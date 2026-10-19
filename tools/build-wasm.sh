@@ -51,6 +51,8 @@ wasm-pack build \
 
 echo
 echo "Built $(ls -lh "$TARGET_DIR/pkg/" | awk '/riscv_sim_kernel/ {print $5, $9}')"
-echo "Next: open front/index.html in a browser (the kernel worker will"
-echo "be wired in services/m07_transport.js once the WASM exports"
-echo "are stable)."
+echo "Next: serve the front end over HTTP (ES modules and Workers need a"
+echo "same-origin http(s) origin — a file:// page is blocked):"
+echo "  python3 -m http.server 8080 --directory front"
+echo "then open http://localhost:8080/ (the kernel worker will be wired"
+echo "in services/m07_transport.js once the WASM exports are stable)."
