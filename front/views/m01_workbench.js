@@ -218,7 +218,17 @@ export function setCapabilities(caps) {
  */
 export function switchView(target) {
     if (activeView && activeView.hash === target.hash) {
-        return { viewId: target.hash, type: "noop", state: viewStore.getState(target.hash) };
+        // Same view: still re-dispatch so the content refreshes — the old
+        // `noop` return left the view stale when the route was re-entered
+        // (FRONTEND_Review.md #6).
+        const evt = {
+            viewId: target.hash,
+            type: "update",
+            state: viewStore.getState(target.hash) ?? {},
+        };
+        dispatchRenderEvent(evt);
+        syncTabState(target.hash);
+        return evt;
     }
     // Save current view state to the store.
     if (activeView) {
@@ -243,6 +253,8 @@ export function switchView(target) {
     }
     // Toggle panel visibility.
     showPanel(target);
+    // Highlight the active tab.
+    syncTabState(target.hash);
     const evt = {
         viewId: target.hash,
         type: isFirstEnter ? "mount" : "update",
@@ -313,6 +325,24 @@ function showPanel(target) {
             "hidden",
             panel.getAttribute("data-view-panel") !== target.hash,
         );
+    }
+}
+
+/**
+ * Sync the tab strip's active state. The CSS highlights
+ * `[aria-current="page"]`, so the attribute — not a class — is the
+ * single source of truth for "which view am I looking at"
+ * (FRONTEND_Review.md #5).
+ *
+ * @param {string} hash — the active view hash
+ */
+function syncTabState(hash) {
+    for (const tab of document.querySelectorAll("[data-view-tab]")) {
+        if (tab.getAttribute("data-view-tab") === hash) {
+            tab.setAttribute("aria-current", "page");
+        } else {
+            tab.removeAttribute("aria-current");
+        }
     }
 }
 

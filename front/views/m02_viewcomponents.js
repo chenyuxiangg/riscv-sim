@@ -16,7 +16,6 @@
 // wired yet) — components render with empty state and update locally.
 
 import * as viewStore from "./m03_viewstore.js";
-import { refreshAll } from "./m01_workbench.js";
 
 // ---------------------------------------------------------------------------
 // ViewComponent shape (LLD §2.1.1)
@@ -109,13 +108,15 @@ const productTreeView = register({
         `;
     },
     onCommand(ev) {
-        // User action: toggle a memory-mapped region's readonly flag.
+        // User action: ask for the demo memory map to be re-seeded.
+        //
+        // The button carries `data-action` itself and lives *outside* the
+        // <table>, so it has no `[data-region-base]` ancestor — requiring
+        // one made the button permanently dead (FRONTEND_Review.md #3).
         const target = /** @type {HTMLElement} */ (ev.target);
-        const row = target.closest?.("[data-region-base]");
-        if (row && target.matches("[data-action='seed-demo']")) {
-            seedDemoBus();
-            refreshAll();
-            return `cmd-seed-demo`;
+        if (target?.matches?.("[data-action='seed-demo']")) {
+            seedBus("product");
+            return "cmd-seed-demo";
         }
         return undefined;
     },
@@ -140,7 +141,7 @@ function renderTree(node) {
 
 function renderMapTable(mappings) {
     if (mappings.length === 0) {
-        return `<p class="muted">尚无映射 — 调用 <code>seedDemoBus()</code> demo。</p>`;
+        return `<p class="muted">尚无映射 — 调用 <code>seedBus()</code> demo。</p>`;
     }
     return `
         <table class="map-table">
@@ -273,10 +274,21 @@ const terminalView = register({
     /** Append new bytes to the terminal buffer in-place (T1 fast path). */
     onDelta(delta) {
         if (!delta?.termDelta) return;
+        const bytes = delta.termDelta.bytes ?? "";
+        // Keep the store in sync so a re-render (view switch, capability
+        // flip) does not lose what was already printed.
+        viewStore.setState("terminal", (prev) => ({
+            ...prev,
+            term: {
+                ...(prev.term ?? {}),
+                bytes: (prev.term?.bytes ?? "") + bytes,
+            },
+        }));
         const out = document.querySelector("[data-terminal-out]");
         if (!out) return;
-        const bytes = delta.termDelta.bytes ?? "";
-        out.textContent = (out.textContent ?? "") + escapeHtml(bytes);
+        // `textContent` does not parse HTML — escaping here would print a
+        // literal "&lt;" (FRONTEND_Review.md #4).
+        out.textContent = (out.textContent ?? "") + bytes;
         out.scrollTop = out.scrollHeight;
     },
     mountFor(el) {},
@@ -333,47 +345,19 @@ export async function mountViewComponents() {
 }
 
 // ---------------------------------------------------------------------------
-// Dev-only demo seeder — populates productTreeView with one RAM region
-// emulating the M-14 kernel side. The real binding lands once M-07
-// transport is wired up.
+// Dev-only seed signal — the production layer never builds demo data
+// itself, it only asks for it (FRONTEND_Review.md #15).
 // ---------------------------------------------------------------------------
 
 /**
- * Build a fake `sim.memoryMap` and a tiny product tree that mirrors
- * what `m14_bus::Bus::regions()` would return after a typical
- * "intelligent light" load.
+ * Ask the dev layer to (re)seed the demo data.
+ *
+ * M-02 must not know how demo data is produced, so it only emits the
+ * `riscv:seed` signal; the dev wiring in app.js turns that signal into
+ * store state. The demo data itself lives in `front/dev/demo-state.js`.
+ *
+ * @param {string} [viewId]
  */
-export function buildDemoStoreState() {
-    return {
-        timeVirt: 0,
-        version: 1,
-        sim: {
-            pc: 0x0,
-            gpr: Array(32).fill(0),
-            memoryMap: [
-                { base: 0x0000_0000, size: 0x1_0000, type: "RAM", detail: "[0, 64 KiB) firmware image" },
-                { base: 0x2000_0000, size: 0x1000, type: "PERIPHERAL", detail: "UART0 (id=1, 4 KiB)" },
-                { base: 0x4000_0000, size: 0x1000, type: "PERIPHERAL", detail: "GPIO0 (id=2, 4 KiB)" },
-            ],
-            disasm: [],
-        },
-        wave: { channels: [] },
-        term: { bytes: "" },
-        events: {},
-        tree: {
-            root: {
-                name: "MainBoard",
-                component_id: "rv-sim",
-                children: [
-                    { name: "GPIO0", component_id: "GPIO0", children: [] },
-                    { name: "UART0", component_id: "UART0", children: [] },
-                ],
-            },
-        },
-    };
-}
-
-/** Convenience exported handle — also reachable from `window.riscv_demo`. */
-export function seedBus() {
-    window.dispatchEvent(new CustomEvent("riscv:seed", { detail: buildDemoStoreState() }));
+export function seedBus(viewId = "product") {
+    window.dispatchEvent(new CustomEvent("riscv:seed", { detail: { viewId } }));
 }
