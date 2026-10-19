@@ -44,20 +44,48 @@ function exposeDevHelpers() {
     };
 }
 
+/**
+ * Derive the status-bar text from the real transport state instead of
+ * hardcoding it (FRONTEND_Review.md #11).
+ *
+ * @param {{mode: string, connected: boolean}|undefined} transport
+ * @returns {string}
+ */
+function describeTransport(transport) {
+    if (transport?.connected) {
+        return `kernel 已连接 — ${transport.mode} transport`;
+    }
+    return "工作台已就绪 — kernel transport 未连接（M-07 待接线）";
+}
+
+/**
+ * Fill the footer with what is actually mounted, so the copy cannot go
+ * stale the way a hardcoded phase label did (FRONTEND_Review.md #12).
+ *
+ * @param {{role: string, views: {hash: string, name: string}[]}} workspace
+ */
+function describeWorkspace(workspace) {
+    const info = document.getElementById("build-info");
+    if (!info) return;
+    const names = (workspace?.views ?? []).map((v) => v.name).join(" / ");
+    info.textContent = `当前工作台：role=${workspace?.role ?? "?"} · ${names}`;
+}
+
 async function bootstrap() {
     status.textContent = "正在挂载模块…";
-    await Promise.all([
-        mountWorkbench(),
+    const [workspace, , , , , transport] = await Promise.all([
+        mountWorkbench(),        // 0 → assembled workspace snapshot
         mountViewComponents(),
         mountViewStore(),
         mountSession(),
         mountCommandRouter(),
-        mountTransport(),
+        mountTransport(),        // 5 → live transport state
         mountRegisterMemory(),
     ]);
     wireDevSeeding();
     exposeDevHelpers();
-    status.textContent = "MVP 就绪 — kernel 待编译";
+    describeWorkspace(workspace);
+    status.textContent = describeTransport(transport);
 }
 
 bootstrap().catch((err) => {

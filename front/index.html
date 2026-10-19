@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <title>RISC-V Sim · 工作台 (MVP)</title>
+  <title>RISC-V Sim · 工作台</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="style.css">
 </head>
@@ -24,9 +24,23 @@
   <main id="app"></main>
 
   <footer class="footer">
-    MVP 第一刀：M-14 总线 + M-01/02/03 工作台（M1 数据底座 4 人日）。
-    <code>M-13 ↔ M-14</code> ADDI 集成测试通过；kernel 编译为 WASM 后此页面会接 M-07 transport。
+    RISC-V 仿真 / 调试工作台 · 零构建前端（原生 ES modules，无打包步骤）。
+    需通过 HTTP 打开：<code>python3 -m http.server 8080 --directory front</code>
+    <span class="muted">（ES module 与 Worker 均要求同源，<code>file://</code> 直开会被浏览器拦截）</span>
+    <span id="build-info"></span>
   </footer>
+
+  <script>
+    // ES modules need a same-origin HTTP(S) origin — a `file://` page is
+    // blocked by the browser's CORS rules and would show a blank page with
+    // no explanation. This inline classic script still runs when the
+    // module script is blocked, so the failure is spelled out
+    // (FRONTEND_Review.md #13).
+    if (location.protocol === "file:") {
+      document.getElementById("status").textContent =
+        "请通过 HTTP 打开：python3 -m http.server 8080 --directory front";
+    }
+  </script>
 
   <script type="module" src="app.js"></script>
 </body>

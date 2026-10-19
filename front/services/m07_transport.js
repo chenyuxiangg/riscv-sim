@@ -6,6 +6,22 @@
 // Both share the same `riscv_sim_contract::protocol::Message`
 // envelope; the host picks one at startup.
 
+/**
+ * @typedef {object} TransportStatus
+ * @property {"none"|"worker"|"websocket"} mode — which adapter is in use
+ * @property {boolean} connected           — is a kernel reachable right now
+ */
+
+/**
+ * Mount the transport adapter.
+ *
+ * MVP: neither adapter exists yet, so the status is reported as
+ * "not connected". The workbench derives its status-bar text from this
+ * descriptor instead of hardcoding it (FRONTEND_Review.md #11) — a
+ * hardcoded "kernel 待编译" outlived the kernel and became stale.
+ *
+ * @returns {Promise<TransportStatus>}
+ */
 export async function mountTransport() {
-    return Promise.resolve();
+    return { mode: "none", connected: false };
 }

@@ -433,13 +433,18 @@ function dispatchRenderEvent(evt) {
 // Bootstrap (replaces the `mount*` no-op from the MVP skeleton).
 // ---------------------------------------------------------------------------
 
-/** @returns {Promise<void>} */
+/**
+ * Mount the workbench and route to the initial view.
+ *
+ * @returns {Promise<object>} the assembled workspace snapshot
+ */
 export async function mountWorkbench() {
     const role = resolveRole();
-    assembleWorkspace(role);
+    const workspace = assembleWorkspace(role);
     window.addEventListener("hashchange", () => {
         route(location.hash);
     });
     // Run once with whatever the URL says.
     route(location.hash || `#/${currentRole}`);
+    return workspace;
 }
