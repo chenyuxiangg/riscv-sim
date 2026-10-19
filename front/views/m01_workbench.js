@@ -34,6 +34,22 @@ const ROLE_CAPABILITIES = new Map([
     ])],
 ]);
 
+/**
+ * Explicit role → default view mapping.
+ *
+ * The role name and the view hash used to be spelled the same way, so
+ * `mountedViews.get(role)` happened to work — a coincidence, not a
+ * contract. A role whose name differs from its view hash would have
+ * silently fallen back to "the first mounted view"
+ * (FRONTEND_Review.md #14).
+ *
+ * @type {ReadonlyMap<string, string>}
+ */
+const ROLE_DEFAULT_VIEW = new Map([
+    ["product", "product"],
+    ["embedded", "embedded"],
+]);
+
 /** @type {ReadonlySet<string>} */
 const FALLBACK_CAPS = new Set([
     "view.productTree",
@@ -166,7 +182,10 @@ export function assembleWorkspace(role) {
         }
     }
     if (!activeView || !mountedViews.has(activeView.hash)) {
-        activeView = mountedViews.get(role) ?? [...mountedViews.values()][0] ?? null;
+        const defaultHash = ROLE_DEFAULT_VIEW.get(role);
+        activeView = (defaultHash ? mountedViews.get(defaultHash) : null)
+            ?? [...mountedViews.values()][0]
+            ?? null;
     }
     mountPanels();
     return {
@@ -183,7 +202,9 @@ export function assembleWorkspace(role) {
  * @param {string} hash — raw `location.hash` (incl. leading `#`)
  */
 export function route(hash) {
-    const viewId = (hash || "").replace(/^#\/?/, "").split("/")[0] || currentRole;
+    const viewId = (hash || "").replace(/^#\/?/, "").split("/")[0]
+        || ROLE_DEFAULT_VIEW.get(currentRole)
+        || currentRole;
     const target = VIEW_REGISTRY.get(viewId);
     if (!target) {
         logEctx05("unregistered-route", hash);
@@ -321,10 +342,16 @@ function createPanel(v) {
     const el = document.createElement("section");
     el.dataset.viewPanel = v.hash;
     el.classList.add("view", "hidden");
-    el.innerHTML = `
-        <h2>${escapeHtml(v.name)}</h2>
-        <div class="view-body" data-view-body="${v.hash}"></div>
-    `;
+    // Build the panel with DOM calls instead of an HTML string: the
+    // view name and hash then never travel through a markup parser
+    // (FRONTEND_Review.md #10).
+    const heading = document.createElement("h2");
+    heading.textContent = v.name;
+    const body = document.createElement("div");
+    body.className = "view-body";
+    body.dataset.viewBody = v.hash;
+    el.appendChild(heading);
+    el.appendChild(body);
     return el;
 }
 
@@ -400,16 +427,6 @@ function dispatchRenderEvent(evt) {
     const ev = new CustomEvent("riscv:render", { detail: evt });
     window.dispatchEvent(ev);
     return evt;
-}
-
-/** Minimal DOM text escape (NFR-04). */
-function escapeHtml(s) {
-    return String(s)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
 }
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@
 // wired yet) — components render with empty state and update locally.
 
 import * as viewStore from "./m03_viewstore.js";
+import { escapeHtml } from "../lib/escape.js";
 
 // ---------------------------------------------------------------------------
 // ViewComponent shape (LLD §2.1.1)
@@ -70,14 +71,10 @@ export function reset() {
 // XSS-safe text + DOM helpers (NFR-04).
 // ---------------------------------------------------------------------------
 
-export function escapeHtml(s) {
-    return String(s)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
-}
+// The helper used to live here; it now has a single implementation in
+// `front/lib/escape.js` (FRONTEND_Review.md #9). Re-exported so existing
+// importers keep working.
+export { escapeHtml };
 
 // ---------------------------------------------------------------------------
 // productTreeView — shows the M-14 mapping table (FR-01/02/03)
