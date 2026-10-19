@@ -135,24 +135,52 @@ riscv_sim/
 详见 [`CONTRIBUTING.md`](./CONTRIBUTING.md)（含 SSH 配置、conventional commits 完整规范、PR 流程、提交前自检清单、不允许做的事）。
 
 要点速览：
-- 默认分支：`main`
+- 默认分支：`main` — **只接受从检视闭环的分支同步过来**，不接受直接往 `main` 提交
 - 分支命名：`<type>/<scope>`（如 `feature/m12-engine-quantum`、`fix/m13-iss-bug-123`）
 - Commit message：Conventional Commits 1.0.0（`feat:` / `fix:` / `docs:` / `refactor:` / `test:` / `perf:` / `build:` / `ci:` / `chore:` / `revert:`）
 - 仓库 SSH：`git@github.com:chenyuxiangg/riscv-sim.git`（HTTPS 不支持）
 - PR：CI 绿 + 至少 1 个 reviewer 批准；commit message 关联 issue 或 ADR 编号
 - 架构变更（涉及 ADR、模块边界）：需更新 `docs/` 下对应设计文档后再合入
 
-### 工作循环（Agent 必读）· 改完代码必须 commit
+### 工作循环（Agent 必读）· 拉分支 → 开发 → 检视 → 同步 main
 
-**改动一旦完成就要 commit，不要把改动留在工作区。** 一次开发会话的收尾必须包含一个 commit。
+**后续所有模块开发都走这条流程。** 核心两句话：
 
-1. **改代码**
-2. **过三关门禁**：`cargo fmt --all -- --check` · `cargo clippy --workspace --all-targets -- -D warnings` · `cargo test --workspace`
-3. **`git add` 用显式路径**——不要用 `git add -A` / `git add .` / `git add <目录>`。本仓库可能有并行会话在同时改动同一工作区，目录级 add 会把别人的改动一并收进你的 commit
-4. **`git commit`**：Conventional Commits；**一个 commit 一个逻辑单元**，跨模块的多件事拆成多个 commit
-5. **报告**：向用户说明 commit hash、门禁结果、以及哪些改动**没有**提交及原因
+- **改动一旦完成就要 commit**，不要把改动留在工作区。
+- **绝不直接往 `main` 提交** —— 所有开发都在从 `main` 拉出的新分支上做，检视闭环后才同步回 `main`。
 
-配套约束：
+#### 1. 开分支（每个模块 / 每件事一个分支）
+
+```bash
+git checkout main
+git pull --rebase origin main        # main 必须与 origin/main 一致
+git checkout -b feature/m19-waveform  # 或 fix/... / docs/... / chore/...
+```
+
+`main` 上**不允许**有未同步的本地提交。新工作一律落在分支上。
+
+#### 2. 开发 + commit（在分支上）
+
+1. 改代码
+2. 过三关门禁：`cargo fmt --all -- --check` · `cargo clippy --workspace --all-targets -- -D warnings` · `cargo test --workspace`
+3. `git add` **用显式路径**——不要用 `git add -A` / `git add .` / `git add <目录>`。本仓库可能有并行会话在同时改动同一工作区，目录级 add 会把别人的改动一并收进你的 commit
+4. `git commit`：Conventional Commits；**一个 commit 一个逻辑单元**，跨模块的多件事拆成多个 commit
+5. 报告：向用户说明 commit hash、门禁结果、以及哪些改动**没有**提交及原因
+
+#### 3. 检视（review 闭环）
+
+- 检视产物：`docs/reviews/M-XX_<Module>_Review.md`（含实证复现 + 问题汇总 + 逐项闭环核对）
+- 检视发现的缺陷**在同一个分支上**追加 fix commit 闭环（不重写已推送的历史）
+- 检视未闭环完 → **不合并**，`main` 保持不动
+
+#### 4. 同步回 main
+
+- 检视闭环 + 门禁全绿后，才把分支同步到 `main`（squash merge 或 fast-forward + merge）
+- 同步完成后删本地分支 + 删远端分支
+- 同步动作需向用户确认后执行
+
+#### 配套约束
+
 - **`git push` 需用户明确指示**，不自行推送；`git push --force` 永远禁止
 - 提交前若工作区出现**非本次会话产生**的改动，先确认归属，再决定是否纳入本次 commit
 - 修 bug 时优先**追加一个新 commit**，不重写已推送的历史

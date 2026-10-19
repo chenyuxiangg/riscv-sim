@@ -114,27 +114,43 @@ git config --global pull.rebase true   # pull 时 rebase，避免无意义 merge
 
 ### 工作流
 
+**所有模块开发都基于 `main` 拉新分支 → 在分支上开发并 commit → 检视闭环 → 同步回 `main`。**
+`main` 上不接受直接提交。
+
 ```bash
-# 1. 从 main 拉最新
+# 1. 从 main 拉最新（main 必须与 origin/main 一致，不留未同步的本地提交）
 git checkout main
 git pull --rebase origin main
 
-# 2. 切功能分支
+# 2. 切新分支（一个模块 / 一件事一个分支）
 git checkout -b feature/m14-bus-ram-pages
 
-# 3. 多次 commit（每个 commit 一个逻辑单元）
-git add -p
+# 3. 在分支上开发 + 多次 commit（每个 commit 一个逻辑单元）
+git add <显式路径>          # 不用 git add -A / . / <目录>
 git commit -m "feat(m14): sparse 4-KiB RAM page table"
 
-# 4. 推 origin（首次）
+# 4. 过三关门禁后才推
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+# 5. 推 origin（首次）
 git push -u origin feature/m14-bus-ram-pages
 
-# 5. 在 GitHub 开 PR：base = main，compare = feature/...
-# 6. CI 绿 + 至少 1 个 reviewer 批准 → squash merge
-# 7. 删本地分支
+# 6. 提交检视：产出 docs/reviews/M-XX_<Module>_Review.md
+#    - 含实证复现 + 问题汇总 + 逐项闭环核对
+#    - 检视发现的缺陷在**同一分支上**追加 fix commit 闭环
+#    - 检视未闭环完 → 不合并，main 保持不动
+
+# 7. 在 GitHub 开 PR：base = main，compare = feature/...
+# 8. 检视闭环 + CI 绿 → 同步到 main（squash merge / fast-forward + merge）
+# 9. 删本地分支 + 删远端分支
 git branch -d feature/m14-bus-ram-pages
 git push origin --delete feature/m14-bus-ram-pages
 ```
+
+**分支与检视的分工**：分支承载「一段尚未被检视的工作」；`main` 承载「已被检视闭环的工作」。
+任何时候 `main` 都应该是绿的、可随时回滚的。
 
 ---
 
@@ -214,18 +230,21 @@ fix
 ## 6. PR 流程 · Pull Request
 
 1. **开工前**：先在 GitHub Issues 开 issue（或复用现有）描述要做什么；大改动先在 issue 里讨论方案
-2. **开发**：在 feature 分支；多次 commit；每个 commit 一个逻辑单元
-3. **本地验证**：
+2. **开分支**：从最新 `main` 拉新分支（`feature/` / `fix/` / `docs/` / `chore/` …）
+3. **开发**：在分支上多次 commit；每个 commit 一个逻辑单元
+4. **本地验证**：
    ```bash
    cargo fmt --all
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
    ```
    三条全过才推
-4. **推分支 + 开 PR**：标题用 conventional commit 格式；正文填「为什么 / 改了什么 / 怎么验 / 截图」
-5. **CI 必跑**：GitHub Actions macOS runner + Spike 对拍（v0.3 启用）
-6. **Review**：至少 1 个 reviewer 批准；架构级改动（涉及 ADR）需更新 `docs/`
-7. **Merge**：squash merge（保持 main 历史干净）；commit message 用 PR 标题
+5. **推分支 + 开 PR**：标题用 conventional commit 格式；正文填「为什么 / 改了什么 / 怎么验 / 截图」
+6. **CI 必跑**：GitHub Actions macOS runner + Spike 对拍（v0.3 启用）
+7. **检视闭环**：产出 `docs/reviews/M-XX_<Module>_Review.md`；报告里的每一项都要有落地改动或明确的挂账理由，**未闭环不合并**
+8. **Review**：至少 1 个 reviewer 批准；架构级改动（涉及 ADR）需更新 `docs/`
+9. **Merge（同步回 main）**：squash merge（保持 main 历史干净）或 fast-forward + merge；commit message 用 PR 标题
+10. **收尾**：删本地分支 + 删远端分支
 
 ### 6.1 PR 标题约定
 
@@ -273,7 +292,9 @@ PR 标题 = squash 后的 commit 标题 = conventional commit 格式。
 
 ## 8. 不允许做的事 · Forbidden
 
-- ❌ 直接 commit 到 `main`（必须经 PR + reviewer）
+- ❌ **直接 commit 到 `main`**（必须从分支走「开发 → 检视闭环 → 同步 main」，见 §4 工作流 / §6 PR 流程）
+- ❌ `main` 上留有未同步的本地提交（`main` 应始终与 `origin/main` 一致）
+- ❌ 检视未闭环就把分支合并到 `main`
 - ❌ `git push --force` 到 `main`
 - ❌ 在 commit message 里写 `noreply@github.com` 等匿名邮箱
 - ❌ 提交大文件（>1MB 走 Git LFS；本仓库目前未启用 LFS）
