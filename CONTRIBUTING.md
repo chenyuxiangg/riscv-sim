@@ -253,6 +253,7 @@ PR 标题 = squash 后的 commit 标题 = conventional commit 格式。
 
 ## 7. 提交前自检清单 · Pre-commit Checklist
 
+- [ ] **改动已完成 commit**（不留未提交的工作区改动）；一个 commit 一个逻辑单元
 - [ ] `cargo fmt --all` 干净
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` 0 warning
 - [ ] `cargo test --workspace` 全过
@@ -261,6 +262,12 @@ PR 标题 = squash 后的 commit 标题 = conventional commit 格式。
 - [ ] 没引入 GPL 依赖（合规 R2）；如需 QEMU 走进程隔离
 - [ ] 没把 `target/` / `Cargo.lock.bak` / `*.pem` / `.env` 误提交（`.gitignore` 已配）
 - [ ] 重大改动（架构 / 跨模块契约）更新了 `docs/` 下对应设计文档
+
+> **为什么有第一条**：代码改完不提交，等于把改动留在工作区——下一次会话、分支切换或并行
+> 开发都可能让这批改动丢失或被误收进别的 commit。**开发会话的收尾必须包含一个 commit。**
+>
+> AI Agent 的完整工作循环见 [`AGENTS.md`](./AGENTS.md) §「工作循环（Agent 必读）」，
+> 其中还规定了 `git add` 必须用显式路径、以及 `git push` 需用户明确指示。
 
 ---
 

@@ -142,6 +142,21 @@ riscv_sim/
 - PR：CI 绿 + 至少 1 个 reviewer 批准；commit message 关联 issue 或 ADR 编号
 - 架构变更（涉及 ADR、模块边界）：需更新 `docs/` 下对应设计文档后再合入
 
+### 工作循环（Agent 必读）· 改完代码必须 commit
+
+**改动一旦完成就要 commit，不要把改动留在工作区。** 一次开发会话的收尾必须包含一个 commit。
+
+1. **改代码**
+2. **过三关门禁**：`cargo fmt --all -- --check` · `cargo clippy --workspace --all-targets -- -D warnings` · `cargo test --workspace`
+3. **`git add` 用显式路径**——不要用 `git add -A` / `git add .` / `git add <目录>`。本仓库可能有并行会话在同时改动同一工作区，目录级 add 会把别人的改动一并收进你的 commit
+4. **`git commit`**：Conventional Commits；**一个 commit 一个逻辑单元**，跨模块的多件事拆成多个 commit
+5. **报告**：向用户说明 commit hash、门禁结果、以及哪些改动**没有**提交及原因
+
+配套约束：
+- **`git push` 需用户明确指示**，不自行推送；`git push --force` 永远禁止
+- 提交前若工作区出现**非本次会话产生**的改动，先确认归属，再决定是否纳入本次 commit
+- 修 bug 时优先**追加一个新 commit**，不重写已推送的历史
+
 ## Security
 
 - 不提交任何密钥、令牌、`.env`（已写入 `.gitignore`）
