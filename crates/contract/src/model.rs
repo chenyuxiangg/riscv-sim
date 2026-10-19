@@ -453,3 +453,84 @@ pub struct TraceEvent {
     /// Access direction.
     pub dir: TraceDir,
 }
+
+/// Edge event crossing the M-18 → M-19 boundary (M-19 v0.9 §1.1).
+///
+/// M-18 performs the edge *judgment* (rising / falling / value) and
+/// M-19 performs the edge *encoding* (write `{t, ch, value, edge}`
+/// into the per-channel ring). This struct is the carrier between
+/// the two: M-18's `m19Encode` entry point hands one of these to
+/// M-19's `encodeEdge`.
+///
+/// Lives in the contract because it is the payload of the
+/// [`crate::port::EdgeSink`] port — the M-18 → M-19 handoff must not
+/// depend on the kernel crate from either side.
+///
+/// This type is deliberately lean (18 bytes before padding): it is
+/// allocated on every observed edge, so it carries no labels or
+/// channel metadata. Channel metadata (label, value width) is
+/// registered separately with M-19's `define_channel`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EdgeEvent {
+    /// Virtual time of the edge (picoseconds).
+    pub t_ps: u64,
+    /// Channel number the edge belongs to.
+    pub ch: u8,
+    /// New value of the signal.
+    pub value: u64,
+    /// Edge classification (rising / falling / value).
+    pub kind: EdgeKind,
+}
+
+/// Incremental waveform push payload (M-19 v0.9 §3.2, table 71).
+///
+/// The unit of the M-19 → M-03 (W1 subscribe) push. The frontend
+/// merges the entries of consecutive deltas into its render buffer.
+///
+/// The sequence numbers are **monotonic and gap-free in the number
+/// space**: `seq_end` of one delta equals `seq_start` of the next,
+/// even when a batch was dropped by a push failure. The *content*
+/// hole is recorded separately in [`DropRange`], so a consumer that
+/// sees a dropped range can request a resume for that range
+/// (M-19 §6.2(2), aligned with M-07 `resumeBySeq` / `E_PROTO-05`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaveformDelta {
+    /// First sequence number covered by this batch.
+    pub seq_start: u64,
+    /// Last sequence number covered by this batch (exclusive end;
+    /// `seq_end - seq_start` == number of entries).
+    pub seq_end: u64,
+    /// Virtual time of the batch (picoseconds). Sourced from the
+    /// authoritative virtual clock (M-12) so the frontend's time axis
+    /// matches the simulation's.
+    pub t_virt: u64,
+    /// Edge events in this batch, in arrival order.
+    pub entries: Vec<EdgeEvent>,
+}
+
+/// A range of sequence numbers whose content was dropped
+/// (M-19 v0.9 §3.2, §6.1 — "推送失败").
+///
+/// Recorded when a batch fails to be delivered to the subscriber.
+/// The sequence *numbers* were still consumed (the number space stays
+/// gap-free), so this range — not a gap in `seq_start`/`seq_end` —
+/// is what tells the consumer that content is missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DropRange {
+    /// First sequence number in the dropped range.
+    pub seq_start: u64,
+    /// One past the last sequence number in the dropped range.
+    pub seq_end: u64,
+}
+
+impl DropRange {
+    /// Number of sequence numbers covered by this range.
+    pub fn len(&self) -> u64 {
+        self.seq_end.saturating_sub(self.seq_start)
+    }
+
+    /// True when the range covers no sequence numbers.
+    pub fn is_empty(&self) -> bool {
+        self.seq_end <= self.seq_start
+    }
+}

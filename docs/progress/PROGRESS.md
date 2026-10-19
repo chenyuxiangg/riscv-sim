@@ -1,11 +1,68 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.8.1
+> **Document version**: v0.9
 > **Created**: 2026-10-19
 > **Last updated**: 2026-10-19
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.9 变更摘要
+
+**M-19 波形管道落地**（按 §6.2 推进顺序，M-18 之后的下一站）。本轮同时完成 **M-18 → M-19 握手**——`docs/reviews/M-18_Probe_Review.md` §四第 2 条点名的缺口「M-19 真正消费 M-18 的边沿事件，否则 M-18 边缘事件的『产出』没有『消费者』」在本轮闭合。
+
+> **口径澄清**：台账 `CROSS_MODULE_DEBT.md` 的 **D-12** 条目指的是 **M-14 ↔ M-15 接线**（`Bus::map_peripheral` 的 size 与 `Peripheral::size()` 一致性校验）；M-18 报告里把「M-14 ↔ M-18 / M-15 ↔ M-18 接线」也称作 D-12，两处编号口径不一致。本轮完成的是 **M-18 → M-19** 这一段（新增 `EdgeSink` 端口），**D-12 本身（M-14 ↔ M-15）未动**，M-14 ↔ M-18 的 bus hook 与 M-15 ↔ M-18 的 `on_probe` 接线也仍未做（后者是 §6.3 的并行 0.5d 项）。
+
+M-19 实现的是「探针 → 边沿编码 → 环形缓冲 → 增量推送 → 前端渲染 / trace 导出」全管道（差异化核心，FR-10 + FR-14）。
+
+### 落地的子模块（拆 5 文件 + 1 测试文件，按子组件独立 review + 测试）
+
+| 子模块 | 文件 | 测试数 | 状态 |
+| --- | --- | --- | --- |
+| `ChannelMeta` + `OverflowPolicy` + `WireFormat`（渲染元数据 + 策略枚举） | `crates/kernel/src/m19_waveform/channel.rs` | 7 单测 | ✅ |
+| `RingEntry` + `ChannelRing`（每通道定长环 + 丢最旧 + `overflow_count` 标记） | `crates/kernel/src/m19_waveform/ring.rs` | 10 单测 | ✅ |
+| `DeltaQueue`（≤20ms 批 + 单调序列号 + `DropRange` 丢弃区间） | `crates/kernel/src/m19_waveform/delta.rs` | 6 单测 | ✅ |
+| `MergedCursor`（跨通道 k 路归并，零额外分配）+ CSV / VCD 分块渲染 | `crates/kernel/src/m19_waveform/export.rs` | 10 单测 | ✅ |
+| `WaveformPipeline` 编排（`encodeEdge` / `pushDelta` / `setOverflowPolicy` / `reconcile_budget` / 导出）+ `SharedPipeline` | `crates/kernel/src/m19_waveform/pipeline.rs` | (走 tests.rs 单测) | ✅ |
+| 单元测试（LLD §7.1 测试表逐条对应 + 契约测试） | `crates/kernel/src/m19_waveform/tests.rs` | 31 单测 | ✅ |
+| 跨模块集成测试（M-14 总线 + M-18 探针 + M-19 管道端到端） | `crates/kernel/tests/m18_to_m19_waveform.rs` | 5 集成测试 | ✅ |
+
+### 契约层变更（additive · 不破坏 M-0 冻结）
+
+- `riscv_sim_contract::model::EdgeEvent { t_ps, ch, value, kind }` —— M-18 → M-19 的边沿事件载体（18B，热路径上每次观察都分配，故不带任何标签/元数据）
+- `riscv_sim_contract::model::WaveformDelta { seq_start, seq_end, t_virt, entries }` —— 增量推送载荷（带单调序列号）
+- `riscv_sim_contract::model::DropRange { seq_start, seq_end }` —— 推送失败丢失的序列区间
+- `riscv_sim_contract::port::EdgeSink` —— M-18 → M-19 驱动端口（设计文档 §1.1「M-18 的 m19Encode 即本模块 encodeEdge 入口」）
+- `riscv_sim_contract::port::DeltaSink` —— M-19 → 订阅者驱动端口（失败语义：丢批 + 记区间，不重试不阻塞）
+
+### M-18 侧改动（additive · 零破坏）
+
+- `ProbeRegistry` 新增可选 `edge_sink: Option<Box<dyn EdgeSink>>` + `set_edge_sink()` / `has_edge_sink()`；未装 sink 时热路径只多一次 `Option` 判断
+- `sample_inner` 原先丢弃的 `EdgeKind`（M-18 review #4 遗留）**现在随 `EdgeEvent` 一起下发**——M-18 review #4 的「kind 信息丢失」问题在 M-19 接线后自然消解
+- `ProbeRegistry` 的 `Debug` 改为手写（`Box<dyn EdgeSink>` 不是 `Debug`）
+
+### 关键设计决策
+
+1. **两个策略都丢最旧，区别只在要不要暂停仿真** —— 设计文档伪码里 `PAUSE_SIM` 分支不推进 `head`，会让环停在满状态并**伪造历史空洞**。实际实现：两种策略都保留最新观察、丢最旧并 `overflow_count++`；`PAUSE_SIM` 额外通过 `PauseHook` 请求 M-12 暂停仿真（控制面操作，不改寄存器/内存，符合只读约束 19-9）
+2. **序列号空间「失败也前移」+ 独立的 `DropRange` 记录内容空洞** —— 数字空间无空洞（前端无法从 seq 发现丢失），内容空洞由 `DropRange` 显式记录，供 M-07 `resumeBySeq` 续拉补齐
+3. **导出归并用 k 路堆归并（零额外分配）** —— 不物化整个归并流，导出满窗口（4 × 2×10⁵）不再需要额外 20MB 堆内存，守住 25MB 内存预算
+4. **环内存「到达序」= 「时间序」，但导出前防御性重排** —— 虚拟时钟单调，正常情况下二者一致；`ChannelRing::sort_by_time()` 在检测到违例时原地重排（不丢数据），保证导出流永远按 `t_virt` 单调
+5. **M-19 不拥有定时器** —— 调度者是 M-12 事件循环的周期回调（19-5）：M-12 调 `push_delta(now_ps)` 并提供权威虚拟时间。M-19 不读任何时钟，这是它可确定性重放的前提
+6. **不新增错误码** —— 无效策略复用 `E_OBS-01`（Observability 族首个 scenario，M-18 已在用）；内存超预算复用 `E_CTX-02`（设计文档 §3.5 明确指定）
+7. **导出接口取 `&mut self`** —— 防御性重排需要可变访问；调用方本来就持有 `&mut`（`push_delta` 也是）
+8. **M-14 ↔ M-18 / M-15 ↔ M-18 两段接线仍未做** —— 本轮只做 M-18 → M-19 这一段握手（新增 `EdgeSink` 端口）。M-15 三个外设的 `on_probe` override 与 M-14 的 `map_peripheral` typed handle 升级留给后续接线 PR（台账 D-12 口径见 v0.9 摘要开头的澄清）
+
+### 进度影响
+
+- **§6.1 依赖表**：M-19 状态 ❌ → ✅；观测管道（M4 阶段 6 人日）的内核侧全部就位
+- **M-18 报告 §四.2 闭环**：「M-19 真正消费 M-18 边沿事件」这条待办已闭合（`EdgeSink` 端口 + 跨模块集成测试）
+- **§3 人日**：探针 M-18 2/3 → 2.5/3（M-18 → M-19 握手完成；M-14/M-15 两段接线仍未做）；波形 M-19 0 → 3/3；观测管道合计 **5.5/6**
+- **§5.4 N5「GPIO 翻转可见」**：内核链路（M-14 → M-18 → M-19 → 导出）**已端到端可达并有集成测试守住**；仍缺 M-15 GPIO `on_probe` 接线（让固件写 OUT 真的触发边沿）+ M-07 transport + M-02 波形 UI 渲染
+- **测试覆盖**：M-19 0 → 64 单测（+64）；workspace lib 107 → 171（+64）；workspace 累计 112 → **181 全绿**（lib 171 + 集成 10）
+
+`cargo test --workspace` = **181 passed / 0 failed**（lib 171 + integration 10；v0.8.1 = 112 → v0.9 = +69）；`cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo fmt --all -- --check` 通过；`cargo check --target wasm32-unknown-unknown` 通过。
+
+---
 
 ## v0.8.1 变更摘要
 
@@ -323,7 +380,7 @@ Q1-Q7 全部答复（见 §8）：
 
 RISC-V 仿真/调试平台项目处于 **MVP 启动期**。架构 + 23 篇模块详细设计已归档；3-crate Cargo workspace + 23 个子模块骨架已建立；M-12 事件驱动引擎和 M-13 RV32I ISS 实现了最小子集（`addi` 单指令可执行，`cargo test --workspace` 两个核心单测 PASS）。
 
-按架构文档 §13.6 WBS 估算，**当前完成度约 23% / 90 人日**（v0.8.1 口径，详见 §3）。下一步沿 §13.6 关键路径推进，目标：完成 **E2E-01 智能灯验收主线**（搭建 → 加载 → 运行 → 波形 → 单步 → 内存 → 判定）。
+按架构文档 §13.6 WBS 估算，**当前完成度约 26% / 90 人日**（v0.9 口径，详见 §3）。下一步沿 §13.6 关键路径推进，目标：完成 **E2E-01 智能灯验收主线**（搭建 → 加载 → 运行 → 波形 → 单步 → 内存 → 判定）。
 
 > ⚠️ **重要纠偏**：早期对话里把"MVP"误读为"两个单元测试通过"。重新校准后，正确定义见 §2。
 >
@@ -358,8 +415,8 @@ RISC-V 仿真/调试平台项目处于 **MVP 启动期**。架构 + 23 篇模块
 | **M-15 外设** | `PeripheralRegistry` + `DummyUart`（读 0 / 写忽略） | 行为级 UART（FR-07 波特率/CTS 流控）未实现；GPIO / Timer 完全空；M-14 typed handle 当前用 `PeripheralId(u32)`，待 M-15 升级到 `Rc<dyn Peripheral>` |
 | **M-16 中断控制器** | `InterruptController` + `BTreeSet<u16>` 存已 raise 的 IRQ | 没 `mip/mie/mcause` CSR 联动；没接入 `step_one` 的中断采样 |
 | **M-17 执行后端** | `SelfIssBackend<B, I>` 包装 Engine + Iss，实现 `ExecutionBackend` 全部 11 个方法（多为 stub） | `step_n` 永远 `Ok(0)`，没真驱动 ISS；断点 / 监视点切换是空操作 |
-| **M-18 探针** | `InMemoryProbe::observe/drain`（修了上次 `last_mut` bug 和 `drain_waveform` swap hack）+ `ProbeRegistry::drain_waveform` | 没任何 signal source 挂到 bus / peripheral；M-14 trace hook 已是良接口，`set_hook(Box<...>)` 装上即可 |
-| **M-19 波形** | `WaveformChannel` push/last 桩 | 没和 ProbeRegistry 联动 |
+| **M-18 探针** | v0.8 ✅ 完整 `ProbeRegistry`（通道表 + 节流 + 边沿判定 + 双流：trace 环 / 边沿流）；v0.9 ✅ 新增可选 `EdgeSink` 端口，M-18 → M-19 接线完成 | 仍缺 M-15 外设 `on_probe` override（D-12 另一半）；`Probe` trait 仍是零实现的死契约（挂账 M-0 下一窗口清理） |
+| **M-19 波形** | v0.9 ✅ 完整 `WaveformPipeline`（边沿编码 + 每通道环 + ≤20ms 批量推送 + 单调序列号 + 跨通道归并 + CSV/VCD 分块导出 + 溢出策略 + 内存预算对账）；M-18 → M-19 已接线 | 导出只到 CSV/VCD 文本；二进制载荷（`BIN_LE_HEADER`）与前端波形渲染留给 M-07 / M-02 |
 | **M-20 快照** | `SnapshotManager` 内存存 `Vec<SnapshotRecord>` | 没 M-23 持久化；没崩溃自动快照触发 |
 | **M-21 日志** | `LogBuffer` 4096 环形 + `Level::{Trace..Fatal}` | 没接 `tracing` crate；没 admin 通道暴露 |
 | **M-22 HMS** | `Hms::report` 单调 `Ok → Degraded → Critical` | 没 watchdog 联动；没降级动作 |
@@ -370,7 +427,7 @@ RISC-V 仿真/调试平台项目处于 **MVP 启动期**。架构 + 23 篇模块
 
 - 真实 ELF / DWARF 解析（FR-05）
 - 调试服务（断点 / 单步 / Reg/Mem 视图 / 反汇编·源码联动）
-- 观测管道 wire-up（探针源 → 边沿编码 → 增量推送 → 波形 UI）
+- 观测管道 wire-up（探针源 → 边沿编码 → 增量推送 → 波形 UI）—— 内核侧 v0.9 已通；仍缺 M-15 外设源 + M-07 传输 + M-02 波形 UI
 - 前端多视图可见化
 - postMessage 传输（M-07）+ 会话管理（M-04）+ 命令路由（M-05）
 - IndexedDB 持久化
@@ -405,7 +462,7 @@ RISC-V 仿真/调试平台项目处于 **MVP 启动期**。架构 + 23 篇模块
 | 搭建产品树 | L0/L1 前端 | M-01 / M-02 | ⚠️ M-01/M-02 视图层落地，productTreeView 渲染内存映射 demo；kernel 数据未接（M-07 待接） |
 | ELF 加载 | 调试服务层 | M-06 | ⚠️ 假实现 |
 | 运行 | 仿真内核层 | M-12 + M-13 + M-14 | ✅ **M-13 ↔ M-14 集成通过**：`step_one_via_bus` 跑通 ADDI，经 bus.fetch 寄存器 x1=42，PC=4 |
-| GPIO 波形 | 观测管道层 | M-15 + M-18 + M-19 | ❌ 无探针源 |
+| GPIO 波形 | 观测管道层 | M-15 + M-18 + M-19 | ⚠️ 内核链路 M-18 → M-19 已通（v0.9 集成测试守住）；缺 M-15 `on_probe` 接线 + M-07 transport + M-02 波形 UI |
 | 单步/内存 | 调试服务层 | M-08 / M-09 / M-10 | ❌ stub |
 | 行为判定 | L0 前端 | M-01 | ❌ |
 
@@ -453,11 +510,12 @@ RISC-V 仿真/调试平台项目处于 **MVP 启动期**。架构 + 23 篇模块
 - ✅ 总线 2 / 4（v0.4 完成 Bus + BusMaster + 跨区间 split；v0.7.2 补完 6 项整洁项；剩余 4-KiB 分页 / 重叠告警等留 P1，详见 §7）
 - ✅ ELF 3 / 3（v0.5 完成）
 - ⚠️ 外设 5.5 / 6（M-15 三外设 + review 全闭环；剩 M-14 接线 PR）
-- ⚠️ 探针 2 / 3（M-18 v0.8 落地 + v0.8.1 闭环 13/15；剩 M-14/M-15 接线 PR）
+- ⚠️ 探针 2.5 / 3（M-18 v0.8 落地 + v0.8.1 闭环 13/15 + v0.9 完成 M-18 → M-19 接线；剩 M-15 外设 `on_probe` 接线 PR）
+- ✅ 波形 3 / 3（M-19 v0.9 落地：边沿编码 + 环形缓冲 + 批量推送 + CSV/VCD 导出）
 - ⚠️ 前端 3.5 / 10（v0.4 M-01/M-02/M-03 viewstore + 4 视图组件；剩余 waveform UI 渲染等后续）
 - ⚠️ 评审开销 ~1.5（M-14 / M-15 / M-18 三轮 review + 闭环，不计入模块交付人日）
 
-**累计 ~21 / 90 人日 ≈ 23%**（v0.8.1 完成后）。
+**累计 ~23.5 / 90 人日 ≈ 26%**（v0.9 完成后）。
 
 ---
 
@@ -472,7 +530,7 @@ RISC-V 仿真/调试平台项目处于 **MVP 启动期**。架构 + 23 篇模块
 | 4 | 事件驱动引擎 | 6 | ISS 接口 | 中；确定性夹具 | ⚠️ | M-12 调度器 |
 | 5 | 外设 UART/GPIO/Timer | 6 | 总线接口 | 低；分级建模 | ✅ | v0.7 Uart16550(1-byte FIFO + 波特率分频) + GpioBank(32-pin 边沿 IRQ) + TimerRiscv(mtime/mtimecmp) + PeripheralRegistry；16 单测全绿；M-14 ↔ M-15 接线下一 PR |
 | 6 | 调试服务 | 8 | ISS、协议 | 中；依赖 hook | ❌ | M-08/09/10 stub |
-| 7 | 观测管道 | 6 | ISS 钩子 | 中；差异化核心 | ⚠️ | M-14 trace hook 接口就位，等 M-18 接 |
+| 7 | 观测管道 | 6 | ISS 钩子 | 中；差异化核心 | ⚠️ | v0.9 M-19 波形管道完整落地 + M-18 → M-19 接线；剩 M-15 外设源 + 二进制载荷 |
 | 8 | DWARF 行表 + 源码联动 | 10 | ELF 解析 | **最大风险** | ❌ | 可降级 |
 | 9 | 前端视图 / 路由 / 波形 UI | 10 | 协议、观测管道 | 中；零构建 | ⚠️ | v0.4 路由 + 4 视图组件；缺 waveform 渲染 |
 | 10 | 持久化 IndexedDB | 3 | 数据模型 | 低 | ❌ | M-23 trait |
@@ -579,8 +637,8 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 | M-15 UART/GPIO/Timer | contract + M-14 | ✅ v0.7 | Uart16550 + GpioBank(32-pin) + TimerRiscv + PeripheralRegistry；16 单测全绿；接线下一 PR |
 | M-13 ISS RV32IMC | contract + M-14 | ⚠️ (ADDI only) | M-14 已就绪，可扩 71 条 |
 | M-11 DWARF/反汇编/trace | contract + M-06 | ❌ | M-06 ✅；DWARF 行表 06-7 |
-| M-18 探针 | contract + M-14 + M-15 | ❌ | **下一目标**；等 M-15 ✅ |
-| M-19 波形 | M-18 + contract | ❌ | 等 M-18 |
+| M-18 探针 | contract + M-14 + M-15 | ✅ v0.8 | ProbeRegistry 完整；v0.9 完成 M-18 → M-19 接线；M-15 外设源待接线 |
+| M-19 波形 | M-18 + contract | ✅ v0.9 | WaveformPipeline 完整（边沿编码 + 环 + 批量推送 + CSV/VCD 导出） |
 | M-16 中断控制器 | M-14 + M-15 | ❌ | 等 M-15 |
 | M-12 事件驱动引擎 | M-13 + M-14 + M-16 | ⚠️ (骨架) | 等 M-13 + M-16 |
 | M-17 执行后端 | M-12 + M-13 + M-14 | ⚠️ (骨架) | 等 M-12 + M-13 |
@@ -609,10 +667,10 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
    M-14 总线 ──────────────┬────── M-06 ELF/Raw/HEX
        │                  │
        ├──[可立即]── M-15 UART/GPIO/Timer ── M-18 探针 ── M-19 波形
+       │                  │                            │
+       │                M-16 中断控制器                │ ← v0.9 止步于此
        │                  │
-       │                M-16 中断控制器
-       │                  │
-       ├──── M-13 ISS 全集扩（I 47 + M 8 + C 16, 71 条）
+       ├──── M-13 ISS 全集扩（I 47 + M 8 + C 16, 71 条）  ★ 下一目标
        │                  │
        ├──── M-12 事件引擎扩（指令预算 / 量子化 / peripheral tick）
        │                  │
@@ -628,24 +686,28 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 
 ### 6.3 下个目标
 
-按依赖图 + E2E-01 §5.4 N5「GPIO 翻转可见」优先级（**M-15 已 ✅ v0.7**，下一 PR 也属 §6.3 范围）：
+按依赖图 + E2E-01 §5.4 主线（**M-19 已 ✅ v0.9**，观测管道内核侧封顶），下一个瓶颈是 **M-13 ISS 全集扩**：
 
-**M-18 探针**（3 人日）
+**M-13 ISS RV32IMC 全集**（12 人日）
 
-子组件拆分（方便测试 + 评审）：
-- `m18_probe::Probe` trait 扩展（contract 既有 `observe/drain` 接口）
-- `m18_probe::InMemoryProbe` 升级（已有 stub 修 `drain_waveform` swap hack）
-- `m18_probe::ProbeRegistry` 装到 `Bus` 的 trace hook + `Peripheral::tick` 出口
-- 信号源：总线读写（已有 hook 接口）+ GPIO OUT 翻转 + UART TX pin 状态 + Timer mtime 采样
-- 边沿编码（rising/falling/toggle） + 通道标签（address / pin / signal）
+为什么是它：M-13 是关键路径上**唯一 gate 7 个下游模块**的节点——M-12 / M-17 / M-08 / M-09 / M-20 / M-23 / M-22 全部等它。同时 E2E-01 的「运行 / 单步 / 内存」三步也都等它（M-13 现在只有 `ADDI` 一条指令）。
+
+子组件拆分（分阶段交付，每阶段独立评审 + 回归）：
+- **阶段 1（~3d）**：D-04 `x0` 硬连线（`CROSS_MODULE_DEBT.md` 阻断项，阻塞 Spike 对拍）+ RV32I 剩余指令（LUI / AUIPC / LOAD / STORE / BRANCH / JAL / JALR / 全部立即数与寄存器立即数形式）
+- **阶段 2（~2d）**：M 扩展 8 条（MUL / MULH / MULHSU / DIV / DIVU / REM / REMU）
+- **阶段 3（~3d）**：C 扩展 16 条（压缩指令，含非法压缩码处理）
+- **阶段 4（~4d）**：Spike golden 对拍（Q7 决议「必做」，FR-04 每条指令 golden）—— 依赖 `riscv64-unknown-elf-gcc` + `spike --isa=rv32imc`
 
 验收：
-- `cargo test -p riscv_sim_kernel m18_probe` ≥ 8 单测（总线读写 / GPIO 翻转 / UART pin / Timer 周期各 ≥1；边沿编码 + drain 边界）
+- `cargo test -p riscv_sim_kernel m13_iss` 覆盖 71 条指令的解码 + 执行语义（含边界：溢出 / 除零 / 未对齐 / 非法码 trap）
+- `tests/golden/` Spike 对拍全绿（阶段 4 交付）
 - `cargo clippy --workspace --all-targets -- -D warnings` 通过
 - `cargo fmt --all -- --check` 通过
-- 演示用例：写 GPIO OUT 引脚翻转 → probe drain 拿到 rising + falling 两条事件
+- 演示用例：M-06 加载 ELF → M-14 映射 → M-13 跑通一段含 LOAD/STORE/BRANCH 的程序，读回内存结果正确
 
-预计 v0.8 落地。解锁 M-19 波形管道（§6.2 顺序）。
+**并行 0.5d（建议同 PR 带上）**：M-15 → M-18 外设接线（D-12 剩余一半）—— `GpioBank` / `Uart16550` / `TimerRiscv` override `Peripheral::on_probe`，让固件写 OUT 真的触发 M-18 边沿 → M-19 波形。做完这一步，**N5「GPIO 翻转可见」的内核路径 100% 闭合**（只剩 M-07 transport + M-02 波形 UI 两个前端件）。
+
+预计 v0.10 落地阶段 1 + 并行接线。解锁 M-12 事件引擎扩 + M-16 中断控制器可并行启动。
 
 ### 6.4 风险与降级（按 AD §12）
 
@@ -679,6 +741,13 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 
 | 日期 | 决策 | 依据 |
 | --- | --- | --- |
+| 2026-10-19 | **M-19 溢出策略：`PAUSE_SIM` 与 `DROP_OLDEST_MARK` 都丢最旧，区别只在要不要请求暂停仿真** | 设计文档伪码的 `PAUSE_SIM` 分支不推进 `head`，会让环停在满状态并**伪造历史空洞**（违反「不伪造数据」）；实际观察已发生，拒绝记录它等于造假。暂停是控制面操作，不改寄存器/内存（19-9） |
+| 2026-10-19 | **序列号空间「失败也前移」+ 独立 `DropRange` 记录内容空洞** | 数字空间保持无空洞（前端无法从 seq 推断丢失），内容空洞由 `DropRange` 显式记录，供 M-07 `resumeBySeq` / `E_PROTO-05` 续拉补齐（19-3 / 19-7） |
+| 2026-10-19 | **导出归并用 k 路堆归并，不物化归并流** | 导出满窗口（4 × 2×10⁵）不额外占 20MB，守住 25MB 内存预算（19-2）；环内「到达序 = 时间序」由单调虚拟时钟保证，导出前再防御性重排 |
+| 2026-10-19 | **M-19 不拥有定时器，调度者是 M-12 周期回调** | 19-5；M-19 不读任何时钟是其可确定性重放的前提（AD §8.1 D0） |
+| 2026-10-19 | **M-19 不新增错误码**：无效策略复用 `E_OBS-01`，内存超预算复用 `E_CTX-02` | 设计文档 §6.1「不新增错误码」+ §3.5 明确指定 `E_CTX-02` |
+| 2026-10-19 | **契约新增 `EdgeSink` / `DeltaSink` 两个驱动端口 + `EdgeEvent` / `WaveformDelta` / `DropRange` 三个 DTO** | 「契约先行」：M-18 → M-19 的交接必须两侧都不依赖对方 crate 内部实现（LLD §2.5）；M-0 冻结范围内的第四次 additive 变更 |
+| 2026-10-19 | **M-18 `sample_inner` 原先丢弃的 `EdgeKind` 随 `EdgeEvent` 下发** | M-18 review #4 遗留的「kind 信息丢失」在 M-19 接线后自然消解，无需改契约 `Edge` 结构（保 M-0 冻结） |
 | 2026-10-19 | **建立 `docs/reviews/` 目录 + `CROSS_MODULE_DEBT.md` 跨模块欠账台账** | 模块报告管模块内问题、跨模块台账管跨模块问题，职责切分避免同一问题在两份报告里各记一半；台账按**修复归属模块**组织并记录阻塞拓扑与处理批次 |
 | 2026-10-19 | **跨模块 review 项一律「上收台账 + 本轮不动」，单独排期** | 用户明确要求跨模块问题（#6 分配上限 / #9 字段可见性 / #11 接线 size 一致性 / #12 M-12 tick）不在模块 PR 里夹带改动 |
 | 2026-10-19 | **契约 `TraceEvent.dir` 用 `enum TraceDir` 替代 `u8` 魔数** | 与 M-14 `AccessDir` 对齐；M-0 冻结范围内的第三次 additive 变更（前两次：`Peripheral::read_clear`、`Peripheral::on_probe` + `ProbeSink`） |

@@ -167,3 +167,39 @@ pub trait Probe {
     /// Snapshot the probe's accumulated edges (e.g. for waveform export).
     fn drain(&mut self) -> Result<Vec<crate::model::Edge>, PlatformError>;
 }
+
+/// Driven port: M-18 probe → M-19 waveform pipeline (M-19 v0.9 §1.1).
+///
+/// M-18 has already judged the edge (rising / falling / value) by the
+/// time it calls this port; the implementation (M-19's `encodeEdge`)
+/// only encodes the event into the per-channel ring buffer and
+/// accumulates it into the pending push batch.
+///
+/// This is the port the M-19 design doc calls *"M-18 的 m19Encode 即本
+/// 模块 encodeEdge 入口"*. It lives in the contract so that neither
+/// side has to depend on the other's crate internals — consistent
+/// with the "契约先行" rule (LLD §2.5).
+///
+/// Implementations must be cheap: this is called on the probe hot path
+/// for every observed edge.
+pub trait EdgeSink {
+    /// Encode one edge event into the waveform pipeline.
+    fn encode_edge(&mut self, ev: crate::model::EdgeEvent);
+}
+
+/// Driven port: M-19 waveform pipeline → delta subscriber (M-19 v0.9 §3.2).
+///
+/// The subscriber is whatever forwards the incremental waveform to
+/// the front-end (M-03's W1 subscription, relayed by M-05 / M-07).
+///
+/// **Failure semantics:** observation events are explicitly allowed to
+/// be lost (review P-09 — "观测类事件不要求可靠投递、允许节流合并").
+/// A subscriber that returns an error causes M-19 to **drop that
+/// batch** and record the lost sequence range; it does not retry and
+/// it does not block the simulation. The consumer can later refill the
+/// missing window over the resume channel (M-07 `resumeBySeq` /
+/// `E_PROTO-05`).
+pub trait DeltaSink {
+    /// Deliver one batch of waveform edges.
+    fn push_delta(&mut self, delta: &crate::model::WaveformDelta) -> Result<(), PlatformError>;
+}

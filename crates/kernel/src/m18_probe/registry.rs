@@ -28,8 +28,8 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
-use riscv_sim_contract::model::{Edge, TraceDir, TraceEvent, Waveform, WaveformStream};
-use riscv_sim_contract::port::ProbeSink;
+use riscv_sim_contract::model::{Edge, EdgeEvent, TraceDir, TraceEvent, Waveform, WaveformStream};
+use riscv_sim_contract::port::{EdgeSink, ProbeSink};
 
 use crate::m14_bus::{AccessDir, BusAccess, BusHook};
 
@@ -140,7 +140,10 @@ impl SampleCfg {
 /// not requiring it; the closure types are also non-`Send`). The
 /// `Rc<RefCell<>>` wrappers around it let it participate in bus
 /// hook closures without moving ownership.
-#[derive(Debug)]
+///
+/// `Debug` is implemented by hand because the optional edge sink
+/// (M-19 v0.9 §1.1) is a `Box<dyn EdgeSink>`, and trait objects do
+/// not implement `Debug`.
 pub struct ProbeRegistry {
     channels: BTreeMap<u8, ChannelDef>,
     /// Source-and-signal index for fast periph-side routing:
@@ -179,11 +182,38 @@ pub struct ProbeRegistry {
     /// (chicken/egg). The accessor `borrow_contended()` returns
     /// the cell's current value.
     borrow_contended: Rc<Cell<u64>>,
+    /// Optional downstream edge sink (M-19 v0.9 §1.1).
+    ///
+    /// This is the M-18 → M-19 handoff: the M-19 design doc's *"M-18 的
+    /// m19Encode 即本模块 encodeEdge 入口"*. When a sink is installed,
+    /// every edge the registry emits is also handed to it as an
+    /// [`EdgeEvent`] carrying the classified [`EdgeKind`].
+    ///
+    /// `None` by default so the registry stays standalone and pays
+    /// nothing when no waveform consumer is attached.
+    edge_sink: Option<Box<dyn EdgeSink>>,
 }
 
 impl Default for ProbeRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl std::fmt::Debug for ProbeRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProbeRegistry")
+            .field("channels", &self.channels)
+            .field("cfg", &self.cfg)
+            .field(
+                "edge_channels",
+                &self.edges.keys().copied().collect::<Vec<_>>(),
+            )
+            .field("trace_len", &self.trace.len())
+            .field("conflict_warns", &self.conflict_warns)
+            .field("borrow_contended", &self.borrow_contended.get())
+            .field("has_edge_sink", &self.edge_sink.is_some())
+            .finish_non_exhaustive()
     }
 }
 
@@ -201,6 +231,7 @@ impl ProbeRegistry {
             trace: TraceStream::default(),
             conflict_warns: 0,
             borrow_contended: Rc::new(Cell::new(0)),
+            edge_sink: None,
         }
     }
 
@@ -515,19 +546,31 @@ impl ProbeRegistry {
 
         // 6. Update `prev` and emit if we classified an edge.
         self.prev.insert(ch, Some(value));
-        // `classified` is `Some(EdgeKind)`. The kind is informational
-        // for the renderer (M-19 will use it to draw the rising /
-        // falling arrow); the `Edge` struct that we push does not
-        // carry it today (it predates M-18 v0.8). The
-        // `let _kind = ...;` makes the unused binding explicit so
-        // reviewers don't read the dead pattern as a bug
-        // (M-18 review #4, 2026-10-19).
-        let _kind = classified?;
+        // The classified kind is forwarded to the downstream edge
+        // sink (M-19) below. It used to be discarded here
+        // (M-18 review #4) because the contract's `Edge` struct
+        // carries only `{t_ps, value}` and nothing downstream could
+        // hold the kind. The M-19 v0.9 handoff now gives it a
+        // carrier (`EdgeEvent`), so the information is no longer
+        // lost.
+        let kind = classified?;
         let edge = Edge {
             t_ps: time_ps,
             value,
         };
         self.edges.entry(ch).or_default().push(edge.clone());
+        // 7. Hand the edge to the optional M-19 sink. This is the
+        //    "m19Encode → encodeEdge" entry the M-19 design doc
+        //    describes (M-19 v0.9 §1.1). The `Option` check keeps
+        //    the no-consumer path free of any extra work.
+        if let Some(sink) = self.edge_sink.as_mut() {
+            sink.encode_edge(EdgeEvent {
+                t_ps: time_ps,
+                ch,
+                value,
+                kind,
+            });
+        }
         Some(edge)
     }
 
@@ -541,6 +584,30 @@ impl ProbeRegistry {
     /// reaches 0.
     pub fn set_rate(&mut self, cfg: SampleCfg) {
         self.cfg = cfg;
+    }
+
+    /// Install (or remove) the downstream edge sink (M-19 v0.9 §1.1).
+    ///
+    /// The sink receives every edge the registry emits, together with
+    /// the classified [`EdgeKind`]. M-19's `WaveformPipeline`
+    /// implements the [`EdgeSink`] port; the wiring code installs it
+    /// once at boot:
+    ///
+    /// ```ignore
+    /// let pipeline = SharedPipeline::new(WaveformPipeline::new());
+    /// reg.set_edge_sink(Some(Box::new(pipeline.clone())));
+    /// ```
+    ///
+    /// Pass `None` to detach. While no sink is installed the registry
+    /// behaves exactly as before — the check in `sample_inner` is a
+    /// single `Option` test on the hot path.
+    pub fn set_edge_sink(&mut self, sink: Option<Box<dyn EdgeSink>>) {
+        self.edge_sink = sink;
+    }
+
+    /// True when a downstream edge sink is installed.
+    pub fn has_edge_sink(&self) -> bool {
+        self.edge_sink.is_some()
     }
 
     /// Drain all per-channel edge events into a [`Waveform`]. The

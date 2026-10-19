@@ -96,8 +96,8 @@ riscv_sim/
 | M-15 | 外设模型层 | `crates/kernel/src/m15_peripheral/` | stub（含 DummyUart） |
 | M-16 | 中断控制器 | `crates/kernel/src/m16_interrupt/` | stub |
 | M-17 | ExecutionBackend 执行后端 | `crates/kernel/src/m17_backend/` | stub（含 `SelfIssBackend`） |
-| M-18 | 探针 | `crates/kernel/src/m18_probe/` | **MVP 重点**（v0.8 完整 `ProbeRegistry`） |
-| M-19 | 波形管道 | `crates/kernel/src/m19_waveform/` | stub（含 `WaveformChannel`） |
+| M-18 | 探针 | `crates/kernel/src/m18_probe/` | **MVP 重点**（v0.8 完整 `ProbeRegistry`；v0.9 加 `EdgeSink` 端口完成 M-18 → M-19 接线） |
+| M-19 | 波形管道 | `crates/kernel/src/m19_waveform/` | **MVP 重点**（v0.9 完整 `WaveformPipeline`：边沿编码 + 每通道环 + ≤20ms 批量推送 + CSV/VCD 分块导出） |
 | M-20 | 快照与确定性事件流记录 | `crates/kernel/src/m20_snapshot/` | stub（含 `SnapshotManager`） |
 | M-21 | 日志系统 | `crates/kernel/src/m21_logging/` | stub（含 `LogBuffer`） |
 | M-22 | 健康管理 HMS | `crates/kernel/src/m22_hms/` | stub（含 `Hms`） |
