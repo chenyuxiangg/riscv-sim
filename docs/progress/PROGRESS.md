@@ -1,11 +1,24 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.1
+> **Document version**: v0.2
 > **Created**: 2026-10-19
 > **Last updated**: 2026-10-19
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.2 变更摘要
+
+Q1-Q7 全部答复（见 §8）：
+- Q1 智能灯固件 = **自研**（~200 行 RV32IMC 最小固件）
+- Q2 ISS 指令集 = **RV32IMC 全集**（I 47 + M 8 + C 16，无压缩子集）
+- Q3 持久化 = **IndexedDB**（用 `idb` ~5KB 包装，非 localStorage）
+- Q4 Worker URL = **同源 URL**（HTTP 部署，`./kernel-worker.js`）
+- Q5 行为判定 = **canvas 比对**（虚拟 LED 渲染 + 像素 diff + 视觉对照）
+- Q6 性能基线 = **macOS**（M3 Apple Silicon）
+- Q7 Spike 对拍 = **必做**（FR-04，每条指令 golden）
+
+影响：M-13 工作量从"~3-8 人日"上调到 §13.6 估的 12 人日；M-23 工作量从 3 上调到 3.5（IndexedDB schema + idb 包装）；C 扩展需 16-bit 指令解码 + PC 步长 2/4 切换，ISS 实现复杂度上升。
 
 ---
 
@@ -173,7 +186,7 @@ RISC-V 仿真/调试平台项目处于 **MVP 启动期**。架构 + 23 篇模块
 按 §13.3 倒推，下一轮要做的纵向切片（让 E2E-01 6 步全绿）：
 
 1. **M-14 总线** — 4 KiB 稀疏 RAM 页表，区间树地址译码（4 → 实际可减到 1.5 人日）
-2. **M-13 ISS 扩到 RV32I 完整基指令**（ADDI + LUI + AUIPC + LOAD + STORE + BRANCH + JAL + JALR）— 智能灯至少要 BRANCH/LOAD/STORE；扩到全集约 8 人日，MVP 子集可压到 3
+2. **M-13 ISS 扩到 RV32IMC 全集**（I 47 条 + M 8 条 + C 16 条 16-bit 压缩指令）— C 扩展需 PC 步长 2/4 切换 + 16-bit 指令解码；按 §13.6 估 **12 人日**，无压缩子集可压到 3-4 人日（用户选全集不压缩）
 3. **M-12 引擎接通 ISS** — 在每量子 instruction budget 内调 `iss.step_one`；engine 现在 run_until_idle 不会触发 ISS，需要新加 `run_quantum_with_iss` 路径
 4. **M-08 断点接通** — `iss.step_one` 在 fetch 前查 pc 命中就返 `StepOutcome::Breakpoint`
 5. **M-06 ELF 真解析** — 引入 `object` crate（BSD-2-Clause，合规），解 PT_LOAD 段写进 bus；DWARF 留 P1
@@ -217,20 +230,33 @@ RISC-V 仿真/调试平台项目处于 **MVP 启动期**。架构 + 23 篇模块
 | 2026-10-19 | `m12_engine::run_until_idle` 改为「每量子推进 → 排空到期」循环 | 原语义让 `engine_advances_time` 测试只走 1 量子 |
 | 2026-10-19 | `m17_backend::SelfIssBackend` bound 从 `BusMaster` 改为 `EventBus` | `Engine` 方法要 EventBus bound |
 | 2026-10-19 | `m15_peripheral::PeripheralRegistry` 拿掉 `derive(Debug)`，手写只输出 count | `Box<dyn Peripheral>` 不 Debug |
+| 2026-10-19 | **Q1** 智能灯固件 = **自研**（不外取） | 用户答复 |
+| 2026-10-19 | **Q2** ISS = **RV32IMC 全集**（I+M+C，含 16-bit 压缩指令） | 用户答复 |
+| 2026-10-19 | **Q3** 持久化 = **IndexedDB**（用 `idb` 包装，BSD-3，~5KB） | 用户答复（接受 +0.3-0.5 人日换容量） |
+| 2026-10-19 | **Q4** Worker URL = **同源**（HTTP 部署） | 用户答复 |
+| 2026-10-19 | **Q5** 行为判定 = **canvas 比对**（虚拟 LED + 像素 diff） | 用户答复 |
+| 2026-10-19 | **Q6** 性能基线硬件 = **macOS / Apple Silicon** | 用户答复 |
+| 2026-10-19 | **Q7** Spike golden 对拍 = **必做**（FR-04） | 用户答复 |
 
 ---
 
-## 8. 待澄清问题
+## 8. 已澄清问题（v0.2 全部答复）
 
-| 编号 | 问题 | 阻塞谁 | 选项 |
+| 编号 | 问题 | 答复 | 对实施的影响 |
 | --- | --- | --- | --- |
-| Q1 | E2E-01 智能灯固件是哪一个？自己写一个最小固件，还是用 riscv-tests / Spike 提供的？ | M-06 ELF + M-13 ISS 选型 | (a) 自写 200 行 RV32I 智能灯（最简）；(b) 用 riscv-tests 现有基准；(c) Spike 自带 dhrystone / qsort 之一 |
-| Q2 | ISS 指令集是只 RV32I 还是 RV32IMC 全集？ | M-13 工作量 | (a) MVP 子集 RV32I（约 47 条 → 压到 ~30 条足够智能灯）；(b) RV32IMC 全集 |
-| Q3 | 持久化 MVP 选 IndexedDB 还是 localStorage？ | M-23 | 架构说 IndexedDB（容量），但 localStorage 简单 |
-| Q4 | 前端 Worker 是用同源 URL 还是 blob URL？ | M-07 | 架构说 file:// 下 blob URL；现代浏览器默认同源 OK |
-| Q5 | 智能灯验证判定逻辑放哪？前端 L0 还是后端断言引擎？ | M-01 / M-22 | 架构说 L0 终点；具体是 DOM 渲染 LED 灯状态还是 canvas 颜色对比 |
-| Q6 | 性能基线 5-10 MIPS 在什么硬件上？ | 性能验收 | 用户机 (M3) 还是泛指 |
-| Q7 | Spike golden 对拍是否在 MVP 必做？ | M-13 验证 | 架构说「逐模块验证 FR-04」；MVP 可只对 ADDI |
+| Q1 | 智能灯固件来源 | **自研** ~200 行 RV32IMC 最小固件（按钮 GPIO 输入 + LED GPIO 输出 + 简单延时循环） | M-15 必须有 GPIO 输入 + 输出；M-11 反汇编要看得懂它；M-06 ELF 解析要能装它 |
+| Q2 | ISS 指令集范围 | **RV32IMC 全集**（I 47 + M 8 + C 16，无压缩子集） | M-13 估 **12 人日**；C 扩展需 PC 步长 2/4 切换 + 16-bit 解码表 |
+| Q3 | 持久化后端 | **IndexedDB**（用 `idb` 包装，~5KB BSD-3 库） | M-23 估 **3.5 人日**（含 `onupgradeneeded` schema 声明）；架构 §7.4 容量模型原样适用；M-05 CommandRouter 须 async 化 |
+| Q4 | Worker URL | **同源 URL**（`./kernel-worker.js`，HTTP 部署） | M-07 简化（无 blob URL 内联代码）；MVP 假定 `python3 -m http.server 8080 --directory front` 或等价 HTTP 部署 |
+| Q5 | 行为判定 | **canvas 比对**（虚拟 LED 渲染到 canvas + 像素 diff + 视觉对照） | M-01 加一个产品行为视图（虚拟 LED 灯泡 + 状态机动画）；可选自动化：每 N ms 截 canvas vs 期望图 |
+| Q6 | 性能基线硬件 | **macOS**（Apple Silicon M3 / 评测机） | 性能验收在该硬件上实测 ≥5 MIPS 估算基线；CI runner 也是 macOS |
+| Q7 | Spike golden 对拍 | **必做**（FR-04，每条已实现指令对拍） | `tests/golden/` 用 Spike 作为 oracle 跑同一程序，对比 `m13_iss` 的 register / memory 输出；CI 必跑；MVP 起步可只对 ADDI + 关键 LOAD/STORE/BRANCH |
+
+### v0.2 锁定后的实施前置条件
+
+- **依赖**：需要安装 `riscv64-unknown-elf-gcc` 工具链（编译自研固件） + `spike`（golden oracle），以及 npm 上没有依赖所以前端 `idb` 走 ESM CDN 或本地拷贝
+- **环境变量**：可能需要 `SPIKE_BIN=/path/to/spike` 给 golden test 用
+- **CI**：GitHub Actions macOS runner + Spike 安装步骤
 
 ---
 
@@ -239,6 +265,7 @@ RISC-V 仿真/调试平台项目处于 **MVP 启动期**。架构 + 23 篇模块
 | 版本 | 日期 | 变更 | 作者 |
 | --- | --- | --- | --- |
 | v0.1 | 2026-10-19 | 初稿：建立项目状态、§13.6 WBS 校准、关键路径、下一里程碑 E2E-01、决策与风险 | agent (mavis) |
+| v0.2 | 2026-10-19 | 答复 Q1-Q7：自研固件 / RV32IMC 全集 / IndexedDB / 同源 Worker / canvas 比对 / macOS / Spike 必做；M-13 工作量上调至 12 人日；§5 step 2 同步更新；新增 §8 「已澄清问题」表与实施前置条件 | agent (mavis) |
 
 ---
 
