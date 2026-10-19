@@ -252,6 +252,11 @@ export function switchView(target) {
             state: viewStore.getState(target.hash) ?? {},
         };
         dispatchRenderEvent(evt);
+        // Re-show the panel: `mountPanels()` hides every panel, and the
+        // bootstrap path lands here on the very first route (the initial
+        // view is pre-selected), so skipping this leaves the main area
+        // blank (FRONTEND_Review.md #19).
+        showPanel(target);
         syncTabState(target.hash);
         return evt;
     }
@@ -436,6 +441,13 @@ function dispatchRenderEvent(evt) {
 /**
  * Mount the workbench and route to the initial view.
  *
+ * The initial route is deferred to a microtask on purpose: it dispatches
+ * the *first* render event, and every view component has to be subscribed
+ * before that happens. Mounting synchronously here would lose that first
+ * event whenever the component library is mounted after the workbench —
+ * the page would come up with every view body empty
+ * (FRONTEND_Review.md #20).
+ *
  * @returns {Promise<object>} the assembled workspace snapshot
  */
 export async function mountWorkbench() {
@@ -444,7 +456,10 @@ export async function mountWorkbench() {
     window.addEventListener("hashchange", () => {
         route(location.hash);
     });
-    // Run once with whatever the URL says.
-    route(location.hash || `#/${currentRole}`);
+    // Run once with whatever the URL says — after the current task, so
+    // that sibling mounts have registered their listeners.
+    queueMicrotask(() => {
+        route(location.hash || `#/${currentRole}`);
+    });
     return workspace;
 }

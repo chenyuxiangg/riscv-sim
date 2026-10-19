@@ -72,7 +72,16 @@ describe("bootstrap", () => {
     test("页脚文案由 JS 填充，不再写死阶段号", () => {
         const info = dom.document.getElementById("build-info");
         assert.ok(info, "缺少 #build-info");
-        assert.match(info.textContent, /role=/);
+        assert.match(info.textContent, /role=(product|embedded)/);
+    });
+
+    test("恰好一个视图面板可见，且与活动标签一致（不得停在空白主区）", () => {
+        // `mountPanels()` hides every panel; the very first route lands in
+        // `switchView`'s "same view" branch, which has to re-show it —
+        // otherwise the main area stays blank (FRONTEND_Review.md #19).
+        const visible = $$("[data-view-panel]").filter((p) => !p.classList.contains("hidden"));
+        assert.equal(visible.length, 1, `应当恰好有一个面板可见，实际 ${visible.length}`);
+        assert.equal(visible[0].getAttribute("data-view-panel"), currentTabs()[0]);
     });
 });
 

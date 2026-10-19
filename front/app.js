@@ -73,9 +73,14 @@ function describeWorkspace(workspace) {
 
 async function bootstrap() {
     status.textContent = "正在挂载模块…";
-    const [workspace, , , , , transport] = await Promise.all([
-        mountWorkbench(),        // 0 → assembled workspace snapshot
-        mountViewComponents(),
+    // The view component library is mounted **first** on purpose: it
+    // subscribes to the `riscv:render` events, and the workbench's
+    // initial route dispatches the first one. Mounting the workbench
+    // first would drop that event and leave every view body empty
+    // (FRONTEND_Review.md #20).
+    const [, workspace, , , , transport] = await Promise.all([
+        mountViewComponents(),   // 0 → subscribes to the render events
+        mountWorkbench(),        // 1 → assembled workspace snapshot
         mountViewStore(),
         mountSession(),
         mountCommandRouter(),
