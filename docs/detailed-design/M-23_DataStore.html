@@ -1,0 +1,428 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>M-23 数据存储与持久化 DataStore 模块详细设计</title><link rel="icon" href="data:image/svg+xml,&lt;svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22&gt;&lt;rect width=%2232%22 height=%2232%22 rx=%226%22 fill=%22%231e3a8a%22/&gt;&lt;text x=%2216%22 y=%2222%22 font-size=%2216%22 fill=%22white%22 text-anchor=%22middle%22 font-family=%22sans-serif%22&gt;M23&lt;/text&gt;&lt;/svg&gt;"><style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { border-left:3px solid var(--brand-2); background:var(--zebra); padding:4px 10px; margin:8px 0 16px; font-size:13.5px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  margin:10px 0 16px; white-space:pre; }
+.nav-box { background:var(--head-bg); border:1px solid var(--line); border-radius:6px;
+  padding:10px 16px; font-size:13.5px; line-height:1.9; display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0 24px; }
+.nav-box a { color:var(--brand-2); text-decoration:none; }
+.nav-box a:hover { text-decoration:underline; }
+.flow-wrap { overflow-x:auto; margin:12px 0 16px; }
+.flow { min-width:640px; width:100%; height:auto; }
+.flow-branch { font-size:12.5px; color:var(--ink-2); border-left:3px solid var(--brand-2);
+  padding:4px 10px; margin:8px 0 16px; background:var(--zebra); }
+.ux-wrap { overflow-x:auto; margin:14px 0 18px; }
+.ux { min-width:560px; max-width:640px; margin:0 auto; }
+.ux svg { width:100%; height:auto; display:block; }
+.ux-cap { text-align:center; font-size:12.5px; color:var(--ink-2); margin:6px 0 0; }
+@media (max-width:767px) {
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media (max-width:560px) {
+  .doc-title { font-size:21px; }
+  .h-sec { font-size:19px; }
+  .doc-table, .doc-table th, .doc-table td { font-size:12.5px; }
+  .code { font-size:11.5px; white-space:pre-wrap; word-break:break-word; }
+  .nav-box { grid-template-columns:1fr; }
+}
+</style></head><body><div class="wrap"><h1 class="doc-title">M-23 数据存储与持久化 DataStore 模块详细设计</h1><p class="subtitle">RISC-V仿真平台 模块详细设计系列：对应《模块设计说明书》4.6.4节</p><p class="version">HTML版 v1.1 (2026-10-16) - 源设计《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版，2026-10-13更新)</p><div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:84%"></colgroup><thead><tr><th style="width:16%;text-align:center">项目</th><th style="width:84%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版新增2.5平台共享契约与各模块端口契约表)</td></tr><tr class="row1"><td data-label="项目" style="text-align:center">对应章节</td><td data-label="内容" style="text-align:left">4.6.4 (M-23 数据存储与持久化 DataStore)：数据描述→源文档表83、关键函数表84、端口契约表85；处理流程=4.6.4.4、异常处理=4.6.4.5</td></tr><tr class="row0"><td data-label="项目" style="text-align:center">承担需求</td><td data-label="内容" style="text-align:left">公共基础设施 (FR-13 项目持久化/分享只读链接、FR-19 反向调试/快照存储)；FR-24 P1 Topology 持久化</td></tr><tr class="row1"><td data-label="项目" style="text-align:center">支撑能力</td><td data-label="内容" style="text-align:left">M-04 (检查点触发与恢复读取/项目保存恢复)；M-20 (快照内容 + 原子写/归档契约)；M-21 (日志分块导出归档)；M-22 (诊断包归档)；M-19 (P1 长回看 spool)</td></tr><tr class="row0"><td data-label="项目" style="text-align:center">MVP状态</td><td data-label="内容" style="text-align:left">PO 主承担模块；MVP 必需：IndexedDB 适配 + atomicWrite + schemaVersion 迁移链 + saveProject/loadProject + saveSnapshot/loadSnapshot + export/m23Archive；P1：服务端适配/长回看 spool/Topology</td></tr><tr class="row1"><td data-label="项目" style="text-align:center">设计基线</td><td data-label="内容" style="text-align:left">AD v2.6.2；横切基础设施(4.6)；可靠性（快照 RPO ≤2s、保留 ≥5、原子写——M-20 触发 + M-23 原子写迁移，表93）；表86 调用规则（唯一入口/单向依赖/能力降级）；4.6.4.5 异常处置</td></tr><tr class="row0"><td data-label="项目" style="text-align:center">评审修订</td><td data-label="内容" style="text-align:left">v1.0（2026-10-16 初版）：按 M-20 v1.1 标准 9 章结构（表/代码块/流程 SVG/界面化 UX 示例）；内建 9.1.1 端口契约（源表85 对齐，4 driving + 3 driven + 4 使用方）+ CH7 契约测试 + CH8 模块级落实；错误码复用源表16 既有码 + 内部处置（无新增码）；原子写（临时+替换）+ schemaVersion 迁移链；写失败保留内存态 + 提示重试不丢会话；hash 只读链接（含版本标识）；IndexedDB 降级 localStorage（快照类不降级）；M-20 快照载荷双侧对齐（Snapshot{cpMeta,m13State,m14Map,m15Periph}，m23SaveSnapshot/m23LoadSnapshot 前缀别名契约）；m23Archive 归档区独立于检查点保留区（20-8 契约锚点落地，M-22 诊断包归档链路闭合）；表86 唯一入口/单向依赖/能力降级；3.7 数据存储 UX 界面化三面板（项目保存/分享 + 快照与迁移 + 归档/导出）。&lt;br&gt;v1.1（2026-10-16 评审 23-1~23-10 全闭环）：23-1 快照接口双侧参数统一——saveSnapshot 改收 M-20 Snapshot 完整单对象（含 cpMeta.id/version），输出确认 + cpId，恢复按 cpId 定位（M-20 m23SaveSnapshot(snap)/m23LoadSnapshot(cp) 同契约，9.1.1 双侧键名约定）；23-2 store.replace 底层语义声明（IndexedDB 单事务 del+put 提交，无替换原语）；23-3 校验改摘要比对（写入算 hash 读回比对，免全量读回，声明大对象开销口径）；23-4 保留裁剪单一权威归 M-20 触发侧（m23DeleteSnapshot 显式删除，saveSnapshot 内不再 trim）；23-5 快照键映射定义（键 = &quot;snap:&quot;+cpMeta.id）；23-6 迁移结果原子写回（迁移即升级持久化，loadProject/loadSnapshot/export 扫描同步）；23-7 export 展开 ExportFilter{timeRange,levels,channels,chunkSize} + 分块 64 KiB/块（9.1.1 与 M-21 归档对接双侧核对）；23-8 DebugMeta 归属声明（项目级独立存储 &quot;pdebug:&quot;+projectId，不随快照回滚，对齐 M-08↔M-04 断点表锚点）；23-9 归档区 MVP 清理策略（保留最近 32 条 + WARN，配额治理 P1）；23-10 补四组用例（快照键映射/迁移写回/双侧载荷一致性断言/归档清理）。</td></tr><tr class="row1"><td data-label="项目" style="text-align:center">编制时间</td><td data-label="内容" style="text-align:left">2026-10-16</td></tr></tbody></table></div><div class="nav-box"><a href="#sec1">1 功能概述</a> <a href="#sec2">2 数据描述</a> <a href="#sec3">3 实现设计</a> <a href="#sec4">4 关键函数</a> <a href="#sec5">5 处理流程</a> <a href="#sec6">6 异常处理</a> <a href="#sec7">7 测试设计与可维护性</a> <a href="#sec8">8 质量属性落实</a> <a href="#sec9">9 接口依赖</a></div>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-23 数据存储与持久化 DataStore（4.6.4）：公共基础设施——快照、项目、配置、日志归档统一存取；存储适配 IndexedDB（MVP）→ 服务端（P1）；写入原子（临时 + 替换）+ schemaVersion 迁移链；写失败保留内存态 + 提示重试不丢会话；分享用 hash 编码只读链接（含版本标识）；数据以 Project + SimState + DebugMeta 序列化结构为基准。承接 FR-13（项目持久化 / 分享只读链接）、FR-19（反向调试 / 快照存储）；为 M-20 检查点落盘（原子写 + schemaVersion 迁移，RPO ≤2s / 保留 ≥5 由 M-20 触发侧保障）、M-21 日志归档分块导出、M-22 诊断包归档（归档区独立于检查点保留区，20-8）提供统一存储。P1 演进：服务端存储适配、M-19 长回看 spool、FR-24 Topology 持久化（多 Board 实例 / 拓扑配置）。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:62%"><col style="width:24%"></colgroup><thead><tr><th style="width:14%;text-align:center">类别</th><th style="width:62%;text-align:center">约束内容</th><th style="width:24%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">统一存取</td><td style="text-align:left">快照、项目、配置、日志归档统一存储入口；数据以 Project + SimState + DebugMeta 序列化结构为基准</td><td style="text-align:left">4.6.4.1</td></tr><tr class="row1"><td style="text-align:center">存储适配</td><td style="text-align:left">IndexedDB（MVP）→ 服务端（P1）适配（storeAdapter）</td><td style="text-align:left">表83</td></tr><tr class="row0"><td style="text-align:center">原子写</td><td style="text-align:left">临时写 → 校验 → 替换（atomicWrite）；失败保留内存态 + 提示重试，不丢会话</td><td style="text-align:left">表83、4.6.4.5</td></tr><tr class="row1"><td style="text-align:center">迁移链</td><td style="text-align:left">schemaVersion 版本迁移（migrate 逐版本升级）</td><td style="text-align:left">表83/表84</td></tr><tr class="row0"><td style="text-align:center">分享</td><td style="text-align:left">hash 编码只读链接（含版本标识），只读不写</td><td style="text-align:left">4.6.4.1、表84</td></tr><tr class="row1"><td style="text-align:center">写失败</td><td style="text-align:left">保留内存态 + 提示重试，不丢会话</td><td style="text-align:left">4.6.4.5</td></tr><tr class="row0"><td style="text-align:center">schema 不兼容</td><td style="text-align:left">明确拒绝 + 升级路径，不静默错读</td><td style="text-align:left">4.6.4.5</td></tr><tr class="row1"><td style="text-align:center">降级</td><td style="text-align:left">IndexedDB 不可用 → localStorage 轻量状态 + 提示（快照类不降级）</td><td style="text-align:left">4.6.4.5</td></tr><tr class="row0"><td style="text-align:center">能力接口</td><td style="text-align:left">saveSnapshot/loadSnapshot（M-20 落盘/读取、M-04 检查点触发与恢复读取）；saveProject/loadProject（M-04 项目保存/恢复 FR-13）；export（M-21 日志导出/归档、M-19 P1 长回看 spool）</td><td style="text-align:left">表86</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：storeAdapter（IndexedDB 适配）、atomicWrite（临时 + 摘要校验 + 替换原子写）、schemaVersion 迁移链（migrate，成功后写回）、saveProject()/loadProject()（FR-13，hash 只读链接含版本标识）、saveSnapshot()/loadSnapshot()（FR-19，M-20 Snapshot 完整对象、键 = cpMeta.id）、export()（M-21 日志分块导出归档，ExportFilter）、m23Archive()（诊断包/现场包归档区，20-8 契约锚点落地，保留 32 条）、m23DeleteSnapshot()（显式删除，23-4）。<br>预留项（P1/P2 演进承接，不属现实现）：服务端存储适配（storeAdapter P1，服务端持久化）；M-19 长回看 spool（P1，复用同一存储适配分块读写）；FR-24 Topology 持久化（P1，多 Board 实例 / 拓扑配置序列化）；多会话存储配额治理（P1）。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构（源文档表83）</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:22%"><col style="width:18%"><col style="width:60%"></colgroup><thead><tr><th style="width:22%;text-align:center">数据结构/数据项</th><th style="width:18%;text-align:center">类型</th><th style="width:60%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">schemaVersion</td><td style="text-align:left">uint</td><td style="text-align:left">持久化 schema 版本（迁移链，migrate 逐版本升级）</td></tr><tr class="row1"><td data-label="数据项" style="text-align:center">storeAdapter</td><td data-label="类型" style="text-align:left">interface</td><td data-label="定义与用途" style="text-align:left">IndexedDB（MVP）/ 服务端（P1）存储适配（open/get/set/delete/clear + 原子语义）</td></tr><tr class="row0"><td data-label="数据项" style="text-align:center">atomicWrite</td><td data-label="类型" style="text-align:left">操作</td><td data-label="定义与用途" style="text-align:left">临时写 → 校验 → 替换原子提交（失败保留内存态 + 重试）</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="body">持久化数据以 Project + SimState + DebugMeta 序列化结构为基准（4.6.4.1）；快照载荷与 M-20 Snapshot{cpMeta, m13State, m14Map, m15Periph} 对齐；原子写对象携带临时态标记；hash 只读链接含版本标识（分享只读，不含可写凭据）。字段定义如下：</p>
+<pre class="code"><code>// Project: 项目持久化结构（FR-13；saveProject/loadProject 载荷）
+struct Project {
+  string  projectId;            // 项目 id
+  string  name;                 // 项目名
+  uint32  version;              // schemaVersion（对齐迁移链）
+  Topology topology;            // 拓扑/Board 配置（FR-24，P1 持久化；MVP 空）
+  Snapshot snap;                // 最近快照引用（运行状态，对齐 M-20 Snapshot）
+  DebugMeta debug;              // 调试元数据（项目级独立持久化，见下）
+};
+// Snapshot: 快照载荷（23-1 双侧对齐：与 M-20 v1.1 Snapshot 结构完全一致，含 cpMeta.id/version）
+//   入参形态 = M-20 完整 Snapshot 单对象（m23SaveSnapshot(snap)/m23LoadSnapshot(cp) 同契约）
+struct Snapshot {
+  Checkpoint cpMeta;            // 检查点元数据（id/tVirt/tHost/baseSeq/version，M-20 定义）
+  M13State  m13State;           // M-13 寄存器/内存序列化
+  M14Map    m14Map;             // M-14 总线/内存映射表
+  M15Periph m15Periph;          // M-15 外设状态
+};
+// DebugMeta: 调试元数据（断点/符号/源码映射）——项目级独立持久化（23-8）
+//   归属声明：不随快照回滚；快照恢复只回灌运行状态（M-13/14/15）；
+//   断点表与 M-08↔M-04 锚点对齐（会话重建按 addr 重注册 + id 重映射）
+struct DebugMeta {
+  Breakpoints bps;              // 断点集（地址/条件）
+  SymbolTable syms;             // 符号表
+  LineMap    lines;             // 源码行映射（DWARF）
+};
+// StoreAdapter: 存储适配（IndexedDB MVP / 服务端 P1，接口不变）
+interface StoreAdapter {
+  open(name) -&gt; Handle;         // 打开存储库（失败可降级，见 3.6）
+  get(key)  -&gt; Value?;          // 读对象（含 schemaVersion 检查）
+  set(key, obj);                // 写对象（走 atomicWrite 原子语义）
+  del(key); clear(scope);       // 删除/清理
+  tx(keys)  -&gt; Tx;              // 事务原语（del+put 同事务提交，23-2 replace 实现基础）
+};
+// AtomicWrite: 原子写对象（临时写 → 摘要校验 → 替换）
+struct AtomicWrite {
+  string  tempKey;              // 临时对象键（写失败残留可清理，不污染正式键）
+  string  finalKey;             // 正式对象键（校验通过后替换）
+  bytes   digest;               // 内容摘要（写入时计算，读回比对，23-3 免全量读回）
+  uint32  schemaVersion;        // 本次写入版本（触发迁移链）
+};
+// HashLink: hash 编码只读分享链接（含版本标识，分享只读不写）
+struct HashLink {
+  string  token;                // hash 令牌（只读，不含可写凭据）
+  uint32  version;              // 版本标识（旧版本链接打开时校验提示）
+  string  scope;                // 范围标识（project / snapshot / archive）
+};
+// ExportFilter: 日志/数据分块导出过滤器（23-7；M-21 归档对接参数）
+struct ExportFilter {
+  Range   timeRange;            // 时间范围 {tStart, tEnd}（宿主时间）
+  Level[] levels;               // 级别过滤（INFO/WARN/ERROR…，空=全部）
+  string[] channels;            // 通道过滤（日志类别/数据通道，空=全部）
+  uint32  chunkSize;            // 分块大小（估算基线 64 KiB/块）
+};
+// ArchiveKit: 归档区条目（m23Archive；归档区独立于检查点保留区，20-8）
+struct ArchiveKit {
+  uint32_t errCode;             // 错误码（诊断包取证要素，M-22）
+  Snapshot  snap;               // 快照（M-20）
+  InputSeq  inputs;             // 稀疏输入序列（M-20）
+  uint64_t  tHost;              // 归档宿主时间（归档不可被回退覆盖）
+};
+// 归档区 MVP 清理策略（23-9）：保留最近 32 条（环形丢最旧 + WARN），配额治理 P1 扩展</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 存取与迁移语义</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:46%"><col style="width:22%"><col style="width:16%"></colgroup><thead><tr><th style="width:16%;text-align:center">机制</th><th style="width:46%;text-align:center">语义</th><th style="width:22%;text-align:center">实现通道</th><th style="width:16%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">项目存取</td><td style="text-align:left">Project 序列化保存/恢复（FR-13）；输出 hash 只读链接（含版本标识）</td><td style="text-align:left">saveProject/loadProject</td><td style="text-align:left">表84</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">快照存取</td><td data-label="语义" style="text-align:left">M-20 Snapshot 完整对象原子写/读取（FR-19）；键 = &quot;snap:&quot; + cpMeta.id（23-5）</td><td data-label="实现通道" style="text-align:left">saveSnapshot/loadSnapshot</td><td data-label="备注" style="text-align:left">表84、M-20、23-1</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">原子写</td><td data-label="语义" style="text-align:left">临时写 → 摘要校验 → 替换（单事务 del+put 提交，23-2/23-3）；失败保留内存态 + 重试 ≤3 + 提示，不丢会话</td><td data-label="实现通道" style="text-align:left">atomicWrite</td><td data-label="备注" style="text-align:left">表83/84</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">迁移链</td><td data-label="语义" style="text-align:left">schemaVersion 逐版本升级，成功后原子写回（23-6）；不兼容 → 明确拒绝 + 升级路径，不静默错读</td><td data-label="实现通道" style="text-align:left">migrate</td><td data-label="备注" style="text-align:left">表84、4.6.4.5</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">调试元数据</td><td data-label="语义" style="text-align:left">DebugMeta 项目级独立持久化，不随快照回滚（23-8）；断点表对齐 M-08↔M-04 锚点</td><td data-label="实现通道" style="text-align:left">debug 独立存储</td><td data-label="备注" style="text-align:left">23-8</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">保留裁剪</td><td data-label="语义" style="text-align:left">快照保留 ≥5 单一权威归 M-20 触发侧（checkpointList）；M-23 仅按显式删除指令清理（23-4）</td><td data-label="实现通道" style="text-align:left">m23DeleteSnapshot</td><td data-label="备注" style="text-align:left">23-4</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">日志归档</td><td data-label="语义" style="text-align:left">M-21 日志分块导出/归档（export，Filter 结构见 2.1.1，23-7）；M-19 P1 长回看 spool 复用同一适配</td><td data-label="实现通道" style="text-align:left">export</td><td data-label="备注" style="text-align:left">表86</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">诊断归档</td><td data-label="语义" style="text-align:left">诊断包/现场包归档区独立于检查点保留区（不被回退覆盖）；MVP 保留最近 32 条 + WARN（23-9）</td><td data-label="实现通道" style="text-align:left">m23Archive</td><td data-label="备注" style="text-align:left">M-20 20-8、M-22</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">适配降级</td><td data-label="语义" style="text-align:left">IndexedDB 不可用 → localStorage 轻量状态 + 提示（快照类不降级）</td><td data-label="实现通道" style="text-align:left">storeAdapter 降级</td><td data-label="备注" style="text-align:left">4.6.4.5</td></tr></tbody></table></div>
+<h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+<p class="body">处理流程（4.6.4.4）：写 = 序列化 → 临时写 → 校验 → 替换 → 确认（失败保留内存态 + 重试）；读 = 读对象 → 版本检查 → 迁移 → 反序列化；分享 = hash 只读链接（含版本标识）。调用方按表86 唯一入口接入（M-04/M-20/M-21/M-22 经 save/load/export/m23Archive 能力接口），禁止绕过 DataStore 自行持久化。</p><h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 saveProject()/loadProject() 项目保存/恢复</h3>
+<p class="body">saveProject/loadProject（FR-13）：项目 + 配置统一序列化（Project 结构），经 atomicWrite 原子落盘；保存成功返回 hash 只读链接（含版本标识，分享只读不写）；读取时先版本检查，命中旧版本走 migrate 迁移链。M-04 为调用方（项目保存/恢复）。伪代码如下：</p>
+<pre class="code"><code>// saveProject: 项目保存（表84；FR-13；输入：Project；输出：确认 + hash 只读链接）
+HashLink saveProject(Project p) {
+  p.version = schemaVersion;                    // 写前锁定当前 schema 版本
+  ok = atomicWrite(&quot;project:&quot; + p.projectId, p);// 原子写（临时 + 替换）
+  if (!ok) return null;                         // 失败保留内存态 + 提示重试（3.3/6.1）
+  return hashLink(p.projectId, schemaVersion);  // hash 只读链接（含版本标识，4.6.4.1）
+}
+// loadProject: 项目恢复（表84；读对象 → 版本检查 → 迁移 → 写回 → 反序列化）
+Project? loadProject(string projectId) {
+  raw = store.get(&quot;project:&quot; + projectId);      // 读对象（StoreAdapter）
+  if (raw == null) return null;
+  if (raw.version &lt; schemaVersion) {            // 版本检查：旧版本走迁移链
+    raw = migrate(raw.version);                 // 逐版本升级（3.4），不静默错读
+    atomicWrite(&quot;project:&quot; + projectId, raw);   // 23-6：迁移成功后原子写回（迁移即升级持久化）
+  }
+  return deserialize(raw);                      // 反序列化（校验失败 → 明确拒绝 + 提示）
+}
+// 分享语义：hash 链接只读（token 不含可写凭据），打开旧版本链接 → 版本校验提示升级</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 saveSnapshot()/loadSnapshot() 快照原子写/读取</h3>
+<p class="body">saveSnapshot/loadSnapshot（FR-19）：入参为 **M-20 Snapshot 完整对象**（含 cpMeta{id,tVirt,tHost,baseSeq,version}，23-1 双侧对齐，单对象形态）；键 = &quot;snap:&quot; + cpMeta.id（23-5）；DebugMeta **不并入快照载荷**——项目级独立存储（23-8）；快照保留 ≥5 裁剪归 M-20 触发侧，M-23 仅按显式删除指令清理（23-4）。伪代码如下：</p>
+<pre class="code"><code>// saveSnapshot: 快照原子写（表84；FR-19；输入：M-20 Snapshot 完整对象；输出：确认 + cpId）
+Result saveSnapshot(Snapshot snap) {
+  ok = atomicWrite(&quot;snap:&quot; + snap.cpMeta.id, snap);  // 键 = cpMeta.id（23-5）；原子写（临时+替换）
+  if (!ok) {                                    // 写失败 → 保留内存态 + 重试 ≤3 + 提示（6.1）
+    return { ok:false, code:&quot;WRITE_RETRY&quot;, cpId: snap.cpMeta.id };
+  }
+  return { ok:true, cpId: snap.cpMeta.id };     // M-20 restore 按 cpId 恢复（含 cp.id，23-1）
+}
+// loadSnapshot: 快照读取（表84；M-20 恢复读取；输入：cpId；输出：Snapshot 状态体）
+Snapshot? loadSnapshot(string cpId) {
+  raw = store.get(&quot;snap:&quot; + cpId);              // 键 = cpMeta.id（23-5 键映射约定）
+  if (raw.cpMeta.version &lt; schemaVersion) {     // 版本检查 → 迁移 → 写回（23-6）
+    raw = migrate(raw.cpMeta.version);
+    atomicWrite(&quot;snap:&quot; + cpId, raw);
+  }
+  return deserialize(raw);                      // 反序列化 → M-20 回灌 M-13/14/15
+}
+// 双侧对齐锚点（23-1）：M-20 m23SaveSnapshot(snap)/m23LoadSnapshot(cp) = 本契约（单对象形态、
+//   载荷 = Snapshot{cpMeta,m13State,m14Map,m15Periph}，两侧结构完全一致）
+// DebugMeta 独立存储（23-8）：键 &quot;pdebug:&quot; + projectId（项目级，不随快照回滚）；
+//   快照恢复只回灌运行状态，断点表对齐 M-08↔M-04 会话重建锚点
+// 保留裁剪单一权威（23-4）：M-20 checkpointList 维护保留 ≥5 并按需显式删除
+//   （m23DeleteSnapshot(cpId)）；saveSnapshot 内不做 trim（双归属消除）
+// 快照类存储不随 IndexedDB 降级（localStorage 仅存轻量状态，见 3.6/6.2）</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 atomicWrite(obj) 原子写实现</h3>
+<p class="body">atomicWrite（表83/84）：临时写 → **摘要校验** → 替换；失败保留内存态 + 重试（≤3 次）+ 提示，不丢会话（4.6.4.5）；replace 底层为 IndexedDB **单事务 del+put 同事务提交**（23-2）；校验用内容摘要（hash）比对、免全量读回（23-3）。伪代码如下：</p>
+<pre class="code"><code>// atomicWrite: 原子写实现（表83；临时写 → 摘要校验 → 替换；失败保留内存态 + 重试 ≤3 + 提示）
+bool atomicWrite(string finalKey, Object obj) {
+  tempKey = finalKey + &quot;.tmp&quot;;                  // 临时对象键（写失败残留可清理）
+  digest = hash(obj);                           // 23-3：写入时计算内容摘要（免全量读回）
+  for (try = 0; try &lt; 3; try++) {
+    if (!store.set(tempKey, {obj, digest})) {   // ① 临时写（事务失败 → 保留内存态 + 重试）
+      continue;                                 // 内存态由调用方保留（不丢会话，4.6.4.5）
+    }
+    if (!validate(store.get(tempKey), digest)) { // ② 摘要校验（读回比对 hash，非全量比对）
+      store.del(tempKey); continue;             // 校验失败清理临时键，重试
+    }
+    store.tx([finalKey, tempKey])               // ③ 替换 = 单事务 del(finalKey)+put(tempKey 内容)
+      .del(finalKey).put(finalKey, read(tempKey))
+      .commit();                                // 23-2：IndexedDB 无&quot;替换&quot;原语，del+put 同事务提交
+    store.del(tempKey);
+    return true;
+  }
+  return false;                                 // 终态：提示重试 + 内存态保留（6.1）
+}
+// 临时键语义：任何失败步骤后正式键不受污染；残留 .tmp 由下次 gcTempKeys() 清理
+// 23-3 开销口径：摘要校验 = 1 次写 + 1 次小读（hash 比对），大对象（快照/内存序列化）无全量读回</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 migrate(fromVer) schema 迁移链</h3>
+<p class="body">migrate（表84）：schemaVersion 迁移链，逐版本升级；版本跳跃按链式逐步迁移；目标版本不兼容（缺迁移路径）→ 明确拒绝 + 升级路径提示，不静默错读（4.6.4.5）；**迁移成功后由调用方原子写回持久化**（23-6，迁移即升级，避免重复迁移与旧数据残留）。伪代码如下：</p>
+<pre class="code"><code>// migrate: schema 迁移链（表84；输入：旧版本；输出：迁移后的数据）
+Object migrate(uint32 fromVer) {
+  cur = readRaw(fromVer);                       // 读旧版本原始对象
+  for (v = fromVer; v &lt; schemaVersion; v++) {
+    fn = MIGRATIONS[v];                         // 迁移注册表（v → v+1 变换函数）
+    if (fn == null) {                           // 缺迁移路径 → 不兼容
+      return { err:&quot;MIGRATE_INCOMPATIBLE&quot;, from:fromVer, to:schemaVersion };  // 明确拒绝 + 升级路径
+    }
+    cur = fn(cur);                              // 逐版本升级（字段增删/语义变换）
+  }
+  cur.version = schemaVersion;
+  return cur;
+}
+// 不静默错读：缺迁移路径 / 反序列化失败 → 明确拒绝 + 提示升级（4.6.4.5）
+// 迁移注册表 MIGRATIONS[v]：每版本一函数（MVP v1 → v2 起步，后续版本只增不删）</code></pre>
+<h3 id="sec3-5" class="h-sub">3.5 export() 与归档（m23Archive）</h3>
+<p class="body">export（表86）：M-21 日志导出/归档分块导出（ExportFilter 过滤 + 分块大小 + 进度回调 + 续导锚点，23-7）；M-19 P1 长回看 spool 复用同一存储适配（分块读写）；m23Archive：诊断包/现场包归档区独立于检查点保留区（20-8：归档不被后续回退覆盖，M-20/M-22 引用）；归档区 MVP 保留最近 32 条（环形丢最旧 + WARN，23-9）。伪代码如下：</p>
+<pre class="code"><code>// export: 日志分块导出/归档（表86；M-21 调用；ExportFilter 过滤 + 分块 + 进度 + 续导锚点）
+ExportHandle export(ExportFilter filter) {
+  block = store.scan(filter)                      // 分块扫描（按 timeRange/levels/channels 过滤）
+             .withChunkSize(filter.chunkSize);    // 23-7：分块大小（估算基线 64 KiB/块）
+  for (each block) {
+    checkVersion(block);                          // 扫描对象逐件版本检查 → 迁移 → 写回（23-6 语义）
+    emit({ chunk, nextOffset, progress });        // 分块 + 续导锚点 + 进度回调（对齐 M-19 导出契约）
+  }
+  return { handle, nextOffset, progress };
+}
+// M-19 P1 长回看 spool：复用同一存储适配（分块写/读，同 schemaVersion 迁移链）
+// m23Archive: 诊断包/现场包归档（20-8；归档区独立于检查点保留区）
+Result m23Archive(ArchiveKit kit) {
+  ok = atomicWrite(&quot;archive:&quot; + kit.tHost, kit); // 归档键按宿主时间，不被回退覆盖
+  trimArchive(32);                               // 23-9：MVP 保留最近 32 条（环形丢最旧 + WARN）
+  return { ok };                                 // 归档区清理策略独立（非检查点保留 ≥5 语义）
+}
+// 双侧核对（20-8 锚点落地）：M-20 m23Archive(kit) / M-22 exportDiagnosticKit → m23Archive 契约一致
+// 23-9 口径：归档区 MVP = 保留最近 32 条 + 容量告警；配额治理 P1 扩展</code></pre>
+<h3 id="sec3-6" class="h-sub">3.6 存储适配与降级（storeAdapter）</h3>
+<p class="body">storeAdapter（表83）：IndexedDB（MVP）→ 服务端（P1）适配，接口不变（能力差异按 M-17 能力位协商降级，表86 调用规则③）；IndexedDB 不可用 → 降级 localStorage 轻量状态 + 提示，快照类不降级（4.6.4.5）。伪代码如下：</p>
+<pre class="code"><code>// storeAdapter: 存储适配（表83；IndexedDB MVP / 服务端 P1，接口不变）
+StoreAdapter store = {
+  open(name) -&gt; {
+    if (indexedDBAvailable()) return idbHandle(name);  // MVP：IndexedDB
+    if (serviceBackend()) return srvHandle(name);      // P1：服务端存储适配
+    warn(&quot;STORAGE_DEGRADE&quot;);                            // 降级 localStorage（轻量状态）
+    return lsHandle(name);                              // 快照类 get/set 返回不支持（不降级）
+  }
+};
+// 降级边界（4.6.4.5/6.2）：localStorage 仅存轻量状态（项目名/最近会话等），
+//   快照/归档类写操作在降级模式下明确拒绝 + 提示（快照类不降级，防数据丢失）
+// 服务端适配（P1）：同一 StoreAdapter 接口，能力协商降级（表86 调用规则③）</code></pre>
+<h3 id="sec3-7" class="h-sub">3.7 数据存储 UX 示例（示意，界面化）</h3>
+<p class="body">以下为数据存储管理交互形态示意（非精确线框图）：项目保存/分享、快照列表与迁移状态、归档/导出三面板，字段与 2.1.1/表83 一致；移动端可横向滚动查看。</p>
+<div class="ux-wrap"><figure class="ux"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="DataStore：项目保存与分享（saveProject / loadProject）"><defs><filter id="sh" x="-10%" y="-20%" width="130%" height="170%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#64748b" flood-opacity="0.25"/></filter><linearGradient id="hdr" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#1e3a8a"/><stop offset="1" stop-color="#2f5bd6"/></linearGradient></defs><rect x="2" y="2" width="676" height="416" rx="10" fill="#ffffff" stroke="#e2e8f0" filter="url(#sh)"/><rect x="2" y="2" width="676" height="36" rx="10" fill="url(#hdr)"/><circle cx="26" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="42" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="58" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><text x="78" y="24" font-size="13" font-weight="700" fill="#ffffff">DataStore：项目保存与分享（saveProject / loadProject）</text>
+<rect x="18" y="50" width="300" height="120" rx="8" fill="#f8fafc" stroke="#d8dee9"/>
+<text x="32" y="72" font-size="12" font-weight="700" fill="#111827">项目持久化（FR-13）</text>
+<text x="32" y="94" font-size="11" fill="#4b5563">项目名：RISC-V 智能灯 demo</text>
+<text x="32" y="112" font-size="11" fill="#4b5563">schemaVersion：v3（迁移链 v1→v2→v3）</text>
+<text x="32" y="130" font-size="11" fill="#4b5563">保存时间：2026-10-16 14:32</text>
+<rect x="32" y="140" width="120" height="20" rx="4" fill="#1e3a8a"/><text x="92" y="153" font-size="10" fill="#ffffff" text-anchor="middle">保存项目（原子写）</text>
+<rect x="18" y="182" width="300" height="120" rx="8" fill="#f8fafc" stroke="#d8dee9"/>
+<text x="32" y="204" font-size="12" font-weight="700" fill="#111827">hash 只读分享链接</text>
+<text x="32" y="226" font-size="11" fill="#2563eb" font-family="ui-monospace,Consolas,monospace">#project=8f3a2c91&amp;v=3</text>
+<text x="32" y="244" font-size="11" fill="#4b5563">版本标识 v=3：旧链接打开 → 版本校验提示升级</text>
+<text x="32" y="262" font-size="11" fill="#4b5563">只读 token，不含可写凭据（分享只读）</text>
+<rect x="32" y="272" width="120" height="20" rx="4" fill="#2f5bd6"/><text x="92" y="285" font-size="10" fill="#ffffff" text-anchor="middle">复制只读链接</text>
+<rect x="338" y="50" width="324" height="252" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+<text x="352" y="72" font-size="12" font-weight="700" fill="#1e3a8a">统一存取（表86 唯一入口）</text>
+<text x="352" y="96" font-size="11" fill="#3730a3">saveProject / loadProject → M-04（FR-13）</text>
+<text x="352" y="116" font-size="11" fill="#3730a3">saveSnapshot / loadSnapshot → M-20（FR-19）</text>
+<text x="352" y="136" font-size="11" fill="#3730a3">export 日志分块导出 → M-21</text>
+<text x="352" y="156" font-size="11" fill="#3730a3">m23Archive 诊断包归档 → M-22</text>
+<text x="352" y="176" font-size="11" fill="#3730a3">长回看 spool 分块读写 → M-19（P1）</text>
+<line x1="352" y1="190" x2="648" y2="190" stroke="#c7d2fe"/>
+<text x="352" y="212" font-size="11" fill="#3730a3">存储适配：IndexedDB（MVP）→ 服务端（P1）</text>
+<text x="352" y="232" font-size="11" fill="#3730a3">原子写：临时写 → 校验 → 替换</text>
+<text x="352" y="252" font-size="11" fill="#3730a3">迁移链：schemaVersion 逐版本升级</text>
+<text x="352" y="272" font-size="11" fill="#3730a3">写失败：保留内存态 + 提示重试（不丢会话）</text>
+<text x="352" y="292" font-size="11" fill="#3730a3">降级：IndexedDB 不可用 → localStorage（快照不降级）</text>
+</svg><figcaption class="ux-cap">图1：DataStore：项目保存与分享（Project 卡片 + hash 只读链接含版本标识）→ 统一存取入口（表86 唯一入口）</figcaption></figure></div>
+<div class="ux-wrap"><figure class="ux"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="DataStore：快照与迁移（saveSnapshot / migrate）"><defs><filter id="sh" x="-10%" y="-20%" width="130%" height="170%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#64748b" flood-opacity="0.25"/></filter><linearGradient id="hdr" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#1e3a8a"/><stop offset="1" stop-color="#2f5bd6"/></linearGradient></defs><rect x="2" y="2" width="676" height="416" rx="10" fill="#ffffff" stroke="#e2e8f0" filter="url(#sh)"/><rect x="2" y="2" width="676" height="36" rx="10" fill="url(#hdr)"/><circle cx="26" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="42" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="58" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><text x="78" y="24" font-size="13" font-weight="700" fill="#ffffff">DataStore：快照与迁移（saveSnapshot / migrate）</text>
+<rect x="18" y="50" width="324" height="240" rx="8" fill="#f8fafc" stroke="#d8dee9"/>
+<text x="32" y="72" font-size="12" font-weight="700" fill="#111827">快照列表（FR-19，保留 ≥5）</text>
+<rect x="32" y="84" width="296" height="28" rx="5" fill="#ffffff" stroke="#d8dee9"/>
+<text x="44" y="102" font-size="11" fill="#111827">#42</text>
+<text x="120" y="102" font-size="11" fill="#4b5563">tVirt 10s · tHost 14:32:01 · RPO 1.4s</text>
+<rect x="290" y="90" width="28" height="16" rx="8" fill="#dcfce7"/><text x="304" y="101" font-size="9" fill="#166534" text-anchor="middle">OK</text>
+<rect x="32" y="118" width="296" height="28" rx="5" fill="#ffffff" stroke="#d8dee9"/>
+<text x="44" y="136" font-size="11" fill="#111827">#41</text>
+<text x="120" y="136" font-size="11" fill="#4b5563">tVirt 10s · tHost 14:31:46 · RPO 1.6s</text>
+<rect x="290" y="126" width="28" height="16" rx="8" fill="#dcfce7"/><text x="304" y="137" font-size="9" fill="#166534" text-anchor="middle">OK</text>
+<rect x="32" y="152" width="296" height="28" rx="5" fill="#ffffff" stroke="#d8dee9"/>
+<text x="44" y="170" font-size="11" fill="#111827">#40</text>
+<text x="120" y="170" font-size="11" fill="#4b5563">tVirt 10s · tHost 14:31:31 · RPO 2.0s</text>
+<rect x="290" y="158" width="28" height="16" rx="8" fill="#fef9c3"/><text x="304" y="169" font-size="9" fill="#a16207" text-anchor="middle">RPO</text>
+<rect x="32" y="186" width="296" height="28" rx="5" fill="#ffffff" stroke="#d8dee9"/>
+<text x="44" y="204" font-size="11" fill="#111827">#39</text>
+<text x="120" y="204" font-size="11" fill="#4b5563">tVirt 10s · tHost 14:31:16 · RPO 1.8s</text>
+<rect x="290" y="192" width="28" height="16" rx="8" fill="#dcfce7"/><text x="304" y="203" font-size="9" fill="#166534" text-anchor="middle">OK</text>
+<text x="32" y="236" font-size="11" fill="#4b5563">原子写状态：临时写 → 校验 → 替换（无半写残留）</text>
+<text x="32" y="256" font-size="11" fill="#4b5563">恢复读取：#41 载荷回灌 M-13/14/15（M-20 restore）</text>
+<text x="32" y="276" font-size="11" fill="#4b5563">快照类不降级：IndexedDB 不可用时明确拒绝 + 提示</text>
+<rect x="360" y="50" width="302" height="240" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+<text x="374" y="72" font-size="12" font-weight="700" fill="#1e3a8a">schema 迁移链（migrate）</text>
+<rect x="374" y="84" width="274" height="26" rx="5" fill="#ffffff" stroke="#c7d2fe"/>
+<text x="386" y="100" font-size="11" fill="#111827">v1 → v2：快照字段扩展（baseSeq）</text>
+<rect x="374" y="116" width="274" height="26" rx="5" fill="#ffffff" stroke="#c7d2fe"/>
+<text x="386" y="132" font-size="11" fill="#111827">v2 → v3：SimState 对齐 M-20 载荷</text>
+<rect x="374" y="148" width="274" height="26" rx="5" fill="#ffffff" stroke="#c7d2fe"/>
+<text x="386" y="164" font-size="11" fill="#111827">当前版本：v3（schemaVersion）</text>
+<text x="374" y="204" font-size="11" fill="#3730a3">逐版本升级，只增不删；缺迁移路径 →</text>
+<text x="374" y="224" font-size="11" fill="#3730a3">明确拒绝 + 升级路径提示（不静默错读）</text>
+<rect x="374" y="240" width="130" height="20" rx="4" fill="#1e3a8a"/><text x="439" y="253" font-size="10" fill="#ffffff" text-anchor="middle">迁移校验</text>
+</svg><figcaption class="ux-cap">图2：DataStore：快照列表与迁移（快照 #39~#42 RPO 状态 + 原子写四步 + schema 迁移链 v1→v3，缺路径明确拒绝）</figcaption></figure></div>
+<div class="ux-wrap"><figure class="ux"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="DataStore：归档与导出（m23Archive / export）"><defs><filter id="sh" x="-10%" y="-20%" width="130%" height="170%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#64748b" flood-opacity="0.25"/></filter><linearGradient id="hdr" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#1e3a8a"/><stop offset="1" stop-color="#2f5bd6"/></linearGradient></defs><rect x="2" y="2" width="676" height="416" rx="10" fill="#ffffff" stroke="#e2e8f0" filter="url(#sh)"/><rect x="2" y="2" width="676" height="36" rx="10" fill="url(#hdr)"/><circle cx="26" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="42" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="58" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><text x="78" y="24" font-size="13" font-weight="700" fill="#ffffff">DataStore：归档与导出（m23Archive / export）</text>
+<rect x="18" y="50" width="324" height="240" rx="8" fill="#f8fafc" stroke="#d8dee9"/>
+<text x="32" y="72" font-size="12" font-weight="700" fill="#111827">归档区（独立于检查点保留区，20-8）</text>
+<rect x="32" y="84" width="296" height="28" rx="5" fill="#ffffff" stroke="#d8dee9"/>
+<text x="44" y="102" font-size="11" fill="#111827">archive:1789461524</text>
+<text x="190" y="102" font-size="11" fill="#4b5563">诊断包 E_CTX-12 · 快照 #42</text>
+<rect x="290" y="90" width="28" height="16" rx="8" fill="#dcfce7"/><text x="304" y="101" font-size="9" fill="#166534" text-anchor="middle">OK</text>
+<rect x="32" y="118" width="296" height="28" rx="5" fill="#ffffff" stroke="#d8dee9"/>
+<text x="44" y="136" font-size="11" fill="#111827">archive:1789461498</text>
+<text x="190" y="136" font-size="11" fill="#4b5563">现场包 P-19 · 输入序列 384 条</text>
+<rect x="290" y="126" width="28" height="16" rx="8" fill="#dcfce7"/><text x="304" y="137" font-size="9" fill="#166534" text-anchor="middle">OK</text>
+<rect x="32" y="152" width="296" height="28" rx="5" fill="#ffffff" stroke="#d8dee9"/>
+<text x="44" y="170" font-size="11" fill="#111827">archive:1789461472</text>
+<text x="190" y="170" font-size="11" fill="#4b5563">日志归档 · 分块导出</text>
+<rect x="290" y="158" width="28" height="16" rx="8" fill="#e0e7ff"/><text x="304" y="169" font-size="9" fill="#3730a3" text-anchor="middle">SP</text>
+<text x="32" y="208" font-size="11" fill="#4b5563">归档区清理策略独立：不被检查点回退覆盖</text>
+<text x="32" y="228" font-size="11" fill="#4b5563">（M-20 20-8 / M-22 诊断包取证链路）</text>
+<text x="32" y="248" font-size="11" fill="#4b5563">m23Archive(kit)：归档键按宿主时间 tHost</text>
+<text x="32" y="268" font-size="11" fill="#4b5563">导出：错误码 + 快照 + 稀疏输入序列（P-23）</text>
+<rect x="360" y="50" width="302" height="240" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+<text x="374" y="72" font-size="12" font-weight="700" fill="#1e3a8a">日志分块导出（export）</text>
+<rect x="374" y="84" width="274" height="110" rx="5" fill="#ffffff" stroke="#c7d2fe"/>
+<text x="386" y="104" font-size="11" fill="#111827">块 1/12 日志区间 [14:30:00, 14:32:00]</text>
+<text x="386" y="124" font-size="11" fill="#4b5563">nextOffset：seq 2048（续导锚点）</text>
+<text x="386" y="144" font-size="11" fill="#4b5563">进度：8% 已完成 0.8 MiB</text>
+<rect x="386" y="154" width="248" height="6" rx="3" fill="#e2e8f0"/><rect x="386" y="154" width="20" height="6" rx="3" fill="#2f5bd6"/>
+<text x="386" y="182" font-size="11" fill="#3730a3">进度回调：块完成 → 更新 UI（对齐 M-19 导出契约）</text>
+<text x="374" y="216" font-size="11" fill="#3730a3">M-19 P1 长回看 spool：复用同一存储适配</text>
+<text x="374" y="236" font-size="11" fill="#3730a3">（分块写/读，同 schemaVersion 迁移链）</text>
+<rect x="374" y="252" width="130" height="20" rx="4" fill="#1e3a8a"/><text x="439" y="265" font-size="10" fill="#ffffff" text-anchor="middle">导出日志归档</text>
+</svg><figcaption class="ux-cap">图3：DataStore：归档与导出（归档区独立条目 + 日志分块导出进度/续导锚点 + M-19 P1 spool 复用同一适配）</figcaption></figure></div>
+<h2 id="sec4" class="h-sec">4 关键函数（源文档表84）</h2>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:30%"><col style="width:26%"><col style="width:44%"></colgroup><thead><tr><th style="width:30%;text-align:center">函数</th><th style="width:26%;text-align:center">说明</th><th style="width:44%;text-align:center">调用关系/输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">saveProject()/loadProject()</td><td style="text-align:left">项目保存/恢复（FR-13）</td><td style="text-align:left">输入：Project；输出：确认（hash 只读链接含版本标识）；迁移后原子写回（23-6）</td></tr><tr class="row1"><td data-label="函数" style="text-align:center">saveSnapshot()/loadSnapshot()</td><td data-label="说明" style="text-align:left">快照原子写/读取（FR-19）</td><td data-label="调用关系" style="text-align:left">输入：M-20 Snapshot 完整对象（含 cpMeta.id/version）；输出：确认 + cpId；键 = &quot;snap:&quot;+cpMeta.id（23-1/23-5）</td></tr><tr class="row0"><td data-label="函数" style="text-align:center">atomicWrite(obj)</td><td data-label="说明" style="text-align:left">原子写实现</td><td data-label="调用关系" style="text-align:left">临时写 → 摘要校验 → 替换（单事务 del+put 提交，23-2/23-3）；失败保留内存态 + 重试 ≤3 + 提示</td></tr><tr class="row1"><td data-label="函数" style="text-align:center">migrate(fromVer)</td><td data-label="说明" style="text-align:left">schema 迁移链</td><td data-label="调用关系" style="text-align:left">输入：旧版本；输出：迁移后的数据；成功后原子写回（23-6）；缺路径 → 明确拒绝 + 升级路径</td></tr><tr class="row0"><td data-label="函数" style="text-align:center">export()</td><td data-label="说明" style="text-align:left">日志导出/归档（表86）</td><td data-label="调用关系" style="text-align:left">ExportFilter 过滤 + 分块（64 KiB/块）+ 进度 + 续导锚点（23-7；M-21 调用；M-19 P1 spool 复用）</td></tr><tr class="row1"><td data-label="函数" style="text-align:center">m23Archive(kit)</td><td data-label="说明" style="text-align:left">诊断包/现场包归档（20-8）</td><td data-label="调用关系" style="text-align:left">归档区独立于检查点保留区，不被回退覆盖；MVP 保留最近 32 条 + WARN（23-9；M-20/M-22 引用）</td></tr><tr class="row0"><td data-label="函数" style="text-align:center">m23DeleteSnapshot(cpId)</td><td data-label="说明" style="text-align:left">快照显式删除（23-4）</td><td data-label="调用关系" style="text-align:left">保留裁剪单一权威归 M-20 触发侧，M-23 仅按显式删除指令清理</td></tr></tbody></table></div>
+<h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 数据读写与迁移流程（源 4.6.4.4 对齐）</h3>
+<p class="body">写：序列化 → 临时写 → 校验 → 替换 → 确认（失败保留内存态 + 重试）；读：读对象 → 版本检查 → 迁移 → 反序列化；分享：hash 只读链接（含版本标识）。流程图如下：</p>
+<div class="flow-wrap">
+<svg class="flow" viewBox="0 0 820 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-23 数据读写与迁移流程">
+<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1e3a8a"/></marker></defs>
+<text x="120" y="26" font-size="13" font-weight="700" fill="#1e3a8a" text-anchor="middle">写路径（原子写）</text>
+<text x="420" y="26" font-size="13" font-weight="700" fill="#1e3a8a" text-anchor="middle">读路径（版本检查 → 迁移）</text>
+<text x="700" y="26" font-size="13" font-weight="700" fill="#1e3a8a" text-anchor="middle">分享路径</text>
+<rect x="40" y="40" width="160" height="34" rx="6" fill="#eef2ff" stroke="#c7d2fe"/><text x="120" y="61" font-size="11" fill="#1e3a8a" text-anchor="middle">序列化（Project/SimState）</text>
+<rect x="340" y="40" width="160" height="34" rx="6" fill="#eef2ff" stroke="#c7d2fe"/><text x="420" y="61" font-size="11" fill="#1e3a8a" text-anchor="middle">读对象（StoreAdapter.get）</text>
+<rect x="620" y="40" width="160" height="34" rx="6" fill="#eef2ff" stroke="#c7d2fe"/><text x="700" y="61" font-size="11" fill="#1e3a8a" text-anchor="middle">生成 hash 只读链接</text>
+<line x1="120" y1="74" x2="120" y2="92" stroke="#1e3a8a" marker-end="url(#arr)"/>
+<rect x="40" y="94" width="160" height="34" rx="6" fill="#eef2ff" stroke="#c7d2fe"/><text x="120" y="115" font-size="11" fill="#1e3a8a" text-anchor="middle">临时写（tempKey）</text>
+<line x1="420" y1="74" x2="420" y2="92" stroke="#1e3a8a" marker-end="url(#arr)"/>
+<rect x="340" y="94" width="160" height="34" rx="6" fill="#eef2ff" stroke="#c7d2fe"/><text x="420" y="115" font-size="11" fill="#1e3a8a" text-anchor="middle">版本检查（schemaVersion）</text>
+<line x1="700" y1="74" x2="700" y2="92" stroke="#1e3a8a" marker-end="url(#arr)"/>
+<rect x="620" y="94" width="160" height="34" rx="6" fill="#eef2ff" stroke="#c7d2fe"/><text x="700" y="115" font-size="11" fill="#1e3a8a" text-anchor="middle">含版本标识（v=n）</text>
+<line x1="120" y1="128" x2="120" y2="146" stroke="#1e3a8a" marker-end="url(#arr)"/>
+<rect x="40" y="148" width="160" height="34" rx="6" fill="#eef2ff" stroke="#c7d2fe"/><text x="120" y="169" font-size="11" fill="#1e3a8a" text-anchor="middle">校验（读回比对）</text>
+<line x1="420" y1="128" x2="420" y2="146" stroke="#1e3a8a" marker-end="url(#arr)"/>
+<rect x="340" y="148" width="160" height="34" rx="6" fill="#eef2ff" stroke="#c7d2fe"/><text x="420" y="169" font-size="11" fill="#1e3a8a" text-anchor="middle">旧版本？→ migrate(fromVer)</text>
+<line x1="120" y1="182" x2="120" y2="200" stroke="#1e3a8a" marker-end="url(#arr)"/>
+<rect x="40" y="202" width="160" height="34" rx="6" fill="#eef2ff" stroke="#c7d2fe"/><text x="120" y="223" font-size="11" fill="#1e3a8a" text-anchor="middle">替换（finalKey 原子提交）</text>
+<line x1="420" y1="182" x2="420" y2="200" stroke="#1e3a8a" marker-end="url(#arr)"/>
+<rect x="340" y="202" width="160" height="34" rx="6" fill="#eef2ff" stroke="#c7d2fe"/><text x="420" y="223" font-size="11" fill="#1e3a8a" text-anchor="middle">反序列化 → 返回</text>
+<line x1="120" y1="236" x2="120" y2="254" stroke="#1e3a8a" marker-end="url(#arr)"/>
+<rect x="40" y="256" width="160" height="34" rx="6" fill="#f8fafc" stroke="#d8dee9"/><text x="120" y="277" font-size="11" fill="#4b5563" text-anchor="middle">确认（失败：保留内存态+重试）</text>
+<line x1="700" y1="128" x2="700" y2="146" stroke="#1e3a8a" marker-end="url(#arr)"/>
+<rect x="620" y="148" width="160" height="34" rx="6" fill="#f8fafc" stroke="#d8dee9"/><text x="700" y="169" font-size="11" fill="#4b5563" text-anchor="middle">只读 token（不含写凭据）</text>
+<line x1="420" y1="236" x2="420" y2="254" stroke="#1e3a8a" marker-end="url(#arr)"/>
+<rect x="340" y="256" width="160" height="34" rx="6" fill="#f8fafc" stroke="#d8dee9"/><text x="420" y="277" font-size="11" fill="#4b5563" text-anchor="middle">缺迁移路径 → 明确拒绝+升级路径</text>
+</svg>
+</div>
+<div class="flow-branch">分支：写失败 → 保留内存态 + 提示重试（≤3 次），不丢会话（4.6.4.5）；schema 不兼容 → 明确拒绝 + 升级路径，不静默错读；IndexedDB 不可用 → 降级 localStorage 轻量状态 + 提示（快照类不降级）。</div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:50%"><col style="width:26%"></colgroup><thead><tr><th style="width:24%;text-align:center">协作模块</th><th style="width:50%;text-align:center">协作内容</th><th style="width:26%;text-align:center">触发时机</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-04（会话管理器）</td><td style="text-align:left">项目保存/恢复（FR-13，saveProject/loadProject）；检查点触发与恢复读取（saveSnapshot/loadSnapshot）</td><td style="text-align:left">项目保存/恢复、检查点落盘/恢复时</td></tr><tr class="row1"><td data-label="协作模块" style="text-align:center">M-20（快照与事件流）</td><td data-label="协作内容" style="text-align:left">快照载荷（M-20 Snapshot 完整对象 {cpMeta,m13State,m14Map,m15Periph}，23-1）；m23SaveSnapshot/m23LoadSnapshot 原子写 + 迁移 + 键约定；m23Archive 归档区独立（20-8）；m23DeleteSnapshot 显式删除（23-4）</td><td data-label="触发时机" style="text-align:left">检查点落盘/恢复读取/现场包上报时</td></tr><tr class="row0"><td data-label="协作模块" style="text-align:center">M-21（日志系统）</td><td data-label="协作内容" style="text-align:left">日志导出/归档（export 分块导出 + 进度 + 续导锚点）</td><td data-label="触发时机" style="text-align:left">日志导出/归档时</td></tr><tr class="row1"><td data-label="协作模块" style="text-align:center">M-22（HMS）</td><td data-label="协作内容" style="text-align:left">诊断包归档（exportDiagnosticKit → m23Archive，归档区独立）</td><td data-label="触发时机" style="text-align:left">诊断包导出/上报时</td></tr><tr class="row0"><td data-label="协作模块" style="text-align:center">M-19（波形管道）</td><td data-label="协作内容" style="text-align:left">P1 长回看 spool 复用同一存储适配（分块写/读，同迁移链）</td><td data-label="触发时机" style="text-align:left">P1 长回看开启时</td></tr></tbody></table></div>
+<h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置（源表16 既有码 + 内部处置，无新增码）</h3>
+<p class="body">M-23 为横切基础设施，存储异常收敛为「复用源表16 既有码 + 内部状态机」：写失败 → 保留内存态 + 提示重试不丢会话；schema 不兼容 → 明确拒绝 + 升级路径（不静默错读）；IndexedDB 不可用 → 降级 localStorage（快照类不降级）。处置如下（4.6.4.5）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:22%"><col style="width:40%"><col style="width:38%"></colgroup><thead><tr><th style="width:22%;text-align:center">错误码 \ 场景</th><th style="width:40%;text-align:center">触发条件</th><th style="width:38%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">写失败（事务失败）</td><td style="text-align:left">atomicWrite 临时写/校验/替换任一失败</td><td style="text-align:left">保留内存态 + 提示重试（≤3 次）；不丢会话（内部处置）</td></tr><tr class="row1"><td data-label="错误码 \ 场景" style="text-align:center">容量/配额超限</td><td data-label="触发条件" style="text-align:left">存储容量/对象大小超限</td><td data-label="处置" style="text-align:left">E_CTX-04（配额超限语义）拒绝写入 + 告警（源表16 既有码）</td></tr><tr class="row0"><td data-label="错误码 \ 场景" style="text-align:center">schema 不兼容</td><td data-label="触发条件" style="text-align:left">migrate 缺迁移路径/目标版本不兼容</td><td data-label="处置" style="text-align:left">E_PROTO-01（版本不匹配语义）明确拒绝 + 升级路径提示，不静默错读</td></tr><tr class="row1"><td data-label="错误码 \ 场景" style="text-align:center">数据损坏/读取失败</td><td data-label="触发条件" style="text-align:left">反序列化失败/校验不一致</td><td data-label="处置" style="text-align:left">明确拒绝 + 提示重建路径（不静默错读，内部处置）</td></tr><tr class="row0"><td data-label="错误码 \ 场景" style="text-align:center">IndexedDB 不可用</td><td data-label="触发条件" style="text-align:left">存储适配 open 失败</td><td data-label="处置" style="text-align:left">降级 localStorage 轻量状态 + 提示；快照/归档类明确拒绝（不降级，4.6.4.5）</td></tr><tr class="row1"><td data-label="错误码 \ 场景" style="text-align:center">归档写失败</td><td data-label="触发条件" style="text-align:left">m23Archive 原子写失败</td><td data-label="处置" style="text-align:left">保留内存态 + 重试一次 + 告警；归档区条目不丢（M-22 诊断包取证）</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）写失败 → 保留内存态 + 提示重试，不丢会话（4.6.4.5）。<br>
+（2）schema 不兼容 → 明确拒绝 + 升级路径，不静默错读（4.6.4.5）；迁移成功后原子写回（迁移即升级持久化，23-6）。<br>
+（3）IndexedDB 不可用 → 降级 localStorage 轻量状态 + 提示（快照类不降级，防数据丢失）。<br>
+（4）hash 分享链接只读（token 不含可写凭据）+ 版本标识（旧链接打开 → 版本校验提示升级）。<br>
+（5）归档区独立于检查点保留区：m23Archive 归档不被后续检查点回退覆盖（M-20 20-8）；MVP 保留最近 32 条 + WARN（23-9）。<br>
+（6）快照保留 ≥5 / RPO ≤2s 由 M-20 触发侧保障（23-4 单一权威：M-20 checkpointList 裁剪，M-23 仅显式删除），DataStore 保证原子写 + 迁移正确（表92）。<br>
+（7）快照接口双侧一致（23-1）：M-23 saveSnapshot(snap) 收 M-20 Snapshot 完整对象（含 cpMeta.id/version），键 = "snap:"+cpMeta.id（23-5）；DebugMeta 项目级独立存储、不随快照回滚（23-8）。<br>
+（8）能力降级：服务端适配（P1）未就绪时按 M-17 能力位协商，storeAdapter 接口不变（表86 调用规则③）。<br>
+（9）移动端：375px 可读（NFR-05），面板单列 + 横向滚动；file:// 直接可开。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表92（M-23 行）：持久化原子写；schemaVersion 迁移；写失败保留内存态——迁移正确、不丢会话。展开用例表如下（契约测试 + 核心路径 + 异常路径，替代实现须通过同端口契约测试，4.6.4.6）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:22%"><col style="width:40%"><col style="width:38%"></colgroup><thead><tr><th style="width:22%;text-align:center">用例</th><th style="width:40%;text-align:center">输入/步骤</th><th style="width:38%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（4.6.4.6）</td><td style="text-align:left">按 9.1.1 端口契约逐项校验 saveProject/loadProject、saveSnapshot/loadSnapshot、atomicWrite、migrate、export、m23Archive 的接口签名、输入校验、输出结构与错误码</td><td style="text-align:left">契约测试全绿；契约变更同步更新测试用例并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">原子写（表92）</td><td data-label="输入/步骤" style="text-align:left">atomicWrite 临时写 → 校验 → 替换全链路</td><td data-label="通过准则" style="text-align:left">正式键始终为完整对象；任一失败步骤后无半写残留，临时键可清理</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">schema 迁移（表92）</td><td data-label="输入/步骤" style="text-align:left">v1/v2 旧数据 → migrate 逐版本升级</td><td data-label="通过准则" style="text-align:left">迁移正确（字段变换一致）；缺迁移路径 → 明确拒绝 + 升级路径提示，不静默错读</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">写失败保留内存态（表92）</td><td data-label="输入/步骤" style="text-align:left">atomicWrite 首次失败</td><td data-label="通过准则" style="text-align:left">保留内存态 + 提示重试（≤3 次），不丢会话；会话数据完整</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">快照载荷对齐（FR-19/M-20）</td><td data-label="输入/步骤" style="text-align:left">saveSnapshot(Snapshot) 落盘后 loadSnapshot(cpId)</td><td data-label="通过准则" style="text-align:left">载荷字段与 M-20 Snapshot{cpMeta,m13State,m14Map,m15Periph} 一致；恢复后状态值可断言</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">快照键映射/恢复读取（23-5/23-10）</td><td data-label="输入/步骤" style="text-align:left">saveSnapshot 落盘 → 按 cpMeta.id 调 loadSnapshot</td><td data-label="通过准则" style="text-align:left">键 &quot;snap:&quot;+cpMeta.id 命中；返回 Snapshot 状态体（含 cpMeta.id），M-20 restore 可定位</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">双侧载荷一致性（23-1/23-10）</td><td data-label="输入/步骤" style="text-align:left">M-20 m23SaveSnapshot(snap)/m23LoadSnapshot(cp) 与 M-23 saveSnapshot(snap)/loadSnapshot(cpId) 对接</td><td data-label="通过准则" style="text-align:left">入参单对象形态一致；cpMeta{id,tVirt,tHost,baseSeq,version}/m13State/m14Map/m15Periph 逐字段断言一致；恢复返回含 cpId</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">迁移后写回（23-6/23-10）</td><td data-label="输入/步骤" style="text-align:left">旧版本对象读取触发 migrate</td><td data-label="通过准则" style="text-align:left">迁移结果原子写回；再次读取不再重复迁移；旧版本数据不残留</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">归档清理（23-9/23-10）</td><td data-label="输入/步骤" style="text-align:left">m23Archive 连续写入超 32 条</td><td data-label="通过准则" style="text-align:left">保留最近 32 条，最旧归档丢 + WARN；归档区不被检查点回退覆盖</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">hash 只读链接（FR-13）</td><td data-label="输入/步骤" style="text-align:left">saveProject 后复制链接 / 旧版本链接打开</td><td data-label="通过准则" style="text-align:left">链接含版本标识；旧版本 → 校验提示升级；token 只读（无写凭据）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">降级（4.6.4.5）</td><td data-label="输入/步骤" style="text-align:left">IndexedDB 不可用</td><td data-label="通过准则" style="text-align:left">localStorage 轻量状态可用 + 提示；快照/归档类明确拒绝（不降级）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">归档区独立（20-8）</td><td data-label="输入/步骤" style="text-align:left">m23Archive 后触发检查点回退</td><td data-label="通过准则" style="text-align:left">归档条目不被回退覆盖；M-22 诊断包取证完整</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">多会话隔离</td><td data-label="输入/步骤" style="text-align:left">并发 ≥10 会话各自存取</td><td data-label="通过准则" style="text-align:left">存储键隔离无串写；配额超限 E_CTX-04 拒绝 + 告警</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">移动端 375px（NFR-05）</td><td data-label="输入/步骤" style="text-align:left">移动端访问存储管理面板</td><td data-label="通过准则" style="text-align:left">单列 + 横向滚动；无溢出/裁切</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）适配隔离：storeAdapter 接口固定，IndexedDB/服务端（P1）/localStorage 降级三实现可替换（表86 能力降级）。<br>
+（2）迁移链集中：MIGRATIONS 注册表逐版本一函数，版本变换可单测、只增不删（不静默错读）。<br>
+（3）原子写收敛：所有落盘统一经 atomicWrite（临时 + 替换），无绕过路径（唯一入口，4.7 调用规则）。<br>
+（4）载荷对齐：SimState 与 M-20 Snapshot 载荷双侧同步，跨模块契约锚点（9.1.1）。<br>
+（5）键空间治理：project:/snap:/archive: 前缀分区，归档区独立清理策略（20-8）。<br>
+（6）CI 门禁：契约测试 + 原子写 + 迁移 + 写失败保留内存态 + 降级用例纳入回归基线（表92）。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-23 责任：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:14%"><col style="width:34%"><col style="width:52%"></colgroup><thead><tr><th style="width:14%;text-align:center">质量属性</th><th style="width:34%;text-align:center">目标（估算基线）</th><th style="width:52%;text-align:center">M-23 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">可靠性</td><td style="text-align:left">快照 RPO ≤2s、保留 ≥5、原子写</td><td style="text-align:left">M-20（触发）+ M-23（原子写 临时+替换 + schemaVersion 迁移）</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">可用性</td><td data-label="目标（基线）" style="text-align:left">零安装、file:// 直接可开、移动端 375px 可读</td><td data-label="M-23 落实" style="text-align:left">IndexedDB 本地存储（无服务依赖）；localStorage 降级保轻量状态</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">可维护性</td><td data-label="目标（基线）" style="text-align:left">核心模块覆盖率 ≥70%；内核前端解耦</td><td data-label="M-23 落实" style="text-align:left">storeAdapter 适配隔离 + 迁移注册表集中，可单测</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">可扩展性</td><td data-label="目标（基线）" style="text-align:left">外设/内核/观测/协议扩展点</td><td data-label="M-23 落实" style="text-align:left">服务端适配（P1）+ M-19 spool + FR-24 Topology 持久化复用同一适配</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">韧性</td><td data-label="目标（基线）" style="text-align:left">故障检测→分级→处置→恢复（NFR-08）</td><td data-label="M-23 落实" style="text-align:left">写失败保留内存态 + 重试不丢会话（4.6.4.5），支撑 M-20 恢复链</td></tr></tbody></table></div>
+<h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<p class="body">合规：横切组件单向依赖（4.7 表86）；M-23 为存储基础，被 M-04/M-20/M-21/M-22/M-19 经能力接口调用；横切组件之间仅按既定链路（M-20→M-23、M-21→M-23、M-22→M-20/M-21），禁止反向依赖业务模块。</p>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:30%"><col style="width:46%"></colgroup><thead><tr><th style="width:24%;text-align:center">依赖方</th><th style="width:30%;text-align:center">被依赖方</th><th style="width:46%;text-align:center">依赖内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-23（DataStore）</td><td style="text-align:left">M-04（会话管理器）</td><td style="text-align:left">检查点触发与恢复读取调用方（saveSnapshot/loadSnapshot 契约，M-04 为触发方）</td></tr><tr class="row1"><td data-label="依赖方" style="text-align:center">M-23</td><td data-label="被依赖方" style="text-align:left">M-20（快照与事件流）</td><td data-label="依赖内容" style="text-align:left">快照载荷内容（M-20 Snapshot{cpMeta,m13State,m14Map,m15Periph} 完整对象，23-1）；键约定 &quot;snap:&quot;+cpMeta.id（23-5）</td></tr><tr class="row0"><td data-label="依赖方" style="text-align:center">M-23</td><td data-label="被依赖方" style="text-align:left">M-21（日志系统）</td><td data-label="依赖内容" style="text-align:left">日志归档导出契约（export 分块 + 续导锚点）</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表85 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层，本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现坚守同端口契约并通过契约测试（7.1）即可接入：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:30%"><col style="width:18%"><col style="width:52%"></colgroup><thead><tr><th style="width:30%;text-align:center">端口/服务</th><th style="width:18%;text-align:center">方向</th><th style="width:52%;text-align:center">契约（输入 → 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">saveProject()/loadProject()</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输入：Project；输出：确认（hash 只读链接含版本标识，FR-13）</td></tr><tr class="row1"><td data-label="端口/服务" style="text-align:center">saveSnapshot()/loadSnapshot()</td><td data-label="方向" style="text-align:left">提供（driving）</td><td data-label="契约内容" style="text-align:left">输入：M-20 Snapshot 完整对象（含 cpMeta.id/version）；输出：确认 + cpId；键 = &quot;snap:&quot;+cpMeta.id（23-1/23-5 双侧键名约定：M-20 m23SaveSnapshot(snap)/m23LoadSnapshot(cp) 同契约）</td></tr><tr class="row0"><td data-label="端口/服务" style="text-align:center">atomicWrite(obj)</td><td data-label="方向" style="text-align:left">提供（driving）</td><td data-label="契约内容" style="text-align:left">临时写 → 摘要校验 → 替换（单事务 del+put 提交，23-2/23-3）；失败保留内存态 + 重试 ≤3 + 提示（不丢会话）</td></tr><tr class="row1"><td data-label="端口/服务" style="text-align:center">migrate(fromVer)</td><td data-label="方向" style="text-align:left">提供（driving）</td><td data-label="契约内容" style="text-align:left">输入：旧版本；输出：迁移后的数据；成功后原子写回（23-6）；缺路径 → E_PROTO-01 明确拒绝 + 升级路径</td></tr><tr class="row0"><td data-label="端口/服务" style="text-align:center">export()</td><td data-label="方向" style="text-align:left">提供（driving）</td><td data-label="契约内容" style="text-align:left">ExportFilter{timeRange,levels,channels,chunkSize} 过滤 + 分块（64 KiB/块）+ 进度 + 续导锚点（23-7；M-21 日志归档；M-19 P1 spool 复用）</td></tr><tr class="row1"><td data-label="端口/服务" style="text-align:center">m23Archive(kit)</td><td data-label="方向" style="text-align:left">提供（driving）</td><td data-label="契约内容" style="text-align:left">归档区独立于检查点保留区（20-8，M-20/M-22 引用）；MVP 保留最近 32 条 + WARN（23-9）</td></tr><tr class="row0"><td data-label="端口/服务" style="text-align:center">m23DeleteSnapshot(cpId)</td><td data-label="方向" style="text-align:left">提供（driving）</td><td data-label="契约内容" style="text-align:left">快照显式删除（23-4：保留裁剪单一权威归 M-20 触发侧，M-23 仅按显式指令清理）</td></tr><tr class="row1"><td data-label="端口/服务" style="text-align:center">M-04</td><td data-label="方向" style="text-align:left">依赖（driven）</td><td data-label="契约内容" style="text-align:left">触发：检查点触发与恢复读取、项目保存/恢复（FR-13）</td></tr><tr class="row0"><td data-label="端口/服务" style="text-align:center">M-20</td><td data-label="方向" style="text-align:left">依赖（driven）</td><td data-label="契约内容" style="text-align:left">快照内容：SimState 载荷（Snapshot{cpMeta,m13State,m14Map,m15Periph}）</td></tr><tr class="row1"><td data-label="端口/服务" style="text-align:center">M-21</td><td data-label="方向" style="text-align:left">依赖（driven）</td><td data-label="契约内容" style="text-align:left">日志归档：export 分块导出契约</td></tr><tr class="row0"><td data-label="端口/服务" style="text-align:center">M-04</td><td data-label="方向" style="text-align:left">被依赖（使用方）</td><td data-label="契约内容" style="text-align:left">项目/配置持久化（saveProject/loadProject，FR-13）</td></tr><tr class="row1"><td data-label="端口/服务" style="text-align:center">M-20</td><td data-label="方向" style="text-align:left">被依赖（使用方）</td><td data-label="契约内容" style="text-align:left">快照存取（saveSnapshot/loadSnapshot 原子写 + 迁移）</td></tr><tr class="row0"><td data-label="端口/服务" style="text-align:center">M-21</td><td data-label="方向" style="text-align:left">被依赖（使用方）</td><td data-label="契约内容" style="text-align:left">日志归档（export）</td></tr><tr class="row1"><td data-label="端口/服务" style="text-align:center">M-19</td><td data-label="方向" style="text-align:left">被依赖（使用方）</td><td data-label="契约内容" style="text-align:left">P1 长回看 spool（复用同一存储适配）</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<p class="body">项目保存 → log(INFO, "M23", "project_save", projectId/version)；项目恢复 → log(INFO, "M23", "project_load", projectId/version)；快照落盘 → log(INFO, "M23", "snap_save", cpId/tHost)；快照读取 → log(INFO, "M23", "snap_load", cpId/version)；快照删除 → log(INFO, "M23", "snap_del", cpId)；迁移 → log(INFO, "M23", "migrate", fromVer/toVer)；写失败 → log(WARN, "M23", "write_retry", key/try)；降级 → log(WARN, "M23", "storage_degrade", "localStorage")；归档 → log(DEBUG, "M23", "archive", tHost)；归档清理 → log(WARN, "M23", "archive_trim", count)。日志条目含虚拟+宿主双时间戳与会话关联（P-22）；产品/嵌入式工作台不可见（角色边界，§3.4）。</p>
+<footer class="subtitle">M-23 数据存储与持久化 DataStore 模块详细设计 v1.1 · 对应《RISC-V仿真平台模块设计说明书》4.6.4节 · 2026-10-16</footer></div></body></html>

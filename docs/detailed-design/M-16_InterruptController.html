@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%231e3a8a'/%3E%3Ctext x='12' y='17' font-size='13' text-anchor='middle' fill='%23ffffff' font-family='sans-serif' font-weight='bold'%3EL%3C/text%3E%3C/svg%3E">
+<title>M-16 中断控制器 模块详细设计</title>
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15px; font-weight:700; color:#374151; margin:18px 0 8px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { margin:0 0 10px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  white-space:pre; margin:10px 0 16px; }
+.code-title { font-size:13px; font-weight:700; color:#111827; margin:16px 0 4px; }
+.fig { margin:14px auto; text-align:center; }
+.fig img { max-width:100%; height:auto; border:1px solid var(--line); border-radius:4px; }
+.fig figcaption { font-size:13px; color:var(--ink-2); margin-top:6px; }
+.caption { text-align:center; font-size:13px; color:var(--ink-2); margin:6px 0 4px; }
+.flow-svg { width:100%; height:auto; }
+.flow-mobile { display:none; }
+.flow-step { display:flex; gap:10px; margin:8px 0; align-items:flex-start; }
+.flow-step .num { flex:0 0 26px; height:26px; border-radius:50%; background:var(--brand);
+  color:#fff; font-weight:700; font-size:13px; display:flex; align-items:center; justify-content:center; }
+.flow-step .txt { font-size:14px; }
+.flow-branch { margin:6px 0 6px 36px; font-size:13.5px; color:var(--ink-2); }
+.flow-arrow { text-align:center; color:#9aa1af; font-size:16px; line-height:1; margin:2px 0; }
+.nav-toggle { margin:14px 0; }
+.nav-toggle summary { cursor:pointer; font-weight:700; color:var(--brand);
+  padding:9px 12px; border:1px solid var(--line); border-radius:6px; background:var(--head-bg); list-style:none; }
+.nav-toggle summary::-webkit-details-marker { display:none; }
+.nav-box { display:flex; flex-direction:column; gap:2px; padding:10px 4px 2px; }
+.nav-l1 { color:var(--brand); font-weight:700; text-decoration:none; padding:3px 4px; }
+.nav-l2 { color:var(--ink-2); text-decoration:none; padding:3px 4px 3px 18px; font-size:13.5px; }
+.nav-l1:hover,.nav-l2:hover { color:var(--brand-2); text-decoration:underline; }
+@media (min-width:768px) {
+  .wrap { display:grid; grid-template-columns:260px 1fr; gap:28px; align-items:start; }
+  .doc-head { grid-column:1 / -1; }
+  .nav-toggle { position:sticky; top:16px; max-height:calc(100vh - 32px); overflow:auto; }
+  .nav-toggle summary { pointer-events:none; }
+  .flow-svg { display:block; }
+  .flow-mobile { display:none; }
+}
+@media (max-width:767px) {
+  .flow-svg { display:none; }
+  .flow-mobile { display:block; }
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media print {
+  .nav-toggle { display:none; }
+  .wrap { display:block; max-width:none; padding:0; }
+  .doc-title { font-size:20px; }
+  .doc-table, .fig, .code { break-inside:avoid; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="doc-head"><h1 class="doc-title">M-16 中断控制器 模块详细设计</h1><p class="subtitle">RISC-V 仿真平台 · 模块详细设计系列 · 对应《模块设计说明书》4.4.5 节</p><p class="version">HTML 版 v1.3（2026-10-13 评审修订 16-1~16-10、N2~N4）· 源设计《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11 更新版）</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11；2026-10-13 契约层版新增 2.5 平台共享契约层与各模块端口契约表）</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.4.5（④ 仿真内核层 · 中断控制器）；端口契约 = 源文档表64</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">FR-06（异常/中断、向量表配置，与 M-12/M-13 协作）</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">简化 PLIC/CLINT：挂起、采样、仲裁、陷入（4.4.5.1）；确定性适用范围（2.4 表6）</td></tr><tr class="row0"><td style="text-align:center">MVP 状态</td><td style="text-align:left">P0 主承担模块（MVP 必需）</td></tr><tr class="row1"><td style="text-align:center">源文档对齐</td><td style="text-align:left">v1.1（2026-10-13）：新增 9.1.1 端口契约（driving/driven，源表64）；CH7 新增契约测试；CH8 补契约层可替换性；表号引用随源文档调整（3.3 表14→表15、3.4 表15→表16、4.4.5 表46/47→表62/63、4.7 表62→表86、7.2 表67→表91、7.3 表68→表92、8 表69→表93）</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.2（2026-10-13）：16-1 仲裁改「挂起且使能」内选最高；16-2 触发模式定义+同线去重；16-3 mtime 量子推进步进；16-4 交付改 iss_pending_intr/iss_take_intr 拉取式；16-5 enabledMask 量子边界拉取 mie；16-6 activeIrq 嵌套防护；16-7 IRQ_BASE=0x80000000；16-8 mtime/mtimecmp 经 M-14 MMIO；16-9 补 4 组用例；16-10 两层使能组合判定。v1.3（跨模块 N2~N4）：N2 中断脉冲探针直接对接 M-18（m18_probe），删 periph_probe(NULL,…)；N3 定时中断职责边界（权威源 = 本模块 mtime/mtimecmp，M-15 Timer 外设 timer-compare 线 MVP 不启用，启用时 CMP 透传 mtimecmp）；N4 mie.UE 统一为 mie.MEIE</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；确定性稳定排序（虚拟时间, 插入序）；评审 P-11（量子固定开销预算）落实</td></tr><tr class="row0"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-12（v1.1 契约层对齐 2026-10-13）</td></tr></tbody></table></div></header><nav class="nav-toggle"><details open><summary>目录</summary><div class="nav-box"><a class="nav-l1" href="#sec1">1 功能概述</a>
+<a class="nav-l2" href="#sec1-1">1.1 模块定位</a>
+<a class="nav-l2" href="#sec1-2">1.2 需求与约束</a>
+<a class="nav-l2" href="#sec1-3">1.3 MVP 范围与预留</a>
+<a class="nav-l1" href="#sec2">2 数据描述</a>
+<a class="nav-l2" href="#sec2-1">2.1 核心数据结构</a>
+<a class="nav-l2" href="#sec2-1-1">2.1.1 复杂结构字段定义</a>
+<a class="nav-l2" href="#sec2-2">2.2 中断线与优先级</a>
+<a class="nav-l2" href="#sec2-3">2.3 数据流说明</a>
+<a class="nav-l1" href="#sec3">3 实现设计</a>
+<a class="nav-l2" href="#sec3-1">3.1 请求与挂起（request/clear）</a>
+<a class="nav-l2" href="#sec3-2">3.2 量子边界采样与仲裁（arbitrate）</a>
+<a class="nav-l2" href="#sec3-3">3.3 交付与陷入（deliver）</a>
+<a class="nav-l2" href="#sec3-4">3.4 定时器中断（mtime/mtimecmp）</a>
+<a class="nav-l2" href="#sec3-5">3.5 与真实 PLIC/CLINT 的差异对照</a>
+<a class="nav-l1" href="#sec4">4 关键函数</a>
+<a class="nav-l1" href="#sec5">5 处理流程</a>
+<a class="nav-l2" href="#sec5-1">5.1 中断处理流程</a>
+<a class="nav-l2" href="#sec5-2">5.2 与相邻模块的协作说明</a>
+<a class="nav-l1" href="#sec6">6 异常处理</a>
+<a class="nav-l2" href="#sec6-1">6.1 异常与处置</a>
+<a class="nav-l2" href="#sec6-2">6.2 边界与降级</a>
+<a class="nav-l1" href="#sec7">7 测试设计与可维护性</a>
+<a class="nav-l2" href="#sec7-1">7.1 测试要点与关键用例</a>
+<a class="nav-l2" href="#sec7-2">7.2 可维护性手段</a>
+<a class="nav-l1" href="#sec8">8 质量属性落实</a>
+<a class="nav-l1" href="#sec9">9 接口依赖</a>
+<a class="nav-l2" href="#sec9-1">9.1 依赖关系</a>
+<a class="nav-l2" href="#sec9-1-1">9.1.1 端口契约（driving/driven）</a>
+<a class="nav-l2" href="#sec9-2">9.2 日志对接（M-21）</a>
+<a class="nav-l2" href="#sec9-3">9.3 探针 / CSR 对接</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-16 中断控制器实现简化 PLIC/CLINT（4.4.5.1）：外设 irqRequest → 挂起队列 → 量子边界采样 → 按优先级仲裁 → 触发 ISS 陷入（mtvec）；定时器用 mtime/mtimecmp 语义或行为级等价。承接 FR-06（异常/中断、向量表配置，与 M-12/M-13 协作）；M-16 在确定性适用范围（2.4 表6：同一种子 + 同一时间戳化输入事件序列 → 结果唯一）。</p>
+<p class="body">中断交付语义：仲裁结果在量子边界交付，经 M-13 trap 写入 mepc/mcause 并跳转 mtvec（4.4.2.4）；处理完成后由软件/外设 irqClear 清除。中断风暴按优先级 + 使能掩码抑制，未使能中断保持挂起不丢（4.4.5.5）。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:62%"><col style="width:24%"></colgroup><thead><tr><th style="width:14%;text-align:center">类别</th><th style="width:62%;text-align:center">约束内容</th><th style="width:24%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">功能</td><td style="text-align:left">简化 PLIC/CLINT：挂起、采样、仲裁、陷入（FR-06）；定时器 mtime/mtimecmp 语义或行为级等价</td><td style="text-align:left">4.4.5.1、FR-06</td></tr><tr class="row1"><td style="text-align:center">正确性</td><td style="text-align:left">仲裁 = 挂起队列 + 优先级 + 使能掩码；交付触发 ISS 陷入 mtvec（写 mepc/mcause）</td><td style="text-align:left">4.4.5.3、4.4.2.4</td></tr><tr class="row0"><td style="text-align:center">确定性</td><td style="text-align:left">M-16 在确定性适用范围（2.4 表6）：仲裁在量子边界采样，采样节奏由 M-12 决定，不依赖宿主时钟</td><td style="text-align:left">2.4 表6、4.4.1.1</td></tr><tr class="row1"><td style="text-align:center">性能</td><td style="text-align:left">量子边界采样开销计入每量子固定开销预算 ≤10% 单量子执行时间（估算基线）</td><td style="text-align:left">4.4.1.1（评审 P-11）</td></tr><tr class="row0"><td style="text-align:center">韧性</td><td style="text-align:left">中断风暴 → 按优先级 + 使能掩码抑制；未使能中断保持挂起不丢</td><td style="text-align:left">4.4.5.5</td></tr><tr class="row1"><td style="text-align:center">合规</td><td style="text-align:left">自研实现采用 BSD/MIT 许可，不可引入 GPL 传染</td><td style="text-align:left">2.4 表6</td></tr><tr class="row0"><td style="text-align:center">体积</td><td style="text-align:left">随内核 WASM 打包，计入内核 ≤1.5 MiB 压缩预算（估算基线）</td><td style="text-align:left">3.3 表15</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：中断挂起队列（pendingQueue）、优先级表（priorityTable）、使能掩码（enabledMask，对应 mstatus/mie）、request/clear/arbitrate/deliver 四函数、量子边界采样（由 M-12 pollIRQ 驱动）、定时器中断行为级等价（mtime/mtimecmp 语义）、中断脉冲探针（probe → M-18）。</p>
+<p class="body">预留项（本模块仅保留演进承接说明，不展开实现）：完整 PLIC 上下文保存/恢复与嵌套中断（P1）；软件中断（SWI）与外部中断细分（P1）；多级优先级组与阈值（P1）；S 模式中断支持（随特权模式演进，P2）。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:20%"><col style="width:22%"><col style="width:58%"></colgroup><thead><tr><th style="width:20%;text-align:center">数据结构</th><th style="width:22%;text-align:center">类型</th><th style="width:58%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">pendingQueue</td><td style="text-align:left">queue</td><td style="text-align:left">中断挂起队列（按 line 挂起，未使能不丢）</td></tr><tr class="row1"><td style="text-align:center">priorityTable</td><td style="text-align:left">Map&lt;line, prio&gt;</td><td style="text-align:left">优先级表（仲裁依据）</td></tr><tr class="row0"><td style="text-align:center">enabledMask</td><td style="text-align:left">bitmask</td><td style="text-align:left">中断使能掩码（对应 mstatus/mie）</td></tr><tr class="row1"><td style="text-align:center">intcState</td><td style="text-align:left">struct</td><td style="text-align:left">控制器内部状态：activeIrq、mtime/mtimecmp（行为级等价）等</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="lead">PendingIrq 是挂起队列中的中断条目；IntcState 为控制器整体状态，字段定义如下：</p>
+<pre class="code"><code>// PendingIrq: 挂起队列条目（arbitrate 仲裁依据）
+struct PendingIrq {
+  uint16_t line;            // 中断线编号（rx-ready/tx-empty/timer-compare 等）
+  uint8_t  prio;            // 优先级（priorityTable[line]，数值越大越优先）
+  uint64_t requestTime;     // 请求时的虚拟时间（确定性排序，插入序锚点）
+  uint8_t  triggerType;     // 触发模式（评审 16-2）：0=电平 / 1=边沿
+  uint8_t  sourceType;      // 请求源类型（UART/GPIO/Timer/扩展）
+  void*    source;          // 请求源实例（M-15 PeripheralInstance）
+  uint8_t  state;           // 0=pending / 1=active（已交付未清除）
+};
+// IntcState: 中断控制器整体状态
+struct IntcState {
+  queue          pendingQueue;  // 挂起队列（按 requestTime + 插入序稳定排序）
+  Map&lt;uint16_t,uint8_t&gt; priorityTable; // line → prio（仲裁依据）
+  uint32_t       enabledMask;   // 使能掩码（对应 mie，量子边界从 M-13 拉取刷新，评审 16-5）
+  uint8_t        activeIrq;     // 当前已交付未清除的中断线（0xFF=无；单级中断语义）
+  uint64_t       mtime;         // 定时器计数（行为级等价，随虚拟时间推进，评审 16-3）
+  uint64_t       mtimecmp;      // 比较值：mtime &gt;= mtimecmp 触发定时器中断（电平语义）
+  uint64_t       lastPoll;      // 上次定时器轮询时刻（mtime 步进基准，评审 16-3）
+  PendingIntr    pendingDelivery; // 交接结构（评审 16-4）：M-13 iss_take_intr 拉取
+};</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 中断线与优先级</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:20%"><col style="width:36%"><col style="width:22%"><col style="width:22%"></colgroup><thead><tr><th style="width:20%;text-align:center">中断线</th><th style="width:36%;text-align:center">请求源（M-15）</th><th style="width:22%;text-align:center">默认优先级</th><th style="width:22%;text-align:center">使能对应</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">rx-ready</td><td style="text-align:left">UART 接收就绪</td><td style="text-align:left">高</td><td style="text-align:left">mie.MEIE（机器外部中断位）</td></tr><tr class="row1"><td data-label="中断线" style="text-align:center">tx-empty</td><td data-label="请求源" style="text-align:left">UART 发送缓冲空</td><td data-label="默认优先级" style="text-align:left">中</td><td data-label="使能对应" style="text-align:left">mie.MEIE</td></tr><tr class="row0"><td data-label="中断线" style="text-align:center">timer-compare</td><td data-label="请求源" style="text-align:left">Timer 比较到期 / mtimecmp</td><td data-label="默认优先级" style="text-align:left">最高（定时器）</td><td data-label="使能对应" style="text-align:left">mie.MTIE（机器定时器中断位）</td></tr></tbody></table></div>
+    <p class="body">优先级语义：timer-compare 使用机器定时器中断语义（mie.MTIE），rx-ready/tx-empty 走外部中断语义（mie.MEIE，评审 N4：统一为标准位名，与 M-13 一致）；仲裁结果为「挂起且使能」集合内最高优先级的中断线（同优先级按 requestTime + 插入序稳定排序，确定性）。触发模式（评审 16-2）：timer-compare = 电平（CLINT：mtime≥mtimecmp 持续有效，改写 mtimecmp 前不撤）；rx-ready/tx-empty = 边沿（M-15 事件触发，单次请求）。</p>
+    <h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+    <p class="body">上行：M-15 request(line) 入挂起队列 → M-12 量子边界 pollIRQ → arbitrate（「挂起且使能」内优先级仲裁）→ deliver(irq) 登记交接结构 → M-13 iss_take_intr 拉取执行陷入（写 mepc/mcause，跳 mtvec）→ 处理完成后 irqClear。观测：中断脉冲经 probe 上报 M-18 → M-19 波形；记录：中断事件经 log 上报 M-21。</p>
+    <h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 请求与挂起（request / clear）</h3>
+<p class="body">外设请求中断线：request(line) 在挂起队列登记（含优先级/请求时间/源实例），未使能中断保持挂起不丢；软件处理后 irqClear 清除，activeIrq 复位。伪代码如下：</p>
+<pre class="code"><code>// request: 外设请求中断线（M-15 irqRequest 调用，评审 16-2：同线去重）
+void intc_request(IntcState* s, uint16_t line, void* src) {
+    if (s-&gt;pendingQueue.has(line)) return;   // 同线去重：已挂起即满足，不堆积
+    PendingIrq irq = { line, s-&gt;priorityTable[line], virt_clock_now(), trigger_type(line), 0, src, 0 };
+    s-&gt;pendingQueue.push(irq);                 // 按（requestTime, 插入序）稳定排序
+    m18_probe(&quot;irq_pulse&quot;, line, irq.requestTime);  // M-18 中断脉冲探针（评审 N2：直接对接
+}                                                  //   M-18 探针通道，不经 M-15 periph_probe，无 NULL 实例）
+// 触发模式（评审 16-2）：timer-compare = 电平（CLINT：mtime≥mtimecmp 持续有效，
+//   改写 mtimecmp 前不撤，与真实语义一致）；rx-ready/tx-empty = 边沿（M-15 事件触发，单次请求）
+uint8_t trigger_type(uint16_t line) {
+    return (line == LINE_TIMER) ? LEVEL_TRIGGER : EDGE_TRIGGER;
+}
+// clear: 清除中断线（软件 irqClear 调用）
+void intc_clear(IntcState* s, uint16_t line) {
+    s-&gt;pendingQueue.remove(line);              // 移除挂起；activeIrq 复位
+    if (s-&gt;activeIrq == line) s-&gt;activeIrq = 0xFF;
+}</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 量子边界采样与仲裁（arbitrate）</h3>
+<p class="body">仲裁仅在量子边界由 M-12 pollIRQ 驱动（4.4.1.1、4.4.5.4）：先在量子边界从 M-13 拉取 mie 刷新 enabledMask（评审 16-5，避免用过期的使能掩码）；随后扫描挂起队列，在「挂起且使能」集合内按「优先级 → requestTime + 插入序」选最高——未使能的高优先级不阻塞已使能的低优先级（评审 16-1，与真实 PLIC「只在挂起且使能集合内仲裁」一致）；已交付未清除（activeIrq≠0xFF）时返回无中断（评审 16-6，单级中断语义）。</p>
+<pre class="code"><code>// refreshEnableMask: 量子边界从 M-13 拉取 mie 同步使能掩码（评审 16-5）
+void intc_refreshEnableMask(IntcState* s) { s-&gt;enabledMask = iss_get_mie(); }
+// arbitrate: 量子边界仲裁（M-12 pollIRQ 调用）
+int intc_arbitrate(IntcState* s) {
+    intc_refreshEnableMask(s);                 // 量子边界同步 mie（评审 16-5）
+    if (s-&gt;activeIrq != 0xFF) return NO_IRQ;   // 单级中断：已有活动中断未清除 → 不覆盖（评审 16-6）
+    // 扫描挂起队列：在「挂起且使能」集合内选优先级最高（评审 16-1，未使能高优先级不阻塞）
+    PendingIrq best = {0}; bool found = false;
+    for (irq : s-&gt;pendingQueue) {
+        if (!(s-&gt;enabledMask &amp; (1u &lt;&lt; irq.line))) continue;   // 未使能：跳过但保持挂起
+        if (!found || irq.prio &gt; best.prio ||
+            (irq.prio == best.prio &amp;&amp; irq.requestTime &lt; best.requestTime)) { best = irq; found = true; }
+    }
+    if (!found) return NO_IRQ;
+    s-&gt;activeIrq = best.line;
+    return best.line;
+}
+// 定时器中断（行为级等价，评审 16-3）：mtime 随虚拟时间步进（M-12 每量子调用）
+void intc_timer_poll(IntcState* s, uint64_t now) {
+    s-&gt;mtime += (now - s-&gt;lastPoll);           // mtime 推进：时间差步进（由 M-12 量子推进驱动）
+    s-&gt;lastPoll = now;
+    if (s-&gt;mtime &gt;= s-&gt;mtimecmp) intc_request(s, LINE_TIMER, NULL); // 电平语义 + 同线去重（评审 16-2）
+}</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 交付与陷入（deliver）</h3>
+<p class="body">deliver(irq) 登记交接结构，由 M-13 主动拉取（评审 16-4，与 M-13 契约 iss_pending_intr/iss_take_intr 对齐，替代原「M-16 主动调 iss_trap」）：仲裁命中后，M-16 把 line/cause 写入 pendingDelivery，M-13 在取指边界经 iss_pending_intr 检查、iss_take_intr 取走并执行陷入（写 mepc/mcause、跳 mtvec，4.4.2.4）。两层使能判定（评审 16-10）：交付前须同时满足 per-line enabledMask 命中 AND mstatus.MIE 全局使能，未满足则保持挂起待下次采样。mcause 中断原因编码依赖 IRQ_BASE 常量（评审 16-7）。</p>
+<pre class="code"><code>#define IRQ_BASE 0x80000000UL   // RV32 中断位（mcause[31]）；cause = IRQ_BASE | line（评审 16-7）
+// deliver: 登记交接结构，供 M-13 拉取（评审 16-4，对齐 M-13 契约）
+void intc_deliver(IntcState* s, int line) {
+    s-&gt;pendingDelivery.line  = line;
+    s-&gt;pendingDelivery.cause = IRQ_BASE | line;  // mcause 中断原因编码（最高位置 1）
+    log(INFO, &quot;INTC&quot;, &quot;deliver irq&quot;, &quot;&quot;);       // M-21 中断交付日志
+}
+// M-13 侧契约（评审 16-4，替代 iss_trap 主动调用）：
+//   bool iss_pending_intr(void);            // true = 有待交付中断（pendingDelivery 有效）
+//   void iss_take_intr(PendingIntr* out);   // 取走交接结构；M-13 写 mepc/mcause 并跳 mtvec
+// 两层使能组合判定（评审 16-10）：per-line enabledMask（arbitrate 已筛）AND mstatus.MIE 全局，
+//   M-13 在执行陷入前检查全局 MIE，未使能则保持挂起待下次采样。</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 定时器中断（mtime/mtimecmp）</h3>
+<p class="body">MVP 采用行为级等价：mtime 随虚拟时间推进（由 M-12 量子推进驱动 intc_timer_poll 步进，评审 16-3），mtime &gt;= mtimecmp 时按机器定时器中断语义挂起（mie.MTIE，电平触发）。mtime/mtimecmp 固件访问通道（评审 16-8）：采用 CLINT 语义，经 M-14 MMIO 区间访问（本模块向 M-14 mapRegion 登记 CLINT 地址区间，读写映射到 mtime/mtimecmp）；不走 M-13 CSR 转发。职责边界（评审 N3）：定时中断权威源 = 本模块 mtime/mtimecmp（标准 CLINT，固件标准路径 0x02004000 区域）；M-15 Timer 外设的 timer-compare 中断线 MVP 不启用（避免双权威源计数不一致），Timer 外设仅作平台周期计数（count 可被固件读）；后续若启用 Timer 外设中断，其 CMP 经 M-14 透传 mtimecmp（同一权威源），作为 P1 变更项管理。</p>
+<h3 id="sec3-5" class="h-sub">3.5 与真实 PLIC/CLINT 的差异对照表</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:14%"><col style="width:34%"><col style="width:30%"><col style="width:22%"></colgroup><thead><tr><th style="width:14%;text-align:center">维度</th><th style="width:34%;text-align:center">真实硬件（PLIC/CLINT）</th><th style="width:30%;text-align:center">本平台建模（行为级等价）</th><th style="width:22%;text-align:center">差异影响</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">仲裁时机</td><td style="text-align:left">硬件实时仲裁</td><td style="text-align:left">量子边界采样（M-12 pollIRQ 节奏）</td><td style="text-align:left">中断交付最多延迟一个量子（1µs 虚拟时间）</td></tr><tr class="row1"><td data-label="维度" style="text-align:center">优先级</td><td data-label="真实硬件" style="text-align:left">PLIC 可配置优先级/阈值</td><td data-label="本平台建模" style="text-align:left">priorityTable 静态优先级 + 使能掩码</td><td data-label="差异影响" style="text-align:left">多级阈值/组配置 P1；MVP 仲裁语义一致</td></tr><tr class="row0"><td data-label="维度" style="text-align:center">定时器</td><td data-label="真实硬件" style="text-align:left">mtime/mtimecmp 硬件计数</td><td data-label="本平台建模" style="text-align:left">行为级等价：随虚拟时间推进</td><td data-label="差异影响" style="text-align:left">定时器精度到虚拟时间刻度；周期级不建模</td></tr><tr class="row1"><td data-label="维度" style="text-align:center">上下文</td><td data-label="真实硬件" style="text-align:left">硬件保存/恢复上下文</td><td data-label="本平台建模" style="text-align:left">由 M-13 trap 机制承担（mepc/mcause/mtvec）</td><td data-label="差异影响" style="text-align:left">嵌套中断 P1；MVP 单级交付语义一致</td></tr><tr class="row0"><td data-label="维度" style="text-align:center">信号观测</td><td data-label="真实硬件" style="text-align:left">物理中断引脚</td><td data-label="本平台建模" style="text-align:left">probe 中断脉冲 → M-18 → M-19</td><td data-label="差异影响" style="text-align:left">波形通道语义一致；无毛刺</td></tr></tbody></table></div>
+    
+<h2 id="sec4" class="h-sec">4 关键函数</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:22%"><col style="width:54%"></colgroup><thead><tr><th style="width:24%;text-align:center">函数</th><th style="width:22%;text-align:center">说明</th><th style="width:54%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">request(line)</td><td style="text-align:left">外设请求中断线</td><td style="text-align:left">输入：line（M-15 irqRequest）；输出：入挂起队列；同线去重 + 触发模式判定（评审 16-2）；定时器线由 intc_timer_poll 挂起</td></tr><tr class="row1"><td style="text-align:center">clear(line)</td><td style="text-align:left">清除中断线</td><td style="text-align:left">输出：确认（挂起移除 + activeIrq 复位）</td></tr><tr class="row0"><td style="text-align:center">arbitrate()</td><td style="text-align:left">量子边界仲裁</td><td style="text-align:left">输入：挂起队列 + 优先级 + 使能（量子边界刷新 mie，评审 16-5）；输出：「挂起且使能」内最高优先级中断（评审 16-1）；已有活动中断 → NO_IRQ（评审 16-6）</td></tr><tr class="row1"><td style="text-align:center">deliver(irq)</td><td style="text-align:left">登记交接结构</td><td style="text-align:left">写入 pendingDelivery（cause = IRQ_BASE|line，评审 16-7）；由 M-13 iss_take_intr 拉取（评审 16-4）</td></tr><tr class="row0"><td style="text-align:center">timerPoll(now)</td><td style="text-align:left">定时器中断轮询（行为级）</td><td style="text-align:left">mtime 按时间差步进（评审 16-3）+ 比较挂起（M-12 每量子调用）</td></tr><tr class="row1"><td style="text-align:center">setPriority(line, prio) / setEnable(mask)</td><td style="text-align:left">优先级/使能配置</td><td style="text-align:left">供固件/映射配置（FR-03/FR-06）；输出：确认；使能生效以下次量子边界拉取为准（评审 16-5）</td></tr></tbody></table></div>
+<p class="body">说明：request/arbitrate/deliver 构成「挂起 → 仲裁 → 陷入」三段式主链；clear 由软件在处理完成后调用；使能与优先级可由固件经 CSR（mie/mip）或映射配置接口调整（4.4.5.2）。</p>
+
+<h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 中断处理流程</h3>
+<p class="body">中断处理闭环如下（对应图 1，源设计 4.4.5.4）：</p>
+<p class="body">（1）请求：M-15 外设 irqRequest(line) 入挂起队列（含优先级/请求时间/源实例）。</p>
+<p class="body">（2）采样：M-12 量子边界 pollIRQ 调 arbitrate，按「优先级 → requestTime + 插入序」取最高且命中使能掩码的中断；未使能中断保持挂起。</p>
+<p class="body">（3）交付：deliver(irq) 登记 pendingDelivery，M-13 经 iss_take_intr 拉取并执行陷入——写 mepc/mcause，跳转 mtvec（评审 16-4，4.4.2.4）。</p>
+<p class="body">（4）清除：处理完成后软件 irqClear(line)，activeIrq 复位，恢复执行。</p>
+<p class="body">（5）观测与记录：请求时 probe 中断脉冲 → M-18 → M-19；交付经 log → M-21。</p>
+<div class="fig"><svg class="flow-svg" viewBox="0 0 980 620" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-16 中断处理流程">
+<defs>
+<marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#4b5563"/></marker>
+</defs>
+<rect x="60" y="50" width="360" height="84" rx="10" fill="#f1f4f9" stroke="#1e3a8a" stroke-width="1.5"/>
+<text x="240" y="74" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">① 外设请求中断线</text>
+<text x="240" y="98" text-anchor="middle" font-size="12.5" fill="#4b5563">M-15 irqRequest(line)</text>
+<text x="240" y="118" text-anchor="middle" font-size="12.5" fill="#4b5563">UART rx-ready / tx-empty / Timer 比较</text>
+<rect x="60" y="190" width="360" height="84" rx="10" fill="#f1f4f9" stroke="#1e3a8a" stroke-width="1.5"/>
+<text x="240" y="214" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">② 挂起队列 pendingQueue</text>
+<text x="240" y="238" text-anchor="middle" font-size="12.5" fill="#4b5563">按（requestTime, 插入序）稳定排序</text>
+<text x="240" y="258" text-anchor="middle" font-size="12.5" fill="#4b5563">未使能中断保持挂起，不丢</text>
+<rect x="60" y="330" width="360" height="84" rx="10" fill="#f1f4f9" stroke="#1e3a8a" stroke-width="1.5"/>
+<text x="240" y="354" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">③ 量子边界采样 + 仲裁</text>
+<text x="240" y="378" text-anchor="middle" font-size="12.5" fill="#4b5563">M-12 pollIRQ 节奏 → arbitrate</text>
+<text x="240" y="398" text-anchor="middle" font-size="12.5" fill="#4b5563">优先级 + 使能掩码（mstatus/mie）</text>
+<rect x="60" y="470" width="360" height="84" rx="10" fill="#f1f4f9" stroke="#1e3a8a" stroke-width="1.5"/>
+<text x="240" y="494" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">④ 交付陷入</text>
+<text x="240" y="518" text-anchor="middle" font-size="12.5" fill="#4b5563">deliver(irq) → M-13 trap</text>
+<text x="240" y="538" text-anchor="middle" font-size="12.5" fill="#4b5563">M-13 iss_take_intr 拉取 → 写 mepc/mcause，跳 mtvec</text>
+<rect x="560" y="330" width="360" height="84" rx="10" fill="#eef2fb" stroke="#2f5bd6" stroke-width="1.5"/>
+<text x="740" y="354" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">⑤ 观测：中断脉冲探针</text>
+<text x="740" y="378" text-anchor="middle" font-size="12.5" fill="#4b5563">probe("irq_pulse") → M-18 → M-19</text>
+<text x="740" y="398" text-anchor="middle" font-size="12.5" fill="#4b5563">波形通道（中断脉冲）</text>
+<rect x="560" y="470" width="360" height="84" rx="10" fill="#eef2fb" stroke="#2f5bd6" stroke-width="1.5"/>
+<text x="740" y="494" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">⑥ 记录：中断日志</text>
+<text x="740" y="518" text-anchor="middle" font-size="12.5" fill="#4b5563">log(INFO, "INTC", "deliver irq")</text>
+<text x="740" y="538" text-anchor="middle" font-size="12.5" fill="#4b5563">→ M-21（仅管理员通道）</text>
+<rect x="180" y="572" width="620" height="40" rx="8" fill="#ffffff" stroke="#9aa1af" stroke-width="1" stroke-dasharray="5 4"/>
+<text x="490" y="597" text-anchor="middle" font-size="12.5" fill="#4b5563">处理完成 → 软件 irqClear(line) → 清除挂起 → 恢复执行；未使能中断继续挂起（确定性：同种子同输入序列结果唯一）</text>
+<line x1="240" y1="134" x2="240" y2="190" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="240" y1="274" x2="240" y2="330" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="240" y1="414" x2="240" y2="470" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="420" y1="372" x2="560" y2="372" stroke="#2f5bd6" stroke-width="1.5" marker-end="url(#arr)"/>
+<text x="490" y="364" text-anchor="middle" font-size="11.5" fill="#2f5bd6">请求时脉冲探针</text>
+<line x1="420" y1="512" x2="560" y2="512" stroke="#2f5bd6" stroke-width="1.5" marker-end="url(#arr)"/>
+<text x="490" y="504" text-anchor="middle" font-size="11.5" fill="#2f5bd6">交付日志</text>
+</svg><div class="flow-mobile">
+<div class="flow-step"><span class="num">1</span><span class="txt">外设请求中断线：M-15 irqRequest(line)（UART rx-ready / tx-empty / Timer 比较）</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">2</span><span class="txt">挂起队列 pendingQueue：按（requestTime, 插入序）稳定排序；未使能不丢</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">3</span><span class="txt">量子边界采样 + 仲裁：M-12 pollIRQ 节奏 → arbitrate（优先级 + 使能掩码 mstatus/mie）</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">4</span><span class="txt">交付陷入：deliver(irq) 登记交接 → M-13 iss_take_intr 拉取（写 mepc/mcause，跳 mtvec）</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">5</span><span class="txt">观测：probe("irq_pulse") → M-18 → M-19 波形（中断脉冲通道）</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">6</span><span class="txt">记录：log(INFO, "INTC", "deliver irq") → M-21（仅管理员通道）</span></div>
+<div class="flow-branch">回环：处理完成 → 软件 irqClear(line) → 清除挂起 → 恢复执行；未使能中断继续挂起（确定性）</div>
+</div><figcaption>图 1 · M-16 中断处理流程</figcaption></div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:18%"><col style="width:34%"><col style="width:48%"></colgroup><thead><tr><th style="width:18%;text-align:center">协作模块</th><th style="width:34%;text-align:center">接口</th><th style="width:48%;text-align:center">时机与说明</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-12（事件引擎）</td><td style="text-align:left">pollIRQ()（量子边界采样）</td><td style="text-align:left">每量子边界采样节奏（4.4.1.1）；控制注入只在安全检查点</td></tr><tr class="row1"><td data-label="协作模块" style="text-align:center">M-13（ISS）</td><td data-label="接口" style="text-align:left">iss_pending_intr / iss_take_intr（拉取式交接）</td><td data-label="时机与说明" style="text-align:left">评审 16-4：仲裁命中后登记 pendingDelivery，M-13 取指边界拉取并执行陷入（写 mepc/mcause，跳 mtvec，4.4.2.4）；量子边界拉取 mie 刷新使能掩码（评审 16-5）</td></tr><tr class="row0"><td data-label="协作模块" style="text-align:center">M-15（外设）</td><td data-label="接口" style="text-align:left">irqRequest(line)/irqClear()</td><td data-label="时机与说明" style="text-align:left">外设请求/清除中断线（4.4.5.1）；请求源实例入 PendingIrq</td></tr><tr class="row1"><td data-label="协作模块" style="text-align:center">M-18（探针）</td><td data-label="接口" style="text-align:left">probe(&quot;irq_pulse&quot;, line, time）</td><td data-label="时机与说明" style="text-align:left">中断请求时模型内埋点回调；边沿判定后送 M-19（4.7 表62）</td></tr><tr class="row0"><td data-label="协作模块" style="text-align:center">M-21（日志）</td><td data-label="接口" style="text-align:left">log(INFO, &quot;INTC&quot;, msg, errCode）</td><td data-label="时机与说明" style="text-align:left">中断交付/仲裁异常日志；自动附双时间戳（对接见 9.2）</td></tr></tbody></table></div>
+
+<h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 异常与处置</h3>
+<p class="body">M-16 无专属错误码族（错误码体系 3.4 表16 未定义 E_INT 族）；异常均以「抑制 / 保持 / 联动」语义处理，不产生平台故障：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:18%"><col style="width:20%"><col style="width:62%"></colgroup><thead><tr><th style="width:18%;text-align:center">异常场景</th><th style="width:20%;text-align:center">处理语义</th><th style="width:62%;text-align:center">说明</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">中断风暴</td><td style="text-align:left">抑制</td><td style="text-align:left">按优先级 + 使能掩码抑制（4.4.5.5）；仲裁只交付「挂起且使能」内最高优先级，其余保持挂起（评审 16-1）</td></tr><tr class="row1"><td data-label="异常场景" style="text-align:center">未使能中断</td><td data-label="处理语义" style="text-align:left">保持</td><td data-label="说明" style="text-align:left">保持挂起不丢，使能后由后续量子边界采样交付；未使能高优先级不阻塞已使能低优先级（评审 16-1，4.4.5.5）</td></tr><tr class="row0"><td data-label="异常场景" style="text-align:center">仲裁无命中</td><td data-label="处理语义" style="text-align:left">正常返回</td><td data-label="说明" style="text-align:left">挂起集内无可交付（全未使能/无挂起/已有活动中断）→ 返回 NO_IRQ，不产生错误码（4.4.5.3）</td></tr><tr class="row1"><td data-label="异常场景" style="text-align:center">交付/陷入失败</td><td data-label="处理语义" style="text-align:left">联动 M-13</td><td data-label="说明" style="text-align:left">M-13 拉取后陷入处理失败由 M-13 上报 E_ISS-03（trap 处理失败），非 M-16 平台故障</td></tr><tr class="row0"><td data-label="异常场景" style="text-align:center">探针溢出</td><td data-label="处理语义" style="text-align:left">按 M-19 策略</td><td data-label="说明" style="text-align:left">脉冲探针通道溢出按 M-19 溢出策略处置（默认丢最旧 + 标记）</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）交付时机边界：仲裁只在量子边界发生，中断交付最多延迟一个量子（1µs 虚拟时间，估算基线）。</p>
+<p class="body">（2）确定性边界：仲裁排序不依赖宿主时钟；请求时间取虚拟时钟，违反 → 确定性断言失败（2.4 表6、源文档 7.3 表92）。</p>
+<p class="body">（3）使能切换：固件修改 mie（经 CSR）后，未使能中断保持挂起；enabledMask 在量子边界从 M-13 拉取刷新（评审 16-5），生效以下次采样为准（不丢不抢）。两层使能组合判定（评审 16-10）：per-line enabledMask AND mstatus.MIE 全局，M-13 陷入前检查全局层。</p>
+<p class="body">（4）性能边界：量子边界采样开销计入每量子固定开销预算 ≤10% 单量子执行时间（估算基线，评审 P-11）；脉冲探针采样可整体关闭（性能开关）。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表91（M-16 行）：测试要点 = 中断；关键用例 = 量子边界采样、优先级仲裁、陷入 mtvec；通过准则 = 仲裁正确、不丢挂起。展开用例表如下（核心模块覆盖率 ≥70%，源文档 7.3 表92）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:20%"><col style="width:40%"><col style="width:40%"></colgroup><thead><tr><th style="width:20%;text-align:center">用例</th><th style="width:40%;text-align:center">输入 / 步骤</th><th style="width:40%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（源 2.5/7.1 对齐）</td><td style="text-align:left">按 9.1.1 端口契约表逐项校验 request/clear/arbitrate/deliver 的接口签名、输入校验、输出结构与错误码；替代实现接入前必须同端口契约测试全绿</td><td style="text-align:left">契约测试全绿；契约变更须同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">量子边界采样</td><td data-label="输入 / 步骤" style="text-align:left">外设请求中断，推进一个量子边界</td><td data-label="通过准则" style="text-align:left">仲裁仅在边界发生；交付最多延迟一个量子（1µs 虚拟时间）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">优先级仲裁</td><td data-label="输入 / 步骤" style="text-align:left">同时挂起 timer-compare 与 rx-ready，边界采样</td><td data-label="通过准则" style="text-align:left">交付最高优先级（timer-compare &gt; rx-ready）；同优先级按 requestTime + 插入序稳定</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">使能并存仲裁（评审 16-1）</td><td data-label="输入 / 步骤" style="text-align:left">高优先级 timer-compare 未使能、低优先级 rx-ready 已使能，同时挂起</td><td data-label="通过准则" style="text-align:left">交付 rx-ready（未使能高优先级不阻塞）；timer-compare 保持挂起，使能后下次采样交付</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">重复请求/去重（评审 16-2）</td><td data-label="输入 / 步骤" style="text-align:left">同线连续 request 两次；timer 电平持续成立跨多量子</td><td data-label="通过准则" style="text-align:left">同线只保留 1 条挂起（去重）；timer 不因电平持续而堆积</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">触发模式（评审 16-2）</td><td data-label="输入 / 步骤" style="text-align:left">边沿线（rx-ready）单次请求后清除；电平线（timer）mtimecmp 改写前持续</td><td data-label="通过准则" style="text-align:left">边沿单次交付；电平改写 mtimecmp 后才撤销</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">陷入 mtvec</td><td data-label="输入 / 步骤" style="text-align:left">仲裁命中后交付</td><td data-label="通过准则" style="text-align:left">M-13 iss_take_intr 拉取：mepc/mcause 正确写入（mcause = 0x80000000|line），PC 跳转 mtvec（4.4.2.4）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">mcause 编码断言（评审 16-7）</td><td data-label="输入 / 步骤" style="text-align:left">分别交付 rx-ready/timer-compare</td><td data-label="通过准则" style="text-align:left">mcause 中断位 0x80000000 置位且低 16 位 = line（IRQ_BASE 契约）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">activeIrq 嵌套防护（评审 16-6）</td><td data-label="输入 / 步骤" style="text-align:left">交付后未清除，再次仲裁</td><td data-label="通过准则" style="text-align:left">返回 NO_IRQ，不覆盖 activeIrq；清除后可再次交付（单级中断语义）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">未使能不丢</td><td data-label="输入 / 步骤" style="text-align:left">mie 清除对应位，边界采样</td><td data-label="通过准则" style="text-align:left">中断保持挂起不丢；使能后下次采样交付（4.4.5.5）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">irqClear</td><td data-label="输入 / 步骤" style="text-align:left">软件处理完成后清除</td><td data-label="通过准则" style="text-align:left">挂起移除 + activeIrq 复位；不再重复交付</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">定时器中断</td><td data-label="输入 / 步骤" style="text-align:left">mtime &gt;= mtimecmp</td><td data-label="通过准则" style="text-align:left">按 MTIE 语义挂起并交付（行为级等价）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">确定性夹具</td><td data-label="输入 / 步骤" style="text-align:left">同种子 + 同时间戳化输入序列（中断注入）跑两遍</td><td data-label="通过准则" style="text-align:left">交付序列（line, 虚拟时间）完全一致（2.4 表6）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">中断风暴</td><td data-label="输入 / 步骤" style="text-align:left">同边界大量请求</td><td data-label="通过准则" style="text-align:left">只交付最高优先级，其余挂起；不丢不崩（4.4.5.5）</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）职责单一：挂起/仲裁/交付/清除四段分离（request/arbitrate/deliver/clear），各段可独立单测。</p>
+<p class="body">（2）确定性排序内建：挂起队列按（requestTime, 插入序）稳定排序，测试夹具可精确复现交付序列。</p>
+<p class="body">（3）日志统一走 M-21：中断交付/仲裁异常 log 结构化入缓冲，不依赖临时打印。</p>
+<p class="body">（4）优先级表可配置（setPriority）：测试可直接构造不同优先级组合，不改实现。</p>
+<p class="body">（5）探针字段固定可断言：脉冲信号名（irq_pulse）与载荷（line）固定，供波形回归断言。</p>
+<p class="body">（6）契约层可替换性（源 2.5 对齐）：本模块对外的 driving 端口收敛到 9.1.1 端口契约表，替代实现（替代中断控制器）遵守同端口契约并通过契约测试即可接入，不改动其他模块。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）与 2.4 表6 落到 M-16 责任：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:14%"><col style="width:30%"><col style="width:56%"></colgroup><thead><tr><th style="width:14%;text-align:center">质量属性</th><th style="width:30%;text-align:center">目标（估算基线）</th><th style="width:56%;text-align:center">M-16 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">可靠性</td><td style="text-align:left">确定性可复现（FR-12）</td><td style="text-align:left">M-16 在确定性适用范围（2.4 表6）；仲裁排序（requestTime, 插入序）不依赖宿主时钟</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">性能</td><td data-label="目标" style="text-align:left">每量子固定开销 ≤10% 单量子执行时间</td><td data-label="M-16 落实" style="text-align:left">量子边界采样 + 仲裁 O(log n)（优先队列）；无逐指令检查</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">韧性</td><td data-label="目标" style="text-align:left">故障检测→分级→处置→恢复（NFR-08）</td><td data-label="M-16 落实" style="text-align:left">中断风暴按优先级 + 使能掩码抑制；未使能保持挂起不丢</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">可维护性</td><td data-label="目标" style="text-align:left">核心模块覆盖率 ≥70%；内核前端解耦；模块即积木可替换（源 2.5）</td><td data-label="M-16 落实" style="text-align:left">挂起/仲裁/交付/清除职责分离；日志经 M-21；优先级表可配置；端口契约测试（9.1.1）保障替代实现可接入</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">可用性</td><td data-label="目标" style="text-align:left">异常/中断、向量表配置（FR-06）</td><td data-label="M-16 落实" style="text-align:left">mtvec 向量入口与 mie/mip 使能语义对齐 M-13，固件可编程</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">合规</td><td data-label="目标" style="text-align:left">不引入 GPL；唯一入口</td><td data-label="M-16 落实" style="text-align:left">自研 BSD/MIT；中断日志不自行实现（4.7 唯一入口规则）</td></tr></tbody></table></div>
+
+<h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<p class="body">源设计 4.4.5.6：依赖 = M-12（采样节奏）、M-13（陷入）、M-15（请求源）、M-18（中断脉冲探针上报）、M-21（中断异常日志）。展开如下：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:28%"><col style="width:16%"><col style="width:56%"></colgroup><thead><tr><th style="width:28%;text-align:center">模块</th><th style="width:16%;text-align:center">方向</th><th style="width:56%;text-align:center">协作内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-12（事件引擎）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">pollIRQ 量子边界采样节奏（4.4.1.1）；定时器轮询随事件队列推进</td></tr><tr class="row1"><td style="text-align:center">M-13（ISS）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">评审 16-4：iss_pending_intr/iss_take_intr 拉取式交接（M-13 取指边界拉取并执行陷入：写 mepc/mcause，跳 mtvec，4.4.2.4）；量子边界 iss_get_mie 拉取使能掩码（评审 16-5）</td></tr><tr class="row0"><td style="text-align:center">M-15（外设）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">irqRequest/irqClear 请求/清除中断线；请求源实例入 PendingIrq（4.4.5.1）</td></tr><tr class="row1"><td style="text-align:center">M-18（探针）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">中断脉冲 probe 上报（4.7 表86：中断请求时模型内埋点回调）</td></tr><tr class="row0"><td style="text-align:center">M-21（日志）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">中断交付/仲裁异常日志（对接见 9.2）</td></tr><tr class="row1"><td style="text-align:center">M-13 / M-15</td><td style="text-align:left">使用方</td><td style="text-align:left">中断陷入语义（M-13）；中断请求源（M-15）；FR-06 向量表配置协作</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表64 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层，本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现（替代中断控制器）遵守同端口契约并通过契约测试（7.1）即可接入，无需改动其他模块：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:18%"><col style="width:58%"></colgroup><thead><tr><th style="width:24%;text-align:center">端口 / 服务</th><th style="width:18%;text-align:center">方向</th><th style="width:58%;text-align:center">契约（输入 → 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:left">request(line)</td><td style="text-align:center">提供（driving）</td><td style="text-align:left">输入：line；输出：入挂起队列</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">clear(line)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输出：确认（挂起移除 + activeIrq 复位）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">arbitrate()</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输入：挂起队列 + 优先级 + 使能；输出：最高优先级中断（NO_IRQ 无命中）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">deliver(irq)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">登记 PendingIntr 交接结构（cause = IRQ_BASE|line，评审 16-7）；由 M-13 iss_take_intr 拉取执行陷入（评审 16-4，与 M-13 契约对齐）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-12 / M-13 / M-15 / M-18 / M-21</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">采样节奏、拉取式陷入交接与 mie 拉取（iss_pending_intr/iss_take_intr/iss_get_mie，评审 16-4/16-5）、请求源、探针、日志（见 9.1）</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:50%"><col style="width:50%"></colgroup><thead><tr><th style="width:50%;text-align:center">时机</th><th style="width:50%;text-align:center">示例调用（ctx / level / errCode）</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">中断交付</td><td style="text-align:left">log(INFO, &quot;INTC&quot;, &quot;deliver irq&quot;, &quot;&quot;)</td></tr><tr class="row1"><td data-label="时机" style="text-align:center">仲裁无命中（正常返回）</td><td data-label="示例调用" style="text-align:left">log(DEBUG, &quot;INTC&quot;, &quot;no irq at boundary&quot;, &quot;&quot;)</td></tr><tr class="row0"><td data-label="时机" style="text-align:center">trap 处理失败（联动 M-13）</td><td data-label="示例调用" style="text-align:left">log(ERROR, &quot;INTC&quot;, &quot;trap fail&quot;, &quot;E_ISS-03&quot;)</td></tr><tr class="row1"><td data-label="时机" style="text-align:center">中断风暴抑制</td><td data-label="示例调用" style="text-align:left">log(WARN, &quot;INTC&quot;, &quot;irq storm suppressed&quot;, &quot;&quot;)</td></tr></tbody></table></div>
+<h3 id="sec9-3" class="h-sub">9.3 探针 / CSR 对接</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:34%"><col style="width:18%"><col style="width:48%"></colgroup><thead><tr><th style="width:34%;text-align:center">接口</th><th style="width:18%;text-align:center">对接方</th><th style="width:48%;text-align:center">信号 / 载荷</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">m18_probe(&quot;irq_pulse&quot;, line, time)</td><td style="text-align:left">M-18</td><td style="text-align:left">中断脉冲：每次 irqRequest 上报（line, 虚拟时间）；评审 N2 直接对接 M-18 探针通道</td></tr><tr class="row1"><td data-label="接口" style="text-align:center">mstatus / mie / mip</td><td data-label="对接方" style="text-align:left">M-13（CSR）</td><td data-label="信号 / 载荷" style="text-align:left">使能掩码与挂起状态读写（enabledMask 对应 mie，量子边界 iss_get_mie 拉取；mip 反映挂起）</td></tr><tr class="row0"><td data-label="接口" style="text-align:center">mtvec</td><td data-label="对接方" style="text-align:left">M-13（CSR）</td><td data-label="信号 / 载荷" style="text-align:left">陷入入口地址（交付目标，4.4.2.4）</td></tr><tr class="row1"><td data-label="接口" style="text-align:center">mtime / mtimecmp</td><td data-label="对接方" style="text-align:left">M-14（MMIO）</td><td data-label="信号 / 载荷" style="text-align:left">评审 16-8：CLINT 语义经 M-14 MMIO 区间访问（本模块 mapRegion 登记 CLINT 区间，读写映射 mtime/mtimecmp），不走 CSR 转发</td></tr></tbody></table></div>
+<p class="body">单向依赖与唯一入口规则（4.7 调用规则）：业务模块 → 横切组件；探针、日志能力由 M-18/M-21 统一提供，本模块不得自行实现或绕过。</p>
+</main>
+</div>
+</body>
+</html>

@@ -1,0 +1,18 @@
+[package]
+name = "riscv_sim_server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Optional server-mode host process (P1). Wraps kernel, exposes HTTP + WebSocket transport (M-07)."
+
+[[bin]]
+name = "riscv_sim_server"
+path = "src/main.rs"
+
+[dependencies]
+riscv_sim_contract = { path = "../contract" }
+riscv_sim_kernel = { path = "../kernel" }
+
+[lints]
+workspace = true

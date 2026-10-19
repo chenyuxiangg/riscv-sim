@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%231e3a8a'/%3E%3Ctext x='12' y='17' font-size='13' text-anchor='middle' fill='%23ffffff' font-family='sans-serif' font-weight='bold'%3EL%3C/text%3E%3C/svg%3E">
+<title>M-12 事件驱动仿真引擎 模块详细设计</title>
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15px; font-weight:700; color:#374151; margin:18px 0 8px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { margin:0 0 10px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  white-space:pre; margin:10px 0 16px; }
+.code-title { font-size:13px; font-weight:700; color:#111827; margin:16px 0 4px; }
+.fig { margin:14px auto; text-align:center; }
+.fig img { max-width:100%; height:auto; border:1px solid var(--line); border-radius:4px; }
+.fig figcaption { font-size:13px; color:var(--ink-2); margin-top:6px; }
+.caption { text-align:center; font-size:13px; color:var(--ink-2); margin:6px 0 4px; }
+.flow-svg { width:100%; height:auto; }
+.flow-mobile { display:none; }
+.flow-step { display:flex; gap:10px; margin:8px 0; align-items:flex-start; }
+.flow-step .num { flex:0 0 26px; height:26px; border-radius:50%; background:var(--brand);
+  color:#fff; font-weight:700; font-size:13px; display:flex; align-items:center; justify-content:center; }
+.flow-step .txt { font-size:14px; }
+.flow-branch { margin:6px 0 6px 36px; font-size:13.5px; color:var(--ink-2); }
+.flow-arrow { text-align:center; color:#9aa1af; font-size:16px; line-height:1; margin:2px 0; }
+.nav-toggle { margin:14px 0; }
+.nav-toggle summary { cursor:pointer; font-weight:700; color:var(--brand);
+  padding:9px 12px; border:1px solid var(--line); border-radius:6px; background:var(--head-bg); list-style:none; }
+.nav-toggle summary::-webkit-details-marker { display:none; }
+.nav-box { display:flex; flex-direction:column; gap:2px; padding:10px 4px 2px; }
+.nav-l1 { color:var(--brand); font-weight:700; text-decoration:none; padding:3px 4px; }
+.nav-l2 { color:var(--ink-2); text-decoration:none; padding:3px 4px 3px 18px; font-size:13.5px; }
+.nav-l1:hover,.nav-l2:hover { color:var(--brand-2); text-decoration:underline; }
+@media (min-width:768px) {
+  .wrap { display:grid; grid-template-columns:260px 1fr; gap:28px; align-items:start; }
+  .doc-head { grid-column:1 / -1; }
+  .nav-toggle { position:sticky; top:16px; max-height:calc(100vh - 32px); overflow:auto; }
+  .nav-toggle summary { pointer-events:none; }
+  .flow-svg { display:block; }
+  .flow-mobile { display:none; }
+}
+@media (max-width:767px) {
+  .flow-svg { display:none; }
+  .flow-mobile { display:block; }
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media print {
+  .nav-toggle { display:none; }
+  .wrap { display:block; max-width:none; padding:0; }
+  .doc-title { font-size:20px; }
+  .doc-table, .fig, .code { break-inside:avoid; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="doc-head"><h1 class="doc-title">M-12 事件驱动仿真引擎 模块详细设计</h1><p class="subtitle">RISC-V 仿真平台 · 模块详细设计系列 · 对应《模块设计说明书》4.4.1 节</p><p class="version">HTML 版 v1.2（2026-10-13 契约层对齐）· 评审修订版（12-1~12-9、B12-1~B12-6）· 源设计《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11 更新版）</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11；2026-10-13 契约层版新增 2.5 平台共享契约层与各模块端口契约表）</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.4.1（④ 仿真内核层 · 事件驱动仿真引擎）；端口契约 = 源文档表52</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">FR-06（中断采样节奏，与 M-16/M-13 协作）；FR-12（确定性）；NFR-08（watchdog 韧性）</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">量子化混合调度主循环；确定性适用范围（2.4 表6）；评审 P-11（量子固定开销预算）落实</td></tr><tr class="row0"><td style="text-align:center">MVP 状态</td><td style="text-align:left">P0 主承担模块（MVP 必需，内核调度中枢）</td></tr><tr class="row1"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.1：12-1 量子↔指令映射；12-2 watchdog 无进展检测；12-3 同步终止；12-4 暂停扣除；12-5 统一命名；12-6 载荷类型；12-7 测试注入；12-8 事件生命周期；12-9 滑动窗口；B12-1~B12-6 契约补全；v1.2 残留修订（R12-1~R12-3）：hms_report 统一为 report 并注明内部封装名；progressBase 三类更新点（dispatchDueEvents/pollIRQ/onProgress）显式化；仅 MMIO 区域访问计进展口径展开</td></tr><tr class="row0"><td style="text-align:center">源文档对齐</td><td style="text-align:left">v1.2（2026-10-13）：新增 9.1.1 端口契约（driving/driven，源表52）；CH7 新增契约测试；CH8 补契约层可替换性；表号引用随源文档调整（3.3 表14→表15、4.4.1 表38/39→表50/51、7.2 表67→表91、7.3 表68→表92、8 表69→表93）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；确定性稳定排序（虚拟时间, 插入序）；评审 P-11 落实</td></tr><tr class="row0"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-13（v1.2 契约层对齐 2026-10-13）</td></tr></tbody></table></div></header><nav class="nav-toggle"><details open><summary>目录</summary><div class="nav-box"><a class="nav-l1" href="#sec1">1 功能概述</a>
+<a class="nav-l2" href="#sec1-1">1.1 模块定位</a>
+<a class="nav-l2" href="#sec1-2">1.2 需求与约束</a>
+<a class="nav-l2" href="#sec1-3">1.3 MVP 范围与预留</a>
+<a class="nav-l1" href="#sec2">2 数据描述</a>
+<a class="nav-l2" href="#sec2-1">2.1 核心数据结构</a>
+<a class="nav-l2" href="#sec2-1-1">2.1.1 复杂结构字段定义</a>
+<a class="nav-l2" href="#sec2-2">2.2 事件类型</a>
+<a class="nav-l2" href="#sec2-3">2.3 数据流说明</a>
+<a class="nav-l1" href="#sec3">3 实现设计</a>
+<a class="nav-l2" href="#sec3-1">3.1 主循环 runUntil</a>
+<a class="nav-l2" href="#sec3-2">3.2 事件队列与稳定排序</a>
+<a class="nav-l2" href="#sec3-3">3.3 虚拟时间推进与空闲区间</a>
+<a class="nav-l2" href="#sec3-4">3.4 安全检查点与控制命令队列</a>
+<a class="nav-l2" href="#sec3-5">3.5 watchdog 无进展检测</a>
+<a class="nav-l2" href="#sec3-6">3.6 确定性 PRNG</a>
+<a class="nav-l2" href="#sec3-7">3.7 宿主时间与暂停扣除</a>
+<a class="nav-l2" href="#sec3-8">3.8 与真实仿真器的差异对照</a>
+<a class="nav-l1" href="#sec4">4 关键函数</a>
+<a class="nav-l1" href="#sec5">5 处理流程</a>
+<a class="nav-l2" href="#sec5-1">5.1 主循环流程</a>
+<a class="nav-l2" href="#sec5-2">5.2 与相邻模块的协作说明</a>
+<a class="nav-l1" href="#sec6">6 异常处理</a>
+<a class="nav-l2" href="#sec6-1">6.1 异常与处置</a>
+<a class="nav-l2" href="#sec6-2">6.2 边界与降级</a>
+<a class="nav-l1" href="#sec7">7 测试设计与可维护性</a>
+<a class="nav-l2" href="#sec7-1">7.1 测试要点与关键用例</a>
+<a class="nav-l2" href="#sec7-2">7.2 可维护性手段</a>
+<a class="nav-l1" href="#sec8">8 质量属性落实</a>
+<a class="nav-l1" href="#sec9">9 接口依赖</a>
+<a class="nav-l2" href="#sec9-1">9.1 依赖关系</a>
+<a class="nav-l2" href="#sec9-1-1">9.1.1 端口契约（driving/driven）</a>
+<a class="nav-l2" href="#sec9-2">9.2 日志对接（M-21）</a>
+<a class="nav-l2" href="#sec9-3">9.3 watchdog / HMS 对接</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-12 事件驱动仿真引擎实现量子化混合调度主循环（4.4.1.1）：以 1µs 时间量子（可配置）为 IRQ 采样节奏，每量子先处理到期事件再让 ISS 执行至多「量子指令配额」条指令；无到期事件且 guest 处于空闲区间时，批量推进虚拟时间到下一事件/检查点（不逐量子空转）。确定性由固定种子 PRNG + 稳定事件排序（虚拟时间, 插入序）保证；控制注入只在安全检查点（事件边界 ∨ 指令计数边界）发生。</p>
+<p class="body">指令预算 watchdog 采用「无进展检测」：连续 N 条指令无任何外部可见进展（中断/事件/访存 I/O 完成，仅 MMIO 区域访问计进展）判定 guest 失控，宿主时间仅作辅助预算（默认 200ms，暂停期扣除），触发后同步终止内核并置幂等标志（与 guest trap 严格区分）。承接 FR-06（中断采样节奏）/FR-12（确定性）；M-12 在确定性适用范围（2.4 表6）。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:62%"><col style="width:24%"></colgroup><thead><tr><th style="width:14%;text-align:center">类别</th><th style="width:62%;text-align:center">约束内容</th><th style="width:24%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">功能</td><td style="text-align:left">量子化混合调度主循环；每量子指令配额；IRQ 采样节奏；事件队列；控制注入（FR-06/FR-12）</td><td style="text-align:left">4.4.1.1、评审 12-1</td></tr><tr class="row1"><td style="text-align:center">确定性</td><td style="text-align:left">固定种子 PRNG + 稳定事件排序（虚拟时间, 插入序）；虚拟时间不依赖宿主时钟</td><td style="text-align:left">4.4.1.1、2.4 表6</td></tr><tr class="row0"><td style="text-align:center">性能</td><td style="text-align:left">批量推进仅限 guest 空闲区间（无到期事件且无待交付中断）；每量子固定开销（事件检查+IRQ 采样+控制注入）≤10% 单量子执行时间（估算基线）</td><td style="text-align:left">4.4.1.1（评审 P-11）、评审 12-1</td></tr><tr class="row1"><td style="text-align:center">韧性</td><td style="text-align:left">watchdog 无进展检测（连续 N 条指令无外部事件）判 guest 失控；宿主时间仅辅助；触发幂等；滑动窗口多次确认</td><td style="text-align:left">评审 12-2/12-9</td></tr><tr class="row0"><td style="text-align:center">正确性</td><td style="text-align:left">guest trap（访存异常/非法指令）= 模型内 guest 异常（正常调试语义），与 watchdog 平台故障严格区分；EV_WATCHDOG 同步终止不再入队投递</td><td style="text-align:left">4.4.1.5、评审 12-3</td></tr><tr class="row1"><td style="text-align:center">合规</td><td style="text-align:left">自研实现采用 BSD/MIT 许可，不可引入 GPL 传染</td><td style="text-align:left">2.4 表6</td></tr><tr class="row0"><td style="text-align:center">体积</td><td style="text-align:left">随内核 WASM 打包，计入内核 ≤1.5 MiB 压缩预算（估算基线）</td><td style="text-align:left">3.3 表15</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：主循环 runUntil（量子化混合调度 + 每量子指令配额）、事件队列（min-heap，稳定排序，支持取消/溢出恢复）、虚拟时间推进（批量推进限定空闲区间）、量子边界中断采样（pollIRQ，M-16 交接结构）、安全检查点与控制命令队列（injectCommand）、watchdog 无进展检测（watchdogCheck，幂等）、确定性 PRNG（种子化随机源）、输入事件时间戳化入口（scheduleEvent，唯一输入路径）、状态查询（getEngineState）与探针点（engineHooks）。</p>
+<p class="body">预留项（本模块仅保留演进承接说明，不展开实现）：录制/回放事件源接入（FR-17，P1，复用 M-20 录制格式）；跨板事件同步（FR-25，P1，与 M-15 port/link 协作）；多核/SMP 调度（FR-18，P2，随 M-17 扩展）。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:22%"><col style="width:18%"><col style="width:60%"></colgroup><thead><tr><th style="width:22%;text-align:center">数据结构</th><th style="width:18%;text-align:center">类型</th><th style="width:60%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">eventQueue</td><td style="text-align:left">min-heap</td><td style="text-align:left">事件队列（按虚拟时间 + 插入序稳定排序；容量上限可配置）</td></tr><tr class="row1"><td style="text-align:center">quantum</td><td style="text-align:left">duration</td><td style="text-align:left">时间量子（默认 1µs，可配置）</td></tr><tr class="row0"><td style="text-align:center">quantumInstrQuota</td><td style="text-align:left">const</td><td style="text-align:left">每量子指令配额（量子↔指令映射，默认 1000 条/量子，估算基线）</td></tr><tr class="row1"><td style="text-align:center">virtualTime</td><td style="text-align:left">uint64</td><td style="text-align:left">虚拟时间（仅由量子推进，不依赖宿主时钟）</td></tr><tr class="row0"><td style="text-align:center">prngState</td><td style="text-align:left">seeded</td><td style="text-align:left">确定性 PRNG（种子化随机源：噪声/去抖/ADC）</td></tr><tr class="row1"><td style="text-align:center">instrCheckpoint</td><td style="text-align:left">const</td><td style="text-align:left">指令计数检查点（每 10⁴ 条做 watchdog/控制注入检查）</td></tr><tr class="row0"><td style="text-align:center">hostBudgetUs</td><td style="text-align:left">const</td><td style="text-align:left">宿主时间辅助预算（默认 200ms；暂停期扣除，单调时钟）</td></tr><tr class="row1"><td style="text-align:center">progressWindow</td><td style="text-align:left">const</td><td style="text-align:left">无进展检测窗口（连续 N 条指令无外部事件，默认 10⁶ 条，估算基线）</td></tr><tr class="row0"><td style="text-align:center">quantumOverhead</td><td style="text-align:left">const</td><td style="text-align:left">每量子固定开销预算 ≤10% 单量子执行时间（评审 P-11，估算基线）</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="lead">Event 是事件队列条目；EventPayload 为载荷类型体系（值语义，入队拷贝、分发后释放）；EngineState 为主循环整体状态。字段定义如下：</p>
+<pre class="code"><code>// Event: 事件队列条目（稳定排序键 = time + seq）
+struct Event {
+  uint64_t      time;      // 虚拟时间（到期时刻；迟到事件归一为当前时间）
+  uint64_t      seq;       // 插入序（同时间稳定排序锚点；取消令牌）
+  EventKind     kind;      // EV_TIMER / EV_UART_RX / EV_GPIO_IN / EV_WATCHDOG / EV_CHECKPOINT
+  EventPayload  payload;   // 载荷（值语义：入队拷贝、分发后释放）
+};
+// EventPayload: 载荷类型体系（联合，无所有权转移）
+union EventPayload {
+  TimerEv     { uint32_t id; uint64_t cmpVal; };   // EV_TIMER
+  UartRxEv    { uint32_t len; uint8_t  data[8]; }; // EV_UART_RX（≤8 字节）
+  GpioEv      { uint32_t pin; uint8_t  level; };   // EV_GPIO_IN
+  WatchdogEv  { uint32_t reason; };                // EV_WATCHDOG（仅日志/回放记录）
+  CheckpointEv{ uint32_t reason; };                // EV_CHECKPOINT
+};
+// Command: 控制命令（排队，安全检查点按序执行）
+struct Command {
+  CommandKind kind;   // CMD_PAUSE / CMD_STEP / CMD_RUN_UNTIL / CMD_SET_BREAKPOINT
+  uint64_t    arg;    // 参数（目标时间/断点地址等）
+  uint64_t    seq;    // 命令序（先进先出）
+};
+// EngineState: 仿真引擎整体状态
+struct EngineState {
+  heap&lt;Event&gt;   eventQueue;      // min-heap：按（time, seq）稳定排序
+  uint64_t      virtualTime;     // 虚拟时间（仅由量子推进）
+  uint64_t      quantum;         // 时间量子（默认 1µs，可配置）
+  uint64_t      quantumInstrQuota; // 每量子指令配额（量子↔指令映射）
+  uint64_t      instrCount;      // 指令计数（检查点与无进展检测基准）
+  uint64_t      nextSeq;         // 下一插入序（事件/命令共用）
+  uint64_t      progressBase;    // 无进展检测基准（上次产生外部进展的指令位置）
+  uint64_t      lastCheckHostUs; // 上次宿主时间检查点（暂停期扣除）
+  uint64_t      queueCapacity;   // 事件队列容量（溢出暂停告警）
+  uint8_t       paused;          // 暂停标志（安全检查点置位）
+  uint8_t       watchdogFired;   // watchdog 幂等标志（一次运行仅触发一次）
+  uint8_t       hostSlowWin;     // 宿主时间超窗计数（滑动窗口确认）
+  RngState      prng;            // 确定性 PRNG（固定种子）
+  Queue&lt;Command&gt; cmdQueue;       // 控制命令队列（FIFO）
+};</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 事件类型</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:15%"><col style="width:33%"><col style="width:24%"><col style="width:28%"></colgroup><thead><tr><th style="width:15%;text-align:center">事件类型</th><th style="width:33%;text-align:center">产生源</th><th style="width:24%;text-align:center">载荷</th><th style="width:28%;text-align:center">说明</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">EV_TIMER</td><td style="text-align:left">M-15 Timer 比较到期 / M-16 mtimecmp</td><td style="text-align:left">TimerEv{id, cmpVal}</td><td style="text-align:left">定时器到期回调（onEvent）</td></tr><tr class="row1"><td data-label="事件类型" style="text-align:center">EV_UART_RX</td><td data-label="产生源" style="text-align:left">M-04 输入注入（UART 写）</td><td data-label="载荷" style="text-align:left">UartRxEv{len, data[8]}</td><td data-label="说明" style="text-align:left">接收就绪，时间戳化入事件流（FR-12）</td></tr><tr class="row0"><td data-label="事件类型" style="text-align:center">EV_GPIO_IN</td><td data-label="产生源" style="text-align:left">M-04 输入注入（按键/GPIO）</td><td data-label="载荷" style="text-align:left">GpioEv{pin, level}</td><td data-label="说明" style="text-align:left">引脚电平变化，时间戳化入事件流</td></tr><tr class="row1"><td data-label="事件类型" style="text-align:center">EV_WATCHDOG</td><td data-label="产生源" style="text-align:left">M-12 watchdog 检查</td><td data-label="载荷" style="text-align:left">WatchdogEv{reason}</td><td data-label="说明" style="text-align:left">仅日志/回放记录；处置走同步终止（评审 12-3）</td></tr><tr class="row0"><td data-label="事件类型" style="text-align:center">EV_CHECKPOINT</td><td data-label="产生源" style="text-align:left">M-04/M-12 检查点触发</td><td data-label="载荷" style="text-align:left">CheckpointEv{reason}</td><td data-label="说明" style="text-align:left">每 10s 虚拟时间或关键事件（M-20 联动）</td></tr></tbody></table></div>
+    <p class="body">输入事件唯一路径（评审 B12-2）：外部输入（UART 写/按键/GPIO 注入）一律经 M-04 recordInput 写入 M-20 事件流，由 M-12 scheduleEvent 在时间戳化后入队；业务模块不得绕过该路径直接入队。scheduleEvent 同时承接引擎内部事件（如检查点触发）。</p>
+    <p class="body">迟到事件语义（评审 12-6）：入队时间 time 小于当前 virtualTime 时，归一为「当前虚拟时间 + 0」入队（seq 递增保持稳定排序），并 log 警告；不允许丢弃。</p>
+    <h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+    <p class="body">主循环：事件队列（min-heap）→ 到期分发（外设 onEvent → 中断请求）→ 量子边界采样（M-16 交接 PendingIntr）→ ISS 执行至多量子指令配额（M-13，访存经 M-14、钩子触发）→ 安全检查点（命令队列执行 + watchdog 无进展检测）→ 空闲区间批量推进 → 循环。确定性：固定种子 PRNG + （虚拟时间, 插入序）稳定排序；虚拟时间不依赖宿主时钟（2.4 表6）。</p>
+    <h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 主循环 runUntil（量子化混合调度）</h3>
+<p class="body">「量子↔指令」映射（评审 12-1）：每量子执行至多 quantumInstrQuota（默认 1000 条，估算基线）条指令；指令边界与量子边界统一为安全检查点。批量推进仅限 guest 空闲区间（无到期事件且无待交付中断）；非空闲时逐量子执行。runUntil 伪代码如下：</p>
+<pre class="code"><code>// runUntil: 连续执行到虚拟时间 t 或暂停条件（主循环入口）
+RunReason runUntil(EngineState* s, uint64_t t) {
+    while (s-&gt;virtualTime &lt; t &amp;&amp; !s-&gt;paused) {
+        if (eventQueue_empty(s) &amp;&amp; pending_intr_empty(s)) {
+            // guest 空闲区间：批量推进到下一事件/检查点，不空转
+            uint64_t next = next_event_time_or_checkpoint(s);
+            advanceTime(s, min(next, t));
+            continue;
+        }
+        dispatchDueEvents(s);                 // 分发到期事件（外设 onEvent）
+        pollIRQ(s);                           // 量子边界采样（M-16 交接）
+        uint64_t done = 0;                    // 本量子已执行指令数
+        while (done &lt; s-&gt;quantumInstrQuota &amp;&amp; !s-&gt;paused) {
+            RunReason r = iss_step(s);        // M-13：执行一条指令
+            done++;
+            if (r == BREAKPOINT_HIT) return r;
+            if (event_due_now(s)) break;      // 有事件到期：回到分发
+            if (done % s-&gt;instrCheckpoint == 0)
+                watchdogCheck(s);             // 指令计数检查点（每 ≤10⁴ 条）
+        }
+        injectCommandsAtSafePoint(s);         // 安全检查点：命令队列按序执行
+        hook(SEC_QUANTUM_END);                // 探针：量子结束
+    }
+    return s-&gt;paused ? PAUSED : TIME_REACHED;
+}</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 事件队列与稳定排序</h3>
+<p class="body">min-heap 按（虚拟时间, 插入序）稳定排序：同一虚拟时间的事件按 seq 严格定序，保证同种子 + 同输入序列 → 结果唯一（2.4 表6）。支持取消（eventCancel，按 seq 标记取消）与溢出恢复（评审 12-8）。</p>
+<pre class="code"><code>// scheduleEvent: 事件入队（时间戳化输入事件统一入口；唯一输入路径，评审 B12-2）
+uint64_t scheduleEvent(EngineState* s, Event ev) {
+    if (ev.time &lt; s-&gt;virtualTime) {
+        log(WARN, &quot;ENGINE&quot;, &quot;late event, normalized&quot;, &quot;&quot;);
+        ev.time = s-&gt;virtualTime;             // 迟到事件归一（评审 12-6）
+    }
+    if (queue_depth(s) &gt;= s-&gt;queueCapacity) {
+        s-&gt;paused = 1;                        // 溢出：暂停仿真并告警，不丢事件
+        log(ERROR, &quot;ENGINE&quot;, &quot;event queue overflow&quot;, &quot;&quot;);
+        return 0;
+    }
+    ev.seq = s-&gt;nextSeq++;
+    s-&gt;eventQueue.push(ev);
+    return ev.seq;                            // 输出：插入序（取消令牌）
+}
+// eventCancel: 按 seq 标记取消（留在堆中，分发时跳过）
+void eventCancel(EngineState* s, uint64_t seq) { s-&gt;eventQueue.cancel(seq); }
+// 稳定排序键：time 升序，同 time 按 seq 升序（确定性）</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 虚拟时间推进与空闲区间</h3>
+<p class="body">advanceTime 仅推进到下一事件/检查点，且仅在 guest 空闲区间（无到期事件且无待交付中断）调用；虚拟时间仅由推进更新，不依赖宿主时钟（2.4 表6）。</p>
+<h3 id="sec3-4" class="h-sub">3.4 安全检查点与控制命令队列</h3>
+<p class="body">控制命令（pause/step/runUntil/setBreakpoint）结构化入队（评审 B12-3）：非安全检查点到达的命令先入 cmdQueue，到安全点（量子边界 ∨ 指令计数边界 ∨ 事件边界）按 FIFO 执行；保证不打断执行中的访存、不产生半指令状态（4.4.1.1）。</p>
+<pre class="code"><code>// injectCommand: 控制命令注入（结构化命令，排队执行）
+uint64_t injectCommand(EngineState* s, Command cmd) {
+    cmd.seq = s-&gt;nextSeq++;
+    s-&gt;cmdQueue.push(cmd);
+    return cmd.seq;
+}
+// injectCommandsAtSafePoint: 安全检查点按序执行命令队列
+void injectCommandsAtSafePoint(EngineState* s) {
+    while (!cmdQueue_empty(s)) {
+        Command c = s-&gt;cmdQueue.pop();
+        switch (c.kind) {
+          case CMD_PAUSE:       s-&gt;paused = 1; break;
+          case CMD_STEP:        s-&gt;stepMode = 1; break;  // step：执行 1 条指令后返回
+          case CMD_RUN_UNTIL:   s-&gt;runUntilT = c.arg; break;
+          case CMD_SET_BREAKPOINT: set_breakpoint(c.arg); break;
+        }
+    }
+}</code></pre>
+<h3 id="sec3-5" class="h-sub">3.5 watchdog 无进展检测</h3>
+<p class="body">watchdog 采用「无进展检测」（评审 12-2）：记录上次产生外部可见进展（事件分发/中断交付/访存 I/O 完成）的指令位置，连续超过 progressWindow（默认 10⁶ 条，估算基线）条指令无进展 → 判 guest 失控。宿主时间仅作辅助预算（每 ≤10⁴ 条检查、超 hostBudgetUs 计一次超窗），且需连续 3 个检查窗口均无进展才触发（滑动窗口确认，评审 12-9）；宿主时钟采用单调时钟、暂停期扣除（评审 12-4）。触发后同步终止（评审 12-3）：直接调 report(HMS_FATAL)（M-22 报告接口，hms_report 为其内部封装名，文档统一用 report）同步终止内核，EV_WATCHDOG 仅作日志/回放记录，不再入队投递；watchdogFired 幂等标志保证一次运行仅触发一次。progressBase 更新点（评审 R12-2）：三类外部可见进展分别在 ① dispatchDueEvents() 分发任一到期事件后、② pollIRQ() 仲裁命中并交付中断后、③ onProgress() 回调（仅 MMIO 区域访问完成，评审 R12-3；普通 RAM 读写不计进展，避免死循环带访存测不到）处回写。</p>
+<pre class="code"><code>// watchdogCheck: 指令计数检查点（每 ≤10⁴ 条）；无进展检测 + 宿主时间辅助 + 幂等
+// progressBase 更新点（三类外部可见进展各自回写基准，评审 R12-2）：
+//   ① 事件分发：dispatchDueEvents() 分发任一到期事件后    → progressBase = instrCount;
+//   ② 中断交付：pollIRQ() 仲裁命中并交付中断后            → progressBase = instrCount;
+//   ③ 访存 I/O：onProgress() 回调（仅 MMIO 区域访问完成，
+//                普通 RAM 读写不计进展，评审 R12-3）      → progressBase = instrCount;
+void watchdogCheck(EngineState* s) {
+    s-&gt;instrCount++;
+    if (s-&gt;instrCount % 10000 != 0) return;
+    if (s-&gt;watchdogFired) return;             // 幂等：一次运行仅触发一次
+    // 条件1：无进展检测（连续 progressWindow 条无外部事件）
+    bool noProgress = (s-&gt;instrCount - s-&gt;progressBase) &gt;= s-&gt;progressWindow;
+    // 条件2：宿主时间辅助（单调时钟，暂停期已扣除）
+    bool hostSlow = (host_now_us() - s-&gt;lastCheckHostUs) &gt; s-&gt;hostBudgetUs;
+    if (hostSlow) s-&gt;hostSlowWin++; else s-&gt;hostSlowWin = 0;
+    bool hostSlow3 = (s-&gt;hostSlowWin &gt;= 3);   // 滑动窗口：连续 3 窗确认
+    if (noProgress || hostSlow3) {
+        s-&gt;watchdogFired = 1;                 // 幂等标志
+        log(ERROR, &quot;ENGINE-WD&quot;, &quot;guest runaway&quot;, &quot;&quot;);
+        report(HMS_FATAL, &quot;guest runaway&quot;);   // M-22 报告接口（hms_report 为其内部封装名）；同步终止（不投递事件）
+        // EV_WATCHDOG 仅作日志/回放记录（WatchdogEv{reason}）
+    }
+    s-&gt;lastCheckHostUs = host_now_us();
+}</code></pre>
+<h3 id="sec3-6" class="h-sub">3.6 确定性 PRNG</h3>
+<p class="body">种子化 PRNG 服务噪声/去抖/ADC 等随机源：同一种子生成同一随机序列，不依赖宿主熵（2.4 表6）；随机源消费顺序由事件排序锁定，保证跨运行一致。</p>
+<h3 id="sec3-7" class="h-sub">3.7 宿主时间与暂停扣除</h3>
+<p class="body">宿主墙钟仅用于 watchdog 辅助预算：使用单调时钟（host_now_us，performance.now 语义），回拨差值为负按 0 处理；暂停（paused）与断点期间在 resume 时重置 lastCheckHostUs 为当前宿主时刻，暂停时长不累积（评审 12-4）。</p>
+<h3 id="sec3-8" class="h-sub">3.8 与真实仿真器的差异对照表</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:14%"><col style="width:30%"><col style="width:34%"><col style="width:22%"></colgroup><thead><tr><th style="width:14%;text-align:center">维度</th><th style="width:30%;text-align:center">周期精确仿真器</th><th style="width:34%;text-align:center">本平台建模（量子化混合调度）</th><th style="width:22%;text-align:center">差异影响</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">时间推进</td><td style="text-align:left">逐周期/逐指令推进</td><td style="text-align:left">1µs 量子 + 每量子指令配额；空闲区间批量推进</td><td style="text-align:left">宏观行为一致；周期级时序不建模</td></tr><tr class="row1"><td data-label="维度" style="text-align:center">宿主时钟</td><td data-label="周期精确仿真器" style="text-align:left">真实时间驱动</td><td data-label="本平台建模" style="text-align:left">仅 watchdog 辅助预算（单调时钟、暂停扣除）</td><td data-label="差异影响" style="text-align:left">确定性可复现（FR-12）；不误判（12-2/12-4）</td></tr><tr class="row0"><td data-label="维度" style="text-align:center">中断采样</td><td data-label="周期精确仿真器" style="text-align:left">硬件实时</td><td data-label="本平台建模" style="text-align:left">量子边界采样（≤1 量子延迟）</td><td data-label="差异影响" style="text-align:left">中断交付语义一致；延迟 ≤1µs 虚拟时间</td></tr><tr class="row1"><td data-label="维度" style="text-align:center">随机源</td><td data-label="周期精确仿真器" style="text-align:left">真实噪声/去抖</td><td data-label="本平台建模" style="text-align:left">固定种子 PRNG</td><td data-label="差异影响" style="text-align:left">同种子同输入 → 同结果</td></tr><tr class="row0"><td data-label="维度" style="text-align:center">失控判定</td><td data-label="周期精确仿真器" style="text-align:left">硬件 watch（实时）</td><td data-label="本平台建模" style="text-align:left">无进展检测（连续 N 条无外部事件）+ 宿主时间辅助 + 滑动窗口确认</td><td data-label="差异影响" style="text-align:left">不因执行快/GC 卡顿误判（12-2/12-9）</td></tr><tr class="row1"><td data-label="维度" style="text-align:center">调度</td><td data-label="周期精确仿真器" style="text-align:left">实时/抢占</td><td data-label="本平台建模" style="text-align:left">安全检查点（量子边界∨指令边界∨事件边界）命令队列注入</td><td data-label="差异影响" style="text-align:left">命令响应 ≤500ms（估算基线）；不打断访存</td></tr></tbody></table></div>
+    
+<h2 id="sec4" class="h-sec">4 关键函数</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:22%"><col style="width:54%"></colgroup><thead><tr><th style="width:24%;text-align:center">函数</th><th style="width:22%;text-align:center">说明</th><th style="width:54%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">runUntil(t)</td><td style="text-align:left">连续执行到虚拟时间 t 或暂停条件</td><td style="text-align:left">主循环入口；调用 M-13 step 系列；输出：RunReason</td></tr><tr class="row1"><td style="text-align:center">scheduleEvent(ev)</td><td style="text-align:left">事件入队（时间戳化输入事件统一入口）</td><td style="text-align:left">输入：{time, kind, payload}；输出：插入序（取消令牌）；迟到归一</td></tr><tr class="row0"><td style="text-align:center">advanceTime()</td><td style="text-align:left">推进虚拟时间（仅空闲区间，批量到下一事件/检查点）</td><td style="text-align:left">输出：新的虚拟时间（不依赖宿主时钟）</td></tr><tr class="row1"><td style="text-align:center">pollIRQ()</td><td style="text-align:left">量子边界中断采样</td><td style="text-align:left">调用 M-16 arbitrate；交接 PendingIntr{line, cause, prio}；输出：待交付中断列表</td></tr><tr class="row0"><td style="text-align:center">injectCommand(cmd)</td><td style="text-align:left">控制命令注入（结构化排队）</td><td style="text-align:left">输入：Command{kind, arg}；输出：命令序；安全检查点按序执行</td></tr><tr class="row1"><td style="text-align:center">watchdogCheck()</td><td style="text-align:left">无进展检测 + 宿主时间辅助（幂等、滑动窗口）</td><td style="text-align:left">输出：同步 report(HMS_FATAL)（hms_report 为内部封装名）；EV_WATCHDOG 仅记录</td></tr><tr class="row0"><td style="text-align:center">dispatchDueEvents()</td><td style="text-align:left">到期事件分发</td><td style="text-align:left">调用 M-15 onEvent → 中断请求；跳过已取消事件；输出：分发计数</td></tr><tr class="row1"><td style="text-align:center">getEngineState()</td><td style="text-align:left">对外状态查询</td><td style="text-align:left">输出：{virtualTime, instrCount, paused, queueDepth, lastReason}（评审 B12-6）</td></tr><tr class="row0"><td style="text-align:center">eventCancel(seq)</td><td style="text-align:left">事件取消（按插入序标记）</td><td style="text-align:left">输入：seq；留在堆中分发时跳过（评审 12-8）</td></tr><tr class="row1"><td style="text-align:center">engineReset()</td><td style="text-align:left">引擎复位（清空队列、重置状态）</td><td style="text-align:left">事件生命周期管理：reset 清队列 + 重置进度基准（评审 12-8）</td></tr></tbody></table></div>
+<p class="body">说明：runUntil 为唯一主循环入口、scheduleEvent 为唯一事件入队入口（外部输入唯一路径 = M-04 recordInput → M-20 事件流 → M-12 调度，评审 B12-2）；watchdog 与 guest trap 严格区分（平台级故障 vs 模型内 guest 异常）。测试注入（评审 12-7）：hostClock 可 mock（hostClock_t 函数指针）、engineHooks 提供打点钩子（onQuantumBegin/onInstrExec/onIRQSample/onProgress）。</p>
+
+<h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 主循环流程</h3>
+<p class="body">主循环闭环如下（对应图 1，源设计 4.4.1.4；时序按评审 12-1 修订）：</p>
+<p class="body">（1）取最早到期事件：eventQueue.top（虚拟时间，插入序）；迟到事件归一为当前时间（评审 12-6）。</p>
+<p class="body">（2）分发到期事件：外设 onEvent → 中断请求（M-15/M-16）；跳过已取消事件。</p>
+<p class="body">（3）量子边界采样 + 执行：pollIRQ → M-16 交接（PendingIntr{line, cause, prio}）；ISS 执行至多每量子指令配额（访存同步分发、钩子触发、trap 记录）。</p>
+<p class="body">（4）安全检查点：指令计数边界 ∨ 事件边界；命令队列按序执行 + watchdog 无进展检测（每 ≤10⁴ 条）。</p>
+<p class="body">（5）批量推进（仅空闲区间）：无到期事件且无待交付中断 → 推进到下一事件/检查点，不空转；回到循环顶。</p>
+<p class="body">（6）观测与记录：probe → M-18 → M-19；log → M-21（调度/watchdog 日志）。</p>
+<p class="body">（7）watchdog 确认：连续窗口无进展 → HMS 同步 terminate（幂等，与 guest trap 严格区分）。</p>
+<div class="fig"><svg class="flow-svg" viewBox="0 0 980 680" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-12 主循环流程">
+<defs>
+<marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#4b5563"/></marker>
+</defs>
+<rect x="60" y="40" width="380" height="74" rx="10" fill="#f1f4f9" stroke="#1e3a8a" stroke-width="1.5"/>
+<text x="250" y="66" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">① 取最早到期事件</text>
+<text x="250" y="92" text-anchor="middle" font-size="12.5" fill="#4b5563">eventQueue.top（虚拟时间, 插入序）；迟到事件归一</text>
+<rect x="60" y="160" width="380" height="74" rx="10" fill="#f1f4f9" stroke="#1e3a8a" stroke-width="1.5"/>
+<text x="250" y="186" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">② 分发到期事件</text>
+<text x="250" y="212" text-anchor="middle" font-size="12.5" fill="#4b5563">外设 onEvent → 中断请求（M-15/M-16）</text>
+<rect x="60" y="280" width="380" height="84" rx="10" fill="#f1f4f9" stroke="#1e3a8a" stroke-width="1.5"/>
+<text x="250" y="304" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">③ 量子边界采样 + 执行</text>
+<text x="250" y="328" text-anchor="middle" font-size="12.5" fill="#4b5563">pollIRQ → M-16 交接（PendingIntr）</text>
+<text x="250" y="348" text-anchor="middle" font-size="12.5" fill="#4b5563">ISS 执行 ≤ 每量子指令配额（M-13 step）</text>
+<rect x="60" y="410" width="380" height="84" rx="10" fill="#f1f4f9" stroke="#1e3a8a" stroke-width="1.5"/>
+<text x="250" y="434" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">④ 安全检查点</text>
+<text x="250" y="458" text-anchor="middle" font-size="12.5" fill="#4b5563">指令计数边界 ∨ 事件边界；命令队列按序执行</text>
+<text x="250" y="478" text-anchor="middle" font-size="12.5" fill="#4b5563">watchdog 无进展检测（每 ≤10⁴ 条）</text>
+<rect x="60" y="540" width="380" height="74" rx="10" fill="#f1f4f9" stroke="#1e3a8a" stroke-width="1.5"/>
+<text x="250" y="566" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">⑤ 批量推进（仅空闲区间）</text>
+<text x="250" y="592" text-anchor="middle" font-size="12.5" fill="#4b5563">无到期事件且无待交付中断 → 推进到下一事件/检查点</text>
+<rect x="560" y="280" width="360" height="84" rx="10" fill="#eef2fb" stroke="#2f5bd6" stroke-width="1.5"/>
+<text x="740" y="304" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">⑥ 观测与记录</text>
+<text x="740" y="328" text-anchor="middle" font-size="12.5" fill="#4b5563">probe → M-18 → M-19 波形</text>
+<text x="740" y="348" text-anchor="middle" font-size="12.5" fill="#4b5563">log → M-21（调度/watchdog 日志）</text>
+<rect x="560" y="410" width="360" height="84" rx="10" fill="#eef2fb" stroke="#2f5bd6" stroke-width="1.5"/>
+<text x="740" y="434" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">⑦ watchdog 确认</text>
+<text x="740" y="458" text-anchor="middle" font-size="12.5" fill="#4b5563">连续窗口无进展 → HMS 同步 terminate</text>
+<text x="740" y="478" text-anchor="middle" font-size="12.5" fill="#4b5563">幂等；与 guest trap 严格区分</text>
+<rect x="140" y="626" width="700" height="44" rx="8" fill="#ffffff" stroke="#9aa1af" stroke-width="1" stroke-dasharray="5 4"/>
+<text x="490" y="646" text-anchor="middle" font-size="12.5" fill="#4b5563">循环：⑤ 后回到 ①；每量子指令配额映射（量子↔指令）；宿主时钟仅辅助预算、暂停期扣除</text>
+<text x="490" y="662" text-anchor="middle" font-size="11" fill="#6b7280">确定性：固定种子 PRNG + （虚拟时间, 插入序）稳定排序，不依赖宿主时钟（2.4 表6）</text>
+<line x1="250" y1="114" x2="250" y2="160" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="250" y1="234" x2="250" y2="280" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="250" y1="364" x2="250" y2="410" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="250" y1="494" x2="250" y2="540" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="440" y1="322" x2="560" y2="322" stroke="#2f5bd6" stroke-width="1.5" marker-end="url(#arr)"/>
+<text x="500" y="314" text-anchor="middle" font-size="11.5" fill="#2f5bd6">执行后</text>
+<line x1="440" y1="452" x2="560" y2="452" stroke="#2f5bd6" stroke-width="1.5" marker-end="url(#arr)"/>
+<text x="500" y="444" text-anchor="middle" font-size="11.5" fill="#2f5bd6">确认后</text>
+</svg><div class="flow-mobile">
+<div class="flow-step"><span class="num">1</span><span class="txt">取最早到期事件：eventQueue.top（虚拟时间, 插入序）；迟到事件归一为当前时间</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">2</span><span class="txt">分发到期事件：外设 onEvent → 中断请求（M-15/M-16）；跳过已取消事件</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">3</span><span class="txt">量子边界采样 + 执行：pollIRQ → M-16 交接（PendingIntr）；ISS 执行 ≤ 每量子指令配额</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">4</span><span class="txt">安全检查点：指令计数边界 ∨ 事件边界；命令队列按序执行 + watchdog 无进展检测</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">5</span><span class="txt">批量推进（仅空闲区间）：无到期事件且无待交付中断 → 推进到下一事件/检查点，不空转</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">6</span><span class="txt">观测与记录：probe → M-18 → M-19；log → M-21（调度/watchdog 日志）</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">7</span><span class="txt">watchdog 确认：连续窗口无进展 → HMS 同步 terminate（幂等，与 guest trap 严格区分）</span></div>
+<div class="flow-branch">循环：⑤ 后回到 ①；每量子指令配额映射（量子↔指令）；宿主时钟仅辅助预算、暂停期扣除；确定性 = 固定种子 + 稳定事件排序，不依赖宿主时钟</div>
+</div><figcaption>图 1 · M-12 主循环流程（v1.1）</figcaption></div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:18%"><col style="width:34%"><col style="width:48%"></colgroup><thead><tr><th style="width:18%;text-align:center">协作模块</th><th style="width:34%;text-align:center">接口</th><th style="width:48%;text-align:center">时机与说明</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-13（ISS）</td><td style="text-align:left">step 系列（执行）</td><td style="text-align:left">每量子执行至多指令配额；访存经 M-14、钩子触发（4.4.1.4）</td></tr><tr class="row1"><td data-label="协作模块" style="text-align:center">M-14/M-15（总线/外设）</td><td data-label="接口" style="text-align:left">访存分发 / onEvent</td><td data-label="时机与说明" style="text-align:left">到期事件分发到外设；访存同步分发（4.4.1.4）</td></tr><tr class="row0"><td data-label="协作模块" style="text-align:center">M-16（中断）</td><td data-label="接口" style="text-align:left">pollIRQ() → PendingIntr 交接</td><td data-label="时机与说明" style="text-align:left">量子边界采样；交接结构 {line, cause, prio}（评审 B12-5）</td></tr><tr class="row1"><td data-label="协作模块" style="text-align:center">M-17（控制接口）</td><td data-label="接口" style="text-align:left">runUntil/step/pause</td><td data-label="时机与说明" style="text-align:left">调试服务经抽象代理；控制命令结构化排队、安全检查点注入（评审 B12-3）</td></tr><tr class="row0"><td data-label="协作模块" style="text-align:center">M-21（日志）</td><td data-label="接口" style="text-align:left">log(level, &quot;ENGINE&quot;, ...）</td><td data-label="时机与说明" style="text-align:left">调度/watchdog 日志；自动附双时间戳（对接见 9.2）</td></tr><tr class="row1"><td data-label="协作模块" style="text-align:center">M-22（HMS）</td><td data-label="接口" style="text-align:left">report(signal)（watchdog 上报）</td><td data-label="时机与说明" style="text-align:left">guest 失控同步终止上报；EV_WATCHDOG 仅记录（评审 12-3）</td></tr></tbody></table></div>
+
+<h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 异常与处置</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:22%"><col style="width:20%"><col style="width:58%"></colgroup><thead><tr><th style="width:22%;text-align:center">异常场景</th><th style="width:20%;text-align:center">处理语义</th><th style="width:58%;text-align:center">说明</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">guest trap（访存异常/非法指令）</td><td style="text-align:left">模型内 guest 异常</td><td style="text-align:left">正常调试语义（E_BUS-01/E_ISS-01），非平台故障（4.4.1.5）</td></tr><tr class="row1"><td data-label="异常场景" style="text-align:center">watchdog 确认（无进展）</td><td data-label="处理语义" style="text-align:left">平台级故障，同步终止</td><td data-label="说明" style="text-align:left">连续窗口无进展 → report(HMS_FATAL)（hms_report 为内部封装名）同步 terminate；幂等；EV_WATCHDOG 仅记录（评审 12-3/12-9）</td></tr><tr class="row0"><td data-label="异常场景" style="text-align:center">事件队列溢出</td><td data-label="处理语义" style="text-align:left">暂停仿真并告警</td><td data-label="说明" style="text-align:left">不丢弃事件、不继续推进；HMS 告警；恢复：drain 非关键事件或扩容（评审 12-8）</td></tr><tr class="row1"><td data-label="异常场景" style="text-align:center">控制命令排队</td><td data-label="处理语义" style="text-align:left">安全检查点按序执行</td><td data-label="说明" style="text-align:left">非安全点命令先入 cmdQueue；不产生半指令状态（评审 B12-3）</td></tr><tr class="row0"><td data-label="异常场景" style="text-align:center">迟到事件</td><td data-label="处理语义" style="text-align:left">归一为当前时间</td><td data-label="说明" style="text-align:left">time &lt; virtualTime → 按当前时间入队 + log 警告；不丢弃（评审 12-6）</td></tr><tr class="row1"><td data-label="异常场景" style="text-align:center">宿主时钟回拨/暂停</td><td data-label="处理语义" style="text-align:left">单调时钟 + 暂停扣除</td><td data-label="说明" style="text-align:left">差值非正按 0 处理；resume 重置计时基准（评审 12-4）</td></tr><tr class="row0"><td data-label="异常场景" style="text-align:center">PRNG 消费越界</td><td data-label="处理语义" style="text-align:left">确定性保底</td><td data-label="说明" style="text-align:left">同种子同输入序列 → 同结果；随机源消费顺序由事件排序锁定（2.4 表6）</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）性能边界：每量子固定开销（到期事件检查 + IRQ 采样 + 控制注入检查）预算 ≤10% 单量子执行时间（估算基线，评审 P-11）；批量推进仅限空闲区间、不空转。</p>
+<p class="body">（2）确定性边界：虚拟时间不依赖宿主时钟；事件队列按（虚拟时间, 插入序）稳定排序；违反 → 确定性断言失败（2.4 表6、源文档 7.3 表92）。</p>
+<p class="body">（3）watchdog 阈值边界：无进展窗口（10⁶ 条）与宿主时间辅助预算（默认 200ms）为估算基线，实现后实测校准；宿主慢速仅作辅助判据，连续 3 窗确认，不误判正常慢速仿真与宿主 GC（评审 12-2/12-9）。</p>
+<p class="body">（4）事件队列溢出：暂停仿真并告警，不丢事件；恢复路径 = drain 非关键事件或扩容后继续（评审 12-8）。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表91（M-12 行）：测试要点 = 确定性调度；关键用例 = 同种子同输入 → 同结果、批量推进不空转、watchdog 超时判定；通过准则 = 确定性成立、超时事件正确。评审 12-7 补充：时钟 mock 注入（hostClock 函数指针）+ 循环计数/采样打点钩子（engineHooks），使「批量推进不空转」「交付延迟 ≤1 量子」「死循环 → 无进展确认」均成为可构造、可断言用例。展开用例表如下（核心模块覆盖率 ≥70%，源文档 7.3 表92）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:20%"><col style="width:40%"><col style="width:40%"></colgroup><thead><tr><th style="width:20%;text-align:center">用例</th><th style="width:40%;text-align:center">输入 / 步骤</th><th style="width:40%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（源 2.5/7.1 对齐）</td><td style="text-align:left">按 9.1.1 端口契约表逐项校验 runUntil/scheduleEvent/advanceTime/pollIRQ/injectCommand/watchdogCheck 的接口签名、输入校验、输出结构与错误码；替代实现接入前必须同端口契约测试全绿</td><td style="text-align:left">契约测试全绿；契约变更须同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">确定性夹具</td><td data-label="输入 / 步骤" style="text-align:left">同种子 + 同时间戳化输入序列（UART 写/按键/GPIO 注入）跑两遍</td><td data-label="通过准则" style="text-align:left">事件处理序列与结果完全一致（虚拟时间, 插入序）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">批量推进不空转</td><td data-label="输入 / 步骤" style="text-align:left">注入空闲区间（无事件、无待交付中断），runUntil 推进</td><td data-label="通过准则" style="text-align:left">hooks.onQuantumBegin 计数不随空闲增长；直接跳到下一事件/检查点</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">watchdog 无进展确认</td><td data-label="输入 / 步骤" style="text-align:left">构造纯计算循环（无事件/无 I/O），mock 时钟推进</td><td data-label="通过准则" style="text-align:left">连续 ≥progressWindow 条无进展 → report(HMS_FATAL) 一次（幂等）；不误判（12-2）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">宿主慢速不误判</td><td data-label="输入 / 步骤" style="text-align:left">mock 时钟抖动/回拨、暂停恢复</td><td data-label="通过准则" style="text-align:left">暂停期不累积；回拨按 0；连续 3 窗确认后才触发（12-4/12-9）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">量子边界采样</td><td data-label="输入 / 步骤" style="text-align:left">外设请求中断，推进一个量子</td><td data-label="通过准则" style="text-align:left">hooks.onIRQSample 每量子触发；交付延迟 ≤1 量子</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">安全检查点注入</td><td data-label="输入 / 步骤" style="text-align:left">执行中下发 pause/step/runUntil/setBreakpoint</td><td data-label="通过准则" style="text-align:left">命令队列按序执行；仅安全点生效；不打断访存、无半指令状态</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">事件队列稳定排序</td><td data-label="输入 / 步骤" style="text-align:left">同虚拟时间入队多个事件</td><td data-label="通过准则" style="text-align:left">按插入序严格定序；跨运行一致</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">事件取消</td><td data-label="输入 / 步骤" style="text-align:left">入队后 eventCancel(seq)</td><td data-label="通过准则" style="text-align:left">分发时跳过；确定性序列不变（评审 12-8）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">迟到事件</td><td data-label="输入 / 步骤" style="text-align:left">入队 time &lt; 当前 virtualTime</td><td data-label="通过准则" style="text-align:left">归一为当前时间入队 + WARN 日志；不丢弃（评审 12-6）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">事件队列溢出</td><td data-label="输入 / 步骤" style="text-align:left">超容量入队</td><td data-label="通过准则" style="text-align:left">暂停仿真并告警；恢复（drain/扩容）后可继续；不丢事件（评审 12-8）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">PRNG 确定性</td><td data-label="输入 / 步骤" style="text-align:left">同种子生成随机序列</td><td data-label="通过准则" style="text-align:left">噪声/去抖/ADC 序列一致（2.4 表6）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">状态查询与探针</td><td data-label="输入 / 步骤" style="text-align:left">getEngineState / engineHooks</td><td data-label="通过准则" style="text-align:left">virtualTime/instrCount/paused/queueDepth 正确；探针点在关键路径触发（评审 B12-6）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">MMIO vs RAM 进展口径</td><td data-label="输入 / 步骤" style="text-align:left">纯 RAM 循环 vs 带 MMIO 访问循环，mock 时钟推进</td><td data-label="通过准则" style="text-align:left">纯 RAM 循环不刷新 progressBase（可被检出失控）；MMIO 访问经 onProgress 刷新 progressBase（R12-3）</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）单一入口：runUntil 为唯一主循环入口、scheduleEvent 为唯一事件入队入口，逻辑集中可测（评审 12-5 统一命名签名）。</p>
+<p class="body">（2）确定性夹具可复现：测试输入复用 M-20 录制格式（时间戳化输入事件序列），缺陷可一键重放定位。</p>
+<p class="body">（3）日志统一走 M-21：调度/watchdog 事件 log 结构化入缓冲，不依赖临时打印。</p>
+<p class="body">（4）阈值可配置：quantum、quantumInstrQuota、instrCheckpoint、hostBudgetUs、progressWindow、queueCapacity 均为配置项，测试可直接构造超时/溢出/回拨场景。</p>
+<p class="body">（5）测试注入面：hostClock 可 mock（单调时钟可控）+ engineHooks 打点钩子，使时序类用例可断言（评审 12-7）。</p>
+<p class="body">（6）严格区分两类异常：guest trap（模型内）与 watchdog（平台级）语义分离，测试断言不混淆。</p>
+<p class="body">（7）契约层可替换性（源 2.5 对齐）：本模块对外的 driving 端口收敛到 9.1.1 端口契约表，替代实现（替代调度引擎）遵守同端口契约并通过契约测试即可接入，不改动其他模块。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）与 2.4 表6 落到 M-12 责任：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:14%"><col style="width:30%"><col style="width:56%"></colgroup><thead><tr><th style="width:14%;text-align:center">质量属性</th><th style="width:30%;text-align:center">目标（估算基线）</th><th style="width:56%;text-align:center">M-12 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">可靠性</td><td style="text-align:left">确定性可复现（FR-12）</td><td style="text-align:left">稳定事件排序（虚拟时间, 插入序）+ 固定种子 PRNG；虚拟时间不依赖宿主时钟（2.4 表6）</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">性能</td><td data-label="目标" style="text-align:left">WASM 解释 ≥5–10 MIPS</td><td data-label="M-12 落实" style="text-align:left">每量子指令配额 + 空闲区间批量推进不空转；每量子固定开销 ≤10% 单量子执行时间（估算基线）</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">韧性</td><td data-label="目标" style="text-align:left">故障检测→分级→处置→恢复（NFR-08）</td><td data-label="M-12 落实" style="text-align:left">watchdog 无进展检测（连续窗口确认、幂等）→ HMS 同步终止；事件队列溢出暂停可恢复</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">可维护性</td><td data-label="目标" style="text-align:left">核心模块覆盖率 ≥70%；内核前端解耦；模块即积木可替换（源 2.5）</td><td data-label="M-12 落实" style="text-align:left">单一入口（runUntil/scheduleEvent）；日志经 M-21；阈值可配置；时钟 mock + 打点钩子；端口契约测试（9.1.1）保障替代实现可接入</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">可用性</td><td data-label="目标" style="text-align:left">命令响应 ≤500ms（估算基线）</td><td data-label="M-12 落实" style="text-align:left">控制命令队列安全检查点注入，响应及时且不打断访存</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">合规</td><td data-label="目标" style="text-align:left">不引入 GPL；唯一入口</td><td data-label="M-12 落实" style="text-align:left">自研 BSD/MIT；调度日志不自行实现（4.7 唯一入口规则）</td></tr></tbody></table></div>
+
+<h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<p class="body">源设计 4.4.1.6：依赖 = M-13（执行）、M-14/M-15（访存与事件）、M-16（中断）、M-17（控制接口）、M-21（调度/watchdog 日志）、M-22（超时上报）。展开如下：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:28%"><col style="width:16%"><col style="width:56%"></colgroup><thead><tr><th style="width:28%;text-align:center">模块</th><th style="width:16%;text-align:center">方向</th><th style="width:56%;text-align:center">协作内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-13（ISS）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">step 系列执行本量子指令（≤配额）；访存经 M-14、钩子触发（4.4.1.4）</td></tr><tr class="row1"><td style="text-align:center">M-14（总线）/M-15（外设）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">访存同步分发；到期事件 onEvent（4.4.1.4）</td></tr><tr class="row0"><td style="text-align:center">M-16（中断控制器）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">pollIRQ 量子边界采样；交接 PendingIntr{line, cause, prio}（评审 B12-5）</td></tr><tr class="row1"><td style="text-align:center">M-17（ExecutionBackend）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">runUntil/step/pause 控制接口代理；命令结构化排队（评审 B12-3）</td></tr><tr class="row0"><td style="text-align:center">M-21（日志）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">调度/watchdog 日志（对接见 9.2）</td></tr><tr class="row1"><td style="text-align:center">M-22（HMS）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">guest 失控同步终止上报；EV_WATCHDOG 仅记录（评审 12-3）</td></tr><tr class="row0"><td style="text-align:center">M-04/M-20</td><td style="text-align:left">使用方</td><td style="text-align:left">输入注入时间戳化（recordInput → 事件流，唯一路径）；检查点触发（每 10s 虚拟时间或关键事件）</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表52 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层，本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现（替代调度引擎）遵守同端口契约并通过契约测试（7.1）即可接入，无需改动其他模块：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:18%"><col style="width:58%"></colgroup><thead><tr><th style="width:24%;text-align:center">端口 / 服务</th><th style="width:18%;text-align:center">方向</th><th style="width:58%;text-align:center">契约（输入 → 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:left">runUntil(t)</td><td style="text-align:center">提供（driving）</td><td style="text-align:left">主循环入口；调用 M-13 step 系列；输出：暂停原因（TIME_REACHED/PAUSED/BP_HIT/...）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">scheduleEvent(ev)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输入：{time, kind, payload}；输出：插入序（迟到归一，评审 12-6）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">advanceTime()</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输出：新的虚拟时间（空闲区间批量推进，评审 12-1）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">pollIRQ()</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">调用 M-16 arbitrate；输出：待交付中断（PendingIntr{line, cause, prio}，评审 B12-5）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">injectCommand(cmd)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输入：pause/step/runUntil/setBreakpoint；输出：注入点确认（安全点排队，评审 B12-3）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">watchdogCheck()</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输出：guest 失控超时事件（交 HMS；无进展检测 + 3 窗幂等，评审 12-2/12-9）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-13 / M-14 / M-15 / M-16 / M-17 / M-21 / M-22</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">执行、访存、事件、中断、控制、日志、上报（见 9.1）</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:50%"><col style="width:50%"></colgroup><thead><tr><th style="width:50%;text-align:center">时机</th><th style="width:50%;text-align:center">示例调用（ctx / level / errCode）</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">主循环调度（每量子）</td><td style="text-align:left">log(TRACE, &quot;ENGINE&quot;, &quot;quantum advance&quot;, &quot;&quot;)</td></tr><tr class="row1"><td data-label="时机" style="text-align:center">watchdog 确认触发</td><td data-label="示例调用" style="text-align:left">log(ERROR, &quot;ENGINE-WD&quot;, &quot;guest runaway&quot;, &quot;&quot;)</td></tr><tr class="row0"><td data-label="时机" style="text-align:center">事件队列溢出</td><td data-label="示例调用" style="text-align:left">log(ERROR, &quot;ENGINE&quot;, &quot;event queue overflow&quot;, &quot;&quot;)</td></tr><tr class="row1"><td data-label="时机" style="text-align:center">迟到事件归一</td><td data-label="示例调用" style="text-align:left">log(WARN, &quot;ENGINE&quot;, &quot;late event, normalized&quot;, &quot;&quot;)</td></tr><tr class="row0"><td data-label="时机" style="text-align:center">控制命令注入</td><td data-label="示例调用" style="text-align:left">log(INFO, &quot;ENGINE&quot;, &quot;inject pause&quot;, &quot;&quot;)</td></tr><tr class="row1"><td data-label="时机" style="text-align:center">guest trap（正常调试语义）</td><td data-label="示例调用" style="text-align:left">log(WARN, &quot;ENGINE-TRAP&quot;, &quot;unmapped access&quot;, &quot;E_BUS-01&quot;)</td></tr></tbody></table></div>
+<h3 id="sec9-3" class="h-sub">9.3 watchdog / HMS 对接</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:34%"><col style="width:18%"><col style="width:48%"></colgroup><thead><tr><th style="width:34%;text-align:center">接口</th><th style="width:18%;text-align:center">对接方</th><th style="width:48%;text-align:center">信号 / 载荷</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">report(signal)</td><td style="text-align:left">M-22</td><td style="text-align:left">HMS_FATAL（guest 失控）；同步终止内核；watchdogFired 幂等；EV_WATCHDOG 仅作记录（评审 12-3）</td></tr><tr class="row1"><td data-label="接口" style="text-align:center">checkpoint(reason)</td><td data-label="对接方" style="text-align:left">M-04/M-20</td><td data-label="信号 / 载荷" style="text-align:left">每 10s 虚拟时间或关键事件触发检查点（RPO ≤2s 宿主时间口径）</td></tr><tr class="row0"><td data-label="接口" style="text-align:center">recordInput(ev)</td><td data-label="对接方" style="text-align:left">M-04（→ M-20 事件流）</td><td data-label="信号 / 载荷" style="text-align:left">外部输入注入时间戳化，确定性基线（FR-12）；唯一输入路径（评审 B12-2）</td></tr><tr class="row1"><td data-label="接口" style="text-align:center">getEngineState()</td><td data-label="对接方" style="text-align:left">M-17/M-18/前端</td><td data-label="信号 / 载荷" style="text-align:left">状态查询：virtualTime/instrCount/paused/queueDepth/lastReason（评审 B12-6）</td></tr></tbody></table></div>
+<p class="body">单向依赖与唯一入口规则（4.7 调用规则）：业务模块 → 横切组件；日志、探针能力由 M-21/M-18 统一提供，本模块不得自行实现或绕过。</p>
+</main>
+</div>
+</body>
+</html>

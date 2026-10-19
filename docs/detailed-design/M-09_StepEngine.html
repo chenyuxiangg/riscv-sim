@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-09 单步引擎 模块详细设计</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%231e3a8a'/%3E%3Ctext x='12' y='17' font-size='13' text-anchor='middle' fill='%23ffffff' font-family='sans-serif' font-weight='bold'%3ES%3C/text%3E%3C/svg%3E">
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15px; font-weight:700; color:#374151; margin:18px 0 8px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { margin:0 0 10px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  white-space:pre; margin:10px 0 16px; }
+.code-title { font-size:13px; font-weight:700; color:#111827; margin:16px 0 4px; }
+.fig { margin:14px auto; text-align:center; }
+.fig img { max-width:100%; height:auto; border:1px solid var(--line); border-radius:4px; }
+.fig figcaption { font-size:13px; color:var(--ink-2); margin-top:6px; }
+.caption { text-align:center; font-size:13px; color:var(--ink-2); margin:6px 0 4px; }
+.flow-svg { width:100%; height:auto; }
+.flow-mobile { display:none; }
+.flow-step { display:flex; gap:10px; margin:8px 0; align-items:flex-start; }
+.flow-step .num { flex:0 0 26px; height:26px; border-radius:50%; background:var(--brand);
+  color:#fff; font-weight:700; font-size:13px; display:flex; align-items:center; justify-content:center; }
+.flow-step .txt { font-size:14px; }
+.flow-branch { margin:6px 0 6px 36px; font-size:13.5px; color:var(--ink-2); }
+.flow-arrow { text-align:center; color:#9aa1af; font-size:16px; line-height:1; margin:2px 0; }
+.nav-toggle { margin:14px 0; }
+.nav-toggle summary { cursor:pointer; font-weight:700; color:var(--brand);
+  padding:9px 12px; border:1px solid var(--line); border-radius:6px; background:var(--head-bg); list-style:none; }
+.nav-toggle summary::-webkit-details-marker { display:none; }
+.nav-box { display:flex; flex-direction:column; gap:2px; padding:10px 4px 2px; }
+.nav-l1 { color:var(--brand); font-weight:700; text-decoration:none; padding:3px 4px; }
+.nav-l2 { color:var(--ink-2); text-decoration:none; padding:3px 4px 3px 18px; font-size:13.5px; }
+.nav-l1:hover,.nav-l2:hover { color:var(--brand-2); text-decoration:underline; }
+@media (min-width:768px) {
+  .wrap { display:grid; grid-template-columns:260px 1fr; gap:28px; align-items:start; }
+  .wrap > * { min-width:0; }
+  main { min-width:0; }
+  .doc-head { grid-column:1 / -1; }
+  .nav-toggle { position:sticky; top:16px; max-height:calc(100vh - 32px); overflow:auto; }
+  .nav-toggle summary { pointer-events:none; }
+  .flow-svg { display:block; }
+  .flow-mobile { display:none; }
+}
+@media (max-width:767px) {
+  .flow-svg { display:none; }
+  .flow-mobile { display:block; }
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media print {
+  .nav-toggle { display:none; }
+  .wrap { display:block; max-width:none; padding:0; }
+  .doc-title { font-size:20px; }
+  .doc-table, .fig, .code { break-inside:avoid; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="doc-head"><h1 class="doc-title">M-09 单步引擎 模块详细设计</h1><p class="subtitle">RISC-V 仿真平台 · 模块详细设计系列 · 对应《模块设计说明书》4.3.2 节</p><p class="version">HTML 版 v1.0（2026-10-14）· 源设计《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11 契约层版，2026-10-13 更新）</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11；2026-10-13 契约层版新增 2.5 平台共享契约层与各模块端口契约表）</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.3.2（③ 调试服务层 · 单步引擎）；端口契约 = 源文档表43（数据描述 表41、关键函数 表42）；处理流程 = 4.3.2.4</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">FR-08（断点/单步，与 M-08 协作）；NFR-07（单步异常日志）；FR-05（源码联动，经 M-11 行映射）</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">ExecutionBackend 抽象（3.2.4 表13）；安全检查点注入（M-12 量子边界）；行映射引用（M-11）</td></tr><tr class="row0"><td style="text-align:center">MVP 状态</td><td style="text-align:left">P0 主承担模块（MVP 必需：指令级/源码级单步 + stepOver + 安全检查点注入）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；依赖方向（2.1 表5：调试服务 → M-17/M-05）；评审 P-05（watch 语义关联）、17-1（step 指令驱动）</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.0（2026-10-14 初版）：按 M-13 v1.1 标准 9 章结构；内建 9.1.1 端口契约（源表43 对齐）+ CH7 契约测试 + CH8 模块即积木可替换；表号/图号引用源文档契约层版实际编号（表41/42/43、表16、表86、表91/93、图3）；与 M-08 08-3、M-17 17-1 跨模块一致。v1.1（2026-10-14 评审修订）：逐条落实 M-09 评审 09-1~09-9——09-1 stepOver 改断点驱动停止（resumeUntilBp）+ removeBp 仅兜底；09-2 stepSource 归 M-09（循环 step + M-11 行表判跨行，执行后端不依赖行映射）；09-3 StepState 补 SafePoint 字段；09-4 定义 isCall 判定（JAL/JALR rd==x1 调用、rd==x0 纯跳转）；09-5 setBreakpoint 返回值前置检查（E_CTX-07）；09-6 命中自动移除为主 + M-08 remove_bp 无效 id 幂等（同步 M-08 v1.2）；09-7 stepOver 用户断点先命中语义（暂停于用户断点、临时断点保留）；09-8 展开 PauseInfo 字段 + stepSource 跨行后仅上报一次；09-9 错误码核对（源表16 E_CTX-06 已被命令超时占用 → 行映射缺失改新增码 E_CTX-10；stepOver 注入失败复用 E_CTX-07）</td></tr><tr class="row1"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-14</td></tr></tbody></table></div></header><nav class="nav-toggle"><details open><summary>目录</summary><div class="nav-box"><a class="nav-l1" href="#sec1">1 功能概述</a>
+<a class="nav-l2" href="#sec1-1">1.1 模块定位</a>
+<a class="nav-l2" href="#sec1-2">1.2 需求与约束</a>
+<a class="nav-l2" href="#sec1-3">1.3 MVP 范围与预留</a>
+<a class="nav-l1" href="#sec2">2 数据描述</a>
+<a class="nav-l2" href="#sec2-1">2.1 核心数据结构</a>
+<a class="nav-l2" href="#sec2-1-1">2.1.1 复杂结构字段定义</a>
+<a class="nav-l2" href="#sec2-2">2.2 单步模式语义</a>
+<a class="nav-l2" href="#sec2-3">2.3 数据流说明</a>
+<a class="nav-l1" href="#sec3">3 实现设计</a>
+<a class="nav-l2" href="#sec3-1">3.1 step 指令级单步</a>
+<a class="nav-l2" href="#sec3-2">3.2 stepSource 源码级单步</a>
+<a class="nav-l2" href="#sec3-3">3.3 stepOver 跳过函数调用（扩展）</a>
+<a class="nav-l2" href="#sec3-4">3.4 与真实调试器的差异对照表</a>
+<a class="nav-l1" href="#sec4">4 关键函数</a>
+<a class="nav-l1" href="#sec5">5 处理流程</a>
+<a class="nav-l2" href="#sec5-1">5.1 单步处理流程（源 4.3.2.4 对齐）</a>
+<a class="nav-l2" href="#sec5-2">5.2 与相邻模块的协作说明</a>
+<a class="nav-l1" href="#sec6">6 异常处理</a>
+<a class="nav-l2" href="#sec6-1">6.1 错误码与处置</a>
+<a class="nav-l2" href="#sec6-2">6.2 边界与降级</a>
+<a class="nav-l1" href="#sec7">7 测试设计与可维护性</a>
+<a class="nav-l2" href="#sec7-1">7.1 测试要点与关键用例</a>
+<a class="nav-l2" href="#sec7-2">7.2 可维护性手段</a>
+<a class="nav-l1" href="#sec8">8 质量属性落实</a>
+<a class="nav-l1" href="#sec9">9 接口依赖</a>
+<a class="nav-l2" href="#sec9-1">9.1 依赖关系</a>
+<a class="nav-l2" href="#sec9-1-1">9.1.1 端口契约（driving/driven）</a>
+<a class="nav-l2" href="#sec9-2">9.2 日志对接（M-21）</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-09 单步引擎（4.3.2）：实现指令级单步 step() 与源码级单步 stepSource()（按 DWARF 行映射边界推进，FR-08）。单步在安全检查点注入，保证不打断执行中的访存、不产生半指令状态（4.3.2.1）。stepOver()（跳过函数调用）为扩展能力，经 M-08 临时断点实现（4.3.2.3 表42）。</p>
+<p class="body">单步是「暂停态 → 执行 1 条/1 行 → 再暂停」的确定性推进：只接受暂停态命令（非暂停态 → E_CTX-02 拒绝），执行粒度由 M-17 抽象保证（指令驱动 step / 行边界 stepSource），单步结果经 M-05 上报 paused（可靠投递），前端刷新视图（4.3.2.4）。断点命中时 M-09 与 M-08 协作：onHit 调 M-09 暂停冻结（SimState 对齐量子边界，5.2 图3），单步/暂停状态一致。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:62%"><col style="width:24%"></colgroup><thead><tr><th style="width:14%;text-align:center">类别</th><th style="width:62%;text-align:center">约束内容</th><th style="width:24%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">功能</td><td style="text-align:left">指令级单步 step() + 源码级单步 stepSource()（按 DWARF 行映射边界推进，FR-08）；stepOver() 扩展（M-08 临时断点）</td><td style="text-align:left">4.3.2.1、4.3.2.3、FR-08</td></tr><tr class="row1"><td style="text-align:center">正确性</td><td style="text-align:left">单步在安全检查点注入，不打断执行中的访存、不产生半指令状态（4.3.2.1）</td><td style="text-align:left">4.3.2.1</td></tr><tr class="row0"><td style="text-align:center">状态约束</td><td style="text-align:left">非暂停态调用单步 → E_CTX-02 拒绝（3.4 表16）</td><td style="text-align:left">4.3.2.5</td></tr><tr class="row1"><td style="text-align:center">降级</td><td style="text-align:left">行映射缺失时 stepSource 自动降级为 step 并提示（表91 M-09 行）</td><td style="text-align:left">4.3.2.5、7.2 表91</td></tr><tr class="row0"><td style="text-align:center">角色边界</td><td style="text-align:left">单步命令仅调试者角色会话可用；产品/嵌入式工作台只消费 paused 事件（只读）</td><td style="text-align:left">2.4 表6、4.3.2.6</td></tr><tr class="row1"><td style="text-align:center">性能</td><td style="text-align:left">运行控制工具栏命令响应 ≤500ms（M-09/M-12 命令驱动，估算基线）</td><td style="text-align:left">8 章表93</td></tr><tr class="row0"><td style="text-align:center">韧性</td><td style="text-align:left">单步结果 paused 可靠投递（ack/重试，对齐 E1 语义）；前端缺口后 reconcile 对账</td><td style="text-align:left">4.3.2.4、5.2 图3</td></tr><tr class="row1"><td style="text-align:center">体积</td><td style="text-align:left">随内核 WASM 打包，计入内核 ≤1.5 MiB 压缩预算（估算基线）</td><td style="text-align:left">3.3 表15</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：step()（指令级单步）、stepSource()（源码级单步，按 M-11 行映射边界推进，缺失降级 step + 提示）、stepOver()（跳过函数调用，M-08 临时断点）、安全检查点注入（safePointInject，对齐量子边界）、暂停态约束（E_CTX-02）、paused 上报（M-05 可靠投递）、单步异常日志（M-21）。</p>
+<p class="body">预留项（P1/P2 演进承接，不展开实现）：行映射深化（P1，依赖 M-11 DWARF .debug_line 行表与栈帧，行边界精确定位）；条件单步（P1，跳过 N 条/按条件暂停）；单步与指令 trace 联动（P1，配合 M-18）；反向单步（P2，配合 M-20 检查点重放）。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:20%"><col style="width:16%"><col style="width:64%"></colgroup><thead><tr><th style="width:20%;text-align:center">数据结构</th><th style="width:16%;text-align:center">类型</th><th style="width:64%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">stepMode</td><td style="text-align:left">enum</td><td style="text-align:left">单步模式：instruction / source（4.3.2.2 表41）</td></tr><tr class="row1"><td style="text-align:center">lineMapRef</td><td style="text-align:left">ref</td><td style="text-align:left">M-11 行映射引用（源码级单步依赖，DWARF 行边界）</td></tr><tr class="row0"><td style="text-align:center">stepState</td><td style="text-align:left">struct</td><td style="text-align:left">单步推进状态（安全点注入标记/当前模式/降级标记）</td></tr><tr class="row1"><td style="text-align:center">safePoint</td><td style="text-align:left">struct</td><td style="text-align:left">安全检查点（量子边界对齐；保证不打断访存、无半指令状态）</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="lead">stepMode 定义单步模式；LineMapRef 是 M-11 行映射的引用句柄；StepState 记录一次单步推进的上下文；SafePoint 是注入到 M-12 量子边界的安全检查点。字段定义如下：</p>
+<pre class="code"><code>// StepMode: 单步模式（4.3.2.2 表41）
+enum StepMode {
+  INSTRUCTION = 0,  // 指令级单步：执行 1 条指令后暂停（step()）
+  SOURCE      = 1,  // 源码级单步：按 DWARF 行映射边界推进（stepSource()）
+};
+// LineMapRef: M-11 行映射引用（源码级单步依赖；句柄由 M-11 行表提供）
+struct LineMapRef {
+  uint32_t handle;      // M-11 行映射句柄（地址→源码行双向索引）
+  uint8_t  valid;       // 行映射有效性（0=缺失 → stepSource 降级 step + 提示）
+};
+// StepState: 单步推进状态（一次单步命令的上下文）
+struct StepState {
+  StepMode  mode;       // 本次单步模式（INSTRUCTION / SOURCE）
+  uint32_t  targetLine; // 源码级单步目标行（SOURCE 模式；行映射边界）
+  uint8_t   degraded;   // 降级标记（SOURCE 缺行映射 → 降级 INSTRUCTION，置 1）
+  SafePoint safePoint;  // 安全检查点（safePointInject 写入；对齐 M-12 量子边界，评审 09-3）
+  PauseInfo lastPause;  // 上次暂停信息（原因/PC/虚拟时间，来源 M-17，评审 09-8）
+};
+// SafePoint: 安全检查点（注入 M-12 量子边界）
+struct SafePoint {
+  uint64_t  quantumSeq; // 对齐的量子序号（M-12 量子化混合调度）
+  uint8_t   inMemOp;    // 访存进行中标记（inMemOp=1 时禁止注入，保证不打断访存）
+  uint8_t   injected;   // 已注入标记（1=已注入，等待单步执行）
+};
+// PauseInfo: 暂停信息（契约来自 M-17；评审 09-8 展开字段）
+struct PauseInfo {
+  PauseReason reason;   // 暂停原因：STEP_DONE=0 / BP_HIT=1 / ABORT=2（M-17 契约）
+  uint32_t    pc;       // 暂停点 PC（指令边界，无半指令状态）
+  uint64_t    time_virt;// 虚拟时间（M-12 权威时钟；日志/前端显示用）
+};</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 单步模式语义</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:22%"><col style="width:34%"><col style="width:28%"><col style="width:16%"></colgroup><thead><tr><th style="width:22%;text-align:center">模式</th><th style="width:34%;text-align:center">语义</th><th style="width:28%;text-align:center">执行通道</th><th style="width:16%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">instruction（指令级）</td><td style="text-align:left">执行 1 条指令后暂停（源 4.3.2.1）</td><td style="text-align:left">M-17 step()（指令驱动）</td><td style="text-align:left">不因事件插入跳过/多步（对齐 M-17 17-1/17-10）</td></tr><tr class="row1"><td data-label="模式" style="text-align:center">source（源码级）</td><td data-label="语义" style="text-align:left">按 DWARF 行映射边界推进至下一行</td><td data-label="执行通道" style="text-align:left">M-09 循环 step + M-11 行表判跨行（评审 09-2 方案①）</td><td data-label="备注" style="text-align:left">跨行后仅上报一次 paused；缺失 → 降级 step + 提示（E_CTX-10）</td></tr><tr class="row0"><td data-label="模式" style="text-align:center">over（跳过调用）</td><td data-label="语义" style="text-align:left">stepOver：跳过函数调用至返回后首条（扩展）</td><td data-label="执行通道" style="text-align:left">M-08 临时断点（返回地址注入）</td><td data-label="备注" style="text-align:left">sourceType=1 临时断点命中即移除（对齐 M-08 08-3）</td></tr></tbody></table></div>
+<h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+<p class="body">命令流：前端（M-01~M-03）→ M-05 会话 → M-09 step/stepSource/stepOver → 状态校验（暂停态，否则 E_CTX-02）→ 安全检查点注入 → M-17 执行通道。</p>
+<p class="body">执行流：M-17 step() 执行 1 条指令（指令驱动）→ 返回 PauseInfo（原因/PC/虚拟时间）→ M-09 记录 StepState.lastPause；stepSource 由 M-09 循环 step + M-11 行表判跨行（评审 09-2 方案①）。</p>
+<p class="body">上报流：单步完成 → M-05 publish(paused)（可靠投递，ack/重试）→ 前端刷新视图（寄存器/内存/反汇编/源码高亮联动，M-02/M-08~M-11 暂停态读写）。单步异常 → M-21 日志（单步异常日志，4.3.2.6 表43）。</p>
+<h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 step 指令级单步</h3>
+<p class="body">step()：暂停态接收命令（非暂停态 → E_CTX-02 拒绝）→ 安全检查点注入（safePointInject：对齐 M-12 量子边界，inMemOp=1 时等待访存完成，保证不打断执行中访存、不产生半指令状态）→ 调 M-17 step() 执行 1 条指令 → 暂停 → 记录 StepState → M-05 publish(paused)。伪代码如下：</p>
+<pre class="code"><code>// step: 指令级单步（4.3.2.3 表42；执行 1 条指令后暂停）
+PauseInfo step(err_t* err) {
+    if (!isPaused()) { *err = E_CTX-02; return (PauseInfo){0}; }  // 非暂停态调用拒绝
+    safePointInject(INSTRUCTION);                 // 安全检查点注入（对齐量子边界）
+    PauseInfo p = m17_step();                     // M-17 指令驱动：恰执行 1 条后暂停
+    stepState.lastPause = p; stepState.mode = INSTRUCTION;
+    publish(&quot;paused&quot;, &amp;p);                        // M-05 可靠投递（ack/重试）
+    log(INFO, &quot;DBG-STEP&quot;, &quot;step done&quot;, &quot;E_OK&quot;);
+    return p;                                     // 输出：暂停状态
+}
+// safePointInject: 安全检查点注入（4.3.2.1；保证不打断访存、无半指令状态）
+void safePointInject(StepMode m) {
+    stepState.mode = m; stepState.targetLine = currentLine();
+    // 在 M-12 量子边界注入；若访存进行中（inMemOp=1）则推迟至该访存完成：
+    // 保证「执行中的访存不被打断」「指令边界原子（无半指令状态）」
+    m12_injectSafePoint(&amp;stepState.safePoint);
+}</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 stepSource 源码级单步</h3>
+<p class="body">stepSource()：行边界是调试层概念，归 M-09 实现（评审 09-2 方案①）——执行后端只提供指令驱动 step()，M-09 循环 step 并以 M-11 行表判跨行；中间暂停不上报，跨行后仅 publish 一次（评审 09-8）。行映射缺失（lineMapRef.valid=0）自动降级为 step 并提示（WARN 日志 + 前端提示，E_CTX-10）。伪代码如下：</p>
+<pre class="code"><code>// stepSource: 源码级单步（4.3.2.3 表42；行边界归 M-09，评审 09-2/09-8）
+PauseInfo stepSource(err_t* err) {
+    if (!isPaused()) { *err = E_CTX-02; return (PauseInfo){0}; }  // 非暂停态调用拒绝
+    if (!lineMapRef.valid) {                      // 行映射缺失 → 降级 step + 提示（E_CTX-10，评审 09-9）
+        stepState.degraded = 1;
+        log(WARN, &quot;DBG-STEP&quot;, &quot;line map missing, degrade to step&quot;, &quot;E_CTX-10&quot;);
+        return step(err);                         // 自动降级为指令级单步
+    }
+    safePointInject(SOURCE);
+    uint32_t targetLine = m11_queryLine(lineMapRef, pc()); // 当前行；目标 = 下一行
+    PauseInfo p;
+    do {
+        p = m17_step();                           // 指令驱动：恰执行 1 条后暂停
+        // 中间暂停不上报（评审 09-8：仅在跨行后 publish 一次）
+    } while (m11_queryLine(lineMapRef, p.pc) == targetLine); // M-11 行表判跨行
+    stepState.lastPause = p; stepState.mode = SOURCE;
+    publish(&quot;paused&quot;, &amp;p);                        // 跨行后一次可靠投递
+    log(INFO, &quot;DBG-STEP&quot;, &quot;stepSource done&quot;, &quot;E_OK&quot;);
+    return p;                                     // 输出：暂停状态
+}</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 stepOver 跳过函数调用（扩展）</h3>
+<p class="body">stepOver()：当前指令为函数调用（isCall 判定见 6.2 与下方注释，评审 09-4）时，在返回地址注入临时断点（M-08 setBreakpoint，sourceType=TEMP）后 resume 持续执行，直至命中返回地址断点（断点驱动停止，评审 09-1）；命中自动移除为主（M-08 08-3），removeBp 仅作 runUntil 因异常/其他断点终止时的兜底清理（评审 09-6）；注入失败前置检查返回 E_CTX-07（评审 09-5）；被调函数内用户断点先命中时暂停于用户断点、临时断点保留（评审 09-7）。非调用指令降级为 step。伪代码如下：</p>
+<pre class="code"><code>// stepOver: 跳过函数调用（4.3.2.3 表42 扩展；经 M-08 临时断点）
+PauseInfo stepOver(err_t* err) {
+    if (!isPaused()) { *err = E_CTX-02; return (PauseInfo){0}; }
+    if (!isCall(currentPc())) return step(err);   // 非调用指令 → 降级 step
+    // isCall 判定（评审 09-4）：经 M-17 readMem 取指解析当前指令——
+    //   JAL rd = x1(ra)：调用；JAL rd = x0：纯跳转，非调用
+    //   JALR rd = x1(ra)：调用；JALR rd = x0：纯跳转（含 c.jalr 展开后同判）
+    uint32_t retAddr = currentPc() + instLen(currentPc()); // 返回地址
+    err_t e; BpId bp = m08_setBreakpoint(retAddr, NULL, &amp;e); // 临时断点（sourceType=TEMP）
+    if (e != E_OK) { *err = e; return (PauseInfo){0}; }   // 注入失败前置检查（评审 09-5，E_CTX-07）
+    PauseInfo p = m17_resumeUntilBp(bp);          // 持续执行直至命中返回地址断点（断点驱动停止，评审 09-1）
+    if (p.reason == BP_HIT &amp;&amp; p.pc == retAddr) {
+        m08_removeBp(bp);                         // 返回地址命中：自动移除为主（对齐 M-08 08-3）
+    } else {
+        // 被调函数内用户断点/异常先终止：暂停于用户断点、临时断点保留待 resume 后命中即移除
+        // （评审 09-7，对齐 GDB 语义）；removeBp 仅作无命中的兜底清理（评审 09-6）
+        m08_removeBpIfStale(bp);                  // M-08 幂等兜底：已移除则无操作（对齐 M-08 N8）
+    }
+    publish(&quot;paused&quot;, &amp;p); log(INFO, &quot;DBG-STEP&quot;, &quot;stepOver done&quot;, &quot;E_OK&quot;);
+    return p;                                     // 输出：暂停状态（返回地址/用户断点/异常点）
+}</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 与真实调试器的差异对照表</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:16%"><col style="width:34%"><col style="width:32%"><col style="width:18%"></colgroup><thead><tr><th style="width:16%;text-align:center">维度</th><th style="width:34%;text-align:center">真实硬件调试器（JTAG/GDB）</th><th style="width:32%;text-align:center">本平台建模（ISS/QEMU）</th><th style="width:18%;text-align:center">差异影响</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">单步载体</td><td style="text-align:left">JTAG 硬件单步 / GDB &#x27;s&#x27; 命令（改指令或调试寄存器）</td><td style="text-align:left">M-17 step()（self_iss 指令驱动；qemu RSP &#x27;s&#x27;）</td><td style="text-align:left">语义一致：恰执行 1 条后暂停</td></tr><tr class="row1"><td style="text-align:center">半指令防护</td><td style="text-align:left">流水线冲刷、中断窗口需调试器处理</td><td style="text-align:left">安全检查点注入（量子边界 + 访存完成），无半指令状态</td><td style="text-align:left">平台更强：注入点原子（4.3.2.1）</td></tr><tr class="row0"><td style="text-align:center">源码级单步</td><td style="text-align:left">GDB step/next（基于行表，跨栈帧语义复杂）</td><td style="text-align:left">stepSource 归 M-09：循环 step + M-11 行表判跨行（缺失降级 step）</td><td style="text-align:left">MVP 行边界级；跨函数 stepOver 经临时断点</td></tr><tr class="row1"><td style="text-align:center">函数跳过</td><td style="text-align:left">GDB finish/until（栈帧语义）</td><td style="text-align:left">stepOver：返回地址临时断点（M-08）</td><td style="text-align:left">MVP 返回地址级；栈帧深化 P1</td></tr><tr class="row0"><td style="text-align:center">性能</td><td style="text-align:left">真实目标受调试口带宽限制</td><td style="text-align:left">ISS 解释执行边界即暂停点，无外部握手</td><td style="text-align:left">平台单步延迟低（≤500ms 命令响应预算）</td></tr></tbody></table></div>
+
+<h2 id="sec4" class="h-sec">4 关键函数</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:32%"><col style="width:44%"></colgroup><thead><tr><th style="width:24%;text-align:center">函数</th><th style="width:32%;text-align:center">说明</th><th style="width:44%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">step()</td><td style="text-align:left">指令级单步（执行 1 条指令后暂停）</td><td style="text-align:left">调 M-17 step()；输出：暂停状态；非暂停态 → E_CTX-02</td></tr><tr class="row1"><td style="text-align:center">stepSource()</td><td style="text-align:left">源码级单步（按行映射边界推进）</td><td style="text-align:left">输入：当前行映射（M-11）；M-09 循环 step + M-11 queryLine 判跨行（评审 09-2 方案①）；输出：暂停状态；缺失 → 降级 step + 提示（E_CTX-10）</td></tr><tr class="row0"><td style="text-align:center">stepOver()</td><td style="text-align:left">跳过函数调用（扩展）</td><td style="text-align:left">调 M-08 临时断点（返回地址）+ resume；非调用指令降级 step；输出：暂停状态</td></tr><tr class="row1"><td style="text-align:center">safePointInject(mode)</td><td style="text-align:left">安全检查点注入</td><td style="text-align:left">对齐 M-12 量子边界；inMemOp=1 时推迟至访存完成；保证无半指令状态</td></tr><tr class="row0"><td style="text-align:center">isPaused()</td><td style="text-align:left">暂停态校验</td><td style="text-align:left">输出：是否暂停态；非暂停态调用单步 → E_CTX-02</td></tr></tbody></table></div>
+
+<h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 单步处理流程（源 4.3.2.4 对齐）</h3>
+<p class="body">单步为「暂停态 → 执行 1 条/1 行 → 再暂停」的确定性推进：暂停态接收单步命令 → 安全检查点注入 → 执行 1 条/1 行 → 暂停 → 上报 paused（可靠投递）→ 前端刷新视图。非暂停态调用与行映射缺失两条异常分支见 6 章。</p>
+<svg class="flow-svg" viewBox="0 0 760 640" role="img" aria-label="M-09 单步处理流程">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2f5bd6"/>
+    </marker>
+  </defs>
+  <style>
+    .st-box{fill:#eef2fb;stroke:#2f5bd6;stroke-width:1.5;rx:6}
+    .st-txt{font-size:12.5px;fill:#1f2937;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+    .st-sub{font-size:11px;fill:#4b5563;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+    .st-arrow{stroke:#2f5bd6;stroke-width:1.6;marker-end:url(#ar)}
+    .st-dec{fill:#fff;stroke:#d97757;stroke-width:1.5;rx:8}
+    .st-dec-txt{font-size:11.5px;fill:#7c2d12;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+  </style>
+  <rect class="st-box" x="300" y="14" width="160" height="46"/>
+  <text class="st-txt" x="380" y="34" text-anchor="middle">1 接收单步命令</text>
+  <text class="st-sub" x="380" y="50" text-anchor="middle">暂停态校验（否则 E_CTX-02）</text>
+  <line class="st-arrow" x1="380" y1="60" x2="380" y2="92"/>
+  <rect class="st-box" x="300" y="92" width="160" height="46"/>
+  <text class="st-txt" x="380" y="112" text-anchor="middle">2 安全检查点注入</text>
+  <text class="st-sub" x="380" y="128" text-anchor="middle">对齐量子边界·访存完成·无半指令</text>
+  <line class="st-arrow" x1="380" y1="138" x2="380" y2="170"/>
+  <rect class="st-box" x="300" y="170" width="160" height="46"/>
+  <text class="st-txt" x="380" y="190" text-anchor="middle">3 执行 1 条 / 1 行</text>
+  <text class="st-sub" x="380" y="206" text-anchor="middle">M-17 step（stepSource：循环 step + 行表判跨行）</text>
+  <line class="st-arrow" x1="380" y1="216" x2="380" y2="248"/>
+  <rect class="st-dec" x="285" y="248" width="190" height="50"/>
+  <text class="st-dec-txt" x="380" y="266" text-anchor="middle">行映射缺失（stepSource）</text>
+  <text class="st-dec-txt" x="380" y="283" text-anchor="middle">→ 降级 step + 提示（WARN）</text>
+  <path class="st-arrow" d="M380,298 L380,330"/>
+  <rect class="st-box" x="300" y="330" width="160" height="46"/>
+  <text class="st-txt" x="380" y="350" text-anchor="middle">4 暂停</text>
+  <text class="st-sub" x="380" y="366" text-anchor="middle">记录 StepState.lastPause</text>
+  <line class="st-arrow" x1="380" y1="376" x2="380" y2="408"/>
+  <rect class="st-box" x="300" y="408" width="160" height="46"/>
+  <text class="st-txt" x="380" y="428" text-anchor="middle">5 上报 paused</text>
+  <text class="st-sub" x="380" y="444" text-anchor="middle">M-05 可靠投递（ack/重试）</text>
+  <line class="st-arrow" x1="380" y1="454" x2="380" y2="486"/>
+  <rect class="st-box" x="300" y="486" width="160" height="46"/>
+  <text class="st-txt" x="380" y="506" text-anchor="middle">6 前端刷新视图</text>
+  <text class="st-sub" x="380" y="522" text-anchor="middle">寄存器/内存/反汇编/源码联动</text>
+  <line class="st-arrow" x1="380" y1="532" x2="380" y2="564"/>
+  <rect class="st-box" x="300" y="564" width="160" height="46"/>
+  <text class="st-txt" x="380" y="584" text-anchor="middle">7 等待下一次单步命令</text>
+  <text class="st-sub" x="380" y="600" text-anchor="middle">暂停态保持（用户显式 resume/step）</text>
+</svg>
+<div class="flow-mobile">
+<div class="flow-step"><span class="num">1</span><span class="txt">接收单步命令<br><span class="flow-branch">暂停态校验（非暂停态 → E_CTX-02 拒绝）</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">2</span><span class="txt">安全检查点注入<br><span class="flow-branch">对齐 M-12 量子边界；访存完成；无半指令状态（4.3.2.1）</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">3</span><span class="txt">执行 1 条 / 1 行<br><span class="flow-branch">M-17 step（指令驱动）/ stepSource（行边界推进）</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">4</span><span class="txt">暂停<br><span class="flow-branch">记录 StepState.lastPause（原因/PC/虚拟时间）</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">5</span><span class="txt">上报 paused<br><span class="flow-branch">M-05 可靠投递（ack/重试）；前端缺口 reconcile 对账</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">6</span><span class="txt">前端刷新视图<br><span class="flow-branch">寄存器/内存/反汇编/源码高亮联动（M-02/M-08~M-11）</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">7</span><span class="txt">等待下一次单步命令<br><span class="flow-branch">暂停态保持；用户显式 resume / 继续 step</span></span></div>
+</div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:22%"><col style="width:52%"><col style="width:26%"></colgroup><thead><tr><th style="width:22%;text-align:center">协作模块</th><th style="width:52%;text-align:center">协作内容</th><th style="width:26%;text-align:center">触发时机</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-17（执行后端）</td><td style="text-align:left">step() 指令驱动单步；readMem 取指（isCall 判定）；resumeUntilBp（stepOver 断点驱动停止）</td><td style="text-align:left">每次单步命令 / stepOver resume</td></tr><tr class="row1"><td style="text-align:center">M-08（断点管理器）</td><td style="text-align:left">stepOver 注入临时断点（返回地址，sourceType=TEMP，命中即移除）；onHit 调 M-09 暂停冻结（对齐量子边界）</td><td style="text-align:left">stepOver 时 / 断点命中时（5.2 图3）</td></tr><tr class="row0"><td style="text-align:center">M-11（行映射）</td><td style="text-align:left">lineMapRef 行表判跨行（queryLine，源码级单步依赖）</td><td style="text-align:left">stepSource 时（缺失降级 step + 提示，E_CTX-10）</td></tr><tr class="row1"><td style="text-align:center">M-12（仿真引擎）</td><td style="text-align:left">安全检查点注入（量子边界对齐）</td><td style="text-align:left">每次单步命令（safePointInject）</td></tr><tr class="row0"><td style="text-align:center">M-05（会话/命令）</td><td style="text-align:left">publish(paused) 可靠投递；单步命令通道</td><td style="text-align:left">单步完成 / 命令下发</td></tr><tr class="row1"><td style="text-align:center">M-21（日志）</td><td style="text-align:left">单步异常日志（非暂停态/行映射缺失）</td><td style="text-align:left">E_CTX-02 拒绝 / stepSource 降级</td></tr></tbody></table></div>
+
+<h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置</h3>
+<p class="body">本模块错误码归属 E_CTX 族（3.4 表16，一场景一码）：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:16%"><col style="width:40%"><col style="width:44%"></colgroup><thead><tr><th style="width:16%;text-align:center">错误码</th><th style="width:40%;text-align:center">场景</th><th style="width:44%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">E_CTX-02</td><td style="text-align:left">非暂停态调用单步（step/stepSource/stepOver 在运行态/复位态执行）</td><td style="text-align:left">拒绝执行并返回错误码；提示先暂停（4.3.2.5）；log(WARN, &quot;DBG-STEP&quot;, …, &quot;E_CTX-02&quot;)</td></tr><tr class="row1"><td style="text-align:center">E_CTX-10</td><td style="text-align:left">行映射缺失（stepSource 无 lineMapRef / lineMapRef.valid=0）</td><td style="text-align:left">自动降级为 step 并提示（WARN + 前端提示；表91 M-09 行：降级边界正确、降级提示）。注：本文档新增场景码（源表16 的 E_CTX-06 已被「命令超时」占用，评审 09-9 核对后换码），待并入源文档 3.4 表16</td></tr><tr class="row0"><td style="text-align:center">E_CTX-07</td><td style="text-align:left">stepOver 临时断点注入失败（返回地址非法/重复）</td><td style="text-align:left">复用源表16「断点注册失败」码（语义一致，评审 09-9）；注入失败前置检查后返回，不进入 resume；stepOver 失败不产生半指令状态（安全检查点保证）</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）非暂停态调用：运行/复位/故障态下 step 类命令一律 E_CTX-02 拒绝，不排队不缓存（确定性语义，2.4 表6）。</p>
+<p class="body">（2）行映射缺失：stepSource 降级为 step（指令级），降级提示可见；不阻断调试。</p>
+<p class="body">（3）QEMU 后端（L1 子集）：step 精确（RSP 's'）；stepSource 归 M-09 循环 step + 行表判跨行——QEMU 侧行映射缺失时同样降级 step（M-17 17-2 语义对齐）。</p>
+<p class="body">（4）半指令防护：安全检查点注入保证单步在指令边界原子推进——访存进行中（inMemOp=1）推迟注入；无中断插入导致半指令状态（4.3.2.1）。</p>
+<p class="body">（5）stepOver 无调用：当前指令非函数调用 → 降级为 step（语义等价，无副作用）。</p>
+<p class="body">（6）isCall 判定规则（评审 09-4）：经 M-17 readMem 取指解析当前指令 opcode/rd——JAL/JALR 的 rd == x1(ra) 视为调用；rd == x0 为纯跳转（非调用）；压缩 c.jalr 展开后按 rd 同判；来源 = M-17 readMem 取指，判定结果用于 stepOver 的「调用 / 降级 step」边界。</p>
+<p class="body">（7）stepOver 中被调函数内用户断点先命中（评审 09-7）：暂停于用户断点（paused 上报用户断点原因）；返回地址临时断点保留不清理；用户 resume 后再次命中返回地址即自动移除（对齐 GDB 语义）。</p>
+<p class="body">（8）stepOver 因异常终止：临时断点经 M-08 幂等兜底清理（remove_bp 对无效 id 幂等，评审 09-6 / 对齐 M-08 N8）；不残留。</p>
+<p class="body">（9）暂停态保持：单步完成后保持暂停（不自动 resume），避免命中风暴/自激（对齐 M-08 命中风暴防护）。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表91（M-09 行）：测试要点 = 指令级/源码级单步；行映射缺失降级；通过准则 = 边界正确、降级提示。展开用例表如下（核心模块覆盖率 ≥70%，源文档 7.3 表92）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:22%"><col style="width:38%"><col style="width:40%"></colgroup><thead><tr><th style="width:22%;text-align:center">用例</th><th style="width:38%;text-align:center">输入 / 步骤</th><th style="width:40%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（源 2.5/7.1 对齐）</td><td style="text-align:left">按 9.1.1 端口契约表逐项校验 step/stepSource/stepOver 的接口签名、输入校验、输出结构与错误码；替代实现（替代单步引擎）接入前必须同端口契约测试全绿</td><td style="text-align:left">契约测试全绿；契约变更须同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">指令级单步（表91）</td><td data-label="输入 / 步骤" style="text-align:left">暂停态连续 step N 次</td><td data-label="通过准则" style="text-align:left">每次恰执行 1 条指令后暂停（指令驱动，不因事件插入跳过/多步）；PauseInfo 正确（原因/PC/虚拟时间）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">源码级单步（表91）</td><td data-label="输入 / 步骤" style="text-align:left">带行映射固件，暂停态 stepSource（跨 3 行代码）</td><td data-label="通过准则" style="text-align:left">沿 DWARF 行映射边界推进至新行；跨行边界次数与行表一致；中间多次 step 仅跨行后 publish 一次（评审 09-8）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">行映射缺失降级（表91）</td><td data-label="输入 / 步骤" style="text-align:left">无行映射会话执行 stepSource</td><td data-label="通过准则" style="text-align:left">自动降级 step + WARN 日志 + 前端提示（E_CTX-10）；边界正确（恰 1 条指令）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">非暂停态拒绝（E_CTX-02）</td><td data-label="输入 / 步骤" style="text-align:left">运行态/复位态调用 step/stepSource/stepOver</td><td data-label="通过准则" style="text-align:left">E_CTX-02 拒绝；不排队不缓存；提示先暂停</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">stepOver 临时断点</td><td data-label="输入 / 步骤" style="text-align:left">当前指令为调用，stepOver</td><td data-label="通过准则" style="text-align:left">返回地址注入临时断点（sourceType=TEMP）；持续执行直至命中返回地址（断点驱动停止，评审 09-1）；命中即移除（对齐 M-08 08-3）；暂停于返回地址</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">stepOver 注入失败（E_CTX-07）</td><td data-label="输入 / 步骤" style="text-align:left">返回地址非法/重复，stepOver</td><td data-label="通过准则" style="text-align:left">setBreakpoint 返回值前置检查；E_CTX-07 返回，不进入 resume（评审 09-5）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">stepOver 用户断点先命中（评审 09-7）</td><td data-label="输入 / 步骤" style="text-align:left">被调函数体内设置用户断点，stepOver</td><td data-label="通过准则" style="text-align:left">暂停于用户断点；返回地址临时断点保留；用户 resume 后命中返回地址即自动移除</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">stepOver 异常终止兜底（评审 09-6）</td><td data-label="输入 / 步骤" style="text-align:left">被调函数触发异常（非断点终止）</td><td data-label="通过准则" style="text-align:left">remove_bp 幂等兜底清理（无效 id 无操作）；不残留临时断点</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">stepOver 无调用降级</td><td data-label="输入 / 步骤" style="text-align:left">当前指令非调用（JAL/JALR rd=x0 纯跳转），stepOver</td><td data-label="通过准则" style="text-align:left">isCall 判定为假 → 降级为 step（语义等价，无副作用）（评审 09-4）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">安全检查点（半指令防护）</td><td data-label="输入 / 步骤" style="text-align:left">访存进行中注入单步命令</td><td data-label="通过准则" style="text-align:left">推迟至访存完成注入；指令边界原子推进；无半指令状态（4.3.2.1）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">paused 可靠上报</td><td data-label="输入 / 步骤" style="text-align:left">publish(paused) 注入 ack 超时</td><td data-label="通过准则" style="text-align:left">重试直至 ack；事件不丢（对齐 E1 语义）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">确定性夹具</td><td data-label="输入 / 步骤" style="text-align:left">同种子 + 同输入序列（含 step 序列）跑两遍</td><td data-label="通过准则" style="text-align:left">执行轨迹（PC 序列/暂停点/虚拟时间）完全一致（2.4 表6）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">QEMU 单步（17-2 对齐）</td><td data-label="输入 / 步骤" style="text-align:left">qemu 后端连续 step</td><td data-label="通过准则" style="text-align:left">step 精确（RSP s）；stepSource 行映射缺失降级 step + 提示</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）模式单一数据源：StepState 单一上下文，step/stepSource/stepOver 共享状态校验与上报路径，无隐式状态。</p>
+<p class="body">（2）执行与上报解耦：safePointInject + M-17 执行 + publish(paused) 三段独立，可分别单测（注入点/执行粒度/上报可靠性）。</p>
+<p class="body">（3）行映射引用隔离：M-09 只持 lineMapRef 句柄（M-11 提供），不解析 DWARF——行映射实现替换不影响本模块。</p>
+<p class="body">（4）抽象隔离：一切执行经 M-17 抽象（step/readMem/resumeUntilBp），行边界归 M-09（经 M-11 行表），M-09 无内核感知，双内核替换不影响本模块。</p>
+<p class="body">（5）CI 门禁：核心模块单测覆盖率 ≥70%（估算基线，源文档 7.3 表92）；单步用例纳入确定性夹具（同种子同输入序列断言暂停点一致）。</p>
+<p class="body">（6）契约层可替换性（源 2.5 对齐）：本模块对外的 driving 端口收敛到 9.1.1 端口契约表，替代实现（替代单步引擎）遵守同端口契约并通过契约测试即可接入。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-09 责任：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:16%"><col style="width:38%"><col style="width:46%"></colgroup><thead><tr><th style="width:16%;text-align:center">质量属性</th><th style="width:38%;text-align:center">目标（估算基线）</th><th style="width:46%;text-align:center">M-09 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">可用性</td><td style="text-align:left">运行控制工具栏命令响应 ≤500ms（表93：M-09/M-12 命令驱动）</td><td style="text-align:left">单步命令经安全检查点注入后直达 M-17，无额外往返；paused 上报节流</td></tr><tr class="row1"><td style="text-align:center">可维护性</td><td style="text-align:left">核心模块覆盖率 ≥70%；模块即积木可替换（源 2.5）</td><td style="text-align:left">模式单一数据源 + 执行/上报解耦 + 行映射引用隔离；端口契约测试（9.1.1）</td></tr><tr class="row0"><td style="text-align:center">可靠性</td><td style="text-align:left">关键事件可靠投递（E1，对齐 5.2 图3）</td><td style="text-align:left">paused ack/重试；前端缺口 reconcile 对账</td></tr><tr class="row1"><td style="text-align:center">确定性</td><td style="text-align:left">单步推进确定性（2.4 表6）</td><td style="text-align:left">指令边界原子推进（安全检查点注入）；同种子同输入轨迹一致</td></tr><tr class="row0"><td style="text-align:center">合规</td><td style="text-align:left">业务模块 → 横切组件单向依赖（4.7 表86）</td><td style="text-align:left">本模块只经 M-17 抽象 + M-05/M-11/M-21 横切通道，不自行实现日志/事件/行映射</td></tr></tbody></table></div>
+<h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:30%"><col style="width:46%"></colgroup><thead><tr><th style="width:24%;text-align:center">依赖方</th><th style="width:30%;text-align:center">被依赖方</th><th style="width:46%;text-align:center">依赖内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-09（单步引擎）</td><td style="text-align:left">M-17 ExecutionBackend</td><td style="text-align:left">step / readMem（isCall 判定）/ resumeUntilBp 抽象接口（3.2.4 表13；2.1 表5）</td></tr><tr class="row1"><td style="text-align:center">M-09（单步引擎）</td><td style="text-align:left">M-08（断点管理器）</td><td style="text-align:left">stepOver 临时断点注入/移除（命中自动移除为主，removeBp 幂等兜底）；onHit 暂停协作（5.2 图3）</td></tr><tr class="row0"><td style="text-align:center">M-09（单步引擎）</td><td style="text-align:left">M-11（行映射）</td><td style="text-align:left">lineMapRef 行表判跨行（queryLine；源码级单步依赖）</td></tr><tr class="row1"><td style="text-align:center">M-09（单步引擎）</td><td style="text-align:left">M-12（仿真引擎）</td><td style="text-align:left">安全检查点注入（量子边界对齐）</td></tr><tr class="row0"><td style="text-align:center">M-09（单步引擎）</td><td style="text-align:left">M-05（会话/命令）</td><td style="text-align:left">命令与事件通道：publish(paused)</td></tr><tr class="row1"><td style="text-align:center">M-09（单步引擎）</td><td style="text-align:left">M-21（日志）</td><td style="text-align:left">单步异常日志（NFR-07）</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表43 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层，本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现（替代单步引擎）遵守同端口契约并通过契约测试（7.1）即可接入，无需改动其他模块：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:30%"><col style="width:16%"><col style="width:54%"></colgroup><thead><tr><th style="width:30%;text-align:center">端口 / 服务</th><th style="width:16%;text-align:center">方向</th><th style="width:54%;text-align:center">契约（输入 → 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:left">step()</td><td style="text-align:center">提供（driving）</td><td style="text-align:left">调用 M-17 step()；输出：暂停状态；非暂停态 → E_CTX-02；安全检查点注入保证无半指令</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">stepSource()</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输入：当前行映射（M-11）；M-09 循环 m17_step() + M-11 queryLine 判跨行（评审 09-2 方案①）；输出：暂停状态；行映射缺失 → 降级 step + 提示（E_CTX-10）；跨行后仅上报一次（评审 09-8）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">stepOver()</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">isCall 判定（JAL/JALR rd==x1 为调用，rd==x0 纯跳转）；注入 M-08 临时断点（返回地址，sourceType=TEMP）；resumeUntilBp 持续执行直至命中（断点驱动停止）；命中自动移除为主、异常/其他断点终止时幂等兜底；用户断点先命中则暂停于用户断点、临时断点保留（评审 09-1/04/05/06/07）；非调用指令降级 step</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-17（ExecutionBackend）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">step / readMem（isCall 判定）/ resumeUntilBp（3.2.4 表13）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-08（断点管理器）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">stepOver 临时断点注入/移除（命中自动移除为主，removeBp 对无效 id 幂等）；onHit 暂停协作（5.2 图3）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-11（行映射）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">lineMapRef 行表判跨行（queryLine）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-12（仿真引擎）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">安全检查点注入（量子边界对齐）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-05（会话/命令）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">publish(paused) 事件通道</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-21（日志）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">单步异常日志</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<p class="body">单步完成 → log(INFO, "DBG-STEP", "step done", "E_OK")；非暂停态调用 → log(WARN, "DBG-STEP", …, "E_CTX-02")；行映射缺失降级 → log(WARN, "DBG-STEP", "line map missing, degrade to step", "E_CTX-10")。产品/嵌入式工作台不可见（角色边界，§3.4），仅管理员通道可查。</p>
+</main>
+</div>
+</body>
+</html>

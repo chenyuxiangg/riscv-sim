@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>RISC-V Sim · 嵌入式工作台 (MVP placeholder)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">RISC-V Sim</span>
+    <nav id="workbench-tabs" class="tabs">
+      <button data-view="product"  class="tab" aria-current="page">产品</button>
+      <button data-view="embedded" class="tab">嵌入式</button>
+      <button data-view="admin"    class="tab" disabled>系统管理员</button>
+    </nav>
+    <span class="status" id="status">未连接</span>
+  </header>
+
+  <main id="app">
+    <section id="view-product"  class="view"><h2>产品视图（M-01 / M-02）</h2><p class="muted">MVP 占位</p></section>
+    <section id="view-embedded" class="view hidden">
+      <h2>嵌入式工作台</h2>
+      <nav class="subtabs">
+        <button data-subview="disasm">反汇编（M-11）</button>
+        <button data-subview="regs">寄存器 / 内存（M-10）</button>
+        <button data-subview="break">断点（M-08）</button>
+        <button data-subview="waveform">波形（M-19）</button>
+        <button data-subview="trace">trace 导出（M-11）</button>
+      </nav>
+      <div class="subview-panels">
+        <div data-subview-panel="disasm" class="hidden"><p class="muted">M-11 占位</p></div>
+        <div data-subview-panel="regs"   class="hidden"><p class="muted">M-10 占位</p></div>
+        <div data-subview-panel="break"  class="hidden"><p class="muted">M-08 占位</p></div>
+        <div data-subview-panel="waveform" class="hidden"><p class="muted">M-19 占位</p></div>
+        <div data-subview-panel="trace"  class="hidden"><p class="muted">M-11 trace 导出占位</p></div>
+      </div>
+    </section>
+    <section id="view-admin" class="view hidden"><h2>系统管理员（P1）</h2><p class="muted">P1 通道：日志 drain / guest kill / 持久化</p></section>
+  </main>
+
+  <footer class="footer">
+    <span>MVP 占位 — kernel 编译为 WASM 后此页面会直接 mount worker（见 <code>app.js</code>）。</span>
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

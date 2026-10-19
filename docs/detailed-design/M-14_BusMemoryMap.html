@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%231e3a8a'/%3E%3Ctext x='12' y='17' font-size='13' text-anchor='middle' fill='%23ffffff' font-family='sans-serif' font-weight='bold'%3EB%3C/text%3E%3C/svg%3E">
+<title>M-14 总线与内存映射 模块详细设计</title>
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15px; font-weight:700; color:#374151; margin:18px 0 8px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { margin:0 0 10px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  white-space:pre; margin:10px 0 16px; }
+.code-title { font-size:13px; font-weight:700; color:#111827; margin:16px 0 4px; }
+.fig { margin:14px auto; text-align:center; }
+.fig img { max-width:100%; height:auto; border:1px solid var(--line); border-radius:4px; }
+.fig figcaption { font-size:13px; color:var(--ink-2); margin-top:6px; }
+.caption { text-align:center; font-size:13px; color:var(--ink-2); margin:6px 0 4px; }
+.flow-svg { width:100%; height:auto; }
+.flow-mobile { display:none; }
+.flow-step { display:flex; gap:10px; margin:8px 0; align-items:flex-start; }
+.flow-step .num { flex:0 0 26px; height:26px; border-radius:50%; background:var(--brand);
+  color:#fff; font-weight:700; font-size:13px; display:flex; align-items:center; justify-content:center; }
+.flow-step .txt { font-size:14px; }
+.flow-branch { margin:6px 0 6px 36px; font-size:13.5px; color:var(--ink-2); }
+.flow-arrow { text-align:center; color:#9aa1af; font-size:16px; line-height:1; margin:2px 0; }
+/* 导航 */
+.nav-toggle { margin:14px 0; }
+.nav-toggle summary { cursor:pointer; font-weight:700; color:var(--brand);
+  padding:9px 12px; border:1px solid var(--line); border-radius:6px; background:var(--head-bg); list-style:none; }
+.nav-toggle summary::-webkit-details-marker { display:none; }
+.nav-box { display:flex; flex-direction:column; gap:2px; padding:10px 4px 2px; }
+.nav-l1 { color:var(--brand); font-weight:700; text-decoration:none; padding:3px 4px; }
+.nav-l2 { color:var(--ink-2); text-decoration:none; padding:3px 4px 3px 18px; font-size:13.5px; }
+.nav-l1:hover,.nav-l2:hover { color:var(--brand-2); text-decoration:underline; }
+@media (min-width:768px) {
+  .wrap { display:grid; grid-template-columns:260px 1fr; gap:28px; align-items:start; }
+  .doc-head { grid-column:1 / -1; }
+  .nav-toggle { position:sticky; top:16px; max-height:calc(100vh - 32px); overflow:auto; }
+  .nav-toggle summary { pointer-events:none; }
+  .flow-svg { display:block; }
+  .flow-mobile { display:none; }
+}
+@media (max-width:767px) {
+  .flow-svg { display:none; }
+  .flow-mobile { display:block; }
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media print {
+  .nav-toggle { display:none; }
+  .wrap { display:block; max-width:none; padding:0; }
+  .doc-title { font-size:20px; }
+  .doc-table, .fig, .code { break-inside:avoid; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="doc-head"><h1 class="doc-title">M-14 总线与内存映射 模块详细设计</h1><p class="subtitle">RISC-V 仿真平台 · 模块详细设计系列 · 对应《模块设计说明书》4.4.3 节</p><p class="version">HTML 版 v1.4（2026-10-13 评审修订 14-1~14-12、N1）· 源设计《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11）</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11；2026-10-13 契约层版新增 2.5 平台共享契约层与各模块端口契约表）</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.4.3（④ 仿真内核层）；端口契约 = 源文档表58</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">FR-02：元器件事例化、地址映射配置；FR-03：外设地址映射查看/修改</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">ExecutionBackend L1~L3 访存通路基座（M-17 抽象）</td></tr><tr class="row0"><td style="text-align:center">MVP 状态</td><td style="text-align:left">P0 主承担模块（MVP 必需）</td></tr><tr class="row1"><td style="text-align:center">源文档对齐</td><td style="text-align:left">v1.2（2026-10-13）：新增 9.1.1 端口契约（driving/driven，源表58）；CH7 新增契约测试；CH8 补契约层可替换性；表号引用随源文档调整（3.3 表14→表15、3.4 表15→表16、4.4.3 表42/43→表56/57、7.2 表67→表91、7.3 表68→表92、8 表69→表93）</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.3（2026-10-13）：14-1 写拆分两阶段防部分提交；14-2 mapTable 派生视图；14-3 E_BUS-05 外设错误；14-4 ROM 写不入对拍；14-5 RAM 后端契约；14-6 BusResult 错误传递；14-7 crosses_region 判定；14-8 用例补全+术语统一；14-9 对拍边界；14-10 快照升级必需；14-11 detach 生命周期；14-12 size=0 拒绝+typed handle。v1.4（跨模块 N1）：预检接口改名 periph_precheck（3.2/6.2(4)/9.1 三处同步，与 M-15 探针上报函数语义分离）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；RISC-V 非特权架构规范 v20260120（RV32I 2.1，访存语义）</td></tr><tr class="row0"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-12（v1.2 契约层对齐 2026-10-13；v1.3 评审修订 2026-10-13）</td></tr></tbody></table></div></header><nav class="nav-toggle"><details open><summary>目录</summary><div class="nav-box"><a class="nav-l1" href="#sec1">1 功能概述</a>
+<a class="nav-l2" href="#sec1-1">1.1 模块定位</a>
+<a class="nav-l2" href="#sec1-2">1.2 需求与约束</a>
+<a class="nav-l2" href="#sec1-3">1.3 MVP 范围与预留</a>
+<a class="nav-l1" href="#sec2">2 数据描述</a>
+<a class="nav-l2" href="#sec2-1">2.1 核心数据结构</a>
+<a class="nav-l2" href="#sec2-1-1">2.1.1 复杂结构字段定义</a>
+<a class="nav-l2" href="#sec2-2">2.2 区间类型与访问语义</a>
+<a class="nav-l2" href="#sec2-3">2.3 数据流说明</a>
+<a class="nav-l1" href="#sec3">3 实现设计</a>
+<a class="nav-l2" href="#sec3-1">3.1 区间树结构与查找算法</a>
+<a class="nav-l2" href="#sec3-2">3.2 读写分发实现</a>
+<a class="nav-l2" href="#sec3-3">3.3 映射编辑事务</a>
+<a class="nav-l2" href="#sec3-4">3.4 与真实硬件总线的差异对照表</a>
+<a class="nav-l1" href="#sec4">4 关键函数</a>
+<a class="nav-l1" href="#sec5">5 处理流程</a>
+<a class="nav-l2" href="#sec5-1">5.1 访存分发流程</a>
+<a class="nav-l2" href="#sec5-2">5.2 映射编辑流程</a>
+<a class="nav-l2" href="#sec5-3">5.3 与 M-13/M-15/M-18 的交互</a>
+<a class="nav-l1" href="#sec6">6 异常处理</a>
+<a class="nav-l2" href="#sec6-1">6.1 错误码与处置</a>
+<a class="nav-l2" href="#sec6-2">6.2 边界与降级</a>
+<a class="nav-l1" href="#sec7">7 测试设计与可维护性</a>
+<a class="nav-l2" href="#sec7-1">7.1 测试要点与关键用例</a>
+<a class="nav-l2" href="#sec7-2">7.2 可维护性手段</a>
+<a class="nav-l1" href="#sec8">8 质量属性落实</a>
+<a class="nav-l1" href="#sec9">9 接口依赖</a>
+<a class="nav-l2" href="#sec9-1">9.1 依赖关系</a>
+<a class="nav-l2" href="#sec9-1-1">9.1.1 端口契约（driving/driven）</a>
+<a class="nav-l2" href="#sec9-2">9.2 日志对接（M-21）</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-14 维护地址区间树（range→region），实现 RAM/ROM/外设归属与读写 O(log n) 分发，是仿真内核层（④层）的访存通路中枢。M-13 的取指与访存读写均经本模块分发：命中 RAM 直接访问；命中外设转调 M-15 的 Peripheral.read/write；未命中产生可观察的访存异常（E_BUS-01，guest trap 语义）。映射表支持 UI 查看与编辑，编辑校验通过后即时生效（FR-03）。</p>
+<p class="body">在平台整体中，M-14 不直接面对前端：映射配置经 M-02 产品视图 / M-05 命令协议进入；访存 trace 事件经 M-18 钩子输出。本模块为 ExecutionBackend（M-17）抽象的自洽实现提供访存基座（L1~L3 共用）。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:62%"><col style="width:24%"></colgroup><thead><tr><th style="width:14%;text-align:center">类别</th><th style="width:62%;text-align:center">约束内容</th><th style="width:24%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">功能</td><td style="text-align:left">地址映射查看/编辑即时生效（FR-03）；元器件事例化与地址映射配置（FR-02）</td><td style="text-align:left">4.4.3.1、7.2 表91</td></tr><tr class="row1"><td style="text-align:center">正确性</td><td style="text-align:left">未映射访问产生可观察的访存异常（E_BUS-01）；映射冲突/越界拒绝并保留旧配置（E_BUS-03/04）</td><td style="text-align:left">3.4 表16、4.4.3.5</td></tr><tr class="row0"><td style="text-align:center">性能</td><td style="text-align:left">lookup 地址查表 O(log n)（区间树）；分发为函数调用级、无时序握手（估算基线）</td><td style="text-align:left">4.4.3.1</td></tr><tr class="row1"><td style="text-align:center">确定性</td><td style="text-align:left">同步分发、无握手时序；事件队列按（虚拟时间, 插入序）稳定排序；虚拟时间由 M-12 推进，不依赖宿主时钟</td><td style="text-align:left">2.4 表6</td></tr><tr class="row0"><td style="text-align:center">合规</td><td style="text-align:left">自研实现采用 BSD/MIT 许可，不可引入 GPL 传染；QEMU 仅进程隔离 + 标准 RSP/QMP 交互、不改源码（M-17 双内核）</td><td style="text-align:left">2.4 表6</td></tr><tr class="row1"><td style="text-align:center">体积</td><td style="text-align:left">随内核 WASM 打包，计入内核 ≤1.5 MiB 压缩预算（估算基线）</td><td style="text-align:left">3.3 表15</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：RAM/ROM/PERIPHERAL 三类区间注册与删除（mapRegion/unmap）、地址查表（lookup，O(log n)）、读写分发（read/write，支持 8/16/32 位宽度与小端字节序）、未映射访存异常（E_BUS-01，guest trap 语义）、映射编辑即时生效（FR-03）、访存 trace 钩子（M-18 总线 trace 底）。</p>
+<p class="body">预留项（本模块仅保留演进承接说明，不展开实现）：多主/多核总线仲裁（FR-18，P2，经 M-17 扩展预留）；Cache/TLB 与写缓冲建模（随 S/U 特权模式演进）；总线时序握手建模（突发/等待状态，源设计基线不建模）；64 位地址空间（当前按 32 位地址空间设计）。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:20%"><col style="width:22%"><col style="width:58%"></colgroup><thead><tr><th style="width:20%;text-align:center">数据结构</th><th style="width:22%;text-align:center">类型</th><th style="width:58%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">regionTree</td><td style="text-align:left">interval tree</td><td style="text-align:left">地址区间树：range → region（RAM/ROM/外设），查找 O(log n)，结构见 2.1.1</td></tr><tr class="row1"><td style="text-align:center">mapTable</td><td style="text-align:left">Map&lt;base, region&gt;</td><td style="text-align:left">映射表（供 UI 查看/编辑，FR-03）：regionTree 的派生投影，每次原子替换后重建（评审 14-2），不单独维护写路径</td></tr><tr class="row0"><td style="text-align:center">busStats</td><td style="text-align:left">struct</td><td style="text-align:left">总线统计（读/写/命中/未命中/拆分计数），字段定义见 2.1.1</td></tr><tr class="row1"><td style="text-align:center">busHook</td><td style="text-align:left">fn_t</td><td style="text-align:left">访存 trace 钩子（M-18 总线 trace 底），事件字段定义见 2.1.1</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="lead">Region 是区间树的叶子语义实体，描述一段地址区间归属：</p>
+<pre class="code"><code>// region: 地址区间实体
+struct Region {
+  uint32_t base;        // 区间起始地址（左闭）
+  uint32_t size;        // 区间长度（字节），[base, base+size) 左闭右开；拒绝 size=0（评审 14-12）
+  uint8_t  type;        // 区间类型：RAM / ROM / PERIPHERAL（见 2.2 表）
+  Target   target;      // typed handle（评审 14-12）：按 type 解释，不用裸 void*——
+                        //   RAM → RamBackend*（3.2 注）；ROM → RomBackend*；PERIPHERAL → Peripheral 实例句柄
+  uint8_t  readonly;    // 只读标志（ROM 置 1；RAM/PERIPHERAL 置 0）
+  uint32_t attr;        // 预留属性位（多核/优先级等演进预留）
+};
+// RAM 后端契约（评审 14-5）：region.target 在 type==RAM 时指向 RamBackend
+struct RamBackend {
+  uint8_t* mem;         // 存储指针（容量 = region.size，越界即总线 bug，mapRegion 校验保证）
+  uint32_t capacity;    // 容量（字节，= region.size）
+  uint32_t base_addr;   // 绑定基址（= region.base）
+};
+// 接口：ram_read(backend, off, width) / ram_write(backend, off, width, val)
+// 固件加载入口：loadImage(base, data, len) 由 M-06 加载 ELF 后调用（数据进入 RAM 的唯一入口，
+//   归属 M-06/M-07 侧调用方；初始化内容默认全 0，loadImage 覆盖写入）。</code></pre>
+<p class="lead">IntervalNode 为增强型区间树节点，携带 maxEnd 用于查找剪枝（算法见 3.1）：</p>
+<pre class="code"><code>// intervalNode: 区间树节点（按 base 排序的增强 BST）
+struct IntervalNode {
+  uint32_t start;       // 区间起点 base
+  uint32_t end;         // 区间终点 base+size（左闭右开）
+  uint32_t maxEnd;      // 子树最大 end，命中剪枝依据：右子树 maxEnd &gt; addr 才可能命中
+  Region*  region;      // 指向区间实体
+  IntervalNode* left;   // 左子树（start 更小）
+  IntervalNode* right;  // 右子树（start 更大）
+  int8_t   balance;     // 平衡因子（AVL 维护，保证查找 O(log n)）
+};</code></pre>
+<p class="lead">busStats 为指标与确定性记录提供数据源；busHook 事件字段与 M-18 总线 trace 契约对齐（每访存记时间戳+地址+方向+宽度）：</p>
+<pre class="code"><code>// busStats: 总线行为统计
+struct BusStats {
+  uint64_t reads;            // 读访问次数
+  uint64_t writes;           // 写访问次数
+  uint64_t ram_hits;         // 命中 RAM 次数
+  uint64_t periph_hits;      // 命中 PERIPHERAL 次数
+  uint64_t misses;           // 未映射访问次数（E_BUS-01）
+  uint64_t unaligned_splits; // 跨区间非对齐访问拆分次数（见 3.2）
+};
+// busHook: 访存 trace 钩子（M-18 总线 trace 底，覆盖全部访存）
+// fn_t on_bus_access(uint64_t ts, uint32_t addr, uint8_t width, uint8_t dir)
+//   ts    虚拟时间戳（M-12 推进）
+//   addr  访问地址（原始地址，非对齐拆分时每片独立上报）
+//   width 访问宽度（8/16/32）
+//   dir   DIR_READ / DIR_WRITE</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 区间类型与访问语义</h3>
+<p class="lead">源设计 4.4.3.2 定义区间类型 RAM/ROM/外设；下表给出各类区间的读写行为、异常语义与对拍断言（带 ※ 的为本文档补充的设计决策，源基线未明确规定）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:18%"><col style="width:34%"><col style="width:24%"><col style="width:24%"></colgroup><thead><tr><th style="width:18%;text-align:center">类型</th><th style="width:34%;text-align:center">读写行为</th><th style="width:24%;text-align:center">访存异常</th><th style="width:24%;text-align:center">对拍语义</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">RAM</td><td style="text-align:left">读直接返回；写直接生效</td><td style="text-align:left">不产生</td><td style="text-align:left">与 Spike golden 内存语义一致（入对拍）</td></tr><tr class="row1"><td data-label="类型" style="text-align:center">ROM</td><td data-label="读写行为" style="text-align:left">读返回；写忽略并可选上报调试事件（※设计决策）</td><td data-label="访存异常" style="text-align:left">不产生</td><td data-label="对拍语义" style="text-align:left">ROM 写忽略为平台自测语义，Spike 无 ROM 概念（内存可写），ROM 写用例不入 Spike 对拍（评审 14-4）</td></tr><tr class="row0"><td data-label="类型" style="text-align:center">PERIPHERAL</td><td data-label="读写行为" style="text-align:left">read 经 target.read(offset,width)；write 经 target.write 即时生效（M-15）</td><td data-label="访存异常" style="text-align:left">外设内错误由外设语义决定；外设抛错转 E_BUS-05 外设错误（※设计决策，评审 14-3）</td><td data-label="对拍语义" style="text-align:left">外设行为由 M-15 对拍；总线仅保证分发正确</td></tr></tbody></table></div>
+<h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+<p class="body">访存数据流：M-13 fetch/load/store → read(addr,width)/write(addr,width,val) → lookup(addr) → 命中 RAM 直接读写 / 命中 PERIPHERAL 转调 M-15 / 未命中产生 E_BUS-01 → 数据或异常回 M-13；每次访问触发 on_bus_access（M-18）。</p>
+<p class="body">映射配置数据流：UI（M-02 映射视图/外设面板）或命令（M-05）→ mapRegion/unmap → 校验（越界 E_BUS-04、重叠 E_BUS-03）→ 应用并即时生效；失败返回错误码，UI 保留旧配置（4.4.3.5）。</p>
+<p class="body">trace 数据流：总线事件流（时间戳+地址+方向+宽度）→ M-18 traceStream → M-11 导出；观测类事件允许节流合并、不要求可靠投递（平台管道设计）。</p><h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 区间树结构与查找算法</h3>
+<p class="body">源设计 4.4.3.2 点名 interval tree：区间按 base 排序组织，节点携带 maxEnd（子树内最大 end），命中判定可在 O(log n) 完成。MVP 区间数量小（RAM/ROM + 少量外设），实现上可选择增强 BST（查/改均 O(log n)）或有序数组二分（查 O(log n)、编辑 O(n) 重建）；本文以增强 BST（AVL 平衡）为设计基线，与两种简化方案对比如下：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:20%"><col style="width:24%"><col style="width:32%"></colgroup><thead><tr><th style="width:24%;text-align:center">方案</th><th style="width:20%;text-align:center">查找 lookup</th><th style="width:24%;text-align:center">插入/删除</th><th style="width:32%;text-align:center">适用说明</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">线性扫描</td><td style="text-align:left">O(n)</td><td style="text-align:left">O(1) 追加</td><td style="text-align:left">区间数极少（≤8）时简单直接，不做推荐</td></tr><tr class="row1"><td style="text-align:center">有序数组 + 二分</td><td style="text-align:left">O(log n)</td><td style="text-align:left">O(n) 重建</td><td style="text-align:left">编辑不频繁、以查询为主时足够，实现最简单</td></tr><tr class="row0"><td style="text-align:center">增强 BST 区间树</td><td style="text-align:left">O(log n)</td><td style="text-align:left">O(log n)</td><td style="text-align:left">源设计基线；映射编辑频繁时性能稳定</td></tr></tbody></table></div>
+<p class="lead">lookup 查找算法（区间左闭右开 [start, end)）：</p>
+<pre class="code"><code>// lookup: 区间树查找（O(log n)）
+Region* lookup(uint32_t addr) {
+    IntervalNode* node = root;
+    while (node != NULL) {
+        if (addr &lt; node-&gt;start) { node = node-&gt;left; continue; }   // 只可能命中左子树
+        if (addr &lt; node-&gt;end)   return node-&gt;region;               // 命中 [start, end)
+        if (node-&gt;right != NULL &amp;&amp; node-&gt;right-&gt;maxEnd &gt; addr)
+            node = node-&gt;right;                                    // 右子树仍可能命中
+        else
+            node = NULL;                                           // 剪枝：右子树最大 end 也 ≤ addr
+    }
+    return NULL;                                                   // 未映射
+}
+// maxEnd 维护：插入/删除后自底向上更新
+//   maxEnd(node) = max(node-&gt;end, maxEnd(node-&gt;left), maxEnd(node-&gt;right))</code></pre>
+<p class="body">正确性要点：区间不允许重叠（mapRegion 保证，见 3.3），因此「addr &lt; node-&gt;end 即命中」判定唯一；maxEnd 剪枝是 O(log n) 的关键——右子树所有区间的 end 均 ≤ maxEnd，若 maxEnd ≤ addr 则右子树绝无命中区间，直接跳过。</p>
+<h3 id="sec3-2" class="h-sub">3.2 读写分发实现</h3>
+<p class="body">宽度语义：read/write 支持 8/16/32 位宽度，其余宽度返回 E_BUS-02 非法地址宽度；RV32 为小端序，16/32 位值按「低字节在低地址」组装。非对齐访问：单区间内直接允许（与 Spike golden 一致）；跨区间边界的非对齐访问拆分为字节切片、逐切片落在单一区间内分发（※设计决策，源基线未规定）。</p>
+<p class="body">错误传递契约（评审 14-6）：read/write 返回 BusResult{val, err} 结构——err==OK 时 val 有效；err!=OK 时 val 无效（恒 0），调用方（M-13）按 err 转同步陷入；不使用哨兵值（0xFFFFFFFF 可能是合法数据，避免歧义）。</p>
+<p class="body">跨区间拆分语义（评审 14-1）：写访问跨区间时改为「两阶段」——先对全部字节片预检可访问性（任一未映射/外设错误 → 整笔失败并返回错误码，不执行任何写），预检通过后再逐片执行写；保证写操作原子性语义（不允许「RAM 已写 + 异常上报」的部分成功状态）。读访问无副作用，可逐片分发拼接。</p>
+<p class="lead">读写分发伪代码（read 为例；write 同构，两阶段预检）：</p>
+<pre class="code"><code>// 错误传递契约（评审 14-6）：BusResult 同时表达数据与错误
+//   err==OK → val 有效；err!=OK → val 恒 0，调用方转同步陷入
+typedef struct { uint32_t val; err_t err; } BusResult;
+
+// bus_read: 读分发（宽度 8/16/32，小端）
+BusResult bus_read(uint32_t addr, uint8_t width) {
+    if (width != 8 &amp;&amp; width != 16 &amp;&amp; width != 32) return (BusResult){0, E_BUS-02};
+    if (crosses_region(addr, width)) return bus_read_split(addr, width);  // 跨区间逐片读拼接
+    on_bus_access(ts, addr, width, DIR_READ);            // trace 钩子（M-18），覆盖全部访存
+    Region* r = lookup(addr);
+    if (r == NULL) return (BusResult){0, E_BUS-01};      // 未映射 → guest trap（M-13 转 mcause 1/5/7）
+    uint32_t off = addr - r-&gt;base;
+    if (r-&gt;type == RAM) return (BusResult){ram_read(r-&gt;target, off, width), OK};
+    if (r-&gt;type == ROM) return (BusResult){rom_read(r-&gt;target, off, width), OK};
+    return periph_read(r-&gt;target, off, width);           // M-15 Peripheral.read（err 非 OK → E_BUS-05，见 6.1）
+}
+
+// bus_write: 写分发（两阶段，评审 14-1：不允许部分提交）
+err_t bus_write(uint32_t addr, uint8_t width, uint32_t val) {
+    if (width != 8 &amp;&amp; width != 16 &amp;&amp; width != 32) return E_BUS-02;
+    if (crosses_region(addr, width)) return bus_write_split(addr, width, val); // 两阶段见下
+    on_bus_access(ts, addr, width, DIR_WRITE);
+    Region* r = lookup(addr);
+    if (r == NULL) return E_BUS-01;
+    uint32_t off = addr - r-&gt;base;
+    if (r-&gt;type == RAM) { ram_write(r-&gt;target, off, width, val); return OK; }
+    if (r-&gt;type == ROM) { rom_write_ignore(addr, width, val);  return OK; }  // 写忽略（可选调试事件）
+    return periph_write(r-&gt;target, off, width, val);       // err 非 OK → E_BUS-05
+}
+
+// 跨区间拆分（评审 14-7：crosses_region 判定 = 两端 lookup 比对）
+bool crosses_region(uint32_t addr, uint8_t width) {
+    if (width == 8) return false;                          // 单字节不跨
+    Region* r0 = lookup(addr);                             // 首字节所在区间
+    Region* r1 = lookup(addr + (width - 1));               // 末字节所在区间（width≤32 无溢出）
+    if (r0 == NULL || r1 == NULL) return true;             // 任一端未映射 → 需拆分（逐片定位错误片）
+    return r0 != r1;                                       // 两端区间不同 → 跨区间
+}
+
+// 写拆分两阶段（评审 14-1）：预检全部字节片 → 通过后统一执行，保证无部分提交
+err_t bus_write_split(uint32_t addr, uint8_t width, uint32_t val) {
+    for (int i = 0; i &lt; width/8; i++) {                    // 阶段一：预检
+        uint32_t a = addr + i;
+        Region* r = lookup(a);
+        if (r == NULL) return E_BUS-01;                    // 任一未映射 → 整笔失败，不执行任何写
+        if (r-&gt;type == PERIPHERAL &amp;&amp; periph_precheck(r-&gt;target, a - r-&gt;base) != OK)
+            return E_BUS-05;                               // 外设片不可访问 → 整笔失败
+    }
+    for (int i = 0; i &lt; width/8; i++) {                    // 阶段二：统一执行
+        uint32_t a = addr + i; uint8_t b = (val &gt;&gt; (8*i)) &amp; 0xFF;
+        Region* r = lookup(a);
+        if (r-&gt;type == RAM) ram_write(r-&gt;target, a - r-&gt;base, 8, b);
+        else if (r-&gt;type == PERIPHERAL) periph_write(r-&gt;target, a - r-&gt;base, 8, b);
+        /* ROM 片：写忽略 */
+    }
+    return OK;
+}
+// 读拆分逐片分发拼接（无副作用，无需预检）：
+//   bus_read_split 按字节片分别 lookup + 读，小端拼接返回；片未映射 → 整笔 E_BUS-01。</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 映射编辑事务</h3>
+<p class="body">mapRegion 按「校验 → 构建新树 → 原子替换」三步执行：① 地址越界检查（base+size 溢出 32 位地址空间 → E_BUS-04）；② 重叠检查（与现有任一区间相交 → E_BUS-03）；③ 通过后插入新节点并更新 maxEnd，随后整体替换根指针，即时生效。任一步失败均保留旧配置（源设计 4.4.3.5）。</p>
+<pre class="code"><code>// mapRegion: 注册/更新映射区间（事务式，失败保留旧配置）
+err_t map_region(Region* r) {
+    if (r-&gt;size == 0)                return E_BUS-06;   // 非法区间：size=0（评审 14-12）
+    if (r-&gt;base + r-&gt;size &lt; r-&gt;base) return E_BUS-04;   // 越界：32 位地址空间溢出
+    if (overlaps(r))                 return E_BUS-03;   // 冲突：与现有区间重叠
+    IntervalNode* new_root = tree_insert(root, r);      // 构建新树（不改旧树，COW 风格）
+    root = new_root;                                    // 原子替换 → 即时生效（FR-03）
+    rebuild_map_table(root);                            // mapTable = regionTree 派生投影（评审 14-2）
+    return OK;
+}
+// unmap: 删除映射（幂等：不存在视为成功 no-op，※设计决策）
+//   输出：确认；失败（越界/冲突类校验）保留旧配置并返回错误码
+// 原子性说明：单线程执行模型下 lookup 与 map_region 天然互斥；
+// 采用构建-替换保证编辑期间的查找始终看到一致快照（多核预留版本化）。
+// mapTable 同步（评审 14-2）：mapTable 不单独维护写路径，rebuild_map_table()
+//   在每次原子替换后由 regionTree 中序遍历重建（O(n)，编辑低频可接受）。
+// 外设生命周期（评审 14-11）：M-15 attach 返回句柄；外设销毁/注销时经 detach(handle)
+//   强制清理对应区间（自动 unmap），杜绝悬垂 target；RAM/ROM 后端随平台生命周期同生共死。</code></pre>
+<p class="body">配置通道：UI 编辑（FR-03）经 M-02 映射视图发起，命令通道经 M-05 协议进入；失败时返回完整错误码（E_BUS-03/04），前端保留旧映射视图不刷新。</p>
+<h3 id="sec3-4" class="h-sub">3.4 与真实硬件总线的差异对照表</h3>
+<p class="lead">本模块为同步函数调用式分发，不建模总线时序与协议细节；真实 SoC 总线（AXI/AHB/APB 等）的差异集中在下表维度：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:16%"><col style="width:42%"><col style="width:42%"></colgroup><thead><tr><th style="width:16%;text-align:center">维度</th><th style="width:42%;text-align:center">本模拟器（同步分发）</th><th style="width:42%;text-align:center">真实 RISC-V 硬件核</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">协议握手</td><td style="text-align:left">无握手：read/write 同步函数调用，一次返回</td><td style="text-align:left">AXI/AHB 等存在握手时序、通道相位与延迟</td></tr><tr class="row1"><td style="text-align:center">突发/等待</td><td style="text-align:left">单笔原子分发，无突发、无等待状态</td><td style="text-align:left">支持突发传输与等待状态（外设慢响应）</td></tr><tr class="row0"><td style="text-align:center">字节使能</td><td style="text-align:left">宽度参数化 8/16/32 直接读写</td><td style="text-align:left">窄总线 + 字节使能（BE）掩码，同宽语义</td></tr><tr class="row1"><td style="text-align:center">端序</td><td style="text-align:left">RV32 小端，低字节低地址</td><td style="text-align:left">小端，语义一致（无差异）</td></tr><tr class="row0"><td style="text-align:center">仲裁</td><td style="text-align:left">单主（M-13 ISS）无仲裁</td><td style="text-align:left">多主仲裁（总线矩阵/菊花链），本平台不建模</td></tr><tr class="row1"><td style="text-align:center">缓存/写缓冲</td><td style="text-align:left">无 Cache、无 TLB、无写缓冲，语义即时</td><td style="text-align:left">有 cache/写缓冲，可见性与一致性差异（不建模）</td></tr><tr class="row0"><td style="text-align:center">时序</td><td style="text-align:left">无周期概念，虚拟时间由 M-12 推进</td><td style="text-align:left">真实周期，访问延迟与性能相关</td></tr><tr class="row1"><td style="text-align:center">错误语义</td><td style="text-align:left">E_BUS-01 访存异常事件（guest trap 语义，非平台故障）</td><td style="text-align:left">总线错误/设备中止（SLVERR/DECERR 等），实现相关</td></tr></tbody></table></div>
+<h2 id="sec4" class="h-sec">4 关键函数</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:18%"><col style="width:58%"></colgroup><thead><tr><th style="width:24%;text-align:center">函数</th><th style="width:18%;text-align:center">说明</th><th style="width:58%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">mapRegion(region)</td><td style="text-align:left">注册/更新映射区间</td><td style="text-align:left">输入 {base,size,type,target}；校验 size=0（E_BUS-06）/越界（E_BUS-04）/重叠（E_BUS-03）；输出确认</td></tr><tr class="row1"><td style="text-align:center">unmap(base)</td><td style="text-align:left">删除映射</td><td style="text-align:left">幂等（不存在视为成功）；外设注销经 detach 强制清理（评审 14-11）；输出确认</td></tr><tr class="row0"><td style="text-align:center">lookup(addr)</td><td style="text-align:left">地址查表</td><td style="text-align:left">区间树 O(log n)；输出 region 或未映射（NULL）</td></tr><tr class="row1"><td style="text-align:center">read(addr,width)</td><td style="text-align:left">读分发</td><td style="text-align:left">输出 BusResult{val, err}（评审 14-6）；RAM 直接读 / Peripheral.read / 未映射 → E_BUS-01；外设错误 → E_BUS-05</td></tr><tr class="row0"><td style="text-align:center">write(addr,width,val)</td><td style="text-align:left">写分发</td><td style="text-align:left">输出 err；两阶段预检后统一执行（评审 14-1）；ROM 写忽略；外设写即时生效</td></tr><tr class="row1"><td style="text-align:center">checkRegion(region)</td><td style="text-align:left">区间校验</td><td style="text-align:left">size=0（E_BUS-06）/越界（E_BUS-04）/重叠（E_BUS-03）检测，供 mapRegion/unmap 复用</td></tr><tr class="row0"><td style="text-align:center">on_bus_access(...)</td><td style="text-align:left">访存 trace 钩子</td><td style="text-align:left">输入 {时间戳,地址,方向,宽度}；交 M-18 traceStream（覆盖全部访存）</td></tr><tr class="row1"><td style="text-align:center">snapshot()/restore()</td><td style="text-align:left">全状态快照/恢复</td><td style="text-align:left">必需项（评审 14-10）：序列化 regionTree/mapTable（配合 M-20/M-23 全状态快照与检查点重放，映射编辑记录同步恢复）</td></tr><tr class="row0"><td style="text-align:center">loadImage(base, data, len)</td><td style="text-align:left">固件镜像加载</td><td style="text-align:left">RAM 后端数据入口（评审 14-5）：M-06 加载 ELF 后调用，写入对应 RAM 区间</td></tr><tr class="row1"><td style="text-align:center">debugDump()</td><td style="text-align:left">映射表导出</td><td style="text-align:left">输出当前全部区间（base/size/type/target），供 M-02 视图与测试断言</td></tr></tbody></table></div>
+<h2 id="sec5" class="h-sec">5 处理流程</h2><h3 id="sec5-1" class="h-sub">5.1 访存分发流程</h3><p class="lead">访存单笔闭环如下（对应图 1）：</p><p class="body">（1）访存请求：M-13 fetch/load/store 调 read(addr,width) / write(addr,width,val)。</p><p class="body">（2）地址查表：lookup(addr) 区间树 O(log n) 查找，maxEnd 剪枝。</p><p class="body">（3）命中分发：RAM 直接读写；PERIPHERAL 转 M-15 Peripheral.read/write（写即时生效）；ROM 读返回、写忽略（※设计决策）。</p><p class="body">（4）未命中：产生 E_BUS-01 访存异常事件（guest trap 语义），M-13 转同步陷入（取指 mcause=1、load mcause=5、store mcause=7）。</p><p class="body">（5）trace 钩子：每次访问触发 on_bus_access（时间戳+地址+方向+宽度），交 M-18 traceStream。</p><p class="body">（6）返回：数据或异常回调用方；流程结束。</p><div class="fig">
+<svg class="flow-svg" viewBox="0 0 960 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-14 访存分发流程">
+  <defs>
+    <marker id="ah" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 Z" fill="#1e3a8a"/>
+    </marker>
+  </defs>
+  <!-- 主列 -->
+  <g font-size="13.5" font-family="Noto Sans SC, PingFang SC, Microsoft YaHei, sans-serif">
+    <rect x="110" y="16" width="260" height="64" rx="8" fill="#eff4ff" stroke="#1e3a8a" stroke-width="1.5"/>
+    <text x="240" y="44" text-anchor="middle" font-weight="700" fill="#1e3a8a">① 访存请求</text>
+    <text x="240" y="64" text-anchor="middle" fill="#334155">read(addr,width) / write(addr,width,val)</text>
+    <rect x="110" y="112" width="260" height="64" rx="8" fill="#eff4ff" stroke="#1e3a8a" stroke-width="1.5"/>
+    <text x="240" y="140" text-anchor="middle" font-weight="700" fill="#1e3a8a">② 地址查表 lookup(addr)</text>
+    <text x="240" y="160" text-anchor="middle" fill="#334155">区间树 O(log n)，maxEnd 剪枝</text>
+    <path d="M240,80 L240,108" stroke="#1e3a8a" stroke-width="1.8" marker-end="url(#ah)" fill="none"/>
+    <path d="M240,176 L240,204" stroke="#1e3a8a" stroke-width="1.8" marker-end="url(#ah)" fill="none"/>
+    <polygon points="240,208 320,240 240,272 160,240" fill="#fff7ed" stroke="#c2410c" stroke-width="1.8"/>
+    <text x="240" y="246" text-anchor="middle" font-weight="700" fill="#c2410c">命中 region？</text>
+    <text x="330" y="228" font-size="12.5" fill="#15803d">是 / 命中</text>
+    <text x="252" y="352" font-size="12.5" fill="#b91c1c">否 / 未命中</text>
+    <!-- 右列：命中分发 -->
+    <rect x="560" y="112" width="320" height="224" rx="8" fill="#f0fdf4" stroke="#15803c" stroke-width="1.5"/>
+    <text x="720" y="138" text-anchor="middle" font-weight="700" fill="#15803d">④ 命中分发（按 type）</text>
+    <line x1="580" y1="154" x2="860" y2="154" stroke="#bbf7d0" stroke-width="1"/>
+    <text x="720" y="180" text-anchor="middle" fill="#1f2937">RAM → 直接读写（ram_read/ram_write）</text>
+    <text x="720" y="206" text-anchor="middle" fill="#1f2937">PERIPHERAL → target.read/write（M-15，写即时生效）</text>
+    <text x="720" y="232" text-anchor="middle" fill="#1f2937">ROM → 读返回 / 写忽略（※设计决策）</text>
+    <text x="720" y="262" text-anchor="middle" fill="#475569" font-size="12">宽度 8/16/32；小端；跨区间拆分见 3.2</text>
+    <!-- 右列：钩子 -->
+    <rect x="560" y="400" width="320" height="128" rx="8" fill="#f1f4f9" stroke="#475569" stroke-width="1.5"/>
+    <text x="720" y="430" text-anchor="middle" font-weight="700" fill="#1e3a8a">⑤ on_bus_access 事件 → M-18 traceStream</text>
+    <text x="720" y="454" text-anchor="middle" fill="#334155">时间戳+地址+方向+宽度（覆盖全部访存）</text>
+    <text x="720" y="484" text-anchor="middle" fill="#334155">返回数据 / 完成（访问结束）</text>
+    <!-- 主列下方：未映射 -->
+    <rect x="110" y="400" width="260" height="128" rx="8" fill="#fef2f2" stroke="#b91c1c" stroke-width="1.5"/>
+    <text x="240" y="430" text-anchor="middle" font-weight="700" fill="#b91c1c">⑥ 未命中 → E_BUS-01</text>
+    <text x="240" y="454" text-anchor="middle" fill="#334155">访存异常事件（guest trap 语义）</text>
+    <text x="240" y="478" text-anchor="middle" fill="#334155">→ M-13 同步陷入</text>
+    <text x="240" y="500" text-anchor="middle" fill="#475569" font-size="12">取指 mcause=1 / load=5 / store=7</text>
+    <!-- 连线 -->
+    <path d="M296,240 L556,240" stroke="#15803d" stroke-width="1.8" marker-end="url(#ah)" fill="none"/>
+    <path d="M240,272 L240,396" stroke="#b91c1c" stroke-width="1.8" marker-end="url(#ah)" fill="none"/>
+    <path d="M720,336 L720,396" stroke="#475569" stroke-width="1.8" marker-end="url(#ah)" fill="none"/>
+    <path d="M374,464 L556,464" stroke="#475569" stroke-width="1.8" marker-end="url(#ah)" fill="none"/>
+    <text x="452" y="452" font-size="12.5" fill="#475569">trace 事件</text>
+  </g>
+</svg>
+
+<div class="flow-mobile">
+  <div class="flow-step"><div class="num">1</div><div class="txt">访存请求：M-13 fetch/load/store 调 read(addr,width) / write(addr,width,val)</div></div>
+  <div class="flow-arrow">↓</div>
+  <div class="flow-step"><div class="num">2</div><div class="txt">地址查表 lookup(addr)：区间树 O(log n)，maxEnd 剪枝</div></div>
+  <div class="flow-branch">分支：命中 region ？</div>
+  <div class="flow-step"><div class="num">3</div><div class="txt">是 → 命中分发：RAM 直接读写 / PERIPHERAL 转 M-15 read/write（写即时生效）/ ROM 读返回、写忽略</div></div>
+  <div class="flow-step"><div class="num">3'</div><div class="txt">否 → 未命中：E_BUS-01 访存异常事件（guest trap 语义）→ M-13 同步陷入（取指 mcause=1 / load=5 / store=7）</div></div>
+  <div class="flow-arrow">↓</div>
+  <div class="flow-step"><div class="num">4</div><div class="txt">on_bus_access 事件（时间戳+地址+方向+宽度）→ M-18 traceStream；返回数据 / 完成</div></div>
+</div>
+<figcaption>图 1 · M-14 访存分发流程</figcaption></div><h3 id="sec5-2" class="h-sub">5.2 映射编辑流程</h3><p class="body">（1）配置来源：UI（M-02 映射视图/外设面板）或命令（M-05）发起 mapRegion/unmap。</p><p class="body">（2）校验：checkRegion 检查越界（E_BUS-04）与重叠（E_BUS-03）。</p><p class="body">（3）拒绝路径：校验失败返回错误码，UI 保留旧配置（源设计 4.4.3.5）。</p><p class="body">（4）应用：构建新树并原子替换根指针（COW 风格），不修改旧树。</p><p class="body">（5）即时生效：后续访存立即按新映射分发（FR-03）。</p><p class="body">（6）视图刷新：M-02 映射表刷新展示新配置。</p><h3 id="sec5-3" class="h-sub">5.3 与 M-13/M-15/M-18 的交互</h3><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:20%"><col style="width:22%"><col style="width:58%"></colgroup><thead><tr><th style="width:20%;text-align:center">模块</th><th style="width:22%;text-align:center">方向</th><th style="width:58%;text-align:center">协作内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-13（ISS）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">取指/load/store 调用 read/write；E_BUS-01 转同步陷入（mcause 1/5/7）</td></tr><tr class="row1"><td style="text-align:center">M-15（外设模型）</td><td style="text-align:left">本模块 → 下游</td><td style="text-align:left">PERIPHERAL 分发到 Peripheral.read/write（offset 换算）；外设 attach 绑定区间</td></tr><tr class="row0"><td style="text-align:center">M-18（探针）</td><td style="text-align:left">本模块 → 下游</td><td style="text-align:left">on_bus_access 事件流作总线 trace 底；trace 独立成流供 M-11 导出</td></tr></tbody></table></div>
+<h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置</h3>
+<p class="body">错误码进入平台统一 E_BUS 族（源设计 3.4 表16），一场景一码，日志/响应携带完整错误码供 HMS 分级与测试断言：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:14%"><col style="width:24%"><col style="width:36%"><col style="width:26%"></colgroup><thead><tr><th style="width:14%;text-align:center">错误码</th><th style="width:24%;text-align:center">场景</th><th style="width:36%;text-align:center">处置</th><th style="width:26%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">E_BUS-01</td><td style="text-align:left">未映射地址访存</td><td style="text-align:left">产生访存异常事件（guest trap 语义，非平台故障）；M-13 转同步陷入（mcause 1/5/7）</td><td style="text-align:left">4.4.3.5、表16</td></tr><tr class="row1"><td data-label="错误码" style="text-align:center">E_BUS-02</td><td data-label="场景" style="text-align:left">非法地址宽度</td><td data-label="处置" style="text-align:left">拒绝访问并返回错误</td><td data-label="来源" style="text-align:left">表16</td></tr><tr class="row0"><td data-label="错误码" style="text-align:center">E_BUS-03</td><td data-label="场景" style="text-align:left">映射冲突（区间重叠）</td><td data-label="处置" style="text-align:left">拒绝并保留旧配置</td><td data-label="来源" style="text-align:left">表16、4.4.3.5</td></tr><tr class="row1"><td data-label="错误码" style="text-align:center">E_BUS-04</td><td data-label="场景" style="text-align:left">映射越界</td><td data-label="处置" style="text-align:left">拒绝并保留旧配置</td><td data-label="来源" style="text-align:left">表16、4.4.3.5</td></tr><tr class="row0"><td data-label="错误码" style="text-align:center">E_BUS-05</td><td data-label="场景" style="text-align:left">外设内部错误（Peripheral.read/write 返回非 OK，评审 14-3）</td><td data-label="处置" style="text-align:left">转总线错误上抛；由 M-13 按 guest 语义或平台策略处置（与未映射 E_BUS-01 可区分）</td><td data-label="来源" style="text-align:left">评审 14-3 补充</td></tr><tr class="row1"><td data-label="错误码" style="text-align:center">E_BUS-06</td><td data-label="场景" style="text-align:left">非法区间参数（size=0，评审 14-12）</td><td data-label="处置" style="text-align:left">拒绝映射并返回错误</td><td data-label="来源" style="text-align:left">评审 14-12 补充</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）非对齐访问：单区间内允许（与 Spike golden 一致）；跨区间边界按字节切片拆分分发（※设计决策）。</p>
+<p class="body">（2）跨区间写拆分：两阶段执行（预检全部字节片 → 统一执行，评审 14-1）；任一片未映射/外设不可访问 → 整笔失败（E_BUS-01/E_BUS-05），不产生「RAM 已写 + 异常上报」的部分提交状态。</p>
+<p class="body">（3）ROM 写：忽略并可选上报调试事件（※设计决策），不产生访存异常；该语义为平台自测范围，ROM 写用例不入 Spike 对拍（Spike 无 ROM 概念、内存可写，评审 14-4）。</p>
+<p class="body">（4）外设访问异常：Peripheral.read/write 返回非 OK → 总线层转 E_BUS-05 上抛（评审 14-3），与未映射 E_BUS-01 可区分；M-15 错误接口契约（read/write 返回 err_t + 预检 periph_precheck，评审 N1：预检为独立接口，与探针上报 periph_probe 语义分离）由 9.1 定义，本模块不自行假设。</p>
+<p class="body">（5）trace 钩子失败：降级为不记录，不影响访存正确性（观测类事件不要求可靠投递，允许节流合并）。</p>
+<p class="body">（6）映射编辑与访存并发：单线程执行模型天然一致；构建-替换保证编辑期间 lookup 始终看到一致快照（多核预留版本化）。</p>
+<p class="body">（7）对拍边界（评审 14-9）：仅「未映射 → trap」与「区间边界命中」入 Spike 差分对拍；跨区间拆分、ROM 写忽略、映射编辑（重叠/越界/size=0）归平台自测，Spike 无区间/ROM/映射编辑概念。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表91 M-14 行：测试要点 = 区间查表分发；映射编辑即时生效；通过准则 = 映射变化即时可见。测试纳入「单元测试 + 确定性夹具 + 黄金对拍 + 端到端验收」四级策略（源设计 7.1）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:44%"><col style="width:40%"></colgroup><thead><tr><th style="width:16%;text-align:center">用例组</th><th style="width:44%;text-align:center">测试要点</th><th style="width:40%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（源 2.5/7.1 对齐）</td><td style="text-align:left">按 9.1.1 端口契约表逐项校验 mapRegion/unmap/lookup/read/write 的接口签名、输入校验、输出结构与错误码；替代实现接入前必须同端口契约测试全绿</td><td style="text-align:left">契约测试全绿；契约变更须同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例组" style="text-align:center">区间查找</td><td data-label="测试要点" style="text-align:left">命中（含边界 base、base+size-1）；未命中 → E_BUS-01</td><td data-label="通过准则" style="text-align:left">查找结果与映射表一致</td></tr><tr class="row0"><td data-label="用例组" style="text-align:center">读写分发</td><td data-label="测试要点" style="text-align:left">RAM 直访、ROM 写忽略（不异常）、PERIPHERAL 转调 M-15；8/16/32 位宽度小端字节序</td><td data-label="通过准则" style="text-align:left">分发目标与宽度语义正确（术语统一：忽略 ≠ 拒绝）</td></tr><tr class="row1"><td data-label="用例组" style="text-align:center">跨区间拆分</td><td data-label="测试要点" style="text-align:left">16/32 位访问跨 RAM/外设边界；写拆分构造「片 1 可写、片 2 未映射」</td><td data-label="通过准则" style="text-align:left">读逐片拼接正确；写两阶段预检：任一片失败 → 整笔 E_BUS-01/E_BUS-05，RAM 片未写（无部分提交，评审 14-1/14-7）</td></tr><tr class="row0"><td data-label="用例组" style="text-align:center">ROM 写忽略</td><td data-label="测试要点" style="text-align:left">对 ROM 区间执行写访问</td><td data-label="通过准则" style="text-align:left">写忽略且不产生访存异常；平台自测断言（不入 Spike 对拍，评审 14-4）</td></tr><tr class="row1"><td data-label="用例组" style="text-align:center">外设错误</td><td data-label="测试要点" style="text-align:left">Peripheral.read/write 返回非 OK（构造 M-15 错误接口契约）</td><td data-label="通过准则" style="text-align:left">转 E_BUS-05 上抛，与未映射 E_BUS-01 可区分（评审 14-3）</td></tr><tr class="row0"><td data-label="用例组" style="text-align:center">映射编辑</td><td data-label="测试要点" style="text-align:left">合法编辑后下一次 lookup 即见新配置；冲突（E_BUS-03）/越界（E_BUS-04）/size=0（E_BUS-06）拒绝并保留旧配置</td><td data-label="通过准则" style="text-align:left">映射变化即时可见（FR-03）；mapTable 与 regionTree 派生一致（评审 14-2）</td></tr><tr class="row1"><td data-label="用例组" style="text-align:center">外设注销清理</td><td data-label="测试要点" style="text-align:left">attach 后 detach（销毁外设）</td><td data-label="通过准则" style="text-align:left">对应区间自动 unmap，访存回落未映射 E_BUS-01，无悬垂 target（评审 14-11）</td></tr><tr class="row0"><td data-label="用例组" style="text-align:center">确定性夹具</td><td data-label="测试要点" style="text-align:left">同种子 + 同访存事件序列重放</td><td data-label="通过准则" style="text-align:left">分发结果序列唯一</td></tr><tr class="row1"><td data-label="用例组" style="text-align:center">覆盖率</td><td data-label="测试要点" style="text-align:left">语句覆盖为主、关键路径补分支覆盖</td><td data-label="通过准则" style="text-align:left">核心模块单测覆盖率 ≥70%（估算基线）</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）构建-替换：映射编辑期间 lookup 始终看到一致快照（多核预留版本化），编辑事务可安全回滚；</p>
+<p class="body">（2）结构化观测：busHook 事件字段固定（时间戳+地址+方向+宽度，对齐 M-18 总线 trace 契约）、busStats 指标计数，测试按字段断言；</p>
+<p class="body">（3）即时生效可验证：映射编辑即时生效 + 拒绝保留旧配置，故障影响面最小、可快速回滚；</p>
+<p class="body">（4）CI 门禁：查找/编辑核心用例纳入单测与确定性夹具；覆盖率门禁纳入源文档 7.3 表92。</p>
+<p class="body">（5）契约层可替换性（源 2.5 对齐）：本模块对外的 driving 端口收敛到 9.1.1 端口契约表，替代实现（替代传输/内存后端等）遵守同端口契约并通过契约测试即可接入；模块内部实现语言与编程模型不受约束。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-14 责任：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:14%"><col style="width:30%"><col style="width:56%"></colgroup><thead><tr><th style="width:14%;text-align:center">质量属性</th><th style="width:30%;text-align:center">目标（估算基线）</th><th style="width:56%;text-align:center">M-14 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">性能</td><td style="text-align:left">lookup O(log n)；分发函数调用级、无握手时序</td><td style="text-align:left">增强区间树（maxEnd 剪枝）+ 同步函数调用分发</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">可用性</td><td data-label="目标" style="text-align:left">映射查看/编辑即时可见（FR-03）</td><td data-label="M-14 落实" style="text-align:left">编辑校验通过后立即生效，下一次 lookup 即见</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">安全</td><td data-label="目标" style="text-align:left">输入上限（映射范围校验）</td><td data-label="M-14 落实" style="text-align:left">冲突/越界拒绝（E_BUS-03/04）并保留旧配置</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">可维护性</td><td data-label="目标" style="text-align:left">核心模块覆盖率 ≥70%；内核前端解耦；模块即积木可替换（源 2.5）</td><td data-label="M-14 落实" style="text-align:left">单测 + 确定性夹具 + 端口契约测试（9.1.1）；映射视图/表单归 M-02，本模块只暴露事务接口；替代实现遵守同端口契约即可接入</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">可靠性</td><td data-label="目标" style="text-align:left">确定性可复现（FR-12）</td><td data-label="M-14 落实" style="text-align:left">同步分发、无握手；虚拟时间由 M-12 推进，不依赖宿主时钟</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">韧性</td><td data-label="目标" style="text-align:left">故障检测→分级→处置→恢复（NFR-08）</td><td data-label="M-14 落实" style="text-align:left">编辑失败保留旧配置；未映射访存转 guest trap（E_BUS-01），不拖垮内核</td></tr></tbody></table></div>
+
+<h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<p class="body">源设计 4.4.3.6：依赖 M-13（访存源）、M-15（外设目标）、M-18（访存 trace 钩子）、M-21（映射/访存异常日志）。展开如下：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:20%"><col style="width:20%"><col style="width:60%"></colgroup><thead><tr><th style="width:20%;text-align:center">模块</th><th style="width:20%;text-align:center">方向</th><th style="width:60%;text-align:center">协作内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-13（ISS）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">取指与访存读写调用 read/write；E_BUS-01 转同步陷入（mcause 1/5/7）；BusResult{val, err} 契约（评审 14-6）</td></tr><tr class="row1"><td style="text-align:center">M-15（外设模型）</td><td style="text-align:left">本模块 → 下游</td><td style="text-align:left">PERIPHERAL 区间分发到 Peripheral.read/write；错误接口契约：read/write 返回 err_t、预检 periph_precheck（评审 N1：独立预检接口，与探针上报 periph_probe 语义分离；14-3）；外设经 attach 调 mapRegion 绑定地址区间，detach 强制清理（评审 14-11）</td></tr><tr class="row0"><td style="text-align:center">M-18（探针）</td><td style="text-align:left">本模块 → 下游</td><td style="text-align:left">on_bus_access 事件流（总线 trace 底，覆盖全部访存）</td></tr><tr class="row1"><td style="text-align:center">M-21（日志系统）</td><td style="text-align:left">本模块 → 下游</td><td style="text-align:left">映射/访存异常日志统一上报（4.4.3.6；对接约定见 9.2）</td></tr><tr class="row0"><td style="text-align:center">M-02 / M-05</td><td style="text-align:left">配置入口 → 本模块</td><td style="text-align:left">映射查看/编辑（FR-03）经命令通道进入 mapRegion/unmap</td></tr><tr class="row1"><td style="text-align:center">M-06 / M-07</td><td style="text-align:left">本模块 → 下游</td><td style="text-align:left">固件加载：loadImage(base, data, len) 写入 RAM 后端（评审 14-5，数据进入 RAM 的唯一入口）</td></tr><tr class="row0"><td style="text-align:center">M-12 / M-20</td><td style="text-align:left">间接</td><td style="text-align:left">访存与 trap 事件上链；regionTree/mapTable 序列化参与全状态快照/检查点重放（必需项，评审 14-10）</td></tr></tbody></table></div>
+<p class="body">本模块为纯数据通路，无用户态 UI：映射视图与编辑表单由 M-02 提供，本模块只暴露事务接口与错误码。</p>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表58 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层，本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现遵守同端口契约并通过契约测试（7.1）即可接入，无需改动其他模块：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:18%"><col style="width:58%"></colgroup><thead><tr><th style="width:24%;text-align:center">端口 / 服务</th><th style="width:18%;text-align:center">方向</th><th style="width:58%;text-align:center">契约（输入 → 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:left">mapRegion(region)</td><td style="text-align:center">提供（driving）</td><td style="text-align:left">输入：{base, size, type, target}；输出：确认；size=0（E_BUS-06）/重叠（E_BUS-03）/越界（E_BUS-04）拒绝并保留旧配置</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">unmap(base)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输出：确认（失败保留旧配置可回退）；detach 强制清理（评审 14-11）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">lookup(addr)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输出：region 或未映射</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">read(addr, width)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输出：BusResult{val, err}（评审 14-6）；RAM 直接访问 / Peripheral.read 转调 / 未映射 → E_BUS-01 / 外设错误 → E_BUS-05</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">write(addr, width, value)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输出：err；两阶段预检后统一执行（评审 14-1）；外设写即时生效</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">loadImage(base, data, len)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">固件加载写入 RAM 后端（评审 14-5，供 M-06/M-07 调用）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-15 / M-18 / M-21 / M-13 / M-12 / M-20</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">外设读写分发与错误契约（E_BUS-05）、on_bus_access 事件流、日志上报、BusResult 消费、快照序列化（见 9.1）</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:26%"><col style="width:44%"><col style="width:30%"></colgroup><thead><tr><th style="width:26%;text-align:center">时机</th><th style="width:44%;text-align:center">ctx / level / errCode</th><th style="width:30%;text-align:center">说明</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">未映射访存</td><td style="text-align:left">log(ERROR, &quot;BUS-ACCESS&quot;, &quot;unmapped&quot;, &quot;E_BUS-01&quot;)</td><td style="text-align:left">guest trap 语义，供 M-22 根因查询</td></tr><tr class="row1"><td data-label="时机" style="text-align:center">外设内部错误</td><td data-label="调用方式" style="text-align:left">log(ERROR, &quot;BUS-ACCESS&quot;, &quot;periph error&quot;, &quot;E_BUS-05&quot;)</td><td data-label="说明" style="text-align:left">与未映射可区分（评审 14-3）</td></tr><tr class="row0"><td data-label="时机" style="text-align:center">映射编辑冲突/越界/非法区间</td><td data-label="调用方式" style="text-align:left">log(WARN, &quot;BUS-MAP&quot;, &quot;region invalid&quot;, &quot;E_BUS-03/E_BUS-04/E_BUS-06&quot;)</td><td data-label="说明" style="text-align:left">编辑被拒留痕，保留旧配置</td></tr><tr class="row1"><td data-label="时机" style="text-align:center">映射变更（生效）</td><td data-label="调用方式" style="text-align:left">log(INFO, &quot;BUS-MAP&quot;, &quot;map/unmap ok&quot;, &quot;&quot;)</td><td data-label="说明" style="text-align:left">映射变化即时生效留痕</td></tr></tbody></table></div>
+</main>
+</div>
+</body>
+</html>

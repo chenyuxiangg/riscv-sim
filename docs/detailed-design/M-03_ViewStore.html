@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-03 视图状态管理（View Store） 模块详细设计</title>
+<link rel="icon" href="data:image/svg+xml,&lt;svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22&gt;&lt;rect width=%2232%22 height=%2232%22 rx=%226%22 fill=%22%231e3a8a%22/&gt;&lt;text x=%2216%22 y=%2222%22 font-size=%2216%22 fill=%22white%22 text-anchor=%22middle%22 font-family=%22sans-serif%22&gt;M03&lt;/text&gt;&lt;/svg&gt;">
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.body { margin:0 0 10px; text-align:justify; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  margin:10px 0 16px; white-space:pre; }
+.nav-box { background:var(--head-bg); border:1px solid var(--line); border-radius:6px;
+  padding:10px 16px; font-size:13.5px; line-height:1.9; display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0 24px; }
+.nav-box a { color:var(--brand-2); text-decoration:none; }
+.nav-box a:hover { text-decoration:underline; }
+.flow-wrap { overflow-x:auto; margin:12px 0 16px; }
+.flow { min-width:640px; width:100%; height:auto; }
+.flow-branch { font-size:12.5px; color:var(--ink-2); border-left:3px solid var(--brand-2);
+  padding:4px 10px; margin:8px 0 16px; background:var(--zebra); }
+.ux-wrap { overflow-x:auto; margin:14px 0 18px; }
+.ux { min-width:560px; max-width:640px; margin:0 auto; }
+.ux svg { width:100%; height:auto; display:block; }
+.ux-cap { text-align:center; font-size:12.5px; color:var(--ink-2); margin:6px 0 0; }
+@media (max-width:767px) {
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media (max-width:560px) {
+  .doc-title { font-size:21px; }
+  .h-sec { font-size:19px; }
+  .doc-table, .doc-table th, .doc-table td { font-size:12.5px; }
+  .code { font-size:11.5px; white-space:pre-wrap; word-break:break-word; }
+  .nav-box { grid-template-columns:1fr; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><h1 class="doc-title">M-03 视图状态管理（View Store） 模块详细设计</h1><p class="subtitle">RISC-V仿真平台 模块详细设计系列 - 对应《模块设计说明书》4.1.3节</p><p class="version">HTML版 v1.2 (2026-10-16) - 源设计《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版，2026-10-13更新)</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版新增2.5平台共享契约与各模块端口契约表)</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.1.3（M-03 视图状态管理）：数据描述→源文档表23、关键函数表24、端口契约表25；处理流程=4.1.3.4、异常处理=4.1.3.5</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">视图切换状态保持（V-11）；订阅合并边界调用链轻量打点，仅管理员通道可见（P-20）；S1/W1/T1/E1 订阅合并 ≤200ms（估算基线）；断线经 M-07 序列号续拉并对账；只读状态快照；零安装/移动端（NFR-05）</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">M-05 命令路由/事件分发（subscribe 句柄 + 事件流）；M-07 传输适配（resumeBySeq 续拉对账）；M-02 视图组件库（storeState 消费 + 变更通知）；M-12 虚拟时间权威源；M-21 合并/对账异常日志</td></tr><tr class="row0"><td style="text-align:center">MVP状态</td><td style="text-align:left">PO主承担模块（MVP必需：storeMap/subscription/throttleTimer + 四函数闭环）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；依赖方向（2.1表5：前端交互层→会话/命令层）；状态保持 V-11；订阅合并 ≤200ms（4.1.3.2 估算基线）；虚拟时间戳合并、冲突新者为准（4.1.3.5）；订阅溢出丢最旧告警（4.1.3.5）；合并打点 P-20（仅管理员通道可见）；只读快照（4.1.3.1）；NFR-05</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.0（2026-10-16 初版）：按 M-02 v1.3 标准 9 章结构（表/代码块/流程 SVG/界面化 UX 示例）；内建 9.1.1 端口契约（源表25 对齐，4 driving + 4 driven）+ CH7 契约测试 + CH8 模块级落实；错误码复用源表16 既有（E_PROTO-05/E_CTX-06，无新增码）；虚拟时间戳合并 + 订阅溢出丢最旧落地；P-20 打点（mergeSpan ring，管理员可见）；M-02 02-5 通道子集过滤锚点双侧核对闭合；M-07 v1.1 resumeBySeq 锚点（E_PROTO-05）；3.7 状态管理 UX 界面化示例（订阅/快照/打点三面板）&lt;br&gt;v1.1（2026-10-16 评审 03-1~03-12）：03-1 两层节流级联对账（状态层合并 ≤200ms leading-edge 立即通知 + DOM 层按合并 flush 触发一次，端到端上界 ≤200ms+1帧，与 M-02 02-3 同语义双侧同步）；03-2 节流窗口策略（leading-edge 首增量立即刷 + 窗口内合并 + trailing-edge 补刷，flush 后清缓冲）；03-3 timeVirt 相等 tie-breaker（seqNo 大者为准，全局单调）；03-4 两态明确（throttlePending 仅聚合、flush 一次性落 channelState/storeMap，节流失效仅弃未落增量）；03-5 通道状态全局单例重构（channelState 按通道一份、storeMap 仅视图私有态，getState 按 channels 子集切片共享引用）；03-6 freeze 策略（切片 O(通道数) 引用拷贝 + 顶层冻结，嵌套约定只读，开销口径）；03-7 T1/E1 直通分支入伪代码 + throttleFor 规则表；03-8 reconcile seqNo 全局单调 + 缺口探测 M-07 重连通知驱动 + 待恢复态退出条件与 UI 降级；03-9 StoreState 双侧同步（完整字段 timeVirt/version/sim/wave/term/events，M-02 升 v1.4 补齐消费侧结构）；03-10 notifyViews 载荷定义（NotifiedDelta{viewIds,delta,flushSeqNo} → M-02 onDelta）；03-11 订阅溢出丢弃优先级（LRU 非核心通道、E1 核心不丢、活跃视图引用自动重订阅）；03-12 补 4 组用例&lt;br&gt;v1.2（2026-10-16 03-9 残留 P1 修复，N26）：getState 输出统一为**平铺 StoreState**（6 字段 {timeVirt,version,sim,wave,term,events}，与 M-02 v1.4 render(storeState) 消费结构完全一致）；未订阅通道字段为空态对象（02-5 子集语义保留）；视图私有态（ViewPrivateState/private）仅 M-03 内部对账锚点，不再进入交付结构；2.1.1/3.1/3.5/9.1.1 结构描述一致化（消除平铺 vs 嵌套自相矛盾）；getState 开销口径不变（O(通道数) 引用拷贝 + 顶层冻结）</td></tr><tr class="row1"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-16</td></tr></tbody></table></div></header><nav><details open><summary>目录</summary><div class="nav-box"><a href="#sec1">1 功能概述</a><a href="#sec1-1">1.1 模块定位</a><a href="#sec1-2">1.2 需求与约束</a><a href="#sec1-3">1.3 MVP 范围与预留</a><a href="#sec2">2 数据描述</a><a href="#sec2-1">2.1 核心数据结构</a><a href="#sec2-1-1">2.1.1 复杂结构字段定义</a><a href="#sec2-2">2.2 状态与订阅语义</a><a href="#sec2-3">2.3 数据流说明</a><a href="#sec3">3 实现设计</a><a href="#sec3-1">3.1 getState</a><a href="#sec3-2">3.2 applyDelta</a><a href="#sec3-3">3.3 subscribe/unsubscribe</a><a href="#sec3-4">3.4 reconcile</a><a href="#sec3-5">3.5 与 M-02 渲染衔接</a><a href="#sec3-6">3.6 差异对照表</a><a href="#sec3-7">3.7 状态管理 UX 示例（示意）</a><a href="#sec4">4 关键函数</a><a href="#sec5">5 处理流程</a><a href="#sec5-1">5.1 状态管理流程</a><a href="#sec5-2">5.2 与相邻模块的协作说明</a><a href="#sec6">6 异常处理</a><a href="#sec6-1">6.1 错误码与处置</a><a href="#sec6-2">6.2 边界与降级</a><a href="#sec7">7 测试设计与可维护性</a><a href="#sec7-1">7.1 测试要点与关键用例</a><a href="#sec7-2">7.2 可维护性手段</a><a href="#sec8">8 质量属性落实</a><a href="#sec9">9 接口依赖</a><a href="#sec9-1">9.1 依赖关系</a><a href="#sec9-1-1">9.1.1 端口契约</a><a href="#sec9-2">9.2 日志对接</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-03 视图状态管理（View Store）（4.1.3）：前端交互层状态管理层。维护各视图独立状态并保证切换后状态保持（V-11）；订阅 S1/W1/T1/E1 流并按节流合并，向视图组件提供一致的只读状态快照。断线重连后经 M-07 序列号续拉并对账（reconcile）。订阅合并边界纳入调用链轻量打点（进入/离开耗时采样），仅管理员通道可见（评审 P-20）。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:62%"><col style="width:24%"></colgroup><thead><tr><th style="width:14%;text-align:center">类别</th><th style="width:62%;text-align:center">约束内容</th><th style="width:24%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">状态保持</td><td style="text-align:left">每视图独立状态对象（storeMap），切换后状态保持（V-11）</td><td style="text-align:left">4.1.3.1、V-11</td></tr><tr class="row1"><td style="text-align:center">订阅合并</td><td style="text-align:left">订阅 S1/W1/T1/E1 流并按节流合并；状态合并节流 ≤200ms（估算基线）</td><td style="text-align:left">4.1.3.1/4.1.3.2</td></tr><tr class="row0"><td style="text-align:center">只读快照</td><td style="text-align:left">向视图组件提供一致的只读状态快照（M-02 render 输入）</td><td style="text-align:left">4.1.3.1</td></tr><tr class="row1"><td style="text-align:center">断线对账</td><td style="text-align:left">断线重连后经 M-07 序列号续拉并对账（reconcile）</td><td style="text-align:left">4.1.3.1</td></tr><tr class="row0"><td style="text-align:center">虚拟时间合并</td><td style="text-align:left">增量按虚拟时间戳合并；状态版本冲突以虚拟时间戳新者为准</td><td style="text-align:left">4.1.3.5</td></tr><tr class="row1"><td style="text-align:center">订阅溢出</td><td style="text-align:left">订阅溢出 → 丢弃最旧订阅并告警</td><td style="text-align:left">4.1.3.5</td></tr><tr class="row0"><td style="text-align:center">打点</td><td style="text-align:left">订阅合并边界纳入调用链轻量打点（进入/离开耗时采样），仅管理员通道可见</td><td style="text-align:left">P-20</td></tr><tr class="row1"><td style="text-align:center">可用性</td><td style="text-align:left">零安装、file:// 直接可开、移动端 375px 可读（NFR-05）</td><td style="text-align:left">NFR-05</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：channelState（S1/W1/T1/E1 通道状态全局单例，03-5）+ storeMap（视图私有状态）、subscription（通道订阅 + 节流/直通规则）、throttleTimer（≤200ms 合并节流，leading/trailing）、mergeSpan（合并耗时采样，P-20）；getState/applyDelta/subscribe·unsubscribe/reconcile 四函数闭环（表24）。<br>预留项（P1 演进承接，不属现实现）：状态历史/时间旅行；订阅优先级与按视图配额；跨会话状态同步；mergeSpan 聚合统计视图（当前仅采样存储，管理员通道可查）。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构（源文档表23）</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:20%"><col style="width:54%"></colgroup><thead><tr><th style="width:26%;text-align:center">数据结构/数据项</th><th style="width:20%;text-align:center">类型</th><th style="width:54%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">channelState</td><td style="text-align:left">Map&amp;lt;Channel, ChannelState&amp;gt;</td><td style="text-align:left">通道状态全局单例（S1/W1/T1/E1 各一份，applyDelta 合并落此；03-5 重构，多视图共享引用，避免按视图复制 N 份）</td></tr><tr class="row1"><td style="text-align:center">storeMap</td><td style="text-align:left">Map&amp;lt;viewId, ViewPrivateState&amp;gt;</td><td style="text-align:left">视图私有状态（UI 过滤/展开/缓存等；切换保持，V-11）；通道状态经 getState 平铺输出（未订阅通道空态）</td></tr><tr class="row0"><td style="text-align:center">subscription</td><td style="text-align:left">Set&amp;lt;channel&amp;gt;</td><td style="text-align:left">订阅通道集合（S1/W1/T1/E1）</td></tr><tr class="row1"><td style="text-align:center">throttleTimer</td><td style="text-align:left">timer</td><td style="text-align:left">状态合并节流（≤200ms 估算基线）</td></tr><tr class="row0"><td style="text-align:center">mergeSpan</td><td style="text-align:left">ring</td><td style="text-align:left">订阅合并耗时采样（管理员可见，评审 P-20）</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="body">数据模型两态分离（03-5 重构）：channelState 为 S1/W1/T1/E1 通道状态全局单例（applyDelta 合并落此，多视图共享引用）；storeMap 仅存视图私有状态（UI 过滤/展开/缓存，切换保持 V-11）；getState 按 ViewComponent.channels 子集订阅、输出**平铺 StoreState**（6 字段，未订阅通道字段为空态对象）交付 M-02 render（M-02 v1.4 消费结构一致，03-9 双侧对齐）；视图私有态仅内部对账锚点，不进交付结构（N26 修复）；mergeSpan 环形采样仅管理员通道可见（P-20）。字段定义如下：</p>
+<pre class="code"><code>// StoreState: getState 输出的完整视图状态（M-03 输出契约；M-02 render 消费，03-9 双侧对齐）
+struct StoreState {
+  uint64_t timeVirt;            // 虚拟时间（权威源 M-12，按事件推进）
+  uint32_t version;             // 状态版本（按虚拟时间戳单调递增，4.1.3.5 冲突以新者为准）
+  SimState sim;                 // S1 仿真状态（寄存器/内存/PC/断点）
+  WaveformState wave;           // W1 波形数据（通道/时间轴）
+  TerminalState term;           // T1 串口回显缓冲
+  EventState events;            // E1 事件（breakpointHit/trap/paused）
+};
+// ChannelState: 通道状态全局单例（03-5；每通道一份，多视图共享引用）
+struct ChannelState {
+  SimState sim; WaveformState wave; TerminalState term; EventState events;
+};
+// ViewPrivateState: 视图私有状态（storeMap 值；UI 过滤/展开/缓存；切换保持 V-11；
+//   仅 M-03 内部使用（对账锚点），不进入 getState 交付结构——M-02 渲染消费平铺 StoreState（N26 修复））
+struct ViewPrivateState {
+  uint32_t uiFlags;             // UI 过滤/展开/选中等本地态（M-02 组件本地态等价）
+  uint64_t lastFlushSeqNo;      // 最近已落库全局序列号（断线对账锚点，03-8）
+};
+// 订阅登记（subscription 集合条目；M-05 subscribe 返回句柄）
+struct SubEntry {
+  Channel ch;                   // S1/W1/T1/E1
+  Handle handle;                // M-05 subscribe 返回的订阅句柄
+  Throttle throttle;            // 节流/直通规则（03-7）：S1/W1 ≤200ms；T1/E1 直通
+  uint64_t lastRefT;            // 最近引用时刻（溢出丢弃 LRU 判定，03-11）
+};
+// MergeSpan: 合并耗时采样（P-20，ring 环形，RING_CAP=256，仅管理员通道可见）
+struct MergeSpan {
+  uint64_t enterT;              // 进入 applyDelta 时刻（调用链打点进入）
+  uint64_t leaveT;              // 离开 applyDelta 时刻（调用链打点离开）
+  uint64_t mergeUs;             // 合并耗时（leaveT - enterT）
+};
+// tie-breaker（03-3）：timeVirt 相等 → seqNo 大者为准（全局单调，M-07 事件序列号）
+// freeze 策略（03-6）：getState 平铺构造（O(通道数) 引用拷贝）+ 顶层 Object.freeze；
+//   底层大对象（波形数组等）共享引用不复制不深冻，文档约定视图只读（开销口径见 3.1）</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 状态与订阅语义</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:46%"><col style="width:22%"><col style="width:16%"></colgroup><thead><tr><th style="width:16%;text-align:center">机制</th><th style="width:46%;text-align:center">语义</th><th style="width:22%;text-align:center">实现通道</th><th style="width:16%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">状态保持</td><td style="text-align:left">视图私有状态 storeMap&lt;viewId,ViewPrivateState&gt; 切换后保持；通道状态共享不复制（03-5）</td><td style="text-align:left">storeMap 按 viewId 索引</td><td style="text-align:left">V-11、03-5</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">通道共享</td><td data-label="语义" style="text-align:left">S1/W1/T1/E1 通道状态全局单例（channelState），多视图共享引用；getState 平铺输出、未订阅通道字段为空态（03-5）</td><td data-label="实现通道" style="text-align:left">channelState + 平铺输出</td><td data-label="备注" style="text-align:left">03-5</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">只读快照</td><td data-label="语义" style="text-align:left">getState 输出平铺只读状态对象（引用共享 + 顶层冻结），视图不可篡改（03-6）</td><td data-label="实现通道" style="text-align:left">getState → freezeTop</td><td data-label="备注" style="text-align:left">4.1.3.1、03-6</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">订阅合并</td><td data-label="语义" style="text-align:left">applyDelta 按虚拟时间戳合并增量；节流 ≤200ms；timeVirt 相等按 seqNo 大者（tie-breaker，03-3）</td><td data-label="实现通道" style="text-align:left">applyDelta + throttleTimer</td><td data-label="备注" style="text-align:left">4.1.3.2/4.1.3.5、03-3</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">通道子集</td><td data-label="语义" style="text-align:left">按 ViewComponent.channels 过滤后传 storeState（terminalView 不接收 sim）</td><td data-label="实现通道" style="text-align:left">channels 过滤</td><td data-label="备注" style="text-align:left">M-02 02-5</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">节流级联</td><td data-label="语义" style="text-align:left">状态层合并节流（leading-edge 首增量立即通知 + 窗口内合并 + trailing 补刷）与 DOM 层渲染解耦；端到端上界 ≤200ms+1帧（03-1）</td><td data-label="实现通道" style="text-align:left">applyDelta + notifyViews</td><td data-label="备注" style="text-align:left">03-1/03-2</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">变更通知</td><td data-label="语义" style="text-align:left">notifyViews 载荷 NotifiedDelta{viewIds,delta,flushSeqNo} → M-02 onDelta（03-10）</td><td data-label="实现通道" style="text-align:left">notifyViews</td><td data-label="备注" style="text-align:left">4.1.3.4、03-10</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">断线对账</td><td data-label="语义" style="text-align:left">reconcile 按 M-07 全局单调序列号补齐缺失状态（缺口 → E_PROTO-05）；缺口探测由 M-07 重连通知驱动（03-8）</td><td data-label="实现通道" style="text-align:left">m07ResumeBySeq</td><td data-label="备注" style="text-align:left">4.1.3.1、03-8</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">合并打点</td><td data-label="语义" style="text-align:left">applyDelta 进入/离开耗时采样入 mergeSpan ring（管理员可见）</td><td data-label="实现通道" style="text-align:left">mergeSpan.append</td><td data-label="备注" style="text-align:left">P-20</td></tr></tbody></table></div>
+<h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+<p class="body">事件驱动流（4.1.3.4）：事件流到达（M-05 分发）→ 节流窗口合并（applyDelta，≤200ms）→ 通知相关视图重渲染（M-02）；断线恢复流：断线重连 → reconcile 对账补齐（M-07 resumeBySeq）→ 恢复视图一致。</p>
+<h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 getState(viewId) 读取视图状态快照</h3>
+<p class="body">getState(viewId)：按视图 id 输出**平铺只读 StoreState**（6 字段，与 M-02 v1.4 render(storeState) 消费结构完全一致，03-9/N26）；未订阅通道字段为空态对象（02-5 子集语义）；引用共享 + 顶层 Object.freeze（03-6）；M-02 render 消费；同输入同输出确定性。开销口径：每次调用 O(通道数 ≤4) 引用拷贝 + 顶层冻结，底层大对象共享引用不复制（03-6）。伪代码如下：</p>
+<pre class="code"><code>// getState: 读取视图状态快照（表24；输出：只读状态对象）
+ReadOnlyState getState(string viewId) {
+  out = { timeVirt: curTimeVirt, version: curVersion,   // 平铺完整字段（03-9，M-02 v1.4 消费一致）
+          sim:    viewChannels(viewId).has(S1) ? channelState.sim    : emptySim,
+          wave:   viewChannels(viewId).has(W1) ? channelState.wave   : emptyWave,
+          term:   viewChannels(viewId).has(T1) ? channelState.term   : emptyTerm,
+          events: viewChannels(viewId).has(E1) ? channelState.events : emptyEvents };
+  return freezeTop(out);                          // 顶层冻结；嵌套对象约定只读（03-6）
+}
+// freeze 策略（03-6）：O(通道数) 引用拷贝 + 顶层 Object.freeze；波形等大数组共享引用不深冻
+// 子集语义（02-5）：未订阅通道字段为空态对象；视图私有态（storeMap）不进入交付结构（N26 修复）
+// 只读语义：视图写入顶层抛出；嵌套修改破坏一致性 → 文档约定视图只读（4.1.3.1）</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 applyDelta(delta) 合并增量状态</h3>
+<p class="body">applyDelta(delta)：输入协议增量（simStateDelta 等），按虚拟时间戳合并 + tie-breaker（03-3），输出变更通知；节流窗口 leading-edge/trailing-edge（03-1/03-2，与 M-02 02-3 同语义）；T1/E1 直通分支（03-7）；窗口缓冲仅聚合、flush 一次性落库（03-4）；进入/离开打点采样（P-20）。节流/直通规则（throttleFor，03-7）：S1/W1 → 节流 ≤200ms；T1/E1 → 直通实时通知。伪代码如下：</p>
+<pre class="code"><code>// applyDelta: 合并增量状态（表24；输入：协议增量；按虚拟时间戳合并；输出：变更通知）
+ChangeNotice applyDelta(Delta delta) {
+  span = {enterT: now, leaveT: 0, mergeUs: 0};   // 调用链打点进入（P-20）
+  if (delta.timeVirt &lt; curTimeVirt ||            // 虚拟时间戳旧者丢弃（4.1.3.5）
+      (delta.timeVirt == curTimeVirt &amp;&amp; delta.seqNo &lt; lastSeqNo))
+    { span.mergeUs = now - span.enterT; mergeSpan.append(span); return DROP_STALE; }
+  if (delta.ch in {T1, E1}) {                    // 直通分支（03-7）：免节流实时合并+通知
+    mergeInto(channelState[delta.ch], delta);    // 直接落通道状态单例（03-5）
+    notifyViews(NotifiedDelta{viewIds(delta.ch), delta, lastSeqNo+1});  // 03-10 载荷
+    span.mergeUs = now - span.enterT; mergeSpan.append(span); return NOTIFIED;
+  }
+  if (throttlePending == null) {                 // 开节流窗口（≤200ms，4.1.3.2）
+    throttlePending = {}; armTimer(200ms);       // throttleTimer
+    notifyViews(NotifiedDelta{viewIds(delta.ch), delta, lastSeqNo}); // leading-edge 立即通知（03-1/03-2）
+  }
+  mergeInto(throttlePending, delta);             // 窗口缓冲仅聚合（03-4，不落库）
+  lastSeqNo = max(lastSeqNo, delta.seqNo);       // 全局单调（03-3/03-8）
+  span.mergeUs = now - span.enterT; mergeSpan.append(span);   // 打点离开（P-20）
+  return QUEUED;
+}
+// flush（throttleTimer 到期，trailing-edge 03-2）：
+//   一次性落 channelState + storeMap[viewId].lastFlushSeqNo 推进 + notifyViews(NotifiedDelta{...})
+//   清空 throttlePending；窗口内无新增量（已 leading 通知）→ 不重复通知</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 subscribe(channel) / unsubscribe 订阅与退订</h3>
+<p class="body">subscribe(channel)/unsubscribe：订阅/退订事件通道，调用 M-05 subscribe，输出订阅句柄；订阅溢出（SUB_CAP=64，估算基线）→ 按优先级丢弃（03-11：LRU 非核心通道；E1 关键事件通道不丢）+ 活跃视图引用自动重订阅；退订释放句柄。伪代码如下：</p>
+<pre class="code"><code>// subscribe: 订阅事件通道（表24；调用 M-05 subscribe；输出：订阅句柄）
+Handle subscribe(Channel ch) {
+  if (subscription.size &gt;= SUB_CAP) {            // 订阅溢出（4.1.3.5）
+    victim = lruVictim(subscription);            // 03-11：LRU 丢弃非核心通道
+    if (victim == null) return REJECTED;         // 全为核心通道（E1）→ 拒绝新订阅 + WARN
+    drop(victim); m21Log(WARN, &quot;STORE&quot;, &quot;sub_overflow&quot;, victim);
+    if (viewActiveUses(victim))                  // 活跃视图引用的通道（03-11）
+      autoResubscribe(victim, backoff 1s);       // 延迟自动重订阅，避免停更
+  }
+  h = m05Subscribe(ch);                          // 调用 M-05 subscribe（订阅句柄）
+  subscription.add({ch, h, throttleFor(ch), now}); // 节流/直通规则（03-7）+ LRU 引用时刻
+  return h;                                      // 输出：订阅句柄
+}
+// throttleFor（03-7 规则表）：S1 → 节流 ≤200ms；W1 → 节流 ≤200ms；
+//   T1 → 直通（串口追加字节实时）；E1 → 直通（关键事件 breakpointHit/trap/paused 实时）
+// unsubscribe: 退订（表24）
+void unsubscribe(Channel ch) {
+  m05Unsubscribe(subscription[ch].handle);       // 释放 M-05 侧句柄
+  subscription.remove(ch);                       // 订阅生命周期闭合（7.2(3)）
+}</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 reconcile() 断线对账</h3>
+<p class="body">reconcile()：断线对账，按序列号补齐缺失状态；seqNo 全局单调（03-8）；缺口探测由 M-07 重连通知驱动（事件驱动，非轮询）；调用 M-07 resumeBySeq（缺口 → E_PROTO-05，M-07 v1.1 契约）；输出补齐后的状态；恢复视图一致（4.1.3.4）。待恢复态：UI 占位展示（加载中 + 缺口条数），退出条件 = reconcile 成功补齐；重试 ≤3 失败 → 视图级提示 + 定时自动重连重试（≤30s，03-8）。伪代码如下：</p>
+<pre class="code"><code>// reconcile: 断线对账（表24；调用 M-07 resumeBySeq；输出：补齐后的状态）
+StoreState reconcile() {
+  gap = probeSeqGap(lastFlushSeqNo);             // 缺口探测：M-07 重连通知驱动（03-8，非轮询）
+  if (noSeqGap(gap)) return snapshot();          // 无缺口 → 直接快照
+  delta = m07ResumeBySeq(lastFlushSeqNo);        // 全局单调 seqNo（03-8）；缺口 → E_PROTO-05
+  applySeqInOrder(delta);                        // 按序列号补齐缺失状态 → channelState 落库
+  notifyViews(NotifiedDelta{viewIds(all), delta, lastSeqNo});  // 03-10 载荷
+  setViewState(READY);                           // 待恢复态退出（03-8）
+  return snapshot();                             // 输出：补齐后的状态
+}
+// 待恢复态（03-8）：reconcile 期间视图显示占位（&quot;补齐中 · 缺口 N 条&quot;）；
+//   退出条件：reconcile 成功 → READY；重试 ≤3 失败 → 视图级提示手动刷新 + 定时自动重连重试 ≤30s</code></pre>
+<h3 id="sec3-5" class="h-sub">3.5 状态流与 M-02 渲染衔接</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:18%"><col style="width:38%"><col style="width:30%"><col style="width:14%"></colgroup><thead><tr><th style="width:18%;text-align:center">衔接点</th><th style="width:38%;text-align:center">M-03（View Store）</th><th style="width:30%;text-align:center">M-02（视图组件库）</th><th style="width:14%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">storeState 快照</td><td style="text-align:left">getState(viewId) 输出**平铺只读 StoreState**（6 字段，未订阅通道空态，N26）</td><td style="text-align:left">render(storeState) 渲染（02-5 按 channels 子集消费）</td><td style="text-align:left">02-5/03-9 双侧核对闭合</td></tr><tr class="row1"><td style="text-align:center">增量刷新</td><td style="text-align:left">applyDelta 合并（leading-edge 立即通知 + trailing 补刷）→ 变更通知</td><td style="text-align:left">onDelta(delta) 按合并 flush 触发一次（03-1）</td><td style="text-align:left">4.1.3.4、03-1/03-2</td></tr><tr class="row0"><td style="text-align:center">订阅驱动</td><td style="text-align:left">subscription 通道集合（S1/W1/T1/E1，节流/直通规则 03-7）</td><td style="text-align:left">ViewComponent.channels 声明所需子集</td><td style="text-align:left">02-5</td></tr><tr class="row1"><td style="text-align:center">StoreState 对齐</td><td style="text-align:left">getState 输出**平铺** {timeVirt,version,sim,wave,term,events}（未订阅通道空态，N26）</td><td style="text-align:left">render(storeState) 按同结构消费（M-02 v1.4 2.1.1 已对齐）</td><td style="text-align:left">03-9 双侧同步</td></tr><tr class="row0"><td style="text-align:center">变更通知载荷</td><td style="text-align:left">notifyViews 载荷 NotifiedDelta{viewIds,delta,flushSeqNo}（03-10）</td><td style="text-align:left">onDelta(delta) 消费载荷，无需直连 M-10/M-19</td><td style="text-align:left">03-10 闭合</td></tr><tr class="row1"><td style="text-align:center">断线恢复</td><td style="text-align:left">reconcile 补齐 → notifyViews（待恢复态占位，03-8）</td><td style="text-align:left">全量重渲染（状态经 View Store 恢复，V-11）</td><td style="text-align:left">4.1.3.4、03-8</td></tr></tbody></table></div>
+<h3 id="sec3-6" class="h-sub">3.6 与 Redux / Vuex 等状态管理的差异对照表</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:30%"><col style="width:38%"><col style="width:18%"></colgroup><thead><tr><th style="width:14%;text-align:center">维度</th><th style="width:30%;text-align:center">Redux / Vuex（通用前端）</th><th style="width:38%;text-align:center">本平台建模（M-03 View Store）</th><th style="width:18%;text-align:center">差异影响</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">状态权威</td><td style="text-align:left">单一 store（全局）</td><td style="text-align:left">通道状态全局单例 + storeMap 视图私有态（03-5）</td><td style="text-align:left">切换保持 V-11，多视图共享不复制</td></tr><tr class="row1"><td style="text-align:center">变更驱动</td><td style="text-align:left">action → reducer 同步</td><td style="text-align:left">协议增量 → 虚拟时间戳合并（节流 ≤200ms + 直通规则）</td><td style="text-align:left">对齐仿真事件流，非 UI action</td></tr><tr class="row0"><td style="text-align:center">时间序</td><td style="text-align:left">自然时序</td><td style="text-align:left">虚拟时间戳新者为准 + seqNo tie-breaker（03-3）</td><td style="text-align:left">乱序增量确定性合并</td></tr><tr class="row1"><td style="text-align:center">订阅</td><td style="text-align:left">selector/订阅函数</td><td style="text-align:left">S1/W1/T1/E1 通道订阅 + M-05 句柄</td><td style="text-align:left">按通道子集过滤（02-5）</td></tr><tr class="row0"><td style="text-align:center">断线</td><td style="text-align:left">无</td><td style="text-align:left">reconcile 经 M-07 resumeBySeq 对账补齐（03-8）</td><td style="text-align:left">断线续拉闭环（E_PROTO-05）</td></tr><tr class="row1"><td style="text-align:center">可观测</td><td style="text-align:left">devtools 插件</td><td style="text-align:left">mergeSpan 合并打点（管理员可见，P-20）</td><td style="text-align:left">调用链耗时采样</td></tr></tbody></table></div>
+<h3 id="sec3-7" class="h-sub">3.7 状态管理 UX 示例（示意，界面化）</h3>
+<p class="body">以下为 View Store 状态管理界面的交互形态示意（非精确线框稿）：订阅管理、只读快照、合并打点三面板，字段与 2.1.1/表24 一致；仅管理员通道可见打点（P-20）；移动端可横向滚动查看。</p>
+<div class="ux-wrap"><figure class="ux"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="subscription · 事件通道订阅管理（示意）"><defs><filter id="sh" x="-10%" y="-20%" width="130%" height="170%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#64748b" flood-opacity="0.25"/></filter><linearGradient id="hdr" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#1e3a8a"/><stop offset="1" stop-color="#2f5bd6"/></linearGradient></defs><rect x="2" y="2" width="676" height="416" rx="10" fill="#ffffff" stroke="#e2e8f0" filter="url(#sh)"/><rect x="2" y="2" width="676" height="36" rx="10" fill="url(#hdr)"/><circle cx="26" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="42" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="58" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><text x="78" y="24" font-size="13" font-weight="700" fill="#ffffff">subscription · 事件通道订阅管理（示意）</text><text x="20" y="60" font-size="12.5" font-weight="700" fill="#374151">通道订阅（S1/W1/T1/E1）</text>
+<rect x="14" y="70" width="430" height="190" rx="6" fill="#ffffff" stroke="#e2e8f0"/>
+<rect x="14" y="70" width="430" height="30" rx="6" fill="#f8fafc" stroke="#e2e8f0"/>
+<line x1="14" y1="100" x2="444" y2="100" stroke="#e2e8f0"/>
+<text x="30" y="90" font-size="11" font-weight="700" fill="#475569">通道</text>
+<text x="120" y="90" font-size="11" font-weight="700" fill="#475569">订阅句柄</text>
+<text x="230" y="90" font-size="11" font-weight="700" fill="#475569">节流</text>
+<text x="330" y="90" font-size="11" font-weight="700" fill="#475569">状态</text>
+<circle cx="30" cy="120" r="3" fill="#22c55e"/>
+<text x="44" y="124" font-size="11" fill="#1f2937">S1 仿真</text>
+<text x="120" y="124" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">h#1a</text>
+<text x="230" y="124" font-size="11" fill="#1f2937">≤200ms</text>
+<rect x="322" y="112" width="56" height="18" rx="9" fill="#dcfce7"/><text x="350" y="124" font-size="10" fill="#15803d" text-anchor="middle">● 活跃</text>
+<line x1="14" y1="140" x2="444" y2="140" stroke="#f1f5f9"/>
+<circle cx="30" cy="156" r="3" fill="#eab308"/>
+<text x="44" y="160" font-size="11" fill="#1f2937">W1 波形</text>
+<text x="120" y="160" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">h#1b</text>
+<text x="230" y="160" font-size="11" fill="#1f2937">≤200ms</text>
+<rect x="322" y="148" width="56" height="18" rx="9" fill="#fef3c7"/><text x="350" y="160" font-size="10" fill="#a16207" text-anchor="middle">合并中</text>
+<line x1="14" y1="176" x2="444" y2="176" stroke="#f1f5f9"/>
+<circle cx="30" cy="192" r="3" fill="#22c55e"/>
+<text x="44" y="196" font-size="11" fill="#1f2937">T1 串口</text>
+<text x="120" y="196" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">h#1c</text>
+<text x="230" y="196" font-size="11" fill="#1f2937">直通</text>
+<rect x="322" y="188" width="56" height="18" rx="9" fill="#dcfce7"/><text x="350" y="200" font-size="10" fill="#15803d" text-anchor="middle">● 活跃</text>
+<line x1="14" y1="212" x2="444" y2="212" stroke="#f1f5f9"/>
+<circle cx="30" cy="228" r="3" fill="#22c55e"/>
+<text x="44" y="232" font-size="11" fill="#1f2937">E1 事件</text>
+<text x="120" y="232" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">h#1d</text>
+<text x="230" y="232" font-size="11" fill="#1f2937">直通</text>
+<rect x="322" y="224" width="56" height="18" rx="9" fill="#dcfce7"/><text x="350" y="236" font-size="10" fill="#15803d" text-anchor="middle">● 活跃</text>
+<rect x="14" y="268" width="430" height="44" rx="6" fill="#fff7ed" stroke="#fde68a"/>
+<text x="30" y="286" font-size="11" fill="#92400e">订阅溢出：SUB_CAP=64 → LRU 丢非核心通道 + WARN</text>
+<text x="30" y="304" font-size="10.5" fill="#b45309">（E1 关键事件通道不丢；活跃视图引用自动重订阅，03-11）</text>
+<rect x="470" y="70" width="196" height="242" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="486" y="92" font-size="12" font-weight="700" fill="#334155">订阅生命周期</text>
+<line x1="470" y1="102" x2="666" y2="102" stroke="#e2e8f0"/>
+<text x="486" y="126" font-size="11" fill="#1f2937">subscribe(ch) → M-05</text>
+<text x="486" y="148" font-size="11" fill="#1f2937">句柄 h#1a..1d</text>
+<text x="486" y="170" font-size="11" fill="#1f2937">unsubscribe → 释放句柄</text>
+<text x="486" y="192" font-size="11" fill="#64748b">退订后不再接收增量</text>
+<text x="486" y="222" font-size="11" fill="#64748b">按 ViewComponent.channels</text>
+<text x="486" y="244" font-size="11" fill="#64748b">子集过滤（M-02 02-5）</text>
+<rect x="486" y="272" width="120" height="24" rx="4" fill="#2f5bd6"/>
+<text x="546" y="288" font-size="10.5" fill="#ffffff" text-anchor="middle">＋ 订阅通道</text>
+<rect x="614" y="272" width="44" height="24" rx="4" fill="#ffffff" stroke="#94a3b8"/>
+<text x="636" y="288" font-size="10.5" fill="#64748b" text-anchor="middle">退订</text></svg><figcaption class="ux-cap">图 1 · subscription：事件通道订阅管理（S1/W1/T1/E1 订阅列表 + 句柄 + 节流/直通 + 状态徽标）——订阅溢出 LRU 丢非核心通道（03-11），通道子集过滤对齐 M-02 02-5</figcaption></figure></div><div class="ux-wrap"><figure class="ux"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="storeState · 视图状态快照（只读，示意）"><defs><filter id="sh" x="-10%" y="-20%" width="130%" height="170%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#64748b" flood-opacity="0.25"/></filter><linearGradient id="hdr" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#1e3a8a"/><stop offset="1" stop-color="#2f5bd6"/></linearGradient></defs><rect x="2" y="2" width="676" height="416" rx="10" fill="#ffffff" stroke="#e2e8f0" filter="url(#sh)"/><rect x="2" y="2" width="676" height="36" rx="10" fill="url(#hdr)"/><circle cx="26" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="42" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="58" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><text x="78" y="24" font-size="13" font-weight="700" fill="#ffffff">storeState · 视图状态快照（只读，示意）</text><text x="20" y="60" font-size="12.5" font-weight="700" fill="#374151">storeState 快照（channelState 单例 · 平铺输出，V-11）</text>
+<rect x="14" y="70" width="430" height="230" rx="6" fill="#ffffff" stroke="#e2e8f0"/>
+<rect x="14" y="70" width="430" height="30" rx="6" fill="#f8fafc" stroke="#e2e8f0"/>
+<line x1="14" y1="100" x2="444" y2="100" stroke="#e2e8f0"/>
+<text x="30" y="90" font-size="11" font-weight="700" fill="#475569">视图</text>
+<text x="110" y="90" font-size="11" font-weight="700" fill="#475569">状态版本</text>
+<text x="230" y="90" font-size="11" font-weight="700" fill="#475569">虚拟时间</text>
+<text x="330" y="90" font-size="11" font-weight="700" fill="#475569">通道子集</text>
+<text x="30" y="122" font-size="11" fill="#1f2937">product</text>
+<text x="110" y="122" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">v38</text>
+<text x="230" y="122" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">1.214s</text>
+<rect x="322" y="112" width="88" height="18" rx="4" fill="#eef2ff"/><text x="366" y="124" font-size="10" fill="#1d4ed8" text-anchor="middle">S1</text>
+<line x1="14" y1="140" x2="444" y2="140" stroke="#f1f5f9"/>
+<rect x="14" y="142" width="430" height="26" fill="#eef2ff"/>
+<rect x="14" y="142" width="3" height="26" fill="#2f5bd6"/>
+<text x="30" y="160" font-size="11" fill="#1f2937">debug</text>
+<text x="110" y="160" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">v42</text>
+<text x="230" y="160" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">1.302s</text>
+<rect x="322" y="150" width="100" height="18" rx="4" fill="#eef2ff"/><text x="372" y="162" font-size="10" fill="#1d4ed8" text-anchor="middle">S1 + E1</text>
+<line x1="14" y1="168" x2="444" y2="168" stroke="#f1f5f9"/>
+<text x="30" y="190" font-size="11" fill="#1f2937">waveform</text>
+<text x="110" y="190" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">v41</text>
+<text x="230" y="190" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">1.302s</text>
+<rect x="322" y="180" width="88" height="18" rx="4" fill="#eef2ff"/><text x="366" y="192" font-size="10" fill="#1d4ed8" text-anchor="middle">W1</text>
+<line x1="14" y1="208" x2="444" y2="208" stroke="#f1f5f9"/>
+<text x="30" y="230" font-size="11" fill="#1f2937">terminal</text>
+<text x="110" y="230" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">v60</text>
+<text x="230" y="230" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">1.302s</text>
+<rect x="322" y="220" width="88" height="18" rx="4" fill="#eef2ff"/><text x="366" y="232" font-size="10" fill="#1d4ed8" text-anchor="middle">T1</text>
+<rect x="14" y="314" width="430" height="40" rx="6" fill="#eff6ff" stroke="#bfdbfe"/>
+<text x="30" y="330" font-size="11" fill="#1d4ed8">只读快照：getState → freeze，视图不可篡改（4.1.3.1）</text>
+<text x="30" y="348" font-size="10.5" fill="#3b82f6">版本冲突 → 虚拟时间戳新者为准（4.1.3.5）</text>
+<rect x="470" y="70" width="196" height="284" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="486" y="92" font-size="12" font-weight="700" fill="#334155">debug 快照明细</text>
+<line x1="470" y1="102" x2="666" y2="102" stroke="#e2e8f0"/>
+<text x="486" y="124" font-size="11" fill="#1f2937">PC   0x8000_0004</text>
+<text x="486" y="146" font-size="11" fill="#1f2937">x10(a0) 0x0000_0010</text>
+<text x="486" y="168" font-size="11" fill="#1f2937">断点 2 启用 / 1 禁用</text>
+<text x="486" y="190" font-size="11" fill="#1f2937">内存页 0x8000_0xx0</text>
+<rect x="486" y="210" width="76" height="18" rx="9" fill="#dcfce7"/><text x="524" y="222" font-size="10" fill="#15803d" text-anchor="middle">● 一致</text>
+<line x1="470" y1="240" x2="666" y2="240" stroke="#e2e8f0"/>
+<text x="486" y="262" font-size="11" fill="#64748b">断线 → reconcile 对账</text>
+<text x="486" y="284" font-size="11" fill="#64748b">M-07 resumeBySeq 补齐</text>
+<rect x="486" y="302" width="160" height="24" rx="4" fill="#fff7ed" stroke="#f59e0b"/>
+<text x="566" y="318" font-size="10.5" fill="#b45309" text-anchor="middle">缺口 3 条 → 补齐中</text>
+<text x="486" y="342" font-size="10.5" fill="#94a3b8">V-11 状态保持 · 只读快照</text></svg><figcaption class="ux-cap">图 2 · storeState：按视图的状态快照面板（版本 + 虚拟时间 + 通道子集徽标）——debug 视图明细卡 + 断线 reconcile 对账提示（V-11、M-07 resumeBySeq）</figcaption></figure></div><div class="ux-wrap"><figure class="ux"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="mergeSpan · 合并节流与调用链打点（P-20，管理员可见，示意）"><defs><filter id="sh" x="-10%" y="-20%" width="130%" height="170%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#64748b" flood-opacity="0.25"/></filter><linearGradient id="hdr" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#1e3a8a"/><stop offset="1" stop-color="#2f5bd6"/></linearGradient></defs><rect x="2" y="2" width="676" height="416" rx="10" fill="#ffffff" stroke="#e2e8f0" filter="url(#sh)"/><rect x="2" y="2" width="676" height="36" rx="10" fill="url(#hdr)"/><circle cx="26" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="42" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="58" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><text x="78" y="24" font-size="13" font-weight="700" fill="#ffffff">mergeSpan · 合并节流与调用链打点（P-20，管理员可见，示意）</text><text x="20" y="60" font-size="12.5" font-weight="700" fill="#374151">合并节流窗口（throttleTimer ≤200ms）</text>
+<rect x="14" y="70" width="430" height="120" rx="6" fill="#fbfdff" stroke="#e2e8f0"/>
+<line x1="40" y1="140" x2="420" y2="140" stroke="#e2e8f0" stroke-width="2"/>
+<polygon points="420,140 408,135 408,145" fill="#e2e8f0"/>
+<line x1="70" y1="132" x2="70" y2="148" stroke="#2f5bd6" stroke-width="2"/>
+<line x1="120" y1="132" x2="120" y2="148" stroke="#2f5bd6" stroke-width="2"/>
+<line x1="170" y1="132" x2="170" y2="148" stroke="#2f5bd6" stroke-width="2"/>
+<line x1="220" y1="132" x2="220" y2="148" stroke="#f59e0b" stroke-width="3"/>
+<rect x="30" y="84" width="160" height="22" rx="4" fill="#dcfce7"/>
+<text x="110" y="99" font-size="10" fill="#15803d" text-anchor="middle">事件 1/2/3 合并（≤200ms）</text>
+<rect x="220" y="84" width="120" height="22" rx="4" fill="#fef3c7"/>
+<text x="280" y="99" font-size="10" fill="#a16207" text-anchor="middle">flush 通知视图</text>
+<text x="30" y="122" font-size="10" fill="#64748b">t0         t0+200ms（节流窗口）</text>
+<rect x="14" y="204" width="430" height="150" rx="6" fill="#ffffff" stroke="#e2e8f0"/>
+<rect x="14" y="204" width="430" height="30" rx="6" fill="#f8fafc" stroke="#e2e8f0"/>
+<line x1="14" y1="234" x2="444" y2="234" stroke="#e2e8f0"/>
+<text x="30" y="224" font-size="11" font-weight="700" fill="#475569">#</text>
+<text x="90" y="224" font-size="11" font-weight="700" fill="#475569">进入(μs)</text>
+<text x="200" y="224" font-size="11" font-weight="700" fill="#475569">离开(μs)</text>
+<text x="310" y="224" font-size="11" font-weight="700" fill="#475569">合并耗时(μs)</text>
+<text x="36" y="252" font-size="11" fill="#1f2937">1</text>
+<text x="90" y="252" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">12</text>
+<text x="200" y="252" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">157</text>
+<text x="310" y="252" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">145</text>
+<line x1="14" y1="270" x2="444" y2="270" stroke="#f1f5f9"/>
+<text x="36" y="298" font-size="11" fill="#1f2937">2</text>
+<text x="90" y="298" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">8</text>
+<text x="200" y="298" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">104</text>
+<text x="310" y="298" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">96</text>
+<line x1="14" y1="316" x2="444" y2="316" stroke="#f1f5f9"/>
+<text x="36" y="344" font-size="11" fill="#1f2937">3</text>
+<text x="90" y="344" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">15</text>
+<text x="200" y="344" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">195</text>
+<text x="310" y="344" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">180</text>
+<rect x="470" y="70" width="196" height="284" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="486" y="92" font-size="12" font-weight="700" fill="#334155">打点（P-20）</text>
+<line x1="470" y1="102" x2="666" y2="102" stroke="#e2e8f0"/>
+<text x="486" y="126" font-size="11" fill="#1f2937">applyDelta 边界</text>
+<text x="486" y="148" font-size="11" fill="#1f2937">进入/离开耗时采样</text>
+<text x="486" y="170" font-size="11" fill="#1f2937">mergeSpan ring 256 条</text>
+<text x="486" y="198" font-size="11" fill="#64748b">仅管理员通道可见</text>
+<text x="486" y="220" font-size="11" fill="#64748b">产品/嵌入式工作台不可见</text>
+<rect x="486" y="244" width="150" height="24" rx="4" fill="#2f5bd6"/>
+<text x="561" y="260" font-size="10.5" fill="#ffffff" text-anchor="middle">管理员通道</text>
+<line x1="470" y1="292" x2="666" y2="292" stroke="#e2e8f0"/>
+<text x="486" y="314" font-size="11" fill="#64748b">ring 溢出 → 丢最旧打点</text>
+<text x="486" y="336" font-size="10.5" fill="#94a3b8">P-20 调用链轻量打点</text></svg><figcaption class="ux-cap">图 3 · mergeSpan：合并节流窗口（事件 1/2/3 合并 ≤200ms → flush 通知视图）+ 合并耗时采样表（进入/离开/耗时）——仅管理员通道可见（P-20）</figcaption></figure></div>
+<h2 id="sec4" class="h-sec">4 关键函数（源文档表24）</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:28%"><col style="width:30%"><col style="width:42%"></colgroup><thead><tr><th style="width:28%;text-align:center">函数</th><th style="width:30%;text-align:center">说明</th><th style="width:42%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">getState(viewId)</td><td style="text-align:left">读取视图状态快照</td><td style="text-align:left">输出：只读状态对象</td></tr><tr class="row1"><td style="text-align:center">applyDelta(delta)</td><td style="text-align:left">合并增量状态（simStateDelta 等）</td><td style="text-align:left">输入：协议增量；按虚拟时间戳合并；输出：变更通知</td></tr><tr class="row0"><td style="text-align:center">subscribe(channel) / unsubscribe</td><td style="text-align:left">订阅/退订事件通道</td><td style="text-align:left">调用 M-05 subscribe；输出：订阅句柄</td></tr><tr class="row1"><td style="text-align:center">reconcile()</td><td style="text-align:left">断线对账：按序列号补齐缺失状态</td><td style="text-align:left">调用 M-07 resumeBySeq；输出：补齐后的状态</td></tr></tbody></table></div><h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 状态管理流程（源 4.1.3.4 对齐）</h3>
+<p class="body">事件驱动流：事件流到达 → 节流窗口合并 → 通知相关视图重渲染；断线恢复流：断线重连 → reconcile 对账补齐 → 恢复视图一致。流程图如下：</p>
+<div class="flow-wrap"><svg class="flow" viewBox="0 0 980 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-03 状态管理流程（4.1.3.4）">
+  <defs>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2f5bd6"/>
+    </marker>
+  </defs>
+  <style>
+    .fbox { fill:#fff; stroke:#1e3a8a; stroke-width:1.4; rx:8; }
+    .fbox2 { fill:#f1f4f9; stroke:#1e3a8a; stroke-width:1.2; rx:8; }
+    .farrow { stroke:#2f5bd6; stroke-width:1.5; marker-end:url(#arw); }
+    .ftxt { font:12px "Noto Sans SC","PingFang SC",sans-serif; fill:#1f2937; }
+    .ftag { font:10.5px "Noto Sans SC","PingFang SC",sans-serif; fill:#4b5563; }
+  </style>
+  <g>
+    <rect class="fbox2" x="20" y="40" width="170" height="56"/>
+    <text class="ftxt" x="105" y="62" text-anchor="middle">事件流到达</text>
+    <text class="ftxt" x="105" y="80" text-anchor="middle">M-05 分发 S1/W1/T1/E1</text>
+    <rect class="fbox" x="250" y="40" width="170" height="56"/>
+    <text class="ftxt" x="335" y="62" text-anchor="middle">applyDelta 合并</text>
+    <text class="ftxt" x="335" y="80" text-anchor="middle">虚拟时间戳 + ≤200ms</text>
+    <rect class="fbox2" x="480" y="40" width="170" height="56"/>
+    <text class="ftxt" x="565" y="62" text-anchor="middle">变更通知</text>
+    <text class="ftxt" x="565" y="80" text-anchor="middle">throttle flush</text>
+    <rect class="fbox" x="710" y="40" width="170" height="56"/>
+    <text class="ftxt" x="795" y="62" text-anchor="middle">M-02 视图重渲染</text>
+    <text class="ftxt" x="795" y="80" text-anchor="middle">render/onDelta ≤200ms</text>
+    <rect class="fbox2" x="20" y="180" width="170" height="56"/>
+    <text class="ftxt" x="105" y="202" text-anchor="middle">断线重连</text>
+    <text class="ftxt" x="105" y="220" text-anchor="middle">M-07 传输适配</text>
+    <rect class="fbox" x="250" y="180" width="170" height="56"/>
+    <text class="ftxt" x="335" y="202" text-anchor="middle">reconcile 对账</text>
+    <text class="ftxt" x="335" y="220" text-anchor="middle">M-07 resumeBySeq</text>
+    <rect class="fbox2" x="480" y="180" width="170" height="56"/>
+    <text class="ftxt" x="565" y="202" text-anchor="middle">补齐缺失状态</text>
+    <text class="ftxt" x="565" y="220" text-anchor="middle">按序列号补齐</text>
+    <rect class="fbox" x="710" y="180" width="170" height="56"/>
+    <text class="ftxt" x="795" y="202" text-anchor="middle">恢复视图一致</text>
+    <text class="ftxt" x="795" y="220" text-anchor="middle">V-11 状态保持</text>
+    <line class="farrow" x1="190" y1="68" x2="246" y2="68"/>
+    <line class="farrow" x1="420" y1="68" x2="476" y2="68"/>
+    <line class="farrow" x1="650" y1="68" x2="706" y2="68"/>
+    <line class="farrow" x1="795" y1="96" x2="795" y2="176"/>
+    <line class="farrow" x1="795" y1="176" x2="190" y2="176" marker-end="none"/>
+    <line class="farrow" x1="190" y1="208" x2="246" y2="208"/>
+    <line class="farrow" x1="420" y1="208" x2="476" y2="208"/>
+    <line class="farrow" x1="650" y1="208" x2="706" y2="208"/>
+    <text class="ftag" x="335" y="130" text-anchor="middle">虚拟时间戳旧者丢弃 + seqNo tie-breaker（03-3）· 打点（P-20）</text>
+    <text class="ftag" x="335" y="250" text-anchor="middle">E_PROTO-05 缺口 → 重试 ≤3 → 视图待恢复（占位展示） + M-21 日志</text>
+  </g>
+</svg></div>
+<div class="flow-branch">分支：订阅溢出 → LRU 丢非核心通道 + 活跃视图引用自动重订阅（03-11）；状态版本冲突 → 虚拟时间戳新者为准 + seqNo tie-breaker（03-3）；T1/E1 直通实时通知（03-7）；E_PROTO-05 持续缺口 → 重试 ≤3 次 → 视图待恢复占位 + 定时自动重连（03-8）；端到端节流级联：状态层 leading-edge 立即通知 + DOM 层按合并 flush 触发一次（03-1）；合并打点仅管理员通道可见（P-20）。</div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:52%"><col style="width:24%"></colgroup><thead><tr><th style="width:24%;text-align:center">协作模块</th><th style="width:52%;text-align:center">协作内容</th><th style="width:24%;text-align:center">触发时机</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-05（命令路由/事件分发）</td><td style="text-align:left">subscribe → M-05 subscribe（订阅句柄）；S1/W1/T1/E1 事件流分发入 applyDelta</td><td style="text-align:left">订阅/事件到达时</td></tr><tr class="row1"><td style="text-align:center">M-07（传输适配）</td><td style="text-align:left">reconcile → M-07 resumeBySeq 续拉对账（缺口 → E_PROTO-05）</td><td style="text-align:left">断线重连时</td></tr><tr class="row0"><td style="text-align:center">M-02（视图组件库）</td><td style="text-align:left">storeState 只读快照 → render（结构双侧对齐 03-9）；通道子集过滤（02-5）；变更通知（NotifiedDelta 载荷，03-10）→ onDelta/重渲染</td><td style="text-align:left">状态变更/切换后</td></tr><tr class="row1"><td style="text-align:center">M-12（事件驱动仿真引擎）</td><td style="text-align:left">虚拟时间权威源：applyDelta 按虚拟时间戳合并</td><td style="text-align:left">增量到达时</td></tr><tr class="row0"><td style="text-align:center">M-21（日志）</td><td style="text-align:left">合并/对账异常日志、订阅溢出告警</td><td style="text-align:left">异常节点</td></tr></tbody></table></div><h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置（源表16 既有码，无新增）</h3>
+<p class="body">M-03 为状态管理层，异常收敛为源表16 既有码（E_PROTO-05/E_CTX-06 等）+ 内部降级策略，无新增码。处置如下：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:40%"><col style="width:34%"></colgroup><thead><tr><th style="width:26%;text-align:center">错误码 / 场景</th><th style="width:40%;text-align:center">触发条件</th><th style="width:34%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">订阅溢出</td><td style="text-align:left">subscription.size 超上限（SUB_CAP=64，估算基线）</td><td style="text-align:left">LRU 丢非核心通道 + WARN 告警（4.1.3.5）；E1 关键通道不丢；活跃视图引用自动重订阅（03-11）</td></tr><tr class="row1"><td style="text-align:center">状态版本冲突</td><td style="text-align:left">增量虚拟时间戳旧于当前状态</td><td style="text-align:left">以虚拟时间戳新者为准；timeVirt 相等按 seqNo 大者（tie-breaker，03-3）</td></tr><tr class="row0"><td style="text-align:center">节流失效</td><td style="text-align:left">throttleTimer 窗口内异常中断</td><td style="text-align:left">丢弃合并窗口（未落增量）；下次事件重开窗口；channelState/storeMap 保持已落权威状态（03-4）</td></tr><tr class="row1"><td style="text-align:center">断线缺口（E_PROTO-05）</td><td style="text-align:left">reconcile 经 M-07 resumeBySeq 查缺口（重连通知驱动，03-8）</td><td style="text-align:left">按序列号补齐；持续缺口重试 ≤3 次 → 视图待恢复占位（缺口条数）+ M-21 日志 + 定时自动重连 ≤30s（03-8）</td></tr><tr class="row0"><td style="text-align:center">订阅命令超时（E_CTX-06）</td><td style="text-align:left">M-05 subscribe 响应超时（&gt;500ms）</td><td style="text-align:left">视图级提示；重试订阅（幂等）</td></tr><tr class="row1"><td style="text-align:center">端到端节流级联</td><td style="text-align:left">状态层合并 ≤200ms 与 DOM 层渲染节流叠加</td><td style="text-align:left">解耦：状态层 leading-edge 立即通知，DOM 层按合并 flush 触发一次；端到端上界 ≤200ms+1帧（03-1）</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）订阅溢出：LRU 丢非核心通道 + 告警（4.1.3.5）；E1 关键事件通道（breakpointHit/trap/paused）不丢；被丢通道若活跃视图引用 → 自动重订阅（退避 ≤1s）+ 视图级提示（03-11）。<br>（2）状态版本冲突：以虚拟时间戳新者为准（4.1.3.5）；timeVirt 相等 → seqNo 大者为准，旧增量丢弃（applyDelta 返回 DROP_STALE，03-3）。<br>（3）节流失效：丢弃合并窗口（未落增量），下次事件重开窗口；channelState/storeMap 保持已落权威状态（两态分离，03-4）。<br>（4）断线对账：reconcile 经 M-07 resumeBySeq 补齐（全局单调 seqNo，03-8）；E_PROTO-05 持续缺口 → 重试 ≤3 次 → 视图待恢复占位（"补齐中 · 缺口 N 条"）+ M-21 日志 + 定时自动重连重试 ≤30s；补齐后 notifyViews 恢复视图一致（4.1.3.4）。<br>（5）通道子集为空：ViewComponent.channels 未声明 → 不订阅不合并，getState 返回空态（M-01 01-2 首进入默认态）。<br>（6）只读防篡改：getState 返回平铺 + 顶层冻结对象，视图写入抛出；嵌套对象约定只读（4.1.3.1、03-6）。<br>（7）mergeSpan 溢出：ring（256 条，估算基线）丢最旧打点，不影响合并主路径（P-20）。<br>（8）移动端：375px 可读（NFR-05），状态面板单列 + 横向滚动；file:// 直接可开。<br>（9）节流级联（03-1）：M-03 合并节流（状态层）与 M-02 渲染节流（DOM 层）解耦——状态层 leading-edge 首增量立即通知（02-3 语义双侧同步），DOM 层仅按合并 flush 触发一次渲染；端到端 UI 刷新上界 = 合并窗口 ≤200ms + DOM 帧 ≤16ms ≈ ≤216ms（估算基线），不再级联叠加为 400ms。<br>（10）通道共享（03-5）：S1/W1/T1/E1 全局单例（channelState），多视图引用共享；storeMap 仅视图私有态；单通道更新只改一份，一致性天然保证。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表92（M-03 行）：视图状态保持（V-11）；合并节流。展开用例表如下（契约测试 + 核心路径 + 异常路径，替代实现须通过同端口契约测试，4.1.3.6）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:40%"><col style="width:36%"></colgroup><thead><tr><th style="width:24%;text-align:center">用例</th><th style="width:40%;text-align:center">输入/步骤</th><th style="width:36%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（4.1.3.6）</td><td style="text-align:left">按 9.1.1 端口契约逐项校验 getState/applyDelta/subscribe/unsubscribe/reconcile 的接口签名、输入校验、输出结构与错误码</td><td style="text-align:left">契约测试全绿；契约变更同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">状态保持（V-11，表92）</td><td data-label="输入/步骤" style="text-align:left">视图 A/B 间切换后注入增量</td><td data-label="通过准则" style="text-align:left">视图私有态 storeMap 独立保持；通道状态 channelState 共享一致（03-5）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">合并节流（表92）</td><td data-label="输入/步骤" style="text-align:left">高频注入 10 条增量</td><td data-label="通过准则" style="text-align:left">leading-edge 首增量立即通知 + 窗口内合并 + trailing 补刷；虚拟时间戳新者为准</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">缓冲与 storeMap 一致性（03-4）</td><td data-label="输入/步骤" style="text-align:left">窗口内注入增量后节流失效</td><td data-label="通过准则" style="text-align:left">缓冲丢弃仅弃未落增量；channelState/storeMap 保持已落权威状态</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">timeVirt 相等 tie-breaker（03-3）</td><td data-label="输入/步骤" style="text-align:left">同虚拟时刻两条增量（seqNo 不同）</td><td data-label="通过准则" style="text-align:left">seqNo 大者为准；小者丢弃（DROP_STALE）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">端到端节流级联（03-1）</td><td data-label="输入/步骤" style="text-align:left">M-03 flush + M-02 渲染链路计时</td><td data-label="通过准则" style="text-align:left">首增量立即通知；端到端上界 ≤200ms+1帧，不级联为 400ms</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">通道共享一致性（03-5）</td><td data-label="输入/步骤" style="text-align:left">多视图订阅同通道后注入增量</td><td data-label="通过准则" style="text-align:left">channelState 单例一致；各视图 getState 平铺输出同步，无 N 份副本</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">只读快照（4.1.3.1、03-6）</td><td data-label="输入/步骤" style="text-align:left">getState 返回对象尝试写入</td><td data-label="通过准则" style="text-align:left">顶层冻结生效，写入抛出；嵌套约定只读；channelState 不受影响</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">订阅溢出（4.1.3.5、03-11）</td><td data-label="输入/步骤" style="text-align:left">订阅超 SUB_CAP</td><td data-label="通过准则" style="text-align:left">LRU 丢非核心通道 + WARN；E1 不丢；活跃视图引用自动重订阅</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">通道子集过滤（02-5）</td><td data-label="输入/步骤" style="text-align:left">terminalView 注入 S1 增量</td><td data-label="通过准则" style="text-align:left">按 channels 子集过滤，T1 视图不接收 sim 状态</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">直通分支（03-7）</td><td data-label="输入/步骤" style="text-align:left">注入 T1 追加字节 / E1 关键事件</td><td data-label="通过准则" style="text-align:left">免节流实时合并 + 立即通知（termDelta 实时回显）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">断线对账（4.1.3.4、03-8）</td><td data-label="输入/步骤" style="text-align:left">模拟断线后重连（M-07 通知驱动）</td><td data-label="通过准则" style="text-align:left">reconcile 补齐缺失状态；E_PROTO-05 缺口重试 ≤3；待恢复态占位展示；恢复视图一致</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">虚拟时间戳冲突（4.1.3.5、03-3）</td><td data-label="输入/步骤" style="text-align:left">注入旧虚拟时间戳增量</td><td data-label="通过准则" style="text-align:left">旧增量丢弃（DROP_STALE）；状态保持新者</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">合并打点（P-20）</td><td data-label="输入/步骤" style="text-align:left">applyDelta 多次后读 mergeSpan</td><td data-label="通过准则" style="text-align:left">进入/离开耗时采样入库；仅管理员通道可见</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">渲染异常联动</td><td data-label="输入/步骤" style="text-align:left">M-02 视图渲染抛错</td><td data-label="通过准则" style="text-align:left">M-03 状态不损坏；下次通知正常渲染</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">移动端 375px（NFR-05）</td><td data-label="输入/步骤" style="text-align:left">移动视口渲染状态面板</td><td data-label="通过准则" style="text-align:left">单列 + 横向滚动；无溢出/裁切</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）状态单源：channelState（通道全局单例）+ storeMap（视图私有态）两态分离，M-02 只读消费（getState 平铺 + 顶层冻结），不直接改库（03-4/03-5）。<br>（2）合并算法独立：applyDelta 节流（leading/trailing）/虚拟时间戳合并/tie-breaker 与订阅解耦，可单独单测。<br>（3）订阅生命周期闭合：subscribe/unsubscribe 成对（句柄释放），防止泄漏；溢出丢弃策略（LRU + 核心不丢）集中可测（03-11）。<br>（4）打点集中：mergeSpan ring 独立模块，不影响合并主路径（P-20）。<br>（5）CI 门禁：契约测试 + 状态保持 + 合并节流 + 断线对账 + 节流级联 + 通道共享用例纳入回归基线（表92）。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-03 责任：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:16%"><col style="width:40%"><col style="width:44%"></colgroup><thead><tr><th style="width:16%;text-align:center">质量属性</th><th style="width:40%;text-align:center">目标（估算基线）</th><th style="width:44%;text-align:center">M-03 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">确定性</td><td style="text-align:left">同事件序列同虚拟时间戳 → 同 storeState</td><td style="text-align:left">applyDelta 按虚拟时间戳新者合并（4.1.3.5）</td></tr><tr class="row1"><td style="text-align:center">性能</td><td style="text-align:left">订阅合并 ≤200ms（4.1.3.2）；打点开销可忽略</td><td style="text-align:left">throttleTimer 窗口合并 + mergeSpan 采样不入主路径</td></tr><tr class="row0"><td style="text-align:center">韧性</td><td style="text-align:left">订阅溢出丢最旧告警；断线对账补齐</td><td style="text-align:left">SUB_CAP 溢出降级 + reconcile（E_PROTO-05 重试 ≤3）</td></tr><tr class="row1"><td style="text-align:center">可用性</td><td style="text-align:left">切换状态保持（V-11）；移动端 375px 可读</td><td style="text-align:left">视图私有态 + 通道共享（03-5）+ 单列面板/横向滚动</td></tr><tr class="row0"><td style="text-align:center">可扩展性</td><td style="text-align:left">新通道订阅即接入；预留状态历史/时间旅行</td><td style="text-align:left">subscription 集合扩展 + getState 快照统一</td></tr></tbody></table></div><h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<div class="lead">合规：业务模块 → 模块组件单向依赖（4.7 表86）；M-03 只经 M-05/M-07/M-02/M-12/M-21 交互，不自行实现事件分发/传输/渲染/日志。</div>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:30%"><col style="width:46%"></colgroup><thead><tr><th style="width:24%;text-align:center">依赖方</th><th style="width:30%;text-align:center">被依赖方</th><th style="width:46%;text-align:center">依赖内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-03（View Store）</td><td style="text-align:left">M-05（命令路由/事件分发）</td><td style="text-align:left">subscribe → M-05 subscribe（订阅句柄）；S1/W1/T1/E1 事件流分发</td></tr><tr class="row1"><td style="text-align:center">M-03</td><td style="text-align:left">M-07（传输适配）</td><td style="text-align:left">reconcile → M-07 resumeBySeq 续拉对账（缺口 → E_PROTO-05）</td></tr><tr class="row0"><td style="text-align:center">M-03</td><td style="text-align:left">M-02（视图组件库）</td><td style="text-align:left">storeState 只读快照 → render；通道子集过滤（02-5）；变更通知 → onDelta/重渲染</td></tr><tr class="row1"><td style="text-align:center">M-03</td><td style="text-align:left">M-12（事件驱动仿真引擎）</td><td style="text-align:left">虚拟时间权威源：applyDelta 按虚拟时间戳合并</td></tr><tr class="row0"><td style="text-align:center">M-03</td><td style="text-align:left">M-21（日志）</td><td style="text-align:left">合并/对账异常日志、订阅溢出告警</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表25 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层、本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现遵守同端口契约并通过契约测试（7.1）即可接入：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:20%"><col style="width:54%"></colgroup><thead><tr><th style="width:26%;text-align:center">端口 / 服务</th><th style="width:20%;text-align:center">方向</th><th style="width:54%;text-align:center">契约（输入 -&gt; 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">getState(viewId)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输出：**平铺只读 StoreState** {timeVirt, version, sim, wave, term, events}（引用共享 + 顶层冻结，03-6；未订阅通道字段为空态，02-5 子集语义；与 M-02 v1.4 render(storeState) 消费结构一致，03-9/N26）；空态 → 视图默认 state（M-01 01-2）</td></tr><tr class="row1"><td style="text-align:center">applyDelta(delta)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输入：协议增量；按虚拟时间戳合并，timeVirt 相等按 seqNo 大者（tie-breaker，03-3）；输出：变更通知；节流 ≤200ms leading-edge/trailing（03-1/03-2）；T1/E1 直通实时通知（03-7）；缓冲仅聚合、flush 落库（03-4）；打点 P-20</td></tr><tr class="row0"><td style="text-align:center">subscribe(channel) / unsubscribe</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">调用 M-05 subscribe；输出：订阅句柄；溢出 LRU 丢非核心通道 + 活跃视图引用自动重订阅（SUB_CAP=64，03-11）</td></tr><tr class="row1"><td style="text-align:center">reconcile()</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">调用 M-07 resumeBySeq；输出：补齐后的状态；缺口 → E_PROTO-05（重试 ≤3）；seqNo 全局单调 + M-07 重连通知驱动 + 待恢复态占位（03-8）</td></tr><tr class="row0"><td style="text-align:center">M-05</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">事件分发：subscribe 句柄 + S1/W1/T1/E1 事件流</td></tr><tr class="row1"><td style="text-align:center">M-07</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">传输适配：resumeBySeq 续拉对账（E_PROTO-05，重连通知驱动）</td></tr><tr class="row0"><td style="text-align:center">M-02</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">视图：storeState 消费（结构双侧对齐，03-9）+ 变更通知驱动，载荷 NotifiedDelta{viewIds,delta,flushSeqNo} → onDelta（03-10）；通道子集过滤 02-5，双侧核对闭合</td></tr><tr class="row1"><td style="text-align:center">M-21</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">合并/对账异常日志、订阅溢出告警</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<p class="body">合并正常 -> log(DEBUG, "STORE", viewId, "merge", n)；订阅溢出 -> log(WARN, "STORE", "sub_overflow", ch)（4.1.3.5）；对账缺口 -> log(WARN, "STORE", "reconcile_gap", n)；对账失败 -> log(ERROR, "STORE", "reconcile_fail", err)（E_PROTO-05 重试耗尽）；合并打点（mergeSpan）仅管理员通道可见（P-20），产品/嵌入式工作台不可见系统日志与诊断详情（角色边界 §3.4）。会话关联字段（sessionId）随 M-21 双时间戳统一记录。</p>
+</main>
+<footer class="subtitle">M-03 视图状态管理（View Store） 模块详细设计 v1.2 · 对应《RISC-V仿真平台模块设计说明书》4.1.3节 · 2026-10-16</footer>
+
+</div>
+</body>
+</html>

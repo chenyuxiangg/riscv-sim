@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-19 波形管道 模块详细设计</title>
+<link rel="icon" href="data:image/svg+xml,&lt;svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22&gt;&lt;rect width=%2232%22 height=%2232%22 rx=%226%22 fill=%22%231e3a8a%22/&gt;&lt;text x=%2216%22 y=%2222%22 font-size=%2216%22 fill=%22white%22 text-anchor=%22middle%22 font-family=%22sans-serif%22&gt;M19&lt;/text&gt;&lt;/svg&gt;">
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15px; font-weight:700; color:#374151; margin:18px 0 8px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { margin:0 0 10px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  margin:10px 0 16px; white-space:pre; }
+code { font-family:inherit; }
+.nav-toggle { margin:10px 0 4px; }
+.nav-box { background:var(--head-bg); border:1px solid var(--line); border-radius:6px;
+  padding:10px 16px; font-size:13.5px; line-height:1.9; display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0 24px; }
+.nav-box a { color:var(--brand-2); text-decoration:none; }
+.nav-box a:hover { text-decoration:underline; }
+.flow-wrap { overflow-x:auto; margin:12px 0 16px; }
+.flow { min-width:640px; width:100%; height:auto; }
+.flow-branch { font-size:12.5px; color:var(--ink-2); border-left:3px solid var(--brand-2);
+  padding:4px 10px; margin:8px 0 16px; background:var(--zebra); }
+@media (max-width:767px) {
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media (max-width:560px) {
+  .doc-title { font-size:21px; }
+  .h-sec { font-size:19px; }
+  .doc-table, .doc-table th, .doc-table td { font-size:12.5px; }
+  .code { font-size:11.5px; white-space:pre-wrap; word-break:break-word; }
+  .nav-box { grid-template-columns:1fr; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><h1 class="doc-title">M-19 波形管道 模块详细设计</h1><p class="subtitle">RISC-V仿真平台 模块详细设计系列 - 对应《模块设计说明书》4.5.2节</p><p class="version">HTML版 v1.1 (2026-10-15) - 源设计《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版，2026-10-13更新)</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版新增2.5平台共享契约与各模块端口契约表)</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.5.2（③ 观测管道层-M-19 波形管道）：数据描述→源文档表71、关键函数表72、端口契约表73；处理流程=4.5.2.4</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">波形/逻辑分析（FR-10，差异化核心）；trace 导出（FR-14）；跨板波形同一时间轴（FR-27，P1）</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">M-18 边沿事件源；M-03 W1 订阅；M-02 波形视图渲染消费；M-23 P1 长回看 spool；M-07 断线续拉通道</td></tr><tr class="row0"><td style="text-align:center">MVP状态</td><td style="text-align:left">PO主承担模块（MVP必需：4 通道环形缓冲 + 边沿编码 + 批量节流推送 + CSV/VCD 分块导出）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；依赖方向（2.1表5：观测管道层→仿真内核/前端状态层）；只读观测约束（2.2：探针/波形/trace 只读，不修改仿真状态）；确定性约束（2.4表6）；评审 P-09（观测类不要求可靠投递、允许节流合并）；溢出策略（图4）；内存预算（表71：4 通道 × 32B ≈ 25MB）</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.0（2026-10-15 初版）：按 M-13 v1.1 标准 9 章结构；内建 9.1.1 端口契约（源表73 对齐）+ CH7 契约测试 + CH8 模块即积木可替换；表号/图号引用源文档契约层版实际编号（表71/72/73、表91/93）；只读观测无新增错误码；管道/编码/推送/溢出按 4.5.2 与评审 P-09、图4 内建；M-18 m19Encode 入口对接声明</td></tr><tr class="row1"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.1（2026-10-15）：落实评审 19-1~19-9：载荷预算口径复核（峰值 ≈24.4 MiB/s / 常规 ≈0.5 MiB/s，19-1）；内存预算改容量规划对账（固定容量无运行时超预算，19-2）；推送失败语义 droppedRanges + 不重推（19-3）；导出契约展开（filter/跨通道 t_virt 归并/nextOffset 锚点/进度，19-4）；调度者 = M-12 周期回调（19-5）；M-03 W1 契约锚点标注（19-6）；M-07 v1.1 resumeBySeq/E_PROTO-05 已核对（19-7）；补用例（19-8）；PAUSE_SIM 统一 MVP 口径 + 暂停≠改状态声明（19-9）</td></tr><tr class="row0"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-15</td></tr></tbody></table></div></header><nav class="nav-toggle"><details open><summary>目录</summary><div class="nav-box"><a href="#sec1">1 功能概述</a><a href="#sec1-1">1.1 模块定位</a><a href="#sec1-2">1.2 需求与约束</a><a href="#sec1-3">1.3 MVP 范围与预留</a><a href="#sec2">2 数据描述</a><a href="#sec2-1">2.1 核心数据结构</a><a href="#sec2-1-1">2.1.1 复杂结构字段定义</a><a href="#sec2-2">2.2 缓存与增量语义</a><a href="#sec2-3">2.3 数据流说明</a><a href="#sec3">3 实现设计</a><a href="#sec3-1">3.1 encodeEdge</a><a href="#sec3-2">3.2 pushDelta</a><a href="#sec3-3">3.3 setOverflowPolicy</a><a href="#sec3-4">3.4 exportCSV/VCD</a><a href="#sec3-5">3.5 内存超预算处置</a><a href="#sec3-6">3.6 差异对照表</a><a href="#sec4">4 关键函数</a><a href="#sec5">5 处理流程</a><a href="#sec5-1">5.1 波形管道流程</a><a href="#sec5-2">5.2 与相邻模块的协作说明</a><a href="#sec6">6 异常处理</a><a href="#sec6-1">6.1 错误码与处置</a><a href="#sec6-2">6.2 边界与降级</a><a href="#sec7">7 测试设计与可维护性</a><a href="#sec7-1">7.1 测试要点与关键用例</a><a href="#sec7-2">7.2 可维护性手段</a><a href="#sec8">8 质量属性落实</a><a href="#sec9">9 接口依赖</a><a href="#sec9-1">9.1 依赖关系</a><a href="#sec9-1-1">9.1.1 端口契约</a><a href="#sec9-2">9.2 日志对接</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-19 波形管道（4.5.2）：实现「探针 → 边沿编码 → 环形缓冲 → 增量推送 → 前端渲染 / trace 导出」管道（差异化核心，FR-10）。边沿编码只记录 {time, ch, value, edge}（只记变化点）；每通道环形缓冲固定容量（默认 2×10⁵ 事件起步，容量模型 = 边沿速率 × 期望回看窗口，默认窗口 ≥100ms）；批量增量推送（≤20ms 一批、节流、单调序列号，调度者 = M-12 事件循环周期回调，19-5）；溢出默认丢最旧 + 标记（可配置暂停仿真 PAUSE_SIM，MVP 可用，19-9）；内存预算默认 4 通道 × 2×10⁵ × 32B ≈ 25MB 常驻（满容量 = 预算上限，固定容量下无运行时超预算，19-2；P1 长回看转 IndexedDB spool）。推送载荷字节预算（19-1 复核）：峰值 4 通道全速 ≈24.4 MiB/s（2×10⁵ 事件/s/通道 × 32B × 4 通道）；常规观测（边沿变化实际速率）约 0.5 MiB/s，对应 ~4k 事件/s/通道。按 ≤200ms 刷新预算：全速峰值单批 ≈4.9MiB，超单帧承受，推导需二进制载荷（定长头）+ 可选压缩 + 前端降采样；常规场景单批 ≈100KB 可直推（评审 P-09 节流合并）。观测类事件不要求可靠投递、允许节流合并（评审 P-09）。M-18 的 m19Encode 即本模块 encodeEdge 入口（边沿事件源）。波形只读观测，不修改仿真状态（2.2 只读约束；PAUSE_SIM 暂停执行属控制面操作，不修改状态数据，19-9）。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:12%"><col style="width:64%"><col style="width:24%"></colgroup><thead><tr><th style="width:12%;text-align:center">类别</th><th style="width:64%;text-align:center">约束内容</th><th style="width:24%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">功能</td><td style="text-align:left">「探针 → 边沿编码 → 环形缓冲 → 增量推送 → 前端渲染 / trace 导出」管道（差异化核心，FR-10）</td><td style="text-align:left">4.5.2.1、FR-10</td></tr><tr class="row1"><td style="text-align:center">编码</td><td style="text-align:left">边沿事件只记录 {time, ch, value, edge}（只记变化点）</td><td style="text-align:left">4.5.2.1</td></tr><tr class="row0"><td style="text-align:center">缓冲</td><td style="text-align:left">每通道环形缓冲固定容量（默认 2×10⁵ 事件；容量 = 边沿速率 × 回看窗口，默认 ≥100ms）</td><td style="text-align:left">4.5.2.2 表71</td></tr><tr class="row1"><td style="text-align:center">推送</td><td style="text-align:left">批量增量推送：≤20ms 一批、节流、单调序列号</td><td style="text-align:left">4.5.2.1</td></tr><tr class="row0"><td style="text-align:center">溢出</td><td style="text-align:left">默认丢最旧 + 标记；可配置暂停仿真（图4）</td><td style="text-align:left">4.5.2.5</td></tr><tr class="row1"><td style="text-align:center">内存</td><td style="text-align:left">4 通道 × 2×10⁵ × 32B ≈ 25MB 常驻（满容量 = 预算上限，固定容量无运行时超预算，19-2；P1 长回看转 IndexedDB spool，M-23）</td><td style="text-align:left">4.5.2.2 表71、19-2</td></tr><tr class="row0"><td style="text-align:center">载荷</td><td style="text-align:left">峰值 ≈24.4 MiB/s（4 通道 × 2×10⁵ 事件/s × 32B，19-1）；常规 ≈0.5 MiB/s（~4k 事件/s/通道）；二进制定长头 + 可选压缩（峰值单批 ≈4.9MiB 推导）</td><td style="text-align:left">4.5.2.1、评审 P-09、19-1</td></tr><tr class="row1"><td style="text-align:center">可靠性</td><td style="text-align:left">观测类事件不要求可靠投递、允许节流合并（可丢，断线续拉补齐）</td><td style="text-align:left">评审 P-09</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：encodeEdge(ev)（边沿编码压缩）、pushDelta()（批量节流推送，单调序列号；调度者 = M-12 周期回调，19-5）、setOverflowPolicy(p)（溢出策略配置，含 PAUSE_SIM 暂停仿真，MVP 可用，19-9）、exportCSV()/exportVCD()（分块导出，跨通道归并 + 可续导 + 进度可见，19-4）；4 通道环形缓冲（2×10⁵/通道）；二进制增量推送（定长头）。<br>预留项（P1 演进承接，不属现实现）：IndexedDB 长回看 spool（P1，M-23，超出 25MB 内存预算时转存）；跨板波形同一时间轴（FR-27，P1，经 M-18/M-19 链路通道）；导出格式压缩扩展（wireFormat COMPRESSED 可选压缩落地）；容量规划运行时保护细化（动态通道数/窗口放大场景，19-2）。<br>语义边界（19-9）：PAUSE_SIM 暂停的是仿真执行（控制面操作，经 M-12 暂停语义实施），不修改寄存器/内存等状态数据，符合 2.2 只读观测约束。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构（源文档表71）</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:26%"><col style="width:48%"></colgroup><thead><tr><th style="width:26%;text-align:center">数据结构</th><th style="width:26%;text-align:center">类型</th><th style="width:48%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">ringBuffer</td><td style="text-align:left">per-channel ring</td><td style="text-align:left">波形环形缓冲（固定容量、覆盖策略，每通道 2×10⁵）</td></tr><tr class="row1"><td style="text-align:center">deltaQueue</td><td style="text-align:left">queue</td><td style="text-align:left">增量推送队列（≤20ms 一批、单调序列号）</td></tr><tr class="row0"><td style="text-align:center">overflowPolicy</td><td style="text-align:left">enum</td><td style="text-align:left">丢最旧 + 标记（默认）/ 暂停仿真</td></tr><tr class="row1"><td style="text-align:center">memBudget</td><td style="text-align:left">const</td><td style="text-align:left">≈25MB 常驻（4 通道 × 2×10⁵ × 32B；容量规划对账基线，满容量 = 预算上限，19-2）</td></tr><tr class="row0"><td style="text-align:center">wireFormat</td><td style="text-align:left">enum</td><td style="text-align:left">二进制定长头 + 可选压缩（载荷预算推导，评审 P-09）</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="body">ringBuffer 为每通道定长环形缓冲（固定容量 + 覆盖策略，容量 = 边沿速率 × 回看窗口）；deltaQueue 为批量节流推送队列（单调序列号，断线续拉锚点）；overflowPolicy 定义溢出处置（图4）；memBudget 为内存预算基线；wireFormat 定义二进制载荷形态。字段定义如下：</p>
+<pre class="code"><code>// RingEntry: 波形环条目（边沿编码后，32B/条：t 8B + ch 1B + value 8B + edge 1B + 对齐）
+struct RingEntry { uint64_t t; uint8_t ch; uint64_t value; uint8_t edge; };
+// ringBuffer: 每通道波形环形缓冲（4.5.2.2 表71；固定容量、覆盖策略）
+struct ringBuffer {
+  RingEntry buf[RING_CAP];  // 定长环形缓冲（默认 RING_CAP=2×10⁵ 事件/通道，起步基线实测校准）
+  uint32_t  head;           // 写游标（溢出丢最旧 + 标记：overflowCount++ 后覆盖）
+  uint64_t  overflowCount;  // 溢出丢弃计数（标记，供前端/日志提示）
+};
+// 容量模型：RING_CAP = 边沿速率 × 期望回看窗口（默认窗口 ≥100ms），实现后实测校准
+// deltaQueue: 增量推送队列（≤20ms 一批、节流、单调序列号；断线续拉锚点）
+struct deltaQueue {
+  WaveformDelta pending;    // 当前批（节流窗口内累积）
+  uint64_t seqNo;           // 单调序列号（推送自增；失败批次亦前移，空间连续无空洞，19-3）
+  uint32_t batchMs = 20;    // 批窗口（≤20ms，主线程合并刷新预算）
+  DropRange droppedRanges[];// 丢弃区间记录（推送失败本批丢弃，前端按 seq 空洞续拉，19-3）
+};
+// overflowPolicy: 溢出策略（4.5.2.2 表71；图4；PAUSE_SIM 属 MVP 可配，19-9）
+enum overflowPolicy { DROP_OLDEST_MARK, PAUSE_SIM }; // 默认 DROP_OLDEST_MARK（可配）
+// memBudget: 内存预算（4.5.2.2 表71；容量规划对账基线，19-2）
+const uint32_t memBudget = 4 * RING_CAP * 32;        // ≈25MB 常驻（满容量 = 预算上限）
+//   固定容量模型下运行时占用恒 ≤ 满容量，无运行时超预算（19-2）；通道数增长 /
+//   RING_CAP 放大时按配置期对账（3.5）：超预算 → 拒绝或强制降采样（联动 M-18 setRate）；
+//   P1 长回看转 IndexedDB spool（M-23）
+// wireFormat: 载荷形态（4.5.2.2 表71；载荷预算推导，评审 P-09）
+enum wireFormat { BIN_LE_HEADER, BIN_LE_COMPRESSED }; // 二进制定长头 + 可选压缩（P1）
+// WaveformDelta: 增量推送载荷（带序列号；断线续拉/前端合并）
+struct WaveformDelta {
+  uint64_t seqStart;        // 推送起始序列号
+  uint64_t seqEnd;          // 推送结束序列号（单调）
+  uint64_t t_virt;          // 虚拟时间戳（M-12 权威源，前端时间轴对齐）
+  RingEntry entries[];      // 本批边沿事件（≤20ms 窗口累积）
+};</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 缓存与增量语义</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:46%"><col style="width:22%"><col style="width:16%"></colgroup><thead><tr><th style="width:16%;text-align:center">机制</th><th style="width:46%;text-align:center">语义</th><th style="width:22%;text-align:center">实现通道</th><th style="width:16%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">边沿编码</td><td style="text-align:left">只记 {time, ch, value, edge} 变化点（M-18 sample 已判定边沿）</td><td style="text-align:left">encodeEdge + RingEntry</td><td style="text-align:left">数据量受控（2.5）</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">批量推送</td><td data-label="语义" style="text-align:left">≤20ms 一批、节流、单调序列号（seqStart/seqEnd）</td><td data-label="实现通道" style="text-align:left">deltaQueue + batchMs</td><td data-label="备注" style="text-align:left">前端 ≤200ms 刷新预算</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">溢出策略</td><td data-label="语义" style="text-align:left">默认丢最旧 + 标记（overflowCount++）；可配暂停仿真（图4）</td><td data-label="实现通道" style="text-align:left">ringBuffer.overflowCount + overflowPolicy</td><td data-label="备注" style="text-align:left">不阻塞仿真（默认）</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">内存预算</td><td data-label="语义" style="text-align:left">4 通道 × 2×10⁵ × 32B ≈ 25MB 常驻（满容量 = 预算上限，固定容量无运行时超预算，19-2）；通道增长/窗口放大按配置期对账</td><td data-label="实现通道" style="text-align:left">memBudget + budgetReconcile</td><td data-label="备注" style="text-align:left">P1 长回看转 IndexedDB spool</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">载荷形态</td><td data-label="语义" style="text-align:left">二进制定长头 + 可选压缩（峰值单批 ≈4.9MiB 推导，19-1）</td><td data-label="实现通道" style="text-align:left">wireFormat</td><td data-label="备注" style="text-align:left">峰值 ≈24.4 MiB/s；常规 ≈0.5 MiB/s</td></tr></tbody></table></div>
+<h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+<p class="body">探针事件 → 边沿编码 → 环形缓冲（按通道）→ 批量节流推送（≤20ms）→ 前端合并渲染；溢出按策略处置（图4，4.5.2.4）。</p>
+<h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 encodeEdge(ev) 边沿编码压缩</h3>
+<p class="body">encodeEdge(ev)：边沿编码压缩——输入 {time, ch, value}（M-18 sample 产出，M-18 的 m19Encode 即本入口），输出 {time, ch, value, edge} 事件写入 per-channel 环形缓冲；只记变化点（M-18 已做边沿判定，本模块仅编码落环）。PAUSE_SIM 溢出策略属 MVP 可配（19-9）；暂停仿真执行不修改状态数据（控制面操作，符合 2.2 只读约束）。伪代码如下：</p>
+<pre class="code"><code>// encodeEdge: 边沿编码压缩（4.5.2.3 表72；输入：{time,ch,value}；输出：{time,ch,value,edge}）
+//   M-18 的 m19Encode(ev) 即本入口（边沿事件源，M-18 v1.1 已对接）
+void encodeEdge(EdgeEvent ev) {
+  RingEntry r = {t: ev.t, ch: ev.ch, value: ev.value, edge: ev.kind};
+  ringBuffer[ev.ch].append(r);                     // 按通道入环（固定容量 + 覆盖策略）
+  if (ringBuffer[ev.ch].full()) {                  // 溢出（图4）
+    if (overflowPolicy == DROP_OLDEST_MARK) {      // 默认：丢最旧 + 标记
+      ringBuffer[ev.ch].overflowCount++;           // 计数标记（不阻塞仿真）
+      ringBuffer[ev.ch].head = (head + 1) % RING_CAP;
+    } else {                                       // PAUSE_SIM：暂停仿真（可配）
+      m12Pause(&quot;waveform_overflow&quot;, ev.ch);        // 联动 M-12 暂停语义
+    }
+  }
+  deltaQueue.enqueue(r);                           // 同时累积进推送队列（≤20ms 批）
+}</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 pushDelta() 批量节流推送</h3>
+<p class="body">pushDelta()：批量增量推送——≤20ms 一批（节流）、单调序列号（seqStart/seqEnd）。调度者（19-5）：挂 M-12 事件循环周期回调（每 batchMs=20ms 触发；首个触发时机 = 首次事件入队后的下一个周期回调），前端按 ≤200ms 刷新预算拉取合并。观测类不要求可靠投递（评审 P-09）；推送失败 → 丢弃本批 + droppedRanges 记录（seq 空洞），前端经续拉通道补齐（对齐 M-07 v1.1 resumeBySeq / E_PROTO-05，19-7 已核对）。伪代码如下：</p>
+<pre class="code"><code>// pushDelta: 批量增量推送（4.5.2.3 表72；输出：waveformDelta 带序列号）
+// 调度者：M-12 事件循环周期回调（每 batchMs=20ms 触发；前端 ≤200ms 预算消费，19-5）
+WaveformDelta pushDelta() {
+  if (deltaQueue.pending.entries.empty()) return null; // 无新事件不推送（节流）
+  uint64_t s = deltaQueue.seqNo;                   // 当前批起点
+  WaveformDelta d = {seqStart: s, seqEnd: s + n,
+                     t_virt: timeVirt, entries: pending.entries};
+  deltaQueue.seqNo = d.seqEnd;                     // 序列号空间单调前移（无空洞，19-3）
+  deltaQueue.pending.clear();                      // 本批移交（下批重新累积）
+  if (m03Push(d) != OK) {                          // 推送失败（P-09 可丢，19-3）
+    droppedRanges.append({seqStart: s, seqEnd: d.seqEnd}); // 记录丢弃区间
+    log(WARN, &quot;WAVE&quot;, &quot;push&quot;, &quot;dropped&quot;);          // 前端按 seq 空洞续拉补齐
+    return d;                                      // 本批不重推、不阻塞仿真
+  }
+  return d;                                        // 输出：waveformDelta（带序列号）
+}
+// 失败语义（19-3）：丢弃本批 + 依赖续拉补齐（推荐，P-09）；seqNo 单调前移、droppedRanges
+//   记录丢弃区间；前端检测 seq 空洞即经续拉通道补齐（对齐 M-07 v1.1 resumeBySeq(seq) /
+//   E_PROTO-05 缺口对账，19-7 已核对）；观测类不重试、不阻塞仿真</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 setOverflowPolicy(p) 溢出策略配置</h3>
+<p class="body">setOverflowPolicy(p)：溢出策略配置——丢最旧 + 标记（默认）/ 暂停仿真（可配），输出确认；配置即生效（后续溢出按新策略处置）。伪代码如下：</p>
+<pre class="code"><code>// setOverflowPolicy: 溢出策略配置（4.5.2.3 表72；输出：确认）
+uint8_t setOverflowPolicy(overflowPolicy p) {
+  overflowPolicy = p;                              // 默认 DROP_OLDEST_MARK；可配 PAUSE_SIM
+  log(INFO, &quot;WAVE&quot;, &quot;overflow_policy&quot;, p);         // 策略变更日志（M-21）
+  return OK;                                       // 输出：确认
+}</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 exportCSV()/exportVCD() 分块导出</h3>
+<p class="body">exportCSV()/exportVCD()：波形导出（FR-10/14）——数据源为 per-channel 环形缓冲当前窗口；跨通道按 t_virt 归并排序（多通道事件交叉时序单流，19-4）；按 filter（通道子集 + 时间窗 + 格式）分块导出（10⁴ 条目/块），nextOffset 为归并流条目索引（续导锚点），进度回调 onProgress(pct)；大文件不阻塞主线程。伪代码如下：</p>
+<pre class="code"><code>// exportCSV / exportVCD: 波形导出（4.5.2.3 表72；FR-10/14；契约展开 19-4）
+// filter: {channels: 通道子集, tStart/tEnd: t_virt 时间窗}；fmt 由调用入口决定（CSV/VCD）
+ExportHandle exportCSV(filter, nextOffset = 0, onProgress = null)
+ExportHandle exportVCD(filter, nextOffset = 0, onProgress = null) {
+  merged = mergeSortByTvirt(ringBuffer[channels(filter)]); // 跨通道归并（t_virt 单调，19-4）
+  chunk  = merged[nextOffset : nextOffset + CHUNK];        // CHUNK = 10⁴ 条目/块
+  return {handle, chunk, nextOffset: nextOffset + CHUNK,   // 续导锚点 = 归并流条目索引
+          progress: nextOffset / merged.size, done};       // 进度：onProgress(pct) 回调
+}
+// 数据源：per-channel ringBuffer（当前窗口，含 overflowCount 标记；历史丢失以标记提示）
+// 大文件分块落盘/下载，不阻塞主线程（FR-14）</code></pre>
+<h3 id="sec3-5" class="h-sub">3.5 内存超预算处置（与 M-18 联动）</h3>
+<p class="body">内存预算对账（19-2）：固定容量模型下运行时占用恒 ≤ 满容量（4×RING_CAP×32 ≈25MB），不存在运行时超预算；对账在容量规划期触发——通道数增长（超出默认 4 通道）或 RING_CAP 放大（回看窗口增大）时，按「通道数 × RING_CAP × 32B」对账 memBudget，超预算 → 拒绝通道创建/窗口放大 + 提示，或强制降采样（联动 M-18 setRate 节流加倍）。P1 演进：动态通道数/窗口放大引入运行时保护，长回看转 IndexedDB spool（M-23，环形窗口滑动保留最近窗口）。伪代码如下：</p>
+<pre class="code"><code>// 容量规划对账（19-2：固定容量下无运行时超预算；配置期触发）
+uint8_t budgetReconcile(uint32_t channelCount, uint32_t ringCap) {
+  uint64_t used = channelCount * ringCap * 32;     // 规划占用（通道数 × 容量 × 32B）
+  if (used &gt; memBudget) {                          // 超 ≈25MB 预算（图4 分支）
+    m18SetRate({throttleN: *2});                   // 强制降采样（联动 M-18，采样减半）
+    log(WARN, &quot;WAVE&quot;, &quot;budget&quot;, &quot;reconcile&quot;);      // 提示（拒绝 or 降采样由调用方选择）
+    return E_CTX-02;                               // 资源超限（既有码语义，无新增码）
+  }
+  return OK;
+}
+// P1：动态通道/窗口放大运行时保护；长回看 → 环形窗口滑动 + IndexedDB spool（M-23 原子写），
+//   导出/回看经 spool 续取（wireFormat COMPRESSED 压缩落地）</code></pre>
+<h3 id="sec3-6" class="h-sub">3.6 与真实示波器 / 逻辑分析软件的差异对照表</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:32%"><col style="width:38%"><col style="width:16%"></colgroup><thead><tr><th style="width:14%;text-align:center">维度</th><th style="width:32%;text-align:center">真实示波器 / 逻辑分析软件</th><th style="width:38%;text-align:center">本平台建模（M-19 波形管道）</th><th style="width:16%;text-align:center">差异影响</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">数据源</td><td style="text-align:left">物理通道连续采集</td><td style="text-align:left">M-18 探针边沿事件（只记变化点）</td><td style="text-align:left">虚拟事件流，无物理采样率</td></tr><tr class="row1"><td style="text-align:center">存储</td><td style="text-align:left">采集板载存储（大容量）</td><td style="text-align:left">每通道环形缓冲 2×10⁵ + 内存预算 25MB（P1 转 IndexedDB）</td><td style="text-align:left">内存受控（表71），长回看 P1</td></tr><tr class="row0"><td style="text-align:center">推送</td><td style="text-align:left">整屏刷新/滚屏</td><td style="text-align:left">批量节流推送（≤20ms）+ 单调序列号；峰值 ≈24.4 MiB/s 需二进制 + 压缩/降采样（19-1）</td><td style="text-align:left">前端 ≤200ms 刷新预算</td></tr><tr class="row1"><td style="text-align:center">可靠性</td><td style="text-align:left">硬件连续无丢失</td><td style="text-align:left">观测类可丢（P-09）+ 序列号续拉补齐</td><td style="text-align:left">断线/丢批可对账，不阻塞仿真</td></tr><tr class="row0"><td style="text-align:center">导出</td><td style="text-align:left">厂商格式（CSV/WAV 等）</td><td style="text-align:left">CSV/VCD 分块导出（可续导、进度可见，FR-14）</td><td style="text-align:left">分块 + 续导，大文件不阻塞</td></tr></tbody></table></div>
+<h2 id="sec4" class="h-sec">4 关键函数（源文档表72）</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:30%"><col style="width:44%"></colgroup><thead><tr><th style="width:26%;text-align:center">函数</th><th style="width:30%;text-align:center">说明</th><th style="width:44%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">encodeEdge(ev)</td><td style="text-align:left">边沿编码压缩</td><td style="text-align:left">输入：{time, ch, value}（M-18 m19Encode 入口）；输出：{time, ch, value, edge} 事件</td></tr><tr class="row1"><td style="text-align:center">pushDelta()</td><td style="text-align:left">批量增量推送（节流）</td><td style="text-align:left">输出：waveformDelta（带序列号，≤20ms 批）</td></tr><tr class="row0"><td style="text-align:center">exportCSV()/exportVCD()</td><td style="text-align:left">波形导出（FR-10/14）</td><td style="text-align:left">输出：分块下载（可续导、进度可见）</td></tr><tr class="row1"><td style="text-align:center">setOverflowPolicy(p)</td><td style="text-align:left">溢出策略配置</td><td style="text-align:left">输出：确认（默认丢最旧+标记；可配暂停仿真）</td></tr></tbody></table></div><h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 波形管道流程（源 4.5.2.4 对齐，图4）</h3>
+<p class="body">探针事件 → 边沿编码 → 环形缓冲（按通道）→ 批量节流推送（≤20ms）→ 前端合并渲染；溢出按策略处置（图4）。流程图如下：</p>
+<div class="flow-wrap"><svg class="flow" viewBox="0 0 980 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-19 波形管道流程（图4）">
+  <defs>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2f5bd6"/>
+    </marker>
+  </defs>
+  <style>
+    .fbox { fill:#fff; stroke:#1e3a8a; stroke-width:1.4; rx:8; }
+    .fbox2 { fill:#f1f4f9; stroke:#1e3a8a; stroke-width:1.2; rx:8; }
+    .farrow { stroke:#2f5bd6; stroke-width:1.5; marker-end:url(#arw); }
+    .ftxt { font:12px "Noto Sans SC","PingFang SC",sans-serif; fill:#1f2937; }
+    .ftag { font:10.5px "Noto Sans SC","PingFang SC",sans-serif; fill:#4b5563; }
+  </style>
+  <g>
+    <rect class="fbox" x="20" y="40" width="170" height="56"/>
+    <text class="ftxt" x="105" y="62" text-anchor="middle">探针事件</text>
+    <text class="ftxt" x="105" y="80" text-anchor="middle">（M-18 边沿事件）</text>
+    <rect class="fbox" x="250" y="40" width="170" height="56"/>
+    <text class="ftxt" x="335" y="62" text-anchor="middle">边沿编码</text>
+    <text class="ftxt" x="335" y="80" text-anchor="middle">{t,ch,value,edge}</text>
+    <rect class="fbox2" x="480" y="40" width="170" height="56"/>
+    <text class="ftxt" x="565" y="62" text-anchor="middle">环形缓冲</text>
+    <text class="ftxt" x="565" y="80" text-anchor="middle">per-channel 2×10⁵</text>
+    <rect class="fbox" x="20" y="180" width="170" height="56"/>
+    <text class="ftxt" x="105" y="202" text-anchor="middle">批量推送</text>
+    <text class="ftxt" x="105" y="220" text-anchor="middle">≤20ms + 单调序列号</text>
+    <rect class="fbox" x="250" y="180" width="170" height="56"/>
+    <text class="ftxt" x="335" y="202" text-anchor="middle">前端合并渲染</text>
+    <text class="ftxt" x="335" y="220" text-anchor="middle">（M-03 W1 → M-02 视图）</text>
+    <rect class="fbox2" x="480" y="180" width="170" height="56"/>
+    <text class="ftxt" x="565" y="202" text-anchor="middle">导出 / 回看</text>
+    <text class="ftxt" x="565" y="220" text-anchor="middle">CSV/VCD 分块 + spool(P1)</text>
+    <rect class="fbox2" x="700" y="40" width="170" height="56"/>
+    <text class="ftxt" x="785" y="62" text-anchor="middle">溢出分支（图4）</text>
+    <text class="ftxt" x="785" y="80" text-anchor="middle">丢最旧+标记 / 暂停仿真</text>
+    <line class="farrow" x1="190" y1="68" x2="246" y2="68"/>
+    <line class="farrow" x1="420" y1="68" x2="476" y2="68"/>
+    <line class="farrow" x1="565" y1="96" x2="565" y2="176"/>
+    <line class="farrow" x1="565" y1="176" x2="190" y2="176" marker-end="none"/>
+    <line class="farrow" x1="190" y1="208" x2="246" y2="208"/>
+    <line class="farrow" x1="420" y1="208" x2="476" y2="208"/>
+    <line class="farrow" x1="650" y1="68" x2="696" y2="68"/>
+    <text class="ftag" x="565" y="130" text-anchor="middle">溢出策略：overflowCount 标记 / m12Pause</text>
+    <text class="ftag" x="335" y="245" text-anchor="middle">推送失败：序列号续拉补齐（P-09 可丢）</text>
+  </g>
+</svg></div>
+<div class="flow-branch">分支：缓冲溢出 → 丢最旧 + 标记（overflowCount++，默认，不阻塞仿真）或暂停仿真（PAUSE_SIM，可配，19-9）；容量规划对账（配置期）→ 拒绝或强制降采样（联动 M-18 setRate，19-2）；推送失败 → 丢弃本批 + droppedRanges + 续拉补齐（观测可丢，P-09，19-3）。</div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:52%"><col style="width:24%"></colgroup><thead><tr><th style="width:24%;text-align:center">协作模块</th><th style="width:52%;text-align:center">协作内容</th><th style="width:24%;text-align:center">触发时机</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-18（探针）</td><td style="text-align:left">边沿事件源：m19Encode(ev) 即 encodeEdge 入口（只记变化点）</td><td style="text-align:left">sample 产出边沿事件时</td></tr><tr class="row1"><td style="text-align:center">M-03（视图状态管理）</td><td style="text-align:left">W1 订阅：pushDelta 输出 waveformDelta（带序列号）供前端合并（锚点：契约待 M-03 文档落地时双侧核对，19-6）</td><td style="text-align:left">批量推送时</td></tr><tr class="row0"><td style="text-align:center">M-02（波形视图）</td><td style="text-align:left">渲染消费：W1 合并结果渲染波形（FR-10）</td><td style="text-align:left">收到增量推送后</td></tr><tr class="row1"><td style="text-align:center">M-23（DataStore）</td><td style="text-align:left">P1 长回看 spool：超内存预算转 IndexedDB（原子写 + schemaVersion）</td><td style="text-align:left">容量规划对账/长回看时（P1）</td></tr><tr class="row0"><td style="text-align:center">M-07（传输适配）</td><td style="text-align:left">续拉通道：推送失败按 seq 空洞补齐（对齐 M-07 v1.1 resumeBySeq / E_PROTO-05，19-7 已核对）</td><td style="text-align:left">断线/推送失败时</td></tr><tr class="row1"><td style="text-align:center">M-12（仿真引擎）</td><td style="text-align:left">PAUSE_SIM 联动暂停 + t_virt 时间基准 + 事件循环周期回调触发 pushDelta（调度者，19-5）</td><td style="text-align:left">周期回调/暂停策略触发时</td></tr></tbody></table></div><h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置（无新增码）</h3>
+<p class="body">M-19 为只读观测模块（2.2），观测类事件可丢（评审 P-09），不新增错误码；异常统一按以下处置：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:42%"><col style="width:32%"></colgroup><thead><tr><th style="width:26%;text-align:center">错误码 / 场景</th><th style="width:42%;text-align:center">触发条件</th><th style="width:32%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">缓冲溢出</td><td style="text-align:left">per-channel 环形缓冲满（边沿速率超容量模型）</td><td style="text-align:left">丢最旧 + 标记（overflowCount++，默认）/ 暂停仿真（PAUSE_SIM，可配，图4）</td></tr><tr class="row1"><td style="text-align:center">推送失败</td><td style="text-align:left">waveformDelta 推送失败（断线/通道异常）</td><td style="text-align:left">丢弃本批 + droppedRanges 记录（seq 空洞）+ 前端续拉补齐（对齐 M-07 v1.1 resumeBySeq / E_PROTO-05，19-3/19-7；观测可丢不重试）</td></tr><tr class="row0"><td style="text-align:center">容量规划超预算</td><td style="text-align:left">通道数增长/窗口放大超 memBudget（固定容量下无运行时超预算，19-2）</td><td style="text-align:left">配置期拒绝或强制降采样（联动 M-18 setRate）+ 提示；P1 转 IndexedDB spool（M-23）</td></tr><tr class="row1"><td style="text-align:center">无效策略</td><td style="text-align:left">setOverflowPolicy 传入未定义策略值</td><td style="text-align:left">拒绝 + 日志（WARN），保持当前策略</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）溢出降级：默认丢最旧 + 标记（overflowCount，不阻塞仿真）；可配暂停仿真（PAUSE_SIM，MVP 可配，19-9）；PAUSE_SIM 暂停仿真执行属控制面操作，不修改寄存器/内存等状态数据，符合 2.2 只读约束。<br>（2）推送失败（P-09）：观测类不要求可靠投递、允许节流合并；推送失败 → 丢弃本批 + droppedRanges 记录（seq 空洞，19-3），前端经续拉通道补齐（对齐 M-07 v1.1 resumeBySeq / E_PROTO-05，19-7），不重试不阻塞。<br>（3）内存预算：4 通道全速常驻 ≈25MB（满容量 = 预算上限，固定容量下无运行时超预算，19-2）；通道增长/窗口放大按配置期对账，超预算拒绝或强制降采样（联动 M-18 setRate）；P1 长回看转 IndexedDB spool（M-23）。<br>（4）时间基准：t_virt 取 M-12 虚拟时间（权威源），跨板波形同轴（FR-27，P1）同基准。<br>（5）导出降级：导出数据源为环形缓冲当前窗口（含 overflowCount 标记）；跨通道导出按 t_virt 归并排序（19-4）；历史丢失部分以标记提示，不伪造数据。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表91（M-19 行）：测试要点 = 订阅边沿事件入环、增量推送；关键用例 = 波形刷新 ≤200ms。展开用例表如下（核心模块覆盖率 ≥70%，源文档 7.3 表92）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:42%"><col style="width:34%"></colgroup><thead><tr><th style="width:24%;text-align:center">用例</th><th style="width:42%;text-align:center">输入/步骤</th><th style="width:34%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（源 2.5/7.1 对齐）</td><td style="text-align:left">按 9.1.1 端口契约逐项校验 encodeEdge/pushDelta/exportCSV/exportVCD/setOverflowPolicy 的接口签名、输入校验、输出结构与错误码；替代实现接入前必须同端口契约测试全量</td><td style="text-align:left">契约测试全绿；契约变更同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">边沿编码只记变化点</td><td data-label="输入/步骤" style="text-align:left">M-18 连续注入边沿事件（含同值）</td><td data-label="通过准则" style="text-align:left">环形缓冲仅存变化点 {t,ch,value,edge}；同值不落环</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">批量节流推送（表91）</td><td data-label="输入/步骤" style="text-align:left">事件持续注入，观察 pushDelta 批次</td><td data-label="通过准则" style="text-align:left">每批 ≤20ms 窗口；单调序列号（seqStart/seqEnd 无回退）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">波形刷新 ≤200ms（表91）</td><td data-label="输入/步骤" style="text-align:left">4 通道全速事件 + 前端渲染计时</td><td data-label="通过准则" style="text-align:left">刷新 ≤200ms 估算基线；常规载荷 ≈0.5 MiB/s 直推、峰值 ≈24.4 MiB/s 走压缩/降采样（19-1）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">溢出丢最旧 + 标记（图4）</td><td data-label="输入/步骤" style="text-align:left">灌满单通道环形缓冲（&gt;2×10⁵）</td><td data-label="通过准则" style="text-align:left">overflowCount 递增；最新窗口保留；不阻塞仿真</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">暂停仿真策略（可配）</td><td data-label="输入/步骤" style="text-align:left">setOverflowPolicy(PAUSE_SIM) 后灌满缓冲</td><td data-label="通过准则" style="text-align:left">溢出触发 M-12 暂停；策略配置即生效</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">容量规划对账（19-2）</td><td data-label="输入/步骤" style="text-align:left">新增通道/放大窗口至超 25MB 预算</td><td data-label="通过准则" style="text-align:left">配置期超预算 → 拒绝或强制降采样（联动 M-18 setRate）；固定容量下运行时无超预算（原 budgetCheck 死逻辑用例暴露后定案）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">推送失败语义（19-3）</td><td data-label="输入/步骤" style="text-align:left">注入 m03Push 失败</td><td data-label="通过准则" style="text-align:left">本批丢弃、seqNo 单调前移、droppedRanges 记录；前端按 seq 空洞续拉补齐</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">跨通道导出归并（19-4）</td><td data-label="输入/步骤" style="text-align:left">多通道事件交叉注入后 exportCSV/VCD</td><td data-label="通过准则" style="text-align:left">归并流按 t_virt 单调；nextOffset 续导锚点正确；onProgress 进度可见</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">调度者周期推送（19-5）</td><td data-label="输入/步骤" style="text-align:left">事件入队后观察批次</td><td data-label="通过准则" style="text-align:left">每 batchMs=20ms 周期触发 pushDelta；前端 ≤200ms 预算消费</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">导出续导/进度（FR-14）</td><td data-label="输入/步骤" style="text-align:left">exportCSV/VCD 大缓冲导出</td><td data-label="通过准则" style="text-align:left">分块 + nextOffset 续导；进度可见；含 overflowCount 标记</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">推送失败续拉（P-09）</td><td data-label="输入/步骤" style="text-align:left">注入推送失败/断线</td><td data-label="通过准则" style="text-align:left">按序列号缺口续拉补齐；观测不重试不阻塞</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）通道独立：per-channel ring 独立容量与游标，新增通道不涉核心逻辑。<br>（2）策略可配：overflowPolicy / batchMs / wireFormat 为结构化配置，调整不涉核心逻辑。<br>（3）载荷自描述：二进制定长头 + 序列号，前端解码不依赖宿主时序（确定性）。<br>（4）能力降级：观测类可丢（P-09）+ 续拉补齐，断线/降载不阻塞仿真。<br>（5）CI 门禁：波形刷新 ≤200ms + 溢出标记 + 序列号单调用例纳入回归基线。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-19 责任：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:18%"><col style="width:40%"><col style="width:42%"></colgroup><thead><tr><th style="width:18%;text-align:center">质量属性</th><th style="width:40%;text-align:center">目标（估算基线）</th><th style="width:42%;text-align:center">M-19 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">确定性</td><td style="text-align:left">推送序列号单调；时间戳 t_virt = M-12 虚拟时间权威源</td><td style="text-align:left">deltaQueue.seqNo + t_virt（2.4 表6）</td></tr><tr class="row1"><td style="text-align:center">性能</td><td style="text-align:left">波形刷新 ≤200ms 估算基线；常规载荷 ≈0.5 MiB/s、峰值 ≈24.4 MiB/s（19-1）</td><td style="text-align:left">批量节流推送 + 二进制定长头 + 可选压缩（峰值降载）</td></tr><tr class="row0"><td style="text-align:center">韧性</td><td style="text-align:left">溢出/内存超预算受控降级</td><td style="text-align:left">丢最旧 + 标记 / 暂停仿真（可配）+ 强制降采样</td></tr><tr class="row1"><td style="text-align:center">可观测性</td><td style="text-align:left">波形/逻辑分析（FR-10）、trace 导出（FR-14）</td><td style="text-align:left">encodeEdge → ringBuffer → exportCSV/VCD</td></tr><tr class="row0"><td style="text-align:center">可扩展性</td><td style="text-align:left">观测管道扩展点（表93）；跨板同轴（FR-27 P1）</td><td style="text-align:left">通道独立 + wireFormat 扩展 + IndexedDB spool（M-23）</td></tr></tbody></table></div><h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<div class="lead">合规：业务模块 → 模块组件单向依赖（4.7 表86）；只经 M-18/M-03/M-02 交互，不自行实现日志/告警/路由。</div>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:30%"><col style="width:46%"></colgroup><thead><tr><th style="width:24%;text-align:center">依赖方</th><th style="width:30%;text-align:center">被依赖方</th><th style="width:46%;text-align:center">依赖内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-19（波形管道）</td><td style="text-align:left">M-18（探针）</td><td style="text-align:left">边沿事件源（m19Encode → encodeEdge）</td></tr><tr class="row1"><td style="text-align:center">M-19</td><td style="text-align:left">M-03（视图状态管理）</td><td style="text-align:left">W1 订阅（waveformDelta 带序列号；锚点：契约待 M-03 文档落地双侧核对，19-6）</td></tr><tr class="row0"><td style="text-align:center">M-19</td><td style="text-align:left">M-23（DataStore）</td><td style="text-align:left">P1 长回看 IndexedDB spool</td></tr><tr class="row1"><td style="text-align:center">M-19</td><td style="text-align:left">M-07（传输适配）</td><td style="text-align:left">断线续拉通道（对齐 M-07 v1.1 resumeBySeq / E_PROTO-05，19-7 已核对）</td></tr><tr class="row0"><td style="text-align:center">M-19</td><td style="text-align:left">M-12（仿真引擎）</td><td style="text-align:left">PAUSE_SIM 联动暂停 + t_virt 时间基准 + pushDelta 调度周期回调（19-5）</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表73 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层、本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现遵守同端口契约并通过契约测试（7.1）即可接入：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:20%"><col style="width:54%"></colgroup><thead><tr><th style="width:26%;text-align:center">端口 / 服务</th><th style="width:20%;text-align:center">方向</th><th style="width:54%;text-align:center">契约（输入 -&gt; 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">encodeEdge(ev)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输入：{time, ch, value}（M-18 m19Encode 入口）；输出：{time, ch, value, edge} 事件</td></tr><tr class="row1"><td style="text-align:center">pushDelta()</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输出：waveformDelta（带单调序列号，≤20ms 批）；失败 → droppedRanges + 续拉补齐（19-3）</td></tr><tr class="row0"><td style="text-align:center">exportCSV()/exportVCD()</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输出：分块下载（可续导、进度可见；含 overflowCount 标记，FR-14）</td></tr><tr class="row1"><td style="text-align:center">setOverflowPolicy(p)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输出：确认（默认丢最旧+标记；可配暂停仿真）</td></tr><tr class="row0"><td style="text-align:center">M-18</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">事件源：边沿事件写入（encodeEdge 入口）</td></tr><tr class="row1"><td style="text-align:center">M-03</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">W1 订阅：waveformDelta 增量推送（锚点：契约待 M-03 文档落地双侧核对，19-6）</td></tr><tr class="row0"><td style="text-align:center">M-23</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">P1 长回看 IndexedDB spool</td></tr><tr class="row1"><td style="text-align:center">M-18</td><td style="text-align:left">被依赖（使用方）</td><td style="text-align:left">边沿事件写入（M-18 sample → m19Encode）</td></tr><tr class="row0"><td style="text-align:center">M-03</td><td style="text-align:left">被依赖（使用方）</td><td style="text-align:left">订阅 W1 流（前端合并渲染）</td></tr><tr class="row1"><td style="text-align:center">M-02</td><td style="text-align:left">被依赖（使用方）</td><td style="text-align:left">波形视图渲染消费（FR-10）</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<p class="body">边沿编码入环 -> log(INFO, "WAVE", "encode", "E_OK")（含通道/事件数）；批量推送 -> log(INFO, "WAVE", "push", seqStart-seqEnd)；推送失败丢弃本批 -> log(WARN, "WAVE", "push", "dropped")（含 seq 区间，19-3）；溢出丢最旧 -> log(WARN, "WAVE", "overflow", ch)（含 overflowCount）；暂停仿真 -> log(WARN, "WAVE", "pause", ch)（PAUSE_SIM）；容量规划对账降采样 -> log(WARN, "WAVE", "budget", "reconcile")（19-2）；策略变更 -> log(INFO, "WAVE", "overflow_policy", p)。会话关联字段（sessionId）随 M-21 双时间戳统一记录，产品/嵌入式工作台不可见（角色边界），仅管理员通道可查。</p>
+</main>
+<footer class="subtitle">M-19 波形管道 模块详细设计 v1.1 · 对应《RISC-V仿真平台模块设计说明书》4.5.2节 · 2026-10-15</footer>
+
+</div>
+</body>
+</html>

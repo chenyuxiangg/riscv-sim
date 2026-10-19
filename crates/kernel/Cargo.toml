@@ -1,0 +1,21 @@
+[package]
+name = "riscv_sim_kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "RISC-V simulation kernel: event-driven engine, RV32IMC ISS, peripherals, observability pipeline. Compiles to native + wasm32-unknown-unknown."
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+riscv_sim_contract = { path = "../contract" }
+
+[features]
+default = []
+wasm = []                # Reserved for wasm-pack build entry point
+
+[lints]
+workspace = true

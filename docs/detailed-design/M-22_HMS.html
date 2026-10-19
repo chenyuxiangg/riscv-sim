@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-22 健康管理 HMS 模块详细设计</title>
+<link rel="icon" href="data:image/svg+xml,&lt;svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22&gt;&lt;rect width=%2232%22 height=%2232%22 rx=%226%22 fill=%22%237c2d12%22/&gt;&lt;text x=%2216%22 y=%2222%22 font-size=%2216%22 fill=%22white%22 text-anchor=%22middle%22 font-family=%22sans-serif%22&gt;M22&lt;/text&gt;&lt;/svg&gt;">
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#7c2d12; --brand-2:#c2410c;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { border-left:3px solid var(--brand-2); background:var(--zebra); padding:4px 10px; margin:8px 0 16px; font-size:13.5px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  margin:10px 0 16px; white-space:pre; }
+.nav-box { background:var(--head-bg); border:1px solid var(--line); border-radius:6px;
+  padding:10px 16px; font-size:13.5px; line-height:1.9; display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0 24px; }
+.nav-box a { color:var(--brand-2); text-decoration:none; }
+.nav-box a:hover { text-decoration:underline; }
+.flow-wrap { overflow-x:auto; margin:12px 0 16px; }
+.flow { min-width:640px; width:100%; height:auto; }
+.flow-branch { font-size:12.5px; color:var(--ink-2); border-left:3px solid var(--brand-2);
+  padding:4px 10px; margin:8px 0 16px; background:var(--zebra); }
+.ux-wrap { overflow-x:auto; margin:14px 0 18px; }
+.ux { min-width:560px; max-width:640px; margin:0 auto; }
+.ux svg { width:100%; height:auto; display:block; }
+.ux-cap { text-align:center; font-size:12.5px; color:var(--ink-2); margin:6px 0 0; }
+@media (max-width:767px) {
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media (max-width:560px) {
+  .doc-title { font-size:21px; }
+  .h-sec { font-size:19px; }
+  .doc-table, .doc-table th, .doc-table td { font-size:12.5px; }
+  .code { font-size:11.5px; white-space:pre-wrap; word-break:break-word; }
+  .nav-box { grid-template-columns:1fr; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><h1 class="doc-title">M-22 健康管理 HMS 模块详细设计</h1><p class="subtitle">RISC-V仿真平台 模块详细设计系列 - 对应《模块设计说明书》4.6.3节</p><p class="version">HTML版 v1.1 (2026-10-16) - 源设计《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版，2026-10-13更新)</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版新增2.5平台共享契约与各模块端口契约表)</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.6.3（M-22 健康管理 HMS）：数据描述→源文档表80、关键函数表81、端口契约表82；处理流程=4.6.3.4、异常处理=4.6.3.5</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">韧性（NFR-08）；性能监控指标通道（FR-20，P2）；现场包（P-19）；脱敏诊断包（P-23）；MVP 基线 L1（崩溃自动快照+恢复）</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">M-21 日志（根因查询/日志关联）；M-20 快照与事件流（恢复/快照/输入序列）；M-04 会话处置；M-07 断连上报；M-23 归档；M-01 异常提示通道；M-05/M-12 信号上报</td></tr><tr class="row0"><td style="text-align:center">MVP状态</td><td style="text-align:left">PO主承担模块（MVP必需：healthSignals/severityTable/degradePolicy + 六函数闭环；指标面板 P2）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；横切基础设施（4.6）；韧性 NFR-08（检测→分级→处置→恢复）；故障三分类（guest trap/平台崩溃/guest 失控）；MVP 基线 L1（崩溃自动快照+恢复）；指标 FR-20/P-18（面板 P2）；现场包 P-19；脱敏诊断包 P-23；角色边界 §3.4；职责分离（M-21 只记录，HMS 只监控，图6）；NFR-05</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.0（2026-10-16 初版）：按 M-20 v1.1 标准 9 章结构（表/代码块/流程 SVG/界面化 UX 示例）；内建 9.1.1 端口契约（源表82 对齐，6 driving + 4 driven + 5 使用方）+ CH7 契约测试 + CH8 模块级落实；错误码复用源表16 既有 + 内部降级策略（无新增码）；评审 L1（崩溃自动快照+恢复）落地 degrade(SNAPSHOT_RESTORE) → M-20 checkpoint+restore；故障三分类（guest trap 仅提示不降级/平台崩溃自动恢复/guest 失控 terminate）入 classify 伪代码；P-18 指标采集（MIPS/P50/P99/推送周期/队列水位/溢出/会话内存/异常率 → metrics ring，面板 P2）；P-19 现场包与 P-23 脱敏诊断包（错误码+快照+输入序列，不含原始日志）双通道导出；角色边界（脱敏提示不含日志、管理员侧 M-21 根因查询）；职责分离（M-21 只记录，HMS 只监控，图6）；3.7 健康管理 UX 界面化三面板（信号分级/降级策略/诊断包+指标）。&lt;br&gt;v1.1（2026-10-16 评审 22-1~22-13 全闭环）：22-1 错误码冲突——M-04 v1.1 已占用 E_CTX-11=会话不存在，watchdog 失控改用未占用码 E_CTX-12（6.1/UX 图1/9.2/7.1 同步，恢复一场景一码）；22-2 恢复时序——degrade(SNAPSHOT_RESTORE) 改回退崩溃前最近检查点 + 输入重放，自动快照=现场保护导出（非恢复源），3.4/2.2/3.6/6.2 同步；22-3 classify TRAP 返回扩枚举 INFO_NO_DEGRADE（2.1.1 枚举 + 3.2 同步）；22-4 report 内查 degradePolicy[sev] → 统一转调公开 degrade(action)（删 FATAL_OR_CRITICAL）；22-5 severityTable 未命中默认仅记录/提示（NO_DEGRADE），不触发降载；22-6 指标与健康信号同源派生口径声明（队列水位/溢出/异常率由 report 信号派生，不双写）；22-7 TRACE_DOWN 降载通道改经 M-12 暂停 trace 事件（m12PauseTraceEvents），M-19 降采样契约双侧核对锚点；22-8 m21RootCause 接口名/入参两侧同步锚点（9.1.1 注明）；22-9 HealthSignal.kind 补 TRAP + src→上报模块映射表（M-04/M-05/M-07/M-12/M-17，TRAP 由 M-13/M-14 上报）；22-10 dispatch 两类分发载荷结构（NoticeMsg 脱敏提示 / AdminDiagnosis 诊断详情，2.1.1 定义）；22-11 degrade 重试上界 ≤3 次 + 终态（上报 DEGRADE_FAILED → 停止会话/人工介入，3.4/6.2 同步）；22-12 信号风暴分级保留（致命/严重不丢）+ 崩溃冻结信号流；22-13 补四组用例（错误码语义/恢复时序/TRAP 可达/默认分级动作）。</td></tr><tr class="row1"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-16</td></tr></tbody></table></div></header><nav><details open><summary>目录</summary><div class="nav-box"><a href="#sec1">1 功能概述</a><a href="#sec1-1">1.1 模块定位</a><a href="#sec1-2">1.2 需求与约束</a><a href="#sec1-3">1.3 MVP 范围与预留</a><a href="#sec2">2 数据描述</a><a href="#sec2-1">2.1 核心数据结构</a><a href="#sec2-1-1">2.1.1 复杂结构字段定义</a><a href="#sec2-2">2.2 分级与处置语义</a><a href="#sec2-3">2.3 数据流说明</a><a href="#sec3">3 实现设计</a><a href="#sec3-1">3.1 report</a><a href="#sec3-2">3.2 classify</a><a href="#sec3-3">3.3 dispatch</a><a href="#sec3-4">3.4 degrade</a><a href="#sec3-5">3.5 collectMetric/exportDiagnosticKit</a><a href="#sec3-6">3.6 与日志职责分离</a><a href="#sec3-7">3.7 健康管理 UX 示例（示意）</a><a href="#sec4">4 关键函数</a><a href="#sec5">5 处理流程</a><a href="#sec5-1">5.1 健康管理与恢复流程</a><a href="#sec5-2">5.2 与相邻模块的协作说明</a><a href="#sec6">6 异常处理</a><a href="#sec6-1">6.1 错误码与处置</a><a href="#sec6-2">6.2 边界与降级</a><a href="#sec7">7 测试设计与可维护性</a><a href="#sec7-1">7.1 测试要点与关键用例</a><a href="#sec7-2">7.2 可维护性手段</a><a href="#sec8">8 质量属性落实</a><a href="#sec9">9 接口依赖</a><a href="#sec9-1">9.1 依赖关系</a><a href="#sec9-1-1">9.1.1 端口契约</a><a href="#sec9-2">9.2 日志对接</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-22 健康管理 HMS（4.6.3）：健康管理横切模块（NFR-08）——采集健康信号（引擎心跳、会话状态机、错误码、命令超时、崩溃信号、传输连接、guest 失控 watchdog）→ 异常分级（致命/严重/警告，阈值可配置）→ 分角色分发（产品/嵌入式 = 脱敏可读提示；系统管理员 = 诊断详情 + 日志关联）→ 降级动作（自动快照 + 恢复/暂停/断开外设/关闭 trace 降载/terminate 失控内核）。故障三分类：① guest trap = 模型内 guest 异常（正常调试语义）；② 平台崩溃 = 平台故障；③ guest 失控 = watchdog 超时（terminate 内核并告警）。MVP 基线 = 崩溃自动快照 + 恢复（评审 L1）。指标通道（承接 FR-20，评审 P-18）；提供「导出脱敏诊断包」（评审 P-23）。与日志系统职责分离（M-21 只记录，HMS 只监控分发，图6）。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:62%"><col style="width:24%"></colgroup><thead><tr><th style="width:14%;text-align:center">类别</th><th style="width:62%;text-align:center">约束内容</th><th style="width:24%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">健康采集</td><td style="text-align:left">采集健康信号：引擎心跳、会话状态机、错误码、命令超时、崩溃信号、传输连接、guest 失控 watchdog</td><td style="text-align:left">4.6.3.1</td></tr><tr class="row1"><td style="text-align:center">异常分级</td><td style="text-align:left">致命/严重/警告 三级；阈值可配置（severityTable）</td><td style="text-align:left">表80</td></tr><tr class="row0"><td style="text-align:center">分角色分发</td><td style="text-align:left">产品/嵌入式 = 脱敏可读提示；系统管理员 = 诊断详情 + 日志关联（M-21）</td><td style="text-align:left">4.6.3.1、表82</td></tr><tr class="row1"><td style="text-align:center">降级动作</td><td style="text-align:left">自动快照+恢复 / 暂停 / 断开外设 / 关闭 trace 降载 / terminate 失控内核；可重试</td><td style="text-align:left">表80/表81</td></tr><tr class="row0"><td style="text-align:center">故障三分类</td><td style="text-align:left">guest trap（正常调试语义）/ 平台崩溃 / guest 失控（watchdog 超时 terminate+告警）</td><td style="text-align:left">4.6.3.1</td></tr><tr class="row1"><td style="text-align:center">MVP 基线</td><td style="text-align:left">崩溃自动快照 + 恢复（评审 L1）</td><td style="text-align:left">评审 L1</td></tr><tr class="row0"><td style="text-align:center">指标通道</td><td style="text-align:left">MIPS、命令响应 P50/P99、推送周期、队列水位、溢出次数、会话内存、异常率（FR-20，指标面板 P2）</td><td style="text-align:left">评审 P-18</td></tr><tr class="row1"><td style="text-align:center">诊断包</td><td style="text-align:left">导出脱敏诊断包：错误码 + 快照 + 稀疏输入序列，不含原始日志（P-23）</td><td style="text-align:left">评审 P-23</td></tr><tr class="row0"><td style="text-align:center">角色边界</td><td style="text-align:left">提示脱敏不含原始日志；产品/嵌入式工作台不接触系统日志与诊断详情</td><td style="text-align:left">§3.4、4.6.3.5</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：healthSignals（健康信号流）、severityTable（分级映射，阈值可配置）、degradePolicy（降级动作策略）、diagnosticKit（脱敏诊断包，P-23）；report/classify/dispatch/degrade/exportDiagnosticKit 五函数闭环 + collectMetric（指标采集，P-18 预留 MVP 采集、面板 P2）。<br>预留项（P1/P2 演进承接，不属现实现）：指标趋势面板（FR-20，P2，collectMetric 写入 metrics ring 但面板 P2）；更细粒度阈值自学习。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构（源文档表80）</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:14%"><col style="width:62%"></colgroup><thead><tr><th style="width:24%;text-align:center">数据结构/数据项</th><th style="width:14%;text-align:center">类型</th><th style="width:62%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">healthSignals</td><td style="text-align:left">stream</td><td style="text-align:left">健康信号（心跳/状态机/错误码/超时/崩溃/连接）</td></tr><tr class="row1"><td style="text-align:center">severityTable</td><td style="text-align:left">Map&amp;lt;signal, level&amp;gt;</td><td style="text-align:left">分级映射（阈值可配置）</td></tr><tr class="row0"><td style="text-align:center">degradePolicy</td><td style="text-align:left">Map&amp;lt;level, action&amp;gt;</td><td style="text-align:left">降级动作策略（可重试）</td></tr><tr class="row1"><td style="text-align:center">metrics</td><td style="text-align:left">ring</td><td style="text-align:left">趋势型指标（FR-20）：MIPS、命令 P50/P99、推送周期、队列水位、溢出次数、会话内存、异常率（评审 P-18）</td></tr><tr class="row0"><td style="text-align:center">diagnosticKit</td><td style="text-align:left">struct</td><td style="text-align:left">脱敏诊断包：错误码 + 快照 + 稀疏输入序列（不含原始日志，评审 P-23）</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="body">健康信号为结构化条目（信号源 + 错误码 + 上下文）；分级映射表阈值可配置；降级动作策略可重试；指标条目写入环形指标带（FR-20/P-18）；诊断包仅含取证要素、不含原始日志（角色边界，P-23）。字段定义如下：</p>
+<pre class="code"><code>// HealthSignal: 健康信号条目（healthSignals 流元素，report 输入）
+struct HealthSignal {
+  uint8_t  src;                 // 信号源：M-04 会话 / M-05 命令 / M-07 传输 / M-12 引擎 / M-17 后端（映射表见下）
+  uint32_t errCode;             // 错误码（E_CTX/E_PROTO 体系，源表16）
+  uint64_t tVirt;               // 虚拟时间（M-20 事件流虚拟时钟，双时间戳定位）
+  uint64_t tHost;               // 宿主时间（M-21 TimeSource）
+  uint32_t ctx;                 // 上下文标识（会话/队列/连接 id）
+  uint8_t  kind;                // HEARTBEAT / STATE / ERROR / TIMEOUT / CRASH / CONN / WATCHDOG / TRAP（22-9 补 TRAP）
+};
+// src -&gt; 上报模块映射（22-9）：M-04 会话（STATE/ERROR/CRASH）、M-05 命令（TIMEOUT/CONN/ERROR）、
+//   M-07 传输（CONN）、M-12 引擎（HEARTBEAT/WATCHDOG）、M-17 后端（CRASH）；TRAP 由 M-13/M-14 模型内上报
+// 故障三分类（4.6.3.1）：guest trap = 模型内 guest 异常（正常调试语义）；平台崩溃 = 平台故障；
+//   guest 失控 = watchdog 超时（terminate 内核并告警）
+// Severity: 异常分级（classify 输出，阈值可配置）
+enum Severity { FATAL, CRITICAL, WARNING, INFO_NO_DEGRADE };   // 22-3：扩枚举（guest trap 仅提示/未命中默认）
+// 分发载荷（22-10）：脱敏提示 vs 管理员诊断详情两类结构
+struct NoticeMsg {            // 脱敏提示（产品/嵌入式，不含原始日志）
+  uint8_t  sev;               // 级别（脱敏后展示）
+  uint32_t errCode;           // 错误码（可展示部分）
+  uint32_t ctx;               // 上下文标识（脱敏）
+};
+struct AdminDiagnosis {       // 诊断详情（系统管理员）
+  uint8_t  sev;               // 级别
+  uint32_t errCode;           // 完整错误码
+  uint32_t ctx;               // 会话/队列/连接 id
+  uint64_t tVirt; uint64_t tHost;   // 双时间戳
+  LogRef   logRef;            // M-21 日志关联（根因查询引用）
+};
+// DiagnosticKit: 脱敏诊断包（评审 P-23；不含原始日志，角色边界 §3.4）
+struct DiagnosticKit {
+  uint32_t errCode;             // 错误码
+  Snapshot  snap;               // 快照（M-20）
+  InputSeq  inputs;             // 稀疏输入序列（M-20）
+};</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 分级与处置语义</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:46%"><col style="width:22%"><col style="width:16%"></colgroup><thead><tr><th style="width:16%;text-align:center">机制</th><th style="width:46%;text-align:center">语义</th><th style="width:22%;text-align:center">实现通道</th><th style="width:16%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">健康采集</td><td style="text-align:left">心跳/状态机/错误码/超时/崩溃/连接/watchdog 统一上报</td><td style="text-align:left">report</td><td style="text-align:left">表81</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">异常分级</td><td data-label="语义" style="text-align:left">致命/严重/警告；阈值可配置（severityTable）</td><td data-label="实现通道" style="text-align:left">classify</td><td data-label="备注" style="text-align:left">表80</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">分角色分发</td><td data-label="语义" style="text-align:left">产品/嵌入式：脱敏可读提示；管理员：诊断详情 + M-21 日志关联</td><td data-label="实现通道" style="text-align:left">dispatch</td><td data-label="备注" style="text-align:left">表82</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">降级动作</td><td data-label="语义" style="text-align:left">自动快照+恢复/暂停/断开外设/关 trace/terminate；可重试</td><td data-label="实现通道" style="text-align:left">degrade</td><td data-label="备注" style="text-align:left">表81</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">恢复</td><td data-label="语义" style="text-align:left">回退**崩溃前最近检查点** + 输入重放（M-20 restore）；自动快照=保护现场非恢复源（22-2）</td><td data-label="实现通道" style="text-align:left">degrade → m20Restore</td><td data-label="备注" style="text-align:left">评审 L1、22-2</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">指标采集</td><td data-label="语义" style="text-align:left">MIPS/P50/P99/推送周期/队列水位/溢出/会话内存/异常率 → metrics ring（面板 P2）；队列水位/溢出/异常率与 healthSignals 同源派生不双写（22-6）</td><td data-label="实现通道" style="text-align:left">collectMetric</td><td data-label="备注" style="text-align:left">FR-20、P-18</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">诊断包</td><td data-label="语义" style="text-align:left">错误码 + 快照 + 稀疏输入序列，不含原始日志</td><td data-label="实现通道" style="text-align:left">exportDiagnosticKit</td><td data-label="备注" style="text-align:left">评审 P-23</td></tr></tbody></table></div>
+<h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+<p class="body">处理流程（4.6.3.4）：信号采集 → 分级 → 分角色分发 → 降级动作 → 恢复（检查点 + 输入重放）；指标采集 → 环形指标带（面板 P2）；崩溃/上报 → 现场包或脱敏诊断包导出；与日志系统职责分离（M-21 只记录，HMS 只监控分发，图6）。</p>
+<h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 report(signal) 健康信号上报</h3>
+<p class="body">report(signal)：接收各业务模块健康信号（信号源 + 错误码），统一时间戳化（tVirt 取 M-20 事件流虚拟时钟、tHost 取 M-21 TimeSource）后**先分级再入流**（classify 定级后写入 healthSignals，分级保留策略据此判定）；分级结果进入分角色分发与降级决策（degradePolicy 查表 → 统一转调 degrade，22-4）。信号流环形带分级保留（致命/严重不丢）与崩溃冻结（取证前因，22-12）。伪代码如下：</p>
+<pre class="code"><code>// report: 健康信号上报（表81；输入：信号源 + 错误码；输出：分级结果）
+Severity report(HealthSignal s) {
+  s.tVirt = m20CurTimeVirt();                      // 双时间戳（M-20 虚拟时钟 + M-21 TimeSource）
+  s.tHost = m21TimeSource().nowHostMs();
+  sev = classify(s);                               // 先分级（定级后再入流，供 22-12 保留策略判定）
+  healthSignals.append(s);                         // 健康信号流（环形 + 分级保留，见下）
+  if (healthSignals.size &gt; SIG_CAP &amp;&amp; sev != FATAL &amp;&amp; sev != CRITICAL) {
+    healthSignals.shift();                         // 22-12：致命/严重相关信号不丢（独立保留带）
+  }
+  dispatch(sev, { src: s.src, errCode: s.errCode, ctx: s.ctx });   // 分角色分发
+  act = degradePolicy[sev];                        // 22-4：查策略表 → 统一转调公开 degrade(action)
+  if (act != NONE &amp;&amp; (sev == FATAL || sev == CRITICAL)) {
+    degrade(act);                                  // 致命/严重 → 自动降级处置（L1）
+  }
+  return sev;
+}
+// 22-12：崩溃/失控时冻结信号流（不再 shift），保证诊断包取证含失控前因（watchdog 时序证据）</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 classify(signal) 异常分级</h3>
+<p class="body">classify(signal)：按 severityTable 分级映射判定致命/严重/警告（阈值可配置）；guest trap 归正常调试语义（仅提示不降级，22-3）；watchdog 超时 → guest 失控（致命）；severityTable 未命中 → 仅记录/提示（NO_DEGRADE，不触发降级动作，22-5）。伪代码如下：</p>
+<pre class="code"><code>// classify: 异常分级（表81；输出：致命/严重/警告/NO_DEGRADE）
+Severity classify(HealthSignal s) {
+  if (s.kind == WATCHDOG &amp;&amp; s.ctx == GUEST_RUN) {   // guest 失控（watchdog 超时，4.6.3.1）
+    return FATAL;                                  // terminate 内核并告警
+  }
+  if (s.kind == TRAP) {                            // guest trap = 模型内异常（正常调试语义）
+    return INFO_NO_DEGRADE;                        // 仅提示不降级（4.6.3.1；22-3 枚举成员）
+  }
+  return severityTable[s.src][s.errCode] != null
+       ? severityTable[s.src][s.errCode]           // 分级映射（阈值可配置，表80）
+       : INFO_NO_DEGRADE;                          // 22-5：未命中仅记录/提示，不触发降级动作
+}
+// severityTable 可配置（Map&lt;signal, level&gt;，表80）：会话异常/命令超时/断连/后端崩溃分级由 M-04/M-05/M-07/M-12 上报
+// 22-5：降载类动作（关 trace 等）仅对明确匹配的降载信号触发，未知错误码默认不处置</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 dispatch(severity, info) 分角色分发</h3>
+<p class="body">dispatch(severity, info)：按角色分发——产品/嵌入式 = 脱敏可读提示（不含原始日志）；系统管理员 = 诊断详情 + M-21 日志关联（根因查询）。伪代码如下：</p>
+<pre class="code"><code>// dispatch: 分角色分发（表81；产品/嵌入式：可读提示（脱敏）；管理员：诊断详情（关联 M-21））
+void dispatch(Severity sev, Info info) {
+  if (role == ADMIN) {
+    details = m21RootCause(info.ctx);              // M-21 根因查询（日志关联；接口名/入参双侧同步锚点，22-8）
+    adminChannel.send(AdminDiagnosis{              // 22-10：诊断详情载荷（2.1.1 结构定义）
+      sev: sev, errCode: info.errCode, ctx: info.ctx,
+      tVirt: info.tVirt, tHost: info.tHost, logRef: details
+    });                                            // 管理员：诊断详情（§3.4）
+  } else {
+    m01Notify(NoticeMsg{ sev, errCode: info.errCode, ctx: info.ctx });  // 22-10：脱敏提示载荷（不含原始日志）
+    // M-01 异常提示通道（表82 使用方）
+  }
+}
+// 角色边界（§3.4）：产品/嵌入式工作台不接触系统日志与诊断详情；提示脱敏（4.6.3.5）</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 degrade(action) 降级动作</h3>
+<p class="body">degrade(action)：执行降级动作（自动快照 + 恢复/暂停/断开外设/关闭 trace 降载/terminate 失控内核）；处置动作可重试（重试上界 ≤3 次 + 终态上报，22-11）；恢复失败回退更早检查点（4.6.3.5）。时序语义（22-2）：崩溃恢复回退**崩溃前最近检查点** + 输入重放，「自动快照」仅作现场保护导出、非恢复源；降载通道经 M-12 暂停 trace 事件（22-7，M-19 降采样契约双侧核对锚点）。伪代码如下：</p>
+<pre class="code"><code>// degrade: 执行降级动作（表81；自动快照+恢复/暂停/断开外设/关trace/terminate；输出：处置结果）
+DegradeResult degrade(Action action) {
+  for (try = 0; try &lt; RETRY_MAX; try++) {          // 22-11：重试上界（≤3 次）
+    r = tryDegrade(action);                        // 执行一次动作
+    if (r.ok) return { ok: true, action, try };
+  }
+  m22Report(DEGRADE_FAILED, action);               // 22-11 终态：上报 + 停止会话/人工介入
+  return { ok: false, action };
+}
+DegradeResult tryDegrade(Action action) {
+  switch (action) {
+    case SNAPSHOT_RESTORE:
+      protectScene();                              // 22-2：自动快照=保护现场（导出，非恢复源）
+      r = m20Restore();                            // 22-2：回退崩溃前最近检查点 + 输入重放（M-20）
+      if (!r.ok) { return r; }                     // 恢复失败 → 下次重试回退更早检查点（4.6.3.5）
+      break;
+    case PAUSE:        m04PauseSession(); break;   // 暂停（M-04 会话处置）
+    case DISCONNECT:   m07Disconnect();   break;   // 断开外设（M-07 传输）
+    case TRACE_DOWN:   m12PauseTraceEvents(); break; // 22-7：经 M-12 暂停 trace 事件（降载通道）
+    case TERMINATE:    m04Terminate();    break;   // terminate 失控内核（guest 失控）
+  }
+  return { ok: true, action };
+}
+// 处置动作可重试（4.6.3.5）；guest 失控 terminate 后重新加载固件或从最近检查点恢复（4.6.3.5）
+// 动作触发链：report → classify → degradePolicy[sev] → degrade（4.6.3.4；22-4 统一转调）
+// 22-2：恢复源 = 崩溃前最近检查点 + 输入重放；崩溃时刻状态不新打检查点（现场保护导出仅取证）
+// 22-7：降载经 M-12 暂停 trace 事件；M-19 侧降采样契约（预算口径）作为 P1 双侧核对锚点</code></pre>
+<h3 id="sec3-5" class="h-sub">3.5 collectMetric(name, value) + exportDiagnosticKit()</h3>
+<p class="body">collectMetric：指标采集（FR-20）写入 metrics 环形指标带（MIPS、命令响应 P50/P99、推送周期、队列水位、溢出次数、会话内存、异常率，P-18）；指标面板 P2 展示（MVP 只做采集与现场包）。exportDiagnosticKit：导出脱敏诊断包（错误码 + 快照 + 稀疏输入序列，不含原始日志，P-23）。伪代码如下：</p>
+<pre class="code"><code>// collectMetric: 指标采集（表81；FR-20；写入 metrics 环形指标带；指标面板 P2 展示，评审 P-18）
+void collectMetric(string name, double value) {
+  metrics.append({ tVirt: m20CurTimeVirt(), name, value });
+  if (metrics.size &gt; METRIC_CAP) { metrics.shift(); }   // 环形（估算基线 4096 条）
+}
+// 指标项：MIPS、命令响应 P50/P99、推送周期、队列水位、溢出次数、会话内存、异常率（表80，P-18）
+// 22-6 同源口径：队列水位/溢出次数/异常率由 report 信号派生（M-05/M-12 上报即写指标，不双写）；
+//   MIPS/命令响应 P50/P99 由 M-05/M-12 周期采集经 collectMetric 写入（单一数据源）
+// exportDiagnosticKit: 导出脱敏诊断包（表81；错误码 + 快照 + 输入序列，不含原始日志；评审 P-23）
+DiagnosticKit exportDiagnosticKit(uint32_t errCode) {
+  kit = {
+    errCode: errCode,
+    snap:   m20LatestSnapshot(),                  // 快照（M-20）
+    inputs: m20InputSeqTail(1024) };              // 稀疏输入序列（M-20，不含日志）
+  m23Archive(kit);                                // M-23 归档（供用户上报后管理员链路取证）
+  return kit;
+}
+// 角色边界（P-23/§3.4）：诊断包不含原始日志——用户上报链路只含取证要素，日志关联仅管理员可见</code></pre>
+<h3 id="sec3-6" class="h-sub">3.6 与日志系统职责分离 + 协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:18%"><col style="width:38%"><col style="width:30%"><col style="width:14%"></colgroup><thead><tr><th style="width:18%;text-align:center">衔接点</th><th style="width:38%;text-align:center">M-22（HMS）</th><th style="width:30%;text-align:center">协作方</th><th style="width:14%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">日志关联</td><td style="text-align:left">dispatch 管理员侧关联 M-21 根因查询（接口名/入参两侧同步锚点，22-8）</td><td style="text-align:left">M-21（只记录）</td><td style="text-align:left">职责分离，图6</td></tr><tr class="row1"><td style="text-align:center">恢复</td><td style="text-align:left">degrade(SNAPSHOT_RESTORE) → 保护现场 + M-20 restore（回退崩溃前最近检查点 + 重放，22-2）</td><td style="text-align:left">M-20（恢复）</td><td style="text-align:left">评审 L1、22-2</td></tr><tr class="row0"><td style="text-align:center">降载通道</td><td style="text-align:left">TRACE_DOWN 经 M-12 暂停 trace 事件（22-7；M-19 降采样契约双侧核对锚点）</td><td style="text-align:left">M-12（事件调度）</td><td style="text-align:left">22-7</td></tr><tr class="row1"><td style="text-align:center">会话处置</td><td style="text-align:left">degrade(PAUSE/TERMINATE) → M-04</td><td style="text-align:left">M-04（会话处置）</td><td style="text-align:left">会话异常上报源</td></tr><tr class="row0"><td style="text-align:center">命令信号</td><td style="text-align:left">M-05 命令超时/队列水位信号上报</td><td style="text-align:left">M-05（使用方）</td><td style="text-align:left">表82</td></tr><tr class="row1"><td style="text-align:center">断连信号</td><td style="text-align:left">M-07 断连上报</td><td style="text-align:left">M-07（使用方）</td><td style="text-align:left">表82</td></tr><tr class="row0"><td style="text-align:center">watchdog</td><td style="text-align:left">M-12 watchdog 超时 → guest 失控 FATAL</td><td style="text-align:left">M-12（使用方）</td><td style="text-align:left">4.6.3.1</td></tr><tr class="row1"><td style="text-align:center">提示通道</td><td style="text-align:left">dispatch 脱敏提示 → M-01</td><td style="text-align:left">M-01（使用方）</td><td style="text-align:left">异常提示通道</td></tr></tbody></table></div>
+<h3 id="sec3-7" class="h-sub">3.7 健康管理 UX 示例（示意，界面化）</h3>
+<p class="body">以下为健康管理中心交互形态示意（非精确线框稿）：健康信号与分级、降级动作策略、诊断包与指标三面板，字段与 2.1.1/表80 一致；移动端可横向滚动查看。</p>
+<div class="ux-wrap"><figure class="ux"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="HMS · 健康信号与分级（report / classify，示意）"><defs><filter id="sh" x="-10%" y="-20%" width="130%" height="170%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#64748b" flood-opacity="0.25"/></filter><linearGradient id="hdr" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#7c2d12"/><stop offset="1" stop-color="#c2410c"/></linearGradient></defs><rect x="2" y="2" width="676" height="416" rx="10" fill="#ffffff" stroke="#e2e8f0" filter="url(#sh)"/><rect x="2" y="2" width="676" height="36" rx="10" fill="url(#hdr)"/><circle cx="26" cy="20" r="4" fill="#fdba74" opacity="0.85"/><circle cx="42" cy="20" r="4" fill="#fdba74" opacity="0.85"/><circle cx="58" cy="20" r="4" fill="#fdba74" opacity="0.85"/><text x="78" y="24" font-size="13" font-weight="700" fill="#ffffff">HMS · 健康信号与分级（report / classify，示意）</text><text x="20" y="60" font-size="12.5" font-weight="700" fill="#374151">健康信号流（healthSignals · 采集 → 分级）</text>
+<rect x="14" y="70" width="430" height="190" rx="6" fill="#ffffff" stroke="#e2e8f0"/>
+<rect x="14" y="70" width="430" height="30" rx="6" fill="#f8fafc" stroke="#e2e8f0"/>
+<line x1="14" y1="100" x2="444" y2="100" stroke="#e2e8f0"/>
+<text x="30" y="90" font-size="11" font-weight="700" fill="#475569">信号</text>
+<text x="110" y="90" font-size="11" font-weight="700" fill="#475569">错误码</text>
+<text x="210" y="90" font-size="11" font-weight="700" fill="#475569">级别</text>
+<text x="310" y="90" font-size="11" font-weight="700" fill="#475569">处置</text>
+<text x="30" y="122" font-size="11" fill="#1f2937">watchdog</text>
+<text x="110" y="122" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">E_CTX-12</text>
+<rect x="202" y="112" width="78" height="18" rx="9" fill="#fee2e2"/><text x="241" y="124" font-size="10" fill="#b91c1c" text-anchor="middle">致命</text>
+<rect x="302" y="110" width="88" height="22" rx="4" fill="#b91c1c"/><text x="346" y="124" font-size="10" fill="#ffffff" text-anchor="middle">terminate</text>
+<line x1="14" y1="140" x2="444" y2="140" stroke="#f1f5f9"/>
+<text x="30" y="160" font-size="11" fill="#1f2937">命令超时</text>
+<text x="110" y="160" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">E_PROTO-04</text>
+<rect x="202" y="150" width="78" height="18" rx="9" fill="#fef3c7"/><text x="241" y="162" font-size="10" fill="#a16207" text-anchor="middle">严重</text>
+<rect x="302" y="150" width="88" height="22" rx="4" fill="#d97706"/><text x="346" y="164" font-size="10" fill="#ffffff" text-anchor="middle">快照+恢复</text>
+<line x1="14" y1="178" x2="444" y2="178" stroke="#f1f5f9"/>
+<text x="30" y="198" font-size="11" fill="#1f2937">guest trap</text>
+<text x="110" y="198" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">E_TRAP</text>
+<rect x="202" y="188" width="78" height="18" rx="9" fill="#e2e8f0"/><text x="241" y="200" font-size="10" fill="#475569" text-anchor="middle">仅提示</text>
+<rect x="302" y="188" width="88" height="22" rx="4" fill="#64748b"/><text x="346" y="202" font-size="10" fill="#ffffff" text-anchor="middle">不降级</text>
+<line x1="14" y1="216" x2="444" y2="216" stroke="#f1f5f9"/>
+<text x="30" y="236" font-size="11" fill="#1f2937">…（环形 ≤10⁴ 条，致命/严重不丢，22-12）</text>
+<rect x="14" y="272" width="430" height="44" rx="6" fill="#fff7ed" stroke="#fde68a"/>
+<text x="30" y="290" font-size="11" fill="#92400e">故障三分类（4.6.3.1）：guest trap（正常调试）· 平台崩溃 · guest 失控（watchdog）</text>
+<text x="30" y="308" font-size="10.5" fill="#b45309">阈值可配置（severityTable，表80）</text>
+<rect x="470" y="70" width="196" height="246" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="486" y="92" font-size="12" font-weight="700" fill="#334155">分角色分发（dispatch）</text>
+<line x1="470" y1="102" x2="666" y2="102" stroke="#e2e8f0"/>
+<text x="486" y="126" font-size="11" fill="#1f2937">产品/嵌入式：脱敏提示</text>
+<text x="486" y="148" font-size="11" fill="#1f2937">（不含原始日志，§3.4）</text>
+<text x="486" y="178" font-size="11" fill="#1f2937">系统管理员：诊断详情</text>
+<text x="486" y="200" font-size="11" fill="#1f2937">+ M-21 日志关联</text>
+<line x1="470" y1="226" x2="666" y2="226" stroke="#e2e8f0"/>
+<text x="486" y="248" font-size="11" fill="#64748b">提示通道 → M-01（表82）</text>
+<text x="486" y="270" font-size="11" fill="#64748b">命令/断连/watchdog 信号</text>
+<text x="486" y="292" font-size="11" fill="#64748b">→ M-05/M-07/M-12 上报</text></svg><figcaption class="ux-cap">图 1 · HMS：健康信号流（信号/错误码/级别/处置四列 + 故障三分类）——采集 → 分级（severityTable）→ 分角色分发（脱敏/诊断详情）</figcaption></figure></div><div class="ux-wrap"><figure class="ux"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="HMS · 降级动作策略（degrade，示意）"><defs><filter id="sh" x="-10%" y="-20%" width="130%" height="170%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#64748b" flood-opacity="0.25"/></filter><linearGradient id="hdr" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#7c2d12"/><stop offset="1" stop-color="#c2410c"/></linearGradient></defs><rect x="2" y="2" width="676" height="416" rx="10" fill="#ffffff" stroke="#e2e8f0" filter="url(#sh)"/><rect x="2" y="2" width="676" height="36" rx="10" fill="url(#hdr)"/><circle cx="26" cy="20" r="4" fill="#fdba74" opacity="0.85"/><circle cx="42" cy="20" r="4" fill="#fdba74" opacity="0.85"/><circle cx="58" cy="20" r="4" fill="#fdba74" opacity="0.85"/><text x="78" y="24" font-size="13" font-weight="700" fill="#ffffff">HMS · 降级动作策略（degrade，示意）</text><text x="20" y="60" font-size="12.5" font-weight="700" fill="#374151">降级动作策略（degradePolicy · 可重试）</text>
+<rect x="14" y="70" width="430" height="190" rx="6" fill="#ffffff" stroke="#e2e8f0"/>
+<rect x="14" y="70" width="430" height="30" rx="6" fill="#f8fafc" stroke="#e2e8f0"/>
+<line x1="14" y1="100" x2="444" y2="100" stroke="#e2e8f0"/>
+<text x="30" y="90" font-size="11" font-weight="700" fill="#475569">级别</text>
+<text x="120" y="90" font-size="11" font-weight="700" fill="#475569">降级动作</text>
+<text x="280" y="90" font-size="11" font-weight="700" fill="#475569">重试</text>
+<text x="30" y="122" font-size="11" fill="#1f2937">致命</text>
+<rect x="112" y="112" width="150" height="18" rx="4" fill="#b91c1c"/><text x="187" y="124" font-size="10" fill="#ffffff" text-anchor="middle">terminate 失控内核</text>
+<rect x="262" y="112" width="64" height="18" rx="9" fill="#fee2e2"/><text x="294" y="124" font-size="10" fill="#b91c1c" text-anchor="middle">重试 1</text>
+<line x1="14" y1="140" x2="444" y2="140" stroke="#f1f5f9"/>
+<text x="30" y="160" font-size="11" fill="#1f2937">严重</text>
+<rect x="112" y="150" width="166" height="18" rx="4" fill="#d97706"/><text x="195" y="162" font-size="10" fill="#ffffff" text-anchor="middle">快照+恢复（回退崩溃前）</text>
+<rect x="262" y="150" width="64" height="18" rx="9" fill="#fef3c7"/><text x="294" y="162" font-size="10" fill="#a16207" text-anchor="middle">重试 3</text>
+<line x1="14" y1="178" x2="444" y2="178" stroke="#f1f5f9"/>
+<text x="30" y="198" font-size="11" fill="#1f2937">严重</text>
+<rect x="112" y="188" width="150" height="18" rx="4" fill="#d97706"/><text x="187" y="200" font-size="10" fill="#ffffff" text-anchor="middle">暂停会话</text>
+<rect x="262" y="188" width="64" height="18" rx="9" fill="#fef3c7"/><text x="294" y="200" font-size="10" fill="#a16207" text-anchor="middle">重试 2</text>
+<line x1="14" y1="216" x2="444" y2="216" stroke="#f1f5f9"/>
+<text x="30" y="236" font-size="11" fill="#1f2937">警告</text>
+<rect x="112" y="226" width="166" height="18" rx="4" fill="#64748b"/><text x="195" y="238" font-size="10" fill="#ffffff" text-anchor="middle">关 trace 降载（经 M-12）</text>
+<rect x="262" y="226" width="64" height="18" rx="9" fill="#e2e8f0"/><text x="294" y="238" font-size="10" fill="#475569" text-anchor="middle">重试 1</text>
+<rect x="14" y="272" width="430" height="44" rx="6" fill="#f0fdf4" stroke="#bbf7d0"/>
+<text x="30" y="290" font-size="11" fill="#15803d">MVP 基线（评审 L1）：崩溃自动快照 + 恢复（M-20 checkpoint + restore）</text>
+<text x="30" y="308" font-size="10.5" fill="#16a34a">处置动作可重试；恢复失败回退更早检查点（4.6.3.5）</text>
+<rect x="470" y="70" width="196" height="246" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="486" y="92" font-size="12" font-weight="700" fill="#334155">动作触发链（4.6.3.4）</text>
+<line x1="470" y1="102" x2="666" y2="102" stroke="#e2e8f0"/>
+<text x="486" y="126" font-size="11" fill="#1f2937">信号采集 → 分级</text>
+<text x="486" y="148" font-size="11" fill="#1f2937">→ 分角色分发</text>
+<text x="486" y="170" font-size="11" fill="#1f2937">→ 降级动作 → 恢复</text>
+<text x="486" y="192" font-size="11" fill="#1f2937">（检查点 + 输入重放）</text>
+<line x1="470" y1="218" x2="666" y2="218" stroke="#e2e8f0"/>
+<text x="486" y="240" font-size="11" fill="#64748b">guest 失控 terminate 后</text>
+<text x="486" y="262" font-size="11" fill="#64748b">重新加载固件或从最近</text>
+<text x="486" y="284" font-size="11" fill="#64748b">检查点恢复（4.6.3.5）</text></svg><figcaption class="ux-cap">图 2 · HMS：降级动作策略表（致命 terminate/严重快照+恢复/警告降载，可重试标记）——动作触发链与 MVP L1 基线</figcaption></figure></div><div class="ux-wrap"><figure class="ux"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="HMS · 诊断包与指标（exportDiagnosticKit / metrics，示意）"><defs><filter id="sh" x="-10%" y="-20%" width="130%" height="170%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#64748b" flood-opacity="0.25"/></filter><linearGradient id="hdr" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#7c2d12"/><stop offset="1" stop-color="#c2410c"/></linearGradient></defs><rect x="2" y="2" width="676" height="416" rx="10" fill="#ffffff" stroke="#e2e8f0" filter="url(#sh)"/><rect x="2" y="2" width="676" height="36" rx="10" fill="url(#hdr)"/><circle cx="26" cy="20" r="4" fill="#fdba74" opacity="0.85"/><circle cx="42" cy="20" r="4" fill="#fdba74" opacity="0.85"/><circle cx="58" cy="20" r="4" fill="#fdba74" opacity="0.85"/><text x="78" y="24" font-size="13" font-weight="700" fill="#ffffff">HMS · 诊断包与指标（exportDiagnosticKit / metrics，示意）</text><text x="20" y="60" font-size="12.5" font-weight="700" fill="#374151">脱敏诊断包（diagnosticKit · P-23）</text>
+<rect x="14" y="70" width="430" height="150" rx="6" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="30" y="94" font-size="11" font-weight="700" fill="#475569">取证要素（不含原始日志，§3.4）</text>
+<rect x="30" y="108" width="398" height="16" rx="8" fill="#e2e8f0"/>
+<rect x="30" y="108" width="398" height="16" rx="8" fill="#c2410c"/>
+<text x="229" y="120" font-size="10" fill="#ffffff" text-anchor="middle">错误码 E_CTX-12 · 快照 #42 · 输入序列 384 条</text>
+<circle cx="46" cy="152" r="5" fill="#22c55e"/>
+<text x="62" y="156" font-size="11" fill="#1f2937">错误码（E_CTX/E_PROTO 体系）</text>
+<circle cx="46" cy="180" r="5" fill="#22c55e"/>
+<text x="62" y="184" font-size="11" fill="#1f2937">快照（M-20 Snapshot 状态体）</text>
+<circle cx="46" cy="208" r="5" fill="#22c55e"/>
+<text x="62" y="212" font-size="11" fill="#1f2937">稀疏输入序列（M-20，可重放）</text>
+<rect x="14" y="234" width="430" height="44" rx="6" fill="#fff7ed" stroke="#fde68a"/>
+<text x="30" y="252" font-size="11" fill="#92400e">供用户上报后管理员链路取证（P-23）</text>
+<text x="30" y="270" font-size="10.5" fill="#b45309">不含原始日志——日志关联仅管理员可见</text>
+<rect x="470" y="70" width="196" height="208" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="486" y="92" font-size="12" font-weight="700" fill="#334155">指标环形带（metrics·FR-20）</text>
+<line x1="470" y1="102" x2="666" y2="102" stroke="#e2e8f0"/>
+<text x="486" y="124" font-size="11" fill="#1f2937">MIPS</text>
+<text x="486" y="146" font-size="11" fill="#1f2937">命令响应 P50/P99</text>
+<text x="486" y="168" font-size="11" fill="#1f2937">推送周期 / 队列水位</text>
+<text x="486" y="190" font-size="11" fill="#1f2937">溢出次数 / 会话内存</text>
+<text x="486" y="212" font-size="11" fill="#1f2937">异常率</text>
+<text x="486" y="240" font-size="10.5" fill="#94a3b8">指标面板 P2 展示（P-18）</text>
+<text x="486" y="262" font-size="10.5" fill="#94a3b8">MVP 只做现场包（P-19）</text>
+<text x="486" y="284" font-size="10.5" fill="#94a3b8">与健康信号</text>
+<line x1="470" y1="292" x2="666" y2="292" stroke="#e2e8f0"/>
+<text x="486" y="314" font-size="11" fill="#64748b">崩溃/上报 → 现场包或</text>
+<text x="486" y="336" font-size="11" fill="#64748b">脱敏诊断包导出（4.6.3.4）</text></svg><figcaption class="ux-cap">图 3 · HMS：脱敏诊断包（错误码 + 快照 + 输入序列，不含原始日志，P-23）+ 指标环形带（FR-20/P-18，面板 P2）</figcaption></figure></div>
+<h2 id="sec4" class="h-sec">4 关键函数（源文档表81）</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:30%"><col style="width:26%"><col style="width:44%"></colgroup><thead><tr><th style="width:30%;text-align:center">函数</th><th style="width:26%;text-align:center">说明</th><th style="width:44%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">report(signal)</td><td style="text-align:left">健康信号上报</td><td style="text-align:left">输入：信号源 + 错误码；输出：分级结果</td></tr><tr class="row1"><td style="text-align:center">classify(signal)</td><td style="text-align:left">异常分级</td><td style="text-align:left">输出：致命/严重/警告</td></tr><tr class="row0"><td style="text-align:center">dispatch(severity, info)</td><td style="text-align:left">分角色分发</td><td style="text-align:left">产品/嵌入式：可读提示（脱敏）；管理员：诊断详情（关联 M-21）</td></tr><tr class="row1"><td style="text-align:center">degrade(action)</td><td style="text-align:left">执行降级动作</td><td style="text-align:left">自动快照+恢复/暂停/断开外设/关 trace/terminate；输出：处置结果</td></tr><tr class="row0"><td style="text-align:center">collectMetric(name, value)</td><td style="text-align:left">指标采集（FR-20）</td><td style="text-align:left">写入 metrics 环形指标带；指标面板 P2 展示（评审 P-18）</td></tr><tr class="row1"><td style="text-align:center">exportDiagnosticKit()</td><td style="text-align:left">导出脱敏诊断包</td><td style="text-align:left">错误码 + 快照 + 输入序列，不含原始日志；供用户上报链路（评审 P-23）</td></tr></tbody></table></div><h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 健康管理与恢复流程（源 4.6.3.4 对齐）</h3>
+<p class="body">信号采集 → 分级 → 分角色分发 → 降级动作 → 恢复（检查点 + 输入重放）；指标采集 → 环形指标带（面板 P2）；崩溃/上报 → 现场包或脱敏诊断包导出；与日志系统职责分离（M-21 只记录，HMS 只监控分发，图6）。流程图如下：</p>
+<div class="flow-wrap"><svg class="flow" viewBox="0 0 980 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-22 健康管理与恢复流程（4.6.3.4）">
+  <defs>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#c2410c"/>
+    </marker>
+  </defs>
+  <style>
+    .fbox { fill:#fff; stroke:#7c2d12; stroke-width:1.4; rx:8; }
+    .fbox2 { fill:#f1f4f9; stroke:#7c2d12; stroke-width:1.2; rx:8; }
+    .farrow { stroke:#c2410c; stroke-width:1.5; marker-end:url(#arw); }
+    .ftxt { font:12px "Noto Sans SC","PingFang SC",sans-serif; fill:#1f2937; }
+    .ftag { font:10.5px "Noto Sans SC","PingFang SC",sans-serif; fill:#4b5563; }
+  </style>
+  <g>
+    <rect class="fbox2" x="20" y="40" width="170" height="56"/>
+    <text class="ftxt" x="105" y="62" text-anchor="middle">信号采集</text>
+    <text class="ftxt" x="105" y="80" text-anchor="middle">心跳/超时/崩溃/watchdog</text>
+    <rect class="fbox" x="250" y="40" width="170" height="56"/>
+    <text class="ftxt" x="335" y="62" text-anchor="middle">report → classify</text>
+    <text class="ftxt" x="335" y="80" text-anchor="middle">致命/严重/警告（表80）</text>
+    <rect class="fbox2" x="480" y="40" width="170" height="56"/>
+    <text class="ftxt" x="565" y="62" text-anchor="middle">dispatch 分角色</text>
+    <text class="ftxt" x="565" y="80" text-anchor="middle">脱敏提示 / 诊断详情</text>
+    <rect class="fbox" x="710" y="40" width="170" height="56"/>
+    <text class="ftxt" x="795" y="62" text-anchor="middle">degrade 降级动作</text>
+    <text class="ftxt" x="795" y="80" text-anchor="middle">快照+恢复/暂停/terminate</text>
+    <rect class="fbox2" x="20" y="180" width="170" height="56"/>
+    <text class="ftxt" x="105" y="202" text-anchor="middle">恢复（评审 L1）</text>
+    <text class="ftxt" x="105" y="220" text-anchor="middle">M-20 检查点 + 输入重放</text>
+    <rect class="fbox" x="250" y="180" width="170" height="56"/>
+    <text class="ftxt" x="335" y="202" text-anchor="middle">会话就绪</text>
+    <text class="ftxt" x="335" y="220" text-anchor="middle">回 M-04 会话状态</text>
+    <rect class="fbox2" x="480" y="180" width="170" height="56"/>
+    <text class="ftxt" x="565" y="202" text-anchor="middle">指标采集</text>
+    <text class="ftxt" x="565" y="220" text-anchor="middle">collectMetric → ring</text>
+    <rect class="fbox" x="710" y="180" width="170" height="56"/>
+    <text class="ftxt" x="795" y="202" text-anchor="middle">崩溃/上报导出</text>
+    <text class="ftxt" x="795" y="220" text-anchor="middle">现场包 P-19 / 诊断包 P-23</text>
+    <line class="farrow" x1="190" y1="68" x2="246" y2="68"/>
+    <line class="farrow" x1="420" y1="68" x2="476" y2="68"/>
+    <line class="farrow" x1="650" y1="68" x2="706" y2="68"/>
+    <line class="farrow" x1="795" y1="96" x2="795" y2="176"/>
+    <line class="farrow" x1="795" y1="176" x2="190" y2="176" marker-end="none"/>
+    <line class="farrow" x1="190" y1="208" x2="246" y2="208"/>
+    <line class="farrow" x1="420" y1="208" x2="476" y2="208"/>
+    <line class="farrow" x1="650" y1="208" x2="706" y2="208"/>
+    <text class="ftag" x="335" y="130" text-anchor="middle">故障三分类：guest trap（正常调试）· 平台崩溃 · guest 失控（watchdog）</text>
+    <text class="ftag" x="335" y="250" text-anchor="middle">处置动作可重试；恢复失败回退更早检查点；职责分离（M-21 只记录，HMS 只监控，图6）</text>
+  </g>
+</svg></div>
+<div class="flow-branch">分支：guest trap → 不分发降级仅提示（正常调试语义）；guest 失控 terminate → 重新加载固件或从最近检查点恢复（4.6.3.5）；指标面板 P2 展示（P-18）；诊断包导出不含原始日志（角色边界，P-23）。</div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:52%"><col style="width:24%"></colgroup><thead><tr><th style="width:24%;text-align:center">协作模块</th><th style="width:52%;text-align:center">协作内容</th><th style="width:24%;text-align:center">触发时机</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-21（日志系统）</td><td style="text-align:left">根因查询 + 日志关联（管理员侧）；职责分离（M-21 只记录）</td><td style="text-align:left">dispatch 管理员分发时</td></tr><tr class="row1"><td style="text-align:center">M-20（快照与事件流）</td><td style="text-align:left">degrade(SNAPSHOT_RESTORE) → checkpoint + restore（检查点+输入重放）</td><td style="text-align:left">严重级降级时</td></tr><tr class="row0"><td style="text-align:center">M-04（会话管理器）</td><td style="text-align:left">degrade(PAUSE/TERMINATE) 会话处置；会话异常上报</td><td style="text-align:left">会话异常/失控时</td></tr><tr class="row1"><td style="text-align:center">M-07（传输适配）</td><td style="text-align:left">断连上报；degrade(DISCONNECT) 断开外设</td><td style="text-align:left">断连/降级时</td></tr><tr class="row0"><td style="text-align:center">M-05（命令路由）</td><td style="text-align:left">命令超时/队列水位信号上报</td><td style="text-align:left">命令异常时</td></tr><tr class="row1"><td style="text-align:center">M-12（仿真引擎）</td><td style="text-align:left">watchdog 超时 → guest 失控（FATAL）</td><td style="text-align:left">watchdog 超时</td></tr><tr class="row0"><td style="text-align:center">M-01（工作台）</td><td style="text-align:left">dispatch 脱敏提示 → 异常提示通道</td><td style="text-align:left">非管理员分发时</td></tr></tbody></table></div><h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置（源表16 既有码 + 内部降级策略，无新增码）</h3>
+<p class="body">M-22 为横切基础设施，健康信号承载源表16 既有错误码（E_CTX/E_PROTO 体系），处置收敛为内部降级策略，无新增码。处置如下（4.6.3.5）：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:40%"><col style="width:34%"></colgroup><thead><tr><th style="width:26%;text-align:center">错误码 / 场景</th><th style="width:40%;text-align:center">触发条件</th><th style="width:34%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">E_CTX-06 命令超时</td><td style="text-align:left">M-05 上报命令超时/队列水位信号</td><td style="text-align:left">classify → 严重 → degrade（快照+恢复或暂停）</td></tr><tr class="row1"><td style="text-align:center">E_PROTO-05 断连</td><td style="text-align:left">M-07 断连上报</td><td style="text-align:left">classify → 严重 → degrade（断开外设）+ 用户提示</td></tr><tr class="row0"><td style="text-align:center">E_CTX-12（失控）watchdog</td><td style="text-align:left">M-12 watchdog 超时（22-1：E_CTX-11 已被 M-04 占用=会话不存在，改用未占用码，一场景一码）</td><td style="text-align:left">FATAL → terminate 内核 + 告警；重新加载固件或从最近检查点恢复</td></tr><tr class="row1"><td style="text-align:center">平台崩溃</td><td style="text-align:left">后端崩溃信号</td><td style="text-align:left">自动快照 + 恢复（评审 L1）；失败回退更早检查点</td></tr><tr class="row0"><td style="text-align:center">处置动作失败</td><td style="text-align:left">degrade 执行失败</td><td style="text-align:left">可重试（4.6.3.5）；恢复失败回退更早检查点</td></tr><tr class="row1"><td style="text-align:center">诊断包导出</td><td style="text-align:left">exportDiagnosticKit 失败</td><td style="text-align:left">重试一次 + 告警；不含原始日志（P-23）</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）处置动作可重试，重试上界 ≤3 次 + 终态（上报 DEGRADE_FAILED → 停止会话/人工介入，22-11）；恢复失败回退更早检查点（4.6.3.5）。<br>（2）提示脱敏不含原始日志；产品/嵌入式工作台不接触系统日志与诊断详情（§3.4 角色边界）。<br>（3）guest 失控 terminate 后重新加载固件或从最近检查点恢复（4.6.3.5）。<br>（4）guest trap = 模型内异常（正常调试语义），仅提示不降级（4.6.3.1；22-3 枚举 INFO_NO_DEGRADE 承载）。<br>（5）恢复时序（22-2）：恢复源 = 崩溃前最近检查点 + 输入重放；崩溃时刻不新打检查点（自动快照=现场保护导出，非恢复源）。<br>（6）severityTable 未命中默认（22-5）：仅记录/提示（NO_DEGRADE），不触发降级动作；降载类动作仅对明确匹配的降载信号。<br>（7）错误码一场景一码（22-1）：watchdog 失控用 E_CTX-12，与 M-04 E_CTX-11=会话不存在 不冲突。<br>（8）诊断包导出不含原始日志（角色边界，评审 P-23）；日志关联仅管理员可见。<br>（9）与日志系统职责分离：M-21 只记录，HMS 只监控分发（图6）。<br>（10）指标采集 MVP 只做现场包（P-19）与健康信号；指标面板 P2 展示（P-18）；与 healthSignals 同源派生不双写（22-6）。<br>（11）健康信号流环形 ≤10⁴ 条（分级保留：致命/严重不丢，22-12；崩溃时冻结信号流）、指标环形 ≤4096 条（估算基线），溢出丢最旧 + warn。<br>（12）移动端：375px 可读（NFR-05），面板单列 + 横向滚动；file:// 直接可开。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表92（M-22 行）：HMS 三分类；分角色分发；降级动作分级处置正确、提示脱敏。展开用例表如下（契约测试 + 核心路径 + 异常路径，替代实现须通过同端口契约测试，4.6.3.6）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:40%"><col style="width:36%"></colgroup><thead><tr><th style="width:24%;text-align:center">用例</th><th style="width:40%;text-align:center">输入/步骤</th><th style="width:36%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（4.6.3.6）</td><td style="text-align:left">按 9.1.1 端口契约逐项校验 report/classify/dispatch/degrade/collectMetric/exportDiagnosticKit 的接口签名、输入校验、输出结构与错误码</td><td style="text-align:left">契约测试全绿；契约变更同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">故障三分类（表92）</td><td data-label="输入/步骤" style="text-align:left">guest trap / 平台崩溃 / guest 失控（watchdog）三信号</td><td data-label="通过准则" style="text-align:left">guest trap → 仅提示不降级；平台崩溃 → 自动快照+恢复；失控 → FATAL terminate+告警</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">错误码一场景一码（22-1/22-13）</td><td data-label="输入/步骤" style="text-align:left">watchdog 失控信号上报</td><td data-label="通过准则" style="text-align:left">使用 E_CTX-12（非 M-04 占用的 E_CTX-11=会话不存在）；日志/诊断包无码歧义</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">恢复时序（22-2/22-13）</td><td data-label="输入/步骤" style="text-align:left">崩溃后 degrade(SNAPSHOT_RESTORE)</td><td data-label="通过准则" style="text-align:left">恢复源 = 崩溃前最近检查点 + 输入重放（非崩溃时刻新打点）；自动快照=现场保护导出</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">TRAP 分支可达（22-9/22-13）</td><td data-label="输入/步骤" style="text-align:left">kind=TRAP 的 guest trap 信号上报</td><td data-label="通过准则" style="text-align:left">classify 返回 INFO_NO_DEGRADE（仅提示不降级）；kind 枚举含 TRAP</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">默认分级动作（22-5/22-13）</td><td data-label="输入/步骤" style="text-align:left">severityTable 未命中错误码</td><td data-label="通过准则" style="text-align:left">默认仅记录/提示（NO_DEGRADE），不触发降载动作</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">异常分级（表80）</td><td data-label="输入/步骤" style="text-align:left">分级阈值可配置场景</td><td data-label="通过准则" style="text-align:left">severityTable 按阈值正确输出致命/严重/警告</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">分角色分发（表92）</td><td data-label="输入/步骤" style="text-align:left">产品/嵌入式 vs 管理员角色</td><td data-label="通过准则" style="text-align:left">产品/嵌入式仅脱敏提示（不含日志）；管理员获诊断详情 + M-21 日志关联</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">降级动作（表92）</td><td data-label="输入/步骤" style="text-align:left">严重级触发 degrade</td><td data-label="通过准则" style="text-align:left">按 degradePolicy 执行对应动作；可重试；处置结果返回</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">崩溃恢复（评审 L1）</td><td data-label="输入/步骤" style="text-align:left">平台崩溃</td><td data-label="通过准则" style="text-align:left">自动快照（M-20 checkpoint）+ restore 就绪；失败回退更早检查点</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">提示脱敏（表92/P-23）</td><td data-label="输入/步骤" style="text-align:left">导出诊断包/分发提示</td><td data-label="通过准则" style="text-align:left">不含原始日志；错误码+快照+输入序列可取证</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">guest 失控恢复（4.6.3.5）</td><td data-label="输入/步骤" style="text-align:left">watchdog 超时 terminate 后</td><td data-label="通过准则" style="text-align:left">重新加载固件或从最近检查点恢复</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">指标采集（P-18）</td><td data-label="输入/步骤" style="text-align:left">collectMetric 写入 metrics ring</td><td data-label="通过准则" style="text-align:left">MIPS/P50/P99/推送周期/队列水位/溢出/会话内存/异常率入带；溢出丢最旧</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">移动端 375px（NFR-05）</td><td data-label="输入/步骤" style="text-align:left">移动视口渲染健康面板</td><td data-label="通过准则" style="text-align:left">单列 + 横向滚动；无溢出/裁切</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）职责单一：M-22 只监控分发，M-21 只记录（图6），互不耦合。<br>（2）分级阈值参数化：severityTable 集中可配置，分级逻辑独立可测。<br>（3）降级策略表化：degradePolicy Map 化，动作可增可调，可重试语义统一。<br>（4）信号采集点收敛：各模块经 report 统一入口上报（唯一入口，4.7 调用规则），不得自行实现健康上报。<br>（5）指标带独立：metrics ring 独立模块，不影响监控主路径（P-18）。<br>（6）CI 门禁：契约测试 + 三分类 + 分角色分发 + 降级动作 + 崩溃恢复用例纳入回归基线（表92）。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-22 责任：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:16%"><col style="width:40%"><col style="width:44%"></colgroup><thead><tr><th style="width:16%;text-align:center">质量属性</th><th style="width:40%;text-align:center">目标（估算基线）</th><th style="width:44%;text-align:center">M-22 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">韧性</td><td style="text-align:left">故障检测→分级→处置→恢复（NFR-08）</td><td style="text-align:left">信号采集 → 分级 → 分发 → degrade → M-20 恢复（检查点+重放）</td></tr><tr class="row1"><td style="text-align:center">可观测</td><td style="text-align:left">HMS 三分类；分角色分发；降级动作分级处置正确、提示脱敏（表92）</td><td style="text-align:left">classify/dispatch/degrade 闭环 + 脱敏边界</td></tr><tr class="row0"><td style="text-align:center">可扩展性</td><td style="text-align:left">性能监控面板（FR-20，P2）</td><td style="text-align:left">collectMetric 指标带（MIPS/P50/P99 等，P-18）</td></tr><tr class="row1"><td style="text-align:center">可诊断性</td><td style="text-align:left">崩溃现场留存（P-19）；脱敏诊断包（P-23）</td><td style="text-align:left">现场包导出 + 诊断包（错误码+快照+输入序列，不含日志）</td></tr></tbody></table></div><h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<div class="lead">合规：横切组件单向依赖（4.7 表86）；M-22 只经 M-21/M-20/M-04/M-07 交互 + 各业务模块信号上报；横切组件之间仅按既定链路（M-22→M-20/M-21），禁止反向依赖业务模块。</div>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:30%"><col style="width:46%"></colgroup><thead><tr><th style="width:24%;text-align:center">依赖方</th><th style="width:30%;text-align:center">被依赖方</th><th style="width:46%;text-align:center">依赖内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-22（HMS）</td><td style="text-align:left">M-21（日志系统）</td><td style="text-align:left">根因查询 + 日志关联（管理员侧 dispatch）</td></tr><tr class="row1"><td style="text-align:center">M-22</td><td style="text-align:left">M-20（快照与事件流）</td><td style="text-align:left">degrade(SNAPSHOT_RESTORE) → checkpoint + restore；快照/输入序列（诊断包）</td></tr><tr class="row0"><td style="text-align:center">M-22</td><td style="text-align:left">M-04（会话管理器）</td><td style="text-align:left">degrade(PAUSE/TERMINATE) 会话处置；会话异常上报</td></tr><tr class="row1"><td style="text-align:center">M-22</td><td style="text-align:left">M-07（传输适配）</td><td style="text-align:left">degrade(DISCONNECT) 断开外设；断连上报</td></tr><tr class="row0"><td style="text-align:center">M-22</td><td style="text-align:left">M-23（DataStore）</td><td style="text-align:left">诊断包/现场包归档（exportDiagnosticKit → m23Archive）</td></tr><tr class="row1"><td style="text-align:center">M-22</td><td style="text-align:left">M-01（工作台）</td><td style="text-align:left">dispatch 脱敏提示 → 异常提示通道</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表82 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层、本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现遵守同端口契约并通过契约测试（7.1）即可接入：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:20%"><col style="width:54%"></colgroup><thead><tr><th style="width:26%;text-align:center">端口 / 服务</th><th style="width:20%;text-align:center">方向</th><th style="width:54%;text-align:center">契约（输入 -&gt; 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">report(signal)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输入：信号源 + 错误码；输出：分级结果（双时间戳，环形流）</td></tr><tr class="row1"><td style="text-align:center">classify(signal)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输出：致命/严重/警告（severityTable 阈值可配置）</td></tr><tr class="row0"><td style="text-align:center">dispatch(severity, info)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">产品/嵌入式：可读提示（脱敏）；管理员：诊断详情（关联 M-21）</td></tr><tr class="row1"><td style="text-align:center">degrade(action)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">自动快照+恢复/暂停/断开外设/关 trace/terminate；输出：处置结果（可重试）</td></tr><tr class="row0"><td style="text-align:center">collectMetric(name, value)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">写入 metrics 环形指标带；指标面板 P2 展示（评审 P-18）</td></tr><tr class="row1"><td style="text-align:center">exportDiagnosticKit()</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">错误码 + 快照 + 输入序列，不含原始日志；供用户上报链路（评审 P-23）</td></tr><tr class="row0"><td style="text-align:center">M-21</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">根因查询：管理员侧日志关联（m21RootCause(ctx)，接口名/入参两侧同步锚点，22-8）</td></tr><tr class="row1"><td style="text-align:center">M-20</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">恢复：checkpoint + restore（检查点 + 输入重放，评审 L1）；快照/输入序列</td></tr><tr class="row0"><td style="text-align:center">M-04</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">会话处置：degrade(PAUSE/TERMINATE)</td></tr><tr class="row1"><td style="text-align:center">M-07</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">断连上报：degrade(DISCONNECT) 断开外设</td></tr><tr class="row0"><td style="text-align:center">M-01</td><td style="text-align:left">被依赖（使用方）</td><td style="text-align:left">异常提示通道（dispatch 脱敏提示）</td></tr><tr class="row1"><td style="text-align:center">M-04</td><td style="text-align:left">被依赖（使用方）</td><td style="text-align:left">会话异常上报</td></tr><tr class="row0"><td style="text-align:center">M-05</td><td style="text-align:left">被依赖（使用方）</td><td style="text-align:left">命令超时/队列水位信号</td></tr><tr class="row1"><td style="text-align:center">M-07</td><td style="text-align:left">被依赖（使用方）</td><td style="text-align:left">断连上报</td></tr><tr class="row0"><td style="text-align:center">M-12</td><td style="text-align:left">被依赖（使用方）</td><td style="text-align:left">watchdog 超时</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<p class="body">report 收信号 -> log(INFO/WARN, "M22", "hms_signal", src/errCode)（管理员可见）；降级动作 -> log(INFO, "M22", "degrade", action)；处置失败 -> log(WARN, "M22", "degrade_fail", action)；诊断包导出 -> log(DEBUG, "M22", "diagkit", errCode)。日志条目含虚拟+宿主双时间戳与会话关联（P-22）；诊断包不含原始日志（P-23 角色边界），日志关联仅管理员侧 dispatch 可见。</p>
+</main>
+<footer class="subtitle">M-22 健康管理 HMS 模块详细设计 v1.1 · 对应《RISC-V仿真平台模块设计说明书》4.6.3节 · 2026-10-16</footer>
+
+</div>
+</body>
+</html>

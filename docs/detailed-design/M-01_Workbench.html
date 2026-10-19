@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-01 工作台装配与多视图路由 模块详细设计</title>
+<link rel="icon" href="data:image/svg+xml,&lt;svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22&gt;&lt;rect width=%2232%22 height=%2232%22 rx=%226%22 fill=%22%231e3a8a%22/&gt;&lt;text x=%2216%22 y=%2222%22 font-size=%2216%22 fill=%22white%22 text-anchor=%22middle%22 font-family=%22sans-serif%22&gt;M01&lt;/text&gt;&lt;/svg&gt;">
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15px; font-weight:700; color:#374151; margin:18px 0 8px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { margin:0 0 10px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  margin:10px 0 16px; white-space:pre; }
+code { font-family:inherit; }
+.nav-toggle { margin:10px 0 4px; }
+.nav-box { background:var(--head-bg); border:1px solid var(--line); border-radius:6px;
+  padding:10px 16px; font-size:13.5px; line-height:1.9; display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0 24px; }
+.nav-box a { color:var(--brand-2); text-decoration:none; }
+.nav-box a:hover { text-decoration:underline; }
+.flow-wrap { overflow-x:auto; margin:12px 0 16px; }
+.flow { min-width:640px; width:100%; height:auto; }
+.flow-branch { font-size:12.5px; color:var(--ink-2); border-left:3px solid var(--brand-2);
+  padding:4px 10px; margin:8px 0 16px; background:var(--zebra); }
+@media (max-width:767px) {
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media (max-width:560px) {
+  .doc-title { font-size:21px; }
+  .h-sec { font-size:19px; }
+  .doc-table, .doc-table th, .doc-table td { font-size:12.5px; }
+  .code { font-size:11.5px; white-space:pre-wrap; word-break:break-word; }
+  .nav-box { grid-template-columns:1fr; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><h1 class="doc-title">M-01 工作台装配与多视图路由 模块详细设计</h1><p class="subtitle">RISC-V仿真平台 模块详细设计系列 - 对应《模块设计说明书》4.1.1节</p><p class="version">HTML版 v1.1 (2026-10-16) - 源设计《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版，2026-10-13更新)</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版新增2.5平台共享契约与各模块端口契约表)</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.1.1（M-01 工作台装配与多视图路由）：数据描述→源文档表17、关键函数表18、端口契约表19；处理流程=4.1.1.4、异常处理=4.1.1.5</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">多视图独立路由（FR-23，M-01/M-03）；视图切换状态保持（V-11）；MVP 装配范围（评审 L1）；零安装/移动端（NFR-05）</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">M-02 视图组件库（渲染）；M-03 View Store（状态保持）；M-05 命令路由/能力面（capBits 协商）；M-21 装配/路由日志；M-22 异常提示通道（HMS 脱敏）</td></tr><tr class="row0"><td style="text-align:center">MVP状态</td><td style="text-align:left">PO主承担模块（MVP必需：嵌入式工作台 + 产品工作台基础面装配、hash 路由、View Store 状态保持）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；依赖方向（2.1表5：前端交互层→会话/命令层）；MVP 装配范围（评审 L1：嵌入式 + 产品基础面）；FR-23（多视图独立路由）；V-11（切换状态保持）；角色边界（§3.4：产品/嵌入式工作台不接触系统日志与诊断详情，HMS 提示脱敏）；可用性（NFR-05：零安装/file:///移动端 375px）；能力位 capBits 对齐 M-05 v1.1 negotiate（01-6 实测）</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.0（2026-10-15 初版）：按 M-13 v1.1 标准 9 章结构；内建 9.1.1 端口契约（源表19 对齐）+ CH7 契约测试 + CH8 模块即积木可替换；表号引用源文档契约层版实际编号（表17/18/19、表92/93）；错误码复用源表16 既有（E_CTX-05，无新增码）；评审 L1（MVP 只装嵌入式+产品基础面）；FR-23/V-11 落地；NFR-05 移动端 375px。&lt;br&gt;v1.1（2026-10-16 评审 01-1~01-8）：01-1 route 按 role×capBits 复校验（防 hash 直改绕过）+ 用例；01-2 首视图默认 state 语义 + switchView 判重；01-3 兜底页浮层覆盖形态；01-4 switchView 写回 hash（replace）+ 刷新恢复用例；01-5 装配规则表（3.5，MVP 两 role 全量）+ capability 单能力声明；01-6 能力面对齐 M-05 v1.1 capBits（实测无 capabilityWhitelist 接口）+ M-02/M-03/M-22 契约锚点；01-7 补 4 组用例；01-8 RenderEvent 结构展开</td></tr><tr class="row1"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-16</td></tr></tbody></table></div></header><nav class="nav-toggle"><details open><summary>目录</summary><div class="nav-box"><a href="#sec1">1 功能概述</a><a href="#sec1-1">1.1 模块定位</a><a href="#sec1-2">1.2 需求与约束</a><a href="#sec1-3">1.3 MVP 范围与预留</a><a href="#sec2">2 数据描述</a><a href="#sec2-1">2.1 核心数据结构</a><a href="#sec2-1-1">2.1.1 复杂结构字段定义</a><a href="#sec2-2">2.2 装配与路由语义</a><a href="#sec2-3">2.3 数据流说明</a><a href="#sec3">3 实现设计</a><a href="#sec3-1">3.1 assembleWorkspace</a><a href="#sec3-2">3.2 route</a><a href="#sec3-3">3.3 switchView</a><a href="#sec3-4">3.4 差异对照表</a><a href="#sec3-5">3.5 装配规则表</a><a href="#sec4">4 关键函数</a><a href="#sec5">5 处理流程</a><a href="#sec5-1">5.1 装配与路由流程</a><a href="#sec5-2">5.2 与相邻模块的协作说明</a><a href="#sec6">6 异常处理</a><a href="#sec6-1">6.1 错误码与处置</a><a href="#sec6-2">6.2 边界与降级</a><a href="#sec7">7 测试设计与可维护性</a><a href="#sec7-1">7.1 测试要点与关键用例</a><a href="#sec7-2">7.2 可维护性手段</a><a href="#sec8">8 质量属性落实</a><a href="#sec9">9 接口依赖</a><a href="#sec9-1">9.1 依赖关系</a><a href="#sec9-1-1">9.1.1 端口契约</a><a href="#sec9-2">9.2 日志对接</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-01 工作台装配与多视图路由（4.1.1）：前端交互层入口，按会话携带的 role 装配三类工作台（产品工作台 / 嵌入式工作台 / 系统管理员工作台 P1）——工作台 = 视图组合 × 能力面 × 观测通道可见性，三者由 role 统一驱动（评审 L1：MVP 只装配「嵌入式工作台 + 产品工作台基础面」）；实现多视图 hash 路由（FR-23，M-01/M-03），视图切换后经 View Store 保持仿真与调试状态（V-11），route 阶段按 role × 能力位复校验目标视图（01-1，防 hash 直改绕过）。可用性约束零安装、file:// 直接可开、移动端 375px 可读（NFR-05）。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:62%"><col style="width:24%"></colgroup><thead><tr><th style="width:14%;text-align:center">类别</th><th style="width:62%;text-align:center">约束内容</th><th style="width:24%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">装配</td><td style="text-align:left">按会话 role 装配三类工作台：视图组合 × 能力位 × 观测通道可见性；MVP 只装嵌入式 + 产品基础面</td><td style="text-align:left">4.1.1.1、评审 L1</td></tr><tr class="row1"><td style="text-align:center">路由</td><td style="text-align:left">多视图 hash 路由，未注册路由走兜底页；route 按 role × 能力位复校验目标视图（01-1）</td><td style="text-align:left">4.1.1.1、FR-23、01-1</td></tr><tr class="row0"><td style="text-align:center">状态保持</td><td style="text-align:left">视图切换后经 View Store 保持仿真与调试状态；切换同步写回 hash（V-11，01-4）</td><td style="text-align:left">4.1.1.1、V-11、01-4</td></tr><tr class="row1"><td style="text-align:center">能力面</td><td style="text-align:left">装配与路由读取 M-05 能力位 capBits（negotiate 协商结果，01-6 实测：M-05 v1.1 无 capabilityWhitelist 接口）</td><td style="text-align:left">表18、表19、01-6</td></tr><tr class="row0"><td style="text-align:center">通道可见性</td><td style="text-align:left">产品/嵌入式工作台不接触系统日志与诊断详情；HMS 提示脱敏（角色边界）</td><td style="text-align:left">§3.4 角色边界</td></tr><tr class="row1"><td style="text-align:center">可用性</td><td style="text-align:left">零安装、file:// 直接可开、移动端 375px 可读（NFR-05）</td><td style="text-align:left">NFR-05</td></tr><tr class="row0"><td style="text-align:center">错误码</td><td style="text-align:left">未注册路由 → 兜底页 + 日志（E_CTX-05，源表16 既有码，无新增）</td><td style="text-align:left">4.1.1.5</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：assembleWorkspace(role)（按 role 装配视图组合 × 能力位 × 通道可见性）、route(hash)（hash 路由 + 未注册/无能力兜底，01-1）、switchView(target)（切换 + View Store 状态保持 + hash 同步，01-4）；MVP 装配 = 嵌入式工作台 + 产品工作台基础面（评审 L1）；hash 路由零依赖可用（NFR-05）。装配规则表（MVP 两 role 全量）见 3.5（01-5）。<br>预留项（P1 演进承接，不属现实现）：系统管理员工作台（P1）；诊断详情/系统日志观测面（随角色边界扩展）；工作台主题/布局自定义与多标签页；与 M-07 断线重连联动的装配态恢复（会话重建后按 role 重装配）；视图多能力位 AND/OR 组合（01-5）。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构（源文档表17）</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:24%"><col style="width:50%"></colgroup><thead><tr><th style="width:26%;text-align:center">数据结构/数据项</th><th style="width:24%;text-align:center">类型</th><th style="width:50%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">role</td><td style="text-align:left">enum</td><td style="text-align:left">会话携带的角色（product/embedded/admin），决定工作台装配与能力位过滤</td></tr><tr class="row1"><td style="text-align:center">viewRegistry</td><td style="text-align:left">Map&lt;hash, View&gt;</td><td style="text-align:left">路由表：hash → 视图组件注册信息（产品/调试/波形/串口终端）</td></tr><tr class="row0"><td style="text-align:center">workspaceState</td><td style="text-align:left">struct</td><td style="text-align:left">当前装配的工作台状态：激活视图、可见通道集合</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="body">role 为会话角色枚举（product/embedded/admin，admin 属 P1 预留）；viewRegistry 为 hash → 视图组件注册信息的路由表（产品/调试/波形/串口终端）；workspaceState 为当前装配的工作台状态（激活视图、可见通道集合）；capBits 为会话能力位集合（M-05 negotiate 协商结果，01-6 实测）；RenderEvent 为切换渲染事件载荷（01-8）。字段定义如下：</p>
+<pre class="code"><code>// role: 会话携带的角色（4.1.1.2 表17；决定工作台装配与能力位过滤）
+enum Role { product, embedded, admin /* admin 属 P1 预留（评审 L1） */ };
+// capBits: 会话能力位集合（01-6 实测：来源 = M-05 v1.1 negotiate 返回的 capBits，
+//   含 ExecutionBackend L1/L2/L3 分级协商；无 capabilityWhitelist 接口，装配/路由统一按 capBits 校验）
+Set&lt;Capability&gt; capBits;
+// viewRegistry: 路由表（FR-23）：hash → 视图组件注册信息
+struct View {
+  string hash;            // 路由 hash（如 &quot;#debug&quot;）
+  Component component;    // 视图组件（M-02 视图组件库提供，待文档落地双侧核对，01-6）
+  string name;            // 视图名称（产品/调试/波形/串口终端）
+  Capability capability;  // 所需能力位（MVP 单能力；多能力 AND/OR 组合 P1 预留，01-5）
+};
+Map&lt;hash, View&gt; viewRegistry;
+// workspaceState: 当前装配的工作台状态
+struct WorkspaceState {
+  Role role;                      // 装配角色
+  View activeView;                // 激活视图
+  Set&lt;channel&gt; visibleChannels;   // 可见通道集合（S1/W1/T1/E1 按 role 过滤，§3.4）
+};
+// RenderEvent: 切换渲染事件（01-8 展开；驱动 M-02 渲染）
+struct RenderEvent {
+  string viewId;                  // 目标视图 id
+  ViewState state;                // 视图状态（首进入为视图默认 state，01-2）
+  RenderType type;                // mount（首进入）/ update（切换回）/ unmount（切出）
+};</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 装配与路由语义</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:46%"><col style="width:22%"><col style="width:16%"></colgroup><thead><tr><th style="width:16%;text-align:center">机制</th><th style="width:46%;text-align:center">语义</th><th style="width:22%;text-align:center">实现通道</th><th style="width:16%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">工作台装配</td><td style="text-align:left">role → 视图组合 × 能力位 × 观测通道可见性（规则表见 3.5，01-5）</td><td style="text-align:left">assembleWorkspace</td><td style="text-align:left">MVP：嵌入式 + 产品基础面（L1）</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">hash 路由</td><td data-label="语义" style="text-align:left">location.hash → viewRegistry 匹配 → 按 role × capBits 复校验 → 切换；未注册/无能力 → 兜底页</td><td data-label="实现通道" style="text-align:left">route</td><td data-label="备注" style="text-align:left">未注册/无能力 → 兜底页 + E_CTX-05（01-1）</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">状态保持</td><td data-label="语义" style="text-align:left">切换时 M-03 getState/setState 保存与恢复，视图状态不丢；同步写回 hash（replace，01-4）</td><td data-label="实现通道" style="text-align:left">switchView</td><td data-label="备注" style="text-align:left">V-11；刷新恢复目标视图</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">能力位校验</td><td data-label="语义" style="text-align:left">装配与路由均按 M-05 capBits（negotiate 协商结果，01-6 实测）过滤/复校验</td><td data-label="实现通道" style="text-align:left">assembleWorkspace/route → capBits</td><td data-label="备注" style="text-align:left">拉取失败 → role 默认能力位降级</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">通道可见性</td><td data-label="语义" style="text-align:left">S1/W1/T1/E1 按 role 过滤；产品/嵌入式不接触系统日志与诊断</td><td data-label="实现通道" style="text-align:left">channelFilter(role)</td><td data-label="备注" style="text-align:left">§3.4 角色边界</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">视图注册</td><td data-label="语义" style="text-align:left">新视图注册 viewRegistry 即接入路由</td><td data-label="实现通道" style="text-align:left">注册表驱动</td><td data-label="备注" style="text-align:left">不涉路由逻辑改造</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">降级</td><td data-label="语义" style="text-align:left">未知 role → 回退嵌入式默认装配；装配失败不阻塞已有视图</td><td data-label="实现通道" style="text-align:left">fallbackEmbedded</td><td data-label="备注" style="text-align:left">4.1.1.5</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">兜底页形态</td><td data-label="语义" style="text-align:left">未注册/无能力路由 → 兜底页浮层覆盖，原视图保持挂载与状态（不卸载，01-3）</td><td data-label="实现通道" style="text-align:left">FALLBACK_VIEW overlay</td><td data-label="备注" style="text-align:left">01-3</td></tr></tbody></table></div>
+<h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+<p class="body">进入模式确定 role → assembleWorkspace 装配（视图组合 × 能力位 × 通道可见性）→ 会话能力位 capBits（M-05 negotiate）→ 监听 hash 变化（hashchange）→ route 切换视图（按 capBits 复校验，01-1）→ 视图从 View Store 恢复状态并渲染（M-03 → M-02）。</p>
+<h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 assembleWorkspace(role) 工作台装配</h3>
+<p class="body">assembleWorkspace(role)：按 role 装配工作台——视图组合 × 能力位 × 通道可见性；未知 role 回退嵌入式工作台默认装配（4.1.1.5）；能力位读取会话 capBits（M-05 negotiate 协商结果，01-6 实测，拉取失败降级 role 默认能力位）；装配失败不阻塞已有视图（调用方捕获，保留当前 workspaceState）。伪代码如下：</p>
+<pre class="code"><code>// assembleWorkspace: 按 role 装配工作台（4.1.1.3 表18；输入：role；输出：装配后的视图集合）
+WorkspaceState assembleWorkspace(Role role) {
+  if (!isValidRole(role))
+    return fallbackEmbedded();                            // 未知 role → 回退嵌入式默认装配（4.1.1.5）
+  capBits = sessionCapBits(role);                         // 会话能力位（M-05 negotiate 协商结果，01-6 实测）
+  if (capBits == null)
+    capBits = defaultCapBits(role);                       // 拉取失败 → role 默认能力位降级（6.2）
+  viewSet = filterByCapability(roleViewSet(role), capBits); // 视图组合 × 能力位过滤（规则表见 3.5，01-5）
+  ws = {role, activeView: viewSet.primary, visibleChannels: channelFilter(role)};
+  m21Log(INFO, &quot;WS&quot;, &quot;assemble&quot;, role);                   // 装配日志（M-21）
+  return ws;                                              // 输出：装配后的视图集合
+}
+// 装配失败不阻塞已有视图：assembleWorkspace 抛错由调用方捕获，保留当前 workspaceState（4.1.1.5）
+// 通道可见性：产品/嵌入式工作台不接触系统日志与诊断详情（§3.4 角色边界，HMS 提示脱敏）</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 route(hash) hash 路由</h3>
+<p class="body">route(hash)：解析 location.hash 并在 viewRegistry 匹配；未注册路由显示兜底页并记日志（E_CTX-05）；已注册路由按 role × capBits 复校验目标视图能力位（01-1，防 hash 直改绕过），不满足同样走兜底页；兜底页为浮层覆盖（01-3）。伪代码如下：</p>
+<pre class="code"><code>// route: 解析 hash 并切换到对应视图（4.1.1.3 表18；输入：location.hash；输出：目标视图）
+View route(String hash) {
+  viewId = parseHash(hash);                               // &quot;#debug&quot; → &quot;debug&quot;（FR-23）
+  target = viewRegistry.get(viewId);                      // 路由表匹配
+  if (target == null) {                                   // 未注册路由 → 兜底页（4.1.1.5）
+    m21Log(WARN, &quot;WS&quot;, &quot;route&quot;, &quot;E_CTX-05&quot;, hash);        // 兜底页日志（E_CTX-05，表16 既有）
+    return FALLBACK_VIEW;                                 // 兜底页视图（浮层覆盖，不卸载原视图，01-3）
+  }
+  if (!capBits.allows(target.capability)) {               // 路由复校验：role × 能力位（01-1）
+    m21Log(WARN, &quot;WS&quot;, &quot;route&quot;, &quot;E_CTX-05&quot;, hash);        // 无能力视图（hash 直改绕过）→ 兜底页 + 日志
+    return FALLBACK_VIEW;
+  }
+  return switchView(target);                              // 切换并保持状态（V-11）
+}</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 switchView(target) 视图切换与状态保持</h3>
+<p class="body">switchView(target)：视图切换，切换后状态保持——同视图判重直接返回（01-2）；保存当前视图状态（M-03 setState），恢复目标视图状态（M-03 getState，空 → 视图默认 state 非兜底，01-2）；同步写回 location.hash（replace，不污染历史栈，01-4）；输出渲染事件（RenderEvent，01-8）驱动 M-02 渲染。伪代码如下：</p>
+<pre class="code"><code>// switchView: 视图切换，切换后状态保持（4.1.1.3 表18；调用 M-03 getState/setState；输出：渲染事件）
+RenderEvent switchView(View target) {
+  if (target.id == workspaceState.activeView.id)
+    return;                                               // 同视图判重：直接返回（01-2）
+  prev = workspaceState.activeView;
+  m03SetState(prev.id, snapshot(prev));                   // 保存当前视图状态（M-03 setState）
+  state = m03GetState(target.id) ?? defaultState(target); // 恢复目标视图状态；空 → 视图默认 state（01-2，
+  //                                                       //   首进入初始化，非兜底）
+  workspaceState.activeView = target;
+  location.replace(&quot;#&quot; + target.hash);                    // 同步写回 hash（replace：不污染历史栈，01-4）
+  type = (firstEnter(target)) ? MOUNT : UPDATE;           // 渲染事件类型（01-8）
+  return publishRender(target, state, type);              // 输出：渲染事件（驱动 M-02 渲染）
+}
+// 说明：hash 切换后状态保持 = 每视图独立 state 存于 View Store（M-03），切换不丢失（V-11）；
+//   刷新页面按当前 hash 恢复目标视图（01-4）</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 与典型前端框架路由的差异对照表</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:16%"><col style="width:30%"><col style="width:36%"><col style="width:18%"></colgroup><thead><tr><th style="width:16%;text-align:center">维度</th><th style="width:30%;text-align:center">典型前端框架（React Router 等）</th><th style="width:36%;text-align:center">本平台建模（M-01 工作台装配与多视图路由）</th><th style="width:18%;text-align:center">差异影响</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">路由模式</td><td style="text-align:left">history 路由（URL path）</td><td style="text-align:left">hash 路由（FR-23），零依赖</td><td style="text-align:left">file:// 直接可开（NFR-05）</td></tr><tr class="row1"><td style="text-align:center">状态保持</td><td style="text-align:left">框架内存态 / URL 序列化</td><td style="text-align:left">View Store 独立状态（M-03 getState/setState）</td><td style="text-align:left">切换不丢失（V-11）</td></tr><tr class="row0"><td style="text-align:center">能力面</td><td style="text-align:left">无（路由人人可达）</td><td style="text-align:left">视图按 role × 能力位过滤 + route 复校验（capBits，M-05 协商）</td><td style="text-align:left">装配 + 路由双层校验（01-1 权限收敛）</td></tr><tr class="row1"><td style="text-align:center">观测通道</td><td style="text-align:left">无</td><td style="text-align:left">S1/W1/T1/E1 按 role 过滤（产品不接触系统日志）</td><td style="text-align:left">角色边界（§3.4）</td></tr><tr class="row0"><td style="text-align:center">装配形态</td><td style="text-align:left">构建期静态路由表</td><td style="text-align:left">运行期按 role 装配视图组合 × 通道可见性</td><td style="text-align:left">工作台 = 装配结果</td></tr></tbody></table></div>
+<h3 id="sec3-5" class="h-sub">3.5 装配规则表（MVP 两 role 全量，01-5 枚举）</h3>
+<p class="body">装配规则表化（7.2(2) 声明落地）：role → 视图组合（hash → 能力位）、可见通道集合全量枚举如下；Capability 为 MVP 单能力（PRODUCT/DEBUG/WAVE/TERM），多能力 AND/OR 组合 P1 预留（01-5）。</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:22%"><col style="width:42%"><col style="width:24%"><col style="width:12%"></colgroup><thead><tr><th style="width:22%;text-align:center">role</th><th style="width:42%;text-align:center">视图组合（hash → 能力位）</th><th style="width:24%;text-align:center">可见通道集合</th><th style="width:12%;text-align:center">说明</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">embedded（嵌入式工作台）</td><td style="text-align:left">#debug → DEBUG、#waveform → WAVE、#terminal → TERM</td><td style="text-align:left">S1 / W1 / T1 / E1</td><td style="text-align:left">调试全量（MVP 主面，L1）</td></tr><tr class="row1"><td data-label="role" style="text-align:center">product（产品基础面）</td><td data-label="视图组合" style="text-align:left">#product → PRODUCT</td><td data-label="可见通道集合" style="text-align:left">S1 / W1</td><td data-label="说明" style="text-align:left">产品基础面（L1）；不接触系统日志/诊断（§3.4）</td></tr><tr class="row0"><td data-label="role" style="text-align:center">admin（P1 预留）</td><td data-label="视图组合" style="text-align:left">全量 + 诊断详情视图</td><td data-label="可见通道集合" style="text-align:left">S1 / W1 / T1 / E1 + 诊断详情</td><td data-label="说明" style="text-align:left">P1 预留，不属现实现</td></tr></tbody></table></div>
+<div class="flow-branch">通道映射（01-5）：S1 = 仿真状态流、W1 = 波形流、T1 = 串口终端流、E1 = 事件流（源文档表23，M-03 订阅集合）；产品/嵌入式工作台可见集合如上表，系统日志/诊断详情仅管理员通道（§3.4）。</div>
+<h2 id="sec4" class="h-sec">4 关键函数（源文档表18）</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:30%"><col style="width:30%"><col style="width:40%"></colgroup><thead><tr><th style="width:30%;text-align:center">函数</th><th style="width:30%;text-align:center">说明</th><th style="width:40%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">assembleWorkspace(role)</td><td style="text-align:left">按 role 装配工作台（视图组合 × 能力位 × 通道可见性）</td><td style="text-align:left">输入：role；读取 M-05 能力位（capBits，negotiate 协商结果，01-6）；输出：装配后的视图集合</td></tr><tr class="row1"><td style="text-align:center">route(hash)</td><td style="text-align:left">解析 hash 并切换到对应视图；未注册/无能力视图走兜底页（01-1）</td><td style="text-align:left">输入：location.hash；按 capBits 复校验；调用 M-03 保持状态；输出：目标视图</td></tr><tr class="row0"><td style="text-align:center">switchView(target)</td><td style="text-align:left">视图切换，切换后状态保持；同步写回 hash（01-4）</td><td style="text-align:left">调用 M-03 getState/setState（空 → 默认 state，01-2）；输出：渲染事件（RenderEvent，01-8）</td></tr></tbody></table></div><h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 工作台装配与路由流程（源 4.1.1.4 对齐）</h3>
+<p class="body">进入模式确定 role → assembleWorkspace 装配 → 会话能力位 capBits（M-05 negotiate）→ 监听 hash 变化 → route 切换视图（按 capBits 复校验，01-1）→ 视图从 View Store 恢复状态并渲染。流程图如下：</p>
+<div class="flow-wrap"><svg class="flow" viewBox="0 0 980 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-01 工作台装配与路由流程（4.1.1.4）">
+  <defs>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2f5bd6"/>
+    </marker>
+  </defs>
+  <style>
+    .fbox { fill:#fff; stroke:#1e3a8a; stroke-width:1.4; rx:8; }
+    .fbox2 { fill:#f1f4f9; stroke:#1e3a8a; stroke-width:1.2; rx:8; }
+    .farrow { stroke:#2f5bd6; stroke-width:1.5; marker-end:url(#arw); }
+    .ftxt { font:12px "Noto Sans SC","PingFang SC",sans-serif; fill:#1f2937; }
+    .ftag { font:10.5px "Noto Sans SC","PingFang SC",sans-serif; fill:#4b5563; }
+  </style>
+  <g>
+    <rect class="fbox" x="20" y="40" width="170" height="56"/>
+    <text class="ftxt" x="105" y="62" text-anchor="middle">进入模式</text>
+    <text class="ftxt" x="105" y="80" text-anchor="middle">确定 role（会话）</text>
+    <rect class="fbox2" x="250" y="40" width="170" height="56"/>
+    <text class="ftxt" x="335" y="62" text-anchor="middle">assembleWorkspace</text>
+    <text class="ftxt" x="335" y="80" text-anchor="middle">视图组合×能力面×通道可见性</text>
+    <rect class="fbox" x="480" y="40" width="170" height="56"/>
+    <text class="ftxt" x="565" y="62" text-anchor="middle">会话能力位</text>
+    <text class="ftxt" x="565" y="80" text-anchor="middle">capBits（M-05 negotiate）</text>
+    <rect class="fbox2" x="20" y="180" width="170" height="56"/>
+    <text class="ftxt" x="105" y="202" text-anchor="middle">监听 hash 变化</text>
+    <text class="ftxt" x="105" y="220" text-anchor="middle">hashchange（FR-23）</text>
+    <rect class="fbox" x="250" y="180" width="170" height="56"/>
+    <text class="ftxt" x="335" y="202" text-anchor="middle">route 切换视图</text>
+    <text class="ftxt" x="335" y="220" text-anchor="middle">viewRegistry 匹配</text>
+    <rect class="fbox2" x="480" y="180" width="170" height="56"/>
+    <text class="ftxt" x="565" y="202" text-anchor="middle">恢复状态并渲染</text>
+    <text class="ftxt" x="565" y="220" text-anchor="middle">M-03 恢复 → M-02 渲染</text>
+    <line class="farrow" x1="190" y1="68" x2="246" y2="68"/>
+    <line class="farrow" x1="420" y1="68" x2="476" y2="68"/>
+    <line class="farrow" x1="565" y1="96" x2="565" y2="176"/>
+    <line class="farrow" x1="565" y1="176" x2="190" y2="176" marker-end="none"/>
+    <line class="farrow" x1="190" y1="208" x2="246" y2="208"/>
+    <line class="farrow" x1="420" y1="208" x2="476" y2="208"/>
+    <text class="ftag" x="335" y="140" text-anchor="middle">未知 role：回退嵌入式默认装配（L1/4.1.1.5）</text>
+    <text class="ftag" x="330" y="245" text-anchor="middle">未注册/无能力视图：兜底页 + E_CTX-05（01-1 浮层覆盖）</text>
+    <text class="ftag" x="565" y="245" text-anchor="middle">装配失败：不阻塞已有视图；V-11 状态保持 + hash 同步</text>
+  </g>
+</svg></div>
+<div class="flow-branch">分支：未知 role → 回退嵌入式工作台默认装配（4.1.1.5/L1）；未注册路由/无能力视图（hash 直改绕过）→ 兜底页浮层覆盖 + E_CTX-05 日志（01-1/01-3）；装配失败 → 不阻塞已有视图（保留当前 workspaceState）；能力位拉取失败 → role 默认能力位降级。</div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:52%"><col style="width:24%"></colgroup><thead><tr><th style="width:24%;text-align:center">协作模块</th><th style="width:52%;text-align:center">协作内容</th><th style="width:24%;text-align:center">触发时机</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-02（视图组件库）</td><td style="text-align:left">视图组件注册进 viewRegistry；RenderEvent（viewId/state/type，01-8）驱动组件渲染（接口签名待 M-02 文档落地双侧核对，01-6）</td><td style="text-align:left">装配/切换后</td></tr><tr class="row1"><td style="text-align:center">M-03（View Store）</td><td style="text-align:left">getState/setState 保存与恢复各视图状态（V-11；getState 空 → 视图默认 state，01-2，签名待 M-03 文档落地双侧核对，01-6）</td><td style="text-align:left">switchView 切换时</td></tr><tr class="row0"><td style="text-align:center">M-05（命令路由/能力面）</td><td style="text-align:left">会话能力位 capBits（negotiate 协商结果，01-6 实测：M-05 v1.1 9.1.1 无 capabilityWhitelist 接口）；装配/route 按 capBits 过滤与复校验</td><td style="text-align:left">assembleWorkspace/route 时</td></tr><tr class="row1"><td style="text-align:center">M-21（日志）</td><td style="text-align:left">装配/路由日志（含 E_CTX-05 兜底日志）</td><td style="text-align:left">装配/路由节点</td></tr><tr class="row0"><td style="text-align:center">M-22（异常提示通道）</td><td style="text-align:left">HMS 脱敏提示（装配失败/兜底页面向用户的可读提示，签名待 M-22 文档落地双侧核对，01-6）</td><td style="text-align:left">异常节点</td></tr></tbody></table></div><h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置（源表16 既有码，无新增）</h3>
+<p class="body">M-01 为装配/路由层，异常统一兜底不崩溃；错误码全部取自源表16（E_CTX-05 既有），无新增码。处置如下：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:28%"><col style="width:40%"><col style="width:32%"></colgroup><thead><tr><th style="width:28%;text-align:center">错误码 / 场景</th><th style="width:40%;text-align:center">触发条件</th><th style="width:32%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">E_CTX-05（未注册/无能力路由）</td><td style="text-align:left">location.hash 在 viewRegistry 无匹配；或目标视图能力位不满足 capBits（hash 直改绕过，01-1）</td><td style="text-align:left">兜底页浮层覆盖 + 记日志（4.1.1.5）；原视图保持挂载与状态（不卸载，01-3）</td></tr><tr class="row1"><td style="text-align:center">未知 role（降级）</td><td style="text-align:left">会话携带 role 非 product/embedded/admin</td><td style="text-align:left">回退嵌入式工作台默认装配（L1）</td></tr><tr class="row0"><td style="text-align:center">装配失败（降级）</td><td style="text-align:left">assembleWorkspace 内部异常</td><td style="text-align:left">不阻塞已有视图：保留当前 workspaceState + WARN 日志 + HMS 脱敏提示</td></tr><tr class="row1"><td style="text-align:center">能力位拉取失败（降级）</td><td style="text-align:left">M-05 negotiate 能力位（capBits）不可得</td><td style="text-align:left">role 默认能力位降级装配（6.2）</td></tr><tr class="row0"><td style="text-align:center">状态恢复（首进入/异常）</td><td style="text-align:left">M-03 getState 返回空 → 首进入视图；getState 异常 → 状态不可得</td><td style="text-align:left">getState 空 → 视图默认 state 初始化（非兜底，01-2）；getState 异常 → 空状态渲染兜底 + 日志，不影响其他视图</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）未知 role：一律回退嵌入式工作台默认装配（4.1.1.5），装配不中断。<br>（2）未注册路由/无能力视图：兜底页浮层覆盖并记日志（E_CTX-05），原视图保持挂载与状态（不卸载，01-3），已激活视图不受影响。<br>（3）装配失败：不阻塞已有视图——调用方捕获异常，保留当前 workspaceState，HMS 脱敏提示。<br>（4）能力位拉取失败：降级 role 默认能力位完成装配，WARN 日志标注降级。<br>（5）通道可见性过滤：产品/嵌入式工作台不接触系统日志与诊断详情（§3.4 角色边界）；HMS 提示脱敏，原始诊断仅管理员通道可见。<br>（6）移动端：375px 可读（NFR-05），导航折叠、视图单列布局；hash 路由零依赖可用（file:// 直接打开）。<br>（7）视图注册缺失：viewRegistry 未注册的目标视图按未注册路由处理（兜底页），不产生空白视图。<br>（8）hash 直改绕过防护（01-1）：产品 role 直改 #admin/未授权 hash → route 复校验能力位不满足 → 兜底页 + E_CTX-05，不进入目标视图。<br>（9）首视图语义（01-2）：首次进入视图 getState 空 → 渲染视图默认初始化 state（非兜底）；同视图重复切换直接返回（判重）。<br>（10）hash 同步（01-4）：switchView 以 replace 写回 location.hash（不污染历史栈），刷新页面按当前 hash 恢复目标视图。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表92（M-01 行）：路由与装配——三种 role 装配；hash 切换后状态保持（V-11）。展开用例表如下（M-01/M-02/M-03 仅渲染部分不计入核心集合，装配/路由逻辑仍按端口契约测试覆盖，源文档 7.3）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:26%"><col style="width:38%"><col style="width:36%"></colgroup><thead><tr><th style="width:26%;text-align:center">用例</th><th style="width:38%;text-align:center">输入/步骤</th><th style="width:36%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（源 2.5/7.1 对齐）</td><td style="text-align:left">按 9.1.1 端口契约逐项校验 assembleWorkspace/route/switchView 的接口签名、输入校验、输出结构与错误码；替代实现接入前必须同端口契约测试全量</td><td style="text-align:left">契约测试全绿；契约变更同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">三种 role 装配（表92）</td><td data-label="输入/步骤" style="text-align:left">product/embedded/admin（admin P1 预留）注入</td><td data-label="通过准则" style="text-align:left">装配视图组合 × 能力面 × 通道可见性正确；admin 未实现时回退 embedded（L1）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">未知 role 回退（4.1.1.5）</td><td data-label="输入/步骤" style="text-align:left">注入非法 role</td><td data-label="通过准则" style="text-align:left">回退嵌入式工作台默认装配；不中断；WARN 日志</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">未注册路由兜底（E_CTX-05）</td><td data-label="输入/步骤" style="text-align:left">注入 viewRegistry 无匹配的 hash</td><td data-label="通过准则" style="text-align:left">兜底页显示 + E_CTX-05 日志；已激活视图不受影响</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">hash 切换状态保持（表92/V-11）</td><td data-label="输入/步骤" style="text-align:left">视图 A 修改状态 → 切 B → 切回 A</td><td data-label="通过准则" style="text-align:left">A 状态经 M-03 恢复不变（V-11）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">能力面过滤</td><td data-label="输入/步骤" style="text-align:left">注入无某能力位的 role</td><td data-label="通过准则" style="text-align:left">对应视图不可达（从装配视图集合剔除）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">能力绕过拦截（01-1/01-7①）</td><td data-label="输入/步骤" style="text-align:left">产品 role 直改 hash 为无能力视图（如 #debug）</td><td data-label="通过准则" style="text-align:left">route 复校验不满足 → 兜底页 + E_CTX-05；不进入目标视图</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">首视图默认状态（01-2/01-7②）</td><td data-label="输入/步骤" style="text-align:left">首次进入视图，M-03 getState 返回空</td><td data-label="通过准则" style="text-align:left">渲染视图默认初始化 state（非兜底）；同视图重复切换直接返回</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">hash 同步/刷新恢复（01-4/01-7③）</td><td data-label="输入/步骤" style="text-align:left">切换视图后刷新页面</td><td data-label="通过准则" style="text-align:left">hash 已 replace 写回；刷新后按当前 hash 恢复目标视图（V-11）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">兜底页形态（01-3/01-7④）</td><td data-label="输入/步骤" style="text-align:left">注入未注册 hash 触发兜底</td><td data-label="通过准则" style="text-align:left">兜底页浮层覆盖；原视图保持挂载与状态（切回状态不丢）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">通道可见性过滤（§3.4）</td><td data-label="输入/步骤" style="text-align:left">产品/嵌入式 role 注入</td><td data-label="通过准则" style="text-align:left">系统日志/诊断通道不可见；HMS 提示脱敏</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">装配失败不阻塞（4.1.1.5）</td><td data-label="输入/步骤" style="text-align:left">M-05 能力位拉取抛错</td><td data-label="通过准则" style="text-align:left">保留当前 workspaceState + WARN + HMS 提示；已有视图可继续操作</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">能力位降级（6.2）</td><td data-label="输入/步骤" style="text-align:left">M-05 negotiate 返回空 capBits</td><td data-label="通过准则" style="text-align:left">role 默认能力位装配；WARN 标注降级</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">移动端 375px（NFR-05）</td><td data-label="输入/步骤" style="text-align:left">移动视口渲染</td><td data-label="通过准则" style="text-align:left">导航折叠、视图单列；无溢出/裁切；file:// 直接可开</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）视图注册表驱动：viewRegistry 集中注册，新增视图不改路由/装配逻辑（注册即接入）。<br>（2）装配规则表化：role → 视图组合/能力位/可见通道为声明式规则（roleViewSet/capabilityFilter/channelFilter，规则表见 3.5，01-5），调整装配不涉流程代码。<br>（3）错误码收敛：未注册/无能力路由统一 E_CTX-05（源表16 既有），提示语义一致。<br>（4）装配/路由与渲染解耦：M-01 只产出装配结果与渲染事件（RenderEvent，01-8），渲染落 M-02（M-01 逻辑纯函数可单测）。<br>（5）CI 门禁：三 role 装配 + V-11 状态保持 + 未注册/无能力路由兜底用例纳入回归基线（表92）。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-01 责任：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:18%"><col style="width:40%"><col style="width:42%"></colgroup><thead><tr><th style="width:18%;text-align:center">质量属性</th><th style="width:40%;text-align:center">目标（估算基线）</th><th style="width:42%;text-align:center">M-01 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">确定性</td><td style="text-align:left">同 role + 同 hash → 同装配/同视图；装配规则枚举</td><td style="text-align:left">assembleWorkspace/route 纯函数式输出（装配结果/目标视图）</td></tr><tr class="row1"><td style="text-align:center">可用性</td><td style="text-align:left">零安装、file:// 直接可开、移动端 375px 可读（NFR-05）</td><td style="text-align:left">hash 路由零依赖 + 导航折叠 + 单列视图</td></tr><tr class="row0"><td style="text-align:center">韧性</td><td style="text-align:left">未知 role/未注册/无能力路由/装配失败均兜底不崩溃</td><td style="text-align:left">回退 embedded 默认装配 / 兜底页浮层覆盖（01-3）/ 保留当前状态</td></tr><tr class="row1"><td style="text-align:center">可观测性</td><td style="text-align:left">装配/路由/兜底可追踪（FR-23）</td><td style="text-align:left">装配/路由日志（M-21）+ HMS 脱敏提示（M-22）</td></tr><tr class="row0"><td style="text-align:center">可扩展性</td><td style="text-align:left">新视图注册即接入；admin 工作台 P1 预留；能力位驱动（01-1 路由复校验）</td><td style="text-align:left">viewRegistry 注册表 + role 装配规则表（3.5，01-5）</td></tr></tbody></table></div><h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<div class="lead">合规：业务模块 → 模块组件单向依赖（4.7 表86）；M-01 只经 M-02/M-03/M-05/M-21/M-22 交互，不自行实现日志/告警/路由。</div>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:30%"><col style="width:46%"></colgroup><thead><tr><th style="width:24%;text-align:center">依赖方</th><th style="width:30%;text-align:center">被依赖方</th><th style="width:46%;text-align:center">依赖内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-01（工作台装配与多视图路由）</td><td style="text-align:left">M-02（视图组件库）</td><td style="text-align:left">视图组件注册进 viewRegistry；RenderEvent（viewId/state/type）驱动组件渲染（契约锚点待 M-02 落地，01-6）</td></tr><tr class="row1"><td style="text-align:center">M-01</td><td style="text-align:left">M-03（View Store）</td><td style="text-align:left">getState/setState 保存与恢复视图状态（V-11；空 → 默认 state，01-2；锚点待 M-03 落地，01-6）</td></tr><tr class="row0"><td style="text-align:center">M-01</td><td style="text-align:left">M-05（命令路由/能力面）</td><td style="text-align:left">会话能力位 capBits（negotiate 协商结果，01-6 实测：M-05 v1.1 无 capabilityWhitelist）</td></tr><tr class="row1"><td style="text-align:center">M-01</td><td style="text-align:left">M-21（日志）</td><td style="text-align:left">装配/路由日志（含 E_CTX-05 兜底日志）</td></tr><tr class="row0"><td style="text-align:center">M-01</td><td style="text-align:left">M-22（异常提示通道）</td><td style="text-align:left">HMS 脱敏提示（装配失败/兜底页可读提示；锚点待 M-22 落地，01-6）</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表19 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层、本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现遵守同端口契约并通过契约测试（7.1）即可接入：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:20%"><col style="width:54%"></colgroup><thead><tr><th style="width:26%;text-align:center">端口 / 服务</th><th style="width:20%;text-align:center">方向</th><th style="width:54%;text-align:center">契约（输入 -&gt; 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">assembleWorkspace(role)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输入：role；读取 M-05 能力位 capBits（negotiate 协商结果，01-6）；输出：装配后的视图集合；未知 role → 回退嵌入式默认装配（4.1.1.5）</td></tr><tr class="row1"><td style="text-align:center">route(hash)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输入：location.hash；按 capBits 复校验目标视图能力位（01-1）；调用 M-03 保持状态；输出：目标视图；未注册/无能力 → 兜底页浮层覆盖 + E_CTX-05（01-3）</td></tr><tr class="row0"><td style="text-align:center">switchView(target)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">调用 M-03 getState/setState（空 → 默认 state，01-2）；同步写回 hash（replace，01-4）；输出：渲染事件（RenderEvent{viewId,state,type}，01-8；V-11 状态保持）</td></tr><tr class="row1"><td style="text-align:center">M-02</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">视图组件库：RenderEvent → DOM 更新（契约锚点待 M-02 落地，01-6）</td></tr><tr class="row0"><td style="text-align:center">M-03</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">View Store：getState/setState 视图状态保持（空 → 默认 state，01-2；锚点待 M-03 落地，01-6）</td></tr><tr class="row1"><td style="text-align:center">M-05</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">命令路由/能力面：capBits（negotiate 协商结果，01-6 实测）</td></tr><tr class="row0"><td style="text-align:center">M-21</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">装配/路由日志（含 E_CTX-05）</td></tr><tr class="row1"><td style="text-align:center">M-22</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">异常提示通道：HMS 脱敏提示（锚点待 M-22 落地，01-6）</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<p class="body">装配成功 -> log(INFO, "WS", "assemble", role)（含视图数/可见通道数）；未知 role 回退 -> log(WARN, "WS", "assemble", "fallback_embedded", role)；未注册/无能力路由 -> log(WARN, "WS", "route", "E_CTX-05", hash)（01-1 复校验拦截同样记录）；装配失败 -> log(WARN, "WS", "assemble", "err", detail)；能力位降级 -> log(WARN, "WS", "assemble", "capbits_fallback", role)。会话关联字段（sessionId）随 M-21 双时间戳统一记录；产品/嵌入式工作台不可见系统日志与诊断详情（角色边界 §3.4），仅管理员通道可查。</p>
+</main>
+<footer class="subtitle">M-01 工作台装配与多视图路由 模块详细设计 v1.1 · 对应《RISC-V仿真平台模块设计说明书》4.1.1节 · 2026-10-16</footer>
+
+</div>
+</body>
+</html>

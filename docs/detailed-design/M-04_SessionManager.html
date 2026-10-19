@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>M-04 会话管理器 模块详细设计</title><link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22><rect width=%2232%22 height=%2232%22 rx=%226%22 fill=%22%231e3a8a%22/><path d=%22M7 9h18v4H7zM7 15h18v4H7zM7 21h12v4H7z%22 fill=%22white%22/></svg>"><style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15px; font-weight:700; color:#374151; margin:18px 0 8px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { margin:0 0 10px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  margin:10px 0 16px; white-space:pre; }
+code { font-family:inherit; }
+.nav-toggle { margin:10px 0 4px; }
+.nav-box { background:var(--head-bg); border:1px solid var(--line); border-radius:6px;
+  padding:10px 16px; font-size:13.5px; line-height:1.9; display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0 24px; }
+.nav-box a { color:var(--brand-2); text-decoration:none; }
+.nav-box a:hover { text-decoration:underline; }
+.flow-wrap { overflow-x:auto; margin:12px 0 16px; }
+.flow { min-width:640px; width:100%; height:auto; }
+@media (max-width:767px) {
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media (max-width:560px) {
+  .doc-title { font-size:21px; }
+  .h-sec { font-size:19px; }
+  .doc-table, .doc-table th, .doc-table td { font-size:12.5px; }
+  .code { font-size:11.5px; white-space:pre-wrap; word-break:break-word; }
+  .nav-box { grid-template-columns:1fr; }
+}
+</style></head>
+<body>
+<div class="wrap"><header><h1 class="doc-title">M-04 会话管理器 模块详细设计</h1><p class="subtitle">RISC-V仿真平台 模块详细设计系列 - 对应《模块设计说明书》4.2.1节</p><p class="version">HTML版 v1.1 (2026-10-14) - 源设计《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版，2026-10-13更新)</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版新增2.5平台共享契约与各模块端口契约表)</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.2.1（② 会话/命令层-M-04 会话管理器）：数据描述→源文档表29、关键函数表30、端口契约表31；处理流程=4.2.1.4</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">FR-12/19（检查点触发与恢复支撑）；NFR-02（响应时限）；确定性约束（2.4 表6）；评审 P-14（服务端配额）、P-22（envBundle）</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">M-05 命令路由/协商；M-07 传输建连；M-20 检查点/事件流；M-23 持久化；M-22 异常上报</td></tr><tr class="row0"><td style="text-align:center">MVP状态</td><td style="text-align:left">PO主承担模块（MVP必需：会话生命周期 + 确定性状态持有 + 检查点触发 + 能力面下发）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；依赖方向（2.1表5：会话/命令层→调试服务/仿真内核/观测管道）；错误码族主属方=E_CTX（3.4表16）；确定性约束（2.4 表6）；评审 P-14（配额）、P-22（envBundle）、R11（配额告警）、R1（恢复=最近检查点+稀疏输入重放；后端分级：L3/self_iss 走 M-20 检查点，QEMU L1 走 M-17 重启+重放，04-1）</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.0（2026-10-14 初版）：按 M-13 v1.1 标准 9 章结构；内建 9.1.1 端口契约（源表31 对齐）+ CH7 契约测试 + CH8 模块即积木可替换；表号/图号引用源文档契约层版实际编号（表29/30/31、表16、表91/93）；错误码 E_CTX 族按源表16 逐码对齐（E_CTX-01/02/04）；确定性/检查点/配额/能力面按源 2.4 表6 与 4.2.1 内建；评审 P-14/P-22/R11/R1 内建。&lt;br&gt;v1.1（2026-10-14 评审 04-1~04-9 全闭环）：04-1 恢复语义按后端分级（L3/self_iss → M-20 检查点+重放；QEMU L1 → M-17 重启+事件重放，会话状态重建），1.1/2.3/8/9.1.1 同步；04-2 timeVirt 来源=会话侧副本（M-12 虚拟时钟推进事件驱动更新，不双维护）；04-3 检查点触发钩子=M-12 每步回调 m04OnTimeAdvance 判定；04-4 destroySession 会话不存在新增 E_CTX-11、销毁失败回执携带状态不回 E_CTX-01；04-5 RPO 度量=宿主时间戳直接采样检查点间隔（不做虚拟↔宿主换算）；04-6 展开 SessionCfg/InputEvent/CheckpointReason/Role 枚举；04-7 memUsed 口径=配置预算求和+运行期上限复核；04-8 补两组用例（检查点落盘失败重试、崩溃恢复两后端路径）；04-9 恢复专用态 RESTORING + 恢复失败重试≤3→终止上报</td></tr><tr class="row1"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-14</td></tr></tbody></table></div></header><nav class="nav-toggle"><details open><summary>目录</summary><div class="nav-box"><a href="#sec1">1 功能概述</a><a href="#sec1-1">1.1 模块定位</a><a href="#sec1-2">1.2 需求与约束</a><a href="#sec1-3">1.3 MVP 范围与预留</a><a href="#sec2">2 数据描述</a><a href="#sec2-1">2.1 核心数据结构</a><a href="#sec2-1-1">2.1.1 复杂结构字段定义</a><a href="#sec2-2">2.2 缓存与增量语义</a><a href="#sec2-3">2.3 数据流说明</a><a href="#sec3">3 实现设计</a><a href="#sec3-1">3.1 createSession</a><a href="#sec3-2">3.2 destroySession</a><a href="#sec3-3">3.3 checkpoint</a><a href="#sec3-4">3.4 recordEvent</a><a href="#sec3-5">3.5 capabilityList</a><a href="#sec3-6">3.6 与真实调试器的差异对照表</a><a href="#sec4">4 关键函数</a><a href="#sec5">5 处理流程</a><a href="#sec5-1">5.1 会话生命周期流程</a><a href="#sec5-2">5.2 与相邻模块的协作说明</a><a href="#sec6">6 异常处理</a><a href="#sec6-1">6.1 错误码与处置</a><a href="#sec6-2">6.2 边界与降级</a><a href="#sec7">7 测试设计与可维护性</a><a href="#sec7-1">7.1 测试要点与关键用例</a><a href="#sec7-2">7.2 可维护性手段</a><a href="#sec8">8 质量属性落实</a><a href="#sec9">9 接口依赖</a><a href="#sec9-1">9.1 依赖关系</a><a href="#sec9-1-1">9.1.1 端口契约</a><a href="#sec9-2">9.2 日志对接</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-04 会话管理器（4.2.1）：管理会话生命周期（创建/运行/暂停/销毁）、并发隔离（每会话独立种子/事件序列/缓冲）、确定性状态持有（种子、事件序列、虚拟时间，表6 确定性约束），下发能力面白名单（按 role），并承担检查点触发策略（每 10s 虚拟时间或关键事件落盘；RPO ≤2s 宿主时间口径、快照保留 ≥5）。服务端形态执行会话配额（内存默认 256MB、会话数准入 ≥10，超限拒绝新会话并告警，R11）。会话建立时记录版本/环境 bundle（产品版本、内核版本、浏览器/UA、协议版本、构建哈希），随现场包与诊断包导出，支撑事后定位（评审 P-22）。恢复语义按后端分级（04-1，与 M-17 v1.2 对齐）：L3/self_iss → 最近检查点 + 稀疏输入事件序列重放（M-20 restore）；QEMU（L1）→ M-17 重启会话 + 输入事件重放（无 M-20 快照数据源），M-04 会话状态（sessionCtx/envBundle）随之重建。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:58%"><col style="width:28%"></colgroup><thead><tr><th style="width:14%;text-align:center">类别</th><th style="width:58%;text-align:center">约束内容</th><th style="width:28%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">功能</td><td style="text-align:left">会话生命周期管理（创建/运行/暂停/销毁）+ 状态机（非法状态 E_CTX-01）</td><td style="text-align:left">4.2.1.1</td></tr><tr class="row1"><td style="text-align:center">确定性</td><td style="text-align:left">同一种子 + 同一时间戳化输入事件序列 → 结果唯一；事件队列按（虚拟时间, 插入序）稳定排序；虚拟时间不依赖宿主时钟</td><td style="text-align:left">2.4 表6</td></tr><tr class="row0"><td style="text-align:center">并发隔离</td><td style="text-align:left">每会话独立种子/事件序列/缓冲；会话间无共享可变状态（≥10 并发隔离无串扰）</td><td style="text-align:left">4.2.1.1、表91</td></tr><tr class="row1"><td style="text-align:center">检查点</td><td style="text-align:left">每 10s 虚拟时间或关键事件（断点命中/暂停/checkpoint 命令）落盘；RPO ≤2s（宿主时间口径）；快照保留 ≥5</td><td style="text-align:left">4.2.1.1、评审 R1</td></tr><tr class="row0"><td style="text-align:center">配额</td><td style="text-align:left">服务端形态：内存默认 256MB/会话、会话数准入 ≥10；超限拒绝新会话并告警（R11、P-14）</td><td style="text-align:left">4.2.1.1、评审 P-14</td></tr><tr class="row1"><td style="text-align:center">能力面</td><td style="text-align:left">capabilityWhitelist 按 role 下发；QEMU 后端 L1 子集降级（capabilityList 输出）</td><td style="text-align:left">4.2.1.1、2.4 表6</td></tr><tr class="row0"><td style="text-align:center">环境信息</td><td style="text-align:left">会话建立时记录 envBundle（产品/内核/UA/协议/构建哈希），随现场包与诊断包导出（P-22）</td><td style="text-align:left">4.2.1.1、评审 P-22</td></tr><tr class="row1"><td style="text-align:center">异常</td><td style="text-align:left">配额超限 → 拒绝新会话并告警；状态机非法 → 上报 HMS（致命级）；销毁失败 → 保留句柄并重试</td><td style="text-align:left">4.2.1.5</td></tr></tbody></table></div>
+
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：createSession(cfg)（配额校验 → 握手装配 → 输出 sessionId）；destroySession(id)（状态机校验 → 清理 M-23 句柄 → 确认）；checkpoint(reason)（按 checkpointPolicy 触发：10s 虚拟时间或关键事件 → M-20 记录 + M-23 原子写）；recordEvent(ev)（时间戳化输入事件 UART 写/按键/GPIO 注入 → 确定性事件流 → M-20）；capabilityList(role)（按 role 返回能力面白名单，QEMU L1 降级）；会话状态机（CREATING/RUNNING/PAUSED/DESTROYING/DESTROYED）+ 配额准入（内存 256MB/会话数 ≥10）。<br>预留项（P1 演进承接，不属现实现）：服务端实例资源配额完整预算（256 MiB×≥10 会话 → 实例基线内存 ≥3 GiB、CPU ≥2 vCPU、快照落盘 IOPS 按 RPO ≤2s 口径，评审 P-14）；现场包/诊断包自动导出（envBundle 已内建，导出流程 P-22 后续承接）；多会话调度与优先级策略。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构（源文档表29）</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:14%"><col style="width:62%"></colgroup><thead><tr><th style="width:24%;text-align:center">数据结构</th><th style="width:14%;text-align:center">类型</th><th style="width:62%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">sessionCtx</td><td style="text-align:left">struct</td><td style="text-align:left">会话上下文：sessionId、role、种子、事件序列号、虚拟时间、能力位</td></tr><tr class="row1"><td data-label="数据结构" style="text-align:center">envBundle</td><td data-label="类型" style="text-align:left">struct</td><td data-label="定义与用途" style="text-align:left">版本/环境 bundle：产品版本、内核版本、浏览器/UA、协议版本、构建哈希（会话建立时记录，P-22）</td></tr><tr class="row0"><td data-label="数据结构" style="text-align:center">quota</td><td data-label="类型" style="text-align:left">struct</td><td data-label="定义与用途" style="text-align:left">内存上限（默认 256MB）与会话数准入上限（≥10）</td></tr><tr class="row1"><td data-label="数据结构" style="text-align:center">checkpointPolicy</td><td data-label="类型" style="text-align:left">struct</td><td data-label="定义与用途" style="text-align:left">触发间隔（10s 虚拟时间）与关键事件清单（断点命中/暂停/checkpoint 命令）；快照保留 ≥5</td></tr><tr class="row0"><td data-label="数据结构" style="text-align:center">capabilityWhitelist</td><td data-label="类型" style="text-align:left">Set&lt;cmd&gt;</td><td data-label="定义与用途" style="text-align:left">按 role 下发的命令能力面白名单（QEMU L1 子集降级）</td></tr></tbody></table></div>
+
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="body">sessionCtx 为每会话独立上下文（确定性状态持有：种子/事件序列/虚拟时间）；envBundle 在会话建立时一次性记录（不可变快照，随现场包/诊断包导出）；checkpointPolicy 定义检查点触发规则（10s 虚拟时间或关键事件清单）。字段定义如下：</p>
+<pre class="code"><code>// SessionState: 会话状态机（创建/运行/暂停/销毁/恢复；非法状态 → E_CTX-01）
+// 04-9：新增 RESTORING（恢复专用态：M-22 触发恢复后、恢复完成前会话驻留；恢复失败重试 ≤3 → 终止会话 + 上报）
+enum SessionState { CREATING, RUNNING, PAUSED, DESTROYING, DESTROYED, RESTORING };
+// sessionCtx: 会话上下文（每会话独立，确定性状态持有，表29）
+struct sessionCtx {
+  uint64_t  sessionId;      // 会话标识（createSession 输出）
+  Role      role;           // 角色（未知 role 装配 → E_CTX-01；枚举见下）
+  uint64_t  seed;           // 确定性种子（同种子 → 同结果，表6）
+  uint64_t  eventSeq;       // 输入事件序列号（recordEvent 单调递增）
+  uint64_t  timeVirt;       // 虚拟时间副本（04-2：权威源=M-12 虚拟时钟，会话侧只读副本，随推进事件更新，不双维护）
+  capBits   caps;           // 能力位（协商结果，QEMU L1 子集）
+  SessionState state;       // 状态机当前态
+};
+// Role 枚举（04-6，与 capabilityWhitelist role 集合对应）：admin（管理员，全量能力面）/ guest（访客，基础能力面）/ anonymous（匿名，只读观测）
+enum Role { admin, guest, anonymous };
+// SessionCfg: 创建会话输入配置（04-6 展开）
+struct SessionCfg {
+  uint64_t  seed;           // 确定性种子（表6）
+  uint64_t  clockHz;        // 虚拟时钟频率（M-12 时钟源）
+  uint64_t  quantumNs;      // 仿真时间量子（M-12，默认 1µs 可配置）
+  Role      role;           // 会话角色（装配校验：未知 role → E_CTX-01）
+  uint32_t  ramMB;          // 内存区间预算（memUsed 求和项，04-7）
+  uint32_t  bufMB;          // 缓冲/事件流预算（memUsed 求和项，04-7）
+};
+// InputEvent: 输入事件结构（04-6 展开；UART 写/按键/GPIO 注入，M-20 事件流接口）
+struct InputEvent {
+  uint8_t  kind;            // 0=UART 写（data/len）/ 1=按键（keyCode/down）/ 2=GPIO 注入（pin/level）
+  uint64_t tVirt;           // 时间戳化（虚拟时间，recordEvent 赋值）
+  uint64_t seq;             // 事件序列号（recordEvent 单调递增）
+  json     payload;         // 载荷（按 kind 的具体字段：UART data/按键 keyCode/GPIO pin+level）
+};
+// CheckpointReason: 检查点触发原因枚举（04-6 展开）
+enum CheckpointReason { TIME_INTERVAL, KEY_EVENT_BREAKPOINT, KEY_EVENT_PAUSE, CMD_CHECKPOINT };
+// envBundle: 版本/环境 bundle（会话建立时记录，P-22；随现场包/诊断包导出）
+struct envBundle {
+  string  productVer;       // 产品版本
+  string  kernelVer;        // 内核版本
+  string  browserUA;        // 浏览器/UA
+  uint8_t protoVer;         // 协议版本（与 M-05 negotiate 对齐）
+  string  buildHash;        // 构建哈希
+};
+// quota: 服务端形态会话配额（P-14）；超限 → E_CTX-04 拒绝新会话并告警（R11）
+struct quota { uint32_t memMB = 256; uint32_t maxSessions = 10; };
+// checkpointPolicy: 检查点触发策略（每 10s 虚拟时间或关键事件；RPO ≤2s 宿主时间；快照保留 ≥5）
+// 04-3 触发钩子：M-12 每量子/事件边界回调 m04OnTimeAdvance(tVirt) → 本策略判定；04-5 RPO 度量=宿主时间戳采样相邻检查点间隔
+struct checkpointPolicy {
+  uint64_t intervalVirtNs = 10e9;   // 触发间隔（10s 虚拟时间）
+  Set&lt;EventKind&gt; keyEvents;         // 关键事件清单（断点命中/暂停/checkpoint 命令）
+  uint32_t keep = 5;                // 快照保留份数（≥5，评审 R1）
+};
+// capabilityWhitelist: 按 role 下发的命令能力面白名单
+struct capabilityWhitelist { Map&lt;Role, Set&lt;cmd&gt;&gt; allow; };  // capabilityList(role) 查询；QEMU 仅 L1 子集
+// sessionTable: 会话表（并发隔离：每会话独立种子/事件序列/缓冲，会话间无共享可变状态）
+struct sessionTable { Map&lt;sessionId, sessionCtx&gt; sessions; quota q; };
+</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 缓存与增量语义</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:42%"><col style="width:26%"><col style="width:16%"></colgroup><thead><tr><th style="width:16%;text-align:center">机制</th><th style="width:42%;text-align:center">语义</th><th style="width:26%;text-align:center">实现通道</th><th style="width:16%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">会话状态机</td><td style="text-align:left">CREATING → RUNNING ⇄ PAUSED → DESTROYING → DESTROYED；非法迁移 → E_CTX-01</td><td style="text-align:left">sessionCtx.state + 迁移校验</td><td style="text-align:left">暂停/恢复受 M-08/M-09 控制（E_CTX-02 暂停态外调用）</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">并发隔离</td><td data-label="语义" style="text-align:left">每会话独立种子/事件序列/缓冲；会话间无共享可变状态</td><td data-label="实现通道" style="text-align:left">sessionTable 分区持有</td><td data-label="备注" style="text-align:left">≥10 并发会话隔离无串扰（表91）</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">确定性状态</td><td data-label="语义" style="text-align:left">种子/事件序列/虚拟时间随会话持有，不依赖宿主时钟</td><td data-label="实现通道" style="text-align:left">sessionCtx 字段</td><td data-label="备注" style="text-align:left">同种子同输入 → 同结果（表6）</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">检查点触发</td><td data-label="语义" style="text-align:left">每 10s 虚拟时间或关键事件落盘；RPO ≤2s；保留 ≥5</td><td data-label="实现通道" style="text-align:left">checkpointPolicy + M-20 记录 + M-23 原子写</td><td data-label="备注" style="text-align:left">触发钩子=M-12 每步回调（04-3）；RPO 度量=宿主时间戳采样（04-5）</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">恢复语义（04-1）</td><td data-label="语义" style="text-align:left">L3/self_iss → 最近检查点 + 稀疏输入重放（M-20 restore）；QEMU L1 → M-17 重启 + 事件重放</td><td data-label="实现通道" style="text-align:left">恢复分级路径</td><td data-label="备注" style="text-align:left">QEMU 无 M-20 快照数据源；会话状态随之重建（R1 对齐）</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">timeVirt 来源（04-2）</td><td data-label="语义" style="text-align:left">会话侧只读副本，权威源=M-12 虚拟时钟，随推进事件更新</td><td data-label="实现通道" style="text-align:left">m12OnTimeAdvance 回调更新 s.timeVirt</td><td data-label="备注" style="text-align:left">不双维护（防确定性破坏，表6）</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">能力面下发</td><td data-label="语义" style="text-align:left">capabilityWhitelist 按 role 查询，会话内缓存</td><td data-label="实现通道" style="text-align:left">capabilityList(role)</td><td data-label="备注" style="text-align:left">QEMU 后端 L1 子集降级</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">envBundle</td><td data-label="语义" style="text-align:left">会话建立时一次性记录，不可变</td><td data-label="实现通道" style="text-align:left">envBundle 字段</td><td data-label="备注" style="text-align:left">随现场包/诊断包导出（P-22）</td></tr></tbody></table></div>
+
+<h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+<p class="body">会话建立流：createSession(cfg) → 配额校验（超限 E_CTX-04 拒绝）→ 状态机 CREATING → M-07 建连 + M-05 negotiate（协议版本 + 能力位）→ 装配 sessionCtx + envBundle → RUNNING → 输出 sessionId。<br>运行期流：命令路由（M-05 dispatchCommand，能力面校验）→ 输入事件记录（recordEvent 时间戳化入确定性事件流，M-20）→ 检查点触发（M-12 每步回调判定：10s 虚拟时间或关键事件 → M-20 记录 + M-23 原子写，04-3）。<br>虚拟时间流（04-2）：M-12 虚拟时钟推进 → 每量子/事件边界回调 m04OnTimeAdvance(tVirt) → 更新 s.timeVirt（会话侧只读副本，不双维护）→ 触发 checkpointPolicy 判定。<br>恢复流（04-1 分级，与 M-17 v1.2 对齐）：L3/self_iss——崩溃/失控处置后（M-22 触发）→ 会话入 RESTORING → 最近检查点 + 稀疏输入事件序列重放（M-20 restore）→ 就绪后回 RUNNING（评审 R1）；QEMU（L1）——M-17 重启会话 + 输入事件重放（无 M-20 快照数据源）→ M-04 重建 sessionCtx/envBundle 回 RUNNING。</p>
+<h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 createSession(cfg) 创建会话</h3>
+<p class="body">createSession(cfg)：配额校验（会话数/内存，超限 E_CTX-04 拒绝新会话并告警 R11）→ 状态机 CREATING → 调 M-07 建连、M-05 协商（协议版本 + 能力位）→ 装配 sessionCtx + envBundle → RUNNING → 输出 sessionId。memUsed 口径（04-7）：创建时按配置预算求和（会话固定开销 + cfg.ramMB + cfg.bufMB），运行期按 sessionCtx 实际占用上限复核。伪代码如下：</p>
+<pre class="code"><code>// createSession: 创建会话并完成握手（4.2.1.3 表30）
+sessionId createSession(SessionCfg cfg) {
+  if (sessionTable.count() &gt;= quota.maxSessions)   // 配额校验：会话数超限
+    return E_CTX-04;                               // 拒绝新会话 + 告警（R11）
+  if (memUsed(cfg) &gt; quota.memMB) return E_CTX-04; // 配额校验：内存超限（默认 256MB，P-14）
+  // memUsed 口径（04-7）：创建时 = 会话固定开销 + cfg.ramMB + cfg.bufMB（配置预算求和）；
+  //   运行期 = 按 sessionCtx 实际占用上限复核（超限 → 强制降级/终止，6.2(1)）
+  if (!validRole(cfg.role)) return E_CTX-01;       // 未知 role 装配 → 非法状态
+  Session s = newCtx(sessionTable.nextId());       // 状态机 CREATING
+  s.state = CREATING; s.seed = cfg.seed;
+  m07Connect(s);                                   // M-07 建连（传输握手）
+  NegoteResult r = m05Negotiate(cfg.protoVer, cfg.caps); // M-05 协议/能力协商（QEMU L1 降级）
+  s.caps = r.result;                               // 能力位（降级明确）
+  s.envBundle = captureEnvBundle();                // 版本/环境 bundle（P-22，不可变）
+  s.timeVirt = 0; s.eventSeq = 0;
+  s.state = RUNNING;                               // 装配完成 → 运行
+  return s.sessionId;
+}</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 destroySession(id) 销毁会话</h3>
+<p class="body">destroySession(id)：会话不存在 → E_CTX-11（04-4）；状态机校验（已销毁/销毁中 → E_CTX-11）→ DESTROYING → 停止事件记录 → 清理 M-23 相关句柄（快照/日志归档）→ DESTROYED → 确认；销毁失败 → 回执携带状态（DESTROYING 保留重试）+ M-22 WARN 上报，异步重试路径不回 E_CTX-01（04-4）。伪代码如下：</p>
+<pre class="code"><code>// destroySession: 销毁会话并释放资源（4.2.1.3 表30）
+Result destroySession(sessionId id) {
+  Session s = sessionTable[id];
+  if (!s) return E_CTX-11;                          // 04-4：会话不存在（新码，一场景一码）
+  if (s.state == DESTROYING || s.state == DESTROYED) return E_CTX-11; // 已销毁/销毁中
+  s.state = DESTROYING;
+  stopEventRecording(s);                           // 停止 recordEvent 入流
+  if (!m23ReleaseHandles(s)) {                     // 清理 M-23 快照/日志句柄
+    m22Report(HMS_WARN, &quot;session_destroy_fail&quot;, s.id); // 04-4：销毁失败 → 保留句柄并重试（4.2.1.5）
+    return {status: DESTROYING, retry: true};     // 回执携带状态（DESTROYING 保留重试），不回 E_CTX-01
+  }
+  s.state = DESTROYED; sessionTable.erase(id);     // 释放会话资源
+  return {status: DESTROYED, ok: true};
+}</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 checkpoint(reason) 触发快照检查点</h3>
+<p class="body">checkpoint(reason)：按 checkpointPolicy 触发——每 10s 虚拟时间或关键事件（断点命中/暂停/checkpoint 命令）→ 调 M-20 记录 + M-23 原子写 → 输出检查点确认；快照保留 ≥5（评审 R1）；非安全检查点（中断中的写）由 M-20 丢弃中间态并回退最近检查点。触发钩子（04-3）：M-12 每量子/事件边界回调 m04OnTimeAdvance(tVirt) 完成判定与调用。伪代码如下：</p>
+<pre class="code"><code>// checkpoint: 触发快照检查点（4.2.1.3 表30；策略 = 10s 虚拟时间或关键事件）
+CheckpointAck checkpoint(CheckpointReason reason) {
+  if (!policy.shouldTrigger(reason, s.timeVirt))    // checkpointPolicy 判定：10s 虚拟时间或关键事件清单
+    return {skip, s.timeVirt};                      // 未到触发点（跳过）
+  m20Record(s.sessionId, s.timeVirt);               // M-20 记录：证据流 + 稀疏输入事件序列
+  m23AtomicWrite(snapshot, s.timeVirt);             // M-23 原子写落盘（宿主时间戳随写记录）
+  m23TrimKeep(policy.keep);                         // 快照保留 ≥5（评审 R1，丢弃最旧）
+  return {ack, s.timeVirt, hostTsn: m23LastTsn()};  // 检查点确认（携带宿主时间戳，RPO 采样用，04-5）
+}
+// 触发点：① 距上次检查点 ≥10s 虚拟时间；② 关键事件（断点命中/暂停/checkpoint 命令）
+// 触发钩子（04-3）：M-12 每步回调 m04OnTimeAdvance(tVirt) → shouldTrigger 判定 → 满足即调用本函数
+// 非安全检查点（中断中的写）：M-20 丢弃中间态 → 回退最近检查点（评审 C）
+// RPO 度量（04-5）：监控/恢复侧按相邻检查点宿主时间戳间隔采样（≤2s 达标），不做虚拟↔宿主换算</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 recordEvent(ev) 记录输入事件</h3>
+<p class="body">recordEvent(ev)：接收时间戳化输入事件（UART 写/按键/GPIO 注入，M-20 事件流接口）→ 附加会话上下文（sessionId + 单调 eventSeq + 当前虚拟时间）→ 入确定性事件流（按（虚拟时间, 插入序）稳定排序，表6）→ 调 M-20 记录。伪代码如下：</p>
+<pre class="code"><code>// recordEvent: 记录输入事件到确定性事件流（4.2.1.3 表30）
+void recordEvent(InputEvent ev) {
+  ev.sessionId = s.sessionId;                       // 会话归属（并发隔离）
+  ev.seq = s.eventSeq++;                            // 事件序列号（单调递增，确定性排序）
+  ev.tVirt = s.timeVirt;                            // 时间戳化（虚拟时间，不依赖宿主时钟）
+  m20RecordInput(ev);                               // M-20：入 eventStream（按 虚拟时间,插入序 稳定排序）
+  // 输入事件 = UART 写 / 按键 / GPIO 注入；不得绕过直接修改仿真状态（M-20 接口契约）
+}</code></pre>
+<h3 id="sec3-5" class="h-sub">3.5 capabilityList(role) 返回能力面白名单</h3>
+<p class="body">capabilityList(role)：按 role 查询 capabilityWhitelist 返回命令能力面白名单；ExecutionBackend 能力分级（L1/L2/L3）——自研 ISS 全量 L3，QEMU 仅 L1 子集（2.4 表6），协商降级由 M-05 negotiate 完成。伪代码如下：</p>
+<pre class="code"><code>// capabilityList: 返回能力面白名单（4.2.1.3 表30）
+Set&lt;cmd&gt; capabilityList(Role role) {
+  Set&lt;cmd&gt; allow = whitelist.allow[role];           // 按 role 下发能力面（capabilityWhitelist）
+  if (backendIsQEMU())                             // QEMU 后端：L1 子集降级（能力分级，表6）
+    allow = allow ∩ CAPS_L1;                       // 仅 L1 基础调试能力
+  return allow;                                    // 输出 Set&lt;cmd&gt;（M-05 dispatchCommand 校验依据）
+}
+// 能力分级：L1 基础调试；L2 = L1 + 指令钩子；L3 = L2 + snapshot/restore + 事件流检查点
+// 自研 ISS 全量 L3；QEMU 声明 L1 子集；前端按能力位协商降级（2.4 表6）</code></pre>
+<h3 id="sec3-6" class="h-sub">3.6 与真实调试器的差异对照表</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:14%"><col style="width:34%"><col style="width:38%"><col style="width:14%"></colgroup><thead><tr><th style="width:14%;text-align:center">维度</th><th style="width:34%;text-align:center">真实硬件调试器（GDB 会话）</th><th style="width:38%;text-align:center">本平台建模（M-04 会话管理器）</th><th style="width:14%;text-align:center">差异影响</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">会话生命周期</td><td style="text-align:left">调试会话随进程生命周期隐式存在，无显式状态机</td><td style="text-align:left">显式 createSession/destroySession + 状态机（CREATING/RUNNING/PAUSED/DESTROYING/DESTROYED）</td><td style="text-align:left">本平台配额准入 + 状态机校验（E_CTX-01/04）</td></tr><tr class="row1"><td data-label="维度" style="text-align:center">确定性</td><td data-label="实机调试器" style="text-align:left">GDB 无种子/事件序列概念，结果依赖宿主时序</td><td data-label="本平台建模" style="text-align:left">每会话种子 + 时间戳化事件序列 + 虚拟时间（表6 确定性约束）</td><td data-label="差异影响" style="text-align:left">同种子同输入 → 结果唯一（可复现、可对拍）</td></tr><tr class="row0"><td data-label="维度" style="text-align:center">检查点</td><td data-label="实机调试器" style="text-align:left">GDB core 文件手动生成（gcore）</td><td data-label="本平台建模" style="text-align:left">自动检查点：10s 虚拟时间或关键事件，RPO ≤2s，保留 ≥5（R1）</td><td data-label="差异影响" style="text-align:left">崩溃恢复 = 最近检查点 + 稀疏输入重放</td></tr><tr class="row1"><td data-label="维度" style="text-align:center">并发隔离</td><td data-label="实机调试器" style="text-align:left">多 GDB 进程各自独立（无统一配额）</td><td data-label="本平台建模" style="text-align:left">sessionTable 分区 + 服务端配额（256MB/会话、≥10 会话）</td><td data-label="差异影响" style="text-align:left">配额超限拒绝 + 告警（R11、P-14）</td></tr><tr class="row0"><td data-label="维度" style="text-align:center">环境信息</td><td data-label="实机调试器" style="text-align:left">GDB 版本单一，无会话级环境记录</td><td data-label="本平台建模" style="text-align:left">envBundle 多维记录（产品/内核/UA/协议/构建哈希，P-22）</td><td data-label="差异影响" style="text-align:left">现场包/诊断包导出支撑事后定位</td></tr></tbody></table></div>
+
+<h2 id="sec4" class="h-sec">4 关键函数（源文档表30）</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:30%"><col style="width:46%"></colgroup><thead><tr><th style="width:24%;text-align:center">函数</th><th style="width:30%;text-align:center">说明</th><th style="width:46%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">createSession(cfg)</td><td style="text-align:left">创建会话并完成握手</td><td style="text-align:left">输入：配置（种子/时钟/量子/role）；调用 M-07 建连、M-05 协商；输出：sessionId</td></tr><tr class="row1"><td style="text-align:center">destroySession(id)</td><td style="text-align:left">销毁会话并释放资源</td><td style="text-align:left">输出：确认；清理 M-23 相关句柄</td></tr><tr class="row0"><td style="text-align:center">checkpoint(reason)</td><td style="text-align:left">触发快照检查点</td><td style="text-align:left">调用 M-20 记录 + M-23 原子写；输出：检查点确认</td></tr><tr class="row1"><td style="text-align:center">recordEvent(ev)</td><td style="text-align:left">记录输入事件到确定性事件流</td><td style="text-align:left">输入：时间戳化输入事件（UART 写/按键/GPIO 注入）；调用 M-20</td></tr><tr class="row0"><td style="text-align:center">capabilityList(role)</td><td style="text-align:left">返回能力面白名单</td><td style="text-align:left">输出：Set&lt;cmd&gt;（QEMU 后端 L1 子集降级）</td></tr></tbody></table></div>
+
+<h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 会话生命周期流程（源 4.2.1.4 对齐）</h3>
+<p class="body">会话建立：配额校验 → 握手（协议版本 + 能力位，M-07/M-05）→ 装配工作台 → 运行期（命令路由 M-05 + 事件记录 M-20 + 检查点触发）→ 暂停/恢复（M-08/M-09）→ 销毁释放。服务端形态按配额准入（超限拒绝 + 告警 R11）。流程图如下：</p>
+<div class="flow-wrap"><svg class="flow" viewBox="0 0 980 470" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-04 会话生命周期状态机流程图">
+  <defs>
+    <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#2f5bd6"/>
+    </marker>
+  </defs>
+  <style>
+    .node { fill:#eff4ff; stroke:#2f5bd6; stroke-width:1.5; rx:8; }
+    .node-err { fill:#fef2f2; stroke:#dc2626; stroke-width:1.5; rx:8; }
+    .node-ok { fill:#ecfdf5; stroke:#059669; stroke-width:1.5; rx:8; }
+    .edge { stroke:#2f5bd6; stroke-width:1.4; fill:none; marker-end:url(#arr); }
+    .edge-err { stroke:#dc2626; stroke-width:1.4; fill:none; marker-end:url(#arr); }
+    .t { font-size:12.5px; fill:#111827; }
+    .t-s { font-size:11px; fill:#6b7280; }
+    .t-e { font-size:11px; fill:#dc2626; }
+  </style>
+
+  <rect class="node" x="20" y="30" width="190" height="52"/>
+  <text class="t" x="115" y="50" text-anchor="middle">创建请求 createSession(cfg)</text>
+  <text class="t-s" x="115" y="68" text-anchor="middle">配额校验：会话数/内存（P-14）</text>
+
+  <rect class="node-err" x="270" y="16" width="180" height="46"/>
+  <text class="t" x="360" y="36" text-anchor="middle">E_CTX-04 配额超限</text>
+  <text class="t-e" x="360" y="54" text-anchor="middle">拒绝新会话 + 告警（R11）</text>
+
+  <rect class="node" x="270" y="110" width="180" height="52"/>
+  <text class="t" x="360" y="130" text-anchor="middle">CREATING 握手装配</text>
+  <text class="t-s" x="360" y="148" text-anchor="middle">M-07 建连 + M-05 协商</text>
+
+  <rect class="node-ok" x="500" y="110" width="190" height="52"/>
+  <text class="t" x="595" y="130" text-anchor="middle">RUNNING 运行期</text>
+  <text class="t-s" x="595" y="148" text-anchor="middle">命令路由 + 事件记录 + 检查点</text>
+
+  <rect class="node" x="500" y="230" width="190" height="52"/>
+  <text class="t" x="595" y="250" text-anchor="middle">PAUSED 暂停态</text>
+  <text class="t-s" x="595" y="268" text-anchor="middle">M-08/M-09 控制（E_CTX-02）</text>
+
+  <rect class="node" x="730" y="230" width="190" height="52"/>
+  <text class="t" x="825" y="250" text-anchor="middle">DESTROYING 销毁中</text>
+  <text class="t-s" x="825" y="268" text-anchor="middle">清理 M-23 句柄（失败保留重试）</text>
+
+  <rect class="node-ok" x="730" y="360" width="190" height="52"/>
+  <text class="t" x="825" y="380" text-anchor="middle">DESTROYED 已销毁</text>
+  <text class="t-s" x="825" y="398" text-anchor="middle">释放资源 + 确认</text>
+
+  <rect class="node-err" x="270" y="360" width="180" height="52"/>
+  <text class="t" x="360" y="380" text-anchor="middle">非法状态 / 未知 role</text>
+  <text class="t-e" x="360" y="398" text-anchor="middle">E_CTX-01 + HMS 致命级</text>
+
+  <path class="edge" d="M210,56 L262,40"/>
+  <path class="edge" d="M210,62 L262,128"/>
+  <path class="edge" d="M450,136 L492,136"/>
+  <path class="edge" d="M595,162 L595,222"/>
+  <path class="edge" d="M690,256 L722,256"/>
+  <path class="edge" d="M825,282 L825,352"/>
+  <path class="edge-err" d="M360,132 L360,352"/>
+  <path class="edge" d="M210,72 L262,138"/>
+</svg></div>
+<p class="body">运行期说明：RUNNING 态内每 10s 虚拟时间或关键事件（断点命中/暂停/checkpoint 命令）触发 checkpoint（M-20 记录 + M-23 原子写）；PAUSED 态仅接受暂停态合法命令（单步/断点等，非暂停态调用 → E_CTX-02）；DESTROYING 清理失败保留句柄并重试（M-22 WARN）。</p>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:22%"><col style="width:56%"><col style="width:22%"></colgroup><thead><tr><th style="width:22%;text-align:center">协作模块</th><th style="width:56%;text-align:center">协作内容</th><th style="width:22%;text-align:center">触发时机</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-05（命令路由）</td><td style="text-align:left">协议/能力协商（negotiate）+ 能力面校验（capabilityList 白名单）</td><td style="text-align:left">会话建立握手 / 命令路由时</td></tr><tr class="row1"><td data-label="协作模块" style="text-align:center">M-07（传输适配器）</td><td data-label="协作内容" style="text-align:left">建连与消息承载（WASM postMessage / WebSocket）</td><td data-label="触发时机" style="text-align:left">createSession 建连时</td></tr><tr class="row0"><td data-label="协作模块" style="text-align:center">M-20（快照/事件流）</td><td data-label="协作内容" style="text-align:left">检查点记录（m20Record）+ 输入事件记录（recordInput）</td><td data-label="触发时机" style="text-align:left">checkpoint / recordEvent 时</td></tr><tr class="row1"><td data-label="协作模块" style="text-align:center">M-23（DataStore）</td><td data-label="协作内容" style="text-align:left">快照原子写 + 句柄清理（m23AtomicWrite/m23ReleaseHandles）</td><td data-label="触发时机" style="text-align:left">checkpoint / destroySession 时</td></tr><tr class="row0"><td data-label="协作模块" style="text-align:center">M-22（HMS）</td><td data-label="协作内容" style="text-align:left">配额告警（R11）、状态机非法致命级上报、销毁失败 WARN、恢复触发</td><td data-label="触发时机" style="text-align:left">配额超限/状态非法/销毁失败/崩溃恢复时</td></tr><tr class="row1"><td data-label="协作模块" style="text-align:center">M-12（事件驱动引擎）</td><td data-label="协作内容" style="text-align:left">虚拟时钟推进回调 m04OnTimeAdvance(tVirt) → timeVirt 副本更新 + 检查点判定（04-2/04-3）</td><td data-label="触发时机" style="text-align:left">每量子/事件边界</td></tr><tr class="row0"><td data-label="协作模块" style="text-align:center">M-08/M-09（断点/单步）</td><td data-label="协作内容" style="text-align:left">暂停/恢复控制（onHit → 暂停 → checkpoint 关键事件）</td><td data-label="触发时机" style="text-align:left">断点命中/单步时</td></tr></tbody></table></div>
+
+<h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置（E_CTX 族主属方）</h3>
+<p class="body">M-04 为 E_CTX 错误码族主属方之一（源文档 3.4 表16），会话路径错误码统一收敛于此（一场景一码）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:30%"><col style="width:42%"><col style="width:28%"></colgroup><thead><tr><th style="width:30%;text-align:center">错误码 / 场景</th><th style="width:42%;text-align:center">触发条件</th><th style="width:28%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">E_CTX-01 非法会话状态</td><td style="text-align:left">状态机非法迁移、未知 role 装配</td><td style="text-align:left">拒绝执行 + 上报 HMS（致命级）</td></tr><tr class="row1"><td data-label="错误码 / 场景" style="text-align:center">E_CTX-02 暂停态外调用</td><td data-label="触发条件" style="text-align:left">单步/断点等在非暂停态执行</td><td data-label="处置" style="text-align:left">拒绝 + 引导前端进入暂停态</td></tr><tr class="row0"><td data-label="错误码 / 场景" style="text-align:center">E_CTX-04 配额超限</td><td data-label="触发条件" style="text-align:left">会话数 ≥10 或内存超 256MB（服务端形态）</td><td data-label="处置" style="text-align:left">拒绝新会话 + 告警（R11、P-14）</td></tr><tr class="row1"><td data-label="错误码 / 场景" style="text-align:center">E_CTX-11 会话不存在（04-4）</td><td data-label="触发条件" style="text-align:left">destroySession/状态查询对已不存在会话调用</td><td data-label="处置" style="text-align:left">拒绝 + 返回不存在（一场景一码，源表16 未占用）</td></tr><tr class="row0"><td data-label="错误码 / 场景" style="text-align:center">销毁失败</td><td data-label="触发条件" style="text-align:left">M-23 句柄清理失败</td><td data-label="处置" style="text-align:left">回执携带状态（DESTROYING 保留重试）+ M-22 WARN，异步重试（04-4 不回 E_CTX-01）</td></tr></tbody></table></div>
+
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）配额超限：会话数 ≥10 或内存超 256MB → E_CTX-04 拒绝新会话并告警（R11）；memUsed 口径（04-7）＝创建时配置预算求和（会话固定开销 + cfg.ramMB + cfg.bufMB），运行期按 sessionCtx 实际占用上限复核（超限 → 强制降级/终止 + M-22 上报）；服务端实例基线预算（P-14：256 MiB×≥10 会话 → 实例内存 ≥3 GiB、CPU ≥2 vCPU）为 P1 立项细化项。</p>
+<p class="body">（2）状态机非法：非法迁移/未知 role 装配 → E_CTX-01 + HMS 致命级上报（4.2.1.5）。</p>
+<p class="body">（3）销毁失败：M-23 句柄清理失败 → 回执携带状态（DESTROYING 保留重试）+ M-22 WARN 上报（04-4，不回 E_CTX-01）；重试成功才进 DESTROYED。</p>
+<p class="body">（4）检查点失败：落盘失败 → 跳过本检查点，下个触发点（10s 虚拟时间或关键事件）重试；非安全检查点（中断中的写）由 M-20 丢弃中间态、回退最近检查点（评审 C）。</p>
+<p class="body">（5）能力面降级：QEMU 后端仅 L1 子集 → capabilityList 输出 L1 白名单，协商降级由 M-05 negotiate 完成（E_CTX-03 语义联动）；前端按能力位降级提示。</p>
+<p class="body">（6）并发隔离：每会话独立种子/事件序列/缓冲，会话间无共享可变状态；隔离缺陷按确定性破坏处理（重放结果不一致 → 定位会话级污染）。</p>
+<p class="body">（7）恢复期间状态（04-9）：M-22 触发恢复后、恢复完成前会话驻留 RESTORING（恢复专用态）；恢复失败 → 重试 ≤3 次 → 终止会话 + HMS 上报（QEMU L1 同理：重启失败重试 ≤3 → 终止）。</p>
+<p class="body">（8）RPO 度量（04-5）：以宿主时间戳直接采样相邻检查点间隔（checkpoint 落盘记录宿主时间，监控/恢复侧比对 ≤2s 达标），不做虚拟↔宿主换算。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表91（M-04 行）：测试要点 = 会话与配额；关键用例 = ≥10 并发会话隔离、配额超限拒绝；通过准则 = 隔离无串扰、拒绝正确。展开用例表如下（核心模块覆盖率 ≥70%，源文档 7.3 表92）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:42%"><col style="width:34%"></colgroup><thead><tr><th style="width:24%;text-align:center">用例</th><th style="width:42%;text-align:center">输入/步骤</th><th style="width:34%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（源 2.5/7.1 对齐）</td><td style="text-align:left">按 9.1.1 端口契约表逐项校验 createSession/destroySession/checkpoint/recordEvent/capabilityList 的接口签名、输入校验、输出结构与错误码；替代实现接入前必须同端口契约测试全绿</td><td style="text-align:left">契约测试全绿；契约变更须同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">并发会话隔离（表91）</td><td data-label="输入/步骤" style="text-align:left">并发创建 ≥10 会话（不同种子），各会话独立运行事件流</td><td data-label="通过准则" style="text-align:left">会话间无串扰；各会话事件序列/虚拟时间独立正确</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">配额超限拒绝（表91）</td><td data-label="输入/步骤" style="text-align:left">创建第 11 个会话 / 内存超 256MB 配置</td><td data-label="通过准则" style="text-align:left">E_CTX-04 拒绝新会话 + 告警（R11）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">会话状态机非法</td><td data-label="输入/步骤" style="text-align:left">在 DESTROYED 态调用 checkpoint / 未知 role 装配</td><td data-label="通过准则" style="text-align:left">E_CTX-01 + HMS 致命级上报</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">销毁失败重试</td><td data-label="输入/步骤" style="text-align:left">注入 M-23 句柄清理失败后销毁</td><td data-label="通过准则" style="text-align:left">保留句柄并重试；重试成功 → DESTROYED</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">检查点触发（10s 虚拟时间）</td><td data-label="输入/步骤" style="text-align:left">推进 10s 虚拟时间（无关键事件）</td><td data-label="通过准则" style="text-align:left">自动触发 checkpoint（M-20 记录 + M-23 原子写）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">检查点触发（关键事件）</td><td data-label="输入/步骤" style="text-align:left">断点命中/暂停事件</td><td data-label="通过准则" style="text-align:left">立即触发 checkpoint；快照保留 ≥5（R1）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">确定性重放（表6）</td><td data-label="输入/步骤" style="text-align:left">同一种子 + 同一输入事件序列，两次运行</td><td data-label="通过准则" style="text-align:left">结果唯一（虚拟时间/事件序列排序一致）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">检查点落盘失败重试（04-8）</td><td data-label="输入/步骤" style="text-align:left">注入 M-23 原子写失败后推进 10s 虚拟时间</td><td data-label="通过准则" style="text-align:left">跳过本检查点 + 下个触发点重试成功（关键事件路径同样覆盖）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">崩溃恢复-两后端路径（04-8）</td><td data-label="输入/步骤" style="text-align:left">self_iss L3：注入崩溃 → M-22 触发；QEMU L1：注入进程退出</td><td data-label="通过准则" style="text-align:left">L3：入 RESTORING → M-20 restore 最近检查点 + 重放 → 回 RUNNING；QEMU：M-17 重启 + 事件重放 → 重建 sessionCtx/envBundle 回 RUNNING</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">能力面下发/降级</td><td data-label="输入/步骤" style="text-align:left">capabilityList(admin) / capabilityList(guest)；QEMU 后端</td><td data-label="通过准则" style="text-align:left">白名单按 role 正确；QEMU 仅 L1 子集</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">envBundle 记录（P-22）</td><td data-label="输入/步骤" style="text-align:left">会话建立后读取 envBundle</td><td data-label="通过准则" style="text-align:left">产品/内核/UA/协议/构建哈希五项完整；随现场包导出</td></tr></tbody></table></div>
+
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）状态机驱动：会话迁移集中在校验函数（唯一状态迁移入口），新增状态只扩展枚举与迁移表，不散改各函数。</p>
+<p class="body">（2）策略可配：checkpointPolicy（间隔/关键事件清单/保留份数）与 quota（内存/会话数）为结构化配置，调整不涉核心逻辑。</p>
+<p class="body">（3）确定性可复现：种子 + 事件序列 + envBundle 全量记录，现场包导出后可离线重放（P-22/R1），问题可回放定位。</p>
+<p class="body">（4）隔离测试：并发会话用例纳入确定性夹具（各会话独立断言，隔离无串扰回归）。</p>
+<p class="body">（5）CI 门禁：核心模块单测覆盖率 ≥70%（估算基线，源文档 7.3 表92）；会话状态机/配额用例纳入契约测试。</p>
+<p class="body">（6）契约层可替换（源 2.5 对齐）：对外 driving 端口收敛到 9.1.1 端口契约，替代实现遵守同端口契约并通过契约测试即可接入。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-04 责任：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:14%"><col style="width:42%"><col style="width:44%"></colgroup><thead><tr><th style="width:14%;text-align:center">质量属性</th><th style="width:42%;text-align:center">目标（估算基线）</th><th style="width:44%;text-align:center">M-04 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">确定性</td><td style="text-align:left">同种子同输入 → 同结果；虚拟时间不依赖宿主时钟（表6）</td><td style="text-align:left">种子/事件序列/虚拟时间随 sessionCtx 持有；recordEvent 稳定排序</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">可靠性</td><td data-label="目标" style="text-align:left">检查点 RPO ≤2s（宿主时间口径）；快照保留 ≥5（R1）；恢复分级（04-1）</td><td data-label="M-04 落实" style="text-align:left">checkpointPolicy 10s 虚拟时间或关键事件触发（钩子=M-12 回调，04-3）；RPO 度量=宿主时间戳采样检查点间隔（04-5）；L3/self_iss 走 M-20 检查点+重放，QEMU L1 走 M-17 重启+重放</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">韧性</td><td data-label="目标" style="text-align:left">故障检测 → 分级 → 处置（NFR-08）</td><td data-label="M-04 落实" style="text-align:left">配额超限拒绝 + 告警（R11）；状态机非法 HMS 致命级；销毁失败保留重试</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">性能</td><td data-label="目标" style="text-align:left">会话建立握手 ≤响应时限（NFR-02）</td><td data-label="M-04 落实" style="text-align:left">createSession 配额校验 + M-07/M-05 握手，无阻塞环节</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">可扩展性</td><td data-label="目标" style="text-align:left">协议扩展点（表93）</td><td data-label="M-04 落实" style="text-align:left">envBundle 多版本记录（P-22）；能力面按 role 白名单下发</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">合规</td><td data-label="目标" style="text-align:left">业务模块 → 模块组件单向依赖（4.7 表86）</td><td data-label="M-04 落实" style="text-align:left">只经 M-05/M-20/M-23/M-22 交互，不自行实现日志/告警/持久化</td></tr></tbody></table></div>
+
+<h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:34%"><col style="width:40%"></colgroup><thead><tr><th style="width:26%;text-align:center">依赖方</th><th style="width:34%;text-align:center">被依赖方</th><th style="width:40%;text-align:center">依赖内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-04（会话管理器）</td><td style="text-align:left">M-05（命令路由与事件分发）</td><td style="text-align:left">协议/能力协商（negotiate）+ 能力面校验</td></tr><tr class="row1"><td style="text-align:center">M-04</td><td style="text-align:left">M-07（传输适配器）</td><td style="text-align:left">建连与消息承载</td></tr><tr class="row0"><td style="text-align:center">M-04</td><td style="text-align:left">M-20（快照/事件流）</td><td style="text-align:left">检查点记录 + 输入事件记录</td></tr><tr class="row1"><td style="text-align:center">M-04</td><td style="text-align:left">M-23（DataStore）</td><td style="text-align:left">快照原子写 + 句柄清理</td></tr><tr class="row0"><td style="text-align:center">M-04</td><td style="text-align:left">M-22（HMS）</td><td style="text-align:left">配额告警/状态非法/销毁失败上报</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表31 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层，本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现遵守同端口契约并通过契约测试（7.1）即可接入：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:26%"><col style="width:14%"><col style="width:60%"></colgroup><thead><tr><th style="width:26%;text-align:center">端口 / 服务</th><th style="width:14%;text-align:center">方向</th><th style="width:60%;text-align:center">契约（输入 → 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:left">createSession(cfg)</td><td style="text-align:center">提供（driving）</td><td style="text-align:left">输入：配置（种子/时钟/量子/role）；配额校验（超限 E_CTX-04 拒绝 + 告警 R11）；调用 M-07 建连、M-05 协商；输出：sessionId</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">destroySession(id)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">状态机校验（非法 E_CTX-01）；输出：确认；清理 M-23 相关句柄（失败保留重试）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">checkpoint(reason)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">按 checkpointPolicy 触发（10s 虚拟时间或关键事件；钩子=M-12 每步回调 m04OnTimeAdvance，04-3）；调用 M-20 记录 + M-23 原子写（宿主时间戳随写记录，RPO 采样，04-5）；输出：检查点确认；恢复分级（04-1）：L3/self_iss 走 M-20 restore，QEMU L1 走 M-17 重启+重放</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">recordEvent(ev)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输入：时间戳化输入事件（UART 写/按键/GPIO 注入）；附加 sessionId/seq/虚拟时间；调用 M-20</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">capabilityList(role)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输出：Set&lt;cmd&gt;（按 role 白名单；QEMU 后端 L1 子集降级）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-05/M-07</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">通信：协议/能力协商 + 建连承载</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-20</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">记录与触发：检查点记录 + 输入事件记录</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-23</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">持久化：快照原子写 + 句柄清理</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-22</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">异常上报：配额告警/状态非法/销毁失败</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<p class="body">会话创建成功 → log(INFO, "SESS", "session create", "E_OK")（含 sessionId/role/种子/能力位）；配额超限 → log(WARN, "SESS", "quota exceed", "E_CTX-04")；状态机非法 → log(ERROR, "SESS", "state invalid", "E_CTX-01")（HMS 致命级联动）；会话不存在 → log(WARN, "SESS", "session not found", "E_CTX-11")；销毁失败 → log(WARN, "SESS", "destroy fail", "DESTROYING-retry")（保留重试，04-4）；检查点落盘 → log(INFO, "SESS", "checkpoint", "E_OK")（含虚拟时间/宿主时间戳/保留份数）；恢复流程 → log(INFO, "SESS", "restore", "E_OK")（含后端分级路径 L3/QEMU 与恢复结果）。会话关联字段（sessionId）随 M-21 双时间戳统一记录，产品/嵌入式工作台不可见（角色边界），仅管理员通道可查。</p>
+</main><footer style="margin:30px 0 20px;padding-top:14px;border-top:1px solid var(--line);color:#6b7280;font-size:12px;text-align:center;">M-04 会话管理器 模块详细设计 · v1.0 · 源设计《RISC-V仿真平台模块设计说明书》4.2.1 节</footer></div></body>
+</html>

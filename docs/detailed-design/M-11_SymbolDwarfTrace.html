@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-11 符号表/DWARF、反汇编·源码联动与 trace 记录/导出 模块详细设计</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%231e3a8a'/%3E%3Ctext x='12' y='17' font-size='13' text-anchor='middle' fill='%23ffffff' font-family='sans-serif' font-weight='bold'%3ES%3C/text%3E%3C/svg%3E">
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15px; font-weight:700; color:#374151; margin:18px 0 8px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { margin:0 0 10px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  margin:10px 0 16px; white-space:pre; }
+code { font-family:inherit; }
+.nav-toggle { margin:10px 0 4px; }
+.nav-box { background:var(--head-bg); border:1px solid var(--line); border-radius:6px;
+  padding:10px 16px; font-size:13.5px; line-height:1.9; display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0 24px; }
+.nav-box a { color:var(--brand-2); text-decoration:none; }
+.nav-box a:hover { text-decoration:underline; }
+.flow-wrap { overflow-x:auto; margin:12px 0 16px; }
+.flow { min-width:640px; width:100%; height:auto; }
+@media (max-width:767px) {
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media (max-width:560px) {
+  .doc-title { font-size:21px; }
+  .h-sec { font-size:19px; }
+  .doc-table, .doc-table th, .doc-table td { font-size:12.5px; }
+  .code { font-size:11.5px; white-space:pre-wrap; word-break:break-word; }
+  .nav-box { grid-template-columns:1fr; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><h1 class="doc-title">M-11 符号表/DWARF、反汇编·源码联动与 trace 记录/导出 模块详细设计</h1><p class="subtitle">RISC-V仿真平台 模块详细设计系列 - 对应《模块设计说明书》4.3.4节</p><p class="version">HTML版 v1.0 (2026-10-14) - 源设计《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版，2026-10-13更新)</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版新增2.5平台共享契约与各模块端口契约表)</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.3.4（③ 调试服务层-符号表/DWARF、反汇编·源码联动与 trace 记录/导出）：数据描述→源文档表47、关键函数表48、端口契约表49；处理流程=4.3.4.4</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">FR-05（反汇编序列、源码高亮）；FR-14（指令/访存 trace 导出 CSV/VCD/JSON）；V-12（反汇编区 PC 高亮）</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">M-06 符号表/行表（loadELF 下发）；M-17 readMem/onInstruction；M-18 访存事件流 attachTrace</td></tr><tr class="row0"><td style="text-align:center">MVP状态</td><td style="text-align:left">PO主承担模块（MVP必需：反汇编 + 源码联动 + trace 记录/导出）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；依赖方向（2.1表5：调试服务→M-06/M-17/M-18/M-05）；评审 P-07（DWARF 子组件拆分）、R9（trace 降速提示）、T1（写失败降级）、L3/P-12（M-06 输入上限）</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.0（2026-10-14 初版）：按 M-13 v1.1 标准 9 章结构；内建 9.1.1 端口契约（源表49 对齐）+ CH7 契约测试 + CH8 模块即积木可替换；表号/图号引用源文档契约层版实际编号（表47/48/49、表16、表86、表91/93）；访存失败按宿主侧语义（对齐 M-10 10-5）；自修改代码缓存失效（对齐 M-13 13-6）；trace 环形溢出丢最旧（对齐 M-21 语义）；双子组件拆分（评审 P-07）；trace 性能开关（评审 R9/T1）；输入上限（评审 L3/P-12）。v1.1（2026-10-14 评审修订）：逐条落实 M-11 评审 11-1~11-10——11-1 取指先读 2 字节按低 2 位判宽度（≠0b11 压缩，code 取 16 位原码），4 字节指令再补读；11-2 traceBuffer 满时写旧 head 再前移（每次仅丢一条最旧）；11-3 disasm 提前结束 err 语义明确（部分序列 + 长度&lt;count 即截断）；11-4 resolveLine 未命中返回 {NULL, 0xFFFFFFFF} 区分降级；11-5 解码表声明独立表 + 与 M-13 一致性门禁；11-6 定义 TraceEvent 结构（kind 来源：M-17 指令钩子 vs M-18 dir 映射）；11-7 定义 ExportHandle 与续导协议（offset 条目偏移、nextOffset 续传、经 M-05 通道）；11-8 disasmCache 失效通道挂 M-18 访存写事件；11-9 补三组用例；11-10 声明 M-11 侧防御校验（count 上限/行表二次校验）</td></tr><tr class="row1"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-14（v1.1 评审修订）</td></tr></tbody></table></div></header><nav class="nav-toggle"><details open><summary>目录</summary><div class="nav-box"><a href="#sec1">1 功能概述</a><a href="#sec1-1">1.1 模块定位</a><a href="#sec1-2">1.2 需求与约束</a><a href="#sec1-3">1.3 MVP 范围与预留</a><a href="#sec2">2 数据描述</a><a href="#sec2-1">2.1 核心数据结构</a><a href="#sec2-1-1">2.1.1 复杂结构字段定义</a><a href="#sec2-2">2.2 缓存与增量语义</a><a href="#sec2-3">2.3 数据流说明</a><a href="#sec3">3 实现设计</a><a href="#sec3-1">3.1 disasm 反汇编序列</a><a href="#sec3-2">3.2 resolveLine 地址→行</a><a href="#sec3-3">3.3 recordTrace/exportTrace</a><a href="#sec3-4">3.4 与真实调试器的差异对照表</a><a href="#sec4">4 关键函数</a><a href="#sec5">5 处理流程</a><a href="#sec5-1">5.1 反汇编联动与 trace 导出流程</a><a href="#sec5-2">5.2 与相邻模块的协作说明</a><a href="#sec6">6 异常处理</a><a href="#sec6-1">6.1 错误码与处置</a><a href="#sec6-2">6.2 边界与降级</a><a href="#sec7">7 测试设计与可维护性</a><a href="#sec7-1">7.1 测试要点与关键用例</a><a href="#sec7-2">7.2 可维护性手段</a><a href="#sec8">8 质量属性落实</a><a href="#sec9">9 接口依赖</a><a href="#sec9-1">9.1 依赖关系</a><a href="#sec9-1-1">9.1.1 端口契约</a><a href="#sec9-2">9.2 日志对接</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-11 符号表/DWARF、反汇编·源码联动与 trace 记录/导出（4.3.4）：消费 M-06 的符号表与行映射，将 text 段反汇编为（地址, 机器码, 助记符）序列；无 DWARF 时反汇编区独立可用（PC 高亮，V-12），含 DWARF 时单步联动源码高亮。指令/访存 trace 记录（可整体关闭的性能开关）与 CSV/VCD/JSON 导出（FR-10/14）。内部拆分为两个子组件控制复杂度（对齐架构 WBS：DWARF 解析为 10 人日最大风险项，评审 P-07）：① DWARF 解析子组件（行表解析、地址→行查询、源码路径归一）；② 反汇编渲染子组件（助记符渲染、PC 高亮、源码联动 UI）。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:16%"><col style="width:62%"><col style="width:22%"></colgroup><thead><tr><th style="width:16%;text-align:center">类别</th><th style="width:62%;text-align:center">约束内容</th><th style="width:22%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">功能</td><td style="text-align:left">反汇编 text 段（地址, 机器码, 助记符）序列；PC 高亮（V-12）；源码联动高亮</td><td style="text-align:left">4.3.4.1、FR-05</td></tr><tr class="row1"><td style="text-align:center">功能</td><td style="text-align:left">指令/访存 trace 记录（可整体关闭）与 CSV/VCD/JSON 导出</td><td style="text-align:left">4.3.4.1、FR-14</td></tr><tr class="row0"><td style="text-align:center">正确性</td><td style="text-align:left">行表解析/地址→行查询/源码路径归一（DWARF 子组件）</td><td style="text-align:left">4.3.4.1、评审 P-07</td></tr><tr class="row1"><td style="text-align:center">状态约束</td><td style="text-align:left">无 DWARF → 降级仅反汇编 + 符号表（独立可用）</td><td style="text-align:left">4.3.4.5</td></tr><tr class="row0"><td style="text-align:center">性能</td><td style="text-align:left">命令 ≤500ms、刷新 ≤200ms（估算基线，表93）；trace 开启明确降速提示（评审 R9）</td><td style="text-align:left">8 章表93、4.3.4.5</td></tr><tr class="row1"><td style="text-align:center">输入上限</td><td style="text-align:left">符号表 ≤10⁵ 条、DWARF 行表 ≤2×10⁵ 条、解析递归深度 ≤64（M-06 上限，超限拒绝并提示）</td><td style="text-align:left">评审 L3/P-12</td></tr><tr class="row0"><td style="text-align:center">角色边界</td><td style="text-align:left">反汇编/源码联动/trace 仅调试角色会话可用；导出经命令协议（产品/嵌入式工作台只读消费）</td><td style="text-align:left">2.4 表6</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：disasm(addr, count)（反汇编序列 + disasmCache 缓存）、resolveLine(addr)（地址→行，无 DWARF 返回空）、recordTrace(ev)（指令/访存 trace，可整体关闭）、exportTrace(fmt, filter)（CSV/VCD/JSON 分块导出，大文件可续导）、双子组件（DWARF 解析/反汇编渲染）。<br>预留项（P1/P2 演进承接，不属现实现）：JSON 导出格式扩展（P2，schema 版本化）；源码路径归一缓存（P2，多 ELF 会话复用）；trace 压缩/持久化（P2，转 IndexedDB spool，对齐 M-19 长回看方案）；符号化读写联动（P1，符号名→地址解析，配合 M-10）。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构（源文档表47）</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:22%"><col style="width:18%"><col style="width:60%"></colgroup><thead><tr><th style="width:22%;text-align:center">数据结构</th><th style="width:18%;text-align:center">类型</th><th style="width:60%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">disasmCache</td><td style="text-align:center">Map&lt;addr, disasmEntry&gt;</td><td style="text-align:left">反汇编缓存（地址, 机器码, 助记符）；命中直返，自修改代码失效对应地址</td></tr><tr class="row1"><td style="text-align:center">traceBuffer</td><td style="text-align:center">ring</td><td style="text-align:left">指令/访存 trace 环形缓冲（可整体关闭；溢出丢最旧 + 计数）</td></tr><tr class="row0"><td style="text-align:center">exportFormat</td><td style="text-align:center">enum</td><td style="text-align:left">CSV / VCD / JSON（导出格式枚举，非法值拒绝）</td></tr><tr class="row1"><td style="text-align:center">dwarfSub</td><td style="text-align:center">subcomponent</td><td style="text-align:left">DWARF 解析子组件：行表解析/地址查询/路径归一（评审 P-07 拆分）</td></tr><tr class="row0"><td style="text-align:center">disasmSub</td><td style="text-align:center">subcomponent</td><td style="text-align:left">反汇编渲染子组件：助记符渲染/PC 高亮/源码联动 UI（评审 P-07 拆分）</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="body">disasmCache 按地址索引反汇编条目（对齐 M-13 13-6：写内存失效对应 pc，自修改代码不命中陈旧解码）；traceBuffer 为环形缓冲（对齐 M-21 溢出丢最旧语义）；exportFormat 为导出格式枚举。字段定义如下：</p>
+<pre class="code"><code>// disasmEntry: 反汇编缓存条目（表47；缓存失效键 = 指令地址）
+struct disasmEntry {
+  uint32_t addr;          // 指令地址
+  uint32_t code;          // 机器码（16/32 位原码，压缩指令保留原码，对齐 M-13 13-1）
+  char     mnemonic[32];  // 助记符（内置 RV32IMC opcode→助记符映射表渲染）
+  uint8_t  width;         // 指令宽度：2（压缩）/ 4（标准）
+};
+// traceBuffer: 指令/访存 trace 环形缓冲（表47；可整体关闭性能开关）
+struct traceBuffer {
+  TraceEntry buf[T_CAP];  // 定长环形缓冲（默认 T_CAP=10⁵ 条目，估算基线实现后实测校准）
+  uint32_t   head;        // 写游标（满时新条目写旧 head 位置后再前移，11-2：每次仅丢一条最旧）
+  uint32_t   count;       // 当前条目数
+  uint32_t   dropped;     // 溢出丢弃计数（只计数不告警风暴）
+  uint8_t    enabled;     // 性能开关：0=整体关闭（零开销），1=开启（R9 降速提示）
+};
+// TraceEntry: trace 条目（指令/访存，FR-14）
+struct TraceEntry {
+  uint64_t time_virt;     // 虚拟时间（M-12 权威时钟，确定性可重放）
+  uint32_t addr;          // 指令地址或访存地址
+  uint8_t  kind;          // 0=指令执行 / 1=访存读 / 2=访存写
+  uint32_t data;          // 指令机器码或访存值
+  uint8_t  width;         // 访存宽度（指令条目=0）
+};
+// TraceEvent: trace 输入事件（11-6：kind 来源与映射规则）
+//   kind=0 指令执行：来自 M-17 onInstruction 钩子（data=指令机器码，width=0）
+//   kind=1 访存读 / kind=2 访存写：来自 M-18 访存事件流 attachTrace 上报 {t, addr, dir, width}
+//   dir=0 映射 kind=1（读）、dir=1 映射 kind=2（写）
+struct TraceEvent {
+  uint64_t time_virt;     // 虚拟时间（M-12 权威时钟，确定性可重放）
+  uint32_t addr;          // 指令地址或访存地址
+  uint8_t  kind;          // 0=指令 / 1=访存读 / 2=访存写（映射规则见上）
+  uint32_t data;          // 指令机器码或访存值
+  uint8_t  width;         // 访存宽度（指令条目=0）
+};
+// LineRef: 地址→行查询结果（表48；区分降级与未命中，11-4）
+//   无 DWARF（降级）→ {file:NULL, line:0}
+//   行表查询未命中       → {file:NULL, line:0xFFFFFFFF}
+struct LineRef { char* file; uint32_t line; };
+// ExportHandle: 分块导出句柄（11-7 续导协议；offset 单位=条目数）
+struct ExportHandle {
+  uint64_t offset;        // 本块起点（条目偏移）
+  uint64_t nextOffset;    // 下一块起点（调用方下次续传的 offset 参数）
+  uint64_t total;         // 筛选命中总条目数
+  uint64_t bytes;         // 本块序列化字节数
+};
+// exportFormat: enum { CSV=0, VCD=1, JSON=2 }</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 缓存与增量语义</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:38%"><col style="width:26%"><col style="width:20%"></colgroup><thead><tr><th style="width:16%;text-align:center">机制</th><th style="width:38%;text-align:center">语义</th><th style="width:26%;text-align:center">实现通道</th><th style="width:20%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">反汇编缓存</td><td style="text-align:left">disasmCache 按 addr 命中直返；写内存失效对应地址</td><td style="text-align:left">M-18 访存写事件（kind=2）失效 pc（对齐 M-13 13-6）</td><td style="text-align:left">失效通道=访存写事件（11-8）；M-10 writeMem 通知为可选路径</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">trace 环形</td><td data-label="语义" style="text-align:left">溢出丢最旧（每次仅丢一条）+ dropped 计数</td><td data-label="实现通道" style="text-align:left">满时写旧 head 位置再前移（11-2）</td><td data-label="备注" style="text-align:left">对齐 M-21 溢出限频语义</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">性能开关</td><td data-label="语义" style="text-align:left">enabled=0 整体关闭（零开销）；开启时降速提示</td><td data-label="实现通道" style="text-align:left">traceBuffer.enabled</td><td data-label="备注" style="text-align:left">退出调试态可关闭恢复全速（评审 R9）</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">导出格式</td><td data-label="语义" style="text-align:left">CSV/VCD/JSON 枚举校验；非法值拒绝</td><td data-label="实现通道" style="text-align:left">exportFormat</td><td data-label="备注" style="text-align:left">大文件分块导出可续导</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">访存失败</td><td data-label="语义" style="text-align:left">反汇编读未映射 → 宿主侧失败事件（非平台故障、非 guest trap）</td><td data-label="实现通道" style="text-align:left">M-17 readMem 返回 E_BUS-01</td><td data-label="备注" style="text-align:left">对齐 M-10 10-5，提前结束序列</td></tr></tbody></table></div>
+<h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+<p class="body">联动流：M-06 loadELF → 符号/行映射构建 → disasmCache 填充（经 M-17 readMem 取指 + 内置解码表）→ 前端反汇编渲染（PC 高亮，V-12）→ 单步联动 resolveLine 源码高亮。<br>trace 流：M-17 onInstruction 钩子（kind=0）/ M-18 访存事件流（attachTrace 上报 {t, addr, dir, width} → dir 映射 kind=1 读 / kind=2 写，11-6）→ recordTrace 统一写入 traceBuffer（性能开关）→ exportTrace 筛选 → CSV/VCD/JSON 分块导出（FR-14）。</p>
+<h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 disasm(addr, count) 反汇编序列生成</h3>
+<p class="body">disasm(addr, count)：disasmCache 命中直返；未命中经 M-17 readMem 取指 → 内置 RV32IMC 解码映射表生成助记符 → 写入缓存后继续。未映射地址返回宿主侧失败事件（对齐 M-10 10-5），提前结束序列（非错误）。伪代码如下：</p>
+<pre class="code"><code>// disasm: 反汇编序列生成（4.3.4.3 表48；缓存优先；宽度判定 11-1）
+list&lt;disasmEntry&gt; disasm(uint32_t addr, uint32_t count, err_t* err) {
+  list&lt;disasmEntry&gt; out;
+  if (count &gt; MAX_DISASM_COUNT) return E_CTX-03;     // count 上限防御（11-10）
+  for (i = 0; i &lt; count; i++) {
+    if (disasmCache contains addr) {                 // 命中直返（对齐 M-13 13-6 失效语义）
+      out.add(disasmCache[addr]); addr += disasmCache[addr].width; continue;
+    }
+    uint16_t low = m17_readMem(addr, 2, err);        // 先读 2 字节判宽度（text 段 2 字节对齐下不跨界）
+    if (*err == E_BUS-01) break;                     // 未映射 → 宿主侧失败，提前结束（10-5 语义）
+    uint8_t width = ((low &amp; 0b11) != 0b11) ? 2 : 4;  // 低 2 位 ≠0b11 → 压缩（2 字节），否则 4 字节
+    uint32_t code = low;                             // 压缩指令：code 取 16 位原码（对齐 M-13 13-1）
+    if (width == 4) code = m17_readMem(addr, 4, err); // 4 字节指令补读完整
+    disasmEntry e = decode_mnemonic(code, width);    // 内置 RV32IMC opcode→助记符映射表
+    e.addr = addr; e.code = code;
+    disasmCache[addr] = e; out.add(e);
+    addr += width;                                   // 2（压缩）/ 4（标准）
+  }
+  return out;                                        // 输出：指令行序列（长度&lt;count 即截断，11-3）
+}</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 resolveLine(addr) 地址→源码行解析</h3>
+<p class="body">resolveLine(addr)：经 DWARF 解析子组件行表查询（地址→行，行表 ≤2×10⁵ 条，L3/P-12 二分查找）；无 DWARF 返回空（降级仅反汇编 + 符号表，4.3.4.5）。伪代码如下：</p>
+<pre class="code"><code>// resolveLine: 地址→源码行解析（4.3.4.3 表48；区分降级与未命中，11-4）
+LineRef resolveLine(uint32_t addr) {
+  if (!dwarfSub.ready) return {file: NULL, line: 0};         // 无 DWARF → 降级（4.3.4.5）
+  return dwarfSub.queryLine(addr) or {file: NULL, line: 0xFFFFFFFF}; // 未命中（行表查询失败）
+}</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 recordTrace(ev) / exportTrace(fmt, filter) trace 记录与导出</h3>
+<p class="body">recordTrace(ev)：指令/访存钩子事件写入 traceBuffer（性能开关 enabled=0 零开销直接返回；溢出丢最旧 + 计数，对齐 M-21）。exportTrace(fmt, filter)：时间/地址筛选 → CSV/VCD/JSON 序列化 → 分块下载（大文件可续导，nextOffset 续传）。伪代码如下：</p>
+<pre class="code"><code>// recordTrace: trace 记录（指令/访存，4.3.4.3 表48；可整体关闭性能开关；11-2）
+void recordTrace(TraceEvent ev) {
+  if (!traceBuffer.enabled) return;                  // 性能开关整体关闭（零开销）
+  if (traceBuffer.count == T_CAP) {                  // 满：写旧 head 位置再前移（每次仅丢一条最旧）
+    traceBuffer.buf[head] = ev;
+    head = (head + 1) % T_CAP; traceBuffer.dropped++;
+  } else {
+    traceBuffer.buf[(head + count) % T_CAP] = ev; count++;
+  }
+}
+// exportTrace: trace 导出（4.3.4.3 表48；CSV/VCD/JSON 分块，大文件可续导；11-7）
+ExportHandle exportTrace(exportFormat fmt, TraceFilter filter, uint64_t offset) {
+  if (fmt != CSV &amp;&amp; fmt != VCD &amp;&amp; fmt != JSON) return E_INVALID_FORMAT; // 枚举校验
+  rows = applyFilter(traceBuffer window, filter);    // 时间/地址筛选（offset=条目偏移起点）
+  chunk = serialize(fmt, rows, offset);              // 分块序列化（定长头 + 数据块）
+  return {offset, nextOffset, total, bytes};         // 续导协议：前端下次传 offset=nextOffset（经 M-05 命令通道）
+}</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 与真实调试器的差异对照表</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:36%"><col style="width:34%"><col style="width:14%"></colgroup><thead><tr><th style="width:16%;text-align:center">维度</th><th style="width:36%;text-align:center">真实硬件调试器（GDB/JTAG）</th><th style="width:34%;text-align:center">本平台建模（ISS/QEMU）</th><th style="width:14%;text-align:center">差异影响</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">反汇编来源</td><td style="text-align:left">GDB disassemble 从目标内存/符号表取指</td><td style="text-align:left">M-17 readMem 取指 + 独立 RV32IMC 解码映射表</td><td style="text-align:left">独立表 + 与 M-13 一致性测试门禁（11-5）</td></tr><tr class="row1"><td data-label="维度" style="text-align:center">地址→行</td><td data-label="实机调试器" style="text-align:left">GDB info line 走符号文件/DWARF</td><td data-label="本平台建模" style="text-align:left">M-06 DWARF 行表 resolveLine（无 DWARF 返回空）</td><td data-label="差异影响" style="text-align:left">无 DWARF 时降级仅反汇编 + 符号表</td></tr><tr class="row0"><td data-label="维度" style="text-align:center">源码联动</td><td data-label="实机调试器" style="text-align:left">GDB 源码视图 + 当前行高亮</td><td data-label="本平台建模" style="text-align:left">resolveLine + 断点/单步暂停联动（PC 高亮，V-12）</td><td data-label="差异影响" style="text-align:left">联动依赖 M-08/M-09 暂停事件</td></tr><tr class="row1"><td data-label="维度" style="text-align:center">trace</td><td data-label="实机调试器" style="text-align:left">GDB tracepoints/重放（需硬件支持）</td><td data-label="本平台建模" style="text-align:left">指令/访存 trace 可整体关闭 + CSV/VCD/JSON 导出（FR-14）</td><td data-label="差异影响" style="text-align:left">导出格式为本平台差异化能力（真实调试器需插件）</td></tr></tbody></table></div>
+<h2 id="sec4" class="h-sec">4 关键函数（源文档表48）</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:34%"><col style="width:26%"><col style="width:40%"></colgroup><thead><tr><th style="width:34%;text-align:center">函数</th><th style="width:26%;text-align:center">说明</th><th style="width:40%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">disasm(addr, count)</td><td style="text-align:left">反汇编序列生成</td><td style="text-align:left">输入：起始地址/条数；输出：指令行序列（缓存命中直返；未映射提前结束）</td></tr><tr class="row1"><td style="text-align:center">resolveLine(addr)</td><td style="text-align:left">地址→源码行解析</td><td style="text-align:left">输入：PC；输出：{file, line}（无 DWARF 返回空）</td></tr><tr class="row0"><td style="text-align:center">recordTrace(ev)</td><td style="text-align:left">trace 记录（指令/访存）</td><td style="text-align:left">输入：钩子事件；输出：traceBuffer 写入（性能开关关闭零开销）</td></tr><tr class="row1"><td style="text-align:center">exportTrace(fmt, filter)</td><td style="text-align:left">trace 导出（时间/地址筛选）</td><td style="text-align:left">输出：CSV/VCD/JSON 分块下载（大文件可续导）</td></tr></tbody></table></div>
+<h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 反汇编联动与 trace 导出流程（源 4.3.4.4 对齐）</h3>
+<p class="body">双链路：联动流 = 加载 → 符号/行映射构建 → 反汇编渲染 → 单步联动高亮；trace 流 = 钩子/访存事件 → 记录 → 筛选 → 分块导出。</p>
+<div class="flow-wrap"><svg class="flow" viewBox="0 0 760 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-11 处理流程：反汇编联动流与 trace 导出流">
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#2f5bd6"/></marker>
+    <style>
+      .st-box{fill:#eef2fb;stroke:#2f5bd6;stroke-width:1.5;rx:6}
+      .st-txt{font-size:12.5px;fill:#1f2937;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+      .st-sub{font-size:11px;fill:#4b5563;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+      .st-arrow{stroke:#2f5bd6;stroke-width:1.6;marker-end:url(#ar)}
+      .st-dec{fill:#fff;stroke:#d97757;stroke-width:1.5;rx:8}
+      .st-dec-txt{font-size:11.5px;fill:#7c2d12;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+    </style>
+  </defs>
+  <rect class="st-box" x="20" y="14" width="150" height="44"/>
+  <text class="st-txt" x="95" y="32" text-anchor="middle">1 加载（M-06 loadELF）</text>
+  <text class="st-sub" x="95" y="48" text-anchor="middle">符号表/行表构建</text>
+  <line class="st-arrow" x1="170" y1="36" x2="216" y2="36"/>
+  <rect class="st-box" x="216" y="14" width="150" height="44"/>
+  <text class="st-txt" x="291" y="32" text-anchor="middle">2 反汇编渲染</text>
+  <text class="st-sub" x="291" y="48" text-anchor="middle">disasm：M-17 取指 + 解码表</text>
+  <line class="st-arrow" x1="366" y1="36" x2="412" y2="36"/>
+  <rect class="st-box" x="412" y="14" width="150" height="44"/>
+  <text class="st-txt" x="487" y="32" text-anchor="middle">3 PC 高亮（V-12）</text>
+  <text class="st-sub" x="487" y="48" text-anchor="middle">反汇编区独立可用</text>
+  <line class="st-arrow" x1="562" y1="36" x2="608" y2="36"/>
+  <rect class="st-box" x="608" y="14" width="140" height="44"/>
+  <text class="st-txt" x="678" y="32" text-anchor="middle">4 单步联动高亮</text>
+  <text class="st-sub" x="678" y="48" text-anchor="middle">resolveLine 源码行</text>
+  <line class="st-arrow" x1="291" y1="58" x2="291" y2="92"/>
+  <rect class="st-dec" x="216" y="92" width="150" height="40"/>
+  <text class="st-dec-txt" x="291" y="116" text-anchor="middle">无 DWARF → 降级仅反汇编+符号表</text>
+  <rect class="st-box" x="20" y="150" width="150" height="44"/>
+  <text class="st-txt" x="95" y="168" text-anchor="middle">A 钩子/访存事件</text>
+  <text class="st-sub" x="95" y="184" text-anchor="middle">M-17 onInstruction / M-18</text>
+  <line class="st-arrow" x1="170" y1="172" x2="216" y2="172"/>
+  <rect class="st-box" x="216" y="150" width="150" height="44"/>
+  <text class="st-txt" x="291" y="168" text-anchor="middle">B recordTrace 记录</text>
+  <text class="st-sub" x="291" y="184" text-anchor="middle">性能开关 enabled=0 零开销</text>
+  <line class="st-arrow" x1="366" y1="172" x2="412" y2="172"/>
+  <rect class="st-box" x="412" y="150" width="150" height="44"/>
+  <text class="st-txt" x="487" y="168" text-anchor="middle">C 筛选（时间/地址）</text>
+  <text class="st-sub" x="487" y="184" text-anchor="middle">traceBuffer 窗口</text>
+  <line class="st-arrow" x1="562" y1="172" x2="608" y2="172"/>
+  <rect class="st-box" x="608" y="150" width="140" height="44"/>
+  <text class="st-txt" x="678" y="168" text-anchor="middle">D 分块导出</text>
+  <text class="st-sub" x="678" y="184" text-anchor="middle">CSV/VCD/JSON 续导</text>
+  <line class="st-arrow" x1="678" y1="58" x2="678" y2="150"/>
+  <line class="st-arrow" x1="291" y1="132" x2="291" y2="150"/>
+  <rect class="st-dec" x="216" y="206" width="150" height="30"/>
+  <text class="st-dec-txt" x="291" y="225" text-anchor="middle">trace 开启 → 降速提示（R9）</text>
+  <line class="st-arrow" x1="291" y1="194" x2="291" y2="206"/>
+</svg></div>
+<div class="flow-branch">分支：无 DWARF → 降级仅反汇编 + 符号表（resolveLine 返回空，4.3.4.5）；trace 开启 → 明确降速提示（评审 R9），退出调试态可关闭恢复全速。</div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:52%"><col style="width:22%"></colgroup><thead><tr><th style="width:26%;text-align:center">协作模块</th><th style="width:52%;text-align:center">协作内容</th><th style="width:22%;text-align:center">触发时机</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-06（ELF 解析）</td><td style="text-align:left">符号表 + DWARF 行表（loadELF 下发）</td><td style="text-align:left">加载完成时</td></tr><tr class="row1"><td style="text-align:center">M-17（执行后端）</td><td style="text-align:left">readMem 取指；onInstruction 钩子（指令 trace）</td><td style="text-align:left">disasm 未命中 / 指令执行时</td></tr><tr class="row0"><td style="text-align:center">M-18（探针）</td><td style="text-align:left">访存事件流 attachTrace 上报 {t, addr, dir, width}；写事件（kind=2）触发 disasmCache 失效对应地址（11-8）</td><td style="text-align:left">每次访存（trace 流底 + 缓存失效）</td></tr><tr class="row1"><td style="text-align:center">M-08/M-09（断点/单步）</td><td style="text-align:left">暂停事件 → resolveLine 联动源码高亮（V-12）</td><td style="text-align:left">断点命中/单步完成 paused 上报后</td></tr><tr class="row0"><td style="text-align:center">M-03（View Store）</td><td style="text-align:left">反汇编/源码视图消费渲染（刷新 ≤200ms 估算基线）</td><td style="text-align:left">联动状态变化时</td></tr><tr class="row1"><td style="text-align:center">M-21（日志）</td><td style="text-align:left">联动异常/trace 丢弃/导出失败日志</td><td style="text-align:left">异常发生时</td></tr></tbody></table></div>
+<h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置</h3>
+<p class="body">本模块以降级语义为主（无 DWARF/trace 关闭/写失败丢弃均为正常降级路径，不新增 E_CTX 码，一场景一码）；反汇编读未映射按宿主侧失败语义经事件通道处理（对齐 M-10 10-5）：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:38%"><col style="width:36%"></colgroup><thead><tr><th style="width:26%;text-align:center">错误码 / 场景</th><th style="width:38%;text-align:center">触发条件</th><th style="width:36%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">无 DWARF（降级）</td><td style="text-align:left">行表未构建 / ELF 无 DWARF 段</td><td style="text-align:left">resolveLine 返回空；降级仅反汇编 + 符号表（4.3.4.5）</td></tr><tr class="row1"><td style="text-align:center">trace 写失败（T1）</td><td style="text-align:left">traceBuffer 写入失败（容量/异常）</td><td style="text-align:left">降级丢弃 + warn 日志（T1 失败语义）</td></tr><tr class="row0"><td style="text-align:center">trace 开启（R9）</td><td style="text-align:left">性能开关 enabled=1 且仿真运行中</td><td style="text-align:left">明确降速提示；退出调试态可关闭恢复全速（4.3.4.5）</td></tr><tr class="row1"><td style="text-align:center">导出格式非法</td><td style="text-align:left">exportTrace(fmt) fmt ∉ {CSV, VCD, JSON}</td><td style="text-align:left">拒绝并返回 E_INVALID_FORMAT（枚举校验）</td></tr><tr class="row0"><td style="text-align:center">输入超限（L3/P-12）</td><td style="text-align:left">行表 &gt;2×10⁵ / 符号表 &gt;10⁵ / 递归深度 &gt;64</td><td style="text-align:left">M-06 前置校验为主；M-11 侧防御二次校验（disasm count 上限 MAX_DISASM_COUNT，行表超限拒绝，11-10）</td></tr><tr class="row1"><td style="text-align:center">访存失败（截断，非错误）</td><td style="text-align:left">disasm 读未映射地址</td><td style="text-align:left">宿主侧失败（dbg_mem_fail 语义，非平台故障、非 guest trap）；返回部分序列，调用方以长度&lt;count 判定截断（11-3）</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）无 DWARF：降级仅反汇编 + 符号表（resolveLine 返回空，独立可用，4.3.4.5）。</p>
+<p class="body">（2）性能开关：traceBuffer.enabled=0 整体关闭（零开销），退出调试态可关闭恢复全速（评审 R9）。</p>
+<p class="body">（3）trace 开启：明确降速提示（命令通道回显，4.3.4.5）。</p>
+<p class="body">（4）写失败：降级丢弃 + warn（T1 失败语义，不阻塞主流程）。</p>
+<p class="body">（5）大文件导出：分块下载（ExportHandle.offset 单位=条目数；nextOffset 续传，前端下次传 offset=nextOffset，经 M-05 命令通道），中途失败可续传不重导（11-7）。</p>
+<p class="body">（6）自修改代码：写内存钩子失效 disasmCache 对应地址，不命中陈旧解码（对齐 M-13 13-6）。</p>
+<p class="body">（7）导出格式：枚举校验，非法值拒绝；CSV/VCD/JSON 序列化器独立可增删。</p>
+<p class="body">（8）防御校验（11-10）：disasm(addr, count) 的 count 上限 MAX_DISASM_COUNT（10⁵ 条/次，估算基线）；行表/符号表超限在 M-06 前置校验后 M-11 仍二次校验并拒绝。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表91（M-11 行）：测试要点 = 反汇编/联动/trace（无 DWARF 独立可用；trace 导出 CSV/VCD）；通过准则 = 联动正确、导出格式合法。展开用例表如下（核心模块覆盖率 ≥70%，源文档 7.3 表92）：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:42%"><col style="width:34%"></colgroup><thead><tr><th style="width:24%;text-align:center">用例</th><th style="width:42%;text-align:center">输入/步骤</th><th style="width:34%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（源 2.5/7.1 对齐）</td><td style="text-align:left">按 9.1.1 端口契约表逐项校验 disasm/resolveLine/recordTrace/exportTrace 的接口签名、输入校验、输出结构与错误码；替代实现接入前必须同端口契约测试全绿</td><td style="text-align:left">契约测试全绿；契约变更须同步更新测试并回归</td></tr><tr class="row1"><td style="text-align:center">反汇编序列正确（表91）</td><td style="text-align:left">对已知 text 段调用 disasm(addr, count)</td><td style="text-align:left">地址/机器码/助记符与预期一致；压缩指令保留 16 位原码</td></tr><tr class="row0"><td style="text-align:center">无 DWARF 独立可用（表91）</td><td style="text-align:left">无行表 ELF 下 disasm + resolveLine</td><td style="text-align:left">反汇编正常 + PC 高亮（V-12）；resolveLine 返回空（降级）</td></tr><tr class="row1"><td style="text-align:center">源码联动正确（表91）</td><td style="text-align:left">DWARF 行表下 resolveLine(addr) 命中/未命中</td><td style="text-align:left">命中返回 {file, line}；未命中返回 {NULL, 0xFFFFFFFF}（11-4）；路径归一一致</td></tr><tr class="row0"><td style="text-align:center">trace 记录（表91）</td><td style="text-align:left">指令/访存钩子触发后查 traceBuffer</td><td style="text-align:left">条目含 time_virt/addr/kind/data/width；enabled=0 无记录（零开销）</td></tr><tr class="row1"><td style="text-align:center">trace 导出格式合法（表91）</td><td style="text-align:left">exportTrace(CSV/VCD) 导出小样本</td><td style="text-align:left">格式头/字段/边界合法（CSV 列、VCD 头 $var）；JSON schema 合法</td></tr><tr class="row0"><td style="text-align:center">分块续导</td><td style="text-align:left">大 trace 分块导出</td><td style="text-align:left">nextOffset 续传一致；中途失败续传不重导</td></tr><tr class="row1"><td style="text-align:center">溢出丢最旧（11-2/11-9）</td><td style="text-align:left">T_CAP 满后连续写多条</td><td style="text-align:left">每次仅丢一条最旧（新条目写旧 head 再前移）；dropped 计数准确；不告警风暴</td></tr><tr class="row0"><td style="text-align:center">压缩指令映射区末端（11-1/11-9）</td><td style="text-align:left">2 字节压缩指令位于映射区末端</td><td style="text-align:left">先读 2 字节按低 2 位判宽度，不跨界误报 E_BUS-01；code 保留 16 位原码</td></tr><tr class="row1"><td style="text-align:center">resolveLine 两态区分（11-4/11-9）</td><td style="text-align:left">无 DWARF 与行表未命中各调用一次</td><td style="text-align:left">降级返回 {NULL, 0}；未命中返回 {NULL, 0xFFFFFFFF}</td></tr><tr class="row0"><td style="text-align:center">自修改代码缓存失效</td><td style="text-align:left">写指令地址后重新 disasm</td><td style="text-align:left">disasmCache 对应地址失效，重新取指（对齐 M-13 13-6）</td></tr><tr class="row1"><td style="text-align:center">性能开关</td><td style="text-align:left">trace 开/关对比</td><td style="text-align:left">关闭零开销（enabled=0 直接返回）；开启有降速提示（R9）</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）双子组件拆分（评审 P-07）：DWARF 解析（行表解析/地址查询/路径归一）与反汇编渲染（助记符/PC 高亮/联动 UI）独立单测，DWARF 为最大风险项（10 人日 WBS）。</p>
+<p class="body">（2）解码表驱动：RV32IMC opcode→助记符映射表独立维护，新增指令只动映射表；独立表与 M-13 指令集存在两套解码语义漂移风险 → 设一致性测试门禁（同代码样本对照 M-13 解码结果，11-5），防漂移。</p>
+<p class="body">（3）缓存与 trace 解耦：disasmCache（联动视图）与 traceBuffer（记录导出）独立，可分别单测（缓存失效/溢出语义）。</p>
+<p class="body">（4）序列化器独立：CSV/VCD/JSON 各为独立序列化器，格式可增删不影响核心链路。</p>
+<p class="body">（5）CI 门禁：核心模块单测覆盖率 ≥70%（估算基线，源文档 7.3 表92）；反汇编/联动用例纳入确定性夹具。</p>
+<p class="body">（6）契约层可替换性（源 2.5 对齐）：本模块对外 driving 端口收敛到 9.1.1 端口契约，替代实现遵守同端口契约并通过契约测试即可接入。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-11 责任：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:16%"><col style="width:38%"><col style="width:46%"></colgroup><thead><tr><th style="width:16%;text-align:center">质量属性</th><th style="width:38%;text-align:center">目标（估算基线）</th><th style="width:46%;text-align:center">M-11 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">性能</td><td style="text-align:left">命令 ≤500ms；刷新 ≤200ms（表93）</td><td style="text-align:left">disasm 缓存命中直返 + trace 可整体关闭（零开销）+ 分块导出（大文件不阻塞）</td></tr><tr class="row1"><td style="text-align:center">可用性</td><td style="text-align:left">反汇编序列、源码高亮、trace 导出（FR-05/14）</td><td style="text-align:left">无 DWARF 降级独立可用（V-12 PC 高亮）；联动正确（表91）</td></tr><tr class="row0"><td style="text-align:center">可维护性</td><td style="text-align:left">核心模块覆盖率 ≥70%；模块即积木可替换（源 2.5）</td><td style="text-align:left">双子组件拆分（P-07）+ 解码表驱动 + 契约端口测试（9.1.1）</td></tr><tr class="row1"><td style="text-align:center">可靠性</td><td style="text-align:left">关键事件可靠投递（E1，对齐 5.2 图3）</td><td style="text-align:left">trace 环形缓冲溢出丢最旧 + 计数（T1 写失败丢弃 + warn）</td></tr><tr class="row0"><td style="text-align:center">合规</td><td style="text-align:left">业务模块 → 横切组件单向依赖（4.7 表86）</td><td style="text-align:left">只经 M-17/M-18 观测通道 + M-05/M-21 横切通道，不自行实现日志/事件</td></tr></tbody></table></div>
+<h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:34%"><col style="width:26%"><col style="width:40%"></colgroup><thead><tr><th style="width:34%;text-align:center">依赖方</th><th style="width:26%;text-align:center">被依赖方</th><th style="width:40%;text-align:center">依赖内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-11（符号表/DWARF、反汇编·联动与 trace）</td><td style="text-align:left">M-06（ELF 解析）</td><td style="text-align:left">符号表 + DWARF 行表（loadELF 下发；行表 ≤2×10⁵）</td></tr><tr class="row1"><td style="text-align:center">M-11</td><td style="text-align:left">M-17（执行后端）</td><td style="text-align:left">readMem 取指 + onInstruction 钩子（3.2.4 表13）</td></tr><tr class="row0"><td style="text-align:center">M-11</td><td style="text-align:left">M-18（探针）</td><td style="text-align:left">访存事件流 attachTrace（trace 流底，4.7 表86）</td></tr><tr class="row1"><td style="text-align:center">M-11</td><td style="text-align:left">M-05（会话/命令）</td><td style="text-align:left">命令与事件通道（反汇编/trace 导出命令）</td></tr><tr class="row0"><td style="text-align:center">M-11</td><td style="text-align:left">M-21（日志）</td><td style="text-align:left">联动异常/trace 丢弃/导出失败日志</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表49 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层，本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现（替代联动/trace 服务）遵守同端口契约并通过契约测试（7.1）即可接入：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:30%"><col style="width:16%"><col style="width:54%"></colgroup><thead><tr><th style="width:30%;text-align:center">端口 / 服务</th><th style="width:16%;text-align:center">方向</th><th style="width:54%;text-align:center">契约（输入 → 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:left">disasm(addr, count)</td><td style="text-align:center">提供（driving）</td><td style="text-align:left">输入：起始地址/条数（count ≤ MAX_DISASM_COUNT）；输出：指令行序列（缓存命中直返；未映射提前结束，长度&lt;count 即截断，11-3）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">resolveLine(addr)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输入：PC；输出：{file, line}——无 DWARF 降级 {NULL, 0}，行表未命中 {NULL, 0xFFFFFFFF}（11-4）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">recordTrace(ev)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输入：TraceEvent（kind=0 指令钩子 / kind=1 读 / kind=2 写，M-18 dir→kind 映射，11-6）；输出：traceBuffer 写入（enabled=0 零开销；满时每次仅丢一条最旧）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">exportTrace(fmt, filter)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输出：ExportHandle{offset, nextOffset, total, bytes}；续导协议 offset=条目偏移、前端下次传 offset=nextOffset（经 M-05 命令通道，11-7）；格式枚举校验</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-06（ELF 解析）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">符号表 + DWARF 行表（4.3.4.6）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-17（执行后端）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">readMem / onInstruction 钩子</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-18（探针）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">访存事件流（attachTrace 上报）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-05（会话/命令）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">命令与事件通道</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-21（日志）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">联动异常日志</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<p class="body">联动成功 → log(INFO, "DBG-DS", "disasm/resolve", "E_OK")；无 DWARF 降级 → log(INFO, "DBG-DS", "no DWARF degrade", "E_OK")；trace 写失败 → log(WARN, "DBG-DS", "trace drop", "T1")；导出格式非法 → log(WARN, "DBG-DS", "invalid export format", "E_INVALID_FORMAT")。产品/嵌入式工作台不可见（角色边界，§3.4），仅管理员通道可查。</p>
+</main>
+</div>
+</body>
+</html>

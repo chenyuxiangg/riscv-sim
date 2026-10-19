@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-08 断点管理器 模块详细设计</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%231e3a8a'/%3E%3Ccircle cx='12' cy='12' r='5' fill='none' stroke='%23ffffff' stroke-width='2'/%3E%3C/svg%3E">
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15px; font-weight:700; color:#374151; margin:18px 0 8px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { margin:0 0 10px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  white-space:pre; margin:10px 0 16px; }
+.code-title { font-size:13px; font-weight:700; color:#111827; margin:16px 0 4px; }
+.fig { margin:14px auto; text-align:center; }
+.fig img { max-width:100%; height:auto; border:1px solid var(--line); border-radius:4px; }
+.fig figcaption { font-size:13px; color:var(--ink-2); margin-top:6px; }
+.caption { text-align:center; font-size:13px; color:var(--ink-2); margin:6px 0 4px; }
+.flow-svg { width:100%; height:auto; }
+.flow-mobile { display:none; }
+.flow-step { display:flex; gap:10px; margin:8px 0; align-items:flex-start; }
+.flow-step .num { flex:0 0 26px; height:26px; border-radius:50%; background:var(--brand);
+  color:#fff; font-weight:700; font-size:13px; display:flex; align-items:center; justify-content:center; }
+.flow-step .txt { font-size:14px; }
+.flow-branch { margin:6px 0 6px 36px; font-size:13.5px; color:var(--ink-2); }
+.flow-arrow { text-align:center; color:#9aa1af; font-size:16px; line-height:1; margin:2px 0; }
+.nav-toggle { margin:14px 0; }
+.nav-toggle summary { cursor:pointer; font-weight:700; color:var(--brand);
+  padding:9px 12px; border:1px solid var(--line); border-radius:6px; background:var(--head-bg); list-style:none; }
+.nav-toggle summary::-webkit-details-marker { display:none; }
+.nav-box { display:flex; flex-direction:column; gap:2px; padding:10px 4px 2px; }
+.nav-l1 { color:var(--brand); font-weight:700; text-decoration:none; padding:3px 4px; }
+.nav-l2 { color:var(--ink-2); text-decoration:none; padding:3px 4px 3px 18px; font-size:13.5px; }
+.nav-l1:hover,.nav-l2:hover { color:var(--brand-2); text-decoration:underline; }
+@media (min-width:768px) {
+  .wrap { display:grid; grid-template-columns:260px 1fr; gap:28px; align-items:start; }
+  .wrap > * { min-width:0; }
+  main { min-width:0; }
+  .doc-head { grid-column:1 / -1; }
+  .nav-toggle { position:sticky; top:16px; max-height:calc(100vh - 32px); overflow:auto; }
+  .nav-toggle summary { pointer-events:none; }
+  .flow-svg { display:block; }
+  .flow-mobile { display:none; }
+}
+@media (max-width:767px) {
+  .flow-svg { display:none; }
+  .flow-mobile { display:block; }
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media print {
+  .nav-toggle { display:none; }
+  .wrap { display:block; max-width:none; padding:0; }
+  .doc-title { font-size:20px; }
+  .doc-table, .fig, .code { break-inside:avoid; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="doc-head"><h1 class="doc-title">M-08 断点管理器 模块详细设计</h1><p class="subtitle">RISC-V 仿真平台 · 模块详细设计系列 · 对应《模块设计说明书》4.3.1 节</p><p class="version">HTML 版 v1.1（2026-10-14）· 源设计《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11 契约层版，2026-10-13 更新）</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11；2026-10-13 契约层版新增 2.5 平台共享契约层与各模块端口契约表）</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.3.1（③ 调试服务层 · 断点管理器）；端口契约 = 源文档表40（数据描述 表38、关键函数 表39）；处理流程 = 5.2 图3</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">FR-08（断点/单步，与 M-09 协作）；FR-11（变量监视，与 M-10 协作）；NFR-07（命中/注册日志）</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">ExecutionBackend 抽象（3.2.4 表13）；表达式引擎（cond 与 watch 共用，评审 P-05）；DebugMeta 断点持久化</td></tr><tr class="row0"><td style="text-align:center">MVP 状态</td><td style="text-align:left">P0 主承担模块（MVP 必需：PC/条件断点 + watch 地址/寄存器表达式）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；依赖方向（2.1 表5：调试服务 → M-17）；评审 P-05（watch 语义）、17-9（QEMU cond 降级）</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.1（2026-10-14）：逐条落实 M-08 评审 08-1~08-10——08-1 唯一命中链路（hitCheck 统一入口，M-17 仅地址快判，删 bpHook 回调求值）；08-2 依赖 M-17 补 bpControl 生命周期接口；08-3 临时断点命中即移除；08-4 id 唯一来源（M-17）+ idIndex 反查；08-5 命中挂载 pre=1 阶段（指令执行前）；08-6 恢复流程按 addr 重注册 + id 重映射；08-7 cond 失败日志限频 ≥1s；08-8 QEMU 下命中走 RSP T05、hitCheck 不参与；08-9 watch evalErr 切换也推送；08-10 补 5 组用例（临时断点移除/启停即时生效/watch 节流/命中风暴/失败限频）。2026-10-14 修订：M-17 v1.2 已落地 bpControl 生命周期接口，本文 remove/enable/disable 同步操作符 REMOVE/ENABLE/DISABLE。v1.2（2026-10-14）：落实 M-09 评审 09-6 联动（N8 无效 id 幂等）——remove_bp/enable_bp/disable_bp 对无效 id 直接返回（idIndex.count 前置判定），remove_bp 可安全作为 stepOver 兜底清理调用</td></tr><tr class="row1"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-14</td></tr></tbody></table></div></header><nav class="nav-toggle"><details open><summary>目录</summary><div class="nav-box"><a class="nav-l1" href="#sec1">1 功能概述</a>
+<a class="nav-l2" href="#sec1-1">1.1 模块定位</a>
+<a class="nav-l2" href="#sec1-2">1.2 需求与约束</a>
+<a class="nav-l2" href="#sec1-3">1.3 MVP 范围与预留</a>
+<a class="nav-l1" href="#sec2">2 数据描述</a>
+<a class="nav-l2" href="#sec2-1">2.1 核心数据结构</a>
+<a class="nav-l2" href="#sec2-1-1">2.1.1 复杂结构字段定义</a>
+<a class="nav-l2" href="#sec2-2">2.2 断点类型与 watch 语义</a>
+<a class="nav-l2" href="#sec2-3">2.3 数据流说明</a>
+<a class="nav-l1" href="#sec3">3 实现设计</a>
+<a class="nav-l2" href="#sec3-1">3.1 断点注册与管理</a>
+<a class="nav-l2" href="#sec3-2">3.2 命中检测与条件求值</a>
+<a class="nav-l2" href="#sec3-3">3.3 watch 变量监视（FR-11）</a>
+<a class="nav-l2" href="#sec3-4">3.4 与真实调试器的差异对照表</a>
+<a class="nav-l1" href="#sec4">4 关键函数</a>
+<a class="nav-l1" href="#sec5">5 处理流程</a>
+<a class="nav-l2" href="#sec5-1">5.1 断点命中处理流程（源 5.2 图3 对齐）</a>
+<a class="nav-l2" href="#sec5-2">5.2 与相邻模块的协作说明</a>
+<a class="nav-l1" href="#sec6">6 异常处理</a>
+<a class="nav-l2" href="#sec6-1">6.1 错误码与处置</a>
+<a class="nav-l2" href="#sec6-2">6.2 边界与降级</a>
+<a class="nav-l1" href="#sec7">7 测试设计与可维护性</a>
+<a class="nav-l2" href="#sec7-1">7.1 测试要点与关键用例</a>
+<a class="nav-l2" href="#sec7-2">7.2 可维护性手段</a>
+<a class="nav-l1" href="#sec8">8 质量属性落实</a>
+<a class="nav-l1" href="#sec9">9 接口依赖</a>
+<a class="nav-l2" href="#sec9-1">9.1 依赖关系</a>
+<a class="nav-l2" href="#sec9-1-1">9.1.1 端口契约（driving/driven）</a>
+<a class="nav-l2" href="#sec9-2">9.2 日志对接（M-21）</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-08 断点管理器（4.3.1）：管理 PC 断点与条件断点（FR-08）——注册/删除/使能、命中检测与回调暂停。断点列表随 DebugMeta 持久化（会话级调试元数据，经 M-04 会话统一管理）。命中后触发状态快照检查点（关键事件，RPO ≤2s 宿主时间口径）。变量监视（FR-11，watch）语义明确：MVP = 地址/寄存器表达式（解析并轮询求值）；符号名监视列入 P1（依赖 DWARF .debug_info 变量表与栈帧回溯，MVP 仅行表级，评审 P-05）。</p>
+<p class="body">调试服务只面对 ExecutionBackend 抽象（3.2.4 表13）：断点注册/命中检测/寄存器内存求值全部经 M-17 抽象代理（自研 ISS L3 / QEMU L1 子集），M-08 不感知具体内核实现。断点命中属于 E1 关键控制事件（5.2 图3），可靠投递（ack/重试），前端在事件缺口或命令超时后主动拉取状态对账（reconcile）。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:62%"><col style="width:24%"></colgroup><thead><tr><th style="width:14%;text-align:center">类别</th><th style="width:62%;text-align:center">约束内容</th><th style="width:24%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">功能</td><td style="text-align:left">PC 断点 + 条件断点（FR-08）：注册/删除/使能、命中检测与回调暂停；watch 变量监视（FR-11，MVP 地址/寄存器表达式，评审 P-05）</td><td style="text-align:left">4.3.1.1、FR-08/FR-11</td></tr><tr class="row1"><td style="text-align:center">正确性</td><td style="text-align:left">无效地址/重复注册 → E_CTX-07 拒绝；条件求值异常 → 按未命中处理并记日志；命中准确、无副作用（表91 M-08 行）</td><td style="text-align:left">4.3.1.5、3.4 表16</td></tr><tr class="row0"><td style="text-align:center">角色边界</td><td style="text-align:left">断点/watch 命令仅调试者角色会话可用；产品/嵌入式工作台只消费命中事件与暂停状态（只读）</td><td style="text-align:left">2.4 表6、4.3.1.6</td></tr><tr class="row1"><td style="text-align:center">性能</td><td style="text-align:left">PC 命中检测优先于全量指令回调（表93 M-08 行）；调试态全钩子 ≥0.5–1 MIPS（估算基线）</td><td style="text-align:left">8 章表93、4.4.1.1</td></tr><tr class="row0"><td style="text-align:center">确定性</td><td style="text-align:left">命中检测基于指令边界 PC 与虚拟时间无关；暂停冻结 SimState 采样对齐量子边界（2.4 表6）</td><td style="text-align:left">2.4 表6、5.2 图3</td></tr><tr class="row1"><td style="text-align:center">韧性</td><td style="text-align:left">断点命中 = E1 关键控制事件：可靠投递（ack/重试）；前端缺口后 reconcile 对账</td><td style="text-align:left">5.2 图3、4.7 表86</td></tr><tr class="row0"><td style="text-align:center">体积</td><td style="text-align:left">随内核 WASM 打包，计入内核 ≤1.5 MiB 压缩预算（估算基线）</td><td style="text-align:left">3.3 表15</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：PC 断点与条件断点（setBreakpoint/remove/enable/disable）、命中检测（hitCheck，优先于全量回调）、命中回调（onHit：M-09 暂停 + M-05 publish(breakpointHit) + M-04 checkpoint）、watch 地址/寄存器表达式（addWatch/removeWatch + 轮询求值）、断点表随 DebugMeta 持久化（会话重建恢复）、注册/命中日志（M-21）。</p>
+<p class="body">预留项（P1/P2 演进承接，不展开实现）：符号名监视（P1，E_CTX-08，依赖 DWARF .debug_info 变量表与栈帧回溯）；源码级行断点（P1，依赖 M-11 行表映射）；watch 表达式引擎深化（算术/解引用 P1）；硬件断点数量模型（随 QEMU 后端适配，P1）。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:20%"><col style="width:22%"><col style="width:58%"></colgroup><thead><tr><th style="width:20%;text-align:center">数据结构</th><th style="width:22%;text-align:center">类型</th><th style="width:58%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">breakpointTable</td><td style="text-align:left">Map&amp;lt;addr, Breakpoint&amp;gt;</td><td style="text-align:left">断点表（PC 断点 + 条件断点）：按地址索引，命中检测 O(1)（4.3.1.2 表38）</td></tr><tr class="row1"><td style="text-align:center">watchList</td><td style="text-align:left">Set&amp;lt;WatchItem&amp;gt;</td><td style="text-align:left">变量监视表达式列表（FR-11）：MVP = 地址/寄存器表达式；符号名表达式 P1（评审 P-05）</td></tr><tr class="row0"><td style="text-align:center">debugMeta</td><td style="text-align:left">struct</td><td style="text-align:left">会话调试元数据（断点表持久化载体）：随 M-04 会话序列化，会话重建时恢复断点</td></tr><tr class="row1"><td style="text-align:center">exprEngine</td><td style="text-align:left">component</td><td style="text-align:left">表达式引擎（cond 条件断点与 watch 共用）：地址/寄存器表达式解析与求值</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="lead">Breakpoint 是断点表条目；WatchItem 是监视项；DebugMeta 携带断点持久化数据。字段定义如下：</p>
+<pre class="code"><code>// Breakpoint: 断点条目（breakpointTable 元素）
+struct Breakpoint {
+  uint32_t id;          // 断点 id（M-17 hook 注册返回值，会话内唯一）
+  uint32_t addr;        // 断点地址（指令边界 PC，需与指令对齐）
+  char     cond[64];    // 条件表达式（空串 = 无条件 PC 断点；地址/寄存器表达式，评审 P-05）
+  uint8_t  enabled;     // 使能位：0=禁用（保留在表，不命中）/ 1=启用
+  uint8_t  sourceType;  // 来源：0=用户 / 1=临时（M-09 stepOver 注入，自动移除）
+  uint32_t hitCount;    // 命中次数（诊断，供前端展示）
+};
+// WatchItem: 变量监视项（watchList 元素，FR-11）
+struct WatchItem {
+  char     expr[64];    // 监视表达式：MVP = 地址（0x80000010）或寄存器（x1/sp/mepc）表达式
+  uint8_t  kind;        // 0=地址 / 1=寄存器（求值通道 = M-17 readMem / readReg 抽象）
+  uint32_t lastValue;   // 上次求值结果（暂停态即时求值 + 运行态量子边界轮询刷新）
+  uint8_t  evalErr;     // 上次求值错误标记（0=正常；1=表达式非法/符号名 P1 → E_CTX-08）
+};
+// DebugMeta: 会话调试元数据（断点持久化载体；由 M-04 会话统一序列化到 M-23）
+struct DebugMeta {
+  uint32_t    bpCount;        // 断点条目数（恢复时按序重建 breakpointTable）
+  Breakpoint  bps[64];        // 断点表快照（随会话持久化，会话重建时恢复）
+  uint32_t    watchCount;     // 监视项数
+  WatchItem   watches[32];    // 监视表快照（随会话持久化）
+};
+// 注：DebugMeta 的持久化通道 = M-04 会话状态管理（→ M-23 数据存储），
+//     M-08 只维护运行态 breakpointTable/watchList，会话重建时从 DebugMeta 恢复。</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 断点类型与 watch 语义</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:18%"><col style="width:32%"><col style="width:30%"><col style="width:20%"></colgroup><thead><tr><th style="width:18%;text-align:center">断点 / 监视类型</th><th style="width:32%;text-align:center">语义</th><th style="width:30%;text-align:center">求值 / 命中通道</th><th style="width:20%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">PC 断点</td><td style="text-align:left">无条件：指令边界 PC 命中即暂停</td><td style="text-align:left">M-17 断点表（self_iss：hook 表；QEMU：RSP Z0）</td><td style="text-align:left">hitCheck(pc) 优先于全量指令回调（表93）</td></tr><tr class="row1"><td style="text-align:center">条件断点</td><td style="text-align:left">PC 命中 + cond 表达式求值为真才暂停</td><td style="text-align:left">M-17 地址快判 + M-08 hitCheck 内 condEval 统一求值（唯一链路，评审 08-1）</td><td style="text-align:left">求值异常 → 按未命中处理并记日志（限频，评审 08-7）</td></tr><tr class="row0"><td style="text-align:center">临时断点</td><td style="text-align:left">M-09 stepOver 注入，命中一次自动移除（评审 08-3）</td><td style="text-align:left">同 PC 断点；sourceType=1，hitCheck 命中即 remove_bp</td><td style="text-align:left">MVP 支持（M-09 协作）</td></tr><tr class="row1"><td style="text-align:center">watch 地址表达式</td><td style="text-align:left">监视指定内存地址（0x80000010）</td><td style="text-align:left">M-17 readMem 轮询求值</td><td style="text-align:left">FR-11；暂停态即时 + 运行态量子边界轮询</td></tr><tr class="row0"><td style="text-align:center">watch 寄存器表达式</td><td style="text-align:left">监视寄存器（x1/sp/mepc 等）</td><td style="text-align:left">M-17 readReg 轮询求值</td><td style="text-align:left">FR-11；符号名表达式 → E_CTX-08（P1）</td></tr></tbody></table></div>
+<h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+<p class="body">注册流：setBreakpoint(addr, cond) → 地址校验（E_CTX-07 拒绝无效/重复）→ M-17 注册地址断点（m17_bp，id 由 M-17 唯一产生）→ breakpointTable 登记 + idIndex 反查索引 → DebugMeta 更新（随会话持久化）。</p>
+<p class="body">命中流（5.2 图3）：M-17 在指令边界 pre=1 阶段地址快判 → M-08 hitCheck(pc) 统一确认（含 cond 求值）→ 命中 → onHit(bp)：临时断点自动移除（评审 08-3）→ M-09 暂停冻结（SimState 对齐量子边界）→ M-05 publish(breakpointHit)（E1 可靠投递，ack/重试）→ M-04 checkpoint（关键事件，RPO ≤2s）→ M-21 日志。</p>
+<p class="body">恢复流（评审 08-6）：会话重建 → M-04 从 DebugMeta 载入断点表 → restoreFromMeta 按 addr 重新注册（新 id 重映射，丢弃旧 id）→ 重建 idIndex。</p>
+<p class="body">watch 流：addWatch(expr) → 表达式分类（地址/寄存器）→ watchList 登记 → 求值（暂停态即时 + 运行态量子边界轮询，节流）→ 值变化或 evalErr 切换经 M-05 publish(watchUpdate) 推送前端（刷新 ≤200ms 估算基线，评审 08-9）。</p>
+<h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 断点注册与管理</h3>
+<p class="body">注册入口 setBreakpoint(addr, cond)：地址校验（指令边界对齐、重复注册）→ 统一经 M-17 注册无条件地址断点（m17_bp，仅地址快判；条件求值统一在 M-08 hitCheck 内，M-17 不再回调求值——唯一命中链路，评审 08-1）→ breakpointTable 登记 + idIndex 反查索引 → DebugMeta 更新。断点 id 唯一来源 = M-17 hook 注册返回值（评审 08-4）。remove/enable/disable 只改表状态与 M-17 钩子启用位，命中检测即时生效。伪代码如下：</p>
+<pre class="code"><code>// setBreakpoint: 注册断点（PC / 条件；统一 m17_bp 地址快判注册，评审 08-1/08-4）
+BpId setBreakpoint(uint32_t addr, const char* cond) {
+    if (!aligned(addr) || breakpointTable.has(addr)) return E_CTX-07; // 无效地址/重复注册拒绝
+    BpId id = m17_bp(addr);                        // M-17 注册地址断点；id 唯一来源 = M-17 返回值
+    Breakpoint bp = { id, addr, cond ? cond : &quot;&quot;, 1, 0, 0 };
+    breakpointTable[addr] = bp;                    // 表登记（按 addr 索引，命中检测 O(1) 查表）
+    idIndex[id] = addr;                            // id→addr 反查索引（onHit/remove 用）
+    debugMeta_sync();                              // 断点表随 DebugMeta 持久化（M-04 会话）
+    log(INFO, &quot;DBG-BP&quot;, &quot;breakpoint set&quot;, &quot;E_OK&quot;);
+    return id;
+}
+// remove / enable / disable: 断点管理（按 id 反查 addr 后操作；评审 08-4）
+// 无效 id 幂等（评审 09-6 联动 / 落实 N8）：id 不存在则直接返回，不产生 UB（remove 兜底清理可安全调用）
+void remove_bp(BpId id)     { if (idIndex.count(id) == 0) return; uint32_t a = idIndex[id]; M17_bpControl(id, REMOVE); breakpointTable.erase(a); idIndex.erase(id); debugMeta_sync(); }
+void enable_bp(BpId id)     { if (idIndex.count(id) == 0) return; M17_bpControl(id, ENABLE); breakpointTable[idIndex[id]].enabled = 1; }
+void disable_bp(BpId id)    { if (idIndex.count(id) == 0) return; M17_bpControl(id, DISABLE); breakpointTable[idIndex[id]].enabled = 0; }
+// restoreFromMeta: 会话恢复（DebugMeta → 断点表，id 重映射，评审 08-6）
+void restoreFromMeta(DebugMeta* meta) {
+    for (i = 0; i &lt; meta-&gt;bpCount; i++) {          // 按 addr 重建 + 重新注册，丢弃旧 id
+        BpId id = m17_bp(meta-&gt;bps[i].addr);
+        Breakpoint bp = { id, meta-&gt;bps[i].addr, meta-&gt;bps[i].cond,
+                          meta-&gt;bps[i].enabled, meta-&gt;bps[i].sourceType, 0 };
+        breakpointTable[bp.addr] = bp; idIndex[id] = bp.addr;
+    }
+}
+// 注：M-17 bp 生命周期经 bpControl 接口（M-17 v1.2 已落地，08-2 联动）：
+//     op=REMOVE/ENABLE/DISABLE；self_iss 移除/启停 hookTable，qemu 映射 RSP z0/Z0。</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 命中检测与条件求值</h3>
+<p class="body">命中检测（hitCheck(pc)）为唯一命中入口（评审 08-1）：挂载于 M-17 hook pre=1 阶段（指令执行前拦截，与 M-17 17-6 pre 钩子一致；评审 08-5），冻结点 = 指令执行前的 SimState。O(1) 查表命中优先于全量指令回调（表93 性能行）——即断点走专用快速路径（PC 比对），不触发 onInstruction 全量钩子。条件断点命中 PC 后由 condEval 求值：地址/寄存器表达式经 M-17 readMem/readReg 抽象读取（不感知内核实现），求值异常按未命中处理并记日志（限频，评审 08-7）。命中确认后调用 onHit(bp)；临时断点（sourceType=1）命中即自动移除（评审 08-3）。伪代码如下：</p>
+<pre class="code"><code>// hitCheck: 唯一命中入口（M-17 hook pre=1 阶段调用；地址快判 + cond 统一求值，评审 08-1/08-5）
+BpId hitCheck(uint32_t pc) {
+    if (!breakpointTable.has(pc)) return NO_HIT;   // O(1) 查表，未命中直接返回
+    Breakpoint* bp = &amp;breakpointTable[pc];
+    if (!bp-&gt;enabled) return NO_HIT;               // 禁用断点不命中
+    if (bp-&gt;cond[0] != &#x27;\0&#x27; &amp;&amp; !condEval(bp))     // 条件断点：求值失败按未命中（限频记日志）
+        return NO_HIT;
+    if (bp-&gt;sourceType == TEMP) remove_bp(bp-&gt;id); // 临时断点命中即自动移除（评审 08-3）
+    return bp-&gt;id;                                 // 命中 → onHit（经 idIndex 反查）
+}
+// condEval: 条件表达式求值（地址/寄存器表达式，经 M-17 抽象；评审 P-05）
+int condEval(Breakpoint* bp) {
+    ExprResult r = exprEngine_eval(bp-&gt;cond);      // 解析并求值（地址/寄存器）
+    if (r.err) {                                   // 求值失败按未命中；日志限频 ≥1s（评审 08-7）
+        if (now - lastCondErrLog &gt;= 1s) { log(WARN, &quot;DBG-BP&quot;, &quot;cond eval fail&quot;, &quot;E_CTX-08&quot;); lastCondErrLog = now; }
+        return 0;
+    }
+    return r.value != 0;
+}
+// onHit: 命中回调（源 4.3.1.3；E1 关键控制事件，5.2 图3）
+void onHit(BpId id) {
+    freezeState();                                 // M-09 暂停冻结（SimState 对齐量子边界，冻结点=指令执行前）
+    publish(&quot;breakpointHit&quot;, id);                  // M-05 E1 可靠投递（ack/重试）
+    checkpoint(&quot;breakpoint_hit&quot;);                  // M-04 检查点（关键事件，RPO ≤2s）
+    log(INFO, &quot;DBG-BP&quot;, &quot;breakpoint hit&quot;, &quot;E_OK&quot;);
+}</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 watch 变量监视（FR-11）</h3>
+<p class="body">addWatch(expr)：表达式分类（地址/寄存器）后登记 watchList；符号名表达式返回 E_CTX-08（P1 能力，评审 P-05）。求值节奏 = 暂停态即时求值 + 运行态量子边界轮询（节流 ≤200ms 刷新预算）；值变化经 M-05 publish(watchUpdate) 推送前端。伪代码如下：</p>
+<pre class="code"><code>// addWatch: 注册变量监视（MVP = 地址/寄存器表达式；符号名 → E_CTX-08）
+void addWatch(const char* expr) {
+    uint8_t kind = classifyExpr(expr);             // 0=地址 / 1=寄存器 / 2=符号名
+    if (kind == SYMBOL) return E_CTX-08;           // 符号名监视 P1（依赖 DWARF/栈帧，评审 P-05）
+    WatchItem w = { strncpy(w.expr, expr, 63), kind, 0, 0 };
+    watchList.insert(w); debugMeta_sync();         // 随 DebugMeta 持久化
+}
+// watchPoll: 量子边界轮询求值（M-12 节奏驱动；节流 ≤200ms 刷新预算）
+void watchPoll(uint64_t now) {
+    for (w : watchList) {
+        uint32_t v; err_t e = (w.kind == REG)
+            ? m17_readReg(w.expr, &amp;v)              // 寄存器（M-17 抽象）
+            : m17_readMem(parseAddr(w.expr), 4, &amp;v); // 地址（M-17 抽象）
+        uint8_t newErr = (e != OK) ? 1 : 0;        // 本次求值错误标记
+        if (newErr == w.evalErr &amp;&amp; v == w.lastValue) continue; // 值/错误态均未变，不推
+        w.evalErr = newErr;
+        if (newErr == 0) w.lastValue = v;          // 仅成功时刷新值
+        publish(&quot;watchUpdate&quot;, w);                 // 值变化 或 evalErr 切换才推（评审 08-9）
+    }
+}
+// removeWatch: 移除监视
+void removeWatch(const char* expr) { watchList.erase(expr); debugMeta_sync(); }</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 与真实调试器的差异对照表</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:18%"><col style="width:34%"><col style="width:30%"><col style="width:18%"></colgroup><thead><tr><th style="width:18%;text-align:center">维度</th><th style="width:34%;text-align:center">真实硬件调试器（JTAG/GDB）</th><th style="width:30%;text-align:center">本平台建模（hook 表）</th><th style="width:18%;text-align:center">差异影响</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">断点载体</td><td style="text-align:left">硬件断点寄存器（数量有限，如 4~8 个）/ 软件断点 eBreak 改写指令</td><td style="text-align:left">M-17 hook 表（地址比对，无数量限制）</td><td style="text-align:left">数量无上限；不改写指令</td></tr><tr class="row1"><td style="text-align:center">指令缓存</td><td style="text-align:left">软件断点改指令污染 I-Cache/D-cache（需 flush）</td><td style="text-align:left">hook 表不改指令，无缓存污染（M-13 decodedCache 不受影响）</td><td style="text-align:left">命中检测零副作用（表91：无副作用）</td></tr><tr class="row0"><td style="text-align:center">命中历史</td><td style="text-align:left">部分调试器无命中计数</td><td style="text-align:left">hitCount 统计 + DebugMeta 持久化</td><td style="text-align:left">诊断/回归可断言</td></tr><tr class="row1"><td style="text-align:center">条件断点</td><td style="text-align:left">硬件比较器/软件求值（受断点资源限制）</td><td style="text-align:left">cond 表达式经 M-17 抽象求值（资源无关）</td><td style="text-align:left">QEMU 下 RSP Z0 不支持 cond → 降级无条件（M-17 17-9）</td></tr><tr class="row0"><td style="text-align:center">watch</td><td style="text-align:left">硬件观察点（数量有限）/ GDB 软件 watch</td><td style="text-align:left">表达式轮询求值（M-17 readReg/readMem）</td><td style="text-align:left">粒度到值变化；无硬件观察点语义</td></tr></tbody></table></div>
+
+<h2 id="sec4" class="h-sec">4 关键函数</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:30%"><col style="width:44%"></colgroup><thead><tr><th style="width:26%;text-align:center">函数</th><th style="width:30%;text-align:center">说明</th><th style="width:44%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">setBreakpoint(addr, cond)</td><td style="text-align:left">注册断点（PC / 条件；统一 m17_bp 地址快判）</td><td style="text-align:left">输入：地址/条件；输出：断点 id（M-17 唯一来源）；无效地址/重复 → E_CTX-07；评审 08-1/08-4</td></tr><tr class="row1"><td style="text-align:center">remove(id) / enable(id) / disable(id)</td><td style="text-align:left">断点管理（按 idIndex 反查 addr 操作）</td><td style="text-align:left">调 M-17 bpControl 启停；输出：更新后的断点表；启用位即时生效</td></tr><tr class="row0"><td style="text-align:center">hitCheck(pc)</td><td style="text-align:left">指令边界 PC 命中检查（pre=1 阶段，唯一命中入口）</td><td style="text-align:left">输入：当前 PC；输出：命中断点集合（优先于全量指令回调，表93）；临时断点命中即移除（评审 08-3/08-5）</td></tr><tr class="row1"><td style="text-align:center">onHit(bp)</td><td style="text-align:left">命中回调：暂停 + 上报 + 检查点</td><td style="text-align:left">调 M-09 暂停、M-05 publish(breakpointHit)、M-04 checkpoint（5.2 图3）</td></tr><tr class="row0"><td style="text-align:center">condEval(bp)</td><td style="text-align:left">条件表达式求值</td><td style="text-align:left">地址/寄存器表达式经 M-17 readReg/readMem；异常 → 未命中 + 限频日志（评审 08-7）</td></tr><tr class="row1"><td style="text-align:center">addWatch(expr) / removeWatch(expr)</td><td style="text-align:left">变量监视增删</td><td style="text-align:left">MVP 地址/寄存器表达式；符号名 → E_CTX-08（P1，评审 P-05）</td></tr><tr class="row0"><td style="text-align:center">watchPoll(now)</td><td style="text-align:left">监视轮询求值</td><td style="text-align:left">M-12 量子边界驱动；值变化或 evalErr 切换经 M-05 publish(watchUpdate)（评审 08-9）</td></tr><tr class="row1"><td style="text-align:center">debugMeta_sync() / restoreFromMeta()</td><td style="text-align:left">断点/watch 表持久化与恢复</td><td style="text-align:left">随 M-04 会话 DebugMeta 序列化（→ M-23）；恢复按 addr 重注册 + id 重映射（评审 08-6）</td></tr></tbody></table></div>
+
+<h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 断点命中处理流程（源 5.2 图3 对齐）</h3>
+<p class="body">断点命中属于 E1 关键控制事件，采用可靠投递（ack/重试）。命中检测挂载于 M-17 hook pre=1 阶段（指令执行前拦截，与 M-17 17-6 pre 钩子一致；评审 08-5），冻结点 = 指令执行前的 SimState；命中后暂停冻结仿真状态（SimState 采样对齐量子边界），并作为关键事件触发检查点落盘（RPO ≤2s 宿主时间口径）；前端在事件缺口或命令超时后主动拉取状态对账（reconcile）。</p>
+<svg class="flow-svg" viewBox="0 0 760 620" role="img" aria-label="断点命中处理流程">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2f5bd6"/>
+    </marker>
+  </defs>
+  <style>
+    .bp-box{fill:#eef2fb;stroke:#2f5bd6;stroke-width:1.5;rx:6}
+    .bp-txt{font-size:12.5px;fill:#1f2937;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+    .bp-sub{font-size:11px;fill:#4b5563;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+    .bp-arrow{stroke:#2f5bd6;stroke-width:1.6;marker-end:url(#ar)}
+    .bp-dec{fill:#fff;stroke:#d97757;stroke-width:1.5;rx:8}
+    .bp-dec-txt{font-size:11.5px;fill:#7c2d12;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+  </style>
+  <rect class="bp-box" x="300" y="18" width="160" height="46"/>
+  <text class="bp-txt" x="380" y="38" text-anchor="middle">1 注册断点</text>
+  <text class="bp-sub" x="380" y="54" text-anchor="middle">setBreakpoint → M-17 hook</text>
+  <line class="bp-arrow" x1="380" y1="64" x2="380" y2="94"/>
+  <rect class="bp-box" x="300" y="94" width="160" height="46"/>
+  <text class="bp-txt" x="380" y="114" text-anchor="middle">2 注入检查点</text>
+  <text class="bp-sub" x="380" y="130" text-anchor="middle">指令计数边界（M-12 量子）</text>
+  <line class="bp-arrow" x1="380" y1="140" x2="380" y2="170"/>
+  <rect class="bp-box" x="300" y="170" width="160" height="46"/>
+  <text class="bp-txt" x="380" y="190" text-anchor="middle">3 PC 命中检测</text>
+  <text class="bp-sub" x="380" y="206" text-anchor="middle">hitCheck：O(1) 查表优先全量回调</text>
+  <line class="bp-arrow" x1="380" y1="216" x2="380" y2="246"/>
+  <rect class="bp-dec" x="285" y="246" width="190" height="52"/>
+  <text class="bp-dec-txt" x="380" y="266" text-anchor="middle">未命中（含 cond 求值失败）</text>
+  <text class="bp-dec-txt" x="380" y="284" text-anchor="middle">→ 继续执行，不暂停</text>
+  <path class="bp-arrow" d="M380,298 L380,330"/>
+  <rect class="bp-box" x="300" y="330" width="160" height="46"/>
+  <text class="bp-txt" x="380" y="350" text-anchor="middle">4 条件求值</text>
+  <text class="bp-sub" x="380" y="366" text-anchor="middle">cond 经 M-17 readReg/readMem</text>
+  <line class="bp-arrow" x1="380" y1="376" x2="380" y2="406"/>
+  <rect class="bp-box" x="300" y="406" width="160" height="46"/>
+  <text class="bp-txt" x="380" y="426" text-anchor="middle">5 暂停冻结</text>
+  <text class="bp-sub" x="380" y="442" text-anchor="middle">M-09：SimState 对齐量子边界</text>
+  <line class="bp-arrow" x1="380" y1="452" x2="380" y2="482"/>
+  <rect class="bp-box" x="300" y="482" width="160" height="46"/>
+  <text class="bp-txt" x="380" y="502" text-anchor="middle">6 可靠上报 breakpointHit</text>
+  <text class="bp-sub" x="380" y="518" text-anchor="middle">M-05 E1：ack/重试</text>
+  <line class="bp-arrow" x1="380" y1="528" x2="380" y2="558"/>
+  <rect class="bp-box" x="300" y="558" width="160" height="46"/>
+  <text class="bp-txt" x="380" y="578" text-anchor="middle">7 触发检查点</text>
+  <text class="bp-sub" x="380" y="594" text-anchor="middle">M-04 checkpoint：RPO ≤2s</text>
+</svg>
+<div class="flow-mobile">
+<div class="flow-step"><span class="num">1</span><span class="txt">注册断点<br><span class="flow-branch">setBreakpoint(addr, cond) → M-17 hook 注册（4.3.1.4）</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">2</span><span class="txt">注入检查点<br><span class="flow-branch">指令计数边界（M-12 量子化混合调度）</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">3</span><span class="txt">PC 命中检测<br><span class="flow-branch">hitCheck(pc)：O(1) 查表，优先于全量指令回调（表93）</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">4</span><span class="txt">条件求值<br><span class="flow-branch">cond 表达式经 M-17 readReg/readMem 抽象求值（评审 P-05）</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">5</span><span class="txt">命中（或未命中继续）<br><span class="flow-branch">cond 求值异常按未命中处理并记日志（4.3.1.5）</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">6</span><span class="txt">暂停冻结<br><span class="flow-branch">M-09 暂停：SimState 采样对齐量子边界</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">7</span><span class="txt">可靠上报 breakpointHit<br><span class="flow-branch">M-05 E1 通道 publish，ack/重试（5.2 图3）</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">8</span><span class="txt">触发检查点<br><span class="flow-branch">M-04 checkpoint（关键事件，RPO ≤2s 宿主时间口径）</span></span></div>
+</div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:22%"><col style="width:50%"><col style="width:28%"></colgroup><thead><tr><th style="width:22%;text-align:center">协作模块</th><th style="width:50%;text-align:center">协作内容</th><th style="width:28%;text-align:center">触发时机</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-17（执行后端）</td><td style="text-align:left">m17_bp 地址快判注册 + bpControl 生命周期（评审 08-2）；指令边界 pre=1 阶段 hitCheck（评审 08-5）；cond/watch 经 readReg/readMem 求值</td><td style="text-align:left">注册命令时 / 每指令边界（命中检测）/ watch 轮询</td></tr><tr class="row1"><td style="text-align:center">M-09（单步引擎）</td><td style="text-align:left">onHit 调暂停冻结；stepOver 注入临时断点（sourceType=1）</td><td style="text-align:left">断点命中时 / 单步跨调用时</td></tr><tr class="row0"><td style="text-align:center">M-05（会话/命令）</td><td style="text-align:left">publish(breakpointHit) E1 可靠投递；watchUpdate 推送</td><td style="text-align:left">命中上报 / watch 值变化（节流）</td></tr><tr class="row1"><td style="text-align:center">M-04（会话）</td><td style="text-align:left">checkpoint(breakpoint_hit) 关键事件检查点；DebugMeta 持久化</td><td style="text-align:left">断点命中时 / 断点表变更时</td></tr><tr class="row0"><td style="text-align:center">M-10（寄存器/内存）</td><td style="text-align:left">（协作）表达式求值通道复用 M-17 抽象，不直接依赖 M-10</td><td style="text-align:left">—</td></tr><tr class="row1"><td style="text-align:center">M-21（日志）</td><td style="text-align:left">注册/命中/求值异常日志</td><td style="text-align:left">注册命令 / 命中回调 / cond 求值失败</td></tr></tbody></table></div>
+
+<h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置</h3>
+<p class="body">本模块错误码归属 E_CTX 族（3.4 表16，一场景一码）：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:18%"><col style="width:40%"><col style="width:42%"></colgroup><thead><tr><th style="width:18%;text-align:center">错误码</th><th style="width:40%;text-align:center">场景</th><th style="width:42%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">E_CTX-07</td><td style="text-align:left">无效地址 / 重复注册（断点地址未对齐指令边界 / 已存在）</td><td style="text-align:left">拒绝注册；log(WARN, &quot;DBG-BP&quot;, &quot;invalid addr/dup&quot;, &quot;E_CTX-07&quot;)</td></tr><tr class="row1"><td style="text-align:center">E_CTX-08</td><td style="text-align:left">符号名表达式（watch/cond 符号名，P1 能力）</td><td style="text-align:left">返回 E_CTX-08 拒绝；提示降级为地址/寄存器表达式（评审 P-05）</td></tr><tr class="row0"><td style="text-align:center">条件求值异常</td><td style="text-align:left">cond 表达式求值失败（非法表达式/读取异常）</td><td style="text-align:left">按未命中处理并记日志（4.3.1.5）；不暂停、不中断执行</td></tr><tr class="row1"><td style="text-align:center">watch 求值失败</td><td style="text-align:left">监视表达式求值失败（地址越界/寄存器不可读）</td><td style="text-align:left">置 evalErr=1 保留监视项；前端显示错误值；不阻塞主循环</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）QEMU 后端（L1 子集）：RSP Z0 不支持条件断点 cond → 条件断点降级为无条件断点并向前端提示（M-17 17-9）；QEMU 无 hook，命中检测走 M-17 RSP 语义（断点命中经 T05 停止回复交付）——hitCheck/condEval 在 QEMU 下不参与，hitCount 仅本地累计（评审 08-8）。</p>
+<p class="body">（2）L1 无 L2 hook：全量指令回调不可用 → 命中检测仍可用（断点为 L1 基础能力）；watch 轮询求值经 RSP 寄存器/内存读命令（qXfer/m），节奏受 RSP 往返限制（尽力而为）。</p>
+<p class="body">（3）断点持久化不可用：DebugMeta 写入失败 → 运行态断点表保持可用，告警提示「断点不随会话恢复」；不阻断调试。</p>
+<p class="body">（4）前端缺口对账：breakpointHit 事件缺口或命令超时 → 前端主动 reconcile 拉取断点表/暂停状态（5.2 图3）。</p>
+<p class="body">（5）命中风暴：断点命中暂停后不自动继续；用户显式 resume 后才再次执行，无自激路径。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表91（M-08 行）：测试要点 = PC/条件断点命中；重复/无效地址拒绝；通过准则 = 命中准确、无副作用。展开用例表如下（核心模块覆盖率 ≥70%，源文档 7.3 表92）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:22%"><col style="width:38%"><col style="width:40%"></colgroup><thead><tr><th style="width:22%;text-align:center">用例</th><th style="width:38%;text-align:center">输入 / 步骤</th><th style="width:40%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（源 2.5/7.1 对齐）</td><td style="text-align:left">按 9.1.1 端口契约表逐项校验 setBreakpoint/remove/enable/disable/hitCheck/onHit/addWatch 的接口签名、输入校验、输出结构与错误码；替代实现（替代断点管理器）接入前必须同端口契约测试全绿</td><td style="text-align:left">契约测试全绿；契约变更须同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">PC 断点命中</td><td data-label="输入 / 步骤" style="text-align:left">0x80000000 设断点，run 至该地址</td><td data-label="通过准则" style="text-align:left">命中准确；PauseInfo.reason=断点命中；hitCount+1</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">条件断点（真/假）</td><td data-label="输入 / 步骤" style="text-align:left">cond=&quot;x1==5&quot;；x1=5 与 x1=6 两种状态运行</td><td data-label="通过准则" style="text-align:left">x1=5 命中暂停；x1=6 不暂停继续执行</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">重复/无效地址拒绝（评审 E_CTX-07）</td><td data-label="输入 / 步骤" style="text-align:left">同一地址重复注册；未对齐地址注册</td><td data-label="通过准则" style="text-align:left">E_CTX-07 拒绝；断点表不变</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">命中无副作用（表91）</td><td data-label="输入 / 步骤" style="text-align:left">断点命中后比对寄存器/内存状态</td><td data-label="通过准则" style="text-align:left">除暂停外零状态修改（不改指令、不污染 M-13 decodedCache）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">优先于全量回调（表93）</td><td data-label="输入 / 步骤" style="text-align:left">注册断点同时开 onInstruction 钩子，统计回调次数</td><td data-label="通过准则" style="text-align:left">命中路径不触发全量指令回调（性能优化生效）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">可靠上报（E1）</td><td data-label="输入 / 步骤" style="text-align:left">publish(breakpointHit) 注入 ack 超时</td><td data-label="通过准则" style="text-align:left">重试直至 ack；事件不丢（5.2 图3）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">检查点触发（M-04）</td><td data-label="输入 / 步骤" style="text-align:left">断点命中后核对检查点</td><td data-label="通过准则" style="text-align:left">checkpoint(breakpoint_hit) 落盘；RPO ≤2s 口径</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">watch 地址/寄存器（FR-11）</td><td data-label="输入 / 步骤" style="text-align:left">监视 0x80000010 与 x1，运行中改写</td><td data-label="通过准则" style="text-align:left">值变化经 watchUpdate 推送（节流）；暂停态即时求值</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">watch 符号名 → E_CTX-08（评审 P-05）</td><td data-label="输入 / 步骤" style="text-align:left">addWatch(&quot;g_counter&quot;)</td><td data-label="通过准则" style="text-align:left">返回 E_CTX-08 拒绝；提示降级为地址/寄存器表达式</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">DebugMeta 持久化恢复</td><td data-label="输入 / 步骤" style="text-align:left">设断点+watch 后保存会话，重建会话</td><td data-label="通过准则" style="text-align:left">断点表/watchList 从 DebugMeta 恢复；id 重映射后按 addr 重新注册（评审 08-6）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">临时断点自动移除（评审 08-3）</td><td data-label="输入 / 步骤" style="text-align:left">stepOver 注入临时断点，命中一次后继续 run</td><td data-label="通过准则" style="text-align:left">命中后断点表移除临时断点；后续运行不再命中</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">enable/disable 即时生效（评审 08-10）</td><td data-label="输入 / 步骤" style="text-align:left">断点命中一次后 disable，再次运行至该地址</td><td data-label="通过准则" style="text-align:left">禁用断点不命中；enable 后恢复命中</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">watch 轮询节流（评审 08-10）</td><td data-label="输入 / 步骤" style="text-align:left">高频改写监视地址，统计 watchUpdate 推送次数</td><td data-label="通过准则" style="text-align:left">推送按 ≤200ms 预算节流合并；值变化不丢</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">watch evalErr 切换推送（评审 08-9）</td><td data-label="输入 / 步骤" style="text-align:left">监视地址先合法后越界（或反之）</td><td data-label="通过准则" style="text-align:left">evalErr 0↔1 切换时发 watchUpdate；前端可见错误态</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">cond 求值失败限频（评审 08-7）</td><td data-label="输入 / 步骤" style="text-align:left">非法 cond 表达式运行 N 条指令</td><td data-label="通过准则" style="text-align:left">WARN 日志 ≥1s 限频；不刷屏、执行不中断</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">命中风暴防护（评审 08-10）</td><td data-label="输入 / 步骤" style="text-align:left">命中暂停后不 resume 直接观察；resume 后再次运行至断点</td><td data-label="通过准则" style="text-align:left">暂停期间不自动继续、无自激；resume 后正常再次命中</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">无效 id 幂等（评审 09-6 联动/N8）</td><td data-label="输入 / 步骤" style="text-align:left">对已移除/从未注册的 id 调 remove_bp/enable_bp/disable_bp</td><td data-label="通过准则" style="text-align:left">直接返回无副作用（不触发 idIndex 越界 UB）；stepOver 兜底清理可安全重复调用</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">QEMU cond 降级（M-17 17-9）</td><td data-label="输入 / 步骤" style="text-align:left">QEMU 后端注册条件断点</td><td data-label="通过准则" style="text-align:left">降级为无条件断点并提示；命中经 RSP T05 交付，hitCheck 不参与（评审 08-8）</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）表驱动断点管理：breakpointTable 单一数据源，命中检测 O(1) 查表，注册/删除/使能只改表与钩子启用位，无隐式状态。</p>
+<p class="body">（2）命中检测与回调解耦：hitCheck 只判命中，onHit 只做副作用动作（暂停/上报/检查点），可独立单测。</p>
+<p class="body">（3）表达式引擎统一（评审 P-05）：cond 条件与 watch 共用 exprEngine（地址/寄存器表达式），一处解析一处求值，符号名扩展点预留（P1）。</p>
+<p class="body">（4）抽象隔离：一切读写经 M-17 抽象（readReg/readMem/bp 注册/bpControl 生命周期，评审 08-2），M-08 无内核感知，双内核替换不影响本模块。</p>
+<p class="body">（5）CI 门禁：核心模块单测覆盖率 ≥70%（估算基线，源文档 7.3 表92）；断点用例纳入确定性夹具（同种子同输入序列断言命中行为一致）。</p>
+<p class="body">（6）契约层可替换性（源 2.5 对齐）：本模块对外的 driving 端口收敛到 9.1.1 端口契约表，替代实现（替代断点管理器）遵守同端口契约并通过契约测试即可接入。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-08 责任：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:16%"><col style="width:38%"><col style="width:46%"></colgroup><thead><tr><th style="width:16%;text-align:center">质量属性</th><th style="width:38%;text-align:center">目标（估算基线）</th><th style="width:46%;text-align:center">M-08 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">性能</td><td style="text-align:left">调试态全钩子 ≥0.5–1 MIPS（表93：M-08 责任 = PC 命中优先于全量回调）</td><td style="text-align:left">断点命中走专用快速路径（O(1) 查表），不触发 onInstruction 全量回调</td></tr><tr class="row1"><td style="text-align:center">可维护性</td><td style="text-align:left">核心模块覆盖率 ≥70%；模块即积木可替换（源 2.5）</td><td style="text-align:left">表驱动 + 命中/回调解耦 + 表达式引擎统一；端口契约测试（9.1.1）</td></tr><tr class="row0"><td style="text-align:center">可靠性</td><td style="text-align:left">关键事件可靠投递（E1，5.2 图3）</td><td style="text-align:left">breakpointHit ack/重试；前端缺口 reconcile 对账；检查点 RPO ≤2s</td></tr><tr class="row1"><td style="text-align:center">可用性</td><td style="text-align:left">命令响应 ≤500ms（表93）</td><td style="text-align:left">断点注册/管理 O(1)；watch 节流推送（≤200ms 刷新预算）</td></tr><tr class="row0"><td style="text-align:center">合规</td><td style="text-align:left">业务模块 → 横切组件单向依赖（4.7 表86）</td><td style="text-align:left">本模块只经 M-17 抽象 + M-05/M-04/M-21 横切通道，不自行实现日志/探针/持久化</td></tr></tbody></table></div>
+<h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:30%"><col style="width:46%"></colgroup><thead><tr><th style="width:24%;text-align:center">依赖方</th><th style="width:30%;text-align:center">被依赖方</th><th style="width:46%;text-align:center">依赖内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-08（断点管理器）</td><td style="text-align:left">M-17 ExecutionBackend</td><td style="text-align:left">run/step/hook/寄存器/内存/快照抽象接口（3.2.4 表13；2.1 表5）</td></tr><tr class="row1"><td style="text-align:center">M-08（断点管理器）</td><td style="text-align:left">M-05（会话/命令）</td><td style="text-align:left">命令与事件通道：publish(breakpointHit/watchUpdate)</td></tr><tr class="row0"><td style="text-align:center">M-08（断点管理器）</td><td style="text-align:left">M-09（单步引擎）</td><td style="text-align:left">暂停协作（onHit 暂停冻结）；stepOver 注入临时断点</td></tr><tr class="row1"><td style="text-align:center">M-08（断点管理器）</td><td style="text-align:left">M-04（会话）</td><td style="text-align:left">checkpoint 关键事件触发；DebugMeta 断点表持久化</td></tr><tr class="row0"><td style="text-align:center">M-08（断点管理器）</td><td style="text-align:left">M-21（日志）</td><td style="text-align:left">注册/命中/求值异常日志（NFR-07）</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表40 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层，本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现（替代断点管理器）遵守同端口契约并通过契约测试（7.1）即可接入，无需改动其他模块：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:30%"><col style="width:16%"><col style="width:54%"></colgroup><thead><tr><th style="width:30%;text-align:center">端口 / 服务</th><th style="width:16%;text-align:center">方向</th><th style="width:54%;text-align:center">契约（输入 → 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:left">setBreakpoint(addr, cond)</td><td style="text-align:center">提供（driving）</td><td style="text-align:left">输入：地址/条件；输出：断点 id（M-17 唯一来源）；无效地址/重复 → E_CTX-07；统一 m17_bp 地址快判注册，cond 求值归 hitCheck（评审 08-1/08-4）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">remove(id) / enable(id) / disable(id)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输出：更新后的断点表（按 idIndex 反查 addr 操作，调 M-17 bpControl）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">hitCheck(pc)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输入：当前 PC；输出：命中断点集合（pre=1 阶段唯一命中入口，优先于全量指令回调，表93；临时断点命中即移除，评审 08-3/08-5）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">onHit(bp)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">调用 M-09 暂停、M-05 publish(breakpointHit)、M-04 checkpoint（5.2 图3）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">addWatch(expr) / removeWatch(expr)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">符号名表达式返回 E_CTX-08（P1 能力，评审 P-05）；输出：确认；值/evalErr 变化推送（评审 08-9）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-17（ExecutionBackend）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">bp 注册 + bpControl 生命周期（M-17 v1.2 已落地，08-2 联动）；readReg/readMem 求值；QEMU 下命中经 RSP T05 交付（评审 08-8；3.2.4 表13）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-09（单步引擎）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">暂停协作；stepOver 临时断点注入</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-05（会话/命令）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">publish(breakpointHit/watchUpdate) 事件通道</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-04（会话）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">checkpoint 关键事件；DebugMeta 持久化</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-21（日志）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">注册/命中/求值异常日志</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<p class="body">注册/删除/使能命令 → log(INFO, "DBG-BP", …)；命中 → log(INFO, "DBG-BP", "breakpoint hit", "E_OK")；无效地址/重复注册 → log(WARN, "DBG-BP", …, "E_CTX-07")；条件求值异常 → log(WARN, "DBG-BP", "cond eval fail", "E_CTX-08")，限频 ≥1s（评审 08-7）。产品/嵌入式工作台不可见（角色边界，§3.4），仅管理员通道可查。</p>
+</main>
+</div>
+</body>
+</html>

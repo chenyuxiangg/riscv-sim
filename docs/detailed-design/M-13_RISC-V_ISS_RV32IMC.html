@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-13 RISC-V ISS（RV32IMC）模块详细设计</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='4' width='24' height='24' rx='3' fill='%231e3a8a'/%3E%3Crect x='9' y='9' width='14' height='14' rx='1.5' fill='%23f8fafc'/%3E%3Cpath d='M14 8V4M18 8V4M14 28v-4M18 28v-4M8 14H4M8 18H4M28 14h-4M28 18h-4' stroke='%231e3a8a' stroke-width='2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://miaoda.feishu.cn/fonts/css2?family=Noto+Sans+SC:wght@400;500;700;900&display=swap">
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15px; font-weight:700; color:#374151; margin:18px 0 8px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { margin:0 0 10px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  white-space:pre; margin:10px 0 16px; }
+.code-title { font-size:13px; font-weight:700; color:#111827; margin:16px 0 4px; }
+.fig { margin:14px auto; text-align:center; }
+.fig img { max-width:100%; height:auto; border:1px solid var(--line); border-radius:4px; }
+.fig figcaption { font-size:13px; color:var(--ink-2); margin-top:6px; }
+.caption { text-align:center; font-size:13px; color:var(--ink-2); margin:6px 0 4px; }
+.flow-svg { width:100%; height:auto; }
+.flow-mobile { display:none; }
+.flow-step { display:flex; gap:10px; margin:8px 0; align-items:flex-start; }
+.flow-step .num { flex:0 0 26px; height:26px; border-radius:50%; background:var(--brand);
+  color:#fff; font-weight:700; font-size:13px; display:flex; align-items:center; justify-content:center; }
+.flow-step .txt { font-size:14px; }
+.flow-branch { margin:6px 0 6px 36px; font-size:13.5px; color:var(--ink-2); }
+.flow-arrow { text-align:center; color:#9aa1af; font-size:16px; line-height:1; margin:2px 0; }
+/* 导航 */
+.nav-toggle { margin:14px 0; }
+.nav-toggle summary { cursor:pointer; font-weight:700; color:var(--brand);
+  padding:9px 12px; border:1px solid var(--line); border-radius:6px; background:var(--head-bg); list-style:none; }
+.nav-toggle summary::-webkit-details-marker { display:none; }
+.nav-box { display:flex; flex-direction:column; gap:2px; padding:10px 4px 2px; }
+.nav-l1 { color:var(--brand); font-weight:700; text-decoration:none; padding:3px 4px; }
+.nav-l2 { color:var(--ink-2); text-decoration:none; padding:3px 4px 3px 18px; font-size:13.5px; }
+.nav-l1:hover,.nav-l2:hover { color:var(--brand-2); text-decoration:underline; }
+@media (min-width:768px) {
+  .wrap { display:grid; grid-template-columns:260px minmax(0,1fr); gap:28px; align-items:start; }
+  .doc-head { grid-column:1 / -1; }
+  .nav-toggle { position:sticky; top:16px; max-height:calc(100vh - 32px); overflow:auto; }
+  .nav-toggle summary { pointer-events:none; }
+  .flow-svg { display:block; }
+  .flow-mobile { display:none; }
+}
+@media (max-width:767px) {
+  .flow-svg { display:none; }
+  .flow-mobile { display:block; }
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media print {
+  .nav-toggle { display:none; }
+  .wrap { display:block; max-width:none; padding:0; }
+  .doc-title { font-size:20px; }
+  .doc-table, .fig, .code { break-inside:avoid; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="doc-head">
+<h1 class="doc-title">M-13 RISC-V ISS（RV32IMC）模块详细设计</h1>
+<p class="subtitle">RISC-V 仿真平台 · 模块详细设计系列 · 对应《模块设计说明书》4.4.2 节</p>
+<p class="version">HTML 版 v1.5（2026-10-17 量子混合调度体系增补）· 源设计《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11）</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11；2026-10-13 契约层版新增 2.5 平台共享契约层与各模块端口契约表）</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.4.2（④ 仿真内核层）；端口契约 = 源文档表55</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">FR-04：RV32I、IM 扩展、伪指令与别名</td></tr><tr class="row1"><td style="text-align:center">能力等级</td><td style="text-align:left">ExecutionBackend L3（全量）</td></tr><tr class="row0"><td style="text-align:center">MVP 状态</td><td style="text-align:left">P0 主承担模块（MVP 必需）</td></tr><tr class="row1"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.3：13-1 decode 不递归保留原码；13-2/13-3 钩子前置与取指对齐；13-4/B13-1 中断接口统一；13-5 表键含 funct7；13-6 缓存失效；13-7 E_ISS-03/mcycle 粒度；13-8 测试补充；13-9 WFI/MRET/mtvec；13-10/B13-5 trap 风暴与快照契约；B13-2 契约签名；B13-4 trap 输出通道；v1.4 残留修订（N1~N5）：压缩返回地址按 d.compressed 调整 pc+2；mcycle 口径统一为退休数+取指配额；E_ISS-03 移除不可构造子场景；on_fetch 异常时不触发；9.1.1 driven 补齐 M-12/M-16/M-21/M-20/M-17/M-22；v1.5 量子混合调度体系增补（2026-10-17）：§5.3 由「与调度引擎的交互」更名「量子混合调度」并向下拆分 5.3.1~5.3.8（虚拟时间模型 sim_now 三类更新入口/ISS 指令时序模型与时延表/事务级总线模型 TLM 与 T_arb+T_route+T_slave 延时分解/外设事件与 MTIME-SysTick 定时器建模/全局调度器宿主机执行模型 Worker 线程与看门狗/调度核心算法伪代码/约束与边界说明/参考范式 Renode-QEMU icount-Spike）；原 5.3 两段文字保留为引言；2.2 补 mtime/mtimecmp CSR（时钟源=sim_now 折算，5.3.4 联动 MTIE）；新增图 2（sim_now 三类推进）/图 3（总线事务四步）/图 4（主线程-Worker 架构）</td></tr><tr class="row0"><td style="text-align:center">源文档对齐</td><td style="text-align:left">v1.4（2026-10-13）：新增 9.1.1 端口契约（driving/driven，源表55）；CH7 新增契约测试；CH8 补契约层可替换性；表号引用随源文档调整（3.2.4 表12→表13、4.4.2 表40/41→表53/54、7.2 表67→表91、7.3 表68→表92、8 表69→表93）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；RISC-V 特权架构规范 v20260120；RISC-V 非特权架构规范 v20260120（RV32I 2.1/M 2.0/C 2.0）</td></tr><tr class="row0"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-11（v1.2 修订 2026-10-12；v1.3 评审修订 2026-10-13；v1.4 契约层对齐 2026-10-13；v1.5 量子混合调度增补 2026-10-17）</td></tr></tbody></table></div>
+</header>
+<nav class="nav-toggle"><details open><summary>目录</summary><div class="nav-box"><a class="nav-l1" href="#sec1">1 功能概述</a>
+<a class="nav-l2" href="#sec1-1">1.1 模块定位</a>
+<a class="nav-l2" href="#sec1-2">1.2 需求与约束</a>
+<a class="nav-l2" href="#sec1-3">1.3 MVP 范围与预留</a>
+<a class="nav-l1" href="#sec2">2 数据描述</a>
+<a class="nav-l2" href="#sec2-1">2.1 核心数据结构</a>
+<a class="nav-l2" href="#sec2-2">2.2 CSR 实现清单（M 模式为主）</a>
+<a class="nav-l2" href="#sec2-3">2.3 数据流说明</a>
+<a class="nav-l1" href="#sec3">3 指令集实现设计</a>
+<a class="nav-l2" href="#sec3-1">3.1 取指、译码、执行框架与硬件差异</a>
+<a class="nav-l2" href="#sec3-2">3.2 表驱动分派伪代码</a>
+<a class="nav-l2" href="#sec3-3">3.3 RV32I 基础指令集实现清单（48 条）</a>
+<a class="nav-l2" href="#sec3-4">3.4 RV32M 乘除扩展实现清单（8 条）</a>
+<a class="nav-l2" href="#sec3-5">3.5 RV32C 压缩指令实现清单（26 条）</a>
+<a class="nav-l2" href="#sec3-6">3.6 特殊语义与边界说明</a>
+<a class="nav-l1" href="#sec4">4 关键函数</a>
+<a class="nav-l1" href="#sec5">5 处理流程</a>
+<a class="nav-l2" href="#sec5-1">5.1 指令执行主循环</a>
+<a class="nav-l2" href="#sec5-2">5.2 异常与中断处理</a>
+<a class="nav-l2" href="#sec5-3">5.3 量子混合调度</a>
+<a class="nav-l2" href="#sec5-3-1">5.3.1 虚拟时间模型 sim_now</a>
+<a class="nav-l2" href="#sec5-3-2">5.3.2 ISS 指令时序模型与时延表</a>
+<a class="nav-l2" href="#sec5-3-3">5.3.3 事务级总线模型（TLM）与总线延时计算</a>
+<a class="nav-l2" href="#sec5-3-4">5.3.4 外设事件与定时器时序建模</a>
+<a class="nav-l2" href="#sec5-3-5">5.3.5 全局调度器宿主机执行模型</a>
+<a class="nav-l2" href="#sec5-3-6">5.3.6 调度核心算法伪代码</a>
+<a class="nav-l2" href="#sec5-3-7">5.3.7 约束与边界说明</a>
+<a class="nav-l2" href="#sec5-3-8">5.3.8 参考范式说明</a>
+<a class="nav-l2" href="#sec5-4">5.4 调试态行为</a>
+<a class="nav-l1" href="#sec6">6 异常处理</a>
+<a class="nav-l2" href="#sec6-1">6.1 错误码与处置</a>
+<a class="nav-l2" href="#sec6-2">6.2 边界与降级</a>
+<a class="nav-l1" href="#sec7">7 测试设计与可维护性</a>
+<a class="nav-l2" href="#sec7-1">7.1 测试要点与关键用例</a>
+<a class="nav-l2" href="#sec7-2">7.2 可维护性手段</a>
+<a class="nav-l1" href="#sec8">8 质量属性落实</a>
+<a class="nav-l1" href="#sec9">9 接口依赖</a>
+<a class="nav-l2" href="#sec9-1">9.1 依赖关系</a>
+<a class="nav-l2" href="#sec9-1-1">9.1.1 端口契约（driving/driven）</a>
+<a class="nav-l2" href="#sec9-2">9.2 与 ExecutionBackend 契约对应</a>
+<a class="nav-l2" href="#sec9-3">9.3 日志对接（M-21）</a></div></details></nav>
+<main>
+
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-13 为平台自研的 RISC-V 指令集模拟器（ISS），实现 RV32IMC 指令集的解释执行，是仿真内核层（④层）的核心执行单元。模块以“取指、解码、执行”的单指令闭环为基本工作方式：两级解码（opcode 到 funct3/funct7）、表驱动执行、指令与访存钩子、CSR（M 模式为主）、同步异常陷入，中断在量子边界采样后交付。</p>
+<p class="body">在平台整体中，M-13 不直接面对前端：所有调试与运行控制均经 ExecutionBackend 抽象（M-17）接入，本模块作为该抽象的自研实现，声明能力等级 L3（L1 基础调试、L2 指令钩子、L3 快照恢复与事件流检查点）。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:64%"><col style="width:22%"></colgroup><thead><tr><th style="width:14%;text-align:center">类别</th><th style="width:64%;text-align:center">约束内容</th><th style="width:22%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">功能</td><td style="text-align:left">RV32I 基础指令集、M 扩展（乘除法）、伪指令与别名支持</td><td style="text-align:left">FR-04</td></tr><tr class="row1"><td style="text-align:center">正确性</td><td style="text-align:left">与 Spike golden 参考模拟器差分对拍，行为不一致记录为内核缺陷并阻断发布</td><td style="text-align:left">FR-04、第7章</td></tr><tr class="row0"><td style="text-align:center">确定性</td><td style="text-align:left">同一种子加同一时间戳化输入事件序列，结果唯一；事件队列按（虚拟时间, 插入序）稳定排序；虚拟时间不依赖宿主时钟</td><td style="text-align:left">2.4 表6</td></tr><tr class="row1"><td style="text-align:center">合规</td><td style="text-align:left">自研实现采用 BSD/MIT 许可，不引入 GPL 传染；QEMU 仅进程隔离 + 标准 RSP/QMP 交互、不改源码（M-17 双内核）</td><td style="text-align:left">2.4 表6</td></tr><tr class="row0"><td style="text-align:center">安全</td><td style="text-align:left">固件在 WASM 沙箱内执行，不触碰宿主 API（NFR-04）；ELF/DWARF 输入大小与复杂度上限由 M-06 解析侧承接</td><td style="text-align:left">2.4 表6、NFR-04、3.3</td></tr><tr class="row1"><td style="text-align:center">性能</td><td style="text-align:left">WASM 解释执行不低于 5 至 10 MIPS；调试态全钩子不低于 0.5 至 1 MIPS（估算基线，实现后实测校准）</td><td style="text-align:left">第8章</td></tr><tr class="row0"><td style="text-align:center">体积</td><td style="text-align:left">内核 WASM 压缩后不大于 1.5 MiB（估算基线）</td><td style="text-align:left">3.3 表14</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：RV32IMC 全量指令（指令全集与实现方式见第 3 章）、M 模式 CSR（mtvec、mstatus、mepc、mcause、mtval、mie、mip 等）、同步异常与中断（详见 5.2）、指令与访存钩子、全状态快照与恢复（配合 M-20/M-23）。</p>
+<p class="body">预留项（本模块仅保留演进承接说明，不展开实现）：多核/SMP（FR-18，P2，经 M-17 扩展预留）；S/U 特权模式与虚拟内存（源设计基线未纳入 MVP，后续按需演进）；mtvec 向量模式（MVP 实现直接模式，向量表模式按 FR-06 的向量表配置需求预留）。</p>
+
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:22%"><col style="width:18%"><col style="width:60%"></colgroup><thead><tr><th style="width:22%;text-align:center">数据结构</th><th style="width:18%;text-align:center">类型</th><th style="width:60%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">regFile</td><td style="text-align:left">uint32[32]</td><td style="text-align:left">通用寄存器组 x0 至 x31，x0 恒为 0，写入忽略</td></tr><tr class="row1"><td style="text-align:center">pc</td><td style="text-align:left">uint32</td><td style="text-align:left">程序计数器，取指与分支/JAL/JALR/MRET 更新</td></tr><tr class="row0"><td style="text-align:center">csrSet</td><td style="text-align:left">Map&amp;lt;uint16, uint32&amp;gt;</td><td style="text-align:left">CSR 集合（M 模式为主），条目见 2.2 节实现清单</td></tr><tr class="row1"><td style="text-align:center">privMode</td><td style="text-align:left">enum（M）</td><td style="text-align:left">特权模式，MVP 仅实现 M 模式</td></tr><tr class="row0"><td style="text-align:center">decodedCache</td><td style="text-align:left">结构体</td><td style="text-align:left">两级解码结果缓存，字段定义见 2.1.1</td></tr><tr class="row1"><td style="text-align:center">hookRegistry</td><td style="text-align:left">结构体</td><td style="text-align:left">on_fetch/on_instruction_pre/post/on_access/on_trap 钩子集合，字段定义见 2.1.1</td></tr><tr class="row0"><td style="text-align:center">trapInfo</td><td style="text-align:left">struct</td><td style="text-align:left">当前 trap 信息，字段定义见 2.1.1（cause/tval/pc/priv/is_interrupt）</td></tr><tr class="row1"><td style="text-align:center">perfCounters</td><td style="text-align:left">结构体</td><td style="text-align:left">指令计数、trap 计数、访存计数等，字段定义见 2.1.1</td></tr></tbody></table></div>
+<h4 class="h-sub3">2.1.1 复杂结构字段定义</h4>
+<p class="lead">trapInfo 承载当前陷入信息，是异常/中断处理的统一载体（语义见 5.2.4）：</p>
+<pre class="code"><code>// trapInfo：当前陷入信息（同步异常与中断通用）
+struct TrapInfo {
+    uint32_t cause;        // 陷入原因：bit31=1 表示中断；低 12 位为异常/中断码（见 5.2）
+    uint32_t tval;         // 陷入值：访存异常记访存地址、非法指令记指令编码、其余记 0
+    uint32_t pc;           // 触发陷入的指令 PC（同步异常）；中断陷入时为下一条待执行指令 PC
+    uint8_t  priv;         // 陷入发生时的特权模式（MVP 恒为 M）
+    uint8_t  is_interrupt; // 1=中断陷入，0=同步异常；供调试事件与证据流区分（M-20）
+};</code></pre>
+<p class="lead">decodedCache 缓存两级解码结果，避免热点路径重复解码；含失效规则（store 写内存失效对应 pc、断点地址禁止缓存，评审 13-6）：</p>
+<pre class="code"><code>// decodedCache：两级解码结果缓存（单条目，按 pc 命中）
+struct DecodedCache {
+    uint32_t raw;          // 原始指令编码（压缩指令保留 16 位原码，用于 mtval 记录）
+    uint16_t compressedRaw;// 压缩指令 16 位原码（非压缩时为 0；评审 13-1）
+    uint32_t pc;           // 缓存的取指地址，命中条件
+    uint8_t  valid;        // 有效标志；可配置关闭（调试期建议关闭以保真）
+    struct {
+        uint8_t  opcode;   // inst[6:0]，第一级分派键
+        uint8_t  funct3;   // inst[14:12]，第二级分派键
+        uint8_t  funct7;   // inst[31:25]（R 型），区分 ADD/SUB、SRL/SRA 等
+        uint8_t  rd, rs1, rs2; // 通用寄存器索引（x0 写忽略）
+        int32_t  imm;      // 已按指令类型符号扩展的立即数
+        uint8_t  cat;      // 指令类别：R/I/S/B/U/J/CSR/SYS/LOAD/STORE/FENCE
+        uint8_t  compressed; // 1=压缩指令（展开字段填充、compressed 保留为 1）
+    } dec;                 // 解码结果
+};
+// 失效规则（评审 13-6）：
+// 1) 任何 store 完成（自修改代码）→ invalidate 命中该 pc 的缓存条目；
+// 2) 断点地址禁止缓存（软件断点写指令字后若缓存命中将执行陈旧解码）；
+// 3) decodedCache 可整体关闭（调试期保真）。</code></pre>
+<p class="lead">hookRegistry 是调试与观测的统一钩子通道，断点（M-08）、trace（M-11）、探针（M-18）、覆盖率共享；回调原型 fn_t(HookKind, const HookEvent*, void*) 与前后钩子语义见下（评审 13-2/B13-3）：</p>
+<pre class="code"><code>// hookRegistry：钩子注册表（断点 M-08、trace M-11、探针 M-18、覆盖率共享）
+// 回调原型（评审 B13-3）：typedef void (*fn_t)(HookKind kind, const HookEvent* ev, void* ctx);
+// HookEvent = { pc, raw, compressedRaw, TrapInfo* trap }；ctx 为注册时上下文。
+struct HookRegistry {
+    fn_t on_fetch;         // 取指成功后触发（含对齐检查结果）；取指异常不触发本钩子，走同步陷入并触发 on_trap（评审 N4）
+    fn_t on_instruction_pre;  // 执行前触发：断点命中检测优先于此回调（评审 13-2）
+    fn_t on_instruction_post; // 执行成功后、pc_update 前触发（异常路径不触发）
+    fn_t on_access;        // 访存钩子：读写事件触发（地址、宽度、值、方向）
+    fn_t on_trap;          // trap 钩子：同步异常/中断陷入时触发（trap 事件输出通道，评审 B13-4）
+    uint32_t hook_mask;    // 钩子使能掩码：调试态全开时执行性能降级至 0.5-1 MIPS（估算基线）
+    uint32_t in_hook;      // 重入保护：钩子回调内不再触发钩子，防止递归
+};</code></pre>
+<p class="lead">perfCounters 为指标与确定性记录提供数据源（mcycle/minstret 读自此处；推进粒度见注释，评审 13-7）：</p>
+<pre class="code"><code>// perfCounters：性能与行为计数（供 HMS 与指标通道 FR-20 预留）
+struct PerfCounters {
+    uint64_t inst_retired; // 已退休指令数（minstret 数据源）：每条成功退休指令 +1，异常/中断路径不递增（评审 13-7）
+    uint64_t traps;        // 陷入总数（同步异常 + 中断）
+    uint64_t trap_streak;  // 连续陷入计数（trap 风暴检测，评审 13-10）
+    uint64_t loads;        // 访存读次数
+    uint64_t stores;       // 访存写次数
+    uint64_t cycles;       // 虚拟周期数（mcycle 数据源，由 M-12 推进，不依赖宿主时钟）
+    // 推进规则（评审 13-7/N2）：mcycle = 退休指令数 + 取指周期配额（取指/译码等固定周期由
+    // M-12 每量子指令配额折算，默认每条指令折 1 个取指周期）；异常/中断陷入本身不计入退休；
+    // 与 Spike 对拍时 mcycle 不比对（仅比对 minstret 与架构状态）。
+};</code></pre>
+<p class="lead">中断交付契约 PendingIntr 与 trap 事件输出通道 TrapEvent：与 M-16/M-12 的交接结构一致，两级仲裁衔接与 mip 视图语义见 5.2.2/5.2.3（评审 13-4/B13-1/B13-4）：</p>
+<pre class="code"><code>// 中断交付契约（评审 13-4 / B13-1）：与 M-12 v1.1 的 PendingIntr 交接一致
+// 两级仲裁衔接：M-16 在量子边界做全局仲裁（特权级比较 + 优先级表）输出单一最高
+// 优先级中断；本模块仅检查全局使能（mstatus.MIE）与 cause 编码，不重复仲裁。
+struct PendingIntr {
+    uint32_t line;   // 中断线号（3=MSI，7=MTI，11=MEI）
+    uint32_t cause;  // mcause 编码 = IRQ_BASE(0x80000000) + line
+    uint8_t  prio;   // M-16 仲裁输出的优先级（预留；交付时本模块按使能检查）
+};
+// 接口：bool iss_pending_intr(); void iss_take_intr(const PendingIntr* p);
+// mip 视图语义：mip 为 M-16 交付的挂起状态只读视图（level 中断由外设/软件保持请求，
+// edge 触发由 M-16 按触发方式管理）；本模块不写 mip。
+
+// trap 事件输出通道（评审 B13-4）：trapInfo → on_trap 钩子（M-18 probe）+ M-12 事件
+// 结构（EV_TRAP）+ M-20 事件流记录；消费者：调试器（M-08~M-11）/M-19 波形/M-20 回放。
+struct TrapEvent {
+    uint64_t    time;    // 虚拟时间（M-12 提供）
+    uint64_t    seq;     // 事件序（稳定排序锚点）
+    uint32_t    cause;   // 陷入原因（bit31=1 中断）
+    uint32_t    tval;    // 陷入值（非法压缩指令记 16 位原码，评审 13-1）
+    uint32_t    pc;      // 陷入 PC
+    uint8_t     priv;    // 特权模式（MVP=M）
+    uint8_t     is_interrupt; // 1=中断，0=同步异常
+};
+
+// 快照契约（评审 B13-5）：全状态快照/恢复（L3，配合 M-20/M-23）
+struct EngineSnapshot {
+    uint32_t version;    // 快照格式版本（不兼容变更时递增）
+    uint32_t crc;        // 载荷校验（CRC32，恢复前校验）
+    uint32_t regFile[32];// 通用寄存器
+    uint32_t csrSet[N];  // CSR 集合（mstatus/mie/mepc/mcause/mtval/mtvec...）
+    uint32_t pc;         // 程序计数器
+    uint8_t  privMode;   // 特权模式（MVP=M）
+    uint64_t instRetired;// 已退休指令数（恢复后续计）
+    uint64_t trapStreak; // 连续陷入计数（恢复后续计）
+    // 恢复动作（评审 B13-5）：清 decodedCache；重置性能计数基准；
+    // 配合 M-12 恢复 progressBase 与虚拟时间（防止恢复后 watchdog 误判）。
+};</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 CSR 实现清单（M 模式为主）</h3>
+<p class="body">以 RISC-V 特权架构规范 v20260120 的 M 模式基线实现，MVP 覆盖下表 CSR；未列出 CSR 视为不存在，访问产生非法指令异常（E_ISS-02）。每行一个 CSR，地址与访问属性单独成列，避免合并歧义。</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:22%"><col style="width:12%"><col style="width:14%"><col style="width:52%"></colgroup><thead><tr><th style="width:22%;text-align:center">CSR</th><th style="width:12%;text-align:center">地址</th><th style="width:14%;text-align:center">访问属性</th><th style="width:52%;text-align:center">用途与实现要点</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">misa</td><td style="text-align:center">0x301</td><td style="text-align:center">RO</td><td style="text-align:left">机器 ISA 扩展：声明 RV32IMC（MXL=1，I/M/C 位置位）；只读</td></tr><tr class="row1"><td style="text-align:center">mvendorid</td><td style="text-align:center">0xF11</td><td style="text-align:center">RO</td><td style="text-align:left">厂商标识：平台常量</td></tr><tr class="row0"><td style="text-align:center">marchid</td><td style="text-align:center">0xF12</td><td style="text-align:center">RO</td><td style="text-align:left">架构标识：平台常量</td></tr><tr class="row1"><td style="text-align:center">mimpid</td><td style="text-align:center">0xF13</td><td style="text-align:center">RO</td><td style="text-align:left">实现标识：平台常量</td></tr><tr class="row0"><td style="text-align:center">mstatus</td><td style="text-align:center">0x300</td><td style="text-align:center">RW</td><td style="text-align:left">机器状态：实现 MIE、MPIE、MPP 位；写保留位按规范忽略</td></tr><tr class="row1"><td style="text-align:center">mie</td><td style="text-align:center">0x304</td><td style="text-align:center">RW</td><td style="text-align:left">中断使能：实现 MSIE、MTIE、MEIE 位（见 5.2.2）</td></tr><tr class="row0"><td style="text-align:center">mip</td><td style="text-align:center">0x344</td><td style="text-align:center">RO</td><td style="text-align:left">中断挂起：只读视图，由 M-16 交付的挂起状态更新</td></tr><tr class="row1"><td style="text-align:center">mtvec</td><td style="text-align:center">0x305</td><td style="text-align:center">RW</td><td style="text-align:left">陷入向量基址：MODE 为 WARL，仅支持直接模式（MODE=0）；写非 0 MODE 值被钳制为 0（评审 13-9）</td></tr><tr class="row0"><td style="text-align:center">mepc</td><td style="text-align:center">0x341</td><td style="text-align:center">RW</td><td style="text-align:left">陷入 PC：异常/中断发生时保存返回地址（语义见 5.2.4）</td></tr><tr class="row1"><td style="text-align:center">mcause</td><td style="text-align:center">0x342</td><td style="text-align:center">RW</td><td style="text-align:left">陷入原因：记录异常码/中断码（bit31 为中断标志）</td></tr><tr class="row0"><td style="text-align:center">mtval</td><td style="text-align:center">0x343</td><td style="text-align:center">RW</td><td style="text-align:left">陷入值：记录非法指令编码/访存地址等</td></tr><tr class="row1"><td style="text-align:center">mcycle</td><td style="text-align:center">0xB00</td><td style="text-align:center">RO</td><td style="text-align:left">虚拟周期计数器（源：perfCounters.cycles；mcycle = 退休指令数 + 取指周期配额，trap 不递增；与 Spike 对拍不比对 mcycle，评审 13-7/N2）</td></tr><tr class="row0"><td style="text-align:center">minstret</td><td style="text-align:center">0xB02</td><td style="text-align:center">RO</td><td style="text-align:left">已退休指令计数器（源：perfCounters.inst_retired；成功退休 +1）</td></tr><tr class="row1"><td style="text-align:center">mtime</td><td style="text-align:center">0x701</td><td style="text-align:center">RW（固件可写）</td><td style="text-align:left">机器定时器：64 位计数（低位 32 位可读；写入实现为低位写+进位语义）；时钟源 = 全局 sim_now 折算（5.3.4-2，v1.5 增补）</td></tr><tr class="row0"><td style="text-align:center">mtimecmp</td><td style="text-align:center">0x741</td><td style="text-align:center">RW</td><td style="text-align:left">定时器比较值：mtime 达到 mtimecmp 时置 MTIP 挂起（经 M-16 交付，5.3.4-2）；写比较值即重新调度 timer_next_trigger 事件</td></tr></tbody></table></div>
+<h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+<p class="body">指令数据流：fetch 以 pc 从 M-14 取指（32 位/16 位宽度判定见 3.1），decode 产出解码结果，execute 依据解码结果表驱动执行；访存读写经 M-14 分发到 RAM 或外设。trap 数据流：异常/中断写入 trapInfo 并同步更新 mepc、mcause、mtval 与 pc（完整流程见 5.2.4）。</p>
+<h2 id="sec3" class="h-sec">3 指令集实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 取指、译码、执行框架与硬件差异</h3>
+<p class="body">取指：以 pc 经 M-14 读取指令。先做对齐前置校验再判宽度（评审 13-3）：（a）pc 低 1 位为 1 → 取指未对齐异常（mcause=0）；（b）pc 低 2 位为 11（pc%4==0）→ 32 位指令，一次读 4 字节；（c）pc 低 2 位为 00/01/10（pc%2==0 且非 4 对齐）→ 16 位压缩指令，一次读 2 字节。未对齐检查先于宽度判定与取指访存检查；取指访存未映射时产生取指访存异常（E_BUS-01，mcause=1）。on_fetch 钩子（评审 N4）：取指成功（含对齐检查通过）后触发；发生取指异常（未对齐/取指访存异常）时不触发 on_fetch，异常经同步陷入路径处理并触发 on_trap。与真实硬件不同，真实 RISC-V 核按 32 位粒度取指（I$ 行缓冲），压缩指令只是从 32 位行中选低 16 位，而本模拟器按实际宽度读取。</p>
+<p class="body">译码：两级解码。第一级按 opcode 分派指令类，第二级按 funct3/funct7 及立即数类型确定具体指令；表驱动键 = opcode|funct3|funct7 组合（ADD 与 MUL 以 funct7 区分，无 funct7 类别恒取 0，评审 13-5）。立即数按类型拼接并符号扩展（I/S/B/U/J 型规则见下表），B/J 型立即数末位恒为 0。压缩指令按象限与 funct3 展开为等价 32 位编码后填充解码字段，但保留 compressed/compressedRaw 原码（不递归，评审 13-1），mtval 对非法压缩指令记 16 位原码——与真实硬件不同：硬件有独立的压缩解码器（部分核），本模拟器统一经展开层。</p>
+<pre class="code"><code>// 立即数格式（译码阶段按类型拼接并符号扩展；B/J 型立即数末位恒为 0，无需 ×2 的移位实现）
+// I 型：imm[11:0] = inst[31:20]
+// S 型：imm[4:0]=inst[11:7]，imm[11:5]=inst[31:25]
+// B 型：imm[12]=inst[31]，imm[10:5]=inst[30:25]，imm[4:1]=inst[11:8]，imm[11]=inst[7]
+// U 型：imm[31:12] = inst[31:12]，低 12 位补 0
+// J 型：imm[20]=inst[31]，imm[10:1]=inst[30:21]，imm[11]=inst[20]，imm[19:12]=inst[19:12]
+// 符号扩展统一为：高位置 1 时按 32 位有符号补全（sext）；B/J 型扩展后末位为 0（对齐目标）</code></pre>
+<p class="body">执行：查表驱动分派到执行函数（伪代码见 3.2）。公共执行规则：访存经 M-14 并按宽度读写；CSR 经 checkCsrAccess 校验；x0 为目标时寄存器写忽略；指令执行前后触发钩子。</p>
+<p class="body">与真实硬件的公共差异（逐指令特有的差异在 3.3/3.4/3.5 各表“与硬件差异点”列说明）：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:16%"><col style="width:42%"><col style="width:42%"></colgroup><thead><tr><th style="width:16%;text-align:center">维度</th><th style="width:42%;text-align:center">本模拟器（解释执行）</th><th style="width:42%;text-align:center">真实 RISC-V 硬件核</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">执行模型</td><td style="text-align:left">顺序、逐指令、指令边界即结果边界</td><td style="text-align:left">流水线（IF/ID/EX/MEM/WB），存在数据冒险、旁路与分支预测</td></tr><tr class="row1"><td style="text-align:center">分支</td><td style="text-align:left">总是顺序取指后按结果修正，无惩罚</td><td style="text-align:left">分支预测错误有冲刷惩罚；JALR 为间接跳转预测难点</td></tr><tr class="row0"><td style="text-align:center">存储层次</td><td style="text-align:left">无 cache、无 TLB、无 store buffer，访存语义即时</td><td style="text-align:left">有 cache/写缓冲，可见性、一致性与延迟不同（本平台不建模）</td></tr><tr class="row1"><td style="text-align:center">时钟</td><td style="text-align:left">虚拟周期由 M-12 推进，与宿主时钟解耦，确定性</td><td style="text-align:left">真实周期，性能与功耗相关</td></tr><tr class="row0"><td style="text-align:center">异常/中断</td><td style="text-align:left">指令边界采样与陷入，量子边界仲裁（5.2）</td><td style="text-align:left">流水线内精确异常点，延迟为流水线级</td></tr><tr class="row1"><td style="text-align:center">CSR/乘除</td><td style="text-align:left">单周期语义、无惩罚</td><td style="text-align:left">CSR 慢路径、乘除多周期（时延差异不影响架构语义）</td></tr><tr class="row0"><td style="text-align:center">x0 寄存器</td><td style="text-align:left">写入直接忽略</td><td style="text-align:left">物理上存在但写被丢弃，语义一致</td></tr><tr class="row1"><td style="text-align:center">非对齐访存</td><td style="text-align:left">允许（与 Spike golden 一致），见 3.6</td><td style="text-align:left">实现相关：部分核支持、部分不支持，未定义行为</td></tr></tbody></table></div>
+<h3 id="sec3-2" class="h-sub">3.2 表驱动分派伪代码</h3>
+<p class="body">两级解码 + 表驱动执行的核心示意（本模块实现框架，非最终源码；访存/CSR/钩子的真实调用经 M-14/M-16/M-18 接口）：</p>
+<pre class="code"><code>// 伪代码：表驱动解码与执行（示意，非真实源码）
+// 解码键（评审 13-5）：op 键 = opcode | funct3 | funct7 组合；
+// ADD(opcode=0110011, funct3=000, funct7=0000000) 与 MUL(..., funct7=0000001) 以 funct7 区分；
+// 无 funct7 的类别（I/S/B/U/J 等）funct7 恒取 0；键未命中 → 非法指令（E_ISS-01）。
+typedef struct {
+    uint8_t opcode, funct3, funct7;
+    uint8_t rd, rs1, rs2;
+    int32_t imm;
+    uint8_t cat;           // R/I/S/B/U/J/CSR/SYS/LOAD/STORE/FENCE
+    uint8_t compressed;    // 1=压缩指令（保留原码，评审 13-1）
+    uint16_t compressedRaw;// 压缩指令 16 位原码（非压缩为 0）
+    uint32_t raw;          // 原始指令编码（mtval 记录源）
+} Dec;
+
+ExecFn exec_table[DECODE_KEY_NUM];   // 表驱动：解码键 → 执行函数（初始化时构建）
+
+Dec decode(uint32_t inst) {
+    Dec d = {0};
+    if ((inst &amp; 0x3) == 0x3) {                 // 低 2 位=11 → 32 位指令
+        d.opcode = inst &amp; 0x7f;
+        d.funct3 = (inst &gt;&gt; 12) &amp; 0x7;
+        d.funct7 = (inst &gt;&gt; 25) &amp; 0x7f;
+        d.rd = (inst &gt;&gt; 7) &amp; 0x1f;
+        d.rs1 = (inst &gt;&gt; 15) &amp; 0x1f;
+        d.rs2 = (inst &gt;&gt; 20) &amp; 0x1f;
+        d.imm = imm_extend(imm_type(d), inst); // 按 I/S/B/U/J 拼接+符号扩展
+        d.cat = classify(d);                   // R/I/S/B/U/J/CSR/SYS/LOAD/STORE/FENCE
+        d.compressed = 0; d.compressedRaw = 0; d.raw = inst;
+    } else {                                   // 低 2 位≠11 → 16 位压缩指令
+        d.compressed = 1; d.compressedRaw = inst &amp; 0xffff; d.raw = inst &amp; 0xffff;
+        uint32_t wide = c_expand(inst);        // C.xxx → 等价 32 位编码（表 3.5）
+        // 不递归：仅用展开编码填充 opcode/funct3/funct7/rd/rs1/rs2/imm/cat（评审 13-1）
+        fill_fields(&amp;d, wide);                 // compressed/compressedRaw/raw 保留原码
+    }
+    return d;
+}
+
+int execute(Dec d) {
+    // 断点命中检测前置（评审 13-2）：软件断点（M-08）在取指后、执行前判定
+    if (breakpoint_hit(d.pc)) { hook(BP_HIT); return BP_HIT; }
+    on_instruction_pre(&amp;d);                    // 执行前钩子（含 trace/探针）
+    ExecFn f = exec_table[decode_key(d.opcode, d.funct3, d.funct7)];
+    if (f == NULL) return E_ISS_01;            // 非法指令→同步陷入（键未命中）
+    int rc = f(&amp;d);                            // 执行：访存经 bus_read/write（M-14）、
+                                               // CSR 经 check_csr（E_ISS-02）
+    if (rc != OK) return rc;                   // E_BUS-01/E_ISS-02 → 同步陷入（不触发 post 钩子）
+    on_instruction_post(&amp;d);                   // 执行成功后钩子（异常路径不触发，评审 13-2）
+    pc_update(&amp;d);                             // PC 更新：顺序 +4/+2；分支/JAL/JALR/MRET
+    return OK;
+}
+
+// 执行函数示例（ADD）：exec_table[KEY(0110011, 000, 0000000)]
+static int exec_add(Dec* d) {
+    if (d-&gt;rd != 0) reg_file[d-&gt;rd] = reg_file[d-&gt;rs1] + reg_file[d-&gt;rs2];
+    return OK;
+}</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 RV32I 基础指令集实现清单（48 条）</h3>
+<p class="body">以下每行给出编码、译码要点（位域与立即数格式）、执行动作、以及与真实硬件的差异点。通用位域：rd=inst[11:7]、rs1=inst[19:15]、rs2=inst[24:20]、funct3=inst[14:12]；立即数格式与符号扩展规则见 3.1。</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:9%"><col style="width:13%"><col style="width:26%"><col style="width:28%"><col style="width:24%"></colgroup><thead><tr><th style="width:9%;text-align:center">指令</th><th style="width:13%;text-align:center">编码（opcode/funct3/funct7）</th><th style="width:26%;text-align:center">译码要点</th><th style="width:28%;text-align:center">执行动作</th><th style="width:24%;text-align:center">与硬件差异点</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">LB</td><td style="text-align:center">0000011/000</td><td style="text-align:left">I 型：rd=inst[11:7]，rs1=inst[19:15]，imm=sext(inst[31:20])</td><td style="text-align:left">addr=regFile[rs1]+imm；经 M-14 读 8 位，符号扩展后写 regFile[rd]（x0 忽略）；触发 onAccess</td><td style="text-align:left">取指读 4 字节、数据读 1 字节，模拟器无 cache/无未对齐限制；硬件可能按 32 位粒度总线读后选字节</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">LH</td><td data-label="编码" style="text-align:center">0000011/001</td><td data-label="译码" style="text-align:left">I 型，同 LB</td><td data-label="执行" style="text-align:left">读 16 位，符号扩展后写 rd</td><td data-label="差异" style="text-align:left">同 LB；硬件对齐要求见 3.6（模拟器与 Spike 一致允许非对齐）</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">LW</td><td data-label="编码" style="text-align:center">0000011/010</td><td data-label="译码" style="text-align:left">I 型，同 LB</td><td data-label="执行" style="text-align:left">读 32 位写 rd</td><td data-label="差异" style="text-align:left">模拟器一次读 32 位；硬件多周期 load 有流水线延迟，模拟器无</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">LBU</td><td data-label="编码" style="text-align:center">0000011/100</td><td data-label="译码" style="text-align:left">I 型，同 LB</td><td data-label="执行" style="text-align:left">读 8 位，零扩展后写 rd</td><td data-label="差异" style="text-align:left">同 LB</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">LHU</td><td data-label="编码" style="text-align:center">0000011/101</td><td data-label="译码" style="text-align:left">I 型，同 LB</td><td data-label="执行" style="text-align:left">读 16 位，零扩展后写 rd</td><td data-label="差异" style="text-align:left">同 LB</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">SB</td><td data-label="编码" style="text-align:center">0100011/000</td><td data-label="译码" style="text-align:left">S 型：imm[4:0]=inst[11:7]，imm[11:5]=inst[31:25]，sext</td><td data-label="执行" style="text-align:left">经 M-14 写 8 位：值取 regFile[rs2] 低 8 位；触发 onAccess</td><td data-label="差异" style="text-align:left">模拟器按字节写；硬件写回粒度与总线宽度相关，模拟器不建模</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">SH</td><td data-label="编码" style="text-align:center">0100011/001</td><td data-label="译码" style="text-align:left">S 型，同 SB</td><td data-label="执行" style="text-align:left">写 16 位：值取 regFile[rs2] 低 16 位</td><td data-label="差异" style="text-align:left">同 SB</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">SW</td><td data-label="编码" style="text-align:center">0100011/010</td><td data-label="译码" style="text-align:left">S 型，同 SB</td><td data-label="执行" style="text-align:left">写 32 位：regFile[rs2]</td><td data-label="差异" style="text-align:left">同 SB</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">SLLI</td><td data-label="编码" style="text-align:center">0010011/001/0000000</td><td data-label="译码" style="text-align:left">I 型但 imm 仅取 shamt=inst[24:20]（5 位）；funct7=0000000</td><td data-label="执行" style="text-align:left">regFile[rd]=regFile[rs1]&lt;&lt;shamt</td><td data-label="差异" style="text-align:left">模拟器单周期完成；硬件移位器位宽受限（RV32 5 位，同语义）</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">SRLI</td><td data-label="编码" style="text-align:center">0010011/101/0000000</td><td data-label="译码" style="text-align:left">shamt=inst[24:20]；funct7=0000000</td><td data-label="执行" style="text-align:left">逻辑右移 shamt 位</td><td data-label="差异" style="text-align:left">同 SLLI</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">SRAI</td><td data-label="编码" style="text-align:center">0010011/101/0100000</td><td data-label="译码" style="text-align:left">shamt=inst[24:20]；funct7=0100000（与 SRLI 以 funct7 区分）</td><td data-label="执行" style="text-align:left">算术右移：高位按符号位填充</td><td data-label="差异" style="text-align:left">同 SLLI</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">ADDI</td><td data-label="编码" style="text-align:center">0010011/000</td><td data-label="译码" style="text-align:left">I 型：imm=sext(inst[31:20])</td><td data-label="执行" style="text-align:left">regFile[rd]=regFile[rs1]+imm（x0 忽略）</td><td data-label="差异" style="text-align:left">模拟器无立即数旁路延迟；硬件有数据冒险/旁路，模拟器顺序执行天然无冒险</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">SLTI</td><td data-label="编码" style="text-align:center">0010011/010</td><td data-label="译码" style="text-align:left">I 型</td><td data-label="执行" style="text-align:left">regFile[rd]=（有符号）regFile[rs1]&lt;imm ? 1:0</td><td data-label="差异" style="text-align:left">比较器语义与硬件一致；模拟器无标志寄存器（RISC-V 无 EFLAGS）</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">SLTIU</td><td data-label="编码" style="text-align:center">0010011/011</td><td data-label="译码" style="text-align:left">I 型</td><td data-label="执行" style="text-align:left">无符号比较 regFile[rs1]&lt;imm 置 1（imm 先符号扩展再按无符号比较）</td><td data-label="差异" style="text-align:left">注意：imm 符号扩展后参与无符号比较，易错点已在对拍用例覆盖</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">XORI</td><td data-label="编码" style="text-align:center">0010011/100</td><td data-label="译码" style="text-align:left">I 型</td><td data-label="执行" style="text-align:left">regFile[rd]=regFile[rs1]^imm</td><td data-label="差异" style="text-align:left">同 ADDI</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">ORI</td><td data-label="编码" style="text-align:center">0010011/110</td><td data-label="译码" style="text-align:left">I 型</td><td data-label="执行" style="text-align:left">regFile[rd]=regFile[rs1]|imm</td><td data-label="差异" style="text-align:left">同 ADDI</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">ANDI</td><td data-label="编码" style="text-align:center">0010011/111</td><td data-label="译码" style="text-align:left">I 型</td><td data-label="执行" style="text-align:left">regFile[rd]=regFile[rs1]&amp;imm</td><td data-label="差异" style="text-align:left">同 ADDI</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">ADD</td><td data-label="编码" style="text-align:center">0110011/000/0000000</td><td data-label="译码" style="text-align:left">R 型：rd=inst[11:7]，rs1=inst[19:15]，rs2=inst[24:20]，funct3/funct7 区分</td><td data-label="执行" style="text-align:left">regFile[rd]=regFile[rs1]+regFile[rs2]</td><td data-label="差异" style="text-align:left">模拟器无寄存器重命名/旁路；硬件依赖项由流水线处理，模拟器顺序执行</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">SUB</td><td data-label="编码" style="text-align:center">0110011/000/0100000</td><td data-label="译码" style="text-align:left">R 型；funct7=0100000 与 ADD 区分</td><td data-label="执行" style="text-align:left">regFile[rd]=regFile[rs1]-regFile[rs2]</td><td data-label="差异" style="text-align:left">同 ADD</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">SLL</td><td data-label="编码" style="text-align:center">0110011/001/0000000</td><td data-label="译码" style="text-align:left">R 型；shamt=regFile[rs2][4:0]</td><td data-label="执行" style="text-align:left">regFile[rd]=regFile[rs1]&lt;&lt;(regFile[rs2]&amp;0x1f)</td><td data-label="差异" style="text-align:left">同 ADD；移位量取低 5 位，与硬件一致</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">SLT</td><td data-label="编码" style="text-align:center">0110011/010/0000000</td><td data-label="译码" style="text-align:left">R 型</td><td data-label="执行" style="text-align:left">regFile[rd]=（有符号）regFile[rs1]&lt;regFile[rs2] ? 1:0</td><td data-label="差异" style="text-align:left">同 ADD</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">SLTU</td><td data-label="编码" style="text-align:center">0110011/011/0000000</td><td data-label="译码" style="text-align:left">R 型</td><td data-label="执行" style="text-align:left">无符号比较置 1</td><td data-label="差异" style="text-align:left">同 ADD</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">XOR</td><td data-label="编码" style="text-align:center">0110011/100/0000000</td><td data-label="译码" style="text-align:left">R 型</td><td data-label="执行" style="text-align:left">regFile[rd]=regFile[rs1]^regFile[rs2]</td><td data-label="差异" style="text-align:left">同 ADD</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">SRL</td><td data-label="编码" style="text-align:center">0110011/101/0000000</td><td data-label="译码" style="text-align:left">R 型；shamt=regFile[rs2][4:0]</td><td data-label="执行" style="text-align:left">逻辑右移</td><td data-label="差异" style="text-align:left">同 ADD</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">SRA</td><td data-label="编码" style="text-align:center">0110011/101/0100000</td><td data-label="译码" style="text-align:left">R 型；funct7=0100000 与 SRL 区分</td><td data-label="执行" style="text-align:left">算术右移</td><td data-label="差异" style="text-align:left">同 ADD</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">OR</td><td data-label="编码" style="text-align:center">0110011/110/0000000</td><td data-label="译码" style="text-align:left">R 型</td><td data-label="执行" style="text-align:left">regFile[rd]=regFile[rs1]|regFile[rs2]</td><td data-label="差异" style="text-align:left">同 ADD</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">AND</td><td data-label="编码" style="text-align:center">0110011/111/0000000</td><td data-label="译码" style="text-align:left">R 型</td><td data-label="执行" style="text-align:left">regFile[rd]=regFile[rs1]&amp;regFile[rs2]</td><td data-label="差异" style="text-align:left">同 ADD</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">LUI</td><td data-label="编码" style="text-align:center">0110111</td><td data-label="译码" style="text-align:left">U 型：imm[31:12]=inst[31:12]，低 12 位补 0</td><td data-label="执行" style="text-align:left">regFile[rd]=imm&lt;&lt;12</td><td data-label="差异" style="text-align:left">模拟器直接拼接；硬件有立即数生成器，语义一致</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">AUIPC</td><td data-label="编码" style="text-align:center">0010111</td><td data-label="译码" style="text-align:left">U 型</td><td data-label="执行" style="text-align:left">regFile[rd]=pc+（imm&lt;&lt;12）</td><td data-label="差异" style="text-align:left">模拟器 pc 在指令边界取值；硬件 pc 为流水线内取指地址，语义一致</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">BEQ</td><td data-label="编码" style="text-align:center">1100011/000</td><td data-label="译码" style="text-align:left">B 型：imm[12]=inst[31]，imm[10:5]=inst[30:25]，imm[4:1]=inst[11:8]，imm[11]=inst[7]，×2 后 sext</td><td data-label="执行" style="text-align:left">条件满足（regFile[rs1]==regFile[rs2]）时 pc+=imm；不满足 pc+=4</td><td data-label="差异" style="text-align:left">模拟器无分支预测/无 BTB，总是顺序取指再修正；硬件预测错误有流水线冲刷惩罚</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">BNE</td><td data-label="编码" style="text-align:center">1100011/001</td><td data-label="译码" style="text-align:left">B 型</td><td data-label="执行" style="text-align:left">不相等时跳转</td><td data-label="差异" style="text-align:left">同 BEQ</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">BLT</td><td data-label="编码" style="text-align:center">1100011/100</td><td data-label="译码" style="text-align:left">B 型</td><td data-label="执行" style="text-align:left">有符号小于时跳转</td><td data-label="差异" style="text-align:left">同 BEQ</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">BGE</td><td data-label="编码" style="text-align:center">1100011/101</td><td data-label="译码" style="text-align:left">B 型</td><td data-label="执行" style="text-align:left">有符号大于等于时跳转</td><td data-label="差异" style="text-align:left">同 BEQ</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">BLTU</td><td data-label="编码" style="text-align:center">1100011/110</td><td data-label="译码" style="text-align:left">B 型</td><td data-label="执行" style="text-align:left">无符号小于时跳转</td><td data-label="差异" style="text-align:left">同 BEQ</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">BGEU</td><td data-label="编码" style="text-align:center">1100011/111</td><td data-label="译码" style="text-align:left">B 型</td><td data-label="执行" style="text-align:left">无符号大于等于时跳转</td><td data-label="差异" style="text-align:left">同 BEQ</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">JAL</td><td data-label="编码" style="text-align:center">1101111</td><td data-label="译码" style="text-align:left">J 型：imm[20]=inst[31]，imm[10:1]=inst[30:21]，imm[11]=inst[20]，imm[19:12]=inst[19:12]，×2 后 sext</td><td data-label="执行" style="text-align:left">regFile[rd]=pc+4（展开自压缩指令 C.JAL/C.JALR 时 rd=pc+2，见 3.5）；pc+=imm</td><td data-label="差异" style="text-align:left">模拟器单周期；硬件 JAL 在解码段即更新 pc（提前跳转），模拟器在指令末尾更新</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">JALR</td><td data-label="编码" style="text-align:center">1100111/000</td><td data-label="译码" style="text-align:left">I 型；imm=sext(inst[31:20])</td><td data-label="执行" style="text-align:left">regFile[rd]=pc+4（展开自压缩指令时 rd=pc+2，见 3.5）；pc=(regFile[rs1]+imm)&amp;~1（最低位清 0）</td><td data-label="差异" style="text-align:left">模拟器无分支预测；硬件 JALR 是间接跳转预测难点，模拟器精确</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">FENCE</td><td data-label="编码" style="text-align:center">0001111/000</td><td data-label="译码" style="text-align:left">I 型（fm=inst[31:28]，pred/succ=inst[27:20]/inst[19:15]）</td><td data-label="执行" style="text-align:left">MVP 单核模型下为空操作，仅保留解码与对拍</td><td data-label="差异" style="text-align:left">硬件需保证内存序（对 I/O 与外设可见性）；模拟器内存模型天然顺序，差异显著，须在文档/对拍中标注</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">ECALL</td><td data-label="编码" style="text-align:center">1110011（imm=0）</td><td data-label="译码" style="text-align:left">SYS 型：imm[11:0]=0</td><td data-label="执行" style="text-align:left">同步陷入：mepc←当前 ECALL 地址，mcause←11，mtval←0，pc←mtvec（流程见 5.2.4）</td><td data-label="差异" style="text-align:left">硬件在流水线内陷入，mepc 指向 ECALL 自身；模拟器在指令边界陷入，语义一致</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">EBREAK</td><td data-label="编码" style="text-align:center">1110011（imm=1）</td><td data-label="译码" style="text-align:left">SYS 型：imm[11:0]=1</td><td data-label="执行" style="text-align:left">同步陷入：mcause←3，mtval←0；同时触发 M-08 调试断点事件</td><td data-label="差异" style="text-align:left">同 ECALL；硬件配合调试器（如 gdb）行为，模拟器经 M-08 对接</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">MRET</td><td data-label="编码" style="text-align:center">1110011（funct7=0011000）</td><td data-label="译码" style="text-align:left">SYS 型：funct7=0011000，rs2=00010</td><td data-label="执行" style="text-align:left">mstatus.MIE←MPIE，MPIE←1；pc←mepc（流程见 5.2.4）</td><td data-label="差异" style="text-align:left">硬件在返回时同步恢复特权模式（MPP）；模拟器 MVP 仅 M 模式，MPP 检查从简</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">WFI</td><td data-label="编码" style="text-align:center">1110011（funct7=0001001）</td><td data-label="译码" style="text-align:left">SYS 型：funct7=0001001，rs2=00101</td><td data-label="执行" style="text-align:left">挂起等待中断：停止取指，中断经 M-16 交付后唤醒（配合 M-12 调度）</td><td data-label="差异" style="text-align:left">硬件 WFI 进入低功耗等待，事件到达唤醒；模拟器挂起执行线程，语义等价但功耗/时延模型不同</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">CSRRW</td><td data-label="编码" style="text-align:center">1110011/001</td><td data-label="译码" style="text-align:left">CSR 型：csr=inst[31:20]，rs1=inst[19:15]</td><td data-label="执行" style="text-align:left">old=csrSet[csr]（经 checkCsrAccess）；若 rs1≠x0 写新值；写 rd</td><td data-label="差异" style="text-align:left">模拟器单线程原子；硬件 CSR 是慢路径（多周期），模拟器无惩罚</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">CSRRS</td><td data-label="编码" style="text-align:center">1110011/010</td><td data-label="译码" style="text-align:left">CSR 型</td><td data-label="执行" style="text-align:left">读 CSR，按 regFile[rs1] 掩码置位（rs1=x0 仅读）</td><td data-label="差异" style="text-align:left">同 CSRRW</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">CSRRC</td><td data-label="编码" style="text-align:center">1110011/011</td><td data-label="译码" style="text-align:left">CSR 型</td><td data-label="执行" style="text-align:left">读 CSR，按 regFile[rs1] 掩码清除（rs1=x0 仅读）</td><td data-label="差异" style="text-align:left">同 CSRRW</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">CSRRWI</td><td data-label="编码" style="text-align:center">1110011/101</td><td data-label="译码" style="text-align:left">CSR 型：zimm[4:0]=inst[19:15]</td><td data-label="执行" style="text-align:left">读旧值写新值（立即数版）</td><td data-label="差异" style="text-align:left">同 CSRRW</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">CSRRSI</td><td data-label="编码" style="text-align:center">1110011/110</td><td data-label="译码" style="text-align:left">CSR 型</td><td data-label="执行" style="text-align:left">读并按 zimm 掩码置位</td><td data-label="差异" style="text-align:left">同 CSRRW</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">CSRRCI</td><td data-label="编码" style="text-align:center">1110011/111</td><td data-label="译码" style="text-align:left">CSR 型</td><td data-label="执行" style="text-align:left">读并按 zimm 掩码清除</td><td data-label="差异" style="text-align:left">同 CSRRW</td></tr></tbody></table></div>
+<h3 id="sec3-4" class="h-sub">3.4 RV32M 乘除扩展实现清单（8 条）</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:9%"><col style="width:13%"><col style="width:26%"><col style="width:28%"><col style="width:24%"></colgroup><thead><tr><th style="width:9%;text-align:center">指令</th><th style="width:13%;text-align:center">编码（opcode/funct3/funct7）</th><th style="width:26%;text-align:center">译码要点</th><th style="width:28%;text-align:center">执行动作</th><th style="width:24%;text-align:center">与硬件差异点</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">MUL</td><td style="text-align:center">0110011/000/0000001</td><td style="text-align:left">R 型；funct7=0000001（与 ADD 区分）</td><td style="text-align:left">32 位×32 位乘积低 32 位写 rd</td><td style="text-align:left">硬件可用多周期乘法器/流水；模拟器映射 WASM i32 原生乘，单周期语义</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">MULH</td><td data-label="编码" style="text-align:center">0110011/001/0000001</td><td data-label="译码" style="text-align:left">R 型</td><td data-label="执行" style="text-align:left">有符号×有符号乘积高 32 位写 rd</td><td data-label="差异" style="text-align:left">模拟器用 64 位中间计算再截高；硬件高位乘法器与低位共享，时延差异</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">MULHSU</td><td data-label="编码" style="text-align:center">0110011/010/0000001</td><td data-label="译码" style="text-align:left">R 型</td><td data-label="执行" style="text-align:left">有符号×无符号乘积高 32 位</td><td data-label="差异" style="text-align:left">同 MULH；无符号操作数需显式零扩展处理</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">MULHU</td><td data-label="编码" style="text-align:center">0110011/011/0000001</td><td data-label="译码" style="text-align:left">R 型</td><td data-label="执行" style="text-align:left">无符号×无符号乘积高 32 位</td><td data-label="差异" style="text-align:left">同 MULH</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">DIV</td><td data-label="编码" style="text-align:center">0110011/100/0000001</td><td data-label="译码" style="text-align:left">R 型</td><td data-label="执行" style="text-align:left">有符号除法；除零：商=全 1、余=被除数；MIN÷-1 溢出：商=MIN</td><td data-label="差异" style="text-align:left">硬件除法器多周期且可能流水不完整；模拟器映射 WASM 或软件算法，结果语义按规范</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">DIVU</td><td data-label="编码" style="text-align:center">0110011/101/0000001</td><td data-label="译码" style="text-align:left">R 型</td><td data-label="执行" style="text-align:left">无符号除法；除零商=全 1</td><td data-label="差异" style="text-align:left">同 DIV</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">REM</td><td data-label="编码" style="text-align:center">0110011/110/0000001</td><td data-label="译码" style="text-align:left">R 型</td><td data-label="执行" style="text-align:left">有符号余数；除零余=被除数</td><td data-label="差异" style="text-align:left">同 DIV</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">REMU</td><td data-label="编码" style="text-align:center">0110011/111/0000001</td><td data-label="译码" style="text-align:left">R 型</td><td data-label="执行" style="text-align:left">无符号余数；除零余=被除数</td><td data-label="差异" style="text-align:left">同 DIV</td></tr></tbody></table></div>
+<h3 id="sec3-5" class="h-sub">3.5 RV32C 压缩指令实现清单（26 条）</h3>
+<p class="body">压缩指令低 2 位不为 11；按象限（Q0/Q1/Q2）与 funct3 解码后展开为等价 32 位指令，复用 3.3/3.4 的执行路径（展开规则见下表“等价 32 位展开”）。C.JR、C.MV、C.EBREAK、C.JALR、C.ADD 共用编码位域，按 rd/rs1/rs2 组合判定，规则遵循非特权规范 C 扩展表 12.4。</p>
+<p class="body">压缩返回地址调整（评审 N1）：C.JAL/C.JALR 展开后复用 JAL/JALR 同一执行函数，其写 rd 的返回地址按 d.compressed 标志调整——展开自压缩指令时返回地址取 pc+2（压缩指令下一条地址）而非 pc+4，调整点在执行函数写 rd 处（见下伪代码）；该机制与硬件压缩解码器语义一致。</p>
+<pre class="code"><code>// 压缩返回地址调整（评审 N1）：JAL/JALR 复用同一执行函数，
+// 展开自压缩指令时（d.compressed=1）返回地址写 pc+2 而非 pc+4
+int exec_jal(Dec* d) {                 // JAL 与展开自 C.JAL 共用
+    uint32_t ra = d-&gt;compressed ? d-&gt;pc + 2 : d-&gt;pc + 4;  // 调整点
+    if (d-&gt;rd != 0) reg_file[d-&gt;rd] = ra;
+    d-&gt;npc = d-&gt;pc + d-&gt;imm;           // 目标地址（符号扩展后已对齐）
+    return OK;
+}
+int exec_jalr(Dec* d) {                // JALR 与展开自 C.JALR 共用
+    uint32_t ra = d-&gt;compressed ? d-&gt;pc + 2 : d-&gt;pc + 4;  // 调整点
+    if (d-&gt;rd != 0) reg_file[d-&gt;rd] = ra;
+    d-&gt;npc = (reg_file[d-&gt;rs1] + d-&gt;imm) &amp; ~1u;           // 最低位清 0
+    return OK;
+}</code></pre>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:12%"><col style="width:16%"><col style="width:20%"><col style="width:30%"><col style="width:22%"></colgroup><thead><tr><th style="width:12%;text-align:center">指令</th><th style="width:16%;text-align:center">编码（象限/funct3）</th><th style="width:20%;text-align:center">等价 32 位展开</th><th style="width:30%;text-align:center">译码与执行要点</th><th style="width:22%;text-align:center">与硬件差异点</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">C.ADDI4SPN</td><td style="text-align:center">Q0/000</td><td style="text-align:left">展开：ADDI x8+n, x2, nzuimm（nzuimm 由 3 个位域拼接，非零）</td><td style="text-align:left">栈指针加非零立即数；rd 映射 x8~x15</td><td style="text-align:left">硬件解码器对压缩指令做 1 个额外解码周期；模拟器先展开再统一执行</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">C.LW</td><td data-label="编码" style="text-align:center">Q0/010</td><td data-label="展开" style="text-align:left">展开：LW x8+uimm, x8+rs1（uimm 由 2 个位域拼接）</td><td data-label="译码执行" style="text-align:left">压缩加载：经 M-14 读 32 位写 x8+rd</td><td data-label="差异" style="text-align:left">同 C.ADDI4SPN；取指宽度差异见 3.1（硬件按 32 位取指选低 16 位）</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">C.SW</td><td data-label="编码" style="text-align:center">Q0/110</td><td data-label="展开" style="text-align:left">展开：SW x8+rs2, x8+uimm(x8+rs1)</td><td data-label="译码执行" style="text-align:left">压缩存储：写 32 位</td><td data-label="差异" style="text-align:left">同 C.LW</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">C.ADDI</td><td data-label="编码" style="text-align:center">Q1/000</td><td data-label="展开" style="text-align:left">展开：ADDI rd, rd, nzimm；rd=x0 时是 C.NOP 别名</td><td data-label="译码执行" style="text-align:left">寄存器加立即数（rd 即 rs1）</td><td data-label="差异" style="text-align:left">C.NOP 与 NOP（ADDI x0,x0,0）等价，模拟器不额外建模</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">C.JAL</td><td data-label="编码" style="text-align:center">Q1/001</td><td data-label="展开" style="text-align:left">展开：JAL x1, offset</td><td data-label="译码执行" style="text-align:left">压缩调用：x1=pc+2（返回地址取压缩指令下一条地址），pc+=imm</td><td data-label="差异" style="text-align:left">返回地址为 pc+2 而非 pc+4——执行路径按 d.compressed 标志调整（见 3.5），模拟器与硬件一致</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">C.LI</td><td data-label="编码" style="text-align:center">Q1/010</td><td data-label="展开" style="text-align:left">展开：ADDI rd, x0, imm</td><td data-label="译码执行" style="text-align:left">加载立即数</td><td data-label="差异" style="text-align:left">无</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">C.ADDI16SP</td><td data-label="编码" style="text-align:center">Q1/011（rd=x2）</td><td data-label="展开" style="text-align:left">展开：ADDI x2, x2, nzimm</td><td data-label="译码执行" style="text-align:left">栈指针调整</td><td data-label="差异" style="text-align:left">无</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">C.LUI</td><td data-label="编码" style="text-align:center">Q1/011（rd≠x2）</td><td data-label="展开" style="text-align:left">展开：LUI rd, imm</td><td data-label="译码执行" style="text-align:left">高立即数加载</td><td data-label="差异" style="text-align:left">无</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">C.SRLI</td><td data-label="编码" style="text-align:center">Q1/100（funct2=00）</td><td data-label="展开" style="text-align:left">展开：SRLI rd, rd, shamt</td><td data-label="译码执行" style="text-align:left">逻辑右移</td><td data-label="差异" style="text-align:left">压缩移位指令 rd 仅限 x8~x15（Q0）或 x1~x15（Q2）</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">C.SRAI</td><td data-label="编码" style="text-align:center">Q1/100（funct2=01）</td><td data-label="展开" style="text-align:left">展开：SRAI rd, rd, shamt</td><td data-label="译码执行" style="text-align:left">算术右移</td><td data-label="差异" style="text-align:left">同 C.SRLI</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">C.ANDI</td><td data-label="编码" style="text-align:center">Q1/100（funct2=10）</td><td data-label="展开" style="text-align:left">展开：ANDI rd, rd, imm</td><td data-label="译码执行" style="text-align:left">与立即数</td><td data-label="差异" style="text-align:left">同 C.SRLI</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">C.SUB</td><td data-label="编码" style="text-align:center">Q1/100011（funct2=00）</td><td data-label="展开" style="text-align:left">展开：SUB rd, rd, rs2</td><td data-label="译码执行" style="text-align:left">寄存器减</td><td data-label="差异" style="text-align:left">操作数限定 x8~x15</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">C.XOR</td><td data-label="编码" style="text-align:center">Q1/100011（funct2=01）</td><td data-label="展开" style="text-align:left">展开：XOR rd, rd, rs2</td><td data-label="译码执行" style="text-align:left">寄存器异或</td><td data-label="差异" style="text-align:left">同 C.SUB</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">C.OR</td><td data-label="编码" style="text-align:center">Q1/100011（funct2=10）</td><td data-label="展开" style="text-align:left">展开：OR rd, rd, rs2</td><td data-label="译码执行" style="text-align:left">寄存器或</td><td data-label="差异" style="text-align:left">同 C.SUB</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">C.AND</td><td data-label="编码" style="text-align:center">Q1/100011（funct2=11）</td><td data-label="展开" style="text-align:left">展开：AND rd, rd, rs2</td><td data-label="译码执行" style="text-align:left">寄存器与</td><td data-label="差异" style="text-align:left">同 C.SUB</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">C.J</td><td data-label="编码" style="text-align:center">Q1/101</td><td data-label="展开" style="text-align:left">展开：JAL x0, offset</td><td data-label="译码执行" style="text-align:left">压缩跳转：pc+=imm，不写返回地址</td><td data-label="差异" style="text-align:left">无</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">C.BEQZ</td><td data-label="编码" style="text-align:center">Q1/110</td><td data-label="展开" style="text-align:left">展开：BEQ rs1, x0, offset</td><td data-label="译码执行" style="text-align:left">等于零跳转</td><td data-label="差异" style="text-align:left">无</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">C.BNEZ</td><td data-label="编码" style="text-align:center">Q1/111</td><td data-label="展开" style="text-align:left">展开：BNE rs1, x0, offset</td><td data-label="译码执行" style="text-align:left">不等于零跳转</td><td data-label="差异" style="text-align:left">无</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">C.SLLI</td><td data-label="编码" style="text-align:center">Q2/000</td><td data-label="展开" style="text-align:left">展开：SLLI rd, rd, shamt</td><td data-label="译码执行" style="text-align:left">逻辑左移</td><td data-label="差异" style="text-align:left">rd 限定 x1~x15</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">C.LWSP</td><td data-label="编码" style="text-align:center">Q2/010</td><td data-label="展开" style="text-align:left">展开：LW rd, uimm, x2</td><td data-label="译码执行" style="text-align:left">栈上加载（基址固定 x2）</td><td data-label="差异" style="text-align:left">rd≠x0（x0 编码保留）</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">C.JR</td><td data-label="编码" style="text-align:center">Q2/100（funct2=00，rs1≠x0 且 rd=x0）</td><td data-label="展开" style="text-align:left">展开：JALR x0, 0(rs1)</td><td data-label="译码执行" style="text-align:left">寄存器跳转（别名）</td><td data-label="差异" style="text-align:left">与 C.MV 共用编码位域，按 rd/rs1/rs2 组合判定（表 12.4）</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">C.MV</td><td data-label="编码" style="text-align:center">Q2/100（funct2=00，rd≠x0 且 rs2=x0）</td><td data-label="展开" style="text-align:left">展开：ADD rd, x0, rs2</td><td data-label="译码执行" style="text-align:left">寄存器搬运（别名）</td><td data-label="差异" style="text-align:left">同 C.JR</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">C.EBREAK</td><td data-label="编码" style="text-align:center">Q2/100（funct2=01，rs1=rs2=x0）</td><td data-label="展开" style="text-align:left">展开：EBREAK</td><td data-label="译码执行" style="text-align:left">调试断点陷入</td><td data-label="差异" style="text-align:left">同 C.JR</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">C.JALR</td><td data-label="编码" style="text-align:center">Q2/100（funct2=01，rs1≠x0 且 rd=x0）</td><td data-label="展开" style="text-align:left">展开：JALR x1, 0(rs1)</td><td data-label="译码执行" style="text-align:left">寄存器间接跳转：x1=pc+2，pc=(rs1)&amp;~1</td><td data-label="差异" style="text-align:left">返回地址 pc+2 由执行路径按 d.compressed 标志调整（见 3.5）</td></tr><tr class="row0"><td data-label="指令" style="text-align:center">C.ADD</td><td data-label="编码" style="text-align:center">Q2/100（funct2=01，rs1≠x0 且 rs2≠x0）</td><td data-label="展开" style="text-align:left">展开：ADD rd, rd, rs2（rd 即 rs1）</td><td data-label="译码执行" style="text-align:left">寄存器加</td><td data-label="差异" style="text-align:left">同 C.JR</td></tr><tr class="row1"><td data-label="指令" style="text-align:center">C.SWSP</td><td data-label="编码" style="text-align:center">Q2/110</td><td data-label="展开" style="text-align:left">展开：SW rs2, uimm, x2</td><td data-label="译码执行" style="text-align:left">栈上存储</td><td data-label="差异" style="text-align:left">rs2≠x0</td></tr></tbody></table></div>
+<p class="body">不实现项：C.LD/C.SD/C.LDSP/C.SDSP（RV64）、C.SUBW/C.ADDW（RV64）、C.FLD/C.FSD/C.FLDSP/C.FSDSP（F/D 扩展）、C.FLW/C.FSW（F 扩展）不属于 RV32IMC，不在本模块指令集中。</p>
+<h3 id="sec3-6" class="h-sub">3.6 特殊语义与边界说明</h3>
+<p class="body">（1）x0 写忽略：所有以 x0 为目标的寄存器写指令不产生副作用，仅保持解码与执行路径一致。</p>
+<p class="body">（2）非对齐访存：与 Spike golden 默认行为对齐，允许非对齐访问且不产生异常；非对齐用例纳入对拍。</p>
+<p class="body">（3）除零与溢出：DIV/DIVU/REM/REMU 按 3.4 表语义执行，属于 guest 语义而非平台错误。</p>
+<p class="body">（4）CSR 指令原子性：单线程执行模型下 CSRRW/CSRRS/CSRRC 的读改写天然原子。</p>
+<p class="body">（5）FENCE 与 WFI：FENCE 为空操作；WFI 挂起等待中断，唤醒协议与 M-12 配合（见 5.3，评审 13-9）。</p>
+<p class="body">（6）decodedCache 失效：任何 store 完成使命中该 pc 的缓存条目失效（自修改代码语义）；断点地址禁止缓存；调试期可整体关闭（评审 13-6）。</p>
+<p class="body">（7）mcycle/minstret 粒度：minstret 每成功退休一条指令 +1；mcycle = 退休指令数 + 取指周期配额（M-12 配额折算）；异常/中断陷入路径不递增；与 Spike 对拍仅比对 minstret 与架构状态，mcycle 不比对（评审 13-7/N2）。</p>
+<p class="body">（8）trap 风暴检测：连续陷入计数（trapStreak）达到阈值（默认 10⁴ 条全部陷入，估算基线）→ 平台级告警上报 M-12/M-22（mtvec 指向自身等 trap 风暴宿主时间正常、watchdog 无进展检测不触发，须由 trap 率/指令配额检测补充，评审 13-10）。</p>
+<p class="body">（9）伪指令与别名：NOP、LI、MV、RET、J、CALL 等汇编伪指令在汇编与反汇编层（M-11）展开，ISS 执行层仅实现机器码。</p>
+<p class="body">（10）对拍覆盖：每条指令至少一条正向用例加边界用例（除零、溢出、非对齐、x0、CSR 权限），全部纳入 Spike 差分对拍；新增或变更指令实现须同步扩充对拍用例（评审 13-8：压缩指令 mtval、cache on/off 差分、自修改代码用例见 7.1）。</p>
+
+<h2 id="sec4" class="h-sec">4 关键函数</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:18%"><col style="width:26%"><col style="width:56%"></colgroup><thead><tr><th style="width:18%;text-align:center">函数</th><th style="width:26%;text-align:center">说明</th><th style="width:56%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">fetch()</td><td style="text-align:left">按 pc 取指（先对齐检查再判宽度，见 3.1）</td><td style="text-align:left">调用 M-14 read；输出：指令编码或取指异常（对齐优先，评审 13-3）</td></tr><tr class="row1"><td style="text-align:center">decode(inst)</td><td style="text-align:left">两级解码（表驱动键 opcode|funct3|funct7）</td><td style="text-align:left">输入：指令编码；输出：Dec（含 compressed/compressedRaw 原码，评审 13-1/13-5）</td></tr><tr class="row0"><td style="text-align:center">execute(decoded)</td><td style="text-align:left">表驱动执行（断点检测前置）</td><td style="text-align:left">调用 M-14 访存、checkCsrAccess；输出：执行结果与副作用（评审 13-2）</td></tr><tr class="row1"><td style="text-align:center">step()</td><td style="text-align:left">单指令执行（含前后钩子）</td><td style="text-align:left">调用 on_instruction_pre/post；输出：PC 更新与暂停原因</td></tr><tr class="row0"><td style="text-align:center">trap(cause, tval)</td><td style="text-align:left">同步陷入</td><td style="text-align:left">写 mepc/mcause/mtval，pc 置 mtvec；输出：TrapEvent（on_trap 钩子 + M-12/M-20 上链，评审 B13-4）</td></tr><tr class="row1"><td style="text-align:center">checkCsrAccess(csr, rw)</td><td style="text-align:left">CSR 权限校验</td><td style="text-align:left">非法访问返回 E_ISS-02；只读位写入按规范忽略</td></tr><tr class="row0"><td style="text-align:center">load/store</td><td style="text-align:left">宽度化访存</td><td style="text-align:left">支持 8/16/32 位读写与符号/零扩展语义，经 M-14；store 后失效解码缓存（评审 13-6）</td></tr><tr class="row1"><td style="text-align:center">iss_pending_intr()/iss_take_intr()</td><td style="text-align:left">中断交付（量子边界）</td><td style="text-align:left">M-16 仲裁输出 PendingIntr{line, cause, prio}；按 mstatus.MIE 判定后执行 trap（5.2.3，评审 13-4）</td></tr><tr class="row0"><td style="text-align:center">mret()</td><td style="text-align:left">机器模式返回</td><td style="text-align:left">恢复 mstatus.MIE 与 mepc 到 pc（5.2.4）</td></tr><tr class="row1"><td style="text-align:center">snapshot()/restore()</td><td style="text-align:left">全状态快照/恢复</td><td style="text-align:left">L3 能力；EngineSnapshot{version, crc, regFile, csrSet, pc, privMode, ...}，恢复前 CRC 校验、恢复时清 decodedCache 并重置计数基准（评审 B13-5）</td></tr><tr class="row0"><td style="text-align:center">getState()</td><td style="text-align:left">对外状态查询</td><td style="text-align:left">输出：{pc, privMode, instRetired, trapStreak, pendingIntr}（供 M-17/前端）</td></tr></tbody></table></div>
+<p class="body">说明：execute 采用表驱动分派（解码键 opcode|funct3|funct7，评审 13-5），指令类别到执行函数的一级映射表在初始化时构建（伪代码见 3.2）；钩子（on_instruction_pre/post、on_access、on_trap）经 hookRegistry 统一触发，断点、trace、探针、覆盖率共享同一钩子通道（对应源文档 3.2.4 表13 的 ExecutionBackend 契约；语义与签名见 2.1.1，评审 13-2/B13-3）。</p>
+
+<h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 指令执行主循环</h3>
+<p class="body">单指令闭环如下（对应图 1）：</p>
+<p class="body">（1）取指：以 pc 经 M-14 读取指令；先做 2/4 对齐检查再判宽度（32 位/16 位压缩，评审 13-3）；取指访存异常时同步陷入。</p>
+<p class="body">（2）表键解码：第一级按 opcode 分派大类，第二级按 funct3/funct7 与立即数扩展确定具体指令（解码键 = opcode|funct3|funct7）；压缩指令展开后保留 16 位原码（评审 13-1/13-5）。</p>
+<p class="body">（3）非法指令判定：解码键未命中表项进入同步陷入（E_ISS-01）。</p>
+<p class="body">（4）表驱动执行：断点命中检测前置（M-08，取指后执行前）；访存指令经 M-14 读写；CSR 指令经 checkCsrAccess 校验。</p>
+<p class="body">（5）钩子触发：on_instruction_pre（执行前）/on_instruction_post（执行成功后）/on_access（访存）/on_trap（陷入）经 hookRegistry 统一触发（评审 13-2）。</p>
+<p class="body">（6）PC 更新：顺序指令 pc 加 4（压缩指令加 2）；分支/JAL/JALR/MRET 按语义更新。</p>
+<p class="body">（7）返回步骤（1）。</p>
+
+<svg class="flow-svg" viewBox="0 0 960 580" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-13 指令执行与陷入流程">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <style>
+    .box { fill:#ffffff; stroke:#2f5bd6; stroke-width:1.6; }
+    .box-t { fill:#1e3a8a; font-size:15px; font-weight:700; }
+    .box-s { fill:#4b5563; font-size:12.5px; }
+    .diamond { fill:#fff8e6; stroke:#d9a520; stroke-width:1.6; }
+    .diamond-t { fill:#7a5a20; font-size:13px; font-weight:700; }
+    .side { fill:#eef2fc; stroke:#c6d3f3; stroke-width:1.4; }
+    .side-t { fill:#1e3a8a; font-size:14px; font-weight:700; }
+    .side-s { fill:#4b5563; font-size:12.5px; }
+    .trap { fill:#fdf4e7; stroke:#e0b968; stroke-width:1.6; }
+    .evt { fill:#e7f6ee; stroke:#a9d8bc; stroke-width:1.4; }
+    .edge { stroke:#64748b; stroke-width:1.5; fill:none; marker-end:url(#arr); }
+    .lab { fill:#64748b; font-size:12px; }
+    .code-tag { fill:#b91c1c; font-size:11.5px; font-weight:700; }
+  </style>
+  <!-- 左主链：取指→解码→执行 -->
+  <g>
+    <rect class="box" x="110" y="16" width="260" height="64" rx="8"/>
+    <text class="box-t" x="240" y="40" text-anchor="middle">① 取指 fetch（对齐前置）</text>
+    <text class="box-s" x="240" y="62" text-anchor="middle">2/4 对齐检查 → 32/16 位读取（评审 13-3）</text>
+    <path class="edge" d="M240,80 L240,112"/>
+    <rect class="box" x="110" y="112" width="260" height="64" rx="8"/>
+    <text class="box-t" x="240" y="136" text-anchor="middle">② 表键解码 decode</text>
+    <text class="box-s" x="240" y="158" text-anchor="middle">opcode|funct3|funct7；压缩保留 16 位原码</text>
+    <path class="edge" d="M240,176 L240,208"/>
+    <polygon class="diamond" points="240,208 296,232 240,256 184,232"/>
+    <text class="diamond-t" x="240" y="236" text-anchor="middle">非法指令？</text>
+    <path class="edge" d="M240,256 L240,288"/>
+    <rect class="box" x="110" y="288" width="260" height="64" rx="8"/>
+    <text class="box-t" x="240" y="312" text-anchor="middle">③ 表驱动执行 execute</text>
+    <text class="box-s" x="240" y="334" text-anchor="middle">断点命中前置 · 访存经 M-14 · CSR 校验</text>
+    <path class="edge" d="M240,352 L240,384"/>
+    <polygon class="diamond" points="240,384 296,408 240,432 184,408"/>
+    <text class="diamond-t" x="240" y="412" text-anchor="middle">访存/CSR 异常？</text>
+    <path class="edge" d="M240,432 L240,464"/>
+    <rect class="box" x="110" y="464" width="260" height="64" rx="8"/>
+    <text class="box-t" x="240" y="488" text-anchor="middle">④ 钩子 pre/post / trap</text>
+    <text class="box-s" x="240" y="510" text-anchor="middle">on_instruction_pre/post · on_access · on_trap</text>
+    <path class="edge" d="M240,528 L240,560"/>
+    <rect class="box" x="110" y="560" width="260" height="60" rx="8"/>
+    <text class="box-t" x="240" y="584" text-anchor="middle">⑤ PC 更新</text>
+    <text class="box-s" x="240" y="604" text-anchor="middle">顺序 +4；分支/JAL/JALR/MRET</text>
+    <path class="edge" d="M110,590 L70,590 L70,48 L108,48"/>
+    <text class="lab" x="30" y="320" text-anchor="middle">返回取指</text>
+    <!-- 是 分支 -->
+    <path class="edge" d="M296,232 L556,232"/>
+    <text class="lab" x="426" y="224" text-anchor="middle">是</text>
+    <text class="code-tag" x="470" y="244" text-anchor="middle">E_ISS-01</text>
+    <path class="edge" d="M296,408 L556,408"/>
+    <text class="lab" x="426" y="400" text-anchor="middle">是</text>
+    <text class="code-tag" x="470" y="420" text-anchor="middle">E_ISS-02 / E_BUS-01</text>
+  </g>
+  <!-- 右侧：中断交付 + 同步陷入 + 事件上链 -->
+  <g>
+    <rect class="side" x="560" y="16" width="320" height="64" rx="8"/>
+    <text class="side-t" x="720" y="40" text-anchor="middle">中断交付（量子边界）</text>
+    <text class="side-s" x="720" y="62" text-anchor="middle">M-16 仲裁 → PendingIntr{line,cause,prio} → MIE</text>
+    <path class="edge" d="M720,80 L720,88"/>
+    <rect class="trap" x="560" y="88" width="320" height="360" rx="8"/>
+    <text class="side-t" x="720" y="116" text-anchor="middle">同步陷入 trap(cause, tval)</text>
+    <text class="side-s" x="720" y="140" text-anchor="middle">mepc ← 异常指令 / 下一条指令（中断）</text>
+    <text class="side-s" x="720" y="160" text-anchor="middle">mcause ← 异常码 / 中断码（bit31=1）</text>
+    <text class="side-s" x="720" y="180" text-anchor="middle">mtval ← 地址 / 指令编码（中断保持原值）</text>
+    <text class="side-s" x="720" y="200" text-anchor="middle">mstatus：MPIE←MIE，MIE←0，MPP←M</text>
+    <text class="side-s" x="720" y="220" text-anchor="middle">pc ← mtvec（直接模式）</text>
+    <text class="side-s" x="720" y="248" text-anchor="middle">中断与同步异常共用陷入路径</text>
+    <text class="side-s" x="720" y="268" text-anchor="middle">（流程详见 5.2.4）</text>
+    <path class="edge" d="M720,448 L720,480"/>
+    <rect class="evt" x="560" y="480" width="320" height="64" rx="8"/>
+    <text class="side-t" x="720" y="504" text-anchor="middle">trap 事件上链</text>
+    <text class="side-s" x="720" y="526" text-anchor="middle">TrapEvent → M-12 事件引擎 · M-20 证据流 · on_trap</text>
+  </g>
+</svg>
+
+<div class="flow-mobile">
+  <div class="flow-step"><span class="num">1</span><div class="txt"><b>取指 fetch（对齐前置）</b>：2/4 对齐检查 → 32/16 位读取（评审 13-3）</div></div>
+  <div class="flow-arrow">↓</div>
+  <div class="flow-step"><span class="num">2</span><div class="txt"><b>表键解码 decode</b>：opcode|funct3|funct7；压缩指令保留 16 位原码</div></div>
+  <div class="flow-arrow">↓</div>
+  <div class="flow-branch">◆ 非法指令？（是 → 同步陷入 E_ISS-01；否 → 继续）</div>
+  <div class="flow-arrow">↓</div>
+  <div class="flow-step"><span class="num">3</span><div class="txt"><b>表驱动执行 execute</b>：断点命中前置 · 访存经 M-14 · CSR 校验 checkCsrAccess</div></div>
+  <div class="flow-arrow">↓</div>
+  <div class="flow-branch">◆ 访存/CSR 异常？（是 → 同步陷入 E_ISS-02 / E_BUS-01；否 → 继续）</div>
+  <div class="flow-arrow">↓</div>
+  <div class="flow-step"><span class="num">4</span><div class="txt"><b>钩子 pre/post / trap</b>：on_instruction_pre/post · on_access · on_trap（M-08/M-11/M-18）</div></div>
+  <div class="flow-arrow">↓</div>
+  <div class="flow-step"><span class="num">5</span><div class="txt"><b>PC 更新</b>：顺序 +4/+2；分支/JAL/JALR/MRET → 返回取指</div></div>
+  <div class="flow-arrow">↓</div>
+  <div class="flow-branch">中断交付（量子边界）：M-16 仲裁 → PendingIntr{line,cause,prio} → mstatus.MIE 判定</div>
+  <div class="flow-branch">同步陷入 trap：写 mepc/mcause/mtval，pc←mtvec（与异常共用路径）→ TrapEvent 上链 M-12/M-20/on_trap</div>
+</div>
+<p class="caption">图 1  M-13 指令执行与陷入流程</p>
+<h3 id="sec5-2" class="h-sub">5.2 异常与中断处理</h3>
+<h4 class="h-sub3">5.2.1 同步异常类型与处理流程</h4>
+<p class="body">同步异常由当前指令自身触发，在指令边界陷入。本模块支持的同步异常如下表（mcause 编码遵循特权规范）：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:20%"><col style="width:10%"><col style="width:12%"><col style="width:30%"><col style="width:28%"></colgroup><thead><tr><th style="width:20%;text-align:center">异常</th><th style="width:10%;text-align:center">mcause</th><th style="width:12%;text-align:center">mtval</th><th style="width:30%;text-align:center">触发条件</th><th style="width:28%;text-align:center">处理要点</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">取指未对齐</td><td style="text-align:center">0</td><td style="text-align:center">pc</td><td style="text-align:left">pc 未按 2/4 对齐取指</td><td style="text-align:left">同步陷入；固件或调试器处理</td></tr><tr class="row1"><td style="text-align:center">取指访存异常</td><td style="text-align:center">1</td><td style="text-align:center">pc</td><td style="text-align:left">取指地址未映射（E_BUS-01）</td><td style="text-align:left">同步陷入</td></tr><tr class="row0"><td style="text-align:center">非法指令</td><td style="text-align:center">2</td><td style="text-align:center">指令编码</td><td style="text-align:left">未识别编码（E_ISS-01）</td><td style="text-align:left">同步陷入；mtval 记指令编码</td></tr><tr class="row1"><td style="text-align:center">断点</td><td style="text-align:center">3</td><td style="text-align:center">0</td><td style="text-align:left">EBREAK 执行</td><td style="text-align:left">同步陷入 + 触发 M-08 断点事件</td></tr><tr class="row0"><td style="text-align:center">访存未对齐</td><td style="text-align:center">4/6</td><td style="text-align:center">地址</td><td style="text-align:left">默认不触发（模拟器与 Spike 一致允许非对齐，见 3.6）</td><td style="text-align:left">不触发，保持 golden 兼容</td></tr><tr class="row1"><td style="text-align:center">访存异常</td><td style="text-align:center">5/7</td><td style="text-align:center">地址</td><td style="text-align:left">load/store 地址未映射（E_BUS-01）</td><td style="text-align:left">同步陷入；mtval 记访存地址</td></tr><tr class="row0"><td style="text-align:center">环境调用（M 模式）</td><td style="text-align:center">11</td><td style="text-align:center">0</td><td style="text-align:left">ECALL 执行</td><td style="text-align:left">同步陷入；mepc 指向 ECALL 自身</td></tr></tbody></table></div>
+<h4 class="h-sub3">5.2.2 中断类型与使能</h4>
+<p class="body">中断由 M-16 中断控制器在量子边界仲裁后以 PendingIntr{line, cause, prio} 交付本模块（评审 13-4/B13-1）。本模块支持的中断如下：cause = IRQ_BASE(0x80000000) + line；mip 为只读挂起视图，由 M-16 交付状态更新（level 中断由外设/软件保持请求、edge 触发由 M-16 管理），本模块不写 mip；mie 使能位由固件经 CSR 写。</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:22%"><col style="width:20%"><col style="width:16%"><col style="width:30%"><col style="width:12%"></colgroup><thead><tr><th style="width:22%;text-align:center">中断</th><th style="width:20%;text-align:center">mip/mie 位</th><th style="width:16%;text-align:center">mcause</th><th style="width:30%;text-align:center">来源（M-16）</th><th style="width:12%;text-align:center">MVP 状态</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">机器软件中断 MSI</td><td style="text-align:center">MSIP/MSIE（位 3）</td><td style="text-align:center">0x80000003</td><td style="text-align:left">软件中断线（调试器/主机注入，用于控制流中断）</td><td style="text-align:center">支持</td></tr><tr class="row1"><td style="text-align:center">机器定时器中断 MTI</td><td style="text-align:center">MTIP/MTIE（位 7）</td><td style="text-align:center">0x80000007</td><td style="text-align:left">定时器（虚拟时间由 M-12 推进，智能灯定时场景）</td><td style="text-align:center">支持</td></tr><tr class="row0"><td style="text-align:center">机器外部中断 MEI</td><td style="text-align:center">MEIP/MEIE（位 11）</td><td style="text-align:center">0x8000000B</td><td style="text-align:left">外设中断线（UART/GPIO/按键等，经 M-15/M-16）</td><td style="text-align:center">支持</td></tr></tbody></table></div>
+<h4 class="h-sub3">5.2.3 中断仲裁与优先级</h4>
+<p class="body">两级仲裁衔接（评审 13-4/B13-1）：M-16 在每个量子边界采样外设/定时器/软件中断源，做全局仲裁（特权级比较 + 优先级表）后输出单一最高优先级中断 PendingIntr；本模块不重复仲裁，仅做全局使能检查（mstatus.MIE=1）并按 cause 编码陷入。M 模式范围内优先级：MEI（11）&gt; MSI（3）&gt; MTI（7）（由 M-16 仲裁表执行）。未使能或全局屏蔽（MIE=0）的中断保持挂起不丢失，待使能后在指令边界交付。</p>
+<h4 class="h-sub3">5.2.4 陷入与返回完整流程</h4>
+<p class="body">同步陷入（异常与中断共用路径，见 5.2.1/5.2.3 的触发条件）：</p>
+<p class="body">（1）mepc ← 陷入点：同步异常为触发指令地址（ECALL/EBREAK 记自身地址）；中断为下一条待执行指令地址。</p>
+<p class="body">（2）mcause ← 陷入原因：异常记异常码；中断记中断码且 bit31 置 1（如 0x8000000B）。</p>
+<p class="body">（3）mtval ← 陷入值：访存异常记地址、非法指令记编码（非法压缩指令记 16 位原码，评审 13-1）；中断时保持原值（规范允许不清零）。</p>
+<p class="body">（4）mstatus 状态保存：MPIE ← MIE；MIE ← 0（屏蔽中断防重入）；MPP ← M。</p>
+<p class="body">（5）pc ← mtvec：MODE 为 WARL 仅支持直接模式（MODE=0，写非 0 被钳制，评审 13-9）；向量模式预留。</p>
+<p class="body">（6）trap 事件上链：写 trapInfo 并构造 TrapEvent{time, seq, cause, tval, pc, priv, is_interrupt}，经 on_trap 钩子（M-18 probe）与 M-12 事件引擎/M-20 事件流输出；消费者：调试器（M-08~M-11）/M-19 波形/M-20 回放（评审 B13-4）。</p>
+<p class="body">返回（MRET）：mstatus.MIE ← MPIE、MPIE ← 1；pc ← mepc；恢复执行。重复陷入语义（评审 13-9）：中断交付后 mip 挂起位由 M-16 按触发方式管理（level 中断由外设/软件保持请求——外设未清除则 MRET 后若仍使能会立即再次陷入，这是规范语义；edge 触发由 M-16 交付时清除），本模块不额外清位、不阻止合法重入。MVP 仅 M 模式，MPP 不参与特权切换。</p>
+<h4 class="h-sub3">5.2.5 边界情况与硬件差异</h4>
+<p class="body">（1）嵌套中断：硬件在陷入时自动清 MIE 屏蔽后续中断；MVP 为单层处理，固件可在 handler 内显式重新使能以实现嵌套。</p>
+<p class="body">（2）同时发生：同一指令边界同步异常优先于中断；多中断由 M-16 按优先级仲裁取最高者交付（5.2.3）。</p>
+<p class="body">（3）中断风暴抑制：按 mie 使能掩码与 M-16 优先级仲裁抑制，未使能中断保持挂起不丢；guest 失控判定（指令预算 watchdog）归 M-12，与 guest trap 严格区分。</p>
+<p class="body">（4）trap 风暴（评审 13-10）：trapStreak 连续陷入计数达阈值（默认 10⁴ 条，估算基线）→ 平台级告警上报 M-12/M-22（如 mtvec 指向自身，宿主时间正常、watchdog 无进展检测不触发，须由本模块 trap 率检测补充）。</p>
+<p class="body">（5）与硬件差异：真实核在流水线内取精确中断点（如 load 完成/异常指令），模拟器在指令边界与量子边界采样，对可观测行为更保守、确定性强；真实硬件有 MPP/MPRV/虚存等机制，MVP 仅 M 模式从简。</p>
+<h3 id="sec5-3" class="h-sub">5.3 量子混合调度</h3>
+<p class="body">M-12 通过 runUntil/step 驱动本模块：连续运行模式下按量子批量执行指令（每量子指令配额），到达事件边界或检查点暂停；控制注入（暂停、断点、单步）只在安全检查点生效。本模块不自行轮询宿主时钟，虚拟时间完全由 M-12 推进（确定性约束）。</p>
+<p class="body">WFI 唤醒协议（评审 13-9）：WFI 执行后置 wfi_pending，本模块停止取指；M-12 在量子边界检查待交付中断（M-16 仲裁结果），存在使能中断（mstatus.MIE=1 且 cause 有效）时唤醒本模块进入陷入路径；无使能中断时 M-12 在空闲区间批量推进虚拟时间（不空转），不误判 guest 失控。</p>
+<h4 id="sec5-3-1" class="h-sub3">5.3.1 虚拟时间模型 sim_now</h4>
+<p class="body">量子混合调度的根基是虚拟时间单一时间基准：全局时间戳 sim_now 统一驱动 ISS、总线与外设，事件驱动与时间驱动两条推进路径在同一时间域内结算。</p>
+<p class="body">（1）时间域隔离定义：虚拟时间（仿真域）——sim_now 为全局时间戳，单位 ns，纯内存变量；无硬件晶振、不读取宿主机系统时钟。宿主机墙上时间（host wall clock）仅用于 Worker 看门狗（5.3.5-3）与前端 UI 渲染节流，不参与仿真时序计算。</p>
+<p class="body">（2）sim_now 的三类更新入口（核心）：入口 1——ISS 执行指令，逐条累加指令虚拟时延（细粒度步进，见 5.3.2）；入口 2——事件调度，直接跳跃至事件时间戳（批量跳时间、消除空转，见 5.3.4）；入口 3——总线事务处理，在仲裁/传输阶段增量推进 sim_now（见 5.3.3）。</p>
+<p class="body">（3）量子边界约束：量子为虚拟时间检查卡点（默认 1000 ns，估算基线、可配置）；允许指令执行轻微越界（指令必须完整执行，见 5.3.7-4），中断最大延迟等于量子大小（见 5.3.7-3）。</p>
+
+<svg class="flow-svg" viewBox="0 0 960 400" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="sim_now 三类更新入口推进示意">
+  <defs>
+    <marker id="arrQ" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <style>
+    .q-box { fill:#ffffff; stroke:#2f5bd6; stroke-width:1.5; }
+    .q-t { fill:#1e3a8a; font-size:13px; font-weight:700; }
+    .q-s { fill:#4b5563; font-size:12px; }
+    .q-lane { fill:#f1f5f9; stroke:#d8dee9; stroke-width:1.2; }
+    .q-lane-t { fill:#374151; font-size:13px; font-weight:700; }
+    .q-jump { fill:#eef2fc; stroke:#c6d3f3; stroke-width:1.5; }
+    .q-arb { fill:#fdf4e7; stroke:#e0b968; stroke-width:1.2; }
+    .q-route { fill:#e7f6ee; stroke:#a9d8bc; stroke-width:1.2; }
+    .q-slave { fill:#fdeaea; stroke:#e8b4b4; stroke-width:1.2; }
+    .q-edge { stroke:#64748b; stroke-width:1.4; fill:none; marker-end:url(#arrQ); }
+    .q-lab { fill:#64748b; font-size:12px; }
+    .q-axis { stroke:#9aa1af; stroke-width:1.6; }
+    .q-qb { stroke:#b91c1c; stroke-width:1.6; stroke-dasharray:6 4; }
+  </style>
+  <text class="q-t" x="480" y="28" text-anchor="middle" font-size="15">sim_now 推进：三类更新入口（虚拟时间，单位 ns）</text>
+  <!-- 泳道1：ISS 细粒度步进 -->
+  <rect class="q-lane" x="30" y="52" width="900" height="82" rx="6"/>
+  <text class="q-lane-t" x="46" y="76">入口1 · ISS 逐条累加（细粒度步进）</text>
+  <g>
+    <rect class="q-box" x="120" y="92" width="48" height="28" rx="4"/><text class="q-s" x="144" y="110" text-anchor="middle">10</text>
+    <rect class="q-box" x="178" y="92" width="48" height="28" rx="4"/><text class="q-s" x="202" y="110" text-anchor="middle">10</text>
+    <rect class="q-box" x="236" y="92" width="48" height="28" rx="4"/><text class="q-s" x="260" y="110" text-anchor="middle">10</text>
+    <rect class="q-box" x="294" y="92" width="48" height="28" rx="4"/><text class="q-s" x="318" y="110" text-anchor="middle">12</text>
+    <rect class="q-box" x="352" y="92" width="48" height="28" rx="4"/><text class="q-s" x="376" y="110" text-anchor="middle">30</text>
+    <rect class="q-box" x="410" y="92" width="48" height="28" rx="4"/><text class="q-s" x="434" y="110" text-anchor="middle">20</text>
+    <rect class="q-box" x="468" y="92" width="48" height="28" rx="4"/><text class="q-s" x="492" y="110" text-anchor="middle">10</text>
+    <rect class="q-box" x="526" y="92" width="48" height="28" rx="4"/><text class="q-s" x="550" y="110" text-anchor="middle">10</text>
+  </g>
+  <text class="q-lab" x="610" y="110">… 逐条累加 T_base（5.3.2 时延表）</text>
+  <!-- 泳道2：事件调度跳跃 -->
+  <rect class="q-lane" x="30" y="152" width="900" height="82" rx="6"/>
+  <text class="q-lane-t" x="46" y="176">入口2 · 事件调度跳跃（批量跳时间、消除空转）</text>
+  <path class="q-edge" d="M150,205 L700,205"/>
+  <circle cx="150" cy="205" r="7" fill="#2f5bd6"/>
+  <text class="q-s" x="150" y="196" text-anchor="middle">sim_now</text>
+  <circle cx="700" cy="205" r="7" fill="#b91c1c"/>
+  <text class="q-s" x="700" y="196" text-anchor="middle">ev.t</text>
+  <text class="q-lab" x="420" y="230" text-anchor="middle">直接跳跃至最近事件时间戳（事件堆弹顶，5.3.4）</text>
+  <!-- 泳道3：总线事务增量 -->
+  <rect class="q-lane" x="30" y="252" width="900" height="82" rx="6"/>
+  <text class="q-lane-t" x="46" y="276">入口3 · 总线事务增量推进（仲裁 / 路由 / 从设备）</text>
+  <rect class="q-arb" x="120" y="292" width="150" height="28" rx="4"/><text class="q-s" x="195" y="310" text-anchor="middle">T_arb</text>
+  <rect class="q-route" x="285" y="292" width="130" height="28" rx="4"/><text class="q-s" x="350" y="310" text-anchor="middle">T_route</text>
+  <rect class="q-slave" x="430" y="292" width="150" height="28" rx="4"/><text class="q-s" x="505" y="310" text-anchor="middle">T_slave</text>
+  <text class="q-lab" x="620" y="310">T_bus_total = T_arb + T_route + T_slave（5.3.3）</text>
+  <!-- 底部时间轴与量子边界 -->
+  <line class="q-axis" x1="60" y1="368" x2="900" y2="368"/>
+  <text class="q-lab" x="60" y="386" text-anchor="middle">0</text>
+  <text class="q-lab" x="480" y="386" text-anchor="middle">500 ns</text>
+  <text class="q-lab" x="900" y="386" text-anchor="middle">1000 ns</text>
+  <line class="q-qb" x1="860" y1="60" x2="860" y2="362"/>
+  <text class="q-lab" x="866" y="54" fill="#b91c1c" font-weight="700">quantum_end（量子边界）</text>
+</svg>
+
+<div class="flow-mobile">
+  <div class="flow-step"><span class="num">1</span><div class="txt"><b>入口1 · ISS 逐条累加</b>：每条指令叠加 T_base（时延表，5.3.2），细粒度步进 sim_now</div></div>
+  <div class="flow-arrow">↓</div>
+  <div class="flow-step"><span class="num">2</span><div class="txt"><b>入口2 · 事件调度跳跃</b>：直接推进至最近事件时间戳 ev.t（事件堆弹顶，批量跳时间、消除空转，5.3.4）</div></div>
+  <div class="flow-arrow">↓</div>
+  <div class="flow-step"><span class="num">3</span><div class="txt"><b>入口3 · 总线事务增量</b>：T_arb + T_route + T_slave 分阶段推进 sim_now（5.3.3）</div></div>
+  <div class="flow-branch">◆ 量子边界：虚拟时间检查卡点；允许指令执行轻微越界，中断最大延迟 = 量子大小（5.3.7）</div>
+</div>
+<p class="caption">图 2  sim_now 三类更新入口推进示意（量子边界检查卡点）</p>
+<h4 id="sec5-3-2" class="h-sub3">5.3.2 ISS 指令时序模型与时延表</h4>
+<p class="body">每条指令执行时延由静态时延表（基础时延 T_base）与访存总线时延（T_bus_total，见 5.3.3）叠加维护，作为 sim_now 细粒度步进的来源。</p>
+<p class="body">（1）指令时延表（Instruction Timing Table）：静态配置表，仿真启动加载；按 opcode+funct 索引获取指令基础时延 T_base。模型说明：事务抽象模型，不完整模拟 CPU 流水线冒险、旁路、stall（默认关闭流水线精细建模，可配置开启）；指令视为原子执行单元，不可在指令执行中途打断。</p>
+<p class="body">（2）普通运算指令时序：仅叠加 T_base，直接加到 sim_now（T_instr = T_base，表 2 示例基线）。</p>
+<p class="body">（3）访存指令时序模型：总耗时 T_instr_mem = T_base + T_bus_total；流程：ISS 译码 → 累加基础时延 → 发起总线事务 → 总线模型计算并叠加总线事务全部时延（T_bus_total 定义见 5.3.3）。</p>
+<p class="body">（4）可选高级能力：Cache 建模（开关控制，默认关闭；开启后额外增加 cache miss 时延，不影响架构语义与 golden 对拍）。</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:34%"><col style="width:18%"><col style="width:24%"></colgroup><thead><tr><th style="width:24%;text-align:center">指令类</th><th style="width:34%;text-align:center">索引键</th><th style="width:18%;text-align:center">T_base（ns，估算基线）</th><th style="width:24%;text-align:center">说明</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">ALU/逻辑/移位</td><td style="text-align:left">opcode|funct3|funct7（I/R 型）</td><td style="text-align:center">10</td><td style="text-align:left">基础时延；压缩指令按展开语义折算</td></tr><tr class="row1"><td data-label="指令类" style="text-align:center">分支/JAL/JALR</td><td data-label="索引键" style="text-align:left">opcode|funct3</td><td data-label="T_base" style="text-align:center">10</td><td data-label="说明" style="text-align:left">顺序取指后修正，无惩罚（与硬件差异见 3.1 表）</td></tr><tr class="row0"><td data-label="指令类" style="text-align:center">Load/Store</td><td data-label="索引键" style="text-align:left">opcode|funct3（宽度域）</td><td data-label="T_base" style="text-align:center">12</td><td data-label="说明" style="text-align:left">另叠加 T_bus_total（5.3.3）；宽度 8/16/32</td></tr><tr class="row1"><td data-label="指令类" style="text-align:center">乘除（M 扩展）</td><td data-label="索引键" style="text-align:left">opcode|funct3|funct7=1</td><td data-label="T_base" style="text-align:center">30</td><td data-label="说明" style="text-align:left">单周期语义、无流水线惩罚（架构语义对齐）</td></tr><tr class="row0"><td data-label="指令类" style="text-align:center">CSR 读写</td><td data-label="索引键" style="text-align:left">opcode|funct3=111</td><td data-label="T_base" style="text-align:center">20</td><td data-label="说明" style="text-align:left">checkCsrAccess 校验后执行</td></tr><tr class="row1"><td data-label="指令类" style="text-align:center">ECALL/EBREAK/MRET</td><td data-label="索引键" style="text-align:left">opcode=1110011（SYS）</td><td data-label="T_base" style="text-align:center">15</td><td data-label="说明" style="text-align:left">陷入/返回路径，不计入退休（5.2）</td></tr></tbody></table></div>
+<p class="lead">时延表口径：上表为估算基线，实现后按 WASM 实测校准（与第 8 章 5~10 MIPS 性能基线共同对账）；时延表为静态配置，运行期不修改（确定性约束，5.3.7-1）。</p>
+<h4 id="sec5-3-3" class="h-sub3">5.3.3 事务级总线模型（TLM）与总线延时计算</h4>
+<p class="body">总线模型是访存时序的来源：本模块的 load/store 与取指均经 M-14 分发，M-14 内实现事务级总线模型，本小节定义其时序语义（本模块只按契约发起与结算时延）。</p>
+<p class="body">（1）总线模型定位：简化 AHB 事务级模型（TLM），非周期精确 RTL；一次读/写打包为一条总线事务，不逐周期仿真握手信号；无独立时钟源，全部时序依赖全局 sim_now。</p>
+<p class="body">（2）总线内部状态变量：bus_free_time——基于 sim_now 的时间戳，标记总线释放时刻，多 Master 仲裁核心状态；地址映射路由表——地址区间映射至从设备实例；总线静态配置——路由时延 T_route。</p>
+<p class="body">（3）总线事务延时分解公式：T_bus_total = T_arb + T_route + T_slave。其中 T_arb 为仲裁等待延时，动态计算 T_arb = max(0, bus_free_time − sim_now)；T_route 为路由译码固定开销（静态配置参数）；T_slave 为从设备访问时延，由从设备 access() 回调返回（RAM/Flash/GPIO/UART 各自独立配置，支持动态状态相关时延）。</p>
+<p class="body">（4）一次总线事务完整执行流程（四步，对应图 3）：① ISS 发起 load/store 请求 {addr, dir, width}；② 仲裁等待：计算 T_arb（多 Master 串行，见（5））；③ 路由 + 从设备访问：查路由表定位从设备，调用 access()，累加 T_route + T_slave；④ 总线状态更新：bus_free_time = sim_now + T_bus_total，返回数据或错误（E_BUS-01 访存异常）。</p>
+<p class="body">（5）多 Master 并发处理规则：CPU、DMA 等主设备串行仲裁；同一时刻仅一条总线事务在传输，后续发起者在 bus_free_time 之后才获准（T_arb 自然体现等待）。</p>
+<p class="body">（6）总线状态更新语义：事务结束更新 bus_free_time 为下一次仲裁基准；总线自身无独立时钟，释放时刻完全由事务时延决定。</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:18%"><col style="width:18%"><col style="width:40%"><col style="width:24%"></colgroup><thead><tr><th style="width:18%;text-align:center">状态变量</th><th style="width:18%;text-align:center">类型</th><th style="width:40%;text-align:center">语义</th><th style="width:24%;text-align:center">更新点</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">bus_free_time</td><td style="text-align:center">uint64（ns）</td><td style="text-align:left">总线释放时间戳；多 Master 仲裁等待基准</td><td style="text-align:left">事务结束时更新（sim_now + T_bus_total）</td></tr><tr class="row1"><td data-label="状态变量" style="text-align:center">route_table</td><td data-label="类型" style="text-align:center">Map&lt;AddrRange, Slave&gt;</td><td data-label="语义" style="text-align:left">地址区间 → 从设备实例（RAM/Flash/GPIO/UART）</td><td data-label="更新点" style="text-align:left">静态加载（M-14 映射表）</td></tr><tr class="row0"><td data-label="状态变量" style="text-align:center">T_route</td><td data-label="类型" style="text-align:center">uint32（ns）</td><td data-label="语义" style="text-align:left">路由译码固定开销（静态配置）</td><td data-label="更新点" style="text-align:left">静态配置，运行期不变</td></tr><tr class="row1"><td data-label="状态变量" style="text-align:center">T_slave(dev, op)</td><td data-label="类型" style="text-align:center">uint32（ns）</td><td data-label="语义" style="text-align:left">从设备访问时延，access() 回调返回；可状态相关</td><td data-label="更新点" style="text-align:left">每次 access() 调用返回</td></tr></tbody></table></div>
+
+<svg class="flow-svg" viewBox="0 0 960 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="一次总线事务四步流程">
+  <defs>
+    <marker id="arrB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <style>
+    .b-box { fill:#ffffff; stroke:#2f5bd6; stroke-width:1.5; }
+    .b-t { fill:#1e3a8a; font-size:13.5px; font-weight:700; }
+    .b-s { fill:#4b5563; font-size:12px; }
+    .b-side { fill:#eef2fc; stroke:#c6d3f3; stroke-width:1.4; }
+    .b-side-t { fill:#1e3a8a; font-size:13px; font-weight:700; }
+    .b-edge { stroke:#64748b; stroke-width:1.5; fill:none; marker-end:url(#arrB); }
+    .b-lab { fill:#64748b; font-size:12px; }
+    .b-formula { fill:#7a5a20; font-size:13px; font-weight:700; }
+  </style>
+  <!-- 主链四步 -->
+  <rect class="b-box" x="120" y="30" width="360" height="66" rx="8"/>
+  <text class="b-t" x="300" y="54" text-anchor="middle">① 发起请求</text>
+  <text class="b-s" x="300" y="76" text-anchor="middle">ISS load/store {addr, dir, width}（经 M-14）</text>
+  <path class="b-edge" d="M300,96 L300,128"/>
+  <rect class="b-box" x="120" y="128" width="360" height="66" rx="8"/>
+  <text class="b-t" x="300" y="152" text-anchor="middle">② 仲裁等待</text>
+  <text class="b-s" x="300" y="174" text-anchor="middle">T_arb = max(0, bus_free_time − sim_now)</text>
+  <path class="b-edge" d="M300,194 L300,226"/>
+  <rect class="b-box" x="120" y="226" width="360" height="66" rx="8"/>
+  <text class="b-t" x="300" y="250" text-anchor="middle">③ 路由 + 从设备访问</text>
+  <text class="b-s" x="300" y="272" text-anchor="middle">查 route_table → access() 累加 T_route + T_slave</text>
+  <path class="b-edge" d="M300,292 L300,324"/>
+  <rect class="b-box" x="120" y="324" width="360" height="66" rx="8"/>
+  <text class="b-t" x="300" y="348" text-anchor="middle">④ 总线状态更新</text>
+  <text class="b-s" x="300" y="370" text-anchor="middle">bus_free_time = sim_now + T_bus_total；返回数据 / E_BUS-01</text>
+  <!-- 右侧公式与语义 -->
+  <rect class="b-side" x="560" y="30" width="340" height="360" rx="8"/>
+  <text class="b-side-t" x="730" y="58" text-anchor="middle">事务延时分解</text>
+  <text class="b-formula" x="730" y="92" text-anchor="middle">T_bus_total = T_arb + T_route + T_slave</text>
+  <text class="b-s" x="730" y="124" text-anchor="middle">T_arb：仲裁等待，动态计算</text>
+  <text class="b-s" x="730" y="144" text-anchor="middle">＝ max(0, bus_free_time − sim_now)</text>
+  <text class="b-s" x="730" y="176" text-anchor="middle">T_route：路由译码固定开销</text>
+  <text class="b-s" x="730" y="196" text-anchor="middle">（静态配置参数）</text>
+  <text class="b-s" x="730" y="228" text-anchor="middle">T_slave：从设备访问时延</text>
+  <text class="b-s" x="730" y="248" text-anchor="middle">（access() 回调返回，可状态相关）</text>
+  <text class="b-side-t" x="730" y="292" text-anchor="middle">bus_free_time 语义</text>
+  <text class="b-s" x="730" y="316" text-anchor="middle">总线释放时间戳，多 Master 仲裁核心状态</text>
+  <text class="b-s" x="730" y="336" text-anchor="middle">事务结束时更新，作为下一次仲裁基准</text>
+  <text class="b-s" x="730" y="364" text-anchor="middle">总线无独立时钟，全部依赖全局 sim_now</text>
+</svg>
+
+<div class="flow-mobile">
+  <div class="flow-step"><span class="num">1</span><div class="txt"><b>发起请求</b>：ISS load/store {addr, dir, width}（经 M-14）</div></div>
+  <div class="flow-arrow">↓</div>
+  <div class="flow-step"><span class="num">2</span><div class="txt"><b>仲裁等待</b>：T_arb = max(0, bus_free_time − sim_now)（多 Master 串行）</div></div>
+  <div class="flow-arrow">↓</div>
+  <div class="flow-step"><span class="num">3</span><div class="txt"><b>路由 + 从设备访问</b>：查 route_table → access() 累加 T_route + T_slave</div></div>
+  <div class="flow-arrow">↓</div>
+  <div class="flow-step"><span class="num">4</span><div class="txt"><b>总线状态更新</b>：bus_free_time = sim_now + T_bus_total；返回数据 / E_BUS-01</div></div>
+  <div class="flow-branch">◆ T_bus_total = T_arb + T_route + T_slave；总线无独立时钟，全部时序依赖全局 sim_now（5.3.3）</div>
+</div>
+<p class="caption">图 3  一次总线事务四步流程与 T_arb/T_route/T_slave 分解</p>
+<h4 id="sec5-3-4" class="h-sub3">5.3.4 外设事件与定时器时序建模</h4>
+<p class="body">外设（M-15）不持有独立时钟，事件全部基于全局 sim_now 产生并进入调度事件堆，与 ISS/总线共享同一时间域。</p>
+<p class="body">（1）外设统一时序规则：所有片上外设共享全局 sim_now 作为唯一时间基准；多时钟域仅修改 tick 周期参数（预分频系数），不存在独立振荡器。</p>
+<p class="body">（2）MTIME/SysTick 定时器建模：定时器维护 timer_next_trigger 时间戳，基于当前 sim_now 与预分频/计数周期计算（timer_next_trigger = sim_now + prescaler × period）；将 timer_next_trigger 事件推入全局最小堆事件队列；调度器推进 sim_now 到达触发时间，弹出事件，执行外设逻辑、产生中断请求标记（对应 2.2 新增 mtime/mtimecmp CSR，见 5.2.2 MTIE）。</p>
+<p class="body">（3）中断采样规则：外设仅标记中断请求（mip 挂起视图由 M-16 交付状态更新），中断统一在量子边界采样仲裁，不在事件发生时刻立即响应（衔接 5.2.2/5.2.3）。</p>
+<h4 id="sec5-3-5" class="h-sub3">5.3.5 全局调度器宿主机执行模型</h4>
+<p class="body">调度器是运行于 Worker 线程内的主循环代码（非独立操作系统进程），仿真内核整体驻留 Worker，与前端主线程隔离。</p>
+<p class="body">（1）调度器载体与线程架构：主线程（UI、控制命令、前端交互）+ Worker 线程（仿真内核：调度器、ISS、总线、外设实例、独立 sim_now、独立事件堆），双线程经结构化消息交互（控制注入/状态上报）；多 SoC 并行：多 Worker，每个 Worker 拥有独立仿真域，互不干扰（架构见图 4）。</p>
+<p class="body">（2）Worker 线程执行逻辑：宿主机 OS 负责线程时间片调度；OS 抢占只会改变宿主机运行速度，不会修改仿真域 sim_now 时序——sim_now 只被仿真事件推进，确定性不受破坏（与 1.2 确定性约束衔接）。</p>
+<p class="body">（3）看门狗机制：看门狗读取宿主机墙上时间，用于检测固件死循环卡死（指令无进展），仅做安全终止，不参与虚拟时间计算（与 M-22 guest 失控判定衔接，WFI 空闲推进不误判，见引言 WFI 协议）。</p>
+
+<svg class="flow-svg" viewBox="0 0 960 400" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="主线程与 Worker 线程架构">
+  <defs>
+    <marker id="arrA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <style>
+    .a-main { fill:#eef2fc; stroke:#c6d3f3; stroke-width:1.6; }
+    .a-worker { fill:#f8fafc; stroke:#2f5bd6; stroke-width:1.8; }
+    .a-t { fill:#1e3a8a; font-size:13.5px; font-weight:700; }
+    .a-s { fill:#4b5563; font-size:12px; }
+    .a-in { fill:#ffffff; stroke:#d8dee9; stroke-width:1.2; }
+    .a-edge { stroke:#64748b; stroke-width:1.5; fill:none; marker-end:url(#arrA); }
+    .a-edge2 { stroke:#64748b; stroke-width:1.5; fill:none; marker-end:url(#arrA); marker-start:url(#arrA); }
+    .a-lab { fill:#64748b; font-size:12px; }
+  </style>
+  <!-- 主线程 -->
+  <rect class="a-main" x="40" y="50" width="280" height="300" rx="10"/>
+  <text class="a-t" x="180" y="80" text-anchor="middle">主线程（UI）</text>
+  <rect class="a-in" x="70" y="100" width="220" height="52" rx="6"/>
+  <text class="a-s" x="180" y="122" text-anchor="middle">前端交互 / 视图渲染</text>
+  <text class="a-s" x="180" y="140" text-anchor="middle">（M-01/M-02/M-03）</text>
+  <rect class="a-in" x="70" y="166" width="220" height="52" rx="6"/>
+  <text class="a-s" x="180" y="188" text-anchor="middle">控制命令注入</text>
+  <text class="a-s" x="180" y="206" text-anchor="middle">（暂停/断点/单步/恢复）</text>
+  <rect class="a-in" x="70" y="232" width="220" height="52" rx="6"/>
+  <text class="a-s" x="180" y="254" text-anchor="middle">状态上报 / 渲染节流</text>
+  <text class="a-s" x="180" y="272" text-anchor="middle">（UI 节流用墙上时间，不参与时序）</text>
+  <!-- 双箭头 -->
+  <path class="a-edge2" d="M330,200 L500,200"/>
+  <text class="a-lab" x="415" y="188" text-anchor="middle">结构化消息</text>
+  <text class="a-lab" x="415" y="220" text-anchor="middle">控制注入 / 状态上报</text>
+  <!-- Worker 线程 -->
+  <rect class="a-worker" x="520" y="50" width="400" height="300" rx="10"/>
+  <text class="a-t" x="720" y="80" text-anchor="middle">Worker 线程（仿真内核）</text>
+  <rect class="a-in" x="545" y="100" width="350" height="52" rx="6"/>
+  <text class="a-s" x="720" y="122" text-anchor="middle">调度器主循环（5.3.6 算法）</text>
+  <text class="a-s" x="720" y="140" text-anchor="middle">量子循环 + 事件堆 + sim_now 推进</text>
+  <rect class="a-in" x="545" y="166" width="350" height="52" rx="6"/>
+  <text class="a-s" x="720" y="188" text-anchor="middle">ISS（M-13）· 总线 TLM（M-14）· 外设实例（M-15）</text>
+  <text class="a-s" x="720" y="206" text-anchor="middle">中断仲裁衔接（M-16）</text>
+  <rect class="a-in" x="545" y="232" width="350" height="52" rx="6"/>
+  <text class="a-s" x="720" y="254" text-anchor="middle">独立仿真域：sim_now + 事件堆（每个 Worker 一份）</text>
+  <text class="a-s" x="720" y="272" text-anchor="middle">OS 抢占只改变宿主速度，不改变 sim_now 时序</text>
+  <!-- 看门狗 -->
+  <rect class="a-in" x="545" y="298" width="350" height="36" rx="6"/>
+  <text class="a-s" x="720" y="320" text-anchor="middle">看门狗：读宿主墙上时间，检测死循环，仅安全终止（不参与时序）</text>
+  <!-- 多 SoC -->
+  <text class="a-lab" x="480" y="386" text-anchor="middle">多 SoC 并行：多 Worker 各自独立仿真域，互不干扰</text>
+</svg>
+
+<div class="flow-mobile">
+  <div class="flow-step"><span class="num">1</span><div class="txt"><b>主线程（UI）</b>：前端交互/视图渲染、控制命令注入（暂停/断点/单步/恢复）、状态上报（UI 节流用墙上时间，不参与时序）</div></div>
+  <div class="flow-arrow">↓</div>
+  <div class="flow-step"><span class="num">2</span><div class="txt"><b>Worker 线程（仿真内核）</b>：调度器主循环（5.3.6）+ ISS/总线 TLM/外设实例 + 独立 sim_now/事件堆；OS 抢占只改变宿主速度，不改变 sim_now 时序</div></div>
+  <div class="flow-branch">◆ 看门狗：读宿主墙上时间，检测固件死循环，仅安全终止（不参与虚拟时间计算）</div>
+  <div class="flow-branch">◆ 多 SoC 并行：多 Worker 各自独立仿真域，互不干扰</div>
+</div>
+<p class="caption">图 4  主线程 / Worker 线程架构与多 SoC 独立仿真域</p>
+<h4 id="sec5-3-6" class="h-sub3">5.3.6 调度核心算法伪代码</h4>
+<p class="body">以下为参考实现（Python 风格伪代码，便于评审理解逻辑，不作为最终工程代码），整合量子循环、事件堆、sim_now 推进、ISS 执行、总线事务调用与量子边界中断采样：</p>
+<pre class="code"><code># 调度主循环（参考实现）：量子批量 + 事件堆 + sim_now 推进 + 边界中断采样
+sim_now = 0                     # 虚拟时间（ns），仿真域唯一时间基准（5.3.1）
+bus_free_time = 0               # 总线释放时间戳（5.3.3）
+event_heap = MinHeap()          # 全局最小堆：未来事件按 (t, seq) 稳定排序
+QUANTUM = 1000                  # 量子大小（ns，估算基线，可配置；5.3.1-3）
+wfi_pending = False             # WFI 停取指标志（引言协议）
+
+def scheduler_run():
+    while not stop_requested:
+        quantum_end = sim_now + QUANTUM
+        # ① 事件驱动优先：批量跳跃至最近事件时间戳，消除空转（5.3.1 入口2）
+        while event_heap and event_heap.top().t &lt;= quantum_end:
+            ev = event_heap.pop()
+            sim_now = max(sim_now, ev.t)     # 直接跳跃至事件时间戳
+            ev.dispatch()                    # 外设逻辑：执行/置中断请求标记（5.3.4）
+        # ② ISS 细粒度步进：量子内逐条执行指令（5.3.1 入口1）
+        while sim_now &lt; quantum_end and not wfi_pending:
+            inst = fetch(pc)                 # 取指经 M-14：总线事务，推进 sim_now/bus_free_time
+            sim_now += inst.T_base           # 累加指令基础时延（5.3.2）
+            if inst.is_mem_access():
+                sim_now += bus_transaction(inst)  # 总线事务：T_arb+T_route+T_slave（5.3.3 入口3）
+            execute(inst)                    # 表驱动执行；允许 sim_now 轻微越界（5.3.7-4）
+            if inst_retired &gt;= inst_budget:  # 指令配额保护（可选，M-12 指令预算折算）
+                break
+        # ③ 量子边界：中断采样与交付（5.3.4-3 / 5.2.2/5.2.3）
+        if event_heap and event_heap.top().t &lt;= sim_now:
+            continue                         # 下一事件恰在边界内 → 回①处理（不空转）
+        irq = m16_arbitrate(sim_now)         # M-16 量子边界全局仲裁 → PendingIntr
+        if irq and mstatus.MIE:
+            take_interrupt(irq)              # 陷入路径（5.2.4）；下量子执行 handler
+</code></pre>
+<h4 id="sec5-3-7" class="h-sub3">5.3.7 约束与边界说明</h4>
+<p class="body">（1）确定性约束：时延表、总线配置、量子大小均为固定静态参数，禁止引入宿主机时间随机量（与 1.2/2.4 确定性约束衔接）；同一种子 + 同一输入序列 → sim_now 推进序列唯一。</p>
+<p class="body">（2）模型取舍：事务级抽象（TLM），不模拟总线信号毛刺、流水线冒险/旁路/stall；可选高级模式（流水线精细建模、Cache 建模）默认关闭，开启不影响架构语义与 golden 对拍。</p>
+<p class="body">（3）中断延迟上限：中断最大延迟等于量子配置值（量子为采样卡点，外设中断请求在下一量子边界交付，见 5.3.1-3/5.3.4-3）。</p>
+<p class="body">（4）时间越界规则：指令必须完整执行（原子单元，5.3.2-1），允许 sim_now 轻微越过量子边界；量子为检查卡点而非硬截止，不截断执行中的指令。</p>
+<h4 id="sec5-3-8" class="h-sub3">5.3.8 参考范式说明</h4>
+<p class="body">本方案参考 Renode 量子调度（虚拟时间驱动事件循环）、QEMU icount 指令时序模型（指令计数折算虚拟时钟）、Spike 指令译码与异常语义（golden 对拍基线）；平台改造点：按虚拟时间量子切片（sim_now 单调推进 + 事件堆批量跳跃），而非指令计数切片（QEMU icount 式）。</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:22%"><col style="width:42%"><col style="width:36%"></colgroup><thead><tr><th style="width:22%;text-align:center">参考范式</th><th style="width:42%;text-align:center">核心机制</th><th style="width:36%;text-align:center">平台取舍</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">Renode 量子调度</td><td style="text-align:left">时间片 + 事件循环，虚拟时间驱动</td><td style="text-align:left">保留量子边界采样；融入事件堆批量跳跃（入口2）</td></tr><tr class="row1"><td data-label="参考范式" style="text-align:center">QEMU icount</td><td data-label="核心机制" style="text-align:left">指令计数折算虚拟时钟（icount=指令→ns）</td><td data-label="平台取舍" style="text-align:left">保留时延表折算（入口1），改造为虚拟时间量子切片</td></tr><tr class="row0"><td data-label="参考范式" style="text-align:center">Spike（golden）</td><td data-label="核心机制" style="text-align:left">译码/异常语义基准，差分对拍</td><td data-label="平台取舍" style="text-align:left">译码与异常语义直接采用为对拍基线（FR-04）</td></tr></tbody></table></div>
+<h3 id="sec5-4" class="h-sub">5.4 调试态行为</h3>
+<p class="body">调试态全钩子启用时执行性能降级至 0.5 至 1 MIPS（估算基线）；PC 断点命中检测优先于全量回调（断点逻辑归 M-08，本模块仅提供钩子通道）。</p>
+
+<h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:14%"><col style="width:30%"><col style="width:44%"><col style="width:12%"></colgroup><thead><tr><th style="width:14%;text-align:center">错误码</th><th style="width:30%;text-align:center">场景</th><th style="width:44%;text-align:center">处置</th><th style="width:12%;text-align:center">属性</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">E_ISS-01</td><td style="text-align:left">非法指令</td><td style="text-align:left">同步陷入（5.2.1），mcause=2 记非法指令，mtval 记指令编码；guest 语义，可被固件处理或交调试器</td><td style="text-align:center">guest trap</td></tr><tr class="row1"><td data-label="错误码" style="text-align:center">E_ISS-02</td><td data-label="场景" style="text-align:left">CSR 非法访问（不存在/权限不足）</td><td data-label="处置" style="text-align:left">同步陷入（5.2.1），mcause=2 记非法指令；只读位写入按规范忽略不报错</td><td data-label="属性" style="text-align:center">guest trap</td></tr><tr class="row0"><td data-label="错误码" style="text-align:center">E_BUS-01</td><td data-label="场景" style="text-align:left">未映射地址访存（含取指）</td><td data-label="处置" style="text-align:left">同步陷入（5.2.1），访存异常（load/store/instruction fault），mtval 记地址</td><td data-label="属性" style="text-align:center">guest trap（由 M-14 抛出）</td></tr><tr class="row1"><td data-label="错误码" style="text-align:center">E_ISS-03</td><td data-label="场景" style="text-align:left">trap 处理失败：mtvec 基址不可执行（trap 交付取指失败；主场景，评审 13-7/N3）</td><td data-label="处置" style="text-align:left">平台级错误，上报 M-12/M-22，不按 guest 语义处理</td><td data-label="属性" style="text-align:center">平台故障</td></tr><tr class="row0"><td data-label="错误码" style="text-align:center">——</td><td data-label="场景" style="text-align:left">Spike 差分对拍不一致</td><td data-label="处置" style="text-align:left">记录为内核缺陷，阻断发布（CI 门禁）</td><td data-label="属性" style="text-align:center">开发/CI</td></tr></tbody></table></div>
+<p class="body">E_ISS-03 仅保留主场景「mtvec 基址不可执行（trap 交付取指失败）」；原「trap 状态写失败」子场景因 mepc/mcause/mtval 均 RW 且 M 模式可写、无法构造真实失败而移除（评审 N3）。</p>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">中断风暴按 mie 使能掩码与 M-16 优先级仲裁抑制（5.2.5），未使能中断保持挂起不丢；guest 失控判定（指令预算 watchdog）归 M-12，与 guest trap 严格区分，不占死 UI；trap 风暴（trapStreak 连续陷入达阈值）平台级告警上报 M-12/M-22（评审 13-10）；快照恢复依赖本模块 L3 能力，恢复时清 decodedCache、重置计数基准并与 M-20 检查点策略配合（评审 B13-5）。</p>
+
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表91 M-13 行：测试要点 = ISS 正确性；关键用例 = Spike golden 差分对拍 + riscv-tests 子集；通过准则 = 对拍一致（FR-04）。测试纳入「单元测试 + 确定性夹具 + 黄金对拍 + 端到端验收」四级策略（源设计 7.1）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:44%"><col style="width:40%"></colgroup><thead><tr><th style="width:16%;text-align:center">用例组</th><th style="width:44%;text-align:center">测试要点</th><th style="width:40%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（源 2.5/7.1 对齐）</td><td style="text-align:left">按 9.1.1 端口契约表逐项校验 decode/execute/trap/step 的接口签名、输入校验、输出结构与错误码；替代实现（如 QEMU 后端）接入前必须同端口契约测试全绿</td><td style="text-align:left">契约测试全绿；契约变更须同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例组" style="text-align:center">指令覆盖对拍</td><td data-label="测试要点" style="text-align:left">RV32IMC 全集 82 条（含压缩指令）逐条与 Spike golden 差分对拍</td><td data-label="通过准则" style="text-align:left">对拍一致（FR-04）</td></tr><tr class="row0"><td data-label="用例组" style="text-align:center">riscv-tests 子集</td><td data-label="测试要点" style="text-align:left">官方 riscv-tests 用例子集（RV32I/M/C）全量通过</td><td data-label="通过准则" style="text-align:left">全部通过（源文档 7.3 表92）</td></tr><tr class="row1"><td data-label="用例组" style="text-align:center">边界语义</td><td data-label="测试要点" style="text-align:left">非对齐访存、x0 写忽略、CSR 只读位写忽略、pc 对齐</td><td data-label="通过准则" style="text-align:left">与 Spike 逐字节一致</td></tr><tr class="row0"><td data-label="用例组" style="text-align:center">异常路径</td><td data-label="测试要点" style="text-align:left">非法指令（E_ISS-01）、CSR 非法访问（E_ISS-02）、未映射访存（E_BUS-01）、trap 处理失败（E_ISS-03）</td><td data-label="通过准则" style="text-align:left">mcause/mtval/mepc 记录正确、guest 语义成立</td></tr><tr class="row1"><td data-label="用例组" style="text-align:center">压缩指令 mtval（评审 13-8）</td><td data-label="测试要点" style="text-align:left">非法压缩编码触发 E_ISS-01</td><td data-label="通过准则" style="text-align:left">mtval 记 16 位原码（非展开码），与 Spike 对拍一致（评审 13-1）</td></tr><tr class="row0"><td data-label="用例组" style="text-align:center">解码缓存差分（评审 13-8）</td><td data-label="测试要点" style="text-align:left">同一程序 decodedCache on/off 各跑一遍</td><td data-label="通过准则" style="text-align:left">执行结果一致；自修改代码（store 改指令字）后缓存失效、行为正确（评审 13-6）</td></tr><tr class="row1"><td data-label="用例组" style="text-align:center">自修改代码（评审 13-8）</td><td data-label="测试要点" style="text-align:left">运行时改写指令字后跳回执行</td><td data-label="通过准则" style="text-align:left">缓存失效后重新解码；与无缓存结果一致</td></tr><tr class="row0"><td data-label="用例组" style="text-align:center">中断路径（平台自测）</td><td data-label="测试要点" style="text-align:left">量子边界采样、M-16 仲裁交付 PendingIntr、陷入 mtvec、mret 恢复</td><td data-label="通过准则" style="text-align:left">不丢挂起、两级仲裁衔接正确（评审 13-4）；Spike 不仿真中断路径，归平台自测（评审 13-8）</td></tr><tr class="row1"><td data-label="用例组" style="text-align:center">trap 风暴（评审 13-10）</td><td data-label="测试要点" style="text-align:left">构造 mtvec 指向自身的陷入循环</td><td data-label="通过准则" style="text-align:left">trapStreak 达阈值 → 平台级告警；与 watchdog 无进展检测协同</td></tr><tr class="row0"><td data-label="用例组" style="text-align:center">快照/恢复</td><td data-label="测试要点" style="text-align:left">任意状态快照 → 修改 → 恢复</td><td data-label="通过准则" style="text-align:left">CRC 校验通过、decodedCache 清空、计数基准重置；恢复点与检查点重放一致（评审 B13-5）</td></tr><tr class="row1"><td data-label="用例组" style="text-align:center">确定性夹具</td><td data-label="测试要点" style="text-align:left">同种子 + 同时间戳化输入事件序列 {t_virt, seq, kind, payload} 重放</td><td data-label="通过准则" style="text-align:left">结果序列唯一（D0 范围）</td></tr><tr class="row0"><td data-label="用例组" style="text-align:center">覆盖率</td><td data-label="测试要点" style="text-align:left">语句覆盖为主、关键路径补分支覆盖</td><td data-label="通过准则" style="text-align:left">核心模块单测覆盖率 ≥70%（估算基线）</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）统一钩子通道：on_instruction_pre/post、on_access、on_trap 经 hookRegistry 统一触发（回调签名 fn_t(HookKind, const HookEvent*, void*)），断点、trace、探针、覆盖率共享同一通道，新增观测能力不改执行路径；</p>
+<p class="body">（2）结构化日志：trap/异常经 M-21 统一上报（对接约定见 9.3），问题定位不依赖私有打印；</p>
+<p class="body">（3）确定性复现：固定种子 + 稳定事件排序 + 快照/恢复（L3），崩溃后可检查点重放验证；</p>
+<p class="body">（4）CI 门禁：差分对拍不一致记录为内核缺陷并阻断发布（4.4.2.5）；覆盖率门禁纳入源文档 7.3 表92；</p>
+<p class="body">（5）性能开关：decodedCache 可关（调试期保真）、钩子整体可关（性能模式，第 8 章 0.5-1 MIPS 与 5-10 MIPS 两档）。</p>
+<p class="body">（6）契约层可替换性（源 2.5 对齐）：本模块对外的 driving/driven 端口收敛到 9.1.1 端口契约表，替代实现（QEMU 后端等）遵守同端口契约并通过契约测试即可接入，不改动其他模块；模块内部实现语言与编程模型不受约束。</p>
+
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-13 责任：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:14%"><col style="width:30%"><col style="width:56%"></colgroup><thead><tr><th style="width:14%;text-align:center">质量属性</th><th style="width:30%;text-align:center">目标（估算基线）</th><th style="width:56%;text-align:center">M-13 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">性能</td><td style="text-align:left">WASM 解释 ≥5–10 MIPS；调试态全钩子 ≥0.5–1 MIPS</td><td style="text-align:left">表驱动执行 + 钩子可关 + decodedCache 可关（两档性能开关）</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">可用性</td><td data-label="目标" style="text-align:left">零安装、file:// 直接可开、移动端 375px 可读</td><td data-label="M-13 落实" style="text-align:left">WASM 沙箱内核内嵌（M-07 内嵌策略）；单文件内联 base64 超限走 ADR-6/E 目录形态分片</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">安全</td><td data-label="目标" style="text-align:left">固件沙箱（NFR-04）、输入上限</td><td data-label="M-13 落实" style="text-align:left">固件在 WASM 沙箱内执行；ELF/DWARF 大小与复杂度上限由 M-06 解析侧承接</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">可维护性</td><td data-label="目标" style="text-align:left">核心模块覆盖率 ≥70%；内核前端解耦；模块即积木可替换（源 2.5）</td><td data-label="M-13 落实" style="text-align:left">单测 + 对拍门禁 + 端口契约测试（9.1.1）；经 M-17 ExecutionBackend 抽象隔离，前端不依赖本模块内部；替代实现遵守同端口契约即可接入</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">可靠性</td><td data-label="目标" style="text-align:left">确定性可复现（FR-12）</td><td data-label="M-13 落实" style="text-align:left">固定种子 + （虚拟时间, 插入序）稳定排序（M-12 主导）；本模块执行语义确定</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">韧性</td><td data-label="目标" style="text-align:left">故障检测→分级→处置→恢复（NFR-08）</td><td data-label="M-13 落实" style="text-align:left">E_ISS-03（trap 处理失败）为平台级故障上报 M-12/M-22；trap 风暴（trapStreak 阈值）平台告警（评审 13-10）；guest 失控由 M-12 watchdog 判定并 terminate</td></tr></tbody></table></div>
+
+
+<h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:12%"><col style="width:24%"><col style="width:64%"></colgroup><thead><tr><th style="width:12%;text-align:center">方向</th><th style="width:24%;text-align:center">对象</th><th style="width:64%;text-align:center">依赖内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">依赖</td><td style="text-align:left">M-14 总线与内存映射</td><td style="text-align:left">取指与访存读写分发，未映射异常（E_BUS-01）</td></tr><tr class="row1"><td style="text-align:center">依赖</td><td style="text-align:left">M-16 中断控制器</td><td style="text-align:left">量子边界中断交付（irq 采样/仲裁结果，见 5.2.3）</td></tr><tr class="row0"><td style="text-align:center">依赖</td><td style="text-align:left">M-17 ExecutionBackend</td><td style="text-align:left">本模块为其自研实现，承担 reset/runUntil/step/断点/读写/快照/L3 契约</td></tr><tr class="row1"><td style="text-align:center">依赖</td><td style="text-align:left">M-18 探针</td><td style="text-align:left">通过 on_instruction_pre/post、on_access、on_trap 钩子上报执行/访存/陷入事件</td></tr><tr class="row0"><td style="text-align:center">依赖</td><td style="text-align:left">M-21 日志系统</td><td style="text-align:left">trap/异常日志统一上报（4.4.2.6；对接约定见 9.3）</td></tr><tr class="row1"><td style="text-align:center">依赖</td><td style="text-align:left">M-12 仿真引擎</td><td style="text-align:left">被 runUntil/step 驱动；控制注入与虚拟时间推进</td></tr><tr class="row0"><td style="text-align:center">依赖</td><td style="text-align:left">M-20 快照/事件流</td><td style="text-align:left">提供全状态快照/恢复与 trap 事件记录</td></tr><tr class="row1"><td style="text-align:center">被依赖</td><td style="text-align:left">M-12、M-17</td><td style="text-align:left">执行单元与后端适配</td></tr><tr class="row0"><td style="text-align:center">被依赖</td><td style="text-align:left">调试服务（M-08 至 M-11）</td><td style="text-align:left">经 M-17 间接访问寄存器、内存、断点、单步</td></tr><tr class="row1"><td style="text-align:center">外部</td><td style="text-align:left">Spike（riscv-isa-sim）</td><td style="text-align:left">差分对拍 golden 参考，仅开发/CI 阶段</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表55 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层，本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现（QEMU 后端等）遵守同端口契约并通过契约测试（7.1）即可接入，无需改动其他模块：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:18%"><col style="width:58%"></colgroup><thead><tr><th style="width:24%;text-align:center">端口 / 服务</th><th style="width:18%;text-align:center">方向</th><th style="width:58%;text-align:center">契约（输入 → 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:left">decode(inst)</td><td style="text-align:center">提供（driving）</td><td style="text-align:left">输入：32 位指令编码；输出：{opcode, funct3, funct7, operands}（含压缩指令展开与原码，评审 13-1）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">execute(decoded)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">调用访存分发（M-14）/CSR 读写；输出：执行结果与副作用（断点命中前置，评审 13-2）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">trap(cause, tval)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">写 mepc/mcause/mtval，跳 mtvec；输出：trap 事件（TrapEvent 上链，评审 B13-4）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">step()</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">调用 on_instruction_pre/post、on_access、on_trap 钩子；输出：PC 更新</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">iss_pending_intr()/iss_take_intr()</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">中断交付（PendingIntr 交接结构，5.2.3，评审 13-4）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">snapshot()/restore()</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">L3 快照契约（EngineSnapshot + CRC 校验，评审 B13-5）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-14 总线与内存映射</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">取指与访存读写分发；未映射 → E_BUS-01</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-12 事件驱动仿真引擎</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">step/runUntil 驱动节奏与每量子指令配额；trap 风暴联动判定（评审 13-10）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-16 中断控制器</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">中断交付（iss_pending_intr/iss_take_intr，PendingIntr 交接，5.2.3）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-21 日志系统</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">trap/异常结构化日志（9.3，唯一入口规则）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-20 事件流/快照</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">snapshot/restore 检查点配合（L3 快照 + CRC，评审 B13-5）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-17 / M-22</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">ExecutionBackend 契约代理（9.2）；平台故障上报（E_ISS-03 → M-12/M-22）</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 与 ExecutionBackend 契约对应</h3>
+<p class="body">本模块对源文档 3.2.4 表13 的契约逐项落实；契约方法签名如下（评审 B13-2）。能力分级声明为 L3 全量。</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:28%"><col style="width:34%"><col style="width:16%"><col style="width:22%"></colgroup><thead><tr><th style="width:28%;text-align:center">方法</th><th style="width:34%;text-align:center">参数</th><th style="width:16%;text-align:center">返回</th><th style="width:22%;text-align:center">说明</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">reset</td><td style="text-align:left">cfg: EngineCfg</td><td style="text-align:center">rc: Err</td><td style="text-align:left">按配置复位引擎（含是否启用 decodedCache/钩子）</td></tr><tr class="row1"><td data-label="方法" style="text-align:center">runUntil</td><td data-label="参数" style="text-align:left">t: uint64（虚拟时间）</td><td data-label="返回" style="text-align:center">rc: RunReason</td><td data-label="说明" style="text-align:left">连续执行到 t 或暂停（TIME_REACHED/PAUSED/BP_HIT/...）</td></tr><tr class="row0"><td data-label="方法" style="text-align:center">step</td><td data-label="参数" style="text-align:left">—</td><td data-label="返回" style="text-align:center">rc: RunReason</td><td data-label="说明" style="text-align:left">执行 1 条指令后返回（含断点检测）</td></tr><tr class="row1"><td data-label="方法" style="text-align:center">pause</td><td data-label="参数" style="text-align:left">—</td><td data-label="返回" style="text-align:center">rc: Err</td><td data-label="说明" style="text-align:left">安全点暂停（经 M-12 注入）</td></tr><tr class="row0"><td data-label="方法" style="text-align:center">setBreakpoint / clearBreakpoint</td><td data-label="参数" style="text-align:left">addr: uint32, cond: BreakCond</td><td data-label="返回" style="text-align:center">id: int32</td><td data-label="说明" style="text-align:left">断点注册/注销；命中时 BP_HIT；断点地址禁止解码缓存（13-6）</td></tr><tr class="row1"><td data-label="方法" style="text-align:center">readReg</td><td data-label="参数" style="text-align:left">idx: regIdx（0~31/CSR 编码）</td><td data-label="返回" style="text-align:center">val: uint32, err</td><td data-label="说明" style="text-align:left">读寄存器/CSR；非法索引报 E_ISS-02 语义</td></tr><tr class="row0"><td data-label="方法" style="text-align:center">writeReg</td><td data-label="参数" style="text-align:left">idx: regIdx, val: uint32</td><td data-label="返回" style="text-align:center">err</td><td data-label="说明" style="text-align:left">写寄存器/CSR（x0 忽略、CSR 权限校验）</td></tr><tr class="row1"><td data-label="方法" style="text-align:center">readMem</td><td data-label="参数" style="text-align:left">addr: uint32, size: 1/2/4</td><td data-label="返回" style="text-align:center">val: uint32, err</td><td data-label="说明" style="text-align:left">宽度化读（经 M-14）；未映射报 E_BUS-01</td></tr><tr class="row0"><td data-label="方法" style="text-align:center">writeMem</td><td data-label="参数" style="text-align:left">addr: uint32, size, val: uint32</td><td data-label="返回" style="text-align:center">err</td><td data-label="说明" style="text-align:left">宽度化写；完成后失效对应 pc 解码缓存（13-6）</td></tr><tr class="row1"><td data-label="方法" style="text-align:center">loadELF</td><td data-label="参数" style="text-align:left">bytes: u8[], entryHint?: uint32</td><td data-label="返回" style="text-align:center">entry: uint32, err</td><td data-label="说明" style="text-align:left">加载固件；大小/复杂度上限由 M-06 承接</td></tr><tr class="row0"><td data-label="方法" style="text-align:center">installSymbols</td><td data-label="参数" style="text-align:left">syms: SymbolTable</td><td data-label="返回" style="text-align:center">err</td><td data-label="说明" style="text-align:left">符号表安装（供 M-11 源码级映射）</td></tr><tr class="row1"><td data-label="方法" style="text-align:center">snapshot / restore</td><td data-label="参数" style="text-align:left">— / snap: EngineSnapshot</td><td data-label="返回" style="text-align:center">snap / err</td><td data-label="说明" style="text-align:left">L3 快照；restore 前 CRC 校验、清解码缓存、重置计数（B13-5）</td></tr><tr class="row0"><td data-label="方法" style="text-align:center">getState</td><td data-label="参数" style="text-align:left">—</td><td data-label="返回" style="text-align:center">EngineStateView</td><td data-label="说明" style="text-align:left">pc/privMode/instRetired/trapStreak/pendingIntr 查询</td></tr><tr class="row1"><td data-label="方法" style="text-align:center">onInstruction / onAccess / onTrap</td><td data-label="参数" style="text-align:left">cb: fn_t, ctx: void*</td><td data-label="返回" style="text-align:center">err</td><td data-label="说明" style="text-align:left">钩子注册（pre/post/trap 语义见 2.1.1）</td></tr></tbody></table></div>
+<h3 id="sec9-3" class="h-sub">9.3 日志对接（M-21）</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:26%"><col style="width:44%"><col style="width:30%"></colgroup><thead><tr><th style="width:26%;text-align:center">时机</th><th style="width:44%;text-align:center">ctx / level / errCode</th><th style="width:30%;text-align:center">说明</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">trap 处理失败</td><td style="text-align:left">log(ERROR, "ISS-TRAP", "trap cause", "E_ISS-03")</td><td style="text-align:left">平台级故障，供 M-22 根因查询</td></tr><tr class="row1"><td data-label="时机" style="text-align:center">非法指令 / CSR 非法访问</td><td data-label="调用方式" style="text-align:left">log(WARN, "ISS-TRAP", "illegal inst", "E_ISS-01/E_ISS-02")</td><td data-label="说明" style="text-align:left">guest 语义，同步陷入同时留痕</td></tr><tr class="row0"><td data-label="时机" style="text-align:center">未映射访存</td><td data-label="调用方式" style="text-align:left">log(ERROR, "BUS-ACCESS", "unmapped", "E_BUS-01")</td><td data-label="说明" style="text-align:left">由 M-14 抛出并上报（4.4.3.6）</td></tr><tr class="row1"><td data-label="时机" style="text-align:center">指令 trace（调试）</td><td data-label="调用方式" style="text-align:left">log(TRACE, "ISS-STEP", "pc/inst/decoded", "")</td><td data-label="说明" style="text-align:left">TRACE 级大容量带，默认过滤</td></tr></tbody></table></div>
+
+</main>
+</div>
+</body>
+</html>

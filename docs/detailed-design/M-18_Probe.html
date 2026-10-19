@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-18 探针 模块详细设计</title>
+<link rel="icon" href="data:image/svg+xml,&lt;svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22&gt;&lt;rect width=%2232%22 height=%2232%22 rx=%226%22 fill=%22%231e3a8a%22/&gt;&lt;text x=%2216%22 y=%2222%22 font-size=%2216%22 fill=%22white%22 text-anchor=%22middle%22 font-family=%22sans-serif%22&gt;M18&lt;/text&gt;&lt;/svg&gt;">
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15px; font-weight:700; color:#374151; margin:18px 0 8px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { margin:0 0 10px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  margin:10px 0 16px; white-space:pre; }
+code { font-family:inherit; }
+.nav-toggle { margin:10px 0 4px; }
+.nav-box { background:var(--head-bg); border:1px solid var(--line); border-radius:6px;
+  padding:10px 16px; font-size:13.5px; line-height:1.9; display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0 24px; }
+.nav-box a { color:var(--brand-2); text-decoration:none; }
+.nav-box a:hover { text-decoration:underline; }
+.flow-wrap { overflow-x:auto; margin:12px 0 16px; }
+.flow { min-width:640px; width:100%; height:auto; }
+.flow-branch { font-size:12.5px; color:var(--ink-2); border-left:3px solid var(--brand-2);
+  padding:4px 10px; margin:8px 0 16px; background:var(--zebra); }
+@media (max-width:767px) {
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media (max-width:560px) {
+  .doc-title { font-size:21px; }
+  .h-sec { font-size:19px; }
+  .doc-table, .doc-table th, .doc-table td { font-size:12.5px; }
+  .code { font-size:11.5px; white-space:pre-wrap; word-break:break-word; }
+  .nav-box { grid-template-columns:1fr; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><h1 class="doc-title">M-18 探针 模块详细设计</h1><p class="subtitle">RISC-V仿真平台 模块详细设计系列 - 对应《模块设计说明书》4.5.1节</p><p class="version">HTML版 v1.1 (2026-10-15) - 源设计《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版，2026-10-13更新)</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版新增2.5平台共享契约与各模块端口契约表)</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.5.1（③ 观测管道层-M-18 探针）：数据描述→源文档表68、关键函数表69、端口契约表70；处理流程=4.5.1.4</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">双源探针（总线 trace 底 + 外设信号面，决策点4）；GPIO 波形/逻辑分析（FR-10）；指令覆盖率/访存 trace 导出（FR-14）；跨板波形同一时间轴（FR-27，P1）</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">M-14 总线访存钩子；M-15 外设 probe 回调；M-16 中断脉冲探针；M-19 边沿事件下游；M-11 trace 消费导出；M-17 能力位</td></tr><tr class="row0"><td style="text-align:center">MVP状态</td><td style="text-align:left">PO主承担模块（MVP必需：自研 ISS 形态双源探针 + 边沿判定 + 采样降载；QEMU 总线 trace 按能力位降级）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；依赖方向（2.1表5：观测管道层→仿真内核/外设）；只读观测约束（2.2：探针/波形/trace 只读，不修改仿真状态）；确定性约束（2.4表6）；评审 H3（总线 trace 仅自研 ISS）；跨模块决议 N1（periph_probe=上报 / periph_precheck=预检）、N2（M-16 中断脉冲直连本模块）、N3（定时器比较统一映射 M-16 mtime）、N4（MEIE 命名统一）</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.0（2026-10-15 初版）：按 M-13 v1.1 标准 9 章结构；内建 9.1.1 端口契约（源表70 对齐）+ CH7 契约测试 + CH8 模块即积木可替换；表号/图号引用源文档契约层版实际编号（表68/69/70、表91/93）；只读观测无新增错误码；双源探针按 4.5.1 与决策点4、评审 H3 内建；跨模块决议 N1~N4 落线（M-15/M-16 接线、M-14 预检改名引用）。&lt;br&gt;v1.1（2026-10-15 评审 18-1~18-8 全闭环）：18-1 traceStream 环形窗口（容量 2×10⁵ + 溢出丢最旧 + dropped 计数）+ M-11 订阅消费单链（不做双缓冲复制）；18-2 中断脉冲通道事件直通（每次 irq_request 均产事件，不参与值比较）；18-3 kind 仅单 bit 通道、多 bit 通道只产 value 事件 + 定时器通道 value 64 位（不截断）；18-4 sample 内实现采样率节流（每 N 取 1 / 虚拟时间间隔）+ overheadBudgetExceeded 度量口径；18-5 traceStream=事件源、M-11 recordTrace 订阅消费（M-11 traceBuffer 语义不变）；18-6 attachSignal 绑定一次性 + 同 ch 冲突拒绝（E_CTX-02 语义）；18-7 补三组用例；18-8 钩子签名对齐 M-14 v1.3（on_bus_access(ts, addr, width, dir)）</td></tr><tr class="row1"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-15</td></tr></tbody></table></div></header><nav class="nav-toggle"><details open><summary>目录</summary><div class="nav-box"><a href="#sec1">1 功能概述</a><a href="#sec1-1">1.1 模块定位</a><a href="#sec1-2">1.2 需求与约束</a><a href="#sec1-3">1.3 MVP 范围与预留</a><a href="#sec2">2 数据描述</a><a href="#sec2-1">2.1 核心数据结构</a><a href="#sec2-1-1">2.1.1 复杂结构字段定义</a><a href="#sec2-2">2.2 缓存与增量语义</a><a href="#sec2-3">2.3 数据流说明</a><a href="#sec3">3 实现设计</a><a href="#sec3-1">3.1 attachTrace</a><a href="#sec3-2">3.2 attachSignal</a><a href="#sec3-3">3.3 sample</a><a href="#sec3-4">3.4 setRate</a><a href="#sec3-5">3.5 中断/定时器探针接线</a><a href="#sec3-6">3.6 差异对照表</a><a href="#sec4">4 关键函数</a><a href="#sec5">5 处理流程</a><a href="#sec5-1">5.1 探针事件流</a><a href="#sec5-2">5.2 与相邻模块的协作说明</a><a href="#sec6">6 异常处理</a><a href="#sec6-1">6.1 错误码与处置</a><a href="#sec6-2">6.2 边界与降级</a><a href="#sec7">7 测试设计与可维护性</a><a href="#sec7-1">7.1 测试要点与关键用例</a><a href="#sec7-2">7.2 可维护性手段</a><a href="#sec8">8 质量属性落实</a><a href="#sec9">9 接口依赖</a><a href="#sec9-1">9.1 依赖关系</a><a href="#sec9-1-1">9.1.1 端口契约</a><a href="#sec9-2">9.2 日志对接</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-18 探针（4.5.1）：双源探针（决策点 4）——总线级 trace（底）+ 外设级探针（面）。总线级 trace：监听地址读写事件流（每访存记录时间戳 + 地址 + 方向 + 宽度），覆盖全部访存，语义少噪声大，作事件流底与访存 trace（供 M-11 导出）；外设级探针：外设模型内埋点回调，暴露语义丰富信号（GPIO 翻转、定时器比较、中断脉冲、按键状态），作波形通道（供 M-19）。双源探针均只读观测，不修改仿真状态（2.2 只读约束）。采样可整体关闭（性能开关）。总线 trace 仅自研 ISS 提供（评审 H3），QEMU 后端按 M-17 能力位协商降级、探针接口保持不变。跨模块决议落实：N1（M-15 periph_probe 为探针上报函数、M-14 外设预检走 periph_precheck 独立接口）、N2（M-16 中断脉冲直连本模块探针通道）、N3（定时器比较通道信号源=M-16 mtime/mtimecmp，M-15 Timer 外设 CMP/PRE 透传）、N4（中断位统一命名 MEIE）。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:12%"><col style="width:64%"><col style="width:24%"></colgroup><thead><tr><th style="width:12%;text-align:center">类别</th><th style="width:64%;text-align:center">约束内容</th><th style="width:24%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">功能</td><td style="text-align:left">双源探针：总线 trace（底，全量访存事件流）+ 外设信号探针（面，语义丰富信号）；采样可整体关闭（性能开关）</td><td style="text-align:left">4.5.1.1、决策点4</td></tr><tr class="row1"><td style="text-align:center">通道</td><td style="text-align:left">channelDefMap 默认 ≥4 通道：定时器比较 / GPIO0 / 中断脉冲 / 按键</td><td style="text-align:left">4.5.1.2 表68</td></tr><tr class="row0"><td style="text-align:center">边沿</td><td style="text-align:left">边沿判定只记变化点（值变化才产出事件，送 M-19）；波形数据量受控（边沿只记变化点 + 采样可配降载）</td><td style="text-align:left">4.5.1.4、2.5</td></tr><tr class="row1"><td style="text-align:center">trace 独立</td><td style="text-align:left">traceStream 独立成流供 M-11 导出，不并入波形通道（双源解耦）</td><td style="text-align:left">4.5.1.4</td></tr><tr class="row0"><td style="text-align:center">只读</td><td style="text-align:left">探针 / 波形 / trace 只读观测，不修改仿真状态</td><td style="text-align:left">2.2</td></tr><tr class="row1"><td style="text-align:center">能力降级</td><td style="text-align:left">总线 trace 仅自研 ISS 提供（评审 H3）；QEMU 后端按 M-17 能力位协商降级，M-18 接口保持不变</td><td style="text-align:left">评审 H3、4.6</td></tr><tr class="row0"><td style="text-align:center">性能</td><td style="text-align:left">波形刷新 ≤200ms 估算基线；探针性能开销超限 → 自动降采样并提示</td><td style="text-align:left">4.5.1.5、8 章表93</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：attachTrace(bus)（挂接 M-14 总线访存钩子 → traceStream）、attachSignal(periph, ch)（挂接 M-15 外设 probe 回调 → 通道绑定）、sample(time, ch, value)（边沿判定与产出边沿事件）、setRate(cfg)（采样配置：通道使能 + 采样率降载 + 性能开关）；自研 ISS 形态（总线 trace 可用）。<br>预留项（P1 演进承接，不属现实现）：GPIO 波形/逻辑分析（FR-10）；跨板波形同一时间轴（FR-27，P1，经 M-18/M-19 链路通道）；多通道扩展（channelDefMap 注册表 >4）；QEMU 后端总线 trace（评审 H3 能力位协商，当前降级不可用）。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构（源文档表68）</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:30%"><col style="width:44%"></colgroup><thead><tr><th style="width:26%;text-align:center">数据结构</th><th style="width:30%;text-align:center">类型</th><th style="width:44%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">channelDefMap</td><td style="text-align:left">Map&lt;ch, {source, signal}&gt;</td><td style="text-align:left">通道定义（默认 ≥4：定时器比较 / GPIO0 / 中断脉冲 / 按键）</td></tr><tr class="row1"><td style="text-align:center">sampleCfg</td><td style="text-align:left">struct</td><td style="text-align:left">采样配置（通道使能、采样率可配降载）</td></tr><tr class="row0"><td style="text-align:center">traceStream</td><td style="text-align:left">stream</td><td style="text-align:left">总线 trace 事件流（时间戳 + 地址 + 方向 + 宽度）</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="body">channelDefMap 决定信号来源与通道绑定（可扩展注册表）；sampleCfg 控制使能与降载（masterEnable 性能开关可整体关闭）；traceStream 为总线级全量访存事件流（底），与波形边沿事件（面）独立。字段定义如下：</p>
+<pre class="code"><code>// channelDefMap: 通道定义（4.5.1.2 表68；默认 ≥4 通道，注册表可扩展）
+struct ChannelDef {
+  uint8_t  ch;         // 通道号
+  string   source;     // 信号来源（M-15 外设 / M-16 中断控制器）
+  string   signal;     // 信号名
+  bool     singleBit;  // 单 bit 信号（18-3：kind 升降沿仅适用单 bit 通道）
+  uint8_t  valueWidth; // 采样值宽度（18-3：定时器通道 64 位，不截断；GPIO 按端口位宽）
+  bool     pulse;      // 脉冲通道（18-2：每次事件均产出，不参与值比较）
+};
+Map&lt;uint8_t, ChannelDef&gt; channelDefMap;
+//   ch=0 定时器比较：source=M-15 Timer 外设 CMP/PRE，signal=timer-compare，
+//        valueWidth=64（18-3：不截断）；N3：MVP 定时中断权威源 = M-16 mtime/mtimecmp
+//        （CLINT 经 MMIO），Timer 外设 CMP/PRE 透传 mtime 写事件统一映射
+//   ch=1 GPIO0：source=M-15 GPIO 外设，signal=gpio0，valueWidth=按端口位宽（FR-10）
+//   ch=2 中断脉冲：source=M-16 中断控制器，signal=irq_pulse，pulse=true（18-2）
+//        （N2：M-16 irq_request 直连本模块探针上报，每次请求均产事件）
+//   ch=3 按键：source=M-15 按键外设，signal=key-state（前端注入事件时间戳化入流）
+// sampleCfg: 采样配置（通道使能、采样率可配降载；性能开关可整体关闭）
+struct sampleCfg {
+  bitmask enable;        // 通道使能位（按 ch 索引 channelDefMap）
+  uint32_t sampleRateHz; // 采样率（18-4：sample 内实现节流，每 N 次回调取 1）
+  uint8_t  throttleN;    // 节流系数（每 N 次回调取 1；或按虚拟时间间隔过滤）
+  bool     masterEnable; // 性能开关：false=整体关闭采样（零开销路径）
+};
+// TraceEvent: 总线 trace 事件（每访存记录；traceStream 条目，供 M-11 导出）
+struct TraceEvent {
+  uint64_t t;     // 时间戳（虚拟时间，M-12 权威源）
+  uint32_t addr;  // 访问地址
+  uint8_t  width; // 访问宽度（8/16/32，对齐 M-14 on_bus_access 签名，18-8）
+  uint8_t  dir;   // DIR_READ / DIR_WRITE
+};
+// traceStream: 总线 trace 事件流（底），独立于波形边沿事件（面），不并入 M-19
+//   18-1：环形窗口（cap 默认 2×10⁵ 条，估算基线实现后实测校准），溢出丢最旧 + dropped 计数；
+//   18-5：M-18 为事件源，M-11 recordTrace 订阅消费（单链，不做双缓冲复制）
+struct traceStream {
+  TraceEvent buf[TRACE_CAP];  // 定长环形窗口（默认 TRACE_CAP=2×10⁵）
+  uint32_t   head;            // 写游标
+  uint64_t   dropped;         // 溢出丢弃计数（丢最旧 + 标记）
+  uint64_t   seq;             // 事件序（单调，供 M-11 订阅续拉/导出聚合）
+};
+// EdgeEvent: 边沿事件（送 M-19 边沿编码）
+struct EdgeEvent {
+  uint64_t t;     // 时间戳（虚拟时间）
+  uint8_t  ch;    // 通道号（channelDefMap 键）
+  uint64_t value; // 当前值（宽度按通道 valueWidth，18-3：定时器 64 位不截断）
+  uint8_t  kind;  // 0=rising / 1=falling（18-3：仅单 bit 通道判升降；多 bit 只产 value 变化）
+};</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 缓存与增量语义</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:46%"><col style="width:22%"><col style="width:16%"></colgroup><thead><tr><th style="width:16%;text-align:center">机制</th><th style="width:46%;text-align:center">语义</th><th style="width:22%;text-align:center">实现通道</th><th style="width:16%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">边沿判定</td><td style="text-align:left">只记变化点：sample 同值重复不产出，值变化才产出边沿事件</td><td style="text-align:left">EdgeEvent + prev[ch]</td><td style="text-align:left">波形数据量受控（2.5：边沿只记变化点）</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">trace 独立</td><td data-label="语义" style="text-align:left">traceStream 全量访存事件（底）独立成流供 M-11 导出；环形窗口（18-1）+ M-11 订阅消费（18-5）</td><td data-label="实现通道" style="text-align:left">traceStream + m11Subscribe</td><td data-label="备注" style="text-align:left">双源解耦（4.5.1.4）；不做双缓冲复制</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">采样降载</td><td data-label="语义" style="text-align:left">通道使能 + 采样率可配（throttleN 节流在 sample 内生效，18-4）；性能开销超限自动降采样</td><td data-label="实现通道" style="text-align:left">sampleCfg.sampleRateHz + throttleN</td><td data-label="备注" style="text-align:left">波形刷新 ≤200ms 估算基线</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">性能开关</td><td data-label="语义" style="text-align:left">masterEnable=false 整体关闭采样（零开销路径）</td><td data-label="实现通道" style="text-align:left">sampleCfg.masterEnable</td><td data-label="备注" style="text-align:left">性能开关（4.5.1.1）</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">时间基准</td><td data-label="语义" style="text-align:left">事件时间戳=虚拟时间（M-12 权威源），跨模块同一基准</td><td data-label="实现通道" style="text-align:left">t = timeVirt</td><td data-label="备注" style="text-align:left">确定性约束（2.4 表6）</td></tr></tbody></table></div>
+<h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+<p class="body">总线访存 / 外设 probe → 边沿判定（只记变化点）→ 产出边沿事件 → 送 M-19；trace 独立成流供 M-11 导出（4.5.1.4）。</p>
+<h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 attachTrace(bus) 挂接总线访存事件</h3>
+<p class="body">attachTrace(bus)：总线级 trace（底）——挂接 M-14 总线访存钩子（on_bus_access(ts, addr, width, dir)，签名对齐 M-14 v1.3，18-8），每访存写入 traceStream 环形窗口（18-1：容量 2×10⁵，溢出丢最旧 + dropped 计数）；M-11 recordTrace 订阅消费（18-5：单链，不做双缓冲复制）；仅自研 ISS 提供（评审 H3，QEMU 按 M-17 能力位降级）。伪代码如下：</p>
+<pre class="code"><code>// attachTrace: 挂接总线访存事件（4.5.1.3 表69；输入：M-14 访存钩子）
+void attachTrace(Bus bus) {
+  if (!cap(TRACE_SUPPORTED)) return;              // QEMU 无总线 trace（评审 H3，能力位协商降级）
+  bus.on_bus_access((ts, addr, width, dir) =&gt; {   // 18-8：签名对齐 M-14 v1.3
+    TraceEvent ev = {t: ts, addr, width, dir};     // 每访存记录（时间戳+地址+宽度+方向）
+    if (traceStream.full()) {                      // 18-1：环形窗口溢出
+      traceStream.dropped++;                       // 丢最旧 + 计数标记（不阻塞仿真）
+      traceStream.head = (head + 1) % TRACE_CAP;
+    }
+    traceStream.append(ev);                        // 输出：traceStream 写入（事件源）
+    m11Subscribe(ev);                              // 18-5：M-11 recordTrace 订阅消费（单链）
+  });
+}</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 attachSignal(periph, ch) 挂接外设信号探针</h3>
+<p class="body">attachSignal(periph, ch)：外设级探针（面）——挂接 M-15 外设模型内 probe 回调（periph_probe(p, sig, v, t)，探针上报函数），绑定到 channelDefMap 通道；绑定在挂接时一次性完成（18-6），同 ch 冲突拒绝 + WARN（E_CTX-02 语义）；采样由 sample() 统一判定产出。跨模块决议 N1：M-15 的 periph_probe 仅为探针上报（void），外设可访问性预检由 M-14 走独立接口 periph_precheck(p, off)，两接口语义分离、命名不冲突。伪代码如下：</p>
+<pre class="code"><code>// attachSignal: 挂接外设信号探针（4.5.1.3 表69；输入：Peripheral.probe 回调）
+void attachSignal(Peripheral periph, uint8_t ch) {
+  // 18-6：绑定在挂接时一次性完成（不进回调）；同 ch 冲突 → 拒绝 + WARN（E_CTX-02 语义）
+  if (channelDefMap.has(ch)) { log(WARN, &quot;probe&quot;, &quot;conflict&quot;, &quot;E_CTX-02&quot;); return; }
+  channelDefMap[ch] = {source: periph.id, signal: sig, singleBit, valueWidth, pulse};
+  // N1：M-15 periph_probe(p, sig, v, t) = 探针上报（void，经本接口进入采样判定）；
+  //     外设预检为独立接口 periph_precheck(p, off)（M-14 调用），与本接口互不冲突
+  periph.onProbe((sig, v, t) =&gt; {                  // M-15 模型内埋点回调
+    sample(t, ch, v);                              // 统一进采样判定（边沿/脉冲/节流）
+  });
+}</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 sample(time, ch, value) 边沿判定与产出</h3>
+<p class="body">sample(time, ch, value)：采样判定——脉冲通道（18-2：中断脉冲）每次事件均产出、不参与值比较；单 bit 通道判升降沿（kind，18-3）；多 bit 通道只产 value 变化事件（不判升降）；采样率节流（18-4：每 N 次回调取 1）；masterEnable=false 零开销直接返回。伪代码如下：</p>
+<pre class="code"><code>// sample: 采样判定与产出（4.5.1.3 表69；输出：边沿事件）
+EdgeEvent sample(uint64_t time, uint8_t ch, uint64_t value) {
+  if (!sampleCfg.masterEnable) return null;        // 性能开关：整体关闭（零开销路径）
+  if (!sampleCfg.enable[ch]) return null;          // 通道未使能
+  if (--throttleCounter[ch] &gt; 0) return null;      // 18-4：采样率节流（每 throttleN 次取 1）
+  throttleCounter[ch] = sampleCfg.throttleN;
+  ChannelDef def = channelDefMap[ch];
+  if (def.pulse) {                                 // 18-2：脉冲通道事件直通
+    EdgeEvent ev = {t: time, ch, value, RISING};   // 每次事件均产出（不参与值比较）
+    prev[ch] = value; m19Encode(ev); return ev;    // 同线号重复请求不丢失
+  }
+  if (value == prev[ch]) return null;              // 只记变化点：同值重复不产出
+  uint8_t kind = def.singleBit ? (value ? RISING : FALLING) : KIND_NA;
+                                                   // 18-3：kind 仅单 bit 通道；多 bit 不判升降
+  prev[ch] = value;                                // 更新旧值基准
+  EdgeEvent ev = {t: time, ch, value, kind};       // 输出：边沿事件（送 M-19 编码）
+  m19Encode(ev);                                   // 下游：M-19 边沿编码入环
+  return ev;
+}</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 setRate(cfg) 采样配置与降载</h3>
+<p class="body">setRate(cfg)：采样配置——通道使能、采样率可配降载（写入 sampleCfg.throttleN，sample 内生效，18-4）；性能开销超限（overheadBudgetExceeded 度量口径：事件产出率 &gt; 预算事件率阈值 或 探针路径 CPU 占比 &gt; 5%，18-4）→ 自动降采样并提示（保持波形刷新 ≤200ms 估算基线）。伪代码如下：</p>
+<pre class="code"><code>// setRate: 采样配置（4.5.1.3 表69；输出：确认）
+uint8_t setRate(sampleCfg cfg) {
+  sampleCfg = cfg;                                 // 通道使能 + 采样率 + 性能开关
+  sampleCfg.throttleN = ceil(sampleRateHz / targetRateHz); // 18-4：节流系数生效
+  if (overheadBudgetExceeded()) {                  // 探针性能开销超限（4.5.1.5）
+    sampleCfg.throttleN *= 2;                      // 自动降采样（节流加倍，sample 内生效）
+    log(WARN, &quot;probe&quot;, &quot;downgrade&quot;, &quot;overhead&quot;);   // 提示（保持波形刷新 ≤200ms 基线）
+  }
+  return OK;                                       // 输出：确认
+}
+// overheadBudgetExceeded（18-4 度量口径）：事件产出率 &gt; 预算事件率阈值（如 10⁶ 事件/s）
+//   或探针路径 CPU 占比 &gt; 5%（采样自耗时计数器），任一成立即视为超限</code></pre>
+<h3 id="sec3-5" class="h-sub">3.5 中断脉冲 / 定时器探针接线（跨模块决议 N2/N3）</h3>
+<p class="body">通道 ch=2（中断脉冲）与 ch=0（定时器比较）的信号源接线明确如下：</p>
+<pre class="code"><code>// N2（中断脉冲）：M-16 irq_request 直连本模块探针通道，不再 periph_probe(NULL, &quot;irq_pulse&quot;, ...)
+void m16IrqPulse(uint64_t t, uint32_t irqLine) {
+  if (sampleCfg.enable[CH_IRQ_PULSE])
+    sample(t, CH_IRQ_PULSE, irqLine);              // 18-2：脉冲通道事件直通（每次请求均产出）
+}                                                  //   同线号重复请求不丢失（不参与值比较）
+// N3（定时器比较）：MVP 定时中断权威源 = M-16 mtime/mtimecmp（CLINT 语义经 M-14 MMIO）
+//   M-15 Timer 外设 CMP/PRE 透传 mtime 写事件 → 本通道统一映射，两套定时器不各自产线
+void m15TimerCompare(uint64_t t, uint64_t cmp) {
+  if (sampleCfg.enable[CH_TIMER_CMP])
+    sample(t, CH_TIMER_CMP, cmp);                  // 18-3：value 64 位不截断（valueWidth=64）
+}</code></pre>
+<h3 id="sec3-6" class="h-sub">3.6 与真实逻辑分析仪 / 探针的差异对照表</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:32%"><col style="width:38%"><col style="width:16%"></colgroup><thead><tr><th style="width:14%;text-align:center">维度</th><th style="width:32%;text-align:center">真实硬件逻辑分析仪 / 探针</th><th style="width:38%;text-align:center">本平台建模（M-18 探针）</th><th style="width:16%;text-align:center">差异影响</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">信号源</td><td style="text-align:left">物理引脚电平直接采样</td><td style="text-align:left">双源：总线 trace（底）+ 外设模型内埋点（面）</td><td style="text-align:left">虚拟信号经模型语义上报，无物理时序</td></tr><tr class="row1"><td style="text-align:center">采样</td><td style="text-align:left">定时器驱动连续采样</td><td style="text-align:left">事件驱动 + 边沿判定（只记变化点）+ 可配降载</td><td style="text-align:left">数据量受控（2.5），事件即变化点</td></tr><tr class="row0"><td style="text-align:center">带宽</td><td style="text-align:left">物理采集存储容量</td><td style="text-align:left">采样可整体关闭 + 自动降采样（性能开关）</td><td style="text-align:left">性能开销超限自动降载（4.5.1.5）</td></tr><tr class="row1"><td style="text-align:center">后端</td><td style="text-align:left">硬件依赖采集卡</td><td style="text-align:left">总线 trace 仅自研 ISS（评审 H3）；QEMU 能力位协商降级</td><td style="text-align:left">接口不变，按能力降级（4.6）</td></tr></tbody></table></div>
+<h2 id="sec4" class="h-sec">4 关键函数（源文档表69）</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:26%"><col style="width:48%"></colgroup><thead><tr><th style="width:26%;text-align:center">函数</th><th style="width:26%;text-align:center">说明</th><th style="width:48%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">attachTrace(bus)</td><td style="text-align:left">挂接总线访存事件</td><td style="text-align:left">输入：M-14 访存钩子；输出：traceStream 写入（仅自研 ISS，H3）</td></tr><tr class="row1"><td style="text-align:center">attachSignal(periph, ch)</td><td style="text-align:left">挂接外设信号探针</td><td style="text-align:left">输入：Peripheral.probe 回调（M-15 periph_probe）；输出：通道绑定</td></tr><tr class="row0"><td style="text-align:center">sample(time, ch, value)</td><td style="text-align:left">边沿判定与产出</td><td style="text-align:left">输出：边沿事件 {time, ch, value, kind}（送 M-19）</td></tr><tr class="row1"><td style="text-align:center">setRate(cfg)</td><td style="text-align:left">采样配置（可配降载）</td><td style="text-align:left">输出：确认（性能超限自动降采样并提示）</td></tr></tbody></table></div><h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 探针事件流（源 4.5.1.4 对齐）</h3>
+<p class="body">总线访存 / 外设 probe → 边沿判定（只记变化点）→ 产出边沿事件 → 送 M-19；trace 独立成流供 M-11 导出。流程图如下：</p>
+<div class="flow-wrap"><svg class="flow" viewBox="0 0 980 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-18 探针双源事件流流程图">
+  <defs>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2f5bd6"/>
+    </marker>
+  </defs>
+  <style>
+    .fbox { fill:#fff; stroke:#1e3a8a; stroke-width:1.4; rx:8; }
+    .fbox2 { fill:#f1f4f9; stroke:#1e3a8a; stroke-width:1.2; rx:8; }
+    .farrow { stroke:#2f5bd6; stroke-width:1.5; marker-end:url(#arw); }
+    .ftxt { font:12px "Noto Sans SC","PingFang SC",sans-serif; fill:#1f2937; }
+    .ftag { font:10.5px "Noto Sans SC","PingFang SC",sans-serif; fill:#4b5563; }
+  </style>
+  <g>
+    <rect class="fbox" x="20" y="40" width="200" height="56"/>
+    <text class="ftxt" x="120" y="62" text-anchor="middle">总线访存事件</text>
+    <text class="ftxt" x="120" y="80" text-anchor="middle">（M-14 钩子，仅自研 ISS）</text>
+    <rect class="fbox" x="20" y="170" width="200" height="56"/>
+    <text class="ftxt" x="120" y="192" text-anchor="middle">外设信号 probe</text>
+    <text class="ftxt" x="120" y="210" text-anchor="middle">（M-15 埋点 / M-16 中断脉冲）</text>
+    <rect class="fbox2" x="340" y="100" width="180" height="56"/>
+    <text class="ftxt" x="430" y="122" text-anchor="middle">采样判定</text>
+    <text class="ftxt" x="430" y="140" text-anchor="middle">边沿只记变化点 + 降载</text>
+    <rect class="fbox2" x="620" y="40" width="180" height="56"/>
+    <text class="ftxt" x="710" y="62" text-anchor="middle">traceStream</text>
+    <text class="ftxt" x="710" y="80" text-anchor="middle">（全量访存，独立成流）</text>
+    <rect class="fbox" x="620" y="150" width="180" height="56"/>
+    <text class="ftxt" x="710" y="172" text-anchor="middle">边沿事件</text>
+    <text class="ftxt" x="710" y="190" text-anchor="middle">{time, ch, value, kind}</text>
+    <rect class="fbox2" x="830" y="40" width="140" height="56"/>
+    <text class="ftxt" x="900" y="62" text-anchor="middle">M-11</text>
+    <text class="ftxt" x="900" y="80" text-anchor="middle">trace 导出</text>
+    <rect class="fbox2" x="830" y="150" width="140" height="56"/>
+    <text class="ftxt" x="900" y="172" text-anchor="middle">M-19</text>
+    <text class="ftxt" x="900" y="190" text-anchor="middle">边沿编码入环</text>
+    <line class="farrow" x1="220" y1="68" x2="336" y2="126"/>
+    <line class="farrow" x1="220" y1="198" x2="336" y2="140"/>
+    <line class="farrow" x1="430" y1="100" x2="430" y2="96" marker-end="none"/>
+    <line class="farrow" x1="430" y1="96" x2="616" y2="76"/>
+    <line class="farrow" x1="430" y1="156" x2="616" y2="172"/>
+    <line class="farrow" x1="800" y1="68" x2="826" y2="68"/>
+    <line class="farrow" x1="800" y1="178" x2="826" y2="178"/>
+    <text class="ftag" x="340" y="210" text-anchor="middle">QEMU：无总线 trace（H3）</text>
+    <text class="ftag" x="660" y="228" text-anchor="middle">采样可整体关闭（性能开关）</text>
+  </g>
+</svg></div>
+<div class="flow-branch">分支：masterEnable=false → 采样整体关闭零开销；性能开销超限 → 自动降采样并提示（波形刷新 ≤200ms 估算基线）；总线 trace 仅自研 ISS（评审 H3），QEMU 按 M-17 能力位协商降级。</div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:52%"><col style="width:24%"></colgroup><thead><tr><th style="width:24%;text-align:center">协作模块</th><th style="width:52%;text-align:center">协作内容</th><th style="width:24%;text-align:center">触发时机</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-14（总线映射）</td><td style="text-align:left">attachTrace 挂接 on_bus_access 钩子（每访存 {ts, addr, width, dir}，18-8 签名对齐）</td><td style="text-align:left">总线映射生效时</td></tr><tr class="row1"><td style="text-align:center">M-15（外设模型）</td><td style="text-align:left">attachSignal 挂接 probe 回调（periph_probe 上报；N1：预检走 periph_precheck）</td><td style="text-align:left">外设实例化时</td></tr><tr class="row0"><td style="text-align:center">M-16（中断控制器）</td><td style="text-align:left">中断脉冲探针直连（N2：irq_request → CH_IRQ_PULSE，不再 periph_probe(NULL,…)）</td><td style="text-align:left">中断请求时</td></tr><tr class="row1"><td style="text-align:center">M-19（波形管道）</td><td style="text-align:left">边沿事件写入（m19Encode，下游）</td><td style="text-align:left">sample 产出边沿事件时</td></tr><tr class="row0"><td style="text-align:center">M-11（trace 导出）</td><td style="text-align:left">traceStream 消费导出（指令覆盖率/访存 trace，FR-14）</td><td style="text-align:left">导出请求时</td></tr><tr class="row1"><td style="text-align:center">M-17（执行后端）</td><td style="text-align:left">能力位协商（QEMU 无总线 trace，H3 降级，接口不变）</td><td style="text-align:left">会话建立/能力协商时</td></tr></tbody></table></div><h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置（无新增码）</h3>
+<p class="body">M-18 为只读观测模块（2.2：探针/波形/trace 只读，不修改仿真状态），不新增错误码；异常统一按以下处置：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:28%"><col style="width:40%"><col style="width:32%"></colgroup><thead><tr><th style="width:28%;text-align:center">错误码 / 场景</th><th style="width:40%;text-align:center">触发条件</th><th style="width:32%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">通道溢出</td><td style="text-align:left">探针边沿事件产出速率超 M-19 环形缓冲容量</td><td style="text-align:left">按 M-19 overflowPolicy（丢最旧 + 标记 / 暂停仿真，可配）</td></tr><tr class="row1"><td style="text-align:center">性能开销超限</td><td style="text-align:left">探针采样开销超预算（波形刷新 &gt;200ms 估算基线）</td><td style="text-align:left">自动降采样（sampleRateHz 减半）并提示</td></tr><tr class="row0"><td style="text-align:center">能力不足</td><td style="text-align:left">QEMU 后端无总线 trace（评审 H3）</td><td style="text-align:left">attachTrace 不挂接；按 M-17 能力位协商降级，接口不变</td></tr><tr class="row1"><td style="text-align:center">无效通道 / 绑定冲突</td><td style="text-align:left">attachSignal / sample 引用未注册通道；同 ch 重复绑定（18-6）</td><td style="text-align:left">拒绝挂接/采样 + 日志（WARN，E_CTX-02 语义），不产出事件</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）QEMU 后端：总线 trace 不可用（评审 H3）→ attachTrace 不挂接，波形（外设面）仍可用；前端按 M-17 能力位提示。<br>（2）性能开关：masterEnable=false → 采样整体关闭（零开销路径，4.5.1.1）。<br>（3）自动降采样：性能开销超限 → throttleN 加倍 + 提示（18-4）；仍超限 → 进一步降采样直至满足 ≤200ms 基线。<br>（4）traceStream 溢出（18-1）：环形窗口满 → 丢最旧 + dropped 计数标记（不阻塞仿真），不并入 M-19 溢出策略。<br>（5）通道溢出（边沿/脉冲）：按 M-19 溢出策略（丢最旧 + 标记，默认；暂停仿真可配）。<br>（6）同 ch 绑定冲突（18-6）：拒绝 + WARN（E_CTX-02 语义）。<br>（7）跨模块接线：N1（periph_probe=上报 / periph_precheck=预检分离）、N2（M-16 中断脉冲直连本模块，脉冲事件直通 18-2）、N3（定时器比较通道统一映射 M-16 mtime/mtimecmp，M-15 Timer CMP/PRE 透传，value 64 位 18-3）、N4（MEIE 命名统一）；M-14 钩子签名 on_bus_access(ts, addr, width, dir)（18-8）。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表91（M-18 行）：测试要点 = 边沿只记变化点 + 采样可配降载；关键用例 = 数据量受控。展开用例表如下（核心模块覆盖率 ≥70%，源文档 7.3 表92）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:42%"><col style="width:34%"></colgroup><thead><tr><th style="width:24%;text-align:center">用例</th><th style="width:42%;text-align:center">输入/步骤</th><th style="width:34%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（源 2.5/7.1 对齐）</td><td style="text-align:left">按 9.1.1 端口契约逐项校验 attachTrace/attachSignal/sample/setRate 的接口签名、输入校验、输出结构与降级路径；替代实现接入前必须同端口契约测试全量</td><td style="text-align:left">契约测试全绿；契约变更同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">边沿只记变化点（表91）</td><td data-label="输入/步骤" style="text-align:left">同一通道连续 sample 同值/变化值</td><td data-label="通过准则" style="text-align:left">同值重复零产出；值变化产出 rising/falling 边沿事件</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">双源探针分离</td><td data-label="输入/步骤" style="text-align:left">同时触发总线访存与外设信号</td><td data-label="通过准则" style="text-align:left">traceStream 记录全量访存；边沿事件仅变化点；两流互不合并</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">采样降载（表91）</td><td data-label="输入/步骤" style="text-align:left">setRate 降低采样率/关通道后持续探针</td><td data-label="通过准则" style="text-align:left">数据量受控（按采样率/通道使能过滤）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">性能开关（4.5.1.1）</td><td data-label="输入/步骤" style="text-align:left">masterEnable=false 后触发访存/信号</td><td data-label="通过准则" style="text-align:left">零产出、零开销（不进入边沿判定）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">trace 独立导出（FR-14）</td><td data-label="输入/步骤" style="text-align:left">M-11 消费 traceStream 导出访存 trace</td><td data-label="通过准则" style="text-align:left">导出条目与 traceStream 一致（时间戳/地址/方向/宽度）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">中断脉冲通道（N2）</td><td data-label="输入/步骤" style="text-align:left">M-16 irq_request 触发（MEIE 中断位）</td><td data-label="通过准则" style="text-align:left">CH_IRQ_PULSE 产出边沿事件（上升沿=请求），不再 periph_probe(NULL,…)</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">定时器比较通道（N3）</td><td data-label="输入/步骤" style="text-align:left">M-15 Timer CMP/PRE 透传 mtime 写事件</td><td data-label="通过准则" style="text-align:left">CH_TIMER_CMP 产出边沿事件；与 M-16 mtime/mtimecmp 权威源一致</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">自动降采样（4.5.1.5）</td><td data-label="输入/步骤" style="text-align:left">模拟探针开销超限</td><td data-label="通过准则" style="text-align:left">throttleN 自动加倍 + 提示；波形刷新满足 ≤200ms 基线</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">traceStream 溢出（18-1）</td><td data-label="输入/步骤" style="text-align:left">灌满 traceStream 环形窗口（&gt;2×10⁵ 访存）</td><td data-label="通过准则" style="text-align:left">丢最旧 + dropped 计数标记；M-11 订阅消费不丢序（18-5 单链）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">同线号重复中断脉冲（18-2）</td><td data-label="输入/步骤" style="text-align:left">同一 irqLine 连续两次 irq_request</td><td data-label="通过准则" style="text-align:left">两次均产出边沿事件（脉冲直通，不参与值比较，不丢失）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">采样率节流生效（18-4）</td><td data-label="输入/步骤" style="text-align:left">setRate 设 throttleN=4 后持续 sample</td><td data-label="通过准则" style="text-align:left">每 4 次回调产出 1 次（节流生效）；事件率受控</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">钩子签名对齐（18-8）</td><td data-label="输入/步骤" style="text-align:left">attachTrace 挂接 M-14 on_bus_access</td><td data-label="通过准则" style="text-align:left">签名 (ts, addr, width, dir) 与 M-14 v1.3 契约一致（契约测试断言）</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）通道注册表可扩展：channelDefMap 注册制新增通道不改判定逻辑。<br>（2）双源解耦：trace 底（全量访存）与信号面（边沿事件）独立流，互不耦合。<br>（3）采样配置结构化：通道使能/采样率/性能开关为显式配置，调整不涉核心逻辑。<br>（4）能力位协商：总线 trace 与能力面解耦（评审 H3），QEMU 降级不改接口。<br>（5）CI 门禁：边沿只记变化点 + 数据量受控用例纳入回归基线。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-18 责任：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:18%"><col style="width:40%"><col style="width:42%"></colgroup><thead><tr><th style="width:18%;text-align:center">质量属性</th><th style="width:40%;text-align:center">目标（估算基线）</th><th style="width:42%;text-align:center">M-18 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">确定性</td><td style="text-align:left">探针事件时间戳=虚拟时间（M-12 权威源）；边沿判定值比较确定</td><td style="text-align:left">t = timeVirt；prev[ch] 比较只记变化点（2.4 表6）</td></tr><tr class="row1"><td style="text-align:center">性能</td><td style="text-align:left">波形刷新 ≤200ms 估算基线；采样开销受控</td><td style="text-align:left">自动降采样 + 性能开关整体关闭（4.5.1.5）</td></tr><tr class="row0"><td style="text-align:center">可观测性</td><td style="text-align:left">双源覆盖总线 + 外设语义信号（FR-10/14 支撑）</td><td style="text-align:left">attachTrace（底）+ attachSignal（面）双源</td></tr><tr class="row1"><td style="text-align:center">韧性</td><td style="text-align:left">通道溢出/开销超限受控降载</td><td style="text-align:left">按 M-19 溢出策略 + 自动降采样提示</td></tr><tr class="row0"><td style="text-align:center">可扩展性</td><td style="text-align:left">观测管道扩展点（表93）</td><td style="text-align:left">channelDefMap 注册制扩展通道（FR-27 P1 跨板同轴）</td></tr></tbody></table></div><h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<div class="lead">合规：业务模块 → 模块组件单向依赖（4.7 表86）；只经 M-14/M-15/M-19/M-11 交互，不自行实现日志/告警/路由。</div>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:30%"><col style="width:46%"></colgroup><thead><tr><th style="width:24%;text-align:center">依赖方</th><th style="width:30%;text-align:center">被依赖方</th><th style="width:46%;text-align:center">依赖内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-18（探针）</td><td style="text-align:left">M-14（总线与内存映射）</td><td style="text-align:left">访存钩子事件源（attachTrace 挂接）</td></tr><tr class="row1"><td style="text-align:center">M-18</td><td style="text-align:left">M-15（外设模型层）</td><td style="text-align:left">外设 probe 回调事件源（attachSignal 挂接）</td></tr><tr class="row0"><td style="text-align:center">M-18</td><td style="text-align:left">M-19（波形管道）</td><td style="text-align:left">边沿事件下游（m19Encode）</td></tr><tr class="row1"><td style="text-align:center">M-18</td><td style="text-align:left">M-11（trace 导出）</td><td style="text-align:left">traceStream 消费导出</td></tr><tr class="row0"><td style="text-align:center">M-18</td><td style="text-align:left">M-17（执行后端）</td><td style="text-align:left">能力位协商（总线 trace 可用性，H3）</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表70 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层、本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现遵守同端口契约并通过契约测试（7.1）即可接入：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:20%"><col style="width:54%"></colgroup><thead><tr><th style="width:26%;text-align:center">端口 / 服务</th><th style="width:20%;text-align:center">方向</th><th style="width:54%;text-align:center">契约（输入 -&gt; 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">attachTrace(bus)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输入：M-14 访存钩子 on_bus_access(ts, addr, width, dir)（18-8）；输出：traceStream 环形窗口写入 + M-11 订阅（仅自研 ISS，评审 H3；溢出丢最旧 + 计数，18-1/18-5）</td></tr><tr class="row1"><td style="text-align:center">attachSignal(periph, ch)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输入：Peripheral.probe 回调（M-15 periph_probe，N1）；输出：通道绑定</td></tr><tr class="row0"><td style="text-align:center">sample(time, ch, value)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输出：边沿事件 {time, ch, value, kind}（脉冲直通 18-2；kind 仅单 bit 18-3；节流生效 18-4；性能开关零开销）</td></tr><tr class="row1"><td style="text-align:center">setRate(cfg)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输出：确认（通道使能/采样率/性能开关；开销超限自动降采样）</td></tr><tr class="row0"><td style="text-align:center">M-14/M-15</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">事件源：访存钩子 / 外设 probe 回调</td></tr><tr class="row1"><td style="text-align:center">M-19</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">下游：边沿事件写入（m19Encode）</td></tr><tr class="row0"><td style="text-align:center">M-11</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">trace 消费导出（traceStream）</td></tr><tr class="row1"><td style="text-align:center">M-13/M-14/M-15/M-16</td><td style="text-align:left">被依赖（使用方）</td><td style="text-align:left">attachTrace/attachSignal 探针上报（N2：M-16 中断脉冲直连 CH_IRQ_PULSE）</td></tr><tr class="row0"><td style="text-align:center">M-19</td><td style="text-align:left">被依赖（使用方）</td><td style="text-align:left">写入边沿事件（采样产出）</td></tr><tr class="row1"><td style="text-align:center">M-11</td><td style="text-align:left">被依赖（使用方）</td><td style="text-align:left">trace 消费导出（FR-14）</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<p class="body">探针挂接 -> log(INFO, "PROBE", "attach", "E_OK")（含通道/信号源）；采样配置变更 -> log(INFO, "PROBE", "setRate", "E_OK")（含采样率）；自动降采样 -> log(WARN, "PROBE", "downgrade", "overhead")；无效通道拒绝 -> log(WARN, "PROBE", "invalid_ch", "E_CTX-02")；通道溢出按 M-19 溢出策略记录（丢最旧 -> WARN 带标记）。会话关联字段（sessionId）随 M-21 双时间戳统一记录，产品/嵌入式工作台不可见（角色边界），仅管理员通道可查。</p>
+</main>
+<footer class="subtitle">M-18 探针 模块详细设计 v1.0 · 对应《RISC-V仿真平台模块设计说明书》4.5.1节 · 2026-10-15</footer>
+
+</div>
+</body>
+</html>

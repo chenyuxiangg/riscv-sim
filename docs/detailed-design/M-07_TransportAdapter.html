@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-07 传输适配器 模块详细设计</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%231e3a8a'/%3E%3Ctext x='12' y='17' font-size='13' text-anchor='middle' fill='%23ffffff' font-family='sans-serif' font-weight='bold'%3ET%3C/text%3E%3C/svg%3E">
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15px; font-weight:700; color:#374151; margin:18px 0 8px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { margin:0 0 10px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  margin:10px 0 16px; white-space:pre; }
+code { font-family:inherit; }
+.nav-toggle { margin:10px 0 4px; }
+.nav-box { background:var(--head-bg); border:1px solid var(--line); border-radius:6px;
+  padding:10px 16px; font-size:13.5px; line-height:1.9; display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0 24px; }
+.nav-box a { color:var(--brand-2); text-decoration:none; }
+.nav-box a:hover { text-decoration:underline; }
+.flow-wrap { overflow-x:auto; margin:12px 0 16px; }
+.flow { min-width:640px; width:100%; height:auto; }
+.flow-branch { font-size:12.5px; color:var(--ink-2); border-left:3px solid var(--brand-2);
+  padding:4px 10px; margin:8px 0 16px; background:var(--zebra); }
+@media (max-width:767px) {
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media (max-width:560px) {
+  .doc-title { font-size:21px; }
+  .h-sec { font-size:19px; }
+  .doc-table, .doc-table th, .doc-table td { font-size:12.5px; }
+  .code { font-size:11.5px; white-space:pre-wrap; word-break:break-word; }
+  .nav-box { grid-template-columns:1fr; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><h1 class="doc-title">M-07 传输适配器 模块详细设计</h1><p class="subtitle">RISC-V仿真平台 模块详细设计系列 - 对应《模块设计说明书》4.2.3节</p><p class="version">HTML版 v1.1 (2026-10-15) - 源设计《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版，2026-10-13更新)</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版新增2.5平台共享契约与各模块端口契约表)</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.2.3（② 会话/命令层-M-07 传输适配器）：数据描述→源文档表35、关键函数表36、端口契约表37；处理流程=4.2.3.4</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">双传输适配（WASM 内嵌 / WS 远程）；断线按序列号续拉补齐；背压治理；NFR-04（WS 鉴权，P1）</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">M-05 协议路由；M-04 会话建连/关联；M-21 断连/重连日志；M-22 断连上报</td></tr><tr class="row0"><td style="text-align:center">MVP状态</td><td style="text-align:left">PO主承担模块（MVP必需：WASM 内嵌 postMessage 传输 + 序列号续拉锚点；WS 远程 P1）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；依赖方向（2.1表5：会话/命令层→调试服务/仿真内核/观测管道）；错误码族主属方=E_PROTO（3.4表16：01/02/05/07/08）+ E_CTX-06 超时联动；确定性约束（2.4表6）；评审 P-08（transfer 移动语义/无 SAB）、P-10（背压水位）、R4（控制面协议封装）、NFR-04（WS 鉴权）</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.0（2026-10-15 初版）：按 M-13 v1.1 标准 9 章结构；内建 9.1.1 端口契约（源表37 对齐）+ CH7 契约测试 + CH8 模块即积木可替换；表号/图号引用源文档契约层版实际编号（表35/36/37、表16、表91/93）；错误码 E_PROTO/E_CTX 族按源表16 逐码对齐（无新增码）；双传输/续拉/背压按 4.2.3 与评审 P-08/P-10/R4/NFR-04 内建。&lt;br&gt;v1.1（2026-10-15 评审 07-1~07-9 全闭环）：07-1 命令/观测双队列分离（命令不丢、观测降采样/丢最旧，丢弃=本地未发送）；07-2 传输帧（M-07 包裹 sessionId/role/crc/seq）与协议层（M-05 解析 msgType/reqId/version/payload）分层声明；07-3 ack 分工（命令 ack → M-07 pendingQueue；事件 ack → M-05 可靠通道；M-07 仅透传）；07-4 历史窗口主线程/适配器侧持有（Worker 重建不影响续拉）；07-5 kind 枚举（THROTTLE/DROP_OLDEST）+ Delta 结构展开；07-6 E_PROTO-04 触发边界（载荷超限→拒绝；命令队列满→拒绝新命令）+ 源表16 核对存在；07-7 补三组用例；07-8 acked 按序推进（乱序缓存待前序补齐）；07-9 数据面生产-消费模型（Worker 写→transfer→主线程读→重建新块）</td></tr><tr class="row1"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-15</td></tr></tbody></table></div></header><nav class="nav-toggle"><details open><summary>目录</summary><div class="nav-box"><a href="#sec1">1 功能概述</a><a href="#sec1-1">1.1 模块定位</a><a href="#sec1-2">1.2 需求与约束</a><a href="#sec1-3">1.3 MVP 范围与预留</a><a href="#sec2">2 数据描述</a><a href="#sec2-1">2.1 核心数据结构</a><a href="#sec2-1-1">2.1.1 复杂结构字段定义</a><a href="#sec2-2">2.2 缓存与增量语义</a><a href="#sec2-3">2.3 数据流说明</a><a href="#sec3">3 实现设计</a><a href="#sec3-1">3.1 send</a><a href="#sec3-2">3.2 transferBlock</a><a href="#sec3-3">3.3 recv</a><a href="#sec3-4">3.4 reconnect</a><a href="#sec3-5">3.5 resumeBySeq</a><a href="#sec3-6">3.6 backpressure</a><a href="#sec3-7">3.7 与真实网络传输的差异对照表</a><a href="#sec4">4 关键函数</a><a href="#sec5">5 处理流程</a><a href="#sec5-1">5.1 传输生命周期流程</a><a href="#sec5-2">5.2 与相邻模块的协作说明</a><a href="#sec6">6 异常处理</a><a href="#sec6-1">6.1 错误码与处置</a><a href="#sec6-2">6.2 边界与降级</a><a href="#sec7">7 测试设计与可维护性</a><a href="#sec7-1">7.1 测试要点与关键用例</a><a href="#sec7-2">7.2 可维护性手段</a><a href="#sec8">8 质量属性落实</a><a href="#sec9">9 接口依赖</a><a href="#sec9-1">9.1 依赖关系</a><a href="#sec9-1-1">9.1.1 端口契约</a><a href="#sec9-2">9.2 日志对接</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-07 传输适配器（4.2.3）：双传输适配——WASM 内嵌（Worker + postMessage 承载协议消息）与 WebSocket 远程（服务端形态 P1），协议语义两形态一致。数据面传输语义明确为「每批不可变分块 transfer + 内核重建新块（移动语义）」（生产-消费模型：Worker 写缓冲 → transfer 移交 → 主线程读 → Worker 重建新块继续写入，不做原地共享；零拷贝仅限一次性大块如快照整块 transfer，file:// 下无 COOP/COEP 时不依赖 SharedArrayBuffer，评审 P-08）。控制面分层（07-2）：M-07 为传输帧（TransportFrame 包裹 sessionId/role/crc/seq），M-05 为协议层（ProtocolMessage 解析 msgType/reqId/version/payload），一律走协议封装（评审 R4）。背压治理与 M-05 对齐（07-1）：命令/观测双队列分离——命令不丢（超水位拒绝新命令 E_PROTO-04），仅观测类（波形/状态增量）降采样/丢最旧（评审 P-10）。断线重连按序列号续拉补齐。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:12%"><col style="width:64%"><col style="width:24%"></colgroup><thead><tr><th style="width:12%;text-align:center">类别</th><th style="width:64%;text-align:center">约束内容</th><th style="width:24%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">功能</td><td style="text-align:left">双传输适配：WASM 内嵌（postMessage）/ WebSocket 远程（P1），协议语义两形态一致</td><td style="text-align:left">4.2.3.1</td></tr><tr class="row1"><td style="text-align:center">数据面</td><td style="text-align:left">每批不可变分块 transfer + Worker 重建新块（移动语义），不做原地共享；零拷贝仅限一次性大块（快照整块 transfer）</td><td style="text-align:left">4.2.3.1、评审 P-08</td></tr><tr class="row0"><td style="text-align:center">数据面</td><td style="text-align:left">file:// 下无 COOP/COEP 时不依赖 SharedArrayBuffer（SAB 不可用降级为 postMessage 拷贝语义）</td><td style="text-align:left">评审 P-08</td></tr><tr class="row1"><td style="text-align:center">控制面</td><td style="text-align:left">控制消息一律走协议封装（ProtocolMessage），不经裸传输通道（评审 R4）</td><td style="text-align:left">4.2.3.1、评审 R4</td></tr><tr class="row0"><td style="text-align:center">可靠性</td><td style="text-align:left">断线重连按序列号续拉补齐（seqNo 锚点；缺口 → E_PROTO-05）</td><td style="text-align:left">4.2.3.4</td></tr><tr class="row1"><td style="text-align:center">背压</td><td style="text-align:left">发送队列水位阈值默认 0.8；命令/观测双队列分离（07-1）：命令不丢（超水位拒绝 E_PROTO-04），仅观测类降采样/丢最旧（丢弃=本地未发送，与 M-05/M-19 对齐，评审 P-10）</td><td style="text-align:left">评审 P-10</td></tr><tr class="row0"><td style="text-align:center">鉴权</td><td style="text-align:left">WS 远程形态：重连 + 鉴权（NFR-04，P1）；WASM 内嵌无鉴权（进程内边界）</td><td style="text-align:left">NFR-04</td></tr><tr class="row1"><td style="text-align:center">性能</td><td style="text-align:left">命令响应 ≤500ms（pendingQueue 超时 E_CTX-06，幂等可重试）；消息格式错误 E_PROTO-08</td><td style="text-align:left">8 章表93、E_PROTO-08</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：send(msg)（控制面协议封装，输出序列号）、transferBlock(block)（数据面不可变分块移动语义移交）、recv(cb)（消息接收回调 → M-05 路由）、resumeBySeq(seq)（断线按序列号续拉补齐）、backpressure(kind)（发送队列水位处置：降采样/丢最旧）；WASM 内嵌形态（Worker postMessage）+ 断线序列号锚点。<br>预留项（P1 演进承接，不属现实现）：WebSocket 远程形态 + 重连鉴权（NFR-04）；REST/CLI 网关接入（headless 命令面，未启用返回 E_CTX-09）；CRC 校验（E_PROTO-06，P1）；SharedArrayBuffer 共享内存路径（COOP/COEP 就绪后，P-08 演进）。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构（源文档表35）</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:20%"><col style="width:14%"><col style="width:66%"></colgroup><thead><tr><th style="width:20%;text-align:center">数据结构</th><th style="width:14%;text-align:center">类型</th><th style="width:66%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">transportType</td><td style="text-align:center">enum</td><td style="text-align:left">传输形态：wasm 内嵌 / ws 远程（协议语义两形态一致）</td></tr><tr class="row1"><td style="text-align:center">connState</td><td style="text-align:center">enum</td><td style="text-align:left">连接状态：connecting / ready / closed / reconnecting</td></tr><tr class="row0"><td style="text-align:center">seqNo</td><td style="text-align:center">uint64</td><td style="text-align:left">发送序列号（单调递增，断线续拉锚点；缺口 → E_PROTO-05）</td></tr><tr class="row1"><td style="text-align:center">pendingQueue</td><td style="text-align:center">queue</td><td style="text-align:left">待确认命令队列（超时管理 E_CTX-06 ≤500ms，幂等可重试）</td></tr><tr class="row0"><td style="text-align:center">txWatermark</td><td style="text-align:center">float</td><td style="text-align:left">发送队列水位阈值（默认 0.8），超限降采样/丢最旧（评审 P-10）</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="body">transportType 决定传输通道实现（postMessage / WebSocket），协议消息结构两形态共用；seqNo 单调递增作为续拉锚点（断线后按序补齐，E_PROTO-05）；pendingQueue 维护待确认命令（超时 E_CTX-06）；txWatermark 触发背压（超限降采样/丢最旧，P-10）。字段定义如下：</p>
+<pre class="code"><code>// transportType: 传输形态（协议语义两形态一致，4.2.3.1）
+enum transportType { wasm, ws };
+// connState: 连接状态机（断线 → reconnecting → ready；closed 为终态）
+enum connState { connecting, ready, closed, reconnecting };
+// seqNo: 发送序列号（单调递增，续拉锚点；缺口 → E_PROTO-05）
+struct seqNo {
+  uint64_t last;     // 已发送序列号（单调递增）
+  uint64_t acked;    // 已确认序列号（07-8：按序推进 TCP 式；乱序 ack 缓存待前序补齐）
+};
+// 分层模型（07-2）：M-07 传输帧包裹 → M-05 协议层解析 payload
+// TransportFrame: 传输帧（M-07 定义：sessionId/role/crc/seq 包裹层）
+struct TransportFrame {
+  uint8_t  type;        // 0=命令 / 1=事件 / 2=ack / 3=续拉请求
+  uint64_t seq;         // 发送序列号（ack/续拉锚点）
+  uint64_t sessionId;   // 会话归属（与 M-04 会话关联）
+  uint8_t  role;        // 角色（WS 形态鉴权/能力面，NFR-04）
+  uint32_t crc;         // CRC 校验（P1，E_PROTO-06）
+  ProtocolMessage payload; // 协议层载荷（M-05 解析，见下）
+};
+// ProtocolMessage: 协议层消息（M-05 定义与解析：msgType/reqId/version/payload）
+//   与 M-05 2.1.1 同源：{msgType, reqId, seq, version, payload}；M-07 不做协议层字段校验
+// ack 分工（07-3）：命令 ack → M-07 pendingQueue 出队推进；事件 ack → M-05 可靠通道
+//   （deliverReliable 重试 ≤3）；M-07 仅做传输层 ack 透传，不承担事件 ack 重试
+// PendingEntry: 待确认命令队列条目（超时管理，E_CTX-06）
+struct PendingEntry {
+  uint64_t seq;         // 命令序列号
+  uint64_t deadline;    // 超时截止（≤500ms，读类/幂等可重试）
+  uint8_t  retries;     // 已重试次数（≤3，与 M-05 对齐）
+};
+// TxQueue: 发送队列（07-1：命令/观测双队列分离，水位背压，评审 P-10）
+struct TxQueue {
+  ring&lt;PendingEntry&gt; cmdQueue;  // 命令队列：不丢（超水位拒绝新命令 E_PROTO-04）
+  ring&lt;PendingEntry&gt; obsQueue;  // 观测队列：可丢（降采样/丢最旧，丢弃=本地未发送）
+  float watermark = 0.8;        // 水位阈值（默认 0.8，作用于 obsQueue）
+  uint32_t cap;                 // 队列容量（超限触发处置）
+  uint8_t  kind;                // 处置类别（07-5）：THROTTLE 降采样 / DROP_OLDEST 丢最旧
+};
+// Delta: resumeBySeq 输出（07-5 展开：补齐的增量，前端对账用，M-03）
+struct Delta {
+  uint64_t seqStart;            // 续拉起点序列号（断线前已 ack）
+  uint64_t seqEnd;              // 续拉终点序列号（当前 last）
+  Entry    entries[];           // 补齐增量条目（按 seq 升序，前端对账 M-03 reconcile）
+};
+// 历史窗口（07-4）：主线程/传输适配器侧持有（Worker 重建不影响 histContains）；
+//   WASM 断线重建后仍按序续拉，仅窗口外缺口才全量对账
+// Block: 数据面不可变分块（移动语义，评审 P-08）
+struct Block {
+  ArrayBuffer buf;      // 不可变分块（transferable，移交后原侧不再读写）
+  uint64_t   batchNo;   // 批次号（数据面批次锚点）
+  bool       immutable; // 不可变标记（重建新块后旧块只读）
+};</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 缓存与增量语义</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:18%"><col style="width:40%"><col style="width:22%"><col style="width:20%"></colgroup><thead><tr><th style="width:18%;text-align:center">机制</th><th style="width:40%;text-align:center">语义</th><th style="width:22%;text-align:center">实现通道</th><th style="width:20%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">发送队列</td><td style="text-align:left">命令/观测双队列（07-1）：cmdQueue 不丢（超水位拒绝 E_PROTO-04）；obsQueue 降采样/丢最旧（丢弃=本地未发送）</td><td style="text-align:left">TxQueue.cmdQueue/obsQueue + watermark(0.8)</td><td style="text-align:left">与 M-05/M-19 背压策略一致（P-10）</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">续拉锚点</td><td data-label="语义" style="text-align:left">seqNo 单调递增；断线后 resumeBySeq(seq) 按缺口补齐；历史窗口主线程/适配器侧持有（07-4）</td><td data-label="实现通道" style="text-align:left">seqNo.last/acked + histWindow</td><td data-label="备注" style="text-align:left">缺口 → E_PROTO-05；窗口外 → 全量对账</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">超时管理</td><td data-label="语义" style="text-align:left">cmdQueue 条目 deadline ≤500ms，超时 E_CTX-06</td><td data-label="实现通道" style="text-align:left">PendingEntry.deadline</td><td data-label="备注" style="text-align:left">读类/幂等命令可重试（与 M-05 对齐）</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">ack 推进</td><td data-label="语义" style="text-align:left">acked 按序推进（TCP 式，07-8）；乱序 ack 缓存待前序补齐</td><td data-label="实现通道" style="text-align:left">seqNo.acked + ackReorderBuf</td><td data-label="备注" style="text-align:left">命令 ack → M-07 出队；事件 ack → M-05 可靠通道（07-3）</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">transfer 语义</td><td data-label="语义" style="text-align:left">生产-消费：Worker 写缓冲 → transfer 移交 → 主线程读 → Worker 重建新块（07-9）</td><td data-label="实现通道" style="text-align:left">Block.transferable</td><td data-label="备注" style="text-align:left">零拷贝仅限一次性大块（快照，P-08）</td></tr></tbody></table></div>
+<h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+<p class="body">建立连接 → 握手（协议版本 + 能力位，E_PROTO-01 拒绝不兼容）→ 收发（数据面不可变分块 transfer，控制面协议封装）→ 断线检测 → 重连 → 按序列号续拉 → 对账完成恢复；发送队列超水位 → 背压处置（降采样/丢最旧，P-10）。</p>
+<h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 send(msg) 协议消息发送</h3>
+<p class="body">send(msg)：控制面统一封装（评审 R4）——分配单调序列号、按类别入命令/观测队列（07-1）、发送传输帧；命令队列超水位 → 拒绝新命令 E_PROTO-04（命令不丢）；观测队列超水位 → backpressure 降采样/丢最旧（丢弃=本地未发送）。ack 分工（07-3）：命令 ack → 本模块 pendingQueue 出队；事件 ack → M-05 可靠通道重试，本模块仅透传。伪代码如下：</p>
+<pre class="code"><code>// send: 协议消息发送（控制面统一封装，评审 R4；4.2.3.3 表36）
+uint64_t send(ProtocolMessage msg) {
+  TransportFrame f = wrap(msg);                    // 07-2：传输帧包裹（sessionId/role/crc/seq）
+  f.seq = seqNo.last++;                            // 分配单调序列号（续拉锚点）
+  if (isCommand(f)) {                              // 命令：cmdQueue（不丢）
+    if (cmdQueueFull()) return E_PROTO-04;         // 07-1：命令队列满 → 拒绝新命令（不丢旧）
+    cmdQueue.push({seq: f.seq, deadline: now()+500ms, retries: 0}); // 入待确认（≤500ms）
+  } else {                                         // 观测：obsQueue（可丢）
+    if (obsQueueOverWatermark()) backpressure(THROTTLE); // 07-1：仅观测降采样/丢最旧
+    if (obsQueueFull()) { dropOldest(); return f.seq; }  // 丢弃=本地未发送（前端对账可补）
+    obsQueue.push({seq: f.seq});                   // 入观测队列
+  }
+  transport_send(f);                               // 形态发送：postMessage / WebSocket
+  return f.seq;                                    // 输出：序列号
+}
+// ack 分工（07-3）：命令 ack → cmdQueue 出队推进；事件 ack → M-05 可靠通道（deliverReliable
+//   重试 ≤3）；M-07 仅做传输层 ack 透传，不承担事件 ack 重试（E_PROTO-07 仅传输层超时记录）</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 transferBlock(block) 不可变分块移交</h3>
+<p class="body">transferBlock(block)：数据面移动语义（评审 P-08，生产-消费模型 07-9）——Worker 写缓冲 → transfer 移交 → 主线程读 → Worker 重建新块继续写入，不做原地共享；零拷贝仅限一次性大块（如快照整块 transfer）；file:// 无 COOP/COEP 时降级为 postMessage 拷贝语义（不依赖 SharedArrayBuffer）。伪代码如下：</p>
+<pre class="code"><code>// transferBlock: 不可变分块移交（移动语义，评审 P-08；4.2.3.3 表36）
+// 生产-消费模型（07-9）：Worker 侧生产（写环形缓冲）→ transferBlock 移交 →
+//   主线程消费（读块，不可变）→ workerRebuildBlock 重建新块供 Worker 继续写
+void transferBlock(Block block) {
+  assert(block.immutable);                          // 不可变分块（移交后原侧不再读写）
+  if (transferableAvailable(block.buf))            // transferable 路径（COOP/COEP 或 Worker 内）
+    postMessage(block, [block.buf]);               // 移交所有权（零拷贝；仅一次性大块如快照）
+  else
+    postMessage(block);                            // file:// 降级：拷贝语义（无 SAB，P-08）
+  workerRebuildBlock(block.batchNo);               // Worker 侧重建新块继续写入（环形缓冲场景）
+}
+// 分块大小/批次频率：按数据面批次（如波形采样批）切分，主线程消费后回写 release 批次号</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 recv(cb) 消息接收回调</h3>
+<p class="body">recv(cb)：消息接收回调分发——解析传输帧（格式错误 → E_PROTO-08；未知字段 → E_PROTO-02 仅日志忽略）、按类型路由（命令/事件/ack/续拉）；ack 分工（07-3）：命令 ack 出队推进、事件 ack 透传 M-05 → 调用 M-05 路由分发。伪代码如下：</p>
+<pre class="code"><code>// recv: 消息接收回调分发（4.2.3.3 表36；调用 M-05 路由）
+void recv(cb) {
+  transport_onMessage((msg) =&gt; {
+    TransportFrame f = parseFrame(msg);            // 传输帧解析（格式错误 → E_PROTO-08 拒绝）
+    f.seq == unknownField ? log(E_PROTO-02) : void;// 未知字段仅日志，向后兼容忽略
+    if (f.type == ACK) {                           // ack 分工（07-3）
+      if (f.payload.msgType == CMD)                // 命令 ack → cmdQueue 出队（按序推进，07-8）
+        cmdQueue.ackInOrder(f.seq);                // 乱序 ack 缓存待前序补齐（ackReorderBuf）
+      else                                         // 事件 ack → M-05 可靠通道（透传不重试）
+        m05RelayEventAck(f.seq);
+      return;
+    }
+    m05Route(f.payload);                           // 07-2：协议层载荷交 M-05 路由
+    cb(f);                                         // 回调输出解析后的消息
+  });
+}</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 reconnect() 断线重连</h3>
+<p class="body">reconnect()：断线重连——WS 形态：重连 + 鉴权（NFR-04）+ 按序列号续拉（resumeBySeq）；WASM 内嵌形态：Worker 重建（postMessage 通道恢复）+ 续拉。重连续拉无法补齐 → 前端主动拉取全量状态对账。伪代码如下：</p>
+<pre class="code"><code>// reconnect: 断线重连（4.2.3.3 表36；输出：连接状态）
+connState reconnect() {
+  connState = reconnecting;                        // 进入重连态
+  if (transportType == ws) {
+    if (!wsAuth()) return closed;                  // WS：重连 + 鉴权（NFR-04，失败 → closed）
+    connState = ready;
+  } else {
+    rebuildWorker();                               // WASM 内嵌：Worker 重建（postMessage 恢复）
+    connState = ready;
+  }
+  resumeBySeq(seqNo.acked);                        // 按序列号续拉补齐（缺口 → E_PROTO-05）
+  return connState;                                // 输出：连接状态
+}
+// 续拉缺口无法补齐 → 前端主动拉取全量状态对账（4.2.3.5）</code></pre>
+<h3 id="sec3-5" class="h-sub">3.5 resumeBySeq(seq) 按序列号续拉补齐</h3>
+<p class="body">resumeBySeq(seq)：按断线前序列号续拉补齐（前端对账用，M-03 reconcile 调用）——对端按 seq 返回缺失增量；缺口无法补齐 → E_PROTO-05 + 前端全量对账。伪代码如下：</p>
+<pre class="code"><code>// resumeBySeq: 按序列号续拉补齐（4.2.3.3 表36；输入：断线前序列号）
+Delta resumeBySeq(uint64_t seq) {
+  if (seq &gt; seqNo.last || !histContains(seq))      // 缺口（断线期间丢失的消息）
+    return E_PROTO-05;                             // 序列号缺口 → 前端全量对账（4.2.3.5）
+  Delta d = histFetch(seq, seqNo.last);            // 按序补齐缺失增量
+  return d;                                        // 输出：补齐的增量（前端对账用，M-03）
+}
+// 历史窗口：最近 N 条按 seq 索引，主线程/适配器侧持有（07-4：Worker 重建不影响续拉；
+//   对齐 M-05 evHistory 续拉数据源语义）</code></pre>
+<h3 id="sec3-6" class="h-sub">3.6 backpressure(kind) 背压处置</h3>
+<p class="body">backpressure(kind)：观测队列水位处置（07-1：命令不丢，仅观测可丢）——kind 枚举（07-5）：THROTTLE 降采样 / DROP_OLDEST 丢最旧，映射观测类数据；队列持续超水位 → 暂停非关键数据流并告警。伪代码如下：</p>
+<pre class="code"><code>// backpressure: 观测队列水位处置（4.2.3.3 表36；与 M-19 对齐，P-10）
+// kind 枚举（07-5）：THROTTLE 降采样（观测高频数据抽稀）/ DROP_OLDEST 丢最旧
+//   （按 seq 丢最早未发送条目）；仅作用于 obsQueue，cmdQueue 命令不丢（07-1）
+void backpressure(uint8_t kind) {
+  if (obsQueue.used() / obsQueue.cap &gt; watermark) { // 观测队列水位超限
+    if (kind == THROTTLE) downSample();            // 降采样（观测类数据）
+    else if (kind == DROP_OLDEST) dropOldest();    // 丢最旧（按 seq 丢最早未发送条目）
+  }
+  if (persistentOverflow()) {                      // 观测队列持续超水位（降载仍堆积）
+    pauseNonCritical();                            // 暂停非关键数据流（波形/观测订阅）
+    m22Report(WARN, &quot;obs_overflow&quot;, watermark);    // 告警（评审 P-10）
+  }
+}
+// 命令队列满 → send 返回 E_PROTO-04 拒绝新命令（不丢已发送命令，07-1/07-6）</code></pre>
+<h3 id="sec3-7" class="h-sub">3.7 与真实网络传输的差异对照表</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:32%"><col style="width:38%"><col style="width:16%"></colgroup><thead><tr><th style="width:14%;text-align:center">维度</th><th style="width:32%;text-align:center">真实网络传输（HTTP/WebSocket 通用）</th><th style="width:38%;text-align:center">本平台建模（M-07 传输适配器）</th><th style="width:16%;text-align:center">差异影响</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">形态</td><td style="text-align:left">单形态连接（HTTP 轮询/WS 直连）</td><td style="text-align:left">双传输适配（WASM 内嵌 postMessage / WS 远程），协议语义两形态一致</td><td style="text-align:left">前端形态按部署环境切换，语义不变（表91）</td></tr><tr class="row1"><td style="text-align:center">数据面</td><td style="text-align:left">通用字节流/JSON，发送方与接收方共享缓冲</td><td style="text-align:left">每批不可变分块 transfer + 接收侧重建新块（移动语义），不做原地共享</td><td style="text-align:left">环形缓冲持续写入场景无竞态（P-08）</td></tr><tr class="row0"><td style="text-align:center">零拷贝</td><td style="text-align:left">通常整包拷贝</td><td style="text-align:left">零拷贝仅限一次性大块（快照整块 transfer）；file:// 无 SAB 时降级拷贝</td><td style="text-align:left">快照传输零拷贝，普通批次保移动语义</td></tr><tr class="row1"><td style="text-align:center">可靠性</td><td style="text-align:left">TCP 保序 + 业务层重试</td><td style="text-align:left">协议序列号 + 断线续拉（resumeBySeq）+ ack 分工（07-3：命令 ack 本模块出队 / 事件 ack M-05 重试）</td><td style="text-align:left">断线补齐无缺口（表91，E_PROTO-05/07）</td></tr><tr class="row0"><td style="text-align:center">背压</td><td style="text-align:left">TCP 窗口流控</td><td style="text-align:left">命令/观测双队列（07-1）：命令不丢（满则拒 E_PROTO-04），仅观测水位（0.8）降采样/丢最旧 + 持续超水位暂停非关键流</td><td style="text-align:left">命令不丢、观测可丢，降载受控（P-10）</td></tr></tbody></table></div>
+<h2 id="sec4" class="h-sec">4 关键函数（源文档表36）</h2>
+
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:28%"><col style="width:46%"></colgroup><thead><tr><th style="width:26%;text-align:center">函数</th><th style="width:28%;text-align:center">说明</th><th style="width:46%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">send(msg)</td><td style="text-align:left">协议消息发送（控制面统一封装）</td><td style="text-align:left">输入：ProtocolMessage；输出：序列号</td></tr><tr class="row1"><td style="text-align:center">transferBlock(block)</td><td style="text-align:left">不可变分块移交（移动语义）</td><td style="text-align:left">输入：不可变 ArrayBuffer；Worker 重建新块；零拷贝仅限一次性大块（快照）</td></tr><tr class="row0"><td style="text-align:center">recv(cb)</td><td style="text-align:left">消息接收回调分发</td><td style="text-align:left">调用 M-05 路由；输出：解析后的消息</td></tr><tr class="row1"><td style="text-align:center">reconnect()</td><td style="text-align:left">断线重连</td><td style="text-align:left">服务端形态：重连 + 鉴权（NFR-04）；输出：连接状态</td></tr><tr class="row0"><td style="text-align:center">resumeBySeq(seq)</td><td style="text-align:left">按序列号续拉补齐</td><td style="text-align:left">输入：断线前序列号；输出：补齐的增量（前端对账用）</td></tr><tr class="row1"><td style="text-align:center">backpressure(kind)</td><td style="text-align:left">发送队列水位处置</td><td style="text-align:left">超限 → 降采样/丢最旧（与 M-19 对齐）；输出：处置结果</td></tr></tbody></table></div>
+<h2 id="sec5" class="h-sec">5 处理流程</h2>
+
+<h3 id="sec5-1" class="h-sub">5.1 传输生命周期流程（源 4.2.3.4 对齐）</h3>
+<p class="body">建立连接 → 握手（协议版本 + 能力位，E_PROTO-01 拒绝不兼容）→ 收发（数据面不可变分块 transfer，控制面协议封装）→ 断线检测 → 重连（WS 鉴权 NFR-04 / WASM Worker 重建）→ 按序列号续拉 → 对账完成恢复；发送队列超水位 → 背压处置。流程图如下：</p>
+<div class="flow-wrap"><svg class="flow" viewBox="0 0 980 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-07 传输生命周期状态机流程图">
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#2f5bd6"/></marker>
+    <style>
+      .st-box{fill:#eef2fb;stroke:#2f5bd6;stroke-width:1.5;rx:6}
+      .st-txt{font-size:12.5px;fill:#1f2937;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+      .st-sub{font-size:11px;fill:#4b5563;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+      .st-arrow{stroke:#2f5bd6;stroke-width:1.6;marker-end:url(#ar)}
+      .st-dec{fill:#fff;stroke:#d97757;stroke-width:1.5;rx:8}
+      .st-dec-txt{font-size:11.5px;fill:#7c2d12;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+      .st-err{fill:#fff;stroke:#b91c1c;stroke-width:1.5;rx:8}
+      .st-err-txt{font-size:11.5px;fill:#7f1d1d;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+    </style>
+  </defs>
+  <rect class="st-box" x="20" y="30" width="150" height="44"/>
+  <text class="st-txt" x="95" y="48" text-anchor="middle">1 建立连接</text>
+  <text class="st-sub" x="95" y="64" text-anchor="middle">connecting（postMessage/WS）</text>
+  <line class="st-arrow" x1="170" y1="52" x2="216" y2="52"/>
+  <rect class="st-box" x="216" y="30" width="150" height="44"/>
+  <text class="st-txt" x="291" y="48" text-anchor="middle">2 握手</text>
+  <text class="st-sub" x="291" y="64" text-anchor="middle">协议版本+能力位（E_PROTO-01）</text>
+  <line class="st-arrow" x1="366" y1="52" x2="412" y2="52"/>
+  <rect class="st-box" x="412" y="30" width="170" height="44"/>
+  <text class="st-txt" x="497" y="48" text-anchor="middle">3 ready 收发</text>
+  <text class="st-sub" x="497" y="64" text-anchor="middle">数据面 transfer / 控制面协议封装</text>
+  <line class="st-arrow" x1="582" y1="52" x2="628" y2="52"/>
+  <rect class="st-box" x="628" y="30" width="150" height="44"/>
+  <text class="st-txt" x="703" y="48" text-anchor="middle">4 断线检测</text>
+  <text class="st-sub" x="703" y="64" text-anchor="middle">WS 断开 / Worker 异常</text>
+  <line class="st-arrow" x1="778" y1="52" x2="824" y2="52"/>
+  <rect class="st-box" x="824" y="30" width="130" height="44"/>
+  <text class="st-txt" x="889" y="48" text-anchor="middle">5 reconnecting</text>
+  <text class="st-sub" x="889" y="64" text-anchor="middle">WS 鉴权 / Worker 重建</text>
+  <line class="st-arrow" x1="497" y1="74" x2="497" y2="120"/>
+  <rect class="st-dec" x="412" y="120" width="170" height="40"/>
+  <text class="st-dec-txt" x="497" y="144" text-anchor="middle">超水位 → 降采样/丢最旧（P-10）</text>
+  <line class="st-arrow" x1="889" y1="74" x2="889" y2="120"/>
+  <rect class="st-box" x="824" y="120" width="130" height="44"/>
+  <text class="st-txt" x="889" y="138" text-anchor="middle">6 续拉补齐</text>
+  <text class="st-sub" x="889" y="154" text-anchor="middle">resumeBySeq（E_PROTO-05）</text>
+  <line class="st-arrow" x1="824" y1="142" x2="700" y2="142"/>
+  <rect class="st-box" x="620" y="120" width="140" height="44"/>
+  <text class="st-txt" x="690" y="138" text-anchor="middle">7 对账恢复</text>
+  <text class="st-sub" x="690" y="154" text-anchor="middle">回 ready（前端刷新视图）</text>
+  <line class="st-arrow" x1="690" y1="120" x2="690" y2="90"/>
+  <rect class="st-err" x="216" y="206" width="150" height="36"/>
+  <text class="st-err-txt" x="291" y="229" text-anchor="middle">握手失败 → E_PROTO-01 拒绝</text>
+  <line class="st-arrow" x1="291" y1="74" x2="291" y2="206"/>
+  <rect class="st-err" x="628" y="206" width="150" height="36"/>
+  <text class="st-err-txt" x="703" y="229" text-anchor="middle">续拉缺口 → 前端全量对账</text>
+  <line class="st-arrow" x1="889" y1="164" x2="703" y2="206"/>
+</svg></div>
+<div class="flow-branch">分支：握手协议版本不匹配 → E_PROTO-01 明确拒绝 + 升级提示；WS 断连 → HMS 严重级 + 重连续拉；WASM 内嵌传输异常 → 视为引擎故障上报；续拉缺口无法补齐 → 前端主动拉取全量状态对账；队列持续超水位 → 暂停非关键数据流并告警（P-10）。</div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:52%"><col style="width:24%"></colgroup><thead><tr><th style="width:24%;text-align:center">协作模块</th><th style="width:52%;text-align:center">协作内容</th><th style="width:24%;text-align:center">触发时机</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-05（命令路由）</td><td style="text-align:left">协议路由：recv 解析后消息分发（命令/事件/ack）</td><td style="text-align:left">收到消息时</td></tr><tr class="row1"><td style="text-align:center">M-04（会话管理器）</td><td style="text-align:left">会话建连（createSession 调 M-07 建连）+ 会话关联（sessionId）</td><td style="text-align:left">createSession 握手时</td></tr><tr class="row0"><td style="text-align:center">M-21（日志系统）</td><td style="text-align:left">断连/重连日志（连接状态变更入日志）</td><td style="text-align:left">连接状态切换时</td></tr><tr class="row1"><td style="text-align:center">M-22（HMS）</td><td style="text-align:left">断连上报（严重级）、队列持续超水位告警、续拉缺口上报</td><td style="text-align:left">断连/背压/续拉失败时</td></tr><tr class="row0"><td style="text-align:center">M-19（波形管道）</td><td style="text-align:left">背压策略对齐（水位处置语义一致，P-10）</td><td style="text-align:left">队列超水位时</td></tr></tbody></table></div>
+<h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置（E_PROTO 族主属方）</h3>
+<p class="body">M-07 为 E_PROTO 错误码族主属方之一（源文档 3.4 表16），传输路径错误码统一收于此（一场景一码，均为表16 既有码，无新增）：</p>
+
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:34%"><col style="width:38%"><col style="width:28%"></colgroup><thead><tr><th style="width:34%;text-align:center">错误码 / 场景</th><th style="width:38%;text-align:center">触发条件</th><th style="width:28%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">E_PROTO-01 协议版本不匹配</td><td style="text-align:left">握手协议版本不兼容</td><td style="text-align:left">明确拒绝 + 升级提示（不静默错读）</td></tr><tr class="row1"><td style="text-align:center">E_PROTO-02 未知字段</td><td style="text-align:left">协议消息含未知字段</td><td style="text-align:left">仅日志记录，向后兼容忽略</td></tr><tr class="row0"><td style="text-align:center">E_PROTO-05 序列号缺口</td><td style="text-align:left">断线续拉发现缺口</td><td style="text-align:left">返回缺口 + 前端全量对账（4.2.3.5）</td></tr><tr class="row1"><td style="text-align:center">E_PROTO-07 关键事件 ack 超时</td><td style="text-align:left">关键事件 ack 超时</td><td style="text-align:left">重试 ≤3 次 → 上报 M-22（M-05 可靠投递联动）</td></tr><tr class="row0"><td style="text-align:center">E_PROTO-08 消息格式错误</td><td style="text-align:left">recv 解析失败</td><td style="text-align:left">拒绝该消息 + 日志（E_PROTO-02 未知字段除外）</td></tr><tr class="row1"><td style="text-align:center">E_CTX-06 命令超时</td><td style="text-align:left">pendingQueue 条目超时（≤500ms）</td><td style="text-align:left">幂等可重试（读类/幂等命令，与 M-05 对齐）</td></tr><tr class="row0"><td style="text-align:center">E_PROTO-04 输入超限</td><td style="text-align:left">消息载荷超限 / 命令队列满（07-6：载荷超限→拒绝返回调用方；cmdQueue 满→拒绝新命令 E_PROTO-04；obsQueue 满→背压处置）</td><td style="text-align:left">拒绝 + 背压处置（P-10）</td></tr><tr class="row1"><td style="text-align:center">E_CTX-09 headless 网关未启用（P1）</td><td style="text-align:left">REST/CLI 网关命令面未启用</td><td style="text-align:left">返回未启用（P1 形态预留）</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）WS 断连 → 上报 HMS（严重级）+ 重连续拉（reconnect + resumeBySeq）；WS 鉴权失败 → closed（重试 ≤3 → 上报）。<br>（2）WASM 内嵌传输异常 → 视为引擎故障上报（Worker 重建 + 续拉；历史窗口主线程/适配器侧持有，重建不影响续拉，07-4）。<br>（3）续拉缺口无法补齐 → 前端主动拉取全量状态对账（E_PROTO-05）。<br>（4）观测队列持续超水位 → 暂停非关键数据流并告警（评审 P-10）；命令队列满 → 拒绝新命令 E_PROTO-04（命令不丢，07-1）。<br>（5）file:// 无 COOP/COEP → 不依赖 SharedArrayBuffer，transferable 降级为 postMessage 拷贝语义（评审 P-08）。<br>（6）CRC 校验失败 → E_PROTO-06（P1 形态启用，MVP 仅记录；E_PROTO-04/06 均已在源表16 核对存在，无新增码）。<br>（7）acked 推进（07-8）：按序推进（TCP 式），乱序 ack 缓存待前序补齐。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表91（M-07 行）：测试要点 = 双传输；关键用例 = WASM/WS 语义一致、断线续拉；通过准则 = 断线补齐无缺口。展开用例表如下（核心模块覆盖率 ≥70%，源文档 7.3 表92）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:42%"><col style="width:34%"></colgroup><thead><tr><th style="width:24%;text-align:center">用例</th><th style="width:42%;text-align:center">输入/步骤</th><th style="width:34%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（源 2.5/7.1 对齐）</td><td style="text-align:left">按 9.1.1 端口契约逐项校验 send/transferBlock/recv/reconnect/resumeBySeq/backpressure 的接口签名、输入校验、输出结构与错误码；替代实现接入前必须同端口契约测试全绿</td><td style="text-align:left">契约测试全绿；契约变更同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">双传输语义一致（表91）</td><td data-label="输入/步骤" style="text-align:left">WASM 内嵌与 WS 远程分别发送同一协议消息序列</td><td data-label="通过准则" style="text-align:left">两形态解析/路由结果一致（协议语义对齐）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">断线续拉无缺口（表91）</td><td data-label="输入/步骤" style="text-align:left">WS 断连 → reconnect → resumeBySeq(seq)</td><td data-label="通过准则" style="text-align:left">补齐缺失增量、无缺口（E_PROTO-05 不触发）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">transfer 移动语义（P-08）</td><td data-label="输入/步骤" style="text-align:left">环形缓冲批次 transferBlock 后原侧读写</td><td data-label="通过准则" style="text-align:left">不可变分块移交后原侧无读写；Worker 重建新块继续</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">零拷贝边界（P-08）</td><td data-label="输入/步骤" style="text-align:left">一次性大块（快照）transfer；file:// 无 SAB 场景</td><td data-label="通过准则" style="text-align:left">大块零拷贝移交；file:// 降级拷贝语义不依赖 SAB</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">pendingQueue 超时（E_CTX-06）</td><td data-label="输入/步骤" style="text-align:left">注入命令无 ack 响应</td><td data-label="通过准则" style="text-align:left">超时 E_CTX-06 + 幂等重试 ≤3 次；写类不自动重试</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">背压处置（P-10）</td><td data-label="输入/步骤" style="text-align:left">发送队列灌至超水位</td><td data-label="通过准则" style="text-align:left">降采样/丢最旧生效；持续超水位暂停非关键流 + 告警</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">消息格式错误（E_PROTO-08）</td><td data-label="输入/步骤" style="text-align:left">注入畸形消息</td><td data-label="通过准则" style="text-align:left">拒绝该消息 + 日志；未知字段 E_PROTO-02 忽略不拒</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">协议版本不匹配（E_PROTO-01）</td><td data-label="输入/步骤" style="text-align:left">握手版本不兼容</td><td data-label="通过准则" style="text-align:left">明确拒绝 + 升级提示</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">续拉缺口对账</td><td data-label="输入/步骤" style="text-align:left">注入断线期间消息丢失</td><td data-label="通过准则" style="text-align:left">E_PROTO-05 + 前端全量状态对账一致</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">WS 鉴权失败（07-7）</td><td data-label="输入/步骤" style="text-align:left">wsAuth 返回失败（NFR-04）</td><td data-label="通过准则" style="text-align:left">reconnect → closed + 上报 M-22；重试 ≤3</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">WASM 续拉数据源（07-7）</td><td data-label="输入/步骤" style="text-align:left">Worker 重建后 resumeBySeq（历史窗口主线程持有）</td><td data-label="通过准则" style="text-align:left">histContains 仍可用、按序续拉无缺口（07-4）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">背压命令不丢（07-7）</td><td data-label="输入/步骤" style="text-align:left">cmdQueue 灌满 + obsQueue 超水位</td><td data-label="通过准则" style="text-align:left">命令满 → E_PROTO-04 拒绝新命令；观测丢最旧/降采样；已发命令不丢（07-1）</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）协议层可替换：协议消息结构（DTO）语言无关 JSON Schema/IDL 定义，传输形态（transportType）只换通道不换语义。<br>（2）序列号锚点：seqNo 单调递增 + acked 推进，续拉/对账不依赖宿主时序（确定性约束表6）。<br>（3）背压可配：txWatermark 水位与处置模式（降采样/丢最旧）为结构化配置，调整不涉核心逻辑。<br>（4）双形态共享：WASM/WS 共用同一协议解析与路由代码路径，形态差异收敛到 transport_* 适配层。<br>（5）CI 门禁：双传输语义一致用例纳入契约测试；断线续拉无缺口纳入回归基线。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-07 责任：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:14%"><col style="width:42%"><col style="width:44%"></colgroup><thead><tr><th style="width:14%;text-align:center">质量属性</th><th style="width:42%;text-align:center">目标（估算基线）</th><th style="width:44%;text-align:center">M-07 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">确定性</td><td style="text-align:left">协议语义两形态一致；消息次序稳定（seq 单调）</td><td style="text-align:left">WASM/WS 共用协议解析路径；seqNo 锚定续拉（表91）</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">可靠性</td><td data-label="目标" style="text-align:left">断线续拉补齐无缺口</td><td data-label="M-07 落实" style="text-align:left">resumeBySeq 按 seq 补齐 + ack 超时重试（E_PROTO-05/07）</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">韧性</td><td data-label="目标" style="text-align:left">断连 → 重连续拉；持续超水位受控</td><td data-label="M-07 落实" style="text-align:left">reconnect + 续拉；背压降采样/丢最旧 + 暂停非关键流（P-10）</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">性能</td><td data-label="目标" style="text-align:left">命令响应 ≤500ms；刷新 ≤200ms</td><td data-label="M-07 落实" style="text-align:left">pendingQueue 超时 E_CTX-06（幂等可重试）；数据面 transfer 零拷贝大块</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">可扩展性</td><td data-label="目标" style="text-align:left">传输形态可加（表93 协议扩展点）</td><td data-label="M-07 落实" style="text-align:left">transportType 枚举扩展（WASM/WS + P1 REST 网关）；协议只增不改</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">合规</td><td data-label="目标" style="text-align:left">业务模块 → 模块组件单向依赖（4.7 表86）</td><td data-label="M-07 落实" style="text-align:left">只经 M-05/M-04/M-21/M-22 交互，不自行实现日志/告警/路由</td></tr></tbody></table></div>
+<h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:30%"><col style="width:36%"><col style="width:34%"></colgroup><thead><tr><th style="width:30%;text-align:center">依赖方</th><th style="width:36%;text-align:center">被依赖方</th><th style="width:34%;text-align:center">依赖内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-07（传输适配器）</td><td style="text-align:left">M-05（命令路由与事件分发）</td><td style="text-align:left">协议路由（recv 后消息分发）</td></tr><tr class="row1"><td style="text-align:center">M-07</td><td style="text-align:left">M-04（会话管理器）</td><td style="text-align:left">会话建连与关联（sessionId）</td></tr><tr class="row0"><td style="text-align:center">M-07</td><td style="text-align:left">M-21（日志系统）</td><td style="text-align:left">断连/重连日志</td></tr><tr class="row1"><td style="text-align:center">M-07</td><td style="text-align:left">M-22（HMS）</td><td style="text-align:left">断连上报（严重级）、背压告警</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表 37 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层，本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现遵守同端口契约并通过契约测试（7.1）即可接入：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:30%"><col style="width:18%"><col style="width:52%"></colgroup><thead><tr><th style="width:30%;text-align:center">端口 / 服务</th><th style="width:18%;text-align:center">方向</th><th style="width:52%;text-align:center">契约（输入 → 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:left">send(msg)</td><td style="text-align:center">提供（driving）</td><td style="text-align:left">输入：ProtocolMessage；输出：序列号；命令队列满 → E_PROTO-04（命令不丢，07-1/07-6）</td></tr><tr class="row1"><td data-label="端口/服务" style="text-align:left">transferBlock(block)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">生产-消费模型（07-9）：输入不可变 ArrayBuffer → transfer 移交 → 主线程读 → Worker 重建新块；零拷贝仅限一次性大块（快照，P-08）</td></tr><tr class="row0"><td data-label="端口/服务" style="text-align:left">recv(cb)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">传输帧解析 → 协议层载荷交 M-05 路由（07-2）；ack 分工（07-3）：命令 ack 出队/事件 ack 透传；E_PROTO-08 格式错误 / E_PROTO-02 未知字段忽略</td></tr><tr class="row1"><td data-label="端口/服务" style="text-align:left">reconnect()</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">服务端形态：重连 + 鉴权（NFR-04，失败 → closed）；输出：连接状态</td></tr><tr class="row0"><td data-label="端口/服务" style="text-align:left">resumeBySeq(seq)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输入：断线前序列号；输出：Delta 结构（seqStart/seqEnd/entries，07-5）；历史窗口主线程持有（07-4）；缺口 → E_PROTO-05</td></tr><tr class="row1"><td data-label="端口/服务" style="text-align:left">backpressure(kind)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">仅观测队列（07-1）；kind 枚举 THROTTLE/DROP_OLDEST（07-5）；输出：处置结果</td></tr><tr class="row0"><td data-label="端口/服务" style="text-align:left">M-05</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">协议路由：recv 后命令/事件/ack 分发（协议层解析 msgType/reqId/version/payload，07-2）</td></tr><tr class="row1"><td data-label="端口/服务" style="text-align:left">M-04</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">会话：建连与关联（sessionId）</td></tr><tr class="row0"><td data-label="端口/服务" style="text-align:left">M-21</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">日志：断连/重连日志</td></tr><tr class="row1"><td data-label="端口/服务" style="text-align:left">M-22</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">上报：断连严重级、背压告警</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<p class="body">连接建立 → log(INFO, &quot;NET&quot;, &quot;connect&quot;, &quot;E_OK&quot;)（含形态/会话 id）；断连 → log(ERROR, &quot;NET&quot;, &quot;disconnect&quot;, &quot;E_PROTO-05&quot; 或形态异常)（HMS 严重级联动）；重连成功 → log(INFO, &quot;NET&quot;, &quot;reconnect&quot;, &quot;E_OK&quot;)；续拉补齐 → log(INFO, &quot;NET&quot;, &quot;resume&quot;, &quot;E_OK&quot;)（含补齐条数）；续拉缺口 → log(WARN, &quot;NET&quot;, &quot;gap&quot;, &quot;E_PROTO-05&quot;)（前端全量对账）；消息格式错误 → log(WARN, &quot;NET&quot;, &quot;format&quot;, &quot;E_PROTO-08&quot;)；背压处置 → log(WARN, &quot;NET&quot;, &quot;backpressure&quot;, &quot;P-10&quot;)（含水位/处置模式）。会话关联字段（sessionId）随 M-21 双时间戳统一记录，产品/嵌入式工作台不可见（角色边界），仅管理员通道可查。</p></main>
+</div>
+</body>
+</html>

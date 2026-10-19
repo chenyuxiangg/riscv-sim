@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%231e3a8a'/%3E%3Ctext x='12' y='17' font-size='13' text-anchor='middle' fill='%23ffffff' font-family='sans-serif' font-weight='bold'%3EB%3C/text%3E%3C/svg%3E">
+<title>M-17 ExecutionBackend 执行后端 模块详细设计</title>
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15px; font-weight:700; color:#374151; margin:18px 0 8px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { margin:0 0 10px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  white-space:pre; margin:10px 0 16px; }
+.code-title { font-size:13px; font-weight:700; color:#111827; margin:16px 0 4px; }
+.fig { margin:14px auto; text-align:center; }
+.fig img { max-width:100%; height:auto; border:1px solid var(--line); border-radius:4px; }
+.fig figcaption { font-size:13px; color:var(--ink-2); margin-top:6px; }
+.caption { text-align:center; font-size:13px; color:var(--ink-2); margin:6px 0 4px; }
+.flow-svg { width:100%; height:auto; }
+.flow-mobile { display:none; }
+.flow-step { display:flex; gap:10px; margin:8px 0; align-items:flex-start; }
+.flow-step .num { flex:0 0 26px; height:26px; border-radius:50%; background:var(--brand);
+  color:#fff; font-weight:700; font-size:13px; display:flex; align-items:center; justify-content:center; }
+.flow-step .txt { font-size:14px; }
+.flow-branch { margin:6px 0 6px 36px; font-size:13.5px; color:var(--ink-2); }
+.flow-arrow { text-align:center; color:#9aa1af; font-size:16px; line-height:1; margin:2px 0; }
+.nav-toggle { margin:14px 0; }
+.nav-toggle summary { cursor:pointer; font-weight:700; color:var(--brand);
+  padding:9px 12px; border:1px solid var(--line); border-radius:6px; background:var(--head-bg); list-style:none; }
+.nav-toggle summary::-webkit-details-marker { display:none; }
+.nav-box { display:flex; flex-direction:column; gap:2px; padding:10px 4px 2px; }
+.nav-l1 { color:var(--brand); font-weight:700; text-decoration:none; padding:3px 4px; }
+.nav-l2 { color:var(--ink-2); text-decoration:none; padding:3px 4px 3px 18px; font-size:13.5px; }
+.nav-l1:hover,.nav-l2:hover { color:var(--brand-2); text-decoration:underline; }
+@media (min-width:768px) {
+  .wrap { display:grid; grid-template-columns:260px 1fr; gap:28px; align-items:start; }
+  .wrap > * { min-width:0; }
+  main { min-width:0; }
+  .doc-head { grid-column:1 / -1; }
+  .nav-toggle { position:sticky; top:16px; max-height:calc(100vh - 32px); overflow:auto; }
+  .nav-toggle summary { pointer-events:none; }
+  .flow-svg { display:block; }
+  .flow-mobile { display:none; }
+}
+@media (max-width:767px) {
+  .flow-svg { display:none; }
+  .flow-mobile { display:block; }
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media print {
+  .nav-toggle { display:none; }
+  .wrap { display:block; max-width:none; padding:0; }
+  .doc-title { font-size:20px; }
+  .doc-table, .fig, .code { break-inside:avoid; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="doc-head"><h1 class="doc-title">M-17 ExecutionBackend 执行后端 模块详细设计</h1><p class="subtitle">RISC-V 仿真平台 · 模块详细设计系列 · 对应《模块设计说明书》4.4.6 节</p><p class="version">HTML 版 v1.2（2026-10-14）· 源设计《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11 更新版）</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11；2026-10-13 契约层版新增 2.5 平台共享契约层与各模块端口契约表）</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.4.6（④ 仿真内核层 · 执行后端 ExecutionBackend）；端口契约 = 源文档表67（文档内表号：数据描述 表65→78、关键函数 表66→79、端口契约 表67→80）</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">FR-15（GDB RSP 兼容，P1）；FR-18（多核/SMP，P2）；FR-19（反向调试/快照，配合 M-20/M-23）；NFR-06（内核前端解耦/插件化）</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">执行后端抽象接口（3.2.4 表13）；双内核适配（自研 ISS L3 / QEMU L1）；能力协商与降级</td></tr><tr class="row0"><td style="text-align:center">MVP 状态</td><td style="text-align:left">P0 主承担模块（MVP 必需：自研 ISS 全量 L3；QEMU P1 服务端扩展）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；能力分级 L1/L2/L3（3.2.4 表13）；评审 H3（总线 trace 仅自研 ISS）、M5（GPL 规避）、P-17（QEMU 差分对拍）</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.2（2026-10-14）：补断点生命周期 bpControl 接口（M-08 评审 08-2 联动）——BackendVtbl 新增 bpControl(id, op)，op=REMOVE/ENABLE/DISABLE；3.1 补 exec_bpControl 代理；self_iss 实现 iss_bpControl（hookTable 移除/启用位）；qemu 映射 RSP z0/Z0；2.2/3.5/4/7.1/9.1.1 同步。v1.1（2026-10-13）：逐条落实 M-17 评审 17-1~17-10——17-1 step 直接代理 vtable.step（删 ONE_INSTR）；17-2 QEMU runUntil 尽力而为；17-3 QEMU 崩溃恢复重执行式（重启+重放）；17-4 删 RUNNING 分支；17-5 补 BackendVtbl 全量成员；17-6 定义 pre/post 钩子调用点与拦截语义；17-7 对拍范围限定指令级+内存；17-8 补 QEMU 会话生命周期；17-9 cond 降级无条件+提示；17-10 补 4 组用例</td></tr><tr class="row1"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-13</td></tr></tbody></table></div></header><nav class="nav-toggle"><details open><summary>目录</summary><div class="nav-box"><a class="nav-l1" href="#sec1">1 功能概述</a>
+<a class="nav-l2" href="#sec1-1">1.1 模块定位</a>
+<a class="nav-l2" href="#sec1-2">1.2 需求与约束</a>
+<a class="nav-l2" href="#sec1-3">1.3 MVP 范围与预留</a>
+<a class="nav-l1" href="#sec2">2 数据描述</a>
+<a class="nav-l2" href="#sec2-1">2.1 核心数据结构</a>
+<a class="nav-l2" href="#sec2-1-1">2.1.1 复杂结构字段定义</a>
+<a class="nav-l2" href="#sec2-2">2.2 能力分级与双内核矩阵</a>
+<a class="nav-l2" href="#sec2-3">2.3 数据流说明</a>
+<a class="nav-l1" href="#sec3">3 实现设计</a>
+<a class="nav-l2" href="#sec3-1">3.1 抽象接口与代理分发</a>
+<a class="nav-l2" href="#sec3-2">3.2 自研 ISS 适配（M-13，全量 L3）</a>
+<a class="nav-l2" href="#sec3-3">3.3 QEMU 适配（P1，L1 子集）</a>
+<a class="nav-l2" href="#sec3-4">3.4 能力协商与降级</a>
+<a class="nav-l2" href="#sec3-5">3.5 与真实硬件 / 双内核的差异对照表</a>
+<a class="nav-l1" href="#sec4">4 关键函数</a>
+<a class="nav-l1" href="#sec5">5 处理流程</a>
+<a class="nav-l2" href="#sec5-1">5.1 能力协商与实例化流程</a>
+<a class="nav-l2" href="#sec5-2">5.2 与相邻模块的协作说明</a>
+<a class="nav-l1" href="#sec6">6 异常处理</a>
+<a class="nav-l2" href="#sec6-1">6.1 错误码与处置</a>
+<a class="nav-l2" href="#sec6-2">6.2 边界与降级</a>
+<a class="nav-l1" href="#sec7">7 测试设计与可维护性</a>
+<a class="nav-l2" href="#sec7-1">7.1 测试要点与关键用例</a>
+<a class="nav-l2" href="#sec7-2">7.2 可维护性手段</a>
+<a class="nav-l1" href="#sec8">8 质量属性落实</a>
+<a class="nav-l1" href="#sec9">9 接口依赖</a>
+<a class="nav-l2" href="#sec9-1">9.1 依赖关系</a>
+<a class="nav-l2" href="#sec9-1-1">9.1.1 端口契约（driving/driven）</a>
+<a class="nav-l2" href="#sec9-2">9.2 日志对接（M-21）</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-17 ExecutionBackend 执行后端抽象：隔离「如何执行指令」与「如何调试/观测」，调试服务（M-08~M-11）只面对抽象接口，不感知具体内核实现（4.4.6.1）。双内核适配：自研 ISS（M-13，WASM，全量能力 L3）与 QEMU（服务端可选，进程隔离 + 标准 RSP/QMP 交互，声明 L1 子集，合规 R2/R5 工程红线）。能力协商由 M-04/M-05 完成，不足时前端降级；「总线 trace 底」仅自研 ISS 提供（评审 H3）。</p>
+<p class="body">能力分级语义：L1 = 基础调试（执行控制/断点/寄存器内存/镜像与符号）；L2 = L1 + 指令/访存钩子（onInstruction/onAccess）；L3 = L2 + snapshot/restore 与事件流检查点（FR-19）。自研 ISS 全量 L3；QEMU 声明 L1 子集（3.2.4 表13）。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:62%"><col style="width:24%"></colgroup><thead><tr><th style="width:14%;text-align:center">类别</th><th style="width:62%;text-align:center">约束内容</th><th style="width:24%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">功能</td><td style="text-align:left">执行后端抽象接口（3.2.4 表13）；双内核适配；能力分级 L1/L2/L3 协商与降级</td><td style="text-align:left">4.4.6.1、3.2.4 表13</td></tr><tr class="row1"><td style="text-align:center">正确性</td><td style="text-align:left">调试服务只面对抽象代理；能力不足调用 → E_CTX-03 拒绝 + 协商降级提示</td><td style="text-align:left">4.4.6.5、3.4 表16</td></tr><tr class="row0"><td style="text-align:center">确定性</td><td style="text-align:left">M-17 在确定性适用范围（2.4 表6）：执行控制与快照/恢复不依赖宿主时钟</td><td style="text-align:left">2.4 表6</td></tr><tr class="row1"><td style="text-align:center">性能</td><td style="text-align:left">调试态全钩子 ≥0.5–1 MIPS（估算基线）；M-08 PC 命中优先于全量回调；钩子按需注册</td><td style="text-align:left">8 章表93、4.4.6.2</td></tr><tr class="row0"><td style="text-align:center">韧性</td><td style="text-align:left">QEMU 子进程崩溃 → 上报 HMS（平台故障）；恢复 = 检查点 + 输入重放</td><td style="text-align:left">4.4.6.5</td></tr><tr class="row1"><td style="text-align:center">合规</td><td style="text-align:left">GPL 传染规避（评审 M5）：自研 BSD/MIT；QEMU 进程隔离、不改 QEMU 源码、仅标准 RSP/QMP 交互</td><td style="text-align:left">4.4.6.1、2.4 表6</td></tr><tr class="row0"><td style="text-align:center">体积</td><td style="text-align:left">随内核 WASM 打包，计入内核 ≤1.5 MiB 压缩预算（估算基线）</td><td style="text-align:left">3.3 表15</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：抽象接口与代理分发（vtable 代理）、自研 ISS（M-13）全量 L3 适配、能力协商（negotiateCap 与 capBitsSet 公布）、执行控制/断点/寄存器内存/镜像符号代理、L2 指令/访存钩子（onInstruction/onAccess，供断点/trace/探针/覆盖率复用）、L3 快照（snapshot/restore → M-20）、后端异常日志（M-21）。</p>
+<p class="body">预留项（P1/P2 演进承接，不展开实现）：QEMU 后端适配（P1，FR-15 GDB RSP 兼容；进程隔离 + RSP/QMP 映射 L1 子集）；多核/SMP（P2，FR-18，扩展预留）；反向调试/快照回放深化（P1，FR-19，配合 M-20/M-23）；watch 符号表达式（P1，E_CTX-08）。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:20%"><col style="width:18%"><col style="width:62%"></colgroup><thead><tr><th style="width:20%;text-align:center">数据结构</th><th style="width:18%;text-align:center">类型</th><th style="width:62%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">backendType</td><td style="text-align:left">enum</td><td style="text-align:left">后端类型：self_iss / qemu（双内核适配，4.4.6.2 表65→78）</td></tr><tr class="row1"><td style="text-align:center">capLevel</td><td style="text-align:left">enum</td><td style="text-align:left">能力分级：L1（基础调试）/ L2（+指令钩子）/ L3（+snapshot/事件流检查点）</td></tr><tr class="row0"><td style="text-align:center">hookTable</td><td style="text-align:left">Set&lt;hook&gt;</td><td style="text-align:left">指令/访存钩子注册表（按需注册，性能优化；L2 能力，仅自研 ISS）</td></tr><tr class="row1"><td style="text-align:center">capBitsSet</td><td style="text-align:left">bitmask</td><td style="text-align:left">能力位集合（含 ExecutionBackend 分级协商结果，源 2.4 表6 相关；前端按位降级）</td></tr><tr class="row0"><td style="text-align:center">backendHandle</td><td style="text-align:left">struct</td><td style="text-align:left">后端实例句柄：类型/实现表/能力位/运行状态（复杂字段见 2.1.1）</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="lead">BackendHandle 是执行后端的实例句柄；CapLevel 定义能力位语义；HookTable 为 L2 钩子注册表。字段定义如下：</p>
+<pre class="code"><code>// BackendHandle: 后端实例句柄（代理分发核心）
+struct BackendHandle {
+  BackendType type;          // self_iss / qemu（枚举）
+  CapLevel    capLevel;      // 已协商能力级：L1/L2/L3（self_iss=L3；qemu=L1 子集）
+  BackendVtbl vtable;        // 实现表（成员全量清单见下；按能力位裁剪，未实现成员 = NULL）
+  uint8_t     capBits;       // 能力位集合（capBitsSet 低 3 位：L1/L2/L3 位），向前端公布
+  uint32_t    state;         // 运行状态：0=ready / 1=running / 2=paused / 3=faulted
+  PauseInfo   lastPause;     // 最近一次暂停信息（原因/PC/虚拟时间，见下）
+  void*       implState;     // 实现私有状态：self_iss → ISS 实例；qemu → 子进程/RSP 会话句柄
+};
+// BackendVtbl: 实现表成员全量清单（17-5；step 与 runUntil 语义分离，见 3.1）
+struct BackendVtbl {
+  PauseInfo (*runUntil)(BackendHandle*, uint64_t t);  // 时间驱动（self_iss 精确；qemu 尽力而为，17-2）
+  PauseInfo (*step)(BackendHandle*);                  // 指令驱动：执行 1 条后暂停（17-1）
+  err_t (*readReg)(BackendHandle*, const char* name, uint32_t* out);
+  err_t (*writeReg)(BackendHandle*, const char* name, uint32_t val);
+  err_t (*readMem)(BackendHandle*, uint32_t addr, uint8_t width, uint32_t* out);
+  err_t (*writeMem)(BackendHandle*, uint32_t addr, uint8_t width, uint32_t val);
+  err_t (*loadELF)(BackendHandle*, const uint8_t* binary, size_t len);
+  err_t (*installSymbols)(BackendHandle*, const uint8_t* dwarf, size_t len);
+  err_t (*bp)(BackendHandle*, uint32_t addr, BpId* id);        // 无条件断点（qemu：RSP Z0）
+  err_t (*bpHook)(BackendHandle*, uint32_t addr, CondFn cond, BpId* id); // 条件断点（self_iss：L2 钩子）
+  err_t (*bpControl)(BackendHandle*, BpId id, uint8_t op);     // 断点生命周期（08-2 联动，v1.2）：
+                                                                //   op：0=REMOVE（注销）/ 1=ENABLE（启用）/ 2=DISABLE（停用）
+                                                                //   self_iss：hookTable 移除 / 钩子启用位；qemu：RSP z0 撤销 / Z0 重插
+  err_t (*snapshot)(BackendHandle*, Snapshot* s);      // L3；qemu = NULL（降级）
+  err_t (*restore)(BackendHandle*, const Snapshot* s); // L3；qemu = NULL（降级）
+};
+// CapLevel: 能力分级（3.2.4 表13 语义）
+enum CapLevel {
+  L1 = 1,   // 基础调试：执行控制/断点/寄存器内存/镜像与符号
+  L2 = 2,   // L1 + 指令/访存钩子（onInstruction / onAccess）
+  L3 = 3,   // L2 + snapshot/restore 与事件流检查点（FR-19）
+};
+// PauseInfo: 暂停信息（执行控制输出；同步语义：runUntil/step 返回即已暂停，
+//             reason 枚举无 RUNNING 值，17-4）
+struct PauseInfo {
+  uint8_t  reason;     // 暂停原因：0=runUntil 到点 / 1=step 完成 / 2=断点命中 / 3=异常 / 4=崩溃
+  uint32_t pc;         // 暂停时 PC
+  uint64_t time_virt;  // 暂停时虚拟时间（权威源 = M-12 虚拟时钟）
+};
+// HookTable / HookEvent: L2 钩子（仅自研 ISS 提供；QEMU 不支持 → 协商降级）
+struct Hook {                    // 钩子注册项（hookTable 元素，17-6）
+  uint8_t  pre;        // 阶段：1=执行前（可拦截暂停）/ 0=执行后（不拦截）
+  uint8_t  kind;       // 0=onInstruction（指令）/ 1=onAccess（访存）
+  int   (*fn)(HookEvent* ev, void* ctx);  // 返回：pre 阶段 1=拦截暂停（断点命中）；0=继续
+  void*    ctx;        // 注册时携带的上下文（断点 id/trace 通道/探针通道）
+};
+struct HookEvent {
+  uint32_t pc;         // 指令地址（onAccess 时 = 访问指令 PC）
+  uint32_t addr;       // 访存地址（onAccess；onInstruction 时 = 0）
+  uint8_t  width;      // 访存宽度（onAccess；onInstruction 时 = 0）
+  uint8_t  dir;        // 访存方向（0=读 / 1=写）
+  uint8_t  pre;        // 触发阶段（同 Hook.pre，供回调自识别）
+};</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 能力分级与双内核矩阵</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:30%"><col style="width:12%"><col style="width:12%"><col style="width:14%"><col style="width:18%"><col style="width:14%"></colgroup><thead><tr><th style="width:30%;text-align:center">能力</th><th style="width:12%;text-align:center">L1 基础调试</th><th style="width:12%;text-align:center">L2 +指令钩子</th><th style="width:14%;text-align:center">L3 +快照/检查点</th><th style="width:18%;text-align:center">自研 ISS（M-13）</th><th style="width:14%;text-align:center">QEMU（P1）</th></tr></thead><tbody><tr class="row0"><td style="text-align:left">执行控制 reset/runUntil/step/stepSource</td><td style="text-align:center">√</td><td style="text-align:center">√</td><td style="text-align:center">√</td><td style="text-align:left">全量（时间精确）</td><td style="text-align:left">√（runUntil 尽力而为，17-2）</td></tr><tr class="row1"><td data-label="能力" style="text-align:left">断点 setBreakpoint / bpControl</td><td data-label="L1" style="text-align:center">√</td><td data-label="L2" style="text-align:center">√</td><td data-label="L3" style="text-align:center">√</td><td data-label="自研 ISS" style="text-align:left">指令钩子实现（支持 cond）+ 生命周期管理（v1.2）</td><td data-label="QEMU（P1）" style="text-align:left">RSP Z0/z0（cond 降级无条件 + 提示，17-9）</td></tr><tr class="row0"><td data-label="能力" style="text-align:left">寄存器/内存 readReg/writeReg/readMem/writeMem</td><td data-label="L1" style="text-align:center">√</td><td data-label="L2" style="text-align:center">√</td><td data-label="L3" style="text-align:center">√</td><td data-label="自研 ISS" style="text-align:left">直接访问</td><td data-label="QEMU（P1）" style="text-align:left">RSP 寄存器/内存命令</td></tr><tr class="row1"><td data-label="能力" style="text-align:left">镜像与符号 loadELF/installSymbols</td><td data-label="L1" style="text-align:center">√</td><td data-label="L2" style="text-align:center">√</td><td data-label="L3" style="text-align:center">√</td><td data-label="自研 ISS" style="text-align:left">段加载</td><td data-label="QEMU（P1）" style="text-align:left">RSP load</td></tr><tr class="row0"><td data-label="能力" style="text-align:left">指令/访存钩子 onInstruction/onAccess</td><td data-label="L1" style="text-align:center">—</td><td data-label="L2" style="text-align:center">√</td><td data-label="L3" style="text-align:center">√</td><td data-label="自研 ISS" style="text-align:left">仅自研 ISS（评审 H3）</td><td data-label="QEMU（P1）" style="text-align:left">不支持 → 降级</td></tr><tr class="row1"><td data-label="能力" style="text-align:left">快照 snapshot/restore</td><td data-label="L1" style="text-align:center">—</td><td data-label="L2" style="text-align:center">—</td><td data-label="L3" style="text-align:center">√</td><td data-label="自研 ISS" style="text-align:left">全量</td><td data-label="QEMU（P1）" style="text-align:left">不支持 → 降级</td></tr><tr class="row0"><td data-label="能力" style="text-align:left">总线 trace 底（M-18）</td><td data-label="L1" style="text-align:center">—</td><td data-label="L2" style="text-align:center">—</td><td data-label="L3" style="text-align:center">—</td><td data-label="自研 ISS" style="text-align:left">仅自研 ISS（评审 H3）</td><td data-label="QEMU（P1）" style="text-align:left">不支持</td></tr></tbody></table></div>
+    <p class="body">能力协商语义：会话创建时由 M-04/M-05 完成协商（后端类型 + capLevel），结果公布到 capBitsSet；前端（M-01~M-03）与调试服务按能力位降级——QEMU 下 trace/快照不可用，调用方降级并提示，横切组件接口保持不变（4.7 表86 能力降级规则）。</p>
+    <h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+    <p class="body">下行：M-08~M-11 调试服务经抽象接口代理 → ExecutionBackend 分发到具体实现（self_iss 直接访问 / qemu RSP 命令）；上行：执行控制输出 PauseInfo（原因/PC/虚拟时间）；观测：L2 钩子（onInstruction/onAccess）→ M-18 探针/trace（仅自研 ISS）；记录：后端异常日志 → M-21；快照：snapshot/restore → M-20 事件流与检查点（L3）。</p>
+    <h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 抽象接口与代理分发</h3>
+<p class="body">调试服务只面对抽象接口（3.2.4 表13）：所有调试调用经 BackendHandle.vtable 分发到具体实现；调用方不感知 self_iss 与 qemu 的实现差异。执行控制输出统一为 PauseInfo（原因/PC/虚拟时间）。两条执行路径语义分离（17-1）：runUntil = 时间驱动（推进至虚拟时间 t，同步返回即暂停）；step = 指令驱动（执行 1 条后暂停）。伪代码如下：</p>
+<pre class="code"><code>// exec_runUntil: 执行控制代理（时间驱动；M-08~M-11 → 抽象接口）
+PauseInfo exec_runUntil(BackendHandle* b, uint64_t t, err_t* err) {
+    if (b-&gt;state != READY &amp;&amp; b-&gt;state != PAUSED) { *err = E_CTX-02; return (PauseInfo){0}; }  // 暂停态外调用拒绝
+    PauseInfo p = b-&gt;vtable.runUntil(b, t);   // 同步调用：返回即已暂停（self_iss：M-12 事件驱动推进至 t；
+                                              //  qemu：尽力而为，时间不保证精确，17-2）
+    b-&gt;lastPause = p; b-&gt;state = PAUSED;      // reason 枚举见 2.1.1（无 RUNNING，同步语义，17-4）
+    *err = OK; return p;
+}
+// exec_step: 指令级单步 —— 直接代理 vtable.step（指令驱动，与 runUntil 分离，17-1）
+PauseInfo exec_step(BackendHandle* b, err_t* err) {
+    if (b-&gt;state != READY &amp;&amp; b-&gt;state != PAUSED) { *err = E_CTX-02; return (PauseInfo){0}; }
+    PauseInfo p = b-&gt;vtable.step(b);          // self_iss：iss_step 执行 1 条后暂停；qemu：RSP &#x27;s&#x27;
+    b-&gt;lastPause = p; b-&gt;state = PAUSED; *err = OK; return p;
+}
+// exec_stepSource: 源码级单步 —— 按行映射推进（无映射降级为 step + 提示，M-09；QEMU 同理，17-2）
+PauseInfo exec_stepSource(BackendHandle* b, const LineMap* map, err_t* err) {
+    ... // self_iss：沿行边界多次 step；qemu：step 近似（行映射缺失降级）
+}
+// exec_readReg: 寄存器读取代理（含 CSR/PC）
+err_t exec_readReg(BackendHandle* b, const char* name, uint32_t* out) {
+    if (!(b-&gt;capBits &amp; CAP_REG)) return E_CTX-03;  // 能力不足拒绝（QEMU 下寄存器可用，L1）
+    return b-&gt;vtable.readReg(b, name, out);        // self_iss：直接读 regFile/CSR；qemu：RSP &#x27;p&#x27; 命令
+}
+// exec_setBreakpoint: 断点代理（17-5/17-9）
+err_t exec_setBreakpoint(BackendHandle* b, uint32_t addr, CondFn cond, BpId* id) {
+    if (b-&gt;capLevel &lt; L2 || cond == NULL) return b-&gt;vtable.bp(b, addr, id);      // qemu：RSP Z0（无条件）
+    return b-&gt;vtable.bpHook(b, addr, cond, id);      // self_iss：L2 条件断点（指令钩子实现）
+    // QEMU 下传 cond：降级为无条件断点 + WARN 日志（17-9），由 qemu_bp 内部处理
+}
+// exec_bpControl: 断点生命周期代理（08-2 联动，v1.2：M-08 remove/enable/disable 统一入口）
+err_t exec_bpControl(BackendHandle* b, BpId id, uint8_t op) {   // op：0=REMOVE / 1=ENABLE / 2=DISABLE
+    if (b-&gt;vtable.bpControl == NULL) return E_CTX-03;           // 能力不足拒绝（L1 基础能力，不应发生）
+    return b-&gt;vtable.bpControl(b, id, op);                      // self_iss：hookTable 操作；qemu：RSP z0/Z0
+}</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 自研 ISS 适配（M-13，全量 L3）</h3>
+<p class="body">MVP 主实现：自研 ISS（WASM）直接承接执行后端——执行控制代理到 M-12/M-13（事件驱动推进、量子边界采样），寄存器/内存直接访问（M-13 regFile/CSR、M-14 总线），断点用 L2 指令钩子实现（M-08 PC 命中优先于全量回调，性能基线 0.5–1 MIPS 调试态）。钩子调用点（17-6）：onInstruction 在 M-13 译码后（pre=1，执行前）与指令执行完成后（pre=0，执行后）两处调用——pre 钩子可返回拦截（断点命中语义，指令不执行）；post 钩子不拦截，供 trace/覆盖率；onAccess 在 M-14 访存路径调用（读/写事件，不拦截）。钩子按需注册（hookTable），未注册路径零开销。快照（L3）：snapshot/restore 序列化 regFile/CSR/pc/privMode（M-13）+ 内存/映射（M-14）+ 外设状态（M-15），经 M-20 契约上链。伪代码如下：</p>
+<pre class="code"><code>// self_iss 实现表（vtable 绑定到 M-13/M-12/M-14 具体接口）
+static BackendVtbl iss_vtable = {
+    .runUntil  = iss_runUntil,    // → M-12 事件驱动推进至虚拟时间 t（量子配额 + 事件分发）
+    .step      = iss_step,        // → M-13 执行 1 条指令后暂停（指令驱动，17-1）
+    .readReg   = iss_readReg,     // → M-13 regFile/CSR 直读（含 PC）
+    .writeReg  = iss_writeReg,    // → M-13 直写（暂停态）
+    .readMem   = iss_readMem,     // → M-14 bus_read（未映射 → E_BUS-01 上报）
+    .writeMem  = iss_writeMem,    // → M-14 bus_write
+    .loadELF   = iss_loadELF,     // → M-13 段加载（对齐 M-06 解析结果）
+    .bp        = iss_bp,          // 无条件断点（内部登记 hookTable，pre=1 拦截）
+    .bpHook    = iss_bpHook,      // 条件断点（cond 判定在钩子回调内完成）
+    .bpControl = iss_bpControl,   // 断点生命周期：hookTable 移除 / 钩子启用位（08-2 联动，v1.2）
+    .snapshot  = iss_snapshot,    // → 序列化 regFile/CSR/pc/privMode → M-20 契约
+    .restore   = iss_restore,     // → 恢复 + 清缓存（decodedCache 按 pc 失效）
+};
+// L2 钩子调用点（M-13 执行流程，17-6）：
+//   pre（pre=1）：译码后、指令执行前调用；fn 返回 1 = 拦截暂停（断点命中语义，指令不执行）
+//   post（pre=0）：指令执行完成后调用；不拦截（trace/覆盖率）
+//   onAccess：M-14 访存路径调用（读/写事件，不拦截）
+void iss_onInstruction(uint32_t pc, uint8_t pre, HookEvent* ev) {
+    if (!hookTable.has(pc)) return;              // 未注册地址零开销（PC 命中优先，评审 H3）
+    for (hook : hookTable[pc]) {
+        if (hook.pre != pre) continue;           // 按阶段过滤（pre=0/1 分列，17-6）
+        int stop = hook.fn(&amp;ev, hook.ctx);
+        if (pre &amp;&amp; stop) { pause(bp_hit, pc); return; }  // pre 拦截：暂停，指令不执行
+    }
+}
+// 钩子注册（onInstruction/onAccess）：hookTable[pc] / hookTable[addr] 追加；
+// 断点地址禁止缓存解码（自修改代码场景，对齐 M-13 缓存失效策略）
+// iss_bpControl: 断点生命周期（08-2 联动，v1.2；op：0=REMOVE / 1=ENABLE / 2=DISABLE）
+err_t iss_bpControl(BackendHandle* b, BpId id, uint8_t op) {
+    BreakpointRec* r = bpRecTable[id];                 // 断点注册记录（addr/cond/钩子句柄）
+    if (r == NULL) return E_CTX-07;                    // 无效断点 id
+    if (op == REMOVE) {
+        hookTable_remove(r-&gt;addr, r-&gt;hookHandle);      // 移除钩子（断点地址解除拦截）
+        bpRecTable.erase(id);                          // 注销记录
+    } else {
+        hookTable[r-&gt;addr].enabled = (op == ENABLE);   // 钩子启用位（停用不命中、保留注册）
+    }
+    return OK;
+}</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 QEMU 适配（P1，L1 子集）</h3>
+<p class="body">QEMU 后端为服务端可选实现（进程隔离，合规 R2/R5）：子进程 + 标准 GDB RSP 承载调试命令、QMP 承载控制/监控；只映射 L1 子集（执行控制/断点/寄存器内存/镜像符号），L2/L3 能力不声明 → 协商降级（E_CTX-03）。QEMU 交互仅标准协议、不改源码。三条契约差异（17-2/17-3/17-9）：runUntil(t) 为尽力而为（RSP vCont 无虚拟时间语义，运行至事件/断点或步进近似，时间不保证精确）；崩溃恢复 = 重启会话 + 输入事件重放至崩溃前虚拟时间（重执行式，QEMU 无状态快照可序列化）；条件断点 cond 降级为无条件 + WARN 提示。命令映射与会话生命周期如下：</p>
+<pre class="code"><code>// qemu 实现表（P1）：RSP/QMP 命令映射（仅标准协议，不改 QEMU 源码）
+static BackendVtbl qemu_vtable = {
+    .runUntil = qemu_runUntil,   // 尽力而为（17-2）：RSP &#x27;vCont&#x27; 续跑 + QMP 暂停；
+                                 //   语义 = 运行至事件/断点或步进近似，t 不保证精确
+    .step     = qemu_step,       // RSP &#x27;s&#x27; 单步（指令驱动，精确）
+    .readReg  = qemu_readReg,    // RSP &#x27;p&lt;regno&gt;&#x27; 读寄存器（QEMU 寄存器编号表）
+    .writeReg = qemu_writeReg,   // RSP &#x27;P&lt;regno&gt;=&lt;val&gt;&#x27; 写寄存器
+    .readMem  = qemu_readMem,    // RSP &#x27;m&lt;addr&gt;,&lt;len&gt;&#x27; 读内存
+    .writeMem = qemu_writeMem,   // RSP &#x27;M&lt;addr&gt;,&lt;len&gt;:&lt;hex&gt;&#x27; 写内存
+    .loadELF  = qemu_loadELF,    // RSP &#x27;vFile&#x27; 镜像加载
+    .bp       = qemu_bp,         // RSP &#x27;Z0&#x27; 软件断点 / &#x27;z0&#x27; 撤销
+                                 // cond 非空 → 降级为无条件断点 + WARN 日志（17-9）
+    .bpControl = qemu_bpControl, // 断点生命周期（08-2 联动，v1.2）：REMOVE → RSP &#x27;z0&#x27; 撤销；
+                                 //   ENABLE → 按记录的 addr 重发 &#x27;Z0&#x27; 重插；DISABLE → &#x27;z0&#x27; 撤销
+    .snapshot = NULL,            // 不声明 → 降级（L3 不可用）
+};
+// 能力声明（QEMU）：capBits = L1 位集；onInstruction/onAccess/snapshot 位清零
+// 降级路径：调试服务调用 L2/L3 接口 → E_CTX-03 拒绝 + capBitsSet 公布 → 前端隐藏/降级提示
+// 崩溃恢复（17-3）：QEMU 无 L3 快照 → 恢复 = 重启子进程 + 输入事件重放至崩溃前
+//   虚拟时间（重执行式，无状态快照基）；自研 ISS 才走 M-20 检查点 + 重放（4.4.6.5）
+// 会话生命周期（17-8）：
+//   启动：spawn + RSP 握手（qSupported），超时 3s → E_CTX-03（实例化失败）
+//   无响应：命令超时 500ms → 判定失联 → 重启子进程 + 重载镜像（≤1 次重连）
+//   协议错误：RSP 校验失败 → 丢弃重发（幂等命令）或终止会话上报
+//   崩溃：退出码非零 / pipe 断开 → HMS report + 重启会话 + 重放</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 能力协商与降级</h3>
+<p class="body">会话创建 → 能力协商（后端类型 + capLevel，M-04/M-05 完成）→ 实例化实现 → 调试服务经抽象代理；能力不足处前端按能力位降级（如 QEMU 下 trace/快照不可用，4.4.6.4）。降级语义：能力位在 capBitsSet 公布，调用方（M-08~M-11、M-18、M-20）按位判断；越权调用 → E_CTX-03 拒绝 + 协商降级提示；横切组件接口保持不变（4.7 表86 能力降级规则）。</p>
+<h3 id="sec3-5" class="h-sub">3.5 与真实硬件 / 双内核的差异对照表</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:14%"><col style="width:30%"><col style="width:32%"><col style="width:24%"></colgroup><thead><tr><th style="width:14%;text-align:center">维度</th><th style="width:30%;text-align:center">双内核差异</th><th style="width:32%;text-align:center">本平台建模</th><th style="width:24%;text-align:center">差异影响</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">内核实现</td><td style="text-align:left">真实处理器；QEMU 为准全系统模拟</td><td style="text-align:left">自研 ISS（WASM，L3）/ QEMU（进程隔离，L1）</td><td style="text-align:left">调试语义一致；QEMU 仅 L1 子集，L2/L3 降级</td></tr><tr class="row1"><td data-label="差异维度" style="text-align:center">执行控制</td><td data-label="双内核差异" style="text-align:left">硬件时钟驱动</td><td data-label="本平台建模" style="text-align:left">M-12 事件驱动虚拟时间推进（runUntil(t)）</td><td data-label="差异影响" style="text-align:left">self_iss 时间以虚拟时钟为权威；QEMU 下 runUntil 尽力而为（17-2），step 精确</td></tr><tr class="row0"><td data-label="差异维度" style="text-align:center">断点</td><td data-label="双内核差异" style="text-align:left">硬件调试寄存器</td><td data-label="本平台建模" style="text-align:left">self_iss：L2 指令钩子；qemu：RSP Z0</td><td data-label="差异影响" style="text-align:left">命中语义一致；self_iss 支持条件断点（cond）；QEMU 下 cond 降级无条件 + 提示（17-9）；生命周期（启停/移除）经 bpControl 统一（08-2 联动，v1.2）</td></tr><tr class="row1"><td data-label="差异维度" style="text-align:center">寄存器/内存</td><td data-label="双内核差异" style="text-align:left">真实寄存器/物理内存</td><td data-label="本平台建模" style="text-align:left">self_iss 直接访问；qemu RSP 命令</td><td data-label="差异影响" style="text-align:left">读写一致；未映射访存 → E_BUS-01 上报</td></tr><tr class="row0"><td data-label="差异维度" style="text-align:center">指令钩子/快照</td><td data-label="双内核差异" style="text-align:left">无对应（调试器层面）</td><td data-label="本平台建模" style="text-align:left">仅自研 ISS（评审 H3）；QEMU 不支持</td><td data-label="差异影响" style="text-align:left">trace/快照仅 L3 后端可用，前端按能力位降级</td></tr><tr class="row1"><td data-label="差异维度" style="text-align:center">GPL 合规</td><td data-label="双内核差异" style="text-align:left">QEMU GPL</td><td data-label="本平台建模" style="text-align:left">进程隔离 + 标准 RSP/QMP，不改源码（评审 M5）</td><td data-label="差异影响" style="text-align:left">无 GPL 传染；差分对拍限指令级 + 内存语义（17-7），外设场景平台自测</td></tr></tbody></table></div>
+    
+<h2 id="sec4" class="h-sec">4 关键函数</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:18%"><col style="width:56%"></colgroup><thead><tr><th style="width:26%;text-align:center">函数</th><th style="width:18%;text-align:center">说明</th><th style="width:56%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">negotiateCap(type, cfg)</td><td style="text-align:left">能力协商</td><td style="text-align:left">输入：后端类型/配置；输出：capLevel + capBitsSet（公布到 M-04/M-05）；QEMU 声明 L1 子集</td></tr><tr class="row1"><td style="text-align:center">instantiateBackend(type, cfg)</td><td style="text-align:left">实例化实现</td><td style="text-align:left">输入：类型/配置；输出：BackendHandle；self_iss 绑定 vtable / qemu 启动子进程（P1）；失败 → E_CTX-03</td></tr><tr class="row0"><td style="text-align:center">reset(cfg)</td><td style="text-align:left">复位到初始态</td><td style="text-align:left">代理 vtable；输出：确认（self_iss：重载镜像 + 清缓存）</td></tr><tr class="row1"><td style="text-align:center">runUntil(t)</td><td style="text-align:left">连续执行至虚拟时间 t</td><td style="text-align:left">代理 vtable（时间驱动）；输出：PauseInfo；暂停态外调用 → E_CTX-02；QEMU 下尽力而为（17-2，时间不保证精确）</td></tr><tr class="row0"><td style="text-align:center">step() / stepSource()</td><td style="text-align:left">指令级/源码级单步</td><td style="text-align:left">step 直接代理 vtable.step（指令驱动，17-1）；stepSource 按行映射推进（无映射降级为 step + 提示，M-09）；输出：PauseInfo</td></tr><tr class="row1"><td style="text-align:center">setBreakpoint(addr, cond)</td><td style="text-align:left">断点注册</td><td style="text-align:left">self_iss：L2 指令钩子（支持 cond）；qemu：RSP Z0（cond 降级无条件 + 提示，17-9）；输出：断点 id；无效/重复 → E_CTX-07</td></tr><tr class="row0"><td style="text-align:center">bpControl(id, op)</td><td style="text-align:left">断点生命周期（08-2 联动，v1.2）</td><td style="text-align:left">op：0=REMOVE / 1=ENABLE / 2=DISABLE；self_iss：hookTable 移除/启用位；qemu：RSP z0 撤销 / Z0 重插；无效 id → E_CTX-07</td></tr><tr class="row1"><td style="text-align:center">readReg(name) / writeReg(name, value)</td><td style="text-align:left">寄存器读写（含 CSR/PC）</td><td style="text-align:left">self_iss 直访；qemu RSP p/P 命令；输出：值/确认（未映射访存 → E_BUS-01 上报）</td></tr><tr class="row0"><td style="text-align:center">readMem(addr, width) / writeMem(addr, width, value)</td><td style="text-align:left">内存读写</td><td style="text-align:left">self_iss：M-14 总线；qemu：RSP m/M 命令；输出：值/确认</td></tr><tr class="row1"><td style="text-align:center">loadELF(binary) / installSymbols(dwarf)</td><td style="text-align:left">镜像与元数据安装</td><td style="text-align:left">self_iss：段加载；qemu：RSP vFile；符号表安装供源码联动（FR-05）</td></tr><tr class="row0"><td style="text-align:center">onInstruction / onAccess (hook)</td><td style="text-align:left">钩子注册（L2）</td><td style="text-align:left">仅自研 ISS；按需注册（hookTable）；断点/trace/探针/覆盖率复用；QEMU → 降级</td></tr><tr class="row1"><td style="text-align:center">snapshot() / restore()</td><td style="text-align:left">全状态快照/恢复（L3）</td><td style="text-align:left">仅自研 ISS；序列化 regFile/CSR/pc/privMode + 总线映射 + 外设状态，经 M-20 契约；QEMU → 降级</td></tr></tbody></table></div>
+<p class="body">说明：negotiateCap → instantiateBackend 构成「协商 → 实例化」装配；此后调试服务（M-08~M-11）只面对 BackendHandle 抽象代理；能力不足调用统一 E_CTX-03 拒绝 + 协商降级提示。</p>
+
+<h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 能力协商与实例化流程</h3>
+<p class="body">（1）会话创建：M-04 装配 role/配额，capBitsSet 预留供前端查询。</p>
+<p class="body">（2）能力协商：M-05 完成 backendType + capLevel 协商（4.4.6.4）；QEMU 声明 L1 子集。</p>
+<p class="body">（3）实例化：instantiateBackend 创建 BackendHandle（self_iss 绑定 vtable / qemu 启动子进程），失败 → E_CTX-03 上报。</p>
+<p class="body">（4）代理访问：调试服务只面对抽象接口；能力不足调用 → E_CTX-03 拒绝 + 协商降级提示（4.4.6.5）。</p>
+<div class="fig"><svg class="flow-svg" viewBox="0 0 980 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-17 能力协商与实例化流程">
+<defs>
+<marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#4b5563"/></marker>
+<marker id="arrd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#9aa1af"/></marker>
+</defs>
+<rect x="60" y="46" width="360" height="80" rx="10" fill="#f1f4f9" stroke="#1e3a8a" stroke-width="1.5"/>
+<text x="240" y="70" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">① 会话创建（M-04）</text>
+<text x="240" y="94" text-anchor="middle" font-size="12.5" fill="#4b5563">role 装配 / 配额检查 / 会话上下文就绪</text>
+<text x="240" y="112" text-anchor="middle" font-size="12.5" fill="#4b5563">capBitsSet 预留（前端可查）</text>
+<line x1="240" y1="126" x2="240" y2="158" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arr)"/>
+<rect x="60" y="158" width="360" height="80" rx="10" fill="#f1f4f9" stroke="#1e3a8a" stroke-width="1.5"/>
+<text x="240" y="182" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">② 能力协商（M-05 / negotiateCap）</text>
+<text x="240" y="206" text-anchor="middle" font-size="12.5" fill="#4b5563">backendType（self_iss / qemu）</text>
+<text x="240" y="224" text-anchor="middle" font-size="12.5" fill="#4b5563">capLevel：L1 / L2 / L3（qemu 声明 L1 子集）</text>
+<line x1="240" y1="238" x2="240" y2="270" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arr)"/>
+<rect x="60" y="270" width="360" height="80" rx="10" fill="#f1f4f9" stroke="#1e3a8a" stroke-width="1.5"/>
+<text x="240" y="294" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">③ 实例化实现（instantiateBackend）</text>
+<text x="240" y="318" text-anchor="middle" font-size="12.5" fill="#4b5563">self_iss：绑定 vtable（WASM 内，L3）</text>
+<text x="240" y="336" text-anchor="middle" font-size="12.5" fill="#4b5563">qemu（P1）：启动子进程 + RSP/QMP 会话</text>
+<line x1="240" y1="350" x2="240" y2="382" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arr)"/>
+<rect x="60" y="382" width="360" height="80" rx="10" fill="#f1f4f9" stroke="#1e3a8a" stroke-width="1.5"/>
+<text x="240" y="406" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">④ 调试服务经抽象代理（M-08~M-11）</text>
+<text x="240" y="430" text-anchor="middle" font-size="12.5" fill="#4b5563">run/step/hook/寄存器/内存/快照</text>
+<text x="240" y="448" text-anchor="middle" font-size="12.5" fill="#4b5563">能力不足调用 → E_CTX-03 拒绝</text>
+<rect x="520" y="158" width="400" height="140" rx="10" fill="#fef3e2" stroke="#b45309" stroke-width="1.5"/>
+<text x="720" y="182" text-anchor="middle" font-size="14" font-weight="700" fill="#b45309">降级分支：QEMU（P1）声明 L1 子集</text>
+<text x="720" y="204" text-anchor="middle" font-size="12.5" fill="#6b7280">L2/L3（指令钩子/快照）能力位清零</text>
+<text x="720" y="222" text-anchor="middle" font-size="12.5" fill="#6b7280">调用方按 capBitsSet 降级（trace/快照隐藏）</text>
+<text x="720" y="240" text-anchor="middle" font-size="12.5" fill="#6b7280">横切组件接口保持不变（4.7 表86）</text>
+<text x="720" y="258" text-anchor="middle" font-size="12.5" fill="#6b7280">崩溃 → HMS report + 检查点/重放恢复</text>
+<line x1="420" y1="198" x2="520" y2="198" stroke="#9aa1af" stroke-width="1.5" marker-end="url(#arrd)"/>
+<line x1="420" y1="422" x2="520" y2="422" stroke="#9aa1af" stroke-width="1.5" marker-end="url(#arrd)"/>
+<text x="470" y="190" text-anchor="middle" font-size="11.5" fill="#9aa1af">若 qemu</text>
+<text x="470" y="416" text-anchor="middle" font-size="11.5" fill="#9aa1af">降级提示</text>
+</svg>
+
+<div class="flow-step"><span class="num">1</span><span class="txt">会话创建（M-04）：role 装配 / 配额检查 / 会话上下文就绪；capBitsSet 预留</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">2</span><span class="txt">能力协商（M-05 / negotiateCap）：backendType（self_iss / qemu）；capLevel L1/L2/L3（qemu 声明 L1 子集）</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">3</span><span class="txt">实例化实现（instantiateBackend）：self_iss 绑定 vtable（WASM 内，L3）；qemu（P1）启动子进程 + RSP/QMP 会话</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">4</span><span class="txt">调试服务经抽象代理（M-08~M-11）：run/step/hook/寄存器/内存/快照；能力不足调用 → E_CTX-03 拒绝</span></div>
+<div class="flow-branch">降级分支：QEMU（P1）声明 L1 子集——L2/L3（指令钩子/快照）能力位清零，调用方按 capBitsSet 降级（trace/快照隐藏），横切组件接口保持不变（4.7 表86）；崩溃 → HMS report + 检查点/重放恢复</div>
+<figcaption>图 1 · M-17 能力协商与实例化流程</figcaption></div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:18%"><col style="width:34%"><col style="width:48%"></colgroup><thead><tr><th style="width:18%;text-align:center">协作模块</th><th style="width:34%;text-align:center">接口</th><th style="width:48%;text-align:center">时机与说明</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-04 / M-05</td><td style="text-align:left">negotiateCap（能力协商）</td><td style="text-align:left">会话创建时协商后端类型 + capLevel；capBitsSet 公布（4.4.6.4）</td></tr><tr class="row1"><td data-label="协作模块" style="text-align:center">M-08~M-11（调试服务）</td><td data-label="接口" style="text-align:left">抽象接口（3.2.4 表13）</td><td data-label="时机与说明" style="text-align:left">run/step/hook/寄存器/内存/快照经代理分发；消费方只面对抽象（4.4.6.1）</td></tr><tr class="row0"><td data-label="协作模块" style="text-align:center">M-13（自研 ISS）</td><td data-label="接口" style="text-align:left">实现表（vtable）</td><td data-label="时机与说明" style="text-align:left">MVP 主实现：执行控制代理到 M-12/M-13；寄存器/内存直接访问（4.4.6.3）</td></tr><tr class="row1"><td data-label="协作模块" style="text-align:center">M-18（探针）</td><td data-label="接口" style="text-align:left">onInstruction/onAccess（L2）</td><td data-label="时机与说明" style="text-align:left">指令/访存钩子供探针与总线 trace（仅自研 ISS，评审 H3；4.7 表86）</td></tr><tr class="row0"><td data-label="协作模块" style="text-align:center">M-20（快照/事件流）</td><td data-label="接口" style="text-align:left">snapshot()/restore()（L3）</td><td data-label="时机与说明" style="text-align:left">全状态快照与检查点重放（FR-19；RPO ≤2s，8 章表93）</td></tr><tr class="row1"><td data-label="协作模块" style="text-align:center">M-21（日志）</td><td data-label="接口" style="text-align:left">log(level, ctx, msg, errCode)</td><td data-label="时机与说明" style="text-align:left">后端异常/崩溃日志上报（对接见 9.2）</td></tr></tbody></table></div>
+
+<h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:22%"><col style="width:34%"><col style="width:44%"></colgroup><thead><tr><th style="width:22%;text-align:center">错误码</th><th style="width:34%;text-align:center">含义</th><th style="width:44%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">E_CTX-02</td><td style="text-align:left">暂停态外调用（单步/断点等在非暂停态执行）</td><td style="text-align:left">拒绝执行并返回错误码；调试服务提示先暂停（3.4 表16）</td></tr><tr class="row1"><td data-label="错误码" style="text-align:center">E_CTX-03</td><td data-label="含义" style="text-align:left">能力不足（QEMU 下调用 L2/L3 能力）</td><td data-label="处置" style="text-align:left">拒绝 + 协商降级提示；capBitsSet 公布，前端按位降级（3.4 表16）</td></tr><tr class="row0"><td data-label="错误码" style="text-align:center">E_CTX-07</td><td data-label="含义" style="text-align:left">断点注册失败（无效地址/重复注册）</td><td data-label="处置" style="text-align:left">拒绝注册并返回错误码；重复注册幂等处理</td></tr><tr class="row1"><td data-label="错误码" style="text-align:center">E_BUS-01</td><td data-label="含义" style="text-align:left">未映射地址访存（readMem/writeMem 代理）</td><td data-label="处置" style="text-align:left">由 M-14 抛访存异常事件（guest trap 语义），非平台故障</td></tr><tr class="row0"><td data-label="错误码" style="text-align:center">QEMU 崩溃（平台故障）</td><td data-label="含义" style="text-align:left">子进程异常退出</td><td data-label="处置" style="text-align:left">上报 HMS（E_CTX-xx &quot;backend crash&quot;）；恢复 = 重启会话 + 输入事件重放至崩溃前虚拟时间（重执行式，17-3；自研 ISS 才走 M-20 检查点 + 重放）</td></tr><tr class="row1"><td data-label="错误码" style="text-align:center">实例化失败</td><td data-label="含义" style="text-align:left">self_iss 装配失败 / qemu 子进程启动失败</td><td data-label="处置" style="text-align:left">E_CTX-03 上报 + 会话降级提示（4.4.6.5）</td></tr><tr class="row0"><td data-label="错误码" style="text-align:center">QEMU 会话失联/协议错误</td><td data-label="含义" style="text-align:left">命令超时 500ms 无响应 / RSP 校验失败</td><td data-label="处置" style="text-align:left">重启子进程 + 重载镜像（≤1 次重连）；协议错误丢弃重发或终止会话（17-8）</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）能力降级边界：QEMU 后端声明 L1 子集——指令钩子（onInstruction/onAccess）与快照（snapshot/restore）不可用，调用方（M-08~M-11、M-18、M-20）按 capBitsSet 降级；总线 trace 底仅自研 ISS 提供（评审 H3）。</p>
+<p class="body">（2）合规红线：QEMU 交互仅标准 RSP/QMP，不改 QEMU 源码；进程隔离避 GPL 传染（评审 M5，4.4.6.5）。</p>
+<p class="body">（3）确定性边界：执行控制输出（PauseInfo 虚拟时间）以 M-12 虚拟时钟为权威，不依赖宿主时钟（2.4 表6）；QEMU 下 runUntil 为尽力而为，虚拟时间不保证精确（17-2），前端按能力位提示。</p>
+<p class="body">（4）崩溃恢复边界：QEMU 子进程崩溃 = 平台故障（非 guest trap）；恢复 = 重启会话 + 输入事件重放至崩溃前虚拟时间（重执行式，QEMU 无状态快照可序列化，17-3）；自研 ISS 才走 M-20 检查点 + 重放；恢复前调试服务暂停并上报 HMS（4.4.6.5、8 章表93 韧性）。</p>
+<p class="body">（5）性能边界：调试态全钩子 ≥0.5–1 MIPS（估算基线）；钩子按需注册，未注册地址零开销；M-08 PC 命中优先于全量回调（8 章表93）。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表91（M-17 行）：测试要点 = 后端分级；关键用例 = L1/L2/L3 能力协商、QEMU 降级协商正确、降级明确。展开用例表如下（核心模块覆盖率 ≥70%，源文档 7.3 表92）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:20%"><col style="width:40%"><col style="width:40%"></colgroup><thead><tr><th style="width:20%;text-align:center">用例</th><th style="width:40%;text-align:center">输入 / 步骤</th><th style="width:40%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（源 2.5/7.1 对齐）</td><td style="text-align:left">按 9.1.1 端口契约表逐项校验 reset/runUntil/step/setBreakpoint/bpControl/readReg/readMem/loadELF/onInstruction/snapshot 的接口签名、输入校验、输出结构与错误码；替代实现（替代执行后端）接入前必须同端口契约测试全绿</td><td style="text-align:left">契约测试全绿；契约变更须同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">能力协商（表91）</td><td data-label="输入 / 步骤" style="text-align:left">分别以 self_iss / qemu 类型创建会话</td><td data-label="通过准则" style="text-align:left">self_iss 协商 L3（全量位）；qemu 协商 L1（L2/L3 位清零）；capBitsSet 公布正确</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">降级明确（表91）</td><td data-label="输入 / 步骤" style="text-align:left">qemu 后端调用 onInstruction / snapshot</td><td data-label="通过准则" style="text-align:left">E_CTX-03 拒绝 + 降级提示；调用方按位降级不崩溃</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">代理分发</td><td data-label="输入 / 步骤" style="text-align:left">经抽象接口分别调 self_iss / qemu 实现同一调试序列</td><td data-label="通过准则" style="text-align:left">输出一致（PauseInfo/寄存器/内存值）；差分对拍范围 = 指令级 + 内存语义（17-7），外设场景走平台自测</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">执行控制</td><td data-label="输入 / 步骤" style="text-align:left">runUntil(t) 推进；step 单步；暂停态外调用</td><td data-label="通过准则" style="text-align:left">PauseInfo 正确（原因/PC/虚拟时间）；E_CTX-02 拒绝正确</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">step 单步路径（17-10）</td><td data-label="输入 / 步骤" style="text-align:left">在断点/条件中断场景连续 step，断言暂停点</td><td data-label="通过准则" style="text-align:left">每次 step 恰执行 1 条指令后暂停（指令驱动，不因事件插入跳过/多步）；PauseInfo.reason=step 完成</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">QEMU runUntil 时间语义（17-10）</td><td data-label="输入 / 步骤" style="text-align:left">qemu 后端 runUntil(t) 与事件/断点并发</td><td data-label="通过准则" style="text-align:left">尽力而为语义成立：运行至事件/断点即返回（时间不精确，无悬空等待）；能力位提示正确</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">断点</td><td data-label="输入 / 步骤" style="text-align:left">PC/条件断点命中；无效地址/重复注册</td><td data-label="通过准则" style="text-align:left">命中准确、无副作用；E_CTX-07 拒绝正确（对齐 M-08 用例）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">断点生命周期 bpControl（08-2 联动）</td><td data-label="输入 / 步骤" style="text-align:left">注册后 REMOVE / ENABLE / DISABLE 三态操作并运行验证</td><td data-label="通过准则" style="text-align:left">REMOVE：命中不再触发、hookTable 移除；ENABLE/DISABLE：启用位即时生效（停用不命中）；无效 id → E_CTX-07（对齐 M-08 08-2/08-4）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">条件断点降级（17-10）</td><td data-label="输入 / 步骤" style="text-align:left">qemu 后端注册带 cond 断点</td><td data-label="通过准则" style="text-align:left">降级为无条件断点 + WARN 日志；命中行为与无条件一致</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">寄存器/内存</td><td data-label="输入 / 步骤" style="text-align:left">readReg/readMem 与 writeReg/writeMem 往返</td><td data-label="通过准则" style="text-align:left">读写一致；未映射访存 → E_BUS-01 上报（对齐 M-10 用例）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">钩子（L2）</td><td data-label="输入 / 步骤" style="text-align:left">注册 onInstruction/onAccess 后执行</td><td data-label="通过准则" style="text-align:left">钩子按需触发；未注册地址零开销</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">钩子 pre/post 触发点（17-10）</td><td data-label="输入 / 步骤" style="text-align:left">pre=1 断点钩子返回拦截；pre=0 trace 钩子执行后触发</td><td data-label="通过准则" style="text-align:left">pre 拦截：指令不执行、PauseInfo.reason=断点命中；post：指令执行后触发、不拦截（17-6）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">快照/恢复（L3）</td><td data-label="输入 / 步骤" style="text-align:left">推进至含复杂状态后 snapshot → 修改 → restore</td><td data-label="通过准则" style="text-align:left">恢复结果与快照点一致；缓存（decodedCache）随快照清理（对齐 M-13/M-20）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">确定性夹具</td><td data-label="输入 / 步骤" style="text-align:left">同种子 + 同输入序列（含断点/快照操作）跑两遍</td><td data-label="通过准则" style="text-align:left">执行轨迹（PC 序列/暂停点/虚拟时间）完全一致（2.4 表6）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">QEMU 崩溃恢复（P1 模拟）</td><td data-label="输入 / 步骤" style="text-align:left">模拟子进程异常退出</td><td data-label="通过准则" style="text-align:left">HMS report 上报；重启会话 + 输入事件重放至崩溃前虚拟时间，状态一致（17-3）</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）抽象隔离（8 章表93 可维护性）：调试服务只面对抽象接口，自研 ISS / QEMU 实现细节隔离在 vtable 之下，替换内核不改消费方。</p>
+<p class="body">（2）能力位协商内建：capBitsSet 单一事实源，前端/调试服务按位降级；新增能力位向后兼容（NFR-06 插件化）。</p>
+<p class="body">（3）钩子按需注册：hookTable 按地址/事件注册，未注册路径零开销；断点命中优先于全量回调（M-08，性能基线）。</p>
+<p class="body">（4）日志统一走 M-21：后端异常/崩溃 log 结构化入缓冲，不依赖临时打印。</p>
+<p class="body">（5）契约层可替换性（源 2.5 对齐）：本模块对外的 driving 端口收敛到 9.1.1 端口契约表，替代实现（替代执行后端）遵守同端口契约并通过契约测试即可接入，不改动既有会话与调试服务。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）与 4.7 表86 落到 M-17 责任：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:14%"><col style="width:30%"><col style="width:56%"></colgroup><thead><tr><th style="width:14%;text-align:center">质量属性</th><th style="width:30%;text-align:center">目标（估算基线）</th><th style="width:56%;text-align:center">M-17 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">性能</td><td style="text-align:left">调试态全钩子 ≥0.5–1 MIPS</td><td style="text-align:left">钩子按需注册 + M-08 PC 命中优先于全量回调；未注册路径零开销</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">可维护性</td><td data-label="目标" style="text-align:left">核心模块覆盖率 ≥70%；内核前端解耦；模块即积木可替换（源 2.5）</td><td data-label="M-17 落实" style="text-align:left">抽象隔离（调试服务只面对抽象）；能力位协商；端口契约测试（9.1.1）保障替代执行后端可接入</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">可扩展性</td><td data-label="目标" style="text-align:left">外设/内核/观测/协议扩展点</td><td data-label="M-17 落实" style="text-align:left">双内核（self_iss / QEMU）；多核/SMP（P2，FR-18）扩展预留</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">可靠性</td><td data-label="目标" style="text-align:left">确定性可复现（FR-12）；快照 RPO ≤2s、保留 ≥5</td><td data-label="M-17 落实" style="text-align:left">执行控制以 M-12 虚拟时钟为权威；snapshot/restore（L3）经 M-20 契约</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">韧性</td><td data-label="目标" style="text-align:left">故障检测→分级→处置→恢复（NFR-08）</td><td data-label="M-17 落实" style="text-align:left">QEMU 崩溃 → HMS 上报 + 重启会话/输入重放（17-3）；自研 ISS 走 M-20 检查点 + 重放；能力不足降级不崩溃</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">合规</td><td data-label="目标" style="text-align:left">不引入 GPL 传染</td><td data-label="M-17 落实" style="text-align:left">自研 BSD/MIT；QEMU 进程隔离 + 标准 RSP/QMP，不改源码（评审 M5）</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">可用性</td><td data-label="目标" style="text-align:left">GDB RSP 兼容（P1，FR-15）</td><td data-label="M-17 落实" style="text-align:left">QEMU 后端经 RSP 交互，标准协议承载调试命令</td></tr></tbody></table></div>
+
+<h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<p class="body">源设计 4.4.6.6：依赖 = M-04/M-05（能力协商）、M-13（自研实现）、M-08~M-11（消费方）、M-18（钩子供探针）、M-20（快照接口）、M-21（后端异常日志）。展开如下：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:28%"><col style="width:16%"><col style="width:56%"></colgroup><thead><tr><th style="width:28%;text-align:center">模块</th><th style="width:16%;text-align:center">方向</th><th style="width:56%;text-align:center">协作内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-04 / M-05</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">会话创建时能力协商（后端类型 + capLevel）；capBitsSet 公布（4.4.6.4）</td></tr><tr class="row1"><td style="text-align:center">M-13（自研 ISS）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">MVP 主实现：vtable 绑定 M-13/M-12/M-14 具体接口（执行控制/寄存器/内存/快照）</td></tr><tr class="row0"><td style="text-align:center">M-08~M-11（调试服务）</td><td style="text-align:left">使用方</td><td style="text-align:left">run/step/hook/寄存器/内存/快照抽象接口消费方（3.2.4 表13、4.4.6.6）</td></tr><tr class="row1"><td style="text-align:center">M-18（探针）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">onInstruction/onAccess 钩子供探针与总线 trace（仅自研 ISS，评审 H3；4.7 表86）</td></tr><tr class="row0"><td style="text-align:center">M-20（快照/事件流）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">snapshot/restore（L3）经快照接口契约（检查点重放，FR-19）</td></tr><tr class="row1"><td style="text-align:center">M-21（日志）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">后端异常/崩溃日志（对接见 9.2）</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表67→80 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层，本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现（替代执行后端）遵守同端口契约并通过契约测试（7.1）即可接入，无需改动其他模块：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:30%"><col style="width:14%"><col style="width:56%"></colgroup><thead><tr><th style="width:30%;text-align:center">端口 / 服务</th><th style="width:14%;text-align:center">方向</th><th style="width:56%;text-align:center">契约（输入 → 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:left">reset(cfg)/runUntil(t)/step()/stepSource()</td><td style="text-align:center">提供（driving）</td><td style="text-align:left">代理到具体实现；输出：PauseInfo（暂停原因/PC/虚拟时间）；暂停态外调用 → E_CTX-02；step 指令驱动（17-1）；QEMU 下 runUntil(t) 尽力而为，时间不保证精确（17-2）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">setBreakpoint(addr, cond)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">self_iss：指令钩子（支持 cond）；qemu：RSP 断点命令（cond 降级无条件 + 提示，17-9）；输出：断点 id；无效/重复 → E_CTX-07</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">bpControl(id, op)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">断点生命周期：op=REMOVE/ENABLE/DISABLE；self_iss：hookTable 移除/启用位；qemu：RSP z0/Z0；无效 id → E_CTX-07（08-2 联动，v1.2；对齐 M-08）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">readReg/writeReg/readMem/writeMem</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">self_iss：直接访问；qemu：RSP 内存/寄存器命令；未映射访存 → E_BUS-01 上报</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">loadELF(binary)/installSymbols(dwarf)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">self_iss：段加载；qemu：RSP load；符号表安装供源码联动（FR-05）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">onInstruction/onAccess</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">仅自研 ISS 提供（评审 H3）；QEMU 不支持 → 协商降级（E_CTX-03）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">snapshot()/restore()</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">仅自研 ISS 提供；QEMU 不支持 → 降级；序列化经 M-20 契约（L3）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-04 / M-05</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">能力协商（4.4.6.4）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-13</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">自研实现（vtable 绑定）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-08~M-11</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">消费方（抽象接口）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-18 / M-20 / M-21</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">钩子供探针 / 快照接口 / 后端异常日志（见 9.1）</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:50%"><col style="width:50%"></colgroup><thead><tr><th style="width:50%;text-align:center">时机</th><th style="width:50%;text-align:center">示例调用（ctx / level / errCode）</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">能力不足调用被拒</td><td style="text-align:left">log(WARN, &quot;BACKEND&quot;, &quot;cap insufficient&quot;, &quot;E_CTX-03&quot;)</td></tr><tr class="row1"><td data-label="时机" style="text-align:center">断点注册失败</td><td data-label="示例调用" style="text-align:left">log(WARN, &quot;BACKEND&quot;, &quot;bp register fail&quot;, &quot;E_CTX-07&quot;)</td></tr><tr class="row0"><td data-label="时机" style="text-align:center">暂停态外调用被拒</td><td data-label="示例调用" style="text-align:left">log(WARN, &quot;BACKEND&quot;, &quot;not paused&quot;, &quot;E_CTX-02&quot;)</td></tr><tr class="row1"><td data-label="时机" style="text-align:center">QEMU 崩溃（平台故障）</td><td data-label="示例调用" style="text-align:left">log(ERROR, &quot;BACKEND&quot;, &quot;qemu crash&quot;, &quot;E_CTX-xx&quot;)；HMS report 联动</td></tr><tr class="row0"><td data-label="时机" style="text-align:center">快照/恢复（L3）</td><td data-label="示例调用" style="text-align:left">log(INFO, &quot;BACKEND&quot;, &quot;snapshot ok&quot;, &quot;&quot;) / log(INFO, &quot;BACKEND&quot;, &quot;restore ok&quot;, &quot;&quot;)</td></tr></tbody></table></div>
+<p class="body">单向依赖与唯一入口规则（4.7 表86）：调试服务 → 抽象接口；横切组件接口保持不变，能力差异（QEMU 下 trace/快照不可用）由调用方按 M-17 能力位协商降级；日志、探针能力由 M-18/M-21 统一提供，本模块不得自行实现或绕过。</p>
+</main>
+</div>
+</body>
+</html>

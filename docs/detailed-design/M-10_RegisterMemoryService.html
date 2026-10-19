@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-10 寄存器/内存服务 模块详细设计</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%231e3a8a'/%3E%3Ctext x='12' y='17' font-size='13' text-anchor='middle' fill='%23ffffff' font-family='sans-serif' font-weight='bold'%3ER%3C/text%3E%3C/svg%3E">
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15px; font-weight:700; color:#374151; margin:18px 0 8px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { margin:0 0 10px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  white-space:pre; margin:10px 0 16px; }
+.code-title { font-size:13px; font-weight:700; color:#111827; margin:16px 0 4px; }
+.fig { margin:14px auto; text-align:center; }
+.fig img { max-width:100%; height:auto; border:1px solid var(--line); border-radius:4px; }
+.fig figcaption { font-size:13px; color:var(--ink-2); margin-top:6px; }
+.caption { text-align:center; font-size:13px; color:var(--ink-2); margin:6px 0 4px; }
+.flow-svg { width:100%; height:auto; }
+.flow-mobile { display:none; }
+.flow-step { display:flex; gap:10px; margin:8px 0; align-items:flex-start; }
+.flow-step .num { flex:0 0 26px; height:26px; border-radius:50%; background:var(--brand);
+  color:#fff; font-weight:700; font-size:13px; display:flex; align-items:center; justify-content:center; }
+.flow-step .txt { font-size:14px; }
+.flow-branch { margin:6px 0 6px 36px; font-size:13.5px; color:var(--ink-2); }
+.flow-arrow { text-align:center; color:#9aa1af; font-size:16px; line-height:1; margin:2px 0; }
+.nav-toggle { margin:14px 0; }
+.nav-toggle summary { cursor:pointer; font-weight:700; color:var(--brand);
+  padding:9px 12px; border:1px solid var(--line); border-radius:6px; background:var(--head-bg); list-style:none; }
+.nav-toggle summary::-webkit-details-marker { display:none; }
+.nav-box { display:flex; flex-direction:column; gap:2px; padding:10px 4px 2px; }
+.nav-l1 { color:var(--brand); font-weight:700; text-decoration:none; padding:3px 4px; }
+.nav-l2 { color:var(--ink-2); text-decoration:none; padding:3px 4px 3px 18px; font-size:13.5px; }
+.nav-l1:hover,.nav-l2:hover { color:var(--brand-2); text-decoration:underline; }
+@media (min-width:768px) {
+  .wrap { display:grid; grid-template-columns:260px 1fr; gap:28px; align-items:start; }
+  .wrap > * { min-width:0; }
+  main { min-width:0; }
+  .doc-head { grid-column:1 / -1; }
+  .nav-toggle { position:sticky; top:16px; max-height:calc(100vh - 32px); overflow:auto; }
+  .nav-toggle summary { pointer-events:none; }
+  .flow-svg { display:block; }
+  .flow-mobile { display:none; }
+}
+@media (max-width:767px) {
+  .flow-svg { display:none; }
+  .flow-mobile { display:block; }
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media print {
+  .nav-toggle { display:none; }
+  .wrap { display:block; max-width:none; padding:0; }
+  .doc-title { font-size:20px; }
+  .doc-table, .fig, .code { break-inside:avoid; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="doc-head"><h1 class="doc-title">M-10 寄存器/内存服务 模块详细设计</h1><p class="subtitle">RISC-V 仿真平台 · 模块详细设计系列 · 对应《模块设计说明书》4.3.3 节</p><p class="version">HTML 版 v1.0（2026-10-14）· 源设计《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11 契约层版，2026-10-13 更新）</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11；2026-10-13 契约层版新增 2.5 平台共享契约层与各模块端口契约表）</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.3.3（③ 调试服务层 · 寄存器/内存服务）；端口契约 = 源文档表46（数据描述 表44、关键函数 表45）；处理流程 = 4.3.3.4</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">FR-09（寄存器/内存查看修改）；FR-11（变量监视、手动读写，与 M-08 协作）；FR-05（源码联动，经视图刷新）</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">ExecutionBackend 抽象（3.2.4 表13）；simCache 暂停冻结；deltaQueue 节流 ≤200ms（表93 性能行）</td></tr><tr class="row0"><td style="text-align:center">MVP 状态</td><td style="text-align:left">P0 主承担模块（MVP 必需：寄存器/内存读写 + simStateDelta 节流推送）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；依赖方向（2.1 表5：调试服务 → M-17/M-05）；评审 P-05（watch 语义关联）</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.0（2026-10-14 初版）：按 M-13 v1.1 标准 9 章结构；内建 9.1.1 端口契约（源表46 对齐）+ CH7 契约测试 + CH8 模块即积木可替换；表号/图号引用源文档契约层版实际编号（表44/45/46、表16、表86、表91/93）；访存异常按 guest trap 语义（E_BUS-01 → 事件通道，非平台故障）；非幂等写版本校验（E_CTX-04）；deltaQueue 快照不移动游标（对齐 M-21 21-2）；跨模块一致：M-09 单步后刷新、M-08 断点冻结、M-03 消费 simStateDelta</td></tr><tr class="row1"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.1（2026-10-14 评审修订 10-1~10-11）：deltaQueue 改窗口累积+flush 单模型（10-1）；读路径不产增量（10-2）；新增 getWriteVersion+writeMem outVersion 版本通道（10-3）；MEM 增量按地址粒度（10-4）；访存失败改宿主侧事件非 guest trap+事件名 dbg_mem_fail（10-5/10-11）；单写者声明（10-6）；x0 忽略置 E_OK（10-7）；memPage LRU 命中/淘汰时机（10-8）；补读无增量/节流边界/LRU 三组用例（10-9）；契约补 CSR 白名单/width/SimStateDelta/outVersion（10-10）</td></tr><tr class="row0"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-14</td></tr></tbody></table></div></header><nav class="nav-toggle"><details open><summary>目录</summary><div class="nav-box"><a class="nav-l1" href="#sec1">1 功能概述</a>
+<a class="nav-l2" href="#sec1-1">1.1 模块定位</a>
+<a class="nav-l2" href="#sec1-2">1.2 需求与约束</a>
+<a class="nav-l2" href="#sec1-3">1.3 MVP 范围与预留</a>
+<a class="nav-l1" href="#sec2">2 数据描述</a>
+<a class="nav-l2" href="#sec2-1">2.1 核心数据结构</a>
+<a class="nav-l2" href="#sec2-1-1">2.1.1 复杂结构字段定义</a>
+<a class="nav-l2" href="#sec2-2">2.2 缓存与增量语义</a>
+<a class="nav-l2" href="#sec2-3">2.3 数据流说明</a>
+<a class="nav-l1" href="#sec3">3 实现设计</a>
+<a class="nav-l2" href="#sec3-1">3.1 readReg / writeReg 寄存器读写</a>
+<a class="nav-l2" href="#sec3-2">3.2 readMem / writeMem 内存读写</a>
+<a class="nav-l2" href="#sec3-3">3.3 getStateDelta / 节流推送</a>
+<a class="nav-l2" href="#sec3-4">3.4 与真实调试器的差异对照表</a>
+<a class="nav-l1" href="#sec4">4 关键函数</a>
+<a class="nav-l1" href="#sec5">5 处理流程</a>
+<a class="nav-l2" href="#sec5-1">5.1 读写与增量推送流程（源 4.3.3.4 对齐）</a>
+<a class="nav-l2" href="#sec5-2">5.2 与相邻模块的协作说明</a>
+<a class="nav-l1" href="#sec6">6 异常处理</a>
+<a class="nav-l2" href="#sec6-1">6.1 错误码与处置</a>
+<a class="nav-l2" href="#sec6-2">6.2 边界与降级</a>
+<a class="nav-l1" href="#sec7">7 测试设计与可维护性</a>
+<a class="nav-l2" href="#sec7-1">7.1 测试要点与关键用例</a>
+<a class="nav-l2" href="#sec7-2">7.2 可维护性手段</a>
+<a class="nav-l1" href="#sec8">8 质量属性落实</a>
+<a class="nav-l1" href="#sec9">9 接口依赖</a>
+<a class="nav-l2" href="#sec9-1">9.1 依赖关系</a>
+<a class="nav-l2" href="#sec9-1-1">9.1.1 端口契约（driving/driven）</a>
+<a class="nav-l2" href="#sec9-2">9.2 日志对接（M-21）</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-10 寄存器/内存服务（4.3.3）：提供通用寄存器 + CSR + PC 的读写与内存读写（暂停态，FR-09）；维护 SimState 缓存并按量子边界采样、节流 ≤200ms 推送 simStateDelta（4.3.3.1）。读写全部经 ExecutionBackend 抽象（M-17 readReg/writeReg/readMem/writeMem），M-10 不感知内核实现（2.1 表5：调试服务 → M-17）。</p>
+<p class="body">暂停态冻结保证视图一致（4.3.3.4）：命令 → ExecutionBackend 读写 → 更新缓存 → 增量入队 → 节流推送；非暂停态读写一律 E_CTX-02 拒绝。内存读写的未映射地址按宿主侧访存失败事件上报（等价 GDB 读失败语义，非平台故障、非 guest trap，4.3.3.5）；非幂等写带版本校验防冲突（writeMem 带版本/确认）。simStateDelta 供 M-03 View Store 消费渲染（寄存器/内存/波形刷新 ≤200ms 估算基线，表93 性能行）。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:62%"><col style="width:24%"></colgroup><thead><tr><th style="width:14%;text-align:center">类别</th><th style="width:62%;text-align:center">约束内容</th><th style="width:24%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">功能</td><td style="text-align:left">通用寄存器 + CSR + PC 读写；内存读写（暂停态，FR-09）</td><td style="text-align:left">4.3.3.1、FR-09</td></tr><tr class="row1"><td style="text-align:center">正确性</td><td style="text-align:left">读写全部经 M-17 抽象（readReg/writeReg/readMem/writeMem），不感知内核实现</td><td style="text-align:left">2.1 表5</td></tr><tr class="row0"><td style="text-align:center">状态约束</td><td style="text-align:left">暂停态冻结保证视图一致；非暂停态读写 → E_CTX-02 拒绝（3.4 表16）</td><td style="text-align:left">4.3.3.4、4.3.3.5</td></tr><tr class="row1"><td style="text-align:center">异常语义</td><td style="text-align:left">未映射地址 → 宿主侧访存失败事件（等价 GDB 读失败，非平台故障、非 guest trap）</td><td style="text-align:left">4.3.3.5</td></tr><tr class="row0"><td style="text-align:center">一致性</td><td style="text-align:left">非幂等写带版本校验防冲突（writeMem 带版本/确认）</td><td style="text-align:left">4.3.3.3、4.3.3.5</td></tr><tr class="row1"><td style="text-align:center">性能</td><td style="text-align:left">simStateDelta 量子边界采样 + 节流 ≤200ms 推送（估算基线，表93 性能行）</td><td style="text-align:left">4.3.3.1、表44、表93</td></tr><tr class="row0"><td style="text-align:center">角色边界</td><td style="text-align:left">寄存器/内存读写仅调试者角色会话可用；产品/嵌入式工作台只消费 delta（只读）</td><td style="text-align:left">2.4 表6、4.3.3.6</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：readReg(name) / writeReg(name, value)（含 CSR/PC）、readMem(addr, width) / writeMem(addr, width, value)（非幂等 + 版本校验）、getStateDelta()（deltaQueue 节流 ≤200ms 合并推送）、simCache（暂停冻结）、未映射 → 宿主侧访存失败事件、非暂停态 E_CTX-02 拒绝。</p>
+<p class="body">预留项（P1/P2 演进承接，不展开实现）：符号化读写（P1，符号名→地址解析，配合 M-11 DWARF/符号表）；批量内存读写（P1，多地址一次往返，调试大数组）；MMIO 寄存器视图联动（P1，配合 M-15 外设寄存器定义）；只读/写保护寄存器位掩码（P2，配合 M-13 CSR 语义）。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:20%"><col style="width:16%"><col style="width:64%"></colgroup><thead><tr><th style="width:20%;text-align:center">数据结构</th><th style="width:16%;text-align:center">类型</th><th style="width:64%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">simCache</td><td style="text-align:left">SimState</td><td style="text-align:left">寄存器/PC/内存页缓存（暂停冻结，4.3.3.2 表44）</td></tr><tr class="row1"><td style="text-align:center">deltaQueue</td><td style="text-align:left">queue</td><td style="text-align:left">待推送增量队列（节流 ≤200ms 合并，4.3.3.2 表44）</td></tr><tr class="row0"><td style="text-align:center">deltaVersion</td><td style="text-align:left">uint64</td><td style="text-align:left">写版本号（非幂等写防冲突；writeMem 带版本/确认）</td></tr><tr class="row1"><td style="text-align:center">memPage</td><td style="text-align:left">struct</td><td style="text-align:left">内存页缓存（按页缓存；readMem 命中直返，未命中拉取回填，10-8）</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="lead">simCache 缓存暂停态冻结的寄存器/PC/内存视图；deltaQueue 按节流窗口合并待推送增量；deltaVersion 记录每次写操作版本（非幂等写防冲突）。字段定义如下：</p>
+<pre class="code"><code>// SimCache: 寄存器/PC/内存页缓存（4.3.3.2 表44；暂停冻结）
+struct SimCache {
+  uint32_t regs[32];      // 通用寄存器 x0~x31（x0 恒 0，写忽略）
+  uint64_t pc;            // PC 快照
+  csr_t    csrs[CSR_N];   // CSR 快照（mstatus/mepc/mtvec/mie/mip 等，读写经 M-17 readReg/writeReg）
+  memPage  pages[MEM_N];  // 内存页缓存（LRU；命中直返，未命中拉取回填，10-8）
+  uint8_t  frozen;        // 暂停冻结标记（1=暂停态冻结，视图一致；运行时量子边界采样刷新）
+};
+// DeltaEntry: 增量条目（待推送增量，节流合并）
+struct DeltaEntry {
+  uint32_t  kind;         // 增量类型：REG=0 / CSR=1 / PC=2 / MEM=3
+  uint32_t  name;         // 寄存器/CSR 名或内存地址（kind 区分；MEM=addr，10-4）
+  uint64_t  value;        // 新值（MEM：按地址粒度，value=写入值；10-4）
+  uint64_t  seq;          // 单调序列号（M-05 事件分发去重/前端 reconcile 对账）
+  uint64_t  time_virt;    // 虚拟时间（M-12 权威时钟）
+};
+// deltaQueue: 待推送增量队列（节流 ≤200ms 估算基线，表93 性能行）
+struct deltaQueue {
+  DeltaEntry buf[Q_CAP];  // 窗口累积缓冲（enqueue 顺序追加；写路径状态变化入队）
+  uint32_t   wpos;        // 写入游标（追加位置；flush 后复位为 0）
+  uint32_t   count;       // 当前窗口条目数（getStateDelta 到期快照 + flush 清空）
+  uint32_t   dropped;     // 超窗口丢弃计数（只计数不告警风暴）
+};
+// WriteVersion: 写版本号（非幂等写防冲突，4.3.3.5）
+struct WriteVersion {
+  uint64_t lastWrite;     // 最近一次写版本（写前必须匹配调用方携带版本）
+  uint64_t monotonic;     // 单调递增（每次写 +1）
+};</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 缓存与增量语义</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:20%"><col style="width:38%"><col style="width:26%"><col style="width:16%"></colgroup><thead><tr><th style="width:20%;text-align:center">机制</th><th style="width:38%;text-align:center">语义</th><th style="width:26%;text-align:center">实现通道</th><th style="width:16%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">暂停冻结</td><td style="text-align:left">暂停态冻结 SimState 缓存，视图一致（4.3.3.4）</td><td style="text-align:left">simCache.frozen=1</td><td style="text-align:left">非暂停态读写 → E_CTX-02 拒绝</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">量子边界采样</td><td data-label="语义" style="text-align:left">运行时按量子边界采样刷新缓存</td><td data-label="实现通道" style="text-align:left">M-12 量子边界采样点</td><td data-label="备注" style="text-align:left">对齐 4.3.3.1「按量子边界采样」</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">窗口累积 + flush</td><td data-label="语义" style="text-align:left">enqueue 顺序追加；到期快照拷贝 + flush 清空（wpos 复位）；未到期不推不丢</td><td data-label="实现通道" style="text-align:left">getStateDelta() 快照 + clearQueue</td><td data-label="备注" style="text-align:left">单消费者 flush 模型（10-1）</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">访存失败</td><td data-label="语义" style="text-align:left">未映射地址 → 宿主侧访存失败事件（等价 GDB 读失败，非平台故障、非 guest trap）</td><td data-label="实现通道" style="text-align:left">M-17 readMem 返回 E_BUS-01</td><td data-label="备注" style="text-align:left">事件通道上报，非平台故障（4.3.3.5）</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">非幂等写</td><td data-label="语义" style="text-align:left">writeMem 带版本/确认防冲突</td><td data-label="实现通道" style="text-align:left">deltaVersion 校验</td><td data-label="备注" style="text-align:left">版本不匹配 → 拒绝并提示重取</td></tr></tbody></table></div>
+<h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+<p class="body">命令流：前端（M-01~M-03）→ M-05 会话 → M-10 readReg/writeReg/readMem/writeMem → 暂停态校验（否则 E_CTX-02）→ M-17 读写抽象（不感知内核实现）→ 结果回写 simCache → 增量入 deltaQueue。</p>
+<p class="body">推送流：getStateDelta() 按节流窗口（≤200ms）合并 deltaQueue → 单调序列号 + 虚拟时间戳 → 经 M-05 事件分发 publish(simStateDelta) → M-03 View Store 消费 → 寄存器/内存/波形视图局部刷新（≤200ms 估算基线，表93）。</p>
+<p class="body">异常流：未映射地址 → M-17 返回 E_BUS-01 → M-10 包装为宿主侧访存失败事件上报（等价 GDB 读失败，非平台故障、非 guest trap）；非幂等写版本冲突 → 拒绝 + 提示重取（4.3.3.5）。</p>
+<h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 readReg / writeReg 寄存器读写</h3>
+<p class="body">readReg(name)：暂停态校验 → 经 M-17 readReg 读取（通用寄存器 x0~x31、pc、CSR 名）→ 回写 simCache。writeReg(name, value)：暂停态校验 → M-17 writeReg 写入 → 更新缓存 + 增量入队；x0 写忽略、CSR 只读位拒绝（M-13 CSR 语义）。读路径仅更新缓存、不产生 delta，写路径产生状态变化增量（10-2）。伪代码如下：</p>
+<pre class="code"><code>// readReg: 读寄存器（含 CSR/PC；4.3.3.3 表45）
+uint64_t readReg(const char* name, err_t* err) {
+    if (!isPaused()) { *err = E_CTX-02; return 0; }       // 非暂停态调用拒绝
+    uint64_t v = m17_readReg(name, err);                  // M-17 抽象读取（不感知内核）
+    if (*err == E_OK) { simCacheUpdate(name, v); }  // 读路径仅更新缓存，不产生 delta（10-2）
+    return v;                                             // 输出：值
+}
+// writeReg: 写寄存器（含 CSR/PC；4.3.3.3 表45）
+void writeReg(const char* name, uint64_t value, err_t* err) {
+    if (!isPaused()) { *err = E_CTX-02; return; }         // 非暂停态调用拒绝
+    if (strcmp(name, &quot;x0&quot;) == 0) { *err = E_OK; return; } // x0 恒 0，写忽略（10-7）
+    m17_writeReg(name, value, err);                       // M-17 抽象写入
+    if (*err == E_OK) { simCacheUpdate(name, value); enqueueDelta(REG, name, value); }
+}                                                        // 输出：确认（err）</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 readMem / writeMem 内存读写</h3>
+<p class="body">readMem(addr, width)：暂停态校验 → 经 M-17 readMem 读取；未映射地址返回宿主侧访存失败事件（等价 GDB 读失败，非平台故障、非 guest trap）。writeMem(addr, width, value)：非幂等写带版本校验（deltaVersion 匹配）防冲突；成功则更新内存页缓存 + 增量入队。伪代码如下：</p>
+<pre class="code"><code>// readMem: 读内存（4.3.3.3 表45；缓存命中直返；未映射 → 宿主侧访存失败事件）
+uint64_t readMem(uint32_t addr, uint8_t width, err_t* err) {
+    if (!isPaused()) { *err = E_CTX-02; return 0; }
+    uint64_t hit; if (memPageHit(addr, width, &amp;hit)) return hit; // 缓存命中直返并刷新 LRU（10-8）
+    uint64_t v = m17_readMem(addr, width, err);
+    if (*err == E_BUS-01) { publish(&quot;dbg_mem_fail&quot;, &amp;(MemFail){addr, width}); return 0; }
+    // ↑ 宿主侧访存失败事件（等价 GDB 读失败，非平台故障、非 guest trap，4.3.3.5；事件名 10-11）
+    if (*err == E_OK) { memPageFill(addr, width, v); }  // 未命中拉取回填缓存（10-8）；读不产生 delta（10-2）
+    return v;                                             // 输出：值
+}
+// writeMem: 写内存（非幂等，带版本/确认，4.3.3.3/4.3.3.5）
+void writeMem(uint32_t addr, uint8_t width, uint64_t value,
+              uint64_t version, uint64_t* outVersion, err_t* err) {
+    if (!isPaused()) { *err = E_CTX-02; return; }
+    if (version != deltaVersion.lastWrite) { *err = E_CTX-04; return; }
+    // ↑ 版本校验防冲突：调用方需基于最新读取版本写（version 不匹配拒绝并提示重取）
+    m17_writeMem(addr, width, value, err);
+    if (*err == E_OK) {
+        deltaVersion.lastWrite = ++deltaVersion.monotonic;
+        *outVersion = deltaVersion.lastWrite;             // 新版本经 out 参数返回（10-3/10-10）
+        memPageUpdate(addr, width, value); enqueueDelta(MEM, addr, value); // 写路径状态变化，按地址粒度（10-4）
+    }
+}                                                        // 输出：确认（err + 新版本）
+// getWriteVersion: 读取当前写版本（10-3 版本获取通道，乐观锁前置）
+uint64_t getWriteVersion() { return deltaVersion.lastWrite; }</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 getStateDelta / 节流推送</h3>
+<p class="body">getStateDelta()：按节流窗口（≤200ms 估算基线）快照 deltaQueue 当前窗口，附单调序列号 + 虚拟时间戳，一次 publish(simStateDelta) 推送并 flush 清空；节流未到期返回 NULL 且不丢增量（10-1/10-9）。伪代码如下：</p>
+<pre class="code"><code>// getStateDelta: 生成增量推送（4.3.3.3 表45；节流合并）
+SimStateDelta* getStateDelta() {
+    if (deltaQueue.count == 0) return NULL;               // 窗口无增量 → 不推送
+    // 节流 ≤200ms（估算基线，表93 性能行）：窗口到期或强制刷新才合并推送
+    if (now() - lastPushTime &lt; 200ms) return NULL;        // 节流窗口未到期
+    SimStateDelta* d = snapshotQueue();                   // 快照拷贝当前窗口（副本；flush 前可重复生成）
+    d-&gt;seq = ++deltaSeq; d-&gt;time_virt = m12_virtTime();   // 单调序列号 + 虚拟时间戳
+    publish(&quot;simStateDelta&quot;, d);                          // M-05 事件分发 → M-03 View Store
+    clearQueue(); lastPushTime = now();                   // flush：count=0、wpos 复位（丢弃仅计数 dropped）
+    return d;                                             // 输出：simStateDelta（节流合并）
+}</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 与真实调试器的差异对照表</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:16%"><col style="width:34%"><col style="width:32%"><col style="width:18%"></colgroup><thead><tr><th style="width:16%;text-align:center">维度</th><th style="width:34%;text-align:center">真实硬件调试器（JTAG/GDB）</th><th style="width:32%;text-align:center">本平台建模（ISS/QEMU）</th><th style="width:18%;text-align:center">差异影响</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">访问通道</td><td style="text-align:left">JTAG 调试口 / GDB monitor 读写（目标暂停或运行读）</td><td style="text-align:left">M-17 抽象 readReg/readMem（self_iss 直接读状态；qemu RSP g/m 命令）</td><td style="text-align:left">语义一致：读写经抽象，不感知内核</td></tr><tr class="row1"><td style="text-align:center">暂停约束</td><td style="text-align:left">部分调试器支持运行中读（受一致性限制）</td><td style="text-align:left">本平台仅暂停态读写（E_CTX-02 拒绝），暂停冻结保证视图一致</td><td style="text-align:left">平台更严格：确定性优先</td></tr><tr class="row0"><td style="text-align:center">未映射地址</td><td style="text-align:left">硬件侧未映射读返回错误（实现相关）</td><td style="text-align:left">宿主侧访存失败事件（等价 GDB 读失败，非平台故障、非 guest trap）</td><td style="text-align:left">调试器可区分宿主失败与 guest 行为</td></tr><tr class="row1"><td style="text-align:center">写一致性</td><td style="text-align:left">写直接作用于目标内存</td><td style="text-align:left">非幂等写 + 版本校验（deltaVersion）防冲突</td><td style="text-align:left">平台更稳：版本不匹配拒绝</td></tr><tr class="row0"><td style="text-align:center">视图刷新</td><td style="text-align:left">GDB 命令同步返回</td><td style="text-align:left">simStateDelta 节流 ≤200ms 推送（M-03 消费）</td><td style="text-align:left">平台异步推送，刷新预算对齐</td></tr></tbody></table></div>
+
+<h2 id="sec4" class="h-sec">4 关键函数</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:30%"><col style="width:30%"><col style="width:40%"></colgroup><thead><tr><th style="width:30%;text-align:center">函数</th><th style="width:30%;text-align:center">说明</th><th style="width:40%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">readReg(name)</td><td style="text-align:left">读寄存器（含 CSR/PC）</td><td style="text-align:left">调 M-17 readReg；输出：值；非暂停态 → E_CTX-02</td></tr><tr class="row1"><td style="text-align:center">writeReg(name, value)</td><td style="text-align:left">写寄存器</td><td style="text-align:left">调 M-17 writeReg；输出：确认；x0 写忽略；CSR 只读位拒绝</td></tr><tr class="row0"><td style="text-align:center">readMem(addr, width)</td><td style="text-align:left">读内存</td><td style="text-align:left">调 M-17 readMem；缓存命中直返；输出：值；未映射 → 宿主侧访存失败事件（非 guest trap）</td></tr><tr class="row1"><td style="text-align:center">writeMem(addr, width, value, version, outVersion)</td><td style="text-align:left">写内存（非幂等）</td><td style="text-align:left">调 M-17 writeMem；输出：确认 + 新版本（outVersion）；版本不匹配 → 拒绝并提示重取（10-3）</td></tr><tr class="row0"><td style="text-align:center">getStateDelta()</td><td style="text-align:left">生成增量推送</td><td style="text-align:left">输出：simStateDelta（节流合并，≤200ms 估算基线）</td></tr><tr class="row1"><td style="text-align:center">getWriteVersion()</td><td style="text-align:left">读取当前写版本</td><td style="text-align:left">输出：deltaVersion.lastWrite（writeMem 乐观锁前置读取，10-3）</td></tr><tr class="row0"><td style="text-align:center">enqueueDelta(kind, name, value)</td><td style="text-align:left">增量入队</td><td style="text-align:left">deltaQueue 定长环形缓冲；窗口内合并</td></tr></tbody></table></div>
+
+<h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 读写与增量推送流程（源 4.3.3.4 对齐）</h3>
+<p class="body">寄存器/内存读写为「命令 → ExecutionBackend 读写 → 更新缓存 → 增量入队 → 节流推送」的确定性链路；暂停态冻结保证视图一致。未映射地址走访存失败分支（宿主侧事件，非 guest trap）。</p>
+<svg class="flow-svg" viewBox="0 0 760 640" role="img" aria-label="M-10 读写与增量推送流程">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2f5bd6"/>
+    </marker>
+  </defs>
+  <style>
+    .st-box{fill:#eef2fb;stroke:#2f5bd6;stroke-width:1.5;rx:6}
+    .st-txt{font-size:12.5px;fill:#1f2937;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+    .st-sub{font-size:11px;fill:#4b5563;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+    .st-arrow{stroke:#2f5bd6;stroke-width:1.6;marker-end:url(#ar)}
+    .st-dec{fill:#fff;stroke:#d97757;stroke-width:1.5;rx:8}
+    .st-dec-txt{font-size:11.5px;fill:#7c2d12;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+  </defs>
+  <rect class="st-box" x="300" y="14" width="160" height="46"/>
+  <text class="st-txt" x="380" y="34" text-anchor="middle">1 接收读写命令</text>
+  <text class="st-sub" x="380" y="50" text-anchor="middle">暂停态校验（否则 E_CTX-02）</text>
+  <line class="st-arrow" x1="380" y1="60" x2="380" y2="92"/>
+  <rect class="st-box" x="300" y="92" width="160" height="46"/>
+  <text class="st-txt" x="380" y="112" text-anchor="middle">2 ExecutionBackend 读写</text>
+  <text class="st-sub" x="380" y="128" text-anchor="middle">M-17 readReg/writeReg/readMem/writeMem</text>
+  <line class="st-arrow" x1="380" y1="138" x2="380" y2="170"/>
+  <rect class="st-dec" x="285" y="170" width="190" height="50"/>
+  <text class="st-dec-txt" x="380" y="188" text-anchor="middle">未映射地址（读内存）</text>
+  <text class="st-dec-txt" x="380" y="205" text-anchor="middle">→ 宿主侧访存失败事件</text>
+  <path class="st-arrow" d="M285,195 L100,195 L100,360"/>
+  <rect class="st-box" x="10" y="360" width="180" height="46"/>
+  <text class="st-txt" x="100" y="380" text-anchor="middle">访存异常事件上报</text>
+  <text class="st-sub" x="100" y="396" text-anchor="middle">非平台故障（4.3.3.5）</text>
+  <path class="st-arrow" d="M380,220 L380,252"/>
+  <rect class="st-box" x="300" y="252" width="160" height="46"/>
+  <text class="st-txt" x="380" y="272" text-anchor="middle">3 更新 simCache</text>
+  <text class="st-sub" x="380" y="288" text-anchor="middle">寄存器/PC/内存页缓存（暂停冻结）</text>
+  <line class="st-arrow" x1="380" y1="298" x2="380" y2="330"/>
+  <rect class="st-box" x="300" y="330" width="160" height="46"/>
+  <text class="st-txt" x="380" y="350" text-anchor="middle">4 增量入 deltaQueue</text>
+  <text class="st-sub" x="380" y="366" text-anchor="middle">窗口累积缓冲（flush 清空复位）</text>
+  <line class="st-arrow" x1="380" y1="376" x2="380" y2="408"/>
+  <rect class="st-box" x="300" y="408" width="160" height="46"/>
+  <text class="st-txt" x="380" y="428" text-anchor="middle">5 节流推送 simStateDelta</text>
+  <text class="st-sub" x="380" y="444" text-anchor="middle">≤200ms 合并；序列号 + 虚拟时间戳</text>
+  <line class="st-arrow" x1="380" y1="454" x2="380" y2="486"/>
+  <rect class="st-box" x="300" y="486" width="160" height="46"/>
+  <text class="st-txt" x="380" y="506" text-anchor="middle">6 M-03 View Store 消费</text>
+  <text class="st-sub" x="380" y="522" text-anchor="middle">寄存器/内存视图局部刷新（≤200ms）</text>
+  <line class="st-arrow" x1="380" y1="532" x2="380" y2="564"/>
+  <rect class="st-box" x="300" y="564" width="160" height="46"/>
+  <text class="st-txt" x="380" y="584" text-anchor="middle">7 视图一致（暂停态保持）</text>
+  <text class="st-sub" x="380" y="600" text-anchor="middle">前端可见当前暂停点状态</text>
+</svg>
+<div class="flow-mobile">
+<div class="flow-step"><span class="num">1</span><span class="txt">接收读写命令<br><span class="flow-branch">暂停态校验（非暂停态 → E_CTX-02 拒绝）</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">2</span><span class="txt">ExecutionBackend 读写<br><span class="flow-branch">M-17 readReg/writeReg/readMem/writeMem（不感知内核实现）</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">3</span><span class="txt">更新 simCache<br><span class="flow-branch">寄存器/PC/内存页缓存更新（暂停冻结保证视图一致）</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">4</span><span class="txt">增量入 deltaQueue<br><span class="flow-branch">窗口累积，flush 清空（超窗口丢弃计数）</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">5</span><span class="txt">节流推送 simStateDelta<br><span class="flow-branch">≤200ms 合并推送；单调序列号 + 虚拟时间戳（表93 性能行）</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">6</span><span class="txt">M-03 View Store 消费<br><span class="flow-branch">寄存器/内存视图局部刷新（≤200ms 估算基线）</span></span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">7</span><span class="txt">视图一致（暂停态保持）<br><span class="flow-branch">前端可见当前暂停点状态</span></span></div>
+<div class="flow-branch">分支：未映射地址（读/写内存）→ 宿主侧访存失败事件上报（等价 GDB 读失败，非平台故障、非 guest trap，4.3.3.5）</div>
+</div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:22%"><col style="width:52%"><col style="width:26%"></colgroup><thead><tr><th style="width:22%;text-align:center">协作模块</th><th style="width:52%;text-align:center">协作内容</th><th style="width:26%;text-align:center">触发时机</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-17（执行后端）</td><td style="text-align:left">readReg/writeReg/readMem/writeMem 读写抽象</td><td style="text-align:left">每次读写命令</td></tr><tr class="row1"><td style="text-align:center">M-05（会话/命令）</td><td style="text-align:left">读写命令通道；publish(simStateDelta) 事件分发</td><td style="text-align:left">命令下发 / 节流窗口到期</td></tr><tr class="row0"><td style="text-align:center">M-03（View Store）</td><td style="text-align:left">消费 simStateDelta 局部刷新（寄存器/内存/波形）</td><td style="text-align:left">每次节流推送</td></tr><tr class="row1"><td style="text-align:center">M-09（单步引擎）</td><td style="text-align:left">单步后暂停点状态刷新（寄存器/内存联动视图）</td><td style="text-align:left">单步完成 paused 上报后</td></tr><tr class="row0"><td style="text-align:center">M-08（断点管理器）</td><td style="text-align:left">断点命中暂停冻结（SimState 对齐量子边界，5.2 图3）</td><td style="text-align:left">断点命中时</td></tr><tr class="row1"><td style="text-align:center">M-21（日志）</td><td style="text-align:left">读写异常日志（未映射/版本冲突）</td><td style="text-align:left">异常发生时</td></tr></tbody></table></div>
+
+<h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置</h3>
+<p class="body">本模块错误码归属 E_CTX 族（3.4 表16，一场景一码）；未映射访存按宿主侧失败语义经事件通道上报（非平台故障、非 guest trap）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:20%"><col style="width:38%"><col style="width:42%"></colgroup><thead><tr><th style="width:20%;text-align:center">错误码 / 事件</th><th style="width:38%;text-align:center">场景</th><th style="width:42%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">E_CTX-02</td><td style="text-align:left">非暂停态读写（运行态/复位态执行 readReg/writeReg/readMem/writeMem）</td><td style="text-align:left">拒绝执行并返回错误码；提示先暂停（4.3.3.5）；log(WARN, &quot;DBG-RM&quot;, …, &quot;E_CTX-02&quot;)</td></tr><tr class="row1"><td data-label="错误码 / 事件" style="text-align:center">E_CTX-04</td><td data-label="场景" style="text-align:left">写版本冲突（writeMem 携带 version 与 deltaVersion.lastWrite 不匹配）</td><td data-label="处置" style="text-align:left">拒绝并提示基于最新读取版本重取（4.3.3.5 非幂等写防冲突）</td></tr><tr class="row0"><td data-label="错误码 / 事件" style="text-align:center">E_BUS-01 → 宿主侧访存失败事件</td><td data-label="场景" style="text-align:left">未映射地址读/写内存</td><td data-label="处置" style="text-align:left">publish(dbg_mem_fail, MemFail{addr,width})；非平台故障、非 guest trap；不触发 HMS（4.3.3.5，10-11）</td></tr><tr class="row1"><td data-label="错误码 / 事件" style="text-align:center">透传 M-17 返回码</td><td data-label="场景" style="text-align:left">CSR 只读位/非法写（x0 写忽略除外）</td><td data-label="处置" style="text-align:left">码值/语义由 M-13 CSR 契约裁决，本模块不自行定义（10-11）；写入失败不产生半指令状态</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）非暂停态调用：运行/复位/故障态下读写命令一律 E_CTX-02 拒绝，不排队不缓存（确定性语义，2.4 表6）。</p>
+<p class="body">（2）未映射地址：返回宿主侧访存失败事件（等价 GDB 读失败，非平台故障、非 guest trap）——不触发 HMS、不中断会话（10-5）。</p>
+<p class="body">（3）非幂等写：writeMem 带版本校验（deltaVersion），版本不匹配拒绝并提示重取；避免覆盖用户尚未看到的并发修改。</p>
+<p class="body">（4）QEMU 后端（L1 子集）：读写经 RSP g/m 命令；未映射语义与快照能力按 M-17 能力位协商降级（4.7 表86 能力降级）。</p>
+<p class="body">（5）x0 写忽略、CSR 只读位拒绝（透传 M-17/M-13 CSR 语义），写失败不产生半指令状态。</p>
+<p class="body">（6）内存页缓存 LRU（10-8）：readMem 命中直返并刷新 LRU；未命中经 M-17 readMem 拉取回填；MEM_N 满淘汰最久未用页（纯视图加速层，不改变读语义）。</p>
+<p class="body">（7）deltaQueue 超窗口丢弃：只计数（dropped）不告警风暴（对齐 M-21 溢出计数限频语义）。
+<p class="body">（8）单写者声明（10-6）：暂停态会话命令串行执行（同一调试会话单写者），writeReg 直接写无需乐观锁；writeMem 版本校验用于「前端编辑内存」与「平台异步刷新」之间的防覆盖——两者不对称是设计选择，9.1.1 契约注明。</p></p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表91（M-10 行）：测试要点 = 寄存器/内存读写一致；未映射访存异常；通过准则 = 读写一致、trap 正确。展开用例表如下（核心模块覆盖率 ≥70%，源文档 7.3 表92）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:22%"><col style="width:38%"><col style="width:40%"></colgroup><thead><tr><th style="width:22%;text-align:center">用例</th><th style="width:38%;text-align:center">输入 / 步骤</th><th style="width:40%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（源 2.5/7.1 对齐）</td><td style="text-align:left">按 9.1.1 端口契约表逐项校验 readReg/writeReg/readMem/writeMem/getWriteVersion/getStateDelta 的接口签名、输入校验、输出结构与错误码；替代实现接入前必须同端口契约测试全绿</td><td style="text-align:left">契约测试全绿；契约变更须同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">读路径无增量（10-2/10-9）</td><td data-label="输入 / 步骤" style="text-align:left">暂停态 readReg/readMem 后调 getStateDelta</td><td data-label="通过准则" style="text-align:left">无 REG/MEM 增量；读仅更新 simCache（与写路径状态变化区分）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">节流未到期边界（10-9）</td><td data-label="输入 / 步骤" style="text-align:left">连续写后窗口内再调 getStateDelta（未到期）</td><td data-label="通过准则" style="text-align:left">返回 NULL 且增量不丢；到期后一次推全量（窗口快照 + flush）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">memPage LRU 淘汰（10-9）</td><td data-label="输入 / 步骤" style="text-align:left">读满 MEM_N 页后继续读新页</td><td data-label="通过准则" style="text-align:left">最久未用页被淘汰；命中页刷新 LRU（读语义不变）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">寄存器读写一致（表91）</td><td data-label="输入 / 步骤" style="text-align:left">暂停态读 x1~x31、pc、CSR（mstatus/mepc/mtvec），写后重读</td><td data-label="通过准则" style="text-align:left">读写一致（写回值 = 重读值）；CSR 只读位写拒绝</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">x0 写忽略</td><td data-label="输入 / 步骤" style="text-align:left">写 x0 任意值后读</td><td data-label="通过准则" style="text-align:left">恒为 0；无增量产生</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">内存读写一致（表91）</td><td data-label="输入 / 步骤" style="text-align:left">暂停态写内存后读（含跨页/非对齐宽度）</td><td data-label="通过准则" style="text-align:left">读写一致（4.3.3.5 非幂等写版本校验通过）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">未映射访存失败（表91）</td><td data-label="输入 / 步骤" style="text-align:left">读写未映射地址</td><td data-label="通过准则" style="text-align:left">宿主侧访存失败事件（等价 GDB 读失败，非平台故障、非 guest trap）；不触发 HMS（10-5）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">写版本冲突（E_CTX-04）</td><td data-label="输入 / 步骤" style="text-align:left">携带过期 version 写内存</td><td data-label="通过准则" style="text-align:left">拒绝 + 提示重取；不产生部分写入</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">非暂停态拒绝（E_CTX-02）</td><td data-label="输入 / 步骤" style="text-align:left">运行态调用 readReg/readMem</td><td data-label="通过准则" style="text-align:left">E_CTX-02 拒绝；不排队不缓存；提示先暂停</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">节流推送（≤200ms）</td><td data-label="输入 / 步骤" style="text-align:left">连续多次写，观察 getStateDelta</td><td data-label="通过准则" style="text-align:left">窗口内合并（≤200ms 估算基线）；一次推送含多增量；序列号单调</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">deltaQueue 溢出</td><td data-label="输入 / 步骤" style="text-align:left">单窗口写超 Q_CAP 条目</td><td data-label="通过准则" style="text-align:left">超窗口丢弃仅计数（dropped）；不告警风暴</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">暂停冻结视图一致</td><td data-label="输入 / 步骤" style="text-align:left">暂停态多轮读写 + 单步推进后刷新</td><td data-label="通过准则" style="text-align:left">视图与暂停点 SimState 一致（对齐量子边界，5.2 图3）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">确定性夹具</td><td data-label="输入 / 步骤" style="text-align:left">同种子 + 同读写序列跑两遍</td><td data-label="通过准则" style="text-align:left">读写结果与 delta 序列完全一致（2.4 表6）</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）读写经 M-17 抽象（readReg/writeReg/readMem/writeMem），M-10 无内核感知，双内核替换不影响本模块。</p>
+<p class="body">（2）缓存与推送解耦：simCache（视图层）与 deltaQueue（推送层）独立，可分别单测（缓存一致性/节流合并）。</p>
+<p class="body">（3）窗口快照 + flush：getStateDelta 到期快照拷贝当前窗口、flush 清空复位（单消费者 flush 模型，10-1）；未到期返回 NULL 不丢增量。</p>
+<p class="body">（4）异常语义隔离：宿主侧访存失败走 dbg_mem_fail 事件通道，平台故障走 HMS；guest trap 仅 ISS 执行期产生（改 mstatus/mepc/mtval）——三类通道分离不混淆（10-5/10-11）。</p>
+<p class="body">（5）CI 门禁：核心模块单测覆盖率 ≥70%（估算基线，源文档 7.3 表92）；读写用例纳入确定性夹具。</p>
+<p class="body">（6）契约层可替换性（源 2.5 对齐）：本模块对外的 driving 端口收敛到 9.1.1 端口契约表，替代实现遵守同端口契约并通过契约测试即可接入。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-10 责任：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:16%"><col style="width:38%"><col style="width:46%"></colgroup><thead><tr><th style="width:16%;text-align:center">质量属性</th><th style="width:38%;text-align:center">目标（估算基线）</th><th style="width:46%;text-align:center">M-10 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">性能</td><td style="text-align:left">寄存器/内存/波形刷新 ≤200ms（表93 性能行：M-03/M-19 节流合并）</td><td style="text-align:left">simStateDelta 量子边界采样 + deltaQueue 节流 ≤200ms 合并推送（4.3.3.1）</td></tr><tr class="row1"><td style="text-align:center">可用性</td><td style="text-align:left">调试视图寄存器/内存/反汇编/源码联动（FR-05/09）</td><td style="text-align:left">读写一致 + 未映射 trap 正确（表91）；暂停冻结视图一致</td></tr><tr class="row0"><td style="text-align:center">可维护性</td><td style="text-align:left">核心模块覆盖率 ≥70%；模块即积木可替换（源 2.5）</td><td style="text-align:left">读写经 M-17 抽象 + 缓存/推送解耦 + 契约端口测试（9.1.1）</td></tr><tr class="row1"><td style="text-align:center">可靠性</td><td style="text-align:left">关键事件可靠投递（E1，对齐 5.2 图3）</td><td style="text-align:left">simStateDelta 单调序列号 + 虚拟时间戳；前端 reconcile 对账</td></tr><tr class="row0"><td style="text-align:center">合规</td><td style="text-align:left">业务模块 → 横切组件单向依赖（4.7 表86）</td><td style="text-align:left">本模块只经 M-17 抽象 + M-05/M-21 横切通道，不自行实现日志/事件</td></tr></tbody></table></div>
+<h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:30%"><col style="width:46%"></colgroup><thead><tr><th style="width:24%;text-align:center">依赖方</th><th style="width:30%;text-align:center">被依赖方</th><th style="width:46%;text-align:center">依赖内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-10（寄存器/内存服务）</td><td style="text-align:left">M-17 ExecutionBackend</td><td style="text-align:left">readReg/writeReg/readMem/writeMem 抽象接口（3.2.4 表13；2.1 表5）</td></tr><tr class="row1"><td style="text-align:center">M-10（寄存器/内存服务）</td><td style="text-align:left">M-05（会话/命令）</td><td style="text-align:left">命令与事件通道：publish(simStateDelta)</td></tr><tr class="row0"><td style="text-align:center">M-10（寄存器/内存服务）</td><td style="text-align:left">M-12（仿真引擎）</td><td style="text-align:left">量子边界采样（simCache 刷新点）</td></tr><tr class="row1"><td style="text-align:center">M-10（寄存器/内存服务）</td><td style="text-align:left">M-03（View Store）</td><td style="text-align:left">simStateDelta 消费（局部刷新 ≤200ms）</td></tr><tr class="row0"><td style="text-align:center">M-10（寄存器/内存服务）</td><td style="text-align:left">M-21（日志）</td><td style="text-align:left">读写异常日志（NFR-07）</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表46 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层，本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现（替代寄存器/内存服务）遵守同端口契约并通过契约测试（7.1）即可接入，无需改动其他模块：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:28%"><col style="width:16%"><col style="width:56%"></colgroup><thead><tr><th style="width:28%;text-align:center">端口 / 服务</th><th style="width:16%;text-align:center">方向</th><th style="width:56%;text-align:center">契约（输入 → 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:left">readReg(name)</td><td style="text-align:center">提供（driving）</td><td style="text-align:left">调用 M-17 readReg；输出：值；非暂停态 → E_CTX-02</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">writeReg(name, value)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">调用 M-17 writeReg；输出：确认；x0 写忽略；CSR 只读位拒绝</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">readMem(addr, width)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">调用 M-17 readMem；缓存命中直返；输出：值；未映射 → 宿主侧访存失败事件（dbg_mem_fail，非 guest trap）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">writeMem(addr, width, value, version, outVersion)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">调用 M-17 writeMem（非幂等）；输出：确认 + 新版本（outVersion）；版本不匹配 → E_CTX-04 拒绝（10-3）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">getWriteVersion()</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输出：deltaVersion.lastWrite（writeMem 乐观锁前置读取，10-3）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">getStateDelta()</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输出：simStateDelta（节流合并，≤200ms 估算基线；单调序列号 + 虚拟时间戳）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-17（ExecutionBackend）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">readReg / writeReg / readMem / writeMem（3.2.4 表13）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-05（会话/命令）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">读写命令通道；publish(simStateDelta) 事件分发</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-12（仿真引擎）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">量子边界采样（simCache 刷新点）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-21（日志）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">读写异常日志</td></tr></tbody></table></div>
+<p class="body">值域与返回通道（10-10）：CSR 名白名单 = mstatus / mepc / mtvec / mie / mip / mcycle / minstret（RW；其余 CSR 只读位写拒绝，透传 M-17/M-13 语义）；width ∈ {1, 2, 4, 8} 字节；writeMem 成功经 outVersion 返回新版本；SimStateDelta = { DeltaEntry entries[Q_CAP]; uint32_t count; uint64_t seq; uint64_t time_virt; }（entries 为窗口快照副本，count 为本次快照条目数）。</p>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<p class="body">读写成功 → log(INFO, "DBG-RM", "reg/mem access", "E_OK")；非暂停态调用 → log(WARN, "DBG-RM", …, "E_CTX-02")；版本冲突 → log(WARN, "DBG-RM", "write version conflict", "E_CTX-04")；未映射访存 → log(INFO, "DBG-RM", "mem access fail (host-side)", "E_BUS-01")。产品/嵌入式工作台不可见（角色边界，§3.4），仅管理员通道可查。</p>
+</main>
+</div>
+</body>
+</html>

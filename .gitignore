@@ -1,0 +1,46 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Secrets & env (any language)
+.env
+.env.*
+*.pem
+*.key
+
+# Rust / Cargo
+**/target/
+**/Cargo.lock.bak
+target/
+# Keep Cargo.lock for binaries, ignore for libraries — kernel is `cdylib`,
+# server is binary, contract is library. We commit Cargo.lock at the
+# workspace root (good for reproducible builds of a binary) but ignore
+# any nested target/ directories.
+
+# wasm-pack build output
+front/assets/pkg/
+front/assets/*.wasm
+front/assets/*.js
+
+# Node / JS front-end (we have no npm deps today, but if you add any)
+front/node_modules/
+front/dist/
+
+# Test artefacts
+tests/golden/_out/
+tests/golden/_tmp/
+*.diff
+
+# Python helper scripts
+__pycache__/
+*.pyc
+
+# Test coverage
+coverage/
+*.lcov

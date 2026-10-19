@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-05 命令路由与事件分发 模块详细设计</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%231e3a8a'/%3E%3Ctext x='12' y='17' font-size='13' text-anchor='middle' fill='%23ffffff' font-family='sans-serif' font-weight='bold'%3ES%3C/text%3E%3C/svg%3E">
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15px; font-weight:700; color:#374151; margin:18px 0 8px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { margin:0 0 10px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  margin:10px 0 16px; white-space:pre; }
+code { font-family:inherit; }
+.nav-toggle { margin:10px 0 4px; }
+.nav-box { background:var(--head-bg); border:1px solid var(--line); border-radius:6px;
+  padding:10px 16px; font-size:13.5px; line-height:1.9; display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0 24px; }
+.nav-box a { color:var(--brand-2); text-decoration:none; }
+.nav-box a:hover { text-decoration:underline; }
+.flow-wrap { overflow-x:auto; margin:12px 0 16px; }
+.flow { min-width:640px; width:100%; height:auto; }
+@media (max-width:767px) {
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media (max-width:560px) {
+  .doc-title { font-size:21px; }
+  .h-sec { font-size:19px; }
+  .doc-table, .doc-table th, .doc-table td { font-size:12.5px; }
+  .code { font-size:11.5px; white-space:pre-wrap; word-break:break-word; }
+  .nav-box { grid-template-columns:1fr; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><h1 class="doc-title">M-05 命令路由与事件分发 模块详细设计</h1><p class="subtitle">RISC-V仿真平台 模块详细设计系列 - 对应《模块设计说明书》4.2.2节</p><p class="version">HTML版 v1.1 (2026-10-14) - 源设计《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版，2026-10-13更新)</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版新增2.5平台共享契约与各模块端口契约表)</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.2.2（② 会话/命令层-M-05 命令路由与事件分发）：数据描述→源文档表32、关键函数表33、端口契约表34；处理流程=4.2.2.4</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">FR-16（headless 网关预留）；NFR-02（响应与刷新时限）；E1 关键控制事件可靠投递语义</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">M-04 能力面白名单；M-07 双传输；M-21 日志；M-22 HMS 超时/水位上报</td></tr><tr class="row0"><td style="text-align:center">MVP状态</td><td style="text-align:left">PO主承担模块（MVP必需：Command/Event Bus + 能力面 + 协议协商）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；依赖方向（2.1表5：会话/命令层→调试服务/仿真内核/观测管道）；错误码族主属方=E_CTX（3.4表16）+ E_PROTO；评审 P-10（背压）、P-20（打点）</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.0（2026-10-14 初版）：按 M-13 v1.1 标准 9 章结构；内建 9.1.1 端口契约（源表34 对齐）+ CH7 契约测试 + CH8 模块即积木可替换；表号/图号引用源文档契约层版实际编号（表32/33/34、表16、表91/93）；错误码 E_CTX/E_PROTO 族按源表16/协议错误清单逐码对齐；背压/打点按评审 P-10/P-20 内建；协议只增不改扩展点（表93）。&lt;br&gt;v1.1（2026-10-14 评审 05-1~05-10 全闭环）：05-1 publish 改单投递模型（deliver* 即最终投递，删外层 notify 循环）+ 可靠通道队列上限/重试上限/超时参数；05-2 dispatchCommand 改异步可中断超时（超时即返回 E_CTX-06、结果作废，写类不自动重试）；05-3 backendCapBits 来源=M-17 能力位查询；05-4 分级规则「E1 关键清单外均观测类」+ 观测类事件清单；05-5 channel 枚举 + 订阅句柄 uint32；05-6 可靠通道参数（ack 500ms/重试≤3/失败对账）；05-7 事件历史环形窗口（10⁴ 条按 seq 索引）支撑续拉；05-8 补三组用例；05-9 NegotiateResult 结构展开 + M-23 契约引用核对；05-10 降级路径声明 + layerSpans 溢出丢最旧</td></tr><tr class="row1"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-14</td></tr></tbody></table></div></header><nav class="nav-toggle"><details open><summary>目录</summary><div class="nav-box"><a href="#sec1">1 功能概述</a><a href="#sec1-1">1.1 模块定位</a><a href="#sec1-2">1.2 需求与约束</a><a href="#sec1-3">1.3 MVP 范围与预留</a><a href="#sec2">2 数据描述</a><a href="#sec2-1">2.1 核心数据结构</a><a href="#sec2-1-1">2.1.1 复杂结构字段定义</a><a href="#sec2-2">2.2 缓存与增量语义</a><a href="#sec2-3">2.3 数据流说明</a><a href="#sec3">3 实现设计</a><a href="#sec3-1">3.1 dispatchCommand</a><a href="#sec3-2">3.2 publish</a><a href="#sec3-3">3.3 negotiate</a><a href="#sec3-4">3.4 与真实调试器的差异对照表</a><a href="#sec4">4 关键函数</a><a href="#sec5">5 处理流程</a><a href="#sec5-1">5.1 命令路由与事件分发流程</a><a href="#sec5-2">5.2 与相邻模块的协作说明</a><a href="#sec6">6 异常处理</a><a href="#sec6-1">6.1 错误码与处置</a><a href="#sec6-2">6.2 边界与降级</a><a href="#sec7">7 测试设计与可维护性</a><a href="#sec7-1">7.1 测试要点与关键用例</a><a href="#sec7-2">7.2 可维护性手段</a><a href="#sec8">8 质量属性落实</a><a href="#sec9">9 接口依赖</a><a href="#sec9-1">9.1 依赖关系</a><a href="#sec9-1-1">9.1.1 端口契约</a><a href="#sec9-2">9.2 日志对接</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-05 命令路由与事件分发（4.2.2）：实现 Command Bus 与 Event Bus——命令（C1/CF1）带请求 id 路由、超时 ≤500ms、读类/幂等命令可重试；事件按订阅分发，E1 关键控制事件（breakpointHit/trap/paused）可靠投递（ack/重试），观测类事件允许丢失并由前端对账。执行协议版本协商（只增不改、未知字段忽略、不兼容明确拒绝并提示升级路径）。承载背压治理（订阅队列水位 80%，降采样/丢最旧，与 M-19 对齐，评审 P-10）。预留 headless 网关接入（REST/CLI 命令面，FR-16，P1）。在各层边界做轻量调用链打点（进入/离开耗时采样，仅管理员通道可见，评审 P-20）。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:16%"><col style="width:62%"><col style="width:22%"></colgroup><thead><tr><th style="width:16%;text-align:center">类别</th><th style="width:62%;text-align:center">约束内容</th><th style="width:22%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">功能</td><td style="text-align:left">命令带请求 id 路由、异步可中断超时 ≤500ms（05-2：定时器驱动，超时即 E_CTX-06 结果作废）、读类/幂等命令可重试</td><td style="text-align:left">4.2.2.1</td></tr><tr class="row1"><td style="text-align:center">功能</td><td style="text-align:left">事件按订阅分发：分级规则（05-4）——E1 关键清单（breakpointHit/trap/paused）可靠投递（ack/重试）；其余观测类（watchUpdate/simStateDelta/checkpoint/trace 等）节流投递允许丢失</td><td style="text-align:left">4.2.2.1、E1 语义（2.3）</td></tr><tr class="row0"><td style="text-align:center">协议</td><td style="text-align:left">协议版本协商：只增不改、未知字段忽略、不兼容明确拒绝并提示升级路径</td><td style="text-align:left">4.2.2.1、E_PROTO-01/02</td></tr><tr class="row1"><td style="text-align:center">背压</td><td style="text-align:left">订阅队列水位默认 0.8，超限降采样/丢最旧（与 M-19 溢出策略一致）</td><td style="text-align:left">评审 P-10</td></tr><tr class="row0"><td style="text-align:center">预留</td><td style="text-align:left">headless 网关接入（REST/CLI 命令面，FR-16，P1）；未启用返回 E_CTX-09</td><td style="text-align:left">4.2.2.1、FR-16</td></tr><tr class="row1"><td style="text-align:center">可观测</td><td style="text-align:left">层边界调用链打点（进入/离开耗时采样），仅管理员通道可见</td><td style="text-align:left">评审 P-20</td></tr><tr class="row0"><td style="text-align:center">性能</td><td style="text-align:left">命令响应 ≤500ms（超时管理）；刷新 ≤200ms（与 M-03/M-19 节流合并）</td><td style="text-align:left">8 章表93、NFR-02</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：dispatchCommand(cmd)（校验能力 → 分发 → 超时管理）、publish(event)（关键/观测分级分发）、subscribe(channel, sub)/unsubscribe、negotiate(version, caps)（协议版本与能力协商）、setWatermark(ratio)（背压水位）、traceSpan(layer, tEnter, tLeave)（层边界打点）。<br>预留项（P1 演进承接，不属现实现）：gatewayDispatch(cmd)（headless REST/CLI 命令面，FR-16，P1，映射到 dispatchCommand）；协议版本协商增强（schemaVersion 迁移策略，事件流持久化/归档配合 M-23 DataStore）；订阅队列多级降载（按订阅优先级逐级暂停，P-10 背压保护）。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构（源文档表32）</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:22%"><col style="width:18%"><col style="width:60%"></colgroup><thead><tr><th style="width:22%;text-align:center">数据结构</th><th style="width:18%;text-align:center">类型</th><th style="width:60%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">cmdRegistry</td><td style="text-align:center">Map&lt;cmd, handler&gt;</td><td style="text-align:left">命令处理器注册表（路由目标，非法命令返回 E_CTX-05 未注册路由）</td></tr><tr class="row1"><td style="text-align:center">subTable</td><td style="text-align:center">Map&lt;channel, Set&lt;subscriber&gt;&gt;</td><td style="text-align:left">事件订阅表（按通道分发，订阅句柄管理）</td></tr><tr class="row0"><td style="text-align:center">seqCounter</td><td style="text-align:center">uint64</td><td style="text-align:left">协议序列号（单调递增，断线续拉锚点，E_PROTO-05）</td></tr><tr class="row1"><td style="text-align:center">capBits</td><td style="text-align:center">Set</td><td style="text-align:left">能力位（含 ExecutionBackend L1/L2/L3 分级协商结果，E_CTX-03 降级）</td></tr><tr class="row0"><td style="text-align:center">queueWatermark</td><td style="text-align:center">float</td><td style="text-align:left">订阅队列水位阈值（默认 0.8），超限触发降采样/丢最旧（评审 P-10）</td></tr><tr class="row1"><td style="text-align:center">layerSpans</td><td style="text-align:center">ring</td><td style="text-align:left">调用链耗时采样（进入/离开，仅管理员通道可见，评审 P-20）</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="body">cmdRegistry 按命令名路由到目标模块处理器；subTable 按通道维护订阅者集合（订阅句柄供退订引用）；seqCounter 单调递增作为断线续拉锚点（对齐 E_PROTO-05 序列号缺口语义）；capBits 记录 ExecutionBackend 分级协商结果（L1/L2/L3，QEMU 仅 L1 子集降级）。字段定义如下：</p>
+<pre class="code"><code>// ProtocolMessage: 协议消息结构（DTO，语言无关 JSON Schema/IDL，2.3 事件结构对齐）
+struct ProtocolMessage {
+  uint32_t msgType;         // 消息类型枚举（命令/响应/事件）
+  uint64_t reqId;           // 请求 id（命令路由配对，Resp 回带）
+  uint64_t seq;             // 协议序列号（seqCounter，断线续拉锚点）
+  uint8_t  version;         // 协议版本（negotiate 协商，只增不改）
+  json     payload;         // 载荷（必填/可选字段 + 校验规则）
+};
+// Resp: 命令响应（请求 id 配对，超时 ≤500ms）
+struct Resp { uint64_t reqId; err_t err; json payload; };
+// Event: 事件对象（S1/W1/T1/E1：事件类型 + 载荷字段 + 序列号语义）
+struct Event {
+  uint8_t  kind;            // 关键控制（E1: breakpointHit/trap/paused）或观测类（05-4 分级规则）
+  uint64_t seq;             // 单调序列号（断线续拉缺口）
+  json     payload;         // 载荷字段（schemaVersion 由协议版本协商管理；事件流持久化由 M-23 DataStore 归档，05-9 已核对）
+  uint8_t  channel;         // 订阅通道（05-5 枚举：0=debug / 1=state / 2=trace / 3=log）
+};
+// channel 枚举（05-5）：0=debug（断点/单步等调试命令事件）、1=state（simStateDelta/watchUpdate 状态类）、2=trace（trace 记录/反汇编观测）、3=log（日志/告警）
+// 订阅句柄（05-5）：subscribe 返回 uint32 句柄 id（subTable 索引引用，退订/对账使用）
+// evHistory: 事件历史环形窗口（05-7，按 seq 索引，最近 N=10^4 条；断线续拉 E_PROTO-05 的数据源，溢出丢最旧）
+struct evHistory { ring&lt;Event&gt; cap=10000; uint64_t minSeq; };   // minSeq=窗口内最小序列号（续拉下界）
+// NegotiateResult（05-9）：协商结果两态展开——{ok, capBits result}（兼容/降级明确）或 {reject, E_PROTO-01, upgradePath}（不兼容拒绝 + 升级提示）
+// capBits: 能力位集合（含 ExecutionBackend L1/L2/L3 分级协商结果）
+struct capBits { bool L1; bool L2; bool L3; };   // QEMU 仅 L1 子集（E_CTX-03 降级）
+// layerSpans: 调用链耗时采样（进入/离开，仅管理员通道可见，评审 P-20）
+struct layerSpans { ring&lt;{layer, tEnter, tLeave, durNs}&gt;; uint32_t cap; };</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 缓存与增量语义</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:38%"><col style="width:26%"><col style="width:20%"></colgroup><thead><tr><th style="width:16%;text-align:center">机制</th><th style="width:38%;text-align:center">语义</th><th style="width:26%;text-align:center">实现通道</th><th style="width:20%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">命令路由</td><td style="text-align:left">按 cmd 查注册表 → 校验能力 → 分发 → Resp（≤500ms）</td><td style="text-align:left">dispatchCommand + cmdRegistry</td><td style="text-align:left">读类/幂等命令可重试（E_CTX-06）；超时异步可中断（05-2）</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">事件分级</td><td data-label="语义" style="text-align:left">分级规则（05-4）：E1 关键清单（breakpointHit/trap/paused）走可靠通道 ack/重试；其余（watchUpdate/simStateDelta/checkpoint/trace 等观测类）节流投递</td><td data-label="实现通道" style="text-align:left">publish + 分级通道</td><td data-label="备注" style="text-align:left">重试失败 → 前端对账（E_PROTO-07）</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">可靠通道参数（05-6）</td><td data-label="语义" style="text-align:left">队列上限 64、ack 超时 500ms、重试间隔 100ms、重试 ≤3 次</td><td data-label="实现通道" style="text-align:left">deliverReliable</td><td data-label="备注" style="text-align:left">超上限/重试耗尽 → 前端对账（E_PROTO-07）；关键事件不丢</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">序列号</td><td data-label="语义" style="text-align:left">seqCounter 单调递增（断线续拉锚点）</td><td data-label="实现通道" style="text-align:left">每消息递增 + evHistory 环形窗口（10⁴ 条按 seq 索引，05-7）</td><td data-label="备注" style="text-align:left">缺口 → 按 evHistory 续拉（E_PROTO-05）；窗口外 → 全量对账</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">背压</td><td data-label="语义" style="text-align:left">队列水位 0.8 超限 → 降采样/丢最旧</td><td data-label="实现通道" style="text-align:left">setWatermark + queueWatermark</td><td data-label="备注" style="text-align:left">与 M-19 溢出策略一致（P-10）</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">打点</td><td data-label="语义" style="text-align:left">层边界进入/离开耗时采样入 layerSpans</td><td data-label="实现通道" style="text-align:left">traceSpan</td><td data-label="备注" style="text-align:left">仅管理员通道可见（P-20）；环形溢出丢最旧（05-10）</td></tr></tbody></table></div>
+<h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+<p class="body">命令流：前端（M-01~M-03）onCommand → M-05 dispatchCommand（版本/能力校验 → 路由 → 执行）→ Resp（请求 id 配对，超时 ≤500ms，读类/幂等可重试）。<br>事件流：仿真/调试事件源（M-08~M-19）产生 → publish 分级（关键 E1：breakpointHit/trap/paused 走可靠通道 ack/重试；观测类按节流）→ 按 subTable 分发 → 订阅方消费（M-03 View Store 刷新 ≤200ms 合并）。<br>序列语义：seqCounter 每消息递增，断线续拉按缺口补齐（E_PROTO-05）。</p>
+<h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 dispatchCommand(cmd) 命令路由</h3>
+<p class="body">dispatchCommand(cmd)：接收 ProtocolMessage → 版本/能力校验 → 按 cmdRegistry 路由 → 目标模块处理器执行 → Resp（请求 id 配对，超时 ≤500ms，读类/幂等命令可重试）。伪代码如下：</p>
+<pre class="code"><code>// dispatchCommand: 命令路由（4.2.2.3 表33；校验能力 → 异步可中断超时分发 → Resp）
+Resp dispatchCommand(ProtocolMessage cmd) {
+  if (cmd.version != negotiated) return E_PROTO-01;   // 协议版本不匹配（拒绝 + 升级提示）
+  if (cmd.msgType not in cmdRegistry) return E_CTX-05; // 未注册路由
+  if (!capBits.allows(cmd)) return E_CTX-03;          // 能力不足（QEMU 下 L2/L3 → 拒绝 + 协商降级，05-10）
+  Resp r = dispatchWithTimeout(                       // 异步可中断超时（05-2）：定时器驱动
+    cmdRegistry[cmd.msgType].handler, cmd, 500ms);    // 超时即返回 E_CTX-06 并作废处理器结果
+  if (r.timedOut) return E_CTX-06;                    // 命令超时（读类/幂等可重试；写类不自动重试防副作用，6.2(1)）
+  r.reqId = cmd.reqId; return r;                      // Resp 请求 id 配对
+}</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 publish(event) 事件分级分发</h3>
+<p class="body">publish(event)：按分级规则（05-4：E1 关键清单走可靠通道，其余观测类节流）分发；deliver* 即最终投递（内部经 subTable 单次分发，05-1 单投递模型）；可靠通道队列上限 64/ack 500ms/重试 ≤3 次（05-6）；观测类超水位降采样/丢最旧（与 M-19 对齐，P-10）。伪代码如下：</p>
+<pre class="code"><code>// publish: 事件按订阅分发（4.2.2.3 表33；分级 → 单投递 → 背压）
+void publish(Event ev) {
+  ev.seq = seqCounter++;                             // 单调序列号（断线续拉锚点，同时入 evHistory 窗口）
+  evHistory.push(ev);                                // 05-7：环形窗口（10^4 条按 seq 索引，续拉数据源）
+  if (ev.kind == CRITICAL) {                         // E1 关键控制事件（breakpointHit/trap/paused）
+    deliverReliable(ev);                             // 05-6：队列上限 64、ack 超时 500ms、重试 ≤3 次
+  } else {                                           // 观测类（watchUpdate/simStateDelta/checkpoint/trace 等）
+    if (queueLevel(ev.channel) &gt;= queueWatermark)    // 队列超水位（默认 0.8，P-10）
+      downsampleOrDropOldest(ev);                    // 降采样/丢最旧（与 M-19 对齐）
+    deliverThrottled(ev);                            // 节流投递（可丢失，前端对账）
+  }
+  // 05-1：deliver* 即最终投递（内部经 subTable 单次分发）；无外层 notify 循环（防双投递）
+}
+// deliverReliable（05-1/05-6）：可靠通道最终投递——入可靠队列（上限 64）→ 经 subTable 单次分发 →
+//   订阅方 ack（500ms 超时）→ 未 ack 重试（间隔 100ms，≤3 次）→ 仍失败 → 前端对账（E_PROTO-07）
+// deliverThrottled：观测类最终投递——经 subTable 单次分发，超水位先降采样/丢最旧
+</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 negotiate(version, caps) 协议版本与能力协商</h3>
+<p class="body">negotiate(version, caps)：协议版本协商（只增不改、未知字段忽略、不兼容明确拒绝并提示升级路径）；能力协商（backendCapBits 来源=M-17 执行后端能力位查询，05-3；ExecutionBackend L1/L2/L3，QEMU 仅 L1 子集降级，E_CTX-03）。返回 NegotiateResult 两态结构（05-9）。伪代码如下：</p>
+<pre class="code"><code>// negotiate: 协议版本与能力协商（4.2.2.3 表33）
+NegotiateResult negotiate(uint8_t version, capBits caps) {
+  if (version &gt; CURRENT_VERSION) {                   // 只增不改：向后兼容
+    return {ok, CAPS_UNCHANGED};                     // 未知字段忽略（E_PROTO-02 仅日志）
+  }
+  if (version &lt; MIN_SUPPORTED)                       // 不兼容（低于最低支持版本）
+    return {reject, E_PROTO-01, upgradePath};        // 明确拒绝 + 提示升级路径
+  capBits backend = m17GetCaps();                    // 05-3：backendCapBits 由 M-17 执行后端暴露（BackendVtbl.caps）
+  capBits result = caps &amp; backend;                   // 能力位协商（QEMU 仅 L1 子集降级）
+  return {ok, result};                               // 输出：协商结果（降级明确，05-9 NegotiateResult）
+}
+// NegotiateResult 两态（05-9）：{ok, capBits result}（兼容：含降级后能力位）| {reject, E_PROTO-01, upgradePath}（不兼容拒绝 + 升级提示）
+// 降级路径（05-10）：E_CTX-03 拒绝响应携带建议能力位 → 前端按 capBits 主动降级后重发 negotiate；或调用方按拒绝响应升级路径处理
+</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 与真实调试器的差异对照表</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:36%"><col style="width:34%"><col style="width:14%"></colgroup><thead><tr><th style="width:16%;text-align:center">维度</th><th style="width:36%;text-align:center">真实硬件调试器（GDB RSP）</th><th style="width:34%;text-align:center">本平台建模（Command/Event Bus）</th><th style="width:14%;text-align:center">差异影响</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">命令面</td><td style="text-align:left">GDB RSP 报文（$qRcmd 等）逐命令同步</td><td style="text-align:left">ProtocolMessage 带请求 id 异步路由（Resp 配对）</td><td style="text-align:left">本平台命令超时 ≤500ms 显式管理</td></tr><tr class="row1"><td data-label="维度" style="text-align:center">事件面</td><td data-label="实机调试器" style="text-align:left">RSP 异步通知（T05 断点等）</td><td data-label="本平台建模" style="text-align:left">Event Bus 分级分发（关键可靠/观测节流）</td><td data-label="差异影响" style="text-align:left">可靠通道 ack/重试为本平台差异化</td></tr><tr class="row0"><td data-label="维度" style="text-align:center">版本协商</td><td data-label="实机调试器" style="text-align:left">RSP qSupported 特性位协商</td><td data-label="本平台建模" style="text-align:left">negotiate(version, caps) 只增不改</td><td data-label="差异影响" style="text-align:left">未知字段忽略（E_PROTO-02）语义一致</td></tr><tr class="row1"><td data-label="维度" style="text-align:center">能力降级</td><td data-label="实机调试器" style="text-align:left">GDB 按目标特性降级</td><td data-label="本平台建模" style="text-align:left">capBits L1/L2/L3 分级协商（QEMU 仅 L1）</td><td data-label="差异影响" style="text-align:left">E_CTX-03 拒绝 + 降级提示</td></tr></tbody></table></div>
+
+<h2 id="sec4" class="h-sec">4 关键函数（源文档表33）</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:34%"><col style="width:26%"><col style="width:40%"></colgroup><thead><tr><th style="width:34%;text-align:center">函数</th><th style="width:26%;text-align:center">说明</th><th style="width:40%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">dispatchCommand(cmd)</td><td style="text-align:left">命令路由：校验能力 → 分发 → 超时管理</td><td style="text-align:left">输入：ProtocolMessage；调用目标模块处理器；输出：Resp（请求 id 配对）</td></tr><tr class="row1"><td style="text-align:center">publish(event)</td><td style="text-align:left">事件按订阅分发</td><td style="text-align:left">输入：事件对象；关键事件进可靠通道（ack/重试），观测类按节流</td></tr><tr class="row0"><td style="text-align:center">subscribe(channel, sub)/unsubscribe</td><td style="text-align:left">订阅管理</td><td style="text-align:left">输出：订阅句柄（退订引用）</td></tr><tr class="row1"><td style="text-align:center">negotiate(version, caps)</td><td style="text-align:left">协议版本与能力协商</td><td style="text-align:left">输出：协商结果（不兼容 → 拒绝 + 升级路径）</td></tr><tr class="row0"><td style="text-align:center">setWatermark(ratio)</td><td style="text-align:left">背压水位配置与处置</td><td style="text-align:left">超限 → 降采样/丢最旧（与 M-19 对齐）；输出：确认</td></tr><tr class="row1"><td style="text-align:center">traceSpan(layer, tEnter, tLeave)</td><td style="text-align:left">层边界调用链打点</td><td style="text-align:left">采样入 layerSpans；仅管理员通道查询（P-20）</td></tr><tr class="row0"><td style="text-align:center">gatewayDispatch(cmd)（P1 预留）</td><td style="text-align:left">headless REST/CLI 命令面网关</td><td style="text-align:left">FR-16；映射到 dispatchCommand，未启用时返回 E_CTX-09</td></tr></tbody></table></div>
+<h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 命令路由与事件分发流程（源 4.2.2.4 对齐）</h3>
+<p class="body">双链路：命令流 = 接收 → 版本/能力校验 → 路由 → 执行 → Resp（超时 ≤500ms）；事件流 = 产生 → 分级（关键/观测）→ 按订阅分发 → 节流/可靠投递；队列超水位 → 降采样/丢最旧；层边界进入/离开打点采样（管理员可见）。</p>
+<div class="flow-wrap"><svg class="flow" viewBox="0 0 760 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-05 处理流程：命令路由流与事件分发流">
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#2f5bd6"/></marker>
+    <style>
+      .st-box{fill:#eef2fb;stroke:#2f5bd6;stroke-width:1.5;rx:6}
+      .st-txt{font-size:12.5px;fill:#1f2937;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+      .st-sub{font-size:11px;fill:#4b5563;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+      .st-arrow{stroke:#2f5bd6;stroke-width:1.6;marker-end:url(#ar)}
+      .st-dec{fill:#fff;stroke:#d97757;stroke-width:1.5;rx:8}
+      .st-dec-txt{font-size:11.5px;fill:#7c2d12;font-family:"Noto Sans SC","PingFang SC",sans-serif}
+    </style>
+  </defs>
+  <rect class="st-box" x="20" y="14" width="150" height="44"/>
+  <text class="st-txt" x="95" y="32" text-anchor="middle">1 接收命令</text>
+  <text class="st-sub" x="95" y="48" text-anchor="middle">ProtocolMessage（请求 id）</text>
+  <line class="st-arrow" x1="170" y1="36" x2="216" y2="36"/>
+  <rect class="st-box" x="216" y="14" width="150" height="44"/>
+  <text class="st-txt" x="291" y="32" text-anchor="middle">2 版本/能力校验</text>
+  <text class="st-sub" x="291" y="48" text-anchor="middle">E_PROTO-01 / E_CTX-03</text>
+  <line class="st-arrow" x1="366" y1="36" x2="412" y2="36"/>
+  <rect class="st-box" x="412" y="14" width="150" height="44"/>
+  <text class="st-txt" x="487" y="32" text-anchor="middle">3 路由分发</text>
+  <text class="st-sub" x="487" y="48" text-anchor="middle">cmdRegistry 目标处理器</text>
+  <line class="st-arrow" x1="562" y1="36" x2="608" y2="36"/>
+  <rect class="st-box" x="608" y="14" width="140" height="44"/>
+  <text class="st-txt" x="678" y="32" text-anchor="middle">4 Resp 配对</text>
+  <text class="st-sub" x="678" y="48" text-anchor="middle">超时 ≤500ms（E_CTX-06）</text>
+  <line class="st-arrow" x1="487" y1="58" x2="487" y2="92"/>
+  <rect class="st-dec" x="412" y="92" width="150" height="40"/>
+  <text class="st-dec-txt" x="487" y="116" text-anchor="middle">未注册路由 → E_CTX-05</text>
+  <rect class="st-box" x="20" y="150" width="150" height="44"/>
+  <text class="st-txt" x="95" y="168" text-anchor="middle">A 事件产生</text>
+  <text class="st-sub" x="95" y="184" text-anchor="middle">M-08~M-19 事件源</text>
+  <line class="st-arrow" x1="170" y1="172" x2="216" y2="172"/>
+  <rect class="st-box" x="216" y="150" width="150" height="44"/>
+  <text class="st-txt" x="291" y="168" text-anchor="middle">B 分级分发</text>
+  <text class="st-sub" x="291" y="184" text-anchor="middle">关键可靠 / 观测节流</text>
+  <line class="st-arrow" x1="366" y1="172" x2="412" y2="172"/>
+  <rect class="st-box" x="412" y="150" width="150" height="44"/>
+  <text class="st-txt" x="487" y="168" text-anchor="middle">C 按订阅分发</text>
+  <text class="st-sub" x="487" y="184" text-anchor="middle">subTable 通道</text>
+  <line class="st-arrow" x1="562" y1="172" x2="608" y2="172"/>
+  <rect class="st-box" x="608" y="150" width="140" height="44"/>
+  <text class="st-txt" x="678" y="168" text-anchor="middle">D 消费/对账</text>
+  <text class="st-sub" x="678" y="184" text-anchor="middle">M-03 View Store</text>
+  <line class="st-arrow" x1="678" y1="58" x2="678" y2="150"/>
+  <line class="st-arrow" x1="291" y1="132" x2="291" y2="150"/>
+  <rect class="st-dec" x="216" y="206" width="150" height="30"/>
+  <text class="st-dec-txt" x="291" y="225" text-anchor="middle">超水位 → 降采样/丢最旧（P-10）</text>
+  <line class="st-arrow" x1="291" y1="194" x2="291" y2="206"/>
+</svg></div>
+<div class="flow-branch">分支：命令超时 → E_CTX-06（幂等可重试）；能力不足 → E_CTX-03 协商降级；协议不兼容 → E_PROTO-01 拒绝 + 升级提示；队列超水位且降载仍堆积 → 暂停非关键订阅并告警（背压保护，P-10）。</div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:52%"><col style="width:22%"></colgroup><thead><tr><th style="width:26%;text-align:center">协作模块</th><th style="width:52%;text-align:center">协作内容</th><th style="width:22%;text-align:center">触发时机</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-04（会话管理器）</td><td style="text-align:left">能力面白名单（按 role 下发）</td><td style="text-align:left">会话建立时</td></tr><tr class="row1"><td style="text-align:center">M-07（传输适配器）</td><td style="text-align:left">协议消息承载（WASM postMessage / WebSocket）</td><td style="text-align:left">命令/事件收发时</td></tr><tr class="row0"><td style="text-align:center">M-08~M-19（命令/事件源）</td><td style="text-align:left">命令处理器注册 + 事件产生（断点/单步/寄存器/反汇编/内核/外设/探针等）</td><td style="text-align:left">命令路由 / 事件产生时</td></tr><tr class="row1"><td style="text-align:center">M-21（日志）</td><td style="text-align:left">路由/超时日志（联动异常）</td><td style="text-align:left">命令超时/分发异常时</td></tr><tr class="row0"><td style="text-align:center">M-22（HMS）</td><td style="text-align:left">超时/水位信号上报（告警）</td><td style="text-align:left">超时/超水位时</td></tr><tr class="row1"><td style="text-align:center">M-03（View Store）</td><td style="text-align:left">事件订阅消费（刷新 ≤200ms 合并）</td><td style="text-align:left">事件分发时</td></tr></tbody></table></div>
+<h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置（E_CTX 族主属方 + E_PROTO 族）</h3>
+<p class="body">M-05 为 E_CTX 错误码族主属方（源文档 3.4 表16），命令/事件路径的错误码统一收敛于此；协议层错误归 E_PROTO 族（一场景一码）：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:38%"><col style="width:36%"></colgroup><thead><tr><th style="width:26%;text-align:center">错误码 / 场景</th><th style="width:38%;text-align:center">触发条件</th><th style="width:36%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">E_CTX-05 未注册路由</td><td style="text-align:left">命令 msgType 不在 cmdRegistry</td><td style="text-align:left">拒绝并返回（hash 路由兜底页语义）</td></tr><tr class="row1"><td style="text-align:center">E_CTX-06 命令超时</td><td style="text-align:left">Resp 超时 ≤500ms</td><td style="text-align:left">超时错误（幂等可重试）</td></tr><tr class="row0"><td style="text-align:center">E_CTX-03 能力不足</td><td style="text-align:left">QEMU 下调用 L2/L3 能力</td><td style="text-align:left">拒绝并协商降级（capBits 协商）</td></tr><tr class="row1"><td style="text-align:center">E_PROTO-01 协议版本不匹配</td><td style="text-align:left">版本低于最低支持</td><td style="text-align:left">明确拒绝 + 提示升级路径</td></tr><tr class="row0"><td style="text-align:center">E_PROTO-02 未知字段</td><td style="text-align:left">收到未知字段（向后兼容）</td><td style="text-align:left">仅日志，忽略（只增不改）</td></tr><tr class="row1"><td style="text-align:center">E_PROTO-05 序列号缺口</td><td style="text-align:left">断线续拉发现缺口</td><td style="text-align:left">按序列号续拉；无法补齐 → 前端全量状态对账</td></tr><tr class="row0"><td style="text-align:center">E_PROTO-07 关键事件 ack 超时</td><td style="text-align:left">E1 可靠通道 ack 超时</td><td style="text-align:left">重试投递；重试失败 → 前端对账</td></tr><tr class="row1"><td style="text-align:center">E_PROTO-08 消息格式错误</td><td style="text-align:left">报文格式非法</td><td style="text-align:left">拒绝并记录原始报文摘要（脱敏）</td></tr><tr class="row0"><td style="text-align:center">背压保护（P-10）</td><td style="text-align:left">队列超水位且降载仍堆积</td><td style="text-align:left">暂停非关键订阅并告警（与 M-19 一致）</td></tr><tr class="row1"><td style="text-align:center">E_CTX-09 headless 未启用</td><td style="text-align:left">gatewayDispatch 未启用（P1 预留）</td><td style="text-align:left">返回 E_CTX-09（FR-16 未开启）</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）命令超时：E_CTX-06。执行模型=异步可中断超时（05-2）：dispatchWithTimeout 定时器驱动，500ms 未返回即回 E_CTX-06 并作废处理器结果；读类/幂等命令可重试，写类命令不自动重试（防副作用重复）。</p>
+<p class="body">（2）能力不足：E_CTX-03，拒绝 + 协商降级（05-10 降级路径：拒绝响应携带建议能力位 → 前端按 capBits 主动降级后重发 negotiate；或调用方按拒绝响应升级路径处理。QEMU 仅 L1 子集）。</p>
+<p class="body">（3）协议版本：只增不改、未知字段忽略（E_PROTO-02 仅日志）；不兼容明确拒绝 + 升级路径（E_PROTO-01）。</p>
+<p class="body">（4）背压：队列水位 0.8 超限 → 降采样/丢最旧（与 M-19 溢出策略一致）；降载仍堆积 → 暂停非关键订阅并告警（P-10）。</p>
+<p class="body">（5）关键事件可靠投递（05-6 参数）：队列上限 64、ack 超时 500ms、重试间隔 100ms、重试 ≤3 次；队列满或重试耗尽 → 前端对账（E_PROTO-07，关键事件不丢，表91）。</p>
+<p class="body">（6）序列号缺口：数据源=evHistory 环形窗口（最近 10⁴ 条、按 seq 索引，05-7），按缺口 seq 续拉补齐；窗口外缺口 → 前端全量状态对账（E_PROTO-05）。</p>
+<p class="body">（7）打点采样：仅管理员通道可见（P-20），产品/嵌入式工作台不可见（角色边界）；layerSpans 环形溢出丢最旧（05-10）。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表91（M-05 行）：测试要点 = 路由与可靠性；关键用例 = 命令超时重试、关键事件 ack、版本协商；通过准则 = 关键事件不丢、降级正确。展开用例表如下（核心模块覆盖率 ≥70%，源文档 7.3 表92）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:42%"><col style="width:34%"></colgroup><thead><tr><th style="width:24%;text-align:center">用例</th><th style="width:42%;text-align:center">输入/步骤</th><th style="width:34%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（源 2.5/7.1 对齐）</td><td style="text-align:left">按 9.1.1 端口契约表逐项校验 dispatchCommand/publish/subscribe/negotiate/setWatermark/traceSpan 的接口签名、输入校验、输出结构与错误码；替代实现（替代传输/网关）接入前必须同端口契约测试全绿</td><td style="text-align:left">契约测试全绿；契约变更须同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">命令超时重试（表91）</td><td data-label="输入/步骤" style="text-align:left">注入慢处理器（&gt;500ms）后调用读类命令</td><td data-label="通过准则" style="text-align:left">返回 E_CTX-06（异步可中断超时，结果作废）；读类重试成功（幂等可重试）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">写类命令超时不重试（05-8）</td><td data-label="输入/步骤" style="text-align:left">写类命令（如 writeMem）注入慢处理器超时</td><td data-label="通过准则" style="text-align:left">返回 E_CTX-06 且不自动重试（防副作用重复，6.2(1)）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">关键事件 ack（表91）</td><td data-label="输入/步骤" style="text-align:left">publish(breakpointHit) 后订阅方不 ack</td><td data-label="通过准则" style="text-align:left">重试投递 ≤3 次；仍失败 → 前端对账（关键事件不丢，05-6）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">可靠通道背压上限（05-8）</td><td data-label="输入/步骤" style="text-align:left">可靠队列写满（64）后继续发布关键事件</td><td data-label="通过准则" style="text-align:left">队列满 → 触发对账（E_PROTO-07），不无限堆积（05-1/05-6）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">publish 单投递断言（05-8）</td><td data-label="输入/步骤" style="text-align:left">发布 1 个事件后订阅方计数</td><td data-label="通过准则" style="text-align:left">每订阅方恰好收到 1 次（防双投递回归，05-1）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">版本协商（表91）</td><td data-label="输入/步骤" style="text-align:left">negotiate(旧版本) / negotiate(不支持版本)</td><td data-label="通过准则" style="text-align:left">旧版本兼容（只增不改）；不支持版本拒绝 + 升级提示（E_PROTO-01）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">未知字段忽略</td><td data-label="输入/步骤" style="text-align:left">发送含未知字段的报文</td><td data-label="通过准则" style="text-align:left">E_PROTO-02 仅日志；正常处理（向后兼容）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">序列号缺口续拉</td><td data-label="输入/步骤" style="text-align:left">断线后按 seq 续拉</td><td data-label="通过准则" style="text-align:left">按序列号补齐（E_PROTO-05）；无法补齐 → 全量对账</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">背压降载（P-10）</td><td data-label="输入/步骤" style="text-align:left">队列超水位 0.8 后继续发布观测事件</td><td data-label="通过准则" style="text-align:left">降采样/丢最旧（与 M-19 一致）；降载仍堆积 → 暂停非关键订阅并告警</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">能力降级（表91）</td><td data-label="输入/步骤" style="text-align:left">QEMU 后端下发 L2/L3 能力命令</td><td data-label="通过准则" style="text-align:left">E_CTX-03 拒绝 + 降级提示（capBits 协商正确）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">消息格式错误</td><td data-label="输入/步骤" style="text-align:left">发送非法报文</td><td data-label="通过准则" style="text-align:left">E_PROTO-08 拒绝 + 脱敏摘要日志</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">打点采样（P-20）</td><td data-label="输入/步骤" style="text-align:left">traceSpan 采样进入/离开耗时</td><td data-label="通过准则" style="text-align:left">layerSpans 记录正确；产品/嵌入式工作台不可见（仅管理员通道）</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）注册表驱动：cmdRegistry 按命令名登记目标模块处理器，新增命令只登记不改造核心路由（协议只增不改扩展点，表93）。</p>
+<p class="body">（2）分级分发解耦：关键事件可靠通道与观测类节流通道独立实现，可分别单测（可靠投递/背压语义）。</p>
+<p class="body">（3）协议版本化：negotiate 只增不改 + schemaVersion 迁移（事件流持久化配合 M-23 DataStore 归档），契约变更走版本协商不破坏性替换（源 2.5 引用规则③）。</p>
+<p class="body">（4）打点可关：traceSpan 采样入 layerSpans 环形缓冲，仅管理员通道查询，不影响业务路径（P-20）。</p>
+<p class="body">（5）CI 门禁：核心模块单测覆盖率 ≥70%（估算基线，源文档 7.3 表92）；命令路由/事件分发用例纳入确定性夹具。</p>
+<p class="body">（6）契约层可替换性（源 2.5 对齐）：本模块对外 driving 端口收敛到 9.1.1 端口契约，替代实现遵守同端口契约并通过契约测试即可接入。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-05 责任：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:16%"><col style="width:38%"><col style="width:46%"></colgroup><thead><tr><th style="width:16%;text-align:center">质量属性</th><th style="width:38%;text-align:center">目标（估算基线）</th><th style="width:46%;text-align:center">M-05 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">性能</td><td style="text-align:left">命令响应 ≤500ms；刷新 ≤200ms（表93）</td><td style="text-align:left">dispatchCommand 超时管理（E_CTX-06）+ 观测类事件节流（与 M-03/M-19 合并）</td></tr><tr class="row1"><td style="text-align:center">可靠性</td><td style="text-align:left">关键事件可靠投递（E1 语义）</td><td style="text-align:left">关键控制事件 ack/重试 + 前端对账（E_PROTO-07）</td></tr><tr class="row0"><td style="text-align:center">可扩展性</td><td style="text-align:left">协议扩展点（表93）</td><td style="text-align:left">协议只增不改 + cmdRegistry 登记扩展（未知字段忽略 E_PROTO-02）</td></tr><tr class="row1"><td style="text-align:center">韧性</td><td style="text-align:left">故障检测 → 分级 → 处置 → 恢复（NFR-08）</td><td style="text-align:left">背压水位 0.8 降载（P-10）+ 超时/水位信号上报 M-22</td></tr><tr class="row0"><td style="text-align:center">合规</td><td style="text-align:left">业务模块 → 横切组件单向依赖（4.7 表86）</td><td style="text-align:left">只经 M-21/M-22 横切通道，不自行实现日志/告警</td></tr></tbody></table></div>
+<h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:34%"><col style="width:26%"><col style="width:40%"></colgroup><thead><tr><th style="width:34%;text-align:center">依赖方</th><th style="width:26%;text-align:center">被依赖方</th><th style="width:40%;text-align:center">依赖内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-05（命令路由与事件分发）</td><td style="text-align:left">M-04（会话管理器）</td><td style="text-align:left">能力面白名单（按 role 下发）</td></tr><tr class="row1"><td style="text-align:center">M-05</td><td style="text-align:left">M-07（传输适配器）</td><td style="text-align:left">协议消息承载（WASM/WebSocket 双传输）</td></tr><tr class="row0"><td style="text-align:center">M-05</td><td style="text-align:left">M-08~M-19</td><td style="text-align:left">命令处理器注册 + 事件源（调试服务/内核/外设/观测）</td></tr><tr class="row1"><td style="text-align:center">M-05</td><td style="text-align:left">M-21（日志）</td><td style="text-align:left">路由/超时日志（联动异常）</td></tr><tr class="row0"><td style="text-align:center">M-05</td><td style="text-align:left">M-22（HMS）</td><td style="text-align:left">超时/水位信号上报</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表34 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层，本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现（替代传输/网关）遵守同端口契约并通过契约测试（7.1）即可接入：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:30%"><col style="width:16%"><col style="width:54%"></colgroup><thead><tr><th style="width:30%;text-align:center">端口 / 服务</th><th style="width:16%;text-align:center">方向</th><th style="width:54%;text-align:center">契约（输入 → 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:left">dispatchCommand(cmd)</td><td style="text-align:center">提供（driving）</td><td style="text-align:left">输入：ProtocolMessage；异步可中断超时分发（05-2：500ms 未完成即 E_CTX-06 结果作废）；输出：Resp（请求 id 配对；读类幂等可重试、写类不自动重试）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">publish(event)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输入：事件对象；单投递模型（05-1：deliver* 内部经 subTable 单次分发）；关键事件（E1）可靠通道 ack/重试（队列上限 64、ack 500ms、重试≤3，05-6），观测类按节流</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">subscribe(channel, sub)/unsubscribe</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输出：订阅句柄 uint32 id（05-5，退订/对账引用）；channel 枚举 0=debug/1=state/2=trace/3=log</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">negotiate(version, caps)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输入：版本 + 能力位；backendCapBits 来源=M-17 能力位查询（05-3）；输出：NegotiateResult 两态（05-9：{ok,降级后能力位}/{reject,E_PROTO-01,升级路径}）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">setWatermark(ratio)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">超限 → 降采样/丢最旧（与 M-19 对齐）；输出：确认</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">traceSpan(layer, tEnter, tLeave)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">采样入 layerSpans（环形溢出丢最旧，05-10）；仅管理员通道查询（P-20）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">gatewayDispatch(cmd)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">FR-16；映射到 dispatchCommand，未启用时返回 E_CTX-09</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-04（会话管理器）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">能力面白名单（4.2.1 表31）</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-07（传输适配器）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">协议消息承载</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-08~M-19</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">命令/事件源</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">M-21（日志）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">路由/超时日志</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-22（HMS）</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">超时/水位信号上报</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<p class="body">命令成功 → log(INFO, "SESS", "dispatch", "E_OK")；命令超时 → log(WARN, "SESS", "cmd timeout", "E_CTX-06")；能力不足 → log(WARN, "SESS", "cap insufficient", "E_CTX-03")；协议版本不匹配 → log(WARN, "SESS", "proto mismatch", "E_PROTO-01")；未知字段 → log(INFO, "SESS", "unknown field", "E_PROTO-02")；消息格式错误 → log(WARN, "SESS", "bad message", "E_PROTO-08")（原始报文摘要脱敏）。产品/嵌入式工作台不可见（角色边界），仅管理员通道可查。</p>
+</main>
+</div>
+</body>
+</html>

@@ -1,0 +1,1674 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>面向嵌入式软件开发者/测试者的 RISC-V 仿真平台 — 架构设计说明书（华为结构）</title>
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%230B0F14"/><rect x="7" y="7" width="18" height="18" rx="2" fill="none" stroke="%23E6A23C" stroke-width="2"/><path d="M16 11.5 L20.5 16 L16 20.5 L11.5 16 Z" fill="%233EC6A0"/></svg>'>
+<style>
+:root{
+  --bg:#0B0F14; --bg2:#10161D; --bg3:#161E27; --line:#24303B; --line2:#33404E;
+  --ink:#E4E9F0; --ink2:#9AA8B6; --ink3:#677787;
+  --amber:#E6A23C; --amber-soft:rgba(230,162,60,.13);
+  --teal:#3EC6A0; --teal-soft:rgba(62,198,160,.12);
+  --cyan:#5AC8E4; --cyan-soft:rgba(90,200,228,.12);
+  --red:#E4645F; --red-soft:rgba(228,100,95,.13);
+  --ok:#55C97E;
+  --mono:ui-monospace,"SF Mono","Cascadia Code",Consolas,"Liberation Mono","Noto Sans Mono CJK SC",monospace;
+  --sans:"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC","Source Han Sans SC",sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{font-family:var(--sans);background:var(--bg);color:var(--ink);line-height:1.68;font-size:15px;-webkit-font-smoothing:antialiased;min-width:0}
+body::before{content:"";position:fixed;inset:0;z-index:-2;pointer-events:none;background:repeating-linear-gradient(0deg,rgba(255,255,255,.015) 0 1px,transparent 1px 38px),repeating-linear-gradient(90deg,rgba(255,255,255,.015) 0 1px,transparent 1px 38px)}
+a{color:var(--teal);text-decoration:none}
+a:hover{text-decoration:underline}
+.wrap{max-width:1160px;margin:0 auto;padding:0 16px 90px}
+.topbar{position:sticky;top:0;z-index:60;background:rgba(11,15,20,.94);border-bottom:1px solid var(--line);backdrop-filter:blur(8px)}
+.topbar .in{max-width:1160px;margin:0 auto;padding:8px 16px;display:flex;align-items:center;gap:10px}
+.tb-title{font-size:13px;font-weight:600;color:var(--ink);white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto}
+.toc{display:flex;gap:4px;overflow-x:auto;padding:0;scrollbar-width:thin;flex:1 1 auto;min-width:0}
+.toc a{font-size:12px;color:var(--ink2);padding:5px 9px;border:1px solid transparent;border-radius:6px;white-space:nowrap;flex:0 0 auto}
+.toc a:hover{color:var(--ink);border-color:var(--line2);text-decoration:none}
+.toc a.active{color:var(--amber);border-color:rgba(230,162,60,.45);background:var(--amber-soft)}
+.cover{padding:34px 0 6px}
+.cover .kicker{font-family:var(--mono);font-size:12px;color:var(--amber);letter-spacing:.08em}
+.cover h1{font-size:26px;line-height:1.3;font-weight:800;margin:8px 0 4px}
+.cover .sub{color:var(--ink2);font-size:14px}
+.meta{display:grid;grid-template-columns:1fr;gap:6px;margin-top:16px;font-size:13px;color:var(--ink2);border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--bg2)}
+.meta b{color:var(--ink)}
+.sec{padding-top:34px;margin-top:26px;border-top:1px solid var(--line)}
+.sec-num{font-family:var(--mono);font-size:12px;color:var(--amber);letter-spacing:.1em}
+.sec h2{font-size:22px;font-weight:800;margin:3px 0 4px;line-height:1.3}
+.sec .sec-intro{color:var(--ink2);font-size:14px;margin-bottom:12px}
+.sec h3{font-size:17px;font-weight:700;margin:24px 0 10px;padding-left:10px;border-left:3px solid var(--teal);line-height:1.35}
+.sec h4{font-size:15px;font-weight:700;margin:14px 0 6px;color:var(--ink)}
+p{margin:8px 0}
+.verdict{border-left:3px solid var(--amber);background:var(--amber-soft);padding:12px 14px;border-radius:0 10px 10px 0;margin:14px 0;font-size:14px}
+.verdict b{color:var(--amber)}
+.verdict .lead{display:block;font-weight:700;color:var(--ink);font-size:15px;margin-bottom:4px}
+.verdict.green{border-left-color:var(--teal);background:var(--teal-soft)}
+.verdict.green b{color:var(--teal)}
+.stats{display:grid;grid-template-columns:1fr;gap:10px;margin:14px 0}
+.stat{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
+.stat .v{font-family:var(--mono);font-size:22px;color:var(--teal);font-weight:700;line-height:1.2}
+.stat .l{font-size:12px;color:var(--ink2);margin-top:3px;line-height:1.45}
+.cards{display:grid;grid-template-columns:1fr;gap:12px}
+.card{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:14px 16px;min-width:0}
+.card h4{font-size:15px;font-weight:700;display:flex;align-items:center;flex-wrap:wrap;gap:8px;line-height:1.4}
+.card .tagline{font-size:13px;color:var(--ink2);margin-top:4px}
+.kv{display:grid;grid-template-columns:70px 1fr;gap:5px 10px;font-size:13px;margin-top:10px;min-width:0}
+.kv dt{color:var(--ink3);font-family:var(--mono);font-size:11.5px;line-height:1.5;padding-top:1px}
+.kv dd{color:var(--ink2);min-width:0;line-height:1.55}
+.kv dd b{color:var(--ink)}
+.chip{display:inline-block;font-size:11px;padding:1px 8px;border-radius:999px;border:1px solid var(--line2);color:var(--ink2);font-family:var(--mono);white-space:nowrap}
+.chip.ok{color:var(--teal);border-color:rgba(62,198,160,.4);background:var(--teal-soft)}
+.chip.warn{color:var(--amber);border-color:rgba(230,162,60,.4);background:var(--amber-soft)}
+.chip.bad{color:var(--red);border-color:rgba(228,100,95,.4);background:var(--red-soft)}
+.chip.cyan{color:var(--cyan);border-color:rgba(90,200,228,.4);background:var(--cyan-soft)}
+.tbl-scroll{overflow-x:auto;margin:12px 0;border:1px solid var(--line);border-radius:10px;background:var(--bg2)}
+table{border-collapse:collapse;font-size:13px;width:100%}
+.tbl-fixed{table-layout:fixed}
+th,td{border-bottom:1px solid var(--line);padding:8px 10px;vertical-align:top;text-align:left;min-width:0}
+th{background:var(--bg3);color:var(--ink2);font-weight:600;font-size:12.5px;white-space:nowrap}
+tbody tr:last-child td{border-bottom:none}
+td.dim{font-weight:700;color:var(--ink);background:var(--bg3)}
+.mono{font-family:var(--mono)}
+.note{font-size:12px;color:var(--ink3);margin-top:6px;line-height:1.6}
+.fig{margin:14px 0;border:1px solid var(--line);border-radius:10px;background:var(--bg2);padding:12px;overflow-x:auto}
+.fig svg{width:100%;height:auto;display:block;min-width:640px}
+.fig .cap{font-size:12px;color:var(--ink3);margin-top:8px;line-height:1.6}
+.dp{border-left:3px solid var(--cyan);background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:12px 0;min-width:0}
+.dp h4{color:var(--cyan);font-size:15px}
+.dp .row{font-size:13px;margin-top:8px;color:var(--ink2);min-width:0}
+.dp .row b{color:var(--ink)}
+.dp .rec{background:var(--teal-soft);border:1px solid rgba(62,198,160,.35);border-radius:8px;padding:8px 10px;margin-top:8px;font-size:13px;color:var(--teal)}
+ol.qlist,ul.ulist{margin:8px 0 8px 2px;padding-left:20px;font-size:14px;color:var(--ink2)}
+ol.qlist li,ul.ulist li{margin:6px 0;min-width:0}
+ol.qlist li b,ul.ulist li b{color:var(--ink)}
+.totop{position:fixed;right:14px;bottom:16px;z-index:70;width:44px;height:44px;border-radius:12px;border:1px solid var(--line2);background:var(--bg3);color:var(--amber);font-size:20px;line-height:1;font-family:var(--sans);cursor:pointer;display:none;align-items:center;justify-content:center}
+.totop.show{display:flex}
+.tag{display:inline-block;font-family:var(--mono);font-size:11px;color:var(--teal);border:1px solid rgba(62,198,160,.35);background:var(--teal-soft);border-radius:6px;padding:1px 7px;margin:2px 4px 2px 0}
+.kv-row{font-size:13px;margin-top:8px;color:var(--ink2);min-width:0;line-height:1.6}
+.kv-row b{display:block;color:var(--ink3);font-family:var(--mono);font-size:11px;margin-bottom:1px}
+.risk-grid{display:grid;grid-template-columns:1fr;gap:10px;margin:12px 0}
+.pill{display:inline-block;min-width:34px;text-align:center;font-family:var(--mono);font-size:12px;padding:1px 8px;border-radius:6px}
+.pill.h{background:var(--red-soft);color:var(--red);border:1px solid rgba(228,100,95,.4)}
+.pill.m{background:var(--amber-soft);color:var(--amber);border:1px solid rgba(230,162,60,.4)}
+.pill.l{background:var(--teal-soft);color:var(--teal);border:1px solid rgba(62,198,160,.4)}
+@media (min-width:600px){
+  .stats{grid-template-columns:repeat(3,1fr)}
+  .meta{grid-template-columns:repeat(2,1fr);gap:6px 24px}
+}
+@media (min-width:768px){
+  body{font-size:15px}
+  .cover h1{font-size:32px}
+  .wrap{padding:0 24px 100px}
+  .cards{grid-template-columns:repeat(2,1fr)}
+  .sec h2{font-size:26px}
+  .sec-intro{font-size:15px}
+  .tb-title{flex:0 0 auto}
+  .risk-grid{grid-template-columns:repeat(2,1fr)}
+}
+@media (min-width:1024px){
+  .stats{grid-template-columns:repeat(4,1fr)}
+}
+@media print{
+  body{background:#fff;color:#111}
+  .topbar,.totop{display:none!important}
+  .wrap{max-width:none;padding:0}
+  .sec{border-color:#ccc}
+  .card,.dp,.fig,.meta{background:#fff;border-color:#ccc}
+}
+</style>
+</head>
+<body>
+
+<nav class="topbar" aria-label="页内导航">
+  <div class="in">
+    <span class="tb-title">RISC-V 仿真平台 · 架构设计说明书（华为结构）</span>
+    <div class="toc" id="toc">
+      <a href="#sec0" data-toc="0">摘要</a>
+      <a href="#sec1" data-toc="1">1 引言</a>
+      <a href="#sec2" data-toc="2">2 概述</a>
+      <a href="#sec3" data-toc="3">3 总体架构</a>
+      <a href="#sec4" data-toc="4">4 逻辑架构</a>
+      <a href="#sec5" data-toc="5">5 运行架构</a>
+      <a href="#sec6" data-toc="6">6 物理架构</a>
+      <a href="#sec7" data-toc="7">7 数据架构</a>
+      <a href="#sec8" data-toc="8">8 关键技术</a>
+      <a href="#sec9" data-toc="9">9 架构决策</a>
+      <a href="#sec10" data-toc="10">10 质量属性</a>
+      <a href="#sec11" data-toc="11">11 演进兼容</a>
+      <a href="#sec12" data-toc="12">12 风险</a>
+      <a href="#sec13" data-toc="13">13 附录</a>
+    </div>
+  </div>
+</nav>
+
+<main class="wrap">
+
+<!-- ===== 章节 0：文档信息 + 执行摘要 ===== -->
+<section class="sec" id="sec0">
+  <div class="sec-num">EXECUTIVE SUMMARY</div>
+  <h2>文档信息与架构摘要</h2>
+
+  <div class="cover">
+    <div class="kicker">ARCHITECTURE DESIGN · 华为架构设计说明书</div>
+    <h1>面向嵌入式软件开发者/测试者的 RISC-V 仿真平台</h1>
+    <p class="sub">架构设计说明书（AD）· 依据《需求分析报告 v1.1》· 4+1 视图 + 架构决策 + 质量属性 + 追溯矩阵</p>
+    <div class="meta">
+      <span><b>文档版本</b> v2.7（新增 §3.2 用例模型：用例图 + 用例清单，补全 4+1 场景视图的 Actor×用例总览）</span>
+      <span><b>编制日期</b> 2026-10-11</span>
+      <span><b>编制方法</b> 华为架构设计方法论：4+1 视图（逻辑/运行/物理/数据/场景）+ 架构决策（ADR）+ 质量属性设计</span>
+      <span><b>架构决策基线</b> 事件驱动时序(1µs 量子) · 分级外设建模(寄存器接口+行为时序) · 解释执行起步(预留 JIT/双内核) · 双源探针波形(总线 trace + 外设信号) · 内核与前端解耦双形态(WASM/服务端)</span>
+      <span><b>形态说明</b> 单文件自包含 HTML，无外部依赖，可直接浏览器打开评审；架构图为内联 SVG（示意级）</span>
+    </div>
+  </div>
+
+  <div class="verdict">
+    <span class="lead">结论先行：本平台采用「仿真内核为芯、事件协议为纽带、多视图前端为壳」的分层架构，以 4+1 视图覆盖全貌——逻辑视图（五横层）、运行视图（量子化调度与并发）、物理视图（WASM/服务端双形态）、数据视图（五类核心模型）、场景视图（开发/产品双闭环）。差异化能力（多层原型、内嵌波形、反汇编·源码联动、确定性）均通过 ExecutionBackend 与 Peripheral 两大扩展点落实到明确架构层。</span>
+    架构核心取舍：① 量子化混合调度同时满足事件驱动时序（决策点1）与确定性可复现（FR-12）；② 探针边沿编码 + 增量推送把波形这一差异化能力做成性能可控的异步流；③ ExecutionBackend + Peripheral 隔离 ISS 与外设，使自研轻量 ISS（合规 R2）与服务端 QEMU 双内核可插拔；④ 统一命令/事件协议 + 双传输适配支撑浏览器 WASM 与服务端 WebSocket 双形态，零安装（NFR-05）不依赖服务端。本架构不引入周期精确/RTL、不做 HIL/EDA——严格守住需求 3.3 平台边界。
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="v">4+1</div><div class="l">视图方法论：逻辑/运行/物理/数据 + 场景</div></div>
+    <div class="stat"><div class="v">2 扩展点</div><div class="l">ExecutionBackend（双内核）+ Peripheral（分级外设）可插拔</div></div>
+    <div class="stat"><div class="v">1µs</div><div class="l">时间量子（可配置），事件驱动时序；确定性事件队列（FR-12）</div></div>
+    <div class="stat"><div class="v">≥5–10 MIPS</div><div class="l">前端 WASM 解释执行性能目标（NFR-01 估算基线）</div></div>
+  </div>
+
+  <h3>执行摘要（一屏结论）</h3>
+  <ul class="ulist">
+    <li><b>总体架构</b>：五横层——① 前端交互层（多视图独立路由，FR-23）② 会话/命令层（会话隔离、快照持久化，FR-13/19）③ 调试服务层（断点/单步/反汇编·源码联动/寄存器内存/波形/trace，FR-05/08/09/10/14）④ 仿真内核层（事件驱动引擎 + ISS + 分级外设 + 总线映射，FR-01~04/06/07）⑤ 观测管道层（探针 + 边沿编码 + 增量推送，FR-10）；另有横切基础设施——日志系统（记录，仅系统管理员通道）与健康管理 HMS（监测/分级/分角色分发/降级，NFR-07/08）；按角色装配三工作台（产品/嵌入式/系统管理员，§3.4）。</li>
+    <li><b>关键机制</b>：量子化混合调度（确定性，范围 = 种子 + 时间戳化输入事件序列，评审 R8）、ExecutionBackend 双内核（L1/L2/L3 能力分级，评审 H3）、Peripheral 分级外设、探针边沿编码观测管道（容量模型 + 内存预算）、统一命令/事件协议（零拷贝仅限数据面）、Worker 韧性基线 + 指令预算 watchdog（评审 R3）、WASM 沙箱 + 统一转义（NFR-04）、视图状态管理。</li>
+    <li><b>数据模型</b>：Project(产品树) / SimState / DebugMeta / Waveform / ProtocolMessage 五类核心模型 + P1 预留 Interconnect Link（多板互联数据面），为前后端、双形态、双内核的公共契约。</li>
+    <li><b>架构决策（ADR）</b>：事件驱动时序、分级外设、解释执行+双内核、双源探针、three.js(P1)、前端承载零构建改义（评审 R2/R7）——全部有候选与权衡（第 9 章）。</li>
+    <li><b>演进路线</b>：MVP（2D 产品树 + 调试联动 + 波形 + 多视图）→ 2D 增强 → 3D 原型（FR-21）→ 帧缓冲渲染（FR-22）→ 自动化/CI（FR-16/17）→ 多板互联（FR-24~27，里程碑 B）→ GDB RSP/多核（P2）。</li>
+    <li><b>关键风险与应对</b>：浏览器解释性能 → Worker 隔离（主路径）+ 分片兜底 + 双内核；GPL 合规 → 自研 BSD/MIT + 进程隔离（法务确认 + 工程红线）；波形数据量 → 边沿编码 + 增量推送 + 内存预算；3D 复杂度 → 列 P1 且渲染/仿真解耦。</li>
+  </ul>
+</section>
+
+<!-- ===== 章节 1：引言 ===== -->
+<section class="sec" id="sec1">
+  <div class="sec-num">CHAPTER 1</div>
+  <h2>引言</h2>
+  <p class="sec-intro">编写目的 / 预期读者 / 参考资料 / 术语与缩写</p>
+
+  <h3>1.1 编写目的</h3>
+  <p>本文档为「面向嵌入式软件开发者/测试者的 RISC-V 仿真平台」的架构设计说明书（Architecture Design，AD）。其目的是：在《需求分析报告 v1.1》的基础上，将需求转化为可实施、可评审、可演进的高层架构方案——明确总体架构、各视图结构、关键机制、架构决策、质量属性设计与演进路线，作为后续详细设计、开发实施与架构评审的基线。</p>
+
+  <h3>1.2 预期读者</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:700px">
+    <colgroup><col style="width:30%"><col style="width:70%"></colgroup>
+    <thead><tr><th>读者</th><th>关注重点</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">架构师/技术评审</td><td>总体架构、4+1 视图、架构决策（ADR）、质量属性与风险</td></tr>
+      <tr><td class="dim">嵌入式软件工程师</td><td>仿真内核设计、ISS/外设/总线、调试与观测机制</td></tr>
+      <tr><td class="dim">前端工程师</td><td>多视图前端、路由、命令/事件协议、数据模型</td></tr>
+      <tr><td class="dim">测试工程师</td><td>确定性/快照、trace 导出、CI 接口（P1）、验收路径</td></tr>
+      <tr><td class="dim">产品/管理者</td><td>执行摘要、演进路线、风险与市场差异化</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>1.3 参考资料</h3>
+  <ul class="ulist">
+    <li><b>《面向嵌入式软件开发者/测试者的 RISC-V 仿真平台 — 需求分析报告 v1.1》</b>（2026-10-11）：六层概念空间模型、四大技术决策点、13 条 P0 功能需求（FR-01~FR-12 + FR-23）、MVP 范围、智能灯 E2E 验收主线。</li>
+    <li>竞品调研三份事实清单（QEMU/Spike/TinyEMU/Unicorn；Renode/Proteus/Wokwi；Imperas/Synopsys/Simics），外部事实均以其为准。</li>
+    <li>华为架构设计方法论：4+1 视图模型（逻辑、开发、进程/运行、物理、场景视图）与架构决策记录（ADR）实践。</li>
+  </ul>
+
+  <h3>1.4 术语与缩写</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:700px">
+    <colgroup><col style="width:26%"><col style="width:74%"></colgroup>
+    <thead><tr><th>术语/缩写</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">ISS</td><td>Instruction Set Simulator，指令集仿真器；本平台为 RV32IMC 解释执行内核</td></tr>
+      <tr><td class="dim">ExecutionBackend</td><td>执行后端抽象：隔离「如何执行指令」与「如何调试/观测」，支持自研 ISS 与 QEMU 双内核</td></tr>
+      <tr><td class="dim">Peripheral</td><td>外设抽象：寄存器接口 + 行为时序 + 中断线 + 探针，支撑分级建模与插件化</td></tr>
+      <tr><td class="dim">时间量子</td><td>事件驱动仿真的最小时间步（默认 1µs），决定确定性调度粒度</td></tr>
+      <tr><td class="dim">DWARF</td><td>调试信息格式，用于「地址↔源码行」映射（反汇编·源码联动）</td></tr>
+      <tr><td class="dim">GDB RSP</td><td>GDB Remote Serial Protocol，外部调试器接入协议（P1）</td></tr>
+      <tr><td class="dim">WASM / WebSocket</td><td>浏览器形态内核承载方式 / 服务端形态通信协议（双形态）</td></tr>
+      <tr><td class="dim">FR / NFR</td><td>功能需求 / 非功能需求（沿用需求报告编号）</td></tr>
+      <tr><td class="dim">ADR</td><td>Architecture Decision Record，架构决策记录</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ===== 章节 2：架构设计概述 ===== -->
+<section class="sec" id="sec2">
+  <div class="sec-num">CHAPTER 2</div>
+  <h2>架构设计概述</h2>
+  <p class="sec-intro">架构设计目标 / 架构设计约束 / 架构设计原则 / 架构设计方法</p>
+
+  <div class="verdict green">
+    <span class="lead">架构设计目标以「可观测性 × 易用性 × 合规 × 可扩展」为第一优先级，保真度以「够用」为界——差异化不拼「仿得更真」而拼「看得更清、上手更快」。所有目标、约束、原则均由需求推导并有据可查。</span>
+  </div>
+
+  <h3>2.1 架构设计目标</h3>
+  <div class="cards">
+    <div class="card">
+      <h4><span class="chip ok">G1</span> 可观测性优先</h4>
+      <p class="tagline">波形、单步、反汇编·源码联动、内存/寄存器、trace 是差异化核心（需求 1.4 硬能力 2）。架构让每个可观测动作有确定归属、低延迟、可增量推送。观测管道（第 8 章）为独立横层。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip ok">G2</span> 零安装与易用</h4>
+      <p class="tagline">浏览器 WASM 或服务端 WebSocket，file:// 直接可开（NFR-05）。内核可内嵌或远程承载，两形态共用同一协议与数据模型（第 6 章物理架构）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip ok">G3</span> 内核与前端解耦、双形态</h4>
+      <p class="tagline">仿真内核与前端解耦（NFR-06）。ExecutionBackend 使同一套调试服务与前端可对接 WASM 自研 ISS 或服务端 QEMU（决策点 3）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip ok">G4</span> 确定性可复现</h4>
+      <p class="tagline">测试者核心价值（FR-12，借鉴 Simics 检查点）。架构把虚拟时间推进、事件调度、随机源收敛到确定性引擎，固定种子即复现，为快照/回放预留。<b>确定性范围 = 种子 + 时间戳化输入事件序列 → 结果唯一（§8.1 D0，评审 R8）</b>。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip ok">G5</span> 合规与安全</h4>
+      <p class="tagline">GPL 合规（R2）、WASM 沙箱 + XSS 防护（NFR-04/R6）。内核可自研（BSD/MIT）并支持进程隔离，前端字符串统一转义，固件仅沙箱内执行。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip ok">G6</span> 可扩展（插件化）</h4>
+      <p class="tagline">外设分级建模（NFR-06，借鉴 Spike 共享库/Renode 分级）。Peripheral 抽象 + 注册表 + 实例化到地址区间，支撑 UART/GPIO/定时器起步，LCD framebuffer 与更多外设随 P1 插件化加入。</p>
+    </div>
+  </div>
+
+  <h3>2.2 架构设计约束</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:760px">
+    <colgroup><col style="width:18%"><col style="width:46%"><col style="width:36%"></colgroup>
+    <thead><tr><th>约束类别</th><th>约束内容</th><th>来源/影响</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">技术约束</td><td>浏览器内解释执行性能基线（≥5–10 MIPS）、命令响应 ≤500ms、波形刷新 ≤200ms（估算基线）</td><td>NFR-01/02；决定引擎与观测设计（第 5/8 章）</td></tr>
+      <tr><td class="dim">商业约束</td><td>零安装、免费入口、低门槛；与商用虚拟平台的差异化（不拼全 ISA 保真度）</td><td>定位与市场（需求 1.1/2.5）</td></tr>
+      <tr><td class="dim">合规约束</td><td>若复用 QEMU/Unicorn（GPL-2.0）会触发衍生作品传染；内核须可自研 BSD/MIT 或进程隔离</td><td>风险 R2；决定 ExecutionBackend 双内核（第 9 章 ADR-3）</td></tr>
+      <tr><td class="dim">范围约束</td><td>不做周期精确/RTL、不做 HIL/EDA、不做编译器/IDE 全栈、不承诺全 ISA 扩展</td><td>需求 3.3 边界表</td></tr>
+      <tr><td class="dim">平台约束</td><td>现代浏览器 + 移动端 375px 可读 + file:// 直接可开；内核与前端解耦双形态</td><td>NFR-05/06</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>2.3 架构设计原则</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:760px">
+    <colgroup><col style="width:22%"><col style="width:44%"><col style="width:34%"></colgroup>
+    <thead><tr><th>原则</th><th>架构落地</th><th>对齐需求/决策</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">够用保真度</td><td>事件驱动时序（1µs 量子）、行为级外设、解释执行起步——不为周期精确/RTL 建模买单</td><td>决策点 1/2/3；需求 3.3</td></tr>
+      <tr><td class="dim">可观测是分层能力</td><td>观测管道独立横层，探针/波形/trace 不散落在内核各处</td><td>硬能力 2；FR-10/14</td></tr>
+      <tr><td class="dim">契约先行（协议解耦）</td><td>统一命令/事件协议 + 五类数据模型为前后端、双形态、双内核公共契约</td><td>NFR-06；决策点 3</td></tr>
+      <tr><td class="dim">双内核可插拔</td><td>ExecutionBackend 隔离 ISS；调试服务只面对抽象</td><td>决策点 3；R1/R2</td></tr>
+      <tr><td class="dim">确定性内建于引擎</td><td>确定性引擎收敛时间/事件/随机源，非外围约束</td><td>FR-06/12；决策点 1</td></tr>
+      <tr><td class="dim">安全是横切面</td><td>WASM 沙箱 + 统一转义 + 会话隔离，跨所有层</td><td>NFR-04；R6</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>2.4 架构设计方法（4+1 视图 + ADR）</h3>
+  <p>本架构采用华为架构设计方法论——<b>4+1 视图模型</b>与<b>架构决策记录（ADR）</b>：</p>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:760px">
+    <colgroup><col style="width:16%"><col style="width:44%"><col style="width:40%"></colgroup>
+    <thead><tr><th>视图</th><th>回答的问题</th><th>对应章节</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">逻辑视图</td><td>系统由哪些模块组成、职责与依赖如何</td><td>第 4 章 逻辑架构</td></tr>
+      <tr><td class="dim">运行视图</td><td>进程/线程如何组织、关键运行机制与时序</td><td>第 5 章 运行架构</td></tr>
+      <tr><td class="dim">物理视图</td><td>部署在何处、运行环境与拓扑</td><td>第 6 章 物理架构</td></tr>
+      <tr><td class="dim">数据视图</td><td>核心数据模型、数据流与存储</td><td>第 7 章 数据架构</td></tr>
+      <tr><td class="dim">场景视图</td><td>用例模型（Actor × 用例）+ 关键场景（双闭环）如何驱动架构</td><td>第 3 章 总体架构（3.2）</td></tr>
+      <tr><td class="dim">架构决策（ADR）</td><td>关键技术选型与权衡理由</td><td>第 9 章 架构决策</td></tr>
+      <tr><td class="dim">质量属性</td><td>非功能需求（性能/可靠/安全/可维护等）如何由架构支撑</td><td>第 10 章 质量属性</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ===== 章节 3：总体架构 ===== -->
+<section class="sec" id="sec3">
+  <div class="sec-num">CHAPTER 3</div>
+  <h2>总体架构设计</h2>
+  <p class="sec-intro">架构风格与总体视图（逻辑视图主图）/ 场景视图（双闭环）/ 需求六层映射与分层职责</p>
+
+  <div class="verdict">
+    <span class="lead">总体架构把需求六层概念空间映射为五横层软件架构：L0/L5 → 前端交互层，L1 → 外设/总线子模块，L2 → ISS，L3 → 仿真引擎，L4 → 调试服务与观测管道。前端在顶、内核在底，观测沿「内核→观测管道→调试服务→前端」上行，构成可下钻、可观察的闭环。</span>
+  </div>
+
+  <h3>3.1 架构风格与总体视图</h3>
+  <p>架构风格：<b>分层 + 事件驱动仿真内核 + 插件化扩展</b>。五横层为逻辑主视图（对应 4+1 的逻辑视图）；另有<b>日志（M-21）/ HMS（M-22）/ DataStore（M-23）三条横切基础设施</b>（被全层消费、不归属任何一层，图中底部虚线带）：</p>
+  <div class="fig">
+    <svg viewBox="0 0 880 580" role="img" aria-label="总体架构：需求六层模型映射到五横层软件架构">
+      <defs>
+        <marker id="aG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3EC6A0"/></marker>
+        <marker id="aA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#E6A23C"/></marker>
+      </defs>
+      <g font-size="10.5" fill="#677787">
+        <text x="760" y="62">L0 产品/系统</text>
+        <text x="760" y="112">L5 前端交互</text>
+        <text x="760" y="196">L4 调试观察</text>
+        <text x="760" y="278">L3 仿真引擎</text>
+        <text x="760" y="360">L2 处理器</text>
+        <text x="760" y="448">L1 硬件描述</text>
+      </g>
+      <rect x="16" y="16" width="720" height="96" rx="10" fill="#161E27" stroke="#3EC6A0"/>
+      <text x="30" y="36" font-size="13" fill="#E6A23C" font-weight="700">① 前端交互层（Presentation）· FR-01/05/11/23</text>
+      <rect x="30" y="44" width="150" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="105" y="64" text-anchor="middle" font-size="11" fill="#E4E9F0">产品视图(2D 树/原理图)</text>
+      <rect x="192" y="44" width="150" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="267" y="64" text-anchor="middle" font-size="11" fill="#E4E9F0">调试视图(寄存器·内存·反汇编源码)</text>
+      <rect x="354" y="44" width="130" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="419" y="64" text-anchor="middle" font-size="11" fill="#E4E9F0">波形视图(独立路由)</text>
+      <rect x="496" y="44" width="110" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="551" y="64" text-anchor="middle" font-size="11" fill="#E4E9F0">串口终端</text>
+      <rect x="618" y="44" width="102" height="30" rx="6" fill="#1E2933" stroke="#5AC8E4"/><text x="669" y="64" text-anchor="middle" font-size="11" fill="#E4E9F0">ELF 加载器</text>
+      <rect x="30" y="80" width="330" height="24" rx="6" fill="#10161D" stroke="#33404E"/><text x="195" y="97" text-anchor="middle" font-size="10.5" fill="#9AA8B6">多视图 hash 路由 · 视图状态管理 · 命令/事件协议客户端</text>
+      <rect x="372" y="80" width="332" height="24" rx="6" fill="#10161D" stroke="#E6A23C" stroke-dasharray="4 3"/><text x="538" y="97" text-anchor="middle" font-size="10.5" fill="#E6A23C">P1: 3D 引擎(three.js) · 帧缓冲→屏幕纹理</text>
+      <line x1="380" y1="112" x2="380" y2="130" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aG)"/>
+      <rect x="16" y="130" width="720" height="66" rx="10" fill="#161E27" stroke="#3EC6A0"/>
+      <text x="30" y="150" font-size="13" fill="#E6A23C" font-weight="700">② 会话 / 命令层（Session · Command）· FR-12/13/19</text>
+      <rect x="30" y="158" width="170" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="115" y="178" text-anchor="middle" font-size="11" fill="#E4E9F0">仿真会话管理(并发隔离)</text>
+      <rect x="212" y="158" width="150" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="287" y="178" text-anchor="middle" font-size="11" fill="#E4E9F0">项目/快照持久化</text>
+      <rect x="374" y="158" width="150" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="449" y="178" text-anchor="middle" font-size="11" fill="#E4E9F0">命令路由/事件分发</text>
+      <rect x="536" y="158" width="184" height="30" rx="6" fill="#10161D" stroke="#33404E"/><text x="628" y="178" text-anchor="middle" font-size="11" fill="#9AA8B6">确定性会话：固定种子·事件序列记录</text>
+      <line x1="380" y1="196" x2="380" y2="214" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aG)"/>
+      <rect x="16" y="214" width="720" height="66" rx="10" fill="#161E27" stroke="#3EC6A0"/>
+      <text x="30" y="234" font-size="13" fill="#E6A23C" font-weight="700">③ 调试服务层（Debug Services）· FR-05/08/09/10/14/15</text>
+      <rect x="30" y="242" width="150" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="105" y="262" text-anchor="middle" font-size="11" fill="#E4E9F0">断点/单步管理</text>
+      <rect x="192" y="242" width="160" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="272" y="262" text-anchor="middle" font-size="11" fill="#E4E9F0">反汇编·源码联动</text>
+      <rect x="364" y="242" width="150" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="439" y="262" text-anchor="middle" font-size="11" fill="#E4E9F0">寄存器/内存访问</text>
+      <rect x="526" y="242" width="194" height="30" rx="6" fill="#10161D" stroke="#5AC8E4"/><text x="623" y="262" text-anchor="middle" font-size="11" fill="#E4E9F0">符号表/DWARF · trace 导出</text>
+      <line x1="380" y1="280" x2="380" y2="298" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aG)"/>
+      <rect x="16" y="298" width="720" height="140" rx="10" fill="#161E27" stroke="#3EC6A0"/>
+      <text x="30" y="318" font-size="13" fill="#E6A23C" font-weight="700">④ 仿真内核层（Simulation Core）· FR-01~04/06/07</text>
+      <rect x="30" y="326" width="218" height="98" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="139" y="344" text-anchor="middle" font-size="11" fill="#E4E9F0">事件驱动仿真引擎</text>
+      <text x="44" y="366" font-size="10.5" fill="#9AA8B6">主循环 · 时间量子(1µs)</text>
+      <text x="44" y="382" font-size="10.5" fill="#9AA8B6">事件队列 · 确定性调度</text>
+      <text x="44" y="398" font-size="10.5" fill="#9AA8B6">虚拟时间推进</text>
+      <text x="44" y="416" font-size="10.5" fill="#9AA8B6">中断采样</text>
+      <rect x="262" y="326" width="150" height="98" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="337" y="344" text-anchor="middle" font-size="11" fill="#E4E9F0">RISC-V ISS（RV32IMC）</text>
+      <text x="276" y="366" font-size="10.5" fill="#9AA8B6">解码-执行</text>
+      <text x="276" y="382" font-size="10.5" fill="#9AA8B6">CSR·中断·异常</text>
+      <text x="276" y="398" font-size="10.5" fill="#9AA8B6">访存分发</text>
+      <text x="276" y="416" font-size="10.5" fill="#9AA8B6">指令钩子(调试)</text>
+      <rect x="426" y="326" width="138" height="98" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="495" y="344" text-anchor="middle" font-size="11" fill="#E4E9F0">总线·内存映射</text>
+      <text x="440" y="366" font-size="10.5" fill="#9AA8B6">区间树查表</text>
+      <text x="440" y="382" font-size="10.5" fill="#9AA8B6">读写分发</text>
+      <text x="440" y="398" font-size="10.5" fill="#9AA8B6">未映射→访存异常</text>
+      <rect x="576" y="326" width="144" height="98" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="648" y="344" text-anchor="middle" font-size="11" fill="#E4E9F0">外设模型层(Peripheral)</text>
+      <text x="590" y="366" font-size="10.5" fill="#9AA8B6">UART·GPIO·定时器</text>
+      <text x="590" y="382" font-size="10.5" fill="#9AA8B6">分级建模·插件注册</text>
+      <text x="590" y="398" font-size="10.5" fill="#9AA8B6">中断请求线</text>
+      <text x="590" y="416" font-size="10.5" fill="#E6A23C">P1: LCD framebuffer</text>
+      <line x1="380" y1="438" x2="380" y2="456" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aG)"/>
+      <rect x="16" y="456" width="720" height="66" rx="10" fill="#161E27" stroke="#5AC8E4"/>
+      <text x="30" y="476" font-size="13" fill="#E6A23C" font-weight="700">⑤ 观测管道层（Observability）· FR-10/14</text>
+      <rect x="30" y="484" width="170" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="115" y="504" text-anchor="middle" font-size="11" fill="#E4E9F0">探针(总线 trace + 外设信号)</text>
+      <rect x="212" y="484" width="150" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="287" y="504" text-anchor="middle" font-size="11" fill="#E4E9F0">波形采样·边沿编码</text>
+      <rect x="374" y="484" width="150" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="449" y="504" text-anchor="middle" font-size="11" fill="#E4E9F0">增量推送·环形缓冲</text>
+      <rect x="536" y="484" width="184" height="30" rx="6" fill="#10161D" stroke="#33404E"/><text x="628" y="504" text-anchor="middle" font-size="11" fill="#9AA8B6">导出 CSV / VCD / trace</text>
+      <rect x="16" y="530" width="720" height="44" rx="10" fill="#10161D" stroke="#5AC8E4" stroke-dasharray="5 4"/>
+      <text x="30" y="549" font-size="12.5" fill="#5AC8E4" font-weight="700">横切基础设施：日志系统（M-21）· 健康管理 HMS（M-22）· 数据存储 DataStore（M-23）</text>
+      <text x="30" y="566" font-size="10.5" fill="#9AA8B6">被全层消费、不归属任何一层：记录（仅系统管理员通道）· 异常监测/分级/分角色分发/降级 · 快照/项目/配置/日志归档（详见 §4.1 / §8.5 / §7.4）</text>
+    </svg>
+    <div class="cap">总体架构五横层（需求六层映射：L0/L5→①，L1→外设/总线，L2→ISS，L3→引擎，L4→③+⑤）。下行灰箭头为命令/控制方向；观测经⑤→③→①上行。P1 琥珀虚线为 3D/帧缓冲扩展点。底部虚线横切带为平台级组件（日志/HMS/DataStore），与五横层正交、被全层消费（图例：虚线=横切）。</div>
+  </div>
+
+  <h3>3.2 场景视图与用例模型（4+1 的场景视图）</h3>
+  <p><b>用例模型</b>回答「谁（Actor）用平台做什么（Use Case）」：参与者来自 §3.4 三工作台角色 + 外部系统（CI/测试框架、GDB 客户端、分享链接读者）；用例由需求 FR/NFR 归并而来，并标注 MVP/P1/P2 边界。用例图给出角色 × 用例 × 系统边界的总体关系（参与关系以椭圆副标注为准，省略交叉连线），完整追溯见下方用例清单：</p>
+  <div class="fig">
+    <svg viewBox="0 0 880 600" role="img" aria-label="RISC-V 仿真平台用例图：六类参与者与十六个用例">
+      <defs>
+        <marker id="aC1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#5AC8E4"/></marker>
+        <marker id="aC2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3EC6A0"/></marker>
+        <marker id="aC3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#E6A23C"/></marker>
+        <marker id="aC4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#9AA8B6"/></marker>
+      </defs>
+      <rect x="210" y="16" width="654" height="568" rx="10" fill="none" stroke="#33404E" stroke-width="1.2" stroke-dasharray="6 4"/>
+      <text x="222" y="35" font-size="11" fill="#9AA8B6">RISC-V 仿真平台（系统边界）</text>
+      <!-- Actor -->
+      <rect x="18" y="44" width="176" height="54" rx="8" fill="#1E2933" stroke="#5AC8E4"/><circle cx="36" cy="64" r="7" fill="none" stroke="#5AC8E4" stroke-width="1.2"/><path d="M 36 71 v 12 M 28 78 h 16" stroke="#5AC8E4" stroke-width="1.2"/><text x="54" y="68" font-size="12" fill="#E4E9F0">产品用户</text><text x="54" y="86" font-size="9.5" fill="#677787">产品工作台 · 搭建/演示</text>
+      <rect x="18" y="112" width="176" height="54" rx="8" fill="#1E2933" stroke="#3EC6A0"/><circle cx="36" cy="132" r="7" fill="none" stroke="#3EC6A0" stroke-width="1.2"/><path d="M 36 139 v 12 M 28 146 h 16" stroke="#3EC6A0" stroke-width="1.2"/><text x="54" y="136" font-size="12" fill="#E4E9F0">嵌入式开发者</text><text x="54" y="154" font-size="9.5" fill="#677787">嵌入式工作台 · 调试/观测</text>
+      <rect x="18" y="180" width="176" height="54" rx="8" fill="#1E2933" stroke="#E6A23C"/><circle cx="36" cy="200" r="7" fill="none" stroke="#E6A23C" stroke-width="1.2"/><path d="M 36 207 v 12 M 28 214 h 16" stroke="#E6A23C" stroke-width="1.2"/><text x="54" y="204" font-size="12" fill="#E4E9F0">系统管理员</text><text x="54" y="222" font-size="9.5" fill="#677787">管理员工作台 · 运维诊断</text>
+      <rect x="18" y="248" width="176" height="54" rx="8" fill="#1E2933" stroke="#9AA8B6"/><circle cx="36" cy="268" r="7" fill="none" stroke="#9AA8B6" stroke-width="1.2"/><path d="M 36 275 v 12 M 28 282 h 16" stroke="#9AA8B6" stroke-width="1.2"/><text x="54" y="272" font-size="12" fill="#E4E9F0">CI / 测试框架</text><text x="54" y="290" font-size="9.5" fill="#677787">headless / REST / CLI（P1）</text>
+      <rect x="18" y="316" width="176" height="54" rx="8" fill="#1E2933" stroke="#9AA8B6"/><circle cx="36" cy="336" r="7" fill="none" stroke="#9AA8B6" stroke-width="1.2"/><path d="M 36 343 v 12 M 28 350 h 16" stroke="#9AA8B6" stroke-width="1.2"/><text x="54" y="340" font-size="12" fill="#E4E9F0">GDB 客户端</text><text x="54" y="358" font-size="9.5" fill="#677787">外部调试器 RSP（P2）</text>
+      <rect x="18" y="384" width="176" height="54" rx="8" fill="#1E2933" stroke="#9AA8B6"/><circle cx="36" cy="404" r="7" fill="none" stroke="#9AA8B6" stroke-width="1.2"/><path d="M 36 411 v 12 M 28 418 h 16" stroke="#9AA8B6" stroke-width="1.2"/><text x="54" y="408" font-size="12" fill="#E4E9F0">分享链接读者</text><text x="54" y="426" font-size="9.5" fill="#677787">只读访问（FR-13）</text>
+      <!-- 主线连线 -->
+      <line x1="194" y1="71" x2="232" y2="71" stroke="#5AC8E4" stroke-width="1.3" marker-end="url(#aC1)"/>
+      <line x1="194" y1="139" x2="232" y2="139" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aC2)"/>
+      <line x1="194" y1="207" x2="194" y2="398" stroke="#E6A23C" stroke-width="1.3"/><line x1="194" y1="398" x2="232" y2="398" stroke="#E6A23C" stroke-width="1.3" marker-end="url(#aC3)"/>
+      <line x1="194" y1="275" x2="194" y2="464" stroke="#9AA8B6" stroke-width="1.2"/><line x1="194" y1="464" x2="232" y2="464" stroke="#9AA8B6" stroke-width="1.2" marker-end="url(#aC4)"/>
+      <line x1="194" y1="411" x2="194" y2="332" stroke="#9AA8B6" stroke-width="1.2"/><line x1="194" y1="332" x2="232" y2="332" stroke="#9AA8B6" stroke-width="1.2" marker-end="url(#aC4)"/>
+      <!-- 行1：搭建与配置 -->
+      <rect x="238" y="44" width="286" height="48" rx="24" fill="#1E2933" stroke="#3EC6A0"/><text x="381" y="66" text-anchor="middle" font-size="12" fill="#E4E9F0">搭建产品树与映射配置</text><text x="381" y="82" text-anchor="middle" font-size="9.5" fill="#677787">FR-01/02/03/07 · 产品/嵌入式 · MVP</text>
+      <rect x="556" y="44" width="286" height="48" rx="24" fill="#1E2933" stroke="#3EC6A0"/><text x="699" y="66" text-anchor="middle" font-size="12" fill="#E4E9F0">时钟树与外设参数</text><text x="699" y="82" text-anchor="middle" font-size="9.5" fill="#677787">FR-07 · 产品/嵌入式 · MVP</text>
+      <!-- 行2：运行与调试 -->
+      <rect x="238" y="110" width="286" height="48" rx="24" fill="#1E2933" stroke="#3EC6A0"/><text x="381" y="132" text-anchor="middle" font-size="12" fill="#E4E9F0">加载固件 ELF / Raw / HEX</text><text x="381" y="148" text-anchor="middle" font-size="9.5" fill="#677787">FR-05 · 嵌入式 · MVP</text>
+      <rect x="556" y="110" width="286" height="48" rx="24" fill="#1E2933" stroke="#3EC6A0"/><text x="699" y="132" text-anchor="middle" font-size="12" fill="#E4E9F0">运行 / 暂停 / 单步 / 断点</text><text x="699" y="148" text-anchor="middle" font-size="9.5" fill="#677787">FR-06/08 · 嵌入式 · MVP</text>
+      <!-- 行3：观测 / 反汇编 -->
+      <rect x="238" y="176" width="286" height="48" rx="24" fill="#1E2933" stroke="#3EC6A0"/><text x="381" y="198" text-anchor="middle" font-size="12" fill="#E4E9F0">状态观测：寄存器/内存/波形/trace/串口</text><text x="381" y="214" text-anchor="middle" font-size="9.5" fill="#677787">FR-09/10/14 · 嵌入式/产品 · MVP</text>
+      <rect x="556" y="176" width="286" height="48" rx="24" fill="#1E2933" stroke="#3EC6A0"/><text x="699" y="198" text-anchor="middle" font-size="12" fill="#E4E9F0">反汇编 · 源码联动</text><text x="699" y="214" text-anchor="middle" font-size="9.5" fill="#677787">FR-05 · 嵌入式 · MVP</text>
+      <!-- 行4：变量监视 / 快照 -->
+      <rect x="238" y="242" width="286" height="48" rx="24" fill="#1E2933" stroke="#3EC6A0"/><text x="381" y="264" text-anchor="middle" font-size="12" fill="#E4E9F0">变量监视</text><text x="381" y="280" text-anchor="middle" font-size="9.5" fill="#677787">FR-11 · 嵌入式 · 地址型 MVP / 符号名型 P1</text>
+      <rect x="556" y="242" width="286" height="48" rx="24" fill="#1E2933" stroke="#E6A23C"/><text x="699" y="264" text-anchor="middle" font-size="12" fill="#E4E9F0">快照恢复与确定性回放</text><text x="699" y="280" text-anchor="middle" font-size="9.5" fill="#677787">FR-12/19 · 嵌入式/产品 · MVP</text>
+      <!-- 行5：项目 / 日志 -->
+      <rect x="238" y="308" width="286" height="48" rx="24" fill="#1E2933" stroke="#E6A23C"/><text x="381" y="330" text-anchor="middle" font-size="12" fill="#E4E9F0">项目持久化与分享</text><text x="381" y="346" text-anchor="middle" font-size="9.5" fill="#677787">FR-13 · 产品/嵌入式/读者 · MVP</text>
+      <rect x="556" y="308" width="286" height="48" rx="24" fill="#1E2933" stroke="#E6A23C"/><text x="699" y="330" text-anchor="middle" font-size="12" fill="#E4E9F0">日志与诊断（仅管理员通道）</text><text x="699" y="346" text-anchor="middle" font-size="9.5" fill="#677787">NFR-07 · 管理员 · MVP</text>
+      <!-- 行6：健康 / 性能 -->
+      <rect x="238" y="374" width="286" height="48" rx="24" fill="#1E2933" stroke="#E6A23C"/><text x="381" y="396" text-anchor="middle" font-size="12" fill="#E4E9F0">健康监测与异常处置</text><text x="381" y="412" text-anchor="middle" font-size="9.5" fill="#677787">NFR-08 · 管理员 · MVP（崩溃快照+恢复）</text>
+      <rect x="556" y="374" width="286" height="48" rx="24" fill="#1E2933" stroke="#E6A23C" stroke-dasharray="5 3"/><text x="699" y="396" text-anchor="middle" font-size="12" fill="#E4E9F0">性能监控</text><text x="699" y="412" text-anchor="middle" font-size="9.5" fill="#677787">FR-20 · 管理员 · P2</text>
+      <!-- 行7：自动化 / 3D -->
+      <rect x="238" y="440" width="286" height="48" rx="24" fill="#1E2933" stroke="#5AC8E4" stroke-dasharray="5 3"/><text x="381" y="462" text-anchor="middle" font-size="12" fill="#E4E9F0">自动化与场景断言</text><text x="381" y="478" text-anchor="middle" font-size="9.5" fill="#677787">FR-16/17 · 嵌入式/CI · P1</text>
+      <rect x="556" y="440" width="286" height="48" rx="24" fill="#1E2933" stroke="#5AC8E4" stroke-dasharray="5 3"/><text x="699" y="462" text-anchor="middle" font-size="12" fill="#E4E9F0">3D 视图与帧缓冲渲染</text><text x="699" y="478" text-anchor="middle" font-size="9.5" fill="#677787">FR-21/22 · 产品 · P1</text>
+      <!-- 行8：多板 / GDB -->
+      <rect x="238" y="506" width="286" height="48" rx="24" fill="#1E2933" stroke="#5AC8E4" stroke-dasharray="5 3"/><text x="381" y="528" text-anchor="middle" font-size="12" fill="#E4E9F0">多板互联调试</text><text x="381" y="544" text-anchor="middle" font-size="9.5" fill="#677787">FR-24~27 · 嵌入式 · P1</text>
+      <rect x="556" y="506" width="286" height="48" rx="24" fill="#1E2933" stroke="#5AC8E4" stroke-dasharray="5 3"/><text x="699" y="528" text-anchor="middle" font-size="12" fill="#E4E9F0">GDB RSP / 多核</text><text x="699" y="544" text-anchor="middle" font-size="9.5" fill="#677787">FR-15/18 · GDB/嵌入式 · P2</text>
+      <text x="222" y="574" font-size="10" fill="#9AA8B6">图例：实线胶囊 = MVP（青绿=搭建/调试，琥珀=项目/管理）；虚线胶囊 = P1/P2（蓝=自动化/演进，琥珀虚线=P2）；参与者以椭圆副标注为准（省略交叉连线，完整关系见用例清单表）</text>
+    </svg>
+    <div class="cap">用例图（4+1 场景视图的 Actor×用例总览）：六类参与者 × 十六个用例，MVP 12 / P1 3 / P2 1；三工作台角色（§3.4）与外部系统（CI/GDB/读者）分列系统边界两侧。</div>
+  </div>
+  <div class="tbl-title">用例清单（UC ↔ FR/NFR ↔ 支撑模块 ↔ 优先级）</div>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:900px">
+    <colgroup><col style="width:8%"><col style="width:24%"><col style="width:18%"><col style="width:14%"><col style="width:24%"><col style="width:12%"></colgroup>
+    <thead><tr><th>用例</th><th>用例名称</th><th>主要参与者</th><th>需求依据</th><th>支撑模块</th><th>优先级</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">UC-01</td><td>搭建产品树与映射配置</td><td>产品用户 / 嵌入式开发者</td><td>FR-01/02/03/07</td><td>M-01 视图装配 · M-02 产品树 · M-14/M-15 映射</td><td>MVP</td></tr>
+      <tr><td class="dim">UC-02</td><td>加载固件（ELF/Raw/HEX）</td><td>嵌入式开发者</td><td>FR-05</td><td>M-06 ELF/DWARF · M-12 内核 · M-17 会话</td><td>MVP</td></tr>
+      <tr><td class="dim">UC-03</td><td>运行控制与调试（运行/暂停/单步/断点）</td><td>嵌入式开发者</td><td>FR-06/08</td><td>M-04/M-05 会话命令 · M-08 调试服务 · M-12 内核</td><td>MVP</td></tr>
+      <tr><td class="dim">UC-04</td><td>状态观测（寄存器/内存/波形/trace/串口）</td><td>嵌入式开发者 / 产品用户</td><td>FR-09/10/14</td><td>M-10 调试视图 · M-18/M-19 观测管道 · M-15 外设</td><td>MVP</td></tr>
+      <tr><td class="dim">UC-05</td><td>反汇编 · 源码联动</td><td>嵌入式开发者</td><td>FR-05</td><td>M-11 反汇编 · M-06 DWARF 行表</td><td>MVP</td></tr>
+      <tr><td class="dim">UC-06</td><td>变量监视</td><td>嵌入式开发者</td><td>FR-11</td><td>M-08/M-10（地址型 MVP；符号名型 P1）</td><td>MVP（地址型）/ P1（符号名型）</td></tr>
+      <tr><td class="dim">UC-07</td><td>项目持久化与分享</td><td>产品用户 / 嵌入式开发者 / 分享读者</td><td>FR-13</td><td>M-23 DataStore · M-04 会话</td><td>MVP</td></tr>
+      <tr><td class="dim">UC-08</td><td>快照恢复与确定性回放</td><td>嵌入式开发者 / 产品用户</td><td>FR-12/19</td><td>M-20 快照/重放 · M-04 会话 · M-17 执行后端</td><td>MVP</td></tr>
+      <tr><td class="dim">UC-09</td><td>日志与诊断（仅管理员通道）</td><td>系统管理员</td><td>NFR-07</td><td>M-21 日志（横切）</td><td>MVP</td></tr>
+      <tr><td class="dim">UC-10</td><td>健康监测与异常处置</td><td>系统管理员</td><td>NFR-08</td><td>M-22 HMS（横切）</td><td>MVP（崩溃快照+恢复）</td></tr>
+      <tr><td class="dim">UC-11</td><td>自动化与场景断言</td><td>嵌入式开发者 / CI/测试框架</td><td>FR-16/17</td><td>M-05 headless 网关 · M-20 录制/断言</td><td>P1</td></tr>
+      <tr><td class="dim">UC-12</td><td>3D 视图与帧缓冲渲染</td><td>产品用户</td><td>FR-21/22</td><td>M-02 产品树（2D/3D 同源）· M-19 帧缓冲 · M-15 显示外设</td><td>P1</td></tr>
+      <tr><td class="dim">UC-13</td><td>多板互联调试</td><td>嵌入式开发者</td><td>FR-24~27</td><td>M-15 Interconnect Link · M-12 全局虚拟时间 · M-11 跨板 trace</td><td>P1</td></tr>
+      <tr><td class="dim">UC-14</td><td>GDB RSP 兼容</td><td>外部 GDB 客户端</td><td>FR-15</td><td>M-17 执行后端（QEMU L1 子集）</td><td>P1/P2</td></tr>
+      <tr><td class="dim">UC-15</td><td>多核 / SMP</td><td>嵌入式开发者</td><td>FR-18</td><td>M-17 执行后端</td><td>P2</td></tr>
+      <tr><td class="dim">UC-16</td><td>性能监控</td><td>系统管理员</td><td>FR-20</td><td>M-22 指标通道（仅管理员可见）</td><td>P2</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><b>双闭环关键场景</b>：关键用例以需求 3.2 的「双闭环」为骨架：开发闭环（改码→重跑→验证→判定→再改码）与产品闭环（配置→下钻→观察→行为判断→再配置）。两闭环共用同一五横层，是架构验收的驱动场景：</p>
+  <div class="fig">
+    <svg viewBox="0 0 880 190" role="img" aria-label="架构中的开发闭环与产品闭环">
+      <defs>
+        <marker id="aB1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3EC6A0"/></marker>
+        <marker id="aB2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#E6A23C"/></marker>
+      </defs>
+      <rect x="16" y="24" width="150" height="40" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="91" y="40" text-anchor="middle" font-size="12" fill="#E4E9F0">① 搭建产品树</text><text x="91" y="56" text-anchor="middle" font-size="10" fill="#677787">前端·产品视图</text>
+      <rect x="198" y="24" width="150" height="40" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="273" y="40" text-anchor="middle" font-size="12" fill="#E4E9F0">② 外设/映射配置</text><text x="273" y="56" text-anchor="middle" font-size="10" fill="#677787">外设模型层</text>
+      <rect x="380" y="24" width="150" height="40" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="455" y="40" text-anchor="middle" font-size="12" fill="#E4E9F0">③ 加载 ELF</text><text x="455" y="56" text-anchor="middle" font-size="10" fill="#677787">ELF 加载器→ISS</text>
+      <rect x="562" y="24" width="150" height="40" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="637" y="40" text-anchor="middle" font-size="12" fill="#E4E9F0">④ 运行(事件驱动)</text><text x="637" y="56" text-anchor="middle" font-size="10" fill="#677787">仿真引擎</text>
+      <rect x="744" y="24" width="120" height="40" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="804" y="40" text-anchor="middle" font-size="12" fill="#E4E9F0">⑤ 观测</text><text x="804" y="56" text-anchor="middle" font-size="10" fill="#677787">探针→波形/trace</text>
+      <line x1="166" y1="44" x2="198" y2="44" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aB1)"/>
+      <line x1="348" y1="44" x2="380" y2="44" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aB1)"/>
+      <line x1="530" y1="44" x2="562" y2="44" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aB1)"/>
+      <line x1="712" y1="44" x2="744" y2="44" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aB1)"/>
+      <path d="M 864 64 V 112 H 116 V 120" fill="none" stroke="#E6A23C" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#aB2)"/>
+      <rect x="16" y="120" width="150" height="40" rx="8" fill="#1E2933" stroke="#E6A23C"/><text x="91" y="136" text-anchor="middle" font-size="12" fill="#E4E9F0">⑥ 调试观察</text><text x="91" y="152" text-anchor="middle" font-size="10" fill="#677787">调试服务+前端调试视图</text>
+      <rect x="198" y="120" width="150" height="40" rx="8" fill="#1E2933" stroke="#E6A23C"/><text x="273" y="136" text-anchor="middle" font-size="12" fill="#E4E9F0">⑦ 改固件/配置</text><text x="273" y="152" text-anchor="middle" font-size="10" fill="#677787">回到①/②</text>
+      <rect x="380" y="120" width="150" height="40" rx="8" fill="#1E2933" stroke="#E6A23C"/><text x="455" y="136" text-anchor="middle" font-size="12" fill="#E4E9F0">⑧ 重跑</text><text x="455" y="152" text-anchor="middle" font-size="10" fill="#677787">确定性引擎</text>
+      <rect x="562" y="120" width="190" height="40" rx="8" fill="#1E2933" stroke="#E6A23C"/><text x="657" y="136" text-anchor="middle" font-size="12" fill="#E4E9F0">⑨ 产品行为判定</text><text x="657" y="152" text-anchor="middle" font-size="10" fill="#677787">L0 起点即终点</text>
+      <line x1="166" y1="140" x2="198" y2="140" stroke="#E6A23C" stroke-width="1.3" marker-end="url(#aB2)"/>
+      <line x1="348" y1="140" x2="380" y2="140" stroke="#E6A23C" stroke-width="1.3" marker-end="url(#aB2)"/>
+      <line x1="530" y1="140" x2="562" y2="140" stroke="#E6A23C" stroke-width="1.3" marker-end="url(#aB2)"/>
+      <text x="448" y="176" text-anchor="middle" font-size="11" fill="#E6A23C">琥珀虚线：闭环返回（观测判定 → 改固件/配置 → 重跑），覆盖开发闭环与产品闭环（需求 3.2）；验收主线智能灯 E2E-01 贯穿全链</text>
+    </svg>
+    <div class="cap">场景视图（示意）：①→⑤ 构建/运行下行，⑥→⑨ 观测/判定闭环上行；开发闭环与产品闭环共用同一五横层骨架。</div>
+  </div>
+
+  <h3>3.3 分层职责与需求映射概览</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:760px">
+    <colgroup><col style="width:18%"><col style="width:42%"><col style="width:40%"></colgroup>
+    <thead><tr><th>横层</th><th>职责（做什么）</th><th>不做什么 / 依赖规则</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">① 前端交互层</td><td>多视图渲染、路由、ELF 上传、命令下发、状态订阅、串口终端、交互 IA</td><td>不直接触碰仿真状态，只通过协议客户端访问；不包含任何仿真逻辑</td></tr>
+      <tr><td class="dim">② 会话/命令层</td><td>会话生命周期、并发隔离、快照/持久化、命令路由、事件分发、确定性会话管理</td><td>不解析 ELF、不执行指令；是前后端解耦的边界层</td></tr>
+      <tr><td class="dim">③ 调试服务层</td><td>断点/单步、反汇编·源码联动、寄存器/内存、符号表/DWARF、trace、GDB RSP(P1)</td><td>不推进仿真、不建模外设；只消费 ExecutionBackend 抽象接口</td></tr>
+      <tr><td class="dim">④ 仿真内核层</td><td>事件驱动引擎、ISS、外设、总线/内存映射、中断、确定性</td><td>不渲染、不做持久化；通过指令/访存钩子向观测管道暴露可观测点</td></tr>
+      <tr><td class="dim">⑤ 观测管道层</td><td>探针采样、波形边沿编码、增量推送、trace/导出</td><td>不改仿真状态（只读观测）；数据量受控（边沿压缩、采样可配）</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>3.4 用户画像与三工作台</h3>
+  <p><b>角色驱动的工作台装配</b>：工作台 = 视图组合 × 能力面 × 观测通道可见性，三者由<b>会话携带的 role</b> 统一驱动（会话层 M-04/M-05 下发能力面白名单，前端 M-01 按 role 装配视图，横切日志/健康管理按 role 决定分发）。MVP 本地单用户，role 由进入模式决定，不依赖登录体系；服务端形态（P1）再引入身份与权限。</p>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:880px">
+    <colgroup><col style="width:16%"><col style="width:26%"><col style="width:30%"><col style="width:28%"></colgroup>
+    <thead><tr><th>工作台</th><th>视图组合（前端装配）</th><th>能力面（命令域）</th><th>观测通道可见性</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">产品工作台</td><td>例程选择、波形视图、串口/终端、外设面板</td><td>运行控制 + 观测只读（run/pause/reset + 状态/波形订阅）</td><td>状态流 + 波形流 + HMS 可读异常提示；<b>系统日志不可见</b></td></tr>
+      <tr><td class="dim">嵌入式工作台（MVP 主线）</td><td>反汇编/断点/单步、寄存器/内存、trace、波形、项目树</td><td>全部调试命令 + 快照 + 导出（FR-05/08/09/10/14）</td><td>调试事件流 + trace 流 + 波形流 + HMS 可读异常提示；<b>系统日志不可见（仅目标级证据）</b></td></tr>
+      <tr><td class="dim">系统管理员工作台（P1）</td><td>系统诊断、会话概览、日志检索</td><td>日志全量/导出/服务端上报、会话管理</td><td><b>系统日志全量（M-21 唯一消费者）</b> + HMS 诊断详情（关联日志）</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><b>异常提示通道</b>：产品/嵌入式工作台不接触原始日志；平台异常由 HMS（§8.5）分级后分发<b>用户可读的异常提示</b>（如「仿真内核异常，已自动保存快照并恢复」），系统管理员收到同一异常的完整诊断。日志（记录）与 HMS（监控/分发）职责分离，日志不越界。</p>
+  <p><b>演进</b>：需求主线（智能灯 E2E-01 验收、调试联动）对应嵌入式工作台，MVP 默认；产品工作台与系统管理员工作台按同一装配规则在 P1 接入，不改变 M-21 与命令总线内部实现。<b>MVP 最小化边界（评审 L1）：MVP 只装配「嵌入式工作台 + 产品工作台基础面（搭建/运行/波形）」，产品行为判定与系统管理员工作台 P1 引入；HMS MVP 基线 = 崩溃自动快照 + 恢复（§10.7 三条），完整分角色分发随 P1。</b></p>
+</section>
+
+<!-- ===== 章节 4：逻辑架构 ===== -->
+<section class="sec" id="sec4">
+  <div class="sec-num">CHAPTER 4</div>
+  <h2>逻辑架构设计</h2>
+  <p class="sec-intro">模块划分 / 关键抽象（ExecutionBackend / Peripheral）/ 子系统内部设计 / 模块间接口契约</p>
+
+  <div class="verdict green">
+    <span class="lead">逻辑架构以两个核心抽象为脊梁：ExecutionBackend 把 ISS 差异（自研/QEMU）隔离在调试服务之下；Peripheral 把外设差异（分级/插件）隔离在总线之下。二者共同保证「前端与调试服务可复用、内核可替换」。</span>
+  </div>
+
+  <h3>4.1 模块划分</h3>
+  <div class="fig">
+    <svg viewBox="0 0 880 600" role="img" aria-label="逻辑架构模块图">
+      <defs>
+        <marker id="aL" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3EC6A0"/></marker>
+      </defs>
+      <rect x="16" y="16" width="848" height="66" rx="10" fill="#161E27" stroke="#3EC6A0"/>
+      <text x="30" y="36" font-size="13" fill="#E6A23C" font-weight="700">① 前端交互层</text>
+      <rect x="30" y="44" width="120" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="90" y="64" text-anchor="middle" font-size="11" fill="#E4E9F0">Router(多视图)</text>
+      <rect x="160" y="44" width="130" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="225" y="64" text-anchor="middle" font-size="11" fill="#E4E9F0">视图组件×3</text>
+      <rect x="300" y="44" width="120" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="360" y="64" text-anchor="middle" font-size="11" fill="#E4E9F0">View Store</text>
+      <rect x="430" y="44" width="140" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="500" y="64" text-anchor="middle" font-size="11" fill="#E4E9F0">命令/事件客户端</text>
+      <rect x="580" y="44" width="120" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="640" y="64" text-anchor="middle" font-size="11" fill="#E4E9F0">ELF/Raw/HEX 解析器</text>
+      <rect x="710" y="44" width="138" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="779" y="64" text-anchor="middle" font-size="11" fill="#E4E9F0">串口/终端 UI</text>
+      <line x1="500" y1="82" x2="500" y2="104" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aL)"/>
+      <rect x="16" y="104" width="848" height="66" rx="10" fill="#161E27" stroke="#3EC6A0"/>
+      <text x="30" y="124" font-size="13" fill="#E6A23C" font-weight="700">② 会话 / 命令层</text>
+      <rect x="30" y="132" width="170" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="115" y="152" text-anchor="middle" font-size="11" fill="#E4E9F0">Session 管理器</text>
+      <rect x="210" y="132" width="150" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="285" y="152" text-anchor="middle" font-size="11" fill="#E4E9F0">Command Bus</text>
+      <rect x="370" y="132" width="150" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="445" y="152" text-anchor="middle" font-size="11" fill="#E4E9F0">Event Bus</text>
+      <rect x="530" y="132" width="150" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="605" y="152" text-anchor="middle" font-size="11" fill="#E4E9F0">快照/持久化</text>
+      <rect x="690" y="132" width="158" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="769" y="152" text-anchor="middle" font-size="11" fill="#E4E9F0">传输适配器(WASM/WS)</text>
+      <line x1="380" y1="170" x2="380" y2="192" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aL)"/>
+      <rect x="16" y="192" width="848" height="66" rx="10" fill="#161E27" stroke="#3EC6A0"/>
+      <text x="30" y="212" font-size="13" fill="#E6A23C" font-weight="700">③ 调试服务层</text>
+      <rect x="30" y="220" width="150" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="105" y="240" text-anchor="middle" font-size="11" fill="#E4E9F0">Breakpoint 管理器</text>
+      <rect x="190" y="220" width="150" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="265" y="240" text-anchor="middle" font-size="11" fill="#E4E9F0">Step 引擎</text>
+      <rect x="350" y="220" width="160" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="430" y="240" text-anchor="middle" font-size="11" fill="#E4E9F0">反汇编·源码联动</text>
+      <rect x="520" y="220" width="140" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="590" y="240" text-anchor="middle" font-size="11" fill="#E4E9F0">Reg/Mem 服务</text>
+      <rect x="670" y="220" width="178" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="759" y="240" text-anchor="middle" font-size="11" fill="#E4E9F0">Symbol/DWARF·Trace</text>
+      <text x="30" y="252" font-size="10.5" fill="#9AA8B6" transform="translate(0 0)">只消费 ExecutionBackend 抽象，不依赖具体 ISS 实现</text>
+      <line x1="380" y1="258" x2="380" y2="280" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aL)"/>
+      <rect x="16" y="280" width="848" height="100" rx="10" fill="#161E27" stroke="#3EC6A0"/>
+      <text x="30" y="300" font-size="13" fill="#E6A23C" font-weight="700">④ 仿真内核层</text>
+      <rect x="30" y="308" width="190" height="62" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="125" y="326" text-anchor="middle" font-size="11" fill="#E4E9F0">事件驱动引擎</text>
+      <text x="44" y="344" font-size="10" fill="#9AA8B6">主循环·量子·事件队列</text>
+      <text x="44" y="360" font-size="10" fill="#9AA8B6">确定性 PRNG(种子)</text>
+      <rect x="230" y="308" width="150" height="62" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="305" y="326" text-anchor="middle" font-size="11" fill="#E4E9F0">ExecutionBackend</text>
+      <text x="244" y="344" font-size="10" fill="#9AA8B6">抽象：run/step/hook</text>
+      <text x="244" y="360" font-size="10" fill="#9AA8B6">实现：自研ISS/QEMU</text>
+      <rect x="390" y="308" width="140" height="62" rx="8" fill="#1E2933" stroke="#5AC8E4"/><text x="460" y="326" text-anchor="middle" font-size="11" fill="#E4E9F0">总线·内存映射</text>
+      <text x="404" y="344" font-size="10" fill="#9AA8B6">区间树·读写分发</text>
+      <text x="404" y="360" font-size="10" fill="#9AA8B6">访存异常</text>
+      <rect x="540" y="308" width="150" height="62" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="615" y="326" text-anchor="middle" font-size="11" fill="#E4E9F0">外设模型层</text>
+      <text x="554" y="344" font-size="10" fill="#9AA8B6">Peripheral 抽象·注册表</text>
+      <text x="554" y="360" font-size="10" fill="#9AA8B6">UART·GPIO·Timer</text>
+      <rect x="700" y="308" width="148" height="62" rx="8" fill="#10161D" stroke="#33404E"/><text x="774" y="326" text-anchor="middle" font-size="11" fill="#9AA8B6">中断控制器</text>
+      <text x="714" y="344" font-size="10" fill="#9AA8B6">PLIC/CLINT 简化</text>
+      <text x="714" y="360" font-size="10" fill="#E6A23C">P1: LCD framebuffer</text>
+      <rect x="16" y="392" width="848" height="50" rx="10" fill="#161E27" stroke="#E6A23C"/>
+      <text x="30" y="410" font-size="13" fill="#E6A23C" font-weight="700">横切：日志系统（Logging Service）· NFR-07</text>
+      <text x="30" y="430" font-size="10.5" fill="#9AA8B6">各层 log() 上报 → 统一采集/分级/关联/导出 → 仅系统管理员通道（控制台/导出/服务端收集）；只进不出，不改任何层状态</text>
+      <rect x="16" y="454" width="848" height="50" rx="10" fill="#161E27" stroke="#5AC8E4"/>
+      <text x="30" y="472" font-size="13" fill="#5AC8E4" font-weight="700">横切：健康管理 HMS（Health Management）· NFR-08</text>
+      <text x="30" y="492" font-size="10.5" fill="#9AA8B6">健康信号采集 → 异常分级（致命/严重/警告）→ 分角色分发（产品/嵌入式=可读提示，管理员=诊断详情）→ 降级动作</text>
+      <rect x="16" y="516" width="848" height="50" rx="10" fill="#161E27" stroke="#3EC6A0"/>
+      <text x="30" y="534" font-size="13" fill="#3EC6A0" font-weight="700">横切：数据存储与持久化（DataStore）· FR-13/19</text>
+      <text x="30" y="554" font-size="10.5" fill="#9AA8B6">快照/项目/配置/日志归档统一存取基础设施；适配 IndexedDB → 服务端；原子写 + schemaVersion 迁移</text>
+    </svg>
+    <div class="cap">逻辑架构模块图（④下方为⑤观测管道，见第 8 章）。箭头为控制依赖方向（下）；观测反向经探针→波形→前端上行。ExecutionBackend 是④内部的扩展点。底部三条横切：日志系统（记录，仅管理员通道）、HMS（监控与分角色分发）、数据存储与持久化（公共基础设施）；角色装配见 §3.4。</div>
+  </div>
+
+  <h3>4.2 关键抽象：ExecutionBackend</h3>
+  <p>ExecutionBackend 把「如何执行指令」从「如何调试/观测」中剥离。调试服务（断点、单步、寄存器、内存）只面对该抽象，不关心底层是自研轻量 ISS 还是服务端 QEMU——同时满足决策点 3（双内核）与合规风险 R2。</p>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:760px">
+    <colgroup><col style="width:26%"><col style="width:74%"></colgroup>
+    <thead><tr><th>抽象接口（示意）</th><th>语义</th></tr></thead>
+    <tbody>
+      <tr><td class="dim mono">reset(cfg) / runUntil(t)</td><td>复位到初始态；连续执行直到虚拟时间 t 或触发暂停条件</td></tr>
+      <tr><td class="dim mono">step() / stepSource()</td><td>指令级单步（执行 1 条暂停）；源码级单步（按源码行边界，依赖行映射）</td></tr>
+      <tr><td class="dim mono">setBreakpoint(addr, cond)</td><td>PC 断点/条件断点注册，命中后回调暂停</td></tr>
+      <tr><td class="dim mono">readReg / writeReg / readMem / writeMem</td><td>寄存器(通用+CSR+PC)与内存访问（暂停态）</td></tr>
+      <tr><td class="dim mono">loadELF(binary) / installSymbols(dwarf)</td><td>ELF/Raw/HEX 镜像加载到映射；安装符号表/DWARF 调试元数据（FR-05）</td></tr>
+      <tr><td class="dim mono">onInstruction / onAccess (hook)</td><td>指令执行前后 / 访存事件钩子——供断点、trace、探针、覆盖率复用</td></tr>
+      <tr><td class="dim mono">snapshot() / restore()</td><td>全状态快照/恢复（FR-19 反向调试/快照基础）</td></tr>
+      <tr><td class="dim mono">能力分级 L1/L2/L3</td><td>L1 基础调试（run/step/断点/寄存器/内存）；L2 = L1 + 指令钩子（onInstruction/onAccess：trace、覆盖率、总线 trace 底）；L3 = L2 + snapshot/restore + 事件流检查点。自研 ISS 全量 L3；QEMU 后端（进程隔离，仅 GDB RSP/QMP 交互）声明 L1 子集，L2/L3 由前端按能力位协商降级（§11.2）；「总线 trace 底」仅自研 ISS 提供（H3 评审）</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>4.3 关键抽象：Peripheral（外设分级）</h3>
+  <p>Peripheral 把外设差异隔离在总线之下，支撑分级建模（决策点 2）。MVP 以「寄存器接口 + 行为级时序」实现 UART/GPIO/定时器；分级体系（SVD 标签→脚本→行为模型→HDL 协同）通过同一抽象向上开放，LCD framebuffer 随 P1 作为新 Peripheral 插件加入。</p>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:760px">
+    <colgroup><col style="width:26%"><col style="width:74%"></colgroup>
+    <thead><tr><th>抽象接口（示意）</th><th>语义</th></tr></thead>
+    <tbody>
+      <tr><td class="dim mono">read(offset) / write(offset, value)</td><td>寄存器级访问入口，由总线按地址区间分发到此实例</td></tr>
+      <tr><td class="dim mono">onEvent(time, kind, payload)</td><td>事件驱动回调（定时器到期、输入就绪等），由引擎事件队列驱动</td></tr>
+      <tr><td class="dim mono">irqRequest(line) / irqClear()</td><td>向中断控制器请求/清除中断线</td></tr>
+      <tr><td class="dim mono">attach(bus, baseAddr, config)</td><td>实例化到地址区间，绑定配置（时钟、波特率、引脚数）</td></tr>
+      <tr><td class="dim mono">probe(signal, value, time)</td><td>向观测管道暴露内部信号（GPIO 翻转、定时器比较、中断脉冲）</td></tr>
+      <tr><td class="dim mono">port(name, dir) / link(peerPort)</td><td>（P1 预留）外设端口抽象：UART TX/RX、GPIO 引脚等对外端口可绑定板间互联链路；未连接端口产生告警（FR-24/25，详见 §8.8）</td></tr>
+      <tr><td class="dim mono">log(message)</td><td>行为日志（NFR-07 可观测性），用于 trace 与调试</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">保真度分级标注（需求 R5）：每个外设实例携带保真度元数据（寄存器级/行为级/HDL 协同），前端在元器件视图中显式展示，避免误导时序敏感驱动。</p>
+
+  <h3>4.4 子系统内部设计</h3>
+  <div class="cards">
+    <div class="card">
+      <h4><span class="chip cyan">仿真内核子系统 · ISS</span></h4>
+      <p class="tagline">RV32IMC 两级解码（opcode→funct3/funct7）；表驱动执行 + 指令钩子；CSR M 模式为主（mtvec/mstatus/mepc/mcause/mie/mip 等）；访存经总线分发；异常同步陷入。正确性以 Spike golden 差分对拍（FR-04）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip cyan">仿真内核子系统 · 总线/映射</span></h4>
+      <p class="tagline">地址区间树（range→region）维护 RAM/ROM/外设归属；访存 O(log n) 查表分发；未映射→访存异常（可观察）；映射表 UI 编辑即时生效（FR-03）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip cyan">仿真内核子系统 · 中断</span></h4>
+      <p class="tagline">简化 PLIC/CLINT：外设 irqRequest → 挂起队列 → 量子边界采样 → 按优先级仲裁 → 触发 ISS 陷入（mtvec）。定时器用 mtime/mtimecmp 语义或行为级等价。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip cyan">前端子系统</span></h4>
+      <p class="tagline">多视图 hash 路由 + View Store + 命令驱动重渲染；ELF/Raw/HEX 浏览器内解析；波形视图独立路由（FR-23）；时钟树视图（FR-07：外设时钟频率可配）；切换后状态保持（V-11）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip cyan">横切 · 日志系统</span></h4>
+      <p class="tagline">独立横切模块：统一采集各层日志（trace/debug/info/warn/error），分级/会话关联后<b>仅向系统管理员通道分发</b>（控制台/导出/服务端收集，§3.4）；只进不出、带虚拟时间、多会话隔离（NFR-07，对应模块设计 M-21）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip cyan">横切 · 健康管理 HMS</span></h4>
+      <p class="tagline">监测健康信号（引擎心跳/会话状态机/错误码/超时/崩溃/传输连接）→ 异常分级（致命/严重/警告）→ 分角色分发（产品/嵌入式=可读提示，管理员=诊断详情+日志关联）→ 可触发降级（自动快照/恢复/断开外设）（NFR-08，对应模块设计 M-22，详见 §8.5）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip cyan">会话 · 确定性状态</span></h4>
+      <p class="tagline">会话层维护种子/事件序列/虚拟时间；事件流记录为 FR-12 确定性证据，供回放与快照恢复（对应模块设计 M-04/M-11）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip cyan">会话 · 事件流记录</span></h4>
+      <p class="tagline">证据流持续记录（量子边界对齐），作为崩溃恢复点与缺陷复现证据：恢复 = 最近检查点 + 稀疏输入事件序列重放（评审 R1；FR-12/19，§7.3/§10.2）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip cyan">横切 · 数据存储与持久化</span></h4>
+      <p class="tagline">公共基础设施：快照/项目/配置/日志归档统一存取；适配 IndexedDB（MVP）→ 服务端（P1）；原子写 + schemaVersion 迁移链（FR-13/19，对应模块设计 M-23，§7.4）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip cyan">会话 · 传输适配</span></h4>
+      <p class="tagline">WASM 内嵌 / WebSocket 远程双传输适配，协议同一、断线序列号续拉（NFR-05/06，对应模块设计 M-07，§6）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip cyan">会话 · 自动化与场景脚本（P1）</span></h4>
+      <p class="tagline">headless 运行入口（REST/CLI → 命令总线）+ 场景脚本/断言引擎（录制输入序列 + 期望输出断言 → 判定报告）；对齐 Robot Framework/Jenkins；承接产品工作台行为判定自动化（FR-16/17，详见 §8.6）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip cyan">P1 预留 · 多板互联</span></h4>
+      <p class="tagline">数据面（Interconnect Link/Topology，§7.1）+ L1 外设 port-链路抽象（§4.3）+ L3 跨板事件同步/消息路由 + 跨板波形同一时间轴（FR-24~27，详见 §8.8）；MVP 单板不阻塞扩展。</p>
+    </div>
+  </div>
+
+  <h3>4.5 模块间接口契约</h3>
+  <div class="cards">
+    <div class="card">
+      <h4><span class="chip ok">契约 1</span> 命令协议（前端→内核）</h4>
+      <p class="tagline">命令驱动、带会话标识与请求 id：<span class="mono">loadELF / run / pause / step / setBreakpoint / readReg / readMem / writeMem / setProbe / setSpeed / snapshot / reset</span>。响应携带状态快照。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip ok">契约 2</span> 事件协议（内核→前端）</h4>
+      <p class="tagline">增量事件流：<span class="mono">simStateDelta / waveformDelta / uartData / log / breakpointHit / trap / paused</span>。前端订阅指定通道，按需拉取；关键控制事件（breakpointHit/trap/paused）可靠投递（ack/重试），观测类允许丢失（§7.3 E1，评审 N4）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip ok">契约 3</span> 观测协议（探针→波形）</h4>
+      <p class="tagline">边沿编码采样事件：<span class="mono">{time, channel, value(0/1), kind(edge/level)}</span>，追加环形缓冲，按批增量推送（第 8 章）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip ok">契约 4</span> 数据模型</h4>
+      <p class="tagline">五类核心模型（Project/SimState/DebugMeta/Waveform/ProtocolMessage）+ P1 Interconnect Link 为前后端、双形态、双内核公共数据结构（第 7 章）。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 章节 5：运行架构 ===== -->
+<section class="sec" id="sec5">
+  <div class="sec-num">CHAPTER 5</div>
+  <h2>运行架构设计</h2>
+  <p class="sec-intro">进程/线程与并发模型 / 核心运行机制（量子化混合调度）/ 关键时序 / 双内核运行策略</p>
+
+  <div class="verdict">
+    <span class="lead">运行架构以「量子化混合调度」为核心运行机制（对应 4+1 的运行视图），实现事件驱动时序（决策点1）与确定性可复现（FR-12）；并以「Worker 内核切片（主路径）+ 分片降级兜底 + 服务端会话隔离」的并发模型支撑双形态与并发目标。</span>
+  </div>
+
+  <h3>5.1 进程 / 线程与并发模型</h3>
+  <div class="cards">
+    <div class="card">
+      <h4><span class="chip ok">浏览器 · 无 Worker 环境降级（兜底，评审 A）</span></h4>
+      <p class="tagline">主路径为 Worker（下卡，韧性基线）；仅在 Worker 不可用的环境（如受限 file:// 旧浏览器）降级为「仿真与 UI 同一主线程按时间片交替」（requestIdleCallback/分片，切片预算：每 ≤10⁴ 条指令或每 10–50ms 宿主时间检查一次命令队列并让出，保证命令响应 ≤500ms 有最坏情况边界），避免阻塞 UI（NFR-02）；降级路径不承诺 guest 失控隔离（watchdog 超时只能抛事件，无法 terminate）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip ok">浏览器 · Worker（MVP 韧性基线）</span></h4>
+      <p class="tagline">仿真内核（ISS/引擎/外设/观测）默认移入 Web Worker，postMessage 承载协议消息，主线程专职 UI 与渲染；主线程 watchdog 定时器周期性确认 Worker 心跳，超时（如 guest 死循环占死内核）即 terminate Worker 并抛「guest 失控」超时事件交由 HMS 处置（评审 R3）。file:// 下 Worker 以同文件/blob URL 创建，不破坏单文件自包含（ADR-6）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip ok">服务端 · 会话隔离</span></h4>
+      <p class="tagline">每会话一个 ExecutionBackend 实例（进程/线程池），状态完全隔离；≥10 并发会话稳定（NFR-03，V-09）。每会话配额：内存上限（默认 256MB）与 CPU 时间片预算；会话数准入上限（默认 ≥10）+ 超限拒绝新会话并告警（评审 R11）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip ok">确定性不受并发影响</span></h4>
+      <p class="tagline">同一会话内虚拟时间推进独立于宿主调度；多会话互不共享确定性种子与事件序列。</p>
+    </div>
+  </div>
+
+  <h3>5.2 核心运行机制：量子化混合调度</h3>
+  <p>事件驱动（决策点 1，借鉴 Renode 时间框架）与确定性（FR-12）在「时间量子」处统一。设计不采用纯事件驱动（每事件处理完 CPU 空闲）也不采用纯周期精确，而是「时间驱动 + 事件分发」的混合：主循环以 1µs 时间量子为 IRQ 采样节奏，每量子先处理到期事件、再让 ISS 执行指令；<b>无到期事件时批量推进到下一事件/检查点</b>（不逐量子空转）。访存同步分发、中断在量子边界采样。每量子固定开销（事件检查 + IRQ 采样 + 控制注入检查）预算 ≤ 单量子指令执行时间的 10%【估算基线，实现后实测校准】；5 MIPS 下 1µs 量子 ≈5 条指令，批量推进保证开销占比不随空转放大。</p>
+  <p class="note">已知延迟声明（评审 L2）：1µs 量子 IRQ 采样意味着虚拟中断响应延迟 ≤1µs（采样边界对齐），这是架构级已知延迟而非模型错误；驱动调试时序敏感代码（如临界区/关中断窗口）时应以此校准预期。</p>
+  <p class="note">指令预算 watchdog（评审 R3）：内核每执行 ≤10⁴ 条指令检查一次宿主时间预算，单片超时（宿主阈值可配，默认 200ms）即判定「guest 失控」并抛超时事件——与 M1 切片预算共用同一检查点（指令计数边界），在 Worker 线程内执行，不占死主线程；guest trap（访存异常/非法指令）由内核捕获为 guest 异常，属模型内事件，与本 watchdog 的平台级超时严格区分（§8.5/§10.7 故障分类）。</p>
+  <div class="fig">
+    <svg viewBox="0 0 880 300" role="img" aria-label="量子化混合调度主循环">
+      <defs>
+        <marker id="aM1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3EC6A0"/></marker>
+      </defs>
+      <rect x="20" y="30" width="150" height="46" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="95" y="46" text-anchor="middle" font-size="12" fill="#E4E9F0">取最早到期事件</text><text x="95" y="62" text-anchor="middle" font-size="10" fill="#9AA8B6">事件队列(最小堆)</text>
+      <rect x="220" y="30" width="150" height="46" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="295" y="46" text-anchor="middle" font-size="12" fill="#E4E9F0">推进虚拟时间</text><text x="295" y="62" text-anchor="middle" font-size="10" fill="#9AA8B6">now = 事件时间</text>
+      <rect x="420" y="30" width="170" height="46" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="505" y="46" text-anchor="middle" font-size="12" fill="#E4E9F0">分发到期事件</text><text x="505" y="62" text-anchor="middle" font-size="10" fill="#9AA8B6">外设 onEvent → 中断请求</text>
+      <rect x="640" y="30" width="160" height="46" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="720" y="46" text-anchor="middle" font-size="12" fill="#E4E9F0">采样中断</text><text x="720" y="62" text-anchor="middle" font-size="10" fill="#9AA8B6">量子边界 IRQ 采样</text>
+      <line x1="170" y1="53" x2="220" y2="53" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aM1)"/>
+      <line x1="370" y1="53" x2="420" y2="53" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aM1)"/>
+      <line x1="590" y1="53" x2="640" y2="53" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aM1)"/>
+      <path d="M 720 76 V 104 H 170 V 122" fill="none" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aM1)"/>
+      <rect x="20" y="122" width="300" height="58" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="170" y="140" text-anchor="middle" font-size="12" fill="#E4E9F0">ISS 执行指令（本量子剩余时间）</text>
+      <text x="34" y="162" font-size="10.5" fill="#9AA8B6">访存→总线同步分发(立即)；指令/访存钩子→断点·trace·探针；trap→记录</text>
+      <rect x="360" y="122" width="170" height="58" rx="8" fill="#1E2933" stroke="#5AC8E4"/><text x="445" y="140" text-anchor="middle" font-size="12" fill="#E4E9F0">到达下个事件时间？</text>
+      <text x="374" y="162" font-size="10.5" fill="#9AA8B6">或暂停条件(断点/单步)</text>
+      <rect x="580" y="122" width="150" height="58" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="655" y="140" text-anchor="middle" font-size="12" fill="#E4E9F0">回到循环顶</text>
+      <text x="594" y="162" font-size="10.5" fill="#9AA8B6">推进到下一量子/事件</text>
+      <line x1="320" y1="151" x2="360" y2="151" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aM1)"/>
+      <path d="M 445 180 V 206 H 170 V 180" fill="none" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aM1)"/>
+      <line x1="530" y1="151" x2="580" y2="151" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aM1)"/>
+      <text x="533" y="141" font-size="10" fill="#9AA8B6">是</text>
+      <text x="196" y="212" font-size="10" fill="#9AA8B6">否：继续本量子</text>
+      <rect x="20" y="214" width="800" height="52" rx="10" fill="#10161D" stroke="#33404E"/>
+      <text x="34" y="236" font-size="11" fill="#E6A23C" font-weight="700">控制注入</text>
+      <text x="34" y="254" font-size="10.5" fill="#9AA8B6">命令总线：pause / step / runUntil(t) / setBreakpoint 通过「下一条指令边界 / 下个事件边界」的检查点注入，不打断执行中的访存（保证状态一致）。</text>
+    </svg>
+    <div class="cap">量子化混合调度主循环（运行视图示意）。确定性由固定种子 PRNG + 稳定事件排序保证；无事件时批量推进到下一事件/检查点（量子仅作 IRQ 采样节奏）；控制注入只在安全检查点（事件边界 ∨ 指令计数边界）发生，避免半指令状态。</div>
+  </div>
+
+  <h3>5.3 关键时序设计</h3>
+  <div class="fig">
+    <svg viewBox="0 0 880 250" role="img" aria-label="关键时序：仿真推进与观测推送">
+      <defs>
+        <marker id="aY1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3EC6A0"/></marker>
+      </defs>
+      <text x="30" y="30" font-size="12" fill="#E6A23C" font-weight="700">虚拟时间轴（量子 = 1µs，可配置）</text>
+      <line x1="30" y1="60" x2="820" y2="60" stroke="#33404E" stroke-width="1.6" marker-end="url(#aY1)"/>
+      <g font-size="10" fill="#9AA8B6">
+        <text x="50" y="76">T0</text><text x="240" y="76">T1µs</text><text x="430" y="76">T2µs</text><text x="620" y="76">T3µs</text><text x="810" y="76">T4µs</text>
+      </g>
+      <g>
+        <rect x="40" y="52" width="3" height="16" fill="#5AC8E4"/><rect x="230" y="52" width="3" height="16" fill="#5AC8E4"/><rect x="420" y="52" width="3" height="16" fill="#5AC8E4"/><rect x="610" y="52" width="3" height="16" fill="#5AC8E4"/>
+      </g>
+      <rect x="30" y="100" width="790" height="30" rx="6" fill="#1E2933" stroke="#33404E"/><text x="425" y="120" text-anchor="middle" font-size="11" fill="#E4E9F0">ISS 执行（每量子执行指令直到时间耗尽 / 事件/暂停点）</text>
+      <rect x="30" y="140" width="790" height="26" rx="6" fill="#10161D" stroke="#5AC8E4"/><text x="425" y="158" text-anchor="middle" font-size="10.5" fill="#9AA8B6">事件分发点（量子边界：外设 onEvent · 中断采样 · 控制注入检查）</text>
+      <text x="30" y="196" font-size="12" fill="#E6A23C" font-weight="700">观测推送（与仿真解耦）</text>
+      <line x1="30" y1="214" x2="820" y2="214" stroke="#33404E" stroke-width="1" stroke-dasharray="4 4"/>
+      <g font-size="10" fill="#9AA8B6">
+        <rect x="90" y="206" width="10" height="16" fill="#3EC6A0" opacity="0.7"/><text x="106" y="220">simStateDelta 批量节流</text>
+        <rect x="330" y="206" width="10" height="16" fill="#3EC6A0" opacity="0.7"/><text x="346" y="220">waveformDelta 按批 ≤20ms</text>
+        <rect x="560" y="206" width="10" height="16" fill="#3EC6A0" opacity="0.7"/><text x="576" y="220">控制命令在安全检查点注入</text>
+      </g>
+      <text x="30" y="240" font-size="10.5" fill="#9AA8B6">观测推送独立于虚拟时间推进节奏，节流合并，避免高频刷屏 → 满足命令 ≤500ms / 刷新 ≤200ms（NFR-02）</text>
+    </svg>
+    <div class="cap">关键时序（运行视图示意）：量子化推进虚拟时间；观测推送按批节流、独立于仿真节奏；控制命令只在安全检查点（事件边界 ∨ 指令计数边界）注入。</div>
+  </div>
+
+  <h3>5.4 双内核运行策略（决策点 3 + R1/R2）</h3>
+  <div class="fig">
+    <svg viewBox="0 0 880 300" role="img" aria-label="双内核与双形态运行">
+      <defs>
+        <marker id="aK1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3EC6A0"/></marker>
+      </defs>
+      <rect x="16" y="16" width="424" height="260" rx="10" fill="#161E27" stroke="#3EC6A0"/>
+      <text x="30" y="36" font-size="13" fill="#E6A23C" font-weight="700">浏览器形态（WASM · 零安装）</text>
+      <rect x="30" y="46" width="160" height="34" rx="6" fill="#1E2933" stroke="#33404E"/><text x="110" y="68" text-anchor="middle" font-size="11" fill="#E4E9F0">多视图前端(JS)</text>
+      <rect x="240" y="46" width="180" height="34" rx="6" fill="#1E2933" stroke="#5AC8E4"/><text x="330" y="68" text-anchor="middle" font-size="11" fill="#E4E9F0">协议客户端(WASM glue)</text>
+      <rect x="30" y="96" width="180" height="150" rx="8" fill="#10161D" stroke="#3EC6A0"/><text x="120" y="114" text-anchor="middle" font-size="11" fill="#E4E9F0">WASM 自研轻量 ISS</text>
+      <text x="44" y="134" font-size="10" fill="#9AA8B6">RV32IMC 解释执行</text>
+      <text x="44" y="152" font-size="10" fill="#9AA8B6">目标 ≥5-10 MIPS【估算】</text>
+      <text x="44" y="176" font-size="10" fill="#5AC8E4">WASM 沙箱内执行固件</text>
+      <text x="44" y="194" font-size="10" fill="#5AC8E4">不触碰宿主 API(NFR-04)</text>
+      <text x="44" y="218" font-size="10" fill="#9AA8B6">预留 JIT(解码-翻译-执行)</text>
+      <rect x="240" y="96" width="180" height="150" rx="8" fill="#10161D" stroke="#3EC6A0"/><text x="330" y="114" text-anchor="middle" font-size="11" fill="#E4E9F0">外设+引擎+观测</text>
+      <text x="254" y="134" font-size="10" fill="#9AA8B6">同 WASM 模块内</text>
+      <text x="254" y="152" font-size="10" fill="#9AA8B6">事件驱动引擎</text>
+      <text x="254" y="170" font-size="10" fill="#9AA8B6">file:// 直接可用</text>
+      <line x1="420" y1="63" x2="420" y2="96" stroke="#3EC6A0" stroke-width="1.2" marker-end="url(#aK1)"/>
+      <text x="30" y="264" font-size="10.5" fill="#9AA8B6">MVP 首选形态：单文件自包含，满足零安装(NFR-05)</text>
+      <rect x="452" y="16" width="412" height="260" rx="10" fill="#161E27" stroke="#3EC6A0"/>
+      <text x="466" y="36" font-size="13" fill="#E6A23C" font-weight="700">服务端形态（WebSocket · 云端）</text>
+      <rect x="466" y="46" width="160" height="34" rx="6" fill="#1E2933" stroke="#33404E"/><text x="546" y="68" text-anchor="middle" font-size="11" fill="#E4E9F0">多视图前端(JS)</text>
+      <rect x="652" y="46" width="196" height="34" rx="6" fill="#1E2933" stroke="#5AC8E4"/><text x="750" y="68" text-anchor="middle" font-size="11" fill="#E4E9F0">WebSocket / REST 网关</text>
+      <rect x="466" y="96" width="382" height="150" rx="8" fill="#10161D" stroke="#3EC6A0"/><text x="657" y="114" text-anchor="middle" font-size="11" fill="#E4E9F0">服务端仿真服务（每会话一个 ExecutionBackend 实例）</text>
+      <rect x="480" y="124" width="170" height="70" rx="6" fill="#1E2933" stroke="#3EC6A0"/><text x="565" y="142" text-anchor="middle" font-size="11" fill="#E4E9F0">自研 ISS (WASM/原生)</text><text x="565" y="160" text-anchor="middle" font-size="10" fill="#9AA8B6">会话进程隔离</text><text x="565" y="176" text-anchor="middle" font-size="10" fill="#9AA8B6">合规首选(BSD/MIT)</text>
+      <rect x="662" y="124" width="172" height="70" rx="6" fill="#1E2933" stroke="#5AC8E4"/><text x="748" y="142" text-anchor="middle" font-size="11" fill="#5AC8E4">QEMU 双内核(可选)</text><text x="748" y="160" text-anchor="middle" font-size="10" fill="#9AA8B6">跑长任务/整机Linux</text><text x="748" y="176" text-anchor="middle" font-size="10" fill="#9AA8B6">进程隔离避 GPL 传染(R2)</text>
+      <text x="480" y="214" font-size="10" fill="#9AA8B6">ExecutionBackend 分级 L1/L2/L3：自研 ISS 全量；QEMU 仅 L1（能力协商降级）</text>
+      <text x="480" y="232" font-size="10" fill="#9AA8B6">≥10 并发会话隔离(NFR-03) · GDB RSP(P1, FR-15)</text>
+      <text x="466" y="264" font-size="10.5" fill="#9AA8B6">P1/P2：云协作、CI 脚本、私有部署</text>
+    </svg>
+    <div class="cap">双形态 × 双内核（运行视图示意）。浏览器 WASM 满足 MVP 零安装；服务端形态承载长任务与 QEMU 双内核，经 ExecutionBackend 统一接口接入，能力面按分级协商（QEMU=L1 子集，指令钩子/快照仅自研 ISS）。GPL 合规（R2）在服务端用进程隔离、浏览器端用自研 BSD/MIT 内核。</div>
+  </div>
+</section>
+
+<!-- ===== 章节 6：物理架构 ===== -->
+<section class="sec" id="sec6">
+  <div class="sec-num">CHAPTER 6</div>
+  <h2>物理架构设计</h2>
+  <p class="sec-intro">部署形态 / 运行环境与拓扑 / 兼容性与可维护性</p>
+
+  <div class="verdict green">
+    <span class="lead">物理架构（4+1 的物理视图）以「浏览器 WASM 单文件自包含」为 MVP 部署形态，满足零安装与 file:// 直接打开（NFR-05）；服务端 WebSocket 形态承载长任务、QEMU 双内核与 GDB RSP（P1/P2）。两形态共用统一协议与数据模型，切换不改变前端代码。</span>
+  </div>
+
+  <h3>6.1 部署形态</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:760px">
+    <colgroup><col style="width:22%"><col style="width:44%"><col style="width:34%"></colgroup>
+    <thead><tr><th>形态</th><th>构成</th><th>适用 / 里程碑</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">浏览器 WASM（MVP）</td><td>前端 JS 包（多视图 UI + 协议客户端 + ELF/DWARF 解析 + watchdog 心跳）+ WASM 内核模块（ISS/引擎/总线/外设，运行于 Worker）+ WASM 观测模块（探针/波形编码）+ 本地存储层；模块按需拆分加载，无服务端依赖；file:// 可开（Worker 同文件/blob URL 创建，评审 R3）</td><td>MVP 首选：零安装、教学/评估/个人开发者（NFR-05，V-10）；Worker 隔离保证 guest 死循环不占死 UI（韧性基线）</td></tr>
+      <tr><td class="dim">服务端 WebSocket（P1/P2）</td><td>前端 JS + WebSocket/REST 网关 + 服务端仿真服务（会话隔离）+ 可选 QEMU 双内核</td><td>长任务/整机 Linux、云协作、CI、私有部署、GDB RSP（FR-13/15/16）</td></tr>
+      <tr><td class="dim">混合（演进）</td><td>同一前端按场景切换传输适配（WASM 内嵌 or WS 远程）</td><td>同一前端覆盖两形态；协议一致则无缝切换</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>6.2 运行环境与拓扑</h3>
+  <ul class="ulist">
+    <li><b>浏览器形态拓扑</b>：浏览器主线程（Web UI + 协议客户端 + watchdog）→ Worker 线程（WASM 内核：ISS + 引擎 + 外设 + 观测），postMessage 承载协议消息；guest 死循环由 watchdog 超时终止内核（评审 R3），不占死主线程；无网络依赖。</li>
+    <li><b>服务端形态拓扑</b>：浏览器（Web UI）→ WebSocket 网关 → 会话管理（每会话一个 ExecutionBackend）→ 可选 QEMU 子进程。会话间进程隔离。</li>
+    <li><b>兼容（NFR-05）</b>：现代 Chrome/Edge/Safari/Firefox；375px 移动端可读、正文 ≥14px；单文件自包含、file:// 直接打开可用（V-10）。</li>
+    <li><b>可维护（NFR-06）</b>：仿真内核与前端解耦（双形态）；外设模型插件化；核心模块单元测试覆盖率 ≥70%【估算】；确定性测试夹具。</li>
+    <li><b>可观测（NFR-07）</b>：独立日志系统（横切）统一采集各层日志，仅向系统管理员通道分发（§3.4）；健康管理 HMS 面向产品/嵌入式工作台分发可读异常提示（§8.5）；虚拟时间/事件队列可视化；确定性可复现（固定种子）。</li>
+  </ul>
+</section>
+
+<!-- ===== 章节 7：数据架构 ===== -->
+<section class="sec" id="sec7">
+  <div class="sec-num">CHAPTER 7</div>
+  <h2>数据架构设计</h2>
+  <p class="sec-intro">核心数据模型 / 产品树数据底座 / 数据流 / 数据存储与持久化</p>
+
+  <div class="verdict green">
+    <span class="lead">数据架构（4+1 的数据视图）以五类核心模型 + P1 预留 Interconnect Link 为公共契约：Project（产品树，2D 与 P1 3D 同源；P1 支持多 Board）、SimState、DebugMeta、Waveform、ProtocolMessage。产品树同时作为 2D 与 3D 原型的唯一数据底座（FR-21「不另造数据模型」）；Interconnect Link 承载多板互联数据面（FR-24/25）。</span>
+  </div>
+
+  <h3>7.1 核心数据模型</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:760px">
+    <colgroup><col style="width:20%"><col style="width:80%"></colgroup>
+    <thead><tr><th>模型</th><th>字段与用途</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">Project</td><td>产品树（Product→Board→MCU/Peripheral 节点；P1 支持多 Board 实例）、内存映射表、场景绑定、会话配置（种子、时钟、量子）；用于搭建、持久化、分享（FR-01/02/03/13）</td></tr>
+      <tr><td class="dim">SimState</td><td>PC / 通用寄存器 / CSR / 内存页 / 外设状态 / 虚拟时间 / 事件序号；用于暂停时寄存器·内存视图（FR-09）与快照恢复（FR-19）</td></tr>
+      <tr><td class="dim">DebugMeta</td><td>符号表 / 地址→源码行映射 / 断点列表 / watch 表达式 / 反汇编序列；用于反汇编·源码联动与断点单步（FR-05/08）</td></tr>
+      <tr><td class="dim">Waveform</td><td>通道定义 + 边沿事件 <span class="mono">{time, ch, value, edge}</span> + 环形缓冲窗口；用于波形视图与导出（FR-10/14）</td></tr>
+      <tr><td class="dim">ProtocolMessage</td><td>命令（req: loadELF/run/step/setBreakpoint/...）与事件（simStateDelta/waveformDelta/uartData/breakpointHit/trap/paused）；前后端与双形态公共契约</td></tr>
+      <tr><td class="dim">Interconnect Link（P1）</td><td>板间互联链路：两端（boardId, peripheralId, port）对 + 类型（UART/SPI/I2C/GPIO/CAN/ETH）+ 虚拟时间戳有序消息队列；多 Board + Topology 构成多板数据面，作为产品树扩展节点持久化（FR-24/25，详见 §8.8）</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>7.2 产品树数据底座（L0/L1）</h3>
+  <div class="fig">
+    <svg viewBox="0 0 880 260" role="img" aria-label="产品树数据模型">
+      <defs>
+        <marker id="aT1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3EC6A0"/></marker>
+      </defs>
+      <rect x="360" y="16" width="160" height="42" rx="8" fill="#1E2933" stroke="#E6A23C"/><text x="440" y="34" text-anchor="middle" font-size="13" fill="#E4E9F0">Product（产品·L0）</text><text x="440" y="50" text-anchor="middle" font-size="9.5" fill="#9AA8B6">id · name · scenario 绑定</text>
+      <path d="M 440 58 V 76 H 440 V 88" fill="none" stroke="#3EC6A0" stroke-width="1.2" marker-end="url(#aT1)"/>
+      <rect x="360" y="88" width="160" height="42" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="440" y="106" text-anchor="middle" font-size="13" fill="#E4E9F0">Board（主板·L1）</text><text x="440" y="122" text-anchor="middle" font-size="9.5" fill="#9AA8B6">id · name · 布局</text>
+      <path d="M 440 130 V 150 H 320 V 158" fill="none" stroke="#3EC6A0" stroke-width="1.2" marker-end="url(#aT1)"/>
+      <path d="M 440 130 V 150 H 560 V 158" fill="none" stroke="#3EC6A0" stroke-width="1.2" marker-end="url(#aT1)"/>
+      <rect x="220" y="158" width="200" height="72" rx="8" fill="#1E2933" stroke="#5AC8E4"/><text x="320" y="176" text-anchor="middle" font-size="12" fill="#5AC8E4">MCU / ISS 节点</text><text x="234" y="194" font-size="10" fill="#9AA8B6">cpu=RV32IMC · isa 覆盖矩阵</text><text x="234" y="210" font-size="10" fill="#9AA8B6">clk · 中断配置</text>
+      <rect x="460" y="158" width="200" height="72" rx="8" fill="#1E2933" stroke="#5AC8E4"/><text x="560" y="176" text-anchor="middle" font-size="12" fill="#5AC8E4">Peripheral 节点 ×N</text><text x="474" y="194" font-size="10" fill="#9AA8B6">type=UART/GPIO/Timer</text><text x="474" y="210" font-size="10" fill="#9AA8B6">baseAddr · irq · 保真度分级</text>
+      <rect x="16" y="236" width="848" height="0" rx="8" fill="none" stroke="none"/>
+    </svg>
+    <div class="cap">产品树数据模型（示意）：Product → Board → MCU/Peripheral 节点树，是搭建、映射、2D/3D 原型与持久化的公共数据底座。</div>
+  </div>
+
+  <h3>7.3 数据流全景设计</h3>
+  <p class="sec-intro">端到端数据流走查 / 数据流明细（方向·缓冲·失败语义）/ 数据流关键约束——数据流未细化是集成期返工的主要来源，本节为每条流给出完整路径与边界，作为模块设计（LLD）与传输协议实现的基线。</p>
+  <div class="fig">
+    <svg viewBox="0 0 880 400" role="img" aria-label="数据流全景图">
+      <defs>
+        <marker id="dA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3EC6A0"/></marker>
+        <marker id="dU" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#E6A23C"/></marker>
+      </defs>
+      <rect x="16" y="16" width="170" height="52" rx="8" fill="#161E27" stroke="#3EC6A0"/><text x="101" y="36" text-anchor="middle" font-size="11.5" fill="#E4E9F0" font-weight="700">前端工作台</text><text x="101" y="56" text-anchor="middle" font-size="9.5" fill="#9AA8B6">产品/嵌入式（按 role）</text>
+      <rect x="240" y="16" width="160" height="52" rx="8" fill="#161E27" stroke="#33404E"/><text x="320" y="36" text-anchor="middle" font-size="11" fill="#E4E9F0">会话/命令层 M-04/05</text><text x="320" y="56" text-anchor="middle" font-size="9.5" fill="#9AA8B6">命令路由·能力面·版本</text>
+      <rect x="460" y="16" width="160" height="52" rx="8" fill="#161E27" stroke="#33404E"/><text x="540" y="36" text-anchor="middle" font-size="11" fill="#E4E9F0">调试服务 M-08~11</text><text x="540" y="56" text-anchor="middle" font-size="9.5" fill="#9AA8B6">断点/单步/trace/导出</text>
+      <rect x="680" y="16" width="180" height="52" rx="8" fill="#161E27" stroke="#3EC6A0"/><text x="770" y="36" text-anchor="middle" font-size="11" fill="#E4E9F0" font-weight="700">仿真内核 M-12~17</text><text x="770" y="56" text-anchor="middle" font-size="9.5" fill="#9AA8B6">引擎/ISS/总线/外设/中断</text>
+      <line x1="186" y1="42" x2="236" y2="42" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#dA)"/>
+      <line x1="400" y1="42" x2="456" y2="42" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#dA)"/>
+      <line x1="620" y1="42" x2="676" y2="42" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#dA)"/>
+      <text x="30" y="94" font-size="10" fill="#677787">下行：C1 控制流 / CF1 配置流（命令带会话 id + 请求 id + 版本）</text>
+      <line x1="770" y1="68" x2="770" y2="96" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#dA)"/>
+      <rect x="680" y="100" width="180" height="52" rx="8" fill="#161E27" stroke="#3EC6A0"/><text x="770" y="120" text-anchor="middle" font-size="11" fill="#E4E9F0" font-weight="700">钩子/探针（内核）</text><text x="770" y="140" text-anchor="middle" font-size="9.5" fill="#9AA8B6">指令/访存钩子 · 外设信号</text>
+      <rect x="460" y="100" width="180" height="52" rx="8" fill="#161E27" stroke="#3EC6A0"/><text x="550" y="120" text-anchor="middle" font-size="11" fill="#E4E9F0" font-weight="700">观测管道 M-18/19</text><text x="550" y="140" text-anchor="middle" font-size="9.5" fill="#9AA8B6">边沿编码 · 环形缓冲</text>
+      <rect x="240" y="100" width="180" height="52" rx="8" fill="#161E27" stroke="#E6A23C"/><text x="330" y="120" text-anchor="middle" font-size="11" fill="#E6A23C" font-weight="700">前端订阅</text><text x="330" y="140" text-anchor="middle" font-size="9.5" fill="#9AA8B6">S1 状态 · W1 波形 · T1 trace · E1 事件</text>
+      <line x1="680" y1="126" x2="640" y2="126" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#dA)"/>
+      <line x1="460" y1="126" x2="420" y2="126" stroke="#E6A23C" stroke-width="1.3" marker-end="url(#dU)"/>
+      <line x1="330" y1="100" x2="330" y2="72" stroke="#E6A23C" stroke-width="1.3" marker-end="url(#dU)"/>
+      <text x="30" y="182" font-size="10" fill="#677787">上行：增量推送（量子边界 + 节流 ≤200ms）；断线按序列号续拉（M-07）</text>
+      <rect x="16" y="196" width="250" height="52" rx="8" fill="#161E27" stroke="#E6A23C"/><text x="141" y="216" text-anchor="middle" font-size="11" fill="#E6A23C" font-weight="700">L1 日志流 → 系统管理员</text><text x="141" y="236" text-anchor="middle" font-size="9.5" fill="#9AA8B6">各层 log() → M-21 分级 → 控制台/导出/服务端</text>
+      <rect x="300" y="196" width="250" height="52" rx="8" fill="#161E27" stroke="#5AC8E4"/><text x="425" y="216" text-anchor="middle" font-size="11" fill="#5AC8E4" font-weight="700">D1 诊断流 → HMS 分发</text><text x="425" y="236" text-anchor="middle" font-size="9.5" fill="#9AA8B6">健康信号 → 分级 → 产品/嵌入式可读提示，管理员诊断</text>
+      <rect x="590" y="196" width="140" height="52" rx="8" fill="#161E27" stroke="#33404E"/><text x="660" y="216" text-anchor="middle" font-size="11" fill="#E4E9F0">P1 持久化流</text><text x="660" y="236" text-anchor="middle" font-size="9.5" fill="#9AA8B6">快照 检查点/恢复</text>
+      <rect x="760" y="196" width="104" height="52" rx="8" fill="#161E27" stroke="#33404E"/><text x="812" y="216" text-anchor="middle" font-size="11" fill="#E4E9F0">X1 导出流</text><text x="812" y="236" text-anchor="middle" font-size="9.5" fill="#9AA8B6">CSV/VCD/JSON</text>
+      <text x="30" y="280" font-size="10.5" fill="#E6A23C" font-weight="700">横切约束：所有流带虚拟时间戳 · 会话隔离 · 角色可见性边界（§3.4）· 双形态走同一协议</text>
+      <text x="30" y="300" font-size="9.5" fill="#9AA8B6">示意：数据流全景走查；完整性与可靠性机制见 §7.3.2；失败语义与缓冲参数见下表</text>
+    </svg>
+    <div class="cap">数据流全景（示意）：下行 C1/CF1 → 内核；上行钩子/探针 → 观测管道 → 前端订阅（S1/W1/T1/E1）→ 前端工作台；横切 L1 日志仅管理员、D1 诊断由 HMS 分角色；P1 持久化与 X1 导出独立通道。所有箭头均连接实体，流以虚拟时间与会话隔离为锚。</div>
+  </div>
+
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:1180px">
+    <colgroup><col style="width:12%"><col style="width:9%"><col style="width:34%"><col style="width:22%"><col style="width:23%"></colgroup>
+    <thead><tr><th>数据流</th><th>方向</th><th>路径（源 → 处理 → 汇）</th><th>时序 / 缓冲 / 节流</th><th>失败语义</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">C1 控制流</td><td>下行</td><td>前端 → M-05 → 调试服务/内核（loadELF/run/pause/step/断点/寄存器/快照等）</td><td>事件触发；请求 id + 超时 ≤500ms</td><td>超时 → Resp 超时错误，幂等命令可重试</td></tr>
+      <tr><td class="dim">CF1 配置流</td><td>下行</td><td>前端 → 会话 → 内核（产品树/内存映射/外设实例化）</td><td>编辑即时生效；整包事务下发</td><td>校验失败 → 拒绝并保留旧配置</td></tr>
+      <tr><td class="dim">S1 状态流</td><td>上行</td><td>内核 → 观测管道 → 前端（simStateDelta）</td><td>量子边界采样 + 节流 ≤200ms</td><td>断线 → 按序列号续拉补齐</td></tr>
+      <tr><td class="dim">W1 波形流</td><td>上行</td><td>总线/外设探针 → 边沿编码 → 环形缓冲 → 前端</td><td>边沿压缩 + 批量推送 ≤200ms</td><td>缓冲溢出 → 丢最旧并标记（采样可配）</td></tr>
+      <tr><td class="dim">T1 trace 流</td><td>上行</td><td>内核钩子 → M-11 记录 → 导出（指令/访存）</td><td>可整体关闭（性能开关）</td><td>写失败 → 降级丢弃 + warn</td></tr>
+      <tr><td class="dim">E1 调试事件流</td><td>上行</td><td>内核 → 事件总线 → 前端（breakpointHit/trap/uartData）</td><td>关键控制事件可靠投递（ack/重试）；低频观测类即时推送</td><td>关键控制事件（breakpointHit/trap/paused）可靠投递（ack/重试）；uartData 等低频观测类允许丢失；事件缺口/命令超时时前端主动拉取状态对账（reconcile）</td></tr>
+      <tr><td class="dim">L1 日志流</td><td>横切</td><td>各层 log() → M-21 分级/关联 → 系统管理员通道</td><td>实时；环形缓冲；只进不出</td><td>溢出 → 丢最旧；不向用户层分发（§3.4）</td></tr>
+      <tr><td class="dim">D1 诊断流</td><td>横切</td><td>健康信号 → HMS 分级 → 分角色分发（可读提示/诊断详情）</td><td>心跳/阈值触发；分级本地决策</td><td>恢复动作可重试；提示脱敏不含原始日志</td></tr>
+      <tr><td class="dim">P1 持久化流</td><td>双向</td><td>会话 ↔ IndexedDB（MVP）/服务端（P1）：Project+SimState+DebugMeta</td><td>检查点触发；原子写（临时+替换）</td><td>写失败 → 保留内存态 + 提示重试，不丢会话</td></tr>
+      <tr><td class="dim">X1 导出流</td><td>出</td><td>trace/波形/日志 → CSV/VCD/JSON（FR-10/14）</td><td>用户触发；大文件分块</td><td>分块失败可续导，进度可见</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h4>7.3.2 数据交互的完整性与可靠性机制</h4>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:940px">
+    <colgroup><col style="width:18%"><col style="width:47%"><col style="width:35%"></colgroup>
+    <thead><tr><th>保障层</th><th>技术 / 结构</th><th>覆盖数据流</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">协议封包</td><td>ProtocolMessage 统一封包：版本 + reqId + 序列号 + 载荷长度/类型；服务端形态（P1）载荷加 CRC32 校验</td><td>C1/CF1/S1/W1/T1/E1</td></tr>
+      <tr><td class="dim">命令可靠性</td><td>请求 id 与 Resp 一一配对；超时 ≤500ms；读类/幂等命令可重试；writeMem 等非幂等命令带版本/确认</td><td>C1/CF1</td></tr>
+      <tr><td class="dim">推送可靠性</td><td>序列号 + 增量快照；断线重连按序列号续拉（M-07）；E1 关键控制事件（breakpointHit/trap/paused）可靠投递（ack/重试），观测类事件允许丢失 + 前端状态对账</td><td>S1/W1/E1</td></tr>
+      <tr><td class="dim">缓冲一致性</td><td>环形缓冲溢出丢最旧 + 标记（可配置）；边沿压缩 + 批量节流防背压；采样可配降载</td><td>W1/T1/L1</td></tr>
+      <tr><td class="dim">存储原子性</td><td>快照原子写（临时 + 替换）+ schemaVersion 迁移链；写失败保留内存态 + 重试，不丢会话</td><td>P1</td></tr>
+      <tr><td class="dim">确定性锚点</td><td>所有流携带虚拟时间戳（非宿主时钟）；<b>证据流（波形/trace/调试事件）记录虚拟时间戳供观察与复现展示；恢复路径 = 检查点 + 稀疏输入事件序列重放（种子 + 时间戳化 UART/按键/GPIO 注入），两者分离（评审 R1）</b>，恢复不依赖全量证据流</td><td>全部流</td></tr>
+      <tr><td class="dim">数据边界</td><td>会话隔离（独立种子/序列/缓冲）；角色可见性边界（§3.4）——产品/嵌入式不收日志与诊断详情</td><td>全部流</td></tr>
+      <tr><td class="dim">传输形态</td><td>协议语义两形态一致（WASM 内嵌与 WS 远程同一封装）；<b>零拷贝仅限数据面</b>（波形/大块内存视图可共享引用），控制面（命令/事件）一律走协议封装（评审 R4）；WS 远程 JSON 序列化（P1 可二进制协议）；双形态同一性</td><td>全部流</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h4>7.3.1 数据流关键约束</h4>
+  <div class="cards">
+    <div class="card"><h4><span class="chip cyan">虚拟时间锚点</span></h4><p class="tagline">所有流携带<b>虚拟时间戳</b>（非宿主时钟），跨流可逐事件对表（日志↔trace↔波形同轴，§8.1）。</p></div>
+    <div class="card"><h4><span class="chip cyan">会话隔离</span></h4><p class="tagline">数据不跨会话串扰：独立种子/事件序列/日志缓冲；并发会话（NFR-03）各自成流。</p></div>
+    <div class="card"><h4><span class="chip cyan">角色可见性边界</span></h4><p class="tagline">产品/嵌入式只收 S1/W1/T1/E1 + HMS 可读提示；系统日志仅系统管理员（§3.4）。</p></div>
+    <div class="card"><h4><span class="chip cyan">背压与节流</span></h4><p class="tagline">上行流环形缓冲 + 边沿压缩 + 批量节流；下行流请求时限；波形采样可配降载。</p></div>
+    <div class="card"><h4><span class="chip cyan">失败语义</span></h4><p class="tagline">命令超时可重试（幂等）；断线按序列号续拉；写失败降级 + 告警，不静默丢失关键状态。</p></div>
+    <div class="card"><h4><span class="chip cyan">双形态同一性</span></h4><p class="tagline">WASM 内嵌 / WS 远程走同一协议与数据流；传输适配层（M-07）切换不影响上层（§6）。</p></div>
+    <div class="card"><h4><span class="chip cyan">快照一致性</span></h4><p class="tagline">快照以量子边界为检查点，与证据流记录对齐；崩溃恢复 = 最近检查点 + 输入序列重放（评审 R1，§10.2）。</p></div>
+    <div class="card"><h4><span class="chip cyan">数据版本</span></h4><p class="tagline">协议与持久化 schema 带版本；不兼容 → 明确拒绝并提示升级路径，不静默错读（§11.2）。</p></div>
+  </div>
+
+  <h3>7.4 数据存储与持久化（横切基础设施）</h3>
+  <p><b>数据存储与持久化是公共基础设施模块（对应 M-23）</b>，不隶属于任何单层，供快照（FR-19）、项目保存/恢复（FR-13）、配置（产品树/映射）、日志归档（M-21 导出）统一存取。存储适配统一接口：<b>IndexedDB（MVP）→ 服务端（P1）</b>；写入采用原子写（临时 + 替换）+ schemaVersion 迁移链（§11.2）；写失败保留内存态 + 重试，不丢会话。分享用 hash 编码只读链接（含版本标识）。数据以 Project + SimState + DebugMeta 序列化结构为基准。</p>
+  <p class="note">MVP 容量预算（评审 M2）：SimState 含内存页，256KB RAM 固件单快照 ≈350KB+；localStorage 5MB 上限下，多快照 + 项目 + 波形共存会撑爆 → <b>MVP 直接采用 IndexedDB</b>（压缩 + 保留策略）；波形长回看 spool 同走 IndexedDB（§8.2 容量模型）。<b>检查点触发策略与 RPO（评审 R5/N2）：每 10s 虚拟时间或关键事件（断点命中/暂停/命令 checkpoint）触发落盘；RPO ≤2s 为宿主时间口径——快照保留数 ≥ RPO/触发间隔（默认保留 ≥5 个检查点，回退最差 ≈2 个触发间隔内）——崩溃恢复 = 最近检查点 + 输入序列重放（§10.2），非安全检查点（中断中的写）丢弃中间态、回退最近检查点（评审 C）。</b>服务端形态（P1）持久化介质（对象存储/DB）+ 断线续拉窗口（事件流序列号续拉 + 缓冲保留时长默认 10min）与并发配额（§6.2）在 P1 立项时落位（评审 R10）。</p>
+</section>
+
+<!-- ===== 章节 8：关键技术 ===== -->
+<section class="sec" id="sec8">
+  <div class="sec-num">CHAPTER 8</div>
+  <h2>关键技术设计</h2>
+  <p class="sec-intro">确定性机制 / 观测管道（差异化核心）/ 反汇编·源码联动 / 安全沙箱</p>
+
+  <div class="verdict">
+    <span class="lead">关键技术围绕差异化能力与硬性约束：确定性机制（FR-12）、观测管道（FR-10 差异化核心）、反汇编·源码联动（FR-05）、安全沙箱（NFR-04）。每项均为独立、可评审的设计，不散落在内核各处。</span>
+  </div>
+
+  <h3>8.1 确定性机制（FR-12 / NFR-07）</h3>
+  <div class="cards">
+    <div class="card">
+      <h4><span class="chip ok">D1</span> 固定随机种子</h4>
+      <p class="tagline">外设随机源（噪声、按键去抖抖动、ADC 采样等）统一来自种子化 PRNG；同种子 → 同随机序列。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip ok">D0</span> 确定性范围定义（评审 R8）</h4>
+      <p class="tagline"><b>确定性 = 给定种子 + 时间戳化输入事件序列（含注入时刻）→ 结果序列唯一</b>；宿主相关因素（命令到达时机、UI 交互节奏、断点命中后的观测时机、宿主时钟）不在承诺范围，不保证跨宿主/跨会话复现观测时序。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip ok">D2</span> 稳定事件排序</h4>
+      <p class="tagline">事件队列按（虚拟时间, 插入序）稳定排序，同刻事件以注册顺序确定处理，消除宿主线程/时钟抖动影响。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip ok">D3</span> 虚拟时间独立</h4>
+      <p class="tagline">虚拟时间仅由量子推进，不依赖宿主 Date/时钟；仿真速率（MIPS）只影响快慢，不影响结果序列。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip ok">D4</span> 事件流记录（证据流，评审 R1）</h4>
+      <p class="tagline">会话层记录证据流（FR-12 预留），为回放/快照（FR-19）与测试者缺陷复现提供证据。<b>外部输入（UART 写、按键、GPIO 注入）统一时间戳化、经事件队列入事件流（评审 M6）</b>——输入捕获闭环是 D4 成立的先决条件。<b>证据流是稀疏输入事件序列（每次注入一条、频率低），容量可行；恢复路径 = 检查点 + 该输入序列重放执行，不依赖全量波形/trace 证据流（评审 R1）</b>。</p>
+    </div>
+  </div>
+
+  <h3>8.2 观测管道（差异化核心）</h3>
+  <p>波形是竞品普遍空白（需求 2.5）、本平台差异化核心。观测管道把它做成「性能可控的异步流」：探针边沿编码压缩、环形缓冲 + 增量推送控制带宽、采样率可配。观测只读、不改仿真状态，与内核解耦。</p>
+  <h4>双源探针（决策点 4）</h4>
+  <div class="cards">
+    <div class="card">
+      <h4><span class="chip cyan">总线级 trace（底）</span></h4>
+      <p class="tagline">监听地址读写事件流（每访存记时间戳 + 地址 + 方向 + 宽度），覆盖全部访存，语义少、噪声大——作事件流底与访存 trace（FR-14）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip cyan">外设级探针（面）</span></h4>
+      <p class="tagline">外设模型内埋点暴露语义丰富信号：GPIO 翻转、定时器比较、中断脉冲、按键状态——作波形通道。Peripheral 通过 probe(signal,value,time) 上报。</p>
+    </div>
+  </div>
+  <h4>波形数据管道</h4>
+  <div class="fig">
+    <svg viewBox="0 0 880 200" role="img" aria-label="波形数据管道">
+      <defs>
+        <marker id="aW1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3EC6A0"/></marker>
+        <marker id="aW2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#5AC8E4"/></marker>
+      </defs>
+      <rect x="16" y="24" width="150" height="56" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="91" y="42" text-anchor="middle" font-size="12" fill="#E4E9F0">探针采样</text><text x="91" y="60" text-anchor="middle" font-size="10" fill="#9AA8B6">总线+外设信号</text>
+      <rect x="216" y="24" width="170" height="56" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="301" y="42" text-anchor="middle" font-size="12" fill="#E4E9F0">边沿编码</text><text x="301" y="60" text-anchor="middle" font-size="10" fill="#9AA8B6">{time,ch,value,edge} 压缩</text>
+      <rect x="436" y="24" width="160" height="56" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="516" y="42" text-anchor="middle" font-size="12" fill="#E4E9F0">环形缓冲(每通道)</text><text x="516" y="60" text-anchor="middle" font-size="10" fill="#9AA8B6">固定容量·覆盖策略</text>
+      <rect x="646" y="24" width="160" height="56" rx="8" fill="#1E2933" stroke="#5AC8E4"/><text x="726" y="42" text-anchor="middle" font-size="12" fill="#5AC8E4">增量推送(delta)</text><text x="726" y="60" text-anchor="middle" font-size="10" fill="#9AA8B6">按批·节流·序列号</text>
+      <line x1="166" y1="52" x2="216" y2="52" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aW1)"/>
+      <line x1="386" y1="52" x2="436" y2="52" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aW1)"/>
+      <line x1="596" y1="52" x2="646" y2="52" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aW1)"/>
+      <rect x="436" y="110" width="170" height="56" rx="8" fill="#1E2933" stroke="#3EC6A0"/><text x="521" y="128" text-anchor="middle" font-size="12" fill="#E4E9F0">trace 记录(事件流)</text><text x="521" y="146" text-anchor="middle" font-size="10" fill="#9AA8B6">指令/访存·导出 CSV/VCD</text>
+      <rect x="646" y="110" width="160" height="56" rx="8" fill="#1E2933" stroke="#5AC8E4"/><text x="726" y="128" text-anchor="middle" font-size="12" fill="#E4E9F0">前端波形渲染</text><text x="726" y="146" text-anchor="middle" font-size="10" fill="#9AA8B6">缩放/平移·CSV/VCD</text>
+      <path d="M 726 80 V 110" fill="none" stroke="#5AC8E4" stroke-width="1.3" marker-end="url(#aW2)"/>
+      <path d="M 521 80 V 110" fill="none" stroke="#3EC6A0" stroke-width="1.3" marker-end="url(#aW1)"/>
+    </svg>
+    <div class="cap">波形数据管道（示意）：探针 → 边沿编码压缩 → 环形缓冲 → 增量推送 → 前端渲染 / trace 导出。观测全程只读，与仿真状态解耦，是「波形刷新 ≤200ms、数据量受控」的关键（决策点 4 + R3）。</div>
+  </div>
+  <h4>采样与数据量预算</h4>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:760px">
+    <colgroup><col style="width:28%"><col style="width:72%"></colgroup>
+    <thead><tr><th>项</th><th>设计值 / 说明（估算基线，实现后实测校准）</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">通道数</td><td>默认 ≥4（FR-10）；定时器比较 / GPIO0 / 中断脉冲 / 按键为 MVP 示范通道</td></tr>
+      <tr><td class="dim">采样语义</td><td>边沿编码：只记录 <span class="mono">{time, ch, value, edge}</span>，电平维持期不重复记录；波形渲染由前后两个边沿推断电平段</td></tr>
+      <tr><td class="dim">采样率</td><td>≥1kHz【估算】；由事件时间戳决定（事件驱动时序天然有时间精度），不额外周期性采样</td></tr>
+      <tr><td class="dim">环形缓冲（容量模型）</td><td>容量按 <span class="mono">buffer_size ≥ 边沿速率 × 期望回看窗口</span> 建模，默认按时间窗口配容量：100kHz 翻转 ≈2×10⁵ 边沿/s、1MHz ≈2×10⁶ 边沿/s，窗口 ≥100ms → 每通道 10⁵~10⁶ 事件（默认 2×10⁵ 起步，可配）；前端可回看窗口内历史</td></tr>
+      <tr><td class="dim">内存预算（评审 G）</td><td>默认配置内存预算显式标注：2×10⁵ 事件/通道 × 4 通道 × 每事件 ≈32B（{time,ch,value,edge} 紧凑编码）≈ 25MB 常驻；P1 长回看转 IndexedDB spool 后常驻降为窗口大小</td></tr>
+      <tr><td class="dim">推送与覆盖预算</td><td>批量推送节流周期 ≤ 回看窗口的 1/2（20ms 批 ≤ 100ms 窗口），保证单推送周期内缓冲不被覆盖多次；溢出策略显式可选：丢最旧+标记 / <b>暂停仿真</b>（默认丢最旧+标记）；长回看（P1）走 IndexedDB 分块 spool 或采样降载，不靠无限内存</td></tr>
+      <tr><td class="dim">增量推送</td><td>按批 + 节流（如 ≤20ms 一批），带单调序列号，前端按序合并；波形刷新 ≤200ms【估算】</td></tr>
+      <tr><td class="dim">导出</td><td>CSV / VCD（FR-10、FR-14）；访存 trace 可按时间/地址筛选导出</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>8.3 反汇编·源码联动（FR-05）</h3>
+  <ul class="ulist">
+    <li><b>ELF/Raw/HEX 解析</b>（前端模块）：浏览器内解析 ELF 段（text/data/bss）与 Raw/HEX 镜像，按映射加载到 ISS；解析符号表与 DWARF 调试信息，构建「地址→源码行」与「地址→符号」映射表（FR-05）。</li>
+    <li><b>反汇编</b>：text 段解码为（地址, 机器码, 助记符）序列；无 DWARF 时反汇编区独立可用，PC 高亮当前指令（V-12）。</li>
+    <li><b>源码联动</b>：含 DWARF 时，单步时反汇编当前行与源码行同步高亮（源码级单步按行映射边界推进）。</li>
+    <li><b>加载性能</b>：64KB ELF ≤3s【估算】；映射规模与固件大小可配置（V-01）。</li>
+  </ul>
+
+  <h3>8.4 安全沙箱与防护（NFR-04 / R6）</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:760px">
+    <colgroup><col style="width:30%"><col style="width:70%"></colgroup>
+    <thead><tr><th>机制</th><th>落地</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">固件沙箱</td><td>固件在 WASM 沙箱内执行（浏览器形态，Worker 内），不触碰宿主 API（NFR-04）。<b>沙箱成立前提（评审 R2）：内核为 C/Rust→WASM 编译产物（线性内存隔离 + 无宿主 API）；若采用 JS 解释器内核则无此隔离，只能降级为「同进程 + 输入校验 + 资源限制」且不称沙箱。</b>服务端形态在会话进程内隔离（进程隔离为主，WASM 沙箱为辅）</td></tr>
+      <tr><td class="dim">XSS 防护</td><td>用户输入、固件字符串输出、串口回显统一转义后才进 DOM；ELF/HEX 解析输入按协议校验（防注入）</td></tr>
+      <tr><td class="dim">通信鉴权</td><td>服务端模式 WebSocket 连接鉴权（NFR-04）；MVP 浏览器形态无服务端，鉴权从简</td></tr>
+      <tr><td class="dim">会话隔离</td><td>服务端每会话隔离状态与资源，防跨会话越权（NFR-03）</td></tr>
+      <tr><td class="dim">输入容量上限</td><td>ELF/DWARF/Raw/HEX 解析设输入大小上限 + 段数/符号表/递归深度限制（畸形输入防 OOM）；客户端威胁低，服务端形态（P1）放大后强制执行（评审 L3）</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>8.5 健康管理 HMS（横切 · NFR-08）</h3>
+  <p><b>定位</b>：与日志系统（记录）分工的健康管理横切模块——监测平台自身健康、异常分级、分角色分发、执行降级动作。产品/嵌入式工作台不接触原始日志，平台异常的<b>用户可读提示</b>由 HMS 统一出口（§3.4）；系统管理员收到同一异常的完整诊断（关联 M-21 日志）。</p>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:880px">
+    <colgroup><col style="width:18%"><col style="width:38%"><col style="width:44%"></colgroup>
+    <thead><tr><th>要素</th><th>落地</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">健康信号源</td><td>引擎心跳、会话状态机、错误码、命令超时、崩溃信号、传输连接状态、<b>guest 失控（watchdog 超时）</b></td><td>各模块周期性上报心跳/状态；错误码统一进 E_CTX/E_BUS/E_ISS/E_PP/E_PROTO（§3）；<b>故障三分类（评审 R3）：① guest trap（访存异常/非法指令）= 模型内 guest 异常，捕获为事件；② 平台崩溃（引擎/宿主异常）= 平台故障；③ guest 失控（死循环超时）= 平台级 watchdog 超时，terminate 内核并告警——后两者入 HMS 处置，前者是正常调试语义</b></td></tr>
+      <tr><td class="dim">异常分级</td><td>致命（平台不可用）/ 严重（功能降级）/ 警告（可继续）</td><td>分级决定分发范围与降级动作，阈值可配置</td></tr>
+      <tr><td class="dim">分角色分发</td><td>产品/嵌入式 = 可读提示（脱敏）；系统管理员 = 诊断详情（关联日志、时间线）</td><td>同一异常两个视角，原始日志不越界（§3.4）</td></tr>
+      <tr><td class="dim">降级动作</td><td>自动快照 + 恢复 / 暂停 / 断开外设 / 关闭 trace 降载 / <b>terminate 失控内核（R3）</b></td><td>动作可重试；<b>恢复 = 检查点 + 稀疏输入事件序列重放（§7.3/§10.2，评审 R1）</b></td></tr>
+      <tr><td class="dim">与 M-21 边界</td><td>HMS 消费健康信号与错误上下文，可引用 M-21 查询根因；不直接暴露日志</td><td>记录（M-21）与监控分发（HMS）职责分离</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">注：HMS 是韧性（§10.7）的执行器：监测 → 分级 → 处置 → 恢复闭环；对应模块设计 M-22。NFR-08 为架构扩展项（需求报告 NFR 仅 01–07），用于承载韧性/异常管理这一非功能面。</p>
+
+  <h3>8.6 自动化与场景脚本（会话层扩展 · P1 预留 · FR-16/17）</h3>
+  <p><b>定位</b>：把「嵌入式测试者」的回归/CI 诉求（需求 1.3 P0 主用户）落到架构面——headless 运行 + 场景脚本/断言，作为会话层（②）的能力扩展，与浏览器协议客户端共用同一命令总线与能力面，不另起仿真体系。</p>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:880px">
+    <colgroup><col style="width:20%"><col style="width:40%"><col style="width:40%"></colgroup>
+    <thead><tr><th>要素</th><th>落地</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">headless 入口</td><td>REST/CLI → 命令总线（与协议客户端同级）；无 UI 会话驱动「加载→运行 N 周期→导出终态」</td><td>FR-16；服务端形态（P1）优先，WASM 形态可 headless 嵌入（如 CI runner）</td></tr>
+      <tr><td class="dim">场景脚本/断言引擎</td><td>录制输入序列（串口写/按键/GPIO 注入）+ 期望输出断言（串口输出/GPIO 状态/寄存器值）→ 一键运行 → 通过/失败报告</td><td>FR-17；断言基于虚拟时间戳对齐，保证确定性判定（§8.1）；<b>录制 = 生成时间戳化输入事件序列，与 D4 事件流同源（可直接回放，评审 M6）</b></td></tr>
+      <tr><td class="dim">CI 对齐</td><td>Robot Framework 关键字封装（借鉴 Renode【已查证·B9】）；Jenkins/CI 配额调度（借鉴 Wokwi CI）</td><td>对齐需求 6.4：FR-16 脚本化/CI 接口</td></tr>
+      <tr><td class="dim">产品闭环衔接</td><td>场景断言 = 产品行为判定（§3.2 产品闭环）的自动化形态：产品工作台可回放/触发场景脚本</td><td>产品工作台（§3.4）行为判定自动化，非仅嵌入式测试者专用</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">数据面：A1 场景脚本流（下行：脚本命令/断言配置；上行：判定结果/断言失败证据），与 C1/CF1 同协议封包（§7.3.2 完整性机制），失败语义 = 断言不通过返回判定码。</p>
+
+  <h3>8.7 帧缓冲渲染三层协同（P1 预留 · FR-22）</h3>
+  <p><b>定位</b>：屏幕 GUI 帧缓冲渲染是「L1 LCD framebuffer 外设模型 + L3 帧缓冲更新时序 + L5 3D 纹理映射」三层协同（需求 6.4 明确），架构按「渲染与仿真解耦、帧刷新走事件队列」预留接口，控制 R9（3D 与仿真线程耦合）风险。</p>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:880px">
+    <colgroup><col style="width:16%"><col style="width:44%"><col style="width:40%"></colgroup>
+    <thead><tr><th>层</th><th>接口 / 时序（P1 预留）</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">L1 LCD 外设模型</td><td>framebuffer 内存区（寄存器接口 + 行为级时序）；脏区/更新事件上报（frameDirty(region) → 事件队列）</td><td>作为新 Peripheral 插件实例加入（§4.3 插件化）；帧缓冲内存区可观察（FR-09 P1）</td></tr>
+      <tr><td class="dim">L3 帧刷新事件</td><td>帧缓冲更新事件入引擎事件队列（虚拟时间锚定）；渲染端按帧事件拉取脏区，不阻塞仿真主循环</td><td>渲染与仿真解耦：仿真只产事件，渲染消费事件；≤100ms 显示延迟【估算】由事件间隔保证</td></tr>
+      <tr><td class="dim">L5 纹理映射通道</td><td>帧缓冲 → 3D 屏幕纹理：脏区增量上传（纹理子区域更新）→ WebGL/three.js 渲染线程独立分帧</td><td>与仿真线程解耦（R9 应对）；数据走观测侧通道（只读），不反向改仿真状态</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">演进依赖：里程碑 A（§11.1）——MVP 闭环 → 2D/树形增强 → 3D 下钻（FR-21，ADR-5）→ 帧缓冲渲染（FR-22）；产品树 2D/3D 同源不另造数据模型（§7.2）。</p>
+
+  <h3>8.8 多板互联与跨板同步（P1 预留 · FR-24~27）</h3>
+  <p><b>定位</b>：需求 v1.2 评审补充的多板互联调试，作为 P1 里程碑 B。架构按需求「MVP 不阻塞扩展」要求（L3 事件队列/消息路由抽象、L1 外设「端口-链路」解耦）给出预留设计——MVP 单板闭环成立，多板作为可配置能力逐层解锁。跨板复杂度风险 R10 由本节接口预留承接。</p>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:880px">
+    <colgroup><col style="width:22%"><col style="width:42%"><col style="width:36%"></colgroup>
+    <thead><tr><th>要素</th><th>架构设计（P1 预留）</th><th>对应需求</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">数据面</td><td>Project 支持多 Board 实例；Interconnect Link 数据模型（两端 port 对 + 类型 + 虚拟时间戳有序消息队列，§7.1）；Topology 作为产品树扩展节点持久化</td><td>FR-24 拓扑配置、保存/恢复、未连接端口告警</td></tr>
+      <tr><td class="dim">L1 端口-链路解耦</td><td>Peripheral 增加 port(name,dir)/link(peerPort) 抽象（§4.3）；外设只暴露端口语义，互联绑定由 Topology 配置层完成，外设本身不感知对端</td><td>FR-25 UART TX→RX、SPI、I2C、GPIO、CAN、ETH 桥接（MVP 扩展期支持 UART+GPIO 子集）</td></tr>
+      <tr><td class="dim">L3 跨板事件同步</td><td>各板共享同一全局虚拟时间轴（时间量子全局一致，借鉴 Renode 全局量子同步【已查证·B13】）；跨板时钟一致性由同一虚拟时间锚定，不依赖宿主时钟</td><td>FR-27 多板波形同一时间轴；确定性不破（§8.1）</td></tr>
+      <tr><td class="dim">L3 跨板消息路由</td><td>链路消息按（虚拟时间戳，链路 id，序列号）有序传递；跨板消息经路由层进出事件队列，不直接线程互调</td><td>FR-25 跨板事件有序；FR-26 跨板消息 trace 完整路径</td></tr>
+      <tr><td class="dim">L4 跨板联合观察</td><td>调试服务支持多板并排（内存/寄存器/反汇编视图）；联动或独立暂停可配置；跨板信号/消息跟踪复用观测管道</td><td>FR-26</td></tr>
+      <tr><td class="dim">L5 跨板波形</td><td>观测管道多板波形按全局虚拟时间轴对齐；跨板链路信号纳入探针采样（探针可挂链路通道）</td><td>FR-27 波形同步 + VCD 导出</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">MVP 预留接口：① 会话层拓扑配置命令（命令面预留，MVP 不暴露 UI）；② L1 外设 port 抽象（MVP 仅实现单板端口，不绑定链路）；③ L3 事件队列消息槽（跨板消息路由预留）。风险 R10（跨板时钟/事件同步与消息路由复杂度）由此承接，列 P1。</p>
+  <p class="note">机制设计骨架（评审 L5）：跨板消息路由时序 = 发送方按（虚拟时间戳, 链路 id, 序列号）入路由队列 → 接收方事件队列在对应虚拟时间点投递（跨板暂停传播：任一板暂停 → 关联链路消息挂起，恢复后按虚拟时间序继续）；故障语义：链路消息丢失/超时 → 两端板均暂停并告警（跨板一致性优先于继续仿真），与单板「丢最旧+标记」不同——多板以一致性为硬约束。里程碑 B 立项前必须补完整时序与故障语义设计（消息丢失/乱序/暂停传播矩阵），本骨架为 P1 立项基线。</p>
+</section>
+
+<!-- ===== 章节 9：架构决策 ===== -->
+<section class="sec" id="sec9">
+  <div class="sec-num">CHAPTER 9</div>
+  <h2>架构决策（ADR）与技术选型</h2>
+  <p class="sec-intro">六大架构决策记录 / 逐模块技术选型矩阵 / 关键选型决策依据</p>
+
+  <div class="verdict">
+    <span class="lead">六大架构决策（ADR）均对齐「够用保真度 × 极致易用 × 可观测 × 合规」目标，全部有候选与权衡，不默认最优、不拍脑袋。选型以 ADR 为纲、以矩阵为表，落实到各模块。</span>
+  </div>
+
+  <h3>9.1 ADR-1 · 时序精度：事件驱动</h3>
+  <div class="dp">
+    <div class="row"><b>问题</b>：仿真时间如何推进，决定「虚拟时间 → 真实时间」映射精度与实现成本。</div>
+    <div class="row"><b>选项</b>：A 事件驱动（时间量子/事件队列）；B 周期精确；C 混合（行为级 + 可选 RTL 协同）。</div>
+    <div class="row"><b>权衡</b>：事件驱动快、模型成本低，足以功能验证与驱动开发；周期精确保真度高但慢、建模贵——商用三巨头均把周期精确让位给 RTL 仿真/emulation（Synopsys ZeBu/HAPS、Simics 功能验证、Imperas 指令精确）。</div>
+    <div class="rec"><b>决策</b>：MVP 采用事件驱动，时间量子 1µs 级（借鉴 Renode）；预留 Verilator HDL 协同接口。</div>
+  </div>
+
+  <h3>9.2 ADR-2 · 外设建模粒度：分级建模</h3>
+  <div class="dp">
+    <div class="row"><b>问题</b>：外设模型精度层级，决定驱动兼容性与调试视图价值。</div>
+    <div class="row"><b>选项</b>：A 寄存器级；B 行为级；C 分级体系（标签→脚本→行为模型→HDL 协同）。</div>
+    <div class="row"><b>权衡</b>：寄存器级利于驱动兼容（QEMU）但成本高；行为级快但可能误导时序敏感驱动（Wokwi 明示模拟支持有限）。</div>
+    <div class="rec"><b>决策</b>：分级建模（Renode 四级蓝本）；MVP 取「寄存器接口 + 行为级时序」——UART/GPIO/定时器首批寄存器级，其余按需分级。</div>
+  </div>
+
+  <h3>9.3 ADR-3 · 仿真性能：解释执行 + 双内核</h3>
+  <div class="dp">
+    <div class="row"><b>问题</b>：内核执行引擎，决定浏览器内可用性能上限与实现复杂度。</div>
+    <div class="row"><b>选项</b>：A 纯解释（WASM 可移植、逐指令可观测）；B JIT/二进制翻译（TCG 式）；C 混合（解释 MVP + 后期 JIT/服务端双内核）。</div>
+    <div class="row"><b>权衡</b>：解释简单、可观测好（Spike 40–240 MIPS 广泛用于验证教学）；JIT 快（QEMU TCG 100M–1B 指令/s）但实现复杂、WASM 下更难；Wokwi 证明浏览器内解释可产品化（~8MHz 限速）。</div>
+    <div class="rec"><b>决策</b>：MVP 解释执行（WASM），目标 5–10 MIPS；架构预留 JIT（解码-翻译-执行流水线）；服务端可选 QEMU 双内核跑长任务/整机——经 ExecutionBackend 隔离（合规 R2）。</div>
+  </div>
+
+  <h3>9.4 ADR-4 · 波形来源：双源探针</h3>
+  <div class="dp">
+    <div class="row"><b>问题</b>：波形数据从哪里采样，决定波形语义丰富度与实现成本。</div>
+    <div class="row"><b>选项</b>：A 总线探针；B 外设内部信号；C 混合。</div>
+    <div class="row"><b>权衡</b>：总线探针实现简单、覆盖全部访存但语义少、噪声大；外设内部信号语义丰富但需每个外设埋点。</div>
+    <div class="rec"><b>决策</b>：混合——总线级 trace 为底（事件流，借鉴 QEMU TCG 插件）+ 外设级探针为面（波形通道，借鉴 Renode LogPeripheralAccess）。波形是普遍空白、差异化机会。</div>
+  </div>
+
+  <h3>9.5 ADR-5 · 3D 可视化引擎（P1）</h3>
+  <div class="dp">
+    <div class="row"><b>问题</b>：产品→主板→元器件三层 3D 交互视图（旋转/缩放/点选下钻）用何种前端技术实现。</div>
+    <div class="row"><b>选项</b>：A three.js（WebGL，浏览器原生、生态成熟）；B WebGPU 原生；C 2D 增强。</div>
+    <div class="row"><b>权衡</b>：three.js 与 Web 零安装一致、社区成熟，但引入 WebGL 渲染线程与仿真线程耦合复杂度（R9）；2D 增强成本低但失去「3D 原型构建 + 调试联动」差异化。</div>
+    <div class="rec"><b>决策</b>：列 P1（不进 MVP）；MVP 以 2D/树形闭环；P1 里程碑 MVP → 2D 增强 → three.js 3D 下钻（FR-21）→ 帧缓冲渲染（FR-22）。产品树同源（不另造数据模型）。</div>
+  </div>
+
+  <h3>9.6 ADR-6 · 前端承载：零构建 vs 零依赖（评审 M3/L4）</h3>
+  <div class="dp">
+    <div class="row"><b>问题</b>：两个独立命题——「零构建」（无打包步骤）与「零依赖」（无外部网络依赖）——此前混为一谈；file:// 形态下 WASM 与 P1 three.js 如何承载需明确。</div>
+    <div class="row"><b>选项</b>：A 原生 JS + 全部内联（零构建、零依赖、单文件）；B 构建产物单 HTML（零依赖、有构建步骤）；C 原生 JS + 关键依赖 CDN（零构建、有网络依赖）。</div>
+    <div class="row"><b>权衡</b>：file:// 的真正约束是 ES module CORS 与外部资源不可达（与框架无关）；three.js 走 CDN 则 file:// 离线失效，与「单文件自包含」冲突；WASM 内联 base64 会膨胀文件（内核 1–3MB → base64 增约 33%）且首屏加载变慢。</div>
+    <div class="rec"><b>决策</b>：MVP = 方案 A——原生 JS 零构建 + WASM 内联 base64（<b>单文件优先、目录形态兜底（NFR-05 允许 file:// 目录形态，评审 E）</b>；或首次加载后由本地文件缓存，file:// 下接受「单目录多文件」：入口 index.html + wasm 文件）；P1 3D = 方案 C 的受控变体：three.js 走可信 CDN，file:// 下 3D 视图降级为 2D/树形（能力协商降级，§11.2），不阻塞核心闭环。<b>「零构建」= 零安装 / 单文件交付属性（用户侧无需任何构建步骤），非开发期约束：内核由 C/Rust→WASM 经 emscripten/LLVM 编译，开发期构建链与测试工具链（node/jest/CI 对拍）正常存在且不受零构建约束（评审 R2/R7/R12）</b>；零依赖在 MVP 保持、P1 允许 CDN + 降级。</div>
+  </div>
+
+  <h3>9.7 逐模块技术选型矩阵</h3>
+  <p class="note">注：本矩阵即决策记录（评审 L4）——每行含候选/权衡/推荐决策/理由，与 ADR 互补；除已编号 ADR-1~6 外的选型不再逐条升格 ADR，评审时以矩阵为决策依据。</p>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:900px">
+    <colgroup><col style="width:12%"><col style="width:20%"><col style="width:24%"><col style="width:20%"><col style="width:24%"></colgroup>
+    <thead><tr><th>模块</th><th>候选方案</th><th>权衡</th><th>推荐决策</th><th>理由 / 演进</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">ISS 内核</td><td>自研轻量 ISS / QEMU / Unicorn / Spike 库</td><td>自研：可控、合规、可观测好、工程量中等；QEMU：整机强但 GPL（R2）；Unicorn：GPL、无外设；Spike：BSD 可借鉴</td><td><b>自研轻量 ISS（RV32IMC，WASM）</b>；服务端可选 QEMU</td><td>合规（BSD/MIT）+ 解释满足 5-10 MIPS（ADR-3）；Spike 差分对拍；预留 JIT</td></tr>
+      <tr><td class="dim">仿真引擎</td><td>事件驱动 / 周期精确 / 混合</td><td>事件驱动快、够功能验证；周期精确真但慢贵</td><td><b>事件驱动（1µs 量子）</b></td><td>ADR-1；借鉴 Renode；预留 Verilator</td></tr>
+      <tr><td class="dim">外设建模</td><td>寄存器级 / 行为级 / 分级</td><td>寄存器级利于兼容但成本高；行为级快但可能误导</td><td><b>分级建模（Peripheral）</b></td><td>ADR-2；寄存器接口+行为时序起步</td></tr>
+      <tr><td class="dim">前端</td><td>原生 JS+hash / React / Vue / Svelte</td><td>框架需打包步骤，产物同样可内联为单 HTML；file:// 真正约束是 ES module CORS 与外部资源不可达（与框架无关）；原生零构建 + 内联可审计</td><td><b>原生 JS + 多视图 hash 路由</b></td><td>零构建零安装（NFR-05）；three.js（P1）承载见 ADR-6</td></tr>
+      <tr><td class="dim">3D 引擎（P1）</td><td>three.js / WebGPU / 2D 增强</td><td>three.js 生态成熟零安装；WebGPU 新；2D 增强无差异化</td><td><b>three.js（ADR-5，P1）</b></td><td>渲染/仿真解耦；产品树同源</td></tr>
+      <tr><td class="dim">ELF/DWARF</td><td>浏览器内 / 服务端 / 外部工具</td><td>浏览器内满足零安装与联动；服务端利于大固件但依赖服务端</td><td><b>浏览器内 ELF 解析 + DWARF 行表</b></td><td>反汇编·源码联动（FR-05）</td></tr>
+      <tr><td class="dim">传输协议</td><td>统一协议+双适配 / 各自私有 / WebRTC</td><td>统一协议支撑双形态双内核透明；各自私有无法复用前端</td><td><b>统一命令/事件协议 + 双传输适配</b></td><td>前后端、双形态、双内核公共契约</td></tr>
+      <tr><td class="dim">波形管道</td><td>自研边沿编码 / VCD 导出 / 周期采样</td><td>自研压缩最优可控；VCD 是导出格式；周期采样数据量大</td><td><b>自研探针边沿编码 + 增量推送</b></td><td>差异化核心（第 8 章）；导出 CSV/VCD</td></tr>
+      <tr><td class="dim">持久化</td><td>localStorage / IndexedDB / 服务端</td><td>localStorage 5MB 上限易被快照撑爆；IndexedDB 容量大、可存快照与波形 spool；服务端支撑云协作</td><td><b>IndexedDB（MVP，容量预算 §7.4）→ 服务端（P1）</b></td><td>FR-13；M2 评审：256KB RAM 快照 ≈350KB+，localStorage 不满足多快照+项目共存</td></tr>
+      <tr><td class="dim">WASM 工具链</td><td>emscripten / LLVM 直出 / AssemblyScript</td><td>emscripten 生态成熟适移植 C；LLVM 直出更轻但工程多</td><td><b>emscripten / LLVM</b></td><td>内核与前端解耦（NFR-06）；<b>属开发期编译链，交付物仍单文件自包含（评审 R2）</b></td></tr>
+      <tr><td class="dim">正确性对拍</td><td>Spike golden / riscv-tests / 自建</td><td>Spike 官方黄金基准；riscv-tests 覆盖子集；自建针对本平台</td><td><b>Spike golden + riscv-tests 子集 + 自建</b></td><td>FR-04 正确性；覆盖矩阵声明</td></tr>
+      <tr><td class="dim">构建/CI（P1）</td><td>headless CLI / Robot Framework / Jenkins</td><td>headless 支撑脚本回归；Robot 借鉴 Renode；Jenkins 调度</td><td><b>headless CLI + 场景脚本/断言引擎（FR-16/17）</b></td><td>对齐 Renode Robot；CI 配额借鉴 Wokwi</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>9.8 关键选型决策依据</h3>
+  <div class="cards">
+    <div class="card">
+      <h4><span class="chip ok">为何自研 ISS 而非 QEMU</span></h4>
+      <p class="tagline">合规是第一硬约束（R2）：QEMU/Unicorn 为 GPL-2.0，浏览器内嵌会触发衍生作品传染，与「开放免费入口」冲突。自研 BSD/MIT 内核（借鉴 Spike/TinyEMU）同时获得指令级可观测（ADR-3），是「可观测 × 合规 × 成本」最优。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip ok">为何前端原生 JS</span></h4>
+      <p class="tagline">零安装（NFR-05）与 file:// 直接可开（V-10）是硬指标，任何构建链依赖（React/Vue 需打包）都会破坏。原生 JS + hash 路由 + 命令驱动重渲染，以略多样板换取零依赖、可审计、可单文件自包含——即 Wokwi 路线。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip cyan">为何波形自研</span></h4>
+      <p class="tagline">波形是竞品普遍空白（需求 2.5）、本平台差异化核心。QEMU 需 TCG 插件自建、Renode 是 VCD 导出、Wokwi 是 Logic Analyzer，无一提供运行时内嵌波形面板。自研边沿编码管道是不可外包的护城河（FR-10）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="chip cyan">为何 3D 用 three.js（P1）</span></h4>
+      <p class="tagline">three.js 与零安装一致、生态成熟、WebGL 原生（ADR-5）；WebGPU 新且与仿真线程耦合复杂度更高（R9）。列 P1 且产品树同源（FR-21）。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 章节 10：质量属性 ===== -->
+<section class="sec" id="sec10">
+  <div class="sec-num">CHAPTER 10</div>
+  <h2>质量属性设计</h2>
+  <p class="sec-intro">非功能需求（NFR）如何由架构支撑：性能 / 可靠性 / 可用性 / 安全 / 可维护性 / 可扩展性</p>
+
+  <div class="verdict green">
+    <span class="lead">质量属性设计把需求 NFR 逐项映射到架构支撑，作为评审与验收的可量化基线。所有性能目标均为需求标注的估算基线（NFR-01~03），架构据此定结构、留实测校准口。</span>
+  </div>
+
+  <h3>10.1 性能</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:760px">
+    <colgroup><col style="width:24%"><col style="width:26%"><col style="width:50%"></colgroup>
+    <thead><tr><th>指标</th><th>目标（估算基线）</th><th>架构支撑</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">仿真速率</td><td>≥5–10 MIPS（前端 WASM 解释）</td><td>表驱动解码 + 指令钩子可关；参考 Wokwi ~8MHz 限速可产品化（NFR-01）；服务端 JIT/QEMU ≥100M（长期）</td></tr>
+      <tr><td class="dim">调试态最低速率（评审 R9）</td><td>全钩子开启 ≥0.5–1 MIPS【估算】</td><td>按需注册钩子（仅订阅项回调）+ PC 断点比较优先于全量指令回调；trace/覆盖率开启时明确降速并提示，退出调试态恢复全速</td></tr>
+      <tr><td class="dim">命令响应</td><td>≤500ms</td><td>控制注入安全检查点 + 事件驱动；Worker 内核切片（主路径）+ 分片降级兜底（NFR-02）</td></tr>
+      <tr><td class="dim">寄存器/内存刷新</td><td>≤200ms</td><td>simStateDelta 增量推送 + 节流；暂停冻结（FR-09）</td></tr>
+      <tr><td class="dim">波形刷新</td><td>≤200ms</td><td>边沿编码 + 环形缓冲 + 批量节流推送（第 8 章）</td></tr>
+      <tr><td class="dim">并发会话</td><td>≥10（单服务实例）</td><td>会话隔离实例 + 独立种子（NFR-03，V-09）</td></tr>
+      <tr><td class="dim">ELF 加载</td><td>64KB ≤3s【估算】</td><td>ELF 解析 + 段加载；规模可配置（V-01）</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>10.2 可靠性</h3>
+  <p>确定性可复现（FR-12）是可靠性的核心：固定种子 + 稳定事件排序 + 虚拟时间独立 + 事件流记录（第 8.1 章）。快照/恢复（FR-19）与事件流回放为测试者缺陷复现提供证据；服务端会话进程隔离保证故障域。</p>
+  <p><b>快照原子性与恢复点</b>：快照以量子边界为检查点原子落盘（写临时文件 + 替换），与证据流记录对齐（§7.3）；<b>崩溃恢复 = 最近检查点 + 稀疏输入事件序列重放执行（恢复路径，非全量证据流重放，评审 R1）</b>，恢复点语义明确（FR-12/19）；持久化写失败 → 保留内存态 + 提示重试，不丢会话。</p>
+
+  <h3>10.3 可用性</h3>
+  <p>多视图独立路由（FR-23）+ View Store 保证切换后仿真与调试状态保持（V-11）；零安装 + file:// 直接可开（NFR-05）；命令驱动重渲染 + Worker 内核切片（主路径）/ 分片兜底避免 UI 卡顿；服务端会话隔离保证并发稳定（V-09）。</p>
+
+  <h3>10.4 安全</h3>
+  <p>WASM 沙箱执行固件（NFR-04）+ 统一转义防 XSS + 通信鉴权（服务端）+ 会话隔离——构成安全横切面（第 8.4 章）。</p>
+
+  <h3>10.5 可维护性</h3>
+  <p>仿真内核与前端解耦（双形态）；外设插件化（Peripheral 注册表）；ExecutionBackend 隔离双内核；核心模块单元测试覆盖率 ≥70%【估算】；确定性测试夹具（NFR-06）。</p>
+
+  <h3>10.6 可扩展性</h3>
+  <p>五个扩展点承接演进（第 11 章）：ExecutionBackend（双内核/多核）、Peripheral（外设库）、观测管道（trace/覆盖率）、协议（GDB RSP/CI）、产品树底座（2D/3D 同源）。演进不推翻分层。</p>
+
+  <h3>10.7 韧性（Resilience · NFR-08）</h3>
+  <p>韧性 = 故障被<b>检测 → 分级 → 处置 → 恢复</b>，执行器为 HMS（§8.5）。针对平台自身（非目标程序）的故障场景，逐项定义检测信号与处置策略：</p>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:880px">
+    <colgroup><col style="width:22%"><col style="width:30%"><col style="width:26%"><col style="width:22%"></colgroup>
+    <thead><tr><th>故障场景</th><th>检测（HMS 信号）</th><th>处置（分级）</th><th>恢复</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">引擎崩溃 / 非法状态</td><td>引擎心跳丢失、状态机非法</td><td>致命 → 自动快照（若处于安全检查点）/ 回退最近检查点（评审 N3）</td><td>回退最近安全检查点 + 输入序列重放（§10.2，评审 R1/C）</td></tr>
+      <tr><td class="dim">guest 死循环 / 失控（评审 R3）</td><td>指令预算 watchdog 超时（Worker 心跳丢失）</td><td>严重 → terminate 内核 + 告警（自动快照可选）</td><td>重新加载固件 / 从最近检查点恢复；与 guest trap 区分（模型内事件）</td></tr>
+      <tr><td class="dim">命令超时</td><td>C1 请求超时（≤500ms）</td><td>警告 → Resp 超时错误</td><td>幂等重试 / 用户重发</td></tr>
+      <tr><td class="dim">服务端断连（WS）</td><td>传输连接状态</td><td>严重 → 重连 + 序列号续拉</td><td>断线重连后补齐状态（M-07）</td></tr>
+      <tr><td class="dim">资源耗尽（内存/缓冲）</td><td>环形缓冲溢出、堆水位</td><td>严重 → 降载（关 trace / 降采样）</td><td>丢最旧数据 + 标记，不崩溃</td></tr>
+      <tr><td class="dim">部分失败（加载/写存储）</td><td>错误码 E_PROTO/E_CTX</td><td>警告/严重 → 拒绝并保留旧态</td><td>提示 + 重试，不丢会话</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">注：MVP 以「崩溃自动恢复 + 断线重连 + 写失败降级 + Worker 韧性基线（guest 失控可 terminate）」为基线；资源降载与服务端断连在 P1 服务端形态完整落地。韧性验证纳入确定性测试夹具（NFR-06）。<b>角色机制（三工作台分角色分发）P1 引入，MVP 角色面从简（评审 L1）。</b></p>
+</section>
+
+<!-- ===== 章节 11：演进兼容 ===== -->
+<section class="sec" id="sec11">
+  <div class="sec-num">CHAPTER 11</div>
+  <h2>演进与兼容性设计</h2>
+  <p class="sec-intro">演进路线（里程碑）/ 兼容性策略 / 需求追溯矩阵</p>
+
+  <div class="verdict">
+    <span class="lead">演进遵循「先 2D 闭环、后 3D 下钻、能力逐层解锁」路线：MVP 交付多视图 + 波形 + 调试联动，再增强，再 3D 与帧缓冲，随后自动化/CI（FR-16/17）与多板互联（FR-24~27，里程碑 B），最后外部工具集成与多核。所有演进均在既有五横层上以扩展点承接，不推翻架构。</span>
+  </div>
+
+  <h3>11.1 演进路线（里程碑时间轴）</h3>
+  <div class="fig">
+    <svg viewBox="0 0 880 230" role="img" aria-label="演进路线时间轴">
+      <defs>
+        <marker id="aE1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3EC6A0"/></marker>
+      </defs>
+      <line x1="60" y1="40" x2="820" y2="40" stroke="#33404E" stroke-width="2" marker-end="url(#aE1)"/>
+      <g font-size="9.5" fill="#677787">
+        <text x="60" y="30" text-anchor="middle">MVP</text>
+        <text x="240" y="30" text-anchor="middle">2D 增强</text>
+        <text x="420" y="30" text-anchor="middle">3D 原型</text>
+        <text x="600" y="30" text-anchor="middle">帧缓冲渲染</text>
+        <text x="790" y="30" text-anchor="middle">工具集成/多核</text>
+      </g>
+      <g>
+        <rect x="60" y="37" width="8" height="6" fill="#3EC6A0"/><rect x="240" y="37" width="8" height="6" fill="#3EC6A0"/><rect x="420" y="37" width="8" height="6" fill="#E6A23C"/><rect x="600" y="37" width="8" height="6" fill="#E6A23C"/><rect x="790" y="37" width="8" height="6" fill="#5AC8E4"/>
+      </g>
+      <rect x="20" y="58" width="180" height="120" rx="8" fill="#161E27" stroke="#3EC6A0"/>
+      <text x="34" y="78" font-size="12" fill="#3EC6A0" font-weight="700">MVP（P0）</text>
+      <text x="34" y="98" font-size="10" fill="#9AA8B6">· 13 条 P0 功能</text>
+      <text x="34" y="114" font-size="10" fill="#9AA8B6">· 2D 产品树/原理图</text>
+      <text x="34" y="130" font-size="10" fill="#9AA8B6">· 调试联动+波形</text>
+      <text x="34" y="146" font-size="10" fill="#9AA8B6">· 多视图+快照</text>
+      <text x="34" y="162" font-size="10" fill="#9AA8B6">· WASM 零安装</text>
+      <rect x="216" y="58" width="180" height="120" rx="8" fill="#161E27" stroke="#3EC6A0"/>
+      <text x="230" y="78" font-size="12" fill="#3EC6A0" font-weight="700">2D 增强（P1）</text>
+      <text x="230" y="98" font-size="10" fill="#9AA8B6">· 更全外设库</text>
+      <text x="230" y="114" font-size="10" fill="#9AA8B6">· trace/波形增强</text>
+      <text x="230" y="130" font-size="10" fill="#9AA8B6">· JIT 提速可选</text>
+      <text x="230" y="146" font-size="10" fill="#9AA8B6">· 服务端 WebSocket</text>
+      <text x="230" y="162" font-size="10" fill="#9AA8B6">· 云协作/CI 起步</text>
+      <rect x="412" y="58" width="180" height="120" rx="8" fill="#161E27" stroke="#E6A23C"/>
+      <text x="426" y="78" font-size="12" fill="#E6A23C" font-weight="700">3D 原型（P1）</text>
+      <text x="426" y="98" font-size="10" fill="#9AA8B6">· 产品→板→元器件 3D</text>
+      <text x="426" y="114" font-size="10" fill="#9AA8B6">· 旋转/缩放/点选下钻</text>
+      <text x="426" y="130" font-size="10" fill="#9AA8B6">· three.js（FR-21）</text>
+      <text x="426" y="146" font-size="10" fill="#9AA8B6">· 产品树 2D/3D 同源</text>
+      <rect x="608" y="58" width="180" height="120" rx="8" fill="#161E27" stroke="#E6A23C"/>
+      <text x="622" y="78" font-size="12" fill="#E6A23C" font-weight="700">帧缓冲渲染（P1/P2）</text>
+      <text x="622" y="98" font-size="10" fill="#9AA8B6">· LCD framebuffer 外设</text>
+      <text x="622" y="114" font-size="10" fill="#9AA8B6">· 帧→屏幕纹理</text>
+      <text x="622" y="130" font-size="10" fill="#9AA8B6">· 补色/缩放（FR-22）</text>
+      <text x="622" y="146" font-size="10" fill="#9AA8B6">· 外设插件化</text>
+      <rect x="808" y="58" width="60" height="120" rx="8" fill="#161E27" stroke="#5AC8E4"/>
+      <text x="838" y="78" text-anchor="middle" font-size="12" fill="#5AC8E4" font-weight="700">P2</text>
+      <text x="838" y="98" text-anchor="middle" font-size="10" fill="#9AA8B6">GDB</text>
+      <text x="838" y="114" text-anchor="middle" font-size="10" fill="#9AA8B6">RSP</text>
+      <text x="838" y="130" text-anchor="middle" font-size="10" fill="#9AA8B6">CI</text>
+      <text x="838" y="146" text-anchor="middle" font-size="10" fill="#9AA8B6">多核</text>
+      <text x="838" y="162" text-anchor="middle" font-size="10" fill="#9AA8B6">QEMU</text>
+      <line x1="200" y1="118" x2="216" y2="118" stroke="#3EC6A0" stroke-width="1.5" marker-end="url(#aE1)"/>
+      <line x1="396" y1="118" x2="412" y2="118" stroke="#3EC6A0" stroke-width="1.5" marker-end="url(#aE1)"/>
+      <line x1="592" y1="118" x2="608" y2="118" stroke="#3EC6A0" stroke-width="1.5" marker-end="url(#aE1)"/>
+      <line x1="788" y1="118" x2="808" y2="118" stroke="#3EC6A0" stroke-width="1.5" marker-end="url(#aE1)"/>
+    </svg>
+    <div class="cap">演进路线（示意）：MVP → 2D 增强 → 3D 原型（FR-21）→ 帧缓冲渲染（FR-22）→ 自动化/CI 与多板互联（里程碑 B，§8.6/§8.8）→ GDB RSP / 多核（P2）。每个里程碑都在既有扩展点（ExecutionBackend / Peripheral / 观测管道 / 协议）上推进。</div>
+  </div>
+
+  <h3>11.2 兼容性策略</h3>
+  <ul class="ulist">
+    <li><b>前端/内核协议契约先行</b>：命令/事件协议版本化，演进只增不改，保持双形态与双内核兼容。</li>
+    <li><b>产品树数据底座稳定</b>：2D/3D 同源（FR-21），3D 演进不引入第二套数据模型。</li>
+    <li><b>外设插件化</b>：Peripheral 注册表新增外设不改既有实例与总线映射。</li>
+    <li><b>性能目标渐进</b>：MVP 解释目标 5–10 MIPS【估算】，演进解锁 JIT/QEMU 双内核，前端代码不变。</li>
+    <li><b>浏览器兼容</b>：现代浏览器 + 375px 移动端 + file:// 直接打开（NFR-05，V-10），演进不引入外部依赖。</li>
+    <li><b>file:// + blob Worker 兼容矩阵（评审 F）</b>：Worker 以同文件/blob URL 创建，LLD 首周对 Chrome/Edge/Firefox/Safari（尤其 Safari file:// 策略）逐浏览器实测并固化兼容矩阵；任一浏览器不支持的降级路径 = §5.1 无 Worker 环境分片兜底。</li>
+    <li><b>协议版本协商</b>：握手携带协议版本 + 能力位；新增字段只增不改（向前兼容），未知字段忽略（向后兼容）；不兼容 → 明确拒绝并提示升级路径，不静默错读（§7.3 数据版本）。</li>
+    <li><b>持久化 schema 版本与迁移</b>：Project/SimState/DebugMeta 携带 schemaVersion；旧版快照按迁移链升级读取（向后兼容）；分享链接 hash 含版本标识；IndexedDB → 服务端迁移按版本执行。</li>
+    <li><b>双形态版本一致性</b>：前端与服务端协议版本匹配检查；不匹配 → 降级提示或拒绝连接（§6）。</li>
+  </ul>
+
+  <h3>11.3 需求追溯矩阵（P0 / NFR → 架构交付）</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:900px">
+    <colgroup><col style="width:14%"><col style="width:46%"><col style="width:40%"></colgroup>
+    <thead><tr><th>需求</th><th>需求要点</th><th>架构交付（章节）</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">FR-01</td><td>图形化搭建（多节点、多外设）</td><td>产品树 + 映射（§3.1 ①，§4.4 总线，§7.2）</td></tr>
+      <tr><td class="dim">FR-02</td><td>元器件事例化、地址映射配置</td><td>Peripheral 实例化 + 区间树（§4.3/4.4）</td></tr>
+      <tr><td class="dim">FR-03</td><td>外设地址映射与查看/修改</td><td>内存映射表 + 读写分发（§4.4 总线）</td></tr>
+      <tr><td class="dim">FR-04</td><td>RV32I、IM 扩展、伪指令与别名</td><td>ISS + Spike golden 对拍（§4.4，§9.7）</td></tr>
+      <tr><td class="dim">FR-05</td><td>反汇编·源码联动</td><td>ELF/DWARF + 反汇编（§8.3，§4.1 ③）</td></tr>
+      <tr><td class="dim">FR-06</td><td>异常/中断、向量表配置</td><td>事件引擎 + 中断控制器（§4.4，§5.2）</td></tr>
+      <tr><td class="dim">FR-07</td><td>UART 波特率/CTS 流控</td><td>Peripheral UART（§4.3/4.4，§1.4）</td></tr>
+      <tr><td class="dim">FR-08</td><td>断点/单步</td><td>Breakpoint/Step（§4.1 ③，§4.2 hook）</td></tr>
+      <tr><td class="dim">FR-09</td><td>寄存器/内存查看修改</td><td>Reg/Mem 服务 + SimState（§4.1 ③，§7.1）</td></tr>
+      <tr><td class="dim">FR-10</td><td>GPIO 波形/逻辑分析</td><td>观测管道 + 波形视图（§8.2，§3.1 ⑤）</td></tr>
+      <tr><td class="dim">FR-11</td><td>变量监视、手动读写</td><td>DebugMeta watch（§7.1，§4.1 ③）</td></tr>
+      <tr><td class="dim">FR-12</td><td>确定性、可复现</td><td>确定性机制（§8.1，§5.2）</td></tr>
+      <tr><td class="dim">FR-23</td><td>多视图独立路由</td><td>hash 路由 + View Store（§3.1 ①，§4.4）</td></tr>
+      <tr><td class="dim">NFR-01</td><td>性能估算基线（≥5–10 MIPS 等）</td><td>质量属性-性能（§10.1，§6.2）</td></tr>
+      <tr><td class="dim">NFR-02</td><td>响应与刷新时限</td><td>命令/观测时序（§5.3，§10.1）</td></tr>
+      <tr><td class="dim">NFR-03</td><td>并发（≥10 会话）</td><td>会话隔离 + 并发模型（§5.1，§6.2）</td></tr>
+      <tr><td class="dim">NFR-04</td><td>安全（沙箱/XSS）</td><td>安全沙箱与防护（§8.4）</td></tr>
+      <tr><td class="dim">NFR-05</td><td>零安装 / file:// / 移动端</td><td>物理架构（§6.1/6.2）</td></tr>
+      <tr><td class="dim">NFR-06</td><td>内核前端解耦 / 插件化</td><td>ExecutionBackend + Peripheral（§4.2/4.3）</td></tr>
+      <tr><td class="dim">NFR-07</td><td>可观测（日志/波形/确定）</td><td>日志系统（横切·仅系统管理员通道，§3.4/§8.5）+ 观测管道（§8.2）</td></tr>
+      <tr><td class="dim">NFR-08</td><td>韧性（架构扩展项，需求 NFR 仅 01–07）</td><td>HMS 健康管理（横切，§8.5）+ 快照/事件流恢复（§7.3/§10.2）</td></tr>
+      <tr><td class="dim">FR-13</td><td>项目持久化 / 分享只读链接</td><td>数据存储横切 DataStore（§7.4，M-23）</td></tr>
+      <tr><td class="dim">FR-14</td><td>指令覆盖率 / 访存 trace 导出</td><td>ExecutionBackend hook 复用 + trace 记录/导出（§8.2）</td></tr>
+      <tr><td class="dim">FR-15</td><td>GDB RSP 兼容</td><td>服务端协议扩展（§5.4，选型表 §9.7）</td></tr>
+      <tr><td class="dim">FR-16</td><td>headless / REST / CLI / CI</td><td>自动化与场景脚本（§8.6，选型表 §9.7）</td></tr>
+      <tr><td class="dim">FR-17</td><td>场景录制 / 期望断言</td><td>自动化断言引擎（§8.6，承接产品工作台行为判定）</td></tr>
+      <tr><td class="dim">FR-18</td><td>多核 / SMP</td><td>ExecutionBackend 扩展预留（§11.1，P2）</td></tr>
+      <tr><td class="dim">FR-19</td><td>反向调试 / 快照</td><td>快照原子写 + 输入序列重放（§10.2，§7.3.2）</td></tr>
+      <tr><td class="dim">FR-20</td><td>性能监控面板</td><td>会话层性能采样 + 观测管道（§8.6 数据面，P2）</td></tr>
+      <tr><td class="dim">FR-21</td><td>可交互 3D 原型视图</td><td>产品树 2D/3D 同源 + ADR-5（§7.2/§9.5）</td></tr>
+      <tr><td class="dim">FR-22</td><td>屏幕 GUI 帧缓冲渲染</td><td>L1+L3+L5 三层协同（§8.7，里程碑 A）</td></tr>
+      <tr><td class="dim">FR-24</td><td>多 Board 实例 / 拓扑配置</td><td>Interconnect Link 数据模型 + Topology（§7.1/§8.8）</td></tr>
+      <tr><td class="dim">FR-25</td><td>板间外设互联绑定</td><td>L1 port-链路抽象 + L3 跨板消息路由（§4.3/§8.8）</td></tr>
+      <tr><td class="dim">FR-26</td><td>跨板调试联动</td><td>调试服务多板并排观察（§8.8）</td></tr>
+      <tr><td class="dim">FR-27</td><td>跨板波形同一时间轴</td><td>观测管道全局虚拟时间轴对齐（§8.8）</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ===== 章节 12：风险 ===== -->
+<section class="sec" id="sec12">
+  <div class="sec-num">CHAPTER 12</div>
+  <h2>风险与应对</h2>
+  <p class="sec-intro">需求风险清单的架构级应对 / 新增架构风险</p>
+
+  <div class="verdict">
+    <span class="lead">风险应对已内建于架构：性能 → 分片 + 双内核；合规 → 自研 BSD/MIT + 进程隔离；波形数据量 → 边沿编码 + 增量推送；3D 复杂度 → 列 P1 且渲染/仿真解耦。无「发现再说」的未决风险。</span>
+  </div>
+
+  <div class="risk-grid">
+    <div class="card">
+      <h4><span class="pill h">高</span> 浏览器解释性能 <span class="chip bad">R1</span></h4>
+      <p class="tagline">纯解释 WASM 可能达不到流畅体验。</p>
+      <div class="kv-row"><b>应对</b>Worker 内核切片 + 分片降级兜底保 UI；目标 5–10 MIPS【估算】（NFR-01）；预留 JIT 解码-翻译-执行流水线；服务端 QEMU 双内核跑长任务。</div>
+    </div>
+    <div class="card">
+      <h4><span class="pill h">高</span> GPL 合规 <span class="chip bad">R2</span></h4>
+      <p class="tagline">复用 QEMU/Unicorn（GPL-2.0）触发衍生传染。</p>
+      <div class="kv-row"><b>应对</b>自研 BSD/MIT 轻量 ISS（借鉴 Spike/TinyEMU）；服务端以独立进程隔离 QEMU，不在核心代码库内联动；<b>追加行动项（评审 M5）：① 法务确认「进程隔离」作为传染边界可接受；② 工程红线——不改 QEMU 源码、仅标准 RSP/QMP 交互、QEMU 源码保持可获取（licensing 可审计）</b>。</div>
+    </div>
+    <div class="card">
+      <h4><span class="pill h">高</span> 波形数据量 <span class="chip bad">R3</span></h4>
+      <p class="tagline">高频波形数据撑爆内存/带宽。</p>
+      <div class="kv-row"><b>应对</b>边沿编码只记变化点（压缩）；环形缓冲定容；按批增量推送 + 节流；采样率可配。</div>
+    </div>
+    <div class="card">
+      <h4><span class="pill m">中</span> 竞品免费化 <span class="chip warn">R4</span></h4>
+      <p class="tagline">Wokwi/Proteus 等跟进内嵌波形或降价。</p>
+      <div class="kv-row"><b>应对</b>差异化从波形扩到「确定性 + 多视图 + 3D 下钻」组合护城河；快速迭代与 CI/GDB 集成。</div>
+    </div>
+    <div class="card">
+      <h4><span class="pill m">中</span> 行为级外设误导 <span class="chip warn">R5</span></h4>
+      <p class="tagline">行为级模型误导时序敏感驱动。</p>
+      <div class="kv-row"><b>应对</b>每外设实例携带保真度分级元数据（寄存器级/行为级），前端显式展示（§4.3）。</div>
+    </div>
+    <div class="card">
+      <h4><span class="pill m">中</span> 沙箱 / XSS <span class="chip warn">R6</span></h4>
+      <p class="tagline">恶意固件/输入触发逃逸或注入。</p>
+      <div class="kv-row"><b>应对</b>WASM 沙箱执行固件不触宿主 API（<b>沙箱成立前提：C→WASM 编译内核，线性内存隔离；JS 解释器路线不称沙箱，降级为同进程 + 输入校验 + 资源限制，评审 R2</b>）；统一转义进 DOM；ELF 解析校验（§8.4）；服务端形态以进程隔离为主。</div>
+    </div>
+    <div class="card">
+      <h4><span class="pill l">低</span> 商用免费版冲击 <span class="chip ok">R7</span></h4>
+      <p class="tagline">商用工具免费化挤压入口。</p>
+      <div class="kv-row"><b>应对</b>定位「教学/个人/评估」轻量入口；差异化可观测性不依赖高保真度。</div>
+    </div>
+    <div class="card">
+      <h4><span class="pill l">低</span> 外设库维护 <span class="chip ok">R8</span></h4>
+      <p class="tagline">外设种类维护成本高。</p>
+      <div class="kv-row"><b>应对</b>Peripheral 插件化 + 分级体系 + 分享生态（社区贡献模型）。</div>
+    </div>
+    <div class="card">
+      <h4><span class="pill l">低</span> 3D 与仿真耦合 <span class="chip ok">R9</span></h4>
+      <p class="tagline">3D 视图线程与仿真线程耦合增复杂度。</p>
+      <div class="kv-row"><b>应对</b>3D 列 P1；渲染与仿真严格解耦（协议 + 产品树同源）；MVP 以 2D/树形闭环。</div>
+    </div>
+    <div class="card">
+      <h4><span class="pill m">中</span> 构建链与外部依赖（新增架构风险）</h4>
+      <p class="tagline">引入框架/构建链破坏零安装与自包含。</p>
+      <div class="kv-row"><b>应对</b>原生 JS + 零构建 + 单文件自包含（§9.7 前端选型 + ADR-6）；外部库统一走可信 CDN（P1，file:// 下降级），非必需不引入。</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 章节 13：附录 ===== -->
+<section class="sec" id="sec13">
+  <div class="sec-num">CHAPTER 13</div>
+  <h2>附录</h2>
+  <p class="sec-intro">与需求文档的关系 / P0 功能清单 / 验收主线 / 参考资料来源 / 后续章节计划</p>
+
+  <h3>13.1 与《需求分析报告 v1.1》的关系</h3>
+  <p>本架构设计以需求报告为唯一输入锚点：六层概念空间模型（L0 产品 / L1 硬件描述 / L2 处理器 / L3 仿真引擎 / L4 调试观察 / L5 前端交互）、四大技术决策点（事件驱动时序 / 分级外设建模 / 解释执行起步预留 JIT/双内核 / 双源探针波形）、23 条功能需求（FR-01~23）、13 条 P0（FR-01~12 + FR-23）、9 项风险、智能灯 E2E 验收主线、以及竞品调研「四要素组合 + 内嵌波形」市场空白结论。架构仅实现需求 3.3 明确边界内的能力，不做周期精确/RTL、不做 HIL/EDA。</p>
+
+  <h3>13.2 MVP 范围（13 条 P0）与架构落地</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:900px">
+    <colgroup><col style="width:26%"><col style="width:46%"><col style="width:28%"></colgroup>
+    <thead><tr><th>P0 能力</th><th>落地形态</th><th>主要章节</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">RV32IMC ISS</td><td>WASM 解释执行，Spike golden 差分对拍</td><td>§4.4，§9.7</td></tr>
+      <tr><td class="dim">UART / GPIO / 定时器</td><td>Peripheral 分级建模，寄存器接口 + 行为时序</td><td>§4.3/4.4</td></tr>
+      <tr><td class="dim">内存映射</td><td>区间树查表分发，未映射访存异常</td><td>§4.4 总线</td></tr>
+      <tr><td class="dim">2D 产品树</td><td>产品→板→MCU/外设 2D 树 + 原理图视图</td><td>§3.1 ①，§7.2</td></tr>
+      <tr><td class="dim">单步 / 断点</td><td>Breakpoint/Step + ExecutionBackend hook</td><td>§4.1/4.2</td></tr>
+      <tr><td class="dim">内存查看</td><td>Reg/Mem 服务 + SimState 冻结</td><td>§4.1 ③，§7.1</td></tr>
+      <tr><td class="dim">反汇编·源码联动</td><td>ELF/DWARF + 反汇编区 + 源码高亮</td><td>§8.3</td></tr>
+      <tr><td class="dim">简易波形</td><td>探针边沿编码 + 增量推送 + 波形视图</td><td>§8.2，§3.1 ⑤</td></tr>
+      <tr><td class="dim">多视图 Web</td><td>WebSocket + WASM 双传输，多视图 hash 路由</td><td>§3.1 ①，§6.1</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>13.3 验收主线：智能灯 E2E-01</h3>
+  <p>智能灯固件跑通（搭建 → 加载 → 运行 → 波形 → 单步 → 内存 → 判定）贯穿五横层：搭建产品树（L0/L1 前端）→ ELF 加载（ISS）→ 运行（事件引擎）→ GPIO 波形（观测管道）→ 单步/内存（调试服务 + SimState）→ 行为判定（L0 终点）。本架构每个环节有明确归属层与协议契约，可作为端到端架构验证用例。</p>
+
+  <h3>13.4 参考资料与来源</h3>
+  <ul class="ulist">
+    <li>《面向嵌入式软件开发者/测试者的 RISC-V 仿真平台 — 需求分析报告 v1.1》（2026-10-11）：需求、决策点、FR/NFR、风险、验收主线。</li>
+    <li>竞品调研（需求 2.5）：QEMU/Spike/TinyEMU/Unicorn；Renode/Proteus/Wokwi；Imperas/Synopsys/Simics 三组事实清单，性能数据（Wokwi ~8MHz、Spike 40–240 MIPS、QEMU TCG 100M–1B 指令/s）为其公开基线【估算引用】。</li>
+    <li>华为架构设计方法论：4+1 视图模型、ADR 实践。</li>
+  </ul>
+  <p class="note">注：本架构文档中所有性能数值（≥5–10 MIPS、≤500ms、≤200ms、≥10 会话、覆盖率 ≥70% 等）均为需求报告标注的估算基线，非实测保证；实现阶段需以真实测量校准并以覆盖矩阵声明保真度与 ISA 支持范围。</p>
+
+  <h3>13.5 后续章节计划（详细设计输入）</h3>
+  <p>本 AD 聚焦总体架构（4+1 视图 + 决策 + 质量属性）。后续细化设计建议另立文档：① 事件驱动引擎内部状态机；② ExecutionBackend 接口规格与双内核实现细节；③ Peripheral 插件规范与保真度分级标注；④ 观测管道数据格式（边沿编码/增量协议）规格；⑤ 前端多视图组件与路由状态设计；⑥ 确定性测试夹具与覆盖率基准；⑦ 三工作台装配规则与能力面白名单（§3.4）；⑧ HMS 分级阈值与分发策略（§8.5）；⑨ 数据流明细与缓冲/背压/失败参数（§7.3）。本 AD 已为上述设计提供接口契约与决策基线。</p>
+
+  <h3>13.6 MVP WBS（工作量估算 · 评审 R7）</h3>
+  <p>人日为<b>估算基线</b>（单人单模块，不含联调/排期，团队配置与排期另行确定）；「零构建」约束作用于交付物而非开发期，以下模块的开发期工具链（编译/测试）不受限（§9.6 ADR-6）。</p>
+  <div class="tbl-scroll">
+  <table class="tbl-fixed" style="min-width:900px">
+    <colgroup><col style="width:26%"><col style="width:12%"><col style="width:28%"><col style="width:34%"></colgroup>
+    <thead><tr><th>模块</th><th>估算人日</th><th>前置依赖</th><th>风险 / 降级</th></tr></thead>
+    <tbody>
+      <tr><td class="dim">产品树 / 内存映射（数据底座）</td><td>4</td><td>—</td><td>低；映射为区间树，未映射访存异常</td></tr>
+      <tr><td class="dim">ELF / Raw / HEX 解析</td><td>3</td><td>—</td><td>中；畸形输入容量上限（§8.4）</td></tr>
+      <tr><td class="dim"><b>DWARF 行表 + 源码联动</b></td><td><b>10</b></td><td>ELF 解析</td><td><b>最大风险项</b>（评审 R7：手写解析工作量大）；降级 = 仅反汇编 + 符号表、无源码联动，不阻塞 MVP 主线</td></tr>
+      <tr><td class="dim">ISS 内核（RV32IMC，C→WASM）</td><td>12</td><td>WASM 工具链</td><td>中；Spike golden 差分对拍逐模块验证（FR-04）</td></tr>
+      <tr><td class="dim">事件驱动引擎 + 量子化调度</td><td>6</td><td>ISS 接口</td><td>中；确定性夹具回归（§8.1 D0 范围）</td></tr>
+      <tr><td class="dim">外设建模（UART / GPIO / Timer）</td><td>6</td><td>总线接口</td><td>低；分级建模 + 保真度标注（§4.3）</td></tr>
+      <tr><td class="dim">调试服务（断点/单步/Reg/Mem/反汇编）</td><td>8</td><td>ISS、协议</td><td>中；依赖 ExecutionBackend hook（§4.2）</td></tr>
+      <tr><td class="dim">观测管道（探针/边沿编码/缓冲/推送）</td><td>6</td><td>ISS 钩子</td><td>中；差异化核心（§8.2），容量模型先行（H1）</td></tr>
+      <tr><td class="dim">前端视图 / 路由 / 波形 UI</td><td>10</td><td>协议、观测管道</td><td>中；零构建手写视图，多视图 hash 路由（FR-23）</td></tr>
+      <tr><td class="dim">命令 / 事件协议（双传输适配）</td><td>5</td><td>—</td><td>中；协议是前后端/双形态公共契约，先行冻结（§7.3）</td></tr>
+      <tr><td class="dim">持久化（IndexedDB + 原子写 + 迁移）</td><td>3</td><td>数据模型</td><td>低；schemaVersion 迁移链（§7.4）</td></tr>
+      <tr><td class="dim">Worker 韧性 + watchdog + HMS 基线</td><td>3</td><td>协议（postMessage）</td><td>中；guest 失控 terminate 语义（评审 R3）</td></tr>
+      <tr><td class="dim">场景脚本 / 断言 + headless CLI（P1 预留）</td><td>2（接口预留）</td><td>协议、确定性锚点</td><td>低；仅定义接口与录制/回放格式（§8.6）</td></tr>
+      <tr><td class="dim">多板互联（P1 预留）</td><td>2（接口预留）</td><td>Peripheral port 抽象</td><td>中；全局虚拟时间 + 有序路由为硬问题，P1 立项前补完整时序设计（评审 L5）</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">合计约 <b>90 人日</b>（不含联调/测试/排期，P1 预留项仅算接口成本）。关键路径依赖：协议冻结 → ISS → 调试服务/观测管道 → 前端；DWARF 与前端视图可并行。人日口径为单模块估算基线，进入详细设计后按模块设计文档（LLD）重新校准。</p>
+</section>
+
+</main>
+
+<button class="totop" id="totop" aria-label="返回顶部" title="返回顶部">↑</button>
+
+<script>
+(function(){
+  var toc = document.getElementById('toc');
+  var links = toc.querySelectorAll('a');
+  var ids = ['sec0','sec1','sec2','sec3','sec4','sec5','sec6','sec7','sec8','sec9','sec10','sec11','sec12','sec13'];
+  var sections = ids.map(function(id){return document.getElementById(id);}).filter(Boolean);
+
+  function onScroll(){
+    var pos = window.scrollY + 120;
+    var cur = 0;
+    for(var i=0;i<sections.length;i++){
+      if(sections[i].offsetTop <= pos){ cur = i; }
+    }
+    for(var j=0;j<links.length;j++){
+      links[j].classList.toggle('active', Number(links[j].getAttribute('data-toc'))===cur);
+    }
+    var tt = document.getElementById('totop');
+    tt.classList.toggle('show', window.scrollY > 600);
+  }
+  window.addEventListener('scroll', onScroll, {passive:true});
+  onScroll();
+
+  var tt = document.getElementById('totop');
+  tt.addEventListener('click', function(){ window.scrollTo({top:0, behavior:'smooth'}); });
+
+  var navLinks = document.querySelectorAll('.toc a');
+  for(var i=0;i<navLinks.length;i++){
+    navLinks[i].addEventListener('click', function(e){
+      e.preventDefault();
+      var target = document.getElementById(this.getAttribute('href').slice(1));
+      if(target){ target.scrollIntoView({behavior:'smooth', block:'start'}); }
+    });
+  }
+})();
+</script>
+</body>
+</html>

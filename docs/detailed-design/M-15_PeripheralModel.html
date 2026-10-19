@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%231e3a8a'/%3E%3Ctext x='12' y='17' font-size='13' text-anchor='middle' fill='%23ffffff' font-family='sans-serif' font-weight='bold'%3EL%3C/text%3E%3C/svg%3E">
+<title>M-15 外设模型层 模块详细设计</title>
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15px; font-weight:700; color:#374151; margin:18px 0 8px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { margin:0 0 10px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  white-space:pre; margin:10px 0 16px; }
+.code-title { font-size:13px; font-weight:700; color:#111827; margin:16px 0 4px; }
+.fig { margin:14px auto; text-align:center; }
+.fig img { max-width:100%; height:auto; border:1px solid var(--line); border-radius:4px; }
+.fig figcaption { font-size:13px; color:var(--ink-2); margin-top:6px; }
+.caption { text-align:center; font-size:13px; color:var(--ink-2); margin:6px 0 4px; }
+.flow-svg { width:100%; height:auto; }
+.flow-mobile { display:none; }
+.flow-step { display:flex; gap:10px; margin:8px 0; align-items:flex-start; }
+.flow-step .num { flex:0 0 26px; height:26px; border-radius:50%; background:var(--brand);
+  color:#fff; font-weight:700; font-size:13px; display:flex; align-items:center; justify-content:center; }
+.flow-step .txt { font-size:14px; }
+.flow-branch { margin:6px 0 6px 36px; font-size:13.5px; color:var(--ink-2); }
+.flow-arrow { text-align:center; color:#9aa1af; font-size:16px; line-height:1; margin:2px 0; }
+.nav-toggle { margin:14px 0; }
+.nav-toggle summary { cursor:pointer; font-weight:700; color:var(--brand);
+  padding:9px 12px; border:1px solid var(--line); border-radius:6px; background:var(--head-bg); list-style:none; }
+.nav-toggle summary::-webkit-details-marker { display:none; }
+.nav-box { display:flex; flex-direction:column; gap:2px; padding:10px 4px 2px; }
+.nav-l1 { color:var(--brand); font-weight:700; text-decoration:none; padding:3px 4px; }
+.nav-l2 { color:var(--ink-2); text-decoration:none; padding:3px 4px 3px 18px; font-size:13.5px; }
+.nav-l1:hover,.nav-l2:hover { color:var(--brand-2); text-decoration:underline; }
+@media (min-width:768px) {
+  .wrap { display:grid; grid-template-columns:260px 1fr; gap:28px; align-items:start; }
+  .doc-head { grid-column:1 / -1; }
+  .nav-toggle { position:sticky; top:16px; max-height:calc(100vh - 32px); overflow:auto; }
+  .nav-toggle summary { pointer-events:none; }
+  .flow-svg { display:block; }
+  .flow-mobile { display:none; }
+}
+@media (max-width:767px) {
+  .flow-svg { display:none; }
+  .flow-mobile { display:block; }
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media print {
+  .nav-toggle { display:none; }
+  .wrap { display:block; max-width:none; padding:0; }
+  .doc-title { font-size:20px; }
+  .doc-table, .fig, .code { break-inside:avoid; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="doc-head"><h1 class="doc-title">M-15 外设模型层 模块详细设计</h1><p class="subtitle">RISC-V 仿真平台 · 模块详细设计系列 · 对应《模块设计说明书》4.4.4 节</p><p class="version">HTML 版 v1.3（2026-10-13 评审修订 15-1~15-12、N1~N3）· 源设计《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11 更新版）</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0（2026-10-11；2026-10-13 契约层版新增 2.5 平台共享契约层与各模块端口契约表）</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.4.4（④ 仿真内核层 · 外设模型层 Peripheral）；端口契约 = 源文档表61</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">FR-07（UART 波特率/CTS 流控）；FR-02（元器件事例化，与 M-02/M-14 协作）；FR-22/24/25（P1 预留）</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">Peripheral 抽象接口（3.2.5 表14）；插件化注册表（NFR-06）；保真度分级元数据（评审 R5）</td></tr><tr class="row0"><td style="text-align:center">MVP 状态</td><td style="text-align:left">P0 主承担模块（MVP 必需：UART/GPIO/Timer）</td></tr><tr class="row1"><td style="text-align:center">源文档对齐</td><td style="text-align:left">v1.1（2026-10-13）：新增 9.1.1 端口契约（driving/driven，源表61）；CH7 新增契约测试；CH8 补契约层可替换性；表号引用随源文档调整（3.1 表7→表8、3.2.5 表13→表14、3.3 表14→表15、4.4.4 表44/45→表59/60、4.7 表62→表86、7.2 表67→表91、7.3 表68→表92、8 表69→表93）</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.2（2026-10-13）：15-1 位时钟公式修正（每 bit=1e9/baud，帧完成计入 start/stop）；15-2 用例期望修正；15-3 count 快进+period 推导；15-4 快照纳入 M-20；15-5 detach 生命周期；15-6 E_PP-05 错误码；15-7 改行为断言+重放；15-8 默认偏移基线；15-9 FIFO 深度；15-10 配置变更重置；15-11 payload 定义；15-12 中断用例。v1.3（跨模块 N1~N3）：N1 新增独立预检接口 periph_precheck（3.1+9.1.1+7.1，返回 err_t，与探针上报语义分离）；N2 中断脉冲探针归属移出（M-16 直连 M-18）；N3 Timer 外设 timer-compare 线 MVP 关闭，定时中断权威源 = M-16 mtime/mtimecmp</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；决策点 2/ADR-2（寄存器接口 + 行为级时序）；评审 R5 落实</td></tr><tr class="row0"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-12（v1.1 契约层对齐 2026-10-13）</td></tr></tbody></table></div></header><nav class="nav-toggle"><details open><summary>目录</summary><div class="nav-box"><a class="nav-l1" href="#sec1">1 功能概述</a>
+<a class="nav-l2" href="#sec1-1">1.1 模块定位</a>
+<a class="nav-l2" href="#sec1-2">1.2 需求与约束</a>
+<a class="nav-l2" href="#sec1-3">1.3 MVP 范围与预留</a>
+<a class="nav-l1" href="#sec2">2 数据描述</a>
+<a class="nav-l2" href="#sec2-1">2.1 核心数据结构</a>
+<a class="nav-l2" href="#sec2-1-1">2.1.1 复杂结构字段定义</a>
+<a class="nav-l2" href="#sec2-2">2.2 内置外设与保真度分级</a>
+<a class="nav-l2" href="#sec2-3">2.3 数据流说明</a>
+<a class="nav-l1" href="#sec3">3 实现设计</a>
+<a class="nav-l2" href="#sec3-1">3.1 Peripheral 抽象接口实现</a>
+<a class="nav-l2" href="#sec3-2">3.2 UART 实现</a>
+<a class="nav-l2" href="#sec3-3">3.3 GPIO 实现</a>
+<a class="nav-l2" href="#sec3-4">3.4 Timer 实现</a>
+<a class="nav-l2" href="#sec3-5">3.5 与真实硬件的建模差异对照</a>
+<a class="nav-l1" href="#sec4">4 关键函数</a>
+<a class="nav-l1" href="#sec5">5 处理流程</a>
+<a class="nav-l2" href="#sec5-1">5.1 外设事件驱动流程</a>
+<a class="nav-l2" href="#sec5-2">5.2 与相邻模块的协作说明</a>
+<a class="nav-l1" href="#sec6">6 异常处理</a>
+<a class="nav-l2" href="#sec6-1">6.1 错误码与处置</a>
+<a class="nav-l2" href="#sec6-2">6.2 边界与降级</a>
+<a class="nav-l1" href="#sec7">7 测试设计与可维护性</a>
+<a class="nav-l2" href="#sec7-1">7.1 测试要点与关键用例</a>
+<a class="nav-l2" href="#sec7-2">7.2 可维护性手段</a>
+<a class="nav-l1" href="#sec8">8 质量属性落实</a>
+<a class="nav-l1" href="#sec9">9 接口依赖</a>
+<a class="nav-l2" href="#sec9-1">9.1 依赖关系</a>
+<a class="nav-l2" href="#sec9-1-1">9.1.1 端口契约（driving/driven）</a>
+<a class="nav-l2" href="#sec9-2">9.2 日志对接（M-21）</a>
+<a class="nav-l2" href="#sec9-3">9.3 事件 / 中断 / 探针对接</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-15 外设模型层（Peripheral）实现外设抽象与注册表、实例化到地址区间；MVP 提供 UART、GPIO、Timer 三个内置外设（寄存器接口 + 行为级时序，决策点 2/ADR-2）。外设差异隔离在总线之下（3.2.5 表13）：M-14 按地址区间把访存分发给实例的 read/write；M-12 事件队列驱动 onEvent（定时器到期、输入就绪）；中断经 M-16（irqRequest/irqClear）；内部信号经 probe 上报观测管道（M-18）。</p>
+<p class="body">每个外设实例携带保真度分级元数据（寄存器级 / 行为级 / HDL 协同）供前端显式展示（评审 R5）；注册表插件化（NFR-06），新增外设类型不改既有实例。预留 port(name, dir)/link(peerPort) 端口抽象供 P1 多板互联（FR-24/25）。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:62%"><col style="width:24%"></colgroup><thead><tr><th style="width:14%;text-align:center">类别</th><th style="width:62%;text-align:center">约束内容</th><th style="width:24%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">功能</td><td style="text-align:left">外设抽象/注册表/实例化；UART 波特率与 CTS 流控（FR-07）；元器件事例化（FR-02，与 M-02/M-14 协作）</td><td style="text-align:left">4.4.4.1、FR-07/FR-02</td></tr><tr class="row1"><td style="text-align:center">正确性</td><td style="text-align:left">寄存器接口 + 行为级时序（决策点 2/ADR-2）；未映射访问由 M-14 抛 E_BUS-01（guest trap）</td><td style="text-align:left">4.4.4.1、4.4.3.5</td></tr><tr class="row0"><td style="text-align:center">确定性</td><td style="text-align:left">M-15 在确定性适用范围（2.4 表6）：同一种子 + 同一时间戳化输入事件序列 → 结果唯一；外设事件入 M-12 事件队列按（虚拟时间, 插入序）稳定排序</td><td style="text-align:left">2.4 表6</td></tr><tr class="row1"><td style="text-align:center">性能</td><td style="text-align:left">外设访存同步分发、无握手时序；Timer 事件调度开销由 M-12 事件队列承担（估算基线）</td><td style="text-align:left">4.4.1.1、4.4.4.4</td></tr><tr class="row0"><td style="text-align:center">合规</td><td style="text-align:left">自研实现采用 BSD/MIT 许可，不可引入 GPL 传染</td><td style="text-align:left">2.4 表6</td></tr><tr class="row1"><td style="text-align:center">安全</td><td style="text-align:left">外设行为数据不触碰宿主 API（NFR-04）；串口回显统一转义由 M-02 承接（XSS 防护）</td><td style="text-align:left">NFR-04、3.1 表7</td></tr><tr class="row0"><td style="text-align:center">体积</td><td style="text-align:left">随内核 WASM 打包，计入内核 ≤1.5 MiB 压缩预算（估算基线）</td><td style="text-align:left">3.3 表15</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：Peripheral 抽象接口（3.2.5 表13）、外设类型注册表（register/instantiate）、UART/GPIO/Timer 三个内置外设（寄存器接口 + 行为级时序）、实例化到地址区间（attach → M-14 mapRegion）、事件驱动回调（onEvent）、中断请求（irqRequest/irqClear）、探针上报（probe → M-18）、保真度分级元数据（fidelityMeta，评审 R5）、行为日志（log → M-21）。</p>
+<p class="body">预留项（本模块仅保留演进承接说明，不展开实现）：port(name, dir)/link(peerPort) 端口抽象与板间互联（FR-24/25，P1）；LCD 外设插件（FR-22，P1）；HDL 协同仿真档（保真度分级 HDL，P1）；ADC/噪声等依赖种子化 PRNG 的建模（随 M-12 确定性 PRNG 演进）。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:20%"><col style="width:22%"><col style="width:58%"></colgroup><thead><tr><th style="width:20%;text-align:center">数据结构</th><th style="width:22%;text-align:center">类型</th><th style="width:58%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">peripheralRegistry</td><td style="text-align:left">Map&lt;type, factory&gt;</td><td style="text-align:left">外设类型注册表（插件化，NFR-06）：type → 工厂函数</td></tr><tr class="row1"><td style="text-align:center">instanceTable</td><td style="text-align:left">Map&lt;baseAddr, instance&gt;</td><td style="text-align:left">实例化到地址区间：baseAddr → PeripheralInstance</td></tr><tr class="row0"><td style="text-align:center">fidelityMeta</td><td style="text-align:left">struct</td><td style="text-align:left">保真度分级元数据（寄存器级/行为级/HDL 协同），供前端显式展示（评审 R5）</td></tr><tr class="row1"><td style="text-align:center">portTable</td><td style="text-align:left">Map&lt;name, port&gt;</td><td style="text-align:left">外设端口抽象（P1 预留，FR-24/25）</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="lead">PeripheralInstance 是实例化到地址区间的外设实体，字段定义如下：</p>
+<pre class="code"><code>// PeripheralInstance: 外设实例（attach 后挂在 instanceTable）
+struct PeripheralInstance {
+  char     type[16];         // 外设类型（UART/GPIO/TIMER/扩展注册类型）
+  uint32_t baseAddr;         // 地址区间基址（M-14 mapRegion 登记）
+  uint32_t size;             // 寄存器窗口大小（字节）
+  FidelityMeta fidelity;     // 保真度分级元数据（评审 R5）
+  void*    state;            // 外设内部状态（UartState/GpioState/TimerState）
+  const void* config;        // 实例化配置（时钟/波特率/引脚数等）
+  uint8_t  irqLine;          // 绑定的中断线（M-16，未用置 0xFF）
+  // 行为层接口（3.2.5 表13）：
+  int  (*read)(PeripheralInstance*, uint32_t offset, uint32_t* out);
+  int  (*write)(PeripheralInstance*, uint32_t offset, uint32_t value);
+  void (*onEvent)(PeripheralInstance*, uint64_t time, EventKind kind, void* payload);
+  void (*probe)(PeripheralInstance*, const char* signal, uint32_t value, uint64_t time);
+  void (*logMsg)(PeripheralInstance*, const char* msg);
+  // 快照契约（评审 15-4）：外设内部状态（UART FIFO/Timer count/GPIO out）可序列化，
+  // 纳入 M-20 L3 全状态快照/检查点重放（9.1），恢复后行为连续
+  int (*snapshot)(PeripheralInstance*, void** out);
+  int (*restore)(PeripheralInstance*, const void* snap);
+};</code></pre>
+<p class="lead">fidelityMeta 描述该实例的建模深度（评审 R5）；三类配置结构逐字段定义如下：</p>
+<pre class="code"><code>// fidelityMeta: 保真度分级元数据（前端显式展示）
+struct FidelityMeta {
+  uint8_t level;             // 0=寄存器级 / 1=行为级（MVP 默认）/ 2=HDL 协同（P1）
+  char    desc[32];          // 一句话说明（如 &quot;行为级：波特率+CTS 流控&quot;）
+  uint8_t caps;              // 能力位：时序建模/中断/探针/流控 等
+};
+// UartCfg: UART 实例化配置（FR-07）
+struct UartCfg { uint32_t clockHz; uint32_t baudRate;
+                 uint8_t dataBits; uint8_t stopBits; uint8_t flowControl; }; // CTS/RTS
+// UartState: UART 运行状态（评审 15-9 补 FIFO 深度与满时行为）
+struct UartState {
+  uint8_t txFifo[16];    // TX FIFO（默认深度 16 字节，估算基线）；满时写返回 E_PP-05 忙
+  uint8_t rxFifo[16];    // RX FIFO（默认深度 16 字节）；满时输入注入丢弃并置 overrun 状态位（可选上报）
+  uint16_t txHead, txTail, txBytes;   // TX 环形缓冲游标与待发字节数
+  uint16_t rxHead, rxTail, rxBytes;   // RX 环形缓冲游标与已收字节数
+  uint64_t bitAcc;       // 位时钟累加器（虚拟时间，ns）
+  uint64_t lastTick;     // 上次位时钟推进时刻（虚拟时间）
+  uint32_t bitIdx;       // 当前帧已发送位数（含 start/stop）
+  uint8_t  txBusy;       // TX 忙标志
+  uint8_t  cts;          // CTS 电平（流控）
+  uint8_t  overrun;      // RX 溢出标志（FIFO 满时置位）
+  const UartCfg* cfg;    // 实例化配置回指（baudRate/dataBits/stopBits/flowControl）
+  PeripheralInstance* periph;  // 回指宿主实例（中断/探针用）
+};
+// GpioCfg: GPIO 实例化配置
+struct GpioCfg { uint8_t pinCount; uint8_t direction; uint32_t initLevel; };
+// TimerCfg: Timer 实例化配置
+struct TimerCfg { uint32_t clockHz; uint8_t mode;
+                  uint32_t prescaler; uint32_t compare; }; // compare 到期触发
+// TimerState: Timer 运行状态
+struct TimerState {
+  uint64_t count;        // 计数值（按虚拟时间差快进，见 3.4）
+  uint64_t lastEvent;    // 上次事件推进时刻（虚拟时间）
+  uint64_t period;       // 到期间隔（虚拟时间，ns）= compare × prescaler 分频周期（评审 15-3）
+  const TimerCfg* cfg;   // 实例化配置回指（clockHz/mode/prescaler/compare）
+  PeripheralInstance* periph;  // 回指宿主实例（中断/探针用）
+};</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 内置外设与保真度分级</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:12%"><col style="width:30%"><col style="width:26%"><col style="width:18%"><col style="width:14%"></colgroup><thead><tr><th style="width:12%;text-align:center">外设</th><th style="width:30%;text-align:center">寄存器接口（行为级窗口）</th><th style="width:26%;text-align:center">行为时序</th><th style="width:18%;text-align:center">探针信号（M-18）</th><th style="width:14%;text-align:center">中断线</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">UART</td><td style="text-align:left">数据/状态/控制寄存器读写（收发 FIFO）</td><td style="text-align:left">波特率位时钟、CTS 流控（FR-07）、输入就绪事件</td><td style="text-align:left">TX/RX 状态、CTS 电平</td><td style="text-align:left">rx-ready / tx-empty</td></tr><tr class="row1"><td data-label="外设" style="text-align:center">GPIO</td><td data-label="寄存器接口" style="text-align:left">引脚电平读写 + 方向控制</td><td data-label="行为时序" style="text-align:left">引脚翻转</td><td data-label="探针信号" style="text-align:left">GPIO0 翻转（默认通道）</td><td data-label="中断线" style="text-align:left">—</td></tr><tr class="row0"><td data-label="外设" style="text-align:center">Timer</td><td data-label="寄存器接口" style="text-align:left">控制/预分频/比较寄存器</td><td data-label="行为时序" style="text-align:left">比较值到期 → 事件入队 → 中断请求</td><td data-label="探针信号" style="text-align:left">定时器比较（默认通道）</td><td data-label="中断线" style="text-align:left">timer-compare</td></tr></tbody></table></div>
+    <p class="body">保真度分级：寄存器级 = 仅状态寄存器读写（无时序）；行为级 = MVP 默认，在寄存器读写之上建模关键行为时序（波特率/CTS/比较触发）；HDL 协同 = P1，外接真实 HDL 仿真器。</p>
+    <h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+    <p class="body">下行：M-14 按地址区间分发访存 → 实例 read/write（寄存器窗口）；上行：行为时序产生事件 → M-12 onEvent 调度 / M-16 irqRequest；观测：probe 边沿信号 → M-18 → M-19 波形；记录：log 行为日志 → M-21。输入注入（UART 写/按键/GPIO 注入）经 M-04 recordInput 时间戳化入 M-20 事件流（4.7 表62）。</p>
+    <h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 Peripheral 抽象接口实现（3.2.5 表13）</h3>
+<p class="body">外设差异隔离在总线之下：M-14 只按地址区间把访存交给实例 read/write；引擎只通过 onEvent 驱动；中断只经 irqRequest/irqClear 与 M-16 交互；观测只经 probe 上报。伪代码如下：</p>
+<pre class="code"><code>// read/write: 寄存器级访问入口（由 M-14 按地址区间分发到实例）
+int periph_read(PeripheralInstance* p, uint32_t offset, uint32_t* out) {
+    return p-&gt;read(p, offset, out);            // 转发到类型实现（UART/GPIO/Timer）
+}
+// attach: 实例化到地址区间（调用 M-14 mapRegion）
+int periph_attach(PeripheralInstance* p, Bus* bus, uint32_t baseAddr) {
+    Region r = { baseAddr, p-&gt;size, PERIPHERAL, p, 0 };
+    int rc = bus-&gt;mapRegion(&amp;r);               // 冲突/越界 → E_BUS-03/E_BUS-04
+    if (rc == OK) { p-&gt;baseAddr = baseAddr; instanceTable[baseAddr] = p; }
+    return rc;
+}
+// detach: 注销外设（评审 15-5）——unmap + instanceTable 清理 + 状态回收，
+// 与 M-14 生命周期协议对齐（M-14 detach 强制清理对应区间，杜绝悬垂 target）
+void periph_detach(PeripheralInstance* p, Bus* bus) {
+    bus-&gt;unmap(p-&gt;baseAddr);                   // M-14 清理映射
+    instanceTable.erase(p-&gt;baseAddr);          // 本模块清理登记
+    release_state(p);                          // 状态回收（含 FIFO/计数缓冲释放）
+}
+// snapshot/restore: 外设状态快照（评审 15-4）——序列化 UART FIFO/Timer count/GPIO out，
+// 纳入 M-20 L3 全状态快照/检查点重放；restore 前校验版本与 CRC（对齐 M-20 契约）
+int periph_snapshot(PeripheralInstance* p, void** out)  { return p-&gt;snapshot(p, out); }
+int periph_restore(PeripheralInstance* p, const void* s){ return p-&gt;restore(p, s); }
+// onEvent: 事件驱动回调（由 M-12 事件队列驱动：定时器到期、输入就绪等）
+void periph_onEvent(PeripheralInstance* p, uint64_t time, EventKind kind, void* payload) {
+    p-&gt;onEvent(p, time, kind, payload);
+}
+// irqRequest / irqClear: 向中断控制器请求/清除中断线
+void periph_irqRequest(PeripheralInstance* p) { intc_request(p-&gt;irqLine); }
+void periph_irqClear(PeripheralInstance* p)    { intc_clear(p-&gt;irqLine); }
+// probe: 向观测管道暴露内部信号（GPIO 翻转、定时器比较、中断脉冲）
+void periph_probe(PeripheralInstance* p, const char* sig, uint32_t v, uint64_t t) {
+    probe_sample(sig, v, t);                  // M-18 attachSignal 通道绑定
+}
+// precheck: 外设可访问性预检（评审 N1）——M-14 写拆分阶段一「预检所有片可访问后统一
+//   执行」时调用；返回 err_t：OK 可访问 / E_PP-05 忙或内部不可访问；与 probe 探针上报
+//   （void）语义分离，是独立预检接口（9.1.1 契约），不承载观测
+int periph_precheck(PeripheralInstance* p, uint32_t offset) {
+    if (!p || !p-&gt;state) return E_PP-05;          // 实例失效（未 attach/已 detach/悬垂）
+    if (offset &gt;= p-&gt;regWindow) return E_PP-05;   // 偏移超出寄存器窗口
+    return p-&gt;precheck ? p-&gt;precheck(p, offset) : OK;  // 后端预检（忙/内部状态），缺省可访问
+}
+// log: 行为日志（NFR-07），用于 trace 与调试
+void periph_log(PeripheralInstance* p, const char* msg) { log(INFO, &quot;PERIPH&quot;, msg, &quot;&quot;); }
+// port/link（P1 预留）：未连接端口产生告警（FR-25）</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 UART 实现</h3>
+<p class="body">寄存器窗口（行为级）：数据寄存器（收发 FIFO 读写）、状态寄存器（TX 忙/RX 就绪/CTS 电平）、控制寄存器（使能/波特率/数据位/流控开关）。默认偏移布局作为实现基线（评审 15-8）：UART DATA=0x00 / STAT=0x04 / CTRL=0x08；GPIO DATA=0x00 / DIR=0x04；Timer CTRL=0x00 / PRE=0x04 / CMP=0x08——与具体固件驱动对齐作为变更项管理（变更走配置/文档变更流程，不静默改偏移）。行为时序：按 baudRate 生成位时钟（每 bit = 1e9/baudRate 虚拟时间），发送按 FIFO 逐字节推进，帧完成 = (1+dataBits+stopBits)×txBytes 位（含起始/停止位）；CTS 流控（FR-07）：CTS 无效时暂停发送；接收侧输入就绪触发 onEvent（输入注入经 M-20 事件流）或 rx-ready 中断。FIFO 深度（评审 15-9）：TX/RX 默认 16 字节；TX 满时写返回 E_PP-05 忙；RX 满时输入注入丢弃并置 overrun 状态位。运行中配置变更（评审 15-10）：写控制寄存器（使能/波特率/数据位）或 GPIO 方向寄存器时，位时钟/计数基准重置（bitAcc=0、lastTick=now），时序从新配置重新起算。</p>
+<pre class="code"><code>// UART 行为时序：位时钟推进（虚拟时间，评审 15-1 修正）
+void uart_tick(UartState* s, uint64_t now) {
+    if (s-&gt;cts &amp;&amp; s-&gt;txBytes &gt; 0) {           // CTS 有效且待发
+        s-&gt;bitAcc += (now - s-&gt;lastTick);      // 按虚拟时间累加位时钟
+        uint64_t bitT = (1ULL * 1e9) / s-&gt;cfg-&gt;baudRate;   // 每 bit 虚拟时间 = 1e9/baud（修正）
+        while (s-&gt;bitAcc &gt;= bitT) { s-&gt;bitAcc -= bitT; s-&gt;bitIdx++; }
+        uint32_t bitsPerFrame = 1 + s-&gt;cfg-&gt;dataBits + s-&gt;cfg-&gt;stopBits;  // start + data + stop
+        if (s-&gt;bitIdx &gt;= bitsPerFrame * s-&gt;txBytes) {      // 帧完成判定计入 start/stop（修正）
+            s-&gt;txBytes = 0; s-&gt;bitIdx = 0; s-&gt;txBusy = 0;
+            periph_irqRequest(s-&gt;periph);                  // tx-empty 中断（FIFO 空）
+        }
+    }
+    s-&gt;lastTick = now;
+}</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 GPIO 实现</h3>
+<p class="body">引脚电平读写 + 方向控制；引脚翻转时经 probe 上报边沿（M-18 默认通道 GPIO0），供波形视图（FR-10）。写入 GPIO 数据寄存器 → 电平变化 → probe(&quot;gpio0&quot;, level, t_virt)。</p>
+<pre class="code"><code>// GPIO 写：电平变化即上报探针（边沿判定在 M-18）
+int gpio_write(PeripheralInstance* p, uint32_t offset, uint32_t value) {
+    GpioState* s = p-&gt;state;
+    uint32_t changed = (s-&gt;out ^ value) &amp; pinMask(p-&gt;config);
+    s-&gt;out = value;
+    if (changed) periph_probe(p, &quot;gpio0&quot;, value, virt_clock_now());  // 翻转探针
+    return OK;
+}</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 Timer 实现</h3>
+<p class="body">比较值触发：count 按虚拟时间差快进（评审 15-3）——每次到期处理时以（now − lastEvent）÷ 分频周期换算计数步进，达 compare 时经 M-12 scheduleEvent 入队到期事件，并 irqRequest 请求中断线（timer-compare）；处理器写控制寄存器清除。period（下次到期间隔）由配置推导：period = compare × 分频周期（分频周期 = 1e9/(clockHz/prescaler) ns），无需额外配置字段。职责边界（评审 N3）：定时中断权威源 = M-16 mtime/mtimecmp（标准 CLINT，固件标准路径经 M-14 MMIO）；本外设 timer-compare 中断线 MVP 不启用（避免双权威源计数不一致），Timer 外设仅作平台周期计数（count 可被固件读、比较探针供波形观测）；后续若启用，CMP 经 M-14 透传 mtimecmp（同一权威源），作为 P1 变更项管理。</p>
+<pre class="code"><code>// Timer 到期：count 快进（评审 15-3）+ 事件入队 + 中断请求
+uint64_t prescaler_ticks(TimerState* s) {
+    // 每计数步的虚拟时间（ns）= 1e9 / (clockHz / prescaler)
+    return (1ULL * 1e9) / (s-&gt;cfg-&gt;clockHz / s-&gt;cfg-&gt;prescaler);
+}
+void timer_tick(TimerState* s, uint64_t now) {
+    // count 推进：时间差 ÷ 分频周期（快进，不需逐周期事件）
+    s-&gt;count += (now - s-&gt;lastEvent) / prescaler_ticks(s);
+    if (s-&gt;count &gt;= s-&gt;cfg-&gt;compare) {
+        s-&gt;count = 0;
+        s-&gt;period = s-&gt;cfg-&gt;compare * prescaler_ticks(s);   // 到期间隔（配置推导，无新增字段）
+        engine_scheduleEvent(now + s-&gt;period, EV_TIMER, s); // M-12 事件队列
+        if (s-&gt;timerIRQEnabled) intc_request(s-&gt;irqLine);   // 评审 N3：timer-compare 线 MVP 关闭
+        periph_probe(s-&gt;periph, &quot;timer_cmp&quot;, 1, now);       // M-18 比较探针（观测保留）
+    }
+    s-&gt;lastEvent = now;
+}
+// 初始化：attach/使能时置 s-&gt;lastEvent = now；首个到期事件由首次 timer_tick 入队。</code></pre>
+<h3 id="sec3-5" class="h-sub">3.5 与真实硬件的外设建模差异对照表</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:14%"><col style="width:30%"><col style="width:34%"><col style="width:22%"></colgroup><thead><tr><th style="width:14%;text-align:center">维度</th><th style="width:30%;text-align:center">真实硬件</th><th style="width:34%;text-align:center">本平台建模（行为级）</th><th style="width:22%;text-align:center">差异影响</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">时序</td><td style="text-align:left">真实引脚电平/时钟周期</td><td style="text-align:left">虚拟时间驱动行为时序（位时钟/比较），无真实引脚</td><td style="text-align:left">指令可观测行为一致；周期级不建模</td></tr><tr class="row1"><td data-label="维度" style="text-align:center">波特率/CTS</td><td data-label="真实硬件" style="text-align:left">硬件 UART 引擎</td><td data-label="本平台建模" style="text-align:left">按 baudRate 生成位时钟（每 bit = 1e9/baud，帧完成计入 start/stop，评审 15-1）、CTS 暂停发送（FR-07）</td><td data-label="差异影响" style="text-align:left">收发节奏一致；无断帧/噪声建模</td></tr><tr class="row0"><td data-label="维度" style="text-align:center">中断</td><td data-label="真实硬件" style="text-align:left">PLIC/CLINT 时序</td><td data-label="本平台建模" style="text-align:left">irqRequest → M-16 挂起/仲裁/陷入</td><td data-label="差异影响" style="text-align:left">中断语义一致；无硬件延迟建模</td></tr><tr class="row1"><td data-label="维度" style="text-align:center">GPIO 波形</td><td data-label="真实硬件" style="text-align:left">示波器级信号</td><td data-label="本平台建模" style="text-align:left">probe 边沿事件（只记变化点）</td><td data-label="差异影响" style="text-align:left">波形通道语义一致；无毛刺</td></tr><tr class="row0"><td data-label="维度" style="text-align:center">输入注入</td><td data-label="真实硬件" style="text-align:left">物理引脚</td><td data-label="本平台建模" style="text-align:left">经 M-20 事件流时间戳化注入（UART 写/按键/GPIO）</td><td data-label="差异影响" style="text-align:left">确定性可重放（FR-12）</td></tr><tr class="row1"><td data-label="维度" style="text-align:center">外设验证</td><td data-label="真实硬件" style="text-align:left">真机/HDL 实测</td><td data-label="本平台建模" style="text-align:left">行为断言 + 确定性重放（+ 可选真机记录比对）；Spike 无外设模型，不构成对拍参照（评审 15-7）</td><td data-label="差异影响" style="text-align:left">验证边界明确；无 golden 参照时以断言与重放为准</td></tr></tbody></table></div>
+    
+<h2 id="sec4" class="h-sec">4 关键函数</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:20%"><col style="width:56%"></colgroup><thead><tr><th style="width:24%;text-align:center">函数</th><th style="width:20%;text-align:center">说明</th><th style="width:56%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">register(type, factory)</td><td style="text-align:left">外设类型注册</td><td style="text-align:left">输出：注册确认（新增外设不改既有实例，NFR-06）</td></tr><tr class="row1"><td style="text-align:center">instantiate(type, cfg)</td><td style="text-align:left">创建外设实例</td><td style="text-align:left">输入：类型/配置（时钟、波特率、引脚数）；输出：实例；未注册类型 → E_PP-01；配置非法 → E_PP-02；实例化失败 → E_PP-03</td></tr><tr class="row0"><td style="text-align:center">attach(instance, baseAddr)</td><td style="text-align:left">绑定地址区间</td><td style="text-align:left">调用 M-14 mapRegion；输出：确认（冲突/越界 → E_BUS-03/04）；登记 instanceTable</td></tr><tr class="row1"><td style="text-align:center">detach(instance)</td><td style="text-align:left">注销外设实例</td><td style="text-align:left">评审 15-5：unmap（M-14）+ instanceTable 清理 + 状态回收；与 M-14 生命周期协议对齐</td></tr><tr class="row0"><td style="text-align:center">read(offset)/write(offset, value)</td><td style="text-align:left">寄存器级访问入口</td><td style="text-align:left">由 M-14 按地址区间分发到实例（3.2.5 表13）；返回 err_t，运行时错误 → E_PP-05（评审 15-6）</td></tr><tr class="row1"><td style="text-align:center">onEvent(time, kind, payload)</td><td style="text-align:left">事件驱动回调</td><td style="text-align:left">由 M-12 事件队列驱动（定时器到期、输入就绪）；payload 结构见 9.3（评审 15-11）</td></tr><tr class="row0"><td style="text-align:center">irqRequest(line)/irqClear()</td><td style="text-align:left">中断线请求/清除</td><td style="text-align:left">调用 M-16 request/clear；RX 就绪/TX 空/比较触发</td></tr><tr class="row1"><td style="text-align:center">probe(signal, value, time)</td><td style="text-align:left">信号上报观测管道</td><td style="text-align:left">调用 M-18；输出：边沿事件</td></tr><tr class="row0"><td style="text-align:center">snapshot()/restore()</td><td style="text-align:left">外设状态快照/恢复</td><td style="text-align:left">评审 15-4：序列化 UART FIFO/Timer count/GPIO out，纳入 M-20 L3 检查点重放；restore 校验版本与 CRC</td></tr><tr class="row1"><td style="text-align:center">port(name, dir)/link(peerPort)</td><td style="text-align:left">端口与链路绑定（P1）</td><td style="text-align:left">未连接端口产生告警（FR-25）</td></tr></tbody></table></div>
+<p class="body">说明：register/instantiate/attach 构成「类型注册 → 实例化 → 挂接」三段式装配；新增外设仅需 register 新类型工厂，不改既有实例（插件化，NFR-06）。</p>
+
+<h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 外设事件驱动流程</h3>
+<p class="body">外设事件闭环如下（对应图 1）：</p>
+<p class="body">（1）下行：M-14 按地址区间分发访存 → 实例 read/write（寄存器窗口，3.2.5 表13）。</p>
+<p class="body">（2）行为：按虚拟时间推进行为时序（UART 位时钟/CTS 流控、Timer 比较触发、GPIO 翻转）。</p>
+<p class="body">（3）上行：时序产出事件/中断——onEvent 入 M-12 事件队列（定时器到期、输入就绪），irqRequest 请求 M-16 中断线（rx-ready、timer-compare）。</p>
+<p class="body">（4）观测：probe 边沿信号 → M-18 → M-19 波形（FR-10）；记录：log 行为日志 → M-21（NFR-07）。</p>
+<p class="body">（5）确定性：输入注入（UART 写/按键/GPIO 注入）经 M-04 recordInput 时间戳化入 M-20 事件流，由 M-12 onEvent 驱动实例——同种子 + 同输入序列 → 结果唯一（2.4 表6）。</p>
+<div class="fig"><svg class="flow-svg" viewBox="0 0 980 640" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-15 外设事件驱动流程">
+<defs>
+<marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#4b5563"/></marker>
+<marker id="arrd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#9aa1af"/></marker>
+</defs>
+<rect x="60" y="50" width="360" height="84" rx="10" fill="#f1f4f9" stroke="#1e3a8a" stroke-width="1.5"/>
+<text x="240" y="74" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">① M-14 总线分发</text>
+<text x="240" y="98" text-anchor="middle" font-size="12.5" fill="#4b5563">read / write 按地址区间</text>
+<text x="240" y="118" text-anchor="middle" font-size="12.5" fill="#4b5563">命中实例 → 寄存器窗口（未映射 → E_BUS-01）</text>
+<rect x="60" y="190" width="360" height="74" rx="10" fill="#f1f4f9" stroke="#1e3a8a" stroke-width="1.5"/>
+<text x="240" y="216" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">② 实例 read / write</text>
+<text x="240" y="240" text-anchor="middle" font-size="12.5" fill="#4b5563">UART / GPIO / Timer 寄存器窗口（3.2.5 表13）</text>
+<rect x="60" y="320" width="360" height="84" rx="10" fill="#f1f4f9" stroke="#1e3a8a" stroke-width="1.5"/>
+<text x="240" y="344" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">③ 行为时序</text>
+<text x="240" y="368" text-anchor="middle" font-size="12.5" fill="#4b5563">位时钟 · CTS 流控 · 比较触发</text>
+<text x="240" y="388" text-anchor="middle" font-size="12.5" fill="#4b5563">（虚拟时间驱动，FR-07）</text>
+<rect x="60" y="460" width="360" height="96" rx="10" fill="#f1f4f9" stroke="#1e3a8a" stroke-width="1.5"/>
+<text x="240" y="484" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">④ 事件与中断</text>
+<text x="240" y="508" text-anchor="middle" font-size="12.5" fill="#4b5563">onEvent → M-12 事件队列</text>
+<text x="240" y="528" text-anchor="middle" font-size="12.5" fill="#4b5563">irqRequest → M-16（挂起/仲裁/陷入）</text>
+<rect x="560" y="320" width="360" height="84" rx="10" fill="#eef2fb" stroke="#2f5bd6" stroke-width="1.5"/>
+<text x="740" y="344" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">⑤ 观测：probe → M-18 → M-19</text>
+<text x="740" y="368" text-anchor="middle" font-size="12.5" fill="#4b5563">GPIO 翻转 / 定时器比较 / 中断脉冲</text>
+<text x="740" y="388" text-anchor="middle" font-size="12.5" fill="#4b5563">边沿事件（只记变化点）→ 波形</text>
+<rect x="560" y="460" width="360" height="84" rx="10" fill="#eef2fb" stroke="#2f5bd6" stroke-width="1.5"/>
+<text x="740" y="484" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">⑥ 记录：log 行为日志 → M-21</text>
+<text x="740" y="508" text-anchor="middle" font-size="12.5" fill="#4b5563">外设异常 / 行为 trace（NFR-07）</text>
+<text x="740" y="528" text-anchor="middle" font-size="12.5" fill="#4b5563">仅管理员通道（角色边界）</text>
+<rect x="180" y="580" width="620" height="44" rx="8" fill="#ffffff" stroke="#9aa1af" stroke-width="1" stroke-dasharray="5 4"/>
+<text x="490" y="600" text-anchor="middle" font-size="12.5" fill="#4b5563">输入注入：M-04 recordInput → M-20 事件流（时间戳化）→ M-12 onEvent 驱动实例（确定性）</text>
+<text x="490" y="616" text-anchor="middle" font-size="11" fill="#6b7280">GPIO 写注入 / 串口输入 / 按键：同种子 + 同输入序列 → 结果唯一（2.4 表6）</text>
+<line x1="240" y1="134" x2="240" y2="190" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="240" y1="264" x2="240" y2="320" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="240" y1="404" x2="240" y2="460" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="420" y1="362" x2="560" y2="362" stroke="#2f5bd6" stroke-width="1.5" marker-end="url(#arr)"/>
+<text x="490" y="354" text-anchor="middle" font-size="11.5" fill="#2f5bd6">probe 边沿信号</text>
+<line x1="420" y1="500" x2="560" y2="500" stroke="#2f5bd6" stroke-width="1.5" marker-end="url(#arr)"/>
+<text x="490" y="492" text-anchor="middle" font-size="11.5" fill="#2f5bd6">外设异常日志</text>
+</svg><div class="flow-mobile">
+<div class="flow-step"><span class="num">1</span><span class="txt">M-14 总线分发：read/write 按地址区间 → 命中实例（未映射 → E_BUS-01）</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">2</span><span class="txt">实例 read/write：UART / GPIO / Timer 寄存器窗口（3.2.5 表13）</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">3</span><span class="txt">行为时序：位时钟 · CTS 流控 · 比较触发（虚拟时间驱动，FR-07）</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">4</span><span class="txt">事件与中断：onEvent → M-12 事件队列；irqRequest → M-16（挂起/仲裁/陷入）</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">5</span><span class="txt">观测：probe → M-18 → M-19 波形（GPIO 翻转 / 定时器比较 / 中断脉冲，边沿事件）</span></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><span class="num">6</span><span class="txt">记录：log 行为日志 → M-21（外设异常/行为 trace，仅管理员通道）</span></div>
+<div class="flow-branch">分支：输入注入 M-04 recordInput → M-20 事件流 → M-12 onEvent（确定性可重放）；探针溢出按 M-19 策略</div>
+</div><figcaption>图 1 · M-15 外设事件驱动流程</figcaption></div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:18%"><col style="width:34%"><col style="width:48%"></colgroup><thead><tr><th style="width:18%;text-align:center">协作模块</th><th style="width:34%;text-align:center">接口</th><th style="width:48%;text-align:center">时机与说明</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-14（总线）</td><td style="text-align:left">read/write（按地址区间分发）</td><td style="text-align:left">每次访存同步分发；未映射 → E_BUS-01 guest trap（4.4.3.5）</td></tr><tr class="row1"><td data-label="协作模块" style="text-align:center">M-12（事件引擎）</td><td data-label="接口" style="text-align:left">onEvent(time, kind, payload）</td><td data-label="时机与说明" style="text-align:left">定时器到期、输入就绪由事件队列驱动；控制注入只在安全检查点</td></tr><tr class="row0"><td data-label="协作模块" style="text-align:center">M-16（中断控制器）</td><td data-label="接口" style="text-align:left">irqRequest(line)/irqClear()</td><td data-label="时机与说明" style="text-align:left">外设实例化/中断请求时请求中断线；挂起/仲裁/陷入（4.4.5.4）</td></tr><tr class="row1"><td data-label="协作模块" style="text-align:center">M-18（探针）</td><td data-label="接口" style="text-align:left">probe(signal, value, time）</td><td data-label="时机与说明" style="text-align:left">外设实例化、中断请求时模型内埋点回调；边沿判定后送 M-19（4.7 表62）</td></tr><tr class="row0"><td data-label="协作模块" style="text-align:center">M-20（事件流）</td><td data-label="接口" style="text-align:left">recordInput（时间戳化输入）</td><td data-label="时机与说明" style="text-align:left">M-04 会话注入 UART 写/按键/GPIO，确定性基线（FR-12，4.7 表62）；外设状态 snapshot/restore 纳入 L3 快照（评审 15-4）</td></tr><tr class="row1"><td data-label="协作模块" style="text-align:center">M-21（日志）</td><td data-label="接口" style="text-align:left">log(level, ctx, msg, errCode）</td><td data-label="时机与说明" style="text-align:left">外设异常/行为 trace 上报；自动附双时间戳与会话关联（对接见 9.2）</td></tr></tbody></table></div>
+
+<h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:34%"><col style="width:50%"></colgroup><thead><tr><th style="width:16%;text-align:center">错误码</th><th style="width:34%;text-align:center">含义</th><th style="width:50%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">E_PP-01</td><td style="text-align:left">未注册外设类型</td><td style="text-align:left">instantiate 拒绝创建；log(WARN, &quot;PERIPH&quot;, &quot;unregistered type&quot;, &quot;E_PP-01&quot;)</td></tr><tr class="row1"><td data-label="错误码" style="text-align:center">E_PP-02</td><td data-label="含义" style="text-align:left">配置非法</td><td data-label="处置" style="text-align:left">instantiate 拒绝并保留旧配置；log(WARN, &quot;PERIPH&quot;, &quot;invalid config&quot;, &quot;E_PP-02&quot;)</td></tr><tr class="row0"><td data-label="错误码" style="text-align:center">E_PP-03</td><td data-label="含义" style="text-align:left">实例化失败</td><td data-label="处置" style="text-align:left">返回失败码；log(ERROR, &quot;PERIPH&quot;, &quot;instantiate fail&quot;, &quot;E_PP-03&quot;)</td></tr><tr class="row1"><td data-label="错误码" style="text-align:center">E_PP-04</td><td data-label="含义" style="text-align:left">端口未连接（P1）</td><td data-label="处置" style="text-align:left">port/link 绑定检查产生告警（FR-25）；MVP 不涉及</td></tr><tr class="row0"><td data-label="错误码" style="text-align:center">E_PP-05</td><td data-label="含义" style="text-align:left">外设运行时错误（忙/内部错误，评审 15-6）</td><td data-label="处置" style="text-align:left">read/write 返回该码（如 TX FIFO 满写忙）；M-14 总线层按外设错误契约转 E_BUS-05 上抛，与未映射 E_BUS-01 可区分</td></tr><tr class="row1"><td data-label="错误码" style="text-align:center">E_BUS-01</td><td data-label="含义" style="text-align:left">未映射地址访存</td><td data-label="处置" style="text-align:left">由 M-14 抛访存异常事件（guest trap 语义），非平台故障</td></tr><tr class="row0"><td data-label="错误码" style="text-align:center">E_BUS-03/04</td><td data-label="含义" style="text-align:left">映射冲突/越界</td><td data-label="处置" style="text-align:left">attach 调 M-14 mapRegion 时拒绝并保留旧配置</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）探针溢出：按 M-19 溢出策略处置（默认丢最旧 + 标记，可配置暂停仿真），外设行为不因探针过载被中断（4.4.4.5、4.5.2.1）。</p>
+<p class="body">（2）采样可整体关闭：probe 为性能开关，关闭后外设行为不受影响（4.5.1.1）。</p>
+<p class="body">（3）配置校验失败保留旧配置：E_PP-02 拒绝新配置，既有实例状态不变（4.4.4.5）。</p>
+<p class="body">（4）确定性边界：外设事件必须入 M-12 事件队列稳定排序（虚拟时间, 插入序），不得依赖宿主时钟；违反 → 确定性断言失败（2.4 表6、源文档 7.3 表92）。</p>
+<p class="body">（5）中断风暴：由 M-16 按优先级 + 使能掩码抑制，未使能中断保持挂起不丢（4.4.5.5）；外设侧不额外兜底。</p>
+<p class="body">（6）外设运行时错误：read/write 返回 E_PP-05（忙/内部错误），总线层转 E_BUS-05 上抛（评审 15-6），与未映射 E_BUS-01 可区分；FIFO 满不静默吞写，行为留痕可查。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表91（M-15 行）：测试要点 = 外设建模；关键用例 = UART 波特率/CTS、GPIO 翻转探针、Timer 比较；通过准则 = 行为时序正确、保真度标注。展开用例表如下（核心模块覆盖率 ≥70%，源文档 7.3 表92）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:20%"><col style="width:40%"><col style="width:40%"></colgroup><thead><tr><th style="width:20%;text-align:center">用例</th><th style="width:40%;text-align:center">输入 / 步骤</th><th style="width:40%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（源 2.5/7.1 对齐）</td><td style="text-align:left">按 9.1.1 端口契约表逐项校验 register/instantiate/attach/onEvent/probe/port·link 的接口签名、输入校验、输出结构与错误码；替代实现（替代外设模型）接入前必须同端口契约测试全绿</td><td style="text-align:left">契约测试全绿；契约变更须同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">UART 波特率（评审 15-2 修正）</td><td data-label="输入 / 步骤" style="text-align:left">配置 clockHz=16MHz、baudRate=115200、dataBits=8、stopBits=1，写 1 字节，推进虚拟时间</td><td data-label="通过准则" style="text-align:left">TX 逐位时钟间隔 = 1e9/baudRate 虚拟时间；帧完成 = (1+8+1)×1 = 10 位后 TX 忙清除（start/stop 计入完成判定）；FIFO 空后 tx-empty 中断</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">UART 帧边界断言（评审 15-2）</td><td data-label="输入 / 步骤" style="text-align:left">发送 N 字节（N=2），按位推进并断言各位时刻</td><td data-label="通过准则" style="text-align:left">第 10N 位（含 start/stop）处 TX 忙清除；发送总耗时 = 10N/baud（正确速率，非 80N/baud）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">CTS 流控（FR-07）</td><td data-label="输入 / 步骤" style="text-align:left">CTS 拉无效，置待发数据</td><td data-label="通过准则" style="text-align:left">暂停发送（TX 忙保持）；CTS 恢复后继续</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">GPIO 翻转探针</td><td data-label="输入 / 步骤" style="text-align:left">写 GPIO 数据寄存器翻转引脚</td><td data-label="通过准则" style="text-align:left">probe 产出边沿事件（只记变化点），通道 GPIO0 进 M-19 波形</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">Timer 比较</td><td data-label="输入 / 步骤" style="text-align:left">设置 compare，推进虚拟时间至到期</td><td data-label="通过准则" style="text-align:left">count 按时间差快进；到期事件入 M-12 队列 + 比较探针；period = compare × 分频周期；timer-compare 中断线默认关闭（评审 N3，权威中断源 = M-16 mtime/mtimecmp）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">可访问性预检（评审 N1）</td><td data-label="输入 / 步骤" style="text-align:left">对已挂载/已 detach 实例调 precheck；偏移越界/后端忙</td><td data-label="通过准则" style="text-align:left">OK 可访问；失效实例/偏移越界/忙 → E_PP-05；M-14 写拆分阶段一据此预检所有片再统一执行</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">中断行为（评审 15-12）</td><td data-label="输入 / 步骤" style="text-align:left">构造 rx-ready / tx-empty / timer-compare 触发后 irqClear 再触发</td><td data-label="通过准则" style="text-align:left">请求/清除/重触发时序正确：清除后线撤销、条件仍满足可再次请求；未使能中断保持挂起不丢</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">外设快照/恢复（评审 15-4）</td><td data-label="输入 / 步骤" style="text-align:left">推进至含 FIFO 数据/Timer count 的状态，snapshot 后 restore</td><td data-label="通过准则" style="text-align:left">UART FIFO/Timer count/GPIO out 完整恢复；重放行为与快照点连续一致</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">外设注销（评审 15-5）</td><td data-label="输入 / 步骤" style="text-align:left">attach 后 detach</td><td data-label="通过准则" style="text-align:left">M-14 映射清理 + instanceTable 移除 + 状态回收；后续访存回落未映射 E_BUS-01，无悬垂 target</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">确定性夹具</td><td data-label="输入 / 步骤" style="text-align:left">同种子 + 同时间戳化输入序列（UART 写/GPIO 注入）跑两遍</td><td data-label="通过准则" style="text-align:left">外设事件序列（虚拟时间, 插入序）完全一致（2.4 表6、源文档 7.3 表92）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">保真度标注（R5）</td><td data-label="输入 / 步骤" style="text-align:left">实例化后读取 fidelityMeta</td><td data-label="通过准则" style="text-align:left">level/desc/caps 正确返回，前端可显式展示</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">注册/实例化</td><td data-label="输入 / 步骤" style="text-align:left">register 新类型后 instantiate；未注册类型/非法配置</td><td data-label="通过准则" style="text-align:left">新增外设不改既有实例；E_PP-01/E_PP-02 正确拒绝</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">地址区间挂接</td><td data-label="输入 / 步骤" style="text-align:left">attach 到地址区间，经 M-14 访问</td><td data-label="通过准则" style="text-align:left">分发正确；冲突 → E_BUS-03；未映射 → E_BUS-01</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）注册表插件化（NFR-06）：新增外设仅 register 新类型工厂，不改既有实例与分发逻辑。</p>
+<p class="body">（2）抽象隔离（8 章表93 可维护性）：Peripheral 抽象把外设差异隔离在总线之下，M-14/调试服务只面对抽象接口。</p>
+<p class="body">（3）行为日志统一走 M-21：log(message) 结构化入缓冲，trace 与调试不依赖临时打印。</p>
+<p class="body">（4）探针字段固定可断言：probe 信号名（gpio0/timer_cmp 等）与边沿语义固定，供测试与波形回归断言。</p>
+<p class="body">（5）确定性夹具可复现：测试输入（UART 写/按键/GPIO 注入）复用 M-20 录制格式，缺陷可一键重放定位。</p>
+<p class="body">（6）契约层可替换性（源 2.5 对齐）：本模块对外的 driving 端口收敛到 9.1.1 端口契约表，替代实现（替代外设模型等）遵守同端口契约并通过契约测试即可接入，不改动既有实例与其他模块。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-15 责任：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:14%"><col style="width:30%"><col style="width:56%"></colgroup><thead><tr><th style="width:14%;text-align:center">质量属性</th><th style="width:30%;text-align:center">目标（估算基线）</th><th style="width:56%;text-align:center">M-15 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">可扩展性</td><td style="text-align:left">外设/内核/观测/协议扩展点</td><td style="text-align:left">注册表插件化（NFR-06）：新增外设不改既有实例；port/link 预留板间互联（FR-24/25）</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">可维护性</td><td data-label="目标" style="text-align:left">核心模块覆盖率 ≥70%；内核前端解耦；模块即积木可替换（源 2.5）</td><td data-label="M-15 落实" style="text-align:left">Peripheral 抽象隔离外设差异；行为日志经 M-21；探针字段固定可断言；端口契约测试（9.1.1）保障替代实现可接入</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">可靠性</td><td data-label="目标" style="text-align:left">确定性可复现（FR-12）</td><td data-label="M-15 落实" style="text-align:left">外设事件入 M-12 事件队列稳定排序；输入注入经 M-20 事件流时间戳化（2.4 表6）</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">性能</td><td data-label="目标" style="text-align:left">访存同步分发；刷新 ≤200ms</td><td data-label="M-15 落实" style="text-align:left">行为级建模（寄存器接口 + 行为时序），无硬件级时序开销；采样可整体关闭</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">可用性</td><td data-label="目标" style="text-align:left">保真度分级显式展示（评审 R5）</td><td data-label="M-15 落实" style="text-align:left">fidelityMeta（寄存器级/行为级/HDL 协同）供前端标注</td></tr><tr class="row1"><td data-label="质量属性" style="text-align:center">韧性</td><td data-label="目标" style="text-align:left">故障检测→分级→处置→恢复（NFR-08）</td><td data-label="M-15 落实" style="text-align:left">探针溢出按 M-19 策略，不因探针过载中断外设行为；配置失败保留旧配置</td></tr><tr class="row0"><td data-label="质量属性" style="text-align:center">合规</td><td data-label="目标" style="text-align:left">不引入 GPL；唯一入口</td><td data-label="M-15 落实" style="text-align:left">自研 BSD/MIT；探针/日志不自行实现（4.7 唯一入口规则）</td></tr></tbody></table></div>
+
+<h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<p class="body">源设计 4.4.4.6：依赖 = M-12（事件队列）、M-14（总线分发）、M-16（中断请求）、M-18（探针）、M-21（外设异常日志）。展开如下：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:28%"><col style="width:16%"><col style="width:56%"></colgroup><thead><tr><th style="width:28%;text-align:center">模块</th><th style="width:16%;text-align:center">方向</th><th style="width:56%;text-align:center">协作内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-12（事件引擎）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">onEvent 由事件队列驱动；输入注入经 M-04/M-20 时间戳化后由 M-12 调度</td></tr><tr class="row1"><td style="text-align:center">M-14（总线）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">read/write 按地址区间分发；attach 调 mapRegion（冲突/越界 → E_BUS-03/04）；detach 经 unmap 清理（评审 15-5）</td></tr><tr class="row0"><td style="text-align:center">M-16（中断控制器）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">irqRequest/irqClear 挂起/仲裁/陷入（4.4.5）</td></tr><tr class="row1"><td style="text-align:center">M-18（探针）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">probe 边沿事件送 M-19（4.7 表86：外设实例化、中断请求时埋点回调）</td></tr><tr class="row0"><td style="text-align:center">M-20（事件流/快照）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">评审 15-4：输入注入时间戳化入事件流（FR-12）；外设状态 snapshot/restore 纳入 L3 全状态快照/检查点重放（UART FIFO/Timer count/GPIO out）</td></tr><tr class="row1"><td style="text-align:center">M-21（日志）</td><td style="text-align:left">上游 → 本模块</td><td style="text-align:left">外设异常/行为日志（对接见 9.2）</td></tr><tr class="row0"><td style="text-align:center">M-02（视图）/M-14</td><td style="text-align:left">使用方</td><td style="text-align:left">FR-02 元器件事例化协作；串口终端回显（3.1 表8）；保真度标注展示（R5）</td></tr><tr class="row1"><td style="text-align:center">FR-25 消费方</td><td style="text-align:left">使用方（P1）</td><td style="text-align:left">port/link 端口抽象供板间互联绑定（M-15/M-12 跨板事件同步）</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表61 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层，本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现（替代外设模型等）遵守同端口契约并通过契约测试（7.1）即可接入，无需改动其他模块：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:18%"><col style="width:58%"></colgroup><thead><tr><th style="width:24%;text-align:center">端口 / 服务</th><th style="width:18%;text-align:center">方向</th><th style="width:58%;text-align:center">契约（输入 → 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:left">register(type, factory)</td><td style="text-align:center">提供（driving）</td><td style="text-align:left">输出：注册确认（新增外设不改既有实例）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">instantiate(type, cfg)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">输入：类型/配置（时钟、波特率、引脚数）；输出：实例；未注册类型/非法配置 → E_PP-01/E_PP-02</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">attach(instance, baseAddr)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">调用 M-14 mapRegion；输出：确认（冲突/越界 → E_BUS-03/04）；登记 instanceTable</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">detach(instance)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">评审 15-5：unmap（M-14）+ instanceTable 清理 + 状态回收；后续访存回落未映射 E_BUS-01</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">onEvent(time, kind, payload)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">由 M-12 事件队列驱动；payload 结构见 9.3（评审 15-11）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">probe(signal, value, time)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">调用 M-18；输出：边沿事件</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">precheck(instance, offset)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">评审 N1：外设可访问性预检（M-14 写拆分阶段一调用）；返回 err_t：OK / E_PP-05（实例失效/偏移越界/后端忙）；与 probe 探针上报（void）语义分离</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">snapshot() / restore()</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">评审 15-4：外设状态序列化/恢复，纳入 M-20 L3 快照与检查点重放；restore 校验版本与 CRC</td></tr><tr class="row0"><td data-label="端口 / 服务" style="text-align:left">port(name, dir)/link(peerPort)</td><td data-label="方向" style="text-align:center">提供（driving）</td><td data-label="契约" style="text-align:left">未连接端口产生告警（FR-25）</td></tr><tr class="row1"><td data-label="端口 / 服务" style="text-align:left">M-12 / M-14 / M-16 / M-18 / M-20 / M-21</td><td data-label="方向" style="text-align:center">依赖（driven）</td><td data-label="契约" style="text-align:left">事件队列、总线分发、中断请求、探针、快照/事件流、日志（见 9.1）</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:50%"><col style="width:50%"></colgroup><thead><tr><th style="width:50%;text-align:center">时机</th><th style="width:50%;text-align:center">示例调用（ctx / level / errCode）</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">未注册外设类型</td><td style="text-align:left">log(WARN, &quot;PERIPH&quot;, &quot;unregistered type&quot;, &quot;E_PP-01&quot;)</td></tr><tr class="row1"><td data-label="时机" style="text-align:center">配置非法</td><td data-label="示例调用" style="text-align:left">log(WARN, &quot;PERIPH&quot;, &quot;invalid config&quot;, &quot;E_PP-02&quot;)</td></tr><tr class="row0"><td data-label="时机" style="text-align:center">实例化失败</td><td data-label="示例调用" style="text-align:left">log(ERROR, &quot;PERIPH&quot;, &quot;instantiate fail&quot;, &quot;E_PP-03&quot;)</td></tr><tr class="row1"><td data-label="时机" style="text-align:center">端口未连接（P1）</td><td data-label="示例调用" style="text-align:left">log(WARN, &quot;PERIPH&quot;, &quot;port not linked&quot;, &quot;E_PP-04&quot;)</td></tr><tr class="row0"><td data-label="时机" style="text-align:center">外设运行时错误（忙/内部）</td><td data-label="示例调用" style="text-align:left">log(ERROR, &quot;PERIPH&quot;, &quot;runtime error&quot;, &quot;E_PP-05&quot;)；M-14 侧转 E_BUS-05 上抛</td></tr><tr class="row1"><td data-label="时机" style="text-align:center">行为 trace（收发/翻转/比较）</td><td data-label="示例调用" style="text-align:left">log(DEBUG, &quot;PERIPH-UART&quot;, &quot;tx byte&quot;, &quot;&quot;) / log(INFO, &quot;PERIPH-GPIO&quot;, &quot;pin toggle&quot;, &quot;&quot;)</td></tr></tbody></table></div>
+<h3 id="sec9-3" class="h-sub">9.3 事件 / 中断 / 探针对接</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:34%"><col style="width:18%"><col style="width:48%"></colgroup><thead><tr><th style="width:34%;text-align:center">接口</th><th style="width:18%;text-align:center">对接方</th><th style="width:48%;text-align:center">信号 / 载荷</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">onEvent(time, kind, payload)</td><td style="text-align:left">M-12</td><td style="text-align:left">事件与载荷（评审 15-11）：EV_TIMER（比较到期）→ payload={uint64_t cmpVal}；EV_UART_RX（输入就绪）→ payload={uint8_t data, uint8_t len}（输入注入载荷）；EV_GPIO_IN（按键/注入）→ payload={uint32_t pin, uint8_t level}</td></tr><tr class="row1"><td data-label="接口" style="text-align:center">irqRequest / irqClear</td><td data-label="对接方" style="text-align:left">M-16</td><td data-label="信号 / 载荷" style="text-align:left">rx-ready、tx-empty、timer-compare 中断线</td></tr><tr class="row0"><td data-label="接口" style="text-align:center">probe(signal, value, time)</td><td data-label="对接方" style="text-align:left">M-18</td><td data-label="信号 / 载荷" style="text-align:left">gpio0（GPIO 翻转，默认通道）、timer_cmp（定时器比较）、中断脉冲</td></tr></tbody></table></div>
+<p class="body">单向依赖与唯一入口规则（4.7 调用规则）：业务模块 → 横切组件；探针、日志能力由 M-18/M-21 统一提供，本模块不得自行实现或绕过。</p>
+</main>
+</div>
+</body>
+</html>

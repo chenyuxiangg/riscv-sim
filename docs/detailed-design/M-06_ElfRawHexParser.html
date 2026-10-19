@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-06 ELF/Raw/HEX 解析器 模块详细设计</title>
+<link rel="icon" href="data:image/svg+xml,&lt;svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22&gt;&lt;rect width=%2232%22 height=%2232%22 rx=%226%22 fill=%22%231e3a8a%22/&gt;&lt;text x=%2216%22 y=%2222%22 font-size=%2216%22 fill=%22white%22 text-anchor=%22middle%22 font-family=%22sans-serif%22&gt;M06&lt;/text&gt;&lt;/svg&gt;">
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15px; font-weight:700; color:#374151; margin:18px 0 8px; }
+.body { margin:0 0 10px; text-align:justify; }
+.lead { margin:0 0 10px; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  margin:10px 0 16px; white-space:pre; }
+code { font-family:inherit; }
+.nav-toggle { margin:10px 0 4px; }
+.nav-box { background:var(--head-bg); border:1px solid var(--line); border-radius:6px;
+  padding:10px 16px; font-size:13.5px; line-height:1.9; display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0 24px; }
+.nav-box a { color:var(--brand-2); text-decoration:none; }
+.nav-box a:hover { text-decoration:underline; }
+.flow-wrap { overflow-x:auto; margin:12px 0 16px; }
+.flow { min-width:640px; width:100%; height:auto; }
+.flow-branch { font-size:12.5px; color:var(--ink-2); border-left:3px solid var(--brand-2);
+  padding:4px 10px; margin:8px 0 16px; background:var(--zebra); }
+@media (max-width:767px) {
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media (max-width:560px) {
+  .doc-title { font-size:21px; }
+  .h-sec { font-size:19px; }
+  .doc-table, .doc-table th, .doc-table td { font-size:12.5px; }
+  .code { font-size:11.5px; white-space:pre-wrap; word-break:break-word; }
+  .nav-box { grid-template-columns:1fr; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><h1 class="doc-title">M-06 ELF/Raw/HEX 解析器 模块详细设计</h1><p class="subtitle">RISC-V仿真平台 模块详细设计系列 - 对应《模块设计说明书》4.1.4节</p><p class="version">HTML版 v1.0 (2026-10-15) - 源设计《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版，2026-10-13更新)</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版新增2.5平台共享契约与各模块端口契约表)</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.1.4（M-06 ELF/Raw/HEX 解析器）：数据描述→源文档表26、关键函数表27、端口契约表28；处理流程=4.1.4.4</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">反汇编·源码联动（FR-05）；输入上限（评审 L3/P-12）；无 DWARF 降级（评审 R7）</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">M-05 命令协议（loadELF 下发）；M-11 联动消费（符号表/行表）；M-14 映射目标（loadImage 写入 RAM）；M-21 解析失败日志</td></tr><tr class="row0"><td style="text-align:center">MVP状态</td><td style="text-align:left">PO主承担模块（MVP必需：浏览器内解析 ELF/Raw/HEX + DWARF 行表 + loadELF 下发，64KB ELF ≤3s）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；依赖方向（2.1表5：前端交互层→会话/命令层）；输入上限（评审 L3/P-12：ELF ≤16 MiB、段数 ≤64、符号表 ≤10⁵、行表 ≤2×10⁵、递归深度 ≤64）；无 DWARF 降级（评审 R7）；M-11 loadELF 下发衔接（4.3.4）；M-14 loadImage 写入 RAM（14-5）</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.0（2026-10-15 初版）：按 M-13 v1.1 标准 9 章结构；内建 9.1.1 端口契约（源表28 对齐）+ CH7 契约测试 + CH8 模块即积木可替换；表号/图号引用源文档契约层版实际编号（表26/27/28、表92/93）；错误码复用源表16 既有（E_PROTO-03/04，无新增码）；L3/P-12 输入上限五维前置校验；R7 无 DWARF 降级；M-14 loadImage 契约对齐（14-5 实测）</td></tr><tr class="row1"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-15</td></tr></tbody></table></div></header><nav class="nav-toggle"><details open><summary>目录</summary><div class="nav-box"><a href="#sec1">1 功能概述</a><a href="#sec1-1">1.1 模块定位</a><a href="#sec1-2">1.2 需求与约束</a><a href="#sec1-3">1.3 MVP 范围与预留</a><a href="#sec2">2 数据描述</a><a href="#sec2-1">2.1 核心数据结构</a><a href="#sec2-1-1">2.1.1 复杂结构字段定义</a><a href="#sec2-2">2.2 解析与映射语义</a><a href="#sec2-3">2.3 数据流说明</a><a href="#sec3">3 实现设计</a><a href="#sec3-1">3.1 parseELF</a><a href="#sec3-2">3.2 parseRaw</a><a href="#sec3-3">3.3 parseHEX</a><a href="#sec3-4">3.4 loadToKernel</a><a href="#sec3-5">3.5 差异对照表</a><a href="#sec3-6">3.6 DWARF 行表状态机</a><a href="#sec4">4 关键函数</a><a href="#sec5">5 处理流程</a><a href="#sec5-1">5.1 镜像加载流程</a><a href="#sec5-2">5.2 与相邻模块的协作说明</a><a href="#sec6">6 异常处理</a><a href="#sec6-1">6.1 错误码与处置</a><a href="#sec6-2">6.2 边界与降级</a><a href="#sec7">7 测试设计与可维护性</a><a href="#sec7-1">7.1 测试要点与关键用例</a><a href="#sec7-2">7.2 可维护性手段</a><a href="#sec8">8 质量属性落实</a><a href="#sec9">9 接口依赖</a><a href="#sec9-1">9.1 依赖关系</a><a href="#sec9-1-1">9.1.1 端口契约</a><a href="#sec9-2">9.2 日志对接</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-06 ELF/Raw/HEX 解析器（4.1.4）：前端交互层，在浏览器内解析 ELF 段（text/data/bss）与 Raw/HEX 镜像，构建符号表与「地址→源码行」映射（DWARF 行表），供反汇编·源码联动使用（FR-05）；解析结果经命令协议 loadELF 下发内核（M-05 dispatchCommand），写 RAM 由内核侧执行（loadELF 命令处理器内调 M-14 loadImage，06-1 单一写入路径，前端不直调 M-14）。输入设具体上限防畸形输入 OOM（评审 L3/P-12）：ELF 文件 ≤16 MiB、段数 ≤64、符号表 ≤10⁵ 条、DWARF 行表条目 ≤2×10⁵、DWARF 通用递归解析深度 ≤64（行表线性推进不适用，06-3）——均为估算基线，超限明确拒绝并提示，不进入内核。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:12%"><col style="width:64%"><col style="width:24%"></colgroup><thead><tr><th style="width:12%;text-align:center">类别</th><th style="width:64%;text-align:center">约束内容</th><th style="width:24%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">功能</td><td style="text-align:left">浏览器内解析 ELF/Raw/HEX 与 DWARF 行表（FR-05）</td><td style="text-align:left">4.1.4.1、FR-05</td></tr><tr class="row1"><td style="text-align:center">解析</td><td style="text-align:left">ELF 段（text/data/bss）→ segmentTable；符号表 → symbolTable；行表 → lineMap</td><td style="text-align:left">4.1.4.2 表26</td></tr><tr class="row0"><td style="text-align:center">映射</td><td style="text-align:left">符号表 Map&lt;addr, name&gt;；行表 Map&lt;addr, {file, line}&gt;（FR-05）</td><td style="text-align:left">4.1.4.2 表26</td></tr><tr class="row1"><td style="text-align:center">下发</td><td style="text-align:left">经 M-05 dispatchCommand(loadELF) 下发内核；写 RAM 由内核侧执行（loadELF 处理器内调 M-14 loadImage，06-1 单一写入路径）</td><td style="text-align:left">4.1.4.3 表27、06-1</td></tr><tr class="row0"><td style="text-align:center">输入上限</td><td style="text-align:left">ELF ≤16 MiB、段数 ≤64、符号表 ≤10⁵ 条、行表 ≤2×10⁵ 条、DWARF 通用递归深度 ≤64（估算基线，超限拒绝）</td><td style="text-align:left">评审 L3/P-12</td></tr><tr class="row1"><td style="text-align:center">性能</td><td style="text-align:left">64KB ELF ≤3s（估算基线；计时 = 解析全流程，不含 loadToKernel 命令下发往返，06-8）</td><td style="text-align:left">4.1.4.4、7.2 表92、06-8</td></tr><tr class="row0"><td style="text-align:center">降级</td><td style="text-align:left">无 DWARF 时降级为仅反汇编 + 符号表（不阻塞 MVP 主线）</td><td style="text-align:left">评审 R7</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：parseELF(binary)（ELF 段 + 符号表 + DWARF 行表解析，输入上限前置校验）、parseRaw(binary, base)（Raw 镜像基址加载）、parseHEX(text)（Intel HEX 解析，含 0x02/0x04 扩展地址记录）、loadToKernel()（经 M-05 loadELF 下发，内核侧写 RAM，输出加载摘要）；64KB ELF ≤3s 性能基线（解析全流程，06-8）。<br>预留项（P1 演进承接，不属现实现）：DWARF 高级特性扩展（.debug_info DIE 树/表达式求值/变量定位，递归深度防护随其落地启用，06-3）；更多镜像格式（Motorola S-Record 等）；符号/行表增量更新（热更新，配合 M-08/M-09 断点联动）；解析子组件独立打包（WASM 分块加载，配合零安装/file:// 形态 NFR-05）。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构（源文档表26）</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:26%"><col style="width:48%"></colgroup><thead><tr><th style="width:26%;text-align:center">数据结构/数据项</th><th style="width:26%;text-align:center">类型</th><th style="width:48%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">segmentTable</td><td style="text-align:left">Map&lt;name, {addr, size, data}&gt;</td><td style="text-align:left">ELF 段解析结果（text/data/bss）</td></tr><tr class="row1"><td style="text-align:center">symbolTable</td><td style="text-align:left">Map&lt;addr, name&gt;</td><td style="text-align:left">符号表（FR-05）</td></tr><tr class="row0"><td style="text-align:center">lineMap</td><td style="text-align:left">Map&lt;addr, {file, line}&gt;</td><td style="text-align:left">DWARF 行表：地址→源码行（FR-05）</td></tr><tr class="row1"><td style="text-align:center">parseLimit</td><td style="text-align:left">const</td><td style="text-align:left">输入上限（估算基线）：ELF ≤16 MiB、段数 ≤64、符号表 ≤10⁵ 条、行表 ≤2×10⁵ 条、递归深度 ≤64（评审 P-12）</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="body">segmentTable 为 ELF 段解析结果（text/data/bss，含基址/大小/数据）；symbolTable 为符号表（地址→符号名，FR-05）；lineMap 为 DWARF 行表（地址→{源文件, 行号}，FR-05）；parseLimit 定义输入上限（估算基线，评审 L3/P-12），解析前置校验、超限拒绝（E_PROTO-04）。字段定义如下：</p>
+<pre class="code"><code>// segmentTable: ELF 段解析结果（4.1.4.2 表26；text/data/bss）
+struct Segment { uint32_t addr; uint32_t size; byte[] data; };
+Map&lt;name, Segment&gt; segmentTable;
+// symbolTable: 符号表（FR-05）：Map&lt;addr, name&gt;
+// lineMap: DWARF 行表（FR-05）：Map&lt;addr, {file, line}&gt;
+struct LineInfo { string file; uint32_t line; };
+Map&lt;uint32_t, LineInfo&gt; lineMap;
+// parseLimit: 输入上限（估算基线，评审 L3/P-12；超限 → E_PROTO-04 拒绝）
+const parseLimit = {
+  elfSize:          16 MiB,   // ELF 文件 ≤16 MiB
+  segmentCount:     64,       // 段数 ≤64
+  symbolCount:      1e5,      // 符号表 ≤10⁵ 条
+  lineEntryCount:   2e5,      // DWARF 行表 ≤2×10⁵ 条
+  dwarfDepth:       64        // DWARF 通用递归解析深度（.debug_info DIE 树落地时启用；
+                              //   行表线性推进非递归，不适用本限制，06-3）
+};</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 解析与映射语义</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:46%"><col style="width:22%"><col style="width:16%"></colgroup><thead><tr><th style="width:16%;text-align:center">机制</th><th style="width:46%;text-align:center">语义</th><th style="width:22%;text-align:center">实现通道</th><th style="width:16%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">ELF 段解析</td><td style="text-align:left">text/data/bss → segmentTable（基址/大小/数据；bss 仅登记、data 空，06-5）</td><td style="text-align:left">parseELF</td><td style="text-align:left">段数 ≤64（P-12）</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">符号表</td><td data-label="语义" style="text-align:left">Map&lt;addr, name&gt;（FR-05）</td><td data-label="实现通道" style="text-align:left">buildSymbols</td><td data-label="备注" style="text-align:left">符号 ≤10⁵ 条（P-12）</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">行映射</td><td data-label="语义" style="text-align:left">Map&lt;addr, {file, line}&gt;（DWARF 行表，FR-05；行表状态机见 3.6）</td><td data-label="实现通道" style="text-align:left">parseDwarfLineTable</td><td data-label="备注" style="text-align:left">行表 ≤2×10⁵ 条（P-12）</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">HEX 扩展地址</td><td data-label="语义" style="text-align:left">0x02/0x04 记录更新高位地址，参与后续数据行地址计算（06-2）</td><td data-label="实现通道" style="text-align:left">parseHEX 状态机</td><td data-label="备注" style="text-align:left">&gt;64KB/大地址镜像支持</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">输入上限</td><td data-label="语义" style="text-align:left">解析前置校验，超限拒绝（E_PROTO-04）</td><td data-label="实现通道" style="text-align:left">parseLimit</td><td data-label="备注" style="text-align:left">防畸形输入 OOM（L3）</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">bss 清零</td><td data-label="语义" style="text-align:left">bss 段仅登记不携带 data；内核侧按 size 清零（对齐 M-14 全 0 初始化，06-5）</td><td data-label="实现通道" style="text-align:left">loadToKernel 载荷 + 内核处理</td><td data-label="备注" style="text-align:left">摘要分段计数</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">降级</td><td data-label="语义" style="text-align:left">无 DWARF → 仅反汇编 + 符号表（R7）</td><td data-label="实现通道" style="text-align:left">lineMap 为空降级</td><td data-label="备注" style="text-align:left">不阻塞 MVP 主线</td></tr></tbody></table></div>
+<h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+<p class="body">文件选择 → 大小校验（parseLimit）→ 解析段（parseELF/parseRaw/parseHEX）→ 构建符号/行映射（symbolTable/lineMap）→ 下发内核（loadToKernel → M-05 loadELF → M-14 loadImage）→ 反馈加载摘要；64KB ELF ≤3s（估算基线）。</p>
+<h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 parseELF(binary) ELF 解析</h3>
+<p class="body">parseELF(binary)：解析 ELF——段、符号表、DWARF；输入上限前置校验（parseLimit，超限 E_PROTO-04）；畸形输入拒绝（E_PROTO-03）；无 DWARF 降级（lineMap 空，R7）。伪代码如下：</p>
+<pre class="code"><code>// parseELF: 解析 ELF（4.1.4.3 表27；输入：ELF 二进制；输出：segmentTable/symbolTable/lineMap）
+ParseResult parseELF(byte[] binary) {
+  if (binary.size &gt; parseLimit.elfSize) return E_PROTO-04;   // 超限拒绝（P-12/L3）
+  if (elfMagic(binary) != 0x7F454C46 || !elfHeaderOk(binary))
+    return E_PROTO-03;                                       // 畸形 ELF（L3，不进入内核）
+  for (seg in elfSections(binary)) {
+    if (segmentTable.size &gt;= parseLimit.segmentCount)
+      return E_PROTO-04;                                     // 段数超限
+    segmentTable[seg.name] = {addr: seg.addr, size: seg.size, data: seg.data};
+  }
+  symbolTable = buildSymbols(elfSymtab(binary), parseLimit.symbolCount); // FR-05
+  if (hasDwarf(binary)) {                                    // DWARF 行表（FR-05）
+    lineMap = parseDwarfLineTable(debugLine(binary));        // 行表线性推进，无深度限制（06-3）
+    if (lineMap.size &gt; parseLimit.lineEntryCount) return E_PROTO-04; // 行表超限
+  } else {
+    lineMap = {};                                            // 无 DWARF 降级（R7）
+  }
+  return {segmentTable, symbolTable, lineMap};               // 输出：三表（加载摘要依据）
+}
+// 06-3：行表为线性推进（非递归），无深度限制；dwarfDepth 仅适用于 DWARF 通用递归解析
+//   （.debug_info DIE 树，P1 预留随其落地启用）</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 parseRaw(binary, base) Raw 镜像加载</h3>
+<p class="body">parseRaw(binary, base)：Raw 镜像按起始地址加载——输出加载段；超限（地址/大小越界）拒绝（E_PROTO-04 语义，输入超限族）。伪代码如下：</p>
+<pre class="code"><code>// parseRaw: Raw 镜像加载（4.1.4.3 表27；输入：裸二进制 + 基址；输出：加载段）
+Segment parseRaw(byte[] binary, uint32_t base) {
+  if (binary.size &gt; parseLimit.elfSize) return E_PROTO-04;   // 输入超限（P-12）
+  if ((uint64)base + binary.size &gt; 4 GiB) return E_PROTO-04; // 地址越界（超限语义）
+  return {name: &quot;raw&quot;, addr: base, size: binary.size, data: binary}; // 输出：加载段
+}</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 parseHEX(text) Intel HEX 解析</h3>
+<p class="body">parseHEX(text)：Intel HEX 解析——行前缀/长度/校验和校验；记录类型 0x00 数据 / 0x01 EOF / 0x02 扩展段地址（ESA）/ 0x04 扩展线性地址（ELA，06-2）/ 0x03/0x05 起始地址；扩展地址状态机更新高位，参与后续数据行地址计算；段归并策略 = 连续地址合并、重叠以后行覆盖（06-4）；畸形行拒绝（E_PROTO-03）；段数超限拒绝（E_PROTO-04）。伪代码如下：</p>
+<pre class="code"><code>// parseHEX: Intel HEX 解析（4.1.4.3 表27；输入：HEX 文本；输出：段表）
+// 状态机（06-2/06-4）：extHigh 保存扩展地址高位（0x02: seg&lt;&lt;4 / 0x04: lin&lt;&lt;16）
+Map&lt;name, Segment&gt; parseHEX(String text) {
+  segs = {}; lineNo = 0; extHigh = 0;
+  for (line in text.lines()) {
+    lineNo++;
+    if (!line.startsWith(&#x27;:&#x27;)) return E_PROTO-03;      // 畸形行（L3）
+    count = byte(line[1..2]);                            // 数据字节数
+    if (line.len != 11 + count * 2) return E_PROTO-03;   // 行内长度与 count 一致（06-4）
+    if (count &gt; 255)               return E_PROTO-04;    // 行数据超上限（P-12）
+    if (hexChecksum(line) != 0)    return E_PROTO-03;    // 校验和错（L3）
+    switch (recordType(line)) {
+      case 0x00:                                         // 数据记录（06-4 归并）
+        addr = extHigh + addrField(line);                // 扩展高位 + 行内地址
+        mergeData(segs, addr, data(line),               // 归并策略：连续地址合并成段、
+                  rule: OVERLAP_LAST_WINS);              //   重叠以后行覆盖（06-4）
+        break;
+      case 0x02: extHigh = segAddrField(line) &lt;&lt; 4;  break; // 扩展段地址（06-2）
+      case 0x04: extHigh = linAddrField(line) &lt;&lt; 16; break; // 扩展线性地址（06-2）
+      case 0x01: return segs;                           // EOF 记录 → 输出段表
+      case 0x03: case 0x05: break;                      // 起始地址记录：合法，不参与段数据
+      default:   return E_PROTO-03;                     // 未知记录类型（L3）
+    }
+    if (segments(segs).size &gt;= parseLimit.segmentCount)
+      return E_PROTO-04;                                // 段数超限（P-12）
+  }
+  return E_PROTO-03;                                    // 无 EOF 截断（畸形）
+}</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 loadToKernel() 下发内核</h3>
+<p class="body">loadToKernel()：经命令协议下发镜像与元数据——调用 M-05 dispatchCommand(loadELF)（载荷 = binary/sections/symbols/lines，行171）；写 RAM 由内核侧执行（loadELF 命令处理器内调 M-14 loadImage，06-1 单一写入路径，前端不直调 M-14）；失败透传 M-05 实际错误码（仅超时 E_CTX-06，06-6）；bss 段仅登记不携带 data，内核侧按 size 清零（06-5）；输出加载摘要。伪代码如下：</p>
+<pre class="code"><code>// loadToKernel: 下发内核（4.1.4.3 表27；调用 M-05 dispatchCommand(loadELF)；输出：加载摘要）
+// 单一写入路径（06-1）：载荷经 loadELF 命令下发，内核侧（M-05 → M-14 loadImage）执行写 RAM；
+//   前端不直调 M-14（跨层消除、载荷与写路径不重复）
+LoadSummary loadToKernel() {
+  payload = {binary: segmentTable.data, sections: segmentTable,   // 含 bss 段登记（data 空，06-5）
+             symbols: symbolTable, lines: lineMap};               // loadELF 载荷（FR-05）
+  result = m05Dispatch(&quot;loadELF&quot;, payload);                      // M-05 命令协议（下发内核）
+  if (result != OK) return result;                               // 透传 M-05 实际错误码（06-6）
+  // 写 RAM 由内核侧执行：loadELF 处理器内 m14LoadImage(seg.addr, seg.data, seg.size)；
+  //   bss 段（data 空）按 seg.size 清零（对齐 M-14 全 0 初始化语义，06-5）
+  return {segments: segmentTable.size, bss: bssSegments.size,    // 摘要分段计数（06-5）
+          symbols: symbolTable.size, lines: lineMap.size, result};
+}
+// 载荷映射：loadELF = binary/sections/dwarf → 加载结果 + 映射摘要（4.1.1 表8，FR-05）
+// 错误码（06-6）：非超时失败透传 M-05 实际码；仅超时路径映射 E_CTX-06（幂等可重试语义）</code></pre>
+<h3 id="sec3-5" class="h-sub">3.5 与 GDB / 厂商烧录工具的差异对照表</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:32%"><col style="width:38%"><col style="width:16%"></colgroup><thead><tr><th style="width:14%;text-align:center">维度</th><th style="width:32%;text-align:center">GDB / 厂商烧录工具</th><th style="width:38%;text-align:center">本平台建模（M-06 ELF/Raw/HEX 解析器）</th><th style="width:16%;text-align:center">差异影响</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">运行位置</td><td style="text-align:left">主机侧工具（readelf/objcopy）</td><td style="text-align:left">浏览器内 WASM 沙箱解析（前端交互层）</td><td style="text-align:left">零安装/file:// 形态（NFR-05）</td></tr><tr class="row1"><td style="text-align:center">ELF 解析</td><td style="text-align:left">readelf/file 段与符号表</td><td style="text-align:left">parseELF → segmentTable/symbolTable</td><td style="text-align:left">结构等价，浏览器内自实现</td></tr><tr class="row0"><td style="text-align:center">行映射</td><td style="text-align:left">GDB info line 走符号文件/DWARF</td><td style="text-align:left">parseDwarfLineTable → lineMap（无 DWARF 降级 R7）</td><td style="text-align:left">行表 ≤2×10⁵ 条（P-12）</td></tr><tr class="row1"><td style="text-align:center">加载下发</td><td style="text-align:left">烧录器/主机加载</td><td style="text-align:left">M-05 loadELF 下发 + M-14 loadImage 写入 RAM（14-5）</td><td style="text-align:left">命令协议链路（M-05）</td></tr><tr class="row0"><td style="text-align:center">上限保护</td><td style="text-align:left">工具自身限制/无防护</td><td style="text-align:left">parseLimit 前置校验（超限拒绝 E_PROTO-04）</td><td style="text-align:left">防畸形输入 OOM（L3）</td></tr></tbody></table></div>
+<h3 id="sec3-6" class="h-sub">3.6 parseDwarfLineTable DWARF 行表状态机（06-7 展开，FR-05 核心）</h3>
+<p class="body">parseDwarfLineTable：解析 .debug_line 行号程序——header 解析（unit_length/version/header_length/min_inst_length/max_ops_per_inst/default_is_stmt/line_base/line_range/opcode_base/standard_opcode_lengths）→ 标准/扩展 opcode 分派 → 行/列寄存器推进 → 地址增量 → 构建 address→line 映射。行表为线性推进（非递归），不受 dwarfDepth 限制（06-3）。伪代码如下：</p>
+<pre class="code"><code>// parseDwarfLineTable: DWARF 行表状态机（4.1.4.2 表26；FR-05；06-7 展开）
+// 行号程序线性推进（非递归，06-3 无深度限制）；受行表条目上限约束（≤2×10⁵，P-12）
+Map&lt;uint32_t, LineInfo&gt; parseDwarfLineTable(byte[] debugLine) {
+  h = parseHeader(debugLine);                // unit_length/version/header_length/
+  //  min_inst_length/max_ops_per_inst/default_is_stmt/line_base/line_range/
+  //  opcode_base/standard_opcode_lengths
+  reg = {addr: 0, op_index: 0, file: 1, line: 1, col: 0, is_stmt: h.default_is_stmt};
+  lineMap = {}; rowSeq = 0;
+  while (!h.end) {
+    op = nextOpcode(h);                       // 取 1 字节 opcode
+    if (op &gt;= h.opcode_base) {                // 特殊 opcode（地址/行增量查表）
+      adv = (op - h.opcode_base) / h.line_range;
+      reg.addr += adv * h.min_inst_length;    // 地址增量推进
+      reg.line += h.line_base + (op - h.opcode_base) % h.line_range;
+      emitRow(lineMap, reg, rowSeq++);        // 行寄存器推进 + 记录
+    } else if (op == 0) {                     // 扩展 opcode
+      len = uleb(); sub = uleb();
+      switch (sub) {
+        case DW_LNE_end_sequence:  reg = {reset}; break;
+        case DW_LNE_set_address:   reg.addr = addr64(); break;
+        case DW_LNE_define_file:   files.add(fileEntry()); break; // 源文件登记
+        default: skip(len);                   // 未知扩展：跳过
+      }
+    } else {                                  // 标准 opcode（行列/地址增量分派）
+      switch (op) {
+        case DW_LNS_copy:       emitRow(lineMap, reg, rowSeq++); break;
+        case DW_LNS_advance_pc: reg.addr += uleb() * h.min_inst_length; break;
+        case DW_LNS_advance_line: reg.line += sleb(); break;
+        case DW_LNS_set_file:   reg.file = uleb(); break;
+        case DW_LNS_set_column: reg.col = uleb(); break;
+        case DW_LNS_negate_stmt: reg.is_stmt = !reg.is_stmt; break;
+        case DW_LNS_set_prologue_end: case DW_LNS_set_epilogue_begin: break;
+        case DW_LNS_advance_line_by:  break;
+        default: skipOperands(op);            // 未知标准 opcode：按长度表跳过
+      }
+    }
+    if (lineMap.size &gt; parseLimit.lineEntryCount) return E_PROTO-04; // 行表超限
+  }
+  return lineMap;                             // 输出：address → {file, line}（FR-05）
+}
+// 说明：rowSeq 单调推进；地址重复时后行覆盖（同地址多行取最后记录）；文件经
+//   DW_LNE_define_file / header file_names 登记，LineInfo.file 为归一化路径</code></pre>
+<h2 id="sec4" class="h-sec">4 关键函数（源文档表27）</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:30%"><col style="width:44%"></colgroup><thead><tr><th style="width:26%;text-align:center">函数</th><th style="width:30%;text-align:center">说明</th><th style="width:44%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">parseELF(binary)</td><td style="text-align:left">解析 ELF：段、符号表、DWARF</td><td style="text-align:left">输入：ELF 二进制；输出：segmentTable/symbolTable/lineMap；失败返回 E_PROTO-03</td></tr><tr class="row1"><td style="text-align:center">parseRaw(binary, base)</td><td style="text-align:left">Raw 镜像按起始地址加载</td><td style="text-align:left">输入：裸二进制 + 基址；输出：加载段</td></tr><tr class="row0"><td style="text-align:center">parseHEX(text)</td><td style="text-align:left">Intel HEX 解析</td><td style="text-align:left">输入：HEX 文本；输出：段表</td></tr><tr class="row1"><td style="text-align:center">loadToKernel()</td><td style="text-align:left">经命令协议下发镜像与元数据</td><td style="text-align:left">调用 M-05 dispatchCommand(loadELF)；输出：加载摘要</td></tr></tbody></table></div><h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 镜像加载流程（源 4.1.4.4 对齐）</h3>
+<p class="body">文件选择 → 大小校验 → 解析段 → 构建符号/行映射 → 下发内核 → 反馈加载摘要；64KB ELF ≤3s（估算基线）。流程图如下：</p>
+<div class="flow-wrap"><svg class="flow" viewBox="0 0 980 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-06 镜像加载流程（4.1.4.4）">
+  <defs>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2f5bd6"/>
+    </marker>
+  </defs>
+  <style>
+    .fbox { fill:#fff; stroke:#1e3a8a; stroke-width:1.4; rx:8; }
+    .fbox2 { fill:#f1f4f9; stroke:#1e3a8a; stroke-width:1.2; rx:8; }
+    .farrow { stroke:#2f5bd6; stroke-width:1.5; marker-end:url(#arw); }
+    .ftxt { font:12px "Noto Sans SC","PingFang SC",sans-serif; fill:#1f2937; }
+    .ftag { font:10.5px "Noto Sans SC","PingFang SC",sans-serif; fill:#4b5563; }
+  </style>
+  <g>
+    <rect class="fbox" x="20" y="40" width="170" height="56"/>
+    <text class="ftxt" x="105" y="62" text-anchor="middle">文件选择</text>
+    <text class="ftxt" x="105" y="80" text-anchor="middle">ELF/Raw/HEX（前端）</text>
+    <rect class="fbox2" x="250" y="40" width="170" height="56"/>
+    <text class="ftxt" x="335" y="62" text-anchor="middle">大小校验</text>
+    <text class="ftxt" x="335" y="80" text-anchor="middle">parseLimit（P-12）</text>
+    <rect class="fbox" x="480" y="40" width="170" height="56"/>
+    <text class="ftxt" x="565" y="62" text-anchor="middle">解析段</text>
+    <text class="ftxt" x="565" y="80" text-anchor="middle">segmentTable（≤64 段）</text>
+    <rect class="fbox" x="20" y="180" width="170" height="56"/>
+    <text class="ftxt" x="105" y="202" text-anchor="middle">构建符号/行映射</text>
+    <text class="ftxt" x="105" y="220" text-anchor="middle">symbolTable + lineMap</text>
+    <rect class="fbox" x="250" y="180" width="170" height="56"/>
+    <text class="ftxt" x="335" y="202" text-anchor="middle">下发内核</text>
+    <text class="ftxt" x="335" y="220" text-anchor="middle">M-05 loadELF → M-14 loadImage</text>
+    <rect class="fbox2" x="480" y="180" width="170" height="56"/>
+    <text class="ftxt" x="565" y="202" text-anchor="middle">反馈加载摘要</text>
+    <text class="ftxt" x="565" y="220" text-anchor="middle">段/符号/行数 + 结果</text>
+    <line class="farrow" x1="190" y1="68" x2="246" y2="68"/>
+    <line class="farrow" x1="420" y1="68" x2="476" y2="68"/>
+    <line class="farrow" x1="565" y1="96" x2="565" y2="176"/>
+    <line class="farrow" x1="565" y1="176" x2="190" y2="176" marker-end="none"/>
+    <line class="farrow" x1="190" y1="208" x2="246" y2="208"/>
+    <line class="farrow" x1="420" y1="208" x2="476" y2="208"/>
+    <text class="ftag" x="335" y="140" text-anchor="middle">畸形/超限：E_PROTO-03/04 拒绝，不进入内核（L3/P-12）</text>
+    <text class="ftag" x="330" y="245" text-anchor="middle">无 DWARF：lineMap 空，降级仅反汇编+符号表（R7）</text>
+    <text class="ftag" x="565" y="245" text-anchor="middle">64KB ELF ≤3s（估算基线，表92）</text>
+  </g>
+</svg></div>
+<div class="flow-branch">分支：畸形输入 → E_PROTO-03 拒绝并提示（L3，不进入内核）；超限 → E_PROTO-04 拒绝并提示（P-12）；无 DWARF → lineMap 空、降级仅反汇编 + 符号表（R7，不阻塞 MVP 主线）；下发失败 → 透传 M-05 实际错误码（仅超时 E_CTX-06，06-6），镜像不进入内核。64KB ELF ≤3s 计时口径 = 解析全流程（文件选择后至解析完成），不含 loadToKernel 命令下发往返（06-8）。</div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:52%"><col style="width:24%"></colgroup><thead><tr><th style="width:24%;text-align:center">协作模块</th><th style="width:52%;text-align:center">协作内容</th><th style="width:24%;text-align:center">触发时机</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-05（命令路由）</td><td style="text-align:left">dispatchCommand(loadELF) 下发镜像与元数据（载荷 = binary/sections/dwarf）</td><td style="text-align:left">loadToKernel 调用时</td></tr><tr class="row1"><td style="text-align:center">M-11（反汇编·联动）</td><td style="text-align:left">消费符号表与行映射：text 段反汇编（地址,机器码,助记符）；含 DWARF 时单步联动源码高亮（FR-05）</td><td style="text-align:left">解析完成/加载后</td></tr><tr class="row0"><td style="text-align:center">M-14（总线映射）</td><td style="text-align:left">内核侧写 RAM 执行方：loadELF 命令处理器内 loadImage(base, data, len)（06-1：前端不直调，经 M-05 载荷链路）；bss 按 size 清零（06-5）；Raw 基址未映射 → 命令失败并提示（06-8）</td><td style="text-align:left">内核侧命令处理时</td></tr><tr class="row1"><td style="text-align:center">M-21（日志）</td><td style="text-align:left">解析失败日志（E_PROTO-03/04）、解析/下发成功摘要日志</td><td style="text-align:left">解析/下发节点</td></tr></tbody></table></div><h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置（源表16 既有码，无新增）</h3>
+<p class="body">M-06 为前端解析模块，畸形/超限输入统一拒绝并提示、不进入内核；错误码全部取自源表16（E_PROTO-03/04 既有），无新增码。处置如下：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:42%"><col style="width:32%"></colgroup><thead><tr><th style="width:26%;text-align:center">错误码 / 场景</th><th style="width:42%;text-align:center">触发条件</th><th style="width:32%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">E_PROTO-03（畸形输入）</td><td style="text-align:left">畸形 ELF/HEX/DWARF 输入（魔数错/校验和错/记录类型未知/无 EOF）</td><td style="text-align:left">拒绝并提示，不进入内核（L3）</td></tr><tr class="row1"><td style="text-align:center">E_PROTO-04（输入超限）</td><td style="text-align:left">超过 parseLimit：&gt;16 MiB / 段数 &gt;64 / 符号 &gt;10⁵ / 行表 &gt;2×10⁵ / 递归深度 &gt;64</td><td style="text-align:left">拒绝并提示，不进入内核（P-12）</td></tr><tr class="row0"><td style="text-align:center">无 DWARF 降级（R7）</td><td style="text-align:left">ELF 无 .debug_line 段</td><td style="text-align:left">lineMap 空，降级仅反汇编 + 符号表（不阻塞 MVP 主线）</td></tr><tr class="row1"><td style="text-align:center">下发失败（M-05）</td><td style="text-align:left">dispatchCommand(loadELF) 失败/超时</td><td style="text-align:left">透传 M-05 实际错误码；仅超时路径映射 E_CTX-06（06-6）；镜像不进入内核 + 提示</td></tr><tr class="row0"><td style="text-align:center">Raw 基址未映射（06-8）</td><td style="text-align:left">parseRaw 基址超出 M-14 已映射区间</td><td style="text-align:left">内核侧 loadImage 校验失败 → 命令失败并提示（前端不预判映射）</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）畸形防护（L3）：ELF 魔数/头校验、HEX 行前缀/长度/校验和/记录类型校验（含 0x02/0x04 扩展地址，06-2/06-4）；畸形一律 E_PROTO-03 拒绝。<br>（2）超限防护（P-12）：大小/段数/符号/行表/通用递归深度五类上限前置校验，超限 E_PROTO-04 拒绝，不进入内核（防 OOM）；HEX 行数据 count ≤255（06-4）。<br>（3）无 DWARF 降级（R7）：lineMap 为空，仅反汇编 + 符号表可用（PC 高亮 V-12），不阻塞 MVP 主线。<br>（4）下发失败（06-6）：loadToKernel 透传 M-05 实际错误码（非超时失败保留拒绝码），仅超时路径 E_CTX-06；镜像不进入内核，前端提示重试。<br>（5）bss 段（06-5）：仅登记不携带 data；内核侧按 size 清零（对齐 M-14 全 0 初始化）；摘要分段计数（text/data/bss 分别列）。<br>（6）Raw 基址衔接（06-8）：前端不预判映射，经载荷下发由内核侧 M-14 校验，未映射区间 → 命令失败并提示。<br>（7）性能降级（06-8）：64KB ELF ≤3s（计时 = 解析全流程，不含命令下发往返）；超时提示解析仍在进行/建议压缩镜像，不静默丢弃。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表92（M-06 行）：64KB ELF ≤3s；畸形输入拒绝；无 DWARF 降级时限达标、E_PROTO-03/04 正确。展开用例表如下（核心模块覆盖率 ≥70%，源文档 7.3 表92）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:42%"><col style="width:34%"></colgroup><thead><tr><th style="width:24%;text-align:center">用例</th><th style="width:42%;text-align:center">输入/步骤</th><th style="width:34%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（源 2.5/7.1 对齐）</td><td style="text-align:left">按 9.1.1 端口契约逐项校验 parseELF/parseRaw/parseHEX/loadToKernel 的接口签名、输入校验、输出结构与错误码；替代实现接入前必须同端口契约测试全量</td><td style="text-align:left">契约测试全绿；契约变更同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">64KB ELF ≤3s（表92）</td><td data-label="输入/步骤" style="text-align:left">注入 64KB ELF，计时解析全流程（文件选择后至解析完成，不含命令下发，06-8）</td><td data-label="通过准则" style="text-align:left">≤3s（估算基线）；段/符号/行表构建完整</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">畸形 ELF 拒绝（表92）</td><td data-label="输入/步骤" style="text-align:left">注入魔数错/头损坏 ELF</td><td data-label="通过准则" style="text-align:left">E_PROTO-03 拒绝并提示；不进入内核</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">超限拒绝（P-12）</td><td data-label="输入/步骤" style="text-align:left">注入 &gt;16 MiB / 段数 &gt;64 / 符号 &gt;10⁵ / 行表 &gt;2×10⁵ / 递归深度 &gt;64</td><td data-label="通过准则" style="text-align:left">E_PROTO-04 拒绝并提示；不进入内核（L3 防 OOM）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">无 DWARF 降级（表92/R7）</td><td data-label="输入/步骤" style="text-align:left">注入无 .debug_line 的 ELF</td><td data-label="通过准则" style="text-align:left">lineMap 空；仅反汇编 + 符号表可用；时限达标</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">Raw 基址加载</td><td data-label="输入/步骤" style="text-align:left">parseRaw(binary, base) 注入</td><td data-label="通过准则" style="text-align:left">加载段 addr/size/data 正确；越界拒绝 E_PROTO-04；基址未映射 → 内核侧命令失败并提示（06-8）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">HEX 解析</td><td data-label="输入/步骤" style="text-align:left">合法 HEX 注入</td><td data-label="通过准则" style="text-align:left">段表按地址归并正确；EOF 终止；校验和错/未知类型 → E_PROTO-03</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">HEX 扩展地址（06-2/06-9①）</td><td data-label="输入/步骤" style="text-align:left">注入含 0x02/0x04 记录的大地址 HEX</td><td data-label="通过准则" style="text-align:left">扩展高位参与数据行地址计算；镜像 &gt;64KB 正常解析（不误拒 E_PROTO-03）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">HEX 行内校验与归并（06-4/06-9②）</td><td data-label="输入/步骤" style="text-align:left">注入 count 与长度不符 / 重叠地址行</td><td data-label="通过准则" style="text-align:left">count-长度一致校验拒绝；连续地址合并成段、重叠以后行覆盖</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">DWARF 行表状态机（06-7/06-9③）</td><td data-label="输入/步骤" style="text-align:left">注入含特殊/标准/扩展 opcode 的 .debug_line</td><td data-label="通过准则" style="text-align:left">header 解析 + opcode 分派 + 行列寄存器推进正确；address→line 构建单调</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">失败 vs 超时错误码（06-6/06-9④）</td><td data-label="输入/步骤" style="text-align:left">注入 loadELF 拒绝与超时两类失败</td><td data-label="通过准则" style="text-align:left">非超时失败透传 M-05 实际码；仅超时映射 E_CTX-06</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">bss 段登记（06-5）</td><td data-label="输入/步骤" style="text-align:left">注入含 bss 段的 ELF</td><td data-label="通过准则" style="text-align:left">bss 仅登记不携带 data；内核侧按 size 清零；摘要分段计数正确</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">loadToKernel 下发</td><td data-label="输入/步骤" style="text-align:left">解析完成后调用</td><td data-label="通过准则" style="text-align:left">M-05 loadELF 载荷正确（binary/sections/dwarf）；M-14 loadImage 写入；返回加载摘要</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）解析子组件独立：ELF 段解析 / DWARF 行表解析 / HEX 解析独立实现，单测互不干扰（对齐 WBS 子组件拆分）。<br>（2）上限集中配置：parseLimit 为结构化常量，调整上限不涉解析逻辑。<br>（3）错误码收敛：畸形/超限统一 E_PROTO-03/04（源表16 既有），前端提示语义一致。<br>（4）载荷自描述：loadELF 载荷结构固定（binary/sections/dwarf），替代实现可接入（契约测试）。<br>（5）CI 门禁：64KB ELF ≤3s + E_PROTO-03/04 正确 + 无 DWARF 降级用例纳入回归基线（表92）。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-06 责任：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:18%"><col style="width:40%"><col style="width:42%"></colgroup><thead><tr><th style="width:18%;text-align:center">质量属性</th><th style="width:40%;text-align:center">目标（估算基线）</th><th style="width:42%;text-align:center">M-06 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">确定性</td><td style="text-align:left">解析结果确定（同一二进制同一输出）；输入上限枚举</td><td style="text-align:left">parseELF/parseRaw/parseHEX 纯函数式输出（三表）</td></tr><tr class="row1"><td style="text-align:center">性能</td><td style="text-align:left">64KB ELF ≤3s（估算基线；计时 = 解析全流程，不含命令下发往返，06-8）</td><td style="text-align:left">浏览器内 WASM 解析 + parseLimit 前置拦截超限</td></tr><tr class="row0"><td style="text-align:center">韧性</td><td style="text-align:left">畸形/超限拒绝不 OOM（L3/P-12）</td><td style="text-align:left">E_PROTO-03/04 拒绝并提示，不进入内核</td></tr><tr class="row1"><td style="text-align:center">可观测性</td><td style="text-align:left">解析失败/下发摘要可追踪（FR-05）</td><td style="text-align:left">解析/下发日志（M-21）+ 加载摘要反馈</td></tr><tr class="row0"><td style="text-align:center">可扩展性</td><td style="text-align:left">镜像格式扩展点（表93）；零安装/file:// 形态（NFR-05）</td><td style="text-align:left">ELF/Raw/HEX → 更多格式；解析子组件独立打包</td></tr></tbody></table></div><h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<div class="lead">合规：业务模块 → 模块组件单向依赖（4.7 表86）；只经 M-05/M-11/M-14/M-21 交互，不自行实现日志/告警/路由。</div>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:30%"><col style="width:46%"></colgroup><thead><tr><th style="width:24%;text-align:center">依赖方</th><th style="width:30%;text-align:center">被依赖方</th><th style="width:46%;text-align:center">依赖内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-06（ELF/Raw/HEX 解析器）</td><td style="text-align:left">M-05（命令路由）</td><td style="text-align:left">dispatchCommand(loadELF) 下发镜像与元数据</td></tr><tr class="row1"><td style="text-align:center">M-06</td><td style="text-align:left">M-11（反汇编·联动）</td><td style="text-align:left">联动消费：符号表 + DWARF 行表（loadELF 下发；行表 ≤2×10⁵）</td></tr><tr class="row0"><td style="text-align:center">M-06</td><td style="text-align:left">M-14（总线映射）</td><td style="text-align:left">内核侧写 RAM 执行方：loadELF 命令处理器内 loadImage（06-1 单一写入路径；bss 清零 06-5）</td></tr><tr class="row1"><td style="text-align:center">M-06</td><td style="text-align:left">M-21（日志）</td><td style="text-align:left">解析失败日志（E_PROTO-03/04）+ 成功摘要</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表28 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层、本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现遵守同端口契约并通过契约测试（7.1）即可接入：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:20%"><col style="width:54%"></colgroup><thead><tr><th style="width:26%;text-align:center">端口 / 服务</th><th style="width:20%;text-align:center">方向</th><th style="width:54%;text-align:center">契约（输入 -&gt; 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">parseELF(binary)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输入：ELF 二进制；输出：segmentTable/symbolTable/lineMap；失败返回 E_PROTO-03（畸形）/E_PROTO-04（超限）</td></tr><tr class="row1"><td style="text-align:center">parseRaw(binary, base)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输入：裸二进制 + 基址；输出：加载段</td></tr><tr class="row0"><td style="text-align:center">parseHEX(text)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输入：HEX 文本；输出：段表（畸形 E_PROTO-03）</td></tr><tr class="row1"><td style="text-align:center">loadToKernel()</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">调用 M-05 dispatchCommand(loadELF)；输出：加载摘要；失败透传 M-05 实际码（仅超时 E_CTX-06，06-6）</td></tr><tr class="row0"><td style="text-align:center">M-05</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">命令协议：dispatchCommand(loadELF)</td></tr><tr class="row1"><td style="text-align:center">M-11</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">联动消费：符号表 + DWARF 行表（4.3.4）</td></tr><tr class="row0"><td style="text-align:center">M-14</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">内核侧写 RAM（经 M-05 loadELF 命令处理器 loadImage；06-1 单一写入路径，前端不直调）</td></tr><tr class="row1"><td style="text-align:center">M-21</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">解析失败日志（E_PROTO-03/04）</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<p class="body">解析成功 -> log(INFO, "ELF", "parse", "E_OK")（含段数/符号数/行表数）；畸形拒绝 -> log(WARN, "ELF", "parse", "E_PROTO-03")（含畸形维度）；超限拒绝 -> log(WARN, "ELF", "parse", "E_PROTO-04")（含超限维度/上限值）；无 DWARF 降级 -> log(INFO, "ELF", "parse", "no_dwarf")；下发完成 -> log(INFO, "ELF", "load", summary)（加载摘要，含分段计数 text/data/bss，06-5）。会话关联字段（sessionId）随 M-21 双时间戳统一记录，产品/嵌入式工作台不可见（角色边界），仅管理员通道可查。</p>
+</main>
+<footer class="subtitle">M-06 ELF/Raw/HEX 解析器 模块详细设计 v1.1 · 对应《RISC-V仿真平台模块设计说明书》4.1.4节 · 2026-10-15</footer>
+
+</div>
+</body>
+</html>

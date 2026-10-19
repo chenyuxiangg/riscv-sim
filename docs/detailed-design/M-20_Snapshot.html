@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-20 快照与确定性事件流记录 模块详细设计</title>
+<link rel="icon" href="data:image/svg+xml,&lt;svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22&gt;&lt;rect width=%2232%22 height=%2232%22 rx=%226%22 fill=%22%231e3a8a%22/&gt;&lt;text x=%2216%22 y=%2222%22 font-size=%2216%22 fill=%22white%22 text-anchor=%22middle%22 font-family=%22sans-serif%22&gt;M20&lt;/text&gt;&lt;/svg&gt;">
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 20px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub { font-size:17px; font-weight:700; color:#111827; margin:24px 0 10px; scroll-margin-top:16px; }
+.body { margin:0 0 10px; text-align:justify; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  margin:10px 0 16px; white-space:pre; }
+.nav-box { background:var(--head-bg); border:1px solid var(--line); border-radius:6px;
+  padding:10px 16px; font-size:13.5px; line-height:1.9; display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0 24px; }
+.nav-box a { color:var(--brand-2); text-decoration:none; }
+.nav-box a:hover { text-decoration:underline; }
+.flow-wrap { overflow-x:auto; margin:12px 0 16px; }
+.flow { min-width:640px; width:100%; height:auto; }
+.flow-branch { font-size:12.5px; color:var(--ink-2); border-left:3px solid var(--brand-2);
+  padding:4px 10px; margin:8px 0 16px; background:var(--zebra); }
+.ux-wrap { overflow-x:auto; margin:14px 0 18px; }
+.ux { min-width:560px; max-width:640px; margin:0 auto; }
+.ux svg { width:100%; height:auto; display:block; }
+.ux-cap { text-align:center; font-size:12.5px; color:var(--ink-2); margin:6px 0 0; }
+@media (max-width:767px) {
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 100px; position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px; font-weight:700; color:var(--brand); font-size:12px; width:84px; }
+}
+@media (max-width:560px) {
+  .doc-title { font-size:21px; }
+  .h-sec { font-size:19px; }
+  .doc-table, .doc-table th, .doc-table td { font-size:12.5px; }
+  .code { font-size:11.5px; white-space:pre-wrap; word-break:break-word; }
+  .nav-box { grid-template-columns:1fr; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><h1 class="doc-title">M-20 快照与确定性事件流记录 模块详细设计</h1><p class="subtitle">RISC-V仿真平台 模块详细设计系列 - 对应《模块设计说明书》4.6.1节</p><p class="version">HTML版 v1.1 (2026-10-16) - 源设计《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版，2026-10-13更新)</p><div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:74%"></colgroup><thead><tr><th style="width:26%;text-align:center">项目</th><th style="width:74%;text-align:center">内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">所属文档</td><td style="text-align:left">《RISC-V仿真平台模块设计说明书》v1.0.0 (2026-10-11契约层版新增2.5平台共享契约与各模块端口契约表)</td></tr><tr class="row1"><td style="text-align:center">对应章节</td><td style="text-align:left">4.6.1（M-20 快照与确定性事件流记录）：数据描述→源文档表74、关键函数表75、端口契约表76；处理流程=4.6.1.4、异常处理=4.6.1.5</td></tr><tr class="row0"><td style="text-align:center">承担需求</td><td style="text-align:left">确定性可复现（FR-12）；快照/反向调试（FR-19）；录制/回放（FR-17，P1）；韧性（NFR-08）；场景录制期望断言（FR-17）</td></tr><tr class="row1"><td style="text-align:center">支撑能力</td><td style="text-align:left">M-04 会话管理器（recordInput/checkpoint 触发与状态）；M-08 断点（关键事件触发检查点）；M-12 事件驱动仿真引擎（scheduleEvent 重放注入）；M-17 QEMU 后端（快照接口/能力降级）；M-23 DataStore（原子写 + 归档）；M-22 HMS（restore 触发 + 上报）</td></tr><tr class="row0"><td style="text-align:center">MVP状态</td><td style="text-align:left">PO主承担模块（MVP必需：eventStream/checkpointList/replayCursor + 五函数闭环）</td></tr><tr class="row1"><td style="text-align:center">设计基线</td><td style="text-align:left">AD v2.6.2；横切基础设施（4.6）；确定性 FR-12（时间戳化输入序列 + M-12 稳定排序）；检查点触发策略（M-04 承担：每 10s 虚拟时间或关键事件）；RPO ≤2s 宿主时间口径、保留 ≥5（表74）；恢复 = 最近检查点 + 稀疏输入序列重放（评审 R1）；非安全检查点回退（评审 C）；现场包 P-19；录制/回放 P-02；夹具同源 P-16；NFR-05</td></tr><tr class="row0"><td style="text-align:center">评审修订</td><td style="text-align:left">v1.0（2026-10-16 初版）：按 M-03 v1.2 标准 9 章结构（表/代码块/流程 SVG/界面化 UX 示例）；内建 9.1.1 端口契约（源表76 对齐，6 driving + 4 driven + 3 使用方）+ CH7 契约测试 + CH8 模块级落实；错误码复用源表16 既有 + 内部降级策略（无新增码）；评审 R1（恢复=检查点+稀疏输入重放，与全量证据流分离）/C（非安全检查点丢弃中间态回退）/P-19（现场包六要素导出）/P-02（录制回放格式+断言引擎预留）/P-16（夹具格式同源）全落地；M-04 04-1 后端分级恢复锚点双侧核对闭合（L3/self_iss → M-20 restore；QEMU L1 → M-17 重启+重放）；M-04 4.1.2 recordEvent/checkpoint 调用方签名落地；3.7 快照/事件流/恢复 UX 界面化三面板（检查点列表 RPO/事件流四列/恢复进度+现场包）&lt;br&gt;v1.1（2026-10-16 评审 20-1~20-12）：20-1 快照载荷结构定义（Snapshot{cpMeta, m13State, m14Map, m15Periph}）+ 采集路径（checkpoint 时 M-13/14/15 序列化）+ 恢复路径（loadSnapshot 后回灌三模块），补齐 3.2/3.3 伪代码；20-2 环形水位约束（丢弃不越过最低保留检查点 baseSeq，STREAM_CAP ≥ 最大回退深度输入数）；20-3 replayInputs(fromSeq) 显式起点 + restore 内调 replayInputs(snap.baseSeq)；20-4 UNSAFE 判定链（M-13/M-14 isrWrite 上报 → M-04/M-20 决策点）；20-5 RPO 换算基线 + 宿主时间漂移补偿辅助检查点（tHostDelta ≥2s）；20-7 重放按 (tVirt, seq) 稳定排序注入（M-12 同语义 + 调度一致性论证）；20-8 m23Archive 归档区独立于检查点保留策略（契约锚点待 M-23 双侧核对）；20-9 输入来源链闭合（M-18/M-15 → M-04 recordEvent → M-20 recordInput）；20-10 Payload union + kind→payload 对应表；20-11 补 3 组用例（快照载荷完整性状态值断言/环形缺口/重放调度一致性）；20-12 3.2 补落盘失败分支（跳过+下次触发重试+WARN，内存态保留）</td></tr><tr class="row1"><td style="text-align:center">编制时间</td><td style="text-align:left">2026-10-16</td></tr></tbody></table></div></header><nav><details open><summary>目录</summary><div class="nav-box"><a href="#sec1">1 功能概述</a><a href="#sec1-1">1.1 模块定位</a><a href="#sec1-2">1.2 需求与约束</a><a href="#sec1-3">1.3 MVP 范围与预留</a><a href="#sec2">2 数据描述</a><a href="#sec2-1">2.1 核心数据结构</a><a href="#sec2-1-1">2.1.1 复杂结构字段定义</a><a href="#sec2-2">2.2 记录与恢复语义</a><a href="#sec2-3">2.3 数据流说明</a><a href="#sec3">3 实现设计</a><a href="#sec3-1">3.1 recordInput</a><a href="#sec3-2">3.2 checkpoint</a><a href="#sec3-3">3.3 restore</a><a href="#sec3-4">3.4 replayInputs</a><a href="#sec3-5">3.5 exportCrashKit</a><a href="#sec3-6">3.6 与全量证据流分离</a><a href="#sec3-7">3.7 快照与事件流 UX 示例（示意）</a><a href="#sec4">4 关键函数</a><a href="#sec5">5 处理流程</a><a href="#sec5-1">5.1 运行期与恢复流程</a><a href="#sec5-2">5.2 与相邻模块的协作说明</a><a href="#sec6">6 异常处理</a><a href="#sec6-1">6.1 错误码与处置</a><a href="#sec6-2">6.2 边界与降级</a><a href="#sec7">7 测试设计与可维护性</a><a href="#sec7-1">7.1 测试要点与关键用例</a><a href="#sec7-2">7.2 可维护性手段</a><a href="#sec8">8 质量属性落实</a><a href="#sec9">9 接口依赖</a><a href="#sec9-1">9.1 依赖关系</a><a href="#sec9-1-1">9.1.1 端口契约</a><a href="#sec9-2">9.2 日志对接</a></div></details></nav><main>
+<h2 id="sec1" class="h-sec">1 功能概述</h2>
+<h3 id="sec1-1" class="h-sub">1.1 模块定位</h3>
+<p class="body">M-20 快照与确定性事件流记录（4.6.1）：横切基础设施，承载确定性（FR-12）与快照恢复（FR-19）——持续记录证据流（量子边界对齐、稀疏输入事件序列：UART 写、按键、GPIO 注入统一时间戳化入事件流）；执行检查点触发策略（每 10s 虚拟时间或关键事件）；恢复 = 最近检查点 + 稀疏输入事件序列重放执行（评审 R1，与全量证据流分离）；非安全检查点（中断中的写）丢弃中间态、回退最近检查点（评审 C）。定义现场包导出（评审 P-19）：崩溃/用户上报时导出「固件镜像 + 会话配置 + 最近检查点 + 稀疏输入序列 + 日志尾部 + 版本/环境信息」，确定性使其天然可复现，供管理员事后分析（不被后续检查点回退覆盖）。预留录制/回放格式与断言引擎（FR-17，P1，评审 P-02）。</p>
+<h3 id="sec1-2" class="h-sub">1.2 需求与约束</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:14%"><col style="width:62%"><col style="width:24%"></colgroup><thead><tr><th style="width:14%;text-align:center">类别</th><th style="width:62%;text-align:center">约束内容</th><th style="width:24%;text-align:center">来源</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">确定性</td><td style="text-align:left">持续记录证据流：稀疏输入事件序列（UART 写/按键/GPIO 注入）统一时间戳化入事件流</td><td style="text-align:left">FR-12、4.6.1.1</td></tr><tr class="row1"><td style="text-align:center">快照恢复</td><td style="text-align:left">恢复 = 最近检查点 + 稀疏输入事件序列重放执行（与全量证据流分离）</td><td style="text-align:left">FR-19、评审 R1</td></tr><tr class="row0"><td style="text-align:center">检查点触发</td><td style="text-align:left">每 10s 虚拟时间或关键事件（M-04 触发策略调用方）；原子写 M-23</td><td style="text-align:left">4.6.1.1/4.6.1.3</td></tr><tr class="row1"><td style="text-align:center">RPO/保留</td><td style="text-align:left">检查点保留 ≥5；回退最差 ≈2 个触发间隔内；RPO ≤2s 宿主时间口径</td><td style="text-align:left">表74、7.2 表92</td></tr><tr class="row0"><td style="text-align:center">非安全检查点</td><td style="text-align:left">中断中的写 → 丢弃中间态、回退最近检查点</td><td style="text-align:left">评审 C</td></tr><tr class="row1"><td style="text-align:center">现场包</td><td style="text-align:left">崩溃/用户上报导出现场包（固件+配置+检查点+稀疏输入序列+日志尾部+版本信息），不被后续回退覆盖</td><td style="text-align:left">评审 P-19</td></tr><tr class="row0"><td style="text-align:center">录制/回放</td><td style="text-align:left">录制格式 = 检查点 + 稀疏输入事件序列（与夹具格式同源）；回放 + 断言引擎（P1 预留）</td><td style="text-align:left">FR-17、P-02/P-16</td></tr><tr class="row1"><td style="text-align:center">韧性</td><td style="text-align:left">恢复失败回退更早检查点（最多 ≥5）；事件流写失败降级丢弃 + warn</td><td style="text-align:left">4.6.1.5</td></tr></tbody></table></div>
+<h3 id="sec1-3" class="h-sub">1.3 MVP 范围与预留</h3>
+<p class="body">MVP 实现范围：eventStream（稀疏输入事件序列）、checkpointList（≥5 保留）、replayCursor（重放游标）、crashKit（现场包，P-19）；recordInput/checkpoint/restore/replayInputs/exportCrashKit 五函数闭环（表75）。<br>预留项（P1 演进承接，不属现实现）：recordingFormat（录制/回放格式，P-02）；replaySession(kit)/assertCheckpoints（回放 + 断言引擎，FR-17）；断言逐次校验工具。</p>
+<h2 id="sec2" class="h-sec">2 数据描述</h2>
+<h3 id="sec2-1" class="h-sub">2.1 核心数据结构（源文档表74）</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:14%"><col style="width:62%"></colgroup><thead><tr><th style="width:24%;text-align:center">数据结构/数据项</th><th style="width:14%;text-align:center">类型</th><th style="width:62%;text-align:center">定义与用途</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">eventStream</td><td style="text-align:left">list</td><td style="text-align:left">稀疏输入事件序列（时间戳化：UART/按键/GPIO 注入）</td></tr><tr class="row1"><td style="text-align:center">checkpointList</td><td style="text-align:left">list(≥5)</td><td style="text-align:left">检查点列表（保留 ≥5，回退最差 ≈2 个触发间隔内，RPO ≤2s 宿主时间口径）</td></tr><tr class="row0"><td style="text-align:center">replayCursor</td><td style="text-align:left">uint</td><td style="text-align:left">重放游标</td></tr><tr class="row1"><td style="text-align:center">crashKit</td><td style="text-align:left">struct</td><td style="text-align:left">现场包：固件 + 配置 + 最近检查点 + 稀疏输入序列 + 日志尾部 + 版本/环境 bundle（评审 P-19）</td></tr><tr class="row0"><td style="text-align:center">recordingFormat</td><td style="text-align:left">enum</td><td style="text-align:left">录制/回放格式 = 检查点 + 稀疏输入事件序列（FR-17，P1，评审 P-02）</td></tr></tbody></table></div>
+<h3 id="sec2-1-1" class="h-sub">2.1.1 复杂结构字段定义</h3>
+<p class="body">事件流条目为时间戳化输入事件（确定性基线 FR-12）；检查点条目记录虚拟/宿主双时间戳与基线序列号（对账/恢复锚点）；现场包结构承载评审 P-19 六要素。字段定义如下：</p>
+<pre class="code"><code>// InputEvent: 稀疏输入事件（统一时间戳化，确定性基线 FR-12；P-16 夹具格式同源 {t_virt, seq, kind, payload}）
+struct InputEvent {
+  uint64_t tVirt;               // 虚拟时间戳（M-12 虚拟时钟，确定性、可重放）
+  uint32_t seq;                 // 全局单调序列号（对账/重放游标锚点）
+  uint8_t  kind;                // UART_WRITE / KEY / GPIO_INJECT（表75 recordInput 输入）
+  Payload  payload;             // 载荷（UART 字节 / 键值 / GPIO 电平向量，见下方 union）
+};
+// Payload union: 按 kind 选其一（对齐 M-04 recordEvent 载荷，20-10）
+union Payload {
+  uint8_t  uartByte;            // kind=UART_WRITE：单字节
+  uint32_t keyCode;             // kind=KEY：键值
+  uint32_t gpioVector;          // kind=GPIO_INJECT：GPIO 电平向量（位图）
+};
+// kind -&gt; payload 对应（20-10）：UART_WRITE→uartByte；KEY→keyCode；GPIO_INJECT→gpioVector
+// Checkpoint: 检查点条目（checkpointList 元素，保留 ≥5，RPO ≤2s 宿主时间口径）
+struct Checkpoint {
+  uint32_t id;                  // 检查点 id（单调）
+  uint64_t tVirt;               // 触发时虚拟时间
+  uint64_t tHost;               // 触发时宿主时间（RPO 采样口径）
+  uint32_t baseSeq;             // 基线序列号（后续输入事件起点）
+  uint32_t version;             // schemaVersion（对齐 M-23 迁移链）
+};
+// Snapshot: 快照载荷（20-1，恢复链核心：检查点实质 = 全仿真状态体）
+struct Snapshot {
+  Checkpoint cpMeta;            // 检查点元数据（id/tVirt/tHost/baseSeq/version）
+  M13State  m13State;           // M-13 指令级状态序列化（寄存器/内存视图）
+  M14Map    m14Map;             // M-14 总线/内存映射状态
+  M15Periph m15Periph;          // M-15 外设模型状态（UART/GPIO/定时器等）
+};
+// 采集路径（20-1）：checkpoint 时由 M-13/M-14/M-15 序列化接口收集（契约锚点，与既有 v1.4/v1.3 双侧核对）
+// 恢复路径（20-1）：loadSnapshot 后按载荷回灌三模块状态（M-13 loadState / M-14 loadMap / M-15 loadPeriph）
+// CrashKit: 现场包（评审 P-19：崩溃/用户上报导出，不被后续检查点回退覆盖）
+struct CrashKit {
+  Firmware fw;                  // 固件镜像
+  Config cfg;                   // 会话配置
+  Checkpoint cp;                // 最近检查点
+  InputSeq inputs;              // 稀疏输入序列
+  LogTail logs;                 // 日志尾部（M-21）
+  VersionBundle env;            // 版本/环境 bundle（产品/内核/浏览器/协议/构建哈希）
+};</code></pre>
+<h3 id="sec2-2" class="h-sub">2.2 记录与恢复语义</h3>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:46%"><col style="width:22%"><col style="width:16%"></colgroup><thead><tr><th style="width:16%;text-align:center">机制</th><th style="width:46%;text-align:center">语义</th><th style="width:22%;text-align:center">实现通道</th><th style="width:16%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">确定性记录</td><td style="text-align:left">稀疏输入事件统一时间戳化入 eventStream（UART/按键/GPIO 注入）</td><td style="text-align:left">recordInput</td><td style="text-align:left">FR-12</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">检查点保留</td><td data-label="语义" style="text-align:left">checkpointList 保留 ≥5；回退最差 ≈2 个触发间隔内</td><td data-label="实现通道" style="text-align:left">checkpoint</td><td data-label="备注" style="text-align:left">表74</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">RPO</td><td data-label="语义" style="text-align:left">RPO ≤2s 宿主时间口径；虚拟↔宿主换算基线 + 宿主时间漂移补偿（宿主时间触发辅助检查点，20-5）</td><td data-label="实现通道" style="text-align:left">tHost 采样 + 辅助触发</td><td data-label="备注" style="text-align:left">表74、7.2</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">恢复模型</td><td data-label="语义" style="text-align:left">恢复 = 最近检查点（Snapshot 状态体）+ 稀疏输入事件序列重放（与全量证据流分离）</td><td data-label="实现通道" style="text-align:left">restore + replayInputs</td><td data-label="备注" style="text-align:left">评审 R1、20-1</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">环形水位</td><td data-label="语义" style="text-align:left">环形丢弃不越过最低保留检查点 baseSeq（覆盖回退窗口，20-2）</td><td data-label="实现通道" style="text-align:left">recordInput 水位判断</td><td data-label="备注" style="text-align:left">20-2</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">非安全检查点</td><td data-label="语义" style="text-align:left">中断中的写 → 丢弃中间态、回退最近检查点</td><td data-label="实现通道" style="text-align:left">checkpoint(SAFE=false)</td><td data-label="备注" style="text-align:left">评审 C</td></tr><tr class="row0"><td data-label="机制" style="text-align:center">现场包</td><td data-label="语义" style="text-align:left">崩溃/用户上报导出六要素现场包，不被后续回退覆盖</td><td data-label="实现通道" style="text-align:left">exportCrashKit</td><td data-label="备注" style="text-align:left">评审 P-19</td></tr><tr class="row1"><td data-label="机制" style="text-align:center">录制同源</td><td data-label="语义" style="text-align:left">录制格式 = 检查点 + 稀疏输入序列（P-16 夹具格式同源）</td><td data-label="实现通道" style="text-align:left">recordingFormat</td><td data-label="备注" style="text-align:left">P-02/P-16</td></tr></tbody></table></div>
+<h3 id="sec2-3" class="h-sub">2.3 数据流说明</h3>
+<p class="body">运行期（4.6.1.4）：输入事件 → 时间戳化 → 事件流；检查点触发（时间/关键事件）→ 原子写（M-23）；崩溃：HMS 触发 restore → 最近检查点 + 输入序列重放 → 会话就绪（图5）；崩溃/上报 → exportCrashKit 现场包归档。</p>
+<h2 id="sec3" class="h-sec">3 实现设计</h2>
+<h3 id="sec3-1" class="h-sub">3.1 recordInput(ev) 输入事件记录（时间戳化）</h3>
+<p class="body">recordInput(ev)：输入外部输入事件（M-04 recordEvent 调用方），统一时间戳化（tVirt 取 M-12 虚拟时钟、seq 全局单调）后追加事件流（确定性基线 FR-12）；事件流仅记录稀疏输入事件，与全量证据流分离（R1）。伪代码如下：</p>
+<pre class="code"><code>// recordInput: 输入事件记录（表75；输入：外部输入事件；输出：事件流追加）
+void recordInput(InputEvent ev) {
+  ev.tVirt = m12CurTimeVirt();                  // 时间戳化（M-12 虚拟时钟，确定性 FR-12）
+  ev.seq   = ++globalSeq;                       // 全局单调序列号（重放游标锚点，P-16 同源）
+  eventStream.append(ev);                       // 稀疏输入事件序列（R1：与全量证据流分离）
+  if (eventStream.size &gt; STREAM_CAP) {          // 环形上限（估算基线 10⁴ 条）
+    dropInputsBelowWatermark();                 // 20-2：仅丢弃早于最低保留检查点 baseSeq 的输入
+    m21Log(WARN, &quot;M20&quot;, &quot;event_drop&quot;, 1);       // 事件流写失败降级（4.6.1.5）
+  }
+}
+// 环形水位保证（20-2）：STREAM_CAP ≥ 最大回退深度所需输入数（最低保留水位 = checkpointList 最早条目 baseSeq），
+//   保证回退到倒数第 5 个检查点（≈2 触发间隔）时其 baseSeq 之前的输入仍完整可重放</code></pre>
+<h3 id="sec3-2" class="h-sub">3.2 checkpoint(reason) 检查点触发</h3>
+<p class="body">checkpoint(reason)：检查点触发（M-04 策略调用方：每 10s 虚拟时间或关键事件）；安全检查点（运行边界）→ 采集快照载荷（20-1：M-13 寄存器/内存 + M-14 映射 + M-15 外设）→ M-23 原子写 + M-04 确认；落盘失败 → 跳过 + 下次触发点重试 + WARN、内存态保留（20-12）；非安全检查点（中断中的写，UNSAFE 判定链 20-4）→ 丢弃中间态、回退最近检查点（评审 C）。RPO ≤2s 宿主时间口径采样（tHost），虚拟↔宿主换算基线 + 宿主时间漂移补偿辅助检查点（20-5）。伪代码如下：</p>
+<pre class="code"><code>// checkpoint: 检查点触发（表75；调用 M-23 原子写 + M-04 确认；输出：检查点确认）
+CheckpointAck checkpoint(reason) {
+  if (reason == UNSAFE) {                       // 非安全检查点（中断中的写，评审 C）
+    dropPendingMidState();                      // 丢弃中间态
+    return ROLLBACK_TO_LAST;                    // 回退最近检查点
+  }
+  cp = { id: ++cpId, tVirt: m12CurTimeVirt(), tHost: nowHostMs(),   // RPO 采样（tHost）
+         baseSeq: globalSeq, version: schemaVersion };
+  snap = collectSnapshot(cp);                   // 20-1：采集载荷（M-13 寄存器/内存 + M-14 映射 + M-15 外设）
+  checkpointList.append(cp);
+  while (checkpointList.size &gt; KEEP_N) {        // 保留 ≥5（表74）
+    checkpointList.shift();
+  }
+  r = m23SaveSnapshot(snap);                    // M-23 原子写（临时+替换，schemaVersion 迁移）
+  if (!r.ok) {                                  // 20-12：落盘失败 → 跳过 + 下次触发点重试，内存态保留
+    m21Log(WARN, &quot;M20&quot;, &quot;checkpoint_write_fail&quot;, cp.id);
+    return { ok: false, retryNextTrigger: true, cpId: cp.id };
+  }
+  m04ConfirmCheckpoint(cp);                     // M-04 确认
+  return { ok: true, cpId: cp.id };
+}
+// 触发策略由 M-04 承担（每 10s 虚拟时间或关键事件，M-04 4.1.2 checkpoint 调用方）；M-08 断点关键事件经 M-04 触发
+// UNSAFE 判定链（20-4）：M-13/M-14 中断处理期间 MMIO/内存写 → 上报 isrWrite 标志 → M-04/M-20 决策点判定 UNSAFE
+// RPO 漂移补偿（20-5）：虚拟 10s ≪ 宿主 2s 时自然达标；慢速仿真（宿主时间漂移）→ 宿主时间辅助检查点（tHostDelta ≥2s → checkpoint(RPO_COMP)）</code></pre>
+<h3 id="sec3-3" class="h-sub">3.3 restore() 崩溃恢复</h3>
+<p class="body">restore()：崩溃恢复（M-22 触发调用方，4.6.1.4）——读取最近检查点（M-23 loadSnapshot 返回 Snapshot 状态体，20-1）+ 按载荷回灌 M-13/M-14/M-15 状态 + 输入序列重放（replayInputs(fromSeq) 显式传回退检查点 baseSeq，20-3），输出恢复完成状态；恢复失败回退更早检查点（最多 ≥5）；后端分级（M-04 04-1）：L3/self_iss → 本函数（检查点+重放）；QEMU L1 → M-17 重启 + 事件重放（不走 M-20 快照，按能力位协商降级）。伪代码如下：</p>
+<pre class="code"><code>// restore: 崩溃恢复（表75；读取最近检查点（M-23）+ 输入序列重放；输出：恢复完成状态）
+RestoreStatus restore() {
+  if (m17CapBits().allows(&quot;snapshot&quot;) == false) {   // QEMU L1：能力位降级（M-17）
+    return m17RestartAndReplay();                   // 重启 + 事件重放（M-04 04-1 分级）
+  }
+  for (idx = 0; idx &lt; KEEP_N; idx++) {              // 回退更早检查点（最多 ≥5，4.6.1.5）
+    cp = checkpointList[checkpointList.size - 1 - idx];
+    snap = m23LoadSnapshot(cp);                     // M-23 loadSnapshot（原子读，返回 Snapshot 状态体）
+    if (snap.ok) {
+      m13LoadState(snap.m13State);                  // 20-1：回灌 M-13 寄存器/内存状态
+      m14LoadMap(snap.m14Map);                      // 20-1：回灌 M-14 总线/内存映射
+      m15LoadPeriph(snap.m15Periph);                // 20-1：回灌 M-15 外设状态
+      replayInputs(snap.baseSeq);                   // 20-3：显式传重放起点（回退检查点 baseSeq）
+      return { ok: true, cpId: cp.id };
+    }
+  }
+  m22Report(RECOVERY_FAILED);                       // M-22 恢复失败上报（4.6.1.5）
+  return { ok: false, reason: E_RECOVERY };
+}
+// 恢复完成后回 M-04 会话状态（M-04 04-1：会话状态 sessionCtx/envBundle 随之重建）</code></pre>
+<h3 id="sec3-4" class="h-sub">3.4 replayInputs() 输入序列重放</h3>
+<p class="body">replayInputs(fromSeq)：从指定起点序列号（回退检查点 baseSeq，20-3）重放稀疏输入事件序列；按 (tVirt, seq) 稳定排序后逐条调用 M-12 scheduleEvent 注入（与 M-12 稳定排序同语义，20-7）；重放游标推进；输出重放完成。伪代码如下：</p>
+<pre class="code"><code>// replayInputs: 稀疏输入事件序列重放（表75；输入：事件流；调用 M-12 scheduleEvent；输出：重放完成）
+ReplayResult replayInputs(uint64_t fromSeq) {         // 20-3：显式传重放起点（回退检查点 baseSeq）
+  events = eventStream.slice(fromSeq, last);          // 起点之后的输入事件
+  stableSort(events);                                 // 20-7：按 (tVirt, seq) 稳定排序（M-12 同语义）
+  for (ev in events) {
+    m12ScheduleEvent(ev);                             // M-12 事件注入（确定性调度）
+    replayCursor = ev.seq;
+  }
+  return { ok: true, replayed: replayCursor - fromSeq };
+}
+// 重放不依赖全量波形/trace 证据流（评审 R1：仅稀疏输入序列即可确定性复现）
+// 调度一致性论证（20-7）：原始执行中 M-12 亦按 (tVirt, 插入序) 稳定排序；重放按同键排序后注入，
+//   与原始执行调度序一致 → 恢复结果与原始一致（7.1 恢复一致用例）</code></pre>
+<h3 id="sec3-5" class="h-sub">3.5 exportCrashKit() 现场包导出</h3>
+<p class="body">exportCrashKit()：崩溃/用户上报触发，导出六要素现场包（固件 + 配置 + 最近检查点 + 稀疏输入序列 + 日志尾部 + 版本/环境 bundle，P-19）为归档对象（M-23）；导出失败重试一次并告警（4.6.1.5）。伪代码如下：</p>
+<pre class="code"><code>// exportCrashKit: 现场包导出（表75；评审 P-19；输出：归档对象）
+CrashKit exportCrashKit() {
+  kit = {
+    fw:   currentFirmware(),
+    cfg:  sessionConfig(),                          // M-04 会话配置
+    cp:   checkpointList.last,                      // 最近检查点
+    inputs: eventStream.slice(cp.baseSeq, last),    // 稀疏输入序列
+    logs:  m21LogTail(512),                         // 日志尾部（M-21）
+    env:   versionBundle() };                       // 版本/环境 bundle（评审 P-22）
+  for (retry = 0; retry &lt; 2; retry++) {             // 失败重试一次并告警（4.6.1.5）
+    r = m23Archive(kit);                           // M-23 归档（20-8：归档区独立于检查点保留策略，
+                                                   //   不被后续检查点回退覆盖；契约锚点待 M-23 落地双侧核对）
+    if (r.ok) return kit;
+    m21Log(WARN, &quot;M20&quot;, &quot;crashkit_export_fail&quot;, retry);
+  }
+  m22Report(CRASHKIT_FAILED);
+  return null;
+}</code></pre>
+<h3 id="sec3-6" class="h-sub">3.6 与全量证据流分离 + 触发协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:18%"><col style="width:38%"><col style="width:30%"><col style="width:14%"></colgroup><thead><tr><th style="width:18%;text-align:center">衔接点</th><th style="width:38%;text-align:center">M-20（快照与事件流）</th><th style="width:30%;text-align:center">协作方</th><th style="width:14%;text-align:center">备注</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">事件流记录</td><td style="text-align:left">recordInput 时间戳化稀疏输入事件</td><td style="text-align:left">M-04 recordEvent（UART/按键/GPIO 注入）</td><td style="text-align:left">FR-12；不得绕过直接改仿真状态</td></tr><tr class="row1"><td style="text-align:center">输入来源链</td><td style="text-align:left">UART/按键/GPIO 事件送达路径：M-18 探针/M-15 外设 → M-04 recordEvent → M-20 recordInput</td><td style="text-align:left">M-04 → M-20</td><td style="text-align:left">20-9 两侧闭合</td></tr><tr class="row0"><td style="text-align:center">检查点触发</td><td style="text-align:left">checkpoint(reason) 原子写</td><td style="text-align:left">M-04（每 10s 虚拟时间/关键事件）+ M-08（断点关键事件）</td><td style="text-align:left">RPO ≤2s、保留 ≥5</td></tr><tr class="row1"><td style="text-align:center">快照载荷</td><td style="text-align:left">checkpoint 采集 Snapshot 状态体（M-13 寄存器/内存 + M-14 映射 + M-15 外设），restore 回灌</td><td style="text-align:left">M-13/M-14/M-15 序列化接口</td><td style="text-align:left">20-1</td></tr><tr class="row0"><td style="text-align:center">UNSAFE 判定</td><td style="text-align:left">中断中写判定链：M-13/M-14 上报 isrWrite → M-04/M-20 决策点判 UNSAFE</td><td style="text-align:left">M-13/M-14 → M-04 → M-20</td><td style="text-align:left">20-4</td></tr><tr class="row1"><td style="text-align:center">恢复</td><td style="text-align:left">restore 检查点 + 重放</td><td style="text-align:left">M-22（崩溃处置后触发）+ M-12（scheduleEvent 注入）</td><td style="text-align:left">评审 R1；QEMU 走 M-17</td></tr><tr class="row0"><td style="text-align:center">现场包</td><td style="text-align:left">exportCrashKit 六要素归档</td><td style="text-align:left">M-23 归档 + M-21 日志尾部</td><td style="text-align:left">评审 P-19</td></tr><tr class="row1"><td style="text-align:center">能力降级</td><td style="text-align:left">QEMU 下快照不可用</td><td style="text-align:left">M-17 能力位协商（capBits.allows(&quot;snapshot&quot;)）</td><td style="text-align:left">M-04 04-1 后端分级</td></tr></tbody></table></div>
+<h3 id="sec3-7" class="h-sub">3.7 快照与事件流 UX 示例（示意，界面化）</h3>
+<p class="body">以下为快照/事件流管理界面的交互形态示意（非精确线框稿）：检查点管理、事件流记录、恢复与现场包三面板，字段与 2.1.1/表74 一致；移动端可横向滚动查看。</p>
+<div class="ux-wrap"><figure class="ux"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="checkpoint · 检查点管理（保留 ≥5 · RPO ≤2s，示意）"><defs><filter id="sh" x="-10%" y="-20%" width="130%" height="170%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#64748b" flood-opacity="0.25"/></filter><linearGradient id="hdr" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#1e3a8a"/><stop offset="1" stop-color="#2f5bd6"/></linearGradient></defs><rect x="2" y="2" width="676" height="416" rx="10" fill="#ffffff" stroke="#e2e8f0" filter="url(#sh)"/><rect x="2" y="2" width="676" height="36" rx="10" fill="url(#hdr)"/><circle cx="26" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="42" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="58" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><text x="78" y="24" font-size="13" font-weight="700" fill="#ffffff">checkpoint · 检查点管理（保留 ≥5 · RPO ≤2s，示意）</text><text x="20" y="60" font-size="12.5" font-weight="700" fill="#374151">检查点列表（checkpointList · 保留 ≥5）</text>
+<rect x="14" y="70" width="430" height="190" rx="6" fill="#ffffff" stroke="#e2e8f0"/>
+<rect x="14" y="70" width="430" height="30" rx="6" fill="#f8fafc" stroke="#e2e8f0"/>
+<line x1="14" y1="100" x2="444" y2="100" stroke="#e2e8f0"/>
+<text x="30" y="90" font-size="11" font-weight="700" fill="#475569">id</text>
+<text x="100" y="90" font-size="11" font-weight="700" fill="#475569">虚拟时间</text>
+<text x="210" y="90" font-size="11" font-weight="700" fill="#475569">宿主时间</text>
+<text x="320" y="90" font-size="11" font-weight="700" fill="#475569">状态</text>
+<text x="30" y="122" font-size="11" fill="#1f2937">#42</text>
+<text x="100" y="122" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">1.210s</text>
+<text x="210" y="122" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">08:12:03.44</text>
+<rect x="312" y="112" width="88" height="18" rx="9" fill="#dcfce7"/><text x="356" y="124" font-size="10" fill="#15803d" text-anchor="middle">● 已落盘</text>
+<line x1="14" y1="140" x2="444" y2="140" stroke="#f1f5f9"/>
+<text x="30" y="160" font-size="11" fill="#1f2937">#41</text>
+<text x="100" y="160" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">1.010s</text>
+<text x="210" y="160" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">08:12:01.98</text>
+<rect x="312" y="150" width="88" height="18" rx="9" fill="#fef3c7"/><text x="356" y="162" font-size="10" fill="#a16207" text-anchor="middle">原子写中</text>
+<line x1="14" y1="178" x2="444" y2="178" stroke="#f1f5f9"/>
+<text x="30" y="198" font-size="11" fill="#1f2937">#40</text>
+<text x="100" y="198" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">0.810s</text>
+<text x="210" y="198" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">08:12:00.77</text>
+<rect x="312" y="188" width="88" height="18" rx="9" fill="#dcfce7"/><text x="356" y="200" font-size="10" fill="#15803d" text-anchor="middle">● 已落盘</text>
+<line x1="14" y1="216" x2="444" y2="216" stroke="#f1f5f9"/>
+<text x="30" y="236" font-size="11" fill="#1f2937">…（共 5 条，保留 ≥5）</text>
+<rect x="14" y="272" width="430" height="44" rx="6" fill="#eff6ff" stroke="#bfdbfe"/>
+<text x="30" y="290" font-size="11" fill="#1d4ed8">触发策略：每 10s 虚拟时间 / 关键事件（M-04）</text>
+<text x="30" y="308" font-size="10.5" fill="#3b82f6">RPO ≤2s 宿主时间口径 · 回退最差 ≈2 触发间隔（表74）</text>
+<rect x="470" y="70" width="196" height="246" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="486" y="92" font-size="12" font-weight="700" fill="#334155">非安全检查点（C）</text>
+<line x1="470" y1="102" x2="666" y2="102" stroke="#e2e8f0"/>
+<text x="486" y="126" font-size="11" fill="#1f2937">中断中的写 → 丢弃中间态</text>
+<text x="486" y="148" font-size="11" fill="#1f2937">回退最近检查点</text>
+<text x="486" y="178" font-size="11" fill="#64748b">原子写：临时 + 替换</text>
+<text x="486" y="200" font-size="11" fill="#64748b">schemaVersion 迁移（M-23）</text>
+<text x="486" y="222" font-size="11" fill="#64748b">QEMU 下快照不可用（M-17）</text>
+<text x="486" y="244" font-size="11" fill="#64748b">→ 能力位协商降级</text>
+<rect x="486" y="272" width="120" height="24" rx="4" fill="#2f5bd6"/>
+<text x="546" y="288" font-size="10.5" fill="#ffffff" text-anchor="middle">＋ 手动检查点</text></svg><figcaption class="ux-cap">图 1 · checkpoint：检查点管理面板（列表 ≥5 + 虚拟/宿主双时间戳 + 状态徽标）——触发策略 RPO ≤2s 与非安全检查点回退（评审 C），原子写 M-23</figcaption></figure></div><div class="ux-wrap"><figure class="ux"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="eventStream · 确定性事件流记录（FR-12，示意）"><defs><filter id="sh" x="-10%" y="-20%" width="130%" height="170%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#64748b" flood-opacity="0.25"/></filter><linearGradient id="hdr" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#1e3a8a"/><stop offset="1" stop-color="#2f5bd6"/></linearGradient></defs><rect x="2" y="2" width="676" height="416" rx="10" fill="#ffffff" stroke="#e2e8f0" filter="url(#sh)"/><rect x="2" y="2" width="676" height="36" rx="10" fill="url(#hdr)"/><circle cx="26" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="42" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="58" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><text x="78" y="24" font-size="13" font-weight="700" fill="#ffffff">eventStream · 确定性事件流记录（FR-12，示意）</text><text x="20" y="60" font-size="12.5" font-weight="700" fill="#374151">稀疏输入事件序列（eventStream · 时间戳化）</text>
+<rect x="14" y="70" width="430" height="190" rx="6" fill="#ffffff" stroke="#e2e8f0"/>
+<rect x="14" y="70" width="430" height="30" rx="6" fill="#f8fafc" stroke="#e2e8f0"/>
+<line x1="14" y1="100" x2="444" y2="100" stroke="#e2e8f0"/>
+<text x="30" y="90" font-size="11" font-weight="700" fill="#475569">seq</text>
+<text x="90" y="90" font-size="11" font-weight="700" fill="#475569">t_virt</text>
+<text x="200" y="90" font-size="11" font-weight="700" fill="#475569">kind</text>
+<text x="310" y="90" font-size="11" font-weight="700" fill="#475569">payload</text>
+<text x="30" y="122" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">0001</text>
+<text x="90" y="122" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">0.120s</text>
+<rect x="192" y="112" width="92" height="18" rx="4" fill="#eef2ff"/><text x="238" y="124" font-size="10" fill="#1d4ed8" text-anchor="middle">UART 写</text>
+<text x="310" y="122" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">0x41 'A'</text>
+<line x1="14" y1="140" x2="444" y2="140" stroke="#f1f5f9"/>
+<text x="30" y="160" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">0002</text>
+<text x="90" y="160" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">0.240s</text>
+<rect x="192" y="150" width="92" height="18" rx="4" fill="#eef2ff"/><text x="238" y="162" font-size="10" fill="#1d4ed8" text-anchor="middle">按键</text>
+<text x="310" y="160" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">KEY_A</text>
+<line x1="14" y1="178" x2="444" y2="178" stroke="#f1f5f9"/>
+<text x="30" y="198" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">0003</text>
+<text x="90" y="198" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">0.360s</text>
+<rect x="192" y="188" width="92" height="18" rx="4" fill="#eef2ff"/><text x="238" y="200" font-size="10" fill="#1d4ed8" text-anchor="middle">GPIO 注入</text>
+<text x="310" y="198" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">P0=1</text>
+<line x1="14" y1="216" x2="444" y2="216" stroke="#f1f5f9"/>
+<text x="30" y="236" font-size="11" fill="#1f2937" font-family="ui-monospace,Consolas,monospace">…（环形 ≤10⁴ 条）</text>
+<rect x="14" y="272" width="430" height="44" rx="6" fill="#f0fdf4" stroke="#bbf7d0"/>
+<text x="30" y="290" font-size="11" fill="#15803d">确定性基线：同种子 + 同输入序列 → 同结果（FR-12）</text>
+<text x="30" y="308" font-size="10.5" fill="#16a34a">事件流写失败 → 降级丢弃 + warn（4.6.1.5）</text>
+<rect x="470" y="70" width="196" height="246" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="486" y="92" font-size="12" font-weight="700" fill="#334155">与全量证据流分离（R1）</text>
+<line x1="470" y1="102" x2="666" y2="102" stroke="#e2e8f0"/>
+<text x="486" y="126" font-size="11" fill="#1f2937">稀疏输入序列（重放源）</text>
+<text x="486" y="148" font-size="11" fill="#1f2937">全量 trace/波形（M-18/19）</text>
+<text x="486" y="170" font-size="11" fill="#1f2937">恢复不依赖证据流（R1）</text>
+<line x1="470" y1="196" x2="666" y2="196" stroke="#e2e8f0"/>
+<text x="486" y="218" font-size="11" fill="#64748b">录制格式（P-02/P-16）：</text>
+<text x="486" y="240" font-size="11" fill="#64748b">检查点 + 稀疏输入序列</text>
+<text x="486" y="262" font-size="11" fill="#64748b">与 7.1 夹具格式同源</text>
+<rect x="486" y="282" width="150" height="24" rx="4" fill="#16a34a"/>
+<text x="561" y="298" font-size="10.5" fill="#ffffff" text-anchor="middle">导出事件流 CSV</text></svg><figcaption class="ux-cap">图 2 · eventStream：确定性事件流记录面板（seq/t_virt/kind/payload 四列，UART 写/按键/GPIO 注入）——确定性基线 FR-12，与全量证据流分离（R1），录制格式同源夹具（P-02/P-16）</figcaption></figure></div><div class="ux-wrap"><figure class="ux"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="restore / crashKit · 崩溃恢复与现场包（P-19，示意）"><defs><filter id="sh" x="-10%" y="-20%" width="130%" height="170%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#64748b" flood-opacity="0.25"/></filter><linearGradient id="hdr" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#1e3a8a"/><stop offset="1" stop-color="#2f5bd6"/></linearGradient></defs><rect x="2" y="2" width="676" height="416" rx="10" fill="#ffffff" stroke="#e2e8f0" filter="url(#sh)"/><rect x="2" y="2" width="676" height="36" rx="10" fill="url(#hdr)"/><circle cx="26" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="42" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><circle cx="58" cy="20" r="4" fill="#93c5fd" opacity="0.85"/><text x="78" y="24" font-size="13" font-weight="700" fill="#ffffff">restore / crashKit · 崩溃恢复与现场包（P-19，示意）</text><text x="20" y="60" font-size="12.5" font-weight="700" fill="#374151">崩溃恢复（restore · 最近检查点 + 输入序列重放）</text>
+<rect x="14" y="70" width="430" height="150" rx="6" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="30" y="94" font-size="11" font-weight="700" fill="#475569">恢复流程（M-22 触发）</text>
+<rect x="30" y="108" width="390" height="16" rx="8" fill="#e2e8f0"/>
+<rect x="30" y="108" width="280" height="16" rx="8" fill="#2f5bd6"/>
+<text x="200" y="120" font-size="10" fill="#ffffff" text-anchor="middle">读取最近检查点 → 重放输入序列 → 会话就绪</text>
+<circle cx="60" cy="152" r="5" fill="#22c55e"/>
+<text x="76" y="156" font-size="11" fill="#1f2937">M-23 loadSnapshot #42（已读）</text>
+<circle cx="60" cy="180" r="5" fill="#eab308"/>
+<text x="76" y="184" font-size="11" fill="#1f2937">replayInputs 重放 384 条（M-12 scheduleEvent）</text>
+<circle cx="60" cy="208" r="5" fill="#94a3b8"/>
+<text x="76" y="212" font-size="11" fill="#1f2937">会话就绪 → 回 M-04 会话状态（04-1）</text>
+<rect x="14" y="234" width="430" height="44" rx="6" fill="#fff7ed" stroke="#fde68a"/>
+<text x="30" y="252" font-size="11" fill="#92400e">恢复失败 → 回退更早检查点（最多 ≥5，4.6.1.5）</text>
+<text x="30" y="270" font-size="10.5" fill="#b45309">QEMU L1 → M-17 重启 + 事件重放（能力位协商降级）</text>
+<rect x="470" y="70" width="196" height="208" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="486" y="92" font-size="12" font-weight="700" fill="#334155">现场包（crashKit · P-19）</text>
+<line x1="470" y1="102" x2="666" y2="102" stroke="#e2e8f0"/>
+<text x="486" y="124" font-size="11" fill="#1f2937">固件镜像</text>
+<text x="486" y="146" font-size="11" fill="#1f2937">会话配置</text>
+<text x="486" y="168" font-size="11" fill="#1f2937">最近检查点 #42</text>
+<text x="486" y="190" font-size="11" fill="#1f2937">稀疏输入序列 384 条</text>
+<text x="486" y="212" font-size="11" fill="#1f2937">日志尾部 512 条（M-21）</text>
+<text x="486" y="234" font-size="11" fill="#1f2937">版本/环境 bundle</text>
+<rect x="486" y="250" width="120" height="24" rx="4" fill="#b45309"/>
+<text x="546" y="266" font-size="10.5" fill="#ffffff" text-anchor="middle">导出现场包</text>
+<text x="486" y="288" font-size="10.5" fill="#94a3b8">失败重试一次并告警（4.6.1.5）</text>
+<line x1="470" y1="292" x2="666" y2="292" stroke="#e2e8f0"/>
+<text x="486" y="314" font-size="11" fill="#64748b">不被后续检查点回退覆盖</text>
+<text x="486" y="336" font-size="10.5" fill="#94a3b8">确定性可复现，供管理员分析（P-19）</text></svg><figcaption class="ux-cap">图 3 · restore/crashKit：崩溃恢复进度（检查点 → 重放 → 会话就绪，M-22 触发）+ 现场包六要素导出（P-19）——回退更早检查点与 QEMU 分级恢复（04-1）</figcaption></figure></div>
+<h2 id="sec4" class="h-sec">4 关键函数（源文档表75）</h2>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:30%"><col style="width:26%"><col style="width:44%"></colgroup><thead><tr><th style="width:30%;text-align:center">函数</th><th style="width:26%;text-align:center">说明</th><th style="width:44%;text-align:center">调用关系 / 输入输出</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">recordInput(ev)</td><td style="text-align:left">输入事件记录（时间戳化）</td><td style="text-align:left">输入：外部输入事件；输出：事件流追加</td></tr><tr class="row1"><td style="text-align:center">checkpoint(reason)</td><td style="text-align:left">检查点触发</td><td style="text-align:left">调用 M-23 原子写 + M-04 确认；输出：检查点确认</td></tr><tr class="row0"><td style="text-align:center">restore()</td><td style="text-align:left">崩溃恢复</td><td style="text-align:left">读取最近检查点（M-23）+ 输入序列重放；输出：恢复完成状态</td></tr><tr class="row1"><td style="text-align:center">replayInputs()</td><td style="text-align:left">稀疏输入事件序列重放</td><td style="text-align:left">输入：事件流；调用 M-12 scheduleEvent；输出：重放完成</td></tr><tr class="row0"><td style="text-align:center">exportCrashKit()</td><td style="text-align:left">现场包导出（崩溃/用户上报触发）</td><td style="text-align:left">固件 + 配置 + 检查点 + 输入序列 + 日志尾部 + 版本信息；输出：归档对象（评审 P-19）</td></tr><tr class="row1"><td style="text-align:center">replaySession(kit) / assertCheckpoints()</td><td style="text-align:left">录制回放 + 断言引擎（P1 预留）</td><td style="text-align:left">FR-17：回放录制序列并对关键断言逐次校验（评审 P-02）</td></tr></tbody></table></div><h2 id="sec5" class="h-sec">5 处理流程</h2>
+<h3 id="sec5-1" class="h-sub">5.1 运行期与恢复流程（源 4.6.1.4 对齐）</h3>
+<p class="body">运行期：输入事件 → 时间戳化 → 事件流；检查点触发（时间/关键事件）→ 原子写；崩溃：HMS 触发 restore → 最近检查点 + 输入序列重放 → 会话就绪（图5）；崩溃/上报 → exportCrashKit 现场包归档。流程图如下：</p>
+<div class="flow-wrap"><svg class="flow" viewBox="0 0 980 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="M-20 运行期与恢复流程（4.6.1.4）">
+  <defs>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2f5bd6"/>
+    </marker>
+  </defs>
+  <style>
+    .fbox { fill:#fff; stroke:#1e3a8a; stroke-width:1.4; rx:8; }
+    .fbox2 { fill:#f1f4f9; stroke:#1e3a8a; stroke-width:1.2; rx:8; }
+    .farrow { stroke:#2f5bd6; stroke-width:1.5; marker-end:url(#arw); }
+    .ftxt { font:12px "Noto Sans SC","PingFang SC",sans-serif; fill:#1f2937; }
+    .ftag { font:10.5px "Noto Sans SC","PingFang SC",sans-serif; fill:#4b5563; }
+  </style>
+  <g>
+    <rect class="fbox2" x="20" y="40" width="170" height="56"/>
+    <text class="ftxt" x="105" y="62" text-anchor="middle">输入事件</text>
+    <text class="ftxt" x="105" y="80" text-anchor="middle">UART/按键/GPIO</text>
+    <rect class="fbox" x="250" y="40" width="170" height="56"/>
+    <text class="ftxt" x="335" y="62" text-anchor="middle">recordInput</text>
+    <text class="ftxt" x="335" y="80" text-anchor="middle">时间戳化入事件流</text>
+    <rect class="fbox2" x="480" y="40" width="170" height="56"/>
+    <text class="ftxt" x="565" y="62" text-anchor="middle">checkpoint 触发</text>
+    <text class="ftxt" x="565" y="80" text-anchor="middle">每 10s 虚拟时间/关键事件</text>
+    <rect class="fbox" x="710" y="40" width="170" height="56"/>
+    <text class="ftxt" x="795" y="62" text-anchor="middle">M-23 原子写</text>
+    <text class="ftxt" x="795" y="80" text-anchor="middle">RPO ≤2s · 保留 ≥5</text>
+    <rect class="fbox2" x="20" y="180" width="170" height="56"/>
+    <text class="ftxt" x="105" y="202" text-anchor="middle">崩溃（M-22 触发）</text>
+    <text class="ftxt" x="105" y="220" text-anchor="middle">restore()</text>
+    <rect class="fbox" x="250" y="180" width="170" height="56"/>
+    <text class="ftxt" x="335" y="202" text-anchor="middle">读取最近检查点</text>
+    <text class="ftxt" x="335" y="220" text-anchor="middle">M-23 loadSnapshot</text>
+    <rect class="fbox2" x="480" y="180" width="170" height="56"/>
+    <text class="ftxt" x="565" y="202" text-anchor="middle">replayInputs 重放</text>
+    <text class="ftxt" x="565" y="220" text-anchor="middle">M-12 scheduleEvent</text>
+    <rect class="fbox" x="710" y="180" width="170" height="56"/>
+    <text class="ftxt" x="795" y="202" text-anchor="middle">会话就绪</text>
+    <text class="ftxt" x="795" y="220" text-anchor="middle">回 M-04 会话状态</text>
+    <line class="farrow" x1="190" y1="68" x2="246" y2="68"/>
+    <line class="farrow" x1="420" y1="68" x2="476" y2="68"/>
+    <line class="farrow" x1="650" y1="68" x2="706" y2="68"/>
+    <line class="farrow" x1="795" y1="96" x2="795" y2="176"/>
+    <line class="farrow" x1="795" y1="176" x2="190" y2="176" marker-end="none"/>
+    <line class="farrow" x1="190" y1="208" x2="246" y2="208"/>
+    <line class="farrow" x1="420" y1="208" x2="476" y2="208"/>
+    <line class="farrow" x1="650" y1="208" x2="706" y2="208"/>
+    <text class="ftag" x="335" y="130" text-anchor="middle">非安全检查点（中断中的写）→ 丢弃中间态回退（评审 C）</text>
+    <text class="ftag" x="335" y="250" text-anchor="middle">恢复失败 → 回退更早检查点（最多 ≥5）· QEMU 走 M-17 重启+重放（04-1）</text>
+  </g>
+</svg></div>
+<div class="flow-branch">分支：崩溃/上报 → exportCrashKit 现场包归档（P-19，不被后续回退覆盖）；事件流写失败 → 降级丢弃 + warn（4.6.1.5）；恢复不依赖全量波形/trace 证据流（R1）；现场包导出失败 → 重试一次并告警（P-19）。</div>
+<h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:52%"><col style="width:24%"></colgroup><thead><tr><th style="width:24%;text-align:center">协作模块</th><th style="width:52%;text-align:center">协作内容</th><th style="width:24%;text-align:center">触发时机</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-04（会话管理器）</td><td style="text-align:left">recordInput/checkpoint 使用方（4.1.2 recordEvent/checkpoint）；恢复后回会话状态</td><td style="text-align:left">输入事件/检查点触发/恢复时</td></tr><tr class="row1"><td style="text-align:center">M-08（断点/单步）</td><td style="text-align:left">断点命中关键事件经 M-04 触发检查点</td><td style="text-align:left">断点命中时</td></tr><tr class="row0"><td style="text-align:center">M-12（事件驱动仿真引擎）</td><td style="text-align:left">replayInputs → M-12 scheduleEvent 确定性注入；tVirt 虚拟时钟</td><td style="text-align:left">恢复重放时</td></tr><tr class="row1"><td style="text-align:center">M-17（QEMU 后端）</td><td style="text-align:left">快照接口；QEMU L1 快照不可用 → 能力位协商降级（重启+重放）</td><td style="text-align:left">能力协商/恢复时</td></tr><tr class="row0"><td style="text-align:center">M-23（DataStore）</td><td style="text-align:left">saveSnapshot/loadSnapshot 原子写 + schemaVersion 迁移；现场包归档</td><td style="text-align:left">检查点落盘/恢复/上报时</td></tr><tr class="row1"><td style="text-align:center">M-22（HMS）</td><td style="text-align:left">restore 触发（崩溃处置后）；恢复失败/现场包导出失败上报</td><td style="text-align:left">崩溃/异常分级时</td></tr></tbody></table></div><h2 id="sec6" class="h-sec">6 异常处理</h2>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置（源表16 既有码 + 内部降级策略，无新增码）</h3>
+<p class="body">M-20 为横切基础设施，异常收敛为源表16 既有码（E_PROTO/E_CTX 体系）+ 内部降级策略，无新增码。处置如下（4.6.1.5）：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:22%"><col style="width:40%"><col style="width:38%"></colgroup><thead><tr><th style="width:22%;text-align:center">错误码 / 场景</th><th style="width:40%;text-align:center">触发条件</th><th style="width:38%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">恢复失败</td><td style="text-align:left">restore 读取最近检查点失败</td><td style="text-align:left">回退更早检查点（最多 ≥5 个，4.6.1.5）；全失败 → M-22 上报 RECOVERY_FAILED</td></tr><tr class="row1"><td style="text-align:center">事件流写失败</td><td style="text-align:left">eventStream 追加/落盘失败</td><td style="text-align:left">降级丢弃 + warn（不影响仿真，4.6.1.5）</td></tr><tr class="row0"><td style="text-align:center">现场包导出失败</td><td style="text-align:left">exportCrashKit 归档失败</td><td style="text-align:left">重试一次并告警（4.6.1.5，P-19）</td></tr><tr class="row1"><td style="text-align:center">非安全检查点</td><td style="text-align:left">中断中的写触发检查点</td><td style="text-align:left">丢弃中间态、回退最近检查点（评审 C）</td></tr><tr class="row0"><td style="text-align:center">快照不可用</td><td style="text-align:left">QEMU L1 后端（M-17 能力位协商）</td><td style="text-align:left">走 M-17 重启 + 事件重放，不走 M-20 快照（M-04 04-1）</td></tr></tbody></table></div>
+<h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>
+<p class="body">（1）恢复失败：回退更早检查点（最多 ≥5 个），恢复不依赖全量波形/trace 证据流（评审 R1）。<br>（2）事件流写失败：降级丢弃 + warn，不影响仿真主路径（4.6.1.5）。<br>（3）现场包导出失败：重试一次 + 告警；仍失败 → M-22 上报（P-19）。<br>（4）非安全检查点（中断中的写）：UNSAFE 判定链 = M-13/M-14 中断处理期间 MMIO/内存写上报 isrWrite → M-04/M-20 决策点（20-4）；判定后丢弃中间态、回退最近检查点（评审 C）。<br>（5）后端分级：QEMU L1 → M-17 重启 + 事件重放（不走 M-20 快照，按能力位协商降级，M-04 04-1）；L3/self_iss → 检查点 + 重放。<br>（6）检查点保留：checkpointList 保留 ≥5；回退最差 ≈2 个触发间隔内（RPO ≤2s 宿主时间口径，表74）。<br>（7）事件流环形水位（20-2）：环形 ≤10⁴ 条（估算基线），溢出仅丢弃早于最低保留检查点 baseSeq 的输入（STREAM_CAP ≥ 最大回退深度所需输入数），保证回退到倒数第 5 个检查点时重放无缺口；仅稀疏输入事件，非全量。<br>（8）RPO 漂移补偿（20-5）：虚拟 10s ≪ 宿主 2s 时自然达标；慢速仿真宿主时间漂移 → 宿主时间辅助检查点（tHostDelta ≥2s → checkpoint(RPO_COMP)），RPO 上界不随仿真速率漂移。<br>（9）移动端：375px 可读（NFR-05），面板单列 + 横向滚动；file:// 直接可开。</p>
+
+<h2 id="sec7" class="h-sec">7 测试设计与可维护性</h2>
+<h3 id="sec7-1" class="h-sub">7.1 测试要点与关键用例</h3>
+<p class="body">源设计 7.2 表92（M-20 行）：RPO ≤2s；保留 ≥5；恢复 = 检查点 + 重放，恢复结果与原始一致。展开用例表如下（契约测试 + 核心路径 + 异常路径，替代实现须通过同端口契约测试，4.6.1.6；确定性夹具格式 = M-20 录制格式同源，P-16）：</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:40%"><col style="width:36%"></colgroup><thead><tr><th style="width:24%;text-align:center">用例</th><th style="width:40%;text-align:center">输入/步骤</th><th style="width:36%;text-align:center">通过准则</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">契约测试（4.6.1.6）</td><td style="text-align:left">按 9.1.1 端口契约逐项校验 recordInput/checkpoint/restore/replayInputs/exportCrashKit/replaySession·assertCheckpoints 的接口签名、输入校验、输出结构与错误码</td><td style="text-align:left">契约测试全绿；契约变更同步更新测试并回归</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">RPO ≤2s（表92）</td><td data-label="输入/步骤" style="text-align:left">连续触发检查点并采样 tHost 间隔</td><td data-label="通过准则" style="text-align:left">相邻检查点宿主时间间隔 ≤2s（估算基线）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">保留 ≥5（表92）</td><td data-label="输入/步骤" style="text-align:left">触发 7 次检查点</td><td data-label="通过准则" style="text-align:left">checkpointList 恒 ≥5 条；最旧被移除</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">恢复一致（表92、P-16）</td><td data-label="输入/步骤" style="text-align:left">同种子录制 → 崩溃 → restore</td><td data-label="通过准则" style="text-align:left">检查点 + 重放结果与原始一致（确定性夹具 = 录制格式同源）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">快照载荷完整性（20-1/20-11）</td><td data-label="输入/步骤" style="text-align:left">检查点后注入已知寄存器/内存值 → 崩溃 → restore</td><td data-label="通过准则" style="text-align:left">恢复后 M-13 寄存器/内存值、M-14 映射、M-15 外设值与检查点时刻一致（状态值级断言）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">检查点落盘失败重试（04-8 联动）</td><td data-label="输入/步骤" style="text-align:left">M-23 saveSnapshot 首次失败</td><td data-label="通过准则" style="text-align:left">跳过 + 下次触发点重试；内存态保留</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">崩溃→恢复就绪（04-1/04-8 联动）</td><td data-label="输入/步骤" style="text-align:left">QEMU/self_iss 两后端崩溃</td><td data-label="通过准则" style="text-align:left">self_iss → restore 检查点+重放就绪；QEMU → M-17 重启+重放</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">非安全检查点回退（评审 C）</td><td data-label="输入/步骤" style="text-align:left">中断中的写触发检查点</td><td data-label="通过准则" style="text-align:left">丢弃中间态、回退最近检查点（UNSAFE 判定链 20-4）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">事件流写失败降级（4.6.1.5）</td><td data-label="输入/步骤" style="text-align:left">模拟事件流追加失败</td><td data-label="通过准则" style="text-align:left">降级丢弃 + warn；仿真主路径不受影响</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">现场包导出（P-19）</td><td data-label="输入/步骤" style="text-align:left">崩溃/用户上报触发 exportCrashKit</td><td data-label="通过准则" style="text-align:left">六要素归档对象完整；失败重试一次 + 告警；不被后续回退覆盖（归档区独立，20-8）</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">环形丢弃与回退缺口（20-2/20-11）</td><td data-label="输入/步骤" style="text-align:left">回退到倒数第 5 个检查点</td><td data-label="通过准则" style="text-align:left">其 baseSeq 之后输入完整可重放（环形水位保证）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">重放调度一致性（20-7/20-11）</td><td data-label="输入/步骤" style="text-align:left">同种子同输入序列原始执行 vs 恢复重放</td><td data-label="通过准则" style="text-align:left">按 (tVirt, seq) 稳定排序后注入，调度序与原始执行一致 → 同结果</td></tr><tr class="row0"><td data-label="用例" style="text-align:center">重放确定性（FR-12）</td><td data-label="输入/步骤" style="text-align:left">同种子同输入序列两次重放</td><td data-label="通过准则" style="text-align:left">同结果（M-12 稳定排序，确定性）</td></tr><tr class="row1"><td data-label="用例" style="text-align:center">移动端 375px（NFR-05）</td><td data-label="输入/步骤" style="text-align:left">移动视口渲染状态面板</td><td data-label="通过准则" style="text-align:left">单列 + 横向滚动；无溢出/裁切</td></tr></tbody></table></div>
+<h3 id="sec7-2" class="h-sub">7.2 可维护性手段</h3>
+<p class="body">（1）单一职责：M-20 只负责记录/触发/恢复/现场包，触发策略在 M-04、原子写在 M-23（职责分离，2.2 模块清单注）。<br>（2）确定性独立可测：recordInput/replayInputs 与存储解耦，录制格式同源夹具（P-16）可离线重放。<br>（3）检查点策略参数化：触发间隔/保留数/RPO 口径集中常量（估算基线），可调可测。<br>（4）降级路径集中：事件流写失败/导出失败/恢复失败路径统一收敛（4.6.1.5）。<br>（5）CI 门禁：契约测试 + RPO/保留 + 恢复一致 + 崩溃恢复两后端用例纳入回归基线（表92）。</p>
+
+<h2 id="sec8" class="h-sec">8 质量属性落实</h2>
+<p class="body">按源设计第 8 章质量属性模块级落实（表93）落到 M-20 责任：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:16%"><col style="width:40%"><col style="width:44%"></colgroup><thead><tr><th style="width:16%;text-align:center">质量属性</th><th style="width:40%;text-align:center">目标（估算基线）</th><th style="width:44%;text-align:center">M-20 落实</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">确定性</td><td style="text-align:left">确定性可复现（FR-12）</td><td style="text-align:left">recordInput 时间戳化 + 重放经 M-12 稳定排序（录制格式同源 P-16）</td></tr><tr class="row1"><td style="text-align:center">可靠性</td><td style="text-align:left">快照 RPO ≤2s、保留 ≥5、原子写</td><td style="text-align:left">checkpoint 保留策略 + M-23 原子写（临时+替换 + schemaVersion）</td></tr><tr class="row0"><td style="text-align:center">韧性</td><td style="text-align:left">故障检测→分级→处置→恢复（NFR-08）</td><td style="text-align:left">restore 检查点+重放；恢复失败回退更早检查点（最多 ≥5）</td></tr><tr class="row1"><td style="text-align:center">可观测</td><td style="text-align:left">现场留存、事后分析（P-19）</td><td style="text-align:left">exportCrashKit 六要素现场包，确定性可复现，不被回退覆盖</td></tr><tr class="row0"><td style="text-align:center">可扩展性</td><td style="text-align:left">录制/回放与断言引擎（FR-17，P1）</td><td style="text-align:left">recordingFormat 预留（P-02），与夹具格式同源</td></tr></tbody></table></div><h2 id="sec9" class="h-sec">9 接口依赖</h2>
+<div class="lead">合规：横切组件单向依赖（4.7 表86）；M-20 只经 M-04/M-12/M-17/M-23/M-22 交互；横切组件之间仅按既定链路（M-20→M-23），禁止反向依赖业务模块。</div>
+<h3 id="sec9-1" class="h-sub">9.1 依赖关系</h3>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:30%"><col style="width:46%"></colgroup><thead><tr><th style="width:24%;text-align:center">依赖方</th><th style="width:30%;text-align:center">被依赖方</th><th style="width:46%;text-align:center">依赖内容</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-20（快照与事件流）</td><td style="text-align:left">M-04（会话管理器）</td><td style="text-align:left">recordInput/checkpoint 使用方（触发策略）；恢复后回会话状态</td></tr><tr class="row1"><td style="text-align:center">M-20</td><td style="text-align:left">M-12（事件驱动仿真引擎）</td><td style="text-align:left">replayInputs → M-12 scheduleEvent；tVirt 虚拟时钟</td></tr><tr class="row0"><td style="text-align:center">M-20</td><td style="text-align:left">M-13（指令级模拟）</td><td style="text-align:left">快照载荷采集/回灌：寄存器/内存状态序列化（20-1，契约锚点与 v1.4 双侧核对）</td></tr><tr class="row1"><td style="text-align:center">M-20</td><td style="text-align:left">M-14（总线与内存映射）</td><td style="text-align:left">快照载荷采集/回灌：映射状态序列化（20-1，契约锚点与 v1.4 双侧核对）</td></tr><tr class="row0"><td style="text-align:center">M-20</td><td style="text-align:left">M-15（外设模型层）</td><td style="text-align:left">快照载荷采集/回灌：外设状态序列化（20-1，契约锚点与 v1.3 双侧核对）</td></tr><tr class="row1"><td style="text-align:center">M-20</td><td style="text-align:left">M-17（QEMU 后端）</td><td style="text-align:left">快照接口；QEMU L1 快照不可用 → 能力位协商降级（M-04 04-1）</td></tr><tr class="row0"><td style="text-align:center">M-20</td><td style="text-align:left">M-23（DataStore）</td><td style="text-align:left">saveSnapshot/loadSnapshot 原子写 + schemaVersion 迁移；现场包归档（归档区独立，20-8）</td></tr><tr class="row1"><td style="text-align:center">M-20</td><td style="text-align:left">M-22（HMS）</td><td style="text-align:left">restore 触发（崩溃处置后）；恢复失败/现场包导出失败上报</td></tr><tr class="row0"><td style="text-align:center">M-20</td><td style="text-align:left">M-21（日志）</td><td style="text-align:left">事件流写失败/现场包导出失败/检查点回退 warn 日志</td></tr></tbody></table></div>
+<h3 id="sec9-1-1" class="h-sub">9.1.1 端口契约（driving/driven，源文档表76 对齐）</h3>
+<p class="body">按源文档 2.5 平台共享契约层、本模块对外交互收敛为语言无关的端口契约（驱动端口 = 本模块提供的服务，被驱动端口 = 本模块依赖的服务）；任何替代实现遵守同端口契约并通过契约测试（7.1）即可接入：</p>
+<div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:26%"><col style="width:20%"><col style="width:54%"></colgroup><thead><tr><th style="width:26%;text-align:center">端口 / 服务</th><th style="width:20%;text-align:center">方向</th><th style="width:54%;text-align:center">契约（输入 -&gt; 输出；错误码/约束）</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">recordInput(ev)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输入：外部输入事件；输出：事件流追加（时间戳化 tVirt + 全局单调 seq，FR-12）</td></tr><tr class="row1"><td style="text-align:center">checkpoint(reason)</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">调用 M-23 原子写 + M-04 确认；输出：检查点确认；保留 ≥5、RPO ≤2s；非安全检查点回退（评审 C）</td></tr><tr class="row0"><td style="text-align:center">restore()</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">读取最近检查点（M-23）+ 输入序列重放；输出：恢复完成状态；失败回退更早检查点（最多 ≥5）；QEMU 走 M-17（04-1）</td></tr><tr class="row1"><td style="text-align:center">replayInputs()</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">输入：事件流；调用 M-12 scheduleEvent；输出：重放完成（游标推进，R1 分离证据流）</td></tr><tr class="row0"><td style="text-align:center">exportCrashKit()</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">固件 + 配置 + 检查点 + 输入序列 + 日志尾部 + 版本信息；输出：归档对象（评审 P-19；失败重试一次）</td></tr><tr class="row1"><td style="text-align:center">replaySession(kit) / assertCheckpoints()</td><td style="text-align:left">提供（driving）</td><td style="text-align:left">FR-17：回放录制序列并对关键断言逐次校验（评审 P-02，P1 预留）</td></tr><tr class="row0"><td style="text-align:center">M-04</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">触发与状态：recordInput/checkpoint 调用方；恢复后回会话状态</td></tr><tr class="row1"><td style="text-align:center">M-12</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">事件注入：scheduleEvent 确定性调度 + 虚拟时钟</td></tr><tr class="row0"><td style="text-align:center">M-13</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">快照载荷采集/回灌：寄存器/内存状态序列化（20-1；契约锚点待与 M-13 v1.4 双侧核对）</td></tr><tr class="row1"><td style="text-align:center">M-14</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">快照载荷采集/回灌：总线/内存映射状态序列化（20-1；契约锚点待与 M-14 v1.4 双侧核对）</td></tr><tr class="row0"><td style="text-align:center">M-15</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">快照载荷采集/回灌：外设状态序列化（20-1；契约锚点待与 M-15 v1.3 双侧核对）</td></tr><tr class="row1"><td style="text-align:center">M-17</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">快照接口：能力位协商（QEMU 下快照不可用 → 降级重启+重放）</td></tr><tr class="row0"><td style="text-align:center">M-23</td><td style="text-align:left">依赖（driven）</td><td style="text-align:left">存取：saveSnapshot/loadSnapshot 原子写 + schemaVersion 迁移；m23Archive 归档区独立于检查点保留策略（20-8，契约锚点待 M-23 落地双侧核对）</td></tr><tr class="row1"><td style="text-align:center">M-04</td><td style="text-align:left">被依赖（使用方）</td><td style="text-align:left">recordInput / checkpoint（4.1.2 触发策略）</td></tr><tr class="row0"><td style="text-align:center">M-08</td><td style="text-align:left">被依赖（使用方）</td><td style="text-align:left">断点命中关键事件经 M-04 触发检查点</td></tr><tr class="row1"><td style="text-align:center">M-22</td><td style="text-align:left">被依赖（使用方）</td><td style="text-align:left">restore 恢复（崩溃处置后）</td></tr></tbody></table></div>
+<h3 id="sec9-2" class="h-sub">9.2 日志对接（M-21）</h3>
+<p class="body">事件流写失败 -> log(WARN, "M20", "event_drop", n)（4.6.1.5）；检查点落盘 -> log(DEBUG, "M20", "checkpoint", cpId)；非安全检查点回退 -> log(WARN, "M20", "unsafe_rollback", cpId)（评审 C）；现场包导出失败 -> log(WARN, "M20", "crashkit_export_fail", retry)（P-19）；恢复失败 -> log(ERROR, "M20", "recover_fail", idx)。日志条目含虚拟+宿主双时间戳与会话关联（P-22）；现场包内含日志尾部（M-21，512 条）。</p>
+</main>
+<footer class="subtitle">M-20 快照与确定性事件流记录 模块详细设计 v1.1 · 对应《RISC-V仿真平台模块设计说明书》4.6.1节 · 2026-10-16</footer>
+
+</div>
+</body>
+</html>
