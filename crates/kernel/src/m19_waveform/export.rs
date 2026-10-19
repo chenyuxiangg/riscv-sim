@@ -6,11 +6,24 @@
 //!
 //! ## Chunking and resume
 //!
+//! Two entry points exist, and they differ in *cost*, not in output:
+//!
+//! - [`ExportSession`] — the recommended path for sequential chunking.
+//!   It keeps the merge cursor alive between chunks, so the whole
+//!   export costs **O(n) total** instead of O(n²/chunk). This is
+//!   M-19 review #4's fix: the previous implementation rebuilt the
+//!   cursor and re-skipped from the start on every chunk.
+//! - [`super::pipeline::WaveformPipeline::export_csv`] /
+//!   [`super::pipeline::WaveformPipeline::export_vcd`] — one-shot /
+//!   *resume* entry points. They take a `next_offset` and skip up to
+//!   it, which costs O(next_offset) **per call**. Use them to resume
+//!   an export at a known anchor, or for small one-off exports; use
+//!   [`ExportSession`] when walking a large window chunk by chunk.
+//!
 //! `next_offset` is an index into the **merged** stream, so it is a
 //! stable resume anchor: re-running the export with the same filter
 //! and the same ring contents continues exactly where the previous
-//! chunk stopped. The caller drives the export by feeding the
-//! returned `next_offset` back in until `done` is true.
+//! chunk stopped.
 //!
 //! ## Merge order
 //!
@@ -27,10 +40,12 @@
 //! whole merged stream, so an export of the full 4 × 2×10⁵ window
 //! does not need a second 20 MB allocation on top of the rings.
 
+use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
+use std::fmt::Write as _;
 
-use riscv_sim_contract::model::{DropRange, EdgeKind};
+use riscv_sim_contract::model::DropRange;
 
 use super::channel::{edge_kind_text, ChannelMeta};
 use super::ring::{RingEntry, RingIter};
@@ -38,12 +53,66 @@ use super::ring::{RingEntry, RingIter};
 /// Entries per export chunk (M-19 v0.9 §3.4: 10⁴ entries per chunk).
 pub const EXPORT_CHUNK: usize = 10_000;
 
+/// A set of channel numbers, stored as a fixed 256-bit mask.
+///
+/// Channel numbers are `u8`, so the whole universe fits in four
+/// `u64` words. Membership tests are therefore O(1) — M-19 review #5
+/// flagged the previous `Vec<u8>::contains` linear scan, which
+/// multiplied the per-edge cost by the number of selected channels
+/// across a whole-window export.
+///
+/// A bitmask also makes duplicate insertion impossible, which the
+/// previous `Vec` allowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChannelSet {
+    bits: [u64; 4],
+}
+
+impl ChannelSet {
+    /// Empty set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a channel. Adding the same channel twice is a no-op.
+    pub fn insert(&mut self, ch: u8) {
+        let idx = usize::from(ch) / 64;
+        let bit = u64::from(ch) % 64;
+        self.bits[idx] |= 1u64 << bit;
+    }
+
+    /// True when `ch` is in the set.
+    pub fn contains(&self, ch: u8) -> bool {
+        let idx = usize::from(ch) / 64;
+        let bit = u64::from(ch) % 64;
+        self.bits[idx] & (1u64 << bit) != 0
+    }
+
+    /// Number of channels in the set.
+    pub fn len(&self) -> usize {
+        self.bits.iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    /// True when the set is empty.
+    pub fn is_empty(&self) -> bool {
+        self.bits.iter().all(|w| *w == 0)
+    }
+
+    /// The channel numbers, in ascending order.
+    pub fn iter(&self) -> impl Iterator<Item = u8> + '_ {
+        (0u16..=255).filter_map(move |c| {
+            let ch = c as u8;
+            self.contains(ch).then_some(ch)
+        })
+    }
+}
+
 /// Which channels and which time window to export.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExportFilter {
     /// Channel subset. `None` exports every channel that holds
     /// entries.
-    pub channels: Option<Vec<u8>>,
+    pub channels: Option<ChannelSet>,
     /// Inclusive lower bound on `t_virt` (picoseconds).
     pub t_start: Option<u64>,
     /// Inclusive upper bound on `t_virt` (picoseconds).
@@ -58,7 +127,7 @@ impl ExportFilter {
 
     /// Restrict the export to a single channel.
     pub fn with_channel(mut self, ch: u8) -> Self {
-        self.channels.get_or_insert_with(Vec::new).push(ch);
+        self.channels.get_or_insert_with(ChannelSet::new).insert(ch);
         self
     }
 
@@ -73,7 +142,7 @@ impl ExportFilter {
     pub fn includes_channel(&self, ch: u8) -> bool {
         match &self.channels {
             None => true,
-            Some(list) => list.contains(&ch),
+            Some(set) => set.contains(ch),
         }
     }
 
@@ -103,14 +172,16 @@ pub enum ExportFormat {
 }
 
 /// Metadata carried alongside an export.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ExportMeta {
-    /// Total number of entries in the merged (filtered) stream.
-    pub total: usize,
+///
+/// The drop ranges are **borrowed**, not copied: an export of a
+/// long-running session would otherwise clone the whole drop history
+/// into every chunk (M-19 review #7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExportMeta<'a> {
     /// True when at least one channel dropped entries to overflow.
     pub overflow_marked: bool,
     /// Ranges whose content was dropped by a failed push.
-    pub dropped_ranges: Vec<DropRange>,
+    pub dropped_ranges: &'a [DropRange],
 }
 
 /// One chunk of an export.
@@ -159,6 +230,15 @@ pub struct MergedCursor<'a> {
     filter: ExportFilter,
     /// Set once the cursor walked past the filter's end bound.
     stopped: bool,
+    /// Set once the merged stream has reached the filter's start
+    /// bound. Past that point the start check is redundant (M-19
+    /// review #16: the merged stream is time-ordered, so no entry
+    /// after the window start can be before it).
+    past_start: bool,
+    /// Diagnostic counter: how many entries the cursor has pulled off
+    /// the heap. Used by the export performance regression test to
+    /// assert the session path is O(n) rather than O(n²/chunk).
+    advances: u64,
 }
 
 impl<'a> MergedCursor<'a> {
@@ -180,11 +260,14 @@ impl<'a> MergedCursor<'a> {
                 });
             }
         }
+        let past_start = filter.t_start.is_none();
         Self {
             streams,
             heap,
             filter,
             stopped: false,
+            past_start,
+            advances: 0,
         }
     }
 
@@ -195,6 +278,7 @@ impl<'a> MergedCursor<'a> {
         }
         loop {
             let Reverse((t, _ch, si)) = self.heap.pop()?;
+            self.advances += 1;
             let (entry, next) = {
                 let stream = &mut self.streams[si];
                 let entry = stream.head.take()?;
@@ -213,10 +297,16 @@ impl<'a> MergedCursor<'a> {
                     return None;
                 }
             }
-            if let Some(start) = self.filter.t_start {
-                if t < start {
-                    continue;
+            if !self.past_start {
+                if let Some(start) = self.filter.t_start {
+                    if t < start {
+                        continue;
+                    }
                 }
+                // The stream is time-ordered, so every later entry is
+                // at or after the window start — the check can be
+                // dropped from here on.
+                self.past_start = true;
             }
             return Some(entry);
         }
@@ -236,12 +326,19 @@ impl<'a> MergedCursor<'a> {
         }
         skipped
     }
+
+    /// Diagnostic: how many entries the cursor has pulled off the
+    /// heap since it was created.
+    pub fn advances(&self) -> u64 {
+        self.advances
+    }
 }
 
 /// Count the entries of the merged stream that pass the filter.
 ///
 /// Used for the export progress. This is an O(n) scan, but it does
-/// not allocate — and it runs once per chunk, not once per entry.
+/// not allocate — and an [`ExportSession`] computes it **once** at
+/// session start, not once per chunk.
 pub fn count_filtered(
     rings: &BTreeMap<u8, super::ring::ChannelRing>,
     filter: &ExportFilter,
@@ -260,6 +357,54 @@ pub fn count_filtered(
     n
 }
 
+/// Escape one field for CSV output (RFC 4180).
+///
+/// A field is quoted when it contains a comma, a double quote, a
+/// newline or a carriage return; embedded double quotes are doubled.
+///
+/// **NFR-04 (M-19 review #3, 2026-10-19):** the channel label is
+/// host-supplied free text. Without escaping, a label containing a
+/// comma silently breaks the column structure of the whole export.
+pub fn csv_escape(field: &str) -> Cow<'_, str> {
+    if !field.contains([',', '"', '\n', '\r']) {
+        return Cow::Borrowed(field);
+    }
+    let mut out = String::with_capacity(field.len() + 2);
+    out.push('"');
+    for c in field.chars() {
+        if c == '"' {
+            out.push('"');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    Cow::Owned(out)
+}
+
+/// Sanitize a label for use inside a VCD `$var` reference.
+///
+/// The VCD `$var` line is `$var <type> <size> <id> <reference> $end`,
+/// where the *reference* is the last field before `$end`. A reference
+/// may contain dots and dashes (`GPIO0.OUT`, `BUS.A1.write`), but it
+/// must not contain `$` (it would terminate the command early) or
+/// control characters / newlines (they would break the line
+/// structure).
+///
+/// The label is host-supplied free text, so everything outside the
+/// safe set is replaced with `_` (M-19 review #3).
+pub fn vcd_label(label: &str) -> String {
+    label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '[' | ']' | '/') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Render a CSV chunk.
 ///
 /// The header (comment metadata + column names) is emitted only in
@@ -269,32 +414,39 @@ pub fn render_csv(
     entries: &[RingEntry],
     metas: &BTreeMap<u8, ChannelMeta>,
     include_header: bool,
+    total: usize,
     meta: &ExportMeta,
 ) -> String {
     let mut out = String::new();
     if include_header {
         out.push_str("# riscv-sim waveform export (M-19)\n");
-        out.push_str(&format!(
-            "# entries={} overflow_marked={} dropped_ranges={}\n",
-            meta.total,
+        let _ = writeln!(
+            out,
+            "# entries={total} overflow_marked={} dropped_ranges={}",
             meta.overflow_marked,
             meta.dropped_ranges.len()
-        ));
-        for r in &meta.dropped_ranges {
-            out.push_str(&format!("# dropped_range={}..{}\n", r.seq_start, r.seq_end));
+        );
+        for r in meta.dropped_ranges {
+            let _ = writeln!(out, "# dropped_range={}..{}", r.seq_start, r.seq_end);
         }
         out.push_str("t_ps,ch,label,value,edge\n");
     }
     for e in entries {
-        let label = metas.get(&e.ch).map(|m| m.label.as_str()).unwrap_or("ch?");
-        out.push_str(&format!(
-            "{},{},{},{},{}\n",
+        let label = metas
+            .get(&e.ch)
+            .map(|m| csv_escape(&m.label))
+            .unwrap_or(Cow::Borrowed("ch?"));
+        // `write!` writes straight into `out` — no intermediate
+        // `String` per row (M-19 review #6).
+        let _ = writeln!(
+            out,
+            "{},{},{},{},{}",
             e.t_ps,
             e.ch,
             label,
             e.value,
             edge_kind_text(e.kind)
-        ));
+        );
     }
     out
 }
@@ -320,7 +472,7 @@ pub fn render_vcd(
             let meta = metas.get(ch);
             let width = meta.map(|m| m.value_width.max(1)).unwrap_or(1);
             let label = meta.map(|m| m.label.as_str()).unwrap_or("ch?");
-            out.push_str(&format!("$var wire {width} ch{ch} {label} $end\n"));
+            let _ = writeln!(out, "$var wire {width} ch{ch} {} $end", vcd_label(label));
         }
         out.push_str("$enddefinitions $end\n");
     }
@@ -331,39 +483,164 @@ pub fn render_vcd(
         // compact. Across a chunk boundary the timestamp is always
         // re-emitted, which is harmless.
         if last_t != Some(e.t_ps) {
-            out.push_str(&format!("#{}\n", e.t_ps));
+            let _ = writeln!(out, "#{}", e.t_ps);
             last_t = Some(e.t_ps);
         }
         let width = metas.get(&e.ch).map(|m| m.value_width).unwrap_or(1);
         if width <= 1 {
-            out.push_str(&format!("{}{}\n", e.value & 1, vcd_id(e.ch)));
+            let _ = writeln!(out, "{}ch{}", e.value & 1, e.ch);
         } else {
-            out.push_str(&format!("b{:b} {}\n", e.value, vcd_id(e.ch)));
+            let _ = writeln!(out, "b{:b} ch{}", e.value, e.ch);
         }
     }
     out
 }
 
-/// VCD identifier for a channel number.
+/// A resumable, chunked export.
 ///
-/// Multi-character identifiers are legal in VCD (the standard's own
-/// examples use `bus0[0]`), and they avoid the collision problem the
-/// printable-ASCII single-character scheme runs into past 94
-/// channels.
-fn vcd_id(ch: u8) -> String {
-    format!("ch{ch}")
+/// The session keeps the merge cursor alive between chunks, so a
+/// sequential export costs **O(n) total** rather than O(n²/chunk)
+/// (M-19 review #4). It also computes the total entry count and the
+/// time-ordering pass **once**, at session start.
+///
+/// The session borrows the pipeline immutably for its lifetime, so
+/// the pipeline cannot be mutated while an export is in flight. That
+/// is deliberate: the export is a read-only snapshot of the window
+/// that existed when the session started.
+pub struct ExportSession<'a> {
+    cursor: MergedCursor<'a>,
+    metas: &'a BTreeMap<u8, ChannelMeta>,
+    format: ExportFormat,
+    total: usize,
+    consumed: usize,
+    overflow_marked: bool,
+    dropped_ranges: Vec<DropRange>,
+    vcd_channels: Vec<u8>,
 }
 
-/// Textual edge kind, re-exported for callers that render their own
-/// tables.
-pub fn kind_text(kind: EdgeKind) -> &'static str {
-    edge_kind_text(kind)
+impl<'a> ExportSession<'a> {
+    /// Build a session over the given rings.
+    ///
+    /// The caller is responsible for having time-ordered the rings
+    /// first (the pipeline does this in `export_session`).
+    pub fn new(
+        rings: &'a BTreeMap<u8, super::ring::ChannelRing>,
+        metas: &'a BTreeMap<u8, ChannelMeta>,
+        filter: ExportFilter,
+        format: ExportFormat,
+        overflow_marked: bool,
+        dropped_ranges: Vec<DropRange>,
+    ) -> Self {
+        let total = count_filtered(rings, &filter);
+        let vcd_channels: Vec<u8> = match &filter.channels {
+            Some(set) => set.iter().collect(),
+            None => rings.keys().copied().collect(),
+        };
+        Self {
+            cursor: MergedCursor::new(rings, filter),
+            metas,
+            format,
+            total,
+            consumed: 0,
+            overflow_marked,
+            dropped_ranges,
+            vcd_channels,
+        }
+    }
+
+    /// Total number of entries in the merged stream.
+    pub fn total(&self) -> usize {
+        self.total
+    }
+
+    /// Number of entries already handed out.
+    pub fn consumed(&self) -> usize {
+        self.consumed
+    }
+
+    /// True when the whole stream has been handed out.
+    pub fn is_done(&self) -> bool {
+        self.consumed >= self.total
+    }
+
+    /// Diagnostic: how many merge-cursor advances the session has
+    /// performed. A sequential export over `n` entries performs `n`
+    /// advances in total — that is the O(n) property.
+    pub fn advances(&self) -> u64 {
+        self.cursor.advances()
+    }
+
+    /// Skip forward to a merged-stream offset.
+    ///
+    /// Used to resume an export at a known anchor. Costs
+    /// O(next_offset) — prefer walking the session forward when
+    /// exporting sequentially.
+    pub fn skip_to(&mut self, next_offset: usize) {
+        if next_offset <= self.consumed {
+            return;
+        }
+        let want = next_offset - self.consumed;
+        let skipped = self.cursor.skip(want);
+        self.consumed += skipped;
+    }
+
+    /// Render the next chunk.
+    pub fn next_chunk(&mut self) -> ExportHandle {
+        let mut entries: Vec<RingEntry> = Vec::with_capacity(EXPORT_CHUNK.min(self.total));
+        while entries.len() < EXPORT_CHUNK {
+            match self.cursor.next_entry() {
+                Some(e) => entries.push(e),
+                None => break,
+            }
+        }
+        self.consumed += entries.len();
+
+        let done = self.consumed >= self.total;
+        let progress_pct = if self.total == 0 {
+            100
+        } else {
+            ((self.consumed as u128 * 100) / self.total as u128).min(100) as u8
+        };
+
+        // The header belongs to the very first chunk. Compute it from
+        // the pre-increment position so it stays correct when the
+        // session is resumed mid-stream.
+        let first_chunk = self.consumed - entries.len() == 0;
+
+        let meta = ExportMeta {
+            overflow_marked: self.overflow_marked,
+            dropped_ranges: &self.dropped_ranges,
+        };
+
+        let chunk = match self.format {
+            ExportFormat::Csv => render_csv(&entries, self.metas, first_chunk, self.total, &meta),
+            ExportFormat::Vcd => render_vcd(&entries, self.metas, &self.vcd_channels, first_chunk),
+        };
+
+        ExportHandle {
+            chunk,
+            next_offset: self.consumed,
+            total: self.total,
+            done,
+            progress_pct,
+            overflow_marked: self.overflow_marked,
+            dropped_ranges: self.dropped_ranges.clone(),
+        }
+    }
+
+    /// Render the next chunk, reporting progress to `on_progress`.
+    pub fn next_chunk_with_progress(&mut self, on_progress: &mut dyn FnMut(u8)) -> ExportHandle {
+        let h = self.next_chunk();
+        on_progress(h.progress_pct);
+        h
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::m19_waveform::ring::ChannelRing;
+    use riscv_sim_contract::model::EdgeKind;
 
     fn ring_of(entries: &[(u64, u64)]) -> ChannelRing {
         let mut r = ChannelRing::with_capacity(64);
@@ -388,6 +665,26 @@ mod tests {
         assert!(f.includes_time(10));
         assert!(f.includes_time(20));
         assert!(!f.includes_time(21));
+    }
+
+    #[test]
+    fn channel_set_is_a_bitmask() {
+        let mut s = ChannelSet::new();
+        assert!(s.is_empty());
+        s.insert(0);
+        s.insert(63);
+        s.insert(64);
+        s.insert(255);
+        // Duplicate insertion is a no-op (the old Vec allowed dupes).
+        s.insert(64);
+        assert!(s.contains(0));
+        assert!(s.contains(63));
+        assert!(s.contains(64));
+        assert!(s.contains(255));
+        assert!(!s.contains(1));
+        assert!(!s.contains(65));
+        assert_eq!(s.len(), 4);
+        assert_eq!(s.iter().collect::<Vec<_>>(), vec![0, 63, 64, 255]);
     }
 
     #[test]
@@ -453,14 +750,13 @@ mod tests {
         );
         let entries = vec![RingEntry::new(100, 1, 1, EdgeKind::Rising)];
         let meta = ExportMeta {
-            total: 1,
             overflow_marked: false,
-            dropped_ranges: vec![],
+            dropped_ranges: &[],
         };
-        let first = render_csv(&entries, &metas, true, &meta);
+        let first = render_csv(&entries, &metas, true, 1, &meta);
         assert!(first.contains("t_ps,ch,label,value,edge"));
         assert!(first.contains("100,1,GPIO0.OUT,1,Rising"));
-        let second = render_csv(&entries, &metas, false, &meta);
+        let second = render_csv(&entries, &metas, false, 1, &meta);
         assert!(!second.contains("t_ps,ch,label,value,edge"));
         assert!(second.contains("100,1,GPIO0.OUT,1,Rising"));
     }
@@ -468,17 +764,68 @@ mod tests {
     #[test]
     fn csv_records_overflow_marker() {
         let metas = BTreeMap::new();
+        let dropped = vec![DropRange {
+            seq_start: 1,
+            seq_end: 4,
+        }];
         let meta = ExportMeta {
-            total: 0,
             overflow_marked: true,
-            dropped_ranges: vec![DropRange {
-                seq_start: 1,
-                seq_end: 4,
-            }],
+            dropped_ranges: &dropped,
         };
-        let out = render_csv(&[], &metas, true, &meta);
+        let out = render_csv(&[], &metas, true, 0, &meta);
         assert!(out.contains("overflow_marked=true"));
         assert!(out.contains("dropped_range=1..4"));
+    }
+
+    #[test]
+    fn csv_escapes_host_supplied_labels() {
+        // M-19 review #3 (NFR-04): a label with a comma must not
+        // break the column structure.
+        let mut metas = BTreeMap::new();
+        metas.insert(
+            0u8,
+            ChannelMeta {
+                label: "a,b\"c\nd".into(),
+                value_width: 1,
+                single_bit: true,
+            },
+        );
+        let entries = vec![RingEntry::new(1, 0, 5, EdgeKind::Value)];
+        let meta = ExportMeta {
+            overflow_marked: false,
+            dropped_ranges: &[],
+        };
+        let out = render_csv(&entries, &metas, true, 1, &meta);
+        // The row must still parse as 5 fields, even though the
+        // quoted label contains a newline (RFC 4180 allows a quoted
+        // field to span lines).
+        let rows = parse_csv(&out);
+        let data = rows.last().expect("a data row");
+        assert_eq!(data.len(), 5);
+        assert_eq!(data[0], "1");
+        assert_eq!(data[1], "0");
+        assert_eq!(data[2], "a,b\"c\nd");
+        assert_eq!(data[3], "5");
+        assert_eq!(data[4], "Value");
+    }
+
+    #[test]
+    fn csv_escape_leaves_plain_fields_untouched() {
+        assert!(matches!(csv_escape("GPIO0.OUT"), Cow::Borrowed(_)));
+        assert!(matches!(csv_escape("a,b"), Cow::Owned(_)));
+    }
+
+    #[test]
+    fn vcd_sanitizes_host_supplied_labels() {
+        // Dots and dashes stay (they are common in signal names and
+        // legal in a VCD reference); `$`, whitespace and control
+        // characters are neutralised.
+        assert_eq!(vcd_label("GPIO0.OUT"), "GPIO0.OUT");
+        assert_eq!(vcd_label("BUS.A1.write"), "BUS.A1.write");
+        assert_eq!(vcd_label("has space"), "has_space");
+        assert_eq!(vcd_label("$end"), "_end");
+        assert_eq!(vcd_label("a\nb"), "a_b");
+        assert_eq!(vcd_label("ok_1"), "ok_1");
     }
 
     #[test]
@@ -497,6 +844,22 @@ mod tests {
     }
 
     #[test]
+    fn vcd_label_cannot_break_the_var_command() {
+        // A label containing `$end` must not terminate the `$var`
+        // command early.
+        let mut metas = BTreeMap::new();
+        metas.insert(1u8, ChannelMeta::single_bit("evil $end $var wire 1 x"));
+        let entries = vec![RingEntry::new(100, 1, 1, EdgeKind::Rising)];
+        let out = render_vcd(&entries, &metas, &[1], true);
+        let var_line = out
+            .lines()
+            .find(|l| l.starts_with("$var"))
+            .expect("a $var line");
+        assert_eq!(var_line.matches("$end").count(), 1);
+        assert!(var_line.ends_with("$end"));
+    }
+
+    #[test]
     fn vcd_uses_vector_form_for_multi_bit_channels() {
         let mut metas = BTreeMap::new();
         metas.insert(3u8, ChannelMeta::multi_bit("WORD", 8));
@@ -504,5 +867,45 @@ mod tests {
         let out = render_vcd(&entries, &metas, &[3], true);
         assert!(out.contains("$var wire 8 ch3 WORD $end"));
         assert!(out.contains("b1010 ch3"));
+    }
+
+    /// Minimal RFC 4180 parser used to assert the CSV column count
+    /// survives hostile labels. Handles quoted fields that span
+    /// lines, which is legal CSV.
+    fn parse_csv(text: &str) -> Vec<Vec<String>> {
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut fields: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut in_quotes = false;
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if in_quotes {
+                if c == '"' {
+                    if chars.peek() == Some(&'"') {
+                        chars.next();
+                        cur.push('"');
+                    } else {
+                        in_quotes = false;
+                    }
+                } else {
+                    cur.push(c);
+                }
+            } else if c == '"' {
+                in_quotes = true;
+            } else if c == ',' {
+                fields.push(std::mem::take(&mut cur));
+            } else if c == '\n' {
+                fields.push(std::mem::take(&mut cur));
+                rows.push(std::mem::take(&mut fields));
+            } else {
+                cur.push(c);
+            }
+        }
+        if !cur.is_empty() || !fields.is_empty() {
+            fields.push(cur);
+            rows.push(fields);
+        }
+        rows.retain(|r| !r.is_empty() || r.len() > 1);
+        rows
     }
 }

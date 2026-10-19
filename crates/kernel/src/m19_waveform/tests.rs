@@ -26,8 +26,8 @@ use riscv_sim_contract::port::DeltaSink;
 
 use crate::m18_probe::{ChannelDef, ProbeRegistry, SampleCfg, CH_GPIO0};
 use crate::m19_waveform::{
-    ChannelMeta, ExportFilter, OverflowPolicy, SharedPipeline, WaveformPipeline, WireFormat,
-    ENTRY_BYTES, EXPORT_CHUNK, MEM_BUDGET_BYTES, RING_CAP,
+    ChannelMeta, EncodeOutcome, ExportFilter, ExportFormat, OverflowPolicy, SharedPipeline,
+    WaveformPipeline, WireFormat, ENTRY_BYTES, EXPORT_CHUNK, MEM_BUDGET_BYTES, RING_CAP,
 };
 
 // ---------------------------------------------------------------------------
@@ -128,6 +128,30 @@ fn data_rows(chunk: &str) -> Vec<Vec<&str>> {
         .filter(|l| !l.starts_with('#') && !l.starts_with("t_ps"))
         .map(|l| l.split(',').collect())
         .collect()
+}
+
+/// Count the fields of one CSV row, honouring RFC 4180 quoting
+/// (a comma inside a quoted field is not a separator).
+fn csv_field_count(row: &str) -> usize {
+    let mut fields = 1;
+    let mut in_quotes = false;
+    let mut chars = row.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_quotes {
+            if c == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                } else {
+                    in_quotes = false;
+                }
+            }
+        } else if c == '"' {
+            in_quotes = true;
+        } else if c == ',' {
+            fields += 1;
+        }
+    }
+    fields
 }
 
 // ---------------------------------------------------------------------------
@@ -447,7 +471,7 @@ fn push_failure_drops_the_batch_and_records_the_range() {
     assert_eq!(p.dropped_batches(), 1);
 
     // The lost content is recorded as a range.
-    let ranges = p.dropped_ranges();
+    let ranges = p.dropped_ranges_vec();
     assert_eq!(ranges.len(), 1);
     assert_eq!(ranges[0].seq_start, 0);
     assert_eq!(ranges[0].seq_end, 2);
@@ -491,15 +515,12 @@ fn dropped_ranges_identify_the_refillable_window() {
         p.push_delta(batch * 20);
     }
 
-    let ranges = p.dropped_ranges();
-    assert_eq!(ranges.len(), 3);
-    // The ranges tile the sequence space contiguously — the consumer
-    // can request a refill for the whole window.
+    let ranges = p.dropped_ranges_vec();
+    assert_eq!(ranges.len(), 1);
+    // Adjacent ranges are merged into one contiguous hole — the
+    // consumer can request a refill for the whole window.
     assert_eq!(ranges[0].seq_start, 0);
-    assert_eq!(ranges[2].seq_end, 6);
-    for w in ranges.windows(2) {
-        assert_eq!(w[0].seq_end, w[1].seq_start);
-    }
+    assert_eq!(ranges[0].seq_end, 6);
 }
 
 // ---------------------------------------------------------------------------
@@ -765,4 +786,223 @@ fn contract_empty_export_is_a_valid_empty_document() {
     assert_eq!(h.total, 0);
     assert_eq!(h.progress_pct, 100);
     assert!(h.chunk.contains("t_ps,ch,label,value,edge"));
+}
+
+// ---------------------------------------------------------------------------
+// M-19 review 闭环回归（2026-10-19）
+//
+// 下面这些用例对应 docs/reviews/M-19_WaveformPipeline_Review.md 的问题项，
+// 每条都锁定一个「修之前会失败、修之后必须成立」的不变量。
+// ---------------------------------------------------------------------------
+
+/// #1 阻断级：`ChannelRing::clone()` 之后调用 `capacity()` 不得 panic。
+///
+/// 旧实现在 `capacity()` 里断言 `buf.capacity() == initial_cap`，而
+/// `Vec::clone` 只按 `len` 分配容量，前提必然不成立。
+#[test]
+fn review_1_clone_then_capacity_does_not_panic() {
+    let mut p = WaveformPipeline::with_ring_capacity(8);
+    p.define_channel(0, ChannelMeta::single_bit("GPIO0.OUT"));
+    p.encode_edge(rising(1, 0));
+    // The pipeline's rings are cloned through the public API path.
+    let mut ring = crate::m19_waveform::ChannelRing::with_capacity(8);
+    ring.push(crate::m19_waveform::RingEntry::new(
+        1,
+        0,
+        0,
+        EdgeKind::Value,
+    ));
+    let c = ring.clone();
+    assert_eq!(c.capacity(), 8);
+    assert_eq!(c.len(), 1);
+}
+
+/// #2 高危：没有安装 `delta_sink` 时推送，内容空洞必须**可查**。
+///
+/// 旧实现把批次取走、序列号推进，却什么都不记 —— 消费方永远不知道
+/// 内容没到过 sink。
+#[test]
+fn review_2_push_without_a_sink_is_recorded_as_unconsumed() {
+    let mut p = gpio_pipeline();
+    p.encode_edge(rising(10, CH_GPIO0));
+    p.encode_edge(falling(20, CH_GPIO0));
+    let d = p.push_delta(30).expect("batch");
+    assert_eq!(d.seq_start, 0);
+    assert_eq!(d.seq_end, 2);
+
+    // 「没到 sink」是可见的。
+    let unconsumed: Vec<_> = p.unconsumed_ranges().copied().collect();
+    assert_eq!(unconsumed.len(), 1);
+    assert_eq!(unconsumed[0].seq_start, 0);
+    assert_eq!(unconsumed[0].seq_end, 2);
+    assert_eq!(p.unconsumed_batches(), 1);
+
+    // 但它不是「投递失败」—— 内容交到了直接调用方手里。
+    assert_eq!(p.dropped_batches(), 0);
+    assert!(p.dropped_ranges_vec().is_empty());
+}
+
+/// #2 高危（另一半）：装了 sink 但投递失败 → 记 `dropped`，不记 unconsumed。
+#[test]
+fn review_2_push_failure_is_recorded_as_dropped_not_unconsumed() {
+    let mut p = gpio_pipeline();
+    p.set_delta_sink(Some(Box::new(SharedSink::failing())));
+    p.encode_edge(rising(10, CH_GPIO0));
+    p.push_delta(20);
+    assert_eq!(p.dropped_batches(), 1);
+    assert_eq!(p.unconsumed_batches(), 0);
+    let dropped = p.dropped_ranges_vec();
+    assert_eq!(dropped.len(), 1);
+    assert_eq!(dropped[0].seq_start, 0);
+    assert_eq!(dropped[0].seq_end, 1);
+}
+
+/// #3 高危：宿主任意的 label 不得破坏 CSV 列结构 / VCD 语法。
+#[test]
+fn review_3_hostile_labels_do_not_break_the_export() {
+    let mut p = WaveformPipeline::new();
+    p.define_channel(
+        0,
+        ChannelMeta {
+            label: "a,b\"c$end d".into(),
+            value_width: 1,
+            single_bit: true,
+        },
+    );
+    p.encode_edge(rising(1, 0));
+
+    // CSV：数据行的列数必须仍是 5（标签被引号包起来，标签内部的逗号
+    // 不算分隔符）。
+    let csv = p.export_csv(&ExportFilter::all(), 0, None);
+    let data = csv
+        .chunk
+        .lines()
+        .find(|l| l.starts_with("1,"))
+        .expect("data row");
+    assert_eq!(csv_field_count(data), 5);
+
+    // VCD：`$var` 命令不能被标签里的 `$end` 提前截断。
+    let vcd = p.export_vcd(&ExportFilter::all(), 0, None);
+    let var_line = vcd
+        .chunk
+        .lines()
+        .find(|l| l.starts_with("$var"))
+        .expect("a $var line");
+    assert_eq!(var_line.matches("$end").count(), 1);
+}
+
+/// #4 高危：分块导出必须是 O(n) 总代价，不是 O(n²/chunk)。
+///
+/// 旧实现每个 chunk 重建归并游标并从 0 重新 skip 一遍。
+#[test]
+fn review_4_sequential_export_is_linear_in_total_entries() {
+    let mut p = WaveformPipeline::new();
+    p.define_channel(0, ChannelMeta::single_bit("GPIO0.OUT"));
+    let n = EXPORT_CHUNK * 2 + 500;
+    for i in 0..n as u64 {
+        p.encode_edge(rising(i, 0));
+    }
+
+    let mut session = p.export_session(ExportFormat::Csv, ExportFilter::all());
+    let mut chunks = 0;
+    loop {
+        let h = session.next_chunk();
+        chunks += 1;
+        assert!(chunks < 10, "export did not terminate");
+        if h.done {
+            break;
+        }
+    }
+    assert_eq!(chunks, 3);
+    // 关键断言：归并游标总共只被推进了 n 次。
+    // 旧实现会是 ~n²/(2·CHUNK) 量级。
+    assert_eq!(session.advances(), n as u64);
+}
+
+/// #4 高危（另一半）：一次性 / 续导出入口仍然可用，且续导锚点正确。
+#[test]
+fn review_4_resume_entry_point_keeps_the_anchor() {
+    let mut p = WaveformPipeline::new();
+    p.define_channel(0, ChannelMeta::single_bit("GPIO0.OUT"));
+    for i in 0..50u64 {
+        p.encode_edge(rising(i, 0));
+    }
+    let h = p.export_csv(&ExportFilter::all(), 0, None);
+    assert_eq!(h.total, 50);
+    assert_eq!(h.next_offset, 50);
+    assert!(h.done);
+    let resumed = p.export_csv(&ExportFilter::all(), 25, None);
+    assert_eq!(resumed.total, 50);
+    assert_eq!(resumed.next_offset, 50);
+}
+
+/// #9 中危：自动建环不得绕过内存预算。
+#[test]
+fn review_9_automatic_ring_creation_respects_the_memory_budget() {
+    let mut p = WaveformPipeline::new();
+    // 4 个通道刚好占满 25.6 MB 预算。
+    for ch in 0..4u8 {
+        p.encode_edge(rising(0, ch));
+    }
+    assert_eq!(p.stats().channel_count, 4);
+    assert_eq!(p.rings_refused(), 0);
+
+    // 第 5 个超预算 → 拒绝建环。
+    let outcome = p.encode_edge(rising(0, 4));
+    assert!(outcome.ring_refused);
+    assert_eq!(p.stats().channel_count, 4);
+    assert_eq!(p.rings_refused(), 1);
+    // 但事件仍然进入实时推送流（只有历史窗口缺失）。
+    assert_eq!(p.stats().pending, 5);
+}
+
+/// #10 中危：共享管道的访问口径必须一致 —— 提供不 panic 的孪生方法。
+#[test]
+fn review_10_shared_pipeline_has_non_panicking_accessors() {
+    let shared = SharedPipeline::new(gpio_pipeline());
+    let guard = shared.try_pipeline_mut().expect("free borrow");
+    // 第二次可变借用被拒绝，而不是 panic。
+    assert!(shared.try_pipeline_mut().is_err());
+    assert!(shared.try_pipeline().is_err());
+    drop(guard);
+    // 释放后恢复可用。
+    assert!(shared.try_pipeline_mut().is_ok());
+}
+
+/// #14 低危：`EdgeSink` 端口返回 `()`，编码结果需要观察者入口。
+#[test]
+fn review_14_last_outcome_exposes_the_encode_result() {
+    let mut p = WaveformPipeline::with_ring_capacity(2);
+    p.define_channel(CH_GPIO0, ChannelMeta::single_bit("GPIO0.OUT"));
+    p.encode_edge(rising(1, CH_GPIO0));
+    assert_eq!(
+        p.last_outcome(),
+        EncodeOutcome {
+            overflowed: false,
+            pause_requested: false,
+            ring_refused: false
+        }
+    );
+    p.encode_edge(rising(2, CH_GPIO0));
+    assert!(!p.last_outcome().overflowed);
+    // 第三个事件撑爆容量 → 溢出被观察到。
+    p.encode_edge(rising(3, CH_GPIO0));
+    assert!(p.last_outcome().overflowed);
+}
+
+/// #7 / #8 中危：丢弃区间有界、校验、且相邻合并。
+#[test]
+fn review_8_drop_ranges_are_validated_and_merged() {
+    let mut p = gpio_pipeline();
+    p.set_delta_sink(Some(Box::new(SharedSink::failing())));
+    // 连续三个批次全部投递失败 → 合并成一个连续空洞。
+    for batch in 0..3u64 {
+        p.encode_edge(rising(batch * 10, CH_GPIO0));
+        p.push_delta(batch * 20);
+    }
+    let ranges = p.dropped_ranges_vec();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].seq_start, 0);
+    assert_eq!(ranges[0].seq_end, 3);
+    assert_eq!(p.dropped_batches(), 3);
 }

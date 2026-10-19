@@ -136,12 +136,25 @@ impl ChannelRing {
     }
 
     /// Configured capacity.
+    ///
+    /// **M-19 review #1 (2026-10-19):** this accessor used to carry a
+    /// `debug_assert_eq!(self.buf.capacity(), self.initial_cap)`. That
+    /// assertion's premise is false — `Vec::clone` allocates exactly
+    /// `len` slots, so a cloned ring's `buf.capacity()` is `len`, not
+    /// `initial_cap` — and it panicked in debug builds on any
+    /// `clone()` followed by `capacity()`. The error message
+    /// ("ring math would be incorrect") was also factually wrong: the
+    /// ring math uses `initial_cap`, never `buf.capacity()`, so it
+    /// stays correct across a clone.
+    ///
+    /// `initial_cap` is the single source of truth for the ring math
+    /// (M-18 review #13's rule); this accessor simply reports it.
     pub fn capacity(&self) -> usize {
-        debug_assert_eq!(
-            self.buf.capacity(),
-            self.initial_cap,
-            "ChannelRing::buf capacity changed after construction; \
-             ring math would be incorrect"
+        debug_assert!(
+            self.len <= self.initial_cap,
+            "ChannelRing::len ({}) exceeds initial_cap ({})",
+            self.len,
+            self.initial_cap
         );
         self.initial_cap
     }
@@ -332,6 +345,35 @@ mod tests {
         c.push(e(2, 2));
         assert_eq!(r.len(), 2);
         assert_eq!(c.len(), 3);
+    }
+
+    #[test]
+    fn clone_then_capacity_does_not_panic() {
+        // M-19 review #1 (2026-10-19): `Vec::clone` allocates exactly
+        // `len` slots, so the clone's `buf.capacity()` is `len` rather
+        // than `initial_cap`. The old assertion in `capacity()` had a
+        // false premise and panicked here in debug builds.
+        let mut r = ChannelRing::with_capacity(8);
+        r.push(e(0, 0));
+        let c = r.clone();
+        assert_eq!(c.capacity(), 8);
+        assert_eq!(c.len(), 1);
+        // The clone is still a fully functional ring.
+        let mut c = c;
+        c.push(e(1, 1));
+        assert_eq!(c.iter().map(|x| x.t_ps).collect::<Vec<_>>(), vec![0, 1]);
+    }
+
+    #[test]
+    fn cloned_ring_keeps_working_overflow_semantics() {
+        // A clone must overflow at the same threshold as the original.
+        let mut r = ChannelRing::with_capacity(2);
+        r.push(e(0, 0));
+        r.push(e(1, 1));
+        let mut c = r.clone();
+        assert!(c.push(e(2, 2)));
+        assert_eq!(c.overflow_count(), 1);
+        assert_eq!(c.len(), 2);
     }
 
     #[test]

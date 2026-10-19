@@ -20,7 +20,52 @@
 //!   consumer hands to the resume channel (M-07 `resumeBySeq` /
 //!   `E_PROTO-05`) to refill the missing window.
 
+use std::collections::VecDeque;
+
 use riscv_sim_contract::model::{DropRange, EdgeEvent, WaveformDelta};
+
+/// Maximum number of remembered drop ranges.
+///
+/// The drop list is a *diagnostic* plus a *resume hint* — a consumer
+/// refills the holes through the M-07 resume channel, it does not
+/// need an unbounded history. M-19 review #7 flagged the previous
+/// unbounded `Vec`, whose growth also made every export chunk more
+/// expensive.
+pub const DROPPED_HISTORY_CAP: usize = 4096;
+
+/// Why a drop range was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropError {
+    /// The range is inverted (`seq_start > seq_end`).
+    Inverted {
+        /// The rejected start.
+        seq_start: u64,
+        /// The rejected end.
+        seq_end: u64,
+    },
+    /// The range extends past the allocated sequence space.
+    OutOfRange {
+        /// The rejected end.
+        seq_end: u64,
+        /// The highest sequence number handed out so far.
+        seq_no: u64,
+    },
+}
+
+impl std::fmt::Display for DropError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Inverted { seq_start, seq_end } => {
+                write!(f, "inverted drop range {seq_start}..{seq_end}")
+            }
+            Self::OutOfRange { seq_end, seq_no } => {
+                write!(f, "drop range ends at {seq_end}, past seq_no {seq_no}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DropError {}
 
 /// Incremental push accumulator.
 #[derive(Debug, Clone, Default)]
@@ -29,8 +74,10 @@ pub struct DeltaQueue {
     pending: Vec<EdgeEvent>,
     /// Next sequence number to assign. Monotonic, never rewound.
     seq_no: u64,
-    /// Ranges whose content was dropped (push failures).
-    dropped: Vec<DropRange>,
+    /// Ranges whose content was dropped (push failures). Bounded by
+    /// [`DROPPED_HISTORY_CAP`]; adjacent ranges are merged so a long
+    /// outage collapses into a single entry.
+    dropped: VecDeque<DropRange>,
     /// Number of dropped batches.
     dropped_batches: u64,
 }
@@ -94,17 +141,57 @@ impl DeltaQueue {
     }
 
     /// Record that the content of `range` was dropped.
-    pub fn record_drop(&mut self, range: DropRange) {
-        if range.is_empty() {
-            return;
+    ///
+    /// The range is validated against the allocated sequence space
+    /// (M-19 review #8): a range that is inverted, or that reaches
+    /// past `seq_no`, is rejected instead of being recorded — a
+    /// consumer acting on such a range would ask the resume channel
+    /// for data that does not exist.
+    ///
+    /// A range that is adjacent to or overlaps the most recent
+    /// recorded range is **merged** into it, so a sustained outage
+    /// collapses into one entry instead of one entry per batch.
+    pub fn record_drop(&mut self, range: DropRange) -> Result<(), DropError> {
+        if range.seq_start > range.seq_end {
+            return Err(DropError::Inverted {
+                seq_start: range.seq_start,
+                seq_end: range.seq_end,
+            });
         }
-        self.dropped.push(range);
+        if range.seq_end > self.seq_no {
+            return Err(DropError::OutOfRange {
+                seq_end: range.seq_end,
+                seq_no: self.seq_no,
+            });
+        }
+        if range.is_empty() {
+            return Ok(());
+        }
         self.dropped_batches += 1;
+        if let Some(last) = self.dropped.back_mut() {
+            // Adjacent (last.seq_end == range.seq_start) or
+            // overlapping (range.seq_start < last.seq_end) ranges
+            // describe one contiguous hole.
+            if range.seq_start <= last.seq_end {
+                last.seq_end = last.seq_end.max(range.seq_end);
+                return Ok(());
+            }
+        }
+        self.dropped.push_back(range);
+        while self.dropped.len() > DROPPED_HISTORY_CAP {
+            self.dropped.pop_front();
+        }
+        Ok(())
     }
 
-    /// Ranges whose content was dropped, in the order they happened.
-    pub fn dropped_ranges(&self) -> &[DropRange] {
-        &self.dropped
+    /// Ranges whose content was dropped, oldest first.
+    pub fn dropped_ranges(&self) -> impl ExactSizeIterator<Item = &DropRange> {
+        self.dropped.iter()
+    }
+
+    /// Snapshot of the drop ranges (oldest first).
+    pub fn dropped_ranges_vec(&self) -> Vec<DropRange> {
+        self.dropped.iter().copied().collect()
     }
 
     /// Number of dropped batches.
@@ -175,27 +262,115 @@ mod tests {
     #[test]
     fn drop_ranges_are_recorded_and_counted() {
         let mut q = DeltaQueue::new();
+        for i in 0..4 {
+            q.enqueue(ev(i));
+        }
+        let _ = q.take_batch(0);
         q.record_drop(DropRange {
             seq_start: 0,
-            seq_end: 3,
-        });
+            seq_end: 2,
+        })
+        .expect("valid range");
         q.record_drop(DropRange {
-            seq_start: 3,
+            seq_start: 2,
             seq_end: 4,
-        });
+        })
+        .expect("valid range");
         assert_eq!(q.dropped_batches(), 2);
-        assert_eq!(q.dropped_ranges().len(), 2);
-        assert_eq!(q.dropped_ranges()[0].len(), 3);
+        // Adjacent ranges are merged into one contiguous hole.
+        assert_eq!(q.dropped_ranges().len(), 1);
+        assert_eq!(q.dropped_ranges().next().expect("range").seq_end, 4);
     }
 
     #[test]
     fn empty_drop_range_is_ignored() {
         let mut q = DeltaQueue::new();
         q.record_drop(DropRange {
-            seq_start: 5,
-            seq_end: 5,
-        });
+            seq_start: 0,
+            seq_end: 0,
+        })
+        .expect("empty range is a no-op");
         assert_eq!(q.dropped_batches(), 0);
-        assert!(q.dropped_ranges().is_empty());
+        assert_eq!(q.dropped_ranges().len(), 0);
+    }
+
+    #[test]
+    fn inverted_drop_range_is_rejected() {
+        let mut q = DeltaQueue::new();
+        let err = q
+            .record_drop(DropRange {
+                seq_start: 5,
+                seq_end: 3,
+            })
+            .expect_err("inverted range");
+        assert_eq!(
+            err,
+            DropError::Inverted {
+                seq_start: 5,
+                seq_end: 3
+            }
+        );
+        assert_eq!(q.dropped_batches(), 0);
+    }
+
+    #[test]
+    fn drop_range_past_the_sequence_space_is_rejected() {
+        let mut q = DeltaQueue::new();
+        q.enqueue(ev(1));
+        let _ = q.take_batch(0);
+        let err = q
+            .record_drop(DropRange {
+                seq_start: 0,
+                seq_end: 99,
+            })
+            .expect_err("out of range");
+        assert_eq!(
+            err,
+            DropError::OutOfRange {
+                seq_end: 99,
+                seq_no: 1
+            }
+        );
+        assert_eq!(q.dropped_batches(), 0);
+    }
+
+    #[test]
+    fn overlapping_drop_ranges_merge() {
+        let mut q = DeltaQueue::new();
+        for i in 0..10 {
+            q.enqueue(ev(i));
+        }
+        let _ = q.take_batch(0);
+        q.record_drop(DropRange {
+            seq_start: 0,
+            seq_end: 6,
+        })
+        .expect("valid");
+        q.record_drop(DropRange {
+            seq_start: 3,
+            seq_end: 8,
+        })
+        .expect("valid");
+        assert_eq!(q.dropped_ranges().len(), 1);
+        assert_eq!(q.dropped_ranges().next().expect("range").seq_end, 8);
+    }
+
+    #[test]
+    fn drop_history_is_bounded() {
+        let mut q = DeltaQueue::new();
+        // Allocate enough sequence space for many disjoint ranges.
+        for _ in 0..(DROPPED_HISTORY_CAP * 2 + 10) {
+            q.enqueue(ev(0));
+            let _ = q.take_batch(0);
+        }
+        let mut next = 0u64;
+        for _ in 0..(DROPPED_HISTORY_CAP + 10) {
+            let _ = q.record_drop(DropRange {
+                seq_start: next,
+                seq_end: next + 1,
+            });
+            next += 2; // leave a gap so ranges do not merge
+        }
+        assert_eq!(q.dropped_ranges().len(), DROPPED_HISTORY_CAP);
     }
 }

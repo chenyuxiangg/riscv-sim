@@ -31,19 +31,16 @@
 //! deterministic and replayable (M-19 v0.9 §8).
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
-use riscv_sim_contract::error::{ErrorFamily, PlatformError};
+use riscv_sim_contract::error::PlatformError;
 use riscv_sim_contract::model::{DropRange, EdgeEvent, WaveformDelta};
 use riscv_sim_contract::port::{DeltaSink, EdgeSink};
 
 use super::channel::{invalid_config, ChannelMeta, OverflowPolicy, WireFormat};
 use super::delta::DeltaQueue;
-use super::export::{
-    count_filtered, render_csv, render_vcd, ExportFilter, ExportFormat, ExportHandle, ExportMeta,
-    MergedCursor, EXPORT_CHUNK,
-};
+use super::export::{ExportFilter, ExportFormat, ExportHandle, ExportSession};
 use super::ring::{ChannelRing, RingEntry, ENTRY_BYTES, RING_CAP};
 
 /// Default channel count the memory budget is sized for (M-19 v0.9 §2.1).
@@ -55,11 +52,19 @@ pub const BUDGET_CHANNELS: u32 = 4;
 /// **capacity-planning** figure: with fixed-size rings the runtime
 /// footprint can never exceed the full capacity, so there is no
 /// runtime over-budget state — the check happens when the caller
-/// plans a new channel or a larger window.
+/// plans a new channel or a larger window, and when the pipeline
+/// auto-creates a ring for an undeclared channel.
 pub const MEM_BUDGET_BYTES: u64 = BUDGET_CHANNELS as u64 * RING_CAP as u64 * ENTRY_BYTES;
 
 /// Default push batch window in milliseconds (M-19 v0.9 §2.1, §3.2).
 pub const DEFAULT_BATCH_MS: u32 = 20;
+
+/// Maximum number of remembered "unconsumed" batch ranges.
+///
+/// A batch pushed while no [`DeltaSink`] was installed is recorded
+/// here so a consumer can discover what never reached a sink. The
+/// list is bounded for the same reason the drop list is.
+pub const UNCONSUMED_HISTORY_CAP: usize = 4096;
 
 /// Hook invoked when the `PAUSE_SIM` overflow policy trips.
 ///
@@ -84,6 +89,20 @@ pub struct EncodeOutcome {
     pub overflowed: bool,
     /// True when the overflow triggered a simulation-pause request.
     pub pause_requested: bool,
+    /// True when the channel had no ring yet and the memory budget
+    /// refused to create one (M-19 review #9). The event is still
+    /// forwarded to the push stream; only the *history window* for
+    /// that channel is missing.
+    pub ring_refused: bool,
+}
+
+impl EncodeOutcome {
+    /// The "nothing happened" outcome.
+    pub const NONE: Self = Self {
+        overflowed: false,
+        pause_requested: false,
+        ring_refused: false,
+    };
 }
 
 /// Aggregate statistics of the pipeline (diagnostics + UI readout).
@@ -99,10 +118,15 @@ pub struct PipelineStats {
     pub pending: usize,
     /// Next sequence number that will be assigned.
     pub seq_no: u64,
-    /// Number of dropped push batches.
+    /// Number of dropped push batches (sink delivery failed).
     pub dropped_batches: u64,
+    /// Number of batches pushed while no sink was installed.
+    pub unconsumed_batches: u64,
     /// Number of simulation-pause requests.
     pub pause_requests: u64,
+    /// Number of channels whose ring creation was refused by the
+    /// memory budget.
+    pub rings_refused: u64,
 }
 
 /// The M-19 waveform pipeline.
@@ -136,6 +160,12 @@ pub struct WaveformPipeline {
     pause_requests: u64,
     /// Cumulative budget reconciles that forced downsampling.
     budget_reconciles: u64,
+    /// Cumulative refused ring creations.
+    rings_refused: u64,
+    /// Batches pushed while no sink was installed.
+    unconsumed: VecDeque<DropRange>,
+    /// Outcome of the most recent `encode_edge`.
+    last_outcome: EncodeOutcome,
 }
 
 impl Default for WaveformPipeline {
@@ -155,7 +185,9 @@ impl std::fmt::Debug for WaveformPipeline {
             .field("seq_no", &self.delta.seq_no())
             .field("pending", &self.delta.pending_len())
             .field("dropped_batches", &self.delta.dropped_batches())
+            .field("unconsumed_batches", &self.unconsumed.len())
             .field("pause_requests", &self.pause_requests)
+            .field("rings_refused", &self.rings_refused)
             .finish_non_exhaustive()
     }
 }
@@ -180,6 +212,9 @@ impl WaveformPipeline {
             last_push_ps: None,
             pause_requests: 0,
             budget_reconciles: 0,
+            rings_refused: 0,
+            unconsumed: VecDeque::new(),
+            last_outcome: EncodeOutcome::NONE,
         }
     }
 
@@ -213,9 +248,7 @@ impl WaveformPipeline {
     /// error), so a boot sequence that runs twice is harmless.
     pub fn define_channel(&mut self, ch: u8, meta: ChannelMeta) {
         self.channels.insert(ch, meta);
-        self.rings
-            .entry(ch)
-            .or_insert_with(|| ChannelRing::with_capacity(self.ring_cap));
+        self.ensure_ring(ch);
     }
 
     /// Metadata of a channel, if declared.
@@ -226,6 +259,35 @@ impl WaveformPipeline {
     /// Declared channels, in channel-number order.
     pub fn channel_ids(&self) -> Vec<u8> {
         self.channels.keys().copied().collect()
+    }
+
+    /// Create the ring for `ch` if it does not exist yet.
+    ///
+    /// **Memory-budget guard (M-19 review #9):** the previous
+    /// implementation created rings on demand from `encode_edge`,
+    /// which let a host feed more channels than the 25 MB budget
+    /// covers — the budget was only ever checked by the *planning*
+    /// call `reconcile_budget`, so the automatic path bypassed it
+    /// entirely.
+    ///
+    /// The check is in bytes: adding one more ring of `ring_cap`
+    /// entries must keep the total planned footprint within
+    /// [`MEM_BUDGET_BYTES`]. With the default capacity that is
+    /// exactly [`BUDGET_CHANNELS`] channels.
+    ///
+    /// Returns `false` when the budget refuses the new ring.
+    fn ensure_ring(&mut self, ch: u8) -> bool {
+        if self.rings.contains_key(&ch) {
+            return true;
+        }
+        let used = (self.rings.len() as u64 + 1) * self.ring_cap as u64 * ENTRY_BYTES;
+        if used > MEM_BUDGET_BYTES {
+            self.rings_refused += 1;
+            return false;
+        }
+        self.rings
+            .insert(ch, ChannelRing::with_capacity(self.ring_cap));
+        true
     }
 
     // -----------------------------------------------------------------
@@ -249,35 +311,49 @@ impl WaveformPipeline {
         self.channels
             .entry(ev.ch)
             .or_insert_with(|| ChannelMeta::fallback(ev.ch));
-        let ring = self
-            .rings
-            .entry(ev.ch)
-            .or_insert_with(|| ChannelRing::with_capacity(self.ring_cap));
 
-        let overflowed = ring.push(RingEntry::from(ev));
+        // The memory budget may refuse a new ring; the event is still
+        // forwarded to the push stream, only its history window is
+        // missing.
+        let ring_refused = !self.ensure_ring(ev.ch);
 
-        // Both policies evict the oldest entry (the push above already
-        // did it). The difference is whether the simulation is asked
-        // to pause as well.
-        let pause_requested = if overflowed && self.policy == OverflowPolicy::PauseSim {
-            self.pause_requests += 1;
-            if let Some(hook) = self.pause_hook.as_mut() {
-                hook(ev.ch);
-            }
-            true
-        } else {
-            false
+        let mut outcome = EncodeOutcome {
+            overflowed: false,
+            pause_requested: false,
+            ring_refused,
         };
+
+        if let Some(ring) = self.rings.get_mut(&ev.ch) {
+            outcome.overflowed = ring.push(RingEntry::from(ev));
+
+            // Both policies evict the oldest entry (the push above
+            // already did it). The difference is whether the
+            // simulation is asked to pause as well.
+            if outcome.overflowed && self.policy == OverflowPolicy::PauseSim {
+                outcome.pause_requested = true;
+                self.pause_requests += 1;
+                if let Some(hook) = self.pause_hook.as_mut() {
+                    hook(ev.ch);
+                }
+            }
+        }
 
         // The event is always accumulated into the push batch: the
         // batch is the live stream the frontend consumes, and the
         // observation already happened.
         self.delta.enqueue(ev);
 
-        EncodeOutcome {
-            overflowed,
-            pause_requested,
-        }
+        self.last_outcome = outcome;
+        outcome
+    }
+
+    /// Outcome of the most recent [`Self::encode_edge`].
+    ///
+    /// The [`EdgeSink`] port returns `()`, so the overflow /
+    /// pause information is retrieved through this observer
+    /// (M-19 review #14).
+    pub fn last_outcome(&self) -> EncodeOutcome {
+        self.last_outcome
     }
 
     // -----------------------------------------------------------------
@@ -294,27 +370,74 @@ impl WaveformPipeline {
     /// Returns `None` when nothing is pending: an empty batch must
     /// not wake the consumer up.
     ///
-    /// When a [`DeltaSink`] is installed and the push fails, the batch
-    /// is **dropped** (observation events are explicitly allowed to
-    /// be lost, review P-09) and the lost sequence range is recorded
-    /// in the drop-range list. The sequence space still advances, so
-    /// a consumer detects the hole through the drop ranges rather
-    /// than through a gap in the numbers.
+    /// ## Delivery semantics (M-19 review #2)
+    ///
+    /// There are three outcomes, and they are **not** the same thing:
+    ///
+    /// | Situation | Content | Recorded as |
+    /// | --- | --- | --- |
+    /// | Sink installed, delivery succeeded | delivered | — |
+    /// | Sink installed, delivery failed | **lost** | `dropped_ranges` (a hole the consumer refills over M-07 `resumeBySeq`) |
+    /// | No sink installed | handed to the **direct caller** via the return value | `unconsumed_ranges` (queryable: "this never reached a sink") |
+    ///
+    /// The previous implementation treated the third case as a
+    /// success: the batch was taken, the sequence space advanced, and
+    /// **nothing** was recorded — so a consumer had no way to learn
+    /// that the content was missing. That violated this module's own
+    /// documented invariant.
+    ///
+    /// The sequence space advances in every case, so the *numbers*
+    /// stay gap-free; the content holes live in the two recorded
+    /// lists.
     pub fn push_delta(&mut self, now_ps: u64) -> Option<WaveformDelta> {
         let delta = self.delta.take_batch(now_ps)?;
         self.last_push_ps = Some(now_ps);
 
-        let failed = match self.delta_sink.as_mut() {
-            Some(sink) => sink.push_delta(&delta).is_err(),
-            None => false,
-        };
-        if failed {
-            self.delta.record_drop(DropRange {
-                seq_start: delta.seq_start,
-                seq_end: delta.seq_end,
-            });
+        match self.delta_sink.as_mut() {
+            Some(sink) => {
+                if sink.push_delta(&delta).is_err() {
+                    // Delivery failed: the content is gone. Record
+                    // the hole so the consumer can refill it.
+                    let _ = self.delta.record_drop(DropRange {
+                        seq_start: delta.seq_start,
+                        seq_end: delta.seq_end,
+                    });
+                }
+            }
+            None => {
+                // No sink: the batch is delivered to the direct
+                // caller through the return value. Record the range
+                // as "never reached a sink" so the situation is
+                // visible instead of silent.
+                self.record_unconsumed(DropRange {
+                    seq_start: delta.seq_start,
+                    seq_end: delta.seq_end,
+                });
+            }
         }
         Some(delta)
+    }
+
+    /// Record a batch that was pushed without a sink attached.
+    fn record_unconsumed(&mut self, range: DropRange) {
+        self.unconsumed.push_back(range);
+        while self.unconsumed.len() > UNCONSUMED_HISTORY_CAP {
+            self.unconsumed.pop_front();
+        }
+    }
+
+    /// Ranges that were pushed while no sink was installed.
+    ///
+    /// These are the batches that never reached a subscriber. If the
+    /// direct caller consumed them, they are simply informational; if
+    /// it dropped them, they mark the content holes.
+    pub fn unconsumed_ranges(&self) -> impl ExactSizeIterator<Item = &DropRange> {
+        self.unconsumed.iter()
+    }
+
+    /// Number of batches pushed while no sink was installed.
+    pub fn unconsumed_batches(&self) -> u64 {
+        self.unconsumed.len() as u64
     }
 
     /// True when the batch window has elapsed and a push is due.
@@ -435,7 +558,8 @@ impl WaveformPipeline {
     ///
     /// The check is a *planning* check, not a runtime check: with
     /// fixed-size rings the runtime footprint can never exceed the
-    /// full capacity.
+    /// full capacity. The *automatic* ring-creation path is guarded
+    /// separately by [`Self::ensure_ring`].
     pub fn reconcile_budget(
         &mut self,
         channel_count: u32,
@@ -452,7 +576,7 @@ impl WaveformPipeline {
             hook(new_throttle);
         }
         Err(PlatformError::new(
-            ErrorFamily::Context,
+            super::WAVEFORM_BUDGET_FAMILY,
             2,
             format!(
                 "waveform memory budget exceeded: {used} B > {MEM_BUDGET_BYTES} B \
@@ -467,9 +591,52 @@ impl WaveformPipeline {
         self.budget_reconciles
     }
 
+    /// Number of channels whose ring creation the budget refused.
+    pub fn rings_refused(&self) -> u64 {
+        self.rings_refused
+    }
+
     // -----------------------------------------------------------------
     // Export (M-19 v0.9 §3.4)
     // -----------------------------------------------------------------
+
+    /// Start a resumable, chunked export.
+    ///
+    /// **This is the recommended path for sequential chunking.** The
+    /// session keeps the merge cursor alive between chunks, so a full
+    /// window export costs O(n) total instead of O(n²/chunk)
+    /// (M-19 review #4).
+    ///
+    /// The session borrows the pipeline immutably for its lifetime:
+    /// the export is a read-only snapshot of the window that existed
+    /// when the session started, and the pipeline cannot be mutated
+    /// while it is in flight.
+    pub fn export_session(
+        &mut self,
+        format: ExportFormat,
+        filter: ExportFilter,
+    ) -> ExportSession<'_> {
+        // The merge requires each channel's entries to be in
+        // non-decreasing time order. The ring stores entries in
+        // *arrival* order, which equals time order because the
+        // virtual clock is monotonic — but a caller that feeds a
+        // stale timestamp would break that invariant, so the export
+        // path reorders any offending channel first (defensively, and
+        // without dropping anything). Done **once** per session.
+        for ring in self.rings.values_mut() {
+            ring.sort_by_time();
+        }
+        let overflow_marked = self.rings.values().any(|r| r.overflow_count() > 0);
+        let dropped = self.delta.dropped_ranges_vec();
+        ExportSession::new(
+            &self.rings,
+            &self.channels,
+            filter,
+            format,
+            overflow_marked,
+            dropped,
+        )
+    }
 
     /// Export one chunk of the waveform.
     ///
@@ -478,13 +645,12 @@ impl WaveformPipeline {
     /// `on_progress` is invoked with the completion percentage after
     /// the chunk is rendered.
     ///
-    /// The merge requires each channel's entries to be in
-    /// non-decreasing time order. The ring stores entries in
-    /// *arrival* order, which equals time order because the virtual
-    /// clock is monotonic — but a caller that feeds a stale timestamp
-    /// would break that invariant, so the export path reorders any
-    /// offending channel first (defensively, and without dropping
-    /// anything).
+    /// **Cost:** resuming at `next_offset` re-walks the merged stream
+    /// up to that point, so this entry point is O(next_offset) per
+    /// call. It is meant for *resuming* an export at a known anchor
+    /// and for small one-off exports. For sequential chunking over a
+    /// large window use [`Self::export_session`], which is O(n) in
+    /// total.
     pub fn export(
         &mut self,
         format: ExportFormat,
@@ -492,68 +658,15 @@ impl WaveformPipeline {
         next_offset: usize,
         on_progress: Option<&mut dyn FnMut(u8)>,
     ) -> ExportHandle {
-        for ring in self.rings.values_mut() {
-            ring.sort_by_time();
-        }
-
-        let total = count_filtered(&self.rings, filter);
-        let mut cursor = MergedCursor::new(&self.rings, filter.clone());
-        cursor.skip(next_offset);
-
-        let mut entries: Vec<RingEntry> = Vec::new();
-        while entries.len() < EXPORT_CHUNK {
-            match cursor.next_entry() {
-                Some(e) => entries.push(e),
-                None => break,
-            }
-        }
-
-        let consumed = next_offset + entries.len();
-        let done = consumed >= total;
-        let progress_pct = if total == 0 {
-            100
-        } else {
-            ((consumed as u128 * 100) / total as u128).min(100) as u8
-        };
-
-        let overflow_marked = self.rings.values().any(|r| r.overflow_count() > 0);
-        let meta = ExportMeta {
-            total,
-            overflow_marked,
-            dropped_ranges: self.delta.dropped_ranges().to_vec(),
-        };
-
-        // The VCD header declares every channel that the filter can
-        // produce, so the variable list is known before the first
-        // entry is rendered.
-        let vcd_channels: Vec<u8> = match &filter.channels {
-            Some(list) => list.clone(),
-            None => self.rings.keys().copied().collect(),
-        };
-
-        let chunk = match format {
-            ExportFormat::Csv => render_csv(&entries, &self.channels, next_offset == 0, &meta),
-            ExportFormat::Vcd => {
-                render_vcd(&entries, &self.channels, &vcd_channels, next_offset == 0)
-            }
-        };
-
-        if let Some(cb) = on_progress {
-            cb(progress_pct);
-        }
-
-        ExportHandle {
-            chunk,
-            next_offset: consumed,
-            total,
-            done,
-            progress_pct,
-            overflow_marked,
-            dropped_ranges: meta.dropped_ranges,
+        let mut session = self.export_session(format, filter.clone());
+        session.skip_to(next_offset);
+        match on_progress {
+            Some(cb) => session.next_chunk_with_progress(cb),
+            None => session.next_chunk(),
         }
     }
 
-    /// Export a CSV chunk.
+    /// Export a CSV chunk. See [`Self::export`] for the cost model.
     pub fn export_csv(
         &mut self,
         filter: &ExportFilter,
@@ -563,7 +676,7 @@ impl WaveformPipeline {
         self.export(ExportFormat::Csv, filter, next_offset, on_progress)
     }
 
-    /// Export a VCD chunk.
+    /// Export a VCD chunk. See [`Self::export`] for the cost model.
     pub fn export_vcd(
         &mut self,
         filter: &ExportFilter,
@@ -586,7 +699,9 @@ impl WaveformPipeline {
             pending: self.delta.pending_len(),
             seq_no: self.delta.seq_no(),
             dropped_batches: self.delta.dropped_batches(),
+            unconsumed_batches: self.unconsumed.len() as u64,
             pause_requests: self.pause_requests,
+            rings_refused: self.rings_refused,
         }
     }
 
@@ -600,12 +715,17 @@ impl WaveformPipeline {
         self.rings.get(&ch).map(|r| r.len()).unwrap_or(0)
     }
 
-    /// Ranges whose content was dropped by a failed push.
-    pub fn dropped_ranges(&self) -> &[DropRange] {
+    /// Ranges whose content was **lost** (a sink delivery failed).
+    pub fn dropped_ranges(&self) -> impl ExactSizeIterator<Item = &DropRange> {
         self.delta.dropped_ranges()
     }
 
-    /// Number of dropped push batches.
+    /// Snapshot of the lost-content ranges.
+    pub fn dropped_ranges_vec(&self) -> Vec<DropRange> {
+        self.delta.dropped_ranges_vec()
+    }
+
+    /// Number of dropped push batches (sink delivery failed).
     pub fn dropped_batches(&self) -> u64 {
         self.delta.dropped_batches()
     }
@@ -620,6 +740,24 @@ impl EdgeSink for WaveformPipeline {
         WaveformPipeline::encode_edge(self, ev);
     }
 }
+
+/// The shared pipeline could not be borrowed because it is already
+/// borrowed elsewhere.
+///
+/// Returned by [`SharedPipeline::try_pipeline`] and
+/// [`SharedPipeline::try_pipeline_mut`] (M-19 review #10: the two
+/// accessors used to have different panic semantics — the hot path
+/// was safe and the control path was not).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BorrowConflict;
+
+impl std::fmt::Display for BorrowConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the waveform pipeline is already borrowed")
+    }
+}
+
+impl std::error::Error for BorrowConflict {}
 
 /// A shared handle to a [`WaveformPipeline`].
 ///
@@ -658,13 +796,39 @@ impl SharedPipeline {
     }
 
     /// Shared access to the pipeline.
+    ///
+    /// **Panics** if the pipeline is currently mutably borrowed. Use
+    /// [`Self::try_pipeline`] in a context where a panic would be
+    /// unrecoverable — the probe hot path is the canonical example.
     pub fn pipeline(&self) -> Ref<'_, WaveformPipeline> {
         self.inner.borrow()
     }
 
     /// Mutable shared access to the pipeline.
+    ///
+    /// **Panics** if the pipeline is currently borrowed. Use
+    /// [`Self::try_pipeline_mut`] in a context where a panic would be
+    /// unrecoverable.
     pub fn pipeline_mut(&self) -> RefMut<'_, WaveformPipeline> {
         self.inner.borrow_mut()
+    }
+
+    /// Shared access to the pipeline, or an error when the borrow is
+    /// contended.
+    ///
+    /// This is the non-panicking counterpart of [`Self::pipeline`]
+    /// (M-19 review #10: the two accessors used to have different
+    /// panic semantics, and the *control* side was the fragile one).
+    pub fn try_pipeline(&self) -> Result<Ref<'_, WaveformPipeline>, BorrowConflict> {
+        self.inner.try_borrow().map_err(|_| BorrowConflict)
+    }
+
+    /// Mutable shared access to the pipeline, or an error when the
+    /// borrow is contended.
+    ///
+    /// This is the non-panicking counterpart of [`Self::pipeline_mut`].
+    pub fn try_pipeline_mut(&self) -> Result<RefMut<'_, WaveformPipeline>, BorrowConflict> {
+        self.inner.try_borrow_mut().map_err(|_| BorrowConflict)
     }
 
     /// Number of observations dropped because of a borrow conflict.

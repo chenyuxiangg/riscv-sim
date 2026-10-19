@@ -1,11 +1,68 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.9
+> **Document version**: v0.9.1
 > **Created**: 2026-10-19
 > **Last updated**: 2026-10-19
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.9.1 变更摘要
+
+**M-19 波形管道 review 闭环：16 项全部落地**（`docs/reviews/M-19_WaveformPipeline_Review.md` §七 逐项核对）。本轮无新功能落地，是 v0.9 提交后的质量收口。
+
+**这轮修复了 1 项阻断级缺陷，且该缺陷已在远端历史里** —— 38e62ed 推上去之后才被另一会话的 review 实证发现。按用户决议，**不重写历史**，追加一个 fix 提交。
+
+### 阻断级缺陷（#1）
+
+`ChannelRing::clone()` 后调用 `capacity()` → **debug 构建下 panic**：
+
+```
+assertion `left == right` failed: ChannelRing::buf capacity changed after construction
+  left: 1  right: 8
+```
+
+根因：`Vec::clone` 只按 `len` 分配容量，克隆后 `buf.capacity()` 必然 ≠ `initial_cap`，而 `capacity()` 里断言两者相等。**讽刺之处**：该行上方的注释恰好点名过这个坑（「`Vec::clone` 会缩小容量，所以不能信 `buf.capacity()`」），而环行数学确实改对了（`push`/`drain` 全用 `initial_cap`），但这个**只读访问器**里留了一条 `Vec::clone` 必然破坏的断言，报错文案「ring math would be incorrect」本身还是事实错误——环行数学从头到尾没读过 `buf.capacity()`。
+
+**M-18 的 `TraceStream` 有完全同源的缺陷**（`trace_stream.rs:103`），一并修复。既有测试克隆后只调 `drain()` 从不调 `capacity()`，所以缺陷一直潜伏。
+
+### 全部 16 项闭环一览
+
+| 严重度 | 项 | 落地 |
+| --- | --- | --- |
+| **阻断** | #1 | 删掉两处前提为假的断言，改断言真不变量 `len <= initial_cap`；M-19 + M-18 同步修；各加一条回归测试 |
+| **高** | #2 | 引入第三种交付结局：「没装 sink」不再被当成成功——内容交给直接调用方（返回值），同时记入**可查**的 `unconsumed_ranges`；「投递失败」才是 `dropped_ranges`（真丢，需补洞） |
+| **高** | #3 | 新增 `csv_escape()`（RFC 4180）+ `vcd_label()`（VCD `$var` reference 安全字符集）——宿主可控文本不再能破坏导出文件结构（NFR-04） |
+| **高** | #4 | 新增 `ExportSession`：会话持有归并游标，跨 chunk 不重建 → **整次导出 O(n) 总代价**（旧实现 O(n²/chunk)）；旧入口保留为「一次性 / 续导锚点」并标注代价模型 |
+| 中 | #5 | 通道过滤改 256 位位图（O(k) → O(1)），顺带天然去重 |
+| 中 | #6 | 删掉每行一次分配的 `vcd_id()`；`render_csv`/`render_vcd` 改 `write!` 直写，无中间分配 |
+| 中 | #7 | `dropped` 改有界（4096）；`ExportMeta` 改**借用**切片，每 chunk 只克隆一次（原两遍） |
+| 中 | #8 | `record_drop` 改返 `Result`，校验区间（不倒置、不越序列空间）；相邻洞**合并** |
+| 中 | #9 | 自动建环前按字节预算校验，超预算拒绝建环（旧的完全绕过只有规划期才走的 `reconcile_budget`） |
+| 中 | #10 | 新增 `try_pipeline()` / `try_pipeline_mut()`（不 panic），与热路径口径统一 |
+| 低 | #11-#16 | 删重复的 `kind_text`；`WAVEFORM_FAMILY` 真正被用 + 新增 `WAVEFORM_BUDGET_FAMILY`；`Edge` vs `EdgeEvent` 并存理由文档化；新增 `last_outcome()`；去掉 `ExportMeta.total` 重复；`MergedCursor` 加 `past_start` 标志位 |
+
+### 契约层变更（additive · 不破坏 M-0 冻结）
+
+本轮**无契约签名变更**，只有文档：契约层 `Edge`（历史/导出形态，通道由所属 `WaveformStream` 隐含）与 `EdgeEvent`（实时形态，自带通道号 + 边沿种类）并存的理由已文档化。不合并二者——合并会改动已冻结类型，并给历史形态塞入容器已隐含的字段。
+
+### 决策记录（v0.9.1）
+
+1. **已推送历史不重写，追加 fix 提交** —— 用户决策。缺陷只影响 `clone()` + `capacity()` 这一条特定调用路径，追加修复即可，审计链完整；强推会覆盖别人的本地状态
+2. **#2 选「显式建模第三种结局」而非「无 sink 也记 DropRange」** —— 无 sink 时内容**没有丢**（交给了直接调用方的返回值），记成 DropRange 会让消费方去补一段它其实拿得到的洞；分成 `dropped_ranges`（真丢）与 `unconsumed_ranges`（没到 sink）两个语义清晰的列表
+3. **#3 VCD label 白名单保留 `.` `-` `[]` `/`** —— review 建议的 `[A-Za-z0-9_]` 会把 `GPIO0.OUT` 打成 `GPIO0_OUT`，可读性损失不必要；真正需要中和的是 `$`（会提前终止 `$var` 命令）、空白与控制字符
+4. **#4 用 `ExportSession` 而不是缓存 `count_filtered`** —— 缓存只能省掉计数，skip 的 O(n) 仍在；持游标的会话是唯一能真正把总代价降到 O(n) 的做法
+5. **#1 删断言而不是手写 Clone 保住容量** —— `initial_cap` 已是唯一真源，断言一个标准库**未承诺**的实现细节（`Vec::with_capacity(n)` 只保证 ≥ n）本身就是错的
+
+### 进度影响
+
+- **测试覆盖**：M-19 64 → 85 单测（+21）；workspace lib 171 → 193（+22，含 M-18 的 1 条）；workspace 累计 181 → **203 全绿**（lib 193 + 集成 10）
+- **§3 人日**：不变（本轮为质量收口，不计入模块交付人日）
+- **跨模块欠账**：D-12 本体（M-14 ↔ M-15 size 一致性）**仍未动**；M-15 ↔ M-18 的 `on_probe` 接线仍未做（§6.3 并行 0.5d 项）
+
+`cargo test --workspace` = **203 passed / 0 failed**（lib 193 + integration 10；v0.9 = 181 → v0.9.1 = +22）；`cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo fmt --all -- --check` 通过。
+
+---
 
 ## v0.9 变更摘要
 
@@ -741,6 +798,11 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 
 | 日期 | 决策 | 依据 |
 | --- | --- | --- |
+| 2026-10-19 | **M-19 review 的 16 项一次性闭环，不重写已推送历史，追加 fix 提交** | 用户决策。阻断级缺陷（`clone()` + `capacity()` debug panic）已在 38e62ed 推上远端；缺陷只影响该条特定调用路径，追加修复即可保住审计链，强推反而会覆盖别人的本地状态 |
+| 2026-10-19 | **#2 拆成 `dropped_ranges`（真丢）与 `unconsumed_ranges`（没到 sink）两个列表** | 无 sink 时内容**没有丢**（交给直接调用方的返回值），记成 DropRange 会让消费方去补一段它实际拿得到的洞；两种结局语义不同，不该混在一个列表里 |
+| 2026-10-19 | **#1 删断言而非手写 Clone 保住容量** | `initial_cap` 已是环行数学的唯一真源（M-18 review #13 的规则）；断言 `Vec::with_capacity(n)` 的实际容量等于 n 是在断言一个标准库**未承诺**的实现细节 |
+| 2026-10-19 | **#3 VCD label 白名单保留 `.` `-` `[]` `/`** | review 建议的 `[A-Za-z0-9_]` 会把 `GPIO0.OUT` 打成 `GPIO0_OUT`；真正需要中和的是 `$`（提前终止 `$var` 命令）、空白与控制字符 |
+| 2026-10-19 | **#4 用 `ExportSession` 持游标，而不是缓存 `count_filtered`** | 缓存只能省掉计数，skip 的 O(n) 仍在；持游标的会话是唯一能把总代价真正降到 O(n) 的做法。旧入口保留为「一次性 / 续导锚点」并标注代价模型 |
 | 2026-10-19 | **M-19 溢出策略：`PAUSE_SIM` 与 `DROP_OLDEST_MARK` 都丢最旧，区别只在要不要请求暂停仿真** | 设计文档伪码的 `PAUSE_SIM` 分支不推进 `head`，会让环停在满状态并**伪造历史空洞**（违反「不伪造数据」）；实际观察已发生，拒绝记录它等于造假。暂停是控制面操作，不改寄存器/内存（19-9） |
 | 2026-10-19 | **序列号空间「失败也前移」+ 独立 `DropRange` 记录内容空洞** | 数字空间保持无空洞（前端无法从 seq 推断丢失），内容空洞由 `DropRange` 显式记录，供 M-07 `resumeBySeq` / `E_PROTO-05` 续拉补齐（19-3 / 19-7） |
 | 2026-10-19 | **导出归并用 k 路堆归并，不物化归并流** | 导出满窗口（4 × 2×10⁵）不额外占 20MB，守住 25MB 内存预算（19-2）；环内「到达序 = 时间序」由单调虚拟时钟保证，导出前再防御性重排 |

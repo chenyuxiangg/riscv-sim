@@ -370,6 +370,24 @@ pub struct WaveformStream {
 }
 
 /// One edge: a value change at a specific virtual time.
+///
+/// **Shape note (M-19 review #13, 2026-10-19):** the contract carries
+/// **two** edge types on purpose, and they are not interchangeable:
+///
+/// - [`Edge`] — the *export / history* shape. It belongs to a
+///   [`WaveformStream`], so the channel is already implied by the
+///   stream it lives in; only the timestamp and the value are needed.
+///   This is what M-18's `ProbeRegistry` accumulates per channel and
+///   what the front-end replays to redraw a waveform.
+/// - [`EdgeEvent`] — the *live* shape. It crosses the M-18 → M-19
+///   boundary as a standalone event, so it must carry its own
+///   channel number and the classified edge kind.
+///
+/// Merging them (by adding `ch` / `kind` to `Edge`) would change an
+/// already-frozen contract type and would bloat the history shape
+/// with fields its container already implies. Keeping them separate
+/// costs one extra 18-byte struct on the live path, which is the
+/// cheaper trade.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edge {
     /// Virtual time (picoseconds) of the edge.
@@ -470,6 +488,10 @@ pub struct TraceEvent {
 /// allocated on every observed edge, so it carries no labels or
 /// channel metadata. Channel metadata (label, value width) is
 /// registered separately with M-19's `define_channel`.
+///
+/// **Shape note:** see [`Edge`] for why the contract carries this
+/// type *and* the history-shaped [`Edge`] side by side
+/// (M-19 review #13, 2026-10-19).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EdgeEvent {
     /// Virtual time of the edge (picoseconds).

@@ -99,12 +99,25 @@ impl TraceStream {
     }
 
     /// Configured capacity.
+    ///
+    /// **M-19 review #1 (2026-10-19):** this accessor used to carry a
+    /// `debug_assert_eq!(self.buf.capacity(), self.initial_cap)`. That
+    /// assertion's premise is false — `Vec::clone` allocates exactly
+    /// `len` slots, so a cloned stream's `buf.capacity()` is `len`,
+    /// not `initial_cap` — and it panicked in debug builds on any
+    /// `clone()` followed by `capacity()`. The error message
+    /// ("ring math would be incorrect") was also factually wrong: the
+    /// ring math uses `initial_cap`, never `buf.capacity()`, so it
+    /// stays correct across a clone.
+    ///
+    /// `initial_cap` is the single source of truth for the ring math
+    /// (M-18 review #13's rule); this accessor simply reports it.
     pub fn capacity(&self) -> usize {
-        debug_assert_eq!(
-            self.buf.capacity(),
-            self.initial_cap,
-            "TraceStream::buf capacity changed after construction; \
-             ring math would be incorrect"
+        debug_assert!(
+            self.len <= self.initial_cap,
+            "TraceStream::len ({}) exceeds initial_cap ({})",
+            self.len,
+            self.initial_cap
         );
         self.initial_cap
     }
@@ -270,6 +283,19 @@ mod tests {
         );
         // Original is unaffected by the clone's drain.
         assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn clone_then_capacity_does_not_panic() {
+        // M-19 review #1 (2026-10-19): `Vec::clone` allocates exactly
+        // `len` slots, so the clone's `buf.capacity()` is `len` rather
+        // than `initial_cap`. The old assertion in `capacity()` had a
+        // false premise and panicked here in debug builds.
+        let mut s = TraceStream::with_capacity(8);
+        s.push(ev(0, 0x100));
+        let c = s.clone();
+        assert_eq!(c.capacity(), 8);
+        assert_eq!(c.len(), 1);
     }
 
     #[test]

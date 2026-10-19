@@ -10,7 +10,7 @@
 //! M-19 owns *rendering* metadata (label + value width → channel).
 //! The wiring code copies the relevant fields across at boot.
 
-use riscv_sim_contract::error::{ErrorFamily, PlatformError};
+use riscv_sim_contract::error::PlatformError;
 use riscv_sim_contract::model::EdgeKind;
 
 /// Rendering metadata for one waveform channel (M-19 v0.9 §2.1).
@@ -169,7 +169,7 @@ impl WireFormat {
 /// conflicts.
 pub fn invalid_config(what: &str, value: u8) -> PlatformError {
     PlatformError::new(
-        ErrorFamily::Observability,
+        super::WAVEFORM_FAMILY,
         1,
         format!("invalid {what}: {value}"),
     )
@@ -187,6 +187,7 @@ pub fn edge_kind_text(kind: EdgeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use riscv_sim_contract::error::ErrorFamily;
 
     #[test]
     fn overflow_policy_codes_round_trip() {

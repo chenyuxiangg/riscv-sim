@@ -48,25 +48,30 @@ pub mod pipeline;
 pub mod ring;
 
 pub use channel::{ChannelMeta, OverflowPolicy, WireFormat};
-pub use delta::DeltaQueue;
+pub use delta::{DeltaQueue, DropError, DROPPED_HISTORY_CAP};
 pub use export::{
-    count_filtered, render_csv, render_vcd, ExportFilter, ExportFormat, ExportHandle, ExportMeta,
-    MergedCursor, EXPORT_CHUNK,
+    count_filtered, csv_escape, render_csv, render_vcd, vcd_label, ChannelSet, ExportFilter,
+    ExportFormat, ExportHandle, ExportMeta, ExportSession, MergedCursor, EXPORT_CHUNK,
 };
 pub use pipeline::{
     EncodeOutcome, PauseHook, PipelineStats, RateHook, SharedPipeline, WaveformPipeline,
-    BUDGET_CHANNELS, DEFAULT_BATCH_MS, MEM_BUDGET_BYTES,
+    BUDGET_CHANNELS, DEFAULT_BATCH_MS, MEM_BUDGET_BYTES, UNCONSUMED_HISTORY_CAP,
 };
 pub use ring::{ChannelRing, RingEntry, RingIter, ENTRY_BYTES, RING_CAP};
 
 use riscv_sim_contract::error::ErrorFamily;
 
-/// Family used by errors raised from this module (M-19 v0.9 §6.1).
+/// Family used by configuration errors raised from this module
+/// (M-19 v0.9 §6.1).
 ///
 /// M-19 commits to "no new error codes": it reuses the existing
 /// `Observability` family for configuration errors and the existing
 /// `Context` family for the memory-budget limit.
 pub const WAVEFORM_FAMILY: ErrorFamily = ErrorFamily::Observability;
+
+/// Family used by resource-limit errors raised from this module
+/// (M-19 v0.9 §3.5 — the memory-budget reconcile returns `E_CTX-02`).
+pub const WAVEFORM_BUDGET_FAMILY: ErrorFamily = ErrorFamily::Context;
 
 // ---------------------------------------------------------------------------
 // Tests

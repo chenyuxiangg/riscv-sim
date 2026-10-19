@@ -96,3 +96,27 @@
 - 本报告仅覆盖 M-18 模块自身；契约 `Probe` trait 与 `ProbeSink` 的去向是技术债级记录，归到 `#10`，不在 M-18 接线 PR 范围。
 - M-19 波形管道（42 行 stub）与 M-11 trace 导出（待审查）不在本范围；M-15 / M-14 / M-12 的接线见台账 D-07 / D-12。
 - 门禁结论为 2026-10-19 实际执行结果。
+
+---
+
+## 六、后续闭环补记（2026-10-19 · PROGRESS v0.9.1）
+
+本报告 v0.8.1 闭环后，M-19 审查（`M-19_WaveformPipeline_Review.md`）在 M-18 的 `TraceStream` 上发现一处**同源缺陷**，本轮一并修复：
+
+### `TraceStream::capacity()` 的断言前提为假 → clone 后 debug panic
+
+`TraceStream` 与 M-19 的 `ChannelRing` 同构：都 `derive(Clone)`，同时 `capacity()` 里断言 `buf.capacity() == initial_cap`。但 `Vec::clone` **只按 `len` 分配容量**，克隆后 `buf.capacity()` 必然是 `len` 而非 `initial_cap` —— 断言在 debug 构建下必然 panic。
+
+讽刺之处与 M-19 侧完全一样：本文件 v0.8.1 的 review #13 结论正是「`Vec::clone` 会缩小容量，所以环行数学要用 `initial_cap` 而不是 `buf.capacity()`」—— 环行数学确实改对了（`push` / `drain` 全部用 `initial_cap`），但 `capacity()` 这个**只读访问器**里留了一条 `Vec::clone` 必然破坏的断言，且其报错文案「ring math would be incorrect」是事实错误：环行数学从头到尾没读过 `buf.capacity()`。
+
+**修复**（与 M-19 `ChannelRing` 同步）：
+
+- 删掉 `debug_assert_eq!(self.buf.capacity(), self.initial_cap)`
+- 改断言真正的不变量 `self.len <= self.initial_cap`
+- `initial_cap` 是环行数学的唯一真源；`capacity()` 只负责报告它
+- 回归测试 `clone_then_capacity_does_not_panic`（`trace_stream.rs` 内）
+
+既有测试 `trace_stream_clone_shares_events_independently` 克隆后只调 `drain()`、从不调 `capacity()`，所以缺陷一直潜伏未被触发。
+
+**门禁**：`cargo test --workspace` = **203 passed / 0 failed**（lib 193 + integration 10）。
+
