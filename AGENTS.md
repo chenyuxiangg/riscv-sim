@@ -10,7 +10,7 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 
 - **技术栈**（自架构 §9.7 选型矩阵 + 用户决策）：
   - **仿真内核**：Rust（自研 RV32IMC ISS，spike 风格），编译为 native + `wasm32-unknown-unknown`（wasm-pack）
-  - **前端**：原生 JavaScript / ES modules（**零构建、零依赖**；MVP 不强制单文件自包含，可部署为服务）
+  - **前端**：原生 JavaScript / ES modules（**零构建、零依赖**；MVP 不强制单文件自包含，可部署为服务；**ES module 与 Worker 均要求同源 HTTP(S)**，`file://` 直开会被浏览器拦截）
   - **3D 引擎**（P1）：three.js（内联）
   - **持久化**（MVP）：IndexedDB（前端）/ SQLite（服务端 P1）
   - **传输**：postMessage（浏览器内 Worker）/ WebSocket（服务端 P1）；统一 `riscv_sim_contract::protocol::Message` 信封
@@ -45,6 +45,7 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 - Build (native):  `cargo build`（开发）/ `cargo build --release`（发布）
 - Build (WASM):    `tools/build-wasm.sh` 或 `tools/build-wasm.sh --release`
 - Test:            `cargo test --workspace`（单元 + 集成 + 黄金对拍）
+- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，19 用例；Node ≥ 22）
 - Lint:            `cargo clippy --workspace --all-targets -- -D warnings`
 - Format:          `cargo fmt --all`
 - Typecheck:       N/A — Rust 编译器即类型检查
@@ -123,7 +124,8 @@ riscv_sim/
 ## Testing instructions
 
 - 单元测试：`cargo test --workspace`（含各模块 `#[cfg(test)] mod tests`）
-- WASM 端到端：`tools/build-wasm.sh` 后浏览器跑 `front/index.html`
+- **前端门禁**：`tools/check-front.sh`（`node --test`，含最小 DOM stub；见 `front/tests/`）——**ESM 链接期错误只有这条门禁能抓住**，Rust 测试全都覆盖不到
+- WASM 端到端：`tools/build-wasm.sh` 后用 `python3 -m http.server 8080 --directory front` 起 HTTP 服务，浏览器访问 `http://localhost:8080/`（**不能 `file://` 直开**：ES module 与 Worker 均要求同源）
 - 黄金对拍：`tests/golden/` 用 Spike 作为外部 oracle，CI 中调 `spike --isa=rv32imc` 跑同一程序对比 `m13_iss` 输出
 - 测试位置约定：
   - 单元测试就近写在 `crates/<crate>/src/<module>/mod.rs` 内 `#[cfg(test)] mod tests`

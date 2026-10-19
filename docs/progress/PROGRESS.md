@@ -1,11 +1,70 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.9.1
+> **Document version**: v0.10.0
 > **Created**: 2026-10-19
-> **Last updated**: 2026-10-19
+> **Last updated**: 2026-10-20
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.10.0 变更摘要
+
+**前端 M-01/02/03 首次模块级 review 闭环：18 项全部落地**（`docs/reviews/FRONTEND_Review.md` §七 逐项核对；16 项首审意见 + 2 项评审漏项）。本轮无新功能落地，是前端自 v0.4 装配以来**第一次**被系统性检视——而这次检视的结论是：**页面 100% 白屏，且三条既有门禁全都看不见**。
+
+### 阻断级缺陷（2 项）：前端 100% 白屏
+
+ES module 的链接错误发生在**任何代码执行之前**——`bootstrap()` 永不启动，状态栏永远停在 `index.html` 的静态文案「未连接」：
+
+- **D-01**：`m02` 导入 `activeView`，而 `m01` 里它是未导出的 `let` → 链接期失败
+- **D-02**：`app.js` 导入 `mountViewStore`，而 `m03` 只导出 `setState/getState/snapshot/subscribe/reset` → 链接期失败
+
+两条必须同批修（同一模块图，浏览器只报第一个错）。实证确认这就是启动路径上的**全部**阻断点：修掉后 bootstrap 即完全跑通。
+
+### 全部 18 项闭环一览
+
+| 类别 | 项 | 落地 |
+| --- | --- | --- |
+| **阻断** | #1 #2 | 删掉 m02 用不到的 `activeView` import；m03 补 `mountViewStore`（写法对齐四个 service） |
+| 高 | #3 #4 #5 | demo 按钮去掉 `closest("[data-region-base]")` 前置条件（按钮在 `</table>` 外 → 恒不触发）；终端 `onDelta` 去掉 `escapeHtml()` 双层转义（`textContent` 不解析 HTML）；`switchView` 同步 `[data-view-tab]` 的 `aria-current`（CSS 一直有这个选择器，JS 从未设置过 → 活动标签页从不高亮） |
+| 中 | #6 #7 | `switchView` 重入分支改派发 `type:"update"`；`setCapabilities` 末尾统一 `refreshAll()`；新增 `captureUiState()` / `restoreUiState()`——LLD §3.3 要求的「按 viewId 存 UI 交互态」此前**从未采集**，原来的 `setState(hash, {})` 在 merge 语义下是 no-op |
+| 低 | #9~#16 | `escapeHtml` 抽到 `front/lib/escape.js`（原本两份逐字重复）；面板改用 `createElement` + `dataset`；`ROLE_DEFAULT_VIEW` 显式映射表（role 名与 view hash 同名是巧合不是契约）；demo 数据隔离到 `front/dev/`；状态栏/页脚文案改为从真实状态推导；补 `file://` 部署提示 |
+| **漏项 1** | #17 | `m02` 调用 `seedDemoBus()`，而该函数**从未定义**——评审只看到按钮是死的所以没暴露。**单纯按 #3 去掉前置条件，会把死按钮变成点了就抛 `ReferenceError`** |
+| **漏项 2** | #18 | `refreshAll()` 调 `mountPanels()` 会把**所有**面板加上 `hidden`，却从不调 `showPanel()` → 任何调用 `refreshAll()` 的路径都会让当前视图消失。缺陷是潜伏的：修复前 `refreshAll()` 唯一的调用点会先在 `seedDemoBus()` 上抛异常，够不到 |
+
+### 新增前端门禁（本轮最重要的结构性产出）
+
+前端此前**零测试**——没有 test runner、没有 CI 冒烟、没有 DOM 测试。这是 D-01 / D-02 长期潜伏的根因：Rust 侧 203 个测试全绿，页面却白屏。
+
+- `front/tests/dom-stub.mjs`：最小 DOM 替身（元素树 / 属性 / classList / dataset / innerHTML 解析 / 带冒泡的事件派发 / 选择器）
+- `front/tests/frontend.test.mjs`：**19 用例 / 6 suite**，零第三方依赖
+- `tools/check-front.sh`：门禁入口（Node ≥ 22）
+- `.github/workflows/ci.yml`：仓库此前**没有 CI**，而 PR 流程要求「CI 绿」——本次补 Rust（fmt / clippy / test）与前端两个 job
+- `package.json`：只有 `{"type":"module"}`，让 Node 确定性地把 `.js` 当 ESM，**没有依赖、没有构建步骤**
+
+门禁有效性用 **8 组变异测试**验证：把每个原始缺陷放回去，门禁必须变红——A（删 `mountViewStore` 导出）/ B（恢复双层转义）/ C（恢复 `row` 前置条件）/ D（`refreshAll` 少 `showPanel`）/ E（不设 `aria-current`）/ F（重入不派发）/ G（UI 态采集退化）/ H（`escapeHtml` 第二份实现）**全部 FAIL ✓**，还原后 PASS ✓。
+
+> 变异 C 首轮曾漏网：原断言只检查「store 里有 3 条映射」，而点击前就已 seed 过，死按钮同样能通过。已改为断言「点击确实发出了 `riscv:seed` 信号」且「点击确实重新 seed 了映射」。
+
+### 决策记录（v0.10.0）
+
+1. **修法取「删掉用不到的 import」而非「新增 `getActiveView()` 导出」** —— 不为没人用的符号扩大公开 API；`refreshAll` 保留即可
+2. **demo 数据隔离到 `front/dev/`，生产模块只发信号** —— M-02 只发 `riscv:seed`，dev 装配层消费；M-07 落地时该文件与 dev 按钮一起消失
+3. **UI 交互态按「真实采集」而非「改注释」闭环 #7** —— LLD §3.3 明确要求，采集终端滚动位置与视图体滚动位置（CSS 里 `.terminal-out` 是唯一 `overflow:auto` 的容器）
+4. **状态栏/页脚改为从真实状态推导** —— 写死的「kernel 待编译」在 kernel 早已跑通后仍挂在页面上；写死阶段号注定再次过期
+5. **新增 CI** —— 仓库此前无 CI，但 PR 流程要求「CI 绿」；补 Rust + 前端两个 job
+6. **门禁用 node:test + 自写 DOM stub，不引第三方依赖** —— 与「零构建、零依赖」的前端约束一致
+
+### 进度影响
+
+- **前端测试覆盖**：0 → **19 用例 / 6 suite**（`tools/check-front.sh`）
+- **前端代码行数**：1 123 → 1 402（含测试与 DOM stub）
+- **§3 人日**：不变（本轮为质量收口，不计入模块交付人日）
+- **跨模块欠账**：D-01 / D-02 / D-18 / D-19 / D-20 **全部闭环**；D-23（门禁缺口）**部分闭环**——第 1 项（ESM 链接检查）已加并升级为完整前端门禁，第 2~4 项（M-06 畸形输入 / M-13 x0 / M-12 快照）仍未加
+- **台账口径**：已开发模块 88 项 review 意见，闭环 83 项（94.3%），未闭环 5 项
+
+`cargo test --workspace` = **203 passed / 0 failed**（本轮未动 Rust 侧）；`cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo fmt --all -- --check` 通过；**前端门禁 19 passed / 0 failed**。
+
+---
 
 ## v0.9.1 变更摘要
 
@@ -501,7 +560,7 @@ RISC-V 仿真/调试平台项目处于 **MVP 启动期**。架构 + 23 篇模块
 > **MVP（P0）**：13 条 P0 功能（FR-01~12 + FR-23）· 2D 产品树/原理图 · 调试联动 + 波形 · 多视图 + 快照 · WASM 零安装
 > —— 架构文档 §11.1
 
-**部署形态**：浏览器 WASM 单文件自包含（file:// 直接打开，NFR-05）。本项目经用户决策可放宽为「可部署服务」双形态。
+**部署形态**：浏览器 WASM **目录形式**（不强制单文件自包含，NFR-05 经用户决策放宽）。**必须通过同源 HTTP(S) 部署**——ES module 与 Worker 均受同源策略约束，`file://` 直开会被浏览器拦截并白屏；既定方式为 `python3 -m http.server 8080 --directory front`（PROGRESS Q4 决议）。
 
 **装配边界**（§3.4 评审 L1）：
 - ✅ 嵌入式工作台（反汇编/断点/单步、Reg/Mem、trace、波形、项目树）— MVP 全量
@@ -898,6 +957,7 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 ## 9. 文档版本历史
 
 | 版本 | 日期 | 变更 | 作者 |
+| v0.10.0 | 2026-10-20 | **前端 M-01/02/03 首次模块级 review 闭环 18/18**（`docs/reviews/FRONTEND_Review.md` §七）：**修掉 2 项阻断级白屏缺陷**（D-01/D-02 ESM 链接期失败 → 页面 100% 空白）+ 5 项功能缺陷 + 9 项整洁项，**另捕获 2 项评审漏项**（`seedDemoBus()` 从未定义 / `refreshAll()` 会把当前面板藏掉）。**新增前端门禁**：`front/tests/` 19 用例（最小 DOM stub，零第三方依赖）+ `tools/check-front.sh` + `.github/workflows/ci.yml`（仓库此前无 CI），并以 8 组变异测试证明门禁能抓住同类回归。前端测试覆盖 0 → 19；台账 D-01/D-02/D-18/D-19/D-20 闭环，D-23 部分闭环 | agent (mavis) |
 | --- | --- | --- | --- |
 | v0.1 | 2026-10-19 | 初稿：建立项目状态、§13.6 WBS 校准、关键路径、下一里程碑 E2E-01、决策与风险 | agent (mavis) |
 | v0.2 | 2026-10-19 | MVP 范围从「选项 B（~30 人日）」升级到「选项 C（90 人日）」；补 Q1-Q7 已答复，DWARF/CI/场景脚本/多板接口预留纳入 MVP | agent (mavis) |
