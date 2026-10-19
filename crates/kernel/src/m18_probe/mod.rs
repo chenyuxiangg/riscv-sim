@@ -1,103 +1,57 @@
-//! M-18 探针 (Probe).
+//! M-18 探针 (Probe) — double-source probe pipeline.
 //!
-//! The probe pipeline attaches to bus signals and peripheral outputs
-//! to produce the edge-encoded waveform stream (M-19). This module
-//! owns the [`Probe`](riscv_sim_contract::port::Probe) trait and a
-//! default in-memory edge store.
+//! Two source layers (M-18 v0.8 §1.1, 决策点 4):
 //!
-//! Status: stub — public port adopted; no concrete probe sources yet.
+//! 1. **Bus trace** (底 / base layer): every `BusAccess` from M-14
+//!    flows into a separate ring buffer for M-11 trace export
+//!    (instruction coverage / memory-access log, FR-14). This stream
+//!    is *not* subject to the channel-based edge judgment below; it
+//!    is full-fidelity, drop-oldest on overflow.
+//!
+//! 2. **Peripheral signal probes** (面 / surface layer): each
+//!    peripheral reports signal changes through the additive
+//!    `Peripheral::on_probe` callback (M-18 v0.8 §18-2, contract
+//!    `ProbeSink`). The registry routes the report to the
+//!    appropriate channel, applies edge judgment (single-bit →
+//!    rising/falling, multi-bit → value, pulse → always-emit), and
+//!    accumulates edge events for the waveform (M-19 downstream).
+//!
+//! The two streams are independent (M-18 v0.8 §2.1.1: "traceStream
+//! 独立成流供 M-11 导出，不并入波形通道"). Both are read-only
+//! observations — M-18 never mutates simulation state.
+//!
+//! ## MVP wiring
+//!
+//! The "next target" from `docs/progress/PROGRESS.md` §6.3 is the
+//! **M-15 → M-18 signal source layer**. M-15 ships with the four
+//! default channel numbers (`CH_TIMER_CMP`, `CH_GPIO0`, `CH_IRQ_PULSE`,
+//! `CH_KEY_STATE`) but the actual `on_probe` override on
+//! `GpioBank` / `Uart16550` / `TimerRiscv` is part of the M-15 ↔ M-18
+//! wiring PR (D-12 in the cross-module debt ledger, deferred per
+//! the design).
+//!
+//! ## Module layout
+//!
+//! ```text
+//! m18_probe/
+//! ├── mod.rs          — re-exports + module doc
+//! ├── channel.rs      — ChannelDef, ChannelKind, classify()
+//! ├── trace_stream.rs — TraceStream (ring buffer + drop counter)
+//! ├── registry.rs     — ProbeRegistry (orchestrator + sample())
+//! └── tests.rs        — unit tests (LLD §7.1)
+//! ```
 
-use riscv_sim_contract::error::{ErrorFamily, PlatformError};
-use riscv_sim_contract::model::{Edge, Waveform, WaveformStream};
-use riscv_sim_contract::port::Probe;
-use std::collections::BTreeMap;
+pub mod channel;
+pub mod registry;
+pub mod trace_stream;
 
-/// In-memory edge store for a single probed signal.
-#[derive(Debug, Default)]
-pub struct InMemoryProbe {
-    id: String,
-    label: String,
-    edges: Vec<Edge>,
-}
+pub use channel::{ChannelDef, ChannelKind, CH_GPIO0, CH_IRQ_PULSE, CH_KEY_STATE, CH_TIMER_CMP};
+pub use registry::{ProbeError, ProbeRegistry, SampleCfg};
+pub use trace_stream::{TraceStream, TRACE_CAP};
 
-impl InMemoryProbe {
-    /// New probe with the given id and human-readable label.
-    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            label: label.into(),
-            edges: Vec::new(),
-        }
-    }
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
-    /// Snapshot the probe's edges as a [`WaveformStream`].
-    pub fn as_stream(&self) -> WaveformStream {
-        WaveformStream {
-            id: self.id.clone(),
-            label: self.label.clone(),
-            edges: self.edges.clone(),
-        }
-    }
-}
-
-impl Probe for InMemoryProbe {
-    fn id(&self) -> &str {
-        &self.id
-    }
-    fn observe(&mut self, now_ps: u64, value: u64) -> Result<(), PlatformError> {
-        if let Some(last) = self.edges.last_mut() {
-            if last.t_ps == now_ps {
-                last.value = value;
-                return Ok(());
-            }
-            if last.value == value {
-                // Collapse duplicates: same value as the most recent edge.
-                return Ok(());
-            }
-        }
-        self.edges.push(Edge {
-            t_ps: now_ps,
-            value,
-        });
-        Ok(())
-    }
-    fn drain(&mut self) -> Result<Vec<Edge>, PlatformError> {
-        Ok(std::mem::take(&mut self.edges))
-    }
-}
-
-/// Registry of probes keyed by id.
-#[derive(Debug, Default)]
-pub struct ProbeRegistry {
-    probes: BTreeMap<String, InMemoryProbe>,
-}
-
-impl ProbeRegistry {
-    /// New empty registry.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Register a probe.
-    pub fn register(&mut self, p: InMemoryProbe) {
-        let _ = self.probes.insert(p.id.clone(), p);
-    }
-
-    /// Take a snapshot of all probes' edges as a [`Waveform`].
-    pub fn drain_waveform(&mut self) -> Result<Waveform, PlatformError> {
-        let mut streams = Vec::with_capacity(self.probes.len());
-        for p in self.probes.values_mut() {
-            let id = p.id.clone();
-            let label = p.label.clone();
-            let edges = p.drain()?;
-            streams.push(WaveformStream { id, label, edges });
-        }
-        Ok(Waveform {
-            schema_version: 1,
-            streams,
-        })
-    }
-}
-
-/// Family used by errors raised from this module.
-pub const PROBE_FAMILY: ErrorFamily = ErrorFamily::Observability;
+#[cfg(test)]
+mod tests;

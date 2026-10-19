@@ -1,11 +1,105 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.7.3
+> **Document version**: v0.8.1
 > **Created**: 2026-10-19
 > **Last updated**: 2026-10-19
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.8.1 变更摘要
+
+**M-18 review 闭环 + `docs/reviews/` 文档体系建立**。本轮无新功能落地，是 M-14 / M-15 / M-18 三个模块 review 意见的收口与归档。
+
+### M-18 review 闭环（15 项 → 13 项闭环）
+
+按 `docs/reviews/M-18_Probe_Review.md` §一·五 闭环核对，落地 13 项可独立处理项：
+
+| 类别 | 落地内容 |
+| --- | --- |
+| **热路径性能** | `wire_signal_probe` 闭包直接路由 `sample_inner`，跳过 `record_signal` 的 `(periph_id.to_string(), signal.to_string())` 二次分配 |
+| **panic 风险** | `borrow_mut()` → `try_borrow_mut()`；借用冲突时静默丢弃该观察并累加 `borrow_contended` 计数，**不 panic 不阻塞**（外设回调上下文里阻塞会死锁） |
+| **边沿语义** | 新增 `prev_survives_enable_disable_cycle` + `prev_survives_master_disable_cycle` 两条测试**固化既有正确行为**——BTreeMap 的 `prev` 在关闭期间不会被清空（关闭时早退在 master/enable 检查，根本走不到写 `prev` 的路径）。原 review 推断「状态丢失」是错的，此处以测试纠正 |
+| **契约层** | `TraceEvent.dir: u8` 魔数 → 新增 `pub enum TraceDir { Read, Write }` + 双向 `From<AccessDir>`；`TraceEvent.dir` 改 `dir: TraceDir` |
+| **判定健壮性** | `ChannelDef::classify` 在 `SingleBit` 分支对 `prev`/`next` 各做 `& 1` 截断，违例输入（`prev=5, next=1`）也给出良定义结果 |
+| **环行鲁棒性** | `TraceStream` 新增 `initial_cap` 字段，`push`/`drain`/`capacity` 全部改用 `initial_cap` 而非 `buf.capacity()`，加 `debug_assert_eq!` —— **从此不再依赖 `Vec::with_capacity` 不超额分配这一未被编译期保证的行为** |
+| **文档** | `define_channel` auto-enable 副作用、`sample_irq_pulse` 通道未注册时「无脉冲 vs 未注册」不可区分、`with_capacity(0)` panic 指引、throttle 算法逐拍 trace，均在源码注释中显式化 |
+
+**未闭环 2 项**（均为低危整洁/技术债）：
+- **#10 契约 `Probe` trait 零实现** —— 全代码库无 `impl Probe for`，与 M-15 review #10 是同一个死契约，建议在 M-0 下一窗口统一清理
+- **#12 `drain_waveform` 借用交错** —— 迭代 `channels` 时 `edges.remove(ch)`，当前可用（不同字段），未来合并两表会 break
+
+### `docs/reviews/` 文档体系
+
+新建 `docs/reviews/` 目录，4 份文档：
+
+| 文件 | 内容 | 状态 |
+| --- | --- | --- |
+| `M-14_BusMemoryMap_Review.md` | 16 项 review + 闭环核对 | 模块内 100% 闭环，2 项跨模块挂账 |
+| `M-15_PeripheralModel_Review.md` | 19 项 review + 闭环核对 | 模块内 100% 闭环，1 项跨模块挂账 |
+| `M-18_Probe_Review.md` | 15 项 review + 闭环核对 | 13/15 闭环，2 项低危挂账 |
+| `CROSS_MODULE_DEBT.md` | **跨模块欠账台账** | 23 条 · 5 阻断 · 含阻塞拓扑与门禁缺口根因 |
+
+**台账是跨模块欠账的唯一追踪入口**：模块报告只管模块内部，跨模块项一律上收台账，按**修复归属模块**组织。
+
+### 决策记录（v0.8.1）
+
+1. **建立 `docs/reviews/` 目录 + 跨模块欠账台账** —— 模块报告管模块内、台账管跨模块，职责切分避免同一问题在两份报告里各记一半
+2. **跨模块项一律「上收台账 + 本轮不动」** —— 用户明确要求跨模块问题单独排期；台账记录归属模块、阻塞拓扑、处理批次
+3. **契约层 `TraceEvent.dir` 用 enum 替代 `u8` 魔数** —— 与 M-14 `AccessDir` 对齐；M-0 冻结范围内的第二次 additive 变更（第一次是 `Peripheral::read_clear`，第二次是 `Peripheral::on_probe` + `ProbeSink`，第三次是本条 `TraceDir`）
+4. **契约 `Probe` trait 暂不删、不实现** —— 留待 M-0 下一窗口与 M-15 report #10 一并清理，避免在模块 PR 里夹带契约破坏性变更
+
+### 进度影响
+
+- **§3 人日**：M-15 6 人日项推进到 5.5/6（剩 M-14 接线）；M-18 6 人日项中的 M-18 部分推进到 2/3（剩 M-14/M-15 接线 PR）
+- **§6.1 依赖表**：M-18 → M-19 的 blocker 进一步松动（M-18 侧 13/15 闭环，剩余 2 项不影响 M-19）
+- **§5.4 验收节点**：N5「GPIO 翻转可见」的**内核前置**已全部就位（M-15 GPIO `IN` 回读输出脚 + M-18 边沿判定 + `TraceDir` 化），仍需 M-14 ↔ M-15 ↔ M-18 接线 PR 才能端到端可达
+- **测试覆盖**：M-18 20 → 29 单测（+9）；workspace lib 98 → 107（+9）；workspace 累计 103 → **112 全绿**
+
+`cargo test --workspace` = **112 passed / 0 failed**（lib 107 + integration 5；v0.8 = 103 → v0.8.1 = +9）；`cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo fmt --all -- --check` 通过。
+
+---
+
+## v0.8 变更摘要
+
+按 §6.3「下个目标」落地 **M-18 探针**（PROGRESS 估 3 人日；本轮 ~0.5d 增量，stub 形态有 `InMemoryProbe`/`ProbeRegistry` 兜底，无新协议冻结点）。M-15 → M-18 接线是独立 PR（D-12 跨模块挂账，本轮不动）。
+
+**落地的子模块**（拆 4 个文件，按子组件独立 review + 测试）：
+
+| 子模块 | 文件 | 测试数 | 状态 |
+| --- | --- | --- | --- |
+| `ChannelDef` + `ChannelKind::{SingleBit, MultiBit, Pulse}` + `classify()` 边沿判定 | `crates/kernel/src/m18_probe/channel.rs` | (走 registry 单测) | ✅ |
+| `TraceStream` 环形窗口（容量 2×10⁵，溢出丢最旧 + `dropped` 计数 + `seq` 单调） | `crates/kernel/src/m18_probe/trace_stream.rs` | 3 单测 | ✅ |
+| `ProbeRegistry` 编排（`define_channel` + `attach_trace` 总线钩子 + `wire_signal_probe` 外设回调 + `sample` 边沿判定 + `setRate` + `drain_waveform` + `drain_trace` + `sample_irq_pulse`） | `crates/kernel/src/m18_probe/registry.rs` | 17 单测 | ✅ |
+| 契约层 additive 扩展：`Peripheral::on_probe` 默认 no-op + `ProbeSink = Box<dyn FnMut(&str, u64, u64)>` + 模型层 `EdgeKind` + `TraceEvent` | `crates/contract/src/{port,model}.rs` | 0（契约，不带测试） | ✅ |
+
+### 契约层变更（additive · 不破坏 M-0 冻结）
+
+- `riscv_sim_contract::port::Peripheral` trait 加默认方法 `fn on_probe(&mut self, _cb: Option<ProbeSink>) {}` —— 默认 no-op，与 M-15 review #2 同样的 additive 模式
+- `riscv_sim_contract::port::ProbeSink = Box<dyn FnMut(&str, u64, u64)>` —— 外设信号回调签名 `(signal_id, value, now_ps)`
+- `riscv_sim_contract::model::EdgeKind::{Rising, Falling, Value}` —— 单 bit 通道判升降、多 bit 通道折叠为 `Value`
+- `riscv_sim_contract::model::TraceEvent { t_ps, addr, width, dir }` —— 总线 trace 单事件（M-11 导出载体）
+
+### 决策记录（v0.8）
+
+1. **模块拆分 4 文件**（channel / trace_stream / registry / tests）—— 与 M-15 uart/gpio/timer 拆 5 文件对齐，方便独立子模块评审与回归
+2. **`prev` 用 `Option<u64>` 表达"未观测"** —— 设计文档伪码 `prev[ch]` 留了未初始化陷阱（M-18 v0.8 §3.3），本轮显式收为 `None` 时首次观察必发（不与"同值不产"语义冲突）
+3. **`wire_signal_probe` 不做冲突校验，冲突校验只在 `define_channel`** —— 设计文档 §3.2 的"同 ch 冲突拒绝"是 *通道定义* 冲突，不是 *外设绑线* 冲突；外设回调可重复安装（替换前一次 sink），符合 `Peripheral::on_probe(Option<…>)` 替换语义
+4. **总线侧走 `BusAccess.width.bytes()` 取字节数**（不是 `as u8` 拿 discriminant）—— `BusWidth::{Byte, Half, Word}` discriminant 是 0/1/2，需要 `.bytes()` 拿 1/2/4；`as u8` 的隐患先在测试里被发现
+5. **throttle 算法按设计文档 §3.3 走"先 decrement、>0 跳过、=0 发并 reset"** —— `throttle_n=4` 配 10 次观察 = 2 次发（第 4、第 8 次），不是 3 次（与 `ceil(10/4)` 不一致，是设计文档的语义）
+6. **`sample_irq_pulse` 便捷方法仅在 `CH_IRQ_PULSE` 注册为 `Pulse` 时工作** —— 不在通道表里时静默 no-op（避免凭空向未定义通道发事件）
+7. **M-15 ↔ M-18 接线（外设侧 `on_probe` override）单独 PR** —— D-12 跨模块挂账；本轮契约层已就位，M-15 三个外设（GpioBank/Uart16550/TimerRiscv）尚未 override `on_probe`，等接线 PR 一并改。PROGRESS §6.3 估算 3 人日，本轮 ~0.5d 增量
+
+### 进度影响
+
+- **§6.1 依赖表**：M-18 状态从 ❌ → ✅；M-19 波形（依赖 M-18）的 blocker 解锁
+- **§6.2 推进顺序图**：M-15 → M-18 箭头落地 ✅；下一站 M-19 波形管道
+- **测试覆盖**：M-18 0 → 20 单测（+20）；workspace lib 78 → 98（+20）；workspace 累计 83 → 103（+20）
+- **§5.4 验收节点**：未触及 N5「GPIO 翻转可见」（仍需 M-15 接线 PR 才能让固件写 OUT 时实际触发 M-18 边沿事件）；但 N5 的 *内核前置*（M-18 接收外设信号）已就位
+
+`cargo test --workspace` = **103 passed / 0 failed**（lib 98 + integration 5；v0.7.3 = 83 → v0.8 = +20）；`cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo fmt --all -- --check` 通过。
+
+---
 
 ## v0.7.3 变更摘要
 
@@ -229,9 +323,11 @@ Q1-Q7 全部答复（见 §8）：
 
 RISC-V 仿真/调试平台项目处于 **MVP 启动期**。架构 + 23 篇模块详细设计已归档；3-crate Cargo workspace + 23 个子模块骨架已建立；M-12 事件驱动引擎和 M-13 RV32I ISS 实现了最小子集（`addi` 单指令可执行，`cargo test --workspace` 两个核心单测 PASS）。
 
-按架构文档 §13.6 WBS 估算，**当前完成度约 13% / 90 人日**。下一步沿 §13.6 关键路径推进，目标：完成 **E2E-01 智能灯验收主线**（搭建 → 加载 → 运行 → 波形 → 单步 → 内存 → 判定）。
+按架构文档 §13.6 WBS 估算，**当前完成度约 23% / 90 人日**（v0.8.1 口径，详见 §3）。下一步沿 §13.6 关键路径推进，目标：完成 **E2E-01 智能灯验收主线**（搭建 → 加载 → 运行 → 波形 → 单步 → 内存 → 判定）。
 
 > ⚠️ **重要纠偏**：早期对话里把"MVP"误读为"两个单元测试通过"。重新校准后，正确定义见 §2。
+>
+> ⚠️ **跨模块欠账**：另有 23 条跨模块问题（5 阻断级）挂在 `docs/reviews/CROSS_MODULE_DEBT.md` 台账，**不在本文档的模块人日口径内**——它们是模块交付之后的集成欠账，需单独排期。台账里最靠前的是 **D-04（M-13 x0 未硬连线）**，它阻塞 Q7 决议的「Spike 对拍必做」。
 
 ---
 
@@ -350,16 +446,18 @@ RISC-V 仿真/调试平台项目处于 **MVP 启动期**。架构 + 23 篇模块
 [验收]  E2E-01 智能灯 跑通
 ```
 
-**已做的人日**（v0.5 估算）：
+**已做的人日**（v0.8.1 估算）：
 - ✅ 协议 5
 - ⚠️ ISS 2.5 / 12（ADDI + step_one_via_bus，1.5d 增量）
-- ⚠️ 引擎 1 / 6（调度器骨架）
-- ✅ 总线 2 / 4（v0.4 完成 Bus + BusMaster + 跨区间 split；剩余 4-KiB 分页 / 重叠告警等留 P1，详见 §7）
+- ⚠️ 引擎 1 / 6（调度器骨架；M-12 未接 ISS 指令预算与外设 tick）
+- ✅ 总线 2 / 4（v0.4 完成 Bus + BusMaster + 跨区间 split；v0.7.2 补完 6 项整洁项；剩余 4-KiB 分页 / 重叠告警等留 P1，详见 §7）
 - ✅ ELF 3 / 3（v0.5 完成）
-- ⚠️ 探针 0.5 / 6（修了 drain 但无源；M-14 trace hook 已就位）
+- ⚠️ 外设 5.5 / 6（M-15 三外设 + review 全闭环；剩 M-14 接线 PR）
+- ⚠️ 探针 2 / 3（M-18 v0.8 落地 + v0.8.1 闭环 13/15；剩 M-14/M-15 接线 PR）
 - ⚠️ 前端 3.5 / 10（v0.4 M-01/M-02/M-03 viewstore + 4 视图组件；剩余 waveform UI 渲染等后续）
+- ⚠️ 评审开销 ~1.5（M-14 / M-15 / M-18 三轮 review + 闭环，不计入模块交付人日）
 
-**累计 ~16.5 / 90 人日 ≈ 18%**（v0.5 完成后）。
+**累计 ~21 / 90 人日 ≈ 23%**（v0.8.1 完成后）。
 
 ---
 
@@ -581,6 +679,10 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 
 | 日期 | 决策 | 依据 |
 | --- | --- | --- |
+| 2026-10-19 | **建立 `docs/reviews/` 目录 + `CROSS_MODULE_DEBT.md` 跨模块欠账台账** | 模块报告管模块内问题、跨模块台账管跨模块问题，职责切分避免同一问题在两份报告里各记一半；台账按**修复归属模块**组织并记录阻塞拓扑与处理批次 |
+| 2026-10-19 | **跨模块 review 项一律「上收台账 + 本轮不动」，单独排期** | 用户明确要求跨模块问题（#6 分配上限 / #9 字段可见性 / #11 接线 size 一致性 / #12 M-12 tick）不在模块 PR 里夹带改动 |
+| 2026-10-19 | **契约 `TraceEvent.dir` 用 `enum TraceDir` 替代 `u8` 魔数** | 与 M-14 `AccessDir` 对齐；M-0 冻结范围内的第三次 additive 变更（前两次：`Peripheral::read_clear`、`Peripheral::on_probe` + `ProbeSink`） |
+| 2026-10-19 | **契约 `Probe` trait 暂不删也不实现，留待 M-0 下一窗口统一清理** | 全代码库零 `impl Probe for`，与 M-15 report #10 是同一个死契约；不在模块 PR 里做契约破坏性变更 |
 | 2026-10-19 | **M-14 区间管理用 `BTreeMap<u32, Region>`**（标准库红黑树）而非手写 AVL 增强 BST | MVP 区间数 ≤ 8，BTreeMap O(log n) + 简单正确；手写 AVL 不增加明显性能但增加错误面 |
 | 2026-10-19 | **M-14 Peripheral typed handle 用 `PeripheralId(u32)` 占位** | M-15 当前只有 DummyUart，没必要立即引入 `Rc<dyn Peripheral>` 生命周期；评审 14-11 留待 M-15 真实现 UART/GPIO 时升级 |
 | 2026-10-19 | **M-14 写跨区间两阶段：阶段一预检全部 byte slice → 阶段二统一执行** | LLD §3.2 评审 14-1 原子性要求：任一未映射 → 整笔失败，不允许 RAM 已写 + 异常上报的部分成功状态 |
@@ -631,6 +733,13 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 | 2026-10-19 | **M-14 review #6 跨模块挂账**：分配上限 | `Bus::prepare_bytes` 仍是裸 `vec![0u8; size as usize]`；需与 M-06 `ParseLimits` 联合改动加 `total_image_bytes` / `max_region_bytes`；畸形固件可在 WASM 内 OOM 触发 worker 崩溃 |
 | 2026-10-19 | **M-15 review §五 N1/N2/N3 闭环** | N1：抽 `m15_peripheral/reg.rs` 共享 `register_offset`/`extract_subword`，消除 review #5 引入的 6 份重复；N2：GPIO `IN` 寄存器回读输出脚（`pin_levels()` = outputs & directions \| inputs & !directions），解锁 N5「GPIO 翻转可见」+ M-18 波形；N3：去重位图 `line < 16` 放宽到 `line < 32`，与文档「unique IRQ line per pin」承诺一致 |
 | 2026-10-19 | **M-15 review §五 N2 优先级最高** | review §五「二次复查」明确标注：固件通过 OUT 驱动 LED 后无法从 IN 读回引脚电平，M-18 波形与 N5 验收都依赖此。已落地 |
+| 2026-10-19 | **M-18 契约层 additive 默认方法**（v0.8） | `Peripheral::on_probe(_cb: Option<ProbeSink>) {}` 默认 no-op；与 M-15 review #2 `read_clear` 同样的 additive 模式；M-0 冻结窗口不开 |
+| 2026-10-19 | **M-18 双源探针 + 双流分离** | trace 走 `BusAccess` 钩子 → 独立 `TraceStream` 环形（FR-14 导出）；波形走 `ProbeSink` 回调 → 边沿事件 → M-19 渲染；两流不混 |
+| 2026-10-19 | **M-18 边沿判定 `prev` 用 `Option<u64>`**（v0.8） | 设计文档 §3.3 伪码 `prev[ch]` 留了未初始化陷阱（首次观察必发但代码路径会"同值不产"过滤掉）；本轮显式收为 `None` 表达"未观测"，首观察必发 |
+| 2026-10-19 | **M-18 冲突校验只在 `define_channel`，不在 `wire_signal_probe`** | 设计文档 §3.2 的"同 ch 冲突拒绝"指 *通道定义* 冲突；外设回调可重复安装（替换前一次 sink），符合 `Option<…>` 替换语义 |
+| 2026-10-19 | **M-18 `BusWidth` 字节数走 `.bytes()` 不是 `as u8`** | `BusWidth` discriminant 是 0/1/2，需要 `.bytes()` 拿 1/2/4；测试 `make_bus_hook_routes_record_bus_access` 第一次就抓到这个错 |
+| 2026-10-19 | **M-18 throttle 算法 = "decrement; >0 跳过; =0 发并 reset"**（v0.8） | 设计文档 §3.3 语义；`throttle_n=4` 配 10 次观察 → 2 次发（第 4、第 8 次），不是 `ceil(10/4)=3`；M-18 测试注释已注明 |
+| 2026-10-19 | **M-18 ↔ M-15 接线单独 PR**（v0.8 决议） | 契约层 `Peripheral::on_probe` 已就位；M-15 三个外设（GpioBank/Uart16550/TimerRiscv）尚未 override `on_probe`，等接线 PR（D-12 跨模块挂账）。本轮不动 |
 
 ---
 
@@ -669,6 +778,8 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 | v0.7.1 | 2026-10-19 | 按 `docs/reviews/M-15_PeripheralModel_Review.md` 落地 19 项：**3 阻断 + 4 高 + 3 中 + 9 低 + 1 跨模块（#11 延 M3）**。契约层只用 additive 默认方法 `Peripheral::read_clear`（不开 M-0 解冻窗口）；UART 加 `take_tx()`、TX_OVERRUN 独立位、STATUS W1C；GPIO TOGGLE 改多 pin mask toggle、方向生效、pending 去重；Timer mtime 只读由引擎驱动；加 `FidelityLevel` 枚举；tests 16 → 25（+9）；lib 65 → 74（+9）；workspace 累计 **79 全绿** | agent (mavis) |
 | v0.7.2 | 2026-10-19 | 按 `docs/reviews/M-14_BusMemoryMap_Review.md` §四 闭环核对，落地剩余 6 项可独立处理（#10 belt-and-braces 删 / #11 read_bytes-write_bytes 改 Result / #12 wrapping_add 改 checked_add / #14 Byte 越界测试收紧 / #16 Tests cover 清单更新 + N5 删孤立横幅）；**2 项跨模块挂账**（#6 需 M-06 联改分配上限 / #9 影响 m06_load_to_bus + m02_viewcomponents 收紧 Region 可见性），按用户要求先不动。M-15 review v0.7.1 后无新增修改。workspace 累计 **79 全绿** | agent (mavis) |
 | v0.7.3 | 2026-10-19 | 按 `docs/reviews/M-15_PeripheralModel_Review.md` §五 复查遗留 3 项：**N1** 抽 `reg.rs` 共享 helper 消除 review #5 引入的 6 份重复（DRY 回归）；**N2** GPIO `IN` 寄存器回读输出脚（`pin_levels()` = outputs & directions \| inputs & !directions），解锁 N5「GPIO 翻转可见」+ M-18 波形；**N3** 去重位图 `line < 16` 放宽到 `line < 32` 同步注释。tests 25 → 29（+4）；workspace 累计 **83 全绿** | agent (mavis) |
+| v0.8 | 2026-10-19 | 按 §6.3「下个目标」落地 **M-18 探针**：4 子模块（channel/trace_stream/registry/tests）+ 契约层 additive 扩展（`Peripheral::on_probe` 默认 no-op + `ProbeSink` 类型别名 + `EdgeKind` 枚举 + `TraceEvent` 结构）。双源探针架构（总线 trace 走 `BusAccess` 钩子，外设信号走 `ProbeSink` 回调）；边沿判定 5 条规则（master switch / channel enable / throttle / pulse 旁路 / 同值过滤）；`TraceStream` 环形 2×10⁵ 容量 + dropped 计数 + seq 单调；`wire_signal_probe` 走 `Rc<RefCell<>>` 闭包桥接外设。M-15 ↔ M-18 接线是独立 PR（D-12 跨模块挂账）。tests 0 → 20（+20）；workspace 累计 **103 全绿** | agent (mavis) |
+| v0.8.1 | 2026-10-19 | **M-18 review 闭环 13/15** + **建立 `docs/reviews/` 文档体系**。M-18 落地 13 项：热路径去字符串分配（闭包直连 `sample_inner`）/ `try_borrow_mut` 消除 borrow panic（加 `borrow_contended` 计数）/ `prev` 跨 enable-disable 两条测试固化既有正确行为（原 review 推断有误，以测试纠正）/ 契约 `TraceEvent.dir` 改 `enum TraceDir` / `classify` SingleBit 做 `&1` 截断 / `TraceStream` 加 `initial_cap` 脱离 `Vec` 容量假设 / 4 处公开 doc 补全。**未闭环 2 项低危**：契约 `Probe` trait 死契约（与 M-15 report #10 同源，延 M-0 窗口）、`drain_waveform` 借用交错。新建 `docs/reviews/` 4 份文档（3 份模块报告 + `CROSS_MODULE_DEBT.md` 跨模块台账，23 条 / 5 阻断）。M-18 tests 20 → 29（+9）；workspace lib 98 → 107（+9）；workspace 累计 103 → **112 全绿**；累计人日 16.5 → ~21（≈23%） | agent (mavis) |
 | v0.2 | 2026-10-19 | 答复 Q1-Q7：自研固件 / RV32IMC 全集 / IndexedDB / 同源 Worker / canvas 比对 / macOS / Spike 必做；M-13 工作量上调至 12 人日；§5 step 2 同步更新；新增 §8 「已澄清问题」表与实施前置条件 | agent (mavis) |
 | v0.3 | 2026-10-19 | MVP 范围从 B（30d, DWARF 留 P1）升级到 **C（§13.6 全量 90 人日）**；§5 重写为 10 阶段计划（M0-M9）+ 13 P0 覆盖矩阵 + 8 个验收节点 + 关键路径图；§6 R7 改「纳入 MVP」；M0 已完成，剩余 85 人日 | agent (mavis) |
 
@@ -689,6 +800,15 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 - **LLD §2.5** 契约层定义（contract crate 唯一来源）
 - **M-12 / M-13 / M-14 / M-06 / M-15 / M-18 / M-19 / M-08** 模块详细设计
 
+**代码审查报告**（`docs/reviews/`，v0.8.1 起建立）：
+
+| 文件 | 覆盖范围 | 闭环状态 |
+| --- | --- | --- |
+| `M-14_BusMemoryMap_Review.md` | M-14 总线 16 项 | 模块内 100%；#6 / #9 跨模块挂账 |
+| `M-15_PeripheralModel_Review.md` | M-15 外设 19 项 | 模块内 100%；#6 / #11 跨模块挂账 |
+| `M-18_Probe_Review.md` | M-18 探针 15 项 | 13/15；#10 / #12 挂账 |
+| `CROSS_MODULE_DEBT.md` | **跨模块欠账台账**（23 条 · 5 阻断） | **跨模块问题的唯一追踪入口** |
+
 ---
 
 ## 11. 仓库与命令
@@ -697,7 +817,9 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 # 验证
 source $HOME/.cargo/env
 cd /Users/zyzs/lczyzs/code/riscv_sim
-cargo test --workspace          # 2 个 MVP 单测 PASS
+cargo test --workspace          # 112 passed / 0 failed（lib 107 + integration 5）
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
 
 # 提交
 git status                      # 改动一览
@@ -710,6 +832,12 @@ tools/build-wasm.sh             # 输出 front/assets/pkg/
 # 前端启动
 python3 -m http.server 8080 --directory front
 ```
+
+**代码审查与跨模块欠账**（`docs/reviews/`）：
+
+- 模块内部问题 → 对应模块报告（`M-14` / `M-15` / `M-18`）
+- **跨模块问题 → `docs/reviews/CROSS_MODULE_DEBT.md` 台账**（按修复归属模块组织，含阻塞拓扑与处理批次）
+- 当前台账：23 条 · 5 阻断级 · 关键路径最靠前的是 **D-04（M-13 x0 未硬连线）**——Q7 决议「Spike 对拍必做」，越晚修 golden 用例返工面越大
 
 ---
 

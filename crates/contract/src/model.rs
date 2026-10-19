@@ -383,3 +383,73 @@ impl Default for Edge {
         Self { t_ps: 0, value: 0 }
     }
 }
+
+/// Edge kind (M-18 v0.8 §18-3).
+///
+/// Single-bit channels (e.g. one GPIO pin) distinguish `Rising` from
+/// `Falling`. Multi-bit channels collapse both into `Value` because
+/// rising/falling on a multi-bit word is ambiguous (which bit?). The
+/// frontend renders both kinds the same way (staircase step on the
+/// new value); `Rising` / `Falling` is a hint for the rendered arrow
+/// direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EdgeKind {
+    /// 0 → 1 transition on a single-bit channel.
+    Rising,
+    /// 1 → 0 transition on a single-bit channel.
+    Falling,
+    /// Multi-bit value change (rising / falling not classified).
+    Value,
+}
+
+/// Bus trace direction (M-18 v0.8 §18-1, §18-8, review #11 2026-10-19).
+///
+/// Replaces the bare `dir: u8` magic-number field that originally
+/// lived on `TraceEvent`. The wire encoding is `0` for read, `1`
+/// for write (matches the `tracing`-style convention so external
+/// tooling can filter on the raw byte without knowing the kernel
+/// enum) — but the in-memory representation is a typed enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TraceDir {
+    /// Memory read access.
+    Read,
+    /// Memory write access.
+    Write,
+}
+
+impl TraceDir {
+    /// Wire byte (`0` = read, `1` = write) for external tooling.
+    pub fn as_byte(self) -> u8 {
+        match self {
+            TraceDir::Read => 0,
+            TraceDir::Write => 1,
+        }
+    }
+}
+
+impl Default for TraceDir {
+    fn default() -> Self {
+        TraceDir::Read
+    }
+}
+
+/// Bus trace event (M-18 v0.8 §18-1, §18-8).
+///
+/// One event per `BusAccess` that passes the trace filter. Lives in
+/// the contract so M-11 (trace export) can consume it without
+/// depending on the kernel crate.
+///
+/// Width is byte-count (1, 2, 4). Direction is the typed
+/// [`TraceDir`] enum (M-18 review #11, 2026-10-19; previously was
+/// a `u8` magic number).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceEvent {
+    /// Virtual time of the bus access (ps).
+    pub t_ps: u64,
+    /// Physical address of the *first byte* of the access.
+    pub addr: u32,
+    /// Access width in bytes (1, 2, 4).
+    pub width: u8,
+    /// Access direction.
+    pub dir: TraceDir,
+}

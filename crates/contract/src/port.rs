@@ -9,6 +9,22 @@ use crate::error::PlatformError;
 use crate::model::{PendingWrite, SimState};
 use crate::protocol::{CommandPayload, EventPayload};
 
+/// Callback signature for peripheral signal reports (M-18 v0.8 §18-2,
+/// additive — see M-15 review #2 for the additive default-method pattern).
+///
+/// The peripheral invokes this when its own state changes in a way
+/// observable to the waveform (e.g. GPIO OUT transition, UART TX pin
+/// level). The closure receives `(signal_id, value, now_ps)`. Signal id
+/// is a stable string per peripheral (e.g. `"OUT"`, `"TX"`); M-18 looks
+/// up the channel bound to `(periph_id, signal_id)` and decides whether
+/// to emit an edge event.
+///
+/// MVP scope: single-threaded (no `Send`); matches M-14's `BusHook`
+/// posture. When the production stack adds multithreaded dispatchers,
+/// add the `+ Send` bound and re-export a new alias (the contract stays
+/// additive — existing peripherals do not need to change).
+pub type ProbeSink = Box<dyn FnMut(&str, u64, u64)>;
+
 /// Driven port: front-end → session / command router (M-05).
 ///
 /// The session owns the receive loop; it converts inbound [`Message`]s
@@ -116,6 +132,19 @@ pub trait Peripheral {
     /// Called once per quantum (1µs by default). Returns the writes
     /// the peripheral wants to commit to the bus this quantum.
     fn tick(&mut self, now_ps: u64) -> Result<Vec<PendingWrite>, PlatformError>;
+    /// Install / replace a probe callback (M-18 v0.8, additive — see
+    /// M-15 review #2 for the additive default-method pattern).
+    ///
+    /// The peripheral invokes this when its own state changes in a way
+    /// observable to the waveform (e.g. GPIO OUT transition, UART TX
+    /// pin level). Pass `None` to detach.
+    ///
+    /// Default = no-op; peripherals that wish to expose signals
+    /// override this. M-15 review §五 N1 keeps the default benign so
+    /// existing peripherals (Uart16550, GpioBank, TimerRiscv,
+    /// DummyUart) do not need to change unless they actually want to
+    /// report signals.
+    fn on_probe(&mut self, _cb: Option<ProbeSink>) {}
 }
 
 /// Driven port: peripheral → interrupt controller (M-15 → M-16).
