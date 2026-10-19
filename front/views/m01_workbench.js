@@ -209,6 +209,10 @@ export function setCapabilities(caps) {
     if (activeView && !currentCapBits.has(activeView.capability)) {
         route(`#/${currentRole}`);
     }
+    // Re-render against the new capabilities: views that just became
+    // permitted need their panels mounted, and the active view may be
+    // stale (FRONTEND_Review.md #6).
+    refreshAll();
 }
 
 /**
@@ -230,9 +234,12 @@ export function switchView(target) {
         syncTabState(target.hash);
         return evt;
     }
-    // Save current view state to the store.
+    // Capture the outgoing view's UI interaction state (LLD §3.3).
+    // The kernel state already lives in M-03 — what is missing there is
+    // the *UI* state (scroll positions, folding), which only the DOM
+    // knows about (FRONTEND_Review.md #7).
     if (activeView) {
-        viewStore.setState(activeView.hash, {});
+        captureUiState(activeView.hash);
     }
     // Restore / initialise the target view state.
     let state = viewStore.getState(target.hash);
@@ -261,6 +268,8 @@ export function switchView(target) {
         state,
     };
     dispatchRenderEvent(evt);
+    // Put the view's UI interaction state back after the re-render.
+    restoreUiState(target.hash);
     return evt;
 }
 
@@ -272,13 +281,15 @@ export function switchView(target) {
  */
 export function refreshAll() {
     mountPanels();
-    if (activeView) {
-        dispatchRenderEvent({
-            viewId: activeView.hash,
-            type: "update",
-            state: viewStore.getState(activeView.hash) ?? {},
-        });
-    }
+    if (!activeView) return;
+    // mountPanels() hides every panel — the active one has to be shown
+    // again, otherwise a capability flip blanks the screen.
+    showPanel(activeView);
+    dispatchRenderEvent({
+        viewId: activeView.hash,
+        type: "update",
+        state: viewStore.getState(activeView.hash) ?? {},
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +298,6 @@ export function refreshAll() {
 
 /** Mount the per-view panels into the DOM (idempotent). */
 function mountPanels() {
-    const seen = new Set();
     for (const v of VIEW_REGISTRY.values()) {
         if (!currentCapBits.has(v.capability)) continue;
         let panel = document.querySelector(v.panel);
@@ -295,7 +305,6 @@ function mountPanels() {
             panel = createPanel(v);
             document.getElementById("app")?.appendChild(panel);
         }
-        seen.add(v.hash);
     }
     // Always ensure a fallback panel exists.
     if (!document.querySelector(FALLBACK_VIEW.panel)) {
@@ -343,6 +352,43 @@ function syncTabState(hash) {
         } else {
             tab.removeAttribute("aria-current");
         }
+    }
+}
+
+/**
+ * Capture the UI interaction state of a view before leaving it
+ * (LLD §3.3 — "per-view UI interaction state": folding, zoom, terminal
+ * scroll position). Only the DOM knows these values, so they are read
+ * on the way out and written back into M-03 on the way in.
+ *
+ * @param {string} viewId
+ */
+function captureUiState(viewId) {
+    const body = document.querySelector(`[data-view-body="${viewId}"]`);
+    if (!body) return;
+    const terminal = body.querySelector("[data-terminal-out]");
+    viewStore.setState(viewId, {
+        ui: {
+            scrollTop: body.scrollTop,
+            terminalScrollTop: terminal ? terminal.scrollTop : 0,
+        },
+    });
+}
+
+/**
+ * Restore the UI interaction state of a view after it has been rendered.
+ *
+ * @param {string} viewId
+ */
+function restoreUiState(viewId) {
+    const body = document.querySelector(`[data-view-body="${viewId}"]`);
+    if (!body) return;
+    const ui = viewStore.getState(viewId)?.ui;
+    if (!ui) return;
+    if (typeof ui.scrollTop === "number") body.scrollTop = ui.scrollTop;
+    const terminal = body.querySelector("[data-terminal-out]");
+    if (terminal && typeof ui.terminalScrollTop === "number") {
+        terminal.scrollTop = ui.terminalScrollTop;
     }
 }
 
