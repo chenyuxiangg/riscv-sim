@@ -16,7 +16,7 @@
 // wired yet) — components render with empty state and update locally.
 
 import * as viewStore from "./m03_viewstore.js";
-import { activeView, refreshAll } from "./m01_workbench.js";
+import { refreshAll } from "./m01_workbench.js";
 
 // ---------------------------------------------------------------------------
 // ViewComponent shape (LLD §2.1.1)

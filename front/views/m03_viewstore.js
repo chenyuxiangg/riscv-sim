@@ -74,3 +74,19 @@ export function reset() {
     for (const set of subscribers.values()) set.clear();
     subscribers.clear();
 }
+
+// ---------------------------------------------------------------------------
+// Bootstrap
+// ---------------------------------------------------------------------------
+
+/**
+ * Mount hook. The store is a module-level singleton (an ES module is
+ * naturally a singleton), so there is nothing to construct — this
+ * exists to give the store the same async mount contract as the other
+ * services and to give the bootstrap a uniform call shape.
+ *
+ * @returns {Promise<void>}
+ */
+export async function mountViewStore() {
+    return Promise.resolve();
+}
