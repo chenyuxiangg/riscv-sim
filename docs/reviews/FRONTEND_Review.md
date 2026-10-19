@@ -11,7 +11,9 @@
 >
 > ## ✅ 闭环状态（2026-10-20 · 分支 `fix/frontend-review-closure`）
 >
-> **16 项全部闭环**，另捕获并修复 **2 项评审漏项**（#17 / #18，见 §七·2）；新增前端门禁 **19 用例 / 6 suite 全绿**（`tools/check-front.sh`），并以 **8 组变异测试**证明门禁能抓住同类回归。逐项核对见 **§七**。
+> **16 项全部闭环**，另捕获并修复 **4 项评审漏项**（#17 / #18 见 §七·2，**#19 / #20 见 §七·2.1**）；新增前端门禁 **21 用例 / 7 suite 全绿**（`tools/check-front.sh`），并以 **10 组变异测试**证明门禁能抓住同类回归。
+>
+> ⚠️ **#19 / #20 是评审漏项，且只有真实浏览器能暴露**：修完白屏后，页面能起来，但**每个视图体都是空的**——DOM stub 测试对此完全隐形（见 §七·2.1）。逐项核对见 **§七**。
 
 ---
 
@@ -151,6 +153,8 @@ front/index.html:13-18:  <a ... data-view-tab="product">产品</a>  （共 6 个
 | 14 | 低 | ✅ | 新增 `ROLE_DEFAULT_VIEW` 显式映射表；`assembleWorkspace()` 与 `route()` 的兜底都改走它 | 角色切换后视图集合断言通过 |
 | 15 | 低 | ✅ | demo 数据移到 `front/dev/demo-state.js`；M-02 只发 `riscv:seed` 信号，dev 装配层消费 | `front/dev/` 与 `front/views/` 边界清晰；生产模块不再持有假数据 |
 | 16 | 低 | ✅ | 新增 `front/tests/dom-stub.mjs` + `front/tests/frontend.test.mjs`（19 用例）+ `tools/check-front.sh` + `.github/workflows/ci.yml` | `tools/check-front.sh` → 19 pass / 0 fail |
+| **19** | 中 | ✅ | 漏项，见 §七·2.1 | 真机：初始面板可见；变异 J → 门禁变红 |
+| **20** | **阻断** | ✅ | 漏项，见 §七·2.1 | 真机：产品视图完整渲染（产品树 / 内存映射）；变异 I → 门禁变红 |
 
 ### 7.2 评审漏项（本次修复中新发现）
 
@@ -158,6 +162,17 @@ front/index.html:13-18:  <a ... data-view-tab="product">产品</a>  （共 6 个
 | --- | --- | --- | --- | --- |
 | **17** | 高 | `m02:116` 调用 `seedDemoBus()`，该函数在整个 `front/` **从未定义** | 评审看到按钮被 `row &&` 前置条件挡住，判定为「死按钮」，因此没有沿着调用链往下看。**单纯按 #3 去掉前置条件，会把死按钮变成点了就抛 `ReferenceError`** | 改为调用 `seedBus()` 信号；demo 数据由 `front/dev/demo-state.js` 提供 |
 | **18** | 中 | `refreshAll()` 调 `mountPanels()` 会把**所有**面板加上 `hidden`，却从不调 `showPanel()` → 任何调用 `refreshAll()` 的路径都会让当前视图消失（白屏） | 评审只指出「能力位变更后视图内容不更新」，未追到 `refreshAll` 的实现；且该缺陷是**潜伏**的——修复前 `refreshAll()` 唯一的调用点（`m02.onCommand`）会先在 `seedDemoBus()` 上抛异常，够不到 | `refreshAll()` 补 `showPanel(activeView)`；实测：修复前 `visible=true → false`，修复后保持 `true` |
+
+### 7.2.1 真机验证暴露的两个漏项（stub 测试完全隐形）
+
+§七·1 全部闭环后，用**真实浏览器**（`python3 -m http.server` + Electron，截图核对）复验，发现页面能起来但**每个视图体都是空的**——评审的 16 项修完仍不可用。这两项**对 DOM stub 测试完全隐形**：测试都在 bootstrap 之后才调 `route()`，那时监听早已就位；只有真实浏览器的「刷新页面 / 带 hash 直接打开」路径会命中。
+
+| # | 严重度 | 问题 | 为何评审与 stub 都抓不到 | 落点 |
+| --- | --- | --- | --- | --- |
+| **19** | 中 | `switchView()` 的「同视图早返回」分支不调 `showPanel()`，而 `mountPanels()` 会把**所有**面板加上 `hidden`。bootstrap 的首次路由恰好命中该分支（初始视图是预置的）→ 当前面板再也没被点亮 → **主区域整块空白** | 评审只追了「视图内容不更新」，没注意面板**可见性**是另一条独立的状态线 | 该分支补 `showPanel(target)` |
+| **20** | **阻断** | **首次 `riscv:render` 事件被丢弃**：`mountWorkbench()` 内部做初始路由并派发**第一个** render 事件，而订阅方 `mountViewComponents()` 在 `Promise.all([mountWorkbench(), mountViewComponents(), ...])` 里**排在后面**（数组字面量从左到右求值）→ 事件派发时还没人订阅 → **视图体永远空白** | 评审做的是「静态 + 链接期」分析，没做运行期时序分析；stub 测试则因为都在 bootstrap 之后触发路由而系统性错过 | ① `app.js` 把 `mountViewComponents()` 排到 `Promise.all` 首位；② `m01` 的初始路由改用 `queueMicrotask` 延到当前任务之后——两处独立地保证「订阅先于首次派发」 |
+
+**真机验证结论**（修复后，截图证据）：页面正常启动不再白屏；初始视图完整渲染（产品视图 / 产品树 / 内存映射 (M-14) / 提示段）；活动标签页高亮；状态栏由 transport 状态推导；页脚由 JS 填充 role 与已挂载视图列表。
 
 ### 7.3 门禁与变异测试
 
@@ -175,6 +190,8 @@ front/index.html:13-18:  <a ... data-view-tab="product">产品</a>  （共 6 个
 | F · 重入不再派发 render | #6 | 🔴 FAIL ✓ |
 | G · UI 态采集退化为 `setState(hash, {})` | #7 / D-19 | 🔴 FAIL ✓ |
 | H · `escapeHtml` 出现第二份实现 | #9 | 🔴 FAIL ✓ |
+| I · 退回原始挂载顺序 + 同步路由 | #20 | 🔴 FAIL ✓（`innerHTML 长度 0`） |
+| J · 少 `showPanel(target)` | #19 | 🔴 FAIL ✓ |
 | — 全部还原 | — | 🟢 PASS ✓ |
 
 > 变异 C **首轮曾漏网**：原断言只检查「store 里有 3 条映射」，而点击前就已 seed 过，死按钮同样能通过。已改为断言「点击确实发出了 `riscv:seed` 信号」且「点击确实重新 seed 了映射」，复测通过。
@@ -197,3 +214,4 @@ front/index.html:13-18:  <a ... data-view-tab="product">产品</a>  （共 6 个
 | `97c85ac` | refactor(front): escape 单点化 / 面板改用 DOM 构造 / role→默认视图显式映射 |
 | `bb59e6a` | chore(front): 状态栏/页脚文案改为从真实状态推导 + 补 file:// 部署提示 |
 | `ed66337` | test(front): 新增前端冒烟门禁（node:test + DOM stub + CI） |
+| `6fc9e1f` | fix(front): 修复「视图体全空」——首次 render 事件被丢弃 + 初始面板不显示 |

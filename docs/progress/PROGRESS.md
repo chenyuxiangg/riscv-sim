@@ -30,6 +30,16 @@ ES module 的链接错误发生在**任何代码执行之前**——`bootstrap()
 | 低 | #9~#16 | `escapeHtml` 抽到 `front/lib/escape.js`（原本两份逐字重复）；面板改用 `createElement` + `dataset`；`ROLE_DEFAULT_VIEW` 显式映射表（role 名与 view hash 同名是巧合不是契约）；demo 数据隔离到 `front/dev/`；状态栏/页脚文案改为从真实状态推导；补 `file://` 部署提示 |
 | **漏项 1** | #17 | `m02` 调用 `seedDemoBus()`，而该函数**从未定义**——评审只看到按钮是死的所以没暴露。**单纯按 #3 去掉前置条件，会把死按钮变成点了就抛 `ReferenceError`** |
 | **漏项 2** | #18 | `refreshAll()` 调 `mountPanels()` 会把**所有**面板加上 `hidden`，却从不调 `showPanel()` → 任何调用 `refreshAll()` 的路径都会让当前视图消失。缺陷是潜伏的：修复前 `refreshAll()` 唯一的调用点会先在 `seedDemoBus()` 上抛异常，够不到 |
+| **漏项 3** | #19 | `switchView()` 的「同视图早返回」分支不调 `showPanel()`，而 `mountPanels()` 把所有面板都藏了 → bootstrap 首次路由恰好命中该分支 → **主区域整块空白** |
+| **漏项 4** | #20 | **首次 `riscv:render` 事件被丢弃**：`mountWorkbench()` 内部做初始路由并派发第一个 render 事件，而订阅方 `mountViewComponents()` 在 `Promise.all` 里排在后面（数组字面量从左到右求值）→ 事件派发时还没人订阅 → **视图体永远空白** |
+
+### 真机复验：修完白屏后，视图体仍然是空的
+
+§六闭环全部落地后，用**真实浏览器**（`python3 -m http.server` + Electron，截图核对）复验，发现页面能起来但**每个视图体都是空的**——评审的 16 项修完仍不可用。这是 **#19 / #20** 两个漏项。
+
+**为什么 DOM stub 测试抓不到**：测试都在 bootstrap 之后才调 `route()`，那时监听早已就位；只有真实浏览器的「刷新页面 / 带 hash 直接打开」路径会命中「首次派发早于订阅」这个时序。**教训**：stub 能覆盖状态与行为，覆盖不了**挂载时序**——这类缺陷必须真机复验。
+
+修复后真机确认：页面正常启动不再白屏；初始视图完整渲染（产品视图 / 产品树 / 内存映射 (M-14) / 提示段）；活动标签页高亮；状态栏由 transport 状态推导；页脚由 JS 填充 role 与已挂载视图列表。
 
 ### 新增前端门禁（本轮最重要的结构性产出）
 
@@ -37,11 +47,12 @@ ES module 的链接错误发生在**任何代码执行之前**——`bootstrap()
 
 - `front/tests/dom-stub.mjs`：最小 DOM 替身（元素树 / 属性 / classList / dataset / innerHTML 解析 / 带冒泡的事件派发 / 选择器）
 - `front/tests/frontend.test.mjs`：**19 用例 / 6 suite**，零第三方依赖
+- `front/tests/initial-render.test.mjs`：**单独进程**以 `?role=product` 启动（初始视图必须**有组件**，否则缺陷不可见），断言产品视图体确实渲染出「产品树」「内存映射」——这条专门锁住 #20 的时序不变量
 - `tools/check-front.sh`：门禁入口（Node ≥ 22）
 - `.github/workflows/ci.yml`：仓库此前**没有 CI**，而 PR 流程要求「CI 绿」——本次补 Rust（fmt / clippy / test）与前端两个 job
 - `package.json`：只有 `{"type":"module"}`，让 Node 确定性地把 `.js` 当 ESM，**没有依赖、没有构建步骤**
 
-门禁有效性用 **8 组变异测试**验证：把每个原始缺陷放回去，门禁必须变红——A（删 `mountViewStore` 导出）/ B（恢复双层转义）/ C（恢复 `row` 前置条件）/ D（`refreshAll` 少 `showPanel`）/ E（不设 `aria-current`）/ F（重入不派发）/ G（UI 态采集退化）/ H（`escapeHtml` 第二份实现）**全部 FAIL ✓**，还原后 PASS ✓。
+门禁有效性用 **10 组变异测试**验证：把每个原始缺陷放回去，门禁必须变红——A（删 `mountViewStore` 导出）/ B（恢复双层转义）/ C（恢复 `row` 前置条件）/ D（`refreshAll` 少 `showPanel`）/ E（不设 `aria-current`）/ F（重入不派发）/ G（UI 态采集退化）/ H（`escapeHtml` 第二份实现）/ I（退回原始挂载顺序 + 同步路由）/ J（少 `showPanel(target)`）**全部 FAIL ✓**，还原后 PASS ✓。
 
 > 变异 C 首轮曾漏网：原断言只检查「store 里有 3 条映射」，而点击前就已 seed 过，死按钮同样能通过。已改为断言「点击确实发出了 `riscv:seed` 信号」且「点击确实重新 seed 了映射」。
 
@@ -56,7 +67,7 @@ ES module 的链接错误发生在**任何代码执行之前**——`bootstrap()
 
 ### 进度影响
 
-- **前端测试覆盖**：0 → **19 用例 / 6 suite**（`tools/check-front.sh`）
+- **前端测试覆盖**：0 → **21 用例 / 7 suite**（`tools/check-front.sh`）
 - **前端代码行数**：1 123 → 1 402（含测试与 DOM stub）
 - **§3 人日**：不变（本轮为质量收口，不计入模块交付人日）
 - **跨模块欠账**：D-01 / D-02 / D-18 / D-19 / D-20 **全部闭环**；D-23（门禁缺口）**部分闭环**——第 1 项（ESM 链接检查）已加并升级为完整前端门禁，第 2~4 项（M-06 畸形输入 / M-13 x0 / M-12 快照）仍未加
@@ -957,7 +968,7 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 ## 9. 文档版本历史
 
 | 版本 | 日期 | 变更 | 作者 |
-| v0.10.0 | 2026-10-20 | **前端 M-01/02/03 首次模块级 review 闭环 18/18**（`docs/reviews/FRONTEND_Review.md` §七）：**修掉 2 项阻断级白屏缺陷**（D-01/D-02 ESM 链接期失败 → 页面 100% 空白）+ 5 项功能缺陷 + 9 项整洁项，**另捕获 2 项评审漏项**（`seedDemoBus()` 从未定义 / `refreshAll()` 会把当前面板藏掉）。**新增前端门禁**：`front/tests/` 19 用例（最小 DOM stub，零第三方依赖）+ `tools/check-front.sh` + `.github/workflows/ci.yml`（仓库此前无 CI），并以 8 组变异测试证明门禁能抓住同类回归。前端测试覆盖 0 → 19；台账 D-01/D-02/D-18/D-19/D-20 闭环，D-23 部分闭环 | agent (mavis) |
+| v0.10.0 | 2026-10-20 | **前端 M-01/02/03 首次模块级 review 闭环 20/20**（`docs/reviews/FRONTEND_Review.md` §七）：**修掉 2 项阻断级白屏缺陷**（D-01/D-02 ESM 链接期失败 → 页面 100% 空白）+ 5 项功能缺陷 + 9 项整洁项，**另捕获 4 项评审漏项**（`seedDemoBus()` 从未定义 / `refreshAll()` 会把当前面板藏掉 / `switchView` 同视图分支不 `showPanel()` / **首次 render 事件因挂载顺序被丢弃**）。**真机复验**（Electron + HTTP 服务）又暴露后两项——修完白屏后视图体仍全空，且对 DOM stub 完全隐形。**新增前端门禁**：`front/tests/` 21 用例（最小 DOM stub，零第三方依赖）+ `tools/check-front.sh` + `.github/workflows/ci.yml`（仓库此前无 CI），并以 10 组变异测试证明门禁能抓住同类回归。前端测试覆盖 0 → 21；台账 D-01/D-02/D-18/D-19/D-20 闭环，D-23 部分闭环 | agent (mavis) |
 | --- | --- | --- | --- |
 | v0.1 | 2026-10-19 | 初稿：建立项目状态、§13.6 WBS 校准、关键路径、下一里程碑 E2E-01、决策与风险 | agent (mavis) |
 | v0.2 | 2026-10-19 | MVP 范围从「选项 B（~30 人日）」升级到「选项 C（90 人日）」；补 Q1-Q7 已答复，DWARF/CI/场景脚本/多板接口预留纳入 MVP | agent (mavis) |
