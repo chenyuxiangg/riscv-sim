@@ -132,9 +132,13 @@ riscv_sim/
 
 ## PR & commit conventions
 
+详见 [`CONTRIBUTING.md`](./CONTRIBUTING.md)（含 SSH 配置、conventional commits 完整规范、PR 流程、提交前自检清单、不允许做的事）。
+
+要点速览：
 - 默认分支：`main`
 - 分支命名：`<type>/<scope>`（如 `feature/m12-engine-quantum`、`fix/m13-iss-bug-123`）
-- Commit message：conventional commits（`feat:` / `fix:` / `docs:` / `refactor:` / `test:`）
+- Commit message：Conventional Commits 1.0.0（`feat:` / `fix:` / `docs:` / `refactor:` / `test:` / `perf:` / `build:` / `ci:` / `chore:` / `revert:`）
+- 仓库 SSH：`git@github.com:chenyuxiangg/riscv-sim.git`（HTTPS 不支持）
 - PR：CI 绿 + 至少 1 个 reviewer 批准；commit message 关联 issue 或 ADR 编号
 - 架构变更（涉及 ADR、模块边界）：需更新 `docs/` 下对应设计文档后再合入
 
