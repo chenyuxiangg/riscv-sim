@@ -50,7 +50,10 @@ pub struct Engine<B: EventBus, I: InterruptSink> {
     now_ps: u64,
     /// Pending events, time-ordered.
     queue: std::collections::BinaryHeap<QueuedEvent>,
-    /// Instruction budget for the current quantum.
+    /// Instruction budget for the current quantum. Reserved for the
+    /// watchdog pre-check (M-12 §5.2 + LLD §4.12.6); not yet threaded
+    /// through `dispatch` in the MVP skeleton.
+    #[allow(dead_code)]
     instruction_budget: u32,
     /// Bus / event / interrupt sinks.
     bus: B,
@@ -70,13 +73,17 @@ struct QueuedEvent {
 
 impl PartialOrd for QueuedEvent {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        // Reverse: earliest first.
+        // Reverse: earliest first. Non-canonical: the `Ord` impl flips
+        // ordering so BinaryHeap acts as a min-heap.
+        // (Lint explicitly allowed at the impl block.)
         other.at_ps.partial_cmp(&self.at_ps)
     }
 }
 impl Ord for QueuedEvent {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.at_ps.cmp(&self.at_ps)
+        other
+            .at_ps
+            .cmp(&self.at_ps)
             .then_with(|| other.seq.cmp(&self.seq))
     }
 }
@@ -95,7 +102,9 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
     }
 
     /// Current virtual time in picoseconds.
-    pub fn now_ps(&self) -> u64 { self.now_ps }
+    pub fn now_ps(&self) -> u64 {
+        self.now_ps
+    }
 
     /// Schedule an event for the given virtual time.
     pub fn schedule(&mut self, at_ps: u64, event: SchedEvent) {
@@ -121,15 +130,19 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
         while self.queue.peek().is_some() {
             // Advance the clock by exactly one quantum.
             self.now_ps = self.now_ps.wrapping_add(TIME_QUANTUM_PS);
-            self.bus.publish(EventPayload::Tick {
-                elapsed_ps: self.now_ps,
-                pc: self.state.pc,
-            }).map_err(|e| PlatformError::new(ErrorFamily::Engine, 1, e.to_string()))?;
+            self.bus
+                .publish(EventPayload::Tick {
+                    elapsed_ps: self.now_ps,
+                    pc: self.state.pc,
+                })
+                .map_err(|e| PlatformError::new(ErrorFamily::Engine, 1, e.to_string()))?;
             quanta = quanta.wrapping_add(1);
 
             // Drain every event that is now due.
             while let Some(t) = self.queue.peek().map(|e| e.at_ps) {
-                if t > self.now_ps { break; }
+                if t > self.now_ps {
+                    break;
+                }
                 let evt = self.queue.pop().expect("peek said some");
                 self.dispatch(evt.event)?;
             }
@@ -144,9 +157,7 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
                 // and call its `tick` port.
                 Ok(())
             }
-            SchedEvent::TimerExpiry { irq, at_ps: _ } => {
-                self.intc.raise(irq)
-            }
+            SchedEvent::TimerExpiry { irq, at_ps: _ } => self.intc.raise(irq),
             SchedEvent::Commit(write) => {
                 // Commit happens at the next bus access; for the
                 // skeleton we just stash it on the state.
@@ -157,10 +168,14 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
     }
 
     /// Snapshot the deterministic engine state (M-20 §4.20).
-    pub fn snapshot(&self) -> SimState { self.state.clone() }
+    pub fn snapshot(&self) -> SimState {
+        self.state.clone()
+    }
 
     /// Restore from a snapshot.
-    pub fn restore(&mut self, state: SimState) { self.state = state; }
+    pub fn restore(&mut self, state: SimState) {
+        self.state = state;
+    }
 }
 
 impl<B: EventBus, I: InterruptSink> Default for Engine<B, I>
@@ -168,7 +183,9 @@ where
     B: Default,
     I: Default,
 {
-    fn default() -> Self { Self::new(B::default(), I::default()) }
+    fn default() -> Self {
+        Self::new(B::default(), I::default())
+    }
 }
 
 #[cfg(test)]
@@ -177,19 +194,31 @@ mod tests {
 
     /// Minimal in-memory event bus for tests.
     #[derive(Default)]
-    struct TestBus { count: u32 }
+    struct TestBus {
+        count: u32,
+    }
     impl EventBus for TestBus {
-        fn publish(&mut self, _: EventPayload) -> Result<(), PlatformError> { self.count += 1; Ok(()) }
+        fn publish(&mut self, _: EventPayload) -> Result<(), PlatformError> {
+            self.count += 1;
+            Ok(())
+        }
     }
     impl InterruptSink for TestBus {
-        fn raise(&mut self, _: u16) -> Result<(), PlatformError> { Ok(()) }
-        fn lower(&mut self, _: u16) -> Result<(), PlatformError> { Ok(()) }
+        fn raise(&mut self, _: u16) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        fn lower(&mut self, _: u16) -> Result<(), PlatformError> {
+            Ok(())
+        }
     }
 
     #[test]
     fn engine_advances_time() {
         let mut eng: Engine<TestBus, TestBus> = Engine::default();
-        eng.schedule(2 * TIME_QUANTUM_PS, SchedEvent::TimerExpiry { irq: 1, at_ps: 0 });
+        eng.schedule(
+            2 * TIME_QUANTUM_PS,
+            SchedEvent::TimerExpiry { irq: 1, at_ps: 0 },
+        );
         let quanta = eng.run_until_idle().expect("run");
         assert_eq!(quanta, 2);
         assert!(eng.now_ps() >= 2 * TIME_QUANTUM_PS);

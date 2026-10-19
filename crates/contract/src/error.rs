@@ -20,13 +20,23 @@ pub struct PlatformError {
 impl PlatformError {
     /// Convenience constructor.
     pub fn new(family: ErrorFamily, scenario: u16, message: impl Into<String>) -> Self {
-        Self { family, scenario, message: message.into() }
+        Self {
+            family,
+            scenario,
+            message: message.into(),
+        }
     }
 }
 
 impl fmt::Display for PlatformError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "E_{}-{:02}: {}", self.family.as_str(), self.scenario, self.message)
+        write!(
+            f,
+            "E_{}-{:02}: {}",
+            self.family.as_str(),
+            self.scenario,
+            self.message
+        )
     }
 }
 
@@ -67,19 +77,19 @@ impl ErrorFamily {
     /// 3–4 char tag used in the textual error code.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Context       => "CTX",
-            Self::Iss           => "ISS",
-            Self::Engine        => "ENG",
-            Self::Bus           => "BUS",
-            Self::Peripheral    => "PER",
-            Self::Interrupt     => "INT",
-            Self::Debug         => "DBG",
+            Self::Context => "CTX",
+            Self::Iss => "ISS",
+            Self::Engine => "ENG",
+            Self::Bus => "BUS",
+            Self::Peripheral => "PER",
+            Self::Interrupt => "INT",
+            Self::Debug => "DBG",
             Self::Observability => "OBS",
-            Self::Snapshot      => "SNAP",
-            Self::Loader        => "LDR",
-            Self::Health        => "HMS",
-            Self::Storage       => "STORE",
-            Self::Transport     => "TRX",
+            Self::Snapshot => "SNAP",
+            Self::Loader => "LDR",
+            Self::Health => "HMS",
+            Self::Storage => "STORE",
+            Self::Transport => "TRX",
         }
     }
 }

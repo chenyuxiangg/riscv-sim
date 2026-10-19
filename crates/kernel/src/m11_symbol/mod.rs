@@ -39,7 +39,11 @@ pub enum TraceFormat {
     Txt,
 }
 
-impl Default for TraceFormat { fn default() -> Self { Self::Csv } }
+impl Default for TraceFormat {
+    fn default() -> Self {
+        Self::Csv
+    }
+}
 
 /// Family used by errors raised from this module.
 pub const SYMBOL_FAMILY: ErrorFamily = ErrorFamily::Loader;

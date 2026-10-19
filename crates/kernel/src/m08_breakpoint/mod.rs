@@ -22,7 +22,9 @@ pub struct BreakpointTable {
 
 impl BreakpointTable {
     /// Create a new empty table.
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Add or update a breakpoint. Stable id is assigned by the host.
     pub fn set(&mut self, bp: Breakpoint) -> Result<(), PlatformError> {
@@ -42,7 +44,9 @@ impl BreakpointTable {
     }
 
     /// Iterate over active breakpoints in address order.
-    pub fn iter(&self) -> impl Iterator<Item = &Breakpoint> { self.inner.values() }
+    pub fn iter(&self) -> impl Iterator<Item = &Breakpoint> {
+        self.inner.values()
+    }
 
     /// Family used by errors raised from this module.
     pub const FAMILY: ErrorFamily = ErrorFamily::Debug;

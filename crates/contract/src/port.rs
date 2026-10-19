@@ -59,14 +59,25 @@ pub trait ExecutionBackend {
     fn read_memory(&self, addr: u32, size: crate::model::WriteSize) -> Result<u32, PlatformError>;
 
     /// Write a single memory location.
-    fn write_memory(&mut self, addr: u32, size: crate::model::WriteSize, value: u32) -> Result<(), PlatformError>;
+    fn write_memory(
+        &mut self,
+        addr: u32,
+        size: crate::model::WriteSize,
+        value: u32,
+    ) -> Result<(), PlatformError>;
 
     /// Toggle a breakpoint (M-08). The backend is responsible for
     /// translating PC breakpoints to per-instruction trap points.
     fn set_breakpoint(&mut self, addr: u32, enabled: bool) -> Result<(), PlatformError>;
 
     /// Toggle a watchpoint (M-10).
-    fn set_watchpoint(&mut self, addr: u32, size: crate::model::WriteSize, write: bool, enabled: bool) -> Result<(), PlatformError>;
+    fn set_watchpoint(
+        &mut self,
+        addr: u32,
+        size: crate::model::WriteSize,
+        write: bool,
+        enabled: bool,
+    ) -> Result<(), PlatformError>;
 }
 
 /// Driven port: a single peripheral (M-15).
@@ -84,8 +95,24 @@ pub trait Peripheral {
     /// Read from a register. Width depends on the offset (see the
     /// module-level register map).
     fn read(&self, offset: u32, size: crate::model::WriteSize) -> Result<u32, PlatformError>;
+    /// Read-and-clear a register (e.g. UART RX FIFO). Defaults to a
+    /// plain [`Self::read`] for peripherals whose read is non-destructive.
+    /// M-15 review #2: this is the additive way to express read-clear
+    /// without breaking the `&self` invariant of [`Self::read`].
+    fn read_clear(
+        &mut self,
+        offset: u32,
+        size: crate::model::WriteSize,
+    ) -> Result<u32, PlatformError> {
+        self.read(offset, size)
+    }
     /// Write to a register.
-    fn write(&mut self, offset: u32, size: crate::model::WriteSize, value: u32) -> Result<(), PlatformError>;
+    fn write(
+        &mut self,
+        offset: u32,
+        size: crate::model::WriteSize,
+        value: u32,
+    ) -> Result<(), PlatformError>;
     /// Called once per quantum (1µs by default). Returns the writes
     /// the peripheral wants to commit to the bus this quantum.
     fn tick(&mut self, now_ps: u64) -> Result<Vec<PendingWrite>, PlatformError>;

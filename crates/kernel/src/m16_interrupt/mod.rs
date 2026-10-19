@@ -19,7 +19,9 @@ pub struct InterruptController {
 
 impl InterruptController {
     /// New empty controller.
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Drain pending IRQs that the engine can sample at the next quantum.
     pub fn drain_pending(&mut self) -> Vec<u16> {

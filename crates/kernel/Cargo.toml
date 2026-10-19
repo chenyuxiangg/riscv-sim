@@ -12,6 +12,12 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 riscv_sim_contract = { path = "../contract" }
+# M-06 ELF / Raw / HEX parser. MVP scope is RV32 ELF32 LE — a hand-rolled
+# parser keeps WASM binary size and dependency surface small while still
+# hitting all M-06 §3 error paths (magic / size / segment-count / overflow).
+# PROGRESS.md v0.5 决策: 不引入 `object` crate，P1 阶段如需支持 ELF64 /
+# non-RV32 ELF 再引入（BSD-2-Clause，无 GPL 风险）。
+# object = { version = "0.36", default-features = false, features = ["read"] }
 
 [features]
 default = []

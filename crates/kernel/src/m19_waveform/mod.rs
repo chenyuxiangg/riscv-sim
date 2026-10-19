@@ -20,7 +20,9 @@ pub struct WaveformChannel {
 
 impl WaveformChannel {
     /// New empty channel.
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Publish a delta. Replaces the previous `last_push`; the
     /// downstream decides how to coalesce.
@@ -31,7 +33,9 @@ impl WaveformChannel {
     }
 
     /// Most recent push, with its monotonic sequence number.
-    pub fn last(&self) -> Option<(u64, &Waveform)> { self.push_seq.checked_sub(1).zip(self.last_push.as_ref()) }
+    pub fn last(&self) -> Option<(u64, &Waveform)> {
+        self.push_seq.checked_sub(1).zip(self.last_push.as_ref())
+    }
 }
 
 /// Family used by errors raised from this module.

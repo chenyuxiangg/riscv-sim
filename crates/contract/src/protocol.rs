@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Breakpoint, Project, SimState, Waveform, Watchpoint, WriteSize};
+use crate::model::{Breakpoint, Project, SimState, Watchpoint, Waveform, WriteSize};
 use crate::SCHEMA_VERSION;
 
 /// Direction of a message on the wire.
@@ -17,7 +17,11 @@ pub enum Direction {
     Event,
 }
 
-impl Default for Direction { fn default() -> Self { Self::Command } }
+impl Default for Direction {
+    fn default() -> Self {
+        Self::Command
+    }
+}
 
 /// Top-level message envelope. Every byte on the wire is one of these.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,7 +80,9 @@ pub enum Payload {
 }
 
 impl Default for Payload {
-    fn default() -> Self { Self::Command(CommandPayload::Nop) }
+    fn default() -> Self {
+        Self::Command(CommandPayload::Nop)
+    }
 }
 
 /// All commands the host can issue. Adding a new variant is non-breaking
@@ -90,36 +96,61 @@ pub enum CommandPayload {
     /// Run until the next breakpoint, watchpoint, or quantum boundary.
     Continue,
     /// Run exactly `n` ISS instructions.
-    StepN { n: u32 },
+    StepN {
+        n: u32,
+    },
     /// Pause the engine at the next quantum boundary.
     Pause,
     /// Set / clear breakpoints and watchpoints.
     SetBreakpoint(Breakpoint),
-    ClearBreakpoint { id: u32 },
+    ClearBreakpoint {
+        id: u32,
+    },
     SetWatchpoint(Watchpoint),
-    ClearWatchpoint { id: u32 },
+    ClearWatchpoint {
+        id: u32,
+    },
     /// Read `size` bytes at `addr` from the simulated memory map.
-    ReadMemory { addr: u32, size: WriteSize },
+    ReadMemory {
+        addr: u32,
+        size: WriteSize,
+    },
     /// Write `size` bytes at `addr` to the simulated memory map.
-    WriteMemory { addr: u32, size: WriteSize, value: u32 },
+    WriteMemory {
+        addr: u32,
+        size: WriteSize,
+        value: u32,
+    },
     /// Subscribe to an event stream. Idempotent.
-    Subscribe { topic: String },
+    Subscribe {
+        topic: String,
+    },
     /// Unsubscribe from an event stream. Idempotent.
-    Unsubscribe { topic: String },
+    Unsubscribe {
+        topic: String,
+    },
     /// Create a snapshot of the current [`SimState`].
     Snapshot,
     /// Restore a previously-created [`SimState`].
-    Restore { state: Box<SimState> },
+    Restore {
+        state: Box<SimState>,
+    },
     /// Reserved for the admin / sysadmin workbench channel.
-    Admin { op: AdminOp },
+    Admin {
+        op: AdminOp,
+    },
 }
 
 impl Default for CommandPayload {
-    fn default() -> Self { Self::Nop }
+    fn default() -> Self {
+        Self::Nop
+    }
 }
 
 impl From<CommandPayload> for Payload {
-    fn from(c: CommandPayload) -> Self { Self::Command(c) }
+    fn from(c: CommandPayload) -> Self {
+        Self::Command(c)
+    }
 }
 
 /// Reserved admin / sysadmin operations (M-22 + M-23 + M-21). Always
@@ -136,35 +167,65 @@ pub enum AdminOp {
     Custom(String),
 }
 
-impl Default for AdminOp { fn default() -> Self { Self::DrainLogs } }
+impl Default for AdminOp {
+    fn default() -> Self {
+        Self::DrainLogs
+    }
+}
 
 /// All events the kernel can publish. Same extensibility rules as commands.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventPayload {
     /// Periodic simulation tick (M-12). Includes elapsed time and a coarse
     /// status so the front-end can throttle renders.
-    Tick { elapsed_ps: u64, pc: u32 },
+    Tick {
+        elapsed_ps: u64,
+        pc: u32,
+    },
     /// The simulation hit a breakpoint or watchpoint and paused.
-    Halted { reason: HaltReason, pc: u32 },
+    Halted {
+        reason: HaltReason,
+        pc: u32,
+    },
     /// Catch-all for kernel errors (see [`crate::error::PlatformError`]).
-    Error { code: String, message: String },
+    Error {
+        code: String,
+        message: String,
+    },
     /// Response to a `ReadMemory` command.
-    MemoryRead { addr: u32, size: WriteSize, value: u32 },
+    MemoryRead {
+        addr: u32,
+        size: WriteSize,
+        value: u32,
+    },
     /// Push waveform edges since the last publish (M-19 incremental push).
     WaveformDelta(Waveform),
     /// Informational: a snapshot was created (carries the snapshot id).
-    SnapshotCreated { id: u64 },
+    SnapshotCreated {
+        id: u64,
+    },
     /// Reserved for P1 multi-board interconnect events.
-    LinkUp { link_id: String },
-    LinkDown { link_id: String },
+    LinkUp {
+        link_id: String,
+    },
+    LinkDown {
+        link_id: String,
+    },
 }
 
 impl Default for EventPayload {
-    fn default() -> Self { Self::Tick { elapsed_ps: 0, pc: 0 } }
+    fn default() -> Self {
+        Self::Tick {
+            elapsed_ps: 0,
+            pc: 0,
+        }
+    }
 }
 
 impl From<EventPayload> for Payload {
-    fn from(e: EventPayload) -> Self { Self::Event(e) }
+    fn from(e: EventPayload) -> Self {
+        Self::Event(e)
+    }
 }
 
 /// Why the simulation halted.
@@ -184,4 +245,8 @@ pub enum HaltReason {
     Watchdog,
 }
 
-impl Default for HaltReason { fn default() -> Self { Self::UserPause } }
+impl Default for HaltReason {
+    fn default() -> Self {
+        Self::UserPause
+    }
+}

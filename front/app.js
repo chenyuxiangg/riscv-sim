@@ -1,14 +1,12 @@
-// RISC-V Sim — front-end bootstrap (MVP placeholder).
+// RISC-V Sim — front-end bootstrap.
 //
-// Layout: vanilla ES modules, no bundler. See AD §9.7 "原生 JS + 多视图
-// hash 路由" and the M-01 / M-02 / M-03 module stubs under `front/views`
-// and `front/services`.
-//
-// Routing: hash-based (e.g. `#/embedded/regs`). MVP just toggles the
-// <section> visibility; M-03 ViewStore is the next thing to wire up.
+// Layout: vanilla ES modules, no bundler. See AD §9.7.
+// Routing + workspace assembly live in m01_workbench (LLD §3.2);
+// view rendering lives in m02_viewcomponents (LLD §3.3). This file
+// only does wiring + dev-mode helpers.
 
 import { mountWorkbench } from "./views/m01_workbench.js";
-import { mountViewComponents } from "./views/m02_viewcomponents.js";
+import { mountViewComponents, buildDemoStoreState } from "./views/m02_viewcomponents.js";
 import { mountViewStore } from "./views/m03_viewstore.js";
 import { mountSession } from "./services/m04_session.js";
 import { mountCommandRouter } from "./services/m05_commandrouter.js";
@@ -18,23 +16,31 @@ import { mountRegisterMemory } from "./services/m10_registermemory.js";
 const status = document.getElementById("status");
 
 /**
- * Tiny hash router. Each route is `{workbench}/{subview?}`.
- * The router only toggles the visible <section> in MVP; M-03 will
- * own the actual state.
+ * Wire the dev-mode "seed demo bus" button. Real data binding lands
+ * once M-07 transport is wired up.
  */
-function applyRoute() {
-    const hash = location.hash.replace(/^#\/?/, "");
-    const [wb, sub] = hash.split("/");
-    const workbench = wb || "product";
-    document.querySelectorAll(".tab").forEach((b) => b.removeAttribute("aria-current"));
-    document.querySelector(`.tab[data-view="${workbench}"]`)?.setAttribute("aria-current", "page");
-    for (const view of document.querySelectorAll(".view")) view.classList.add("hidden");
-    const target = document.getElementById(`view-${workbench}`);
-    if (target) target.classList.remove("hidden");
-    if (workbench === "embedded" && sub) {
-        for (const panel of document.querySelectorAll("[data-subview-panel]")) panel.classList.add("hidden");
-        document.querySelector(`[data-subview-panel="${sub}"]`)?.classList.remove("hidden");
-    }
+function wireSeedButton() {
+    const btn = document.getElementById("seed-demo");
+    if (!btn) return;
+    btn.addEventListener("click", () => {
+        const storeState = buildDemoStoreState();
+        const evt = new CustomEvent("riscv:render", {
+            detail: { viewId: "product", type: "update", state: storeState },
+        });
+        window.dispatchEvent(evt);
+        status.textContent = "已 seed demo 内存映射（M-14 1 RAM + 2 PERIPHERAL）";
+    });
+}
+
+/** Expose the seeder on `window.riscv_demo` for console convenience. */
+function exposeDevHelpers() {
+    window.riscv_demo = {
+        seedBus: () => {
+            const btn = document.getElementById("seed-demo");
+            btn?.click();
+        },
+        buildDemoStoreState,
+    };
 }
 
 async function bootstrap() {
@@ -48,8 +54,8 @@ async function bootstrap() {
         mountTransport(),
         mountRegisterMemory(),
     ]);
-    window.addEventListener("hashchange", applyRoute);
-    applyRoute();
+    wireSeedButton();
+    exposeDevHelpers();
     status.textContent = "MVP 就绪 — kernel 待编译";
 }
 

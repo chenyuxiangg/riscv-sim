@@ -27,7 +27,11 @@ pub enum StepOutcome {
     HostPause,
 }
 
-impl Default for StepOutcome { fn default() -> Self { Self::Advanced } }
+impl Default for StepOutcome {
+    fn default() -> Self {
+        Self::Advanced
+    }
+}
 
 /// Trap reason taxonomy. Mapped to `mtval` by the engine (LLD §4.13.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +46,11 @@ pub enum TrapCause {
     Ecall,
 }
 
-impl Default for TrapCause { fn default() -> Self { Self::IllegalInstruction } }
+impl Default for TrapCause {
+    fn default() -> Self {
+        Self::IllegalInstruction
+    }
+}
 
 /// Executor wrapper. Holds the memory accessors so the per-instruction
 /// site stays readable.
@@ -51,7 +59,12 @@ where
     F: Fn(u32, riscv_sim_contract::model::WriteSize) -> Result<u32, PlatformError>,
     G: Fn(u32, riscv_sim_contract::model::WriteSize, u32) -> Result<(), PlatformError>,
 {
+    /// The fields below are wired through `Executor::new` but the
+    /// MVP-only `ADDI` path never invokes them. Used by LOAD / STORE
+    /// once M-13 widens to the full RV32IMC set (LLD §4.13).
+    #[allow(dead_code)]
     read_mem: F,
+    #[allow(dead_code)]
     write_mem: G,
 }
 
@@ -61,10 +74,19 @@ where
     G: Fn(u32, riscv_sim_contract::model::WriteSize, u32) -> Result<(), PlatformError>,
 {
     /// Build a new executor from memory accessors.
-    pub fn new(read_mem: F, write_mem: G) -> Self { Self { read_mem, write_mem } }
+    pub fn new(read_mem: F, write_mem: G) -> Self {
+        Self {
+            read_mem,
+            write_mem,
+        }
+    }
 
     /// Execute one decoded instruction, mutating the [`SimState`].
-    pub fn execute(&mut self, state: &mut SimState, d: &Decoded) -> Result<StepOutcome, PlatformError> {
+    pub fn execute(
+        &mut self,
+        state: &mut SimState,
+        d: &Decoded,
+    ) -> Result<StepOutcome, PlatformError> {
         // 0b0010011 = I-type ALU (addi / slti / etc.). MVP only implements
         // ADDI (funct3 == 0x0) to keep the harness small.
         if d.opcode == 0b0010011 {
@@ -76,13 +98,18 @@ where
                 state.pc = state.pc.wrapping_add(4);
                 return Ok(StepOutcome::Advanced);
             }
-            return Ok(StepOutcome::Trapped { cause: TrapCause::IllegalInstruction });
+            return Ok(StepOutcome::Trapped {
+                cause: TrapCause::IllegalInstruction,
+            });
         }
 
         Err(PlatformError::new(
             ErrorFamily::Iss,
             2,
-            format!("unimplemented opcode 0b{:07b} at pc=0x{:08x}", d.opcode, d.pc),
+            format!(
+                "unimplemented opcode 0b{:07b} at pc=0x{:08x}",
+                d.opcode, d.pc
+            ),
         ))
     }
 }

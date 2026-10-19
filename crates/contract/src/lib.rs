@@ -13,9 +13,9 @@
 //! - [`port`] — driving / driven port signatures for ExecutionBackend,
 //!   Peripheral, debug services, and the observability pipeline.
 
-// MVP: docs on every public variant field are TODO. Once the protocol
-// shape stabilises (post-M0), re-tighten to `deny(missing_docs)`.
-#![warn(missing_docs)]
+// MVP: docs on every public variant field are TODO. PROGRESS.md §7
+// 2026-10-19 decision: workspace `missing_docs = "allow"` until each
+// public item is documented, then re-tighten to `deny`.
 
 pub mod error;
 pub mod model;

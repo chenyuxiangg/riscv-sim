@@ -60,7 +60,11 @@ pub struct TreeNode {
 
 impl Default for TreeNode {
     fn default() -> Self {
-        Self { name: String::new(), component_id: None, children: Vec::new() }
+        Self {
+            name: String::new(),
+            component_id: None,
+            children: Vec::new(),
+        }
     }
 }
 
@@ -96,7 +100,11 @@ pub enum ImageKind {
     RawHex,
 }
 
-impl Default for ImageKind { fn default() -> Self { Self::Elf } }
+impl Default for ImageKind {
+    fn default() -> Self {
+        Self::Elf
+    }
+}
 
 /// Where the kernel should read the image bytes from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,7 +117,11 @@ pub enum ImageSource {
     Url(String),
 }
 
-impl Default for ImageSource { fn default() -> Self { Self::Bytes(Vec::new()) } }
+impl Default for ImageSource {
+    fn default() -> Self {
+        Self::Bytes(Vec::new())
+    }
+}
 
 /// Project version metadata (ISA, toolchain, schema).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,7 +136,11 @@ pub struct ProjectVersion {
 
 impl Default for ProjectVersion {
     fn default() -> Self {
-        Self { schema: 1, isa: ISA.to_string(), toolchain: String::new() }
+        Self {
+            schema: 1,
+            isa: ISA.to_string(),
+            toolchain: String::new(),
+        }
     }
 }
 
@@ -183,7 +199,12 @@ pub struct PendingWrite {
 
 impl Default for PendingWrite {
     fn default() -> Self {
-        Self { paddr: 0, size: WriteSize::Byte, value: 0, source: String::new() }
+        Self {
+            paddr: 0,
+            size: WriteSize::Byte,
+            value: 0,
+            source: String::new(),
+        }
     }
 }
 
@@ -198,7 +219,11 @@ pub enum WriteSize {
     Word,
 }
 
-impl Default for WriteSize { fn default() -> Self { Self::Byte } }
+impl Default for WriteSize {
+    fn default() -> Self {
+        Self::Byte
+    }
+}
 
 /// Debug metadata = symbols + breakpoints + watch points (M-08, M-10, M-11).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,7 +250,13 @@ pub struct LineEntry {
 }
 
 impl Default for LineEntry {
-    fn default() -> Self { Self { addr: 0, file: String::new(), line: 0 } }
+    fn default() -> Self {
+        Self {
+            addr: 0,
+            file: String::new(),
+            line: 0,
+        }
+    }
 }
 
 /// Function or variable symbol (M-11).
@@ -240,7 +271,13 @@ pub struct Symbol {
 }
 
 impl Default for Symbol {
-    fn default() -> Self { Self { name: String::new(), addr: None, size: None } }
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            addr: None,
+            size: None,
+        }
+    }
 }
 
 /// A single breakpoint (M-08).
@@ -257,7 +294,14 @@ pub struct Breakpoint {
 }
 
 impl Default for Breakpoint {
-    fn default() -> Self { Self { id: 0, addr: 0, source_hint: None, enabled: true } }
+    fn default() -> Self {
+        Self {
+            id: 0,
+            addr: 0,
+            source_hint: None,
+            enabled: true,
+        }
+    }
 }
 
 /// A watch point (M-10). Fires when the access matches.
@@ -275,7 +319,12 @@ pub struct Watchpoint {
 
 impl Default for Watchpoint {
     fn default() -> Self {
-        Self { id: 0, addr: 0, size: WriteSize::Word, access: WatchAccess::Write }
+        Self {
+            id: 0,
+            addr: 0,
+            size: WriteSize::Word,
+            access: WatchAccess::Write,
+        }
     }
 }
 
@@ -290,7 +339,11 @@ pub enum WatchAccess {
     Either,
 }
 
-impl Default for WatchAccess { fn default() -> Self { Self::Write } }
+impl Default for WatchAccess {
+    fn default() -> Self {
+        Self::Write
+    }
+}
 
 /// Edge-encoded waveform fragment (M-18, M-19).
 ///
@@ -326,5 +379,7 @@ pub struct Edge {
 }
 
 impl Default for Edge {
-    fn default() -> Self { Self { t_ps: 0, value: 0 } }
+    fn default() -> Self {
+        Self { t_ps: 0, value: 0 }
+    }
 }

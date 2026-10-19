@@ -7,9 +7,9 @@
 //!
 //! Status: stub — trait adopted; the two backends are TODO(MVP).
 
+use crate::m20_snapshot::SnapshotRecord;
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::Project;
-use crate::m20_snapshot::SnapshotRecord;
 
 /// Storage backend. Implementations are out-of-tree at MVP and
 /// selected by the host (front-end or server).

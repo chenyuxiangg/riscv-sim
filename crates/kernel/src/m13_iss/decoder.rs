@@ -69,4 +69,6 @@ impl Decoder {
 /// Width of the access the executor should perform when reading
 /// instruction memory. RV32C is a future task; the MVP only handles
 /// 32-bit fetches.
-pub fn fetch_size() -> WriteSize { WriteSize::Word }
+pub fn fetch_size() -> WriteSize {
+    WriteSize::Word
+}

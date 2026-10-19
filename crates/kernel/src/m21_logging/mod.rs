@@ -29,7 +29,11 @@ pub enum Level {
     Fatal,
 }
 
-impl Default for Level { fn default() -> Self { Self::Info } }
+impl Default for Level {
+    fn default() -> Self {
+        Self::Info
+    }
+}
 
 /// One log record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +49,14 @@ pub struct LogRecord {
 }
 
 impl Default for LogRecord {
-    fn default() -> Self { Self { ts_ms: 0, level: Level::Info, source: String::new(), message: String::new() } }
+    fn default() -> Self {
+        Self {
+            ts_ms: 0,
+            level: Level::Info,
+            source: String::new(),
+            message: String::new(),
+        }
+    }
 }
 
 /// Log buffer. Bounded by [`MAX_LOG_RECORDS`].
@@ -56,7 +67,9 @@ pub struct LogBuffer {
 
 impl LogBuffer {
     /// New empty buffer.
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Push a record, dropping the oldest if the buffer is full.
     pub fn push(&mut self, rec: LogRecord) {
@@ -67,10 +80,14 @@ impl LogBuffer {
     }
 
     /// Drain all records (admin-only operation).
-    pub fn drain(&mut self) -> Vec<LogRecord> { self.records.drain(..).collect() }
+    pub fn drain(&mut self) -> Vec<LogRecord> {
+        self.records.drain(..).collect()
+    }
 
     /// Read-only access.
-    pub fn iter(&self) -> impl Iterator<Item = &LogRecord> { self.records.iter() }
+    pub fn iter(&self) -> impl Iterator<Item = &LogRecord> {
+        self.records.iter()
+    }
 }
 
 /// Family used by errors raised from this module.

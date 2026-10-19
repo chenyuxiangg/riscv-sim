@@ -20,7 +20,11 @@ pub enum Health {
     Critical,
 }
 
-impl Default for Health { fn default() -> Self { Self::Ok } }
+impl Default for Health {
+    fn default() -> Self {
+        Self::Ok
+    }
+}
 
 /// HMS state. Single-thread, the kernel serializes state updates.
 #[derive(Debug, Default)]
@@ -31,16 +35,20 @@ pub struct Hms {
 
 impl Hms {
     /// New HMS in [`Health::Ok`].
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Current state.
-    pub fn state(&self) -> Health { self.state }
+    pub fn state(&self) -> Health {
+        self.state
+    }
 
     /// Report an anomaly. The HMS picks the right escalation per the
     /// LLD §4.22.2 rules.
     pub fn report(&mut self, kind: &str) -> Result<Health, PlatformError> {
         let next = match self.state {
-            Health::Ok       => Health::Degraded,
+            Health::Ok => Health::Degraded,
             Health::Degraded => Health::Critical,
             Health::Critical => Health::Critical,
         };

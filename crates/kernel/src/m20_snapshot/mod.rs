@@ -25,7 +25,14 @@ pub struct SnapshotRecord {
 }
 
 impl Default for SnapshotRecord {
-    fn default() -> Self { Self { id: 0, at_ps: 0, state: SimState::default(), label: String::new() } }
+    fn default() -> Self {
+        Self {
+            id: 0,
+            at_ps: 0,
+            state: SimState::default(),
+            label: String::new(),
+        }
+    }
 }
 
 /// Snapshot manager. Holds recent snapshots in memory; the actual
@@ -38,22 +45,38 @@ pub struct SnapshotManager {
 
 impl SnapshotManager {
     /// New empty manager.
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Capture a snapshot of the given state at the given virtual time.
-    pub fn capture(&mut self, state: &SimState, at_ps: u64, label: impl Into<String>) -> SnapshotRecord {
+    pub fn capture(
+        &mut self,
+        state: &SimState,
+        at_ps: u64,
+        label: impl Into<String>,
+    ) -> SnapshotRecord {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        let rec = SnapshotRecord { id, at_ps, state: state.clone(), label: label.into() };
+        let rec = SnapshotRecord {
+            id,
+            at_ps,
+            state: state.clone(),
+            label: label.into(),
+        };
         self.records.push(rec.clone());
         rec
     }
 
     /// Look up a snapshot by id.
-    pub fn get(&self, id: u64) -> Option<&SnapshotRecord> { self.records.iter().find(|r| r.id == id) }
+    pub fn get(&self, id: u64) -> Option<&SnapshotRecord> {
+        self.records.iter().find(|r| r.id == id)
+    }
 
     /// Iterate all stored snapshots, newest first.
-    pub fn iter(&self) -> impl Iterator<Item = &SnapshotRecord> { self.records.iter().rev() }
+    pub fn iter(&self) -> impl Iterator<Item = &SnapshotRecord> {
+        self.records.iter().rev()
+    }
 }
 
 /// Family used by errors raised from this module.

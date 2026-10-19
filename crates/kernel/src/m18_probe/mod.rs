@@ -23,17 +23,27 @@ pub struct InMemoryProbe {
 impl InMemoryProbe {
     /// New probe with the given id and human-readable label.
     pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
-        Self { id: id.into(), label: label.into(), edges: Vec::new() }
+        Self {
+            id: id.into(),
+            label: label.into(),
+            edges: Vec::new(),
+        }
     }
 
     /// Snapshot the probe's edges as a [`WaveformStream`].
     pub fn as_stream(&self) -> WaveformStream {
-        WaveformStream { id: self.id.clone(), label: self.label.clone(), edges: self.edges.clone() }
+        WaveformStream {
+            id: self.id.clone(),
+            label: self.label.clone(),
+            edges: self.edges.clone(),
+        }
     }
 }
 
 impl Probe for InMemoryProbe {
-    fn id(&self) -> &str { &self.id }
+    fn id(&self) -> &str {
+        &self.id
+    }
     fn observe(&mut self, now_ps: u64, value: u64) -> Result<(), PlatformError> {
         if let Some(last) = self.edges.last_mut() {
             if last.t_ps == now_ps {
@@ -45,7 +55,10 @@ impl Probe for InMemoryProbe {
                 return Ok(());
             }
         }
-        self.edges.push(Edge { t_ps: now_ps, value });
+        self.edges.push(Edge {
+            t_ps: now_ps,
+            value,
+        });
         Ok(())
     }
     fn drain(&mut self) -> Result<Vec<Edge>, PlatformError> {
@@ -61,7 +74,9 @@ pub struct ProbeRegistry {
 
 impl ProbeRegistry {
     /// New empty registry.
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Register a probe.
     pub fn register(&mut self, p: InMemoryProbe) {
@@ -77,7 +92,10 @@ impl ProbeRegistry {
             let edges = p.drain()?;
             streams.push(WaveformStream { id, label, edges });
         }
-        Ok(Waveform { schema_version: 1, streams })
+        Ok(Waveform {
+            schema_version: 1,
+            streams,
+        })
     }
 }
 

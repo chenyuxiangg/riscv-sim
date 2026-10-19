@@ -23,7 +23,11 @@ pub enum StepKind {
     Line,
 }
 
-impl Default for StepKind { fn default() -> Self { Self::Instruction } }
+impl Default for StepKind {
+    fn default() -> Self {
+        Self::Instruction
+    }
+}
 
 /// Step engine — pure orchestration. Calls into M-12 / M-08; the
 /// kernel wires this up at construction.
@@ -34,16 +38,18 @@ pub struct StepEngine {
 
 impl StepEngine {
     /// New step engine.
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Plan a step. The host calls this to learn which engine APIs to
     /// invoke next. MVP always returns `Plan::One`.
     pub fn plan(&self, kind: StepKind, _state: &SimState) -> Result<Plan, PlatformError> {
         Ok(match kind {
             StepKind::Instruction => Plan::One,
-            StepKind::Over        => Plan::One, // TODO(MVP): set temp BP
-            StepKind::Out         => Plan::One, // TODO(MVP): set temp BP at RA
-            StepKind::Line        => Plan::One, // TODO(MVP): DWARF lookup
+            StepKind::Over => Plan::One, // TODO(MVP): set temp BP
+            StepKind::Out => Plan::One,  // TODO(MVP): set temp BP at RA
+            StepKind::Line => Plan::One, // TODO(MVP): DWARF lookup
         })
     }
 
@@ -58,4 +64,8 @@ pub enum Plan {
     One,
 }
 
-impl Default for Plan { fn default() -> Self { Self::One } }
+impl Default for Plan {
+    fn default() -> Self {
+        Self::One
+    }
+}

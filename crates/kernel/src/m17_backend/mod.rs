@@ -53,16 +53,40 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
     fn continue_until_event(&mut self) -> Result<(), PlatformError> {
         self.engine.run_until_idle().map(|_| ())
     }
-    fn pause(&mut self) -> Result<(), PlatformError> { Ok(()) }
-    fn snapshot(&self) -> Result<SimState, PlatformError> { Ok(self.engine.snapshot()) }
-    fn restore(&mut self, state: &SimState) -> Result<(), PlatformError> { self.engine.restore(state.clone()); Ok(()) }
+    fn pause(&mut self) -> Result<(), PlatformError> {
+        Ok(())
+    }
+    fn snapshot(&self) -> Result<SimState, PlatformError> {
+        Ok(self.engine.snapshot())
+    }
+    fn restore(&mut self, state: &SimState) -> Result<(), PlatformError> {
+        self.engine.restore(state.clone());
+        Ok(())
+    }
     fn read_memory(&self, _addr: u32, _size: WriteSize) -> Result<u32, PlatformError> {
         // TODO(MVP): forward to the bus.
         Ok(0)
     }
-    fn write_memory(&mut self, _addr: u32, _size: WriteSize, _value: u32) -> Result<(), PlatformError> { Ok(()) }
-    fn set_breakpoint(&mut self, _addr: u32, _enabled: bool) -> Result<(), PlatformError> { Ok(()) }
-    fn set_watchpoint(&mut self, _addr: u32, _size: WriteSize, _write: bool, _enabled: bool) -> Result<(), PlatformError> { Ok(()) }
+    fn write_memory(
+        &mut self,
+        _addr: u32,
+        _size: WriteSize,
+        _value: u32,
+    ) -> Result<(), PlatformError> {
+        Ok(())
+    }
+    fn set_breakpoint(&mut self, _addr: u32, _enabled: bool) -> Result<(), PlatformError> {
+        Ok(())
+    }
+    fn set_watchpoint(
+        &mut self,
+        _addr: u32,
+        _size: WriteSize,
+        _write: bool,
+        _enabled: bool,
+    ) -> Result<(), PlatformError> {
+        Ok(())
+    }
 }
 
 impl<B: EventBus, I: InterruptSink> Default for SelfIssBackend<B, I>
@@ -70,7 +94,9 @@ where
     B: Default,
     I: Default,
 {
-    fn default() -> Self { Self::new(B::default(), I::default()) }
+    fn default() -> Self {
+        Self::new(B::default(), I::default())
+    }
 }
 
 /// Family used by errors raised from this module.
