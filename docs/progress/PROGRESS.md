@@ -1,11 +1,108 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.14.1
+> **Document version**: v0.15.0
 > **Created**: 2026-10-19
 > **Last updated**: 2026-10-21
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.15.0 变更摘要
+
+**D-07 闭环：唤醒时间驱动链路**（分支 `feat/d07-time-driven-scheduler`）。
+
+台账 D-07 原本写的是「M-12 的 `dispatch` 真正调用它（**剩最后一步**）」。
+**实测发现台账估计偏小**：整条链路有**四处断口**，缺一不可 ——
+「最后一步」根本走不到终点。
+
+### 一、四处断口 → 各自的闭环
+
+| # | 断口 | 缺了什么 | 闭环 |
+| --- | --- | --- | --- |
+| ① | **没人装 ticker** | `Engine::set_peripheral_ticker` 在生产代码里**从无调用** | M-17 新增 `install_peripheral_ticker()`（从 `Bus::peripheral_instances()` 取实例 → 按物理地址 tick 单个外设）；**宿主**在 `new()` 与 `rebuild_platform()` 两处装上——只有宿主知道它挂了哪些外设 |
+| ② | **没人排 `PeripheralTick`** | 事件队列里**永远没有**外设 tick 事件 | M-12 主循环在每个量子边界**确保**每个登记外设都有一件 tick 在等着（**自愈**），派发后**续排**到下一个量子边界 |
+| ③ | **`pending_writes` 只写不读** | 外设 tick 返回的写**永远落不到总线上** | M-17 的执行器在每条指令之后把队列抽干并**真正写进总线**；失败的那一条**留在队列里**，不静默丢 |
+| ④ | **时间驱动主循环无人调用** | LLD 的唯一主循环 `runUntil` **从不被执行** | M-12 新增 `Engine::run_until(executor, until_ps)`（LLD §3.1 结构）；M-17 的 `continue_until_event()` 与宿主的 `Continue` 都走它 |
+
+### 二、「指令驱动与时间驱动如何交替」的裁定
+
+这是 D-07 一直没写下来的那个问题。现在有了答案：
+
+- **时间驱动是骨架** —— 事件队列 + 量子边界（1 µs）决定「什么时候派发事件、
+  什么时候推进外设时钟」；
+- **指令驱动是量子内的填充物** —— 一个量子内最多执行 1000 条指令；
+- **二者在「指令边界」交汇** —— 每执行一条指令就问一次「有没有事件到期」，
+  到期就抢占（安全检查点 = 量子边界 ∨ 指令边界 ∨ 事件边界）。
+
+**两条路径共用同一个执行器**（`m17_backend::IssExecutor`）——
+没有第二套 ISS 逻辑会跟它漂移。
+
+### 三、口径订正：量子是 1 µs，不是 1 ns
+
+`TIME_QUANTUM_PS` 原写 `1_000`（1 ns），注释却写「1 µs」—— **差 1000 倍**，
+而且与「每量子 1000 条指令」不自洽。现在三个常量闭合：
+
+```text
+TIME_QUANTUM_PS = QUANTUM_INSTR_QUOTA × INSTRUCTION_COST_PS
+                = 1 000 × 1 000 ps = 1 000 000 ps = 1 µs
+```
+
+⚠️ **可观测后果**：跨一个量子要 1000 条指令，不是 1 条。
+
+### 四、接缝不是契约端口（与 D-32 的关系）
+
+契约层冻结，新增端口要等 `schema_version = 2`（台账 **D-32**）。而 LLD §2.3
+要求主循环里必须有 `iss_step(s)` 这一步 —— 于是 M-12 在**自己内部**定义
+`InstructionExecutor`（与既有的 `PeripheralTicker` 同一套路），由 M-17 实现：
+
+```text
+M-12（调度器）──executes──▶ M-17（后端）──drives──▶ M-13（ISS）
+```
+
+**依赖方向单向：M-12 不依赖 M-13** —— M-12 的单元测试可以拿一个假执行器喂它。
+M-12 LLD §9.1.1 端口契约表已补该行（v1.3）。
+
+### 五、一处行为订正（必须说清楚）
+
+第 1 阶段 `continue_until_event()` **只排空事件队列、不执行指令**（队列恒空 →
+等价于空操作）。它对应的是 M-17 LLD §3.1 `runUntil` 的**退化形态**。
+现在它真的跑代码 —— LLD §9.1.1 写的 `runUntil(t)` 本来就是
+「调用 M-13 step 系列；量子配额 + 事件分发」。
+
+### 六、门禁与产物
+
+| 门禁 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | ✅ |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
+| `cargo test --workspace --no-fail-fast` | ✅ **525**（契约 lib 12 + kernel lib 437 + 集成 **65** + golden runner 11） |
+| `crates/kernel/tests/d07_time_driven.rs` | ✅ **12 条**端到端 |
+| `tools/check-front.sh` | ✅ **156 用例 / 29 suite**（前端未改动） |
+| `tools/build-wasm.sh --release` + `node tools/wasm-smoke.mjs` | ✅ **22 项**（含「Continue 命中断点」——新时间驱动路径） |
+| `tools/browser-verify.mjs`（真 Chrome） | ✅ 真机挂载 + 渲染路径 + 真内核执行 + 探针流 |
+| `tools/golden-run.sh --keep-going` | ✅ **42/42 判决一致**，9 expected-gap，**0 mismatch** |
+| **反向变异自检** | ✅ **14 条全部按期望变红**（变异必须**能编译**，编译错误不算判别力） |
+
+### 七、方法论沉淀（本轮新增）
+
+1. ⚠️ **台账写「最后一步」的时候，要重新数一遍断口**。D-07 的台账原话是
+   「M-12 的 `dispatch` 真正调用它」——实测发现那只是**四处断口**里的
+   一处，而且**那一处根本走不到终点**（没人装 ticker、没人排事件、
+   写不落地、主循环没人调）。**「差最后一步」与「差四步」的差别是
+   「两小时」与「两天」**。
+2. ⚠️ **「接缝存在」≠「接缝被接上」**。`PeripheralTicker` 从 v0.11 起就在
+   M-12 里躺着，`dispatch` 的分支也写好了 —— 但生产代码**从没调用过**
+   `set_peripheral_ticker`。**判别式要落在被依赖方自己身上**：
+   本轮的用例直接断言**外设自己**被 tick 过几次、写的值能不能从总线读回来。
+3. ⚠️ **同一份数据不能有两个真相**。外设的时钟一度有两个推进点
+   （M-14 的 `Bus::tick_peripherals` 与 M-12 的 ticker）—— 现在统一走
+   M-12 的 `tick_peripherals` 一个入口。
+4. ⚠️ **写规格与写实现不一致时，先看规格**。本轮核对了 M-12 §3.1 与
+   M-17 §3.1 的伪代码 —— 「`runUntil` 是唯一主循环、它调用 ISS 的 step」
+   **规格里早就写着**，是实现没跟上。**先读规格再设计**，能省掉一半的
+   自我辩论。
+
+---
 
 ## v0.14.1 变更摘要
 

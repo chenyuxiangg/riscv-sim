@@ -109,12 +109,12 @@ riscv_sim/
 | M-09 | 单步引擎 | `crates/kernel/src/m09_step/` | ✅ **v0.13 第 1 阶段实现**（71 行 stub → 308 行）：`StepKind` 四种粒度 + `Plan` + `StepOutcome`；`Over`/`Out`/`Line` **显式降级**为指令级（`degradation()` 把降级说出来，不悄悄降级） |
 | M-10 | 寄存器内存服务 | `front/services/m10_registermemory.js` | ✅ v0.11 实现（订阅寄存器/内存快照）；v0.11.1 补断线重连后重订阅；**v0.13 补 `resubscribe()` / `loadProject()`**——装载工程后内核侧订阅会失效，必须**强制**重订（幂等的 `ensureSubscribed()` 不够，台账 **D-45**） |
 | M-11 | 符号表/DWARF/反汇编/trace 导出 | `crates/kernel/src/m11_symbol/` | stub |
-| M-12 | 事件驱动仿真引擎 | `crates/kernel/src/m12_engine/` | ✅ v0.11 加固（快照还原 now_ps+事件队列、推进不空转、seq 不撞号）；v0.11.2 增契约快照 DTO 转换层（`snapshot_dto` / `restore_dto`，**先校验后应用**）+ `Engine::reset()`；⚠️ **至今无独立模块级 review**（台账 D-30） |
+| M-12 | 事件驱动仿真引擎 | `crates/kernel/src/m12_engine/` | ✅ v0.11 加固（快照还原 now_ps+事件队列、推进不空转、seq 不撞号）；v0.11.2 增契约快照 DTO 转换层（`snapshot_dto` / `restore_dto`，**先校验后应用**）+ `Engine::reset()`；✅ **v0.15 D-07：唯一主循环 `run_until(executor, until_ps)`（LLD §3.1 结构）+ `InstructionExecutor` 内部接缝（M-12 不依赖 M-13）+ `tick_peripherals` 唯一外设时钟同步点 + `TIME_QUANTUM_PS` 订正为 1 µs**；⚠️ **至今无独立模块级 review**（台账 D-30） |
 | M-13 | RISC-V ISS（RV32IMC） | `crates/kernel/src/m13_iss/` | ✅ v0.11 **RV32I 全集 41 条** + 模块级 review；v0.11.1 检视轮修 SYSTEM funct3 阻断级缺陷；v0.12 **RV32I 与 Spike 逐例对拍通过**（语料 51 例中 42 例判决一致；失败用例号一致性由变异金丝雀证明）；v0.13 取指改走 `Bus::read_fetch`（**取指不匹配观察点**，V-A 🟠-2）；M/C 扩展待做（第 3 阶段，台账 D-43） |
 | M-14 | 总线与内存映射 | `crates/kernel/src/m14_bus/` | ✅ v0.4 完成 + v0.7.2 补完；v0.11 接线 PR；v0.13 新增 `read_only()`（调试读不计入统计 / trace / 观察点）与 `load_bytes()`（镜像装载的**唯一**写路径），并给 `BusAccess` 增 `is_fetch` 标记（**取指 vs 数据访问**）；**D-46 增 `add_hook()`（追加式 hook，`set_hook` 保留「替换全部」语义）+ `peripheral_instances()` + `tick_peripherals()`** |
 | M-15 | 外设模型层 | `crates/kernel/src/m15_peripheral/` | ✅ v0.7 三外设 + v0.11 接线 PR |
 | M-16 | 中断控制器 | `crates/kernel/src/m16_interrupt/` | stub |
-| M-17 | ExecutionBackend 执行后端 | `crates/kernel/src/m17_backend/` | ✅ **v0.13 第 1 阶段实现**（stub → 925 行）：`step_n` 真正驱动 M-13 ISS（断点取指前命中 / 陷阱 / 观察点总线 hook 命中）、`read_memory` / `write_memory` 接 M-14 总线、`set_breakpoint` / `set_watchpoint` 接 M-08 表；v0.11.2 的 `snapshot_full` / `restore_full` 接线保持；**D-46：观察点 hook 改 `add_hook`（不顶掉别人的）+ 每条指令前同步一次外设时钟（边沿才有真实时间戳）** |
+| M-17 | ExecutionBackend 执行后端 | `crates/kernel/src/m17_backend/` | ✅ **v0.13 第 1 阶段实现**（stub → 925 行）：`step_n` 真正驱动 M-13 ISS（断点取指前命中 / 陷阱 / 观察点总线 hook 命中）、`read_memory` / `write_memory` 接 M-14 总线、`set_breakpoint` / `set_watchpoint` 接 M-08 表；v0.11.2 的 `snapshot_full` / `restore_full` 接线保持；**D-46：观察点 hook 改 `add_hook`（不顶掉别人的）+ 每条指令前同步一次外设时钟（边沿才有真实时间戳）**；✅ **v0.15 D-07：`IssExecutor` 实现 M-12 的 `InstructionExecutor` 接缝（指令驱动与时间驱动**共用一条** ISS 路径）+ `install_peripheral_ticker`（外设 tick 接缝）+ `pending_writes` 真正提交到总线 + `continue_until_event` 走唯一主循环** |
 | M-18 | 探针 | `crates/kernel/src/m18_probe/` | ✅ v0.8 完整 `ProbeRegistry` + v0.9 `EdgeSink` + v0.11 接线 PR；v0.11.1 修总线 hook 的 RefCell 重入 panic；**D-46：正式挂上生产总线**（此前只在测试里接线） |
 | M-19 | 波形管道 | `crates/kernel/src/m19_waveform/` | ✅ v0.9 完整 `WaveformPipeline`：边沿编码 + 每通道环 + ≤20ms 批量推送 + CSV/VCD 分块导出 |
 | M-20 | 快照与确定性事件流记录 | `crates/kernel/src/m20_snapshot/` | stub（含 `SnapshotManager`）；⚠️ 其 LLD §2.1.1 的 `Snapshot{cpMeta, m13State, m14Map, m15Periph}` 与契约 DTO **尚未对齐**，`SnapshotRecord` 仍吃 partial `SimState` 且无 serde derive（台账 **D-37**） |
@@ -187,6 +187,18 @@ riscv_sim/
 > - ⚠️ **探针流订阅没有「断线重连后重订」**（M-10 的寄存器流有）→ 台账 **D-54**（今天无活影响，两种传输都不自动重连；P1 做自动重连前必须补）
 > - ⚠️ **browser-verify 单独看，对「累加 vs 覆盖」「真数据 vs 假数据」没有判别力**——它是**连线检查**，不是行为检查；那一层由**前端门禁**兜住。所以「browser-verify 通过」**不能**单独作为「波形视图行为正确」的证据
 > - ⚠️ **mock 内核的探针流是「全量」语义，真内核是「增量」** → 台账 **D-55**（mock 未接前端，无活影响；但别拿 mock 当真内核的行为参考）
+
+> **v0.15 D-07 判据**（唤醒时间驱动链路 · 四处断口全闭环）：
+> - `cargo test --workspace --no-fail-fast` **525 全绿**（契约 lib 12 + kernel lib 437 + 集成 **65** + golden runner 11）
+> - `crates/kernel/tests/d07_time_driven.rs` **12 条**端到端 —— 对着**四处断口**逐条钉判别式：① 没人装 ticker ② 没人排 `PeripheralTick` ③ `pending_writes` 只写不读 ④ 时间驱动主循环无人调用
+> - **反向变异自检 14 条，全部按期望变红**（变异必须**能编译**，编译错误导致的「红」不算判别力）
+> - ⚠️ **台账写「剩最后一步」的时候要重新数断口**：D-07 原写「M-12 的 `dispatch` 真正调用它」——实测是**四处断口**，且那一处**根本走不到终点**
+> - ⚠️ **「接缝存在」≠「接缝被接上」**：`PeripheralTicker` 从 v0.11 起就躺在 M-12 里，但生产代码**从没调用过** `set_peripheral_ticker`。判别式落在**被依赖方自己身上**（断言外设被 tick 过几次、写的值能不能从总线读回来）
+> - ⚠️ **「指令驱动 vs 时间驱动」的裁定**：时间驱动是**骨架**（事件队列 + 量子边界），指令驱动是量子内的**填充物**（每量子 ≤1000 条），二者在**指令边界**交汇（事件边界 = 抢占点）。两条路径**共用同一个执行器**（`IssExecutor`）——没有第二套 ISS 逻辑会漂移
+> - ⚠️ **量子是 1 µs 不是 1 ns**：`TIME_QUANTUM_PS` 原写 `1_000` 却注释「1 µs」（差 1000 倍）。现在 `TIME_QUANTUM_PS = QUANTUM_INSTR_QUOTA × INSTRUCTION_COST_PS` 闭合换算
+> - ⚠️ **接缝不是契约端口**：契约层冻结（新增端口要等 `schema_version=2`，台账 **D-32**）→ `InstructionExecutor` / `PeripheralTicker` 都是 **M-12 内部接缝**，由 M-17 实现，**依赖方向单向**（M-12 不依赖 M-13）。M-12 LLD §9.1.1 已补该行
+> - ⚠️ **外设时钟只有一个推进点**：M-12 的 `tick_peripherals`（指令边界同步）+ `SchedEvent::PeripheralTick`（量子边界）走**同一个** ticker 接缝；M-14 的 `Bus::tick_peripherals` **不再**被 M-17 直接调用（否则是**两个真相**）
+> - ⚠️ **`continue_until_event` 的语义订正**：第 1 阶段它只排空队列、**不执行指令**（队列恒空 → 等价于空操作）；现在它真的跑代码（LLD §3.1 `runUntil` 的本意）
 
 ## Code style
 
