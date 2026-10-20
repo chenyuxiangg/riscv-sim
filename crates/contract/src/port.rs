@@ -65,10 +65,31 @@ pub trait ExecutionBackend {
     /// Pause as soon as possible (at the next quantum boundary).
     fn pause(&mut self) -> Result<(), PlatformError>;
 
-    /// Capture a deterministic snapshot.
+    /// Capture a **partial** snapshot of the platform state.
+    ///
+    /// The returned [`SimState`] carries the platform state, the
+    /// virtual clock and the event-queue insertion counter — but **not**
+    /// the pending event queue, which the contract has no room for. A
+    /// snapshot taken this way therefore cannot be restored
+    /// deterministically; see [`Self::restore`].
     fn snapshot(&self) -> Result<SimState, PlatformError>;
 
-    /// Restore a deterministic snapshot.
+    /// Restore a **partial** snapshot of the platform state.
+    ///
+    /// The platform state and the virtual clock are restored, but the
+    /// pending event queue is not part of [`SimState`] and stays as it
+    /// is. Restoring is therefore **not** the inverse of
+    /// [`Self::snapshot`] in the deterministic sense: events queued
+    /// after the snapshot was taken are still pending and will still
+    /// fire, so a run after a restore can diverge from an uninterrupted
+    /// run with the same seed.
+    ///
+    /// Callers that need a deterministic round-trip must snapshot the
+    /// event queue as well. M-12 provides that pair as
+    /// `Engine::snapshot_full` / `Engine::restore_full`, which carry
+    /// the queue in an engine-level type; wiring it into the contract
+    /// is tracked as an open item in
+    /// `docs/reviews/CROSS_MODULE_DEBT.md`.
     fn restore(&mut self, state: &SimState) -> Result<(), PlatformError>;
 
     /// Read a single memory location.

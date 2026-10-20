@@ -161,7 +161,12 @@ pub struct SimState {
     pub csrs: Vec<(u16, u32)>,
     /// Pending memory writes from the current quantum.
     pub pending_writes: Vec<PendingWrite>,
-    /// Scheduler event queue head pointer.
+    /// Monotonic **insertion counter** for the scheduler's event queue.
+    ///
+    /// It is *not* a pointer into the queue — the contract has no room
+    /// for the queue itself. M-12 uses it as the next-event `seq`
+    /// floor, so a restored state cannot reuse a sequence number that
+    /// is still queued (D-17). The field name is historical.
     pub event_queue_head: u64,
     /// Deterministic seed (M-12 §1.1 评审 R8).
     pub seed: u64,

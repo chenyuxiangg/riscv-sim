@@ -339,10 +339,23 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
     /// clock ([`SimState::virtual_time_ps`]) — is restored, but the event
     /// queue is *not* part of [`SimState`] and therefore stays as it is.
     ///
+    /// **This is not a deterministic round-trip.** Events queued *after*
+    /// the snapshot was taken are still pending and will still fire, so
+    /// a run after a restore can diverge from an uninterrupted run with
+    /// the same seed. Concretely: schedule A, snapshot, schedule B,
+    /// restore, run — both A and B fire, while an uninterrupted run
+    /// from the same seed would only fire A.
+    ///
+    /// Use [`Engine::restore_full`] together with
+    /// [`Engine::snapshot_full`] whenever determinism is required: that
+    /// pair round-trips the queue contents, the queue order, the
+    /// insertion counter and the virtual time (D-05).
+    /// [`Engine::snapshot`] / [`Engine::restore`] are the contract-level
+    /// pair, and the contract has no room for the queue.
+    ///
     /// The insertion counter is taken from the restored state and then
     /// raised above every `seq` still queued, so scheduling after a
-    /// restore can never collide with a queued event (D-17). Use
-    /// [`Engine::restore_full`] for an exact restoration.
+    /// restore can never collide with a queued event (D-17).
     pub fn restore(&mut self, state: SimState) {
         self.state = state;
         let floor = self.queue.max_seq().map_or(0, |seq| seq.saturating_add(1));
