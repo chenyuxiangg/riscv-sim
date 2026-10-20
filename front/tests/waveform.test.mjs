@@ -205,6 +205,77 @@ describe("探针流 · 内核侧订阅", () => {
     });
 });
 
+// ---------------------------------------------------------------------------
+// D-46 检视 V-B：这条是**补上的**判别力缺口
+//
+// ⚠️ **此前 `loadProjectIntoKernel` 是私有函数，前端门禁里一条用例都碰不到
+// 它**。实测：把里面的 `await waveform.subscribeProbeStream()` 删掉，
+// `tools/check-front.sh` 仍然 **152/152 全绿**——D-46 最核心的不变量
+// 「`LoadProject` 后探针流被强制重订」**根本没有被守**。
+//
+// 与 D-45 同一个坑：「我记得要重订」写在注释里，不如用一条用例钉住。
+// ---------------------------------------------------------------------------
+
+describe("探针流 · 装载工程后的强制重订", () => {
+    /**
+     * 造一套「服务替身」，记录 `loadProjectIntoKernel` 实际做了什么。
+     *
+     * @returns {{services: object, calls: string[]}}
+     */
+    function fakeServices() {
+        const calls = [];
+        return {
+            calls,
+            services: {
+                commandRouter: fakeRouter(),
+                registerMemory: {
+                    async loadProject() {
+                        calls.push("registerMemory.loadProject");
+                    },
+                },
+                waveform: {
+                    reset() {
+                        calls.push("waveform.reset");
+                    },
+                    async subscribeProbeStream() {
+                        calls.push("waveform.subscribeProbeStream");
+                    },
+                },
+            },
+        };
+    }
+
+    test("三步都做了：reset → 装载（连带重订寄存器流）→ **重订探针流**", async () => {
+        const { services, calls } = fakeServices();
+        await app.loadProjectIntoKernel(services, { id: "p" });
+        assert.deepEqual(
+            calls,
+            ["waveform.reset", "registerMemory.loadProject", "waveform.subscribeProbeStream"],
+            "装载工程后必须重订探针流 —— LoadProject 把内核的主题集合清空了，\
+不重订的话探针流**静默停掉**（与 D-45 同一个坑）",
+        );
+    });
+
+    test("探针流的重订**必须真的发一条订阅命令**（不是只调了个空函数）", async () => {
+        const { router } = setup();
+        const services = {
+            commandRouter: router,
+            registerMemory: { async loadProject() {} },
+            waveform: app.wireWaveform(router),
+        };
+        await app.loadProjectIntoKernel(services, { id: "p" });
+        const subscribes = router.sent.filter(
+            (c) => c && typeof c === "object" && "Subscribe" in c,
+        );
+        assert.equal(
+            subscribes.length,
+            1,
+            `必须有一条 Subscribe 命令，实际发出：${JSON.stringify(router.sent)}`,
+        );
+        assert.deepEqual(subscribes[0], { Subscribe: { topic: "sim.waveform" } });
+    });
+});
+
 describe("波形视图 · 渲染", () => {
     test("通道列表渲染出来了（含标签与边沿数）", () => {
         const { router } = setup();

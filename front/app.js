@@ -240,8 +240,14 @@ async function startSession(services) {
  *
  * @param {{commandRouter: object, registerMemory: object, waveform: object}} services
  * @param {object} project — `model::Project` shaped value
+ *
+ * ⚠️ **导出是为了让它可测**（D-46 检视 V-B）。此前它是**私有**函数，
+ * 前端门禁里**一条用例都碰不到它**——把第 3 步（探针流重订）删掉，
+ * `tools/check-front.sh` 仍然 **152/152 全绿**：D-46 最核心的不变量
+ * 「`LoadProject` 后探针流被强制重订」**根本没有被守**。
+ * 与 D-45 同一个坑——「我记得要重订」写在注释里，不如用一条用例钉住。
  */
-async function loadProjectIntoKernel(services, project) {
+export async function loadProjectIntoKernel(services, project) {
     const { registerMemory, waveform } = services;
     waveform.reset();
     await registerMemory.loadProject(project);
