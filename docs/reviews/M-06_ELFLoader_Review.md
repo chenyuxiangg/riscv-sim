@@ -76,10 +76,10 @@
 | 1 | 阻断 | ✅ 闭环 | `hex.rs` 错误分支改 `bytes.len().saturating_sub(5)`；用例 `hex_rejects_short_record_without_panicking`；**反向验证**：临时回退修复后新门禁立即 panic 失败 |
 | 2 | 高 | ✅ 闭环 | `finalise` 改返回 `Result`，超段数报 E_LDR-02 而非 `truncate()`；另把合并判定的 `wrapping_add` 改 `checked_add`（`0xFFFF_FFF0 + 0x10` 回绕成 `0x0` 会被误判为地址连续，把固件字节搬到错误地址）；3 条 `finalise` 私有辅助函数用例 + 1 条端到端用例 |
 | 3 | 高 | ✅ 闭环 | `read_u16` / `read_u32` 改 `Result<u16/u32, PlatformError>`，全部调用点 `?` 传播；移除 `phnum * e_phentsize` 的 `.expect(...)`；4 条读函数用例（越界 / 极端偏移 / 正常解码） |
-| 4 | 高 | ✅ 闭环 | `Loader` trait 的 `load_with_limits` 去掉默认实现改为必须实现；`load` 成为带默认限额的便捷方法；4 条用例验证 `elf_size` / `raw_size` / `hex_size` / `segment_count` 逐项生效 |
+| 4 | 高 | ✅ 闭环 | `Loader` trait 的 `load_with_limits` 去掉默认实现改为必须实现；`load` 成为带默认限额的便捷方法；4 条用例验证 `elf_size` / `raw_size` / `hex_size` / `segment_count` 逐项生效。**保证性质说明**：限额是**契约性保证**——所有解析路径都必须读 `limits`，且 trait 的默认实现已删除（漏实现就编译不过）。但它**不是**由回归测试锁死的：检视 V3 的变异测试删掉某条路径的限额检查后，M-06 的 47 条用例仍全绿。后续若改动限额校验，需靠人工复核而非依赖门禁 |
 | 5 | 中 | ✅ 闭环 | 新增 `detect_kind_from_bytes`（ELF magic / IHEX 首行 `:`）与 `detect_kind_with_hint`（magic 优先、扩展名辅助、扩展名明确指向某格式时仍尊重它以给出精确错误）；5 条用例 |
 | 6 | 中 | ✅ 闭环 | PT_LOAD 循环内新增 `p_filesz > p_memsz` → E_LDR-01；用例 `elf_rejects_filesz_greater_than_memsz` |
-| 7 | 中 | ⚠️ **部分闭环** | M-06 侧已加 `total_image_bytes`（默认 64 MiB）/ `max_region_bytes`（默认 16 MiB）并在 ELF / HEX / raw 三条路径逐项校验（5 条用例）。**M-14 侧 `prepare_bytes` 未动**（他方保留区） |
+| 7 | 中 | ✅ 闭环 | M-06 侧已加 `total_image_bytes`（默认 64 MiB）/ `max_region_bytes`（默认 16 MiB）并在 ELF / HEX / raw 三条路径逐项校验（5 条用例）。**M-14 侧亦已闭环**（`60dbbb8`：`prepare_bytes` 在分配前校验区域上限，超限报 E_BUS-09；`map_region` 另有一道闸）。两侧缺一不可，现两侧均在 |
 | 8 | 中 | ✅ 闭环 | `ParseLimits` 新增 `hex_size` / `raw_size`；HEX 与 raw 各自使用，不再借用 `elf_size` |
 | 9 | 中 | ✅ 闭环 | `append_or_merge` 对空 payload 直接返回；用例 `hex_ignores_zero_length_data_records` |
 | 10 | 中 | ✅ 闭环 | `tests_malformed.rs`：20 条表驱动畸形用例（覆盖 brief 要求的 9 类）+ 2 条固定种子 fuzz 用例（随机字节 2000 轮 / 合法镜像变异 2000 轮） |
@@ -89,9 +89,9 @@
 | 14 | 低 | ⬜ 未修 | MVP 不使用该字段 |
 | 15 | 低 | ⚠️ 已加严 | 输出段数新增 `segment_count` 校验（`e_phnum` 的保守性保留） |
 | 16 | 低 | ⬜ 未修 | 已在 `ParseLimits` 文档中写明由 M-11 执行 |
-| 17 | 低 | ⬜ 未修 | 已记录为已知限制与建议判据 |
+| 17 | 低 | ✅ 已修 | 嗅探判据由「首字节是 `:`」收紧为结构判据：记录标记 + 长度 ≥ 11 + 长度为奇数 + 声明字节数与实际数据长度一致 + 标记后全为 hex 数字。首字节恰为 `0x3A` 的 raw 二进制不再被误判为 HEX。判据与 IHEX 解析器自身的校验（`bytes.len() == count + 5`）一致，合法文件仍被识别。3 条用例（raw blob / 4 种畸形记录 / 最短 EOF 记录） |
 
-**统计：阻断 / 高严重度项 100% 闭环**（#1~#4），中严重度 6/7 闭环（#7 仅剩 M-14 侧），低严重度按「设计取舍 / 跨模块 / 收益有限」分流，0 项被遗忘。
+**统计：阻断 / 高严重度项 100% 闭环**（#1~#4），中严重度 7/7 闭环（#7 的 M-14 侧已由 `60dbbb8` 补齐），低严重度按「设计取舍 / 跨模块 / 收益有限」分流，0 项被遗忘；#17 的嗅探假阳性已由检视 V3 跟进修复。
 
 ### 4.1 与 LLD 的偏离登记
 
@@ -107,12 +107,12 @@
 
 | 项 | 状态 | 需要谁 | 说明 |
 | --- | --- | --- | --- |
-| **D-10 的 M-14 侧** | ❌ **未闭合** | 需指派 M-14 会话 | M-14 `prepare_bytes` 仍是裸 `vec![0u8; size as usize]`，`size` 最大可达 ~4 GiB。M-06 侧现在保证「交给 M-14 的每个段 ≤ `max_region_bytes`、整镜像 ≤ `total_image_bytes`」，但 M-14 自身若被其他调用方直接喂一个超大 size，仍会 OOM。**两侧缺一不可** |
+| **D-10 的 M-14 侧** | ✅ **已闭合** | — | M-14 `prepare_bytes` 已加区域大小上限（`60dbbb8`）：分配前校验，超限报 E_BUS-09，`map_region` 另有一道闸。检视 V2 补测发现外设映射路径只受单层防线守护，已由 `0fbd6e7` 补上用例 |
 | **`symbol_count` / `line_entry_count`** | ❌ 未闭合 | M-11 | M-06 不解析符号表 / DWARF 行表，两个字段在 M-06 侧不生效。已在 `ParseLimits` 文档中写明归属 |
 | **D-23 门禁缺口第 3~4 项** | ❌ 未闭合 | 协调者 | 本轮只补了 M-06 相关的第 2 项（畸形输入表驱动用例）。台账中的其余门禁项不属 M-06 |
 | **契约冻结** | ✅ 无诉求 | — | 本轮**未修改** `crates/contract/**`。新增的 `ParseLimits` 字段在 kernel 内部，未触及契约层；M-05 若要下发这些限额，需协调者决定是否进契约 |
 | **公开 API 变更** | ⚠️ 需知会 | 协调者 | ① `Loader` trait 的 `load_with_limits` 由「有默认实现」变为「必须实现」（trait 破坏性变更；全代码库仅 `DefaultLoader` 一个实现，`front/` 与 `crates/server/` 均未引用 M-06，无外部影响）② `detect_kind` 未知扩展名的返回值由 `Elf` 改为 `RawHex` ③ `ParseLimits` 新增 4 个字段（均为加法，构造点均用 `..Default::default()`） |
-| **嗅探假阳性**（#17） | ⬜ 已知限制 | — | raw 二进制首字节为 `0x3A` 时会被判成 HEX 并解析失败。概率低，后果是该文件加载不了 |
+| **嗅探假阳性**（#17） | ✅ 已修 | — | 判据已由「首字节是 `:`」收紧为结构判据（见 §四 #17）。raw 二进制首字节为 `0x3A` 时不再被误判成 HEX |
 | **`ET_DYN` 不支持** | ⬜ 已知限制 | — | MVP 只接受 `ET_EXEC`；PIE 固件会被拒（E_LDR-01），错误信息明确 |
 | **`e_entry` 不校验**（#13） | ⬜ 已知限制 | — | 入口地址落在段外可加载成功，运行时才暴露 |
 

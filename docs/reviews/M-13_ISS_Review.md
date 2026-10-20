@@ -6,6 +6,12 @@
 > **审查方式**：全文件通读 + 调用方交叉核对（M-12 / M-17 / M-08 / M-09 / M-20 / M-23 / M-22 / M-06）+ 指令语义逐条对拍 RISC-V 非特权规范 v20260120（RV32I 2.1）
 > **门禁状态**：`cargo test --workspace` 277 passed / 0 failed（基线 203）；`clippy -D warnings` 干净；`fmt --check` 干净
 > **结论**：M-13 由「只有 ADDI 一条指令」扩到 **RV32I 全集（41 条指令 = LLD §3.3 的 48 条清单中实现 40 条 + FENCE.I）**，三条台账欠账（D-04 / D-11 / D-16）全部闭环。审查中另发现并修复 **1 项实现缺陷**（立即数符号扩展位宽错误，影响全部负立即数）。剩余 8 项为下一波（M 扩展 / C 扩展 / CSR / 陷阱投递）的工作，不在本轮范围。
+>
+> **后续修订（2026-10-20，独立检视 V1 之后）**：
+> - 本报告初版**漏报** 1 项阻断级分类缺陷（SYSTEM 未校验 `funct3`，见 §一 #14），已由 `caf7f82` 修复并补 3 条用例。
+> - §一 #6 的「本轮契约要求非对齐访存 → `Trapped`」**没有契约依据**（`crates/contract/src/` 零处提及），默认策略已按 LLD 改为 `Allow`。
+> - §一 #5 的 LLD 矛盾已回写（`00f1ab5`）。
+> - M-13 测试数 78 → 88；`cargo test --workspace` 375 passed / 0 failed。
 
 ---
 
@@ -17,8 +23,8 @@
 | 2 | **高** | `mod.rs`（原 `:140`） | **D-11：`BusExecutor` 复制 `Executor` 的 ADDI 语义**，`bus` 字段挂 `#[allow(dead_code)]` 从未被读；两条路径的非法指令语义还不同（`Trapped` vs `Err`） | LOAD/STORE 落地后会**静默绕过总线**（丢 stats 与 M-18 hook）。**已修复** | ✅ 引入 `MemoryAccess` 端口（`executor.rs:102`）+ 唯一执行路径 `execute_one()`（`executor.rs:441`）。`BusExecutor` 删除，改为只做访存适配的 `BusMemory`（`mod.rs:166`）。两条路径的非法指令语义统一为 `Trapped { IllegalInstruction }` |
 | 3 | **中** | `decoder.rs`（原 `Decoded`） | **D-16：`Decoded` 无指令长度字段，PC 恒 `+4`** | RV32IMC 落地前必须先改结构，否则解码结构要返工。**已修复** | ✅ 新增 `pub len: u8`（`decoder.rs:43`）与 `LEN_32` / `LEN_16` 常量；解码器按 `raw & 0b11` 判定宽度（32 位编码低位恒 `0b11`，压缩编码恒不为）；PC 步进改为按 `d.len` |
 | 4 | **高** | `decoder.rs` `immediate()` | **本轮新发现：S / B / J 型立即数符号扩展位宽少算一位**（原写 11 / 12 / 20，正确为 12 / 13 / 21） | 符号位（S 型 `imm[11]`、B 型 `imm[12]`、J 型 `imm[20]`）在左移时被移出 32 位，**所有负立即数都会算错偏移量**。例：B 型 `-8` 被解成 `-384`、J 型 `+0x10_0000`（越界值）被解成 `-0x10_0000` | ✅ 已修正为 12 / 13 / 21 位；补 `branch_immediate_survives_every_field` / `jal_immediate_survives_every_field` 逐字段用例锁定 |
-| 5 | **中** | LLD §3.1 vs §3.3 | **LLD 自身矛盾**：§3.1 立即数表写「U 型 `imm[31:12] = inst[31:12]`，低 12 位补 0」，§3.3 执行列却写 LUI 的执行动作是 `regFile[rd] = imm<<12` | 两者不可同真：若 `imm` 已含左移，再 `<<12` 即二次左移（`lui x1, 0x12345` 会得到 `0x2345_0000` 而非 `0x1234_5000`） | 本实现按 §3.1 立即数表（U 型立即数即最终值，低 12 位为 0），LUI 直接 `rd = imm`、AUIPC `rd = pc + imm`。**理由**：§3.1 是立即数拼接的规范定义，§3.3 执行列是笔误。建议回写 LLD 修正 §3.3 |
-| 6 | **中** | `executor.rs` `MisalignedPolicy`（`:175`） | **LLD §3.6(2) 要求非对齐访存「允许、不产生异常」（与 Spike 对齐）」，本轮契约要求「非对齐访存 → `Trapped { MisalignedAccess }`」 | RISC-V 规范允许二选一，两者都合法。硬编码任一方都会在另一方落地时返工 | **未二选一**：做成 `MisalignedPolicy` 开关（`Trap` / `Allow`），默认 `Trap`（满足本轮契约），`Iss::with_misaligned_policy()`（`mod.rs:79`）可切到 `Allow`（满足 LLD §3.6(2)）。Spike 对拍波次落地时翻转默认值即可，无需改结构 |
+| 5 | **中** | LLD §3.1 vs §3.3 | **LLD 自身矛盾**：§3.1 立即数表写「U 型 `imm[31:12] = inst[31:12]`，低 12 位补 0」，§3.3 执行列却写 LUI 的执行动作是 `regFile[rd] = imm<<12` | 两者不可同真：若 `imm` 已含左移，再 `<<12` 即二次左移（`lui x1, 0x12345` 会得到 `0x2345_0000` 而非 `0x1234_5000`） | 本实现按 §3.1 立即数表（U 型立即数即最终值，低 12 位为 0），LUI 直接 `rd = imm`、AUIPC `rd = pc + imm`。**理由**：§3.1 是立即数拼接的规范定义，§3.3 执行列是笔误。**已回写 LLD**：§3.3 执行列改为「`regFile[rd] = imm`（imm 已按 §3.1 完成左移，勿再移位）」，v0.11.0 收口提交 `00f1ab5` |
+| 6 | **中** | `executor.rs` `MisalignedPolicy`（`:175`） | **LLD §3.6(2) 要求非对齐访存「允许、不产生异常」（与 Spike 对齐）」 | RISC-V 规范允许二选一，两者都合法。硬编码任一方都会在另一方落地时返工 | **已按 LLD 口径定为默认 `Allow`**：`MisalignedPolicy` 仍做成开关（`Trap` / `Allow`），但默认值是 `Allow`（`#[default]`），`Trap` 降为 opt-in 严格模式。**订正本报告此前的表述**：原文写「本轮契约要求非对齐访存 → `Trapped`」——`crates/contract/src/` 全文零处提及非对齐访存，并无此契约要求，属本报告的自我设定。依据是 LLD §3.6(2) 与 §5.2.1 两处原文（「默认不触发」「保持 golden 兼容」）。默认取 `Trap` 会让 ISS 在任何触碰非对齐地址的程序上与 Spike 分叉，而那正是 golden 对拍要测的 |
 | 7 | **中** | `executor.rs` `execute_one()` | **LLD §3.2 要求键未命中 → E_ISS-01 平台错误码**，本实现统一为 `StepOutcome::Trapped { IllegalInstruction }` | E_ISS-01 是平台错误码，而非法指令本质是指令级同步异常（mcause = 2）。陷阱投递链路（mepc/mcause/mtval → mtvec）尚未接通，`StepOutcome::Trapped` 是当前唯一能表达「指令级同步异常」的通道 | 按本轮契约统一为 `Trapped`。**理由**：D-11 要求两条路径的非法指令语义一致，`Trapped` 是唯一自洽的选择。陷阱投递接通后，`Trapped` → E_ISS-01 的转换应在 M-12 侧完成（见 §四 #3） |
 | 8 | **低** | `executor.rs` `TrapCause`（`:44`） | `TrapCause::IntegerDivideByZero` 为预留变体，本轮无任何产出路径（M 扩展属下一波） | 死变体。但本轮契约明确要求为 Wave 2 预留 | 保留，文档已注明「Reserved for the `M` extension」。M 扩展落地时直接产出，无需改枚举形状 |
 | 9 | **低** | `executor.rs` / `mod.rs` | **陷阱投递链路未接通**：`StepOutcome::Trapped` 只带 `TrapCause`，不更新 `mepc` / `mcause` / `mtval`，也不跳转 `mtvec` | `SimState.csrs` 是 `Vec<(u16, u32)>` 契约字段，但 ISS 尚未读写它。M-16 / M-12 的中断交付也未接线 | 列为下一波。本轮不伪造 CSR 语义 |
@@ -26,6 +32,7 @@
 | 11 | **低** | `executor.rs` `read_gpr` / `write_gpr` | **x0 槽位不被擦洗**：ISS 丢弃对 x0 的写入，但不会把被外部写脏的 `state.gpr[0]` 改回 0 | 架构语义正确（x0 恒读作 0），但下游若直接读 `state.gpr[0]`（寄存器面板 / M-20 快照 / M-10 内存服务）会看到脏值 | ISS 侧不擦洗（写忽略是架构语义，擦洗是消毒，两回事）。**跨模块契约点**：建议在 `SimState.gpr` 的文档里写明「x0 槽位恒为 0 的保证由写入方负责」——需契约层决策，本次未改契约 |
 | 12 | **低** | `decoder.rs` `Decoded` | **新增 `pub len` 字段对外部字面量构造是破坏性变更** | `Decoded` 的构造点全在 `m13_iss` 内部（已全库检索确认：仅 `m11_symbol` 的**文档注释**提到 `Decoded`，非构造点；`m17_backend` 只用 `Iss`） | 影响为零，保留加法式变更 |
 | 13 | **低** | `executor.rs` `classify()` | **指令集仍有缺口**：M 扩展（8 条）、C 扩展（26 条）、CSR 指令（6 条）、MRET / WFI 未实现，命中即判非法指令 | LLD §3.3 把 FENCE 列入 RV32I，已实现（空操作）；其余属 Wave 2 | 下一波。压缩指令（`len == 2`）已显式判为非法指令陷阱，不会被误当作 32 位指令执行 |
+| 14 | **阻断** | `executor.rs` `classify()` 的 SYSTEM 分支 | **本报告初版遗漏的缺陷：SYSTEM opcode 只按 12 位立即数判 ECALL / EBREAK，未校验 `funct3`** | RISC-V 非特权规范把 `funct3 == 0b000` 留给 ECALL / EBREAK，`funct3` 001..111 是 CSR 指令族。只看立即数会把 `0x00001073`（csr=0，CSRRW）误判为 ECALL，mcause 报 11 而非 2 —— CSR 接线落地后 trap 会投递给错误的 handler。**本报告初版把 CSR 归入「指令集缺口」，未识别出这是一个现存的分类缺陷**；独立检视（V1）以变异测试发现，当时尚无任何测试能抓住它 | ✅ 已修（`caf7f82`）：`match (d.funct3, d.imm)`，funct3 ≠ 0 一律判非法指令。补 3 条用例（7 个 funct3 × 4 个 csr 的表驱动 / 不得误判为 EBREAK / MRET 与 WFI 形态） |
 
 ---
 
@@ -37,7 +44,7 @@
 | §3.1 | 立即数按 I / S / B / U / J 型拼接并符号扩展 | ✅ `decoder.rs` 的 `immediate()`，按 opcode 选格式；OP-IMM 移位指令特判为 5 位 shamt（LLD §3.3） |
 | §3.1（评审 13-3） | 未对齐检查先于宽度判定与取指访存 | ✅ `mod.rs:97` / `:131`：`pc & 0x1 != 0` 先于取指判陷阱 |
 | §3.3 | x0 写忽略 | ✅ `write_gpr()` 写侧丢弃；读侧恒 0 |
-| §3.6(2) | 非对齐访存 | ⚠️ 做成策略开关，默认 `Trap`（见 §一 #6） |
+| §3.6(2) | 非对齐访存 | ✅ 做成策略开关，**默认 `Allow`**（与 Spike 一致，保持 golden 兼容；见 §一 #6）。`Trap` 为 opt-in 严格模式 |
 | §3.6(5) | FENCE / WFI | ✅ FENCE / FENCE.I 实现为空操作；WFI 依赖 CSR，留待下一波 |
 | §3.6(10) / 评审 13-8 | 每条指令至少一条正向用例 + 边界用例 | ✅ 41 条指令逐条有用例；边界覆盖负立即数、移位量 ≥ 32、SLT 跨符号边界、分支跳 / 不跳、B/J 型立即数逐字段、未对齐访存、非法码陷阱 |
 | §2.1 | 指令为 `(gpr, mem, decoded)` 的纯函数，执行器不读宿主时钟 | ✅ `execute_one()` 是纯函数；`execution_is_deterministic` 用例断言同一程序两次运行结果完全一致 |
@@ -60,7 +67,7 @@
 ## 四、剩余风险与下一波
 
 1. **陷阱投递（最高优先）**：`StepOutcome::Trapped` 目前只带原因，不更新 `mepc` / `mcause` / `mtval`，不跳 `mtvec`。固件一旦依赖 ECALL 处理（`ecall` → `trap` → `mepc` → `mret`），当前实现无法闭环。M-16 / M-12 的中断交付同属此链。
-2. **Spike 对拍（FR-04 必做）**：本轮已具备对拍前提（x0 正确、语义单一、立即数拼接有逐字段用例）。对拍前需先决定 `MisalignedPolicy` 的默认值——Spike 默认允许非对齐，届时应切到 `Allow`。
+2. **Spike 对拍（FR-04 必做）**：本轮已具备对拍前提（x0 正确、语义单一、立即数拼接有逐字段用例）。`MisalignedPolicy` 的默认值**已决定并落地**（默认 `Allow`，与 Spike 一致），对拍时无需再翻转。
 3. **M 扩展**：`Op` / `TrapCause::IntegerDivideByZero` 已预留位置；`MUL` 的 funct7 = `0000001` 当前判为非法指令（有用例锁定），Wave 2 落地时改 `classify()` 即可。
 4. **C 扩展**：`Decoded.len` 已能区分 2 / 4 字节，压缩编码当前显式判为非法指令；C 落地还需改取指宽度（`pc % 4 == 2` 时取半字）与解码器展开层。
 5. **跨模块契约点**：`SimState.gpr[0]` 恒 0 的保证由谁负责（§一 #11）——需契约层决策，本次未改契约。
