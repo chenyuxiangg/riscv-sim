@@ -1195,3 +1195,197 @@ fn ebreak_traps() {
         }
     );
 }
+
+// ---------------------------------------------------------------------------
+// RV32I — boundary cases
+// ---------------------------------------------------------------------------
+
+/// The B-type immediate must survive the splice for every offset class:
+/// zero, both signs, the imm[4:1] field, the imm[10:5] field and the
+/// imm[11] / imm[12] sign fields.
+#[test]
+fn branch_immediate_survives_every_field() {
+    for offset in [0i32, 2, -2, 16, -16, 254, -254, 2046, -2048, 4094, -4096] {
+        let d = Decoder::default().decode(enc_b(offset, 2, 1, 0b000, BRANCH), 0);
+        assert_eq!(
+            d.imm, offset,
+            "branch offset {} did not survive the immediate splice",
+            offset
+        );
+    }
+}
+
+/// The J-type immediate must survive the splice for every offset class.
+#[test]
+fn jal_immediate_survives_every_field() {
+    // The J-type immediate is 21 bits wide and always even, so the
+    // representable range is [-0x10_0000, 0x0F_FFFE].
+    for offset in [
+        0i32, 2, -2, 0x1000, -0x1000, 0x08_0000, -0x08_0000, 0x0F_FFFE, -0x10_0000,
+    ] {
+        let d = Decoder::default().decode(enc_j(offset, 1, JAL), 0);
+        assert_eq!(
+            d.imm, offset,
+            "jal offset {} did not survive the immediate splice",
+            offset
+        );
+    }
+}
+
+/// A register shift amount of 32 or more uses only its low 5 bits.
+#[test]
+fn register_shift_amounts_use_only_the_low_five_bits() {
+    let mut h = Harness::new();
+
+    // 32 & 0x1f == 0 → no shift at all.
+    let mut state = SimState::default();
+    state.gpr[1] = 0x1234_5678;
+    state.gpr[2] = 32;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b001, 3, OP));
+    assert_eq!(
+        state.gpr[3], 0x1234_5678,
+        "a shift amount of 32 shifts by 0"
+    );
+
+    // 63 & 0x1f == 31 → the largest shift.
+    let mut state = SimState::default();
+    state.gpr[1] = 1;
+    state.gpr[2] = 63;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b001, 3, OP));
+    assert_eq!(state.gpr[3], 1 << 31, "a shift amount of 63 shifts by 31");
+}
+
+/// An immediate shift amount of 31 is the largest one.
+#[test]
+fn immediate_shift_amount_of_thirty_one_shifts_by_thirty_one() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 1;
+    h.step_one_at(&mut state, 0, enc_shift(0, 31, 1, 0b001, 2, OP_IMM));
+    assert_eq!(state.gpr[2], 1 << 31);
+}
+
+/// An illegal funct3 must trap as an illegal instruction.
+#[test]
+fn illegal_funct3_traps() {
+    let mut h = Harness::new();
+
+    // LOAD with funct3 = 0b011 is not a valid encoding.
+    let mut state = SimState::default();
+    let outcome = h.step_one_at(&mut state, 0, enc_i(0, 0, 0b011, 2, LOAD));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::IllegalInstruction
+        }
+    );
+
+    // BRANCH with funct3 = 0b010 is not a valid encoding.
+    let mut state = SimState::default();
+    let outcome = h.step_one_at(&mut state, 0, enc_b(8, 0, 0, 0b010, BRANCH));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::IllegalInstruction
+        }
+    );
+}
+
+/// An illegal funct7 must trap as an illegal instruction.
+#[test]
+fn illegal_funct7_traps() {
+    let mut h = Harness::new();
+
+    // ADD with funct7 = 0b000_0001 is the M extension's MUL, which is
+    // not implemented in this wave.
+    let mut state = SimState::default();
+    let outcome = h.step_one_at(&mut state, 0, enc_r(0b000_0001, 2, 1, 0b000, 3, OP));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::IllegalInstruction
+        }
+    );
+
+    // SLLI with funct7 = 0b000_0001 is not a valid shift encoding.
+    let mut state = SimState::default();
+    let outcome = h.step_one_at(&mut state, 0, enc_shift(0b000_0001, 4, 1, 0b001, 3, OP_IMM));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::IllegalInstruction
+        }
+    );
+}
+
+/// An illegal instruction must not touch the PC or the registers.
+#[test]
+fn illegal_instruction_leaves_the_state_untouched() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[3] = 0x1234_5678;
+    let outcome = h.step_one_at(&mut state, 0x1000, enc_r(0b000_0001, 2, 1, 0b000, 3, OP));
+    assert!(matches!(outcome, StepOutcome::Trapped { .. }));
+    assert_eq!(
+        state.pc, 0x1000,
+        "a trapped instruction must not advance the PC"
+    );
+    assert_eq!(
+        state.gpr[3], 0x1234_5678,
+        "a trapped instruction must not write rd"
+    );
+}
+
+/// A short program must run instruction after instruction, with the PC
+/// advancing by one instruction length each time.
+#[test]
+fn a_program_runs_instruction_after_instruction() {
+    let mut h = Harness::new();
+    // addi x1, x0, 5 ; addi x2, x1, 3 ; sub x3, x2, x1
+    h.load(
+        0,
+        &[
+            enc_i(5, 0, 0b000, 1, OP_IMM),
+            enc_i(3, 1, 0b000, 2, OP_IMM),
+            enc_r(0b010_0000, 1, 2, 0b000, 3, OP),
+        ],
+    );
+
+    let mut state = SimState::default();
+    for _ in 0..3 {
+        h.step(&mut state).expect("step");
+    }
+    assert_eq!(state.gpr[1], 5);
+    assert_eq!(state.gpr[2], 8);
+    assert_eq!(state.gpr[3], 3, "x3 = x2 - x1 = 8 - 5");
+    assert_eq!(
+        state.pc, 12,
+        "three 4-byte instructions advance the PC by 12"
+    );
+}
+
+/// The ISS is a pure function of its inputs: the same program and the
+/// same starting state must produce the same result every time.
+#[test]
+fn execution_is_deterministic() {
+    let program = [
+        enc_i(5, 0, 0b000, 1, OP_IMM),
+        enc_i(3, 1, 0b000, 2, OP_IMM),
+        enc_r(0b010_0000, 1, 2, 0b000, 3, OP),
+    ];
+
+    let run = || {
+        let mut h = Harness::new();
+        h.load(0, &program);
+        let mut state = SimState::default();
+        for _ in 0..3 {
+            h.step(&mut state).expect("step");
+        }
+        (state.gpr, state.pc)
+    };
+
+    let first = run();
+    let second = run();
+    assert_eq!(first.0, second.0, "the register file must be reproducible");
+    assert_eq!(first.1, second.1, "the PC must be reproducible");
+}
