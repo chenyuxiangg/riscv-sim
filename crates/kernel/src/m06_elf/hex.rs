@@ -155,7 +155,7 @@ pub fn parse(text: &str, limits: &ParseLimits) -> Result<LoadImage, PlatformErro
             }
             0x01 => {
                 // EOF — return early with the segments we have.
-                return Ok(finalise(buf, limits));
+                return finalise(buf, limits);
             }
             0x02 => {
                 // Extended Segment Address: 2 bytes, applied as `<< 4`.
@@ -218,7 +218,14 @@ pub fn parse(text: &str, limits: &ParseLimits) -> Result<LoadImage, PlatformErro
 ///
 /// Overlapping but distinct rows are NOT merged — M-14 catches them
 /// as E_BUS-03 collisions and the host surfaces a clear error.
-fn finalise(mut buf: Vec<(u32, Vec<u8>)>, limits: &ParseLimits) -> LoadImage {
+///
+/// If the merged result still exceeds `limits.segment_count` this returns
+/// `Err` (E_LDR-02) instead of silently dropping the tail: dropping
+/// firmware bytes would load a truncated image that looks valid (D-08).
+fn finalise(
+    mut buf: Vec<(u32, Vec<u8>)>,
+    limits: &ParseLimits,
+) -> Result<LoadImage, PlatformError> {
     buf.sort_by_key(|(b, _)| *b);
 
     // Step 1: collapse same-base duplicates (last wins).
@@ -241,7 +248,13 @@ fn finalise(mut buf: Vec<(u32, Vec<u8>)>, limits: &ParseLimits) -> LoadImage {
     let mut final_segments: Vec<(u32, Vec<u8>)> = Vec::new();
     for (base, mut data) in collapsed {
         if let Some((prev_base, prev_data)) = final_segments.last_mut() {
-            if prev_base.wrapping_add(prev_data.len() as u32) == base {
+            // `checked_add` rather than `wrapping_add`: a segment that
+            // ends exactly at the 4 GiB bus boundary must not wrap around
+            // to a low address and be mistaken for a contiguous run.
+            if prev_base
+                .checked_add(prev_data.len() as u32)
+                .is_some_and(|end| end == base)
+            {
                 prev_data.append(&mut data);
                 continue;
             }
@@ -250,12 +263,20 @@ fn finalise(mut buf: Vec<(u32, Vec<u8>)>, limits: &ParseLimits) -> LoadImage {
     }
 
     if final_segments.len() > limits.segment_count as usize {
-        final_segments.truncate(limits.segment_count as usize);
+        return Err(PlatformError::new(
+            FAMILY,
+            2,
+            format!(
+                "merged segment count {} exceeds parseLimit.segmentCount {}",
+                final_segments.len(),
+                limits.segment_count
+            ),
+        ));
     }
-    LoadImage {
+    Ok(LoadImage {
         segments: final_segments,
         entry: 0,
-    }
+    })
 }
 
 /// Append `bytes` at `base` into `buf`, merging with the previous
@@ -272,7 +293,10 @@ fn append_or_merge(buf: &mut Vec<(u32, Vec<u8>)>, base: u32, bytes: &[u8]) {
             last_data[..n].copy_from_slice(&bytes[..n]);
             return;
         }
-        if last_base.wrapping_add(last_data.len() as u32) == base {
+        if last_base
+            .checked_add(last_data.len() as u32)
+            .is_some_and(|end| end == base)
+        {
             last_data.extend_from_slice(bytes);
             return;
         }
@@ -303,5 +327,77 @@ fn hex_nibble(b: u8) -> Option<u8> {
         b'a'..=b'f' => Some(b - b'a' + 10),
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tests
+// ---------------------------------------------------------------------------
+
+/// Tests for the private merge/finalise helpers. They live here (rather
+/// than in the module-level `tests.rs`) because `finalise` is private to
+/// this module and the D-08 contract — "exceeding the segment budget is an
+/// error, never a silently truncated image" — is about `finalise` itself.
+#[cfg(test)]
+mod finalise_tests {
+    use super::*;
+
+    fn limits_with_segment_count(n: u32) -> ParseLimits {
+        ParseLimits {
+            segment_count: n,
+            ..ParseLimits::default()
+        }
+    }
+
+    /// D-08: exceeding `segment_count` must be reported, not truncated.
+    /// The old implementation called `truncate()` here, which silently
+    /// dropped the tail of the firmware.
+    #[test]
+    fn finalise_reports_segment_overflow_instead_of_truncating() {
+        let buf = vec![
+            (0x0000_0000u32, vec![0xAAu8; 4]),
+            (0x0000_1000u32, vec![0xBBu8; 4]),
+        ];
+        let err = finalise(buf, &limits_with_segment_count(1)).unwrap_err();
+        assert_eq!(err.family, ErrorFamily::Loader);
+        assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+        assert!(
+            err.message.contains("segmentCount"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
+
+    /// D-08 control: a merged image that fits the budget is returned whole.
+    #[test]
+    fn finalise_keeps_all_segments_within_budget() {
+        let buf = vec![
+            (0x0000_0000u32, vec![0xAAu8; 4]),
+            (0x0000_1000u32, vec![0xBBu8; 4]),
+        ];
+        let img = finalise(buf, &limits_with_segment_count(2)).unwrap();
+        assert_eq!(img.segments.len(), 2);
+    }
+
+    /// A segment that ends exactly at the 4 GiB bus boundary must not be
+    /// treated as contiguous with a low address. The merge test uses
+    /// `checked_add` rather than `wrapping_add`: under wrapping
+    /// arithmetic `0xFFFF_FFF0 + 0x10` becomes `0x0`, and merging those
+    /// two runs would relocate firmware bytes to the wrong address.
+    #[test]
+    fn finalise_does_not_merge_across_the_4gib_boundary() {
+        let buf = vec![
+            (0xFFFF_FFF0u32, vec![0xCCu8; 0x10]),
+            (0x0000_0000u32, vec![0xDDu8; 4]),
+        ];
+        let img = finalise(buf, &limits_with_segment_count(8)).unwrap();
+        assert_eq!(
+            img.segments.len(),
+            2,
+            "segments on either side of the 4 GiB boundary must stay separate"
+        );
+        // `finalise` sorts by base, so the low address comes first.
+        assert_eq!(img.segments[0].0, 0x0000_0000);
+        assert_eq!(img.segments[1].0, 0xFFFF_FFF0);
     }
 }

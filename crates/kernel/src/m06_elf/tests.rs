@@ -342,6 +342,39 @@ fn hex_rejects_unknown_record_type() {
 }
 
 // ---------------------------------------------------------------------------
+// D-08 regression: a HEX image whose segment count exceeds the budget must
+// be rejected, never silently truncated. A truncated image looks valid to
+// the host and would run with firmware bytes missing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hex_rejects_image_exceeding_segment_budget() {
+    // Three disjoint data records + EOF. With a budget of 2 segments the
+    // image must be rejected instead of being cut down to 2 segments.
+    let text = format!(
+        "{}{}{}{}",
+        hex_line(0x0000, 0x00, &[0xAA]),
+        hex_line(0x1000, 0x00, &[0xBB]),
+        hex_line(0x2000, 0x00, &[0xCC]),
+        hex_line(0x0000, 0x01, &[]),
+    );
+    let limits = ParseLimits {
+        segment_count: 2,
+        ..ParseLimits::default()
+    };
+    let err = DefaultLoader
+        .load_with_limits(text.as_bytes(), Kind::Hex, &limits)
+        .unwrap_err();
+    assert_eq!(err.family, ErrorFamily::Loader);
+    assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+    assert!(
+        err.message.contains("segmentCount"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Loader trait dispatch + detect_kind helper
 // ---------------------------------------------------------------------------
 
