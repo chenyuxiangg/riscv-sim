@@ -106,7 +106,7 @@ riscv_sim/
 | M-10 | 寄存器内存服务 | `front/services/m10_registermemory.js` | ✅ v0.11 实现（订阅寄存器/内存快照）；v0.11.1 补断线重连后重订阅 |
 | M-11 | 符号表/DWARF/反汇编/trace 导出 | `crates/kernel/src/m11_symbol/` | stub |
 | M-12 | 事件驱动仿真引擎 | `crates/kernel/src/m12_engine/` | ✅ v0.11 加固（快照还原 now_ps+事件队列、推进不空转、seq 不撞号）；v0.11.2 增契约快照 DTO 转换层（`snapshot_dto` / `restore_dto`，**先校验后应用**）+ `Engine::reset()`；⚠️ **至今无独立模块级 review**（台账 D-30） |
-| M-13 | RISC-V ISS（RV32IMC） | `crates/kernel/src/m13_iss/` | ✅ v0.11 **RV32I 全集 41 条** + 模块级 review；v0.11.1 检视轮修 SYSTEM funct3 阻断级缺陷；v0.12 **RV32I 与 Spike 逐例对拍通过**（语料 51 例中 42 例判决 + 失败用例号全一致）；M/C 扩展待做（第 3 阶段，台账 D-43） |
+| M-13 | RISC-V ISS（RV32IMC） | `crates/kernel/src/m13_iss/` | ✅ v0.11 **RV32I 全集 41 条** + 模块级 review；v0.11.1 检视轮修 SYSTEM funct3 阻断级缺陷；v0.12 **RV32I 与 Spike 逐例对拍通过**（语料 51 例中 42 例判决一致；失败用例号一致性由变异金丝雀证明）；M/C 扩展待做（第 3 阶段，台账 D-43） |
 | M-14 | 总线与内存映射 | `crates/kernel/src/m14_bus/` | ✅ v0.4 完成 + v0.7.2 补完；v0.11 接线 PR |
 | M-15 | 外设模型层 | `crates/kernel/src/m15_peripheral/` | ✅ v0.7 三外设 + v0.11 接线 PR |
 | M-16 | 中断控制器 | `crates/kernel/src/m16_interrupt/` | stub |
@@ -122,7 +122,7 @@ riscv_sim/
 > - `m12_engine::tests::engine_advances_time`（事件队列 + 时间推进）
 > - `m13_iss::tests::addi_executes`（RV32I ADDI 解释执行，x1=42）
 >
-> **v0.11 起新增判据**（`cargo test --workspace` **406** 全绿 = 契约 lib 12 + kernel lib 356 + 集成 38）：
+> **v0.11 起新增判据**（`cargo test --workspace` **417** 全绿 = 契约 lib 12 + kernel lib 356 + 集成 38 + golden runner 11）：
 > - `m13_iss::tests_rv32i::*`（RV32I 41 条指令 + 黄金编码 + 边界 + CSR 形态 SYSTEM 陷阱 + 步进/回绕/子字存储）
 > - `m12_engine::tests::*`（snapshot→restore→继续推进的确定性）
 > - `m06_elf::tests_malformed::*`（畸形输入表驱动 + fuzz，均不得 panic）
@@ -133,9 +133,11 @@ riscv_sim/
 > - `m06_elf::tests::*`（IHEX 嗅探结构判据：raw 二进制首字节 `0x3A` 不再误判；4 GiB 总线边界）
 >
 > **v0.12 黄金对拍判据**（第 2 阶段；**不进 `cargo test`**，需外部依赖）：
-> - `tools/golden-run.sh --self-check` —— **变异金丝雀**：两个金丝雀（自包含 `fail_3.S` + 上游 `add.S` 期望值篡改版）在 **Spike 与我们侧都必须报 `FAIL 3`**。金丝雀不过 = 对拍不具判别力，**直接判负**
-> - `tools/golden-run.sh --keep-going` —— 全量语料：**RV32I 42/42 判决与失败用例号逐例一致**；M/C 扩展 9 例为 `pending`（报 `expected-gap`，**不计失败**）
+> - `tools/golden-run.sh --self-check` —— **三个变异对照**（自包含 `fail_3.S` 报 `FAIL 3`；**未改动的**上游 `add.S` 报 `PASS`；**篡改期望值的**上游 `add.S` 报 `FAIL 3`），两侧都要一致，不过 = **直接判负**。⚠️ 金丝雀只覆盖「判决运输路径」，**不证明成功路径有判别力**（实测 10 个 ALU 变异漏检 8 个）——判别力由**全量对拍**提供（10/10 抓到）。更强的自检形式见台账 **D-44**
+> - `tools/golden-run.sh --keep-going` —— 全量语料：**RV32I 42/42 判决逐例一致**（本语料 42 例全为 PASS；**「失败用例号一致」由变异对照证明**）；M/C 扩展 9 例为 `pending`（**只容忍候选侧跑不了**，其他不一致一律判负；`pending` 行必须带理由 + 台账号）
 > - ⚠️ **参考侧 ISA 必须是 `rv32imc_zicclsm_zifencei`**（理由见台账 D-42）；候选侧 runner 是 `crates/kernel/src/bin/riscv-golden.rs`
+> - ⚠️ **两侧内存图必须一致**（脚本已统一：栈窗口 4 KiB + RAM 4 MiB）——否则「触碰镜像之外地址」的用例会一边 fault 一边正常
+> - ⚠️ **任何一侧出不了判决（NOVERDICT）即判负**——「两侧都没判决」不等于「两侧一致」
 >
 > **v0.11.2 快照 DTO 判据**（契约新增可序列化 DTO，D-24 根因闭环）：
 > - `crates/contract/src/snapshot.rs::tests::*`（DTO 的 JSON **精确形状** + `validate()` 六类拒绝）
@@ -169,7 +171,7 @@ riscv_sim/
 - 测试位置约定：
   - 单元测试就近写在 `crates/<crate>/src/<module>/mod.rs` 内 `#[cfg(test)] mod tests`
   - 跨模块集成测试放 `tests/unit/`（顶层 `tests/` 目录，Rust 自动识别为集成测试）
-  - Spike 对拍脚本放 `tests/golden/`，可执行 `.py` 或 `.sh`；候选侧 runner 是 `crates/kernel/src/bin/riscv-golden.rs`（**harness 代码，不是 23 个模块之一**）
+  - Spike 对拍**脚本**放 `tools/`（`golden-run.sh`）；**语料、env、金丝雀、说明**放 `tests/golden/`；候选侧 runner 是 `crates/kernel/src/bin/riscv-golden.rs`（**harness 代码，不是 23 个模块之一**）
 
 ## PR & commit conventions
 

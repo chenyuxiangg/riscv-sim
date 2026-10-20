@@ -85,11 +85,34 @@ int is_misaligned_enabled() { return proc && proc->extension_enabled(EXT_ZICCLSM
 
 > 这条同时说明了一件事：**「与 Spike 一致」这种话必须钉死到具体版本与具体 ISA 串**，否则换一次调用方式就悄悄反了。
 
+### 四、三路独立检视（合 main 前）—— 判定 FAIL ×2 / PASS ×1
+
+分支 `feat/golden-harness`（base `fe039bf`）合 main 前走 AGENTS.md 的工作循环：**先检视、后合**。3 路检视员在三个 detached worktree（`/tmp/rv-golden-{a,b,c}`）里互不可见，各自独立跑门禁 + 变异自检 + **真实 Spike 对拍**（本机 spike 1.1.1-dev / riscv-none-elf-gcc 15.2.0 / riscv-tests clone 齐备，检视员是**真跑**的，不是只读代码）。
+
+| 检视 | 范围 | 判定 | 关键发现 |
+| --- | --- | --- | --- |
+| **V-A** | runner 本体 | **FAIL** | 🟠 **判决解码用了 64 位字，Spike 只用 48 位 payload**（`fesvr/device.h`: `tohost << 16 >> 16`）——能把 PASS 判反、能报出协议上不存在的 `FAIL 0`；🟠 命令行错误直接 `panic!`（exit 101、无 VERDICT 行）；🟠 `-v` 段尾裸加溢出 panic；🟡 **runner 零单测**（12 个逻辑变异全部逃过 `cargo test`） |
+| **V-B** | env 语义 + 对拍有效性 | **FAIL** | 🟠 **金丝雀抓不到成功路径的 bug**（10 个 ALU 变异漏检 8 个——金丝雀只执行判决运输路径的 7 条指令）；🟠 `pending` 机制**容忍任何不一致**（含真缺陷）；🟡 `CHECK_XLEN` 定义了却从不调用；🟡 `--list` 空选择在 bash 3.2 下崩溃；🟡 `--suite` 缺参被静默当作不过滤 |
+| **V-C** | 跨模块 + 文档一致性 | PASS | 🟠 **两侧都没判决被判成「一致」**（假绿，脚本仍 exit 0）；🟠 **金丝雀缺失被静默放过**；🟡 `gpr[2]` 初值恰是**复位向量地址** `0x80000000`；🟡 分数秒超时会让 `alarm(0)` 取消闹钟 |
+
+**本轮最有价值的三条结论**：
+
+1. **裁判工具本身也会判错**——V-A 的 H-1 是「裁判把 PASS 判成 FAIL」。golden 对拍的裁判必须逐位对齐 Spike 的实现（48 位 payload + 先截断后判零），不是「看起来对」就行。
+2. **一个不会失败的对拍比没有对拍更糟**——V-A 与 V-C 各抓到一处假绿通道（NOVERDICT 判一致、金丝雀缺失放过）。本分支自己在 v0.12.0 初稿里写下的这句话，最后是被检视员证实的。
+3. **自检的判别力必须被测量，不能被假设**——V-B 用 10 个注入缺陷量化出「金丝雀漏检 8/10，全量对拍抓全 10/10」。金丝雀的定位因此**下调**为「协议握手自检」，README 明写「它不证明什么」。
+
+**V-B 额外证实的两块**（此前无人写下来）：
+
+- **env 与上游的判决编码字节级等价**：静态反汇编 + 4 个 test number 的动态对比 + 单射性论证（`v ↦ v>>1` 在 bit0=1 的集合上单射 ⇒ 退出码相等 ⇒ 64 位 `tohost` 相等），**三重确认**。但**判决值等价 ≠ 执行路径等价**（上游走 ECALL → 陷阱 → trap vector，本仓库直写 tohost），且上游跑在 U 模式、本仓库停在 M 模式。
+- **`sp` 从未被真正使用**：上游宏 `TEST_LD_OP` / `TEST_ST_OP` 的 `la x2, base` 把 `sp` 劫持成数据指针，语料里 511 处 `off(sp)` 访问全部落在镜像内的数据区。
+
+**闭环**：全部 🟠 已修（`f9b86f3` runner 判决与健壮性 + 11 条单测、`cdbcffb` 脚本假绿漏洞与两侧内存图对齐）；🟡 逐条处置；**D-42 闭环**（M-13 + M-14 四处 LLD 措辞订正）；**新登记 D-44**（更強的自检形式：判决序号覆盖式变异 / 候选侧故障注入）。检视产物归档在 `docs/reviews/REVIEWS.md` §3.3。
+
 ### 四、门禁
 
 - `cargo fmt --all -- --check` ✅
 - `cargo clippy --workspace --all-targets -- -D warnings` ✅
-- `cargo test --workspace --no-fail-fast` **406 passed / 0 failed**（契约 lib 12 + kernel lib 356 + 集成 38）——**与 v0.11.2 持平**（本轮新增的是 harness 与 bin target，不带 `#[test]`）
+- `cargo test --workspace --no-fail-fast` 406 → **417 passed / 0 failed**（契约 lib 12 + kernel lib 356 + 集成 38 + **golden runner 11**）——检视轮补的 runner 单测是本轮唯一的用例增量
 - `tools/check-front.sh` **119 用例 / 21 suite** ✅
 - `tools/build-wasm.sh` ✅（61 K wasm）
 
