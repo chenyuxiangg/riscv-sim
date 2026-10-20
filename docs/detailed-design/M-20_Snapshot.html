@@ -115,6 +115,15 @@ struct Snapshot {
 //   它由 M-17 的 snapshot_full/restore_full 提供，可确定性还原**引擎**
 //   （评审 20-1 的 Snapshot 仍需由 M-20 组装完整载荷）。
 //   落盘格式契约归属：本结构（模块契约，M-20/M-23 双侧冻结）优先于契约层 DTO。
+//
+// v1.3（2026-10-20 协调者裁决）—— LLD 内部矛盾的裁定：
+//   LLD **总纲**表12 / §2 持久化数据格式 / §4.6.4.1 / 表84 / 表85 曾把快照载荷
+//   写成「SimState + DebugMeta」，与本节（评审 20-1 / 23-1）定义的完整单对象
+//   **不一致**。裁定：**以本节为准**——快照载荷 = Snapshot{cpMeta, m13State,
+//   m14Map, m15Periph}；DebugMeta 是**项目级独立存储**（评审 23-8，键 "pdebug:"+
+//   projectId，不随快照回滚），不属快照载荷。
+//   总纲侧已同步订正；契约层 EngineSnapshotDto 定位为**本结构中 M-12/M-17 段**
+//   的承载类型，由 M-20 组装进本结构后落盘。
 // CrashKit: 现场包（评审 P-19：崩溃/用户上报导出，不被后续检查点回退覆盖）
 struct CrashKit {
   Firmware fw;                  // 固件镜像

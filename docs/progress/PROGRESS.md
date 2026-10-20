@@ -99,6 +99,21 @@
 
 独立检视实测出「改回去 0 条用例变红」的盲区：还原丢 `instruction_budget` / 丢 `pending_writes` / 忽略 `next_seq` / 落盘 JSON 形状无测试钉住 / 规范序 `seq` 平局无覆盖 / 插入序镜像不一致无检查 / 内层 `SimState` 版本无检查 / `restore_full` 不校验。逐个补用例后 **8 项变异自检全部变红**。
 
+### ⚖️ LLD 内部矛盾裁决（2026-10-20，协调者）
+
+收口轮检视 V-C 揭出 **LLD 自身自相矛盾**：
+
+| 来源 | 快照载荷写法 |
+| --- | --- |
+| LLD **总纲**表12 / §2 持久化数据格式 / §4.6.4.1 / 表84 / 表85 | 「`SimState + DebugMeta`」 |
+| M-20 / M-23 **详细设计** §2.1.1（评审 20-1 / 23-1） | 「完整单对象 `Snapshot{cpMeta, m13State, m14Map, m15Periph}`」 |
+
+**裁决：以详细设计 §2.1.1 为准。** 依据：详细设计是 M-20↔M-23 **双侧对齐冻结**的既有契约资产；且评审 23-8 已明确 `DebugMeta` 是**项目级独立存储**（键 `pdebug:`+projectId，不随快照回滚）——「`SimState + DebugMeta`」那个写法既装不下内存与外设状态，又把 `DebugMeta` 错置进了快照载荷。
+
+**同步订正**：LLD 总纲（表12 新增 `Snapshot` 模型行、`SimState` 用途收窄；表13 补 `snapshotFull`/`restoreFull` 并把 `snapshot()/restore()` 订正为非确定性 partial 语义；表84/表85 输入改为完整单对象）· M-23 详细设计三处陈旧措辞 · M-20 详细设计加 v1.3 裁决段 · 契约层 `snapshot.rs` 模块 doc 新增「Where the persisted-session format lives」段。
+
+**裁决后剩余工作**：**D-36**（外设 / INTC 状态不在 DTO）+ **D-37**（M-20/M-23 未接线）+ **D-41**（新登记：契约层 `SimState` 缺「内存页 / 外设状态」字段——裁决把这两个字段正式划归 M-13 / M-14 / M-15 三段，「`SimState` 直接落盘即可还原会话」这条路正式放弃）。
+
 ### 方法论沉淀
 
 - **「加法方向」的变异才测得出盲区**：V-B 的 C3（给 `restore_full` **加** `validate()` → 0 red）与 V-A 的 m05b（把变体改名 → 392/392 全绿）都是加正确性看是否有人守；常规「删功能看是否变红」测不出来。

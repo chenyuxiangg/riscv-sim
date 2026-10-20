@@ -42,6 +42,30 @@
 //! controller needs their own persisted representation (M-20 / M-23); that
 //! gap is tracked in `docs/reviews/CROSS_MODULE_DEBT.md` (D-36).
 //!
+//! # Where the persisted-session format lives
+//!
+//! The persisted snapshot format is **not** defined here. It is owned by
+//! M-20 / M-23's detailed design §2.1.1, which defines a single complete
+//! object:
+//!
+//! ```text
+//! Snapshot { cpMeta, m13State, m14Map, m15Periph }
+//! ```
+//!
+//! (`DebugMeta` is a *project-level* store of its own — review 23-8 — and
+//! is not part of the snapshot payload.)
+//!
+//! This DTO is the carrier for the **M-12/M-17 segment** of that object:
+//! the scheduler queue, the platform state, the insertion counter, the
+//! virtual clock and the per-quantum instruction budget. M-20 assembles the
+//! full `Snapshot` from that segment plus the M-13 / M-14 / M-15 segments.
+//!
+//! The earlier LLD wording ("the snapshot payload is `SimState + DebugMeta`")
+//! contradicted that detailed design; the discrepancy was **adjudicated on
+//! 2026-10-20 in favour of the detailed design §2.1.1**, and the module
+//! specification has since been corrected to match. See D-37 in the debt
+//! ledger.
+//!
 //! # Compatibility
 //!
 //! Adding this module is **purely additive**: no existing type, field or
