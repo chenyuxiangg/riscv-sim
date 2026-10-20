@@ -173,6 +173,12 @@ where
 /// / "不触发，保持 golden 兼容". The default therefore **performs**
 /// the access.
 ///
+/// **"与 Spike 一致" needs the Zicclsm qualifier.** Spike only performs
+/// misaligned accesses when the Zicclsm extension is enabled; a stock
+/// `spike --isa=rv32imc` traps on them. See the
+/// [`MisalignedPolicy::Allow`] variant docs for the exact mechanism and
+/// the ledger entry **D-42** that tracks the wording fix.
+///
 /// [`MisalignedPolicy::Trap`] stays available as a strict diagnostic
 /// mode: a debugger that wants unaligned accesses surfaced rather than
 /// silently performed can opt into it. It is *not* the default because
@@ -181,7 +187,23 @@ where
 /// comparison (Wave 2) measures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MisalignedPolicy {
-    /// Perform the access anyway (LLD default; Spike-compatible).
+    /// Perform the access anyway (LLD default).
+    ///
+    /// **"Spike-compatible" needs a qualifier.** Spike only *performs*
+    /// misaligned accesses when the **Zicclsm** extension is enabled —
+    /// `riscv/mmu.cc` does
+    /// `if (!is_misaligned_enabled()) throw trap_load_address_misaligned(...)`
+    /// and `is_misaligned_enabled()` is
+    /// `proc->extension_enabled(EXT_ZICCLSM)`.  A stock
+    /// `spike --isa=rv32imc` therefore **traps** on a misaligned access,
+    /// while `spike --isa=rv32imc_zicclsm` performs it.
+    ///
+    /// This default matches the **Zicclsm-enabled** Spike, which is what
+    /// the golden comparison pins (`tools/golden-run.sh`, ISA
+    /// `rv32imc_zicclsm_zifencei`) — see `tests/golden/README.md`.
+    /// The wording in LLD §3.6(2) / §5.2.1 ("与 Spike 一致允许非对齐")
+    /// is only true under that qualifier; the ledger entry **D-42**
+    /// tracks the wording fix.
     #[default]
     Allow,
     /// Raise a misaligned-access trap (strict diagnostic mode).
