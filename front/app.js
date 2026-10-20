@@ -37,10 +37,16 @@ function requestDemoSeed(viewId = "product") {
 }
 
 /** Expose the seeder on `window.riscv_demo` for console convenience. */
-function exposeDevHelpers() {
+function exposeDevHelpers(workspace, transport) {
     window.riscv_demo = {
         seedBus: () => requestDemoSeed(),
         buildDemoStoreState,
+        // The assembled workspace / transport snapshots — let the
+        // front-end gate assert that the footer and the status bar are
+        // *derived* from the real state instead of hardcoded strings
+        // (FRONTEND_Review.md R-02).
+        workspace,
+        transport,
     };
 }
 
@@ -48,14 +54,36 @@ function exposeDevHelpers() {
  * Derive the status-bar text from the real transport state instead of
  * hardcoding it (FRONTEND_Review.md #11).
  *
+ * Exported so the front-end gate can assert that the status bar is
+ * *derived* rather than a hardcoded string (FRONTEND_Review.md R-02).
+ *
  * @param {{mode: string, connected: boolean}|undefined} transport
  * @returns {string}
  */
-function describeTransport(transport) {
-    if (transport?.connected) {
+export function describeTransport(transport) {
+    if (!transport) {
+        // A missing transport descriptor must read differently from a
+        // present-but-disconnected one — otherwise a mis-bound mount
+        // result (e.g. the workspace snapshot landing in the transport
+        // slot) is invisible to the gate (FRONTEND_Review.md R-01/R-02).
+        return "工作台已就绪 — kernel transport 状态未知（M-07 未挂载）";
+    }
+    if (transport.connected) {
         return `kernel 已连接 — ${transport.mode} transport`;
     }
     return "工作台已就绪 — kernel transport 未连接（M-07 待接线）";
+}
+
+/**
+ * Write the derived status text into the status bar.
+ *
+ * @param {{mode: string, connected: boolean}|undefined} transport
+ * @param {Element} [el]
+ * @returns {string} the text written
+ */
+export function renderStatus(transport, el = status) {
+    el.textContent = describeTransport(transport);
+    return el.textContent;
 }
 
 /**
@@ -73,24 +101,38 @@ function describeWorkspace(workspace) {
 
 async function bootstrap() {
     status.textContent = "正在挂载模块…";
-    // The view component library is mounted **first** on purpose: it
-    // subscribes to the `riscv:render` events, and the workbench's
-    // initial route dispatches the first one. Mounting the workbench
-    // first would drop that event and leave every view body empty
-    // (FRONTEND_Review.md #20).
-    const [, workspace, , , , transport] = await Promise.all([
-        mountViewComponents(),   // 0 → subscribes to the render events
-        mountWorkbench(),        // 1 → assembled workspace snapshot
-        mountViewStore(),
-        mountSession(),
-        mountCommandRouter(),
-        mountTransport(),        // 5 → live transport state
-        mountRegisterMemory(),
-    ]);
+    // Two redundant safeguards guarantee that the view component library
+    // is subscribed **before** the workbench dispatches its first
+    // `riscv:render` event (otherwise every view body stays empty —
+    // FRONTEND_Review.md #20):
+    //   1. object literal order — `components` is mounted first, so the
+    //      subscription is registered synchronously;
+    //   2. `mountWorkbench()` defers its initial route to a microtask
+    //      (m01), so even an async mount cannot miss the event.
+    //
+    // The mounts are collected in a **named** object and resolved by key:
+    // the key→value mapping is derived from the same object, so adding
+    // or reordering a mount can no longer silently mis-bind a result
+    // (FRONTEND_Review.md R-01). Object literal evaluation order is still
+    // source order, so safeguard 1 is unaffected.
+    const pending = {
+        components: mountViewComponents(),
+        workspace: mountWorkbench(),
+        viewStore: mountViewStore(),
+        session: mountSession(),
+        commandRouter: mountCommandRouter(),
+        transport: mountTransport(),
+        registerMemory: mountRegisterMemory(),
+    };
+    const { components, workspace, transport } = Object.fromEntries(
+        await Promise.all(
+            Object.entries(pending).map(async ([key, promise]) => [key, await promise]),
+        ),
+    );
     wireDevSeeding();
-    exposeDevHelpers();
+    exposeDevHelpers(workspace, transport);
     describeWorkspace(workspace);
-    status.textContent = describeTransport(transport);
+    renderStatus(transport);
 }
 
 bootstrap().catch((err) => {

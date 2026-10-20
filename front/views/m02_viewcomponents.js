@@ -272,20 +272,24 @@ const terminalView = register({
     onDelta(delta) {
         if (!delta?.termDelta) return;
         const bytes = delta.termDelta.bytes ?? "";
-        // Keep the store in sync so a re-render (view switch, capability
-        // flip) does not lose what was already printed.
+        // The store is the single source of truth: the DOM is rewritten
+        // from the accumulated value instead of appending to whatever the
+        // DOM currently holds. Appending to the DOM would duplicate the
+        // bytes whenever a re-render rebuilds the body from the store
+        // (FRONTEND_Review.md R-07).
+        const next = (viewStore.getState("terminal")?.term?.bytes ?? "") + bytes;
         viewStore.setState("terminal", (prev) => ({
             ...prev,
             term: {
                 ...(prev.term ?? {}),
-                bytes: (prev.term?.bytes ?? "") + bytes,
+                bytes: next,
             },
         }));
         const out = document.querySelector("[data-terminal-out]");
         if (!out) return;
         // `textContent` does not parse HTML — escaping here would print a
         // literal "&lt;" (FRONTEND_Review.md #4).
-        out.textContent = (out.textContent ?? "") + bytes;
+        out.textContent = next;
         out.scrollTop = out.scrollHeight;
     },
     mountFor(el) {},

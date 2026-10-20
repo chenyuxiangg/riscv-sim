@@ -257,6 +257,9 @@ export function switchView(target) {
         // view is pre-selected), so skipping this leaves the main area
         // blank (FRONTEND_Review.md #19).
         showPanel(target);
+        // The re-render rebuilt the DOM — put the view's UI interaction
+        // state back (FRONTEND_Review.md R-15).
+        restoreUiState(target.hash);
         syncTabState(target.hash);
         return evt;
     }
@@ -393,18 +396,28 @@ function syncTabState(hash) {
  * scroll position). Only the DOM knows these values, so they are read
  * on the way out and written back into M-03 on the way in.
  *
+ * Only values that can actually exist are captured: `.view-body` has no
+ * `overflow` and is therefore **not** a scroll container — its
+ * `scrollTop` is always 0 in a real browser. The terminal output
+ * (`.terminal-out`, `overflow:auto`) is the only real scroll container
+ * in the current view set (FRONTEND_Review.md R-04).
+ *
  * @param {string} viewId
  */
 function captureUiState(viewId) {
     const body = document.querySelector(`[data-view-body="${viewId}"]`);
     if (!body) return;
     const terminal = body.querySelector("[data-terminal-out]");
-    viewStore.setState(viewId, {
+    // Function form: `ui` is merged key-by-key instead of being
+    // replaced wholesale, so future sub-keys (zoom, folding) survive
+    // (FRONTEND_Review.md R-06).
+    viewStore.setState(viewId, (prev) => ({
+        ...prev,
         ui: {
-            scrollTop: body.scrollTop,
+            ...(prev.ui ?? {}),
             terminalScrollTop: terminal ? terminal.scrollTop : 0,
         },
-    });
+    }));
 }
 
 /**
@@ -417,7 +430,6 @@ function restoreUiState(viewId) {
     if (!body) return;
     const ui = viewStore.getState(viewId)?.ui;
     if (!ui) return;
-    if (typeof ui.scrollTop === "number") body.scrollTop = ui.scrollTop;
     const terminal = body.querySelector("[data-terminal-out]");
     if (terminal && typeof ui.terminalScrollTop === "number") {
         terminal.scrollTop = ui.terminalScrollTop;
