@@ -1389,3 +1389,22 @@ fn execution_is_deterministic() {
     assert_eq!(first.0, second.0, "the register file must be reproducible");
     assert_eq!(first.1, second.1, "the PC must be reproducible");
 }
+
+/// A misaligned instruction address must trap before the fetch
+/// happens (LLD §3.1, 评审 13-3).
+#[test]
+fn misaligned_fetch_address_traps() {
+    let mut h = Harness::new();
+    let mut state = SimState {
+        pc: 0x1001, // odd instruction address
+        ..SimState::default()
+    };
+    let outcome = h.step(&mut state).expect("must not error");
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::MisalignedAccess
+        }
+    );
+    assert_eq!(state.pc, 0x1001, "a trapped fetch must not advance the PC");
+}

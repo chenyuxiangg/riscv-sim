@@ -94,6 +94,13 @@ impl Iss {
         F: Fn(u32, WriteSize) -> Result<u32, PlatformError>,
         G: Fn(u32, WriteSize, u32) -> Result<(), PlatformError>,
     {
+        if state.pc & 0x1 != 0 {
+            // Misaligned instruction address: the alignment check
+            // precedes the fetch itself (LLD §3.1, 评审 13-3).
+            return Ok(StepOutcome::Trapped {
+                cause: TrapCause::MisalignedAccess,
+            });
+        }
         let raw = read_mem(state.pc, WriteSize::Word).map_err(|e| {
             PlatformError::new(
                 ErrorFamily::Iss,
@@ -121,6 +128,13 @@ impl Iss {
         state: &mut SimState,
         bus: &mut Bus,
     ) -> Result<StepOutcome, PlatformError> {
+        if state.pc & 0x1 != 0 {
+            // Misaligned instruction address: the alignment check
+            // precedes the fetch itself (LLD §3.1, 评审 13-3).
+            return Ok(StepOutcome::Trapped {
+                cause: TrapCause::MisalignedAccess,
+            });
+        }
         let raw = bus.read(state.pc, BusWidth::Word).map_err(|e| {
             PlatformError::new(
                 ErrorFamily::Iss,
@@ -263,12 +277,15 @@ mod tests {
 
     /// Integration: fetch from an unmapped PC surfaces the bus trap as
     /// an `Iss` family error wrapping the E_BUS-01 message.
+    ///
+    /// The PC must stay even — an odd PC is a misaligned fetch and is
+    /// reported as a trap, not as a bus error (LLD §3.1, 评审 13-3).
     #[test]
     fn addi_via_bus_unmapped_pc_traps() {
         let mut bus = Bus::new();
         // No regions mapped.
         let mut state = SimState {
-            pc: 0xDEAD_BEEF,
+            pc: 0xDEAD_BEE0,
             ..SimState::default()
         };
         let mut iss = Iss::default();
