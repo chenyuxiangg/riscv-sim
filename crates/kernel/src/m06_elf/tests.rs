@@ -164,6 +164,26 @@ fn elf_rejects_truncated_header() {
 }
 
 // ---------------------------------------------------------------------------
+// D-15 regression: p_filesz must not exceed p_memsz.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn elf_rejects_filesz_greater_than_memsz() {
+    let mut elf = make_minimal_elf(4, 4);
+    // p_memsz lives at program-header offset 20; the program header
+    // starts at file offset 52 → 52 + 20 = 72.
+    elf[72..76].copy_from_slice(&0u32.to_le_bytes());
+    let err = DefaultLoader.load(&elf, Kind::Elf).unwrap_err();
+    assert_eq!(err.family, ErrorFamily::Loader);
+    assert_eq!(err.scenario, 1, "E_LDR-01 malformed");
+    assert!(
+        err.message.contains("p_filesz"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Raw loader tests
 // ---------------------------------------------------------------------------
 

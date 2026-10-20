@@ -223,6 +223,21 @@ pub fn parse(bytes: &[u8], limits: &ParseLimits) -> Result<LoadImage, PlatformEr
         let p_memsz = read_u32(phdr, 20)?;
         let _ = p_vaddr; // MVP: trust p_paddr
 
+        // The in-memory footprint of a PT_LOAD is `p_memsz`; the file
+        // contributes `p_filesz` of it. A segment whose file part is
+        // larger than its memory part is malformed — accepting it would
+        // build a segment that claims more memory than it declares.
+        if p_filesz > p_memsz {
+            return Err(PlatformError::new(
+                FAMILY,
+                1,
+                format!(
+                    "PT_LOAD p_filesz {} exceeds p_memsz {} (paddr=0x{:08x})",
+                    p_filesz, p_memsz, p_paddr
+                ),
+            ));
+        }
+
         let memsz = p_memsz as u64;
         let paddr_end = (p_paddr as u64).checked_add(memsz).ok_or_else(|| {
             PlatformError::new(
