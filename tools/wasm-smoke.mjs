@@ -121,6 +121,31 @@ function find(events, variant) {
     return events.map((e) => e.payload.Event).find((p) => variant in p);
 }
 
+/**
+ * 在事件数组里找一条**探针**波形流。
+ *
+ * ⚠️ 不能直接用 `find(events, "WaveformDelta")`：一次运行会推**两条**
+ * 波形事件——寄存器增量 + 探针边沿——`find` 只会拿到第一条（寄存器那条）。
+ * 所以这里按流 id 找。
+ *
+ * @param {object[]} events
+ * @param {string} id — e.g. `"GPIO0.OUT"`
+ * @returns {{id: string, label: string, edges: Array<{t_ps: number, value: number}>}|undefined}
+ */
+function findProbeStream(events, id) {
+    for (const e of events) {
+        const payload = e.payload.Event;
+        if (!payload || !("WaveformDelta" in payload)) continue;
+        const streams = payload.WaveformDelta.streams ?? [];
+        const hit = streams.find((s) => s.id === id);
+        if (hit) return hit;
+    }
+    return undefined;
+}
+
+/** 探针通道 id —— M-18 的 `"{外设 id}.{信号名}"`。 */
+const GPIO_STREAM_ID = "GPIO0.OUT";
+
 console.log("WASM 桥冒烟测试");
 console.log(`  kernel_version          = ${mod.kernel_version()}`);
 console.log(`  protocol_schema_version = ${mod.protocol_schema_version()}`);
@@ -173,6 +198,44 @@ check("schema 版本是 1", mod.protocol_schema_version() === 1);
     check("StepN 后 x3 = 49", value("cpu.gpr.x3") === 49, `实际 ${value("cpu.gpr.x3")}`);
 }
 
+// -- 探针流（D-46）--------------------------------------------------------
+//
+// 波形管道是**真的**接上的：demo 固件写 GPIO0.OUT → M-15 报边沿 →
+// M-18 判沿 → 宿主推成契约的 `WaveformDelta`。
+//
+// 这里特意**不用** mock：跑的是 `front/assets/pkg/` 里那个真 wasm 产物。
+{
+    // 订阅探针流：内核会**强制**推一次通道列表（哪怕还没有边沿）。
+    const subEvents = send({ Subscribe: { topic: "sim.waveform" } });
+    const stream = findProbeStream(subEvents, GPIO_STREAM_ID);
+    check("订阅探针流后列出了 GPIO0.OUT 通道", stream !== undefined);
+    check(
+        "刚订阅时通道还没有边沿",
+        (stream?.edges ?? []).length === 0,
+        `实际 ${JSON.stringify(stream?.edges)}`,
+    );
+
+    // demo 固件的第 8 条指令写 GPIO0.OUT —— 跑到那里就该有边沿了。
+    // （前 4 条指令上面已经跑过，这里再跑 4 条。）
+    const runEvents = send({ StepN: { n: 4 } });
+    const runStream = findProbeStream(runEvents, GPIO_STREAM_ID);
+    check(
+        "固件写 GPIO 后探针流带来一条边沿",
+        (runStream?.edges ?? []).length === 1,
+        `实际 ${JSON.stringify(runStream?.edges)}`,
+    );
+    check(
+        "边沿的值是固件写进去的引脚位图（1）",
+        runStream?.edges?.[0]?.value === 1,
+        `实际 ${runStream?.edges?.[0]?.value}`,
+    );
+    check(
+        "边沿带的是**真实**的虚拟时间戳（不是 0）",
+        typeof runStream?.edges?.[0]?.t_ps === "number" && runStream.edges[0].t_ps > 0,
+        `实际 ${runStream?.edges?.[0]?.t_ps}`,
+    );
+}
+
 // -- ReadMemory -----------------------------------------------------------
 {
     const events = send({ ReadMemory: { addr: DEMO_STORE_ADDR, size: "Word" } });
@@ -201,6 +264,7 @@ check("schema 版本是 1", mod.protocol_schema_version() === 1);
         `实际 ${halted?.Halted?.pc}`,
     );
 }
+
 
 // -- 畸形输入 -------------------------------------------------------------
 {

@@ -24,7 +24,10 @@
 //   - the **real** kernel really executes: a `step` command makes the
 //     register view show `x1 = 0x2a` — the value the WASM kernel
 //     computed from the demo firmware (第 1 阶段起前端挂的是真内核，
-//     不再是 mock)；
+//     不再是 mock);
+//   - the **real** probe pipeline really works: after the demo firmware
+//     drives `GPIO0.OUT`, the waveform view lists that channel **with
+//     its edge count** (D-46) — not "some content";
 //   - the console is clean: no `console.error`, no uncaught exception.
 //
 // What it does NOT verify
@@ -33,10 +36,7 @@
 //     server, so it is deliberately *not* part of `tools/check-front.sh`;
 //   - it does not replace the Node gate — the Node gate checks the
 //     contract / module behaviour, this one checks the wiring in a
-//     browser;
-//   - it does not check the waveform view: the real probe pipeline
-//     (M-18 / M-19) is not wired in stage 1, so the waveform view is
-//     legitimately empty.
+//     browser.
 //
 // Prerequisites
 // -------------
@@ -473,6 +473,7 @@ const PROBE_EXPRESSION = `(() => {
     const code = regCells[i] ? regCells[i].querySelector("code") : null;
     return code ? String(code.textContent || "").trim() : "";
   };
+  const waveItems = Array.from(document.querySelectorAll('[data-view-body="waveform"] .channel-list > li'));
   return {
     hasApp: Boolean(app),
     panelCount: panels.length,
@@ -484,6 +485,11 @@ const PROBE_EXPRESSION = `(() => {
     regX1: cellText(1),
     regX2: cellText(2),
     pc: String((document.querySelector('[data-view-body="regmem"] .pc') || {}).textContent || "").trim(),
+    waveChannels: waveItems.length,
+    waveLabel0: waveItems[0]
+      ? String((waveItems[0].querySelector(".channel-label") || {}).textContent || "").trim()
+      : "",
+    waveItemText0: waveItems[0] ? String(waveItems[0].textContent || "").trim() : "",
     status: String((document.getElementById("status") || {}).textContent || "").trim(),
     note: String((document.getElementById("kernel-note") || {}).textContent || "").trim(),
   };
@@ -596,6 +602,35 @@ function renderChecks(probe) {
             name: "寄存器视图渲染出 32 个寄存器格",
             ok: probe.regCells === 32,
             detail: `regCells=${probe.regCells}`,
+        },
+    ];
+}
+
+/**
+ * **探针流**检查：波形视图真的列出了真内核推来的通道（D-46）。
+ *
+ * 这是「波形视图不再是空的」的真机证据：demo 固件写 GPIO0.OUT → M-15
+ * 报边沿 → M-18 判沿 → 宿主推契约事件 → 前端落进视图状态 → 视图列出
+ * 通道。
+ *
+ * ⚠️ 断言的是**通道名与边沿数**，不是「有内容」：只断言「非空」的话，
+ * 页面里随便塞点假数据也能绿（这正是第 1 阶段那版 mock `probe.*` 流的
+ * 问题）。
+ *
+ * @param {object} probe
+ * @returns {{name: string, ok: boolean, detail: string}[]}
+ */
+function waveformChecks(probe) {
+    return [
+        {
+            name: "波形视图列出了 GPIO0.OUT 通道",
+            ok: probe.waveChannels >= 1 && probe.waveLabel0 === "GPIO0.OUT",
+            detail: `channels=${probe.waveChannels} label0="${probe.waveLabel0}"`,
+        },
+        {
+            name: "该通道带着固件产生的边沿",
+            ok: /\b1 edges\b/.test(probe.waveItemText0 ?? ""),
+            detail: `item0="${probe.waveItemText0}"`,
         },
     ];
 }
@@ -757,6 +792,34 @@ async function main() {
             await sleep(250);
         }
 
+        // -- drive the probe pipeline (D-46) ----------------------------------
+        //  The demo firmware writes `GPIO0.OUT` on its 8th instruction, so
+        //  the program has to run that far. The single `step` above only
+        //  ran one instruction (it is the one the `x1 == 42` assertion
+        //  checks), so push a `step10` on top of it — 1 + 10 instructions
+        //  is past the GPIO write.
+        await cdp.send("Runtime.evaluate", {
+            expression:
+                'window.dispatchEvent(new CustomEvent("riscv:command", { detail: { action: "step10" } }));',
+            returnByValue: true,
+        });
+        await cdp.send("Runtime.evaluate", {
+            expression: 'location.hash = "#/waveform";',
+            returnByValue: true,
+        });
+        let waveform = [];
+        const waveDeadline = Date.now() + opts.timeoutMs;
+        while (Date.now() < waveDeadline) {
+            const res = await cdp.send("Runtime.evaluate", {
+                expression: PROBE_EXPRESSION,
+                returnByValue: true,
+            });
+            probe = res.result?.value ?? null;
+            waveform = probe ? waveformChecks(probe) : [];
+            if (waveform.length > 0 && waveform.every((c) => c.ok)) break;
+            await sleep(250);
+        }
+
         // -- report ------------------------------------------------------------
         console.log("");
         console.log("落地页检查：");
@@ -773,17 +836,22 @@ async function main() {
         for (const check of kernelExec) {
             console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
         }
+        console.log("");
+        console.log("探针流检查（切到 #/waveform）：");
+        for (const check of waveform) {
+            console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
+        }
         if (consoleErrors.length > 0) {
             console.log("");
             console.log("控制台错误：");
             for (const err of consoleErrors) console.log(`  ✗ ${err}`);
         }
 
-        const failed = [...landing, ...render, ...kernelExec].filter((c) => !c.ok);
+        const failed = [...landing, ...render, ...kernelExec, ...waveform].filter((c) => !c.ok);
         const ok = failed.length === 0 && consoleErrors.length === 0;
         console.log("");
         console.log(ok
-            ? "browser-verify: 通过（真机挂载 + 渲染路径 + 真内核执行 + 控制台）"
+            ? "browser-verify: 通过（真机挂载 + 渲染路径 + 真内核执行 + 探针流 + 控制台）"
             : `browser-verify: 失败（${failed.length} 项断言未通过，${consoleErrors.length} 条控制台错误）`);
         return ok ? 0 : EXIT_FAILED;
     } finally {
