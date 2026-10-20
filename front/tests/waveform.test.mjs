@@ -285,6 +285,36 @@ describe("探针流 · 装载工程后的强制重订", () => {
         );
         assert.deepEqual(subscribes[0], { Subscribe: { topic: "sim.waveform" } });
     });
+
+    test("探针流重订失败**不牵连**前两步（工程已装载、寄存器流已重订）", async () => {
+        // ⚠️ 三步串在一起时，第 3 步抛错会让整个 loadProjectIntoKernel
+        // 失败——而前两步**已经成功**了。调用方若因此判定「内核未就绪」，
+        // 就会连带跳过 Nop 往返与产品树渲染，提示语还会**误导**
+        // （说内核没就绪，其实内核好得很）。
+        const { services, calls } = fakeServices();
+        services.waveform.subscribeProbeStream = async () => {
+            calls.push("waveform.subscribeProbeStream");
+            throw new Error("内核不回");
+        };
+        const result = await app.loadProjectIntoKernel(services, { id: "p" });
+        assert.deepEqual(
+            calls,
+            ["waveform.reset", "registerMemory.loadProject", "waveform.subscribeProbeStream"],
+            "前两步**必须已经执行**——失败不能把它们回滚掉",
+        );
+        assert.ok(result.probeError, "失败必须**报出来**（不静默）");
+        assert.match(String(result.probeError?.message), /内核不回/);
+    });
+
+    test("探针流重订失败**不抛**（前两步的成功要保留下来）", async () => {
+        const { services } = fakeServices();
+        services.waveform.subscribeProbeStream = async () => {
+            throw new Error("内核不回");
+        };
+        // 不该 reject —— reject 会让调用方把整个会话判死。
+        const result = await app.loadProjectIntoKernel(services, { id: "p" });
+        assert.ok(result.probeError instanceof Error);
+    });
 });
 
 describe("波形视图 · 渲染", () => {

@@ -148,6 +148,8 @@ function publishViewState(viewId) {
 async function handleCommand(detail, services) {
     const { commandRouter, registerMemory, waveform } = services;
     const action = detail?.action;
+    /** 探针流重订失败（仅「reset」路径可能非空）。 */
+    let resetProbeError = null;
     try {
         switch (action) {
             case "step":
@@ -166,10 +168,15 @@ async function handleCommand(detail, services) {
                 // 装载工程**并且**把两条内核侧订阅都强制重订
                 // （内核侧的订阅随工程一起失效了 —— 新工程 = 新会话，
                 // FR-13）。这三步绑在一个函数里，调用点不会漏掉后两步。
-                await loadProjectIntoKernel(
-                    { commandRouter, registerMemory, waveform },
-                    buildMockProject(),
-                );
+                //
+                // ⚠️ 探针流重订失败**不判复位失败**——工程装好了、寄存器
+                // 流也重订了（`loadProjectIntoKernel` 把失败单独兜住）。
+                resetProbeError = (
+                    await loadProjectIntoKernel(
+                        { commandRouter, registerMemory, waveform },
+                        buildMockProject(),
+                    )
+                ).probeError;
                 break;
             case "read-regs":
                 await registerMemory.readRegisters();
@@ -180,7 +187,11 @@ async function handleCommand(detail, services) {
             default:
                 return;
         }
-        setNote(`命令 ${action} 完成`);
+        setNote(
+            resetProbeError
+                ? `命令 ${action} 完成，但探针流不可用：${resetProbeError?.message ?? resetProbeError}`
+                : `命令 ${action} 完成`,
+        );
     } catch (err) {
         setNote(`命令 ${action} 失败：${err?.message ?? err}`);
     }
@@ -212,13 +223,25 @@ async function startSession(services) {
         //
         // 这个缺陷在 mock 内核时代就存在，是第 1 阶段前端接上**真内核**
         // 之后、被真机断言「x1 必须是 42」逼出来的。
-        await loadProjectIntoKernel({ commandRouter, registerMemory, waveform }, project);
+        const { probeError } = await loadProjectIntoKernel(
+            { commandRouter, registerMemory, waveform },
+            project,
+        );
         viewStore.setState("product", (prev) => ({
             ...prev,
             tree: project.tree,
         }));
         publishViewState("product");
         await commandRouter.dispatchCommand(Command.nop());
+        if (probeError) {
+            // ⚠️ **内核是好的**——工程装好了、寄存器流也重订了、连 Nop
+            // 往返都成功了。只是**探针流**订阅不上（波形视图会是空的）。
+            //
+            // 这里**不能**说「内核未就绪」——那会把排查引到错误的方向
+            // （D-46 检视 V-B）。
+            setNote(`内核已就绪，但探针流不可用：${probeError?.message ?? probeError}`);
+            return;
+        }
         setNote("WASM 内核已就绪（Nop 往返成功）");
     } catch (err) {
         setNote(`内核未就绪：${err?.message ?? err}`);
@@ -240,6 +263,17 @@ async function startSession(services) {
  *
  * @param {{commandRouter: object, registerMemory: object, waveform: object}} services
  * @param {object} project — `model::Project` shaped value
+ * @returns {Promise<{probeError: Error|null}>} — `probeError` 非空表示
+ *   **探针流**重订失败；**工程已经装载、寄存器流已经重订**（前两步成功）
+ *
+ * ⚠️ **第三步失败不许牵连前两步**（D-46 检视 V-B）。三步串在一起时，
+ * 第 3 步抛错会让整个 `loadProjectIntoKernel` 失败——而前两步**已经
+ * 成功了**：工程装好了、寄存器流也重订了。调用方若因此判定「内核未就绪」，
+ * 就会连带跳过 Nop 往返、产品树渲染，提示语还会**误导**（说内核没就绪，
+ * 其实内核好得很，只是探针流订阅不上）。
+ *
+ * 所以第 3 步**单独**兜住，失败作为 `probeError` 返回——**不静默**：
+ * 调用点负责把它显示出来。
  *
  * ⚠️ **导出是为了让它可测**（D-46 检视 V-B）。此前它是**私有**函数，
  * 前端门禁里**一条用例都碰不到它**——把第 3 步（探针流重订）删掉，
@@ -251,7 +285,13 @@ export async function loadProjectIntoKernel(services, project) {
     const { registerMemory, waveform } = services;
     waveform.reset();
     await registerMemory.loadProject(project);
-    await waveform.subscribeProbeStream();
+    try {
+        await waveform.subscribeProbeStream();
+        return { probeError: null };
+    } catch (err) {
+        // 前两步的成功**保留**：工程已装载、寄存器流已重订。
+        return { probeError: err };
+    }
 }
 
 /**
