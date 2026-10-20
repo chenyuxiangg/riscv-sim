@@ -21,6 +21,17 @@ pub const CH_GPIO0: u8 = 1;
 pub const CH_IRQ_PULSE: u8 = 2;
 pub const CH_KEY_STATE: u8 = 3;
 
+/// UART TX byte channel (D-12).
+///
+/// The four channels above are the M-18 LLD's default set (表68);
+/// the registry's channel map is an open table, so a peripheral that
+/// needs its own channel gets one. The UART TX channel carries *bytes*
+/// — every transmitted byte is an event, including two identical bytes
+/// in a row — so it must be bound as a **pulse** channel (M-18
+/// `ChannelKind::Pulse`); a multi-bit channel would swallow the
+/// second identical byte (same value = no edge).
+pub const CH_UART_TX: u8 = 4;
+
 /// What kind of signal the channel carries (M-18 v0.8 §2.1.1, §18-3).
 ///
 /// `SingleBit` is the only kind for which the registry classifies
