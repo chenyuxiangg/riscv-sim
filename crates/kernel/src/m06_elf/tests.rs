@@ -297,6 +297,33 @@ fn hex_rejects_missing_eof() {
     assert!(err.message.contains("EOF"));
 }
 
+// ---------------------------------------------------------------------------
+// D-03 regression: a short IHEX record must be rejected, not panic.
+//
+// The declared byte count and the actual payload length disagree, and the
+// record is shorter than the 5-byte header+tail (LL+AAAA+TT+CC). The
+// diagnostic used to compute `bytes.len() - 5`, which underflowed for a
+// 4-byte record → `panic!("attempt to subtract with overflow")`. In WASM
+// that is a worker crash, so the whole "any malformed input must be an
+// `Err`, never a panic" rule is now pinned by a test.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hex_rejects_short_record_without_panicking() {
+    // Body "01234567" → 4 decoded bytes: LL=0x01, AAAA=0x2345, TT=0x67.
+    // Declared count (1) + 5 != 4 → rejected.
+    let err = DefaultLoader
+        .load(b":01234567\n:00000001FF\n", Kind::Hex)
+        .unwrap_err();
+    assert_eq!(err.family, ErrorFamily::Loader);
+    assert_eq!(err.scenario, 1, "E_LDR-01 malformed");
+    assert!(
+        err.message.contains("declared count"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
 #[test]
 fn hex_rejects_unknown_record_type() {
     // Build a line manually with rec_type = 0x07 (unknown).

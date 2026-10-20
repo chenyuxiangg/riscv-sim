@@ -109,7 +109,13 @@ pub fn parse(text: &str, limits: &ParseLimits) -> Result<LoadImage, PlatformErro
                     "line {}: declared count {} != actual payload {}",
                     line_no,
                     count,
-                    bytes.len() - 5
+                    // `bytes` holds LL+AAAA+TT+DD*+CC; a short record can
+                    // be shorter than that 5-byte header+tail, so the
+                    // payload length must be computed with a saturating
+                    // subtraction. A plain `bytes.len() - 5` underflows
+                    // (and panics in debug builds) for a 4-byte record —
+                    // the D-03 blocking defect.
+                    bytes.len().saturating_sub(5)
                 ),
             ));
         }
