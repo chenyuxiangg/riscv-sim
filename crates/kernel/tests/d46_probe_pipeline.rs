@@ -111,6 +111,42 @@ fn host_with_probe_subscription() -> KernelHost {
 // -- 通道列表 ---------------------------------------------------------------
 
 #[test]
+fn a_fresh_host_already_has_the_probe_pipeline_wired() {
+    // ⚠️ `KernelHost::new()` 建好默认内存图（含 GPIO）并装了管道，但
+    // **没有**给 GPIO 装上探针回调——`attach_peripheral_probes()` 只在
+    // `rebuild_platform()`（装载工程时）里调。
+    //
+    // 后果：一个**刚建好、还没装载工程**的宿主，GPIO 上的写**不产生任何
+    // 边沿**。现有用例全都先 `LoadProject`（走 `rebuild_platform`），
+    // 所以这个缺口此前没人看得见。
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::Subscribe {
+            topic: TOPIC_WAVEFORM.to_string(),
+        },
+    );
+    // 直接往 GPIO 的 OUT 写 1 —— 不经任何固件。
+    dispatch(
+        &mut host,
+        CommandPayload::WriteMemory {
+            addr: DEFAULT_GPIO_BASE + 0x04,
+            size: WriteSize::Word,
+            value: 1,
+        },
+    );
+    let events = dispatch(&mut host, CommandPayload::StepN { n: 1 });
+    let wave = last_probe_waveform(&events).expect("写完 GPIO 必须推一条探针波形");
+    let gpio = stream(&wave, GPIO_STREAM_ID).expect("波形里必须有 GPIO0.OUT 通道");
+    assert_eq!(
+        gpio.edges.len(),
+        1,
+        "刚建好的宿主也必须能观察到 GPIO 边沿：{:?}",
+        gpio.edges
+    );
+}
+
+#[test]
 fn subscribing_lists_the_gpio_channel_even_before_any_edge() {
     let mut host = KernelHost::new();
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));

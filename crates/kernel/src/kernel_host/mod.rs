@@ -243,6 +243,14 @@ impl KernelHost {
         // `LoadProject` — which re-maps the memory anyway.
         let _ = host.map_default_memory();
         host.install_probe_pipeline();
+        // 外设的探针回调**也要在这里装**——`KernelHost::new()` 造出来的
+        // 宿主已经有一张默认内存图（里面有一个 GPIO），它上面的写必须
+        // 能产生边沿。
+        //
+        // ⚠️ 漏掉这一步的后果很隐蔽：所有**先 `LoadProject`** 的用法都
+        // 走 `rebuild_platform()`（它会重装一遍），所以缺口一直没人看见；
+        // 只有「刚建好、还没装载工程」的宿主会**静默**观察不到任何边沿。
+        host.attach_peripheral_probes();
         host
     }
 
