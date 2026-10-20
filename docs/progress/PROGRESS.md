@@ -1,11 +1,83 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.13.1
+> **Document version**: v0.14.0
 > **Created**: 2026-10-19
-> **Last updated**: 2026-10-20
+> **Last updated**: 2026-10-21
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.14.0 变更摘要
+
+**D-46 闭环：探针管道真的接上了**（分支 `feat/d46-probe-pipeline`）。
+
+第 1 阶段结束时波形视图是**空的**——M-18 / M-19 的实现本身是齐的（v0.8 / v0.9），
+但**没有任何一处把它们挂到生产总线上**。这条链路此前只在**测试里**是通的。
+
+### 一、四根线，一次接上
+
+| 线 | 改动 | 为什么 |
+| --- | --- | --- |
+| M-14 总线 hook | 增 `add_hook()`（**追加式**）；`set_hook()` 保留「替换全部」语义 | 观察点 hook（M-17）与访存 trace hook（M-18）**都要看见每一次访存**，单槽会互相顶掉 |
+| M-14 → 外设 | 增 `peripheral_instances()` | 装配层据此给每个外设实例挂 M-18 的探针回调 |
+| 外设时钟 | 增 `tick_peripherals(now_ps)`，M-17 **每条指令前**调一次 | M-15 的 GPIO 在 `tick` 里记权威虚拟时间——不这样，边沿的时间戳恒为 0，**时间轴是平的**（半个假象） |
+| 宿主装配 | `ProbeRegistry` → `EdgeSink` → `WaveformPipeline` → 契约 `WaveformDelta` | 这才是「管道接上」本身 |
+
+> ⚠️ **方案 A（用户拍板）**：`add_hook` 是 **additive**，不替换既有的 `set_hook`
+> 语义。公开 API 只增不减。
+
+### 二、前端：过滤器写反了，第 1 阶段那版是**永远空**的
+
+第 1 阶段的 `app.js` 写的是「只认 id 以 `probe.` 开头的流」。而**真内核**的通道 id
+是 `"{外设 id}.{信号名}"`——`GPIO0.OUT`——**不叫** `probe.*`。所以真通道会被
+**全部过滤掉**，波形视图永远是空的。
+
+判别式改成「id **不是** `cpu.` 开头的寄存器流」。
+
+顺带修掉两处同源的静默失效：
+
+- **订阅要强制重订**：`LoadProject` 清空内核的主题集合（新工程 = 新会话，FR-13），
+  不重订的话探针推送**静默停掉**——与 D-45 同一个坑。落在
+  `loadProjectIntoKernel()`（装载 + 重订寄存器流 + 重订探针流绑成一个动作）。
+- **边沿要累加**：内核每次只推增量，覆盖的话视图上永远只有最后一批的边沿数。
+
+### 三、demo 固件必须真的动一下引脚
+
+管道通了，但没有东西去动那个引脚，通道列表是空的、边沿也是空的——波形视图**仍然是
+空的**，只是「空的原因」换了一个。所以 demo 固件 0x14..0x1c 从三条 `nop` 改成
+GPIO 设置指令（`lui x5, 0x40000` / `addi x6, x0, 1` / `sw x6, 4(x5)`）。
+
+⚠️ **两份固件不许漂移**：前端 `front/dev/demo-firmware.js` 与 Rust 侧必须逐字节相同。
+新增的 `d46_probe_pipeline.rs` 里有一条用例**直接读那份 JS 比对**。
+
+### 四、证据
+
+| 门禁 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | ✅ |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
+| `cargo test --workspace --no-fail-fast` | ✅ **502**（契约 lib 12 + kernel lib 431 + 集成 **48** + golden runner 11） |
+| `tools/check-front.sh` | ✅ **152 用例 / 28 suite**（v0.13.1 = 141 / 25） |
+| `crates/kernel/tests/d46_probe_pipeline.rs` | ✅ **10 条**端到端 |
+| `front/tests/waveform.test.mjs` | ✅ **9 条** |
+| `tools/wasm-smoke.mjs`（真 wasm 产物） | ✅ **22 项**（+4 项探针流断言） |
+| `tools/browser-verify.mjs`（真 Chrome） | ✅ 波形视图列出 `GPIO0.OUT` **且带边沿数** |
+| `tools/golden-run.sh --keep-going` | ✅ **42/42**（本轮零改动对拍路径） |
+
+### 五、方法论沉淀
+
+1. ⚠️ **「实现齐了」不等于「接上了」**。M-18 / M-19 的实现从 v0.8 / v0.9 起就齐了，
+   但**生产代码里没有一处调用它们**——接线缺口能潜伏十几个版本。
+   **判据：一条链路要有一个「从用户输入到用户可见输出」的端到端用例**，而不只是
+   「每个零件的单测都绿」。
+2. ⚠️ **过滤器的判别方向比过滤器本身更容易错**。「只认 `probe.` 前缀」与「排除
+   `cpu.` 前缀」在 mock 时代**行为完全一样**（mock 的流就叫 `probe.*`），所以
+   错的那一版也「测得过」。接上真内核后错的那一版直接空掉。
+   **判据：判别式要按「真内核的真实形状」写，并有一条用真形状断言的用例。**
+3. ⚠️ **时间轴平了等于半个假象**。边沿的值与次数都对、但 `t_ps` 恒为 0，
+   波形「看起来有数据」却读不出「什么时候变的」。外设时钟必须与虚拟时钟同步。
+
+---
 
 ## v0.13.1 变更摘要
 
@@ -108,8 +180,8 @@ V-A 的 6 条中危里，**5 条不是实现写错**，而是变异测试时「�
 | --- | --- |
 | `cargo fmt --all -- --check` | ✅ |
 | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
-| `cargo test --workspace --no-fail-fast` | ✅ **492**（契约 lib 12 + kernel lib 431 + 集成 38 + golden runner 11） |
-| `tools/check-front.sh` | ✅ **141 用例 / 25 suite**（v0.13.0 = 138 / 21） |
+| `cargo test --workspace --no-fail-fast` | ✅ **492**（契约 lib 12 + kernel lib 431 + 集成 38 + golden runner 11）→ **v0.14.0 = 502**（集成 48） |
+| `tools/check-front.sh` | ✅ **141 用例 / 25 suite**（v0.13.0 = 138 / 21）→ **v0.14.0 = 152 / 28** |
 | **13 项反向变异自检** | ✅ **全部变红**（还原校验 md5 一致） |
 | `tools/wasm-smoke.mjs` | ✅ 真 wasm 跑完整桥（**18 项**断言） |
 | `tools/browser-verify.mjs`（真 Chrome） | ✅ `x1 == 0x0000002a` · PC == 0x00000004 · 控制台干净 |

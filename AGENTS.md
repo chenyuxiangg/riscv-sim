@@ -48,7 +48,7 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 - Build (native):  `cargo build`（开发）/ `cargo build --release`（发布）
 - Build (WASM):    `tools/build-wasm.sh` 或 `tools/build-wasm.sh --release`
 - Test:            `cargo test --workspace`（单元 + 集成 + 黄金对拍）
-- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，141 用例 / 25 suite；Node ≥ 22）
+- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，152 用例 / 28 suite；Node ≥ 22）
 - Test (WASM 桥): `node tools/wasm-smoke.mjs`（需先 `tools/build-wasm.sh`；在 Node 里驱动真 wasm 产物跑完整桥，产物不在则跳过）
 - Test (浏览器真机): `tools/browser-verify.mjs`（零依赖 CDP 脚本，需本机 Chrome + 已构建的 WASM 产物 + `python3 -m http.server 8080 --directory front`；**不进默认门禁**，按需运行）
 - Test (黄金对拍): `tools/fetch-golden-deps.sh`（拉 riscv-tests + 交叉工具链到**仓库外**）→ `tools/golden-run.sh --self-check`（变异金丝雀）→ `tools/golden-run.sh --keep-going`（全量）
@@ -111,17 +111,17 @@ riscv_sim/
 | M-11 | 符号表/DWARF/反汇编/trace 导出 | `crates/kernel/src/m11_symbol/` | stub |
 | M-12 | 事件驱动仿真引擎 | `crates/kernel/src/m12_engine/` | ✅ v0.11 加固（快照还原 now_ps+事件队列、推进不空转、seq 不撞号）；v0.11.2 增契约快照 DTO 转换层（`snapshot_dto` / `restore_dto`，**先校验后应用**）+ `Engine::reset()`；⚠️ **至今无独立模块级 review**（台账 D-30） |
 | M-13 | RISC-V ISS（RV32IMC） | `crates/kernel/src/m13_iss/` | ✅ v0.11 **RV32I 全集 41 条** + 模块级 review；v0.11.1 检视轮修 SYSTEM funct3 阻断级缺陷；v0.12 **RV32I 与 Spike 逐例对拍通过**（语料 51 例中 42 例判决一致；失败用例号一致性由变异金丝雀证明）；v0.13 取指改走 `Bus::read_fetch`（**取指不匹配观察点**，V-A 🟠-2）；M/C 扩展待做（第 3 阶段，台账 D-43） |
-| M-14 | 总线与内存映射 | `crates/kernel/src/m14_bus/` | ✅ v0.4 完成 + v0.7.2 补完；v0.11 接线 PR；v0.13 新增 `read_only()`（调试读不计入统计 / trace / 观察点）与 `load_bytes()`（镜像装载的**唯一**写路径），并给 `BusAccess` 增 `is_fetch` 标记（**取指 vs 数据访问**） |
+| M-14 | 总线与内存映射 | `crates/kernel/src/m14_bus/` | ✅ v0.4 完成 + v0.7.2 补完；v0.11 接线 PR；v0.13 新增 `read_only()`（调试读不计入统计 / trace / 观察点）与 `load_bytes()`（镜像装载的**唯一**写路径），并给 `BusAccess` 增 `is_fetch` 标记（**取指 vs 数据访问**）；**D-46 增 `add_hook()`（追加式 hook，`set_hook` 保留「替换全部」语义）+ `peripheral_instances()` + `tick_peripherals()`** |
 | M-15 | 外设模型层 | `crates/kernel/src/m15_peripheral/` | ✅ v0.7 三外设 + v0.11 接线 PR |
 | M-16 | 中断控制器 | `crates/kernel/src/m16_interrupt/` | stub |
-| M-17 | ExecutionBackend 执行后端 | `crates/kernel/src/m17_backend/` | ✅ **v0.13 第 1 阶段实现**（stub → 925 行）：`step_n` 真正驱动 M-13 ISS（断点取指前命中 / 陷阱 / 观察点总线 hook 命中）、`read_memory` / `write_memory` 接 M-14 总线、`set_breakpoint` / `set_watchpoint` 接 M-08 表；v0.11.2 的 `snapshot_full` / `restore_full` 接线保持 |
-| M-18 | 探针 | `crates/kernel/src/m18_probe/` | ✅ v0.8 完整 `ProbeRegistry` + v0.9 `EdgeSink` + v0.11 接线 PR；v0.11.1 修总线 hook 的 RefCell 重入 panic |
+| M-17 | ExecutionBackend 执行后端 | `crates/kernel/src/m17_backend/` | ✅ **v0.13 第 1 阶段实现**（stub → 925 行）：`step_n` 真正驱动 M-13 ISS（断点取指前命中 / 陷阱 / 观察点总线 hook 命中）、`read_memory` / `write_memory` 接 M-14 总线、`set_breakpoint` / `set_watchpoint` 接 M-08 表；v0.11.2 的 `snapshot_full` / `restore_full` 接线保持；**D-46：观察点 hook 改 `add_hook`（不顶掉别人的）+ 每条指令前同步一次外设时钟（边沿才有真实时间戳）** |
+| M-18 | 探针 | `crates/kernel/src/m18_probe/` | ✅ v0.8 完整 `ProbeRegistry` + v0.9 `EdgeSink` + v0.11 接线 PR；v0.11.1 修总线 hook 的 RefCell 重入 panic；**D-46：正式挂上生产总线**（此前只在测试里接线） |
 | M-19 | 波形管道 | `crates/kernel/src/m19_waveform/` | ✅ v0.9 完整 `WaveformPipeline`：边沿编码 + 每通道环 + ≤20ms 批量推送 + CSV/VCD 分块导出 |
 | M-20 | 快照与确定性事件流记录 | `crates/kernel/src/m20_snapshot/` | stub（含 `SnapshotManager`）；⚠️ 其 LLD §2.1.1 的 `Snapshot{cpMeta, m13State, m14Map, m15Periph}` 与契约 DTO **尚未对齐**，`SnapshotRecord` 仍吃 partial `SimState` 且无 serde derive（台账 **D-37**） |
 | M-21 | 日志系统 | `crates/kernel/src/m21_logging/` | stub（含 `LogBuffer`） |
 | M-22 | 健康管理 HMS | `crates/kernel/src/m22_hms/` | stub（含 `Hms`） |
 | M-23 | 数据存储与持久化 DataStore | `crates/kernel/src/m23_datastore/` | stub（含 `DataStore` trait） |
-| **内核宿主**（装配层 · **不是 23 个模块之一**） | 协议装配：契约命令 ↔ 内核调用 | `crates/kernel/src/kernel_host/` | ✅ **v0.13 第 1 阶段新增**（1 314 行 / 34 测试）：16 条命令 → 事件的**规范映射**（形状见 `docs/detailed-design/STAGE-1_Wasm_Bridge.md` §3.1）/ 镜像装载（ELF + RawHex）/ 默认内存图 / 寄存器全量与增量波形流 / `handle_json` JSON 桥 |
+| **内核宿主**（装配层 · **不是 23 个模块之一**） | 协议装配：契约命令 ↔ 内核调用 | `crates/kernel/src/kernel_host/` | ✅ **v0.13 第 1 阶段新增**（1 517 行 / 34 测试）：16 条命令 → 事件的**规范映射**（形状见 `docs/detailed-design/STAGE-1_Wasm_Bridge.md` §3.1）/ 镜像装载（ELF + RawHex）/ 默认内存图 / 寄存器全量与增量波形流 / `handle_json` JSON 桥；**D-46：装上探针管道**（M-18 判沿 → M-19 环 → 契约 `WaveformDelta`）+ 默认内存图映射 GPIO 外设 |
 
 > **MVP 跑通判据**（首个能 cargo test 通过的功能闭环）：
 > - `m12_engine::tests::engine_advances_time`（事件队列 + 时间推进）
@@ -162,8 +162,18 @@ riscv_sim/
 > - **13 项反向变异自检全部变红**（第 1 阶段检视轮的闭环口径——见 `docs/reviews/REVIEWS.md` §3.4.7 的闭环对照表）
 > - ⚠️ **真机断言必须断言值**：只断言「内核已就绪」抓不到 D-45 这一类（PC 前进、x1 不动）。且**要反向证明它有判别力**——把断言弱化成「非空」再改坏固件，会**全绿**（V-B 实测）
 > - ⚠️ **规格里写着的约束，必须有一条能变红的用例**：V-A 的 6 条中危里 5 条属于此类——改实现不会变红，缺陷能潜伏很久
-> - ⚠️ **第 1 阶段的已知限制**：波形视图是空的——真实探针管道（M-18/M-19 ↔ M-14 总线 hook）**没接**（台账 **D-46**）。**不允许用假数据糊弄**：mock 内核当年凭空造的 `probe.*` 流，真内核不造
 > - ⚠️ **台账新增** **D-47**（帧 `seq` 双序列空间）· **D-48**（`E_TRX-04` 同码多义）· **D-49**（`E_PROTO-*` 不在契约 `ErrorFamily` 族里）
+>
+> **v0.14 D-46 探针管道判据**（波形视图不再是空的）：
+> - `cargo test --workspace --no-fail-fast` **502 全绿**（契约 lib 12 + kernel lib 431 + 集成 **48** + golden runner 11）
+> - `crates/kernel/tests/d46_probe_pipeline.rs`（**10 条**：通道列表 / 真实边沿 / 边沿带**真实时间戳** / `LoadProject` 后管道仍在 / **观察点 hook 与探针 hook 共存** / 两份 demo 固件防漂移）
+> - `front/tests/waveform.test.mjs`（**9 条**：真内核通道 id `GPIO0.OUT` 进得了视图状态 / 寄存器流不进波形视图 / 边沿**累加** / 强制重订 `sim.waveform`）
+> - `tools/check-front.sh` **152 用例 / 28 suite**
+> - `tools/wasm-smoke.mjs`——在 Node 里驱动**真** wasm 产物，**+4 项探针流断言**（通道列表 / 真实边沿 / 边沿值 / 边沿时间戳 ≠ 0）
+> - `tools/browser-verify.mjs`——**真 Chrome** 复验波形视图：**断言通道名 `GPIO0.OUT` + 边沿数**，不只是「非空」
+> - ⚠️ **demo 固件真的驱动 GPIO**（0x14..0x1c：`lui x5, 0x40000` / `addi x6, x0, 1` / `sw x6, 4(x5)`）——否则管道通了也没有边沿可推，视图还是空的
+> - ⚠️ **前端过滤判别式是「不是 `cpu.` 开头的寄存器流」，不是「是 `probe.` 前缀」**：真内核的通道 id 是 `"{外设 id}.{信号名}"`（`GPIO0.OUT`），写成只认 `probe.` 会把真通道**全部过滤掉**（第 1 阶段那版就是这么写的）
+> - ⚠️ **总线 hook 是追加式的**：M-14 `add_hook`（新）+ `set_hook`（保留「替换全部」语义）。观察点 hook 与探针 hook 必须**共存**——单槽会互相顶掉
 
 ## Code style
 

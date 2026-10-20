@@ -94,7 +94,7 @@ JS 镜像见 `front/lib/message.js`（`decodeMessage()` 是它的逆）。
 | --- | --- |
 | `Nop` | `Tick` |
 | `LoadProject` | `Tick`。⚠️ **装载即新会话**：内核侧的主题集合被清空（FR-13），所以**不会**产生 `WaveformDelta`——全量寄存器流由**随后的** `Subscribe{sim.registers}` 触发（见 §3.2b） |
-| `Continue` | `Tick`；若已订阅 `sim.registers` → `WaveformDelta`（**增量**：仅脏寄存器 + pc）；若停止 → `Halted`；取指失败 → `Error{E_ISS-01}`（**取代**，见下） |
+| `Continue` | `Tick`；若已订阅 `sim.registers` → `WaveformDelta`（**增量**：仅脏寄存器 + pc）；若已订阅 `sim.waveform` → `WaveformDelta`（**增量**：仅探针边沿，见 §3.3）；若停止 → `Halted`；取指失败 → `Error{E_ISS-01}`（**取代**，见下） |
 | `StepN{n}` | 同 `Continue`（把 `Continue` 换成「执行 n 条」）。⚠️ `n` 条跑完**不是**停止，不产生 `Halted` |
 | `Pause` | `Tick`；`Halted{UserPause}` |
 | `SetBreakpoint` | `Tick`；地址非法 / 重复注册 → `Error{E_CTX-07}`（**取代** `Tick`） |
@@ -103,7 +103,7 @@ JS 镜像见 `front/lib/message.js`（`decodeMessage()` 是它的逆）。
 | `ClearWatchpoint{id}` | `Tick`（同上，幂等） |
 | `ReadMemory` | `MemoryRead{addr,size,value}`；未映射 → `Error{E_BUS-01}`（**取代**） |
 | `WriteMemory` | `Tick`；未映射 → `Error{E_BUS-01}`（**取代**） |
-| `Subscribe{topic}` | `Tick`；`topic=="sim.registers"` → `WaveformDelta`（**全量**）。⚠️ `topic=="sim.waveform"` **不产生任何探针流**（第 1 阶段没接探针管道，见 §3.3） |
+| `Subscribe{topic}` | `Tick`；`topic=="sim.registers"` → `WaveformDelta`（**全量**）；`topic=="sim.waveform"` → `WaveformDelta`（**探针通道列表**，见 §3.3） |
 | `Unsubscribe{topic}` | `Tick`（幂等） |
 | `Snapshot` | `SnapshotCreated{id}`（id 单调递增）。⚠️ 第 1 阶段**只分配 id，不落盘**（M-20 仍是 stub，见 §3.7） |
 | `Restore{state}` | `Tick`；`state.schema_version` 不符 → `Error{E_SNAP-05}`（**取代**） |
@@ -156,9 +156,30 @@ await registerMemory.loadProject(project);   // 不是 dispatch + ensureSubscrib
 
 ### 3.3 探针波形流
 
-第 1 阶段**不接** M-18/M-19 探针管道（真实探针接线是后续阶段），因此
-`sim.waveform` 订阅下**不产生**探针流。波形视图在第 1 阶段为空——这是**已知
-限制**，登记为台账欠账，不允许用假数据糊弄。
+**D-46 已闭环**：M-18 / M-19 的探针管道**真的接在总线上**了。链路是
+
+```
+guest 写外设 → M-14 派发 → M-15 判「状态真变了」→ report(signal)
+   → M-18 判沿 → 边沿进 M-19 的环（EdgeSink）
+   → 内核宿主取边沿 → 契约 EventPayload::WaveformDelta
+```
+
+- **通道 id** = `"{外设 id}.{信号名}"`（M-18 `drain_waveform`）。默认内存图
+  里映射了一个 GPIO 外设（`GPIO0`，基址 `0x4000_0000`），所以默认只有一条
+  通道：`GPIO0.OUT`。
+- **通道列表与边沿走同一个事件形状**（契约冻结，没有单独的「通道列表」
+  变体）。`Subscribe{sim.waveform}` 时内核**强制**推一次——哪怕一条边沿
+  都还没有。前端据此区分「有这条信号，只是还没变化」与「根本没有这条
+  信号」；只靠边沿是表达不出前者的。
+- **增量**：`Continue` / `StepN` 推的是**自上次推送以来**的边沿。宿主侧
+  必须**累加**边沿数，直接覆盖的话视图上永远只有最后一批。
+- **时间戳**：边沿带的是外设上报时刻的虚拟时间。M-17 的步进循环在**每条
+  指令前**同步一次外设时钟（M-14 `tick_peripherals`），所以时间轴是真实
+  的、单调的——不是恒为 0 的平线。
+
+> ⚠️ **判别式**：前端过滤寄存器流用的是「id **不是** `cpu.` 开头」，而
+> **不是**「id 以 `probe.` 开头」。真内核的通道 id 是 `GPIO0.OUT` 这种
+> 形状——写成只认 `probe.` 会把真通道**全部过滤掉**，波形视图永远是空的。
 
 ### 3.4 默认内存图（demo 平台）
 
@@ -169,6 +190,7 @@ await registerMemory.loadProject(project);   // 不是 dispatch + ensureSubscrib
 | --- | --- | --- | --- |
 | RAM | `0x0000_0000` | 1 MiB | 复位向量 + 镜像 + 数据 |
 | RAM | `0x8000_0000` | 4 MiB | 常规 RISC-V 内存（与 golden 对拍侧一致） |
+| GPIO | `0x4000_0000` | 16 B | 一个 32 脚 GPIO 组（D-46）——**没有外设就没有信号可观察** |
 
 镜像落点：
 - `ImageKind::Elf` → M-06 解析出的各段，按段自己的 `paddr` 落；`entry` 作复位向量。
@@ -188,10 +210,10 @@ await registerMemory.loadProject(project);   // 不是 dispatch + ensureSubscrib
 | 0x04 | `0x00700113` | `addi x2, x0, 7` |
 | 0x08 | `0x002081B3` | `add  x3, x1, x2` |
 | 0x0c | `0x10302023` | `sw  x3, 0x100(x0)` |
-| 0x10 | `0x0100006F` | `jal x0, 0x20` |
-| 0x14 | `0x00000013` | `nop` |
-| 0x18 | `0x00000013` | `nop` |
-| 0x1c | `0x00000013` | `nop` |
+| 0x10 | `0x0040006F` | `jal x0, 0x14` |
+| 0x14 | `0x400002B7` | `lui x5, 0x40000` ← x5 = GPIO 基址 |
+| 0x18 | `0x00100313` | `addi x6, x0, 1` |
+| 0x1c | `0x0062A223` | `sw  x6, 4(x5)` ← **GPIO0.OUT = 1**（D-46 的探针边沿） |
 | 0x20 | `0x00100213` | `addi x4, x0, 1` ← **断点靶点** |
 | 0x24 | `0x0000006F` | `jal x0, 0` ← 自环 |
 
@@ -201,6 +223,18 @@ await registerMemory.loadProject(project);   // 不是 dispatch + ensureSubscrib
 在 bit[31:25]，imm[4:0] = 0 在 bit[11:7]）。前端「读 0x100」的动作依赖这一条。
 前端门禁里有一条**解码级**断言（把 S 型立即数解回来比对 `0x100`），
 不是只比对字面值。
+
+**D-46 订正（2026-10-21）**：0x10..0x1c 原本是「跳到 0x20 + 三条 nop」，
+现改成「跳到 0x14 + 三条 GPIO 设置指令」。**demo 固件必须真的动一下引脚**
+——否则探针管道接通了也没有边沿可推，波形视图仍然是空的（只是「空的
+原因」换了一个）。`0x1c` 处的 `sw x6, 4(x5)` 写的就是 GPIO 的 `OUT`
+寄存器（偏移 `0x04`），M-15 在**电平真变化**时上报 `OUT` 信号。
+
+> ⚠️ **两份固件不许漂移**：前端 `front/dev/demo-firmware.js` 与 Rust 侧
+> （`crates/kernel/src/kernel_host/tests.rs` + `crates/kernel/tests/d46_probe_pipeline.rs`）
+> 必须**逐字节相同**——否则前端看到的和内核跑的不是同一个程序，而两边
+> 各自都有测试，绿着测不同的固件。`d46_probe_pipeline.rs` 里有一条用例
+> **直接读那份 JS 比对**。
 
 ### 3.5 断点语义（M-08）
 
