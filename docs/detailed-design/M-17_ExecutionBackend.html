@@ -157,6 +157,16 @@ struct BackendVtbl {
                                                                 //   self_iss：hookTable 移除 / 钩子启用位；qemu：RSP z0 撤销 / Z0 重插
   err_t (*snapshot)(BackendHandle*, Snapshot* s);      // L3；qemu = NULL（降级）
   err_t (*restore)(BackendHandle*, const Snapshot* s); // L3；qemu = NULL（降级）
+  // 完整引擎级快照（v1.3，2026-10-20 收口轮新增；契约 port.rs::ExecutionBackend）
+  //   snapshot_full / restore_full：携带**待处理事件队列**与插入序计数器，
+  //   因此可确定性还原**引擎**（M-12 段）。与上面 partial 的 snapshot/restore
+  //   的差别：partial 的 SimState 装不下队列，还原后快照之后入队的事件仍会触发。
+  //   载体 = 契约层 riscv_sim_contract::snapshot::EngineSnapshotDto（可序列化）。
+  //   作用域：只覆盖 M-12/M-17 段；外设（M-15）与中断控制器（M-16）状态
+  //   **不在**其中（见 M-20 §2.1.1 的完整 Snapshot 结构）。
+  //   降级：不支持的后端返回 E_SNAP-03（**大声失败**，不静默跳过）。
+  err_t (*snapshot_full)(BackendHandle*, EngineSnapshotDto* d);      // L3；qemu = NULL（降级）
+  err_t (*restore_full)(BackendHandle*, const EngineSnapshotDto* d); // L3；qemu = NULL（降级）
 };
 // CapLevel: 能力分级（3.2.4 表13 语义）
 enum CapLevel {

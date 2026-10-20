@@ -26,7 +26,10 @@ wasm = []                # Reserved for wasm-pack build entry point
 [dev-dependencies]
 # Only for the snapshot-DTO round-trip evidence (tests/m12_m17_snapshot_dto.rs):
 # a DTO that cannot survive a JSON round-trip is not a persistence format.
-# Dev-dependency only — the shipped WASM binary stays free of serde.
+# Dev-dependency only — it lets the *tests* use serde_json; the shipped
+# artifact is unaffected. (Note: `serde` itself has been a hard dependency of
+# the contract crate since long before this branch, so it was already in the
+# wasm dependency graph; measured WASM cost of this branch: 0 bytes.)
 serde_json = "1.0"
 
 [lints]

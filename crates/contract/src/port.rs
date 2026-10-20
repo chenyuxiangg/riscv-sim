@@ -8,7 +8,7 @@
 use crate::error::{ErrorFamily, PlatformError};
 use crate::model::{PendingWrite, SimState};
 use crate::protocol::{CommandPayload, EventPayload};
-use crate::snapshot::{EngineSnapshotDto, E_SNAP_03_UNSUPPORTED_RESTORE};
+use crate::snapshot::{EngineSnapshotDto, E_SNAP_03_UNSUPPORTED_FULL_SNAPSHOT};
 
 /// Callback signature for peripheral signal reports (M-18 v0.8 §18-2,
 /// additive — see M-15 review #2 for the additive default-method pattern).
@@ -91,8 +91,8 @@ pub trait ExecutionBackend {
     /// contract's serializable [`EngineSnapshotDto`].
     fn restore(&mut self, state: &SimState) -> Result<(), PlatformError>;
 
-    /// Capture a **complete** snapshot: the platform state **and** the
-    /// pending event queue, in a form that can be persisted.
+    /// Capture a **complete engine-level** snapshot: the platform state
+    /// **and** the pending event queue, in a form that can be persisted.
     ///
     /// Unlike [`Self::snapshot`] (partial), the result round-trips
     /// deterministically through [`Self::restore_full`]: the queue
@@ -100,15 +100,33 @@ pub trait ExecutionBackend {
     /// time all survive (D-05 / FR-12). This is the snapshot form M-20
     /// persists and M-23 stores.
     ///
-    /// Default: `Ok(None)` — the backend does not expose its event
-    /// queue, so only the partial [`Self::snapshot`] is available.
-    /// Backends that can produce a complete snapshot override this
-    /// **and** [`Self::restore_full`].
-    fn snapshot_full(&self) -> Result<Option<EngineSnapshotDto>, PlatformError> {
-        Ok(None)
+    /// **Scope limit**: it captures the *engine*. It does **not** capture
+    /// peripheral models (M-15) or the interrupt controller (M-16) — a
+    /// host that persists only this DTO reproduces the engine, not a
+    /// whole session. See [`crate::snapshot`] for the full list.
+    ///
+    /// Default: an error (`E_SNAP-03`) — the backend does not support
+    /// complete snapshots. The default is **loud on purpose**: a soft
+    /// "no snapshot available" answer invites the natural caller shape
+    /// `if let Some(dto) = b.snapshot_full()? { … }`, whose `None` branch
+    /// silently skips the restore and leaves the caller believing it
+    /// resumed a deterministic state (D-24). Failing on the *first* call
+    /// makes "this backend has no complete snapshot" impossible to miss.
+    fn snapshot_full(&self) -> Result<EngineSnapshotDto, PlatformError> {
+        Err(PlatformError::new(
+            ErrorFamily::Snapshot,
+            E_SNAP_03_UNSUPPORTED_FULL_SNAPSHOT,
+            "backend does not support complete (deterministic) snapshots",
+        ))
     }
 
     /// Restore a snapshot previously produced by [`Self::snapshot_full`].
+    ///
+    /// The snapshot is **validated before it is applied** — an unknown
+    /// schema version, a malformed event queue or an insertion-counter
+    /// mismatch is rejected with an error rather than silently loaded
+    /// (FR-12). Implementations that override this method are expected
+    /// to keep that property.
     ///
     /// Default: an error (`E_SNAP-03`) — the backend does not support
     /// deterministic restore, and **nothing is changed**. Failing loudly
@@ -118,7 +136,7 @@ pub trait ExecutionBackend {
     fn restore_full(&mut self, _snapshot: &EngineSnapshotDto) -> Result<(), PlatformError> {
         Err(PlatformError::new(
             ErrorFamily::Snapshot,
-            E_SNAP_03_UNSUPPORTED_RESTORE,
+            E_SNAP_03_UNSUPPORTED_FULL_SNAPSHOT,
             "backend does not support deterministic snapshot restore",
         ))
     }

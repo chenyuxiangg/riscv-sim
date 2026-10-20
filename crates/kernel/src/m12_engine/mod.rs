@@ -42,7 +42,12 @@ pub const TIME_QUANTUM_PS: u64 = 1_000; // 1 µs
 
 /// Default guest-instruction budget before the engine yields to the host.
 /// Implemented as the watchdog pre-check (M-12 §5.2 + LLD §4.12.6).
-pub const DEFAULT_INSTRUCTION_BUDGET: u32 = 10_000;
+///
+/// The value lives in the contract so that a default-constructed
+/// [`riscv_sim_contract::snapshot::EngineSnapshotDto`] and a fresh engine
+/// agree on it — one source of truth, no drift.
+pub const DEFAULT_INSTRUCTION_BUDGET: u32 =
+    riscv_sim_contract::snapshot::DEFAULT_INSTRUCTION_BUDGET;
 
 /// Scheduling event held in the event queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,20 +193,12 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
         self.instruction_budget = DEFAULT_INSTRUCTION_BUDGET;
     }
 
-    /// Borrow the injected event bus (read-only).
-    ///
-    /// The bus is a dependency, not engine state — it is deliberately
-    /// **not** part of any snapshot. Exposing it read-only lets the host
-    /// observe what the engine published without letting it mutate the
-    /// engine.
-    pub fn bus(&self) -> &B {
-        &self.bus
-    }
-
     /// Borrow the injected interrupt sink (read-only).
     ///
-    /// Same posture as [`Engine::bus`]: an injected dependency, not
-    /// snapshot state.
+    /// The interrupt sink is an injected dependency, not engine state — it
+    /// is deliberately **not** part of any snapshot. Exposing it read-only
+    /// lets a host observe which IRQ lines the engine raised without
+    /// letting it mutate the engine.
     pub fn intc(&self) -> &I {
         &self.intc
     }

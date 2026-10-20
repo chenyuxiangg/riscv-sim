@@ -8,7 +8,6 @@
 //!
 //! Status: stub — persistence backend is TODO(MVP).
 
-use riscv_sim_contract::error::ErrorFamily;
 use riscv_sim_contract::model::SimState;
 
 /// A recorded snapshot, plus the metadata needed to reload it.
@@ -80,4 +79,8 @@ impl SnapshotManager {
 }
 
 /// Family used by errors raised from this module.
-pub const SNAPSHOT_FAMILY: ErrorFamily = ErrorFamily::Snapshot;
+///
+/// Re-exported from the contract crate, which owns the error-code families
+/// — defining a second constant with the same name and value here would
+/// make the two ambiguous the moment a module imports both.
+pub use riscv_sim_contract::snapshot::SNAPSHOT_FAMILY;

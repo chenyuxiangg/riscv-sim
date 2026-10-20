@@ -13,8 +13,9 @@
 //! - [`port`] — driving / driven port signatures for ExecutionBackend,
 //!   Peripheral, debug services, and the observability pipeline.
 //! - [`snapshot`] — serializable snapshot DTOs carrying the pending event
-//!   queue, so a snapshot can be persisted *and* restored deterministically
-//!   (debt ledger D-24).
+//!   queue, so the **engine's** scheduler state can be persisted *and*
+//!   restored deterministically (debt ledger D-24). Peripheral models
+//!   (M-15) and the interrupt controller (M-16) are **not** part of it.
 
 // MVP: docs on every public variant field are TODO. PROGRESS.md §7
 // 2026-10-19 decision: workspace `missing_docs = "allow"` until each

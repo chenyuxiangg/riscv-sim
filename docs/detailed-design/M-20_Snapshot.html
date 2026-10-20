@@ -108,6 +108,13 @@ struct Snapshot {
 };
 // 采集路径（20-1）：checkpoint 时由 M-13/M-14/M-15 序列化接口收集（契约锚点，与既有 v1.4/v1.3 双侧核对）
 // 恢复路径（20-1）：loadSnapshot 后按载荷回灌三模块状态（M-13 loadState / M-14 loadMap / M-15 loadPeriph）
+// v1.2（2026-10-20 收口轮新增）—— 与契约层快照 DTO 的关系：
+//   契约层 riscv_sim_contract::snapshot::EngineSnapshotDto 只覆盖本结构的
+//   **M-12/M-17 段**（调度器待处理事件队列 + 平台状态 + 插入序计数器 +
+//   虚拟时间 + 每量子指令预算），**不含** cpMeta / m14Map / m15Periph。
+//   它由 M-17 的 snapshot_full/restore_full 提供，可确定性还原**引擎**
+//   （评审 20-1 的 Snapshot 仍需由 M-20 组装完整载荷）。
+//   落盘格式契约归属：本结构（模块契约，M-20/M-23 双侧冻结）优先于契约层 DTO。
 // CrashKit: 现场包（评审 P-19：崩溃/用户上报导出，不被后续检查点回退覆盖）
 struct CrashKit {
   Firmware fw;                  // 固件镜像
@@ -385,7 +392,8 @@ CrashKit exportCrashKit() {
 <div class="flow-branch">分支：崩溃/上报 → exportCrashKit 现场包归档（P-19，不被后续回退覆盖）；事件流写失败 → 降级丢弃 + warn（4.6.1.5）；恢复不依赖全量波形/trace 证据流（R1）；现场包导出失败 → 重试一次并告警（P-19）。</div>
 <h3 id="sec5-2" class="h-sub">5.2 与相邻模块的协作说明</h3>
 <div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:24%"><col style="width:52%"><col style="width:24%"></colgroup><thead><tr><th style="width:24%;text-align:center">协作模块</th><th style="width:52%;text-align:center">协作内容</th><th style="width:24%;text-align:center">触发时机</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">M-04（会话管理器）</td><td style="text-align:left">recordInput/checkpoint 使用方（4.1.2 recordEvent/checkpoint）；恢复后回会话状态</td><td style="text-align:left">输入事件/检查点触发/恢复时</td></tr><tr class="row1"><td style="text-align:center">M-08（断点/单步）</td><td style="text-align:left">断点命中关键事件经 M-04 触发检查点</td><td style="text-align:left">断点命中时</td></tr><tr class="row0"><td style="text-align:center">M-12（事件驱动仿真引擎）</td><td style="text-align:left">replayInputs → M-12 scheduleEvent 确定性注入；tVirt 虚拟时钟</td><td style="text-align:left">恢复重放时</td></tr><tr class="row1"><td style="text-align:center">M-17（QEMU 后端）</td><td style="text-align:left">快照接口；QEMU L1 快照不可用 → 能力位协商降级（重启+重放）</td><td style="text-align:left">能力协商/恢复时</td></tr><tr class="row0"><td style="text-align:center">M-23（DataStore）</td><td style="text-align:left">saveSnapshot/loadSnapshot 原子写 + schemaVersion 迁移；现场包归档</td><td style="text-align:left">检查点落盘/恢复/上报时</td></tr><tr class="row1"><td style="text-align:center">M-22（HMS）</td><td style="text-align:left">restore 触发（崩溃处置后）；恢复失败/现场包导出失败上报</td><td style="text-align:left">崩溃/异常分级时</td></tr></tbody></table></div><h2 id="sec6" class="h-sec">6 异常处理</h2>
-<h3 id="sec6-1" class="h-sub">6.1 错误码与处置（源表16 既有码 + 内部降级策略，无新增码）</h3>
+<h3 id="sec6-1" class="h-sub">6.1 错误码与处置（源表16 既有码 + 内部降级策略）</h3>
+<p class="body"><b>v1.2（2026-10-20 收口轮）：</b>契约层快照 DTO 在 <code>E_SNAP</code> 族新增 5 个场景码（<code>E_SNAP-01</code> 未知 schema 版本 / <code>E_SNAP-02</code> 事件队列畸形 / <code>E_SNAP-03</code> 后端不支持完整快照 / <code>E_SNAP-04</code> 插入序镜像不一致 / <code>E_SNAP-05</code> 内层 SimState 版本不受支持）。族前缀不变、场景码只增不改，符合 LLD 总纲 §3.3。</p>
 <p class="body">M-20 为横切基础设施，异常收敛为源表16 既有码（E_PROTO/E_CTX 体系）+ 内部降级策略，无新增码。处置如下（4.6.1.5）：</p>
 <div class="tbl-wrap"><table class="doc-table"><colgroup><col style="width:22%"><col style="width:40%"><col style="width:38%"></colgroup><thead><tr><th style="width:22%;text-align:center">错误码 / 场景</th><th style="width:40%;text-align:center">触发条件</th><th style="width:38%;text-align:center">处置</th></tr></thead><tbody><tr class="row0"><td style="text-align:center">恢复失败</td><td style="text-align:left">restore 读取最近检查点失败</td><td style="text-align:left">回退更早检查点（最多 ≥5 个，4.6.1.5）；全失败 → M-22 上报 RECOVERY_FAILED</td></tr><tr class="row1"><td style="text-align:center">事件流写失败</td><td style="text-align:left">eventStream 追加/落盘失败</td><td style="text-align:left">降级丢弃 + warn（不影响仿真，4.6.1.5）</td></tr><tr class="row0"><td style="text-align:center">现场包导出失败</td><td style="text-align:left">exportCrashKit 归档失败</td><td style="text-align:left">重试一次并告警（4.6.1.5，P-19）</td></tr><tr class="row1"><td style="text-align:center">非安全检查点</td><td style="text-align:left">中断中的写触发检查点</td><td style="text-align:left">丢弃中间态、回退最近检查点（评审 C）</td></tr><tr class="row0"><td style="text-align:center">快照不可用</td><td style="text-align:left">QEMU L1 后端（M-17 能力位协商）</td><td style="text-align:left">走 M-17 重启 + 事件重放，不走 M-20 快照（M-04 04-1）</td></tr></tbody></table></div>
 <h3 id="sec6-2" class="h-sub">6.2 边界与降级</h3>

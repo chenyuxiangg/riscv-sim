@@ -144,12 +144,23 @@ impl Default for ProjectVersion {
     }
 }
 
+/// Format version of the [`SimState`] structure itself.
+///
+/// Distinct from [`crate::snapshot::SNAPSHOT_SCHEMA_VERSION`], which
+/// versions the *snapshot DTO family* that embeds a [`SimState`]. Both
+/// versions travel inside one snapshot document and **both** are checked
+/// by [`crate::snapshot::EngineSnapshotDto::validate`].
+///
+/// Bump on every incompatible change to the field set of [`SimState`].
+pub const SIM_STATE_SCHEMA_VERSION: u32 = 1;
+
 /// SimState = everything needed to deterministically resume a paused
 /// simulation (M-20). The fields are intentionally serializable so the
 /// snapshot can be persisted to IndexedDB (MVP) or a server store (P1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimState {
-    /// Schema version of the snapshot format.
+    /// Schema version of the [`SimState`] format — see
+    /// [`SIM_STATE_SCHEMA_VERSION`].
     pub schema_version: u32,
     /// Virtual time (picoseconds) at the snapshot point.
     pub virtual_time_ps: u64,
@@ -163,10 +174,14 @@ pub struct SimState {
     pub pending_writes: Vec<PendingWrite>,
     /// Monotonic **insertion counter** for the scheduler's event queue.
     ///
-    /// It is *not* a pointer into the queue — the contract has no room
-    /// for the queue itself. M-12 uses it as the next-event `seq`
-    /// floor, so a restored state cannot reuse a sequence number that
-    /// is still queued (D-17). The field name is historical.
+    /// It is *not* a pointer into the queue — [`SimState`] itself has no
+    /// room for the queue. M-12 uses it as the next-event `seq` floor, so
+    /// a restored state cannot reuse a sequence number that is still
+    /// queued (D-17). The field name is historical.
+    ///
+    /// The queue itself lives in
+    /// [`crate::snapshot::EngineSnapshotDto`], which is the only snapshot
+    /// form that round-trips deterministically.
     pub event_queue_head: u64,
     /// Deterministic seed (M-12 §1.1 评审 R8).
     pub seed: u64,
@@ -175,7 +190,7 @@ pub struct SimState {
 impl Default for SimState {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: SIM_STATE_SCHEMA_VERSION,
             virtual_time_ps: 0,
             gpr: [0u32; 32],
             pc: 0,

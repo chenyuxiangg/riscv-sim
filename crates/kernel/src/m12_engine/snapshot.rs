@@ -26,6 +26,7 @@
 //! 落盘方（M-20 / M-23）只需要认识 DTO，不需要认识 M-12 的内部类型 —
 //! 这正是「契约先行」要的效果。
 
+use riscv_sim_contract::error::PlatformError;
 use riscv_sim_contract::port::{EventBus, InterruptSink};
 use riscv_sim_contract::snapshot::{
     EngineSnapshotDto, QueuedEventDto, SchedEventDto, SNAPSHOT_SCHEMA_VERSION,
@@ -136,10 +137,13 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
     /// 虚拟时间、每量子指令预算全部还原，还原后继续推进与「从未还原过」
     /// 的运行产生完全相同的事件序列（D-05 / FR-12）。
     ///
-    /// 还原**不做**校验 —— 调用方若来自不可信存储，应先用
-    /// [`EngineSnapshotDto::validate`] 检查。
-    pub fn restore_dto(&mut self, dto: &EngineSnapshotDto) {
+    /// **先校验、后应用**：快照来自不可信存储时，未知 schema 版本、畸形
+    /// 事件队列、插入序计数器不一致一律返回错误，且**引擎保持原样**
+    /// （FR-12）。校验通过才落到引擎上。
+    pub fn restore_dto(&mut self, dto: &EngineSnapshotDto) -> Result<(), PlatformError> {
+        dto.validate()?;
         self.restore_full(&EngineSnapshot::from(dto));
+        Ok(())
     }
 }
 

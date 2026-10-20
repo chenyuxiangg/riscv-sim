@@ -84,6 +84,12 @@ struct Snapshot {
   M14Map    m14Map;             // M-14 总线/内存映射表
   M15Periph m15Periph;          // M-15 外设状态
 };
+// v1.2（2026-10-20 收口轮新增）—— 与契约层快照 DTO 的关系：
+//   落盘格式以**本结构**为准（M-20/M-23 双侧冻结的 Snapshot）。
+//   契约层 riscv_sim_contract::snapshot::EngineSnapshotDto 只覆盖其中的 **M-12/M-17 段**
+//   （调度器待处理事件队列 + 平台状态 + 插入序计数器 + 虚拟时间 + 每量子指令预算），
+//   **不含** cpMeta / m14Map / m15Periph —— 它由 M-17 的 snapshot_full/restore_full 提供，
+//   可确定性还原**引擎**，但**不能**单独还原一个会话。
 // DebugMeta: 调试元数据（断点/符号/源码映射）——项目级独立持久化（23-8）
 //   归属声明：不随快照回滚；快照恢复只回灌运行状态（M-13/14/15）；
 //   断点表与 M-08↔M-04 锚点对齐（会话重建按 addr 重注册 + id 重映射）

@@ -20,8 +20,12 @@ use crate::m13_iss::Iss;
 /// The default backend: the in-tree RV32IMC ISS behind the M-12
 /// scheduler. `B` is the event bus the engine publishes ticks on; `I`
 /// is the interrupt sink peripherals raise IRQs through.
+///
+/// The engine is the **single source of truth** for the platform state:
+/// the backend keeps no second copy of it. (It used to — a write-only
+/// `state` field that nothing ever read, so it silently drifted out of
+/// step with the engine. It was removed.)
 pub struct SelfIssBackend<B: EventBus, I: InterruptSink> {
-    state: SimState,
     /// Held so the [`ExecutionBackend::step_n`] body can wire it up to
     /// the engine's instruction-budget loop in a later milestone. MVP
     /// does not execute instructions through this path yet.
@@ -34,7 +38,6 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
     /// Build a backend.
     pub fn new(bus: B, intc: I) -> Self {
         Self {
-            state: SimState::default(),
             iss: Iss::default(),
             engine: Engine::new(bus, intc),
         }
@@ -57,12 +60,11 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
 
 impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
     fn reset(&mut self) -> Result<(), PlatformError> {
-        // The engine is the source of truth for the snapshot — resetting
-        // only the backend's own mirror would leave the queue, the
-        // virtual clock and the register file exactly as they were, and
-        // `snapshot()` would keep reporting the pre-reset state.
+        // The engine is the source of truth for the platform state — a
+        // reset that left it alone would keep the queue, the virtual
+        // clock and the register file exactly as they were, and
+        // `snapshot()` would go on reporting the pre-reset state.
         self.engine.reset();
-        self.state = SimState::default();
         Ok(())
     }
     fn step_n(&mut self, _n: u32) -> Result<u32, PlatformError> {
@@ -81,21 +83,22 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
     }
     fn restore(&mut self, state: &SimState) -> Result<(), PlatformError> {
         self.engine.restore(state.clone());
-        // Keep the backend's own mirror in step with the engine so the two
-        // never disagree about the platform state.
-        self.state = self.engine.snapshot();
         Ok(())
     }
 
-    /// Capture a **complete** snapshot: platform state **and** the pending
-    /// event queue, in the contract's serializable form.
+    /// Capture a **complete engine-level** snapshot: platform state **and**
+    /// the pending event queue, in the contract's serializable form.
     ///
     /// Unlike [`ExecutionBackend::snapshot`] (partial), this round-trips
     /// deterministically through [`ExecutionBackend::restore_full`] — the
     /// queue contents, the queue order, the insertion counter and the
     /// virtual time all survive (D-24 / D-05).
-    fn snapshot_full(&self) -> Result<Option<EngineSnapshotDto>, PlatformError> {
-        Ok(Some(self.engine.snapshot_dto()))
+    ///
+    /// **Scope limit**: peripheral models (M-15) and the interrupt
+    /// controller (M-16) are **not** part of it — the engine does not own
+    /// them and cannot serialize them.
+    fn snapshot_full(&self) -> Result<EngineSnapshotDto, PlatformError> {
+        Ok(self.engine.snapshot_dto())
     }
 
     /// Restore a complete snapshot captured by
@@ -105,10 +108,11 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
     /// after the snapshot was taken no longer fire — this is the
     /// deterministic restore that the partial
     /// [`ExecutionBackend::restore`] cannot provide.
+    ///
+    /// The snapshot is **validated before it is applied**: a malformed one
+    /// is rejected with an error and the engine is left untouched.
     fn restore_full(&mut self, snapshot: &EngineSnapshotDto) -> Result<(), PlatformError> {
-        self.engine.restore_dto(snapshot);
-        self.state = self.engine.snapshot();
-        Ok(())
+        self.engine.restore_dto(snapshot)
     }
     fn read_memory(&self, _addr: u32, _size: WriteSize) -> Result<u32, PlatformError> {
         // TODO(MVP): forward to the bus.
