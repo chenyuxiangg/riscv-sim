@@ -124,19 +124,19 @@ pub fn parse(bytes: &[u8], limits: &ParseLimits) -> Result<LoadImage, PlatformEr
         ));
     }
 
-    let e_type = read_u16(bytes, 16);
-    let e_machine = read_u16(bytes, 18);
-    let e_version = read_u32(bytes, 20);
-    let e_entry = read_u32(bytes, 24);
-    let e_phoff = read_u32(bytes, 28);
-    let e_shoff = read_u32(bytes, 32);
-    let e_flags = read_u32(bytes, 36);
-    let e_ehsize = read_u16(bytes, 40);
-    let e_phentsize = read_u16(bytes, 42);
-    let e_phnum = read_u16(bytes, 44);
-    let e_shentsize = read_u16(bytes, 46);
-    let e_shnum = read_u16(bytes, 48);
-    let e_shstrndx = read_u16(bytes, 50);
+    let e_type = read_u16(bytes, 16)?;
+    let e_machine = read_u16(bytes, 18)?;
+    let e_version = read_u32(bytes, 20)?;
+    let e_entry = read_u32(bytes, 24)?;
+    let e_phoff = read_u32(bytes, 28)?;
+    let e_shoff = read_u32(bytes, 32)?;
+    let e_flags = read_u32(bytes, 36)?;
+    let e_ehsize = read_u16(bytes, 40)?;
+    let e_phentsize = read_u16(bytes, 42)?;
+    let e_phnum = read_u16(bytes, 44)?;
+    let e_shentsize = read_u16(bytes, 46)?;
+    let e_shnum = read_u16(bytes, 48)?;
+    let e_shstrndx = read_u16(bytes, 50)?;
 
     let _ = (e_shoff, e_flags, e_ehsize, e_shentsize, e_shnum, e_shstrndx); // unused in MVP
 
@@ -190,11 +190,9 @@ pub fn parse(bytes: &[u8], limits: &ParseLimits) -> Result<LoadImage, PlatformEr
 
     let phoff = e_phoff as usize;
     let ph_end = phoff
-        .checked_add(
-            phnum
-                .checked_mul(ELF32_PHDR_SIZE)
-                .expect("phnum * phentsize fits usize"),
-        )
+        .checked_add(phnum.checked_mul(ELF32_PHDR_SIZE).ok_or_else(|| {
+            PlatformError::new(FAMILY, 2, "e_phnum * e_phentsize overflows usize")
+        })?)
         .ok_or_else(|| PlatformError::new(FAMILY, 1, "phoff + phnum*phentsize overflows usize"))?;
     if ph_end > bytes.len() {
         return Err(PlatformError::new(
@@ -214,15 +212,15 @@ pub fn parse(bytes: &[u8], limits: &ParseLimits) -> Result<LoadImage, PlatformEr
     for i in 0..phnum {
         let base = phoff + i * ELF32_PHDR_SIZE;
         let phdr = &bytes[base..base + ELF32_PHDR_SIZE];
-        let p_type = read_u32(phdr, 0);
+        let p_type = read_u32(phdr, 0)?;
         if p_type != PT_LOAD {
             continue;
         }
-        let p_offset = read_u32(phdr, 4);
-        let p_vaddr = read_u32(phdr, 8);
-        let p_paddr = read_u32(phdr, 12);
-        let p_filesz = read_u32(phdr, 16);
-        let p_memsz = read_u32(phdr, 20);
+        let p_offset = read_u32(phdr, 4)?;
+        let p_vaddr = read_u32(phdr, 8)?;
+        let p_paddr = read_u32(phdr, 12)?;
+        let p_filesz = read_u32(phdr, 16)?;
+        let p_memsz = read_u32(phdr, 20)?;
         let _ = p_vaddr; // MVP: trust p_paddr
 
         let memsz = p_memsz as u64;
@@ -291,21 +289,90 @@ pub fn parse(bytes: &[u8], limits: &ParseLimits) -> Result<LoadImage, PlatformEr
 // little-endian readers with bounds checks. Each reader returns
 // PlatformError(E_LDR-01) if the slice is too short — a malformed
 // header should fail loud, not silently wrap.
+//
+// These are total functions over untrusted input: they return `Err`
+// instead of panicking, so a malformed file can never take the process
+// (or the WASM worker) down. D-09.
 // ---------------------------------------------------------------------------
 
-fn read_u16(buf: &[u8], off: usize) -> u16 {
-    if off + 2 > buf.len() {
-        // E_LDR-01 path; we never trigger this from the public entry
-        // because parse has already verified the header bounds, but the
-        // helper is total for the program-header loop as well.
-        panic!("read_u16: oob {} + 2 > {}", off, buf.len());
-    }
-    u16::from_le_bytes([buf[off], buf[off + 1]])
+fn read_u16(buf: &[u8], off: usize) -> Result<u16, PlatformError> {
+    let end = off.checked_add(2).ok_or_else(|| {
+        PlatformError::new(FAMILY, 1, format!("read_u16: offset {} overflows", off))
+    })?;
+    let raw = buf.get(off..end).ok_or_else(|| {
+        PlatformError::new(
+            FAMILY,
+            1,
+            format!("read_u16: oob {} + 2 > {}", off, buf.len()),
+        )
+    })?;
+    Ok(u16::from_le_bytes([raw[0], raw[1]]))
 }
 
-fn read_u32(buf: &[u8], off: usize) -> u32 {
-    if off + 4 > buf.len() {
-        panic!("read_u32: oob {} + 4 > {}", off, buf.len());
+fn read_u32(buf: &[u8], off: usize) -> Result<u32, PlatformError> {
+    let end = off.checked_add(4).ok_or_else(|| {
+        PlatformError::new(FAMILY, 1, format!("read_u32: offset {} overflows", off))
+    })?;
+    let raw = buf.get(off..end).ok_or_else(|| {
+        PlatformError::new(
+            FAMILY,
+            1,
+            format!("read_u32: oob {} + 4 > {}", off, buf.len()),
+        )
+    })?;
+    Ok(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+}
+
+// ---------------------------------------------------------------------------
+// tests
+// ---------------------------------------------------------------------------
+
+/// Tests for the private little-endian readers. They live here (rather
+/// than in the module-level `tests.rs`) because the readers are private
+/// to this module, and the D-09 contract — "out-of-bounds is an `Err`,
+/// never a panic" — is about the readers themselves.
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+
+    /// D-09: an out-of-bounds read must be an `Err`, not a panic.
+    #[test]
+    fn read_u16_out_of_bounds_is_an_error_not_a_panic() {
+        let buf = [0u8; 4];
+        let err = read_u16(&buf, 3).unwrap_err();
+        assert_eq!(err.family, ErrorFamily::Loader);
+        assert_eq!(err.scenario, 1, "E_LDR-01 malformed");
+        assert!(err.message.contains("oob"), "unexpected: {}", err.message);
     }
-    u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
+
+    #[test]
+    fn read_u32_out_of_bounds_is_an_error_not_a_panic() {
+        let buf = [0u8; 4];
+        let err = read_u32(&buf, 1).unwrap_err();
+        assert_eq!(err.scenario, 1, "E_LDR-01 malformed");
+        assert!(err.message.contains("oob"), "unexpected: {}", err.message);
+    }
+
+    /// A wildly out-of-range offset must not overflow the offset
+    /// arithmetic either.
+    #[test]
+    fn read_u32_at_absurd_offset_is_an_error_not_a_panic() {
+        let buf = [0u8; 4];
+        let err = read_u32(&buf, usize::MAX).unwrap_err();
+        assert_eq!(err.scenario, 1, "E_LDR-01 malformed");
+        assert!(
+            err.message.contains("overflow"),
+            "unexpected: {}",
+            err.message
+        );
+    }
+
+    /// The happy path still decodes little-endian correctly.
+    #[test]
+    fn readers_decode_little_endian() {
+        let buf = [0x34u8, 0x12, 0x78, 0x56, 0xBC, 0x9A];
+        assert_eq!(read_u16(&buf, 0).unwrap(), 0x1234);
+        assert_eq!(read_u32(&buf, 0).unwrap(), 0x5678_1234);
+        assert_eq!(read_u16(&buf, 4).unwrap(), 0x9ABC);
+    }
 }
