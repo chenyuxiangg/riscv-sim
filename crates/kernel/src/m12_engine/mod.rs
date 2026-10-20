@@ -722,6 +722,105 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // D-23 gate gap #4 — determinism across snapshot / restore
+    // ------------------------------------------------------------------
+
+    /// Observable trace of a run segment.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Trace {
+        ticks: Vec<(u64, u32)>,
+        raised: Vec<u16>,
+        steps: u64,
+        quanta: u64,
+        now_ps: u64,
+        state: SimState,
+        queue: Vec<QueuedEvent>,
+    }
+
+    fn run_and_trace(eng: &mut Engine<RecordingBus, RecordingIntc>, steps: u64) -> Trace {
+        let tick_start = eng.bus.ticks.len();
+        let irq_start = eng.intc.raised.len();
+        let step_start = eng.advance_steps();
+        let quanta = eng.run_steps(steps).expect("run");
+        Trace {
+            ticks: eng.bus.ticks[tick_start..].to_vec(),
+            raised: eng.intc.raised[irq_start..].to_vec(),
+            steps: eng.advance_steps() - step_start,
+            quanta,
+            now_ps: eng.now_ps(),
+            state: eng.snapshot(),
+            queue: eng.snapshot_full().queue,
+        }
+    }
+
+    fn build_scenario() -> Engine<RecordingBus, RecordingIntc> {
+        let mut eng: Engine<RecordingBus, RecordingIntc> = Engine::default();
+        eng.schedule(1_000, timer(1, 1_000));
+        eng.schedule(2_000, timer(2, 2_000));
+        eng.schedule(2_000, timer(3, 2_000));
+        eng.schedule(
+            3_000,
+            SchedEvent::Commit(PendingWrite {
+                paddr: 0x1000_0000,
+                size: riscv_sim_contract::model::WriteSize::Word,
+                value: 0xdead_beef,
+                source: "m12-test".to_string(),
+            }),
+        );
+        eng.schedule(9_000, timer(4, 9_000));
+        eng
+    }
+
+    #[test]
+    fn snapshot_restore_continue_is_deterministic() {
+        let mut eng = build_scenario();
+        let snap = eng.snapshot_full();
+
+        // Run A: continue for two steps from the snapshot point.
+        let a = run_and_trace(&mut eng, 2);
+        assert_eq!(a.steps, 2);
+        assert_eq!(a.raised, vec![1, 2, 3]);
+        assert_eq!(a.now_ps, 2_000);
+
+        // Restore to the snapshot point and run the same two steps.
+        eng.restore_full(&snap);
+        let b = run_and_trace(&mut eng, 2);
+
+        // Everything observable must match: tick trace, IRQ trace, step
+        // count, virtual time, platform state and the remaining queue.
+        assert_eq!(a.ticks, b.ticks);
+        assert_eq!(a.raised, b.raised);
+        assert_eq!(a.steps, b.steps);
+        assert_eq!(a.quanta, b.quanta);
+        assert_eq!(a.now_ps, b.now_ps);
+        assert_eq!(a.state, b.state);
+        assert_eq!(a.queue, b.queue);
+    }
+
+    #[test]
+    fn snapshot_restore_continue_matches_unrestored_run() {
+        // The stronger form: a restored engine must produce the same
+        // result as an engine that was never restored at all.
+        let mut restored = build_scenario();
+        let snap = restored.snapshot_full();
+        drain_run(&mut restored);
+        restored.restore_full(&snap);
+        let (restored_ticks, restored_raised) = drain_run(&mut restored);
+
+        let mut straight = build_scenario();
+        let (straight_ticks, straight_raised) = drain_run(&mut straight);
+
+        assert_eq!(restored_ticks, straight_ticks);
+        assert_eq!(restored_raised, straight_raised);
+        assert_eq!(restored.now_ps(), straight.now_ps());
+        assert_eq!(restored.snapshot(), straight.snapshot());
+        assert_eq!(
+            restored.snapshot_full().queue,
+            straight.snapshot_full().queue
+        );
+    }
+
+    // ------------------------------------------------------------------
     // D-07 — peripheral tick seam
     // ------------------------------------------------------------------
 
