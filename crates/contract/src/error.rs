@@ -61,7 +61,9 @@ pub enum ErrorFamily {
     Debug,
     /// Observability: probe, waveform, trace, symbol (M-18, M-19, M-11).
     Observability,
-    /// Snapshot and deterministic event flow (M-20).
+    /// Snapshot and deterministic event flow (M-20), plus the contract
+    /// layer's snapshot DTO validation codes (`E_SNAP-01`..`E_SNAP-05`,
+    /// see [`crate::snapshot`]).
     Snapshot,
     /// ELF / DWARF / object parsing (M-06, M-11).
     Loader,
