@@ -88,6 +88,31 @@ M-15 外设 ──────────────────────�
 
 ---
 
+### 0.3 正确性对拍链路（第 2 阶段打通）
+
+```
+riscv-tests 源（仓库外）──riscv-none-elf-gcc──▶ 同一个 ELF
+                                                    │
+                    ┌───────────────────────────────┴───────────────────────────────┐
+                    ▼                                                               ▼
+        ┌───────────────────────────┐                          ┌───────────────────────────┐
+        │ Spike（外部 oracle）      │                          │ riscv-golden（我们的候选）   │
+        │ --isa=rv32imc_zicclsm_   │                          │ M-06 加载 → M-14 总线      │
+        │      zifencei            │                          │        → M-13 ISS          │
+        └───────────┬───────────────┘                          └───────────┬───────────────┘
+                    │ 读 tohost，判定 PASS / FAIL <n>                        │ 同一条判定
+                    └───────────────────────────────┬───────────────────────┘
+                                                    ▼
+                                       tools/golden-run.sh 比对判决
+                                       （FAIL 必须用例号也一致）
+```
+
+> **2026-10-20 实测：RV32I 语料 42/42 全通**，M 扩展 8 例 + C 扩展 1 例为 `pending`（M-13 未实现，见 **D-43**）。
+> **自检**：`tools/golden-run.sh --self-check` 跑两个变异金丝雀（自包含 `fail_3.S` + 上游 `add.S` 的期望值篡改版），两侧**都**必须报 `FAIL 3`——否则判定「对拍不具判别力」并退出非零。
+> **口径与理由**见 `tests/golden/README.md`（含 **Zicclsm** 这个必须钉死的 ISA 细节，见 **D-42**）。
+
+---
+
 ---
 
 ## §1 欠账明细
@@ -152,6 +177,8 @@ M-15 外设 ──────────────────────�
 | **D-39** | 契约 | 收口轮检视 V-A · 🟢-6 | **`validate()` 不检查「队列最早到期时刻 ≥ `state.virtual_time_ps`」**：一个 `at_ps` 早于当前虚拟时间的快照能通过校验 | ⏳ **未做**：引擎产出的快照永远满足该不变量，故当前是**防御性检查缺口**而非真缺陷。补法：`validate()` 增加一条检查（可复用 `E_SNAP_02` 队列畸形码，或新开场景码） |
 | **D-41** | 契约 + M-13 | 收口轮检视 V-C · H-1 附带（pre-existing） | **契约层 `SimState` 缺「内存页」与「外设状态」两个字段**：LLD 总纲表12 把 `SimState` 的关键字段列为「PC、通用寄存器、CSR、**内存页**、**外设状态**、虚拟时间、事件序号」，而契约层现行的 `SimState` 只有 `gpr/pc/csrs/pending_writes/virtual_time_ps/event_queue_head/seed` | ⏳ **已登记未做**：**pre-existing**（不是本分支引入），但收口轮的裁决把问题**钉实**了——快照载荷已定为 `Snapshot{cpMeta, m13State, m14Map, m15Periph}`，其中 `m13State` 负责「指令级状态（寄存器/内存视图）」、`m14Map` 负责「总线/内存映射状态」、`m15Periph` 负责「外设状态」；**内存页与外设状态因此不进 `SimState`，而是被拆到了 M-13/M-14/M-15 三段里**（表12 已加注说明现行实现是设计意图的子集）。**这意味着「`SimState` 直接落盘即可还原会话」这条路被正式放弃**，M-20 必须按三段分别采集。待做：M-13 / M-14 / M-15 各自补状态导出与载入接口（`loadState` / `loadMap` / `loadPeriph`，LLD 评审 20-1 已列） |
 | **D-40** | 契约 | 收口轮检视 V-C · L-3 | **`EngineSnapshotDto::default()` 是一个「合法但空」的快照**：`validate()` 对它返回 `Ok(())`，宿主若把 `default()` 落盘，得到的与「真实快照」在类型上不可区分 | ⏳ **未做**：契约层不提供 `Default` 是 breaking change，但可加 `is_empty()` 供宿主**显式拒绝**空快照。影响有限（宿主自造夹具时的常见误用） |
+| **D-42** | M-13 + M-14 | 第 2 阶段 golden 对拍（2026-10-20） | **「与 Spike 一致允许非对齐」的表述缺了一个必要限定**：Spike 只在 **Zicclsm 扩展启用**时才*执行*非对齐访问——`riscv/mmu.cc` 的 `is_misaligned_enabled()` 就是 `proc->extension_enabled(EXT_ZICCLSM)`，为假时直接 `throw trap_load_address_misaligned`。**stock `spike --isa=rv32imc` 是抛陷阱的**，而 M-13 的默认 `MisalignedPolicy::Allow`（执行）与它**相反**，只与「启用了 Zicclsm 的 Spike」一致 | ⏳ **已登记未做**：本轮对拍已把参考侧 ISA 钉为 `rv32imc_zicclsm_zifencei` 规避（口径见 `tests/golden/README.md`），M-13 的 `executor.rs` 注释也已补上限定语；但 **LLD §3.6(2) / §5.2.1 的原始措辞仍未订正**。另需决策：`MisalignedPolicy::Trap` 一旦被启用，是否需要配套的陷阱投递（依赖 M-16，第 5 阶段） |
+| **D-43** | M-13 | 第 2 阶段 golden 对拍（2026-10-20） | **M 扩展（8 条）与 C 扩展（1 条）尚未实现**，golden 语料 51 例中 **9 例无法与 Spike 对拍**（`rv32um/*` 8 例 + `rv32uc/rvc` 1 例，现状是 `IllegalInstruction` 陷阱） | ⏳ **已登记未做**：`tests/golden/corpus.txt` 已把这 9 例标为 `pending`——对拍时它们报 `expected-gap` 而**不**计为失败，语料覆盖率因此始终可见；M-13 补齐 M / C 后把标记翻成 `active`，即自动纳入门禁。**第 3 阶段**的工作项 |
 
 ### 1.3.1 检视轮（2026-10-20）小结
 
@@ -948,3 +975,5 @@ V4 指出台账 / PROGRESS / AGENTS 的数字失真 3~4 倍，且同一文档内
 | 2026-10-20 | **收口轮：契约新增可序列化快照 DTO —— D-24 根因闭环** | 用户决策「契约新增可序列化 DTO」后由协调者直接实现（契约层变更不走子会话）。 · 关键 commit：`3016de0` · → 叙事见 `PROGRESS.md` v0.11.2 段 |
 | 2026-10-20 | **⚖️ LLD 内部矛盾裁决：以详细设计 §2.1.1 为准** | 收口轮检视 V-C 揭出 LLD 自身自相矛盾：**总纲表12 / §2 持久化数据格式 / §4.6.4.1 / 表84 / 表85** 说快照载荷是「`SimState + DebugMeta`」，而 **M-20… · → 叙事见 `PROGRESS.md` v0.11.2 段 |
 | 2026-10-20 | **收口轮检视闭环：3 路独立检视（V-A 契约 / V-B 内核 / V-C 跨模块）→ 逐项修复** | 分支合 main 前**先检视、后合**（AGENTS.md 工作循环）。 · → 叙事见 `PROGRESS.md` v0.11.2 段 |
+| 2026-10-20 | **D-38 闭环：WASM 构建路径跑通** | kernel 增 target-specific `wasm-bindgen` + 新增 `wasm_api.rs` 导出面；修掉 `tools/build-wasm.sh` 的输出路径 bug 与 `--target no-modules` 选型错误（改 `--target web`）。 · 关键 commit：`fe039bf` · → 叙事见 `PROGRESS.md` v0.12.0 段 |
+| 2026-10-20 | **第 2 阶段：RV32I golden 对拍打通（Spike 作为外部 oracle）** | 自写**零 CSR 的最小 env**（`tests/golden/env/`）绕开 CSR 与陷阱投递，直接按 HTIF 协议写 `tohost`；新增 `riscv-golden` runner（M-06 + M-14 + M-13）与 `tools/golden-run.sh`（含**变异金丝雀**：两侧都必须报 `FAIL 3`）；语料 51 例中 **RV32I 42/42 与 Spike 判决逐例一致（含失败用例号）**。 · 关键 commit：`b830739` / `b097d95` / `e0fe6ab` / `6a370fc` · → 叙事见 `PROGRESS.md` v0.12.0 段 |

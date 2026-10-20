@@ -1,11 +1,99 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.11.2
+> **Document version**: v0.12.0
 > **Created**: 2026-10-19
 > **Last updated**: 2026-10-20
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.12.0 变更摘要
+
+**D-38 闭环（WASM 构建路径）+ 第 2 阶段 RV32I golden 对拍打通（Spike 作为外部 oracle）**。
+
+### 一、D-38 闭环：`tools/build-wasm.sh` 真的能跑了
+
+台账 D-38 记的是「AGENTS.md 记载的构建路径是坏的」——`wasm-pack build --target no-modules ... crates/kernel` 报 `Ensure that you have "wasm-bindgen" as a dependency`。本轮三处修复：
+
+1. **kernel 增 target-specific `wasm-bindgen`**（`[target.'cfg(target_arch = "wasm32")'.dependencies]`）——**native 依赖树实测 0 命中**，原生构建的依赖面与体积不变
+2. **新增 `crates/kernel/src/wasm_api.rs`**（`#[cfg(target_arch = "wasm32")]`）导出 `kernel_version()` / `protocol_schema_version()` / `ping()`
+3. **修掉脚本自身的两个 bug**：① 相对 `--out-dir` 会落进 `crates/kernel/front/assets/pkg`（wasm-pack 以 **crate 目录**为工作目录）→ 改绝对路径；② **target 选型错误**——原注释「刻意不用 `--target web`」是误解（需要 bundler 的是 `--target bundler`；`--target no-modules` 产出 **CommonJS 风格 IIFE、无 `export` 语句**，原生 ES module 前端**根本 import 不到它的导出**）→ 改 `--target web`
+
+**证据**：`tools/build-wasm.sh` 跑通，61 K wasm + 8 K ESM glue 落 `front/assets/pkg/`；Node 22 实测 `kernel_version()=0.1.0` / `protocol_schema_version()=1` / `ping("你好, RISC-V")=pong:你好, RISC-V`（UTF-8 往返正确）。
+
+⚠️ **本条只闭合「构建路径可跑通 + 导出可调用」**。真正的 `process_message(json) → json` 协议桥属**第 1 阶段**，此处**刻意不做半成品**——一个会静默丢命令的半截桥，正是 D-24 那一类事故。
+
+### 二、第 2 阶段：golden 对拍打通
+
+#### 关键决策：用「零 CSR 的最小 env」绕开陷阱投递，而不是给 M-13 补 CSR
+
+上游 riscv-tests 的 `env/p/riscv_test.h` 是**机器态**的：`RVTEST_CODE_BEGIN` 要编程 `mtvec` / `mstatus` / `mepc` / `satp` / `pmpaddr0` / `pmpcfg0` / `mie` / `medeleg` / `mideleg` / `mnstatus`，读 `mhartid`，最后 `mret`；`RVTEST_PASS` / `RVTEST_FAIL` 靠 **`ecall`（a7=93）** 触发陷阱，再由 trap vector 转成 `sw tohost`。
+
+- **方案 A**（官方 env + 自建 rv32 pk + M-13 实现 CSR 与陷阱投递）：最标准，但工作量最大，且把「第 5 阶段的 M-16」提前拽进来
+- **方案 B**（自写最小 env）：**实测采纳**
+
+**为什么 B 可行**：Spike 内建 HTIF 真正在意的只有 `tohost` 这一个 64 位字——`syscall_t::handle_syscall` 里 `if (cmd.payload() & 1) { htif->exitcode = cmd.payload(); }`，而 `exit_code()` 就是 `exitcode >> 1`。官方 env 的编码 `(testnum<<1)|1` **与该协议完全吻合**。既然如此，整条 CSR + 陷阱链路都可以拿掉，直接写 `tohost` 即可——**判决编码与上游逐字节相同**。
+
+> 落地：`tests/golden/env/riscv_test.h`（自写，不拷贝上游）+ `tests/golden/env/link.ld`。上游 `env/p` **不进仓库**（外部工具不进主代码）。
+
+#### 新增件
+
+| 件 | 位置 | 作用 |
+| --- | --- | --- |
+| 最小 env | `tests/golden/env/riscv_test.h` · `link.ld` | 零 CSR 的 `tohost` 判决协议 |
+| 变异金丝雀 | `tests/golden/canary/fail_3.S` | 自包含的**故意失败**用例，两侧都必须报 `FAIL 3` |
+| 语料清单 | `tests/golden/corpus.txt` | 51 例的权威清单（含 `march` 与 `status`） |
+| 候选侧 runner | `crates/kernel/src/bin/riscv-golden.rs` | M-06 加载 → M-14 总线 → M-13 ISS，按 HTIF 协议判判决 |
+| 对拍脚本 | `tools/golden-run.sh` | 两侧跑**同一个 ELF**，比对判决 |
+| 依赖获取 | `tools/fetch-golden-deps.sh` | 拉 riscv-tests + 交叉工具链（**仓库外**） |
+
+#### 结果
+
+```
+total=51 ok=42 now-passing=0 expected-gap=9 mismatch=0 build-failed=0
+```
+
+- **RV32I 42/42 全通**——每例的**判决与失败用例号都与 Spike 逐项一致**
+- **9 例 `expected-gap`**：`rv32um/*` 8 例（M 扩展）+ `rv32uc/rvc` 1 例（C 扩展），M-13 尚未实现（台账 **D-43**，第 3 阶段工作项）。语料清单把这 9 例标为 `pending`，对拍时**报缺口而不计失败**——覆盖率因此始终可见；M-13 补齐后翻成 `active` 即自动进门禁
+
+#### 对拍必须能失败：变异自检
+
+**一个不会失败的对拍比没有对拍更糟**——两侧若永远都答 `PASS`，51 例全「一致」，跑出来是绿的却什么都没证明。因此 `--self-check` 跑两个金丝雀，**两侧都必须报 `FAIL 3`**：
+
+1. `canary/fail_3.S`——自包含，证明 FAIL 判决编码在两侧都解出正确用例号
+2. **篡改**上游 `rv64ui/add.S` 的第 3 例期望值——证明**行为差异**（而不只是协议不匹配）真能被抓出来
+
+实测：两个金丝雀在 Spike 与我们侧**都**报 `FAIL 3` ✅
+
+### 三、顺手钉死的一个语义坑：Zicclsm（台账 D-42）
+
+`rv32ui/ma_data`（非对齐访存）在 `spike --isa=rv32imc` 下**死循环**——因为 stock Spike 对非对齐访问是**抛陷阱**的：
+
+```c++
+// riscv/mmu.cc
+bool misaligned_ok = intrapage && is_misaligned_enabled();
+if (!is_misaligned_enabled()) throw trap_load_address_misaligned(...);
+
+// riscv/mmu.h
+int is_misaligned_enabled() { return proc && proc->extension_enabled(EXT_ZICCLSM); }
+```
+
+而 M-13 的默认 `MisalignedPolicy::Allow`（**执行**非对齐访问）与 stock Spike **相反**，只与「启用了 Zicclsm 的 Spike」一致。
+
+- 对拍脚本把参考侧 ISA 钉为 **`rv32imc_zicclsm_zifencei`**——`zicclsm` 让 Spike 执行非对齐（与我们的默认 `Allow` 对齐），`zifencei` 让 `fence_i` 能编能跑
+- M-13 `executor.rs` 的注释已补上这个限定语；**LLD §3.6(2) / §5.2.1 的原始措辞仍待订正**（台账 **D-42**）
+
+> 这条同时说明了一件事：**「与 Spike 一致」这种话必须钉死到具体版本与具体 ISA 串**，否则换一次调用方式就悄悄反了。
+
+### 四、门禁
+
+- `cargo fmt --all -- --check` ✅
+- `cargo clippy --workspace --all-targets -- -D warnings` ✅
+- `cargo test --workspace --no-fail-fast` **406 passed / 0 failed**（契约 lib 12 + kernel lib 356 + 集成 38）——**与 v0.11.2 持平**（本轮新增的是 harness 与 bin target，不带 `#[test]`）
+- `tools/check-front.sh` **119 用例 / 21 suite** ✅
+- `tools/build-wasm.sh` ✅（61 K wasm）
+
+---
 
 ## v0.11.2 变更摘要
 

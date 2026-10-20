@@ -49,6 +49,7 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 - Test:            `cargo test --workspace`（单元 + 集成 + 黄金对拍）
 - Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，119 用例 / 21 suite；Node ≥ 22）
 - Test (浏览器真机): `tools/browser-verify.mjs`（零依赖 CDP 脚本，需本机 Chrome + `python3 -m http.server 8080 --directory front`；**不进默认门禁**，按需运行）
+- Test (黄金对拍): `tools/fetch-golden-deps.sh`（拉 riscv-tests + 交叉工具链到**仓库外**）→ `tools/golden-run.sh --self-check`（变异金丝雀）→ `tools/golden-run.sh --keep-going`（全量）
 - Lint:            `cargo clippy --workspace --all-targets -- -D warnings`
 - Format:          `cargo fmt --all`
 - Typecheck:       N/A — Rust 编译器即类型检查
@@ -72,12 +73,18 @@ riscv_sim/
 │   ├── lib/                  # 契约 JS 镜像（message.js）+ 传输帧（frame.js）
 │   └── style.css
 ├── tools/
-│   ├── build-wasm.sh         # wasm-pack 包装（无依赖 web/bundler，输出 no-modules）
+│   ├── build-wasm.sh         # wasm-pack 包装（`--target web`，输出带命名导出的原生 ESM）
 │   ├── check-front.sh        # 前端门禁（node:test）
-│   └── browser-verify.mjs    # 浏览器真机复验（零依赖 CDP，按需运行，不进默认门禁）
+│   ├── browser-verify.mjs    # 浏览器真机复验（零依赖 CDP，按需运行，不进默认门禁）
+│   ├── fetch-golden-deps.sh  # 拉 golden 外部依赖（riscv-tests + 交叉工具链）到仓库外
+│   └── golden-run.sh         # Spike 对拍：同一 ELF 两侧跑，比对判决（含变异自检）
 ├── tests/
 │   ├── unit/                 # 单元测试
-│   └── golden/               # Spike 对拍测试（Wave 2 落地；工具链已就绪）
+│   └── golden/               # Spike 对拍 harness
+│       ├── env/              # 零 CSR 最小 env（riscv_test.h + link.ld）——绕开陷阱投递
+│       ├── canary/           # 变异金丝雀（两侧都必须报 FAIL 3）
+│       ├── corpus.txt        # 51 例语料清单（march + status）
+│       └── README.md         # 协议、语料边界、Zicclsm 口径
 └── docs/                     # 27 篇设计文档 + reviews/（1 入口 + 9 份模块报告）
 ```
 
@@ -99,7 +106,7 @@ riscv_sim/
 | M-10 | 寄存器内存服务 | `front/services/m10_registermemory.js` | ✅ v0.11 实现（订阅寄存器/内存快照）；v0.11.1 补断线重连后重订阅 |
 | M-11 | 符号表/DWARF/反汇编/trace 导出 | `crates/kernel/src/m11_symbol/` | stub |
 | M-12 | 事件驱动仿真引擎 | `crates/kernel/src/m12_engine/` | ✅ v0.11 加固（快照还原 now_ps+事件队列、推进不空转、seq 不撞号）；v0.11.2 增契约快照 DTO 转换层（`snapshot_dto` / `restore_dto`，**先校验后应用**）+ `Engine::reset()`；⚠️ **至今无独立模块级 review**（台账 D-30） |
-| M-13 | RISC-V ISS（RV32IMC） | `crates/kernel/src/m13_iss/` | ✅ v0.11 **RV32I 全集 41 条** + 模块级 review；v0.11.1 检视轮修 SYSTEM funct3 阻断级缺陷；M/C 扩展待做 |
+| M-13 | RISC-V ISS（RV32IMC） | `crates/kernel/src/m13_iss/` | ✅ v0.11 **RV32I 全集 41 条** + 模块级 review；v0.11.1 检视轮修 SYSTEM funct3 阻断级缺陷；v0.12 **RV32I 与 Spike 逐例对拍通过**（语料 51 例中 42 例判决 + 失败用例号全一致）；M/C 扩展待做（第 3 阶段，台账 D-43） |
 | M-14 | 总线与内存映射 | `crates/kernel/src/m14_bus/` | ✅ v0.4 完成 + v0.7.2 补完；v0.11 接线 PR |
 | M-15 | 外设模型层 | `crates/kernel/src/m15_peripheral/` | ✅ v0.7 三外设 + v0.11 接线 PR |
 | M-16 | 中断控制器 | `crates/kernel/src/m16_interrupt/` | stub |
@@ -124,6 +131,11 @@ riscv_sim/
 > **v0.11.1 检视轮新增判据**（4 路独立检视后补齐）：
 > - `m18_probe::tests::*`（总线 hook 在 `RefCell` 争用下不 panic）
 > - `m06_elf::tests::*`（IHEX 嗅探结构判据：raw 二进制首字节 `0x3A` 不再误判；4 GiB 总线边界）
+>
+> **v0.12 黄金对拍判据**（第 2 阶段；**不进 `cargo test`**，需外部依赖）：
+> - `tools/golden-run.sh --self-check` —— **变异金丝雀**：两个金丝雀（自包含 `fail_3.S` + 上游 `add.S` 期望值篡改版）在 **Spike 与我们侧都必须报 `FAIL 3`**。金丝雀不过 = 对拍不具判别力，**直接判负**
+> - `tools/golden-run.sh --keep-going` —— 全量语料：**RV32I 42/42 判决与失败用例号逐例一致**；M/C 扩展 9 例为 `pending`（报 `expected-gap`，**不计失败**）
+> - ⚠️ **参考侧 ISA 必须是 `rv32imc_zicclsm_zifencei`**（理由见台账 D-42）；候选侧 runner 是 `crates/kernel/src/bin/riscv-golden.rs`
 >
 > **v0.11.2 快照 DTO 判据**（契约新增可序列化 DTO，D-24 根因闭环）：
 > - `crates/contract/src/snapshot.rs::tests::*`（DTO 的 JSON **精确形状** + `validate()` 六类拒绝）
@@ -153,11 +165,11 @@ riscv_sim/
 - **前端门禁**：`tools/check-front.sh`（`node --test`，含最小 DOM stub；见 `front/tests/`）——**ESM 链接期错误只有这条门禁能抓住**，Rust 测试全都覆盖不到
 - **前端改动后必须真机复验**：`tools/check-front.sh` 的 DOM stub 覆盖**状态与行为**，覆盖不了**挂载时序**——「首次事件派发早于订阅」这类缺陷对 stub 完全隐形（2026-10-20 的 #20：修完白屏后视图体仍全空，只有真实浏览器能暴露）。改前端挂载顺序 / 事件订阅关系后，必须起 `python3 -m http.server 8080 --directory front` 用浏览器实跑一遍
 - WASM 端到端：`tools/build-wasm.sh` 后用 `python3 -m http.server 8080 --directory front` 起 HTTP 服务，浏览器访问 `http://localhost:8080/`（**不能 `file://` 直开**：ES module 与 Worker 均要求同源）
-- 黄金对拍：`tests/golden/` 用 Spike 作为外部 oracle，CI 中调 `spike --isa=rv32imc` 跑同一程序对比 `m13_iss` 输出
+- 黄金对拍：`tools/golden-run.sh` 用 Spike 作为外部 oracle（参考侧 ISA 必须是 **`rv32imc_zicclsm_zifencei`**——`zicclsm` 决定 Spike 是否执行非对齐访问，stock `--isa=rv32imc` 是抛陷阱的，见台账 D-42）。两侧跑**同一个 ELF**，判决与失败用例号都要一致
 - 测试位置约定：
   - 单元测试就近写在 `crates/<crate>/src/<module>/mod.rs` 内 `#[cfg(test)] mod tests`
   - 跨模块集成测试放 `tests/unit/`（顶层 `tests/` 目录，Rust 自动识别为集成测试）
-  - Spike 对拍脚本放 `tests/golden/`，可执行 `.py` 或 `.sh`
+  - Spike 对拍脚本放 `tests/golden/`，可执行 `.py` 或 `.sh`；候选侧 runner 是 `crates/kernel/src/bin/riscv-golden.rs`（**harness 代码，不是 23 个模块之一**）
 
 ## PR & commit conventions
 
