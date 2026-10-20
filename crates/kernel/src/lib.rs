@@ -29,5 +29,11 @@ pub mod m21_logging;
 pub mod m22_hms;
 pub mod m23_datastore;
 
+/// WASM export surface for the browser front-end (wasm32 only).
+///
+/// Native builds do not compile this module — see D-38.
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_api;
+
 /// Crate-wide version. Mirrors `Cargo.toml` for log / event payloads.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

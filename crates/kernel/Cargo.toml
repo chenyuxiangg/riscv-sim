@@ -23,6 +23,16 @@ riscv_sim_contract = { path = "../contract" }
 default = []
 wasm = []                # Reserved for wasm-pack build entry point
 
+# WASM export surface (D-38). Target-specific so that **native builds
+# never pull `wasm-bindgen` into their dependency graph** — the
+# kernel's native footprint is unchanged, and `cargo build` on a
+# non-wasm target never compiles `src/wasm_api.rs`.
+#
+# The module itself is additionally gated on
+# `#[cfg(target_arch = "wasm32")]`, so the two conditions agree.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+
 [dev-dependencies]
 # Only for the snapshot-DTO round-trip evidence (tests/m12_m17_snapshot_dto.rs):
 # a DTO that cannot survive a JSON round-trip is not a persistence format.
