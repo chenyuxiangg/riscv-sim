@@ -786,6 +786,101 @@ impl Bus {
         result
     }
 
+    /// Bulk-write a byte blob into the bus (image loading path).
+    ///
+    /// This is the **single write path** for image loading (M-06 LLD
+    /// 06-1: 「写 RAM 由内核侧执行」——前端不直调 M-14). Every byte goes
+    /// through the normal address decoder, so an image that runs past the
+    /// end of a mapped region fails with `E_BUS-01` instead of silently
+    /// corrupting whatever lives next to it.
+    ///
+    /// The writes **are** counted in the bus statistics and **do** fire
+    /// the bus hook: loading an image is a write on the bus, and a
+    /// consumer that watches the bus must see it. (Watchpoints are
+    /// cleared before an image is loaded, so an image load cannot fire a
+    /// watchpoint.)
+    pub fn load_bytes(&mut self, addr: u32, bytes: &[u8]) -> Result<(), PlatformError> {
+        for (i, byte) in bytes.iter().enumerate() {
+            let a = addr.checked_add(i as u32).ok_or_else(|| {
+                PlatformError::new(
+                    BUS_FAMILY,
+                    1,
+                    format!("write address overflow at 0x{:08x}", addr),
+                )
+            })?;
+            self.write(a, BusWidth::Byte, *byte as u32)?;
+        }
+        Ok(())
+    }
+
+    /// Read **without** touching the access statistics or the bus hook.
+    ///
+    /// The contract port
+    /// [`ExecutionBackend::read_memory`](crate::riscv_sim_contract::port::ExecutionBackend::read_memory)
+    /// takes `&self`, but [`Bus::read`] needs `&mut self` to bump the
+    /// counters. This method is the read-only twin: it returns exactly
+    /// the same value — or exactly the same error — as [`Bus::read`], but
+    /// it neither counts the access nor fires the hook.
+    ///
+    /// That difference matters: a debugger peeking at a word must not
+    /// show up in the bus statistics, nor in the M-18 trace, nor in a
+    /// watchpoint match (a watchpoint is about the **guest's** accesses).
+    pub fn read_only(&self, addr: u32, width: BusWidth) -> Result<u32, PlatformError> {
+        match self.crosses_region(addr, width) {
+            Crossing::Aligned => {
+                let (base, off) = match self.lookup(addr) {
+                    Some(r) => (r.base, (addr - r.base) as usize),
+                    None => {
+                        return Err(PlatformError::new(
+                            BUS_FAMILY,
+                            1,
+                            format!("read unmapped addr=0x{:08x}", addr),
+                        ));
+                    }
+                };
+                let region = self.regions.get(&base).ok_or_else(|| {
+                    PlatformError::new(
+                        BUS_FAMILY,
+                        1,
+                        format!("read region vanished mid-flight base=0x{:08x}", base),
+                    )
+                })?;
+                Self::read_region(region, off, width)
+            }
+            Crossing::Crosses => {
+                let mut acc: u32 = 0;
+                for i in 0..width.bytes() {
+                    let a = addr.wrapping_add(i as u32);
+                    let (base, off) = match self.lookup(a) {
+                        Some(r) => (r.base, (a - r.base) as usize),
+                        None => {
+                            return Err(PlatformError::new(
+                                BUS_FAMILY,
+                                1,
+                                format!("read unmapped byte addr=0x{:08x}", a),
+                            ));
+                        }
+                    };
+                    let region = self.regions.get(&base).ok_or_else(|| {
+                        PlatformError::new(
+                            BUS_FAMILY,
+                            1,
+                            format!("read region vanished base=0x{:08x}", base),
+                        )
+                    })?;
+                    let b = Self::read_region_byte(region, off)?;
+                    acc |= (b as u32) << (i * 8);
+                }
+                Ok(acc)
+            }
+            Crossing::Unmapped => Err(PlatformError::new(
+                BUS_FAMILY,
+                1,
+                format!("read unmapped addr=0x{:08x}", addr),
+            )),
+        }
+    }
+
     /// Inner read path. Either returns the full value or an error
     /// describing which slice failed. No stats / hook side-effects.
     fn read_inner(&mut self, addr: u32, width: BusWidth) -> Result<u32, PlatformError> {

@@ -211,6 +211,46 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
         self.state.virtual_time_ps
     }
 
+    /// Current program counter.
+    ///
+    /// Cheap accessor for the hot path (the execution backend checks it
+    /// once per instruction) — [`Engine::snapshot`] would clone the
+    /// whole platform state just to read one word.
+    pub fn pc(&self) -> u32 {
+        self.state.pc
+    }
+
+    /// Borrow the platform state **mutably**.
+    ///
+    /// The engine is the **single owner** of the platform state (the
+    /// virtual clock included — see [`Engine::now_ps`]). This accessor
+    /// exists so the execution backend (M-17) can drive the ISS (M-13)
+    /// against *that* state instead of keeping a second copy of it.
+    ///
+    /// Borrowing (rather than handing out an owned clone) is what keeps
+    /// the "one source of truth" property: a clone would let the ISS
+    /// advance a register file the engine never sees.
+    ///
+    /// The caller is expected to write back through the same borrow; the
+    /// engine re-reads the state on every snapshot / restore, so no
+    /// explicit "commit" step is needed.
+    pub fn state_mut(&mut self) -> &mut SimState {
+        &mut self.state
+    }
+
+    /// Advance the virtual clock by `delta_ps` picoseconds.
+    ///
+    /// The clock lives in [`SimState::virtual_time_ps`] and nowhere else
+    /// (D-05). Advancing it here — instead of letting every caller keep
+    /// its own `now_ps` — is what makes a snapshot restore the clock for
+    /// free.
+    ///
+    /// Saturation instead of wrapping: a clock that wraps around would
+    /// make the event queue's ordering meaningless.
+    pub fn advance_virtual_time(&mut self, delta_ps: u64) {
+        self.state.virtual_time_ps = self.state.virtual_time_ps.saturating_add(delta_ps);
+    }
+
     /// Number of clock advances performed since the engine was created.
     ///
     /// Because the engine batch-advances across idle intervals, this is
