@@ -38,6 +38,7 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 - `docs/detailed-design/M-01..M-23_*.html` — 23 篇模块详细设计
 - `docs/reviews/REVIEWS.md` — **检视与欠账的单一入口**（欠账总表 + §3 两轮检视归档 + §4 模块报告索引 + §5 变更索引）
 - `docs/reviews/M-*_Review.md` / `FRONTEND_*_Review.md` — 9 份模块详细检视报告
+- `docs/detailed-design/STAGE-1_Wasm_Bridge.md` — **第 1 阶段 WASM 桥接口规格（冻结）**：契约命令 ↔ 事件的规范映射表
 
 ## Setup commands
 
@@ -47,8 +48,9 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 - Build (native):  `cargo build`（开发）/ `cargo build --release`（发布）
 - Build (WASM):    `tools/build-wasm.sh` 或 `tools/build-wasm.sh --release`
 - Test:            `cargo test --workspace`（单元 + 集成 + 黄金对拍）
-- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，119 用例 / 21 suite；Node ≥ 22）
-- Test (浏览器真机): `tools/browser-verify.mjs`（零依赖 CDP 脚本，需本机 Chrome + `python3 -m http.server 8080 --directory front`；**不进默认门禁**，按需运行）
+- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，138 用例 / 25 suite；Node ≥ 22）
+- Test (WASM 桥): `node tools/wasm-smoke.mjs`（需先 `tools/build-wasm.sh`；在 Node 里驱动真 wasm 产物跑完整桥，产物不在则跳过）
+- Test (浏览器真机): `tools/browser-verify.mjs`（零依赖 CDP 脚本，需本机 Chrome + 已构建的 WASM 产物 + `python3 -m http.server 8080 --directory front`；**不进默认门禁**，按需运行）
 - Test (黄金对拍): `tools/fetch-golden-deps.sh`（拉 riscv-tests + 交叉工具链到**仓库外**）→ `tools/golden-run.sh --self-check`（变异金丝雀）→ `tools/golden-run.sh --keep-going`（全量）
 - Lint:            `cargo clippy --workspace --all-targets -- -D warnings`
 - Format:          `cargo fmt --all`
@@ -62,7 +64,8 @@ riscv_sim/
 ├── rust-toolchain.toml       # stable + wasm32 target
 ├── crates/
 │   ├── contract/             # 契约层（DTO/事件/错误码/端口签名，所有模块都引它）
-│   ├── kernel/               # 仿真内核（含 16 个子模块 M-06/M-08/M-09/M-11/M-12/.../M-23）
+│   ├── kernel/               # 仿真内核（16 个子模块 M-06/M-08/M-09/M-11/M-12/.../M-23
+│   │                         #   + kernel_host 装配层（非 23 模块之一））
 │   └── server/               # 服务端形态（P1 占位，MVP 不强制）
 ├── front/                    # 原生 JS 前端（ES modules，零构建）
 │   ├── index.html
@@ -76,6 +79,7 @@ riscv_sim/
 │   ├── build-wasm.sh         # wasm-pack 包装（`--target web`，输出带命名导出的原生 ESM）
 │   ├── check-front.sh        # 前端门禁（node:test）
 │   ├── browser-verify.mjs    # 浏览器真机复验（零依赖 CDP，按需运行，不进默认门禁）
+│   ├── wasm-smoke.mjs        # WASM 桥冒烟（Node 驱动真 wasm 产物，按需运行）
 │   ├── fetch-golden-deps.sh  # 拉 golden 外部依赖（riscv-tests + 交叉工具链）到仓库外
 │   └── golden-run.sh         # Spike 对拍：同一 ELF 两侧跑，比对判决（含变异自检）
 ├── tests/
@@ -85,7 +89,7 @@ riscv_sim/
 │       ├── canary/           # 变异金丝雀（两侧都必须报 FAIL 3）
 │       ├── corpus.txt        # 51 例语料清单（march + status）
 │       └── README.md         # 协议、语料边界、Zicclsm 口径
-└── docs/                     # 27 篇设计文档 + reviews/（1 入口 + 9 份模块报告）
+└── docs/                     # 28 篇设计文档（含 STAGE-1 桥规格）+ reviews/（1 入口 + 9 份模块报告）
 ```
 
 ## Project layout
@@ -100,23 +104,24 @@ riscv_sim/
 | M-04 | 会话管理器 | `front/services/m04_session.js` | ✅ v0.11 实现（状态机 + 断线重连） |
 | M-05 | 命令路由与事件分发 | `front/services/m05_commandrouter.js` | ✅ v0.11 实现（订阅/退订/一次性订阅）；v0.11.1 补 `once()` 一次性语义的观察与回归用例 |
 | M-06 | ELF / Raw-HEX 解析器 | `crates/kernel/src/m06_elf/` | ✅ v0.11 加固 + **首次模块级 review**（D-03 阻断级消除）；v0.11.1 检视轮再修 IHEX 嗅探判据 + bss gap 溢出 |
-| M-07 | 传输适配器 | `front/services/m07_transport.js` | ✅ v0.11 实现（Worker + WebSocket 双适配器；当前接 mock 内核） |
-| M-08 | 断点管理器 | `crates/kernel/src/m08_breakpoint/` | stub |
-| M-09 | 单步引擎 | `crates/kernel/src/m09_step/` | stub |
-| M-10 | 寄存器内存服务 | `front/services/m10_registermemory.js` | ✅ v0.11 实现（订阅寄存器/内存快照）；v0.11.1 补断线重连后重订阅 |
+| M-07 | 传输适配器 | `front/services/m07_transport.js` | ✅ v0.11 实现（Worker + WebSocket 双适配器）；**v0.13 第 1 阶段起默认挂真 WASM 内核**（`front/kernel-worker.js`），mock 退化为测试替身 |
+| M-08 | 断点管理器 | `crates/kernel/src/m08_breakpoint/` | ✅ **v0.13 第 1 阶段实现**（53 行 stub → 457 行）：断点表（按 addr 索引 + id 反查）/ 观察点表（地址 + 方向 + 宽度匹配）/ `hit_check` 取指前命中 / 未对齐与重复注册拒 `E_CTX-07` |
+| M-09 | 单步引擎 | `crates/kernel/src/m09_step/` | ✅ **v0.13 第 1 阶段实现**（71 行 stub → 308 行）：`StepKind` 四种粒度 + `Plan` + `StepOutcome`；`Over`/`Out`/`Line` **显式降级**为指令级（`degradation()` 把降级说出来，不悄悄降级） |
+| M-10 | 寄存器内存服务 | `front/services/m10_registermemory.js` | ✅ v0.11 实现（订阅寄存器/内存快照）；v0.11.1 补断线重连后重订阅；**v0.13 补 `resubscribe()` / `loadProject()`**——装载工程后内核侧订阅会失效，必须**强制**重订（幂等的 `ensureSubscribed()` 不够，台账 **D-45**） |
 | M-11 | 符号表/DWARF/反汇编/trace 导出 | `crates/kernel/src/m11_symbol/` | stub |
 | M-12 | 事件驱动仿真引擎 | `crates/kernel/src/m12_engine/` | ✅ v0.11 加固（快照还原 now_ps+事件队列、推进不空转、seq 不撞号）；v0.11.2 增契约快照 DTO 转换层（`snapshot_dto` / `restore_dto`，**先校验后应用**）+ `Engine::reset()`；⚠️ **至今无独立模块级 review**（台账 D-30） |
 | M-13 | RISC-V ISS（RV32IMC） | `crates/kernel/src/m13_iss/` | ✅ v0.11 **RV32I 全集 41 条** + 模块级 review；v0.11.1 检视轮修 SYSTEM funct3 阻断级缺陷；v0.12 **RV32I 与 Spike 逐例对拍通过**（语料 51 例中 42 例判决一致；失败用例号一致性由变异金丝雀证明）；M/C 扩展待做（第 3 阶段，台账 D-43） |
 | M-14 | 总线与内存映射 | `crates/kernel/src/m14_bus/` | ✅ v0.4 完成 + v0.7.2 补完；v0.11 接线 PR |
 | M-15 | 外设模型层 | `crates/kernel/src/m15_peripheral/` | ✅ v0.7 三外设 + v0.11 接线 PR |
 | M-16 | 中断控制器 | `crates/kernel/src/m16_interrupt/` | stub |
-| M-17 | ExecutionBackend 执行后端 | `crates/kernel/src/m17_backend/` | stub（含 `SelfIssBackend`）；v0.11.2 接线 `snapshot_full` / `restore_full`（两端对称地大声失败 `E_SNAP-03`），删掉写而不读的死字段 `state`，`reset()` 接 `Engine::reset()` |
+| M-17 | ExecutionBackend 执行后端 | `crates/kernel/src/m17_backend/` | ✅ **v0.13 第 1 阶段实现**（stub → 763 行）：`step_n` 真正驱动 M-13 ISS（断点取指前命中 / 陷阱 / 观察点总线 hook 命中）、`read_memory` / `write_memory` 接 M-14 总线、`set_breakpoint` / `set_watchpoint` 接 M-08 表；v0.11.2 的 `snapshot_full` / `restore_full` 接线保持 |
 | M-18 | 探针 | `crates/kernel/src/m18_probe/` | ✅ v0.8 完整 `ProbeRegistry` + v0.9 `EdgeSink` + v0.11 接线 PR；v0.11.1 修总线 hook 的 RefCell 重入 panic |
 | M-19 | 波形管道 | `crates/kernel/src/m19_waveform/` | ✅ v0.9 完整 `WaveformPipeline`：边沿编码 + 每通道环 + ≤20ms 批量推送 + CSV/VCD 分块导出 |
 | M-20 | 快照与确定性事件流记录 | `crates/kernel/src/m20_snapshot/` | stub（含 `SnapshotManager`）；⚠️ 其 LLD §2.1.1 的 `Snapshot{cpMeta, m13State, m14Map, m15Periph}` 与契约 DTO **尚未对齐**，`SnapshotRecord` 仍吃 partial `SimState` 且无 serde derive（台账 **D-37**） |
 | M-21 | 日志系统 | `crates/kernel/src/m21_logging/` | stub（含 `LogBuffer`） |
 | M-22 | 健康管理 HMS | `crates/kernel/src/m22_hms/` | stub（含 `Hms`） |
 | M-23 | 数据存储与持久化 DataStore | `crates/kernel/src/m23_datastore/` | stub（含 `DataStore` trait） |
+| **内核宿主**（装配层 · **不是 23 个模块之一**） | 协议装配：契约命令 ↔ 内核调用 | `crates/kernel/src/kernel_host/` | ✅ **v0.13 第 1 阶段新增**（1 116 行 / 27 测试）：16 条命令 → 事件的**规范映射**（形状见 `docs/detailed-design/STAGE-1_Wasm_Bridge.md` §3.1）/ 镜像装载（ELF + RawHex）/ 默认内存图 / 寄存器全量与增量波形流 / `handle_json` JSON 桥 |
 
 > **MVP 跑通判据**（首个能 cargo test 通过的功能闭环）：
 > - `m12_engine::tests::engine_advances_time`（事件队列 + 时间推进）
@@ -147,6 +152,15 @@ riscv_sim/
 > **v0.11.2 收口轮判据**（分支合 main 前 3 路独立检视的闭环，commit `3893626`）：
 > - 8 项**闭环变异自检全部变红**（口径：`cargo test --workspace --no-fail-fast`——默认 fail-fast 会截断红测条数）
 > - 台账合计行 **172 / 143 / 29**（新增「收口轮新增」行 37 / 34 / 3）· 检视产物 `docs/reviews/REVIEWS.md`（§3.1）
+>
+> **v0.13 第 1 阶段判据**（WASM 导出层 + 前端接真实内核 + 真机复验）：
+> - **接口形状冻结**：`docs/detailed-design/STAGE-1_Wasm_Bridge.md`——内核只认契约消息（`process_message(json) → json` 的出参是**事件数组**），传输帧（`sessionId`/`role`/`reqId`）归前端，**内核不解析**
+> - `cargo test --workspace --no-fail-fast` **479 全绿**（契约 lib 12 + kernel lib 418 + 集成 38 + golden runner 11）
+> - `tools/check-front.sh` **138 用例 / 25 suite**
+> - `tools/wasm-smoke.mjs`——在 Node 里驱动**真** wasm 产物跑完整桥（Nop → LoadProject → Subscribe → StepN → ReadMemory → SetBreakpoint → Continue → 畸形输入）
+> - `tools/browser-verify.mjs`——**真 Chrome** 复验，且**断言值**：`x1 == 0x0000002a`（demo 固件真的被执行了），不只是「内核已就绪」
+> - ⚠️ **真机断言必须断言值**：只断言「内核已就绪」抓不到 D-45 这一类（PC 前进、x1 不动）
+> - ⚠️ **第 1 阶段的已知限制**：波形视图是空的——真实探针管道（M-18/M-19 ↔ M-14 总线 hook）**没接**（台账 **D-46**）。**不允许用假数据糊弄**：mock 内核当年凭空造的 `probe.*` 流，真内核不造
 
 ## Code style
 
@@ -166,7 +180,9 @@ riscv_sim/
 - 单元测试：`cargo test --workspace`（含各模块 `#[cfg(test)] mod tests`）
 - **前端门禁**：`tools/check-front.sh`（`node --test`，含最小 DOM stub；见 `front/tests/`）——**ESM 链接期错误只有这条门禁能抓住**，Rust 测试全都覆盖不到
 - **前端改动后必须真机复验**：`tools/check-front.sh` 的 DOM stub 覆盖**状态与行为**，覆盖不了**挂载时序**——「首次事件派发早于订阅」这类缺陷对 stub 完全隐形（2026-10-20 的 #20：修完白屏后视图体仍全空，只有真实浏览器能暴露）。改前端挂载顺序 / 事件订阅关系后，必须起 `python3 -m http.server 8080 --directory front` 用浏览器实跑一遍
+- **WASM 桥冒烟**：`tools/build-wasm.sh` 后跑 `node tools/wasm-smoke.mjs`——在 Node 里驱动**真** wasm 产物跑完整桥（产物不在时**跳过**并退出 0，不进默认门禁）
 - WASM 端到端：`tools/build-wasm.sh` 后用 `python3 -m http.server 8080 --directory front` 起 HTTP 服务，浏览器访问 `http://localhost:8080/`（**不能 `file://` 直开**：ES module 与 Worker 均要求同源）
+- **真机复验**：`tools/browser-verify.mjs`——真 Chrome + 真 WASM 内核，**断言值**（`x1 == 0x0000002a`）。**需要先 `tools/build-wasm.sh`**（产物缺失 → 退出 127 = 前置条件缺失，不是验证失败）
 - 黄金对拍：`tools/golden-run.sh` 用 Spike 作为外部 oracle（参考侧 ISA 必须是 **`rv32imc_zicclsm_zifencei`**——`zicclsm` 决定 Spike 是否执行非对齐访问，stock `--isa=rv32imc` 是抛陷阱的，见台账 D-42）。两侧跑**同一个 ELF**，判决与失败用例号都要一致
 - 测试位置约定：
   - 单元测试就近写在 `crates/<crate>/src/<module>/mod.rs` 内 `#[cfg(test)] mod tests`

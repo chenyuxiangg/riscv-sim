@@ -1,11 +1,94 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.12.0
+> **Document version**: v0.13.0
 > **Created**: 2026-10-19
 > **Last updated**: 2026-10-20
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.13.0 变更摘要
+
+**第 1 阶段：WASM 导出层 + 前端接真实内核 + 真机复验**。
+
+前端不再挂 dev-only 的 mock 内核 —— 浏览器里跑的是**真的** RV32IMC 内核（M-13 ISS），
+经 `wasm-pack` 编译出的 WASM 产物，由一个 Worker 承载，说的仍是**冻结的**契约协议。
+
+### 一、接口形状冻结
+
+新增 **`docs/detailed-design/STAGE-1_Wasm_Bridge.md`**（第 1 阶段唯一权威副本）：
+
+| 层 | 形态 | 归属 |
+| --- | --- | --- |
+| M-07 传输帧 | `{type, seq, sessionId, role, reqId, payload}` | 前端（`front/lib/frame.js` + `front/kernel-worker.js`） |
+| M-05 契约消息 | `riscv_sim_contract::protocol::Message` | 契约（冻结，**内核只认这一层**） |
+
+桥只有一个入口：`process_message(json) → json` —— **一条契约命令进，一批契约事件出**。
+传输帧上的 `sessionId` / `role` / `reqId` 是前端的事，**内核不解析**。
+
+### 二、内核侧（Rust）
+
+| 模块 | 变化 |
+| --- | --- |
+| **M-08 断点管理器** | 53 行 stub → **457 行真实实现**：断点表（按 addr + id 反查）/ 观察点表（地址 + 方向 + 宽度匹配）/ `hit_check` **取指前**命中 / 未对齐与重复注册拒 `E_CTX-07` / 清断点**幂等** |
+| **M-09 单步引擎** | 71 行 stub → **308 行**：四种粒度 + `Plan` + `StepOutcome`；`Over`/`Out`/`Line` **显式降级**为指令级，`degradation()` 把降级说出来（不悄悄降级） |
+| **M-17 执行后端** | stub → **763 行**：`step_n` 真正驱动 M-13 ISS（断点命中 / 陷阱 / 观察点经总线 hook）/ `read_memory`·`write_memory` 接 M-14 / `set_breakpoint`·`set_watchpoint` 接 M-08；`continue_until_event` 保持**时间驱动**语义（评审 17-1） |
+| **M-12 引擎** | 新增 `state_mut()` / `advance_virtual_time()` / `pc()` —— 平台状态与虚拟时钟的**唯一持有者**仍是引擎，后端只**借**不克隆 |
+| **M-14 总线** | 新增 `read_only()`（调试读**不计入**总线统计 / trace / 观察点）与 `load_bytes()`（镜像装载的单一写入路径） |
+| **内核宿主**（**装配层，非 23 模块之一**） | **新增** 1 116 行 / 27 测试：16 条命令 → 事件的**规范映射**（映射表见桥规格 §3.1）/ ELF + RawHex 镜像装载 / 默认内存图 / 寄存器**全量与增量**波形流 / `handle_json` JSON 桥 |
+
+`wasm_api.rs` 增 `process_message(json)` 与 `reset_session()`；会话住在 `thread_local!` + `RefCell`
+（workspace 禁 `unsafe`，WASM 的「全局变量」没有别的干净写法）。桥路径上**没有** `unwrap`/`expect`/`panic!`
+——WASM 里 panic = 整个 Worker 崩。
+
+### 三、前端侧（JS）
+
+- **新增** `front/kernel-worker.js`：WASM 传输宿主（动态 import + init + 帧映射；首个事件带 `reqId`）
+- **新增** `front/dev/demo-firmware.js`：40 字节手写编码的 RV32I demo 程序
+- `front/app.js` / `front/services/m07_transport.js`：默认挂真内核（mock 退化为**测试替身**）
+- `front/services/m10_registermemory.js`：新增 `resubscribe()` 与 `loadProject()`（见下）
+
+### 四、真机复验抓到的前端既有缺陷（D-45，已闭环）
+
+**装载工程后，寄存器推送静默停掉**：`LoadProject` 清空内核侧的主题集合（新工程 = 新会话，FR-13），
+而宿主本地的「已订阅」标志还立着 → 幂等的 `ensureSubscribed()` 什么都不发。
+
+**这个缺陷在 mock 内核时代就存在**（mock 的 `reset()` 同样清主题），是接上**真内核** +
+把「x1 必须是 42」写进真机断言之后才暴露的——**PC 会前进、x1 不动**。
+
+修法把不变量的归属从「调用点的注释」挪到**服务**：M-10 新增 `loadProject(project)`，
+把「装载 + **强制**重新订阅」绑成一个动作。前端门禁加 2 条回归用例，
+**反向验证**：把 `resubscribe()` 改成空操作 → 2 条变红；删掉 `loadProject()` 的重订 → 1 条变红。
+
+> **教训**：真机断言必须断言**值**。只断言「内核已就绪」抓不到这一类。
+
+### 五、门禁与产物
+
+| 门禁 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | ✅ |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
+| `cargo test --workspace --no-fail-fast` | ✅ **479**（契约 lib 12 + kernel lib 418 + 集成 38 + golden runner 11） |
+| `tools/check-front.sh` | ✅ **138 用例 / 25 suite**（v0.12 = 119 / 21） |
+| `tools/wasm-smoke.mjs`（新增） | ✅ 在 Node 里驱动**真** wasm 产物跑完整桥 |
+| `tools/browser-verify.mjs`（真 Chrome） | ✅ **x1 == 0x0000002a** · PC == 0x00000004 · 控制台干净 |
+| `tools/build-wasm.sh --release` | 284 KB（D-38 时 61 KB；M-17 LLD 的预算 ≤1.5 MiB） |
+
+### 六、已知限制（**有意留到后续阶段**）
+
+- **波形视图是空的** —— 真实探针管道（M-18 / M-19 ↔ M-14 总线 hook）**没接**（台账 **D-46**）。
+  mock 内核当年凭空造了 `probe.led0` / `probe.uart0.tx` 两个流，**真内核不造**。
+- `Over` / `Out` / `Line` 单步退化为指令级（需要调用栈跟踪与 DWARF 行表）。
+- 条件断点未实现（冻结契约的 `Breakpoint` 没有 `cond` 字段 → D-32 缺口）。
+- `Admin` 通道未启用（一律 `E_CTX-05`）。
+
+### 七、下一步
+
+1. **第 1 阶段三路独立检视** → 归档 `docs/reviews/REVIEWS.md` → 回合 main
+2. **第 3 阶段**：M + C 扩展（`corpus.txt` 里 9 例 `pending` 翻 `active` 即自动进门禁）
+3. **第 4/5 阶段**：D-07 / D-36 / D-37 / D-41 / M-20 / M-23 落盘对齐 LLD；M-16 中断 / M-11 符号
+
+---
 
 ## v0.12.0 变更摘要
 
