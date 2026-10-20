@@ -41,7 +41,19 @@ RISCV_TESTS_DIR="${RISCV_TESTS_DIR:-$HOME/riscv-sim-golden/riscv-tests}"
 TOOLCHAIN_DIR="${RISCV_TOOLCHAIN_DIR:-$HOME/riscv-sim-golden/toolchain}"
 SPIKE="${SPIKE:-}"
 ISA="${GOLDEN_ISA:-rv32imc_zicclsm_zifencei}"
-MEM="${GOLDEN_MEM:-0x80000000:0x400000}"
+# The memory map **both** sides expose.
+#
+#   2147479552 = 0x7ffe_f000   stack window, 4096 bytes
+#   2147483648 = 0x80000000   RAM, 4 MiB
+#
+# Spike's multi-region `-m` parser only accepts **decimal** numbers
+# (its single-region form does accept hex), hence the decimal literals.
+#
+# The two sides must expose the *same* addressable set: if the candidate
+# mapped only the image's own span, a program touching an address
+# outside the image but inside Spike's memory would fault on one side
+# and run fine on the other — a false mismatch (review finding M-3).
+MEM="${GOLDEN_MEM:-2147479552:4096,2147483648:4194304}"
 TIMEOUT_SEC="${GOLDEN_TIMEOUT:-10}"
 BUDGET="${GOLDEN_BUDGET:-1000000}"
 OUT_DIR="${GOLDEN_OUT:-$REPO_ROOT/tests/golden/_out}"
@@ -129,6 +141,17 @@ run_with_timeout() {
 
 is_timeout() { [ "$1" -eq 142 ] || [ "$1" -eq 124 ]; }
 
+# The timeout must be a **positive integer number of seconds**.
+#
+# `perl -e 'alarm shift; ...'` truncates a fractional argument to 0, and
+# `alarm(0)` *cancels* the alarm instead of arming it — a fractional
+# `GOLDEN_TIMEOUT` would silently disable the timeout altogether.  Reject
+# it loudly rather than run unbounded.
+case "$TIMEOUT_SEC" in
+    ''|*[!0-9]*) die "GOLDEN_TIMEOUT must be a positive integer number of seconds (got '$TIMEOUT_SEC')" ;;
+esac
+[ "$TIMEOUT_SEC" -ge 1 ] || die "GOLDEN_TIMEOUT must be >= 1 (got '$TIMEOUT_SEC')"
+
 # Assemble one source file with the golden environment.
 build_case() {
     local src="$1" elf="$2" march="$3"
@@ -154,9 +177,19 @@ compare_one() {
         spike_verdict="FAIL $spike_rc"
     fi
 
-    our_verdict="$("$RUNNER" "$elf" --budget "$BUDGET" 2>"${elf%.elf}.ours.log" \
-        | sed -n 's/^VERDICT //p')"
-    [ -n "$our_verdict" ] || our_verdict="ERROR"
+    # The candidate gets a wall-clock cap too.  Its instruction budget
+    # is the primary bound, but a budget of u64::MAX would otherwise let
+    # the harness hang forever (review finding L-6).
+    our_out="${elf%.elf}.ours.out"
+    run_with_timeout "$TIMEOUT_SEC" "$RUNNER" "$elf" --budget "$BUDGET" \
+        > "$our_out" 2>"${elf%.elf}.ours.log"
+    local our_rc=$?
+    if is_timeout "$our_rc"; then
+        our_verdict="NOVERDICT"
+    else
+        our_verdict="$(sed -n 's/^VERDICT //p' "$our_out")"
+        [ -n "$our_verdict" ] || our_verdict="ERROR"
+    fi
 
     echo "$spike_verdict|$our_verdict"
 }
@@ -175,8 +208,13 @@ compare_one() {
 #                     value for test 3 corrupted; proves a *behavioural*
 #                     ISA difference is actually detected
 #
-if [ "$SELF_CHECK" -eq 1 ]; then
-    printf '\n%s\n' "== mutation self-check =="
+# run_canaries -> 0 when every canary held, 1 otherwise.
+#
+# The canaries are **not** an optional extra: they run on every corpus
+# pass as well as under `--self-check`.  The corpus itself contains only
+# PASS cases, so without the canaries the FAIL-number path would be
+# guarded by nothing at all in the default gate (review finding M-2).
+run_canaries() {
     canary_fail=0
 
     check_canary() {
@@ -217,11 +255,21 @@ if [ "$SELF_CHECK" -eq 1 ]; then
             canary_fail=1
         fi
     else
+        # A skipped canary is NOT a passing canary.  AGENTS.md's criterion
+        # says "both canaries must report FAIL 3" — a SKIP silently
+        # degrades the proof from two independent checks to one without
+        # anyone noticing.
         printf '  %-22s SKIPPED (upstream add.S not found)\n' "mutated add"
+        canary_fail=1
     fi
 
-    printf '\n'
-    if [ "$canary_fail" -ne 0 ]; then
+    return "$canary_fail"
+}
+
+if [ "$SELF_CHECK" -eq 1 ]; then
+    printf '\n%s\n' "== mutation self-check =="
+    run_canaries
+    if [ $? -ne 0 ]; then
         echo "self-check FAILED — the comparison is not discriminating."
         exit 1
     fi
@@ -232,8 +280,15 @@ fi
 [ "${#cases[@]}" -gt 0 ] || die "no cases selected"
 
 # ---------------------------------------------------------------- corpus run
-total=0; ok=0; now_passing=0; expected_gap=0; mismatch=0; build_failed=0
+total=0; ok=0; now_passing=0; expected_gap=0; mismatch=0; build_failed=0; no_verdict=0
 declare -a failures=()
+
+printf '\n%s\n' "== mutation self-check =="
+if ! run_canaries; then
+    echo "self-check FAILED — the comparison is not discriminating; the corpus run is abandoned."
+    exit 1
+fi
+echo "self-check ok — both sides detect a failing case as FAIL 3."
 
 printf '\n%-28s %-18s %-18s %s\n' "CASE" "SPIKE" "OURS" "RESULT"
 printf '%s\n' "------------------------------------------------------------------------"
@@ -265,7 +320,17 @@ for c in "${cases[@]}"; do
     spike_verdict="${got%%|*}"
     our_verdict="${got##*|}"
 
-    if [ "$spike_verdict" = "$our_verdict" ]; then
+    if [ "$spike_verdict" = "NOVERDICT" ] || [ "$our_verdict" = "NOVERDICT" ]; then
+        # A missing verdict is NOT an agreement.  Counting
+        # NOVERDICT == NOVERDICT as "ok" is how a harness goes green
+        # while both sides are simply broken — the reference side timed
+        # out and the candidate ran out of budget, and the comparison
+        # reported them as consistent.
+        printf '%-28s %-18s %-18s %s\n' "$suite/$test_name" "$spike_verdict" "$our_verdict" "NO-VERDICT"
+        no_verdict=$((no_verdict + 1))
+        failures+=("$suite/$test_name: no verdict (spike=$spike_verdict ours=$our_verdict)")
+        [ "$KEEP_GOING" -eq 1 ] || break
+    elif [ "$spike_verdict" = "$our_verdict" ]; then
         if [ "$status" = "pending" ]; then
             printf '%-28s %-18s %-18s %s\n' "$suite/$test_name" "$spike_verdict" "$our_verdict" "NOW-PASSING"
             now_passing=$((now_passing + 1))
@@ -287,8 +352,8 @@ for c in "${cases[@]}"; do
 done
 
 printf '\n%s\n' "------------------------------------------------------------------------"
-printf 'total=%d ok=%d now-passing=%d expected-gap=%d mismatch=%d build-failed=%d\n' \
-    "$total" "$ok" "$now_passing" "$expected_gap" "$mismatch" "$build_failed"
+printf 'total=%d ok=%d now-passing=%d expected-gap=%d mismatch=%d no-verdict=%d build-failed=%d\n' \
+    "$total" "$ok" "$now_passing" "$expected_gap" "$mismatch" "$no_verdict" "$build_failed"
 
 if [ "${#failures[@]}" -gt 0 ]; then
     printf '\n%s\n' "failures:"
@@ -299,7 +364,7 @@ fi
 
 printf '\nartifacts: %s\n' "$OUT_DIR"
 
-if [ "$mismatch" -gt 0 ] || [ "$build_failed" -gt 0 ]; then
+if [ "$mismatch" -gt 0 ] || [ "$build_failed" -gt 0 ] || [ "$no_verdict" -gt 0 ]; then
     exit 1
 fi
 exit 0
