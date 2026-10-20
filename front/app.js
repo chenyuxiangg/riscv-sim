@@ -164,6 +164,11 @@ async function handleCommand(detail, services) {
                 break;
             case "reset":
                 await commandRouter.dispatchCommand(Command.loadProject(buildMockProject()));
+                // A new project is a new session: the kernel-side
+                // register subscription died with the old project, so
+                // the host has to subscribe again — otherwise the
+                // register view silently goes stale.
+                await registerMemory.readRegisters();
                 break;
             case "read-regs":
                 await registerMemory.readRegisters();

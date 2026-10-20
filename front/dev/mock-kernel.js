@@ -71,6 +71,10 @@ export function createMockKernel(options = {}) {
         state.haltReason = null;
         state.memory.clear();
         state.breakpoints.clear();
+        // A new project is a new session: the old topic subscriptions
+        // die with it (FR-13 — every session id owns its namespace).
+        // The host has to subscribe again after a `LoadProject`.
+        state.topics.clear();
         state.snapshotCounter = 0;
         state.executed = 0;
         for (let i = 0; i < 32; i += 1) dirtyRegisters.add(i);

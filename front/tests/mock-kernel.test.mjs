@@ -256,6 +256,46 @@ describe("mock 内核 · 断点契约（F1）", () => {
     });
 });
 
+describe("mock 内核 · 换工程即换会话（F12）", () => {
+    /** A minimal `model::Project` shaped payload. */
+    const project = {
+        id: "p",
+        name: "p",
+        tree: { root: { name: "r", component_id: null, children: [] } },
+        images: [],
+        version: { schema: 1, isa: "RV32IMC", toolchain: "mock" },
+    };
+
+    test("LoadProject 清空旧订阅（旧 topic 不再收到推送）", () => {
+        const kernel = createMockKernel();
+        kernel.handle(commandFrame({ Subscribe: { topic: "sim.registers" } }));
+        assert.deepEqual(kernel.snapshot().topics, ["sim.registers"]);
+
+        const frames = kernel.handle(commandFrame({ LoadProject: project }));
+        assert.deepEqual(kernel.snapshot().topics, [], "旧订阅没有随工程一起失效");
+        // The old topic receives no push any more — not even the
+        // register snapshot the `LoadProject` answer would carry.
+        assert.equal(
+            frames.find((f) => f.payload.payload.Event.WaveformDelta),
+            undefined,
+            "旧 topic 仍然收到了推送",
+        );
+    });
+
+    test("重新订阅后推送恢复", () => {
+        const kernel = createMockKernel();
+        kernel.handle(commandFrame({ Subscribe: { topic: "sim.registers" } }));
+        kernel.handle(commandFrame({ LoadProject: project }));
+
+        kernel.handle(commandFrame({ Subscribe: { topic: "sim.registers" } }));
+        const frames = kernel.handle(commandFrame({ StepN: { n: 1 } }));
+        assert.ok(
+            frames.find((f) => f.payload.payload.Event.WaveformDelta),
+            "重新订阅后没有收到推送",
+        );
+    });
+});
+
 describe("端到端：M-07 → 真实 worker 文件 → mock kernel → M-05", () => {
     test("Nop 往返成功（链路真的通）", async () => {
         const { router } = await bootChain();
