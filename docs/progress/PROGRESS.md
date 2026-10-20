@@ -1,11 +1,131 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.13.0
+> **Document version**: v0.13.1
 > **Created**: 2026-10-19
 > **Last updated**: 2026-10-20
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.13.1 变更摘要
+
+**第 1 阶段三路独立检视 + 闭环**（分支 `feat/stage1-wasm-kernel`）。
+
+检视范围：`git diff 3500465..5a638ef`（7 个 commit）。三路检视员各自在**隔离 worktree**
+（`/tmp/rv-a` / `rv-b` / `rv-c`）里作业，互不可见，结束时工作区均干净。
+
+| 检视员 | 范围 | 判决 |
+| --- | --- | --- |
+| **V-A** | Rust 内核侧（M-08/09/12/13/14/17 + kernel_host + wasm_api） | **FAIL** — 2 高危 + 6 中危 + 8 低危 |
+| **V-B** | 前端与桥（`front/**` + `tools/**`） | **PASS** — 5 中危 + 2 低危 |
+| **V-C** | 跨模块与文档一致性（三方契约 + 台账） | **FAIL** — 2 高危 + 2 中危 + 2 低危 |
+
+**13 项发现全部在本分支闭环**（10 项直接修，3 项登记为 **D-47 / D-48 / D-49**），
+**13 项反向变异自检全部变红**。完整证据归档见 `docs/reviews/REVIEWS.md` §3.4。
+
+### 一、两个真 bug（V-A 🟠，已在**真 WASM 产物**上复现）
+
+**🟠-1 调试器写内存污染观察点命中槽 → 下一条 guest 指令误报停机**
+
+设写观察点（0x200）→ 调试器写一次 0x200 → 再发 `StepN{1}`。被执行的指令是
+`addi x1,x0,42`，**根本没碰 0x200**，内核却回报 `Halted{Watchpoint, pc:4}`。
+
+根因：命中槽只在 `reset()` / `clear_debug_state()` 清空，只在 step 批次**末尾**消费。
+调试器的 `bus.write` 触发同一条 hook 把槽填上，那一批没有 step 去消费它 → 残留到下一批。
+
+处置：`step_n` **批次开头**清命中槽（它只应承载**本批次内**的命中）。这一处同时修掉
+「Trap 分支 break 时残留」的第二条路径。
+
+> ⚠️ 同一缺陷的另一半早被作者在镜像装载路径上绕开过——`m14_bus::load_bytes` 的文档里
+> 明写「装载镜像前清掉观察点，镜像装载不能触发观察点」。**`WriteMemory` 命令路径被漏掉了。**
+
+**🟠-2 只读观察点被「取指」误触发——代码地址上的读观察点必假命中**
+
+取指经 `Bus::read(state.pc)` 走总线，会 `fire_hook(dir=Read)`；hook 只看「方向 + 地址区间」，
+无法区分「取指」与「数据读」。于是挂在**代码地址**上的读观察点，每一次取指都命中。
+
+处置：`BusAccess` 增 `is_fetch` 标记；`Bus::read_fetch()` 专供取指；M-13 的取指改走它；
+M-17 的观察点 hook **跳过取指**。⚠️ 附带一条**对照**用例证明修复没有做成
+「读观察点整个失灵」：guest 的一次 `lw` 仍然命中读观察点。
+
+### 二、六条中危：**规格里写着的约束没有用例在守**
+
+V-A 的 6 条中危里，**5 条不是实现写错**，而是变异测试时「改实现 → 没有任何测试变红」。
+逐条补了能变红的用例：
+
+| 盲区 | 补的用例 |
+| --- | --- |
+| 命令层「ReadMemory 不产生副作用」无守护 | `read_memory_command_has_no_side_effect_on_the_bus` |
+| 指令计数口径（陷入算不算「执行了」）无守护；`total_executed` **零引用** | `the_execution_count_pins_down_what_counts_as_executed` |
+| `continue_until_event` 的「时间驱动、不执行 guest 指令」无防护 | `continue_until_event_does_not_execute_guest_instructions` |
+| 规格 §3.1「事件序列（有序）」无顺序断言 | `a_breakpoint_run_emits_tick_then_waveform_then_halted` |
+| `load_bytes` 的「镜像越界必须报 E_BUS-01」无守护 | `an_image_that_runs_past_the_mapped_region_is_rejected` |
+| `Restore` 的「状态不合法 → Error」拒绝路径**未实现**（无条件返回 `Tick`） | 修实现 + `restore_rejects_a_state_with_a_foreign_schema_version`（错误码复用契约已有的 `E_SNAP-05`） |
+
+### 三、规格与实现的三处矛盾（V-C 🟠）——**改规格，不改实现**
+
+冻结规格 `STAGE-1_Wasm_Bridge.md` §3.1 的映射表与实现**及自身 §3.3** 互相矛盾：
+
+1. `LoadProject` 行写「已订阅 → `WaveformDelta`（全量）」，但实现先清空主题集合 → **永不可达**；
+2. `Subscribe` 行写「`sim.waveform` → 探针流」，而**同一份文档 §3.3** 明说第 1 阶段不产生探针流；
+3. `Continue` 行同样列了不成立的 `sim.waveform` 分支。
+
+**处置顺序必须是先改规格**——实现的语义被已闭环的 **D-45** 直接依赖，改它会把 D-45 打回原形。
+§3.1 表已逐行订正，并加了一句「**本表是实现与文档的共同权威**，任何一方与本表不一致时，
+先改本表，再改代码」。
+
+另修：§2.1 补「`E_PROTO-08` / `E_PROTO-01` 是**前端协议层**的码，不属于契约的任何一个
+`ErrorFamily` 族」（契约只有 13 个族，**没有 `PROTO`**；契约层冻结，不新增族）；
+新增 §3.7 明说 `Snapshot` 第 1 阶段**只分配 id、不落盘**；新增 §4.1 明说宿主侧失败 → `Error{E_TRX-04}`。
+
+### 四、前端与工具（V-B）
+
+- **wasm-smoke 的 demo 固件字节是手工副本** → 改为直接 `import` 前端那份，两份字节不再可能漂移
+- **`validateEventList` 的「空数组」守卫零覆盖**（删掉后门禁全绿）→ 假模块加 `?mode=empty` + 一条用例
+- **产物缺失时两个工具的退出码语义冲突**（0 vs 127）→ 统一为 **127**（前置条件缺失 ≠ 验证通过）
+- **WASM 初始化失败时同一故障被报两次、文案不同** → 有命令在飞时只由命令帧承担；文案统一；补 2 条用例
+- **`wasm-smoke` 的畸形输入断言过弱**（只看数组长度）→ 补 `direction` / `seq` 断言
+
+### 五、本轮方法论沉淀
+
+1. **「规格里写着的约束」必须有一条能变红的用例**。变异自检的口径因此从
+   「改动会不会被现有测试抓住」扩展到「**规格里的每一条明文要求，都得有一条能变红的用例**」。
+2. **真机断言必须断言值，而且要反向证明它有判别力**。V-B 实测：把
+   `x1 == "0000002a"` 弱化成 `x1 != ""` + 固件写错 → **全绿、退出码 0，检查名还写着 "x1 = 42"**。
+3. **「护栏」也要被检视**。两处护栏缺失（空数组守卫零覆盖、字节副本）不是功能缺陷，
+   但都让「未来的破坏」查不出来。
+4. **规格是共同权威，不是实现注释**。处置顺序：先改规格——实现的语义往往被已闭环的不变量依赖。
+5. **同一个数字要能被第三方独立复算**。V-C 实测契约层 1 877 行 vs 文档 1 851 行，
+   且指出这是**基线遗留**——本轮重算了同表其它行却漏了它。
+6. ⚠️ **变异验证的「还原」必须同时刷新 mtime**。`shutil.copy2` 保留备份的旧 mtime，
+   cargo 据此**跳过重编**，门禁跑的是变异前的**旧二进制**——症状是「还原后本该变绿的用例
+   仍然变红」。本轮真踩上了（`⚪-6` 的用例还原后仍红，一度以为修复没生效）。
+   还原一律用 `copyfile` + `os.utime(path, None)`，或还原后强制 `touch`。
+
+### 六、门禁与产物（闭环后）
+
+| 门禁 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | ✅ |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
+| `cargo test --workspace --no-fail-fast` | ✅ **492**（契约 lib 12 + kernel lib 431 + 集成 38 + golden runner 11） |
+| `tools/check-front.sh` | ✅ **141 用例 / 25 suite**（v0.13.0 = 138 / 21） |
+| **13 项反向变异自检** | ✅ **全部变红**（还原校验 md5 一致） |
+| `tools/wasm-smoke.mjs` | ✅ 真 wasm 跑完整桥（**18 项**断言） |
+| `tools/browser-verify.mjs`（真 Chrome） | ✅ `x1 == 0x0000002a` · PC == 0x00000004 · 控制台干净 |
+| `tools/build-wasm.sh --release` | 290 622 B ≈ 283.4 KiB（≤1.5 MiB 预算） |
+| `tools/golden-run.sh --keep-going` | ✅ **42/42** 判决一致，9 例 M/C 扩展 expected-gap，0 mismatch |
+
+### 七、新登记的台账欠账
+
+- **D-47** — 传输帧 `seq` 有**两个序列空间**（内核 `msg.seq` vs 宿主 `hostSeq`）。今天无活影响
+  （M-05 用契约 `Message.seq`），但 M-07 的 `resumeBySeq` 落地前必须拆开。
+- **D-48** — `E_TRX-04` 一个码被三种语义复用（传输通道错误 / WASM 宿主侧错误）。本阶段功能上无害，
+  P1 做错误分类时应当拆码。
+- **D-49** — `E_PROTO-08` / `E_PROTO-01` 不属于契约的任何一个 `ErrorFamily` 族。契约层冻结，
+  真要族化需另起契约变更流程。
+
+---
 
 ## v0.13.0 变更摘要
 

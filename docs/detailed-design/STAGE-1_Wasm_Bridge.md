@@ -51,6 +51,13 @@
 - **出参**：一个 JSON **数组**，元素是契约 `Message`，`direction` 必须是 `"Event"`。
 - **不抛异常、不 panic**：WASM 里 panic = 整个 Worker 崩。畸形输入必须变成
   一个 `Error` 事件（`E_PROTO-08`），而不是把 Worker 带走。
+- **`E_PROTO-08` / `E_PROTO-01` 的归属**：它们是**前端协议层**的码，
+  **不属于**契约 `ErrorFamily` 的任何一个族——契约的 `ErrorFamily` 只有
+  `CTX / ISS / ENG / BUS / PER / INT / DBG / OBS / SNAP / LDR / HMS /
+  STORE / TRX` **13 个族，没有 `PROTO`**。契约的
+  `EventPayload::Error.code` 就是个 `String` 字段，没有族约束，所以这两个码
+  以**字面量**形式出现在事件里。契约层冻结，本阶段**不新增** `Proto` 族
+  （那是一次契约变更，需要另起流程）。
 - **出参数组长度 ≥ 1**：每条命令至少回一个事件（`Nop` → `Tick`）。
 - **`seq` 由内核分配**：出参 `Message.seq` 是内核自己的单调计数器，从 `1` 起，
   每产出一条事件 +1。**不复用**入参的 `seq`（那是前端 M-05 的序号空间）。
@@ -86,9 +93,9 @@ JS 镜像见 `front/lib/message.js`（`decodeMessage()` 是它的逆）。
 | 命令 | 事件序列（有序） |
 | --- | --- |
 | `Nop` | `Tick` |
-| `LoadProject` | `Tick`；若已订阅 `sim.registers` → `WaveformDelta`（**全量**寄存器 + pc） |
-| `Continue` | `Tick`；若已订阅 `sim.registers` → `WaveformDelta`（**增量**：仅脏寄存器 + pc）；若停止 → `Halted`；若已订阅 `sim.waveform` → `WaveformDelta`（探针流） |
-| `StepN{n}` | 同 `Continue`（把 `Continue` 换成「执行 n 条」） |
+| `LoadProject` | `Tick`。⚠️ **装载即新会话**：内核侧的主题集合被清空（FR-13），所以**不会**产生 `WaveformDelta`——全量寄存器流由**随后的** `Subscribe{sim.registers}` 触发（见 §3.2b） |
+| `Continue` | `Tick`；若已订阅 `sim.registers` → `WaveformDelta`（**增量**：仅脏寄存器 + pc）；若停止 → `Halted`；取指失败 → `Error{E_ISS-01}`（**取代**，见下） |
+| `StepN{n}` | 同 `Continue`（把 `Continue` 换成「执行 n 条」）。⚠️ `n` 条跑完**不是**停止，不产生 `Halted` |
 | `Pause` | `Tick`；`Halted{UserPause}` |
 | `SetBreakpoint` | `Tick`；地址非法 / 重复注册 → `Error{E_CTX-07}`（**取代** `Tick`） |
 | `ClearBreakpoint{id}` | `Tick`（id 不存在 → **幂等**，仍是 `Tick`，不报错） |
@@ -96,13 +103,21 @@ JS 镜像见 `front/lib/message.js`（`decodeMessage()` 是它的逆）。
 | `ClearWatchpoint{id}` | `Tick`（同上，幂等） |
 | `ReadMemory` | `MemoryRead{addr,size,value}`；未映射 → `Error{E_BUS-01}`（**取代**） |
 | `WriteMemory` | `Tick`；未映射 → `Error{E_BUS-01}`（**取代**） |
-| `Subscribe{topic}` | `Tick`；`topic=="sim.registers"` → `WaveformDelta`（**全量**）；`topic=="sim.waveform"` → `WaveformDelta`（探针流） |
+| `Subscribe{topic}` | `Tick`；`topic=="sim.registers"` → `WaveformDelta`（**全量**）。⚠️ `topic=="sim.waveform"` **不产生任何探针流**（第 1 阶段没接探针管道，见 §3.3） |
 | `Unsubscribe{topic}` | `Tick`（幂等） |
-| `Snapshot` | `SnapshotCreated{id}`（id 单调递增） |
-| `Restore{state}` | `Tick`；状态不合法 → `Error`（**取代**） |
+| `Snapshot` | `SnapshotCreated{id}`（id 单调递增）。⚠️ 第 1 阶段**只分配 id，不落盘**（M-20 仍是 stub，见 §3.7） |
+| `Restore{state}` | `Tick`；`state.schema_version` 不符 → `Error{E_SNAP-05}`（**取代**） |
 | `Admin{op}` | `Error{E_CTX-05}`（管理通道未启用） |
 
 **「取代」= 该条命令只产出这一个事件**（错误事件本身即首个事件，携带 `reqId`）。
+
+**「取指失败 → Error」的完整序列**：`Continue` / `StepN` 在取指失败（总线错误）时产出
+**4 条**事件，依次是 `Error{E_ISS-01}` → `Tick` → `WaveformDelta` → `Halted{Trap}`。
+错误事件排在**最前**，因为它要携带命令的 `reqId`——M-05 靠它拒掉命令，而不是
+让命令等超时。
+
+> **本表是实现与文档的共同权威**。任何一方与本表不一致时，先改本表，再改代码——
+> 反过来做会把已闭环的 D-45（装载后必须强制重订）打回原形。
 
 ### 3.2 寄存器波形流
 
@@ -206,6 +221,19 @@ await registerMemory.loadProject(project);   // 不是 dispatch + ensureSubscrib
 | 宿主 `Pause` | `UserPause` |
 | 跑满指令预算（`Continue` 的上限） | `EndOfExecution` |
 
+### 3.7 `Snapshot` 的语义（第 1 阶段：**只分配 id**）
+
+`Snapshot` 命令回一条 `SnapshotCreated{id}`，id **单调递增**。
+
+⚠️ **第 1 阶段它只分配 id，不真正捕获快照**：M-20 的 `SnapshotManager` 还是
+stub，它的 `SnapshotRecord` 也仍吃 partial 的 `SimState`（台账 **D-37**）。
+所以这个 id **指向一个不存在的实体**——后续也不能靠它恢复（契约的
+`Restore{state}` 是宿主**直传**状态，不走 id）。
+
+这是**有意留到后续阶段**的（与 §3.3 的波形流同一个写法），不是实现漏了。
+真正落盘要等 M-20 / M-23 按各自 LLD §2.1.1 组装完整载荷
+（`Snapshot{cpMeta, m13State, m14Map, m15Periph}`）。
+
 ---
 
 ## 4. 前端传输宿主（`front/kernel-worker.js`）
@@ -224,6 +252,25 @@ await registerMemory.loadProject(project);   // 不是 dispatch + ensureSubscrib
 - `sessionId` / `role` **原样回传**——内核不解释它们（会话归属是 M-04 的事）。
 - 传输帧的 `seq` = 事件的 `Message.seq`（与 mock 内核同口径）。
 - WASM 初始化失败 → Worker 抛错，M-07 的 `error` 事件把状态置为 `closed`。
+
+### 4.1 宿主侧失败 → `Error{E_TRX-04}`
+
+下列三种**宿主侧**（不是内核侧）失败，一律回**一条** `Error` 事件，错误码
+**`E_TRX-04`**（M-07 的传输族 `TRX`），并**保留命令的 `reqId`**（这样 M-05
+能拒掉在飞的命令，而不是等超时）：
+
+| 情形 | 触发点 |
+| --- | --- |
+| WASM 初始化失败 | `ensureKernel()` 的 init 抛错 |
+| 内核抛错（`process_message` 抛异常） | `process_message` 调用 |
+| 内核返回值非法（非 JSON / 非数组 / 空数组） | `validateEventList()` |
+
+- **同一个故障只报一次**：初始化失败时若有命令在飞，由那条命令的错误帧
+  承担（带 `reqId`），宿主**不再**补一条启动级帧。
+- ⚠️ `E_TRX-04` 在 M-07 里也用于「传输通道错误」（Worker `error` 事件 /
+  WebSocket 错误）。**同码多义**是已知问题：前端无法据码区分「通道挂了」
+  与「内核算错了」。本阶段不影响功能（两条路径的处置不同：前者把传输置为
+  `closed`，后者拒掉单条命令），但 P1 做断线续拉时应当拆码（→ 台账 **D-47**）。
 
 ---
 
@@ -248,3 +295,5 @@ await registerMemory.loadProject(project);   // 不是 dispatch + ensureSubscrib
 3. **条件断点未实现**——冻结契约的 `Breakpoint` 没有 `cond` 字段（D-32 缺口）。
 4. **观察点只做地址匹配**——`Watchpoint` 有 `access` / `size` 字段，可精确匹配。
 5. **管理通道未启用**——`Admin` 一律 `E_CTX-05`。
+6. **`Snapshot` 只分配 id，不落盘**——见 §3.7（台账 **D-37**）。
+7. **`E_PROTO-08` / `E_PROTO-01` 不属于契约的 `ErrorFamily` 族**——见 §2.1。
