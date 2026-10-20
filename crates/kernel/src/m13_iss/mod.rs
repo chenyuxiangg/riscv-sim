@@ -18,7 +18,7 @@ pub mod decoder;
 pub mod executor;
 
 pub use decoder::{Decoded, Decoder};
-pub use executor::{Executor, StepOutcome};
+pub use executor::{read_gpr, write_gpr, Executor, StepOutcome};
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{SimState, WriteSize};
@@ -156,9 +156,9 @@ impl<'a> BusExecutor<'a> {
         // ADDI so the ISS stays a pure interpreter; all memory
         // dispatches flow through `self.bus`.
         if d.opcode == 0b0010011 && d.funct3 == 0x0 {
-            let lhs = state.gpr[d.rs1 as usize] as i32;
+            let lhs = read_gpr(state, d.rs1) as i32;
             let result = lhs.wrapping_add(d.imm) as u32;
-            state.gpr[d.rd as usize] = result;
+            write_gpr(state, d.rd, result);
             state.pc = state.pc.wrapping_add(4);
             return Ok(StepOutcome::Advanced);
         }
@@ -174,11 +174,13 @@ impl<'a> BusExecutor<'a> {
 }
 
 #[cfg(test)]
+mod tests_rv32i;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::m14_bus::Bus;
     use riscv_sim_contract::model::WriteSize;
-
     fn make_mem(contents: &[(u32, u32)]) -> Vec<(u32, u32)> {
         contents.to_vec()
     }

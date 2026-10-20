@@ -52,6 +52,32 @@ impl Default for TrapCause {
     }
 }
 
+/// Read a general-purpose register.
+///
+/// x0 is hardwired to zero: the architectural state of x0 is always
+/// readable as 0 regardless of what the register file happens to
+/// contain. Every read path must go through this helper (D-04) —
+/// a bare `state.gpr[rs1]` read lets a corrupted / externally written
+/// x0 leak into the executed semantics.
+pub fn read_gpr(state: &SimState, r: u8) -> u32 {
+    if r == 0 {
+        0
+    } else {
+        state.gpr[r as usize]
+    }
+}
+
+/// Write a general-purpose register.
+///
+/// Writes to x0 are discarded — x0 is hardwired to zero (D-04). Every
+/// write path must go through this helper so no instruction can
+/// clobber x0.
+pub fn write_gpr(state: &mut SimState, r: u8, value: u32) {
+    if r != 0 {
+        state.gpr[r as usize] = value;
+    }
+}
+
 /// Executor wrapper. Holds the memory accessors so the per-instruction
 /// site stays readable.
 pub struct Executor<F, G>
@@ -92,9 +118,9 @@ where
         if d.opcode == 0b0010011 {
             if d.funct3 == 0x0 {
                 // ADDI: rd = rs1 + imm
-                let lhs = state.gpr[d.rs1 as usize] as i32;
+                let lhs = read_gpr(state, d.rs1) as i32;
                 let result = lhs.wrapping_add(d.imm) as u32;
-                state.gpr[d.rd as usize] = result;
+                write_gpr(state, d.rd, result);
                 state.pc = state.pc.wrapping_add(4);
                 return Ok(StepOutcome::Advanced);
             }
