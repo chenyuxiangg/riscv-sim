@@ -6,8 +6,83 @@
 //! hook capture, stats accounting.
 
 use super::*;
-use std::cell::RefCell;
+use riscv_sim_contract::model::{PendingWrite, WriteSize};
+use riscv_sim_contract::port::Peripheral;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+
+// ---------------------------------------------------------------------------
+// Mock peripheral — exercises the bus → instance dispatch (D-12 / D-14).
+// ---------------------------------------------------------------------------
+
+/// A minimal peripheral that records **which** read path the bus used.
+///
+/// The counters are `Cell`s because the contract's `Peripheral::read`
+/// takes `&self` while `read_clear` / `write` take `&mut self`.
+#[derive(Debug, Default)]
+struct MockPeripheral {
+    id: String,
+    base: u32,
+    size: u32,
+    reads: Cell<u32>,
+    read_clears: Cell<u32>,
+    writes: Cell<u32>,
+    last_write: Cell<Option<(u32, WriteSize, u32)>>,
+    fail: bool,
+}
+
+impl MockPeripheral {
+    fn new(id: &str, base: u32, size: u32) -> Self {
+        Self {
+            id: id.to_string(),
+            base,
+            size,
+            ..Default::default()
+        }
+    }
+}
+
+impl Peripheral for MockPeripheral {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn base_addr(&self) -> u32 {
+        self.base
+    }
+    fn size(&self) -> u32 {
+        self.size
+    }
+    fn read(&self, _offset: u32, _size: WriteSize) -> Result<u32, PlatformError> {
+        self.reads.set(self.reads.get() + 1);
+        Ok(0xA5A5_0000)
+    }
+    fn read_clear(&mut self, offset: u32, _size: WriteSize) -> Result<u32, PlatformError> {
+        self.read_clears.set(self.read_clears.get() + 1);
+        if self.fail {
+            return Err(PlatformError::new(
+                ErrorFamily::Peripheral,
+                2,
+                "mock peripheral failure",
+            ));
+        }
+        Ok(0x5A5A_0000 | offset)
+    }
+    fn write(&mut self, offset: u32, size: WriteSize, value: u32) -> Result<(), PlatformError> {
+        self.writes.set(self.writes.get() + 1);
+        self.last_write.set(Some((offset, size, value)));
+        if self.fail {
+            return Err(PlatformError::new(
+                ErrorFamily::Peripheral,
+                2,
+                "mock peripheral failure",
+            ));
+        }
+        Ok(())
+    }
+    fn tick(&mut self, _now_ps: u64) -> Result<Vec<PendingWrite>, PlatformError> {
+        Ok(Vec::new())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // map / unmap / lookup
@@ -386,4 +461,118 @@ fn busmaster_trait_dispatches_to_bus() {
     master.write(0x6000, WriteSize::Word, 0x1234_5678).unwrap();
     let val = master.read(0x6002, WriteSize::Half).unwrap();
     assert_eq!(val, 0x1234);
+}
+
+// ---------------------------------------------------------------------------
+// Peripheral instance dispatch (D-12 / D-14).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn peripheral_instance_dispatches_reads_and_writes() {
+    // D-12: a mapped instance really receives the guest accesses.
+    let mock = Rc::new(RefCell::new(MockPeripheral::new("MOCK0", 0x3000, 0x10)));
+    let mut bus = Bus::new();
+    bus.map_peripheral_instance(0x3000, 0x10, Rc::clone(&mock) as _)
+        .expect("map peripheral instance");
+
+    let val = bus.read(0x3004, BusWidth::Word).expect("read periph");
+    assert_eq!(val, 0x5A5A_0004, "the read came from the instance");
+    bus.write(0x3008, BusWidth::Word, 0xDEAD_BEEF)
+        .expect("write periph");
+
+    let m = mock.borrow();
+    assert_eq!(m.writes.get(), 1);
+    assert_eq!(
+        m.last_write.get(),
+        Some((0x8, WriteSize::Word, 0xDEAD_BEEF)),
+        "the offset is region-relative"
+    );
+    assert_eq!(bus.stats().periph_hits, 2, "one read + one write");
+}
+
+#[test]
+fn peripheral_read_uses_read_clear_not_read() {
+    // D-14: the bus must call `read_clear`, never `read`. A peripheral
+    // whose read is destructive (UART RX FIFO) would silently keep
+    // handing out the same byte otherwise — with no compile-time hint.
+    let mock = Rc::new(RefCell::new(MockPeripheral::new("MOCK0", 0x3000, 0x10)));
+    let mut bus = Bus::new();
+    bus.map_peripheral_instance(0x3000, 0x10, Rc::clone(&mock) as _)
+        .expect("map peripheral instance");
+
+    bus.read(0x3000, BusWidth::Word).expect("read periph");
+    bus.read(0x3000, BusWidth::Word).expect("read periph again");
+
+    let m = mock.borrow();
+    assert_eq!(
+        m.read_clears.get(),
+        2,
+        "both reads took the read-clear path"
+    );
+    assert_eq!(m.reads.get(), 0, "the plain read path must not be used");
+}
+
+#[test]
+fn peripheral_error_is_surfaced_as_e_bus_05() {
+    // M-14 LLD §6.1: an outer peripheral error becomes E_BUS-05 — it
+    // must stay distinguishable from the unmapped E_BUS-01.
+    let mock = Rc::new(RefCell::new(MockPeripheral::new("MOCK0", 0x3000, 0x10)));
+    mock.borrow_mut().fail = true;
+    let mut bus = Bus::new();
+    bus.map_peripheral_instance(0x3000, 0x10, Rc::clone(&mock) as _)
+        .expect("map peripheral instance");
+
+    let err = bus.read(0x3000, BusWidth::Word).expect_err("must fail");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(err.scenario, 5, "peripheral error → E_BUS-05");
+    assert!(
+        err.message.contains("mock peripheral failure"),
+        "the original reason must survive: {}",
+        err.message
+    );
+
+    let err = bus.write(0x3000, BusWidth::Word, 1).expect_err("must fail");
+    assert_eq!(err.scenario, 5);
+}
+
+#[test]
+fn peripheral_size_mismatch_is_rejected_with_e_bus_08() {
+    // D-12: the bus window must match `Peripheral::size()`.
+    let mock = Rc::new(RefCell::new(MockPeripheral::new("MOCK0", 0x3000, 0x10)));
+    let mut bus = Bus::new();
+    let err = bus
+        .map_peripheral_instance(0x3000, 0x20, Rc::clone(&mock) as _)
+        .expect_err("size mismatch must be rejected");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(err.scenario, 8, "size mismatch → E_BUS-08");
+    assert_eq!(bus.region_count(), 0, "a rejected mount leaves no region");
+}
+
+#[test]
+fn busy_peripheral_instance_yields_e_bus_05_instead_of_a_panic() {
+    // The instance is already mutably borrowed by the caller → the
+    // dispatch must not panic (a panic in the bus path would take the
+    // whole simulation down).
+    let mock = Rc::new(RefCell::new(MockPeripheral::new("MOCK0", 0x3000, 0x10)));
+    let mut bus = Bus::new();
+    bus.map_peripheral_instance(0x3000, 0x10, Rc::clone(&mock) as _)
+        .expect("map peripheral instance");
+
+    let _held = mock.borrow_mut();
+    let err = bus.read(0x3000, BusWidth::Word).expect_err("must fail");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(err.scenario, 5, "a busy instance → E_BUS-05");
+}
+
+#[test]
+fn id_only_peripheral_mapping_still_reports_not_wired() {
+    // The legacy id-only mapping has no instance behind it — it must
+    // keep reporting "not wired" (E_BUS-05) rather than pretending to
+    // work.
+    let mut bus = Bus::new();
+    bus.map_peripheral(0x2000_0000, 0x100, PeripheralId(1))
+        .expect("map peripheral");
+    let err = bus.read(0x2000_0010, BusWidth::Word).unwrap_err();
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(err.scenario, 5);
 }

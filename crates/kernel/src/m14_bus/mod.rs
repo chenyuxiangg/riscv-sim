@@ -7,8 +7,9 @@
 //! Port contract (LLD §9.1.1):
 //! - driving: ISS / peripheral / debug services (via [`BusMaster`]).
 //! - driven: typed handles per region kind (RAM → [`RamBackend`],
-//!   PERIPHERAL → [`PeripheralId`]; ROM → [`RomBackend`] is a thin
-//!   wrapper over RAM with `writable = false`).
+//!   PERIPHERAL → [`PeripheralId`] (id-only, legacy) or
+//!   [`BoundPeripheral`] (live instance, D-12); ROM → [`RomBackend`]
+//!   is a thin wrapper over RAM with `writable = false`).
 //!
 //! Error codes (LLD §3.4 / M-14 §6.1):
 //!   E_BUS-01 unmapped            → PlatformError{Bus, 1}
@@ -17,6 +18,8 @@
 //!   E_BUS-04 overflow (base+size)→ PlatformError{Bus, 4}
 //!   E_BUS-05 peripheral error    → PlatformError{Bus, 5}
 //!   E_BUS-06 size = 0            → PlatformError{Bus, 6}
+//!   E_BUS-07 init > region size  → PlatformError{Bus, 7}
+//!   E_BUS-08 periph size mismatch→ PlatformError{Bus, 8}  (D-12)
 //!
 //! Determinism (AD §8.1 D0): reads / writes are synchronous function
 //! calls, no hand-shake timing. Virtual time is owned by M-12; this
@@ -26,10 +29,13 @@
 
 #![allow(clippy::result_large_err)]
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::WriteSize;
+use riscv_sim_contract::port::Peripheral;
 
 /// 4 GiB — covers the entire RV32 physical address space.
 pub const BUS_SIZE: u64 = 0x1_0000_0000;
@@ -195,6 +201,65 @@ pub enum RegionType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct PeripheralId(pub u32);
 
+/// A peripheral *instance* bound to a bus region (D-12).
+///
+/// The bus keeps a **shared handle** (`Rc<RefCell<dyn Peripheral>>`) rather
+/// than owning the instance: M-15 stays the owner of the peripheral
+/// (M-14 LLD §3.2 / M-15 LLD §4.4.4 — `attach` binds the interval, the
+/// instance lives in M-15's instance table), so the engine can still reach
+/// the same instance for `tick` / state inspection while the bus
+/// dispatches guest accesses into it.
+///
+/// The trait object is the *contract* trait
+/// (`riscv_sim_contract::port::Peripheral`) — M-14 never names an
+/// M-15 concrete type, per the "契约先行" rule (LLD §2.5).
+pub struct BoundPeripheral {
+    /// Bus-side token (assigned by [`Bus::map_peripheral_instance`]).
+    id: PeripheralId,
+    /// Shared handle to the live instance.
+    handle: Rc<RefCell<dyn Peripheral>>,
+}
+
+impl BoundPeripheral {
+    /// Bus-side token of this binding.
+    pub fn id(&self) -> PeripheralId {
+        self.id
+    }
+
+    /// The shared handle to the live instance.
+    pub fn handle(&self) -> &Rc<RefCell<dyn Peripheral>> {
+        &self.handle
+    }
+
+    /// The peripheral's own string id (e.g. `"GPIO0"`), if the instance is
+    /// not currently borrowed.
+    pub fn instance_id(&self) -> Option<String> {
+        self.handle.try_borrow().ok().map(|p| p.id().to_string())
+    }
+
+    /// Borrow the instance for a read-or-write dispatch.
+    ///
+    /// Returns `None` when the instance is already mutably borrowed — the
+    /// caller turns that into E_BUS-05 instead of panicking (a panic in
+    /// the dispatch path would take the whole simulation down).
+    ///
+    /// The bus always dispatches reads through `read_clear` (D-14), so
+    /// the mutable borrow is what the read path needs too.
+    pub(crate) fn try_write(&self) -> Option<std::cell::RefMut<'_, dyn Peripheral + 'static>> {
+        self.handle.try_borrow_mut().ok()
+    }
+}
+
+// `dyn Peripheral` has no `Debug` bound — hand-roll it.
+impl std::fmt::Debug for BoundPeripheral {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundPeripheral")
+            .field("id", &self.id)
+            .field("instance_id", &self.instance_id())
+            .finish_non_exhaustive()
+    }
+}
+
 /// One address interval registered on the bus. Owns its backing store
 /// for RAM / ROM regions, or holds the peripheral token for `Peripheral`.
 ///
@@ -216,12 +281,16 @@ pub struct Region {
 /// Region-local backing store chosen by `kind`.
 ///
 /// `Ram` and `Rom` both carry an owned `Vec<u8>` — `Rom` simply ignores
-/// writes. `Peripheral` regions carry a [`PeripheralId`].
+/// writes. `Peripheral` regions carry either a [`PeripheralId`] (legacy
+/// id-only mapping — nothing to dispatch to, E_BUS-05) or a
+/// [`BoundPeripheral`] (live instance, D-12).
 #[derive(Debug)]
 pub enum RegionTarget {
     Ram(RamBackend),
     Rom(RomBackend),
     Peripheral(PeripheralId),
+    /// A peripheral region bound to a live instance (D-12 wiring).
+    PeripheralBound(BoundPeripheral),
 }
 
 /// RAM backing store. Bounds-checked on every read / write.
@@ -312,6 +381,9 @@ pub struct Bus {
     hook: Option<BusHook>,
     last_ts_ps: u64,
     stats: BusStats,
+    /// Next bus-side peripheral token handed out by
+    /// [`Bus::map_peripheral_instance`].
+    next_periph_id: u32,
 }
 
 impl Default for Bus {
@@ -321,6 +393,7 @@ impl Default for Bus {
             hook: None,
             last_ts_ps: 0,
             stats: BusStats::default(),
+            next_periph_id: 0,
         }
     }
 }
@@ -368,6 +441,12 @@ impl Bus {
     }
 
     /// Map a peripheral region pointing at the given peripheral id.
+    ///
+    /// **Id-only mapping — nothing to dispatch to.** The bus has no
+    /// instance behind the id, so every access to this window surfaces
+    /// E_BUS-05. Use [`Bus::map_peripheral_instance`] for real wiring;
+    /// this entry point is kept for compatibility with the pre-D-12
+    /// call sites (a typed handle without an instance).
     pub fn map_peripheral(
         &mut self,
         base: u32,
@@ -380,6 +459,74 @@ impl Bus {
             kind: RegionType::Peripheral,
             target: RegionTarget::Peripheral(id),
         })
+    }
+
+    /// Map a peripheral **instance** onto the bus (D-12 wiring).
+    ///
+    /// This is the real M-14 ↔ M-15 junction: accesses that land in
+    /// `[base, base + size)` are dispatched into the instance
+    /// (`read_clear` / `write`, see D-14) instead of failing with
+    /// E_BUS-05.
+    ///
+    /// The instance is held as a **shared handle** so M-15 stays the
+    /// owner (the engine can still `tick` it and inspect its state).
+    ///
+    /// ## Validation
+    ///
+    /// - `size` **must** equal the instance's own
+    ///   [`Peripheral::size`] — otherwise the bus window and the
+    ///   peripheral's register file disagree and accesses would land
+    ///   outside the peripheral's own view. Mismatch → **E_BUS-08**.
+    /// - Overlap with an existing region → **E_BUS-03**.
+    ///
+    /// Every failure leaves the existing region set untouched.
+    pub fn map_peripheral_instance(
+        &mut self,
+        base: u32,
+        size: u32,
+        handle: Rc<RefCell<dyn Peripheral>>,
+    ) -> Result<(), PlatformError> {
+        // D-12: the window size must match the peripheral's own size.
+        // Read it through a shared borrow; a contended instance (the
+        // caller is holding it borrowed) is reported as a bus error
+        // rather than panicking.
+        let (periph_size, periph_id) = {
+            let periph = handle.try_borrow().map_err(|_| {
+                PlatformError::new(
+                    BUS_FAMILY,
+                    5,
+                    "peripheral instance is borrowed; cannot validate its window size",
+                )
+            })?;
+            (periph.size(), periph.id().to_string())
+        };
+        if size != periph_size {
+            return Err(PlatformError::new(
+                BUS_FAMILY,
+                8,
+                format!(
+                    "peripheral window size mismatch: bus window is {size} bytes but \
+                     peripheral '{periph_id}' declares {} bytes",
+                    periph_size
+                ),
+            ));
+        }
+        let id = PeripheralId(self.next_periph_id);
+        self.next_periph_id = self.next_periph_id.wrapping_add(1);
+        self.map_region(Region {
+            base,
+            size,
+            kind: RegionType::Peripheral,
+            target: RegionTarget::PeripheralBound(BoundPeripheral { id, handle }),
+        })
+    }
+
+    /// The peripheral instance bound to the region at `base`, if any.
+    pub fn peripheral_at(&self, base: u32) -> Option<&BoundPeripheral> {
+        match self.regions.get(&base).map(|r| &r.target) {
+            Some(RegionTarget::PeripheralBound(b)) => Some(b),
+            _ => None,
+        }
     }
 
     /// Allocate the backing byte vector and validate `init` length.
@@ -441,7 +588,7 @@ impl Bus {
         match &mut region.target {
             RegionTarget::Ram(r) => r.base_addr = region.base,
             RegionTarget::Rom(r) => r.base_addr = region.base,
-            RegionTarget::Peripheral(_) => {}
+            RegionTarget::Peripheral(_) | RegionTarget::PeripheralBound(_) => {}
         }
         self.regions.insert(region.base, region);
         Ok(())
@@ -713,7 +860,9 @@ impl Bus {
             }
             if !matches!(
                 region.target,
-                RegionTarget::Ram(_) | RegionTarget::Peripheral(_)
+                RegionTarget::Ram(_)
+                    | RegionTarget::Peripheral(_)
+                    | RegionTarget::PeripheralBound(_)
             ) {
                 return Err(PlatformError::new(
                     BUS_FAMILY,
@@ -779,17 +928,41 @@ impl Bus {
             RegionTarget::Ram(r) => Self::read_bytes(&r.bytes, off, width),
             RegionTarget::Rom(r) => Self::read_bytes(&r.bytes, off, width),
             RegionTarget::Peripheral(id) => {
-                // M-15 dispatch not yet wired — surface an explicit error
-                // so callers know to upgrade their integration test once
-                // M-15 lands.
+                // Id-only mapping: the bus holds no instance, so there
+                // is nothing to dispatch to. Kept for the pre-D-12
+                // call sites; real wiring uses `map_peripheral_instance`.
                 Err(PlatformError::new(
                     BUS_FAMILY,
                     5,
                     format!(
-                        "peripheral read not wired (id={:?}, off=0x{:x}, width={:?}) — wait for M-15",
+                        "peripheral read not wired (id={:?}, off=0x{:x}, width={:?}) — \
+                         use map_peripheral_instance to bind a live peripheral",
                         id, off, width
                     ),
                 ))
+            }
+            RegionTarget::PeripheralBound(b) => {
+                // D-14: reads go through `read_clear`, never `read`.
+                // `Peripheral::read_clear` defaults to `read` for
+                // non-destructive peripherals, so this is safe for
+                // every peripheral — but it is the only way a
+                // read-destructive register (UART RX FIFO) drains
+                // correctly. Calling `read` here would silently
+                // resurrect the "UART RX only receives 1 byte" defect
+                // with no compile-time hint.
+                let mut periph = b.try_write().ok_or_else(|| {
+                    PlatformError::new(
+                        BUS_FAMILY,
+                        5,
+                        format!(
+                            "peripheral '{}' is busy (read)",
+                            b.instance_id().unwrap_or_default()
+                        ),
+                    )
+                })?;
+                periph
+                    .read_clear(off as u32, width.into())
+                    .map_err(|e| Self::periph_error("read", e))
             }
         }
     }
@@ -807,6 +980,23 @@ impl Bus {
                 5,
                 format!("peripheral byte read not wired (id={:?})", id),
             )),
+            RegionTarget::PeripheralBound(b) => {
+                // D-14: byte slices take the read-clear path too.
+                let mut periph = b.try_write().ok_or_else(|| {
+                    PlatformError::new(
+                        BUS_FAMILY,
+                        5,
+                        format!(
+                            "peripheral '{}' is busy (read)",
+                            b.instance_id().unwrap_or_default()
+                        ),
+                    )
+                })?;
+                let v = periph
+                    .read_clear(off as u32, WriteSize::Byte)
+                    .map_err(|e| Self::periph_error("read", e))?;
+                Ok((v & 0xFF) as u8)
+            }
         }
     }
 
@@ -830,6 +1020,21 @@ impl Bus {
                 5,
                 format!("peripheral write not wired (id={:?})", id),
             )),
+            RegionTarget::PeripheralBound(b) => {
+                let mut periph = b.try_write().ok_or_else(|| {
+                    PlatformError::new(
+                        BUS_FAMILY,
+                        5,
+                        format!(
+                            "peripheral '{}' is busy (write)",
+                            b.instance_id().unwrap_or_default()
+                        ),
+                    )
+                })?;
+                periph
+                    .write(off as u32, width.into(), value)
+                    .map_err(|e| Self::periph_error("write", e))
+            }
         }
     }
 
@@ -852,7 +1057,31 @@ impl Bus {
                 5,
                 format!("peripheral byte write not wired (id={:?})", id),
             )),
+            RegionTarget::PeripheralBound(b) => {
+                let mut periph = b.try_write().ok_or_else(|| {
+                    PlatformError::new(
+                        BUS_FAMILY,
+                        5,
+                        format!(
+                            "peripheral '{}' is busy (write)",
+                            b.instance_id().unwrap_or_default()
+                        ),
+                    )
+                })?;
+                periph
+                    .write(off as u32, WriteSize::Byte, u32::from(value))
+                    .map_err(|e| Self::periph_error("write", e))
+            }
         }
+    }
+
+    /// Convert a peripheral-level error into the bus-level E_BUS-05
+    /// (M-14 LLD §6.1: "外设抛错转 E_BUS-05 外设错误" — the bus
+    /// error must stay distinguishable from the unmapped E_BUS-01).
+    /// The original message is kept so the host can still see *why*
+    /// the peripheral refused the access.
+    fn periph_error(op: &str, err: PlatformError) -> PlatformError {
+        PlatformError::new(BUS_FAMILY, 5, format!("peripheral {op} failed: {err}"))
     }
 
     // ----- byte / half / word primitive -----
@@ -962,8 +1191,10 @@ enum Crossing {
 //   - full-unmapped reads (E_BUS-01),
 //   - hook capture with `ok` / `err_scenario` flag (review #2),
 //   - stats accounting split by RegionType (review #3),
-//   - peripheral E_BUS-05 lock-down until M-15 wires dispatch
-//     (review #13),
+//   - peripheral E_BUS-05 lock-down for the id-only mapping (review #13),
+//   - peripheral **instance** dispatch: read → `read_clear`, write →
+//     `write`, size mismatch → E_BUS-08, busy instance → E_BUS-05
+//     (D-12 / D-14),
 //   - E_BUS-07 init-too-large independent of E_BUS-04 (review #7),
 //   - BusMaster trait shape.
 // ---------------------------------------------------------------------------
