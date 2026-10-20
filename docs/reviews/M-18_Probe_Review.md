@@ -61,7 +61,7 @@
 
 | D-ID | 描述 | 状态 |
 | --- | --- | --- |
-| **D-12** | M-14 ↔ M-18 接线（`bus.set_hook(Some(reg.make_bus_hook()))`）和 M-15 ↔ M-18 接线（`periph.on_probe(Some(reg.wire_signal_probe(...)))`）**两端都没接**。`make_bus_hook` 与 `wire_signal_probe` 两个 helper 已就位但**全代码库零调用方**（grep `make_bus_hook` / `wire_signal_probe` 仅命中 `registry.rs` 自身 + `tests.rs`） | ❌ 接线延迟，PROGRESS v0.8 明确「独立 PR，本轮不动」。> ⚠️ 编号口径：台账 `CROSS_MODULE_DEBT.md` 的 D-12 指 **M-14 ↔ M-15**（size 一致性），与本报告此处用法不同。v0.9 完成了 **M-18 → M-19** 这一段（新 `port::EdgeSink`），本行两段接线**仍未做** |
+| **D-12** | M-14 ↔ M-18 接线（`bus.set_hook(Some(reg.make_bus_hook()))`）和 M-15 ↔ M-18 接线（`periph.on_probe(Some(reg.wire_signal_probe(...)))`）**两端都没接**。`make_bus_hook` 与 `wire_signal_probe` 两个 helper 已就位但**全代码库零调用方**（grep `make_bus_hook` / `wire_signal_probe` 仅命中 `registry.rs` 自身 + `tests.rs`） | ❌ 接线延迟，PROGRESS v0.8 明确「独立 PR，本轮不动」。> ⚠️ 编号口径：台账 `REVIEWS.md` 的 D-12 指 **M-14 ↔ M-15**（size 一致性），与本报告此处用法不同。v0.9 完成了 **M-18 → M-19** 这一段（新 `port::EdgeSink`），本行两段接线**仍未做** |
 | **D-07** | M-12 调度器从未调用 `Peripheral::tick`，M-18 的 `record_signal` 端到端不可达 | ❌ 跨模块欠账 |
 | — | M-19 波形管道仍是 stub（42 行），不在本审查范围 | P1 阶段 → **v0.9 已落地完整 `WaveformPipeline`**，并新增 `port::EdgeSink` 端口完成 M-18 → M-19 握手（本报告 §四.2 的待办闭合） |
 

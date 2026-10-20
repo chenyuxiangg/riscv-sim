@@ -1,7 +1,7 @@
 # M-13 RISC-V ISS（RV32IMC）· 代码审查报告
 
 > **审查对象**：`crates/kernel/src/m13_iss/`（5 个文件，2581 行：`alu.rs` 78 / `decoder.rs` 146 / `executor.rs` 651 / `mod.rs` 296 / `tests_rv32i.rs` 1410）
-> **审查基准**：`docs/detailed-design/M-13_RISC-V_ISS_RV32IMC.html`（LLD §4.13）、`docs/reviews/CROSS_MODULE_DEBT.md`（D-04 / D-11 / D-16 / D-23）
+> **审查基准**：`docs/detailed-design/M-13_RISC-V_ISS_RV32IMC.html`（LLD §4.13）、`docs/reviews/REVIEWS.md`（D-04 / D-11 / D-16 / D-23）
 > **审查日期**：2026-10-20
 > **审查方式**：全文件通读 + 调用方交叉核对（M-12 / M-17 / M-08 / M-09 / M-20 / M-23 / M-22 / M-06）+ 指令语义逐条对拍 RISC-V 非特权规范 v20260120（RV32I 2.1）
 > **门禁状态**：`cargo test --workspace` 277 passed / 0 failed（基线 203）；`clippy -D warnings` 干净；`fmt --check` 干净

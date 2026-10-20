@@ -1,7 +1,7 @@
 # M-06 ELF / Raw / HEX 解析器 · 代码审查报告
 
 > **审查对象**：`crates/kernel/src/m06_elf/`（`mod.rs` / `elf.rs` / `hex.rs` / `tests.rs` / `tests_malformed.rs`）
-> **审查基准**：`docs/detailed-design/M-06_ElfRawHexParser.html`（LLD §4.6）、`docs/reviews/CROSS_MODULE_DEBT.md`（D-03 / D-08 / D-09 / D-10 / D-15 / D-21 / D-22 / D-23）、`AGENTS.md`
+> **审查基准**：`docs/detailed-design/M-06_ElfRawHexParser.html`（LLD §4.6）、`docs/reviews/REVIEWS.md`（D-03 / D-08 / D-09 / D-10 / D-15 / D-21 / D-22 / D-23）、`AGENTS.md`
 > **审查日期**：2026-10-20
 > **审查方式**：全文件通读 + 调用方交叉核对（`crates/kernel/tests/m06_load_to_bus.rs` / 前端 / contract）+ 台账逐条复核 + 畸形输入自建语料 fuzz
 > **门禁状态**：`cargo test --workspace` **232 passed / 0 failed**（基线 203）；`clippy -D warnings` 干净；`fmt --check` 干净

@@ -40,7 +40,7 @@
 //! **A host that persists only this DTO does not reproduce a session** —
 //! it reproduces the *engine*. Rehydrating peripherals and the interrupt
 //! controller needs their own persisted representation (M-20 / M-23); that
-//! gap is tracked in `docs/reviews/CROSS_MODULE_DEBT.md` (D-36).
+//! gap is tracked in `docs/reviews/REVIEWS.md` (D-36).
 //!
 //! # Where the persisted-session format lives
 //!

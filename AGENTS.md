@@ -36,6 +36,8 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 - `docs/requirements/RISC-V_Requirements_v1.4.html` — 13 条 P0 + 6 层概念空间
 - `docs/module-design-spec/RISC-V_Module_Design_Specification.html` — 23 模块 LLD
 - `docs/detailed-design/M-01..M-23_*.html` — 23 篇模块详细设计
+- `docs/reviews/REVIEWS.md` — **检视与欠账的单一入口**（欠账总表 + §3 两轮检视归档 + §4 模块报告索引 + §5 变更索引）
+- `docs/reviews/M-*_Review.md` / `FRONTEND_*_Review.md` — 9 份模块详细检视报告
 
 ## Setup commands
 
@@ -76,7 +78,7 @@ riscv_sim/
 ├── tests/
 │   ├── unit/                 # 单元测试
 │   └── golden/               # Spike 对拍测试（Wave 2 落地；工具链已就绪）
-└── docs/                     # 27 篇设计文档
+└── docs/                     # 27 篇设计文档 + reviews/（1 入口 + 9 份模块报告）
 ```
 
 ## Project layout
@@ -130,7 +132,7 @@ riscv_sim/
 >
 > **v0.11.2 收口轮判据**（分支合 main 前 3 路独立检视的闭环，commit `3893626`）：
 > - 8 项**闭环变异自检全部变红**（口径：`cargo test --workspace --no-fail-fast`——默认 fail-fast 会截断红测条数）
-> - 台账合计行 **172 / 143 / 29**（新增「收口轮新增」行 37 / 34 / 3）· 检视产物 `docs/reviews/REVIEW_ROUND_2026-10-20_CONTRACT_DTO.md`
+> - 台账合计行 **172 / 143 / 29**（新增「收口轮新增」行 37 / 34 / 3）· 检视产物 `docs/reviews/REVIEWS.md`（§3.1）
 
 ## Code style
 
@@ -196,7 +198,7 @@ git checkout -b feature/m19-waveform  # 或 fix/... / docs/... / chore/...
 
 #### 3. 检视（review 闭环）
 
-- 检视产物：`docs/reviews/M-XX_<Module>_Review.md`（含实证复现 + 问题汇总 + 逐项闭环核对）
+- 检视产物：**`docs/reviews/REVIEWS.md`**（含实证复现 + 问题汇总 + 逐项闭环核对；模块级报告另见 `docs/reviews/M-XX_<Module>_Review.md`）
 - 检视发现的缺陷**在同一个分支上**追加 fix commit 闭环（不重写已推送的历史）
 - 检视未闭环完 → **不合并**，`main` 保持不动
 

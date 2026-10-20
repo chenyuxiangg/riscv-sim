@@ -291,7 +291,7 @@ echo $?
 ## 九、边界声明
 
 - 本轮**只**动了 `front/**` 与本文件（`docs/reviews/FRONTEND_ServiceLayer_Review.md`）。
-- `crates/**`、`tools/check-front.sh`、`docs/reviews/CROSS_MODULE_DEBT.md`、
+- `crates/**`、`tools/check-front.sh`、`docs/reviews/REVIEWS.md`、
   `docs/progress/PROGRESS.md`、`docs/reviews/FRONTEND_Review.md`、
   `AGENTS.md` / `README.md` / `CONTRIBUTING.md` / `.github/**` **未改**。
 - 未推送任何分支（`git push` 需用户明确指示）。

@@ -86,7 +86,7 @@
 
 共查出 **37 项**（去重后）：**0 阻断 + 5 高危 + 32 中低危**。**34 项闭环 / 3 项留账**（D-38 / D-39 / D-40），另有 2 条**已闭环但带残留工作量**的条目 → **D-36 / D-37**。
 
-完整证据（含 3 张变异测试表、逐条闭环对照表、数字核对表）见 `docs/reviews/REVIEW_ROUND_2026-10-20_CONTRACT_DTO.md`。
+完整证据（含 3 张变异测试表、逐条闭环对照表、数字核对表）见 `docs/reviews/REVIEWS.md`（§3.1）。
 
 ### 高危闭环要点
 
@@ -414,7 +414,7 @@ assertion `left == right` failed: ChannelRing::buf capacity changed after constr
 
 **M-19 波形管道落地**（按 §6.2 推进顺序，M-18 之后的下一站）。本轮同时完成 **M-18 → M-19 握手**——`docs/reviews/M-18_Probe_Review.md` §四第 2 条点名的缺口「M-19 真正消费 M-18 的边沿事件，否则 M-18 边缘事件的『产出』没有『消费者』」在本轮闭合。
 
-> **口径澄清**：台账 `CROSS_MODULE_DEBT.md` 的 **D-12** 条目指的是 **M-14 ↔ M-15 接线**（`Bus::map_peripheral` 的 size 与 `Peripheral::size()` 一致性校验）；M-18 报告里把「M-14 ↔ M-18 / M-15 ↔ M-18 接线」也称作 D-12，两处编号口径不一致。本轮完成的是 **M-18 → M-19** 这一段（新增 `EdgeSink` 端口），**D-12 本身（M-14 ↔ M-15）未动**，M-14 ↔ M-18 的 bus hook 与 M-15 ↔ M-18 的 `on_probe` 接线也仍未做（后者是 §6.3 的并行 0.5d 项）。
+> **口径澄清**：台账 `REVIEWS.md` 的 **D-12** 条目指的是 **M-14 ↔ M-15 接线**（`Bus::map_peripheral` 的 size 与 `Peripheral::size()` 一致性校验）；M-18 报告里把「M-14 ↔ M-18 / M-15 ↔ M-18 接线」也称作 D-12，两处编号口径不一致。本轮完成的是 **M-18 → M-19** 这一段（新增 `EdgeSink` 端口），**D-12 本身（M-14 ↔ M-15）未动**，M-14 ↔ M-18 的 bus hook 与 M-15 ↔ M-18 的 `on_probe` 接线也仍未做（后者是 §6.3 的并行 0.5d 项）。
 
 M-19 实现的是「探针 → 边沿编码 → 环形缓冲 → 增量推送 → 前端渲染 / trace 导出」全管道（差异化核心，FR-10 + FR-14）。
 
@@ -498,7 +498,7 @@ M-19 实现的是「探针 → 边沿编码 → 环形缓冲 → 增量推送 �
 | `M-14_BusMemoryMap_Review.md` | 16 项 review + 闭环核对 | 模块内 100% 闭环，2 项跨模块挂账 |
 | `M-15_PeripheralModel_Review.md` | 19 项 review + 闭环核对 | 模块内 100% 闭环，1 项跨模块挂账 |
 | `M-18_Probe_Review.md` | 15 项 review + 闭环核对 | 13/15 闭环，2 项低危挂账 |
-| `CROSS_MODULE_DEBT.md` | **跨模块欠账台账** | 23 条 · 5 阻断 · 含阻塞拓扑与门禁缺口根因 |
+| `REVIEWS.md` | **跨模块欠账台账** | 23 条 · 5 阻断 · 含阻塞拓扑与门禁缺口根因 |
 
 **台账是跨模块欠账的唯一追踪入口**：模块报告只管模块内部，跨模块项一律上收台账，按**修复归属模块**组织。
 
@@ -787,7 +787,7 @@ RISC-V 仿真/调试平台项目处于 **MVP 启动期**。架构 + 23 篇模块
 
 > ⚠️ **重要纠偏**：早期对话里把"MVP"误读为"两个单元测试通过"。重新校准后，正确定义见 §2。
 >
-> ⚠️ **跨模块欠账**：另有 23 条跨模块问题（5 阻断级）挂在 `docs/reviews/CROSS_MODULE_DEBT.md` 台账，**不在本文档的模块人日口径内**——它们是模块交付之后的集成欠账，需单独排期。台账里最靠前的是 **D-04（M-13 x0 未硬连线）**，它阻塞 Q7 决议的「Spike 对拍必做」。
+> ⚠️ **跨模块欠账**：另有 23 条跨模块问题（5 阻断级）挂在 `docs/reviews/REVIEWS.md` 台账，**不在本文档的模块人日口径内**——它们是模块交付之后的集成欠账，需单独排期。台账里最靠前的是 **D-04（M-13 x0 未硬连线）**，它阻塞 Q7 决议的「Spike 对拍必做」。
 
 ---
 
@@ -1096,7 +1096,7 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 为什么是它：M-13 是关键路径上**唯一 gate 7 个下游模块**的节点——M-12 / M-17 / M-08 / M-09 / M-20 / M-23 / M-22 全部等它。同时 E2E-01 的「运行 / 单步 / 内存」三步也都等它（M-13 现在只有 `ADDI` 一条指令）。
 
 子组件拆分（分阶段交付，每阶段独立评审 + 回归）：
-- **阶段 1（~3d）**：D-04 `x0` 硬连线（`CROSS_MODULE_DEBT.md` 阻断项，阻塞 Spike 对拍）+ RV32I 剩余指令（LUI / AUIPC / LOAD / STORE / BRANCH / JAL / JALR / 全部立即数与寄存器立即数形式）
+- **阶段 1（~3d）**：D-04 `x0` 硬连线（`REVIEWS.md` 阻断项，阻塞 Spike 对拍）+ RV32I 剩余指令（LUI / AUIPC / LOAD / STORE / BRANCH / JAL / JALR / 全部立即数与寄存器立即数形式）
 - **阶段 2（~2d）**：M 扩展 8 条（MUL / MULH / MULHSU / DIV / DIVU / REM / REMU）
 - **阶段 3（~3d）**：C 扩展 16 条（压缩指令，含非法压缩码处理）
 - **阶段 4（~4d）**：Spike golden 对拍（Q7 决议「必做」，FR-04 每条指令 golden）—— 依赖 `riscv64-unknown-elf-gcc` + `spike --isa=rv32imc`
@@ -1157,7 +1157,7 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 | 2026-10-19 | **M-19 不新增错误码**：无效策略复用 `E_OBS-01`，内存超预算复用 `E_CTX-02` | 设计文档 §6.1「不新增错误码」+ §3.5 明确指定 `E_CTX-02` |
 | 2026-10-19 | **契约新增 `EdgeSink` / `DeltaSink` 两个驱动端口 + `EdgeEvent` / `WaveformDelta` / `DropRange` 三个 DTO** | 「契约先行」：M-18 → M-19 的交接必须两侧都不依赖对方 crate 内部实现（LLD §2.5）；M-0 冻结范围内的第四次 additive 变更 |
 | 2026-10-19 | **M-18 `sample_inner` 原先丢弃的 `EdgeKind` 随 `EdgeEvent` 下发** | M-18 review #4 遗留的「kind 信息丢失」在 M-19 接线后自然消解，无需改契约 `Edge` 结构（保 M-0 冻结） |
-| 2026-10-19 | **建立 `docs/reviews/` 目录 + `CROSS_MODULE_DEBT.md` 跨模块欠账台账** | 模块报告管模块内问题、跨模块台账管跨模块问题，职责切分避免同一问题在两份报告里各记一半；台账按**修复归属模块**组织并记录阻塞拓扑与处理批次 |
+| 2026-10-19 | **建立 `docs/reviews/` 目录 + `REVIEWS.md` 跨模块欠账台账** | 模块报告管模块内问题、跨模块台账管跨模块问题，职责切分避免同一问题在两份报告里各记一半；台账按**修复归属模块**组织并记录阻塞拓扑与处理批次 |
 | 2026-10-19 | **跨模块 review 项一律「上收台账 + 本轮不动」，单独排期** | 用户明确要求跨模块问题（#6 分配上限 / #9 字段可见性 / #11 接线 size 一致性 / #12 M-12 tick）不在模块 PR 里夹带改动 |
 | 2026-10-19 | **契约 `TraceEvent.dir` 用 `enum TraceDir` 替代 `u8` 魔数** | 与 M-14 `AccessDir` 对齐；M-0 冻结范围内的第三次 additive 变更（前两次：`Peripheral::read_clear`、`Peripheral::on_probe` + `ProbeSink`） |
 | 2026-10-19 | **契约 `Probe` trait 暂不删也不实现，留待 M-0 下一窗口统一清理** | 全代码库零 `impl Probe for`，与 M-15 report #10 是同一个死契约；不在模块 PR 里做契约破坏性变更 |
@@ -1259,7 +1259,7 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 | v0.7.2 | 2026-10-19 | 按 `docs/reviews/M-14_BusMemoryMap_Review.md` §四 闭环核对，落地剩余 6 项可独立处理（#10 belt-and-braces 删 / #11 read_bytes-write_bytes 改 Result / #12 wrapping_add 改 checked_add / #14 Byte 越界测试收紧 / #16 Tests cover 清单更新 + N5 删孤立横幅）；**2 项跨模块挂账**（#6 需 M-06 联改分配上限 / #9 影响 m06_load_to_bus + m02_viewcomponents 收紧 Region 可见性），按用户要求先不动。M-15 review v0.7.1 后无新增修改。workspace 累计 **79 全绿** | agent (mavis) |
 | v0.7.3 | 2026-10-19 | 按 `docs/reviews/M-15_PeripheralModel_Review.md` §五 复查遗留 3 项：**N1** 抽 `reg.rs` 共享 helper 消除 review #5 引入的 6 份重复（DRY 回归）；**N2** GPIO `IN` 寄存器回读输出脚（`pin_levels()` = outputs & directions \| inputs & !directions），解锁 N5「GPIO 翻转可见」+ M-18 波形；**N3** 去重位图 `line < 16` 放宽到 `line < 32` 同步注释。tests 25 → 29（+4）；workspace 累计 **83 全绿** | agent (mavis) |
 | v0.8 | 2026-10-19 | 按 §6.3「下个目标」落地 **M-18 探针**：4 子模块（channel/trace_stream/registry/tests）+ 契约层 additive 扩展（`Peripheral::on_probe` 默认 no-op + `ProbeSink` 类型别名 + `EdgeKind` 枚举 + `TraceEvent` 结构）。双源探针架构（总线 trace 走 `BusAccess` 钩子，外设信号走 `ProbeSink` 回调）；边沿判定 5 条规则（master switch / channel enable / throttle / pulse 旁路 / 同值过滤）；`TraceStream` 环形 2×10⁵ 容量 + dropped 计数 + seq 单调；`wire_signal_probe` 走 `Rc<RefCell<>>` 闭包桥接外设。M-15 ↔ M-18 接线是独立 PR（D-12 跨模块挂账）。tests 0 → 20（+20）；workspace 累计 **103 全绿** | agent (mavis) |
-| v0.8.1 | 2026-10-19 | **M-18 review 闭环 13/15** + **建立 `docs/reviews/` 文档体系**。M-18 落地 13 项：热路径去字符串分配（闭包直连 `sample_inner`）/ `try_borrow_mut` 消除 borrow panic（加 `borrow_contended` 计数）/ `prev` 跨 enable-disable 两条测试固化既有正确行为（原 review 推断有误，以测试纠正）/ 契约 `TraceEvent.dir` 改 `enum TraceDir` / `classify` SingleBit 做 `&1` 截断 / `TraceStream` 加 `initial_cap` 脱离 `Vec` 容量假设 / 4 处公开 doc 补全。**未闭环 2 项低危**：契约 `Probe` trait 死契约（与 M-15 report #10 同源，延 M-0 窗口）、`drain_waveform` 借用交错。新建 `docs/reviews/` 4 份文档（3 份模块报告 + `CROSS_MODULE_DEBT.md` 跨模块台账，23 条 / 5 阻断）。M-18 tests 20 → 29（+9）；workspace lib 98 → 107（+9）；workspace 累计 103 → **112 全绿**；累计人日 16.5 → ~21（≈23%） | agent (mavis) |
+| v0.8.1 | 2026-10-19 | **M-18 review 闭环 13/15** + **建立 `docs/reviews/` 文档体系**。M-18 落地 13 项：热路径去字符串分配（闭包直连 `sample_inner`）/ `try_borrow_mut` 消除 borrow panic（加 `borrow_contended` 计数）/ `prev` 跨 enable-disable 两条测试固化既有正确行为（原 review 推断有误，以测试纠正）/ 契约 `TraceEvent.dir` 改 `enum TraceDir` / `classify` SingleBit 做 `&1` 截断 / `TraceStream` 加 `initial_cap` 脱离 `Vec` 容量假设 / 4 处公开 doc 补全。**未闭环 2 项低危**：契约 `Probe` trait 死契约（与 M-15 report #10 同源，延 M-0 窗口）、`drain_waveform` 借用交错。新建 `docs/reviews/` 4 份文档（3 份模块报告 + `REVIEWS.md` 跨模块台账，23 条 / 5 阻断）。M-18 tests 20 → 29（+9）；workspace lib 98 → 107（+9）；workspace 累计 103 → **112 全绿**；累计人日 16.5 → ~21（≈23%） | agent (mavis) |
 | v0.2 | 2026-10-19 | 答复 Q1-Q7：自研固件 / RV32IMC 全集 / IndexedDB / 同源 Worker / canvas 比对 / macOS / Spike 必做；M-13 工作量上调至 12 人日；§5 step 2 同步更新；新增 §8 「已澄清问题」表与实施前置条件 | agent (mavis) |
 | v0.3 | 2026-10-19 | MVP 范围从 B（30d, DWARF 留 P1）升级到 **C（§13.6 全量 90 人日）**；§5 重写为 10 阶段计划（M0-M9）+ 13 P0 覆盖矩阵 + 8 个验收节点 + 关键路径图；§6 R7 改「纳入 MVP」；M0 已完成，剩余 85 人日 | agent (mavis) |
 
@@ -1280,14 +1280,25 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 - **LLD §2.5** 契约层定义（contract crate 唯一来源）
 - **M-12 / M-13 / M-14 / M-06 / M-15 / M-18 / M-19 / M-08** 模块详细设计
 
-**代码审查报告**（`docs/reviews/`，v0.8.1 起建立）：
+**代码审查报告**（`docs/reviews/`，v0.8.1 起建立，**2026-10-20 归拢**）：
 
-| 文件 | 覆盖范围 | 闭环状态 |
-| --- | --- | --- |
-| `M-14_BusMemoryMap_Review.md` | M-14 总线 16 项 | 模块内 100%；#6 / #9 跨模块挂账 |
-| `M-15_PeripheralModel_Review.md` | M-15 外设 19 项 | 模块内 100%；#6 / #11 跨模块挂账 |
-| `M-18_Probe_Review.md` | M-18 探针 15 项 | 13/15；#10 / #12 挂账 |
-| `CROSS_MODULE_DEBT.md` | **跨模块欠账台账**（23 条 · 5 阻断） | **跨模块问题的唯一追踪入口** |
+> **2026-10-20 归拢**：原先 12 份文档（台账 + 2 份轮次汇总 + 9 份模块报告）承担 3 种角色，摊在 12 个文件里，
+> 且有 3 处内容重复（模块状态表记两遍 / 变更记录记两遍 / 轮次汇总重述模块报告）。
+> 现归拢为 **`REVIEWS.md` 一个入口**（台账 + 两轮检视归档）+ **9 份模块详细报告**；
+> 模块状态速查归 `AGENTS.md`，改动叙事归本文档。
+
+| 文件 | 角色 | 覆盖范围 | 闭环状态 |
+| --- | --- | --- | --- |
+| `REVIEWS.md` | **唯一入口**（原台账 + 2 份轮次汇总） | 欠账总表 · 欠账明细 · 处理顺序 · §3 两轮检视归档 · §4 模块报告索引 · §5 变更索引 | 172 发现 / 143 闭环 / 29 未闭环；欠账条目 D-01~D-41 |
+| `M-06_ELFLoader_Review.md` | 模块详细报告 | M-06 加载器 17 项 | 12 闭环 / 5 留账并说明理由 |
+| `M-13_ISS_Review.md` | 模块详细报告 | M-13 ISS 14 项 | 14/14；RV32I 全集落地 |
+| `M-14_BusMemoryMap_Review.md` | 模块详细报告 | M-14 总线 16 项 | 模块内 100%；#6 / #9 跨模块挂账 |
+| `M-14_M-15_M-18_Wiring_Review.md` | 模块详细报告 | 三处接线 | 接线闭合，N5 端到端 13 用例为证 |
+| `M-15_PeripheralModel_Review.md` | 模块详细报告 | M-15 外设 19 项 | 模块内 100%；#6 / #11 跨模块挂账 |
+| `M-18_Probe_Review.md` | 模块详细报告 | M-18 探针 15 项 | 13/15；#10 / #12 挂账 |
+| `M-19_WaveformPipeline_Review.md` | 模块详细报告 | M-19 波形 16 项 | 16/16（含 1 项阻断级） |
+| `FRONTEND_Review.md` | 模块详细报告 | 前端 M-01/02/03 20 项 | 20/20，含 3 阻断与 4 项评审漏项 |
+| `FRONTEND_ServiceLayer_Review.md` | 模块详细报告 | 前端服务层 M-04/05/07/10 | 已实现；7 项契约缺口留 Wave 2 |
 
 ---
 
@@ -1316,7 +1327,7 @@ python3 -m http.server 8080 --directory front
 **代码审查与跨模块欠账**（`docs/reviews/`）：
 
 - 模块内部问题 → 对应模块报告（`M-14` / `M-15` / `M-18`）
-- **跨模块问题 → `docs/reviews/CROSS_MODULE_DEBT.md` 台账**（按修复归属模块组织，含阻塞拓扑与处理批次）
+- **跨模块问题 → `docs/reviews/REVIEWS.md` 台账**（按修复归属模块组织，含阻塞拓扑与处理批次）
 - 当前台账：23 条 · 5 阻断级 · 关键路径最靠前的是 **D-04（M-13 x0 未硬连线）**——Q7 决议「Spike 对拍必做」，越晚修 golden 用例返工面越大
 
 ---

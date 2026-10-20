@@ -48,7 +48,7 @@ pub const BUS_SIZE: u64 = 0x1_0000_0000;
 /// (in the browser: OOM the tab). 16 MiB matches the order of magnitude
 /// of M-06's `ParseLimits::max_region_bytes` default — M-14 does not
 /// depend on `m06_elf`, so the constant is defined locally (the two
-/// sides are independent; see `docs/reviews/CROSS_MODULE_DEBT.md` D-10).
+/// sides are independent; see `docs/reviews/REVIEWS.md` D-10).
 pub const DEFAULT_MAX_REGION_BYTES: u64 = 16 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@
 # The front end had **no** automated check of any kind: 203 Rust tests
 # were green while `front/index.html` was 100% blank, because a missing
 # export in front/views/*.js fails at ESM *link* time — before any code
-# runs (FRONTEND_Review.md #16, CROSS_MODULE_DEBT.md D-23).
+# runs (FRONTEND_Review.md #16, REVIEWS.md D-23).
 #
 # This gate boots the real front end against a minimal DOM double and
 # asserts the behaviour the review found broken. It needs Node >= 22

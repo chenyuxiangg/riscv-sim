@@ -1,7 +1,7 @@
 # M-14 / M-15 / M-18 接线 · 代码审查报告
 
 > **审查对象**：`crates/kernel/src/m14_bus/`、`crates/kernel/src/m15_peripheral/`、`crates/kernel/src/m18_probe/`（含新增集成测试 `crates/kernel/tests/m14_m15_m19_wiring.rs`）
-> **审查基准**：`docs/detailed-design/M-14_BusMemoryMap.html`（§3.2 读写分发、§6.1 错误码）、`M-15_PeripheralModel.html`（§4.4.4 外设接口、§9.3 探针对接）、`M-18_Probe.html`（§1.3 MVP 范围、§2.1.1 表 68 通道定义）、`docs/reviews/CROSS_MODULE_DEBT.md`（D-07 / D-10 / D-12 / D-14）、`riscv_sim_contract::port`
+> **审查基准**：`docs/detailed-design/M-14_BusMemoryMap.html`（§3.2 读写分发、§6.1 错误码）、`M-15_PeripheralModel.html`（§4.4.4 外设接口、§9.3 探针对接）、`M-18_Probe.html`（§1.3 MVP 范围、§2.1.1 表 68 通道定义）、`docs/reviews/REVIEWS.md`（D-07 / D-10 / D-12 / D-14）、`riscv_sim_contract::port`
 > **审查日期**：2026-10-20
 > **审查方式**：接线 PR 自审 + 端到端集成测试实证（真实 `Bus` + 真实 `PeripheralRegistry` + 真实 `ProbeRegistry` + 真实 `WaveformPipeline`，无一处绕过）
 > **门禁状态**：`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets -- -D warnings` 干净；`cargo test --workspace` **234 passed / 0 failed**（基线 203 → 新增 31）
@@ -166,7 +166,7 @@ M-14 LLD §6.1：外设内部错误 → **E_BUS-05**（与未映射 E_BUS-01 可
 | --- | --- | --- |
 | O1 | **D-07**：M-12 的 `dispatch` 里 `PeripheralTick` 分支仍是空 TODO，M-12 需真正调用 `Peripheral::tick(now_ps)` | `m12_engine`（另一并行会话 / Wave 2）。**一旦落地，本 PR 的边沿时间戳自动变精确，无需改本 PR 代码** |
 | O2 | 契约 `port.rs` 的 `ProbeSink` 文档举例 `"OUT"`/`"TX"`，与本 PR 的信号名一致；但 M-18 LLD 表 68 写的是 `gpio0`/`timer-compare` | **文档层面对齐**：M-15 LLD / M-18 LLD 的信号名是否统一到 `"OUT"`/`"TX"`/`"CMP"`，或反过来改代码里的常量。**改常量成本 = 1 行**，本 PR 已把常量收敛到 M-15 侧 |
-| O3 | `docs/reviews/CROSS_MODULE_DEBT.md`（D-10 / D-12 / D-14 状态）与 `docs/progress/PROGRESS.md`（N5 前置条件）需要协调者统一更新 | 协调者保留区 |
+| O3 | `docs/reviews/REVIEWS.md`（D-10 / D-12 / D-14 状态）与 `docs/progress/PROGRESS.md`（N5 前置条件）需要协调者统一更新 | 协调者保留区 |
 | O4 | `crates/kernel/src/lib.rs` / `m17_backend`：M-17 将来要用 M-14 派发外设访存，需要知道 `map_peripheral_instance` 的存在 | 协调者保留区 |
 
 ### 5.3 本 PR 自身遗留的已知限制（不阻塞，已在代码注释里标注）
@@ -197,4 +197,4 @@ running 5 tests     → 5 passed; 0 failed       （m18_to_m19_waveform，未改
 合计 234 passed / 0 failed（基线 203 → +31）
 ```
 
-未触碰的文件（按 brief 的所有权约束）：`crates/contract/**`、`crates/kernel/src/lib.rs`、`crates/kernel/src/m12_engine/**`、`crates/kernel/src/m17_backend/**`、`crates/kernel/tests/m06_load_to_bus.rs`、`crates/kernel/tests/m18_to_m19_waveform.rs`、`docs/reviews/CROSS_MODULE_DEBT.md`、`docs/progress/PROGRESS.md`、`AGENTS.md`、`Cargo.toml`。
+未触碰的文件（按 brief 的所有权约束）：`crates/contract/**`、`crates/kernel/src/lib.rs`、`crates/kernel/src/m12_engine/**`、`crates/kernel/src/m17_backend/**`、`crates/kernel/tests/m06_load_to_bus.rs`、`crates/kernel/tests/m18_to_m19_waveform.rs`、`docs/reviews/REVIEWS.md`、`docs/progress/PROGRESS.md`、`AGENTS.md`、`Cargo.toml`。
