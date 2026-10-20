@@ -20,7 +20,11 @@
 //     active view has a readable title and a **non-empty body** (the
 //     white-screen check);
 //   - the service chain really works: the transport reports "connected"
-//     and the footer reports "mock 内核已就绪（Nop 往返成功）";
+//     and the footer reports "WASM 内核已就绪（Nop 往返成功）";
+//   - the **real** kernel really executes: a `step` command makes the
+//     register view show `x1 = 0x2a` — the value the WASM kernel
+//     computed from the demo firmware (第 1 阶段起前端挂的是真内核，
+//     不再是 mock)；
 //   - the console is clean: no `console.error`, no uncaught exception.
 //
 // What it does NOT verify
@@ -30,15 +34,18 @@
 //   - it does not replace the Node gate — the Node gate checks the
 //     contract / module behaviour, this one checks the wiring in a
 //     browser;
-//   - it says nothing about the real WASM kernel: the front end still
-//     talks to the dev-only mock kernel worker.
+//   - it does not check the waveform view: the real probe pipeline
+//     (M-18 / M-19) is not wired in stage 1, so the waveform view is
+//     legitimately empty.
 //
 // Prerequisites
 // -------------
 //   - Node >= 22 (the script uses the global `WebSocket` and `fetch`);
 //   - a local Chrome / Chromium (see `CHROME_PATH` below);
 //   - python3 (to serve `front/` over HTTP — ES modules and Workers
-//     need a same-origin HTTP(S) origin, `file://` is blocked).
+//     need a same-origin HTTP(S) origin, `file://` is blocked);
+//   - **the WASM kernel artifact** — `tools/build-wasm.sh` must have been
+//     run (the front end now mounts the real kernel, not the mock).
 //
 // Usage
 // -----
@@ -461,6 +468,11 @@ const PROBE_EXPRESSION = `(() => {
   const active = panels.find((p) => !p.classList.contains("hidden")) || null;
   const heading = active ? active.querySelector("h2") : null;
   const body = active ? active.querySelector("[data-view-body]") : null;
+  const regCells = Array.from(document.querySelectorAll('[data-view-body="regmem"] .reg-grid > div'));
+  const cellText = (i) => {
+    const code = regCells[i] ? regCells[i].querySelector("code") : null;
+    return code ? String(code.textContent || "").trim() : "";
+  };
   return {
     hasApp: Boolean(app),
     panelCount: panels.length,
@@ -468,7 +480,10 @@ const PROBE_EXPRESSION = `(() => {
     activePanel: active ? active.getAttribute("data-view-panel") : null,
     title: heading ? String(heading.textContent || "").trim() : "",
     bodyChars: body ? String(body.innerHTML || "").trim().length : 0,
-    regCells: document.querySelectorAll('[data-view-body="regmem"] .reg-grid > div').length,
+    regCells: regCells.length,
+    regX1: cellText(1),
+    regX2: cellText(2),
+    pc: String((document.querySelector('[data-view-body="regmem"] .pc') || {}).textContent || "").trim(),
     status: String((document.getElementById("status") || {}).textContent || "").trim(),
     note: String((document.getElementById("kernel-note") || {}).textContent || "").trim(),
   };
@@ -514,9 +529,38 @@ function landingChecks(probe) {
             detail: `status="${probe.status}"`,
         },
         {
-            name: "mock 内核已就绪（Nop 往返）",
-            ok: typeof probe.note === "string" && probe.note.includes("mock 内核已就绪"),
+            name: "WASM 内核已就绪（Nop 往返）",
+            ok: typeof probe.note === "string" && probe.note.includes("WASM 内核已就绪"),
             detail: `note="${probe.note}"`,
+        },
+    ];
+}
+
+/**
+ * **真内核执行**检查：demo 固件真的跑起来了。
+ *
+ * 这是本脚本与 mock 时代的**本质区别**：以前只能验「内核已就绪」，
+ * 现在能验「WASM 内核真的执行了指令」——发一条 `step` 命令，然后读
+ * 寄存器视图里 x1 的值。
+ *
+ * demo 固件第一条指令是 `addi x1, x0, 42`，所以单步一次之后 x1 必须是
+ * `0000002a`。这条断言一旦变红，只有三种可能：内核没接上、命令没派发、
+ * 或者波形增量没推到视图——**不是**「mock 还在」这种含混的失败。
+ *
+ * @param {object} probe
+ * @returns {{name: string, ok: boolean, detail: string}[]}
+ */
+function kernelExecChecks(probe) {
+    return [
+        {
+            name: "WASM 内核执行了 demo 固件（x1 = 42）",
+            ok: probe.regX1 === "0000002a",
+            detail: `x1="${probe.regX1}"`,
+        },
+        {
+            name: "PC 随单步前进（0x00000004）",
+            ok: probe.pc === "0x00000004",
+            detail: `pc="${probe.pc}"`,
         },
     ];
 }
@@ -567,6 +611,23 @@ function renderChecks(probe) {
  */
 async function main() {
     const opts = parseArgs(process.argv.slice(2));
+
+    // The front end now mounts the **real** WASM kernel, so the artifact
+    // is a hard precondition. Missing it is *not* a verification failure
+    // (the wasm build is a separate, deliberate step) — it is the same
+    // class as "no Chrome".
+    const wasmGlue = join(frontDir, "assets/pkg/riscv_sim_kernel.js");
+    const wasmBin = join(frontDir, "assets/pkg/riscv_sim_kernel_bg.wasm");
+    if (!existsSync(wasmGlue) || !existsSync(wasmBin)) {
+        console.error([
+            "error: 找不到 WASM 内核产物。",
+            `  期望：${wasmGlue}`,
+            `  期望：${wasmBin}`,
+            "  先构建：tools/build-wasm.sh（或 tools/build-wasm.sh --release）",
+        ].join("\n"));
+        return EXIT_PRECONDITION;
+    }
+    console.log("· WASM 内核：front/assets/pkg/");
 
     const chromePath = resolveChrome();
     if (!chromePath) {
@@ -674,6 +735,28 @@ async function main() {
             await sleep(250);
         }
 
+        // -- drive the REAL kernel -------------------------------------------
+        //  Send a `step` command through the view layer's signal and check
+        //  that the register view shows the value the **WASM kernel**
+        //  actually computed (`addi x1, x0, 42` → x1 = 0x2a).
+        await cdp.send("Runtime.evaluate", {
+            expression:
+                'window.dispatchEvent(new CustomEvent("riscv:command", { detail: { action: "step" } }));',
+            returnByValue: true,
+        });
+        let kernelExec = [];
+        const execDeadline = Date.now() + opts.timeoutMs;
+        while (Date.now() < execDeadline) {
+            const res = await cdp.send("Runtime.evaluate", {
+                expression: PROBE_EXPRESSION,
+                returnByValue: true,
+            });
+            probe = res.result?.value ?? null;
+            kernelExec = probe ? kernelExecChecks(probe) : [];
+            if (kernelExec.length > 0 && kernelExec.every((c) => c.ok)) break;
+            await sleep(250);
+        }
+
         // -- report ------------------------------------------------------------
         console.log("");
         console.log("落地页检查：");
@@ -685,17 +768,22 @@ async function main() {
         for (const check of render) {
             console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
         }
+        console.log("");
+        console.log("真内核执行检查（发一条 step 命令）：");
+        for (const check of kernelExec) {
+            console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
+        }
         if (consoleErrors.length > 0) {
             console.log("");
             console.log("控制台错误：");
             for (const err of consoleErrors) console.log(`  ✗ ${err}`);
         }
 
-        const failed = [...landing, ...render].filter((c) => !c.ok);
+        const failed = [...landing, ...render, ...kernelExec].filter((c) => !c.ok);
         const ok = failed.length === 0 && consoleErrors.length === 0;
         console.log("");
         console.log(ok
-            ? "browser-verify: 通过（真机挂载 + 渲染路径 + 服务链 + 控制台）"
+            ? "browser-verify: 通过（真机挂载 + 渲染路径 + 真内核执行 + 控制台）"
             : `browser-verify: 失败（${failed.length} 项断言未通过，${consoleErrors.length} 条控制台错误）`);
         return ok ? 0 : EXIT_FAILED;
     } finally {
