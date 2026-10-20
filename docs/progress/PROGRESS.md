@@ -1,11 +1,52 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.11.0
+> **Document version**: v0.11.1
 > **Created**: 2026-10-19
 > **Last updated**: 2026-10-20
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.11.1 变更摘要
+
+**先检视、后合 main**：Wave 1 交付后不直接回合 `main`，而是先拉起 **4 路独立检视**（V1 M-13 / V2 M-12+接线 / V3 M-06 / V4 前端+收口），逐条处理完评审意见才允许同步。
+
+### 检视结论
+
+| 检视 | 对象 | 判定 | 关键发现 |
+| --- | --- | --- | --- |
+| **V1** | M-13 ISS | **FAIL** | 🔴 SYSTEM opcode 未校验 `funct3` → CSR 形态编码（`0x00001073`）被误判为 ECALL，mcause 报 11 而非 2。**当时无任何测试能抓住** |
+| **V2** | M-12 + M-14/M-15/M-18 接线 | **FAIL** | 🔴 `ExecutionBackend::restore` 不是确定性还原（契约文档却承诺「deterministic snapshot」）；🟠 总线 hook 用裸 `borrow_mut()` → 持锁时重入 panic |
+| **V3** | M-06 加载器 | **PASS** | ~26 000 次随机 / 边界输入 0 panic；2 项中危（嗅探假阳性 / 文档状态过时）+ 1 项低危 |
+| **V4** | 前端服务层 + 收口文档 | **PARTIAL** | mock 内核 `ClearBreakpoint` 按 `addr` 删（契约是 `id`）；契约测试不验变体内层字段名；**台账 / PROGRESS / AGENTS 数字失真 3~4 倍** |
+
+### 本轮闭环
+
+- **1 阻断级**（M-13 `funct3` 校验）、**2 高危**（总线 hook panic、快照语义文档）、**6 中危**（M-06 IHEX 嗅探结构判据 / bss gap `checked_add` / M-14 外设路径上限覆盖 / mock 契约缺陷 / 契约测试盲区 / M-10 重连重订阅）
+- **LLD 探针信号名对齐实现口径**（F-5）：3 份 HTML、零代码风险。裁决依据是契约层 `ProbeSink` 已用 `"OUT"`/`"TX"`，按「契约先行」优先
+- **真机复验脚本落仓**：`tools/browser-verify.mjs`（零依赖 CDP，Node 22 全局 `WebSocket` + `fetch`），本机 Chrome 155 headless **实跑 10 项断言全过、退出码 0**
+- **新登记 D-24~D-33 共 10 条**（含 M-12 至今无独立模块级 review → D-30）
+
+### 方法论：变异测试判定「测试是否真能抓住实现错误」
+
+V1 的 32 项变异里有 **4 项改回去没有任何现有测试会红**，其中 1 项是真缺陷。这比「读代码找 bug」更有效——它直接暴露了**覆盖漏洞**。本轮补的每一条用例都做了**反向验证**（改回原样必须变红），确保不是安慰剂。
+
+### 数字口径订正（V4 发现）
+
+此前 PROGRESS / 台账 / AGENTS 的代码行数与测试数**低估 3~4 倍**，且同一文档内「314」与「334」自相矛盾（一个只算 lib、一个把 lib 也算进去了）。现统一口径：
+
+- 「代码」= 模块目录下**全部 `.rs` 文件总行数**（含测试）；「测试」= 该目录下 `#[test]` **用例条数**
+- `cargo test --workspace` 一律写**总数**并拆出 lib / 集成
+
+### 进度影响
+
+- **测试覆盖**：`cargo test --workspace` 355 → **375**（lib 352 + 集成 23）；前端门禁 109 → **119 用例 / 21 suite**
+- **代码规模**（`git diff --shortstat main..HEAD`）：内核 **+6 917 行**、前端 **+4 255 行**、文档 **+978 行**（此前文档写的 +1 500 / +1 800 严重低估）
+- **完成度**：约 32%（90 人日 WBS 口径）——⚠️ **该数字未经独立复核**，WBS 文档不在仓内
+
+`cargo test --workspace` = **375 passed / 0 failed**（lib 352 + 集成 23）；`cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo fmt --all -- --check` 通过；**前端门禁 119 passed / 0 failed / 21 suite**。
+
+---
 
 ## v0.11.0 变更摘要
 
@@ -62,7 +103,7 @@
 | M-06 畸形输入表驱动 + fuzz | D-03 / D-15 | ✅ |
 | ESM 链接检查（v0.10 已加） | D-01 / D-02 | ✅ 已有 |
 
-**基线跃迁**：`cargo test --workspace` 203 → **314**（+111）；前端门禁 38 → **109 用例 / 19 suite**（+71）。
+**基线跃迁**：`cargo test --workspace` 203 → **355**（lib 334 + 集成 21，+152）；前端门禁 38 → **109 用例 / 19 suite**（+71）。
 
 ### 工具链：Spike + RISC-V GCC 落地（Wave 2 golden 对拍的前置）
 
@@ -103,13 +144,13 @@
 
 ### 进度影响
 
-- **测试覆盖**：`cargo test --workspace` 203 → **334**（+131）；前端门禁 38 → **109 用例 / 19 suite**（+71）
-- **代码规模**：内核 +1 500 行（M-13 `alu.rs` / `tests_rv32i.rs`、M-12 `queue.rs`、M-06 `tests_malformed.rs`）；前端 +1 800 行（服务层 + mock 内核 + 7 个测试文件）
-- **新增模块级 review 报告**：M-13 ISS（13 项问题）、M-06 加载器（17 项问题 / 12 项闭环 / 5 项留账并说明理由）、前端服务层 —— **M-06 是该模块诞生以来第一次被系统检视**
+- **测试覆盖**：`cargo test --workspace` 203 → **355**（lib 334 + 集成 21，+152）；前端门禁 38 → **109 用例 / 19 suite**（+71）
+- **代码规模**：内核 **+6 917 行**、前端 **+4 255 行**（`git diff --shortstat main..HEAD`；此前此处写的 +1 500 / +1 800 严重低估 3~4 倍，V4 检视发现）
+- **新增模块级 review 报告**：M-13 ISS（13 项问题，检视轮补 #14 阻断级）、M-06 加载器（17 项问题 / 12 项闭环 / 5 项留账并说明理由）、前端服务层 —— **M-06 是该模块诞生以来第一次被系统检视**
 - **§3 人日**：本轮为并行化交付，按 WBS 口径 M-13 +3、M-12 +2、M-06 +1、前端 +2.5、T5 +1（M-14/M-15/M-18 接线）
-- **完成度**：约 26% → **约 32%**（90 人日 WBS 口径）
+- **完成度**：约 26% → **约 32%**（90 人日 WBS 口径）——⚠️ 该数字未经独立复核（WBS 文档不在仓内）
 
-`cargo test --workspace` = **334 passed / 0 failed**；`cargo clippy --workspace --all-targets -- -D warnings` 通过（且已删除 `non_canonical_partial_ord_impl` allowance）；`cargo fmt --all -- --check` 通过；**前端门禁 109 passed / 0 failed / 19 suite**。
+`cargo test --workspace` = **355 passed / 0 failed**（lib 334 + 集成 21）；`cargo clippy --workspace --all-targets -- -D warnings` 通过（且已删除 `non_canonical_partial_ord_impl` allowance）；`cargo fmt --all -- --check` 通过；**前端门禁 109 passed / 0 failed / 19 suite**。
 
 ---
 

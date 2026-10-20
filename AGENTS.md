@@ -45,7 +45,8 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 - Build (native):  `cargo build`（开发）/ `cargo build --release`（发布）
 - Build (WASM):    `tools/build-wasm.sh` 或 `tools/build-wasm.sh --release`
 - Test:            `cargo test --workspace`（单元 + 集成 + 黄金对拍）
-- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，109 用例 / 19 suite；Node ≥ 22）
+- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，119 用例 / 21 suite；Node ≥ 22）
+- Test (浏览器真机): `tools/browser-verify.mjs`（零依赖 CDP 脚本，需本机 Chrome + `python3 -m http.server 8080 --directory front`；**不进默认门禁**，按需运行）
 - Lint:            `cargo clippy --workspace --all-targets -- -D warnings`
 - Format:          `cargo fmt --all`
 - Typecheck:       N/A — Rust 编译器即类型检查
@@ -69,7 +70,9 @@ riscv_sim/
 │   ├── lib/                  # 契约 JS 镜像（message.js）+ 传输帧（frame.js）
 │   └── style.css
 ├── tools/
-│   └── build-wasm.sh         # wasm-pack 包装（无依赖 web/bundler，输出 no-modules）
+│   ├── build-wasm.sh         # wasm-pack 包装（无依赖 web/bundler，输出 no-modules）
+│   ├── check-front.sh        # 前端门禁（node:test）
+│   └── browser-verify.mjs    # 浏览器真机复验（零依赖 CDP，按需运行，不进默认门禁）
 ├── tests/
 │   ├── unit/                 # 单元测试
 │   └── golden/               # Spike 对拍测试（Wave 2 落地；工具链已就绪）
@@ -86,20 +89,20 @@ riscv_sim/
 | M-02 | 视图组件库 | `front/views/m02_viewcomponents.js` | ✅ v0.10 闭环；v0.11 加调试命令条 + 寄存器/内存视图 |
 | M-03 | 视图状态管理 | `front/views/m03_viewstore.js` | ✅ v0.10 闭环 |
 | M-04 | 会话管理器 | `front/services/m04_session.js` | ✅ v0.11 实现（状态机 + 断线重连） |
-| M-05 | 命令路由与事件分发 | `front/services/m05_commandrouter.js` | ✅ v0.11 实现（订阅/退订/一次性订阅） |
-| M-06 | ELF / Raw-HEX 解析器 | `crates/kernel/src/m06_elf/` | ✅ v0.11 加固 + **首次模块级 review**（D-03 阻断级消除） |
+| M-05 | 命令路由与事件分发 | `front/services/m05_commandrouter.js` | ✅ v0.11 实现（订阅/退订/一次性订阅）；v0.11.1 补 `once()` 一次性语义的观察与回归用例 |
+| M-06 | ELF / Raw-HEX 解析器 | `crates/kernel/src/m06_elf/` | ✅ v0.11 加固 + **首次模块级 review**（D-03 阻断级消除）；v0.11.1 检视轮再修 IHEX 嗅探判据 + bss gap 溢出 |
 | M-07 | 传输适配器 | `front/services/m07_transport.js` | ✅ v0.11 实现（Worker + WebSocket 双适配器；当前接 mock 内核） |
 | M-08 | 断点管理器 | `crates/kernel/src/m08_breakpoint/` | stub |
 | M-09 | 单步引擎 | `crates/kernel/src/m09_step/` | stub |
-| M-10 | 寄存器内存服务 | `front/services/m10_registermemory.js` | ✅ v0.11 实现（订阅寄存器/内存快照） |
+| M-10 | 寄存器内存服务 | `front/services/m10_registermemory.js` | ✅ v0.11 实现（订阅寄存器/内存快照）；v0.11.1 补断线重连后重订阅 |
 | M-11 | 符号表/DWARF/反汇编/trace 导出 | `crates/kernel/src/m11_symbol/` | stub |
-| M-12 | 事件驱动仿真引擎 | `crates/kernel/src/m12_engine/` | ✅ v0.11 加固（快照还原 now_ps+事件队列、推进不空转、seq 不撞号） |
-| M-13 | RISC-V ISS（RV32IMC） | `crates/kernel/src/m13_iss/` | ✅ v0.11 **RV32I 全集 41 条** + 模块级 review；M/C 扩展待做 |
+| M-12 | 事件驱动仿真引擎 | `crates/kernel/src/m12_engine/` | ✅ v0.11 加固（快照还原 now_ps+事件队列、推进不空转、seq 不撞号）；⚠️ **至今无独立模块级 review**（台账 D-30） |
+| M-13 | RISC-V ISS（RV32IMC） | `crates/kernel/src/m13_iss/` | ✅ v0.11 **RV32I 全集 41 条** + 模块级 review；v0.11.1 检视轮修 SYSTEM funct3 阻断级缺陷；M/C 扩展待做 |
 | M-14 | 总线与内存映射 | `crates/kernel/src/m14_bus/` | ✅ v0.4 完成 + v0.7.2 补完；v0.11 接线 PR |
 | M-15 | 外设模型层 | `crates/kernel/src/m15_peripheral/` | ✅ v0.7 三外设 + v0.11 接线 PR |
 | M-16 | 中断控制器 | `crates/kernel/src/m16_interrupt/` | stub |
 | M-17 | ExecutionBackend 执行后端 | `crates/kernel/src/m17_backend/` | stub（含 `SelfIssBackend`） |
-| M-18 | 探针 | `crates/kernel/src/m18_probe/` | ✅ v0.8 完整 `ProbeRegistry` + v0.9 `EdgeSink` + v0.11 接线 PR |
+| M-18 | 探针 | `crates/kernel/src/m18_probe/` | ✅ v0.8 完整 `ProbeRegistry` + v0.9 `EdgeSink` + v0.11 接线 PR；v0.11.1 修总线 hook 的 RefCell 重入 panic |
 | M-19 | 波形管道 | `crates/kernel/src/m19_waveform/` | ✅ v0.9 完整 `WaveformPipeline`：边沿编码 + 每通道环 + ≤20ms 批量推送 + CSV/VCD 分块导出 |
 | M-20 | 快照与确定性事件流记录 | `crates/kernel/src/m20_snapshot/` | stub（含 `SnapshotManager`） |
 | M-21 | 日志系统 | `crates/kernel/src/m21_logging/` | stub（含 `LogBuffer`） |
@@ -110,11 +113,15 @@ riscv_sim/
 > - `m12_engine::tests::engine_advances_time`（事件队列 + 时间推进）
 > - `m13_iss::tests::addi_executes`（RV32I ADDI 解释执行，x1=42）
 >
-> **v0.11 起新增判据**（`cargo test --workspace` 314 全绿）：
-> - `m13_iss::tests_rv32i::*`（RV32I 41 条指令 + 黄金编码 + 边界）
+> **v0.11 起新增判据**（`cargo test --workspace` 375 全绿 = lib 352 + 集成 23）：
+> - `m13_iss::tests_rv32i::*`（RV32I 41 条指令 + 黄金编码 + 边界 + CSR 形态 SYSTEM 陷阱 + 步进/回绕/子字存储）
 > - `m12_engine::tests::*`（snapshot→restore→继续推进的确定性）
 > - `m06_elf::tests_malformed::*`（畸形输入表驱动 + fuzz，均不得 panic）
-> - `crates/kernel/tests/m14_m15_m19_wiring.rs`（N5「GPIO 翻转可见」端到端）
+> - `crates/kernel/tests/m14_m15_m19_wiring.rs`（N5「GPIO 翻转可见」端到端 + 外设路径区域上限）
+>
+> **v0.11.1 检视轮新增判据**（4 路独立检视后补齐）：
+> - `m18_probe::tests::*`（总线 hook 在 `RefCell` 争用下不 panic）
+> - `m06_elf::tests::*`（IHEX 嗅探结构判据：raw 二进制首字节 `0x3A` 不再误判；4 GiB 总线边界）
 
 ## Code style
 
