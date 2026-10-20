@@ -439,3 +439,37 @@ fn timer_compare_hit_reaches_the_waveform_pipeline() {
         assert_eq!(e.t_ps, 2_000);
     }
 }
+
+// ---------------------------------------------------------------------------
+// D-10 — 区域大小上限（M-14 侧）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn oversized_region_is_rejected_without_allocating() {
+    // D-10（M-14 侧）：畸形固件可以声明 GiB 级的段；总线必须在
+    // **分配之前** 拒绝它，否则浏览器标签页直接 OOM。
+    let mut bus = Bus::new();
+    let err = bus
+        .map_ram(0, 0x4000_0000, &[])
+        .expect_err("a 1 GiB region must be rejected");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(err.scenario, 9, "over-cap region raises E_BUS-09");
+    assert_eq!(bus.region_count(), 0);
+}
+
+#[test]
+fn the_region_size_cap_is_configurable() {
+    // 上限可配：默认 16 MiB，宿主可按自己的预算策略调整。
+    let mut bus = Bus::with_max_region_bytes(0x1000);
+    assert_eq!(bus.max_region_bytes(), 0x1000);
+    bus.map_ram(0, 0x1000, &[])
+        .expect("a region at the cap is fine");
+    let err = bus
+        .map_ram(0x2000, 0x1001, &[])
+        .expect_err("a region over the cap must be rejected");
+    assert_eq!(err.scenario, 9);
+    // 调整上限后同样的尺寸可以映射了。
+    bus.set_max_region_bytes(0x2000);
+    bus.map_ram(0x2000, 0x1001, &[])
+        .expect("raising the cap works");
+}

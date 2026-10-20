@@ -20,6 +20,7 @@
 //!   E_BUS-06 size = 0            → PlatformError{Bus, 6}
 //!   E_BUS-07 init > region size  → PlatformError{Bus, 7}
 //!   E_BUS-08 periph size mismatch→ PlatformError{Bus, 8}  (D-12)
+//!   E_BUS-09 region over the cap → PlatformError{Bus, 9}  (D-10)
 //!
 //! Determinism (AD §8.1 D0): reads / writes are synchronous function
 //! calls, no hand-shake timing. Virtual time is owned by M-12; this
@@ -39,6 +40,16 @@ use riscv_sim_contract::port::Peripheral;
 
 /// 4 GiB — covers the entire RV32 physical address space.
 pub const BUS_SIZE: u64 = 0x1_0000_0000;
+
+/// Default upper bound on a single region's size, in bytes (D-10).
+///
+/// A malformed firmware image can declare a segment of ~4 GiB; without a
+/// cap, `map_ram` would happily `vec![0u8; size]` and OOM the host
+/// (in the browser: OOM the tab). 16 MiB matches the order of magnitude
+/// of M-06's `ParseLimits::max_region_bytes` default — M-14 does not
+/// depend on `m06_elf`, so the constant is defined locally (the two
+/// sides are independent; see `docs/reviews/CROSS_MODULE_DEBT.md` D-10).
+pub const DEFAULT_MAX_REGION_BYTES: u64 = 16 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Widths / access descriptors (kept local so future P1 extensions — e.g. 64-bit
@@ -381,6 +392,12 @@ pub struct Bus {
     hook: Option<BusHook>,
     last_ts_ps: u64,
     stats: BusStats,
+    /// Upper bound on a single region's size, in bytes (D-10).
+    ///
+    /// Checked **before** any backing store is allocated, so a malformed
+    /// firmware segment can never make the host allocate GiB-scale
+    /// memory. See [`DEFAULT_MAX_REGION_BYTES`].
+    max_region_bytes: u64,
     /// Next bus-side peripheral token handed out by
     /// [`Bus::map_peripheral_instance`].
     next_periph_id: u32,
@@ -393,6 +410,7 @@ impl Default for Bus {
             hook: None,
             last_ts_ps: 0,
             stats: BusStats::default(),
+            max_region_bytes: DEFAULT_MAX_REGION_BYTES,
             next_periph_id: 0,
         }
     }
@@ -404,6 +422,7 @@ impl std::fmt::Debug for Bus {
             .field("regions.len", &self.regions.len())
             .field("stats", &self.stats)
             .field("hook.installed", &self.hook.is_some())
+            .field("max_region_bytes", &self.max_region_bytes)
             .finish()
     }
 }
@@ -414,14 +433,41 @@ impl Bus {
         Self::default()
     }
 
+    /// Build an empty bus with a custom per-region size cap (D-10).
+    ///
+    /// `max_region_bytes` is a plain upper bound: `0` means *no region
+    /// fits at all*, `u64::MAX` means *effectively unlimited*. The
+    /// default ([`DEFAULT_MAX_REGION_BYTES`]) is the safe one — use
+    /// this constructor only when the host has its own budget policy.
+    pub fn with_max_region_bytes(max_region_bytes: u64) -> Self {
+        Self {
+            max_region_bytes,
+            ..Self::default()
+        }
+    }
+
+    /// Current per-region size cap, in bytes (D-10).
+    pub fn max_region_bytes(&self) -> u64 {
+        self.max_region_bytes
+    }
+
+    /// Adjust the per-region size cap at runtime (D-10).
+    ///
+    /// The cap is enforced on the *next* mapping operation; regions
+    /// that are already mapped are untouched.
+    pub fn set_max_region_bytes(&mut self, max_region_bytes: u64) {
+        self.max_region_bytes = max_region_bytes;
+    }
+
     /// Map a RAM region into the bus.
     pub fn map_ram(&mut self, base: u32, size: u32, init: &[u8]) -> Result<(), PlatformError> {
+        let cap = self.max_region_bytes;
         self.map_region(Region {
             base,
             size,
             kind: RegionType::Ram,
             target: RegionTarget::Ram(RamBackend {
-                bytes: Self::prepare_bytes(base, size, init)?,
+                bytes: Self::prepare_bytes(base, size, init, cap)?,
                 base_addr: base,
             }),
         })
@@ -429,12 +475,13 @@ impl Bus {
 
     /// Map a ROM region. Writes will be silently dropped.
     pub fn map_rom(&mut self, base: u32, size: u32, init: &[u8]) -> Result<(), PlatformError> {
+        let cap = self.max_region_bytes;
         self.map_region(Region {
             base,
             size,
             kind: RegionType::Rom,
             target: RegionTarget::Rom(RomBackend {
-                bytes: Self::prepare_bytes(base, size, init)?,
+                bytes: Self::prepare_bytes(base, size, init, cap)?,
                 base_addr: base,
             }),
         })
@@ -477,6 +524,8 @@ impl Bus {
     ///   [`Peripheral::size`] — otherwise the bus window and the
     ///   peripheral's register file disagree and accesses would land
     ///   outside the peripheral's own view. Mismatch → **E_BUS-08**.
+    /// - `size` must also respect the bus-wide cap
+    ///   ([`Bus::max_region_bytes`], D-10) → **E_BUS-09**.
     /// - Overlap with an existing region → **E_BUS-03**.
     ///
     /// Every failure leaves the existing region set untouched.
@@ -530,9 +579,30 @@ impl Bus {
     }
 
     /// Allocate the backing byte vector and validate `init` length.
-    fn prepare_bytes(base: u32, size: u32, init: &[u8]) -> Result<Vec<u8>, PlatformError> {
+    ///
+    /// **D-10:** the size cap is checked *before* the allocation, so a
+    /// malformed firmware segment can never make the host reserve GiB
+    /// of memory. `max_region_bytes` is the bus-wide cap
+    /// ([`Bus::max_region_bytes`]).
+    fn prepare_bytes(
+        base: u32,
+        size: u32,
+        init: &[u8],
+        max_region_bytes: u64,
+    ) -> Result<Vec<u8>, PlatformError> {
         if size == 0 {
             return Err(PlatformError::new(BUS_FAMILY, 6, "region size must be > 0"));
+        }
+        // D-10: reject oversized regions *before* allocating.
+        if u64::from(size) > max_region_bytes {
+            return Err(PlatformError::new(
+                BUS_FAMILY,
+                9,
+                format!(
+                    "region size {size} exceeds the per-region cap of {max_region_bytes} bytes \
+                     (base=0x{base:08x})"
+                ),
+            ));
         }
         if init.len() > size as usize {
             // Review #7: split this off from E_BUS-04 (overflow) so
@@ -555,9 +625,9 @@ impl Bus {
         Ok(bytes)
     }
 
-    /// Atomic region insert: validate `size > 0`, overflow, and overlap
-    /// against current regions, then insert. All failures preserve the
-    /// existing region set (LLD §3.3).
+    /// Atomic region insert: validate `size > 0`, overflow, the D-10
+    /// size cap, and overlap against current regions, then insert. All
+    /// failures preserve the existing region set (LLD §3.3).
     fn map_region(&mut self, mut region: Region) -> Result<(), PlatformError> {
         if region.size == 0 {
             return Err(PlatformError::new(BUS_FAMILY, 6, "region size must be > 0"));
@@ -579,6 +649,19 @@ impl Bus {
                 format!(
                     "region 0x{:08x}..0x{:08x} exceeds 4 GiB bus",
                     region.base, end
+                ),
+            ));
+        }
+        // D-10: the cap is enforced on *every* mapping path, not only
+        // the ones that allocate a backing store — a peripheral window
+        // claims an address interval just the same.
+        if u64::from(region.size) > self.max_region_bytes {
+            return Err(PlatformError::new(
+                BUS_FAMILY,
+                9,
+                format!(
+                    "region size {} exceeds the per-region cap of {} bytes (base=0x{:08x})",
+                    region.size, self.max_region_bytes, region.base
                 ),
             ));
         }
@@ -1183,7 +1266,7 @@ enum Crossing {
 
 // ---------------------------------------------------------------------------
 // Tests cover (see `tests.rs`):
-//   - map / unmap validation (E_BUS-03 / 04 / 06 / 07),
+//   - map / unmap validation (E_BUS-03 / 04 / 06 / 07 / 09),
 //   - lookup,
 //   - read / write happy paths with 8/16/32 widths,
 //   - ROM-write ignore,
@@ -1195,6 +1278,7 @@ enum Crossing {
 //   - peripheral **instance** dispatch: read → `read_clear`, write →
 //     `write`, size mismatch → E_BUS-08, busy instance → E_BUS-05
 //     (D-12 / D-14),
+//   - per-region size cap (E_BUS-09, D-10),
 //   - E_BUS-07 init-too-large independent of E_BUS-04 (review #7),
 //   - BusMaster trait shape.
 // ---------------------------------------------------------------------------

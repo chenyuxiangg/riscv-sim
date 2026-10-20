@@ -576,3 +576,70 @@ fn id_only_peripheral_mapping_still_reports_not_wired() {
     assert_eq!(err.family, ErrorFamily::Bus);
     assert_eq!(err.scenario, 5);
 }
+
+// ---------------------------------------------------------------------------
+// D-10 — per-region size cap (M-14 side).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn oversized_ram_region_is_rejected_before_allocating() {
+    // D-10: a malformed firmware image can declare a ~4 GiB segment.
+    // The cap must reject it *before* the backing store is allocated.
+    let mut bus = Bus::new();
+    let err = bus
+        .map_ram(0, 0x4000_0000, &[])
+        .expect_err("a 1 GiB region must be rejected");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(err.scenario, 9, "over-cap region → E_BUS-09");
+    assert_eq!(bus.region_count(), 0);
+}
+
+#[test]
+fn oversized_rom_region_is_rejected_before_allocating() {
+    // The ROM path allocates too — it must be capped as well.
+    let mut bus = Bus::new();
+    let err = bus
+        .map_rom(0, 0x4000_0000, &[])
+        .expect_err("a 1 GiB region must be rejected");
+    assert_eq!(err.scenario, 9);
+}
+
+#[test]
+fn the_region_size_cap_is_configurable() {
+    let mut bus = Bus::with_max_region_bytes(0x1000);
+    assert_eq!(bus.max_region_bytes(), 0x1000);
+    bus.map_ram(0, 0x1000, &[])
+        .expect("a region at the cap is fine");
+    let err = bus
+        .map_ram(0x2000, 0x1001, &[])
+        .expect_err("a region over the cap must be rejected");
+    assert_eq!(err.scenario, 9);
+    // The cap can be raised at runtime (the host owns the budget).
+    bus.set_max_region_bytes(0x2000);
+    bus.map_ram(0x2000, 0x1001, &[])
+        .expect("raising the cap works");
+}
+
+#[test]
+fn the_default_cap_leaves_normal_regions_untouched() {
+    // The default cap must not get in the way of a realistic image.
+    let mut bus = Bus::new();
+    assert_eq!(bus.max_region_bytes(), DEFAULT_MAX_REGION_BYTES);
+    bus.map_ram(0x8000_0000, 0x1000, &[0xAA; 4])
+        .expect("normal region");
+    bus.map_ram(0x8001_0000, 0x10_0000, &[])
+        .expect("16 MiB region");
+    assert_eq!(bus.region_count(), 2);
+}
+
+#[test]
+fn the_cap_also_guards_the_peripheral_window() {
+    // A peripheral window claims an address interval just like a RAM
+    // region does — the cap applies to it too.
+    let mock = Rc::new(RefCell::new(MockPeripheral::new("MOCK0", 0x3000, 0x10)));
+    let mut bus = Bus::with_max_region_bytes(0x8);
+    let err = bus
+        .map_peripheral_instance(0x3000, 0x10, Rc::clone(&mock) as _)
+        .expect_err("over-cap peripheral window must be rejected");
+    assert_eq!(err.scenario, 9);
+}
