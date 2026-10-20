@@ -358,10 +358,22 @@ pub fn classify(d: &Decoded) -> Option<Op> {
             0b001 => Some(Op::FenceI),
             _ => None,
         },
-        // SYSTEM: ECALL / EBREAK are selected by the 12-bit immediate.
-        0b111_0011 => match d.imm {
-            0 => Some(Op::Ecall),
-            1 => Some(Op::Ebreak),
+        // SYSTEM: ECALL / EBREAK are selected by the 12-bit immediate
+        // **and only when funct3 is zero**.
+        //
+        // The RISC-V unprivileged spec reserves `funct3 == 0b000` in
+        // this opcode for ECALL / EBREAK; every other funct3 is a CSR
+        // instruction (CSRRW / CSRRS / CSRRC and their immediate
+        // variants CSRRWI / CSRRSI / CSRRCI). Selecting on the
+        // immediate alone would misroute a CSR-shaped encoding such
+        // as `0x00001073` (csr = 0, funct3 = 0b001) into the ECALL
+        // handler and report mcause 11 instead of 2 — the trap would
+        // reach the wrong handler as soon as CSR support lands.
+        // The ISS does not implement CSR yet, so those encodings trap
+        // as an illegal instruction (review V1 defect 1).
+        0b111_0011 => match (d.funct3, d.imm) {
+            (0b000, 0) => Some(Op::Ecall),
+            (0b000, 1) => Some(Op::Ebreak),
             _ => None,
         },
         _ => None,
@@ -413,6 +425,28 @@ fn store_width(op: Op) -> WriteSize {
 }
 
 /// Value a store writes: the low bytes of the source register.
+///
+/// The ISS masks the source register down to the access width
+/// **before** handing the value to the bus. That is the
+/// architectural rule (`sb` writes the low 8 bits, `sh` the low 16)
+/// and the only way the bus can stay consistent between its three
+/// write paths:
+///
+/// - the RAM path masks per byte (`Bus::write_bytes`),
+/// - the peripheral path forwards the value unchanged together with
+///   the access width, and the M-15 models only mask where their
+///   register layout requires it (`GPIO`'s pin mask is `u32::MAX`),
+/// - the cross-region split path in the M-14 LLD (§3.2) already
+///   slices the value byte-wise.
+///
+/// Masking here makes all three observe the same 8/16-bit value, and
+/// makes the value the M-18 bus hook records identical to the value
+/// the target actually received.
+///
+/// Review V1 defect 4 flagged this mask as redundant because
+/// removing it left every test green — that was a coverage gap (no
+/// test asserted what a sub-word store delivers to a peripheral), not
+/// evidence of redundancy.
 fn truncate_store(op: Op, value: u32) -> u32 {
     match op {
         Op::Sb => alu::zext8(value),
@@ -431,7 +465,17 @@ fn is_aligned(addr: u32, size: WriteSize) -> bool {
 }
 
 /// PC after an instruction that falls through to the next one.
-fn sequential(d: &Decoded) -> u32 {
+///
+/// The step is the **decoded instruction length**, not a hard-coded
+/// 4: a decoder that always reports 4 makes every compressed (RV32C)
+/// instruction land on the wrong half-word boundary (D-16). The
+/// `Decoded::len` field exists precisely so the PC can advance by 2
+/// once the C extension lands.
+///
+/// `pub(crate)` so the module tests can pin the behaviour: a
+/// hard-coded `+ 4` here would silently break every compressed
+/// instruction (review V1 defect 2).
+pub(crate) fn sequential(d: &Decoded) -> u32 {
     d.pc.wrapping_add(d.len as u32)
 }
 

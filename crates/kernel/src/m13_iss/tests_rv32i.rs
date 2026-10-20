@@ -13,14 +13,16 @@
 //!   two dispatch routes share one semantic path (D-11).
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
-use riscv_sim_contract::model::{SimState, WriteSize};
+use riscv_sim_contract::model::{PendingWrite, SimState, WriteSize};
+use riscv_sim_contract::port::Peripheral;
 
 use crate::m14_bus::Bus;
 
-use super::decoder::Decoder;
-use super::executor::{read_gpr, MisalignedPolicy, StepOutcome, TrapCause};
+use super::decoder::{Decoded, Decoder};
+use super::executor::{read_gpr, sequential, MisalignedPolicy, StepOutcome, TrapCause};
 use super::Iss;
 
 // ---------------------------------------------------------------------------
@@ -45,6 +47,8 @@ const BRANCH: u8 = 0b110_0011;
 const JALR: u8 = 0b110_0111;
 /// Opcode of the JAL instruction.
 const JAL: u8 = 0b110_1111;
+/// The SYSTEM group (ECALL / EBREAK / CSR instructions).
+const SYSTEM: u8 = 0b111_0011;
 
 /// Encode an I-type instruction (12-bit signed immediate).
 fn enc_i(imm: i32, rs1: u8, funct3: u8, rd: u8, opcode: u8) -> u32 {
@@ -1437,4 +1441,297 @@ fn misaligned_fetch_address_traps() {
         }
     );
     assert_eq!(state.pc, 0x1001, "a trapped fetch must not advance the PC");
+}
+
+// ---------------------------------------------------------------------------
+// Review V1 defect 1 — ECALL / EBREAK need funct3 == 0
+// ---------------------------------------------------------------------------
+
+/// Every CSR-shaped encoding of the SYSTEM opcode must trap as an
+/// illegal instruction, not as ECALL or EBREAK.
+///
+/// The RISC-V unprivileged spec reserves `funct3 == 0b000` in the
+/// SYSTEM opcode for ECALL / EBREAK; funct3 001..111 select the CSR
+/// instruction family (CSRRW / CSRRS / CSRRC and their immediate
+/// variants CSRRWI / CSRRSI / CSRRCI). Selecting on the 12-bit
+/// immediate alone would route `0x00001073` (csr = 0, funct3 = 0b001)
+/// into the ECALL handler and report mcause 11 instead of 2 — the
+/// trap would reach the wrong handler as soon as CSR support lands.
+#[test]
+fn csr_shaped_system_encodings_trap_as_illegal_instruction() {
+    for funct3 in 0b001..=0b111u8 {
+        for csr in [0u32, 1, 5, 0xC00] {
+            let mut h = Harness::new();
+            let mut state = SimState::default();
+            // The CSR number lives in bits 31:20 — the same field the
+            // ECALL / EBREAK immediate occupies.
+            let word = enc_i(csr as i32, 0, funct3, 0, SYSTEM);
+            let outcome = h.step_one_at(&mut state, 0x1000, word);
+            assert_eq!(
+                outcome,
+                StepOutcome::Trapped {
+                    cause: TrapCause::IllegalInstruction
+                },
+                "csr={csr:#x} funct3={funct3:#b} must trap as an illegal instruction"
+            );
+        }
+    }
+}
+
+/// A CSR-shaped encoding whose immediate field happens to be 1 must
+/// not be reported as EBREAK.
+#[test]
+fn a_csr_shaped_system_encoding_is_never_ebreak() {
+    // csr = 1, funct3 = 0b001 (CSRRW) — the immediate field is 1.
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    let word = enc_i(1, 0, 0b001, 0, SYSTEM);
+    let outcome = h.step_one_at(&mut state, 0x1000, word);
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::IllegalInstruction
+        },
+        "csr=1 funct3=0b001 must not be reported as EBREAK"
+    );
+}
+
+/// SYSTEM with funct3 == 0 but an immediate other than 0 / 1 is
+/// neither ECALL nor EBREAK — MRET (`imm = 0x302`) and WFI
+/// (`imm = 0x105`) fall into this bucket.
+#[test]
+fn system_with_an_unexpected_immediate_traps_as_illegal_instruction() {
+    for imm in [2i32, 0x105, 0x302] {
+        let mut h = Harness::new();
+        let mut state = SimState::default();
+        let word = enc_i(imm, 0, 0b000, 0, SYSTEM);
+        let outcome = h.step_one_at(&mut state, 0x1000, word);
+        assert_eq!(
+            outcome,
+            StepOutcome::Trapped {
+                cause: TrapCause::IllegalInstruction
+            },
+            "SYSTEM imm={imm:#x} must trap as an illegal instruction"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Review V1 defect 2 — the PC steps by the decoded instruction length
+// ---------------------------------------------------------------------------
+
+/// A minimal [`Decoded`] for the tests that only care about the PC
+/// step.
+fn decoded_at(pc: u32, len: u8) -> Decoded {
+    Decoded {
+        opcode: OP_IMM,
+        funct3: 0b000,
+        funct7: 0,
+        rd: 0,
+        rs1: 0,
+        rs2: 0,
+        imm: 0,
+        raw: 0,
+        pc,
+        len,
+    }
+}
+
+/// The fall-through PC advances by the **decoded length**, not by a
+/// hard-coded 4 — a compressed (RV32C) instruction advances by 2.
+///
+/// A `+ 4` here would silently break every compressed instruction
+/// once the C extension lands (D-16).
+#[test]
+fn sequential_advances_by_the_decoded_instruction_length() {
+    assert_eq!(sequential(&decoded_at(0x1000, 2)), 0x1002);
+    assert_eq!(sequential(&decoded_at(0x1000, 4)), 0x1004);
+}
+
+/// The decoder's length drives the PC step for a real encoding too.
+#[test]
+fn the_pc_step_follows_the_length_the_decoder_reported() {
+    let word = enc_i(42, 0, 0b000, 1, OP_IMM);
+    let decoded = Decoder::default().decode(word, 0x1000);
+    assert_eq!(decoded.len, 4, "a 32-bit encoding decodes to 4 bytes");
+    assert_eq!(sequential(&decoded), 0x1004);
+}
+
+// ---------------------------------------------------------------------------
+// Review V1 defect 3 — the effective address wraps instead of panicking
+// ---------------------------------------------------------------------------
+
+/// A load whose effective address wraps around the 32-bit space must
+/// access the wrapped address, not panic.
+///
+/// `x1 = 0xFFFF_FFFF` plus an offset of 1 wraps to address 0. The
+/// address computation uses `wrapping_add`, so the access lands at 0
+/// — and a debug build must not abort on the overflow.
+#[test]
+fn a_load_whose_address_wraps_around_does_not_panic() {
+    let mut h = Harness::new();
+    // Plant 0x80 at address 0 → LB sign-extends it to 0xFFFF_FF80.
+    h.load(0, &[0x0000_0080]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0xFFFF_FFFF;
+    let word = enc_i(1, 1, 0b000, 2, LOAD);
+    let outcome = h.step_one_at(&mut state, 0x1000, word);
+    assert_eq!(
+        outcome,
+        StepOutcome::Advanced,
+        "the wrapped load must execute, not trap"
+    );
+    assert_eq!(
+        state.gpr[2], 0xFFFF_FF80,
+        "the load must read the wrapped address 0"
+    );
+}
+
+/// The same for a store: the wrapped address is written, and a
+/// follow-up load observes it.
+#[test]
+fn a_store_whose_address_wraps_around_does_not_panic() {
+    let mut h = Harness::new();
+    h.load(0, &[0]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0xFFFF_FFFF;
+    state.gpr[2] = 0x0000_00AB;
+    h.step_one_at(&mut state, 0x1000, enc_s(1, 2, 1, 0b000, STORE));
+    // Read it back with `lbu x3, 0(x0)`.
+    h.load(0x1004, &[enc_i(0, 0, 0b100, 3, LOAD)]);
+    state.pc = 0x1004;
+    h.step(&mut state).expect("step");
+    assert_eq!(
+        state.gpr[3], 0x0000_00AB,
+        "the store must have landed on the wrapped address 0"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Review V1 defect 4 — a sub-word store delivers the truncated value
+// ---------------------------------------------------------------------------
+
+/// A peripheral that records the raw value the bus hands it, so the
+/// sub-word store semantics can be observed end to end.
+#[derive(Default)]
+struct RecordingPeripheral {
+    /// The last write the bus delivered: `(offset, width, value)`.
+    last: Option<(u32, WriteSize, u32)>,
+}
+
+impl Peripheral for RecordingPeripheral {
+    fn id(&self) -> &str {
+        "REC0"
+    }
+
+    fn base_addr(&self) -> u32 {
+        0x2000
+    }
+
+    fn size(&self) -> u32 {
+        0x10
+    }
+
+    fn read(&self, _offset: u32, _size: WriteSize) -> Result<u32, PlatformError> {
+        Ok(0)
+    }
+
+    fn write(&mut self, offset: u32, size: WriteSize, value: u32) -> Result<(), PlatformError> {
+        self.last = Some((offset, size, value));
+        Ok(())
+    }
+
+    fn tick(&mut self, _now_ps: u64) -> Result<Vec<PendingWrite>, PlatformError> {
+        Ok(Vec::new())
+    }
+}
+
+/// A sub-word store must deliver the **truncated** value to a
+/// peripheral.
+///
+/// The M-14 bus hands a peripheral the value unchanged together with
+/// the access width, and the M-15 models do not mask it themselves
+/// (`GPIO`'s pin mask is `u32::MAX`). The ISS therefore masks the
+/// source register down to the access width before the value reaches
+/// the bus — otherwise `sb` of `0x1234` would deliver `0x1234` to the
+/// target while the very same store to RAM would write `0x34`.
+#[test]
+fn a_sub_word_store_to_a_peripheral_delivers_the_truncated_value() {
+    let periph = Rc::new(RefCell::new(RecordingPeripheral::default()));
+    let handle: Rc<RefCell<dyn Peripheral>> = periph.clone();
+
+    let mut bus = Bus::new();
+    bus.map_ram(0, 0x1000, &image(&[enc_s(0, 2, 1, 0b000, STORE)]))
+        .expect("map ram");
+    bus.map_peripheral_instance(0x2000, 0x10, handle)
+        .expect("map peripheral");
+
+    let mut iss = Iss::default();
+    let mut state = SimState::default();
+    state.gpr[1] = 0x2000; // the peripheral window
+    state.gpr[2] = 0x1234; // the value to store
+    iss.step_one_via_bus(&mut state, &mut bus)
+        .expect("step via bus");
+
+    let last = periph.borrow().last.expect("the peripheral saw a write");
+    assert_eq!(last.0, 0, "the write landed on the window's first byte");
+    assert_eq!(last.1, WriteSize::Byte, "an `sb` is a byte-wide access");
+    assert_eq!(
+        last.2, 0x0000_0034,
+        "an `sb` must deliver only the low 8 bits of the source register"
+    );
+}
+
+/// The mirror image: a word store delivers the full 32-bit value.
+#[test]
+fn a_word_store_to_a_peripheral_delivers_the_full_value() {
+    let periph = Rc::new(RefCell::new(RecordingPeripheral::default()));
+    let handle: Rc<RefCell<dyn Peripheral>> = periph.clone();
+
+    let mut bus = Bus::new();
+    bus.map_ram(0, 0x1000, &image(&[enc_s(0, 2, 1, 0b010, STORE)]))
+        .expect("map ram");
+    bus.map_peripheral_instance(0x2000, 0x10, handle)
+        .expect("map peripheral");
+
+    let mut iss = Iss::default();
+    let mut state = SimState::default();
+    state.gpr[1] = 0x2000;
+    state.gpr[2] = 0x1234_5678;
+    iss.step_one_via_bus(&mut state, &mut bus)
+        .expect("step via bus");
+
+    let last = periph.borrow().last.expect("the peripheral saw a write");
+    assert_eq!(last.1, WriteSize::Word, "an `sw` is a word-wide access");
+    assert_eq!(
+        last.2, 0x1234_5678,
+        "an `sw` must deliver all 32 bits of the source register"
+    );
+}
+
+/// A half-word store delivers the low 16 bits.
+#[test]
+fn a_half_word_store_to_a_peripheral_delivers_the_truncated_value() {
+    let periph = Rc::new(RefCell::new(RecordingPeripheral::default()));
+    let handle: Rc<RefCell<dyn Peripheral>> = periph.clone();
+
+    let mut bus = Bus::new();
+    bus.map_ram(0, 0x1000, &image(&[enc_s(0, 2, 1, 0b001, STORE)]))
+        .expect("map ram");
+    bus.map_peripheral_instance(0x2000, 0x10, handle)
+        .expect("map peripheral");
+
+    let mut iss = Iss::default();
+    let mut state = SimState::default();
+    state.gpr[1] = 0x2000;
+    state.gpr[2] = 0x1234_5678;
+    iss.step_one_via_bus(&mut state, &mut bus)
+        .expect("step via bus");
+
+    let last = periph.borrow().last.expect("the peripheral saw a write");
+    assert_eq!(last.1, WriteSize::Half, "an `sh` is a half-word access");
+    assert_eq!(
+        last.2, 0x0000_5678,
+        "an `sh` must deliver only the low 16 bits of the source register"
+    );
 }
