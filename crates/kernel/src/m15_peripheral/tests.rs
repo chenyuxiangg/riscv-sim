@@ -14,6 +14,133 @@
 
 use super::*;
 use riscv_sim_contract::model::WriteSize;
+use riscv_sim_contract::port::ProbeSink;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+// ---------------------------------------------------------------------------
+// Probe reporting (D-12) — the M-15 → M-18 signal source layer.
+// ---------------------------------------------------------------------------
+
+/// Recorded probe observations: `(signal, value, now_ps)`.
+type ProbeLog = Rc<RefCell<Vec<(String, u64, u64)>>>;
+
+/// Install a probe sink that records every observation as
+/// `(signal, value, now_ps)`.
+fn recording_probe() -> (ProbeLog, ProbeSink) {
+    let log: ProbeLog = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&log);
+    (
+        log,
+        Box::new(move |signal: &str, value: u64, now_ps: u64| {
+            sink.borrow_mut().push((signal.to_string(), value, now_ps));
+        }),
+    )
+}
+
+#[test]
+fn gpio_reports_out_changes_through_the_probe() {
+    // D-12: a pin level change reaches the probe pipeline; an unchanged
+    // level must not (it would spam the waveform).
+    let (log, sink) = recording_probe();
+    let mut gpio = GpioBank::new("GPIO0", 0);
+    gpio.on_probe(Some(sink));
+    gpio.set_directions(0xFFFF_FFFF);
+    gpio.tick(1_000).unwrap();
+
+    // 初值 0 → 写 0：电平没变 → 不上报。
+    gpio.write(0x4, WriteSize::Word, 0).unwrap();
+    assert!(
+        log.borrow().is_empty(),
+        "an unchanged level must not report"
+    );
+
+    gpio.write(0x4, WriteSize::Word, 0b101).unwrap();
+    let log = log.borrow();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].0, gpio::SIGNAL_OUT);
+    assert_eq!(log[0].1, 0b101, "the reported value is the pin bitmap");
+    assert_eq!(log[0].2, 1_000, "the timestamp is the peripheral's clock");
+}
+
+#[test]
+fn gpio_toggle_also_reports_the_new_level() {
+    let (log, sink) = recording_probe();
+    let mut gpio = GpioBank::new("GPIO0", 0);
+    gpio.on_probe(Some(sink));
+    gpio.set_directions(0xFFFF_FFFF);
+    gpio.write(0xC, WriteSize::Word, 1 << 3).unwrap();
+    let log = log.borrow();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].0, gpio::SIGNAL_OUT);
+    assert_eq!(log[0].1, 1 << 3);
+}
+
+#[test]
+fn uart_reports_tx_bytes_through_the_probe() {
+    let (log, sink) = recording_probe();
+    let mut uart = Uart16550::new("UART0", 0, 9600, 4);
+    uart.on_probe(Some(sink));
+    uart.tick(500).unwrap();
+
+    uart.write(0x0, WriteSize::Byte, u32::from(b'A')).unwrap();
+    let log = log.borrow();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].0, uart::SIGNAL_TX);
+    assert_eq!(log[0].1, u64::from(b'A'), "the reported value is the byte");
+    assert_eq!(log[0].2, 500);
+}
+
+#[test]
+fn timer_reports_compare_hits_through_the_probe() {
+    let (log, sink) = recording_probe();
+    let mut tim = TimerRiscv::new("TIM0", 0, 7);
+    tim.on_probe(Some(sink));
+    tim.set_mtimecmp(1_000);
+
+    tim.tick(500).unwrap();
+    assert!(log.borrow().is_empty(), "no hit before the deadline");
+
+    tim.tick(2_000).unwrap();
+    let log = log.borrow();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].0, timer::SIGNAL_CMP);
+    assert_eq!(log[0].1, 1, "the reported value is the hit flag");
+    assert_eq!(log[0].2, 2_000);
+}
+
+#[test]
+fn a_peripheral_without_a_probe_reports_nothing() {
+    // 未挂探针的外设不能因为上报路径而出错。
+    let mut gpio = GpioBank::new("GPIO0", 0);
+    gpio.write(0x4, WriteSize::Word, 0b1).unwrap();
+    assert_eq!(gpio.read(0x4, WriteSize::Byte).unwrap(), 1);
+}
+
+#[test]
+fn registry_handle_shares_the_same_instance() {
+    // D-12: the registry owns the instance; the bus gets a *handle* to
+    // the very same object, so a write through the handle is visible
+    // through the registry (and vice versa).
+    let mut reg = PeripheralRegistry::new();
+    reg.register(Uart16550::new("UART0", 0, 9600, 4)).unwrap();
+    let handle = reg.handle("UART0").expect("handle");
+
+    {
+        let mut p = handle.borrow_mut();
+        let _ = p.write(0x0, WriteSize::Byte, 0x41);
+    }
+    let status = reg
+        .get("UART0")
+        .unwrap()
+        .read(0x4, WriteSize::Byte)
+        .unwrap();
+    assert_eq!(
+        status & uart::status_bits::TX_READY,
+        0,
+        "the registry and the handle must see the same instance"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // PeripheralRegistry
@@ -66,7 +193,10 @@ fn registry_get_mut_allows_state_changes() {
         assert_eq!(u.id(), "UART0");
     }
     // Mutate via the typed trait object: write DATA → TX FIFO.
-    let u = reg.get_mut("UART0").expect("registered");
+    // `get_mut` hands out a `RefMut` guard (the registry owns the
+    // instance behind a `RefCell`), so the binding must be mutable to
+    // reach the `&mut self` methods.
+    let mut u = reg.get_mut("UART0").expect("registered");
     let _ = u.write(0x0, WriteSize::Byte, 0x41);
     // Verify the mutation took effect through the STATUS register:
     // TX_READY is cleared while a byte is in the TX FIFO.

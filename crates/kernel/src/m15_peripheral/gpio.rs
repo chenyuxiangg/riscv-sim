@@ -24,11 +24,28 @@
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
-use riscv_sim_contract::port::Peripheral;
+use riscv_sim_contract::port::{Peripheral, ProbeSink};
 
 use super::reg::{extract_subword, register_offset};
+use super::ProbeSlot;
 
 pub const GPIO_WINDOW: u32 = 0x10;
+
+/// Probe signal name for the output latch (D-12 / N5).
+///
+/// The M-18 channel is bound to `(peripheral id, signal)` — the signal
+/// name is what the peripheral reports and what the channel definition
+/// carries. `"OUT"` follows the contract's `ProbeSink` documentation
+/// (M-18 v0.8 §18-2: "Signal id is a stable string per peripheral
+/// (e.g. `"OUT"`, `"TX"`)") and the M-18 LLD's own channel examples.
+///
+/// The reported **value** is the pin bitmap (bit `n` = pin `n`), not a
+/// single bit — a 32-pin bank needs 32 bits of information. A channel
+/// bound to this signal should therefore be a multi-bit channel
+/// (M-18 LLD: "ch=1 GPIO0 … valueWidth = 按端口位宽"); a single-bit
+/// channel only ever sees pin 0 (M-18 masks the value to its LSB).
+pub const SIGNAL_OUT: &str = "OUT";
+
 const PIN_COUNT: u32 = 32;
 /// Mask of all valid pin bits for a 32-pin bank. MVP: bank is fixed at
 /// 32 pins so the mask is simply `u32::MAX`. Reserved for narrower banks
@@ -53,6 +70,17 @@ pub struct GpioBank {
     irq_lines: [u16; PIN_COUNT as usize],
     /// Sticky edge-triggered pending IRQ vector. Low bit = pin 0.
     pending_irqs: u32,
+    /// M-18 probe callback (D-12). Empty = no observer attached.
+    probe: ProbeSlot,
+    /// Last virtual time this peripheral observed (ps).
+    ///
+    /// The probe report has to carry a timestamp, but the contract's
+    /// `Peripheral::write` / `read` carry no time argument. The
+    /// authoritative clock is M-12's, and M-12 reaches the peripheral
+    /// through `Peripheral::tick(now_ps)` once per quantum — so the
+    /// peripheral remembers the last time it was ticked and stamps its
+    /// probe reports with it (D-07 wires M-12 → `tick`).
+    now_ps: u64,
 }
 
 impl GpioBank {
@@ -65,6 +93,8 @@ impl GpioBank {
             inputs: 0,
             irq_lines: [0xFFFF; PIN_COUNT as usize],
             pending_irqs: 0,
+            probe: ProbeSlot::default(),
+            now_ps: 0,
         }
     }
 
@@ -191,6 +221,12 @@ impl Peripheral for GpioBank {
                 // configured pin, regardless of direction — the OUT
                 // latch is firmware-controlled).
                 self.latch_edges(prev ^ self.outputs);
+                // D-12: report the new pin level to the probe
+                // pipeline. Only on an actual change — an unchanged
+                // level must not spam the waveform.
+                if prev != self.outputs {
+                    self.report(SIGNAL_OUT, self.outputs);
+                }
                 Ok(())
             }
             reg::TOGGLE => {
@@ -200,8 +236,13 @@ impl Peripheral for GpioBank {
                 // Reading this register returns 0 (write-only).
                 let mask = value & PIN_COUNT_MASK;
                 if mask != 0 {
+                    let prev = self.outputs;
                     self.outputs ^= mask;
                     self.latch_edges(mask);
+                    // D-12: a toggle is a level change too.
+                    if prev != self.outputs {
+                        self.report(SIGNAL_OUT, self.outputs);
+                    }
                 }
                 Ok(())
             }
@@ -218,12 +259,30 @@ impl Peripheral for GpioBank {
         }
     }
 
-    fn tick(&mut self, _now_ps: u64) -> Result<Vec<PendingWrite>, PlatformError> {
+    fn tick(&mut self, now_ps: u64) -> Result<Vec<PendingWrite>, PlatformError> {
+        // The engine owns the virtual clock (M-12); `tick` is how it
+        // reaches the peripheral. Remembering the time here is what
+        // lets the probe reports carry a meaningful timestamp.
+        self.now_ps = now_ps;
         Ok(Vec::new())
+    }
+
+    /// Install / replace the M-18 probe callback (D-12).
+    fn on_probe(&mut self, cb: Option<ProbeSink>) {
+        self.probe.set(cb);
     }
 }
 
 impl GpioBank {
+    /// Report one signal observation to the M-18 probe pipeline.
+    ///
+    /// The value is the pin bitmap; the timestamp is the last virtual
+    /// time the engine ticked this peripheral (see [`GpioBank::now_ps`]).
+    fn report(&mut self, signal: &str, value: u32) {
+        let now = self.now_ps;
+        self.probe.report(signal, u64::from(value), now);
+    }
+
     fn read_word(&self, word_offset: u32) -> Result<u32, PlatformError> {
         match word_offset {
             reg::DIR => Ok(self.directions),
