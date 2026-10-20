@@ -143,10 +143,10 @@ function publishViewState(viewId) {
  * reported in the footer note; nothing is thrown at the view.
  *
  * @param {{action?: string, viewId?: string}} detail
- * @param {{commandRouter: object, registerMemory: object}} services
+ * @param {{commandRouter: object, registerMemory: object, waveform: object}} services
  */
 async function handleCommand(detail, services) {
-    const { commandRouter, registerMemory } = services;
+    const { commandRouter, registerMemory, waveform } = services;
     const action = detail?.action;
     try {
         switch (action) {
@@ -163,10 +163,13 @@ async function handleCommand(detail, services) {
                 await commandRouter.dispatchCommand(Command.pause());
                 break;
             case "reset":
-                // `loadProject()` 装载工程**并且**强制重新订阅寄存器流
+                // 装载工程**并且**把两条内核侧订阅都强制重订
                 // （内核侧的订阅随工程一起失效了 —— 新工程 = 新会话，
-                // FR-13）。这两步绑在服务里，调用点不会漏掉后者。
-                await registerMemory.loadProject(buildMockProject());
+                // FR-13）。这三步绑在一个函数里，调用点不会漏掉后两步。
+                await loadProjectIntoKernel(
+                    { commandRouter, registerMemory, waveform },
+                    buildMockProject(),
+                );
                 break;
             case "read-regs":
                 await registerMemory.readRegisters();
@@ -185,20 +188,20 @@ async function handleCommand(detail, services) {
 
 /**
  * Bring the session up: create it, load the mock project, subscribe to
- * the register stream and probe the link with a `Nop` round-trip.
+ * the register + probe streams and probe the link with a `Nop` round-trip.
  *
  * Never throws — a missing kernel (e.g. the front-end gate running
  * under Node, where `Worker` does not exist) must not take the whole
  * workbench down.
  *
- * @param {{session: object, commandRouter: object, registerMemory: object, workspace: object}} services
+ * @param {{session: object, commandRouter: object, registerMemory: object, waveform: object, workspace: object}} services
  */
 async function startSession(services) {
-    const { session, commandRouter, registerMemory, workspace } = services;
+    const { session, commandRouter, registerMemory, waveform, workspace } = services;
     try {
         await session.createSession({ role: workspace.role });
         const project = buildMockProject();
-        // `loadProject()` 装载工程**并且**强制重新订阅寄存器流。
+        // 装载工程**并且**把两条内核侧订阅都强制重订。
         //
         // 为什么必须是「强制」：`LoadProject` 会清掉内核侧的主题集合
         // （新工程 = 新会话，FR-13），而 `ensureSubscribed()` 是**幂等**
@@ -209,7 +212,7 @@ async function startSession(services) {
         //
         // 这个缺陷在 mock 内核时代就存在，是第 1 阶段前端接上**真内核**
         // 之后、被真机断言「x1 必须是 42」逼出来的。
-        await registerMemory.loadProject(project);
+        await loadProjectIntoKernel({ commandRouter, registerMemory, waveform }, project);
         viewStore.setState("product", (prev) => ({
             ...prev,
             tree: project.tree,
@@ -223,28 +226,119 @@ async function startSession(services) {
 }
 
 /**
- * Push the probe channels of the kernel into the waveform view.
+ * 装载工程，并把**两条**内核侧订阅都强制重订。
+ *
+ * 三步绑在一个函数里（而不是散落在调用点的「记得再订阅一次」注释里）：
+ * 调用点只管调它，不会有人忘记后两步。
+ *
+ * 1. `waveform.reset()` —— 新工程 = 新会话，上一个会话的探针通道
+ *    不该继续挂在视图上；
+ * 2. `registerMemory.loadProject()` —— 装载工程 + 强制重订寄存器流
+ *    （D-45 的教训：内核侧的订阅会随工程一起失效）；
+ * 3. `waveform.subscribeProbeStream()` —— 强制重订探针流。同样的道理：
+ *    `LoadProject` 把内核的主题集合清空了，探针流不重订就**静默停掉**。
+ *
+ * @param {{commandRouter: object, registerMemory: object, waveform: object}} services
+ * @param {object} project — `model::Project` shaped value
+ */
+async function loadProjectIntoKernel(services, project) {
+    const { registerMemory, waveform } = services;
+    waveform.reset();
+    await registerMemory.loadProject(project);
+    await waveform.subscribeProbeStream();
+}
+
+/**
+ * 波形流的 id 前缀：**寄存器**波形流归 M-10（寄存器视图）消费。
+ *
+ * ⚠️ 判别方向不能反：第 1 阶段那版写的是「只认 `probe.` 开头的」，
+ * 而**真内核**的探针通道 id 是 `"{外设 id}.{信号名}"`（M-18 的
+ * `drain_waveform`），也就是 `GPIO0.OUT`——它不叫 `probe.*`。写成只认
+ * `probe.` 的话，真内核的通道会被**全部过滤掉**，波形视图永远是空的。
+ *
+ * 所以判别式是「**不是**寄存器流」，而不是「是某种前缀」。
+ */
+const REGISTER_STREAM_PREFIX = "cpu.";
+
+/**
+ * Wire the kernel's probe channels into the waveform view (D-46).
+ *
+ * 内核侧把探针边沿推成 `EventPayload::WaveformDelta`，**通道列表**和
+ * **边沿增量**走的是同一个事件形状（契约冻结，没有单独的「通道列表」
+ * 变体）。所以这里：
+ *
+ * - 通道列表：从边沿事件的 `streams` 里读（订阅时内核会**强制**推一次
+ *   空边沿的波形，通道就在里面）；
+ * - 边沿计数：**累加**。内核每次推送的是「自上次推送以来」的边沿
+ *   （`drain_waveform` 会清空），直接覆盖的话，视图上永远只有最后一批
+ *   的边沿数。
  *
  * @param {object} commandRouter
+ * @returns {{reset: () => void, subscribeProbeStream: () => Promise<object>}}
  */
-function wireWaveform(commandRouter) {
+export function wireWaveform(commandRouter) {
+    /**
+     * 累加出来的通道表。内核每次只推**增量**，所以边沿数必须在这里
+     * 累加，不能被下一批覆盖。
+     *
+     * @type {Map<string, {id: string, label: string, edges: number, lastValue: number|null}>}
+     */
+    const channels = new Map();
+
     commandRouter.subscribe("waveform.delta", (event) => {
-        const streams = (event.value?.streams ?? []).filter((s) =>
-            String(s.id ?? "").startsWith("probe."));
+        const streams = (event.value?.streams ?? []).filter(
+            (s) => !String(s.id ?? "").startsWith(REGISTER_STREAM_PREFIX),
+        );
         if (streams.length === 0) return;
+        for (const stream of streams) {
+            const id = String(stream.id ?? "");
+            if (!id) continue;
+            const edges = Array.isArray(stream.edges) ? stream.edges : [];
+            const entry = channels.get(id) ?? {
+                id,
+                label: stream.label ?? id,
+                edges: 0,
+                lastValue: null,
+            };
+            entry.label = stream.label ?? entry.label ?? id;
+            entry.edges += edges.length;
+            if (edges.length > 0) {
+                entry.lastValue = edges[edges.length - 1].value ?? entry.lastValue;
+            }
+            channels.set(id, entry);
+        }
         viewStore.setState("waveform", (prev) => ({
             ...prev,
             wave: {
                 ...(prev.wave ?? {}),
-                channels: streams.map((s) => ({
-                    id: s.id,
-                    label: s.label ?? s.id,
-                    edges: (s.edges ?? []).length,
-                })),
+                channels: [...channels.values()],
             },
         }));
         publishViewState("waveform");
     });
+
+    return {
+        /** 新会话：旧的通道不算数（FR-13 —— 每个 session 独立命名空间）。 */
+        reset() {
+            channels.clear();
+            viewStore.setState("waveform", (prev) => ({
+                ...prev,
+                wave: { ...(prev.wave ?? {}), channels: [] },
+            }));
+            publishViewState("waveform");
+        },
+        /**
+         * 订阅内核侧的探针流。
+         *
+         * 必须是**强制**的：`LoadProject` 清掉了内核的主题集合，不重订
+         * 的话探针推送会**静默停掉**（和 D-45 是同一个坑）。
+         *
+         * @returns {Promise<object>}
+         */
+        async subscribeProbeStream() {
+            return commandRouter.dispatchCommand(Command.subscribe("sim.waveform"));
+        },
+    };
 }
 
 async function bootstrap() {
@@ -286,6 +380,10 @@ async function bootstrap() {
         transport: transportApi,
         viewStore,
     });
+    // 探针接线（D-46）必须在**任何**装载之前挂好：
+    // `startSession` 会装载工程并订阅探针流，订阅的响应（通道列表）
+    // 到达时如果还没订阅 `waveform.delta`，那批数据就丢了。
+    const waveform = wireWaveform(commandRouter);
 
     const pending = {
         components: componentsPromise,
@@ -314,12 +412,11 @@ async function bootstrap() {
     renderStatus(transportApi.getTransportStatus());
 
     window.addEventListener("riscv:command", (ev) => {
-        void handleCommand(ev.detail, { commandRouter, registerMemory });
+        void handleCommand(ev.detail, { commandRouter, registerMemory, waveform });
     });
-    wireWaveform(commandRouter);
 
     // Fire and forget — the session comes up on its own.
-    void startSession({ session, commandRouter, registerMemory, workspace });
+    void startSession({ session, commandRouter, registerMemory, waveform, workspace });
 }
 
 bootstrap().catch((err) => {

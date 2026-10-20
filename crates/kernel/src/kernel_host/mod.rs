@@ -29,12 +29,28 @@
 //!
 //! ## 第 1 阶段的已知边界
 //!
-//! - **M-12 的调度循环没被启用**：本阶段没有外设 / 定时器，事件队列恒空，
-//!   所以指令执行直接由 M-17 驱动 M-13，M-12 承担的是**平台状态与虚拟
-//!   时钟的唯一持有者**。接线外设时再把调度循环打开。
-//! - **没有探针管道**：M-18 / M-19 没有接到总线上，所以 `sim.waveform`
-//!   订阅下**不产生**探针流。波形视图在第 1 阶段是空的——这是已知限制，
-//!   不是假数据。
+//! - **M-12 的调度循环没被启用**：本阶段没有定时器 / 事件队列，事件队列
+//!   恒空，所以指令执行直接由 M-17 驱动 M-13，M-12 承担的是**平台状态与
+//!   虚拟时钟的唯一持有者**。接线外设时再把调度循环打开。
+//!
+//! ## 探针管道（D-46）
+//!
+//! 探针管道是**接上了**的：
+//!
+//! ```text
+//! guest 写外设 → M-14 派发 → M-15 判「状态真变了」→ report(signal)
+//!    → M-18 判沿 → 边沿进 M-19 的环（EdgeSink）
+//!    → 本模块取边沿 → 契约 EventPayload::WaveformDelta
+//! ```
+//!
+//! - **总线 hook 是追加式的**（M-14 `add_hook`）：M-17 的观察点 hook 与
+//!   M-18 的访存 trace hook **共存**，后装的不会把先装的顶掉。
+//! - **通道列表与边沿走同一个事件形状**（契约冻结，没有单独的「通道列表」
+//!   变体）：订阅 `sim.waveform` 时**强制**推一次（哪怕还没有边沿），
+//!   前端据此列出「有这条信号，只是还没变化」。
+//! - **波形的时间轴靠外设时钟**：M-15 的 GPIO 在 `tick(now_ps)` 里记下
+//!   当前时间，边沿才带得上真实时间戳。M-17 的步进循环每条指令同步一次
+//!   外设时钟（D-07 的时间驱动调度器落地后由 M-12 的量子边界接管）。
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -53,7 +69,61 @@ use riscv_sim_contract::SCHEMA_VERSION;
 
 use crate::m06_elf::{DefaultLoader, Kind as LoadKind, ParseLimits};
 use crate::m12_engine::DEFAULT_INSTRUCTION_BUDGET;
+use crate::m15_peripheral::gpio::{GpioBank, GPIO_WINDOW};
 use crate::m17_backend::SelfIssBackend;
+use crate::m18_probe::{ChannelDef, ChannelKind, ProbeRegistry, SampleCfg, CH_GPIO0};
+use crate::m19_waveform::{ChannelMeta, SharedPipeline, WaveformPipeline};
+
+/// GPIO 外设的基址（PL061 惯例）。
+///
+/// 与默认内存图的两段 RAM（`0x0000_0000` / `0x8000_0000`）都不重叠。
+pub const DEFAULT_GPIO_BASE: u32 = 0x4000_0000;
+
+/// GPIO 外设的实例 id（同时是 M-18 通道的 source）。
+pub const GPIO_PERIPH_ID: &str = "GPIO0";
+
+/// GPIO 的信号名（M-15 `gpio::SIGNAL_OUT`）。
+pub const GPIO_SIGNAL_NAME: &str = "OUT";
+
+/// **demo 固件**（40 字节，RV32I 手写编码，小端）。
+///
+/// 这是**演示平台**的默认镜像，也是前端 `front/dev/demo-firmware.js`
+/// 里那份的**同一个程序**——两边必须**逐字节相同**，否则前端看到的和
+/// 内核跑的不是同一个程序（而两边各自都有测试，绿着测不同的固件）。
+///
+/// ```text
+/// 0x00  addi x1, x0, 42
+/// 0x04  addi x2, x0, 7
+/// 0x08  add  x3, x1, x2
+/// 0x0c  sw   x3, 0x100(x0)
+/// 0x10  jal  x0, 0x14
+/// 0x14  lui  x5, 0x40000      ← x5 = GPIO 基址
+/// 0x18  addi x6, x0, 1
+/// 0x1c  sw   x6, 4(x5)        ← GPIO0.OUT = 1（探针边沿，D-46）
+/// 0x20  addi x4, x0, 1        ← 断点靶点
+/// 0x24  jal  x0, 0            ← 自环
+/// ```
+///
+/// ⚠️ **单一权威副本**：Rust 侧**只有这一份**——`kernel_host` 的单元测试
+/// 与 `crates/kernel/tests/d46_probe_pipeline.rs` 都引用它，不各自抄一份。
+/// 之前抄了三份（JS + 两份 Rust），改一份另两份照旧通过，正是「三份副本
+/// 各自有测试」这种最坏的漂移形态。
+///
+/// 防漂移的用例在 `crates/kernel/tests/d46_probe_pipeline.rs`：它**直接读**
+/// `front/dev/demo-firmware.js` 的字节数组来比对。
+pub const DEMO_FIRMWARE_BYTES: [u8; 40] = [
+    0x93, 0x00, 0xa0, 0x02, 0x13, 0x01, 0x70, 0x00, 0xb3, 0x81, 0x20, 0x00, 0x23, 0x20, 0x30, 0x10,
+    0x6f, 0x00, 0x40, 0x00, 0xb7, 0x02, 0x00, 0x40, 0x13, 0x03, 0x10, 0x00, 0x23, 0xa2, 0x62, 0x00,
+    0x13, 0x02, 0x10, 0x00, 0x6f, 0x00, 0x00, 0x00,
+];
+
+/// 波形通道的显示标签。
+pub const GPIO_SIGNAL_LABEL: &str = "GPIO0.OUT";
+
+/// GPIO `OUT` 信号的位宽（32 个引脚 → 32 位位图）。
+///
+/// 与 M-18 LLD 表 68 的「valueWidth = 按端口位宽」一致。
+pub const GPIO_VALUE_WIDTH: u8 = 32;
 
 /// 订阅主题：寄存器快照。
 ///
@@ -125,6 +195,10 @@ pub struct KernelHost {
     published_pc: u32,
     /// 是否已经发布过（全量快照之后才为真）。
     published_valid: bool,
+    /// M-18 探针注册表（D-46）—— 判沿 + 访存 trace 环。
+    probes: Option<Rc<RefCell<ProbeRegistry>>>,
+    /// M-19 波形管道（D-46）—— 边沿的环形缓冲（导出用）。
+    waveform: Option<SharedPipeline>,
 }
 
 impl std::fmt::Debug for KernelHost {
@@ -160,21 +234,155 @@ impl KernelHost {
             published_regs: [0; 32],
             published_pc: 0,
             published_valid: false,
+            probes: None,
+            waveform: None,
         };
         // The default memory map cannot fail on a fresh bus (the two
         // regions do not overlap and are far below the 16 MiB per-region
         // cap). If it ever does, the failure is reported by the next
         // `LoadProject` — which re-maps the memory anyway.
         let _ = host.map_default_memory();
+        host.install_probe_pipeline();
         host
     }
 
-    /// 建立默认内存图（低段 1 MiB + 高段 4 MiB RAM）。
+    /// 建立默认内存图（低段 1 MiB + 高段 4 MiB RAM + 一个 GPIO 外设）。
     fn map_default_memory(&mut self) -> Result<(), PlatformError> {
         let bus = self.backend.bus_mut();
         bus.map_ram(DEFAULT_RAM_LOW_BASE, DEFAULT_RAM_LOW_SIZE, &[])?;
         bus.map_ram(DEFAULT_RAM_HIGH_BASE, DEFAULT_RAM_HIGH_SIZE, &[])?;
+        // GPIO 外设（D-46）：**没有外设就没有信号可观察**——波形管道
+        // 会一直是空的。基址取 PL061 惯例的 0x4000_0000，与两段 RAM
+        // 都不重叠。
+        let gpio = Rc::new(RefCell::new(GpioBank::new(
+            GPIO_PERIPH_ID,
+            DEFAULT_GPIO_BASE,
+        )));
+        bus.map_peripheral_instance(DEFAULT_GPIO_BASE, GPIO_WINDOW, gpio)?;
         Ok(())
+    }
+
+    /// 装上探针管道（D-46）：M-14 总线 → M-18 判沿 → M-19 环形缓冲。
+    ///
+    /// 装的是**四根线**：
+    ///
+    /// 1. M-14 的总线 hook → M-18 的访存 trace 环（M-11 导出用）；
+    /// 2. M-18 → M-19 的 `EdgeSink` 握手（每条边沿同时进 M-19 的环）；
+    /// 3. M-18 的通道定义（与 M-19 的通道号一一对应）；
+    /// 4. M-19 的通道定义 + `SharedPipeline` 句柄。
+    ///
+    /// ⚠️ 必须在**总线建好之后**调用：`reset_memory_map`（装载新工程时）
+    /// 会换上一条**全新的**总线，总线上挂的 hook 一并不见了——所以那里
+    /// 也要重装一遍。
+    fn install_probe_pipeline(&mut self) {
+        let registry = Rc::new(RefCell::new(ProbeRegistry::new()));
+
+        // M-19 的环形缓冲：边沿的长期历史 + CSV/VCD 导出。
+        //
+        // 通道元数据必须与 M-18 那一侧**一致**：GPIO 的 `OUT` 信号是
+        // **32 位引脚位图**（M-15 `gpio::SIGNAL_OUT` 的定义），不是
+        // 单个引脚的电平。所以它是 **multi-bit / 32 位**——M-18 LLD
+        // 表 68 的「valueWidth = 按端口位宽」。把它当单比特通道，
+        // 32 个引脚就只剩 pin 0 有信息了（M-15 的 `gpio.rs` 头注释
+        // 明确写了这条）。
+        let shared = SharedPipeline::new({
+            let mut p = WaveformPipeline::new();
+            p.define_channel(
+                CH_GPIO0,
+                ChannelMeta::multi_bit(GPIO_SIGNAL_LABEL, GPIO_VALUE_WIDTH),
+            );
+            p
+        });
+
+        // M-18 → M-19 握手：每条边沿同时进 M-19 的环形缓冲。
+        registry
+            .borrow_mut()
+            .set_edge_sink(Some(Box::new(shared.clone())));
+
+        // M-18 的通道定义（通道号与 M-19 的**必须**一致）。
+        let _ = registry.borrow_mut().define_channel(ChannelDef::multi_bit(
+            CH_GPIO0,
+            GPIO_PERIPH_ID,
+            GPIO_SIGNAL_NAME,
+            GPIO_VALUE_WIDTH,
+        ));
+
+        // 打开探针：master + 通道。
+        let mut cfg = SampleCfg {
+            master_enable: true,
+            ..Default::default()
+        };
+        cfg.enable_channel(CH_GPIO0);
+        registry.borrow_mut().set_rate(cfg);
+
+        // M-14 总线 → M-18 的访存 trace 环。
+        // `make_bus_hook` 自带争用处理：注册表被占用时丢弃这条访存并
+        // 计数，**不阻塞**总线派发路径。
+        self.backend
+            .bus_mut()
+            .add_hook(ProbeRegistry::make_bus_hook(Rc::clone(&registry)));
+
+        self.probes = Some(registry);
+        self.waveform = Some(shared);
+    }
+
+    /// 给已映射的外设装上探针回调（M-18 `attach_signal`）。
+    ///
+    /// 这一步把「外设状态变化」接到「M-18 的通道」上——波形流是从**这里**
+    /// 来的，不是从总线访存来的（总线访存只进 trace 环）。
+    fn attach_peripheral_probes(&mut self) {
+        let Some(registry) = self.probes.clone() else {
+            return;
+        };
+        for (_base, handle) in self.backend.bus().peripheral_instances() {
+            // 外设正被总线派发路径占用时跳过——下一次 attach 会补上。
+            let Ok(mut periph) = handle.try_borrow_mut() else {
+                continue;
+            };
+            if periph.id() != GPIO_PERIPH_ID {
+                continue;
+            }
+            let _ = ProbeRegistry::attach_signal(
+                Rc::clone(&registry),
+                &mut *periph,
+                GPIO_SIGNAL_NAME,
+                CH_GPIO0,
+                ChannelKind::MultiBit,
+                GPIO_VALUE_WIDTH,
+            );
+        }
+    }
+
+    /// 重建整个平台：内存图 + 探针管道 + 外设探针回调。
+    ///
+    /// 装载新工程时走这里——新工程 = 新会话，内存图与探针管道都要重来。
+    fn rebuild_platform(&mut self) -> Result<(), PlatformError> {
+        self.backend.reset_memory_map();
+        self.map_default_memory()?;
+        self.install_probe_pipeline();
+        self.attach_peripheral_probes();
+        Ok(())
+    }
+
+    /// 取一批波形边沿，推成契约事件（D-46）。
+    ///
+    /// - `force = true`（订阅时）：即使还没有边沿也要推一次——前端要看到
+    ///   **通道列表**，否则它不知道「有这条信号，只是还没变化」。
+    /// - `force = false`（每轮运行后）：只在真有边沿时推。
+    fn waveform_event(&mut self, force: bool) -> Option<EventPayload> {
+        if !self.topics.contains(TOPIC_WAVEFORM) {
+            return None;
+        }
+        let registry = self.probes.as_ref()?;
+        let mut reg = registry.try_borrow_mut().ok()?;
+        let wave = reg.drain_waveform();
+        if wave.streams.is_empty() {
+            return None;
+        }
+        if !force && wave.streams.iter().all(|s| s.edges.is_empty()) {
+            return None;
+        }
+        Some(EventPayload::WaveformDelta(wave))
     }
 
     // -- JSON 桥 ------------------------------------------------------------
@@ -335,12 +543,18 @@ impl KernelHost {
         }
     }
 
-    /// 装载工程：复位 → 重建内存图 → 加载镜像 → 换新会话（清订阅）。
+    /// 装载工程：复位 → 重建平台 → 加载镜像 → 换新会话（清订阅）。
     fn on_load_project(&mut self, project: Project) -> Vec<EventPayload> {
         let _ = self.backend.reset();
         self.backend.clear_debug_state();
-        self.backend.reset_memory_map();
-        if let Err(err) = self.map_default_memory() {
+        // 重建平台：**内存图 + 探针管道 + 外设探针回调**一起重来。
+        //
+        // ⚠️ 不能只 `reset_memory_map()` + `map_default_memory()`：
+        // `reset_memory_map` 换上一条**全新**的总线，总线上挂的 hook
+        // （M-17 的观察点 hook + M-18 的访存 trace hook）**一起没了**，
+        // 外设的探针回调也随旧外设一起没了。探针管道必须在新的总线上
+        // 重新装一遍（D-46）。
+        if let Err(err) = self.rebuild_platform() {
             return vec![self.error_from(&err)];
         }
 
@@ -420,6 +634,10 @@ impl KernelHost {
         if let Some(wave) = self.register_waveform(false) {
             events.push(wave);
         }
+        // 探针波形（D-46）：本轮运行里外设状态变化产生的边沿。
+        if let Some(wave) = self.waveform_event(false) {
+            events.push(wave);
+        }
         let reason = self.backend.last_stop_reason().or_else(|| {
             // `Continue` 跑到预算上限也是一个合法的停止条件（契约里
             // 最接近的取值是 `EndOfExecution`）；`StepN` 跑满 n 条是
@@ -464,9 +682,14 @@ impl KernelHost {
             }
         }
         if want_waveform {
-            // 第 1 阶段没有真实探针管道（M-18/M-19 未接总线），因此这里
-            // **不产生**探针流。波形视图在第 1 阶段是空的——已知限制，
-            // 不是假数据。
+            // 探针波形（D-46）：**强制**推一次，即使还没有边沿。
+            //
+            // 前端要看到**通道列表**——「有这条信号，只是还没变化」和
+            // 「根本没有这条信号」是两回事。前者只靠边沿是表达不出来的：
+            // 第一批边沿到来之前，前端会一直显示「尚无探针信号」。
+            if let Some(wave) = self.waveform_event(true) {
+                events.push(wave);
+            }
         }
         events
     }

@@ -15,19 +15,30 @@ const frontDir = resolve(here, "..");
 
 const importFront = (rel) => import(pathToFileURL(resolve(frontDir, rel)).href);
 
-const { DEMO_FIRMWARE_BYTES, DEMO_FIRMWARE_BREAKPOINT_ADDR } = await importFront("dev/demo-firmware.js");
+const {
+    DEMO_FIRMWARE_BYTES,
+    DEMO_FIRMWARE_BREAKPOINT_ADDR,
+    DEMO_FIRMWARE_GPIO_BASE,
+    DEMO_FIRMWARE_GPIO_OUT_OFFSET,
+} = await importFront("dev/demo-firmware.js");
 const { buildMockProject } = await importFront("dev/mock-project.js");
 
-/** The byte list the stage-1 brief froze, byte for byte. */
+/**
+ * The byte list the demo firmware is frozen at (byte for byte).
+ *
+ * ⚠️ 2026-10-21（D-46）：0x10..0x1c 从「跳到 0x20 + 三条 nop」改成
+ * 「跳到 0x14 + 三条 GPIO 设置指令」——demo 固件必须**真的动一下引脚**，
+ * 否则探针管道接通了也没有边沿可推，波形视图仍然是空的。
+ */
 const EXPECTED_BYTES = [
     0x93, 0x00, 0xa0, 0x02,
     0x13, 0x01, 0x70, 0x00,
     0xb3, 0x81, 0x20, 0x00,
     0x23, 0x20, 0x30, 0x10,
-    0x6f, 0x00, 0x00, 0x01,
-    0x13, 0x00, 0x00, 0x00,
-    0x13, 0x00, 0x00, 0x00,
-    0x13, 0x00, 0x00, 0x00,
+    0x6f, 0x00, 0x40, 0x00,
+    0xb7, 0x02, 0x00, 0x40,
+    0x13, 0x03, 0x10, 0x00,
+    0x23, 0xa2, 0x62, 0x00,
     0x13, 0x02, 0x10, 0x00,
     0x6f, 0x00, 0x00, 0x00,
 ];
@@ -99,6 +110,48 @@ describe("demo 固件", () => {
             [0x13, 0x02, 0x10, 0x00],
             "0x20 处不是断点靶点指令",
         );
+    });
+
+    test("GPIO 设置段：0x14..0x1c 真的在驱动引脚（D-46）", () => {
+        // 0x14: `lui x5, 0x40000` → x5 = GPIO 基址 0x4000_0000。
+        const lui = wordAt(0x14);
+        assert.equal(lui & 0x7f, 0x37, "opcode 必须是 LUI");
+        assert.equal((lui >>> 7) & 0x1f, 5, "rd 必须是 x5");
+        const imm20 = lui >>> 12; // LUI 的立即数就在 bit[31:12]
+        assert.equal((imm20 << 12) >>> 0, DEMO_FIRMWARE_GPIO_BASE, "x5 必须是 GPIO 基址");
+
+        // 0x18: `addi x6, x0, 1` → x6 = 1。
+        const addi = wordAt(0x18);
+        assert.equal(addi & 0x7f, 0x13, "opcode 必须是 ADDI");
+        assert.equal((addi >>> 7) & 0x1f, 6, "rd 必须是 x6");
+        assert.equal((addi >>> 15) & 0x1f, 0, "rs1 必须是 x0");
+        assert.equal(addi >> 20, 1, "立即数必须是 1");
+
+        // 0x1c: `sw x6, 4(x5)` → GPIO0.OUT = 1。
+        const sw = wordAt(0x1c);
+        assert.equal(sw & 0x7f, 0x23, "opcode 必须是 STORE");
+        assert.equal((sw >>> 12) & 0x7, 0x2, "funct3 必须是 word");
+        assert.equal((sw >>> 20) & 0x1f, 6, "rs2 必须是 x6");
+        assert.equal((sw >>> 15) & 0x1f, 5, "rs1 必须是 x5");
+        assert.equal(
+            decodeSTypeImm(sw),
+            DEMO_FIRMWARE_GPIO_OUT_OFFSET,
+            "sw 的偏移量必须解回 GPIO OUT 的偏移",
+        );
+    });
+
+    test("0x10 的跳转目标是 0x14（不是 0x20）", () => {
+        // J 型立即数以**半字**为单位，解回字节偏移再加回 PC。
+        const jal = wordAt(0x10);
+        assert.equal(jal & 0x7f, 0x6f, "opcode 必须是 JAL");
+        assert.equal((jal >>> 7) & 0x1f, 0, "rd 必须是 x0（无条件跳转）");
+        const imm =
+            ((jal >>> 31) & 0x1) * 0x100000 +
+            ((jal >>> 21) & 0x3ff) * 2 +
+            ((jal >>> 20) & 0x1) * 0x800 +
+            ((jal >>> 12) & 0xff) * 0x1000;
+        const sign = imm & 0x100000 ? imm - 0x200000 : imm;
+        assert.equal(0x10 + sign, 0x14, "跳转必须落到 GPIO 设置段");
     });
 
     test("字节数组被冻结（调用方改不动）", () => {

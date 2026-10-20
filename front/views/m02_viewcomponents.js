@@ -317,7 +317,7 @@ const regmemView = register({
 });
 
 // ---------------------------------------------------------------------------
-// waveformView — placeholder for FR-10/14. Renders channel list.
+// waveformView — 探针通道列表 (D-46).
 // ---------------------------------------------------------------------------
 
 const waveformView = register({
@@ -329,12 +329,15 @@ const waveformView = register({
             <section class="waveform">
                 <h3>波形 (M-19)</h3>
                 ${channels.length === 0
-                    ? `<p class="muted">尚无探针信号 — M-15 + M-18 接入后会列出通道。</p>`
+                    ? `<p class="muted">尚无探针信号 — 固件驱动外设后（M-15 + M-18 管道已接通）会列出通道。</p>`
                     : `<ul class="channel-list">
                         ${channels.map((c) => `
                             <li>
                                 <span class="channel-label">${escapeHtml(c.label || c.id)}</span>
                                 <span class="muted">${c.edges ?? 0} edges</span>
+                                ${c.lastValue === null || c.lastValue === undefined
+                                    ? ""
+                                    : `<span class="muted">· 最新值 ${escapeHtml(String(c.lastValue))}</span>`}
                             </li>`).join("")}
                        </ul>`}
             </section>

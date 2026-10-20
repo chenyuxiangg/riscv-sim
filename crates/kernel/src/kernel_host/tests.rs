@@ -12,25 +12,11 @@ use super::*;
 
 use riscv_sim_contract::model::{ProductTree, ProjectVersion, SimState};
 
-/// demo 固件（40 字节，RV32I 手写编码，小端）。
+/// demo 固件 —— **引用共享常量**，不抄一份。
 ///
-/// ```text
-/// 0x00  addi x1, x0, 42
-/// 0x04  addi x2, x0, 7
-/// 0x08  add  x3, x1, x2
-/// 0x0c  sw   x3, 0x100(x0)
-/// 0x10  jal  x0, 0x20
-/// 0x14  nop
-/// 0x18  nop
-/// 0x1c  nop
-/// 0x20  addi x4, x0, 1     ← 断点靶点
-/// 0x24  jal  x0, 0         ← 自环
-/// ```
-const DEMO_BYTES: [u8; 40] = [
-    0x93, 0x00, 0xa0, 0x02, 0x13, 0x01, 0x70, 0x00, 0xb3, 0x81, 0x20, 0x00, 0x23, 0x20, 0x30, 0x10,
-    0x6f, 0x00, 0x00, 0x01, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00,
-    0x13, 0x02, 0x10, 0x00, 0x6f, 0x00, 0x00, 0x00,
-];
+/// 权威副本在 `kernel_host::DEMO_FIRMWARE_BYTES`（Rust 侧唯一一份），
+/// 它与前端 `front/dev/demo-firmware.js` 逐字节相同。
+use super::DEMO_FIRMWARE_BYTES as DEMO_BYTES;
 
 /// demo 固件里的断点靶点地址。
 const DEMO_BREAKPOINT_ADDR: u32 = 0x20;
@@ -246,11 +232,16 @@ fn store_then_read_memory_round_trips() {
 fn read_memory_on_unmapped_address_is_an_error() {
     let mut host = KernelHost::new();
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
-    // 0x4000_0000 不在默认内存图里。
+    // 0x5000_0000 不在默认内存图里。
+    //
+    // ⚠️ 口径：默认内存图**现在**还映射了 GPIO（0x4000_0000，D-46），
+    // 所以「未映射」的样例地址换成了 0x5000_0000。原来的 0x4000_0000
+    // 现在读得到东西（DIR 寄存器），拿它当「未映射」会让这条用例失去
+    // 判别力。
     let events = dispatch(
         &mut host,
         CommandPayload::ReadMemory {
-            addr: 0x4000_0000,
+            addr: 0x5000_0000,
             size: WriteSize::Word,
         },
     );
@@ -280,10 +271,12 @@ fn write_memory_then_read_back() {
 fn write_memory_to_unmapped_address_is_an_error() {
     let mut host = KernelHost::new();
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    // 0x5000_0000 不在默认内存图里（0x4000_0000 现在是 GPIO，见
+    // `read_memory_on_unmapped_address_is_an_error` 的口径说明）。
     let events = dispatch(
         &mut host,
         CommandPayload::WriteMemory {
-            addr: 0x4000_0000,
+            addr: 0x5000_0000,
             size: WriteSize::Word,
             value: 1,
         },
@@ -466,8 +459,12 @@ fn fetch_from_unmapped_memory_is_reported_as_an_error() {
     let mut host = KernelHost::new();
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // 把 PC 挪到未映射地址（契约的 `Restore` 带完整 `SimState`）。
+    //
+    // ⚠️ 用 0x5000_0000 而不是 0x4000_0000：后者现在是 GPIO 的窗口，
+    // 取指会**成功**（读回 DIR = 0），这条用例要验的是「取指失败」，
+    // 拿一个能取到的地址去验就验错了东西。
     let state = SimState {
-        pc: 0x4000_0000,
+        pc: 0x5000_0000,
         ..SimState::default()
     };
     dispatch(
