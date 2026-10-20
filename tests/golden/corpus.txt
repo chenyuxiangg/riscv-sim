@@ -1,0 +1,76 @@
+# Golden corpus manifest — the authoritative list of riscv-tests cases that
+# the platform compares against Spike.
+#
+# Format:  <suite>  <test>  <march>  <status>
+#
+#   suite   riscv-tests suite directory under isa/
+#   test    test case name (isa/<suite>/<test>.S)
+#   march   -march= value used to assemble the case
+#   status  active  — the case must agree with Spike; a mismatch fails the run
+#           pending — the case needs an ISA extension M-13 does not implement
+#                     yet, so a mismatch is an expected gap and does NOT fail
+#                     the run.  A `pending` case that starts agreeing is
+#                     reported as NOW-PASSING: flip it to `active`.
+#
+# Scope rules (see tests/golden/env/riscv_test.h for the full rationale):
+#   * the environment is CSR-free, so `rv32mi` / `rv32si` are OUT — they
+#     need trap delivery and `mret`, which land with M-16 in phase 5;
+#   * `zifencei` is enabled everywhere so that `fence_i` assembles;
+#   * `rv32um` needs the M extension, `rv32uc` the C extension — both are
+#     M-13 work items tracked for phase 3, so they start as `pending`.
+#
+# Runtime ISA for the reference side is `rv32imc_zicclsm_zifencei`:
+# Zicclsm is what makes Spike *perform* misaligned accesses instead of
+# trapping on them, which is what our ISS's default MisalignedPolicy::Allow
+# does.  See tests/golden/README.md for the full note.
+rv32ui add rv32i_zifencei active
+rv32ui addi rv32i_zifencei active
+rv32ui and rv32i_zifencei active
+rv32ui andi rv32i_zifencei active
+rv32ui auipc rv32i_zifencei active
+rv32ui beq rv32i_zifencei active
+rv32ui bge rv32i_zifencei active
+rv32ui bgeu rv32i_zifencei active
+rv32ui blt rv32i_zifencei active
+rv32ui bltu rv32i_zifencei active
+rv32ui bne rv32i_zifencei active
+rv32ui fence_i rv32i_zifencei active
+rv32ui jal rv32i_zifencei active
+rv32ui jalr rv32i_zifencei active
+rv32ui lb rv32i_zifencei active
+rv32ui lbu rv32i_zifencei active
+rv32ui ld_st rv32i_zifencei active
+rv32ui lh rv32i_zifencei active
+rv32ui lhu rv32i_zifencei active
+rv32ui lui rv32i_zifencei active
+rv32ui lw rv32i_zifencei active
+rv32ui ma_data rv32i_zifencei active
+rv32ui or rv32i_zifencei active
+rv32ui ori rv32i_zifencei active
+rv32ui sb rv32i_zifencei active
+rv32ui sh rv32i_zifencei active
+rv32ui simple rv32i_zifencei active
+rv32ui sll rv32i_zifencei active
+rv32ui slli rv32i_zifencei active
+rv32ui slt rv32i_zifencei active
+rv32ui slti rv32i_zifencei active
+rv32ui sltiu rv32i_zifencei active
+rv32ui sltu rv32i_zifencei active
+rv32ui sra rv32i_zifencei active
+rv32ui srai rv32i_zifencei active
+rv32ui srl rv32i_zifencei active
+rv32ui srli rv32i_zifencei active
+rv32ui st_ld rv32i_zifencei active
+rv32ui sub rv32i_zifencei active
+rv32ui sw rv32i_zifencei active
+rv32ui xor rv32i_zifencei active
+rv32ui xori rv32i_zifencei active
+rv32um div rv32im_zifencei pending
+rv32um divu rv32im_zifencei pending
+rv32um mul rv32im_zifencei pending
+rv32um mulh rv32im_zifencei pending
+rv32um mulhsu rv32im_zifencei pending
+rv32um mulhu rv32im_zifencei pending
+rv32um rem rv32im_zifencei pending
+rv32um remu rv32im_zifencei pending
+rv32uc rvc rv32ic_zifencei pending
