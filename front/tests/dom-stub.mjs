@@ -149,25 +149,36 @@ class StubEventTarget {
         set.add({ handler, once, capture });
     }
 
-    removeEventListener(type, handler) {
+    removeEventListener(type, handler, options) {
+        // Per DOM spec the match is (type, callback, capture) — removing
+        // the *other* phase's registration is a spec deviation
+        // (FRONTEND_Review.md R-19).
+        const capture = typeof options === "boolean" ? options : Boolean(options?.capture);
         const set = this._listeners.get(type);
         if (!set) return;
         for (const entry of set) {
-            if (entry.handler === handler) {
+            if (entry.handler === handler && entry.capture === capture) {
                 set.delete(entry);
                 return;
             }
         }
     }
 
-    /** Fire the listeners registered on this node for one dispatch phase. */
+    /**
+     * Fire the listeners registered on this node for one dispatch phase.
+     * `event.eventPhase` is set the way the DOM does it — 1 = capture,
+     * 2 = at target, 3 = bubble — so a listener can tell which phase it
+     * was invoked in (FRONTEND_Review.md R-19).
+     */
     _fire(event, phase) {
         const set = this._listeners.get(event.type);
         if (!set) return;
+        const isTarget = event.target === this;
         for (const entry of [...set]) {
             if (phase === "capture" && !entry.capture) continue;
             if (phase === "bubble" && entry.capture) continue;
             setEventProp(event, "currentTarget", this);
+            setEventProp(event, "eventPhase", isTarget ? 2 : (phase === "capture" ? 1 : 3));
             entry.handler.call(this, event);
             if (entry.once) set.delete(entry);
         }
@@ -485,7 +496,10 @@ export function installDom(html) {
     doc.dispatchEvent = (event) => {
         setEventProp(event, "target", doc);
         watchStopPropagation(event);
-        doc._fire(event, "bubble");
+        // The document is the root of the propagation path: capture-phase
+        // listeners must fire too (FRONTEND_Review.md R-16).
+        doc._fire(event, "capture");
+        if (!propagationStopped(event)) doc._fire(event, "bubble");
         return true;
     };
 
@@ -512,10 +526,30 @@ export function installDom(html) {
     globalThis.location = location;
     globalThis.history = history;
 
-    // The real DOM fires `DOMContentLoaded` once the document is parsed.
-    queueMicrotask(() => {
+    // The real DOM fires `DOMContentLoaded` **after** the deferred module
+    // scripts have run — so a module that registers a listener in its
+    // top level does receive the event. Firing it from a microtask here
+    // would beat the (asynchronous) module evaluation and the listener
+    // would never fire — a false green (FRONTEND_Review.md R-15).
+    // The event is therefore dispatched explicitly, by the caller, once
+    // the modules are loaded.
+    // Counter of every `DOMContentLoaded` dispatch. The real browser
+    // dispatches it exactly once, after the deferred module scripts ran —
+    // an extra/early dispatch is a stub deviation the gate must catch
+    // (FRONTEND_Review.md R-15).
+    let domContentLoadedDispatches = 0;
+    const dispatchDOMContentLoaded = () => {
+        domContentLoadedDispatches += 1;
         doc.dispatchEvent(new Event("DOMContentLoaded"));
-    });
+    };
+    const fireDOMContentLoaded = dispatchDOMContentLoaded;
 
-    return { document: doc, window: win, location, history };
+    return {
+        document: doc,
+        window: win,
+        location,
+        history,
+        fireDOMContentLoaded,
+        get domContentLoadedDispatches() { return domContentLoadedDispatches; },
+    };
 }

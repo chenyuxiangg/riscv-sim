@@ -188,6 +188,20 @@ export function assembleWorkspace(role) {
             ?? null;
     }
     mountPanels();
+    return currentWorkspace();
+}
+
+/**
+ * Read-only snapshot of the currently assembled workspace.
+ *
+ * The bootstrap fills the footer from it, and the front-end gate asserts
+ * against it — the gate must not depend on a **dev-only** global
+ * (FRONTEND_Review.md R-18: removing the dev helpers is a legitimate
+ * refactor and must not turn the gate red).
+ *
+ * @returns {{role: string, capBits: string[], views: {hash: string, name: string}[], activeView: {hash: string, name: string}|null}}
+ */
+export function currentWorkspace() {
     return {
         role: currentRole,
         capBits: [...currentCapBits],

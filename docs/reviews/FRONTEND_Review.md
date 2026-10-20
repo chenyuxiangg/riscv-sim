@@ -11,7 +11,7 @@
 >
 > ## ✅ 闭环状态（2026-10-20 · 分支 `fix/frontend-review-closure`）
 >
-> **16 项全部闭环**，另捕获并修复 **4 项评审漏项**（#17 / #18 见 §七·2，**#19 / #20 见 §七·2.1**）；新增前端门禁 **35 用例 / 7 suite 全绿**（`tools/check-front.sh`），并以 **21 组变异测试**证明门禁能抓住同类回归（含复审新增的 11 组，见 §八·7）。
+> **16 项全部闭环**，另捕获并修复 **4 项评审漏项**（#17 / #18 见 §七·2，**#19 / #20 见 §七·2.1**）；新增前端门禁 **38 用例 / 7 suite 全绿**（`tools/check-front.sh`），并以 **32 组变异测试**（三轮累计）证明门禁能抓住同类回归（见 §八·3 / §八·7 / §八·9）。
 >
 > ⚠️ **#19 / #20 是评审漏项，且只有真实浏览器能暴露**：修完白屏后，页面能起来，但**每个视图体都是空的**——DOM stub 测试对此完全隐形（见 §七·2.1）。逐项核对见 **§七**。
 
@@ -152,7 +152,7 @@ front/index.html:13-18:  <a ... data-view-tab="product">产品</a>  （共 6 个
 | 13 | 低 | ✅ | `index.html` 加 inline classic script 检测 `file:` 并给出 HTTP 部署指引；页脚常驻部署提示；`build-wasm.sh` 末尾提示同步 | 静态检查「index.html 含 file:// 部署提示」；文档侧见 `AGENTS.md` / `PROGRESS.md` 同步 |
 | 14 | 低 | ✅ | 新增 `ROLE_DEFAULT_VIEW` 显式映射表；`assembleWorkspace()` 与 `route()` 的兜底都改走它 | 角色切换后视图集合断言通过 |
 | 15 | 低 | ✅ | demo 数据移到 `front/dev/demo-state.js`；M-02 只发 `riscv:seed` 信号，dev 装配层消费 | `front/dev/` 与 `front/views/` 边界清晰；生产模块不再持有假数据 |
-| 16 | 低 | ✅ | 新增 `front/tests/dom-stub.mjs` + `front/tests/frontend.test.mjs`（35 用例 / 7 suite）+ `tools/check-front.sh` + `.github/workflows/ci.yml` | `tools/check-front.sh` → 35 pass / 0 fail |
+| 16 | 低 | ✅ | 新增 `front/tests/dom-stub.mjs` + `front/tests/frontend.test.mjs`（38 用例 / 7 suite）+ `tools/check-front.sh` + `.github/workflows/ci.yml` | `tools/check-front.sh` → 38 pass / 0 fail |
 | **19** | 中 | ✅ | 漏项，见 §七·2.1 | 真机：初始面板可见；变异 J → 门禁变红 |
 | **20** | **阻断** | ✅ | 漏项，见 §七·2.1 | 真机：产品视图完整渲染（产品树 / 内存映射）；变异 I → 门禁变红 |
 
@@ -176,7 +176,7 @@ front/index.html:13-18:  <a ... data-view-tab="product">产品</a>  （共 6 个
 
 ### 7.3 门禁与变异测试
 
-新增门禁（`tools/check-front.sh` → `node --test "front/tests/*.test.mjs"`）：**35 用例 / 7 suite / 0 失败**，零第三方依赖，Node ≥ 22（复审后新增 14 条，含 7 条 DOM stub 保真度自测）。
+新增门禁（`tools/check-front.sh` → `node --test "front/tests/*.test.mjs"`）：**38 用例 / 7 suite / 0 失败**，零第三方依赖，Node ≥ 22（复审两轮后新增 17 条，含 9 条 DOM stub 保真度自测）。
 
 门禁有效性用变异测试验证——把每个原始缺陷放回去，门禁必须变红：
 
@@ -314,7 +314,7 @@ front/index.html:13-18:  <a ... data-view-tab="product">产品</a>  （共 6 个
 
 ### 8.7 复审意见闭环（2026-10-20 · 作者侧）
 
-复审 §八·1 的 **15 项发现** + §八·5 的修补清单全部落地：3 处门禁盲区封住、1 处位置耦合消除、DOM stub 的 5 处保真度缺口补齐。门禁由 21 用例 / 6 suite 扩到 **35 用例 / 7 suite**。
+复审 §八·1 的 **15 项发现** + §八·5 的修补清单全部落地：3 处门禁盲区封住、1 处位置耦合消除、DOM stub 的 5 处保真度缺口补齐。门禁由 21 用例 / 6 suite 扩到 **38 用例 / 7 suite**。
 
 | # | 严重度 | 状态 | 落点 | 验证 |
 | --- | --- | --- | --- | --- |
@@ -326,7 +326,7 @@ front/index.html:13-18:  <a ... data-view-tab="product">产品</a>  （共 6 个
 | **R-06** | 中 | ✅ | `captureUiState` 改函数式派生，`ui` **按键合并**而非整块替换 | 变异「改回整块替换」→ 门禁变红 ✓ |
 | **R-07** | 低 | ✅ | `onDelta` 只写 store，DOM 写 store 的**权威值**（不再基于 DOM 累加） | 变异「改回 DOM 累加」→ 门禁变红 ✓（新用例模拟订阅者夹击重渲染） |
 | **R-08** | 低 | ✅ | `app.js` 注释改为准确表述：数组顺序与 `queueMicrotask` 是**两道冗余保险**，各自的作用分别写明 | — |
-| **R-09** | 低 | ✅ | 用例数统一为 **35 用例 / 7 suite**（AGENTS.md / PROGRESS.md / 台账 / 本文件） | 亲跑 → `# tests 35 / # suites 7` |
+| **R-09** | 低 | ✅ | 用例数统一为 **38 用例 / 7 suite**（AGENTS.md / PROGRESS.md / 台账 / 本文件） | 亲跑 → `# tests 35 / # suites 7` |
 | **R-10** | 低 | ✅ | `tools/check-front.sh` 增加 Node 主版本 ≥ 22 的显式校验（否则 Node 18/20 上报出难以理解的错） | — |
 | **R-11** | 低 | ✅ | `package.json` 移到 `front/`（`"type":"module"` 只影响 front/ 下的 `.js`，仓库根不再被波及）；`.gitignore` 补根 `node_modules/` | `front/` 内 `npm run test:front` 与根目录 `tools/check-front.sh` 均 35 passed ✓ |
 | **R-12** | 低 | ✅ | stub 的 `document` 支持 `addEventListener`，装好 DOM 后于微任务里派发一次 `DOMContentLoaded` | stub 自测 ✓ |
@@ -353,3 +353,148 @@ front/index.html:13-18:  <a ... data-view-tab="product">产品</a>  （共 6 个
 > **复审建议的具名对象写法有一处笔误**：`Promise.all` 只接受可迭代对象，传普通对象会抛 `TypeError`。实现改为「挂载项收进具名对象 → 由 `Object.entries(pending)` 派生键→值映射 → `Promise.all` 解析」，同样消除下标耦合；对象字面量的求值顺序仍保证 `components` 先于 `workspace` 挂载。
 >
 > **本节只记录复审意见的闭环，不改复审结论本身**（§八·1~§八·4 为复审原文，保留原样以便对照）。
+
+---
+
+## 八·八、复验（2026-10-20 · 第二轮，独立复检 `445c863`/`b3045b7`/`32b3387`/`2390bb6`）
+
+> **复验范围**：`git diff dde0685..2390bb6`（4 commit，12 文件，+578/−87）。**只读复验，未改动 `front/` 与 `crates/` 任何文件。**
+> **复验方法**：① 逐项核对 §八·7 的 15 条闭环声明；② **独立复跑 11 组声称变异 + 5 组自建探针**（在 `/tmp` 副本执行，已清理）；③ DOM stub 语义探针 4 组；④ 亲跑三门禁。
+> **基线复核**：`cargo test --workspace` 203 passed ✓ · `cargo clippy -D warnings` ✓ · `cargo fmt --check` ✓ · `tools/check-front.sh` **35 passed / 7 suite** ✓（与声明一致）· `front/` 内 `npm run test:front` 35 passed ✓
+> **总体结论**：**§八·7 的 15 项闭环声明全部属实**——逐条独立验证，无一项「声称已修但实际没修」或「修错了地方」。**但本轮改动自身引入了 5 项新问题**（3 项中低危的 stub 保真度/断言脆弱性 + 2 项文档残留），它们不会让当前代码出错，但会削弱门禁本身的可信度。
+
+### 8.8.1 §八·7 的 15 项闭环逐条核对
+
+| # | 声明 | 我的独立验证方式 | 结论 |
+| --- | --- | --- | --- |
+| R-01 | 具名挂载绑定，消除下标耦合 | 变异「插入一个 mount」→ 仍绿（无害）✓；变异「transport 槽位换成 `mountViewStore()`」→ 变红 ✓；**额外探针「transport 与 workspace 的值互换（都是对象）」→ 2 fail** ✓ 抓住 | ✅ **属实**，且比声明更强（对象值互换也抓得住） |
+| R-02 | 三条断言绑定真实状态 | 变异 #10 / #11 / #12 → 各 1 fail ✓；**额外探针「`describeTransport` 退化为常量函数」→ 1 fail** ✓（靠「推导随状态变化」+「缺失读起来不同」两条子断言抓住） | ✅ **属实**，三条断言**均非恒等式** |
+| R-03 | 六种属性算符 + 未实现语法显式抛错 | 变异「`^=` 退化为属性存在」→ 1 fail ✓；自测断言 `[data-view-tab^="deb"]` 选中 `debug` ✓ | ✅ **属实**。额外加分：**显式抛错与真实 DOM 一致**（浏览器对无效选择器也抛 `SyntaxError`） |
+| R-04 | 删掉 `body.scrollTop` 采集，只留真实滚动容器 | 变异「恢复采集 `body.scrollTop`」→ 1 fail ✓；新断言 `Object.keys(ui) === ["terminalScrollTop"]` 精确 ✓ | ✅ **属实** |
+| R-05 | 支持 `once` / `capture` / `stopPropagation`，冒泡顺序修正为 目标→根 | 变异「摘掉 once 支持」→ 1 fail ✓；自测「stopPropagation 阻止到达祖先」通过 ✓；**独立探针确认冒泡顺序已是 目标→根** | ✅ **属实**（但见 8.8.3 的 R-16 / R-19 两条残留） |
+| R-06 | `captureUiState` 函数式按键合并 | 变异「改回整块替换 `ui`」→ 1 fail ✓；新用例断言 `ui.zoom` 在切换后仍在 ✓ | ✅ **属实** |
+| R-07 | `onDelta` 只写 store，DOM 写 store 权威值 | 变异「改回 DOM 累加」→ 1 fail ✓；新用例用订阅者模拟「重渲染夹击」，断言 `<a>` 只出现 1 次 ✓ | ✅ **属实** |
+| R-08 | 注释改为准确表述 | 代码核对 `app.js:104-117`：「两道冗余保险」+ 各自作用分述 ✓ | ✅ **属实** |
+| R-09 | 用例数统一 35 / 7 | 亲跑 `# tests 35 / # suites 7` ✓；四处文档（AGENTS.md / PROGRESS.md ×2 / 台账）均已改 ✓ | ✅ **属实** |
+| R-10 | `check-front.sh` 加 Node ≥ 22 校验 | 代码核对 ✓（`node -e` 显式判断主版本） | ✅ **属实** |
+| R-11 | `package.json` 移到 `front/`，`.gitignore` 补 `node_modules/` | `front/` 内 `npm run test:front` → 35 pass ✓；根目录已无 `package.json` ✓；`front/**/*.js` 仍在 ESM 作用域 ✓；`git ls-files front/package.json` 已入库 ✓；`.gitignore` 的 `node_modules/`（无前导斜杠）已覆盖 `front/node_modules/` ✓ | ✅ **属实**（但 PROGRESS.md:67 有一处残留，见 8.8.4） |
+| R-12 | `document` 支持 `addEventListener` + 派发一次 `DOMContentLoaded` | 自测断言 `typeof addEventListener === "function"` ✓。**但事件派发时机与真实浏览器相反** → 见 8.8.3 R-15 | ◐ **字面属实，但引入了新的假绿陷阱** |
+| R-13 | `window.location` 与全局同源 | 自测 `dom.window.location === dom.location` ✓ | ✅ **属实** |
+| R-14 | `textContent` 赋值后 `innerHTML` 返回转义文本 | 自测 `el.textContent = "<b>&"` → `innerHTML === "&lt;b&gt;&amp;"` ✓，与真实浏览器一致 | ✅ **属实** |
+| R-15 | 同视图分支补 `restoreUiState` | 变异「去掉同视图分支的 `restoreUiState`」→ 1 fail ✓。**该断言非恒等式**——同视图重入会 `body.innerHTML = html` 重建 DOM（`scrollTop` 归 0），不还原则失败 | ✅ **属实** |
+
+**15/15 属实。** 其中 R-01 / R-02 的覆盖强度**强于声明**（对象值互换、常量化 `describeTransport` 两种额外错绑形态均被抓）。
+
+### 8.8.2 变异矩阵独立复跑（16 组）
+
+#### 声称需变红的 11 组 —— 全部复现
+
+| 变异 | 我的实测 | 判定 |
+| --- | --- | --- |
+| #10 `createPanel` 改回 innerHTML 拼接 | 34 / **1 fail** | ✅ |
+| #11 状态栏改回硬编码 | 34 / **1 fail** | ✅ |
+| #12 页脚改回硬编码 | 34 / **1 fail** | ✅ |
+| transport 槽位真实错绑（换成 `mountViewStore()`） | 34 / **1 fail** | ✅ |
+| stub `^=` 退化为属性存在 | 34 / **1 fail** | ✅ |
+| stub `once` 支持被摘掉 | 34 / **1 fail** | ✅ |
+| `onDelta` 改回 DOM 累加 | 34 / **1 fail** | ✅ |
+| 恢复采集 `body.scrollTop` | 34 / **1 fail** | ✅ |
+| 同视图分支去掉 `restoreUiState` | 34 / **1 fail** | ✅ |
+| `captureUiState` 改回整块替换 `ui` | 34 / **1 fail** | ✅ |
+| 插入一个 mount（预期无害） | 35 / 0 fail | ✅ 与预期一致 |
+
+#### 我自建的 5 组探针
+
+| 探针 | 实测 | 判定 |
+| --- | --- | --- |
+| transport ↔ workspace **值互换**（都是对象） | 33 / **2 fail** | ✅ 新断言抓得住 |
+| `describeTransport` **退化为常量函数** | 34 / **1 fail** | ✅ 新断言抓得住 |
+| m01 里加一句含 `innerHTML` 的**注释** | 34 / **1 fail** | ❌ **假红** → R-17 |
+| **删掉 `exposeDevHelpers`**（dev helper 被清） | 32 / **3 fail** | ❌ **假红** → R-18 |
+| stub `removeEventListener` 内部条目检查 | 移除的是 `capture=true` 那个 | ❌ 规范相反 → R-19 |
+
+### 8.8.3 本轮新发现（5 项）
+
+| # | 严重度 | 位置 | 问题 | 证据 | 建议 |
+| --- | --- | --- | --- | --- | --- |
+| **R-15** | **中** | `front/tests/dom-stub.mjs:513-516`（`installDom` 末尾）+ `front/tests/frontend.test.mjs` 的 R-12 自测 | **stub 的 `DOMContentLoaded` 派发时机与真实浏览器相反 → 变成一个「假绿陷阱」** | stub 在 `installDom()` 时 `queueMicrotask` 派发；而测试文件是 `installDom()` → `await import(app.js)`，**动态 import 的完成晚于已排队的微任务** → 事件在 `app.js` 执行完之前就派发了。**实测：模拟「import 完成后才注册监听」→ 触发 0 次**（真实浏览器 1 次）。**后果**：任何在 `app.js` 里注册 `document.addEventListener("DOMContentLoaded", …)` 的代码，在浏览器里正常工作、在门禁里**永远不执行** → 假绿。而 R-12 的自测**只断言 `typeof addEventListener === "function"`，没有断言事件真的派发**，给了「已覆盖」的错觉 | ① 不自动派发，改为 `dom.fireDocumentReady()` 由测试在 import 之后显式调用（最稳）；② 或把自测从「函数存在」升级为「事件确实派发且恰好一次」，并在 stub 里把派发推迟到 import 之后；③ 至少在 stub 注释里写明「当前时序早于模块执行，勿用于 DOMContentLoaded 监听」 |
+| **R-16** | 中 | `front/tests/dom-stub.mjs:488-492`（`doc.dispatchEvent`） | **`document` 上的 capture 监听器永不触发** | `doc.dispatchEvent` 用 `doc._fire(event, "bubble")` → 跳过 capture 条目。**实测：document 上注册 `{capture:true}` 的 click 监听 → 0 次**（真实浏览器 1 次，document 是捕获路径的根）。R-12 修好了「document 支持 addEventListener」，但只补了 bubble 一半 | `doc.dispatchEvent` 走与元素相同的两阶段：捕获相沿 body→target 路径，冒泡相沿 target→body 路径 |
+| **R-17** | 中 | `front/tests/frontend.test.mjs` 的「M-01 不用 innerHTML 拼面板」断言 | **静态源码文本断言过宽 → 假红** | 断言是 `!/innerHTML/.test(m01源码)`——**只要 m01 源码里出现 "innerHTML" 这个词就红**，注释、字符串、无关代码一律算。**实测：加一行 `// NOTE: we do not use innerHTML here` 注释 → 1 fail**。这类「用源码文本代替行为断言」的写法，会让正常重构撞红门禁 | 改成**行为断言**：构造一个 `name` 含 `<script>` 的视图，断言渲染后 DOM 里没有 script 元素；或把静态断言收窄为只匹配赋值形式 `\.innerHTML\s*=` 而非任意出现 |
+| **R-18** | 中 | `front/tests/frontend.test.mjs` 的两条新断言 | **门禁强依赖 dev-only 全局 `window.riscv_demo`** | 两条断言都从 `dom.window.riscv_demo?.workspace/transport` 取「真实状态」。**实测：删掉 `app.js` 里一行 `exposeDevHelpers(workspace, transport)` → 3 fail**（假红：功能本身没坏，只是 dev helper 被清理了）。这让「清理 dev 代码 / 收紧公开面」这类正常重构会撞红门禁 | ① 把快照挂到语义上属于**生产面**的位置（如 `window.riscv_debug`，或让 `describeWorkspace` / `renderStatus` 直接返回文本供断言）；② 或在 `riscv_demo` 缺失时 **skip** 而非 fail；③ 或让 `exposeDevHelpers` 明确标注为「门禁契约的一部分」并在 AGENTS.md 记一笔 |
+| **R-19** | 低 | `front/tests/dom-stub.mjs:172-180`（`removeEventListener`） | **移除的条目与 DOM 规范相反** | stub 按「首个 handler 匹配」删除 → 注册顺序 capture 在前，故删掉的是 `capture=true` 那个；**DOM 规范要求 `removeEventListener(type, handler)`（不带 capture）移除 `capture=false` 那个**。**实测内部条目：删除后剩 `{cap:false}`，规范期望剩 `{cap:true}`**。仅当同一 handler 同时注册两个相位时可见，当前前端不用 → 潜伏 | 按 capture 标志匹配：注册时把 `capture` 存进条目，删除时比较 `options?.capture`（缺省 false）与条目标志 |
+
+### 8.8.4 文档残留不一致（2 项 · 低）
+
+| 位置 | 问题 | 建议 |
+| --- | --- | --- |
+| `docs/progress/PROGRESS.md:67` | 仍写「`package.json`：只有 `{"type":"module"}`」——但该文件**已移到 `front/`**，仓库根不再有 `package.json`，这句现在指向一个不存在的路径 | 改为「`front/package.json`：只有 `{"type":"module"}`……」 |
+| `docs/reviews/FRONTEND_Review.md:14` | 写「**21 组**变异测试」——按 §八·3 的 16 组 + §八·7 的 11 组计应为 **27 组**（若从作者最初的 10 组起算才是 21） | 统一为 27 组，或改写为「累计 27 组（§八·3 16 组 + §八·7 11 组）」 |
+
+### 8.8.5 确认无误的项
+
+| 项 | 确认内容 |
+| --- | --- |
+| **R-01 的顺序保险** | `pending` 对象字面量的求值顺序仍是源码顺序 → `components`（`mountViewComponents()`）**先于** `workspace`（`mountWorkbench()`）被调用 → 「组件库先注册监听」那道保险**未受影响** ✓。`Object.entries` 对非数字键保持插入顺序 ✓ |
+| **R-02 的断言有效性** | 三条新断言**均非恒等式**：页脚断言绑定 workspace 快照的 role **与全部视图名**（硬编码文案写不出这些名字）；状态栏断言用「重算 + 变化性 + 缺失可区分」三条子断言，能抓住 `describeTransport` 常量化与挂载结果错绑 |
+| **R-03 的抛错语义** | stub 遇未实现选择器语法显式抛错，**与真实 DOM 一致**（浏览器对无效选择器也抛 `SyntaxError`）——这是正确的取舍，不是缺陷 |
+| **R-05 的冒泡顺序** | 独立探针确认已是 **目标 → 根**；`stopPropagation` 生效 ✓ |
+| **R-11 的归位完整性** | 根目录已无 `package.json`；`front/**/*.js` 仍在 ESM 作用域；`.gitignore` 的 `node_modules/`（无前导斜杠）已覆盖 `front/node_modules/`；`front/package.json` 已入库 ✓ |
+| **导出面** | `describeTransport` / `renderStatus` 从 `app.js` 导出——`app.js` 是**入口模块**而非公共库，导出 2 个纯函数供门禁驱动**不构成不该扩的公开面**。`renderStatus(transport, el = status)` 的默认参数捕获模块级元素，测试显式传 scratch 元素 ✓ |
+| **CI / 工具面** | `check-front.sh` 的 Node 版本校验、exec 位、引号 glob 均实测通过；`front/package.json` 的 `test:front` 脚本在 `front/` 下可跑 ✓ |
+
+### 8.8.6 建议的最小修补
+
+| 优先 | 动作 | 成本 | 收益 |
+| --- | --- | --- | --- |
+| 1 | **R-17** 静态断言改行为断言（或收窄为 `\.innerHTML\s*=`） | ~6 行 | 消除「一句注释撞红门禁」的假红 |
+| 2 | **R-18** 门禁不再强依赖 `window.riscv_demo` | ~5 行 | 正常 dev 清理不再撞红门禁 |
+| 3 | **R-15** `DOMContentLoaded` 改为显式触发 + 自测断言事件真的派发 | ~8 行 | 堵住「浏览器里跑、门禁里不跑」的假绿 |
+| 4 | **R-16** `document` 补 capture 相 | ~6 行 | stub 与真实 DOM 语义对齐 |
+| 5 | R-19 `removeEventListener` 按 capture 标志匹配 | ~4 行 | 规范对齐 |
+| 6 | 8.8.4 的 2 处文档残留 | 各 1 词 | 一致性 |
+
+### 8.8.7 复验边界声明
+
+- 复验**只读**：`front/` 与 `crates/` 下**零改动**；变异测试与探针在 `/tmp` 副本中执行，已清理，仓库无残留。
+- 本节记录的是**复验意见**，不代表已修复；修复由作者按 §8.8.6 顺序执行。
+- 复验未覆盖：真实浏览器行为（Electron + HTTP 服务）、WASM 产物、CSS 渲染效果、跨浏览器兼容性。
+- §八·1~§八·4 与 §八·7 保留原文未改；本节是独立追加的复验结论。
+
+
+### 8.9 二次复验闭环（2026-10-20 · 作者侧）
+
+二次复验（§八·8）确认 **§八·7 的 15 项闭环声明 15/15 属实**，但同时查出**本轮改动自身引入的 5 项新问题**——全部在此闭环，并各配回归锁。
+
+| # | 严重度 | 状态 | 落点 | 验证 |
+| --- | --- | --- | --- | --- |
+| **R-15** | 中 | ✅ | stub 不再自动派发 `DOMContentLoaded`：真实浏览器在**延迟的模块脚本执行完之后**才派发，stub 若在 `installDom()` 里用微任务派发，动态 import 还没完成事件就发了 → 模块顶层注册的监听永远收不到（前端会「浏览器跑、门禁不跑」的**假绿**）。改为由调用方在模块加载后**显式派发**（`dom.fireDOMContentLoaded()`），并加派发计数器 | 变异「提前自动派发」→ 门禁变红 ✓；新增用例断言「模块顶层监听收到 1 次」+「派发计数恰为 1」 |
+| **R-16** | 中 | ✅ | `document` 的事件也走**捕获 + 冒泡两相位**（此前只有 bubble 一半） | 变异「document 不走捕获相位」→ 门禁变红 ✓ + 新增用例 |
+| **R-17** | 中 | ✅ | 静态断言从单词级 `!/innerHTML/` 收窄为**赋值级** `!/\.innerHTML\s*=/`——源码里一句「这里不用 innerHTML」的注释不再把门禁撞红 | 变异「加一句含该词的注释」→ 门禁**仍绿** ✓（预期：窄正则免疫散文）；而 #10 回归仍被抓住 ✓ |
+| **R-18** | 中 | ✅ | 门禁不再依赖 dev-only 全局 `window.riscv_demo`：工作台快照改从 `m01.currentWorkspace()`（生产模块的只读 API）取，transport 状态改从 `m07.getTransportStatus()` 取；seed 用例改走**生产信号** `riscv:seed` | 变异「删掉 `exposeDevHelpers()`」→ 门禁**仍绿** ✓（预期：清理 dev helper 属正常重构）；而「transport 槽位真实错绑」仍被抓住 ✓ |
+| **R-19** | 低 | ✅ | stub 的 `removeEventListener` 按 **(type, callback, capture)** 三元组匹配（此前只看 handler，会误删另一相位的注册）；同时给 stub 补上 `event.eventPhase`（1 捕获 / 2 目标 / 3 冒泡），使相位可观测 | 变异「移除错相位」→ 门禁变红 ✓ + 新增用例（监听挂祖先上，两个相位才有区分度） |
+
+**文档残留同步**：`PROGRESS.md` 的门禁条目补上「`package.json` 已移到 `front/`」；本文件顶部的变异组数改为 **32 组（三轮累计）**。
+
+**本轮变异矩阵（16 组：13 组必须变红 + 3 组预期变绿）**：
+
+| 变异 | 门禁 | 判定 |
+| --- | --- | --- |
+| #10 `createPanel` 改回 innerHTML 拼接 | 变红 | ✅ 抓住 |
+| #11 状态栏改回硬编码（历史文案） | 变红 | ✅ 抓住 |
+| #12 页脚改回硬编码（缺视图名） | 变红 | ✅ 抓住 |
+| transport 槽位真实错绑 | 变红 | ✅ 抓住 |
+| stub `^=` 算符退化 | 变红 | ✅ 抓住 |
+| stub `once` 支持被摘掉 | 变红 | ✅ 抓住 |
+| `onDelta` 改回 DOM 累加 | 变红 | ✅ 抓住 |
+| 恢复采集恒 0 的 `body.scrollTop` | 变红 | ✅ 抓住 |
+| 同视图分支去掉 `restoreUiState` | 变红 | ✅ 抓住 |
+| `captureUiState` 改回整块替换 `ui` | 变红 | ✅ 抓住 |
+| `DOMContentLoaded` 提前自动派发 | 变红 | ✅ 抓住 |
+| `document` 不走捕获相位 | 变红 | ✅ 抓住 |
+| `removeEventListener` 移除错相位 | 变红 | ✅ 抓住 |
+| 插入一个 mount（具名绑定下无害） | **仍绿** | ⚪ 预期无害——失败模式已不复存在 |
+| 删掉 `exposeDevHelpers()`（dev helper） | **仍绿** | ⚪ 预期无害——门禁已不依赖 dev 全局（R-18 闭环） |
+| 静态断言遇含 `innerHTML` 的注释 | **仍绿** | ⚪ 预期无害——窄正则只匹配赋值（R-17 闭环） |
+| 全部还原 | 绿 | ✅ |
+
+门禁规模：**38 用例 / 7 suite**（两轮复审共新增 17 条，其中 9 条是 DOM stub 保真度自测）。

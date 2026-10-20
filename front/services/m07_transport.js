@@ -12,6 +12,9 @@
  * @property {boolean} connected           — is a kernel reachable right now
  */
 
+/** @type {TransportStatus} */
+let transportStatus = { mode: "none", connected: false };
+
 /**
  * Mount the transport adapter.
  *
@@ -23,5 +26,18 @@
  * @returns {Promise<TransportStatus>}
  */
 export async function mountTransport() {
-    return { mode: "none", connected: false };
+    transportStatus = { mode: "none", connected: false };
+    return transportStatus;
+}
+
+/**
+ * The transport state as of the last mount.
+ *
+ * The front-end gate reads the state from here rather than from a
+ * dev-only global (FRONTEND_Review.md R-18).
+ *
+ * @returns {TransportStatus}
+ */
+export function getTransportStatus() {
+    return transportStatus;
 }

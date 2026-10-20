@@ -31,10 +31,24 @@ const app = await importFront("app.js");
 const m01 = await importFront("views/m01_workbench.js");
 const m02 = await importFront("views/m02_viewcomponents.js");
 const m03 = await importFront("views/m03_viewstore.js");
+const m07 = await importFront("services/m07_transport.js");
 
 /** Let the async bootstrap settle. */
 const tick = () => new Promise((r) => setTimeout(r, 0));
 await tick();
+// The real DOM fires `DOMContentLoaded` after the deferred module scripts
+// have run, so a module that registers a listener in its top level does
+// receive it. The stub dispatches it explicitly for the same reason
+// (FRONTEND_Review.md R-15).
+let moduleLevelDomContentLoadedHits = 0;
+dom.document.addEventListener("DOMContentLoaded", () => {
+    moduleLevelDomContentLoadedHits += 1;
+});
+dom.fireDOMContentLoaded();
+// 快照取自「模块加载完、首次派发」这一刻——后续自测里的额外派发不应
+// 影响这个不变量。
+const startupDomContentLoadedHits = moduleLevelDomContentLoadedHits;
+const startupDomContentLoadedDispatches = dom.domContentLoadedDispatches;
 
 const $ = (selector) => dom.document.querySelector(selector);
 const $$ = (selector) => dom.document.querySelectorAll(selector);
@@ -80,8 +94,10 @@ describe("bootstrap", () => {
         // 硬编码的 "role=embedded" 同样匹配 → 对 #12 的回归完全无感知。
         // 改为绑定**真实**工作台快照里的 role 与全部视图名。
         const info = dom.document.getElementById("build-info");
-        const workspace = dom.window.riscv_demo?.workspace;
-        assert.ok(workspace, "缺少工作台快照（window.riscv_demo.workspace）");
+        // 取自**生产模块**的只读快照，而不是 dev-only 全局——清理 dev
+        // helper 属于正常重构，不该把门禁撞红（FRONTEND_Review.md R-18）。
+        const workspace = m01.currentWorkspace();
+        assert.ok(workspace, "缺少工作台快照");
         assert.ok(
             info.textContent.includes(`role=${workspace.role}`),
             `页脚 role 与工作台快照不符：${info.textContent}`,
@@ -101,8 +117,8 @@ describe("bootstrap", () => {
         //       ② 推导结果必须随 transport 状态变化；
         //       ③ transport 缺失（挂载结果错绑）必须读起来不一样。
         const status = dom.document.getElementById("status");
-        const transport = dom.window.riscv_demo?.transport;
-        assert.ok(transport, "缺少 transport 快照（window.riscv_demo.transport）");
+        const transport = m07.getTransportStatus();
+        assert.ok(transport, "缺少 transport 状态");
         assert.equal(
             status.textContent,
             app.describeTransport(transport),
@@ -129,8 +145,11 @@ describe("bootstrap", () => {
         // 门禁完全无感知。这条把「M-01 只用 createElement + dataset
         // 构造面板」锁成可回归的约定。
         const src = readFileSync(resolve(frontDir, "views/m01_workbench.js"), "utf8");
+        // 只匹配**赋值**（`x.innerHTML =`），不匹配散文——否则源码里一句
+        // 「这里不用 innerHTML」的注释就会把门禁撞红（FRONTEND_Review.md
+        // R-17：过宽的静态断言 = 假红）。
         assert.ok(
-            !/innerHTML/.test(src),
+            !/\.innerHTML\s*=/.test(src),
             "M-01 不应通过 innerHTML 拼接面板内容（#10）",
         );
     });
@@ -309,7 +328,9 @@ describe("M-02 视图组件", () => {
     test("demo 按钮可点击（seedDemoBus 未定义回归）", () => {
         m01.assembleWorkspace("embedded");
         m01.route("#/product");
-        dom.window.riscv_demo.seedBus();
+        // 走**生产信号**而不是 dev-only 全局——门禁不该依赖
+        // window.riscv_demo（FRONTEND_Review.md R-18）。
+        dom.window.dispatchEvent(new CustomEvent("riscv:seed", { detail: { viewId: "product" } }));
         const button = $("[data-action='seed-demo']");
         assert.ok(button, "demo 按钮未渲染");
 
@@ -404,8 +425,50 @@ describe("DOM stub 保真度", () => {
         assert.equal(bubbled, 0, "stopPropagation 未被尊重");
     });
 
-    test("document 支持 addEventListener（DOMContentLoaded 触发一次）", () => {
+    test("document 支持 addEventListener，DOMContentLoaded 在派发后被收到", () => {
         assert.equal(typeof dom.document.addEventListener, "function");
+        let hits = 0;
+        const listener = () => { hits += 1; };
+        dom.document.addEventListener("DOMContentLoaded", listener);
+        dom.fireDOMContentLoaded();
+        dom.document.removeEventListener("DOMContentLoaded", listener);
+        dom.fireDOMContentLoaded();
+        assert.equal(hits, 1, "DOMContentLoaded 派发后监听未收到（或未随 removeEventListener 失效）");
+    });
+
+    test("DOMContentLoaded 在模块脚本之后才派发，且只派发一次", () => {
+        // R-15：stub 若在 installDom 时就派发，模块顶层注册的监听器永远
+        // 收不到 —— 前端会「浏览器跑、门禁不跑」。
+        assert.equal(startupDomContentLoadedHits, 1, "模块顶层注册的监听器没收到事件");
+        assert.equal(
+            startupDomContentLoadedDispatches, 1,
+            "DOMContentLoaded 派发次数异常——不得在模块脚本之前自动派发",
+        );
+    });
+
+    test("document 的 capture 监听器也会触发", () => {
+        let hits = 0;
+        const listener = () => { hits += 1; };
+        dom.document.addEventListener("custom-evt", listener, { capture: true });
+        dom.document.dispatchEvent(new Event("custom-evt"));
+        assert.equal(hits, 1, "document 的 capture 监听器未触发");
+    });
+
+    test("removeEventListener 只移除同一相位的监听", () => {
+        // R-19：DOM 规范要求按 (type, callback, capture) 三元组匹配；
+        // 旧实现只看 handler，会误删另一相位的注册。
+        // 监听挂在**祖先**上——挂在事件目标上时两个相位都属 AT_TARGET(2)，
+        // 无法区分。
+        const parent = dom.document.createElement("div");
+        const child = dom.document.createElement("span");
+        parent.appendChild(child);
+        const phases = [];
+        const handler = (ev) => { phases.push(ev.eventPhase); };
+        parent.addEventListener("x", handler, { capture: true });  // 捕获相位
+        parent.addEventListener("x", handler);                    // 冒泡相位
+        parent.removeEventListener("x", handler);                 // 只移除冒泡相位
+        child.dispatchEvent(new Event("x"));
+        assert.deepEqual(phases, [1], "removeEventListener 移除了错误相位的监听");
     });
 
     test("window.location 可用且与全局 location 同源", () => {

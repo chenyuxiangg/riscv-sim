@@ -37,16 +37,10 @@ function requestDemoSeed(viewId = "product") {
 }
 
 /** Expose the seeder on `window.riscv_demo` for console convenience. */
-function exposeDevHelpers(workspace, transport) {
+function exposeDevHelpers() {
     window.riscv_demo = {
         seedBus: () => requestDemoSeed(),
         buildDemoStoreState,
-        // The assembled workspace / transport snapshots — let the
-        // front-end gate assert that the footer and the status bar are
-        // *derived* from the real state instead of hardcoded strings
-        // (FRONTEND_Review.md R-02).
-        workspace,
-        transport,
     };
 }
 
@@ -130,7 +124,7 @@ async function bootstrap() {
         ),
     );
     wireDevSeeding();
-    exposeDevHelpers(workspace, transport);
+    exposeDevHelpers();
     describeWorkspace(workspace);
     renderStatus(transport);
 }
