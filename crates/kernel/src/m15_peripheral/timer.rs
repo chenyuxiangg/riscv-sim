@@ -22,11 +22,19 @@
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
-use riscv_sim_contract::port::Peripheral;
+use riscv_sim_contract::port::{Peripheral, ProbeSink};
 
 use super::reg::{extract_subword, register_offset};
+use super::ProbeSlot;
 
 pub const TIMER_WINDOW: u32 = 0x10;
+
+/// Probe signal name for a compare hit (D-12 / N5).
+///
+/// The reported **value** is the hit flag (1 = the comparison fired).
+/// Every compare hit is one event, so the channel bound to this signal
+/// should be a **pulse** channel (M-18 `ChannelKind::Pulse`).
+pub const SIGNAL_CMP: &str = "CMP";
 
 mod reg {
     pub const MTIME_LO: u32 = 0x0;
@@ -49,6 +57,11 @@ pub struct TimerRiscv {
     /// cleared when firmware rewrites `mtimecmp` to a future deadline
     /// or when the consumer drains via [`take_pending_irq`].
     pending_irq: bool,
+    /// M-18 probe callback (D-12). Empty = no observer attached.
+    probe: ProbeSlot,
+    /// Last virtual time this peripheral observed (ps) — see
+    /// [`GpioBank::now_ps`](super::gpio::GpioBank) for the rationale.
+    now_ps: u64,
 }
 
 impl TimerRiscv {
@@ -60,6 +73,8 @@ impl TimerRiscv {
             mtime: 0,
             mtimecmp: 0,
             pending_irq: false,
+            probe: ProbeSlot::default(),
+            now_ps: 0,
         }
     }
 
@@ -160,15 +175,29 @@ impl Peripheral for TimerRiscv {
         // 评审 N3: authoritative source is M-16; this peripheral is a
         // fallback. We still expose mtime advancement for projects
         // that rely on the bus-side timer.
+        self.now_ps = now_ps;
         self.mtime = now_ps;
         if self.mtimecmp > 0 && self.mtime >= self.mtimecmp && !self.pending_irq {
             self.pending_irq = true;
+            // D-12: the compare hit is a waveform event.
+            self.report(SIGNAL_CMP, 1);
         }
         Ok(Vec::new())
+    }
+
+    /// Install / replace the M-18 probe callback (D-12).
+    fn on_probe(&mut self, cb: Option<ProbeSink>) {
+        self.probe.set(cb);
     }
 }
 
 impl TimerRiscv {
+    /// Report one signal observation to the M-18 probe pipeline.
+    fn report(&mut self, signal: &str, value: u64) {
+        let now = self.now_ps;
+        self.probe.report(signal, value, now);
+    }
+
     fn read_word(&self, word_offset: u32) -> Result<u32, PlatformError> {
         match word_offset {
             reg::MTIME_LO => Ok(self.mtime as u32),

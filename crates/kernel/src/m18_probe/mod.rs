@@ -22,13 +22,22 @@
 //!
 //! ## MVP wiring
 //!
-//! The "next target" from `docs/progress/PROGRESS.md` §6.3 is the
-//! **M-15 → M-18 signal source layer**. M-15 ships with the four
-//! default channel numbers (`CH_TIMER_CMP`, `CH_GPIO0`, `CH_IRQ_PULSE`,
-//! `CH_KEY_STATE`) but the actual `on_probe` override on
-//! `GpioBank` / `Uart16550` / `TimerRiscv` is part of the M-15 ↔ M-18
-//! wiring PR (D-12 in the cross-module debt ledger, deferred per
-//! the design).
+//! The three wiring points are all in place:
+//!
+//! - **M-14 → M-18** (bus trace): [`ProbeRegistry::make_bus_hook`]
+//!   hands a `BusHook` to the bus; every access lands in the trace
+//!   ring (for M-11 export).
+//! - **M-15 → M-18** (peripheral signals):
+//!   [`ProbeRegistry::attach_signal`] binds a peripheral's signal to
+//!   a channel *and* installs the callback into the peripheral — one
+//!   call, the M-18 LLD §1.3 `attachSignal(periph, ch)`.
+//! - **M-18 → M-19** (waveform handoff): [`ProbeRegistry::set_edge_sink`]
+//!   installs the downstream [`EdgeSink`](riscv_sim_contract::port::EdgeSink).
+//!
+//! The four default channel numbers (`CH_TIMER_CMP`, `CH_GPIO0`,
+//! `CH_IRQ_PULSE`, `CH_KEY_STATE`) come from M-18 v0.8 §2.1.1;
+//! `CH_UART_TX` is an additional channel for the UART's per-byte TX
+//! event stream (the channel map is an open table, not a fixed array).
 //!
 //! ## Module layout
 //!
@@ -45,7 +54,9 @@ pub mod channel;
 pub mod registry;
 pub mod trace_stream;
 
-pub use channel::{ChannelDef, ChannelKind, CH_GPIO0, CH_IRQ_PULSE, CH_KEY_STATE, CH_TIMER_CMP};
+pub use channel::{
+    ChannelDef, ChannelKind, CH_GPIO0, CH_IRQ_PULSE, CH_KEY_STATE, CH_TIMER_CMP, CH_UART_TX,
+};
 pub use registry::{ProbeError, ProbeRegistry, SampleCfg};
 pub use trace_stream::{TraceStream, TRACE_CAP};
 

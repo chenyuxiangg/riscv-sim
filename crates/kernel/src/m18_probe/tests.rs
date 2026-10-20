@@ -728,3 +728,164 @@ fn wire_signal_probe_normal_path_increments_zero_contention() {
     assert_eq!(reg.borrow().borrow_contended(), 0);
     assert_eq!(reg.borrow().edge_count(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// 14. attach_signal binds a peripheral to a channel (D-12 / LLD §1.3)
+// ---------------------------------------------------------------------------
+
+/// A peripheral that can fire a probe observation on demand.
+#[derive(Default)]
+struct MockPeripheral {
+    id: String,
+    sink: Option<riscv_sim_contract::port::ProbeSink>,
+    fired: Rc<RefCell<Vec<(String, u64, u64)>>>,
+}
+
+impl std::fmt::Debug for MockPeripheral {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockPeripheral")
+            .field("id", &self.id)
+            .field("probe_attached", &self.sink.is_some())
+            .finish()
+    }
+}
+
+impl MockPeripheral {
+    fn new(id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            sink: None,
+            fired: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    /// Fire one observation through the installed probe callback.
+    fn fire(&mut self, signal: &str, value: u64, now_ps: u64) {
+        self.fired
+            .borrow_mut()
+            .push((signal.to_string(), value, now_ps));
+        if let Some(sink) = self.sink.as_mut() {
+            sink(signal, value, now_ps);
+        }
+    }
+}
+
+impl riscv_sim_contract::port::Peripheral for MockPeripheral {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn base_addr(&self) -> u32 {
+        0
+    }
+    fn size(&self) -> u32 {
+        0x10
+    }
+    fn read(
+        &self,
+        _offset: u32,
+        _size: riscv_sim_contract::model::WriteSize,
+    ) -> Result<u32, PlatformError> {
+        Ok(0)
+    }
+    fn write(
+        &mut self,
+        _offset: u32,
+        _size: riscv_sim_contract::model::WriteSize,
+        _value: u32,
+    ) -> Result<(), PlatformError> {
+        Ok(())
+    }
+    fn tick(
+        &mut self,
+        _now_ps: u64,
+    ) -> Result<Vec<riscv_sim_contract::model::PendingWrite>, PlatformError> {
+        Ok(Vec::new())
+    }
+    fn on_probe(&mut self, cb: Option<riscv_sim_contract::port::ProbeSink>) {
+        self.sink = cb;
+    }
+}
+
+#[test]
+fn attach_signal_binds_the_peripheral_and_defines_the_channel() {
+    // M-18 LLD §1.3 `attachSignal(periph, ch)`: one call binds the
+    // channel and installs the callback into the peripheral.
+    let reg = Rc::new(RefCell::new(ProbeRegistry::new()));
+    let mut periph = MockPeripheral::new("GPIO0");
+    {
+        let mut cfg = default_cfg();
+        cfg.enable_channel(CH_GPIO0);
+        reg.borrow_mut().set_rate(cfg);
+    }
+
+    ProbeRegistry::attach_signal(
+        Rc::clone(&reg),
+        &mut periph,
+        "OUT",
+        CH_GPIO0,
+        crate::m18_probe::channel::ChannelKind::SingleBit,
+        1,
+    )
+    .expect("attach signal");
+
+    assert_eq!(reg.borrow().channel_count(), 1, "the channel is defined");
+
+    // The peripheral's reports now reach the channel.
+    periph.fire("OUT", 1, 10);
+    periph.fire("OUT", 0, 20);
+    {
+        let borrow = reg.borrow();
+        assert_eq!(borrow.edge_count(), 2);
+        let edges = borrow.edges_for(CH_GPIO0);
+        assert_eq!(edges[0].value, 1);
+        assert_eq!(edges[1].value, 0);
+    }
+}
+
+#[test]
+fn attach_signal_is_idempotent_for_the_same_binding() {
+    // Re-attaching the same (peripheral id, signal) to the same
+    // channel is a no-op, not a conflict.
+    let reg = Rc::new(RefCell::new(ProbeRegistry::new()));
+    let mut periph = MockPeripheral::new("GPIO0");
+    {
+        let mut cfg = default_cfg();
+        cfg.enable_channel(CH_GPIO0);
+        reg.borrow_mut().set_rate(cfg);
+    }
+    for _ in 0..2 {
+        ProbeRegistry::attach_signal(
+            Rc::clone(&reg),
+            &mut periph,
+            "OUT",
+            CH_GPIO0,
+            crate::m18_probe::channel::ChannelKind::SingleBit,
+            1,
+        )
+        .expect("attach signal");
+    }
+    assert_eq!(reg.borrow().channel_count(), 1);
+    assert_eq!(reg.borrow().conflict_warns(), 0);
+}
+
+#[test]
+fn attach_signal_rejects_a_conflicting_channel_binding() {
+    // The same channel number bound to a *different* (source, signal)
+    // is a conflict (M-18 v0.8 §18-6).
+    let reg = Rc::new(RefCell::new(ProbeRegistry::new()));
+    let mut periph = MockPeripheral::new("GPIO0");
+    reg.borrow_mut()
+        .define_channel(ChannelDef::single_bit(CH_GPIO0, "OTHER", "X"))
+        .unwrap();
+
+    let err = ProbeRegistry::attach_signal(
+        Rc::clone(&reg),
+        &mut periph,
+        "OUT",
+        CH_GPIO0,
+        crate::m18_probe::channel::ChannelKind::SingleBit,
+        1,
+    )
+    .expect_err("conflicting binding must be rejected");
+    assert_eq!(err.scenario(), 1, "OBS-01");
+}

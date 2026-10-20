@@ -26,12 +26,22 @@
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
-use riscv_sim_contract::port::Peripheral;
+use riscv_sim_contract::port::{Peripheral, ProbeSink};
 
 use super::reg::{extract_subword, register_offset};
+use super::ProbeSlot;
 
 /// Register window is 8 bytes wide (评审 15-9).
 pub const UART_WINDOW: u32 = 0x8;
+
+/// Probe signal name for a transmitted byte (D-12 / N5).
+///
+/// The reported **value** is the byte itself (0x00..=0xFF). Every
+/// transmitted byte is one event, so the channel bound to this signal
+/// should be a **pulse** channel (M-18 `ChannelKind::Pulse`): a
+/// multi-bit channel would swallow a repeated byte (same value = no
+/// edge), and two identical bytes in a row are two distinct events.
+pub const SIGNAL_TX: &str = "TX";
 
 /// Register offsets (word-aligned; sub-register accesses map via
 /// `offset >> 2` per M-15 review #5).
@@ -66,6 +76,11 @@ pub struct Uart16550 {
     status: u32,
     /// IRQ line to raise on RX.
     irq_line: u16,
+    /// M-18 probe callback (D-12). Empty = no observer attached.
+    probe: ProbeSlot,
+    /// Last virtual time this peripheral observed (ps) — see
+    /// [`GpioBank::now_ps`](super::gpio::GpioBank) for the rationale.
+    now_ps: u64,
 }
 
 impl Uart16550 {
@@ -79,6 +94,8 @@ impl Uart16550 {
             rx: None,
             status: 0,
             irq_line,
+            probe: ProbeSlot::default(),
+            now_ps: 0,
         };
         s.refresh_status();
         s
@@ -105,6 +122,8 @@ impl Uart16550 {
         }
         self.tx = Some(byte);
         self.refresh_status();
+        // D-12: a transmitted byte is a waveform event.
+        self.report(SIGNAL_TX, u64::from(byte));
     }
 
     /// Drain the TX FIFO (host bridge consumes the byte the firmware
@@ -238,11 +257,18 @@ impl Peripheral for Uart16550 {
         }
     }
 
-    fn tick(&mut self, _now_ps: u64) -> Result<Vec<PendingWrite>, PlatformError> {
+    fn tick(&mut self, now_ps: u64) -> Result<Vec<PendingWrite>, PlatformError> {
         // No time-driven side-effects beyond RX FIFO state (the host
         // calls `tick` once per quantum; bit-clock progression is out
-        // of MVP scope 评审 15-1).
+        // of MVP scope 评审 15-1). The tick does carry the authoritative
+        // virtual time, which the probe reports are stamped with.
+        self.now_ps = now_ps;
         Ok(Vec::new())
+    }
+
+    /// Install / replace the M-18 probe callback (D-12).
+    fn on_probe(&mut self, cb: Option<ProbeSink>) {
+        self.probe.set(cb);
     }
 }
 
@@ -251,6 +277,12 @@ impl Peripheral for Uart16550 {
 // variant that mutates FIFO state. Centralised so the `read` and
 // `read_clear` paths share error mapping.
 impl Uart16550 {
+    /// Report one signal observation to the M-18 probe pipeline.
+    fn report(&mut self, signal: &str, value: u64) {
+        let now = self.now_ps;
+        self.probe.report(signal, value, now);
+    }
+
     fn read_word(&self, word_offset: u32) -> Result<u32, PlatformError> {
         match word_offset {
             reg::DATA => Ok(self.rx.map(u32::from).unwrap_or(0)),

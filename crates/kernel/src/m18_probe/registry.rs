@@ -29,7 +29,7 @@ use std::rc::Rc;
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{Edge, EdgeEvent, TraceDir, TraceEvent, Waveform, WaveformStream};
-use riscv_sim_contract::port::{EdgeSink, ProbeSink};
+use riscv_sim_contract::port::{EdgeSink, Peripheral, ProbeSink};
 
 use crate::m14_bus::{AccessDir, BusAccess, BusHook};
 
@@ -409,10 +409,71 @@ impl ProbeRegistry {
         })
     }
 
+    /// Bind a peripheral signal to a channel **and** install the probe
+    /// callback into the peripheral (D-12).
+    ///
+    /// This is the M-18 LLD §1.3 `attachSignal(periph, ch)` entry point
+    /// ("挂接 M-15 外设 probe 回调 → 通道绑定"): one call wires both
+    /// ends of the M-15 ↔ M-18 link, so the channel definition and the
+    /// peripheral's report can never drift apart.
+    ///
+    /// - The channel's `source` is the peripheral's own id
+    ///   (`Peripheral::id()`, e.g. `"GPIO0"`) and its `signal` is the
+    ///   name the peripheral reports (`"OUT"`, `"TX"`, `"CMP"` — the
+    ///   `SIGNAL_*` constants in M-15). The registry's lookup table is
+    ///   keyed by exactly that pair, which is what
+    ///   [`Self::wire_signal_probe`] filters on.
+    /// - If the channel is already defined with the *same*
+    ///   (source, signal) pair the binding is reused (re-attaching is
+    ///   idempotent). A *different* binding on the same channel number
+    ///   is a conflict → [`ProbeError::ChannelConflict`].
+    ///
+    /// The registry is taken as `Rc<RefCell<Self>>` (same reason as
+    /// [`Self::wire_signal_probe`]): the returned closure has to
+    /// outlive this call.
+    pub fn attach_signal(
+        reg: Rc<RefCell<Self>>,
+        periph: &mut dyn Peripheral,
+        signal: &str,
+        ch: u8,
+        kind: ChannelKind,
+        value_width: u8,
+    ) -> Result<(), ProbeError> {
+        let source = periph.id().to_string();
+        {
+            let mut r = reg.borrow_mut();
+            match r.channels.get(&ch) {
+                None => {
+                    r.define_channel(ChannelDef {
+                        ch,
+                        source: source.clone(),
+                        signal: signal.to_string(),
+                        kind,
+                        value_width,
+                    })?;
+                }
+                Some(def) if def.source == source && def.signal == signal => {
+                    // Same binding — reuse it (idempotent re-attach).
+                }
+                Some(def) => {
+                    return Err(ProbeError::ChannelConflict {
+                        ch,
+                        existing_source: format!("{}.{}", def.source, def.signal),
+                    });
+                }
+            }
+        }
+        // Install the callback. `wire_signal_probe` records the
+        // (source, signal) → ch mapping in the lookup table and builds
+        // the filtering closure.
+        let sink = Self::wire_signal_probe(Rc::clone(&reg), &source, signal, ch);
+        periph.on_probe(Some(sink));
+        Ok(())
+    }
+
     // -----------------------------------------------------------------
     // Recording (called by the bus hook + periph callbacks)
     // -----------------------------------------------------------------
-
     /// Record one bus access into the trace ring buffer. The hook
     /// filter is trivial: every access is recorded (M-18 v0.8 §2.1
     /// "全量访存事件流"). Errored accesses (`ok == false`) are
