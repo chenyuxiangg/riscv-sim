@@ -889,3 +889,82 @@ fn attach_signal_rejects_a_conflicting_channel_binding() {
     .expect_err("conflicting binding must be rejected");
     assert_eq!(err.scenario(), 1, "OBS-01");
 }
+
+// ---------------------------------------------------------------------------
+// 20. make_bus_hook does NOT panic on contention
+//     (F-3, 2026-10-20 — 总线 hook 的 RefCell 重入 panic)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bus_hook_does_not_panic_on_immutable_borrow_contention() {
+    // F-3：调用方在 `bus.read()` / `bus.write()` 期间持有
+    // `probes.borrow()`（不可变借用）时触发总线 hook。
+    // 旧实现用裸 `borrow_mut()` → RefCell 重入 panic，整机仿真崩掉。
+    // 新实现必须：丢弃该次访存记录 + borrow_contended 计数 +1，绝不 panic。
+    let reg = Rc::new(RefCell::new(ProbeRegistry::new()));
+    let mut hook = ProbeRegistry::make_bus_hook(Rc::clone(&reg));
+    let access = make_bus_access(42, 0x2000_0000, BusWidth::Word, AccessDir::Read, true);
+
+    {
+        let _guard = reg.borrow(); // 不可变借用在整个 hook 调用期间保持
+        hook(&access); // 旧实现在此 panic
+    } // 释放借用
+
+    assert_eq!(
+        reg.borrow().borrow_contended(),
+        1,
+        "the contended bus access must be counted, not panic"
+    );
+    assert_eq!(
+        reg.borrow().trace_len(),
+        0,
+        "the contended access record is dropped (trace must not grow)"
+    );
+}
+
+#[test]
+fn bus_hook_does_not_panic_on_mutable_borrow_contention() {
+    // F-3 的另一半：调用方持有 `borrow_mut()`（可变借用）时触发 hook。
+    // 同样必须不 panic、计数递增、trace 不增长。
+    let reg = Rc::new(RefCell::new(ProbeRegistry::new()));
+    let mut hook = ProbeRegistry::make_bus_hook(Rc::clone(&reg));
+    let access = make_bus_access(7, 0x4000_0000, BusWidth::Byte, AccessDir::Write, true);
+
+    {
+        let mut _guard = reg.borrow_mut(); // 可变借用在整个 hook 调用期间保持
+        hook(&access); // 旧实现在此 panic
+    } // 释放借用
+
+    assert_eq!(
+        reg.borrow().borrow_contended(),
+        1,
+        "the contended bus access must be counted, not panic"
+    );
+    assert_eq!(
+        reg.borrow().trace_len(),
+        0,
+        "the contended access record is dropped (trace must not grow)"
+    );
+}
+
+#[test]
+fn bus_hook_normal_path_keeps_the_contention_counter_at_zero() {
+    // 正常路径回归保护：无争用时计数保持 0，访存记录照常进 trace。
+    let reg = Rc::new(RefCell::new(ProbeRegistry::new()));
+    let mut hook = ProbeRegistry::make_bus_hook(Rc::clone(&reg));
+    let access = make_bus_access(99, 0x2000_0000, BusWidth::Word, AccessDir::Read, true);
+
+    hook(&access);
+    hook(&access);
+
+    assert_eq!(
+        reg.borrow().borrow_contended(),
+        0,
+        "an uncontended bus hook must not report contention"
+    );
+    assert_eq!(
+        reg.borrow().trace_len(),
+        2,
+        "an uncontended bus hook must still record the accesses"
+    );
+}
