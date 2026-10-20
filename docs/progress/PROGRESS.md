@@ -7,6 +7,93 @@
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
 
+## v0.15.1 变更摘要
+
+**D-07 检视轮闭环**（分支 `feature/d07-time-driven-scheduler`）。
+
+三路独立检视（**V-A** Rust 内核 / **V-B** 测试判别力与变异方法论 / **V-C** 文档一致性）
+共查出 **43 项**（V-A 13 + V-B 15 + V-C 15），判定 **PARTIAL / FAIL / FAIL**。
+**38 项已在本分支闭环，5 项留账**（**D-57 / D-58 / D-59 / D-60 / D-62**）。
+
+### 一、本轮最要紧的两条
+
+**V-A 🟠-1 · 同一外设在同一虚拟时刻被 tick 两次。**
+
+D-07 把 M-14 的 `Bus::tick_peripherals` 摘掉了，但 M-12 **自己这边留了两个真相**：
+指令边界（`tick_peripherals`）与 `PeripheralTick` 事件（`dispatch`）都进同一个
+`PeripheralTicker`。实测：一次 `continue_until_event()`（10 000 条 = 10 量子）产生
+**10 009** 次 tick，其中 9 对是**同一 `now_ps` 重复**；同样 10 000 条指令，
+`StepN` 是 **10 000** 次 —— **两条驱动路径的外设时钟对不上**。
+
+> **闭环**：量子边界的 `PeripheralTick` 事件**代劳**本量子**第一条**指令的推进
+> （指令边界跳过刚被事件 tick 过的外设）。两条路径的推进序列从此**逐条相同**——
+> 这成了新的**不变量**，已用 `both_paths_tick_the_peripheral_clock_identically` 钉住。
+> ⚠️ 代价：tick 的条数从此**正好等于**执行的指令数，旧断言 `>` 随之改写为 `==`。
+
+**V-B 🟠-1 · 断口 3 的判别式在两条生产路径之间冗余。**
+
+夹具 `RecordingPeripheral::tick` **每次都返回同一条写** —— 两条路径拿到的是
+**同一份数据**，于是删掉任一条路径的「写收集」分支，d07 用例**照样全绿**。
+
+> **闭环**：夹具加 `emit_at`——**只在某个时刻吐写**；再补两条用例把两条路径
+> **分开**（指令边界 `t=0` / 量子边界 `t=1 µs`），外加一条「该写**恰好**被提交
+> 一次」（用总线 hook 数写次数）。
+
+### 二、本轮**自查**发现并修掉的真缺陷
+
+F5 的修复（`until_ps` 改**预检**：`now + 指令成本 > until_ps`）会让外层主循环
+**永远空转**——时间到头了 → 内层一条也不执行 → 外层再转一圈还是同样的结果 →
+**死循环**。退出条件与内层停止条件互斥时，循环就永远转不出去。
+已补「不许空转」的收手：内层零指令 → 外层立刻返回 `TimeReached`。
+
+### 三、判别力缺口回填
+
+| 轮 | 变异 | 结果 |
+| --- | --- | --- |
+| 第 2 轮（V-A 的 7 处缺口 + 4 条回归） | 11 条 | ✅ **11/11 按期望变红** |
+| 第 3 轮（V-B 的发现 + 2 条已知无守 + 1 条脆弱性探针） | 11 条 | ✅ **8 条变红**；2 条确认无守（→ **D-60**）；1 条脆弱性探针（→ **D-62**） |
+
+D-07 的用例从 **12 条**扩到 **31 条**。新增的包括：两条路径的 tick 序列**逐条
+相同**（F1 不变量）· 指令边界 / 事件路径**各自**投递外设的写（F-01）· 该写
+**恰好**提交一次 · 报错的外设**不丢已收下的写** · 下一个量子边界**严格在**当前
+时刻之后 · 预算**硬上限**（预算设成非配额整数倍）· 换内存图后登记表只含新外设 ·
+多外设**按地址分派** · 快照恢复后外设时钟**继续走** · 停止原因**不跨轮残留**。
+
+### 四、留账（5 项）
+
+| 台账 | 内容 |
+| --- | --- |
+| **D-57** | `continue_until_event` 的实现语义与**冻结契约**不一致（契约写「到量子边界」= 1000 条，实现跑到指令预算 = 10 000 条）→ 随 **D-32** 的 `schema_version=2` 处理 |
+| **D-58** | `Peripheral::tick` 的调用频率与契约口径不一致（契约写「每量子一次」，实现是**每指令一次**）→ 随 **D-32** 处理 |
+| **D-59** | `StepOutcome::HostPause` / `Breakpoint` 是**死分支**；`pause()` 只置 `last_stop`，不真正中断（既有欠账） |
+| **D-60** | 两处**死接口**：`tick_peripherals` 的返回值无人消费；`continue_until_event` 不消费观察点命中槽 |
+| **D-62** | D-07 用例与**默认口径**耦合（配额改成 20000 会让用例变红）——**4 条与配置无关**的已改成相对单条指令成本 / 相对配额，变红数 **8 → 4**；其中 3 条需要「一轮预算跨过一个量子」这个前提，已加**显式前提断言**（红得清楚）；剩 1 条是**默认值测试**。测试文件头已显式标注「本文件钉的是默认口径」 |
+
+**D-61**（M-14 `Bus::tick_peripherals` 生产不可达）本轮**已闭环**：该方法标
+`#[deprecated]`，doc comment 写明「D-07 之后外设时钟的唯一推进点是 M-12 的
+`tick_peripherals`」——留着就有被接回去的风险（接回去就又是「两个真相」）。
+
+### 五、方法论沉淀（本轮新增）
+
+1. ⚠️ **「同一个回调的两条调用路径」必须用「限定时刻」把夹具分开**。两条路径共用
+   同一个回调时，夹具若每次都吐同一份数据，两条路径的判别式就**互相掩护**。
+2. ⚠️ **「同一份数据不能有两个真相」要有不变量用例**，不只是实现里改对。
+   「两条路径的推进序列逐条相同」才是一条能被变异打红的不变量。
+3. ⚠️ **反向变异自检的期望集合要用 AND 语义**。OR 语义只能证明「某条期望的用例
+   红了」，**不能**证明「每条期望各自都守得住」——变异往往顺带红掉别的用例，把
+   真正的漏网之鱼盖住了。**完整红集**要一起记下来。
+4. ⚠️ **变异脚本的备份文件名必须唯一，且 `copyfile` 的方向要写对**。本轮真踩了：
+   两个源文件都叫 `mod.rs` → 备份互相覆盖；`copyfile(src, dst)` 写成「备份 ← 源」
+   而不是「源 ← 备份」→ 还原其实是**再备份一次**。症状是**变异累积**：后面的每条
+   变异都跑在前一条的残骸上。**还原后必须逐字节校验**。
+5. ⚠️ **修一处「更精确」的判据，可能引入死循环**。改一处行为，要顺着把**终止性**
+   再走一遍。
+6. ⚠️ **恒真式断言要挑出来**。要钉的是「**换算只有一个真相**」，不是把定义重说一遍。
+7. ⚠️ **「用例钉的是默认值」这件事必须写在文件头**。凡本来就与配置无关的不变量，
+   一律写成**相对单条指令成本**的形式。
+
+---
+
 ## v0.15.0 变更摘要
 
 **D-07 闭环：唤醒时间驱动链路**（分支 `feat/d07-time-driven-scheduler`）。
@@ -51,7 +138,7 @@ TIME_QUANTUM_PS = QUANTUM_INSTR_QUOTA × INSTRUCTION_COST_PS
 
 ### 四、接缝不是契约端口（与 D-32 的关系）
 
-契约层冻结，新增端口要等 `schema_version = 2`（台账 **D-32**）。而 LLD §2.3
+契约层冻结，新增端口要等 `schema_version = 2`（台账 **D-32**）。而 **LLD §3.1**
 要求主循环里必须有 `iss_step(s)` 这一步 —— 于是 M-12 在**自己内部**定义
 `InstructionExecutor`（与既有的 `PeripheralTicker` 同一套路），由 M-17 实现：
 
@@ -59,14 +146,16 @@ TIME_QUANTUM_PS = QUANTUM_INSTR_QUOTA × INSTRUCTION_COST_PS
 M-12（调度器）──executes──▶ M-17（后端）──drives──▶ M-13（ISS）
 ```
 
-**依赖方向单向：M-12 不依赖 M-13** —— M-12 的单元测试可以拿一个假执行器喂它。
+**依赖方向单向：M-12 不依赖 M-13** —— `crates/kernel/src/m12_engine/**`
+无 `m13` 引用（已复核）。接缝的**假执行器**（`CountingExecutor`）在**集成测试**
+`crates/kernel/tests/d07_time_driven.rs` 里，不在 M-12 自己的单元测试里。
 M-12 LLD §9.1.1 端口契约表已补该行（v1.3）。
 
 ### 五、一处行为订正（必须说清楚）
 
 第 1 阶段 `continue_until_event()` **只排空事件队列、不执行指令**（队列恒空 →
 等价于空操作）。它对应的是 M-17 LLD §3.1 `runUntil` 的**退化形态**。
-现在它真的跑代码 —— LLD §9.1.1 写的 `runUntil(t)` 本来就是
+现在它真的跑代码 —— **M-12 LLD §9.1.1** 写的 `runUntil(t)` 本来就是
 「调用 M-13 step 系列；量子配额 + 事件分发」。
 
 ### 六、门禁与产物
@@ -75,13 +164,13 @@ M-12 LLD §9.1.1 端口契约表已补该行（v1.3）。
 | --- | --- |
 | `cargo fmt --all -- --check` | ✅ |
 | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
-| `cargo test --workspace --no-fail-fast` | ✅ **525**（契约 lib 12 + kernel lib 437 + 集成 **65** + golden runner 11） |
-| `crates/kernel/tests/d07_time_driven.rs` | ✅ **12 条**端到端 |
+| `cargo test --workspace --no-fail-fast` | ✅ **544**（契约 lib 12 + kernel lib 437 + 集成 **84** + golden runner 11） |
+| `crates/kernel/tests/d07_time_driven.rs` | ✅ **31 条**端到端（检视轮从 12 条扩到 31 条） |
 | `tools/check-front.sh` | ✅ **156 用例 / 29 suite**（前端未改动） |
 | `tools/build-wasm.sh --release` + `node tools/wasm-smoke.mjs` | ✅ **22 项**（含「Continue 命中断点」——新时间驱动路径） |
 | `tools/browser-verify.mjs`（真 Chrome） | ✅ 真机挂载 + 渲染路径 + 真内核执行 + 探针流 |
 | `tools/golden-run.sh --keep-going` | ✅ **42/42 判决一致**，9 expected-gap，**0 mismatch** |
-| **反向变异自检** | ✅ **14 条全部按期望变红**（变异必须**能编译**，编译错误不算判别力） |
+| **反向变异自检** | ✅ **25 条全部按期望变红**（变异必须**能编译**，编译错误不算判别力；期望集合用 **AND 语义**逐条核对） |
 
 ### 七、方法论沉淀（本轮新增）
 
@@ -1087,7 +1176,7 @@ M-19 实现的是「探针 → 边沿编码 → 环形缓冲 → 增量推送 �
 - **§5.4 验收节点**：N5「GPIO 翻转可见」的**内核前置**已全部就位（M-15 GPIO `IN` 回读输出脚 + M-18 边沿判定 + `TraceDir` 化），仍需 M-14 ↔ M-15 ↔ M-18 接线 PR 才能端到端可达
 - **测试覆盖**：M-18 20 → 29 单测（+9）；workspace lib 98 → 107（+9）；workspace 累计 103 → **112 全绿**
 
-`cargo test --workspace` = **112 passed / 0 failed**（lib 107 + integration 5；v0.8 = 103 → v0.8.1 = +9）；`cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo fmt --all -- --check` 通过。
+`cargo test --workspace --no-fail-fast` = **544 passed / 0 failed**（契约 lib 12 + kernel lib 437 + 集成 84 + golden runner 11；v0.8 = 103 → v0.8.1 = +9 → v0.14 = 512 → v0.15 = 544）；`cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo fmt --all -- --check` 通过。
 
 ---
 
@@ -1359,6 +1448,12 @@ RISC-V 仿真/调试平台项目处于 **MVP 启动期**。架构 + 23 篇模块
 > ⚠️ **重要纠偏**：早期对话里把"MVP"误读为"两个单元测试通过"。重新校准后，正确定义见 §2。
 >
 > ⚠️ **跨模块欠账**：另有 23 条跨模块问题（5 阻断级）挂在 `docs/reviews/REVIEWS.md` 台账，**不在本文档的模块人日口径内**——它们是模块交付之后的集成欠账，需单独排期。台账里最靠前的是 **D-04（M-13 x0 未硬连线）**，它阻塞 Q7 决议的「Spike 对拍必做」。
+>
+> ⚠️ **本文档 §0 / §1 是 v0.1 口径的历史快照**（自 v0.9 起未重算）。
+> **当前口径以各版本变更摘要为准**：测试 **544 全绿**（契约 lib 12 + kernel lib 437
+> + 集成 84 + golden runner 11）、前端门禁 **156 用例 / 29 suite**、
+> golden RV32I **42/42** 判决一致（9 expected-gap、0 mismatch）、
+> 台账见 `docs/reviews/REVIEWS.md`（**D-07 已于 v0.15 闭环**）。
 
 ---
 
@@ -1816,8 +1911,10 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 ## 9. 文档版本历史
 
 | 版本 | 日期 | 变更 | 作者 |
-| v0.10.0 | 2026-10-20 | **前端 M-01/02/03 首次模块级 review 闭环 20/20**（`docs/reviews/FRONTEND_Review.md` §七）：**修掉 2 项阻断级白屏缺陷**（D-01/D-02 ESM 链接期失败 → 页面 100% 空白）+ 5 项功能缺陷 + 9 项整洁项，**另捕获 4 项评审漏项**（`seedDemoBus()` 从未定义 / `refreshAll()` 会把当前面板藏掉 / `switchView` 同视图分支不 `showPanel()` / **首次 render 事件因挂载顺序被丢弃**）。**真机复验**（Electron + HTTP 服务）又暴露后两项——修完白屏后视图体仍全空，且对 DOM stub 完全隐形。**新增前端门禁**：`front/tests/` 38 用例（最小 DOM stub，零第三方依赖）+ `tools/check-front.sh` + `.github/workflows/ci.yml`（仓库此前无 CI），并以 32 组变异测试（三轮累计）证明门禁能抓住同类回归。前端测试覆盖 0 → 35；台账 D-01/D-02/D-18/D-19/D-20 闭环，D-23 部分闭环 | agent (mavis) |
 | --- | --- | --- | --- |
+| v0.15.1 | 2026-10-21 | **D-07 检视轮闭环**：三路独立检视（V-A PARTIAL / V-B FAIL / V-C FAIL）共 **43 项发现** → **38 项闭环 / 5 项留账**（D-57~D-60、D-62）。最要紧的两条：**V-A 🟠-1**（同一外设在同一虚拟时刻被 tick 两次 → 两条驱动路径的外设时钟对不上）修法是「量子边界的事件代劳本量子第一条指令的推进」，并把「两条路径的推进序列**逐条相同**」立为新不变量；**V-B 🟠-1**（断口 3 的判别式在两条生产路径之间**冗余**——夹具每次吐同一条写，两条路径互相掩护）修法是让夹具**只在某个时刻吐写**，把两条路径**分开**。另有一条**本轮自查发现并修掉的真缺陷**：F5 的预检式修法会让外层主循环**永远空转**（死循环），已补「不许空转」的收手。反向变异自检 **25 条全部变红**（期望集合用 **AND 语义**逐条核对）。D-07 用例 **12 → 31 条** | agent (mavis) |
+| v0.15.0 | 2026-10-21 | **D-07 闭环：唤醒时间驱动链路**——四处断口全闭环（没人装 ticker / 没人排 `PeripheralTick` / `pending_writes` 只写不读 / 唯一主循环 `runUntil` 无人调）+ 裁定「指令驱动 × 时间驱动如何交替」（时间驱动是骨架、指令驱动是量子内填充物，二者在**指令边界**交汇，两条路径共用 `IssExecutor`）+ `TIME_QUANTUM_PS` 订正为 1 µs（`QUANTUM_INSTR_QUOTA`×`INSTRUCTION_COST_PS` 闭合）+ `InstructionExecutor` 定为 M-12 内部接缝（契约层冻结，D-32）。证据：544 全绿（集成 84）· `d07_time_driven.rs` 31 条 · 反向变异 25 条全红 · wasm-smoke 22 项 · golden 42/42 | agent (mavis) |
+| v0.10.0 | 2026-10-20 | **前端 M-01/02/03 首次模块级 review 闭环 20/20**（`docs/reviews/FRONTEND_Review.md` §七）：**修掉 2 项阻断级白屏缺陷**（D-01/D-02 ESM 链接期失败 → 页面 100% 空白）+ 5 项功能缺陷 + 9 项整洁项，**另捕获 4 项评审漏项**（`seedDemoBus()` 从未定义 / `refreshAll()` 会把当前面板藏掉 / `switchView` 同视图分支不 `showPanel()` / **首次 render 事件因挂载顺序被丢弃**）。**真机复验**（Electron + HTTP 服务）又暴露后两项——修完白屏后视图体仍全空，且对 DOM stub 完全隐形。**新增前端门禁**：`front/tests/` 38 用例（最小 DOM stub，零第三方依赖）+ `tools/check-front.sh` + `.github/workflows/ci.yml`（仓库此前无 CI），并以 32 组变异测试（三轮累计）证明门禁能抓住同类回归。前端测试覆盖 0 → 35；台账 D-01/D-02/D-18/D-19/D-20 闭环，D-23 部分闭环 | agent (mavis) |
 | v0.1 | 2026-10-19 | 初稿：建立项目状态、§13.6 WBS 校准、关键路径、下一里程碑 E2E-01、决策与风险 | agent (mavis) |
 | v0.2 | 2026-10-19 | MVP 范围从「选项 B（~30 人日）」升级到「选项 C（90 人日）」；补 Q1-Q7 已答复，DWARF/CI/场景脚本/多板接口预留纳入 MVP | agent (mavis) |
 | v0.3 | 2026-10-19 | 嵌入 v0.2 决策表；WBS 同步；E2E-01 验收标准定锚 | agent (mavis) |
@@ -1879,7 +1976,7 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 # 验证
 source $HOME/.cargo/env
 cd /Users/zyzs/lczyzs/code/riscv_sim
-cargo test --workspace          # 112 passed / 0 failed（lib 107 + integration 5）
+cargo test --workspace --no-fail-fast   # 544 passed / 0 failed（契约 lib 12 + kernel lib 437 + 集成 84 + golden runner 11）
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 

@@ -114,14 +114,14 @@ riscv_sim/
 | M-14 | 总线与内存映射 | `crates/kernel/src/m14_bus/` | ✅ v0.4 完成 + v0.7.2 补完；v0.11 接线 PR；v0.13 新增 `read_only()`（调试读不计入统计 / trace / 观察点）与 `load_bytes()`（镜像装载的**唯一**写路径），并给 `BusAccess` 增 `is_fetch` 标记（**取指 vs 数据访问**）；**D-46 增 `add_hook()`（追加式 hook，`set_hook` 保留「替换全部」语义）+ `peripheral_instances()` + `tick_peripherals()`** |
 | M-15 | 外设模型层 | `crates/kernel/src/m15_peripheral/` | ✅ v0.7 三外设 + v0.11 接线 PR |
 | M-16 | 中断控制器 | `crates/kernel/src/m16_interrupt/` | stub |
-| M-17 | ExecutionBackend 执行后端 | `crates/kernel/src/m17_backend/` | ✅ **v0.13 第 1 阶段实现**（stub → 925 行）：`step_n` 真正驱动 M-13 ISS（断点取指前命中 / 陷阱 / 观察点总线 hook 命中）、`read_memory` / `write_memory` 接 M-14 总线、`set_breakpoint` / `set_watchpoint` 接 M-08 表；v0.11.2 的 `snapshot_full` / `restore_full` 接线保持；**D-46：观察点 hook 改 `add_hook`（不顶掉别人的）+ 每条指令前同步一次外设时钟（边沿才有真实时间戳）**；✅ **v0.15 D-07：`IssExecutor` 实现 M-12 的 `InstructionExecutor` 接缝（指令驱动与时间驱动**共用一条** ISS 路径）+ `install_peripheral_ticker`（外设 tick 接缝）+ `pending_writes` 真正提交到总线 + `continue_until_event` 走唯一主循环** |
+| M-17 | ExecutionBackend 执行后端 | `crates/kernel/src/m17_backend/` | ✅ **v0.13 第 1 阶段实现**（stub → **1 222 行**，v0.15 后）：`step_n` 真正驱动 M-13 ISS（断点取指前命中 / 陷阱 / 观察点总线 hook 命中）、`read_memory` / `write_memory` 接 M-14 总线、`set_breakpoint` / `set_watchpoint` 接 M-08 表；v0.11.2 的 `snapshot_full` / `restore_full` 接线保持；**D-46：观察点 hook 改 `add_hook`（不顶掉别人的）+ 每条指令前同步一次外设时钟（边沿才有真实时间戳）**；✅ **v0.15 D-07：`IssExecutor` 实现 M-12 的 `InstructionExecutor` 接缝（指令驱动与时间驱动**共用一条** ISS 路径）+ `install_peripheral_ticker`（外设 tick 接缝）+ `pending_writes` 真正提交到总线 + `continue_until_event` 走唯一主循环** |
 | M-18 | 探针 | `crates/kernel/src/m18_probe/` | ✅ v0.8 完整 `ProbeRegistry` + v0.9 `EdgeSink` + v0.11 接线 PR；v0.11.1 修总线 hook 的 RefCell 重入 panic；**D-46：正式挂上生产总线**（此前只在测试里接线） |
 | M-19 | 波形管道 | `crates/kernel/src/m19_waveform/` | ✅ v0.9 完整 `WaveformPipeline`：边沿编码 + 每通道环 + ≤20ms 批量推送 + CSV/VCD 分块导出 |
 | M-20 | 快照与确定性事件流记录 | `crates/kernel/src/m20_snapshot/` | stub（含 `SnapshotManager`）；⚠️ 其 LLD §2.1.1 的 `Snapshot{cpMeta, m13State, m14Map, m15Periph}` 与契约 DTO **尚未对齐**，`SnapshotRecord` 仍吃 partial `SimState` 且无 serde derive（台账 **D-37**） |
 | M-21 | 日志系统 | `crates/kernel/src/m21_logging/` | stub（含 `LogBuffer`） |
 | M-22 | 健康管理 HMS | `crates/kernel/src/m22_hms/` | stub（含 `Hms`） |
 | M-23 | 数据存储与持久化 DataStore | `crates/kernel/src/m23_datastore/` | stub（含 `DataStore` trait） |
-| **内核宿主**（装配层 · **不是 23 个模块之一**） | 协议装配：契约命令 ↔ 内核调用 | `crates/kernel/src/kernel_host/` | ✅ **v0.13 第 1 阶段新增**（1 517 行 / 34 测试）：16 条命令 → 事件的**规范映射**（形状见 `docs/detailed-design/STAGE-1_Wasm_Bridge.md` §3.1）/ 镜像装载（ELF + RawHex）/ 默认内存图 / 寄存器全量与增量波形流 / `handle_json` JSON 桥；**D-46：装上探针管道**（M-18 判沿 → M-19 环 → 契约 `WaveformDelta`）+ 默认内存图映射 GPIO 外设 |
+| **内核宿主**（装配层 · **不是 23 个模块之一**） | 协议装配：契约命令 ↔ 内核调用 | `crates/kernel/src/kernel_host/` | ✅ **v0.13 第 1 阶段新增**（**1 712 行** / 34 测试，v0.15 后）：16 条命令 → 事件的**规范映射**（形状见 `docs/detailed-design/STAGE-1_Wasm_Bridge.md` §3.1）/ 镜像装载（ELF + RawHex）/ 默认内存图 / 寄存器全量与增量波形流 / `handle_json` JSON 桥；**D-46：装上探针管道**（M-18 判沿 → M-19 环 → 契约 `WaveformDelta`）+ 默认内存图映射 GPIO 外设 |
 
 > **MVP 跑通判据**（首个能 cargo test 通过的功能闭环）：
 > - `m12_engine::tests::engine_advances_time`（事件队列 + 时间推进）
@@ -189,16 +189,28 @@ riscv_sim/
 > - ⚠️ **mock 内核的探针流是「全量」语义，真内核是「增量」** → 台账 **D-55**（mock 未接前端，无活影响；但别拿 mock 当真内核的行为参考）
 
 > **v0.15 D-07 判据**（唤醒时间驱动链路 · 四处断口全闭环）：
-> - `cargo test --workspace --no-fail-fast` **525 全绿**（契约 lib 12 + kernel lib 437 + 集成 **65** + golden runner 11）
-> - `crates/kernel/tests/d07_time_driven.rs` **12 条**端到端 —— 对着**四处断口**逐条钉判别式：① 没人装 ticker ② 没人排 `PeripheralTick` ③ `pending_writes` 只写不读 ④ 时间驱动主循环无人调用
-> - **反向变异自检 14 条，全部按期望变红**（变异必须**能编译**，编译错误导致的「红」不算判别力）
+> - `cargo test --workspace --no-fail-fast` **544 全绿**（契约 lib 12 + kernel lib 437 + 集成 **84** + golden runner 11）
+> - `crates/kernel/tests/d07_time_driven.rs` **31 条**端到端 —— 对着**四处断口**逐条钉判别式：① 没人装 ticker ② 没人排 `PeripheralTick` ③ `pending_writes` 只写不读 ④ 时间驱动主循环无人调用
+> - **反向变异自检 25 条，全部按期望变红**（变异必须**能编译**，编译错误导致的「红」不算判别力；期望集合用 **AND 语义**逐条核对）
 > - ⚠️ **台账写「剩最后一步」的时候要重新数断口**：D-07 原写「M-12 的 `dispatch` 真正调用它」——实测是**四处断口**，且那一处**根本走不到终点**
 > - ⚠️ **「接缝存在」≠「接缝被接上」**：`PeripheralTicker` 从 v0.11 起就躺在 M-12 里，但生产代码**从没调用过** `set_peripheral_ticker`。判别式落在**被依赖方自己身上**（断言外设被 tick 过几次、写的值能不能从总线读回来）
 > - ⚠️ **「指令驱动 vs 时间驱动」的裁定**：时间驱动是**骨架**（事件队列 + 量子边界），指令驱动是量子内的**填充物**（每量子 ≤1000 条），二者在**指令边界**交汇（事件边界 = 抢占点）。两条路径**共用同一个执行器**（`IssExecutor`）——没有第二套 ISS 逻辑会漂移
 > - ⚠️ **量子是 1 µs 不是 1 ns**：`TIME_QUANTUM_PS` 原写 `1_000` 却注释「1 µs」（差 1000 倍）。现在 `TIME_QUANTUM_PS = QUANTUM_INSTR_QUOTA × INSTRUCTION_COST_PS` 闭合换算
 > - ⚠️ **接缝不是契约端口**：契约层冻结（新增端口要等 `schema_version=2`，台账 **D-32**）→ `InstructionExecutor` / `PeripheralTicker` 都是 **M-12 内部接缝**，由 M-17 实现，**依赖方向单向**（M-12 不依赖 M-13）。M-12 LLD §9.1.1 已补该行
 > - ⚠️ **外设时钟只有一个推进点**：M-12 的 `tick_peripherals`（指令边界同步）+ `SchedEvent::PeripheralTick`（量子边界）走**同一个** ticker 接缝；M-14 的 `Bus::tick_peripherals` **不再**被 M-17 直接调用（否则是**两个真相**）
-> - ⚠️ **`continue_until_event` 的语义订正**：第 1 阶段它只排空队列、**不执行指令**（队列恒空 → 等价于空操作）；现在它真的跑代码（LLD §3.1 `runUntil` 的本意）
+> ⚠️ **`continue_until_event` 的语义订正**：第 1 阶段它只排空队列、**不执行指令**（队列恒空 → 等价于空操作）；现在它真的跑代码（LLD §3.1 `runUntil` 的本意）
+> - ⚠️ **实现语义与冻结契约不一致**（台账 **D-57**）：契约写「跑到下一个**量子边界**」= 1000 条，实现跑到**指令预算** = 10 000 条。契约层冻结 → 随 **D-32** 的 `schema_version=2` 处理
+>
+> **v0.15.1 D-07 检视轮判据**（三路独立检视 43 项发现 → 38 项闭环 / 5 项留账）：
+> - `crates/kernel/tests/d07_time_driven.rs` **31 条**（检视轮从 12 条扩到 31 条）—— 新增「两条路径的外设推进序列**逐条相同**」「指令边界 / 事件路径**各自**投递外设的写」「该写**恰好**提交一次」「报错的外设**不丢**已收下的写」「下一个量子边界**严格在**当前时刻之后」「预算**硬上限**」「换内存图后登记表只含新外设」「多外设**按地址分派**」「快照恢复后外设时钟**继续走**」「停止原因**不跨轮残留**」
+> - **反向变异自检第 2 轮 11 条 + 第 3 轮 11 条** —— ✅ **19 条按期望变红**；2 条确认**无守**（→ 台账 **D-60**）；1 条**脆弱性探针**（→ 台账 **D-62**）
+> - ⚠️ **同一个回调的两条调用路径要用「限定时刻」把夹具分开**：夹具每次都吐同一份数据时，两条路径的判别式会**互相掩护**——删掉任一条，用例照样全绿
+> - ⚠️ **「同一份数据不能有两个真相」要有不变量用例**：本轮 V-A 🟠-1（同一外设在同一虚拟时刻被 tick 两次）修完之后，「两条路径的推进序列**逐条相同**」才是一条能被变异打红的不变量
+> - ⚠️ **反向变异自检的期望集合要用 AND 语义**：OR 语义只能证明「某条期望的用例红了」，**不能**证明「每条期望各自都守得住」；**完整红集**要一起记下来
+> - ⚠️ **变异脚本的备份文件名必须唯一，且 `copyfile` 方向要写对**：本轮真踩了（两个源文件都叫 `mod.rs` + `copyfile` 方向写反）→ 变异**累积**、还原失败。**还原后必须逐字节校验**
+> - ⚠️ **修一处「更精确」的判据，可能引入死循环**：`until_ps` 改预检后，外层主循环与内层停止条件互斥 → **永远空转**。改行为要顺着把**终止性**再走一遍
+> - ⚠️ **恒真式断言要挑出来**：要钉的是「**换算只有一个真相**」（M-17 转调 M-12），不是把定义重说一遍
+> - ⚠️ **「用例钉的是默认值」必须写在文件头**：凡与配置**无关**的不变量，一律写成**相对单条指令成本**的形式
 
 ## Code style
 
