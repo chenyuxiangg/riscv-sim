@@ -33,7 +33,7 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 
 详细设计文档：
 - `docs/architecture/RISC-V_Architecture_Design.html` — 4+1 视图 + ADR
-- `docs/requirements/RISC-V_Requirements_v1.3.html` — 13 条 P0 + 6 层概念空间
+- `docs/requirements/RISC-V_Requirements_v1.4.html` — 13 条 P0 + 6 层概念空间
 - `docs/module-design-spec/RISC-V_Module_Design_Specification.html` — 23 模块 LLD
 - `docs/detailed-design/M-01..M-23_*.html` — 23 篇模块详细设计
 

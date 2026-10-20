@@ -316,6 +316,6 @@ PR 标题 = squash 后的 commit 标题 = conventional commit 格式。
 - `AGENTS.md` — AI Agent 读的项目约定（精简指针，详细内容见本文件 + 27 篇设计文档）
 - `docs/progress/PROGRESS.md` — 项目进度 + 完整开发计划
 - `docs/architecture/RISC-V_Architecture_Design.html` — 架构设计（4+1 视图 + ADR）
-- `docs/requirements/RISC-V_Requirements_v1.3.html` — 需求规格（13 P0 + 6 层概念空间）
+- `docs/requirements/RISC-V_Requirements_v1.4.html` — 需求规格（13 P0 + 6 层概念空间）
 - `docs/module-design-spec/RISC-V_Module_Design_Specification.html` — 23 模块 LLD
 - `docs/detailed-design/M-NN_*.html` — 23 篇模块详细设计

@@ -156,10 +156,10 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
   <div class="cover">
     <div class="kicker">ARCHITECTURE DESIGN · 华为架构设计说明书</div>
     <h1>面向嵌入式软件开发者/测试者的 RISC-V 仿真平台</h1>
-    <p class="sub">架构设计说明书（AD）· 依据《需求分析报告 v1.1》· 4+1 视图 + 架构决策 + 质量属性 + 追溯矩阵</p>
+    <p class="sub">架构设计说明书（AD）· 依据《需求分析报告 v1.4》· 4+1 视图 + 架构决策 + 质量属性 + 追溯矩阵</p>
     <div class="meta">
-      <span><b>文档版本</b> v2.7（新增 §3.2 用例模型：用例图 + 用例清单，补全 4+1 场景视图的 Actor×用例总览）</span>
-      <span><b>编制日期</b> 2026-10-11</span>
+      <span><b>文档版本</b> v2.8（部署形态定案：浏览器形态由「单文件自包含 / file:// 直开」改为「目录形态 + 同源 HTTP 部署」，NFR-05 相应修订——用户决策 2026-10-20）</span>
+      <span><b>编制日期</b> 2026-10-20</span>
       <span><b>编制方法</b> 华为架构设计方法论：4+1 视图（逻辑/运行/物理/数据/场景）+ 架构决策（ADR）+ 质量属性设计</span>
       <span><b>架构决策基线</b> 事件驱动时序(1µs 量子) · 分级外设建模(寄存器接口+行为时序) · 解释执行起步(预留 JIT/双内核) · 双源探针波形(总线 trace + 外设信号) · 内核与前端解耦双形态(WASM/服务端)</span>
       <span><b>形态说明</b> 单文件自包含 HTML，无外部依赖，可直接浏览器打开评审；架构图为内联 SVG（示意级）</span>
@@ -258,7 +258,7 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
     </div>
     <div class="card">
       <h4><span class="chip ok">G2</span> 零安装与易用</h4>
-      <p class="tagline">浏览器 WASM 或服务端 WebSocket，file:// 直接可开（NFR-05）。内核可内嵌或远程承载，两形态共用同一协议与数据模型（第 6 章物理架构）。</p>
+      <p class="tagline">浏览器 WASM 或服务端 WebSocket，同源 HTTP 部署直接可开（NFR-05）。内核可内嵌或远程承载，两形态共用同一协议与数据模型（第 6 章物理架构）。</p>
     </div>
     <div class="card">
       <h4><span class="chip ok">G3</span> 内核与前端解耦、双形态</h4>
@@ -288,7 +288,7 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
       <tr><td class="dim">商业约束</td><td>零安装、免费入口、低门槛；与商用虚拟平台的差异化（不拼全 ISA 保真度）</td><td>定位与市场（需求 1.1/2.5）</td></tr>
       <tr><td class="dim">合规约束</td><td>若复用 QEMU/Unicorn（GPL-2.0）会触发衍生作品传染；内核须可自研 BSD/MIT 或进程隔离</td><td>风险 R2；决定 ExecutionBackend 双内核（第 9 章 ADR-3）</td></tr>
       <tr><td class="dim">范围约束</td><td>不做周期精确/RTL、不做 HIL/EDA、不做编译器/IDE 全栈、不承诺全 ISA 扩展</td><td>需求 3.3 边界表</td></tr>
-      <tr><td class="dim">平台约束</td><td>现代浏览器 + 移动端 375px 可读 + file:// 直接可开；内核与前端解耦双形态</td><td>NFR-05/06</td></tr>
+      <tr><td class="dim">平台约束</td><td>现代浏览器 + 移动端 375px 可读 + 同源 HTTP 部署直接可开；内核与前端解耦双形态</td><td>NFR-05/06</td></tr>
     </tbody>
   </table>
   </div>
@@ -749,11 +749,11 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
   <div class="cards">
     <div class="card">
       <h4><span class="chip ok">浏览器 · 无 Worker 环境降级（兜底，评审 A）</span></h4>
-      <p class="tagline">主路径为 Worker（下卡，韧性基线）；仅在 Worker 不可用的环境（如受限 file:// 旧浏览器）降级为「仿真与 UI 同一主线程按时间片交替」（requestIdleCallback/分片，切片预算：每 ≤10⁴ 条指令或每 10–50ms 宿主时间检查一次命令队列并让出，保证命令响应 ≤500ms 有最坏情况边界），避免阻塞 UI（NFR-02）；降级路径不承诺 guest 失控隔离（watchdog 超时只能抛事件，无法 terminate）。</p>
+      <p class="tagline">主路径为 Worker（下卡，韧性基线）；仅在 Worker 不可用的环境（如受限的旧浏览器）降级为「仿真与 UI 同一主线程按时间片交替」（requestIdleCallback/分片，切片预算：每 ≤10⁴ 条指令或每 10–50ms 宿主时间检查一次命令队列并让出，保证命令响应 ≤500ms 有最坏情况边界），避免阻塞 UI（NFR-02）；降级路径不承诺 guest 失控隔离（watchdog 超时只能抛事件，无法 terminate）。</p>
     </div>
     <div class="card">
       <h4><span class="chip ok">浏览器 · Worker（MVP 韧性基线）</span></h4>
-      <p class="tagline">仿真内核（ISS/引擎/外设/观测）默认移入 Web Worker，postMessage 承载协议消息，主线程专职 UI 与渲染；主线程 watchdog 定时器周期性确认 Worker 心跳，超时（如 guest 死循环占死内核）即 terminate Worker 并抛「guest 失控」超时事件交由 HMS 处置（评审 R3）。file:// 下 Worker 以同文件/blob URL 创建，不破坏单文件自包含（ADR-6）。</p>
+      <p class="tagline">仿真内核（ISS/引擎/外设/观测）默认移入 Web Worker，postMessage 承载协议消息，主线程专职 UI 与渲染；主线程 watchdog 定时器周期性确认 Worker 心跳，超时（如 guest 死循环占死内核）即 terminate Worker 并抛「guest 失控」超时事件交由 HMS 处置（评审 R3）。Worker 以同源 URL 创建（HTTP 部署；P1 可评估 blob URL 内联，不破坏零安装属性）（ADR-6）。</p>
     </div>
     <div class="card">
       <h4><span class="chip ok">服务端 · 会话隔离</span></h4>
@@ -847,9 +847,9 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
       <rect x="240" y="96" width="180" height="150" rx="8" fill="#10161D" stroke="#3EC6A0"/><text x="330" y="114" text-anchor="middle" font-size="11" fill="#E4E9F0">外设+引擎+观测</text>
       <text x="254" y="134" font-size="10" fill="#9AA8B6">同 WASM 模块内</text>
       <text x="254" y="152" font-size="10" fill="#9AA8B6">事件驱动引擎</text>
-      <text x="254" y="170" font-size="10" fill="#9AA8B6">file:// 直接可用</text>
+      <text x="254" y="170" font-size="10" fill="#9AA8B6">同源 HTTP 部署</text>
       <line x1="420" y1="63" x2="420" y2="96" stroke="#3EC6A0" stroke-width="1.2" marker-end="url(#aK1)"/>
-      <text x="30" y="264" font-size="10.5" fill="#9AA8B6">MVP 首选形态：单文件自包含，满足零安装(NFR-05)</text>
+      <text x="30" y="264" font-size="10.5" fill="#9AA8B6">MVP 形态：目录形态 + 同源 HTTP 部署，满足零安装(NFR-05)</text>
       <rect x="452" y="16" width="412" height="260" rx="10" fill="#161E27" stroke="#3EC6A0"/>
       <text x="466" y="36" font-size="13" fill="#E6A23C" font-weight="700">服务端形态（WebSocket · 云端）</text>
       <rect x="466" y="46" width="160" height="34" rx="6" fill="#1E2933" stroke="#33404E"/><text x="546" y="68" text-anchor="middle" font-size="11" fill="#E4E9F0">多视图前端(JS)</text>
@@ -872,7 +872,7 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
   <p class="sec-intro">部署形态 / 运行环境与拓扑 / 兼容性与可维护性</p>
 
   <div class="verdict green">
-    <span class="lead">物理架构（4+1 的物理视图）以「浏览器 WASM 单文件自包含」为 MVP 部署形态，满足零安装与 file:// 直接打开（NFR-05）；服务端 WebSocket 形态承载长任务、QEMU 双内核与 GDB RSP（P1/P2）。两形态共用统一协议与数据模型，切换不改变前端代码。</span>
+    <span class="lead">物理架构（4+1 的物理视图）以「浏览器 WASM 目录形态（同源 HTTP 部署）」为 MVP 部署形态，满足零安装（NFR-05）；服务端 WebSocket 形态承载长任务、QEMU 双内核与 GDB RSP（P1/P2）。两形态共用统一协议与数据模型，切换不改变前端代码。</span>
   </div>
 
   <h3>6.1 部署形态</h3>
@@ -881,7 +881,7 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
     <colgroup><col style="width:22%"><col style="width:44%"><col style="width:34%"></colgroup>
     <thead><tr><th>形态</th><th>构成</th><th>适用 / 里程碑</th></tr></thead>
     <tbody>
-      <tr><td class="dim">浏览器 WASM（MVP）</td><td>前端 JS 包（多视图 UI + 协议客户端 + ELF/DWARF 解析 + watchdog 心跳）+ WASM 内核模块（ISS/引擎/总线/外设，运行于 Worker）+ WASM 观测模块（探针/波形编码）+ 本地存储层；模块按需拆分加载，无服务端依赖；file:// 可开（Worker 同文件/blob URL 创建，评审 R3）</td><td>MVP 首选：零安装、教学/评估/个人开发者（NFR-05，V-10）；Worker 隔离保证 guest 死循环不占死 UI（韧性基线）</td></tr>
+      <tr><td class="dim">浏览器 WASM（MVP）</td><td>前端 JS 包（多视图 UI + 协议客户端 + ELF/DWARF 解析 + watchdog 心跳）+ WASM 内核模块（ISS/引擎/总线/外设，运行于 Worker）+ WASM 观测模块（探针/波形编码）+ 本地存储层；模块按需拆分加载，无服务端依赖；同源 HTTP 部署可开（Worker 同源 URL 创建，评审 R3）</td><td>MVP 首选：零安装、教学/评估/个人开发者（NFR-05，V-10）；Worker 隔离保证 guest 死循环不占死 UI（韧性基线）</td></tr>
       <tr><td class="dim">服务端 WebSocket（P1/P2）</td><td>前端 JS + WebSocket/REST 网关 + 服务端仿真服务（会话隔离）+ 可选 QEMU 双内核</td><td>长任务/整机 Linux、云协作、CI、私有部署、GDB RSP（FR-13/15/16）</td></tr>
       <tr><td class="dim">混合（演进）</td><td>同一前端按场景切换传输适配（WASM 内嵌 or WS 远程）</td><td>同一前端覆盖两形态；协议一致则无缝切换</td></tr>
     </tbody>
@@ -892,7 +892,7 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
   <ul class="ulist">
     <li><b>浏览器形态拓扑</b>：浏览器主线程（Web UI + 协议客户端 + watchdog）→ Worker 线程（WASM 内核：ISS + 引擎 + 外设 + 观测），postMessage 承载协议消息；guest 死循环由 watchdog 超时终止内核（评审 R3），不占死主线程；无网络依赖。</li>
     <li><b>服务端形态拓扑</b>：浏览器（Web UI）→ WebSocket 网关 → 会话管理（每会话一个 ExecutionBackend）→ 可选 QEMU 子进程。会话间进程隔离。</li>
-    <li><b>兼容（NFR-05）</b>：现代 Chrome/Edge/Safari/Firefox；375px 移动端可读、正文 ≥14px；单文件自包含、file:// 直接打开可用（V-10）。</li>
+    <li><b>兼容（NFR-05）</b>：现代 Chrome/Edge/Safari/Firefox；375px 移动端可读、正文 ≥14px；零安装（用户侧无构建/安装步骤）、同源 HTTP 部署直接打开可用（V-10）。</li>
     <li><b>可维护（NFR-06）</b>：仿真内核与前端解耦（双形态）；外设模型插件化；核心模块单元测试覆盖率 ≥70%【估算】；确定性测试夹具。</li>
     <li><b>可观测（NFR-07）</b>：独立日志系统（横切）统一采集各层日志，仅向系统管理员通道分发（§3.4）；健康管理 HMS 面向产品/嵌入式工作台分发可读异常提示（§8.5）；虚拟时间/事件队列可视化；确定性可复现（固定种子）。</li>
   </ul>
@@ -1259,10 +1259,10 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
 
   <h3>9.6 ADR-6 · 前端承载：零构建 vs 零依赖（评审 M3/L4）</h3>
   <div class="dp">
-    <div class="row"><b>问题</b>：两个独立命题——「零构建」（无打包步骤）与「零依赖」（无外部网络依赖）——此前混为一谈；file:// 形态下 WASM 与 P1 three.js 如何承载需明确。</div>
+    <div class="row"><b>问题</b>：两个独立命题——「零构建」（无打包步骤）与「零依赖」（无外部网络依赖）——此前混为一谈；目录形态下 WASM 与 P1 three.js 如何承载需明确。</div>
     <div class="row"><b>选项</b>：A 原生 JS + 全部内联（零构建、零依赖、单文件）；B 构建产物单 HTML（零依赖、有构建步骤）；C 原生 JS + 关键依赖 CDN（零构建、有网络依赖）。</div>
-    <div class="row"><b>权衡</b>：file:// 的真正约束是 ES module CORS 与外部资源不可达（与框架无关）；three.js 走 CDN 则 file:// 离线失效，与「单文件自包含」冲突；WASM 内联 base64 会膨胀文件（内核 1–3MB → base64 增约 33%）且首屏加载变慢。</div>
-    <div class="rec"><b>决策</b>：MVP = 方案 A——原生 JS 零构建 + WASM 内联 base64（<b>单文件优先、目录形态兜底（NFR-05 允许 file:// 目录形态，评审 E）</b>；或首次加载后由本地文件缓存，file:// 下接受「单目录多文件」：入口 index.html + wasm 文件）；P1 3D = 方案 C 的受控变体：three.js 走可信 CDN，file:// 下 3D 视图降级为 2D/树形（能力协商降级，§11.2），不阻塞核心闭环。<b>「零构建」= 零安装 / 单文件交付属性（用户侧无需任何构建步骤），非开发期约束：内核由 C/Rust→WASM 经 emscripten/LLVM 编译，开发期构建链与测试工具链（node/jest/CI 对拍）正常存在且不受零构建约束（评审 R2/R7/R12）</b>；零依赖在 MVP 保持、P1 允许 CDN + 降级。</div>
+    <div class="row"><b>权衡</b>：同源 HTTP 部署的真正约束是 ES module CORS 与外部资源不可达（与框架无关）；three.js 走 CDN 则离线失效，与「零依赖」冲突；WASM 内联 base64 会膨胀文件（内核 1–3MB → base64 增约 33%）且首屏加载变慢——故目录形态下<b>不内联</b> WASM，直接以同源静态资源加载。</div>
+    <div class="rec"><b>决策</b>：MVP = 方案 A——原生 JS 零构建 + WASM 内联 base64（<b>目录形态 + 同源 HTTP 部署为最终形态</b>（用户决策 2026-10-20；NFR-05 相应修订，单文件自包含降级为<b>可选交付形态</b>，不再作为 MVP 硬指标）；目录形态下由同源静态服务器承载：入口 index.html + 相对 import 的模块图 + wasm 文件）；P1 3D = 方案 C 的受控变体：three.js 走可信 CDN，离线环境 3D 视图降级为 2D/树形（能力协商降级，§11.2），不阻塞核心闭环。<b>「零构建」= 零安装交付属性（用户侧无需任何构建步骤），非开发期约束：内核由 C/Rust→WASM 经 emscripten/LLVM 编译，开发期构建链与测试工具链（node/jest/CI 对拍）正常存在且不受零构建约束（评审 R2/R7/R12）</b>；零依赖在 MVP 保持、P1 允许 CDN + 降级。</div>
   </div>
 
   <h3>9.7 逐模块技术选型矩阵</h3>
@@ -1275,13 +1275,13 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
       <tr><td class="dim">ISS 内核</td><td>自研轻量 ISS / QEMU / Unicorn / Spike 库</td><td>自研：可控、合规、可观测好、工程量中等；QEMU：整机强但 GPL（R2）；Unicorn：GPL、无外设；Spike：BSD 可借鉴</td><td><b>自研轻量 ISS（RV32IMC，WASM）</b>；服务端可选 QEMU</td><td>合规（BSD/MIT）+ 解释满足 5-10 MIPS（ADR-3）；Spike 差分对拍；预留 JIT</td></tr>
       <tr><td class="dim">仿真引擎</td><td>事件驱动 / 周期精确 / 混合</td><td>事件驱动快、够功能验证；周期精确真但慢贵</td><td><b>事件驱动（1µs 量子）</b></td><td>ADR-1；借鉴 Renode；预留 Verilator</td></tr>
       <tr><td class="dim">外设建模</td><td>寄存器级 / 行为级 / 分级</td><td>寄存器级利于兼容但成本高；行为级快但可能误导</td><td><b>分级建模（Peripheral）</b></td><td>ADR-2；寄存器接口+行为时序起步</td></tr>
-      <tr><td class="dim">前端</td><td>原生 JS+hash / React / Vue / Svelte</td><td>框架需打包步骤，产物同样可内联为单 HTML；file:// 真正约束是 ES module CORS 与外部资源不可达（与框架无关）；原生零构建 + 内联可审计</td><td><b>原生 JS + 多视图 hash 路由</b></td><td>零构建零安装（NFR-05）；three.js（P1）承载见 ADR-6</td></tr>
+      <tr><td class="dim">前端</td><td>原生 JS+hash / React / Vue / Svelte</td><td>框架需打包步骤，产物同样可内联为单 HTML；同源 HTTP 部署真正约束是 ES module CORS 与外部资源不可达（与框架无关）；原生零构建 + 可审计</td><td><b>原生 JS + 多视图 hash 路由</b></td><td>零构建零安装（NFR-05）；three.js（P1）承载见 ADR-6</td></tr>
       <tr><td class="dim">3D 引擎（P1）</td><td>three.js / WebGPU / 2D 增强</td><td>three.js 生态成熟零安装；WebGPU 新；2D 增强无差异化</td><td><b>three.js（ADR-5，P1）</b></td><td>渲染/仿真解耦；产品树同源</td></tr>
       <tr><td class="dim">ELF/DWARF</td><td>浏览器内 / 服务端 / 外部工具</td><td>浏览器内满足零安装与联动；服务端利于大固件但依赖服务端</td><td><b>浏览器内 ELF 解析 + DWARF 行表</b></td><td>反汇编·源码联动（FR-05）</td></tr>
       <tr><td class="dim">传输协议</td><td>统一协议+双适配 / 各自私有 / WebRTC</td><td>统一协议支撑双形态双内核透明；各自私有无法复用前端</td><td><b>统一命令/事件协议 + 双传输适配</b></td><td>前后端、双形态、双内核公共契约</td></tr>
       <tr><td class="dim">波形管道</td><td>自研边沿编码 / VCD 导出 / 周期采样</td><td>自研压缩最优可控；VCD 是导出格式；周期采样数据量大</td><td><b>自研探针边沿编码 + 增量推送</b></td><td>差异化核心（第 8 章）；导出 CSV/VCD</td></tr>
       <tr><td class="dim">持久化</td><td>localStorage / IndexedDB / 服务端</td><td>localStorage 5MB 上限易被快照撑爆；IndexedDB 容量大、可存快照与波形 spool；服务端支撑云协作</td><td><b>IndexedDB（MVP，容量预算 §7.4）→ 服务端（P1）</b></td><td>FR-13；M2 评审：256KB RAM 快照 ≈350KB+，localStorage 不满足多快照+项目共存</td></tr>
-      <tr><td class="dim">WASM 工具链</td><td>emscripten / LLVM 直出 / AssemblyScript</td><td>emscripten 生态成熟适移植 C；LLVM 直出更轻但工程多</td><td><b>emscripten / LLVM</b></td><td>内核与前端解耦（NFR-06）；<b>属开发期编译链，交付物仍单文件自包含（评审 R2）</b></td></tr>
+      <tr><td class="dim">WASM 工具链</td><td>emscripten / LLVM 直出 / AssemblyScript</td><td>emscripten 生态成熟适移植 C；LLVM 直出更轻但工程多</td><td><b>emscripten / LLVM</b></td><td>内核与前端解耦（NFR-06）；<b>属开发期编译链，交付物仍零安装（评审 R2）</b></td></tr>
       <tr><td class="dim">正确性对拍</td><td>Spike golden / riscv-tests / 自建</td><td>Spike 官方黄金基准；riscv-tests 覆盖子集；自建针对本平台</td><td><b>Spike golden + riscv-tests 子集 + 自建</b></td><td>FR-04 正确性；覆盖矩阵声明</td></tr>
       <tr><td class="dim">构建/CI（P1）</td><td>headless CLI / Robot Framework / Jenkins</td><td>headless 支撑脚本回归；Robot 借鉴 Renode；Jenkins 调度</td><td><b>headless CLI + 场景脚本/断言引擎（FR-16/17）</b></td><td>对齐 Renode Robot；CI 配额借鉴 Wokwi</td></tr>
     </tbody>
@@ -1296,7 +1296,7 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
     </div>
     <div class="card">
       <h4><span class="chip ok">为何前端原生 JS</span></h4>
-      <p class="tagline">零安装（NFR-05）与 file:// 直接可开（V-10）是硬指标，任何构建链依赖（React/Vue 需打包）都会破坏。原生 JS + hash 路由 + 命令驱动重渲染，以略多样板换取零依赖、可审计、可单文件自包含——即 Wokwi 路线。</p>
+      <p class="tagline">零安装（NFR-05）与同源 HTTP 部署直接可开（V-10）是硬指标，任何构建链依赖（React/Vue 需打包）都会破坏。原生 JS + hash 路由 + 命令驱动重渲染，以略多样板换取零依赖、可审计、零安装——即 Wokwi 路线。</p>
     </div>
     <div class="card">
       <h4><span class="chip cyan">为何波形自研</span></h4>
@@ -1341,7 +1341,7 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
   <p><b>快照原子性与恢复点</b>：快照以量子边界为检查点原子落盘（写临时文件 + 替换），与证据流记录对齐（§7.3）；<b>崩溃恢复 = 最近检查点 + 稀疏输入事件序列重放执行（恢复路径，非全量证据流重放，评审 R1）</b>，恢复点语义明确（FR-12/19）；持久化写失败 → 保留内存态 + 提示重试，不丢会话。</p>
 
   <h3>10.3 可用性</h3>
-  <p>多视图独立路由（FR-23）+ View Store 保证切换后仿真与调试状态保持（V-11）；零安装 + file:// 直接可开（NFR-05）；命令驱动重渲染 + Worker 内核切片（主路径）/ 分片兜底避免 UI 卡顿；服务端会话隔离保证并发稳定（V-09）。</p>
+  <p>多视图独立路由（FR-23）+ View Store 保证切换后仿真与调试状态保持（V-11）；零安装 + 同源 HTTP 部署直接可开（NFR-05）；命令驱动重渲染 + Worker 内核切片（主路径）/ 分片兜底避免 UI 卡顿；服务端会话隔离保证并发稳定（V-09）。</p>
 
   <h3>10.4 安全</h3>
   <p>WASM 沙箱执行固件（NFR-04）+ 统一转义防 XSS + 通信鉴权（服务端）+ 会话隔离——构成安全横切面（第 8.4 章）。</p>
@@ -1445,8 +1445,8 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
     <li><b>产品树数据底座稳定</b>：2D/3D 同源（FR-21），3D 演进不引入第二套数据模型。</li>
     <li><b>外设插件化</b>：Peripheral 注册表新增外设不改既有实例与总线映射。</li>
     <li><b>性能目标渐进</b>：MVP 解释目标 5–10 MIPS【估算】，演进解锁 JIT/QEMU 双内核，前端代码不变。</li>
-    <li><b>浏览器兼容</b>：现代浏览器 + 375px 移动端 + file:// 直接打开（NFR-05，V-10），演进不引入外部依赖。</li>
-    <li><b>file:// + blob Worker 兼容矩阵（评审 F）</b>：Worker 以同文件/blob URL 创建，LLD 首周对 Chrome/Edge/Firefox/Safari（尤其 Safari file:// 策略）逐浏览器实测并固化兼容矩阵；任一浏览器不支持的降级路径 = §5.1 无 Worker 环境分片兜底。</li>
+    <li><b>浏览器兼容</b>：现代浏览器 + 375px 移动端 + 同源 HTTP 部署直接打开（NFR-05，V-10），演进不引入外部依赖。</li>
+    <li><b>Worker 兼容矩阵（评审 F）</b>：Worker 以同源 URL 创建，LLD 首周对 Chrome/Edge/Firefox/Safari 逐浏览器实测并固化兼容矩阵；任一浏览器不支持的降级路径 = §5.1 无 Worker 环境分片兜底。</li>
     <li><b>协议版本协商</b>：握手携带协议版本 + 能力位；新增字段只增不改（向前兼容），未知字段忽略（向后兼容）；不兼容 → 明确拒绝并提示升级路径，不静默错读（§7.3 数据版本）。</li>
     <li><b>持久化 schema 版本与迁移</b>：Project/SimState/DebugMeta 携带 schemaVersion；旧版快照按迁移链升级读取（向后兼容）；分享链接 hash 含版本标识；IndexedDB → 服务端迁移按版本执行。</li>
     <li><b>双形态版本一致性</b>：前端与服务端协议版本匹配检查；不匹配 → 降级提示或拒绝连接（§6）。</li>
@@ -1475,7 +1475,7 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
       <tr><td class="dim">NFR-02</td><td>响应与刷新时限</td><td>命令/观测时序（§5.3，§10.1）</td></tr>
       <tr><td class="dim">NFR-03</td><td>并发（≥10 会话）</td><td>会话隔离 + 并发模型（§5.1，§6.2）</td></tr>
       <tr><td class="dim">NFR-04</td><td>安全（沙箱/XSS）</td><td>安全沙箱与防护（§8.4）</td></tr>
-      <tr><td class="dim">NFR-05</td><td>零安装 / file:// / 移动端</td><td>物理架构（§6.1/6.2）</td></tr>
+      <tr><td class="dim">NFR-05</td><td>零安装 / 同源 HTTP 部署 / 移动端</td><td>物理架构（§6.1/6.2）</td></tr>
       <tr><td class="dim">NFR-06</td><td>内核前端解耦 / 插件化</td><td>ExecutionBackend + Peripheral（§4.2/4.3）</td></tr>
       <tr><td class="dim">NFR-07</td><td>可观测（日志/波形/确定）</td><td>日志系统（横切·仅系统管理员通道，§3.4/§8.5）+ 观测管道（§8.2）</td></tr>
       <tr><td class="dim">NFR-08</td><td>韧性（架构扩展项，需求 NFR 仅 01–07）</td><td>HMS 健康管理（横切，§8.5）+ 快照/事件流恢复（§7.3/§10.2）</td></tr>
@@ -1556,8 +1556,8 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
     </div>
     <div class="card">
       <h4><span class="pill m">中</span> 构建链与外部依赖（新增架构风险）</h4>
-      <p class="tagline">引入框架/构建链破坏零安装与自包含。</p>
-      <div class="kv-row"><b>应对</b>原生 JS + 零构建 + 单文件自包含（§9.7 前端选型 + ADR-6）；外部库统一走可信 CDN（P1，file:// 下降级），非必需不引入。</div>
+      <p class="tagline">引入框架/构建链破坏零安装属性。</p>
+      <div class="kv-row"><b>应对</b>原生 JS + 零构建 + 零安装（§9.7 前端选型 + ADR-6）；外部库统一走可信 CDN（P1，离线环境下降级），非必需不引入。</div>
     </div>
   </div>
 </section>
