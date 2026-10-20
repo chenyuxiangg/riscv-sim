@@ -70,10 +70,12 @@ SELF_CHECK=0
 KEEP_GOING=0
 RELEASE=0
 
+die() { echo "golden-run: $*" >&2; exit 2; }
+
 while [ $# -gt 0 ]; do
     case "$1" in
-        --suite)       SUITE_FILTER="${2:-}"; shift 2 ;;
-        --filter)      FILTER="${2:-}"; shift 2 ;;
+        --suite)       [ $# -ge 2 ] || die "--suite needs a suite name"; SUITE_FILTER="$2"; shift 2 ;;
+        --filter)      [ $# -ge 2 ] || die "--filter needs a REGEX"; FILTER="$2"; shift 2 ;;
         --list)        LIST_ONLY=1; shift ;;
         --self-check)  SELF_CHECK=1; shift ;;
         --release)     RELEASE=1; shift ;;
@@ -82,8 +84,6 @@ while [ $# -gt 0 ]; do
         *) echo "golden-run: unknown option $1" >&2; exit 2 ;;
     esac
 done
-
-die() { echo "golden-run: $*" >&2; exit 2; }
 
 # ---------------------------------------------------------------- preflight
 [ -f "$MANIFEST" ] || die "missing corpus manifest: $MANIFEST"
@@ -103,10 +103,22 @@ fi
 cases=()
 while IFS= read -r line; do
     case "$line" in ''|'#'*) continue ;; esac
-    # shellcheck disable=SC2086
-    set -- $line
-    [ $# -eq 4 ] || die "malformed manifest line: $line"
-    suite="$1"; test_name="$2"; march="$3"; status="$4"
+    # The reason column may contain spaces, so `read` is used (it puts
+    # the remainder of the line into the last variable).
+    read -r suite test_name march status reason <<< "$line"
+    if [ -z "$suite" ] || [ -z "$test_name" ] || [ -z "$march" ] || [ -z "$status" ]; then
+        die "malformed manifest line: $line"
+    fi
+    case "$status" in
+        active|pending) ;;
+        *) die "unknown status '$status' in manifest line: $line" ;;
+    esac
+    # A pending case must say why it is out of scope and which ledger
+    # entry tracks it -- otherwise the exception silently outlives the
+    # reason that justified it.
+    if [ "$status" = "pending" ] && [ -z "$reason" ]; then
+        die "pending case '$suite/$test_name' has no reason / ledger entry"
+    fi
     [ -n "$SUITE_FILTER" ] && [ "$suite" != "$SUITE_FILTER" ] && continue
     if [ -n "$FILTER" ]; then
         echo "$suite/$test_name" | grep -Eq "$FILTER" || continue
@@ -114,11 +126,19 @@ while IFS= read -r line; do
     cases+=("$suite|$test_name|$march|$status")
 done < "$MANIFEST"
 
-if [ "$LIST_ONLY" -eq 1 ]; then
-    for c in "${cases[@]}"; do
-        echo "$c" | tr '|' ' '
-    done
-    exit 0
+# NOTE: macOS ships bash 3.2, where expanding an **empty** array under
+# `set -u` is a fatal "unbound variable" error.  The length guard has
+# to come before any "${cases[@]}" expansion -- including the `--list`
+# branch.
+if [ "${#cases[@]}" -gt 0 ]; then
+    if [ "$LIST_ONLY" -eq 1 ]; then
+        for c in "${cases[@]}"; do
+            echo "$c" | tr '|' ' '
+        done
+        exit 0
+    fi
+else
+    die "no cases selected (empty corpus, or the --suite / --filter selection matched nothing)"
 fi
 
 # ---------------------------------------------------------------- build
@@ -136,7 +156,7 @@ mkdir -p "$OUT_DIR"
 # with SIGALRM (observed as exit status 142).
 run_with_timeout() {
     local secs="$1"; shift
-    perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+    perl -e 'alarm shift; exec(@ARGV) or die "exec failed: $!"' "$secs" "$@"
 }
 
 is_timeout() { [ "$1" -eq 142 ] || [ "$1" -eq 124 ]; }
@@ -241,7 +261,28 @@ run_canaries() {
         canary_fail=1
     fi
 
-    # --- canary B: upstream add with a corrupted expectation ---
+    # --- canary B: upstream add, unmodified -- a positive control ---
+    #
+    # The two canaries above only exercise the FAIL path.  A positive
+    # control closes the other direction: the harness must be able to
+    # recognise a PASS on both sides, not just a FAIL.  Without it, a
+    # harness that reported "FAIL" for everything would look perfectly
+    # healthy.
+    up_add_plain="$RISCV_TESTS_DIR/isa/rv64ui/add.S"
+    if [ -f "$up_add_plain" ]; then
+        elf_p="$OUT_DIR/canary-add-plain.elf"
+        if build_case "$up_add_plain" "$elf_p" rv32i_zifencei; then
+            check_canary "add (positive)" "$elf_p" "PASS"
+        else
+            printf '  %-22s BUILD FAILED\n' "add (positive)"
+            canary_fail=1
+        fi
+    else
+        printf '  %-22s SKIPPED (upstream add.S not found)\n' "add (positive)"
+        canary_fail=1
+    fi
+
+    # --- canary C: upstream add with a corrupted expectation ---
     up_add="$RISCV_TESTS_DIR/isa/rv64ui/add.S"
     if [ -f "$up_add" ]; then
         mut_src="$OUT_DIR/canary-add-mutated.S"
@@ -273,7 +314,7 @@ if [ "$SELF_CHECK" -eq 1 ]; then
         echo "self-check FAILED — the comparison is not discriminating."
         exit 1
     fi
-    echo "self-check ok — both sides detect a failing case as FAIL 3."
+    echo "self-check ok — both sides agree on a failing case (FAIL 3) and on a passing one (PASS)."
     exit 0
 fi
 
@@ -288,7 +329,7 @@ if ! run_canaries; then
     echo "self-check FAILED — the comparison is not discriminating; the corpus run is abandoned."
     exit 1
 fi
-echo "self-check ok — both sides detect a failing case as FAIL 3."
+echo "self-check ok — both sides agree on a failing case (FAIL 3) and on a passing one (PASS)."
 
 printf '\n%-28s %-18s %-18s %s\n' "CASE" "SPIKE" "OURS" "RESULT"
 printf '%s\n' "------------------------------------------------------------------------"
@@ -320,7 +361,17 @@ for c in "${cases[@]}"; do
     spike_verdict="${got%%|*}"
     our_verdict="${got##*|}"
 
-    if [ "$spike_verdict" = "NOVERDICT" ] || [ "$our_verdict" = "NOVERDICT" ]; then
+    if [ "$spike_verdict" = "$our_verdict" ] && [ "$status" = "pending" ]; then
+        # A pending case that now agrees is a **stale flag**: the
+        # extension it was waiting for has landed, so the case belongs
+        # in the `active` set.  Failing the run is what keeps the flag
+        # honest -- otherwise the exception silently outlives its
+        # reason.
+        printf '%-28s %-18s %-18s %s\n' "$suite/$test_name" "$spike_verdict" "$our_verdict" "NOW-PASSING"
+        now_passing=$((now_passing + 1))
+        failures+=("$suite/$test_name: pending case now agrees — flip its status to 'active'")
+        [ "$KEEP_GOING" -eq 1 ] || break
+    elif [ "$spike_verdict" = "NOVERDICT" ] || [ "$our_verdict" = "NOVERDICT" ]; then
         # A missing verdict is NOT an agreement.  Counting
         # NOVERDICT == NOVERDICT as "ok" is how a harness goes green
         # while both sides are simply broken — the reference side timed
@@ -340,9 +391,22 @@ for c in "${cases[@]}"; do
         fi
     elif [ "$status" = "pending" ]; then
         # Expected gap: the case needs an ISA extension M-13 does not
-        # implement yet.  Reported, but it does not fail the run.
-        printf '%-28s %-18s %-18s %s\n' "$suite/$test_name" "$spike_verdict" "$our_verdict" "expected-gap"
-        expected_gap=$((expected_gap + 1))
+        # implement yet.  **Only** "the candidate cannot execute it at
+        # all" is tolerated -- ERROR / NOVERDICT.  Any other
+        # disagreement (e.g. Spike says PASS and we say FAIL 3) is a
+        # real defect and must fail the run; swallowing it under
+        # "expected gap" is exactly the kind of hole this ledger
+        # exists to close.
+        case "$our_verdict" in
+            ERROR*|NOVERDICT)
+                printf '%-28s %-18s %-18s %s\n' "$suite/$test_name" "$spike_verdict" "$our_verdict" "expected-gap"
+                expected_gap=$((expected_gap + 1)) ;;
+            *)
+                printf '%-28s %-18s %-18s %s\n' "$suite/$test_name" "$spike_verdict" "$our_verdict" "MISMATCH"
+                mismatch=$((mismatch + 1))
+                failures+=("$suite/$test_name: spike=$spike_verdict ours=$our_verdict (pending)")
+                [ "$KEEP_GOING" -eq 1 ] || break ;;
+        esac
     else
         printf '%-28s %-18s %-18s %s\n' "$suite/$test_name" "$spike_verdict" "$our_verdict" "MISMATCH"
         mismatch=$((mismatch + 1))
@@ -364,7 +428,8 @@ fi
 
 printf '\nartifacts: %s\n' "$OUT_DIR"
 
-if [ "$mismatch" -gt 0 ] || [ "$build_failed" -gt 0 ] || [ "$no_verdict" -gt 0 ]; then
+if [ "$mismatch" -gt 0 ] || [ "$build_failed" -gt 0 ] || [ "$no_verdict" -gt 0 ] \
+   || [ "$now_passing" -gt 0 ]; then
     exit 1
 fi
 exit 0

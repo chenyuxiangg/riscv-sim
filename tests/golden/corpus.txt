@@ -1,16 +1,22 @@
 # Golden corpus manifest — the authoritative list of riscv-tests cases that
 # the platform compares against Spike.
 #
-# Format:  <suite>  <test>  <march>  <status>
+# Format:  <suite>  <test>  <march>  <status>  [reason]
 #
 #   suite   riscv-tests suite directory under isa/
 #   test    test case name (isa/<suite>/<test>.S)
 #   march   -march= value used to assemble the case
 #   status  active  — the case must agree with Spike; a mismatch fails the run
 #           pending — the case needs an ISA extension M-13 does not implement
-#                     yet, so a mismatch is an expected gap and does NOT fail
-#                     the run.  A `pending` case that starts agreeing is
-#                     reported as NOW-PASSING: flip it to `active`.
+#                     yet.  For a pending case the harness tolerates **only**
+#                     "the candidate cannot execute it" (ERROR / NOVERDICT).
+#                     Any other disagreement is a real defect and fails the
+#                     run.  A pending case that starts agreeing is reported
+#                     as NOW-PASSING and **fails the run** — flip it to
+#                     `active` and the flag stops being stale.
+#   reason  REQUIRED for `pending`: why it is out of scope + the ledger
+#           entry that tracks it.  The harness validates that every
+#           pending row carries one.
 #
 # Scope rules (see tests/golden/env/riscv_test.h for the full rationale):
 #   * the environment is CSR-free, so `rv32mi` / `rv32si` are OUT — they
@@ -65,12 +71,12 @@ rv32ui sub rv32i_zifencei active
 rv32ui sw rv32i_zifencei active
 rv32ui xor rv32i_zifencei active
 rv32ui xori rv32i_zifencei active
-rv32um div rv32im_zifencei pending
-rv32um divu rv32im_zifencei pending
-rv32um mul rv32im_zifencei pending
-rv32um mulh rv32im_zifencei pending
-rv32um mulhsu rv32im_zifencei pending
-rv32um mulhu rv32im_zifencei pending
-rv32um rem rv32im_zifencei pending
-rv32um remu rv32im_zifencei pending
-rv32uc rvc rv32ic_zifencei pending
+rv32um div rv32im_zifencei pending D-43: M 扩展 8 条未实现
+rv32um divu rv32im_zifencei pending D-43: M 扩展 8 条未实现
+rv32um mul rv32im_zifencei pending D-43: M 扩展 8 条未实现
+rv32um mulh rv32im_zifencei pending D-43: M 扩展 8 条未实现
+rv32um mulhsu rv32im_zifencei pending D-43: M 扩展 8 条未实现
+rv32um mulhu rv32im_zifencei pending D-43: M 扩展 8 条未实现
+rv32um rem rv32im_zifencei pending D-43: M 扩展 8 条未实现
+rv32um remu rv32im_zifencei pending D-43: M 扩展 8 条未实现
+rv32uc rvc rv32ic_zifencei pending D-43: C 扩展未实现

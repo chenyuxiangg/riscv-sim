@@ -97,6 +97,11 @@
 
 // XLEN check.  On RV32, `a0 = 1 << 31` must be negative.  Upstream reaches
 // `RVTEST_PASS` from here; ours writes `tohost` directly.
+//
+// This macro **is** called from `RVTEST_CODE_BEGIN` -- upstream calls it
+// too (right after the CSR setup).  A defined-but-never-called macro is
+// a lie in the documentation, and the XLEN check is the cheapest possible
+// sanity gate on the whole environment.
 #define CHECK_XLEN li a0, 1; slli a0, a0, 31; bltz a0, 1f; RVTEST_PASS; 1:
 
 // Zero every architectural register.  Keeps a run deterministic regardless
@@ -123,6 +128,7 @@ reset_vector:                                                              \
         INIT_XREG;                                                         \
         li sp, 0x7ffff000;                                                 \
         li TESTNUM, 0;                                                     \
+        CHECK_XLEN;                                                        \
         init;                                                              \
         EXTRA_INIT;                                                        \
         EXTRA_INIT_TIMER;                                                  \
