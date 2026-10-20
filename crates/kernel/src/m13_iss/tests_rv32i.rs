@@ -39,6 +39,12 @@ const LUI: u8 = 0b011_0111;
 const LOAD: u8 = 0b000_0011;
 /// Opcode of the STORE group.
 const STORE: u8 = 0b010_0011;
+/// Opcode of the BRANCH group.
+const BRANCH: u8 = 0b110_0011;
+/// Opcode of the JALR instruction.
+const JALR: u8 = 0b110_0111;
+/// Opcode of the JAL instruction.
+const JAL: u8 = 0b110_1111;
 
 /// Encode an I-type instruction (12-bit signed immediate).
 fn enc_i(imm: i32, rs1: u8, funct3: u8, rd: u8, opcode: u8) -> u32 {
@@ -89,6 +95,30 @@ fn enc_s(imm: i32, rs2: u8, rs1: u8, funct3: u8, opcode: u8) -> u32 {
 /// Little-endian byte image of a word sequence.
 fn image(words: &[u32]) -> Vec<u8> {
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
+}
+
+/// Encode a B-type instruction (13-bit signed immediate, split fields).
+fn enc_b(imm: i32, rs2: u8, rs1: u8, funct3: u8, opcode: u8) -> u32 {
+    let imm = imm as u32;
+    (((imm >> 12) & 0x1) << 31)
+        | (((imm >> 5) & 0x3F) << 25)
+        | ((rs2 as u32) << 20)
+        | ((rs1 as u32) << 15)
+        | ((funct3 as u32) << 12)
+        | (((imm >> 1) & 0xF) << 8)
+        | (((imm >> 11) & 0x1) << 7)
+        | (opcode as u32)
+}
+
+/// Encode a J-type instruction (21-bit signed immediate, split fields).
+fn enc_j(imm: i32, rd: u8, opcode: u8) -> u32 {
+    let imm = imm as u32;
+    (((imm >> 20) & 0x1) << 31)
+        | (((imm >> 1) & 0x3FF) << 21)
+        | (((imm >> 11) & 0x1) << 20)
+        | (((imm >> 12) & 0xFF) << 12)
+        | ((rd as u32) << 7)
+        | (opcode as u32)
 }
 
 // ---------------------------------------------------------------------------
@@ -913,4 +943,255 @@ fn load_and_store_go_through_the_bus() {
     assert_eq!(state.gpr[2], 0xCAFE_BABE, "the load must reach memory");
     let stats = h.bus.stats();
     assert_eq!(stats.reads, 2, "the bus must see the fetch and the load");
+}
+
+// ---------------------------------------------------------------------------
+// RV32I — BRANCH / JAL / JALR
+// ---------------------------------------------------------------------------
+
+/// The test encoders must produce the spec-mandated encodings — a
+/// drifting encoder would silently invalidate every other case in
+/// this file.
+#[test]
+fn test_encoders_match_the_specified_encodings() {
+    assert_eq!(
+        enc_i(42, 0, 0b000, 1, OP_IMM),
+        0x02A0_0093,
+        "addi x1, x0, 42"
+    );
+    assert_eq!(enc_u(0x12345, 1, LUI), 0x1234_50B7, "lui x1, 0x12345");
+    assert_eq!(enc_u(0x1, 1, AUIPC), 0x0000_1097, "auipc x1, 0x1");
+    assert_eq!(enc_i(8, 1, 0b010, 2, LOAD), 0x0080_A103, "lw x2, 8(x1)");
+    assert_eq!(enc_s(8, 2, 1, 0b010, STORE), 0x0020_A423, "sw x2, 8(x1)");
+    assert_eq!(enc_b(8, 0, 0, 0b000, BRANCH), 0x0000_0463, "beq x0, x0, 8");
+    assert_eq!(enc_j(8, 1, JAL), 0x0080_00EF, "jal x1, 8");
+    assert_eq!(enc_i(-4, 2, 0b000, 1, JALR), 0xFFC1_00E7, "jalr x1, -4(x2)");
+    assert_eq!(enc_r(0, 2, 1, 0b000, 3, OP), 0x0020_81B3, "add x3, x1, x2");
+    assert_eq!(
+        enc_r(0b010_0000, 2, 1, 0b000, 3, OP),
+        0x4020_81B3,
+        "sub x3, x1, x2"
+    );
+}
+
+/// The branch immediate is spliced from the two imm fields and sign
+/// extended.
+#[test]
+fn decode_branch_splices_the_immediate() {
+    let d = Decoder::default().decode(enc_b(-8, 2, 1, 0b000, BRANCH), 0);
+    assert_eq!(d.opcode, BRANCH);
+    assert_eq!(d.funct3, 0b000);
+    assert_eq!(d.rs1, 1);
+    assert_eq!(d.rs2, 2);
+    assert_eq!(d.imm, -8);
+
+    // The most negative branch offset exercises the sign bit of
+    // imm[12], which lives in inst[31].
+    let min = Decoder::default().decode(enc_b(-4096, 0, 0, 0b000, BRANCH), 0);
+    assert_eq!(min.imm, -4096);
+
+    // The largest positive branch offset sets imm[12].
+    let max = Decoder::default().decode(enc_b(4094, 0, 0, 0b000, BRANCH), 0);
+    assert_eq!(max.imm, 4094);
+}
+
+/// The J-type immediate is spliced from four fields and sign extended.
+#[test]
+fn decode_jal_splices_the_immediate() {
+    let d = Decoder::default().decode(enc_j(0x1000, 1, JAL), 0);
+    assert_eq!(d.opcode, JAL);
+    assert_eq!(d.rd, 1);
+    assert_eq!(d.imm, 0x1000);
+
+    let back = Decoder::default().decode(enc_j(-2048, 1, JAL), 0);
+    assert_eq!(back.imm, -2048, "a negative J offset must sign extend");
+}
+
+/// JALR carries a plain I-type immediate.
+#[test]
+fn decode_jalr_fills_the_fields() {
+    let d = Decoder::default().decode(enc_i(-4, 2, 0b000, 1, JALR), 0);
+    assert_eq!(d.opcode, JALR);
+    assert_eq!(d.funct3, 0b000);
+    assert_eq!(d.rd, 1);
+    assert_eq!(d.rs1, 2);
+    assert_eq!(d.imm, -4);
+}
+
+/// A taken branch redirects the PC; a not-taken branch falls through.
+#[test]
+fn beq_taken_and_not_taken() {
+    let mut h = Harness::new();
+
+    let mut state = SimState::default();
+    state.gpr[1] = 7;
+    state.gpr[2] = 7;
+    h.step_one_at(&mut state, 0x1000, enc_b(16, 2, 1, 0b000, BRANCH));
+    assert_eq!(state.pc, 0x1010, "a taken branch jumps to pc + offset");
+
+    let mut state = SimState::default();
+    state.gpr[1] = 7;
+    state.gpr[2] = 8;
+    h.step_one_at(&mut state, 0x1000, enc_b(16, 2, 1, 0b000, BRANCH));
+    assert_eq!(state.pc, 0x1004, "a not-taken branch falls through");
+}
+
+/// BNE is the inverse of BEQ.
+#[test]
+fn bne_taken_and_not_taken() {
+    let mut h = Harness::new();
+
+    let mut state = SimState::default();
+    state.gpr[1] = 7;
+    state.gpr[2] = 8;
+    h.step_one_at(&mut state, 0x1000, enc_b(16, 2, 1, 0b001, BRANCH));
+    assert_eq!(state.pc, 0x1010);
+
+    let mut state = SimState::default();
+    state.gpr[1] = 7;
+    state.gpr[2] = 7;
+    h.step_one_at(&mut state, 0x1000, enc_b(16, 2, 1, 0b001, BRANCH));
+    assert_eq!(state.pc, 0x1004);
+}
+
+/// BLT compares signed, BLTU compares unsigned.
+#[test]
+fn blt_and_bltu_differ_across_the_sign_boundary() {
+    let mut h = Harness::new();
+
+    // -1 < 1 is true signed, false unsigned.
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX;
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0x1000, enc_b(16, 2, 1, 0b100, BRANCH));
+    assert_eq!(state.pc, 0x1010, "BLT is signed");
+
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX;
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0x1000, enc_b(16, 2, 1, 0b110, BRANCH));
+    assert_eq!(state.pc, 0x1004, "BLTU is unsigned");
+}
+
+/// BGE and BGEU are the inverses of BLT and BLTU.
+#[test]
+fn bge_and_bgeu_are_the_inverses() {
+    let mut h = Harness::new();
+
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX;
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0x1000, enc_b(16, 2, 1, 0b101, BRANCH));
+    assert_eq!(state.pc, 0x1004, "BGE is signed: -1 is not >= 1");
+
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX;
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0x1000, enc_b(16, 2, 1, 0b111, BRANCH));
+    assert_eq!(state.pc, 0x1010, "BGEU is unsigned: 0xFFFF_FFFF is >= 1");
+}
+
+/// A branch with a negative offset jumps backwards.
+#[test]
+fn branch_with_negative_offset_jumps_backwards() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 1;
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0x1000, enc_b(-16, 2, 1, 0b000, BRANCH));
+    assert_eq!(state.pc, 0x0FF0);
+}
+
+/// JAL jumps to the target and links the return address.
+#[test]
+fn jal_links_and_jumps() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    h.step_one_at(&mut state, 0x1000, enc_j(0x1000, 1, JAL));
+    assert_eq!(state.pc, 0x2000, "JAL jumps to pc + offset");
+    assert_eq!(state.gpr[1], 0x1004, "JAL links the return address");
+}
+
+/// JALR jumps to the computed target and links the return address.
+#[test]
+fn jalr_links_and_jumps() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[2] = 0x2000;
+    h.step_one_at(&mut state, 0x1000, enc_i(-4, 2, 0b000, 1, JALR));
+    assert_eq!(state.pc, 0x1FFC, "JALR jumps to rs1 + imm");
+    assert_eq!(state.gpr[1], 0x1004, "JALR links the return address");
+}
+
+/// JALR clears the low bit of the computed target.
+#[test]
+fn jalr_clears_the_low_bit_of_the_target() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[2] = 0x2001; // odd target
+    h.step_one_at(&mut state, 0x1000, enc_i(0, 2, 0b000, 1, JALR));
+    assert_eq!(state.pc, 0x2000, "the low bit of a JALR target is cleared");
+}
+
+/// JALR must read rs1 before writing rd, so that `jalr x1, 0(x1)` links
+/// the old value of x1.
+#[test]
+fn jalr_reads_rs1_before_writing_rd() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 0x3000;
+    h.step_one_at(&mut state, 0x1000, enc_i(0, 1, 0b000, 1, JALR));
+    assert_eq!(state.pc, 0x3000, "the target comes from the old x1");
+    assert_eq!(state.gpr[1], 0x1004, "x1 holds the return address");
+}
+
+/// FENCE is a no-op in the sequentially consistent single-core model.
+#[test]
+fn fence_is_a_no_op() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    // fence iorw, iorw
+    h.step_one_at(&mut state, 0x1000, enc_i(0x0FF, 0, 0b000, 0, 0b000_1111));
+    assert_eq!(state.pc, 0x1004, "FENCE only advances the PC");
+}
+
+/// FENCE.I is a no-op as well.
+#[test]
+fn fence_i_is_a_no_op() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    h.step_one_at(&mut state, 0x1000, enc_i(0, 0, 0b001, 0, 0b000_1111));
+    assert_eq!(state.pc, 0x1004);
+}
+
+/// ECALL raises an environment-call trap.
+#[test]
+fn ecall_traps() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    let outcome = h.step_one_at(&mut state, 0x1000, enc_i(0, 0, 0b000, 0, 0b111_0011));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::Ecall
+        }
+    );
+    assert_eq!(
+        state.pc, 0x1000,
+        "a trapped instruction must not advance the PC"
+    );
+}
+
+/// EBREAK raises a breakpoint trap — distinct from a host breakpoint.
+#[test]
+fn ebreak_traps() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    let outcome = h.step_one_at(&mut state, 0x1000, enc_i(1, 0, 0b000, 0, 0b111_0011));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::Breakpoint
+        }
+    );
 }

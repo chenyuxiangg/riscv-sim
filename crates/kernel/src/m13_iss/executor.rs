@@ -246,6 +246,30 @@ pub enum Op {
     Sh,
     /// SW — store word.
     Sw,
+    /// BEQ — branch if equal.
+    Beq,
+    /// BNE — branch if not equal.
+    Bne,
+    /// BLT — branch if less than, signed.
+    Blt,
+    /// BGE — branch if greater than or equal, signed.
+    Bge,
+    /// BLTU — branch if less than, unsigned.
+    Bltu,
+    /// BGEU — branch if greater than or equal, unsigned.
+    Bgeu,
+    /// JAL — jump and link.
+    Jal,
+    /// JALR — jump and link, register.
+    Jalr,
+    /// FENCE — memory ordering fence (a no-op here).
+    Fence,
+    /// FENCE.I — instruction fetch fence (a no-op here).
+    FenceI,
+    /// ECALL — environment call.
+    Ecall,
+    /// EBREAK — breakpoint.
+    Ebreak,
 }
 
 /// Second-level decode: map a decode key onto a concrete operation.
@@ -305,7 +329,48 @@ pub fn classify(d: &Decoded) -> Option<Op> {
             0b010 => Some(Op::Sw),
             _ => None,
         },
+        // BRANCH.
+        0b110_0011 => match d.funct3 {
+            0b000 => Some(Op::Beq),
+            0b001 => Some(Op::Bne),
+            0b100 => Some(Op::Blt),
+            0b101 => Some(Op::Bge),
+            0b110 => Some(Op::Bltu),
+            0b111 => Some(Op::Bgeu),
+            _ => None,
+        },
+        // JAL — the J-type format has no funct3 field, bits 14:12
+        // belong to the immediate.
+        0b110_1111 => Some(Op::Jal),
+        // JALR.
+        0b110_0111 => (d.funct3 == 0b000).then_some(Op::Jalr),
+        // MISC-MEM: FENCE / FENCE.I.
+        0b000_1111 => match d.funct3 {
+            0b000 => Some(Op::Fence),
+            0b001 => Some(Op::FenceI),
+            _ => None,
+        },
+        // SYSTEM: ECALL / EBREAK are selected by the 12-bit immediate.
+        0b111_0011 => match d.imm {
+            0 => Some(Op::Ecall),
+            1 => Some(Op::Ebreak),
+            _ => None,
+        },
         _ => None,
+    }
+}
+
+/// Evaluate a branch condition against its two source registers.
+fn branch_taken(op: Op, lhs: u32, rhs: u32) -> bool {
+    match op {
+        Op::Beq => lhs == rhs,
+        Op::Bne => lhs != rhs,
+        Op::Blt => (lhs as i32) < (rhs as i32),
+        Op::Bge => (lhs as i32) >= (rhs as i32),
+        Op::Bltu => lhs < rhs,
+        Op::Bgeu => lhs >= rhs,
+        // Only branch operations reach this function.
+        _ => false,
     }
 }
 
@@ -360,6 +425,12 @@ fn is_aligned(addr: u32, size: WriteSize) -> bool {
 /// PC after an instruction that falls through to the next one.
 fn sequential(d: &Decoded) -> u32 {
     d.pc.wrapping_add(d.len as u32)
+}
+
+/// PC after a taken branch: the branch target is relative to the PC of
+/// the branch instruction itself.
+fn branch(d: &Decoded) -> u32 {
+    d.pc.wrapping_add(d.imm as u32)
 }
 
 /// The single execution path shared by every dispatch route.
@@ -534,6 +605,44 @@ pub fn execute_one<M: MemoryAccess>(
             let value = truncate_store(op, read_gpr(state, d.rs2));
             mem.write(addr, size, value)?;
             sequential(d)
+        }
+        Op::Beq | Op::Bne | Op::Blt | Op::Bge | Op::Bltu | Op::Bgeu => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            if branch_taken(op, lhs, rhs) {
+                branch(d)
+            } else {
+                sequential(d)
+            }
+        }
+        Op::Jal => {
+            // The link register holds the address of the instruction
+            // *after* the jump.
+            write_gpr(state, d.rd, d.pc.wrapping_add(d.len as u32));
+            branch(d)
+        }
+        Op::Jalr => {
+            // The target is computed from rs1 before rd is written, so
+            // that `jalr rd, imm(rs1)` with rd == rs1 behaves as the
+            // spec requires.
+            let target = read_gpr(state, d.rs1).wrapping_add(d.imm as u32) & !1u32;
+            write_gpr(state, d.rd, d.pc.wrapping_add(d.len as u32));
+            target
+        }
+        Op::Fence | Op::FenceI => {
+            // The single-core model is sequentially consistent, so the
+            // fences are no-ops (LLD §3.6(5)).
+            sequential(d)
+        }
+        Op::Ecall => {
+            return Ok(StepOutcome::Trapped {
+                cause: TrapCause::Ecall,
+            })
+        }
+        Op::Ebreak => {
+            return Ok(StepOutcome::Trapped {
+                cause: TrapCause::Breakpoint,
+            })
         }
     };
 
