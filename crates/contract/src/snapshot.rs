@@ -277,6 +277,15 @@ mod tests {
         }
     }
 
+    // The two JSON tests need `serde_json`, which is an **optional**
+    // dependency of this crate (the `json` feature). The crate must stay
+    // buildable — and testable — with `--no-default-features`, so they are
+    // feature-gated rather than unconditional.
+    //
+    // Note: the DTOs themselves only need `serde`, which is a *non-optional*
+    // dependency — the "serializable" promise holds with or without the
+    // `json` feature. Only the JSON *text* round-trip needs `serde_json`.
+    #[cfg(feature = "json")]
     #[test]
     fn snapshot_dto_round_trips_through_json() {
         let snapshot = sample_snapshot();
@@ -285,6 +294,7 @@ mod tests {
         assert_eq!(snapshot, back);
     }
 
+    #[cfg(feature = "json")]
     #[test]
     fn snapshot_dto_json_carries_the_event_queue() {
         let json = serde_json::to_string(&sample_snapshot()).expect("serialize");

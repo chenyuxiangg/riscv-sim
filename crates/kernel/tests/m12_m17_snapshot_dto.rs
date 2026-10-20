@@ -284,6 +284,46 @@ impl ExecutionBackend for MinimalBackend {
 }
 
 #[test]
+fn backend_reset_returns_to_the_entry_state() {
+    // `ExecutionBackend::reset` 的契约是「Reset to entry state」。此前
+    // M-17 的实现只重置了后端自己那份 `state` 镜像，**引擎原封不动** ——
+    // 队列、虚拟时钟、寄存器全留着，`snapshot()` 继续返回 reset 之前的状态。
+    let mut backend: SelfIssBackend<NullBus, RecordingIntc> =
+        SelfIssBackend::new(NullBus, RecordingIntc::default());
+
+    backend
+        .engine_mut()
+        .schedule(TIME_QUANTUM_PS, timer(1, TIME_QUANTUM_PS));
+    backend.engine_mut().run_until_idle().expect("run");
+    assert!(
+        backend.snapshot().expect("snap").virtual_time_ps > 0,
+        "运行之后虚拟时钟应当已经前进"
+    );
+
+    backend.reset().expect("reset");
+
+    assert_eq!(
+        backend.engine().pending_event_count(),
+        0,
+        "reset 之后待处理队列必须为空"
+    );
+    assert_eq!(
+        backend.snapshot().expect("snap"),
+        SimState::default(),
+        "reset 之后的快照必须与全新后端的快照逐字相同"
+    );
+
+    // 完整快照同样必须回到入口状态。
+    let fresh: SelfIssBackend<NullBus, RecordingIntc> =
+        SelfIssBackend::new(NullBus, RecordingIntc::default());
+    assert_eq!(
+        backend.snapshot_full().expect("full"),
+        fresh.snapshot_full().expect("full"),
+        "reset 之后的完整快照必须与全新后端一致"
+    );
+}
+
+#[test]
 fn contract_defaults_are_additive_and_fail_loudly() {
     let mut backend = MinimalBackend;
 

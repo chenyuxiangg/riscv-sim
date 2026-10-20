@@ -57,6 +57,11 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
 
 impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
     fn reset(&mut self) -> Result<(), PlatformError> {
+        // The engine is the source of truth for the snapshot — resetting
+        // only the backend's own mirror would leave the queue, the
+        // virtual clock and the register file exactly as they were, and
+        // `snapshot()` would keep reporting the pre-reset state.
+        self.engine.reset();
         self.state = SimState::default();
         Ok(())
     }

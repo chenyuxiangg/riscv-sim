@@ -167,6 +167,27 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
         }
     }
 
+    /// Reset the engine to its **entry state**.
+    ///
+    /// Clears the pending event queue, the platform state (registers, PC,
+    /// CSRs, pending writes, virtual clock), the insertion counter and the
+    /// step counter, and restores the default instruction budget — i.e.
+    /// the engine ends up in the state [`Engine::new`] would have
+    /// produced.
+    ///
+    /// The injected dependencies (event bus, interrupt sink) and the
+    /// peripheral-tick seam ([`Engine::set_peripheral_ticker`]) are
+    /// **wiring**, not simulation state: they are deliberately left in
+    /// place, because silently dropping the ticker would stop peripherals
+    /// from ever being ticked again.
+    pub fn reset(&mut self) {
+        self.queue = EventQueue::new();
+        self.state = SimState::default();
+        self.next_seq = 0;
+        self.advance_steps = 0;
+        self.instruction_budget = DEFAULT_INSTRUCTION_BUDGET;
+    }
+
     /// Borrow the injected event bus (read-only).
     ///
     /// The bus is a dependency, not engine state — it is deliberately
@@ -553,6 +574,65 @@ mod tests {
         let quanta = eng.run_until_idle().expect("run");
         assert_eq!(quanta, 2);
         assert!(eng.now_ps() >= 2 * TIME_QUANTUM_PS);
+    }
+
+    // ------------------------------------------------------------------
+    // reset — the engine must really return to its entry state
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn engine_reset_clears_the_queue_the_clock_and_the_counter() {
+        let mut eng: Engine<RecordingBus, RecordingIntc> = Engine::default();
+        eng.schedule(5 * TIME_QUANTUM_PS, timer(1, 5 * TIME_QUANTUM_PS));
+        eng.run_until_idle().expect("run");
+        assert!(eng.now_ps() > 0);
+        assert_eq!(eng.next_seq(), 1);
+
+        eng.reset();
+
+        assert_eq!(eng.pending_event_count(), 0, "队列必须被清空");
+        assert_eq!(eng.now_ps(), 0, "虚拟时钟必须回到 0");
+        assert_eq!(eng.next_seq(), 0, "插入序计数器必须归零");
+        assert_eq!(eng.advance_steps(), 0, "步数计数必须归零");
+        assert_eq!(
+            eng.instruction_budget(),
+            DEFAULT_INSTRUCTION_BUDGET,
+            "指令预算必须回到默认值"
+        );
+        assert_eq!(
+            eng.snapshot(),
+            SimState::default(),
+            "reset 后的快照必须与全新引擎的快照逐字相同"
+        );
+    }
+
+    #[test]
+    fn engine_reset_keeps_the_peripheral_ticker_wired() {
+        // The ticker is *wiring*, not simulation state: dropping it on
+        // reset would silently stop peripherals from ever being ticked.
+        let mut eng: Engine<TestBus, TestBus> = Engine::default();
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        eng.set_peripheral_ticker(PeripheralTicker::new(move |paddr, at_ps| {
+            sink.borrow_mut().push((paddr, at_ps));
+            Ok(Vec::new())
+        }));
+
+        eng.reset();
+        eng.schedule(
+            700,
+            SchedEvent::PeripheralTick {
+                paddr: 0x4000_0000,
+                at_ps: 700,
+            },
+        );
+        eng.run_until_idle().expect("run");
+
+        assert_eq!(
+            *seen.borrow(),
+            vec![(0x4000_0000, 700)],
+            "reset 之后 ticker 仍必须被触发"
+        );
     }
 
     // ------------------------------------------------------------------
