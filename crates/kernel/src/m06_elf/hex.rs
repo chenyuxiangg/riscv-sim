@@ -21,7 +21,7 @@
 //! Limits from [`super::ParseLimits`]:
 //!   - line data count ≤ MAX_HEX_RECORD_BYTES (FF)
 //!   - total merged segment count ≤ limits.segment_count
-//!   - file size ≤ limits.elf_size
+//!   - text size ≤ limits.hex_size
 //!   - paddr end ≤ 4 GiB (else E_LDR-03)
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
@@ -38,14 +38,14 @@ const HEX_RECORD_MAX_DATA: usize = 0xFF;
 
 /// Parsed Intel HEX payload.
 pub fn parse(text: &str, limits: &ParseLimits) -> Result<LoadImage, PlatformError> {
-    if text.len() > limits.elf_size {
+    if text.len() > limits.hex_size {
         return Err(PlatformError::new(
             FAMILY,
             2,
             format!(
-                "HEX payload {} exceeds parseLimit.elfSize {}",
+                "HEX payload {} exceeds parseLimit.hexSize {}",
                 text.len(),
-                limits.elf_size
+                limits.hex_size
             ),
         ));
     }
@@ -54,6 +54,9 @@ pub fn parse(text: &str, limits: &ParseLimits) -> Result<LoadImage, PlatformErro
     // (PROGRESS.md M-06 06-4).
     let mut ext_high: u32 = 0;
     let mut buf: Vec<(u32, Vec<u8>)> = Vec::new();
+    // Bytes the loader materialises for this image; bounded by
+    // `total_image_bytes` (D-10).
+    let mut image_bytes: u64 = 0;
     let mut line_no: usize = 0;
     for line in text.lines() {
         line_no += 1;
@@ -109,7 +112,13 @@ pub fn parse(text: &str, limits: &ParseLimits) -> Result<LoadImage, PlatformErro
                     "line {}: declared count {} != actual payload {}",
                     line_no,
                     count,
-                    bytes.len() - 5
+                    // `bytes` holds LL+AAAA+TT+DD*+CC; a short record can
+                    // be shorter than that 5-byte header+tail, so the
+                    // payload length must be computed with a saturating
+                    // subtraction. A plain `bytes.len() - 5` underflows
+                    // (and panics in debug builds) for a 4-byte record —
+                    // the D-03 blocking defect.
+                    bytes.len().saturating_sub(5)
                 ),
             ));
         }
@@ -145,11 +154,36 @@ pub fn parse(text: &str, limits: &ParseLimits) -> Result<LoadImage, PlatformErro
                         format!("data at 0x{:08x}..0x{:08x} overruns 4 GiB bus", base, end),
                     ));
                 }
+                // D-10: bound the memory this record makes the loader
+                // materialise. A HEX text file is small but can describe
+                // a huge image, so the *image* budget — not the text
+                // size — is what protects the allocator.
+                if u64::from(bytes_len) > limits.max_region_bytes {
+                    return Err(PlatformError::new(
+                        FAMILY,
+                        2,
+                        format!(
+                            "HEX record length {} exceeds parseLimit.maxRegionBytes {}",
+                            bytes_len, limits.max_region_bytes
+                        ),
+                    ));
+                }
+                image_bytes = image_bytes.saturating_add(u64::from(bytes_len));
+                if image_bytes > limits.total_image_bytes {
+                    return Err(PlatformError::new(
+                        FAMILY,
+                        2,
+                        format!(
+                            "image size {} exceeds parseLimit.totalImageBytes {}",
+                            image_bytes, limits.total_image_bytes
+                        ),
+                    ));
+                }
                 append_or_merge(&mut buf, base, payload);
             }
             0x01 => {
                 // EOF — return early with the segments we have.
-                return Ok(finalise(buf, limits));
+                return finalise(buf, limits);
             }
             0x02 => {
                 // Extended Segment Address: 2 bytes, applied as `<< 4`.
@@ -212,7 +246,14 @@ pub fn parse(text: &str, limits: &ParseLimits) -> Result<LoadImage, PlatformErro
 ///
 /// Overlapping but distinct rows are NOT merged — M-14 catches them
 /// as E_BUS-03 collisions and the host surfaces a clear error.
-fn finalise(mut buf: Vec<(u32, Vec<u8>)>, limits: &ParseLimits) -> LoadImage {
+///
+/// If the merged result still exceeds `limits.segment_count` this returns
+/// `Err` (E_LDR-02) instead of silently dropping the tail: dropping
+/// firmware bytes would load a truncated image that looks valid (D-08).
+fn finalise(
+    mut buf: Vec<(u32, Vec<u8>)>,
+    limits: &ParseLimits,
+) -> Result<LoadImage, PlatformError> {
     buf.sort_by_key(|(b, _)| *b);
 
     // Step 1: collapse same-base duplicates (last wins).
@@ -235,7 +276,13 @@ fn finalise(mut buf: Vec<(u32, Vec<u8>)>, limits: &ParseLimits) -> LoadImage {
     let mut final_segments: Vec<(u32, Vec<u8>)> = Vec::new();
     for (base, mut data) in collapsed {
         if let Some((prev_base, prev_data)) = final_segments.last_mut() {
-            if prev_base.wrapping_add(prev_data.len() as u32) == base {
+            // `checked_add` rather than `wrapping_add`: a segment that
+            // ends exactly at the 4 GiB bus boundary must not wrap around
+            // to a low address and be mistaken for a contiguous run.
+            if prev_base
+                .checked_add(prev_data.len() as u32)
+                .is_some_and(|end| end == base)
+            {
                 prev_data.append(&mut data);
                 continue;
             }
@@ -244,18 +291,50 @@ fn finalise(mut buf: Vec<(u32, Vec<u8>)>, limits: &ParseLimits) -> LoadImage {
     }
 
     if final_segments.len() > limits.segment_count as usize {
-        final_segments.truncate(limits.segment_count as usize);
+        return Err(PlatformError::new(
+            FAMILY,
+            2,
+            format!(
+                "merged segment count {} exceeds parseLimit.segmentCount {}",
+                final_segments.len(),
+                limits.segment_count
+            ),
+        ));
     }
-    LoadImage {
+    // D-10: a merged segment can be larger than any single record (the
+    // merge folds adjacent runs together), so the per-record check is
+    // not enough to bound the region the loader hands to M-14.
+    for (base, data) in &final_segments {
+        if data.len() as u64 > limits.max_region_bytes {
+            return Err(PlatformError::new(
+                FAMILY,
+                2,
+                format!(
+                    "merged segment at 0x{:08x} is {} bytes, exceeds parseLimit.maxRegionBytes {}",
+                    base,
+                    data.len(),
+                    limits.max_region_bytes
+                ),
+            ));
+        }
+    }
+    Ok(LoadImage {
         segments: final_segments,
         entry: 0,
-    }
+    })
 }
 
 /// Append `bytes` at `base` into `buf`, merging with the previous
 /// `(base, data)` row when the previous run ends exactly at `base`
 /// (06-4).
 fn append_or_merge(buf: &mut Vec<(u32, Vec<u8>)>, base: u32, bytes: &[u8]) {
+    // A data record with zero payload bytes contributes nothing. Emitting
+    // a zero-length row would hand M-14 a phantom region that maps a
+    // byte of RAM the firmware never contained (and can collide with a
+    // real region as E_BUS-03).
+    if bytes.is_empty() {
+        return;
+    }
     if let Some((last_base, last_data)) = buf.last_mut() {
         if *last_base == base {
             // Same exact base — last-wins overwrite (data len capped).
@@ -266,7 +345,10 @@ fn append_or_merge(buf: &mut Vec<(u32, Vec<u8>)>, base: u32, bytes: &[u8]) {
             last_data[..n].copy_from_slice(&bytes[..n]);
             return;
         }
-        if last_base.wrapping_add(last_data.len() as u32) == base {
+        if last_base
+            .checked_add(last_data.len() as u32)
+            .is_some_and(|end| end == base)
+        {
             last_data.extend_from_slice(bytes);
             return;
         }
@@ -297,5 +379,77 @@ fn hex_nibble(b: u8) -> Option<u8> {
         b'a'..=b'f' => Some(b - b'a' + 10),
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tests
+// ---------------------------------------------------------------------------
+
+/// Tests for the private merge/finalise helpers. They live here (rather
+/// than in the module-level `tests.rs`) because `finalise` is private to
+/// this module and the D-08 contract — "exceeding the segment budget is an
+/// error, never a silently truncated image" — is about `finalise` itself.
+#[cfg(test)]
+mod finalise_tests {
+    use super::*;
+
+    fn limits_with_segment_count(n: u32) -> ParseLimits {
+        ParseLimits {
+            segment_count: n,
+            ..ParseLimits::default()
+        }
+    }
+
+    /// D-08: exceeding `segment_count` must be reported, not truncated.
+    /// The old implementation called `truncate()` here, which silently
+    /// dropped the tail of the firmware.
+    #[test]
+    fn finalise_reports_segment_overflow_instead_of_truncating() {
+        let buf = vec![
+            (0x0000_0000u32, vec![0xAAu8; 4]),
+            (0x0000_1000u32, vec![0xBBu8; 4]),
+        ];
+        let err = finalise(buf, &limits_with_segment_count(1)).unwrap_err();
+        assert_eq!(err.family, ErrorFamily::Loader);
+        assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+        assert!(
+            err.message.contains("segmentCount"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
+
+    /// D-08 control: a merged image that fits the budget is returned whole.
+    #[test]
+    fn finalise_keeps_all_segments_within_budget() {
+        let buf = vec![
+            (0x0000_0000u32, vec![0xAAu8; 4]),
+            (0x0000_1000u32, vec![0xBBu8; 4]),
+        ];
+        let img = finalise(buf, &limits_with_segment_count(2)).unwrap();
+        assert_eq!(img.segments.len(), 2);
+    }
+
+    /// A segment that ends exactly at the 4 GiB bus boundary must not be
+    /// treated as contiguous with a low address. The merge test uses
+    /// `checked_add` rather than `wrapping_add`: under wrapping
+    /// arithmetic `0xFFFF_FFF0 + 0x10` becomes `0x0`, and merging those
+    /// two runs would relocate firmware bytes to the wrong address.
+    #[test]
+    fn finalise_does_not_merge_across_the_4gib_boundary() {
+        let buf = vec![
+            (0xFFFF_FFF0u32, vec![0xCCu8; 0x10]),
+            (0x0000_0000u32, vec![0xDDu8; 4]),
+        ];
+        let img = finalise(buf, &limits_with_segment_count(8)).unwrap();
+        assert_eq!(
+            img.segments.len(),
+            2,
+            "segments on either side of the 4 GiB boundary must stay separate"
+        );
+        // `finalise` sorts by base, so the low address comes first.
+        assert_eq!(img.segments[0].0, 0x0000_0000);
+        assert_eq!(img.segments[1].0, 0xFFFF_FFF0);
     }
 }

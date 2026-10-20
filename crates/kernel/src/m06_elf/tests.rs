@@ -164,6 +164,26 @@ fn elf_rejects_truncated_header() {
 }
 
 // ---------------------------------------------------------------------------
+// D-15 regression: p_filesz must not exceed p_memsz.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn elf_rejects_filesz_greater_than_memsz() {
+    let mut elf = make_minimal_elf(4, 4);
+    // p_memsz lives at program-header offset 20; the program header
+    // starts at file offset 52 → 52 + 20 = 72.
+    elf[72..76].copy_from_slice(&0u32.to_le_bytes());
+    let err = DefaultLoader.load(&elf, Kind::Elf).unwrap_err();
+    assert_eq!(err.family, ErrorFamily::Loader);
+    assert_eq!(err.scenario, 1, "E_LDR-01 malformed");
+    assert!(
+        err.message.contains("p_filesz"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Raw loader tests
 // ---------------------------------------------------------------------------
 
@@ -297,6 +317,33 @@ fn hex_rejects_missing_eof() {
     assert!(err.message.contains("EOF"));
 }
 
+// ---------------------------------------------------------------------------
+// D-03 regression: a short IHEX record must be rejected, not panic.
+//
+// The declared byte count and the actual payload length disagree, and the
+// record is shorter than the 5-byte header+tail (LL+AAAA+TT+CC). The
+// diagnostic used to compute `bytes.len() - 5`, which underflowed for a
+// 4-byte record → `panic!("attempt to subtract with overflow")`. In WASM
+// that is a worker crash, so the whole "any malformed input must be an
+// `Err`, never a panic" rule is now pinned by a test.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hex_rejects_short_record_without_panicking() {
+    // Body "01234567" → 4 decoded bytes: LL=0x01, AAAA=0x2345, TT=0x67.
+    // Declared count (1) + 5 != 4 → rejected.
+    let err = DefaultLoader
+        .load(b":01234567\n:00000001FF\n", Kind::Hex)
+        .unwrap_err();
+    assert_eq!(err.family, ErrorFamily::Loader);
+    assert_eq!(err.scenario, 1, "E_LDR-01 malformed");
+    assert!(
+        err.message.contains("declared count"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
 #[test]
 fn hex_rejects_unknown_record_type() {
     // Build a line manually with rec_type = 0x07 (unknown).
@@ -312,6 +359,56 @@ fn hex_rejects_unknown_record_type() {
         .unwrap_err();
     assert_eq!(err.scenario, 1);
     assert!(err.message.contains("unknown record type"));
+}
+
+// ---------------------------------------------------------------------------
+// D-08 regression: a HEX image whose segment count exceeds the budget must
+// be rejected, never silently truncated. A truncated image looks valid to
+// the host and would run with firmware bytes missing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hex_rejects_image_exceeding_segment_budget() {
+    // Three disjoint data records + EOF. With a budget of 2 segments the
+    // image must be rejected instead of being cut down to 2 segments.
+    let text = format!(
+        "{}{}{}{}",
+        hex_line(0x0000, 0x00, &[0xAA]),
+        hex_line(0x1000, 0x00, &[0xBB]),
+        hex_line(0x2000, 0x00, &[0xCC]),
+        hex_line(0x0000, 0x01, &[]),
+    );
+    let limits = ParseLimits {
+        segment_count: 2,
+        ..ParseLimits::default()
+    };
+    let err = DefaultLoader
+        .load_with_limits(text.as_bytes(), Kind::Hex, &limits)
+        .unwrap_err();
+    assert_eq!(err.family, ErrorFamily::Loader);
+    assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+    assert!(
+        err.message.contains("segmentCount"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+#[test]
+fn hex_ignores_zero_length_data_records() {
+    // A data record with a zero payload contributes no bytes. It must
+    // not become a zero-length segment: M-14 would map a phantom RAM
+    // region the firmware never contained.
+    let text = format!(
+        "{}{}{}",
+        hex_line(0x0000, 0x00, &[]),
+        hex_line(0x0000, 0x00, &[0xAA, 0xBB]),
+        hex_line(0x0000, 0x01, &[]),
+    );
+    let li = DefaultLoader.load(text.as_bytes(), Kind::Hex).expect("hex");
+    assert_eq!(li.segments.len(), 1);
+    assert_eq!(li.segments[0].0, 0x0000);
+    assert_eq!(li.segments[0].1, vec![0xAA, 0xBB]);
 }
 
 // ---------------------------------------------------------------------------
@@ -341,5 +438,301 @@ fn detect_kind_classifies_extensions() {
     assert_eq!(detect_kind("hex"), Kind::Hex);
     assert_eq!(detect_kind("iHex"), Kind::Hex);
     assert_eq!(detect_kind("bin"), Kind::RawHex);
-    assert_eq!(detect_kind("garbage"), Kind::Elf); // default
+    // D-21: an unknown extension must NOT be assumed to be ELF. Guessing
+    // ELF made every extension-less raw file fail with "bad ELF magic".
+    assert_eq!(detect_kind("garbage"), Kind::RawHex);
+    assert_eq!(detect_kind(""), Kind::RawHex);
+}
+
+// ---------------------------------------------------------------------------
+// D-21: magic-byte sniffing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn detect_kind_from_bytes_sniffs_elf_magic() {
+    let elf = make_minimal_elf(4, 4);
+    assert_eq!(detect_kind_from_bytes(&elf), Some(Kind::Elf));
+}
+
+#[test]
+fn detect_kind_from_bytes_sniffs_ihex_record_marker() {
+    let text = hex_line(0x0000, 0x00, &[0xAA]) + &hex_line(0x0000, 0x01, &[]);
+    assert_eq!(detect_kind_from_bytes(text.as_bytes()), Some(Kind::Hex));
+}
+
+#[test]
+fn detect_kind_from_bytes_is_inconclusive_for_raw_blobs() {
+    assert_eq!(detect_kind_from_bytes(&[0x00, 0x01, 0x02, 0x03]), None);
+    assert_eq!(detect_kind_from_bytes(&[]), None);
+}
+
+#[test]
+fn detect_kind_with_hint_prefers_magic_bytes_over_extension() {
+    // A valid ELF named ".hex" is still an ELF.
+    let elf = make_minimal_elf(4, 4);
+    assert_eq!(detect_kind_with_hint("hex", &elf), Kind::Elf);
+    // An extension-less raw blob is raw, not a broken ELF (D-21).
+    let raw = vec![0x00u8, 0x01, 0x02, 0x03];
+    assert_eq!(detect_kind_with_hint("", &raw), Kind::RawHex);
+    assert_eq!(detect_kind_with_hint("garbage", &raw), Kind::RawHex);
+}
+
+#[test]
+fn detect_kind_with_hint_honours_a_specific_extension_when_magic_is_inconclusive() {
+    // The magic does not check out, but the extension names a format:
+    // the parser must get the chance to report a precise error rather
+    // than the file being silently loaded as a raw blob.
+    let raw = vec![0x00u8, 0x01, 0x02, 0x03];
+    assert_eq!(detect_kind_with_hint("elf", &raw), Kind::Elf);
+    assert_eq!(detect_kind_with_hint("hex", &raw), Kind::Hex);
+    // ... and a raw blob named ".elf" really does fail with a clear
+    // "bad ELF magic" instead of being loaded as raw. The blob is long
+    // enough to pass the header-length check so that the magic check is
+    // the one that fires.
+    let raw = vec![0x00u8; 64];
+    let err = DefaultLoader
+        .load(&raw, detect_kind_with_hint("elf", &raw))
+        .unwrap_err();
+    assert_eq!(err.scenario, 1);
+    assert!(err.message.contains("magic"), "unexpected: {}", err.message);
+}
+
+// ---------------------------------------------------------------------------
+// D-22: the caller-supplied limits must actually be enforced.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn load_with_limits_enforces_the_elf_size_limit() {
+    let elf = make_minimal_elf(4, 4);
+    let limits = ParseLimits {
+        elf_size: 16,
+        ..ParseLimits::default()
+    };
+    let err = DefaultLoader
+        .load_with_limits(&elf, Kind::Elf, &limits)
+        .unwrap_err();
+    assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+    assert!(
+        err.message.contains("elfSize"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+#[test]
+fn load_with_limits_enforces_the_raw_size_limit() {
+    let raw = vec![0u8; 32];
+    let limits = ParseLimits {
+        raw_size: 16,
+        ..ParseLimits::default()
+    };
+    let err = DefaultLoader
+        .load_with_limits(&raw, Kind::RawHex, &limits)
+        .unwrap_err();
+    assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+    assert!(
+        err.message.contains("rawSize"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+#[test]
+fn load_with_limits_enforces_the_hex_size_limit() {
+    let text = hex_line(0x0000, 0x00, &[0xAA]) + &hex_line(0x0000, 0x01, &[]);
+    let limits = ParseLimits {
+        hex_size: 4,
+        ..ParseLimits::default()
+    };
+    let err = DefaultLoader
+        .load_with_limits(text.as_bytes(), Kind::Hex, &limits)
+        .unwrap_err();
+    assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+    assert!(
+        err.message.contains("hexSize"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+#[test]
+fn load_with_limits_enforces_the_segment_count_limit() {
+    let elf = make_minimal_elf(4, 4);
+    let limits = ParseLimits {
+        segment_count: 0,
+        ..ParseLimits::default()
+    };
+    let err = DefaultLoader
+        .load_with_limits(&elf, Kind::Elf, &limits)
+        .unwrap_err();
+    assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+}
+
+#[test]
+fn empty_raw_image_is_rejected() {
+    let err = DefaultLoader.load(&[], Kind::RawHex).unwrap_err();
+    assert_eq!(err.scenario, 1, "E_LDR-01 malformed");
+    assert!(err.message.contains("empty"), "unexpected: {}", err.message);
+}
+
+// ---------------------------------------------------------------------------
+// D-10 (M-06 side): the image budget must bound what the loader
+// materialises. A tiny file can declare a huge image — the `.bss` tail
+// of a PT_LOAD is not stored in the file at all.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn elf_rejects_segment_larger_than_the_region_budget() {
+    // An 88-byte ELF whose single PT_LOAD declares a 1 MiB `.bss` tail.
+    let elf = make_minimal_elf(4, 1024 * 1024);
+    let limits = ParseLimits {
+        max_region_bytes: 4096,
+        ..ParseLimits::default()
+    };
+    let err = DefaultLoader
+        .load_with_limits(&elf, Kind::Elf, &limits)
+        .unwrap_err();
+    assert_eq!(err.family, ErrorFamily::Loader);
+    assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+    assert!(
+        err.message.contains("maxRegionBytes"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+#[test]
+fn elf_rejects_image_larger_than_the_total_budget() {
+    // Two PT_LOADs of 4 KiB each — each is within the per-region
+    // budget, but together they exceed the total image budget.
+    let elf = make_two_segment_elf(4096, 4096);
+    let limits = ParseLimits {
+        max_region_bytes: 8192,
+        total_image_bytes: 4096,
+        ..ParseLimits::default()
+    };
+    let err = DefaultLoader
+        .load_with_limits(&elf, Kind::Elf, &limits)
+        .unwrap_err();
+    assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+    assert!(
+        err.message.contains("totalImageBytes"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+/// Build an ELF32 LE RV32 ET_EXEC with exactly two PT_LOAD program
+/// headers, each declaring `memsz` bytes of memory at a distinct
+/// paddr. The program-header table sits right after the ELF header and
+/// the shared `.text` follows it.
+fn make_two_segment_elf(memsz1: u32, memsz2: u32) -> Vec<u8> {
+    let phnum = 2u16;
+    let text_offset = 52 + phnum as usize * 32;
+    let mut bytes = Vec::new();
+    // ----- ELF header (52 bytes) -----
+    bytes.extend_from_slice(&[
+        0x7F, b'E', b'L', b'F', // magic
+        1,    // EI_CLASS = ELFCLASS32
+        1,    // EI_DATA  = ELFDATA2LSB
+        1,    // EI_VERSION = EV_CURRENT
+        0,    // EI_OSABI
+        0, 0, 0, 0, 0, 0, 0, 0, // EI_ABIVERSION + padding
+        2, 0, // e_type = ET_EXEC
+        0xF3, 0x00, // e_machine = EM_RISCV
+        1, 0, 0, 0, // e_version
+        0, 0, 0, 0, // e_entry
+        52, 0, 0, 0, // e_phoff
+        0, 0, 0, 0, // e_shoff
+        0, 0, 0, 0, // e_flags
+        52, 0, // e_ehsize
+        32, 0, // e_phentsize
+        0, 0, // e_phnum (patched below)
+        0, 0, // e_shentsize
+        0, 0, // e_shnum
+        0, 0, // e_shstrndx
+    ]);
+    bytes[44..46].copy_from_slice(&phnum.to_le_bytes());
+
+    // ----- Two program headers -----
+    for (paddr, memsz) in [(0u32, memsz1), (0x1000u32, memsz2)] {
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+        bytes.extend_from_slice(&(text_offset as u32).to_le_bytes()); // p_offset
+        bytes.extend_from_slice(&paddr.to_le_bytes()); // p_vaddr
+        bytes.extend_from_slice(&paddr.to_le_bytes()); // p_paddr
+        bytes.extend_from_slice(&4u32.to_le_bytes()); // p_filesz
+        bytes.extend_from_slice(&memsz.to_le_bytes()); // p_memsz
+        bytes.extend_from_slice(&5u32.to_le_bytes()); // p_flags
+        bytes.extend_from_slice(&4u32.to_le_bytes()); // p_align
+    }
+    assert_eq!(bytes.len(), text_offset);
+
+    // ----- .text (one RV32 ADDI x1, x0, 42) -----
+    bytes.extend_from_slice(&0x02A0_0093u32.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn hex_rejects_image_larger_than_the_total_budget() {
+    let text = format!(
+        "{}{}",
+        hex_line(0x0000, 0x00, &[0xAA; 16]),
+        hex_line(0x0000, 0x01, &[]),
+    );
+    let limits = ParseLimits {
+        total_image_bytes: 8,
+        ..ParseLimits::default()
+    };
+    let err = DefaultLoader
+        .load_with_limits(text.as_bytes(), Kind::Hex, &limits)
+        .unwrap_err();
+    assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+    assert!(
+        err.message.contains("totalImageBytes"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+#[test]
+fn hex_rejects_merged_segment_larger_than_the_region_budget() {
+    // Two adjacent 8-byte records merge into one 16-byte segment. The
+    // per-record check cannot see that, the merged-segment check can.
+    let text = format!(
+        "{}{}{}",
+        hex_line(0x0000, 0x00, &[0xAA; 8]),
+        hex_line(0x0008, 0x00, &[0xBB; 8]),
+        hex_line(0x0000, 0x01, &[]),
+    );
+    let limits = ParseLimits {
+        max_region_bytes: 12,
+        ..ParseLimits::default()
+    };
+    let err = DefaultLoader
+        .load_with_limits(text.as_bytes(), Kind::Hex, &limits)
+        .unwrap_err();
+    assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+    assert!(
+        err.message.contains("maxRegionBytes"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+#[test]
+fn raw_rejects_blob_larger_than_the_region_budget() {
+    let raw = vec![0u8; 64];
+    let limits = ParseLimits {
+        max_region_bytes: 32,
+        ..ParseLimits::default()
+    };
+    let err = DefaultLoader
+        .load_with_limits(&raw, Kind::RawHex, &limits)
+        .unwrap_err();
+    assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+    assert!(
+        err.message.contains("maxRegionBytes"),
+        "unexpected message: {}",
+        err.message
+    );
 }
