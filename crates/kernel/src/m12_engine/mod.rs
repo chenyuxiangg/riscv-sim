@@ -22,6 +22,8 @@
 //! 与 M-20 快照落盘路径上；当前的调度内核（时间推进 / 事件队列 / 稳定
 //! 排序 / 快照还原）已经可用。
 
+use std::fmt;
+
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, SimState};
 use riscv_sim_contract::port::{EventBus, InterruptSink};
@@ -53,6 +55,49 @@ pub enum SchedEvent {
 impl Default for SchedEvent {
     fn default() -> Self {
         Self::TimerExpiry { irq: 0, at_ps: 0 }
+    }
+}
+
+/// 外设 tick 的回调端口（M-12 ↔ M-14/M-15 的接缝，见 D-07）。
+///
+/// 契约层目前没有「按物理地址找到外设实例并 tick 它」的端口（总线侧接线
+/// 由并行工作流负责，接口未定）。为了让 M-12 的 `PeripheralTick` 分支
+/// 结构完整且可测，这里在 **m12 内部**定义一个回调式端口：
+///
+/// ```text
+/// tick(paddr, now_ps) -> Result<Vec<PendingWrite>, PlatformError>
+/// ```
+///
+/// 语义与契约的 [`riscv_sim_contract::port::Peripheral::tick`] 一致：返回
+/// 本次 tick 期间外设希望提交到总线上的写。引擎把这些写并入
+/// [`SimState::pending_writes`]，与 [`SchedEvent::Commit`] 走同一条提交
+/// 路径。
+///
+/// 期望的最终形态（需协调者决策，见交付报告）：要么在契约层新增
+/// `PeripheralTickSink` 端口并由 M-14 的总线实现，要么保留本回调端口、
+/// 由 M-17 在装配时把总线的外设注册表接进来。
+pub struct PeripheralTicker {
+    tick: Box<dyn FnMut(u32, u64) -> Result<Vec<PendingWrite>, PlatformError>>,
+}
+
+impl PeripheralTicker {
+    /// 构造一个 tick 回调。
+    pub fn new<F>(f: F) -> Self
+    where
+        F: FnMut(u32, u64) -> Result<Vec<PendingWrite>, PlatformError> + 'static,
+    {
+        Self { tick: Box::new(f) }
+    }
+
+    /// 触发一次外设 tick。
+    pub fn tick(&mut self, paddr: u32, now_ps: u64) -> Result<Vec<PendingWrite>, PlatformError> {
+        (self.tick)(paddr, now_ps)
+    }
+}
+
+impl fmt::Debug for PeripheralTicker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PeripheralTicker")
     }
 }
 
@@ -100,6 +145,8 @@ pub struct Engine<B: EventBus, I: InterruptSink> {
     /// Diagnostic only — it counts *steps*, not virtual time, and is
     /// deliberately not part of the snapshot (it is a metric, not state).
     advance_steps: u64,
+    /// Optional peripheral-tick seam (D-07).
+    ticker: Option<PeripheralTicker>,
 }
 
 impl<B: EventBus, I: InterruptSink> Engine<B, I> {
@@ -113,6 +160,7 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
             state: SimState::default(),
             next_seq: 0,
             advance_steps: 0,
+            ticker: None,
         }
     }
 
@@ -150,6 +198,16 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
     /// Set the instruction budget for the current quantum.
     pub fn set_instruction_budget(&mut self, budget: u32) {
         self.instruction_budget = budget;
+    }
+
+    /// Install the peripheral-tick seam (D-07).
+    ///
+    /// The callback receives the physical address of the peripheral and the
+    /// current virtual time, and returns the writes the peripheral wants
+    /// committed. Until the bus side (M-14/M-15) exposes a registry, this
+    /// is how a [`SchedEvent::PeripheralTick`] reaches a peripheral.
+    pub fn set_peripheral_ticker(&mut self, ticker: PeripheralTicker) {
+        self.ticker = Some(ticker);
     }
 
     /// Schedule an event for the given virtual time.
@@ -238,9 +296,19 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
 
     fn dispatch(&mut self, event: SchedEvent) -> Result<(), PlatformError> {
         match event {
-            SchedEvent::PeripheralTick { paddr: _, at_ps: _ } => {
-                // TODO(MVP): look up the peripheral registered at paddr
-                // and call its `tick` port.
+            SchedEvent::PeripheralTick { paddr, at_ps } => {
+                // D-07: the peripheral registry lives on the bus side
+                // (M-14 / M-15) and the contract has no port for "find the
+                // peripheral at `paddr` and tick it" yet. The seam below is
+                // the shape we expect it to plug into — a
+                // `PeripheralTicker` callback installed by whoever owns
+                // the bus (see `Engine::set_peripheral_ticker`). Until
+                // then the event is a no-op.
+                let writes = match self.ticker.as_mut() {
+                    Some(ticker) => ticker.tick(paddr, at_ps)?,
+                    None => Vec::new(),
+                };
+                self.state.pending_writes.extend(writes);
                 Ok(())
             }
             SchedEvent::TimerExpiry { irq, at_ps: _ } => self.intc.raise(irq),
@@ -651,5 +719,38 @@ mod tests {
 
         eng.run_until_idle().expect("run");
         assert_eq!(eng.intc.raised, vec![1, 2]);
+    }
+
+    // ------------------------------------------------------------------
+    // D-07 — peripheral tick seam
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn peripheral_tick_reaches_the_installed_ticker() {
+        let mut eng: Engine<RecordingBus, RecordingIntc> = Engine::default();
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        eng.set_peripheral_ticker(PeripheralTicker::new(move |paddr, now_ps| {
+            sink.borrow_mut().push((paddr, now_ps));
+            Ok(vec![PendingWrite {
+                paddr,
+                size: riscv_sim_contract::model::WriteSize::Word,
+                value: 0x1234,
+                source: "m12-test".to_string(),
+            }])
+        }));
+
+        eng.schedule(
+            700,
+            SchedEvent::PeripheralTick {
+                paddr: 0x4000_0000,
+                at_ps: 700,
+            },
+        );
+        eng.run_until_idle().expect("run");
+
+        assert_eq!(*seen.borrow(), vec![(0x4000_0000, 700)]);
+        assert_eq!(eng.snapshot().pending_writes.len(), 1);
+        assert_eq!(eng.snapshot().pending_writes[0].paddr, 0x4000_0000);
     }
 }
