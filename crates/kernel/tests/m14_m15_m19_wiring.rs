@@ -23,8 +23,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use riscv_sim_contract::error::ErrorFamily;
-use riscv_sim_contract::model::EdgeKind;
+use riscv_sim_contract::error::{ErrorFamily, PlatformError};
+use riscv_sim_contract::model::{EdgeKind, PendingWrite, WriteSize};
+use riscv_sim_contract::port::Peripheral;
 use riscv_sim_kernel::m14_bus::{Bus, BusWidth};
 use riscv_sim_kernel::m15_peripheral::gpio::{GPIO_WINDOW, SIGNAL_OUT};
 use riscv_sim_kernel::m15_peripheral::timer::{SIGNAL_CMP, TIMER_WINDOW};
@@ -38,6 +39,48 @@ use riscv_sim_kernel::m19_waveform::{ChannelMeta, SharedPipeline, WaveformPipeli
 const GPIO_BASE: u32 = 0x4000_0000;
 const UART_BASE: u32 = 0x2000_0000;
 const TIM_BASE: u32 = 0x6000_0000;
+
+/// 一个窗口大小可以任意指定的外设（F-7 专用）。
+///
+/// 真实的三个外设窗口都是固定的小值，没法驱动「窗口超上限」这条分支，
+/// 所以这里造一个只有 `size()` 可配的最小外设：寄存器语义是空壳，
+/// 本用例只关心**挂载阶段**的大小校验。
+struct SizedPeripheral {
+    id: String,
+    base: u32,
+    size: u32,
+}
+
+impl SizedPeripheral {
+    fn new(id: &str, base: u32, size: u32) -> Self {
+        Self {
+            id: id.to_string(),
+            base,
+            size,
+        }
+    }
+}
+
+impl Peripheral for SizedPeripheral {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn base_addr(&self) -> u32 {
+        self.base
+    }
+    fn size(&self) -> u32 {
+        self.size
+    }
+    fn read(&self, _offset: u32, _size: WriteSize) -> Result<u32, PlatformError> {
+        Ok(0)
+    }
+    fn write(&mut self, _offset: u32, _size: WriteSize, _value: u32) -> Result<(), PlatformError> {
+        Ok(())
+    }
+    fn tick(&mut self, _now_ps: u64) -> Result<Vec<PendingWrite>, PlatformError> {
+        Ok(Vec::new())
+    }
+}
 
 /// The whole wired-up platform: bus + peripherals + probes + waveform.
 struct Harness {
@@ -472,4 +515,66 @@ fn the_region_size_cap_is_configurable() {
     bus.set_max_region_bytes(0x2000);
     bus.map_ram(0x2000, 0x1001, &[])
         .expect("raising the cap works");
+}
+
+#[test]
+fn oversized_peripheral_window_is_rejected_by_the_region_cap() {
+    // F-7（M-14 侧盲区）：外设路径的区域大小上限必须被拒绝。
+    //
+    // `map_ram` / `map_rom` 有**两层**保护（`prepare_bytes` 的预分配检查
+    // + `map_region` 的统一上限），而 `map_peripheral_instance` 只有
+    // `map_region` 这一层。之前的接线测试只覆盖了 `map_ram` 路径，
+    // 于是「外设路径的上限」这条防线**没有任何测试守护**——一旦
+    // `map_region` 里的上限检查被误删，外设路径会静默放行。
+    //
+    // 这里造一个 `size()` = 1 GiB 的外设（远超默认 16 MiB 上限），
+    // 挂载必须被拒，且错误必须是 E_BUS-09。
+    const HUGE_BASE: u32 = 0x4000_0000;
+    const HUGE_SIZE: u32 = 0x4000_0000; // 1 GiB
+
+    let mut peripherals = PeripheralRegistry::new();
+    peripherals
+        .register(SizedPeripheral::new("HUGE0", HUGE_BASE, HUGE_SIZE))
+        .expect("register the oversized peripheral");
+    let handle = peripherals.handle("HUGE0").expect("handle");
+
+    let mut bus = Bus::new();
+    let err = bus
+        .map_peripheral_instance(HUGE_BASE, HUGE_SIZE, Rc::clone(&handle))
+        .expect_err("外设路径的区域大小上限必须被拒绝");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(
+        err.scenario, 9,
+        "an over-cap peripheral window must raise E_BUS-09"
+    );
+    assert_eq!(
+        bus.region_count(),
+        0,
+        "a rejected mount must leave the region set untouched"
+    );
+
+    // 窗口 size 与外设声明不一致时先报 E_BUS-08 —— 说明 1 GiB 那个
+    // 用例确实是被**上限**挡下来的，而不是被尺寸校验挡下来的。
+    let err = bus
+        .map_peripheral_instance(HUGE_BASE, HUGE_SIZE - 4, handle)
+        .expect_err("a size mismatch is rejected too");
+    assert_eq!(err.scenario, 8, "size mismatch raises E_BUS-08");
+}
+
+#[test]
+fn a_peripheral_window_within_the_cap_still_mounts() {
+    // 回归保护：上限之内的外设窗口照常挂载（别把上限检查写成"一律拒绝"）。
+    const SMALL_BASE: u32 = 0x7000_0000;
+    const SMALL_SIZE: u32 = 0x1000;
+
+    let mut peripherals = PeripheralRegistry::new();
+    peripherals
+        .register(SizedPeripheral::new("SMALL0", SMALL_BASE, SMALL_SIZE))
+        .expect("register the small peripheral");
+    let handle = peripherals.handle("SMALL0").expect("handle");
+
+    let mut bus = Bus::new();
+    bus.map_peripheral_instance(SMALL_BASE, SMALL_SIZE, handle)
+        .expect("a window under the cap must be accepted");
+    assert_eq!(bus.region_count(), 1);
 }
