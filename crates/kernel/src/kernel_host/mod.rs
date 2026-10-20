@@ -39,9 +39,13 @@
 //!
 //! ```text
 //! guest 写外设 → M-14 派发 → M-15 判「状态真变了」→ report(signal)
-//!    → M-18 判沿 → 边沿进 M-19 的环（EdgeSink）
-//!    → 本模块取边沿 → 契约 EventPayload::WaveformDelta
+//!    → M-18 判沿 → 边沿进 M-18 自己的存储
+//!                   └→ 同时进 M-19 的环（EdgeSink 端口）
+//!    → 本模块从 M-18 的存储取边沿 → 契约 EventPayload::WaveformDelta
 //! ```
+//!
+//! ⚠️ **契约事件取自 M-18，不是 M-19**。M-19 的环也装了、边沿也一并进去，
+//! 但它目前**只写不读**——CSV/VCD 导出**还没接进契约**（台账 D-50）。
 //!
 //! - **总线 hook 是追加式的**（M-14 `add_hook`）：M-17 的观察点 hook 与
 //!   M-18 的访存 trace hook **共存**，后装的不会把先装的顶掉。
@@ -150,6 +154,15 @@ pub const DEFAULT_RAM_HIGH_SIZE: u32 = 0x0040_0000;
 /// 波形（寄存器流）的 schema 版本。
 const WAVEFORM_SCHEMA_VERSION: u32 = 1;
 
+/// **单个波形事件**里最多带多少条边沿。
+///
+/// 一条 8 MB 的事件（8 000 条边沿）会把 WASM 的 `postMessage` 与前端的
+/// JSON 解析同时压垮——V-A 检视实测的量级。边沿条数必须有上限。
+///
+/// 截断**保留最新的**边沿（正在发生的事比历史重要），并计数
+/// （[`KernelHost::waveform_edges_truncated`]）——不静默丢。
+pub const MAX_WAVEFORM_EDGES_PER_EVENT: usize = 4096;
+
 /// 引擎事件汇（事件总线 + 中断汇）。
 ///
 /// 引擎在调度循环里发布的 `Tick` 会被收集到这里。共享句柄让宿主能取走
@@ -199,6 +212,15 @@ pub struct KernelHost {
     probes: Option<Rc<RefCell<ProbeRegistry>>>,
     /// M-19 波形管道（D-46）—— 边沿的环形缓冲（导出用）。
     waveform: Option<SharedPipeline>,
+    /// 探针管道**装配失败**的累计次数（V-A 检视 · 🟡-6 / 🟡-7）。
+    ///
+    /// 装配期的 `define_channel` / `attach_signal` 失败原本被 `let _ =`
+    /// 静默吞掉——通道没接上，波形视图就是空的，而**没有任何报错**。
+    /// 现在失败是**可见的**：计数器 + [`KernelHost::probe_wiring_failures`]。
+    probe_wiring_failures: u32,
+    /// 发布波形事件时因**超出单事件边沿上限**而截断的条数
+    /// （V-A 检视 · 🟠-1）。
+    waveform_edges_truncated: u64,
 }
 
 impl std::fmt::Debug for KernelHost {
@@ -236,6 +258,8 @@ impl KernelHost {
             published_valid: false,
             probes: None,
             waveform: None,
+            probe_wiring_failures: 0,
+            waveform_edges_truncated: 0,
         };
         // The default memory map cannot fail on a fresh bus (the two
         // regions do not overlap and are far below the 16 MiB per-region
@@ -308,12 +332,23 @@ impl KernelHost {
             .set_edge_sink(Some(Box::new(shared.clone())));
 
         // M-18 的通道定义（通道号与 M-19 的**必须**一致）。
-        let _ = registry.borrow_mut().define_channel(ChannelDef::multi_bit(
-            CH_GPIO0,
-            GPIO_PERIPH_ID,
-            GPIO_SIGNAL_NAME,
-            GPIO_VALUE_WIDTH,
-        ));
+        //
+        // ⚠️ 失败**不能静默吞掉**（V-A 检视 · 🟡-6）：通道没接上时，
+        // 波形视图就是空的，而宿主**一声不吭**。失败计入
+        // `probe_wiring_failures`，由 [`KernelHost::probe_wiring_failures`]
+        // 暴露。
+        if registry
+            .borrow_mut()
+            .define_channel(ChannelDef::multi_bit(
+                CH_GPIO0,
+                GPIO_PERIPH_ID,
+                GPIO_SIGNAL_NAME,
+                GPIO_VALUE_WIDTH,
+            ))
+            .is_err()
+        {
+            self.probe_wiring_failures += 1;
+        }
 
         // 打开探针：master + 通道。
         let mut cfg = SampleCfg {
@@ -344,20 +379,29 @@ impl KernelHost {
         };
         for (_base, handle) in self.backend.bus().peripheral_instances() {
             // 外设正被总线派发路径占用时跳过——下一次 attach 会补上。
+            //
+            // ⚠️ 但「跳过」是**有代价**的：这一轮里该外设的写不会产生
+            // 任何边沿，而宿主**不吭声**（V-A 检视 · 🟡-7）。失败计入
+            // `probe_wiring_failures`。
             let Ok(mut periph) = handle.try_borrow_mut() else {
+                self.probe_wiring_failures += 1;
                 continue;
             };
             if periph.id() != GPIO_PERIPH_ID {
                 continue;
             }
-            let _ = ProbeRegistry::attach_signal(
+            if ProbeRegistry::attach_signal(
                 Rc::clone(&registry),
                 &mut *periph,
                 GPIO_SIGNAL_NAME,
                 CH_GPIO0,
                 ChannelKind::MultiBit,
                 GPIO_VALUE_WIDTH,
-            );
+            )
+            .is_err()
+            {
+                self.probe_wiring_failures += 1;
+            }
         }
     }
 
@@ -383,14 +427,85 @@ impl KernelHost {
         }
         let registry = self.probes.as_ref()?;
         let mut reg = registry.try_borrow_mut().ok()?;
-        let wave = reg.drain_waveform();
+        let mut wave = reg.drain_waveform();
         if wave.streams.is_empty() {
             return None;
         }
         if !force && wave.streams.iter().all(|s| s.edges.is_empty()) {
             return None;
         }
+        // 单事件的边沿**总量**有上限（V-A 检视 · 🟠-1）。
+        //
+        // 一次 `drain_waveform()` 可能带上万条边沿——长时间没订阅时边沿
+        // 会攒起来（虽然 M-18 那侧已经定容了，但攒的是**上限**那么多）。
+        // 一条 8 MB 的事件会把 WASM 的 `postMessage` 与前端的 JSON 解析
+        // 同时压垮。
+        //
+        // 截断**保留最新的**边沿（正在发生的事比历史重要），并计数
+        // （`waveform_edges_truncated`）——不静默丢。
+        let total: usize = wave.streams.iter().map(|s| s.edges.len()).sum();
+        if total > MAX_WAVEFORM_EDGES_PER_EVENT {
+            let per_stream = (MAX_WAVEFORM_EDGES_PER_EVENT / wave.streams.len().max(1)).max(1);
+            let mut dropped = 0usize;
+            for stream in wave.streams.iter_mut() {
+                if stream.edges.len() > per_stream {
+                    let excess = stream.edges.len() - per_stream;
+                    dropped += excess;
+                    let start = stream.edges.len() - per_stream;
+                    stream.edges.drain(0..start);
+                }
+            }
+            self.waveform_edges_truncated += dropped as u64;
+        }
         Some(EventPayload::WaveformDelta(wave))
+    }
+
+    /// M-19 波形管道（D-46）—— 边沿的环形缓冲。
+    ///
+    /// 供「**M-18 → M-19 的握手真的在跑**」这类断言用：把
+    /// `set_edge_sink` 那行去掉的话，环里的条数恒为 0，断言立刻变红
+    /// （V-A 检视 · 🟠-1 —— 此前 M-19 在生产路径上是**死代码**，
+    /// 删掉握手整套用例照样全绿）。
+    pub fn waveform_pipeline(&self) -> Option<&SharedPipeline> {
+        self.waveform.as_ref()
+    }
+
+    /// 探针管道**装配失败**的累计次数（V-A 检视 · 🟡-6 / 🟡-7）。
+    ///
+    /// 非零 = 有通道或回调没接上，波形视图会少东西——但宿主不会报错，
+    /// 所以这个计数器是唯一的信号。
+    pub fn probe_wiring_failures(&self) -> u32 {
+        self.probe_wiring_failures
+    }
+
+    /// 因超出 [`MAX_WAVEFORM_EDGES_PER_EVENT`] 而被截断的边沿条数。
+    ///
+    /// 非零 = 有一条事件里的边沿**不全**（保留的是最新的那些）。
+    pub fn waveform_edges_truncated(&self) -> u64 {
+        self.waveform_edges_truncated
+    }
+
+    /// M-18 的边沿存储因达到**每通道上限**而丢弃的边沿条数。
+    ///
+    /// 非零 = 边沿时间轴上有一个**洞**（最旧的那批被淘汰了）。它与
+    /// [`KernelHost::waveform_edges_truncated`] 是**两层**上限：这一层
+    /// 管**内存**，那一层管**单条事件的大小**。
+    pub fn probe_edges_dropped(&self) -> u64 {
+        self.probes
+            .as_ref()
+            .and_then(|reg| reg.try_borrow().ok())
+            .map(|reg| reg.dropped_edge_count())
+            .unwrap_or(0)
+    }
+
+    /// 当前总线上装了几个 bus hook。
+    ///
+    /// 正常情况下是 **2 个**：M-17 的观察点匹配器 + M-18 的访存 trace 环
+    /// （D-46）。**换内存图会换总线**——新总线上的 hook 从零开始，
+    /// 管道必须在上面重装一遍，否则访存 trace 环会**静默**收不到任何
+    /// 访存（M-11 的数据源就断了）。
+    pub fn bus_hook_count(&self) -> usize {
+        self.backend.bus().hook_count()
     }
 
     // -- JSON 桥 ------------------------------------------------------------
@@ -506,7 +621,17 @@ impl KernelHost {
             }
             CommandPayload::WriteMemory { addr, size, value } => {
                 match self.backend.write_memory(addr, size, value) {
-                    Ok(()) => vec![self.tick()],
+                    Ok(()) => {
+                        let mut events = vec![self.tick()];
+                        // 调试器写内存**也会**产生探针边沿（写 GPIO 的
+                        // OUT 寄存器就是改电平）。不推的话这条边沿要等到
+                        // 下一轮 `Run` 才出去——用户盯着波形视图却看不到
+                        // 自己刚写的那一下（V-A 检视 · 🟡-8）。
+                        if let Some(wave) = self.waveform_event(false) {
+                            events.push(wave);
+                        }
+                        events
+                    }
                     Err(err) => vec![self.error_from(&err)],
                 }
             }
@@ -626,6 +751,16 @@ impl KernelHost {
 
     /// 执行一批指令（`None` = 跑到停止条件，`Some(n)` = 恰好 n 条）。
     fn on_run(&mut self, steps: Option<u32>) -> Vec<EventPayload> {
+        // 运行期**重试**装探针回调（V-A 检视 · 🟡-7）。
+        //
+        // 装配那一刻外设可能正被总线派发路径占用（`try_borrow_mut` 失败）
+        // → 那一轮漏掉了。没有重试的话，这个漏掉的回调**永远不会**补上，
+        // 那个信号从此再也不产生边沿，而宿主一声不吭。
+        //
+        // `attach_signal` 对同一 `(source, signal)` 是**幂等**的，所以重复
+        // 调用不会冲突。
+        self.attach_peripheral_probes();
+
         let budget = steps.unwrap_or(DEFAULT_INSTRUCTION_BUDGET);
         let mut events = Vec::new();
         match self.backend.step_n(budget) {
