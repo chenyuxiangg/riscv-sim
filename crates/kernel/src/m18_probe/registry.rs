@@ -317,10 +317,48 @@ impl ProbeRegistry {
     /// Note: takes the registry as an `Rc<RefCell<>>` parameter
     /// (not `self: Rc<RefCell<Self>>`) because Rust does not
     /// support `Rc<RefCell<Self>>` as a method receiver type.
+    ///
+    /// ## Borrow-contention safety (F-3, 2026-10-20)
+    ///
+    /// The hook fires **inside** `Bus::read` / `Bus::write` — the
+    /// host is already on the dispatch path. A caller that holds a
+    /// borrow of the registry across the bus access (e.g. to inspect
+    /// the trace ring right after the access) would make a plain
+    /// `borrow_mut()` panic, and a panic on the dispatch path takes
+    /// the whole simulation down.
+    ///
+    /// So the hook mirrors [`Self::wire_signal_probe`]: it uses
+    /// `try_borrow_mut()`, and when the registry is busy it **drops
+    /// that one access record** and bumps the `borrow_contended`
+    /// counter instead of panicking. The trace ring then misses the
+    /// contended access, and the diagnostic counter tells the host
+    /// that the trace is incomplete.
+    ///
+    /// The counter lives in its own `Rc<Cell<u64>>` (cloned out
+    /// *before* the closure is built) precisely so the contention
+    /// path never touches the contended `RefCell` — counting the
+    /// contention through the registry would contend again.
+    ///
+    /// Precondition: the registry must not be borrowed when the hook
+    /// is *built* (same precondition as [`Self::wire_signal_probe`]).
+    /// Borrowing it while the hook *runs* is safe — that is exactly
+    /// the case this method is designed to absorb.
     pub fn make_bus_hook(reg: Rc<RefCell<Self>>) -> BusHook {
         let me = Rc::clone(&reg);
+        // Clone the counter handle out *before* the closure exists:
+        // inside the closure we must never `borrow()` the registry
+        // again — that is exactly the borrow that may be contended.
+        let contention_cell = Rc::clone(&reg.borrow().borrow_contended);
         Box::new(move |access: &BusAccess| {
-            me.borrow_mut().record_bus_access(access);
+            if let Ok(mut r) = me.try_borrow_mut() {
+                r.record_bus_access(access);
+            } else {
+                // Contended: drop this access record and count it.
+                // No spin, no block — the hook runs on the bus
+                // dispatch path, where waiting would extend the
+                // borrow past the call site.
+                contention_cell.set(contention_cell.get() + 1);
+            }
         })
     }
 
