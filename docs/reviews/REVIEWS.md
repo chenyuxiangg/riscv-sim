@@ -272,7 +272,7 @@ riscv-tests 源（仓库外）──riscv-none-elf-gcc──▶ 同一个 ELF
   LLD 信号名对齐（F-5，3 份 HTML）                            →  docs/lld-signal-name-align
 
 第 4 批 · Wave 2
-  D-07        → M-12 真正调用 Peripheral::tick（接缝已留，待 m14 持有外设注册表）
+  D-07        → ✅ 已闭环（v0.15：四处断口全闭环 + 唯一主循环 run_until）
   D-13        → 字段可见性收紧（需同步改集成测试与前端 renderMapTable）
   D-24        → ✅ 已闭环（契约新增可序列化 DTO）
   D-30        → M-12 独立模块级 review
@@ -281,7 +281,7 @@ riscv-tests 源（仓库外）──riscv-none-elf-gcc──▶ 同一个 ELF
   契约缺口 7 项（D-32）→ 随 schema_version=2 一并处理
 ```
 
-**关键路径变化（2026-10-20）**：**D-04 不再是瓶颈**——x0 已硬连线，Spike 工具链亦已装好并端到端验证通过（`spike --isa=rv32imc` 退出码 0）。**下一个瓶颈从「修欠账」转为「补能力」**：M-13 的 M/C 扩展、Spike golden 对拍、以及 D-07 的外设 tick 接线。
+**关键路径变化（2026-10-20）**：**D-04 不再是瓶颈**——x0 已硬连线，Spike 工具链亦已装好并端到端验证通过（`spike --isa=rv32imc` 退出码 0）。**下一个瓶颈从「修欠账」转为「补能力」**：M-13 的 M/C 扩展、Spike golden 对拍。⚠️ **2026-10-21 更新**：D-07 外设 tick 接线亦已闭环（v0.15）——实测它比台账估计的「最后一步」大得多（**四处断口**），详见 §1.2 的 D-07 条目。
 
 **v0.11 的方法论教训**：这批任务**全部无前置依赖、文件所有权零交集**，因此可以 5 路同时施工、实测 **0 merge 冲突**。下一批的并行切分应继续按「文件所有权」而非「模块边界」来切。
 
@@ -296,7 +296,7 @@ riscv-tests 源（仓库外）──riscv-none-elf-gcc──▶ 同一个 ELF
 | ~~5~~ | ~~M-13 扩 RV32IMC 全集~~ | ~~12 人日~~ | ✅ v0.11 完成 **RV32I 41 条**（M/C 扩展待做） |
 | **1** | **Spike golden 对拍**（工具链已就绪） | ~4d | **FR-04 必做项**；Q7 决议 |
 | **2** | **M-13 M 扩展（8 条）+ C 扩展（16 条）** | ~5d | RV32IMC 全集补完 |
-| **3** | **D-07 外设 tick 接线**（m12 接缝已留） | ~1d | 定时器时序推进 / FIFO 时间效应全链路生效 |
+| ~~3~~ | ~~**D-07 外设 tick 接线**（m12 接缝已留）~~ | ~~~1d~~ | ✅ v0.15 完成（实测是**四处断口**，不是一步） |
 | **4** | **WASM 导出层 + 真实 worker 接入** | ~2d | 真实内核上浏览器（当前是 mock 内核） |
 | **5** | **契约缺口 7 项** | ~2d | 与 D-32 同批（`schema_version=2`） |
 | **5b** | **D-36 + D-37 + D-41：快照落盘对齐 LLD** | ~3d | 外设 / 中断控制器状态序列化（M-15 / M-16，D-36）+ M-20 按 LLD §2.1.1 组装完整 `Snapshot{cpMeta, m13State, m14Map, m15Periph}` + M-23 改吃该结构（D-37）+ M-13 / M-14 / M-15 补状态导出与载入接口（D-41）。⚖️ **LLD 矛盾已于 2026-10-20 裁决：以详细设计 §2.1.1 为准**（总纲侧已订正） |
@@ -1315,7 +1315,7 @@ V4 指出台账 / PROGRESS / AGENTS 的数字失真 3~4 倍，且同一文档内
 | 编号 | 发现 | 处置 |
 | --- | --- | --- |
 | 🟡-2 | `KernelHost::new()` **漏装**外设探针回调 → 刚建好、还没 `LoadProject` 的宿主**观察不到任何边沿** | ✅ 已修（`d0d0b66`）+ 用例 `a_fresh_host_already_has_the_probe_pipeline_wired` |
-| 🟡-3 | M-14 措辞说「并进 `pending_writes`」——但 `pending_writes` 在生产代码里**只写不读** | ✅ 措辞收窄：「提交路径待 D-07 落地」 |
+| 🟡-3 | M-14 措辞说「并进 `pending_writes`」——但 `pending_writes` 在生产代码里**只写不读** | ✅ 措辞收窄（「提交路径待 D-07 落地」）→ ✅ **2026-10-21：D-07 已落地，提交路径已通**（M-17 执行器把队列抽干并真正写进总线） |
 | 🟡-4 | `tick_peripherals` 遇**第一个**报错外设即整体 `?` 中断 → 前面已收集的写全丢，后面的外设**错过时钟同步** | ✅ 改成 `PeripheralTickOutcome{writes, error, skipped}`：**继续 tick 后面的**，报**第一个**错，写**一条不丢**；用例 `a_failing_peripheral_does_not_stop_the_others_from_ticking` |
 | 🟡-5 | **判别力缺口**：`add_hook` **一条用例都没有**（M-14 的测试里三处全是 `set_hook`）→ M-17 改回 `set_hook` 全绿 | ✅ 补 3 条 M-14 用例 + 1 条 **M-17** 用例（`installing_the_watch_hook_does_not_evict_an_existing_hook`，**与装配顺序无关**） |
 | 🟡-6 | 管道装配错误被 `let _ =` **静默丢弃**（`define_channel` / `attach_signal`） | ✅ 改为**计数**（`probe_wiring_failures()`）。⚠️ 失败路径**仍无用例** → 台账 **D-52** |

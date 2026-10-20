@@ -434,7 +434,12 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
     /// 落在边界上，返回的是**下一个**边界（边界是「刚过」，不是「就在」）。
     pub fn next_quantum_boundary(&self) -> u64 {
         let now = self.now_ps();
-        (now / TIME_QUANTUM_PS + 1) * TIME_QUANTUM_PS
+        // 饱和算术：虚拟时间接近 `u64::MAX` 时（狂跑几个世纪），
+        // `now / QUANTUM + 1` 再乘回去会**溢出**——debug 构建直接 panic。
+        (now / TIME_QUANTUM_PS)
+            .saturating_add(1)
+            .saturating_mul(TIME_QUANTUM_PS)
+            .max(now)
     }
 
     /// **推进所有已登记外设的时钟**（D-07）——外设时钟的唯一同步点。
@@ -525,6 +530,12 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
     /// the new time. An event scheduled exactly at the current time is
     /// dispatched by the step that reaches it — dispatch never happens
     /// late, because the clock lands exactly on the event time.
+    ///
+    /// ⚠️ **它不执行 guest 指令**——这是「纯事件推进」的低层原语
+    /// （把队列排空）。**生产路径走 [`Engine::run_until`]**（LLD §3.1 的
+    /// 唯一主循环：派发事件 + 量子内执行指令 + 在事件边界抢占）。
+    /// 本方法保留是因为它是**公开 API**（只增不减），也是「快照还原后把
+    /// 队列跑干净」这类场景的合适工具。
     pub fn run_until_idle(&mut self) -> Result<u64, PlatformError> {
         self.run_steps(u64::MAX)
     }
@@ -710,7 +721,7 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
             self.ensure_peripheral_ticks();
             let reticked = self.dispatch_due_events()?;
             for (paddr, at_ps) in reticked {
-                let next = at_ps + TIME_QUANTUM_PS;
+                let next = at_ps.saturating_add(TIME_QUANTUM_PS);
                 self.schedule_event(next, SchedEvent::PeripheralTick { paddr, at_ps: next });
             }
 
