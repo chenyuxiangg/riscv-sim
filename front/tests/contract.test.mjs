@@ -9,6 +9,13 @@
 // So this file parses the Rust contract **out of the repository** and
 // compares it with the JS builders. If somebody edits one side only,
 // this test goes red.
+//
+// The comparison covers three levels, because the wire format has three
+// levels: the variant **name**, the variant **shape** (unit / newtype /
+// struct) and the struct variant's **field names**. Checking only the
+// variant name left a blind spot: renaming `ClearBreakpoint { id }` to
+// `{ ident }` on the JS side alone desynchronised the wire format
+// without turning any test red (F6).
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -31,6 +38,7 @@ import {
     waveform,
 } from "../lib/message.js";
 import { encodeFrame, decodeFrame, FRAME_TYPE } from "../lib/frame.js";
+import { buildMockProject } from "../dev/mock-project.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const frontDir = resolve(here, "..");
@@ -74,6 +82,73 @@ function rustVariants(source, enumName) {
 function variantOf(value) {
     if (typeof value === "string") return value;
     return Object.keys(value)[0];
+}
+
+/**
+ * Shape of one Rust enum variant — `unit`, `newtype` or `struct` — plus
+ * the **field names** of a struct variant.
+ *
+ * The variant *name* alone is not enough: renaming a struct field on one
+ * side only (e.g. `ClearBreakpoint { id }` → `{ ident }`) desynchronises
+ * the wire format just as badly as renaming the variant, and the variant
+ * set check cannot see it (F6).
+ *
+ * The contract crate has no `#[serde(rename = ...)]` attributes, so the
+ * Rust field name *is* the wire name.
+ *
+ * @param {string} source
+ * @param {string} enumName
+ * @param {string} variantName
+ * @returns {{kind: "unit"|"newtype"|"struct", fields: string[]}}
+ */
+function rustVariantShape(source, enumName, variantName) {
+    const start = source.indexOf(`pub enum ${enumName} {`);
+    assert.notEqual(start, -1, `契约里找不到 enum ${enumName}`);
+    const body = source.slice(start);
+    const end = body.indexOf("\n}");
+    assert.notEqual(end, -1, `enum ${enumName} 没有闭合`);
+    const lines = body.slice(0, end).split("\n");
+    // A variant line is indented by exactly four spaces; the negative
+    // look-ahead keeps `StepN` from matching a hypothetical `StepNext`.
+    const variantRe = new RegExp(`^ {4}${variantName}(?![A-Za-z0-9_])`);
+    const index = lines.findIndex((line) => variantRe.test(line));
+    assert.notEqual(index, -1, `enum ${enumName} 里找不到变体 ${variantName}`);
+    const line = lines[index];
+    if (line.includes("{")) {
+        // Struct variant — the fields are indented by eight spaces and
+        // the block ends with a four-space `}`.
+        const fields = [];
+        for (const l of lines.slice(index + 1)) {
+            if (/^ {4}\}/.test(l)) break;
+            const m = /^ {8}(?:pub\s+)?([a-z_][A-Za-z0-9_]*)\s*:/.exec(l);
+            if (m) fields.push(m[1]);
+        }
+        return { kind: "struct", fields };
+    }
+    if (line.includes("(")) return { kind: "newtype", fields: [] };
+    return { kind: "unit", fields: [] };
+}
+
+/**
+ * Field names of a top-level Rust `struct` (the DTOs the newtype
+ * variants carry).
+ *
+ * @param {string} source
+ * @param {string} structName
+ * @returns {string[]}
+ */
+function rustStructFields(source, structName) {
+    const start = source.indexOf(`pub struct ${structName} {`);
+    assert.notEqual(start, -1, `契约里找不到 struct ${structName}`);
+    const body = source.slice(start);
+    const end = body.indexOf("\n}");
+    assert.notEqual(end, -1, `struct ${structName} 没有闭合`);
+    const fields = [];
+    for (const line of body.slice(0, end).split("\n")) {
+        const m = /^ {4}(?:pub\s+)?([a-z_][A-Za-z0-9_]*)\s*:/.exec(line);
+        if (m) fields.push(m[1]);
+    }
+    return fields;
 }
 
 describe("Message 信封（与 crates/contract 逐字对齐）", () => {
@@ -207,6 +282,115 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             Object.values(WATCH_ACCESS).sort(),
             rustVariants(model, "WatchAccess").sort(),
             "WatchAccess 标签不一致",
+        );
+    });
+
+    test("每个变体的内层字段名与 Rust 逐字一致（不只是变体名）", { skip: !hasRust }, () => {
+        const protocol = readFileSync(protocolRs, "utf8");
+        // One entry per variant — the JS builder's *result*, i.e. the
+        // value serde would put behind the `Command` / `Event` tag.
+        const jsPayloads = {
+            CommandPayload: {
+                Nop: Command.nop(),
+                LoadProject: Command.loadProject({}),
+                Continue: Command.continueRun(),
+                StepN: Command.stepN(1),
+                Pause: Command.pause(),
+                SetBreakpoint: Command.setBreakpoint({}),
+                ClearBreakpoint: Command.clearBreakpoint(1),
+                SetWatchpoint: Command.setWatchpoint({}),
+                ClearWatchpoint: Command.clearWatchpoint(1),
+                ReadMemory: Command.readMemory(0, "Word"),
+                WriteMemory: Command.writeMemory(0, "Word", 0),
+                Subscribe: Command.subscribe("t"),
+                Unsubscribe: Command.unsubscribe("t"),
+                Snapshot: Command.snapshot(),
+                Restore: Command.restore({}),
+                Admin: Command.admin({}),
+            },
+            EventPayload: {
+                Tick: Event.tick(0, 0),
+                Halted: Event.halted("Trap", 0),
+                Error: Event.error("E_X-01", "m"),
+                MemoryRead: Event.memoryRead(0, "Word", 0),
+                WaveformDelta: Event.waveformDelta(waveform([])),
+                SnapshotCreated: Event.snapshotCreated(1),
+                LinkUp: Event.linkUp("l"),
+                LinkDown: Event.linkDown("l"),
+            },
+        };
+
+        for (const [enumName, payloads] of Object.entries(jsPayloads)) {
+            for (const variant of rustVariants(protocol, enumName)) {
+                const shape = rustVariantShape(protocol, enumName, variant);
+                const value = payloads[variant];
+                assert.ok(
+                    value !== undefined,
+                    `Rust 的 ${enumName}::${variant} 在 JS 侧没有对应构造器`,
+                );
+                if (shape.kind === "unit") {
+                    // A unit variant serialises as a bare string.
+                    assert.equal(
+                        value,
+                        variant,
+                        `${enumName}::${variant} 应当序列化成裸字符串`,
+                    );
+                    continue;
+                }
+                // A struct / newtype variant is a single-key object.
+                assert.deepEqual(
+                    Object.keys(value),
+                    [variant],
+                    `${enumName}::${variant} 应当是单键对象`,
+                );
+                if (shape.kind === "struct") {
+                    assert.deepEqual(
+                        Object.keys(value[variant]).sort(),
+                        shape.fields.slice().sort(),
+                        `${enumName}::${variant} 的字段名与 Rust 不一致`,
+                    );
+                } else {
+                    // A newtype variant carries a whole DTO — the field
+                    // names live in that DTO (checked separately below).
+                    assert.equal(
+                        typeof value[variant],
+                        "object",
+                        `${enumName}::${variant} 应当携带一个 DTO 对象`,
+                    );
+                }
+            }
+        }
+    });
+
+    test("newtype 变体携带的 DTO 字段名与 Rust 一致", { skip: !hasRust }, () => {
+        const model = readFileSync(modelRs, "utf8");
+        const project = buildMockProject();
+        // The DTOs the front end actually builds.
+        const cases = [
+            ["Project", project],
+            ["ProductTree", project.tree],
+            ["TreeNode", project.tree.root],
+            ["ProjectVersion", project.version],
+            ["Waveform", waveform([])],
+        ];
+        for (const [structName, dto] of cases) {
+            assert.deepEqual(
+                Object.keys(dto).sort(),
+                rustStructFields(model, structName).sort(),
+                `${structName} 的字段名与 Rust 不一致`,
+            );
+        }
+        // The nested stream / edge shapes travel with the waveform DTO.
+        const w = waveform([{ id: "cpu.gpr.x1", label: "x1", edges: [{ t_ps: 5, value: 42 }] }]);
+        assert.deepEqual(
+            Object.keys(w.streams[0]).sort(),
+            rustStructFields(model, "WaveformStream").sort(),
+            "WaveformStream 的字段名与 Rust 不一致",
+        );
+        assert.deepEqual(
+            Object.keys(w.streams[0].edges[0]).sort(),
+            rustStructFields(model, "Edge").sort(),
+            "Edge 的字段名与 Rust 不一致",
         );
     });
 });

@@ -190,6 +190,31 @@ describe("M-05 事件分发", () => {
         router.close();
     });
 
+    test("once() 首个事件后即退订（handler 只被调用过一次）", async () => {
+        const transport = createFakeTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        // A counting spy on the one-shot handler: it must be reached by
+        // the first event only — the second event of the same topic must
+        // not arrive (F8).
+        let calls = 0;
+        /** @type {object[]} */
+        const seen = [];
+        const promise = router.once("halted", (event) => {
+            calls += 1;
+            seen.push(event);
+        });
+        transport.emit(eventFrame(null, Event.halted("Breakpoint", 0x40)));
+        transport.emit(eventFrame(null, Event.halted("Trap", 0x10)));
+        const event = await promise;
+        assert.equal(event.value.reason, "Breakpoint");
+        assert.equal(calls, 1, "once() 的 handler 被调用了多次");
+        assert.equal(seen.length, 1);
+        assert.equal(seen[0].value.reason, "Breakpoint");
+        // The subscription is gone — the topic keeps no subscriber.
+        assert.ok(!router.topics().includes("halted"), "once() 没有退订");
+        router.close();
+    });
+
     test("通配 topic 收到全部事件", async () => {
         const transport = createFakeTransport();
         const router = await m05.mountCommandRouter({ transport });

@@ -106,14 +106,23 @@ export async function mountCommandRouter(options = {}) {
     /**
      * One-shot subscription: resolves with the first matching event.
      *
+     * The optional observer is called with the matched event **once**:
+     * the subscription is already gone by then, so a second event of the
+     * same topic never reaches it. Without the observer the one-shot
+     * semantics were only observable from the outside through
+     * `topics()` — the handler itself was invisible, so no gate could
+     * prove that it stops firing (F8).
+     *
      * @param {string} topic
+     * @param {(event: object) => void} [onEvent]
      * @returns {Promise<object>}
      */
-    function once(topic) {
+    function once(topic, onEvent) {
         return new Promise((resolve) => {
             const off = subscribe(topic, (event) => {
                 off();
                 resolve(event);
+                onEvent?.(event);
             });
         });
     }

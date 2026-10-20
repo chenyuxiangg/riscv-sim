@@ -23,6 +23,29 @@ void dom;
 
 const importFront = (rel) => import(pathToFileURL(resolve(frontDir, rel)).href);
 
+/**
+ * A command frame carrying one `CommandPayload` value.
+ *
+ * @param {object|string} payload — the inner `CommandPayload`
+ * @param {number} [reqId]
+ * @returns {object}
+ */
+function commandFrame(payload, reqId = 0) {
+    return {
+        type: "command",
+        seq: 1,
+        sessionId: null,
+        role: null,
+        reqId,
+        payload: {
+            schema_version: 1,
+            direction: "Command",
+            seq: 1,
+            payload: { Command: payload },
+        },
+    };
+}
+
 const m05 = await importFront("services/m05_commandrouter.js");
 const m07 = await importFront("services/m07_transport.js");
 const m10 = await importFront("services/m10_registermemory.js");
@@ -183,6 +206,93 @@ describe("mock kernel（纯逻辑，进程内）", () => {
             },
         });
         assert.equal(frames[0].payload.payload.Event.Error.code, "E_BUS-01");
+    });
+});
+
+describe("mock 内核 · 断点契约（F1）", () => {
+    test("ClearBreakpoint 按 id 删除断点（契约里没有 addr 字段）", () => {
+        const kernel = createMockKernel();
+        kernel.handle(commandFrame({ SetBreakpoint: { id: 7, addr: 0x40 } }));
+        assert.deepEqual(kernel.snapshot().breakpoints, [[0x40, 7]]);
+
+        // The frozen contract's `ClearBreakpoint { id }` carries no
+        // address — the old implementation deleted address 0 and left the
+        // breakpoint in place.
+        const frames = kernel.handle(commandFrame({ ClearBreakpoint: { id: 7 } }));
+        assert.deepEqual(kernel.snapshot().breakpoints, [], "断点没有被删掉");
+        assert.equal(frames[0].payload.payload.Event.Tick.elapsed_ps, 0);
+    });
+
+    test("清掉断点后步进越过 0x40（不再在断点处停下）", () => {
+        const kernel = createMockKernel();
+        kernel.handle(commandFrame({ SetBreakpoint: { id: 7, addr: 0x40 } }));
+        // With the breakpoint set, the run stops *before* executing the
+        // instruction at 0x40 — five instructions, 5 × 1000 ps.
+        kernel.handle(commandFrame("Continue"));
+        assert.equal(kernel.snapshot().timeVirt, 5000, "断点没有在 0x40 生效");
+
+        const cleared = createMockKernel();
+        cleared.handle(commandFrame({ SetBreakpoint: { id: 7, addr: 0x40 } }));
+        cleared.handle(commandFrame({ ClearBreakpoint: { id: 7 } }));
+        cleared.handle(commandFrame("Continue"));
+        // Without the breakpoint the instruction at 0x40 runs as well.
+        assert.equal(cleared.snapshot().timeVirt, 6000, "断点被清掉后仍然停下了");
+    });
+
+    test("clear 一个不存在的 id 不会误删其它断点", () => {
+        const kernel = createMockKernel();
+        kernel.handle(commandFrame({ SetBreakpoint: { id: 7, addr: 0x40 } }));
+        kernel.handle(commandFrame({ SetBreakpoint: { id: 8, addr: 0x20 } }));
+
+        const frames = kernel.handle(commandFrame({ ClearBreakpoint: { id: 99 } }));
+        assert.deepEqual(
+            kernel.snapshot().breakpoints,
+            [[0x40, 7], [0x20, 8]],
+            "不存在的 id 误删了断点",
+        );
+        // An unknown id is not an error — the contract has no error code
+        // for it, and the command still gets its Tick answer.
+        assert.equal(frames[0].payload.payload.Event.Tick.elapsed_ps, 0);
+    });
+});
+
+describe("mock 内核 · 换工程即换会话（F12）", () => {
+    /** A minimal `model::Project` shaped payload. */
+    const project = {
+        id: "p",
+        name: "p",
+        tree: { root: { name: "r", component_id: null, children: [] } },
+        images: [],
+        version: { schema: 1, isa: "RV32IMC", toolchain: "mock" },
+    };
+
+    test("LoadProject 清空旧订阅（旧 topic 不再收到推送）", () => {
+        const kernel = createMockKernel();
+        kernel.handle(commandFrame({ Subscribe: { topic: "sim.registers" } }));
+        assert.deepEqual(kernel.snapshot().topics, ["sim.registers"]);
+
+        const frames = kernel.handle(commandFrame({ LoadProject: project }));
+        assert.deepEqual(kernel.snapshot().topics, [], "旧订阅没有随工程一起失效");
+        // The old topic receives no push any more — not even the
+        // register snapshot the `LoadProject` answer would carry.
+        assert.equal(
+            frames.find((f) => f.payload.payload.Event.WaveformDelta),
+            undefined,
+            "旧 topic 仍然收到了推送",
+        );
+    });
+
+    test("重新订阅后推送恢复", () => {
+        const kernel = createMockKernel();
+        kernel.handle(commandFrame({ Subscribe: { topic: "sim.registers" } }));
+        kernel.handle(commandFrame({ LoadProject: project }));
+
+        kernel.handle(commandFrame({ Subscribe: { topic: "sim.registers" } }));
+        const frames = kernel.handle(commandFrame({ StepN: { n: 1 } }));
+        assert.ok(
+            frames.find((f) => f.payload.payload.Event.WaveformDelta),
+            "重新订阅后没有收到推送",
+        );
     });
 });
 
