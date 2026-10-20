@@ -57,7 +57,7 @@ pub mod trace_stream;
 pub use channel::{
     ChannelDef, ChannelKind, CH_GPIO0, CH_IRQ_PULSE, CH_KEY_STATE, CH_TIMER_CMP, CH_UART_TX,
 };
-pub use registry::{ProbeError, ProbeRegistry, SampleCfg};
+pub use registry::{ProbeError, ProbeRegistry, SampleCfg, EDGE_STORE_CAP};
 pub use trace_stream::{TraceStream, TRACE_CAP};
 
 // ---------------------------------------------------------------------------

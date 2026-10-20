@@ -5,6 +5,8 @@
 //! - the sample configuration (master enable + per-channel enable
 //!   bitmask + per-channel throttle counter),
 //! - the per-channel edge-event store (drained by `drain_waveform`),
+//!   **bounded** per channel by [`EDGE_STORE_CAP`] (drop-oldest, counted
+//!   — see [`ProbeRegistry::dropped_edge_count`]),
 //! - the bus trace ring buffer (drained by `drain_trace`),
 //! - a small diagnostics counter for attach conflicts (informational
 //!   only — the registry does not raise `PlatformError` on conflict
@@ -35,6 +37,30 @@ use crate::m14_bus::{AccessDir, BusAccess, BusHook};
 
 use super::channel::{ChannelDef, ChannelKind};
 use super::trace_stream::TraceStream;
+
+/// **每通道**的边沿存储上限（超出后丢最旧的）。
+///
+/// M-18 的边沿存储是「drain 之前先攒着」的形态：宿主在每轮运行结束时
+/// 才 `drain_waveform()` 一次。**没人订阅**时这段存储只进不出——没有
+/// 上限的话，一次长时间不订阅的仿真就能把内存吃光（V-A 检视 · 🟠-1
+/// 实测：30 万条边沿堆着不释放）。
+///
+/// 超出上限时丢**最旧的**一条（drop-oldest）：最新的边沿才是正在发生
+/// 的事，丢掉它比丢掉历史更糟。丢弃是**可见的**——计数见
+/// [`ProbeRegistry::dropped_edge_count`]，不静默截断。
+///
+/// 8192 条 × 16 B ≈ 128 KB / 通道：既是内存的**兜底**，也给下游
+/// （宿主的单事件边沿上限 [`crate::kernel_host::MAX_WAVEFORM_EDGES_PER_EVENT`]
+/// = 4096）留出「该截的截在发布层」的空间——两层上限各管一段，
+/// 免得发布层的事件大到压垮 `postMessage`。
+pub const EDGE_STORE_CAP: usize = 8192;
+
+/// 触发一次批量淘汰时丢掉的条数（上限的 1/4）。
+///
+/// **成批**淘汰而不是每次丢一条：逐条淘汰要把整个 `Vec` 前移一次，
+/// 30 万条边沿就是 30 万次 16 KB 的 memmove——那才是真正的性能坑。
+/// 成批淘汰让总搬运量回到 O(n)。
+const EDGE_STORE_EVICT: usize = EDGE_STORE_CAP / 4;
 
 /// Errors raised by the probe registry. M-18 v0.8 §6.1 commits to
 /// "no new error code" for the M-18 module itself, but the registry
@@ -164,7 +190,17 @@ pub struct ProbeRegistry {
     throttle: BTreeMap<u8, u8>,
     /// Per-channel accumulated edge events (drained by
     /// [`ProbeRegistry::drain_waveform`]).
+    ///
+    /// Bounded per channel by [`EDGE_STORE_CAP`] — drop-oldest when
+    /// full (V-A 检视 · 🟠-1).
     edges: BTreeMap<u8, Vec<Edge>>,
+    /// Diagnostics: cumulative count of edges dropped because a
+    /// channel's store hit [`EDGE_STORE_CAP`].
+    ///
+    /// The drop is **visible**: a subscriber that sees a gap in the
+    /// edge timeline can attribute it to a real overflow rather than
+    /// to a silent truncation.
+    dropped_edges: u64,
     /// Bus trace ring buffer.
     trace: TraceStream,
     /// Diagnostics: count of attach-time conflicts encountered.
@@ -211,6 +247,7 @@ impl std::fmt::Debug for ProbeRegistry {
             )
             .field("trace_len", &self.trace.len())
             .field("conflict_warns", &self.conflict_warns)
+            .field("dropped_edges", &self.dropped_edges)
             .field("borrow_contended", &self.borrow_contended.get())
             .field("has_edge_sink", &self.edge_sink.is_some())
             .finish_non_exhaustive()
@@ -228,6 +265,7 @@ impl ProbeRegistry {
             prev: BTreeMap::new(),
             throttle: BTreeMap::new(),
             edges: BTreeMap::new(),
+            dropped_edges: 0,
             trace: TraceStream::default(),
             conflict_warns: 0,
             borrow_contended: Rc::new(Cell::new(0)),
@@ -263,6 +301,16 @@ impl ProbeRegistry {
     /// (useful for tests + diagnostics).
     pub fn edge_count(&self) -> usize {
         self.edges.values().map(|v| v.len()).sum()
+    }
+
+    /// Diagnostics: cumulative count of edges dropped because a
+    /// channel's store reached [`EDGE_STORE_CAP`].
+    ///
+    /// A non-zero value means the edge timeline has a **hole** — the
+    /// oldest edges were evicted to keep memory bounded. It is
+    /// reported, not silently swallowed (V-A 检视 · 🟠-1).
+    pub fn dropped_edge_count(&self) -> u64 {
+        self.dropped_edges
     }
 
     /// Number of bus trace events currently in the ring.
@@ -657,7 +705,23 @@ impl ProbeRegistry {
             t_ps: time_ps,
             value,
         };
-        self.edges.entry(ch).or_default().push(edge.clone());
+        // 6b. Append to the per-channel store, **bounded**.
+        //
+        // The store is drained only when a subscriber asks for a
+        // waveform. Between two drains it can grow without limit —
+        // a long run with no subscriber would eat all the memory
+        // (V-A 检视 · 🟠-1). Drop-oldest keeps the newest edges
+        // (the ones describing what is happening *now*) and the
+        // eviction is counted, not silent.
+        {
+            let bucket = self.edges.entry(ch).or_default();
+            if bucket.len() >= EDGE_STORE_CAP {
+                let evict = EDGE_STORE_EVICT.min(bucket.len());
+                bucket.drain(0..evict);
+                self.dropped_edges += evict as u64;
+            }
+            bucket.push(edge.clone());
+        }
         // 7. Hand the edge to the optional M-19 sink. This is the
         //    "m19Encode → encodeEdge" entry the M-19 design doc
         //    describes (M-19 v0.9 §1.1). The `Option` check keeps
