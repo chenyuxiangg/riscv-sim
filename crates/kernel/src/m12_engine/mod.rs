@@ -205,7 +205,15 @@ pub enum RunReason {
 pub struct RunOutcome {
     /// 本轮实际执行的指令条数。
     pub instructions: u64,
-    /// 本轮消耗的量子数。
+    /// 本轮经过的**安全检查点**数（= 主循环外层的轮数）。
+    ///
+    /// ⚠️ **口径**（V-A 检视 · F9）：它计的是「外层循环转了几圈」，
+    /// **不是**「虚拟时间跨过了几个量子」。一轮 = **派发到期事件** +
+    /// **至多一个量子**的指令；被**事件抢占**的量子会算成两轮
+    /// （事件边界 = 抢占点 = 额外的安全检查点）。
+    ///
+    /// 于是「没有抢占」时它恰好等于「跨过的量子数」，「有抢占」时它
+    /// **大于**量子数 —— 这正是「事件边界 = 抢占点」的可观测形状。
     pub quanta: u64,
     /// 为什么停。
     pub reason: RunReason,
@@ -458,6 +466,24 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
     ///
     /// [`Peripheral::tick`]: riscv_sim_contract::port::Peripheral::tick
     pub fn tick_peripherals(&mut self, now_ps: u64) -> Result<usize, PlatformError> {
+        self.tick_peripherals_except(now_ps, &[])
+    }
+
+    /// 同 [`Engine::tick_peripherals`]，但**跳过** `skip` 里的外设。
+    ///
+    /// 存在的理由：量子边界的 [`SchedEvent::PeripheralTick`] 事件**已经**
+    /// 在当前时刻推进过这些外设了，紧接着的第一条指令**不该**再推进一次
+    /// ——那会让同一个外设在**同一虚拟时刻**被 tick 两次，而两条驱动路径
+    /// （`step_n` 与 `run_until`）的外设时钟会因此**对不上**
+    /// （V-A 检视 · F1）。
+    ///
+    /// 跳过之后，两条路径的外设推进序列**逐条相同**：每条指令推进一次，
+    /// 量子边界那一次由事件代劳。
+    pub fn tick_peripherals_except(
+        &mut self,
+        now_ps: u64,
+        skip: &[u32],
+    ) -> Result<usize, PlatformError> {
         let Self {
             ticker,
             peripherals,
@@ -470,6 +496,9 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
         let mut ticked = 0usize;
         let mut first_error: Option<PlatformError> = None;
         for &paddr in peripherals.iter() {
+            if skip.contains(&paddr) {
+                continue;
+            }
             match ticker.tick(paddr, now_ps) {
                 Ok(writes) => {
                     state.pending_writes.extend(writes);
@@ -720,15 +749,39 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
             //     事件被弄丢时（快照恢复、外设被换掉）链路会自愈。
             self.ensure_peripheral_ticks();
             let reticked = self.dispatch_due_events()?;
-            for (paddr, at_ps) in reticked {
+            for (paddr, at_ps) in &reticked {
+                // ⚠️ **陈旧事件不续排**（V-A 检视 · F6）：登记表被清空
+                // （换工程 = 换外设集合）之后，队列里还留着旧基址的 tick
+                // 事件——续排它就等于让一件**永远等不到主人**的事件永远
+                // 留在队列里。派发一次就够了（ticker 找不到实例 → 空转）。
+                if !self.peripherals.contains(paddr) {
+                    continue;
+                }
                 let next = at_ps.saturating_add(TIME_QUANTUM_PS);
-                self.schedule_event(next, SchedEvent::PeripheralTick { paddr, at_ps: next });
+                self.schedule_event(
+                    next,
+                    SchedEvent::PeripheralTick {
+                        paddr: *paddr,
+                        at_ps: next,
+                    },
+                );
             }
+            // 刚刚被**事件**推进过的外设，在**同一时刻**不该再被指令边界
+            // 推进一次（V-A 检视 · F1）——那会让同一外设在同一虚拟时刻被
+            // tick 两次，两条驱动路径的外设时钟也就对不上。
+            //
+            // 只对**本量子的第一条**指令生效：第二条指令的时刻已经
+            // 往前走了 1 ns，必须照常推进。
+            let mut just_ticked: Vec<u32> = reticked.iter().map(|(paddr, _)| *paddr).collect();
 
             // (2) 量子内执行指令。
             let mut done = 0u32;
             while done < QUANTUM_INSTR_QUOTA {
-                if self.now_ps() >= until_ps {
+                // **不冲过**目标时间（V-A 检视 · F5）：执行一条指令会把
+                // 时钟往前推 `INSTRUCTION_COST_PS`，所以要**先预检**——
+                // 只在「已经到达」时才停，会让 `run_until(t)` 落到 `t`
+                // 之后最多一条指令的距离上（`run_until(4500)` → 5000）。
+                if self.now_ps().saturating_add(INSTRUCTION_COST_PS) > until_ps {
                     break;
                 }
                 // 指令预算也要在**指令边界**上查（安全检查点 = 量子边界
@@ -740,7 +793,8 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
                 }
                 // 外设时钟同步（**指令边界**）——精细时间戳（D-46）。
                 let now = self.now_ps();
-                self.tick_peripherals(now)?;
+                self.tick_peripherals_except(now, &just_ticked)?;
+                just_ticked.clear();
                 match executor.step(self.state_mut())? {
                     ExecOutcome::Advanced => {
                         instructions += 1;
@@ -770,6 +824,22 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
                     instructions,
                     quanta,
                     reason: RunReason::BudgetExhausted,
+                });
+            }
+
+            // (4) ⚠️ **不许空转**（V-A 检视 · F5 闭环）：内层循环一条指令
+            //     都没执行 → 只可能是「`now + 指令成本 > until_ps`」把时间
+            //     预检挡住了（预算耗尽的情况上面已经返回了）。
+            //
+            //     不在这里收手，外层就会**永远转下去**：时间到头了 → 内层
+            //     一条也不执行 → 外层再转一圈还是同样的结果 → **死循环**。
+            //     （这是 F5 的预检式修法带来的副作用——原版 `now >= until_ps`
+            //     总能靠「多执行一条」把时间推过头，侥幸不死。）
+            if done == 0 {
+                return Ok(RunOutcome {
+                    instructions,
+                    quanta,
+                    reason: RunReason::TimeReached,
                 });
             }
         }

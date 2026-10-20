@@ -475,6 +475,11 @@ fn set_hook_still_replaces_every_hook() {
 }
 
 #[test]
+// ⚠️ 本用例守的是 M-14 的**最小同步语义**——它已被 D-07 收敛到 M-12 的
+// `Engine::tick_peripherals`，`Bus::tick_peripherals` 因此标了 `#[deprecated]`
+// （台账 D-61）。这里显式放行 deprecated 告警：留着这条用例是为了保住
+// 「报错的外设不牵连别人」这条性质在 M-14 侧的**实现**。
+#[allow(deprecated)]
 fn a_failing_peripheral_does_not_stop_the_others_from_ticking() {
     // 一个外设 `tick` 报错时，**其余外设仍然要被 tick**（V-A 检视 · 🟡-4）。
     //

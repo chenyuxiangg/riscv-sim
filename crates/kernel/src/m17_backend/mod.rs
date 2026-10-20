@@ -113,13 +113,22 @@ impl<'a> IssExecutor<'a> {
             watch_hit,
         }
     }
+
+    /// 该地址上有没有**生效中**的断点（取指之前判定）。
+    ///
+    /// 单独暴露出来，是为了让调用方能在**推进别的状态之前**先问一句
+    /// ——`step_n` 必须在同步外设时钟**之前**问（V-A 检视 · F3）：一条
+    /// **没有执行**的指令不该让外设的时钟也走一格。
+    pub fn breakpoint_at(&self, pc: u32) -> bool {
+        self.breakpoints.hit_check(pc).is_some()
+    }
 }
 
 impl InstructionExecutor for IssExecutor<'_> {
     fn step(&mut self, state: &mut SimState) -> Result<ExecOutcome, PlatformError> {
         // (1) 断点命中检测 —— 挂在**取指之前**（M-08 LLD §3.2）。
         //     命中时该条指令尚未执行，状态零副作用。
-        if self.breakpoints.hit_check(state.pc).is_some() {
+        if self.breakpoint_at(state.pc) {
             return Ok(ExecOutcome::Stop {
                 reason: HaltReason::Breakpoint,
                 consumed: false,
@@ -128,14 +137,12 @@ impl InstructionExecutor for IssExecutor<'_> {
 
         // (2) 执行一条指令（访存经 M-14）。
         let outcome = self.iss.step_one_via_bus(state, self.bus);
-        match outcome {
-            Ok(StepOutcome::Advanced) => {}
+        let trapped = match outcome {
+            Ok(StepOutcome::Advanced) => false,
             Ok(StepOutcome::Trapped { .. }) => {
                 // 陷入的指令**也算执行了**——它被取指、被译码、被触发。
-                return Ok(ExecOutcome::Stop {
-                    reason: HaltReason::Trap,
-                    consumed: true,
-                });
+                // 但它**没有退休**，所以虚拟时钟**不推进**（见 (3)）。
+                true
             }
             Ok(StepOutcome::Breakpoint) => {
                 return Ok(ExecOutcome::Stop {
@@ -156,17 +163,38 @@ impl InstructionExecutor for IssExecutor<'_> {
                 })
             }
             Err(err) => {
-                // 取指 / 访存失败（E_BUS-01 等）——按陷阱处理。
+                // 取指 / 访存失败（E_BUS-01 等）——**报错**，不是陷阱。
+                //
+                // ⚠️ 旧注释写「按陷阱处理」而代码是 `return Err(err)`——
+                // 注释与代码矛盾（V-A 检视 · F12）。这里**如实**说一句：
+                // 错误**向上传播**给调用方，由调用方决定怎么处理；执行器
+                // 自己不把它降级成 `HaltReason::Trap`。
+                //
+                // （批处理那侧的 `step_n` 会把它记成 `Trap` 停止原因——那是
+                // **批处理层**的选择，不是执行器这一层的行为。）
                 return Err(err);
             }
-        }
+        };
 
-        // (3) 推进虚拟时钟。
-        state.virtual_time_ps = state.virtual_time_ps.saturating_add(INSTRUCTION_COST_PS);
+        // (3) 推进虚拟时钟（**陷阱不推进**——陷入的指令没有正常退休）。
+        if !trapped {
+            state.virtual_time_ps = state.virtual_time_ps.saturating_add(INSTRUCTION_COST_PS);
+        }
 
         // (4) 提交待写（D-07）——`pending_writes` 从此**不只是被写进
         //     去**，而是真的落到总线上。
+        //
+        //     ⚠️ **在陷阱判定之前**（V-A 检视 · F4）：外设在 tick 期间
+        //     已经发生的动作，与 guest 这条指令成不成功**无关**。写在
+        //     队列里不提交 = 外设的写**永远看不见**。
         commit_pending_writes(state, self.bus)?;
+
+        if trapped {
+            return Ok(ExecOutcome::Stop {
+                reason: HaltReason::Trap,
+                consumed: true,
+            });
+        }
 
         // (5) 观察点命中 —— 访存发生在指令**内部**，所以只能在指令返回后
         //     判定。这里只**看**不取：命中槽由后端在批次结束时消费
@@ -494,7 +522,16 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
         let mut executor = IssExecutor::new(iss, bus, breakpoints, Rc::clone(watch_hit));
 
         for _ in 0..n {
-            // (1) 外设时钟同步（**指令边界**）—— 让本条指令里发生的探针
+            // (1) 断点命中检测 —— 挂在**取指之前**（M-08 LLD §3.2）。
+            //     命中时该条指令尚未执行，状态零副作用——**外设时钟也不
+            //     推进**（V-A 检视 · F3：一条没执行的指令不该让外设的
+            //     时钟也走一格）。
+            if executor.breakpoint_at(engine.pc()) {
+                *last_stop = Some(HaltReason::Breakpoint);
+                break;
+            }
+
+            // (2) 外设时钟同步（**指令边界**）—— 让本条指令里发生的探针
             //     边沿带上**真实**的虚拟时间戳（D-46）。
             //
             //     没有这一步，M-15 的 GPIO 记下的 `now_ps` 永远是 0，
@@ -511,7 +548,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             let now_ps = engine.now_ps();
             engine.tick_peripherals(now_ps)?;
 
-            // (2) 执行一条指令（断点 / 陷阱 / 观察点的判定都在执行器里）。
+            // (3) 执行一条指令（陷阱 / 观察点的判定都在执行器里）。
             match executor.step(engine.state_mut()) {
                 Ok(ExecOutcome::Advanced) => {
                     executed += 1;
@@ -526,7 +563,8 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
                     break;
                 }
                 Err(err) => {
-                    // 取指 / 访存失败（E_BUS-01 等）——按陷阱处理。
+                    // 取指 / 访存失败（E_BUS-01 等）——**批处理层**把它记成
+                    // 陷阱停止原因（并把错误向上传播）。
                     *last_stop = Some(HaltReason::Trap);
                     return Err(err);
                 }

@@ -878,6 +878,15 @@ impl Bus {
     /// 这是**最小**同步：谁调用、什么时候调用由上层决定。D-07 落地后，
     /// 外设的 tick 由 M-12 的调度器在**量子边界**统一驱动（那才是
     /// 架构上的正确粒度），本方法届时退化为调度器 tick 路径的实现细节。
+    ///
+    /// ⚠️ **已标 `#[deprecated]`**（台账 **D-61**，D-07 检视轮 V-B · ⚪-13）：
+    /// D-07 把外设时钟的推进点**收敛**到 M-12 的 `Engine::tick_peripherals`
+    /// 之后，本方法在**生产路径上已不可达**——全仓只剩 M-14 自己的单测在调它。
+    /// 留着它是为了不破坏公开 API，但**留着就有被接回去的风险**——接回去就又是
+    /// 「两个真相」（同一份外设时钟，两处各推一次）。
+    #[deprecated(
+        note = "D-07 之后外设时钟的唯一推进点是 M-12 的 Engine::tick_peripherals（走 PeripheralTicker 接缝）；本方法在生产路径上已不可达，保留仅为兼容旧的最小同步语义"
+    )]
     pub fn tick_peripherals(&self, now_ps: u64) -> PeripheralTickOutcome {
         let mut out = PeripheralTickOutcome::default();
         for region in self.regions.values() {
