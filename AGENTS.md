@@ -96,7 +96,7 @@ riscv_sim/
 | M-09 | 单步引擎 | `crates/kernel/src/m09_step/` | stub |
 | M-10 | 寄存器内存服务 | `front/services/m10_registermemory.js` | ✅ v0.11 实现（订阅寄存器/内存快照）；v0.11.1 补断线重连后重订阅 |
 | M-11 | 符号表/DWARF/反汇编/trace 导出 | `crates/kernel/src/m11_symbol/` | stub |
-| M-12 | 事件驱动仿真引擎 | `crates/kernel/src/m12_engine/` | ✅ v0.11 加固（快照还原 now_ps+事件队列、推进不空转、seq 不撞号）；⚠️ **至今无独立模块级 review**（台账 D-30） |
+| M-12 | 事件驱动仿真引擎 | `crates/kernel/src/m12_engine/` | ✅ v0.11 加固（快照还原 now_ps+事件队列、推进不空转、seq 不撞号）；v0.11.2 增契约快照 DTO 转换层（`snapshot_dto` / `restore_dto`）；⚠️ **至今无独立模块级 review**（台账 D-30） |
 | M-13 | RISC-V ISS（RV32IMC） | `crates/kernel/src/m13_iss/` | ✅ v0.11 **RV32I 全集 41 条** + 模块级 review；v0.11.1 检视轮修 SYSTEM funct3 阻断级缺陷；M/C 扩展待做 |
 | M-14 | 总线与内存映射 | `crates/kernel/src/m14_bus/` | ✅ v0.4 完成 + v0.7.2 补完；v0.11 接线 PR |
 | M-15 | 外设模型层 | `crates/kernel/src/m15_peripheral/` | ✅ v0.7 三外设 + v0.11 接线 PR |
@@ -113,7 +113,7 @@ riscv_sim/
 > - `m12_engine::tests::engine_advances_time`（事件队列 + 时间推进）
 > - `m13_iss::tests::addi_executes`（RV32I ADDI 解释执行，x1=42）
 >
-> **v0.11 起新增判据**（`cargo test --workspace` 375 全绿 = lib 352 + 集成 23）：
+> **v0.11 起新增判据**（`cargo test --workspace` 392 全绿 = 契约 lib 8 + kernel lib 354 + 集成 30）：
 > - `m13_iss::tests_rv32i::*`（RV32I 41 条指令 + 黄金编码 + 边界 + CSR 形态 SYSTEM 陷阱 + 步进/回绕/子字存储）
 > - `m12_engine::tests::*`（snapshot→restore→继续推进的确定性）
 > - `m06_elf::tests_malformed::*`（畸形输入表驱动 + fuzz，均不得 panic）
@@ -122,6 +122,10 @@ riscv_sim/
 > **v0.11.1 检视轮新增判据**（4 路独立检视后补齐）：
 > - `m18_probe::tests::*`（总线 hook 在 `RefCell` 争用下不 panic）
 > - `m06_elf::tests::*`（IHEX 嗅探结构判据：raw 二进制首字节 `0x3A` 不再误判；4 GiB 总线边界）
+>
+> **v0.11.2 快照 DTO 判据**（契约新增可序列化 DTO，D-24 根因闭环）：
+> - `crates/contract/src/snapshot.rs::tests::*`（DTO 的 JSON 往返 + `validate()` 四类拒绝）
+> - `crates/kernel/tests/m12_m17_snapshot_dto.rs`（partial 路径的发散 vs full 路径的不发散 + JSON 落盘往返 + M-17 接线 + 契约默认实现）
 
 ## Code style
 

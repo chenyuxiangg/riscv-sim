@@ -3,9 +3,10 @@
 > **定位**：本文件是**全部 review 欠账的唯一追踪入口**——跨模块条目与模块内条目都在这里汇总状态。模块问题的**详细分析、实证记录与修复建议**见各模块报告（§八 索引）。
 > **建立日期**：2026-10-19
 > **状态核实日期**：2026-10-20（v0.11.0 并行开发后重新逐条回源码核对，非引用历史结论）
-> **基线**：`cargo test --workspace` **375 passed / 0 failed**（lib 352 + 集成 23）；`clippy -D warnings` 干净（已删 `non_canonical_partial_ord_impl` allowance）；`fmt --check` 干净；前端门禁 **119 用例 / 21 suite**
+> **基线**：`cargo test --workspace` **392 passed / 0 failed**（契约 lib 8 + kernel lib 354 + 集成 30）；`clippy -D warnings` 干净（已删 `non_canonical_partial_ord_impl` allowance）；`fmt --check` 干净；前端门禁 **119 用例 / 21 suite**
 > **关键结论**：v0.10 记录的「三条现有门禁对本台账全部 5 项阻断级条目均无感知」**已不成立**——本轮补上了 3 类最小门禁（M-13 x0 / M-12 确定性 / M-06 畸形输入），**3 条阻断级条目全部消除**。
-> **本轮（2026-10-20 独立检视轮）新增**：4 路独立检视（V1 M-13 / V2 M-12+接线 / V3 M-06 / V4 前端+收口）共查出 **22 项**：1 阻断级（M-13 SYSTEM 未校验 funct3，已修）+ 2 高危（F-3 总线 hook panic，已修；F-1 快照语义承诺，已订正文档）+ 若干中低危。**阻断级与高危已全部闭环**，中低危分流为 D-24~D-32。详见 §四·1。
+> **本轮（2026-10-20 独立检视轮）新增**：4 路独立检视（V1 M-13 / V2 M-12+接线 / V3 M-06 / V4 前端+收口）共查出 **22 项**：1 阻断级（M-13 SYSTEM 未校验 funct3，已修）+ 2 高危（F-3 总线 hook panic，已修；F-1 快照语义承诺，已订正文档）+ 若干中低危。**阻断级与高危已全部闭环**，中低危分流为 D-24~D-35。详见 §四·1。
+> **D-24 已闭环（2026-10-20 收口轮）**：契约层新增可序列化快照 DTO（`crates/contract/src/snapshot.rs`），`ExecutionBackend` 增 `snapshot_full` / `restore_full`（additive 默认实现），M-12 ↔ DTO 双向转换落地，M-17 接线完成——**确定性快照首次可以落盘**。
 > **维护约定**：本文件是**活文档**。模块报告的闭环章节记录该模块的细节，本台账只保留**汇总状态 + 跨模块拓扑 + 处理顺序**；两者冲突时以本台账的核实日期为准。
 
 ---
@@ -22,14 +23,15 @@
 | **M-19 波形** | 3 897 | 85 | 16 | **16** | 0 | 🟢 **已清零**（`cee6b61`） |
 | **前端 M-01/02/03** | 1 123 → 1 594 | **21** | 20（16 首审 + 4 漏项） | **20** | 0 | 🟢 **已清零**（`fc83e1e`~`6fc9e1f`） |
 | **M-06 加载器** | 1 189 → 2 652 | **52** | **17（v0.11 首次模块级 review）** | **13** | 4（留账并说明理由） | 🟢 **已审查 + 加固**（v0.11，检视轮再修 3 项） |
-| **M-12 引擎** | 226 → 1 060 | **18** | 台账 3 项（D-05/06/17） | **3** | 0（**但无独立模块级 review** → D-30） | 🟢 **已加固**（v0.11） |
+| **M-12 引擎** | 226 → 1 292 | **20** | 台账 3 项（D-05/06/17） | **3** | 0（**但无独立模块级 review** → D-30） | 🟢 **已加固**（v0.11，收口轮再增快照 DTO 转换层） |
+| **契约层** | 1 163 → 1 544 | **8** | 检视轮 D-24 根因修复 | **1** | 0 | 🟢 **新增可序列化快照 DTO**（收口轮） |
 | **M-13 ISS** | 456 → 2 962 | **88** | 14（v0.11 首次模块级 review + 检视轮补 #14） | **14** | 0 | 🟢 **RV32I 全集落地**（v0.11，检视轮修 4 项） |
 | **前端 M-04/05/07/10** | 66 → 2 220 | **71** | 7 项契约缺口 + 3 自查缺陷 | 3（已修） | 7（契约缺口 → D-32，留 Wave 2） | 🟢 **已实现**（v0.11） |
-| **M-08/09/11/16/17/20/21/22/23** | 591 | — | 无 | — | — | ⚪ 纯 stub，未开工 |
+| **M-08/09/11/16/17/20/21/22/23** | 591 → 633 | — | 无 | — | — | ⚪ 纯 stub，未开工（M-17 因快照 DTO 接线增 41 行） |
 
-> **统计口径**（2026-10-20 检视轮重算，V4 指出此前数字失真）：「代码」= 该模块目录下**全部 `.rs` 文件的总行数**（含测试文件）；「测试」= 该模块目录下 `#[test]` 的**用例条数**。前端：「代码」= `front/views`（1 045）+ `front/app.js` / `index.html` / `style.css`（549）= 1 594；M-04/05/07/10 = `front/services`（1 213）+ `front/lib`（414）+ `front/dev`（593）= 2 220。集成测试另计：M-06 5 + 接线 13 + M-18→M-19 5 = **23 条**。前端门禁单列：**119 用例 / 21 suite**。
+> **统计口径**（2026-10-20 检视轮重算，V4 指出此前数字失真）：「代码」= 该模块目录下**全部 `.rs` 文件的总行数**（含测试文件）；「测试」= 该模块目录下 `#[test]` 的**用例条数**。前端：「代码」= `front/views`（1 045）+ `front/app.js` / `index.html` / `style.css`（549）= 1 594；M-04/05/07/10 = `front/services`（1 213）+ `front/lib`（414）+ `front/dev`（593）= 2 220。集成测试另计：M-06 5 + 接线 13 + M-18→M-19 5 + 快照 DTO 7 = **30 条**。前端门禁单列：**119 用例 / 21 suite**。
 
-**v0.11.0 后台账口径**：阻断级 **5 → 0**（3 条本轮闭环），高危 9 条中 **8 条闭环**（余 D-13），中低危 8 条中 6 条闭环，D-23 门禁缺口 **4 → 0**。检视轮再闭环 1 阻断 + 2 高危，新登记 D-24~D-35 共 12 条。
+**v0.11.0 后台账口径**：阻断级 **5 → 0**（3 条本轮闭环），高危 9 条中 **8 条闭环**（余 D-13），中低危 8 条中 6 条闭环，D-23 门禁缺口 **4 → 0**。检视轮再闭环 1 阻断 + 2 高危，新登记 D-24~D-35 共 12 条。**收口轮再闭环 D-24（根因修复）**。
 
 | 口径 | 项数 | 闭环 | 未闭环 |
 | --- | --- | --- | --- |
@@ -39,8 +41,8 @@
 | M-19 | 16 | 16 | 0 |
 | 前端 M-01/02/03 | 20 | 20 | 0 |
 | **v0.11 新增报告** | M-06 17 + M-13 13 + 前端服务层 10 + 接线 PR 10 | 40 | 4（契约缺口） |
-| **检视轮新增** | 22 项发现 | 3（1 阻断 + 2 高危） | 19（分流为 D-24~D-35） |
-| **合计** | **135** | **109** | **26** |
+| **检视轮新增** | 22 项发现 | 4（1 阻断 + 2 高危 + D-24 根因） | 18（其中 12 条登记为 D-24~D-35，6 条留各模块报告） |
+| **合计** | **135** | **110** | **25** |
 
 ### 1.2 跨模块链路连通性
 
@@ -87,7 +89,7 @@ M-15 外设 ──────────────────────�
 | **D-12** | M-14 ↔ M-15 ↔ M-18 接线 | M-14 报告 #13 / M-15 报告 #11 | `Bus::map_peripheral(base, size, PeripheralId)` 的 size 与 `Peripheral::size()` 无一致性校验 | ✅ **已闭环**（v0.11 接线 PR，3 个 commit）：① 总线经 `Rc<RefCell<dyn Peripheral>>` **共享句柄**持有外设实例（`BoundPeripheral` + `RegionTarget::PeripheralBound`），新增 `Bus::map_peripheral_instance`，挂载时校验 `size == periph.size()` 不一致返 **E_BUS-08**；② M-15 注册表改共享句柄（`handle()` / `share()`），三外设 override `on_probe` 上报 `OUT` / `TX` / `CMP` 信号；③ M-18 新增 `ProbeRegistry::attach_signal`（LLD §1.3 的 `attachSignal`）+ `CH_UART_TX = 4`。**N5「GPIO 翻转可见」的内核路径 100% 闭合**——`crates/kernel/tests/m14_m15_m19_wiring.rs` 11 个端到端用例为证（固件写 GPIO OUT → M-14 派发 → M-15 上报 → M-18 判沿 → M-19 波形通道出现期望边沿） |
 | **D-13** | M-14 | M-14 报告 #9 | `Region.target` / `RamBackend.bytes` 仍为 `pub` | ⏳ **未动**：收紧可见性要同步改 `crates/kernel/tests/m06_load_to_bus.rs` 与 `front/views/m02_viewcomponents.js` 的 `renderMapTable`——后者与 v0.11 的 T4 前端服务层改动相邻，**留 Wave 2 一并做**避免来回冲突 |
 | **D-14** | 契约 + M-14 | M-15 报告 N4 | `Peripheral::read_clear` 默认实现委托 `read`，**漏覆写的外设静默获得非破坏性读** | ✅ **已闭环**（v0.11 `22107a0`）：总线读外设**一律调 `read_clear`**（不是 `read`），`Uart16550` 正确 override（读 RX 后清空 FIFO 状态）。回归测试：连续读两次 UART RX，第二次不再拿到同一字节；M-14 侧另有 `read_clear` 路径计数用例证明确实走了破坏性读 |
-| **D-24** | 契约 + M-12 + M-17 | 检视 V2 · F-1 | **`ExecutionBackend::restore` 不是确定性还原**：`SimState` 不含事件队列（契约无此空间），`Engine::restore` 只还原平台状态与虚拟时钟，队列原样保留 | 🔴 检视 V2 实证：`schedule A; snapshot; schedule B; restore; run` → **A 与 B 都触发**，而「同种子从未 restore 的运行」只有 A。契约文档此前承诺「Restore a deterministic snapshot」，未来 M-20 持久化实现者会直接踩中。⚠️ **本轮只订正文档承诺，未改 API 形状**：`crates/contract/src/port.rs` 的 `snapshot` / `restore` 改述为「partial」，`m12_engine::restore` 的 docstring 补上具体发散场景与 `snapshot_full` / `restore_full` 的使用指引（`7254a00`）。**根因未除**：`EngineSnapshot`（含队列）**不可序列化**——kernel crate 无 serde，契约层放不下。**待决策**（Wave 2）：契约新增可序列化 DTO（倾向）vs 允许 kernel 引入 serde |
+| **D-24** | 契约 + M-12 + M-17 | 检视 V2 · F-1 | **`ExecutionBackend::restore` 不是确定性还原**：`SimState` 不含事件队列（契约无此空间），`Engine::restore` 只还原平台状态与虚拟时钟，队列原样保留 | ✅ **已闭环（收口轮，commit `3016de0`）——根因已除**。检视 V2 实证：`schedule A; snapshot; schedule B; restore; run` → **A 与 B 都触发**，而从快照时刻出发的运行只有 A。**处置**：① 契约层新增 `crates/contract/src/snapshot.rs`（`EngineSnapshotDto` / `QueuedEventDto` / `SchedEventDto`，全部可序列化 + `validate()`）；② `ExecutionBackend` 增 `snapshot_full` / `restore_full`，**additive 默认实现**（不支持时前者返 `None`、后者**大声报错** `E_SNAP-03`，不静默跳过）；③ M-12 新增 `snapshot.rs` 做 `EngineSnapshot ↔ EngineSnapshotDto` 双向转换 + `Engine::snapshot_dto` / `restore_dto`；④ M-17 `SelfIssBackend` 接线完成。**partial 的 `snapshot` / `restore` 保持原样**（仍如实标注为非确定性），公开 API 只增不减。**证据**：`cargo test --workspace` 375 → 392；5 项变异自检全部变红；D-24 原始复现有两条用例分别钉住 partial 路径的发散与 full 路径的不发散。**意义**：确定性快照**首次可以落盘**，M-20 / M-23 的持久化不再被卡 |
 
 ---
 
@@ -122,7 +124,7 @@ M-15 外设 ──────────────────────�
 | 严重度 | 项数 | 处置 |
 | --- | --- | --- |
 | 🔴 阻断 | 1 | M-13 SYSTEM 未校验 `funct3`（CSR 形态编码被误判为 ECALL，mcause 错）→ **已修**（`caf7f82`），补 3 条用例；**变异自检**：改回原样后 4 条用例变红 |
-| 🟠 高危 | 2 | F-3 总线 hook `borrow_mut()` 重入 panic → **已修**（`bd647dd`），补 3 条用例；F-1 快照语义承诺 → **已订正文档**（`7254a00`），根因转 D-24 |
+| 🟠 高危 | 2 | F-3 总线 hook `borrow_mut()` 重入 panic → **已修**（`bd647dd`），补 3 条用例；F-1 快照语义承诺 → **已订正文档**（`7254a00`），根因转 D-24 → **D-24 根因已在收口轮修复**（`3016de0`：契约新增可序列化快照 DTO + `snapshot_full` / `restore_full` 端口 + M-12/M-17 接线） |
 | 🟡 中 | 6 | 已修：M-06 IHEX 嗅探结构判据（`fd3d036`）、M-06 bss gap `checked_add`（`fd3d036`）、M-14 外设路径上限覆盖（`0fbd6e7`）；未做：D-25 / D-29 / D-30 / D-32 / D-33 |
 | 🟢 低 | 13 | 已修：M-13 `sequential` 步进覆盖 / 地址回绕覆盖 / 子字存储截断契约（`caf7f82`）；M-06 边界测试（`fd3d036`）；M-18 契约字段名校验 / mock `ClearBreakpoint` 按 id / M-10 重连重订阅 / `once()` 退订覆盖 / mock topics 重置；LLD 信号名对齐（F-5）；未做：D-27 / D-28 / D-31 / D-34 / D-35 |
 
@@ -255,3 +257,4 @@ M-15 外设 ──────────────────────�
 | 2026-10-20 | **前端分支独立复审（`fix/frontend-review-closure`，11 commit）** | 结论见 `FRONTEND_Review.md` §八。**首审 16 项 + 4 项评审漏项确认真实闭环**（16 组变异测试逐项验证，11 组被门禁抓住）。但复审另查出 **3 处门禁盲区**（#10 createPanel 改回 innerHTML、#11 状态栏改回硬编码、#12 页脚改回硬编码 —— 改回去门禁仍 21 pass / 0 fail）+ **1 处位置耦合缺陷**（`app.js:81` 的 `Promise.all` 数组 7 元素 vs 解构 6 槽，插入一个 mount 即静默错绑 `transport`，门禁抓不住，用户已见过页脚 `role=?` 症状）+ **DOM stub 5 处保真度缺口**（`^=`/`$=` 选择器算符未实现退化为「属性存在即匹配」；无滚动模型使「终端滚动还原」用例成恒等式；`once`/`stopPropagation` 未实现；`document.addEventListener` 与 `window.location` 缺失）+ 文档用例数 4 处不一致。**SAB / COOP-DEP 语义校正经抽检准确**（COOP/COEP 是服务器响应头，SAB 的真正条件是跨源隔离）。基线：`cargo test --workspace` 203 ✓ / `check-front.sh` **35 passed / 7 suite** ✓ / CI YAML 合法且 exec 位已入库 ✓。✅ **复审 15 项发现全部闭环**（见 §八·7）：3 处盲区已封、位置耦合已消除、stub 5 处保真度缺口补齐 |
 | 2026-10-20 | **前端复审闭环二次复验**（`445c863`/`b3045b7`/`32b3387`/`2390bb6`） | 结论见 `FRONTEND_Review.md` §八·八。**§八·7 的 15 项闭环声明逐条独立验证，15/15 属实**，无「声称已修但没修」项；11 组声称变异全部复现变红，**另 5 组自建探针**（transport↔workspace 值互换、`describeTransport` 常量化）也被新断言抓住——覆盖强度强于声明。**但本轮改动自身引入 5 项新问题**：R-15 stub 的 `DOMContentLoaded` 在动态 import 完成**之前**派发（实测「import 后才注册监听」→ 0 次，真实浏览器 1 次）→ 前端若监听该事件会「浏览器跑、门禁不跑」**假绿**，而 R-12 自测只断言函数存在、不断言事件派发；R-16 `document` 的 capture 监听器永不触发；R-17 新增的 `!/innerHTML/.test(m01源码)` 静态断言**过宽**（加一句含该词的注释即 1 fail 假红）；R-18 门禁强依赖 dev-only 全局 `window.riscv_demo`（删掉 `exposeDevHelpers` → 3 fail 假红）；R-19 stub `removeEventListener` 移除的是 `capture=true` 条目（DOM 规范要求移除 `capture=false`）。另 2 处文档残留：`PROGRESS.md:67` 未提 `package.json` 已移到 `front/`、`FRONTEND_Review.md:14` 的「21 组变异」应为 27 组。**`front/` 与 `crates/` 零改动**。✅ **2026-10-20 二次复验闭环**：作者侧确认 §八·7 的 15 项声明 **15/15 属实**，并修掉本轮改动自身引入的 5 项新问题（R-15 `DOMContentLoaded` 派发时机造成假绿 / R-16 document 缺捕获相位 / R-17 静态断言过宽致假红 / R-18 门禁依赖 dev-only 全局 / R-19 removeEventListener 移除错相位），门禁扩至 **38 用例 / 7 suite**，三轮累计 32 组变异中 13 组必须变红者全部被抓住、3 组预期变绿者各有理由 |
 | 2026-10-20 | **独立检视轮：4 路并行检视 → 逐项修复（v0.11.1）** | Wave 1 交付后**先检视、后合 main**，4 路独立检视（V1 M-13 / V2 M-12+接线 / V3 M-06 / V4 前端+收口）共查出 **22 项**。**1 阻断级**：M-13 SYSTEM opcode 未校验 `funct3` → CSR 形态编码（`0x00001073`）被误判为 ECALL，mcause 报 11 而非 2（`caf7f82` 修复 + 3 条用例，**变异自检：改回原样 4 条用例变红**）。**2 高危**：总线 hook 用裸 `borrow_mut()` → 持锁时重入 panic（`bd647dd` 修复 + 3 条用例）；`ExecutionBackend::restore` 的「确定性快照」承诺与实现不符（`7254a00` 订正文档，根因转 **D-24**）。**中低危已修**：M-06 IHEX 嗅探改结构判据（`0x3A` 开头的 raw 二进制不再误判）、bss gap 基址 `checked_add`、M-14 外设路径区域上限覆盖、M-13 的 `sequential` 步进 / 地址回绕 / 子字存储截断契约 3 处覆盖漏洞、LLD 探针信号名对齐实现口径（3 份 HTML，零代码风险）。**新登记 D-24~D-35 共 12 条**。**数字失真已订正**（V4 发现）：台账 / PROGRESS / AGENTS 的代码行数与测试数此前低估 3~4 倍，现按「模块目录全部 .rs 行数 / `#[test]` 条数」统一重算并写明口径。**基线**：`cargo test --workspace` 314 → **375**（lib 352 + 集成 23）；前端门禁 109 → **119 / 21 suite** |
+| 2026-10-20 | **收口轮：契约新增可序列化快照 DTO —— D-24 根因闭环** | 用户决策「契约新增可序列化 DTO」后由协调者直接实现（契约层变更不走子会话）。**根因回顾**：D-24 的根因不是「契约没空间」，而是**两头堵死**——M-12 的 `EngineSnapshot` 含事件队列但不可序列化（kernel crate 刻意无 serde），契约层的 `SimState` 又装不下队列本身，于是「确定性的快照存在，却落不了盘」，M-20 / M-23 的持久化被卡死。**处置**（commit `3016de0`）：① 契约新增 `crates/contract/src/snapshot.rs`（`EngineSnapshotDto` / `QueuedEventDto` / `SchedEventDto` + `validate()`，检查队列规范序 / seq 唯一 / next_seq 不撞号）；② `ExecutionBackend` 增 `snapshot_full` / `restore_full`，采用**本仓库既有的 additive 默认实现模式**（M-15 review #2）——不支持完整快照的后端 `snapshot_full` 返 `None`、`restore_full` **大声报错** `E_SNAP-03` 而非静默跳过；③ M-12 新增 `snapshot.rs` 做 `EngineSnapshot ↔ EngineSnapshotDto` 双向转换 + `Engine::snapshot_dto` / `restore_dto`；④ M-17 `SelfIssBackend` 接线；⑤ `Engine` 增 `bus()` / `intc()` 只读访问器、`SelfIssBackend` 增 `engine()` / `engine_mut()`。**公开 API 只增不减**，partial 的 `snapshot` / `restore` 保持原样并继续如实标注为非确定性。**证据**：`cargo test --workspace` 375 → **392**（契约 lib 8 + kernel lib 354 + 集成 30）；**5 项变异自检全部变红**（M-1 还原不恢复队列 → 4 条红 / M-2 DTO 丢队列 → 2 条红 / M-3 默认 restore_full 静默成功 → 1 条红 / M-4 M-17 谎称不支持 → 1 条红 / M-5 validate 去 seq 查重 → 1 条红）。**台账数字同步重算**：M-12 1 060 → **1 292**（测 18 → 20）· 契约层 1 163 → **1 544**（测 0 → 8）· stub 组 591 → **633**（M-17 +41）· 集成测试 23 → **30**；合计闭环 109 → **110** |

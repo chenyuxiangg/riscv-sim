@@ -1,11 +1,59 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.11.1
+> **Document version**: v0.11.2
 > **Created**: 2026-10-19
 > **Last updated**: 2026-10-20
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.11.2 变更摘要
+
+**契约新增可序列化 DTO**（用户决策）——D-24 的根因闭环，确定性快照**首次可以落盘**。
+
+### D-24 的根因：不是「契约没空间」，是两头堵死
+
+| | 装得下事件队列？ | 可序列化？ | 结果 |
+| --- | --- | --- | --- |
+| 契约层 `SimState` | ❌ 装不下 | ✅ 可序列化 | 落得了盘，但**还原不完整** |
+| M-12 `EngineSnapshot` | ✅ 装得下 | ❌ kernel crate 刻意无 serde | 还原完整，但**落不了盘** |
+
+两头各差一环，M-20 / M-23 的持久化就被卡死。**本轮补上第三块拼图**：契约层的可序列化镜像。
+
+### 处置（commit `3016de0`）
+
+- **契约层新增** `crates/contract/src/snapshot.rs`：`EngineSnapshotDto` / `QueuedEventDto` / `SchedEventDto`，全部可序列化；`validate()` 检查队列规范序（`at_ps` 升序、同刻 `seq` 升序）、`seq` 唯一、`next_seq` 不撞号
+- **`ExecutionBackend` 增** `snapshot_full` / `restore_full`，采用本仓库既有的 **additive 默认实现模式**（M-15 review #2）：不支持完整快照的后端 `snapshot_full` 返 `None`，`restore_full` **大声报错** `E_SNAP-03` 而非静默跳过——静默跳过会让调用方误以为自己续上了确定性状态
+- **M-12** 新增 `snapshot.rs`：`EngineSnapshot ↔ EngineSnapshotDto` 双向转换 + `Engine::snapshot_dto` / `restore_dto`
+- **M-17** `SelfIssBackend` 接线 `snapshot_full` / `restore_full`
+- **访问器**：`Engine::bus()` / `Engine::intc()`（只读）、`SelfIssBackend::engine()` / `engine_mut()`
+
+**公开 API 只增不减**：未改动任何既有类型、字段或方法签名。partial 的 `snapshot` / `restore` 保持原样，并继续如实标注为「非确定性」。
+
+### 证据
+
+- `cargo test --workspace` 375 → **392**（契约 lib 8 + kernel lib 354 + 集成 30）
+- **5 项变异自检全部变红**（改回缺陷形态必须让用例红）：
+
+| 变异 | 变红用例数 |
+| --- | --- |
+| M-1 还原时不恢复队列（退回 D-24 缺陷形态） | 4 |
+| M-2 DTO 导出丢队列 | 2 |
+| M-3 契约默认 `restore_full` 静默成功 | 1 |
+| M-4 M-17 谎称不支持完整快照 | 1 |
+| M-5 `validate()` 去掉 `seq` 查重 | 1 |
+
+- D-24 的原始复现（`schedule A; snapshot; schedule B; restore; run`）现在有**两条**用例分别钉住 partial 路径的发散与 full 路径的不发散
+
+### 进度影响
+
+- **测试覆盖**：`cargo test --workspace` 375 → **392**（契约 lib 8 + kernel lib 354 + 集成 30）
+- **代码规模**：契约层 1 163 → **1 544** 行（测 0 → 8）· M-12 1 060 → **1 292** 行（测 18 → 20）· stub 组 591 → **633** 行（M-17 +41）· 新增集成测试文件 `crates/kernel/tests/m12_m17_snapshot_dto.rs`（7 条）
+- **台账**：D-24 闭环，合计闭环 109 → **110**
+
+`cargo test --workspace` = **392 passed / 0 failed**（契约 lib 8 + kernel lib 354 + 集成 30）；`cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo fmt --all -- --check` 通过；**前端门禁 119 passed / 0 failed / 21 suite**（本轮零前端改动）。
+
+---
 
 ## v0.11.1 变更摘要
 
