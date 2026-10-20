@@ -6,9 +6,9 @@
 //! - **时间单一真相**：虚拟时钟只存在于 [`SimState::virtual_time_ps`]，
 //!   引擎不再保留第二份 `now_ps`。因此 `restore` 天然把时间一并还原
 //!   （D-05），也不存在「引擎时钟与快照时钟不一致」的可能。
-//! - **推进按量子步进**：时钟每个时间量子前进一次。事件之间的空量子
-//!   目前会被空转消耗 —— 需要改成「直接跳到下一个到期事件」
-//!   （M-12 §3.3「空闲区间批量推进」，D-06 待办）。
+//! - **推进不空转**：推进时直接跳到下一个到期事件，而不是逐个量子空转
+//!   （M-12 §3.3「空闲区间批量推进」）。1 秒虚拟跨度的事件序列只耗
+//!   O(事件数) 步，而不是 O(时间/量子) 步（D-06）。
 //! - **序号不撞号**：插入序 `seq` 是引擎的**独立单调计数器**，不与事件
 //!   队列的内容耦合；恢复时会把计数器顶到队列已占用值之上，因此恢复后
 //!   继续 `schedule` 不会与队列中已有事件撞号（D-17）。
@@ -126,8 +126,8 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
 
     /// Number of clock advances performed since the engine was created.
     ///
-    /// Diagnostic only — it counts *steps*, not virtual time, and is
-    /// deliberately not part of the snapshot (it is a metric, not state).
+    /// Because the engine batch-advances across idle intervals, this is
+    /// *not* the number of quanta — see [`Engine::run_until_idle`].
     pub fn advance_steps(&self) -> u64 {
         self.advance_steps
     }
@@ -177,13 +177,17 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
     /// Run the engine until the queue is empty or a host pause is
     /// requested. Returns the number of **time quanta consumed**.
     ///
-    /// The unit is virtual time, not loop iterations: one quantum per
-    /// step, so the step count and the quanta count agree. Use
-    /// [`Engine::advance_steps`] for the step count.
+    /// The unit is virtual time, not loop iterations: the engine
+    /// batch-advances across idle intervals (M-12 §3.3), so a 1-second
+    /// virtual span costs a handful of steps while still reporting
+    /// 1 000 000 quanta. Use [`Engine::advance_steps`] for the step
+    /// count.
     ///
-    /// Each step: advance the virtual clock by one quantum, publish a
-    /// [`EventPayload::Tick`], then dispatch every event that is due at
-    /// the new time.
+    /// Each step: advance the virtual clock to the next due event, publish
+    /// a [`EventPayload::Tick`], then dispatch every event that is due at
+    /// the new time. An event scheduled exactly at the current time is
+    /// dispatched by the step that reaches it — dispatch never happens
+    /// late, because the clock lands exactly on the event time.
     pub fn run_until_idle(&mut self) -> Result<u64, PlatformError> {
         self.run_steps(u64::MAX)
     }
@@ -198,11 +202,18 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
         let start_ps = self.now_ps();
         let mut steps = 0u64;
         while steps < max_steps {
-            if self.queue.peek().is_none() {
+            // Idle interval (M-12 §3.1 / §3.3): the guest has nothing to
+            // do until the next event is due, so the virtual clock jumps
+            // straight to that event instead of stepping through empty
+            // quanta. This is what keeps a long virtual span at
+            // O(events) steps instead of O(time / quantum) (D-06).
+            let Some(next) = self.queue.peek() else {
                 break;
+            };
+            let target = next.at_ps;
+            if target > self.now_ps() {
+                self.state.virtual_time_ps = target;
             }
-            // Advance the clock by exactly one quantum.
-            self.state.virtual_time_ps = self.state.virtual_time_ps.wrapping_add(TIME_QUANTUM_PS);
 
             self.bus
                 .publish(EventPayload::Tick {
@@ -508,6 +519,72 @@ mod tests {
         assert_eq!(eng.pending_event_count(), 1);
         eng.run_until_idle().expect("run");
         assert_eq!(eng.now_ps(), 4_000);
+    }
+
+    // ------------------------------------------------------------------
+    // D-06 — no idling through empty quanta
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn single_far_future_event_costs_one_step() {
+        // The regression this guards: the old skeleton advanced one
+        // 1 µs quantum per event, so an event at t = 1e12 ps burned
+        // 1e9 iterations.
+        let mut eng: Engine<RecordingBus, RecordingIntc> = Engine::default();
+        eng.schedule(1_000_000_000_000, timer(1, 1_000_000_000_000));
+
+        let before = eng.advance_steps();
+        let quanta = eng.run_until_idle().expect("run");
+        let steps = eng.advance_steps() - before;
+
+        assert_eq!(steps, 1, "a far-future event must not burn quanta");
+        assert_eq!(quanta, 1_000_000_000);
+        assert_eq!(eng.now_ps(), 1_000_000_000_000);
+        assert_eq!(eng.bus.ticks.len(), 1);
+    }
+
+    #[test]
+    fn long_span_advance_is_event_bounded() {
+        // Performance baseline: a 1-second virtual span (1e12 ps) covered
+        // by 64 events must cost O(events) steps, not O(time / quantum).
+        const SPAN_PS: u64 = 1_000_000_000_000;
+        const EVENTS: u64 = 64;
+
+        let mut eng: Engine<RecordingBus, RecordingIntc> = Engine::default();
+        for i in 0..EVENTS {
+            let at = SPAN_PS * i / (EVENTS - 1);
+            eng.schedule(at, timer((i % 8) as u16, at));
+        }
+
+        let before = eng.advance_steps();
+        let quanta = eng.run_until_idle().expect("run");
+        let steps = eng.advance_steps() - before;
+
+        // Explicit upper bound: one step per event, no more.
+        assert_eq!(steps, EVENTS, "advance steps must be O(events)");
+        assert!(
+            steps < SPAN_PS / TIME_QUANTUM_PS,
+            "steps ({steps}) must stay far below the quantum count ({})",
+            SPAN_PS / TIME_QUANTUM_PS
+        );
+        // The virtual span is still fully covered.
+        assert_eq!(quanta, SPAN_PS / TIME_QUANTUM_PS);
+        assert_eq!(eng.now_ps(), SPAN_PS);
+        // One tick per step — the bus is not flooded either.
+        assert_eq!(eng.bus.ticks.len() as u64, EVENTS);
+    }
+
+    #[test]
+    fn events_are_dispatched_at_their_exact_time() {
+        let mut eng: Engine<RecordingBus, RecordingIntc> = Engine::default();
+        eng.schedule(1_500, timer(1, 1_500));
+        eng.schedule(1_600, timer(2, 1_600));
+        eng.run_until_idle().expect("run");
+        // No quantum-boundary rounding: each event lands on its own time.
+        assert_eq!(
+            eng.bus.ticks.iter().map(|t| t.0).collect::<Vec<_>>(),
+            vec![1_500, 1_600]
+        );
     }
 
     // ------------------------------------------------------------------
