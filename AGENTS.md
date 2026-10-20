@@ -168,7 +168,7 @@ riscv_sim/
 > - `cargo test --workspace --no-fail-fast` **512 全绿**（契约 lib 12 + kernel lib 436 + 集成 **53** + golden runner 11）
 > - `crates/kernel/tests/d46_probe_pipeline.rs`（**15 条**：通道列表 / 真实边沿 / 边沿带**真实时间戳** / `LoadProject` 后管道仍在 / **观察点 hook 与探针 hook 共存** / **不经 `LoadProject` 也能产生边沿** / 两份 demo 固件防漂移 / **M-19 的环里真的有边沿** / **单事件边沿数有上限** / **M-18 的边沿存储有上限** / **`LoadProject` 后新总线上的 hook 装齐了**）
 > - `front/tests/waveform.test.mjs`（**9 条**：真内核通道 id `GPIO0.OUT` 进得了视图状态 / 寄存器流不进波形视图 / 边沿**累加** / 强制重订 `sim.waveform`）
-> - `tools/check-front.sh` **154 用例 / 29 suite**（v0.14.1 = 152 / 28）
+> - `tools/check-front.sh` **156 用例 / 29 suite**（v0.14.1 = 152 / 28）
 > - `tools/wasm-smoke.mjs`——在 Node 里驱动**真** wasm 产物，**+5 项探针流断言**（通道列表 / 刚订阅时无边沿 / 真实边沿 / 边沿值 / 边沿时间戳 ≠ 0）
 > - `tools/browser-verify.mjs`——**真 Chrome** 复验波形视图：**断言通道名 `GPIO0.OUT` + 边沿数**，不只是「非空」
 > - ⚠️ **demo 固件真的驱动 GPIO**（0x14..0x1c：`lui x5, 0x40000` / `addi x6, x0, 1` / `sw x6, 4(x5)`）——否则管道通了也没有边沿可推，视图还是空的
@@ -183,6 +183,8 @@ riscv_sim/
 > - ⚠️ **外设 `tick` 报错不许牵连别人**：一个外设报错，其余外设**照样 tick**（时钟同步不能被别人拖停），已收的写**一条不丢**
 > - ⚠️ **前端门禁曾有两条判别力缺口**（V-B）：①「装载工程后探针流被强制重订」**根本没被守**（`loadProjectIntoKernel` 是私有函数，删掉重订 → 门禁 152/152 全绿）；② `app.js` **导入即启动**，它异步调的 `waveform.reset()` 会落进**任意两个用例之间**（共享 M-03 单例）——判据是**探针**（连跑 N 遍通道数恒为 1），不是「用例变红」
 > - ⚠️ **判别式要顺序无关**：「探针 hook 后装」时观察点 hook 改回 `set_hook` **无害**；「运行期重试」会掩盖「`LoadProject` 不重装管道」——判别式必须落在「**新总线上的 hook 数**」上
+> - ⚠️ **第 3 步失败不许牵连前两步**：`loadProjectIntoKernel` 的探针流重订失败**单独**兜住（`probeError` 返回，不抛）——否则「内核未就绪」的提示会**误导**（内核好得很，只是探针流订阅不上）
+> - ⚠️ **探针流订阅没有「断线重连后重订」**（M-10 的寄存器流有）→ 台账 **D-54**（今天无活影响，两种传输都不自动重连；P1 做自动重连前必须补）
 
 ## Code style
 
