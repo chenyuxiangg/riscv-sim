@@ -1,11 +1,91 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.14.0
+> **Document version**: v0.14.1
 > **Created**: 2026-10-19
 > **Last updated**: 2026-10-21
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.14.1 变更摘要
+
+**D-46 检视轮闭环：发布的波形流终于有上限了，M-19 也不再是死代码**
+（分支 `feat/d46-probe-pipeline`）。
+
+三路独立检视（V-A 内核 / V-B 前端与工具 / V-C 一致性与文档）共查出 **19 项**
+（V-A 9 + V-C 10）：**4 中危 + 15 低危**，V-A / V-C 判 **FAIL**。**全部已在本分支闭环**。
+
+### 一、本轮最重要的一条：发布源**无上限**，M-19 是**死代码**（V-A 🟠-1）
+
+V-A 实测：
+
+- 不订阅波形时，M-18 的边沿存储**只进不出**——堆到 **30 万条**不释放；
+- 订阅那一刻一次性推出去：单条事件 **8 MB**（8 000 条 ≈ 219 KB）——
+  WASM 的 `postMessage` 与前端的 JSON 解析同时被压垮；
+- ⚠️ **反向变异**：把 M-18 → M-19 的 `set_edge_sink` 握手删掉，
+  **D-46 全部 10 条用例照样全绿**——M-19 的环**只写不读**，它是**死代码**。
+
+**处置：两层上限，各管一段。**
+
+| 层 | 位置 | 机制 | 可见性 |
+| --- | --- | --- | --- |
+| **内存层** | M-18 `ProbeRegistry` | `EDGE_STORE_CAP = 8192` / 通道，drop-oldest（成批淘汰，摊还 O(1)） | `dropped_edge_count()` |
+| **事件层** | 宿主 `waveform_event` | `MAX_WAVEFORM_EDGES_PER_EVENT = 4096` / 事件，保留最新 | `waveform_edges_truncated()` |
+
+另加一条**让 M-19 活过来**的用例：直接断言 **M-19 的环里有边沿**。
+
+### 二、其余低危的处置
+
+| 编号 | 发现 | 处置 |
+| --- | --- | --- |
+| 🟡-2 | `new()` 漏装外设探针回调 | ✅ `d0d0b66`（V-C 独立发现同一洞） |
+| 🟡-3 | `pending_writes` 措辞 | ✅ 收窄（「提交路径待 D-07 落地」） |
+| 🟡-4 | 外设 `tick` 遇错即整体中断 | ✅ 继续 tick 后面的 + 写一条不丢（`PeripheralTickOutcome`） |
+| 🟡-5 | `add_hook` **一条用例都没有** | ✅ M-14 补 3 条 + M-17 补 1 条（**顺序无关**） |
+| 🟡-6 / 🟡-7 | 管道装配失败**静默** | ✅ 计数 + 运行期重试。⚠️ 失败路径仍无用例 → **D-52** |
+| 🟡-8 | `WriteMemory` 的边沿**晚一轮** | ✅ 当场推波形 |
+| 🟡-9 | M-18 的访存 trace 环**从不被 drain**（3~5 MB 常驻） | ⏳ **D-51** |
+| V-C 🟠×1 | 桥规格 §6 与 §3.3 **自相矛盾** | ✅ 改规格 |
+| V-C 🟠×1 | 内核宿主行数失真 | ✅ 复算订正（**1 677**） |
+| V-C 🟡×7 | 断言数 / §3.1 措辞 / 链路图 / 索引 / 3 处 U+FFFD / 2 处数字 | ✅ 逐条订正 |
+
+### 三、前端：门禁里的两条判别力缺口（V-B）
+
+| 编号 | 发现 | 处置 |
+| --- | --- | --- |
+| 🟠-1 | 「装载工程后探针流被强制重订」**根本没被守**——`loadProjectIntoKernel` 是私有函数，门禁碰不到它。删掉第 3 步 → 前端门禁 **152/152 全绿** | ✅ 导出该函数 + 补 2 条用例。**判别力**：删掉第 3 步 → **2 条变红**（此前 0 条） |
+| 🟡-2 | 共享单例 + 异步 bootstrap = 用例之间的**竞态**——`app.js` **导入即启动**，它异步调的 `waveform.reset()` 会落进任意两个用例之间，把上一个用例的通道清掉 | ✅ 自启动加开关（`__RVSIM_NO_BOOTSTRAP__`），门禁侧关掉。**判据是探针**（连跑 N 遍通道数恒为 1），不是「用例变红」 |
+
+⚠️ 第二条的判据特别值得记：**原缺陷是偶发的**，表现为「有时红有时绿」——
+所以「用例全绿」**不能**作为它的证据。必须用「同一脚本连跑 N 遍」来证。
+
+### 四、门禁与产物
+
+| 门禁 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | ✅ |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
+| `cargo test --workspace --no-fail-fast` | ✅ **512**（契约 lib 12 + kernel lib 436 + 集成 **53** + golden runner 11） |
+| `tools/check-front.sh` | ✅ **152 用例 / 28 suite** |
+| `crates/kernel/tests/d46_probe_pipeline.rs` | ✅ **15 条**端到端 |
+| `tools/wasm-smoke.mjs`（真 wasm 产物） | ✅ **22 项** |
+| `tools/browser-verify.mjs`（真 Chrome） | ✅ 波形视图列出 `GPIO0.OUT` **且带边沿数** |
+| **反向变异自检** | ✅ **20 条中 19 条变红**（唯一变绿 = 已登记的 **D-52** 已知缺口） |
+
+### 五、方法论沉淀（本轮新增）
+
+1. ⚠️ **「用例都在」≠「用得着」**。删掉 M-18 → M-19 的握手，D-46 全部用例照样全绿——
+   因为用例守的是「**边沿出现**」，不是「M-19 真的在用」。
+   **判据要落在被依赖方自己身上**：断言 M-19 的环里有边沿。
+2. ⚠️ **变异必须能编译**。编译错误导致的「红」**不算判别力**——它证明的是「你改坏了」。
+   脚本必须先 `cargo build --tests` 再跑测试。
+3. ⚠️ **修复可能掩盖别的用例的判别力**。V-A-7 的「运行期重试」把「`LoadProject`
+   不重装管道」的变异从 RED 变 GREEN，而缺陷还在。
+   **判据：断言要顺序无关**（「别人先装的 hook 还在」/「新总线上的 hook 数」）。
+4. ⚠️ **备份要按文件备份一次**。同一文件的多次编辑若每次都重新备份，第二份备份
+   就是「已被改过」的文件——还原时会把**变异残留**留在工作区（本轮真踩到了）。
+
+---
 
 ## v0.14.0 变更摘要
 
@@ -58,9 +138,9 @@ GPIO 设置指令（`lui x5, 0x40000` / `addi x6, x0, 1` / `sw x6, 4(x5)`）。
 | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
 | `cargo test --workspace --no-fail-fast` | ✅ **502**（契约 lib 12 + kernel lib 431 + 集成 **48** + golden runner 11） |
 | `tools/check-front.sh` | ✅ **152 用例 / 28 suite**（v0.13.1 = 141 / 25） |
-| `crates/kernel/tests/d46_probe_pipeline.rs` | ✅ **10 条**端到端 |
+| `crates/kernel/tests/d46_probe_pipeline.rs` | ✅ **11 条**端到端 |
 | `front/tests/waveform.test.mjs` | ✅ **9 条** |
-| `tools/wasm-smoke.mjs`（真 wasm 产物） | ✅ **22 项**（+4 项探针流断言） |
+| `tools/wasm-smoke.mjs`（真 wasm 产物） | ✅ **22 项**（+5 项探针流断言） |
 | `tools/browser-verify.mjs`（真 Chrome） | ✅ 波形视图列出 `GPIO0.OUT` **且带边沿数** |
 | `tools/golden-run.sh --keep-going` | ✅ **42/42**（本轮零改动对拍路径） |
 

@@ -165,15 +165,24 @@ riscv_sim/
 > - ⚠️ **台账新增** **D-47**（帧 `seq` 双序列空间）· **D-48**（`E_TRX-04` 同码多义）· **D-49**（`E_PROTO-*` 不在契约 `ErrorFamily` 族里）
 >
 > **v0.14 D-46 探针管道判据**（波形视图不再是空的）：
-> - `cargo test --workspace --no-fail-fast` **502 全绿**（契约 lib 12 + kernel lib 431 + 集成 **48** + golden runner 11）
-> - `crates/kernel/tests/d46_probe_pipeline.rs`（**10 条**：通道列表 / 真实边沿 / 边沿带**真实时间戳** / `LoadProject` 后管道仍在 / **观察点 hook 与探针 hook 共存** / 两份 demo 固件防漂移）
+> - `cargo test --workspace --no-fail-fast` **512 全绿**（契约 lib 12 + kernel lib 436 + 集成 **53** + golden runner 11）
+> - `crates/kernel/tests/d46_probe_pipeline.rs`（**15 条**：通道列表 / 真实边沿 / 边沿带**真实时间戳** / `LoadProject` 后管道仍在 / **观察点 hook 与探针 hook 共存** / **不经 `LoadProject` 也能产生边沿** / 两份 demo 固件防漂移 / **M-19 的环里真的有边沿** / **单事件边沿数有上限** / **M-18 的边沿存储有上限** / **`LoadProject` 后新总线上的 hook 装齐了**）
 > - `front/tests/waveform.test.mjs`（**9 条**：真内核通道 id `GPIO0.OUT` 进得了视图状态 / 寄存器流不进波形视图 / 边沿**累加** / 强制重订 `sim.waveform`）
-> - `tools/check-front.sh` **152 用例 / 28 suite**
-> - `tools/wasm-smoke.mjs`——在 Node 里驱动**真** wasm 产物，**+4 项探针流断言**（通道列表 / 真实边沿 / 边沿值 / 边沿时间戳 ≠ 0）
+> - `tools/check-front.sh` **154 用例 / 29 suite**（v0.14.1 = 152 / 28）
+> - `tools/wasm-smoke.mjs`——在 Node 里驱动**真** wasm 产物，**+5 项探针流断言**（通道列表 / 刚订阅时无边沿 / 真实边沿 / 边沿值 / 边沿时间戳 ≠ 0）
 > - `tools/browser-verify.mjs`——**真 Chrome** 复验波形视图：**断言通道名 `GPIO0.OUT` + 边沿数**，不只是「非空」
 > - ⚠️ **demo 固件真的驱动 GPIO**（0x14..0x1c：`lui x5, 0x40000` / `addi x6, x0, 1` / `sw x6, 4(x5)`）——否则管道通了也没有边沿可推，视图还是空的
 > - ⚠️ **前端过滤判别式是「不是 `cpu.` 开头的寄存器流」，不是「是 `probe.` 前缀」**：真内核的通道 id 是 `"{外设 id}.{信号名}"`（`GPIO0.OUT`），写成只认 `probe.` 会把真通道**全部过滤掉**（第 1 阶段那版就是这么写的）
 > - ⚠️ **总线 hook 是追加式的**：M-14 `add_hook`（新）+ `set_hook`（保留「替换全部」语义）。观察点 hook 与探针 hook 必须**共存**——单槽会互相顶掉
+>
+> **v0.14.1 D-46 检视轮判据**（发布源有上限 + M-19 不再是死代码 + 前端门禁不再有判别力缺口）：
+> - **反向变异自检 22 条，20 条变红**（2 条「预期不红」= 已登记的 **D-52** 与「竞态偶发、判据是探针」）——脚本先 `cargo build --tests` 再跑测试，**编译错误导致的「红」不算判别力**
+> - ⚠️ **两层上限各管一段**：M-18 `EDGE_STORE_CAP = 8192` / 通道（**内存**层，drop-oldest + 计数）+ 宿主 `MAX_WAVEFORM_EDGES_PER_EVENT = 4096` / 事件（**事件**层，保留最新 + 计数）
+> - ⚠️ **「用例都在」≠「用得着」**：删掉 M-18 → M-19 的 `set_edge_sink` 握手，曾让 D-46 全部用例**照样全绿**（M-19 是**死代码**）。现在有用例直接断言 **M-19 的环里有边沿**
+> - ⚠️ **修复可能掩盖别的用例的判别力**：V-A-7 的「运行期重试」曾把「`LoadProject` 不重装管道」的变异从 RED 变 GREEN。判别式必须是**顺序无关**的（断言「别人先装的 hook 还在」/「新总线上的 hook 数」）
+> - ⚠️ **外设 `tick` 报错不许牵连别人**：一个外设报错，其余外设**照样 tick**（时钟同步不能被别人拖停），已收的写**一条不丢**
+> - ⚠️ **前端门禁曾有两条判别力缺口**（V-B）：①「装载工程后探针流被强制重订」**根本没被守**（`loadProjectIntoKernel` 是私有函数，删掉重订 → 门禁 152/152 全绿）；② `app.js` **导入即启动**，它异步调的 `waveform.reset()` 会落进**任意两个用例之间**（共享 M-03 单例）——判据是**探针**（连跑 N 遍通道数恒为 1），不是「用例变红」
+> - ⚠️ **判别式要顺序无关**：「探针 hook 后装」时观察点 hook 改回 `set_hook` **无害**；「运行期重试」会掩盖「`LoadProject` 不重装管道」——判别式必须落在「**新总线上的 hook 数**」上
 
 ## Code style
 
