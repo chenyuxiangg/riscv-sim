@@ -394,6 +394,23 @@ fn hex_rejects_image_exceeding_segment_budget() {
     );
 }
 
+#[test]
+fn hex_ignores_zero_length_data_records() {
+    // A data record with a zero payload contributes no bytes. It must
+    // not become a zero-length segment: M-14 would map a phantom RAM
+    // region the firmware never contained.
+    let text = format!(
+        "{}{}{}",
+        hex_line(0x0000, 0x00, &[]),
+        hex_line(0x0000, 0x00, &[0xAA, 0xBB]),
+        hex_line(0x0000, 0x01, &[]),
+    );
+    let li = DefaultLoader.load(text.as_bytes(), Kind::Hex).expect("hex");
+    assert_eq!(li.segments.len(), 1);
+    assert_eq!(li.segments[0].0, 0x0000);
+    assert_eq!(li.segments[0].1, vec![0xAA, 0xBB]);
+}
+
 // ---------------------------------------------------------------------------
 // Loader trait dispatch + detect_kind helper
 // ---------------------------------------------------------------------------

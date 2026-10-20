@@ -328,6 +328,13 @@ fn finalise(
 /// `(base, data)` row when the previous run ends exactly at `base`
 /// (06-4).
 fn append_or_merge(buf: &mut Vec<(u32, Vec<u8>)>, base: u32, bytes: &[u8]) {
+    // A data record with zero payload bytes contributes nothing. Emitting
+    // a zero-length row would hand M-14 a phantom region that maps a
+    // byte of RAM the firmware never contained (and can collide with a
+    // real region as E_BUS-03).
+    if bytes.is_empty() {
+        return;
+    }
     if let Some((last_base, last_data)) = buf.last_mut() {
         if *last_base == base {
             // Same exact base — last-wins overwrite (data len capped).
