@@ -96,15 +96,15 @@ riscv_sim/
 | M-09 | 单步引擎 | `crates/kernel/src/m09_step/` | stub |
 | M-10 | 寄存器内存服务 | `front/services/m10_registermemory.js` | ✅ v0.11 实现（订阅寄存器/内存快照）；v0.11.1 补断线重连后重订阅 |
 | M-11 | 符号表/DWARF/反汇编/trace 导出 | `crates/kernel/src/m11_symbol/` | stub |
-| M-12 | 事件驱动仿真引擎 | `crates/kernel/src/m12_engine/` | ✅ v0.11 加固（快照还原 now_ps+事件队列、推进不空转、seq 不撞号）；v0.11.2 增契约快照 DTO 转换层（`snapshot_dto` / `restore_dto`）；⚠️ **至今无独立模块级 review**（台账 D-30） |
+| M-12 | 事件驱动仿真引擎 | `crates/kernel/src/m12_engine/` | ✅ v0.11 加固（快照还原 now_ps+事件队列、推进不空转、seq 不撞号）；v0.11.2 增契约快照 DTO 转换层（`snapshot_dto` / `restore_dto`，**先校验后应用**）+ `Engine::reset()`；⚠️ **至今无独立模块级 review**（台账 D-30） |
 | M-13 | RISC-V ISS（RV32IMC） | `crates/kernel/src/m13_iss/` | ✅ v0.11 **RV32I 全集 41 条** + 模块级 review；v0.11.1 检视轮修 SYSTEM funct3 阻断级缺陷；M/C 扩展待做 |
 | M-14 | 总线与内存映射 | `crates/kernel/src/m14_bus/` | ✅ v0.4 完成 + v0.7.2 补完；v0.11 接线 PR |
 | M-15 | 外设模型层 | `crates/kernel/src/m15_peripheral/` | ✅ v0.7 三外设 + v0.11 接线 PR |
 | M-16 | 中断控制器 | `crates/kernel/src/m16_interrupt/` | stub |
-| M-17 | ExecutionBackend 执行后端 | `crates/kernel/src/m17_backend/` | stub（含 `SelfIssBackend`） |
+| M-17 | ExecutionBackend 执行后端 | `crates/kernel/src/m17_backend/` | stub（含 `SelfIssBackend`）；v0.11.2 接线 `snapshot_full` / `restore_full`（两端对称地大声失败 `E_SNAP-03`），删掉写而不读的死字段 `state`，`reset()` 接 `Engine::reset()` |
 | M-18 | 探针 | `crates/kernel/src/m18_probe/` | ✅ v0.8 完整 `ProbeRegistry` + v0.9 `EdgeSink` + v0.11 接线 PR；v0.11.1 修总线 hook 的 RefCell 重入 panic |
 | M-19 | 波形管道 | `crates/kernel/src/m19_waveform/` | ✅ v0.9 完整 `WaveformPipeline`：边沿编码 + 每通道环 + ≤20ms 批量推送 + CSV/VCD 分块导出 |
-| M-20 | 快照与确定性事件流记录 | `crates/kernel/src/m20_snapshot/` | stub（含 `SnapshotManager`） |
+| M-20 | 快照与确定性事件流记录 | `crates/kernel/src/m20_snapshot/` | stub（含 `SnapshotManager`）；⚠️ 其 LLD §2.1.1 的 `Snapshot{cpMeta, m13State, m14Map, m15Periph}` 与契约 DTO **尚未对齐**，`SnapshotRecord` 仍吃 partial `SimState` 且无 serde derive（台账 **D-37**） |
 | M-21 | 日志系统 | `crates/kernel/src/m21_logging/` | stub（含 `LogBuffer`） |
 | M-22 | 健康管理 HMS | `crates/kernel/src/m22_hms/` | stub（含 `Hms`） |
 | M-23 | 数据存储与持久化 DataStore | `crates/kernel/src/m23_datastore/` | stub（含 `DataStore` trait） |
@@ -113,7 +113,7 @@ riscv_sim/
 > - `m12_engine::tests::engine_advances_time`（事件队列 + 时间推进）
 > - `m13_iss::tests::addi_executes`（RV32I ADDI 解释执行，x1=42）
 >
-> **v0.11 起新增判据**（`cargo test --workspace` 392 全绿 = 契约 lib 8 + kernel lib 354 + 集成 30）：
+> **v0.11 起新增判据**（`cargo test --workspace` **406** 全绿 = 契约 lib 12 + kernel lib 356 + 集成 38）：
 > - `m13_iss::tests_rv32i::*`（RV32I 41 条指令 + 黄金编码 + 边界 + CSR 形态 SYSTEM 陷阱 + 步进/回绕/子字存储）
 > - `m12_engine::tests::*`（snapshot→restore→继续推进的确定性）
 > - `m06_elf::tests_malformed::*`（畸形输入表驱动 + fuzz，均不得 panic）
@@ -124,8 +124,13 @@ riscv_sim/
 > - `m06_elf::tests::*`（IHEX 嗅探结构判据：raw 二进制首字节 `0x3A` 不再误判；4 GiB 总线边界）
 >
 > **v0.11.2 快照 DTO 判据**（契约新增可序列化 DTO，D-24 根因闭环）：
-> - `crates/contract/src/snapshot.rs::tests::*`（DTO 的 JSON 往返 + `validate()` 四类拒绝）
-> - `crates/kernel/tests/m12_m17_snapshot_dto.rs`（partial 路径的发散 vs full 路径的不发散 + JSON 落盘往返 + M-17 接线 + 契约默认实现）
+> - `crates/contract/src/snapshot.rs::tests::*`（DTO 的 JSON **精确形状** + `validate()` 六类拒绝）
+> - `crates/kernel/tests/m12_m17_snapshot_dto.rs`（**15 条**：partial 路径的发散 vs full 路径的不发散 + 畸形快照拒绝 + 被拒后引擎原样不动 + JSON 落盘往返 + M-17 接线 + 契约默认实现）
+> - ⚠️ **口径限定**：该 DTO 只覆盖 **M-12/M-17 段（引擎）**，**不含**外设（M-15）/ 中断控制器（M-16）/ 内存映射——落盘完整会话仍需 M-20/M-23 按各自 LLD §2.1.1 组装（台账 **D-36 / D-37**）
+>
+> **v0.11.2 收口轮判据**（分支合 main 前 3 路独立检视的闭环，commit `3893626`）：
+> - 8 项**闭环变异自检全部变红**（口径：`cargo test --workspace --no-fail-fast`——默认 fail-fast 会截断红测条数）
+> - 台账合计行 **172 / 143 / 29**（新增「收口轮新增」行 37 / 34 / 3）· 检视产物 `docs/reviews/REVIEW_ROUND_2026-10-20_CONTRACT_DTO.md`
 
 ## Code style
 

@@ -11,6 +11,8 @@
 
 **契约新增可序列化 DTO**（用户决策）——D-24 的根因闭环，确定性快照**首次可以落盘**。
 
+> ⚠️ **口径限定（收口轮 3 路检视后）**：该 DTO 只覆盖 **M-12/M-17 段（引擎）**——外设（M-15）/ 中断控制器（M-16）/ 内存映射**不在**其中。**落盘完整会话仍需 M-20/M-23 按各自 LLD §2.1.1 组装**（台账 **D-36 / D-37**）。「首次可以落盘」成立于**引擎级**，不成立于「整个会话」。
+
 ### D-24 的根因：不是「契约没空间」，是两头堵死
 
 | | 装得下事件队列？ | 可序列化？ | 结果 |
@@ -20,19 +22,20 @@
 
 两头各差一环，M-20 / M-23 的持久化就被卡死。**本轮补上第三块拼图**：契约层的可序列化镜像。
 
-### 处置（commit `3016de0`）
+### 处置（commit `3016de0` / `560226c` / `3893626`）
 
-- **契约层新增** `crates/contract/src/snapshot.rs`：`EngineSnapshotDto` / `QueuedEventDto` / `SchedEventDto`，全部可序列化；`validate()` 检查队列规范序（`at_ps` 升序、同刻 `seq` 升序）、`seq` 唯一、`next_seq` 不撞号
-- **`ExecutionBackend` 增** `snapshot_full` / `restore_full`，采用本仓库既有的 **additive 默认实现模式**（M-15 review #2）：不支持完整快照的后端 `snapshot_full` 返 `None`，`restore_full` **大声报错** `E_SNAP-03` 而非静默跳过——静默跳过会让调用方误以为自己续上了确定性状态
-- **M-12** 新增 `snapshot.rs`：`EngineSnapshot ↔ EngineSnapshotDto` 双向转换 + `Engine::snapshot_dto` / `restore_dto`
-- **M-17** `SelfIssBackend` 接线 `snapshot_full` / `restore_full`
-- **访问器**：`Engine::bus()` / `Engine::intc()`（只读）、`SelfIssBackend::engine()` / `engine_mut()`
+- **契约层新增** `crates/contract/src/snapshot.rs`：`EngineSnapshotDto` / `QueuedEventDto` / `SchedEventDto`，全部可序列化；`validate()` 检查队列规范序（`at_ps` 升序、同刻 `seq` 升序）、`seq` 唯一、`next_seq` 不撞号、**插入序镜像与 `next_seq` 一致**、**内层 `SimState` 版本受支持**
+- **`ExecutionBackend` 增** `snapshot_full` / `restore_full`，采用本仓库既有的 **additive 默认实现模式**（M-15 review #2）。⚠️ **收口轮改为两端对称地大声失败** `E_SNAP-03`——原设计 `snapshot_full` 返 `None`，而调用方最自然的写法 `if let Some(dto) = b.snapshot_full()? { b.restore_full(&dto)?; }` 的 `None` 分支会**静默跳过整条还原**，正是 D-24 描述的失败模式
+- **M-12** 新增 `snapshot.rs`：`EngineSnapshot ↔ EngineSnapshotDto` 双向转换 + `Engine::snapshot_dto` / `restore_dto`（**先校验后应用**——畸形快照被拒且引擎原样不动）
+- **M-17** `SelfIssBackend` 接线 `snapshot_full` / `restore_full`；删掉**写而不读**的死字段 `state`；`reset()` 改为真正重置引擎（M-12 新增 `Engine::reset()`，**保留 ticker**——ticker 是接线不是状态）
+- **访问器**：`Engine::intc()`（只读）、`SelfIssBackend::engine()` / `engine_mut()`（`Engine::bus()` 收口轮删除——全仓零使用）
+- **LLD 同步**：M-17 §9.1.1 端口表补两行；M-20 / M-23 §2.1.1 写明「契约 DTO 只覆盖 M-12/M-17 段，落盘格式以 M-20/M-23 的 `Snapshot` 为准」（AGENTS.md 要求「涉及 ADR、模块边界需先更新设计文档」）
 
 **公开 API 只增不减**：未改动任何既有类型、字段或方法签名。partial 的 `snapshot` / `restore` 保持原样，并继续如实标注为「非确定性」。
 
 ### 证据
 
-- `cargo test --workspace` 375 → **392**（契约 lib 8 + kernel lib 354 + 集成 30）
+- `cargo test --workspace` 375 → **392** → **406**（契约 lib 12 + kernel lib 356 + 集成 38）
 - **5 项变异自检全部变红**（改回缺陷形态必须让用例红）：
 
 | 变异 | 变红用例数 |
@@ -44,14 +47,63 @@
 | M-5 `validate()` 去掉 `seq` 查重 | 1 |
 
 - D-24 的原始复现（`schedule A; snapshot; schedule B; restore; run`）现在有**两条**用例分别钉住 partial 路径的发散与 full 路径的不发散
+- **收口轮 8 项闭环变异自检全部变红**（`--no-fail-fast` 口径）：
+
+| 变异 | 变红用例 |
+| --- | --- |
+| M-A `restore_full` 去掉校验（V-B H-1，原 0 red） | 4 条畸形快照拒绝用例 |
+| M-B 还原丢 `instruction_budget`（原 0 red） | `engine_level_round_trip_preserves_every_snapshot_field` |
+| M-C DTO→Engine 丢 `pending_writes`（原 0 red） | `pending_writes_survive_the_dto_round_trip` |
+| M-D 还原忽略 `next_seq`（原 0 red） | `engine_level_round_trip_preserves_every_snapshot_field` |
+| M-E 事件变体改名 `Commit`→`CommitWrite`（V-A m05b，原 0 red） | `snapshot_dto_json_shape_is_pinned_exactly` |
+| M-F 规范序检查丢掉 `seq` 平局裁决（V-A m02，原 0 red） | `validate_rejects_a_queue_with_a_descending_seq_at_the_same_time` |
+| M-G `validate` 去掉插入序镜像检查（V-A 🟠-2，原无检查） | `restore_full_rejects_an_insertion_counter_mismatch` 等 2 条 |
+| M-H `validate` 去掉内层 `SimState` 版本检查（V-A 🟠-2，原无检查） | `validate_rejects_an_unsupported_state_schema_version` |
+
+> ⚠️ **变异计数的口径**：一律用 `cargo test --workspace --no-fail-fast`。默认 `cargo test` 是 **fail-fast**——前一个 test target 失败会中止后续 target，红测条数会被系统性截断（收口轮自检实测：同一变异 fail-fast 下 5 条、`--no-fail-fast` 下 9 条）。上表「M-1 ~ M-5」的条数是**原提交口径**，独立检视复算为 4 / 6 / 1 / 2 / 1（`--no-fail-fast`）。
 
 ### 进度影响
 
-- **测试覆盖**：`cargo test --workspace` 375 → **392**（契约 lib 8 + kernel lib 354 + 集成 30）
-- **代码规模**：契约层 1 163 → **1 544** 行（测 0 → 8）· M-12 1 060 → **1 292** 行（测 18 → 20）· stub 组 591 → **633** 行（M-17 +41）· 新增集成测试文件 `crates/kernel/tests/m12_m17_snapshot_dto.rs`（7 条）
-- **台账**：D-24 闭环，合计闭环 109 → **110**
+- **测试覆盖**：`cargo test --workspace` 375 → **392** → **406**（契约 lib 12 + kernel lib 356 + 集成 38）
+- **代码规模**：契约层 1 163 → **1 851** 行（测 0 → 12）· M-12 1 060 → **1 373** 行（测 18 → 22）· stub 组 591 → **645** 行（M-17 +51）· 集成测试文件 `crates/kernel/tests/m12_m17_snapshot_dto.rs`（7 → **15** 条）
+- **台账**：D-24 闭环；收口轮再登记 **D-36 / D-37**（高危）、**D-38**（中危）、**D-39 / D-40**（低危）；合计 135 / 109 / 26 → **172 / 143 / 29**
 
-`cargo test --workspace` = **392 passed / 0 failed**（契约 lib 8 + kernel lib 354 + 集成 30）；`cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo fmt --all -- --check` 通过；**前端门禁 119 passed / 0 failed / 21 suite**（本轮零前端改动）。
+`cargo test --workspace` = **406 passed / 0 failed**（契约 lib 12 + kernel lib 356 + 集成 38）；`cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo fmt --all -- --check` 通过；**前端门禁 119 passed / 0 failed / 21 suite**（本轮零前端改动）。
+
+---
+
+## v0.11.2 收口轮：先检视、后合 main
+
+**分支合 main 前先做独立检视**（AGENTS.md 工作循环）。本轮代码由协调者自己写，更需要独立会话检视。
+
+### 3 路独立检视（互不可见，各自独立跑门禁 + 变异）
+
+| 检视 | 范围 | 判定 |
+| --- | --- | --- |
+| **V-A** | 契约层 | **FAIL** |
+| **V-B** | 内核接线 + 测试有效性 | **FAIL** |
+| **V-C** | 跨模块 + 文档一致性 | **FAIL** |
+
+共查出 **37 项**（去重后）：**0 阻断 + 5 高危 + 32 中低危**。**34 项闭环 / 3 项留账**（D-38 / D-39 / D-40），另有 2 条**已闭环但带残留工作量**的条目 → **D-36 / D-37**。
+
+完整证据（含 3 张变异测试表、逐条闭环对照表、数字核对表）见 `docs/reviews/REVIEW_ROUND_2026-10-20_CONTRACT_DTO.md`。
+
+### 高危闭环要点
+
+1. **契约 doc 过度承诺**——「完整 / 逐位还原 / 确定性往返」，而外设与中断控制器状态根本不在 DTO 里（与上一轮 F-1 同一类错误）→ 措辞收窄 + 登记 **D-36**
+2. **落盘加载路径不做校验**——契约明文承诺「畸形快照必须被拒绝」，唯一还原入口却不调 `validate()`，且**加校验后 0 条用例变红** → `restore_full` / `restore_dto` 改为**先校验后应用**
+3. **DTO 与 M-20/M-23 已冻结的 LLD 快照结构冲突**、M-20/M-23 完全未接线 → 三份 LLD 同步 + 登记 **D-37**（含 LLD 总纲 vs 详细设计的矛盾，**待协调者裁决**）
+4. **M-17 端口表未同步**（AGENTS.md 要求「涉及 ADR、模块边界需先更新设计文档」）→ M-17 LLD §9.1.1 补两行
+
+### 覆盖漏洞 8 处全部补上
+
+独立检视实测出「改回去 0 条用例变红」的盲区：还原丢 `instruction_budget` / 丢 `pending_writes` / 忽略 `next_seq` / 落盘 JSON 形状无测试钉住 / 规范序 `seq` 平局无覆盖 / 插入序镜像不一致无检查 / 内层 `SimState` 版本无检查 / `restore_full` 不校验。逐个补用例后 **8 项变异自检全部变红**。
+
+### 方法论沉淀
+
+- **「加法方向」的变异才测得出盲区**：V-B 的 C3（给 `restore_full` **加** `validate()` → 0 red）与 V-A 的 m05b（把变体改名 → 392/392 全绿）都是加正确性看是否有人守；常规「删功能看是否变红」测不出来。
+- **fail-fast 会系统性截断红测条数**，所有变异计数必须显式写明口径。
+- **多名检视员独立撞上同一条缺陷**（V-B H-1 ≡ V-C H-2）是该缺陷足够显眼的强信号。
 
 ---
 
