@@ -557,3 +557,165 @@ fn empty_raw_image_is_rejected() {
     assert_eq!(err.scenario, 1, "E_LDR-01 malformed");
     assert!(err.message.contains("empty"), "unexpected: {}", err.message);
 }
+
+// ---------------------------------------------------------------------------
+// D-10 (M-06 side): the image budget must bound what the loader
+// materialises. A tiny file can declare a huge image — the `.bss` tail
+// of a PT_LOAD is not stored in the file at all.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn elf_rejects_segment_larger_than_the_region_budget() {
+    // An 88-byte ELF whose single PT_LOAD declares a 1 MiB `.bss` tail.
+    let elf = make_minimal_elf(4, 1024 * 1024);
+    let limits = ParseLimits {
+        max_region_bytes: 4096,
+        ..ParseLimits::default()
+    };
+    let err = DefaultLoader
+        .load_with_limits(&elf, Kind::Elf, &limits)
+        .unwrap_err();
+    assert_eq!(err.family, ErrorFamily::Loader);
+    assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+    assert!(
+        err.message.contains("maxRegionBytes"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+#[test]
+fn elf_rejects_image_larger_than_the_total_budget() {
+    // Two PT_LOADs of 4 KiB each — each is within the per-region
+    // budget, but together they exceed the total image budget.
+    let elf = make_two_segment_elf(4096, 4096);
+    let limits = ParseLimits {
+        max_region_bytes: 8192,
+        total_image_bytes: 4096,
+        ..ParseLimits::default()
+    };
+    let err = DefaultLoader
+        .load_with_limits(&elf, Kind::Elf, &limits)
+        .unwrap_err();
+    assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+    assert!(
+        err.message.contains("totalImageBytes"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+/// Build an ELF32 LE RV32 ET_EXEC with exactly two PT_LOAD program
+/// headers, each declaring `memsz` bytes of memory at a distinct
+/// paddr. The program-header table sits right after the ELF header and
+/// the shared `.text` follows it.
+fn make_two_segment_elf(memsz1: u32, memsz2: u32) -> Vec<u8> {
+    let phnum = 2u16;
+    let text_offset = 52 + phnum as usize * 32;
+    let mut bytes = Vec::new();
+    // ----- ELF header (52 bytes) -----
+    bytes.extend_from_slice(&[
+        0x7F, b'E', b'L', b'F', // magic
+        1,    // EI_CLASS = ELFCLASS32
+        1,    // EI_DATA  = ELFDATA2LSB
+        1,    // EI_VERSION = EV_CURRENT
+        0,    // EI_OSABI
+        0, 0, 0, 0, 0, 0, 0, 0, // EI_ABIVERSION + padding
+        2, 0, // e_type = ET_EXEC
+        0xF3, 0x00, // e_machine = EM_RISCV
+        1, 0, 0, 0, // e_version
+        0, 0, 0, 0, // e_entry
+        52, 0, 0, 0, // e_phoff
+        0, 0, 0, 0, // e_shoff
+        0, 0, 0, 0, // e_flags
+        52, 0, // e_ehsize
+        32, 0, // e_phentsize
+        0, 0, // e_phnum (patched below)
+        0, 0, // e_shentsize
+        0, 0, // e_shnum
+        0, 0, // e_shstrndx
+    ]);
+    bytes[44..46].copy_from_slice(&phnum.to_le_bytes());
+
+    // ----- Two program headers -----
+    for (paddr, memsz) in [(0u32, memsz1), (0x1000u32, memsz2)] {
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+        bytes.extend_from_slice(&(text_offset as u32).to_le_bytes()); // p_offset
+        bytes.extend_from_slice(&paddr.to_le_bytes()); // p_vaddr
+        bytes.extend_from_slice(&paddr.to_le_bytes()); // p_paddr
+        bytes.extend_from_slice(&4u32.to_le_bytes()); // p_filesz
+        bytes.extend_from_slice(&memsz.to_le_bytes()); // p_memsz
+        bytes.extend_from_slice(&5u32.to_le_bytes()); // p_flags
+        bytes.extend_from_slice(&4u32.to_le_bytes()); // p_align
+    }
+    assert_eq!(bytes.len(), text_offset);
+
+    // ----- .text (one RV32 ADDI x1, x0, 42) -----
+    bytes.extend_from_slice(&0x02A0_0093u32.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn hex_rejects_image_larger_than_the_total_budget() {
+    let text = format!(
+        "{}{}",
+        hex_line(0x0000, 0x00, &[0xAA; 16]),
+        hex_line(0x0000, 0x01, &[]),
+    );
+    let limits = ParseLimits {
+        total_image_bytes: 8,
+        ..ParseLimits::default()
+    };
+    let err = DefaultLoader
+        .load_with_limits(text.as_bytes(), Kind::Hex, &limits)
+        .unwrap_err();
+    assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+    assert!(
+        err.message.contains("totalImageBytes"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+#[test]
+fn hex_rejects_merged_segment_larger_than_the_region_budget() {
+    // Two adjacent 8-byte records merge into one 16-byte segment. The
+    // per-record check cannot see that, the merged-segment check can.
+    let text = format!(
+        "{}{}{}",
+        hex_line(0x0000, 0x00, &[0xAA; 8]),
+        hex_line(0x0008, 0x00, &[0xBB; 8]),
+        hex_line(0x0000, 0x01, &[]),
+    );
+    let limits = ParseLimits {
+        max_region_bytes: 12,
+        ..ParseLimits::default()
+    };
+    let err = DefaultLoader
+        .load_with_limits(text.as_bytes(), Kind::Hex, &limits)
+        .unwrap_err();
+    assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+    assert!(
+        err.message.contains("maxRegionBytes"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+#[test]
+fn raw_rejects_blob_larger_than_the_region_budget() {
+    let raw = vec![0u8; 64];
+    let limits = ParseLimits {
+        max_region_bytes: 32,
+        ..ParseLimits::default()
+    };
+    let err = DefaultLoader
+        .load_with_limits(&raw, Kind::RawHex, &limits)
+        .unwrap_err();
+    assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+    assert!(
+        err.message.contains("maxRegionBytes"),
+        "unexpected message: {}",
+        err.message
+    );
+}

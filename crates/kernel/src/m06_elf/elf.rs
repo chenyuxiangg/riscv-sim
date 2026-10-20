@@ -209,6 +209,9 @@ pub fn parse(bytes: &[u8], limits: &ParseLimits) -> Result<LoadImage, PlatformEr
 
     let max_paddr: u64 = crate::m14_bus::BUS_SIZE; // 4 GiB.
     let mut segments: Vec<(u32, Vec<u8>)> = Vec::new();
+    // Bytes the loader would materialise for this image (file parts +
+    // zero-filled `.bss` gaps). Bounded by `total_image_bytes` (D-10).
+    let mut total_bytes: u64 = 0;
     for i in 0..phnum {
         let base = phoff + i * ELF32_PHDR_SIZE;
         let phdr = &bytes[base..base + ELF32_PHDR_SIZE];
@@ -239,6 +242,34 @@ pub fn parse(bytes: &[u8], limits: &ParseLimits) -> Result<LoadImage, PlatformEr
         }
 
         let memsz = p_memsz as u64;
+
+        // D-10: bound the memory this segment makes the loader
+        // materialise. `p_memsz` is the whole footprint (file bytes plus
+        // the zero-filled `.bss` tail), and the tail is *not* stored in
+        // the file — so without this check an 84-byte ELF can declare a
+        // gigabyte of RAM and have the loader allocate it.
+        if memsz > limits.max_region_bytes {
+            return Err(PlatformError::new(
+                FAMILY,
+                2,
+                format!(
+                    "PT_LOAD memsz {} exceeds parseLimit.maxRegionBytes {} (paddr=0x{:08x})",
+                    p_memsz, limits.max_region_bytes, p_paddr
+                ),
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(memsz);
+        if total_bytes > limits.total_image_bytes {
+            return Err(PlatformError::new(
+                FAMILY,
+                2,
+                format!(
+                    "image size {} exceeds parseLimit.totalImageBytes {}",
+                    total_bytes, limits.total_image_bytes
+                ),
+            ));
+        }
+
         let paddr_end = (p_paddr as u64).checked_add(memsz).ok_or_else(|| {
             PlatformError::new(
                 FAMILY,
@@ -291,6 +322,23 @@ pub fn parse(bytes: &[u8], limits: &ParseLimits) -> Result<LoadImage, PlatformEr
             }
             segments.push((gap_base, vec![0u8; gap_size as usize]));
         }
+    }
+
+    // The budget must hold for the segments we actually hand to M-14,
+    // not just for the program-header count: every PT_LOAD with a
+    // `.bss` tail produces two output segments, so a file with
+    // `segment_count` program headers can yield up to twice as many
+    // load segments (D-22 — the limit has to bind the real output).
+    if segments.len() > limits.segment_count as usize {
+        return Err(PlatformError::new(
+            FAMILY,
+            2,
+            format!(
+                "segment count {} exceeds parseLimit.segmentCount {}",
+                segments.len(),
+                limits.segment_count
+            ),
+        ));
     }
 
     let load_image = LoadImage {

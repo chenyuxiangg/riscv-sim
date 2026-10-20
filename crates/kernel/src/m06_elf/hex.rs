@@ -54,6 +54,9 @@ pub fn parse(text: &str, limits: &ParseLimits) -> Result<LoadImage, PlatformErro
     // (PROGRESS.md M-06 06-4).
     let mut ext_high: u32 = 0;
     let mut buf: Vec<(u32, Vec<u8>)> = Vec::new();
+    // Bytes the loader materialises for this image; bounded by
+    // `total_image_bytes` (D-10).
+    let mut image_bytes: u64 = 0;
     let mut line_no: usize = 0;
     for line in text.lines() {
         line_no += 1;
@@ -149,6 +152,31 @@ pub fn parse(text: &str, limits: &ParseLimits) -> Result<LoadImage, PlatformErro
                         FAMILY,
                         3,
                         format!("data at 0x{:08x}..0x{:08x} overruns 4 GiB bus", base, end),
+                    ));
+                }
+                // D-10: bound the memory this record makes the loader
+                // materialise. A HEX text file is small but can describe
+                // a huge image, so the *image* budget — not the text
+                // size — is what protects the allocator.
+                if u64::from(bytes_len) > limits.max_region_bytes {
+                    return Err(PlatformError::new(
+                        FAMILY,
+                        2,
+                        format!(
+                            "HEX record length {} exceeds parseLimit.maxRegionBytes {}",
+                            bytes_len, limits.max_region_bytes
+                        ),
+                    ));
+                }
+                image_bytes = image_bytes.saturating_add(u64::from(bytes_len));
+                if image_bytes > limits.total_image_bytes {
+                    return Err(PlatformError::new(
+                        FAMILY,
+                        2,
+                        format!(
+                            "image size {} exceeds parseLimit.totalImageBytes {}",
+                            image_bytes, limits.total_image_bytes
+                        ),
                     ));
                 }
                 append_or_merge(&mut buf, base, payload);
@@ -272,6 +300,23 @@ fn finalise(
                 limits.segment_count
             ),
         ));
+    }
+    // D-10: a merged segment can be larger than any single record (the
+    // merge folds adjacent runs together), so the per-record check is
+    // not enough to bound the region the loader hands to M-14.
+    for (base, data) in &final_segments {
+        if data.len() as u64 > limits.max_region_bytes {
+            return Err(PlatformError::new(
+                FAMILY,
+                2,
+                format!(
+                    "merged segment at 0x{:08x} is {} bytes, exceeds parseLimit.maxRegionBytes {}",
+                    base,
+                    data.len(),
+                    limits.max_region_bytes
+                ),
+            ));
+        }
     }
     Ok(LoadImage {
         segments: final_segments,

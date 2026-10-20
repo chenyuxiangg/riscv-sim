@@ -97,6 +97,13 @@ impl Default for Kind {
 /// parser, `raw_size` by the raw parser, `segment_count` by both the ELF
 /// and the HEX parser. `symbol_count` / `line_entry_count` bound the
 /// DWARF tables and are enforced by M-11, which owns that parsing.
+///
+/// `total_image_bytes` and `max_region_bytes` bound the **memory the
+/// loader materialises**, not the size of the input file. They exist
+/// because a tiny file can declare a huge image: a `.bss` gap is not
+/// stored in the file, so an 84-byte ELF can declare a gigabyte of RAM
+/// and have the loader allocate it (D-10, cross-module with M-14's
+/// `prepare_bytes`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseLimits {
     /// Maximum ELF file size in bytes (default 16 MiB).
@@ -111,6 +118,12 @@ pub struct ParseLimits {
     pub symbol_count: u32,
     /// Maximum number of DWARF line-table entries (default 2e5).
     pub line_entry_count: u32,
+    /// Maximum number of bytes the loader may materialise in total
+    /// across every segment of one image (default 64 MiB).
+    pub total_image_bytes: u64,
+    /// Maximum number of bytes a single segment may declare (default
+    /// 16 MiB).
+    pub max_region_bytes: u64,
 }
 
 impl Default for ParseLimits {
@@ -122,6 +135,8 @@ impl Default for ParseLimits {
             segment_count: 64,
             symbol_count: 100_000,
             line_entry_count: 200_000,
+            total_image_bytes: 64 * 1024 * 1024,
+            max_region_bytes: 16 * 1024 * 1024,
         }
     }
 }
@@ -336,6 +351,30 @@ pub fn parse_raw(
             FAMILY,
             1,
             "raw image is empty (nothing to load)",
+        ));
+    }
+    // D-10: a raw blob becomes exactly one region, so the image budget
+    // applies to it directly.
+    if bytes.len() as u64 > limits.max_region_bytes {
+        return Err(PlatformError::new(
+            FAMILY,
+            2,
+            format!(
+                "raw size {} exceeds parseLimit.maxRegionBytes {}",
+                bytes.len(),
+                limits.max_region_bytes
+            ),
+        ));
+    }
+    if bytes.len() as u64 > limits.total_image_bytes {
+        return Err(PlatformError::new(
+            FAMILY,
+            2,
+            format!(
+                "image size {} exceeds parseLimit.totalImageBytes {}",
+                bytes.len(),
+                limits.total_image_bytes
+            ),
         ));
     }
     let end = (base as u64)
