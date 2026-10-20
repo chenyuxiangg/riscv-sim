@@ -20,7 +20,7 @@ use riscv_sim_contract::model::{SimState, WriteSize};
 use crate::m14_bus::Bus;
 
 use super::decoder::Decoder;
-use super::executor::{read_gpr, StepOutcome, TrapCause};
+use super::executor::{read_gpr, MisalignedPolicy, StepOutcome, TrapCause};
 use super::Iss;
 
 // ---------------------------------------------------------------------------
@@ -35,6 +35,10 @@ const AUIPC: u8 = 0b001_0111;
 const OP: u8 = 0b011_0011;
 /// Opcode of the LUI group.
 const LUI: u8 = 0b011_0111;
+/// Opcode of the LOAD group.
+const LOAD: u8 = 0b000_0011;
+/// Opcode of the STORE group.
+const STORE: u8 = 0b010_0011;
 
 /// Encode an I-type instruction (12-bit signed immediate).
 fn enc_i(imm: i32, rs1: u8, funct3: u8, rd: u8, opcode: u8) -> u32 {
@@ -69,6 +73,22 @@ fn enc_shift(funct7: u8, shamt: u8, rs1: u8, funct3: u8, rd: u8, opcode: u8) -> 
 /// Encode a U-type instruction (20-bit immediate in bits 31:12).
 fn enc_u(imm20: u32, rd: u8, opcode: u8) -> u32 {
     ((imm20 & 0xF_FFFF) << 12) | ((rd as u32) << 7) | (opcode as u32)
+}
+
+/// Encode an S-type instruction (12-bit signed immediate, split fields).
+fn enc_s(imm: i32, rs2: u8, rs1: u8, funct3: u8, opcode: u8) -> u32 {
+    let imm = imm as u32;
+    ((imm & 0x1F) << 7)
+        | (((imm >> 5) & 0x7F) << 25)
+        | ((rs2 as u32) << 20)
+        | ((rs1 as u32) << 15)
+        | ((funct3 as u32) << 12)
+        | (opcode as u32)
+}
+
+/// Little-endian byte image of a word sequence.
+fn image(words: &[u32]) -> Vec<u8> {
+    words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -187,13 +207,10 @@ struct BusHarness {
 }
 
 impl BusHarness {
-    fn new(program: &[u32]) -> Self {
-        let mut bytes = Vec::new();
-        for word in program {
-            bytes.extend_from_slice(&word.to_le_bytes());
-        }
+    /// Map a 4 KiB RAM region at address 0 holding `bytes`.
+    fn new(bytes: &[u8]) -> Self {
         let mut bus = Bus::new();
-        bus.map_ram(0, 0x1_0000, &bytes).expect("map ram");
+        bus.map_ram(0, 0x1000, bytes).expect("map ram");
         Self {
             bus,
             iss: Iss::default(),
@@ -235,7 +252,7 @@ fn addi_reading_x1_cannot_write_x0() {
 #[test]
 fn bus_path_also_keeps_x0_zero() {
     let word = enc_i(42, 0, 0b000, 0, OP_IMM);
-    let mut h = BusHarness::new(&[word]);
+    let mut h = BusHarness::new(&image(&[word]));
     let mut state = SimState::default();
     h.step(&mut state).expect("step via bus");
     assert_eq!(state.gpr[0], 0, "x0 must stay hardwired to zero");
@@ -277,7 +294,7 @@ fn illegal_instruction_reports_the_same_outcome_on_both_routes() {
     let mut state = SimState::default();
     let closure_outcome = h.step_one_at(&mut state, 0, word);
 
-    let mut bh = BusHarness::new(&[word]);
+    let mut bh = BusHarness::new(&image(&[word]));
     let mut bus_state = SimState::default();
     let bus_outcome = bh.step(&mut bus_state).expect("bus route must not error");
 
@@ -644,4 +661,256 @@ fn xor_or_and_operate_on_two_registers() {
     state.gpr[2] = 0x0F0F_0F0F;
     h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b111, 3, OP));
     assert_eq!(state.gpr[3], 0x0000_0000, "complementary masks and to zero");
+}
+
+// ---------------------------------------------------------------------------
+// RV32I — LOAD / STORE
+// ---------------------------------------------------------------------------
+
+/// The load fields land in the right places.
+#[test]
+fn decode_load_fills_the_fields() {
+    let d = Decoder::default().decode(enc_i(8, 1, 0b010, 2, LOAD), 0);
+    assert_eq!(d.opcode, LOAD);
+    assert_eq!(d.funct3, 0b010);
+    assert_eq!(d.rd, 2);
+    assert_eq!(d.rs1, 1);
+    assert_eq!(d.imm, 8);
+}
+
+/// The store immediate is spliced from the two imm fields
+/// (imm[11:5] = inst[31:25], imm[4:0] = inst[11:7]).
+#[test]
+fn decode_store_splices_the_immediate() {
+    let d = Decoder::default().decode(enc_s(-8, 2, 1, 0b010, STORE), 0);
+    assert_eq!(d.opcode, STORE);
+    assert_eq!(d.funct3, 0b010);
+    assert_eq!(d.rs1, 1);
+    assert_eq!(d.rs2, 2);
+    assert_eq!(d.imm, -8);
+
+    // The largest positive immediate exercises the imm[11:5] field.
+    let big = Decoder::default().decode(enc_s(2047, 2, 1, 0b010, STORE), 0);
+    assert_eq!(big.imm, 2047);
+
+    // The most negative immediate exercises the sign bit of imm[11:5].
+    let min = Decoder::default().decode(enc_s(-2048, 2, 1, 0b010, STORE), 0);
+    assert_eq!(min.imm, -2048);
+}
+
+/// LW reads a word and writes it to the destination register.
+#[test]
+fn lw_reads_a_word_from_memory() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0xDEAD_BEEF]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    h.step_one_at(&mut state, 0, enc_i(0, 1, 0b010, 2, LOAD));
+    assert_eq!(state.gpr[2], 0xDEAD_BEEF);
+}
+
+/// LB sign-extends the loaded byte.
+#[test]
+fn lb_sign_extends_the_byte() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0xFFFF_FF80]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    h.step_one_at(&mut state, 0, enc_i(0, 1, 0b000, 2, LOAD));
+    assert_eq!(
+        state.gpr[2], 0xFFFF_FF80,
+        "0x80 must sign-extend to 0xFFFF_FF80"
+    );
+}
+
+/// LBU zero-extends the loaded byte.
+#[test]
+fn lbu_zero_extends_the_byte() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0xFFFF_FF80]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    h.step_one_at(&mut state, 0, enc_i(0, 1, 0b100, 2, LOAD));
+    assert_eq!(state.gpr[2], 0x0000_0080);
+}
+
+/// LH sign-extends the loaded halfword.
+#[test]
+fn lh_sign_extends_the_halfword() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0xFFFF_8000]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    h.step_one_at(&mut state, 0, enc_i(0, 1, 0b001, 2, LOAD));
+    assert_eq!(state.gpr[2], 0xFFFF_8000);
+}
+
+/// LHU zero-extends the loaded halfword.
+#[test]
+fn lhu_zero_extends_the_halfword() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0xFFFF_8000]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    h.step_one_at(&mut state, 0, enc_i(0, 1, 0b101, 2, LOAD));
+    assert_eq!(state.gpr[2], 0x0000_8000);
+}
+
+/// SW writes a whole word.
+#[test]
+fn sw_writes_a_word() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    state.gpr[2] = 0xCAFE_BABE;
+    h.step_one_at(&mut state, 0, enc_s(0, 2, 1, 0b010, STORE));
+    assert_eq!(
+        h.ram.borrow().read(0x100, WriteSize::Word).unwrap(),
+        0xCAFE_BABE
+    );
+}
+
+/// SB writes exactly one byte and leaves its neighbours alone.
+#[test]
+fn sb_writes_a_single_byte() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0x1122_3344]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    state.gpr[2] = 0xAABB_CCDD;
+    h.step_one_at(&mut state, 0, enc_s(0, 2, 1, 0b000, STORE));
+    let ram = h.ram.borrow();
+    assert_eq!(ram.read(0x100, WriteSize::Byte).unwrap(), 0xDD);
+    assert_eq!(ram.read(0x101, WriteSize::Byte).unwrap(), 0x33);
+    assert_eq!(ram.read(0x100, WriteSize::Word).unwrap(), 0x1122_33DD);
+}
+
+/// SH writes exactly two bytes.
+#[test]
+fn sh_writes_a_halfword() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0x1122_3344]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    state.gpr[2] = 0xAABB_CCDD;
+    h.step_one_at(&mut state, 0, enc_s(0, 2, 1, 0b001, STORE));
+    let ram = h.ram.borrow();
+    assert_eq!(ram.read(0x100, WriteSize::Half).unwrap(), 0xCCDD);
+    assert_eq!(ram.read(0x100, WriteSize::Word).unwrap(), 0x1122_CCDD);
+}
+
+/// A load into x0 is discarded.
+#[test]
+fn load_into_x0_is_discarded() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0xDEAD_BEEF]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    h.step_one_at(&mut state, 0, enc_i(0, 1, 0b010, 0, LOAD));
+    assert_eq!(state.gpr[0], 0, "a load into x0 must be discarded");
+}
+
+/// A misaligned word access traps.
+#[test]
+fn misaligned_word_access_traps() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 0x101; // not 4-byte aligned
+    let outcome = h.step_one_at(&mut state, 0, enc_i(0, 1, 0b010, 2, LOAD));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::MisalignedAccess
+        }
+    );
+    assert_eq!(
+        state.gpr[2], 0,
+        "a trapped load must not write the register"
+    );
+}
+
+/// A misaligned halfword access traps.
+#[test]
+fn misaligned_halfword_access_traps() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 0x101; // not 2-byte aligned
+    let outcome = h.step_one_at(&mut state, 0, enc_i(0, 1, 0b001, 2, LOAD));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::MisalignedAccess
+        }
+    );
+}
+
+/// A misaligned store traps.
+#[test]
+fn misaligned_store_traps() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0x0000_0000]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x102; // not 4-byte aligned
+    state.gpr[2] = 0xFFFF_FFFF;
+    let outcome = h.step_one_at(&mut state, 0, enc_s(0, 2, 1, 0b010, STORE));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::MisalignedAccess
+        }
+    );
+    assert_eq!(
+        h.ram.borrow().read(0x100, WriteSize::Word).unwrap(),
+        0,
+        "a trapped store must not touch memory"
+    );
+}
+
+/// A byte access is never misaligned.
+#[test]
+fn byte_accesses_are_never_misaligned() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0x0000_0000]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x101; // odd address, but a byte access is aligned
+    state.gpr[2] = 0xAB;
+    let outcome = h.step_one_at(&mut state, 0, enc_s(0, 2, 1, 0b000, STORE));
+    assert!(matches!(outcome, StepOutcome::Advanced));
+    assert_eq!(h.ram.borrow().read(0x101, WriteSize::Byte).unwrap(), 0xAB);
+}
+
+/// The Spike-aligned policy performs the access instead of trapping.
+#[test]
+fn allow_policy_performs_the_misaligned_access() {
+    let mut h = Harness::new();
+    h.iss = h.iss.with_misaligned_policy(MisalignedPolicy::Allow);
+    h.load(0x100, &[0x1122_3344]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x101; // not 4-byte aligned
+    let outcome = h.step_one_at(&mut state, 0, enc_i(0, 1, 0b010, 2, LOAD));
+    assert!(matches!(outcome, StepOutcome::Advanced));
+    assert_eq!(
+        state.gpr[2], 0x0011_2233,
+        "the unaligned word is read as-is"
+    );
+}
+
+/// Loads and stores must go through the M-14 bus — the bus is the
+/// only place that counts accesses and fires the M-18 probe hook
+/// (D-11: a bypassing implementation would silently lose both).
+#[test]
+fn load_and_store_go_through_the_bus() {
+    // lw x2, 0x100(x0) — the data lives at 0x100 in the same region.
+    let program = enc_i(0x100, 0, 0b010, 2, LOAD);
+    let mut bytes = image(&[program]);
+    bytes.resize(0x104, 0);
+    bytes[0x100..0x104].copy_from_slice(&0xCAFE_BABE_u32.to_le_bytes());
+
+    let mut h = BusHarness::new(&bytes);
+    let mut state = SimState::default();
+    h.step(&mut state).expect("step via bus");
+
+    assert_eq!(state.gpr[2], 0xCAFE_BABE, "the load must reach memory");
+    let stats = h.bus.stats();
+    assert_eq!(stats.reads, 2, "the bus must see the fetch and the load");
 }

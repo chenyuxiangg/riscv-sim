@@ -19,9 +19,9 @@ pub mod decoder;
 pub mod executor;
 
 pub use decoder::{Decoded, Decoder};
-pub use executor::{classify, Op};
 pub use executor::{
-    execute_one, read_gpr, write_gpr, Executor, MemoryAccess, StepOutcome, TrapCause,
+    classify, execute_one, read_gpr, write_gpr, Executor, MemoryAccess, MisalignedPolicy, Op,
+    StepOutcome, TrapCause,
 };
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
@@ -58,6 +58,7 @@ pub struct Iss {
     #[allow(dead_code)]
     cfg: IssConfig,
     decoder: Decoder,
+    misaligned: MisalignedPolicy,
 }
 
 impl Iss {
@@ -66,7 +67,18 @@ impl Iss {
         Self {
             cfg,
             decoder: Decoder::default(),
+            misaligned: MisalignedPolicy::default(),
         }
+    }
+
+    /// Select the policy for misaligned data accesses.
+    ///
+    /// Defaults to [`MisalignedPolicy::Trap`]; LLD §3.6(2) asks for the
+    /// Spike-aligned behaviour ([`MisalignedPolicy::Allow`]) instead,
+    /// which the Spike golden wave will need.
+    pub fn with_misaligned_policy(mut self, policy: MisalignedPolicy) -> Self {
+        self.misaligned = policy;
+        self
     }
 
     /// Run a single instruction and return the outcome. Memory and CSR
@@ -90,7 +102,7 @@ impl Iss {
             )
         })?;
         let decoded = self.decoder.decode(raw, state.pc);
-        let mut exec = Executor::new(read_mem, write_mem);
+        let mut exec = Executor::new(read_mem, write_mem).with_misaligned_policy(self.misaligned);
         exec.execute(state, &decoded)
     }
     /// Run a single instruction with all memory traffic routed through
@@ -118,7 +130,7 @@ impl Iss {
         })?;
         let decoded = self.decoder.decode(raw, state.pc);
         let mut mem = BusMemory::new(bus);
-        execute_one(&mut mem, state, &decoded)
+        execute_one(&mut mem, state, &decoded, self.misaligned)
     }
 }
 

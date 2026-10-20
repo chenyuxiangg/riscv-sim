@@ -116,6 +116,7 @@ where
 {
     read_mem: F,
     write_mem: G,
+    misaligned: MisalignedPolicy,
 }
 
 impl<F, G> Executor<F, G>
@@ -128,7 +129,14 @@ where
         Self {
             read_mem,
             write_mem,
+            misaligned: MisalignedPolicy::default(),
         }
+    }
+
+    /// Select the policy for misaligned data accesses.
+    pub fn with_misaligned_policy(mut self, policy: MisalignedPolicy) -> Self {
+        self.misaligned = policy;
+        self
     }
 
     /// Execute one decoded instruction, mutating the [`SimState`].
@@ -137,7 +145,8 @@ where
         state: &mut SimState,
         d: &Decoded,
     ) -> Result<StepOutcome, PlatformError> {
-        execute_one(self, state, d)
+        let misaligned = self.misaligned;
+        execute_one(self, state, d, misaligned)
     }
 }
 
@@ -153,6 +162,22 @@ where
     fn write(&mut self, addr: u32, size: WriteSize, value: u32) -> Result<(), PlatformError> {
         (self.write_mem)(addr, size, value)
     }
+}
+
+/// Policy for misaligned data accesses.
+///
+/// The RISC-V spec lets an implementation either raise an
+/// address-misaligned exception or perform the access. LLD §3.6(2)
+/// asks for the Spike-aligned behaviour (perform it), while the
+/// platform contract for this wave asks for a trap — the policy is
+/// therefore configurable, and defaults to trapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MisalignedPolicy {
+    /// Raise a misaligned-access trap.
+    #[default]
+    Trap,
+    /// Perform the access anyway.
+    Allow,
 }
 
 /// Instruction identity after two-level decode.
@@ -205,6 +230,22 @@ pub enum Op {
     Or,
     /// AND — and.
     And,
+    /// LB — load byte, sign-extended.
+    Lb,
+    /// LH — load halfword, sign-extended.
+    Lh,
+    /// LW — load word.
+    Lw,
+    /// LBU — load byte, zero-extended.
+    Lbu,
+    /// LHU — load halfword, zero-extended.
+    Lhu,
+    /// SB — store byte.
+    Sb,
+    /// SH — store halfword.
+    Sh,
+    /// SW — store word.
+    Sw,
 }
 
 /// Second-level decode: map a decode key onto a concrete operation.
@@ -248,7 +289,71 @@ pub fn classify(d: &Decoded) -> Option<Op> {
             (0b111, 0b000_0000) => Some(Op::And),
             _ => None,
         },
+        // LOAD.
+        0b000_0011 => match d.funct3 {
+            0b000 => Some(Op::Lb),
+            0b001 => Some(Op::Lh),
+            0b010 => Some(Op::Lw),
+            0b100 => Some(Op::Lbu),
+            0b101 => Some(Op::Lhu),
+            _ => None,
+        },
+        // STORE.
+        0b010_0011 => match d.funct3 {
+            0b000 => Some(Op::Sb),
+            0b001 => Some(Op::Sh),
+            0b010 => Some(Op::Sw),
+            _ => None,
+        },
         _ => None,
+    }
+}
+
+/// Access width of a load instruction.
+fn load_width(op: Op) -> WriteSize {
+    match op {
+        Op::Lb | Op::Lbu => WriteSize::Byte,
+        Op::Lh | Op::Lhu => WriteSize::Half,
+        _ => WriteSize::Word,
+    }
+}
+
+/// Value a load writes into the destination register: sign- or
+/// zero-extended to 32 bits.
+fn extend_load(op: Op, raw: u32) -> u32 {
+    match op {
+        Op::Lb => alu::sext8(raw),
+        Op::Lbu => alu::zext8(raw),
+        Op::Lh => alu::sext16(raw),
+        Op::Lhu => alu::zext16(raw),
+        _ => raw,
+    }
+}
+
+/// Access width of a store instruction.
+fn store_width(op: Op) -> WriteSize {
+    match op {
+        Op::Sb => WriteSize::Byte,
+        Op::Sh => WriteSize::Half,
+        _ => WriteSize::Word,
+    }
+}
+
+/// Value a store writes: the low bytes of the source register.
+fn truncate_store(op: Op, value: u32) -> u32 {
+    match op {
+        Op::Sb => alu::zext8(value),
+        Op::Sh => alu::zext16(value),
+        _ => value,
+    }
+}
+
+/// Whether an address satisfies the natural alignment of the access.
+fn is_aligned(addr: u32, size: WriteSize) -> bool {
+    match size {
+        WriteSize::Byte => true,
+        WriteSize::Half => addr & 0x1 == 0,
+        WriteSize::Word => addr & 0x3 == 0,
     }
 }
 
@@ -259,14 +364,14 @@ fn sequential(d: &Decoded) -> u32 {
 
 /// The single execution path shared by every dispatch route.
 ///
-/// `_mem` is the memory port: it is threaded through here so that both
-/// dispatch routes are structurally identical, and so that the first
-/// instructions needing it (LOAD / STORE) land on one code path rather
-/// than two (D-11).
+/// `mem` is the memory port: it is threaded through here so that both
+/// dispatch routes are structurally identical, and so that the load /
+/// store instructions land on one code path rather than two (D-11).
 pub fn execute_one<M: MemoryAccess>(
-    _mem: &mut M,
+    mem: &mut M,
     state: &mut SimState,
     d: &Decoded,
+    misaligned: MisalignedPolicy,
 ) -> Result<StepOutcome, PlatformError> {
     if d.len != LEN_32 {
         // A compressed (RV32C) encoding: a legal instruction the ISS
@@ -404,6 +509,30 @@ pub fn execute_one<M: MemoryAccess>(
             let lhs = read_gpr(state, d.rs1);
             let rhs = read_gpr(state, d.rs2);
             write_gpr(state, d.rd, alu::and(lhs, rhs));
+            sequential(d)
+        }
+        Op::Lb | Op::Lbu | Op::Lh | Op::Lhu | Op::Lw => {
+            let addr = read_gpr(state, d.rs1).wrapping_add(d.imm as u32);
+            let size = load_width(op);
+            if misaligned == MisalignedPolicy::Trap && !is_aligned(addr, size) {
+                return Ok(StepOutcome::Trapped {
+                    cause: TrapCause::MisalignedAccess,
+                });
+            }
+            let raw = mem.read(addr, size)?;
+            write_gpr(state, d.rd, extend_load(op, raw));
+            sequential(d)
+        }
+        Op::Sb | Op::Sh | Op::Sw => {
+            let addr = read_gpr(state, d.rs1).wrapping_add(d.imm as u32);
+            let size = store_width(op);
+            if misaligned == MisalignedPolicy::Trap && !is_aligned(addr, size) {
+                return Ok(StepOutcome::Trapped {
+                    cause: TrapCause::MisalignedAccess,
+                });
+            }
+            let value = truncate_store(op, read_gpr(state, d.rs2));
+            mem.write(addr, size, value)?;
             sequential(d)
         }
     };

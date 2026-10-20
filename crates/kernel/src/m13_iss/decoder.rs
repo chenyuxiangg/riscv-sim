@@ -99,29 +99,31 @@ fn immediate(opcode: u8, funct3: u8, raw: u32) -> i32 {
         // AUIPC adds it to the PC.
         0b011_0111 | 0b001_0111 => (raw & 0xFFFF_F000) as i32,
         // S-type: imm[11:5] = inst[31:25], imm[4:0] = inst[11:7].
+        // The immediate is 12 bits wide, sign bit in imm[11].
         0b010_0011 => {
             let imm = (((raw >> 25) & 0x7F) << 5) | ((raw >> 7) & 0x1F);
-            sign_extend(imm, 11)
+            sign_extend(imm, 12)
         }
         // B-type: imm[12] = inst[31], imm[10:5] = inst[30:25],
         // imm[4:1] = inst[11:8], imm[11] = inst[7]. The immediate is
-        // already scaled by two.
+        // 13 bits wide, sign bit in imm[12], and already scaled by two.
         0b110_0011 => {
             let imm = (((raw >> 31) & 0x1) << 12)
                 | (((raw >> 25) & 0x3F) << 5)
                 | (((raw >> 8) & 0xF) << 1)
                 | (((raw >> 7) & 0x1) << 11);
-            sign_extend(imm, 12)
+            sign_extend(imm, 13)
         }
         // J-type: imm[20] = inst[31], imm[10:1] = inst[30:21],
         // imm[11] = inst[20], imm[19:12] = inst[19:12]. The immediate
-        // is already scaled by two.
+        // is 21 bits wide, sign bit in imm[20], and already scaled by
+        // two.
         0b110_1111 => {
             let imm = (((raw >> 31) & 0x1) << 20)
                 | (((raw >> 21) & 0x3FF) << 1)
                 | (((raw >> 20) & 0x1) << 11)
                 | (((raw >> 12) & 0xFF) << 12);
-            sign_extend(imm, 20)
+            sign_extend(imm, 21)
         }
         // OP-IMM shifts carry a 5-bit shift amount, not an immediate.
         0b001_0011 if funct3 == 0b001 || funct3 == 0b101 => ((raw >> 20) & 0x1F) as i32,
