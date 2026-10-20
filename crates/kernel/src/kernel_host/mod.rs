@@ -72,7 +72,6 @@ use riscv_sim_contract::protocol::{
 use riscv_sim_contract::SCHEMA_VERSION;
 
 use crate::m06_elf::{DefaultLoader, Kind as LoadKind, ParseLimits};
-use crate::m12_engine::DEFAULT_INSTRUCTION_BUDGET;
 use crate::m15_peripheral::gpio::{GpioBank, GPIO_WINDOW};
 use crate::m17_backend::SelfIssBackend;
 use crate::m18_probe::{ChannelDef, ChannelKind, ProbeRegistry, SampleCfg, CH_GPIO0};
@@ -266,6 +265,11 @@ impl KernelHost {
         // cap). If it ever does, the failure is reported by the next
         // `LoadProject` — which re-maps the memory anyway.
         let _ = host.map_default_memory();
+        // The time-driven link (D-07) also needs to be connected here:
+        // whoever hangs the peripheral onto the bus is also the one who
+        // registers it with the engine — otherwise `PeripheralTick` is
+        // always a no-op and the peripheral's clock never advances.
+        host.install_peripheral_ticker();
         host.install_probe_pipeline();
         // 外设的探针回调**也要在这里装**——`KernelHost::new()` 造出来的
         // 宿主已经有一张默认内存图（里面有一个 GPIO），它上面的写必须
@@ -411,9 +415,20 @@ impl KernelHost {
     fn rebuild_platform(&mut self) -> Result<(), PlatformError> {
         self.backend.reset_memory_map();
         self.map_default_memory()?;
+        // 时间驱动链路（D-07）也要重建——新外设是新实例，旧的 tick
+        // 事件指着旧实例。
+        self.install_peripheral_ticker();
         self.install_probe_pipeline();
         self.attach_peripheral_probes();
         Ok(())
+    }
+
+    /// 装上外设 tick 接缝，并把总线上的外设登记到引擎里（D-07）。
+    ///
+    /// **只有宿主知道它往总线上挂了哪些外设**——这正是这一步必须住在
+    /// 宿主、而不是后端里的原因：后端看不见宿主映射的外设。
+    fn install_peripheral_ticker(&mut self) {
+        self.backend.install_peripheral_ticker();
     }
 
     /// 取一批波形边沿，推成契约事件（D-46）。
@@ -761,10 +776,20 @@ impl KernelHost {
         // 调用不会冲突。
         self.attach_peripheral_probes();
 
-        let budget = steps.unwrap_or(DEFAULT_INSTRUCTION_BUDGET);
         let mut events = Vec::new();
-        match self.backend.step_n(budget) {
-            Ok(_) => {}
+        // `Continue` → **时间驱动**：走 M-12 的唯一主循环（量子化执行 +
+        // 到期事件派发 + 外设时钟推进）。一轮的边界是引擎自己的指令预算
+        // （`DEFAULT_INSTRUCTION_BUDGET`），跑满就让出给宿主。
+        // `StepN` → **指令驱动**：恰好 n 条（调试器语义）。
+        //
+        // 两条路径共用同一个执行器（`m17_backend::IssExecutor`），所以
+        // 「按指令跑」与「按时间跑」不会各自长出一套 ISS 逻辑（D-07）。
+        let run = match steps {
+            Some(n) => self.backend.step_n(n).map(|_| ()),
+            None => self.backend.continue_until_event(),
+        };
+        match run {
+            Ok(()) => {}
             Err(err) => {
                 // The error comes **first**: it carries the command's
                 // `reqId`, so M-05 rejects the command instead of letting
@@ -914,6 +939,16 @@ impl KernelHost {
     /// 当前虚拟时间（皮秒）。
     pub fn now_ps(&self) -> u64 {
         self.backend.engine().now_ps()
+    }
+
+    /// 事件队列里**待处理**的事件数（D-07）。
+    ///
+    /// 时间驱动链路的心跳：跑过一轮之后，队列里应当留着一件待派发的
+    /// 外设 tick 事件（下一个量子边界的那一次）。指令驱动的路径
+    /// （`StepN`）不排期它 —— 所以这个数字就是「走的是哪条路」的可
+    /// 观测证据。
+    pub fn pending_event_count(&self) -> usize {
+        self.backend.engine().pending_event_count()
     }
 
     /// 当前 PC。

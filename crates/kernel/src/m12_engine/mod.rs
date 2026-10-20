@@ -20,25 +20,60 @@
 //! 可序列化镜像 [`EngineSnapshotDto`]，让确定性的快照**落得了盘**
 //! （D-24 根因修复）。
 //!
-//! TODO(MVP): 把调度器接到 [`crate::m13_iss`] 的译码器、外设 tick 回调
-//! 与 M-20 快照落盘路径上；当前的调度内核（时间推进 / 事件队列 / 稳定
-//! 排序 / 快照还原）已经可用。
+//! TODO(MVP): 把调度器接到 M-20 快照落盘路径上；调度内核（时间推进 /
+//! 事件队列 / 稳定排序 / 快照还原）与**唯一主循环**（[`Engine::run_until`]，
+//! D-07）已经可用。
+//!
+//! ## 指令驱动与时间驱动如何交替（D-07）
+//!
+//! - **时间驱动是骨架**：事件队列 + 量子边界（1 µs）决定「什么时候
+//!   派发事件、什么时候推进外设时钟」；
+//! - **指令驱动是量子内的填充物**：一个量子内最多执行
+//!   [`QUANTUM_INSTR_QUOTA`] 条指令；
+//! - 二者在**指令边界**交汇：每条指令之后检查一次「有没有事件到期」，
+//!   到期就抢占（安全检查点 = 量子边界 ∨ 指令边界 ∨ 事件边界）。
+//!
+//! 指令本身的执行通过 [`InstructionExecutor`] 接缝注入 —— M-12 **不**
+//! 依赖 M-13，依赖方向是单向的（M-17 实现该接缝）。
 
 use std::fmt;
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, SimState};
 use riscv_sim_contract::port::{EventBus, InterruptSink};
-use riscv_sim_contract::protocol::EventPayload;
+use riscv_sim_contract::protocol::{EventPayload, HaltReason};
 
 mod queue;
 mod snapshot;
 
 pub use queue::{EventQueue, QueuedEvent};
 
-/// Default time quantum, in picoseconds. Configurable per-project (M-12
-/// §4.12.2).
-pub const TIME_QUANTUM_PS: u64 = 1_000; // 1 µs
+/// 时间量子（皮秒）—— **1 µs**（LLD §2.1 `quantum`，默认 1 µs，可配置）。
+///
+/// ⚠️ **口径订正（D-07）**：1 µs = **1 000 000 ps**。历史实现写的是
+/// `1_000`（1 ns），注释却写「1 µs」—— 差了 1000 倍，而且与「每量子
+/// 1000 条指令」的自洽换算对不上。现在这三个常量构成一个闭合的换算：
+///
+/// ```text
+/// TIME_QUANTUM_PS = QUANTUM_INSTR_QUOTA × INSTRUCTION_COST_PS
+///                 = 1 000 × 1 000 ps = 1 000 000 ps = 1 µs
+/// ```
+///
+/// 量子长短的**可观测后果**：量子边沿是「外设时钟同步」与「事件派发」的
+/// 节奏；量子从 1 ns 变成 1 µs 之后，跨一个量子要 1000 条指令，而不是 1 条。
+pub const TIME_QUANTUM_PS: u64 = 1_000_000;
+
+/// 每量子的指令配额（LLD §2.1 `quantumInstrQuota`，默认 **1000 条/量子**）。
+///
+/// 量子 ↔ 指令的映射（评审 12-1）：一个量子内最多执行这么多条指令，
+/// 之后必须回到安全检查点（派发到期事件 / 采样 IRQ / 让出宿主）。
+pub const QUANTUM_INSTR_QUOTA: u32 = 1_000;
+
+/// 单条指令的虚拟时间成本（皮秒）= 量子 / 每量子指令配额 = **1 ns**。
+///
+/// 与 M-17 的 `INSTRUCTION_COST_PS` 同值 —— 后者现在转调本常量，
+/// 避免「同一个换算在两处各写一遍」。
+pub const INSTRUCTION_COST_PS: u64 = TIME_QUANTUM_PS / QUANTUM_INSTR_QUOTA as u64;
 
 /// Default guest-instruction budget before the engine yields to the host.
 /// Implemented as the watchdog pre-check (M-12 §5.2 + LLD §4.12.6).
@@ -109,6 +144,73 @@ impl fmt::Debug for PeripheralTicker {
     }
 }
 
+/// 一条 guest 指令的执行结果（M-12 视角）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecOutcome {
+    /// 指令正常退休（PC 已前进）。
+    Advanced,
+    /// 需要停下：断点 / 陷阱 / 观察点 / 宿主暂停。
+    ///
+    /// 停止原因用契约的 [`HaltReason`] 表达 —— 那是跨模块唯一的「为什么停」
+    /// 词汇表（契约冻结，不能另起一套）。
+    Stop {
+        /// 为什么停。
+        reason: HaltReason,
+        /// 这条指令是否**已经被执行**。
+        ///
+        /// 断点命中 = **没有**执行（命中在取指之前，状态零副作用）；
+        /// 陷阱 = 执行了（被取指、被译码、被触发）。两条路径的「已执行
+        /// 条数」因此不同，主循环要照实计数。
+        consumed: bool,
+    },
+}
+
+/// 「执行一条 guest 指令」的端口（M-12 ↔ M-13 的接缝）。
+///
+/// **为什么不是契约端口**：契约层冻结，新增端口要等 `schema_version = 2`
+/// （台账 D-32）。而 LLD §2.3 明确要求主循环里要有 `iss_step(s)` 这一步，
+/// 所以 M-12 必须能「驱动一条指令」—— 但 M-12 不该知道 M-13 的
+/// `StepOutcome`（那是 M-13 的内部词汇表）。
+///
+/// 于是 M-12 在**自己内部**定义这个 trait（与 [`PeripheralTicker`] 同一
+/// 套路：模块内部的回调式接缝），由 M-17 实现：
+///
+/// ```text
+/// M-12（调度器）──executes──▶ M-17（后端）──drives──▶ M-13（ISS）
+/// ```
+///
+/// 依赖方向单向：M-17 依赖 M-12 与 M-13，M-12 **不依赖** M-13。
+/// 这样 M-12 的单元测试可以拿一个假的执行器喂它，完全不需要 ISS。
+pub trait InstructionExecutor {
+    /// 执行**一条** guest 指令。
+    ///
+    /// 实现方负责：断点判定（取指之前）、执行本身、观察点判定（访存发生
+    /// 在指令内部，只能在指令返回后判），以及**推进虚拟时钟**。
+    fn step(&mut self, state: &mut SimState) -> Result<ExecOutcome, PlatformError>;
+}
+
+/// 唯一主循环的停止原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunReason {
+    /// 到达目标虚拟时间（LLD `runUntil(t)` 的 `TIME_REACHED`）。
+    TimeReached,
+    /// 本轮指令预算耗尽 —— 让出给宿主（安全检查点）。
+    BudgetExhausted,
+    /// 被断点 / 陷阱 / 观察点 / 宿主暂停打断。
+    Stopped(HaltReason),
+}
+
+/// 一轮主循环的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunOutcome {
+    /// 本轮实际执行的指令条数。
+    pub instructions: u64,
+    /// 本轮消耗的量子数。
+    pub quanta: u64,
+    /// 为什么停。
+    pub reason: RunReason,
+}
+
 /// 引擎的**完整**快照 —— 足以把引擎逐位还原。
 ///
 /// [`SimState`] 里装不下事件队列（契约冻结，不能扩字段），所以队列、
@@ -155,6 +257,15 @@ pub struct Engine<B: EventBus, I: InterruptSink> {
     advance_steps: u64,
     /// Optional peripheral-tick seam (D-07).
     ticker: Option<PeripheralTicker>,
+    /// **已登记的外设**基址（D-07）。
+    ///
+    /// 登记表回答的是「时钟推进要推进谁」：M-12 自己不知道总线上挂了
+    /// 哪些外设（那是 M-14/M-15 的事），但它必须能在**指令边界**逐个
+    /// 推进它们的外设时钟——否则探针边沿的时间戳恒为 0（D-46）。
+    ///
+    /// 登记是**装配期**的一次性动作（谁把外设挂到总线上，谁来登记），
+    /// 不是运行期的动态增删。
+    peripherals: Vec<u32>,
 }
 
 impl<B: EventBus, I: InterruptSink> Engine<B, I> {
@@ -169,6 +280,7 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
             next_seq: 0,
             advance_steps: 0,
             ticker: None,
+            peripherals: Vec::new(),
         }
     }
 
@@ -180,8 +292,9 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
     /// the engine ends up in the state [`Engine::new`] would have
     /// produced.
     ///
-    /// The injected dependencies (event bus, interrupt sink) and the
-    /// peripheral-tick seam ([`Engine::set_peripheral_ticker`]) are
+    /// The injected dependencies (event bus, interrupt sink), the
+    /// peripheral-tick seam ([`Engine::set_peripheral_ticker`]) and the
+    /// peripheral registry ([`Engine::register_peripheral`]) are
     /// **wiring**, not simulation state: they are deliberately left in
     /// place, because silently dropping the ticker would stop peripherals
     /// from ever being ticked again.
@@ -289,6 +402,93 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
         self.ticker = Some(ticker);
     }
 
+    /// 登记一个**可被时钟推进**的外设（D-07）。
+    ///
+    /// 登记回答的是「推进谁」：M-12 不知道总线上挂了哪些外设，但外设的
+    /// 时钟必须由虚拟时间推进，否则探针边沿的时间戳恒为 0（D-46）。
+    ///
+    /// **幂等**：同一个基址登记两次只算一次。
+    pub fn register_peripheral(&mut self, paddr: u32) {
+        if !self.peripherals.contains(&paddr) {
+            self.peripherals.push(paddr);
+        }
+    }
+
+    /// 已登记的外设基址（只读）。
+    pub fn registered_peripherals(&self) -> &[u32] {
+        &self.peripherals
+    }
+
+    /// 清空外设登记表（D-07）。
+    ///
+    /// 换工程 = 换内存图 = 换外设集合（M-17 的 `reset_memory_map`）。
+    /// 旧的外设基址如果留在表里，主循环会**徒劳地**去 tick 一个已经不
+    /// 存在的地址 —— 每次都是一次空转，而且登记表会越积越多。
+    pub fn clear_peripherals(&mut self) {
+        self.peripherals.clear();
+    }
+
+    /// 下一个量子边界的虚拟时间。
+    ///
+    /// 量子边界 = 时间的整数倍 [`TIME_QUANTUM_PS`]。当前时刻本身若已经
+    /// 落在边界上，返回的是**下一个**边界（边界是「刚过」，不是「就在」）。
+    pub fn next_quantum_boundary(&self) -> u64 {
+        let now = self.now_ps();
+        (now / TIME_QUANTUM_PS + 1) * TIME_QUANTUM_PS
+    }
+
+    /// **推进所有已登记外设的时钟**（D-07）——外设时钟的唯一同步点。
+    ///
+    /// 每个外设的 [`Peripheral::tick`] 都会被调用一次，返回的写并入
+    /// [`SimState::pending_writes`]（与 [`SchedEvent::Commit`] 同一条提交
+    /// 路径）。
+    ///
+    /// 粒度由调用方决定：生产代码在**每条指令之前**调用它（精细时间戳，
+    /// D-46），主循环在**量子边界**也会通过
+    /// [`SchedEvent::PeripheralTick`] 触发一次（契约口径「每量子一次」）。
+    /// 两次调用的时间戳是单调的——量子边界必然**不早于**最后一次指令
+    /// 边界的同步。
+    ///
+    /// 返回本次推进的外设个数。
+    ///
+    /// [`Peripheral::tick`]: riscv_sim_contract::port::Peripheral::tick
+    pub fn tick_peripherals(&mut self, now_ps: u64) -> Result<usize, PlatformError> {
+        let Self {
+            ticker,
+            peripherals,
+            state,
+            ..
+        } = self;
+        let Some(ticker) = ticker.as_mut() else {
+            return Ok(0);
+        };
+        let mut ticked = 0usize;
+        let mut first_error: Option<PlatformError> = None;
+        for &paddr in peripherals.iter() {
+            match ticker.tick(paddr, now_ps) {
+                Ok(writes) => {
+                    state.pending_writes.extend(writes);
+                    ticked += 1;
+                }
+                Err(err) => {
+                    // 报错的外设**不许牵连别人**：其余外设**照样 tick**
+                    // ——时钟同步不能被别人拖停（D-46 · V-A-4）。记下
+                    // **第一个**错误，继续把剩下的走完，最后再抛。
+                    //
+                    // 已经收下的写**一条不丢**（它们已经在
+                    // `state.pending_writes` 里）。
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+            }
+        }
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+        Ok(ticked)
+    }
+
     /// Schedule an event for the given virtual time.
     pub fn schedule(&mut self, at_ps: u64, event: SchedEvent) {
         let _ = self.schedule_event(at_ps, event);
@@ -362,35 +562,28 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
             self.advance_steps = self.advance_steps.wrapping_add(1);
 
             // Dispatch every event that is due at the current time.
-            while let Some(t) = self.queue.peek().map(|e| e.at_ps) {
-                if t > self.now_ps() {
-                    break;
-                }
-                // `peek` said there is one — but `pop` is a separate
-                // call, and a panic here would take the whole WASM
-                // worker down (WASM 里 panic = Worker 崩). Fail loudly
-                // with an error instead (V-A 检视 · ⚪-4)。
-                let evt = self.queue.pop().ok_or_else(|| {
-                    PlatformError::new(ErrorFamily::Engine, 2, "事件队列在 peek 与 pop 之间不一致")
-                })?;
-                self.dispatch(evt.event)?;
-            }
+            //
+            // ⚠️ 这里**不续排**周期性的外设 tick（`dispatch_due_events`
+            // 的返回值被丢弃）：本方法的语义是「把队列排空」，而续排会
+            // 让队列永远不空 → 死循环。续排只发生在唯一主循环
+            // `Engine::run_until` 里（D-07）。
+            self.dispatch_due_events()?;
         }
         Ok(quanta_between(start_ps, self.now_ps()))
     }
 
     fn dispatch(&mut self, event: SchedEvent) -> Result<(), PlatformError> {
         match event {
-            SchedEvent::PeripheralTick { paddr, at_ps } => {
-                // D-07: the peripheral registry lives on the bus side
-                // (M-14 / M-15) and the contract has no port for "find the
-                // peripheral at `paddr` and tick it" yet. The seam below is
-                // the shape we expect it to plug into — a
-                // `PeripheralTicker` callback installed by whoever owns
-                // the bus (see `Engine::set_peripheral_ticker`). Until
-                // then the event is a no-op.
+            SchedEvent::PeripheralTick { paddr, at_ps: _ } => {
+                // D-07：**真正**调用外设 tick 接缝。
+                //
+                // 时间戳用**当前虚拟时钟**而不是事件自带的 `at_ps`：事件
+                // 可能被**迟到**派发（LLD 评审 12-6 的归一化），而外设
+                // 记下的时间必须是它「实际被推进的那一刻」——否则探针
+                // 边沿会带着一个未来的时间戳。
+                let now = self.now_ps();
                 let writes = match self.ticker.as_mut() {
-                    Some(ticker) => ticker.tick(paddr, at_ps)?,
+                    Some(ticker) => ticker.tick(paddr, now)?,
                     None => Vec::new(),
                 };
                 self.state.pending_writes.extend(writes);
@@ -402,6 +595,171 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
                 // skeleton we just stash it on the state.
                 self.state.pending_writes.push(write);
                 Ok(())
+            }
+        }
+    }
+
+    /// 派发**当前时刻已到期**的全部事件。
+    ///
+    /// 返回本次派发的外设 tick 事件（`paddr`, 到期时刻）—— 调用方
+    /// （唯一主循环 [`Engine::run_until`]）据此**续排**下一个周期，
+    /// 从而让「外设时钟」这条时间驱动链路自持。
+    ///
+    /// ⚠️ **续排不在这里做**：`run_until_idle` / `run_steps` 语义是
+    /// 「把队列排空」，如果派发即续排，队列**永远不会空**，这两个方法
+    /// 会死循环。周期性的续排只发生在唯一主循环里。
+    fn dispatch_due_events(&mut self) -> Result<Vec<(u32, u64)>, PlatformError> {
+        let mut reticked = Vec::new();
+        while let Some(t) = self.queue.peek().map(|e| e.at_ps) {
+            if t > self.now_ps() {
+                break;
+            }
+            // `peek` said there is one — but `pop` is a separate
+            // call, and a panic here would take the whole WASM
+            // worker down (WASM 里 panic = Worker 崩). Fail loudly
+            // with an error instead (V-A 检视 · ⚪-4)。
+            let evt = self.queue.pop().ok_or_else(|| {
+                PlatformError::new(ErrorFamily::Engine, 2, "事件队列在 peek 与 pop 之间不一致")
+            })?;
+            if let SchedEvent::PeripheralTick { paddr, .. } = &evt.event {
+                reticked.push((*paddr, evt.at_ps));
+            }
+            self.dispatch(evt.event)?;
+        }
+        Ok(reticked)
+    }
+
+    /// 队列里是否有**此刻已经到期**的事件（事件边界 = 抢占点）。
+    fn has_due_event(&self) -> bool {
+        self.queue.peek().is_some_and(|e| e.at_ps <= self.now_ps())
+    }
+
+    /// **确保**每个已登记的外设都有一件待派发的 tick 事件（D-07）。
+    ///
+    /// 这是时间驱动链路的**自愈**部分：主循环保证每个登记的外设都有一
+    /// 次 tick 在**下一个量子边界**等着，因此事件即使被弄丢（快照恢复
+    /// 之后、外设被换掉之后），外设的时钟也不会永久停摆。
+    fn ensure_peripheral_ticks(&mut self) {
+        let missing: Vec<u32> = self
+            .peripherals
+            .iter()
+            .copied()
+            .filter(|paddr| {
+                !self.queue.iter().any(|e| {
+                    matches!(e.event, SchedEvent::PeripheralTick { paddr: q, .. } if q == *paddr)
+                })
+            })
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let at = self.next_quantum_boundary();
+        for paddr in missing {
+            self.schedule_event(at, SchedEvent::PeripheralTick { paddr, at_ps: at });
+        }
+    }
+
+    /// **唯一主循环**（LLD §3.1 `runUntil`）——量子化混合调度。
+    ///
+    /// 一轮循环：
+    ///
+    /// 1. 派发**到期事件**（外设 tick / 定时器到期 / 提交）；
+    /// 2. 在本量子内执行**至多 [`QUANTUM_INSTR_QUOTA`] 条**指令；
+    /// 3. 每条指令之后检查**事件边界**——有事件到期就立刻回到第 1 步
+    ///    （安全检查点 = 量子边界 ∨ 指令边界 ∨ 事件边界，LLD §2.3）；
+    /// 4. 量子结束回到第 1 步。
+    ///
+    /// 停止条件（任一命中即返回）：
+    ///
+    /// - 虚拟时间到达 `until_ps`（[`RunReason::TimeReached`]）；
+    /// - 本轮指令预算（[`Engine::instruction_budget`]）耗尽
+    ///   （[`RunReason::BudgetExhausted`]）——让出给宿主；
+    /// - 执行器请求停止（断点 / 陷阱 / 观察点 / 暂停，
+    ///   [`RunReason::Stopped`]）。
+    ///
+    /// **指令驱动与时间驱动如何交替**（D-07 的核心问题）：时间驱动是
+    /// **骨架**（事件队列 + 量子边界），指令驱动是量子内的**填充物**。
+    /// 二者在**指令边界**交汇——每执行一条指令就问一次「有没有事件到期」，
+    /// 到期就抢占、派发、继续。没有事件时，guest 一直有指令可执行，
+    /// 时间随指令推进；没有指令时（`wfi` 之类）时间才会被事件推进。
+    ///
+    /// 与 [`Engine::run_until_idle`] 的分工：后者是「把队列排空」的一次性
+    /// 工具（不执行指令、不维持周期），本方法是生产路径。
+    pub fn run_until<E: InstructionExecutor>(
+        &mut self,
+        executor: &mut E,
+        until_ps: u64,
+    ) -> Result<RunOutcome, PlatformError> {
+        let mut instructions = 0u64;
+        let mut quanta = 0u64;
+        let budget = u64::from(self.instruction_budget);
+        loop {
+            if self.now_ps() >= until_ps {
+                return Ok(RunOutcome {
+                    instructions,
+                    quanta,
+                    reason: RunReason::TimeReached,
+                });
+            }
+
+            // (1) 派发到期事件，并把外设 tick **续排**到下一个量子边界
+            //     ——时间驱动链路自持（D-07）。
+            //
+            //     续排之前先「确保」每个登记的外设都有一件 tick 在等着：
+            //     事件被弄丢时（快照恢复、外设被换掉）链路会自愈。
+            self.ensure_peripheral_ticks();
+            let reticked = self.dispatch_due_events()?;
+            for (paddr, at_ps) in reticked {
+                let next = at_ps + TIME_QUANTUM_PS;
+                self.schedule_event(next, SchedEvent::PeripheralTick { paddr, at_ps: next });
+            }
+
+            // (2) 量子内执行指令。
+            let mut done = 0u32;
+            while done < QUANTUM_INSTR_QUOTA {
+                if self.now_ps() >= until_ps {
+                    break;
+                }
+                // 指令预算也要在**指令边界**上查（安全检查点 = 量子边界
+                // ∨ 指令边界 ∨ 事件边界）。只在量子边界查的话，一次
+                // **抢占**会把量子劈成两半，于是这一轮会**超预算**最多
+                // 一个量子——「预算」就不再是预算了。
+                if instructions >= budget {
+                    break;
+                }
+                // 外设时钟同步（**指令边界**）——精细时间戳（D-46）。
+                let now = self.now_ps();
+                self.tick_peripherals(now)?;
+                match executor.step(self.state_mut())? {
+                    ExecOutcome::Advanced => {
+                        instructions += 1;
+                        done += 1;
+                    }
+                    ExecOutcome::Stop { reason, consumed } => {
+                        if consumed {
+                            instructions += 1;
+                        }
+                        return Ok(RunOutcome {
+                            instructions,
+                            quanta,
+                            reason: RunReason::Stopped(reason),
+                        });
+                    }
+                }
+                // 事件边界 = 抢占点：有事件到期就回到 (1)。
+                if self.has_due_event() {
+                    break;
+                }
+            }
+            quanta += 1;
+
+            // (3) 安全检查点：指令预算耗尽 → 让出给宿主。
+            if instructions >= budget {
+                return Ok(RunOutcome {
+                    instructions,
+                    quanta,
+                    reason: RunReason::BudgetExhausted,
+                });
             }
         }
     }
@@ -763,7 +1121,10 @@ mod tests {
         let steps = eng.advance_steps() - before;
 
         assert_eq!(steps, 1, "a far-future event must not burn quanta");
-        assert_eq!(quanta, 1_000_000_000);
+        // 量子是 1 µs（D-07 订正），所以 1e12 ps 跨 1e6 个量子。
+        // ⚠️ 这里**按常量**写期望值，而不是写死数字——量子的口径变了，
+        // 这条用例的**意图**（「远期事件不能烧掉一堆量子」）不受影响。
+        assert_eq!(quanta, 1_000_000_000_000 / TIME_QUANTUM_PS);
         assert_eq!(eng.now_ps(), 1_000_000_000_000);
         assert_eq!(eng.bus.ticks.len(), 1);
     }

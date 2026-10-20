@@ -37,7 +37,7 @@ use riscv_sim_contract::protocol::HaltReason;
 use riscv_sim_contract::snapshot::EngineSnapshotDto;
 
 use crate::m08_breakpoint::{BreakpointTable, WatchpointTable};
-use crate::m12_engine::Engine;
+use crate::m12_engine::{Engine, ExecOutcome, InstructionExecutor, PeripheralTicker, RunReason};
 use crate::m13_iss::{Iss, StepOutcome};
 use crate::m14_bus::{AccessDir, Bus, BusWidth};
 
@@ -45,7 +45,143 @@ use crate::m14_bus::{AccessDir, Bus, BusWidth};
 ///
 /// 第 1 阶段没有真正的流水线模型，每条指令按 **1 ns** 计——与前端的
 /// mock 内核同口径，前端时间轴不需要因为换内核而重标定。
-pub const INSTRUCTION_COST_PS: u64 = 1_000;
+///
+/// ⚠️ **口径统一（D-07）**：值不再是这里独立写死的 `1_000`，而是转调
+/// M-12 的 [`crate::m12_engine::INSTRUCTION_COST_PS`]（= 时间量子 1 µs ÷
+/// 每量子指令配额 1000 条 = 1 ns）。「量子 ↔ 指令」的换算只允许有**一处**
+/// 定义，否则量子与指令成本会各自漂移。
+pub const INSTRUCTION_COST_PS: u64 = crate::m12_engine::INSTRUCTION_COST_PS;
+
+/// 把 `state.pending_writes` 里的写**真正提交**到总线（D-07）。
+///
+/// 提交之后队列被清空 —— 否则同一个写会被提交两次。
+///
+/// **失败的那一条不会被丢掉**：写失败时错误向上抛，队列里剩下的写
+/// （包括失败的那条）原样保留，调用方可以重试或诊断。
+///
+/// 返回成功提交的条数。
+fn commit_pending_writes(state: &mut SimState, bus: &mut Bus) -> Result<usize, PlatformError> {
+    let mut committed = 0usize;
+    while let Some(write) = state.pending_writes.first().cloned() {
+        bus.write(write.paddr, BusWidth::from(write.size), write.value)?;
+        state.pending_writes.remove(0);
+        committed += 1;
+    }
+    Ok(committed)
+}
+
+/// M-17 的指令执行器：把 M-13 的 ISS 接进 M-12 的唯一主循环（D-07）。
+///
+/// 这是 M-12 的 [`InstructionExecutor`] 接缝的**唯一实现**。它借用
+/// 后端手里的 ISS 与总线（不复制、不克隆），因此：
+///
+/// - 依赖方向单向：M-12 不认识 M-13，M-13 不认识 M-12；
+/// - 状态仍然只有**一份**：ISS 推进的就是引擎持有的那份
+///   [`SimState`]，虚拟时钟也在这份状态上。
+///
+/// 一条指令的执行顺序（M-08 LLD §3.2 / M-17 LLD）：
+///
+/// 1. **断点命中检测** —— 挂在**取指之前**，命中时该条指令尚未执行，
+///    状态零副作用；
+/// 2. **执行**（访存经 M-14 总线，钩子照常触发）；
+/// 3. **推进虚拟时钟**（`INSTRUCTION_COST_PS`）；
+/// 4. **提交待写**（`pending_writes` → 总线）；
+/// 5. **观察点命中检测** —— 访存发生在指令**内部**，只能在指令返回后判。
+pub struct IssExecutor<'a> {
+    /// M-13 ISS。
+    iss: &'a mut Iss,
+    /// M-14 总线（访存与提交都走它）。
+    bus: &'a mut Bus,
+    /// M-08 断点表（取指前的命中判定）。
+    breakpoints: &'a BreakpointTable,
+    /// 观察点命中槽（与后端共享同一份）。
+    watch_hit: Rc<RefCell<Option<Watchpoint>>>,
+}
+
+impl<'a> IssExecutor<'a> {
+    /// 构造一个执行器。
+    pub fn new(
+        iss: &'a mut Iss,
+        bus: &'a mut Bus,
+        breakpoints: &'a BreakpointTable,
+        watch_hit: Rc<RefCell<Option<Watchpoint>>>,
+    ) -> Self {
+        Self {
+            iss,
+            bus,
+            breakpoints,
+            watch_hit,
+        }
+    }
+}
+
+impl InstructionExecutor for IssExecutor<'_> {
+    fn step(&mut self, state: &mut SimState) -> Result<ExecOutcome, PlatformError> {
+        // (1) 断点命中检测 —— 挂在**取指之前**（M-08 LLD §3.2）。
+        //     命中时该条指令尚未执行，状态零副作用。
+        if self.breakpoints.hit_check(state.pc).is_some() {
+            return Ok(ExecOutcome::Stop {
+                reason: HaltReason::Breakpoint,
+                consumed: false,
+            });
+        }
+
+        // (2) 执行一条指令（访存经 M-14）。
+        let outcome = self.iss.step_one_via_bus(state, self.bus);
+        match outcome {
+            Ok(StepOutcome::Advanced) => {}
+            Ok(StepOutcome::Trapped { .. }) => {
+                // 陷入的指令**也算执行了**——它被取指、被译码、被触发。
+                return Ok(ExecOutcome::Stop {
+                    reason: HaltReason::Trap,
+                    consumed: true,
+                });
+            }
+            Ok(StepOutcome::Breakpoint) => {
+                return Ok(ExecOutcome::Stop {
+                    reason: HaltReason::Breakpoint,
+                    consumed: false,
+                })
+            }
+            Ok(StepOutcome::Watchpoint) => {
+                return Ok(ExecOutcome::Stop {
+                    reason: HaltReason::Watchpoint,
+                    consumed: true,
+                })
+            }
+            Ok(StepOutcome::HostPause) => {
+                return Ok(ExecOutcome::Stop {
+                    reason: HaltReason::UserPause,
+                    consumed: true,
+                })
+            }
+            Err(err) => {
+                // 取指 / 访存失败（E_BUS-01 等）——按陷阱处理。
+                return Err(err);
+            }
+        }
+
+        // (3) 推进虚拟时钟。
+        state.virtual_time_ps = state.virtual_time_ps.saturating_add(INSTRUCTION_COST_PS);
+
+        // (4) 提交待写（D-07）——`pending_writes` 从此**不只是被写进
+        //     去**，而是真的落到总线上。
+        commit_pending_writes(state, self.bus)?;
+
+        // (5) 观察点命中 —— 访存发生在指令**内部**，所以只能在指令返回后
+        //     判定。这里只**看**不取：命中槽由后端在批次结束时消费
+        //     （一次命中不能在下一批里继续报），而宿主还需要知道**是哪
+        //     一个**观察点命中的。
+        if self.watch_hit.borrow().is_some() {
+            return Ok(ExecOutcome::Stop {
+                reason: HaltReason::Watchpoint,
+                consumed: true,
+            });
+        }
+
+        Ok(ExecOutcome::Advanced)
+    }
+}
 
 /// The default backend: the in-tree RV32IMC ISS behind the M-12
 /// scheduler. `B` is the event bus the engine publishes ticks on; `I`
@@ -204,6 +340,49 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
     pub fn reset_memory_map(&mut self) {
         self.bus = Bus::new();
         self.install_watch_hook();
+        // 换内存图 = 换外设集合：登记表要跟着清（D-07），否则主循环会
+        // 一直去 tick 早已不存在的基址。
+        self.engine.clear_peripherals();
+    }
+
+    /// **装上外设 tick 接缝**，并登记总线上的每一个外设（D-07）。
+    ///
+    /// 这一步是**时间驱动链路**的起点：没有它，
+    /// [`SchedEvent::PeripheralTick`] 永远是一个空事件（`dispatch` 里的
+    /// ticker 是 `None`），外设的时钟也永远不被虚拟时间推进。
+    ///
+    /// 接缝的形态是「按物理地址 tick 单个外设」：M-12 的
+    /// [`Engine::tick_peripherals`] 逐个登记地址调用它，
+    /// [`SchedEvent::PeripheralTick`] 事件也带着地址调用它——**同一个
+    /// 回调，两条路径**。
+    ///
+    /// 幂等：重复调用只会重建接缝并（重新）登记同一批地址，不会产生
+    /// 重复的 tick 事件（事件由 M-12 的主循环负责排期）。
+    pub fn install_peripheral_ticker(&mut self) {
+        let instances = self.bus.peripheral_instances();
+        // The handles are `Rc` — cloning them is cheap and lets the
+        // registration loop and the tick closure share one list.
+        let bases: Vec<u32> = instances.iter().map(|(base, _)| *base).collect();
+        let ticker = PeripheralTicker::new(move |paddr, now_ps| {
+            // The event carries the peripheral's base address — look up
+            // the instance and advance **that** one's clock.
+            let Some((_, handle)) = instances.iter().find(|(base, _)| *base == paddr) else {
+                // An address that isn't on the bus (a peripheral that was
+                // replaced) — nothing to advance, and **not** an error:
+                // the event is stale, not broken.
+                return Ok(Vec::new());
+            };
+            let Ok(mut periph) = handle.try_borrow_mut() else {
+                // The peripheral is busy (it is on the dispatch path) —
+                // skip this tick. The next one comes along.
+                return Ok(Vec::new());
+            };
+            periph.tick(now_ps)
+        });
+        self.engine.set_peripheral_ticker(ticker);
+        for base in bases {
+            self.engine.register_peripheral(base);
+        }
     }
 
     /// Install the bus hook that matches watchpoints.
@@ -307,69 +486,43 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
         // (V-A 检视 · 🟠-1).
         *watch_hit.borrow_mut() = None;
 
+        // The instruction path shares the **same** executor as the
+        // time-driven path (D-07): breakpoint judgement, watchpoint
+        // judgement, the virtual clock and the pending-write commit all
+        // live in one place — there is no second "step" implementation
+        // that could drift from this one.
+        let mut executor = IssExecutor::new(iss, bus, breakpoints, Rc::clone(watch_hit));
+
         for _ in 0..n {
-            // (1) 断点命中检测 —— 挂在**取指之前**（M-08 LLD §3.2）。
-            //     命中时该条指令尚未执行，状态零副作用。
-            let pc = engine.pc();
-            if breakpoints.hit_check(pc).is_some() {
-                *last_stop = Some(HaltReason::Breakpoint);
-                break;
-            }
-
-            // (1.5) 外设时钟同步（D-46）—— 让本条指令里发生的探针边沿
-            //       带上**真实**的虚拟时间戳。
+            // (1) 外设时钟同步（**指令边界**）—— 让本条指令里发生的探针
+            //     边沿带上**真实**的虚拟时间戳（D-46）。
             //
-            //       没有这一步，M-15 的 GPIO 记下的 `now_ps` 永远是 0，
-            //       边沿虽然是真的（值、次数都对），时间轴却是平的——
-            //       波形看起来「有数据」，却读不出「什么时候变的」。
+            //     没有这一步，M-15 的 GPIO 记下的 `now_ps` 永远是 0，
+            //     边沿虽然是真的（值、次数都对），时间轴却是平的——
+            //     波形看起来「有数据」，却读不出「什么时候变的」。
             //
-            //       ⚠️ 这是**最小**同步：粒度是「每条指令一次」。D-07
-            //       落地后由 M-12 的调度器在量子边界统一驱动（D-07 的
-            //       「指令驱动与时间驱动如何交替」尚未裁定，这里不抢跑）。
-            {
-                let now_ps = engine.now_ps();
-                let outcome = bus.tick_peripherals(now_ps);
-                if !outcome.writes.is_empty() {
-                    // 外设在 tick 期间想提交的写 —— 并进引擎的待提交队列，
-                    // 不静默丢弃（M-14 `tick_peripherals` 的契约）。
-                    engine.state_mut().pending_writes.extend(outcome.writes);
-                }
-                if let Some(err) = outcome.error {
-                    // 报错的外设不影响别人：其余外设**已经** tick 过了，
-                    // 上面收集到的写也**已经**并进队列了。这里才把错误
-                    // 抛出去（V-A 检视 · 🟡-4）。
-                    return Err(err);
-                }
-            }
+            //     粒度是「每条指令一次」：这是探针边沿时间戳能**精确到
+            //     单条指令**的唯一办法。契约里 `Peripheral::tick` 写的
+            //     「每量子一次」是**下限**（至少要走到），不是上限。
+            //
+            //     ⚠️ 走的是 M-12 的 `tick_peripherals`（唯一的外设时钟
+            //     同步点），不是 M-14 的 `Bus::tick_peripherals`——两处
+            //     各调一次 `Peripheral::tick` 就是**两个真相**（D-07）。
+            let now_ps = engine.now_ps();
+            engine.tick_peripherals(now_ps)?;
 
-            // (2) 执行一条指令。
-            let outcome = {
-                let state = engine.state_mut();
-                iss.step_one_via_bus(state, bus)
-            };
-            match outcome {
-                Ok(StepOutcome::Advanced) => {
+            // (2) 执行一条指令（断点 / 陷阱 / 观察点的判定都在执行器里）。
+            match executor.step(engine.state_mut()) {
+                Ok(ExecOutcome::Advanced) => {
                     executed += 1;
                     *total_executed += 1;
-                    engine.advance_virtual_time(INSTRUCTION_COST_PS);
                 }
-                Ok(StepOutcome::Trapped { .. }) => {
-                    // 陷入的指令也算「执行了」——它被取指、被译码、被触发。
-                    executed += 1;
-                    *total_executed += 1;
-                    *last_stop = Some(HaltReason::Trap);
-                    break;
-                }
-                Ok(StepOutcome::Breakpoint) => {
-                    *last_stop = Some(HaltReason::Breakpoint);
-                    break;
-                }
-                Ok(StepOutcome::Watchpoint) => {
-                    *last_stop = Some(HaltReason::Watchpoint);
-                    break;
-                }
-                Ok(StepOutcome::HostPause) => {
-                    *last_stop = Some(HaltReason::UserPause);
+                Ok(ExecOutcome::Stop { reason, consumed }) => {
+                    if consumed {
+                        executed += 1;
+                        *total_executed += 1;
+                    }
+                    *last_stop = Some(reason);
                     break;
                 }
                 Err(err) => {
@@ -378,31 +531,61 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
                     return Err(err);
                 }
             }
+        }
 
-            // (3) 观察点命中 —— 访问发生在指令**内部**，所以只能在
-            //     指令返回后判定。命中槽在这里**消费**掉：一次命中
-            //     不能在下一批里继续报。
-            if let Some(wp) = watch_hit.borrow_mut().take() {
+        // The hit slot belongs to this batch — consume it (a hit must not
+        // keep firing in the next batch). Only a batch that actually
+        // stopped on a watchpoint reports *which* watchpoint fired.
+        if let Some(wp) = watch_hit.borrow_mut().take() {
+            if *last_stop == Some(HaltReason::Watchpoint) {
                 *last_watchpoint = Some(wp);
-                *last_stop = Some(HaltReason::Watchpoint);
-                break;
             }
         }
         Ok(executed)
     }
 
     fn continue_until_event(&mut self) -> Result<(), PlatformError> {
-        // **时间驱动**：推进 M-12 调度器（外设 tick / 定时器到期 / 量子
-        // 边界），把到期的事件派发掉。
+        // **时间驱动**：走 M-12 的**唯一主循环**（LLD §3.1 `runUntil`）。
         //
-        // 它**不**执行 guest 指令 —— 那是 `step_n` 的职责。契约把两者
-        // 分开正是为了这个（M-17 LLD 评审 17-1「step 与 runUntil 语义
-        // 分离」）：指令驱动与时间驱动是两条不同的轴。
+        // 与 `step_n` 的分工（D-07）：
         //
-        // 第 1 阶段事件队列恒空（没有外设 / 定时器接线），所以这里等价于
-        // 「没有可派发的事件」；宿主侧的「继续运行」由 `step_n` + 指令
-        // 预算实现（见 `kernel_host::KernelHost::on_run`）。
-        self.engine.run_until_idle().map(|_| ())
+        // - `step_n` = **指令驱动**：恰好 n 条，调试器语义；
+        // - 本方法 = **时间驱动**：量子化主循环 —— 派发到期事件
+        //   （外设 tick / 定时器到期）、每量子执行至多 1000 条指令、
+        //   在**指令边界**抢占。
+        //
+        // 停止条件：断点 / 陷阱 / 观察点 / 暂停，或本轮指令预算耗尽
+        // （让出给宿主）。
+        let SelfIssBackend {
+            iss,
+            engine,
+            bus,
+            breakpoints,
+            watch_hit,
+            last_stop,
+            last_watchpoint,
+            total_executed,
+            ..
+        } = self;
+
+        *last_stop = None;
+        *last_watchpoint = None;
+        *watch_hit.borrow_mut() = None;
+
+        let mut executor = IssExecutor::new(iss, bus, breakpoints, Rc::clone(watch_hit));
+        // `u64::MAX` = 「不设时间上限」——本轮的边界是**指令预算**，
+        // 由 M-12 的 `instruction_budget` 决定。
+        let outcome = engine.run_until(&mut executor, u64::MAX)?;
+        *total_executed += outcome.instructions;
+        if let RunReason::Stopped(reason) = outcome.reason {
+            *last_stop = Some(reason);
+        }
+        if let Some(wp) = watch_hit.borrow_mut().take() {
+            if *last_stop == Some(HaltReason::Watchpoint) {
+                *last_watchpoint = Some(wp);
+            }
+        }
+        Ok(())
     }
 
     fn pause(&mut self) -> Result<(), PlatformError> {
@@ -974,19 +1157,66 @@ mod tests {
     }
 
     #[test]
-    fn continue_until_event_does_not_execute_guest_instructions() {
-        // 回归 V-A 🟡-3：`continue_until_event` 是**时间驱动**（推进 M-12
-        // 调度器），**不执行** guest 指令（M-17 LLD 评审 17-1「step 与
-        // runUntil 语义分离」）。把一条 guest 指令塞进去也不该有测试变红 ——
-        // 这条用例把它钉住。
+    fn continue_until_event_runs_the_quantum_main_loop() {
+        // **D-07 的行为订正**：第 1 阶段 `continue_until_event` 只是「把
+        // 事件队列排空」，**不执行** guest 指令（那时的队列恒空，于是它
+        // 等价于空操作）。D-07 把它接到 M-12 的**唯一主循环**上：时间
+        // 驱动与指令驱动在主循环里交替，Continue 因此真的会跑代码。
+        //
+        // 判别式钉住三件事：
+        // 1. 指令**真的**被执行了（PC 前进、计数增加）；
+        // 2. 一轮的边界是**指令预算**，不是「跑到没事件」；
+        // 3. 执行的条数是**量子配额**的整数倍（量子化调度）。
         let mut backend = backend_with_demo();
         let pc_before = backend.snapshot().expect("snapshot").pc;
         backend.continue_until_event().expect("run until event");
-        assert_eq!(backend.total_executed(), 0, "runUntil 不得执行 guest 指令");
-        assert_eq!(
+
+        assert!(
+            backend.total_executed() > 0,
+            "时间驱动路径必须真的执行 guest 指令"
+        );
+        assert_ne!(
             backend.snapshot().expect("snapshot").pc,
             pc_before,
-            "runUntil 不得推进 PC"
+            "PC 必须前进"
+        );
+        assert_eq!(
+            backend.total_executed() as u32 % crate::m12_engine::QUANTUM_INSTR_QUOTA,
+            0,
+            "一轮的执行条数必须是量子配额的整数倍（量子化调度）"
+        );
+        assert_eq!(
+            backend.total_executed(),
+            u64::from(crate::m12_engine::DEFAULT_INSTRUCTION_BUDGET),
+            "没有断点/陷阱时，一轮应当正好跑满指令预算然后让出给宿主"
+        );
+    }
+
+    #[test]
+    fn continue_until_event_stops_at_a_breakpoint() {
+        // 时间驱动路径也必须**认断点**——否则「跑到断点停下」这个
+        // 调试器最基本的语义在 Continue 下就没了。
+        let mut backend = backend_with_demo();
+        backend
+            .set_breakpoint_with_id(Breakpoint {
+                id: 7,
+                addr: 0,
+                source_hint: None,
+                enabled: true,
+            })
+            .expect("set breakpoint");
+
+        backend.continue_until_event().expect("run until event");
+
+        assert_eq!(
+            backend.last_stop_reason(),
+            Some(HaltReason::Breakpoint),
+            "断点必须让时间驱动路径停下来"
+        );
+        assert_eq!(
+            backend.total_executed(),
+            0,
+            "断点挂在取指之前，命中的那条指令**没有**被执行"
         );
     }
 }

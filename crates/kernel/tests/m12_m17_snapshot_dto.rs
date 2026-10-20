@@ -421,7 +421,11 @@ fn backend_exposes_the_full_snapshot_through_the_contract() {
     backend.restore_full(&dto).expect("restore_full");
 
     let start = backend.engine().intc().raised.len();
-    backend.continue_until_event().expect("run");
+    // 这里要的是「**把队列排空**」，不是「执行 guest 指令」——
+    // `continue_until_event` 走的是唯一主循环，它会真的去取指，而这个
+    // 后端**没有映射任何内存**（取指必然失败）。快照 DTO 的语义与
+    // 「跑不跑指令」无关，用纯事件推进即可。
+    backend.engine_mut().run_until_idle().expect("run");
     let irqs = &backend.engine().intc().raised[start..];
     assert_eq!(irqs, &[1, 2], "还原后只应触发快照里有的事件");
 }

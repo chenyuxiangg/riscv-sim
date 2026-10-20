@@ -120,6 +120,14 @@ impl EventQueue {
         queue
     }
 
+    /// 遍历队列中的事件（**堆序**，不是规范出队序）。
+    ///
+    /// 只用于「队列里有没有某种事件」这类查询——那种查询与顺序无关，
+    /// 不值得为此排一次序。需要规范出队序时用 [`EventQueue::to_ordered_vec`]。
+    pub fn iter(&self) -> impl Iterator<Item = &QueuedEvent> {
+        self.heap.iter()
+    }
+
     /// 队列中已占用的最大插入序（None = 空队列）。
     ///
     /// 恢复时用它把插入序计数器顶到已占用值之上，避免撞号（D-17）。
