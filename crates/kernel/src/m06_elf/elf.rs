@@ -313,7 +313,23 @@ pub fn parse(bytes: &[u8], limits: &ParseLimits) -> Result<LoadImage, PlatformEr
         // a bss-like gap without the ELF PT_LOAD doing the work itself.
         if p_memsz > p_filesz {
             let gap_size = p_memsz - p_filesz;
-            let gap_base = p_paddr.wrapping_add(p_filesz);
+            // `checked_add` rather than `wrapping_add`. The overflow
+            // itself is already unreachable — the `paddr_end` check
+            // above rejects any segment that would cross the 4 GiB
+            // bus, and `p_filesz <= p_memsz` — but a silent wrap
+            // would materialise the zero-filled gap at address 0
+            // instead of failing, so the explicit error is cheaper
+            // than trusting that ordering to hold (review V3 finding
+            // L-6).
+            let gap_base = p_paddr.checked_add(p_filesz).ok_or_else(|| {
+                PlatformError::new(
+                    FAMILY,
+                    3,
+                    format!(
+                        "bss gap base overflows u32 (paddr=0x{p_paddr:08x} filesz=0x{p_filesz:x})"
+                    ),
+                )
+            })?;
             let gap_end = (gap_base as u64)
                 .checked_add(gap_size as u64)
                 .ok_or_else(|| PlatformError::new(FAMILY, 3, "bss gap end overflows u64"))?;

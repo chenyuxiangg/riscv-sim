@@ -228,8 +228,29 @@ pub fn detect_kind_with_hint(extension: &str, bytes: &[u8]) -> Kind {
         .unwrap_or(Kind::RawHex)
 }
 
-/// True when the payload looks like Intel HEX text: the first non-blank
-/// line starts with the record marker `:`.
+/// The fixed-size part of an Intel HEX record: the `:` marker plus the
+/// two-hex-digit byte count, the four-digit address, the two-digit
+/// record type and the two-digit checksum.
+const IHEX_FIXED_LEN: usize = 11;
+
+/// True when the payload looks like Intel HEX text.
+///
+/// The check is **structural**, not merely "the first byte is `:`" — a
+/// raw binary image may legitimately start with `0x3A`, and treating
+/// it as HEX would make the loader reject a perfectly valid blob
+/// (review V3 finding P1). The first non-blank line counts as an
+/// IHEX record only when
+///
+/// * it starts with the record marker `:`,
+/// * it is at least [`IHEX_FIXED_LEN`] characters long,
+/// * the number of data bytes the record declares matches the
+///   record's actual length (a record is `11 + 2 * byte_count`
+///   characters),
+/// * every character after the marker is an ASCII hex digit.
+///
+/// These are exactly the conditions the IHEX parser itself enforces
+/// (see `hex.rs`), so a file the parser would accept is still
+/// recognised, and a binary blob that merely starts with `:` is not.
 fn looks_like_ihex(bytes: &[u8]) -> bool {
     for raw_line in bytes.split(|b| *b == b'\n') {
         let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
@@ -237,9 +258,39 @@ fn looks_like_ihex(bytes: &[u8]) -> bool {
         if trimmed.is_empty() {
             continue;
         }
-        return trimmed[0] == b':';
+        return is_ihex_record(trimmed);
     }
     false
+}
+
+/// True when `line` has the shape of a well-formed Intel HEX record.
+fn is_ihex_record(line: &[u8]) -> bool {
+    if line.len() < IHEX_FIXED_LEN || line[0] != b':' {
+        return false;
+    }
+    // The data section is two hex characters per byte, so a record's
+    // length is always odd.
+    if (line.len() - IHEX_FIXED_LEN) % 2 != 0 {
+        return false;
+    }
+    if !line[1..].iter().all(|b| b.is_ascii_hexdigit()) {
+        return false;
+    }
+    // The declared byte count must match the data the record carries.
+    let (Some(hi), Some(lo)) = (hex_value(line[1]), hex_value(line[2])) else {
+        return false;
+    };
+    usize::from(hi * 16 + lo) == (line.len() - IHEX_FIXED_LEN) / 2
+}
+
+/// Value of a single ASCII hex digit.
+fn hex_value(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Trim ASCII whitespace from both ends of a byte slice.

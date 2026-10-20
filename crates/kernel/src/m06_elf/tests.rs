@@ -21,6 +21,12 @@ use super::*;
 /// `.text` lives at paddr = 0, optionally extended with a `.bss`
 /// gap (`p_memsz > p_filesz`).
 fn make_minimal_elf(p_filesz: u32, p_memsz: u32) -> Vec<u8> {
+    make_minimal_elf_at(0, p_filesz, p_memsz)
+}
+
+/// The same, but with the segment placed at an explicit physical
+/// address — used to exercise the address-space boundaries.
+fn make_minimal_elf_at(p_paddr: u32, p_filesz: u32, p_memsz: u32) -> Vec<u8> {
     assert!(p_filesz <= p_memsz);
     let mut bytes = Vec::new();
     // ----- ELF header (52 bytes) -----
@@ -58,8 +64,8 @@ fn make_minimal_elf(p_filesz: u32, p_memsz: u32) -> Vec<u8> {
         1, 0, 0, 0, // p_type = PT_LOAD
     ]);
     bytes.extend_from_slice(&p_offset.to_le_bytes()); // p_offset
-    bytes.extend_from_slice(&0u32.to_le_bytes()); // p_vaddr
-    bytes.extend_from_slice(&0u32.to_le_bytes()); // p_paddr
+    bytes.extend_from_slice(&p_paddr.to_le_bytes()); // p_vaddr
+    bytes.extend_from_slice(&p_paddr.to_le_bytes()); // p_paddr
     bytes.extend_from_slice(&p_filesz.to_le_bytes()); // p_filesz
     bytes.extend_from_slice(&p_memsz.to_le_bytes()); // p_memsz
     bytes.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R|PF_X
@@ -464,6 +470,102 @@ fn detect_kind_from_bytes_sniffs_ihex_record_marker() {
 fn detect_kind_from_bytes_is_inconclusive_for_raw_blobs() {
     assert_eq!(detect_kind_from_bytes(&[0x00, 0x01, 0x02, 0x03]), None);
     assert_eq!(detect_kind_from_bytes(&[]), None);
+}
+
+/// A raw binary image may legitimately start with `0x3A` (`:`) — the
+/// record marker on its own must not turn a raw image into HEX
+/// (review V3 finding P1).
+#[test]
+fn a_raw_blob_starting_with_the_record_marker_is_not_sniffed_as_ihex() {
+    // A blob that starts with ':' but is plainly binary.
+    let blob = [
+        0x3Au8, 0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8, 0xF7, 0xF6, 0xF5,
+    ];
+    assert_eq!(
+        detect_kind_from_bytes(&blob),
+        None,
+        "a raw blob that merely starts with ':' must not be sniffed as HEX"
+    );
+    assert_eq!(
+        detect_kind_with_hint("bin", &blob),
+        Kind::RawHex,
+        "and it must still load as a raw image"
+    );
+}
+
+/// A line that is not a well-formed IHEX record must not be sniffed
+/// as HEX — the sniff has to be structural, not just "starts with
+/// `:`".
+#[test]
+fn a_malformed_ihex_record_is_not_sniffed_as_ihex() {
+    let cases: &[&[u8]] = &[
+        // Too short for the fixed header (marker + count + address +
+        // type + checksum is 11 characters).
+        b":0000001\n",
+        // Even length — a record is always `11 + 2 * count` characters.
+        b":00000001FF0\n",
+        // The declared byte count (0x02) does not match the one data
+        // byte the record actually carries.
+        b":0200000000FF\n",
+        // A non-hex character after the marker.
+        b":00000001GG\n",
+    ];
+    for case in cases {
+        assert_eq!(
+            detect_kind_from_bytes(case),
+            None,
+            "{:?} must not be sniffed as HEX",
+            String::from_utf8_lossy(case)
+        );
+    }
+}
+
+/// A well-formed record is still recognised — including the
+/// 11-character EOF record, the shortest one there is.
+#[test]
+fn a_well_formed_ihex_record_is_still_sniffed_as_ihex() {
+    // The EOF record: marker, count 00, address 0000, type 01, checksum FF.
+    assert_eq!(detect_kind_from_bytes(b":00000001FF\n"), Some(Kind::Hex));
+    // A data record with one payload byte: 13 characters.
+    let text = hex_line(0x0000, 0x00, &[0xAA]);
+    assert_eq!(detect_kind_from_bytes(text.as_bytes()), Some(Kind::Hex));
+}
+
+// ---------------------------------------------------------------------------
+// The 4 GiB bus boundary (review V3 finding L-6).
+// ---------------------------------------------------------------------------
+
+/// A segment whose in-memory footprint crosses the 4 GiB bus
+/// boundary must be rejected.
+///
+/// This is the check that stands in front of the `.bss` gap base
+/// arithmetic: a segment that ends past the bus would otherwise have
+/// its gap base wrapped around a `u32` and materialise a zero-filled
+/// segment at the wrong address.
+#[test]
+fn a_segment_whose_footprint_crosses_the_bus_boundary_is_rejected() {
+    // p_paddr + p_memsz = 0xFFFF_FFF0 + 0x20 = 0x1_0000_0010 → past the
+    // 4 GiB bus.
+    let elf = make_minimal_elf_at(0xFFFF_FFF0, 4, 0x20);
+    let err = DefaultLoader
+        .load(&elf, Kind::Elf)
+        .expect_err("a segment crossing the 4 GiB bus must be rejected");
+    assert_eq!(err.family, ErrorFamily::Loader);
+    assert_eq!(err.scenario, 3, "out-of-bus -> LDR-03");
+}
+
+/// The last segment that still fits must load — the boundary is
+/// inclusive, not off by one.
+#[test]
+fn a_segment_ending_exactly_at_the_bus_boundary_is_accepted() {
+    // p_paddr + p_memsz = 0xFFFF_FFE0 + 0x20 = 0x1_0000_0000 → exactly
+    // the end of the 4 GiB bus.
+    let elf = make_minimal_elf_at(0xFFFF_FFE0, 4, 0x20);
+    let li = DefaultLoader
+        .load(&elf, Kind::Elf)
+        .expect("a segment ending exactly at the bus boundary is legal");
+    assert_eq!(li.segments.len(), 2, "the file part plus the .bss gap");
+    assert_eq!(li.segments[0].0, 0xFFFF_FFE0);
 }
 
 #[test]
