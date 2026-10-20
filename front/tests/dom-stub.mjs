@@ -98,9 +98,86 @@ function setEventProp(event, name, node) {
     return event;
 }
 
+/** Escape text the way the real DOM reports it in `innerHTML`. */
+function escapeMarkup(text) {
+    return String(text)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+}
+
+/**
+ * Wrap `stopPropagation` so the stub can observe that propagation was
+ * stopped, independently of how the host runtime reports it
+ * (FRONTEND_Review.md R-05).
+ */
+function watchStopPropagation(event) {
+    if (typeof event.stopPropagation !== "function" || event.__stubStopWatched) return;
+    event.__stubStopWatched = true;
+    const original = event.stopPropagation.bind(event);
+    event.stopPropagation = () => {
+        original();
+        event.__stubStopped = true;
+    };
+}
+
+/** True when the event asked the propagation to stop. */
+function propagationStopped(event) {
+    return Boolean(event.cancelBubble) || Boolean(event.__stubStopped);
+}
+
+/**
+ * Shared event-target behaviour: listener registry with `once` / `capture`
+ * support, plus the capture → bubble dispatch order. Without these the
+ * stub happily accepts code that behaves differently in a real browser
+ * (FRONTEND_Review.md R-05).
+ */
+class StubEventTarget {
+    constructor() {
+        /** @type {Map<string, Set<{handler: Function, once: boolean, capture: boolean}>>} */
+        this._listeners = new Map();
+    }
+
+    addEventListener(type, handler, options) {
+        const once = typeof options === "boolean" ? options : Boolean(options?.once);
+        const capture = typeof options === "boolean" ? options : Boolean(options?.capture);
+        let set = this._listeners.get(type);
+        if (!set) {
+            set = new Set();
+            this._listeners.set(type, set);
+        }
+        set.add({ handler, once, capture });
+    }
+
+    removeEventListener(type, handler) {
+        const set = this._listeners.get(type);
+        if (!set) return;
+        for (const entry of set) {
+            if (entry.handler === handler) {
+                set.delete(entry);
+                return;
+            }
+        }
+    }
+
+    /** Fire the listeners registered on this node for one dispatch phase. */
+    _fire(event, phase) {
+        const set = this._listeners.get(event.type);
+        if (!set) return;
+        for (const entry of [...set]) {
+            if (phase === "capture" && !entry.capture) continue;
+            if (phase === "bubble" && entry.capture) continue;
+            setEventProp(event, "currentTarget", this);
+            entry.handler.call(this, event);
+            if (entry.once) set.delete(entry);
+        }
+    }
+}
+
 /** A DOM element. */
-export class StubElement {
+export class StubElement extends StubEventTarget {
     constructor(tagName = "div") {
+        super();
         this.tagName = String(tagName).toUpperCase();
         this.childNodes = [];
         this.parentNode = null;
@@ -112,7 +189,6 @@ export class StubElement {
         this.scrollHeight = 0;
         this._text = "";
         this._html = "";
-        this._listeners = new Map();
     }
 
     /** Element children (text nodes excluded). */
@@ -160,7 +236,8 @@ export class StubElement {
     set textContent(value) {
         this.childNodes = [];
         this._text = String(value);
-        this._html = "";
+        // The real DOM reports the text as escaped markup in innerHTML.
+        this._html = escapeMarkup(this._text);
     }
 
     get innerHTML() { return this._html; }
@@ -201,54 +278,41 @@ export class StubElement {
 
     // --- events -------------------------------------------------------------
 
-    addEventListener(type, handler) {
-        let set = this._listeners.get(type);
-        if (!set) {
-            set = new Set();
-            this._listeners.set(type, set);
-        }
-        set.add(handler);
-    }
-
-    removeEventListener(type, handler) {
-        this._listeners.get(type)?.delete(handler);
-    }
-
-    /** Dispatch with bubbling — `event.target` is the dispatching node. */
+    /** Dispatch with capture + bubble phases — `event.target` is this node. */
     dispatchEvent(event) {
         setEventProp(event, "target", this);
-        let node = this;
-        while (node) {
-            setEventProp(event, "currentTarget", node);
-            const handlers = node._listeners?.get(event.type);
-            if (handlers) for (const handler of [...handlers]) handler.call(node, event);
-            node = node.parentNode;
+        watchStopPropagation(event);
+        try {
+            if (typeof event.cancelBubble !== "boolean") event.cancelBubble = false;
+        } catch (_e) {
+            // read-only cancelBubble — ignore
+        }
+        // 捕获阶段：根 → 目标
+        const path = [];
+        for (let node = this; node; node = node.parentNode) path.unshift(node);
+        for (const node of path) {
+            node._fire?.(event, "capture");
+            if (propagationStopped(event)) return true;
+        }
+        // 冒泡阶段：目标 → 根（与真实 DOM 同序，stopPropagation 才有意义）
+        for (const node of [...path].reverse()) {
+            node._fire?.(event, "bubble");
+            if (propagationStopped(event)) break;
         }
         return true;
     }
 }
 
 /** The `window` global. */
-export class StubWindow {
+export class StubWindow extends StubEventTarget {
     constructor() {
-        this._listeners = new Map();
-    }
-    addEventListener(type, handler) {
-        let set = this._listeners.get(type);
-        if (!set) {
-            set = new Set();
-            this._listeners.set(type, set);
-        }
-        set.add(handler);
-    }
-    removeEventListener(type, handler) {
-        this._listeners.get(type)?.delete(handler);
+        super();
     }
     dispatchEvent(event) {
         setEventProp(event, "target", this);
-        setEventProp(event, "currentTarget", this);
-        const handlers = this._listeners.get(event.type);
-        if (handlers) for (const handler of [...handlers]) handler.call(this, event);
+        watchStopPropagation(event);
+        // Window listeners are not part of the capture/bubble split here.
+        this._fire(event, "bubble");
         return true;
     }
 }
@@ -256,6 +320,22 @@ export class StubWindow {
 // ---------------------------------------------------------------------------
 // Selector matching
 // ---------------------------------------------------------------------------
+
+/**
+ * Attribute operators. Every operator the CSS spec defines for attribute
+ * selectors is implemented — an unimplemented operator used to degrade
+ * into "attribute exists", which made the stub return the **wrong**
+ * element (e.g. `[data-view-tab^="deb"]` matched `product`). A silent
+ * false match is worse than a loud failure (FRONTEND_Review.md R-03).
+ */
+const ATTR_OPERATORS = {
+    "=": (actual, expected) => actual === expected,
+    "^=": (actual, expected) => actual.startsWith(expected),
+    "$=": (actual, expected) => actual.endsWith(expected),
+    "*=": (actual, expected) => actual.includes(expected),
+    "~=": (actual, expected) => actual.split(/\s+/).includes(expected),
+    "|=": (actual, expected) => actual === expected || actual.startsWith(`${expected}-`),
+};
 
 /** Match one compound selector: `tag`, `#id`, `.class`, `[attr]`, `[attr="v"]`. */
 function matchesSimple(el, selector) {
@@ -280,11 +360,23 @@ function matchesSimple(el, selector) {
         } else {
             const expr = m[3].trim();
             const am = /^([\w:-]+)(?:\s*([~^$*|]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\]]*)))?$/.exec(expr);
-            if (!am) return false;
+            if (!am) {
+                throw new Error(
+                    `dom-stub: 不支持的选择器表达式 "[${expr}]"——`
+                    + "未实现的语法必须显式失败，而不是静默返回 false",
+                );
+            }
             if (!el.hasAttribute(am[1])) return false;
             if (am[2]) {
-                const value = am[3] ?? am[4] ?? am[5] ?? "";
-                if (am[2] === "=" && el.getAttribute(am[1]) !== value) return false;
+                const op = ATTR_OPERATORS[am[2]];
+                if (!op) {
+                    throw new Error(
+                        `dom-stub: 不支持的选择器算符 "${am[2]}"（[${am[1]}]）——`
+                        + "未实现的算符必须显式失败，而不是退化成「属性存在即匹配」",
+                    );
+                }
+                const expected = am[3] ?? am[4] ?? am[5] ?? "";
+                if (!op(el.getAttribute(am[1]) ?? "", expected)) return false;
             }
         }
     }
@@ -383,13 +475,18 @@ export function installDom(html) {
     const body = new StubElement("body");
     for (const child of parseHtml(extractBody(html))) body.appendChild(child);
 
-    const doc = {
-        body,
-        documentElement: new StubElement("html"),
-        getElementById(id) { return findById(body, id); },
-        querySelector(selector) { return body.querySelector(selector); },
-        querySelectorAll(selector) { return body.querySelectorAll(selector); },
-        createElement(tag) { return new StubElement(tag); },
+    const doc = new StubEventTarget();
+    doc.body = body;
+    doc.documentElement = new StubElement("html");
+    doc.getElementById = (id) => findById(body, id);
+    doc.querySelector = (selector) => body.querySelector(selector);
+    doc.querySelectorAll = (selector) => body.querySelectorAll(selector);
+    doc.createElement = (tag) => new StubElement(tag);
+    doc.dispatchEvent = (event) => {
+        setEventProp(event, "target", doc);
+        watchStopPropagation(event);
+        doc._fire(event, "bubble");
+        return true;
     };
 
     const win = new StubWindow();
@@ -399,6 +496,8 @@ export function installDom(html) {
         protocol: "http:",
         href: "http://localhost:8080/",
     };
+    // The real `window.location` is the same object as the global one.
+    win.location = location;
     const history = {
         replaceState(_state, _title, url) {
             if (typeof url !== "string") return;
@@ -412,6 +511,11 @@ export function installDom(html) {
     globalThis.window = win;
     globalThis.location = location;
     globalThis.history = history;
+
+    // The real DOM fires `DOMContentLoaded` once the document is parsed.
+    queueMicrotask(() => {
+        doc.dispatchEvent(new Event("DOMContentLoaded"));
+    });
 
     return { document: doc, window: win, location, history };
 }
