@@ -357,10 +357,26 @@ export function createMockKernel(options = {}) {
                 break;
             }
 
-            case "ClearBreakpoint":
-                state.breakpoints.delete(Number(value.addr ?? 0) >>> 0);
+            case "ClearBreakpoint": {
+                // The frozen contract carries **only** the breakpoint id
+                // (`CommandPayload::ClearBreakpoint { id: u32 }`) — there
+                // is no `addr` field. The mock table is keyed by address,
+                // so the id has to be resolved to an address first; the
+                // old code deleted address 0 and left the breakpoint in
+                // place (F1).
+                const rawId = value.id;
+                const id = Number(rawId);
+                if (rawId !== undefined && rawId !== null && Number.isFinite(id)) {
+                    for (const [addr, bpId] of state.breakpoints) {
+                        if (bpId === id) {
+                            state.breakpoints.delete(addr);
+                            break;
+                        }
+                    }
+                }
                 frames.push(makeFrame(reqId, Event.tick(state.timeVirt, state.pc)));
                 break;
+            }
 
             case "SetWatchpoint":
             case "ClearWatchpoint":
@@ -395,6 +411,10 @@ export function createMockKernel(options = {}) {
             haltReason: state.haltReason,
             memory: Object.fromEntries(state.memory),
             topics: [...state.topics],
+            // Breakpoint table as `[addr, id]` pairs — the table is keyed
+            // by address, so the id → address resolution done by
+            // `ClearBreakpoint` is observable here (dev / test only).
+            breakpoints: [...state.breakpoints],
             seed,
         }),
     };
