@@ -366,7 +366,13 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
                 if t > self.now_ps() {
                     break;
                 }
-                let evt = self.queue.pop().expect("peek said some");
+                // `peek` said there is one — but `pop` is a separate
+                // call, and a panic here would take the whole WASM
+                // worker down (WASM 里 panic = Worker 崩). Fail loudly
+                // with an error instead (V-A 检视 · ⚪-4)。
+                let evt = self.queue.pop().ok_or_else(|| {
+                    PlatformError::new(ErrorFamily::Engine, 2, "事件队列在 peek 与 pop 之间不一致")
+                })?;
                 self.dispatch(evt.event)?;
             }
         }

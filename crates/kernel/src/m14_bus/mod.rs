@@ -178,6 +178,15 @@ pub struct BusAccess {
     /// When `ok == false`, the [`PlatformError::scenario`] that the
     /// caller will receive. `None` on success.
     pub err_scenario: Option<u16>,
+    /// Whether this access is an **instruction fetch** rather than a data
+    /// access.
+    ///
+    /// A fetch is a read on the bus like any other, so the trace layer
+    /// (M-18) still sees it — but a **watchpoint is about the guest's data
+    /// accesses**, so a fetch must never match one. Without this flag a
+    /// read watchpoint placed on a *code* address would fire on every
+    /// instruction fetched from there (V-A 检视 · 🟠-2).
+    pub is_fetch: bool,
 }
 
 /// Optional callback used by M-18 to capture every bus access for
@@ -782,7 +791,32 @@ impl Bus {
                 (false, Some(e.scenario))
             }
         };
-        self.fire_hook(addr, width, AccessDir::Read, ok, scenario);
+        self.fire_hook(addr, width, AccessDir::Read, ok, scenario, false);
+        result
+    }
+
+    /// Read for **instruction fetch**.
+    ///
+    /// Identical to [`Bus::read`] — same value, same error, same
+    /// statistics — except that the bus hook is told this access is a
+    /// fetch ([`BusAccess::is_fetch`]). A watchpoint is about the guest's
+    /// **data** accesses, so a fetch must never match one; without this
+    /// distinction a read watchpoint on a code address fires on every
+    /// instruction fetched from there (V-A 检视 · 🟠-2).
+    pub fn read_fetch(&mut self, addr: u32, width: BusWidth) -> Result<u32, PlatformError> {
+        self.stats.reads += 1;
+
+        let result = self.read_inner(addr, width);
+        let (ok, scenario) = match &result {
+            Ok(_) => (true, None),
+            Err(e) => {
+                if matches!(e.family, BUS_FAMILY) && e.scenario == 1 {
+                    self.stats.misses += 1;
+                }
+                (false, Some(e.scenario))
+            }
+        };
+        self.fire_hook(addr, width, AccessDir::Read, ok, scenario, true);
         result
     }
 
@@ -801,7 +835,16 @@ impl Bus {
     /// watchpoint.)
     pub fn load_bytes(&mut self, addr: u32, bytes: &[u8]) -> Result<(), PlatformError> {
         for (i, byte) in bytes.iter().enumerate() {
-            let a = addr.checked_add(i as u32).ok_or_else(|| {
+            // `u32::try_from` rather than `i as u32`: the latter silently
+            // **truncates** for a blob larger than 4 GiB (V-A 检视 · ⚪-3).
+            let offset = u32::try_from(i).map_err(|_| {
+                PlatformError::new(
+                    BUS_FAMILY,
+                    1,
+                    format!("write offset overflow at 0x{:08x}", addr),
+                )
+            })?;
+            let a = addr.checked_add(offset).ok_or_else(|| {
                 PlatformError::new(
                     BUS_FAMILY,
                     1,
@@ -969,7 +1012,7 @@ impl Bus {
                 (false, Some(e.scenario))
             }
         };
-        self.fire_hook(addr, width, AccessDir::Write, ok, scenario);
+        self.fire_hook(addr, width, AccessDir::Write, ok, scenario, false);
         result
     }
 
@@ -1330,6 +1373,7 @@ impl Bus {
         dir: AccessDir,
         ok: bool,
         err_scenario: Option<u16>,
+        is_fetch: bool,
     ) {
         if let Some(hook) = self.hook.as_mut() {
             let evt = BusAccess {
@@ -1339,6 +1383,7 @@ impl Bus {
                 dir,
                 ok,
                 err_scenario,
+                is_fetch,
             };
             (hook)(&evt);
         }

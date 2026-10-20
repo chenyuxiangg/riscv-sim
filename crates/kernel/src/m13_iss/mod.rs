@@ -137,7 +137,12 @@ impl Iss {
                 cause: TrapCause::MisalignedAccess,
             });
         }
-        let raw = bus.read(state.pc, BusWidth::Word).map_err(|e| {
+        // The fetch goes through `read_fetch`, not `read`: an instruction
+        // fetch is a read on the bus, but a **watchpoint is about the
+        // guest's data accesses** — a read watchpoint placed on a code
+        // address must not fire on every instruction fetched from there
+        // (V-A 检视 · 🟠-2).
+        let raw = bus.read_fetch(state.pc, BusWidth::Word).map_err(|e| {
             PlatformError::new(
                 ErrorFamily::Iss,
                 1,

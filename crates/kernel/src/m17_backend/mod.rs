@@ -226,6 +226,13 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
                 if !access.ok {
                     return;
                 }
+                // An **instruction fetch** is not a data access. A
+                // watchpoint watches the guest's data, so a read
+                // watchpoint on a *code* address must not fire on every
+                // instruction fetched from there (V-A 检视 · 🟠-2).
+                if access.is_fetch {
+                    return;
+                }
                 let is_write = matches!(access.dir, AccessDir::Write);
                 let size: WriteSize = access.width.into();
                 let hit = watchpoints
@@ -285,6 +292,14 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
         let mut executed = 0u32;
         *last_stop = None;
         *last_watchpoint = None;
+        // The hit slot carries **this batch's** hits only. It has to be
+        // cleared here, not just consumed at the end of a batch: a hit can
+        // also arrive from *outside* a step batch — a debugger write
+        // (`WriteMemory`) fires the same bus hook — and such a leftover
+        // would be mistaken for a hit of the **next** batch, stopping the
+        // guest on an instruction that never touched the watched address
+        // (V-A 检视 · 🟠-1).
+        *watch_hit.borrow_mut() = None;
 
         for _ in 0..n {
             // (1) 断点命中检测 —— 挂在**取指之前**（M-08 LLD §3.2）。
@@ -561,8 +576,13 @@ mod tests {
 
     /// 造一个后端，低段 RAM 已映射并装入 demo 程序。
     fn backend_with_demo() -> SelfIssBackend<NullSinks, NullSinks> {
+        backend_with_program(&DEMO)
+    }
+
+    /// 造一个后端，低段 RAM 已映射并装入给定程序（从地址 0 起）。
+    fn backend_with_program(program: &[u8]) -> SelfIssBackend<NullSinks, NullSinks> {
         let mut bus = Bus::new();
-        bus.map_ram(0, 0x1_0000, &DEMO).expect("map ram");
+        bus.map_ram(0, 0x1_0000, program).expect("map ram");
         SelfIssBackend::new(NullSinks, NullSinks).with_memory_bus(bus)
     }
 
@@ -759,5 +779,147 @@ mod tests {
         backend.clear_debug_state();
         assert_eq!(backend.breakpoints().len(), 0);
         assert_eq!(backend.watchpoints().len(), 0);
+    }
+
+    // -- V-A 检视闭环（🟠-1 / 🟠-2 / 🟡-2 / 🟡-3）---------------------------
+
+    #[test]
+    fn a_debugger_write_does_not_leak_into_the_next_step_batch() {
+        // 回归 V-A 🟠-1：调试器写内存会触发同一条总线 hook，把命中槽填上；
+        // 那一批没有 step 去消费它，残留到**下一批**被误当成本批的命中 ——
+        // 于是 guest 在一条根本没碰过被监视地址的指令上假停机。
+        let mut backend = backend_with_demo();
+        backend
+            .set_watchpoint_with_id(Watchpoint {
+                id: 1,
+                addr: 0x200,
+                size: WriteSize::Word,
+                access: WatchAccess::Write,
+            })
+            .expect("set watchpoint");
+        // 调试器写一次被监视的地址（不是 guest 干的）。
+        backend
+            .write_memory(0x200, WriteSize::Word, 0x1234)
+            .expect("debugger write");
+        // 接下来跑一条完全不碰 0x200 的指令（`addi x1,x0,42`）。
+        let executed = backend.step_n(1).expect("step");
+        assert_eq!(executed, 1, "这条指令不该被观察点打断");
+        assert_ne!(
+            backend.last_stop_reason(),
+            Some(HaltReason::Watchpoint),
+            "调试器的写不得让下一条 guest 指令误报观察点命中"
+        );
+        assert_eq!(
+            backend.last_watchpoint_hit().map(|w| w.addr),
+            None,
+            "本批次没有命中任何观察点"
+        );
+    }
+
+    #[test]
+    fn an_instruction_fetch_does_not_fire_a_read_watchpoint() {
+        // 回归 V-A 🟠-2：取指也是一次总线读。若不区分「取指」与「数据读」，
+        // 挂在**代码地址**上的读观察点会被每一次取指误触发。
+        let mut backend = backend_with_demo();
+        backend
+            .set_watchpoint_with_id(Watchpoint {
+                id: 1,
+                addr: 0x00,
+                size: WriteSize::Word,
+                access: WatchAccess::Read,
+            })
+            .expect("set watchpoint");
+        let executed = backend.step_n(3).expect("step");
+        assert_eq!(executed, 3, "取指不得触发观察点");
+        assert_ne!(
+            backend.last_stop_reason(),
+            Some(HaltReason::Watchpoint),
+            "取指不是数据访问，不得命中读观察点"
+        );
+    }
+
+    #[test]
+    fn a_data_read_still_fires_a_read_watchpoint() {
+        // 🟠-2 的**对照**：区分取指之后，真正的**数据读**仍然要命中读
+        // 观察点 —— 否则这个修复就变成了「读观察点整个失灵」。
+        //
+        // 程序只有一条 `lw x1, 0x100(x0)`（0x10002083，小端字节 83 20 00
+        // 10），它是对 0x100 的一次**数据读**。
+        //
+        // ⚠️ 编码核对：L 型立即数的 imm[11:5] 在 **bit[31:25]**，
+        // imm[4:0] 在 bit[24:20]。0x100 → imm[11:5] = 8 → 8 << 25 =
+        // 0x10000000，加上 funct3=2（0x2000）、rd=1（0x80）、opcode=3
+        // → 0x10002083。
+        let mut backend = backend_with_program(&[0x83, 0x20, 0x00, 0x10]);
+        backend
+            .set_watchpoint_with_id(Watchpoint {
+                id: 1,
+                addr: 0x100,
+                size: WriteSize::Word,
+                access: WatchAccess::Read,
+            })
+            .expect("set watchpoint");
+        backend.step_n(1).expect("step");
+        assert_eq!(
+            backend.last_stop_reason(),
+            Some(HaltReason::Watchpoint),
+            "guest 的数据读仍然要命中读观察点"
+        );
+        assert_eq!(backend.last_watchpoint_hit().map(|w| w.addr), Some(0x100));
+    }
+
+    #[test]
+    fn the_execution_count_pins_down_what_counts_as_executed() {
+        // 回归 V-A 🟡-2：计数口径此前只写在代码注释里，没有任何用例守护。
+        //
+        // 口径（两条都要钉住）：
+        // ① **陷入**的指令算「执行了」——它被取指、被译码、被触发；
+        // ② **取指失败**（总线错误）不算——那条指令根本没被取到。
+        //
+        // ① 用「奇地址 PC」触发：对齐检查先于取指（M-13 LLD 评审 13-3）。
+        let mut backend = backend_with_demo();
+        backend.set_pc(1);
+        let executed = backend.step_n(1).expect("step");
+        assert_eq!(executed, 1, "陷入的指令计入执行数");
+        assert_eq!(backend.total_executed(), 1);
+        assert_eq!(backend.last_stop_reason(), Some(HaltReason::Trap));
+
+        // ② 用「没有任何内存映射」触发取指失败。
+        let mut backend: SelfIssBackend<NullSinks, NullSinks> =
+            SelfIssBackend::new(NullSinks, NullSinks);
+        let err = backend.step_n(1).unwrap_err();
+        assert_eq!(err.family, ErrorFamily::Iss);
+        assert_eq!(
+            backend.total_executed(),
+            0,
+            "取指失败的那条指令没有被取到，不计入执行数"
+        );
+    }
+
+    #[test]
+    fn total_executed_counts_every_executed_instruction() {
+        // 回归 V-A 🟡-2：`total_executed` 此前**零引用**，改坏也没有测试变红。
+        let mut backend = backend_with_demo();
+        backend.step_n(3).expect("step");
+        assert_eq!(backend.total_executed(), 3);
+        backend.step_n(2).expect("step");
+        assert_eq!(backend.total_executed(), 5, "计数跨批次累加");
+    }
+
+    #[test]
+    fn continue_until_event_does_not_execute_guest_instructions() {
+        // 回归 V-A 🟡-3：`continue_until_event` 是**时间驱动**（推进 M-12
+        // 调度器），**不执行** guest 指令（M-17 LLD 评审 17-1「step 与
+        // runUntil 语义分离」）。把一条 guest 指令塞进去也不该有测试变红 ——
+        // 这条用例把它钉住。
+        let mut backend = backend_with_demo();
+        let pc_before = backend.snapshot().expect("snapshot").pc;
+        backend.continue_until_event().expect("run until event");
+        assert_eq!(backend.total_executed(), 0, "runUntil 不得执行 guest 指令");
+        assert_eq!(
+            backend.snapshot().expect("snapshot").pc,
+            pc_before,
+            "runUntil 不得推进 PC"
+        );
     }
 }

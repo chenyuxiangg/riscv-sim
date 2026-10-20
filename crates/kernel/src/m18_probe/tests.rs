@@ -46,6 +46,7 @@ fn make_bus_access(ts_ps: u64, addr: u32, w: BusWidth, dir: AccessDir, ok: bool)
         dir,
         ok,
         err_scenario: if ok { None } else { Some(1) },
+        is_fetch: false,
     }
 }
 
