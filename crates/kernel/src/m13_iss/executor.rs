@@ -1,14 +1,19 @@
-//! Executor for the MVP subset (RV32I ALU + a single I-type immediate).
+//! Executor for the RV32I instruction set.
 //!
 //! The executor is a pure function over `(gpr, mem, decoded)`. It
 //! does not maintain its own state — the caller threads the
 //! [`SimState`] through, which is what gives us deterministic replay.
 //!
+//! There is exactly **one** execution path ([`execute_one`]). Every
+//! dispatch route — the closure-backed [`Executor`] and the bus-backed
+//! adapter in the crate root — feeds the same function, so the two
+//! routes cannot drift apart in their instruction semantics (D-11).
+//!
 //! `StepOutcome` tells the engine whether the instruction completed,
 //! trapped, or paused at a breakpoint.
 
-use riscv_sim_contract::error::{ErrorFamily, PlatformError};
-use riscv_sim_contract::model::SimState;
+use riscv_sim_contract::error::PlatformError;
+use riscv_sim_contract::model::{SimState, WriteSize};
 
 use super::decoder::Decoded;
 
@@ -44,6 +49,14 @@ pub enum TrapCause {
     OutOfRange,
     /// Environment call from M-mode.
     Ecall,
+    /// Guest `EBREAK` (mcause = 3). Distinct from
+    /// [`StepOutcome::Breakpoint`], which means a *host* breakpoint
+    /// inserted by M-08 rather than a guest instruction.
+    Breakpoint,
+    /// Reserved for the `M` extension (division by zero, mcause = 6).
+    /// The M extension lands in a later wave; the cause is declared
+    /// here so the taxonomy does not have to change shape when it does.
+    IntegerDivideByZero,
 }
 
 impl Default for TrapCause {
@@ -78,26 +91,36 @@ pub fn write_gpr(state: &mut SimState, r: u8, value: u32) {
     }
 }
 
+/// Memory access port used by the executor.
+///
+/// The ISS never touches memory directly: every load / store goes
+/// through this port. Two adapters implement it — the closure-backed
+/// [`Executor`] and the bus-backed adapter in the crate root — so both
+/// dispatch routes run identical semantics (D-11). A third adapter can
+/// be added (e.g. a flat RAM model) without touching the semantics.
+pub trait MemoryAccess {
+    /// Read `size` bytes at `addr`; the value is returned in the low
+    /// bytes of the result (little-endian).
+    fn read(&mut self, addr: u32, size: WriteSize) -> Result<u32, PlatformError>;
+    /// Write the low `size` bytes of `value` at `addr`.
+    fn write(&mut self, addr: u32, size: WriteSize, value: u32) -> Result<(), PlatformError>;
+}
+
 /// Executor wrapper. Holds the memory accessors so the per-instruction
 /// site stays readable.
 pub struct Executor<F, G>
 where
-    F: Fn(u32, riscv_sim_contract::model::WriteSize) -> Result<u32, PlatformError>,
-    G: Fn(u32, riscv_sim_contract::model::WriteSize, u32) -> Result<(), PlatformError>,
+    F: Fn(u32, WriteSize) -> Result<u32, PlatformError>,
+    G: Fn(u32, WriteSize, u32) -> Result<(), PlatformError>,
 {
-    /// The fields below are wired through `Executor::new` but the
-    /// MVP-only `ADDI` path never invokes them. Used by LOAD / STORE
-    /// once M-13 widens to the full RV32IMC set (LLD §4.13).
-    #[allow(dead_code)]
     read_mem: F,
-    #[allow(dead_code)]
     write_mem: G,
 }
 
 impl<F, G> Executor<F, G>
 where
-    F: Fn(u32, riscv_sim_contract::model::WriteSize) -> Result<u32, PlatformError>,
-    G: Fn(u32, riscv_sim_contract::model::WriteSize, u32) -> Result<(), PlatformError>,
+    F: Fn(u32, WriteSize) -> Result<u32, PlatformError>,
+    G: Fn(u32, WriteSize, u32) -> Result<(), PlatformError>,
 {
     /// Build a new executor from memory accessors.
     pub fn new(read_mem: F, write_mem: G) -> Self {
@@ -113,29 +136,56 @@ where
         state: &mut SimState,
         d: &Decoded,
     ) -> Result<StepOutcome, PlatformError> {
-        // 0b0010011 = I-type ALU (addi / slti / etc.). MVP only implements
-        // ADDI (funct3 == 0x0) to keep the harness small.
-        if d.opcode == 0b0010011 {
-            if d.funct3 == 0x0 {
-                // ADDI: rd = rs1 + imm
-                let lhs = read_gpr(state, d.rs1) as i32;
-                let result = lhs.wrapping_add(d.imm) as u32;
-                write_gpr(state, d.rd, result);
-                state.pc = state.pc.wrapping_add(4);
-                return Ok(StepOutcome::Advanced);
-            }
-            return Ok(StepOutcome::Trapped {
-                cause: TrapCause::IllegalInstruction,
-            });
-        }
-
-        Err(PlatformError::new(
-            ErrorFamily::Iss,
-            2,
-            format!(
-                "unimplemented opcode 0b{:07b} at pc=0x{:08x}",
-                d.opcode, d.pc
-            ),
-        ))
+        execute_one(self, state, d)
     }
+}
+
+impl<F, G> MemoryAccess for Executor<F, G>
+where
+    F: Fn(u32, WriteSize) -> Result<u32, PlatformError>,
+    G: Fn(u32, WriteSize, u32) -> Result<(), PlatformError>,
+{
+    fn read(&mut self, addr: u32, size: WriteSize) -> Result<u32, PlatformError> {
+        (self.read_mem)(addr, size)
+    }
+
+    fn write(&mut self, addr: u32, size: WriteSize, value: u32) -> Result<(), PlatformError> {
+        (self.write_mem)(addr, size, value)
+    }
+}
+
+/// The single execution path shared by every dispatch route.
+///
+/// `_mem` is the memory port: it is threaded through here so that both
+/// dispatch routes are structurally identical, and so that the first
+/// instructions needing it (LOAD / STORE) land on one code path rather
+/// than two (D-11).
+pub fn execute_one<M: MemoryAccess>(
+    _mem: &mut M,
+    state: &mut SimState,
+    d: &Decoded,
+) -> Result<StepOutcome, PlatformError> {
+    // 0b0010011 = I-type ALU (addi / slti / etc.). MVP only implements
+    // ADDI (funct3 == 0x0) to keep the harness small.
+    if d.opcode == 0b0010011 {
+        if d.funct3 == 0x0 {
+            // ADDI: rd = rs1 + imm
+            let lhs = read_gpr(state, d.rs1) as i32;
+            let result = lhs.wrapping_add(d.imm) as u32;
+            write_gpr(state, d.rd, result);
+            state.pc = state.pc.wrapping_add(4);
+            return Ok(StepOutcome::Advanced);
+        }
+        return Ok(StepOutcome::Trapped {
+            cause: TrapCause::IllegalInstruction,
+        });
+    }
+
+    // An encoding the ISS cannot execute is an illegal instruction, not
+    // a platform failure: both dispatch routes report it identically
+    // (D-11). The engine turns this into mcause = 2 once trap delivery
+    // is wired (LLD §5.2.4).
+    Ok(StepOutcome::Trapped {
+        cause: TrapCause::IllegalInstruction,
+    })
 }

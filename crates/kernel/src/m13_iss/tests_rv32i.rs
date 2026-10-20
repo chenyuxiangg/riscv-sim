@@ -19,7 +19,7 @@ use riscv_sim_contract::model::{SimState, WriteSize};
 
 use crate::m14_bus::Bus;
 
-use super::executor::{read_gpr, StepOutcome};
+use super::executor::{read_gpr, StepOutcome, TrapCause};
 use super::Iss;
 
 // ---------------------------------------------------------------------------
@@ -223,4 +223,40 @@ fn reading_x0_yields_zero_even_if_register_file_is_corrupted() {
     h.step_one_at(&mut state, 0, word);
     assert_eq!(state.gpr[5], 1, "rs1 = x0 must read as zero");
     assert_eq!(read_gpr(&state, 0), 0, "x0 must read as zero");
+}
+
+// ---------------------------------------------------------------------------
+// D-11 — one execution path for both dispatch routes
+// ---------------------------------------------------------------------------
+
+/// An encoding the ISS cannot execute must be reported as an illegal
+/// instruction on *both* dispatch routes.
+///
+/// Before D-11 the closure route returned `Trapped` while the bus
+/// route returned `Err` — the two routes disagreed about what an
+/// illegal instruction even is.
+#[test]
+fn illegal_instruction_reports_the_same_outcome_on_both_routes() {
+    // 0b010_1011 is not a valid RV32I opcode.
+    let word = 0x0000_002Bu32;
+
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    let closure_outcome = h.step_one_at(&mut state, 0, word);
+
+    let mut bh = BusHarness::new(&[word]);
+    let mut bus_state = SimState::default();
+    let bus_outcome = bh.step(&mut bus_state).expect("bus route must not error");
+
+    assert_eq!(
+        closure_outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::IllegalInstruction
+        },
+        "closure route must trap as an illegal instruction"
+    );
+    assert_eq!(
+        bus_outcome, closure_outcome,
+        "both dispatch routes must agree on the outcome"
+    );
 }

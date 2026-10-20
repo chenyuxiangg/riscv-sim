@@ -18,7 +18,9 @@ pub mod decoder;
 pub mod executor;
 
 pub use decoder::{Decoded, Decoder};
-pub use executor::{read_gpr, write_gpr, Executor, StepOutcome};
+pub use executor::{
+    execute_one, read_gpr, write_gpr, Executor, MemoryAccess, StepOutcome, TrapCause,
+};
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{SimState, WriteSize};
@@ -89,15 +91,14 @@ impl Iss {
         let mut exec = Executor::new(read_mem, write_mem);
         exec.execute(state, &decoded)
     }
-
     /// Run a single instruction with all memory traffic routed through
     /// the supplied [`Bus`] (M-14). This is the production dispatch
     /// path — every fetch / load / store goes through the address
     /// decoder and contributes to the bus's stats / hook.
     ///
     /// Errors raised by the bus (E_BUS-01 / E_BUS-02 / E_BUS-05) are
-    /// mapped to ISS `{family: Iss, scenario: 1}` traps by
-    /// [`Executor::execute`] (which threads the error string through).
+    /// mapped to ISS `{family: Iss, scenario: 1}` errors by
+    /// [`BusMemory`] (which threads the error string through).
     /// Real guest-trap shaping (mcause + mtval) will land once the
     /// CSR file in `SimState` is connected; for now the bus error
     /// message is propagated verbatim.
@@ -114,8 +115,8 @@ impl Iss {
             )
         })?;
         let decoded = self.decoder.decode(raw, state.pc);
-        let mut exec = BusExecutor::new(bus);
-        exec.execute(state, &decoded)
+        let mut mem = BusMemory::new(bus);
+        execute_one(&mut mem, state, &decoded)
     }
 }
 
@@ -125,51 +126,46 @@ impl Default for Iss {
     }
 }
 
-/// Adapter that lets [`Executor`] dispatch memory accesses through a
-/// live [`Bus`] while keeping the executor's "memory accessor funcs"
-/// shape. The trick: the inner `Executor::execute` borrows two Fn
-/// muts at once; we re-enter the same `&mut Bus` serially by routing
-/// every read / write through this struct's methods, one slice at a
-/// time.
+/// Memory adapter that routes every ISS access through a live [`Bus`]
+/// (M-14).
 ///
-/// MVP caveat: ADDI is the only implemented instruction (LLD §4.13),
-/// so the bus borrow is currently used only by the fetch path inside
-/// [`Iss::step_one_via_bus`]. The struct exists to keep the
-/// future LOAD / STORE implementations from re-engineering the
-/// double `&mut Bus` borrow.
-struct BusExecutor<'a> {
-    #[allow(dead_code)]
+/// The adapter exists only to bridge the bus's `&mut self` API to the
+/// executor's memory port: the inner `Executor` holds two closures
+/// that would each need a `&mut Bus` at the same time, which Rust
+/// cannot lend out. Holding the bus in a struct and handing the
+/// executor a `&mut BusMemory` keeps the borrow exclusive while
+/// letting the two routes share one execution path (D-11).
+struct BusMemory<'a> {
     bus: &'a mut Bus,
 }
 
-impl<'a> BusExecutor<'a> {
+impl<'a> BusMemory<'a> {
     fn new(bus: &'a mut Bus) -> Self {
         Self { bus }
     }
+}
 
-    /// Execute one decoded instruction. Memory accesses are routed
-    /// straight through the bus — matches the legacy `Executor::new`
-    /// test surface but with the bus behind every `read_mem` /
-    /// `write_mem` call instead of plain closure functions.
-    fn execute(&mut self, state: &mut SimState, d: &Decoded) -> Result<StepOutcome, PlatformError> {
-        // 0b0010011 = I-type ALU. Reproduce Executor::execute's body for
-        // ADDI so the ISS stays a pure interpreter; all memory
-        // dispatches flow through `self.bus`.
-        if d.opcode == 0b0010011 && d.funct3 == 0x0 {
-            let lhs = read_gpr(state, d.rs1) as i32;
-            let result = lhs.wrapping_add(d.imm) as u32;
-            write_gpr(state, d.rd, result);
-            state.pc = state.pc.wrapping_add(4);
-            return Ok(StepOutcome::Advanced);
-        }
-        Err(PlatformError::new(
-            ErrorFamily::Iss,
-            2,
-            format!(
-                "unimplemented opcode 0b{:07b} at pc=0x{:08x}",
-                d.opcode, d.pc
-            ),
-        ))
+impl MemoryAccess for BusMemory<'_> {
+    fn read(&mut self, addr: u32, size: WriteSize) -> Result<u32, PlatformError> {
+        self.bus.read(addr, BusWidth::from(size)).map_err(|e| {
+            PlatformError::new(
+                ErrorFamily::Iss,
+                1,
+                format!("load at 0x{:08x}: {}", addr, e),
+            )
+        })
+    }
+
+    fn write(&mut self, addr: u32, size: WriteSize, value: u32) -> Result<(), PlatformError> {
+        self.bus
+            .write(addr, BusWidth::from(size), value)
+            .map_err(|e| {
+                PlatformError::new(
+                    ErrorFamily::Iss,
+                    1,
+                    format!("store at 0x{:08x}: {}", addr, e),
+                )
+            })
     }
 }
 
