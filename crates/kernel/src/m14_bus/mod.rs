@@ -35,7 +35,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
-use riscv_sim_contract::model::WriteSize;
+use riscv_sim_contract::model::{PendingWrite, WriteSize};
 use riscv_sim_contract::port::Peripheral;
 
 /// 4 GiB — covers the entire RV32 physical address space.
@@ -398,7 +398,14 @@ impl BusMaster for Bus {
 /// design will collapse naturally into this map when needed.
 pub struct Bus {
     regions: BTreeMap<u32, Region>,
-    hook: Option<BusHook>,
+    /// The bus-hook callbacks, in installation order.
+    ///
+    /// **Several** consumers need to observe every bus access: M-17's
+    /// watchpoint matcher and M-18's trace ring are two independent
+    /// subscribers, and neither may evict the other. A single slot
+    /// would have made the second `set_hook` silently replace the
+    /// first (D-46).
+    hooks: Vec<BusHook>,
     last_ts_ps: u64,
     stats: BusStats,
     /// Upper bound on a single region's size, in bytes (D-10).
@@ -416,7 +423,7 @@ impl Default for Bus {
     fn default() -> Self {
         Self {
             regions: BTreeMap::new(),
-            hook: None,
+            hooks: Vec::new(),
             last_ts_ps: 0,
             stats: BusStats::default(),
             max_region_bytes: DEFAULT_MAX_REGION_BYTES,
@@ -430,7 +437,7 @@ impl std::fmt::Debug for Bus {
         f.debug_struct("Bus")
             .field("regions.len", &self.regions.len())
             .field("stats", &self.stats)
-            .field("hook.installed", &self.hook.is_some())
+            .field("hook.count", &self.hooks.len())
             .field("max_region_bytes", &self.max_region_bytes)
             .finish()
     }
@@ -757,8 +764,94 @@ impl Bus {
     }
 
     /// Install / replace the trace hook (M-18 source of bus accesses).
+    /// **Replace** the bus-hook list with a single callback (or clear it).
+    ///
+    /// This is the original API and keeps its meaning: `set_hook(None)`
+    /// removes every hook, `set_hook(Some(h))` leaves exactly one.
+    ///
+    /// Prefer [`Bus::add_hook`] when a consumer merely wants to *join*
+    /// the observation stream — several independent consumers
+    /// (M-17's watchpoint matcher, M-18's trace ring) need to see the
+    /// same accesses, and the last `set_hook` would otherwise evict
+    /// the others (D-46).
     pub fn set_hook(&mut self, hook: Option<BusHook>) {
-        self.hook = hook;
+        self.hooks.clear();
+        if let Some(h) = hook {
+            self.hooks.push(h);
+        }
+    }
+
+    /// **Append** a bus-hook callback, keeping the ones already installed.
+    ///
+    /// The additive twin of [`Bus::set_hook`]: a consumer that only
+    /// observes (M-18's trace ring) joins the stream instead of
+    /// replacing it.
+    pub fn add_hook(&mut self, hook: BusHook) {
+        self.hooks.push(hook);
+    }
+
+    /// The **live** peripheral instances on this bus, with their base
+    /// addresses.
+    ///
+    /// The assembly layer (M-17 / `kernel_host`) needs this for two
+    /// wirings that the bus itself does not own:
+    ///
+    /// - **D-46** — attaching a probe sink to each peripheral
+    ///   ([`crate::m18_probe::ProbeRegistry::attach_signal`]) so the
+    ///   waveform pipeline sees the peripheral's state changes;
+    /// - **D-07** — ticking each peripheral from the scheduler.
+    ///
+    /// The handles are cloned `Rc`s, so the caller can hold on to them
+    /// after the bus is moved into a backend.
+    pub fn peripheral_instances(&self) -> Vec<(u32, Rc<RefCell<dyn Peripheral>>)> {
+        self.regions
+            .iter()
+            .filter_map(|(base, region)| match &region.target {
+                RegionTarget::PeripheralBound(bound) => Some((*base, Rc::clone(&bound.handle))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **推进**总线上所有**已绑定实例**的外设时钟（D-46）。
+    ///
+    /// 外设的 `tick(now_ps)` 是它与虚拟时钟之间的唯一同步点：M-15 的
+    /// GPIO 在 `tick` 里记下当前时间，之后它上报的探针边沿才带得上
+    /// **真实**的时间戳（M-15 `gpio.rs` 的 `now_ps` 字段）。
+    ///
+    /// 没有这一步，边沿的时间戳会一直是 0 —— 波形看起来「有数据」，
+    /// 时间轴却是平的，等于半个假象。
+    ///
+    /// ## 返回值
+    ///
+    /// 收集所有外设在本次 tick 期间希望提交到总线上的写
+    /// （[`PendingWrite`]）。**不静默丢弃**：调用方（M-17 的步进循环 /
+    /// 宿主）负责把它们并进引擎的 `SimState::pending_writes`。
+    ///
+    /// ## 争用
+    ///
+    /// 某个外设正被总线派发路径占用（`try_borrow_mut` 失败）时，
+    /// **跳过**这一次的 tick——它只是没赶上时钟，下一次 tick 会补上。
+    /// 派发路径上的 panic 是不可恢复的，所以这里绝不 `borrow_mut`。
+    ///
+    /// ## 与 D-07 的关系
+    ///
+    /// 这是**最小**同步：谁调用、什么时候调用由上层决定。D-07 落地后，
+    /// 外设的 tick 由 M-12 的调度器在**量子边界**统一驱动（那才是
+    /// 架构上的正确粒度），本方法届时退化为调度器 tick 路径的实现细节。
+    pub fn tick_peripherals(&self, now_ps: u64) -> Result<Vec<PendingWrite>, PlatformError> {
+        let mut writes = Vec::new();
+        for region in self.regions.values() {
+            let RegionTarget::PeripheralBound(bound) = &region.target else {
+                continue;
+            };
+            let Ok(mut periph) = bound.handle.try_borrow_mut() else {
+                // 外设正忙（派发路径上）——跳过这次 tick。
+                continue;
+            };
+            writes.extend(periph.tick(now_ps)?);
+        }
+        Ok(writes)
     }
 
     /// Update the most recent virtual time the bus was told about.
@@ -1375,16 +1468,19 @@ impl Bus {
         err_scenario: Option<u16>,
         is_fetch: bool,
     ) {
-        if let Some(hook) = self.hook.as_mut() {
-            let evt = BusAccess {
-                ts_ps: self.last_ts_ps,
-                addr,
-                width,
-                dir,
-                ok,
-                err_scenario,
-                is_fetch,
-            };
+        if self.hooks.is_empty() {
+            return;
+        }
+        let evt = BusAccess {
+            ts_ps: self.last_ts_ps,
+            addr,
+            width,
+            dir,
+            ok,
+            err_scenario,
+            is_fetch,
+        };
+        for hook in self.hooks.iter_mut() {
             (hook)(&evt);
         }
     }

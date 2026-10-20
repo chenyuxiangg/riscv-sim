@@ -219,8 +219,14 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
     fn install_watch_hook(&mut self) {
         let watchpoints = Rc::clone(&self.watchpoints);
         let watch_hit = Rc::clone(&self.watch_hit);
+        // `add_hook`（追加），**不是** `set_hook`（替换全部）：总线上还
+        // 要挂 M-18 的探针 hook（D-46），两个消费者都得看见每一次访存，
+        // 后装的不能把先装的顶掉。
+        //
+        // 三个调用点（`new` / `with_memory_bus` / `reset_memory_map`）
+        // 拿到的都是**没有**本模块 hook 的总线，所以不会重复安装。
         self.bus
-            .set_hook(Some(Box::new(move |access: &crate::m14_bus::BusAccess| {
+            .add_hook(Box::new(move |access: &crate::m14_bus::BusAccess| {
                 // A failed access is not an observed access — it never
                 // reached memory, so it must not fire a watchpoint.
                 if !access.ok {
@@ -244,7 +250,7 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
                         *slot = Some(wp);
                     }
                 }
-            })));
+            }));
     }
 
     /// The watchpoint that fired in the last step batch, if any.
@@ -308,6 +314,26 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             if breakpoints.hit_check(pc).is_some() {
                 *last_stop = Some(HaltReason::Breakpoint);
                 break;
+            }
+
+            // (1.5) 外设时钟同步（D-46）—— 让本条指令里发生的探针边沿
+            //       带上**真实**的虚拟时间戳。
+            //
+            //       没有这一步，M-15 的 GPIO 记下的 `now_ps` 永远是 0，
+            //       边沿虽然是真的（值、次数都对），时间轴却是平的——
+            //       波形看起来「有数据」，却读不出「什么时候变的」。
+            //
+            //       ⚠️ 这是**最小**同步：粒度是「每条指令一次」。D-07
+            //       落地后由 M-12 的调度器在量子边界统一驱动（D-07 的
+            //       「指令驱动与时间驱动如何交替」尚未裁定，这里不抢跑）。
+            {
+                let now_ps = engine.now_ps();
+                let writes = bus.tick_peripherals(now_ps)?;
+                if !writes.is_empty() {
+                    // 外设在 tick 期间想提交的写 —— 并进引擎的待提交队列，
+                    // 不静默丢弃（M-14 `tick_peripherals` 的契约）。
+                    engine.state_mut().pending_writes.extend(writes);
+                }
             }
 
             // (2) 执行一条指令。
