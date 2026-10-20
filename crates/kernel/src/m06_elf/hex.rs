@@ -21,7 +21,7 @@
 //! Limits from [`super::ParseLimits`]:
 //!   - line data count ≤ MAX_HEX_RECORD_BYTES (FF)
 //!   - total merged segment count ≤ limits.segment_count
-//!   - file size ≤ limits.elf_size
+//!   - text size ≤ limits.hex_size
 //!   - paddr end ≤ 4 GiB (else E_LDR-03)
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
@@ -38,14 +38,14 @@ const HEX_RECORD_MAX_DATA: usize = 0xFF;
 
 /// Parsed Intel HEX payload.
 pub fn parse(text: &str, limits: &ParseLimits) -> Result<LoadImage, PlatformError> {
-    if text.len() > limits.elf_size {
+    if text.len() > limits.hex_size {
         return Err(PlatformError::new(
             FAMILY,
             2,
             format!(
-                "HEX payload {} exceeds parseLimit.elfSize {}",
+                "HEX payload {} exceeds parseLimit.hexSize {}",
                 text.len(),
-                limits.elf_size
+                limits.hex_size
             ),
         ));
     }
