@@ -2,9 +2,8 @@
 //
 // Two adapters, one protocol:
 //   - browser-mode : postMessage to a Web Worker hosting the kernel
-//                    (`front/dev/mock-kernel-worker.js` today, the WASM
-//                    kernel from `crates/kernel` once its export layer
-//                    lands — Wave 2).
+//                    (`front/kernel-worker.js` — the WASM kernel from
+//                    `crates/kernel`, stage 1).
 //   - server-mode  : WebSocket to `riscv_sim_server` (P1). Skeleton only:
 //                    without a URL it stays in an explicit "not connected"
 //                    state.
@@ -332,7 +331,7 @@ export async function mountTransport(options = {}) {
         adapter = null;
     }
     const mode = options.mode === "websocket" ? "websocket" : "worker";
-    const label = mode === "websocket" ? "server websocket (P1)" : "mock worker";
+    const label = mode === "websocket" ? "server websocket (P1)" : "wasm worker";
     setStatus({
         mode,
         connected: false,
@@ -346,7 +345,7 @@ export async function mountTransport(options = {}) {
     const built = mode === "websocket"
         ? createWebSocketAdapter({ url: options.url ?? null })
         : createWorkerAdapter({
-            workerUrl: options.workerUrl ?? "./dev/mock-kernel-worker.js",
+            workerUrl: options.workerUrl ?? "./kernel-worker.js",
             createWorker: options.createWorker,
         });
 

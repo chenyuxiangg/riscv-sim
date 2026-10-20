@@ -8,6 +8,8 @@
 // Kept in `front/dev/` because it is demo data: the production path
 // (M-06 ELF / raw-HEX loader) is a later wave.
 
+import { DEMO_FIRMWARE_BYTES } from "./demo-firmware.js";
+
 /**
  * Build the mock project used by the dev wiring.
  *
@@ -33,7 +35,13 @@ export function buildMockProject() {
                 ],
             },
         },
-        images: [],
+        images: [{
+            name: "demo-firmware.bin",
+            kind: "RawHex",
+            // `model::ImageSource::Bytes(Vec<u8>)` — an externally
+            // tagged enum, so the serde shape is `{"Bytes":[...]}`.
+            source: { Bytes: [...DEMO_FIRMWARE_BYTES] },
+        }],
         version: {
             schema: 1,
             isa: "RV32IMC",

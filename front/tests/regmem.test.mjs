@@ -87,6 +87,15 @@ function registerSnapshot(gpr, pc, tPs = 1000) {
     return waveform(streams);
 }
 
+/** A minimal `model::Project` shaped payload. */
+const project = {
+    id: "proj-regmem",
+    name: "regmem",
+    tree: { root: { name: "MainBoard", component_id: null, children: [] } },
+    images: [],
+    version: { schema: 1, isa: "RV32IMC", toolchain: "gate" },
+};
+
 describe("M-10 寄存器内存服务", () => {
     test("读寄存器走 M-05，快照落到缓存", async () => {
         const transport = createFakeTransport();
@@ -298,6 +307,89 @@ describe("M-10 寄存器内存服务", () => {
         transport.setConnected(true);
         await tick();
         assert.equal(transport.sent.length, 1, "链路没断却重复订阅了");
+        router.close();
+        service.close();
+    });
+
+    test("装载工程后必须**强制**重新订阅（幂等的 ensureSubscribed 不够）", async () => {
+        // 回归用例（第 1 阶段接上真内核后暴露）：
+        //
+        //   `LoadProject` 会清掉**内核侧**的主题集合（新工程 = 新会话，
+        //   FR-13），但**本地**的「已订阅」标志还立着。于是幂等的
+        //   `ensureSubscribed()` 什么都不发，寄存器推送**静默停掉**——
+        //   视图停在旧值上，不报任何错。
+        //
+        //   这道不变量的归属是**服务**：`loadProject()` 把「装载 +
+        //   强制重新订阅」绑在一起，调用点不会漏掉后半步。
+        const transport = createFakeTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
+
+        // 1) 先订阅一次 —— 本地标志变成「已订阅」。
+        const first = service.ensureSubscribed();
+        transport.emit(eventFrame(
+            transport.sent[0].reqId,
+            Event.waveformDelta(registerSnapshot(new Array(32).fill(0), 0)),
+        ));
+        await first;
+        assert.equal(transport.sent.length, 1);
+
+        // 2) 装载工程：内核侧订阅随工程一起失效，本地标志却没动。
+        const loading = service.loadProject(project);
+        await tick();
+        assert.deepEqual(
+            transport.sent[1].message.payload.Command,
+            { LoadProject: project },
+            "第 2 条命令应当是 LoadProject",
+        );
+        transport.emit(eventFrame(transport.sent[1].reqId, Event.tick(0, 0)));
+        await tick();
+
+        // 3) `loadProject()` 自己就把订阅重新发了一遍。
+        const subscribes = transport.sent.filter(
+            (s) => s.message.payload?.Command?.Subscribe !== undefined,
+        );
+        assert.equal(subscribes.length, 2, "装载工程后没有重新订阅，推送会静默停掉");
+        assert.deepEqual(
+            transport.sent[2].message.payload,
+            { Command: { Subscribe: { topic: "sim.registers" } } },
+        );
+
+        // 4) 答上订阅，别留 pending。
+        transport.emit(eventFrame(
+            transport.sent[2].reqId,
+            Event.waveformDelta(registerSnapshot(new Array(32).fill(0), 0)),
+        ));
+        await loading;
+        router.close();
+        service.close();
+    });
+
+    test("resubscribe() 会无视本地标志重新发订阅", async () => {
+        const transport = createFakeTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
+
+        const first = service.ensureSubscribed();
+        transport.emit(eventFrame(
+            transport.sent[0].reqId,
+            Event.waveformDelta(registerSnapshot(new Array(32).fill(0), 0)),
+        ));
+        await first;
+
+        // 幂等的那个：什么都不发。
+        await service.ensureSubscribed();
+        assert.equal(transport.sent.length, 1, "ensureSubscribed 应当是幂等的");
+
+        // 强制的那个：重新发一条 Subscribe。
+        const again = service.resubscribe();
+        await tick();
+        assert.equal(transport.sent.length, 2, "resubscribe 没有重新订阅");
+        transport.emit(eventFrame(
+            transport.sent[1].reqId,
+            Event.waveformDelta(registerSnapshot(new Array(32).fill(0), 0)),
+        ));
+        await again;
         router.close();
         service.close();
     });

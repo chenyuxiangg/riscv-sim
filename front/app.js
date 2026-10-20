@@ -25,8 +25,8 @@ import { Command } from "./lib/message.js";
 import { buildMockProject } from "./dev/mock-project.js";
 import { buildDemoStoreState, seedDemoState } from "./dev/demo-state.js";
 
-/** URL of the dev-only mock kernel Worker (same-origin HTTP required). */
-const MOCK_WORKER_URL = "./dev/mock-kernel-worker.js";
+/** URL of the WASM kernel Worker (same-origin HTTP required). */
+const KERNEL_WORKER_URL = "./kernel-worker.js";
 
 const status = document.getElementById("status");
 
@@ -34,7 +34,7 @@ const status = document.getElementById("status");
  * Wire the dev-only "seed demo bus" affordances:
  *   - the top-bar button
  *   - the `riscv:seed` signal emitted by the product view
- * The demo seeder stays available as a fallback for the parts the mock
+ * The demo seeder stays available as a fallback for the parts the
  * kernel does not model yet (the M-14 memory map).
  */
 function wireDevSeeding() {
@@ -163,12 +163,10 @@ async function handleCommand(detail, services) {
                 await commandRouter.dispatchCommand(Command.pause());
                 break;
             case "reset":
-                await commandRouter.dispatchCommand(Command.loadProject(buildMockProject()));
-                // A new project is a new session: the kernel-side
-                // register subscription died with the old project, so
-                // the host has to subscribe again — otherwise the
-                // register view silently goes stale.
-                await registerMemory.readRegisters();
+                // `loadProject()` 装载工程**并且**强制重新订阅寄存器流
+                // （内核侧的订阅随工程一起失效了 —— 新工程 = 新会话，
+                // FR-13）。这两步绑在服务里，调用点不会漏掉后者。
+                await registerMemory.loadProject(buildMockProject());
                 break;
             case "read-regs":
                 await registerMemory.readRegisters();
@@ -200,15 +198,25 @@ async function startSession(services) {
     try {
         await session.createSession({ role: workspace.role });
         const project = buildMockProject();
-        await commandRouter.dispatchCommand(Command.loadProject(project));
+        // `loadProject()` 装载工程**并且**强制重新订阅寄存器流。
+        //
+        // 为什么必须是「强制」：`LoadProject` 会清掉内核侧的主题集合
+        // （新工程 = 新会话，FR-13），而 `ensureSubscribed()` 是**幂等**
+        // 的——本地标志可能还写着「已订阅」（会话绑定
+        // `createSession` → `bindSession` → 传输状态变化会触发一次），
+        // 实际内核侧的订阅却已经随旧工程一起没了。结果就是寄存器推送
+        // **静默停掉**，视图停在旧值上，不报任何错。
+        //
+        // 这个缺陷在 mock 内核时代就存在，是第 1 阶段前端接上**真内核**
+        // 之后、被真机断言「x1 必须是 42」逼出来的。
+        await registerMemory.loadProject(project);
         viewStore.setState("product", (prev) => ({
             ...prev,
             tree: project.tree,
         }));
         publishViewState("product");
-        await registerMemory.ensureSubscribed();
         await commandRouter.dispatchCommand(Command.nop());
-        setNote("mock 内核已就绪（Nop 往返成功）");
+        setNote("WASM 内核已就绪（Nop 往返成功）");
     } catch (err) {
         setNote(`内核未就绪：${err?.message ?? err}`);
     }
@@ -269,7 +277,7 @@ async function bootstrap() {
     // the router / session / regmem service get the live adapter.
     const transportStatus = await transportApi.mountTransport({
         mode: "worker",
-        workerUrl: MOCK_WORKER_URL,
+        workerUrl: KERNEL_WORKER_URL,
     });
     const commandRouter = await mountCommandRouter({ transport: transportApi });
     const session = await mountSession({ transport: transportApi, commandRouter });
@@ -300,7 +308,7 @@ async function bootstrap() {
     describeWorkspace(workspace);
 
     // The status bar follows the **live** transport state, not a
-    // one-shot snapshot: the mock kernel connects a tick after the
+    // one-shot snapshot: the kernel worker connects a tick after the
     // page came up, and the bar has to say so.
     transportApi.onStatus((st) => renderStatus(st));
     renderStatus(transportApi.getTransportStatus());

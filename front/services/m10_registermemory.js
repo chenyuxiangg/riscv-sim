@@ -278,13 +278,58 @@ export async function mountRegisterMemory(options = {}) {
         ensureSubscribed();
     }) ?? null;
 
+    /**
+     * **强制**重新订阅内核侧的寄存器流。
+     *
+     * `ensureSubscribed()` 是**幂等**的：本地 `subscribed` 标志为真时它
+     * 直接返回，什么都不发。但内核侧的订阅是**会死的**——`LoadProject`
+     * 会清掉内核的主题集合（新工程 = 新会话，FR-13），此时本地的标志
+     * 还是「已订阅」，实际却没有订阅。
+     *
+     * 结果是：寄存器推送**静默停掉**，视图停在旧值上，没有任何报错。
+     * 这个缺陷在 mock 内核时代就存在（mock 的 `reset()` 同样清主题），
+     * 直到第 1 阶段前端接上**真内核**、并把「x1 必须是 42」写进真机
+     * 断言，它才暴露出来。
+     *
+     * 所以：**任何 `LoadProject` 之后都必须调这个**，而不是
+     * `ensureSubscribed()`。
+     *
+     * @returns {Promise<void>}
+     */
+    async function resubscribe() {
+        subscribed = false;
+        await ensureSubscribed();
+    }
+
+    /**
+     * 装载一个工程，并**强制**重新订阅寄存器流。
+     *
+     * `LoadProject` 会清掉内核侧的主题集合（新工程 = 新会话，FR-13），
+     * 所以装载之后必须重新订阅，否则寄存器推送**静默停掉**——视图停在
+     * 旧值上，没有任何报错。
+     *
+     * 把这道不变量放在**服务**里（而不是散落在调用点的「记得再订阅一次」
+     * 注释里）是它正确的归属：调用点只管调 `loadProject()`，不会有人
+     * 忘记那一步。
+     *
+     * @param {object} project — `model::Project` shaped value
+     * @returns {Promise<void>}
+     */
+    async function loadProject(project) {
+        if (!router) throw new Error("E_TRX-01: 未挂载命令路由器（M-05）");
+        await router.dispatchCommand(Command.loadProject(project));
+        await resubscribe();
+    }
+
     return {
         readRegisters,
         readMemory,
         writeMemory,
+        loadProject,
         getSnapshot,
         subscribe,
         ensureSubscribed,
+        resubscribe,
         /** Force an immediate store push (the gate uses it instead of waiting). */
         flushRender,
         close() {

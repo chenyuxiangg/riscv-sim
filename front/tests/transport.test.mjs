@@ -175,6 +175,15 @@ describe("M-07 传输适配器 · worker 形态", () => {
         assert.match(status.lastError, /E_TRX-02/);
     });
 
+    test("默认挂载指向 WASM 内核 worker（不再是 mock worker）", async () => {
+        // No `workerUrl` and no `createWorker` → the default factory
+        // hits the missing `Worker` global and the error message carries
+        // the URL it tried to load.
+        const status = await m07.mountTransport({ mode: "worker" });
+        assert.match(status.lastError, /\.\/kernel-worker\.js/, "默认 workerUrl 不是 WASM 内核");
+        assert.equal(status.label, "wasm worker", "默认 label 不是 wasm worker");
+    });
+
     test("未连接时发命令抛 E_TRX-01", async () => {
         await m07.mountTransport({ mode: "worker" });
         assert.throws(() => m07.sendCommand(commandMessage(1, Command.nop())), /E_TRX-01/);
