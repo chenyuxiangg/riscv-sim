@@ -28,6 +28,8 @@ const { eventMessage, Event, waveform } = await importFront("lib/message.js");
 function createFakeTransport() {
     /** @type {Set<Function>} */
     const messageHandlers = new Set();
+    /** @type {Set<Function>} */
+    const statusHandlers = new Set();
     const transport = {
         sent: [],
         connected: true,
@@ -35,8 +37,9 @@ function createFakeTransport() {
             messageHandlers.add(handler);
             return () => messageHandlers.delete(handler);
         },
-        onStatus() {
-            return () => {};
+        onStatus(handler) {
+            statusHandlers.add(handler);
+            return () => statusHandlers.delete(handler);
         },
         sendCommand(message, options = {}) {
             transport.sent.push({ message, reqId: options.reqId ?? null });
@@ -46,6 +49,13 @@ function createFakeTransport() {
         },
         emit(frame) {
             for (const fn of [...messageHandlers]) fn(frame);
+        },
+        /** Flip the link state and notify the status subscribers. */
+        setConnected(value) {
+            transport.connected = value;
+            for (const fn of [...statusHandlers]) {
+                fn(transport.getTransportStatus());
+            }
         },
     };
     return transport;
@@ -228,6 +238,66 @@ describe("M-10 寄存器内存服务", () => {
         const sim = viewStore.getState("debug").sim;
         assert.equal(sim.disasm.length, 1, "sim 被整块替换，反汇编没了");
         assert.equal(sim.pc, 0x20);
+        router.close();
+        service.close();
+    });
+
+    test("断线重连后重新订阅寄存器（不丢增量）", async () => {
+        const transport = createFakeTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
+
+        // 1) link up → the service subscribes to the register topic.
+        const first = service.ensureSubscribed();
+        assert.equal(transport.sent.length, 1);
+        assert.deepEqual(
+            transport.sent[0].message.payload,
+            { Command: { Subscribe: { topic: "sim.registers" } } },
+        );
+        transport.emit(eventFrame(
+            transport.sent[0].reqId,
+            Event.waveformDelta(registerSnapshot(new Array(32).fill(0), 0)),
+        ));
+        await first;
+
+        // 2) the link goes down — the kernel-side subscription dies with
+        //    it, so the service must forget that it is subscribed.
+        transport.setConnected(false);
+
+        // 3) the link comes back → the service subscribes again.
+        transport.setConnected(true);
+        await tick();
+        assert.equal(transport.sent.length, 2, "重连后没有重新订阅");
+        assert.deepEqual(
+            transport.sent[1].message.payload,
+            { Command: { Subscribe: { topic: "sim.registers" } } },
+        );
+
+        // Answer the second subscribe so no command is left pending.
+        transport.emit(eventFrame(
+            transport.sent[1].reqId,
+            Event.waveformDelta(registerSnapshot(new Array(32).fill(0), 0)),
+        ));
+        await tick();
+        router.close();
+        service.close();
+    });
+
+    test("链路没断时不重复订阅", async () => {
+        const transport = createFakeTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
+
+        const first = service.ensureSubscribed();
+        transport.emit(eventFrame(
+            transport.sent[0].reqId,
+            Event.waveformDelta(registerSnapshot(new Array(32).fill(0), 0)),
+        ));
+        await first;
+        // A repeated status notification must not re-subscribe.
+        transport.setConnected(true);
+        await tick();
+        assert.equal(transport.sent.length, 1, "链路没断却重复订阅了");
         router.close();
         service.close();
     });

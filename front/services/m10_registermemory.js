@@ -183,6 +183,18 @@ export async function mountRegisterMemory(options = {}) {
     // -- requests ------------------------------------------------------------
 
     /**
+     * Is the transport link up right now? A service mounted without a
+     * transport counts as "up" — only a real disconnect invalidates the
+     * kernel-side subscription.
+     *
+     * @returns {boolean}
+     */
+    function linkIsUp() {
+        const status = transport?.getTransportStatus?.();
+        return status ? status.connected !== false : true;
+    }
+
+    /**
      * Ask the kernel for a fresh register snapshot. Resolves with the
      * snapshot event (a `WaveformDelta`).
      *
@@ -191,7 +203,11 @@ export async function mountRegisterMemory(options = {}) {
     async function readRegisters() {
         if (!router) throw new Error("E_TRX-01: 未挂载命令路由器（M-05）");
         const event = await router.dispatchCommand(Command.subscribe("sim.registers"));
-        subscribed = true;
+        // The kernel-side subscription only survives while the link is
+        // up: a disconnect during the round-trip invalidates it, and
+        // `ensureSubscribed()` has to subscribe again after the
+        // reconnect — otherwise the register deltas are lost (F7).
+        if (linkIsUp()) subscribed = true;
         return event;
     }
 
@@ -240,7 +256,7 @@ export async function mountRegisterMemory(options = {}) {
      */
     async function ensureSubscribed() {
         if (subscribed || !router) return;
-        if (transport && !transport.getTransportStatus?.().connected) return;
+        if (!linkIsUp()) return;
         try {
             await readRegisters();
         } catch (err) {
@@ -250,7 +266,16 @@ export async function mountRegisterMemory(options = {}) {
     }
 
     const offStatus = transport?.onStatus?.((st) => {
-        if (st.connected) ensureSubscribed();
+        if (st?.connected === false) {
+            // The link went down: the kernel-side subscription died with
+            // it. Reset the flag so the next `ensureSubscribed()` (the
+            // reconnect path below) subscribes again — otherwise the
+            // service keeps believing it is subscribed and the register
+            // deltas never come back (F7).
+            subscribed = false;
+            return;
+        }
+        ensureSubscribed();
     }) ?? null;
 
     return {
