@@ -26,10 +26,11 @@ missing_docs = "allow"
 # at the project level. Don't churn the frozen schemas just to silence a
 # stylistic warning — revisit when M-0 contracts are re-shaped post-MVP.
 derivable_impls = "allow"
-# M-12's BinaryHeap min-heap trick relies on a non-canonical Ord impl
-# (PROGRESS.md §1.2 M-12 状态: 调度器骨架). Re-enable when M-12 finishes
-# the ISS-instruction-budget wiring and the queue grows a real comparator.
-non_canonical_partial_ord_impl = "allow"
+# M-12's event queue used to rely on a non-canonical Ord impl (PROGRESS.md
+# §1.2 M-12 状态: 调度器骨架). M-12 加固后队列改为规范排序（`PartialOrd =
+# Some(self.cmp(other))`），该 allowance 已无对象，2026-10-20 移除。
+# 保留这段注释以说明「为什么这里曾经有一行 allow」——若将来又出现非规范
+# Ord 实现，优先把实现改规范，而不是重新加 allowance。
 
 [profile.dev]
 opt-level = 0

@@ -73,9 +73,11 @@ impl Iss {
 
     /// Select the policy for misaligned data accesses.
     ///
-    /// Defaults to [`MisalignedPolicy::Trap`]; LLD §3.6(2) asks for the
-    /// Spike-aligned behaviour ([`MisalignedPolicy::Allow`]) instead,
-    /// which the Spike golden wave will need.
+    /// Defaults to [`MisalignedPolicy::Allow`] — LLD §3.6(2) / §5.2.1
+    /// require the Spike-aligned behaviour ("默认不触发…保持 golden
+    /// 兼容"). Use [`MisalignedPolicy::Trap`] to opt into strict
+    /// diagnostics, where an unaligned access surfaces as a trap
+    /// instead of being performed.
     pub fn with_misaligned_policy(mut self, policy: MisalignedPolicy) -> Self {
         self.misaligned = policy;
         self

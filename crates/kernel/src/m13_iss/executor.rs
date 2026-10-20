@@ -167,17 +167,25 @@ where
 /// Policy for misaligned data accesses.
 ///
 /// The RISC-V spec lets an implementation either raise an
-/// address-misaligned exception or perform the access. LLD §3.6(2)
-/// asks for the Spike-aligned behaviour (perform it), while the
-/// platform contract for this wave asks for a trap — the policy is
-/// therefore configurable, and defaults to trapping.
+/// address-misaligned exception or perform the access. LLD §3.6(2) and
+/// §5.2.1 both ask for the Spike-aligned behaviour (perform it) and
+/// say so explicitly — "默认不触发（模拟器与 Spike 一致允许非对齐）"
+/// / "不触发，保持 golden 兼容". The default therefore **performs**
+/// the access.
+///
+/// [`MisalignedPolicy::Trap`] stays available as a strict diagnostic
+/// mode: a debugger that wants unaligned accesses surfaced rather than
+/// silently performed can opt into it. It is *not* the default because
+/// a default of `Trap` would diverge from Spike on any program that
+/// touches an unaligned address, which is exactly what the golden
+/// comparison (Wave 2) measures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MisalignedPolicy {
-    /// Raise a misaligned-access trap.
+    /// Perform the access anyway (LLD default; Spike-compatible).
     #[default]
-    Trap,
-    /// Perform the access anyway.
     Allow,
+    /// Raise a misaligned-access trap (strict diagnostic mode).
+    Trap,
 }
 
 /// Instruction identity after two-level decode.

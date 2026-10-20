@@ -840,10 +840,11 @@ fn load_into_x0_is_discarded() {
     assert_eq!(state.gpr[0], 0, "a load into x0 must be discarded");
 }
 
-/// A misaligned word access traps.
+/// A misaligned word access traps under the strict `Trap` policy.
 #[test]
 fn misaligned_word_access_traps() {
     let mut h = Harness::new();
+    h.iss = h.iss.with_misaligned_policy(MisalignedPolicy::Trap);
     let mut state = SimState::default();
     state.gpr[1] = 0x101; // not 4-byte aligned
     let outcome = h.step_one_at(&mut state, 0, enc_i(0, 1, 0b010, 2, LOAD));
@@ -859,10 +860,11 @@ fn misaligned_word_access_traps() {
     );
 }
 
-/// A misaligned halfword access traps.
+/// A misaligned halfword access traps under the strict `Trap` policy.
 #[test]
 fn misaligned_halfword_access_traps() {
     let mut h = Harness::new();
+    h.iss = h.iss.with_misaligned_policy(MisalignedPolicy::Trap);
     let mut state = SimState::default();
     state.gpr[1] = 0x101; // not 2-byte aligned
     let outcome = h.step_one_at(&mut state, 0, enc_i(0, 1, 0b001, 2, LOAD));
@@ -874,10 +876,11 @@ fn misaligned_halfword_access_traps() {
     );
 }
 
-/// A misaligned store traps.
+/// A misaligned store traps under the strict `Trap` policy.
 #[test]
 fn misaligned_store_traps() {
     let mut h = Harness::new();
+    h.iss = h.iss.with_misaligned_policy(MisalignedPolicy::Trap);
     h.load(0x100, &[0x0000_0000]);
     let mut state = SimState::default();
     state.gpr[1] = 0x102; // not 4-byte aligned
@@ -893,6 +896,33 @@ fn misaligned_store_traps() {
         h.ram.borrow().read(0x100, WriteSize::Word).unwrap(),
         0,
         "a trapped store must not touch memory"
+    );
+}
+
+/// The **default** policy performs the misaligned access.
+///
+/// LLD §3.6(2) / §5.2.1 require the Spike-aligned behaviour
+/// ("默认不触发（模拟器与 Spike 一致允许非对齐）" / "不触发，保持 golden
+/// 兼容"）。A default of `Trap` would diverge from Spike on any
+/// program touching an unaligned address — exactly what the golden
+/// comparison measures. So `Allow` is the default and `Trap` is the
+/// opt-in strict mode.
+#[test]
+fn default_policy_performs_the_misaligned_access() {
+    let mut h = Harness::new();
+    assert_eq!(
+        MisalignedPolicy::default(),
+        MisalignedPolicy::Allow,
+        "the default must be the LLD-mandated Spike-aligned policy"
+    );
+    h.load(0x100, &[0x1122_3344]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x101; // not 4-byte aligned
+    let outcome = h.step_one_at(&mut state, 0, enc_i(0, 1, 0b010, 2, LOAD));
+    assert!(matches!(outcome, StepOutcome::Advanced));
+    assert_eq!(
+        state.gpr[2], 0x0011_2233,
+        "the unaligned word is read as-is, Spike-style"
     );
 }
 

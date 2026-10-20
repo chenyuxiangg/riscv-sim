@@ -1,11 +1,117 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.10.0
+> **Document version**: v0.11.0
 > **Created**: 2026-10-19
 > **Last updated**: 2026-10-20
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.11.0 变更摘要
+
+**首次「多路并行开发」**：把 5 个互不重叠的模块任务拆成 5 个隔离 worktree，5 个 Agent 会话同时施工，全绿后统一收口。核心目标是把台账里**3 条阻断级欠账 + 8 条高危 + 4 条中低危**一次性打掉，并把「模块做完了、模块之间没接上」这个结构性问题从根上解决。
+
+### 并行执行的工程机制（本次最大的方法论产出）
+
+| 机制 | 做法 | 解决的问题 |
+| --- | --- | --- |
+| **worktree 隔离** | 每个任务一个 `git worktree` + 一个分支 + 独立 `target/` | 并行会话抢 git index / 抢 commit 的竞态（本仓库 AGENTS.md 明确警告过「目录级 add 会把别人的改动一并收进你的 commit」）；`target/` 独立避免 cargo 锁竞争 |
+| **文件所有权矩阵** | 每个会话一份「只能改 / 不得改」清单，硬冲突文件（`crates/contract/**`、`lib.rs`、`m17_backend/**`、台账与 PROGRESS）划为协调者保留区 | 零 merge 冲突（实测 4 个分支合入 **0 冲突**） |
+| **公开 API 只增不减** | 契约冻结 + `m17_backend` 保留 → 所有改动只能是加法 | 子会话不需要跨模块协商，各自可独立交付 |
+| **协调者独立复验** | 不采信子会话的「已全绿」声明，自己在每个 worktree 里重跑 fmt / clippy / test / 前端门禁 | 子会话自报 220/232/109，独立复验逐条对上 |
+
+### 5 路交付明细
+
+| 任务 | 分支 | commit | 测试 | 闭环的欠账 |
+| --- | --- | --- | --- | --- |
+| **T1 · M-13 ISS** | `feature/m13-iss-rv32i` | 9 | 203 → **277** | D-04 / D-11 / D-16 |
+| **T2 · M-12 引擎** | `feature/m12-engine-hardening` | 4 | 203 → **220** | D-05 / D-06 / D-17 / D-23 #4 |
+| **T3 · M-06 加载器** | `feature/m06-loader-hardening` | 9 | 203 → **232** | D-03 / D-08 / D-09 / D-15 / D-21 / D-22 / D-10（M-06 侧）/ D-23 #2 |
+| **T4 · 前端服务层** | `feature/frontend-service-layer` | 8 | 38 → **109 用例 / 19 suite** | 前端 M-04 / M-05 / M-07 / M-10 从空壳到真跑通 |
+| **T5 · 三处接线** | `feature/m14-m15-m18-wiring` | 6 | 203 → **234** | D-12 / D-14 / D-10（M-14 侧）· **N5 闭合** |
+
+### N5「GPIO 翻转可见」内核路径 100% 闭合（T5 接线 PR）
+
+台账 §1.2 画的那条断链——「M-15 外设 → ???」——v0.11 全部接上：
+
+| 环节 | 之前 | 现在 |
+| --- | --- | --- |
+| M-14 → M-15 | 总线只存 `PeripheralId`，**没有外设实例** → 访问外设窗口返 E_BUS-05 | 总线经 `Rc<RefCell<dyn Peripheral>>` **共享句柄**持有外设实例（`BoundPeripheral` + `RegionTarget::PeripheralBound`），`map_peripheral_instance` 挂载时校验 `size == periph.size()`（不一致 → E_BUS-08） |
+| M-15 → M-18 | 三个外设**都没 override `on_probe`** → 外设状态变化永远到不了探针 | `GpioBank` / `Uart16550` / `TimerRiscv` 全部 override，上报 `OUT` / `TX` / `CMP`；M-18 新增 `ProbeRegistry::attach_signal`（LLD §1.3 的 `attachSignal`）+ `CH_UART_TX = 4` |
+| 读路径 | —— | 总线读外设**一律 `read_clear`**（D-14），`Uart16550` 正确 override（读 RX 后清 FIFO）——UART「只能收 1 字节」的原缺陷不会静默复现 |
+| 区域分配 | `prepare_bytes` 裸 `vec![0u8; size]` → 84 字节畸形 ELF 可申请 GiB 级内存 | 引入**区域大小上限**（超限 → E_BUS-09），`map_ram` / `map_region` 两条分配路径均受保护，**不先分配后检查** |
+
+**证据**：`crates/kernel/tests/m14_m15_m19_wiring.rs` —— **11 个端到端用例**，固件写 GPIO OUT → M-14 派发到外设实例 → M-15 上报 → M-18 判沿 → M-19 波形通道出现期望边沿。
+
+**观测管道现在有两条通路**到达 M-19：「总线访存」与「外设信号」——此前只有前者。
+
+### 3 条阻断级欠账全部消除
+
+- **D-04（x0 未硬连线）** —— `executor.rs` 与 `mod.rs` 两处裸写 `state.gpr[d.rd]` 全部收敛到 `read_gpr` / `write_gpr`：写侧 `rd == 0` 丢弃写入，读侧恒返回 0。**这是 T1 全部 RV32I 工作量的前置**——x0 不硬连线，Spike 对拍第一条 golden 用例即红。
+- **D-03（畸形 HEX 整数下溢 panic）** —— `hex.rs:112` 的 `bytes.len() - 5` 在 4 字节记录时下溢 panic（WASM 内等于 worker 崩溃）。修掉后新增**表驱动畸形输入用例 + 固定种子 fuzz**，并做了**反向验证**：把修复改回去，门禁确实变红。
+- **D-05（快照不还原 now_ps / 事件队列）** —— `Engine` 改以 `state.virtual_time_ps` 为时间唯一真相（契约里本就为这个留的字段），`EngineSnapshot` 在 m12 内部承载队列完整快照，`snapshot_full` / `restore_full` 新增而**旧签名原样保留**（`m17_backend` 零改动继续编译）。
+
+### 3 条「门禁看不见」的结构性欠账被补上（D-23）
+
+台账 §五 的结论是「203 个 Rust 测试全绿的同时前端白屏、M-06 能被 4 字节畸形记录打崩」——根因是门禁覆盖不到。本轮补上其中 3 类：
+
+| 门禁 | 覆盖 | 状态 |
+| --- | --- | --- |
+| M-13 x0 断言 | D-04 | ✅ |
+| M-12 snapshot→restore→继续推进的确定性断言 | D-05 | ✅ |
+| M-06 畸形输入表驱动 + fuzz | D-03 / D-15 | ✅ |
+| ESM 链接检查（v0.10 已加） | D-01 / D-02 | ✅ 已有 |
+
+**基线跃迁**：`cargo test --workspace` 203 → **314**（+111）；前端门禁 38 → **109 用例 / 19 suite**（+71）。
+
+### 工具链：Spike + RISC-V GCC 落地（Wave 2 golden 对拍的前置）
+
+用户指示「现在就把 Spike + RISC-V GCC 装上」。本机 **Homebrew 是坏的**（2023-12 版本，不认识 macOS 26.6），且配的阿里云镜像**停在 2023-12**。绕行路径：
+
+1. 从 GitHub 直取 Homebrew `main` 分支（2026-10-19 版）并切换过去——本机 brew 从「跑不起来」变为可用
+2. `brew tap riscv-software-src/riscv` → `riscv-isa-sim`（**Spike 1.1.1-dev**）+ `riscv-pk`（代理内核）
+3. RISC-V GCC 走 **xpack**（`@xpack-dev-tools/riscv-none-elf-gcc` 15.2.0，darwin-arm64，支持 rv32imc）——避开 brew 的 GCC 编译链
+
+**端到端已验证**：`spike --isa=rv32imc t.elf` 退出码 0（riscv-tests 的 tohost/fromhost 约定），指令轨迹里 `x1 = 0x2a`(42)、压缩指令 `c.li` 解码均正确。
+
+途中踩到两个坑，**Wave 2 的 golden 脚手架必须绕开**：
+
+1. **xpack GCC 默认链接脚本把 LOAD 段放在 `0x7ffff000`**（设备树槽位）→ spike 直接报「Access exception」，必须写显式裸机链接脚本（`OUTPUT_ARCH(riscv)` + `MEMORY { RAM : ORIGIN = 0x80000000 }`）
+2. **裸机跑必须按 riscv-tests 约定提供 `tohost` / `fromhost` 符号**，否则 spike 无法报告通过/失败，只有一句「tohost and fromhost symbols not in ELF」
+
+### 决策记录（v0.11.0）
+
+1. **「非对齐访存」默认策略改回 LLD 口径（`Allow` 而非 `Trap`）** —— T1 按 brief 实现了 `MisalignedPolicy`，默认 `Trap`；但 LLD §3.6(2) 与 §5.2.1 明写「默认不触发（模拟器与 Spike 一致允许非对齐）」「不触发，保持 golden 兼容」。**默认 `Trap` 会让 ISS 在任何触碰非对齐地址的程序上与 Spike 分叉**——而那正是 golden 对拍要测的东西。故默认改 `Allow`，`Trap` 保留为严格诊断模式（用 builder 显式 opt-in）。
+2. **回写 M-13 LLD §3.3 的 LUI / AUIPC 执行列** —— §3.1 的立即数表说「U 型：imm[31:12] = inst[31:12]，低 12 位补 0」（即 imm **已含**左移），§3.3 的执行列却写 `regFile[rd]=imm<<12`（**二次左移**）。按 §3.1 实现才是架构正确的（否则 `lui x1, 0x12345` 会得 `0x2345_0000`），已回写 §3.3。
+3. **契约新增与 `serde` 二选一：暂不决定** —— T2 指出 `EngineSnapshot` **不可序列化**（kernel crate 无 serde，契约冻结装不下事件队列），M-20 / M-23 落盘被卡。倾向「契约新增可序列化 DTO」——契约本就是 DTO 层，且 M-20/M-23 本就需要契约里的持久化模型。**留待 Wave 2 决策**，本轮不擅自改契约。
+4. **`Loader` trait 破坏性变更接受** —— T3 把 `load_with_limits` 从「有默认实现」改成「必须实现」。全库仅 `DefaultLoader` 一个实现，`front/` 与 `crates/server/` 均未引用 M-06，风险为零。
+5. **删掉 workspace 里已无对象的 `non_canonical_partial_ord_impl = "allow"`** —— M-12 加固后队列改为规范排序（`PartialOrd = Some(self.cmp(other))`），该 allowance 已无对象。删后 clippy 依然干净。
+6. **D-10 拆成两侧并行做** —— 台账原文「两模块同一件事的两面…单改任一模块都不完整」。M-06 侧由 T3 做（`ParseLimits` + `total_image_bytes` / `max_region_bytes`），M-14 侧（`prepare_bytes` 的裸 `vec![0u8; size]`）由 T5 在接线 PR 里做。两侧**各自独立生效**，不要求谁先谁后。
+
+### 本轮各任务自查发现的新缺陷（不修，留账）
+
+| 来源 | 缺陷 | 去向 |
+| --- | --- | --- |
+| T1 | S/B/J 型立即数符号扩展位宽少算一位（`B 型 -8` 被解成 `-384`） | ✅ 本轮已修 |
+| T1 | LLD §3.1 与 §3.3 对 U 型立即数自相矛盾 | ✅ 本轮已回写 |
+| T1 | 陷阱投递链路未接通（`mepc`/`mcause`/`mtval` → `mtvec`） | Wave 2（M-16 + M-12 联合） |
+| T4 | WebSocket 握手前误报 connected | ✅ 本轮已修（门禁抓到） |
+| T4 | 会话 `ready→ready` 非法迁移导致握手中止 + 重连无限递归 | ✅ 本轮已修（**Chrome 真机**抓到，DOM stub 盖不住） |
+| T4 | 7 项契约缺口（无寄存器快照事件 / 无写寄存器命令 / 无 `negotiate` / `u64` 超 2^53 / `E_PROTO` 族无对应 / `crc` 未实现） | Wave 2（契约升 `schema_version=2`） |
+| T2 | `EngineSnapshot` 不可序列化 | Wave 2（见决策 3） |
+| T2 | 事件队列空时不推进时钟；Tick 节奏改为「每推进步 1 个 Tick」 | ISS 接入后需恢复逐量子步进（代码内已留注释） |
+
+### 进度影响
+
+- **测试覆盖**：`cargo test --workspace` 203 → **334**（+131）；前端门禁 38 → **109 用例 / 19 suite**（+71）
+- **代码规模**：内核 +1 500 行（M-13 `alu.rs` / `tests_rv32i.rs`、M-12 `queue.rs`、M-06 `tests_malformed.rs`）；前端 +1 800 行（服务层 + mock 内核 + 7 个测试文件）
+- **新增模块级 review 报告**：M-13 ISS（13 项问题）、M-06 加载器（17 项问题 / 12 项闭环 / 5 项留账并说明理由）、前端服务层 —— **M-06 是该模块诞生以来第一次被系统检视**
+- **§3 人日**：本轮为并行化交付，按 WBS 口径 M-13 +3、M-12 +2、M-06 +1、前端 +2.5、T5 +1（M-14/M-15/M-18 接线）
+- **完成度**：约 26% → **约 32%**（90 人日 WBS 口径）
+
+`cargo test --workspace` = **334 passed / 0 failed**；`cargo clippy --workspace --all-targets -- -D warnings` 通过（且已删除 `non_canonical_partial_ord_impl` allowance）；`cargo fmt --all -- --check` 通过；**前端门禁 109 passed / 0 failed / 19 suite**。
+
+---
 
 ## v0.10.0 变更摘要
 
