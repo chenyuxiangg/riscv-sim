@@ -14,10 +14,12 @@
 //! watchpoint traps. The skeleton below compiles and exposes the
 //! `decode + execute_one` API for tests.
 
+pub mod alu;
 pub mod decoder;
 pub mod executor;
 
 pub use decoder::{Decoded, Decoder};
+pub use executor::{classify, Op};
 pub use executor::{
     execute_one, read_gpr, write_gpr, Executor, MemoryAccess, StepOutcome, TrapCause,
 };

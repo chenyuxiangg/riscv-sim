@@ -15,6 +15,7 @@
 use riscv_sim_contract::error::PlatformError;
 use riscv_sim_contract::model::{SimState, WriteSize};
 
+use super::alu;
 use super::decoder::{Decoded, LEN_32};
 
 /// Result of a single instruction execution.
@@ -154,6 +155,108 @@ where
     }
 }
 
+/// Instruction identity after two-level decode.
+///
+/// The LLD's decode key is `opcode | funct3 | funct7` (评审 13-5): the
+/// first level picks the instruction category, the second picks the
+/// operation inside it. [`classify`] implements exactly that — a key
+/// that does not resolve is an illegal instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Op {
+    /// LUI — load the upper immediate.
+    Lui,
+    /// AUIPC — add the upper immediate to the PC.
+    Auipc,
+    /// ADDI — add immediate.
+    Addi,
+    /// SLTI — set less than, signed immediate.
+    Slti,
+    /// SLTIU — set less than, unsigned immediate.
+    Sltiu,
+    /// XORI — exclusive-or immediate.
+    Xori,
+    /// ORI — or immediate.
+    Ori,
+    /// ANDI — and immediate.
+    Andi,
+    /// SLLI — shift left logical, immediate shift amount.
+    Slli,
+    /// SRLI — shift right logical, immediate shift amount.
+    Srli,
+    /// SRAI — shift right arithmetic, immediate shift amount.
+    Srai,
+    /// ADD — add.
+    Add,
+    /// SUB — subtract.
+    Sub,
+    /// SLL — shift left logical.
+    Sll,
+    /// SLT — set less than, signed.
+    Slt,
+    /// SLTU — set less than, unsigned.
+    Sltu,
+    /// XOR — exclusive-or.
+    Xor,
+    /// SRL — shift right logical.
+    Srl,
+    /// SRA — shift right arithmetic.
+    Sra,
+    /// OR — or.
+    Or,
+    /// AND — and.
+    And,
+}
+
+/// Second-level decode: map a decode key onto a concrete operation.
+///
+/// `None` means the key is not a legal RV32I encoding — the caller
+/// turns that into an illegal-instruction trap (LLD §3.2: a key that
+/// misses the table is an illegal instruction).
+pub fn classify(d: &Decoded) -> Option<Op> {
+    match d.opcode {
+        // U-type. Neither LUI nor AUIPC has a funct3 field — bits
+        // 14:12 belong to the immediate.
+        0b011_0111 => Some(Op::Lui),
+        0b001_0111 => Some(Op::Auipc),
+        // OP-IMM.
+        0b001_0011 => match d.funct3 {
+            0b000 => Some(Op::Addi),
+            0b001 => (d.funct7 == 0b000_0000).then_some(Op::Slli),
+            0b010 => Some(Op::Slti),
+            0b011 => Some(Op::Sltiu),
+            0b100 => Some(Op::Xori),
+            0b101 => match d.funct7 {
+                0b000_0000 => Some(Op::Srli),
+                0b010_0000 => Some(Op::Srai),
+                _ => None,
+            },
+            0b110 => Some(Op::Ori),
+            0b111 => Some(Op::Andi),
+            _ => None,
+        },
+        // OP (register-register).
+        0b011_0011 => match (d.funct3, d.funct7) {
+            (0b000, 0b000_0000) => Some(Op::Add),
+            (0b000, 0b010_0000) => Some(Op::Sub),
+            (0b001, 0b000_0000) => Some(Op::Sll),
+            (0b010, 0b000_0000) => Some(Op::Slt),
+            (0b011, 0b000_0000) => Some(Op::Sltu),
+            (0b100, 0b000_0000) => Some(Op::Xor),
+            (0b101, 0b000_0000) => Some(Op::Srl),
+            (0b101, 0b010_0000) => Some(Op::Sra),
+            (0b110, 0b000_0000) => Some(Op::Or),
+            (0b111, 0b000_0000) => Some(Op::And),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// PC after an instruction that falls through to the next one.
+fn sequential(d: &Decoded) -> u32 {
+    d.pc.wrapping_add(d.len as u32)
+}
+
 /// The single execution path shared by every dispatch route.
 ///
 /// `_mem` is the memory port: it is threaded through here so that both
@@ -174,27 +277,137 @@ pub fn execute_one<M: MemoryAccess>(
         });
     }
 
-    // 0b0010011 = I-type ALU (addi / slti / etc.). MVP only implements
-    // ADDI (funct3 == 0x0) to keep the harness small.
-    if d.opcode == 0b0010011 {
-        if d.funct3 == 0x0 {
-            // ADDI: rd = rs1 + imm
-            let lhs = read_gpr(state, d.rs1) as i32;
-            let result = lhs.wrapping_add(d.imm) as u32;
-            write_gpr(state, d.rd, result);
-            state.pc = state.pc.wrapping_add(d.len as u32);
-            return Ok(StepOutcome::Advanced);
+    let op = match classify(d) {
+        Some(op) => op,
+        None => {
+            // An encoding the ISS cannot execute is an illegal
+            // instruction, not a platform failure: both dispatch routes
+            // report it identically (D-11). The engine turns this into
+            // mcause = 2 once trap delivery is wired (LLD §5.2.4).
+            return Ok(StepOutcome::Trapped {
+                cause: TrapCause::IllegalInstruction,
+            });
         }
-        return Ok(StepOutcome::Trapped {
-            cause: TrapCause::IllegalInstruction,
-        });
-    }
+    };
 
-    // An encoding the ISS cannot execute is an illegal instruction, not
-    // a platform failure: both dispatch routes report it identically
-    // (D-11). The engine turns this into mcause = 2 once trap delivery
-    // is wired (LLD §5.2.4).
-    Ok(StepOutcome::Trapped {
-        cause: TrapCause::IllegalInstruction,
-    })
+    let next_pc = match op {
+        Op::Lui => {
+            // The decoded U-type immediate already carries the value in
+            // bits 31:12 with a zeroed low half.
+            write_gpr(state, d.rd, d.imm as u32);
+            sequential(d)
+        }
+        Op::Auipc => {
+            write_gpr(state, d.rd, d.pc.wrapping_add(d.imm as u32));
+            sequential(d)
+        }
+        Op::Addi => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::add(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Slti => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::slt(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Sltiu => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::sltu(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Xori => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::xor(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Ori => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::or(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Andi => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::and(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Slli => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::sll(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Srli => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::srl(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Srai => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::sra(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Add => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::add(lhs, rhs));
+            sequential(d)
+        }
+        Op::Sub => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::sub(lhs, rhs));
+            sequential(d)
+        }
+        Op::Sll => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::sll(lhs, rhs));
+            sequential(d)
+        }
+        Op::Slt => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::slt(lhs, rhs));
+            sequential(d)
+        }
+        Op::Sltu => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::sltu(lhs, rhs));
+            sequential(d)
+        }
+        Op::Xor => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::xor(lhs, rhs));
+            sequential(d)
+        }
+        Op::Srl => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::srl(lhs, rhs));
+            sequential(d)
+        }
+        Op::Sra => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::sra(lhs, rhs));
+            sequential(d)
+        }
+        Op::Or => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::or(lhs, rhs));
+            sequential(d)
+        }
+        Op::And => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::and(lhs, rhs));
+            sequential(d)
+        }
+    };
+
+    state.pc = next_pc;
+    Ok(StepOutcome::Advanced)
 }

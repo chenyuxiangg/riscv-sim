@@ -29,6 +29,12 @@ use super::Iss;
 
 /// Opcode of the OP-IMM group.
 const OP_IMM: u8 = 0b001_0011;
+/// Opcode of the AUIPC group.
+const AUIPC: u8 = 0b001_0111;
+/// Opcode of the OP (register-register) group.
+const OP: u8 = 0b011_0011;
+/// Opcode of the LUI group.
+const LUI: u8 = 0b011_0111;
 
 /// Encode an I-type instruction (12-bit signed immediate).
 fn enc_i(imm: i32, rs1: u8, funct3: u8, rd: u8, opcode: u8) -> u32 {
@@ -37,6 +43,32 @@ fn enc_i(imm: i32, rs1: u8, funct3: u8, rd: u8, opcode: u8) -> u32 {
         | ((funct3 as u32) << 12)
         | ((rd as u32) << 7)
         | (opcode as u32)
+}
+
+/// Encode an R-type instruction (`funct7 | rs2 | rs1 | funct3 | rd | opcode`).
+fn enc_r(funct7: u8, rs2: u8, rs1: u8, funct3: u8, rd: u8, opcode: u8) -> u32 {
+    ((funct7 as u32) << 25)
+        | ((rs2 as u32) << 20)
+        | ((rs1 as u32) << 15)
+        | ((funct3 as u32) << 12)
+        | ((rd as u32) << 7)
+        | (opcode as u32)
+}
+
+/// Encode an OP-IMM shift instruction
+/// (`funct7 | shamt | rs1 | funct3 | rd | opcode`).
+fn enc_shift(funct7: u8, shamt: u8, rs1: u8, funct3: u8, rd: u8, opcode: u8) -> u32 {
+    ((funct7 as u32) << 25)
+        | (((shamt as u32) & 0x1F) << 20)
+        | ((rs1 as u32) << 15)
+        | ((funct3 as u32) << 12)
+        | ((rd as u32) << 7)
+        | (opcode as u32)
+}
+
+/// Encode a U-type instruction (20-bit immediate in bits 31:12).
+fn enc_u(imm20: u32, rd: u8, opcode: u8) -> u32 {
+    ((imm20 & 0xF_FFFF) << 12) | ((rd as u32) << 7) | (opcode as u32)
 }
 
 // ---------------------------------------------------------------------------
@@ -314,4 +346,302 @@ fn compressed_encoding_traps_and_leaves_the_pc_alone() {
         state.pc, 0x1000,
         "a trapped instruction must not advance the PC"
     );
+}
+
+// ---------------------------------------------------------------------------
+// RV32I — U-type (LUI / AUIPC)
+// ---------------------------------------------------------------------------
+
+/// LUI must decode the 20-bit immediate into bits 31:12 with a zeroed
+/// low half.
+#[test]
+fn decode_lui_fills_the_upper_immediate() {
+    let d = Decoder::default().decode(enc_u(0x12345, 1, LUI), 0);
+    assert_eq!(d.opcode, LUI);
+    assert_eq!(d.rd, 1);
+    assert_eq!(
+        d.imm, 0x1234_5000,
+        "U-type immediate keeps the low 12 bits zero"
+    );
+}
+
+/// AUIPC decodes the same immediate shape as LUI.
+#[test]
+fn decode_auipc_fills_the_upper_immediate() {
+    let d = Decoder::default().decode(enc_u(0x1, 1, AUIPC), 0);
+    assert_eq!(d.opcode, AUIPC);
+    assert_eq!(d.imm, 0x1000);
+}
+
+/// LUI writes the upper immediate into the destination register.
+#[test]
+fn lui_writes_the_upper_immediate() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    h.step_one_at(&mut state, 0, enc_u(0x12345, 1, LUI));
+    assert_eq!(state.gpr[1], 0x1234_5000);
+    assert_eq!(state.pc, 4);
+}
+
+/// AUIPC adds the upper immediate to the PC of the instruction.
+#[test]
+fn auipc_adds_the_upper_immediate_to_the_pc() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    h.step_one_at(&mut state, 0x1000, enc_u(0x1, 1, AUIPC));
+    assert_eq!(
+        state.gpr[1], 0x2000,
+        "AUIPC must use the instruction's own PC"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RV32I — OP-IMM
+// ---------------------------------------------------------------------------
+
+/// The I-type immediate is sign-extended from 12 bits.
+#[test]
+fn decode_addi_sign_extends_the_immediate() {
+    let d = Decoder::default().decode(enc_i(-1, 1, 0b000, 2, OP_IMM), 0);
+    assert_eq!(d.imm, -1, "a 12-bit immediate must be sign-extended");
+    assert_eq!(d.rs1, 1);
+    assert_eq!(d.rd, 2);
+}
+
+/// The OP-IMM shifts carry a 5-bit shift amount, not a 12-bit immediate.
+#[test]
+fn decode_shift_immediates_report_the_shift_amount() {
+    let slli = Decoder::default().decode(enc_shift(0, 4, 1, 0b001, 2, OP_IMM), 0);
+    assert_eq!(slli.imm, 4);
+    assert_eq!(slli.funct7, 0);
+
+    let srli = Decoder::default().decode(enc_shift(0, 20, 1, 0b101, 2, OP_IMM), 0);
+    assert_eq!(srli.imm, 20);
+    assert_eq!(srli.funct7, 0);
+
+    let srai = Decoder::default().decode(enc_shift(0b010_0000, 20, 1, 0b101, 2, OP_IMM), 0);
+    assert_eq!(srai.imm, 20);
+    assert_eq!(srai.funct7, 0b010_0000);
+}
+
+/// ADDI sign-extends its immediate.
+#[test]
+fn addi_sign_extends_negative_immediates() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 5;
+    h.step_one_at(&mut state, 0, enc_i(-3, 1, 0b000, 2, OP_IMM));
+    assert_eq!(state.gpr[2], 2, "5 + (-3) = 2");
+}
+
+/// ADDI wraps on overflow — RISC-V has no trap-on-overflow.
+#[test]
+fn addi_wraps_on_overflow() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX;
+    h.step_one_at(&mut state, 0, enc_i(1, 1, 0b000, 2, OP_IMM));
+    assert_eq!(state.gpr[2], 0, "0xFFFF_FFFF + 1 wraps to 0");
+}
+
+/// SLTI compares as signed.
+#[test]
+fn slti_compares_signed() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX; // -1
+    h.step_one_at(&mut state, 0, enc_i(1, 1, 0b010, 2, OP_IMM));
+    assert_eq!(state.gpr[2], 1, "-1 < 1 is true");
+}
+
+/// SLTIU compares as unsigned — the classic signed/unsigned split.
+#[test]
+fn sltiu_compares_unsigned() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX; // -1 as signed, huge as unsigned
+    h.step_one_at(&mut state, 0, enc_i(1, 1, 0b011, 2, OP_IMM));
+    assert_eq!(state.gpr[2], 0, "0xFFFF_FFFF < 1 is false unsigned");
+}
+
+/// The bitwise OP-IMMs use the sign-extended immediate.
+#[test]
+fn bitwise_op_imms_use_the_sign_extended_immediate() {
+    let mut h = Harness::new();
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0x0F0F_0F0F;
+    h.step_one_at(&mut state, 0, enc_i(-1, 1, 0b100, 2, OP_IMM));
+    assert_eq!(
+        state.gpr[2], 0xF0F0_F0F0,
+        "xori with -1 inverts the register"
+    );
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0x0F0F_0F0F;
+    h.step_one_at(&mut state, 0, enc_i(-1, 1, 0b110, 2, OP_IMM));
+    assert_eq!(state.gpr[2], 0xFFFF_FFFF, "ori with -1 sets every bit");
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0x0F0F_0F0F;
+    h.step_one_at(&mut state, 0, enc_i(-1, 1, 0b111, 2, OP_IMM));
+    assert_eq!(state.gpr[2], 0x0F0F_0F0F, "andi with -1 keeps every bit");
+}
+
+/// SLLI shifts left by the immediate shift amount.
+#[test]
+fn slli_shifts_left_by_the_immediate_amount() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 0x0000_0003;
+    h.step_one_at(&mut state, 0, enc_shift(0, 4, 1, 0b001, 2, OP_IMM));
+    assert_eq!(state.gpr[2], 0x30);
+}
+
+/// SRLI shifts right logically.
+#[test]
+fn srli_shifts_right_logically() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 0x8000_0000;
+    h.step_one_at(&mut state, 0, enc_shift(0, 20, 1, 0b101, 2, OP_IMM));
+    assert_eq!(
+        state.gpr[2], 0x0000_0800,
+        "a logical shift must not sign-extend"
+    );
+}
+
+/// SRAI shifts right arithmetically, preserving the sign bit.
+#[test]
+fn srai_shifts_right_arithmetically() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 0x8000_0000;
+    h.step_one_at(
+        &mut state,
+        0,
+        enc_shift(0b010_0000, 20, 1, 0b101, 2, OP_IMM),
+    );
+    assert_eq!(
+        state.gpr[2], 0xFFFF_F800,
+        "an arithmetic shift must keep the sign"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RV32I — OP (register-register)
+// ---------------------------------------------------------------------------
+
+/// The R-type fields land in the right places.
+#[test]
+fn decode_r_type_fills_the_register_fields() {
+    let d = Decoder::default().decode(enc_r(0b010_0000, 2, 1, 0b000, 3, OP), 0);
+    assert_eq!(d.opcode, OP);
+    assert_eq!(d.rd, 3);
+    assert_eq!(d.rs1, 1);
+    assert_eq!(d.rs2, 2);
+    assert_eq!(d.funct3, 0b000);
+    assert_eq!(d.funct7, 0b010_0000);
+}
+
+/// ADD and SUB wrap around.
+#[test]
+fn add_and_sub_wrap_around() {
+    let mut h = Harness::new();
+
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX;
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b000, 3, OP));
+    assert_eq!(state.gpr[3], 0, "0xFFFF_FFFF + 1 wraps to 0");
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0;
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0, enc_r(0b010_0000, 2, 1, 0b000, 3, OP));
+    assert_eq!(state.gpr[3], u32::MAX, "0 - 1 wraps to 0xFFFF_FFFF");
+}
+
+/// The register shift amount uses only its low 5 bits.
+#[test]
+fn sll_masks_the_shift_amount_to_five_bits() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 1;
+    state.gpr[2] = 33; // 33 & 0x1f == 1
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b001, 3, OP));
+    assert_eq!(state.gpr[3], 2, "a shift amount of 33 shifts by 1");
+}
+
+/// SLT compares across the signed / unsigned boundary.
+#[test]
+fn slt_compares_across_the_sign_boundary() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX; // -1 signed
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b010, 3, OP));
+    assert_eq!(state.gpr[3], 1, "-1 < 1 is true signed");
+}
+
+/// SLTU compares the same pair as unsigned.
+#[test]
+fn sltu_compares_unsigned() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX;
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b011, 3, OP));
+    assert_eq!(state.gpr[3], 0, "0xFFFF_FFFF < 1 is false unsigned");
+}
+
+/// SRL and SRA differ on a negative value.
+#[test]
+fn srl_and_sra_differ_on_negative_values() {
+    let mut h = Harness::new();
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0x8000_0000;
+    state.gpr[2] = 20;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b101, 3, OP));
+    assert_eq!(state.gpr[3], 0x0000_0800, "SRL is logical");
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0x8000_0000;
+    state.gpr[2] = 20;
+    h.step_one_at(&mut state, 0, enc_r(0b010_0000, 2, 1, 0b101, 3, OP));
+    assert_eq!(state.gpr[3], 0xFFFF_F800, "SRA is arithmetic");
+}
+
+/// XOR / OR / AND operate on the two source registers.
+///
+/// The operands are complementary masks, so the expected results are
+/// obvious by inspection.
+#[test]
+fn xor_or_and_operate_on_two_registers() {
+    let mut h = Harness::new();
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0xF0F0_F0F0;
+    state.gpr[2] = 0x0F0F_0F0F;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b100, 3, OP));
+    assert_eq!(
+        state.gpr[3], 0xFFFF_FFFF,
+        "complementary masks xor to all ones"
+    );
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0xF0F0_F0F0;
+    state.gpr[2] = 0x0F0F_0F0F;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b110, 3, OP));
+    assert_eq!(
+        state.gpr[3], 0xFFFF_FFFF,
+        "complementary masks or to all ones"
+    );
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0xF0F0_F0F0;
+    state.gpr[2] = 0x0F0F_0F0F;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b111, 3, OP));
+    assert_eq!(state.gpr[3], 0x0000_0000, "complementary masks and to zero");
 }
