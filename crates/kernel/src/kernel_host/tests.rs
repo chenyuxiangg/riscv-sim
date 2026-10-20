@@ -573,3 +573,177 @@ fn handle_json_never_panics_on_a_hostile_input() {
         assert!(!parsed.is_empty(), "输入 {junk:?} 至少要回一个事件");
     }
 }
+
+// -- V-A 检视闭环（🟡-1 / 🟡-4 / 🟡-5 / 🟡-6 / ⚪-6）-----------------------
+
+#[test]
+fn read_memory_command_has_no_side_effect_on_the_bus() {
+    // 回归 V-A 🟡-1：命令层的「ReadMemory 不产生副作用」此前**没有**
+    // 任何用例守护——把命令层改成走普通 `bus.read()`（进统计、进 hook），
+    // 全部测试仍然绿，而调试器的 peek 会开始误触发读观察点。
+    let mut host = KernelHost::new();
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    let before = host.backend.bus().stats().reads;
+    let events = dispatch(
+        &mut host,
+        CommandPayload::ReadMemory {
+            addr: DEMO_STORE_ADDR,
+            size: WriteSize::Word,
+        },
+    );
+    assert_eq!(
+        host.backend.bus().stats().reads,
+        before,
+        "调试读不得计入总线统计"
+    );
+    // 命令确实读到了值。
+    match &events[0] {
+        EventPayload::MemoryRead { addr, value, .. } => {
+            assert_eq!(*addr, DEMO_STORE_ADDR);
+            assert_eq!(*value, 0, "刚装载时那个位置还没有被写过");
+        }
+        other => panic!("ReadMemory 应当回 MemoryRead，实际 {other:?}"),
+    }
+}
+
+#[test]
+fn a_debugger_read_does_not_fire_a_read_watchpoint() {
+    // 回归 V-A 🟡-1 的第二半：调试读命中了一个读观察点之后，
+    // **下一条** guest 指令不得误报观察点命中。
+    let mut host = KernelHost::new();
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    dispatch(
+        &mut host,
+        CommandPayload::SetWatchpoint(riscv_sim_contract::model::Watchpoint {
+            id: 1,
+            addr: DEMO_STORE_ADDR,
+            size: WriteSize::Word,
+            access: riscv_sim_contract::model::WatchAccess::Read,
+        }),
+    );
+    // 调试器读一次被监视的地址。
+    dispatch(
+        &mut host,
+        CommandPayload::ReadMemory {
+            addr: DEMO_STORE_ADDR,
+            size: WriteSize::Word,
+        },
+    );
+    // 接下来跑一条指令：不得因为刚才那次调试读而假停。
+    let events = dispatch(&mut host, CommandPayload::StepN { n: 1 });
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            EventPayload::Halted {
+                reason: HaltReason::Watchpoint,
+                ..
+            }
+        )),
+        "调试读不得让下一条 guest 指令误报观察点：{events:?}"
+    );
+}
+
+#[test]
+fn a_breakpoint_run_emits_tick_then_waveform_then_halted() {
+    // 回归 V-A 🟡-4：桥规格 §3.1 规定「事件序列（有序）」，且前端靠
+    // 「**首个**事件携带 reqId」关联命令——顺序不是可有可无的装饰。
+    // 此前所有用例都只「找第一条某类型事件」，把 Halted 挪到前面也没人管。
+    let mut host = KernelHost::new();
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    dispatch(
+        &mut host,
+        CommandPayload::Subscribe {
+            topic: "sim.registers".to_string(),
+        },
+    );
+    dispatch(
+        &mut host,
+        CommandPayload::SetBreakpoint(riscv_sim_contract::model::Breakpoint {
+            id: 1,
+            addr: DEMO_BREAKPOINT_ADDR,
+            source_hint: None,
+            enabled: true,
+        }),
+    );
+    let events = dispatch(&mut host, CommandPayload::Continue);
+    let kinds: Vec<&str> = events
+        .iter()
+        .map(|e| match e {
+            EventPayload::Tick { .. } => "Tick",
+            EventPayload::WaveformDelta(_) => "WaveformDelta",
+            EventPayload::Halted { .. } => "Halted",
+            EventPayload::Error { .. } => "Error",
+            _ => "其它",
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["Tick", "WaveformDelta", "Halted"],
+        "命中断点时的事件顺序必须是 Tick → WaveformDelta → Halted"
+    );
+}
+
+#[test]
+fn an_image_that_runs_past_the_mapped_region_is_rejected() {
+    // 回归 V-A 🟡-5：`load_bytes` 是镜像装载的**唯一**写路径，越界必须
+    // 报 E_BUS-01。此前把越界错误吞掉，全部测试仍然绿。
+    let mut host = KernelHost::new();
+    let mut project = demo_project();
+    // 低段 RAM 是 1 MiB —— 镜像比它大一个字节就会越界。
+    let mut oversized = vec![0u8; 0x10_0000 + 1];
+    oversized[0] = 0x93;
+    project.images[0].source = ImageSource::Bytes(oversized);
+    let events = dispatch(&mut host, CommandPayload::LoadProject(project));
+    let (code, _) = first_error(&events);
+    assert_eq!(code, "E_BUS-01", "越界的镜像必须被拒绝");
+}
+
+#[test]
+fn restore_rejects_a_state_with_a_foreign_schema_version() {
+    // 回归 V-A 🟡-6：契约的 `SimState` 带 `schema_version`，但
+    // `Engine::restore` 不校验它——一份版本错配的快照会被**静默接受**，
+    // 把 PC 与整份寄存器换掉，而调用方连一个错都看不到。
+    let mut host = KernelHost::new();
+    let state = SimState {
+        schema_version: SIM_STATE_SCHEMA_VERSION + 1,
+        ..SimState::default()
+    };
+    let events = dispatch(
+        &mut host,
+        CommandPayload::Restore {
+            state: Box::new(state),
+        },
+    );
+    let (code, _) = first_error(&events);
+    assert_eq!(code, "E_SNAP-05", "版本不符的快照必须被拒绝");
+}
+
+#[test]
+fn restore_accepts_a_state_with_the_current_schema_version() {
+    let mut host = KernelHost::new();
+    let events = dispatch(
+        &mut host,
+        CommandPayload::Restore {
+            state: Box::new(SimState::default()),
+        },
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Tick { .. })),
+        "版本相符的快照应当被接受：{events:?}"
+    );
+}
+
+#[test]
+fn an_envelope_from_a_newer_schema_is_refused() {
+    // 回归 V-A ⚪-6：只拒「版本更低」的话，一个来自更高版本 schema 的
+    // 消息会被**静默地**少解析几个字段（契约的 serde 派生没有
+    // `deny_unknown_fields`）——那比直接拒绝糟得多。
+    let mut host = KernelHost::new();
+    let mut msg = Message::command(1, CommandPayload::Nop);
+    msg.schema_version = SCHEMA_VERSION + 1;
+    let events = host.handle_message(&msg);
+    let (code, _) = first_error(&events);
+    assert_eq!(code, "E_PROTO-01", "版本更高的信封必须被拒绝");
+}

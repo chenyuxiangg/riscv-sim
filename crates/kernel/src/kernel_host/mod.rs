@@ -43,6 +43,7 @@ use std::rc::Rc;
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{
     Edge, ImageKind, ImageRef, ImageSource, Project, Waveform, WaveformStream, WriteSize,
+    SIM_STATE_SCHEMA_VERSION,
 };
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
 use riscv_sim_contract::protocol::{
@@ -218,11 +219,15 @@ impl KernelHost {
 
     /// 校验信封并派发命令。
     fn handle_envelope(&mut self, msg: Message) -> Vec<EventPayload> {
-        if msg.schema_version < SCHEMA_VERSION {
+        // 版本必须**完全**匹配，不能只拒低的：契约的 serde 派生没有
+        // `deny_unknown_fields`，一个来自更高版本 schema 的消息会被
+        // **静默地**少解析几个字段——那比直接拒绝糟得多。宁可拒掉，
+        // 也不要 misinterpret（V-A 检视 · ⚪-6）。
+        if msg.schema_version != SCHEMA_VERSION {
             return vec![EventPayload::Error {
                 code: "E_PROTO-01".to_string(),
                 message: format!(
-                    "协议版本不兼容：{} < {}",
+                    "协议版本不兼容：{} != {}",
                     msg.schema_version, SCHEMA_VERSION
                 ),
             }];
@@ -300,10 +305,29 @@ impl KernelHost {
                     id: self.snapshot_counter,
                 }]
             }
-            CommandPayload::Restore { state } => match self.backend.restore(&state) {
-                Ok(()) => vec![self.tick()],
-                Err(err) => vec![self.error_from(&err)],
-            },
+            CommandPayload::Restore { state } => {
+                // 快照的 `schema_version` 必须对得上，否则**拒绝**。
+                // 契约的 `SimState` 带这个字段，而 `Engine::restore` 不
+                // 校验它——一份版本错配的快照会把 PC 与整份寄存器换掉，
+                // 而调用方连一个错都看不到（V-A 检视 · 🟡-6）。
+                //
+                // 错误码复用契约已有的 `E_SNAP-05`（不支持的状态 schema
+                // 版本）——一场景一码。
+                if state.schema_version != SIM_STATE_SCHEMA_VERSION {
+                    vec![EventPayload::Error {
+                        code: "E_SNAP-05".to_string(),
+                        message: format!(
+                            "SimState 的 schema_version 不支持：{} != {}",
+                            state.schema_version, SIM_STATE_SCHEMA_VERSION
+                        ),
+                    }]
+                } else {
+                    match self.backend.restore(&state) {
+                        Ok(()) => vec![self.tick()],
+                        Err(err) => vec![self.error_from(&err)],
+                    }
+                }
+            }
             CommandPayload::Admin { .. } => vec![EventPayload::Error {
                 code: "E_CTX-05".to_string(),
                 message: "管理通道未启用（admin op 不在当前会话的能力面内）".to_string(),
