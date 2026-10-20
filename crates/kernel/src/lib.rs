@@ -29,6 +29,13 @@ pub mod m21_logging;
 pub mod m22_hms;
 pub mod m23_datastore;
 
+/// 内核宿主（协议装配层）—— 把契约命令翻译成内核调用，再把结果翻译回
+/// 契约事件。
+///
+/// **它不是 23 个详细设计模块之一**，而是它们的装配——真内核在浏览器里
+/// 的「会话」。形状见 `docs/detailed-design/STAGE-1_Wasm_Bridge.md`。
+pub mod kernel_host;
+
 /// WASM export surface for the browser front-end (wasm32 only).
 ///
 /// Native builds do not compile this module — see D-38.

@@ -12,6 +12,12 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 riscv_sim_contract = { path = "../contract" }
+# serde_json — the WASM 协议桥 (`kernel_host::handle_json`) has to marshal
+# the frozen contract envelope. It is **already** in the native dependency
+# tree through the contract crate's `json` feature (the contract's own
+# golden-JSON tests use it), so this adds no new external crate — it only
+# makes the kernel link it directly.
+serde_json = "1.0"
 # M-06 ELF / Raw / HEX parser. MVP scope is RV32 ELF32 LE — a hand-rolled
 # parser keeps WASM binary size and dependency surface small while still
 # hitting all M-06 §3 error paths (magic / size / segment-count / overflow).
