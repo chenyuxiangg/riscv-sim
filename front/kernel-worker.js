@@ -66,6 +66,27 @@ function startKernelHost() {
     let hostSeq = 0;
 
     /**
+     * Number of commands currently **waiting for the WASM init**.
+     *
+     * Used to decide who reports an init failure: if a command is in
+     * flight, its own error frame (which carries the command's `reqId`)
+     * is the one that matters — adding a second, boot-level frame for the
+     * same fault would report the same failure twice with two different
+     * wordings.
+     *
+     * @type {number}
+     */
+    let inFlight = 0;
+
+    /**
+     * Whether the boot-level (command-less) init-failure frame was already
+     * posted. One failure, one boot frame.
+     *
+     * @type {boolean}
+     */
+    let bootErrorPosted = false;
+
+    /**
      * Serial chain: frames are handled strictly in arrival order.
      *
      * The kernel is stateful (registers / memory / breakpoints), so two
@@ -132,26 +153,47 @@ function startKernelHost() {
      * so the M-07 adapter turns the worker `error` event into a
      * `closed` transport (spec §4).
      *
+     * The boot-level frame (`reqId = null`) is only posted when **no**
+     * command is in flight: an in-flight command gets its own error frame
+     * with its own `reqId`, and posting both would report the same fault
+     * twice with two different wordings.
+     *
      * @param {unknown} err
      */
     function failFast(err) {
-        const seq = (hostSeq += 1);
-        self.postMessage({
-            type: FRAME_TYPE.Event,
-            seq,
-            sessionId: null,
-            role: null,
-            reqId: null,
-            payload: eventMessage(seq, Event.error(
-                HOST_ERROR_CODE,
-                `WASM 内核初始化失败：${err?.message ?? err}`,
-            )),
-        });
+        if (!bootErrorPosted && inFlight === 0) {
+            bootErrorPosted = true;
+            const seq = (hostSeq += 1);
+            self.postMessage({
+                type: FRAME_TYPE.Event,
+                seq,
+                sessionId: null,
+                role: null,
+                reqId: null,
+                payload: eventMessage(seq, Event.error(
+                    HOST_ERROR_CODE,
+                    initFailureMessage(err),
+                )),
+            });
+        }
         // Deferred by one tick so the error frame above is delivered
         // before the worker dies.
         setTimeout(() => {
             throw err;
         }, 0);
+    }
+
+    /**
+     * The canonical wording of an init failure.
+     *
+     * Both the boot-level frame and the per-command frame use it, so one
+     * fault never shows up with two different texts.
+     *
+     * @param {unknown} err
+     * @returns {string}
+     */
+    function initFailureMessage(err) {
+        return `WASM 内核初始化失败：${err?.message ?? err}`;
     }
 
     /**
@@ -227,11 +269,19 @@ function startKernelHost() {
         }
 
         let mod;
+        inFlight += 1;
         try {
             mod = await ensureKernel();
         } catch (err) {
-            postError(frame, err);
+            // The init failed. The frame carries the command's `reqId`,
+            // so M-05 rejects the pending command instead of letting it
+            // time out — and `failFast` will **not** add a second,
+            // boot-level frame for the same fault (a command is in
+            // flight right now).
+            postError(frame, new Error(initFailureMessage(err)));
             return;
+        } finally {
+            inFlight -= 1;
         }
 
         let messages;

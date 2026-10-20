@@ -186,6 +186,22 @@ describe("WASM 传输宿主 · 帧 → 消息 → 帧", () => {
         assert.match(frame.payload.payload.Event.Error.message, /数组/);
     });
 
+    test("内核返回空数组 → 回一个 E_TRX-04 的 Error 事件", async () => {
+        const host = createWasmWorker("empty");
+        host.send(commandFrame("Nop", { reqId: 11 }));
+        await host.waitFor(() => host.frames().length >= 1);
+
+        const frame = host.frames()[0];
+        assert.equal(frame.type, "event");
+        assert.equal(frame.reqId, 11, "错误帧必须带命令的 reqId");
+        assert.equal(frame.payload.payload.Event.Error.code, "E_TRX-04");
+        assert.match(
+            frame.payload.payload.Event.Error.message,
+            /没有返回任何事件/,
+            "空数组必须被明确拒绝（否则命令会静默无回帧，只能等超时）",
+        );
+    });
+
     test("非命令类型的帧被忽略（不产生回帧）", async () => {
         const host = createWasmWorker("nop");
         host.send({
@@ -228,6 +244,51 @@ describe("WASM 传输宿主 · 帧 → 消息 → 帧", () => {
             frame.payload.payload.Event.Error.message,
             /初始化失败/,
             "初始化失败的错误消息必须说明原因",
+        );
+    });
+
+    test("初始化失败时有命令在飞 → 只报一次，且带命令的 reqId", async () => {
+        // The fake init fails **after** a delay, so the command below is
+        // still waiting for the init when the failure hits.
+        const host = createWasmWorker("init-fail-late");
+        host.send(commandFrame("Nop", { reqId: 11 }));
+        await host.waitFor(() => host.frames().length >= 1);
+        await new Promise((r) => setTimeout(r, 150));
+
+        const frames = host.frames();
+        assert.equal(
+            frames.length,
+            1,
+            "同一个初始化故障只该报一次（命令在飞时由命令帧承担，启动级帧不再重复）",
+        );
+        const frame = frames[0];
+        assert.equal(frame.reqId, 11, "错误帧必须带命令的 reqId（M-05 要靠它拒命令）");
+        assert.equal(frame.payload.payload.Event.Error.code, "E_TRX-04");
+        assert.match(frame.payload.payload.Event.Error.message, /初始化失败/);
+    });
+
+    test("同一个初始化故障在所有帧里只有一种文案", async () => {
+        const host = createWasmWorker("init-fail");
+        host.send(commandFrame("Nop", { reqId: 12 }));
+        await host.waitFor(() => host.frames().length >= 1);
+        await new Promise((r) => setTimeout(r, 150));
+
+        const frames = host.frames();
+        const messages = frames.map(
+            (f) => f.payload?.payload?.Event?.Error?.message ?? "",
+        );
+        assert.ok(messages.length >= 1, "至少要有一帧报告初始化失败");
+        assert.ok(
+            messages.every((m) => m === messages[0]),
+            `同一故障不应出现两种文案：${JSON.stringify(messages)}`,
+        );
+        assert.ok(
+            frames.some((f) => f.reqId === 12),
+            "在飞的命令必须拿到带 reqId 的错误帧",
+        );
+        assert.ok(
+            frames.filter((f) => f.reqId === null).length <= 1,
+            "启动级（无 reqId）错误帧最多一条",
         );
     });
 });

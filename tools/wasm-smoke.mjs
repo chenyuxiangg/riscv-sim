@@ -17,8 +17,9 @@
 //
 //     tools/build-wasm.sh            # 或 --release
 //
-// 产物不在（`front/assets/pkg/` 被 gitignore）时脚本**跳过**并退出 0——
-// 它是按需门禁，不进默认门禁（与 `tools/browser-verify.mjs` 同一口径）。
+// 产物不在（`front/assets/pkg/` 被 gitignore）时脚本**跳过**并退出 127
+// （与 `tools/browser-verify.mjs` 同一口径：127 = 前置条件缺失，不是
+// 「验证通过」——CI 只看退出码时，「没跑」绝不能被当成「过了」）。
 //
 // ## 用法
 //
@@ -28,6 +29,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { DEMO_FIRMWARE_BYTES } from "../front/dev/demo-firmware.js";
+
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
 const pkgDir = resolve(repoRoot, "front/assets/pkg");
@@ -35,19 +38,22 @@ const glue = resolve(pkgDir, "riscv_sim_kernel.js");
 const wasm = resolve(pkgDir, "riscv_sim_kernel_bg.wasm");
 
 if (!existsSync(glue) || !existsSync(wasm)) {
-    console.log("SKIP: WASM 产物不存在（先跑 tools/build-wasm.sh）");
-    process.exit(0);
+    console.error([
+        "SKIP: WASM 产物不存在（先跑 tools/build-wasm.sh）",
+        `  期望：${glue}`,
+        `  期望：${wasm}`,
+    ].join("\n"));
+    process.exit(127);
 }
 
 /**
- * demo 固件（40 字节，RV32I 手写编码，小端）——与
- * `front/dev/demo-firmware.js` 逐字节相同。
+ * demo 固件（40 字节，RV32I 手写编码，小端）。
+ *
+ * ⚠️ **直接 import 前端那份**，不复制常量：两份字节一旦漂移，这个脚本
+ * 就会绿着测一个前端根本没发的程序，而浏览器复验走的是前端那份——
+ * 两个「真机证据」指向不同的固件。（V-B 检视发现 · 中危 2）
  */
-const DEMO_BYTES = [
-    0x93, 0x00, 0xa0, 0x02, 0x13, 0x01, 0x70, 0x00, 0xb3, 0x81, 0x20, 0x00, 0x23, 0x20, 0x30, 0x10,
-    0x6f, 0x00, 0x00, 0x01, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00,
-    0x13, 0x02, 0x10, 0x00, 0x6f, 0x00, 0x00, 0x00,
-];
+const DEMO_BYTES = DEMO_FIRMWARE_BYTES;
 
 /** demo 固件的断点靶点。 */
 const DEMO_BREAKPOINT_ADDR = 0x20;
@@ -200,6 +206,18 @@ check("schema 版本是 1", mod.protocol_schema_version() === 1);
 {
     const out = JSON.parse(mod.process_message("{not json"));
     check("畸形输入回一个 Error 事件", out.length === 1);
+    // 不只看数组长度：内核若回一个 `direction:"Command"` 的消息，长度
+    // 仍然是 1，这条断言会绿。方向与 seq 都要断言。（V-B 检视 · 低危 2）
+    check(
+        "畸形输入回的是 Event 方向",
+        out[0]?.direction === "Event",
+        `实际 ${out[0]?.direction}`,
+    );
+    check(
+        "畸形输入回的事件带合法 seq",
+        typeof out[0]?.seq === "number" && Number.isFinite(out[0].seq),
+        `实际 ${out[0]?.seq}`,
+    );
     const err = out[0]?.payload?.Event?.Error;
     check("错误码是 E_PROTO-08", err?.code === "E_PROTO-08", `实际 ${err?.code}`);
 }
