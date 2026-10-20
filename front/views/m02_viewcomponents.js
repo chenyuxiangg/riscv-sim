@@ -77,6 +77,31 @@ export function reset() {
 export { escapeHtml };
 
 // ---------------------------------------------------------------------------
+// Command signal — the view layer never talks to the service layer
+// directly (the same rule the demo seeder follows: M-02 only emits a
+// signal, `app.js` turns it into state).
+// ---------------------------------------------------------------------------
+
+/** Monotonic request id counter (the ViewComponent `onCommand` return). */
+let requestCounter = 0;
+
+/**
+ * Emit the `riscv:command` signal and return the request id.
+ *
+ * @param {string} action
+ * @param {string} viewId
+ * @returns {string} the request id
+ */
+function emitCommand(action, viewId) {
+    requestCounter += 1;
+    const requestId = `cmd-${action}-${requestCounter}`;
+    window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: { action, requestId, viewId },
+    }));
+    return requestId;
+}
+
+// ---------------------------------------------------------------------------
 // productTreeView — shows the M-14 mapping table (FR-01/02/03)
 // ---------------------------------------------------------------------------
 
@@ -170,6 +195,15 @@ const debugView = register({
     render(state) {
         const sim = state?.sim ?? {};
         return `
+            <div class="debug-toolbar">
+                <button type="button" data-action="step">单步</button>
+                <button type="button" data-action="step10">单步 ×10</button>
+                <button type="button" data-action="continue">继续</button>
+                <button type="button" data-action="pause">暂停</button>
+                <button type="button" data-action="reset">复位</button>
+                <button type="button" data-action="read-regs">读寄存器</button>
+                <button type="button" data-action="read-mem">读内存 @0x100</button>
+            </div>
             <div class="debug-grid">
                 <section class="disasm">
                     <h3>反汇编 (M-11)</h3>
@@ -211,14 +245,75 @@ const debugView = register({
     },
     onCommand(ev) {
         const action = ev.target?.closest?.("[data-action]")?.dataset?.action;
-        if (action === "step") {
-            // Will route to M-05 dispatchCommand once transport lands.
-            console.info("[M-02 debugView] step requested (no-op until M-07)");
-        }
-        return undefined;
+        if (!action) return undefined;
+        return emitCommand(action, "debug");
     },
     onDelta(_delta) {},
-    mountFor(_el) {},
+    mountFor(el) {
+        el.addEventListener("click", (ev) => debugView.onCommand(ev));
+    },
+});
+
+// ---------------------------------------------------------------------------
+// regmemView — the "寄存器/内存" view (M-10 data).
+//
+// The panel existed in M-01's view registry from the start, but no
+// component was registered for it — the tab rendered an empty body.
+// M-10 now feeds the store, so the view has something to show.
+// ---------------------------------------------------------------------------
+
+const regmemView = register({
+    id: "regmem",
+    channels: ["sim"],
+    render(state) {
+        const sim = state?.sim ?? {};
+        const gpr = sim.gpr ?? Array(32).fill(0);
+        const mem = sim.mem ?? {};
+        const cells = Object.entries(mem);
+        return `
+            <section class="regmem-view">
+                <h3>寄存器 / 内存 (M-10)</h3>
+                <div class="debug-toolbar">
+                    <button type="button" data-action="read-regs">读寄存器</button>
+                    <button type="button" data-action="read-mem">读内存 @0x100</button>
+                </div>
+                <div class="grid-2">
+                    <div>
+                        <h4>通用寄存器</h4>
+                        <div class="reg-grid">${
+                            gpr.map((v, i) =>
+                                `<div><span class="muted">x${i}</span><code>${(v >>> 0).toString(16).padStart(8, "0")}</code></div>`
+                            ).join("")
+                        }</div>
+                    </div>
+                    <div>
+                        <h4>PC / 虚拟时间</h4>
+                        <code class="pc">0x${(sim.pc ?? 0).toString(16).padStart(8, "0")}</code>
+                        <code class="timeVirt">${state?.timeVirt ?? 0} ps</code>
+                        <h4>内存单元</h4>
+                        ${cells.length === 0
+                            ? `<p class="muted">尚无读回的内存单元 — 点击「读内存 @0x100」。</p>`
+                            : `<table class="map-table">
+                                <thead><tr><th>地址</th><th>值</th></tr></thead>
+                                <tbody>${cells.map(([addr, value]) => `
+                                    <tr><td><code>${escapeHtml(addr)}</code></td>
+                                    <td><code>0x${(value >>> 0).toString(16).padStart(8, "0")}</code></td></tr>
+                                `).join("")}</tbody>
+                            </table>`}
+                    </div>
+                </div>
+            </section>
+        `;
+    },
+    onCommand(ev) {
+        const action = ev.target?.closest?.("[data-action]")?.dataset?.action;
+        if (!action) return undefined;
+        return emitCommand(action, "regmem");
+    },
+    onDelta(_delta) {},
+    mountFor(el) {
+        el.addEventListener("click", (ev) => regmemView.onCommand(ev));
+    },
 });
 
 // ---------------------------------------------------------------------------
