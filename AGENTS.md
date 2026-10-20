@@ -45,7 +45,7 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 - Build (native):  `cargo build`（开发）/ `cargo build --release`（发布）
 - Build (WASM):    `tools/build-wasm.sh` 或 `tools/build-wasm.sh --release`
 - Test:            `cargo test --workspace`（单元 + 集成 + 黄金对拍）
-- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，35 用例 / 7 suite；Node ≥ 22）
+- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，38 用例 / 7 suite；Node ≥ 22）
 - Lint:            `cargo clippy --workspace --all-targets -- -D warnings`
 - Format:          `cargo fmt --all`
 - Typecheck:       N/A — Rust 编译器即类型检查
