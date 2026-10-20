@@ -19,6 +19,7 @@ use riscv_sim_contract::model::{SimState, WriteSize};
 
 use crate::m14_bus::Bus;
 
+use super::decoder::Decoder;
 use super::executor::{read_gpr, StepOutcome, TrapCause};
 use super::Iss;
 
@@ -258,5 +259,59 @@ fn illegal_instruction_reports_the_same_outcome_on_both_routes() {
     assert_eq!(
         bus_outcome, closure_outcome,
         "both dispatch routes must agree on the outcome"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// D-16 — instruction length field
+// ---------------------------------------------------------------------------
+
+/// A 32-bit encoding must decode to a length of 4 bytes.
+#[test]
+fn decode_reports_four_bytes_for_a_32bit_encoding() {
+    let d = Decoder::default().decode(enc_i(1, 0, 0b000, 1, OP_IMM), 0x1000);
+    assert_eq!(d.len, 4, "a 32-bit encoding is 4 bytes long");
+}
+
+/// A 16-bit (compressed) encoding must decode to a length of 2 bytes.
+///
+/// Every 32-bit encoding has bits[1:0] = 0b11; a compressed encoding
+/// never does, which is how the decoder tells them apart.
+#[test]
+fn decode_reports_two_bytes_for_a_compressed_encoding() {
+    let d = Decoder::default().decode(0x0000_0001, 0x1000);
+    assert_eq!(d.len, 2, "a compressed encoding is 2 bytes long");
+}
+
+/// The PC must advance by the decoded instruction length, not by a
+/// hard-coded 4.
+#[test]
+fn pc_advances_by_the_decoded_instruction_length() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    h.step_one_at(&mut state, 0x1000, enc_i(1, 0, 0b000, 1, OP_IMM));
+    assert_eq!(
+        state.pc, 0x1004,
+        "PC must advance by the instruction length"
+    );
+}
+
+/// A compressed encoding is not executable yet: it must trap and leave
+/// the PC alone rather than execute the upper half-word as if it were
+/// a 32-bit instruction.
+#[test]
+fn compressed_encoding_traps_and_leaves_the_pc_alone() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    let outcome = h.step_one_at(&mut state, 0x1000, 0x0000_0001);
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::IllegalInstruction
+        }
+    );
+    assert_eq!(
+        state.pc, 0x1000,
+        "a trapped instruction must not advance the PC"
     );
 }

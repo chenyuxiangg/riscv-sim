@@ -15,7 +15,7 @@
 use riscv_sim_contract::error::PlatformError;
 use riscv_sim_contract::model::{SimState, WriteSize};
 
-use super::decoder::Decoded;
+use super::decoder::{Decoded, LEN_32};
 
 /// Result of a single instruction execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +165,15 @@ pub fn execute_one<M: MemoryAccess>(
     state: &mut SimState,
     d: &Decoded,
 ) -> Result<StepOutcome, PlatformError> {
+    if d.len != LEN_32 {
+        // A compressed (RV32C) encoding: a legal instruction the ISS
+        // cannot execute yet. Trap rather than mis-execute it — the
+        // length field is what makes the distinction possible (D-16).
+        return Ok(StepOutcome::Trapped {
+            cause: TrapCause::IllegalInstruction,
+        });
+    }
+
     // 0b0010011 = I-type ALU (addi / slti / etc.). MVP only implements
     // ADDI (funct3 == 0x0) to keep the harness small.
     if d.opcode == 0b0010011 {
@@ -173,7 +182,7 @@ pub fn execute_one<M: MemoryAccess>(
             let lhs = read_gpr(state, d.rs1) as i32;
             let result = lhs.wrapping_add(d.imm) as u32;
             write_gpr(state, d.rd, result);
-            state.pc = state.pc.wrapping_add(4);
+            state.pc = state.pc.wrapping_add(d.len as u32);
             return Ok(StepOutcome::Advanced);
         }
         return Ok(StepOutcome::Trapped {
