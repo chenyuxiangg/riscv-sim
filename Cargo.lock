@@ -45,6 +45,7 @@ name = "riscv_sim_kernel"
 version = "0.1.0"
 dependencies = [
  "riscv_sim_contract",
+ "serde_json",
 ]
 
 [[package]]

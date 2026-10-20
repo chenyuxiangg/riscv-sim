@@ -12,6 +12,7 @@
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{SimState, WriteSize};
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
+use riscv_sim_contract::snapshot::EngineSnapshotDto;
 
 use crate::m12_engine::Engine;
 use crate::m13_iss::Iss;
@@ -38,6 +39,20 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
             engine: Engine::new(bus, intc),
         }
     }
+
+    /// Borrow the underlying engine (read-only).
+    ///
+    /// M-17 owns the engine; this accessor lets the host inspect the
+    /// scheduler (pending events, virtual clock) without giving up the
+    /// backend's own port surface.
+    pub fn engine(&self) -> &Engine<B, I> {
+        &self.engine
+    }
+
+    /// Borrow the underlying engine (mutable) — e.g. to schedule events.
+    pub fn engine_mut(&mut self) -> &mut Engine<B, I> {
+        &mut self.engine
+    }
 }
 
 impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
@@ -61,6 +76,33 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
     }
     fn restore(&mut self, state: &SimState) -> Result<(), PlatformError> {
         self.engine.restore(state.clone());
+        // Keep the backend's own mirror in step with the engine so the two
+        // never disagree about the platform state.
+        self.state = self.engine.snapshot();
+        Ok(())
+    }
+
+    /// Capture a **complete** snapshot: platform state **and** the pending
+    /// event queue, in the contract's serializable form.
+    ///
+    /// Unlike [`ExecutionBackend::snapshot`] (partial), this round-trips
+    /// deterministically through [`ExecutionBackend::restore_full`] — the
+    /// queue contents, the queue order, the insertion counter and the
+    /// virtual time all survive (D-24 / D-05).
+    fn snapshot_full(&self) -> Result<Option<EngineSnapshotDto>, PlatformError> {
+        Ok(Some(self.engine.snapshot_dto()))
+    }
+
+    /// Restore a complete snapshot captured by
+    /// [`ExecutionBackend::snapshot_full`].
+    ///
+    /// The pending event queue is restored **as it was**, so events queued
+    /// after the snapshot was taken no longer fire — this is the
+    /// deterministic restore that the partial
+    /// [`ExecutionBackend::restore`] cannot provide.
+    fn restore_full(&mut self, snapshot: &EngineSnapshotDto) -> Result<(), PlatformError> {
+        self.engine.restore_dto(snapshot);
+        self.state = self.engine.snapshot();
         Ok(())
     }
     fn read_memory(&self, _addr: u32, _size: WriteSize) -> Result<u32, PlatformError> {

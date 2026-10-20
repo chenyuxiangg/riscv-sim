@@ -12,6 +12,9 @@
 //! - [`error`] — error code family + per-subsystem scenario codes.
 //! - [`port`] — driving / driven port signatures for ExecutionBackend,
 //!   Peripheral, debug services, and the observability pipeline.
+//! - [`snapshot`] — serializable snapshot DTOs carrying the pending event
+//!   queue, so a snapshot can be persisted *and* restored deterministically
+//!   (debt ledger D-24).
 
 // MVP: docs on every public variant field are TODO. PROGRESS.md §7
 // 2026-10-19 decision: workspace `missing_docs = "allow"` until each
@@ -21,6 +24,7 @@ pub mod error;
 pub mod model;
 pub mod port;
 pub mod protocol;
+pub mod snapshot;
 
 /// Protocol schema version. Bump on every breaking change; consumers
 /// negotiate via the `schema_version` field in every [`protocol::Message`].

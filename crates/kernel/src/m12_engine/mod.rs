@@ -13,10 +13,12 @@
 //!   队列的内容耦合；恢复时会把计数器顶到队列已占用值之上，因此恢复后
 //!   继续 `schedule` 不会与队列中已有事件撞号（D-17）。
 //!
-//! 快照有两种形态：[`Engine::snapshot`] 返回契约级 [`SimState`]（M-17
+//! 快照有三种形态：[`Engine::snapshot`] 返回契约级 [`SimState`]（M-17
 //! 交给宿主的那一份，签名保持不变）；[`Engine::snapshot_full`] 返回
 //! [`EngineSnapshot`]，额外携带待处理事件队列与插入序计数器 —— **只有
-//! 它能精确还原引擎**（D-05）。
+//! 它能精确还原引擎**（D-05）；[`Engine::snapshot_dto`] 返回契约层的
+//! 可序列化镜像 [`EngineSnapshotDto`]，让确定性的快照**落得了盘**
+//! （D-24 根因修复）。
 //!
 //! TODO(MVP): 把调度器接到 [`crate::m13_iss`] 的译码器、外设 tick 回调
 //! 与 M-20 快照落盘路径上；当前的调度内核（时间推进 / 事件队列 / 稳定
@@ -30,6 +32,7 @@ use riscv_sim_contract::port::{EventBus, InterruptSink};
 use riscv_sim_contract::protocol::EventPayload;
 
 mod queue;
+mod snapshot;
 
 pub use queue::{EventQueue, QueuedEvent};
 
@@ -162,6 +165,24 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
             advance_steps: 0,
             ticker: None,
         }
+    }
+
+    /// Borrow the injected event bus (read-only).
+    ///
+    /// The bus is a dependency, not engine state — it is deliberately
+    /// **not** part of any snapshot. Exposing it read-only lets the host
+    /// observe what the engine published without letting it mutate the
+    /// engine.
+    pub fn bus(&self) -> &B {
+        &self.bus
+    }
+
+    /// Borrow the injected interrupt sink (read-only).
+    ///
+    /// Same posture as [`Engine::bus`]: an injected dependency, not
+    /// snapshot state.
+    pub fn intc(&self) -> &I {
+        &self.intc
     }
 
     /// Current virtual time in picoseconds.

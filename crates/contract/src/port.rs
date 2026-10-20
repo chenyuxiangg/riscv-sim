@@ -5,9 +5,10 @@
 //! implementations (e.g. a QEMU-backed ExecutionBackend) just implement
 //! the same trait and pass the contract tests (LLD §7.1).
 
-use crate::error::PlatformError;
+use crate::error::{ErrorFamily, PlatformError};
 use crate::model::{PendingWrite, SimState};
 use crate::protocol::{CommandPayload, EventPayload};
+use crate::snapshot::{EngineSnapshotDto, E_SNAP_03_UNSUPPORTED_RESTORE};
 
 /// Callback signature for peripheral signal reports (M-18 v0.8 §18-2,
 /// additive — see M-15 review #2 for the additive default-method pattern).
@@ -85,12 +86,42 @@ pub trait ExecutionBackend {
     /// run with the same seed.
     ///
     /// Callers that need a deterministic round-trip must snapshot the
-    /// event queue as well. M-12 provides that pair as
-    /// `Engine::snapshot_full` / `Engine::restore_full`, which carry
-    /// the queue in an engine-level type; wiring it into the contract
-    /// is tracked as an open item in
-    /// `docs/reviews/CROSS_MODULE_DEBT.md`.
+    /// event queue as well. Use [`Self::snapshot_full`] /
+    /// [`Self::restore_full`] for that — they carry the queue in the
+    /// contract's serializable [`EngineSnapshotDto`].
     fn restore(&mut self, state: &SimState) -> Result<(), PlatformError>;
+
+    /// Capture a **complete** snapshot: the platform state **and** the
+    /// pending event queue, in a form that can be persisted.
+    ///
+    /// Unlike [`Self::snapshot`] (partial), the result round-trips
+    /// deterministically through [`Self::restore_full`]: the queue
+    /// contents, the queue order, the insertion counter and the virtual
+    /// time all survive (D-05 / FR-12). This is the snapshot form M-20
+    /// persists and M-23 stores.
+    ///
+    /// Default: `Ok(None)` — the backend does not expose its event
+    /// queue, so only the partial [`Self::snapshot`] is available.
+    /// Backends that can produce a complete snapshot override this
+    /// **and** [`Self::restore_full`].
+    fn snapshot_full(&self) -> Result<Option<EngineSnapshotDto>, PlatformError> {
+        Ok(None)
+    }
+
+    /// Restore a snapshot previously produced by [`Self::snapshot_full`].
+    ///
+    /// Default: an error (`E_SNAP-03`) — the backend does not support
+    /// deterministic restore, and **nothing is changed**. Failing loudly
+    /// is deliberate: silently skipping the restore would leave the
+    /// caller believing it had resumed a deterministic state when it had
+    /// not (D-24).
+    fn restore_full(&mut self, _snapshot: &EngineSnapshotDto) -> Result<(), PlatformError> {
+        Err(PlatformError::new(
+            ErrorFamily::Snapshot,
+            E_SNAP_03_UNSUPPORTED_RESTORE,
+            "backend does not support deterministic snapshot restore",
+        ))
+    }
 
     /// Read a single memory location.
     fn read_memory(&self, addr: u32, size: crate::model::WriteSize) -> Result<u32, PlatformError>;

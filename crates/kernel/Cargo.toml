@@ -23,5 +23,11 @@ riscv_sim_contract = { path = "../contract" }
 default = []
 wasm = []                # Reserved for wasm-pack build entry point
 
+[dev-dependencies]
+# Only for the snapshot-DTO round-trip evidence (tests/m12_m17_snapshot_dto.rs):
+# a DTO that cannot survive a JSON round-trip is not a persistence format.
+# Dev-dependency only — the shipped WASM binary stays free of serde.
+serde_json = "1.0"
+
 [lints]
 workspace = true
