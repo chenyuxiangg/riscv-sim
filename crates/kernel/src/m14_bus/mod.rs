@@ -198,6 +198,29 @@ pub struct BusAccess {
 /// swap this for `Box<dyn FnMut(&BusAccess) + Send>` (M-12 P2 SMP).
 pub type BusHook = Box<dyn FnMut(&BusAccess)>;
 
+/// **外设时钟推进的结果**（[`Bus::tick_peripherals`]）。
+///
+/// 三件事一起报，不拆成三个返回值：
+///
+/// - **写**：外设在 tick 期间希望提交到总线上的写。调用方**必须**把它们
+///   并进引擎的 `SimState::pending_writes`——不静默丢弃。⚠️ **提交路径
+///   待 D-07 落地**：`pending_writes` 目前在生产代码里**只写不读**
+///   （真正的提交要等 D-07 的时间驱动调度器接手）。
+/// - **错误**：第一个报错的外设的错误。**其余外设仍然会被 tick**
+///   （V-A 检视 · 🟡-4）——一个外设出错不该让别的外设错过时钟同步。
+///   已经收到的写**一条都不丢**。
+/// - **跳过**：因为正被总线派发路径占用（`try_borrow_mut` 失败）而没
+///   赶上这次 tick 的外设数量。
+#[derive(Debug, Default)]
+pub struct PeripheralTickOutcome {
+    /// 本次 tick 期间外设希望提交到总线上的写。
+    pub writes: Vec<PendingWrite>,
+    /// 第一个报错的外设的错误（其余外设仍会被 tick）。
+    pub error: Option<PlatformError>,
+    /// 因为正被派发路径占用而跳过的外设数量。
+    pub skipped: usize,
+}
+
 // ---------------------------------------------------------------------------
 // Region kinds + typed handles (评审 14-12).
 // ---------------------------------------------------------------------------
@@ -790,6 +813,16 @@ impl Bus {
         self.hooks.push(hook);
     }
 
+    /// How many bus hooks are currently installed.
+    ///
+    /// A bus carries **several independent consumers**: M-17's
+    /// watchpoint matcher and M-18's access-trace ring (D-46). The
+    /// count is the cheapest way to assert that **both** are on the
+    /// wire — a single-slot hook would silently starve one of them.
+    pub fn hook_count(&self) -> usize {
+        self.hooks.len()
+    }
+
     /// The **live** peripheral instances on this bus, with their base
     /// addresses.
     ///
@@ -822,36 +855,47 @@ impl Bus {
     /// 没有这一步，边沿的时间戳会一直是 0 —— 波形看起来「有数据」，
     /// 时间轴却是平的，等于半个假象。
     ///
-    /// ## 返回值
-    ///
-    /// 收集所有外设在本次 tick 期间希望提交到总线上的写
-    /// （[`PendingWrite`]）。**不静默丢弃**：调用方（M-17 的步进循环 /
-    /// 宿主）负责把它们并进引擎的 `SimState::pending_writes`。
-    ///
     /// ## 争用
     ///
     /// 某个外设正被总线派发路径占用（`try_borrow_mut` 失败）时，
     /// **跳过**这一次的 tick——它只是没赶上时钟，下一次 tick 会补上。
     /// 派发路径上的 panic 是不可恢复的，所以这里绝不 `borrow_mut`。
     ///
+    /// ## 报错的外设不牵连别人
+    ///
+    /// 一个外设 `tick` 报错时，**其余外设仍然会被 tick**——否则它们会
+    /// 错过时钟同步，探针边沿的时间戳从此对不齐（V-A 检视 · 🟡-4）。
+    /// 第一个错误记在 [`PeripheralTickOutcome::error`] 里，**已经收
+    /// 到的写一条都不丢**。
+    ///
     /// ## 与 D-07 的关系
     ///
     /// 这是**最小**同步：谁调用、什么时候调用由上层决定。D-07 落地后，
     /// 外设的 tick 由 M-12 的调度器在**量子边界**统一驱动（那才是
     /// 架构上的正确粒度），本方法届时退化为调度器 tick 路径的实现细节。
-    pub fn tick_peripherals(&self, now_ps: u64) -> Result<Vec<PendingWrite>, PlatformError> {
-        let mut writes = Vec::new();
+    pub fn tick_peripherals(&self, now_ps: u64) -> PeripheralTickOutcome {
+        let mut out = PeripheralTickOutcome::default();
         for region in self.regions.values() {
             let RegionTarget::PeripheralBound(bound) = &region.target else {
                 continue;
             };
             let Ok(mut periph) = bound.handle.try_borrow_mut() else {
                 // 外设正忙（派发路径上）——跳过这次 tick。
+                out.skipped += 1;
                 continue;
             };
-            writes.extend(periph.tick(now_ps)?);
+            match periph.tick(now_ps) {
+                Ok(pending) => out.writes.extend(pending),
+                Err(err) => {
+                    // 记下**第一个**错误，但继续 tick 后面的外设：它们
+                    // 不能因为别人的错误而错过时钟同步。
+                    if out.error.is_none() {
+                        out.error = Some(err);
+                    }
+                }
+            }
         }
-        Ok(writes)
+        out
     }
 
     /// Update the most recent virtual time the bus was told about.

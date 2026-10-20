@@ -328,11 +328,17 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             //       「指令驱动与时间驱动如何交替」尚未裁定，这里不抢跑）。
             {
                 let now_ps = engine.now_ps();
-                let writes = bus.tick_peripherals(now_ps)?;
-                if !writes.is_empty() {
+                let outcome = bus.tick_peripherals(now_ps);
+                if !outcome.writes.is_empty() {
                     // 外设在 tick 期间想提交的写 —— 并进引擎的待提交队列，
                     // 不静默丢弃（M-14 `tick_peripherals` 的契约）。
-                    engine.state_mut().pending_writes.extend(writes);
+                    engine.state_mut().pending_writes.extend(outcome.writes);
+                }
+                if let Some(err) = outcome.error {
+                    // 报错的外设不影响别人：其余外设**已经** tick 过了，
+                    // 上面收集到的写也**已经**并进队列了。这里才把错误
+                    // 抛出去（V-A 检视 · 🟡-4）。
+                    return Err(err);
                 }
             }
 
@@ -610,6 +616,41 @@ mod tests {
         let mut bus = Bus::new();
         bus.map_ram(0, 0x1_0000, program).expect("map ram");
         SelfIssBackend::new(NullSinks, NullSinks).with_memory_bus(bus)
+    }
+
+    /// 观察点 hook 用 `add_hook`（追加），**不是** `set_hook`（替换全部）。
+    ///
+    /// 总线上要挂**不止一个**消费者：M-17 的观察点匹配器 + M-18 的访存
+    /// trace 环（D-46）。后装的不能把先装的顶掉。
+    ///
+    /// ⚠️ 判别力：把 `install_watch_hook` 里的 `add_hook` 改回 `set_hook`
+    /// ——这条用例立刻变红（别人的 hook 被清掉了）。**与装配顺序无关**：
+    /// 这里故意先在总线上装一个「别人的 hook」，再交给后端。
+    #[test]
+    fn installing_the_watch_hook_does_not_evict_an_existing_hook() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let seen = Rc::new(Cell::new(0u32));
+        let mut bus = Bus::new();
+        bus.map_ram(0, 0x1_0000, &DEMO).expect("map ram");
+        let counter = Rc::clone(&seen);
+        bus.add_hook(Box::new(move |_a: &crate::m14_bus::BusAccess| {
+            counter.set(counter.get() + 1);
+        }));
+
+        let mut backend = SelfIssBackend::new(NullSinks, NullSinks).with_memory_bus(bus);
+        backend.step_n(1).expect("step");
+
+        assert!(
+            seen.get() > 0,
+            "总线上别人装好的 hook 必须还在——观察点 hook 不能顶掉它"
+        );
+        assert!(
+            backend.bus().hook_count() >= 2,
+            "总线上必须同时有「别人的 hook」与「观察点 hook」，实测 {}",
+            backend.bus().hook_count()
+        );
     }
 
     #[test]

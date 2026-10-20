@@ -84,10 +84,67 @@ impl Peripheral for MockPeripheral {
     }
 }
 
+/// A peripheral that **counts** its ticks and can fail on tick.
+///
+/// Used by the `tick_peripherals` tests: the clock-sync path must keep
+/// ticking the *other* peripherals when one of them fails (V-A 检视 ·
+/// 🟡-4).
+#[derive(Debug, Default)]
+struct TickMockPeripheral {
+    id: String,
+    base: u32,
+    size: u32,
+    ticks: Cell<u32>,
+    fail_tick: bool,
+}
+
+impl TickMockPeripheral {
+    fn new(id: &str, base: u32, size: u32, fail_tick: bool) -> Self {
+        Self {
+            id: id.to_string(),
+            base,
+            size,
+            ticks: Cell::new(0),
+            fail_tick,
+        }
+    }
+}
+
+impl Peripheral for TickMockPeripheral {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn base_addr(&self) -> u32 {
+        self.base
+    }
+    fn size(&self) -> u32 {
+        self.size
+    }
+    fn read(&self, _offset: u32, _size: WriteSize) -> Result<u32, PlatformError> {
+        Ok(0)
+    }
+    fn read_clear(&mut self, _offset: u32, _size: WriteSize) -> Result<u32, PlatformError> {
+        Ok(0)
+    }
+    fn write(&mut self, _offset: u32, _size: WriteSize, _value: u32) -> Result<(), PlatformError> {
+        Ok(())
+    }
+    fn tick(&mut self, _now_ps: u64) -> Result<Vec<PendingWrite>, PlatformError> {
+        self.ticks.set(self.ticks.get() + 1);
+        if self.fail_tick {
+            return Err(PlatformError::new(
+                ErrorFamily::Peripheral,
+                2,
+                "mock peripheral tick failure",
+            ));
+        }
+        Ok(Vec::new())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // map / unmap / lookup
 // ---------------------------------------------------------------------------
-
 #[test]
 fn map_ram_succeeds_and_lookup_returns_region() {
     let mut bus = Bus::new();
@@ -348,6 +405,112 @@ fn hook_receives_every_access_with_current_ts() {
     assert_eq!(events[0].dir, AccessDir::Read);
     assert_eq!(events[1].dir, AccessDir::Write);
     assert_eq!(events[1].addr, 0x4000);
+}
+
+#[test]
+fn add_hook_appends_instead_of_replacing() {
+    // D-46：`add_hook` 是 `set_hook` 的 **additive** 孪生。两个独立的
+    // 消费者（观察点匹配器 + 探针 trace 环）必须**都**看见每一次访存。
+    //
+    // ⚠️ 这条用例是 `add_hook` 的**判别力**所在：如果 `add_hook` 退化成
+    // 「清空后只留一个」，只有最后装的那个 hook 会触发，用例立刻变红。
+    // （此前 D-46 的端到端用例只保护**探针**一侧，把 M-17 的
+    // `add_hook` 改回 `set_hook` 仍然全绿——V-A 检视 · 🟡-5。）
+    let first = Rc::new(Cell::new(0u32));
+    let second = Rc::new(Cell::new(0u32));
+    let mut bus = Bus::new();
+    bus.map_ram(0x4000, 0x10, &[1, 2, 3, 4]).unwrap();
+
+    let c1 = Rc::clone(&first);
+    bus.add_hook(Box::new(move |_a: &BusAccess| c1.set(c1.get() + 1)));
+    let c2 = Rc::clone(&second);
+    bus.add_hook(Box::new(move |_a: &BusAccess| c2.set(c2.get() + 1)));
+
+    bus.set_now_ps(7);
+    bus.read(0x4000, BusWidth::Word).expect("read ok");
+    bus.write(0x4000, BusWidth::Word, 0xABCD).expect("write ok");
+
+    assert_eq!(first.get(), 2, "第一个 hook 看见了两次访存");
+    assert_eq!(second.get(), 2, "第二个 hook 也看见了两次访存");
+}
+
+#[test]
+fn add_hook_keeps_the_hook_installed_by_set_hook() {
+    // 装配顺序是「先 `set_hook`（观察点），再 `add_hook`（探针）」。
+    // 后装的不能把先装的顶掉。
+    let first = Rc::new(Cell::new(0u32));
+    let second = Rc::new(Cell::new(0u32));
+    let mut bus = Bus::new();
+    bus.map_ram(0x4000, 0x10, &[1, 2, 3, 4]).unwrap();
+
+    let c1 = Rc::clone(&first);
+    bus.set_hook(Some(Box::new(move |_a: &BusAccess| c1.set(c1.get() + 1))));
+    let c2 = Rc::clone(&second);
+    bus.add_hook(Box::new(move |_a: &BusAccess| c2.set(c2.get() + 1)));
+
+    bus.read(0x4000, BusWidth::Word).expect("read ok");
+
+    assert_eq!(first.get(), 1, "set_hook 装的那个还在");
+    assert_eq!(second.get(), 1, "add_hook 装的那个也在了");
+}
+
+#[test]
+fn set_hook_still_replaces_every_hook() {
+    // `set_hook` 的语义**不变**：它是「替换全部」。D-46 明确保留这一点
+    // ——`add_hook` 是新增的，不是把 `set_hook` 改掉。
+    let first = Rc::new(Cell::new(0u32));
+    let second = Rc::new(Cell::new(0u32));
+    let mut bus = Bus::new();
+    bus.map_ram(0x4000, 0x10, &[1, 2, 3, 4]).unwrap();
+
+    let c1 = Rc::clone(&first);
+    bus.add_hook(Box::new(move |_a: &BusAccess| c1.set(c1.get() + 1)));
+    let c2 = Rc::clone(&second);
+    bus.set_hook(Some(Box::new(move |_a: &BusAccess| c2.set(c2.get() + 1))));
+
+    bus.read(0x4000, BusWidth::Word).expect("read ok");
+
+    assert_eq!(first.get(), 0, "set_hook 把之前的 hook 全部清掉了");
+    assert_eq!(second.get(), 1, "只剩 set_hook 装的那个");
+}
+
+#[test]
+fn a_failing_peripheral_does_not_stop_the_others_from_ticking() {
+    // 一个外设 `tick` 报错时，**其余外设仍然要被 tick**（V-A 检视 · 🟡-4）。
+    //
+    // 道理很实在：外设的 `tick` 是它与虚拟时钟之间的**唯一**同步点。
+    // 报错的外设让别人的时钟同步也停了，探针边沿的时间戳从此对不齐——
+    // 波形看起来「有数据」，时间轴却是歪的。
+    //
+    // ⚠️ 判别力：把 `tick_peripherals` 改回「遇第一个报错外设即整体
+    // `?` 中断」，这条用例立刻变红（后面的外设根本没被 tick）。
+    // ⚠️ **基址顺序要紧**：报错的 `BAD` 必须排在**前面**（0x3000），
+    // 否则「遇错即中断」的变异在它之前就已经把好的外设 tick 过了——
+    // 用例会假绿。总线按基址顺序遍历区域。
+    let bad = Rc::new(RefCell::new(TickMockPeripheral::new(
+        "BAD", 0x3000, 0x10, true,
+    )));
+    let good = Rc::new(RefCell::new(TickMockPeripheral::new(
+        "GOOD", 0x4000, 0x10, false,
+    )));
+    let mut bus = Bus::new();
+    bus.map_peripheral_instance(0x3000, 0x10, Rc::clone(&bad) as _)
+        .unwrap();
+    bus.map_peripheral_instance(0x4000, 0x10, Rc::clone(&good) as _)
+        .unwrap();
+
+    let outcome = bus.tick_peripherals(1_000);
+
+    assert!(
+        outcome.error.is_some(),
+        "报错的外设必须把错误报出来——不静默吞掉"
+    );
+    assert_eq!(
+        good.borrow().ticks.get(),
+        1,
+        "没报错的外设必须照样被 tick（时钟同步不能被别人拖停）"
+    );
+    assert_eq!(bad.borrow().ticks.get(), 1, "报错的外设自己也 tick 了");
 }
 
 #[test]
