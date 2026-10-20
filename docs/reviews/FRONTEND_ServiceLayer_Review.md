@@ -192,8 +192,45 @@ D-2 / D-3 说明了一件事：**DOM stub 覆盖不到挂载时序**（AGENTS.md
 | 产品树 | 显示已加载的 mock 项目（MainBoard → RV32IMC → UART0/GPIO0） |
 | 控制台 | 无 JS 异常（仅浏览器默认的 `favicon.ico` 404） |
 
-复验脚本是 `/tmp` 下的临时 CDP 脚本，**没有**进仓（不进 `front/tests/`：
-它依赖本机 Chrome 路径，不适合作为门禁）。
+复验脚本已进仓：**`tools/browser-verify.mjs`**（零依赖，Node 22 的全局
+`WebSocket` + `fetch` 驱动 Chrome DevTools Protocol，不引入任何 npm 包）。
+它**不是**门禁的一部分（`tools/check-front.sh` 不调用它）——它依赖本机
+Chrome，只能按需手动跑。
+
+复现步骤（仓库根目录）：
+
+```bash
+# 1) 起同源 HTTP 服务（ES module 与 Worker 都要求 HTTP，file:// 会被拦）
+python3 -m http.server 8080 --directory front
+
+# 2) 跑真机复验脚本（自己会起 Chrome，跑完自动清理）
+node tools/browser-verify.mjs --no-serve
+
+# 3) 看退出码：0 = 通过，1 = 有断言失败 / 控制台错误，127 = 缺前置条件
+echo $?
+```
+
+不想自己起服务时，直接 `node tools/browser-verify.mjs`——脚本发现端口没人
+应答就会自己拉起 `python3 -m http.server`。浏览器路径默认按
+`CHROME_PATH` → macOS `Google Chrome.app` → `Chromium.app` → PATH 上的
+`google-chrome` / `chromium` 依次尝试；都找不到时打印提示并以 **127**
+退出（那是「本机缺前置条件」，不是「前端有问题」）。
+
+脚本验证什么：真实 Chrome 里的**落地页装配**（工作台容器有子节点、当前
+视图有标题文本）、**渲染路径**（切到 `#/regmem` 后视图正文非空、32 个
+寄存器格渲染出来——这正是 DOM stub 盖不住的「首次事件早于订阅」那类
+白屏缺陷）、**服务链**（传输层「已连接」+ 页脚「mock 内核已就绪」）、
+**控制台干净**（无 `console.error`、无未捕获异常；浏览器默认的
+`favicon.ico` 404 被显式忽略）。
+
+脚本**不**验证什么：它不是 `tools/check-front.sh` 的替代品（契约镜像、
+模块行为仍由 Node 门禁覆盖），它不接真实 WASM 内核（前端仍连 dev-only
+的 mock worker），也不覆盖多视图交互与仿真结果本身。
+
+> 落地视图 `embedded` 目前**没有** M-02 组件（MVP 占位面板），所以它的
+> 正文本来就是空的；脚本因此把「正文非空」的检查放在 `#/regmem` 上。
+> 这条已知缺口由 `tools/browser-verify.mjs` 的落地页/渲染路径两段检查
+> 显式区分，不会被误判成白屏回归。
 
 ---
 
@@ -224,8 +261,16 @@ D-2 / D-3 说明了一件事：**DOM stub 覆盖不到挂载时序**（AGENTS.md
    树覆盖回 demo 树。是 dev-only 行为，但两个数据源容易让人误解。
 
 6. **门禁的 DOM stub 仍是 stub**：本轮的 D-2 / D-3 就是它盖不住的
-   「挂载时序 / 状态回调时序」类缺陷。建议后续把「服务层状态机」也纳入
-   真机冒烟（哪怕只是 CI 里跑一次 CDP 脚本）。
+   「挂载时序 / 状态回调时序」类缺陷。真机冒烟脚本已进仓
+   （`tools/browser-verify.mjs`，见第六节），可以按需手动跑；它依赖
+   本机 Chrome，所以还进不了 `tools/check-front.sh` 的默认门禁。
+   后续若要常态化，需要一个带 Chrome 的 CI runner。
+
+7. **落地视图 `embedded` 没有 M-02 组件**（MVP 占位面板，正文为空）：
+   首次进入工作台看到的是「嵌入式工作台」标题 + 空面板，要切到
+   `#/debug` / `#/regmem` 才有内容。属于 MVP 欠账，不是本轮引入的
+   回归——`tools/browser-verify.mjs` 的落地页与渲染路径两段检查把
+   两者区分开，不会误报。
 
 ---
 
