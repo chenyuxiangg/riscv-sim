@@ -29,6 +29,17 @@ const indexHtml = readFileSync(resolve(frontDir, "index.html"), "utf8");
 // module scope.
 installDom(indexHtml);
 
+// ⚠️ **关掉 `app.js` 的自启动**（D-46 检视 V-B · probe D2）。
+//
+// `app.js` 是引导入口——**导入即启动**。它的 `bootstrap()` 是异步的，
+// 里面会调 `waveform.reset()`；而 M-03 的视图状态是**模块级单例**。
+// 于是那条 reset 可能落在**任意两个用例之间**，把上一个用例刚推进 store
+// 的通道清掉——实测「推入 1 条 → 0 ms 后看 → 变成 0 条」。
+//
+// 当前的用例之所以还是绿的，**只因为时序恰好对**。这里显式关掉自启动，
+// 让这个套件**不依赖时序运气**。
+globalThis.__RVSIM_NO_BOOTSTRAP__ = true;
+
 const importFront = (rel) => import(pathToFileURL(resolve(frontDir, rel)).href);
 
 const app = await importFront("app.js");

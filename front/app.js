@@ -425,7 +425,28 @@ async function bootstrap() {
     void startSession({ session, commandRouter, registerMemory, waveform, workspace });
 }
 
-bootstrap().catch((err) => {
-    console.error("bootstrap failed:", err);
-    status.textContent = `启动失败: ${err?.message ?? err}`;
-});
+/**
+ * 自动启动的开关。
+ *
+ * ⚠️ `app.js` 是**引导入口**——**导入即启动**（`bootstrap()` 是模块级的
+ * 副作用）。这对浏览器是对的，对**导入即断言**的前端门禁是灾难：
+ * `bootstrap()` 里的 `startSession()` 是**异步**的，它会调
+ * `waveform.reset()`——而 M-03 的视图状态是**模块级单例**。于是那条
+ * reset 可能落在**任意两个用例之间**，把上一个用例刚推进 store 的通道
+ * 清掉。
+ *
+ * 实测（V-B 检视 · probe D2）：推入 1 条通道后 0 ms 再看，store 里的通道
+ * **变成 0 条**——reset 落下来了。当前的用例之所以还是绿的，**只因为时序
+ * 恰好对**。
+ *
+ * 所以：需要导入 `app.js` 但**不要**它的自启动副作用的测试，先设
+ * `globalThis.__RVSIM_NO_BOOTSTRAP__ = true`。
+ */
+const NO_BOOTSTRAP_FLAG = "__RVSIM_NO_BOOTSTRAP__";
+
+if (!globalThis[NO_BOOTSTRAP_FLAG]) {
+    bootstrap().catch((err) => {
+        console.error("bootstrap failed:", err);
+        status.textContent = `启动失败: ${err?.message ?? err}`;
+    });
+}
