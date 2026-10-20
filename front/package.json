@@ -4,6 +4,6 @@
   "type": "module",
   "description": "Zero-build front end (native ES modules — no bundler, no dependency). The `type` field only tells Node to treat .js as ESM for the front-end smoke gate; there is nothing to install and nothing to build.",
   "scripts": {
-    "test:front": "node --test \"front/tests/*.test.mjs\""
+    "test:front": "node --test \"tests/*.test.mjs\""
   }
 }

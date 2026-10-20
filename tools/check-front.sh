@@ -21,4 +21,13 @@ if ! command -v node >/dev/null 2>&1; then
     exit 1
 fi
 
+# `node --test` with a quoted glob needs Node >= 21; the gate also uses the
+# node:test API surface of 18+. Check explicitly so an old Node fails with
+# a clear message instead of a cryptic one (FRONTEND_Review.md R-10).
+node -e 'const major = +process.versions.node.split(".")[0];
+if (major < 22) {
+  console.error(`error: Node >= 22 required, found ${process.versions.node}`);
+  process.exit(1);
+}'
+
 node --test "front/tests/*.test.mjs"

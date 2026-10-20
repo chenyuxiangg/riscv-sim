@@ -29,6 +29,7 @@ front/assets/*.wasm
 front/assets/*.js
 
 # Node / JS front-end (we have no npm deps today, but if you add any)
+node_modules/
 front/node_modules/
 front/dist/
 
