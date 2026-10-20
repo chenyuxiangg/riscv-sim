@@ -1,16 +1,22 @@
-//! Executor for the MVP subset (RV32I ALU + a single I-type immediate).
+//! Executor for the RV32I instruction set.
 //!
 //! The executor is a pure function over `(gpr, mem, decoded)`. It
 //! does not maintain its own state — the caller threads the
 //! [`SimState`] through, which is what gives us deterministic replay.
 //!
+//! There is exactly **one** execution path ([`execute_one`]). Every
+//! dispatch route — the closure-backed [`Executor`] and the bus-backed
+//! adapter in the crate root — feeds the same function, so the two
+//! routes cannot drift apart in their instruction semantics (D-11).
+//!
 //! `StepOutcome` tells the engine whether the instruction completed,
 //! trapped, or paused at a breakpoint.
 
-use riscv_sim_contract::error::{ErrorFamily, PlatformError};
-use riscv_sim_contract::model::SimState;
+use riscv_sim_contract::error::PlatformError;
+use riscv_sim_contract::model::{SimState, WriteSize};
 
-use super::decoder::Decoded;
+use super::alu;
+use super::decoder::{Decoded, LEN_32};
 
 /// Result of a single instruction execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +50,14 @@ pub enum TrapCause {
     OutOfRange,
     /// Environment call from M-mode.
     Ecall,
+    /// Guest `EBREAK` (mcause = 3). Distinct from
+    /// [`StepOutcome::Breakpoint`], which means a *host* breakpoint
+    /// inserted by M-08 rather than a guest instruction.
+    Breakpoint,
+    /// Reserved for the `M` extension (division by zero, mcause = 6).
+    /// The M extension lands in a later wave; the cause is declared
+    /// here so the taxonomy does not have to change shape when it does.
+    IntegerDivideByZero,
 }
 
 impl Default for TrapCause {
@@ -52,33 +66,77 @@ impl Default for TrapCause {
     }
 }
 
+/// Read a general-purpose register.
+///
+/// x0 is hardwired to zero: the architectural state of x0 is always
+/// readable as 0 regardless of what the register file happens to
+/// contain. Every read path must go through this helper (D-04) —
+/// a bare `state.gpr[rs1]` read lets a corrupted / externally written
+/// x0 leak into the executed semantics.
+pub fn read_gpr(state: &SimState, r: u8) -> u32 {
+    if r == 0 {
+        0
+    } else {
+        state.gpr[r as usize]
+    }
+}
+
+/// Write a general-purpose register.
+///
+/// Writes to x0 are discarded — x0 is hardwired to zero (D-04). Every
+/// write path must go through this helper so no instruction can
+/// clobber x0.
+pub fn write_gpr(state: &mut SimState, r: u8, value: u32) {
+    if r != 0 {
+        state.gpr[r as usize] = value;
+    }
+}
+
+/// Memory access port used by the executor.
+///
+/// The ISS never touches memory directly: every load / store goes
+/// through this port. Two adapters implement it — the closure-backed
+/// [`Executor`] and the bus-backed adapter in the crate root — so both
+/// dispatch routes run identical semantics (D-11). A third adapter can
+/// be added (e.g. a flat RAM model) without touching the semantics.
+pub trait MemoryAccess {
+    /// Read `size` bytes at `addr`; the value is returned in the low
+    /// bytes of the result (little-endian).
+    fn read(&mut self, addr: u32, size: WriteSize) -> Result<u32, PlatformError>;
+    /// Write the low `size` bytes of `value` at `addr`.
+    fn write(&mut self, addr: u32, size: WriteSize, value: u32) -> Result<(), PlatformError>;
+}
+
 /// Executor wrapper. Holds the memory accessors so the per-instruction
 /// site stays readable.
 pub struct Executor<F, G>
 where
-    F: Fn(u32, riscv_sim_contract::model::WriteSize) -> Result<u32, PlatformError>,
-    G: Fn(u32, riscv_sim_contract::model::WriteSize, u32) -> Result<(), PlatformError>,
+    F: Fn(u32, WriteSize) -> Result<u32, PlatformError>,
+    G: Fn(u32, WriteSize, u32) -> Result<(), PlatformError>,
 {
-    /// The fields below are wired through `Executor::new` but the
-    /// MVP-only `ADDI` path never invokes them. Used by LOAD / STORE
-    /// once M-13 widens to the full RV32IMC set (LLD §4.13).
-    #[allow(dead_code)]
     read_mem: F,
-    #[allow(dead_code)]
     write_mem: G,
+    misaligned: MisalignedPolicy,
 }
 
 impl<F, G> Executor<F, G>
 where
-    F: Fn(u32, riscv_sim_contract::model::WriteSize) -> Result<u32, PlatformError>,
-    G: Fn(u32, riscv_sim_contract::model::WriteSize, u32) -> Result<(), PlatformError>,
+    F: Fn(u32, WriteSize) -> Result<u32, PlatformError>,
+    G: Fn(u32, WriteSize, u32) -> Result<(), PlatformError>,
 {
     /// Build a new executor from memory accessors.
     pub fn new(read_mem: F, write_mem: G) -> Self {
         Self {
             read_mem,
             write_mem,
+            misaligned: MisalignedPolicy::default(),
         }
+    }
+
+    /// Select the policy for misaligned data accesses.
+    pub fn with_misaligned_policy(mut self, policy: MisalignedPolicy) -> Self {
+        self.misaligned = policy;
+        self
     }
 
     /// Execute one decoded instruction, mutating the [`SimState`].
@@ -87,29 +145,507 @@ where
         state: &mut SimState,
         d: &Decoded,
     ) -> Result<StepOutcome, PlatformError> {
-        // 0b0010011 = I-type ALU (addi / slti / etc.). MVP only implements
-        // ADDI (funct3 == 0x0) to keep the harness small.
-        if d.opcode == 0b0010011 {
-            if d.funct3 == 0x0 {
-                // ADDI: rd = rs1 + imm
-                let lhs = state.gpr[d.rs1 as usize] as i32;
-                let result = lhs.wrapping_add(d.imm) as u32;
-                state.gpr[d.rd as usize] = result;
-                state.pc = state.pc.wrapping_add(4);
-                return Ok(StepOutcome::Advanced);
-            }
+        let misaligned = self.misaligned;
+        execute_one(self, state, d, misaligned)
+    }
+}
+
+impl<F, G> MemoryAccess for Executor<F, G>
+where
+    F: Fn(u32, WriteSize) -> Result<u32, PlatformError>,
+    G: Fn(u32, WriteSize, u32) -> Result<(), PlatformError>,
+{
+    fn read(&mut self, addr: u32, size: WriteSize) -> Result<u32, PlatformError> {
+        (self.read_mem)(addr, size)
+    }
+
+    fn write(&mut self, addr: u32, size: WriteSize, value: u32) -> Result<(), PlatformError> {
+        (self.write_mem)(addr, size, value)
+    }
+}
+
+/// Policy for misaligned data accesses.
+///
+/// The RISC-V spec lets an implementation either raise an
+/// address-misaligned exception or perform the access. LLD §3.6(2)
+/// asks for the Spike-aligned behaviour (perform it), while the
+/// platform contract for this wave asks for a trap — the policy is
+/// therefore configurable, and defaults to trapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MisalignedPolicy {
+    /// Raise a misaligned-access trap.
+    #[default]
+    Trap,
+    /// Perform the access anyway.
+    Allow,
+}
+
+/// Instruction identity after two-level decode.
+///
+/// The LLD's decode key is `opcode | funct3 | funct7` (评审 13-5): the
+/// first level picks the instruction category, the second picks the
+/// operation inside it. [`classify`] implements exactly that — a key
+/// that does not resolve is an illegal instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Op {
+    /// LUI — load the upper immediate.
+    Lui,
+    /// AUIPC — add the upper immediate to the PC.
+    Auipc,
+    /// ADDI — add immediate.
+    Addi,
+    /// SLTI — set less than, signed immediate.
+    Slti,
+    /// SLTIU — set less than, unsigned immediate.
+    Sltiu,
+    /// XORI — exclusive-or immediate.
+    Xori,
+    /// ORI — or immediate.
+    Ori,
+    /// ANDI — and immediate.
+    Andi,
+    /// SLLI — shift left logical, immediate shift amount.
+    Slli,
+    /// SRLI — shift right logical, immediate shift amount.
+    Srli,
+    /// SRAI — shift right arithmetic, immediate shift amount.
+    Srai,
+    /// ADD — add.
+    Add,
+    /// SUB — subtract.
+    Sub,
+    /// SLL — shift left logical.
+    Sll,
+    /// SLT — set less than, signed.
+    Slt,
+    /// SLTU — set less than, unsigned.
+    Sltu,
+    /// XOR — exclusive-or.
+    Xor,
+    /// SRL — shift right logical.
+    Srl,
+    /// SRA — shift right arithmetic.
+    Sra,
+    /// OR — or.
+    Or,
+    /// AND — and.
+    And,
+    /// LB — load byte, sign-extended.
+    Lb,
+    /// LH — load halfword, sign-extended.
+    Lh,
+    /// LW — load word.
+    Lw,
+    /// LBU — load byte, zero-extended.
+    Lbu,
+    /// LHU — load halfword, zero-extended.
+    Lhu,
+    /// SB — store byte.
+    Sb,
+    /// SH — store halfword.
+    Sh,
+    /// SW — store word.
+    Sw,
+    /// BEQ — branch if equal.
+    Beq,
+    /// BNE — branch if not equal.
+    Bne,
+    /// BLT — branch if less than, signed.
+    Blt,
+    /// BGE — branch if greater than or equal, signed.
+    Bge,
+    /// BLTU — branch if less than, unsigned.
+    Bltu,
+    /// BGEU — branch if greater than or equal, unsigned.
+    Bgeu,
+    /// JAL — jump and link.
+    Jal,
+    /// JALR — jump and link, register.
+    Jalr,
+    /// FENCE — memory ordering fence (a no-op here).
+    Fence,
+    /// FENCE.I — instruction fetch fence (a no-op here).
+    FenceI,
+    /// ECALL — environment call.
+    Ecall,
+    /// EBREAK — breakpoint.
+    Ebreak,
+}
+
+/// Second-level decode: map a decode key onto a concrete operation.
+///
+/// `None` means the key is not a legal RV32I encoding — the caller
+/// turns that into an illegal-instruction trap (LLD §3.2: a key that
+/// misses the table is an illegal instruction).
+pub fn classify(d: &Decoded) -> Option<Op> {
+    match d.opcode {
+        // U-type. Neither LUI nor AUIPC has a funct3 field — bits
+        // 14:12 belong to the immediate.
+        0b011_0111 => Some(Op::Lui),
+        0b001_0111 => Some(Op::Auipc),
+        // OP-IMM.
+        0b001_0011 => match d.funct3 {
+            0b000 => Some(Op::Addi),
+            0b001 => (d.funct7 == 0b000_0000).then_some(Op::Slli),
+            0b010 => Some(Op::Slti),
+            0b011 => Some(Op::Sltiu),
+            0b100 => Some(Op::Xori),
+            0b101 => match d.funct7 {
+                0b000_0000 => Some(Op::Srli),
+                0b010_0000 => Some(Op::Srai),
+                _ => None,
+            },
+            0b110 => Some(Op::Ori),
+            0b111 => Some(Op::Andi),
+            _ => None,
+        },
+        // OP (register-register).
+        0b011_0011 => match (d.funct3, d.funct7) {
+            (0b000, 0b000_0000) => Some(Op::Add),
+            (0b000, 0b010_0000) => Some(Op::Sub),
+            (0b001, 0b000_0000) => Some(Op::Sll),
+            (0b010, 0b000_0000) => Some(Op::Slt),
+            (0b011, 0b000_0000) => Some(Op::Sltu),
+            (0b100, 0b000_0000) => Some(Op::Xor),
+            (0b101, 0b000_0000) => Some(Op::Srl),
+            (0b101, 0b010_0000) => Some(Op::Sra),
+            (0b110, 0b000_0000) => Some(Op::Or),
+            (0b111, 0b000_0000) => Some(Op::And),
+            _ => None,
+        },
+        // LOAD.
+        0b000_0011 => match d.funct3 {
+            0b000 => Some(Op::Lb),
+            0b001 => Some(Op::Lh),
+            0b010 => Some(Op::Lw),
+            0b100 => Some(Op::Lbu),
+            0b101 => Some(Op::Lhu),
+            _ => None,
+        },
+        // STORE.
+        0b010_0011 => match d.funct3 {
+            0b000 => Some(Op::Sb),
+            0b001 => Some(Op::Sh),
+            0b010 => Some(Op::Sw),
+            _ => None,
+        },
+        // BRANCH.
+        0b110_0011 => match d.funct3 {
+            0b000 => Some(Op::Beq),
+            0b001 => Some(Op::Bne),
+            0b100 => Some(Op::Blt),
+            0b101 => Some(Op::Bge),
+            0b110 => Some(Op::Bltu),
+            0b111 => Some(Op::Bgeu),
+            _ => None,
+        },
+        // JAL — the J-type format has no funct3 field, bits 14:12
+        // belong to the immediate.
+        0b110_1111 => Some(Op::Jal),
+        // JALR.
+        0b110_0111 => (d.funct3 == 0b000).then_some(Op::Jalr),
+        // MISC-MEM: FENCE / FENCE.I.
+        0b000_1111 => match d.funct3 {
+            0b000 => Some(Op::Fence),
+            0b001 => Some(Op::FenceI),
+            _ => None,
+        },
+        // SYSTEM: ECALL / EBREAK are selected by the 12-bit immediate.
+        0b111_0011 => match d.imm {
+            0 => Some(Op::Ecall),
+            1 => Some(Op::Ebreak),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Evaluate a branch condition against its two source registers.
+fn branch_taken(op: Op, lhs: u32, rhs: u32) -> bool {
+    match op {
+        Op::Beq => lhs == rhs,
+        Op::Bne => lhs != rhs,
+        Op::Blt => (lhs as i32) < (rhs as i32),
+        Op::Bge => (lhs as i32) >= (rhs as i32),
+        Op::Bltu => lhs < rhs,
+        Op::Bgeu => lhs >= rhs,
+        // Only branch operations reach this function.
+        _ => false,
+    }
+}
+
+/// Access width of a load instruction.
+fn load_width(op: Op) -> WriteSize {
+    match op {
+        Op::Lb | Op::Lbu => WriteSize::Byte,
+        Op::Lh | Op::Lhu => WriteSize::Half,
+        _ => WriteSize::Word,
+    }
+}
+
+/// Value a load writes into the destination register: sign- or
+/// zero-extended to 32 bits.
+fn extend_load(op: Op, raw: u32) -> u32 {
+    match op {
+        Op::Lb => alu::sext8(raw),
+        Op::Lbu => alu::zext8(raw),
+        Op::Lh => alu::sext16(raw),
+        Op::Lhu => alu::zext16(raw),
+        _ => raw,
+    }
+}
+
+/// Access width of a store instruction.
+fn store_width(op: Op) -> WriteSize {
+    match op {
+        Op::Sb => WriteSize::Byte,
+        Op::Sh => WriteSize::Half,
+        _ => WriteSize::Word,
+    }
+}
+
+/// Value a store writes: the low bytes of the source register.
+fn truncate_store(op: Op, value: u32) -> u32 {
+    match op {
+        Op::Sb => alu::zext8(value),
+        Op::Sh => alu::zext16(value),
+        _ => value,
+    }
+}
+
+/// Whether an address satisfies the natural alignment of the access.
+fn is_aligned(addr: u32, size: WriteSize) -> bool {
+    match size {
+        WriteSize::Byte => true,
+        WriteSize::Half => addr & 0x1 == 0,
+        WriteSize::Word => addr & 0x3 == 0,
+    }
+}
+
+/// PC after an instruction that falls through to the next one.
+fn sequential(d: &Decoded) -> u32 {
+    d.pc.wrapping_add(d.len as u32)
+}
+
+/// PC after a taken branch: the branch target is relative to the PC of
+/// the branch instruction itself.
+fn branch(d: &Decoded) -> u32 {
+    d.pc.wrapping_add(d.imm as u32)
+}
+
+/// The single execution path shared by every dispatch route.
+///
+/// `mem` is the memory port: it is threaded through here so that both
+/// dispatch routes are structurally identical, and so that the load /
+/// store instructions land on one code path rather than two (D-11).
+pub fn execute_one<M: MemoryAccess>(
+    mem: &mut M,
+    state: &mut SimState,
+    d: &Decoded,
+    misaligned: MisalignedPolicy,
+) -> Result<StepOutcome, PlatformError> {
+    if d.len != LEN_32 {
+        // A compressed (RV32C) encoding: a legal instruction the ISS
+        // cannot execute yet. Trap rather than mis-execute it — the
+        // length field is what makes the distinction possible (D-16).
+        return Ok(StepOutcome::Trapped {
+            cause: TrapCause::IllegalInstruction,
+        });
+    }
+
+    let op = match classify(d) {
+        Some(op) => op,
+        None => {
+            // An encoding the ISS cannot execute is an illegal
+            // instruction, not a platform failure: both dispatch routes
+            // report it identically (D-11). The engine turns this into
+            // mcause = 2 once trap delivery is wired (LLD §5.2.4).
             return Ok(StepOutcome::Trapped {
                 cause: TrapCause::IllegalInstruction,
             });
         }
+    };
 
-        Err(PlatformError::new(
-            ErrorFamily::Iss,
-            2,
-            format!(
-                "unimplemented opcode 0b{:07b} at pc=0x{:08x}",
-                d.opcode, d.pc
-            ),
-        ))
-    }
+    let next_pc = match op {
+        Op::Lui => {
+            // The decoded U-type immediate already carries the value in
+            // bits 31:12 with a zeroed low half.
+            write_gpr(state, d.rd, d.imm as u32);
+            sequential(d)
+        }
+        Op::Auipc => {
+            write_gpr(state, d.rd, d.pc.wrapping_add(d.imm as u32));
+            sequential(d)
+        }
+        Op::Addi => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::add(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Slti => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::slt(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Sltiu => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::sltu(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Xori => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::xor(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Ori => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::or(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Andi => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::and(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Slli => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::sll(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Srli => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::srl(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Srai => {
+            let lhs = read_gpr(state, d.rs1);
+            write_gpr(state, d.rd, alu::sra(lhs, d.imm as u32));
+            sequential(d)
+        }
+        Op::Add => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::add(lhs, rhs));
+            sequential(d)
+        }
+        Op::Sub => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::sub(lhs, rhs));
+            sequential(d)
+        }
+        Op::Sll => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::sll(lhs, rhs));
+            sequential(d)
+        }
+        Op::Slt => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::slt(lhs, rhs));
+            sequential(d)
+        }
+        Op::Sltu => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::sltu(lhs, rhs));
+            sequential(d)
+        }
+        Op::Xor => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::xor(lhs, rhs));
+            sequential(d)
+        }
+        Op::Srl => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::srl(lhs, rhs));
+            sequential(d)
+        }
+        Op::Sra => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::sra(lhs, rhs));
+            sequential(d)
+        }
+        Op::Or => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::or(lhs, rhs));
+            sequential(d)
+        }
+        Op::And => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::and(lhs, rhs));
+            sequential(d)
+        }
+        Op::Lb | Op::Lbu | Op::Lh | Op::Lhu | Op::Lw => {
+            let addr = read_gpr(state, d.rs1).wrapping_add(d.imm as u32);
+            let size = load_width(op);
+            if misaligned == MisalignedPolicy::Trap && !is_aligned(addr, size) {
+                return Ok(StepOutcome::Trapped {
+                    cause: TrapCause::MisalignedAccess,
+                });
+            }
+            let raw = mem.read(addr, size)?;
+            write_gpr(state, d.rd, extend_load(op, raw));
+            sequential(d)
+        }
+        Op::Sb | Op::Sh | Op::Sw => {
+            let addr = read_gpr(state, d.rs1).wrapping_add(d.imm as u32);
+            let size = store_width(op);
+            if misaligned == MisalignedPolicy::Trap && !is_aligned(addr, size) {
+                return Ok(StepOutcome::Trapped {
+                    cause: TrapCause::MisalignedAccess,
+                });
+            }
+            let value = truncate_store(op, read_gpr(state, d.rs2));
+            mem.write(addr, size, value)?;
+            sequential(d)
+        }
+        Op::Beq | Op::Bne | Op::Blt | Op::Bge | Op::Bltu | Op::Bgeu => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            if branch_taken(op, lhs, rhs) {
+                branch(d)
+            } else {
+                sequential(d)
+            }
+        }
+        Op::Jal => {
+            // The link register holds the address of the instruction
+            // *after* the jump.
+            write_gpr(state, d.rd, d.pc.wrapping_add(d.len as u32));
+            branch(d)
+        }
+        Op::Jalr => {
+            // The target is computed from rs1 before rd is written, so
+            // that `jalr rd, imm(rs1)` with rd == rs1 behaves as the
+            // spec requires.
+            let target = read_gpr(state, d.rs1).wrapping_add(d.imm as u32) & !1u32;
+            write_gpr(state, d.rd, d.pc.wrapping_add(d.len as u32));
+            target
+        }
+        Op::Fence | Op::FenceI => {
+            // The single-core model is sequentially consistent, so the
+            // fences are no-ops (LLD §3.6(5)).
+            sequential(d)
+        }
+        Op::Ecall => {
+            return Ok(StepOutcome::Trapped {
+                cause: TrapCause::Ecall,
+            })
+        }
+        Op::Ebreak => {
+            return Ok(StepOutcome::Trapped {
+                cause: TrapCause::Breakpoint,
+            })
+        }
+    };
+
+    state.pc = next_pc;
+    Ok(StepOutcome::Advanced)
 }

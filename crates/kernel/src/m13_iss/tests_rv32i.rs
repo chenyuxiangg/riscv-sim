@@ -1,0 +1,1410 @@
+//! RV32I coverage for M-13: decode tables, execution semantics and the
+//! architectural edge cases (x0 hardwiring, sign extension, shift
+//! amounts, branch / jump immediate splicing, misaligned accesses,
+//! illegal encodings).
+//!
+//! The shared scaffolding lives here so every case drives the ISS the
+//! same way the production path does:
+//!
+//! * [`Harness`] — byte-addressable RAM + [`Iss`], stepping through
+//!   `Iss::step_one` (closure memory port).
+//! * [`BusHarness`] — the same program driven through
+//!   `Iss::step_one_via_bus` (M-14 bus memory port), used to prove the
+//!   two dispatch routes share one semantic path (D-11).
+
+use std::cell::RefCell;
+
+use riscv_sim_contract::error::{ErrorFamily, PlatformError};
+use riscv_sim_contract::model::{SimState, WriteSize};
+
+use crate::m14_bus::Bus;
+
+use super::decoder::Decoder;
+use super::executor::{read_gpr, MisalignedPolicy, StepOutcome, TrapCause};
+use super::Iss;
+
+// ---------------------------------------------------------------------------
+// Instruction encoders
+// ---------------------------------------------------------------------------
+
+/// Opcode of the OP-IMM group.
+const OP_IMM: u8 = 0b001_0011;
+/// Opcode of the AUIPC group.
+const AUIPC: u8 = 0b001_0111;
+/// Opcode of the OP (register-register) group.
+const OP: u8 = 0b011_0011;
+/// Opcode of the LUI group.
+const LUI: u8 = 0b011_0111;
+/// Opcode of the LOAD group.
+const LOAD: u8 = 0b000_0011;
+/// Opcode of the STORE group.
+const STORE: u8 = 0b010_0011;
+/// Opcode of the BRANCH group.
+const BRANCH: u8 = 0b110_0011;
+/// Opcode of the JALR instruction.
+const JALR: u8 = 0b110_0111;
+/// Opcode of the JAL instruction.
+const JAL: u8 = 0b110_1111;
+
+/// Encode an I-type instruction (12-bit signed immediate).
+fn enc_i(imm: i32, rs1: u8, funct3: u8, rd: u8, opcode: u8) -> u32 {
+    (((imm as u32) & 0xFFF) << 20)
+        | ((rs1 as u32) << 15)
+        | ((funct3 as u32) << 12)
+        | ((rd as u32) << 7)
+        | (opcode as u32)
+}
+
+/// Encode an R-type instruction (`funct7 | rs2 | rs1 | funct3 | rd | opcode`).
+fn enc_r(funct7: u8, rs2: u8, rs1: u8, funct3: u8, rd: u8, opcode: u8) -> u32 {
+    ((funct7 as u32) << 25)
+        | ((rs2 as u32) << 20)
+        | ((rs1 as u32) << 15)
+        | ((funct3 as u32) << 12)
+        | ((rd as u32) << 7)
+        | (opcode as u32)
+}
+
+/// Encode an OP-IMM shift instruction
+/// (`funct7 | shamt | rs1 | funct3 | rd | opcode`).
+fn enc_shift(funct7: u8, shamt: u8, rs1: u8, funct3: u8, rd: u8, opcode: u8) -> u32 {
+    ((funct7 as u32) << 25)
+        | (((shamt as u32) & 0x1F) << 20)
+        | ((rs1 as u32) << 15)
+        | ((funct3 as u32) << 12)
+        | ((rd as u32) << 7)
+        | (opcode as u32)
+}
+
+/// Encode a U-type instruction (20-bit immediate in bits 31:12).
+fn enc_u(imm20: u32, rd: u8, opcode: u8) -> u32 {
+    ((imm20 & 0xF_FFFF) << 12) | ((rd as u32) << 7) | (opcode as u32)
+}
+
+/// Encode an S-type instruction (12-bit signed immediate, split fields).
+fn enc_s(imm: i32, rs2: u8, rs1: u8, funct3: u8, opcode: u8) -> u32 {
+    let imm = imm as u32;
+    ((imm & 0x1F) << 7)
+        | (((imm >> 5) & 0x7F) << 25)
+        | ((rs2 as u32) << 20)
+        | ((rs1 as u32) << 15)
+        | ((funct3 as u32) << 12)
+        | (opcode as u32)
+}
+
+/// Little-endian byte image of a word sequence.
+fn image(words: &[u32]) -> Vec<u8> {
+    words.iter().flat_map(|w| w.to_le_bytes()).collect()
+}
+
+/// Encode a B-type instruction (13-bit signed immediate, split fields).
+fn enc_b(imm: i32, rs2: u8, rs1: u8, funct3: u8, opcode: u8) -> u32 {
+    let imm = imm as u32;
+    (((imm >> 12) & 0x1) << 31)
+        | (((imm >> 5) & 0x3F) << 25)
+        | ((rs2 as u32) << 20)
+        | ((rs1 as u32) << 15)
+        | ((funct3 as u32) << 12)
+        | (((imm >> 1) & 0xF) << 8)
+        | (((imm >> 11) & 0x1) << 7)
+        | (opcode as u32)
+}
+
+/// Encode a J-type instruction (21-bit signed immediate, split fields).
+fn enc_j(imm: i32, rd: u8, opcode: u8) -> u32 {
+    let imm = imm as u32;
+    (((imm >> 20) & 0x1) << 31)
+        | (((imm >> 1) & 0x3FF) << 21)
+        | (((imm >> 11) & 0x1) << 20)
+        | (((imm >> 12) & 0xFF) << 12)
+        | ((rd as u32) << 7)
+        | (opcode as u32)
+}
+
+// ---------------------------------------------------------------------------
+// Test memory
+// ---------------------------------------------------------------------------
+
+/// Byte-addressable little-endian RAM backing the ISS memory port.
+struct TestRam {
+    base: u32,
+    bytes: Vec<u8>,
+}
+
+impl TestRam {
+    fn new(base: u32, size: usize) -> Self {
+        Self {
+            base,
+            bytes: vec![0u8; size],
+        }
+    }
+
+    fn offset(&self, addr: u32) -> Option<usize> {
+        let rel = addr.checked_sub(self.base)? as usize;
+        if rel < self.bytes.len() {
+            Some(rel)
+        } else {
+            None
+        }
+    }
+
+    /// Plant a little-endian word sequence at `addr`.
+    fn load(&mut self, addr: u32, words: &[u32]) {
+        for (i, word) in words.iter().enumerate() {
+            let at = addr + (i as u32) * 4;
+            let off = self.offset(at).expect("program image fits in RAM");
+            self.bytes[off..off + 4].copy_from_slice(&word.to_le_bytes());
+        }
+    }
+
+    fn read(&self, addr: u32, size: WriteSize) -> Result<u32, PlatformError> {
+        let off = self
+            .offset(addr)
+            .ok_or_else(|| PlatformError::new(ErrorFamily::Iss, 1, "unmapped read"))?;
+        let width = width_bytes(size);
+        if off + width > self.bytes.len() {
+            return Err(PlatformError::new(ErrorFamily::Iss, 1, "read past end"));
+        }
+        let mut value = 0u32;
+        for i in 0..width {
+            value |= (self.bytes[off + i] as u32) << (8 * i);
+        }
+        Ok(value)
+    }
+
+    fn write(&mut self, addr: u32, size: WriteSize, value: u32) -> Result<(), PlatformError> {
+        let off = self
+            .offset(addr)
+            .ok_or_else(|| PlatformError::new(ErrorFamily::Iss, 1, "unmapped write"))?;
+        let width = width_bytes(size);
+        if off + width > self.bytes.len() {
+            return Err(PlatformError::new(ErrorFamily::Iss, 1, "write past end"));
+        }
+        for i in 0..width {
+            self.bytes[off + i] = (value >> (8 * i)) as u8;
+        }
+        Ok(())
+    }
+}
+
+fn width_bytes(size: WriteSize) -> usize {
+    match size {
+        WriteSize::Byte => 1,
+        WriteSize::Half => 2,
+        WriteSize::Word => 4,
+    }
+}
+
+/// ISS + RAM harness driving the closure memory port.
+struct Harness {
+    ram: RefCell<TestRam>,
+    iss: Iss,
+}
+
+impl Harness {
+    fn new() -> Self {
+        Self {
+            ram: RefCell::new(TestRam::new(0, 64 * 1024)),
+            iss: Iss::default(),
+        }
+    }
+
+    fn load(&mut self, addr: u32, words: &[u32]) {
+        self.ram.borrow_mut().load(addr, words);
+    }
+
+    fn step(&mut self, state: &mut SimState) -> Result<StepOutcome, PlatformError> {
+        let ram = &self.ram;
+        self.iss.step_one(
+            state,
+            |addr, size| ram.borrow().read(addr, size),
+            |addr, size, value| ram.borrow_mut().write(addr, size, value),
+        )
+    }
+
+    /// Step a single instruction placed at `pc` and return the outcome.
+    fn step_one_at(&mut self, state: &mut SimState, pc: u32, word: u32) -> StepOutcome {
+        self.load(pc, &[word]);
+        state.pc = pc;
+        self.step(state).expect("step succeeds")
+    }
+}
+
+/// ISS + M-14 bus harness driving the production dispatch path.
+struct BusHarness {
+    bus: Bus,
+    iss: Iss,
+}
+
+impl BusHarness {
+    /// Map a 4 KiB RAM region at address 0 holding `bytes`.
+    fn new(bytes: &[u8]) -> Self {
+        let mut bus = Bus::new();
+        bus.map_ram(0, 0x1000, bytes).expect("map ram");
+        Self {
+            bus,
+            iss: Iss::default(),
+        }
+    }
+
+    fn step(&mut self, state: &mut SimState) -> Result<StepOutcome, PlatformError> {
+        self.iss.step_one_via_bus(state, &mut self.bus)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D-04 — x0 hardwired to zero
+// ---------------------------------------------------------------------------
+
+/// `addi x0, x0, 42` must not be able to change x0.
+#[test]
+fn addi_to_x0_leaves_x0_zero() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    let word = enc_i(42, 0, 0b000, 0, OP_IMM);
+    h.step_one_at(&mut state, 0, word);
+    assert_eq!(state.gpr[0], 0, "x0 must stay hardwired to zero");
+}
+
+/// A pre-existing x1 value must not be copied into x0 by `addi x0, x1, 1`.
+#[test]
+fn addi_reading_x1_cannot_write_x0() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 0xDEAD_BEEF;
+    let word = enc_i(1, 1, 0b000, 0, OP_IMM);
+    h.step_one_at(&mut state, 0, word);
+    assert_eq!(state.gpr[0], 0, "x0 must stay hardwired to zero");
+    assert_eq!(state.gpr[1], 0xDEAD_BEEF, "x1 must be untouched");
+}
+
+/// The bus dispatch path must honour the same x0 rule (D-11: one path).
+#[test]
+fn bus_path_also_keeps_x0_zero() {
+    let word = enc_i(42, 0, 0b000, 0, OP_IMM);
+    let mut h = BusHarness::new(&image(&[word]));
+    let mut state = SimState::default();
+    h.step(&mut state).expect("step via bus");
+    assert_eq!(state.gpr[0], 0, "x0 must stay hardwired to zero");
+}
+
+/// Even if the register file is corrupted with a non-zero x0, reads of
+/// x0 must still observe the hardwired zero.
+///
+/// Note the assertion is on the *read* path: the ISS discards writes to
+/// x0, it does not scrub a slot somebody else corrupted. Callers that
+/// need the architectural value must go through [`read_gpr`].
+#[test]
+fn reading_x0_yields_zero_even_if_register_file_is_corrupted() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[0] = 0x1234_5678;
+    let word = enc_i(1, 0, 0b000, 5, OP_IMM);
+    h.step_one_at(&mut state, 0, word);
+    assert_eq!(state.gpr[5], 1, "rs1 = x0 must read as zero");
+    assert_eq!(read_gpr(&state, 0), 0, "x0 must read as zero");
+}
+
+// ---------------------------------------------------------------------------
+// D-11 — one execution path for both dispatch routes
+// ---------------------------------------------------------------------------
+
+/// An encoding the ISS cannot execute must be reported as an illegal
+/// instruction on *both* dispatch routes.
+///
+/// Before D-11 the closure route returned `Trapped` while the bus
+/// route returned `Err` — the two routes disagreed about what an
+/// illegal instruction even is.
+#[test]
+fn illegal_instruction_reports_the_same_outcome_on_both_routes() {
+    // 0b010_1011 is not a valid RV32I opcode.
+    let word = 0x0000_002Bu32;
+
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    let closure_outcome = h.step_one_at(&mut state, 0, word);
+
+    let mut bh = BusHarness::new(&image(&[word]));
+    let mut bus_state = SimState::default();
+    let bus_outcome = bh.step(&mut bus_state).expect("bus route must not error");
+
+    assert_eq!(
+        closure_outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::IllegalInstruction
+        },
+        "closure route must trap as an illegal instruction"
+    );
+    assert_eq!(
+        bus_outcome, closure_outcome,
+        "both dispatch routes must agree on the outcome"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// D-16 — instruction length field
+// ---------------------------------------------------------------------------
+
+/// A 32-bit encoding must decode to a length of 4 bytes.
+#[test]
+fn decode_reports_four_bytes_for_a_32bit_encoding() {
+    let d = Decoder::default().decode(enc_i(1, 0, 0b000, 1, OP_IMM), 0x1000);
+    assert_eq!(d.len, 4, "a 32-bit encoding is 4 bytes long");
+}
+
+/// A 16-bit (compressed) encoding must decode to a length of 2 bytes.
+///
+/// Every 32-bit encoding has bits[1:0] = 0b11; a compressed encoding
+/// never does, which is how the decoder tells them apart.
+#[test]
+fn decode_reports_two_bytes_for_a_compressed_encoding() {
+    let d = Decoder::default().decode(0x0000_0001, 0x1000);
+    assert_eq!(d.len, 2, "a compressed encoding is 2 bytes long");
+}
+
+/// The PC must advance by the decoded instruction length, not by a
+/// hard-coded 4.
+#[test]
+fn pc_advances_by_the_decoded_instruction_length() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    h.step_one_at(&mut state, 0x1000, enc_i(1, 0, 0b000, 1, OP_IMM));
+    assert_eq!(
+        state.pc, 0x1004,
+        "PC must advance by the instruction length"
+    );
+}
+
+/// A compressed encoding is not executable yet: it must trap and leave
+/// the PC alone rather than execute the upper half-word as if it were
+/// a 32-bit instruction.
+#[test]
+fn compressed_encoding_traps_and_leaves_the_pc_alone() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    let outcome = h.step_one_at(&mut state, 0x1000, 0x0000_0001);
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::IllegalInstruction
+        }
+    );
+    assert_eq!(
+        state.pc, 0x1000,
+        "a trapped instruction must not advance the PC"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RV32I — U-type (LUI / AUIPC)
+// ---------------------------------------------------------------------------
+
+/// LUI must decode the 20-bit immediate into bits 31:12 with a zeroed
+/// low half.
+#[test]
+fn decode_lui_fills_the_upper_immediate() {
+    let d = Decoder::default().decode(enc_u(0x12345, 1, LUI), 0);
+    assert_eq!(d.opcode, LUI);
+    assert_eq!(d.rd, 1);
+    assert_eq!(
+        d.imm, 0x1234_5000,
+        "U-type immediate keeps the low 12 bits zero"
+    );
+}
+
+/// AUIPC decodes the same immediate shape as LUI.
+#[test]
+fn decode_auipc_fills_the_upper_immediate() {
+    let d = Decoder::default().decode(enc_u(0x1, 1, AUIPC), 0);
+    assert_eq!(d.opcode, AUIPC);
+    assert_eq!(d.imm, 0x1000);
+}
+
+/// LUI writes the upper immediate into the destination register.
+#[test]
+fn lui_writes_the_upper_immediate() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    h.step_one_at(&mut state, 0, enc_u(0x12345, 1, LUI));
+    assert_eq!(state.gpr[1], 0x1234_5000);
+    assert_eq!(state.pc, 4);
+}
+
+/// AUIPC adds the upper immediate to the PC of the instruction.
+#[test]
+fn auipc_adds_the_upper_immediate_to_the_pc() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    h.step_one_at(&mut state, 0x1000, enc_u(0x1, 1, AUIPC));
+    assert_eq!(
+        state.gpr[1], 0x2000,
+        "AUIPC must use the instruction's own PC"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RV32I — OP-IMM
+// ---------------------------------------------------------------------------
+
+/// The I-type immediate is sign-extended from 12 bits.
+#[test]
+fn decode_addi_sign_extends_the_immediate() {
+    let d = Decoder::default().decode(enc_i(-1, 1, 0b000, 2, OP_IMM), 0);
+    assert_eq!(d.imm, -1, "a 12-bit immediate must be sign-extended");
+    assert_eq!(d.rs1, 1);
+    assert_eq!(d.rd, 2);
+}
+
+/// The OP-IMM shifts carry a 5-bit shift amount, not a 12-bit immediate.
+#[test]
+fn decode_shift_immediates_report_the_shift_amount() {
+    let slli = Decoder::default().decode(enc_shift(0, 4, 1, 0b001, 2, OP_IMM), 0);
+    assert_eq!(slli.imm, 4);
+    assert_eq!(slli.funct7, 0);
+
+    let srli = Decoder::default().decode(enc_shift(0, 20, 1, 0b101, 2, OP_IMM), 0);
+    assert_eq!(srli.imm, 20);
+    assert_eq!(srli.funct7, 0);
+
+    let srai = Decoder::default().decode(enc_shift(0b010_0000, 20, 1, 0b101, 2, OP_IMM), 0);
+    assert_eq!(srai.imm, 20);
+    assert_eq!(srai.funct7, 0b010_0000);
+}
+
+/// ADDI sign-extends its immediate.
+#[test]
+fn addi_sign_extends_negative_immediates() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 5;
+    h.step_one_at(&mut state, 0, enc_i(-3, 1, 0b000, 2, OP_IMM));
+    assert_eq!(state.gpr[2], 2, "5 + (-3) = 2");
+}
+
+/// ADDI wraps on overflow — RISC-V has no trap-on-overflow.
+#[test]
+fn addi_wraps_on_overflow() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX;
+    h.step_one_at(&mut state, 0, enc_i(1, 1, 0b000, 2, OP_IMM));
+    assert_eq!(state.gpr[2], 0, "0xFFFF_FFFF + 1 wraps to 0");
+}
+
+/// SLTI compares as signed.
+#[test]
+fn slti_compares_signed() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX; // -1
+    h.step_one_at(&mut state, 0, enc_i(1, 1, 0b010, 2, OP_IMM));
+    assert_eq!(state.gpr[2], 1, "-1 < 1 is true");
+}
+
+/// SLTIU compares as unsigned — the classic signed/unsigned split.
+#[test]
+fn sltiu_compares_unsigned() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX; // -1 as signed, huge as unsigned
+    h.step_one_at(&mut state, 0, enc_i(1, 1, 0b011, 2, OP_IMM));
+    assert_eq!(state.gpr[2], 0, "0xFFFF_FFFF < 1 is false unsigned");
+}
+
+/// The bitwise OP-IMMs use the sign-extended immediate.
+#[test]
+fn bitwise_op_imms_use_the_sign_extended_immediate() {
+    let mut h = Harness::new();
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0x0F0F_0F0F;
+    h.step_one_at(&mut state, 0, enc_i(-1, 1, 0b100, 2, OP_IMM));
+    assert_eq!(
+        state.gpr[2], 0xF0F0_F0F0,
+        "xori with -1 inverts the register"
+    );
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0x0F0F_0F0F;
+    h.step_one_at(&mut state, 0, enc_i(-1, 1, 0b110, 2, OP_IMM));
+    assert_eq!(state.gpr[2], 0xFFFF_FFFF, "ori with -1 sets every bit");
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0x0F0F_0F0F;
+    h.step_one_at(&mut state, 0, enc_i(-1, 1, 0b111, 2, OP_IMM));
+    assert_eq!(state.gpr[2], 0x0F0F_0F0F, "andi with -1 keeps every bit");
+}
+
+/// SLLI shifts left by the immediate shift amount.
+#[test]
+fn slli_shifts_left_by_the_immediate_amount() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 0x0000_0003;
+    h.step_one_at(&mut state, 0, enc_shift(0, 4, 1, 0b001, 2, OP_IMM));
+    assert_eq!(state.gpr[2], 0x30);
+}
+
+/// SRLI shifts right logically.
+#[test]
+fn srli_shifts_right_logically() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 0x8000_0000;
+    h.step_one_at(&mut state, 0, enc_shift(0, 20, 1, 0b101, 2, OP_IMM));
+    assert_eq!(
+        state.gpr[2], 0x0000_0800,
+        "a logical shift must not sign-extend"
+    );
+}
+
+/// SRAI shifts right arithmetically, preserving the sign bit.
+#[test]
+fn srai_shifts_right_arithmetically() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 0x8000_0000;
+    h.step_one_at(
+        &mut state,
+        0,
+        enc_shift(0b010_0000, 20, 1, 0b101, 2, OP_IMM),
+    );
+    assert_eq!(
+        state.gpr[2], 0xFFFF_F800,
+        "an arithmetic shift must keep the sign"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RV32I — OP (register-register)
+// ---------------------------------------------------------------------------
+
+/// The R-type fields land in the right places.
+#[test]
+fn decode_r_type_fills_the_register_fields() {
+    let d = Decoder::default().decode(enc_r(0b010_0000, 2, 1, 0b000, 3, OP), 0);
+    assert_eq!(d.opcode, OP);
+    assert_eq!(d.rd, 3);
+    assert_eq!(d.rs1, 1);
+    assert_eq!(d.rs2, 2);
+    assert_eq!(d.funct3, 0b000);
+    assert_eq!(d.funct7, 0b010_0000);
+}
+
+/// ADD and SUB wrap around.
+#[test]
+fn add_and_sub_wrap_around() {
+    let mut h = Harness::new();
+
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX;
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b000, 3, OP));
+    assert_eq!(state.gpr[3], 0, "0xFFFF_FFFF + 1 wraps to 0");
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0;
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0, enc_r(0b010_0000, 2, 1, 0b000, 3, OP));
+    assert_eq!(state.gpr[3], u32::MAX, "0 - 1 wraps to 0xFFFF_FFFF");
+}
+
+/// The register shift amount uses only its low 5 bits.
+#[test]
+fn sll_masks_the_shift_amount_to_five_bits() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 1;
+    state.gpr[2] = 33; // 33 & 0x1f == 1
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b001, 3, OP));
+    assert_eq!(state.gpr[3], 2, "a shift amount of 33 shifts by 1");
+}
+
+/// SLT compares across the signed / unsigned boundary.
+#[test]
+fn slt_compares_across_the_sign_boundary() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX; // -1 signed
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b010, 3, OP));
+    assert_eq!(state.gpr[3], 1, "-1 < 1 is true signed");
+}
+
+/// SLTU compares the same pair as unsigned.
+#[test]
+fn sltu_compares_unsigned() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX;
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b011, 3, OP));
+    assert_eq!(state.gpr[3], 0, "0xFFFF_FFFF < 1 is false unsigned");
+}
+
+/// SRL and SRA differ on a negative value.
+#[test]
+fn srl_and_sra_differ_on_negative_values() {
+    let mut h = Harness::new();
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0x8000_0000;
+    state.gpr[2] = 20;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b101, 3, OP));
+    assert_eq!(state.gpr[3], 0x0000_0800, "SRL is logical");
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0x8000_0000;
+    state.gpr[2] = 20;
+    h.step_one_at(&mut state, 0, enc_r(0b010_0000, 2, 1, 0b101, 3, OP));
+    assert_eq!(state.gpr[3], 0xFFFF_F800, "SRA is arithmetic");
+}
+
+/// XOR / OR / AND operate on the two source registers.
+///
+/// The operands are complementary masks, so the expected results are
+/// obvious by inspection.
+#[test]
+fn xor_or_and_operate_on_two_registers() {
+    let mut h = Harness::new();
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0xF0F0_F0F0;
+    state.gpr[2] = 0x0F0F_0F0F;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b100, 3, OP));
+    assert_eq!(
+        state.gpr[3], 0xFFFF_FFFF,
+        "complementary masks xor to all ones"
+    );
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0xF0F0_F0F0;
+    state.gpr[2] = 0x0F0F_0F0F;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b110, 3, OP));
+    assert_eq!(
+        state.gpr[3], 0xFFFF_FFFF,
+        "complementary masks or to all ones"
+    );
+
+    let mut state = SimState::default();
+    state.gpr[1] = 0xF0F0_F0F0;
+    state.gpr[2] = 0x0F0F_0F0F;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b111, 3, OP));
+    assert_eq!(state.gpr[3], 0x0000_0000, "complementary masks and to zero");
+}
+
+// ---------------------------------------------------------------------------
+// RV32I — LOAD / STORE
+// ---------------------------------------------------------------------------
+
+/// The load fields land in the right places.
+#[test]
+fn decode_load_fills_the_fields() {
+    let d = Decoder::default().decode(enc_i(8, 1, 0b010, 2, LOAD), 0);
+    assert_eq!(d.opcode, LOAD);
+    assert_eq!(d.funct3, 0b010);
+    assert_eq!(d.rd, 2);
+    assert_eq!(d.rs1, 1);
+    assert_eq!(d.imm, 8);
+}
+
+/// The store immediate is spliced from the two imm fields
+/// (imm[11:5] = inst[31:25], imm[4:0] = inst[11:7]).
+#[test]
+fn decode_store_splices_the_immediate() {
+    let d = Decoder::default().decode(enc_s(-8, 2, 1, 0b010, STORE), 0);
+    assert_eq!(d.opcode, STORE);
+    assert_eq!(d.funct3, 0b010);
+    assert_eq!(d.rs1, 1);
+    assert_eq!(d.rs2, 2);
+    assert_eq!(d.imm, -8);
+
+    // The largest positive immediate exercises the imm[11:5] field.
+    let big = Decoder::default().decode(enc_s(2047, 2, 1, 0b010, STORE), 0);
+    assert_eq!(big.imm, 2047);
+
+    // The most negative immediate exercises the sign bit of imm[11:5].
+    let min = Decoder::default().decode(enc_s(-2048, 2, 1, 0b010, STORE), 0);
+    assert_eq!(min.imm, -2048);
+}
+
+/// LW reads a word and writes it to the destination register.
+#[test]
+fn lw_reads_a_word_from_memory() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0xDEAD_BEEF]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    h.step_one_at(&mut state, 0, enc_i(0, 1, 0b010, 2, LOAD));
+    assert_eq!(state.gpr[2], 0xDEAD_BEEF);
+}
+
+/// LB sign-extends the loaded byte.
+#[test]
+fn lb_sign_extends_the_byte() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0xFFFF_FF80]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    h.step_one_at(&mut state, 0, enc_i(0, 1, 0b000, 2, LOAD));
+    assert_eq!(
+        state.gpr[2], 0xFFFF_FF80,
+        "0x80 must sign-extend to 0xFFFF_FF80"
+    );
+}
+
+/// LBU zero-extends the loaded byte.
+#[test]
+fn lbu_zero_extends_the_byte() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0xFFFF_FF80]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    h.step_one_at(&mut state, 0, enc_i(0, 1, 0b100, 2, LOAD));
+    assert_eq!(state.gpr[2], 0x0000_0080);
+}
+
+/// LH sign-extends the loaded halfword.
+#[test]
+fn lh_sign_extends_the_halfword() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0xFFFF_8000]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    h.step_one_at(&mut state, 0, enc_i(0, 1, 0b001, 2, LOAD));
+    assert_eq!(state.gpr[2], 0xFFFF_8000);
+}
+
+/// LHU zero-extends the loaded halfword.
+#[test]
+fn lhu_zero_extends_the_halfword() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0xFFFF_8000]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    h.step_one_at(&mut state, 0, enc_i(0, 1, 0b101, 2, LOAD));
+    assert_eq!(state.gpr[2], 0x0000_8000);
+}
+
+/// SW writes a whole word.
+#[test]
+fn sw_writes_a_word() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    state.gpr[2] = 0xCAFE_BABE;
+    h.step_one_at(&mut state, 0, enc_s(0, 2, 1, 0b010, STORE));
+    assert_eq!(
+        h.ram.borrow().read(0x100, WriteSize::Word).unwrap(),
+        0xCAFE_BABE
+    );
+}
+
+/// SB writes exactly one byte and leaves its neighbours alone.
+#[test]
+fn sb_writes_a_single_byte() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0x1122_3344]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    state.gpr[2] = 0xAABB_CCDD;
+    h.step_one_at(&mut state, 0, enc_s(0, 2, 1, 0b000, STORE));
+    let ram = h.ram.borrow();
+    assert_eq!(ram.read(0x100, WriteSize::Byte).unwrap(), 0xDD);
+    assert_eq!(ram.read(0x101, WriteSize::Byte).unwrap(), 0x33);
+    assert_eq!(ram.read(0x100, WriteSize::Word).unwrap(), 0x1122_33DD);
+}
+
+/// SH writes exactly two bytes.
+#[test]
+fn sh_writes_a_halfword() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0x1122_3344]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    state.gpr[2] = 0xAABB_CCDD;
+    h.step_one_at(&mut state, 0, enc_s(0, 2, 1, 0b001, STORE));
+    let ram = h.ram.borrow();
+    assert_eq!(ram.read(0x100, WriteSize::Half).unwrap(), 0xCCDD);
+    assert_eq!(ram.read(0x100, WriteSize::Word).unwrap(), 0x1122_CCDD);
+}
+
+/// A load into x0 is discarded.
+#[test]
+fn load_into_x0_is_discarded() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0xDEAD_BEEF]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x100;
+    h.step_one_at(&mut state, 0, enc_i(0, 1, 0b010, 0, LOAD));
+    assert_eq!(state.gpr[0], 0, "a load into x0 must be discarded");
+}
+
+/// A misaligned word access traps.
+#[test]
+fn misaligned_word_access_traps() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 0x101; // not 4-byte aligned
+    let outcome = h.step_one_at(&mut state, 0, enc_i(0, 1, 0b010, 2, LOAD));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::MisalignedAccess
+        }
+    );
+    assert_eq!(
+        state.gpr[2], 0,
+        "a trapped load must not write the register"
+    );
+}
+
+/// A misaligned halfword access traps.
+#[test]
+fn misaligned_halfword_access_traps() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 0x101; // not 2-byte aligned
+    let outcome = h.step_one_at(&mut state, 0, enc_i(0, 1, 0b001, 2, LOAD));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::MisalignedAccess
+        }
+    );
+}
+
+/// A misaligned store traps.
+#[test]
+fn misaligned_store_traps() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0x0000_0000]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x102; // not 4-byte aligned
+    state.gpr[2] = 0xFFFF_FFFF;
+    let outcome = h.step_one_at(&mut state, 0, enc_s(0, 2, 1, 0b010, STORE));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::MisalignedAccess
+        }
+    );
+    assert_eq!(
+        h.ram.borrow().read(0x100, WriteSize::Word).unwrap(),
+        0,
+        "a trapped store must not touch memory"
+    );
+}
+
+/// A byte access is never misaligned.
+#[test]
+fn byte_accesses_are_never_misaligned() {
+    let mut h = Harness::new();
+    h.load(0x100, &[0x0000_0000]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x101; // odd address, but a byte access is aligned
+    state.gpr[2] = 0xAB;
+    let outcome = h.step_one_at(&mut state, 0, enc_s(0, 2, 1, 0b000, STORE));
+    assert!(matches!(outcome, StepOutcome::Advanced));
+    assert_eq!(h.ram.borrow().read(0x101, WriteSize::Byte).unwrap(), 0xAB);
+}
+
+/// The Spike-aligned policy performs the access instead of trapping.
+#[test]
+fn allow_policy_performs_the_misaligned_access() {
+    let mut h = Harness::new();
+    h.iss = h.iss.with_misaligned_policy(MisalignedPolicy::Allow);
+    h.load(0x100, &[0x1122_3344]);
+    let mut state = SimState::default();
+    state.gpr[1] = 0x101; // not 4-byte aligned
+    let outcome = h.step_one_at(&mut state, 0, enc_i(0, 1, 0b010, 2, LOAD));
+    assert!(matches!(outcome, StepOutcome::Advanced));
+    assert_eq!(
+        state.gpr[2], 0x0011_2233,
+        "the unaligned word is read as-is"
+    );
+}
+
+/// Loads and stores must go through the M-14 bus — the bus is the
+/// only place that counts accesses and fires the M-18 probe hook
+/// (D-11: a bypassing implementation would silently lose both).
+#[test]
+fn load_and_store_go_through_the_bus() {
+    // lw x2, 0x100(x0) — the data lives at 0x100 in the same region.
+    let program = enc_i(0x100, 0, 0b010, 2, LOAD);
+    let mut bytes = image(&[program]);
+    bytes.resize(0x104, 0);
+    bytes[0x100..0x104].copy_from_slice(&0xCAFE_BABE_u32.to_le_bytes());
+
+    let mut h = BusHarness::new(&bytes);
+    let mut state = SimState::default();
+    h.step(&mut state).expect("step via bus");
+
+    assert_eq!(state.gpr[2], 0xCAFE_BABE, "the load must reach memory");
+    let stats = h.bus.stats();
+    assert_eq!(stats.reads, 2, "the bus must see the fetch and the load");
+}
+
+// ---------------------------------------------------------------------------
+// RV32I — BRANCH / JAL / JALR
+// ---------------------------------------------------------------------------
+
+/// The test encoders must produce the spec-mandated encodings — a
+/// drifting encoder would silently invalidate every other case in
+/// this file.
+#[test]
+fn test_encoders_match_the_specified_encodings() {
+    assert_eq!(
+        enc_i(42, 0, 0b000, 1, OP_IMM),
+        0x02A0_0093,
+        "addi x1, x0, 42"
+    );
+    assert_eq!(enc_u(0x12345, 1, LUI), 0x1234_50B7, "lui x1, 0x12345");
+    assert_eq!(enc_u(0x1, 1, AUIPC), 0x0000_1097, "auipc x1, 0x1");
+    assert_eq!(enc_i(8, 1, 0b010, 2, LOAD), 0x0080_A103, "lw x2, 8(x1)");
+    assert_eq!(enc_s(8, 2, 1, 0b010, STORE), 0x0020_A423, "sw x2, 8(x1)");
+    assert_eq!(enc_b(8, 0, 0, 0b000, BRANCH), 0x0000_0463, "beq x0, x0, 8");
+    assert_eq!(enc_j(8, 1, JAL), 0x0080_00EF, "jal x1, 8");
+    assert_eq!(enc_i(-4, 2, 0b000, 1, JALR), 0xFFC1_00E7, "jalr x1, -4(x2)");
+    assert_eq!(enc_r(0, 2, 1, 0b000, 3, OP), 0x0020_81B3, "add x3, x1, x2");
+    assert_eq!(
+        enc_r(0b010_0000, 2, 1, 0b000, 3, OP),
+        0x4020_81B3,
+        "sub x3, x1, x2"
+    );
+}
+
+/// The branch immediate is spliced from the two imm fields and sign
+/// extended.
+#[test]
+fn decode_branch_splices_the_immediate() {
+    let d = Decoder::default().decode(enc_b(-8, 2, 1, 0b000, BRANCH), 0);
+    assert_eq!(d.opcode, BRANCH);
+    assert_eq!(d.funct3, 0b000);
+    assert_eq!(d.rs1, 1);
+    assert_eq!(d.rs2, 2);
+    assert_eq!(d.imm, -8);
+
+    // The most negative branch offset exercises the sign bit of
+    // imm[12], which lives in inst[31].
+    let min = Decoder::default().decode(enc_b(-4096, 0, 0, 0b000, BRANCH), 0);
+    assert_eq!(min.imm, -4096);
+
+    // The largest positive branch offset sets imm[12].
+    let max = Decoder::default().decode(enc_b(4094, 0, 0, 0b000, BRANCH), 0);
+    assert_eq!(max.imm, 4094);
+}
+
+/// The J-type immediate is spliced from four fields and sign extended.
+#[test]
+fn decode_jal_splices_the_immediate() {
+    let d = Decoder::default().decode(enc_j(0x1000, 1, JAL), 0);
+    assert_eq!(d.opcode, JAL);
+    assert_eq!(d.rd, 1);
+    assert_eq!(d.imm, 0x1000);
+
+    let back = Decoder::default().decode(enc_j(-2048, 1, JAL), 0);
+    assert_eq!(back.imm, -2048, "a negative J offset must sign extend");
+}
+
+/// JALR carries a plain I-type immediate.
+#[test]
+fn decode_jalr_fills_the_fields() {
+    let d = Decoder::default().decode(enc_i(-4, 2, 0b000, 1, JALR), 0);
+    assert_eq!(d.opcode, JALR);
+    assert_eq!(d.funct3, 0b000);
+    assert_eq!(d.rd, 1);
+    assert_eq!(d.rs1, 2);
+    assert_eq!(d.imm, -4);
+}
+
+/// A taken branch redirects the PC; a not-taken branch falls through.
+#[test]
+fn beq_taken_and_not_taken() {
+    let mut h = Harness::new();
+
+    let mut state = SimState::default();
+    state.gpr[1] = 7;
+    state.gpr[2] = 7;
+    h.step_one_at(&mut state, 0x1000, enc_b(16, 2, 1, 0b000, BRANCH));
+    assert_eq!(state.pc, 0x1010, "a taken branch jumps to pc + offset");
+
+    let mut state = SimState::default();
+    state.gpr[1] = 7;
+    state.gpr[2] = 8;
+    h.step_one_at(&mut state, 0x1000, enc_b(16, 2, 1, 0b000, BRANCH));
+    assert_eq!(state.pc, 0x1004, "a not-taken branch falls through");
+}
+
+/// BNE is the inverse of BEQ.
+#[test]
+fn bne_taken_and_not_taken() {
+    let mut h = Harness::new();
+
+    let mut state = SimState::default();
+    state.gpr[1] = 7;
+    state.gpr[2] = 8;
+    h.step_one_at(&mut state, 0x1000, enc_b(16, 2, 1, 0b001, BRANCH));
+    assert_eq!(state.pc, 0x1010);
+
+    let mut state = SimState::default();
+    state.gpr[1] = 7;
+    state.gpr[2] = 7;
+    h.step_one_at(&mut state, 0x1000, enc_b(16, 2, 1, 0b001, BRANCH));
+    assert_eq!(state.pc, 0x1004);
+}
+
+/// BLT compares signed, BLTU compares unsigned.
+#[test]
+fn blt_and_bltu_differ_across_the_sign_boundary() {
+    let mut h = Harness::new();
+
+    // -1 < 1 is true signed, false unsigned.
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX;
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0x1000, enc_b(16, 2, 1, 0b100, BRANCH));
+    assert_eq!(state.pc, 0x1010, "BLT is signed");
+
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX;
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0x1000, enc_b(16, 2, 1, 0b110, BRANCH));
+    assert_eq!(state.pc, 0x1004, "BLTU is unsigned");
+}
+
+/// BGE and BGEU are the inverses of BLT and BLTU.
+#[test]
+fn bge_and_bgeu_are_the_inverses() {
+    let mut h = Harness::new();
+
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX;
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0x1000, enc_b(16, 2, 1, 0b101, BRANCH));
+    assert_eq!(state.pc, 0x1004, "BGE is signed: -1 is not >= 1");
+
+    let mut state = SimState::default();
+    state.gpr[1] = u32::MAX;
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0x1000, enc_b(16, 2, 1, 0b111, BRANCH));
+    assert_eq!(state.pc, 0x1010, "BGEU is unsigned: 0xFFFF_FFFF is >= 1");
+}
+
+/// A branch with a negative offset jumps backwards.
+#[test]
+fn branch_with_negative_offset_jumps_backwards() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 1;
+    state.gpr[2] = 1;
+    h.step_one_at(&mut state, 0x1000, enc_b(-16, 2, 1, 0b000, BRANCH));
+    assert_eq!(state.pc, 0x0FF0);
+}
+
+/// JAL jumps to the target and links the return address.
+#[test]
+fn jal_links_and_jumps() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    h.step_one_at(&mut state, 0x1000, enc_j(0x1000, 1, JAL));
+    assert_eq!(state.pc, 0x2000, "JAL jumps to pc + offset");
+    assert_eq!(state.gpr[1], 0x1004, "JAL links the return address");
+}
+
+/// JALR jumps to the computed target and links the return address.
+#[test]
+fn jalr_links_and_jumps() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[2] = 0x2000;
+    h.step_one_at(&mut state, 0x1000, enc_i(-4, 2, 0b000, 1, JALR));
+    assert_eq!(state.pc, 0x1FFC, "JALR jumps to rs1 + imm");
+    assert_eq!(state.gpr[1], 0x1004, "JALR links the return address");
+}
+
+/// JALR clears the low bit of the computed target.
+#[test]
+fn jalr_clears_the_low_bit_of_the_target() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[2] = 0x2001; // odd target
+    h.step_one_at(&mut state, 0x1000, enc_i(0, 2, 0b000, 1, JALR));
+    assert_eq!(state.pc, 0x2000, "the low bit of a JALR target is cleared");
+}
+
+/// JALR must read rs1 before writing rd, so that `jalr x1, 0(x1)` links
+/// the old value of x1.
+#[test]
+fn jalr_reads_rs1_before_writing_rd() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 0x3000;
+    h.step_one_at(&mut state, 0x1000, enc_i(0, 1, 0b000, 1, JALR));
+    assert_eq!(state.pc, 0x3000, "the target comes from the old x1");
+    assert_eq!(state.gpr[1], 0x1004, "x1 holds the return address");
+}
+
+/// FENCE is a no-op in the sequentially consistent single-core model.
+#[test]
+fn fence_is_a_no_op() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    // fence iorw, iorw
+    h.step_one_at(&mut state, 0x1000, enc_i(0x0FF, 0, 0b000, 0, 0b000_1111));
+    assert_eq!(state.pc, 0x1004, "FENCE only advances the PC");
+}
+
+/// FENCE.I is a no-op as well.
+#[test]
+fn fence_i_is_a_no_op() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    h.step_one_at(&mut state, 0x1000, enc_i(0, 0, 0b001, 0, 0b000_1111));
+    assert_eq!(state.pc, 0x1004);
+}
+
+/// ECALL raises an environment-call trap.
+#[test]
+fn ecall_traps() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    let outcome = h.step_one_at(&mut state, 0x1000, enc_i(0, 0, 0b000, 0, 0b111_0011));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::Ecall
+        }
+    );
+    assert_eq!(
+        state.pc, 0x1000,
+        "a trapped instruction must not advance the PC"
+    );
+}
+
+/// EBREAK raises a breakpoint trap — distinct from a host breakpoint.
+#[test]
+fn ebreak_traps() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    let outcome = h.step_one_at(&mut state, 0x1000, enc_i(1, 0, 0b000, 0, 0b111_0011));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::Breakpoint
+        }
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RV32I — boundary cases
+// ---------------------------------------------------------------------------
+
+/// The B-type immediate must survive the splice for every offset class:
+/// zero, both signs, the imm[4:1] field, the imm[10:5] field and the
+/// imm[11] / imm[12] sign fields.
+#[test]
+fn branch_immediate_survives_every_field() {
+    for offset in [0i32, 2, -2, 16, -16, 254, -254, 2046, -2048, 4094, -4096] {
+        let d = Decoder::default().decode(enc_b(offset, 2, 1, 0b000, BRANCH), 0);
+        assert_eq!(
+            d.imm, offset,
+            "branch offset {} did not survive the immediate splice",
+            offset
+        );
+    }
+}
+
+/// The J-type immediate must survive the splice for every offset class.
+#[test]
+fn jal_immediate_survives_every_field() {
+    // The J-type immediate is 21 bits wide and always even, so the
+    // representable range is [-0x10_0000, 0x0F_FFFE].
+    for offset in [
+        0i32, 2, -2, 0x1000, -0x1000, 0x08_0000, -0x08_0000, 0x0F_FFFE, -0x10_0000,
+    ] {
+        let d = Decoder::default().decode(enc_j(offset, 1, JAL), 0);
+        assert_eq!(
+            d.imm, offset,
+            "jal offset {} did not survive the immediate splice",
+            offset
+        );
+    }
+}
+
+/// A register shift amount of 32 or more uses only its low 5 bits.
+#[test]
+fn register_shift_amounts_use_only_the_low_five_bits() {
+    let mut h = Harness::new();
+
+    // 32 & 0x1f == 0 → no shift at all.
+    let mut state = SimState::default();
+    state.gpr[1] = 0x1234_5678;
+    state.gpr[2] = 32;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b001, 3, OP));
+    assert_eq!(
+        state.gpr[3], 0x1234_5678,
+        "a shift amount of 32 shifts by 0"
+    );
+
+    // 63 & 0x1f == 31 → the largest shift.
+    let mut state = SimState::default();
+    state.gpr[1] = 1;
+    state.gpr[2] = 63;
+    h.step_one_at(&mut state, 0, enc_r(0, 2, 1, 0b001, 3, OP));
+    assert_eq!(state.gpr[3], 1 << 31, "a shift amount of 63 shifts by 31");
+}
+
+/// An immediate shift amount of 31 is the largest one.
+#[test]
+fn immediate_shift_amount_of_thirty_one_shifts_by_thirty_one() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 1;
+    h.step_one_at(&mut state, 0, enc_shift(0, 31, 1, 0b001, 2, OP_IMM));
+    assert_eq!(state.gpr[2], 1 << 31);
+}
+
+/// An illegal funct3 must trap as an illegal instruction.
+#[test]
+fn illegal_funct3_traps() {
+    let mut h = Harness::new();
+
+    // LOAD with funct3 = 0b011 is not a valid encoding.
+    let mut state = SimState::default();
+    let outcome = h.step_one_at(&mut state, 0, enc_i(0, 0, 0b011, 2, LOAD));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::IllegalInstruction
+        }
+    );
+
+    // BRANCH with funct3 = 0b010 is not a valid encoding.
+    let mut state = SimState::default();
+    let outcome = h.step_one_at(&mut state, 0, enc_b(8, 0, 0, 0b010, BRANCH));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::IllegalInstruction
+        }
+    );
+}
+
+/// An illegal funct7 must trap as an illegal instruction.
+#[test]
+fn illegal_funct7_traps() {
+    let mut h = Harness::new();
+
+    // ADD with funct7 = 0b000_0001 is the M extension's MUL, which is
+    // not implemented in this wave.
+    let mut state = SimState::default();
+    let outcome = h.step_one_at(&mut state, 0, enc_r(0b000_0001, 2, 1, 0b000, 3, OP));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::IllegalInstruction
+        }
+    );
+
+    // SLLI with funct7 = 0b000_0001 is not a valid shift encoding.
+    let mut state = SimState::default();
+    let outcome = h.step_one_at(&mut state, 0, enc_shift(0b000_0001, 4, 1, 0b001, 3, OP_IMM));
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::IllegalInstruction
+        }
+    );
+}
+
+/// An illegal instruction must not touch the PC or the registers.
+#[test]
+fn illegal_instruction_leaves_the_state_untouched() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[3] = 0x1234_5678;
+    let outcome = h.step_one_at(&mut state, 0x1000, enc_r(0b000_0001, 2, 1, 0b000, 3, OP));
+    assert!(matches!(outcome, StepOutcome::Trapped { .. }));
+    assert_eq!(
+        state.pc, 0x1000,
+        "a trapped instruction must not advance the PC"
+    );
+    assert_eq!(
+        state.gpr[3], 0x1234_5678,
+        "a trapped instruction must not write rd"
+    );
+}
+
+/// A short program must run instruction after instruction, with the PC
+/// advancing by one instruction length each time.
+#[test]
+fn a_program_runs_instruction_after_instruction() {
+    let mut h = Harness::new();
+    // addi x1, x0, 5 ; addi x2, x1, 3 ; sub x3, x2, x1
+    h.load(
+        0,
+        &[
+            enc_i(5, 0, 0b000, 1, OP_IMM),
+            enc_i(3, 1, 0b000, 2, OP_IMM),
+            enc_r(0b010_0000, 1, 2, 0b000, 3, OP),
+        ],
+    );
+
+    let mut state = SimState::default();
+    for _ in 0..3 {
+        h.step(&mut state).expect("step");
+    }
+    assert_eq!(state.gpr[1], 5);
+    assert_eq!(state.gpr[2], 8);
+    assert_eq!(state.gpr[3], 3, "x3 = x2 - x1 = 8 - 5");
+    assert_eq!(
+        state.pc, 12,
+        "three 4-byte instructions advance the PC by 12"
+    );
+}
+
+/// The ISS is a pure function of its inputs: the same program and the
+/// same starting state must produce the same result every time.
+#[test]
+fn execution_is_deterministic() {
+    let program = [
+        enc_i(5, 0, 0b000, 1, OP_IMM),
+        enc_i(3, 1, 0b000, 2, OP_IMM),
+        enc_r(0b010_0000, 1, 2, 0b000, 3, OP),
+    ];
+
+    let run = || {
+        let mut h = Harness::new();
+        h.load(0, &program);
+        let mut state = SimState::default();
+        for _ in 0..3 {
+            h.step(&mut state).expect("step");
+        }
+        (state.gpr, state.pc)
+    };
+
+    let first = run();
+    let second = run();
+    assert_eq!(first.0, second.0, "the register file must be reproducible");
+    assert_eq!(first.1, second.1, "the PC must be reproducible");
+}
+
+/// A misaligned instruction address must trap before the fetch
+/// happens (LLD §3.1, 评审 13-3).
+#[test]
+fn misaligned_fetch_address_traps() {
+    let mut h = Harness::new();
+    let mut state = SimState {
+        pc: 0x1001, // odd instruction address
+        ..SimState::default()
+    };
+    let outcome = h.step(&mut state).expect("must not error");
+    assert_eq!(
+        outcome,
+        StepOutcome::Trapped {
+            cause: TrapCause::MisalignedAccess
+        }
+    );
+    assert_eq!(state.pc, 0x1001, "a trapped fetch must not advance the PC");
+}
