@@ -11,7 +11,7 @@
 >
 > ## ✅ 闭环状态（2026-10-20 · 分支 `fix/frontend-review-closure`）
 >
-> **16 项全部闭环**，另捕获并修复 **4 项评审漏项**（#17 / #18 见 §七·2，**#19 / #20 见 §七·2.1**）；新增前端门禁 **21 用例 / 7 suite 全绿**（`tools/check-front.sh`），并以 **10 组变异测试**证明门禁能抓住同类回归。
+> **16 项全部闭环**，另捕获并修复 **4 项评审漏项**（#17 / #18 见 §七·2，**#19 / #20 见 §七·2.1**）；新增前端门禁 **35 用例 / 7 suite 全绿**（`tools/check-front.sh`），并以 **21 组变异测试**证明门禁能抓住同类回归（含复审新增的 11 组，见 §八·7）。
 >
 > ⚠️ **#19 / #20 是评审漏项，且只有真实浏览器能暴露**：修完白屏后，页面能起来，但**每个视图体都是空的**——DOM stub 测试对此完全隐形（见 §七·2.1）。逐项核对见 **§七**。
 
@@ -152,7 +152,7 @@ front/index.html:13-18:  <a ... data-view-tab="product">产品</a>  （共 6 个
 | 13 | 低 | ✅ | `index.html` 加 inline classic script 检测 `file:` 并给出 HTTP 部署指引；页脚常驻部署提示；`build-wasm.sh` 末尾提示同步 | 静态检查「index.html 含 file:// 部署提示」；文档侧见 `AGENTS.md` / `PROGRESS.md` 同步 |
 | 14 | 低 | ✅ | 新增 `ROLE_DEFAULT_VIEW` 显式映射表；`assembleWorkspace()` 与 `route()` 的兜底都改走它 | 角色切换后视图集合断言通过 |
 | 15 | 低 | ✅ | demo 数据移到 `front/dev/demo-state.js`；M-02 只发 `riscv:seed` 信号，dev 装配层消费 | `front/dev/` 与 `front/views/` 边界清晰；生产模块不再持有假数据 |
-| 16 | 低 | ✅ | 新增 `front/tests/dom-stub.mjs` + `front/tests/frontend.test.mjs`（19 用例）+ `tools/check-front.sh` + `.github/workflows/ci.yml` | `tools/check-front.sh` → 19 pass / 0 fail |
+| 16 | 低 | ✅ | 新增 `front/tests/dom-stub.mjs` + `front/tests/frontend.test.mjs`（35 用例 / 7 suite）+ `tools/check-front.sh` + `.github/workflows/ci.yml` | `tools/check-front.sh` → 35 pass / 0 fail |
 | **19** | 中 | ✅ | 漏项，见 §七·2.1 | 真机：初始面板可见；变异 J → 门禁变红 |
 | **20** | **阻断** | ✅ | 漏项，见 §七·2.1 | 真机：产品视图完整渲染（产品树 / 内存映射）；变异 I → 门禁变红 |
 
@@ -176,7 +176,7 @@ front/index.html:13-18:  <a ... data-view-tab="product">产品</a>  （共 6 个
 
 ### 7.3 门禁与变异测试
 
-新增门禁（`tools/check-front.sh` → `node --test "front/tests/*.test.mjs"`）：**19 用例 / 6 suite / 0 失败**，零第三方依赖，Node ≥ 22。
+新增门禁（`tools/check-front.sh` → `node --test "front/tests/*.test.mjs"`）：**35 用例 / 7 suite / 0 失败**，零第三方依赖，Node ≥ 22（复审后新增 14 条，含 7 条 DOM stub 保真度自测）。
 
 门禁有效性用变异测试验证——把每个原始缺陷放回去，门禁必须变红：
 
@@ -215,3 +215,141 @@ front/index.html:13-18:  <a ... data-view-tab="product">产品</a>  （共 6 个
 | `bb59e6a` | chore(front): 状态栏/页脚文案改为从真实状态推导 + 补 file:// 部署提示 |
 | `ed66337` | test(front): 新增前端冒烟门禁（node:test + DOM stub + CI） |
 | `6fc9e1f` | fix(front): 修复「视图体全空」——首次 render 事件被丢弃 + 初始面板不显示 |
+
+---
+
+## 八、复审（2026-10-20 · 独立复检 `fix/frontend-review-closure`）
+
+> **复审范围**：`git diff main..fix/frontend-review-closure`（11 commit，32 文件，+1644/−221）。**只读检视，未改动 `front/` 与 `crates/` 任何文件。**
+> **复审方法**：① 逐文件通读改动；② **16 组变异测试**（把每项修复改回去，看门禁是否仍绿）；③ DOM stub 保真度实测（8 项探针）；④ 文档 72 处改写的语义抽检；⑤ 亲跑三门禁。
+> **基线复核**：`cargo test --workspace` 203 passed ✓ · `cargo clippy -D warnings` ✓ · `cargo fmt --check` ✓ · `tools/check-front.sh` **21 passed** ✓ · CI YAML 合法、exec 位已入库（`100755`）、引号 glob 在 Node 22 生效 ✓
+> **总体结论**：**16 项首审意见 + 4 项评审漏项确认真实闭环**（逐项变异验证，见 §八·3）。**但门禁本身存在 3 处盲区、DOM stub 有 5 处保真度缺口、1 处位置耦合缺陷**——它们不会让当前代码出错，但会让**同类回归再次静默通过**。
+
+### 8.1 已确认的发现（16 项）
+
+| # | 严重度 | 位置 | 问题 | 证据 | 建议 |
+| --- | --- | --- | --- | --- | --- |
+| **R-01** | **高** | `app.js:81` | `Promise.all` 的**数组长度（7）与解构槽数（6）不同步**，靠位置耦合绑定 | 数组 7 元素 `[mountViewComponents, mountWorkbench, mountViewStore, mountSession, mountCommandRouter, mountTransport, mountRegisterMemory]`，解构 `[, workspace, , , , transport]` → `transport` ← index 5 = `mountTransport()`，**当前正确**。但**变异测试：在 index 2 插入一个 mount → `transport` 静默改绑到 `mountRegisterMemory()`（undefined）→ 状态栏降级为「未连接」，门禁 21 pass / 0 fail** | 改具名对象解构（对象字面量求值顺序仍是源码顺序，顺序保证不变但不再错位）：<br>`const { components, workspace, transport } = await Promise.all({ components: mountViewComponents(), workspace: mountWorkbench(), … })` |
+| **R-02** | **高** | `front/tests/frontend.test.mjs:75`、`:58-69` | **门禁对 #10 / #11 / #12 三项修复完全无感知** | 三项变异均 **21 pass / 0 fail**：① #10 `createPanel` 改回 innerHTML 字符串拼接；② #11 状态栏改回硬编码；③ #12 页脚改回硬编码。成因：页脚断言是 `/role=(product|embedded)/`，**硬编码的 "role=embedded" 同样匹配**；状态栏断言只排除「启动失败」与「未连接」两个具体字符串，降级文案「工作台已就绪 — kernel transport 未连接」两条都满足 | 断言改为**绑定真实状态值**而非匹配宽泛正则：页脚断言包含 `workspace.views` 里的**视图名**（硬编码写不出来）；状态栏断言随 `transport.connected` 变化而变化（跑两遍 transport 状态比对） |
+| **R-03** | 中 | `front/tests/dom-stub.mjs:285-288` | **`^=` / `$=` / `~=` / `|=` 选择器算符未实现，退化为「属性存在即匹配」** | `matchesSimple` 只对 `=` 比较值，其余算符直接跳过值比较。**实测 `[data-view-tab^="deb"]` → stub 返回 `t1`（`data-view-tab="product"`），真实浏览器返回 `t2`（`data-view-tab="debug"`）**；`[data-view-tab$="bug"]` 同样返回 `t1` | 实现这四个算符；或**遇到未实现算符直接抛错**——静默假绿比明确失败危险得多 |
+| **R-04** | 中 | `front/tests/dom-stub.mjs:111-112` + `front/style.css:87` | **stub 无滚动模型 → 「终端滚动位置还原」这条用例是恒等式** | `scrollTop`/`scrollHeight` 是普通数据属性，**`scrollHeight` 恒 0**。实测 `out.scrollTop = out.scrollHeight` → 0（真实浏览器会滚到底）。于是 `frontend.test.mjs:176` 的 `assert.equal(…scrollTop, 42)` **只证明「赋了值」，不证明「浏览器滚过去了」**。更关键：`.view-body { min-height: 200px; }` **没有 `overflow:auto`** → `captureUiState` 采集的 `body.scrollTop` 在真实浏览器里**恒为 0**（`.view-body` 不是滚动容器），只有 `.terminal-out`（`max-height:280px; overflow:auto`）是真滚动容器 | ① 给 `.view-body` 加 `overflow:auto`（否则 `body.scrollTop` 这条采集采的是一个恒 0 的值）；② 或删掉 `body.scrollTop` 采集；③ 测试改成断言「发生了赋值」而非「值生效」，并注明真实浏览器仍需复验 |
+| **R-05** | 中 | `front/tests/dom-stub.mjs:204-228` | stub **忽略 `addEventListener` 第三参**（capture/once/passive），且 **`stopPropagation` 不被尊重** | 实测：`{ once: true }` 监听被触发 **2 次**（真实浏览器 1 次）；子节点 `stopPropagation()` 后祖先监听仍收到 **1 次**（真实浏览器 0 次）——`dispatchEvent` 无条件沿 `parentNode` 上溯，不看 `cancelBubble` | 当前前端不用这些 API → 今天无实际故障。但 stub 允许写出「浏览器里行为不同」的代码而测试照绿，属**假绿来源**。建议至少实现 `once` 与 `stopPropagation` |
+| **R-06** | 中 | `front/views/m01_workbench.js:402-407` | `captureUiState` 写的 `ui` 键在 merge 语义下**整块替换** | `setState` 是浅 merge（`m03:27`），`{ ui: {...} }` → `next.ui` 整体被替换。**与内核状态（`sim`/`wave`/`term`/`tree`）是兄弟键，不互相污染 ✓**（这一顾虑可以排除）。但若将来往 `ui` 下再加键（如 `ui.zoom`），一次 `captureUiState` 就会抹掉它 | 改函数式派生保留既有子键：`setState(viewId, prev => ({ ...prev, ui: { ...(prev.ui ?? {}), scrollTop, terminalScrollTop } }))` |
+| **R-07** | 低 | `front/views/m02_viewcomponents.js:277-288` | `onDelta` **同时写 store 与 DOM**，理论上可重复追加 | `setState` 累加 `term.bytes`，随后 `out.textContent = (out.textContent ?? "") + bytes` **再基于 DOM 当前值追加**。若 `setState` 的订阅者触发重渲染，DOM 会先从 store 重建（已含该字节），再被追加一次 → **重复追加**。**当前不可达**：`m03.subscribe` 无任何调用方，且 `onDelta` 无人调用（M-07 未接线）→ **推测级风险**，接线时会变成真实路径 | `onDelta` 只写 store，DOM 更新统一交给 `applyRenderEvent`；或反过来只写 DOM，但内容从 store 重新计算而非累加 `out.textContent` |
+| **R-08** | 低 | `front/app.js:76-80` | **注释把功劳记给了数组顺序，实际是 `queueMicrotask` 在兜底** | 注释称「Mounting the workbench first would drop that event」——但有 `queueMicrotask`（`m01:461`）后**即使 workbench 先 mount 也不会丢事件**。变异测试佐证：单独去掉 `queueMicrotask` → **21 pass / 0 fail**（数组顺序仍保证订阅先注册）；**同时**去掉 microtask 且交换数组顺序 → 19 pass / 2 fail ✓ | 两处保险是**冗余**的（好设计，门禁锁的是「结果」而非「机制」）。但注释会误导后来者以为可以随意调整数组顺序。建议改为「两处冗余保险：数组顺序保证同步订阅先注册，queueMicrotask 保证异步 mount 也不会错过」 |
+| **R-09** | 低 | `AGENTS.md:48`、`PROGRESS.md:63`、`CROSS_MODULE_DEBT.md:112`、`FRONTEND_Review.md:14` | **门禁用例数 4 处不一致** | 实际 `node --test` 报 **`# tests 21 / # suites 6`**。三处写「**19 用例**」、一处写「21 用例 / **7 suite**」（suite 数错） | 统一为 **21 用例 / 6 suite** |
+| **R-10** | 低 | `tools/check-front.sh:19-23` | 脚本宣称「needs Node >= 22」但**不校验版本** | `command -v node` 通过即往下跑。`node --test` 的**带参 glob** 支持是 Node **21+**（`describe`/`test` 是 18+）→ Node 18/20 上会报出难以理解的错误。CI 用 `setup-node@v4` + `node-version: 22` 固定 ✓，本地开发可能踩坑 | 加一行版本判断：`node -e "process.exit(+process.versions.node.split('.')[0] >= 22 ? 0 : 1)"` |
+| **R-11** | 低 | 根 `package.json` + `.gitignore:32` | `"type":"module"` 位于**仓库根**，影响全仓库 `.js`；`.gitignore` 只忽略 `front/node_modules/`，**没有根 `node_modules/`** | 实测 `front/` 之外**无任何 `.js` 文件** → **今天无影响 ✓**。但根 package.json 使未来任意新增 `.js` 都被当 ESM（CommonJS 脚本会直接报错）；若有人在根跑 `npm install` 会生成未被忽略的 `node_modules/` | 把 package.json 移到 `front/`（更贴合「前端门禁」的归属），或在 `.gitignore` 补 `node_modules/` |
+| **R-12** | 低 | `front/tests/dom-stub.mjs:386-393` | stub 的 `document` **没有 `addEventListener`** | 实测 `typeof D.addEventListener === "undefined"`。真实 DOM 有。当前代码不用 → 无影响；将来加 `document.addEventListener("DOMContentLoaded", …)` 会直接 TypeError（**假红**而非假绿，可接受） | 补一个最小实现（`DOMContentLoaded` 触发一次即可） |
+| **R-13** | 低 | `front/tests/dom-stub.mjs:395-401` | `dom.window.location` 不存在（只设了全局 `location`） | 实测 `undefined`。当前代码用全局 `location` ✓，但 `window.location` 是浏览器里最自然的写法 | `StubWindow` 补 `location` 引用 |
+| **R-14** | 低 | `front/tests/dom-stub.mjs:160-164` | `textContent` 赋值后 `innerHTML` 返回 `""`（真实浏览器返回内容） | 实测 `b.textContent = "raw"` → `b.innerHTML === ""`，真实浏览器是 `"raw"` | 修 stub：赋值时同步 `_html` |
+| **R-15** | 低 | `front/views/m01_workbench.js:245-262` | `switchView` **同视图分支不调 `restoreUiState`**，与正常切换分支（`:298`）不一致 | 同视图重入时 render 重建 DOM → 滚动位置被重置。变异测试：去掉 `showPanel` 会被抓住（20/1），**去掉 `restoreUiState` 不会**——无对应断言 | 同视图分支补 `restoreUiState(target.hash)` |
+
+### 8.2 推测级观察（未实测 / 未在本轮验证）
+
+| 项 | 推测 | 依据 |
+| --- | --- | --- |
+| seed 按钮在真实浏览器点击未送达 | **判定为工具问题**的结论我无法独立验证（浏览器工具的合成点击未触发页面事件，含用户自加的全局 click 捕获也未触发）。门禁侧覆盖了按钮 → `riscv:seed` 信号 → store 更新的完整链路（`frontend.test.mjs:193-215`），逻辑上等价；但**真机路径未被独立确认** | 复审未复现真机点击，仅复核了门禁覆盖范围 |
+| `onDelta` 的重复追加（R-07） | **推测**：当前 `subscribe` 无调用方、`onDelta` 无调用方 → 不可达。M-07 接线时需重新评估 | 代码路径静态分析 |
+| 真实浏览器下 `terminalScrollTop` 的还原 | **推测**：stub 的 `scrollTop` 是普通属性，真实浏览器中 `scrollTop = 42` 在内容不足 280px 时会被**钳制为 0** → 还原可能静默失效。需真机 + 足够长的终端内容才能确认 | CSS 事实 + 浏览器滚动语义 |
+| 72 处文档改写的**全部**语义 | 抽检了 SAB/COOP-DEP 校正（**准确**）、部署形态（**一致**）、file:// 残留表述（**已清扫**）；其余 60+ 处未逐条核 | 抽检，非全量 |
+
+### 8.3 变异测试矩阵（16 组 · 复审独立执行）
+
+| 变异 | 门禁结果 | 判定 |
+| --- | --- | --- |
+| D-01：m02 重新 import 未导出的 `activeView` | 0 pass / **2 fail** | ✅ 抓住 |
+| D-02：删 `mountViewStore` 导出 | 0 pass / **2 fail** | ✅ 抓住 |
+| #3：恢复 `row` 前置判断 | 20 / **1 fail** | ✅ 抓住 |
+| #4：恢复终端双层转义 | 20 / **1 fail** | ✅ 抓住 |
+| #5：移除 `syncTabState` 调用 | 19 / **2 fail** | ✅ 抓住 |
+| #6：恢复 `switchView` 的 noop 早返回 | 19 / **2 fail** | ✅ 抓住 |
+| #7：移除 `captureUiState` | 20 / **1 fail** | ✅ 抓住 |
+| #13：删 `file://` 提示 | 20 / **1 fail** | ✅ 抓住 |
+| #19：同视图分支去掉 `showPanel` | 20 / **1 fail** | ✅ 抓住 |
+| #20 + 数组顺序：双失效 | 19 / **2 fail** | ✅ 抓住 |
+| #16：把 `describe(` 改名（门禁自检） | 1 / **1 fail** | ✅ 抓住 |
+| **#10**：`createPanel` 改回 innerHTML 字符串 | **21 / 0 fail** | ❌ **盲区** |
+| **#11**：状态栏改回硬编码 | **21 / 0 fail** | ❌ **盲区** |
+| **#12**：页脚改回硬编码 | **21 / 0 fail** | ❌ **盲区** |
+| **#14**：改回 `mountedViews.get(role)` | **21 / 0 fail** | ⚪ 等效变异（当前两种写法行为相同） |
+| **#2**：Promise.all 中间插入一个 mount（下标错位） | **21 / 0 fail** | ❌ **盲区** |
+
+**结论：11/16 组被抓住，3 处真盲区（#10 / #11 / #12），1 处等效变异，1 处位置耦合盲区（#2）。**
+
+### 8.4 复审确认闭环无误的项
+
+| 项 | 复核方式 | 结论 |
+| --- | --- | --- |
+| D-01 修法 | 变异测试 | ✅ 选「m02 删掉用不到的 `activeView` import」而非新增 export——最小改动、不新增公开 API，门禁能抓住回归 |
+| D-02 | 变异测试 | ✅ |
+| #3 / #4 / #5 / #6 / #7 | 变异测试 | ✅ 门禁全部能抓住 |
+| #9 escape 单点化 | 变异测试 | ✅ 源码文本计数断言能抓住 |
+| #13 file:// 提示 | 变异测试 | ✅ 静态断言能抓住 |
+| #19 / #20 | 变异测试 | ✅ 双失效组合能被抓住 |
+| 时序双保险 | 变异测试 | ✅ 冗余且互补：数组顺序保证同步订阅先注册，`queueMicrotask` 保证异步 mount 也不错过；门禁锁「结果」而非「机制」——这是**好门禁设计** |
+| CI 可跑性 | 亲跑 | ✅ YAML 合法；`tools/check-front.sh` 的 exec 位已入库（`100755`）；`node --test "front/tests/*.test.mjs"` 的**引号 glob 在 Node 22 生效**（实测 21 passed） |
+| `package.json` `"type":"module"` | 全仓 `find` | ✅ `front/` 之外无任何 `.js` 文件 → 今天零影响 |
+| SAB / COOP-DEP 语义校正 | 文档抽检 | ✅ **准确**：COOP/COEP 是**服务器响应头**，`file://` 无服务器故无该头；SAB 可用性的真正条件是**跨源隔离**（COOP+COEP）。把条件从「file:// 下无 COOP/COEP 时」改为「无 COOP/COEP 时」是正确的，且与新的部署形态（目录 + 同源 HTTP）自洽 |
+| 部署形态定案 | 文档抽检 | ✅ 目录形态 + 同源 HTTP 与 ES module 的 CORS 硬约束一致；AGENTS.md / CONTRIBUTING.md / 需求 v1.4 / AD v2.8 已同步；残留「file:// 直接打开」硬指标表述已清扫（仅存于历史说明与版本记录，属正确留痕） |
+| 需求 v1.3 → v1.4 改名 | 交叉引用 | ✅ AGENTS.md / CONTRIBUTING.md 引用已同步，无悬空链接 |
+
+### 8.5 建议的最小修补（按投入产出比）
+
+| 优先 | 动作 | 成本 | 收益 |
+| --- | --- | --- | --- |
+| 1 | **R-01** 改具名对象解构 | ~3 行 | 消除位置耦合；这是唯一一处「代码当前正确但结构脆弱」的问题 |
+| 2 | **R-02** 三条断言改为绑定真实状态值 | ~6 行 | 把 3 处盲区变成有效回归锁 |
+| 3 | **R-09** 用例数统一为 21 / 6 suite | 4 处各 1 词 | 文档一致性 |
+| 4 | **R-04** 给 `.view-body` 加 `overflow:auto` 或删掉 `body.scrollTop` 采集 | ~2 行 | 让「UI 交互态采集」这条 LLD §3.3 要求真正可验证 |
+| 5 | **R-03** stub 遇未实现算符抛错 | ~5 行 | 防止未来写出静默假绿的选择器测试 |
+| 6 | R-06 / R-07 / R-08 / R-10 ~ R-15 | 小 | 整洁与一致 |
+
+### 8.6 复审边界声明
+
+- 复审**只读**：`front/` 与 `crates/` 下**零改动**；变异测试在 `/tmp` 的副本中执行，已清理，仓库无残留。
+- 本节记录的是**复审意见**，不代表已修复；修复由作者按 §八·5 顺序执行。
+- 复审未覆盖：真实浏览器行为（Electron + HTTP 服务）、`tools/build-wasm.sh` 的 WASM 产物、CSS 渲染效果、跨浏览器兼容性。
+
+
+### 8.7 复审意见闭环（2026-10-20 · 作者侧）
+
+复审 §八·1 的 **15 项发现** + §八·5 的修补清单全部落地：3 处门禁盲区封住、1 处位置耦合消除、DOM stub 的 5 处保真度缺口补齐。门禁由 21 用例 / 6 suite 扩到 **35 用例 / 7 suite**。
+
+| # | 严重度 | 状态 | 落点 | 验证 |
+| --- | --- | --- | --- | --- |
+| **R-01** | 高 | ✅ | `app.js` 改**具名**挂载：挂载项收进 `pending` 对象，键→值映射由同一对象派生（`Object.entries(pending).map(async ([k, p]) => [k, await p])`），不再有下标耦合 | 变异「插入一个 mount」→ 门禁**仍绿**（⚪ 无害，失败模式已不复存在）；变异「transport 槽位真实错绑」→ 门禁**变红** ✓ |
+| **R-02** | 高 | ✅ | 三条断言改为绑定真实状态：页脚断言工作台快照的 role **与全部视图名**；状态栏断言 = `describeTransport(实际 transport)`，且推导随 transport 变化、**transport 缺失读起来不同**（否则错绑不可见）；另加「M-01 不得用 innerHTML 拼面板」静态断言 | 变异 #10 / #11 / #12 三项改回去 → 门禁**全部变红** ✓ |
+| **R-03** | 中 | ✅ | stub 实现 `= / ^= / $= / *= / ~= / \|=` 六种属性算符；**未实现的语法显式抛错**（不再静默退化） | 变异「`^=` 退化为属性存在即匹配」→ 门禁变红 ✓ + stub 自测 1 条 |
+| **R-04** | 中 | ✅ | `.view-body` 无 `overflow`、**不是滚动容器** → 删掉 `body.scrollTop` 采集（真实浏览器里恒 0 的死值），只保留真实滚动容器 `.terminal-out`；测试断言采集到的键集合恰为 `["terminalScrollTop"]` | 变异「恢复采集 body.scrollTop」→ 门禁变红 ✓ |
+| **R-05** | 中 | ✅ | stub 支持 `once` / `capture` 选项与 `stopPropagation`；**冒泡阶段顺序修正为目标 → 根**（此前反了，父节点先于子节点触发，致 stopPropagation 失效） | 变异「摘掉 once 支持」→ 门禁变红 ✓ + stub 自测 2 条 |
+| **R-06** | 中 | ✅ | `captureUiState` 改函数式派生，`ui` **按键合并**而非整块替换 | 变异「改回整块替换」→ 门禁变红 ✓ |
+| **R-07** | 低 | ✅ | `onDelta` 只写 store，DOM 写 store 的**权威值**（不再基于 DOM 累加） | 变异「改回 DOM 累加」→ 门禁变红 ✓（新用例模拟订阅者夹击重渲染） |
+| **R-08** | 低 | ✅ | `app.js` 注释改为准确表述：数组顺序与 `queueMicrotask` 是**两道冗余保险**，各自的作用分别写明 | — |
+| **R-09** | 低 | ✅ | 用例数统一为 **35 用例 / 7 suite**（AGENTS.md / PROGRESS.md / 台账 / 本文件） | 亲跑 → `# tests 35 / # suites 7` |
+| **R-10** | 低 | ✅ | `tools/check-front.sh` 增加 Node 主版本 ≥ 22 的显式校验（否则 Node 18/20 上报出难以理解的错） | — |
+| **R-11** | 低 | ✅ | `package.json` 移到 `front/`（`"type":"module"` 只影响 front/ 下的 `.js`，仓库根不再被波及）；`.gitignore` 补根 `node_modules/` | `front/` 内 `npm run test:front` 与根目录 `tools/check-front.sh` 均 35 passed ✓ |
+| **R-12** | 低 | ✅ | stub 的 `document` 支持 `addEventListener`，装好 DOM 后于微任务里派发一次 `DOMContentLoaded` | stub 自测 ✓ |
+| **R-13** | 低 | ✅ | stub 的 `window.location` 指向与全局 `location` 同一对象 | stub 自测 ✓ |
+| **R-14** | 低 | ✅ | stub 的 `textContent` 赋值同步 `_html`（转义后的文本，与真实浏览器一致） | stub 自测 ✓ |
+| **R-15** | 低 | ✅ | `switchView` 同视图分支补 `restoreUiState(target.hash)` | 变异「去掉同视图分支的 restoreUiState」→ 门禁变红 ✓ |
+
+**变异矩阵复跑（10 组需变红 + 1 组预期无害）**：
+
+| 变异 | 门禁 | 判定 |
+| --- | --- | --- |
+| #10 `createPanel` 改回 innerHTML 拼接 | 变红 | ✅ 抓住 |
+| #11 状态栏改回硬编码（历史文案） | 变红 | ✅ 抓住 |
+| #12 页脚改回硬编码（缺视图名） | 变红 | ✅ 抓住 |
+| 插入一个 mount（位置耦合） | **仍绿** | ⚪ 预期无害——具名绑定下该变异不再产生错绑；真实错绑（transport 槽位）单独验证 → 变红 ✓ |
+| stub `^=` 算符退化 | 变红 | ✅ 抓住 |
+| stub `once` 支持被摘掉 | 变红 | ✅ 抓住 |
+| `onDelta` 改回 DOM 累加 | 变红 | ✅ 抓住 |
+| 恢复采集恒 0 的 `body.scrollTop` | 变红 | ✅ 抓住 |
+| 同视图分支去掉 `restoreUiState` | 变红 | ✅ 抓住 |
+| `captureUiState` 改回整块替换 `ui` | 变红 | ✅ 抓住 |
+| 全部还原 | 绿 | ✅ |
+
+> **复审建议的具名对象写法有一处笔误**：`Promise.all` 只接受可迭代对象，传普通对象会抛 `TypeError`。实现改为「挂载项收进具名对象 → 由 `Object.entries(pending)` 派生键→值映射 → `Promise.all` 解析」，同样消除下标耦合；对象字面量的求值顺序仍保证 `components` 先于 `workspace` 挂载。
+>
+> **本节只记录复审意见的闭环，不改复审结论本身**（§八·1~§八·4 为复审原文，保留原样以便对照）。
