@@ -254,6 +254,15 @@ impl PeripheralRegistry {
     /// A rejected payload leaves every peripheral **exactly as it was**
     /// — a half-applied restore is worse than a rejected one (STAGE-3
     /// §5).
+    ///
+    /// ⚠️ That promise is kept by a **read-only validation pass over
+    /// every instance** ([`Peripheral::validate_session_state`]) that
+    /// runs **before** the write stage — the peripheral's own integrity
+    /// rules (e.g. the GPIO's `irq_lines` must have exactly
+    /// [`riscv_sim_contract::session::GPIO_PIN_COUNT`] entries) live
+    /// **inside** the peripheral, so the contract layer cannot check
+    /// them. Without that pass, a payload whose *second* peripheral is
+    /// malformed would leave the *first* one already overwritten.
     pub fn load_state(&mut self, state: &M15PeriphDto) -> Result<(), PlatformError> {
         restore_session_states(&self.live_instances(), state)
     }
@@ -317,11 +326,107 @@ pub fn collect_session_state(instances: &[(u32, SharedPeripheral)]) -> M15Periph
 /// The bus-bound twin of [`PeripheralRegistry::load_state`] — same
 /// matching rules, same errors, same "all checks before any write"
 /// discipline. See that method for the full contract.
+///
+/// ## Two phases — and the write phase writes **nothing** until the
+/// first one is through
+///
+/// 1. **match** (both directions) + **kind**;
+/// 2. **read-only validation** of **every** instance
+///    ([`Peripheral::validate_session_state`]);
+/// 3. **apply** — one instance at a time.
+///
+/// ⚠️ Phase 2 is **not** redundant with the checks inside
+/// [`Peripheral::restore_session_state`]. A peripheral's own integrity
+/// rules (e.g. the GPIO's `irq_lines` must have exactly
+/// [`riscv_sim_contract::session::GPIO_PIN_COUNT`] entries) live
+/// **inside** the peripheral — the contract layer cannot check them,
+/// because it does not know what the peripheral's state *means*. If
+/// those rules were only checked in the write path, then "write the
+/// UART, discover the malformed GPIO afterwards" would leave **half an
+/// applied session** (the UART has already been overwritten) behind an
+/// `Err` — and a half-applied snapshot is worse than a rejected one
+/// (STAGE-3 §5).
 pub fn restore_session_states(
     instances: &[(u32, SharedPeripheral)],
     state: &M15PeriphDto,
 ) -> Result<(), PlatformError> {
-    // ---- Phase 1: index the live instances. Nothing is written yet. ----
+    let (live, entries) = match_peripherals(instances, state)?;
+
+    // ---- Phase 2: read-only validation of **every** instance. ----
+    // Nothing has been written yet: a rejection here leaves every
+    // peripheral exactly as it was.
+    validate_all(&live, &entries)?;
+
+    // ---- Phase 3: apply. One instance at a time, no overlapping borrows. ----
+    for (id, _kind, variant) in &entries {
+        let target = live
+            .iter()
+            .find(|l| l.id == *id)
+            .expect("phase 1 rejected every id without a live instance");
+        let mut periph = target.handle.borrow_mut();
+        periph.restore_session_state(variant)?;
+    }
+    Ok(())
+}
+
+/// **Phase 2** — the read-only validation of **every** instance.
+///
+/// ⚠️ **One landing spot.** The write path ([`restore_session_states`])
+/// and the read-only pre-flight ([`validate_session_states`]) both call
+/// **this** function — one constraint, one implementation. If the two
+/// had their own copies, they could drift apart, and the drift would
+/// be invisible until a malformed payload left a half-applied session
+/// behind.
+fn validate_all(live: &[LiveInstance], entries: &FlatEntries) -> Result<(), PlatformError> {
+    for (id, _kind, variant) in entries {
+        let target = live
+            .iter()
+            .find(|l| l.id == *id)
+            .expect("phase 1 rejected every id without a live instance");
+        let periph = target.handle.borrow();
+        periph.validate_session_state(variant)?;
+    }
+    Ok(())
+}
+
+/// **Read-only** pre-flight: can these live instances accept this
+/// payload's peripheral state? — **writes nothing**.
+///
+/// This is the gate the kernel host runs **before** it touches the
+/// bus: the host's restore chain writes the memory map and the memory
+/// pages **before** it reaches the peripherals, so a peripheral state
+/// that turns out to be unacceptable at that point would leave a
+/// **Frankenstein session** behind (memory from the payload, registers
+/// and peripherals from before the restore) with nothing but an `Err`
+/// to show for it (STAGE-3 §5).
+///
+/// ⚠️ The checks are the **same** ones [`restore_session_states`] runs
+/// in its phase 1 / phase 2 — one landing spot, one implementation.
+/// The host calls this; it does not re-implement anything.
+pub fn validate_session_states(
+    instances: &[(u32, SharedPeripheral)],
+    state: &M15PeriphDto,
+) -> Result<(), PlatformError> {
+    let (live, entries) = match_peripherals(instances, state)?;
+    validate_all(&live, &entries)
+}
+
+/// The payload's peripheral states, flattened into `(id, kind, state)`.
+type FlatEntries = Vec<(String, SessionKind, PeripheralSessionState)>;
+
+/// Match the payload's peripheral states onto the live instances.
+///
+/// **Phase 1** of the restore: the payload's set and the live set must
+/// agree **in both directions**, and a payload entry's kind must match
+/// the live instance's kind. Nothing is written here.
+///
+/// Returns the live instances (indexed by id) and the payload's entries
+/// flattened into `(id, kind, state)`.
+fn match_peripherals(
+    instances: &[(u32, SharedPeripheral)],
+    state: &M15PeriphDto,
+) -> Result<(Vec<LiveInstance>, FlatEntries), PlatformError> {
+    // ---- Index the live instances. Nothing is written yet. ----
     let mut live: Vec<LiveInstance> = Vec::with_capacity(instances.len());
     for (_base, handle) in instances {
         let (id, kind) = {
@@ -363,7 +468,7 @@ pub fn restore_session_states(
         ));
     }
 
-    // ---- Phase 2: every id in the payload must be live. ----
+    // ---- Every id in the payload must be live. ----
     for (id, _kind, _state) in &entries {
         if !live.iter().any(|l| l.id == *id) {
             return Err(PlatformError::new(
@@ -374,7 +479,8 @@ pub fn restore_session_states(
         }
     }
 
-    // ---- Phase 3: every live peripheral that participates must be described. ----
+    // ---- Every live peripheral that participates must be described,
+    //      **with the same kind**. ----
     for l in &live {
         // `None` = this peripheral has no session state at all (the
         // contract's default) — there is nothing to restore.
@@ -394,16 +500,7 @@ pub fn restore_session_states(
         }
     }
 
-    // ---- Phase 4: apply. One instance at a time, no overlapping borrows. ----
-    for (id, _kind, variant) in &entries {
-        let target = live
-            .iter()
-            .find(|l| l.id == *id)
-            .expect("phase 2 rejected every id without a live instance");
-        let mut periph = target.handle.borrow_mut();
-        periph.restore_session_state(variant)?;
-    }
-    Ok(())
+    Ok((live, entries))
 }
 
 /// A live peripheral, as the restore path sees it.

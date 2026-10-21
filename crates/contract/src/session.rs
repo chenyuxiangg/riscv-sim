@@ -71,6 +71,18 @@ use crate::snapshot::{EngineSnapshotDto, SNAPSHOT_FAMILY, SNAPSHOT_SCHEMA_VERSIO
 /// — that one governs the **M-12/M-17 segment** reused as segment 1.
 pub const SESSION_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
+/// Number of pins in a **GPIO bank** — the single landing spot for that
+/// number.
+///
+/// ⚠️ **One number, one home.** The GPIO's per-pin IRQ list
+/// ([`GpioStateDto::irq_lines`]) must have **exactly** this many entries:
+/// fewer would leave the remaining pins' IRQ lines undefined, more would
+/// carry lines that do not exist. M-15's `PIN_COUNT` **references** this
+/// constant instead of spelling out `32` a second time — two copies of
+/// the same number is two truths, and the moment one of them moves the
+/// payload silently stops validating.
+pub const GPIO_PIN_COUNT: usize = 32;
+
 /// Scenario code: the session payload's shape is malformed — its
 /// segment tables are not canonically ordered, or they contradict each
 /// other.
@@ -210,6 +222,11 @@ pub struct GpioStateDto {
     /// Input latch.
     pub inputs: u32,
     /// IRQ line per pin.
+    ///
+    /// ⚠️ **Exactly [`GPIO_PIN_COUNT`] entries** — one per pin, in pin
+    /// order. Fewer leaves the remaining pins' lines undefined, more
+    /// carries lines that do not exist; neither is padded nor truncated
+    /// (see [`SessionSnapshotDto::validate`]).
     pub irq_lines: Vec<u16>,
     /// Pending IRQ bitmask.
     pub pending_irqs: u32,
@@ -327,12 +344,19 @@ impl SessionSnapshotDto {
     /// 1. `schema_version` — known?
     /// 2. `cp_meta.version` — known?
     /// 3. inner `m12_engine.schema_version` — known?
-    /// 4. `m14_map.regions` — ascending by `base`, non-overlapping
-    /// 5. `m13_state.mem_pages` — ascending by `base`, non-overlapping,
+    /// 4. inner `m12_engine.state.schema_version` — known? (**the inner
+    ///    validator is its single home** — see the note below)
+    /// 5. `m14_map.regions` — ascending by `base`, non-overlapping
+    /// 6. `m13_state.mem_pages` — ascending by `base`, non-overlapping,
     ///    and each page fits inside a RAM region
-    /// 6. `m15_periph` — no duplicate id within a kind
-    /// 7. `m16_intc.raised` — ascending, no duplicates
-    /// 8. the inner engine snapshot validates on its own terms
+    /// 7. `m15_periph` — no duplicate id, **across kinds** as well
+    /// 8. `m15_periph.gpios[*].irq_lines` — exactly [`GPIO_PIN_COUNT`]
+    ///    entries
+    /// 9. `m16_intc.raised` — ascending, no duplicates
+    /// 10. the inner engine snapshot validates on its own terms
+    ///
+    /// ⚠️ The numbers are the **frozen spec's** (§5) — the same numbers
+    /// the spec's table uses, so a reader can line the two up.
     ///
     /// ⚠️ The inner `m12_engine.state.schema_version` is **not** checked
     /// here — see the comment at the check itself. The frozen spec
@@ -422,15 +446,49 @@ impl SessionSnapshotDto {
             }
         }
 
-        // 7 — no duplicate peripheral id within a kind.
-        check_unique(self.m15_periph.uarts.iter().map(|u| u.id.as_str()), "UART")?;
-        check_unique(self.m15_periph.gpios.iter().map(|g| g.id.as_str()), "GPIO")?;
+        // 7 — no duplicate peripheral id — **across kinds** as well.
+        //
+        // ⚠️ A UART and a GPIO may not share an id: the id is the
+        // peripheral's **identity**, and the restore path matches the
+        // payload onto the live instances **by id**. Two entries with
+        // one id = one of them silently wins (or both are written into
+        // the same instance) → the restored session differs from the
+        // captured one, with nothing to show for it.
         check_unique(
-            self.m15_periph.timers.iter().map(|t| t.id.as_str()),
-            "定时器",
+            self.m15_periph
+                .uarts
+                .iter()
+                .map(|u| (u.id.as_str(), "UART"))
+                .chain(
+                    self.m15_periph
+                        .gpios
+                        .iter()
+                        .map(|g| (g.id.as_str(), "GPIO")),
+                )
+                .chain(
+                    self.m15_periph
+                        .timers
+                        .iter()
+                        .map(|t| (t.id.as_str(), "定时器")),
+                ),
         )?;
 
-        // 8 — the raised lines must be ascending and deduplicated.
+        // 8 — every GPIO bank must carry **exactly one IRQ line per pin**.
+        //
+        // ⚠️ Neither padded nor truncated: padding fabricates lines the
+        // firmware never wrote, truncation drops lines it did. Both are
+        // rejected.
+        for g in &self.m15_periph.gpios {
+            if g.irq_lines.len() != GPIO_PIN_COUNT {
+                return Err(self.malformed(&format!(
+                    "GPIO '{}' 的 irq_lines 有 {} 条，应恰好 {GPIO_PIN_COUNT} 条（不补齐也不截断）",
+                    g.id,
+                    g.irq_lines.len()
+                )));
+            }
+        }
+
+        // 9 — the raised lines must be ascending and deduplicated.
         let mut prev: Option<u16> = None;
         for line in &self.m16_intc.raised {
             if let Some(p) = prev {
@@ -441,7 +499,7 @@ impl SessionSnapshotDto {
             prev = Some(*line);
         }
 
-        // 9 — the inner engine snapshot validates on its own terms.
+        // 10 — the inner engine snapshot validates on its own terms.
         self.m12_engine.validate()?;
 
         Ok(())
@@ -471,18 +529,25 @@ fn unsupported_version(what: &str, got: u32, want: u32) -> PlatformError {
     )
 }
 
-/// Reject duplicate ids, and (as a convenience) report them in order.
-fn check_unique<'a, I>(ids: I, what: &str) -> Result<(), PlatformError>
+/// Reject duplicate peripheral ids, and report them with the kind they
+/// came from.
+///
+/// ⚠️ The check spans **all three kinds**: an id that is a UART *and* a
+/// GPIO is a duplicate too. The restore path matches by id, so one id
+/// with two entries is two states competing for one instance.
+fn check_unique<'a, I>(ids: I) -> Result<(), PlatformError>
 where
-    I: Iterator<Item = &'a str>,
+    I: Iterator<Item = (&'a str, &'a str)>,
 {
     let mut seen: Vec<&str> = Vec::new();
-    for id in ids {
+    for (id, kind) in ids {
         if seen.contains(&id) {
             return Err(PlatformError::new(
                 SNAPSHOT_FAMILY,
                 E_SNAP_06_MALFORMED_SESSION,
-                format!("会话快照载荷畸形：{what} 的 id 重复（{id}）"),
+                format!(
+                    "会话快照载荷畸形：{kind} 的 id 重复（{id}）——同一个 id 不能既是 UART 又是 GPIO"
+                ),
             ));
         }
         seen.push(id);
@@ -533,7 +598,7 @@ mod tests {
                     directions: 0xF,
                     outputs: 0x1,
                     inputs: 0x2,
-                    irq_lines: vec![4, 5],
+                    irq_lines: (0..GPIO_PIN_COUNT).map(|i| 4 + i as u16).collect(),
                     pending_irqs: 0,
                     now_ps: 600,
                 }],
@@ -916,6 +981,81 @@ mod tests {
         s.m15_periph.uarts = vec![uart.clone(), uart];
         let err = s.validate().expect_err("必须被拒");
         assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// ⚠️ **跨类型**的 id 重复也是重复——同一个 id 不能既是 UART 又是
+    /// GPIO。
+    ///
+    /// 恢复路径**按 id** 把载荷匹配到活实例上：一个 id 挂两条状态 =
+    /// 两条状态抢一个实例（或者两条都被写进同一个实例）→ 还原出来的
+    /// 会话与采出来的那份**不一样**，而载荷里没有任何东西能提示这件事。
+    #[test]
+    fn a_peripheral_id_duplicated_across_kinds_is_rejected() {
+        let mut s = sample();
+        // GPIO 冒用了 UART 的 id。
+        s.m15_periph.gpios[0].id = s.m15_periph.uarts[0].id.clone();
+        let err = s.validate().expect_err("跨类型的 id 重复必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// 定时器与 UART 同名 —— 同一条规则，**另一对**类型。
+    #[test]
+    fn a_peripheral_id_duplicated_between_a_timer_and_a_uart_is_rejected() {
+        let mut s = sample();
+        s.m15_periph.timers[0].id = s.m15_periph.uarts[0].id.clone();
+        let err = s.validate().expect_err("跨类型的 id 重复必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// GPIO 的每引脚 IRQ 线**少一条** → 拒。
+    ///
+    /// ⚠️ **不补齐**：补齐 = 造出固件没写过的事实。
+    #[test]
+    fn a_gpio_with_too_few_irq_lines_is_rejected() {
+        let mut s = sample();
+        s.m15_periph.gpios[0].irq_lines = vec![1, 2, 3];
+        let err = s.validate().expect_err("irq_lines 少一条必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// GPIO 的每引脚 IRQ 线**多一条** → 拒。
+    ///
+    /// ⚠️ **不截断**：截断 = 丢状态。
+    #[test]
+    fn a_gpio_with_too_many_irq_lines_is_rejected() {
+        let mut s = sample();
+        s.m15_periph.gpios[0].irq_lines = vec![0xFFFF; GPIO_PIN_COUNT + 1];
+        let err = s.validate().expect_err("irq_lines 多一条必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// 恰好**每引脚一条** → 载荷通过校验。
+    ///
+    /// ⚠️ 这条是上面两条的**反面**：只有「少一条 / 多一条都拒」而没有
+    /// 「刚好一条放行」，那两条断言就分不清「校验器在数条数」和「校验器
+    /// 什么都拒」。
+    #[test]
+    fn a_gpio_with_exactly_one_irq_line_per_pin_is_accepted() {
+        let mut s = sample();
+        s.m15_periph.gpios[0].irq_lines = vec![0xFFFF; GPIO_PIN_COUNT];
+        s.validate()
+            .expect("恰好每引脚一条的 GPIO 状态必须通过校验");
+    }
+
+    /// ⚠️ **数字由常量自己说**：引脚数改了，这条用例的「恰好」也要跟着
+    /// 变——所以断言的是**条数**，不是字面量 `32`。
+    ///
+    /// 这条钉住的是「契约层导出的那个数」与「载荷的形状」是**同一个数**：
+    /// 把 `GPIO_PIN_COUNT` 改成 16 之后，M-15 的 `PIN_COUNT` 必须跟着变
+    /// （它引用的是这个常量），否则 GPIO 的导出就会带 32 条线而契约层
+    /// 只认 16 条 ——**载荷再也过不了自己的校验**。
+    #[test]
+    fn the_gpio_pin_count_is_the_single_landing_spot() {
+        assert_eq!(GPIO_PIN_COUNT, 32, "MVP 的 GPIO  Bank 是 32 引脚");
+        let mut s = sample();
+        s.m15_periph.gpios[0].irq_lines = vec![0xFFFF; GPIO_PIN_COUNT];
+        s.validate()
+            .expect("按契约层导出的引脚数构造的载荷必须通过校验");
     }
 
     #[test]

@@ -257,6 +257,33 @@ pub trait Peripheral {
         None
     }
 
+    /// **Read-only** check: "can I accept this state?" — **writes
+    /// nothing**.
+    ///
+    /// ⚠️ **This method is not optional in spirit, but it is additive in
+    /// form.** The restore path's write stage may hide integrity
+    /// constraints that **only this peripheral knows** (e.g. the GPIO's
+    /// `irq_lines` must have exactly [`crate::session::GPIO_PIN_COUNT`]
+    /// entries). If those checks live **only** in the write path, then
+    /// "restore the UART first, discover the malformed GPIO afterwards"
+    /// leaves a **half-applied session** (the UART has already been
+    /// overwritten) behind an `Err`. A half-applied snapshot is worse
+    /// than a rejected one (STAGE-3 §5).
+    ///
+    /// ⚠️ The default implementation **lets everything through**
+    /// (`Ok(())`): it must be **additive** — every existing implementor
+    /// keeps compiling and keeps its behaviour, so the wire protocol
+    /// does not move and [`crate::SCHEMA_VERSION`] stays put. A
+    /// peripheral that participates in the session snapshot **must**
+    /// override it; that requirement is pinned by **behavioural** tests
+    /// (not by a white-box check of "who overrode it").
+    fn validate_session_state(
+        &self,
+        _state: &crate::session::PeripheralSessionState,
+    ) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
     /// Restore this peripheral's session state.
     ///
     /// The default implementation **rejects** any state with
@@ -302,8 +329,20 @@ pub const E_PER_05_PERIPHERAL_SET_MISMATCH: u16 = 5;
 /// Driven port: peripheral → interrupt controller (M-15 → M-16).
 pub trait InterruptSink {
     /// Raise an IRQ line. Idempotent.
+    ///
+    /// ⚠️ **This call may fail because the controller is busy** (the
+    /// implementation may be reached while the controller is already
+    /// borrowed — e.g. a `RefCell` contention in the kernel host). The
+    /// failure is reported with the interrupt family's scenario code
+    /// (`E_INT_01`, "controller busy") — the exact code is the
+    /// implementation's, the contract only fixes the **meaning**:
+    /// `Err` means **this IRQ line was NOT raised**. A caller that
+    /// ignores the result believes the line is up while it is not.
     fn raise(&mut self, irq: u16) -> Result<(), PlatformError>;
     /// Lower an IRQ line.
+    ///
+    /// ⚠️ Same failure semantics as [`Self::raise`]: `Err` means **this
+    /// IRQ line was NOT lowered**.
     fn lower(&mut self, irq: u16) -> Result<(), PlatformError>;
 }
 
