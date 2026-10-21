@@ -271,7 +271,7 @@ pub trait Peripheral {
         let _ = state;
         Err(PlatformError::new(
             crate::error::ErrorFamily::Peripheral,
-            4,
+            E_PER_04_UNSUPPORTED_SESSION_STATE,
             format!(
                 "外设 {} 不支持会话状态回灌——快照里有它的状态，但它没有实现",
                 self.id()
@@ -279,6 +279,25 @@ pub trait Peripheral {
         ))
     }
 }
+
+/// Scenario code: this peripheral does not accept the session state it was
+/// handed — the default [`Peripheral::restore_session_state`] rejects it.
+///
+/// ⚠️ **A named constant, not a literal.** The default implementation used
+/// to spell the code as a bare `4`; a bare number has no meaning attached
+/// to it, so the same number could later be reused for something else
+/// without anybody noticing (one code, two meanings — the same trap as
+/// D-69's `E_PP` / `E_PER` and D-32's `E_PROTO-02`).
+pub const E_PER_04_UNSUPPORTED_SESSION_STATE: u16 = 4;
+
+/// Scenario code: the peripheral set in a session payload does **not** match
+/// the live instances — either the payload names an id that is not live, or
+/// a live peripheral that participates in the session state is not
+/// described by the payload.
+///
+/// ⚠️ Both directions are checked on purpose: skipping either one would
+/// leave the restored session **silently different** from the captured one.
+pub const E_PER_05_PERIPHERAL_SET_MISMATCH: u16 = 5;
 
 /// Driven port: peripheral → interrupt controller (M-15 → M-16).
 pub trait InterruptSink {

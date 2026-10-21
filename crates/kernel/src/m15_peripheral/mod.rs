@@ -508,30 +508,24 @@ impl std::error::Error for RegisterError {}
 /// Family used by errors raised from this module.
 pub const PERIPHERAL_FAMILY: ErrorFamily = ErrorFamily::Peripheral;
 
-/// Scenario code: this peripheral cannot accept the given session
-/// state — the state belongs to a **different kind** of peripheral, or
-/// it is malformed (e.g. a GPIO state with the wrong number of IRQ
-/// lines).
-///
-/// ⚠️ The **same** code the contract's default implementation of
-/// [`Peripheral::restore_session_state`] uses (scenario 4): the
-/// scenario is literally the same one — *this peripheral does not
-/// accept this session state*.
-pub const E_PER_04_UNSUPPORTED_SESSION_STATE: u16 = 4;
-
-/// Scenario code: the session payload's peripheral id set does not
-/// match the live instances.
-///
-/// Two directions, one code (the message says which):
-///
-/// - the payload describes a peripheral that is **not** live;
-/// - a live peripheral that participates in the session state is
-///   **not** described by the payload.
-///
-/// ⚠️ Skipping either side would leave the restored session
-/// **different** from the captured one — and *silently*: nobody would
-/// ever learn that a peripheral's state was dropped (STAGE-3 §3.3).
-pub const E_PER_05_PERIPHERAL_SET_MISMATCH: u16 = 5;
+// ⚠️ The two session-state scenario codes live in the **contract layer**
+// (`riscv_sim_contract::port`), not here: `E_PER_04` is the code the
+// contract's own default implementation returns, so the contract has to be
+// able to name it. Defining a second copy of the same number here would
+// put one code in two places — the moment one of them moved, the two
+// would silently drift apart.
+//
+// - [`E_PER_04_UNSUPPORTED_SESSION_STATE`] — this peripheral does not
+//   accept the session state it was handed (wrong kind / malformed).
+// - [`E_PER_05_PERIPHERAL_SET_MISMATCH`] — the payload's peripheral id set
+//   does not match the live instances, **in either direction** (the
+//   payload names a peripheral that is not live, or a live peripheral that
+//   participates in the session state is not described by the payload).
+//   Skipping either side would leave the restored session **different**
+//   from the captured one — and *silently* (STAGE-3 §3.3).
+pub use riscv_sim_contract::port::{
+    E_PER_04_UNSUPPORTED_SESSION_STATE, E_PER_05_PERIPHERAL_SET_MISMATCH,
+};
 
 #[cfg(test)]
 mod tests;

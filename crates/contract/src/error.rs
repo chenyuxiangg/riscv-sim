@@ -71,6 +71,15 @@ impl std::error::Error for PlatformError {}
 /// and the completeness check compared only their **lengths** — so a new
 /// variant added to the enum but forgotten in both lists left the check
 /// **green**. V-A 检视 · 中危 5.)
+///
+/// ⚠️ **This macro declares the *families*, not the *scenario codes*.**
+/// A family's scenario codes live with the module that owns the scenario:
+/// the protocol codes in this file, the engine-segment codes in
+/// [`crate::snapshot`], the session-payload codes in [`crate::session`],
+/// the peripheral-port codes in [`crate::port`], the bus codes in the
+/// kernel's `m14_bus`. A code that **two** modules need to name must
+/// live in the **contract layer** — otherwise the same number ends up
+/// spelled in two places and drifts apart (one code, two truths).
 macro_rules! error_families {
     ($( $(#[$meta:meta])* $variant:ident => $tag:literal, )*) => {
         /// Top-level subsystem family for error codes.
