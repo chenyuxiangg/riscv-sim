@@ -37,7 +37,10 @@ fn load_state_replaces_the_raised_lines() {
     let mut intc = InterruptController::new();
     intc.raise(9).expect("raise");
 
-    intc.load_state(&M16IntcDto { raised: vec![2, 4] });
+    intc.load_state(&M16IntcDto {
+        raised: vec![2, 4],
+        ..M16IntcDto::default()
+    });
 
     assert_eq!(intc.export_state().raised, vec![2, 4]);
     assert_eq!(
@@ -54,6 +57,7 @@ fn load_state_keeps_the_set_canonical() {
     let mut intc = InterruptController::new();
     intc.load_state(&M16IntcDto {
         raised: vec![9, 3, 3, 1],
+        ..M16IntcDto::default()
     });
     assert_eq!(intc.export_state().raised, vec![1, 3, 9]);
 }
@@ -76,7 +80,10 @@ fn export_then_load_round_trips_the_raised_lines() {
 fn load_state_clears_the_lines_when_the_payload_is_empty() {
     let mut intc = InterruptController::new();
     intc.raise(3).expect("raise");
-    intc.load_state(&M16IntcDto { raised: Vec::new() });
+    intc.load_state(&M16IntcDto {
+        raised: Vec::new(),
+        ..M16IntcDto::default()
+    });
     assert!(
         intc.export_state().raised.is_empty(),
         "an empty payload means no line is raised"

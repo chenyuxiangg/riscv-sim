@@ -153,7 +153,10 @@ mod tests {
                 }],
                 ..M15PeriphDto::default()
             },
-            m16_intc: M16IntcDto { raised: vec![1, 3] },
+            m16_intc: M16IntcDto {
+                raised: vec![1, 3],
+                ..M16IntcDto::default()
+            },
         }
     }
 

@@ -44,6 +44,7 @@ impl InterruptController {
     pub fn export_state(&self) -> M16IntcDto {
         M16IntcDto {
             raised: self.raised.iter().copied().collect(),
+            ..M16IntcDto::default()
         }
     }
 

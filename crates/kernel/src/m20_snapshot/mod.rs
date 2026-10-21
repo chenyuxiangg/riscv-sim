@@ -271,7 +271,10 @@ mod tests {
     }
 
     fn m16_intc() -> M16IntcDto {
-        M16IntcDto { raised: vec![1, 3] }
+        M16IntcDto {
+            raised: vec![1, 3],
+            ..M16IntcDto::default()
+        }
     }
 
     /// 走一遍 M-20 自己的组装路径，得到一份**合法**的会话载荷。
