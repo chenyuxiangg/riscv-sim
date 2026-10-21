@@ -38,7 +38,7 @@
 //!
 //! # 恢复路径
 //!
-//! [`SnapshotManager::restore_session`] **只做校验**，不把状态灌回各模块——
+//! [`SnapshotManager::validate_session`] **只做校验**，不把状态灌回各模块——
 //! 灌回去是内核宿主的事（它同时持有总线 / 外设 / INTC）。⚠️ **校验必须发生在
 //! 任何状态被写入之前**：半个应用完的快照比被拒绝的快照更糟（它留下的会话状态
 //! 没有任何检查点描述过，下游也分辨不出来）。
@@ -109,7 +109,7 @@ impl SnapshotManager {
     ///
     /// * `cp_meta` **原样**放进载荷（段 0）。⚠️ 调用方要自己保证
     ///   `cp_meta.version == SESSION_SNAPSHOT_SCHEMA_VERSION`——本方法**不**改写
-    ///   它（改写就是「悄悄替你造数据」），版本不对时 [`Self::restore_session`]
+    ///   它（改写就是「悄悄替你造数据」），版本不对时 [`Self::validate_session`]
     ///   会拒。
     /// * 载荷的 `schema_version` 恒为 [`SESSION_SNAPSHOT_SCHEMA_VERSION`]。
     pub fn capture_session(
@@ -135,7 +135,7 @@ impl SnapshotManager {
     /// 记一条快照进内存列表，分配**单调递增**的 id。
     ///
     /// ⚠️ 本方法**不做校验**——它返回 `SnapshotRecord` 而不是 `Result`。
-    /// 合法性在**恢复入口**（[`Self::restore_session`]）把关：**进**的时候宽容，
+    /// 合法性在**恢复入口**（[`Self::validate_session`]）把关：**进**的时候宽容，
     /// **用**的时候严格，比「存的时候就拒」更实用（存一份坏快照不会毁掉已有
     /// 的记录）。
     pub fn record(
@@ -172,7 +172,14 @@ impl SnapshotManager {
     ///
     /// ⚠️ **校验发生在任何写入之前**（冻结规格 §5）：全部检查通过之前，调用方
     /// 不应该写任何状态。半个应用完的快照比被拒绝的快照更糟。
-    pub fn restore_session(&self, payload: &SessionSnapshotDto) -> Result<(), PlatformError> {
+    ///
+    /// ⚠️ **名字必须与行为一致**：本方法**曾经**叫 `restore_session`，
+    /// 与 `KernelHost::restore_session` **同名不同义**——后者真的把状态灌回去，
+    /// 本方法只校验。同名不同义就是「一码多义」的一个变体：调用方读到
+    /// `restore_session` 会以为状态已经恢复，实际上什么都没发生。
+    /// 现在宿主侧叫 `restore_session`（真恢复），本方法叫 `validate_session`
+    /// （只校验），两个名字各自自明。
+    pub fn validate_session(&self, payload: &SessionSnapshotDto) -> Result<(), PlatformError> {
         payload.validate()
     }
 }
@@ -435,10 +442,10 @@ mod tests {
 
     /// 合法载荷**必须**被接受——否则恢复路径把好快照也拒了。
     #[test]
-    fn restore_session_accepts_a_well_formed_payload() {
+    fn validate_session_accepts_a_well_formed_payload() {
         let mut mgr = SnapshotManager::new();
         let payload = sample_payload(&mut mgr, 1);
-        mgr.restore_session(&payload).expect("合法载荷必须被接受");
+        mgr.validate_session(&payload).expect("合法载荷必须被接受");
     }
 
     /// ⚠️ **版本不认识 → 拒**（台账 D-37 的核心防线）。
@@ -446,12 +453,14 @@ mod tests {
     /// 断言用**字面量** `5`（= `E_SNAP-05`），不用实现里引用的常量——
     /// 自指的断言分不出「改行为」与「没改行为」。
     #[test]
-    fn restore_session_rejects_an_unknown_schema_version() {
+    fn validate_session_rejects_an_unknown_schema_version() {
         let mut mgr = SnapshotManager::new();
         let mut payload = sample_payload(&mut mgr, 1);
         payload.schema_version = 999;
 
-        let err = mgr.restore_session(&payload).expect_err("未知版本必须被拒");
+        let err = mgr
+            .validate_session(&payload)
+            .expect_err("未知版本必须被拒");
         assert_eq!(err.family, ErrorFamily::Snapshot, "族必须是 SNAP");
         assert_eq!(err.family.as_str(), "SNAP");
         assert_eq!(err.scenario, 5, "必须是 E_SNAP-05（版本不受支持）");
@@ -461,7 +470,7 @@ mod tests {
     ///
     /// 判别式落在**载荷本身**：把区域表打乱成非升序，恢复必须拒。
     #[test]
-    fn restore_session_rejects_a_malformed_segment_table() {
+    fn validate_session_rejects_a_malformed_segment_table() {
         let mut mgr = SnapshotManager::new();
         let mut payload = sample_payload(&mut mgr, 1);
         // 故意打乱：base 大的在前
@@ -480,19 +489,21 @@ mod tests {
             },
         ];
 
-        let err = mgr.restore_session(&payload).expect_err("结构畸形必须被拒");
+        let err = mgr
+            .validate_session(&payload)
+            .expect_err("结构畸形必须被拒");
         assert_eq!(err.family, ErrorFamily::Snapshot);
         assert_eq!(err.scenario, 6, "必须是 E_SNAP-06（会话载荷畸形）");
     }
 
     /// 内存页落在**任何 RAM 区域之外** → 拒（静默忽略 = 丢状态）。
     #[test]
-    fn restore_session_rejects_a_page_outside_every_ram_region() {
+    fn validate_session_rejects_a_page_outside_every_ram_region() {
         let mut mgr = SnapshotManager::new();
         let mut payload = sample_payload(&mut mgr, 1);
         payload.m13_state.mem_pages[0].base = 0x9000;
 
-        mgr.restore_session(&payload)
+        mgr.validate_session(&payload)
             .expect_err("越界的内存页必须被拒");
     }
 
@@ -505,10 +516,40 @@ mod tests {
 
         let mut bad = good.clone();
         bad.schema_version = 999;
-        assert!(mgr.restore_session(&bad).is_err());
+        assert!(mgr.validate_session(&bad).is_err());
 
         assert_eq!(mgr.iter().count(), 1, "记录数不得变");
         let kept = mgr.get(rec.id).expect("记录必须还在");
         assert_eq!(kept.payload, good, "已有记录的内容不得被改写");
+    }
+
+    /// ⚠️ **Literal** assertion — this type must **not** carry a method
+    /// named `restore_session`.
+    ///
+    /// The manager's method used to be called `restore_session` while it
+    /// only ever **validated** the payload. The host's `restore_session`
+    /// really does restore — so the two shared a name and meant different
+    /// things, which is the "one code, two meanings" trap in a new dress:
+    /// a caller reading `restore_session` would reasonably believe the
+    /// state had been restored when nothing had been written.
+    ///
+    /// The check reads the **source text** rather than calling the
+    /// method, because a method that must not exist cannot be called —
+    /// and a compile error would be a *different* kind of red than the
+    /// one this guard is about. (Same trick as the `SnapshotRecord`
+    /// field-set guard below.)
+    #[test]
+    fn the_manager_has_no_restore_session_method() {
+        let src = include_str!("mod.rs");
+        let has_restore_session = src.lines().any(|l| {
+            let t = l.trim();
+            t.starts_with("pub fn restore_session") || t.starts_with("fn restore_session")
+        });
+        assert!(
+            !has_restore_session,
+            "`SnapshotManager` 上不许有 `restore_session` 方法——它只做校验，\
+             真正恢复的是 `KernelHost::restore_session`；同名不同义会让调用方\
+             以为状态已经恢复"
+        );
     }
 }
