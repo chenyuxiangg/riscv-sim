@@ -23,6 +23,7 @@
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
 use riscv_sim_contract::port::{Peripheral, ProbeSink};
+use riscv_sim_contract::session::{PeripheralSessionState, TimerStateDto};
 
 use super::reg::{extract_subword, register_offset};
 use super::ProbeSlot;
@@ -188,6 +189,54 @@ impl Peripheral for TimerRiscv {
     /// Install / replace the M-18 probe callback (D-12).
     fn on_probe(&mut self, cb: Option<ProbeSink>) {
         self.probe.set(cb);
+    }
+
+    /// This timer's share of the **session snapshot** (segment 4 —
+    /// STAGE-3 §3.3).
+    ///
+    /// `mtime` / `mtimecmp` are the two quantities the firmware reads
+    /// and writes; both are exported verbatim.
+    fn session_state(&self) -> Option<PeripheralSessionState> {
+        Some(PeripheralSessionState::Timer(TimerStateDto {
+            id: self.id.clone(),
+            irq_line: self.irq_line,
+            mtime: self.mtime,
+            mtimecmp: self.mtimecmp,
+        }))
+    }
+
+    /// Restore the timer's session state (segment 4's consumer).
+    ///
+    /// `mtime` / `mtimecmp` / the IRQ line are restored verbatim.
+    ///
+    /// ⚠️ The DTO carries no `now_ps` field, but the timer keeps
+    /// `now_ps == mtime` at **every** tick — so `now_ps` is restored
+    /// from `mtime` and the two stay in lockstep.
+    ///
+    /// ⚠️ The DTO carries no sticky-`pending_irq` field either. That
+    /// flag is **re-armed by the next tick** whenever
+    /// `mtime >= mtimecmp` (see [`Peripheral::tick`]), so a restored
+    /// timer that is already past its deadline raises its IRQ again on
+    /// the next clock tick — the same behaviour the captured timer had.
+    fn restore_session_state(
+        &mut self,
+        state: &PeripheralSessionState,
+    ) -> Result<(), PlatformError> {
+        let PeripheralSessionState::Timer(s) = state else {
+            return Err(super::wrong_state_kind(
+                &self.id,
+                super::SessionKind::Timer,
+                super::SessionKind::of(state),
+            ));
+        };
+        super::check_same_id(&self.id, &s.id)?;
+        self.irq_line = s.irq_line;
+        self.mtime = s.mtime;
+        self.mtimecmp = s.mtimecmp;
+        // The timer advances `mtime` **and** `now_ps` together on every
+        // tick — keeping them equal here preserves that invariant.
+        self.now_ps = s.mtime;
+        Ok(())
     }
 }
 

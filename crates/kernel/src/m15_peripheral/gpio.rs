@@ -25,6 +25,7 @@
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
 use riscv_sim_contract::port::{Peripheral, ProbeSink};
+use riscv_sim_contract::session::{GpioStateDto, PeripheralSessionState};
 
 use super::reg::{extract_subword, register_offset};
 use super::ProbeSlot;
@@ -270,6 +271,69 @@ impl Peripheral for GpioBank {
     /// Install / replace the M-18 probe callback (D-12).
     fn on_probe(&mut self, cb: Option<ProbeSink>) {
         self.probe.set(cb);
+    }
+
+    /// This GPIO bank's share of the **session snapshot** (segment 4 —
+    /// STAGE-3 §3.3).
+    ///
+    /// The per-pin IRQ lines are exported as a **list in pin order**
+    /// (pin 0 first): the DTO carries a `Vec`, the bank owns a
+    /// `[u16; PIN_COUNT]`, and the order is the whole meaning of the
+    /// list. A reordering would silently move a pin's IRQ line onto
+    /// another pin.
+    fn session_state(&self) -> Option<PeripheralSessionState> {
+        Some(PeripheralSessionState::Gpio(GpioStateDto {
+            id: self.id.clone(),
+            directions: self.directions,
+            outputs: self.outputs,
+            inputs: self.inputs,
+            irq_lines: self.irq_lines.to_vec(),
+            pending_irqs: self.pending_irqs,
+            now_ps: self.now_ps,
+        }))
+    }
+
+    /// Restore the GPIO bank's session state (segment 4's consumer).
+    ///
+    /// **Every** field is restored: the direction mask, the output
+    /// latch, the input latch, the per-pin IRQ lines, the sticky
+    /// pending-IRQ vector and `now_ps`.
+    ///
+    /// ⚠️ The IRQ-line list must have **exactly one entry per pin** —
+    /// a shorter list would leave the remaining pins' lines undefined
+    /// and a longer one would carry lines that do not exist. Neither
+    /// is repaired silently: the state is **rejected**
+    /// ([`E_PER_04_UNSUPPORTED_SESSION_STATE`]).
+    fn restore_session_state(
+        &mut self,
+        state: &PeripheralSessionState,
+    ) -> Result<(), PlatformError> {
+        let PeripheralSessionState::Gpio(s) = state else {
+            return Err(super::wrong_state_kind(
+                &self.id,
+                super::SessionKind::Gpio,
+                super::SessionKind::of(state),
+            ));
+        };
+        super::check_same_id(&self.id, &s.id)?;
+        if s.irq_lines.len() != PIN_COUNT as usize {
+            return Err(PlatformError::new(
+                super::PERIPHERAL_FAMILY,
+                super::E_PER_04_UNSUPPORTED_SESSION_STATE,
+                format!(
+                    "GPIO '{}' 的会话状态带 {} 条 IRQ 线，应为 {PIN_COUNT} 条",
+                    self.id,
+                    s.irq_lines.len()
+                ),
+            ));
+        }
+        self.directions = s.directions & PIN_COUNT_MASK;
+        self.outputs = s.outputs & PIN_COUNT_MASK;
+        self.inputs = s.inputs & PIN_COUNT_MASK;
+        self.irq_lines.copy_from_slice(&s.irq_lines);
+        self.pending_irqs = s.pending_irqs & PIN_COUNT_MASK;
+        self.now_ps = s.now_ps;
+        Ok(())
     }
 }
 

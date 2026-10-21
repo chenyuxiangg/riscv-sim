@@ -15,6 +15,9 @@
 use super::*;
 use riscv_sim_contract::model::WriteSize;
 use riscv_sim_contract::port::ProbeSink;
+use riscv_sim_contract::session::{
+    GpioStateDto, M15PeriphDto, PeripheralSessionState, UartStateDto,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -646,4 +649,465 @@ fn uart_byte_drives_gpio_led_pin() {
     assert_eq!(gpio.read(0x4, WriteSize::Byte).unwrap(), 1);
     let pending = gpio.take_pending_irqs();
     assert_eq!(pending, vec![11]);
+}
+
+// ---------------------------------------------------------------------------
+// Session snapshot (STAGE-3 §3.3) — segment 4 (peripheral internal state).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn uart_session_state_round_trips_every_field() {
+    let mut uart = Uart16550::new("UART0", 0x1000, 9600, 4);
+    uart.write(0x0, WriteSize::Byte, u32::from(b'A'))
+        .expect("tx");
+    uart.receive(b'Z');
+    uart.tick(1_234).expect("tick");
+
+    let exported = uart
+        .session_state()
+        .expect("the UART participates in the session state");
+    let PeripheralSessionState::Uart(state) = exported.clone() else {
+        panic!("a UART must export a UART state");
+    };
+    assert_eq!(state.id, "UART0");
+    assert_eq!(state.tx, Some(b'A'), "the TX byte must be carried");
+    assert_eq!(state.rx, Some(b'Z'), "the RX byte must be carried");
+    assert_eq!(state.irq_line, 4);
+    assert_eq!(
+        state.now_ps, 1_234,
+        "the peripheral's virtual time must be carried"
+    );
+    assert_eq!(
+        state.status, 0x2,
+        "the latched status register must be carried"
+    );
+
+    // Restore into a *fresh* UART → the exported state must come back
+    // field for field. A dropped field (status / irq_line / now_ps)
+    // shows up here, not as a silent divergence later on.
+    let mut fresh = Uart16550::new("UART0", 0x1000, 9600, 0);
+    fresh
+        .restore_session_state(&exported)
+        .expect("the UART must accept its own state");
+    assert_eq!(
+        fresh.session_state(),
+        Some(exported),
+        "the round-trip must be field-for-field equal"
+    );
+}
+
+#[test]
+fn gpio_session_state_round_trips_every_field() {
+    let mut gpio = GpioBank::new("GPIO0", 0x2000);
+    gpio.set_directions(0xFFFF_FFFF);
+    gpio.set_irq_line_for_pin(3, 12);
+    gpio.set_irq_line_for_pin(31, 20);
+    gpio.write(0x4, WriteSize::Word, 0x0000_0008).expect("out");
+    gpio.set_external_inputs(0x0000_00F0);
+    gpio.tick(4_321).expect("tick");
+
+    let exported = gpio
+        .session_state()
+        .expect("the GPIO participates in the session state");
+    let PeripheralSessionState::Gpio(state) = exported.clone() else {
+        panic!("a GPIO must export a GPIO state");
+    };
+    assert_eq!(state.id, "GPIO0");
+    assert_eq!(state.directions, 0xFFFF_FFFF);
+    assert_eq!(state.outputs, 0x8);
+    assert_eq!(state.inputs, 0xF0);
+    assert_eq!(
+        state.pending_irqs, 0x8,
+        "the sticky pending vector is carried"
+    );
+    assert_eq!(state.now_ps, 4_321);
+    assert_eq!(
+        state.irq_lines.len(),
+        32,
+        "one IRQ line per pin must be carried"
+    );
+    assert_eq!(state.irq_lines[3], 12, "the lines are in **pin order**");
+    assert_eq!(state.irq_lines[31], 20, "the lines are in **pin order**");
+    assert_eq!(
+        state.irq_lines[0], 0xFFFF,
+        "an unconfigured pin keeps its default"
+    );
+
+    let mut fresh = GpioBank::new("GPIO0", 0x2000);
+    fresh
+        .restore_session_state(&exported)
+        .expect("the GPIO must accept its own state");
+    assert_eq!(
+        fresh.session_state(),
+        Some(exported),
+        "the round-trip must be field-for-field equal"
+    );
+}
+
+#[test]
+fn timer_session_state_round_trips_every_field() {
+    let mut tim = TimerRiscv::new("TIM0", 0x3000, 7);
+    tim.set_mtimecmp(9_000);
+    tim.tick(5_000).expect("tick");
+
+    let exported = tim
+        .session_state()
+        .expect("the timer participates in the session state");
+    let PeripheralSessionState::Timer(state) = exported.clone() else {
+        panic!("a timer must export a timer state");
+    };
+    assert_eq!(state.id, "TIM0");
+    assert_eq!(state.irq_line, 7);
+    assert_eq!(state.mtime, 5_000);
+    assert_eq!(state.mtimecmp, 9_000);
+
+    let mut fresh = TimerRiscv::new("TIM0", 0x3000, 0);
+    fresh
+        .restore_session_state(&exported)
+        .expect("the timer must accept its own state");
+    assert_eq!(
+        fresh.session_state(),
+        Some(exported),
+        "the round-trip must be field-for-field equal"
+    );
+    assert_eq!(fresh.mtime(), 5_000, "mtime must be restored");
+    assert_eq!(fresh.mtimecmp(), 9_000, "mtimecmp must be restored");
+}
+
+#[test]
+fn restoring_a_state_of_the_wrong_kind_is_rejected() {
+    // A UART must not swallow a GPIO state: the kinds are not
+    // interchangeable, and applying one would move another peripheral's
+    // registers into this one.
+    let mut uart = Uart16550::new("UART0", 0x1000, 9600, 4);
+    let gpio_state = PeripheralSessionState::Gpio(GpioStateDto {
+        id: "UART0".to_string(),
+        directions: 0,
+        outputs: 0,
+        inputs: 0,
+        irq_lines: vec![0xFFFF; 32],
+        pending_irqs: 0,
+        now_ps: 0,
+    });
+    let err = uart
+        .restore_session_state(&gpio_state)
+        .expect_err("a UART must reject a GPIO state");
+    assert_eq!(err.family, ErrorFamily::Peripheral);
+    assert_eq!(err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE);
+}
+
+#[test]
+fn restoring_a_state_that_names_another_peripheral_is_rejected() {
+    // The id inside the payload is the peripheral's own — a state that
+    // names a different peripheral was handed to the wrong instance.
+    let mut uart = Uart16550::new("UART0", 0x1000, 9600, 4);
+    let foreign = PeripheralSessionState::Uart(UartStateDto {
+        id: "UART1".to_string(),
+        tx: Some(b'X'),
+        rx: None,
+        status: 0,
+        irq_line: 1,
+        now_ps: 0,
+    });
+    let err = uart
+        .restore_session_state(&foreign)
+        .expect_err("a state of another peripheral must be rejected");
+    assert_eq!(err.scenario, E_PER_05_PERIPHERAL_SET_MISMATCH);
+}
+
+#[test]
+fn gpio_rejects_a_state_with_the_wrong_number_of_irq_lines() {
+    // A short list would leave the other pins' lines undefined; a long
+    // one would carry lines that do not exist. Neither is repaired
+    // silently.
+    let mut gpio = GpioBank::new("GPIO0", 0x2000);
+    let bad = PeripheralSessionState::Gpio(GpioStateDto {
+        id: "GPIO0".to_string(),
+        directions: 0,
+        outputs: 0,
+        inputs: 0,
+        irq_lines: vec![1, 2, 3],
+        pending_irqs: 0,
+        now_ps: 0,
+    });
+    let err = gpio
+        .restore_session_state(&bad)
+        .expect_err("a malformed GPIO state must be rejected");
+    assert_eq!(err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE);
+}
+
+#[test]
+fn registry_export_state_groups_by_kind_and_orders_by_id() {
+    let mut reg = PeripheralRegistry::new();
+    reg.register(Uart16550::new("UART1", 0x1000, 9600, 1))
+        .expect("uart1");
+    reg.register(GpioBank::new("GPIO0", 0x2000)).expect("gpio");
+    reg.register(Uart16550::new("UART0", 0x3000, 9600, 2))
+        .expect("uart0");
+    reg.register(TimerRiscv::new("TIM0", 0x4000, 3))
+        .expect("timer");
+
+    let state = reg.export_state();
+    assert_eq!(state.uarts.len(), 2);
+    assert_eq!(state.uarts[0].id, "UART0", "the groups are ordered by id");
+    assert_eq!(state.uarts[1].id, "UART1");
+    assert_eq!(state.gpios.len(), 1);
+    assert_eq!(state.gpios[0].id, "GPIO0");
+    assert_eq!(state.timers.len(), 1);
+    assert_eq!(state.timers[0].id, "TIM0");
+}
+
+#[test]
+fn registry_load_state_restores_every_peripheral() {
+    let mut source = PeripheralRegistry::new();
+    source
+        .register(Uart16550::new("UART0", 0x1000, 9600, 4))
+        .expect("uart");
+    source
+        .register(GpioBank::new("GPIO0", 0x2000))
+        .expect("gpio");
+    source
+        .register(TimerRiscv::new("TIM0", 0x3000, 7))
+        .expect("timer");
+    // Give them some state through the register interface.
+    source
+        .get_mut("UART0")
+        .expect("uart")
+        .write(0x0, WriteSize::Byte, u32::from(b'Q'))
+        .expect("tx");
+    source
+        .get_mut("GPIO0")
+        .expect("gpio")
+        .write(0x0, WriteSize::Word, 0xF0)
+        .expect("dir");
+    source
+        .get_mut("TIM0")
+        .expect("timer")
+        .write(0x8, WriteSize::Word, 4_242)
+        .expect("mtimecmp");
+
+    let state = source.export_state();
+
+    // A fresh registry with the same ids — the restore must reproduce
+    // the captured state field for field.
+    let mut target = PeripheralRegistry::new();
+    target
+        .register(Uart16550::new("UART0", 0x1000, 9600, 0))
+        .expect("uart");
+    target
+        .register(GpioBank::new("GPIO0", 0x2000))
+        .expect("gpio");
+    target
+        .register(TimerRiscv::new("TIM0", 0x3000, 0))
+        .expect("timer");
+    target.load_state(&state).expect("load_state");
+
+    assert_eq!(
+        target.export_state(),
+        state,
+        "the restored state must be field-for-field equal"
+    );
+}
+
+#[test]
+fn registry_load_state_rejects_an_unknown_id() {
+    let mut reg = PeripheralRegistry::new();
+    reg.register(Uart16550::new("UART0", 0x1000, 9600, 4))
+        .expect("uart");
+    // The payload describes the **live** peripheral **and** an unknown
+    // one: the "every live peripheral is described" check is satisfied,
+    // so only the "every id in the payload is live" check can catch the
+    // unknown id. (Two checks, two directions — a test that only had
+    // the unknown entry would be satisfied by either of them.)
+    let state = M15PeriphDto {
+        uarts: vec![
+            UartStateDto {
+                id: "UART0".to_string(),
+                tx: None,
+                rx: None,
+                status: 0,
+                irq_line: 0,
+                now_ps: 0,
+            },
+            UartStateDto {
+                id: "NOPE".to_string(),
+                tx: None,
+                rx: None,
+                status: 0,
+                irq_line: 0,
+                now_ps: 0,
+            },
+        ],
+        ..Default::default()
+    };
+    let err = reg
+        .load_state(&state)
+        .expect_err("an unknown peripheral id must be rejected");
+    assert_eq!(err.family, ErrorFamily::Peripheral);
+    assert_eq!(err.scenario, E_PER_05_PERIPHERAL_SET_MISMATCH);
+}
+
+#[test]
+fn registry_load_state_writes_nothing_when_one_id_is_unknown() {
+    // "Validate before apply" (STAGE-3 §5): the valid entry must not
+    // be applied when another entry is rejected.
+    let mut reg = PeripheralRegistry::new();
+    reg.register(Uart16550::new("UART0", 0x1000, 9600, 4))
+        .expect("uart");
+    let state = M15PeriphDto {
+        uarts: vec![
+            UartStateDto {
+                id: "UART0".to_string(),
+                tx: Some(b'Z'),
+                rx: None,
+                status: 0,
+                irq_line: 9,
+                now_ps: 42,
+            },
+            UartStateDto {
+                id: "GHOST".to_string(),
+                tx: None,
+                rx: None,
+                status: 0,
+                irq_line: 0,
+                now_ps: 0,
+            },
+        ],
+        ..Default::default()
+    };
+    let err = reg
+        .load_state(&state)
+        .expect_err("the unknown id must be rejected");
+    assert_eq!(err.scenario, E_PER_05_PERIPHERAL_SET_MISMATCH);
+
+    let restored = reg.export_state();
+    assert_eq!(
+        restored.uarts[0].irq_line, 4,
+        "the valid entry must not have been applied"
+    );
+    assert_eq!(restored.uarts[0].now_ps, 0);
+}
+
+#[test]
+fn collect_session_state_reads_the_live_bus_instances() {
+    // The host binds its peripherals straight onto the bus (it keeps no
+    // registry) — the free functions are its entry point.
+    let uart = share(Uart16550::new("UART0", 0x1000, 9600, 4));
+    let gpio = share(GpioBank::new("GPIO0", 0x2000));
+    let tim = share(TimerRiscv::new("TIM0", 0x3000, 5));
+    let instances: Vec<(u32, SharedPeripheral)> =
+        vec![(0x1000, uart), (0x2000, gpio), (0x3000, tim)];
+
+    let state = collect_session_state(&instances);
+    assert_eq!(state.uarts.len(), 1);
+    assert_eq!(state.uarts[0].id, "UART0");
+    assert_eq!(state.gpios.len(), 1);
+    assert_eq!(state.gpios[0].id, "GPIO0");
+    assert_eq!(state.timers.len(), 1);
+    assert_eq!(state.timers[0].id, "TIM0");
+}
+
+#[test]
+fn collect_session_state_orders_each_group_by_id() {
+    // The bus order is a *placement*, not an identity: two UARTs bound
+    // in the "wrong" order must still be exported in id order.
+    let uart1 = share(Uart16550::new("UART1", 0x1000, 9600, 1));
+    let uart0 = share(Uart16550::new("UART0", 0x2000, 9600, 2));
+    let instances: Vec<(u32, SharedPeripheral)> = vec![(0x1000, uart1), (0x2000, uart0)];
+
+    let state = collect_session_state(&instances);
+    assert_eq!(state.uarts.len(), 2);
+    assert_eq!(state.uarts[0].id, "UART0", "the group is ordered by id");
+    assert_eq!(state.uarts[1].id, "UART1");
+}
+
+#[test]
+fn collect_session_state_releases_its_borrows() {
+    // The collection must not hold a borrow across the loop: the
+    // restore path takes a **mutable** borrow of the very same cell,
+    // and holding both at once would panic.
+    let uart = share(Uart16550::new("UART0", 0x1000, 9600, 4));
+    let instances: Vec<(u32, SharedPeripheral)> = vec![(0x1000, Rc::clone(&uart))];
+    let _state = collect_session_state(&instances);
+
+    let mut periph = uart.borrow_mut();
+    periph
+        .write(0x0, WriteSize::Byte, u32::from(b'X'))
+        .expect("the borrow must be free");
+}
+
+#[test]
+fn restore_session_states_round_trips_the_bus_instances() {
+    let uart = share(Uart16550::new("UART0", 0x1000, 9600, 4));
+    let gpio = share(GpioBank::new("GPIO0", 0x2000));
+    {
+        let mut p = uart.borrow_mut();
+        p.write(0x0, WriteSize::Byte, u32::from(b'K')).expect("tx");
+    }
+    {
+        let mut p = gpio.borrow_mut();
+        p.write(0x0, WriteSize::Word, 0x0F0F_0F0F).expect("dir");
+    }
+    let instances: Vec<(u32, SharedPeripheral)> =
+        vec![(0x1000, Rc::clone(&uart)), (0x2000, Rc::clone(&gpio))];
+    let state = collect_session_state(&instances);
+
+    // Fresh instances, same ids.
+    let fresh_uart = share(Uart16550::new("UART0", 0x1000, 9600, 0));
+    let fresh_gpio = share(GpioBank::new("GPIO0", 0x2000));
+    let fresh: Vec<(u32, SharedPeripheral)> = vec![(0x1000, fresh_uart), (0x2000, fresh_gpio)];
+    restore_session_states(&fresh, &state).expect("restore");
+
+    assert_eq!(
+        collect_session_state(&fresh),
+        state,
+        "the restored state must be field-for-field equal"
+    );
+}
+
+#[test]
+fn restore_session_states_rejects_an_unknown_id() {
+    let uart = share(Uart16550::new("UART0", 0x1000, 9600, 4));
+    let instances: Vec<(u32, SharedPeripheral)> = vec![(0x1000, uart)];
+    // The payload describes the **live** peripheral **and** an unknown
+    // one, so the "every live peripheral is described" check is
+    // satisfied and only the "every id in the payload is live" check
+    // can catch the unknown id.
+    let state = M15PeriphDto {
+        uarts: vec![
+            UartStateDto {
+                id: "UART0".to_string(),
+                tx: None,
+                rx: None,
+                status: 0,
+                irq_line: 0,
+                now_ps: 0,
+            },
+            UartStateDto {
+                id: "GHOST".to_string(),
+                tx: None,
+                rx: None,
+                status: 0,
+                irq_line: 0,
+                now_ps: 0,
+            },
+        ],
+        ..Default::default()
+    };
+    let err = restore_session_states(&instances, &state)
+        .expect_err("an unknown peripheral id must be rejected");
+    assert_eq!(err.family, ErrorFamily::Peripheral);
+    assert_eq!(err.scenario, E_PER_05_PERIPHERAL_SET_MISMATCH);
+}
+
+#[test]
+fn restore_session_states_rejects_a_payload_that_misses_a_live_peripheral() {
+    // The other direction: a live peripheral that the payload does not
+    // describe would silently keep its initial state — the restored
+    // session would differ from the captured one.
+    let uart = share(Uart16550::new("UART0", 0x1000, 9600, 4));
+    let instances: Vec<(u32, SharedPeripheral)> = vec![(0x1000, uart)];
+    let err = restore_session_states(&instances, &M15PeriphDto::default())
+        .expect_err("a payload that misses a live peripheral must be rejected");
+    assert_eq!(err.scenario, E_PER_05_PERIPHERAL_SET_MISMATCH);
 }
