@@ -211,6 +211,27 @@ pub(super) fn width_bytes(size: WriteSize) -> usize {
     }
 }
 
+/// Read a CSR **out of the state's CSR file** — the test-side view.
+///
+/// ⚠️ The helper reads the file **directly** instead of going through
+/// the implementation's accessor: an assertion that used the
+/// implementation's own reader to check the implementation's own
+/// writer would be **self-referential** — it would stay green even if
+/// both sides were wrong in the same way.
+pub(super) fn csr_value(state: &SimState, csr: u16) -> u32 {
+    state
+        .csrs
+        .iter()
+        .find(|(number, _)| *number == csr)
+        .map(|(_, value)| *value)
+        .unwrap_or(0)
+}
+
+/// The CSR numbers present in the state's CSR file, in file order.
+pub(super) fn csr_numbers(state: &SimState) -> Vec<u16> {
+    state.csrs.iter().map(|(number, _)| *number).collect()
+}
+
 /// ISS + RAM harness driving the closure memory port.
 pub(super) struct Harness {
     pub(super) ram: RefCell<TestRam>,
