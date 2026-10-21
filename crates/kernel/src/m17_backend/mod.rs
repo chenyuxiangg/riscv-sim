@@ -38,7 +38,7 @@ use riscv_sim_contract::snapshot::EngineSnapshotDto;
 
 use crate::m08_breakpoint::{BreakpointTable, WatchpointTable};
 use crate::m12_engine::{Engine, ExecOutcome, InstructionExecutor, PeripheralTicker, RunReason};
-use crate::m13_iss::{Iss, StepOutcome};
+use crate::m13_iss::{write_gpr, Iss, StepOutcome};
 use crate::m14_bus::{AccessDir, Bus, BusWidth};
 
 /// 一条指令的虚拟时间成本（皮秒）。
@@ -358,6 +358,46 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
     /// baked into the backend.
     pub fn set_pc(&mut self, pc: u32) {
         self.engine.state_mut().pc = pc;
+    }
+
+    /// 通用寄存器组（x0..x31）的**当前值**。
+    ///
+    /// 读的是**引擎持有的那份** [`SimState`]——后端不持有第二份寄存器表
+    /// （见模块头「状态单一真相」）。返回值是一次**快照**，不是活引用：
+    /// 调用方拿到的是调用那一刻的值。
+    ///
+    /// ⚠️ **x0 恒为 0**（D-04）：x0 在体系结构上恒等于零，所以这里**不**
+    /// 直接返回原始槽位——一份被损坏的快照（`Restore` 带进来的脏 x0）
+    /// 不能让 x0 泄出非零值。写路径同理（见 [`SelfIssBackend::set_gpr`]）。
+    pub fn register_file(&self) -> [u32; 32] {
+        let mut gpr = self.engine.snapshot().gpr;
+        gpr[0] = 0;
+        gpr
+    }
+
+    /// 写**一个**通用寄存器（调试器写寄存器）。
+    ///
+    /// 写的是引擎持有的那份状态——**没有影子副本**（见模块头「状态单一
+    /// 真相」）。下一次 `register_file()` / `snapshot()` 就能看到新值。
+    ///
+    /// - `index >= 32` → **拒绝**（`E_DBG-01`）。⚠️ 这里**拒绝**而不是
+    ///   钳位：写钳位会**静默**写到别的寄存器——用户以为改了 x40，
+    ///   实际改的是 x7。读越界没有副作用，所以读是钳位、写是拒绝。
+    /// - `index == 0` → **丢弃**（D-04）：x0 恒等于零。调用方仍然会
+    ///   收到回复（值恒为 0），不会把它当成一次失败。
+    pub fn set_gpr(&mut self, index: u32, value: u32) -> Result<(), PlatformError> {
+        if index >= 32 {
+            return Err(PlatformError::new(
+                ErrorFamily::Debug,
+                1,
+                format!("寄存器下标越界：x{index}（合法范围 x0..x31）"),
+            ));
+        }
+        // `write_gpr` 是 M-13 的**唯一**写路径——它自己挡掉了 x0（D-04）。
+        // 这里不重复实现那条规则，免得两处规则漂移。
+        let state = self.engine.state_mut();
+        write_gpr(state, index as u8, value);
+        Ok(())
     }
 
     /// Replace the memory bus with a **fresh, empty** one.

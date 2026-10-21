@@ -41,7 +41,7 @@
 //! guest 写外设 → M-14 派发 → M-15 判「状态真变了」→ report(signal)
 //!    → M-18 判沿 → 边沿进 M-18 自己的存储
 //!                   └→ 同时进 M-19 的环（EdgeSink 端口）
-//!    → 本模块从 M-18 的存储取边沿 → 契约 EventPayload::WaveformDelta
+//!    → 本模块从 M-18 的存储取边沿 → 契约 EventPayload::WaveformHistory
 //! ```
 //!
 //! ⚠️ **契约事件取自 M-18，不是 M-19**。M-19 的环也装了、边沿也一并进去，
@@ -55,6 +55,26 @@
 //! - **波形的时间轴靠外设时钟**：M-15 的 GPIO 在 `tick(now_ps)` 里记下
 //!   当前时间，边沿才带得上真实时间戳。M-17 的步进循环每条指令同步一次
 //!   外设时钟（D-07 的时间驱动调度器落地后由 M-12 的量子边界接管）。
+//!
+//! ## 契约 v2 的三个新命令
+//!
+//! 冻结规格：`docs/detailed-design/STAGE-2_Contract_V2.md` §5。
+//!
+//! | 命令 | 内核行为 | 回复事件 |
+//! | --- | --- | --- |
+//! | `ReadRegisters{index,count}` | 读 M-13 的 `gpr`；`index`/`count` **钳到** `[0,32)`；`count = 0` → **回复空区间**（`values` 为空数组） | `Registers{index,values}`（`index` = **实际**起点） |
+//! | `WriteRegister{index,value}` | 写 M-13 的 `gpr`；`index == 0` → **丢弃**（D-04）但**仍回复**；`index > 31` → **拒绝**（`E_DBG-01`） | `Registers{index,values}`（`values.len() == 1`） |
+//! | `Negotiate{min_schema_version,cap_bits}` | `min_schema_version > SCHEMA_VERSION` → **拒绝**（`E_PROTO-01`） | `Negotiated{schema_version,cap_bits,kernel}` |
+//!
+//! ⚠️ **读是钳位、写是拒绝**：写钳位会**静默**写到别的寄存器。
+//!
+//! ⚠️ **回复事件不走 topic 过滤**：`Registers` / `Negotiated` 是命令的
+//! **直接回复**，不是订阅流——订阅没建立也必须送达（前端收不到就白发了）。
+//!
+//! ⚠️ **`SimStateDelta` 本批不接线**：契约 v2 冻结了它的**形状**，但本
+//! 项目反复吃过「没有生产者的接口 = 死接口」的亏（台账 D-66）。它的
+//! 生产者（谁在什么时候产生增量）等 M-10 的增量订阅落地后再定——
+//! 在那之前接线只会造出一个「有形状、没内容」的变体。
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -62,7 +82,7 @@ use std::rc::Rc;
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{
-    Edge, ImageKind, ImageRef, ImageSource, Project, Waveform, WaveformStream, WriteSize,
+    Edge, ImageKind, ImageRef, ImageSource, Project, WaveformHistory, WaveformStream, WriteSize,
     SIM_STATE_SCHEMA_VERSION,
 };
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
@@ -131,8 +151,12 @@ pub const GPIO_VALUE_WIDTH: u8 = 32;
 /// 订阅主题：寄存器快照。
 ///
 /// 契约里**没有**寄存器快照事件（D-32 缺口），所以寄存器值只能走
-/// `EventPayload::WaveformDelta` 的边沿编码流——这是契约内**唯一**的
+/// `EventPayload::WaveformHistory` 的边沿编码流——这是契约内**唯一**的
 /// 载体。流 id 与 mock 内核逐字一致，前端视图零改动。
+///
+/// ⚠️ 契约 v2 之后，`EventPayload::Registers`（契约 v2 新增）才是
+/// **一等公民**的寄存器载体；这条边沿流是**兼容路径**（前端视图仍
+/// 靠它渲染），两者并存。
 pub const TOPIC_REGISTERS: &str = "sim.registers";
 
 /// 订阅主题：探针波形。
@@ -152,6 +176,33 @@ pub const DEFAULT_RAM_HIGH_SIZE: u32 = 0x0040_0000;
 
 /// 波形（寄存器流）的 schema 版本。
 const WAVEFORM_SCHEMA_VERSION: u32 = 1;
+
+/// 内核**授予**的能力位（契约 v2 · `Negotiated.cap_bits`）。
+///
+/// 语义取自 M-17 LLD §2.1.1 的 `capBitsSet`（**低 3 位** = 能力分级）：
+///
+/// | 位 | 含义 |
+/// | --- | --- |
+/// | bit0 | L1 —— 基础调试（运行 / 单步 / 断点 / 寄存器 / 内存） |
+/// | bit1 | L2 —— 指令 / 访存钩子（探针、trace、覆盖率） |
+/// | bit2 | L3 —— 快照 / 事件流检查点 |
+///
+/// 本仓库的内核是**自研 ISS**（`self_iss`），M-17 LLD 明确它协商到 **L3**
+/// （全量位）。QEMU 后端（P1）会声明 L1 子集并把 L2 / L3 位清零。
+pub const KERNEL_CAP_BITS: u64 = 0b111;
+
+/// 内核描述串（契约 v2 · `Negotiated.kernel`）。
+///
+/// 格式 `"{crate}/{version} {ISA}"`，与契约规格给的例子
+/// `"riscv_sim_kernel/0.1.0 RV32IMC"` 同形：版本 + ISA 串。
+pub fn kernel_descriptor() -> String {
+    format!(
+        "{}/{} {}",
+        env!("CARGO_PKG_NAME"),
+        crate::VERSION,
+        riscv_sim_contract::model::ISA
+    )
+}
 
 /// **单个波形事件**里最多带多少条边沿。
 ///
@@ -472,7 +523,7 @@ impl KernelHost {
             }
             self.waveform_edges_truncated += dropped as u64;
         }
-        Some(EventPayload::WaveformDelta(wave))
+        Some(EventPayload::WaveformHistory(wave))
     }
 
     /// M-19 波形管道（D-46）—— 边沿的环形缓冲。
@@ -634,6 +685,12 @@ impl KernelHost {
                     Err(err) => vec![self.error_from(&err)],
                 }
             }
+            CommandPayload::ReadRegisters { index, count } => self.on_read_registers(index, count),
+            CommandPayload::WriteRegister { index, value } => self.on_write_register(index, value),
+            CommandPayload::Negotiate {
+                min_schema_version,
+                cap_bits,
+            } => self.on_negotiate(min_schema_version, cap_bits),
             CommandPayload::WriteMemory { addr, size, value } => {
                 match self.backend.write_memory(addr, size, value) {
                     Ok(()) => {
@@ -836,6 +893,94 @@ impl KernelHost {
         ]
     }
 
+    /// 读一段通用寄存器（契约 v2 · `ReadRegisters`）。
+    ///
+    /// 语义逐字取自 `docs/detailed-design/STAGE-2_Contract_V2.md` §5
+    /// （`count = 0` 的口径经父会话订正：见下面「回复空区间」）：
+    ///
+    /// - `index` / `count` **钳到** `[0, 32)`；`index` 钳到 `0..31`
+    ///   （即 x31），区间右端也钳到寄存器表末尾；
+    /// - `count == 0` → **回复空区间**（`values` 是空数组）；
+    /// - 回复 `Registers { index, values }` 里的 `index` 是**实际**起点，
+    ///   `values.len()` 是**实际**条数。
+    ///
+    /// ⚠️ **读是钳位、写是拒绝**：读越界没有副作用，钳到最近的合法寄存器
+    /// 是合理的降级；写越界若也钳位，会**静默**写到别的寄存器。
+    ///
+    /// ⚠️ **走引擎状态**：寄存器值来自 M-17 → M-12 的那份 [`SimState`]，
+    /// 宿主**不持有**影子副本（否则会出现「事件发出去了、引擎里的值没变」
+    /// 这种两边漂移）。
+    fn on_read_registers(&mut self, index: u32, count: u32) -> Vec<EventPayload> {
+        let start = index.min(31);
+        // 区间右端不能越过寄存器表末尾：`start + count <= 32`。
+        let count = count.min(32 - start);
+        // ⚠️ `count == 0` **照样回复**（`values` 是空数组）：请求必须被
+        // **回答**。M-05 按 `reqId` 配对请求与回复——「没有回复」与「消息
+        // 丢失」在协议上**不可区分**，零回复会被前端当成传输故障，在
+        // 500 ms 后以 `E_CTX-06`（命令超时）拒绝：用户看到的是「内核没
+        // 应答」，而不是「读到了空区间」。
+        let gpr = self.backend.register_file();
+        let end = (start + count) as usize;
+        let values = gpr[start as usize..end].to_vec();
+        vec![EventPayload::Registers {
+            index: start,
+            values,
+        }]
+    }
+
+    /// 写**一个**通用寄存器（契约 v2 · `WriteRegister`）。
+    ///
+    /// 语义逐字取自 `docs/detailed-design/STAGE-2_Contract_V2.md` §5：
+    ///
+    /// - `index == 0` → **丢弃**（D-04：x0 恒等于零），但**仍回复**
+    ///   （回复里的值恒为 0）；
+    /// - `index > 31` → **拒绝**（`E_DBG-01`），寄存器文件**不变**；
+    /// - 回复 `Registers { index, values }`，`values.len() == 1`。
+    ///
+    /// 回复里的值是**写完之后从引擎状态读回来的**实际值——不是命令里
+    /// 带来的那个值：x0 的写被丢弃了，回 0 才是真的。
+    fn on_write_register(&mut self, index: u32, value: u32) -> Vec<EventPayload> {
+        if let Err(err) = self.backend.set_gpr(index, value) {
+            // `index > 31`：拒绝（`E_DBG-01`）。寄存器文件**原样不动**。
+            return vec![self.error_from(&err)];
+        }
+        let actual = self.backend.register_file()[index as usize];
+        vec![EventPayload::Registers {
+            index,
+            values: vec![actual],
+        }]
+    }
+
+    /// 协议 / 能力协商（契约 v2 · `Negotiate`）。
+    ///
+    /// - 宿主要的**最低**版本高于内核支持的版本 → **拒绝**（`E_PROTO-01`）；
+    /// - 否则回 `SCHEMA_VERSION` 与内核**授予**的能力位
+    ///   （[`KERNEL_CAP_BITS`]）。
+    ///
+    /// ⚠️ **最低版本，不是最高版本**：宿主说「我最低能说 v2」= 宿主懂
+    /// v2 的全部语法；内核回它自己认得的版本（= `SCHEMA_VERSION`）。
+    /// 宿主说「我最低能说 v3」= 宿主要内核至少懂 v3，而内核只懂 v2 →
+    /// 拒。
+    fn on_negotiate(&mut self, min_schema_version: u32, _host_cap_bits: u64) -> Vec<EventPayload> {
+        if min_schema_version > SCHEMA_VERSION {
+            return vec![EventPayload::Error {
+                code: "E_PROTO-01".to_string(),
+                message: format!(
+                    "宿主要求的最低协议版本 {min_schema_version} 高于内核支持的 {SCHEMA_VERSION}"
+                ),
+            }];
+        }
+        // ⚠️ 宿主**提供**的 `cap_bits` 在这里**不参与**裁决：契约规格
+        // §5 只说「回内核授予的 cap_bits」，没定义「取交集」之类的规则。
+        // 宁可按规格字面实现（内核授予什么就是什么），也不自己发明一条
+        // 规格里没有的语义——那样前端按位降级的依据就成了猜测。
+        vec![EventPayload::Negotiated {
+            schema_version: SCHEMA_VERSION,
+            cap_bits: KERNEL_CAP_BITS,
+            kernel: kernel_descriptor(),
+        }]
+    }
+
     /// 订阅一个主题。
     fn on_subscribe(&mut self, topic: String) -> Vec<EventPayload> {
         let want_registers = topic == TOPIC_REGISTERS;
@@ -916,7 +1061,7 @@ impl KernelHost {
         if streams.is_empty() {
             return None;
         }
-        Some(EventPayload::WaveformDelta(Waveform {
+        Some(EventPayload::WaveformHistory(WaveformHistory {
             schema_version: WAVEFORM_SCHEMA_VERSION,
             streams,
         }))
@@ -964,3 +1109,6 @@ impl KernelHost {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_contract_v2;
