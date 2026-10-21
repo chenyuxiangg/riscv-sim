@@ -98,6 +98,8 @@ pub struct IssExecutor<'a> {
     breakpoints: &'a BreakpointTable,
     /// 观察点命中槽（与后端共享同一份）。
     watch_hit: Rc<RefCell<Option<Watchpoint>>>,
+    /// 宿主暂停标志（与后端共享同一份）—— 裁决 C。
+    pause_requested: &'a mut bool,
 }
 
 impl<'a> IssExecutor<'a> {
@@ -107,12 +109,14 @@ impl<'a> IssExecutor<'a> {
         bus: &'a mut Bus,
         breakpoints: &'a BreakpointTable,
         watch_hit: Rc<RefCell<Option<Watchpoint>>>,
+        pause_requested: &'a mut bool,
     ) -> Self {
         Self {
             iss,
             bus,
             breakpoints,
             watch_hit,
+            pause_requested,
         }
     }
 
@@ -124,10 +128,42 @@ impl<'a> IssExecutor<'a> {
     pub fn breakpoint_at(&self, pc: u32) -> bool {
         self.breakpoints.hit_check(pc).is_some()
     }
+
+    /// **取走**一次宿主暂停请求（取走即消失）。
+    ///
+    /// 裁决 C：`pause()` 的语义 =「在**下一条指令边界**停下」。宿主调用
+    /// 是**同步**的——它不可能在一条指令执行的中途插进来，所以「立刻停下」
+    /// 是**做不到**的语义。于是暂停请求变成一个**标志位**，由执行器在
+    /// 指令边界上查。
+    ///
+    /// ⚠️ **取走即消失**：一次暂停**只影响一个批次**。若标志位不清，
+    /// 后面每一个批次都会在同一处停下，机器就**再也跑不动了**。
+    pub fn take_pause(&mut self) -> bool {
+        if *self.pause_requested {
+            *self.pause_requested = false;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl InstructionExecutor for IssExecutor<'_> {
     fn step(&mut self, state: &mut SimState) -> Result<ExecOutcome, PlatformError> {
+        // (0) 宿主暂停 —— 停在**下一条指令边界**（裁决 C）。
+        //
+        //     放在断点判定**之前**：暂停是**宿主的意图**，断点是 guest
+        //     侧的条件；两者同时成立时，宿主说停就停。
+        //
+        //     `consumed: false` —— 被停下的那条指令**没有执行**，所以
+        //     「已执行条数」不能多算一条。
+        if self.take_pause() {
+            return Ok(ExecOutcome::Stop {
+                reason: HaltReason::UserPause,
+                consumed: false,
+            });
+        }
+
         // (1) 断点命中检测 —— 挂在**取指之前**（M-08 LLD §3.2）。
         //     命中时该条指令尚未执行，状态零副作用。
         if self.breakpoint_at(state.pc) {
@@ -158,12 +194,18 @@ impl InstructionExecutor for IssExecutor<'_> {
                     consumed: true,
                 })
             }
-            Ok(StepOutcome::HostPause) => {
-                return Ok(ExecOutcome::Stop {
-                    reason: HaltReason::UserPause,
-                    consumed: true,
-                })
-            }
+            // ⚠️ M-13 的 `StepOutcome::HostPause` 是**死变体**：STAGE-4
+            //    裁决 C 要求删除它（它「M-13 产生的宿主暂停」在架构上就
+            //    是错的——M-13 不可能知道宿主要暂停），但它是 **M-13 的
+            //    公开 API**，删除要过「公开 API 只增不减」的决策，所以
+            //    **本批仍留在 M-13 里**（台账留账）。
+            //
+            //    M-17 **不再**为它单独分派：暂停语义落在 M-17 自己的
+            //    `pause_requested` 标志位上（见 [`SelfIssBackend::pause`]）。
+            //    这一臂把「不是上面几种」的结局一律按「**没有指令退休**」
+            //    处理（虚拟时钟不推进）——该变体今天**没有生产者**，所以
+            //    这一臂不可达。
+            Ok(_) => true,
             Err(err) => {
                 // 取指 / 访存失败（E_BUS-01 等）——**报错**，不是陷阱。
                 //
@@ -239,6 +281,14 @@ pub struct SelfIssBackend<B: EventBus, I: InterruptSink> {
     next_watch_id: u32,
     /// Total instructions executed since the last reset.
     total_executed: u64,
+    /// 宿主请求暂停（裁决 C）。
+    ///
+    /// `pause()` 置位；执行器在**指令边界**上查它 ⇒ 命中就停。
+    ///
+    /// ⚠️ **取走即消失**（见 [`IssExecutor::take_pause`]）：一次暂停**只
+    /// 影响一个批次**。否则后面每个批次都会在同一处停下，机器就再也
+    /// 跑不动了。
+    pause_requested: bool,
 }
 
 impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
@@ -258,6 +308,7 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
             last_watchpoint: None,
             next_watch_id: 1,
             total_executed: 0,
+            pause_requested: false,
         };
         backend.install_watch_hook();
         backend
@@ -527,6 +578,8 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
         self.last_stop = None;
         self.last_watchpoint = None;
         self.total_executed = 0;
+        // 暂停请求属于**上一次批次**的残留 —— reset 之后不该还有效。
+        self.pause_requested = false;
         *self.watch_hit.borrow_mut() = None;
         Ok(())
     }
@@ -541,6 +594,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             last_stop,
             last_watchpoint,
             total_executed,
+            pause_requested,
             ..
         } = self;
 
@@ -561,10 +615,23 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
         // judgement, the virtual clock and the pending-write commit all
         // live in one place — there is no second "step" implementation
         // that could drift from this one.
-        let mut executor = IssExecutor::new(iss, bus, breakpoints, Rc::clone(watch_hit));
+        let mut executor =
+            IssExecutor::new(iss, bus, breakpoints, Rc::clone(watch_hit), pause_requested);
 
         for _ in 0..n {
-            // (1) 断点命中检测 —— 挂在**取指之前**（M-08 LLD §3.2）。
+            // (1) 宿主暂停 —— 停在**下一条指令边界**（裁决 C）。
+            //
+            //     与断点判定**同型**（都在取指之前、都在外设时钟同步之前）：
+            //     一条**没有执行**的指令不该让外设的时钟也走一格。
+            //
+            //     ⚠️ **取走即消失**：一次暂停只影响**一个**批次（见
+            //     [`IssExecutor::take_pause`]）。
+            if executor.take_pause() {
+                *last_stop = Some(HaltReason::UserPause);
+                break;
+            }
+
+            // (2) 断点命中检测 —— 挂在**取指之前**（M-08 LLD §3.2）。
             //     命中时该条指令尚未执行，状态零副作用——**外设时钟也不
             //     推进**（V-A 检视 · F3：一条没执行的指令不该让外设的
             //     时钟也走一格）。
@@ -573,7 +640,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
                 break;
             }
 
-            // (2) 外设时钟同步（**指令边界**）—— 让本条指令里发生的探针
+            // (3) 外设时钟同步（**指令边界**）—— 让本条指令里发生的探针
             //     边沿带上**真实**的虚拟时间戳（D-46）。
             //
             //     没有这一步，M-15 的 GPIO 记下的 `now_ps` 永远是 0，
@@ -590,11 +657,15 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             let now_ps = engine.now_ps();
             engine.tick_peripherals(now_ps)?;
 
-            // (3) 执行一条指令（陷阱 / 观察点的判定都在执行器里）。
+            // (4) 执行一条指令（陷阱 / 观察点的判定都在执行器里）。
             match executor.step(engine.state_mut()) {
                 Ok(ExecOutcome::Advanced) => {
                     executed += 1;
                     *total_executed += 1;
+                }
+                Ok(ExecOutcome::InterruptTaken) => {
+                    // 中断交付**没有**指令退休 ⇒ 不计入 `executed` /
+                    // `total_executed`（STAGE-4 裁决 I）。批次**不停**。
                 }
                 Ok(ExecOutcome::Stop { reason, consumed }) => {
                     if consumed {
@@ -645,6 +716,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             last_stop,
             last_watchpoint,
             total_executed,
+            pause_requested,
             ..
         } = self;
 
@@ -652,7 +724,8 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
         *last_watchpoint = None;
         *watch_hit.borrow_mut() = None;
 
-        let mut executor = IssExecutor::new(iss, bus, breakpoints, Rc::clone(watch_hit));
+        let mut executor =
+            IssExecutor::new(iss, bus, breakpoints, Rc::clone(watch_hit), pause_requested);
         // `u64::MAX` = 「不设时间上限」——本轮的边界是**指令预算**，
         // 由 M-12 的 `instruction_budget` 决定。
         let outcome = engine.run_until(&mut executor, u64::MAX)?;
@@ -668,7 +741,20 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
         Ok(())
     }
 
+    /// 宿主请求暂停（裁决 C）。
+    ///
+    /// 语义 =「在**下一条指令边界**停下」——**不是**「立刻停下」：宿主
+    /// 调用是**同步**的，宿主**不可能**在一条指令执行的中途插进来，
+    /// 所以「立刻」是**做不到**的语义，写进文档就是骗人。
+    ///
+    /// 实现落点：置位 [`SelfIssBackend::pause_requested`]，由执行器在
+    /// 指令边界上查它（`step_n` 在**外设时钟同步之前**查，时间驱动路径
+    /// 在执行器里查——两条路径共用同一个标志位）。
+    ///
+    /// ⚠️ **取走即消失**：标志位被**消费**它的那一批清掉 ⇒ 一次暂停
+    /// **只影响一个批次**（见 [`IssExecutor::take_pause`]）。
     fn pause(&mut self) -> Result<(), PlatformError> {
+        self.pause_requested = true;
         self.last_stop = Some(HaltReason::UserPause);
         Ok(())
     }
@@ -1315,5 +1401,96 @@ mod tests {
             0,
             "断点挂在取指之前，命中的那条指令**没有**被执行"
         );
+    }
+
+    // ---- 裁决 C：`pause()` = 在**下一条指令边界**停下 ----
+
+    /// `pause()` ⇒ 批次在**下一条指令边界**停（裁决 C / 验收 31）。
+    ///
+    /// 判别式落在**输出**上：停下的那条指令**没有执行** ⇒
+    /// 「已执行条数」不多算、PC 不前进、停止原因是 `UserPause`。
+    ///
+    /// ⚠️ 期望值用**外部**常量（`HaltReason::UserPause`），不自指实现。
+    #[test]
+    fn pause_stops_the_batch_at_the_next_instruction_boundary() {
+        let mut backend = backend_with_demo();
+        let pc_before = backend.snapshot().expect("snapshot").pc;
+
+        backend.pause().expect("pause");
+        assert_eq!(
+            backend.last_stop_reason(),
+            Some(HaltReason::UserPause),
+            "pause() 之后宿主立刻就能看到「暂停」这个停止原因"
+        );
+
+        let executed = backend.step_n(10).expect("step");
+        assert_eq!(
+            executed, 0,
+            "被暂停的那条指令**没有执行**——已执行条数不能多算一条"
+        );
+        assert_eq!(
+            backend.total_executed(),
+            0,
+            "已执行条数必须说真话：暂停的那条指令没有退休"
+        );
+        assert_eq!(
+            backend.last_stop_reason(),
+            Some(HaltReason::UserPause),
+            "停止原因必须是 UserPause"
+        );
+        assert_eq!(
+            backend.snapshot().expect("snapshot").pc,
+            pc_before,
+            "PC 不能前进——暂停发生在**指令边界**（取指之前）"
+        );
+    }
+
+    /// 一次暂停**只影响一个批次**（裁决 C）。
+    ///
+    /// ⚠️ 判别力：若标志位**取走不消失**，后面每个批次都会在同一处停下，
+    /// 机器就**再也跑不动了**——这条用例会把那种实现打红（第二个批次
+    /// 的已执行条数会是 0）。
+    #[test]
+    fn a_pause_affects_exactly_one_batch() {
+        let mut backend = backend_with_demo();
+        backend.pause().expect("pause");
+        assert_eq!(backend.step_n(10).expect("step"), 0, "第一批被暂停");
+
+        let executed = backend.step_n(10).expect("step");
+        assert_eq!(executed, 10, "暂停只影响**一个**批次——下一批必须照常跑");
+        assert_eq!(backend.total_executed(), 10);
+    }
+
+    /// 时间驱动路径（`continue_until_event`）也认暂停。
+    ///
+    /// 两条路径共用**同一个**执行器，但暂停标志是**后端**上的一个字段
+    /// ——若只在一侧查，时间驱动路径就会**无视**暂停。
+    #[test]
+    fn pause_stops_the_time_driven_path_too() {
+        let mut backend = backend_with_demo();
+        backend.pause().expect("pause");
+
+        backend.continue_until_event().expect("run until event");
+
+        assert_eq!(
+            backend.last_stop_reason(),
+            Some(HaltReason::UserPause),
+            "时间驱动路径也必须在指令边界认暂停"
+        );
+        assert_eq!(backend.total_executed(), 0, "被暂停的那条指令**没有执行**");
+    }
+
+    /// `reset()` 把暂停请求一起清掉。
+    ///
+    /// 暂停请求属于**上一次运行**的残留 —— reset 之后不该还有效，否则
+    /// reset 之后的第一批会莫名其妙地零条停下。
+    #[test]
+    fn a_reset_clears_a_pending_pause() {
+        let mut backend = backend_with_demo();
+        backend.pause().expect("pause");
+        backend.reset().expect("reset");
+
+        let executed = backend.step_n(3).expect("step");
+        assert_eq!(executed, 3, "reset 之后不该还有效的暂停请求");
     }
 }

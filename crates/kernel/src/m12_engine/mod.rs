@@ -149,6 +149,17 @@ impl fmt::Debug for PeripheralTicker {
 pub enum ExecOutcome {
     /// 指令正常退休（PC 已前进）。
     Advanced,
+    /// **交付了一个中断**（**没有**指令退休）—— 继续跑，不要计入已执行条数。
+    ///
+    /// 中断交付发生在**取指边界**（M-17 的执行器）：M-16 仲裁出待交付的
+    /// 中断 ⇒ 陷入（`mepc` / `mcause` / `mtval` 写好，PC 跳到 `mtvec`）。
+    /// 那条被中断的指令**没有执行**，虚拟时钟也**没有**推进。
+    ///
+    /// ⚠️ **为什么必须有这个变体**（STAGE-4 裁决 I）：若复用 [`Self::Advanced`]，
+    /// 主循环会把它**计成一条已执行指令**（`instructions += 1`）→「已执行条数」
+    /// 每交付一次中断就多一条 —— 一个**说不出口的偏差**。中断是「透明」的：
+    /// 交付**不停批次**，handler 紧接着在同一条指令边界后开始执行。
+    InterruptTaken,
     /// 需要停下：断点 / 陷阱 / 观察点 / 宿主暂停。
     ///
     /// 停止原因用契约的 [`HaltReason`] 表达 —— 那是跨模块唯一的「为什么停」
@@ -800,6 +811,17 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
                         instructions += 1;
                         done += 1;
                     }
+                    ExecOutcome::InterruptTaken => {
+                        // 中断交付**没有**指令退休 ⇒ 既不计入 `instructions`
+                        // （「已执行条数」必须说真话），也**不**计入本量子的
+                        // 配额 `done`，更**不是**停止原因 —— 中断是「透明」的：
+                        // handler 紧接着在下一条指令边界后开始执行。
+                        //
+                        // ⚠️ **不会空转**：交付由 M-16 的 `active_irq` 单级防护
+                        // 限死（未清除前不再交付），而「取走即消失」⇒ 一轮
+                        // 里最多一次交付；量子边界又要靠虚拟时间推进，而时间
+                        // 只随**指令退休**前进 ⇒ 这里不推进时间也不会卡死。
+                    }
                     ExecOutcome::Stop { reason, consumed } => {
                         if consumed {
                             instructions += 1;
@@ -1450,5 +1472,65 @@ mod tests {
         assert_eq!(*seen.borrow(), vec![(0x4000_0000, 700)]);
         assert_eq!(eng.snapshot().pending_writes.len(), 1);
         assert_eq!(eng.snapshot().pending_writes[0].paddr, 0x4000_0000);
+    }
+
+    // ------------------------------------------------------------------
+    // 中断交付（STAGE-4 裁决 I）：`ExecOutcome::InterruptTaken`
+    // ------------------------------------------------------------------
+
+    /// 一个**假**执行器：前 `interrupts` 次返回 [`ExecOutcome::InterruptTaken`]，
+    /// 之后返回 [`ExecOutcome::Advanced`]。
+    ///
+    /// 它把「中断交付」与「指令退休」分成两件事——真实执行器（M-17）也是
+    /// 这么做的：交付时那条指令**没有执行**，虚拟时钟也**没有**推进。
+    struct InterruptThenAdvance {
+        interrupts: u32,
+        calls: u64,
+    }
+
+    impl InstructionExecutor for InterruptThenAdvance {
+        fn step(&mut self, state: &mut SimState) -> Result<ExecOutcome, PlatformError> {
+            self.calls += 1;
+            if self.calls <= u64::from(self.interrupts) {
+                // 中断交付：没有指令退休 ⇒ 时钟不推进。
+                return Ok(ExecOutcome::InterruptTaken);
+            }
+            state.virtual_time_ps = state.virtual_time_ps.saturating_add(INSTRUCTION_COST_PS);
+            Ok(ExecOutcome::Advanced)
+        }
+    }
+
+    /// 中断交付**不计入**已执行条数，也**不停**批次（裁决 I）。
+    ///
+    /// 判别式落在**输出**上：`RunOutcome::instructions`（已执行条数）与
+    /// `RunOutcome::reason`（停止原因）。
+    ///
+    /// ⚠️ 若把 `InterruptTaken` 复用成 `Advanced`，`instructions` 会多算
+    /// 3 条（10003 ≠ 10000）——这条用例当场变红。
+    #[test]
+    fn an_interrupt_delivery_is_neither_counted_nor_a_stop() {
+        let mut eng: Engine<RecordingBus, RecordingIntc> = Engine::default();
+        let mut executor = InterruptThenAdvance {
+            interrupts: 3,
+            calls: 0,
+        };
+
+        let outcome = eng.run_until(&mut executor, u64::MAX).expect("run");
+
+        assert_eq!(
+            outcome.instructions,
+            u64::from(DEFAULT_INSTRUCTION_BUDGET),
+            "中断交付**没有**指令退休 ⇒ 已执行条数不能多算"
+        );
+        assert_eq!(
+            executor.calls,
+            u64::from(DEFAULT_INSTRUCTION_BUDGET) + 3,
+            "执行器被调用的次数 = 已执行条数 + 中断交付次数（交付不占配额）"
+        );
+        assert_eq!(
+            outcome.reason,
+            RunReason::BudgetExhausted,
+            "中断交付**不是**停止原因——它是「透明」的，handler 紧接着跑"
+        );
     }
 }
