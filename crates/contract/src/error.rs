@@ -1,8 +1,15 @@
 //! Error code family + per-subsystem scenario codes (LLD §3.4).
 //!
-//! Format: `E_<FAMILY>-<SCENARIO>` where family is a 3–4 char subsystem tag
+//! Format: `E_<FAMILY>-<SCENARIO>` where family is a 3–5 char subsystem tag
 //! and scenario is a 2-digit code. New scenario codes are additive; old
 //! codes never change meaning.
+//!
+//! ⚠️ The tag length was **3–4** until contract v2, which was **wrong**:
+//! two of the fourteen families are 5 characters — `PROTO` (added in v2)
+//! and `STORE` (pre-existing) — and the module design specification has
+//! always spelled the protocol family `E_PROTO-0x`. The constraint is
+//! now **3–5**; the tags themselves are unchanged, so no error code on
+//! the wire moved (debt ledger **D-68**'s sibling fix).
 
 use core::fmt;
 
@@ -89,7 +96,7 @@ pub enum ErrorFamily {
 }
 
 impl ErrorFamily {
-    /// 3–4 char tag used in the textual error code.
+    /// 3–5 char tag used in the textual error code.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Context => "CTX",
@@ -109,6 +116,30 @@ impl ErrorFamily {
         }
     }
 }
+
+/// Every [`ErrorFamily`] variant, in declaration order.
+///
+/// The enum's own `match` is the single source of truth for the **tag**;
+/// this list is the single source of truth for **"which families exist"**.
+/// A new family that is not in this list is invisible to the
+/// completeness check in `tests::every_family_tag_is_pinned` — so adding
+/// a family means adding it here too.
+pub const ALL_FAMILIES: &[ErrorFamily] = &[
+    ErrorFamily::Context,
+    ErrorFamily::Iss,
+    ErrorFamily::Engine,
+    ErrorFamily::Bus,
+    ErrorFamily::Peripheral,
+    ErrorFamily::Interrupt,
+    ErrorFamily::Debug,
+    ErrorFamily::Observability,
+    ErrorFamily::Snapshot,
+    ErrorFamily::Loader,
+    ErrorFamily::Health,
+    ErrorFamily::Storage,
+    ErrorFamily::Transport,
+    ErrorFamily::Protocol,
+];
 
 /// Error family used by the protocol-level codes below.
 pub const PROTO_FAMILY: ErrorFamily = ErrorFamily::Protocol;
@@ -240,5 +271,69 @@ mod tests {
             err.to_string(),
             "E_DBG-01: register index 99 is out of range"
         );
+    }
+
+    /// **Every** family's wire tag is pinned here.
+    ///
+    /// The tag is the **prefix of every error code on the wire** — it is
+    /// the part a debugger greps for and the part the module design
+    /// specification's error-code table lists. Before this test only
+    /// `PROTO` and `TRX` had a guard, so renaming any of the other
+    /// twelve tags would have turned **no** test red while every error
+    /// code of that family changed shape on the wire.
+    ///
+    /// That is not hypothetical: the LLD's error table spelled the
+    /// peripheral family `E_PP` while the contract (and the code) emit
+    /// `E_PER` — a live doc/code conflict that went unnoticed precisely
+    /// because nothing pinned the tag (debt ledger **D-69**).
+    ///
+    /// The table is the **single** place the tags are written down; the
+    /// `as_str` implementation is checked against it, not the other way
+    /// round.
+    #[test]
+    fn every_family_tag_is_pinned() {
+        const TAGS: &[(ErrorFamily, &str)] = &[
+            (ErrorFamily::Context, "CTX"),
+            (ErrorFamily::Iss, "ISS"),
+            (ErrorFamily::Engine, "ENG"),
+            (ErrorFamily::Bus, "BUS"),
+            (ErrorFamily::Peripheral, "PER"),
+            (ErrorFamily::Interrupt, "INT"),
+            (ErrorFamily::Debug, "DBG"),
+            (ErrorFamily::Observability, "OBS"),
+            (ErrorFamily::Snapshot, "SNAP"),
+            (ErrorFamily::Loader, "LDR"),
+            (ErrorFamily::Health, "HMS"),
+            (ErrorFamily::Storage, "STORE"),
+            (ErrorFamily::Transport, "TRX"),
+            (ErrorFamily::Protocol, "PROTO"),
+        ];
+
+        // No family may be forgotten: the list must cover *every* variant.
+        assert_eq!(
+            TAGS.len(),
+            ALL_FAMILIES.len(),
+            "族清单漏了某个 ErrorFamily 变体 —— 新增族时必须在这里补一行"
+        );
+
+        for family in ALL_FAMILIES {
+            let tag = TAGS
+                .iter()
+                .find(|(f, _)| f == family)
+                .map(|(_, t)| *t)
+                .unwrap_or_else(|| panic!("{family:?} 没有在族标签表里登记"));
+            assert_eq!(
+                family.as_str(),
+                tag,
+                "{family:?} 的线上族标签变了 —— 错误码的前缀变了"
+            );
+            // The module header says the tag is a 3–5 character
+            // subsystem tag; a 2- or 6-character tag would break the
+            // `E_<FAMILY>-<SCENARIO>` format the LLD's tables assume.
+            assert!(
+                tag.len() == 3 || tag.len() == 4 || tag.len() == 5,
+                "族标签 {tag} 不是 3–5 个字符"
+            );
+        }
     }
 }
