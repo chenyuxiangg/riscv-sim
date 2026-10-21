@@ -908,6 +908,32 @@ mod tests {
         assert_eq!(err.scenario, crate::snapshot::E_SNAP_02_MALFORMED_QUEUE);
     }
 
+    /// ⚠️ **Literal** assertion — the malformed-payload code must not
+    /// collide with the queue-malformed code.
+    ///
+    /// `E_SNAP_02` means "the *event queue* is malformed" and
+    /// `E_SNAP_06` means "the *session payload* is malformed". If the
+    /// two ever share a number, a consumer reading the code can no
+    /// longer tell which table to look at — **one code, two meanings**
+    /// (the same trap as D-69's `E_PP` / `E_PER`).
+    #[test]
+    fn the_malformed_session_code_is_its_own() {
+        assert_eq!(
+            E_SNAP_06_MALFORMED_SESSION, 6,
+            "会话载荷畸形的场景码必须是 6"
+        );
+        assert_ne!(
+            E_SNAP_06_MALFORMED_SESSION,
+            crate::snapshot::E_SNAP_02_MALFORMED_QUEUE,
+            "「会话载荷畸形」与「事件队列畸形」不能共用一个码"
+        );
+        assert_ne!(
+            E_SNAP_06_MALFORMED_SESSION,
+            crate::snapshot::E_SNAP_05_UNSUPPORTED_STATE_SCHEMA,
+            "「会话载荷畸形」与「版本不受支持」不能共用一个码"
+        );
+    }
+
     /// ⚠️ **Literal** assertion — the outer version is pinned by a
     /// number, not by a constant.
     ///
