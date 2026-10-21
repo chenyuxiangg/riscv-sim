@@ -97,6 +97,7 @@ impl DataStore for InMemoryDataStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::m20_snapshot::SnapshotManager;
     use riscv_sim_contract::error::ErrorFamily;
     use riscv_sim_contract::model::{ProductTree, ProjectVersion};
     use riscv_sim_contract::session::{
@@ -213,6 +214,28 @@ mod tests {
             store.get_snapshot(43).expect("读取").is_none(),
             "别的 id 必须取不到"
         );
+    }
+
+    /// ⚠️ **检查点 id 的唯一落点** = `payload.cp_meta.id`，M-23 用它做键。
+    ///
+    /// M-20 记下的**记录序号**（`SnapshotRecord.id`）与**检查点 id**
+    /// （`payload.cp_meta.id`）是**两个不同的量**，各有一个落点；落盘按**后者**。
+    /// 记录上**没有**第二个 `cp_meta`（同一个量两个落点 = 恢复时要挑赢家）。
+    #[test]
+    fn a_recorded_snapshot_is_stored_under_its_checkpoint_id() {
+        let mut mgr = SnapshotManager::new();
+        let payload = sample_payload(9);
+        let rec = mgr.record(payload.clone(), "cp");
+
+        let mut store = InMemoryDataStore::new();
+        store.put_snapshot(&rec.payload).expect("落盘");
+
+        let back = store
+            .get_snapshot(u64::from(rec.payload.cp_meta.id))
+            .expect("读取")
+            .expect("必须能用检查点 id 取回");
+        assert_eq!(back, rec.payload, "取回的必须是记下的那一份");
+        assert_eq!(back.cp_meta.id, 9, "检查点 id 必须原样保留（它就是落盘键）");
     }
 
     /// 同 id、**同内容** → 幂等（存储状态不变）。

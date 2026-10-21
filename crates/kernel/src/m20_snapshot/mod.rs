@@ -15,22 +15,20 @@
 //! 本模块把形状换成**唯一**的一种：
 //!
 //! ```text
-//! SnapshotRecord { id, cp_meta, payload: SessionSnapshotDto, label }
+//! SnapshotRecord { id, payload: SessionSnapshotDto, label }
 //! ```
 //!
 //! 其中 `payload` 是契约层的 [`SessionSnapshotDto`]——**六段齐全**（段 0 检查点
 //! 元数据 / 段 1 引擎 / 段 2 内存页 / 段 3 内存映射 / 段 4 外设 / 段 5 INTC）。
+//! ⚠️ 记录上**没有** `cp_meta` 字段：检查点元数据的**唯一落点**是
+//! `payload.cp_meta`（同一个量两个落点 = 恢复时要挑赢家 = 输家默默腐烂）。
 //!
 //! # M-20 是**记录器**，不是**采集器**
 //!
 //! ⚠️ **六段由调用方提供**（内核宿主持有总线 / 外设 / 中断控制器，由它去调
 //! M-14 的 `export_pages` / `export_map`、M-15 的 `export_state`、M-16 的
 //! `export_state`）。这样 M-20 **不依赖** M-14 / M-15 / M-16——依赖方向单向，
-//! M-20 只认契约层的 DTO。
-//!
-//! > 与冻结规格 §3.5 的**差异**（本实现为准）：规格里 `capture_session` 直接收
-//! > `&Bus` / `&PeripheralRegistry` / `&InterruptController`；本实现收**已经导出
-//! > 好的 DTO**。两者产出**同一种** `SessionSnapshotDto`，差别只在**谁去采集**。
+//! M-20 只认契约层的 DTO，三段可以各自演进。
 //!
 //! # 虚拟时间的唯一落点
 //!
@@ -57,17 +55,23 @@ use riscv_sim_contract::snapshot::EngineSnapshotDto;
 /// ⚠️ **形状已换**（台账 D-37）：本结构**不再**直接持有 partial 的 `SimState`，
 /// 也不再有裸的 `at_ps: u64`。载荷的唯一载体是契约层的
 /// [`SessionSnapshotDto`]（六段齐全）。
+///
+/// ⚠️ **记录上**没有** `cp_meta` 字段**：检查点元数据的**唯一落点**是
+/// [`Self::payload`] 里的 `cp_meta`（段 0）。在记录上再挂一份就是**同一个量
+/// 有两个落点**——恢复时必须挑一个赢家，输家默默腐烂（契约层裁决 B「寄存器
+/// 已经在 `m12Engine.state` 里，再存一份就是两个真相」同源的坑）。
+///
+/// ⚠️ **两个 id 不是同一个量**，各有一个落点：
+/// * [`Self::id`] —— M-20 分配的**记录序号**（单调，内存列表内定位用）；
+/// * `payload.cp_meta.id` —— **检查点 id**（M-23 落盘时的键）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotRecord {
-    /// Stable id (monotonic).
+    /// Stable id (monotonic) —— **记录序号**，不是检查点 id。
     pub id: u64,
-    /// 检查点元数据（段 0）。
-    ///
-    /// ⚠️ 它是 [`Self::payload`] 里 `cp_meta` 的**副本**，不是第二份真相——
-    /// 两者永远相等（`record()` 从同一处取值）。存在的理由是「列表视图不必
-    /// 展开整个载荷就能显示时间戳与检查点号」。
-    pub cp_meta: CheckpointMetaDto,
     /// The session payload itself — the **only** carrier of the state.
+    ///
+    /// ⚠️ 检查点元数据在**它里面**（`payload.cp_meta`），本结构**不再**另存
+    /// 一份。
     pub payload: SessionSnapshotDto,
     /// Free-form human label.
     pub label: String,
@@ -77,7 +81,6 @@ impl Default for SnapshotRecord {
     fn default() -> Self {
         Self {
             id: 0,
-            cp_meta: CheckpointMetaDto::default(),
             payload: SessionSnapshotDto::default(),
             label: String::new(),
         }
@@ -144,7 +147,6 @@ impl SnapshotManager {
         self.next_id = self.next_id.wrapping_add(1);
         let rec = SnapshotRecord {
             id,
-            cp_meta: payload.cp_meta.clone(),
             payload,
             label: label.into(),
         };
@@ -313,7 +315,7 @@ mod tests {
     // 内存记录
     // ------------------------------------------------------------------
 
-    /// id **单调**且互不相同；载荷与 `cp_meta` **原样**存下。
+    /// id **单调**且互不相同；载荷（含段 0 的检查点元数据）**原样**存下。
     #[test]
     fn record_allocates_monotonic_ids_and_stores_the_payload_verbatim() {
         let mut mgr = SnapshotManager::new();
@@ -326,10 +328,74 @@ mod tests {
         assert!(r2.id > r1.id, "id 必须单调递增：{} 然后 {}", r1.id, r2.id);
         assert_ne!(r1.id, r2.id, "id 不得撞号");
         assert_eq!(r1.payload, p1, "载荷必须原样存下");
-        assert_eq!(r1.cp_meta, p1.cp_meta, "段 0 必须原样存下");
+        assert_eq!(
+            r1.payload.cp_meta, p1.cp_meta,
+            "段 0（检查点元数据）必须原样存下——它的**唯一落点**就是 payload.cp_meta"
+        );
+        assert_eq!(
+            r1.payload.cp_meta.id, 1,
+            "检查点 id 必须原样保留（它同时是 M-23 落盘的键）"
+        );
         assert_eq!(r1.label, "first");
         assert_eq!(r2.payload, p2);
         assert_eq!(r2.label, "second");
+    }
+
+    /// ⚠️ **记录上不存在 `cp_meta` 字段**——检查点元数据的**唯一落点**是
+    /// `payload.cp_meta`。
+    ///
+    /// 记录上再挂一份 `cp_meta` = **同一个量两个落点**：恢复时必须挑一个赢家，
+    /// 输家默默腐烂（契约层裁决 B「寄存器已经在 `m12Engine.state` 里，再存一份
+    /// 就是两个真相」同源的坑）。所以这条不变量**必须**有守卫。
+    ///
+    /// ⚠️ **为什么用源码形状来钉，而不是「序列化后不含 `cp_meta` 键」**：
+    /// `SnapshotRecord` 是**内核内部**结构，**没有** serde derive（内核 crate
+    /// 不依赖 `serde`，而 `Cargo.toml` 不在本模块的改动范围内），所以「序列化后
+    /// 的键集」在本 crate 里**做不出来**。退而求其次：直接读**本文件的源码**，
+    /// 把 `SnapshotRecord` 的字段集读出来，断言它**恰好**是
+    /// `{id, payload, label}`。
+    ///
+    /// 判别式：把 `cp_meta` 字段加回来 → 字段集变成 4 个 → **本用例变红**
+    /// （且整个 crate 仍能编译——所以这不是「编译错误式的红」）。
+    #[test]
+    fn the_record_carries_no_cp_meta_field_of_its_own() {
+        let fields = snapshot_record_fields();
+        assert_eq!(
+            fields,
+            vec![
+                "id".to_string(),
+                "payload".to_string(),
+                "label".to_string()
+            ],
+            "SnapshotRecord 的字段集必须恰好是 {{id, payload, label}} —— 检查点元数据的唯一落点是 payload.cp_meta"
+        );
+    }
+
+    /// 从**本文件的源码**里读出 `SnapshotRecord` 的字段名表。
+    ///
+    /// ⚠️ 针脚必须**唯一**且**不与测试代码自身撞车**：用 `concat!` 拼出
+    /// 「结构体头 + 换行」，测试模块里那个**字面量**就不会被当成定义。
+    fn snapshot_record_fields() -> Vec<String> {
+        const SRC: &str = include_str!("mod.rs");
+        const HEAD: &str = concat!("pub struct SnapshotRecord {", "\n");
+        let start = SRC
+            .find(HEAD)
+            .expect("本文件里必须有 SnapshotRecord 的定义");
+        let body = &SRC[start + HEAD.len()..];
+        let end = body.find('}').expect("结构体定义必须有闭合花括号");
+        body[..end]
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("pub "))
+            .map(|l| {
+                l.trim_start_matches("pub ")
+                    .split(':')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            })
+            .collect()
     }
 
     /// `get(id)` 必须能取回**那条**记录（按 id 索引，不是「随便给一条」）。
