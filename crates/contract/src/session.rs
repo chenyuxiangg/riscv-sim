@@ -58,7 +58,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::PlatformError;
-use crate::model::SIM_STATE_SCHEMA_VERSION;
 use crate::snapshot::{EngineSnapshotDto, SNAPSHOT_FAMILY, SNAPSHOT_SCHEMA_VERSION};
 
 /// Format version of the **session-level** payload.
@@ -328,13 +327,16 @@ impl SessionSnapshotDto {
     /// 1. `schema_version` — known?
     /// 2. `cp_meta.version` — known?
     /// 3. inner `m12_engine.schema_version` — known?
-    /// 4. inner `m12_engine.state.schema_version` — known?
-    /// 5. `m14_map.regions` — ascending by `base`, non-overlapping
-    /// 6. `m13_state.mem_pages` — ascending by `base`, non-overlapping,
+    /// 4. `m14_map.regions` — ascending by `base`, non-overlapping
+    /// 5. `m13_state.mem_pages` — ascending by `base`, non-overlapping,
     ///    and each page fits inside a RAM region
-    /// 7. `m15_periph` — no duplicate id within a kind
-    /// 8. `m16_intc.raised` — ascending, no duplicates
-    /// 9. the inner engine snapshot validates on its own terms
+    /// 6. `m15_periph` — no duplicate id within a kind
+    /// 7. `m16_intc.raised` — ascending, no duplicates
+    /// 8. the inner engine snapshot validates on its own terms
+    ///
+    /// ⚠️ The inner `m12_engine.state.schema_version` is **not** checked
+    /// here — see the comment at the check itself. The frozen spec
+    /// §5 lists it; the inner validator is its single home.
     pub fn validate(&self) -> Result<(), PlatformError> {
         if self.schema_version != SESSION_SNAPSHOT_SCHEMA_VERSION {
             return Err(unsupported_version(
@@ -357,13 +359,20 @@ impl SessionSnapshotDto {
                 SNAPSHOT_SCHEMA_VERSION,
             ));
         }
-        if self.m12_engine.state.schema_version != SIM_STATE_SCHEMA_VERSION {
-            return Err(unsupported_version(
-                "引擎段内平台状态的版本不受支持",
-                self.m12_engine.state.schema_version,
-                SIM_STATE_SCHEMA_VERSION,
-            ));
-        }
+        // ⚠️ **No check for `m12_engine.state.schema_version` here on
+        // purpose** — the inner `EngineSnapshotDto::validate()` already
+        // rejects it with the **same** scenario code
+        // (`E_SNAP_05_UNSUPPORTED_STATE_SCHEMA`, see
+        // `crate::snapshot`). A second copy of the same rule would be a
+        // second landing spot for one constraint: dropping either copy
+        // would leave the behaviour unchanged, so neither could be
+        // covered by a discriminating test. The inner check is the
+        // single home for that rule.
+        //
+        // ⚠️ The engine-segment version above **is** still checked here,
+        // because the inner one reports a *different* code
+        // (`E_SNAP_01_UNSUPPORTED_SCHEMA`); the outer check decides
+        // which code the session payload surfaces.
 
         // 5 — the region table must be canonically ordered and disjoint.
         let mut prev_end: Option<(u32, u32)> = None;
@@ -652,15 +661,14 @@ mod tests {
             for p in path {
                 let next = match p {
                     // an array index
-                    s if s.chars().all(|c| c.is_ascii_digit()) => cur
-                        .get(s.parse::<usize>().expect("index"))
-                        .ok_or(())
-                        .map(|v| v),
-                    s => cur.get(*s).ok_or(()).map(|v| v),
+                    s if s.chars().all(|c| c.is_ascii_digit()) => {
+                        cur.get(s.parse::<usize>().expect("index"))
+                    }
+                    s => cur.get(*s),
                 };
                 match next {
-                    Ok(v) => cur = v,
-                    Err(()) => {
+                    Some(v) => cur = v,
+                    None => {
                         ok = false;
                         break;
                     }
