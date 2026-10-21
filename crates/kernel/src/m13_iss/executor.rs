@@ -33,8 +33,6 @@ pub enum StepOutcome {
     Breakpoint,
     /// Instruction hit a watchpoint inserted by M-10.
     Watchpoint,
-    /// Engine pause requested by host mid-quantum.
-    HostPause,
 }
 
 impl Default for StepOutcome {

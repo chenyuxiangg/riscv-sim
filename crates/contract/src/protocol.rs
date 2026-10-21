@@ -127,9 +127,9 @@ pub enum CommandPayload {
     /// boundary" — but a command is handled at a **quiescent** point
     /// (the host is not concurrent with the engine's run loop), so
     /// there is no "next quantum boundary" to wait for. The wording now
-    /// says what actually happens. (D-57's family; see the debt
-    /// ledger **D-72** for the related dead interface
-    /// `StepOutcome::HostPause`.)
+    /// says what actually happens. (D-57's family; the related dead
+    /// interface `StepOutcome::HostPause` was **removed** by the M-16
+    /// landing batch — see the debt ledger **D-72**, now closed.)
     Pause,
     /// Set / clear breakpoints and watchpoints.
     SetBreakpoint(Breakpoint),

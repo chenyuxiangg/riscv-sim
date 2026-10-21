@@ -397,6 +397,14 @@ impl InstructionExecutor for IssExecutor<'_> {
         if irq_clear_after != irq_clear_before {
             self.clear_lines_by_mask(irq_clear_after);
         }
+        // ⚠️ 这个 `match` **穷举** `StepOutcome` 的全部变体，**没有**兜底臂 ——
+        //    M-13 以后再加变体，M-17 会**编译不过**（而不是静默走兜底）。
+        //
+        //    ⚠️ 这里**曾经**有一臂 `Ok(StepOutcome::HostPause) => true` —— 一个
+        //    「M-13 产生的宿主暂停」在架构上就是错的：**M-13 不可能知道
+        //    宿主要暂停**。暂停语义落在 M-17 自己的 `pause_requested` 标志位
+        //    上（见 [`SelfIssBackend::pause`]），那个变体已随 STAGE-4 裁决 C
+        //    **删除**（台账 **D-72** 闭环）。
         let trapped = match outcome {
             Ok(StepOutcome::Advanced) => false,
             Ok(StepOutcome::Trapped { .. }) => {
@@ -416,18 +424,6 @@ impl InstructionExecutor for IssExecutor<'_> {
                     consumed: true,
                 })
             }
-            // ⚠️ M-13 的 `StepOutcome::HostPause` 是**死变体**：STAGE-4
-            //    裁决 C 要求删除它（它「M-13 产生的宿主暂停」在架构上就
-            //    是错的——M-13 不可能知道宿主要暂停），但它是 **M-13 的
-            //    公开 API**，删除要过「公开 API 只增不减」的决策，所以
-            //    **本批仍留在 M-13 里**（台账留账）。
-            //
-            //    M-17 **不再**为它单独分派：暂停语义落在 M-17 自己的
-            //    `pause_requested` 标志位上（见 [`SelfIssBackend::pause`]）。
-            //    这一臂把「不是上面几种」的结局一律按「**没有指令退休**」
-            //    处理（虚拟时钟不推进）——该变体今天**没有生产者**，所以
-            //    这一臂不可达。
-            Ok(_) => true,
             Err(err) => {
                 // 取指 / 访存失败（E_BUS-01 等）——**报错**，不是陷阱。
                 //
