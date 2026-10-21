@@ -394,3 +394,104 @@ pub trait DeltaSink {
     /// Deliver one batch of waveform edges.
     fn push_delta(&mut self, delta: &crate::model::WaveformDelta) -> Result<(), PlatformError>;
 }
+
+#[cfg(test)]
+mod tests {
+    //! Pins the **three default implementations** of [`Peripheral`] that
+    //! the session snapshot depends on.
+    //!
+    //! ⚠️ **These are the contract's *additivity* guarantees.** They are
+    //! invisible in the kernel: M-15's three peripherals **all** override
+    //! the session methods, so changing a default there would change
+    //! **nothing** observable — and nothing would go red. The property
+    //! has to be pinned **here**, on the contract, where it is written.
+
+    use super::*;
+    use crate::model::WriteSize;
+    use crate::session::{PeripheralSessionState, UartStateDto};
+
+    /// A peripheral that implements **only** the mandatory methods —
+    /// it does **not** override any of the three session-snapshot
+    /// defaults. This is what an "existing implementor" looks like
+    /// (the trait's default methods are what keep it compiling).
+    struct BarePeripheral;
+
+    impl Peripheral for BarePeripheral {
+        fn id(&self) -> &str {
+            "BARE0"
+        }
+        fn base_addr(&self) -> u32 {
+            0x4000_1000
+        }
+        fn size(&self) -> u32 {
+            0x10
+        }
+        fn read(&self, _offset: u32, _size: WriteSize) -> Result<u32, PlatformError> {
+            Ok(0)
+        }
+        fn write(
+            &mut self,
+            _offset: u32,
+            _size: WriteSize,
+            _value: u32,
+        ) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        fn tick(&mut self, _now_ps: u64) -> Result<Vec<PendingWrite>, PlatformError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn uart_state() -> PeripheralSessionState {
+        PeripheralSessionState::Uart(UartStateDto {
+            id: "BARE0".to_string(),
+            tx: Some(0x41),
+            rx: None,
+            status: 0,
+            irq_line: 3,
+            now_ps: 0,
+        })
+    }
+
+    /// ⚠️ **The default is `None`** — a peripheral that contributes no
+    /// session state says so, instead of contributing an empty state
+    /// that would look like "this peripheral had no state" rather than
+    /// "this peripheral is not part of the snapshot".
+    #[test]
+    fn a_peripheral_that_does_not_override_contributes_no_session_state() {
+        let p = BarePeripheral;
+        assert!(p.session_state().is_none());
+    }
+
+    /// ⚠️ **The default lets everything through** (`Ok(())`).
+    ///
+    /// This is the **additivity** guarantee: a peripheral written
+    /// against the contract *before* the session snapshot existed must
+    /// keep compiling **and keep working**. If the default rejected
+    /// every state, every such implementor would start failing its
+    /// restore — a **breaking** change smuggled in as an "additive"
+    /// one.
+    #[test]
+    fn the_default_acceptance_check_lets_everything_through() {
+        let p = BarePeripheral;
+        let state = uart_state();
+        assert!(
+            p.validate_session_state(&state).is_ok(),
+            "默认的 validate_session_state 必须放行——它是加法性的保证"
+        );
+    }
+
+    /// ⚠️ **The default rejects** — a peripheral that does not implement
+    /// the restore must **not silently swallow** a state meant for it:
+    /// that drops state without a word, and the restored session would
+    /// quietly differ from the captured one.
+    #[test]
+    fn the_default_restore_rejects_instead_of_silently_succeeding() {
+        let mut p = BarePeripheral;
+        let err = p
+            .restore_session_state(&uart_state())
+            .expect_err("默认实现必须报错，不能静默成功");
+        assert_eq!(err.family, crate::error::ErrorFamily::Peripheral);
+        assert_eq!(err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE);
+    }
+}
