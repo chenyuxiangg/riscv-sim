@@ -133,6 +133,24 @@ describe("契约 v2 · 虚拟时间走十进制字符串（§2）", () => {
         assert.throws(() => psToNumber(1.5), /E_PROTO-08/);
     });
 
+    test("ps() 对极大值产出**纯十进制**（不是指数记法）", () => {
+        // `String(1e21)` = "1e+21" —— 那**不是**十进制整数字符串，
+        // `psToNumber` 会把它判成「形态非法」（E_PROTO-08）。但 1e21 > 2^53，
+        // 按规格 §2.4 正确的分类是「输入超限」（E_PROTO-04）——分类错了，
+        // 「超限」与「畸形」就混成了同一件事。
+        const text = ps(1e21);
+        assert.match(text, /^\d+$/, "ps() 必须产出纯十进制字符串");
+        assert.equal(text, "1000000000000000000000");
+        assert.throws(() => psToNumber(text), (err) => {
+            assert.equal(err.code, "E_PROTO-04");
+            return true;
+        });
+        // 常规路径（普通整数）行为不变。
+        assert.equal(ps(0), "0");
+        assert.equal(ps(1000), "1000");
+        assert.equal(ps(9007199254740992), "9007199254740992");
+    });
+
     test("Tick 事件的 elapsed_ps 是字符串", () => {
         const evt = Event.tick(1234, 0x40);
         assert.equal(typeof evt.Tick.elapsed_ps, "string");
@@ -439,6 +457,33 @@ describe("契约 v2 · M-10 消费新事件与新命令", () => {
             service.getSnapshot().timeVirt,
             1000,
             "时间被静默改写成了别的值",
+        );
+        router.close();
+        service.close();
+    });
+
+    test("Tick 缺 elapsed_ps 时保留旧时间并报 E_PROTO-08（时间轴不倒退）", async () => {
+        const transport = fakeTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
+
+        transport.emit(eventFrame(null, Event.tick("1000", 0x10)));
+        assert.equal(service.getSnapshot().timeVirt, 1000);
+
+        // 缺 `elapsed_ps` 的 tick —— 这是**畸形**，不是 0。
+        //
+        // ⚠️ 判别式落在**时间轴**上：把缺失当成 0 会让虚拟时间从 1000
+        // **倒退**到 0（时间倒流），而且**不报任何错**。
+        transport.emit(eventFrame(null, { Tick: { pc: 0x14 } }));
+        assert.equal(
+            service.getSnapshot().timeVirt,
+            1000,
+            "缺失 elapsed_ps 让虚拟时间倒退了",
+        );
+        assert.match(
+            service.getSnapshot().lastError ?? "",
+            /^E_PROTO-08:/,
+            "缺失 elapsed_ps 没有被报成畸形",
         );
         router.close();
         service.close();

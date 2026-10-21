@@ -35,7 +35,7 @@
 // re-render, throttled to ≤200 ms (M-10 LLD §2.2 — the delta push
 // budget).
 
-import { Command, WRITE_SIZE, psToNumber } from "../lib/message.js";
+import { Command, WRITE_SIZE, psToNumber, protocolError } from "../lib/message.js";
 
 /** Render push throttle (M-10 LLD — ≤200ms). */
 export const RENDER_THROTTLE_MS = 200;
@@ -186,13 +186,28 @@ export async function mountRegisterMemory(options = {}) {
         // `elapsed_ps` is a **decimal string** (contract v2 §2.2) — read it
         // back through `psToNumber()`, which throws instead of silently
         // rounding a value that does not fit a JS number.
+        //
+        // ⚠️ **缺失**的 `elapsed_ps` 是**畸形**（E_PROTO-08），**不是 0**：
+        // 把它当成 0 会让虚拟时间**倒退**（上一个 tick 的时间被抹成 0），
+        // 时间轴上表现为「时间倒流」。所以这里区分三种情况：
+        //   - 缺失 / null → 畸形，保留旧值 + 记 E_PROTO-08；
+        //   - 形态非法 → 保留旧值 + 记 E_PROTO-08（`psToNumber` 抛的）；
+        //   - 超过 2^53 → 保留旧值 + 记 E_PROTO-04（`psToNumber` 抛的）。
         let elapsed = null;
-        try {
-            elapsed = psToNumber(event.value?.elapsed_ps ?? 0);
-        } catch (err) {
-            // The time is **left alone** — a value we cannot represent
-            // exactly must not overwrite the last good one.
-            lastError = err?.message ?? String(err);
+        const raw = event.value?.elapsed_ps;
+        if (raw === undefined || raw === null) {
+            lastError = protocolError(
+                "E_PROTO-08",
+                "Tick 事件缺少 elapsed_ps（虚拟时间字段是必需的）",
+            ).message;
+        } else {
+            try {
+                elapsed = psToNumber(raw);
+            } catch (err) {
+                // The time is **left alone** — a value we cannot represent
+                // exactly must not overwrite the last good one.
+                lastError = err?.message ?? String(err);
+            }
         }
         if (elapsed !== null) timeVirt = elapsed;
         if (typeof event.value?.pc === "number") pc = event.value.pc >>> 0;
