@@ -5,12 +5,19 @@
 > **再修订（2026-10-21 · 契约层 v2）**：契约事件变体 `EventPayload::WaveformDelta` →
 > **`EventPayload::WaveformHistory`**（台账 D-34：变体名随**内容**改——它装的是 **history 形**）。
 > **本表的「命令 → 事件序列」语义未变**，只是变体名改了；契约 v2 的冻结规格见
-> `docs/detailed-design/STAGE-2_Contract_V2.md`。本文件是**第 1 阶段**两侧实现的唯一权威副本：
-> Rust 侧（`crates/kernel/src/kernel_host/` + `wasm_api.rs`）与前端侧
-> （`front/kernel-worker.js`）都按本文实现；任何一方要改形状，必须先改本文。
+> `docs/detailed-design/STAGE-2_Contract_V2.md`。
+>
+> ⚠️ **本文是「第 1 阶段」的桥规格**：命令 → 事件序列的**语义**以本文为准，
+> 但**线格式**（`schema_version`、虚拟时间的数值表示、变体集合、错误族、传输帧 `crc`）
+> 以 **`docs/detailed-design/STAGE-2_Contract_V2.md` 为准**——契约层已升到
+> **`schema_version = 2`**，**冻结已解除**。本文与 v2 规格**冲突时以 v2 规格为准**。
+> 第 1 阶段两侧实现的实现依据仍是本文：Rust 侧（`crates/kernel/src/kernel_host/` +
+> `wasm_api.rs`）与前端侧（`front/kernel-worker.js`）；**任何一方要改命令 → 事件序列的
+> 语义，必须先改本文**。
 >
 > **范围**：第 1 阶段 = WASM 导出层 + 前端接真实内核 + 真机复验。
-> 契约层（`crates/contract/**`）**冻结不变**——本文描述的一切都在契约之内。
+> 契约层（`crates/contract/**`）自 **v2** 起**不再冻结**（升版的破坏性变更逐条列明于
+> `STAGE-2_Contract_V2.md` §1.1）——本文描述的一切仍在契约之内。
 
 ---
 
@@ -31,7 +38,7 @@
 
 | 层 | 形态 | 归属 | 谁实现 |
 | --- | --- | --- | --- |
-| M-07 传输帧 | `{type, seq, sessionId, role, reqId, payload}` | 前端传输层 | `front/lib/frame.js` + `front/kernel-worker.js` |
+| M-07 传输帧 | `{type, seq, sessionId, role, reqId, crc, payload}` | 前端传输层 | `front/lib/frame.js` + `front/kernel-worker.js` |
 | M-05 契约消息 | `riscv_sim_contract::protocol::Message` | 契约（冻结） | Rust `protocol.rs` + `front/lib/message.js` 镜像 |
 
 **内核只认契约消息**。传输帧是前端的东西，内核**不解析**、**不认识**。
@@ -56,13 +63,16 @@
 - **出参**：一个 JSON **数组**，元素是契约 `Message`，`direction` 必须是 `"Event"`。
 - **不抛异常、不 panic**：WASM 里 panic = 整个 Worker 崩。畸形输入必须变成
   一个 `Error` 事件（`E_PROTO-08`），而不是把 Worker 带走。
-- **`E_PROTO-08` / `E_PROTO-01` 的归属**：它们是**前端协议层**的码，
-  **不属于**契约 `ErrorFamily` 的任何一个族——契约的 `ErrorFamily` 只有
+- **`E_PROTO-08` / `E_PROTO-01` 的归属**：契约 v2 起它们**有族可归**——
+  `ErrorFamily::Protocol`，`as_str()` → **`"PROTO"`**（与 LLD 的 `E_PROTO-0x` **逐字一致**）。
+  契约的 `ErrorFamily` 现在是 **14 个族**：
   `CTX / ISS / ENG / BUS / PER / INT / DBG / OBS / SNAP / LDR / HMS /
-  STORE / TRX` **13 个族，没有 `PROTO`**。契约的
-  `EventPayload::Error.code` 就是个 `String` 字段，没有族约束，所以这两个码
-  以**字面量**形式出现在事件里。契约层冻结，本阶段**不新增** `Proto` 族
-  （那是一次契约变更，需要另起流程）。
+  STORE / TRX / PROTO`。
+  ⚠️ `PROTO`（**协议层**：版本协商 / 信封畸形 / CRC 不符）与 `TRX`（**传输适配器自身**
+  的故障：连接 / 断线 / 超时）**并存不合并**——两个族职责不同，前端要靠它决定是
+  「**重连**」还是「**报错**」。
+  `EventPayload::Error.code` 仍是 `String` 字段（无族约束），但场景码的**字面量**
+  已由契约的 `error` 模块固化（`E_PROTO_01_VERSION_MISMATCH` … `E_PROTO_08_BAD_MESSAGE`）。
 - **出参数组长度 ≥ 1**：每条命令至少回一个事件（`Nop` → `Tick`）。
 - **`seq` 由内核分配**：出参 `Message.seq` 是内核自己的单调计数器，从 `1` 起，
   每产出一条事件 +1。**不复用**入参的 `seq`（那是前端 M-05 的序号空间）。
@@ -72,13 +82,22 @@
 ### 2.2 契约消息的 JSON 形状（serde 默认表示）
 
 ```jsonc
-// 命令：结构体变体
-{"schema_version":1,"direction":"Command","seq":1,"payload":{"Command":{"StepN":{"n":1}}}}
+// 命令：结构体变体（契约 v2：schema_version = 2）
+{"schema_version":2,"direction":"Command","seq":1,"payload":{"Command":{"StepN":{"n":1}}}}
 // 命令：单元变体（serde 把无字段变体序列化成裸字符串）
-{"schema_version":1,"direction":"Command","seq":2,"payload":{"Command":"Nop"}}
-// 事件
-{"schema_version":1,"direction":"Event","seq":7,"payload":{"Event":{"Tick":{"elapsed_ps":1000,"pc":4}}}}
+{"schema_version":2,"direction":"Command","seq":2,"payload":{"Command":"Nop"}}
+// 事件（契约 v2：虚拟时间走十进制字符串 —— 数值策略见 STAGE-2 §2）
+{"schema_version":2,"direction":"Event","seq":7,"payload":{"Event":{"Tick":{"elapsed_ps":"1000","pc":4}}}}
 ```
+
+⚠️ **两处 v2 的线格式变化**（本文的第 1 阶段示例已同步）：
+
+| 项 | v1 | **v2** |
+| --- | --- | --- |
+| `schema_version` | `1` | **`2`** |
+| 虚拟时间（`elapsed_ps` / `t_ps` / `virtual_time_ps` / `at_ps` …） | JSON **数字** | **十进制字符串**（超过 2⁵³ 后 JSON 数字会静默丢精度） |
+
+其余 `u64`（计数器、序列号、信号值）**保持 JSON 数字**。
 
 JS 镜像见 `front/lib/message.js`（`decodeMessage()` 是它的逆）。
 
@@ -114,6 +133,14 @@ JS 镜像见 `front/lib/message.js`（`decodeMessage()` 是它的逆）。
 | `Restore{state}` | `Tick`；`state.schema_version` 不符 → `Error{E_SNAP-05}`（**取代**） |
 | `Admin{op}` | `Error{E_CTX-05}`（管理通道未启用） |
 
+**契约 v2 新增的 3 条命令**（已接线；语义逐字取自 `STAGE-2_Contract_V2.md` §5）：
+
+| 命令 | 事件序列（有序） |
+| --- | --- |
+| `ReadRegisters{index,count}` | `Registers{index,values}`。`index` / `count` **钳到** `[0, 32)`；`index` 是**实际**起点、`values.len()` 是**实际**条数；⚠️ **`count = 0` 照样回复空区间**（`values: []`）——**「不回复」与「消息丢失」不可区分**（M-05 按 `reqId` 配对，零回复 → 500 ms 假超时 `E_CTX-06`） |
+| `WriteRegister{index,value}` | `Registers{index,values}`（`values.len() == 1`，值是**写完之后从引擎状态读回来的**实际值）。`index == 0` → **丢弃**（D-04）但**仍回复**（值恒为 0）；`index > 31` → **拒绝**（`Error{E_DBG-01}`，寄存器文件原样不动） |
+| `Negotiate{min_schema_version,cap_bits}` | `Negotiated{schema_version,cap_bits,kernel}`；宿主的 `min_schema_version` 高于内核支持的版本 → **拒绝**（`Error{E_PROTO-01}`） |
+
 **「取代」= 该条命令只产出这一个事件**（错误事件本身即首个事件，携带 `reqId`）。
 
 **「取指失败 → Error」的完整序列**：`Continue` / `StepN` 在取指失败（总线错误）时产出
@@ -127,9 +154,12 @@ JS 镜像见 `front/lib/message.js`（`decodeMessage()` 是它的逆）。
 ### 3.2 寄存器波形流
 
 ⚠️ **契约层 v2 起，这句话已经不成立**：契约**现在有**寄存器快照事件了
-（`EventPayload::Registers`，台账 D-32 缺口 1 已闭环）。但**本表描述的桥（第 1 阶段）
-尚未改接线**——寄存器值在本桥里**仍然**走 `EventPayload::WaveformHistory` 的边沿编码流。
-改接线属于后续批次，本文不提前改。
+（`EventPayload::Registers`，台账 D-32 缺口 1 已闭环），而且**内核侧已接线**
+（`kernel_host::on_read_registers` / `on_write_register`）——见 §3.1 的两条新行。
+**本节描述的是第 1 阶段遗留的「边沿编码寄存器流」**：它**仍然**是
+`Subscribe{sim.registers}` 的全量推送与 `Continue` / `StepN` 的增量推送的载体
+（`EventPayload::WaveformHistory`），**没有**被 `Registers` 事件取代——
+两者**并存**：前者是「随仿真推进的脏寄存器流」，后者是「按需读 / 写的一等公民通道」。
 流 id 与 mock 内核**逐字一致**，前端视图零改动：
 
 | 流 id | label | value |

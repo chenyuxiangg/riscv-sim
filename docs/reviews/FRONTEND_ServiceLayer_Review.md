@@ -75,10 +75,17 @@ idle ──create──▶ creating ──link up──▶ ready
 ### M-10 寄存器内存服务（`front/services/m10_registermemory.js`）
 
 - 缓存内容：32 个 GPR、PC、虚拟时间、已读回的内存单元。
-- 数据来源：寄存器/PC 走 `waveform.delta`（边沿流），虚拟时间走 `tick`，
-  内存走 `memory.read`。
-- 请求：读寄存器 = `Subscribe("sim.registers")`（契约没有「读寄存器」命令，
-  见第五节）；读内存 = `ReadMemory`；写内存 = `WriteMemory` + **读回确认**
+- 数据来源（**v2 口径**）：寄存器/PC 走 `waveform.history`（**边沿流**——原
+  `waveform.delta`，台账 **D-34** 改名：事件变体随**内容**改，`WaveformDelta` →
+  `WaveformHistory`）；虚拟时间走 `tick`，内存走 `memory.read`。
+  ⚠️ **「寄存器只能从边沿流里刨」这个前提已被契约 v2 推翻**——v2 有了**一等公民**的
+  寄存器通道 `EventPayload::Registers{index, values}`（回复 `ReadRegisters` /
+  `WriteRegister`），寄存器快照**不必**再从边沿流反解。本节记的是**第 1 阶段**
+  （v1 契约）的接线，**当时**确实只有边沿流一条路。
+- 请求：读寄存器 = `Subscribe("sim.registers")`（**v1 口径**：契约**没有**「读寄存器」命令，
+  见第五节）；⚠️ **契约 v2 已补上** `ReadRegisters` / `WriteRegister` 命令（M-10 的
+  `readRegisters()` / `writeRegister()`），`Subscribe` 这条路**仍保留**（推送脏寄存器流）；
+  读内存 = `ReadMemory`；写内存 = `WriteMemory` + **读回确认**
   （前端不猜内核状态）。
 - 落视图：合并语义写进 M-03 store（不整块替换 `sim`，反汇编区不会被抹掉），
   ≤200ms 节流触发 `riscv:render`；提供 `flushRender()` 供门禁同步断言。
@@ -116,6 +123,15 @@ D-2 / D-3 说明了一件事：**DOM stub 覆盖不到挂载时序**（AGENTS.md
 ---
 
 ## 五、契约缺口（需要协调者决策，本轮未擅自改契约）
+
+> ⚠️ **本节是第 1 阶段（`schema_version = 1`）的检视记录**——**下面 7 条缺口已由契约 v2 批
+> （台账 **D-32**）逐条闭环**（冻结规格 `docs/detailed-design/STAGE-2_Contract_V2.md`）：
+> ① 读寄存器 → `ReadRegisters` + `Registers`；② `simStateDelta` → `EventPayload::SimStateDelta`；
+> ③ 写寄存器 → `WriteRegister`；④ 能力协商 → `Negotiate` + `Negotiated`；
+> ⑤ `u64` 精度 → 虚拟时间走**十进制字符串**；⑥ 错误族 → 新增 `ErrorFamily::Protocol`（`"PROTO"`）；
+> ⑦ `crc` → 落在 **M-07 的传输帧**（`front/lib/frame.js`）。**本节正文保留原样**——
+> 它记的是**当时**的判断与本轮做法，改写它会让检视记录失去「当时如此」的价值。
+> 逐条闭环状态见 `docs/reviews/REVIEWS.md` 的 **D-32**（以及 **D-34** / **D-69**）。
 
 冻结契约与 LLD 之间有几处对不上。前端按「契约优先」处理，但这些缺口会
 在 Wave 2 真实 WASM 接入时变成硬伤：
