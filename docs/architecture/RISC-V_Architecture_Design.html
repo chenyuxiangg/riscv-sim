@@ -1146,7 +1146,7 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
     <colgroup><col style="width:18%"><col style="width:38%"><col style="width:44%"></colgroup>
     <thead><tr><th>要素</th><th>落地</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td class="dim">健康信号源</td><td>引擎心跳、会话状态机、错误码、命令超时、崩溃信号、传输连接状态、<b>guest 失控（watchdog 超时）</b></td><td>各模块周期性上报心跳/状态；错误码统一进 E_CTX/E_BUS/E_ISS/E_PER/E_PROTO（§3）；<b>故障三分类（评审 R3）：① guest trap（访存异常/非法指令）= 模型内 guest 异常，捕获为事件；② 平台崩溃（引擎/宿主异常）= 平台故障；③ guest 失控（死循环超时）= 平台级 watchdog 超时，terminate 内核并告警——后两者入 HMS 处置，前者是正常调试语义</b></td></tr>
+      <tr><td class="dim">健康信号源</td><td>引擎心跳、会话状态机、错误码、命令超时、崩溃信号、传输连接状态、<b>guest 失控（watchdog 超时）</b></td><td>各模块周期性上报心跳/状态；错误码统一进<b>已接线的 12 个族</b>（E_CTX / E_BUS / E_ISS / E_PER / E_DBG / E_SNAP / E_PROTO / E_LDR / E_OBS / E_TRX / E_ENG / E_INT；另有<b>已声明未接线的 2 个族</b> E_HMS / E_STORE——契约层已声明族标签但当前无生产构造点）——族清单与场景码见《模块设计说明书》3.4 表16；<b>故障三分类（评审 R3）：① guest trap（访存异常/非法指令）= 模型内 guest 异常，捕获为事件；② 平台崩溃（引擎/宿主异常）= 平台故障；③ guest 失控（死循环超时）= 平台级 watchdog 超时，terminate 内核并告警——后两者入 HMS 处置，前者是正常调试语义</b></td></tr>
       <tr><td class="dim">异常分级</td><td>致命（平台不可用）/ 严重（功能降级）/ 警告（可继续）</td><td>分级决定分发范围与降级动作，阈值可配置</td></tr>
       <tr><td class="dim">分角色分发</td><td>产品/嵌入式 = 可读提示（脱敏）；系统管理员 = 诊断详情（关联日志、时间线）</td><td>同一异常两个视角，原始日志不越界（§3.4）</td></tr>
       <tr><td class="dim">降级动作</td><td>自动快照 + 恢复 / 暂停 / 断开外设 / 关闭 trace 降载 / <b>terminate 失控内核（R3）</b></td><td>动作可重试；<b>恢复 = 检查点 + 稀疏输入事件序列重放（§7.3/§10.2，评审 R1）</b></td></tr>
@@ -1364,7 +1364,7 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
       <tr><td class="dim">命令超时</td><td>C1 请求超时（≤500ms）</td><td>警告 → Resp 超时错误</td><td>幂等重试 / 用户重发</td></tr>
       <tr><td class="dim">服务端断连（WS）</td><td>传输连接状态</td><td>严重 → 重连 + 序列号续拉</td><td>断线重连后补齐状态（M-07）</td></tr>
       <tr><td class="dim">资源耗尽（内存/缓冲）</td><td>环形缓冲溢出、堆水位</td><td>严重 → 降载（关 trace / 降采样）</td><td>丢最旧数据 + 标记，不崩溃</td></tr>
-      <tr><td class="dim">部分失败（加载/写存储）</td><td>错误码 E_PROTO/E_CTX</td><td>警告/严重 → 拒绝并保留旧态</td><td>提示 + 重试，不丢会话</td></tr>
+      <tr><td class="dim">部分失败（加载/写存储）</td><td>错误码 <b>E_LDR-01~03</b>（镜像解析）+ <b>E_PROTO-03/04</b>（镜像畸形 / 输入超限）；写存储走 <b>E_STORE</b> 族（<b>已声明未接线</b>）</td><td>警告/严重 → 拒绝并保留旧态</td><td>提示 + 重试，不丢会话</td></tr>
     </tbody>
   </table>
   </div>
