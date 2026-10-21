@@ -1,11 +1,118 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.16.0
+> **Document version**: v0.17.0
 > **Created**: 2026-10-19
 > **Last updated**: 2026-10-21
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.17.0 变更摘要
+
+**契约层 v2 升版**（分支 `feature/contract-schema-v2`；规格冻结 `14da92e`，实现 `3126f54`，
+预算口径订正 `3a9660c`）。
+
+契约层自 v0.10 起冻结在 `schema_version = 1`，本轮是**第一次**升版。冻结规格 =
+`docs/detailed-design/STAGE-2_Contract_V2.md`（逐条列明破坏性变更、缺口 7 项、topic 映射、
+错误族、传输帧 `crc`、D-39 / D-40、D-57 / D-58）。
+
+台账**闭环 6 条**：**D-32**（契约缺口 7 项）· **D-34**（`Waveform` / `WaveformDelta` 命名歧义）·
+**D-39**（快照队列到期时刻校验）· **D-40**（空快照显式拒绝）· **D-57 / D-58**（契约端口文档与
+实现口径订正）。**新登记 1 条**：**D-68**（低危 · 指令预算的文档措辞）。
+
+### 一、第一次升版，所以「破坏性变更」是被允许的——但必须逐条写明
+
+破坏性变更**只有 4 类**，其余**全是加法**（不删字段、不改字段语义、不改既有事件的载荷形状）：
+
+1. **命令 / 事件新增**（变体集合变了 → 前端契约镜像必须跟）；
+2. **数值策略变更**（虚拟时间字段的线上表示：JSON 数字 → 十进制字符串）；
+3. **改名**（`model::Waveform` → `model::WaveformHistory`；`EventPayload::WaveformDelta` →
+   `EventPayload::WaveformHistory`；topic `waveform.delta` → `waveform.history`）；
+4. **错误族新增一个**（`ErrorFamily::Protocol` → `"PROTO"`）。
+
+> ⚠️ **快照族另有一个版本**：`SNAPSHOT_SCHEMA_VERSION` 1 → 2。快照的时间字段也字符串化了，
+> **旧的快照文件读不进来了**——升版让旧读者**大声拒绝**，而不是误读时间戳。
+
+### 二、虚拟时间为什么必须走十进制字符串
+
+契约里的虚拟时间是 `u64`（皮秒）。Rust 侧 `serde_json` 把 `u64` 序列化成 **JSON 数字**；
+JS 侧 `JSON.parse` 把 JSON 数字解析成 **IEEE-754 double**，**只精确到 2⁵³**。
+
+```
+2^53 ps = 9 007 199 254 740 992 ps ≈ 9 007 s ≈ 2.5 小时仿真时间
+```
+
+量子是 **1 µs**——所以**一次连续仿真 2.5 小时就会越过 2⁵³**。**这不是理论值，是可达的。**
+越过之后 `elapsed_ps` / `t_ps` 会**静默丢精度**（差值变成 1 000 000 之类的非整数量），
+波形时间轴会出现**跳变**。
+
+规则因此是：**凡是「随仿真时长增长」的量走十进制字符串，其余 `u64` 保持 JSON 数字**，
+并逐字段写明各自的**可达上界**（`Message.seq` 2⁵³ 条 ≈ 285 年 @1000 msg/s，安全；
+`Edge.value` MVP 内 ≤ 32 位，安全；……）。
+
+> ⚠️ **Rust 类型不变**（仍是 `u64`），只改**线上表示**（`#[serde(with = ...)]`）——
+> **内核内部零改动**。反序列化**同时接受字符串与数字**（兼容旧生产者），但文档写明
+> 「数字形态只保证 ≤ 2⁵³ 精确」。JS 侧读回时**超过 2⁵³ 必须抛错**，不是四舍五入——
+> 静默丢精度正是这条要消灭的行为。
+
+### 三、契约此前**根本没有寄存器载体**
+
+新增 `Registers` 事件之前，前端只能从波形边沿里刨寄存器，把「**信号历史**」和
+「**寄存器快照**」混为一谈。本轮补上一等公民的寄存器通道：
+
+- **命令 3 个**：`ReadRegisters{index, count}` · `WriteRegister{index, value}` ·
+  `Negotiate{min_schema_version, cap_bits}`；
+- **事件 3 个**：`Registers{index, values}`（**读命令与写命令共用**这一条回复）·
+  `Negotiated{schema_version, cap_bits, kernel}` ·
+  `SimStateDelta{registers, pc, t_ps}`（LLD 自 v0.11 起就引用它，契约里一直没有落点）。
+
+⚠️ **「读是钳位、写是拒绝」不是笔误**：读越界**没有副作用**，钳到合法区间即可；
+写越界若也钳位，会**静默写到别的寄存器**——那正是不可接受的副作用。
+写 x0 则**丢弃**（D-04 的硬连线）但**仍回复**——丢弃是语义，不是错误。
+
+### 四、错误族：`PROTO` 与 `TRX` **并存不合并**
+
+LLD 的 `E_PROTO-01`…`E_PROTO-08` 此前在契约的 `ErrorFamily` 里**没有族可归**（传输族是 `TRX`）。
+本轮新增 `ErrorFamily::Protocol`（`as_str() == "PROTO"`，与 LLD 逐字一致）。
+
+> ⚠️ **不与 `Transport`（`"TRX"`）合并**：两个族职责不同——`TRX` 是**传输适配器自身**的故障
+> （连接、断线、超时），`PROTO` 是**协议层**的故障（版本协商、信封畸形、CRC 不符）。
+> 合并会让「对端没接上」和「对端接上了但说的不是人话」落进同一个码，
+> 前端无法据此决定是**重连**还是**报错**。
+
+### 五、D-57 / D-58 / D-68：**改文档，不改实现**
+
+这一族的三条**行为从来是对的**，错的只是**契约文档的措辞**：
+
+| 台账 | 文档原措辞 | 订正后 | 为什么不改实现 |
+| --- | --- | --- | --- |
+| **D-57** | `continue_until_event` 跑到「下一个**量子边界**」 | 跑到「**本轮指令预算耗尽**」；量子边界是**抢占点**不是停止条件 | 改实现会**推翻 D-07 刚闭环的 `d07_time_driven.rs` 31 条用例**所钉的语义 |
+| **D-58** | `Peripheral::tick` 「**每量子一次**（默认 1 µs）」 | 「**每条指令边界一次**（外加每个量子边界一次）」；tick **不**被量子化 | 降回每量子一次会**牺牲 D-46 换来的边沿时间戳精度**（精确到单条指令） |
+| **D-68** | `DEFAULT_INSTRUCTION_BUDGET = 10_000` 是「**per-quantum**」 | 是「**run-window**」预算（= 10 个量子；10 000 × 1 ns = 10 µs，对 1 µs 的量子） | 引擎的 `instruction_budget` **一直就是**运行窗口预算；措辞差了 10 倍，会让人把量子 / 配额 / 预算的换算整个算错 |
+
+⚠️ **这一族能拖这么久，根因是契约层冻结**：冻结期间「契约文档」与「实现口径」两处各说各话，
+而冻结层不允许改。**契约层一解冻，三条一起订正**——这也说明「文档口径偏离」这类欠账
+**应该在解冻时一次性清**，而不是零散地补。
+
+### 六、本批的已知缺口（**不在本批范围**）
+
+- ⚠️ **前端契约镜像仍是 v1**（`front/lib/message.js` 的 `SCHEMA_VERSION = 1`）。
+  `front/tests/contract.test.mjs` 的「Rust 源码 ↔ JS 镜像逐字对拍」**已经把红抓出来了**
+  （命令变体集合 / 事件变体集合 / 变体内层字段名 / newtype 变体的 DTO 字段名 **4 条红**）——
+  这正是那条对拍门禁**有判别力**的证明。两侧 `schema_version` 必须**同时**升到 2。
+- ⚠️ **内核侧尚未迁移到 v2**：`crates/kernel` 当前**编译不过**（`model::Waveform` 导入 3 处、
+  `EventPayload::WaveformDelta` 变体 2 处、`CommandPayload` 新增 3 变体未覆盖的匹配）——
+  属内核侧批次。**本批只改文档，不碰 `crates/**` 与 `front/**`**。
+
+### 七、门禁与产物
+
+> ⚠️ **本段的数字待收口时从当前树重算**——契约层与内核侧的后续批次落地后，
+> `cargo test --workspace` 的合计条数、`tools/check-front.sh` 的门禁统计都会变。
+> 本批**只**可确认：契约层自带用例（`cargo test -p riscv_sim_contract`）**全绿**；
+> `cargo fmt --all -- --check` 与 `cargo clippy -p riscv_sim_contract --all-targets -- -D warnings` 干净。
+
+- 关键 commit：`14da92e`（规格冻结）· `3126f54`（契约层 v2 实现）· `3a9660c`（D-68 预算口径订正）
+- 冻结规格：`docs/detailed-design/STAGE-2_Contract_V2.md` · 台账：`docs/reviews/REVIEWS.md`
 
 ## v0.16.0 变更摘要
 

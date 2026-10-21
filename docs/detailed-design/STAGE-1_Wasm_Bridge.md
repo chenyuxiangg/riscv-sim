@@ -1,7 +1,11 @@
 # 第 1 阶段 · WASM 桥接口规格（冻结）
 
 > **状态**：冻结（2026-10-21 修订——D-46 探针管道闭环，§3.1 / §3.3 / §3.4 /
-> §3.4b / §6 同步；**事件形状未变**）。本文件是**第 1 阶段**两侧实现的唯一权威副本：
+> §3.4b / §6 同步；**事件形状未变**）。
+> **再修订（2026-10-21 · 契约层 v2）**：契约事件变体 `EventPayload::WaveformDelta` →
+> **`EventPayload::WaveformHistory`**（台账 D-34：变体名随**内容**改——它装的是 **history 形**）。
+> **本表的「命令 → 事件序列」语义未变**，只是变体名改了；契约 v2 的冻结规格见
+> `docs/detailed-design/STAGE-2_Contract_V2.md`。本文件是**第 1 阶段**两侧实现的唯一权威副本：
 > Rust 侧（`crates/kernel/src/kernel_host/` + `wasm_api.rs`）与前端侧
 > （`front/kernel-worker.js`）都按本文实现；任何一方要改形状，必须先改本文。
 >
@@ -94,8 +98,8 @@ JS 镜像见 `front/lib/message.js`（`decodeMessage()` 是它的逆）。
 | 命令 | 事件序列（有序） |
 | --- | --- |
 | `Nop` | `Tick` |
-| `LoadProject` | `Tick`。⚠️ **装载即新会话**：内核侧的主题集合被清空（FR-13），所以**不会**产生 `WaveformDelta`——全量寄存器流由**随后的** `Subscribe{sim.registers}` 触发（见 §3.2b） |
-| `Continue` | `Tick`；若已订阅 `sim.registers` → `WaveformDelta`（**增量**：仅脏寄存器 + pc）；若已订阅 `sim.waveform` **且本轮有至少一条新边沿** → `WaveformDelta`（**增量**：仅探针边沿，见 §3.3；**无新边沿时不推**，避免空 delta）；若停止 → `Halted`；取指失败 → `Error{E_ISS-01}`（**取代**，见下） |
+| `LoadProject` | `Tick`。⚠️ **装载即新会话**：内核侧的主题集合被清空（FR-13），所以**不会**产生 `WaveformHistory`——全量寄存器流由**随后的** `Subscribe{sim.registers}` 触发（见 §3.2b） |
+| `Continue` | `Tick`；若已订阅 `sim.registers` → `WaveformHistory`（**增量**：仅脏寄存器 + pc）；若已订阅 `sim.waveform` **且本轮有至少一条新边沿** → `WaveformHistory`（**增量**：仅探针边沿，见 §3.3；**无新边沿时不推**，避免空 delta）；若停止 → `Halted`；取指失败 → `Error{E_ISS-01}`（**取代**，见下） |
 | `StepN{n}` | 同 `Continue`（把 `Continue` 换成「执行 n 条」）。⚠️ `n` 条跑完**不是**停止，不产生 `Halted` |
 | `Pause` | `Tick`；`Halted{UserPause}` |
 | `SetBreakpoint` | `Tick`；地址非法 / 重复注册 → `Error{E_CTX-07}`（**取代** `Tick`） |
@@ -104,7 +108,7 @@ JS 镜像见 `front/lib/message.js`（`decodeMessage()` 是它的逆）。
 | `ClearWatchpoint{id}` | `Tick`（同上，幂等） |
 | `ReadMemory` | `MemoryRead{addr,size,value}`；未映射 → `Error{E_BUS-01}`（**取代**） |
 | `WriteMemory` | `Tick`；未映射 → `Error{E_BUS-01}`（**取代**） |
-| `Subscribe{topic}` | `Tick`；`topic=="sim.registers"` → `WaveformDelta`（**全量**）；`topic=="sim.waveform"` → `WaveformDelta`（**探针通道列表**，见 §3.3） |
+| `Subscribe{topic}` | `Tick`；`topic=="sim.registers"` → `WaveformHistory`（**全量**）；`topic=="sim.waveform"` → `WaveformHistory`（**探针通道列表**，见 §3.3） |
 | `Unsubscribe{topic}` | `Tick`（幂等） |
 | `Snapshot` | `SnapshotCreated{id}`（id 单调递增）。⚠️ 第 1 阶段**只分配 id，不落盘**（M-20 仍是 stub，见 §3.7） |
 | `Restore{state}` | `Tick`；`state.schema_version` 不符 → `Error{E_SNAP-05}`（**取代**） |
@@ -113,7 +117,7 @@ JS 镜像见 `front/lib/message.js`（`decodeMessage()` 是它的逆）。
 **「取代」= 该条命令只产出这一个事件**（错误事件本身即首个事件，携带 `reqId`）。
 
 **「取指失败 → Error」的完整序列**：`Continue` / `StepN` 在取指失败（总线错误）时产出
-**4 条**事件，依次是 `Error{E_ISS-01}` → `Tick` → `WaveformDelta` → `Halted{Trap}`。
+**4 条**事件，依次是 `Error{E_ISS-01}` → `Tick` → `WaveformHistory` → `Halted{Trap}`。
 错误事件排在**最前**，因为它要携带命令的 `reqId`——M-05 靠它拒掉命令，而不是
 让命令等超时。
 
@@ -122,8 +126,10 @@ JS 镜像见 `front/lib/message.js`（`decodeMessage()` 是它的逆）。
 
 ### 3.2 寄存器波形流
 
-契约里**没有**寄存器快照事件（D-32 缺口），所以寄存器值只能走
-`EventPayload::WaveformDelta` 的边沿编码流——这是契约内**唯一**的载体。
+⚠️ **契约层 v2 起，这句话已经不成立**：契约**现在有**寄存器快照事件了
+（`EventPayload::Registers`，台账 D-32 缺口 1 已闭环）。但**本表描述的桥（第 1 阶段）
+尚未改接线**——寄存器值在本桥里**仍然**走 `EventPayload::WaveformHistory` 的边沿编码流。
+改接线属于后续批次，本文不提前改。
 流 id 与 mock 内核**逐字一致**，前端视图零改动：
 
 | 流 id | label | value |
@@ -162,7 +168,7 @@ await registerMemory.loadProject(project);   // 不是 dispatch + ensureSubscrib
 ```
 guest 写外设 → M-14 派发 → M-15 判「状态真变了」→ report(signal)
    → M-18 判沿 → 边沿进 M-19 的环（EdgeSink）
-   → 内核宿主取边沿 → 契约 EventPayload::WaveformDelta
+   → 内核宿主取边沿 → 契约 EventPayload::WaveformHistory
 ```
 
 - **通道 id** = `"{外设 id}.{信号名}"`（M-18 `drain_waveform`）。默认内存图
@@ -191,7 +197,7 @@ JSON 解析同时压垮。两层各管一段：
 | 层 | 位置 | 上限 | 满了怎么办 | 可见性 |
 | --- | --- | --- | --- | --- |
 | **内存层** | M-18 的每通道边沿存储 | `EDGE_STORE_CAP = 8192` | 丢**最旧的**（成批淘汰） | `dropped_edge_count()` |
-| **事件层** | 单条 `WaveformDelta` 事件 | `MAX_WAVEFORM_EDGES_PER_EVENT = 4096` | 保留**最新的** | `waveform_edges_truncated()` |
+| **事件层** | 单条 `WaveformHistory` 事件 | `MAX_WAVEFORM_EDGES_PER_EVENT = 4096` | 保留**最新的** | `waveform_edges_truncated()` |
 
 两层的取舍不同是**有意的**：内存层管「存多少」，事件层管「一条事件多大」。
 只做一层，要么内存爆，要么事件太大。**截断都是可见的计数**，不静默丢——
