@@ -80,6 +80,26 @@ pub const REGION_KIND_ROM: &str = "rom";
 /// Region-kind tag of a peripheral region (see [`REGION_KIND_RAM`]).
 pub const REGION_KIND_PERIPHERAL: &str = "peripheral";
 
+/// Scenario code: two regions overlap (or an address is already mapped).
+///
+/// ⚠️ **A named constant, not a literal.** The same number was spelled
+/// out as a bare `3` in several places — a bare number carries no
+/// meaning, so the same value could later be reused for something else
+/// without anybody noticing (one code, two meanings — the same trap as
+/// `E_SNAP-02` / `E_SNAP-06`).
+pub const E_BUS_03_OVERLAP: u16 = 3;
+
+/// Scenario code: the region's address range does not fit the 32-bit
+/// address space (`base + size` overflows, or the range leaves the
+/// 4 GiB bus).
+pub const E_BUS_04_OUT_OF_RANGE: u16 = 4;
+
+/// Scenario code: the region's size is zero.
+pub const E_BUS_06_ZERO_SIZE: u16 = 6;
+
+/// Scenario code: the region's size exceeds the per-region cap.
+pub const E_BUS_09_TOO_LARGE: u16 = 9;
+
 /// Scenario code: the memory-map topology names a region kind this
 /// build does not know.
 ///
@@ -978,14 +998,14 @@ impl Bus {
                     if r.size == 0 {
                         return Err(PlatformError::new(
                             BUS_FAMILY,
-                            6,
+                            E_BUS_06_ZERO_SIZE,
                             format!("region 0x{:08x} has size 0", r.base),
                         ));
                     }
                     let end = r.base.checked_add(r.size).ok_or_else(|| {
                         PlatformError::new(
                             BUS_FAMILY,
-                            4,
+                            E_BUS_04_OUT_OF_RANGE,
                             format!(
                                 "base + size overflows u32 (base=0x{:08x}, size=0x{:x})",
                                 r.base, r.size
@@ -995,14 +1015,14 @@ impl Bus {
                     if u64::from(end) > BUS_SIZE {
                         return Err(PlatformError::new(
                             BUS_FAMILY,
-                            4,
+                            E_BUS_04_OUT_OF_RANGE,
                             format!("region 0x{:08x}..0x{:08x} exceeds 4 GiB bus", r.base, end),
                         ));
                     }
                     if u64::from(r.size) > self.max_region_bytes {
                         return Err(PlatformError::new(
                             BUS_FAMILY,
-                            9,
+                            E_BUS_09_TOO_LARGE,
                             format!(
                                 "region size {} exceeds the per-region cap of {} bytes (base=0x{:08x})",
                                 r.size, self.max_region_bytes, r.base
@@ -1031,7 +1051,7 @@ impl Bus {
             if w[1].0 < w[0].1 {
                 return Err(PlatformError::new(
                     BUS_FAMILY,
-                    3,
+                    E_BUS_03_OVERLAP,
                     format!(
                         "rebuilt regions 0x{:08x}..0x{:08x} and 0x{:08x}..0x{:08x} overlap",
                         w[0].0, w[0].1, w[1].0, w[1].1
@@ -1053,7 +1073,7 @@ impl Bus {
                 if *rbase < end && *base < *rend {
                     return Err(PlatformError::new(
                         BUS_FAMILY,
-                        3,
+                        E_BUS_03_OVERLAP,
                         format!(
                             "rebuilt region 0x{:08x}..0x{:08x} overlaps the peripheral window \
                              0x{:08x}..0x{:08x} that is kept in place",
