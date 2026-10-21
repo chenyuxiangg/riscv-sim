@@ -18,11 +18,12 @@
 // alive (that is what `reconnecting` means). An illegal transition is
 // rejected with E_CTX-01 (M-04 LLD §6.1) and leaves the state untouched.
 //
-// Capability negotiation is **not** implemented: the frozen
-// `CommandPayload` has no `negotiate` variant, so the front end cannot
-// ask the kernel for its capability set. The workbench keeps using the
-// static role capability bits of M-01. See the review doc's "contract
-// gaps" section.
+// Capability negotiation: contract v2 **does** provide a `Negotiate`
+// command (`CommandPayload::Negotiate { min_schema_version, cap_bits }`
+// → `EventPayload::Negotiated`), but the front end does **not** call it
+// yet — the frozen spec (STAGE-2 §11) does not require the front end to
+// negotiate. Until that changes the workbench keeps using the static role
+// capability bits of M-01.
 
 /** Legal session state transitions. */
 const LEGAL_TRANSITIONS = Object.freeze({

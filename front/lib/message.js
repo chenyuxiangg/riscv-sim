@@ -123,10 +123,25 @@ export function protocolError(code, message) {
  * 凡是「随仿真时长增长」的量（虚拟时间）都走字符串：JSON 数字只能精确
  * 表示到 2^53，而 2^53 ps ≈ 2.5 小时的仿真时间——**可达**，不是理论值。
  *
+ * ⚠️ **非安全整数走 BigInt 路径**：`String(1e21)` 给出的是指数记法
+ * `"1e+21"`——那**不是**十进制整数字符串，`psToNumber` 会把它判成「形态
+ * 非法」（E_PROTO-08）。但 1e21 > 2^53，按规格 §2.4 它应该是「输入超限」
+ * （E_PROTO-04）——**错误的分类**会让「超限」与「畸形」两件事混在一起。
+ * 所以这里的产出必须是**纯十进制**：让 `psToNumber` 走到超限分支。
+ *
+ * 常规路径（安全整数）**行为不变**。
+ *
  * @param {number|bigint|string} value
  * @returns {string}
  */
 export function ps(value) {
+    if (typeof value === "bigint") return value.toString();
+    if (typeof value === "number") {
+        if (Number.isSafeInteger(value)) return String(value);
+        // 整数但**不是**安全整数（|value| > 2^53）：BigInt 给出**纯十进制**
+        // 的精确值（`BigInt` 接受任何整数值的 double）。
+        if (Number.isInteger(value)) return BigInt(value).toString();
+    }
     return String(value);
 }
 
@@ -260,6 +275,23 @@ export const Command = Object.freeze({
 // Event payloads — `protocol::EventPayload`
 // ---------------------------------------------------------------------------
 
+/**
+ * `model::DeltaRegister { index, value }` — one changed register inside
+ * `EventPayload::SimStateDelta` (contract v2 spec §4.4).
+ *
+ * The DTO is **nested** inside the event payload, so the contract gate
+ * has to look at it explicitly: the variant-level field check only sees
+ * the **outer** `registers` field and never descends into the elements
+ * (F3).
+ *
+ * @param {number} index — register index (0..=31)
+ * @param {number} value — the new value
+ * @returns {{index: number, value: number}}
+ */
+export function deltaRegister(index, value) {
+    return { index: Number(index), value: Number(value) >>> 0 };
+}
+
 /** Event payload builders. Same shape rule as `Command`. */
 export const Event = Object.freeze({
     /** `EventPayload::Tick { elapsed_ps, pc }` — `elapsed_ps` 走十进制字符串。 */
@@ -299,10 +331,7 @@ export const Event = Object.freeze({
      */
     simStateDelta: (registers, pc, tPs) => ({
         SimStateDelta: {
-            registers: (registers ?? []).map((r) => ({
-                index: Number(r?.index),
-                value: Number(r?.value) >>> 0,
-            })),
+            registers: (registers ?? []).map((r) => deltaRegister(r?.index, r?.value)),
             pc: pc === null || pc === undefined ? null : Number(pc),
             t_ps: ps(tPs),
         },

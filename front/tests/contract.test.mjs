@@ -36,6 +36,7 @@ import {
     decodeMessage,
     eventTopic,
     waveform,
+    deltaRegister,
 } from "../lib/message.js";
 import { encodeFrame, decodeFrame, FRAME_TYPE } from "../lib/frame.js";
 import { buildMockProject } from "../dev/mock-project.js";
@@ -46,6 +47,7 @@ const repoRoot = resolve(frontDir, "..");
 
 const protocolRs = resolve(repoRoot, "crates/contract/src/protocol.rs");
 const modelRs = resolve(repoRoot, "crates/contract/src/model.rs");
+const snapshotRs = resolve(repoRoot, "crates/contract/src/snapshot.rs");
 const hasRust = existsSync(protocolRs) && existsSync(modelRs);
 
 /**
@@ -149,6 +151,89 @@ function rustStructFields(source, structName) {
         if (m) fields.push(m[1]);
     }
     return fields;
+}
+
+/**
+ * Every field declaration inside a Rust `struct` or `enum`, together with
+ * the `#[serde(...)]` attributes that sit **directly above** it.
+ *
+ * The other helpers in this file only look at *names* and *shapes*, so
+ * they cannot see the **serde representation** of a field. That blind
+ * spot is exactly what let the §2 numeric policy drift: dropping the
+ * `#[serde(with = "crate::numstr::u64_decimal")]` attribute of a single
+ * field puts the Rust side back to a JSON number while this gate stays
+ * green — and `numstr::u64_decimal` accepts **both** shapes, so nothing
+ * fails at runtime either (F2).
+ *
+ * The parser is deliberately small: it walks the container body line by
+ * line, collecting attributes (they may span several lines) and handing
+ * them to the field declaration that follows. Doc comments and blank
+ * lines are skipped without dropping the pending attributes.
+ *
+ * @param {string} source
+ * @param {string} containerName — a `struct` or `enum` name
+ * @returns {Array<{owner: string, name: string, attributes: string[]}>}
+ *   `owner` is the struct name, or the **variant** name for a field of a
+ *   struct variant.
+ */
+function rustFieldDeclarations(source, containerName) {
+    const start = source.search(new RegExp(`^pub (?:struct|enum) ${containerName} \\{`, "m"));
+    assert.notEqual(start, -1, `契约里找不到 ${containerName}`);
+    const body = source.slice(start);
+    const end = body.indexOf("\n}");
+    assert.notEqual(end, -1, `${containerName} 没有闭合`);
+    const lines = body.slice(0, end).split("\n");
+
+    /** @type {Array<{owner: string, name: string, attributes: string[]}>} */
+    const decls = [];
+    /** @type {string[]} */
+    let pending = [];
+    /** @type {string|null} */
+    let partial = null;
+    let owner = containerName;
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+        // -- an attribute, possibly spanning several lines -----------------
+        if (partial !== null) {
+            partial += ` ${trimmed}`;
+            if (trimmed.includes("]")) {
+                pending.push(partial);
+                partial = null;
+            }
+            continue;
+        }
+        if (trimmed.startsWith("#[")) {
+            if (trimmed.includes("]")) pending.push(trimmed);
+            else partial = trimmed;
+            continue;
+        }
+        // -- doc comments / blank lines keep the pending attributes -------
+        if (trimmed === "" || trimmed.startsWith("//")) continue;
+        // -- an enum variant: it owns the fields that follow --------------
+        const variant = /^ {4}([A-Z][A-Za-z0-9]*)\s*(\{|\(|,)/.exec(line);
+        if (variant) {
+            owner = variant[1];
+            pending = [];
+            continue;
+        }
+        // -- a field of a struct variant (indented by eight spaces) -------
+        const nested = /^ {8}(?:pub\s+)?([a-z_][A-Za-z0-9_]*)\s*:/.exec(line);
+        if (nested) {
+            decls.push({ owner, name: nested[1], attributes: pending });
+            pending = [];
+            continue;
+        }
+        // -- a field of a top-level struct (indented by four spaces) ------
+        const top = /^ {4}(?:pub\s+)?([a-z_][A-Za-z0-9_]*)\s*:/.exec(line);
+        if (top) {
+            decls.push({ owner: containerName, name: top[1], attributes: pending });
+            pending = [];
+            continue;
+        }
+        pending = [];
+    }
+    return decls;
 }
 
 describe("Message 信封（与 crates/contract 逐字对齐）", () => {
@@ -396,6 +481,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             ["TreeNode", project.tree.root],
             ["ProjectVersion", project.version],
             ["WaveformHistory", waveform([])],
+            // `DeltaRegister` 嵌在 `SimStateDelta` 的 `registers[]` 里
+            // ——变体级的字段名检查只比**外层**，进不到元素里（F3）。
+            ["DeltaRegister", deltaRegister(1, 42)],
         ];
         for (const [structName, dto] of cases) {
             assert.deepEqual(
@@ -416,6 +504,55 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             rustStructFields(model, "Edge").sort(),
             "Edge 的字段名与 Rust 不一致",
         );
+    });
+
+    test("虚拟时间字段在 Rust 侧必须挂 numstr 属性（§2 数值策略）", { skip: !hasRust }, () => {
+        // 规格 §2：凡是「随仿真时长增长」的量（虚拟时间），线上表示是
+        // **十进制字符串**。Rust 侧靠字段上的
+        // `#[serde(with = "crate::numstr::u64_decimal")]` 实现。
+        //
+        // ⚠️ 这条门禁原来**看不见**这个属性：名字 / 形状的对拍只看变体
+        // 与字段名，看不到 serde 的**表示**。把 `Tick::elapsed_ps` 的
+        // numstr 属性删掉 → Rust 侧发 JSON 数字、JS 镜像发字符串，而
+        // `numstr::u64_decimal` **两种形态都收** → **静默**退回旧形态，
+        // 运行时也不会报错（同一个盲点覆盖全部 8+1 个虚拟时间字段）。
+        const model = readFileSync(modelRs, "utf8");
+        const protocol = readFileSync(protocolRs, "utf8");
+        const snapshot = readFileSync(snapshotRs, "utf8");
+
+        // [源码, 容器, 字段, 归属变体（null = 不限）, 期望条数]
+        const cases = [
+            [model, "SimState", "virtual_time_ps", null, 1],
+            [model, "Edge", "t_ps", null, 1],
+            [model, "TraceEvent", "t_ps", null, 1],
+            [model, "EdgeEvent", "t_ps", null, 1],
+            [model, "WaveformDelta", "t_virt", null, 1],
+            [protocol, "EventPayload", "elapsed_ps", "Tick", 1],
+            [protocol, "EventPayload", "t_ps", "SimStateDelta", 1],
+            // `SchedEventDto` 的两个变体各带一个 `at_ps`。
+            [snapshot, "SchedEventDto", "at_ps", null, 2],
+            [snapshot, "QueuedEventDto", "at_ps", null, 1],
+        ];
+
+        const numstr = /serde\s*\(\s*with\s*=\s*"crate::numstr::u64_decimal"\s*\)/;
+        for (const [source, container, field, owner, expected] of cases) {
+            const decls = rustFieldDeclarations(source, container).filter(
+                (d) => d.name === field && (owner === null || d.owner === owner),
+            );
+            assert.equal(
+                decls.length,
+                expected,
+                `${container} 里叫 ${field} 的字段数量与预期不符（Rust 侧改名 / 改结构了？）`,
+            );
+            for (const decl of decls) {
+                assert.ok(
+                    decl.attributes.some((a) => numstr.test(a)),
+                    `${container}::${decl.owner}::${field} 缺少 `
+                    + '#[serde(with = "crate::numstr::u64_decimal")]'
+                    + "——虚拟时间会退回 JSON 数字（§2 数值策略失效）",
+                );
+            }
+        }
     });
 });
 
