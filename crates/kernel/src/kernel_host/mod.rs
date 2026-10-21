@@ -75,8 +75,29 @@
 //! 项目反复吃过「没有生产者的接口 = 死接口」的亏（台账 D-66）。它的
 //! 生产者（谁在什么时候产生增量）等 M-10 的增量订阅落地后再定——
 //! 在那之前接线只会造出一个「有形状、没内容」的变体。
+//!
+//! ## 会话级快照（STAGE-3）
+//!
+//! 冻结规格：`docs/detailed-design/STAGE-3_Session_Snapshot.md`。
+//!
+//! 宿主是**采集器**，M-20 是**记录器**：六段由本模块从各自的持有者那里
+//! 收齐，再交给 [`crate::m20_snapshot::SnapshotManager::capture_session`]
+//! 组装成契约层的 [`SessionSnapshotDto`]。
+//!
+//! ```text
+//! 段 0 cp_meta     ← 调用方给的
+//! 段 1 m12_engine  ← M-12 引擎（M-17 的 snapshot_full）
+//! 段 2 m13_state   ← M-14 总线的内存页（RAM 内容）
+//! 段 3 m14_map     ← M-14 总线的区域拓扑
+//! 段 4 m15_periph  ← M-15 外设的内部状态（按 id 匹配）
+//! 段 5 m16_intc    ← M-16 已拉起的 IRQ 行
+//! ```
+//!
+//! ⚠️ **恢复顺序是规格 §3.7 的不变量，不可换**：校验 → 区域拓扑 → 内存页
+//! → 外设状态 → IRQ 行 → 引擎段。页写不进不存在的区域；外设状态写不进
+//! 未绑定的实例；引擎段**最后**还原（它会覆盖 `gpr` / `pc` / 虚拟时间）。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
@@ -91,13 +112,20 @@ use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
 use riscv_sim_contract::protocol::{
     CommandPayload, Direction, EventPayload, HaltReason, Message, Payload,
 };
+use riscv_sim_contract::session::{
+    CheckpointMetaDto, M13StateDto, M14MapDto, M15PeriphDto, M16IntcDto, SessionSnapshotDto,
+};
+use riscv_sim_contract::snapshot::EngineSnapshotDto;
 use riscv_sim_contract::SCHEMA_VERSION;
 
 use crate::m06_elf::{DefaultLoader, Kind as LoadKind, ParseLimits};
+use crate::m15_peripheral;
 use crate::m15_peripheral::gpio::{GpioBank, GPIO_WINDOW};
+use crate::m16_interrupt::InterruptController;
 use crate::m17_backend::SelfIssBackend;
 use crate::m18_probe::{ChannelDef, ChannelKind, ProbeRegistry, SampleCfg, CH_GPIO0};
 use crate::m19_waveform::{ChannelMeta, SharedPipeline, WaveformPipeline};
+use crate::m20_snapshot::SnapshotManager;
 
 /// GPIO 外设的基址（PL061 惯例）。
 ///
@@ -215,6 +243,32 @@ pub fn kernel_descriptor() -> String {
 /// （[`KernelHost::waveform_edges_truncated`]）——不静默丢。
 pub const MAX_WAVEFORM_EDGES_PER_EVENT: usize = 4096;
 
+/// 场景码：中断控制器正被占用（`RefCell` 争用），状态回灌无法进行。
+///
+/// ⚠️ **内核宿主本地**——只有本模块需要命名它（M-16 自己的 `raise` /
+/// `lower` 路径不报这个错），所以它不进契约层。契约层目前没有 `INT`
+/// 族的场景码；等 M-16 落地、第二个模块也要命名它时，再上提到契约层。
+pub const E_INT_01_CONTROLLER_BUSY: u16 = 1;
+
+/// 中断汇与 M-16 控制器之间的**共享状态**。
+///
+/// ⚠️ **共享同一份**：[`HostSinks`]（引擎的 `InterruptSink`）与
+/// [`KernelHost`]（会话载荷的采集 / 回灌）必须看到**同一个**控制器——
+/// 两份就是**两个真相**（本项目反复踩过的坑：同一个量两个落点，恢复时
+/// 必须挑赢家，输家默默腐烂）。
+#[derive(Debug, Default)]
+struct IntcLink {
+    /// M-16 的中断控制器 —— 已拉起 IRQ 行的**唯一**落点。
+    controller: RefCell<InterruptController>,
+    /// 委派失败（`RefCell` 争用）的累计次数。
+    ///
+    /// ⚠️ 委派**不许 panic**：M-14 的总线 hook 在 `RefCell` 争用下 panic
+    /// 是本项目**已经修过**的坑（V-A 检视 F-3），同一个坑不许踩第二次。
+    /// 争用时**记一次失败**并返回 `Ok(())`——失败是**可见的**（这个
+    /// 计数器），不是静默的。
+    failures: Cell<u32>,
+}
+
 /// 引擎事件汇（事件总线 + 中断汇）。
 ///
 /// 引擎在调度循环里发布的 `Tick` 会被收集到这里。共享句柄让宿主能取走
@@ -223,6 +277,8 @@ pub const MAX_WAVEFORM_EDGES_PER_EVENT: usize = 4096;
 #[derive(Debug, Default, Clone)]
 struct HostSinks {
     events: Rc<RefCell<Vec<EventPayload>>>,
+    /// 与 [`KernelHost`] **共享**的 M-16 控制器（见 [`IntcLink`]）。
+    intc: Rc<IntcLink>,
 }
 
 impl EventBus for HostSinks {
@@ -233,11 +289,42 @@ impl EventBus for HostSinks {
 }
 
 impl InterruptSink for HostSinks {
-    fn raise(&mut self, _irq: u16) -> Result<(), PlatformError> {
-        Ok(())
+    /// 拉起一条 IRQ 行 —— **委派**给 M-16 的控制器。
+    ///
+    /// ⚠️ 以前这里是**空实现**（`Ok(())`）——那正是会话载荷段 5
+    /// （`m16_intc`）**恒为空**的直接原因。现在它真的接到一个控制器上，
+    /// 于是「段 5 恒为空」的成因精确落在「M-15 没有生产路径」上，而不是
+    /// 「intc 是个空壳」。
+    fn raise(&mut self, irq: u16) -> Result<(), PlatformError> {
+        self.delegate(|intc| intc.raise(irq))
     }
-    fn lower(&mut self, _irq: u16) -> Result<(), PlatformError> {
-        Ok(())
+
+    /// 撤下一条 IRQ 行 —— **委派**给 M-16 的控制器。
+    fn lower(&mut self, irq: u16) -> Result<(), PlatformError> {
+        self.delegate(|intc| intc.lower(irq))
+    }
+}
+
+impl HostSinks {
+    /// 把一次中断操作委派给 M-16 的控制器。
+    ///
+    /// ⚠️ **拿不到就记一次失败并返回 `Ok(())`**——绝不 `unwrap` /
+    /// `borrow_mut` 硬取：争用下 panic 是本项目已修过的坑（V-A 检视
+    /// F-3）。中断被吞掉比 panic 温和，但**必须可见**：失败次数由
+    /// [`KernelHost::intc_delegation_failures`] 暴露。
+    fn delegate<F>(&self, op: F) -> Result<(), PlatformError>
+    where
+        F: FnOnce(&mut InterruptController) -> Result<(), PlatformError>,
+    {
+        match self.intc.controller.try_borrow_mut() {
+            Ok(mut intc) => op(&mut intc),
+            Err(_) => {
+                self.intc
+                    .failures
+                    .set(self.intc.failures.get().wrapping_add(1));
+                Ok(())
+            }
+        }
     }
 }
 
@@ -273,6 +360,14 @@ pub struct KernelHost {
     /// 发布波形事件时因**超出单事件边沿上限**而截断的条数
     /// （V-A 检视 · 🟠-1）。
     waveform_edges_truncated: u64,
+    /// M-16 的中断控制器 —— 与 [`HostSinks`] **共享同一份**（STAGE-3 段 5）。
+    intc: Rc<IntcLink>,
+    /// M-20 的快照管理器 —— 会话载荷的**记录器**（STAGE-3）。
+    ///
+    /// ⚠️ 宿主**持有**它，但**不自己组装**载荷：六段由宿主采集，组装交给
+    /// M-20（规格 §3.5）——这样 M-20 不依赖 M-14 / M-15 / M-16，三段可以
+    /// 各自演进。
+    snapshots: SnapshotManager,
 }
 
 impl std::fmt::Debug for KernelHost {
@@ -298,7 +393,13 @@ impl Default for KernelHost {
 impl KernelHost {
     /// 创建一个空会话（内存图已建立，尚未加载任何镜像）。
     pub fn new() -> Self {
-        let sinks = HostSinks::default();
+        // ⚠️ 中断控制器**先**造出来，再交给 `HostSinks`——两者**共享同一份**
+        // （`Rc` 克隆），否则引擎拉起的 IRQ 行与宿主导出的段 5 就是两个真相。
+        let intc = Rc::new(IntcLink::default());
+        let sinks = HostSinks {
+            events: Rc::new(RefCell::new(Vec::new())),
+            intc: Rc::clone(&intc),
+        };
         let mut host = Self {
             backend: SelfIssBackend::new(sinks.clone(), sinks.clone()),
             sinks,
@@ -312,6 +413,8 @@ impl KernelHost {
             waveform: None,
             probe_wiring_failures: 0,
             waveform_edges_truncated: 0,
+            intc,
+            snapshots: SnapshotManager::new(),
         };
         // The default memory map cannot fail on a fresh bus (the two
         // regions do not overlap and are far below the 16 MiB per-region
@@ -1111,10 +1214,180 @@ impl KernelHost {
     pub fn read_memory(&self, addr: u32, size: WriteSize) -> Result<u32, PlatformError> {
         self.backend.bus().read_only(addr, size.into())
     }
+
+    // -- 会话级快照（STAGE-3）------------------------------------------------
+    //
+    // 下面这一组是**宿主调试 / 测试读面**：它们把会话的当前状态原样
+    // 摊出来，供端到端用例逐项比对「恢复前」与「恢复后」。
+    //
+    // ⚠️ 它们**不是契约层**的东西，也不进 `SCHEMA_VERSION`——契约层冻结
+    // 的是**线上**的 DTO，这里是**进程内**的观察窗口。
+
+    /// 当前会话的**通用寄存器**（32 个 GPR）。
+    ///
+    /// ⚠️ **x0 恒为 0**（D-04）：取的是后端的寄存器文件，它已经把 x0
+    /// 归零——一份被损坏的快照不能让 x0 泄出非零值。
+    pub fn registers(&self) -> [u32; 32] {
+        self.backend.register_file()
+    }
+
+    /// 当前会话的**引擎段**（队列内容 + 队列顺序 + 插入序计数器 + 指令
+    /// 预算 + 平台状态）。
+    ///
+    /// ⚠️ 一个 [`EngineSnapshotDto`] 就覆盖了「事件队列 / 插入序 / 指令
+    /// 预算」三项——它们在 DTO 里是**分开的字段**，不是一个笼统的
+    /// 「引擎状态」。
+    pub fn engine_snapshot(&self) -> EngineSnapshotDto {
+        self.backend.engine().snapshot_dto()
+    }
+
+    /// 当前会话的**外设内部状态**（段 4 的同一份导出）。
+    pub fn peripheral_states(&self) -> M15PeriphDto {
+        m15_peripheral::collect_session_state(&self.backend.bus().peripheral_instances())
+    }
+
+    /// 当前会话的**已拉起 IRQ 行**（段 5 的同一份导出）。
+    pub fn intc_state(&self) -> M16IntcDto {
+        self.intc_state_inner()
+    }
+
+    /// 当前会话的**内存映射拓扑**（段 3 的同一份导出）。
+    pub fn memory_map(&self) -> M14MapDto {
+        self.backend.bus().export_map()
+    }
+
+    /// 拉起一条 IRQ 行（走的是**引擎那条路**——同一个委派）。
+    ///
+    /// ⚠️ 目前**没有生产路径**会调它：M-15 的 pending IRQ 采样点属于
+    /// **M-16 落地**的范畴（台账 D-63 / D-64 / D-72 / D-74）。本方法
+    /// 让「段 5 恒为空」的成因精确落在「M-15 没有生产路径」上，而不是
+    /// 「intc 是个空壳」。
+    pub fn raise_irq(&mut self, irq: u16) -> Result<(), PlatformError> {
+        self.sinks.raise(irq)
+    }
+
+    /// 撤下一条 IRQ 行。
+    pub fn lower_irq(&mut self, irq: u16) -> Result<(), PlatformError> {
+        self.sinks.lower(irq)
+    }
+
+    /// 中断委派失败（`RefCell` 争用）的累计次数。
+    ///
+    /// 非零 = 有一次中断操作**没有真的落到控制器上**——这条 IRQ 行丢了。
+    pub fn intc_delegation_failures(&self) -> u32 {
+        self.intc.failures.get()
+    }
+
+    /// 采集一份**会话级**快照载荷（六段齐全，STAGE-3 §3.5）。
+    ///
+    /// 宿主是**采集器**，M-20 是**记录器**：六段分别来自各自的持有者
+    /// （M-12 引擎 / M-14 总线 / M-15 外设 / M-16 控制器），最后交给
+    /// [`SnapshotManager::capture_session`] 组装。
+    ///
+    /// ⚠️ **段 0 是调用方给的**——检查点元数据（检查点 id / 虚拟时间 /
+    /// 宿主时间 / 基线序列号）**不是**宿主的量：宿主不造它，也不改写它
+    /// （改写就是「悄悄替你造数据」）。
+    ///
+    /// ⚠️ **段 2 只含 RAM 内容**（契约层裁决 B：寄存器的唯一落点是
+    /// `m12_engine.state`，再存一份就是两个真相）。
+    pub fn capture_session(&mut self, cp_meta: CheckpointMetaDto) -> SessionSnapshotDto {
+        // ⚠️ 采集顺序：**先**把六段收齐（每段都是**独立**的一份导出），
+        // **再**交给 M-20 组装——M-20 不碰 M-14 / M-15 / M-16。
+        let engine = self.backend.engine().snapshot_dto();
+        let m13_state = M13StateDto {
+            mem_pages: self.backend.bus().export_pages(),
+        };
+        let m14_map = self.backend.bus().export_map();
+        let m15_periph =
+            m15_peripheral::collect_session_state(&self.backend.bus().peripheral_instances());
+        let m16_intc = self.intc_state_inner();
+        self.snapshots
+            .capture_session(cp_meta, engine, m13_state, m14_map, m15_periph, m16_intc)
+    }
+
+    /// 还原一份**会话级**快照载荷（STAGE-3 §3.7）。
+    ///
+    /// ## 顺序是**不变量**，不可换
+    ///
+    /// ```text
+    /// 0. payload.validate()           ← 先校验：一个字都还没改
+    /// 1. M-14 load_map(map)           ← 重建区域拓扑
+    /// 2. M-14 load_pages(pages)       ← 把 RAM 内容写进去（需要区域已存在）
+    /// 3. M-15 restore_session_states  ← 外设内部状态
+    /// 4. M-16 load_state(intc)        ← 已拉起的 IRQ 行
+    /// 5. M-17 restore_full(engine)    ← 最后还原引擎段（覆盖 gpr / pc / 虚拟时间）
+    /// ```
+    ///
+    /// 页写不进不存在的区域；外设状态写不进未绑定的实例；引擎段**最后**
+    /// 还原——它会**覆盖** `gpr` / `pc` / 虚拟时间。
+    ///
+    /// ## 「校验先于应用」是真的
+    ///
+    /// - 第 0 步失败 → **总线、外设、intc、引擎一个字节都不许动**；
+    /// - 第 1 / 2 / 3 步各自的消费者（Lane A 写的）**已经是**「全量校验
+    ///   → 再写入」，所以**每一步失败时，那一步自己没写**；之前步骤写下的
+    ///   内容是**合法**的（前面每步都通过了各自的校验）。
+    pub fn restore_session(&mut self, payload: &SessionSnapshotDto) -> Result<(), PlatformError> {
+        // ---- 第 0 步：先校验。一个字都还没改。 ----
+        payload.validate()?;
+
+        // ---- 第 1 步：重建区域拓扑（RAM / ROM 重建；外设原地保留）。 ----
+        self.backend.bus_mut().load_map(&payload.m14_map)?;
+
+        // ---- 第 2 步：回灌 RAM 内容（页要写进**已存在**的区域里）。 ----
+        self.backend
+            .bus_mut()
+            .load_pages(&payload.m13_state.mem_pages)?;
+
+        // ---- 第 3 步：外设内部状态（按 id 双向匹配；检查全在写入之前）。 ----
+        let instances = self.backend.bus().peripheral_instances();
+        m15_peripheral::restore_session_states(&instances, &payload.m15_periph)?;
+
+        // ---- 第 4 步：已拉起的 IRQ 行。 ----
+        self.load_intc_state(&payload.m16_intc)?;
+
+        // ---- 第 5 步：最后还原引擎段（队列 / 寄存器 / 虚拟时间）。 ----
+        self.backend.restore_full(&payload.m12_engine)?;
+
+        Ok(())
+    }
+
+    /// 读出当前已拉起的 IRQ 行（段 5 的同一份导出）。
+    ///
+    /// ⚠️ 争用时（`RefCell` 拿不到）**记一次失败**并返回**空**段 5 ——
+    /// 失败是**可见的**（[`Self::intc_delegation_failures`]），不是静默的
+    /// 「丢一段状态却不吭声」。
+    fn intc_state_inner(&self) -> M16IntcDto {
+        match self.intc.controller.try_borrow() {
+            Ok(intc) => intc.export_state(),
+            Err(_) => {
+                self.intc
+                    .failures
+                    .set(self.intc.failures.get().wrapping_add(1));
+                M16IntcDto::default()
+            }
+        }
+    }
+
+    /// 回灌已拉起的 IRQ 行（段 5 的消费者）。
+    fn load_intc_state(&self, state: &M16IntcDto) -> Result<(), PlatformError> {
+        let mut intc = self.intc.controller.try_borrow_mut().map_err(|_| {
+            PlatformError::new(
+                ErrorFamily::Interrupt,
+                E_INT_01_CONTROLLER_BUSY,
+                "中断控制器正被占用，无法回灌已拉起的 IRQ 行",
+            )
+        })?;
+        intc.load_state(state);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_session_snapshot;
 
 #[cfg(test)]
 mod tests_contract_v2;
