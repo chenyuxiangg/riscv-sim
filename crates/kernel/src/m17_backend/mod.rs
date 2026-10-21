@@ -87,9 +87,15 @@ pub const INSTRUCTION_COST_PS: u64 = crate::m12_engine::INSTRUCTION_COST_PS;
 /// 0x28  mret                    ← handler：回到 mepc
 /// ```
 ///
-/// ⚠️ **手写编码**：仓库里没有 RISC-V 汇编器。每一行都对着 M-13 的
-/// 译码规则核对过（CSR 指令的 csr 号在 bits[31:20]、zimm 在
+/// ⚠️ **手写编码**：这一份固件是**手打**的字节（仓库里没有 RISC-V 汇编器
+/// —— 交叉工具链在**仓库外**，见 `tools/fetch-golden-deps.sh`），每一行都对着
+/// M-13 的译码规则核对过（CSR 指令的 csr 号在 bits[31:20]、zimm 在
 /// bits[19:15]、funct3 在 bits[14:12]）。
+///
+/// ⚠️ **与端到端夹具的两份固件来源不同**：
+/// `crates/kernel/tests/intc_end_to_end.rs` 的那份是**汇编器产出**的
+/// （`riscv-none-elf-as -march=rv32i_zicsr` + `objdump` 逐条核对，汇编源在
+/// `crates/kernel/tests/fixtures/intc_fw.S`）；**这一份**是手打的。
 ///
 /// ⚠️ **`mie` 的值是 `1 << 11`（= 2048），不是 `11`**：`mie` 的
 /// **位号**是 11（`MEIE`），而 CSR 里存的是**位图**。`csrrwi` 的
@@ -388,41 +394,34 @@ impl InstructionExecutor for IssExecutor<'_> {
         // (4) 执行一条指令（访存经 M-14）。
         //
         //     ⚠️ `irq_clear` 的**副作用**（接缝 #4）在 M-17，**不在** M-13：
-        //     M-13 只管把值写进 CSR 文件，「写了要清哪些线」由 M-17 承担
-        //     （M-13 的执行器是纯函数，它不该认识 M-16）。
-        let irq_clear_before = csr_read(state, CSR_IRQ_CLEAR);
+        //     M-13 只管把值写进 CSR 文件，并**回报**「刚写了哪个 CSR」；
+        //     「写了要清哪些线」由 M-17 承担。
         let outcome = self.iss.step_one_via_bus(state, self.bus);
-        // 指令**刚写完** CSR ⇒ 立刻比对 `irq_clear`：**变了**才动手。
-        let irq_clear_after = csr_read(state, CSR_IRQ_CLEAR);
-        if irq_clear_after != irq_clear_before {
-            self.clear_lines_by_mask(irq_clear_after);
+        // ⚠️ **判据是「这条指令写了 `irq_clear`」，不是「`irq_clear` 的值
+        //     变了」**（STAGE-4 §4 接缝 #4 的原话）。
+        //
+        //     「值变了」是**错的**：guest 的 handler **每次都写同一个掩码**
+        //     ⇒ 第二次写时「值没变」⇒ 清除被**静默丢弃** ⇒ `active_irq`
+        //     永不复位 ⇒ M-16 的单级嵌套防护把这条线**永久堵死**
+        //     （v0.19 检视轮 **F-1**）。
+        if self.iss.take_last_csr_written() == Some(CSR_IRQ_CLEAR) {
+            self.clear_lines_by_mask(csr_read(state, CSR_IRQ_CLEAR));
         }
         // ⚠️ 这个 `match` **穷举** `StepOutcome` 的全部变体，**没有**兜底臂 ——
         //    M-13 以后再加变体，M-17 会**编译不过**（而不是静默走兜底）。
         //
-        //    ⚠️ 这里**曾经**有一臂 `Ok(StepOutcome::HostPause) => true` —— 一个
-        //    「M-13 产生的宿主暂停」在架构上就是错的：**M-13 不可能知道
-        //    宿主要暂停**。暂停语义落在 M-17 自己的 `pause_requested` 标志位
-        //    上（见 [`SelfIssBackend::pause`]），那个变体已随 STAGE-4 裁决 C
-        //    **删除**（台账 **D-72** 闭环）。
+        //    ⚠️ 这里**曾经**有三臂是**死分支**（`StepOutcome` 里的
+        //    `HostPause` / `Breakpoint` / `Watchpoint` **从来没有生产者**）：
+        //    「M-13 产生的宿主暂停」在架构上就是错的（**M-13 不可能知道
+        //    宿主要暂停**）；M-08 的断点由 **M-17 在取指前**自己判；
+        //    M-10 的观察点由**总线 hook** 记录、M-17 在指令返回后判。
+        //    三个变体已随 **STAGE-4 裁决 C** 与台账 **D-59 / D-72** 删除。
         let trapped = match outcome {
             Ok(StepOutcome::Advanced) => false,
             Ok(StepOutcome::Trapped { .. }) => {
                 // 陷入的指令**也算执行了**——它被取指、被译码、被触发。
                 // 但它**没有退休**，所以虚拟时钟**不推进**（见 (3)）。
                 true
-            }
-            Ok(StepOutcome::Breakpoint) => {
-                return Ok(ExecOutcome::Stop {
-                    reason: HaltReason::Breakpoint,
-                    consumed: false,
-                })
-            }
-            Ok(StepOutcome::Watchpoint) => {
-                return Ok(ExecOutcome::Stop {
-                    reason: HaltReason::Watchpoint,
-                    consumed: true,
-                })
             }
             Err(err) => {
                 // 取指 / 访存失败（E_BUS-01 等）——**报错**，不是陷阱。
@@ -1889,6 +1888,13 @@ mod tests {
             IRQ_MAIN_LOOP_ADDR,
             "mepc 必须是**被中断处**的 PC"
         );
+        // ⚠️ **「值是 0」必须配「这条 CSR 在文件里」** —— `csr_read` 对
+        //    「文件里没有的 CSR」也返回 0 ⇒ 单独断言「值是 0」是**真空
+        //    断言**（v0.19 检视轮 V-B · F-3）。
+        assert!(
+            state.csrs.iter().any(|(n, _)| *n == CSR_MTVAL),
+            "中断路径必须**真的写**过 mtval（不是「读不到就是 0」的那种假绿）"
+        );
         assert_eq!(
             crate::m13_iss::csr::csr_read(&state, CSR_MTVAL),
             0,
@@ -1974,6 +1980,25 @@ mod tests {
             crate::m13_iss::csr::csr_read(&state, CSR_MCAUSE),
             riscv_sim_contract::csr::IRQ_BASE | u32::from(IRQ_LINE),
             "第二次交付的 mcause 一样"
+        );
+
+        // ⚠️ **断言必须落在「第二次交付之后」的控制器状态上**，不能只数
+        //    「handler 跑了几次」—— 那个量在「**第二次清除被跳过**」时
+        //    **照样成立**（handler 确实跑了，只是它写的 `irq_clear` 没生效）。
+        //
+        //    guest 每次 handler 都写**同一个**掩码 ⇒ 「值变了才清」的闸门
+        //    会把第二次清除**静默丢弃** ⇒ `active_irq` 不复位 ⇒ M-16 的
+        //    单级嵌套防护把这条线**永久堵死**。
+        let controller = controller.borrow();
+        assert!(
+            controller.pending_lines().is_empty(),
+            "第二次 handler 写 irq_clear 也必须真的清掉挂起项 —— 实际还挂着 {:?}",
+            controller.pending_lines()
+        );
+        assert_eq!(
+            controller.active_irq(),
+            riscv_sim_contract::csr::NO_ACTIVE_IRQ,
+            "第二次 handler 写 irq_clear 也必须复位 active_irq（否则单级防护把这条线永久堵死）"
         );
     }
 

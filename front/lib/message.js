@@ -213,7 +213,16 @@ export const Command = Object.freeze({
     continueRun: () => "Continue",
     /** `CommandPayload::StepN { n }` — run exactly `n` instructions. */
     stepN: (n) => ({ StepN: { n: Number(n) } }),
-    /** `CommandPayload::Pause` — pause at the next quantum boundary. */
+    /**
+     * `CommandPayload::Pause` — stop the engine at the next **instruction**
+     * boundary.
+     *
+     * ⚠️ v1 的措辞写的是「next **quantum** boundary」，契约层已订正掉
+     * （`crates/contract/src/protocol.rs`）：宿主调用是**同步**的，
+     * `pause()` 必然发生在批次**之外**；「量子边界」不是它能停的地方。
+     * 实现落在 M-17 的 `pause_requested` 标志位上，在**下一条指令边界**
+     * 停下（STAGE-4 裁决 C · 台账 D-59）。
+     */
     pause: () => "Pause",
     /** `CommandPayload::SetBreakpoint(Breakpoint)`. */
     setBreakpoint: (breakpoint) => ({ SetBreakpoint: breakpoint }),

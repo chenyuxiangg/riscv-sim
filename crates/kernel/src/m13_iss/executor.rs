@@ -23,16 +23,22 @@ use super::csr;
 use super::decoder::Decoded;
 
 /// Result of a single instruction execution.
+///
+/// ⚠️ **只列 M-13 自己能知道的事**：指令退休了、还是触发了陷阱。
+///
+/// ⚠️ 这里**曾经**有三个变体是**死接口**（从来没有生产者）：
+/// `HostPause`（宿主暂停 —— **M-13 不可能知道**宿主要暂停）·
+/// `Breakpoint`（M-08 的断点 —— **M-17 在取指前**自己判，M-13 无从知晓）·
+/// `Watchpoint`（M-10 的观察点 —— 访存命中由**总线 hook** 记录，M-17 在
+/// 指令返回后判）。三者已随 **STAGE-4 裁决 C** 与台账 **D-59 / D-72**
+/// **删除**。删掉它们之后，这个 `match` **穷举**全部变体 ⇒ M-13 以后再加
+/// 变体，M-17 会**编译不过**（而不是静默走兜底）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
     /// Instruction retired normally; PC advanced.
     Advanced,
     /// Instruction triggered a trap (illegal / misaligned / bus error).
     Trapped { cause: TrapCause },
-    /// Instruction hit a breakpoint inserted by M-08.
-    Breakpoint,
-    /// Instruction hit a watchpoint inserted by M-10.
-    Watchpoint,
 }
 
 impl Default for StepOutcome {
@@ -67,9 +73,9 @@ pub enum TrapCause {
     OutOfRange,
     /// Environment call from M-mode (`mcause = 11`).
     Ecall,
-    /// Guest `EBREAK` (`mcause = 3`). Distinct from
-    /// [`StepOutcome::Breakpoint`], which means a *host* breakpoint
-    /// inserted by M-08 rather than a guest instruction.
+    /// Guest `EBREAK` (`mcause = 3`). Distinct from a *host* breakpoint
+    /// inserted by M-08 (which M-17 checks **before** the fetch, so it
+    /// never reaches the ISS at all).
     Breakpoint,
     /// Reserved for a future cause.
     ///
@@ -214,7 +220,24 @@ where
         d: &Decoded,
     ) -> Result<StepOutcome, PlatformError> {
         let misaligned = self.misaligned;
-        execute_one(self, state, d, misaligned)
+        let mut wrote_csr = None;
+        execute_one(self, state, d, misaligned, &mut wrote_csr)
+    }
+
+    /// Execute one decoded instruction **and report** which CSR it
+    /// wrote (`None` = it wrote none).
+    ///
+    /// This is the variant the platform layer uses: the ISS *reports*
+    /// what it did, and the platform decides what a write to a platform
+    /// CSR *means* (STAGE-4 §4 接缝 #4).
+    pub fn execute_with_report(
+        &mut self,
+        state: &mut SimState,
+        d: &Decoded,
+        wrote_csr: &mut Option<u16>,
+    ) -> Result<StepOutcome, PlatformError> {
+        let misaligned = self.misaligned;
+        execute_one(self, state, d, misaligned, wrote_csr)
     }
 }
 
@@ -643,11 +666,22 @@ fn branch(d: &Decoded) -> u32 {
 /// `mem` is the memory port: it is threaded through here so that both
 /// dispatch routes are structurally identical, and so that the load /
 /// store instructions land on one code path rather than two (D-11).
+///
+/// `wrote_csr` receives the **CSR number this instruction wrote** (`None`
+/// = it wrote no CSR). The ISS itself has **no** side effects of its own:
+/// it only *reports* what it did, and the platform layer (M-17) decides
+/// what a write to a platform CSR like `irq_clear` *means* (STAGE-4 §4
+/// 接缝 #4).
+///
+/// ⚠️ The report is produced by the **write arms themselves**, so the
+/// "does this instruction write?" decision has exactly **one** home —
+/// there is no second copy of it to drift.
 pub fn execute_one<M: MemoryAccess>(
     mem: &mut M,
     state: &mut SimState,
     d: &Decoded,
     misaligned: MisalignedPolicy,
+    wrote_csr: &mut Option<u16>,
 ) -> Result<StepOutcome, PlatformError> {
     let op = match classify(d) {
         Some(op) => op,
@@ -923,6 +957,7 @@ pub fn execute_one<M: MemoryAccess>(
             }
             if !csr_write_is_ignored(number) {
                 csr::csr_write(state, number, value);
+                *wrote_csr = Some(number);
             }
             sequential(d)
         }
@@ -937,6 +972,7 @@ pub fn execute_one<M: MemoryAccess>(
             write_gpr(state, d.rd, old);
             if d.rs1 != 0 && !csr_write_is_ignored(number) {
                 csr::csr_write(state, number, old | value);
+                *wrote_csr = Some(number);
             }
             sequential(d)
         }
@@ -949,6 +985,7 @@ pub fn execute_one<M: MemoryAccess>(
             write_gpr(state, d.rd, old);
             if d.rs1 != 0 && !csr_write_is_ignored(number) {
                 csr::csr_write(state, number, old & !value);
+                *wrote_csr = Some(number);
             }
             sequential(d)
         }
@@ -962,6 +999,7 @@ pub fn execute_one<M: MemoryAccess>(
             }
             if !csr_write_is_ignored(number) {
                 csr::csr_write(state, number, value);
+                *wrote_csr = Some(number);
             }
             sequential(d)
         }
@@ -974,6 +1012,7 @@ pub fn execute_one<M: MemoryAccess>(
             write_gpr(state, d.rd, old);
             if value != 0 && !csr_write_is_ignored(number) {
                 csr::csr_write(state, number, old | value);
+                *wrote_csr = Some(number);
             }
             sequential(d)
         }
@@ -986,6 +1025,7 @@ pub fn execute_one<M: MemoryAccess>(
             write_gpr(state, d.rd, old);
             if value != 0 && !csr_write_is_ignored(number) {
                 csr::csr_write(state, number, old & !value);
+                *wrote_csr = Some(number);
             }
             sequential(d)
         }

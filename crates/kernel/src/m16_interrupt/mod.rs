@@ -22,11 +22,18 @@
 //!
 //! 本模块**不依赖** M-12 / M-13 / M-17：
 //!
-//! - 量子边界采样由**调用方**驱动（M-12 的 `InterruptPoller` 接缝 →
-//!   M-17 装配），调用方把 CSR 文件里的 `mie` / `mstatus` 读出来传进
-//!   [`InterruptController::poll`]；
-//! - 交付是**拉取式**的：M-13 在取指边界查 [`InterruptController::pending_intr`]、
-//!   取走 [`InterruptController::take_intr`]（LLD 评审 16-4）。
+//! - 量子边界采样由**调用方**驱动 —— 具体是 **M-17 的执行器**
+//!   （`IssExecutor::step` 在**取指边界**上按「跨过量子」判据调
+//!   [`InterruptController::poll`]），调用方把 CSR 文件里的 `mie` /
+//!   `mstatus` 读出来传进 `poll`；
+//! - 交付是**拉取式**的：M-17 在取指边界取走
+//!   [`InterruptController::take_intr`]（LLD 评审 16-4），
+//!   再交给 M-13 的**唯一**陷阱入口 `enter_trap`。
+//!
+//! ⚠️ **没有「M-12 的 `InterruptPoller` 接缝」** —— 那个接缝在
+//! **STAGE-4 裁决 I** 里被**否掉**了：它会要求 M-12 持有一个闭包，
+//! 而那个闭包要反过来借用 M-17 自己的 `Iss` ⇒ **自引用借用**（Rust 不允许）。
+//! 接缝因此落在 **M-17 的执行器**里，M-12 的 `Engine` **零改动**。
 //!
 //! 本模块只认**契约层**的词汇（[`riscv_sim_contract::csr`] 的 CSR 编号 /
 //! `mie` 位映射 / `IRQ_BASE`）与**契约层**的会话载荷形状
@@ -38,7 +45,12 @@
 //! `3`（timer-compare），而 `mie` 用的是 RISC-V 的**标准位号**
 //! `11`（`MEIE`）/ `7`（`MTIE`）。两者的映射**只有一处**
 //! （[`riscv_sim_contract::csr::mie_bit_for_line`]），本模块的使能刷新
-//! 与 M-13 的 `mip` 上报都从它取。
+//! 从它取。
+//!
+//! ⚠️ **`mip` 今天的**唯一**消费者还没有实现** —— guest 读 `mip` 恒得 0
+//! （平台是**推**式交付：中断直接陷入，不需要 guest 去轮询）。台账
+//! **D-84** 记着这件事；`mie_bit_for_line` 的**反向**映射（线 → `mip` 位）
+//! 是 P1 的落点。
 
 use riscv_sim_contract::csr::{
     mie_bit_for_line, IRQ_BASE, IRQ_TIMER_COMPARE, IRQ_UART_RX_READY, IRQ_UART_TX_EMPTY,

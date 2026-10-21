@@ -70,7 +70,9 @@
   | 2 | UART tx-empty | **11**（`MEIE`） | 1 |
   | 3 | timer-compare | **7**（`MTIE`） | 2（最高） |
 
-- **两个位号空间**（line 空间 1/2/3 与 RISC-V `mie` 位号 11/7）**必须显式映射**（`mie_bit_for_line`），**不得**混用。映射表是**代码里的唯一真相**，两处（M-16 刷新使能、M-13 写 `mip`）都从它取。
+- **两个位号空间**（line 空间 1/2/3 与 RISC-V `mie` 位号 11/7）**必须显式映射**（`mie_bit_for_line`），**不得**混用。映射表是**代码里的唯一真相**。
+  - ⚠️ **本批只有**一个消费者：**M-16 刷新使能**。
+  - ⚠️ **第二个消费者（「M-13 写 `mip`」= guest 读得到「有没有挂起中断」）本批没做** —— 平台是**推**式交付（中断直接陷入，guest 不需要轮询），所以它**今天没有活影响**；但 `mip` 读出来恒为 0。⇒ 登记为台账 **D-84**（P1：`mie_bit_for_line` 的**反向**映射 + `mip` 的读侧投影）。**不要**在这里留一句没人实现的规格。
 - **M-16 内部的 `enabled_mask: u32` 按 line 索引**（bit L = line L 使能）；**量子边界**从 CSR `mie` 刷新：`enabled_mask` 的 bit L := `mie` 的 bit `mie_bit_for_line(L)`。**没有** mie 位映射的 line（未来扩展）刷新时**保持原值** —— **不静默清零**（清零 = 静默关中断）。
 - **全局使能**：`mstatus.MIE`（bit **3**）。仲裁要求它为 1。
 - **交付前**的两层判定（LLD 评审 16-10）：per-line `enabled_mask` **AND** `mstatus.MIE`。
@@ -410,16 +412,24 @@ pub fn enter_trap(state: &mut SimState, cause: u32, mtval: u32) -> u32
 | # | 从 | 到 | 机制 | 落点 |
 | --- | --- | --- | --- | --- |
 | 1 | 外设（M-15） | M-16 | `InterruptSink::raise(line)` | 契约层**既有**端口；M-16 实现它 |
-| 2 | M-12 | M-16 | **量子边界**采样回调（**M-12 内部接缝**，与 `PeripheralTicker` 同型） | `m12_engine` 新增 `InterruptPoller` 接缝；`set_interrupt_poller` 安装；M-17 装配 |
+| 2 | M-17 | M-16 | **量子边界**采样回调（**M-17 执行器内部**接缝 —— 裁决 I；**不是** M-12 的接缝，见 §4.1） | M-17 的 `IssExecutor::step` 在**取指边界**上按「跨过量子」判据调 `intc.poll(now_ps, mie, mstatus)`；`mie` / `mstatus` 走 M-13 的 `csr_read` |
 | 3 | M-16 | M-13 | **拉取式**交付（LLD 评审 16-4） | `m16_interrupt` 暴露 `pending_intr()` / `take_intr()`；M-17 的 `IssExecutor` 在取指边界查 |
-| 4 | M-13 | M-16 | `irq_clear` CSR 写 ⇒ 清挂起 | M-13 的 CSR 写路径需要一个**副作用回调**；M-17 装配 |
+| 4 | M-13 | M-16 | `irq_clear` CSR 写 ⇒ 清挂起 | M-13 的 CSR 写路径**回报**「刚写了哪个 CSR」（`Iss::take_last_csr_written`）；M-17 看到「写的是 `irq_clear`」就调 `intc.clear(line)` |
 | 5 | M-16 | M-18 | **中断脉冲**（D-26） | M-16 的 `pulse_sink` 回调；宿主接到 `ProbeRegistry::sample_irq_pulse` |
 | 6 | 宿主 | M-16 | `raise_irq` / `lower_irq` / `set_timer_compare` | `kernel_host` **既有** `raise_irq` / `lower_irq` **扩语义**（现在是「直接进 `raised` 集合」） |
 | 7 | 宿主 | M-16 | `clear_irq(line)`（新） | 调试器/固件清中断 |
 
 ⚠️ **接缝 #2 与 #3 的边界**：`M-12` **不依赖** M-13，**也不依赖** M-16 —— 它只认一个**回调式接缝**（与 `PeripheralTicker` / `InstructionExecutor` **同型**）。**依赖方向单向**：M-17 → M-12 / M-13 / M-16。
 
-⚠️ **接缝 #4 的落点**：M-13 的执行器是**纯函数**（`(gpr, mem, decoded)`），它**不该**直接认识 M-16。所以 `irq_clear` 的**副作用**由 **M-17** 承担：M-17 在 CSR 写之后检查「刚写的 CSR 是不是 `irq_clear`」，是就调 `intc.clear(line)`。**M-13 只管把值写进 `csrs`**，副作用在 M-17 —— **一个约束一个落点**。
+⚠️ **接缝 #4 的落点**：M-13 的执行器是**纯函数**（`(gpr, mem, decoded)`），它**不该**直接认识 M-16。所以 `irq_clear` 的**副作用**由 **M-17** 承担：M-13 只管把值写进 `csrs`，并**回报**「刚写了哪个 CSR」；M-17 拿到这个回报，若是 `irq_clear` 就调 `intc.clear(line)` —— **一个约束一个落点**。
+
+> ⚠️ **判据必须是「这条指令写了 `irq_clear`」，不是「`irq_clear` 的值变了」**（**v0.19 检视轮 F-1 闭环**）。
+>
+> 「值变了」是**错的**：guest 的 handler **每次都写同一个掩码** ⇒ 第二次写时「值没变」⇒ 清除被**静默丢弃** ⇒ `active_irq` 永不复位 ⇒ M-16 的单级嵌套防护把那条线**永久堵死**。
+>
+> 而当时**两条**声称覆盖该场景的用例（端到端的「能再来一次」+ M-17 的「`mret` 之后能再来一次」）**只数「handler 跑了几次」** ⇒ 那个量在缺陷路径上**照样成立** ⇒ **全绿放过**；更糟的是它们把缺陷**钉成了期望**（把清除真正做掉反而会让它们变红）。
+>
+> ⇒ **机制换掉，不是打补丁**：M-13 回报「M-13 的 CSR 写路径需要一个**副作用回调**」的**字面**落点（回报而不是回调——回调会让 M-13 持有一个闭包，而那个闭包要反过来借用 M-17 的 `Iss` ⇒ **自引用借用**）。回报由**执行臂自己**产生 ⇒ 「这条指令写没写」的判据**只有一份**，不会漂移。
 
 ### 4.1 跨 lane 的 Rust 签名（**冻结** —— 三路施工对着这一份写）
 

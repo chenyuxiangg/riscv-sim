@@ -67,6 +67,17 @@ pub struct Iss {
     cfg: IssConfig,
     decoder: Decoder,
     misaligned: MisalignedPolicy,
+    /// 上一条指令**写入**的 CSR 号（`None` = 没写 / 还没跑过）。
+    ///
+    /// ⚠️ 这是**给平台层看的回报**，不是 ISS 自己的副作用：ISS 只**报告**
+    /// 「我写了哪个 CSR」，「写了要做什么」（例如 `irq_clear` ⇒ 清中断线）
+    /// 由 **M-17** 决定（STAGE-4 §4 接缝 #4）。
+    ///
+    /// ⚠️ **为什么必须有它**：平台层若靠「**值变了**」来猜「guest 写了
+    /// 这个 CSR」，那么 guest 写**同一个值**两次时，第二次就会被**静默
+    /// 丢弃** —— 那是 v0.19 检视轮查出的 **F-1**（第二次 `irq_clear`
+    /// 被跳过 ⇒ `active_irq` 永不复位 ⇒ 那条线被单级防护**永久堵死**）。
+    last_csr_written: Option<u16>,
 }
 
 impl Iss {
@@ -76,7 +87,18 @@ impl Iss {
             cfg,
             decoder: Decoder::default(),
             misaligned: MisalignedPolicy::default(),
+            last_csr_written: None,
         }
+    }
+
+    /// 取走「上一条指令写入的 CSR 号」（**取走即消失**）。
+    ///
+    /// 返回 `None` = 上一条指令**没有写**任何 CSR（或还没跑过指令）。
+    ///
+    /// ⚠️ **一次只对应一条指令**：每执行一条指令，这个值就被**重置**
+    /// ——所以平台层必须**紧接着**那一步取走它，隔一条再取就取不到了。
+    pub fn take_last_csr_written(&mut self) -> Option<u16> {
+        self.last_csr_written.take()
     }
 
     /// Select the policy for misaligned data accesses.
@@ -104,6 +126,9 @@ impl Iss {
         F: Fn(u32, WriteSize) -> Result<u32, PlatformError>,
         G: Fn(u32, WriteSize, u32) -> Result<(), PlatformError>,
     {
+        // ⚠️ **先清零**（与 [`Iss::step_one_via_bus`] 同口径）：每条指令只
+        //    对应**一次**回报。
+        self.last_csr_written = None;
         if state.pc & 0x1 != 0 {
             // Misaligned instruction address: the alignment check
             // precedes the fetch itself (LLD §3.1, 评审 13-3).
@@ -128,7 +153,10 @@ impl Iss {
         })?;
         let decoded = self.decoder.decode(raw, state.pc);
         let mut exec = Executor::new(read_mem, write_mem).with_misaligned_policy(self.misaligned);
-        exec.execute(state, &decoded)
+        let mut wrote_csr = None;
+        let outcome = exec.execute_with_report(state, &decoded, &mut wrote_csr);
+        self.last_csr_written = wrote_csr;
+        outcome
     }
     /// Run a single instruction with all memory traffic routed through
     /// the supplied [`Bus`] (M-14). This is the production dispatch
@@ -148,6 +176,9 @@ impl Iss {
         state: &mut SimState,
         bus: &mut Bus,
     ) -> Result<StepOutcome, PlatformError> {
+        // ⚠️ **先清零**：每条指令只对应**一次**回报 —— 平台层必须**紧接着**
+        //    那一步取走它（[`Iss::take_last_csr_written`]）。
+        self.last_csr_written = None;
         if state.pc & 0x1 != 0 {
             // Misaligned instruction address: the alignment check
             // precedes the fetch itself (LLD §3.1, 评审 13-3).
@@ -172,7 +203,10 @@ impl Iss {
         })?;
         let decoded = self.decoder.decode(raw, state.pc);
         let mut mem = BusMemory::new(bus);
-        execute_one(&mut mem, state, &decoded, self.misaligned)
+        let mut wrote_csr = None;
+        let outcome = execute_one(&mut mem, state, &decoded, self.misaligned, &mut wrote_csr);
+        self.last_csr_written = wrote_csr;
+        outcome
     }
 }
 

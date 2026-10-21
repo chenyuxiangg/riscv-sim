@@ -1553,6 +1553,86 @@ mod tests {
         assert_ne!(dto.active_irq, 0, "0 会被读成「行 0 是活动中断」");
     }
 
+    /// 段 5 的**字段顺序**被钉住。
+    ///
+    /// ⚠️ 上一条形状用例（`the_session_payload_shape_is_pinned_exactly`）
+    ///    把键**排序**后再比对 ⇒ 它**按定义与顺序无关**；而
+    ///    `serde_json` 没开 `preserve_order` ⇒ `to_value` 的 `Map` 是
+    ///    `BTreeMap` ⇒ **声明顺序根本不会被保留** ⇒ 调换段 5 的字段声明
+    ///    顺序，**没有任何用例会红**（v0.19 检视轮 V-A · F-3）。
+    ///
+    /// ⇒ 这里用 [`serde_json::to_string`]（**结构体直接序列化** ⇒ 按**声明
+    ///    顺序**写字段；`BTreeMap` 只影响 `Value`，不影响结构体的写出顺序）
+    ///    把**键在 JSON 文本里出现的先后**断言下来。
+    #[test]
+    fn the_segment_5_field_order_is_pinned() {
+        let text = serde_json::to_string(&M16IntcDto::default()).expect("json");
+        let order: Vec<&str> = [
+            "raised",
+            "pending",
+            "priorities",
+            "enabled_mask",
+            "active_irq",
+            "mtime_ps",
+            "mtimecmp_ps",
+        ]
+        .into_iter()
+        .collect();
+        let mut cursor = 0usize;
+        for key in order {
+            let at = text[cursor..]
+                .find(&format!("\"{key}\""))
+                .unwrap_or_else(|| panic!("字段 {key} 不在 {text} 里"));
+            cursor += at + key.len() + 2;
+        }
+        // ⚠️ 反向钉一次：把顺序**整个倒过来**，上面的游标推进就**找不到**
+        //    `enabled_mask` —— 所以这条用例真的在管「顺序」，不是「键集」。
+        let reversed = serde_json::to_string(&ReversedSegment5::default()).expect("json");
+        assert_ne!(
+            text, reversed,
+            "段 5 的字段顺序必须被钉住（否则「按字节 diff 两份载荷」的下游工具会失效）"
+        );
+    }
+
+    /// 段 5 的**倒序**版本 —— 只用来证明「顺序真的被钉住」。
+    #[derive(serde::Serialize)]
+    struct ReversedSegment5 {
+        mtimecmp_ps: u64,
+        mtime_ps: u64,
+        active_irq: u16,
+        enabled_mask: u32,
+        priorities: Vec<IrqPriorityDto>,
+        pending: Vec<PendingIrqDto>,
+        raised: Vec<u16>,
+    }
+
+    impl Default for ReversedSegment5 {
+        fn default() -> Self {
+            Self {
+                mtimecmp_ps: 0,
+                mtime_ps: 0,
+                active_irq: crate::csr::NO_ACTIVE_IRQ,
+                enabled_mask: 0,
+                priorities: Vec::new(),
+                pending: Vec::new(),
+                raised: Vec::new(),
+            }
+        }
+    }
+
+    /// **旧形状**载荷（只有 `raised`）必须**过校验**，不只是能反序列化。
+    ///
+    /// ⚠️ 上一条用例只测了**反序列化** —— 旧载荷能不能**过 `validate()`**
+    ///    是**另一件事**（STAGE-4 §2.4「旧载荷必须仍然通过」）。
+    #[test]
+    fn an_old_segment_5_payload_still_passes_the_validator() {
+        let mut payload = sample();
+        payload.m16_intc = serde_json::from_str(r#"{"raised":[1,3]}"#).expect("旧形状必须能读");
+        payload
+            .validate()
+            .expect("旧形状的段 5 必须仍然过校验（那正是 stub 时代的真实状态）");
+    }
+
     /// 虚拟时间字段走**十进制字符串**（契约 v2 §2.2）。
     ///
     /// ⚠️ 这是「判别式落在字段的**线上表示**上」：断言的是 JSON 里的

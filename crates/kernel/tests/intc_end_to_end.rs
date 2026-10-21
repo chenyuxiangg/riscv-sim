@@ -143,6 +143,11 @@ fn deliveries(host: &KernelHost) -> u32 {
 }
 
 /// CSR 文件里某个 CSR 的值（读不到 = 0）。
+///
+/// ⚠️ **这个助手对「文件里没有的 CSR」也返回 0** ⇒ 单独用它断言
+/// 「某个 CSR 的值是 0」是**真空断言**（v0.19 检视轮 V-B · F-3）。
+/// 要断言「值是 0」就得**同时**断言「这条 CSR **在文件里**」——
+/// 见 [`csr_is_present`]。
 fn csr(host: &KernelHost, number: u16) -> u32 {
     host.engine_snapshot()
         .state
@@ -151,6 +156,15 @@ fn csr(host: &KernelHost, number: u16) -> u32 {
         .find(|(n, _)| *n == number)
         .map(|(_, v)| *v)
         .unwrap_or(0)
+}
+
+/// 某个 CSR **在 CSR 文件里**（不是「它的值是 0」）。
+fn csr_is_present(host: &KernelHost, number: u16) -> bool {
+    host.engine_snapshot()
+        .state
+        .csrs
+        .iter()
+        .any(|(n, _)| *n == number)
 }
 
 // ---------------------------------------------------------------------------
@@ -168,13 +182,56 @@ fn an_interrupt_is_delivered_only_after_the_first_quantum_boundary() {
     step(&mut host, 16);
     host.raise_irq(LINE_1).expect("拉起中断必须成功");
 
-    // 还没跨过量子边界 ⇒ **不许**交付。
-    step(&mut host, 8);
+    // ⚠️ 「边界前」这一步的条数**从量子配额算出来**，不是写死的 8 ——
+    //    写死的话，配额一旦被调小，这条会因**夹具**（而不是被测行为）变红
+    //    （v0.19 检视轮 V-B 补强 6 / V-A O-7）。
+    //
+    //    判别式落在**关系**上：跑满**恰好一个量子**（`QUANTUM_INSTR_QUOTA`
+    //    条）仍**不许**交付；再跑一个量子就**必须**交付。
+    let before_boundary = QUANTUM_INSTR_QUOTA.saturating_sub(16);
+    step(&mut host, before_boundary);
     assert_eq!(deliveries(&host), 0, "量子边界之前不许交付中断");
 
     // 跨过量子边界 ⇒ **必须**交付。
-    step(&mut host, QUANTUM_INSTR_QUOTA * 2);
+    step(&mut host, QUANTUM_INSTR_QUOTA);
     assert_eq!(deliveries(&host), 1, "跨过量子边界后必须交付一次中断");
+}
+
+/// **夹具防漂移**：固件字节的**关键位置**必须还是「我们以为的那些指令」。
+///
+/// ⚠️ 仓库里**没有** RISC-V 汇编器（交叉工具链在**仓库外**，见
+/// `tools/fetch-golden-deps.sh`）⇒ 字节与 `fixtures/intc_fw.S` 之间
+/// **没有自动一致性检查**。这条用例是**人可复核**的那一道：它把每条
+/// **关键**指令的编码写死，字节被改动就会红（v0.19 检视轮 V-B · G-9）。
+#[test]
+fn the_firmware_bytes_are_still_the_ones_the_source_file_describes() {
+    // 0x00 lui t0, 0x0
+    assert_eq!(&INTC_FIRMWARE[0x00..0x04], &[0xB7, 0x02, 0x00, 0x00]);
+    // 0x04 addi t0, t0, 0x3c（handler 的地址）
+    assert_eq!(&INTC_FIRMWARE[0x04..0x08], &[0x93, 0x82, 0xC2, 0x03]);
+    // 0x0c csrrw x0, mtvec, t0
+    assert_eq!(&INTC_FIRMWARE[0x0c..0x10], &[0x73, 0x90, 0x52, 0x30]);
+    // 0x14 srli t1, t1, 1 · 0x18 ori t1, t1, 0x80
+    //   ⇒ t1 = 0x880（mie 的 MEIE bit 11 + MTIE bit 7）
+    assert_eq!(
+        &INTC_FIRMWARE[0x14..0x1c],
+        &[0x13, 0x53, 0x13, 0x00, 0x13, 0x63, 0x03, 0x08]
+    );
+    // 0x1c csrrw x0, mie, t1
+    assert_eq!(&INTC_FIRMWARE[0x1c..0x20], &[0x73, 0x10, 0x43, 0x30]);
+    // 0x20 addi t2, x0, 8（mstatus 的 MIE 位，bit 3）· 0x24 csrrs x0, mstatus, t2
+    assert_eq!(
+        &INTC_FIRMWARE[0x20..0x28],
+        &[0x93, 0x03, 0x80, 0x00, 0x73, 0xA0, 0x03, 0x30]
+    );
+    // 0x48 addi t3, x0, 2 —— 掩码 0b10 = **线 1**（bit L = 线 L）
+    assert_eq!(&INTC_FIRMWARE[0x48..0x4c], &[0x13, 0x0E, 0x20, 0x00]);
+    // 0x4c csrrw x0, 0x7c0, t3（irq_clear）
+    assert_eq!(&INTC_FIRMWARE[0x4c..0x50], &[0x73, 0x10, 0x0E, 0x7C]);
+    // 0x50 mret
+    assert_eq!(&INTC_FIRMWARE[0x50..0x54], &[0x73, 0x00, 0x20, 0x30]);
+    // 固件总长 84 字节（0x54）
+    assert_eq!(INTC_FIRMWARE.len(), 84, "固件长度变了");
 }
 
 /// 交付 ⇒ 写 `mcause` / `mepc` / `mtval`、跳 `mtvec`。
@@ -194,6 +251,10 @@ fn the_delivery_writes_the_trap_csr_and_jumps_to_the_vector_table() {
         csr(&host, CSR_MEPC),
         SPIN_ADDR,
         "mepc 必须是陷阱时那条待执行的指令的地址"
+    );
+    assert!(
+        csr_is_present(&host, CSR_MTVAL),
+        "中断路径必须**真的写**过 mtval（不是「读不到就是 0」的那种假绿）"
     );
     assert_eq!(
         csr(&host, CSR_MTVAL),
@@ -227,6 +288,11 @@ fn the_handler_clears_the_line_and_resets_the_active_interrupt() {
         state.active_irq, NO_ACTIVE_IRQ,
         "handler 清过线 ⇒ active_irq 必须复位"
     );
+    assert_eq!(
+        host.intc_delegation_failures(),
+        0,
+        "中断委派不许失败（失败时 intc_state 返回的是默认值 —— 正好等于断言值）"
+    );
 }
 
 /// 清过之后**同一个中断还能再来一次**（`mret` 回到 `mepc`，`MIE` 被恢复）。
@@ -243,6 +309,27 @@ fn the_same_interrupt_can_be_delivered_again_after_the_handler_clears_it() {
     host.raise_irq(LINE_1).expect("第二次拉起必须成功");
     step(&mut host, QUANTUM_INSTR_QUOTA * 2);
     assert_eq!(deliveries(&host), 2, "清过之后同一个中断必须能再来一次");
+
+    // ⚠️ **断言必须落在「第二次交付之后」的控制器状态上**。
+    //
+    //    只数「handler 跑了几次」在「**第二次清除被跳过**」时**照样成立**
+    //    —— handler 确实跑了，只是它写的 `irq_clear`（guest 每次都写**同一个**
+    //    掩码）没生效 ⇒ `active_irq` 不复位 ⇒ 这条线被**永久堵死**。
+    let state = host.intc_state();
+    assert!(
+        state.pending.is_empty(),
+        "第二次 handler 清线后挂起队列必须空：{:?}",
+        state.pending
+    );
+    assert_eq!(
+        state.active_irq, NO_ACTIVE_IRQ,
+        "第二次 handler 清线后 active_irq 必须复位（否则这条线被永久堵死）"
+    );
+    assert_eq!(
+        host.intc_delegation_failures(),
+        0,
+        "中断委派不许失败（失败时 intc_state 返回的是默认值 —— 正好等于断言值）"
+    );
 }
 
 /// `mret` 之后回到 `mepc`（而不是回到 handler 或乱跳）。

@@ -371,6 +371,35 @@ fn the_timer_raises_line_three_when_mtime_reaches_the_compare_value() {
     );
 }
 
+/// `mtime == mtimecmp`（**恰好到达**）也必须挂起 —— `>=` 的**等号侧**。
+///
+/// ⚠️ 这条是**专门补的**（v0.19 检视轮 V-B · F-2）：上一条用例的名字
+/// 叫「when mtime **reaches** the compare value」，但它用的是 `2000 > 1000`
+/// —— **等号那一边根本没人测**。把 `>=` 改成 `>` 之后，**没有任何一条
+/// 用例会红**（V-B 的变异 V-07 实测 0 红）。
+///
+/// 判别式落在**控制器自己的输出**上（交付了哪条线）。
+#[test]
+fn the_timer_raises_the_line_when_mtime_equals_the_compare_value() {
+    let mut intc = InterruptController::new();
+    intc.set_timer_compare(1000);
+
+    let delivered = intc
+        .poll(1000, MIE_TIMER, MSTATUS_ON)
+        .expect("poll")
+        .expect("**恰好**到达比较值也必须交付（`>=` 的等号侧）");
+
+    assert_eq!(
+        delivered.line, IRQ_TIMER_COMPARE,
+        "mtime == mtimecmp 时定时器线必须挂起"
+    );
+    assert_eq!(
+        intc.pending_lines(),
+        vec![IRQ_TIMER_COMPARE],
+        "等号侧也要真的排上队"
+    );
+}
+
 /// `mtimecmp == 0` ⇒ 定时器**关闭**（否则 `mtime >= 0` 恒成立）。
 #[test]
 fn a_zero_compare_value_means_the_timer_is_off() {
