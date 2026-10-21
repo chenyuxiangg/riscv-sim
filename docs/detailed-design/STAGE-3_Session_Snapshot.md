@@ -357,11 +357,16 @@ pub trait DataStore {
 | 2 | `cp_meta.version` == `SESSION_SNAPSHOT_SCHEMA_VERSION` | `E_SNAP-05` |
 | 3 | 内层 `m12_engine.schema_version` == `SNAPSHOT_SCHEMA_VERSION` | `E_SNAP-05` |
 | 4 | 内层 `m12_engine.state.schema_version` == `SIM_STATE_SCHEMA_VERSION` | `E_SNAP-05` |
-| 5 | `m14_map.regions`：**按 base 升序且不重叠** | `E_SNAP-02`（畸形） |
-| 6 | `m13_state.mem_pages`：**按 base 升序且不重叠**；每页的 `bytes` 长度 ≤ 该区域大小 | `E_SNAP-02` |
-| 7 | `m15_periph`：**同一类型内 id 不重复** | `E_SNAP-02` |
-| 8 | `m16_intc.raised`：**升序且不重复** | `E_SNAP-02` |
+| 5 | `m14_map.regions`：**按 base 升序且不重叠** | **`E_SNAP-06`**（会话载荷畸形） |
+| 6 | `m13_state.mem_pages`：**按 base 升序且不重叠**；每页的 `bytes` 长度 ≤ 该区域大小 | **`E_SNAP-06`** |
+| 7 | `m15_periph`：**同一类型内 id 不重复** | **`E_SNAP-06`** |
+| 8 | `m16_intc.raised`：**升序且不重复** | **`E_SNAP-06`** |
 | 9 | 内层 `m12_engine.validate()` 全部通过（队列到期 ≥ 虚拟时间 等） | 内层自己的码 |
+
+> ⚠️ **不借用 `E_SNAP-02`**：那个码的原义是「**事件队列**畸形」，拿它报
+> 「区域表不排序」就是**一码多义**——前端拿到 `E_SNAP-02` 无法判断该查队列还是查内存图。
+> 本轮**新开一个场景码** `E_SNAP-06`（会话载荷畸形），**一场景一码**
+> （与 D-69 的 `E_PP`/`E_PER`、D-32 的 `E_PROTO-02` 同一个教训）。
 
 ⚠️ **校验必须发生在任何状态被写入之前**——半个应用完的快照比被拒绝的快照更糟。
 
