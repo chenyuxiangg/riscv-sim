@@ -496,6 +496,19 @@ pub trait DataStore {
 | 8 | `m15_periph.gpios[*].irq_lines`：**恰好** `GPIO_PIN_COUNT` 条（少/多都拒，不补齐也不截断） | **`E_SNAP-06`** |
 | 9 | `m16_intc.raised`：**升序且不重复** | **`E_SNAP-06`** |
 | 10 | 内层 `m12_engine.validate()` 全部通过（队列到期 ≥ 虚拟时间 等） | 内层自己的码 |
+| 11 | `m16_intc.pending`：**同一条 line 不重复**，且按 `(request_time_ps, insert_seq)` **严格升序** | **`E_SNAP-06`** |
+| 12 | `m16_intc.priorities`：**按 line 升序且不重复** | **`E_SNAP-06`** |
+| 13 | `m16_intc.active_irq`：要么「无」（`NO_ACTIVE_IRQ`），要么**必须**在 `pending` 里 | **`E_SNAP-06`** |
+| 14 | `m16_intc.pending` 里的每条 line 都**必须**在 `raised` 里（不变式**单向**：`pending ⊆ raised`） | **`E_SNAP-06`** |
+
+> ⚠️ **第 11 ~ 14 项是 M-16 落地批（v0.19）追加的**——见冻结规格
+> `docs/detailed-design/STAGE-4_Interrupt_Controller.md` §2.4。
+> 它们描述的是**中断控制器从 stub 长出队列之后**段 5 的形状。
+> ⚠️ **编号是追加的，不重编号**：重编号会让本表与实现对不上，
+> 而本表是**照着实现的**（实现里的注释也写着同样的编号）。
+> ⚠️ **第 14 项的方向是单向的**：`pending ⊆ raised`，**不是**相等 ——
+> 「拉起了若干行、队列是空的」正是 M-16 还是 stub 时捕获到的**真实
+> 状态**，必须能过校验（**旧载荷不许失效**）。
 
 > ⚠️ **第 4 项的落点唯一 —— 外层不重复检查**。
 > 内层 `EngineSnapshotDto::validate()`（`crates/contract/src/snapshot.rs`）**已经**
@@ -513,6 +526,10 @@ pub trait DataStore {
 > （与 D-69 的 `E_PP`/`E_PER`、D-32 的 `E_PROTO-02` 同一个教训）。
 
 ⚠️ **校验必须发生在任何状态被写入之前**——半个应用完的快照比被拒绝的快照更糟。
+
+⚠️ **本表现在是 14 项**（v0.19 起）——第 11 ~ 14 项由 M-16 落地批追加。
+前面那一段「本表仍是 **10 类**」说的是**第 5 项的三条子规则不是新类**，
+那条口径**没有被打破**：第 11 ~ 14 项是**四个新的检查项**，不是第 5 项的子规则。
 
 > ⚠️ **第 5 项的三条子规则（`size != 0` / `base + size` 不越过 u32）是
 > V-B 检视（2026-10-21）补进规格的**：契约层的实现**本来就比本表严**
