@@ -46,7 +46,7 @@
 | `LoadAddressMisaligned` | **4** | 读访存地址未对齐 |
 | `StoreAddressMisaligned` | **6** | 写访存地址未对齐 |
 
-**理由**：RISC-V 手册的 mcause 异常码 **0 / 4 / 6** 是三个**不同**的码。实现侧今天**一个** `MisalignedAccess` 变体**同时**覆盖取指未对齐、读未对齐、写未对齐 —— 台账 **D-63** 说的就是这件事（「取指未对齐与访存未对齐共用它（mcause 4/6）」）。
+**理由**：RISC-V 手册的 mcause 异常码 **0 / 4 / 6** 是三个**不同**的码。⚠️ **批前**实现侧**一个** `MisalignedAccess` 变体**同时**覆盖取指未对齐、读未对齐、写未对齐 —— 台账 **D-63** 说的就是这件事（「取指未对齐与访存未对齐共用它（mcause 4/6）」）。✅ **本批已拆成上面三个变体**。
 
 **这是内核 crate 内部的 API 变更，不是契约层变更**（`TrapCause` 在 `crates/kernel/src/m13_iss/executor.rs`，不在 `crates/contract/`）—— 契约层「公开 API 只增不减」的约束**不适用**。全仓消费点只有 M-13 内部与 M-17，**同批改完**。
 
@@ -333,7 +333,7 @@ pub struct InterruptController {
 pub fn enter_trap(state: &mut SimState, cause: u32, mtval: u32) -> u32
 ```
 
-它做四件事（顺序固定）：
+它做**五**件事（顺序固定）：
 
 1. `mepc := state.pc`
 2. `mcause := cause`
@@ -351,24 +351,24 @@ pub fn enter_trap(state: &mut SimState, cause: u32, mtval: u32) -> u32
 | ECALL（11）/ EBREAK（3） | **0** |
 | 中断（`IRQ_BASE｜line`） | **0**（中断没有故障地址） |
 
-⚠️ **压缩指令的 `mtval`**：压缩指令的 `mtval` 按 RISC-V 规范应是**16 位原码**（零扩展到 32 位）。`Decoded::compressed_raw` 已有这个信息（台账 D-64 说「信息齐备」）→ **本批把它接上**。
+⚠️ **压缩指令的 `mtval`**：压缩指令的 `mtval` 按 RISC-V 规范应是**16 位原码**（零扩展到 32 位）。`Decoded::compressed_raw` 已有这个信息（台账 D-64 说「信息齐备」）→ ✅ **本批已把它接上**（非法指令分支按 `d.compressed` 取 `compressed_raw` 否则取 `d.raw`）。
 
 ### 3.6 M-13 的 CSR 指令与 `mret`
 
 | 指令 | funct3 | 语义 |
 | --- | --- | --- |
 | `CSRRW` | `001` | `rd = old`；`csr = rs1`（`rd == x0` ⇒ **不读**旧值） |
-| `CSRRS` | `010` | `rd = old`；`rs1 != x0` ⇒ `csr |= rs1`（`rs1 == x0` ⇒ **只读**，不写） |
+| `CSRRS` | `010` | `rd = old`；`rs1 != x0` ⇒ `csr \|= rs1`（`rs1 == x0` ⇒ **只读**，不写） |
 | `CSRRC` | `011` | `rd = old`；`rs1 != x0` ⇒ `csr &= !rs1` |
 | `CSRRWI` | `101` | `rd = old`；`csr = zimm`（rs1 字段当 u5） |
-| `CSRRSI` | `110` | `rd = old`；`zimm != 0` ⇒ `csr |= zimm` |
+| `CSRRSI` | `110` | `rd = old`；`zimm != 0` ⇒ `csr \|= zimm` |
 | `CSRRCI` | `111` | `rd = old`；`zimm != 0` ⇒ `csr &= !zimm` |
 | `MRET` | `000` + `imm = 0x302` | `pc := mepc`；`MIE := MPIE`；`MPIE := 1` |
 
 - **只读 CSR 的写被忽略**（地址 bit 11 置位；外加平台规则：`mip` 也只读）。
 - **未知 CSR 的读 = 0**（不产生陷阱）。
 - ⚠️ **没有「未对齐 CSR 地址 ⇒ 非法指令」这条规则**（裁决 H）。
-- `MRET` 的编码是 `0x3020_0073` ⇒ `funct3 == 0` 且 `imm == 0x302`。⚠️ **当前 `classify` 对 `funct3 == 0` 的 SYSTEM 编码按 `imm` 分派 `Ecall`(imm=0) / `Ebreak`(imm=1)** → `MRET` 今天落到 `None`（非法指令）→ 本批**加一个 `Op::Mret`** 分支，**不动** `Ecall` / `Ebreak` 的既有分派。
+- `MRET` 的编码是 `0x3020_0073` ⇒ `funct3 == 0` 且 `imm == 0x302`。⚠️ **批前** `classify` 对 `funct3 == 0` 的 SYSTEM 编码按 `imm` 分派 `Ecall`(imm=0) / `Ebreak`(imm=1) ⇒ `MRET` 落到 `None`（非法指令）；✅ **本批已加 `Op::Mret` 分支**（`(0b000, 0x302) => Some(Op::Mret)`），**不动** `Ecall` / `Ebreak` 的既有分派。
 - `SRET` / `WFI` / `SFENCE.VMA` ⇒ **非法指令**（MVP 只有 M 模式）。
 
 ### 3.7 `pause()`（裁决 C）
@@ -397,6 +397,10 @@ pub fn enter_trap(state: &mut SimState, cause: u32, mtval: u32) -> u32
 >
 > 已落地的位置：`crates/kernel/src/m17_backend/mod.rs` 的
 > `IssExecutor::take_pause` 与 `SelfIssBackend::pause`。
+>
+> ⚠️ **另有一处清零**：`SelfIssBackend::reset()` 也把 `pause_requested` 清掉 ——
+> 那是**会话级**复位（「暂停请求属于上一次批次的残留，reset 之后不该还有效」），
+> **不是**「批次开始时清零」，与本节的「取走即消失」口径**不冲突**。
 
 ### 3.8 定时器中断（裁决 E 的范围内部分）
 
@@ -429,7 +433,10 @@ pub fn enter_trap(state: &mut SimState, cause: u32, mtval: u32) -> u32
 >
 > 而当时**两条**声称覆盖该场景的用例（端到端的「能再来一次」+ M-17 的「`mret` 之后能再来一次」）**只数「handler 跑了几次」** ⇒ 那个量在缺陷路径上**照样成立** ⇒ **全绿放过**；更糟的是它们把缺陷**钉成了期望**（把清除真正做掉反而会让它们变红）。
 >
-> ⇒ **机制换掉，不是打补丁**：M-13 回报「M-13 的 CSR 写路径需要一个**副作用回调**」的**字面**落点（回报而不是回调——回调会让 M-13 持有一个闭包，而那个闭包要反过来借用 M-17 的 `Iss` ⇒ **自引用借用**）。回报由**执行臂自己**产生 ⇒ 「这条指令写没写」的判据**只有一份**，不会漂移。
+> ⇒ **机制换掉，不是打补丁**：规格原文说「M-13 的 CSR 写路径需要一个**副作用回调**」——
+> 这句话的**字面**落点是**回报**（不是回调：回调会让 M-13 持有一个闭包，而那个闭包要反过来
+> 借用 M-17 自己的 `Iss` ⇒ **自引用借用**）。回报由**执行臂自己**产生 ⇒ 「这条指令写没写」
+> 的判据**只有一份**，不会漂移。
 
 ### 4.1 跨 lane 的 Rust 签名（**冻结** —— 三路施工对着这一份写）
 
@@ -621,6 +628,10 @@ impl<'a> IssExecutor<'a> {
 ### 6.3 M-13
 
 18. 六条 CSR 指令的读写语义（含 `rd == x0` 不读、`rs1 == x0` 不写）。
+    ⚠️ **「`rd == x0` 不读」在本平台不可观测** —— CSR 读**无副作用**
+    ⇒ 「读了再丢弃」与「根本不读」**行为等价** ⇒ 实现**仍按规范**跳过
+    那次读取（M-13 `executor.rs` 的 `if d.rd != 0` 守卫），但它**不构成
+    一条判别力要求** ⇒ **不要求**对应的反向变异。
 19. **只读** CSR（`0x344` `mip` / `0xBFF8` `mtime`）的写**被忽略**。
 20. **只读** CSR（`mip` / `mtime`）的写**被忽略**；`irq_clear`（`0x7C0`）的写**生效**。
 21. 未知 CSR 的读 = **0**，**不陷阱**；`mtvec`（`0x305`，低位**不是** 0）**可读可写**。
@@ -628,16 +639,24 @@ impl<'a> IssExecutor<'a> {
 23. **取指未对齐** ⇒ cause **0**；**读未对齐** ⇒ cause **4**；**写未对齐** ⇒ cause **6**（**D-63**）。
 24. 陷阱写 `mtval`：非法指令 ⇒ 指令字（压缩 ⇒ 原码）；未对齐 ⇒ 故障地址（**D-64**）。
 25. 陷入时 `mepc := pc`、`mstatus.MIE := 0`、`MPIE := 旧 MIE`。
+26. ⚠️ **「刚写了哪个 CSR」的回报，六条 CSR 指令**各自**都要有**（v0.19 检视轮
+    **F-13** 增补）—— 判据是「**这条指令写了 `irq_clear`**」，而这条判据在
+    `csrrw` / `csrrs` / `csrrc` / `csrrwi` / `csrrsi` / `csrrci` **六条执行臂上
+    各写了一遍** ⇒ **每条臂都要回报**，哪怕写进去的值与原来**相同**。
+    ⚠️ **被忽略的写不回报**（只读 CSR 的写被忽略 ⇒ **没写** ⇒ 不该回报 ——
+    否则 M-17 会把「写了 `mip`」当成「写了 `irq_clear`」⇒ **清错线**）。
+    ⇒ 这条是 **F-1**（`irq_clear` 同值重写 ⇒ 第二次清线被静默丢弃 ⇒ 那条线
+    被单级防护**永久堵死**）修复所依赖的**唯一**判据。
 
 ### 6.4 接线与端到端
 
-26. **量子边界**才仲裁（一条指令执行中间**不**仲裁）。
-27. 中断交付 ⇒ `pc` 跳到 `mtvec`；`mcause == 0x8000_0000 | line`。
-28. `irq_clear` CSR 写 ⇒ 挂起项被清、`active_irq` 复位（**不是**恒真断言）。
-29. `MRET` 之后回到 `mepc`，且能**再次**收到同一中断（清 → 再请求 → 再交付）。
-30. **脉冲探针**：一次 `request()` ⇒ M-18 收到**恰好一条** `irq_pulse` 边沿（**D-26**）。
-31. `pause()` ⇒ 批次在**下一条指令边界**停（**D-59**）。
-32. **黄金对拍**：`tools/golden-run.sh --keep-going` **51/51** 不变（语料**无** CSR 指令 ⇒ CSR 实现**不得**改变既有判决）。
+27. **量子边界**才仲裁（一条指令执行中间**不**仲裁）。
+28. 中断交付 ⇒ `pc` 跳到 `mtvec`；`mcause == 0x8000_0000 | line`。
+29. `irq_clear` CSR 写 ⇒ 挂起项被清、`active_irq` 复位（**不是**恒真断言）。
+30. `MRET` 之后回到 `mepc`，且能**再次**收到同一中断（清 → 再请求 → 再交付）。
+31. **脉冲探针**：一次 `request()` ⇒ M-18 收到**恰好一条** `irq_pulse` 边沿（**D-26**）。
+32. `pause()` ⇒ 批次在**下一条指令边界**停（**D-59**）。
+33. **黄金对拍**：`tools/golden-run.sh --keep-going` **51/51** 不变（语料**无** CSR 指令 ⇒ CSR 实现**不得**改变既有判决）。
 
 ### 6.5 门禁
 
@@ -677,5 +696,6 @@ tools/build-wasm.sh && node tools/wasm-smoke.mjs
 | `AGENTS.md` | v0.19 判据块 + M-13 / M-16 模块状态行 |
 | `docs/detailed-design/STAGE-2_Contract_V2.md` | **不改**（本批**不升** `schema_version`） |
 | `docs/detailed-design/STAGE-3_Session_Snapshot.md` | **不改**（段 5 的形状扩了，但载荷 `schema_version` 不变、**旧载荷仍可加载**） |
-| `docs/architecture/RISC-V_Architecture_Design.html` | §3.4 表16 错误码族补齐（**D-70**，文档 lane） |
-| `front/lib/message.js` | **不改**（契约层没升版） |
+| `docs/module-design-spec/RISC-V_Module_Design_Specification.html` | §3.4 **表16** 错误码族补齐（**D-70**，文档 lane）—— ⚠️ **表16 在本文件里**，架构文档只是**引用**它 |
+| `docs/architecture/RISC-V_Architecture_Design.html` | §3.4 的**错误码族清单**（健康信号源 / 部分失败两行）同步到 12 族（**D-70**）—— 它**不**含表16 |
+| `front/lib/message.js` | **只改注释**：`Pause` 的措辞（「下一条**指令**边界」，F-8）；契约层**不升版** ⇒ JS 镜像**无**语义改动 |
