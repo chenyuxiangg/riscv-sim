@@ -57,7 +57,7 @@
 //!
 //! This DTO is the carrier for the **M-12/M-17 segment** of that object:
 //! the scheduler queue, the platform state, the insertion counter, the
-//! virtual clock and the per-quantum instruction budget. M-20 assembles the
+//! virtual clock and the run-window instruction budget. M-20 assembles the
 //! full `Snapshot` from that segment plus the M-13 / M-14 / M-15 segments.
 //!
 //! The earlier LLD wording ("the snapshot payload is `SimState + DebugMeta`")
@@ -97,7 +97,22 @@ use crate::model::{PendingWrite, SimState};
 /// loudly instead of mis-reading the timestamps.
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
-/// Default per-quantum guest instruction budget.
+/// Default **run-window** guest instruction budget.
+///
+/// This is the budget of **one run window** — the amount of guest
+/// instructions the engine executes before it yields back to the host
+/// (the engine's `BudgetExhausted` stop reason). It is **not** the
+/// per-quantum quota: the engine executes at most 1 000 instructions
+/// **per quantum**, and the default budget of 10 000 spans **10 quanta**
+/// (10 000 × 1 ns = 10 µs against a 1 µs quantum).
+///
+/// ⚠️ The old wording said "per-quantum", which was **wrong by a factor
+/// of ten** — it made the value look like the quantum's quota and broke
+/// the quantum / quota / budget arithmetic for anyone reasoning from the
+/// contract alone. Corrected in contract v2 (debt ledger **D-68**); the
+/// *behaviour* was never wrong — it is the semantics the D-07 suite
+/// (`m17_backend::tests::continue_until_event_runs_the_quantum_main_loop`)
+/// pins, and the port documentation was corrected alongside it (**D-57**).
 ///
 /// Mirrors the engine's own default so that a default-constructed
 /// [`EngineSnapshotDto`] describes a plausible engine rather than one
