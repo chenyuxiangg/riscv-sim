@@ -110,7 +110,7 @@ riscv_sim/
 | M-10 | 寄存器内存服务 | `front/services/m10_registermemory.js` | ✅ v0.11 实现（订阅寄存器/内存快照）；v0.11.1 补断线重连后重订阅；**v0.13 补 `resubscribe()` / `loadProject()`**——装载工程后内核侧订阅会失效，必须**强制**重订（幂等的 `ensureSubscribed()` 不够，台账 **D-45**） |
 | M-11 | 符号表/DWARF/反汇编/trace 导出 | `crates/kernel/src/m11_symbol/` | stub |
 | M-12 | 事件驱动仿真引擎 | `crates/kernel/src/m12_engine/` | ✅ v0.11 加固（快照还原 now_ps+事件队列、推进不空转、seq 不撞号）；v0.11.2 增契约快照 DTO 转换层（`snapshot_dto` / `restore_dto`，**先校验后应用**）+ `Engine::reset()`；✅ **v0.15 D-07：唯一主循环 `run_until(executor, until_ps)`（LLD §3.1 结构）+ `InstructionExecutor` 内部接缝（M-12 不依赖 M-13）+ `tick_peripherals` 唯一外设时钟同步点 + `TIME_QUANTUM_PS` 订正为 1 µs**；⚠️ **至今无独立模块级 review**（台账 D-30） |
-| M-13 | RISC-V ISS（RV32IMC） | `crates/kernel/src/m13_iss/` | ✅ v0.11 **RV32I 全集 41 条** + 模块级 review；v0.11.1 检视轮修 SYSTEM funct3 阻断级缺陷；v0.12 **RV32I 与 Spike 逐例对拍通过**（语料 51 例中 42 例判决一致；失败用例号一致性由变异金丝雀证明）；v0.13 取指改走 `Bus::read_fetch`（**取指不匹配观察点**，V-A 🟠-2）；M/C 扩展待做（第 3 阶段，台账 D-43） |
+| M-13 | RISC-V ISS（RV32IMC） | `crates/kernel/src/m13_iss/` | ✅ v0.11 **RV32I 全集 41 条** + 模块级 review；v0.11.1 检视轮修 SYSTEM funct3 阻断级缺陷；v0.12 **RV32I 与 Spike 逐例对拍通过**（语料 51 例中 42 例判决一致；失败用例号一致性由变异金丝雀证明）；v0.13 取指改走 `Bus::read_fetch`（**取指不匹配观察点**，V-A 🟠-2）；✅ **v0.16 M+C 扩展落地**（**RV32M 8 条 + RV32C 26 条**）：`compressed.rs` 字段级展开 + `alu.rs` 乘除 8 函数 + `Decoded` 增 `compressed`/`compressed_raw`/`illegal`；**golden 语料 51/51 全通**（D-43 闭环） |
 | M-14 | 总线与内存映射 | `crates/kernel/src/m14_bus/` | ✅ v0.4 完成 + v0.7.2 补完；v0.11 接线 PR；v0.13 新增 `read_only()`（调试读不计入统计 / trace / 观察点）与 `load_bytes()`（镜像装载的**唯一**写路径），并给 `BusAccess` 增 `is_fetch` 标记（**取指 vs 数据访问**）；**D-46 增 `add_hook()`（追加式 hook，`set_hook` 保留「替换全部」语义）+ `peripheral_instances()` + `tick_peripherals()`** |
 | M-15 | 外设模型层 | `crates/kernel/src/m15_peripheral/` | ✅ v0.7 三外设 + v0.11 接线 PR |
 | M-16 | 中断控制器 | `crates/kernel/src/m16_interrupt/` | stub |
@@ -211,6 +211,19 @@ riscv_sim/
 > - ⚠️ **修一处「更精确」的判据，可能引入死循环**：`until_ps` 改预检后，外层主循环与内层停止条件互斥 → **永远空转**。改行为要顺着把**终止性**再走一遍
 > - ⚠️ **恒真式断言要挑出来**：要钉的是「**换算只有一个真相**」（M-17 转调 M-12），不是把定义重说一遍
 > - ⚠️ **「用例钉的是默认值」必须写在文件头**：凡与配置**无关**的不变量，一律写成**相对单条指令成本**的形式
+
+> **v0.16 M+C 扩展判据**（RV32M 8 条 + RV32C 26 条落地 · 台账 D-43 闭环）：
+> - `cargo test --workspace --no-fail-fast` **593 全绿**（契约 lib 12 + kernel lib **486**（原 437，+49）+ 集成 84 + golden runner 11）
+> - `crates/kernel/src/m13_iss/tests_rv32m.rs` **17 条** + `tests_rv32c.rs` **32 条**（新增）；`tests_common.rs` 抽出共享脚手架供 `tests_rv32i` / `tests_rv32m` / `tests_rv32c` 三模块共用
+> - **压缩编码常量全部取自 GNU as 并逐条核对**（不是手搓位模式）——否则「测试与实现同源」，一个坏解码器会和测试一起绿
+> - `tools/golden-run.sh --keep-going` → **total=51 ok=51 mismatch=0**（`rv32um` 8 例 + `rv32uc/rvc` 双侧 PASS）；`tests/golden/corpus.txt` 9 例 `pending` → `active`
+> - ⚠️ **压缩指令用「字段级展开」而不是展开成 32 位位模式**：位模式表达 C.LUI 的 20 位截断规则有歧义；字段级展开语义等价、少一轮编解码、立即数按自然宽度携带（**偏离 LLD 伪码，已在台账 + LLD §3.5 记一笔**）
+> - ⚠️ **取指维持「一次读 4 字节」**：低 2 位只判**宽度**、不改**访存宽度**——否则总线访存次数翻倍、统计口径改变（LLD §3.1 已订正）
+> - ⚠️ **不补 4 字节对齐检查**：C 扩展使 IALIGN=16，32 位指令可在 2 字节对齐地址执行（参考实现亦然）
+> - ⚠️ **「保留编码 vs HINT」一律以 Spike 为准**：`c.lui` 零立即数 = 保留（陷阱）；`c.mv` / `c.add` rd=x0 = **合法空操作**（退休）；`c.swsp` rs2=x0 = **真写 0**
+> - ⚠️ **CJ / CB 偏移拼出的就是带符号字节偏移**（CJ 12 位符号在 bit11 / CB 9 位符号在 bit8），**不是**还要再乘 2 的半字数；**C.ADDI16SP 同理**（低 4 位恒 0，别再 ×16）
+> - ⚠️ **Q1/100 槽位同时装 CI 组与 CA 组**：靠 `inst[11:10] == 0b11` 区分；CA 组 funct2 在 `inst[6:5]`、CI 组 funct2 在 `inst[11:10]`；**CR 组 funct2 只有 1 位在 `inst[12]`**（寄存器域是完整的 `inst[11:7]`）
+> - ⚠️ **C.SW 的 funct3 是 0b110**（0b101 是 C.FSW，属 F 扩展）
 
 ## Code style
 

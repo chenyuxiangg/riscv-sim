@@ -1,11 +1,105 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.15.0
+> **Document version**: v0.16.0
 > **Created**: 2026-10-19
 > **Last updated**: 2026-10-21
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.16.0 变更摘要
+
+**M + C 扩展落地**（分支 `feature/m13-mc-extensions`，基线 `main` = `8e12ff5`）。
+
+台账 **D-43** 闭环：golden 语料 51 例**全部**与 Spike 判决逐例一致（原 42 例），
+`tests/golden/corpus.txt` 里 9 个 `pending` 标记全部翻成 `active`。
+
+### 一、本轮做了什么
+
+| 项 | 内容 |
+| --- | --- |
+| **RV32M（8 条）** | `mul` / `mulh` / `mulhsu` / `mulhu` / `div` / `divu` / `rem` / `remu`；`alu.rs` 增 8 个函数。除零与 MIN÷-1 溢出给**已定义**结果（不产生陷阱、不计平台错误码） |
+| **RV32C（26 条）** | **新增** `crates/kernel/src/m13_iss/compressed.rs`（字段级展开表） |
+| **解码** | `Decoded` 增 3 个公开字段 `compressed` / `compressed_raw` / `illegal`；`decode` 按低 2 位分流；删掉原先「长度 ≠ 4 即陷阱」的分支 |
+| **执行** | `Op` 增 8 个 M 变体；`classify` 增 `funct7=0000001` 分支并**先查 `d.illegal`**；JAL/JALR 链接寄存器沿用 `d.len` → 压缩指令自然得 pc+2 |
+| **用例** | `tests_rv32m.rs` **17 条** + `tests_rv32c.rs` **32 条** = **49 条**；共享脚手架抽到 `tests_common.rs`（`tests_rv32i` / `tests_rv32m` / `tests_rv32c` 三模块共用） |
+| **语料** | `tests/golden/corpus.txt` 9 例 `pending` → `active` |
+
+### 二、压缩指令为什么用「字段级展开」而不是展开成 32 位位模式
+
+LLD §3.2 的伪码是 `wide = c_expand(inst); fill_fields(&d, wide)`——先拼出一个 32 位
+**位模式**，再把字段从它身上拆下来。实现改成了**字段级展开**：直接产出等价 32 位指令的
+字段集（opcode / funct3 / funct7 / rd / rs1 / rs2 / imm）。
+
+理由是**位模式表达不了 C.LUI 的截断规则**。C.LUI 的立即数是「6 位字段 sext 到 32 位后
+**截断到 20 位 LUI 字段**再 <<12」——不是「sext6 << 12」（那是 `0xFFFF_E000`，而架构值是
+`0xFFFE_1000`，差在高 12 位）。这个规则用位模式写出来必然歧义。
+
+字段级展开的收益：**每条立即数规则只写一次**、**按自然宽度携带**（不用把压缩立即数挤进
+32 位立即数字段再截断/移位）、**少一轮编解码**。执行侧仍是**同一条**路径——
+`c.add` **就是** `add`、`c.lw` **就是** `lw`，压缩指令**没有第二套执行器**。
+
+> ⚠️ **这是对 LLD 伪码的偏离，已在台账 + LLD §3.5 记一笔**（架构语义完全等价）。
+
+### 三、几条靠**取证**而不是靠**记忆**定下来的语义
+
+C 扩展有若干「看起来显然、其实不是」的规则，全部用 **GNU as 的输出**（逐字段核对）与
+**参考实现**（Spike）双向取证后写进代码与 LLD：
+
+1. **C.LUI**：6 位字段 sext → **截断到 20 位 LUI 字段** → `<<12`。
+2. **CR 格式**（`C.JR` / `C.MV` / `C.EBREAK` / `C.JALR` / `C.ADD`）：funct2 只有 **1 位**，
+   在 `inst[12]`——**不是** `inst[11:10]`，那两位属于寄存器域；寄存器域是完整的 `inst[11:7]`。
+3. **Q1/100 槽位**同时装 CI 组（`C.SRLI` / `C.SRAI` / `C.ANDI`）与 CA 组
+   （`C.SUB` / `C.XOR` / `C.OR` / `C.AND`）：靠 **`inst[11:10] == 0b11`** 区分。
+   CA 组 funct2 在 **`inst[6:5]`**，CI 组 funct2 在 **`inst[11:10]`**，且 CA 组要求
+   **`inst[12] == 0`**。读错会把 `C.ANDI` 悄悄变成 `C.OR`。
+4. **CJ / CB 偏移**：位域拼出的**就是带符号的字节偏移**（CJ 12 位符号在 bit11，量程
+   [-2048, 2046]；CB 9 位符号在 bit8，量程 [-256, 254]）——**不是**还要再乘 2 的半字数。
+5. **C.ADDI16SP**：位域拼出的**已是字节偏移**（低 4 位恒 0，量程 [-512, 496]），
+   **不要再乘 16**。
+6. **C.SW 的 funct3 是 0b110**（0b101 在该象限是 C.FSW，属 F 扩展）。
+
+### 四、「保留编码」与「HINT」的分类一律以参考实现为准
+
+分类错了会直接改变 golden 对拍结果（一侧陷阱、一侧退休 → 判决不一致，且失败用例号对不上）：
+
+| 编码 | 分类 | 依据 |
+| --- | --- | --- |
+| `C.LUI` 立即数 = 0 | **保留编码**（陷阱，不退休） | 参考实现不退休它；HINT 必须留下 rd 不动，而参考实现压根不退休 |
+| `C.ADDI4SPN` nzuimm = 0 · `C.ADDI16SP` nzimm = 0 · `C.LWSP` rd = x0 · `C.JR` rs1 = x0 | **保留编码**（陷阱） | 规范原文 + 参考实现 |
+| `C.MV` / `C.ADD` rd = x0 | **合法空操作**（退休） | 参考实现退休；`add x0,…` 本就不写任何寄存器 |
+| `C.SWSP` rs2 = x0 | **真的写 0**（不是 HINT） | 参考实现确实写 0 |
+| `C.SLLI` rd = x0 | HINT | 写 x0 被丢弃，无架构效果 |
+| RV32 下 `C.SRLI`/`C.SRAI`/`C.SLLI` shamt[5] = 1 | 保留（陷阱） | 留给自定义扩展 |
+
+### 五、取证方法（可复现）
+
+- **编码常量**：全部取自 `riscv-none-elf-as -march=rv32ic` 的输出并**逐条核对**
+  （44/44 verified），**不是手搓位模式**。否则「测试与实现同源」，一个坏解码器会和测试一起绿。
+- **语义定案**：用 golden env 造探针 ELF 看参考实现的**退出码**（PASS = 0；
+  陷阱 = 自旋 = hang/TIMEOUT 且无输出，探针里读作「未退休」）。
+- **禁止**：用参考实现的调试器管道做批量探针（会挂起）。
+
+### 六、门禁与产物
+
+- `cargo fmt --all -- --check` ✅
+- `cargo clippy --workspace --all-targets -- -D warnings` ✅
+- `cargo test --workspace --no-fail-fast` ✅ **593 全绿**（契约 lib 12 + kernel lib **486** + 集成 84 + golden runner 11）
+- `tools/golden-run.sh --keep-going` → `total=51 ok=51 now-passing=0 expected-gap=0 mismatch=0 no-verdict=0 build-failed=0` ✅✓
+- 关键 commit：`8c3e50f`（实现）· `9ec3b4a`（用例）· `5649034`（语料翻转）
+
+### 七、方法论沉淀（本轮新增）
+
+1. ⚠️ **「保留编码」与「HINT」是两种东西，分类错误会直接改变对拍判决**。前者**不退休**
+   （陷阱），后者**退休但无架构效果**。判据只能来自参考实现，不能靠「读起来像 HINT」。
+2. ⚠️ **规格里的立即数规则要用「位模式」表达前，先问一句「这个规则能被位模式表达吗」**。
+   C.LUI 的 20 位截断就是反例——位模式表达不了，就该在**字段级**落地。
+3. ⚠️ **测试常量不要手搓**。压缩编码的每一个字段都必须与汇编器输出对齐，否则
+   「实现和测试同源」的坏解码器会一起绿。
+4. ⚠️ **压缩指令必须共用同一条执行路径**。「C.ADD 是 ADD」这件事，一旦写成第二套
+   分派，两套语义迟早会漂。
+
+---
 
 ## v0.15.1 变更摘要
 
