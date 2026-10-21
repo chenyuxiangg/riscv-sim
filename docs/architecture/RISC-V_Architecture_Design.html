@@ -1146,7 +1146,7 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
     <colgroup><col style="width:18%"><col style="width:38%"><col style="width:44%"></colgroup>
     <thead><tr><th>要素</th><th>落地</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td class="dim">健康信号源</td><td>引擎心跳、会话状态机、错误码、命令超时、崩溃信号、传输连接状态、<b>guest 失控（watchdog 超时）</b></td><td>各模块周期性上报心跳/状态；错误码统一进 E_CTX/E_BUS/E_ISS/E_PP/E_PROTO（§3）；<b>故障三分类（评审 R3）：① guest trap（访存异常/非法指令）= 模型内 guest 异常，捕获为事件；② 平台崩溃（引擎/宿主异常）= 平台故障；③ guest 失控（死循环超时）= 平台级 watchdog 超时，terminate 内核并告警——后两者入 HMS 处置，前者是正常调试语义</b></td></tr>
+      <tr><td class="dim">健康信号源</td><td>引擎心跳、会话状态机、错误码、命令超时、崩溃信号、传输连接状态、<b>guest 失控（watchdog 超时）</b></td><td>各模块周期性上报心跳/状态；错误码统一进 E_CTX/E_BUS/E_ISS/E_PER/E_PROTO（§3）；<b>故障三分类（评审 R3）：① guest trap（访存异常/非法指令）= 模型内 guest 异常，捕获为事件；② 平台崩溃（引擎/宿主异常）= 平台故障；③ guest 失控（死循环超时）= 平台级 watchdog 超时，terminate 内核并告警——后两者入 HMS 处置，前者是正常调试语义</b></td></tr>
       <tr><td class="dim">异常分级</td><td>致命（平台不可用）/ 严重（功能降级）/ 警告（可继续）</td><td>分级决定分发范围与降级动作，阈值可配置</td></tr>
       <tr><td class="dim">分角色分发</td><td>产品/嵌入式 = 可读提示（脱敏）；系统管理员 = 诊断详情（关联日志、时间线）</td><td>同一异常两个视角，原始日志不越界（§3.4）</td></tr>
       <tr><td class="dim">降级动作</td><td>自动快照 + 恢复 / 暂停 / 断开外设 / 关闭 trace 降载 / <b>terminate 失控内核（R3）</b></td><td>动作可重试；<b>恢复 = 检查点 + 稀疏输入事件序列重放（§7.3/§10.2，评审 R1）</b></td></tr>
