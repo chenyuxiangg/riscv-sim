@@ -286,6 +286,38 @@ fn the_m_extension_behaves_the_same_on_both_dispatch_routes() {
     bytes.clear();
 }
 
+/// Reading x0 through the M extension must yield zero, like every
+/// other register read (D-04).
+///
+/// The write side has its own case; the read side needs its own too:
+/// `mul x5, x0, x4` must be zero whatever `x4` holds, and nothing
+/// else in the M suite puts `x0` into a source position.
+///
+/// ⚠️ The case has to **corrupt the register file** first.  The ISS
+/// discards every write to x0, so an x0 that nobody scribbled on
+/// reads as zero anyway — a reader that went around the guard and
+/// took the raw slot would produce the same answer and the case
+/// would hold nothing.  This mirrors the RV32I case
+/// `reading_x0_yields_zero_even_if_register_file_is_corrupted`.
+#[test]
+fn the_m_extension_cannot_read_x0() {
+    // `mul x5, x0, x4` — the multiplicand is x0.
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[0] = 0xDEAD_BEEF; // corrupted x0
+    state.gpr[4] = 0xDEAD_BEEF; // rs2
+    h.step_one_at(&mut state, 0, enc_m(0b000, 4, 0, 5));
+    assert_eq!(state.gpr[5], 0, "x0 must read as zero");
+
+    // The same for the divide group, where the dividend is rs1.
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[0] = 0xDEAD_BEEF; // corrupted x0
+    state.gpr[4] = 7; // rs2
+    h.step_one_at(&mut state, 0, enc_m(0b100, 4, 0, 5));
+    assert_eq!(state.gpr[5], 0, "x0 must read as zero");
+}
+
 /// Writing to x0 through the M extension must be discarded, like every
 /// other register write (D-04).
 #[test]

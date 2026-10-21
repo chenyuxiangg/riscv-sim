@@ -4,14 +4,20 @@
 //!
 //! ## Where the encodings come from
 //!
-//! Every encoding in this file was produced by GNU as and checked
-//! against it; they are **not** hand-assembled bit patterns.  That
-//! matters: the compressed formats have several bit fields that are
-//! easy to mis-place (the CR format's one-bit `funct2` in `inst[12]`,
-//! the CA format's `funct2` in `inst[6:5]`, the Q1/100 slot's two
-//! different formats), and a test that encodes the instruction the
-//! same way the implementation decodes it would agree with a broken
-//! decoder.
+//! The **main table** of legal encodings was produced by GNU as and
+//! checked against it; they are **not** hand-assembled bit patterns.
+//! That matters: the compressed formats have several bit fields that
+//! are easy to mis-place (the CR format's one-bit `funct2` in
+//! `inst[12]`, the CA format's `funct2` in `inst[6:5]`, the Q1/100
+//! slot's two different formats), and a test that encodes the
+//! instruction the same way the implementation decodes it would agree
+//! with a broken decoder.
+//!
+//! The **reserved / HINT table** is a different story: GNU as
+//! *refuses* most of those code points ("illegal operands" for
+//! `c.srli x8, 0`, `c.slli x0, 0`, `c.lwsp x0, 0`, `c.jr x0`, …), so
+//! they were classified against the **reference simulator** instead
+//! and cross-checked with an independent spec-derived decoder.
 //!
 //! ## Where the expected values come from
 //!
@@ -23,7 +29,7 @@
 //! (`0xFFFE_1000` vs `0xFFFF_E000`).  A dedicated Spike probe
 //! distinguishes the two: it reports `0xFFFE_1000`.
 
-use riscv_sim_contract::model::SimState;
+use riscv_sim_contract::model::{SimState, WriteSize};
 
 use super::decoder::{Decoder, LEN_16};
 use super::executor::{classify, Op, StepOutcome, TrapCause};
@@ -67,6 +73,10 @@ const C_ADDI4SPN_4: u16 = 0x0040;
 const C_SLLI_X8_4: u16 = 0x0412;
 /// `c.slli x8, 31`
 const C_SLLI_X8_31: u16 = 0x047E;
+/// `c.slli x31, 1` — the destination register is the full five bits.
+const C_SLLI_X31_1: u16 = 0x0F86;
+/// `c.slli x16, 3`
+const C_SLLI_X16_3: u16 = 0x080E;
 /// `c.srli x8, 12`
 const C_SRLI_X8_12: u16 = 0x8031;
 /// `c.srai x8, 12`
@@ -120,6 +130,8 @@ const C_LWSP_X8_12: u16 = 0x4432;
 const C_LWSP_X8_252: u16 = 0x547E;
 /// `c.swsp x8, 12(sp)`
 const C_SWSP_X8_12: u16 = 0xC622;
+/// `c.swsp x31, 252(sp)` — the largest offset, from a high register.
+const C_SWSP_X31_252: u16 = 0xDFFE;
 /// `c.j` with a +4 byte offset.
 const C_J_P4: u16 = 0xA011;
 /// `c.j` with a -4 byte offset.
@@ -130,6 +142,38 @@ const C_JAL_P4: u16 = 0x2011;
 const C_BEQZ_X8_P4: u16 = 0xC011;
 /// `c.bnez x8` with a +4 byte offset.
 const C_BNEZ_X8_P4: u16 = 0xE011;
+/// `c.beqz x8` with a +2 byte offset — the smallest forward jump.
+const C_BEQZ_X8_P2: u16 = 0xC009;
+/// `c.bnez x8` with a +2 byte offset.
+const C_BNEZ_X8_P2: u16 = 0xE009;
+/// `c.beqz x8` with a +8 byte offset.
+const C_BEQZ_X8_P8: u16 = 0xC401;
+/// `c.bnez x8` with a +8 byte offset.
+const C_BNEZ_X8_P8: u16 = 0xE401;
+/// `c.beqz x8` with a +26 byte offset.
+const C_BEQZ_X8_P26: u16 = 0xCC09;
+/// `c.bnez x8` with a +26 byte offset.
+const C_BNEZ_X8_P26: u16 = 0xEC09;
+/// `c.beqz x8` with a +80 byte offset — `imm[7:6] == 0b01`.
+const C_BEQZ_X8_P80: u16 = 0xC821;
+/// `c.bnez x8` with a +80 byte offset.
+const C_BNEZ_X8_P80: u16 = 0xE821;
+/// `c.beqz x8` with a -4 byte offset — the sign bit is set.
+const C_BEQZ_X8_M4: u16 = 0xDC75;
+/// `c.bnez x8` with a -4 byte offset.
+const C_BNEZ_X8_M4: u16 = 0xFC75;
+/// `c.beqz x8` with a -256 byte offset — the far end of the range.
+const C_BEQZ_X8_M256: u16 = 0xD001;
+/// `c.bnez x8` with a -256 byte offset.
+const C_BNEZ_X8_M256: u16 = 0xF001;
+/// `c.beqz x8` with a +130 byte offset — `imm[7:6] == 0b10`.
+const C_BEQZ_X8_P130: u16 = 0xC049;
+/// `c.bnez x8` with a +130 byte offset.
+const C_BNEZ_X8_P130: u16 = 0xE049;
+/// `c.beqz x8` with a +6 byte offset — `imm[2:1] == 0b11`.
+const C_BEQZ_X8_P6: u16 = 0xC019;
+/// `c.bnez x8` with a +6 byte offset.
+const C_BNEZ_X8_P6: u16 = 0xE019;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -315,13 +359,20 @@ fn c_addi_can_name_any_register() {
 /// `c.li` loads a sign-extended immediate.
 #[test]
 fn c_li_loads_a_sign_extended_immediate() {
+    // The destination register is **pre-loaded with a non-zero value**
+    // on purpose: `c.li` is `addi rd, x0, imm`, so it must not read
+    // `rd`.  With a zero-initialised register the two readings
+    // (`addi rd, x0, imm` and `addi rd, rd, imm`) give the same
+    // answer, and the case would hold nothing.
     let mut h = Harness::new();
     let mut state = SimState::default();
+    state.gpr[8] = 0x0100_0000;
     step_c(&mut h, &mut state, 0x1000, C_LI_X8_M16);
     assert_eq!(state.gpr[8], 0xFFFF_FFF0);
 
     let mut h = Harness::new();
     let mut state = SimState::default();
+    state.gpr[5] = 0x0100_0000;
     step_c(&mut h, &mut state, 0x1000, C_LI_X5_31);
     assert_eq!(state.gpr[5], 31);
 }
@@ -329,12 +380,16 @@ fn c_li_loads_a_sign_extended_immediate() {
 /// `c.lui` loads the 6-bit immediate into the upper half of the
 /// register.
 ///
-/// The immediate is the 6-bit field sign-extended and truncated to the
-/// **20-bit** LUI field — not "the 6-bit value shifted left by 12".
-/// The difference shows up in the top bits: the field `0b100001`
-/// means `-31`, whose LUI field is `0xfffe1`, so the destination is
-/// `0xfffe1000`.  Shifting the sign-extended value left by 12 would
-/// give `0xffffe000` instead.
+/// The value is `sext6(field) << 12` in 32-bit two's complement: the
+/// field `0b100001` means `-31`, so the destination is `0xfffe1000`.
+/// The specification phrases the same thing as "sign-extended into
+/// the 20-bit LUI field", and the two readings coincide in RV32 — a
+/// 32-bit left shift already drops exactly those 12 high bits.
+///
+/// ⚠️ The *wrong* reading is the one that takes the 20 bits at the
+/// **high** end of the sign-extended value (`sext6 & 0xfffff000` =
+/// `0xffffe000` for the field `0b100001`).  A dedicated reference
+/// probe distinguishes the two and reports `0xfffe1000`.
 #[test]
 fn c_lui_loads_the_truncated_twenty_bit_immediate() {
     let mut h = Harness::new();
@@ -677,6 +732,119 @@ fn c_mv_with_a_high_register_copies_the_source() {
     }
 }
 
+/// `c.beqz` / `c.bnez` must land on the right target for **every**
+/// field of the 9-bit branch offset.
+///
+/// The suite only ever branched by `+4`, and decoding that encoding
+/// touches a single field (`imm[2:1]`): the sign bit (`inst[12]`),
+/// `imm[4:3]` (`inst[11:10]`), `imm[7:6]` (`inst[6:5]`) and `imm[5]`
+/// (`inst[2]`) were never exercised.  A decoder that dropped the sign
+/// bit, or shifted `imm[7:6]`, was therefore invisible to the unit
+/// tests **and** to the golden corpus — upstream's `rvc.S` only uses
+/// small forward displacements.
+///
+/// The offsets below cover **every field** of the offset, and between
+/// them every *pattern* inside the two-bit fields as well:
+///
+/// ```text
+/// offset   imm[8]  imm[7:6]  imm[5]  imm[4:3]  imm[2:1]
+/// +2         0        00        0        00        01
+/// +4         0        00        0        00        10
+/// +6         0        00        0        00        11
+/// +8         0        00        0        01        00
+/// +26        0        00        0        11        01
+/// +80        0        01        0        10        00
+/// +130       0        10        0        00        01
+/// -4         1        11        1        11        10
+/// -256       1        00        0        00        00
+/// ```
+///
+/// The table is not hand-transcribed: it is the decomposition of the
+/// encodings as the ISS itself decodes them, so a row that disagreed
+/// with the decoder would be a bug in the table, not in the decoder.
+///
+/// The judgement is on the **landing address**, not on "did it
+/// branch": a decoder that computes the wrong target still branches.
+#[test]
+fn c_beqz_and_c_bnez_land_on_the_right_target() {
+    let cases: [(u16, i32); 16] = [
+        (C_BEQZ_X8_P2, 2),
+        (C_BNEZ_X8_P2, 2),
+        (C_BEQZ_X8_P6, 6),
+        (C_BNEZ_X8_P6, 6),
+        (C_BEQZ_X8_P8, 8),
+        (C_BNEZ_X8_P8, 8),
+        (C_BEQZ_X8_P26, 26),
+        (C_BNEZ_X8_P26, 26),
+        (C_BEQZ_X8_P80, 80),
+        (C_BNEZ_X8_P80, 80),
+        (C_BEQZ_X8_P130, 130),
+        (C_BNEZ_X8_P130, 130),
+        (C_BEQZ_X8_M4, -4),
+        (C_BNEZ_X8_M4, -4),
+        (C_BEQZ_X8_M256, -256),
+        (C_BNEZ_X8_M256, -256),
+    ];
+    for (enc, offset) in cases {
+        let pc = 0x1000u32;
+        let target = (pc as i32 + offset) as u32;
+        // `c.beqz` takes the branch when the register is zero,
+        // `c.bnez` when it is not; the funct3 tells them apart.
+        let is_beqz = (enc >> 13) & 0b111 == 0b110;
+        let mut h = Harness::new();
+        let mut state = SimState::default();
+        state.gpr[8] = if is_beqz { 0 } else { 1 };
+        step_c(&mut h, &mut state, pc, enc);
+        assert_eq!(
+            state.pc, target,
+            "0x{enc:04x} must land on pc {offset} = 0x{target:08x}"
+        );
+    }
+}
+
+/// `c.slli`'s destination register is the **full five bits**.
+///
+/// `c.slli` is one of the few compressed instructions whose `rd` is
+/// not confined to `x8`..`x15`; the suite only ever shifted `x8`, so
+/// a decoder that narrowed the field to three bits was invisible —
+/// to the unit tests and to the golden corpus alike.
+#[test]
+fn c_slli_shifts_into_a_high_destination_register() {
+    for (reg, enc, amount) in [(31u8, C_SLLI_X31_1, 1u32), (16u8, C_SLLI_X16_3, 3u32)] {
+        let mut h = Harness::new();
+        let mut state = SimState::default();
+        state.gpr[reg as usize] = 1;
+        step_c(&mut h, &mut state, 0x1000, enc);
+        assert_eq!(
+            state.gpr[reg as usize],
+            1u32 << amount,
+            "c.slli must shift into x{reg}"
+        );
+    }
+}
+
+/// `c.swsp` must reach the **largest** offset from a **high** source
+/// register.
+///
+/// The suite only stored through `c.swsp x8, 12(sp)`: that encoding
+/// leaves `uimm[7:6]` (`inst[8:7]`) at zero and uses a three-bit
+/// source register, so neither the wide offset nor the five-bit `rs2`
+/// field was exercised — by the unit tests or by the golden corpus.
+#[test]
+fn c_swsp_reaches_the_largest_offset_from_a_high_register() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[2] = 0x2000; // sp
+    state.gpr[31] = 0xABCD_EF01;
+    step_c(&mut h, &mut state, 0x1000, C_SWSP_X31_252);
+    let stored = h
+        .ram
+        .borrow()
+        .read(0x2000 + 252, WriteSize::Word)
+        .expect("sp + 252 is mapped");
+    assert_eq!(stored, 0xABCD_EF01, "c.swsp must store x31 at sp + 252");
+}
+
 /// `c.beqz` branches when the register is zero and falls through
 /// otherwise.
 #[test]
@@ -813,6 +981,26 @@ fn the_reserved_and_hint_encodings_are_classified_like_the_reference() {
         (0xe002, false), // quadrant 2, funct3 = 111 (reserved)
     ];
     for &(enc, retires) in table {
+        // The `illegal` flag is part of the public `Decoded` contract:
+        // a reserved encoding must be flagged, not merely fail to
+        // decode.  It is the flag — not an incidental zero opcode —
+        // that the executor refuses on, so the flag needs an observer.
+        //
+        // `illegal` and "traps" are **not** the same predicate:
+        // `c.ebreak` is a perfectly legal instruction that raises a
+        // breakpoint trap, so it must not be flagged illegal.
+        let d = decode_c(enc);
+        let expect_illegal = !retires && enc != C_EBREAK;
+        assert_eq!(
+            d.illegal, expect_illegal,
+            "0x{enc:04x} must be flagged illegal exactly when it is reserved"
+        );
+        assert!(d.compressed, "0x{enc:04x} must stay flagged as compressed");
+        assert_eq!(
+            d.compressed_raw, enc,
+            "0x{enc:04x} must keep its 16-bit code"
+        );
+
         let mut h = Harness::new();
         let mut state = SimState::default();
         let outcome = h.step_half_at(&mut state, 0x1000, enc);
@@ -836,9 +1024,15 @@ fn the_reserved_and_hint_encodings_are_classified_like_the_reference() {
 
 /// The HINT encodings must have **no** architectural effect.
 ///
-/// A HINT that wrote its destination register would not be a HINT: the
-/// `c.lui` with a zero immediate is the sharpest case, because writing
-/// zero to `rd` is observable.
+/// A HINT that wrote its destination register would not be a HINT, so
+/// every register is pre-loaded and must come back untouched.
+///
+/// ⚠️ The `c.lui` with a **zero immediate** is *not* in this list: it
+/// is a **reserved** encoding that traps, not a HINT.  The `c.lui`
+/// HINT is the `rd = x0` one (`0x6005`), and writing x0 is not
+/// observable — so the sharpest entries here are `0x0401`
+/// (`c.addi x8, 0`) and `0x8001` (`c.srli x8, 0`), which write a
+/// real register with a value that must stay put.
 #[test]
 fn a_hint_encoding_leaves_the_architectural_state_alone() {
     for enc in [0x0002u16, 0x0015, 0x0401, 0x4015, 0x6005, 0x8001] {
