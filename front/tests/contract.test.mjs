@@ -51,6 +51,33 @@ const snapshotRs = resolve(repoRoot, "crates/contract/src/snapshot.rs");
 const hasRust = existsSync(protocolRs) && existsSync(modelRs);
 
 /**
+ * The Rust contract sources must be **present**.
+ *
+ * ⚠️ **Why this is a hard failure, not a skip** (V-B 检视 · B-6):
+ * these six cases used to carry `{ skip: !hasRust }`. `node --test`
+ * reports a skipped test as **not failed** and still exits **0** — so
+ * a tree without `crates/contract/src/` turned the **whole cross-layer
+ * gate** into a silent no-op that still reported "green".
+ *
+ * That is the exact failure mode this project's reviews keep hitting:
+ * the gate looked like it was holding the Rust↔JS mirror in sync, while
+ * in fact it was checking nothing at all. `front/` and `crates/` live in
+ * the same repository, so "the Rust source is missing" is never a
+ * legitimate state here — it means the tree is broken, and a broken
+ * tree must **fail**, not skip.
+ *
+ * Same reasoning as `tools/wasm-smoke.mjs`: "did not run" must never be
+ * indistinguishable from "passed".
+ */
+function requireRustSource() {
+    assert.ok(
+        hasRust,
+        `Rust 契约源码缺失（${protocolRs} / ${modelRs}）——` +
+            "对拍门禁必须**失败**，不能静默跳过（静默跳过 = 假绿）",
+    );
+}
+
+/**
  * Extract the variant names of a Rust `pub enum` from the contract
  * source.
  *
@@ -319,7 +346,8 @@ describe("Message 信封（与 crates/contract 逐字对齐）", () => {
 });
 
 describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
-    test("命令变体集合与 Rust CommandPayload 一致", { skip: !hasRust }, () => {
+    test("命令变体集合与 Rust CommandPayload 一致", () => {
+        requireRustSource();
         const rust = rustVariants(readFileSync(protocolRs, "utf8"), "CommandPayload").sort();
         const js = [
             variantOf(Command.nop()),
@@ -345,7 +373,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
         assert.deepEqual(js, rust, "JS 命令变体与 Rust CommandPayload 不一致");
     });
 
-    test("事件变体集合与 Rust EventPayload 一致", { skip: !hasRust }, () => {
+    test("事件变体集合与 Rust EventPayload 一致", () => {
+        requireRustSource();
         const rust = rustVariants(readFileSync(protocolRs, "utf8"), "EventPayload").sort();
         const js = [
             variantOf(Event.tick(0, 0)),
@@ -363,7 +392,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
         assert.deepEqual(js, rust, "JS 事件变体与 Rust EventPayload 不一致");
     });
 
-    test("Direction / WriteSize / HaltReason / WatchAccess 标签逐字一致", { skip: !hasRust }, () => {
+    test("Direction / WriteSize / HaltReason / WatchAccess 标签逐字一致", () => {
+        requireRustSource();
         const protocol = readFileSync(protocolRs, "utf8");
         const model = readFileSync(modelRs, "utf8");
         assert.deepEqual(
@@ -388,7 +418,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
         );
     });
 
-    test("每个变体的内层字段名与 Rust 逐字一致（不只是变体名）", { skip: !hasRust }, () => {
+    test("每个变体的内层字段名与 Rust 逐字一致（不只是变体名）", () => {
+        requireRustSource();
         const protocol = readFileSync(protocolRs, "utf8");
         // One entry per variant — the JS builder's *result*, i.e. the
         // value serde would put behind the `Command` / `Event` tag.
@@ -471,7 +502,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
         }
     });
 
-    test("newtype 变体携带的 DTO 字段名与 Rust 一致", { skip: !hasRust }, () => {
+    test("newtype 变体携带的 DTO 字段名与 Rust 一致", () => {
+        requireRustSource();
         const model = readFileSync(modelRs, "utf8");
         const project = buildMockProject();
         // The DTOs the front end actually builds.
@@ -506,7 +538,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
         );
     });
 
-    test("虚拟时间字段在 Rust 侧必须挂 numstr 属性（§2 数值策略）", { skip: !hasRust }, () => {
+    test("虚拟时间字段在 Rust 侧必须挂 numstr 属性（§2 数值策略）", () => {
+        requireRustSource();
         // 规格 §2：凡是「随仿真时长增长」的量（虚拟时间），线上表示是
         // **十进制字符串**。Rust 侧靠字段上的
         // `#[serde(with = "crate::numstr::u64_decimal")]` 实现。
