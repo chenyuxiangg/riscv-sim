@@ -75,15 +75,15 @@ function fakeRouter() {
 }
 
 /**
- * Build a `WaveformDelta` event value.
+ * Build a `WaveformHistory` event value.
  *
  * @param {Array<{id: string, label?: string, edges: Array<{t_ps: number, value: number}>}>} streams
  * @returns {object}
  */
 function waveformEvent(streams) {
     return {
-        variant: "WaveformDelta",
-        topic: "waveform.delta",
+        variant: "WaveformHistory",
+        topic: "waveform.history",
         value: {
             schema_version: 1,
             streams: streams.map((s) => ({
@@ -122,7 +122,7 @@ describe("探针流 · 通道落进视图状态", () => {
     test("真内核的通道 id（`GPIO0.OUT`）进得了视图状态", () => {
         const { router } = setup();
         router.emit(
-            "waveform.delta",
+            "waveform.history",
             waveformEvent([
                 { id: "GPIO0.OUT", label: "GPIO0.OUT", edges: [] },
             ]),
@@ -134,7 +134,7 @@ describe("探针流 · 通道落进视图状态", () => {
     test("mock 的通道 id（`probe.led0`）也认（前端不绑定具体通道名）", () => {
         const { router } = setup();
         router.emit(
-            "waveform.delta",
+            "waveform.history",
             waveformEvent([
                 { id: "probe.led0", label: "LED0", edges: [{ t_ps: 1, value: 1 }] },
             ]),
@@ -146,7 +146,7 @@ describe("探针流 · 通道落进视图状态", () => {
     test("寄存器流（`cpu.gpr.x1` / `cpu.pc`）不进波形视图", () => {
         const { router } = setup();
         router.emit(
-            "waveform.delta",
+            "waveform.history",
             waveformEvent([
                 { id: "cpu.gpr.x1", label: "x1", edges: [{ t_ps: 1, value: 42 }] },
                 { id: "cpu.pc", label: "pc", edges: [{ t_ps: 1, value: 4 }] },
@@ -162,14 +162,14 @@ describe("探针流 · 通道落进视图状态", () => {
     test("边沿是**累加**的（内核每次只推增量）", () => {
         const { router } = setup();
         router.emit(
-            "waveform.delta",
+            "waveform.history",
             waveformEvent([
                 { id: "GPIO0.OUT", label: "GPIO0.OUT", edges: [{ t_ps: 1, value: 1 }] },
             ]),
         );
         assert.equal(channels()[0].edges, 1);
         router.emit(
-            "waveform.delta",
+            "waveform.history",
             waveformEvent([
                 { id: "GPIO0.OUT", label: "GPIO0.OUT", edges: [{ t_ps: 2, value: 0 }] },
             ]),
@@ -185,7 +185,7 @@ describe("探针流 · 通道落进视图状态", () => {
     test("reset 之后旧通道不算数（新会话 = 新命名空间）", () => {
         const { router, waveform } = setup();
         router.emit(
-            "waveform.delta",
+            "waveform.history",
             waveformEvent([
                 { id: "GPIO0.OUT", label: "GPIO0.OUT", edges: [{ t_ps: 1, value: 1 }] },
             ]),
@@ -321,7 +321,7 @@ describe("波形视图 · 渲染", () => {
     test("通道列表渲染出来了（含标签与边沿数）", () => {
         const { router } = setup();
         router.emit(
-            "waveform.delta",
+            "waveform.history",
             waveformEvent([
                 { id: "GPIO0.OUT", label: "GPIO0.OUT", edges: [{ t_ps: 1, value: 1 }] },
             ]),
@@ -335,7 +335,7 @@ describe("波形视图 · 渲染", () => {
     test("没有通道时给出的是「尚无探针信号」而不是空白", () => {
         const { router } = setup();
         router.emit(
-            "waveform.delta",
+            "waveform.history",
             waveformEvent([{ id: "cpu.gpr.x1", label: "x1", edges: [] }]),
         );
         const view = m02.get("waveform");

@@ -97,7 +97,7 @@ const project = {
 };
 
 describe("M-10 寄存器内存服务", () => {
-    test("读寄存器走 M-05，快照落到缓存", async () => {
+    test("读寄存器走 M-05 的 ReadRegisters 命令，快照落到缓存", async () => {
         const transport = createFakeTransport();
         const router = await m05.mountCommandRouter({ transport });
         const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
@@ -105,17 +105,82 @@ describe("M-10 寄存器内存服务", () => {
         const gpr = new Array(32).fill(0);
         gpr[1] = 42;
         gpr[3] = 49;
-        const promise = service.readRegisters();
+        const promise = service.readRegisters(0, 32);
         const reqId = transport.sent[0].reqId;
-        // The subscribe command is a `Subscribe` on the register topic.
-        assert.deepEqual(transport.sent[0].message.payload, { Command: { Subscribe: { topic: "sim.registers" } } });
-        transport.emit(eventFrame(reqId, Event.waveformDelta(registerSnapshot(gpr, 0x08))));
+        // 契约 v2：读寄存器有**专用命令**，不再靠「订阅搭车」。
+        assert.deepEqual(transport.sent[0].message.payload, {
+            Command: { ReadRegisters: { index: 0, count: 32 } },
+        });
+        transport.emit(eventFrame(reqId, Event.registers(0, gpr)));
         await promise;
 
         const snapshot = service.getSnapshot();
         assert.equal(snapshot.gpr[1], 42);
         assert.equal(snapshot.gpr[3], 49);
-        assert.equal(snapshot.pc, 0x08);
+        router.close();
+        service.close();
+    });
+
+    test("读 0 个寄存器正常 resolve（空区间不是错误，也不是超时）", async () => {
+        // 契约 v2 §5（已订正）：`count = 0` 回复 `Registers { index,
+        // values: [] }`。M-05 按 `reqId` 配对请求与回复，「没有回复」与
+        // 「消息丢了」不可区分——内核不回复的话，这条合法请求会变成一条
+        // **假超时**（E_CTX-06）。
+        const transport = createFakeTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
+
+        const promise = service.readRegisters(0, 0);
+        assert.deepEqual(transport.sent[0].message.payload, {
+            Command: { ReadRegisters: { index: 0, count: 0 } },
+        });
+        transport.emit(eventFrame(transport.sent[0].reqId, Event.registers(0, [])));
+        const event = await promise;
+        assert.deepEqual(event.value.values, [], "空区间的 values 是空数组");
+        assert.equal(event.value.index, 0);
+        router.close();
+        service.close();
+    });
+
+    test("写寄存器走 M-05 的 WriteRegister 命令，值落到缓存", async () => {
+        const transport = createFakeTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
+
+        const promise = service.writeRegister(5, 0x2a);
+        const reqId = transport.sent[0].reqId;
+        assert.deepEqual(transport.sent[0].message.payload, {
+            Command: { WriteRegister: { index: 5, value: 0x2a } },
+        });
+        transport.emit(eventFrame(reqId, Event.registers(5, [0x2a])));
+        await promise;
+        assert.equal(service.getSnapshot().gpr[5], 0x2a);
+        router.close();
+        service.close();
+    });
+
+    test("sim.registers 主题的 Registers 事件落到寄存器缓存", async () => {
+        const transport = createFakeTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
+
+        transport.emit(eventFrame(null, Event.registers(1, [42, 43])));
+        const gpr = service.getSnapshot().gpr;
+        assert.equal(gpr[1], 42);
+        assert.equal(gpr[2], 43);
+        router.close();
+        service.close();
+    });
+
+    test("sim.state.delta 主题的增量事件落到寄存器缓存与 pc", async () => {
+        const transport = createFakeTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
+
+        transport.emit(eventFrame(null, Event.simStateDelta([{ index: 7, value: 9 }], 0x20, 1000)));
+        const snapshot = service.getSnapshot();
+        assert.equal(snapshot.gpr[7], 9);
+        assert.equal(snapshot.pc, 0x20);
         router.close();
         service.close();
     });
@@ -127,11 +192,11 @@ describe("M-10 寄存器内存服务", () => {
 
         const gpr = new Array(32).fill(0);
         gpr[1] = 42;
-        transport.emit(eventFrame(null, Event.waveformDelta(registerSnapshot(gpr, 0x04))));
+        transport.emit(eventFrame(null, Event.waveformHistory(registerSnapshot(gpr, 0x04))));
         assert.equal(service.getSnapshot().gpr[1], 42);
 
         // A delta that only carries x2 keeps x1 untouched.
-        transport.emit(eventFrame(null, Event.waveformDelta(waveform([
+        transport.emit(eventFrame(null, Event.waveformHistory(waveform([
             { id: "cpu.gpr.x2", label: "x2", edges: [{ t_ps: 2000, value: 7 }] },
         ]))));
         const snapshot = service.getSnapshot();
@@ -201,7 +266,7 @@ describe("M-10 寄存器内存服务", () => {
         const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
         const seen = [];
         const off = service.subscribe((snapshot) => seen.push(snapshot.gpr[1]));
-        transport.emit(eventFrame(null, Event.waveformDelta(registerSnapshot(
+        transport.emit(eventFrame(null, Event.waveformHistory(registerSnapshot(
             Object.assign(new Array(32).fill(0), { 1: 42 }),
             0x04,
         ))));
@@ -219,7 +284,7 @@ describe("M-10 寄存器内存服务", () => {
         const renders = [];
         const listener = (ev) => renders.push(ev.detail?.viewId);
         dom.window.addEventListener("riscv:render", listener);
-        transport.emit(eventFrame(null, Event.waveformDelta(registerSnapshot(
+        transport.emit(eventFrame(null, Event.waveformHistory(registerSnapshot(
             Object.assign(new Array(32).fill(0), { 5: 99 }),
             0x10,
         ))));
@@ -242,7 +307,7 @@ describe("M-10 寄存器内存服务", () => {
         const router = await m05.mountCommandRouter({ transport });
         const service = await m10.mountRegisterMemory({ commandRouter: router, transport, viewStore });
         viewStore.setState("debug", { sim: { disasm: [{ pc: 0 }] } });
-        transport.emit(eventFrame(null, Event.waveformDelta(registerSnapshot(new Array(32).fill(0), 0x20))));
+        transport.emit(eventFrame(null, Event.waveformHistory(registerSnapshot(new Array(32).fill(0), 0x20))));
         service.flushRender();
         const sim = viewStore.getState("debug").sim;
         assert.equal(sim.disasm.length, 1, "sim 被整块替换，反汇编没了");
@@ -265,7 +330,7 @@ describe("M-10 寄存器内存服务", () => {
         );
         transport.emit(eventFrame(
             transport.sent[0].reqId,
-            Event.waveformDelta(registerSnapshot(new Array(32).fill(0), 0)),
+            Event.registers(0, new Array(32).fill(0)),
         ));
         await first;
 
@@ -285,7 +350,7 @@ describe("M-10 寄存器内存服务", () => {
         // Answer the second subscribe so no command is left pending.
         transport.emit(eventFrame(
             transport.sent[1].reqId,
-            Event.waveformDelta(registerSnapshot(new Array(32).fill(0), 0)),
+            Event.registers(0, new Array(32).fill(0)),
         ));
         await tick();
         router.close();
@@ -300,7 +365,7 @@ describe("M-10 寄存器内存服务", () => {
         const first = service.ensureSubscribed();
         transport.emit(eventFrame(
             transport.sent[0].reqId,
-            Event.waveformDelta(registerSnapshot(new Array(32).fill(0), 0)),
+            Event.registers(0, new Array(32).fill(0)),
         ));
         await first;
         // A repeated status notification must not re-subscribe.
@@ -329,7 +394,7 @@ describe("M-10 寄存器内存服务", () => {
         const first = service.ensureSubscribed();
         transport.emit(eventFrame(
             transport.sent[0].reqId,
-            Event.waveformDelta(registerSnapshot(new Array(32).fill(0), 0)),
+            Event.registers(0, new Array(32).fill(0)),
         ));
         await first;
         assert.equal(transport.sent.length, 1);
@@ -358,7 +423,7 @@ describe("M-10 寄存器内存服务", () => {
         // 4) 答上订阅，别留 pending。
         transport.emit(eventFrame(
             transport.sent[2].reqId,
-            Event.waveformDelta(registerSnapshot(new Array(32).fill(0), 0)),
+            Event.registers(0, new Array(32).fill(0)),
         ));
         await loading;
         router.close();
@@ -373,7 +438,7 @@ describe("M-10 寄存器内存服务", () => {
         const first = service.ensureSubscribed();
         transport.emit(eventFrame(
             transport.sent[0].reqId,
-            Event.waveformDelta(registerSnapshot(new Array(32).fill(0), 0)),
+            Event.registers(0, new Array(32).fill(0)),
         ));
         await first;
 
@@ -387,7 +452,7 @@ describe("M-10 寄存器内存服务", () => {
         assert.equal(transport.sent.length, 2, "resubscribe 没有重新订阅");
         transport.emit(eventFrame(
             transport.sent[1].reqId,
-            Event.waveformDelta(registerSnapshot(new Array(32).fill(0), 0)),
+            Event.registers(0, new Array(32).fill(0)),
         ));
         await again;
         router.close();

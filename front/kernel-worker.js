@@ -20,7 +20,7 @@
 // **无副作用**（前端门禁的 ESM 链接检查就在 Node 里 import 它，而那里
 // 连 `Worker` 全局都没有）。
 
-import { decodeFrame, FRAME_TYPE } from "./lib/frame.js";
+import { decodeFrame, encodeFrame, FRAME_TYPE } from "./lib/frame.js";
 import { eventMessage, Event } from "./lib/message.js";
 
 /**
@@ -164,7 +164,7 @@ function startKernelHost() {
         if (!bootErrorPosted && inFlight === 0) {
             bootErrorPosted = true;
             const seq = (hostSeq += 1);
-            self.postMessage({
+            self.postMessage(encodeFrame({
                 type: FRAME_TYPE.Event,
                 seq,
                 sessionId: null,
@@ -174,7 +174,7 @@ function startKernelHost() {
                     HOST_ERROR_CODE,
                     initFailureMessage(err),
                 )),
-            });
+            }));
         }
         // Deferred by one tick so the error frame above is delivered
         // before the worker dies.
@@ -207,7 +207,7 @@ function startKernelHost() {
      */
     function postError(frame, err) {
         const seq = (hostSeq += 1);
-        self.postMessage({
+        self.postMessage(encodeFrame({
             type: FRAME_TYPE.Event,
             seq,
             sessionId: frame.sessionId,
@@ -217,7 +217,7 @@ function startKernelHost() {
                 HOST_ERROR_CODE,
                 err?.message ?? String(err),
             )),
-        });
+        }));
     }
 
     /**
@@ -300,7 +300,7 @@ function startKernelHost() {
         }
 
         messages.forEach((msg, index) => {
-            self.postMessage({
+            self.postMessage(encodeFrame({
                 type: FRAME_TYPE.Event,
                 // The frame's seq is the event's own seq (same wording as
                 // the mock kernel).
@@ -311,7 +311,7 @@ function startKernelHost() {
                 // it by reqId); the rest are pushed events.
                 reqId: index === 0 ? frame.reqId : null,
                 payload: msg,
-            });
+            }));
         });
     }
 

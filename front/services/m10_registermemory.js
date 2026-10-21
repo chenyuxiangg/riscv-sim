@@ -5,30 +5,43 @@
 // and the memory cells the workbench has read.
 //
 // Where the data comes from (all through M-05 → M-07):
-//   - registers / pc : the kernel pushes them as edge-encoded waveform
-//                      streams (`EventPayload::WaveformDelta`, streams
-//                      `cpu.gpr.xN` / `cpu.pc`). The frozen contract has
-//                      no "register snapshot" variant, so the edge
-//                      stream is the only contract-native carrier — see
-//                      the review doc's "contract gaps" section.
-//   - virtual time   : `EventPayload::Tick { elapsed_ps, pc }`.
-//   - memory         : `EventPayload::MemoryRead { addr, size, value }`.
+//   - registers     : `EventPayload::Registers { index, values }` — the
+//                     **first-class** carrier added in contract v2
+//                     (topic `sim.registers`). The kernel may still also
+//                     push the register file as edge-encoded waveform
+//                     streams (`EventPayload::WaveformHistory`, streams
+//                     `cpu.gpr.xN` / `cpu.pc`); that path is kept so the
+//                     service works against a kernel that has not been
+//                     rewired to the new event yet.
+//   - virtual time  : `EventPayload::Tick { elapsed_ps, pc }` —
+//                     `elapsed_ps` travels as a **decimal string**
+//                     (contract v2 §2.2), so it is read back through
+//                     `psToNumber()`, which **refuses** to round a value
+//                     that does not fit a JS number.
+//   - memory        : `EventPayload::MemoryRead { addr, size, value }`.
 //
-// Read / write requests go the other way: `readRegisters()` asks the
-// kernel for a fresh snapshot (`Subscribe` on the register topic — the
-// frozen contract has no "read registers" command), `readMemory()` uses
-// `ReadMemory`, `writeMemory()` uses `WriteMemory` and reads back to
-// confirm.
+// Read / write requests go the other way: `readRegisters()` uses the
+// contract v2 `ReadRegisters` command, `writeRegister()` uses
+// `WriteRegister`, `readMemory()` uses `ReadMemory` and `writeMemory()`
+// uses `WriteMemory` and reads back to confirm.
+//
+// ⚠️ **读是钳位、写是拒绝**（规格 §5）：内核把读的 `index` / `count`
+// 钳到 32 个寄存器的范围内，并**回报实际起点**；写 x0 被丢弃，写
+// 越界（`index > 31`）是**拒绝**（E_DBG-01）而不是钳位——写钳位会
+// **静默**写到别的寄存器。所以本服务**不**替内核钳位写索引。
 //
 // The service pushes its snapshot into the M-03 view store (the
 // "寄存器/内存" and "调试" views consume it) and asks the workbench to
 // re-render, throttled to ≤200 ms (M-10 LLD §2.2 — the delta push
 // budget).
 
-import { Command, WRITE_SIZE } from "../lib/message.js";
+import { Command, WRITE_SIZE, psToNumber } from "../lib/message.js";
 
 /** Render push throttle (M-10 LLD — ≤200ms). */
 export const RENDER_THROTTLE_MS = 200;
+
+/** Number of general-purpose registers (x0..x31). */
+export const GPR_COUNT = 32;
 
 /** Stream ids the kernel uses for the register file. */
 const GPR_STREAM = /^cpu\.gpr\.x(\d+)$/;
@@ -91,9 +104,13 @@ export async function mountRegisterMemory(options = {}) {
     // -- inbound events ------------------------------------------------------
 
     /**
-     * Merge one waveform delta into the register cache.
+     * Merge one waveform history into the register cache.
      *
-     * @param {object} value — the `Waveform` DTO
+     * The edge-encoded register streams are the **legacy** carrier: the
+     * kernel pushes `cpu.gpr.xN` / `cpu.pc` streams, and only the *last*
+     * edge of each stream carries the current value.
+     *
+     * @param {object} value — the `WaveformHistory` DTO
      */
     function applyWaveform(value) {
         const streams = value?.streams ?? [];
@@ -104,7 +121,7 @@ export async function mountRegisterMemory(options = {}) {
             const gprMatch = GPR_STREAM.exec(stream.id ?? "");
             if (gprMatch) {
                 const index = Number(gprMatch[1]);
-                if (index >= 0 && index < 32) gpr[index] = last.value >>> 0;
+                if (index >= 0 && index < GPR_COUNT) gpr[index] = last.value >>> 0;
                 continue;
             }
             if (stream.id === PC_STREAM) {
@@ -113,15 +130,71 @@ export async function mountRegisterMemory(options = {}) {
         }
     }
 
-    const offWaveform = router?.subscribe?.("waveform.delta", (event) => {
+    /**
+     * Merge a `Registers` batch into the register cache.
+     *
+     * ⚠️ The batch starts at the index the **kernel** reports — the kernel
+     * clamps the request (contract v2 §5) and replies with the *actual*
+     * start index, which is not necessarily the requested one. The
+     * service therefore trusts the reply, never the request.
+     *
+     * @param {object} value — the `Registers` payload
+     */
+    function applyRegisters(value) {
+        const start = Number(value?.index ?? 0);
+        const values = Array.isArray(value?.values) ? value.values : [];
+        for (let i = 0; i < values.length; i += 1) {
+            const reg = start + i;
+            if (reg < 0 || reg >= GPR_COUNT) continue;
+            gpr[reg] = Number(values[i]) >>> 0;
+        }
+    }
+
+    /**
+     * Merge a `SimStateDelta` into the register cache.
+     *
+     * @param {object} value — the `SimStateDelta` payload
+     */
+    function applyStateDelta(value) {
+        for (const reg of value?.registers ?? []) {
+            const index = Number(reg?.index);
+            if (!Number.isInteger(index) || index < 0 || index >= GPR_COUNT) continue;
+            gpr[index] = Number(reg?.value) >>> 0;
+        }
+        if (typeof value?.pc === "number") pc = value.pc >>> 0;
+    }
+
+    const offWaveform = router?.subscribe?.("waveform.history", (event) => {
         applyWaveform(event.value);
         notify();
         scheduleRender();
     }) ?? null;
 
+    const offRegisters = router?.subscribe?.("sim.registers", (event) => {
+        applyRegisters(event.value);
+        notify();
+        scheduleRender();
+    }) ?? null;
+
+    const offStateDelta = router?.subscribe?.("sim.state.delta", (event) => {
+        applyStateDelta(event.value);
+        notify();
+        scheduleRender();
+    }) ?? null;
+
     const offTick = router?.subscribe?.("tick", (event) => {
-        const elapsed = Number(event.value?.elapsed_ps ?? 0);
-        if (Number.isFinite(elapsed)) timeVirt = elapsed;
+        // `elapsed_ps` is a **decimal string** (contract v2 §2.2) — read it
+        // back through `psToNumber()`, which throws instead of silently
+        // rounding a value that does not fit a JS number.
+        let elapsed = null;
+        try {
+            elapsed = psToNumber(event.value?.elapsed_ps ?? 0);
+        } catch (err) {
+            // The time is **left alone** — a value we cannot represent
+            // exactly must not overwrite the last good one.
+            lastError = err?.message ?? String(err);
+        }
+        if (elapsed !== null) timeVirt = elapsed;
         if (typeof event.value?.pc === "number") pc = event.value.pc >>> 0;
         notify();
         scheduleRender();
@@ -195,12 +268,57 @@ export async function mountRegisterMemory(options = {}) {
     }
 
     /**
-     * Ask the kernel for a fresh register snapshot. Resolves with the
-     * snapshot event (a `WaveformDelta`).
+     * Ask the kernel for a fresh register snapshot.
+     *
+     * Contract v2 has a **first-class** read command, so this no longer
+     * piggybacks on a topic subscription: the kernel clamps the request
+     * to the 32-register file and replies with the *actual* start index
+     * (spec §5).
+     *
+     * @param {number} [index] — first register to read (0 = x0)
+     * @param {number} [count] — how many consecutive registers to read
+     * @returns {Promise<object>} the `Registers` event
+     */
+    async function readRegisters(index = 0, count = GPR_COUNT) {
+        if (!router) throw new Error("E_TRX-01: 未挂载命令路由器（M-05）");
+        const event = await router.dispatchCommand(Command.readRegisters(index, count));
+        applyRegisters(event.value);
+        notify();
+        scheduleRender();
+        return event;
+    }
+
+    /**
+     * Write one general-purpose register.
+     *
+     * ⚠️ The index is **not** clamped here: the kernel rejects an
+     * out-of-range write (E_DBG-01) instead of silently writing to a
+     * different register (spec §5). Writing x0 is discarded by the
+     * kernel but still answered.
+     *
+     * @param {number} index
+     * @param {number} value
+     * @returns {Promise<object>} the `Registers` event
+     */
+    async function writeRegister(index, value) {
+        if (!router) throw new Error("E_TRX-01: 未挂载命令路由器（M-05）");
+        const event = await router.dispatchCommand(Command.writeRegister(index, value));
+        applyRegisters(event.value);
+        notify();
+        scheduleRender();
+        return event;
+    }
+
+    /**
+     * Subscribe to the kernel-side register topic.
+     *
+     * This is the **push** side: the kernel keeps sending register
+     * updates to the `sim.registers` topic until the subscription dies
+     * (a `LoadProject` kills it, and so does a disconnect).
      *
      * @returns {Promise<object>}
      */
-    async function readRegisters() {
+    async function subscribeRegisterTopic() {
         if (!router) throw new Error("E_TRX-01: 未挂载命令路由器（M-05）");
         const event = await router.dispatchCommand(Command.subscribe("sim.registers"));
         // The kernel-side subscription only survives while the link is
@@ -258,7 +376,7 @@ export async function mountRegisterMemory(options = {}) {
         if (subscribed || !router) return;
         if (!linkIsUp()) return;
         try {
-            await readRegisters();
+            await subscribeRegisterTopic();
         } catch (err) {
             lastError = err?.message ?? String(err);
             notify();
@@ -323,6 +441,7 @@ export async function mountRegisterMemory(options = {}) {
 
     return {
         readRegisters,
+        writeRegister,
         readMemory,
         writeMemory,
         loadProject,
@@ -334,6 +453,8 @@ export async function mountRegisterMemory(options = {}) {
         flushRender,
         close() {
             offWaveform?.();
+            offRegisters?.();
+            offStateDelta?.();
             offTick?.();
             offMemory?.();
             offError?.();
