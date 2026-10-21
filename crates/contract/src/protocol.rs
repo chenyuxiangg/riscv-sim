@@ -95,13 +95,41 @@ pub enum CommandPayload {
     Nop,
     /// Load a new project and reset the engine.
     LoadProject(Project),
-    /// Run until the next breakpoint, watchpoint, or quantum boundary.
+    /// Run until the next breakpoint, watchpoint, or trap, **or until the
+    /// engine's instruction budget for this run window is exhausted**.
+    ///
+    /// The quantum boundary is a **preemption point** (the scheduler may
+    /// yield there), **not** a stop condition.
+    ///
+    /// **Contract v2 wording (D-57).** The v1 wording said "or quantum
+    /// boundary", which contradicted the implementation: the engine ran
+    /// until its instruction budget was exhausted (10 000 instructions =
+    /// 10 quanta). The implementation is the one that was kept — it is
+    /// the semantics D-07 closed and the `d07_time_driven.rs` suite
+    /// pins — so the *documentation* was corrected instead.
+    ///
+    /// ⚠️ The same wording used to live in
+    /// [`crate::port::ExecutionBackend::continue_until_event`], which
+    /// was corrected in v2 as well. **Both places said it** — the
+    /// variant's doc comment and the port's — and only the port was
+    /// caught the first time round.
     Continue,
     /// Run exactly `n` ISS instructions.
     StepN {
         n: u32,
     },
-    /// Pause the engine at the next quantum boundary.
+    /// Request a pause.
+    ///
+    /// The engine records the request and the host reports
+    /// `Halted { reason: UserPause }`.
+    ///
+    /// ⚠️ The v1 wording said "Pause the engine at the next quantum
+    /// boundary" — but a command is handled at a **quiescent** point
+    /// (the host is not concurrent with the engine's run loop), so
+    /// there is no "next quantum boundary" to wait for. The wording now
+    /// says what actually happens. (D-57's family; see the debt
+    /// ledger **D-72** for the related dead interface
+    /// `StepOutcome::HostPause`.)
     Pause,
     /// Set / clear breakpoints and watchpoints.
     SetBreakpoint(Breakpoint),

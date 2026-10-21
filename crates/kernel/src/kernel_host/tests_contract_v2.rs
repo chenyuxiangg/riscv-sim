@@ -500,3 +500,55 @@ fn waveform_edges_arrive_as_the_renamed_waveform_history_event() {
     );
     assert_eq!(gpio.edges[0].value, 1, "边沿的值是固件写进 OUT 的那个 1");
 }
+
+// -- Continue（D-57 的端口文档订正 · 命令层的那根钉子）-----------------
+
+/// `Continue` 命令跑的是**本轮指令预算**，不是「下一个量子边界」。
+///
+/// D-57 把契约的端口文档从「跑到下一个**量子边界**」订正为「跑到本轮
+/// **指令预算**耗尽」。⚠️ 判别式必须落在**行为**上，否则「改了文档但
+/// 没改行为」与「没改文档」同样无法分辨：
+///
+/// - 量子配额是 1 000 条，指令预算是 10 000 条 —— 两者差 **10 倍**。
+///   断言「正好 10 000 条」就能把「预算耗尽」与「停在量子边界」分开；
+/// - 同时断言它是量子配额的**整数倍**（量子化调度）。
+///
+/// ⚠️ 这条用例守的是**命令**这一层（M-05 → kernel_host → M-17）；
+/// 端口方法那一层由 `m17_backend::tests::
+/// continue_until_event_runs_the_quantum_main_loop` 守着。
+/// **两者是不同的表面**，各要有各的钉子 —— 只钉一处，另一处照样能漂。
+#[test]
+fn the_continue_command_runs_the_budget_not_one_quantum() {
+    let mut host = host_after_steps(0);
+    let before = host.backend.total_executed();
+    assert_eq!(before, 0, "夹具：Continue 之前一条指令都没跑");
+
+    let events = dispatch(&mut host, CommandPayload::Continue);
+    let executed = host.backend.total_executed() - before;
+
+    assert_eq!(
+        executed,
+        u64::from(crate::m12_engine::DEFAULT_INSTRUCTION_BUDGET),
+        "没有断点 / 陷阱时，Continue 必须跑满**指令预算**（10 000 条）—— \
+         停在量子边界是 1 000 条，两者差 10 倍"
+    );
+    // ⚠️ 上面那条断言是**自指**的（用的就是实现自己用的那个常量），
+    // 所以它**单独**钉不住「预算 vs 量子边界」——把预算常量改成 1 000，
+    // 它照样绿。判别式必须落在**量子配额**上（一个与预算无关的量）：
+    // 「跑过**不止一个量子**」。D-73。
+    assert!(
+        executed > u64::from(crate::m12_engine::QUANTUM_INSTR_QUOTA),
+        "Continue 必须跑过**不止一个量子**（量子配额 {} 条）—— \
+         停在量子边界是恰好一个量子，跑满指令预算才是多个量子",
+        crate::m12_engine::QUANTUM_INSTR_QUOTA
+    );
+    assert_eq!(
+        executed % u64::from(crate::m12_engine::QUANTUM_INSTR_QUOTA),
+        0,
+        "一轮的执行条数必须是量子配额的整数倍（量子化调度）"
+    );
+    assert!(
+        !events.is_empty(),
+        "Continue 至少要回一个事件（Tick / Halted）"
+    );
+}
