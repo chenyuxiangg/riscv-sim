@@ -153,6 +153,7 @@ LLD 的 `E_PROTO-01`…`E_PROTO-08` 此前在契约的 `ErrorFamily` 里**没有
 - `tools/check-front.sh` ✅ **208 用例 / 35 suite**
 - `tools/golden-run.sh --keep-going` → `total=51 ok=51 now-passing=0 expected-gap=0 mismatch=0 no-verdict=0 build-failed=0` ✅（**D-43 闭环**；本批未动 M-13 / M-06，语料未变）
 - `tools/wasm-smoke.mjs` —— **34 项断言**（需先 `tools/build-wasm.sh`；**不进默认门禁**，按需运行）
+- `tools/browser-verify.mjs`（**真 Chrome + 真 WASM**）—— ✅ **14 项断言全过**（落地页挂载 / 切到 `#/regmem` 渲染出 32 个寄存器格 / 真内核执行 demo 固件 **x1 = 42** / PC 前进到 `0x00000004` / 波形视图列出 `GPIO0.OUT` **且带 1 条边沿** / 控制台无错）——**断言值**，不只是「非空」
 - 关键 commit：`14da92e`（规格冻结）· `3126f54`（契约层 v2 实现）· `3a9660c`（D-68 预算口径订正）·
   `371f38f`（内核侧适配）· `feature/c2-front`（前端侧适配，3 commit）· `7bacbdf`（工具侧适配）·
   `5b89c9a`（D-73 判据自指）· `e8bc706`（V-A 契约层闭环）· `24d34f7` / `e9dfc4c`（合并前端 / 文档两路）·
