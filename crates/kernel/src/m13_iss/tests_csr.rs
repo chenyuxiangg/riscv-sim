@@ -992,3 +992,130 @@ fn a_csr_instruction_behaves_the_same_on_both_dispatch_routes() {
         "both routes must agree on the CSR file"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The **report** — which CSR did this instruction actually write?
+// ---------------------------------------------------------------------------
+
+/// 六条 CSR 指令**各自**都要回报「刚写了哪个 CSR」。
+///
+/// ⚠️ 这是 v0.19 检视轮 **F-1** 的修复所依赖的判据：M-17 靠这个回报
+/// 知道「这条指令写了 `irq_clear`」。判据若只挂在**一条**臂上，其余
+/// 五条臂写 `irq_clear` 就会**静默不生效** ⇒ 那条线被单级防护**永久
+/// 堵死**（该线再也交付不了任何中断）。
+///
+/// ⚠️ **准确的后果表述**（本轮收口订正）：F-1 的后果是「**那条线被永久
+/// 堵死**」，**不是**「平台活锁」。早先据 K-17 / K-18 的「挂死」观测写下
+/// 的「平台活锁」是**错的** —— 那个「挂死」经复核是**假 HANG**
+/// （macOS 对新链接二进制的 `exec` 扫描堵住了测试二进制，**与被测代码
+/// 无关**；见 `docs/reviews/REVIEWS.md` §3.10.5 第 17 条）。新口径下
+/// **K-17 判 RED ✓**。⇒ 「**会不会挂死取决于哪条路径**」：真正会挂死的是
+/// **K-10**（`take_intr` **取走不消失** ⇒ 同一交付被反复交付 ⇒ 引擎内层
+/// 循环不退出），那才是台账 **D-83** 的生产侧。
+///
+/// ⚠️ 这条断言是**逐臂**的。`CSRRS` / `CSRRC` / `CSRSI` / `CSRCI` 的
+/// 写入值与源操作数有关（`old | value` / `old & !value`），但**只要
+/// 执行臂真的调了写**，就必须回报 —— **哪怕写进去的值与原来相同**
+/// （那正是 F-1 那个「第二次清除被静默丢弃」的现场）。
+///
+/// ⚠️ 变异自检 **K-39~K-42** 就是把这四条臂逐条改坏的（退化成
+/// 「值变了才回报」）；**K-38** 改的是立即数形式的 `CSRWI` 臂。
+///
+/// ⚠️ **每条臂写两次**（第二次是**同一个值**）：「值变了才回报」的退化在
+/// **第一次**抓不住（第一次值确实变了）⇒ 只写一次的断言对这组变异
+/// **0 红** ⇒ 判别力缺口。
+#[test]
+fn every_csr_instruction_reports_the_csr_number_it_wrote() {
+    // (funct3, rs1-field)
+    //
+    // ⚠️ 立即数形式的 `rs1` 字段装的是 **zimm**（5 位）—— 编码上是
+    // 同一个字段，语义上不是同一个操作数。
+    for (funct3, rs1_field) in [
+        (F_CSRRW, 1u8),
+        (F_CSRRS, 1),
+        (F_CSRRC, 1),
+        (F_CSRRWI, 2),
+        (F_CSRRSI, 2),
+        (F_CSRRCI, 2),
+    ] {
+        let mut h = Harness::new();
+        let mut state = state_with_csrs(&[]);
+        state.gpr[1] = 0x2; // CSRRS / CSRRC 的非零源
+                            // ⚠️ **每条臂写两次**：第一次写时值确实变了（0 → 2）⇒ 判据若退化成
+                            //    「**值变了**才回报」，**第一次**照样回报 ⇒ 抓不住 ⇒ 必须有
+                            //    **第二次**（**同一个值**）才抓得住 —— 那正是 F-1 的现场。
+        for round in 1..=2u32 {
+            assert_eq!(
+                h.iss.take_last_csr_written(),
+                None,
+                "funct3 = {funct3:03b} 第 {round} 轮之前：上一条指令的回报必须已经被取走"
+            );
+            let outcome = h.step_one_at(
+                &mut state,
+                0x1000,
+                csr_insn(CSR_IRQ_CLEAR, rs1_field, funct3, 0),
+            );
+            assert_eq!(
+                outcome,
+                StepOutcome::Advanced,
+                "funct3 = {funct3:03b} 第 {round} 轮"
+            );
+            assert_eq!(
+                h.iss.take_last_csr_written(),
+                Some(CSR_IRQ_CLEAR),
+                "funct3 = {funct3:03b} 第 {round} 轮：这条指令写了 CSR 0x{CSR_IRQ_CLEAR:03x}，\
+                 必须回报它 —— **哪怕写进去的值与上一次完全相同**"
+            );
+        }
+    }
+}
+
+/// 被**忽略**的写**不回报**。
+///
+/// 回报的语义是「这条指令**真的写了**某个 CSR」。只读 CSR（`mip`）
+/// 的写被忽略 ⇒ **没写** ⇒ 不该有回报。
+///
+/// ⚠️ 若这里也回报，M-17 就会把「写了 `mip`」当成「写了 `irq_clear`」
+/// ⇒ **清错线**（清掉一条根本没被拉起的线，真正的挂起项还在）。
+#[test]
+fn an_ignored_write_reports_nothing() {
+    let mut h = Harness::new();
+    let mut state = state_with_csrs(&[(CSR_MIP, 0)]);
+    state.gpr[1] = 0x1;
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MIP, 1, F_CSRRW, 0));
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert_eq!(
+        h.iss.take_last_csr_written(),
+        None,
+        "只读 CSR 的写被忽略 ⇒ 没有真的写 ⇒ 不该回报"
+    );
+}
+
+/// **重复写同一个值**也必须回报。
+///
+/// ⚠️ 这是 F-1 的**现场**：guest 的 handler **每次**都写**同一个**掩码
+/// ⇒ 判据若退化成「**值变了**才回报」，**第二次**就会被**静默跳过**
+/// ⇒ 第二次清线丢掉 ⇒ `active_irq` 永不复位 ⇒ 那条线被单级防护
+/// **永久堵死**。
+///
+/// ⇒ ⚠️ **只写一次**的断言**抓不住**这个退化（第一次写时值确实变了）
+/// ⇒ 这条用例必须**写两次**，且两次写的是**同一个值**。
+///
+/// 变异自检 **K-18b / K-38**（把回报退化成「值变了才回报」）就是被这条
+/// 抓红的 —— 而**不是**被「只写一次」的那条。
+#[test]
+fn a_repeated_write_of_the_same_value_still_reports_the_csr() {
+    let mut h = Harness::new();
+    let mut state = state_with_csrs(&[]);
+    state.gpr[1] = 0x2;
+    for round in 1..=2u32 {
+        let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_IRQ_CLEAR, 1, F_CSRRW, 0));
+        assert_eq!(outcome, StepOutcome::Advanced, "第 {round} 轮");
+        assert_eq!(
+            h.iss.take_last_csr_written(),
+            Some(CSR_IRQ_CLEAR),
+            "第 {round} 轮：这条指令写了 CSR 0x{CSR_IRQ_CLEAR:03x}，必须回报它 —— \
+             **哪怕写进去的值与上一次完全相同**"
+        );
+    }
+}
