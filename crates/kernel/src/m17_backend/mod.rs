@@ -30,7 +30,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use riscv_sim_contract::error::{ErrorFamily, PlatformError};
+use riscv_sim_contract::error::{
+    ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_01_INVALID_REGISTER_INDEX,
+};
 use riscv_sim_contract::model::{Breakpoint, SimState, WatchAccess, Watchpoint, WriteSize};
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
 use riscv_sim_contract::protocol::HaltReason;
@@ -388,8 +390,8 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
     pub fn set_gpr(&mut self, index: u32, value: u32) -> Result<(), PlatformError> {
         if index >= 32 {
             return Err(PlatformError::new(
-                ErrorFamily::Debug,
-                1,
+                DEBUG_FAMILY,
+                E_DBG_01_INVALID_REGISTER_INDEX,
                 format!("寄存器下标越界：x{index}（合法范围 x0..x31）"),
             ));
         }

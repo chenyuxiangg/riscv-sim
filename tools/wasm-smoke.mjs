@@ -30,6 +30,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { DEMO_FIRMWARE_BYTES } from "../front/dev/demo-firmware.js";
+import { SCHEMA_VERSION } from "../front/lib/message.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
@@ -67,6 +68,9 @@ const mod = await import(pathToFileURL(glue).href);
 // 新版 wasm-bindgen 的 init 收一个对象参数，位置参数已废弃。
 await mod.default({ module_or_path: readFileSync(wasm) });
 
+/** 内核自己报的协议版本 —— 发命令时用它（见 `send()` 的注释）。 */
+const kernelSchemaVersion = mod.protocol_schema_version();
+
 let failures = 0;
 
 /**
@@ -93,7 +97,10 @@ function check(what, ok, detail = "") {
  */
 function send(payload) {
     const message = {
-        schema_version: 1,
+        // 用**内核自己报的**版本发命令：契约规定「低于支持版本 → 拒」，
+        // 所以发一个内核不认的版本会让每个断言都变成「命令被拒」，
+        // 掩盖真正的被测行为。版本**对不对**由下面那条显式断言管。
+        schema_version: kernelSchemaVersion,
         direction: "Command",
         seq: 1,
         payload: { Command: payload },
@@ -124,19 +131,19 @@ function find(events, variant) {
 /**
  * 在事件数组里找一条**探针**波形流。
  *
- * ⚠️ 不能直接用 `find(events, "WaveformDelta")`：一次运行会推**两条**
+ * ⚠️ 不能直接用 `find(events, "WaveformHistory")`：一次运行会推**两条**
  * 波形事件——寄存器增量 + 探针边沿——`find` 只会拿到第一条（寄存器那条）。
  * 所以这里按流 id 找。
  *
  * @param {object[]} events
  * @param {string} id — e.g. `"GPIO0.OUT"`
- * @returns {{id: string, label: string, edges: Array<{t_ps: number, value: number}>}|undefined}
+ * @returns {{id: string, label: string, edges: Array<{t_ps: string, value: number}>}|undefined}
  */
 function findProbeStream(events, id) {
     for (const e of events) {
         const payload = e.payload.Event;
-        if (!payload || !("WaveformDelta" in payload)) continue;
-        const streams = payload.WaveformDelta.streams ?? [];
+        if (!payload || !("WaveformHistory" in payload)) continue;
+        const streams = payload.WaveformHistory.streams ?? [];
         const hit = streams.find((s) => s.id === id);
         if (hit) return hit;
     }
@@ -152,7 +159,16 @@ console.log(`  protocol_schema_version = ${mod.protocol_schema_version()}`);
 console.log(`  ping                    = ${mod.ping("hello")}`);
 
 check("ping 回声正确", mod.ping("hello") === "pong:hello");
-check("schema 版本是 1", mod.protocol_schema_version() === 1);
+check(
+    "内核的协议版本是 2",
+    kernelSchemaVersion === 2,
+    `实际 ${kernelSchemaVersion}`,
+);
+check(
+    "内核的协议版本与前端 JS 镜像一致",
+    kernelSchemaVersion === SCHEMA_VERSION,
+    `内核 ${kernelSchemaVersion} vs 镜像 ${SCHEMA_VERSION}`,
+);
 
 // -- Nop ------------------------------------------------------------------
 {
@@ -178,17 +194,17 @@ check("schema 版本是 1", mod.protocol_schema_version() === 1);
 // -- Subscribe ------------------------------------------------------------
 {
     const events = send({ Subscribe: { topic: "sim.registers" } });
-    const wave = find(events, "WaveformDelta");
+    const wave = find(events, "WaveformHistory");
     check("Subscribe 推全量寄存器快照", wave !== undefined);
-    const streams = wave?.WaveformDelta?.streams ?? [];
+    const streams = wave?.WaveformHistory?.streams ?? [];
     check("全量快照 = 32 条 GPR + pc", streams.length === 33, `实际 ${streams.length}`);
 }
 
 // -- StepN ----------------------------------------------------------------
 {
     const events = send({ StepN: { n: 4 } });
-    const wave = find(events, "WaveformDelta");
-    const streams = wave?.WaveformDelta?.streams ?? [];
+    const wave = find(events, "WaveformHistory");
+    const streams = wave?.WaveformHistory?.streams ?? [];
     const value = (id) => {
         const s = streams.find((x) => x.id === id);
         return s ? s.edges[s.edges.length - 1].value : undefined;
@@ -198,10 +214,101 @@ check("schema 版本是 1", mod.protocol_schema_version() === 1);
     check("StepN 后 x3 = 49", value("cpu.gpr.x3") === 49, `实际 ${value("cpu.gpr.x3")}`);
 }
 
+// -- 契约 v2 的新命令（真 wasm 产物）-------------------------------------
+//
+// 这一段验的是**契约 v2 新增的三条命令**在**真内核**上的行为：
+// 协商、读寄存器、写寄存器。规格 §5 的语义逐条落地：
+//
+//   - `Negotiate`：宿主要求的**最低**版本高于内核支持的 → 拒（E_PROTO-01）；
+//   - `ReadRegisters`：读是**钳位**，回复带**实际起点**；
+//   - `WriteRegister`：写 x0 被**丢弃**但**仍回复**；写越界是**拒绝**
+//     （E_DBG-01）而不是钳位——写钳位会静默写到别的寄存器。
+{
+    // 协商：正常路径
+    const neg = find(send({ Negotiate: { min_schema_version: 2, cap_bits: 0 } }), "Negotiated");
+    check("Negotiate 回一个 Negotiated 事件", neg !== undefined);
+    check(
+        "协商的协议版本是 2",
+        neg?.Negotiated?.schema_version === 2,
+        `实际 ${neg?.Negotiated?.schema_version}`,
+    );
+    check(
+        "协商回了内核描述串（版本 + ISA）",
+        typeof neg?.Negotiated?.kernel === "string" && /RV32IMC/.test(neg.Negotiated.kernel),
+        `实际 ${JSON.stringify(neg?.Negotiated?.kernel)}`,
+    );
+
+    // 协商：宿主要求的版本高于内核 → 拒
+    const negBad = send({ Negotiate: { min_schema_version: 99, cap_bits: 0 } });
+    const negErr = find(negBad, "Error");
+    check(
+        "Negotiate 版本太高被拒（E_PROTO-01）",
+        negErr?.Error?.code === "E_PROTO-01",
+        `实际 ${negErr?.Error?.code}`,
+    );
+
+    // 读寄存器：钳位 + 回报实际起点
+    const read = find(send({ ReadRegisters: { index: 1, count: 3 } }), "Registers");
+    check("ReadRegisters 回一个 Registers 事件", read !== undefined);
+    check(
+        "读到的 x1/x2/x3 是固件真的算出来的值",
+        JSON.stringify(read?.Registers?.values) === JSON.stringify([42, 7, 49]),
+        `实际 ${JSON.stringify(read?.Registers?.values)}`,
+    );
+
+    // 读寄存器：区间越过寄存器表末尾 → 钳到末尾
+    const clamped = find(send({ ReadRegisters: { index: 30, count: 10 } }), "Registers");
+    check(
+        "读的区间越界时钳到寄存器表末尾",
+        clamped?.Registers?.index === 30 && clamped?.Registers?.values?.length === 2,
+        `实际 index=${clamped?.Registers?.index} len=${clamped?.Registers?.values?.length}`,
+    );
+
+    // 读寄存器：count = 0 → **回复空区间**（不是不回复——不回复与消息
+    // 丢失不可区分，M-05 会超时拒绝）
+    const empty = find(send({ ReadRegisters: { index: 0, count: 0 } }), "Registers");
+    check(
+        "count = 0 回复空区间（而不是不回复）",
+        empty !== undefined && Array.isArray(empty?.Registers?.values) &&
+            empty.Registers.values.length === 0,
+        `实际 ${JSON.stringify(empty?.Registers)}`,
+    );
+
+    // 写寄存器：写 x0 被丢弃但仍回复
+    const w0 = find(send({ WriteRegister: { index: 0, value: 0xDEAD } }), "Registers");
+    check(
+        "写 x0 被丢弃但仍回复（值恒为 0）",
+        JSON.stringify(w0?.Registers?.values) === JSON.stringify([0]),
+        `实际 ${JSON.stringify(w0?.Registers?.values)}`,
+    );
+
+    // 写寄存器：越界是**拒绝**（E_DBG-01），不是钳位
+    const wBad = find(send({ WriteRegister: { index: 99, value: 1 } }), "Error");
+    check(
+        "写越界被拒（E_DBG-01），不是钳位",
+        wBad?.Error?.code === "E_DBG-01",
+        `实际 ${wBad?.Error?.code}`,
+    );
+
+    // 写寄存器：正常写要真的写进去（能被读回来）
+    //
+    // ⚠️ 写的是 x5，而 demo 固件在 0x1c 用 x5 作 GPIO 基址
+    // （`sw x6, 4(x5)`）。**这不影响后面的探针断言**：固件在 0x14
+    // 有 `lui x5, 0x40000`，探针段的 `StepN(4)` 正好执行 0x10→0x14→
+    // 0x18→0x1c，x5 在那之前就被**重新设回** 0x4000_0000 了。
+    send({ WriteRegister: { index: 5, value: 0x1234 } });
+    const back = find(send({ ReadRegisters: { index: 5, count: 1 } }), "Registers");
+    check(
+        "写进 x5 的值能被读回来",
+        back?.Registers?.values?.[0] === 0x1234,
+        `实际 ${JSON.stringify(back?.Registers?.values)}`,
+    );
+}
+
 // -- 探针流（D-46）--------------------------------------------------------
 //
 // 波形管道是**真的**接上的：demo 固件写 GPIO0.OUT → M-15 报边沿 →
-// M-18 判沿 → 宿主推成契约的 `WaveformDelta`。
+// M-18 判沿 → 宿主推成契约的 `WaveformHistory`。
 //
 // 这里特意**不用** mock：跑的是 `front/assets/pkg/` 里那个真 wasm 产物。
 {
@@ -231,8 +338,13 @@ check("schema 版本是 1", mod.protocol_schema_version() === 1);
     );
     check(
         "边沿带的是**真实**的虚拟时间戳（不是 0）",
-        typeof runStream?.edges?.[0]?.t_ps === "number" && runStream.edges[0].t_ps > 0,
-        `实际 ${runStream?.edges?.[0]?.t_ps}`,
+        // 契约 v2：虚拟时间在线上是**十进制字符串**（§2.2）——u64 走
+        // JSON 数字会落到 JS double，只精确到 2^53。所以这里既要看它
+        // 是字符串形态，也要看它折算出来确实大于 0。
+        typeof runStream?.edges?.[0]?.t_ps === "string" &&
+            /^\d+$/.test(runStream.edges[0].t_ps) &&
+            Number(runStream.edges[0].t_ps) > 0,
+        `实际 ${JSON.stringify(runStream?.edges?.[0]?.t_ps)}`,
     );
 }
 

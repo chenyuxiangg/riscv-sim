@@ -80,7 +80,9 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use riscv_sim_contract::error::{ErrorFamily, PlatformError};
+use riscv_sim_contract::error::{
+    ErrorFamily, PlatformError, E_PROTO_01_VERSION_MISMATCH, PROTO_FAMILY,
+};
 use riscv_sim_contract::model::{
     Edge, ImageKind, ImageRef, ImageSource, Project, WaveformHistory, WaveformStream, WriteSize,
     SIM_STATE_SCHEMA_VERSION,
@@ -621,13 +623,15 @@ impl KernelHost {
         // **静默地**少解析几个字段——那比直接拒绝糟得多。宁可拒掉，
         // 也不要 misinterpret（V-A 检视 · ⚪-6）。
         if msg.schema_version != SCHEMA_VERSION {
-            return vec![EventPayload::Error {
-                code: "E_PROTO-01".to_string(),
-                message: format!(
+            let err = PlatformError::new(
+                PROTO_FAMILY,
+                E_PROTO_01_VERSION_MISMATCH,
+                format!(
                     "协议版本不兼容：{} != {}",
                     msg.schema_version, SCHEMA_VERSION
                 ),
-            }];
+            );
+            return vec![self.error_from(&err)];
         }
         if msg.direction != Direction::Command {
             return vec![EventPayload::Error {
@@ -963,12 +967,14 @@ impl KernelHost {
     /// 拒。
     fn on_negotiate(&mut self, min_schema_version: u32, _host_cap_bits: u64) -> Vec<EventPayload> {
         if min_schema_version > SCHEMA_VERSION {
-            return vec![EventPayload::Error {
-                code: "E_PROTO-01".to_string(),
-                message: format!(
+            let err = PlatformError::new(
+                PROTO_FAMILY,
+                E_PROTO_01_VERSION_MISMATCH,
+                format!(
                     "宿主要求的最低协议版本 {min_schema_version} 高于内核支持的 {SCHEMA_VERSION}"
                 ),
-            }];
+            );
+            return vec![self.error_from(&err)];
         }
         // ⚠️ 宿主**提供**的 `cap_bits` 在这里**不参与**裁决：契约规格
         // §5 只说「回内核授予的 cap_bits」，没定义「取交集」之类的规则。
