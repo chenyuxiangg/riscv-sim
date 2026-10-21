@@ -247,7 +247,10 @@ impl Bus {
     pub fn export_map(&self) -> M14MapDto;
 
     /// 回灌内存映射拓扑——段 3 的消费者。
-    /// ⚠️ **重建区域**（RAM / ROM 的内容**不恢复**，ROM 随固件走、RAM 在段 2）。
+    /// ⚠️ **只重建 RAM / ROM 区域**（内容置零；ROM 随固件走、RAM 在段 2）。
+    /// ⚠️ **外设区域原地保留**（既不删除、也不重建）——外设实例是会话的
+    /// **输入**（固件绑定出来的活实例），不是状态。
+    /// 删掉它们会让恢复后的总线**没有外设**，固件再跑一步就发散。
     pub fn load_map(&mut self, map: &M14MapDto) -> Result<(), PlatformError>;
 }
 ```
@@ -283,13 +286,19 @@ impl InterruptController {
 ```rust
 impl SnapshotManager {
     /// 组装**完整**会话载荷（六段全齐）。
+    ///
+    /// ⚠️ **六段由调用方提供**——M-20 是**记录器**，不是**采集器**。
+    /// 采集（`bus.export_pages()` / `registry.export_state()` / …）由
+    /// **内核宿主**做，因为它同时持有总线、外设注册表与中断控制器。
+    /// 这样 M-20 **不依赖** M-14 / M-15 / M-16，三段可以各自演进。
     pub fn capture_session(
         &mut self,
         cp_meta: CheckpointMetaDto,
         engine: EngineSnapshotDto,
-        bus: &Bus,
-        periph: &PeripheralRegistry,
-        intc: &InterruptController,
+        m13_state: M13StateDto,
+        m14_map: M14MapDto,
+        m15_periph: M15PeriphDto,
+        m16_intc: M16IntcDto,
     ) -> SessionSnapshotDto;
 }
 ```
@@ -403,6 +412,7 @@ pub trait DataStore {
 | **压缩快照**（`recordingFormat`） | LLD 明写 **P1 预留** |
 | **`DebugMeta` 进快照** | 2026-10-20 裁决：项目级独立存储（键 `pdebug:`+projectId），**不随快照回滚** |
 | **M-11 符号表 / DWARF** | 独立批次（10 人日，风险最高） |
+| **会话快照的**协议入口**（`SaveSession` / `LoadSession` 命令） | 加一个**命令变体**就是**协议层**改动：v2 的 JS 镜像 `decodeMessage` 遇到未知变体会抛 `E_PROTO-08`，所以加变体必须同时 bump `SCHEMA_VERSION` —— 那是**另一次**契约升版，不属本批。本轮把会话快照做到**宿主内部 API**可达（`KernelHost::capture_session` / `restore_session`），协议入口留给下一批 |
 
 ---
 
