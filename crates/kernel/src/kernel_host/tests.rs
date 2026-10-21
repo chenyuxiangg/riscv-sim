@@ -77,20 +77,20 @@ fn first_error(events: &[EventPayload]) -> (String, String) {
     panic!("没有 Error 事件：{events:?}");
 }
 
-/// 取第一条 `WaveformDelta` 的流 id 列表。
+/// 取第一条 `WaveformHistory` 的流 id 列表。
 fn first_waveform_ids(events: &[EventPayload]) -> Vec<String> {
     for e in events {
-        if let EventPayload::WaveformDelta(wave) = e {
+        if let EventPayload::WaveformHistory(wave) = e {
             return wave.streams.iter().map(|s| s.id.clone()).collect();
         }
     }
-    panic!("没有 WaveformDelta 事件：{events:?}");
+    panic!("没有 WaveformHistory 事件：{events:?}");
 }
 
-/// 从 `WaveformDelta` 里读一个寄存器的值。
+/// 从 `WaveformHistory` 里读一个寄存器的值。
 fn waveform_value(events: &[EventPayload], id: &str) -> Option<u64> {
     for e in events {
-        if let EventPayload::WaveformDelta(wave) = e {
+        if let EventPayload::WaveformHistory(wave) = e {
             for stream in &wave.streams {
                 if stream.id == id {
                     return stream.edges.last().map(|edge| edge.value);
@@ -449,7 +449,7 @@ fn unsubscribe_stops_the_register_pushes() {
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e, EventPayload::WaveformDelta(_))),
+            .any(|e| matches!(e, EventPayload::WaveformHistory(_))),
         "退订之后不再推波形：{events:?}"
     );
 }
@@ -667,7 +667,7 @@ fn a_breakpoint_run_emits_tick_then_waveform_then_halted() {
         .iter()
         .map(|e| match e {
             EventPayload::Tick { .. } => "Tick",
-            EventPayload::WaveformDelta(_) => "WaveformDelta",
+            EventPayload::WaveformHistory(_) => "WaveformHistory",
             EventPayload::Halted { .. } => "Halted",
             EventPayload::Error { .. } => "Error",
             _ => "其它",
@@ -675,8 +675,8 @@ fn a_breakpoint_run_emits_tick_then_waveform_then_halted() {
         .collect();
     assert_eq!(
         kinds,
-        vec!["Tick", "WaveformDelta", "Halted"],
-        "命中断点时的事件顺序必须是 Tick → WaveformDelta → Halted"
+        vec!["Tick", "WaveformHistory", "Halted"],
+        "命中断点时的事件顺序必须是 Tick → WaveformHistory → Halted"
     );
 }
 

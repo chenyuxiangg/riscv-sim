@@ -8,7 +8,7 @@
 //! guest 写 GPIO0.OUT
 //!    → M-14 总线派发 → M-15 GpioBank 判「电平真变了」→ report("OUT")
 //!    → M-18 ProbeRegistry 判沿 → 边沿进 M-19 的环（EdgeSink）
-//!    → kernel_host 取边沿 → 契约 EventPayload::WaveformDelta
+//!    → kernel_host 取边沿 → 契约 EventPayload::WaveformHistory
 //!    → 前端波形视图列出通道
 //! ```
 //!
@@ -24,7 +24,8 @@
 //! - 观察点 hook 与探针 hook **必须共存** —— 单槽 hook 会互相顶掉。
 
 use riscv_sim_contract::model::{
-    ImageKind, ImageRef, ImageSource, ProductTree, Project, ProjectVersion, Waveform, WriteSize,
+    ImageKind, ImageRef, ImageSource, ProductTree, Project, ProjectVersion, WaveformHistory,
+    WriteSize,
 };
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload, Message};
 use riscv_sim_kernel::kernel_host::{
@@ -67,23 +68,23 @@ fn dispatch(host: &mut KernelHost, cmd: CommandPayload) -> Vec<EventPayload> {
     host.handle_message(&Message::command(1, cmd))
 }
 
-/// 从一批事件里挑出**最后一条**探针波形（`WaveformDelta`）。
+/// 从一批事件里挑出**最后一条**探针波形（`WaveformHistory`）。
 ///
 /// ⚠️ 必须挑「最后一条」：一次 `Subscribe` 会推两条波形事件——寄存器
 /// 全量快照 + 探针通道列表。挑第一条会拿到寄存器那条，断言就落空了。
-fn last_probe_waveform(events: &[EventPayload]) -> Option<Waveform> {
+fn last_probe_waveform(events: &[EventPayload]) -> Option<WaveformHistory> {
     events.iter().rev().find_map(|e| match e {
-        EventPayload::WaveformDelta(wave) => Some(wave.clone()),
+        EventPayload::WaveformHistory(wave) => Some(wave.clone()),
         _ => None,
     })
 }
 
 /// 从一批事件里挑出**所有**探针波形。
-fn all_waveforms(events: &[EventPayload]) -> Vec<Waveform> {
+fn all_waveforms(events: &[EventPayload]) -> Vec<WaveformHistory> {
     events
         .iter()
         .filter_map(|e| match e {
-            EventPayload::WaveformDelta(wave) => Some(wave.clone()),
+            EventPayload::WaveformHistory(wave) => Some(wave.clone()),
             _ => None,
         })
         .collect()
@@ -91,7 +92,7 @@ fn all_waveforms(events: &[EventPayload]) -> Vec<Waveform> {
 
 /// 在波形里找一条流。
 fn stream<'a>(
-    wave: &'a Waveform,
+    wave: &'a WaveformHistory,
     id: &str,
 ) -> Option<&'a riscv_sim_contract::model::WaveformStream> {
     wave.streams.iter().find(|s| s.id == id)

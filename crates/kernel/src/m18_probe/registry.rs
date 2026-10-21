@@ -30,7 +30,9 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
-use riscv_sim_contract::model::{Edge, EdgeEvent, TraceDir, TraceEvent, Waveform, WaveformStream};
+use riscv_sim_contract::model::{
+    Edge, EdgeEvent, TraceDir, TraceEvent, WaveformHistory, WaveformStream,
+};
 use riscv_sim_contract::port::{EdgeSink, Peripheral, ProbeSink};
 
 use crate::m14_bus::{AccessDir, BusAccess, BusHook};
@@ -773,10 +775,10 @@ impl ProbeRegistry {
         self.edge_sink.is_some()
     }
 
-    /// Drain all per-channel edge events into a [`Waveform`]. The
+    /// Drain all per-channel edge events into a [`WaveformHistory`]. The
     /// per-channel `Vec<Edge>`s are emptied; the channel map and
     /// other state are untouched.
-    pub fn drain_waveform(&mut self) -> Waveform {
+    pub fn drain_waveform(&mut self) -> WaveformHistory {
         let mut streams = Vec::new();
         // Iterate in channel-number order so the output is stable
         // (matters for tests + diffable exports).
@@ -789,7 +791,7 @@ impl ProbeRegistry {
                 edges,
             });
         }
-        Waveform {
+        WaveformHistory {
             schema_version: 1,
             streams,
         }

@@ -12,7 +12,7 @@
 //! Status: stub — public port only.
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
-use riscv_sim_contract::model::{LineEntry, Symbol, Waveform};
+use riscv_sim_contract::model::{LineEntry, Symbol, WaveformHistory};
 
 /// Public port of M-11. Each method is a separate sub-responsibility.
 pub trait SymbolService {
@@ -25,7 +25,11 @@ pub trait SymbolService {
     /// Disassemble one instruction word into a human-readable string.
     fn disassemble(&self, addr: u32, word: u32) -> Result<String, PlatformError>;
     /// Export the in-memory waveform as a trace blob (CSV / VCD).
-    fn export_trace(&self, wf: &Waveform, format: TraceFormat) -> Result<Vec<u8>, PlatformError>;
+    fn export_trace(
+        &self,
+        wf: &WaveformHistory,
+        format: TraceFormat,
+    ) -> Result<Vec<u8>, PlatformError>;
 }
 
 /// Export format for execution traces.
