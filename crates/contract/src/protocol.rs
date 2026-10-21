@@ -5,7 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Breakpoint, Project, SimState, Watchpoint, Waveform, WriteSize};
+use crate::model::{
+    Breakpoint, DeltaRegister, Project, SimState, Watchpoint, WaveformHistory, WriteSize,
+};
 use crate::SCHEMA_VERSION;
 
 /// Direction of a message on the wire.
@@ -121,6 +123,44 @@ pub enum CommandPayload {
         size: WriteSize,
         value: u32,
     },
+    /// Read a range of general-purpose registers (M-10).
+    ///
+    /// The reply is [`EventPayload::Registers`]. `index` and `count` are
+    /// clamped to the 32-register file; the reply always reports the
+    /// **actual** start index it used.
+    ///
+    /// Added in contract v2: before v2 the contract had no register
+    /// carrier at all, so the front end had to read registers out of the
+    /// edge-encoded waveform streams — which conflated "signal history"
+    /// with "register snapshot".
+    ReadRegisters {
+        /// Index of the first register to read (0 = x0).
+        index: u32,
+        /// How many consecutive registers to read.
+        count: u32,
+    },
+    /// Write one general-purpose register (M-10).
+    ///
+    /// Writing x0 is discarded (D-04). The reply is
+    /// [`EventPayload::Registers`] carrying the register's new value.
+    WriteRegister {
+        /// Index of the register to write (0..=31).
+        index: u32,
+        /// The 32-bit value to write.
+        value: u32,
+    },
+    /// Negotiate the protocol schema version and the session
+    /// capabilities (M-05).
+    ///
+    /// The reply is [`EventPayload::Negotiated`]. The host sends the
+    /// **lowest** schema version it can speak; the kernel answers with
+    /// the version it settled on.
+    Negotiate {
+        /// The lowest schema version the host can speak.
+        min_schema_version: u32,
+        /// Capability bits the host offers (M-05 `capBits`).
+        cap_bits: u64,
+    },
     /// Subscribe to an event stream. Idempotent.
     Subscribe {
         topic: String,
@@ -179,6 +219,11 @@ pub enum EventPayload {
     /// Periodic simulation tick (M-12). Includes elapsed time and a coarse
     /// status so the front-end can throttle renders.
     Tick {
+        /// Elapsed virtual time (picoseconds) since the run started.
+        ///
+        /// Travels as a **decimal string** — see [`crate::numstr`] and the
+        /// contract v2 spec §2.2.
+        #[serde(with = "crate::numstr::u64_decimal")]
         elapsed_ps: u64,
         pc: u32,
     },
@@ -198,8 +243,49 @@ pub enum EventPayload {
         size: WriteSize,
         value: u32,
     },
+    /// A batch of general-purpose register values (M-10).
+    ///
+    /// This is the **first-class** register carrier: before v2 the
+    /// front-end had to read registers out of the edge-encoded waveform
+    /// streams (the contract had no register event), which conflated
+    /// "signal history" with "register snapshot".
+    Registers {
+        /// Index of the first register in `values` (0 = x0).
+        index: u32,
+        /// The register values, in ascending index order.
+        values: Vec<u32>,
+    },
+    /// The negotiation result (M-05).
+    Negotiated {
+        /// The schema version the kernel settled on.
+        schema_version: u32,
+        /// The capability bits the kernel grants.
+        cap_bits: u64,
+        /// Kernel build / ISA descriptor (e.g. `"riscv_sim_kernel/0.1.0 RV32IMC"`).
+        kernel: String,
+    },
+    /// An incremental simulation-state update (M-02 `onDelta`).
+    ///
+    /// The LLD's `simStateDelta` has been referenced by M-02 / M-03 /
+    /// M-10 since v0.11 but the contract never carried it — the
+    /// front-end's register view was rebuilt from waveform edges.
+    SimStateDelta {
+        /// The registers that changed, ascending index order.
+        registers: Vec<DeltaRegister>,
+        /// The new program counter, when it changed.
+        pc: Option<u32>,
+        /// Virtual time of the update — **decimal string** (spec §2.2).
+        #[serde(with = "crate::numstr::u64_decimal")]
+        t_ps: u64,
+    },
     /// Push waveform edges since the last publish (M-19 incremental push).
-    WaveformDelta(Waveform),
+    ///
+    /// **Renamed in contract v2** (D-34): the variant was called
+    /// `WaveformDelta` but carried the **history** shape
+    /// ([`WaveformHistory`]) — the name on the event said "delta" while
+    /// the content was a history. The *live batch* shape keeps the name
+    /// [`crate::model::WaveformDelta`].
+    WaveformHistory(WaveformHistory),
     /// Informational: a snapshot was created (carries the snapshot id).
     SnapshotCreated {
         id: u64,
@@ -248,5 +334,151 @@ pub enum HaltReason {
 impl Default for HaltReason {
     fn default() -> Self {
         Self::UserPause
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The schema version is the contract's single version knob — the
+    /// front end's JS mirror hard-codes the same number, and the
+    /// `contract.test.mjs` gate compares the two.
+    #[test]
+    fn the_schema_version_is_two() {
+        assert_eq!(crate::SCHEMA_VERSION, 2);
+    }
+
+    /// The three commands contract v2 adds (D-32 gaps 1, 2, 3).
+    #[test]
+    fn the_v2_commands_exist_with_their_frozen_field_names() {
+        let read = CommandPayload::ReadRegisters { index: 1, count: 4 };
+        let json = serde_json::to_value(&read).expect("json");
+        assert_eq!(
+            json,
+            serde_json::json!({ "ReadRegisters": { "index": 1, "count": 4 } })
+        );
+
+        let write = CommandPayload::WriteRegister {
+            index: 5,
+            value: 0x2A,
+        };
+        let json = serde_json::to_value(&write).expect("json");
+        assert_eq!(
+            json,
+            serde_json::json!({ "WriteRegister": { "index": 5, "value": 42 } })
+        );
+
+        let negotiate = CommandPayload::Negotiate {
+            min_schema_version: 2,
+            cap_bits: 0b1011,
+        };
+        let json = serde_json::to_value(&negotiate).expect("json");
+        assert_eq!(
+            json,
+            serde_json::json!({ "Negotiate": { "min_schema_version": 2, "cap_bits": 11 } })
+        );
+    }
+
+    /// The three events contract v2 adds (D-32 gaps 1, 3, 7).
+    #[test]
+    fn the_v2_events_exist_with_their_frozen_field_names() {
+        let registers = EventPayload::Registers {
+            index: 0,
+            values: vec![0, 1, 2],
+        };
+        let json = serde_json::to_value(&registers).expect("json");
+        assert_eq!(
+            json,
+            serde_json::json!({ "Registers": { "index": 0, "values": [0, 1, 2] } })
+        );
+
+        let negotiated = EventPayload::Negotiated {
+            schema_version: 2,
+            cap_bits: 7,
+            kernel: "riscv_sim_kernel/0.1.0 RV32IMC".to_string(),
+        };
+        let json = serde_json::to_value(&negotiated).expect("json");
+        assert_eq!(
+            json,
+            serde_json::json!({ "Negotiated": { "schema_version": 2, "cap_bits": 7,
+                "kernel": "riscv_sim_kernel/0.1.0 RV32IMC" } })
+        );
+
+        let delta = EventPayload::SimStateDelta {
+            registers: vec![crate::model::DeltaRegister {
+                index: 1,
+                value: 42,
+            }],
+            pc: Some(0x1000),
+            t_ps: 1234,
+        };
+        let json = serde_json::to_value(&delta).expect("json");
+        assert_eq!(
+            json,
+            serde_json::json!({ "SimStateDelta": {
+                "registers": [{ "index": 1, "value": 42 }],
+                "pc": 4096,
+                "t_ps": "1234" } })
+        );
+    }
+
+    /// The virtual-time fields travel as **decimal strings** (v2 spec
+    /// §2.2) — the whole point of the rule is that a `u64` would
+    /// silently lose precision above `2^53`.
+    #[test]
+    fn the_virtual_time_travels_as_a_decimal_string() {
+        let tick = EventPayload::Tick {
+            elapsed_ps: 9_007_199_254_740_993,
+            pc: 0,
+        };
+        let json = serde_json::to_value(&tick).expect("json");
+        assert_eq!(
+            json,
+            serde_json::json!({ "Tick": { "elapsed_ps": "9007199254740993", "pc": 0 } })
+        );
+
+        // A value a double could not hold survives the round trip.
+        let back: EventPayload = serde_json::from_value(json).expect("round trip");
+        match back {
+            EventPayload::Tick { elapsed_ps, .. } => {
+                assert_eq!(elapsed_ps, 9_007_199_254_740_993);
+            }
+            other => panic!("expected a Tick, got {other:?}"),
+        }
+    }
+
+    /// The waveform event was renamed in v2 (D-34): the variant now says
+    /// what it carries — the **history** shape, not a delta.
+    #[test]
+    fn the_waveform_event_carries_the_history_shape() {
+        let history = crate::model::WaveformHistory {
+            schema_version: 1,
+            streams: vec![crate::model::WaveformStream {
+                id: "GPIO0.OUT".to_string(),
+                label: "GPIO0.OUT".to_string(),
+                edges: vec![crate::model::Edge { t_ps: 5, value: 1 }],
+            }],
+        };
+        let payload = EventPayload::WaveformHistory(history);
+        let json = serde_json::to_value(&payload).expect("json");
+        // The edge's timestamp is a string (v2 numeric policy) and the
+        // variant name is the history one.
+        assert_eq!(
+            json,
+            serde_json::json!({ "WaveformHistory": { "schema_version": 1, "streams": [
+                { "id": "GPIO0.OUT", "label": "GPIO0.OUT",
+                  "edges": [{ "t_ps": "5", "value": 1 }] } ] } })
+        );
+    }
+
+    /// The envelope carries the schema version, and the version is the
+    /// one the front end negotiates against.
+    #[test]
+    fn the_envelope_carries_the_current_schema_version() {
+        let msg = Message::command(7, CommandPayload::Nop);
+        assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
+        let json = serde_json::to_value(&msg).expect("json");
+        assert_eq!(json["schema_version"], 2);
     }
 }

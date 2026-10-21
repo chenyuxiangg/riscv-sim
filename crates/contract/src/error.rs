@@ -73,6 +73,19 @@ pub enum ErrorFamily {
     Storage,
     /// Transport adapter (M-07).
     Transport,
+    /// Protocol-level errors: schema-version negotiation, envelope
+    /// validation, transport-frame integrity (M-05, M-07).
+    ///
+    /// This is the family the LLD's `E_PROTO-01`..`E_PROTO-08` codes
+    /// belong to. Before v2 the contract had **no** family for them (the
+    /// transport family is `TRX`), so the LLD's codes had no
+    /// contract-side home.
+    ///
+    /// The two families are **not** interchangeable: `TRX` is a failure
+    /// *of the transport itself* (connect, drop, timeout), `PROTO` is a
+    /// failure *of the protocol* (version not negotiated, malformed
+    /// envelope, CRC mismatch).
+    Protocol,
 }
 
 impl ErrorFamily {
@@ -92,6 +105,34 @@ impl ErrorFamily {
             Self::Health => "HMS",
             Self::Storage => "STORE",
             Self::Transport => "TRX",
+            Self::Protocol => "PROTO",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The LLD's protocol-error codes are spelled `E_PROTO-0x` — the
+    /// family tag has to match the LLD **verbatim**, or every code in
+    /// the specification would have no contract-side home (D-32 gap 5).
+    #[test]
+    fn the_protocol_family_is_spelled_like_the_lld() {
+        assert_eq!(ErrorFamily::Protocol.as_str(), "PROTO");
+        let err = PlatformError::new(ErrorFamily::Protocol, 6, "crc mismatch");
+        assert_eq!(err.to_string(), "E_PROTO-06: crc mismatch");
+    }
+
+    /// The two protocol-adjacent families are **not** interchangeable:
+    /// `TRX` is a failure of the transport, `PROTO` a failure of the
+    /// protocol.
+    #[test]
+    fn the_transport_and_protocol_families_are_distinct() {
+        assert_eq!(ErrorFamily::Transport.as_str(), "TRX");
+        assert_ne!(
+            ErrorFamily::Transport.as_str(),
+            ErrorFamily::Protocol.as_str()
+        );
     }
 }

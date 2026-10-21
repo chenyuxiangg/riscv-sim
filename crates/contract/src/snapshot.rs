@@ -90,7 +90,12 @@ use crate::model::{PendingWrite, SimState};
 /// The two describe different formats and both travel inside one
 /// document; bumping only one of them lets an old reader accept a new
 /// document and silently mis-parse it.
-pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+///
+/// **Bumped to 2 in contract v2**: the virtual-time fields now travel as
+/// **decimal strings** (contract v2 spec §2.2), so a v1 snapshot file is
+/// no longer parseable. The bump is what makes an old reader reject it
+/// loudly instead of mis-reading the timestamps.
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 /// Default per-quantum guest instruction budget.
 ///
@@ -149,6 +154,9 @@ pub enum SchedEventDto {
         /// This is the value handed to the peripheral-tick callback, so it
         /// is **live** state: changing it changes when the peripheral is
         /// ticked. It may differ from [`QueuedEventDto::at_ps`].
+        ///
+        /// Travels as a **decimal string** — contract v2 spec §2.2.
+        #[serde(with = "crate::numstr::u64_decimal")]
         at_ps: u64,
     },
     /// A timer expiry.
@@ -159,6 +167,9 @@ pub enum SchedEventDto {
         /// mirrors the engine's `SchedEvent` one-for-one — the engine's
         /// dispatch does **not** read it (the queue entry's time drives
         /// the clock), so it is inert.
+        ///
+        /// Travels as a **decimal string** — contract v2 spec §2.2.
+        #[serde(with = "crate::numstr::u64_decimal")]
         at_ps: u64,
     },
     /// A pending memory write to commit at the next quantum boundary.
@@ -181,6 +192,9 @@ pub struct QueuedEventDto {
     /// normalised: a late event is pulled forward to `max(at_ps, now)`.
     /// The payload's own `at_ps` (see [`SchedEventDto`]) keeps the
     /// producer's value and may differ.
+    ///
+    /// Travels as a **decimal string** — contract v2 spec §2.2.
+    #[serde(with = "crate::numstr::u64_decimal")]
     pub at_ps: u64,
     /// Insertion order — the stable tiebreaker for events due at the
     /// same virtual time, and the event's cancellation token.
@@ -266,6 +280,15 @@ impl EngineSnapshotDto {
     ///    writes the two equal. A snapshot where they differ did not come
     ///    from this engine, and silently picking one of them would make
     ///    the outcome depend on which field the reader happened to trust.
+    /// 7. **the queue's earliest due time is not before the snapshot's
+    ///    virtual time** (contract v2, D-39). An event that was already
+    ///    due when the snapshot was taken would fire *immediately* on
+    ///    restore, which is not what "this is the state at time T" means.
+    ///    The engine never produces such a snapshot (it normalises a late
+    ///    event forward to `max(at_ps, now)`), so this is a **defensive**
+    ///    check against a malformed or hand-edited store — but a snapshot
+    ///    from an untrusted store is exactly the case this validator
+    ///    exists for.
     ///
     /// Returns `Ok(())` when the snapshot is self-consistent.
     pub fn validate(&self) -> Result<(), PlatformError> {
@@ -342,7 +365,47 @@ impl EngineSnapshotDto {
             previous = Some(key);
         }
 
+        // Check 7 (D-39): nothing in the queue may already be due.
+        // The queue is in canonical order, so the *first* entry is the
+        // earliest one — no need to scan for the minimum.
+        if let Some(earliest) = self.queue.first() {
+            if earliest.at_ps < self.state.virtual_time_ps {
+                return Err(PlatformError::new(
+                    SNAPSHOT_FAMILY,
+                    E_SNAP_02_MALFORMED_QUEUE,
+                    format!(
+                        "event queue holds an event due at {} ps, before the snapshot's virtual time {} ps",
+                        earliest.at_ps, self.state.virtual_time_ps
+                    ),
+                ));
+            }
+        }
+
         Ok(())
+    }
+
+    /// True when this snapshot carries **no engine state at all**.
+    ///
+    /// A default-constructed [`EngineSnapshotDto`] is a *valid* snapshot
+    /// (it passes [`Self::validate`]) but an **empty** one — and in the
+    /// type system it is indistinguishable from a real snapshot. A host
+    /// that persists `EngineSnapshotDto::default()` by accident would
+    /// later restore a guest at PC 0 with no memory and no idea why.
+    ///
+    /// This predicate lets the host **explicitly reject** such a snapshot
+    /// instead of guessing. (D-40.)
+    ///
+    /// "Empty" means: no queued events **and** a pristine platform state
+    /// — no registers written, no CSRs, no pending writes, and the
+    /// virtual clock still at zero. A snapshot of a guest that has
+    /// actually run is never empty, even if its queue happens to be.
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+            && self.state.virtual_time_ps == 0
+            && self.state.pc == 0
+            && self.state.gpr.iter().all(|v| *v == 0)
+            && self.state.csrs.is_empty()
+            && self.state.pending_writes.is_empty()
     }
 }
 
@@ -520,10 +583,12 @@ mod tests {
         //    后者会把键按字典序重排，测的就不是真实线上顺序了）。
         //    三种事件变体**全部**出现在这里：漏掉任何一种，那个变体就仍然
         //    没有被钉住。
+        //    ⚠️ `at_ps` 是**十进制字符串**（contract v2 spec §2.2）——
+        //    这正是本条要钉住的东西：它一变，旧快照就读不回来了。
         let queue_json = serde_json::to_string(&dto.queue).expect("queue json");
         assert_eq!(
             queue_json,
-            r#"[{"at_ps":10,"seq":0,"event":{"peripheral_tick":{"paddr":1,"at_ps":10}}},{"at_ps":20,"seq":1,"event":{"timer_expiry":{"irq":2,"at_ps":20}}},{"at_ps":30,"seq":2,"event":{"commit":{"paddr":536870912,"size":"Word","value":305419896,"source":"UART0"}}}]"#,
+            r#"[{"at_ps":"10","seq":0,"event":{"peripheral_tick":{"paddr":1,"at_ps":"10"}}},{"at_ps":"20","seq":1,"event":{"timer_expiry":{"irq":2,"at_ps":"20"}}},{"at_ps":"30","seq":2,"event":{"commit":{"paddr":536870912,"size":"Word","value":305419896,"source":"UART0"}}}]"#,
             "队列的线上形状变了 —— 旧快照将无法被读回"
         );
 
@@ -639,5 +704,56 @@ mod tests {
     fn validate_accepts_an_empty_queue() {
         let snapshot = EngineSnapshotDto::default();
         assert!(snapshot.validate().is_ok());
+    }
+
+    /// D-39: an event that was **already due** when the snapshot was
+    /// taken would fire immediately on restore — that is not what "the
+    /// state at time T" means. The engine never produces such a
+    /// snapshot (it normalises a late event forward to
+    /// `max(at_ps, now)`), so this guards against a malformed or
+    /// hand-edited store.
+    #[test]
+    fn validate_rejects_an_event_that_was_already_due() {
+        let mut snapshot = sample_snapshot();
+        // The queue's earliest entry is due at 2 000 ps, but the
+        // snapshot's virtual time is 1 000 ps — that one is fine. Move
+        // the clock past it and the snapshot becomes impossible.
+        snapshot.state.virtual_time_ps = 2_500;
+
+        let err = snapshot.validate().expect_err("must reject");
+        assert_eq!(err.scenario, E_SNAP_02_MALFORMED_QUEUE);
+        assert!(
+            err.message.contains("before the snapshot's virtual time"),
+            "the message should say what is wrong: {}",
+            err.message
+        );
+    }
+
+    /// The same check must **not** fire on a queue whose earliest entry
+    /// is due exactly at the snapshot's virtual time — that is a legal
+    /// boundary, not a malformed queue.
+    #[test]
+    fn validate_accepts_an_event_due_exactly_now() {
+        let mut snapshot = sample_snapshot();
+        snapshot.state.virtual_time_ps = 2_000;
+        assert!(snapshot.validate().is_ok());
+    }
+
+    /// D-40: a default-constructed snapshot is **valid** but **empty**,
+    /// and in the type system it is indistinguishable from a real one.
+    /// `is_empty()` lets the host reject it explicitly.
+    #[test]
+    fn a_default_snapshot_is_valid_but_empty() {
+        let snapshot = EngineSnapshotDto::default();
+        assert!(snapshot.validate().is_ok(), "a default snapshot is valid");
+        assert!(snapshot.is_empty(), "a default snapshot is empty");
+    }
+
+    /// The flip side: a snapshot of a guest that has actually run is
+    /// **not** empty — even when its event queue happens to be empty.
+    #[test]
+    fn a_snapshot_of_a_running_guest_is_not_empty() {
+        let snapshot = sample_snapshot();
+        assert!(!snapshot.is_empty());
     }
 }

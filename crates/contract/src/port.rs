@@ -60,7 +60,18 @@ pub trait ExecutionBackend {
     /// executed (may be less if a trap / breakpoint fires).
     fn step_n(&mut self, n: u32) -> Result<u32, PlatformError>;
 
-    /// Run until the next breakpoint, watchpoint, trap, or quantum boundary.
+    /// Run until the next breakpoint, watchpoint, or trap, **or until the
+    /// engine's instruction budget for this run window is exhausted**.
+    ///
+    /// The quantum boundary is a **preemption point** (the scheduler may
+    /// yield there), **not** a stop condition.
+    ///
+    /// **Contract v2 wording (D-57).** The v1 wording said "or quantum
+    /// boundary", which contradicted the implementation: the engine ran
+    /// until its instruction budget was exhausted (10 000 instructions =
+    /// 10 quanta). The implementation is the one that was kept — it is
+    /// the semantics D-07 closed and the `d07_time_driven.rs` suite
+    /// pins — so the *documentation* was corrected instead.
     fn continue_until_event(&mut self) -> Result<(), PlatformError>;
 
     /// Pause as soon as possible (at the next quantum boundary).
@@ -199,8 +210,19 @@ pub trait Peripheral {
         size: crate::model::WriteSize,
         value: u32,
     ) -> Result<(), PlatformError>;
-    /// Called once per quantum (1µs by default). Returns the writes
-    /// the peripheral wants to commit to the bus this quantum.
+    /// Called on **every instruction boundary** (and on every quantum
+    /// boundary). The default quantum is 1 µs, but the tick is **not**
+    /// quantised to it: the probe pipeline needs edge timestamps that are
+    /// exact to a single instruction, so the tick runs at instruction
+    /// granularity. Implementations must therefore be **cheap** and
+    /// **idempotent within one virtual instant**.
+    ///
+    /// **Contract v2 wording (D-58).** The v1 wording said "called once
+    /// per quantum (1 µs by default)", which contradicted the
+    /// implementation: the tick runs at instruction granularity, because
+    /// D-46 introduced that so probe edges carry an exact-to-one-
+    /// instruction timestamp. Quantising it back would throw that away,
+    /// so the *documentation* was corrected instead.
     fn tick(&mut self, now_ps: u64) -> Result<Vec<PendingWrite>, PlatformError>;
     /// Install / replace a probe callback (M-18 v0.8, additive — see
     /// M-15 review #2 for the additive default-method pattern).

@@ -163,6 +163,12 @@ pub struct SimState {
     /// [`SIM_STATE_SCHEMA_VERSION`].
     pub schema_version: u32,
     /// Virtual time (picoseconds) at the snapshot point.
+    ///
+    /// Travels as a **decimal string** — see [`crate::numstr`] and the
+    /// contract v2 spec §2.2: a `u64` would become a JSON number, and a
+    /// JSON number is exact only up to `2^53` ps ≈ 2.5 hours of simulated
+    /// time, which a 1 µs quantum reaches in a long run.
+    #[serde(with = "crate::numstr::u64_decimal")]
     pub virtual_time_ps: u64,
     /// ISS general-purpose registers (x0..x31, 32-bit each).
     pub gpr: [u32; 32],
@@ -365,13 +371,40 @@ impl Default for WatchAccess {
     }
 }
 
+/// One changed register inside a
+/// [`crate::protocol::EventPayload::SimStateDelta`].
+///
+/// Added in contract v2: the LLD's `simStateDelta` has been referenced by
+/// M-02 / M-03 / M-10 since v0.11, but the contract had no way to carry
+/// it — the front end rebuilt its register view out of waveform edges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeltaRegister {
+    /// Register index (0..=31).
+    pub index: u32,
+    /// The new value.
+    pub value: u32,
+}
+
+impl Default for DeltaRegister {
+    fn default() -> Self {
+        Self { index: 0, value: 0 }
+    }
+}
+
 /// Edge-encoded waveform fragment (M-18, M-19).
 ///
 /// Waveforms are NOT periodic samples — they are an *edge stream*: a list
 /// of "value changed at virtual time t" entries per signal. The frontend
 /// renders the staircase by replaying the edges (M-19 §4.19).
+///
+/// **Renamed in contract v2** (D-34): the type was called `Waveform`,
+/// which collided with the *live batch* shape `WaveformDelta` — and
+/// `EventPayload::WaveformDelta` used to carry **this** type, so the
+/// name on the event said "delta" while the content was a history.
+/// The two shapes now have one name each: this one is the **history**,
+/// [`WaveformDelta`] is the **batch**.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Waveform {
+pub struct WaveformHistory {
     /// Schema version of the edge format.
     pub schema_version: u32,
     /// One edge-encoded stream per probed signal.
@@ -411,6 +444,10 @@ pub struct WaveformStream {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edge {
     /// Virtual time (picoseconds) of the edge.
+    ///
+    /// Travels as a **decimal string** — see [`crate::numstr`] and the
+    /// contract v2 spec §2.2.
+    #[serde(with = "crate::numstr::u64_decimal")]
     pub t_ps: u64,
     /// New value (interpretation depends on the signal kind; bits, level, etc).
     pub value: u64,
@@ -483,6 +520,10 @@ impl Default for TraceDir {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceEvent {
     /// Virtual time of the bus access (ps).
+    ///
+    /// Travels as a **decimal string** — see [`crate::numstr`] and the
+    /// contract v2 spec §2.2.
+    #[serde(with = "crate::numstr::u64_decimal")]
     pub t_ps: u64,
     /// Physical address of the *first byte* of the access.
     pub addr: u32,
@@ -515,6 +556,10 @@ pub struct TraceEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EdgeEvent {
     /// Virtual time of the edge (picoseconds).
+    ///
+    /// Travels as a **decimal string** — see [`crate::numstr`] and the
+    /// contract v2 spec §2.2.
+    #[serde(with = "crate::numstr::u64_decimal")]
     pub t_ps: u64,
     /// Channel number the edge belongs to.
     pub ch: u8,
@@ -545,6 +590,10 @@ pub struct WaveformDelta {
     /// Virtual time of the batch (picoseconds). Sourced from the
     /// authoritative virtual clock (M-12) so the frontend's time axis
     /// matches the simulation's.
+    ///
+    /// Travels as a **decimal string** — see [`crate::numstr`] and the
+    /// contract v2 spec §2.2.
+    #[serde(with = "crate::numstr::u64_decimal")]
     pub t_virt: u64,
     /// Edge events in this batch, in arrival order.
     pub entries: Vec<EdgeEvent>,
