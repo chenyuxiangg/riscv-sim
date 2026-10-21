@@ -182,14 +182,14 @@ void writeReg(const char* name, uint64_t value, err_t* err) {
 }                                                        // 输出：确认（err）</code></pre>
 <p class="body"><b>契约 v2 的线格式（<code>ReadRegisters</code> / <code>WriteRegister</code> / <code>Registers</code> 事件）</b>：契约层 v2 新增了<b>一等公民</b>的寄存器通道——此前契约<b>根本没有寄存器载体</b>，前端只能从波形边沿里刨寄存器，把「信号历史」和「寄存器快照」混为一谈。宿主发 <code>ReadRegisters&#123;index, count&#125;</code>（读一段通用寄存器）或 <code>WriteRegister&#123;index, value&#125;</code>（写一个通用寄存器），本模块回 <code>Registers&#123;index, values&#125;</code> 事件——<b>读命令与写命令共用这一条回复</b>（写命令的 <code>values.len() == 1</code>）。</p>
 <p class="body">⚠️ <b>「读是钳位、写是拒绝」不是笔误，是两条不同的语义</b>：</p>
-<ul><li><b>读 → 钳位</b>：<code>index</code> / <code>count</code> 钳到 <code>[0, 32)</code>，回复里的 <code>index</code> 是<b>实际</b>起点、<code>values.len()</code> 是实际条数；<code>count = 0</code> 则<b>不回复</b>（空区间没有内容）。<b>理由</b>：读越界<b>没有副作用</b>，钳到合法区间即可。</li>
+<ul><li><b>读 → 钳位</b>：<code>index</code> / <code>count</code> 钳到 <code>[0, 32)</code>，回复里的 <code>index</code> 是<b>实际</b>起点、<code>values.len()</code> 是实际条数；<code>count = 0</code> 则<b>回复空区间</b>（<code>values: []</code>，<code>index</code> 是<b>钳位后的实际起点</b>）。<b>理由</b>：读越界<b>没有副作用</b>，钳到合法区间即可；⚠️ <b>「不回复」是错的</b>——M-05 按 <code>reqId</code> 配对请求与回复，<b>「没有回复」与「消息丢失」在协议上不可区分</b>，会变成 500 ms 假超时（<code>E_CTX-06</code>），用户看到的是「内核没应答」而不是「读到了空区间」。契约的回复模型只有两种：一条配对的回复，或一条 <code>Error</code>——<b>「不回复」不在模型里</b>，它等价于传输故障（冻结规格 §5）</li>
 <li><b>写 → 拒绝</b>：<code>index &gt; 31</code> → <b>拒绝</b>（<code>E_DBG-01</code>），<b>不钳位</b>。<b>理由</b>：写若也钳位，会<b>静默写到别的寄存器</b>——那正是不可接受的副作用。</li>
 <li><b>写 x0 → 丢弃</b>：<code>index == 0</code> 的写入被<b>丢弃</b>（x0 恒为 0，台账 D-04 的硬连线在 M-13 侧），但<b>仍要回复</b>（<code>values</code> 里是 0）。<b>理由</b>：丢弃是<b>语义</b>（写 x0 无效），不是<b>错误</b>——回一个「已丢弃」的确认比回错误更贴合调用方的预期（它要的只是「写完了没有」）。</li></ul>
 <pre class="code"><code>// 契约 v2：ReadRegisters / WriteRegister → Registers 事件（3.1；冻结规格 §4.1 / §5）
 Registers readRegisters(uint32_t index, uint32_t count) {
     index = min(index, 31);                       // 读：钳位（无副作用）
     count = min(count, 32 - index);               // 读：钳位到寄存器文件末尾
-    if (count == 0) return NONE;                  // 空区间没有内容 → 不回复
+    if (count == 0) return Registers{index, []};  // count=0 → 回复空区间（不是「不回复」：不回复 ≡ 消息丢失）
     uint32_t values[32];
     for (uint32_t i = 0; i &lt; count; i++)
         values[i] = m17_readReg(index + i);       // 经 M-17 取值（x0 恒 0）

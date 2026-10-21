@@ -18,7 +18,10 @@
 
 台账**闭环 6 条**：**D-32**（契约缺口 7 项）· **D-34**（`Waveform` / `WaveformDelta` 命名歧义）·
 **D-39**（快照队列到期时刻校验）· **D-40**（空快照显式拒绝）· **D-57 / D-58**（契约端口文档与
-实现口径订正）。**新登记 1 条**：**D-68**（低危 · 指令预算的文档措辞）。
+实现口径订正）。**新登记 2 条**：**D-68**（低危 · 指令预算的文档措辞）·
+**D-69**（低危 · 错误码族前缀 `E_PP` → `E_PER`——**改 LLD，不改契约、不改代码**；
+「契约侧是 canonical」原本**没有用例在守**，已由 `8767c4a` 的
+`error::tests::every_family_tag_is_pinned` 补上表驱动单测，**14 个族全覆盖**）。
 
 ### 一、第一次升版，所以「破坏性变更」是被允许的——但必须逐条写明
 
@@ -94,24 +97,32 @@ LLD 的 `E_PROTO-01`…`E_PROTO-08` 此前在契约的 `ErrorFamily` 里**没有
 而冻结层不允许改。**契约层一解冻，三条一起订正**——这也说明「文档口径偏离」这类欠账
 **应该在解冻时一次性清**，而不是零散地补。
 
-### 六、本批的已知缺口（**不在本批范围**）
+### 六、本批的落地状态（**已完成** · 2026-10-21 补记）
 
-- ⚠️ **前端契约镜像仍是 v1**（`front/lib/message.js` 的 `SCHEMA_VERSION = 1`）。
-  `front/tests/contract.test.mjs` 的「Rust 源码 ↔ JS 镜像逐字对拍」**已经把红抓出来了**
-  （命令变体集合 / 事件变体集合 / 变体内层字段名 / newtype 变体的 DTO 字段名 **4 条红**）——
-  这正是那条对拍门禁**有判别力**的证明。两侧 `schema_version` 必须**同时**升到 2。
-- ⚠️ **内核侧尚未迁移到 v2**：`crates/kernel` 当前**编译不过**（`model::Waveform` 导入 3 处、
-  `EventPayload::WaveformDelta` 变体 2 处、`CommandPayload` 新增 3 变体未覆盖的匹配）——
-  属内核侧批次。**本批只改文档，不碰 `crates/**` 与 `front/**`**。
+⚠️ **本段此前写的是「文档批在自己分支的旧快照上」的状态**（前端镜像仍是 v1 / 内核侧编译不过）——
+那是**合树前**的中间态，**合树后没有回头修**。以下为**当前树**的实测结果：
 
-### 七、门禁与产物
+- ✅ **内核侧已迁移到 v2**（`371f38f`）：`model::Waveform` → `model::WaveformHistory`、
+  `EventPayload::WaveformDelta` → `EventPayload::WaveformHistory`、3 个新命令
+  （`ReadRegisters` / `WriteRegister` / `Negotiate`）全部接线——`crates/kernel` **编译通过**。
+- ✅ **前端契约镜像已升到 v2**（`feature/c2-front`，3 commit）：`front/lib/message.js` 的
+  `SCHEMA_VERSION = 2`；`front/lib/frame.js` 增 `crc`（契约 v2 §7.2）；
+  `front/services/m10_registermemory.js` 增 `ReadRegisters` / `WriteRegister` / `Registers`。
+  两侧 `schema_version` **同时**升到 2（规格 §10）——「Rust 源码 ↔ JS 镜像逐字对拍」门禁
+  **由 4 条红转全绿**（台账 D-32 / D-34 的「判别力」栏已同步改写）。
+- ✅ **工具侧已适配契约 v2**（`7bacbdf`）：`tools/wasm-smoke.mjs` 按 v2 的线格式断言
+  （含「`count = 0` **回复空区间**、**而不是不回复**」）。
 
-> ⚠️ **本段的数字待收口时从当前树重算**——契约层与内核侧的后续批次落地后，
-> `cargo test --workspace` 的合计条数、`tools/check-front.sh` 的门禁统计都会变。
-> 本批**只**可确认：契约层自带用例（`cargo test -p riscv_sim_contract`）**全绿**；
-> `cargo fmt --all -- --check` 与 `cargo clippy -p riscv_sim_contract --all-targets -- -D warnings` 干净。
+### 七、门禁与产物（**从当前树重算**）
 
-- 关键 commit：`14da92e`（规格冻结）· `3126f54`（契约层 v2 实现）· `3a9660c`（D-68 预算口径订正）
+- `cargo fmt --all -- --check` ✅
+- `cargo clippy --workspace --all-targets -- -D warnings` ✅
+- `cargo test --workspace --no-fail-fast` ✅ **632 全绿**（契约 lib **32** + kernel lib **505** + 集成 **84** + golden runner 11）
+- `tools/check-front.sh` ✅ **200 用例 / 34 suite**
+- `tools/golden-run.sh --keep-going` → `total=51 ok=51 now-passing=0 expected-gap=0 mismatch=0 no-verdict=0 build-failed=0` ✅（**D-43 闭环**；本批未动 M-13 / M-06，语料未变）
+- `tools/wasm-smoke.mjs` —— **34 项断言**（需先 `tools/build-wasm.sh`；**不进默认门禁**，按需运行）
+- 关键 commit：`14da92e`（规格冻结）· `3126f54`（契约层 v2 实现）· `3a9660c`（D-68 预算口径订正）·
+  `371f38f`（内核侧适配）· `feature/c2-front`（前端侧适配，3 commit）· `7bacbdf`（工具侧适配）
 - 冻结规格：`docs/detailed-design/STAGE-2_Contract_V2.md` · 台账：`docs/reviews/REVIEWS.md`
 
 ## v0.16.0 变更摘要
