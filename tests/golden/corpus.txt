@@ -71,12 +71,12 @@ rv32ui sub rv32i_zifencei active
 rv32ui sw rv32i_zifencei active
 rv32ui xor rv32i_zifencei active
 rv32ui xori rv32i_zifencei active
-rv32um div rv32im_zifencei pending D-43: M 扩展 8 条未实现
-rv32um divu rv32im_zifencei pending D-43: M 扩展 8 条未实现
-rv32um mul rv32im_zifencei pending D-43: M 扩展 8 条未实现
-rv32um mulh rv32im_zifencei pending D-43: M 扩展 8 条未实现
-rv32um mulhsu rv32im_zifencei pending D-43: M 扩展 8 条未实现
-rv32um mulhu rv32im_zifencei pending D-43: M 扩展 8 条未实现
-rv32um rem rv32im_zifencei pending D-43: M 扩展 8 条未实现
-rv32um remu rv32im_zifencei pending D-43: M 扩展 8 条未实现
-rv32uc rvc rv32ic_zifencei pending D-43: C 扩展未实现
+rv32um div rv32im_zifencei active
+rv32um divu rv32im_zifencei active
+rv32um mul rv32im_zifencei active
+rv32um mulh rv32im_zifencei active
+rv32um mulhsu rv32im_zifencei active
+rv32um mulhu rv32im_zifencei active
+rv32um rem rv32im_zifencei active
+rv32um remu rv32im_zifencei active
+rv32uc rvc rv32ic_zifencei active
