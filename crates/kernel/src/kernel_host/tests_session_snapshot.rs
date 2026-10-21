@@ -116,6 +116,31 @@ fn host_with_demo(steps: u32) -> KernelHost {
     host
 }
 
+/// 走**时间驱动**路径跑一轮（`Continue` → M-12 的唯一主循环）。
+///
+/// ⚠️ **为什么层 1 的漂移需要它**（V-B 检视 · B-1，阻断级）：
+/// `step_n` 走的是**指令驱动**路径——它**不排期**外设 tick 事件，
+/// 于是队列**恒空**、插入序**恒为 0**。而「队列 / 插入序 / 指令预算」
+/// 这三项在段 1（引擎段）里：
+///
+/// - 队列恒空 → 「没还原队列」与「还原了队列」**看不出来**；
+/// - 插入序恒为 0 → 同上；
+/// - 指令预算恒为默认值 → 同上。
+///
+/// → 段 1 的断言**整条没有牙齿**：把这三项**分别**改坏（不还原），
+/// 本批的**任何**用例都**不会**变红。
+/// `Continue` 走时间驱动路径：量子边界会**续排**外设 tick，队列里
+/// **真的**有一件待派发的事件，插入序也**真的**动过。
+fn run_continue(host: &mut KernelHost) {
+    let events = host.handle_message(&Message::command(11, CommandPayload::Continue));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Error { .. })),
+        "时间驱动跑一轮必须成功：{events:?}"
+    );
+}
+
 /// 往 GPIO 的 `OUT` 寄存器写一个值（用来制造**现场漂移**）。
 fn write_gpio_out(host: &mut KernelHost, value: u32) {
     let events = host.handle_message(&Message::command(
@@ -823,28 +848,73 @@ fn restore_session_rebuilds_the_memory_map_topology() {
 ///
 /// ⚠️ **为什么要先制造漂移**：不漂移的话，「恢复了」与「根本没动过」
 /// **不可区分**——一段既没被存、也没被恢复的状态，两次采集会**同样地**
-/// 缺它，用例照样绿。这里把 IRQ 行、GPIO 输出、区域拓扑三处都动一下，
-/// 恢复必须把它们**逐段**抹平。
+/// 缺它，用例照样绿。这里把 **六处**都动一下，恢复必须把它们**逐段**抹平。
 ///
 /// ⚠️ 断言是**六段逐段相等**，不是「整个结构相等」——笼统的相等说不清
 /// 是**哪一段**不同。
+///
+/// ## 漂移的**覆盖面**就是这条用例的判别力（V-B 检视 · B-1 / H-3 / C-3）
+///
+/// | 漂移 | 动的是哪一段 | 没有它会怎样 |
+/// | --- | --- | --- |
+/// | `run_continue` | 段 1 的**队列 / 插入序 / 虚拟时间** | 队列恒空、插入序恒为 0 → 「不还原队列」与「还原了队列」**看不出来** |
+/// | `set_instruction_budget` | 段 1 的**指令预算** | 预算恒为默认值 → 「不还原预算」**看不出来** |
+/// | `write_ram` | 段 2 的**内存页** | 段 2 的牙齿来自 `load_map` 的**清零**（**代偿**）→ 「不还原内存页」**看不出来** |
+/// | `map_ram` | 段 3 的**区域拓扑** | — |
+/// | `write_gpio_out` | 段 4 的**外设状态** | — |
+/// | `lower_irq` | 段 5 的**IRQ 行** | — |
+///
+/// ⚠️ **段 0 的判别力**：宿主**代填** `cp_meta.t_virt`（= 引擎的虚拟时间），
+/// 所以 `run_continue` 一推进时间，段 0 就**跟着变了**——段 0 的断言
+/// **不再**是「两个常量相等」（那是**恒真式**）。
 #[test]
 fn a_restored_session_reproduces_the_captured_payload_segment_by_segment() {
     let mut host = host_with_demo(8);
+    // ⚠️ 先走一轮**时间驱动**：队列里要**真的**有一件待派发的事件，
+    // 插入序也要**真的**动过——否则段 1 的这三项恒定，断言没有牙齿。
+    run_continue(&mut host);
     host.raise_irq(5).expect("raise");
     let before = host.capture_session(meta());
     assert_eq!(before.m16_intc.raised, vec![5], "夹具：段 5 有一行");
+    assert_eq!(
+        before.m12_engine.queue.len(),
+        1,
+        "夹具：时间驱动路径下队列里必须有一件待派发的外设 tick 事件"
+    );
+    assert!(
+        before.m12_engine.next_seq > 0,
+        "夹具：插入序计数器必须已经动过（next_seq = {}）",
+        before.m12_engine.next_seq
+    );
 
-    // ---- 现场漂移：三处都动一下。 ----
+    // ---- 现场漂移：六处都动一下。 ----
+    // ① 段 5：撤掉那一行 IRQ。
     host.lower_irq(5).expect("lower");
-    write_gpio_out(&mut host, 0xF0);
+    // ② 段 1：再跑一轮时间驱动 —— 队列内容、插入序、虚拟时间全变。
+    run_continue(&mut host);
+    // ③ 段 1：把指令预算改成**非默认值**（默认 10 000 从来不变过 →
+    //    「不还原预算」根本看不出来）。
+    host.backend.engine_mut().set_instruction_budget(4321);
+    // ④ 段 3：多挂一块 RAM 区域。
     host.backend
         .bus_mut()
         .map_ram(0x2000_0000, 0x1000, &[])
         .expect("map ram");
+    // ⑤ 段 4：改 GPIO 输出。
+    write_gpio_out(&mut host, 0xF0);
+    // ⑥ 段 2：改 **RAM 的内容**（必须落在**总线导出的那几页**里）。
+    //    ⚠️ 放在 `run_continue` **之后**：demo 固件的 `jal x0, 0` 会
+    //    把自己重跑一遍，`sw x3, 0x100(x0)` 会把 49 写回来。
+    write_ram(&mut host, DEMO_STORE_ADDR, 0xDEAD_BEEF);
+
     assert_eq!(host.intc_state().raised, Vec::<u16>::new());
     assert_eq!(host.peripheral_states().gpios[0].outputs, 0xF0);
     assert_eq!(host.memory_map().regions.len(), 4);
+    assert_eq!(
+        host.backend.engine().instruction_budget(),
+        4321,
+        "漂移：指令预算必须真的变了"
+    );
 
     // ---- 恢复。 ----
     host.restore_session(&before).expect("restore");

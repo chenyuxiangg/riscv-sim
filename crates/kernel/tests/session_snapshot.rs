@@ -61,6 +61,18 @@ const DEMO_STORE_ADDR: u32 = 0x100;
 const DEMO_STORE_VALUE: u32 = 49;
 
 /// 一条指令的虚拟时间成本（皮秒）—— M-12 的换算（1 µs 量子 ÷ 1000 条）。
+///
+/// ⚠️ **这条常量是「自指」的**（V-B 检视 · D-1）：它引用的是**实现自己**
+/// 的 `INSTRUCTION_COST_PS`。所以**本文件的用例察觉不到「指令成本变了」**
+/// ——实测把成本从 1000 ps 改成 2000 ps，本批的端到端 / 宿主用例**一条都不红**
+/// （只有老批次 D-07 的 `the_quantum_is_one_microsecond_and_the_quota_is_a_thousand_instructions`
+/// 会红）。
+///
+/// ⚠️ **这不影响本文件的判别力**：它要抓的是「某段状态没进快照 / 没被还原」，
+/// 判别式落在**关系**（「(N+M) 个指令成本」）上，**不是**落在绝对值上。
+/// **绝对值由 D-07 的用例守着**——两个批次**分工明确**。
+/// ⚠️ **不要**把它改成字面量：那样这条夹具就与实现**完全脱钩**，
+/// 实现改了成本夹具还在绿——**换一种形式的自指**。
 const INSTRUCTION_COST_PS: u64 = riscv_sim_kernel::m12_engine::INSTRUCTION_COST_PS;
 
 /// 造一个挂着 demo 固件的工程。
@@ -357,6 +369,25 @@ fn a_payload_restores_an_equivalent_session_in_a_fresh_host() {
 
     // ---- 还原进一个**全新**的会话。 ----
     let mut restored = host_with_demo();
+
+    // ⚠️ **夹具自检**（V-B 检视 · C-4）：全新会话在还原之前，CPU 状态
+    // 必须是**空的**（PC = 0、通用寄存器全 0、没有拉起的 IRQ 行）。
+    // 「不还原就一定对不上」这个**前提必须被断言**——否则它只是一句
+    // 注释，而这个前提正是本用例的全部意义所在。
+    // ⚠️ 原来的两行（`fr.gpr` / `fr.pc` 与参照比）**与主判别式的
+    // ①② 完全重复**，且断的是**还原之后**的状态——那不是「夹具自检」。
+    let pre = final_state(&restored);
+    assert_eq!(pre.pc, 0, "夹具：全新会话还原前的 PC 必须是 0");
+    assert_eq!(
+        pre.gpr, [0u32; 32],
+        "夹具：全新会话还原前的 32 个通用寄存器必须全 0"
+    );
+    assert_eq!(
+        pre.irq.raised,
+        Vec::<u16>::new(),
+        "夹具：全新会话还原前没有拉起的 IRQ 行"
+    );
+
     restored.restore_session(&payload).expect("还原必须成功");
     step(&mut restored, M_STEPS);
 
@@ -368,10 +399,6 @@ fn a_payload_restores_an_equivalent_session_in_a_fresh_host() {
 
     let fr = final_state(&restored);
     let fp = final_state(&plain);
-
-    // 夹具自检：新会话在还原之前是**空的**——不还原就一定对不上。
-    assert_eq!(fr.gpr, fp.gpr, "夹具：还原后 GPR 必须与参照一致");
-    assert_eq!(fr.pc, fp.pc);
 
     assert_same_final_state(&fr, &fp);
 }

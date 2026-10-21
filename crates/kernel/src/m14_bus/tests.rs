@@ -1301,6 +1301,96 @@ fn load_map_rejects_overlapping_regions() {
     );
 }
 
+/// ⚠️ **E_BUS-06（区域大小为 0）必须有用例钉住**。
+///
+/// V-B 检视发现：`load_map` 里这三条错误路径（`E_BUS-04` / `E_BUS-06` /
+/// `E_BUS-09`）**本来是裸数字场景码**，v0.18 批把它们换成了**命名常量**
+/// ——但**换名字不等于有守卫**：把常量改掉，**没有任何用例会红**。
+/// 这条用例把常量**钉住**。
+#[test]
+fn load_map_rejects_a_region_of_size_zero() {
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10, &[0xAA; 0x10]).expect("ram");
+    let map = M14MapDto {
+        regions: vec![RegionDto {
+            base: 0x8000,
+            size: 0,
+            kind: "ram".to_string(),
+            target: String::new(),
+        }],
+    };
+    let err = bus
+        .load_map(&map)
+        .expect_err("a region of size 0 must be rejected");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(err.scenario, E_BUS_06_ZERO_SIZE, "size 0 必须报 E_BUS-06");
+    assert_eq!(
+        bus.region_count(),
+        1,
+        "a rejected map must leave the bus untouched"
+    );
+}
+
+/// ⚠️ **E_BUS-04（`base + size` 越过 u32）必须有用例钉住**。
+///
+/// 同上：这条路径此前**无用例在守**。
+#[test]
+fn load_map_rejects_a_region_whose_end_overflows_u32() {
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10, &[0xAA; 0x10]).expect("ram");
+    let map = M14MapDto {
+        regions: vec![RegionDto {
+            base: 0xFFFF_FFF0,
+            size: 0x20,
+            kind: "ram".to_string(),
+            target: String::new(),
+        }],
+    };
+    let err = bus
+        .load_map(&map)
+        .expect_err("a region whose end overflows u32 must be rejected");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(
+        err.scenario, E_BUS_04_OUT_OF_RANGE,
+        "base + size 越过 u32 必须报 E_BUS-04"
+    );
+    assert_eq!(
+        bus.region_count(),
+        1,
+        "a rejected map must leave the bus untouched"
+    );
+}
+
+/// ⚠️ **E_BUS-09（区域超过单区上限）必须有用例钉住**。
+///
+/// 同上：这条路径此前**无用例在守**。
+#[test]
+fn load_map_rejects_a_region_larger_than_the_per_region_cap() {
+    let mut bus = Bus::with_max_region_bytes(0x1000);
+    bus.map_ram(0x1000, 0x10, &[0xAA; 0x10]).expect("ram");
+    let map = M14MapDto {
+        regions: vec![RegionDto {
+            base: 0x8000,
+            size: 0x2000,
+            kind: "ram".to_string(),
+            target: String::new(),
+        }],
+    };
+    let err = bus
+        .load_map(&map)
+        .expect_err("a region larger than the cap must be rejected");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(
+        err.scenario, E_BUS_09_TOO_LARGE,
+        "超过单区上限必须报 E_BUS-09"
+    );
+    assert_eq!(
+        bus.region_count(),
+        1,
+        "a rejected map must leave the bus untouched"
+    );
+}
+
 #[test]
 fn load_map_rejects_a_region_overlapping_a_kept_peripheral_window() {
     // The peripheral window stays in place — a rebuilt region may not

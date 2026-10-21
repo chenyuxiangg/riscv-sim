@@ -366,13 +366,19 @@ mod tests {
     /// （且整个 crate 仍能编译——所以这不是「编译错误式的红」）。
     #[test]
     fn the_record_carries_no_cp_meta_field_of_its_own() {
-        let fields = snapshot_record_fields();
+        let mut fields = snapshot_record_fields();
+        // ⚠️ **比较的是集合，不是序列**（V-B 检视 · D-2）：字段的**声明
+        // 顺序**与「这个结构体有哪些字段」**无关**。按源码顺序比较 →
+        // 一次纯重排（`payload` 与 `label` 换个位置，**语义完全不变**）
+        // 就会让本用例变红——**脆性守卫**。排序后再比：顺序无关，
+        // 集合变了照样红。
+        fields.sort();
         assert_eq!(
             fields,
             vec![
                 "id".to_string(),
-                "payload".to_string(),
-                "label".to_string()
+                "label".to_string(),
+                "payload".to_string()
             ],
             "SnapshotRecord 的字段集必须恰好是 {{id, payload, label}} —— 检查点元数据的唯一落点是 payload.cp_meta"
         );
