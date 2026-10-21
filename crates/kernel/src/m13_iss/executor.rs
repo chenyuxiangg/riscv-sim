@@ -16,7 +16,7 @@ use riscv_sim_contract::error::PlatformError;
 use riscv_sim_contract::model::{SimState, WriteSize};
 
 use super::alu;
-use super::decoder::{Decoded, LEN_32};
+use super::decoder::Decoded;
 
 /// Result of a single instruction execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,6 +260,23 @@ pub enum Op {
     Or,
     /// AND — and.
     And,
+    /// MUL — low 32 bits of the product (M extension).
+    Mul,
+    /// MULH — high 32 bits of the signed product (M extension).
+    Mulh,
+    /// MULHSU — high 32 bits of the signed × unsigned product (M
+    /// extension).
+    Mulhsu,
+    /// MULHU — high 32 bits of the unsigned product (M extension).
+    Mulhu,
+    /// DIV — signed division (M extension).
+    Div,
+    /// DIVU — unsigned division (M extension).
+    Divu,
+    /// REM — signed remainder (M extension).
+    Rem,
+    /// REMU — unsigned remainder (M extension).
+    Remu,
     /// LB — load byte, sign-extended.
     Lb,
     /// LH — load halfword, sign-extended.
@@ -308,6 +325,12 @@ pub enum Op {
 /// turns that into an illegal-instruction trap (LLD §3.2: a key that
 /// misses the table is an illegal instruction).
 pub fn classify(d: &Decoded) -> Option<Op> {
+    if d.illegal {
+        // A reserved compressed encoding has no 32-bit equivalent, so
+        // it never resolves to an operation: it is an illegal
+        // instruction, exactly like an unknown 32-bit opcode.
+        return None;
+    }
     match d.opcode {
         // U-type. Neither LUI nor AUIPC has a funct3 field — bits
         // 14:12 belong to the immediate.
@@ -341,6 +364,17 @@ pub fn classify(d: &Decoded) -> Option<Op> {
             (0b101, 0b010_0000) => Some(Op::Sra),
             (0b110, 0b000_0000) => Some(Op::Or),
             (0b111, 0b000_0000) => Some(Op::And),
+            // RV32M: funct7 = 0000001 selects the multiply / divide
+            // group (LLD §3.4).  The funct3 field alone is not enough
+            // to tell MUL from MULH — the whole group shares it.
+            (0b000, 0b000_0001) => Some(Op::Mul),
+            (0b001, 0b000_0001) => Some(Op::Mulh),
+            (0b010, 0b000_0001) => Some(Op::Mulhsu),
+            (0b011, 0b000_0001) => Some(Op::Mulhu),
+            (0b100, 0b000_0001) => Some(Op::Div),
+            (0b101, 0b000_0001) => Some(Op::Divu),
+            (0b110, 0b000_0001) => Some(Op::Rem),
+            (0b111, 0b000_0001) => Some(Op::Remu),
             _ => None,
         },
         // LOAD.
@@ -518,15 +552,6 @@ pub fn execute_one<M: MemoryAccess>(
     d: &Decoded,
     misaligned: MisalignedPolicy,
 ) -> Result<StepOutcome, PlatformError> {
-    if d.len != LEN_32 {
-        // A compressed (RV32C) encoding: a legal instruction the ISS
-        // cannot execute yet. Trap rather than mis-execute it — the
-        // length field is what makes the distinction possible (D-16).
-        return Ok(StepOutcome::Trapped {
-            cause: TrapCause::IllegalInstruction,
-        });
-    }
-
     let op = match classify(d) {
         Some(op) => op,
         None => {
@@ -534,6 +559,11 @@ pub fn execute_one<M: MemoryAccess>(
             // instruction, not a platform failure: both dispatch routes
             // report it identically (D-11). The engine turns this into
             // mcause = 2 once trap delivery is wired (LLD §5.2.4).
+            //
+            // A reserved *compressed* encoding lands here too — the
+            // decoder flags it and `classify` refuses it, so the
+            // compressed path reports illegal instructions through the
+            // same door as the 32-bit one.
             return Ok(StepOutcome::Trapped {
                 cause: TrapCause::IllegalInstruction,
             });
@@ -654,6 +684,54 @@ pub fn execute_one<M: MemoryAccess>(
             let lhs = read_gpr(state, d.rs1);
             let rhs = read_gpr(state, d.rs2);
             write_gpr(state, d.rd, alu::and(lhs, rhs));
+            sequential(d)
+        }
+        Op::Mul => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::mul(lhs, rhs));
+            sequential(d)
+        }
+        Op::Mulh => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::mulh(lhs, rhs));
+            sequential(d)
+        }
+        Op::Mulhsu => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::mulhsu(lhs, rhs));
+            sequential(d)
+        }
+        Op::Mulhu => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::mulhu(lhs, rhs));
+            sequential(d)
+        }
+        Op::Div => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::div(lhs, rhs));
+            sequential(d)
+        }
+        Op::Divu => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::divu(lhs, rhs));
+            sequential(d)
+        }
+        Op::Rem => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::rem(lhs, rhs));
+            sequential(d)
+        }
+        Op::Remu => {
+            let lhs = read_gpr(state, d.rs1);
+            let rhs = read_gpr(state, d.rs2);
+            write_gpr(state, d.rd, alu::remu(lhs, rhs));
             sequential(d)
         }
         Op::Lb | Op::Lbu | Op::Lh | Op::Lhu | Op::Lw => {

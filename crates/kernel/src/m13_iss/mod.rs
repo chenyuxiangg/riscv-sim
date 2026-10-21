@@ -15,6 +15,7 @@
 //! `decode + execute_one` API for tests.
 
 pub mod alu;
+pub mod compressed;
 pub mod decoder;
 pub mod executor;
 
@@ -205,7 +206,13 @@ impl MemoryAccess for BusMemory<'_> {
 }
 
 #[cfg(test)]
+mod tests_common;
+#[cfg(test)]
+mod tests_rv32c;
+#[cfg(test)]
 mod tests_rv32i;
+#[cfg(test)]
+mod tests_rv32m;
 
 #[cfg(test)]
 mod tests {
