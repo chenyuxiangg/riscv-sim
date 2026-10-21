@@ -21,6 +21,9 @@
 //!   E_BUS-07 init > region size  → PlatformError{Bus, 7}
 //!   E_BUS-08 periph size mismatch→ PlatformError{Bus, 8}  (D-12)
 //!   E_BUS-09 region over the cap → PlatformError{Bus, 9}  (D-10)
+//!   E_BUS-10 unknown region kind   → PlatformError{Bus, 10} (STAGE-3 §3.2)
+//!   E_BUS-11 page outside every RAM region → PlatformError{Bus, 11} (STAGE-3 §3.2)
+//!   E_BUS-12 ROM topology mismatch  → PlatformError{Bus, 12} (STAGE-3 §3.2)
 //!
 //! Determinism (AD §8.1 D0): reads / writes are synchronous function
 //! calls, no hand-shake timing. Virtual time is owned by M-12; this
@@ -37,6 +40,7 @@ use std::rc::Rc;
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
 use riscv_sim_contract::port::Peripheral;
+use riscv_sim_contract::session::{M14MapDto, MemPageDto, RegionDto};
 
 /// 4 GiB — covers the entire RV32 physical address space.
 pub const BUS_SIZE: u64 = 0x1_0000_0000;
@@ -50,6 +54,87 @@ pub const BUS_SIZE: u64 = 0x1_0000_0000;
 /// depend on `m06_elf`, so the constant is defined locally (the two
 /// sides are independent; see `docs/reviews/REVIEWS.md` D-10).
 pub const DEFAULT_MAX_REGION_BYTES: u64 = 16 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// Session snapshot (STAGE-3 §3.2) — memory pages + memory-map topology.
+// ---------------------------------------------------------------------------
+
+/// Maximum number of bytes carried by **one** exported memory page.
+///
+/// The page size is a **transport** decision, not a memory-map one: a
+/// RAM region may be larger than one page, and [`Bus::export_pages`]
+/// chunks it accordingly (the last chunk of a region may be shorter).
+///
+/// 64 KiB keeps a single page small enough to serialize without one
+/// huge allocation, while still amortizing the per-page overhead.
+pub const MEM_PAGE_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Region-kind tag of a RAM region, as it appears in
+/// [`RegionDto::kind`] — **lower case** (the wire form must survive a
+/// reordering of [`RegionType`]).
+pub const REGION_KIND_RAM: &str = "ram";
+
+/// Region-kind tag of a ROM region (see [`REGION_KIND_RAM`]).
+pub const REGION_KIND_ROM: &str = "rom";
+
+/// Region-kind tag of a peripheral region (see [`REGION_KIND_RAM`]).
+pub const REGION_KIND_PERIPHERAL: &str = "peripheral";
+
+/// Scenario code: two regions overlap (or an address is already mapped).
+///
+/// ⚠️ **A named constant, not a literal.** The same number was spelled
+/// out as a bare `3` in several places — a bare number carries no
+/// meaning, so the same value could later be reused for something else
+/// without anybody noticing (one code, two meanings — the same trap as
+/// `E_SNAP-02` / `E_SNAP-06`).
+pub const E_BUS_03_OVERLAP: u16 = 3;
+
+/// Scenario code: the region's address range does not fit the 32-bit
+/// address space (`base + size` overflows, or the range leaves the
+/// 4 GiB bus).
+pub const E_BUS_04_OUT_OF_RANGE: u16 = 4;
+
+/// Scenario code: the region's size is zero.
+pub const E_BUS_06_ZERO_SIZE: u16 = 6;
+
+/// Scenario code: the region's size exceeds the per-region cap.
+pub const E_BUS_09_TOO_LARGE: u16 = 9;
+
+/// Scenario code: the memory-map topology names a region kind this
+/// build does not know.
+///
+/// ⚠️ A dedicated code, on purpose — `E_BUS-06` means "size == 0" and
+/// `E_BUS-03` means "overlap"; neither of them can carry "this string
+/// is not a region kind" without becoming two-meaning (the same lesson
+/// as `E_SNAP-02` / `E_SNAP-06`, STAGE-3 §5).
+pub const E_BUS_10_INVALID_REGION_KIND: u16 = 10;
+
+/// Scenario code: a memory page does not fit inside **any** RAM
+/// region of the bus.
+///
+/// ⚠️ Distinct from `E_BUS-01` ("unmapped address"): that one is about
+/// a *guest access* to an address with no mapping, this one is about a
+/// *snapshot page* that the memory map does not cover. A consumer that
+/// receives `E_BUS-01` looks at the access; one that receives
+/// `E_BUS-11` looks at the page table.
+pub const E_BUS_11_PAGE_OUTSIDE_RAM: u16 = 11;
+
+/// Scenario code: the ROM topology in the payload does not match the
+/// ROM regions on the bus.
+///
+/// The ROM **content** is not part of the payload (it travels with the
+/// firmware image — STAGE-3 §3.1 / §7), so the only place it can come
+/// from is the ROM region that is on the bus **right now**. If the
+/// payload's ROM regions and the bus's ROM regions do not correspond
+/// one-to-one (same `base`, same `size`), the content cannot be
+/// carried over faithfully — and a restore that quietly produced an
+/// empty ROM would erase the firmware.
+///
+/// ⚠️ A dedicated code, on purpose: `E_BUS-04` is "base + size
+/// overflows the 32-bit address space" and `E_BUS-03` is "two regions
+/// overlap" — neither of them can carry "the ROM topology does not
+/// match the payload".
+pub const E_BUS_12_ROM_TOPOLOGY_MISMATCH: u16 = 12;
 
 // ---------------------------------------------------------------------------
 // Widths / access descriptors (kept local so future P1 extensions — e.g. 64-bit
@@ -789,6 +874,426 @@ impl Bus {
     /// Iterate regions in ascending base order.
     pub fn regions(&self) -> impl Iterator<Item = (&u32, &Region)> {
         self.regions.iter()
+    }
+
+    // -----------------------------------------------------------------------
+    // Session snapshot (STAGE-3 §3.2): memory pages (segment 2) and the
+    // memory-map topology (segment 3).
+    // -----------------------------------------------------------------------
+
+    /// Export the **memory-map topology** — segment 3 of the session
+    /// payload (STAGE-3 §3.2).
+    ///
+    /// Every region is listed — RAM, ROM **and** peripheral — ordered by
+    /// `base` (the region table is a [`BTreeMap`], so the order is
+    /// canonical by construction, not by a post-hoc sort).
+    ///
+    /// - `kind` is the **lower-case string** the wire format demands
+    ///   (`"ram"` / `"rom"` / `"peripheral"`) — never an enum ordinal,
+    ///   so a reordering of [`RegionType`] cannot silently change what
+    ///   a stored payload means.
+    /// - `target` is **empty** for RAM / ROM (they have no identity
+    ///   beyond their address range) and carries the **peripheral's own
+    ///   id** (`"GPIO0"`) for a peripheral region: a *bound* instance is
+    ///   not serializable, only its id is — the restore path re-binds
+    ///   by id (STAGE-3 §3.1).
+    ///
+    /// A peripheral region whose instance is **currently borrowed** (a
+    /// dispatch is in flight) cannot report its id; the bus-side token
+    /// is used as a fallback (`"periph#<token>"`). That token is **not**
+    /// bindable — it only keeps the export lossless instead of
+    /// dropping the target on the floor.
+    pub fn export_map(&self) -> M14MapDto {
+        let mut regions = Vec::with_capacity(self.regions.len());
+        for (base, region) in &self.regions {
+            let (kind, target) = match &region.target {
+                RegionTarget::Ram(_) => (REGION_KIND_RAM, String::new()),
+                RegionTarget::Rom(_) => (REGION_KIND_ROM, String::new()),
+                RegionTarget::PeripheralBound(bound) => (
+                    REGION_KIND_PERIPHERAL,
+                    bound
+                        .instance_id()
+                        .unwrap_or_else(|| format!("periph#{}", bound.id().0)),
+                ),
+                RegionTarget::Peripheral(id) => {
+                    (REGION_KIND_PERIPHERAL, format!("periph#{}", id.0))
+                }
+            };
+            regions.push(RegionDto {
+                base: *base,
+                size: region.size,
+                kind: kind.to_string(),
+                target,
+            });
+        }
+        M14MapDto { regions }
+    }
+
+    /// Restore the **memory-map topology** — segment 3's consumer
+    /// (STAGE-3 §3.2).
+    ///
+    /// ## What is rebuilt
+    ///
+    /// **RAM and ROM regions are rebuilt** from the payload: the old
+    /// RAM / ROM regions are dropped and new ones are mapped at the
+    /// payload's addresses.
+    ///
+    /// - **RAM**: the rebuilt region starts **zeroed**. The RAM content
+    ///   is not part of the topology — it travels in segment 2
+    ///   ([`Bus::load_pages`]) and is poured back in afterwards.
+    /// - **ROM**: the rebuilt region keeps the **content of the ROM
+    ///   region it replaces** (byte for byte). The ROM content is not
+    ///   in the payload either (it travels with the **firmware image**,
+    ///   which is an *input* of a session — STAGE-3 §3.1 / §7), so the
+    ///   only place it can come from is the ROM region that is on the
+    ///   bus right now. ⚠️ Rebuilding a ROM region **zeroed** would
+    ///   erase the firmware: the restored session would fault on its
+    ///   very first instruction.
+    ///
+    ///   ⚠️ The ROM content is carried over **by region identity**:
+    ///   the payload's ROM region must have the **same `base` and the
+    ///   same `size`** as the ROM region on the bus. A mismatch is
+    ///   **rejected** ([`E_BUS_12_ROM_TOPOLOGY_MISMATCH`]) — the
+    ///   content is *not* moved to another address, because a ROM
+    ///   whose content does not match its address range is not the
+    ///   firmware any more.
+    ///
+    /// ## What is **kept in place** — and why
+    ///
+    /// **Peripheral regions are neither deleted nor rebuilt.** They
+    /// stay exactly as they are — same address window, same bound
+    /// instance.
+    ///
+    /// ⚠️ This is a **correctness requirement**, not a shortcut. A
+    /// peripheral region is an **input** of the session: the host binds
+    /// the live instances from the firmware. If `load_map` deleted
+    /// those windows, the restored bus would have **no GPIO / UART** —
+    /// the firmware's next instruction would fault on a missing
+    /// peripheral, and the restored session would silently **diverge**
+    /// from the captured one. Keeping them is what makes "snapshot →
+    /// restore → run again" reproduce the same session.
+    ///
+    /// ⚠️ The **peripheral entries inside the payload are therefore
+    /// ignored** — they describe the topology, not the instances. The
+    /// instance is re-bound by the host, from the firmware.
+    ///
+    /// ## Validation (all of it runs **before** anything is written)
+    ///
+    /// - unknown `kind` → **E_BUS-10**;
+    /// - `size == 0` → **E_BUS-06**; `base + size` overflows → **E_BUS-04**;
+    /// - region larger than the bus-wide cap → **E_BUS-09**;
+    /// - two RAM / ROM regions overlap, or one of them overlaps a
+    ///   **kept** peripheral region → **E_BUS-03**;
+    /// - the ROM regions of the payload and of the bus do not
+    ///   correspond one-to-one → **E_BUS-12**.
+    ///
+    /// A rejected topology leaves the bus **exactly as it was** — a
+    /// half-applied map is worse than a rejected one (STAGE-3 §5).
+    pub fn load_map(&mut self, map: &M14MapDto) -> Result<(), PlatformError> {
+        // ---- Phase 1: validate the whole topology, touch nothing yet. ----
+        let mut rebuild: Vec<&RegionDto> = Vec::new();
+        for r in &map.regions {
+            match r.kind.as_str() {
+                REGION_KIND_RAM | REGION_KIND_ROM => {
+                    if r.size == 0 {
+                        return Err(PlatformError::new(
+                            BUS_FAMILY,
+                            E_BUS_06_ZERO_SIZE,
+                            format!("region 0x{:08x} has size 0", r.base),
+                        ));
+                    }
+                    let end = r.base.checked_add(r.size).ok_or_else(|| {
+                        PlatformError::new(
+                            BUS_FAMILY,
+                            E_BUS_04_OUT_OF_RANGE,
+                            format!(
+                                "base + size overflows u32 (base=0x{:08x}, size=0x{:x})",
+                                r.base, r.size
+                            ),
+                        )
+                    })?;
+                    if u64::from(end) > BUS_SIZE {
+                        return Err(PlatformError::new(
+                            BUS_FAMILY,
+                            E_BUS_04_OUT_OF_RANGE,
+                            format!("region 0x{:08x}..0x{:08x} exceeds 4 GiB bus", r.base, end),
+                        ));
+                    }
+                    if u64::from(r.size) > self.max_region_bytes {
+                        return Err(PlatformError::new(
+                            BUS_FAMILY,
+                            E_BUS_09_TOO_LARGE,
+                            format!(
+                                "region size {} exceeds the per-region cap of {} bytes (base=0x{:08x})",
+                                r.size, self.max_region_bytes, r.base
+                            ),
+                        ));
+                    }
+                    rebuild.push(r);
+                }
+                // Kept in place — deliberately not rebuilt (see the doc).
+                REGION_KIND_PERIPHERAL => {}
+                other => {
+                    return Err(PlatformError::new(
+                        BUS_FAMILY,
+                        E_BUS_10_INVALID_REGION_KIND,
+                        format!("unknown region kind '{other}' at base=0x{:08x}", r.base),
+                    ));
+                }
+            }
+        }
+
+        // The rebuilt intervals must not overlap each other …
+        let mut intervals: Vec<(u32, u32)> =
+            rebuild.iter().map(|r| (r.base, r.base + r.size)).collect();
+        intervals.sort_unstable();
+        for w in intervals.windows(2) {
+            if w[1].0 < w[0].1 {
+                return Err(PlatformError::new(
+                    BUS_FAMILY,
+                    E_BUS_03_OVERLAP,
+                    format!(
+                        "rebuilt regions 0x{:08x}..0x{:08x} and 0x{:08x}..0x{:08x} overlap",
+                        w[0].0, w[0].1, w[1].0, w[1].1
+                    ),
+                ));
+            }
+        }
+
+        // … nor overlap a peripheral region that stays in place.
+        for (base, region) in &self.regions {
+            if !matches!(
+                region.target,
+                RegionTarget::Peripheral(_) | RegionTarget::PeripheralBound(_)
+            ) {
+                continue;
+            }
+            let end = base + region.size;
+            for (rbase, rend) in &intervals {
+                if *rbase < end && *base < *rend {
+                    return Err(PlatformError::new(
+                        BUS_FAMILY,
+                        E_BUS_03_OVERLAP,
+                        format!(
+                            "rebuilt region 0x{:08x}..0x{:08x} overlaps the peripheral window \
+                             0x{:08x}..0x{:08x} that is kept in place",
+                            rbase, rend, base, end
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // The ROM regions of the payload and of the bus must correspond
+        // **one-to-one** (same `base`, same `size`): the ROM content is
+        // not in the payload, so the content of the region on the bus is
+        // the only thing that can be carried over. A mismatch is
+        // rejected instead of producing an empty (i.e. erased) ROM.
+        //
+        // The content is copied out **now** — the regions are dropped
+        // in phase 2, and the copy is what survives the rebuild.
+        let current_rom: BTreeMap<u32, (u32, Vec<u8>)> = self
+            .regions
+            .iter()
+            .filter_map(|(base, region)| match &region.target {
+                RegionTarget::Rom(rom) => Some((*base, (region.size, rom.bytes.clone()))),
+                _ => None,
+            })
+            .collect();
+
+        for r in rebuild.iter().filter(|r| r.kind == REGION_KIND_ROM) {
+            match current_rom.get(&r.base) {
+                None => {
+                    return Err(PlatformError::new(
+                        BUS_FAMILY,
+                        E_BUS_12_ROM_TOPOLOGY_MISMATCH,
+                        format!(
+                            "会话载荷里的 ROM 区域 0x{:08x} 在当前总线上没有对应区域——ROM 内容无法保留",
+                            r.base
+                        ),
+                    ));
+                }
+                Some((size, _)) if *size != r.size => {
+                    return Err(PlatformError::new(
+                        BUS_FAMILY,
+                        E_BUS_12_ROM_TOPOLOGY_MISMATCH,
+                        format!(
+                            "ROM 区域 0x{:08x} 的大小不一致：载荷 {} 字节，总线 {} 字节——ROM 内容无法保留",
+                            r.base, r.size, size
+                        ),
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+        for (base, (size, _)) in &current_rom {
+            if !rebuild
+                .iter()
+                .any(|r| r.kind == REGION_KIND_ROM && r.base == *base && r.size == *size)
+            {
+                return Err(PlatformError::new(
+                    BUS_FAMILY,
+                    E_BUS_12_ROM_TOPOLOGY_MISMATCH,
+                    format!(
+                        "当前总线上的 ROM 区域 0x{:08x}（{} 字节）不在会话载荷里——重建会丢掉固件",
+                        base, size
+                    ),
+                ));
+            }
+        }
+
+        // ---- Phase 2: apply. RAM / ROM are rebuilt, peripherals stay. ----
+        self.regions
+            .retain(|_, r| !matches!(r.target, RegionTarget::Ram(_) | RegionTarget::Rom(_)));
+        for r in rebuild {
+            if r.kind == REGION_KIND_RAM {
+                // The RAM content is not part of the topology — it is
+                // poured back in by `load_pages` (segment 2).
+                self.map_ram(r.base, r.size, &[])?;
+            } else {
+                // The ROM content follows the region it replaces.
+                let content: &[u8] = current_rom
+                    .get(&r.base)
+                    .map(|(_, bytes)| bytes.as_slice())
+                    .unwrap_or(&[]);
+                self.map_rom(r.base, r.size, content)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Export the **guest-visible memory pages** (RAM content) — segment
+    /// 2's producer (STAGE-3 §3.2).
+    ///
+    /// Only **RAM** regions are exported:
+    ///
+    /// - ROM content travels with the **firmware image** (an input of a
+    ///   session, not its state) — see STAGE-3 §3.1;
+    /// - peripheral windows hold **no** memory content at all.
+    ///
+    /// A region larger than [`MEM_PAGE_CHUNK_BYTES`] is split into
+    /// several pages; the **last** page of a region may be shorter (the
+    /// payload never pads a page to a page boundary — padding would
+    /// silently change the region's length on restore).
+    ///
+    /// The pages come out in ascending `base` order (the region table
+    /// is a [`BTreeMap`]), and each page's `base` is the address of its
+    /// **first** byte.
+    pub fn export_pages(&self) -> Vec<MemPageDto> {
+        let mut pages: Vec<MemPageDto> = Vec::new();
+        for region in self.regions.values() {
+            let RegionTarget::Ram(ram) = &region.target else {
+                continue;
+            };
+            let mut offset = 0usize;
+            while offset < ram.bytes.len() {
+                let end = (offset + MEM_PAGE_CHUNK_BYTES).min(ram.bytes.len());
+                // `region.base + offset` cannot overflow: the region's
+                // `base + size` is checked to fit the 4 GiB bus.
+                let base = region.base + offset as u32;
+                pages.push(MemPageDto {
+                    base,
+                    bytes: ram.bytes[offset..end].to_vec(),
+                });
+                offset = end;
+            }
+        }
+        pages
+    }
+
+    /// Restore the **guest-visible memory pages** (RAM content) — segment
+    /// 2's consumer (STAGE-3 §3.2).
+    ///
+    /// ⚠️ **`load_map` must run first** (STAGE-3 §3.7): a page is
+    /// written *into* an existing RAM region, so without the topology
+    /// there is nothing to write into — and the call **fails** with
+    /// [`E_BUS_11_PAGE_OUTSIDE_RAM`] rather than silently dropping the
+    /// content.
+    ///
+    /// A page must lie **entirely** inside one RAM region; a page that
+    /// starts in a region but runs past its end is **rejected**, not
+    /// clipped (clipping would restore a *different* memory image than
+    /// the one that was captured).
+    ///
+    /// ## Validation runs before anything is written
+    ///
+    /// Every page is checked first; only then are the bytes written.
+    /// A rejected page list leaves the RAM content **untouched** — a
+    /// half-applied restore is worse than a rejected one (STAGE-3 §5).
+    pub fn load_pages(&mut self, pages: &[MemPageDto]) -> Result<(), PlatformError> {
+        // ---- Phase 1: resolve every page to a RAM region, touch nothing. ----
+        let mut plan: Vec<(u32, usize)> = Vec::with_capacity(pages.len());
+        for page in pages {
+            let len = u32::try_from(page.bytes.len()).map_err(|_| {
+                PlatformError::new(
+                    BUS_FAMILY,
+                    E_BUS_11_PAGE_OUTSIDE_RAM,
+                    format!("memory page at 0x{:08x} is too large", page.base),
+                )
+            })?;
+            let end = page.base.checked_add(len).ok_or_else(|| {
+                PlatformError::new(
+                    BUS_FAMILY,
+                    E_BUS_11_PAGE_OUTSIDE_RAM,
+                    format!(
+                        "memory page at 0x{:08x} ({} bytes) overflows the 32-bit address space",
+                        page.base, len
+                    ),
+                )
+            })?;
+            let region_base = self
+                .regions
+                .iter()
+                .find(|(_, r)| {
+                    matches!(r.target, RegionTarget::Ram(_))
+                        && r.base <= page.base
+                        && end <= r.base.saturating_add(r.size)
+                })
+                .map(|(b, _)| *b)
+                .ok_or_else(|| {
+                    PlatformError::new(
+                        BUS_FAMILY,
+                        E_BUS_11_PAGE_OUTSIDE_RAM,
+                        format!(
+                            "memory page 0x{:08x}..0x{:08x} does not fit inside any RAM region \
+                             (load the memory map first)",
+                            page.base, end
+                        ),
+                    )
+                })?;
+            plan.push((region_base, (page.base - region_base) as usize));
+        }
+
+        // ---- Phase 2: write the bytes. ----
+        for (page, (region_base, offset)) in pages.iter().zip(plan) {
+            let region = self.regions.get_mut(&region_base).ok_or_else(|| {
+                PlatformError::new(
+                    BUS_FAMILY,
+                    E_BUS_11_PAGE_OUTSIDE_RAM,
+                    format!("RAM region 0x{:08x} vanished mid-restore", region_base),
+                )
+            })?;
+            let RegionTarget::Ram(ram) = &mut region.target else {
+                return Err(PlatformError::new(
+                    BUS_FAMILY,
+                    E_BUS_11_PAGE_OUTSIDE_RAM,
+                    format!("region 0x{:08x} is not a RAM region", region_base),
+                ));
+            };
+            let end = offset + page.bytes.len();
+            let slot = ram.bytes.get_mut(offset..end).ok_or_else(|| {
+                PlatformError::new(
+                    BUS_FAMILY,
+                    E_BUS_11_PAGE_OUTSIDE_RAM,
+                    format!(
+                        "memory page 0x{:08x} does not fit into RAM region 0x{:08x}",
+                        page.base, region_base
+                    ),
+                )
+            })?;
+            slot.copy_from_slice(&page.bytes);
+        }
+        Ok(())
     }
 
     /// Install / replace the trace hook (M-18 source of bus accesses).

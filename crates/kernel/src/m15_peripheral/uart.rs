@@ -27,6 +27,7 @@
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
 use riscv_sim_contract::port::{Peripheral, ProbeSink};
+use riscv_sim_contract::session::{PeripheralSessionState, UartStateDto};
 
 use super::reg::{extract_subword, register_offset};
 use super::ProbeSlot;
@@ -270,6 +271,82 @@ impl Peripheral for Uart16550 {
     fn on_probe(&mut self, cb: Option<ProbeSink>) {
         self.probe.set(cb);
     }
+
+    /// This UART's share of the **session snapshot** (segment 4 —
+    /// STAGE-3 §3.3).
+    ///
+    /// Every field the UART owns is exported: the two 1-byte FIFOs, the
+    /// latched STATUS register (including the overrun flags), the IRQ
+    /// line and the peripheral's **authoritative virtual time**.
+    ///
+    /// ⚠️ `now_ps` is not decoration: it is the timestamp the probe
+    /// reports are stamped with. Losing it would make every edge that
+    /// follows the restore land on the wrong point of the time axis.
+    fn session_state(&self) -> Option<PeripheralSessionState> {
+        Some(PeripheralSessionState::Uart(UartStateDto {
+            id: self.id.clone(),
+            tx: self.tx,
+            rx: self.rx,
+            status: self.status,
+            irq_line: self.irq_line,
+            now_ps: self.now_ps,
+        }))
+    }
+
+    /// Restore the UART's session state (segment 4's consumer).
+    ///
+    /// **Every** field is restored — the FIFOs, the latched STATUS
+    /// register, the IRQ line and `now_ps`.
+    ///
+    /// ⚠️ STATUS is restored **as it was captured**, not recomputed
+    /// from the FIFOs: the captured value is the register the guest
+    /// reads, and recomputing it would silently rewrite the overrun
+    /// flags the firmware has not cleared yet.
+    ///
+    /// ⚠️ The UART's **own** rules are checked here as well
+    /// ([`Uart16550::check_status`]) — **defensive redundancy**: the
+    /// gate is the read-only pass
+    /// ([`Peripheral::validate_session_state`]), which runs **before**
+    /// any peripheral is written (STAGE-3 §5).
+    fn restore_session_state(
+        &mut self,
+        state: &PeripheralSessionState,
+    ) -> Result<(), PlatformError> {
+        let PeripheralSessionState::Uart(s) = state else {
+            return Err(super::wrong_state_kind(
+                &self.id,
+                super::SessionKind::Uart,
+                super::SessionKind::of(state),
+            ));
+        };
+        super::check_same_id(&self.id, &s.id)?;
+        self.check_status(s)?;
+        self.tx = s.tx;
+        self.rx = s.rx;
+        self.status = s.status;
+        self.irq_line = s.irq_line;
+        self.now_ps = s.now_ps;
+        Ok(())
+    }
+
+    /// **Read-only** acceptance check for this UART's session state
+    /// (STAGE-3 §3.3) — the gate that runs **before** anything is
+    /// written.
+    ///
+    /// ⚠️ The rules that live **only here** are the ones the contract
+    /// layer cannot check: it knows the *shape* of a UART state, but not
+    /// what the STATUS bits **mean** (see [`Uart16550::check_status`]).
+    fn validate_session_state(&self, state: &PeripheralSessionState) -> Result<(), PlatformError> {
+        let PeripheralSessionState::Uart(s) = state else {
+            return Err(super::wrong_state_kind(
+                &self.id,
+                super::SessionKind::Uart,
+                super::SessionKind::of(state),
+            ));
+        };
+        super::check_same_id(&self.id, &s.id)?;
+        self.check_status(s)
+    }
 }
 
 // Internal helpers: the non-destructive `read` returns the word at
@@ -277,6 +354,70 @@ impl Peripheral for Uart16550 {
 // variant that mutates FIFO state. Centralised so the `read` and
 // `read_clear` paths share error mapping.
 impl Uart16550 {
+    /// The UART's **own** integrity rules for a session state.
+    ///
+    /// ⚠️ Two rules, both **UART-specific** — the contract layer cannot
+    /// check them: it knows the *shape* of a UART state, but not what
+    /// the STATUS bits **mean**.
+    ///
+    /// 1. **Only the defined bits.** The STATUS register may only carry
+    ///    the bits this model defines. A state with other bits set could
+    ///    not have been produced by this UART — it came from somewhere
+    ///    else (or from a hand-built payload).
+    /// 2. **The FIFO flags must agree with the FIFOs.** `RX_FULL` is
+    ///    set exactly when the RX FIFO holds a byte; `TX_READY` is set
+    ///    exactly when the TX FIFO is empty. A state that contradicts
+    ///    itself would restore a UART whose register **lies** about its
+    ///    own FIFOs — and the firmware would believe it.
+    ///
+    /// ⚠️ Every state this UART produces satisfies both rules:
+    /// [`Uart16550::refresh_status`] is the **single writer** of the
+    /// FIFO bits, and it runs after every FIFO mutation.
+    fn check_status(&self, state: &UartStateDto) -> Result<(), PlatformError> {
+        const KNOWN_BITS: u32 = status_bits::TX_READY
+            | status_bits::RX_FULL
+            | status_bits::RX_OVERRUN
+            | status_bits::TX_OVERRUN;
+        if state.status & !KNOWN_BITS != 0 {
+            return Err(PlatformError::new(
+                super::PERIPHERAL_FAMILY,
+                super::E_PER_04_UNSUPPORTED_SESSION_STATE,
+                format!(
+                    "UART '{}' 的会话状态带未定义的 STATUS 位 {:#x}",
+                    self.id,
+                    state.status & !KNOWN_BITS
+                ),
+            ));
+        }
+        let rx_full = state.status & status_bits::RX_FULL != 0;
+        if rx_full != state.rx.is_some() {
+            return Err(PlatformError::new(
+                super::PERIPHERAL_FAMILY,
+                super::E_PER_04_UNSUPPORTED_SESSION_STATE,
+                format!(
+                    "UART '{}' 的会话状态自相矛盾：STATUS.RX_FULL = {}，但 RX FIFO 是 {}",
+                    self.id,
+                    rx_full,
+                    if state.rx.is_some() { "满" } else { "空" }
+                ),
+            ));
+        }
+        let tx_ready = state.status & status_bits::TX_READY != 0;
+        if tx_ready != state.tx.is_none() {
+            return Err(PlatformError::new(
+                super::PERIPHERAL_FAMILY,
+                super::E_PER_04_UNSUPPORTED_SESSION_STATE,
+                format!(
+                    "UART '{}' 的会话状态自相矛盾：STATUS.TX_READY = {}，但 TX FIFO 是 {}",
+                    self.id,
+                    tx_ready,
+                    if state.tx.is_none() { "空" } else { "满" }
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// Report one signal observation to the M-18 probe pipeline.
     fn report(&mut self, signal: &str, value: u64) {
         let now = self.now_ps;

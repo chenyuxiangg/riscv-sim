@@ -237,13 +237,112 @@ pub trait Peripheral {
     /// DummyUart) do not need to change unless they actually want to
     /// report signals.
     fn on_probe(&mut self, _cb: Option<ProbeSink>) {}
+
+    /// This peripheral's share of the **session snapshot** (segment 4 of
+    /// the session payload — see
+    /// [`crate::session::SessionSnapshotDto`]).
+    ///
+    /// Returns `None` when this peripheral contributes **no** session
+    /// state — the default, and the right answer for a peripheral whose
+    /// whole state is derivable from the bus (a plain register window,
+    /// say). M-15's UART / GPIO / timer override it.
+    ///
+    /// ⚠️ **Additive** — this method has a default implementation, so
+    /// every existing implementor keeps compiling and keeps its
+    /// behaviour. Adding a method to a trait is an **additive** change
+    /// (the contract's "only add, never change" rule), not a breaking
+    /// one; the wire protocol is unaffected, so
+    /// [`crate::SCHEMA_VERSION`] does **not** move.
+    fn session_state(&self) -> Option<crate::session::PeripheralSessionState> {
+        None
+    }
+
+    /// **Read-only** check: "can I accept this state?" — **writes
+    /// nothing**.
+    ///
+    /// ⚠️ **This method is not optional in spirit, but it is additive in
+    /// form.** The restore path's write stage may hide integrity
+    /// constraints that **only this peripheral knows** (e.g. the GPIO's
+    /// `irq_lines` must have exactly [`crate::session::GPIO_PIN_COUNT`]
+    /// entries). If those checks live **only** in the write path, then
+    /// "restore the UART first, discover the malformed GPIO afterwards"
+    /// leaves a **half-applied session** (the UART has already been
+    /// overwritten) behind an `Err`. A half-applied snapshot is worse
+    /// than a rejected one (STAGE-3 §5).
+    ///
+    /// ⚠️ The default implementation **lets everything through**
+    /// (`Ok(())`): it must be **additive** — every existing implementor
+    /// keeps compiling and keeps its behaviour, so the wire protocol
+    /// does not move and [`crate::SCHEMA_VERSION`] stays put. A
+    /// peripheral that participates in the session snapshot **must**
+    /// override it; that requirement is pinned by **behavioural** tests
+    /// (not by a white-box check of "who overrode it").
+    fn validate_session_state(
+        &self,
+        _state: &crate::session::PeripheralSessionState,
+    ) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
+    /// Restore this peripheral's session state.
+    ///
+    /// The default implementation **rejects** any state with
+    /// [`ErrorFamily::Peripheral`] — a peripheral that does not
+    /// participate in the session snapshot must not **silently swallow**
+    /// a state meant for it: that would drop state without a word, and
+    /// the restored session would quietly differ from the captured one.
+    fn restore_session_state(
+        &mut self,
+        state: &crate::session::PeripheralSessionState,
+    ) -> Result<(), PlatformError> {
+        let _ = state;
+        Err(PlatformError::new(
+            crate::error::ErrorFamily::Peripheral,
+            E_PER_04_UNSUPPORTED_SESSION_STATE,
+            format!(
+                "外设 {} 不支持会话状态回灌——快照里有它的状态，但它没有实现",
+                self.id()
+            ),
+        ))
+    }
 }
+
+/// Scenario code: this peripheral does not accept the session state it was
+/// handed — the default [`Peripheral::restore_session_state`] rejects it.
+///
+/// ⚠️ **A named constant, not a literal.** The default implementation used
+/// to spell the code as a bare `4`; a bare number has no meaning attached
+/// to it, so the same number could later be reused for something else
+/// without anybody noticing (one code, two meanings — the same trap as
+/// D-69's `E_PP` / `E_PER` and D-32's `E_PROTO-02`).
+pub const E_PER_04_UNSUPPORTED_SESSION_STATE: u16 = 4;
+
+/// Scenario code: the peripheral set in a session payload does **not** match
+/// the live instances — either the payload names an id that is not live, or
+/// a live peripheral that participates in the session state is not
+/// described by the payload.
+///
+/// ⚠️ Both directions are checked on purpose: skipping either one would
+/// leave the restored session **silently different** from the captured one.
+pub const E_PER_05_PERIPHERAL_SET_MISMATCH: u16 = 5;
 
 /// Driven port: peripheral → interrupt controller (M-15 → M-16).
 pub trait InterruptSink {
     /// Raise an IRQ line. Idempotent.
+    ///
+    /// ⚠️ **This call may fail because the controller is busy** (the
+    /// implementation may be reached while the controller is already
+    /// borrowed — e.g. a `RefCell` contention in the kernel host). The
+    /// failure is reported with the interrupt family's scenario code
+    /// (`E_INT_01`, "controller busy") — the exact code is the
+    /// implementation's, the contract only fixes the **meaning**:
+    /// `Err` means **this IRQ line was NOT raised**. A caller that
+    /// ignores the result believes the line is up while it is not.
     fn raise(&mut self, irq: u16) -> Result<(), PlatformError>;
     /// Lower an IRQ line.
+    ///
+    /// ⚠️ Same failure semantics as [`Self::raise`]: `Err` means **this
+    /// IRQ line was NOT lowered**.
     fn lower(&mut self, irq: u16) -> Result<(), PlatformError>;
 }
 
@@ -294,4 +393,105 @@ pub trait EdgeSink {
 pub trait DeltaSink {
     /// Deliver one batch of waveform edges.
     fn push_delta(&mut self, delta: &crate::model::WaveformDelta) -> Result<(), PlatformError>;
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pins the **three default implementations** of [`Peripheral`] that
+    //! the session snapshot depends on.
+    //!
+    //! ⚠️ **These are the contract's *additivity* guarantees.** They are
+    //! invisible in the kernel: M-15's three peripherals **all** override
+    //! the session methods, so changing a default there would change
+    //! **nothing** observable — and nothing would go red. The property
+    //! has to be pinned **here**, on the contract, where it is written.
+
+    use super::*;
+    use crate::model::WriteSize;
+    use crate::session::{PeripheralSessionState, UartStateDto};
+
+    /// A peripheral that implements **only** the mandatory methods —
+    /// it does **not** override any of the three session-snapshot
+    /// defaults. This is what an "existing implementor" looks like
+    /// (the trait's default methods are what keep it compiling).
+    struct BarePeripheral;
+
+    impl Peripheral for BarePeripheral {
+        fn id(&self) -> &str {
+            "BARE0"
+        }
+        fn base_addr(&self) -> u32 {
+            0x4000_1000
+        }
+        fn size(&self) -> u32 {
+            0x10
+        }
+        fn read(&self, _offset: u32, _size: WriteSize) -> Result<u32, PlatformError> {
+            Ok(0)
+        }
+        fn write(
+            &mut self,
+            _offset: u32,
+            _size: WriteSize,
+            _value: u32,
+        ) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        fn tick(&mut self, _now_ps: u64) -> Result<Vec<PendingWrite>, PlatformError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn uart_state() -> PeripheralSessionState {
+        PeripheralSessionState::Uart(UartStateDto {
+            id: "BARE0".to_string(),
+            tx: Some(0x41),
+            rx: None,
+            status: 0,
+            irq_line: 3,
+            now_ps: 0,
+        })
+    }
+
+    /// ⚠️ **The default is `None`** — a peripheral that contributes no
+    /// session state says so, instead of contributing an empty state
+    /// that would look like "this peripheral had no state" rather than
+    /// "this peripheral is not part of the snapshot".
+    #[test]
+    fn a_peripheral_that_does_not_override_contributes_no_session_state() {
+        let p = BarePeripheral;
+        assert!(p.session_state().is_none());
+    }
+
+    /// ⚠️ **The default lets everything through** (`Ok(())`).
+    ///
+    /// This is the **additivity** guarantee: a peripheral written
+    /// against the contract *before* the session snapshot existed must
+    /// keep compiling **and keep working**. If the default rejected
+    /// every state, every such implementor would start failing its
+    /// restore — a **breaking** change smuggled in as an "additive"
+    /// one.
+    #[test]
+    fn the_default_acceptance_check_lets_everything_through() {
+        let p = BarePeripheral;
+        let state = uart_state();
+        assert!(
+            p.validate_session_state(&state).is_ok(),
+            "默认的 validate_session_state 必须放行——它是加法性的保证"
+        );
+    }
+
+    /// ⚠️ **The default rejects** — a peripheral that does not implement
+    /// the restore must **not silently swallow** a state meant for it:
+    /// that drops state without a word, and the restored session would
+    /// quietly differ from the captured one.
+    #[test]
+    fn the_default_restore_rejects_instead_of_silently_succeeding() {
+        let mut p = BarePeripheral;
+        let err = p
+            .restore_session_state(&uart_state())
+            .expect_err("默认实现必须报错，不能静默成功");
+        assert_eq!(err.family, crate::error::ErrorFamily::Peripheral);
+        assert_eq!(err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE);
+    }
 }

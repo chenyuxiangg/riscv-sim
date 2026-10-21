@@ -23,6 +23,7 @@
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
 use riscv_sim_contract::port::{Peripheral, ProbeSink};
+use riscv_sim_contract::session::{PeripheralSessionState, TimerStateDto};
 
 use super::reg::{extract_subword, register_offset};
 use super::ProbeSlot;
@@ -189,9 +190,105 @@ impl Peripheral for TimerRiscv {
     fn on_probe(&mut self, cb: Option<ProbeSink>) {
         self.probe.set(cb);
     }
+
+    /// This timer's share of the **session snapshot** (segment 4 —
+    /// STAGE-3 §3.3).
+    ///
+    /// `mtime` / `mtimecmp` are the two quantities the firmware reads
+    /// and writes; both are exported verbatim.
+    fn session_state(&self) -> Option<PeripheralSessionState> {
+        Some(PeripheralSessionState::Timer(TimerStateDto {
+            id: self.id.clone(),
+            irq_line: self.irq_line,
+            mtime: self.mtime,
+            mtimecmp: self.mtimecmp,
+        }))
+    }
+
+    /// Restore the timer's session state (segment 4's consumer).
+    ///
+    /// `mtime` / `mtimecmp` / the IRQ line are restored verbatim.
+    ///
+    /// ⚠️ The DTO carries no `now_ps` field, but the timer keeps
+    /// `now_ps == mtime` at **every** tick — so `now_ps` is restored
+    /// from `mtime` and the two stay in lockstep.
+    ///
+    /// ⚠️ The DTO carries no sticky-`pending_irq` field either. That
+    /// flag is **re-armed by the next tick** whenever
+    /// `mtime >= mtimecmp` (see [`Peripheral::tick`]), so a restored
+    /// timer that is already past its deadline raises its IRQ again on
+    /// the next clock tick — the same behaviour the captured timer had.
+    ///
+    /// ⚠️ The timer's **own** rules are checked here as well
+    /// ([`TimerRiscv::check_state`]) — **defensive redundancy**: the
+    /// gate is the read-only pass
+    /// ([`Peripheral::validate_session_state`]), which runs **before**
+    /// any peripheral is written (STAGE-3 §5).
+    fn restore_session_state(
+        &mut self,
+        state: &PeripheralSessionState,
+    ) -> Result<(), PlatformError> {
+        let PeripheralSessionState::Timer(s) = state else {
+            return Err(super::wrong_state_kind(
+                &self.id,
+                super::SessionKind::Timer,
+                super::SessionKind::of(state),
+            ));
+        };
+        super::check_same_id(&self.id, &s.id)?;
+        self.check_state(s)?;
+        self.irq_line = s.irq_line;
+        self.mtime = s.mtime;
+        self.mtimecmp = s.mtimecmp;
+        // The timer advances `mtime` **and** `now_ps` together on every
+        // tick — keeping them equal here preserves that invariant.
+        self.now_ps = s.mtime;
+        Ok(())
+    }
+
+    /// **Read-only** acceptance check for this timer's session state
+    /// (STAGE-3 §3.3) — the gate that runs **before** anything is
+    /// written.
+    ///
+    /// ⚠️ The rules that live **only here**: the state must be **a
+    /// timer state** (a UART's state must not be swallowed by a timer —
+    /// that would move another peripheral's registers into this one) and
+    /// it must name **this** timer.
+    ///
+    /// ⚠️ The numeric fields carry no further constraint: `mtime` and
+    /// `mtimecmp` are 64-bit counters and **every** value of them is
+    /// producible (`mtimecmp == 0` is the "no deadline" encoding, and a
+    /// deadline in the past is the normal "already fired" case). A rule
+    /// that does not exist must not be invented here.
+    fn validate_session_state(&self, state: &PeripheralSessionState) -> Result<(), PlatformError> {
+        let PeripheralSessionState::Timer(s) = state else {
+            return Err(super::wrong_state_kind(
+                &self.id,
+                super::SessionKind::Timer,
+                super::SessionKind::of(state),
+            ));
+        };
+        super::check_same_id(&self.id, &s.id)?;
+        self.check_state(s)
+    }
 }
 
 impl TimerRiscv {
+    /// The timer's **own** integrity rules for a session state.
+    ///
+    /// ⚠️ There is exactly one: the two counters are 64-bit and
+    /// **every** value of them is producible — `mtimecmp == 0` is the
+    /// "no deadline" encoding, and a deadline in the past is the normal
+    /// "already fired" case (the IRQ is re-armed on the next tick).
+    /// A rule that does not exist must not be invented here: a
+    /// fabricated constraint would reject **legitimate** payloads.
+    ///
+    /// ⚠️ The check exists so that the rule has **one** landing spot —
+    /// the read-only gate and the write path must not drift apart.
+    fn check_state(&self, _state: &TimerStateDto) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
     /// Report one signal observation to the M-18 probe pipeline.
     fn report(&mut self, signal: &str, value: u64) {
         let now = self.now_ps;

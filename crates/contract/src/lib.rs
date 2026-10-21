@@ -12,6 +12,11 @@
 //! - [`error`] — error code family + per-subsystem scenario codes.
 //! - [`port`] — driving / driven port signatures for ExecutionBackend,
 //!   Peripheral, debug services, and the observability pipeline.
+//! - [`session`] — the **session-level** snapshot payload (M-20 / M-23
+//!   §2.1.1): checkpoint metadata + the M-12/M-17 engine segment + memory
+//!   pages + the memory-map topology + peripheral state + raised IRQ lines
+//!   (debt ledger D-36 / D-37 / D-41). Frozen spec:
+//!   `docs/detailed-design/STAGE-3_Session_Snapshot.md`.
 //! - [`snapshot`] — serializable snapshot DTOs carrying the pending event
 //!   queue, so the **engine's** scheduler state can be persisted *and*
 //!   restored deterministically (debt ledger D-24). Peripheral models
@@ -37,6 +42,7 @@ pub mod model;
 pub mod numstr;
 pub mod port;
 pub mod protocol;
+pub mod session;
 pub mod snapshot;
 
 /// Protocol schema version. Bump on every breaking change; consumers

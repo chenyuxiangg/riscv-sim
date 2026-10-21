@@ -115,17 +115,17 @@ riscv_sim/
 | M-11 | 符号表/DWARF/反汇编/trace 导出 | `crates/kernel/src/m11_symbol/` | stub |
 | M-12 | 事件驱动仿真引擎 | `crates/kernel/src/m12_engine/` | ✅ v0.11 加固（快照还原 now_ps+事件队列、推进不空转、seq 不撞号）；v0.11.2 增契约快照 DTO 转换层（`snapshot_dto` / `restore_dto`，**先校验后应用**）+ `Engine::reset()`；✅ **v0.15 D-07：唯一主循环 `run_until(executor, until_ps)`（LLD §3.1 结构）+ `InstructionExecutor` 内部接缝（M-12 不依赖 M-13）+ `tick_peripherals` 唯一外设时钟同步点 + `TIME_QUANTUM_PS` 订正为 1 µs**；⚠️ **至今无独立模块级 review**（台账 D-30） |
 | M-13 | RISC-V ISS（RV32IMC） | `crates/kernel/src/m13_iss/` | ✅ v0.11 **RV32I 全集 41 条** + 模块级 review；v0.11.1 检视轮修 SYSTEM funct3 阻断级缺陷；v0.12 **RV32I 与 Spike 逐例对拍通过**（语料 51 例中 42 例判决一致；失败用例号一致性由变异金丝雀证明）；v0.13 取指改走 `Bus::read_fetch`（**取指不匹配观察点**，V-A 🟠-2）；✅ **v0.16 M+C 扩展落地**（**RV32M 8 条 + RV32C 26 条**）：`compressed.rs` 字段级展开 + `alu.rs` 乘除 8 函数 + `Decoded` 增 `compressed`/`compressed_raw`/`illegal`；**golden 语料 51/51 全通**（D-43 闭环） |
-| M-14 | 总线与内存映射 | `crates/kernel/src/m14_bus/` | ✅ v0.4 完成 + v0.7.2 补完；v0.11 接线 PR；v0.13 新增 `read_only()`（调试读不计入统计 / trace / 观察点）与 `load_bytes()`（镜像装载的**唯一**写路径），并给 `BusAccess` 增 `is_fetch` 标记（**取指 vs 数据访问**）；**D-46 增 `add_hook()`（追加式 hook，`set_hook` 保留「替换全部」语义）+ `peripheral_instances()` + `tick_peripherals()`** |
-| M-15 | 外设模型层 | `crates/kernel/src/m15_peripheral/` | ✅ v0.7 三外设 + v0.11 接线 PR |
-| M-16 | 中断控制器 | `crates/kernel/src/m16_interrupt/` | stub |
+| M-14 | 总线与内存映射 | `crates/kernel/src/m14_bus/` | ✅ v0.4 完成 + v0.7.2 补完；v0.11 接线 PR；v0.13 新增 `read_only()`（调试读不计入统计 / trace / 观察点）与 `load_bytes()`（镜像装载的**唯一**写路径），并给 `BusAccess` 增 `is_fetch` 标记（**取指 vs 数据访问**）；**D-46 增 `add_hook()`（追加式 hook，`set_hook` 保留「替换全部」语义）+ `peripheral_instances()` + `tick_peripherals()`**；✅ **v0.18 会话快照：新增 `export_map()` / `load_map()` + `export_pages()` / `load_pages()`**（`load_map` 重建 **RAM 清零** / **ROM 原地保留内容**（`base`/`size` 不符报 `E_BUS-12`） / **外设区域原地保留**；新增 `E_BUS-10/11/12`） |
+| M-15 | 外设模型层 | `crates/kernel/src/m15_peripheral/` | ✅ v0.7 三外设 + v0.11 接线 PR；✅ **v0.18 会话快照：新增 `session_state()` / `restore_session_state()` + 自由函数 `collect_session_state()` / `restore_session_states()` / `validate_session_states()`**（回灌**两阶段**：先全量**只读**校验，全过才写一个字节） |
+| M-16 | 中断控制器 | `crates/kernel/src/m16_interrupt/` | ⚠️ **部分落地**（v0.18）：新增 `export_state()` / `load_state()`（**升序去重** / **整体替换**语义）——段 5 的生产者与消费者；**其余仍 stub**（CSR 管道未接线 → 该段在**生产路径**上恒为空，台账 **D-63 / D-64 / D-72 / D-74**） |
 | M-17 | ExecutionBackend 执行后端 | `crates/kernel/src/m17_backend/` | ✅ **v0.13 第 1 阶段实现**（stub → **1 319 行**，v0.17 重算）：`step_n` 真正驱动 M-13 ISS（断点取指前命中 / 陷阱 / 观察点总线 hook 命中）、`read_memory` / `write_memory` 接 M-14 总线、`set_breakpoint` / `set_watchpoint` 接 M-08 表；v0.11.2 的 `snapshot_full` / `restore_full` 接线保持；**D-46：观察点 hook 改 `add_hook`（不顶掉别人的）+ 每条指令前同步一次外设时钟（边沿才有真实时间戳）**；✅ **v0.15 D-07：`IssExecutor` 实现 M-12 的 `InstructionExecutor` 接缝（指令驱动与时间驱动**共用一条** ISS 路径）+ `install_peripheral_ticker`（外设 tick 接缝）+ `pending_writes` 真正提交到总线 + `continue_until_event` 走唯一主循环** |
 | M-18 | 探针 | `crates/kernel/src/m18_probe/` | ✅ v0.8 完整 `ProbeRegistry` + v0.9 `EdgeSink` + v0.11 接线 PR；v0.11.1 修总线 hook 的 RefCell 重入 panic；**D-46：正式挂上生产总线**（此前只在测试里接线） |
 | M-19 | 波形管道 | `crates/kernel/src/m19_waveform/` | ✅ v0.9 完整 `WaveformPipeline`：边沿编码 + 每通道环 + ≤20ms 批量推送 + CSV/VCD 分块导出；✅ **v0.17 契约 v2 的命名边界**：**history 形**（`schema_version + streams[]`）随内容改名 → `model::WaveformHistory` + 事件变体 `EventPayload::WaveformHistory` + topic `waveform.history`；**live 批次形**（`seq_start/seq_end/t_virt/entries`）**保留原名** `model::WaveformDelta`（**不是**死代码，是 M-11 / **D-50** 的落点，本批未上线） |
-| M-20 | 快照与确定性事件流记录 | `crates/kernel/src/m20_snapshot/` | stub（含 `SnapshotManager`）；⚠️ 其 LLD §2.1.1 的 `Snapshot{cpMeta, m13State, m14Map, m15Periph}` 与契约 DTO **尚未对齐**，`SnapshotRecord` 仍吃 partial `SimState` 且无 serde derive（台账 **D-37**） |
+| M-20 | 快照与确定性事件流记录 | `crates/kernel/src/m20_snapshot/` | ✅ **v0.18 会话快照：按六段组装**（`capture_session()`）+ `record()` 落记录（`SnapshotRecord { id, payload, label }`——**无第二份 `cp_meta`**）+ `validate_session()`（**只校验、不还原**；⚠️ **同名不同义** = 「一码多义」的变体，有源码级守卫防回退）。⚠️ 输入事件流 / `CrashKit` 等**仍 stub** |
 | M-21 | 日志系统 | `crates/kernel/src/m21_logging/` | stub（含 `LogBuffer`） |
 | M-22 | 健康管理 HMS | `crates/kernel/src/m22_hms/` | stub（含 `Hms`） |
-| M-23 | 数据存储与持久化 DataStore | `crates/kernel/src/m23_datastore/` | stub（含 `DataStore` trait） |
-| **内核宿主**（装配层 · **不是 23 个模块之一**） | 协议装配：契约命令 ↔ 内核调用 | `crates/kernel/src/kernel_host/` | ✅ **v0.13 第 1 阶段新增**（**2 420 行** / **47 测试**，v0.17 重算）：16 条命令 → 事件的**规范映射**（形状见 `docs/detailed-design/STAGE-1_Wasm_Bridge.md` §3.1）/ 镜像装载（ELF + RawHex）/ 默认内存图 / 寄存器全量与增量波形流 / `handle_json` JSON 桥；**D-46：装上探针管道**（M-18 判沿 → M-19 环 → 契约 `WaveformHistory`）+ 默认内存图映射 GPIO 外设；✅ **v0.17 契约 v2：3 条新命令接线**（`ReadRegisters` / `WriteRegister` / `Negotiate` → `Registers` / `Negotiated`） |
+| M-23 | 数据存储与持久化 DataStore | `crates/kernel/src/m23_datastore/` | ⚠️ **部分落地**（v0.18）：`DataStore::put_snapshot()` / `get_snapshot()` 改吃 `SessionSnapshotDto`（**写入前先 `validate()`**）+ 新增 `InMemoryDataStore`（键 = `cp_meta.id`）。⚠️ **IndexedDB / SQLite 后端仍 stub** |
+| **内核宿主**（装配层 · **不是 23 个模块之一**） | 协议装配：契约命令 ↔ 内核调用 | `crates/kernel/src/kernel_host/` | ✅ **v0.13 第 1 阶段新增**（**3 658 行** / **63 测试**，v0.18 重算）：16 条命令 → 事件的**规范映射**（形状见 `docs/detailed-design/STAGE-1_Wasm_Bridge.md` §3.1）/ 镜像装载（ELF + RawHex）/ 默认内存图 / 寄存器全量与增量波形流 / `handle_json` JSON 桥；**D-46：装上探针管道**（M-18 判沿 → M-19 环 → 契约 `WaveformHistory`）+ 默认内存图映射 GPIO 外设；✅ **v0.17 契约 v2：3 条新命令接线**（`ReadRegisters` / `WriteRegister` / `Negotiate` → `Registers` / `Negotiated`） |
 
 > **MVP 跑通判据**（首个能 cargo test 通过的功能闭环）：
 > - `m12_engine::tests::engine_advances_time`（事件队列 + 时间推进）
@@ -259,6 +259,22 @@ riscv_sim/
 > - ⚠️ **错误族清单是**单一来源**（`error_families!` 宏展开 enum + `as_str()` + `ALL_FAMILIES`）：新增族漏登记 → **编译错误**。⚠️ 族标签长度是「**3–5** 字符」（`PROTO` 与 `STORE` 都是 5 字符）——**不是**「3–4」
 > - ⚠️ **前端门禁不许静默跳过**：`front/tests/contract.test.mjs` 的六条 Rust↔JS 对拍用例带 `{ skip: !hasRust }` 时，`node --test` 把 skipped 当「没失败」、**退出码仍是 0** → 跨层对拍变成**什么都不查却报绿**的静默空转。已改**硬断言**（移走 `crates/` → **6 条红、退出码 1**）。⚠️ 口径与 `tools/wasm-smoke.mjs` 的 **127** 一致：**「没跑」绝不能与「跑过了」不可区分**
 > - ⚠️ **断言不得自指**：判别式必须落在**与实现无关**的量上。若断言用的常量就是实现自己用的那个常量，「改行为」与「没改行为」**无法分辨**（**D-73** 就是这么潜伏的）
+>
+> **v0.18 会话级快照载荷判据**（台账 §2.2 优先级表 **5b** · D-36 / D-37 / D-41 闭环 · 冻结规格 `docs/detailed-design/STAGE-3_Session_Snapshot.md`）：
+> - `cargo test --workspace --no-fail-fast` **767 全绿**（契约 lib **69** + kernel lib **596** + 集成 **91** + golden runner **11**）
+> - **本批的核心命题**：**落盘一个会话的完整状态，还原出的是一个「等价会话」**——不只是「还原了一个引擎」。六段载荷 = `SessionSnapshotDto { schema_version, cp_meta, m12_engine, m13_state, m14_map, m15_periph, m16_intc }`（**段 0~5**，`schema_version` 不编号）
+> - **三处裁决**（规格 §1.2）：**A** LLD 结构清单漏列 M-12/M-17 段 → 补 `m12Engine` · **B** CPU 寄存器**已经在** `m12Engine.state` 里 → `m13State` **只**承载内存页（**寄存器不重复存**，否则是两个真相）· **C** 补第 6 段 `m16Intc`（⚠️ 该段在**生产路径**上恒为空——**CSR 管道未接线** + **M-15 的 pending IRQ 没有生产路径升上来**，两条成因**缺一不可**）
+> - ⚠️ **恢复链的第 0.5 步**（宿主在 `load_map` / `load_pages` **之前**的**只读**外设预检）：**应用顺序一字未改**（仍是规格 §3.7 的五步），只多了一个**不写任何东西**的步骤。**没有它**，「外设状态畸形」会留下一具**缝合怪**（内存来自载荷、寄存器来自恢复前）——而调用方只拿到一个 `Err`
+> - ⚠️ **「先校验后写入」有两层闸门，缺一不可**：契约层 `validate()` 查**载荷的自洽**（跨类型 id 唯一 · `gpio.irq_lines` 恰好 `GPIO_PIN_COUNT` 条 · 区域 `size != 0` · `base + size` 不越 u32）；**外设层** `Peripheral::validate_session_state()` 查「**这个外设能不能接受这份状态**」（如 UART 的 STATUS 位与 FIFO 是否自洽）——**契约层查不了**，只有外设认识自己状态的含义
+> - ⚠️ **一个约束一个落点**：`GPIO_PIN_COUNT` 由**契约层**导出（载荷的**形状**依赖它），M-15 的 `PIN_COUNT` **引用**它——同一个数写两遍 = 一处一动，载荷**静默停止校验**
+> - ⚠️ **ROM 内容不进快照**（固件是**输入**不是状态）→ 恢复链**没有「重装固件」这一步** → `load_map` 重建 ROM 时**原地保留内容**（`base`/`size` 不符报 `E_BUS-12`，**不搬地址、不静默丢弃**）；**外设区域原地保留**（外设实例是**输入**，删了恢复后总线无外设）
+> - ⚠️ **M-20 的 `restore_session` 改名 `validate_session`**（**只校验、不还原**）——宿主 `restore_session`（真恢复）保持原名：**同名不同义 = 「一码多义」的变体**；有源码级守卫 `the_manager_has_no_restore_session_method` 防回退
+> - ⚠️ **会话快照没有协议入口**（`SaveSession` / `LoadSession` 要 bump `SCHEMA_VERSION`）——本批只到**宿主内部 API** 可达
+> - ⚠️ **断点表 / 观察点表 / 探针环 / 波形环不在载荷里** → 「还原出的会话等价吗」**取决于还原进哪个宿主**（同宿主保留、跨宿主丢失）
+> - ⚠️ **判别力必须落在「漂移覆盖面」上**：段 1 的断言要有牙齿，漂移必须**换掉队列内容 / 推进插入序 / 改掉指令预算**（`step_n` 是指令驱动 → 队列**恒空**、插入序**恒为 0**、预算**恒为默认值** → 「不还原」与「还原了」**不可分辨**）；段 2 的断言要有牙齿，漂移必须**写 RAM**（否则牙齿来自 `load_map` 的**清零**——**代偿**）
+> - ⚠️ **变异自检 7/7 + 17/17 全按期望**（内核侧 K1~K7 · 契约层 M1~M17）；**对照变异**（语义不变）必须 **0 红**；**还原必须逐字节校验**（md5）——本轮父会话真踩了「两个 `mod.rs` 备份名撞车 → 内容互相覆盖」的坑，是 md5 断言当场抓住的
+> - **新登记 3 条台账**：**D-79**（变异工具链的还原不逐字节校验 / 快照不是最终树）· **D-80**（端到端夹具不含 ROM / 定时器——**故意为之**，加进去只会造**恒真断言**）· **D-81**（契约层「内存页越界」与「不落 RAM 区内」报**同一个码**，按码判别不出）
+> - → 检视归档见 `docs/reviews/REVIEWS.md` **§3.9** · 冻结规格见 `docs/detailed-design/STAGE-3_Session_Snapshot.md`
 
 ## Code style
 

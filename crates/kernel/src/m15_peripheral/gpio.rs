@@ -25,6 +25,7 @@
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
 use riscv_sim_contract::port::{Peripheral, ProbeSink};
+use riscv_sim_contract::session::{GpioStateDto, PeripheralSessionState, GPIO_PIN_COUNT};
 
 use super::reg::{extract_subword, register_offset};
 use super::ProbeSlot;
@@ -46,7 +47,13 @@ pub const GPIO_WINDOW: u32 = 0x10;
 /// channel only ever sees pin 0 (M-18 masks the value to its LSB).
 pub const SIGNAL_OUT: &str = "OUT";
 
-const PIN_COUNT: u32 = 32;
+/// Number of pins in the bank.
+///
+/// ⚠️ **One number, one home** — the contract layer owns it
+/// ([`GPIO_PIN_COUNT`]). The number is spelled out in the *contract*
+/// because the **payload's** shape depends on it (the per-pin IRQ list
+/// must have exactly this many entries); the model here just follows.
+const PIN_COUNT: u32 = GPIO_PIN_COUNT as u32;
 /// Mask of all valid pin bits for a 32-pin bank. MVP: bank is fixed at
 /// 32 pins so the mask is simply `u32::MAX`. Reserved for narrower banks
 /// (P1 evolution 评审 R5).
@@ -271,9 +278,113 @@ impl Peripheral for GpioBank {
     fn on_probe(&mut self, cb: Option<ProbeSink>) {
         self.probe.set(cb);
     }
+
+    /// This GPIO bank's share of the **session snapshot** (segment 4 —
+    /// STAGE-3 §3.3).
+    ///
+    /// The per-pin IRQ lines are exported as a **list in pin order**
+    /// (pin 0 first): the DTO carries a `Vec`, the bank owns a
+    /// `[u16; PIN_COUNT]`, and the order is the whole meaning of the
+    /// list. A reordering would silently move a pin's IRQ line onto
+    /// another pin.
+    fn session_state(&self) -> Option<PeripheralSessionState> {
+        Some(PeripheralSessionState::Gpio(GpioStateDto {
+            id: self.id.clone(),
+            directions: self.directions,
+            outputs: self.outputs,
+            inputs: self.inputs,
+            irq_lines: self.irq_lines.to_vec(),
+            pending_irqs: self.pending_irqs,
+            now_ps: self.now_ps,
+        }))
+    }
+
+    /// Restore the GPIO bank's session state (segment 4's consumer).
+    ///
+    /// **Every** field is restored: the direction mask, the output
+    /// latch, the input latch, the per-pin IRQ lines, the sticky
+    /// pending-IRQ vector and `now_ps`.
+    ///
+    /// ⚠️ The IRQ-line list must have **exactly one entry per pin** —
+    /// a shorter list would leave the remaining pins' lines undefined
+    /// and a longer one would carry lines that do not exist. Neither
+    /// is repaired silently: the state is **rejected**
+    /// ([`E_PER_04_UNSUPPORTED_SESSION_STATE`]).
+    ///
+    /// ⚠️ The same rule is also checked **before** the write stage
+    /// ([`Peripheral::validate_session_state`]) — the check here is
+    /// **defensive redundancy**, not the gate. The gate is the
+    /// read-only pass, because a check that only lives here would let
+    /// the restore write the *other* peripherals first and then fail
+    /// (STAGE-3 §5).
+    fn restore_session_state(
+        &mut self,
+        state: &PeripheralSessionState,
+    ) -> Result<(), PlatformError> {
+        let PeripheralSessionState::Gpio(s) = state else {
+            return Err(super::wrong_state_kind(
+                &self.id,
+                super::SessionKind::Gpio,
+                super::SessionKind::of(state),
+            ));
+        };
+        super::check_same_id(&self.id, &s.id)?;
+        self.check_irq_lines(&s.irq_lines)?;
+        self.directions = s.directions & PIN_COUNT_MASK;
+        self.outputs = s.outputs & PIN_COUNT_MASK;
+        self.inputs = s.inputs & PIN_COUNT_MASK;
+        self.irq_lines.copy_from_slice(&s.irq_lines);
+        self.pending_irqs = s.pending_irqs & PIN_COUNT_MASK;
+        self.now_ps = s.now_ps;
+        Ok(())
+    }
+
+    /// **Read-only** acceptance check for this bank's session state
+    /// (STAGE-3 §3.3) — the gate that runs **before** anything is
+    /// written.
+    ///
+    /// ⚠️ The rule that lives **only here**: the per-pin IRQ list must
+    /// have **exactly one entry per pin** — no padding, no truncation.
+    /// The contract layer checks the same shape rule on the *payload*
+    /// (it knows the pin count), but the **peripheral** owns the
+    /// meaning of the list, so the peripheral checks it too — and the
+    /// peripheral's check is the one that guards the **write** stage.
+    fn validate_session_state(&self, state: &PeripheralSessionState) -> Result<(), PlatformError> {
+        let PeripheralSessionState::Gpio(s) = state else {
+            return Err(super::wrong_state_kind(
+                &self.id,
+                super::SessionKind::Gpio,
+                super::SessionKind::of(state),
+            ));
+        };
+        super::check_same_id(&self.id, &s.id)?;
+        self.check_irq_lines(&s.irq_lines)
+    }
 }
 
 impl GpioBank {
+    /// The bank's **own** integrity rule: the per-pin IRQ list must have
+    /// exactly one entry per pin.
+    ///
+    /// ⚠️ **Neither padded nor truncated**: padding fabricates IRQ
+    /// lines the firmware never wrote, truncation drops lines it did.
+    /// Both are rejected with the contract's "this peripheral cannot
+    /// take that state" code.
+    fn check_irq_lines(&self, lines: &[u16]) -> Result<(), PlatformError> {
+        if lines.len() != GPIO_PIN_COUNT {
+            return Err(PlatformError::new(
+                super::PERIPHERAL_FAMILY,
+                super::E_PER_04_UNSUPPORTED_SESSION_STATE,
+                format!(
+                    "GPIO '{}' 的会话状态带 {} 条 IRQ 线，应为 {GPIO_PIN_COUNT} 条",
+                    self.id,
+                    lines.len()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// Report one signal observation to the M-18 probe pipeline.
     ///
     /// The value is the pin bitmap; the timestamp is the last virtual
