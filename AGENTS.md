@@ -49,7 +49,7 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 - Build (native):  `cargo build`（开发）/ `cargo build --release`（发布）
 - Build (WASM):    `tools/build-wasm.sh` 或 `tools/build-wasm.sh --release`
 - Test:            `cargo test --workspace`（单元 + 集成 + 黄金对拍）
-- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，**200 用例 / 34 suite**；Node ≥ 22）
+- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，**208 用例 / 35 suite**；Node ≥ 22）
 - Test (WASM 桥): `node tools/wasm-smoke.mjs`（需先 `tools/build-wasm.sh`；在 Node 里驱动真 wasm 产物跑完整桥，产物不在则跳过）
 - Test (浏览器真机): `tools/browser-verify.mjs`（零依赖 CDP 脚本，需本机 Chrome + 已构建的 WASM 产物 + `python3 -m http.server 8080 --directory front`；**不进默认门禁**，按需运行）
 - Test (黄金对拍): `tools/fetch-golden-deps.sh`（拉 riscv-tests + 交叉工具链到**仓库外**）→ `tools/golden-run.sh --self-check`（变异金丝雀）→ `tools/golden-run.sh --keep-going`（全量）
@@ -241,11 +241,11 @@ riscv_sim/
 > - **新登记 5 条台账**：**D-63**（取指未对齐 mcause）· **D-64**（mtval 全平台不存在）· **D-65**（golden 两侧栈窗口**完全不重叠**，预存）· **D-66**（三处死接口/死字段）· **D-67**（D-07 用例对 C 扩展保留规则的隐式耦合）
 >
 > **v0.17 契约 v2 判据**（契约层**第一次**升版 · `schema_version = 2` · 冻结规格 `docs/detailed-design/STAGE-2_Contract_V2.md`）：
-> - `cargo test --workspace --no-fail-fast` **632 全绿**（契约 lib **32** + kernel lib **505** + 集成 **84** + golden runner 11）
-> - `tools/check-front.sh` **200 用例 / 34 suite**（v0.16 = 156 / 29）
+> - `cargo test --workspace --no-fail-fast` **636 全绿**（契约 lib **36** + kernel lib **505** + 集成 **84** + golden runner 11）
+> - `tools/check-front.sh` **208 用例 / 35 suite**（v0.16 = 156 / 29）
 > - `tools/golden-run.sh --keep-going` → `total=51 ok=51 mismatch=0`（**D-43** 闭环；本批未动 M-13 / M-06，语料未变）
 > - `tools/wasm-smoke.mjs` **34 项断言**（需先 `tools/build-wasm.sh`；**不进默认门禁**）
-> - **契约层自带 32 条**用例（`cargo test -p riscv_sim_contract`）——v0.11 时只有 12 条
+> - **契约层自带 36 条**用例（`cargo test -p riscv_sim_contract`）——v0.11 时只有 12 条
 > - ⚠️ **虚拟时间走十进制字符串**：线上 `elapsed_ps` / `t_ps` / `virtual_time_ps` / `at_ps` 是**字符串**；其余 `u64` 仍是 JSON 数字。JS 侧读回时**超过 2⁵³ 必须抛错**（`E_PROTO-04`，**不是** `E_PROTO-02`——那个的原义是「未知字段 → 仅日志」，拿它抛错语义是反的）
 > - ⚠️ **`ReadRegisters { count: 0 }` 回复空区间**（`values: []`，`index` 是钳位后的实际起点），**不是「不回复」**——M-05 按 `reqId` 配对，「没有回复」与「消息丢失」不可区分 → 会变成 500 ms 假超时 `E_CTX-06`
 > - ⚠️ **两个 topic 命名空间不要混**：**订阅 topic**（`sim.registers` / `sim.waveform`）vs **事件 topic**（`tick` / `halted` / `memory.read` / `waveform.history`）；⚠️ `Registers` 的事件 topic **故意**取 `sim.registers`（与订阅 topic 同名，是有意的重合）
@@ -253,7 +253,12 @@ riscv_sim/
 > - ⚠️ **`crc` 属前端传输帧**（`front/lib/frame.js`），**不在**契约信封上；CRC-32 覆盖 payload 的**规范 JSON**（递归排序键）；**缺失 → 放行**（旧生产者）/ **算错 → 拒绝该帧**（`E_PROTO-06`）
 > - ⚠️ **错误族 14 个**（`CTX/ISS/ENG/BUS/PER/INT/DBG/OBS/SNAP/LDR/HMS/STORE/TRX/PROTO`）——`PROTO`（协议层）与 `TRX`（传输层）**并存不合并**；族标签由 `error::tests::every_family_tag_is_pinned` **表驱动钉死**（台账 **D-69**）
 > - ⚠️ **D-57 已闭环**：契约端口文档订正为「跑到**本轮指令预算耗尽**；量子边界是**抢占点**、**不是**停止条件」——**改文档不改实现**；**契约层冻结已解除**。⚠️ **D-73**：当时的判据是**自指**的 → 已把判别式改落在**量子配额**上（「跑过**不止一个**量子」），端口方法层 + 命令层各一条
-> - **新登记 7 条台账**：**D-68**（指令预算措辞）· **D-69**（`E_PP` → `E_PER`）· **D-70**（LLD 错误码表只收录 **6 族 / 29 个码**，代码实际发 **11 族 / 36 个码**）· **D-71**（M-10 LLD 的 `<style>` 永不闭合 → 第 260 行到 EOF 被吞成 CSS）· **D-72**（`StepOutcome::HostPause` 死接口）· **D-73**（D-57 判据自指，**已闭环**）· **D-74**（M-16 模块头的「量子边界」措辞）
+> - **新登记 8 条台账**：**D-68**（指令预算措辞）· **D-69**（`E_PP` → `E_PER`）· **D-70**（LLD 错误码表只收录 **6 族 / 29 个码**，代码实际发 **11 族 / 36 个码**）· **D-71**（M-10 LLD 的 `<style>` 永不闭合 → 第 260 行到 EOF 被吞成 CSS）· **D-72**（`StepOutcome::HostPause` 死接口）· **D-73**（D-57 判据自指，**已闭环**）· **D-74**（M-16 模块头的「量子边界」措辞）· **D-75**（内核 `schema_version` **严格等号** vs 前端 `decodeMessage` **前向兼容**——语义不对称，**非本批引入**）
+> - ⚠️ **`SIM_STATE_SCHEMA_VERSION` 必须跟着升版**（1 → **2**）：`virtual_time_ps` 改走字符串后，对 v1 读者**不兼容**。契约的规则是「改了字段集**或线上表示**，**两个**版本号一起 bump」——只 bump 外层会让两个版本号**含义分叉**，将来 v3 把内层升到 2 时会拒掉 **v2 自己产的快照**
+> - ⚠️ **版本号 / 线上表示必须有**字面量**断言**：`SNAPSHOT_SCHEMA_VERSION` 与 `SimState.virtual_time_ps` 的字符串表示此前**无用例钉住**（全部**符号化**引用常量 / 只断言**键集**不断言**值形态**）——删掉 `#[serde(with = "u64_decimal")]` 全工作区照样全绿。现在是 `the_snapshot_schema_version_is_two` / `the_sim_state_schema_version_is_two` 两条**字面量**断言 + `numstr::field_tests` 的**一条**用例钉住**全部 10 个字段位点**
+> - ⚠️ **错误族清单是**单一来源**（`error_families!` 宏展开 enum + `as_str()` + `ALL_FAMILIES`）：新增族漏登记 → **编译错误**。⚠️ 族标签长度是「**3–5** 字符」（`PROTO` 与 `STORE` 都是 5 字符）——**不是**「3–4」
+> - ⚠️ **前端门禁不许静默跳过**：`front/tests/contract.test.mjs` 的六条 Rust↔JS 对拍用例带 `{ skip: !hasRust }` 时，`node --test` 把 skipped 当「没失败」、**退出码仍是 0** → 跨层对拍变成**什么都不查却报绿**的静默空转。已改**硬断言**（移走 `crates/` → **6 条红、退出码 1**）。⚠️ 口径与 `tools/wasm-smoke.mjs` 的 **127** 一致：**「没跑」绝不能与「跑过了」不可区分**
+> - ⚠️ **断言不得自指**：判别式必须落在**与实现无关**的量上。若断言用的常量就是实现自己用的那个常量，「改行为」与「没改行为」**无法分辨**（**D-73** 就是这么潜伏的）
 
 ## Code style
 

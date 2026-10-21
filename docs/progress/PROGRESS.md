@@ -113,16 +113,50 @@ LLD 的 `E_PROTO-01`…`E_PROTO-08` 此前在契约的 `ErrorFamily` 里**没有
 - ✅ **工具侧已适配契约 v2**（`7bacbdf`）：`tools/wasm-smoke.mjs` 按 v2 的线格式断言
   （含「`count = 0` **回复空区间**、**而不是不回复**」）。
 
-### 七、门禁与产物（**从当前树重算**）
+### 七、检视轮闭环（2026-10-21）
+
+三路**独立**检视（V-A 契约+内核 / V-B 前端+传输帧 / V-C 文档一致性+数字口径）
+共 **44 项发现 → 38 项闭环 / 6 项留账**：
+
+| 检视 | 发现 | 闭环 | 留账 |
+| --- | --- | --- | --- |
+| **V-A** | **11**（2 高危 + 4 中危 + 2 低危 + 2 观察） | **10** | 观察 10 → **D-75** |
+| **V-B** | **13**（2 高危 + 3 中危 + 2 低危 + 4 观察 + B-6） | **12** | F9 / F10 / F12 → 随 D-47 / P1 / D-50 |
+| **V-C** | **20**（3 高危 + 7 中危 + 5 低危 + 5 观察） | **16** | L-5 → **D-74** · O-1 → **D-71** |
+
+**本批最贵的两条**（都属于「**断言无用例钉住**」这一型）：
+
+- **D-73**（V-C 发现）：D-57 的判据是**自指**的——用的就是实现自己用的
+  `DEFAULT_INSTRUCTION_BUDGET` 常量，把那个常量改成量子配额（1 000）断言**照样全绿**。
+  已把判别式改落在「跑过**不止一个**量子」上（端口方法层 + 命令层各一条）。
+- **版本号 / 线上表示无用例钉住**（V-A 发现，2 高危）：`SNAPSHOT_SCHEMA_VERSION` 与
+  `SimState.virtual_time_ps` 的字符串表示此前**只断言键集、不断言值形态**——
+  删掉 `#[serde(with = "u64_decimal")]` 全工作区照样全绿。已补**字面量**断言 +
+  **一条**钉住**全部 10 个字段位点**的形状用例。
+
+**另修一处「静默假绿」**（V-B 的 B-6）：`front/tests/contract.test.mjs` 的六条 Rust↔JS
+对拍用例带 `{ skip: !hasRust }`——`node --test` 把 skipped 当「没失败」、**退出码仍是 0**，
+于是「Rust 源码不在」会把**跨层对拍门禁**变成**什么都不查却报绿**的静默空转。
+已改**硬断言**（移走 `crates/` → **6 条红、0 skipped、退出码 1**）。
+
+**反向变异自检 21 条全部按期望变红**（第 3 轮正是它暴露了 D-73 的自指断言）。
+⚠️ **期望集合用 AND 语义逐条核对**——OR 语义只能证明「某条期望的用例红了」，
+**不能**证明「每条期望各自都守得住」。
+
+归档：`docs/reviews/REVIEWS.md` **§3.8**（含三份检视报告 + 闭环对照表 + 方法论沉淀）。
+
+### 八、门禁与产物（**从最终树重算**）
 
 - `cargo fmt --all -- --check` ✅
 - `cargo clippy --workspace --all-targets -- -D warnings` ✅
-- `cargo test --workspace --no-fail-fast` ✅ **632 全绿**（契约 lib **32** + kernel lib **505** + 集成 **84** + golden runner 11）
-- `tools/check-front.sh` ✅ **200 用例 / 34 suite**
+- `cargo test --workspace --no-fail-fast` ✅ **636 全绿**（契约 lib **36** + kernel lib **505** + 集成 **84** + golden runner 11）
+- `tools/check-front.sh` ✅ **208 用例 / 35 suite**
 - `tools/golden-run.sh --keep-going` → `total=51 ok=51 now-passing=0 expected-gap=0 mismatch=0 no-verdict=0 build-failed=0` ✅（**D-43 闭环**；本批未动 M-13 / M-06，语料未变）
 - `tools/wasm-smoke.mjs` —— **34 项断言**（需先 `tools/build-wasm.sh`；**不进默认门禁**，按需运行）
 - 关键 commit：`14da92e`（规格冻结）· `3126f54`（契约层 v2 实现）· `3a9660c`（D-68 预算口径订正）·
-  `371f38f`（内核侧适配）· `feature/c2-front`（前端侧适配，3 commit）· `7bacbdf`（工具侧适配）
+  `371f38f`（内核侧适配）· `feature/c2-front`（前端侧适配，3 commit）· `7bacbdf`（工具侧适配）·
+  `5b89c9a`（D-73 判据自指）· `e8bc706`（V-A 契约层闭环）· `24d34f7` / `e9dfc4c`（合并前端 / 文档两路）·
+  `5944c5d`（前端门禁不许静默跳过）
 - 冻结规格：`docs/detailed-design/STAGE-2_Contract_V2.md` · 台账：`docs/reviews/REVIEWS.md`
 
 ## v0.16.0 变更摘要
@@ -1502,7 +1536,7 @@ M-19 实现的是「探针 → 边沿编码 → 环形缓冲 → 增量推送 �
 | # | 严重度 | 修复 |
 | --- | --- | --- |
 | **N1** | 中 | 抽 `m15_peripheral/reg.rs` 共享 `register_offset` + `extract_subword` 两个 helper；`uart.rs` / `gpio.rs` / `timer.rs` 三处 `use super::reg::{...}` 引入；消除 review #5 修复引入的 6 份函数体重复。DRY 回归彻底收回 |
-| **N2** | 中 | 新增 `GpioBank::pin_levels()` 私有方法，返回 `(outputs & directions) | (inputs & !directions)`；`IN` 寄存器改用 `pin_levels()` 回读。固件写 OUT 驱动 LED 后能从 IN 读到引脚电平。**N5「GPIO 翻转可见」+ M-18 波形 pipeline 都依赖这个**（review §五「二次复查」明确标注） |
+| **N2** | 中 | 新增 `GpioBank::pin_levels()` 私有方法，返回 `(outputs & directions) \| (inputs & !directions)`；`IN` 寄存器改用 `pin_levels()` 回读。固件写 OUT 驱动 LED 后能从 IN 读到引脚电平。**N5「GPIO 翻转可见」+ M-18 波形 pipeline 都依赖这个**（review §五「二次复查」明确标注） |
 | **N3** | 低 | `take_pending_irqs()` 去重位图从 `line < 16` 放宽到 `line < 32`；注释同步：「line ∈ [16, 32) previously bypassed dedup entirely, contradicting the documented unique-line contract」；line ≥ 32 的边角情况保留无去重（u32 位图兜不住） |
 
 ### 测试覆盖（M-15：25 → 29 条，+4）
@@ -1575,7 +1609,7 @@ M-19 实现的是「探针 → 边沿编码 → 环形缓冲 → 增量推送 �
 | --- | --- | --- |
 | 1 | **阻断** | Uart16550 加 `pub fn take_tx() -> Option<u8>`，host bridge 消费 TX 字节；`refresh_status` 同步翻 TX_READY |
 | 2 | **阻断** | contract::Peripheral trait **additive** 加 `fn read_clear(&mut self, …)` 默认方法（不破坏 `read(&self, …)` 签名）；Uart16550 实现 `read_word_mut` 清 RX FIFO 并 refresh status |
-| 3 | **阻断** | GPIO TOGGLE 改成 **多 pin mask toggle**：`outputs ^= value & PIN_COUNT_MASK`；固件 `1<<3` 翻 pin 3、`(1<<3)|(1<<0)` 同时翻两 pin；同步改 `tests.rs` |
+| 3 | **阻断** | GPIO TOGGLE 改成 **多 pin mask toggle**：`outputs ^= value & PIN_COUNT_MASK`；固件 `1<<3` 翻 pin 3、`(1<<3)\|(1<<0)` 同时翻两 pin；同步改 `tests.rs` |
 | 4 | 高 | UART 新增 `status_bits::TX_OVERRUN = 0x8`；`transmit()` 溢出置 TX_OVERRUN 位（不再复用 RX_OVERRUN） |
 | 5 | 高 | 三个外设的 read/write 改 `match offset & !0x3` 做寄存器选择；`extract_subword(word, offset, size)` 按 WriteSize 切字节/半字/字 |
 | 6 | 高 | 删 `raise_irq()` 死函数 + `InterruptSink` import；M-12 真正调用 `tick()` 留给 M-18 PR（v0.6.1 已留 wiring PR 范围） |
@@ -2104,7 +2138,7 @@ M0 (5d) ── M1 (7d) ── M2 (18d) ── M3 (6d) ── M4 (6d) ── M6 (
 | 2026-10-19 | **M-14 写跨区间两阶段：阶段一预检全部 byte slice → 阶段二统一执行** | LLD §3.2 评审 14-1 原子性要求：任一未映射 → 整笔失败，不允许 RAM 已写 + 异常上报的部分成功状态 |
 | 2026-10-19 | **M-14 trace hook 类型 `Box<dyn FnMut(&BusAccess)>`（无 Send bound）** | MVP 单线程模拟；Send bound 留 M-12 P2 SMP 阶段再加 |
 | 2026-10-19 | **M-13 接入 M-14 加 `step_one_via_bus`，保留 `step_one` 函数指针老接口** | 双通道：函数指针接口零依赖用于纯解释器单测；`&mut Bus` 接口用于真实总线分发 |
-| 2026-10-19 | **M-01 capBits MVP 内置 role 默认集合**；M-05 negotiate 接入后改从协议取 | M-05 还没实现；URL `?role=product|embedded` 切换角色作为 MVP 临时入口 |
+| 2026-10-19 | **M-01 capBits MVP 内置 role 默认集合**；M-05 negotiate 接入后改从协议取 | M-05 还没实现；URL `?role=product\|embedded` 切换角色作为 MVP 临时入口 |
 | 2026-10-19 | **`render → ` CustomEvent(`riscv:render`) 派发**，M-02 监听 | M-01 switchView 返回值是个内部接口；通过 CustomEvent 让任意视图组件都可挂载 |
 | 2026-10-19 | workspace `missing_docs = "allow"` + `derivable_impls = "allow"` | M-0 冻结后尚未补全公开字段 doc；不为此重新 churn 协议代码；M-0 后续收敛时切回 deny |
 | 2026-10-19 | m12_engine `instruction_budget` 字段加 `#[allow(dead_code)]`；QueuedEvent 翻转 Ord 加 `non_canonical_partial_ord_impl = "allow"` | M-12 调度骨架尚未接 ISS 指令预算；BinaryHeap min-heap trick 需要非规范 Ord。等 M-12 完成 ISS 接通后回收 |
