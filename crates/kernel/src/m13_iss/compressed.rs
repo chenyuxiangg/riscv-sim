@@ -15,10 +15,14 @@
 //! compressed immediates are not all 32-bit-shaped:
 //!
 //! * `C.LUI`'s immediate is the 6-bit field sign-extended and then
-//!   truncated to the **20-bit** LUI field — the result is *not*
-//!   `sext6(field) << 12` (which would be `0xFFFF_E000` for the
-//!   field `0b100001`, where the architectural value is `0xFFFE_1000`),
-//!   and the difference only shows up in the upper bits;
+//!   truncated to the **20-bit** LUI field.  For the field `0b100001`
+//!   (i.e. -31) that is `0xFFFE1 << 12 = 0xFFFE_1000`, and that is
+//!   what the reference simulator produces — a dedicated probe
+//!   distinguishes it from the other candidate (`0xFFFF_E000`).
+//!   The tempting wrong reading is to take the 20 bits at the **high**
+//!   end of the sign-extended value (`sext6 & 0xFFFFF_000` =
+//!   `0xFFFF_E000`).  Note that `sext6 << 12` in 32-bit arithmetic is
+//!   **not** wrong: the shift truncates to exactly those 20 bits.
 //! * `C.ADDI16SP`'s offset is a multiple of 16 in [-512, 496], which
 //!   does fit — but only because the compressed field carries the
 //!   *byte* offset directly, and an implementation that read the field
@@ -39,9 +43,12 @@
 //!   register field is the full five bits `inst[11:7]` — the `funct2`
 //!   is *not* `inst[11:10]`, because those bits belong to the
 //!   register;
-//! * the **CI**-group shifts (`C.SRLI` / `C.SRAI`) and the **CA**
-//!   group (`C.SUB` / `C.XOR` / `C.OR` / `C.AND`) share the
-//!   `Q1/100` slot and are told apart by `inst[12]`.
+//! * the **CI**-group shifts (`C.SRLI` / `C.SRAI` / `C.ANDI`) and the
+//!   **CA** group (`C.SUB` / `C.XOR` / `C.OR` / `C.AND`) share the
+//!   `Q1/100` slot and are told apart by `inst[11:10]`: the CI
+//!   group's `funct2` *is* `inst[11:10]`, while the CA group's is
+//!   `inst[6:5]` and the CA format additionally requires
+//!   `inst[12] == 0`;
 
 use super::decoder::sign_extend;
 

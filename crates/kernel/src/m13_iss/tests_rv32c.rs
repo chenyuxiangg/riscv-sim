@@ -19,8 +19,9 @@
 //! defines, cross-checked against Spike (the golden reference) — the
 //! `C.LUI` case in particular: the specification's "6-bit immediate
 //! sign-extended into the 20-bit LUI field" is *not* the same as
-//! "the 6-bit immediate sign-extended and shifted left by 12", and
-//! the difference is visible in the upper bits.
+//! "the 6-bit immediate sign-extended and **masked at the high end**"
+//! (`0xFFFE_1000` vs `0xFFFF_E000`).  A dedicated Spike probe
+//! distinguishes the two: it reports `0xFFFE_1000`.
 
 use riscv_sim_contract::model::SimState;
 

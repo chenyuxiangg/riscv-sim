@@ -54,9 +54,13 @@ pub enum TrapCause {
     /// [`StepOutcome::Breakpoint`], which means a *host* breakpoint
     /// inserted by M-08 rather than a guest instruction.
     Breakpoint,
-    /// Reserved for the `M` extension (division by zero, mcause = 6).
-    /// The M extension lands in a later wave; the cause is declared
-    /// here so the taxonomy does not have to change shape when it does.
+    /// Reserved for a future cause (mcause = 6).
+    ///
+    /// **Not raised by RV32M**: a division by zero and the
+    /// `INT_MIN / -1` overflow are architecturally *defined results*,
+    /// not traps (LLD §3.6(11)), so the M extension never reports
+    /// this.  The variant is kept so the taxonomy does not have to
+    /// change shape when a genuine divide-by-zero cause does land.
     IntegerDivideByZero,
 }
 
