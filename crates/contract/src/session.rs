@@ -639,6 +639,12 @@ mod tests {
     /// the v1 wire format (a JSON number). That is exactly the silent
     /// degradation the whole numeric policy exists to remove, and it is
     /// why the assertion has to be on the **shape**, not on "it parses".
+    ///
+    /// ⚠️ The **count** is pinned separately, by
+    /// [`exactly_six_virtual_time_fields_carry_the_decimal_attribute`]
+    /// — the per-field assertions above would all still pass if a
+    /// **seventh** field quietly joined the set, and the spec's "six"
+    /// would quietly become a lie.
     #[test]
     fn every_virtual_time_field_in_the_session_payload_is_a_decimal_string() {
         let json = serde_json::to_value(sample()).expect("json");
@@ -712,6 +718,37 @@ mod tests {
             .pointer("/m15_periph/timers/0/mtimecmp")
             .expect("timer mtimecmp");
         assert!(mtimecmp.is_string(), "timers[0].mtimecmp 必须是字符串");
+    }
+
+    /// ⚠️ **Literal** assertion — the number of decimal-string fields is
+    /// pinned by a **number**, and the list is read out of the source
+    /// so a **seventh** field cannot slip in unnoticed.
+    ///
+    /// The per-field assertions above check that the six known fields
+    /// travel as strings. They say nothing about the **rest** of the
+    /// file: a new `u64` field with the attribute (or one that should
+    /// have it and does not) would leave every other test **green**,
+    /// and the spec's "six virtual-time fields" would quietly become a
+    /// lie. The spec's count is only true if something enforces it.
+    ///
+    /// ⚠️ The count is read from the **source text** rather than from a
+    /// list the implementation also uses — a list would be self-referential
+    /// (D-73: an assertion that uses the implementation's own constant
+    /// cannot tell "changed" from "not changed").
+    #[test]
+    fn exactly_six_virtual_time_fields_carry_the_decimal_attribute() {
+        let src = include_str!("session.rs");
+        let attribute_lines = src
+            .lines()
+            .filter(|l| l.trim_start().starts_with("#[serde(with"))
+            .filter(|l| l.contains("numstr::u64_decimal"))
+            .count();
+        assert_eq!(
+            attribute_lines, 6,
+            "会话载荷里带十进制字符串属性的字段必须恰好 6 个 \
+             （cp_meta.t_virt / cp_meta.t_host / uarts[0].now_ps / \
+             gpios[0].now_ps / timers[0].mtime / timers[0].mtimecmp）"
+        );
     }
 
     /// A **float** must not be accepted as a virtual time — `1.5` would

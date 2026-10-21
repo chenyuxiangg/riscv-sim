@@ -346,7 +346,7 @@ pub trait DataStore {
 **沿用契约层 v2 §2 的规则**：凡是「随仿真时长增长」的量（虚拟时间），线上表示为
 **十进制字符串**（`crate::numstr::u64_decimal`）。
 
-本轮新增的虚拟时间字段（**共 5 个**）：
+本轮新增的虚拟时间字段（**共 6 个**）：
 
 | 字段 | 所在 |
 | --- | --- |
@@ -358,6 +358,11 @@ pub trait DataStore {
 | `mtimecmp` | `TimerStateDto` |
 
 （`t_host` 是**宿主时间**（ms），但它同样随时间增长 → 同样走字符串。）
+
+> ⚠️ **数目以本表为准**（6 个），与 §6 验收第 2 项一致。
+> 契约层 `crates/contract/src/session.rs` 里带
+> `#[serde(with = "crate::numstr::u64_decimal")]` 的字段**恰好 6 个**，
+> 逐个对应上表——多一个少一个都会让「6 个」这句话变成空话。
 
 其余 `u64`（`base_seq` / `instruction_budget` / `next_seq` / `event_queue_head`）
 保持 **JSON 数字**。
