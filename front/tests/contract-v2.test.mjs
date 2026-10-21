@@ -51,6 +51,7 @@ const frontDir = resolve(here, "..");
 const importFront = (rel) => import(pathToFileURL(resolve(frontDir, rel)).href);
 
 const m05 = await importFront("services/m05_commandrouter.js");
+const m07 = await importFront("services/m07_transport.js");
 const m10 = await importFront("services/m10_registermemory.js");
 const { createMockKernel, MOCK_CAP_BITS } = await importFront("dev/mock-kernel.js");
 
@@ -614,11 +615,137 @@ describe("契约 v2 · mock 内核的 §5 语义", () => {
             assert.doesNotThrow(() => decodeFrame(JSON.parse(JSON.stringify(frame))));
         }
     });
+
+    test("mock 内核拒收 crc 算错的**入站**帧（命令不执行）", () => {
+        // mock 的入站 `decodeFrame` 原来**没有任何用例守**——把它摘掉，
+        // 整条门禁**照样全绿**。
+        //
+        // 判别式落在**行为**上：crc 算错的入站帧**不产生任何回复**
+        // （命令根本没被执行），而不是「抛了异常」。
+        const kernel = createMockKernel();
+        const good = commandFrame("Nop");
+        // 对照：crc **正确**的同一帧会被执行。
+        const ok = kernel.handle(good);
+        assert.equal(ok.length, 1, "crc 正确的入站帧没有被执行");
+        // crc **算错** → 不执行。
+        const broken = kernel.handle({ ...good, crc: "deadbeef" });
+        assert.equal(broken.length, 0, "crc 算错的入站帧被 mock 执行了");
+    });
+
+    test("mock 内核拒收**载荷被篡改**的入站帧（crc 没跟着改）", () => {
+        const kernel = createMockKernel();
+        const good = commandFrame("Nop");
+        const tampered = {
+            ...good,
+            payload: commandMessage(1, { Nop: {} }),
+        };
+        const frames = kernel.handle(tampered);
+        assert.equal(frames.length, 0, "载荷被篡改的入站帧被 mock 执行了");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// §7.2 · crc 在**生产 / 消费边界**上的强制力
+// ---------------------------------------------------------------------------
+
+describe("契约 v2 · crc 的集成级强制力（§7.2）", () => {
+    test("适配器收到 crc 算错的帧时**不下发**给 M-05（E_PROTO-06）", async () => {
+        // ⚠️ 这条用例守的是**生产 / 消费边界**，不是 `decodeFrame` 这个
+        // 函数：原来「crc 算错被拒」只由 `frame.js` 的**单元级**用例守，
+        // 而 M-05 / M-10 的夹具根本不携带 crc（全部走「缺失放行」分支）
+        // ——所以**适配器**这一层的 crc 强制力**没有任何集成级用例**。
+        const worker = createFakeWorker();
+        await m07.mountTransport({ mode: "worker", createWorker: () => worker });
+        const router = await m05.mountCommandRouter({ transport: m07 });
+        const seen = [];
+        router.subscribe("*", (event) => seen.push(event));
+
+        const good = encodeFrame({
+            type: FRAME_TYPE.Event,
+            seq: 1,
+            sessionId: "sess-1",
+            role: "embedded",
+            reqId: null,
+            payload: eventMessage(1, Event.tick(1000, 0x10)),
+        });
+        // 对照：crc **正确**的帧必须下发。
+        worker.emit("message", good);
+        assert.equal(seen.length, 1, "crc 正确的帧没有下发到 M-05");
+
+        // crc **算错**的帧：不得下发。
+        worker.emit("message", { ...good, crc: "deadbeef" });
+        assert.equal(seen.length, 1, "crc 算错的帧被下发到了 M-05");
+        assert.match(
+            m07.getTransportStatus().lastError ?? "",
+            /E_PROTO-06/,
+            "crc 算错的帧没有报 E_PROTO-06",
+        );
+
+        router.close();
+        m07.close();
+    });
+
+    test("载荷被改过而 crc 没改的帧同样**不下发**（篡改要露出来）", async () => {
+        const worker = createFakeWorker();
+        await m07.mountTransport({ mode: "worker", createWorker: () => worker });
+        const router = await m05.mountCommandRouter({ transport: m07 });
+        const seen = [];
+        router.subscribe("*", (event) => seen.push(event));
+
+        const good = encodeFrame({
+            type: FRAME_TYPE.Event,
+            seq: 1,
+            sessionId: "sess-1",
+            role: "embedded",
+            reqId: null,
+            payload: eventMessage(1, Event.tick(1000, 0x10)),
+        });
+        // 载荷被换成别的时刻，crc 仍是旧的 —— crc 守的就是这个。
+        worker.emit("message", {
+            ...good,
+            payload: eventMessage(1, Event.tick(9999, 0x14)),
+        });
+        assert.equal(seen.length, 0, "被篡改的帧被下发到了 M-05");
+
+        router.close();
+        m07.close();
+    });
 });
 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * A fake Worker with the browser's event shape (M-07's worker adapter).
+ *
+ * @returns {object}
+ */
+function createFakeWorker() {
+    /** @type {Map<string, Set<Function>>} */
+    const listeners = new Map();
+    const worker = {
+        sent: [],
+        postMessage(data) {
+            worker.sent.push(data);
+        },
+        addEventListener(type, handler) {
+            let set = listeners.get(type);
+            if (!set) {
+                set = new Set();
+                listeners.set(type, set);
+            }
+            set.add(handler);
+        },
+        terminate() {},
+        emit(type, data) {
+            const set = listeners.get(type);
+            if (!set) return;
+            for (const fn of [...set]) fn({ data });
+        },
+    };
+    return worker;
+}
 
 /** A transport double with the M-07 surface the router uses. */
 function fakeTransport() {
@@ -674,14 +801,14 @@ function mockKernelTransport() {
             return () => {};
         },
         sendCommand(message, options = {}) {
-            const frames = kernel.handle({
-                type: "command",
+            const frames = kernel.handle(encodeFrame({
+                type: FRAME_TYPE.Command,
                 seq: 1,
                 sessionId: null,
                 role: null,
                 reqId: options.reqId ?? null,
                 payload: message,
-            });
+            }));
             for (const raw of frames) {
                 const frame = decodeFrame(raw);
                 for (const fn of [...messageHandlers]) fn(frame);
@@ -693,26 +820,36 @@ function mockKernelTransport() {
     };
 }
 
-/** An inbound event frame. */
+/**
+ * An inbound event frame.
+ *
+ * ⚠️ 走 `encodeFrame`——夹具本身带**真** crc，所以它也**在 crc 的强制力
+ * 之下**。手工造一个没有 `crc` 字段的帧，等于让夹具走「缺失放行」分支：
+ * 那条分支是给**旧生产者**留的兼容口子，不是生产路径（F5）。
+ */
 function eventFrame(reqId, payload, seq = 1) {
-    return {
-        type: "event",
+    return encodeFrame({
+        type: FRAME_TYPE.Event,
         seq,
         sessionId: "sess-1",
         role: "embedded",
         reqId,
         payload: eventMessage(seq, payload),
-    };
+    });
 }
 
-/** A command frame carrying one `CommandPayload` value. */
+/**
+ * A command frame carrying one `CommandPayload` value.
+ *
+ * 同样走 `encodeFrame`（带**真** crc）——见 `eventFrame` 的说明（F5）。
+ */
 function commandFrame(payload, reqId = 1) {
-    return {
-        type: "command",
+    return encodeFrame({
+        type: FRAME_TYPE.Command,
         seq: 1,
         sessionId: null,
         role: null,
         reqId,
         payload: commandMessage(1, payload),
-    };
+    });
 }
