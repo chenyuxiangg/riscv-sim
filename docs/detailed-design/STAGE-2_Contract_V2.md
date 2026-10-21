@@ -118,12 +118,26 @@ export function ps(value) { return String(value); }
 
 /**
  * 把线上表示的虚拟时间读回 JS number。
- * 超过 2^53 时**抛错**（E_PROTO-02）而不是静默丢精度。
+ * 超过 2^53 时**抛错**（E_PROTO-04）而不是静默丢精度。
  */
 export function psToNumber(text) { ... }
 ```
 
 ⚠️ **`psToNumber` 必须抛错而不是四舍五入**——静默丢精度是本条要消灭的**正是**那种行为。
+
+⚠️ **错误码是 `E_PROTO-04`（输入超限），不是 `E_PROTO-02`**（规格订正 · 收口自查）。
+初稿写的是 `E_PROTO-02`，那是**错的**：`E_PROTO-02` 在 LLD 里的原义是
+「**未知字段** → 忽略、**仅日志**」，而「未知字段」在契约里恰恰是**不抛错**的
+（只增不改原则）。拿一个「仅日志」的码去**抛错**，语义是反的。
+
+「数值超出消费者能精确表示的范围」对应的是 **`E_PROTO-04`（输入超限）**——
+输入的**大小**超过了这个消费者能处理的**上限**。为此 `E_PROTO-04` 的口径
+在 LLD 里被明确拓宽为「输入超限（大小/复杂度上限）**或数值超出消费者可精确
+表示的范围**」。
+
+⚠️ **反序列化侧不受影响**：契约的 `numstr::u64_decimal` 接受数字形态（≤ 2⁵³
+精确），**不抛错**——那只是精度**已经**丢失的旧生产者的形态，不是「超限」。
+「超限」是**消费者侧**的判断，发生在 JS 侧。
 
 ---
 
@@ -248,12 +262,34 @@ pub struct DeltaRegister {
 
 ### 4.5 前端 topic 映射
 
-| 事件变体 | topic |
+⚠️ **这里有两个不同的 topic 命名空间，不要混**（规格订正 · 收口自查）：
+
+| 命名空间 | 谁用 | 取值风格 | 作用 |
+| --- | --- | --- | --- |
+| **订阅 topic** | 宿主发给内核的 `Subscribe { topic }` | `sim.registers` / `sim.waveform` | 内核据此决定**推什么** |
+| **事件 topic** | 前端 `message.js` 的 `EVENT_TOPIC`（变体 → 路由键） | `tick` / `halted` / `memory.read` | 前端据此决定**派给谁** |
+
+两者是**各自独立**的，历史上就并存（v1 的 `EVENT_TOPIC.WaveformDelta` 是
+`waveform.delta`，而内核的波形订阅 topic 是 `sim.waveform`）。
+
+**事件 topic 映射**（`front/lib/message.js` 的 `EVENT_TOPIC`）：
+
+| 事件变体 | 事件 topic |
 | --- | --- |
 | `Registers` | `sim.registers` |
 | `Negotiated` | `sim.negotiated` |
 | `SimStateDelta` | `sim.state.delta` |
 | `WaveformHistory`（改名后） | `waveform.history`（原 `waveform.delta`） |
+
+⚠️ **`Registers` 的事件 topic 故意取 `sim.registers`**——它与**订阅 topic**
+里的 `sim.registers` **同名**。这样一来，一条 `Registers` 回复事件（无论是
+`ReadRegisters` 的回复还是内核的推送）都会被派到 M-10 订阅的那个 topic 上，
+M-10 的处理器**自动**把它落到视图状态里，而不必再写一条专门的旁路。
+这是**有意的重合**，不是笔误。
+
+⚠️ `Negotiated` / `SimStateDelta` 的 `sim.*` 风格与 `tick` / `halted` 这类
+短名**不统一**——这是事实记录，不是本批要统一的东西（统一命名是独立的一
+笔欠账，不在契约 v2 的范围内）。
 
 ---
 
@@ -261,12 +297,23 @@ pub struct DeltaRegister {
 
 | 命令 | 内核行为 | 回复事件 |
 | --- | --- | --- |
-| `ReadRegisters { index, count }` | 读 M-13 的 `gpr`；`index`/`count` **钳到** `[0, 32)`；`index` 钳到 `0..31`；`count = 0` → **不回复**（空区间没有内容） | `Registers { index, values }`（`index` = **实际**起点，`values.len()` = 实际条数） |
+| `ReadRegisters { index, count }` | 读 M-13 的 `gpr`；`index`/`count` **钳到** `[0, 32)`；`index` 钳到 `0..31`；`count = 0` → **回复空区间**（`values: []`） | `Registers { index, values }`（`index` = **实际**起点，`values.len()` = 实际条数） |
 | `WriteRegister { index, value }` | 写 M-13 的 `gpr`；`index == 0` → **丢弃**（D-04）但**仍回复**（值恒为 0）；`index > 31` → **拒绝**（`E_DBG-01`） | `Registers { index, values }`（`values.len() == 1`） |
 | `Negotiate { min_schema_version, cap_bits }` | 宿主 `min_schema_version > SCHEMA_VERSION` → **拒绝**（`E_PROTO-01`）；否则回 `SCHEMA_VERSION` 与内核授予的 `cap_bits` | `Negotiated { schema_version, cap_bits, kernel }` |
 
 ⚠️ **`WriteRegister` 的 `index > 31` 是拒绝而不是钳位**——写钳位会**静默**写到别的寄存器。
 `ReadRegisters` 则是**钳位**（读越界没有副作用）。
+
+⚠️ **`count = 0` 必须回复空区间，不能不回复**（规格订正 · 收口自查）。
+初稿写的是「`count = 0` → 不回复」，那是**错的**：M-05 的命令路由按
+`reqId` 配对请求与回复，**没有回复**与**消息丢失**在协议上**不可区分**——
+`dispatchCommand` 会在 500 ms 后以 `E_CTX-06`（命令超时）拒绝。
+于是一个完全合法的请求（「读 0 个寄存器」）会变成一条**假超时**，
+用户看到的是「内核没应答」而不是「读到了空区间」。
+
+M-05 的回复模型只有两种：一条配对的回复，或一条 `Error`。**「不回复」不在模型里**，
+它等价于传输故障。所以 `count = 0` 回复 `Registers { index, values: [] }`：
+请求被**回答**了，区间是**空**的——两件事都说清楚了。
 
 ⚠️ **错误码用契约常量，不要裸字符串**：
 
@@ -452,7 +499,8 @@ D-64 说「随 M-16 一并做」。本批**刻意不加** `SimState.mtval` 字�
 | 1 | `SCHEMA_VERSION == 2` | 契约层单测 + JS 镜像常量 |
 | 2 | 3 个新命令 / 3 个新事件在 **Rust 与 JS 两侧**逐字一致 | `front/tests/contract.test.mjs`（现成的对拍门禁） |
 | 3 | 虚拟时间字段的**线上表示是十进制字符串** | 契约层 JSON 形状断言 + JS 镜像断言 |
-| 4 | `psToNumber` 超过 2⁵³ **抛错**而不是静默截断 | JS 单测 |
+| 4 | `psToNumber` 超过 2⁵³ **抛错**而不是静默截断；错误码是 **`E_PROTO-04`**（输入超限），**不是** `E_PROTO-02`（那个是「仅日志」） | JS 单测 |
+| 4b | **`ReadRegisters { count: 0 }` 回复 `values: []`，不是「不回复」**——不回复与消息丢失不可区分，M-05 会超时拒绝 | 内核侧用例 + 前端 mock 用例 |
 | 5 | `ErrorFamily::Protocol.as_str() == "PROTO"` | 契约层单测 |
 | 5b | **`E_PROTO_01`..`E_PROTO_08` 与 `E_DBG_01` 的场景常量已固化**，渲染出的码与 LLD 逐字一致 | 契约层单测（`error::tests`） |
 | 5c | **LLD 错误码表补 DBG 一行**（`E_DBG-01` = 寄存器下标越界） | 文档核对 |
