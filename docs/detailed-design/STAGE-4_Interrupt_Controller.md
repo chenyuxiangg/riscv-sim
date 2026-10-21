@@ -120,6 +120,22 @@ csr 0x305 must be aligned
 
 ⚠️ **方法论沉淀**：本条是「**规格也会写错**」的一个实例 —— 规格不是圣经，**能被一条反例打红的规格就该被打红**。反例的形状是「**平台自己要用的那个值**」（`mtvec` 0x305）**违反了规格自己写的规则**」。⇒ 本批的判别式里必须有一条**把标准编号钉死**的用例（`crates/contract/src/csr.rs::tests::mtvec_is_a_legal_csr_number`）。
 
+#### 裁决 I —— 接缝落在 **M-17 的执行器**里，**M-12 的 `Engine` 一个字都不改**
+
+本规格第一稿把采样接缝写成「M-12 内部的 `InterruptPoller`」，由 `Engine::set_interrupt_poller` 安装。
+**订正**，理由：
+
+1. **自引用借用**：`SelfIssBackend` **自己**持有中断控制器（泛型参数 `I`）。
+   要让接缝闭包去调 `intc.poll(...)`，闭包就得捕获这个 `I` ⇒ 结构体持有闭包、闭包又捕获结构体的字段 ⇒
+   **自引用借用**，Rust **不允许**（`SelfIssBackend` 不是 `Pin` 的）。
+2. **落点本来就该在执行器**：采样与交付发生在**取指边界**，而取指边界的落点是
+   M-17 的 `IssExecutor::step`（M-12 的 `InstructionExecutor` 端口的**实现者**）。
+   M-12 的 `Engine` **不执行指令** —— 在它身上装接缝等于**装在一个不发生的地方**。
+3. **依赖方向不变**：M-17 → M-12 / M-13 / M-16；M-12 **不依赖** M-16。
+
+**代价**：M-12 要多一个 `ExecOutcome::InterruptTaken` 变体（理由见 §4.1 的 M-12 段）。
+**收益**：M-12 的引擎**零改动**、**零新增接缝**；「已执行条数」保持准确。
+
 ### 1.3 台账闭环清单（本批负责闭环的）
 
 | 条目 | 内容 | 本批怎么闭环 |
@@ -473,63 +489,77 @@ pub fn enter_trap(state: &mut SimState, cause: u32, mtval: u32) -> u32;
 `TrapCause` 的三个变体（**替换** `MisalignedAccess`）：
 `InstructionAddressMisaligned`（0）· `LoadAddressMisaligned`（4）· `StoreAddressMisaligned`（6）。
 
-#### M-12（`crates/kernel/src/m12_engine/`）新增接缝
+#### M-12（`crates/kernel/src/m12_engine/`）—— **只多一个 `ExecOutcome` 变体**
+
+⚠️ **接缝不在 M-12**（本规格第一稿写的是「M-12 内部接缝 `InterruptPoller`」，
+**已订正** —— 见**裁决 I**）。
+
+采样与交付都发生在**取指边界**，而「取指边界」的落点是 **M-17 的 `IssExecutor::step`**
+（M-12 的 `InstructionExecutor` 端口的实现者）。所以：
+
+- **M-12 的 `Engine` 一个字都不用改**（它不直接执行指令）；
+- **M-12 只需要多一个 `ExecOutcome` 变体**：
 
 ```rust
-/// 量子边界的**中断采样**回调（M-12 内部接缝，与 `PeripheralTicker` 同型）。
-///
-/// 签名：`FnMut(now_ps, &mut SimState) -> Result<(), PlatformError>`。
-/// `SimState` 传进去是因为回调要从 CSR 文件里读 `mie` / `mstatus`。
-pub struct InterruptPoller { /* ... */ }
-
-impl InterruptPoller {
-    pub fn new<F>(f: F) -> Self
-    where F: FnMut(u64, &mut SimState) -> Result<(), PlatformError> + 'static;
-    pub fn poll(&mut self, now_ps: u64, state: &mut SimState) -> Result<(), PlatformError>;
+pub enum ExecOutcome {
+    /// 指令正常退休（PC 已前进）。
+    Advanced,
+    /// **交付了一个中断**（没有指令退休）—— 继续跑，不要计入已执行条数。
+    InterruptTaken,
+    /// 需要停下：断点 / 陷阱 / 观察点 / 宿主暂停。
+    Stop { reason: HaltReason, consumed: bool },
 }
-
-/// 装到引擎上（**唯一**的安装点）。
-pub fn set_interrupt_poller(&mut self, poller: InterruptPoller);
 ```
 
-⚠️ **接缝在 M-12 内部**，**不是契约端口**（与 `PeripheralTicker` / `InstructionExecutor` 同型）—— 依赖方向单向：M-17 → M-12 / M-13 / M-16，M-12 **不依赖** M-16。
+⚠️ **为什么必须有这个变体**：中断交付**没有**任何指令退休。若复用 `Advanced`，
+M-12 的主循环会把它**计成一条已执行指令**（`instructions += 1`），
+「已执行条数」就会**每交付一次中断就多一条** —— 一个**说不出口的偏差**。
+`InterruptTaken` 让两条路径（`step_n` / `continue_until_event`）都**不计数**。
 
 #### M-17（`crates/kernel/src/m17_backend/`）接线
 
 ```rust
 impl<'a> IssExecutor<'a> {
-    /// 多带两个引用：中断控制器 + 脉冲/副作用回调。
+    /// 多带三个引用：中断控制器、上次采样时刻、清除请求的观察点。
     pub fn new(
         iss: &'a mut Iss,
         bus: &'a mut Bus,
         breakpoints: &'a BreakpointTable,
         watch_hit: Rc<RefCell<Option<Watchpoint>>>,
         intc: &'a mut dyn InterruptPort,     // ← 新增
+        last_poll_ps: &'a mut u64,           // ← 新增（跨批次持久）
     ) -> Self;
-}
-
-/// M-17 需要的**中断控制器**能力（**内核内部** trait，由 M-16 实现）。
-pub trait InterruptPort {
-    fn pending_intr(&self) -> Option<PendingIntr>;
-    fn take_intr(&mut self) -> Option<PendingIntr>;
-    fn clear(&mut self, line: u16);
 }
 ```
 
-⚠️ `InterruptPort` 是**内核 crate 内部**的 trait（放 `m16_interrupt` 里），**不进契约层** —— 契约层已经有 `InterruptSink`（raise / lower），再加一个契约端口就是**第二个真相**。
+⚠️ `InterruptPort` 是**内核 crate 内部**的 trait（放 `m16_interrupt` 里，**由 M-16 实现**），
+**不进契约层** —— 契约层已经有 `InterruptSink`（raise / lower），再加一个契约端口就是
+**第二个真相**。
+
+⚠️ **`last_poll_ps` 必须挂在后端上，不能挂在执行器上**：执行器是**每批次新建**的
+（`step_n` / `continue_until_event` 各建一个）。挂执行器上 ⇒ 每次新批次都从 0 开始 ⇒
+「上次采样时刻」永远是 0 ⇒ **每个批次的第一条指令都会触发一次采样**
+⇒ 「仲裁只在量子边界发生」这条不变式**当场破掉**。
 
 ---
 
 ## 5. 错误码
 
-**本批不新增错误码族**。本批涉及：
+**本批不新增任何错误码**。本批**涉及**的既有码：
 
 | 码 | 族 | 落点 | 何时 |
 | --- | --- | --- | --- |
 | `E_INT_01_CONTROLLER_BUSY` | `INT` | 宿主 | `RefCell` 争用（**既有**） |
-| `E_ISS_03` | `ISS` | M-13 | 陷入处理失败（LLD §6.1「交付/陷入失败 → M-13 上报」） |
+| `E_ISS-01` | `ISS` | M-13 | 取指失败（**既有**） |
 
-⚠️ **D-70**（LLD 错误码表只收录 6 族 / 29 码，代码实际发 11 族 / 36 码）是**文档补齐**，与本批的实现**并行但独立**（文档 lane，零文件交集）。
+⚠️ **`E_ISS-03`（LLD §6.1「交付 / 陷入失败 → M-13 上报」）本批不产生**：
+`enter_trap` 是**不会失败**的（写 CSR + 跳 PC，没有失败分支）⇒ 该码**今天没有生产者**，
+留在表里等「陷阱处理真的出错」的场景出现。它**不是**本批的欠账。
+
+⚠️ **D-70**（错误码表与代码脱节）已由**文档 lane** 闭环：按**构造点**重算，
+生产代码实际发出 **12 族 / 42 码**（台账原记的「11 族 / 36 码」是 **v0.17 批**的数字，
+本批又新增了 `E_SNAP-06` / `E_BUS-10..12` / `E_INT-01` 等）⇒ 表16 收录集
+从 36 码 / 7 族扩到 **57 码 / 12 族**。
 
 ---
 
