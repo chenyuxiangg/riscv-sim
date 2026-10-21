@@ -43,7 +43,7 @@ SPIKE="${SPIKE:-}"
 ISA="${GOLDEN_ISA:-rv32imc_zicclsm_zifencei}"
 # The memory map **both** sides expose.
 #
-#   2147479552 = 0x7ffe_f000   stack window, 4096 bytes
+#   2147479552 = 0x7fff_f000   stack window, 4096 bytes
 #   2147483648 = 0x80000000   RAM, 4 MiB
 #
 # Spike's multi-region `-m` parser only accepts **decimal** numbers

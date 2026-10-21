@@ -22,8 +22,10 @@
 #   * the environment is CSR-free, so `rv32mi` / `rv32si` are OUT — they
 #     need trap delivery and `mret`, which land with M-16 in phase 5;
 #   * `zifencei` is enabled everywhere so that `fence_i` assembles;
-#   * `rv32um` needs the M extension, `rv32uc` the C extension — both are
-#     M-13 work items tracked for phase 3, so they start as `pending`.
+#   * `rv32um` needs the M extension, `rv32uc` the C extension — both
+#     landed in v0.16 (ledger D-43 closed), so the corpus is now **all
+#     `active`**.  The `pending` mechanism stays in place for the next
+#     extension gap.
 #
 # Runtime ISA for the reference side is `rv32imc_zicclsm_zifencei`:
 # Zicclsm is what makes Spike *perform* misaligned accesses instead of

@@ -130,8 +130,8 @@ header comment of `env/riscv_test.h`.
 The consequence for the corpus:
 
 * `isa/rv32ui/*` — in scope (RV32I)
-* `isa/rv32um/*` — in scope, needs the **M** extension
-* `isa/rv32uc/*` — in scope, needs the **C** extension
+* `isa/rv32um/*` — in scope, needs the **M** extension (landed in v0.16)
+* `isa/rv32uc/*` — in scope, needs the **C** extension (landed in v0.16)
 * `isa/rv32mi/*` — **out**: machine-level, needs CSR + trap delivery
 * `isa/rv32si/*` — **out**: supervisor-level, same
 
@@ -145,8 +145,8 @@ ledger entry that tracks it.
 | upstream suite | cases | in the corpus? | why |
 | --- | --- | --- | --- |
 | `rv32ui` | 42 | ✅ in (`active`) | the RV32I base — the whole point of this phase |
-| `rv32um` | 8 | ✅ in (`pending`) | needs the **M** extension → **D-43** |
-| `rv32uc` | 1 | ✅ in (`pending`) | needs the **C** extension → **D-43** |
+| `rv32um` | 8 | ✅ in (`active`) | needs the **M** extension — landed in v0.16 (**D-43** closed) |
+| `rv32uc` | 1 | ✅ in (`active`) | needs the **C** extension — landed in v0.16 (**D-43** closed) |
 | `rv32mi` | 16 | ❌ out | machine-level: CSR access, breakpoints, PMP, `mret`, trap-and-continue handlers. Needs trap delivery → **M-16** (phase 5) |
 | `rv32si` | 6 | ❌ out | supervisor-level: the same plus S-mode → **M-16** (phase 5) |
 | `rv32ua` | 10 | ❌ out | **A** extension (atomics) — not implemented; a natural phase-3 addition next to M/C |
