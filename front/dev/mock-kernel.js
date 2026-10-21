@@ -42,6 +42,21 @@ export const MOCK_BREAKPOINT_ADDR = 0x40;
 /** Kernel descriptor reported by the `Negotiate` reply. */
 export const MOCK_KERNEL_ID = "riscv_sim_mock/0.1.0 RV32IMC";
 
+/**
+ * Capability bits the mock kernel **grants** (contract v2 spec §5).
+ *
+ * ⚠️ The reply carries what the **kernel** grants — **not** what the host
+ * offers. `CommandPayload::Negotiate { cap_bits }` is the host's
+ * *offer*; the spec defines no intersection, so echoing the offer back
+ * would be a second, silently different negotiation protocol. The real
+ * kernel answers with its own `KERNEL_CAP_BITS` (`0b111`); the mock
+ * mirrors that shape so the two behave the same.
+ *
+ * The bits must never be **empty**: an empty set means "the front end
+ * degrades every capability", which is not what this mock does.
+ */
+export const MOCK_CAP_BITS = 0b111;
+
 /** Number of general-purpose registers. */
 const GPR_COUNT = 32;
 
@@ -370,9 +385,12 @@ export function createMockKernel(options = {}) {
                     )));
                     break;
                 }
+                // 规格 §5：回的是**内核授予的**能力位（`MOCK_CAP_BITS`），
+                // **不是**宿主提供的 `cap_bits`——后者是宿主的「报价」，
+                // 规格没有定义取交集，回显它等于凭空造出第二套协商语义。
                 frames.push(makeFrame(reqId, Event.negotiated(
                     SCHEMA_VERSION,
-                    Number(value.cap_bits ?? 0),
+                    MOCK_CAP_BITS,
                     MOCK_KERNEL_ID,
                 )));
                 break;

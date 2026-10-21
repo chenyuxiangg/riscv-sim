@@ -52,7 +52,7 @@ const importFront = (rel) => import(pathToFileURL(resolve(frontDir, rel)).href);
 
 const m05 = await importFront("services/m05_commandrouter.js");
 const m10 = await importFront("services/m10_registermemory.js");
-const { createMockKernel } = await importFront("dev/mock-kernel.js");
+const { createMockKernel, MOCK_CAP_BITS } = await importFront("dev/mock-kernel.js");
 
 // ---------------------------------------------------------------------------
 // §2 · 虚拟时间的线上表示
@@ -509,14 +509,44 @@ describe("契约 v2 · mock 内核的 §5 语义", () => {
         );
     });
 
-    test("Negotiate 回内核定下的版本与能力位", () => {
+    test("Negotiate 回内核定下的版本与**内核授予的**能力位", () => {
+        // 规格 §5：回复带的是**内核授予的** `cap_bits`，**不是**宿主
+        // 提供的那个。宿主提供的是「报价」，规格没有定义取交集——回显
+        // 报价等于凭空造出第二套协商语义。
+        //
+        // ⚠️ 判别式：宿主这里报 `0x0f`（与内核授予的那一组**不同**），
+        // 所以「回显宿主值」的实现会在这里**红**。
         const kernel = createMockKernel();
         const frames = kernel.handle(commandFrame({ Negotiate: { min_schema_version: 2, cap_bits: 0x0f } }));
         const reply = frames.find((f) => f.payload.payload.Event.Negotiated);
         assert.ok(reply, "没有回复 Negotiated");
         assert.equal(reply.payload.payload.Event.Negotiated.schema_version, SCHEMA_VERSION);
-        assert.equal(reply.payload.payload.Event.Negotiated.cap_bits, 0x0f);
+        assert.equal(
+            reply.payload.payload.Event.Negotiated.cap_bits,
+            MOCK_CAP_BITS,
+            "回复的能力位必须是内核授予的那一组",
+        );
+        assert.notEqual(
+            reply.payload.payload.Event.Negotiated.cap_bits,
+            0x0f,
+            "回复回显了宿主提供的能力位",
+        );
         assert.match(reply.payload.payload.Event.Negotiated.kernel, /RV32IMC/);
+    });
+
+    test("Negotiate 的能力位**不随宿主的报价变**（报价是 0 也不能回 0）", () => {
+        // 宿主报 0（= 什么能力都不要）时，内核仍然回**自己授予的**那
+        // 一组：能力位是内核的裁决，不是宿主的输入。
+        //
+        // 「空能力位」是内核侧明令禁止的（前端会按位降级），所以这条
+        // 断言也钉住了「回复永远非 0」。
+        const kernel = createMockKernel();
+        const frames = kernel.handle(commandFrame({ Negotiate: { min_schema_version: 2, cap_bits: 0 } }));
+        const reply = frames.find((f) => f.payload.payload.Event.Negotiated);
+        assert.ok(reply, "没有回复 Negotiated");
+        const capBits = reply.payload.payload.Event.Negotiated.cap_bits;
+        assert.equal(capBits, MOCK_CAP_BITS, "回复的能力位必须是内核授予的那一组");
+        assert.notEqual(capBits, 0, "能力位不能是空的（空 = 前端按位降级）");
     });
 
     test("Negotiate 在宿主要的版本比内核新时被拒（E_PROTO-01）", () => {
