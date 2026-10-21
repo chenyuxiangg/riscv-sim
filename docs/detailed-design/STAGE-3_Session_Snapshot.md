@@ -229,7 +229,7 @@ pub struct GpioStateDto {
     pub directions: u32,     // 1 = 输出
     pub outputs: u32,
     pub inputs: u32,
-    pub irq_lines: Vec<u16>, // 每 pin 一条
+    pub irq_lines: Vec<u16>, // 每 pin 一条 —— ⚠️ **恰好** `GPIO_PIN_COUNT` 条
     pub pending_irqs: u32,
     pub now_ps: u64,         // ⚠️ 十进制字符串
 }
@@ -241,6 +241,13 @@ pub struct TimerStateDto {
     pub mtimecmp: u64,       // ⚠️ 十进制字符串
 }
 ```
+
+> ⚠️ **`irq_lines` 的条数是契约的一部分**：它必须**恰好**等于引脚数
+> （`GPIO_PIN_COUNT`，当前 **32**）。
+> ⚠️ **这个数字只有一个落点**——契约层导出 `GPIO_PIN_COUNT`，
+> **M-15 的 `PIN_COUNT` 改为引用它**（不要在两边各写一遍 `32`）。
+> ⚠️ 少一条或多一条都要**拒**（`E_PER_04`）：不静默补齐、也不截断——
+> 补齐 = 造出固件没写过的事实，截断 = 丢状态。
 
 #### `M16IntcDto`（段 5 · 已拉起的 IRQ 行）
 
@@ -294,12 +301,26 @@ pub enum PeripheralSessionState {
 }
 ```
 
-⚠️ **契约层 `Peripheral` trait 的两个加法方法**（`crates/contract/src/port.rs`）：
+⚠️ **契约层 `Peripheral` trait 的三个加法方法**（`crates/contract/src/port.rs`）：
 
 ```rust
 pub trait Peripheral {
     /// 本外设在会话载荷里的状态——`None` = 本外设不参与会话快照。
     fn session_state(&self) -> Option<PeripheralSessionState> { None }
+
+    /// **只读**地检查「这份状态我能不能接受」——**不写任何东西**。
+    ///
+    /// ⚠️ **这个方法是必需的，不是可选的**：`restore_session_state` 的写入
+    /// 路径里**可能**藏着只有该外设自己知道的完整性约束（如 GPIO 的
+    /// `irq_lines` 必须恰好 32 条）。若那些检查**只在写入路径里**，
+    /// 那么「先写 UART、再写 GPIO 时才发现 GPIO 的状态畸形」就会留下
+    /// **半个应用完的会话**（UART 已被改写）——**半个应用完的快照比被拒绝的
+    /// 快照更糟**（§5 的核心不变式）。
+    ///
+    /// ⚠️ **默认实现放行**（`Ok(())`）——它必须是**加法**（既有实现一行不改）。
+    /// 参与会话快照的外设**必须**覆写它。
+    fn validate_session_state(&self, state: &PeripheralSessionState)
+        -> Result<(), PlatformError> { Ok(()) }
 
     /// 回灌本外设的状态。默认实现**报错**（不静默吞掉）。
     fn restore_session_state(&mut self, state: &PeripheralSessionState)
@@ -311,6 +332,9 @@ pub trait Peripheral {
 > **线上协议不变** → `SCHEMA_VERSION` **不动**。
 > ⚠️ 默认的 `restore_session_state()` **必须报错**而不是静默成功：把一份
 > 属于别的外设的状态静默吞掉 = 丢状态 = 还原出来的会话**悄悄**不一样。
+> ⚠️ `validate_session_state()` 的默认实现**放行**（`Ok(())`）：它要**覆写**才能
+> 收紧，放行不会破坏任何既有实现——而「参与会话快照的外设必须覆写它」由
+> **行为用例**钉住（不是靠白盒检查「谁覆写了」）。
 
 ```rust
 impl PeripheralRegistry {
@@ -323,6 +347,14 @@ impl PeripheralRegistry {
     /// 两者都用**本轮新开的场景码** `E_PER_05_PERIPHERAL_SET_MISMATCH`
     /// （住在契约层 `port.rs`；⚠️ **不是既有码**）。
     /// **绝不静默跳过**——静默跳过 = 丢状态 = 还原出来的会话不一样。
+    ///
+    /// ⚠️ **两阶段：先对**所有**实例跑一遍**只读**校验
+    /// （[`Peripheral::validate_session_state`]），全过才进写入阶段。
+    /// ⚠️ **这不是多余的**：外设自己的完整性规则（如 GPIO 的 `irq_lines`
+    /// 必须恰好 `GPIO_PIN_COUNT` 条）**只存在于外设内部**——如果它们只在
+    /// 写入路径里检查，「先写 UART、再写 GPIO 时才发现 GPIO 畸形」就会留下
+    /// **半个应用完的会话**（UART 已被改写），而函数返回的是 `Err`。
+    /// **半个应用完的快照比被拒绝的快照更糟**（§5 的核心不变式）。
     pub fn load_state(&mut self, state: &M15PeriphDto) -> Result<(), PlatformError>;
 }
 ```
@@ -437,9 +469,10 @@ pub trait DataStore {
 | 4 | 内层 `m12_engine.state.schema_version` == `SIM_STATE_SCHEMA_VERSION` | `E_SNAP-05`（**落点在内层**，见下） |
 | 5 | `m14_map.regions`：**按 base 升序且不重叠** | **`E_SNAP-06`**（会话载荷畸形） |
 | 6 | `m13_state.mem_pages`：**按 base 升序且不重叠**；每页的 `bytes` 长度 ≤ 该区域大小 | **`E_SNAP-06`** |
-| 7 | `m15_periph`：**同一类型内 id 不重复** | **`E_SNAP-06`** |
-| 8 | `m16_intc.raised`：**升序且不重复** | **`E_SNAP-06`** |
-| 9 | 内层 `m12_engine.validate()` 全部通过（队列到期 ≥ 虚拟时间 等） | 内层自己的码 |
+| 7 | `m15_periph`：**id 全局不重复**（**跨类型**也算重复——同一个 id 不能既是 UART 又是 GPIO） | **`E_SNAP-06`** |
+| 8 | `m15_periph.gpios[*].irq_lines`：**恰好** `GPIO_PIN_COUNT` 条（少/多都拒，不补齐也不截断） | **`E_SNAP-06`** |
+| 9 | `m16_intc.raised`：**升序且不重复** | **`E_SNAP-06`** |
+| 10 | 内层 `m12_engine.validate()` 全部通过（队列到期 ≥ 虚拟时间 等） | 内层自己的码 |
 
 > ⚠️ **第 4 项的落点唯一 —— 外层不重复检查**。
 > 内层 `EngineSnapshotDto::validate()`（`crates/contract/src/snapshot.rs`）**已经**
@@ -457,6 +490,20 @@ pub trait DataStore {
 > （与 D-69 的 `E_PP`/`E_PER`、D-32 的 `E_PROTO-02` 同一个教训）。
 
 ⚠️ **校验必须发生在任何状态被写入之前**——半个应用完的快照比被拒绝的快照更糟。
+
+> ⚠️ **第 7 / 8 项是 V-A 检视（2026-10-21）补的**——它们堵的是**拒绝路径**上的洞：
+> 此前契约层只查「同一类型内 id 不重复」，于是
+> ① 同一个 id **跨类型**重复（既是 UART 又是 GPIO）；
+> ② `gpio.irq_lines` 条数不对（它必须**恰好** `GPIO_PIN_COUNT` 条）；
+> 这两类畸形载荷能**通过** `validate()` → **落盘** → 到**恢复**时才炸，
+> 而恢复是**逐个外设写**的 → 先写 UART、再写 GPIO 时才发现 GPIO 畸形 →
+> **UART 已经被改写** → 函数返回 `Err`，但会话**已经坏了**。
+> 这直接违反本节的核心不变式（「半个应用完的快照比被拒绝的快照更糟」）。
+> ⚠️ 契约层查得了的是**载荷层**的自洽（第 7 / 8 项）；**外设自己的**完整性规则
+> （如 UART 的状态位与 FIFO 的一致性）**契约层查不了** → 那是
+> `Peripheral::validate_session_state()` 的职责（§3.3），由 **M-15** 在
+> **写入任何东西之前**对**所有**实例逐个调用。
+> **两层都必要**：契约层挡住「畸形载荷落盘」，外设层挡住「恢复途中才发现畸形」。
 
 ---
 
@@ -478,6 +525,8 @@ pub trait DataStore {
 | 12 | M-15 的 `load_state` 遇到未知 id **报错**（不是静默跳过） | 内核单测 |
 | 13 | 恢复后事件队列 / 插入序 / 指令预算与快照一致 | 集成测试 |
 | 14 | 三关门禁全绿 | `fmt` / `clippy` / `cargo test --workspace --no-fail-fast` |
+| 15 | **M-15 的回灌是「先全量只读校验，再写」**——外设状态畸形时**报错**且**别的外设一个字节都没被写** | 内核单测（写一个合法的 UART + 一个畸形的 GPIO，断言 UART 未变） |
+| 16 | **契约层 `validate()` 拒跨类型 id 重复**与**`irq_lines` 条数不对**的载荷 | 契约层单测 |
 
 ---
 
