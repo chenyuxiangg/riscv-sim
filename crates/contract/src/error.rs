@@ -49,37 +49,93 @@ impl fmt::Display for PlatformError {
 
 impl std::error::Error for PlatformError {}
 
-/// Top-level subsystem family for error codes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ErrorFamily {
+/// Declare the error families **once** — the enum, the wire tag table
+/// and [`ALL_FAMILIES`] are all expanded from this single list.
+///
+/// ```ignore
+/// error_families! {
+///     /// doc
+///     Context => "CTX",
+/// }
+/// ```
+///
+/// The doc comment on each variant is carried over to the generated
+/// variant, so the documentation stays where a reader expects it.
+///
+/// ⚠️ The macro is the **single source of truth**: adding a family means
+/// adding one line here, and the tag table plus the completeness list
+/// follow automatically. There is no way to add a variant that the
+/// checks do not see.
+///
+/// (Before this, the enum and the two lists were maintained **by hand**,
+/// and the completeness check compared only their **lengths** — so a new
+/// variant added to the enum but forgotten in both lists left the check
+/// **green**. V-A 检视 · 中危 5.)
+macro_rules! error_families {
+    ($( $(#[$meta:meta])* $variant:ident => $tag:literal, )*) => {
+        /// Top-level subsystem family for error codes.
+        ///
+        /// The variants and their **wire tags** are declared in **one**
+        /// place by the `error_families!` macro — the enum,
+        /// [`ErrorFamily::as_str`] and [`ALL_FAMILIES`] are all expanded
+        /// from that single declaration. A new family that is not
+        /// declared there is a **compile error**.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum ErrorFamily {
+            $(
+                $(#[$meta])*
+                $variant,
+            )*
+        }
+
+        impl ErrorFamily {
+            /// 3–5 char tag used in the textual error code.
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $tag,)*
+                }
+            }
+        }
+
+        /// Every [`ErrorFamily`] variant, in declaration order.
+        ///
+        /// Expanded from the same declaration as the enum — it cannot
+        /// drift out of sync with it.
+        pub const ALL_FAMILIES: &[ErrorFamily] = &[
+            $(ErrorFamily::$variant,)*
+        ];
+    };
+}
+
+error_families! {
     /// Session / command / view-store context (M-04, M-05, M-03).
-    Context,
+    Context => "CTX",
     /// ISS / execution backend (M-13, M-17).
-    Iss,
+    Iss => "ISS",
     /// Event-driven engine, scheduler, time quantum (M-12).
-    Engine,
+    Engine => "ENG",
     /// Bus and memory map (M-14).
-    Bus,
+    Bus => "BUS",
     /// Peripheral modeling (M-15).
-    Peripheral,
+    Peripheral => "PER",
     /// Interrupt controller (M-16).
-    Interrupt,
+    Interrupt => "INT",
     /// Debug services: breakpoint, step, register/memory (M-08, M-09, M-10).
-    Debug,
+    Debug => "DBG",
     /// Observability: probe, waveform, trace, symbol (M-18, M-19, M-11).
-    Observability,
+    Observability => "OBS",
     /// Snapshot and deterministic event flow (M-20), plus the contract
     /// layer's snapshot DTO validation codes (`E_SNAP-01`..`E_SNAP-05`,
     /// see [`crate::snapshot`]).
-    Snapshot,
+    Snapshot => "SNAP",
     /// ELF / DWARF / object parsing (M-06, M-11).
-    Loader,
+    Loader => "LDR",
     /// Health-management system (M-22).
-    Health,
+    Health => "HMS",
     /// Data store / persistence (M-23).
-    Storage,
+    Storage => "STORE",
     /// Transport adapter (M-07).
-    Transport,
+    Transport => "TRX",
     /// Protocol-level errors: schema-version negotiation, envelope
     /// validation, transport-frame integrity (M-05, M-07).
     ///
@@ -92,54 +148,8 @@ pub enum ErrorFamily {
     /// *of the transport itself* (connect, drop, timeout), `PROTO` is a
     /// failure *of the protocol* (version not negotiated, malformed
     /// envelope, CRC mismatch).
-    Protocol,
+    Protocol => "PROTO",
 }
-
-impl ErrorFamily {
-    /// 3–5 char tag used in the textual error code.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Context => "CTX",
-            Self::Iss => "ISS",
-            Self::Engine => "ENG",
-            Self::Bus => "BUS",
-            Self::Peripheral => "PER",
-            Self::Interrupt => "INT",
-            Self::Debug => "DBG",
-            Self::Observability => "OBS",
-            Self::Snapshot => "SNAP",
-            Self::Loader => "LDR",
-            Self::Health => "HMS",
-            Self::Storage => "STORE",
-            Self::Transport => "TRX",
-            Self::Protocol => "PROTO",
-        }
-    }
-}
-
-/// Every [`ErrorFamily`] variant, in declaration order.
-///
-/// The enum's own `match` is the single source of truth for the **tag**;
-/// this list is the single source of truth for **"which families exist"**.
-/// A new family that is not in this list is invisible to the
-/// completeness check in `tests::every_family_tag_is_pinned` — so adding
-/// a family means adding it here too.
-pub const ALL_FAMILIES: &[ErrorFamily] = &[
-    ErrorFamily::Context,
-    ErrorFamily::Iss,
-    ErrorFamily::Engine,
-    ErrorFamily::Bus,
-    ErrorFamily::Peripheral,
-    ErrorFamily::Interrupt,
-    ErrorFamily::Debug,
-    ErrorFamily::Observability,
-    ErrorFamily::Snapshot,
-    ErrorFamily::Loader,
-    ErrorFamily::Health,
-    ErrorFamily::Storage,
-    ErrorFamily::Transport,
-    ErrorFamily::Protocol,
-];
 
 /// Error family used by the protocol-level codes below.
 pub const PROTO_FAMILY: ErrorFamily = ErrorFamily::Protocol;

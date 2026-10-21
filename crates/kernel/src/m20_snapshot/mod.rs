@@ -16,6 +16,16 @@ pub struct SnapshotRecord {
     /// Stable id (monotonic or UUID).
     pub id: u64,
     /// Captured virtual time (ps).
+    ///
+    /// ⚠️ **落盘时必须走 `riscv_sim_contract::numstr::u64_decimal`**：
+    /// 契约 v2 起，虚拟时间字段的**线上表示**是十进制字符串（§2 数值策略），
+    /// `SimState.virtual_time_ps` 已经带 `#[serde(with = "u64_decimal")]`。
+    /// 本字段是**内核内部**结构（还没有 serde derive），落盘接线时
+    /// （M-23 DataStore，见台账 D-36 / D-37）**不要**直接按 JSON 数字写出，
+    /// 否则会与 `state.virtual_time_ps` 的表示**不一致**——
+    /// 同一个快照里两个时间字段两种形状，下游解析会静默拿到 `2^53` 截断值。
+    ///
+    /// 本模块仍是 **stub**（落盘未接线），此处先钉住口径，避免接线时踩坑。
     pub at_ps: u64,
     /// The state itself.
     pub state: SimState,

@@ -151,8 +151,24 @@ impl Default for ProjectVersion {
 /// versions travel inside one snapshot document and **both** are checked
 /// by [`crate::snapshot::EngineSnapshotDto::validate`].
 ///
-/// Bump on every incompatible change to the field set of [`SimState`].
-pub const SIM_STATE_SCHEMA_VERSION: u32 = 1;
+/// Bump on every incompatible change to the field set — **or the wire
+/// representation** — of [`SimState`].
+///
+/// **Bumped to 2 in contract v2**: `virtual_time_ps` now travels as a
+/// **decimal string** (contract v2 spec §2.2). That is an
+/// **incompatible** change even though the *field set* is unchanged: a
+/// v1 reader deserialises `virtual_time_ps` into a plain `u64`, and a
+/// JSON **string** will not deserialise into it — the read fails loudly
+/// (good), but the version must say so (the contract's own rule is
+/// "bump **both**", and only one of the two was bumped).
+///
+/// ⚠️ The outer gate already rejects v1 documents
+/// ([`crate::snapshot::SNAPSHOT_SCHEMA_VERSION`] is 2), so this is
+/// belt-and-braces — but leaving the inner version at 1 would have made
+/// the two version numbers **mean different things**, and a future v3
+/// that bumps the inner one to 2 would have rejected **v2's own**
+/// snapshots.
+pub const SIM_STATE_SCHEMA_VERSION: u32 = 2;
 
 /// SimState = everything needed to deterministically resume a paused
 /// simulation (M-20). The fields are intentionally serializable so the

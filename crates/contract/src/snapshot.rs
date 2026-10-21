@@ -433,7 +433,12 @@ mod tests {
         EngineSnapshotDto {
             schema_version: SNAPSHOT_SCHEMA_VERSION,
             state: SimState {
-                schema_version: 1,
+                // ⚠️ **符号化**，不写字面量：契约 v2 把
+                // `SIM_STATE_SCHEMA_VERSION` 升到了 2，而这份夹具之前写的是
+                // 硬编码的 `1` —— 升版的那一瞬间它就**静默**变成了一份
+                // 「状态版本不匹配」的快照，夹具的所有用例一起变红，而
+                // 原因**不在**被测行为上。符号化引用让它自动跟随。
+                schema_version: crate::model::SIM_STATE_SCHEMA_VERSION,
                 virtual_time_ps: 1_000,
                 pc: 0x8000_0004,
                 gpr: [0u32; 32],
@@ -765,10 +770,61 @@ mod tests {
     }
 
     /// The flip side: a snapshot of a guest that has actually run is
-    /// **not** empty — even when its event queue happens to be empty.
+    /// **not** empty — **even when its event queue happens to be empty**.
+    ///
+    /// ⚠️ **队列必须是空的** —— 这正是判别点。台账 D-40 声称这条用例
+    /// 「防的是把判据写成『队列空即空』」，但夹具原本带着 3 条事件，
+    /// 两种判据在样例上**同值**，那条声称**不成立**（V-A 检视 · 中危 6）。
+    /// 变异实测：把 `is_empty()` 换成 `self.queue.is_empty()` → 契约层
+    /// 32 条**全绿**。
+    ///
+    /// 所以这里的夹具是「**队列空、但 guest 跑过**」：虚拟时间非零、PC
+    /// 非零、寄存器有值。判据退化成「队列空即空」时，这一条**必须变红**。
     #[test]
-    fn a_snapshot_of_a_running_guest_is_not_empty() {
-        let snapshot = sample_snapshot();
-        assert!(!snapshot.is_empty());
+    fn a_snapshot_of_a_running_guest_is_not_empty_even_with_an_empty_queue() {
+        let mut snapshot = sample_snapshot();
+        snapshot.queue.clear();
+        // 队列空了，但 guest **跑过**：虚拟时间与 PC 都在动。
+        assert_eq!(snapshot.state.virtual_time_ps, 1_000);
+        assert_ne!(snapshot.state.pc, 0);
+
+        assert!(
+            !snapshot.is_empty(),
+            "跑过的 guest 的快照永不为空——哪怕事件队列恰好是空的"
+        );
+    }
+
+    /// ⚠️ **字面量**断言，不是符号化引用。
+    ///
+    /// 台账 / 规格 §11 第 11 项要求「`SNAPSHOT_SCHEMA_VERSION` 已
+    /// bump」，验收方式是「契约层单测」。但**所有**快照用例都用
+    /// **符号化**引用（`SNAPSHOT_SCHEMA_VERSION`），所以把常量改回 1
+    /// 之后，契约层 32 条 + **全工作区 631 条**全绿，而一份 v1 形态的
+    /// 快照（`virtual_time_ps` 是 JSON 数字）会被**静默接受** ——
+    /// 正是 §2 整批要消灭的那种静默降级（V-A 检视 · 高危 1）。
+    ///
+    /// 所以这里**写字面量**：常量被改回 1 时，这条用例必须变红。
+    #[test]
+    fn the_snapshot_schema_version_is_two() {
+        assert_eq!(
+            SNAPSHOT_SCHEMA_VERSION, 2,
+            "快照 DTO 的格式版本必须是 2——改回去会让 v1 快照被静默接受"
+        );
+    }
+
+    /// ⚠️ **字面量**断言，理由同上。
+    ///
+    /// 契约自己的规则是「改了 `SimState` 的字段集或**线上表示**，要
+    /// **两个**版本号一起 bump」。契约 v2 把 `virtual_time_ps` 改成
+    /// 十进制字符串 —— 对 v1 读者**不兼容**（`u64` 读不了 JSON 字符串），
+    /// 所以内层版本号也必须升。否则将来 v3 把内层升到 2 时，**v2 自己
+    /// 产的快照会被 v3 拒绝**（V-A 检视 · 中危 7）。
+    #[test]
+    fn the_sim_state_schema_version_is_two() {
+        assert_eq!(
+            crate::model::SIM_STATE_SCHEMA_VERSION,
+            2,
+            "SimState 的格式版本必须与它的线上表示同步升版"
+        );
     }
 }
