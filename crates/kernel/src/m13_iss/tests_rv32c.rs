@@ -29,6 +29,7 @@
 //! (`0xFFFE_1000` vs `0xFFFF_E000`).  A dedicated Spike probe
 //! distinguishes the two: it reports `0xFFFE_1000`.
 
+use riscv_sim_contract::csr::{CSR_MEPC, CSR_MTVEC};
 use riscv_sim_contract::model::{SimState, WriteSize};
 
 use super::decoder::{Decoder, LEN_16};
@@ -879,10 +880,17 @@ fn c_bnez_branches_only_on_non_zero() {
 }
 
 /// `c.ebreak` raises the breakpoint trap.
+///
+/// ⚠️ The trap **hands the PC to the vector table** (STAGE-4 §3.5) —
+/// the old assertion ("a trapped instruction must not advance") was
+/// written when the trap path wrote no CSR and left the PC alone.
 #[test]
 fn c_ebreak_raises_the_breakpoint_trap() {
     let mut h = Harness::new();
-    let mut state = SimState::default();
+    let mut state = SimState {
+        csrs: vec![(CSR_MTVEC, 0x2000)],
+        ..SimState::default()
+    };
     let outcome = step_c(&mut h, &mut state, 0x1000, C_EBREAK);
     assert_eq!(
         outcome,
@@ -890,7 +898,15 @@ fn c_ebreak_raises_the_breakpoint_trap() {
             cause: TrapCause::Breakpoint
         }
     );
-    assert_eq!(state.pc, 0x1000, "a trapped instruction must not advance");
+    assert_eq!(
+        state.pc, 0x2000,
+        "a trap must hand the PC to the vector table"
+    );
+    assert_eq!(
+        csr_value(&state, CSR_MEPC),
+        0x1000,
+        "mepc must point at the faulting instruction"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,7 +1018,12 @@ fn the_reserved_and_hint_encodings_are_classified_like_the_reference() {
         );
 
         let mut h = Harness::new();
-        let mut state = SimState::default();
+        // A non-zero vector table, so the trap's PC hand-off is
+        // observable (STAGE-4 §3.5: a trap jumps to `mtvec`).
+        let mut state = SimState {
+            csrs: vec![(CSR_MTVEC, 0x2000)],
+            ..SimState::default()
+        };
         let outcome = h.step_half_at(&mut state, 0x1000, enc);
         if retires {
             assert!(
@@ -1015,8 +1036,13 @@ fn the_reserved_and_hint_encodings_are_classified_like_the_reference() {
                 "0x{enc:04x} must trap, got {outcome:?}"
             );
             assert_eq!(
-                state.pc, 0x1000,
-                "0x{enc:04x}: a trapped instruction must not advance the PC"
+                state.pc, 0x2000,
+                "0x{enc:04x}: a trap must hand the PC to the vector table"
+            );
+            assert_eq!(
+                csr_value(&state, CSR_MEPC),
+                0x1000,
+                "0x{enc:04x}: mepc must point at the faulting instruction"
             );
         }
     }

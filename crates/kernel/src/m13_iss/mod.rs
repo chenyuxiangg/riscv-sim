@@ -16,6 +16,7 @@
 
 pub mod alu;
 pub mod compressed;
+pub mod csr;
 pub mod decoder;
 pub mod executor;
 
@@ -24,6 +25,12 @@ pub use executor::{
     classify, execute_one, read_gpr, write_gpr, Executor, MemoryAccess, MisalignedPolicy, Op,
     StepOutcome, TrapCause,
 };
+
+/// The platform's **single** trap entry (STAGE-4 §3.5).
+///
+/// The exception path and the interrupt path both go through it, so
+/// "what a trap does to the architectural state" has one answer.
+pub use csr::enter_trap;
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{SimState, WriteSize};
@@ -100,9 +107,17 @@ impl Iss {
         if state.pc & 0x1 != 0 {
             // Misaligned instruction address: the alignment check
             // precedes the fetch itself (LLD §3.1, 评审 13-3).
-            return Ok(StepOutcome::Trapped {
-                cause: TrapCause::MisalignedAccess,
-            });
+            //
+            // ⚠️ The cause is **0** (instruction address misaligned) —
+            // a *different* number from a misaligned load (`4`) or
+            // store (`6`). That split is the whole point of ledger
+            // **D-63**; the old single `MisalignedAccess` variant
+            // reported the load / store code for the fetch as well.
+            //
+            // `mtval` carries the **faulting address** (STAGE-4 §3.5).
+            let cause = TrapCause::InstructionAddressMisaligned;
+            enter_trap(state, cause.mcause(), state.pc);
+            return Ok(StepOutcome::Trapped { cause });
         }
         let raw = read_mem(state.pc, WriteSize::Word).map_err(|e| {
             PlatformError::new(
@@ -123,9 +138,11 @@ impl Iss {
     /// Errors raised by the bus (E_BUS-01 / E_BUS-02 / E_BUS-05) are
     /// mapped to ISS `{family: Iss, scenario: 1}` errors by
     /// [`BusMemory`] (which threads the error string through).
-    /// Real guest-trap shaping (mcause + mtval) will land once the
-    /// CSR file in `SimState` is connected; for now the bus error
-    /// message is propagated verbatim.
+    /// ⚠️ Turning a **bus error** into a guest trap (mcause + mtval) is
+    /// still **not** done — the bus error message is propagated
+    /// verbatim. (The trap path that *is* wired is the architectural
+    /// one: illegal instruction / ECALL / EBREAK / misaligned access,
+    /// which goes through [`enter_trap`].)
     pub fn step_one_via_bus(
         &mut self,
         state: &mut SimState,
@@ -134,9 +151,12 @@ impl Iss {
         if state.pc & 0x1 != 0 {
             // Misaligned instruction address: the alignment check
             // precedes the fetch itself (LLD §3.1, 评审 13-3).
-            return Ok(StepOutcome::Trapped {
-                cause: TrapCause::MisalignedAccess,
-            });
+            //
+            // ⚠️ The cause is **0** (instruction address misaligned) —
+            // see the note in [`Iss::step_one`].
+            let cause = TrapCause::InstructionAddressMisaligned;
+            enter_trap(state, cause.mcause(), state.pc);
+            return Ok(StepOutcome::Trapped { cause });
         }
         // The fetch goes through `read_fetch`, not `read`: an instruction
         // fetch is a read on the bus, but a **watchpoint is about the
@@ -207,6 +227,8 @@ impl MemoryAccess for BusMemory<'_> {
 
 #[cfg(test)]
 mod tests_common;
+#[cfg(test)]
+mod tests_csr;
 #[cfg(test)]
 mod tests_rv32c;
 #[cfg(test)]
