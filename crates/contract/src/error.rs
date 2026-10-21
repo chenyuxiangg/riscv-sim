@@ -135,7 +135,8 @@ error_families! {
     Observability => "OBS",
     /// Snapshot and deterministic event flow (M-20), plus the contract
     /// layer's snapshot DTO validation codes (`E_SNAP-01`..`E_SNAP-05`,
-    /// see [`crate::snapshot`]).
+    /// see [`crate::snapshot`]; `E_SNAP-06`, the session-payload code,
+    /// see [`crate::session`]).
     Snapshot => "SNAP",
     /// ELF / DWARF / object parsing (M-06, M-11).
     Loader => "LDR",

@@ -82,9 +82,15 @@ LLD 说 `m13State` = 「M-13 指令级状态序列化（**寄存器**/内存视�
 D-36 点名「**已拉起的 IRQ 行**」不在快照里。M-16 的 `InterruptController`
 **有**一份真实状态（`raised: BTreeSet<u16>`），虽然它还是 stub。
 
-**裁定**：会话载荷**加第 6 段 `m16Intc`**。理由：M-16 的状态**有生产者**
+**裁定**：会话载荷**加第 6 段 `m16Intc`**。理由：M-16 的状态**有生产者接口**
 （`raise` / `lower`），不是「契约里有、没人产」的半截状态。
-⚠️ **但 M-16 的 CSR 管道仍未接线**（它还是 stub）——所以段 6 在当前树里**恒为空**，
+
+⚠️ **但段 6 在当前树里恒为空，成因有两条，缺一不可**：
+1. **M-16 的 CSR 管道仍未接线**（它还是 stub）；
+2. **没有任何生产调用方**把 M-15 的 pending IRQ 升到 M-16 —— 外设的 pending
+   采样点属 **M-16 落地**的范畴（台账 D-63 / D-64 / D-72 / D-74）。
+
+⚠️ 所以「等 CSR 管道接上线，段 6 就 populated」是**错的**——还差第 2 条。
 这是**如实反映现状**，不是缺陷。
 
 ---
@@ -265,17 +271,57 @@ impl Bus {
 
 ### 3.3 M-15 的导出 / 载入接口
 
+⚠️ **契约层新增的载体（`crates/contract/src/session.rs`）**——外设的状态不是
+裸 DTO，而是包在这个枚举里，因为一个外设的 `session_state()` 要能表达
+「我属于哪一类」：
+
+```rust
+/// 一个外设在会话载荷里的状态。
+pub enum PeripheralSessionState {
+    Uart(UartStateDto),
+    Gpio(GpioStateDto),
+    Timer(TimerStateDto),
+}
+```
+
+⚠️ **契约层 `Peripheral` trait 的两个加法方法**（`crates/contract/src/port.rs`）：
+
+```rust
+pub trait Peripheral {
+    /// 本外设在会话载荷里的状态——`None` = 本外设不参与会话快照。
+    fn session_state(&self) -> Option<PeripheralSessionState> { None }
+
+    /// 回灌本外设的状态。默认实现**报错**（不静默吞掉）。
+    fn restore_session_state(&mut self, state: &PeripheralSessionState)
+        -> Result<(), PlatformError>;
+}
+```
+
+> ⚠️ **两个方法都是「加法」**（有默认实现）→ 既有实现一行不改 →
+> **线上协议不变** → `SCHEMA_VERSION` **不动**。
+> ⚠️ 默认的 `restore_session_state()` **必须报错**而不是静默成功：把一份
+> 属于别的外设的状态静默吞掉 = 丢状态 = 还原出来的会话**悄悄**不一样。
+
 ```rust
 impl PeripheralRegistry {
     /// 导出全部外设的内部状态——段 4 的生产者。
     pub fn export_state(&self) -> M15PeriphDto;
 
     /// 回灌全部外设的内部状态——段 4 的消费者。
-    /// ⚠️ **按 id 匹配**：找不到对应外设 → 报错（`E_PER-05` 一类的既有码），
-    /// **不静默跳过**——静默跳过 = 丢状态 = 还原出来的会话不一样。
+    /// ⚠️ **按 id 匹配**（双向）：载荷里的 id 找不到对应外设 → 报错；
+    /// 活实例参与了会话状态、却没被载荷描述 → **同样报错**。
+    /// 两者都用**本轮新开的场景码** `E_PER_05_PERIPHERAL_SET_MISMATCH`
+    /// （住在契约层 `port.rs`；⚠️ **不是既有码**）。
+    /// **绝不静默跳过**——静默跳过 = 丢状态 = 还原出来的会话不一样。
     pub fn load_state(&mut self, state: &M15PeriphDto) -> Result<(), PlatformError>;
 }
 ```
+
+> ⚠️ **宿主走的是自由函数，不是 registry**：内核宿主把外设**直接绑在总线上**
+> （它**不持有** `PeripheralRegistry`），所以宿主侧的实际入口是
+> `m15_peripheral::collect_session_state(&instances)` /
+> `restore_session_states(&instances, &state)`——registry 的两个方法是
+> **等价镜像**。
 
 ### 3.4 M-16 的导出 / 载入接口
 
