@@ -237,6 +237,47 @@ pub trait Peripheral {
     /// DummyUart) do not need to change unless they actually want to
     /// report signals.
     fn on_probe(&mut self, _cb: Option<ProbeSink>) {}
+
+    /// This peripheral's share of the **session snapshot** (segment 4 of
+    /// the session payload — see
+    /// [`crate::session::SessionSnapshotDto`]).
+    ///
+    /// Returns `None` when this peripheral contributes **no** session
+    /// state — the default, and the right answer for a peripheral whose
+    /// whole state is derivable from the bus (a plain register window,
+    /// say). M-15's UART / GPIO / timer override it.
+    ///
+    /// ⚠️ **Additive** — this method has a default implementation, so
+    /// every existing implementor keeps compiling and keeps its
+    /// behaviour. Adding a method to a trait is an **additive** change
+    /// (the contract's "only add, never change" rule), not a breaking
+    /// one; the wire protocol is unaffected, so
+    /// [`crate::SCHEMA_VERSION`] does **not** move.
+    fn session_state(&self) -> Option<crate::session::PeripheralSessionState> {
+        None
+    }
+
+    /// Restore this peripheral's session state.
+    ///
+    /// The default implementation **rejects** any state with
+    /// [`ErrorFamily::Peripheral`] — a peripheral that does not
+    /// participate in the session snapshot must not **silently swallow**
+    /// a state meant for it: that would drop state without a word, and
+    /// the restored session would quietly differ from the captured one.
+    fn restore_session_state(
+        &mut self,
+        state: &crate::session::PeripheralSessionState,
+    ) -> Result<(), PlatformError> {
+        let _ = state;
+        Err(PlatformError::new(
+            crate::error::ErrorFamily::Peripheral,
+            4,
+            format!(
+                "外设 {} 不支持会话状态回灌——快照里有它的状态，但它没有实现",
+                self.id()
+            ),
+        ))
+    }
 }
 
 /// Driven port: peripheral → interrupt controller (M-15 → M-16).
