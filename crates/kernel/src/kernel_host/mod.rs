@@ -122,8 +122,8 @@ use crate::m06_elf::{DefaultLoader, Kind as LoadKind, ParseLimits};
 use crate::m15_peripheral;
 use crate::m15_peripheral::gpio::{GpioBank, GPIO_WINDOW};
 use crate::m16_interrupt::InterruptController;
-use crate::m17_backend::SelfIssBackend;
-use crate::m18_probe::{ChannelDef, ChannelKind, ProbeRegistry, SampleCfg, CH_GPIO0};
+use crate::m17_backend::{SelfIssBackend, SharedInterruptPort};
+use crate::m18_probe::{ChannelDef, ChannelKind, ProbeRegistry, SampleCfg, CH_GPIO0, CH_IRQ_PULSE};
 use crate::m19_waveform::{ChannelMeta, SharedPipeline, WaveformPipeline};
 use crate::m20_snapshot::SnapshotManager;
 
@@ -177,6 +177,21 @@ pub const GPIO_SIGNAL_LABEL: &str = "GPIO0.OUT";
 ///
 /// 与 M-18 LLD 表 68 的「valueWidth = 按端口位宽」一致。
 pub const GPIO_VALUE_WIDTH: u8 = 32;
+
+/// **中断脉冲**通道（M-16 → M-18，接缝 #5 / 台账 D-26）的 source id。
+///
+/// M-18 的流 id 是 `"{source}.{signal}"` ⇒ 这条通道的 id 是
+/// `"M16.irq_pulse"`。
+pub const IRQ_PULSE_SOURCE: &str = "M16";
+
+/// **中断脉冲**通道的信号名。
+pub const IRQ_PULSE_SIGNAL: &str = "irq_pulse";
+
+/// **中断脉冲**通道的显示标签（与 M-18 那一侧逐字相同）。
+pub const IRQ_PULSE_LABEL: &str = "M16.irq_pulse";
+
+/// **中断脉冲**通道的值宽（脉冲的「值」是中断线号 ⇒ 64 位足够）。
+pub const IRQ_PULSE_VALUE_WIDTH: u8 = 64;
 
 /// 订阅主题：寄存器快照。
 ///
@@ -243,12 +258,17 @@ pub fn kernel_descriptor() -> String {
 /// （[`KernelHost::waveform_edges_truncated`]）——不静默丢。
 pub const MAX_WAVEFORM_EDGES_PER_EVENT: usize = 4096;
 
-/// 场景码：中断控制器正被占用（`RefCell` 争用），状态回灌无法进行。
+/// 场景码：中断控制器正被占用（`RefCell` 争用）。
 ///
-/// ⚠️ **内核宿主本地**——只有本模块需要命名它（M-16 自己的 `raise` /
-/// `lower` 路径不报这个错），所以它不进契约层。契约层目前没有 `INT`
-/// 族的场景码；等 M-16 落地、第二个模块也要命名它时，再上提到契约层。
-pub const E_INT_01_CONTROLLER_BUSY: u16 = 1;
+/// ⚠️ **定义在 M-17**（[`crate::m17_backend::E_INT_01_CONTROLLER_BUSY`]），
+/// 这里**转出**它：M-17 的 [`crate::m17_backend::SharedInterruptPort`] 是
+/// **第一个**会真的撞上 `RefCell` 争用的地方（它在**指令边界**上借控制
+/// 器，而同一批次里外设还会经 `InterruptSink::raise` 借**同一个**控制器）。
+/// 一个场景码**只能有一份定义** —— 两处各写一个 `1`，将来漂移了没人知道。
+///
+/// ⚠️ 对外的路径一个字都没变：`riscv_sim_kernel::kernel_host::E_INT_01_CONTROLLER_BUSY`
+/// 照旧可用。
+pub use crate::m17_backend::E_INT_01_CONTROLLER_BUSY;
 
 /// 中断汇与 M-16 控制器之间的**共享状态**。
 ///
@@ -259,7 +279,12 @@ pub const E_INT_01_CONTROLLER_BUSY: u16 = 1;
 #[derive(Debug, Default)]
 struct IntcLink {
     /// M-16 的中断控制器 —— 已拉起 IRQ 行的**唯一**落点。
-    controller: RefCell<InterruptController>,
+    ///
+    /// ⚠️ **多一层 `Rc`**：M-17 的执行器也要访问**同一个**控制器（采样 /
+    /// 交付 / 清除），而执行器要的是 `&mut dyn InterruptPort` ⇒ 控制器得
+    /// 住在 `Rc<RefCell<…>>` 后面，宿主把一份克隆交给 M-17
+    /// （[`crate::m17_backend::SharedInterruptPort`]）。
+    controller: Rc<RefCell<InterruptController>>,
     /// 委派失败（`RefCell` 争用）的累计次数。
     ///
     /// ⚠️ 委派**不许 panic**：M-14 的总线 hook 在 `RefCell` 争用下 panic
@@ -433,6 +458,12 @@ impl KernelHost {
         // cap). If it ever does, the failure is reported by the next
         // `LoadProject` — which re-maps the memory anyway.
         let _ = host.map_default_memory();
+        // The interrupt controller reaches **two** places: the engine's
+        // `InterruptSink` (peripherals *raise* IRQ lines) and M-17's
+        // executor (quantum-boundary *sampling* / pull-style *delivery* /
+        // `irq_clear` side effect). Both must see the **same** controller —
+        // two controllers would be two truths.
+        host.install_interrupt_port();
         // The time-driven link (D-07) also needs to be connected here:
         // whoever hangs the peripheral onto the bus is also the one who
         // registers it with the engine — otherwise `PeripheralTick` is
@@ -448,6 +479,20 @@ impl KernelHost {
         // 只有「刚建好、还没装载工程」的宿主会**静默**观察不到任何边沿。
         host.attach_peripheral_probes();
         host
+    }
+
+    /// 装上 M-16 的中断控制器**端口**（接缝 #2 / #3 / #4）。
+    ///
+    /// 宿主是**唯一**知道「引擎那条 `InterruptSink` 通路」与「M-17 的
+    /// 采样 / 交付通路」必须看到**同一个**控制器的地方——它把同一个
+    /// `Rc<RefCell<InterruptController>>` 的两份引用分别交给两边。
+    ///
+    /// ⚠️ 幂等：重复调用只是换掉后端里的端口盒子，控制器还是**同一个**。
+    fn install_interrupt_port(&mut self) {
+        self.backend
+            .install_interrupt_port(Box::new(SharedInterruptPort::new(Rc::clone(
+                &self.intc.controller,
+            ))));
     }
 
     /// 建立默认内存图（低段 1 MiB + 高段 4 MiB RAM + 一个 GPIO 外设）。
@@ -495,6 +540,12 @@ impl KernelHost {
                 CH_GPIO0,
                 ChannelMeta::multi_bit(GPIO_SIGNAL_LABEL, GPIO_VALUE_WIDTH),
             );
+            // 中断脉冲通道（接缝 #5）—— 标签与 M-18 那一侧**逐字相同**
+            // （M-18 的流 id 是 `"{source}.{signal}"`）。
+            p.define_channel(
+                CH_IRQ_PULSE,
+                ChannelMeta::multi_bit(IRQ_PULSE_LABEL, IRQ_PULSE_VALUE_WIDTH),
+            );
             p
         });
 
@@ -522,13 +573,55 @@ impl KernelHost {
             self.probe_wiring_failures += 1;
         }
 
+        // M-16 → M-18 的**中断脉冲**通道（接缝 #5 / 台账 D-26）。
+        //
+        // ⚠️ 通道**必须**注册成 `Pulse`：脉冲通道「每次观测都发」，
+        // 同一根线上的重复请求**不合并**（多比特通道会把第二次相同值
+        // 吞掉）。
+        if registry
+            .borrow_mut()
+            .define_channel(ChannelDef::pulse(
+                CH_IRQ_PULSE,
+                IRQ_PULSE_SOURCE,
+                IRQ_PULSE_SIGNAL,
+            ))
+            .is_err()
+        {
+            self.probe_wiring_failures += 1;
+        }
+
         // 打开探针：master + 通道。
         let mut cfg = SampleCfg {
             master_enable: true,
             ..Default::default()
         };
         cfg.enable_channel(CH_GPIO0);
+        cfg.enable_channel(CH_IRQ_PULSE);
         registry.borrow_mut().set_rate(cfg);
+
+        // M-16 的脉冲回调 → M-18 的 `sample_irq_pulse`。
+        //
+        // ⚠️ **不许在回调里回头碰控制器**：回调是在控制器**借出**的状态下
+        // 被调用的（`intc.request()` ⇒ `pulse_sink(now_ps, line)`），回头
+        // 碰控制器就是**自引用借用** ⇒ `RefCell` 争用 ⇒ panic。
+        //
+        // ⚠️ 探针注册表被占用时**丢弃**这条脉冲（`try_borrow_mut`），不
+        // panic：M-18 的访存 hook 也是这么处理争用的。
+        let pulse_registry = Rc::clone(&registry);
+        let sink = Box::new(move |now_ps: u64, line: u16| {
+            let Ok(mut reg) = pulse_registry.try_borrow_mut() else {
+                return;
+            };
+            let _ = reg.sample_irq_pulse(now_ps, u64::from(line));
+        });
+        match self.intc.controller.try_borrow_mut() {
+            Ok(mut intc) => intc.set_pulse_sink(sink),
+            Err(_) => {
+                // 控制器正被占用 ⇒ 脉冲回调**没装上**：这一轮的脉冲探针
+                // 不会有边沿。失败**可见**（计数器），不静默。
+                self.probe_wiring_failures += 1;
+            }
+        }
 
         // M-14 总线 → M-18 的访存 trace 环。
         // `make_bus_hook` 自带争用处理：注册表被占用时丢弃这条访存并
@@ -1283,6 +1376,38 @@ impl KernelHost {
         self.sinks.lower(irq)
     }
 
+    /// **清除**一条 IRQ 行（接缝 #7：调试器 / 固件清中断）。
+    ///
+    /// 语义与 M-16 的 [`InterruptController::clear`] 逐字相同：移除挂起项 +
+    /// 撤销线电平 + 复位 `active_irq`。
+    ///
+    /// ⚠️ 争用（`RefCell` 拿不到）时**记一次失败并返回 `Err`**——与
+    /// [`HostSinks::delegate`] **同一种结果**：同一个失败条件必须是
+    /// 同一个口径（`Err` + 计数 +1），否则「同一个量两个真相」。
+    pub fn clear_irq(&mut self, line: u16) -> Result<(), PlatformError> {
+        self.sinks.delegate(|intc| {
+            intc.clear(line);
+            Ok(())
+        })
+    }
+
+    /// 设置**定时器比较值**（接缝 #6 / 裁决 E）。
+    ///
+    /// `mtime >= mtimecmp` 时按**电平**语义挂起 line 3（timer-compare），
+    /// 于是「定时器 → 仲裁 → 交付 → 陷入」整条链可以端到端验证。
+    ///
+    /// ⚠️ **固件侧的 MMIO 通路推迟到 P1**（裁决 E / 台账 D-82）：今天
+    /// guest 自己写不了 `mtimecmp`，**宿主 API** 是本批的入口。
+    ///
+    /// ⚠️ `0` 表示**定时器关闭**（否则 `mtime >= 0` 恒成立，那是一条
+    /// 永不消失的中断）。
+    pub fn set_timer_compare(&mut self, mtimecmp_ps: u64) -> Result<(), PlatformError> {
+        self.sinks.delegate(|intc| {
+            intc.set_timer_compare(mtimecmp_ps);
+            Ok(())
+        })
+    }
+
     /// 中断委派失败（`RefCell` 争用）的累计次数。
     ///
     /// 非零 = 有一次中断操作**没有真的落到控制器上**——这条 IRQ 行丢了。
@@ -1459,3 +1584,6 @@ mod tests_session_snapshot;
 
 #[cfg(test)]
 mod tests_contract_v2;
+
+#[cfg(test)]
+mod tests_intc;
