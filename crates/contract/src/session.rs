@@ -653,6 +653,9 @@ mod tests {
             .get("m13_state")
             .and_then(|v| v.as_object())
             .expect("m13");
+        let mut m13k: Vec<&str> = m13.keys().map(String::as_str).collect();
+        m13k.sort_unstable();
+        assert_eq!(m13k, vec!["mem_pages"], "m13_state 的键集必须精确固定");
         let pages = m13
             .get("mem_pages")
             .and_then(|v| v.as_array())
@@ -664,6 +667,9 @@ mod tests {
 
         // 段 3
         let m14 = obj.get("m14_map").and_then(|v| v.as_object()).expect("m14");
+        let mut m14k: Vec<&str> = m14.keys().map(String::as_str).collect();
+        m14k.sort_unstable();
+        assert_eq!(m14k, vec!["regions"], "m14_map 的键集必须精确固定");
         let regions = m14
             .get("regions")
             .and_then(|v| v.as_array())
@@ -686,6 +692,40 @@ mod tests {
         let mut uk: Vec<&str> = uart.keys().map(String::as_str).collect();
         uk.sort_unstable();
         assert_eq!(uk, vec!["id", "irq_line", "now_ps", "rx", "status", "tx"]);
+
+        // ⚠️ **GPIO 与定时器也要钉**——它们各自带**时间字段**
+        // （`now_ps` / `mtime` / `mtimecmp`），不钉住键集就等于给
+        // 「往里塞一个新字段」开了后门（V-B 检视的 C-1）。
+        let gpios = m15.get("gpios").and_then(|v| v.as_array()).expect("gpios");
+        let gpio = gpios[0].as_object().expect("gpio");
+        let mut gk: Vec<&str> = gpio.keys().map(String::as_str).collect();
+        gk.sort_unstable();
+        assert_eq!(
+            gk,
+            vec![
+                "directions",
+                "id",
+                "inputs",
+                "irq_lines",
+                "now_ps",
+                "outputs",
+                "pending_irqs",
+            ],
+            "GPIO 状态的键集必须精确固定——多一个字段就是载荷形状变了"
+        );
+
+        let timers = m15
+            .get("timers")
+            .and_then(|v| v.as_array())
+            .expect("timers");
+        let timer = timers[0].as_object().expect("timer");
+        let mut tk: Vec<&str> = timer.keys().map(String::as_str).collect();
+        tk.sort_unstable();
+        assert_eq!(
+            tk,
+            vec!["id", "irq_line", "mtime", "mtimecmp"],
+            "定时器状态的键集必须精确固定——多一个字段就是载荷形状变了"
+        );
 
         // 段 5
         let m16 = obj
@@ -785,35 +825,104 @@ mod tests {
         assert!(mtimecmp.is_string(), "timers[0].mtimecmp 必须是字符串");
     }
 
-    /// ⚠️ **Literal** assertion — the number of decimal-string fields is
-    /// pinned by a **number**, and the list is read out of the source
-    /// so a **seventh** field cannot slip in unnoticed.
+    /// ⚠️ **语义**判别式——钉的是**线上表示**的集合，不是源码里的
+    /// 属性行数。
     ///
-    /// The per-field assertions above check that the six known fields
-    /// travel as strings. They say nothing about the **rest** of the
-    /// file: a new `u64` field with the attribute (or one that should
-    /// have it and does not) would leave every other test **green**,
-    /// and the spec's "six virtual-time fields" would quietly become a
-    /// lie. The spec's count is only true if something enforces it.
+    /// ⚠️ **旧写法是排版耦合的**：`include_str!("session.rs")` + 数
+    /// `starts_with("#[serde(with")` 的行——把一个属性改成**多行**写法
+    /// （语义完全不变）就会让门禁变红。一次纯 `rustfmt` 就可能这么排
+    /// → 一次纯格式化就能把门禁弄红，那是**假红**。
     ///
-    /// ⚠️ The count is read from the **source text** rather than from a
-    /// list the implementation also uses — a list would be self-referential
-    /// (D-73: an assertion that uses the implementation's own constant
-    /// cannot tell "changed" from "not changed").
+    /// 现在的口径是**线上表示**：带
+    /// `#[serde(with = "crate::numstr::u64_decimal")]` 的字段，线上必然是
+    /// **十进制字符串**；不带属性的 `u64`，线上是 JSON **数字**。于是
+    /// 「带该属性的字段集合」与「线上形态是十进制字符串的字段集合」是
+    /// **同一个集合**——后者与排版无关。
+    ///
+    /// ⚠️ **夹具的不变量**：样例载荷里 UART / GPIO / 定时器**各恰好
+    /// 一台** → 值的个数 == 字段声明的个数。（多一台 UART 就会多出第
+    /// 七个十进制字符串 → 本用例变红：这是**故意**的，夹具是本用例
+    /// 契约的一部分。）
+    ///
+    /// ⚠️ **两处刻意的排除**：
+    /// ① 段 1（`m12_engine`）——它是**冻结的**内层快照，数值策略与版本链
+    ///    在 `snapshot.rs` / `model.rs` 里；规格 §4 的「6 个」说的是
+    ///    **本文件**（`session.rs`）里的字段。
+    /// ② `id` / `kind` / `target` —— 载荷里除时间字段外只有这三个
+    ///    **非时间**字符串字段（形状守卫已钉住它们）；按**键名**排除，
+    ///    夹具里的 id 就算变成纯数字也不会污染计数。
     #[test]
     fn exactly_six_virtual_time_fields_carry_the_decimal_attribute() {
-        let src = include_str!("session.rs");
-        let attribute_lines = src
-            .lines()
-            .filter(|l| l.trim_start().starts_with("#[serde(with"))
-            .filter(|l| l.contains("numstr::u64_decimal"))
-            .count();
+        let json = serde_json::to_value(sample()).expect("json");
+        let top = json.as_object().expect("object");
+
+        let mut paths: Vec<String> = Vec::new();
+        for (key, value) in top {
+            if key == "m12_engine" {
+                continue;
+            }
+            decimal_string_paths(value, key, &mut paths);
+        }
+        paths.sort();
+
         assert_eq!(
-            attribute_lines, 6,
+            paths.len(),
+            6,
             "会话载荷里带十进制字符串属性的字段必须恰好 6 个 \
              （cp_meta.t_virt / cp_meta.t_host / uarts[0].now_ps / \
-             gpios[0].now_ps / timers[0].mtime / timers[0].mtimecmp）"
+             gpios[0].now_ps / timers[0].mtime / timers[0].mtimecmp）\
+             ——实际线上是十进制字符串的字段：{paths:?}"
         );
+        assert_eq!(
+            paths,
+            vec![
+                "cp_meta.t_host",
+                "cp_meta.t_virt",
+                "m15_periph.gpios.0.now_ps",
+                "m15_periph.timers.0.mtime",
+                "m15_periph.timers.0.mtimecmp",
+                "m15_periph.uarts.0.now_ps",
+            ],
+            "十进制字符串字段的集合必须**恰好**是规格 §4 表里的那六个——\
+             多一个或少一个，「6 个」这句话就是空话"
+        );
+    }
+
+    /// Collect the JSON paths of every leaf whose **wire form** is a
+    /// decimal string — the form `u64_decimal` produces.
+    ///
+    /// ⚠️ The three **non-time** string keys (`id` / `kind` / `target`)
+    /// are skipped **by key name**: they are the payload's only other
+    /// string fields (the shape guard already pins them), and skipping
+    /// them keeps a fixture whose id happens to be numeric from
+    /// polluting the count.
+    fn decimal_string_paths(value: &serde_json::Value, prefix: &str, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    if matches!(key.as_str(), "id" | "kind" | "target") {
+                        continue;
+                    }
+                    let path = if prefix.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{prefix}.{key}")
+                    };
+                    decimal_string_paths(child, &path, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, child) in items.iter().enumerate() {
+                    decimal_string_paths(child, &format!("{prefix}.{index}"), out);
+                }
+            }
+            serde_json::Value::String(text)
+                if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                out.push(prefix.to_string());
+            }
+            _ => {}
+        }
     }
 
     /// A **float** must not be accepted as a virtual time — `1.5` would
@@ -924,6 +1033,81 @@ mod tests {
             },
         ];
         let err = s.validate().expect_err("必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// ⚠️ **升序但重叠**的内存页必须被拒——这是规格 §5 第 6 类
+    /// 「按 base 升序**且不重叠**」的后半句。
+    ///
+    /// ⚠️ 既有用例 `unsorted_pages_are_rejected` 只造了**乱序**
+    /// （`0x2000` 在前、`0x1000` 在后）——那种载荷在「只查升序」的
+    /// 实现下**照样**被拒 → 判别力缺口：把页表的重叠检查删掉
+    /// （`prev_page_end` 存 `base` 而不是 `end`），**没有一条用例会红**。
+    ///
+    /// ⚠️ 本用例的夹具刻意**只含这一个畸形**：两页都完整落在 RAM 区域
+    /// 内（否则「不落在任何 RAM 区域内」那条检查会**替**重叠检查接住
+    /// 载荷，变异就伪装成绿的）。
+    #[test]
+    fn overlapping_pages_are_rejected() {
+        let mut s = sample();
+        s.m14_map.regions = vec![RegionDto {
+            base: 0,
+            size: 0x4000,
+            kind: "ram".to_string(),
+            target: String::new(),
+        }];
+        // 0x1000..0x2800 与 0x2000..0x3000 —— **按 base 升序**，但互相重叠。
+        s.m13_state.mem_pages = vec![
+            MemPageDto {
+                base: 0x1000,
+                bytes: vec![0; 0x1800],
+            },
+            MemPageDto {
+                base: 0x2000,
+                bytes: vec![0; 0x1000],
+            },
+        ];
+        let err = s.validate().expect_err("升序但重叠的内存页必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// ⚠️ **大小为 0 的区域**必须被拒——零长度的区间在内存图里是
+    /// **无法落地的地址空间**（谁落在里面？）。
+    ///
+    /// ⚠️ 夹具刻意**清空内存页**：否则页面会因为「不落在任何 RAM 区域
+    /// 内」被拒——**同一个错误码**（`E_SNAP_06`）却由**另一条**检查
+    /// 报出 → 删掉本规则后用例照样绿 → 判别力缺口。
+    #[test]
+    fn a_zero_sized_region_is_rejected() {
+        let mut s = sample();
+        s.m14_map.regions = vec![RegionDto {
+            base: 0x1000,
+            size: 0,
+            kind: "ram".to_string(),
+            target: String::new(),
+        }];
+        s.m13_state.mem_pages.clear();
+        let err = s.validate().expect_err("大小为 0 的区域必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// ⚠️ **`base + size` 越过 u32** 的区域必须被拒——区间的**上界**
+    /// 算不出来 = 这条区域**没有上界**。
+    ///
+    /// ⚠️ 夹具同样**清空内存页**：页面落不进这个区域，会由「不落在
+    /// 任何 RAM 区域内」那条检查报出**同一个错误码** → 掩盖本规则。
+    #[test]
+    fn a_region_whose_end_overflows_u32_is_rejected() {
+        let mut s = sample();
+        // 0xFFFF_F000 + 0x2000 = 0x1_0000_1000 > u32::MAX
+        s.m14_map.regions = vec![RegionDto {
+            base: 0xFFFF_F000,
+            size: 0x2000,
+            kind: "ram".to_string(),
+            target: String::new(),
+        }];
+        s.m13_state.mem_pages.clear();
+        let err = s.validate().expect_err("上界越过 u32 的区域必须被拒");
         assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
     }
 
