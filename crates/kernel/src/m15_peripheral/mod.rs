@@ -24,8 +24,9 @@
 //! via [`PeripheralRegistry::describe`] for the front-end display
 //! (评审 R5). All MVP peripherals are fidelity level = 1 (行为级).
 
-use riscv_sim_contract::error::ErrorFamily;
+use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::port::ProbeSink;
+use riscv_sim_contract::session::{M15PeriphDto, PeripheralSessionState};
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -205,6 +206,283 @@ impl PeripheralRegistry {
             None
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Session snapshot (STAGE-3 §3.3) — segment 4.
+    // -----------------------------------------------------------------------
+
+    /// Export the internal state of **every** registered peripheral —
+    /// segment 4's producer (STAGE-3 §3.3).
+    ///
+    /// The states are grouped **by kind** (`uarts` / `gpios` / `timers`)
+    /// and each group is ordered by **id**. A peripheral that does not
+    /// implement [`Peripheral::session_state`] contributes nothing — it
+    /// has no session state to carry (the contract's default is `None`).
+    pub fn export_state(&self) -> M15PeriphDto {
+        collect_session_state(&self.live_instances())
+    }
+
+    /// Restore the internal state of every registered peripheral —
+    /// segment 4's consumer (STAGE-3 §3.3).
+    ///
+    /// ## Matching
+    ///
+    /// By **id** — the stable id the peripheral reports through
+    /// [`Peripheral::id`], not its bus address (an address is a
+    /// *placement*, the id is the *identity*).
+    ///
+    /// ## No silent skipping
+    ///
+    /// The payload's peripheral set and the live instances must
+    /// **agree**, in both directions:
+    ///
+    /// - a payload entry whose id is **not** live → **error**
+    ///   ([`E_PER_05_PERIPHERAL_SET_MISMATCH`]);
+    /// - a live peripheral that **participates** in the session state
+    ///   (its [`Peripheral::session_state`] is `Some`) but is **not**
+    ///   described by the payload → **error** (same code).
+    ///
+    /// ⚠️ Skipping either side would leave the restored session
+    /// **different** from the captured one — and *silently*: nobody
+    /// would ever learn that a peripheral's state was dropped. A
+    /// peripheral that does **not** participate in the snapshot (the
+    /// contract's default `None`) is not affected: it simply has no
+    /// state to restore.
+    ///
+    /// ## All checks run before anything is written
+    ///
+    /// A rejected payload leaves every peripheral **exactly as it was**
+    /// — a half-applied restore is worse than a rejected one (STAGE-3
+    /// §5).
+    pub fn load_state(&mut self, state: &M15PeriphDto) -> Result<(), PlatformError> {
+        restore_session_states(&self.live_instances(), state)
+    }
+
+    /// The registered instances, in the shape the free functions take.
+    fn live_instances(&self) -> Vec<(u32, SharedPeripheral)> {
+        self.by_id
+            .values()
+            .map(|handle| {
+                // The borrow is released immediately — the restore path
+                // takes a **mutable** borrow of the very same cells.
+                let base = { handle.borrow().base_addr() };
+                (base, handle.clone())
+            })
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session snapshot — the bus-bound flavour (STAGE-3 §3.3).
+// ---------------------------------------------------------------------------
+
+/// Collect the session state of the **live instances bound on a bus**.
+///
+/// The kernel host binds its peripherals **directly onto the bus** (it
+/// keeps no [`PeripheralRegistry`]), so the registry's
+/// [`PeripheralRegistry::export_state`] is not reachable from there.
+/// This free function is the host's entry point: it walks the
+/// [`Bus::peripheral_instances`](crate::m14_bus::Bus::peripheral_instances)
+/// list and produces the very same payload.
+///
+/// ⚠️ **Borrows do not overlap.** Each instance is borrowed for the
+/// duration of one `session_state()` call and released immediately —
+/// a borrow held across the loop would make the *restore* path panic
+/// (a `borrow_mut` while a `borrow` is alive).
+pub fn collect_session_state(instances: &[(u32, SharedPeripheral)]) -> M15PeriphDto {
+    let mut dto = M15PeriphDto::default();
+    for (_base, handle) in instances {
+        let state = {
+            let periph = handle.borrow();
+            periph.session_state()
+        };
+        match state {
+            Some(PeripheralSessionState::Uart(s)) => dto.uarts.push(s),
+            Some(PeripheralSessionState::Gpio(s)) => dto.gpios.push(s),
+            Some(PeripheralSessionState::Timer(s)) => dto.timers.push(s),
+            // A peripheral without session state contributes nothing.
+            None => {}
+        }
+    }
+    // Each group is ordered by id — the payload is a **canonical**
+    // form, not a snapshot of the registration order.
+    dto.uarts.sort_by(|a, b| a.id.cmp(&b.id));
+    dto.gpios.sort_by(|a, b| a.id.cmp(&b.id));
+    dto.timers.sort_by(|a, b| a.id.cmp(&b.id));
+    dto
+}
+
+/// Restore the session state onto the **live instances bound on a bus**.
+///
+/// The bus-bound twin of [`PeripheralRegistry::load_state`] — same
+/// matching rules, same errors, same "all checks before any write"
+/// discipline. See that method for the full contract.
+pub fn restore_session_states(
+    instances: &[(u32, SharedPeripheral)],
+    state: &M15PeriphDto,
+) -> Result<(), PlatformError> {
+    // ---- Phase 1: index the live instances. Nothing is written yet. ----
+    let mut live: Vec<LiveInstance> = Vec::with_capacity(instances.len());
+    for (_base, handle) in instances {
+        let (id, kind) = {
+            // The borrow ends with this block on purpose: the restore
+            // below takes a **mutable** borrow of the same cell, and
+            // holding both at once would panic.
+            let periph = handle.borrow();
+            let kind = periph.session_state().as_ref().map(SessionKind::of);
+            (periph.id().to_string(), kind)
+        };
+        live.push(LiveInstance {
+            id,
+            kind,
+            handle: handle.clone(),
+        });
+    }
+
+    // The payload, flattened into (id, kind, state).
+    let mut entries: Vec<(String, SessionKind, PeripheralSessionState)> = Vec::new();
+    for s in &state.uarts {
+        entries.push((
+            s.id.clone(),
+            SessionKind::Uart,
+            PeripheralSessionState::Uart(s.clone()),
+        ));
+    }
+    for s in &state.gpios {
+        entries.push((
+            s.id.clone(),
+            SessionKind::Gpio,
+            PeripheralSessionState::Gpio(s.clone()),
+        ));
+    }
+    for s in &state.timers {
+        entries.push((
+            s.id.clone(),
+            SessionKind::Timer,
+            PeripheralSessionState::Timer(s.clone()),
+        ));
+    }
+
+    // ---- Phase 2: every id in the payload must be live. ----
+    for (id, _kind, _state) in &entries {
+        if !live.iter().any(|l| l.id == *id) {
+            return Err(PlatformError::new(
+                PERIPHERAL_FAMILY,
+                E_PER_05_PERIPHERAL_SET_MISMATCH,
+                format!("会话载荷里的外设 '{id}' 没有对应的活实例——外设集合对不上，不能静默跳过"),
+            ));
+        }
+    }
+
+    // ---- Phase 3: every live peripheral that participates must be described. ----
+    for l in &live {
+        // `None` = this peripheral has no session state at all (the
+        // contract's default) — there is nothing to restore.
+        let Some(kind) = l.kind else { continue };
+        if !entries
+            .iter()
+            .any(|(id, k, _state)| *id == l.id && *k == kind)
+        {
+            return Err(PlatformError::new(
+                PERIPHERAL_FAMILY,
+                E_PER_05_PERIPHERAL_SET_MISMATCH,
+                format!(
+                    "活实例外设 '{}' 在会话载荷里没有对应的状态——外设集合对不上，不能静默跳过",
+                    l.id
+                ),
+            ));
+        }
+    }
+
+    // ---- Phase 4: apply. One instance at a time, no overlapping borrows. ----
+    for (id, _kind, variant) in &entries {
+        let target = live
+            .iter()
+            .find(|l| l.id == *id)
+            .expect("phase 2 rejected every id without a live instance");
+        let mut periph = target.handle.borrow_mut();
+        periph.restore_session_state(variant)?;
+    }
+    Ok(())
+}
+
+/// A live peripheral, as the restore path sees it.
+struct LiveInstance {
+    /// The peripheral's own id (its identity, not its placement).
+    id: String,
+    /// The kind it reports — `None` when the peripheral does not
+    /// participate in the session snapshot.
+    kind: Option<SessionKind>,
+    /// The live handle.
+    handle: SharedPeripheral,
+}
+
+/// Which kind of peripheral a session state belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionKind {
+    Uart,
+    Gpio,
+    Timer,
+}
+
+impl SessionKind {
+    /// The kind carried by a session state.
+    fn of(state: &PeripheralSessionState) -> Self {
+        match state {
+            PeripheralSessionState::Uart(_) => Self::Uart,
+            PeripheralSessionState::Gpio(_) => Self::Gpio,
+            PeripheralSessionState::Timer(_) => Self::Timer,
+        }
+    }
+
+    /// Human-readable name, for the error messages.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Uart => "UART",
+            Self::Gpio => "GPIO",
+            Self::Timer => "定时器",
+        }
+    }
+}
+
+/// Check that a session state names **this** instance.
+///
+/// The id inside the payload is the peripheral's own — a state that
+/// names a *different* peripheral was handed to the wrong instance
+/// (or the payload was built by hand). Applying it would move one
+/// peripheral's state into another: the kind of corruption that is
+/// invisible until the firmware misbehaves.
+pub(crate) fn check_same_id(expected: &str, got: &str) -> Result<(), PlatformError> {
+    if expected == got {
+        return Ok(());
+    }
+    Err(PlatformError::new(
+        PERIPHERAL_FAMILY,
+        E_PER_05_PERIPHERAL_SET_MISMATCH,
+        format!("会话状态里的外设 id 是 '{got}'，但被交给了 '{expected}'"),
+    ))
+}
+
+/// Build the "this peripheral cannot take that state" error.
+///
+/// Reuses the contract's default-implementation code (the trait's
+/// `restore_session_state` default rejects with scenario 4) — the
+/// scenario is the same one: *this peripheral does not accept this
+/// session state*.
+pub(crate) fn wrong_state_kind(
+    periph_id: &str,
+    expected: SessionKind,
+    got: SessionKind,
+) -> PlatformError {
+    PlatformError::new(
+        PERIPHERAL_FAMILY,
+        E_PER_04_UNSUPPORTED_SESSION_STATE,
+        format!(
+            "外设 '{periph_id}' 是{}，却收到了{}的状态",
+            expected.name(),
+            got.name()
+        ),
+    )
 }
 
 /// Error returned by [`PeripheralRegistry::register`] when an id
@@ -229,6 +507,31 @@ impl std::error::Error for RegisterError {}
 
 /// Family used by errors raised from this module.
 pub const PERIPHERAL_FAMILY: ErrorFamily = ErrorFamily::Peripheral;
+
+/// Scenario code: this peripheral cannot accept the given session
+/// state — the state belongs to a **different kind** of peripheral, or
+/// it is malformed (e.g. a GPIO state with the wrong number of IRQ
+/// lines).
+///
+/// ⚠️ The **same** code the contract's default implementation of
+/// [`Peripheral::restore_session_state`] uses (scenario 4): the
+/// scenario is literally the same one — *this peripheral does not
+/// accept this session state*.
+pub const E_PER_04_UNSUPPORTED_SESSION_STATE: u16 = 4;
+
+/// Scenario code: the session payload's peripheral id set does not
+/// match the live instances.
+///
+/// Two directions, one code (the message says which):
+///
+/// - the payload describes a peripheral that is **not** live;
+/// - a live peripheral that participates in the session state is
+///   **not** described by the payload.
+///
+/// ⚠️ Skipping either side would leave the restored session
+/// **different** from the captured one — and *silently*: nobody would
+/// ever learn that a peripheral's state was dropped (STAGE-3 §3.3).
+pub const E_PER_05_PERIPHERAL_SET_MISMATCH: u16 = 5;
 
 #[cfg(test)]
 mod tests;

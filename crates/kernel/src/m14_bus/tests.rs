@@ -8,6 +8,7 @@
 use super::*;
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
 use riscv_sim_contract::port::Peripheral;
+use riscv_sim_contract::session::{M14MapDto, MemPageDto, RegionDto};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -810,4 +811,577 @@ fn the_cap_also_guards_the_peripheral_window() {
         .map_peripheral_instance(0x3000, 0x10, Rc::clone(&mock) as _)
         .expect_err("over-cap peripheral window must be rejected");
     assert_eq!(err.scenario, 9);
+}
+
+// ---------------------------------------------------------------------------
+// Session snapshot (STAGE-3 §3.2) — segment 2 (memory pages) and
+// segment 3 (memory-map topology).
+// ---------------------------------------------------------------------------
+
+/// The expected page-chunk size, spelled **literally**.
+///
+/// ⚠️ Deliberately **not** `MEM_PAGE_CHUNK_BYTES`: an assertion that
+/// quotes the implementation's own constant cannot tell "the behaviour
+/// changed" from "the behaviour stayed" — it moves with the
+/// implementation (the D-73 lesson). A literal turns a change of the
+/// chunk size red.
+const EXPECTED_PAGE_CHUNK: usize = 64 * 1024;
+
+/// A bus with one RAM region, one ROM region and one **bound**
+/// peripheral window — the shape every test below starts from.
+fn bus_with_all_region_kinds() -> (Bus, Rc<RefCell<MockPeripheral>>) {
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10, &[0xAA; 0x10]).expect("ram");
+    bus.map_rom(0x2000, 0x10, &[0xBB; 0x10]).expect("rom");
+    let mock = Rc::new(RefCell::new(MockPeripheral::new("MOCK0", 0x3000, 0x10)));
+    bus.map_peripheral_instance(0x3000, 0x10, Rc::clone(&mock) as _)
+        .expect("peripheral");
+    (bus, mock)
+}
+
+#[test]
+fn export_pages_covers_the_ram_content_only() {
+    // ROM content travels with the firmware (an *input* of a session),
+    // a peripheral window holds no memory at all — segment 2 is the
+    // RAM content and nothing else.
+    let (bus, _mock) = bus_with_all_region_kinds();
+    let pages = bus.export_pages();
+    assert_eq!(pages.len(), 1, "only the RAM region carries content");
+    assert_eq!(pages[0].base, 0x1000);
+    assert_eq!(pages[0].bytes, vec![0xAAu8; 0x10]);
+}
+
+#[test]
+fn export_pages_chunks_a_region_larger_than_one_page() {
+    let mut bus = Bus::new();
+    let size = EXPECTED_PAGE_CHUNK * 2 + 17;
+    let init: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    bus.map_ram(0x1000, size as u32, &init).expect("ram");
+
+    let pages = bus.export_pages();
+    assert_eq!(pages.len(), 3, "a region larger than one page is chunked");
+    for p in &pages {
+        assert!(
+            p.bytes.len() <= EXPECTED_PAGE_CHUNK,
+            "a page must not exceed the chunk size (got {})",
+            p.bytes.len()
+        );
+    }
+    assert_eq!(pages[0].base, 0x1000);
+    assert_eq!(pages[1].base, 0x1000 + EXPECTED_PAGE_CHUNK as u32);
+    assert_eq!(pages[2].base, 0x1000 + 2 * EXPECTED_PAGE_CHUNK as u32);
+    assert_eq!(pages[2].bytes.len(), 17, "the last page may be shorter");
+    let joined: Vec<u8> = pages.iter().flat_map(|p| p.bytes.iter().copied()).collect();
+    assert_eq!(
+        joined, init,
+        "the chunks must concatenate back to the region"
+    );
+}
+
+#[test]
+fn export_pages_then_load_pages_restores_the_content() {
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x40, &[]).expect("ram");
+    bus.load_bytes(0x1000, &[1, 2, 3, 4, 5, 6, 7, 8])
+        .expect("write the pattern");
+    let pages = bus.export_pages();
+
+    // Wipe the RAM — only a real restore can bring the bytes back.
+    bus.load_bytes(0x1000, &[0u8; 8]).expect("wipe");
+    assert_eq!(bus.read_only(0x1000, BusWidth::Word).unwrap(), 0);
+
+    bus.load_pages(&pages).expect("load");
+    assert_eq!(
+        bus.read_only(0x1000, BusWidth::Word).unwrap(),
+        0x0403_0201,
+        "the first word must be restored"
+    );
+    assert_eq!(
+        bus.read_only(0x1004, BusWidth::Word).unwrap(),
+        0x0807_0605,
+        "the second word must be restored"
+    );
+}
+
+#[test]
+fn load_pages_writes_a_page_at_its_own_offset_inside_the_region() {
+    // A page that does not start at the region's base must land at its
+    // own address — not at the region's start.
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x40, &[]).expect("ram");
+    bus.load_bytes(0x1010, &[0xDE, 0xAD, 0xBE, 0xEF])
+        .expect("write");
+    let page = MemPageDto {
+        base: 0x1010,
+        bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
+    };
+    bus.load_pages(&[page]).expect("load");
+    assert_eq!(
+        bus.read_only(0x1010, BusWidth::Word).unwrap(),
+        0xEFBE_ADDE,
+        "the page must land at its own address"
+    );
+    assert_eq!(
+        bus.read_only(0x1000, BusWidth::Word).unwrap(),
+        0,
+        "the region start must be untouched"
+    );
+}
+
+#[test]
+fn load_pages_rejects_a_page_outside_every_ram_region() {
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10, &[0xAA; 0x10]).expect("ram");
+    let err = bus
+        .load_pages(&[MemPageDto {
+            base: 0x9000,
+            bytes: vec![1, 2, 3],
+        }])
+        .expect_err("a page outside every RAM region must be rejected");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(
+        err.scenario, E_BUS_11_PAGE_OUTSIDE_RAM,
+        "an uncovered page must yield E_BUS-11"
+    );
+}
+
+#[test]
+fn load_pages_fails_when_the_memory_map_was_not_loaded() {
+    // STAGE-3 §6 #11: `load_pages` without `load_map` must **fail** —
+    // there is no region to write into, and dropping the content
+    // silently would restore a different session.
+    let mut bus = Bus::new();
+    let err = bus
+        .load_pages(&[MemPageDto {
+            base: 0x1000,
+            bytes: vec![1, 2, 3],
+        }])
+        .expect_err("loading pages without a map must fail");
+    assert_eq!(err.scenario, E_BUS_11_PAGE_OUTSIDE_RAM);
+}
+
+#[test]
+fn load_pages_rejects_a_page_that_runs_past_its_region() {
+    // The page *starts* inside the RAM region but runs past its end:
+    // clipping it would restore a different memory image.
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10, &[0xAA; 0x10]).expect("ram");
+    let err = bus
+        .load_pages(&[MemPageDto {
+            base: 0x1008,
+            bytes: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        }])
+        .expect_err("a page past the region end must be rejected");
+    assert_eq!(err.scenario, E_BUS_11_PAGE_OUTSIDE_RAM);
+}
+
+#[test]
+fn load_pages_writes_nothing_when_one_page_is_rejected() {
+    // "Validate before apply" (STAGE-3 §5): a half-applied restore is
+    // worse than a rejected one.
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10, &[0xAA; 0x10]).expect("ram");
+    let err = bus
+        .load_pages(&[
+            MemPageDto {
+                base: 0x1000,
+                bytes: vec![0x11; 4],
+            },
+            MemPageDto {
+                base: 0x9000,
+                bytes: vec![0x22; 4],
+            },
+        ])
+        .expect_err("the second page is uncovered");
+    assert_eq!(err.scenario, E_BUS_11_PAGE_OUTSIDE_RAM);
+    assert_eq!(
+        bus.read_only(0x1000, BusWidth::Word).unwrap(),
+        0xAAAA_AAAA,
+        "the first (valid) page must not have been written"
+    );
+}
+
+#[test]
+fn export_map_lists_every_region_in_base_order() {
+    let (bus, _mock) = bus_with_all_region_kinds();
+    let map = bus.export_map();
+    assert_eq!(map.regions.len(), 3);
+    assert_eq!(map.regions[0].base, 0x1000);
+    assert_eq!(map.regions[0].kind, "ram");
+    assert_eq!(map.regions[0].target, "", "a RAM region has no target");
+    assert_eq!(map.regions[1].base, 0x2000);
+    assert_eq!(map.regions[1].kind, "rom");
+    assert_eq!(map.regions[1].target, "", "a ROM region has no target");
+    assert_eq!(map.regions[2].base, 0x3000);
+    assert_eq!(
+        map.regions[2].kind, "peripheral",
+        "the kind is the lower-case string, not an enum ordinal"
+    );
+    assert_eq!(
+        map.regions[2].target, "MOCK0",
+        "the target is the peripheral's own id"
+    );
+}
+
+#[test]
+fn load_map_rebuilds_the_ram_region_and_zeroes_its_content() {
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10, &[0xAA; 0x10]).expect("ram");
+
+    let map = M14MapDto {
+        regions: vec![RegionDto {
+            base: 0x1000,
+            size: 0x10,
+            kind: "ram".to_string(),
+            target: String::new(),
+        }],
+    };
+    bus.load_map(&map).expect("load_map");
+
+    let ram = bus.lookup(0x1000).expect("the RAM region must be rebuilt");
+    assert_eq!(ram.size, 0x10);
+    assert_eq!(ram.kind, RegionType::Ram);
+    assert_eq!(
+        bus.read_only(0x1000, BusWidth::Word).unwrap(),
+        0,
+        "the rebuilt RAM starts zeroed (the content travels in segment 2)"
+    );
+}
+
+#[test]
+fn load_map_rebuilds_the_rom_region_and_keeps_its_content() {
+    // ⚠️ The ROM content is **not** in the payload (it travels with the
+    // firmware — STAGE-3 §3.1 / §7), so rebuilding the ROM region
+    // zeroed would **erase the firmware**: the restored session would
+    // fault on its very first instruction. The content of the region
+    // that is on the bus must survive the rebuild, byte for byte.
+    let mut bus = Bus::new();
+    let firmware: Vec<u8> = (0..0x10u8).collect();
+    bus.map_rom(0x2000, 0x10, &firmware).expect("rom");
+
+    let map = M14MapDto {
+        regions: vec![RegionDto {
+            base: 0x2000,
+            size: 0x10,
+            kind: "rom".to_string(),
+            target: String::new(),
+        }],
+    };
+    bus.load_map(&map).expect("load_map");
+
+    let rom = bus.lookup(0x2000).expect("the ROM region must be rebuilt");
+    assert_eq!(rom.size, 0x10);
+    assert_eq!(rom.kind, RegionType::Rom);
+    // Read the whole region back, byte for byte.
+    for (i, byte) in firmware.iter().enumerate() {
+        assert_eq!(
+            bus.read_only(0x2000 + i as u32, BusWidth::Byte).unwrap(),
+            u32::from(*byte),
+            "the ROM content must survive the rebuild (byte {i})"
+        );
+    }
+}
+
+#[test]
+fn load_map_rejects_a_rom_topology_mismatch() {
+    // The ROM content is carried over **by region identity**: a payload
+    // whose ROM region has a different size has no counterpart to take
+    // the content from — the restore is rejected, and nothing is
+    // written (not even the RAM).
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10, &[0xAA; 0x10]).expect("ram");
+    bus.map_rom(0x2000, 0x10, &[0xBB; 0x10]).expect("rom");
+
+    let map = M14MapDto {
+        regions: vec![
+            RegionDto {
+                base: 0x1000,
+                size: 0x10,
+                kind: "ram".to_string(),
+                target: String::new(),
+            },
+            RegionDto {
+                base: 0x2000,
+                size: 0x20,
+                kind: "rom".to_string(),
+                target: String::new(),
+            },
+        ],
+    };
+    let err = bus
+        .load_map(&map)
+        .expect_err("a ROM size mismatch must be rejected");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(
+        err.scenario, E_BUS_12_ROM_TOPOLOGY_MISMATCH,
+        "a ROM topology mismatch must yield E_BUS-12"
+    );
+    assert_eq!(
+        bus.read_only(0x2000, BusWidth::Word).unwrap(),
+        0xBBBB_BBBB,
+        "a rejected map must not touch the ROM content"
+    );
+    assert_eq!(
+        bus.read_only(0x1000, BusWidth::Word).unwrap(),
+        0xAAAA_AAAA,
+        "a rejected map must not touch the RAM content"
+    );
+}
+
+#[test]
+fn load_map_rejects_a_rom_region_that_is_not_on_the_bus() {
+    // The payload's ROM region has no counterpart to take the content
+    // from — rebuilding it would produce an empty ROM.
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10, &[0xAA; 0x10]).expect("ram");
+
+    let map = M14MapDto {
+        regions: vec![
+            RegionDto {
+                base: 0x1000,
+                size: 0x10,
+                kind: "ram".to_string(),
+                target: String::new(),
+            },
+            RegionDto {
+                base: 0x2000,
+                size: 0x10,
+                kind: "rom".to_string(),
+                target: String::new(),
+            },
+        ],
+    };
+    let err = bus
+        .load_map(&map)
+        .expect_err("a ROM region with no counterpart must be rejected");
+    assert_eq!(err.scenario, E_BUS_12_ROM_TOPOLOGY_MISMATCH);
+    assert_eq!(
+        bus.read_only(0x1000, BusWidth::Word).unwrap(),
+        0xAAAA_AAAA,
+        "a rejected map must not touch the RAM content"
+    );
+}
+
+#[test]
+fn load_map_rejects_a_rom_region_the_payload_does_not_mention() {
+    // The other direction: a ROM region on the bus that the payload
+    // does not describe would be dropped by the rebuild — the firmware
+    // would be lost silently.
+    let mut bus = Bus::new();
+    bus.map_rom(0x2000, 0x10, &[0xBB; 0x10]).expect("rom");
+
+    let map = M14MapDto {
+        regions: vec![RegionDto {
+            base: 0x1000,
+            size: 0x10,
+            kind: "ram".to_string(),
+            target: String::new(),
+        }],
+    };
+    let err = bus
+        .load_map(&map)
+        .expect_err("a ROM region missing from the payload must be rejected");
+    assert_eq!(err.scenario, E_BUS_12_ROM_TOPOLOGY_MISMATCH);
+    assert_eq!(
+        bus.read_only(0x2000, BusWidth::Word).unwrap(),
+        0xBBBB_BBBB,
+        "a rejected map must not touch the ROM content"
+    );
+}
+
+#[test]
+fn load_map_keeps_the_peripheral_regions_in_place() {
+    // ⚠️ A peripheral region is an **input** of the session (the host
+    // binds the live instances from the firmware). `load_map` must
+    // neither delete nor rebuild it — a restored bus without its
+    // peripheral window would fault on the firmware's next access and
+    // the session would silently diverge.
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10, &[0xAA; 0x10]).expect("ram");
+    let mock = Rc::new(RefCell::new(MockPeripheral::new("MOCK0", 0x3000, 0x10)));
+    bus.map_peripheral_instance(0x3000, 0x10, Rc::clone(&mock) as _)
+        .expect("peripheral");
+
+    let map = M14MapDto {
+        regions: vec![RegionDto {
+            base: 0x1000,
+            size: 0x10,
+            kind: "ram".to_string(),
+            target: String::new(),
+        }],
+    };
+    bus.load_map(&map).expect("load_map");
+
+    assert_eq!(
+        bus.region_count(),
+        2,
+        "the peripheral region must survive load_map (RAM + peripheral)"
+    );
+    let bound = bus
+        .peripheral_at(0x3000)
+        .expect("the peripheral window must still be mapped");
+    assert_eq!(
+        bound.instance_id().as_deref(),
+        Some("MOCK0"),
+        "the kept window is still bound to the same instance"
+    );
+
+    // … and it still dispatches into that very instance.
+    bus.write(0x3000, BusWidth::Word, 0x1234_5678)
+        .expect("the kept window must still dispatch");
+    assert_eq!(
+        mock.borrow().writes.get(),
+        1,
+        "the instance must be reached"
+    );
+    assert_eq!(
+        mock.borrow().last_write.get().map(|w| w.2),
+        Some(0x1234_5678),
+        "the value must arrive unchanged"
+    );
+}
+
+#[test]
+fn load_map_rejects_an_unknown_region_kind() {
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10, &[0xAA; 0x10]).expect("ram");
+    let map = M14MapDto {
+        regions: vec![RegionDto {
+            base: 0x8000,
+            size: 0x10,
+            kind: "sprite".to_string(),
+            target: String::new(),
+        }],
+    };
+    let err = bus
+        .load_map(&map)
+        .expect_err("an unknown kind must be rejected");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(err.scenario, E_BUS_10_INVALID_REGION_KIND);
+    assert_eq!(
+        bus.region_count(),
+        1,
+        "a rejected map must leave the bus untouched"
+    );
+    assert_eq!(
+        bus.read_only(0x1000, BusWidth::Word).unwrap(),
+        0xAAAA_AAAA,
+        "a rejected map must not touch the RAM content"
+    );
+}
+
+#[test]
+fn load_map_rejects_overlapping_regions() {
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10, &[0xAA; 0x10]).expect("ram");
+    let map = M14MapDto {
+        regions: vec![
+            RegionDto {
+                base: 0x8000,
+                size: 0x20,
+                kind: "ram".to_string(),
+                target: String::new(),
+            },
+            RegionDto {
+                base: 0x8010,
+                size: 0x20,
+                kind: "ram".to_string(),
+                target: String::new(),
+            },
+        ],
+    };
+    let err = bus
+        .load_map(&map)
+        .expect_err("overlapping regions must be rejected");
+    assert_eq!(err.scenario, 3, "overlap must yield E_BUS-03");
+    assert_eq!(
+        bus.region_count(),
+        1,
+        "a rejected map must leave the bus untouched"
+    );
+}
+
+#[test]
+fn load_map_rejects_a_region_overlapping_a_kept_peripheral_window() {
+    // The peripheral window stays in place — a rebuilt region may not
+    // land on top of it.
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10, &[0xAA; 0x10]).expect("ram");
+    let mock = Rc::new(RefCell::new(MockPeripheral::new("MOCK0", 0x3000, 0x10)));
+    bus.map_peripheral_instance(0x3000, 0x10, Rc::clone(&mock) as _)
+        .expect("peripheral");
+
+    let map = M14MapDto {
+        regions: vec![RegionDto {
+            base: 0x3000,
+            size: 0x10,
+            kind: "ram".to_string(),
+            target: String::new(),
+        }],
+    };
+    let err = bus
+        .load_map(&map)
+        .expect_err("a region over the kept peripheral window must be rejected");
+    assert_eq!(err.scenario, 3, "overlap must yield E_BUS-03");
+    assert_eq!(
+        bus.region_count(),
+        2,
+        "a rejected map must leave the bus untouched"
+    );
+}
+
+#[test]
+fn export_map_then_load_map_round_trips_the_topology() {
+    let (source, _mock) = bus_with_all_region_kinds();
+    let map = source.export_map();
+
+    // The restore target is a bus built from the **same firmware**: its
+    // ROM region is there, with the same base and size — that is where
+    // the ROM content comes from (the payload does not carry it).
+    let mut target = Bus::new();
+    target.map_ram(0x1000, 0x10, &[0xAA; 0x10]).expect("ram");
+    target.map_rom(0x2000, 0x10, &[0xBB; 0x10]).expect("rom");
+
+    target.load_map(&map).expect("load_map");
+
+    // The RAM / ROM part of the topology must round-trip exactly.
+    let rebuilt: Vec<(u32, u32, String)> = target
+        .regions()
+        .map(|(_, r)| (r.base, r.size, region_kind_tag(r.kind)))
+        .collect();
+    assert_eq!(
+        rebuilt,
+        vec![
+            (0x1000, 0x10, "ram".to_string()),
+            (0x2000, 0x10, "rom".to_string()),
+        ],
+        "the rebuilt topology must match the exported one (minus the \
+         peripheral window, which is an input and stays in place)"
+    );
+    assert_eq!(
+        target.region_count(),
+        2,
+        "the peripheral window is not rebuilt — it is an input"
+    );
+    assert_eq!(
+        target.read_only(0x2000, BusWidth::Word).unwrap(),
+        0xBBBB_BBBB,
+        "the ROM content survives the round trip"
+    );
+    assert_eq!(
+        target.read_only(0x1000, BusWidth::Word).unwrap(),
+        0,
+        "the RAM is zeroed — its content travels in segment 2"
+    );
+}
+
+/// The wire tag of a region kind — the same lower-case strings the
+/// payload carries. Spelled out here so the test does not quote the
+/// implementation's own constants.
+fn region_kind_tag(kind: RegionType) -> String {
+    match kind {
+        RegionType::Ram => "ram".to_string(),
+        RegionType::Rom => "rom".to_string(),
+        RegionType::Peripheral => "peripheral".to_string(),
+    }
 }

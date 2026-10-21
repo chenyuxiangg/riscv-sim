@@ -27,6 +27,7 @@
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
 use riscv_sim_contract::port::{Peripheral, ProbeSink};
+use riscv_sim_contract::session::{PeripheralSessionState, UartStateDto};
 
 use super::reg::{extract_subword, register_offset};
 use super::ProbeSlot;
@@ -269,6 +270,56 @@ impl Peripheral for Uart16550 {
     /// Install / replace the M-18 probe callback (D-12).
     fn on_probe(&mut self, cb: Option<ProbeSink>) {
         self.probe.set(cb);
+    }
+
+    /// This UART's share of the **session snapshot** (segment 4 —
+    /// STAGE-3 §3.3).
+    ///
+    /// Every field the UART owns is exported: the two 1-byte FIFOs, the
+    /// latched STATUS register (including the overrun flags), the IRQ
+    /// line and the peripheral's **authoritative virtual time**.
+    ///
+    /// ⚠️ `now_ps` is not decoration: it is the timestamp the probe
+    /// reports are stamped with. Losing it would make every edge that
+    /// follows the restore land on the wrong point of the time axis.
+    fn session_state(&self) -> Option<PeripheralSessionState> {
+        Some(PeripheralSessionState::Uart(UartStateDto {
+            id: self.id.clone(),
+            tx: self.tx,
+            rx: self.rx,
+            status: self.status,
+            irq_line: self.irq_line,
+            now_ps: self.now_ps,
+        }))
+    }
+
+    /// Restore the UART's session state (segment 4's consumer).
+    ///
+    /// **Every** field is restored — the FIFOs, the latched STATUS
+    /// register, the IRQ line and `now_ps`.
+    ///
+    /// ⚠️ STATUS is restored **as it was captured**, not recomputed
+    /// from the FIFOs: the captured value is the register the guest
+    /// reads, and recomputing it would silently rewrite the overrun
+    /// flags the firmware has not cleared yet.
+    fn restore_session_state(
+        &mut self,
+        state: &PeripheralSessionState,
+    ) -> Result<(), PlatformError> {
+        let PeripheralSessionState::Uart(s) = state else {
+            return Err(super::wrong_state_kind(
+                &self.id,
+                super::SessionKind::Uart,
+                super::SessionKind::of(state),
+            ));
+        };
+        super::check_same_id(&self.id, &s.id)?;
+        self.tx = s.tx;
+        self.rx = s.rx;
+        self.status = s.status;
+        self.irq_line = s.irq_line;
+        self.now_ps = s.now_ps;
+        Ok(())
     }
 }
 
