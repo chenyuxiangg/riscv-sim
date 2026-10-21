@@ -260,6 +260,23 @@ export const Command = Object.freeze({
 // Event payloads — `protocol::EventPayload`
 // ---------------------------------------------------------------------------
 
+/**
+ * `model::DeltaRegister { index, value }` — one changed register inside
+ * `EventPayload::SimStateDelta` (contract v2 spec §4.4).
+ *
+ * The DTO is **nested** inside the event payload, so the contract gate
+ * has to look at it explicitly: the variant-level field check only sees
+ * the **outer** `registers` field and never descends into the elements
+ * (F3).
+ *
+ * @param {number} index — register index (0..=31)
+ * @param {number} value — the new value
+ * @returns {{index: number, value: number}}
+ */
+export function deltaRegister(index, value) {
+    return { index: Number(index), value: Number(value) >>> 0 };
+}
+
 /** Event payload builders. Same shape rule as `Command`. */
 export const Event = Object.freeze({
     /** `EventPayload::Tick { elapsed_ps, pc }` — `elapsed_ps` 走十进制字符串。 */
@@ -299,10 +316,7 @@ export const Event = Object.freeze({
      */
     simStateDelta: (registers, pc, tPs) => ({
         SimStateDelta: {
-            registers: (registers ?? []).map((r) => ({
-                index: Number(r?.index),
-                value: Number(r?.value) >>> 0,
-            })),
+            registers: (registers ?? []).map((r) => deltaRegister(r?.index, r?.value)),
             pc: pc === null || pc === undefined ? null : Number(pc),
             t_ps: ps(tPs),
         },
