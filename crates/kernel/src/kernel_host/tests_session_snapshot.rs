@@ -49,6 +49,24 @@ const DEMO_FIRST_WORD: u32 = 0x02a0_0093;
 /// demo 固件里 GPIO `OUT` 寄存器的偏移（M-15 `gpio::reg::OUT`）。
 const GPIO_OUT_OFFSET: u32 = 4;
 
+/// 测试用 UART 挂到总线上的基址（默认内存图上那块地址是空的）。
+const TEST_UART_BASE: u32 = 0x2000_0000;
+
+/// 给宿主挂一个 **UART**（默认内存图上只有 GPIO）。
+///
+/// ⚠️ **为什么需要它**：契约层**不认识** UART 的状态位语义，所以「外设
+/// 状态畸形」里有一类**只有外设自己**查得出来。宿主级的用例要能对
+/// **第二层闸门**（外设自己的只读校验）敏感，就需要这样一种畸形。
+fn attach_uart(host: &mut KernelHost, base: u32) {
+    let uart = crate::m15_peripheral::share(crate::m15_peripheral::Uart16550::new(
+        "UART0", base, 9600, 4,
+    ));
+    host.backend
+        .bus_mut()
+        .map_peripheral_instance(base, crate::m15_peripheral::uart::UART_WINDOW, uart)
+        .expect("把 UART 挂到总线上");
+}
+
 /// 造一个挂着 demo 固件的工程。
 ///
 /// ⚠️ **工程构造照抄** `tests.rs` 的 `demo_project()`——那份是**另一个
@@ -116,6 +134,27 @@ fn write_gpio_out(host: &mut KernelHost, value: u32) {
     );
 }
 
+/// 往 **RAM** 里写一个值（用来制造**总线的现场漂移**）。
+///
+/// ⚠️ 必须落在 **RAM**（不是外设窗口）：这条漂移要证明的是「**总线**
+/// 一个字节都不许动」，所以它必须落在**总线导出的那几页**里。
+fn write_ram(host: &mut KernelHost, addr: u32, value: u32) {
+    let events = host.handle_message(&Message::command(
+        10,
+        CommandPayload::WriteMemory {
+            addr,
+            size: WriteSize::Word,
+            value,
+        },
+    ));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Error { .. })),
+        "写 RAM 必须成功：{events:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 工作项 A —— 中断汇真的委派给 M-16 的控制器
 // ---------------------------------------------------------------------------
@@ -156,11 +195,17 @@ fn the_interrupt_sink_delegates_to_the_controller() {
     );
 }
 
-/// 委派**不许 panic**：拿不到控制器就**记一次失败**并返回 `Ok(())`。
+/// 委派**不许 panic**：拿不到控制器就**记一次失败**并返回 `Err`。
 ///
 /// ⚠️ M-14 的总线 hook 在 `RefCell` 争用下 panic 是本项目**已经修过**的
 /// 坑（V-A 检视 F-3）——同一个坑不许踩第二次。所以这条用例**主动制造
 /// 争用**：控制器被借住的时候再 `raise`。
+///
+/// ⚠️ **同一个失败条件必须是同一个口径**（V-A 检视 F-2）：委派路径原来
+/// 返回 `Ok(())`——引擎于是以为这条 IRQ 拉起来了，其实它被丢了；而回灌
+/// 路径对同一个争用返回 `Err`。一个量两个真相，下一个接线「M-15 pending
+/// IRQ → `intc.raise()`」的人会直接踩上那个哑掉的口子。所以现在统一成
+/// **报错**。
 #[test]
 fn the_interrupt_delegation_never_panics_under_contention() {
     let mut host = KernelHost::new();
@@ -170,12 +215,16 @@ fn the_interrupt_delegation_never_panics_under_contention() {
     // `host` 借走，之后就没法再 `&mut host` 了。
     let intc = Rc::clone(&host.intc);
     let borrowed = intc.controller.borrow_mut();
-    // 这一行**必须**返回 `Ok(())` 而不是 panic —— `unwrap` / `borrow_mut`
-    // 硬取在这里就是踩 F-3 那个坑。
-    let result = host.raise_irq(5);
-    assert!(
-        result.is_ok(),
-        "争用时委派必须返回 Ok(())（失败由计数器暴露），不能是错误、更不能 panic"
+    // 这一行**必须**返回 `Err` 而不是 panic —— `unwrap` / `borrow_mut`
+    // 硬取在这里就是踩 F-3 那个坑；而返回 `Ok(())` 则是踩 F-2 那个坑
+    // （谎报成功）。
+    let err = host
+        .raise_irq(5)
+        .expect_err("争用时委派必须返回 Err——这条 IRQ 行没有被拉起");
+    assert_eq!(err.family, ErrorFamily::Interrupt, "族必须是 INT");
+    assert_eq!(
+        err.scenario, E_INT_01_CONTROLLER_BUSY,
+        "必须是 E_INT-01（控制器忙）"
     );
     assert_eq!(
         host.intc_delegation_failures(),
@@ -188,6 +237,35 @@ fn the_interrupt_delegation_never_panics_under_contention() {
         Vec::<u16>::new(),
         "争用时那次 raise 确实没有落到控制器上"
     );
+}
+
+/// ⚠️ **两条路径同口径**：**回灌**路径上的争用也返回 `Err` + 计数 +1。
+///
+/// 这条是上面那条的**对偶**：同一个失败条件（控制器被占着），两条路径
+/// 必须给出**同一种**结果。少一条，这两条路径就会重新分叉——而分叉的
+/// 代价是「同一个量两个真相」。
+#[test]
+fn the_restore_path_reports_the_same_contention_error_as_the_delegate_path() {
+    let mut host = host_with_demo(4);
+    let payload = host.capture_session(meta());
+    let before = host.intc_delegation_failures();
+
+    let intc = Rc::clone(&host.intc);
+    let borrowed = intc.controller.borrow_mut();
+    let err = host
+        .restore_session(&payload)
+        .expect_err("控制器被占着时回灌必须报错");
+    assert_eq!(err.family, ErrorFamily::Interrupt, "族必须是 INT");
+    assert_eq!(
+        err.scenario, E_INT_01_CONTROLLER_BUSY,
+        "必须是 E_INT-01（控制器忙）——与委派路径同一个码"
+    );
+    assert_eq!(
+        host.intc_delegation_failures(),
+        before + 1,
+        "回灌路径的争用也必须被记成一次失败——两条路径同口径"
+    );
+    drop(borrowed);
 }
 
 // ---------------------------------------------------------------------------
@@ -208,8 +286,32 @@ fn capture_session_assembles_the_six_segments_from_their_sources() {
         "会话载荷的版本号必须由 M-20 钉死"
     );
 
-    // 段 0 —— 调用方给的那一份，原样落位。
-    assert_eq!(payload.cp_meta, meta(), "段 0 必须原样落位");
+    // 段 0 —— 调用方给的那一份，**除了 `t_virt`**（宿主代填）。
+    assert_eq!(
+        payload.cp_meta.id,
+        meta().id,
+        "段 0 的检查点 id 必须原样落位"
+    );
+    assert_eq!(
+        payload.cp_meta.t_host,
+        meta().t_host,
+        "段 0 的宿主时间必须原样落位"
+    );
+    assert_eq!(
+        payload.cp_meta.base_seq,
+        meta().base_seq,
+        "段 0 的基线序列号必须原样落位"
+    );
+    assert_eq!(
+        payload.cp_meta.version,
+        meta().version,
+        "段 0 的版本号必须原样落位"
+    );
+    assert_eq!(
+        payload.cp_meta.t_virt,
+        4 * INSTRUCTION_COST_PS,
+        "段 0 的 `t_virt` 必须由宿主代填成引擎的虚拟时间（调用方给的 12345 被覆盖）"
+    );
 
     // 段 1 —— M-12 引擎段。
     assert_eq!(
@@ -313,6 +415,56 @@ fn capture_session_carries_the_raised_irq_lines() {
     payload.validate().expect("带 IRQ 行的载荷也必须自洽");
 }
 
+/// ⚠️ 宿主**代填**段 0 的 `t_virt`——**调用方给的值被覆盖**。
+///
+/// ## 为什么
+///
+/// 载荷里有**两个**「虚拟时间」：`cp_meta.t_virt` 与
+/// `m12_engine.state.virtual_time_ps`。它们是**同一个量**。留两个落点
+/// 就是「同一个量两个真相」——恢复时必须挑赢家，输家默默腐烂（这个项目
+/// 已经吃过好几次亏：D-73 的自指断言、D-53 的静默降级）。
+///
+/// 宿主**代填**它，因为它**就是**引擎的虚拟时间——这不是「造数据」。
+///
+/// ## 判别式
+///
+/// 夹具**故意**传一个**不同的** `t_virt`（`12_345`），而引擎的时间是
+/// `4 * INSTRUCTION_COST_PS`（`4_000`）。断言的是**被覆盖成引擎的时间**
+/// ——只断言「等于某个数」的话，忘了代填也可能凑巧对上。
+#[test]
+fn capture_session_fills_in_the_checkpoint_virtual_time() {
+    let mut host = host_with_demo(4);
+    let caller = CheckpointMetaDto {
+        id: 3,
+        t_virt: 12_345,
+        t_host: 7,
+        base_seq: 1,
+        version: SESSION_SNAPSHOT_SCHEMA_VERSION,
+    };
+    let payload = host.capture_session(caller);
+
+    assert_eq!(
+        payload.cp_meta.t_virt,
+        host.engine_snapshot().state.virtual_time_ps,
+        "段 0 的 `t_virt` 必须等于引擎的虚拟时间"
+    );
+    assert_eq!(
+        payload.cp_meta.t_virt,
+        4 * INSTRUCTION_COST_PS,
+        "夹具：跑了 4 条指令之后引擎的虚拟时间必须是 4 个指令成本"
+    );
+    assert_ne!(
+        payload.cp_meta.t_virt, 12_345,
+        "调用方给的 `t_virt` 必须被覆盖——否则同一个量有两个落点"
+    );
+
+    // 段 0 的**其余**字段仍然是调用方给的，宿主不改写。
+    assert_eq!(payload.cp_meta.id, 3);
+    assert_eq!(payload.cp_meta.t_host, 7);
+    assert_eq!(payload.cp_meta.base_seq, 1);
+    assert_eq!(payload.cp_meta.version, SESSION_SNAPSHOT_SCHEMA_VERSION);
+}
+
 // ---------------------------------------------------------------------------
 // 工作项 C —— 恢复：先校验、顺序不可换、失败的那一步不写东西
 // ---------------------------------------------------------------------------
@@ -376,11 +528,17 @@ fn restore_session_rejects_an_unknown_schema_version_without_touching_the_state(
     assert_eq!(host.now_ps(), 4 * INSTRUCTION_COST_PS, "虚拟时间不许动");
 }
 
-/// **含未知外设 id** → 拒，且**外设状态未改**。
+/// **含未知外设 id** → 拒，且**外设状态未改**、**总线未改**。
 ///
 /// ⚠️ 这一条同时钉住了「失败的那一步没有写入任何东西」：外设回灌
 /// （第 3 步）的检查**全在写入之前**跑完，所以它失败时外设一个字段
 /// 都没动。
+///
+/// ⚠️ **总线也必须未改**——这是**只读预检**（第 0.5 步）的判别式：
+/// 恢复链的第 1 / 2 步（`load_map` / `load_pages`）已经写过内存了，
+/// 「外设集合对不上」这种**契约层查不了**的畸形若等到第 3 步才发现，
+/// 失败后的会话就是「内存来自载荷、寄存器来自恢复前」的**拼接体**。
+/// 断言落在**具体字节**上（先制造漂移），所以它有判别力。
 #[test]
 fn restore_session_rejects_an_unknown_peripheral_id_without_touching_the_peripheral_state() {
     let mut host = host_with_demo(8);
@@ -393,6 +551,17 @@ fn restore_session_rejects_an_unknown_peripheral_id_without_touching_the_periphe
 
     let mut payload = host.capture_session(meta());
     payload.m15_periph.gpios[0].id = "NO_SUCH_GPIO".to_string();
+
+    // ⚠️ 制造**总线的现场漂移**：把载荷里那块内存改掉。
+    // 不漂移的话，「载荷没写」与「写了同样的内容」**不可区分**——
+    // 断言会变成恒真式。
+    write_ram(&mut host, DEMO_STORE_ADDR, 0xDEAD);
+    assert_eq!(
+        host.read_memory(DEMO_STORE_ADDR, WriteSize::Word)
+            .expect("read"),
+        0xDEAD,
+        "夹具：漂移必须真的落到 RAM 上"
+    );
 
     let err = host
         .restore_session(&payload)
@@ -408,6 +577,136 @@ fn restore_session_rejects_an_unknown_peripheral_id_without_touching_the_periphe
         7 * INSTRUCTION_COST_PS,
         "失败的那一步没有写入任何东西——外设自己的时钟也不能动"
     );
+    assert_eq!(
+        host.read_memory(DEMO_STORE_ADDR, WriteSize::Word)
+            .expect("read"),
+        0xDEAD,
+        "总线一个字节都不许动——恢复链必须在外设那一步之前就发现外设集合对不上"
+    );
+}
+
+/// ⚠️ **宿主级**：载荷里的**外设状态畸形** → 拒，且**总线一个字节都不许
+/// 动**。
+///
+/// ## 场景
+///
+/// 载荷里有一个合法的外设状态 + 一个**畸形**的（GPIO 的 `irq_lines` 只有
+/// 3 条）。契约层的 [`validate`](riscv_sim_contract::session::SessionSnapshotDto::validate)
+/// 会先把它拒掉（`E_SNAP-06`）——**第一层**闸门。
+///
+/// ## 为什么还要断言总线
+///
+/// 因为「载荷被拒」有两种可能：**载荷被拒了**，或者**载荷被部分应用了**。
+/// 只有断言「总线的**具体字节**没动」才能区分这两者。
+///
+/// ⚠️ 断言必须有**判别力**：所以先在 RAM 上制造**漂移**——不漂移的话，
+/// 「什么都没写」与「写了同样的内容」**不可区分**，断言就成了恒真式。
+#[test]
+fn restore_session_rejects_a_malformed_peripheral_state_without_touching_the_bus() {
+    let mut host = host_with_demo(8);
+    attach_uart(&mut host, TEST_UART_BASE);
+    let mut payload = host.capture_session(meta());
+    assert_eq!(
+        payload.m15_periph.uarts.len(),
+        1,
+        "夹具：载荷里必须有一个**合法**的 UART"
+    );
+    // 畸形：GPIO 的每引脚 IRQ 线只有 3 条（应为 32 条）。
+    payload.m15_periph.gpios[0].irq_lines = vec![1, 2, 3];
+
+    // 漂移：把 RAM 里那块内存改掉。
+    write_ram(&mut host, DEMO_STORE_ADDR, 0xDEAD);
+    assert_eq!(
+        host.read_memory(DEMO_STORE_ADDR, WriteSize::Word)
+            .expect("read"),
+        0xDEAD,
+        "夹具：漂移必须真的落到 RAM 上"
+    );
+
+    let err = host
+        .restore_session(&payload)
+        .expect_err("外设状态畸形的载荷必须被拒");
+    assert_eq!(err.family, ErrorFamily::Snapshot, "族必须是 SNAP");
+    assert_eq!(err.scenario, 6, "必须是 E_SNAP-06（会话载荷畸形）");
+
+    assert_eq!(
+        host.read_memory(DEMO_STORE_ADDR, WriteSize::Word)
+            .expect("read"),
+        0xDEAD,
+        "被拒的载荷不许动总线——一个字都不许动"
+    );
+    assert_eq!(
+        host.read_memory(0, WriteSize::Word).expect("read"),
+        DEMO_FIRST_WORD,
+        "固件也不许被动"
+    );
+    assert_eq!(host.registers()[1], 42, "引擎也不能动");
+}
+
+/// ⚠️ **宿主级 · 第二层闸门**：一种**契约层查不了**的外设状态畸形
+/// （UART 的 STATUS 里出现**未定义的位**）→ 拒，且**总线一个字节都不许
+/// 动**。
+///
+/// ## 为什么这条不能省
+///
+/// 上面那条（畸形的 GPIO）被**契约层**先拒掉了——那是**第一层**闸门。
+/// 要证明**第二层**闸门（外设自己的只读校验）真的在宿主这一级**生效**，
+/// 就必须用一种**契约层看不见**的畸形：契约层认识 UART 状态的**形状**，
+/// 不认识 STATUS 位的**语义**。
+///
+/// ## 判别力
+///
+/// - 载荷里的 UART 状态被改成带**未定义位**的 STATUS；
+/// - RAM 上先制造**漂移**（不漂移的话断言是恒真式）；
+/// - 恢复必须报错（`E_PER-04`），且 RAM 必须还是**漂移后**的那个值。
+///
+/// ⚠️ 少了宿主的**只读预检**（第 0.5 步），恢复链会先跑 `load_map` /
+/// `load_pages` ——**总线已经被写了**，然后才在外设那一步失败：失败后的
+/// 会话是「内存来自载荷、寄存器来自恢复前」的**拼接体**。
+#[test]
+fn restore_session_rejects_a_malformed_uart_state_without_touching_the_bus() {
+    let mut host = host_with_demo(8);
+    attach_uart(&mut host, TEST_UART_BASE);
+    let mut payload = host.capture_session(meta());
+    assert_eq!(
+        payload.m15_periph.uarts.len(),
+        1,
+        "夹具：宿主上必须挂着一个 UART"
+    );
+
+    // 畸形：STATUS 里出现这个模型**从来没有**过的位（0x8000）。
+    payload.m15_periph.uarts[0].status |= 0x8000;
+    // ⚠️ 载荷本身**必须**能过契约层的校验——否则这条用例测的是第一层，
+    // 不是第二层。
+    payload.validate().expect("契约层查不了 UART 的状态位语义");
+
+    // 漂移：把 RAM 里那块内存改掉。
+    write_ram(&mut host, DEMO_STORE_ADDR, 0xDEAD);
+    assert_eq!(
+        host.read_memory(DEMO_STORE_ADDR, WriteSize::Word)
+            .expect("read"),
+        0xDEAD,
+        "夹具：漂移必须真的落到 RAM 上"
+    );
+
+    let err = host
+        .restore_session(&payload)
+        .expect_err("外设状态畸形的载荷必须被拒");
+    assert_eq!(err.family, ErrorFamily::Peripheral, "族必须是 PER");
+    assert_eq!(err.scenario, 4, "必须是 E_PER-04（这个外设不接受这份状态）");
+
+    assert_eq!(
+        host.read_memory(DEMO_STORE_ADDR, WriteSize::Word)
+            .expect("read"),
+        0xDEAD,
+        "被拒的载荷不许动总线——一个字都不许动"
+    );
+    assert_eq!(
+        host.read_memory(0, WriteSize::Word).expect("read"),
+        DEMO_FIRST_WORD,
+        "固件也不许被动"
+    );
+    assert_eq!(host.registers()[1], 42, "引擎也不能动");
 }
 
 /// **第 1 步（区域拓扑）失败** → 总线**一字未改**。
