@@ -309,7 +309,7 @@ const REGISTER_STREAM_PREFIX = "cpu.";
 /**
  * Wire the kernel's probe channels into the waveform view (D-46).
  *
- * 内核侧把探针边沿推成 `EventPayload::WaveformDelta`，**通道列表**和
+ * 内核侧把探针边沿推成 `EventPayload::WaveformHistory`，**通道列表**和
  * **边沿增量**走的是同一个事件形状（契约冻结，没有单独的「通道列表」
  * 变体）。所以这里：
  *
@@ -331,7 +331,7 @@ export function wireWaveform(commandRouter) {
      */
     const channels = new Map();
 
-    commandRouter.subscribe("waveform.delta", (event) => {
+    commandRouter.subscribe("waveform.history", (event) => {
         const streams = (event.value?.streams ?? []).filter(
             (s) => !String(s.id ?? "").startsWith(REGISTER_STREAM_PREFIX),
         );
@@ -428,7 +428,7 @@ async function bootstrap() {
     });
     // 探针接线（D-46）必须在**任何**装载之前挂好：
     // `startSession` 会装载工程并订阅探针流，订阅的响应（通道列表）
-    // 到达时如果还没订阅 `waveform.delta`，那批数据就丢了。
+    // 到达时如果还没订阅 `waveform.history`，那批数据就丢了。
     const waveform = wireWaveform(commandRouter);
 
     const pending = {

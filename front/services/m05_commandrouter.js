@@ -14,6 +14,12 @@
 // `front/lib/frame.js`). A command is resolved by the first event that
 // carries its `reqId`; an `Error` event rejects the command instead.
 //
+// **Topic 路由是表驱动的**：事件变体 → topic 的映射只有一处——
+// `front/lib/message.js` 的 `EVENT_TOPIC`。契约 v2 新增了三个事件变体
+// （`Registers` / `Negotiated` / `SimStateDelta`）并给 `WaveformHistory`
+// 换了 topic（`waveform.delta` → `waveform.history`），本模块**不**维护
+// 自己的 topic 列表——多一份列表就多一处会漂移的地方。
+//
 // Timeouts follow the M-05 LLD: a command that is not answered within
 // 500 ms is rejected with E_CTX-06 (read-only / idempotent commands may
 // be retried by the caller).

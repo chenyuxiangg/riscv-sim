@@ -38,7 +38,7 @@ const mode = new URL(import.meta.url).searchParams.get("mode") ?? "nop";
  */
 function eventMessage(seq, payload) {
     return {
-        schema_version: 1,
+        schema_version: 2,
         direction: "Event",
         seq,
         payload: { Event: payload },
@@ -82,7 +82,7 @@ export function process_message(json) {
         return "not json at all";
     }
     if (mode === "not-array") {
-        return JSON.stringify(eventMessage(commandSeq + 1, { Tick: { elapsed_ps: 0, pc: 0 } }));
+        return JSON.stringify(eventMessage(commandSeq + 1, { Tick: { elapsed_ps: "0", pc: 0 } }));
     }
     if (mode === "empty") {
         // An **empty** event list: the bridge's contract says at least one
@@ -92,12 +92,12 @@ export function process_message(json) {
     }
     if (mode === "two") {
         return JSON.stringify([
-            eventMessage(commandSeq + 1, { Tick: { elapsed_ps: 1000, pc: 4 } }),
+            eventMessage(commandSeq + 1, { Tick: { elapsed_ps: "1000", pc: 4 } }),
             eventMessage(commandSeq + 2, { Halted: { reason: "Breakpoint", pc: 0x20 } }),
         ]);
     }
     // mode === "nop"
     return JSON.stringify([
-        eventMessage(commandSeq + 1, { Tick: { elapsed_ps: 0, pc: 0 } }),
+        eventMessage(commandSeq + 1, { Tick: { elapsed_ps: "0", pc: 0 } }),
     ]);
 }

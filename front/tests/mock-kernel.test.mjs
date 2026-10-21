@@ -38,7 +38,7 @@ function commandFrame(payload, reqId = 0) {
         role: null,
         reqId,
         payload: {
-            schema_version: 1,
+            schema_version: SCHEMA_VERSION,
             direction: "Command",
             seq: 1,
             payload: { Command: payload },
@@ -49,7 +49,7 @@ function commandFrame(payload, reqId = 0) {
 const m05 = await importFront("services/m05_commandrouter.js");
 const m07 = await importFront("services/m07_transport.js");
 const m10 = await importFront("services/m10_registermemory.js");
-const { Command } = await importFront("lib/message.js");
+const { Command, SCHEMA_VERSION } = await importFront("lib/message.js");
 const { createMockKernel } = await importFront("dev/mock-kernel.js");
 
 const workers = [];
@@ -120,7 +120,7 @@ describe("mock kernel（纯逻辑，进程内）", () => {
             role: "embedded",
             reqId: 5,
             payload: {
-                schema_version: 1,
+                schema_version: SCHEMA_VERSION,
                 direction: "Command",
                 seq: 1,
                 payload: { Command: "Nop" },
@@ -129,10 +129,10 @@ describe("mock kernel（纯逻辑，进程内）", () => {
         assert.equal(frames.length, 1);
         assert.equal(frames[0].type, "event");
         assert.equal(frames[0].reqId, 5);
-        assert.deepEqual(frames[0].payload.payload, { Event: { Tick: { elapsed_ps: 0, pc: 0 } } });
+        assert.deepEqual(frames[0].payload.payload, { Event: { Tick: { elapsed_ps: "0", pc: 0 } } });
     });
 
-    test("单步推进 PC 并把寄存器推成边沿流", () => {
+    test("单步推进 PC 并把寄存器推成 Registers 事件", () => {
         const kernel = createMockKernel();
         // The kernel only pushes to subscribers of the register topic.
         kernel.handle({
@@ -142,7 +142,7 @@ describe("mock kernel（纯逻辑，进程内）", () => {
             role: null,
             reqId: 0,
             payload: {
-                schema_version: 1,
+                schema_version: SCHEMA_VERSION,
                 direction: "Command",
                 seq: 1,
                 payload: { Command: { Subscribe: { topic: "sim.registers" } } },
@@ -155,19 +155,18 @@ describe("mock kernel（纯逻辑，进程内）", () => {
             role: null,
             reqId: 1,
             payload: {
-                schema_version: 1,
+                schema_version: SCHEMA_VERSION,
                 direction: "Command",
                 seq: 1,
                 payload: { Command: { StepN: { n: 1 } } },
             },
         });
         // The response is a Tick; the register delta follows.
-        assert.deepEqual(frames[0].payload.payload, { Event: { Tick: { elapsed_ps: 1000, pc: 4 } } });
-        const delta = frames.find((f) => f.payload.payload.Event.WaveformDelta);
-        assert.ok(delta, "没有推送寄存器增量");
-        const streams = delta.payload.payload.Event.WaveformDelta.streams;
-        const x1 = streams.find((s) => s.id === "cpu.gpr.x1");
-        assert.equal(x1.edges[0].value, 42, "x1 没有被写成 42");
+        assert.deepEqual(frames[0].payload.payload, { Event: { Tick: { elapsed_ps: "1000", pc: 4 } } });
+        const pushed = frames.find((f) => f.payload.payload.Event.Registers);
+        assert.ok(pushed, "没有推送寄存器增量");
+        const values = pushed.payload.payload.Event.Registers.values;
+        assert.equal(values[1], 42, "x1 没有被写成 42");
         assert.equal(kernel.snapshot().pc, 4);
     });
 
@@ -180,7 +179,7 @@ describe("mock kernel（纯逻辑，进程内）", () => {
             role: null,
             reqId: 1,
             payload: {
-                schema_version: 1,
+                schema_version: SCHEMA_VERSION,
                 direction: "Command",
                 seq: 1,
                 payload: { Command: { NotACommand: {} } },
@@ -199,7 +198,7 @@ describe("mock kernel（纯逻辑，进程内）", () => {
             role: null,
             reqId: 1,
             payload: {
-                schema_version: 1,
+                schema_version: SCHEMA_VERSION,
                 direction: "Command",
                 seq: 1,
                 payload: { Command: { ReadMemory: { addr: 0x90000000, size: "Word" } } },
@@ -220,7 +219,7 @@ describe("mock 内核 · 断点契约（F1）", () => {
         // breakpoint in place.
         const frames = kernel.handle(commandFrame({ ClearBreakpoint: { id: 7 } }));
         assert.deepEqual(kernel.snapshot().breakpoints, [], "断点没有被删掉");
-        assert.equal(frames[0].payload.payload.Event.Tick.elapsed_ps, 0);
+        assert.equal(frames[0].payload.payload.Event.Tick.elapsed_ps, "0");
     });
 
     test("清掉断点后步进越过 0x40（不再在断点处停下）", () => {
@@ -252,7 +251,7 @@ describe("mock 内核 · 断点契约（F1）", () => {
         );
         // An unknown id is not an error — the contract has no error code
         // for it, and the command still gets its Tick answer.
-        assert.equal(frames[0].payload.payload.Event.Tick.elapsed_ps, 0);
+        assert.equal(frames[0].payload.payload.Event.Tick.elapsed_ps, "0");
     });
 });
 
@@ -276,7 +275,7 @@ describe("mock 内核 · 换工程即换会话（F12）", () => {
         // The old topic receives no push any more — not even the
         // register snapshot the `LoadProject` answer would carry.
         assert.equal(
-            frames.find((f) => f.payload.payload.Event.WaveformDelta),
+            frames.find((f) => f.payload.payload.Event.Registers),
             undefined,
             "旧 topic 仍然收到了推送",
         );
@@ -290,7 +289,7 @@ describe("mock 内核 · 换工程即换会话（F12）", () => {
         kernel.handle(commandFrame({ Subscribe: { topic: "sim.registers" } }));
         const frames = kernel.handle(commandFrame({ StepN: { n: 1 } }));
         assert.ok(
-            frames.find((f) => f.payload.payload.Event.WaveformDelta),
+            frames.find((f) => f.payload.payload.Event.Registers),
             "重新订阅后没有收到推送",
         );
     });

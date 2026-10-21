@@ -22,7 +22,7 @@ void dom;
 const importFront = (rel) => import(pathToFileURL(resolve(frontDir, rel)).href);
 
 const m05 = await importFront("services/m05_commandrouter.js");
-const { commandMessage, eventMessage, Command, Event } = await importFront("lib/message.js");
+const { commandMessage, eventMessage, Command, Event, SCHEMA_VERSION } = await importFront("lib/message.js");
 
 /** A transport double with the M-07 surface the router uses. */
 function createFakeTransport() {
@@ -81,7 +81,7 @@ describe("M-05 命令路由 · 出站", () => {
         router.dispatchCommand(Command.stepN(4)).catch(() => {});
         assert.equal(transport.sent.length, 1);
         const { message, reqId } = transport.sent[0];
-        assert.equal(message.schema_version, 1);
+        assert.equal(message.schema_version, SCHEMA_VERSION);
         assert.equal(message.direction, "Command");
         assert.deepEqual(message.payload, { Command: { StepN: { n: 4 } } });
         assert.equal(typeof reqId, "number");
@@ -96,7 +96,7 @@ describe("M-05 命令路由 · 出站", () => {
         transport.emit(eventFrame(reqId, Event.tick(42, 0x40)));
         const event = await promise;
         assert.equal(event.variant, "Tick");
-        assert.equal(event.value.elapsed_ps, 42);
+        assert.equal(event.value.elapsed_ps, "42");
         router.close();
     });
 
@@ -110,8 +110,8 @@ describe("M-05 命令路由 · 出站", () => {
         transport.emit(eventFrame(idB, Event.tick(2, 0x8)));
         transport.emit(eventFrame(idA, Event.tick(1, 0x4)));
         const [a, b] = await Promise.all([first, second]);
-        assert.equal(a.value.elapsed_ps, 1);
-        assert.equal(b.value.elapsed_ps, 2);
+        assert.equal(a.value.elapsed_ps, "1");
+        assert.equal(b.value.elapsed_ps, "2");
         router.close();
     });
 
@@ -162,7 +162,7 @@ describe("M-05 事件分发", () => {
         off();
         transport.emit(eventFrame(null, Event.tick(2, 0)));
         assert.equal(seen.length, 1);
-        assert.equal(seen[0].value.elapsed_ps, 1);
+        assert.equal(seen[0].value.elapsed_ps, "1");
         router.close();
     });
 

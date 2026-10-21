@@ -16,20 +16,34 @@
 // `docs/reviews/FRONTEND_ServiceLayer_Review.md`):
 //   - it models a 6-instruction toy program, not the RV32IMC ISS;
 //   - it never fabricates a register snapshot outside the frozen
-//     contract — register values travel as edge-encoded waveform streams
-//     (`EventPayload::WaveformDelta`), the only contract-native carrier
-//     for per-signal values;
+//     contract — contract v2 has a **first-class** register carrier
+//     (`EventPayload::Registers` / `EventPayload::SimStateDelta`), and
+//     the probe signals travel as `EventPayload::WaveformHistory`;
 //   - it is a test double, not a simulator: no interrupts, no MMU, no
 //     peripherals, no deterministic-replay guarantees.
 
-import { Event, eventMessage, decodeMessage, waveform, HALT_REASON, WRITE_SIZE } from "../lib/message.js";
-import { decodeFrame, FRAME_TYPE } from "../lib/frame.js";
+import {
+    Event,
+    eventMessage,
+    decodeMessage,
+    waveform,
+    HALT_REASON,
+    WRITE_SIZE,
+    SCHEMA_VERSION,
+} from "../lib/message.js";
+import { decodeFrame, encodeFrame, FRAME_TYPE } from "../lib/frame.js";
 
 /** RAM window of the toy platform. */
 export const MOCK_RAM = Object.freeze({ base: 0x0000_0000, size: 0x1_0000 });
 
 /** Address of the synthetic breakpoint at the end of the toy program. */
 export const MOCK_BREAKPOINT_ADDR = 0x40;
+
+/** Kernel descriptor reported by the `Negotiate` reply. */
+export const MOCK_KERNEL_ID = "riscv_sim_mock/0.1.0 RV32IMC";
+
+/** Number of general-purpose registers. */
+const GPR_COUNT = 32;
 
 /** Virtual time added per executed instruction (picoseconds). */
 const TICK_PS = 1000;
@@ -77,7 +91,7 @@ export function createMockKernel(options = {}) {
         state.topics.clear();
         state.snapshotCounter = 0;
         state.executed = 0;
-        for (let i = 0; i < 32; i += 1) dirtyRegisters.add(i);
+        for (let i = 0; i < GPR_COUNT; i += 1) dirtyRegisters.add(i);
         pcDirty = true;
     }
 
@@ -142,26 +156,6 @@ export function createMockKernel(options = {}) {
 
     // -- payload builders ----------------------------------------------------
 
-    function registerStreams(includeAll) {
-        const streams = [];
-        for (let i = 0; i < 32; i += 1) {
-            if (!includeAll && !dirtyRegisters.has(i)) continue;
-            streams.push({
-                id: `cpu.gpr.x${i}`,
-                label: `x${i}`,
-                edges: [{ t_ps: state.timeVirt, value: state.gpr[i] }],
-            });
-        }
-        if (includeAll || pcDirty) {
-            streams.push({
-                id: "cpu.pc",
-                label: "pc",
-                edges: [{ t_ps: state.timeVirt, value: state.pc }],
-            });
-        }
-        return streams;
-    }
-
     function probeStreams() {
         return [
             {
@@ -181,34 +175,69 @@ export function createMockKernel(options = {}) {
 
     function makeFrame(reqId, payload) {
         seq += 1;
-        return {
+        return encodeFrame({
             type: FRAME_TYPE.Event,
             seq,
             sessionId: state.sessionId ?? null,
             role: state.role ?? null,
             reqId: reqId ?? null,
             payload: eventMessage(seq, payload),
-        };
+        });
     }
 
     /**
-     * Push the register snapshot / delta if anybody subscribed.
+     * The registers changed since the last push, in ascending index order.
      *
-     * @param {object[]} frames
-     * @param {boolean} includeAll
+     * @returns {Array<{index: number, value: number}>}
      */
-    function pushRegisters(frames, includeAll) {
-        if (!state.topics.has("sim.registers")) return;
-        const streams = registerStreams(includeAll);
-        if (streams.length === 0) return;
+    function dirtySnapshot() {
+        const registers = [];
+        for (const i of [...dirtyRegisters].sort((a, b) => a - b)) {
+            registers.push({ index: i, value: state.gpr[i] });
+        }
+        return registers;
+    }
+
+    /** Forget the pending changes (after they have been pushed). */
+    function clearDirty() {
         dirtyRegisters.clear();
         pcDirty = false;
-        frames.push(makeFrame(null, Event.waveformDelta(waveform(streams))));
+    }
+
+    /**
+     * Push the register file to the `sim.registers` subscribers.
+     *
+     * `Registers` carries a **contiguous** range, so the push is the whole
+     * file; the *scattered* increments ride on `SimStateDelta` instead.
+     *
+     * @param {object[]} frames
+     */
+    function pushRegisters(frames) {
+        if (!state.topics.has("sim.registers")) return;
+        const values = [];
+        for (let i = 0; i < GPR_COUNT; i += 1) values.push(state.gpr[i]);
+        frames.push(makeFrame(null, Event.registers(0, values)));
+    }
+
+    /**
+     * Push the changed registers to the `sim.state.delta` subscribers.
+     *
+     * @param {object[]} frames
+     */
+    function pushStateDelta(frames) {
+        if (!state.topics.has("sim.state.delta")) return;
+        const registers = dirtySnapshot();
+        if (registers.length === 0 && !pcDirty) return;
+        frames.push(makeFrame(null, Event.simStateDelta(
+            registers,
+            pcDirty ? state.pc : null,
+            state.timeVirt,
+        )));
     }
 
     function pushWaveform(frames) {
         if (!state.topics.has("sim.waveform")) return;
-        frames.push(makeFrame(null, Event.waveformDelta(waveform(probeStreams()))));
+        frames.push(makeFrame(null, Event.waveformHistory(waveform(probeStreams()))));
     }
 
     // -- command handling ----------------------------------------------------
@@ -259,13 +288,17 @@ export function createMockKernel(options = {}) {
                 reset();
                 state.project = value;
                 frames.push(makeFrame(reqId, Event.tick(state.timeVirt, state.pc)));
-                pushRegisters(frames, true);
+                pushRegisters(frames);
+                pushStateDelta(frames);
+                clearDirty();
                 break;
 
             case "Continue":
                 run(64);
                 frames.push(makeFrame(reqId, Event.tick(state.timeVirt, state.pc)));
-                pushRegisters(frames, false);
+                pushRegisters(frames);
+                pushStateDelta(frames);
+                clearDirty();
                 if (state.halted) {
                     frames.push(makeFrame(null, Event.halted(state.haltReason, state.pc)));
                 }
@@ -276,11 +309,64 @@ export function createMockKernel(options = {}) {
                 const n = Math.max(0, Math.min(Number(value.n) || 0, 1024));
                 run(n);
                 frames.push(makeFrame(reqId, Event.tick(state.timeVirt, state.pc)));
-                pushRegisters(frames, false);
+                pushRegisters(frames);
+                pushStateDelta(frames);
+                clearDirty();
                 if (state.halted) {
                     frames.push(makeFrame(null, Event.halted(state.haltReason, state.pc)));
                 }
                 pushWaveform(frames);
+                break;
+            }
+
+            case "ReadRegisters": {
+                // 规格 §5：读的 `index` / `count` **钳位**到 32 个寄存器，
+                // 回复带的是**实际**起点。
+                const requested = Number(value.index) || 0;
+                const start = Math.max(0, Math.min(Math.trunc(requested), GPR_COUNT - 1));
+                const available = GPR_COUNT - start;
+                const wanted = Math.max(0, Math.trunc(Number(value.count) || 0));
+                const count = Math.min(wanted, available);
+                if (count === 0) break; // 空区间没有内容 → 不回复
+                const values = [];
+                for (let i = 0; i < count; i += 1) values.push(state.gpr[start + i]);
+                frames.push(makeFrame(reqId, Event.registers(start, values)));
+                break;
+            }
+
+            case "WriteRegister": {
+                const index = Number(value.index);
+                if (!Number.isInteger(index) || index < 0 || index >= GPR_COUNT) {
+                    // 写越界是**拒绝**，不是钳位——写钳位会静默写到别的寄存器。
+                    frames.push(makeFrame(reqId, Event.error(
+                        "E_DBG-01",
+                        `寄存器下标越界：${String(value.index)}`,
+                    )));
+                    break;
+                }
+                if (index !== 0) {
+                    state.gpr[index] = Number(value.value) >>> 0;
+                    dirtyRegisters.add(index);
+                }
+                // 写 x0 被丢弃（D-04），但**仍回复**——值恒为 0。
+                frames.push(makeFrame(reqId, Event.registers(index, [state.gpr[index]])));
+                break;
+            }
+
+            case "Negotiate": {
+                const min = Number(value.min_schema_version ?? 0);
+                if (min > SCHEMA_VERSION) {
+                    frames.push(makeFrame(reqId, Event.error(
+                        "E_PROTO-01",
+                        `协议版本不兼容：宿主最低 ${min} > 内核 ${SCHEMA_VERSION}`,
+                    )));
+                    break;
+                }
+                frames.push(makeFrame(reqId, Event.negotiated(
+                    SCHEMA_VERSION,
+                    Number(value.cap_bits ?? 0),
+                    MOCK_KERNEL_ID,
+                )));
                 break;
             }
 
@@ -327,14 +413,15 @@ export function createMockKernel(options = {}) {
                 if (topic === "sim.registers") {
                     // The snapshot **is** the response — the caller asked
                     // for the current register file.
-                    const streams = registerStreams(true);
-                    dirtyRegisters.clear();
-                    pcDirty = false;
-                    frames.push(makeFrame(reqId, Event.waveformDelta(waveform(streams))));
+                    const values = [];
+                    for (let i = 0; i < GPR_COUNT; i += 1) values.push(state.gpr[i]);
+                    frames.push(makeFrame(reqId, Event.registers(0, values)));
                 } else {
                     frames.push(makeFrame(reqId, Event.tick(state.timeVirt, state.pc)));
                     if (topic === "sim.waveform") pushWaveform(frames);
+                    if (topic === "sim.state.delta") pushStateDelta(frames);
                 }
+                clearDirty();
                 break;
             }
 

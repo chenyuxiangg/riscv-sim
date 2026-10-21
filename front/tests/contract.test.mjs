@@ -152,6 +152,10 @@ function rustStructFields(source, structName) {
 }
 
 describe("Message 信封（与 crates/contract 逐字对齐）", () => {
+    test("JS 镜像的 schema 版本是 2（契约 v2）", () => {
+        assert.equal(SCHEMA_VERSION, 2);
+    });
+
     test("信封字段名与 Rust Message 完全一致", () => {
         const msg = commandMessage(7, Command.nop());
         assert.deepEqual(Object.keys(msg), ["schema_version", "direction", "seq", "payload"]);
@@ -170,7 +174,8 @@ describe("Message 信封（与 crates/contract 逐字对齐）", () => {
         // serde 的 externally-tagged 表示：unit 变体没有花括号。
         assert.equal(commandMessage(0, Command.nop()).payload.Command, "Nop");
         assert.deepEqual(commandMessage(0, Command.stepN(3)).payload.Command, { StepN: { n: 3 } });
-        assert.deepEqual(eventMessage(0, Event.tick(11, 22)).payload.Event, { Tick: { elapsed_ps: 11, pc: 22 } });
+        // 虚拟时间走**十进制字符串**（契约 v2 §2.2）。
+        assert.deepEqual(eventMessage(0, Event.tick(11, 22)).payload.Event, { Tick: { elapsed_ps: "11", pc: 22 } });
     });
 
     test("decodeMessage 能还原 variant 与载荷", () => {
@@ -208,16 +213,23 @@ describe("Message 信封（与 crates/contract 逐字对齐）", () => {
         assert.equal(eventTopic("Tick"), "tick");
         assert.equal(eventTopic("Halted"), "halted");
         assert.equal(eventTopic("MemoryRead"), "memory.read");
-        assert.equal(eventTopic("WaveformDelta"), "waveform.delta");
+        // D-34：事件变体随**内容**改名，topic 跟随变体名。
+        assert.equal(eventTopic("WaveformHistory"), "waveform.history");
+        // 契约 v2 新增的三个事件变体。
+        assert.equal(eventTopic("Registers"), "sim.registers");
+        assert.equal(eventTopic("Negotiated"), "sim.negotiated");
+        assert.equal(eventTopic("SimStateDelta"), "sim.state.delta");
         // 前向兼容：未知变体不抛异常。
         assert.equal(eventTopic("SomethingNew"), "unknown");
     });
 
-    test("waveform 构造器对齐 model::Waveform 字段名", () => {
+    test("waveform 构造器对齐 model::WaveformHistory 字段名", () => {
         const w = waveform([{ id: "cpu.gpr.x1", label: "x1", edges: [{ t_ps: 5, value: 42 }] }]);
         assert.deepEqual(Object.keys(w), ["schema_version", "streams"]);
         assert.deepEqual(Object.keys(w.streams[0]), ["id", "label", "edges"]);
         assert.deepEqual(Object.keys(w.streams[0].edges[0]), ["t_ps", "value"]);
+        // 边沿的虚拟时间走十进制字符串（契约 v2 §2.2）。
+        assert.equal(w.streams[0].edges[0].t_ps, "5");
     });
 });
 
@@ -236,6 +248,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Command.clearWatchpoint(1)),
             variantOf(Command.readMemory(0, "Word")),
             variantOf(Command.writeMemory(0, "Word", 0)),
+            variantOf(Command.readRegisters(0, 1)),
+            variantOf(Command.writeRegister(1, 0)),
+            variantOf(Command.negotiate(2, 0)),
             variantOf(Command.subscribe("t")),
             variantOf(Command.unsubscribe("t")),
             variantOf(Command.snapshot()),
@@ -252,7 +267,10 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Event.halted("Trap", 0)),
             variantOf(Event.error("E_X-01", "m")),
             variantOf(Event.memoryRead(0, "Word", 0)),
-            variantOf(Event.waveformDelta({})),
+            variantOf(Event.registers(0, [])),
+            variantOf(Event.negotiated(2, 0, "k")),
+            variantOf(Event.simStateDelta([], null, 0)),
+            variantOf(Event.waveformHistory({})),
             variantOf(Event.snapshotCreated(1)),
             variantOf(Event.linkUp("l")),
             variantOf(Event.linkDown("l")),
@@ -302,6 +320,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 ClearWatchpoint: Command.clearWatchpoint(1),
                 ReadMemory: Command.readMemory(0, "Word"),
                 WriteMemory: Command.writeMemory(0, "Word", 0),
+                ReadRegisters: Command.readRegisters(0, 1),
+                WriteRegister: Command.writeRegister(1, 0),
+                Negotiate: Command.negotiate(2, 0),
                 Subscribe: Command.subscribe("t"),
                 Unsubscribe: Command.unsubscribe("t"),
                 Snapshot: Command.snapshot(),
@@ -313,7 +334,10 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 Halted: Event.halted("Trap", 0),
                 Error: Event.error("E_X-01", "m"),
                 MemoryRead: Event.memoryRead(0, "Word", 0),
-                WaveformDelta: Event.waveformDelta(waveform([])),
+                Registers: Event.registers(0, [0]),
+                Negotiated: Event.negotiated(2, 0, "k"),
+                SimStateDelta: Event.simStateDelta([], null, 0),
+                WaveformHistory: Event.waveformHistory(waveform([])),
                 SnapshotCreated: Event.snapshotCreated(1),
                 LinkUp: Event.linkUp("l"),
                 LinkDown: Event.linkDown("l"),
@@ -371,7 +395,7 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             ["ProductTree", project.tree],
             ["TreeNode", project.tree.root],
             ["ProjectVersion", project.version],
-            ["Waveform", waveform([])],
+            ["WaveformHistory", waveform([])],
         ];
         for (const [structName, dto] of cases) {
             assert.deepEqual(
@@ -396,7 +420,7 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
 });
 
 describe("传输帧（M-07 TransportFrame）", () => {
-    test("帧结构含会话、角色与关联 id", () => {
+    test("帧结构含会话、角色、关联 id 与 crc", () => {
         const frame = encodeFrame({
             type: FRAME_TYPE.Command,
             seq: 3,
@@ -405,7 +429,10 @@ describe("传输帧（M-07 TransportFrame）", () => {
             reqId: 9,
             payload: commandMessage(3, Command.nop()),
         });
-        assert.deepEqual(Object.keys(frame), ["type", "seq", "sessionId", "role", "reqId", "payload"]);
+        assert.deepEqual(
+            Object.keys(frame),
+            ["type", "seq", "sessionId", "role", "reqId", "crc", "payload"],
+        );
         assert.equal(frame.reqId, 9);
     });
 

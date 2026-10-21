@@ -25,7 +25,7 @@ void dom;
 const importFront = (rel) => import(pathToFileURL(resolve(frontDir, rel)).href);
 
 const m07 = await importFront("services/m07_transport.js");
-const { commandMessage, eventMessage, Command, Event } = await importFront("lib/message.js");
+const { commandMessage, eventMessage, Command, Event, SCHEMA_VERSION } = await importFront("lib/message.js");
 
 /** A fake Worker with the browser's event shape. */
 function createFakeWorker() {
@@ -127,7 +127,7 @@ describe("M-07 传输适配器 · worker 形态", () => {
         assert.equal(frame.role, "product");
         assert.equal(frame.reqId, 42);
         // The payload is the frozen contract envelope, untouched.
-        assert.equal(frame.payload.schema_version, 1);
+        assert.equal(frame.payload.schema_version, SCHEMA_VERSION);
         assert.equal(frame.payload.direction, "Command");
         assert.deepEqual(frame.payload.payload, { Command: { StepN: { n: 2 } } });
     });

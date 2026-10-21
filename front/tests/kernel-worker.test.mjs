@@ -99,7 +99,7 @@ function commandFrame(payload, opts = {}) {
         role: opts.role ?? "embedded",
         reqId: opts.reqId ?? 7,
         payload: {
-            schema_version: 1,
+            schema_version: 2,
             direction: "Command",
             seq: 1,
             payload: { Command: payload },
@@ -125,7 +125,7 @@ describe("WASM 传输宿主 · 帧 → 消息 → 帧", () => {
         assert.equal(frame.payload.direction, "Event", "payload 必须是契约事件消息");
         assert.deepEqual(
             frame.payload.payload,
-            { Event: { Tick: { elapsed_ps: 0, pc: 0 } } },
+            { Event: { Tick: { elapsed_ps: "0", pc: 0 } } },
             "事件负载不是内核给出的契约形状",
         );
         // The frame's seq is the event's own seq (spec §4).
@@ -211,10 +211,10 @@ describe("WASM 传输宿主 · 帧 → 消息 → 帧", () => {
             role: "embedded",
             reqId: null,
             payload: {
-                schema_version: 1,
+                schema_version: 2,
                 direction: "Event",
                 seq: 3,
-                payload: { Event: { Tick: { elapsed_ps: 0, pc: 0 } } },
+                payload: { Event: { Tick: { elapsed_ps: "0", pc: 0 } } },
             },
         });
         await new Promise((r) => setTimeout(r, 200));
