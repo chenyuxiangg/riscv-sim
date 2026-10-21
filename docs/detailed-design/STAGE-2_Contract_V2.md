@@ -65,7 +65,7 @@
 > **凡是「随仿真时长增长」的量（虚拟时间），在线上表示为十进制字符串。**
 > 其余 `u64`（计数器、序列号、信号值）保持 **JSON 数字**。
 
-**走字符串的字段（8 个）**：
+**走字符串的字段（9 个）**：
 
 | 字段 | 类型 | 所在 |
 | --- | --- | --- |
@@ -74,9 +74,16 @@
 | `t_ps` | `u64` | `model::Edge` |
 | `t_ps` | `u64` | `model::EdgeEvent` |
 | `t_ps` | `u64` | `model::TraceEvent` |
-| `t_virt` | `u64` | `model::WaveformDelta` |
-| `at_ps` | `u64` | `snapshot::ScheduledEvent` |
-| `at_ps` | `u64` | `snapshot::EventQueueEntry` |
+| `t_virt` | `u64` | `model::WaveformDelta`（live 批次形） |
+| `t_ps` | `u64` | `protocol::EventPayload::SimStateDelta` |
+| `at_ps` | `u64` | `snapshot::SchedEventDto`（`PeripheralTick` / `TimerExpiry` 两个变体各一个） |
+| `at_ps` | `u64` | `snapshot::QueuedEventDto` |
+
+> ⚠️ **本表在实现完成后补过一次**：初稿列了 8 个，漏了
+> `EventPayload::SimStateDelta::t_ps`（§4.4 自己写着「decimal string (§2.2)」），
+> 且把 Rust 的类型名写成了 `ScheduledEvent` / `EventQueueEntry` —— 实际是
+> **`SchedEventDto`** / **`QueuedEventDto`**。**实现从一开始就是对的**（9 个
+> 字段全带 `numstr` 属性），是表不全。
 
 **保持数字的字段（其余全部 `u64`）**，连同各自的**可达上界**（写进契约文档）：
 
@@ -499,6 +506,7 @@ D-64 说「随 M-16 一并做」。本批**刻意不加** `SimState.mtval` 字�
 | 1 | `SCHEMA_VERSION == 2` | 契约层单测 + JS 镜像常量 |
 | 2 | 3 个新命令 / 3 个新事件在 **Rust 与 JS 两侧**逐字一致 | `front/tests/contract.test.mjs`（现成的对拍门禁） |
 | 3 | 虚拟时间字段的**线上表示是十进制字符串** | 契约层 JSON 形状断言 + JS 镜像断言 |
+| 3b | **跨语言对拍门禁能抓到「数值策略」的不同步** —— 删掉 Rust 侧任一虚拟时间字段的 `#[serde(with = "crate::numstr::u64_decimal")]` 必须让 `front/tests/contract.test.mjs` 变红 | JS 单测（**V-B 检视 · 高危**：删掉后门禁 18/18 全绿 —— `numstr` 的反序列化**两种形态都收**，不同步会**静默**退回旧形态） |
 | 4 | `psToNumber` 超过 2⁵³ **抛错**而不是静默截断；错误码是 **`E_PROTO-04`**（输入超限），**不是** `E_PROTO-02`（那个是「仅日志」） | JS 单测 |
 | 4b | **`ReadRegisters { count: 0 }` 回复 `values: []`，不是「不回复」**——不回复与消息丢失不可区分，M-05 会超时拒绝 | 内核侧用例 + 前端 mock 用例 |
 | 5 | `ErrorFamily::Protocol.as_str() == "PROTO"` | 契约层单测 |
