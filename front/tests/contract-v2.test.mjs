@@ -393,6 +393,23 @@ describe("契约 v2 · M-10 消费新事件与新命令", () => {
         service.close();
     });
 
+    test("readRegisters(0, 0) 正常 resolve（空区间也要有回复，不超时）", async () => {
+        const transport = mockKernelTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
+
+        // ⚠️ 判别式落在**服务层**：M-05 按 `reqId` 配对请求与回复，
+        // 「没有回复」与「消息丢了」在协议上不可区分。内核要是真的不回复，
+        // 这里会 500 ms 之后以 E_CTX-06（命令超时）拒绝——一个**合法**
+        // 请求被报成「内核没应答」。
+        const event = await service.readRegisters(0, 0);
+        assert.equal(event.variant, "Registers");
+        assert.deepEqual(event.value.values, [], "空区间的 values 是空数组");
+        assert.equal(event.value.index, 0, "index 是钳位后的实际起点");
+        router.close();
+        service.close();
+    });
+
     test("虚拟时间从字符串读回（超过 2^53 时报错而不是舍入）", async () => {
         const transport = fakeTransport();
         const router = await m05.mountCommandRouter({ transport });
@@ -434,6 +451,26 @@ describe("契约 v2 · mock 内核的 §5 语义", () => {
         const reply = frames.find((f) => f.payload.payload.Event.Registers);
         assert.equal(reply.payload.payload.Event.Registers.index, 31);
         assert.equal(reply.payload.payload.Event.Registers.values.length, 1);
+    });
+
+    test("ReadRegisters count=0 也要**回复**（空区间，不是「没有回复」）", () => {
+        // 规格 §5 已订正：「不回复」不在 M-05 的回复模型里——它按 reqId
+        // 配对请求与回复，所以「没有回复」与「消息丢了」不可区分，一个
+        // 合法请求会变成一条**假超时**（E_CTX-06）。
+        const kernel = createMockKernel();
+        const frames = kernel.handle(commandFrame({ ReadRegisters: { index: 99, count: 0 } }));
+        const reply = frames.find((f) => f.payload.payload.Event.Registers);
+        assert.ok(reply, "count=0 也必须回复");
+        assert.deepEqual(
+            reply.payload.payload.Event.Registers.values,
+            [],
+            "空区间的 values 是空数组",
+        );
+        assert.equal(
+            reply.payload.payload.Event.Registers.index,
+            31,
+            "index 仍是钳位后的实际起点",
+        );
     });
 
     test("写 x0 被丢弃但**仍回复**（值恒为 0）", () => {
@@ -522,6 +559,49 @@ function fakeTransport() {
         },
     };
     return transport;
+}
+
+/**
+ * A transport double backed by the **real** mock kernel.
+ *
+ * The kernel's frames go back through `decodeFrame()` — so the crc is
+ * validated on the way back too, and the whole M-05 correlation path
+ * (request → kernel → reply → pending command) runs for real. A command
+ * the kernel does **not** answer therefore really does time out here,
+ * which is exactly what the "empty range must still be answered" case
+ * has to distinguish.
+ */
+function mockKernelTransport() {
+    const kernel = createMockKernel();
+    /** @type {Set<Function>} */
+    const messageHandlers = new Set();
+    return {
+        sent: [],
+        onMessage(handler) {
+            messageHandlers.add(handler);
+            return () => messageHandlers.delete(handler);
+        },
+        onStatus() {
+            return () => {};
+        },
+        sendCommand(message, options = {}) {
+            const frames = kernel.handle({
+                type: "command",
+                seq: 1,
+                sessionId: null,
+                role: null,
+                reqId: options.reqId ?? null,
+                payload: message,
+            });
+            for (const raw of frames) {
+                const frame = decodeFrame(raw);
+                for (const fn of [...messageHandlers]) fn(frame);
+            }
+        },
+        getTransportStatus() {
+            return { mode: "worker", connected: true, connState: "ready" };
+        },
+    };
 }
 
 /** An inbound event frame. */

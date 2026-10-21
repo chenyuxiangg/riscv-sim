@@ -327,7 +327,15 @@ export function createMockKernel(options = {}) {
                 const available = GPR_COUNT - start;
                 const wanted = Math.max(0, Math.trunc(Number(value.count) || 0));
                 const count = Math.min(wanted, available);
-                if (count === 0) break; // 空区间没有内容 → 不回复
+                // ⚠️ `count = 0` 也**必须回复**（规格 §5 已订正）：回复
+                // `Registers { index, values: [] }`，`index` 仍是钳位后的
+                // 实际起点。
+                //
+                // 「不回复」不在 M-05 的回复模型里：它按 `reqId` 配对请求与
+                // 回复，所以「没有回复」与「消息丢了」在协议上**不可区分**——
+                // 一个完全合法的请求（「读 0 个寄存器」）会变成一条**假超时**
+                // （E_CTX-06），用户看到的是「内核没应答」而不是「读到了
+                // 空区间」。
                 const values = [];
                 for (let i = 0; i < count; i += 1) values.push(state.gpr[start + i]);
                 frames.push(makeFrame(reqId, Event.registers(start, values)));

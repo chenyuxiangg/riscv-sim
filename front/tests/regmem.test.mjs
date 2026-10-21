@@ -121,6 +121,27 @@ describe("M-10 寄存器内存服务", () => {
         service.close();
     });
 
+    test("读 0 个寄存器正常 resolve（空区间不是错误，也不是超时）", async () => {
+        // 契约 v2 §5（已订正）：`count = 0` 回复 `Registers { index,
+        // values: [] }`。M-05 按 `reqId` 配对请求与回复，「没有回复」与
+        // 「消息丢了」不可区分——内核不回复的话，这条合法请求会变成一条
+        // **假超时**（E_CTX-06）。
+        const transport = createFakeTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
+
+        const promise = service.readRegisters(0, 0);
+        assert.deepEqual(transport.sent[0].message.payload, {
+            Command: { ReadRegisters: { index: 0, count: 0 } },
+        });
+        transport.emit(eventFrame(transport.sent[0].reqId, Event.registers(0, [])));
+        const event = await promise;
+        assert.deepEqual(event.value.values, [], "空区间的 values 是空数组");
+        assert.equal(event.value.index, 0);
+        router.close();
+        service.close();
+    });
+
     test("写寄存器走 M-05 的 WriteRegister 命令，值落到缓存", async () => {
         const transport = createFakeTransport();
         const router = await m05.mountCommandRouter({ transport });
