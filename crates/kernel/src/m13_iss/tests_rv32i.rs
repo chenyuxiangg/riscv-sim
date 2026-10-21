@@ -10,6 +10,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use riscv_sim_contract::csr::{CSR_MEPC, CSR_MTVEC};
 use riscv_sim_contract::error::PlatformError;
 use riscv_sim_contract::model::{PendingWrite, SimState, WriteSize};
 use riscv_sim_contract::port::Peripheral;
@@ -17,7 +18,9 @@ use riscv_sim_contract::port::Peripheral;
 use crate::m14_bus::Bus;
 
 use super::decoder::{Decoded, Decoder};
-use super::executor::{read_gpr, sequential, MisalignedPolicy, StepOutcome, TrapCause};
+use super::executor::{
+    classify, read_gpr, sequential, MisalignedPolicy, Op, StepOutcome, TrapCause,
+};
 use super::tests_common::*;
 use super::Iss;
 
@@ -144,19 +147,25 @@ fn pc_advances_by_the_decoded_instruction_length() {
     );
 }
 
-/// A **reserved** compressed encoding must trap and leave the PC alone
-/// rather than execute the upper half-word as if it were a 32-bit
-/// instruction.
+/// A **reserved** compressed encoding must trap rather than execute the
+/// upper half-word as if it were a 32-bit instruction.
 ///
 /// The word below is `0x02A0_0000`: the low half-word `0x0000` is a
 /// reserved `C.ADDI4SPN` (its `nzuimm` is zero), while the upper
 /// half-word `0x02A0` *is* a valid 32-bit `addi`.  A decoder that
 /// ignored the width would run the upper half-word instead of
 /// trapping.
+///
+/// ⚠️ The trap now **redirects the PC** to the vector table (STAGE-4
+/// §3.5) instead of leaving it alone — a trap hands the PC to
+/// `mtvec`, it does not leave the faulting address in place.
 #[test]
-fn reserved_compressed_encoding_traps_and_leaves_the_pc_alone() {
+fn reserved_compressed_encoding_traps_and_hands_the_pc_to_the_vector_table() {
     let mut h = Harness::new();
-    let mut state = SimState::default();
+    let mut state = SimState {
+        csrs: vec![(CSR_MTVEC, 0x2000)],
+        ..SimState::default()
+    };
     let outcome = h.step_one_at(&mut state, 0x1000, 0x02A0_0000);
     assert_eq!(
         outcome,
@@ -165,8 +174,13 @@ fn reserved_compressed_encoding_traps_and_leaves_the_pc_alone() {
         }
     );
     assert_eq!(
-        state.pc, 0x1000,
-        "a trapped instruction must not advance the PC"
+        state.pc, 0x2000,
+        "a trap must hand the PC to the vector table"
+    );
+    assert_eq!(
+        csr_value(&state, CSR_MEPC),
+        0x1000,
+        "mepc must point at the faulting instruction"
     );
 }
 
@@ -616,6 +630,10 @@ fn load_into_x0_is_discarded() {
 }
 
 /// A misaligned word access traps under the strict `Trap` policy.
+///
+/// ⚠️ The cause is **`LoadAddressMisaligned`** (`mcause = 4`) — a
+/// misaligned **load** is a different cause from a misaligned fetch
+/// (`0`) and from a misaligned store (`6`) (ledger **D-63**).
 #[test]
 fn misaligned_word_access_traps() {
     let mut h = Harness::new();
@@ -626,7 +644,7 @@ fn misaligned_word_access_traps() {
     assert_eq!(
         outcome,
         StepOutcome::Trapped {
-            cause: TrapCause::MisalignedAccess
+            cause: TrapCause::LoadAddressMisaligned
         }
     );
     assert_eq!(
@@ -646,12 +664,15 @@ fn misaligned_halfword_access_traps() {
     assert_eq!(
         outcome,
         StepOutcome::Trapped {
-            cause: TrapCause::MisalignedAccess
+            cause: TrapCause::LoadAddressMisaligned
         }
     );
 }
 
 /// A misaligned store traps under the strict `Trap` policy.
+///
+/// ⚠️ The cause is **`StoreAddressMisaligned`** (`mcause = 6`) — the
+/// store's own code, not the load's (`4`).
 #[test]
 fn misaligned_store_traps() {
     let mut h = Harness::new();
@@ -664,7 +685,7 @@ fn misaligned_store_traps() {
     assert_eq!(
         outcome,
         StepOutcome::Trapped {
-            cause: TrapCause::MisalignedAccess
+            cause: TrapCause::StoreAddressMisaligned
         }
     );
     assert_eq!(
@@ -970,10 +991,17 @@ fn fence_i_is_a_no_op() {
 }
 
 /// ECALL raises an environment-call trap.
+///
+/// ⚠️ The trap **hands the PC to the vector table** (STAGE-4 §3.5) —
+/// the old assertion ("a trapped instruction must not advance the PC")
+/// was written when the trap path wrote no CSR and left the PC alone.
 #[test]
 fn ecall_traps() {
     let mut h = Harness::new();
-    let mut state = SimState::default();
+    let mut state = SimState {
+        csrs: vec![(CSR_MTVEC, 0x2000)],
+        ..SimState::default()
+    };
     let outcome = h.step_one_at(&mut state, 0x1000, enc_i(0, 0, 0b000, 0, 0b111_0011));
     assert_eq!(
         outcome,
@@ -982,8 +1010,13 @@ fn ecall_traps() {
         }
     );
     assert_eq!(
-        state.pc, 0x1000,
-        "a trapped instruction must not advance the PC"
+        state.pc, 0x2000,
+        "a trap must hand the PC to the vector table"
+    );
+    assert_eq!(
+        csr_value(&state, CSR_MEPC),
+        0x1000,
+        "mepc must point at the faulting instruction"
     );
 }
 
@@ -1123,17 +1156,31 @@ fn illegal_funct7_traps() {
     );
 }
 
-/// An illegal instruction must not touch the PC or the registers.
+/// An illegal instruction must not touch the registers.
+///
+/// ⚠️ The **PC** is no longer "untouched": a trap hands the PC to the
+/// vector table (STAGE-4 §3.5). The old assertion ("a trapped
+/// instruction must not advance the PC") was written when the trap path
+/// wrote no CSR at all; it is replaced by the vector-table hand-off,
+/// which is the architectural behaviour now.
 #[test]
 fn illegal_instruction_leaves_the_state_untouched() {
     let mut h = Harness::new();
-    let mut state = SimState::default();
+    let mut state = SimState {
+        csrs: vec![(CSR_MTVEC, 0x2000)],
+        ..SimState::default()
+    };
     state.gpr[3] = 0x1234_5678;
     let outcome = h.step_one_at(&mut state, 0x1000, enc_r(0b000_0010, 2, 1, 0b000, 3, OP));
     assert!(matches!(outcome, StepOutcome::Trapped { .. }));
     assert_eq!(
-        state.pc, 0x1000,
-        "a trapped instruction must not advance the PC"
+        state.pc, 0x2000,
+        "a trap must hand the PC to the vector table"
+    );
+    assert_eq!(
+        csr_value(&state, CSR_MEPC),
+        0x1000,
+        "mepc must point at the faulting instruction"
     );
     assert_eq!(
         state.gpr[3], 0x1234_5678,
@@ -1197,6 +1244,16 @@ fn execution_is_deterministic() {
 
 /// A misaligned instruction address must trap before the fetch
 /// happens (LLD §3.1, 评审 13-3).
+///
+/// ⚠️ The cause is **`InstructionAddressMisaligned`** (`mcause = 0`) —
+/// the fetch's own code, not the load's (`4`) or the store's (`6`)
+/// (ledger **D-63**).
+///
+/// ⚠️ The trap **redirects the PC** to the vector table (STAGE-4
+/// §3.5): a trapped instruction does not "leave the PC alone" any
+/// more — it hands the PC to `mtvec`. The old assertion ("a trapped
+/// fetch must not advance the PC") was written when the trap path
+/// wrote no CSR at all.
 #[test]
 fn misaligned_fetch_address_traps() {
     let mut h = Harness::new();
@@ -1204,22 +1261,32 @@ fn misaligned_fetch_address_traps() {
         pc: 0x1001, // odd instruction address
         ..SimState::default()
     };
+    // A non-zero vector table, so the redirect is observable.
+    state.csrs = vec![(CSR_MTVEC, 0x2000)];
     let outcome = h.step(&mut state).expect("must not error");
     assert_eq!(
         outcome,
         StepOutcome::Trapped {
-            cause: TrapCause::MisalignedAccess
+            cause: TrapCause::InstructionAddressMisaligned
         }
     );
-    assert_eq!(state.pc, 0x1001, "a trapped fetch must not advance the PC");
+    assert_eq!(
+        state.pc, 0x2000,
+        "a trap must hand the PC to the vector table"
+    );
+    assert_eq!(
+        csr_value(&state, CSR_MEPC),
+        0x1001,
+        "mepc must point at the faulting instruction"
+    );
 }
 
 // ---------------------------------------------------------------------------
 // Review V1 defect 1 — ECALL / EBREAK need funct3 == 0
 // ---------------------------------------------------------------------------
 
-/// Every CSR-shaped encoding of the SYSTEM opcode must trap as an
-/// illegal instruction, not as ECALL or EBREAK.
+/// Every CSR-shaped encoding of the SYSTEM opcode must be dispatched as
+/// a **CSR instruction** — never as ECALL or EBREAK.
 ///
 /// The RISC-V unprivileged spec reserves `funct3 == 0b000` in the
 /// SYSTEM opcode for ECALL / EBREAK; funct3 001..111 select the CSR
@@ -1228,9 +1295,22 @@ fn misaligned_fetch_address_traps() {
 /// immediate alone would route `0x00001073` (csr = 0, funct3 = 0b001)
 /// into the ECALL handler and report mcause 11 instead of 2 — the
 /// trap would reach the wrong handler as soon as CSR support lands.
+///
+/// ⚠️ This test was **rewritten** when the CSR instruction family
+/// landed: the encodings are legal instructions now, so they no longer
+/// trap. What it still pins is the **dispatch** — a CSR-shaped
+/// encoding retires as a CSR instruction, and the decode level names
+/// the same operation.
 #[test]
-fn csr_shaped_system_encodings_trap_as_illegal_instruction() {
-    for funct3 in 0b001..=0b111u8 {
+fn csr_shaped_system_encodings_are_dispatched_as_csr_instructions() {
+    for (funct3, op) in [
+        (0b001, Op::Csrrw),
+        (0b010, Op::Csrrs),
+        (0b011, Op::Csrrc),
+        (0b101, Op::Csrrwi),
+        (0b110, Op::Csrrsi),
+        (0b111, Op::Csrrci),
+    ] {
         for csr in [0u32, 1, 5, 0xC00] {
             let mut h = Harness::new();
             let mut state = SimState::default();
@@ -1240,10 +1320,14 @@ fn csr_shaped_system_encodings_trap_as_illegal_instruction() {
             let outcome = h.step_one_at(&mut state, 0x1000, word);
             assert_eq!(
                 outcome,
-                StepOutcome::Trapped {
-                    cause: TrapCause::IllegalInstruction
-                },
-                "csr={csr:#x} funct3={funct3:#b} must trap as an illegal instruction"
+                StepOutcome::Advanced,
+                "csr={csr:#x} funct3={funct3:#b} must retire as a CSR instruction, not trap"
+            );
+            let d = Decoder::default().decode(word, 0x1000);
+            assert_eq!(
+                classify(&d),
+                Some(op),
+                "csr={csr:#x} funct3={funct3:#b} must decode to {op:?}"
             );
         }
     }
@@ -1251,6 +1335,11 @@ fn csr_shaped_system_encodings_trap_as_illegal_instruction() {
 
 /// A CSR-shaped encoding whose immediate field happens to be 1 must
 /// not be reported as EBREAK.
+///
+/// ⚠️ Rewritten when the CSR instruction family landed: the encoding
+/// is a `CSRRW` now, so the test pins the two things that are
+/// observable — it **retires** (it does not trap), and it performs the
+/// `CSRRW` write (the CSR file ends up holding the written value).
 #[test]
 fn a_csr_shaped_system_encoding_is_never_ebreak() {
     // csr = 1, funct3 = 0b001 (CSRRW) — the immediate field is 1.
@@ -1260,19 +1349,27 @@ fn a_csr_shaped_system_encoding_is_never_ebreak() {
     let outcome = h.step_one_at(&mut state, 0x1000, word);
     assert_eq!(
         outcome,
-        StepOutcome::Trapped {
-            cause: TrapCause::IllegalInstruction
-        },
-        "csr=1 funct3=0b001 must not be reported as EBREAK"
+        StepOutcome::Advanced,
+        "csr=1 funct3=0b001 must retire as a CSRRW, not trap as EBREAK"
+    );
+    assert_eq!(
+        csr_value(&state, 1),
+        0,
+        "CSRRW with rs1 = x0 must write 0 into the CSR"
     );
 }
 
-/// SYSTEM with funct3 == 0 but an immediate other than 0 / 1 is
-/// neither ECALL nor EBREAK — MRET (`imm = 0x302`) and WFI
-/// (`imm = 0x105`) fall into this bucket.
+/// SYSTEM with funct3 == 0 but an immediate other than 0 / 1 / 0x302 is
+/// neither ECALL nor EBREAK — WFI (`imm = 0x105`) and SRET
+/// (`imm = 0x102`) fall into this bucket and stay **illegal**.
+///
+/// ⚠️ `MRET` (`imm = 0x302`) left this list when the CSR / trap
+/// family landed: it is a legal instruction now (pinned by the
+/// `tests_csr` module). SRET and WFI stay illegal — the platform is
+/// **M-mode only** (STAGE-4 §3.6).
 #[test]
 fn system_with_an_unexpected_immediate_traps_as_illegal_instruction() {
-    for imm in [2i32, 0x105, 0x302] {
+    for imm in [2i32, 0x102, 0x105] {
         let mut h = Harness::new();
         let mut state = SimState::default();
         let word = enc_i(imm, 0, 0b000, 0, SYSTEM);

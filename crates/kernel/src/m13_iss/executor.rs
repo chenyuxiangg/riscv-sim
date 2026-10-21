@@ -12,25 +12,33 @@
 //! `StepOutcome` tells the engine whether the instruction completed,
 //! trapped, or paused at a breakpoint.
 
+use riscv_sim_contract::csr::{
+    csr_write_is_ignored, CSR_MEPC, CSR_MSTATUS, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT,
+};
 use riscv_sim_contract::error::PlatformError;
 use riscv_sim_contract::model::{SimState, WriteSize};
 
 use super::alu;
+use super::csr;
 use super::decoder::Decoded;
 
 /// Result of a single instruction execution.
+///
+/// ⚠️ **只列 M-13 自己能知道的事**：指令退休了、还是触发了陷阱。
+///
+/// ⚠️ 这里**曾经**有三个变体是**死接口**（从来没有生产者）：
+/// `HostPause`（宿主暂停 —— **M-13 不可能知道**宿主要暂停）·
+/// `Breakpoint`（M-08 的断点 —— **M-17 在取指前**自己判，M-13 无从知晓）·
+/// `Watchpoint`（M-10 的观察点 —— 访存命中由**总线 hook** 记录，M-17 在
+/// 指令返回后判）。三者已随 **STAGE-4 裁决 C** 与台账 **D-59 / D-72**
+/// **删除**。删掉它们之后，这个 `match` **穷举**全部变体 ⇒ M-13 以后再加
+/// 变体，M-17 会**编译不过**（而不是静默走兜底）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
     /// Instruction retired normally; PC advanced.
     Advanced,
     /// Instruction triggered a trap (illegal / misaligned / bus error).
     Trapped { cause: TrapCause },
-    /// Instruction hit a breakpoint inserted by M-08.
-    Breakpoint,
-    /// Instruction hit a watchpoint inserted by M-10.
-    Watchpoint,
-    /// Engine pause requested by host mid-quantum.
-    HostPause,
 }
 
 impl Default for StepOutcome {
@@ -39,29 +47,91 @@ impl Default for StepOutcome {
     }
 }
 
-/// Trap reason taxonomy. Mapped to `mtval` by the engine (LLD §4.13.4).
+/// Trap reason taxonomy.
+///
+/// The variants are the **taxonomy**; the number the trap reports is
+/// the architectural `mcause` code, and [`TrapCause::mcause`] is the
+/// **only** place that maps one to the other (one constraint, one
+/// home).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrapCause {
-    /// Illegal instruction.
+    /// Illegal instruction (`mcause = 2`).
     IllegalInstruction,
-    /// Misaligned memory access.
-    MisalignedAccess,
+    /// Misaligned **instruction** address (`mcause = 0`).
+    ///
+    /// The fetch address was not half-word aligned. This is a
+    /// **different** cause from a misaligned data access: RISC-V
+    /// numbers the three of them `0` / `4` / `6`, and one variant
+    /// covering all three (the old `MisalignedAccess`) reported the
+    /// wrong number for two of them (ledger **D-63**).
+    InstructionAddressMisaligned,
+    /// Misaligned **load** address (`mcause = 4`).
+    LoadAddressMisaligned,
+    /// Misaligned **store** address (`mcause = 6`).
+    StoreAddressMisaligned,
     /// Out-of-range physical address.
     OutOfRange,
-    /// Environment call from M-mode.
+    /// Environment call from M-mode (`mcause = 11`).
     Ecall,
-    /// Guest `EBREAK` (mcause = 3). Distinct from
-    /// [`StepOutcome::Breakpoint`], which means a *host* breakpoint
-    /// inserted by M-08 rather than a guest instruction.
+    /// Guest `EBREAK` (`mcause = 3`). Distinct from a *host* breakpoint
+    /// inserted by M-08 (which M-17 checks **before** the fetch, so it
+    /// never reaches the ISS at all).
     Breakpoint,
-    /// Reserved for a future cause (mcause = 6).
+    /// Reserved for a future cause.
     ///
     /// **Not raised by RV32M**: a division by zero and the
     /// `INT_MIN / -1` overflow are architecturally *defined results*,
     /// not traps (LLD §3.6(11)), so the M extension never reports
     /// this.  The variant is kept so the taxonomy does not have to
     /// change shape when a genuine divide-by-zero cause does land.
+    ///
+    /// ⚠️ It is **not** removed by this batch (ledger **D-66** owns
+    /// that decision): removing a public variant and adding the CSR
+    /// instruction family in the same batch would mix two changes and
+    /// dilute the discriminating power of both.
     IntegerDivideByZero,
+}
+
+impl TrapCause {
+    /// The architectural `mcause` code of this cause.
+    ///
+    /// This is the **single** mapping from the taxonomy to the number
+    /// the guest reads out of `mcause` — the exception path, the
+    /// interrupt path and the tests all go through it, so the number
+    /// cannot drift away from the variant.
+    ///
+    /// The codes are the RISC-V exception codes:
+    /// `0` instruction address misaligned · `2` illegal instruction ·
+    /// `3` breakpoint · `4` load address misaligned · `6` store address
+    /// misaligned · `11` environment call from M-mode.
+    ///
+    /// ⚠️ The two **dead** variants have **no architectural code**:
+    ///
+    /// * `OutOfRange` — RISC-V splits "the access was not allowed"
+    ///   into three access faults (instruction / load / store), and the
+    ///   variant does not say which one it means. It has **no
+    ///   producer** today (the bus reports an unmapped access as an
+    ///   `E_BUS` error, not as a trap), so its number is a
+    ///   **placeholder** and is unobservable;
+    /// * `IntegerDivideByZero` — RISC-V defines a division by zero as
+    ///   an **architectural result**, not an exception, so there is no
+    ///   code for it at all. Also a **dead** variant (ledger
+    ///   **D-66**).
+    ///
+    /// Both use the **custom** range (`mcause >= 16`), which the
+    /// RISC-V manual reserves for platform-specific causes.
+    pub fn mcause(self) -> u32 {
+        match self {
+            TrapCause::InstructionAddressMisaligned => 0,
+            TrapCause::IllegalInstruction => 2,
+            TrapCause::Breakpoint => 3,
+            TrapCause::LoadAddressMisaligned => 4,
+            TrapCause::StoreAddressMisaligned => 6,
+            TrapCause::Ecall => 11,
+            TrapCause::OutOfRange => 16,
+            TrapCause::IntegerDivideByZero => 17,
+        }
+    }
 }
 
 impl Default for TrapCause {
@@ -150,7 +220,24 @@ where
         d: &Decoded,
     ) -> Result<StepOutcome, PlatformError> {
         let misaligned = self.misaligned;
-        execute_one(self, state, d, misaligned)
+        let mut wrote_csr = None;
+        execute_one(self, state, d, misaligned, &mut wrote_csr)
+    }
+
+    /// Execute one decoded instruction **and report** which CSR it
+    /// wrote (`None` = it wrote none).
+    ///
+    /// This is the variant the platform layer uses: the ISS *reports*
+    /// what it did, and the platform decides what a write to a platform
+    /// CSR *means* (STAGE-4 §4 接缝 #4).
+    pub fn execute_with_report(
+        &mut self,
+        state: &mut SimState,
+        d: &Decoded,
+        wrote_csr: &mut Option<u16>,
+    ) -> Result<StepOutcome, PlatformError> {
+        let misaligned = self.misaligned;
+        execute_one(self, state, d, misaligned, wrote_csr)
     }
 }
 
@@ -321,6 +408,20 @@ pub enum Op {
     Ecall,
     /// EBREAK — breakpoint.
     Ebreak,
+    /// CSRRW — swap a CSR with a register.
+    Csrrw,
+    /// CSRRS — set the bits of a CSR from a register.
+    Csrrs,
+    /// CSRRC — clear the bits of a CSR from a register.
+    Csrrc,
+    /// CSRRWI — swap a CSR with a 5-bit immediate.
+    Csrrwi,
+    /// CSRRSI — set the bits of a CSR with a 5-bit immediate.
+    Csrrsi,
+    /// CSRRCI — clear the bits of a CSR with a 5-bit immediate.
+    Csrrci,
+    /// MRET — return from a machine-mode trap handler.
+    Mret,
 }
 
 /// Second-level decode: map a decode key onto a concrete operation.
@@ -429,11 +530,26 @@ pub fn classify(d: &Decoded) -> Option<Op> {
         // as `0x00001073` (csr = 0, funct3 = 0b001) into the ECALL
         // handler and report mcause 11 instead of 2 — the trap would
         // reach the wrong handler as soon as CSR support lands.
-        // The ISS does not implement CSR yet, so those encodings trap
-        // as an illegal instruction (review V1 defect 1).
+        //
+        // `funct3 == 0b000` with an immediate other than 0 / 1 is the
+        // **privileged** part of the opcode: `0x302` is MRET (the
+        // machine-mode trap return), `0x105` is WFI, `0x102` is
+        // SRET. This platform is **M-mode only** (STAGE-4 §3.6), so
+        // MRET is implemented and the others stay illegal.
         0b111_0011 => match (d.funct3, d.imm) {
             (0b000, 0) => Some(Op::Ecall),
             (0b000, 1) => Some(Op::Ebreak),
+            // MRET — the standard encoding is `0x3020_0073`, i.e. the
+            // 12-bit immediate field holds 0x302.
+            (0b000, 0x302) => Some(Op::Mret),
+            // The CSR instruction family (funct3 001..111; 0b100 is
+            // reserved and stays illegal).
+            (0b001, _) => Some(Op::Csrrw),
+            (0b010, _) => Some(Op::Csrrs),
+            (0b011, _) => Some(Op::Csrrc),
+            (0b101, _) => Some(Op::Csrrwi),
+            (0b110, _) => Some(Op::Csrrsi),
+            (0b111, _) => Some(Op::Csrrci),
             _ => None,
         },
         _ => None,
@@ -550,11 +666,22 @@ fn branch(d: &Decoded) -> u32 {
 /// `mem` is the memory port: it is threaded through here so that both
 /// dispatch routes are structurally identical, and so that the load /
 /// store instructions land on one code path rather than two (D-11).
+///
+/// `wrote_csr` receives the **CSR number this instruction wrote** (`None`
+/// = it wrote no CSR). The ISS itself has **no** side effects of its own:
+/// it only *reports* what it did, and the platform layer (M-17) decides
+/// what a write to a platform CSR like `irq_clear` *means* (STAGE-4 §4
+/// 接缝 #4).
+///
+/// ⚠️ The report is produced by the **write arms themselves**, so the
+/// "does this instruction write?" decision has exactly **one** home —
+/// there is no second copy of it to drift.
 pub fn execute_one<M: MemoryAccess>(
     mem: &mut M,
     state: &mut SimState,
     d: &Decoded,
     misaligned: MisalignedPolicy,
+    wrote_csr: &mut Option<u16>,
 ) -> Result<StepOutcome, PlatformError> {
     let op = match classify(d) {
         Some(op) => op,
@@ -568,9 +695,18 @@ pub fn execute_one<M: MemoryAccess>(
             // decoder flags it and `classify` refuses it, so the
             // compressed path reports illegal instructions through the
             // same door as the 32-bit one.
-            return Ok(StepOutcome::Trapped {
-                cause: TrapCause::IllegalInstruction,
-            });
+            //
+            // `mtval` carries the **instruction word**: the 32-bit
+            // encoding, or the **16-bit original code** of a
+            // compressed encoding (STAGE-4 §3.5).
+            let cause = TrapCause::IllegalInstruction;
+            let mtval = if d.compressed {
+                d.compressed_raw as u32
+            } else {
+                d.raw
+            };
+            csr::enter_trap(state, cause.mcause(), mtval);
+            return Ok(StepOutcome::Trapped { cause });
         }
     };
 
@@ -742,9 +878,11 @@ pub fn execute_one<M: MemoryAccess>(
             let addr = read_gpr(state, d.rs1).wrapping_add(d.imm as u32);
             let size = load_width(op);
             if misaligned == MisalignedPolicy::Trap && !is_aligned(addr, size) {
-                return Ok(StepOutcome::Trapped {
-                    cause: TrapCause::MisalignedAccess,
-                });
+                // A misaligned **load** is `mcause = 4` — not the same
+                // code as a misaligned fetch (`0`) or store (`6`).
+                let cause = TrapCause::LoadAddressMisaligned;
+                csr::enter_trap(state, cause.mcause(), addr);
+                return Ok(StepOutcome::Trapped { cause });
             }
             let raw = mem.read(addr, size)?;
             write_gpr(state, d.rd, extend_load(op, raw));
@@ -754,9 +892,10 @@ pub fn execute_one<M: MemoryAccess>(
             let addr = read_gpr(state, d.rs1).wrapping_add(d.imm as u32);
             let size = store_width(op);
             if misaligned == MisalignedPolicy::Trap && !is_aligned(addr, size) {
-                return Ok(StepOutcome::Trapped {
-                    cause: TrapCause::MisalignedAccess,
-                });
+                // A misaligned **store** is `mcause = 6`.
+                let cause = TrapCause::StoreAddressMisaligned;
+                csr::enter_trap(state, cause.mcause(), addr);
+                return Ok(StepOutcome::Trapped { cause });
             }
             let value = truncate_store(op, read_gpr(state, d.rs2));
             mem.write(addr, size, value)?;
@@ -791,14 +930,119 @@ pub fn execute_one<M: MemoryAccess>(
             sequential(d)
         }
         Op::Ecall => {
-            return Ok(StepOutcome::Trapped {
-                cause: TrapCause::Ecall,
-            })
+            // An environment call carries **no** auxiliary value.
+            let cause = TrapCause::Ecall;
+            csr::enter_trap(state, cause.mcause(), 0);
+            return Ok(StepOutcome::Trapped { cause });
         }
         Op::Ebreak => {
-            return Ok(StepOutcome::Trapped {
-                cause: TrapCause::Breakpoint,
-            })
+            // A breakpoint carries **no** auxiliary value either.
+            let cause = TrapCause::Breakpoint;
+            csr::enter_trap(state, cause.mcause(), 0);
+            return Ok(StepOutcome::Trapped { cause });
+        }
+        Op::Csrrw => {
+            // `rd = old`; `csr = rs1`.
+            //
+            // ⚠️ With `rd == x0` the manual says the CSR is **not
+            // read** at all — the old value is simply dropped. Nothing
+            // observable depends on it here (a CSR read has no side
+            // effect), but the rule is implemented rather than
+            // approximated: the read is *skipped*, not just unused.
+            let number = csr::csr_number(d.raw);
+            let value = read_gpr(state, d.rs1);
+            if d.rd != 0 {
+                let old = csr::csr_read(state, number);
+                write_gpr(state, d.rd, old);
+            }
+            if !csr_write_is_ignored(number) {
+                csr::csr_write(state, number, value);
+                *wrote_csr = Some(number);
+            }
+            sequential(d)
+        }
+        Op::Csrrs => {
+            // `rd = old`; `csr |= rs1` — but only when `rs1 != x0`:
+            // with `rs1 == x0` the instruction is a **pure read** and
+            // must not write the CSR at all (not even to the value it
+            // already holds).
+            let number = csr::csr_number(d.raw);
+            let value = read_gpr(state, d.rs1);
+            let old = csr::csr_read(state, number);
+            write_gpr(state, d.rd, old);
+            if d.rs1 != 0 && !csr_write_is_ignored(number) {
+                csr::csr_write(state, number, old | value);
+                *wrote_csr = Some(number);
+            }
+            sequential(d)
+        }
+        Op::Csrrc => {
+            // `rd = old`; `csr &= !rs1` — same "no write with
+            // `rs1 == x0`" rule as [`Op::Csrrs`].
+            let number = csr::csr_number(d.raw);
+            let value = read_gpr(state, d.rs1);
+            let old = csr::csr_read(state, number);
+            write_gpr(state, d.rd, old);
+            if d.rs1 != 0 && !csr_write_is_ignored(number) {
+                csr::csr_write(state, number, old & !value);
+                *wrote_csr = Some(number);
+            }
+            sequential(d)
+        }
+        Op::Csrrwi => {
+            // `CSRRW` with the `rs1` field read as a 5-bit immediate.
+            let number = csr::csr_number(d.raw);
+            let value = csr::csr_zimm(d.raw);
+            if d.rd != 0 {
+                let old = csr::csr_read(state, number);
+                write_gpr(state, d.rd, old);
+            }
+            if !csr_write_is_ignored(number) {
+                csr::csr_write(state, number, value);
+                *wrote_csr = Some(number);
+            }
+            sequential(d)
+        }
+        Op::Csrrsi => {
+            // `CSRRS` with the `rs1` field read as a 5-bit immediate.
+            // A zero immediate means "read only" — no write.
+            let number = csr::csr_number(d.raw);
+            let value = csr::csr_zimm(d.raw);
+            let old = csr::csr_read(state, number);
+            write_gpr(state, d.rd, old);
+            if value != 0 && !csr_write_is_ignored(number) {
+                csr::csr_write(state, number, old | value);
+                *wrote_csr = Some(number);
+            }
+            sequential(d)
+        }
+        Op::Csrrci => {
+            // `CSRRC` with the `rs1` field read as a 5-bit immediate.
+            // A zero immediate means "read only" — no write.
+            let number = csr::csr_number(d.raw);
+            let value = csr::csr_zimm(d.raw);
+            let old = csr::csr_read(state, number);
+            write_gpr(state, d.rd, old);
+            if value != 0 && !csr_write_is_ignored(number) {
+                csr::csr_write(state, number, old & !value);
+                *wrote_csr = Some(number);
+            }
+            sequential(d)
+        }
+        Op::Mret => {
+            // `pc := mepc`; `mstatus.MIE := mstatus.MPIE`;
+            // `mstatus.MPIE := 1`.
+            let target = csr::csr_read(state, CSR_MEPC);
+            let mstatus = csr::csr_read(state, CSR_MSTATUS);
+            let mie = 1u32 << MSTATUS_MIE_BIT;
+            let mpie = 1u32 << MSTATUS_MPIE_BIT;
+            let restored = if mstatus & mpie != 0 { mie } else { 0 };
+            csr::csr_write(
+                state,
+                CSR_MSTATUS,
+                (mstatus & !(mie | mpie)) | restored | mpie,
+            );
+            target
         }
     };
 

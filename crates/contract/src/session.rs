@@ -288,10 +288,107 @@ pub struct M15PeriphDto {
 }
 
 /// Interrupt-controller state — segment 5.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+///
+/// ⚠️ **Two different things live here, and they are not the same**:
+///
+/// * [`Self::raised`] — the **line level**: which interrupt lines are
+///   currently *asserted*;
+/// * [`Self::pending`] — the **pending queue**: the entries that are
+///   waiting to be arbitrated and delivered.
+///
+/// The invariant between them is **one-directional**: every line in
+/// `pending` is also in `raised` (a queued interrupt is an asserted
+/// one), but not the other way round. The asymmetry is what lets an
+/// **old** payload — one captured while M-16 was still a stub, with
+/// lines in `raised` and no queue at all — restore **faithfully**
+/// instead of silently losing its state.
+///
+/// ⚠️ Every field added after the original `raised` is
+/// `#[serde(default)]`, so an old payload still deserialises — and the
+/// defaults are not merely tolerated, they are **correct** for that
+/// era: a stub-era session really had no queue, no enable mask and no
+/// active interrupt. The session payload's `schema_version` therefore
+/// stays `1` (adjudication F of the frozen spec
+/// `docs/detailed-design/STAGE-4_Interrupt_Controller.md` §1.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct M16IntcDto {
     /// Currently raised IRQ lines, ascending and deduplicated.
+    #[serde(default)]
     pub raised: Vec<u16>,
+    /// The pending queue, in canonical order: `request_time_ps`
+    /// ascending, ties broken by `insert_seq` ascending.
+    #[serde(default)]
+    pub pending: Vec<PendingIrqDto>,
+    /// Per-line priorities, ordered by line.
+    #[serde(default)]
+    pub priorities: Vec<IrqPriorityDto>,
+    /// The enable mask, indexed **by line** (bit L = line L).
+    #[serde(default)]
+    pub enabled_mask: u32,
+    /// The interrupt line that was delivered and not yet cleared
+    /// ([`crate::csr::NO_ACTIVE_IRQ`] = none).
+    #[serde(default = "no_active_irq")]
+    pub active_irq: u16,
+    /// The timer counter (virtual-time equivalent) — decimal string.
+    #[serde(default, with = "crate::numstr::u64_decimal")]
+    pub mtime_ps: u64,
+    /// The timer compare value — decimal string.
+    #[serde(default, with = "crate::numstr::u64_decimal")]
+    pub mtimecmp_ps: u64,
+}
+
+/// The default for [`M16IntcDto::active_irq`].
+///
+/// ⚠️ It is [`crate::csr::NO_ACTIVE_IRQ`] and **not** `0`: `0` would
+/// read as "line 0 is the active interrupt", and the payload validator
+/// would then reject every payload that carries the default (line 0 is
+/// not in the queue).
+fn no_active_irq() -> u16 {
+    crate::csr::NO_ACTIVE_IRQ
+}
+
+impl Default for M16IntcDto {
+    fn default() -> Self {
+        Self {
+            raised: Vec::new(),
+            pending: Vec::new(),
+            priorities: Vec::new(),
+            enabled_mask: 0,
+            active_irq: no_active_irq(),
+            mtime_ps: 0,
+            mtimecmp_ps: 0,
+        }
+    }
+}
+
+/// One entry of the interrupt controller's pending queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingIrqDto {
+    /// The interrupt line.
+    pub line: u16,
+    /// The line's priority (higher wins).
+    pub prio: u8,
+    /// When the line was requested (virtual time) — decimal string.
+    #[serde(with = "crate::numstr::u64_decimal")]
+    pub request_time_ps: u64,
+    /// The insertion counter — the tie-breaker that makes the queue
+    /// order **deterministic** when two lines are requested at the same
+    /// virtual time.
+    pub insert_seq: u64,
+    /// Trigger mode: `0` = level, `1` = edge.
+    pub trigger_type: u8,
+    /// The request source: `"uart"` / `"gpio"` / `"timer"` /
+    /// `"platform"`.
+    pub source_type: String,
+}
+
+/// One line's priority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IrqPriorityDto {
+    /// The interrupt line.
+    pub line: u16,
+    /// The line's priority (higher wins).
+    pub prio: u8,
 }
 
 /// The session-level snapshot payload.
@@ -354,6 +451,18 @@ impl SessionSnapshotDto {
     ///    entries
     /// 9. `m16_intc.raised` — ascending, no duplicates
     /// 10. the inner engine snapshot validates on its own terms
+    /// 11. `m16_intc.pending` — one entry per line, in canonical
+    ///     `(request_time_ps, insert_seq)` order
+    /// 12. `m16_intc.priorities` — ascending by line, no duplicates
+    /// 13. `m16_intc.active_irq` — either "none" or a line that **is**
+    ///     in the pending queue
+    /// 14. `m16_intc.pending` — every queued line is also in `raised`
+    ///
+    /// ⚠️ Checks **11 ~ 14** were added by the M-16 landing batch
+    /// (frozen spec `docs/detailed-design/STAGE-4_Interrupt_Controller.md`
+    /// §2.4). They describe the **queue** the interrupt controller
+    /// acquired when it stopped being a stub; before that, segment 5
+    /// carried only the asserted lines.
     ///
     /// ⚠️ The numbers are the **frozen spec's** (§5) — the same numbers
     /// the spec's table uses, so a reader can line the two up.
@@ -499,6 +608,77 @@ impl SessionSnapshotDto {
             prev = Some(*line);
         }
 
+        // 11 — the pending queue: one entry per line (the controller
+        // deduplicates a repeated request), in canonical order.
+        //
+        // The canonical order is `(request_time_ps, insert_seq)` — the
+        // same key the controller itself uses, so "canonically ordered"
+        // here means "in the order the controller would have produced".
+        let mut queued_lines: Vec<u16> = Vec::new();
+        let mut prev_key: Option<(u64, u64)> = None;
+        for entry in &self.m16_intc.pending {
+            if queued_lines.contains(&entry.line) {
+                return Err(self.malformed(&format!(
+                    "挂起队列里 IRQ 行 {} 出现了两次（同线去重是控制器的不变式）",
+                    entry.line
+                )));
+            }
+            queued_lines.push(entry.line);
+            let key = (entry.request_time_ps, entry.insert_seq);
+            if let Some(prev) = prev_key {
+                if key <= prev {
+                    return Err(self.malformed(&format!(
+                        "挂起队列未按 (请求时刻, 插入序) 升序：({}) 跟在 ({}) 后面",
+                        key.0, prev.0
+                    )));
+                }
+            }
+            prev_key = Some(key);
+        }
+
+        // 12 — the priority table: one entry per line, ordered by line.
+        let mut prev_line: Option<u16> = None;
+        for pr in &self.m16_intc.priorities {
+            if let Some(p) = prev_line {
+                if pr.line <= p {
+                    return Err(self.malformed(&format!(
+                        "优先级表未按 IRQ 行升序或有重复：行 {} 跟在行 {} 后面",
+                        pr.line, p
+                    )));
+                }
+            }
+            prev_line = Some(pr.line);
+        }
+
+        // 13 — the delivered-and-not-cleared line must still be queued.
+        //
+        // An active line that is *not* in the queue would be a line the
+        // controller can neither re-deliver nor clear — a payload that
+        // describes a state the controller cannot be in.
+        if self.m16_intc.active_irq != crate::csr::NO_ACTIVE_IRQ
+            && !queued_lines.contains(&self.m16_intc.active_irq)
+        {
+            return Err(self.malformed(&format!(
+                "已交付但未清除的 IRQ 行 {} 不在挂起队列里",
+                self.m16_intc.active_irq
+            )));
+        }
+
+        // 14 — every queued line must also be asserted.
+        //
+        // The invariant is **one-directional** (`pending ⊆ raised`), not
+        // equality: a payload captured while M-16 was a stub carries
+        // asserted lines and an empty queue, and that is a *faithful*
+        // description of that era's state.
+        for entry in &self.m16_intc.pending {
+            if !self.m16_intc.raised.contains(&entry.line) {
+                return Err(self.malformed(&format!(
+                    "挂起队列里的 IRQ 行 {} 没有被拉起（队列是拉起行的子集）",
+                    entry.line
+                )));
+            }
+        }
+
         // 10 — the inner engine snapshot validates on its own terms.
         self.m12_engine.validate()?;
 
@@ -609,7 +789,10 @@ mod tests {
                     mtimecmp: 1000,
                 }],
             },
-            m16_intc: M16IntcDto { raised: vec![1, 3] },
+            m16_intc: M16IntcDto {
+                raised: vec![1, 3],
+                ..M16IntcDto::default()
+            },
         }
     }
 
@@ -734,10 +917,22 @@ mod tests {
             .expect("m16");
         let mut m16k: Vec<&str> = m16.keys().map(String::as_str).collect();
         m16k.sort_unstable();
-        assert_eq!(m16k, vec!["raised"]);
+        assert_eq!(
+            m16k,
+            vec![
+                "active_irq",
+                "enabled_mask",
+                "mtime_ps",
+                "mtimecmp_ps",
+                "pending",
+                "priorities",
+                "raised",
+            ],
+            "段 5 的键集必须精确固定——M-16 落地后段 5 带的是整个控制器状态"
+        );
     }
 
-    /// ⚠️ **All six** virtual-time fields travel as **decimal strings**.
+    /// ⚠️ **All eight** virtual-time fields travel as **decimal strings**.
     ///
     /// The `u64_decimal` deserialiser accepts **both** forms, so a
     /// silently reverted field does not error — it just goes back to
@@ -746,9 +941,9 @@ mod tests {
     /// why the assertion has to be on the **shape**, not on "it parses".
     ///
     /// ⚠️ The **count** is pinned separately, by
-    /// [`exactly_six_virtual_time_fields_carry_the_decimal_attribute`]
+    /// [`exactly_eight_virtual_time_fields_carry_the_decimal_attribute`]
     /// — the per-field assertions above would all still pass if a
-    /// **seventh** field quietly joined the set, and the spec's "six"
+    /// **ninth** field quietly joined the set, and the spec's "eight"
     /// would quietly become a lie.
     #[test]
     fn every_virtual_time_field_in_the_session_payload_is_a_decimal_string() {
@@ -852,7 +1047,7 @@ mod tests {
     ///    **非时间**字符串字段（形状守卫已钉住它们）；按**键名**排除，
     ///    夹具里的 id 就算变成纯数字也不会污染计数。
     #[test]
-    fn exactly_six_virtual_time_fields_carry_the_decimal_attribute() {
+    fn exactly_eight_virtual_time_fields_carry_the_decimal_attribute() {
         let json = serde_json::to_value(sample()).expect("json");
         let top = json.as_object().expect("object");
 
@@ -867,10 +1062,11 @@ mod tests {
 
         assert_eq!(
             paths.len(),
-            6,
-            "会话载荷里带十进制字符串属性的字段必须恰好 6 个 \
+            8,
+            "会话载荷里带十进制字符串属性的字段必须恰好 8 个 \
              （cp_meta.t_virt / cp_meta.t_host / uarts[0].now_ps / \
-             gpios[0].now_ps / timers[0].mtime / timers[0].mtimecmp）\
+             gpios[0].now_ps / timers[0].mtime / timers[0].mtimecmp / \
+             m16_intc.mtime_ps / m16_intc.mtimecmp_ps）\
              ——实际线上是十进制字符串的字段：{paths:?}"
         );
         assert_eq!(
@@ -882,9 +1078,11 @@ mod tests {
                 "m15_periph.timers.0.mtime",
                 "m15_periph.timers.0.mtimecmp",
                 "m15_periph.uarts.0.now_ps",
+                "m16_intc.mtime_ps",
+                "m16_intc.mtimecmp_ps",
             ],
-            "十进制字符串字段的集合必须**恰好**是规格 §4 表里的那六个——\
-             多一个或少一个，「6 个」这句话就是空话"
+            "十进制字符串字段的集合必须**恰好**是规格 §4 表里的那八个——\
+             多一个或少一个，「8 个」这句话就是空话"
         );
     }
 
@@ -1315,5 +1513,339 @@ mod tests {
             SESSION_SNAPSHOT_SCHEMA_VERSION, 1,
             "会话载荷的格式版本必须是 1——改回去会让旧载荷被静默接受"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // 段 5 的扩展（M-16 落地批 · STAGE-4 §2.4）
+    // ------------------------------------------------------------------
+
+    /// **旧载荷**（M-16 还是 stub 的时候捕获的）**仍然能反序列化**。
+    ///
+    /// ⚠️ 这一条是「加字段」能不能成立的**前提**：段 5 的形状变了，
+    /// 但会话载荷的 `schema_version` **没有**升 —— 前提就是旧载荷
+    /// 读得回来。
+    ///
+    /// ⚠️ 而且不只是「读得回来」：默认值必须是**那个时代的真实状态**
+    /// （没有队列 / 没有使能掩码 / 没有活动中断），否则「读得回来但
+    /// 读出来是错的」比「读不回来」更糟。
+    #[test]
+    fn an_old_segment_5_payload_still_deserialises() {
+        let json = r#"{"raised":[1,3]}"#;
+        let dto: M16IntcDto = serde_json::from_str(json).expect("旧形状必须能读");
+        assert_eq!(dto.raised, vec![1, 3]);
+        assert!(
+            dto.pending.is_empty(),
+            "旧载荷没有队列——那正是 stub 时代的真实状态"
+        );
+        assert_eq!(dto.enabled_mask, 0);
+        assert_eq!(dto.mtime_ps, 0);
+        assert_eq!(dto.mtimecmp_ps, 0);
+    }
+
+    /// 「没有活动中断」的标记**不是 0**。
+    ///
+    /// ⚠️ 如果它是 0，那么每个带默认值的载荷都会被校验器拒掉
+    /// （「活动中断行 0 不在队列里」）——而那会让**所有**旧载荷失效。
+    #[test]
+    fn the_default_active_irq_is_the_no_active_marker() {
+        let dto = M16IntcDto::default();
+        assert_eq!(dto.active_irq, crate::csr::NO_ACTIVE_IRQ);
+        assert_ne!(dto.active_irq, 0, "0 会被读成「行 0 是活动中断」");
+    }
+
+    /// 段 5 的**字段顺序**被钉住。
+    ///
+    /// ⚠️ 上一条形状用例（`the_session_payload_shape_is_pinned_exactly`）
+    ///    把键**排序**后再比对 ⇒ 它**按定义与顺序无关**；而
+    ///    `serde_json` 没开 `preserve_order` ⇒ `to_value` 的 `Map` 是
+    ///    `BTreeMap` ⇒ **声明顺序根本不会被保留** ⇒ 调换段 5 的字段声明
+    ///    顺序，**没有任何用例会红**（v0.19 检视轮 V-A · F-3）。
+    ///
+    /// ⇒ 这里用 [`serde_json::to_string`]（**结构体直接序列化** ⇒ 按**声明
+    ///    顺序**写字段；`BTreeMap` 只影响 `Value`，不影响结构体的写出顺序）
+    ///    把**键在 JSON 文本里出现的先后**断言下来。
+    #[test]
+    fn the_segment_5_field_order_is_pinned() {
+        let text = serde_json::to_string(&M16IntcDto::default()).expect("json");
+        let order: Vec<&str> = [
+            "raised",
+            "pending",
+            "priorities",
+            "enabled_mask",
+            "active_irq",
+            "mtime_ps",
+            "mtimecmp_ps",
+        ]
+        .into_iter()
+        .collect();
+        let mut cursor = 0usize;
+        for key in order {
+            let at = text[cursor..]
+                .find(&format!("\"{key}\""))
+                .unwrap_or_else(|| panic!("字段 {key} 不在 {text} 里"));
+            cursor += at + key.len() + 2;
+        }
+        // ⚠️ 反向钉一次：把顺序**整个倒过来**，上面的游标推进就**找不到**
+        //    `enabled_mask` —— 所以这条用例真的在管「顺序」，不是「键集」。
+        let reversed = serde_json::to_string(&ReversedSegment5::default()).expect("json");
+        assert_ne!(
+            text, reversed,
+            "段 5 的字段顺序必须被钉住（否则「按字节 diff 两份载荷」的下游工具会失效）"
+        );
+    }
+
+    /// 段 5 的**倒序**版本 —— 只用来证明「顺序真的被钉住」。
+    #[derive(serde::Serialize)]
+    struct ReversedSegment5 {
+        mtimecmp_ps: u64,
+        mtime_ps: u64,
+        active_irq: u16,
+        enabled_mask: u32,
+        priorities: Vec<IrqPriorityDto>,
+        pending: Vec<PendingIrqDto>,
+        raised: Vec<u16>,
+    }
+
+    impl Default for ReversedSegment5 {
+        fn default() -> Self {
+            Self {
+                mtimecmp_ps: 0,
+                mtime_ps: 0,
+                active_irq: crate::csr::NO_ACTIVE_IRQ,
+                enabled_mask: 0,
+                priorities: Vec::new(),
+                pending: Vec::new(),
+                raised: Vec::new(),
+            }
+        }
+    }
+
+    /// **旧形状**载荷（只有 `raised`）必须**过校验**，不只是能反序列化。
+    ///
+    /// ⚠️ 上一条用例只测了**反序列化** —— 旧载荷能不能**过 `validate()`**
+    ///    是**另一件事**（STAGE-4 §2.4「旧载荷必须仍然通过」）。
+    #[test]
+    fn an_old_segment_5_payload_still_passes_the_validator() {
+        let mut payload = sample();
+        payload.m16_intc = serde_json::from_str(r#"{"raised":[1,3]}"#).expect("旧形状必须能读");
+        payload
+            .validate()
+            .expect("旧形状的段 5 必须仍然过校验（那正是 stub 时代的真实状态）");
+    }
+
+    /// 虚拟时间字段走**十进制字符串**（契约 v2 §2.2）。
+    ///
+    /// ⚠️ 这是「判别式落在字段的**线上表示**上」：断言的是 JSON 里的
+    /// 文本形状，不是「值对不对」。
+    #[test]
+    fn the_segment_5_virtual_time_fields_travel_as_decimal_strings() {
+        let dto = M16IntcDto {
+            mtime_ps: 9_007_199_254_740_992,
+            mtimecmp_ps: 42,
+            ..M16IntcDto::default()
+        };
+        let json = serde_json::to_string(&dto).expect("序列化必须成功");
+        assert!(
+            json.contains(r#""mtime_ps":"9007199254740992""#),
+            "mtime_ps 必须走十进制字符串：{json}"
+        );
+        assert!(
+            json.contains(r#""mtimecmp_ps":"42""#),
+            "mtimecmp_ps 必须走十进制字符串：{json}"
+        );
+        let back: M16IntcDto = serde_json::from_str(&json).expect("往返必须成功");
+        assert_eq!(back.mtime_ps, dto.mtime_ps);
+        assert_eq!(back.mtimecmp_ps, dto.mtimecmp_ps);
+    }
+
+    /// 段 5 的**字段名**在 JSON 上是稳定的（载荷是**公开**格式）。
+    #[test]
+    fn the_segment_5_field_names_are_stable() {
+        let dto = M16IntcDto::default();
+        let json = serde_json::to_string(&dto).expect("序列化必须成功");
+        for key in [
+            "raised",
+            "pending",
+            "priorities",
+            "enabled_mask",
+            "active_irq",
+            "mtime_ps",
+            "mtimecmp_ps",
+        ] {
+            assert!(
+                json.contains(&format!("\"{key}\"")),
+                "段 5 必须带字段 `{key}`：{json}"
+            );
+        }
+    }
+
+    /// 构造一个**合法**的段 5 —— 用来给「拒」的用例当反面。
+    fn well_formed_segment_5() -> M16IntcDto {
+        M16IntcDto {
+            raised: vec![1, 3],
+            pending: vec![
+                PendingIrqDto {
+                    line: 1,
+                    prio: 1,
+                    request_time_ps: 100,
+                    insert_seq: 1,
+                    trigger_type: 1,
+                    source_type: "uart".to_string(),
+                },
+                PendingIrqDto {
+                    line: 3,
+                    prio: 2,
+                    request_time_ps: 200,
+                    insert_seq: 2,
+                    trigger_type: 0,
+                    source_type: "timer".to_string(),
+                },
+            ],
+            priorities: vec![
+                IrqPriorityDto { line: 1, prio: 1 },
+                IrqPriorityDto { line: 3, prio: 2 },
+            ],
+            enabled_mask: 0b1010,
+            active_irq: crate::csr::NO_ACTIVE_IRQ,
+            mtime_ps: 500,
+            mtimecmp_ps: 1_000,
+        }
+    }
+
+    /// 合法形状**通过**校验 —— 上面每一条「拒」的用例都需要这条做对照，
+    /// 否则「校验器什么都拒」也能让它们全绿。
+    #[test]
+    fn a_well_formed_segment_5_is_accepted() {
+        let mut s = sample();
+        s.m16_intc = well_formed_segment_5();
+        s.validate().expect("合法形状必须通过校验");
+    }
+
+    /// 挂起队列里**同一条线出现两次** → 拒。
+    ///
+    /// ⚠️ **不重复**（同线去重是控制器的不变式）。
+    ///
+    /// ⚠️ **夹具必须只踩这一条**：本用例的重复项**时刻不同**（`100` 与 `200`），
+    /// 所以队列的**顺序检查（第 11 项的后半段）不会**顺带把它拒掉 ——
+    /// 否则本用例就变成「顺序检查在起作用」的假判别式，**同线去重这一条
+    /// 就没人守了**。（这正是本条被反向变异自检抓出来的形状：把
+    /// 「同线去重」检查去掉，用例**照样绿**。）
+    #[test]
+    fn a_duplicated_pending_line_is_rejected() {
+        let mut s = sample();
+        let mut seg = well_formed_segment_5();
+        // 行 1 出现两次，但**请求时刻不同** ⇒ 顺序仍是升序的。
+        seg.pending[1] = PendingIrqDto {
+            line: seg.pending[0].line,
+            prio: seg.pending[0].prio,
+            request_time_ps: 900,
+            insert_seq: 9,
+            trigger_type: 1,
+            source_type: "uart".to_string(),
+        };
+        s.m16_intc = seg;
+        let err = s.validate().expect_err("同线重复必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// ⚠️ **反面**：**时刻不同**的重复行**确实**能穿过顺序检查 ⇒
+    /// 证明上一条用例钉住的是**同线去重**这一条，而不是顺序检查。
+    ///
+    /// 没有这一条，上一条用例就可能因为「顺序检查顺带拒了它」而变绿 ——
+    /// 那样「同线去重」这条规则就**没有守卫**。
+    #[test]
+    fn a_duplicated_line_with_distinct_times_keeps_the_queue_ordered() {
+        let mut s = sample();
+        let mut seg = well_formed_segment_5();
+        seg.pending[1] = PendingIrqDto {
+            line: seg.pending[0].line,
+            prio: seg.pending[0].prio,
+            request_time_ps: 900,
+            insert_seq: 9,
+            trigger_type: 1,
+            source_type: "uart".to_string(),
+        };
+        // 队列**顺序**本身是好的（100 < 900）。
+        let keys: Vec<(u64, u64)> = seg
+            .pending
+            .iter()
+            .map(|p| (p.request_time_ps, p.insert_seq))
+            .collect();
+        assert!(keys[0] < keys[1], "夹具必须满足顺序检查");
+        s.m16_intc = seg;
+        // 而它**仍然**必须被拒 —— 理由只能是「同线去重」。
+        let err = s.validate().expect_err("同线重复必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// 挂起队列**顺序不对** → 拒。
+    ///
+    /// ⚠️ 判别式落在**排序键** `(请求时刻, 插入序)` 上：把两条的
+    /// 请求时刻对调，顺序就反了。
+    #[test]
+    fn an_out_of_order_pending_queue_is_rejected() {
+        let mut s = sample();
+        let mut seg = well_formed_segment_5();
+        seg.pending.swap(0, 1);
+        s.m16_intc = seg;
+        let err = s.validate().expect_err("队列顺序不对必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// 优先级表**顺序不对** → 拒。
+    #[test]
+    fn an_unsorted_priority_table_is_rejected() {
+        let mut s = sample();
+        let mut seg = well_formed_segment_5();
+        seg.priorities.swap(0, 1);
+        s.m16_intc = seg;
+        let err = s.validate().expect_err("优先级表顺序不对必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// 「已交付未清除」的行**不在队列里** → 拒。
+    ///
+    /// ⚠️ 这种载荷描述的状态控制器**到不了**：一条既不能被再次交付、
+    /// 也不能被清除的行。
+    #[test]
+    fn an_active_line_that_is_not_queued_is_rejected() {
+        let mut s = sample();
+        let mut seg = well_formed_segment_5();
+        seg.active_irq = 2; // 行 2 既不在队列里，也不在 raised 里
+        s.m16_intc = seg;
+        let err = s.validate().expect_err("活动行不在队列里必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// 队列里的行**没有被拉起** → 拒。
+    ///
+    /// ⚠️ 这条守的是**单向**不变式 `pending ⊆ raised` 的方向：
+    /// 「队列里的行必须是被断言的」成立，而反向**不**要求成立
+    /// （stub 时代的载荷就是「拉起了若干行、队列是空的」）。
+    #[test]
+    fn a_queued_line_that_is_not_raised_is_rejected() {
+        let mut s = sample();
+        let mut seg = well_formed_segment_5();
+        seg.raised = vec![3]; // 队列里有行 1，但行 1 没被拉起
+        s.m16_intc = seg;
+        let err = s.validate().expect_err("队列里的行没被拉起必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// 反向**不**要求成立：`raised` 可以有队列里没有的行。
+    ///
+    /// ⚠️ 这是上面那条的**反面**，也是「旧载荷必须还能过校验」这条
+    /// 裁决的落点 —— 如果这个方向也被拒，所有 stub 时代的载荷都会
+    /// 变成废载荷。
+    #[test]
+    fn a_raised_line_without_a_queue_entry_is_accepted() {
+        let mut s = sample();
+        let mut seg = well_formed_segment_5();
+        seg.pending.clear();
+        seg.raised = vec![1, 3];
+        seg.active_irq = crate::csr::NO_ACTIVE_IRQ;
+        s.m16_intc = seg;
+        s.validate()
+            .expect("「拉起了但没排队」是 stub 时代的真实状态，必须放行");
     }
 }

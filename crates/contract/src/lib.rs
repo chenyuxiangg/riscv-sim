@@ -23,6 +23,10 @@
 //!   (M-15) and the interrupt controller (M-16) are **not** part of it.
 //! - [`numstr`] — decimal-string transport for the virtual-time fields
 //!   (contract v2 spec §2).
+//! - [`csr`] — the machine-mode CSR vocabulary and the platform's
+//!   interrupt-line space (CSR numbers · `mie` bit positions · the
+//!   line → `mie` bit mapping). Frozen spec:
+//!   `docs/detailed-design/STAGE-4_Interrupt_Controller.md` §2.1.
 //!
 //! # Schema version
 //!
@@ -37,6 +41,7 @@
 // 2026-10-19 decision: workspace `missing_docs = "allow"` until each
 // public item is documented, then re-tighten to `deny`.
 
+pub mod csr;
 pub mod error;
 pub mod model;
 pub mod numstr;
