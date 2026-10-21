@@ -132,7 +132,7 @@ export function ps(value) {
 
 /**
  * 把线上表示的虚拟时间读回 JS number。
- * 超过 2^53 时**抛错**（E_PROTO-02）而不是静默丢精度。
+ * 超过 2^53 时**抛错**（E_PROTO-04）而不是静默丢精度。
  *
  * ⚠️ 这里**不能**用 `Number(text)` 了事：`Number("9007199254740993")` 会
  * 变成 `9007199254740992`——**静默**丢掉 1 ps，正是本规则要消灭的行为。
@@ -141,9 +141,15 @@ export function ps(value) {
  * 数字形态（旧的线上表示）**接受**，但精度可能早已丢失——文档口径是
  * 「数字形态只保证 ≤ 2^53 精确」。
  *
+ * ⚠️ **错误码**：超限用 **`E_PROTO-04`**（输入超限：数值的大小超过了
+ * 消费者能精确表示的上限）——**不是** `E_PROTO-02`。后者的原义是
+ * 「未知字段」，在契约里恰恰是**不抛错**的（只增不改，仅记一条日志），
+ * 拿一个「仅日志」的码去抛错语义是反的。形态非法（非有限数 / 非整数 /
+ * 负数 / 不是十进制整数字符串）仍然是 `E_PROTO-08`（消息格式错误）。
+ *
  * @param {unknown} text
  * @returns {number}
- * @throws {Error & {code: string}} E_PROTO-02（超过 2^53）/ E_PROTO-08（形态非法）
+ * @throws {Error & {code: string}} E_PROTO-04（超过 2^53）/ E_PROTO-08（形态非法）
  */
 export function psToNumber(text) {
     if (typeof text === "number") {
@@ -157,7 +163,7 @@ export function psToNumber(text) {
             throw protocolError("E_PROTO-08", `虚拟时间为负：${String(text)}`);
         }
         if (text > MAX_EXACT_PS) {
-            throw protocolError("E_PROTO-02", `虚拟时间超过 2^53，无法精确表示：${String(text)}`);
+            throw protocolError("E_PROTO-04", `虚拟时间超过 2^53，无法精确表示：${String(text)}`);
         }
         return text;
     }
@@ -167,7 +173,7 @@ export function psToNumber(text) {
         }
         const exact = BigInt(text);
         if (exact > BigInt(MAX_EXACT_PS)) {
-            throw protocolError("E_PROTO-02", `虚拟时间超过 2^53，无法精确表示：${text}`);
+            throw protocolError("E_PROTO-04", `虚拟时间超过 2^53，无法精确表示：${text}`);
         }
         return Number(exact);
     }

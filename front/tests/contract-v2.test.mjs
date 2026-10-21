@@ -72,15 +72,27 @@ describe("契约 v2 · 虚拟时间走十进制字符串（§2）", () => {
         assert.equal(psToNumber("9007199254740992"), 9007199254740992);
     });
 
-    test("psToNumber() 超过 2^53 **抛错**，不是截断（E_PROTO-02）", () => {
+    test("psToNumber() 超过 2^53 **抛错**，不是截断（E_PROTO-04）", () => {
         // 2^53 + 1 —— `Number()` 会把它悄悄变成 2^53。
-        assert.throws(() => psToNumber("9007199254740993"), /E_PROTO-02/);
+        //
+        // ⚠️ 错误码必须是 **E_PROTO-04**（输入超限：数值的大小超过了消费
+        // 者能精确表示的上限），**不是** E_PROTO-02——后者的原义是「未知
+        // 字段」，在契约里是**不抛错**的（只增不改，仅记一条日志）。拿一
+        // 个「仅日志」的码去抛错，语义是反的。
+        //
+        // 断言钉到 **code**（不是「抛了就行」）：把 04 写成 02，用例照样
+        // 全绿——除非它真的区分这两个码。
+        assert.throws(() => psToNumber("9007199254740993"), /E_PROTO-04/);
         assert.throws(() => psToNumber("9007199254740993"), (err) => {
-            assert.equal(err.code, "E_PROTO-02");
+            assert.equal(err.code, "E_PROTO-04");
             return true;
         });
         // 更远的值同样拒绝。
-        assert.throws(() => psToNumber("18446744073709551615"), /E_PROTO-02/);
+        assert.throws(() => psToNumber("18446744073709551615"), /E_PROTO-04/);
+        assert.throws(() => psToNumber("18446744073709551615"), (err) => {
+            assert.equal(err.code, "E_PROTO-04");
+            return true;
+        });
     });
 
     test("psToNumber() 超过 2^53 时**不**返回被四舍五入的数", () => {
@@ -91,7 +103,7 @@ describe("契约 v2 · 虚拟时间走十进制字符串（§2）", () => {
             caught = err;
         }
         assert.ok(caught, "必须抛错，而不是返回一个被舍入的数");
-        assert.equal(caught.code, "E_PROTO-02");
+        assert.equal(caught.code, "E_PROTO-04");
         // 错误信息里不能出现那个被舍入的值 —— 它会让人以为读到了真值。
         assert.ok(!caught.message.includes("9007199254740992"), "错误信息泄露了被舍入的值");
     });
@@ -105,9 +117,9 @@ describe("契约 v2 · 虚拟时间走十进制字符串（§2）", () => {
     test("psToNumber() 的数字形态超过 2^53 也**抛错**", () => {
         // 数字形态的精度可能早已丢失，但**太大**的值仍然要拒——
         // 放行它等于把「读不出来的时刻」当成「读出来的时刻」。
-        assert.throws(() => psToNumber(1e300), /E_PROTO-02/);
+        assert.throws(() => psToNumber(1e300), /E_PROTO-04/);
         assert.throws(() => psToNumber(1e300), (err) => {
-            assert.equal(err.code, "E_PROTO-02");
+            assert.equal(err.code, "E_PROTO-04");
             return true;
         });
     });
@@ -420,7 +432,9 @@ describe("契约 v2 · M-10 消费新事件与新命令", () => {
 
         // 超过 2^53 —— 必须**报错**，不能悄悄变成一个舍入过的值。
         transport.emit(eventFrame(null, Event.tick("9007199254740993", 0x10)));
-        assert.match(service.getSnapshot().lastError, /E_PROTO-02/);
+        // 错误码钉到 **E_PROTO-04**（输入超限），不是 E_PROTO-02（未知
+        // 字段 · 仅日志）。
+        assert.match(service.getSnapshot().lastError, /^E_PROTO-04:/);
         assert.equal(
             service.getSnapshot().timeVirt,
             1000,
