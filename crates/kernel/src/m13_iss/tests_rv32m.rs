@@ -193,6 +193,19 @@ fn rem_takes_the_signed_remainder() {
 fn remu_takes_the_unsigned_remainder() {
     assert_eq!(run_m(0b111, 100, 7), 2);
     assert_eq!(run_m(0b111, 0xFFFF_FFF9, 16), 9);
+    // The unsigned remainder can have **bit 31 set** — a signed
+    // interpretation, or a stray mask of the sign bit, changes it.
+    // Both operands below are larger than the dividend's half, so the
+    // remainder is the dividend itself.
+    assert_eq!(run_m(0b111, 0xFFFF_FFFE, 0xFFFF_FFFF), 0xFFFF_FFFE);
+    assert_eq!(run_m(0b111, 0x8000_0000, 0x8000_0001), 0x8000_0000);
+    // ...and on those operands the signed remainder is a **different**
+    // value, so the two must not be confused.
+    assert_ne!(
+        run_m(0b111, 0xFFFF_FFFE, 0xFFFF_FFFF),
+        run_m(0b110, 0xFFFF_FFFE, 0xFFFF_FFFF),
+        "the signed and the unsigned remainder must differ"
+    );
 }
 
 // ---------------------------------------------------------------------------

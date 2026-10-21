@@ -90,6 +90,21 @@ const C_ADD_X5_X10: u16 = 0x92AA;
 const C_JR_X5: u16 = 0x8282;
 /// `c.jalr x5`
 const C_JALR_X5: u16 = 0x9282;
+/// `c.mv x17, x10` — the register field's **top bit** is set, so
+/// `inst[11]` is 1.  This is the discriminating case for the CR
+/// format's one-bit `funct2`: a decoder that read the funct2 from
+/// `inst[11]` (or `inst[11:10]`) would decode `c.jr x5` correctly by
+/// accident, because `inst[11]` happens to be zero there.
+const C_MV_X17_X10: u16 = 0x88AA;
+/// `c.jr x17` — see `C_MV_X17_X10`.
+const C_JR_X17: u16 = 0x8882;
+/// `c.mv x31, x10` — `inst[11:10] == 0b11`.  This is the discriminating
+/// case for a decoder that reads the CR format's `funct2` as **two**
+/// bits from `inst[11:10]`: for every register below `x24` those two
+/// bits are not `0b11`, so the mistake hides.
+const C_MV_X31_X10: u16 = 0x8FAA;
+/// `c.jr x31` — see `C_MV_X31_X10`.
+const C_JR_X31: u16 = 0x8F82;
 /// `c.ebreak`
 const C_EBREAK: u16 = 0x9002;
 /// `c.lw x8, 4(x9)`
@@ -610,6 +625,55 @@ fn c_jr_jumps_without_writing_a_link_register() {
     step_c(&mut h, &mut state, 0x1000, C_JR_X5);
     assert_eq!(state.pc, 0x2000);
     assert_eq!(state.gpr[1], 0xDEAD, "c.jr must not write a link register");
+}
+
+/// The CR group must keep its **one-bit** `funct2` for every register.
+///
+/// The CR format's `funct2` lives in `inst[12]`; the register field is
+/// the full `inst[11:7]`.  A decoder that read the funct2 from
+/// `inst[11]` (or from `inst[11:10]`) decodes `c.jr x5` **by
+/// accident** — `inst[11]` happens to be zero for `x5` — and only
+/// breaks once the register reaches `x16`, where `inst[11]` is set.
+/// Every low-register case therefore hides the bug.
+#[test]
+fn c_jr_with_a_high_register_still_jumps() {
+    // x17: `inst[11]` is set, `inst[11:10]` is `0b10`.
+    // x31: `inst[11:10]` is `0b11` — the case a **two-bit** funct2
+    // reading gets wrong.
+    for (reg, enc) in [(17u8, C_JR_X17), (31u8, C_JR_X31)] {
+        let mut h = Harness::new();
+        let mut state = SimState::default();
+        state.gpr[reg as usize] = 0x2000;
+        state.gpr[1] = 0xDEAD;
+        step_c(&mut h, &mut state, 0x1000, enc);
+        assert_eq!(state.pc, 0x2000, "c.jr x{reg} must jump to x{reg}");
+        assert_eq!(
+            state.gpr[1], 0xDEAD,
+            "c.jr must not write a link register (x{reg})"
+        );
+    }
+}
+
+/// `c.mv` with a **high** destination register must copy, not add.
+///
+/// `c.mv` is `add rd, x0, rs2` and `c.add` is `add rd, rd, rs2`; the
+/// two differ only in the CR format's `funct2` bit.  Reading that bit
+/// from the wrong place turns `c.mv` into `c.add` for every register
+/// whose `inst[11]` is set.
+#[test]
+fn c_mv_with_a_high_register_copies_the_source() {
+    for (reg, enc) in [(17u8, C_MV_X17_X10), (31u8, C_MV_X31_X10)] {
+        let mut h = Harness::new();
+        let mut state = SimState::default();
+        state.gpr[10] = 0x1234;
+        state.gpr[reg as usize] = 0x9999;
+        step_c(&mut h, &mut state, 0x1000, enc);
+        assert_eq!(
+            state.gpr[reg as usize], 0x1234,
+            "c.mv must copy, not accumulate"
+        );
+        assert_eq!(state.gpr[10], 0x1234, "c.mv must not touch the source");
+    }
 }
 
 /// `c.beqz` branches when the register is zero and falls through
