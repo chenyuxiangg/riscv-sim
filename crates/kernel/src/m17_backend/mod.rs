@@ -30,6 +30,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use riscv_sim_contract::csr::{CSR_IRQ_CLEAR, CSR_MIE, CSR_MSTATUS};
 use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_01_INVALID_REGISTER_INDEX,
 };
@@ -39,9 +40,25 @@ use riscv_sim_contract::protocol::HaltReason;
 use riscv_sim_contract::snapshot::EngineSnapshotDto;
 
 use crate::m08_breakpoint::{BreakpointTable, WatchpointTable};
-use crate::m12_engine::{Engine, ExecOutcome, InstructionExecutor, PeripheralTicker, RunReason};
-use crate::m13_iss::{write_gpr, Iss, StepOutcome};
+use crate::m12_engine::{
+    Engine, ExecOutcome, InstructionExecutor, PeripheralTicker, RunReason, TIME_QUANTUM_PS,
+};
+use crate::m13_iss::csr::csr_read;
+use crate::m13_iss::{enter_trap, write_gpr, Iss, StepOutcome};
 use crate::m14_bus::{AccessDir, Bus, BusWidth};
+use crate::m16_interrupt::{InterruptPort, PendingIntr, MAX_MASKABLE_LINE};
+
+/// 「中断控制器正被占用」的场景码（`INT` 族）。
+///
+/// ⚠️ **不是新错误码** —— 它是**既有**的码（契约层 §5 的表里列着
+/// `E_INT_01_CONTROLLER_BUSY`），本批只是把它的**唯一定义**从宿主搬到了
+/// 这里：M-17 的 [`SharedInterruptPort`] 是**第一个**会真的撞上
+/// `RefCell` 争用的地方（它在**指令边界**上借控制器，而同一批次里
+/// 外设还会经 `InterruptSink::raise` 借**同一个**控制器）。
+///
+/// 宿主仍然**转出**这个名字（`kernel_host::E_INT_01_CONTROLLER_BUSY`），
+/// 所以对外的路径一个字都没变。
+pub const E_INT_01_CONTROLLER_BUSY: u16 = 1;
 
 /// 一条指令的虚拟时间成本（皮秒）。
 ///
@@ -53,6 +70,54 @@ use crate::m14_bus::{AccessDir, Bus, BusWidth};
 /// 每量子指令配额 1000 条 = 1 ns）。「量子 ↔ 指令」的换算只允许有**一处**
 /// 定义，否则量子与指令成本会各自漂移。
 pub const INSTRUCTION_COST_PS: u64 = crate::m12_engine::INSTRUCTION_COST_PS;
+
+/// **中断固件**（手写机器码，小端）。
+///
+/// ```text
+/// 0x00  addi  x5, x0, 0x20     ← handler 的地址
+/// 0x04  lui  x6, 0x8           ← x6 = 0x8000
+/// 0x08  srli x6, x6, 4         ← x6 = 0x800 = 1 << 11（**MEIE** 位号）
+/// 0x0c  csrrw x0, mtvec, x5     ← mtvec = 0x20（直接模式）
+/// 0x10  csrrw x0, mie, x6       ← mie 的 bit 11 —— 使能 line 1
+/// 0x14  csrrsi x0, mstatus, 8   ← mstatus.MIE（bit 3）= 1
+/// 0x18  jal   x0, 0x18          ← 主循环（自环，等中断）
+/// 0x1c  nop
+/// 0x20  addi  x7, x7, 1         ← handler：计数器 +1
+/// 0x24  csrrwi x0, irq_clear, 2 ← handler：清 line 1（位掩码 bit 1）
+/// 0x28  mret                    ← handler：回到 mepc
+/// ```
+///
+/// ⚠️ **手写编码**：仓库里没有 RISC-V 汇编器。每一行都对着 M-13 的
+/// 译码规则核对过（CSR 指令的 csr 号在 bits[31:20]、zimm 在
+/// bits[19:15]、funct3 在 bits[14:12]）。
+///
+/// ⚠️ **`mie` 的值是 `1 << 11`（= 2048），不是 `11`**：`mie` 的
+/// **位号**是 11（`MEIE`），而 CSR 里存的是**位图**。`csrrwi` 的
+/// zimm 只有 5 位 ⇒ 写不进 2048 ⇒ 得先把它装进一个寄存器。
+pub const IRQ_FIRMWARE_BYTES: [u8; 44] = [
+    // 0x00  addi  x5, x0, 0x20     → 0x0200_0293
+    0x93, 0x02, 0x00, 0x02, //
+    // 0x04  lui  x6, 0x8           → 0x0000_8337
+    0x37, 0x83, 0x00, 0x00, //
+    // 0x08  srli x6, x6, 4         → 0x0043_5313
+    0x13, 0x53, 0x43, 0x00, //
+    // 0x0c  csrrw x0, mtvec, x5     → 0x3052_9073
+    0x73, 0x90, 0x52, 0x30, //
+    // 0x10  csrrw x0, mie, x6       → 0x3043_1073
+    0x73, 0x10, 0x43, 0x30, //
+    // 0x14  csrrsi x0, mstatus, 8   → 0x3004_6073
+    0x73, 0x60, 0x04, 0x30, //
+    // 0x18  jal   x0, 0x18          → 0x0000_006f
+    0x6f, 0x00, 0x00, 0x00, //
+    // 0x1c  nop
+    0x13, 0x00, 0x00, 0x00, //
+    // 0x20  addi  x7, x7, 1         → 0x0013_8393
+    0x93, 0x83, 0x13, 0x00, //
+    // 0x24  csrrwi x0, irq_clear, 2 → 0x7c01_5073
+    0x73, 0x50, 0x01, 0x7c, //
+    // 0x28  mret                    → 0x3020_0073
+    0x73, 0x00, 0x20, 0x30,
+];
 
 /// 把 `state.pending_writes` 里的写**真正提交**到总线（D-07）。
 ///
@@ -70,6 +135,95 @@ fn commit_pending_writes(state: &mut SimState, bus: &mut Bus) -> Result<usize, P
         committed += 1;
     }
     Ok(committed)
+}
+
+/// 把 `Rc<RefCell<T>>` 适配成 [`InterruptPort`]。
+///
+/// **为什么需要它**：M-16 的控制器在宿主里是**共享**的——引擎那条
+/// `InterruptSink::raise` 通路与 M-17 的采样 / 交付通路必须看到**同一个**
+/// 控制器（同一个量**一个**真相）。于是它得住在 `Rc<RefCell<…>>` 后面，
+/// 而 [`InterruptPort`] 的方法要 `&mut self` ⇒ 需要一层适配。
+///
+/// ⚠️ **每次调用才借**（不是把 `RefMut` 持在手上）：M-17 的执行器在
+/// **整个批次**里都持有这个端口的引用，而**同一条批次**里外设还会经
+/// `InterruptSink::raise` 拉起 IRQ 行——那也要借**同一个**控制器。若
+/// 适配器把 `RefMut` 持在手上，外设的拉起就**永远失败**
+/// （`E_INT_01`），而失败是**看得见**的：guest 的中断从此再也拉不起来。
+///
+/// ⚠️ **争用不 panic**：借不到就**报错**（`E_INT_01`）或**当作没有**
+/// （`take_intr` / `clear` 没有错误通道）——绝不 `unwrap`。
+pub struct SharedInterruptPort<T: InterruptPort + 'static> {
+    inner: Rc<RefCell<T>>,
+}
+
+impl<T: InterruptPort + 'static> SharedInterruptPort<T> {
+    /// 造一个共享端口。
+    pub fn new(inner: Rc<RefCell<T>>) -> Self {
+        Self { inner }
+    }
+}
+
+impl<T: InterruptPort + 'static> InterruptPort for SharedInterruptPort<T> {
+    fn pending_intr(&self) -> Option<PendingIntr> {
+        // 借不到就**当作没有**：`pending_intr` 只是「有没有待交付」的
+        // 查询，没有错误通道。真正的交付在 `take_intr` 里判。
+        self.inner.try_borrow().ok().and_then(|c| c.pending_intr())
+    }
+
+    fn take_intr(&mut self) -> Option<PendingIntr> {
+        match self.inner.try_borrow_mut() {
+            Ok(mut controller) => controller.take_intr(),
+            // 争用 ⇒ 本轮**不交付**（挂起项**不丢**，下一次采样再来）。
+            Err(_) => None,
+        }
+    }
+
+    fn clear(&mut self, line: u16) {
+        if let Ok(mut controller) = self.inner.try_borrow_mut() {
+            controller.clear(line);
+        }
+    }
+
+    fn poll(
+        &mut self,
+        now_ps: u64,
+        mie: u32,
+        mstatus: u32,
+    ) -> Result<Option<PendingIntr>, PlatformError> {
+        let mut controller = self.inner.try_borrow_mut().map_err(|_| {
+            PlatformError::new(
+                ErrorFamily::Interrupt,
+                E_INT_01_CONTROLLER_BUSY,
+                "中断控制器正被占用，这一轮**没有**采样",
+            )
+        })?;
+        controller.poll(now_ps, mie, mstatus)
+    }
+}
+
+/// 「没有装中断控制器」时的**空端口**。
+///
+/// 后端的端口字段**总是**有值——执行器要拿 `&mut dyn InterruptPort`
+/// （冻结规格 §4.1 的签名），所以「还没装」这个状态也得有一个**说得清**
+/// 的实现：它什么都不做（不采样、不交付、不清除）。
+struct NullInterruptPort;
+
+impl InterruptPort for NullInterruptPort {
+    fn pending_intr(&self) -> Option<PendingIntr> {
+        None
+    }
+    fn take_intr(&mut self) -> Option<PendingIntr> {
+        None
+    }
+    fn clear(&mut self, _line: u16) {}
+    fn poll(
+        &mut self,
+        _now_ps: u64,
+        _mie: u32,
+        _mstatus: u32,
+    ) -> Result<Option<PendingIntr>, PlatformError> {
+        Ok(None)
+    }
 }
 
 /// M-17 的指令执行器：把 M-13 的 ISS 接进 M-12 的唯一主循环（D-07）。
@@ -98,21 +252,40 @@ pub struct IssExecutor<'a> {
     breakpoints: &'a BreakpointTable,
     /// 观察点命中槽（与后端共享同一份）。
     watch_hit: Rc<RefCell<Option<Watchpoint>>>,
+    /// 宿主暂停标志（与后端共享同一份）—— 裁决 C。
+    pause_requested: &'a mut bool,
+    /// M-16 的中断控制器（接缝 #2 采样 / 接缝 #3 拉取式交付 / 接缝 #4
+    /// `irq_clear` 副作用的**同一个**端口）。
+    intc: &'a mut dyn InterruptPort,
+    /// 上次**量子边界采样**的时刻（跨批次持久 —— 裁决 I）。
+    last_poll_ps: &'a mut u64,
 }
 
 impl<'a> IssExecutor<'a> {
     /// 构造一个执行器。
+    ///
+    /// ⚠️ `last_poll_ps` **必须**由**后端**持有并传进来：执行器是**每批次
+    /// 新建**的（`step_n` / `continue_until_event` 各建一个）。挂在执行器上
+    /// ⇒ 每次新批次都从 0 开始 ⇒ 「上次采样时刻」永远是 0 ⇒ **每个批次的
+    /// 第一条指令都会触发一次采样** ⇒ 「仲裁只在量子边界发生」这条不变式
+    /// 当场破掉（STAGE-4 裁决 I）。
     pub fn new(
         iss: &'a mut Iss,
         bus: &'a mut Bus,
         breakpoints: &'a BreakpointTable,
         watch_hit: Rc<RefCell<Option<Watchpoint>>>,
+        intc: &'a mut dyn InterruptPort,
+        last_poll_ps: &'a mut u64,
+        pause_requested: &'a mut bool,
     ) -> Self {
         Self {
             iss,
             bus,
             breakpoints,
             watch_hit,
+            pause_requested,
+            intc,
+            last_poll_ps,
         }
     }
 
@@ -124,10 +297,56 @@ impl<'a> IssExecutor<'a> {
     pub fn breakpoint_at(&self, pc: u32) -> bool {
         self.breakpoints.hit_check(pc).is_some()
     }
+
+    /// **取走**一次宿主暂停请求（取走即消失）。
+    ///
+    /// 裁决 C：`pause()` 的语义 =「在**下一条指令边界**停下」。宿主调用
+    /// 是**同步**的——它不可能在一条指令执行的中途插进来，所以「立刻停下」
+    /// 是**做不到**的语义。于是暂停请求变成一个**标志位**，由执行器在
+    /// 指令边界上查。
+    ///
+    /// ⚠️ **取走即消失**：一次暂停**只影响一个批次**。若标志位不清，
+    /// 后面每一个批次都会在同一处停下，机器就**再也跑不动了**。
+    pub fn take_pause(&mut self) -> bool {
+        if *self.pause_requested {
+            *self.pause_requested = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 按**位掩码**清除中断线（接缝 #4 的副作用）。
+    ///
+    /// 掩码的 bit L = 清除 line L（平台自定义 CSR `irq_clear` 的口径）。
+    ///
+    /// ⚠️ **写两次同一个值不会丢清除请求**：第一次写已经把那些线清掉了，
+    /// 第二次是**空操作**（M-17 只在「值**变了**」时才动手）。
+    fn clear_lines_by_mask(&mut self, mask: u32) {
+        for line in 0..=MAX_MASKABLE_LINE {
+            if mask & (1u32 << line) != 0 {
+                self.intc.clear(line);
+            }
+        }
+    }
 }
 
 impl InstructionExecutor for IssExecutor<'_> {
     fn step(&mut self, state: &mut SimState) -> Result<ExecOutcome, PlatformError> {
+        // (0) 宿主暂停 —— 停在**下一条指令边界**（裁决 C）。
+        //
+        //     放在断点判定**之前**：暂停是**宿主的意图**，断点是 guest
+        //     侧的条件；两者同时成立时，宿主说停就停。
+        //
+        //     `consumed: false` —— 被停下的那条指令**没有执行**，所以
+        //     「已执行条数」不能多算一条。
+        if self.take_pause() {
+            return Ok(ExecOutcome::Stop {
+                reason: HaltReason::UserPause,
+                consumed: false,
+            });
+        }
+
         // (1) 断点命中检测 —— 挂在**取指之前**（M-08 LLD §3.2）。
         //     命中时该条指令尚未执行，状态零副作用。
         if self.breakpoint_at(state.pc) {
@@ -137,8 +356,47 @@ impl InstructionExecutor for IssExecutor<'_> {
             });
         }
 
-        // (2) 执行一条指令（访存经 M-14）。
+        // (2) **量子边界采样**（接缝 #2）+ **拉取式交付**（接缝 #3）。
+        //
+        //     顺序是规格 §4 的那一条：断点 → 采样 → 交付 → 执行。
+        //
+        //     ⚠️ **只在跨过量子边界时采样**：`now_ps - last_poll_ps >=
+        //     TIME_QUANTUM_PS`。采样读的是 CSR 文件里的 `mie` / `mstatus`
+        //     （**使能的唯一真相**是 CSR `mie`，裁决 D）。
+        let now_ps = state.virtual_time_ps;
+        if now_ps.saturating_sub(*self.last_poll_ps) >= TIME_QUANTUM_PS {
+            *self.last_poll_ps = now_ps;
+            let mie = csr_read(state, CSR_MIE);
+            let mstatus = csr_read(state, CSR_MSTATUS);
+            self.intc.poll(now_ps, mie, mstatus)?;
+        }
+
+        // (3) 交付：**拉取式**（LLD 评审 16-4）—— M-16 登记了交付，M-17
+        //     在**取指边界**把它取走并陷入。
+        //
+        //     ⚠️ 中断交付**不停批次**（不像异常那样停）：中断是「透明」的，
+        //     handler 紧接着在同一条指令边界后开始执行。
+        if let Some(intr) = self.intc.take_intr() {
+            // 中断**没有**故障地址 ⇒ `mtval = 0`（规格 §3.5 的表）。
+            // 陷入的其余部分（`mepc` / `mcause` / `mtval` / 关中断 / 跳
+            // `mtvec`）由 M-13 的**唯一**陷入入口 `enter_trap` 负责 ——
+            // 异常路径与中断路径**共用**它。
+            enter_trap(state, intr.cause, 0);
+            return Ok(ExecOutcome::InterruptTaken);
+        }
+
+        // (4) 执行一条指令（访存经 M-14）。
+        //
+        //     ⚠️ `irq_clear` 的**副作用**（接缝 #4）在 M-17，**不在** M-13：
+        //     M-13 只管把值写进 CSR 文件，「写了要清哪些线」由 M-17 承担
+        //     （M-13 的执行器是纯函数，它不该认识 M-16）。
+        let irq_clear_before = csr_read(state, CSR_IRQ_CLEAR);
         let outcome = self.iss.step_one_via_bus(state, self.bus);
+        // 指令**刚写完** CSR ⇒ 立刻比对 `irq_clear`：**变了**才动手。
+        let irq_clear_after = csr_read(state, CSR_IRQ_CLEAR);
+        if irq_clear_after != irq_clear_before {
+            self.clear_lines_by_mask(irq_clear_after);
+        }
         let trapped = match outcome {
             Ok(StepOutcome::Advanced) => false,
             Ok(StepOutcome::Trapped { .. }) => {
@@ -158,12 +416,18 @@ impl InstructionExecutor for IssExecutor<'_> {
                     consumed: true,
                 })
             }
-            Ok(StepOutcome::HostPause) => {
-                return Ok(ExecOutcome::Stop {
-                    reason: HaltReason::UserPause,
-                    consumed: true,
-                })
-            }
+            // ⚠️ M-13 的 `StepOutcome::HostPause` 是**死变体**：STAGE-4
+            //    裁决 C 要求删除它（它「M-13 产生的宿主暂停」在架构上就
+            //    是错的——M-13 不可能知道宿主要暂停），但它是 **M-13 的
+            //    公开 API**，删除要过「公开 API 只增不减」的决策，所以
+            //    **本批仍留在 M-13 里**（台账留账）。
+            //
+            //    M-17 **不再**为它单独分派：暂停语义落在 M-17 自己的
+            //    `pause_requested` 标志位上（见 [`SelfIssBackend::pause`]）。
+            //    这一臂把「不是上面几种」的结局一律按「**没有指令退休**」
+            //    处理（虚拟时钟不推进）——该变体今天**没有生产者**，所以
+            //    这一臂不可达。
+            Ok(_) => true,
             Err(err) => {
                 // 取指 / 访存失败（E_BUS-01 等）——**报错**，不是陷阱。
                 //
@@ -178,12 +442,12 @@ impl InstructionExecutor for IssExecutor<'_> {
             }
         };
 
-        // (3) 推进虚拟时钟（**陷阱不推进**——陷入的指令没有正常退休）。
+        // (5) 推进虚拟时钟（**陷阱不推进**——陷入的指令没有正常退休）。
         if !trapped {
             state.virtual_time_ps = state.virtual_time_ps.saturating_add(INSTRUCTION_COST_PS);
         }
 
-        // (4) 提交待写（D-07）——`pending_writes` 从此**不只是被写进
+        // (6) 提交待写（D-07）——`pending_writes` 从此**不只是被写进
         //     去**，而是真的落到总线上。
         //
         //     ⚠️ **在陷阱判定之前**（V-A 检视 · F4）：外设在 tick 期间
@@ -198,7 +462,7 @@ impl InstructionExecutor for IssExecutor<'_> {
             });
         }
 
-        // (5) 观察点命中 —— 访存发生在指令**内部**，所以只能在指令返回后
+        // (7) 观察点命中 —— 访存发生在指令**内部**，所以只能在指令返回后
         //     判定。这里只**看**不取：命中槽由后端在批次结束时消费
         //     （一次命中不能在下一批里继续报），而宿主还需要知道**是哪
         //     一个**观察点命中的。
@@ -239,6 +503,31 @@ pub struct SelfIssBackend<B: EventBus, I: InterruptSink> {
     next_watch_id: u32,
     /// Total instructions executed since the last reset.
     total_executed: u64,
+    /// 宿主请求暂停（裁决 C）。
+    ///
+    /// `pause()` 置位；执行器在**指令边界**上查它 ⇒ 命中就停。
+    ///
+    /// ⚠️ **取走即消失**（见 [`IssExecutor::take_pause`]）：一次暂停**只
+    /// 影响一个批次**。否则后面每个批次都会在同一处停下，机器就再也
+    /// 跑不动了。
+    pause_requested: bool,
+    /// M-16 的中断控制器**端口**（接缝 #2 / #3 / #4 的落点）。
+    ///
+    /// ⚠️ **不是**引擎那个 `I`：引擎持有的是 `InterruptSink`（外设**拉起**
+    /// IRQ 行那条路），这里是 `InterruptPort`（**采样 / 交付 / 清除**那条
+    /// 路）。两者在宿主里指向**同一个**控制器（`Rc<RefCell<…>>` 共享），
+    /// **不是**两个控制器。
+    ///
+    /// ⚠️ 它**必须**是后端的一个**独立字段**：执行器要同时拿到
+    /// `&mut Engine`（平台状态）与 `&mut dyn InterruptPort`（控制器），
+    /// 而引擎**自己**就持有 `I` ⇒ 同一个结构体里再放一个「指向 `I` 的
+    /// 引用」就是**自引用借用**（Rust 不允许，STAGE-4 裁决 I）。
+    intc_port: Box<dyn InterruptPort>,
+    /// 上次**量子边界采样**的时刻（跨批次持久 —— 裁决 I）。
+    ///
+    /// ⚠️ **必须**挂在**后端**上，不能挂在执行器上：执行器是**每批次
+    /// 新建**的 ⇒ 挂在执行器上等于「每个批次的第一条指令都采样一次」。
+    last_poll_ps: u64,
 }
 
 impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
@@ -258,6 +547,9 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
             last_watchpoint: None,
             next_watch_id: 1,
             total_executed: 0,
+            pause_requested: false,
+            intc_port: Box::new(NullInterruptPort),
+            last_poll_ps: 0,
         };
         backend.install_watch_hook();
         backend
@@ -305,6 +597,30 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
     /// Total instructions executed since the last reset.
     pub fn total_executed(&self) -> u64 {
         self.total_executed
+    }
+
+    /// 装上 M-16 的中断控制器**端口**（接缝 #2 / #3 / #4）。
+    ///
+    /// 装上之后，执行器才会在**取指边界**上：
+    ///
+    /// 1. 按**量子边界**采样并仲裁（接缝 #2）；
+    /// 2. **拉取式**取走交付并陷入（接缝 #3）；
+    /// 3. 在 guest 写 `irq_clear` 之后清掉对应的线（接缝 #4）。
+    ///
+    /// ⚠️ 端口是**独占**的：后端**接管**了这个盒子（`Box`），调用方若还要
+    /// 观察控制器（导出状态、请求中断），得**另外**持有一份共享句柄
+    /// （[`SharedInterruptPort`] 就是干这个的）。
+    ///
+    /// 幂等：重复装只是换掉端口，不会产生第二份状态。
+    pub fn install_interrupt_port(&mut self, port: Box<dyn InterruptPort>) {
+        self.intc_port = port;
+        // 换控制器 ⇒ 「上次采样时刻」不再有意义（新的控制器还没被采样过）。
+        self.last_poll_ps = 0;
+    }
+
+    /// 当前装着的 M-16 端口（只读）。
+    pub fn interrupt_port(&self) -> &dyn InterruptPort {
+        self.intc_port.as_ref()
     }
 
     /// The M-08 breakpoint table (read-only).
@@ -527,6 +843,11 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
         self.last_stop = None;
         self.last_watchpoint = None;
         self.total_executed = 0;
+        // 暂停请求属于**上一次批次**的残留 —— reset 之后不该还有效。
+        self.pause_requested = false;
+        // 虚拟时钟归零 ⇒ 「上次采样时刻」也归零，否则第一次采样会被推迟
+        // 一整个量子（复位之后中断迟迟不交付）。
+        self.last_poll_ps = 0;
         *self.watch_hit.borrow_mut() = None;
         Ok(())
     }
@@ -541,6 +862,9 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             last_stop,
             last_watchpoint,
             total_executed,
+            pause_requested,
+            intc_port,
+            last_poll_ps,
             ..
         } = self;
 
@@ -561,10 +885,30 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
         // judgement, the virtual clock and the pending-write commit all
         // live in one place — there is no second "step" implementation
         // that could drift from this one.
-        let mut executor = IssExecutor::new(iss, bus, breakpoints, Rc::clone(watch_hit));
+        let mut executor = IssExecutor::new(
+            iss,
+            bus,
+            breakpoints,
+            Rc::clone(watch_hit),
+            intc_port.as_mut(),
+            last_poll_ps,
+            pause_requested,
+        );
 
         for _ in 0..n {
-            // (1) 断点命中检测 —— 挂在**取指之前**（M-08 LLD §3.2）。
+            // (1) 宿主暂停 —— 停在**下一条指令边界**（裁决 C）。
+            //
+            //     与断点判定**同型**（都在取指之前、都在外设时钟同步之前）：
+            //     一条**没有执行**的指令不该让外设的时钟也走一格。
+            //
+            //     ⚠️ **取走即消失**：一次暂停只影响**一个**批次（见
+            //     [`IssExecutor::take_pause`]）。
+            if executor.take_pause() {
+                *last_stop = Some(HaltReason::UserPause);
+                break;
+            }
+
+            // (2) 断点命中检测 —— 挂在**取指之前**（M-08 LLD §3.2）。
             //     命中时该条指令尚未执行，状态零副作用——**外设时钟也不
             //     推进**（V-A 检视 · F3：一条没执行的指令不该让外设的
             //     时钟也走一格）。
@@ -573,7 +917,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
                 break;
             }
 
-            // (2) 外设时钟同步（**指令边界**）—— 让本条指令里发生的探针
+            // (3) 外设时钟同步（**指令边界**）—— 让本条指令里发生的探针
             //     边沿带上**真实**的虚拟时间戳（D-46）。
             //
             //     没有这一步，M-15 的 GPIO 记下的 `now_ps` 永远是 0，
@@ -590,11 +934,15 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             let now_ps = engine.now_ps();
             engine.tick_peripherals(now_ps)?;
 
-            // (3) 执行一条指令（陷阱 / 观察点的判定都在执行器里）。
+            // (4) 执行一条指令（陷阱 / 观察点的判定都在执行器里）。
             match executor.step(engine.state_mut()) {
                 Ok(ExecOutcome::Advanced) => {
                     executed += 1;
                     *total_executed += 1;
+                }
+                Ok(ExecOutcome::InterruptTaken) => {
+                    // 中断交付**没有**指令退休 ⇒ 不计入 `executed` /
+                    // `total_executed`（STAGE-4 裁决 I）。批次**不停**。
                 }
                 Ok(ExecOutcome::Stop { reason, consumed }) => {
                     if consumed {
@@ -645,6 +993,9 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             last_stop,
             last_watchpoint,
             total_executed,
+            pause_requested,
+            intc_port,
+            last_poll_ps,
             ..
         } = self;
 
@@ -652,7 +1003,15 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
         *last_watchpoint = None;
         *watch_hit.borrow_mut() = None;
 
-        let mut executor = IssExecutor::new(iss, bus, breakpoints, Rc::clone(watch_hit));
+        let mut executor = IssExecutor::new(
+            iss,
+            bus,
+            breakpoints,
+            Rc::clone(watch_hit),
+            intc_port.as_mut(),
+            last_poll_ps,
+            pause_requested,
+        );
         // `u64::MAX` = 「不设时间上限」——本轮的边界是**指令预算**，
         // 由 M-12 的 `instruction_budget` 决定。
         let outcome = engine.run_until(&mut executor, u64::MAX)?;
@@ -668,7 +1027,20 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
         Ok(())
     }
 
+    /// 宿主请求暂停（裁决 C）。
+    ///
+    /// 语义 =「在**下一条指令边界**停下」——**不是**「立刻停下」：宿主
+    /// 调用是**同步**的，宿主**不可能**在一条指令执行的中途插进来，
+    /// 所以「立刻」是**做不到**的语义，写进文档就是骗人。
+    ///
+    /// 实现落点：置位 [`SelfIssBackend::pause_requested`]，由执行器在
+    /// 指令边界上查它（`step_n` 在**外设时钟同步之前**查，时间驱动路径
+    /// 在执行器里查——两条路径共用同一个标志位）。
+    ///
+    /// ⚠️ **取走即消失**：标志位被**消费**它的那一批清掉 ⇒ 一次暂停
+    /// **只影响一个批次**（见 [`IssExecutor::take_pause`]）。
     fn pause(&mut self) -> Result<(), PlatformError> {
+        self.pause_requested = true;
         self.last_stop = Some(HaltReason::UserPause);
         Ok(())
     }
@@ -679,6 +1051,10 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
 
     fn restore(&mut self, state: &SimState) -> Result<(), PlatformError> {
         self.engine.restore(state.clone());
+        // 虚拟时间被**换掉**了 ⇒ 「上次采样时刻」不再可比：归零，让
+        // 恢复后的第一条指令就重新采样（否则恢复到一个更早的时刻时，
+        // 中断要等虚拟时间追上旧值才交付）。
+        self.last_poll_ps = 0;
         Ok(())
     }
 
@@ -708,7 +1084,10 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
     /// The snapshot is **validated before it is applied**: a malformed one
     /// is rejected with an error and the engine is left untouched.
     fn restore_full(&mut self, snapshot: &EngineSnapshotDto) -> Result<(), PlatformError> {
-        self.engine.restore_dto(snapshot)
+        self.engine.restore_dto(snapshot)?;
+        // 同 [`Self::restore`]：虚拟时间换了 ⇒ 「上次采样时刻」归零。
+        self.last_poll_ps = 0;
+        Ok(())
     }
 
     fn read_memory(&self, addr: u32, size: WriteSize) -> Result<u32, PlatformError> {
@@ -839,8 +1218,11 @@ pub const BACKEND_FAMILY: ErrorFamily = ErrorFamily::Iss;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use riscv_sim_contract::csr::{CSR_MCAUSE, CSR_MEPC, CSR_MTVAL, CSR_MTVEC};
     use riscv_sim_contract::model::Breakpoint;
     use riscv_sim_contract::protocol::EventPayload;
+
+    use crate::m16_interrupt::{InterruptController, SOURCE_PLATFORM, TRIGGER_EDGE};
 
     /// 事件总线 + 中断汇的最小实现。
     #[derive(Debug, Default)]
@@ -1315,5 +1697,352 @@ mod tests {
             0,
             "断点挂在取指之前，命中的那条指令**没有**被执行"
         );
+    }
+
+    // ---- 裁决 C：`pause()` = 在**下一条指令边界**停下 ----
+
+    /// `pause()` ⇒ 批次在**下一条指令边界**停（裁决 C / 验收 31）。
+    ///
+    /// 判别式落在**输出**上：停下的那条指令**没有执行** ⇒
+    /// 「已执行条数」不多算、PC 不前进、停止原因是 `UserPause`。
+    ///
+    /// ⚠️ 期望值用**外部**常量（`HaltReason::UserPause`），不自指实现。
+    #[test]
+    fn pause_stops_the_batch_at_the_next_instruction_boundary() {
+        let mut backend = backend_with_demo();
+        let pc_before = backend.snapshot().expect("snapshot").pc;
+
+        backend.pause().expect("pause");
+        assert_eq!(
+            backend.last_stop_reason(),
+            Some(HaltReason::UserPause),
+            "pause() 之后宿主立刻就能看到「暂停」这个停止原因"
+        );
+
+        let executed = backend.step_n(10).expect("step");
+        assert_eq!(
+            executed, 0,
+            "被暂停的那条指令**没有执行**——已执行条数不能多算一条"
+        );
+        assert_eq!(
+            backend.total_executed(),
+            0,
+            "已执行条数必须说真话：暂停的那条指令没有退休"
+        );
+        assert_eq!(
+            backend.last_stop_reason(),
+            Some(HaltReason::UserPause),
+            "停止原因必须是 UserPause"
+        );
+        assert_eq!(
+            backend.snapshot().expect("snapshot").pc,
+            pc_before,
+            "PC 不能前进——暂停发生在**指令边界**（取指之前）"
+        );
+    }
+
+    /// 一次暂停**只影响一个批次**（裁决 C）。
+    ///
+    /// ⚠️ 判别力：若标志位**取走不消失**，后面每个批次都会在同一处停下，
+    /// 机器就**再也跑不动了**——这条用例会把那种实现打红（第二个批次
+    /// 的已执行条数会是 0）。
+    #[test]
+    fn a_pause_affects_exactly_one_batch() {
+        let mut backend = backend_with_demo();
+        backend.pause().expect("pause");
+        assert_eq!(backend.step_n(10).expect("step"), 0, "第一批被暂停");
+
+        let executed = backend.step_n(10).expect("step");
+        assert_eq!(executed, 10, "暂停只影响**一个**批次——下一批必须照常跑");
+        assert_eq!(backend.total_executed(), 10);
+    }
+
+    /// 时间驱动路径（`continue_until_event`）也认暂停。
+    ///
+    /// 两条路径共用**同一个**执行器，但暂停标志是**后端**上的一个字段
+    /// ——若只在一侧查，时间驱动路径就会**无视**暂停。
+    #[test]
+    fn pause_stops_the_time_driven_path_too() {
+        let mut backend = backend_with_demo();
+        backend.pause().expect("pause");
+
+        backend.continue_until_event().expect("run until event");
+
+        assert_eq!(
+            backend.last_stop_reason(),
+            Some(HaltReason::UserPause),
+            "时间驱动路径也必须在指令边界认暂停"
+        );
+        assert_eq!(backend.total_executed(), 0, "被暂停的那条指令**没有执行**");
+    }
+
+    /// `reset()` 把暂停请求一起清掉。
+    ///
+    /// 暂停请求属于**上一次运行**的残留 —— reset 之后不该还有效，否则
+    /// reset 之后的第一批会莫名其妙地零条停下。
+    #[test]
+    fn a_reset_clears_a_pending_pause() {
+        let mut backend = backend_with_demo();
+        backend.pause().expect("pause");
+        backend.reset().expect("reset");
+
+        let executed = backend.step_n(3).expect("step");
+        assert_eq!(executed, 3, "reset 之后不该还有效的暂停请求");
+    }
+
+    // ------------------------------------------------------------------
+    // 中断接线（STAGE-4 接缝 #2 / #3 / #4）
+    // ------------------------------------------------------------------
+
+    /// 固件里 handler 的地址（= `mtvec`）。
+    const IRQ_HANDLER_ADDR: u32 = 0x20;
+
+    /// 固件里主循环的地址（= 陷入时的 `pc`，也是 `mepc`）。
+    const IRQ_MAIN_LOOP_ADDR: u32 = 0x18;
+
+    /// 固件里那条「handler 计数器」用的寄存器。
+    const IRQ_HANDLER_COUNTER_REG: u32 = 7;
+
+    /// 固件清的那条线（line 1 = UART rx-ready）。
+    const IRQ_LINE: u16 = 1;
+
+    /// 造一个**带中断控制器**的后端 + 控制器本身的共享句柄。
+    ///
+    /// 返回控制器句柄是**必要的**：验收要求断言「挂起项被清 / `active_irq`
+    /// 复位」——那是**控制器导出的状态**，不是「我调用了某个函数」。
+    fn backend_with_irq(
+        program: &[u8],
+    ) -> (
+        SelfIssBackend<NullSinks, NullSinks>,
+        Rc<RefCell<InterruptController>>,
+    ) {
+        let controller = Rc::new(RefCell::new(InterruptController::new()));
+        let mut backend = backend_with_program(program);
+        backend.install_interrupt_port(Box::new(SharedInterruptPort::new(Rc::clone(&controller))));
+        (backend, controller)
+    }
+
+    /// 一个量子能跑多少条指令（= 量子长度 ÷ 单条指令成本）。
+    fn instructions_per_quantum() -> u32 {
+        (crate::m12_engine::TIME_QUANTUM_PS / crate::m12_engine::INSTRUCTION_COST_PS) as u32
+    }
+
+    /// 读 guest 的一个 CSR（**唯一**入口是 M-13 的 `csr_read`）。
+    fn guest_csr(backend: &SelfIssBackend<NullSinks, NullSinks>, csr: u16) -> u32 {
+        let state = backend.snapshot().expect("snapshot");
+        crate::m13_iss::csr::csr_read(&state, csr)
+    }
+
+    /// **量子边界**才仲裁（验收 26）。
+    ///
+    /// 判别式落在**输出**上：量子边界之前 `mcause` **没有**被写（没有陷入），
+    /// 跨过边界之后它才出现。
+    ///
+    /// ⚠️ 若采样改成「每条指令一次」，第一条指令就会交付中断 ⇒
+    /// 「边界之前没有陷入」这条断言当场变红。
+    #[test]
+    fn an_interrupt_is_delivered_only_at_a_quantum_boundary() {
+        let (mut backend, controller) = backend_with_irq(&IRQ_FIRMWARE_BYTES);
+        controller
+            .borrow_mut()
+            .request(IRQ_LINE, 0, SOURCE_PLATFORM, TRIGGER_EDGE)
+            .expect("request");
+
+        let per_quantum = instructions_per_quantum();
+        backend.step_n(per_quantum).expect("step");
+        assert_eq!(
+            guest_csr(&backend, CSR_MCAUSE),
+            0,
+            "量子边界**之前**不许仲裁 —— 一条指令执行中间不仲裁"
+        );
+
+        backend.step_n(1).expect("step");
+        assert_eq!(
+            guest_csr(&backend, CSR_MCAUSE),
+            riscv_sim_contract::csr::IRQ_BASE | u32::from(IRQ_LINE),
+            "跨过量子边界就必须交付"
+        );
+    }
+
+    /// 中断交付 ⇒ `pc` 跳到 `mtvec`，`mcause` = `IRQ_BASE | line`，
+    /// `mepc` = 被中断处（验收 27）。
+    #[test]
+    fn the_delivery_jumps_to_mtvec_and_records_the_cause() {
+        let (mut backend, controller) = backend_with_irq(&IRQ_FIRMWARE_BYTES);
+        controller
+            .borrow_mut()
+            .request(IRQ_LINE, 0, SOURCE_PLATFORM, TRIGGER_EDGE)
+            .expect("request");
+
+        backend
+            .step_n(instructions_per_quantum() + 1)
+            .expect("step");
+
+        let state = backend.snapshot().expect("snapshot");
+        assert_eq!(
+            state.pc, IRQ_HANDLER_ADDR,
+            "交付之后 PC 必须跳到 mtvec（直接模式）"
+        );
+        assert_eq!(
+            crate::m13_iss::csr::csr_read(&state, CSR_MCAUSE),
+            riscv_sim_contract::csr::IRQ_BASE | u32::from(IRQ_LINE),
+            "mcause 必须是 `IRQ_BASE | line`"
+        );
+        assert_eq!(
+            crate::m13_iss::csr::csr_read(&state, CSR_MEPC),
+            IRQ_MAIN_LOOP_ADDR,
+            "mepc 必须是**被中断处**的 PC"
+        );
+        assert_eq!(
+            crate::m13_iss::csr::csr_read(&state, CSR_MTVAL),
+            0,
+            "中断没有故障地址 ⇒ mtval = 0"
+        );
+        assert_eq!(
+            crate::m13_iss::csr::csr_read(&state, CSR_MTVEC),
+            IRQ_HANDLER_ADDR,
+            "mtvec 是 guest 自己写的那个值"
+        );
+    }
+
+    /// 写 `irq_clear` ⇒ 挂起项被清、`active_irq` 复位（验收 28）。
+    ///
+    /// ⚠️ **判别力**：只断言「CSR 写成功」是**恒真断言**。这里断言的是
+    /// **控制器导出的状态**——挂起队列空了、`active_irq` 复位了。
+    /// 若 M-17 的副作用没接上，这两条都会红。
+    #[test]
+    fn writing_irq_clear_clears_the_pending_entry_and_resets_active_irq() {
+        let (mut backend, controller) = backend_with_irq(&IRQ_FIRMWARE_BYTES);
+        controller
+            .borrow_mut()
+            .request(IRQ_LINE, 0, SOURCE_PLATFORM, TRIGGER_EDGE)
+            .expect("request");
+
+        // 交付 + handler（handler 里写 `irq_clear`）。
+        backend
+            .step_n(instructions_per_quantum() + 4)
+            .expect("step");
+
+        let controller = controller.borrow();
+        assert!(
+            controller.pending_lines().is_empty(),
+            "`irq_clear` 写完，挂起队列必须空 —— 实际还挂着 {:?}",
+            controller.pending_lines()
+        );
+        assert_eq!(
+            controller.active_irq(),
+            riscv_sim_contract::csr::NO_ACTIVE_IRQ,
+            "`irq_clear` 写完，active_irq 必须复位"
+        );
+    }
+
+    /// `MRET` 之后回到 `mepc`，且能**再次**收到同一中断（验收 29）。
+    ///
+    /// 判别式：handler 的**计数器**（x6）——它数的是 handler 跑了几遍。
+    /// 第二次交付要发生，`irq_clear` 的副作用就必须真的把 `active_irq`
+    /// 复位了（否则单级嵌套防护会挡住第二次交付）。
+    #[test]
+    fn the_same_interrupt_is_delivered_again_after_mret() {
+        let (mut backend, controller) = backend_with_irq(&IRQ_FIRMWARE_BYTES);
+        controller
+            .borrow_mut()
+            .request(IRQ_LINE, 0, SOURCE_PLATFORM, TRIGGER_EDGE)
+            .expect("request");
+
+        // 第一遍：交付 → handler → mret 回到主循环。
+        backend
+            .step_n(instructions_per_quantum() + 4)
+            .expect("step");
+        let state = backend.snapshot().expect("snapshot");
+        assert_eq!(state.pc, IRQ_MAIN_LOOP_ADDR, "mret 之后必须回到 mepc");
+        assert_eq!(
+            state.gpr[IRQ_HANDLER_COUNTER_REG as usize], 1,
+            "handler 必须跑过一遍"
+        );
+
+        // 第二遍：再请求一次同一条线 → 下一个量子边界再交付一次。
+        controller
+            .borrow_mut()
+            .request(IRQ_LINE, 0, SOURCE_PLATFORM, TRIGGER_EDGE)
+            .expect("request again");
+        backend
+            .step_n(instructions_per_quantum() + 4)
+            .expect("step");
+
+        let state = backend.snapshot().expect("snapshot");
+        assert_eq!(
+            state.gpr[IRQ_HANDLER_COUNTER_REG as usize], 2,
+            "清过之后，同一条中断必须能**再次**被交付"
+        );
+        assert_eq!(
+            crate::m13_iss::csr::csr_read(&state, CSR_MCAUSE),
+            riscv_sim_contract::csr::IRQ_BASE | u32::from(IRQ_LINE),
+            "第二次交付的 mcause 一样"
+        );
+    }
+
+    /// 中断交付**不计入**已执行条数（STAGE-4 裁决 I 在 M-17 这一侧）。
+    ///
+    /// 判别式：`total_executed` 与「真正退休的指令数」对不上——交付那一轮
+    /// 没有指令退休。
+    #[test]
+    fn the_delivery_does_not_count_as_an_executed_instruction() {
+        let (mut backend, controller) = backend_with_irq(&IRQ_FIRMWARE_BYTES);
+        controller
+            .borrow_mut()
+            .request(IRQ_LINE, 0, SOURCE_PLATFORM, TRIGGER_EDGE)
+            .expect("request");
+
+        let per_quantum = instructions_per_quantum();
+        let executed = backend.step_n(per_quantum + 1).expect("step");
+        assert_eq!(
+            executed,
+            per_quantum,
+            "跑了 {} 步，但**交付**那一轮没有指令退休 ⇒ 执行的条数是 {}，\
+             不是 {}",
+            per_quantum + 1,
+            per_quantum,
+            per_quantum + 1
+        );
+    }
+
+    /// 「上次采样时刻」必须**跨批次**保留（STAGE-4 裁决 I）。
+    ///
+    /// ⚠️ 判别式落在 M-16 **导出的状态**上（`mtime` = 最近一次采样的
+    /// 虚拟时间）。若「上次采样时刻」挂在**执行器**上（执行器是**每批次
+    /// 新建**的），下一批的第一条指令就会再采样一次 ⇒ `mtime` 变成那条
+    /// 指令的时刻 ⇒ 「仲裁只在量子边界发生」这条不变式当场破掉。
+    #[test]
+    fn the_quantum_boundary_sampling_survives_across_batches() {
+        let (mut backend, controller) = backend_with_irq(&IRQ_FIRMWARE_BYTES);
+        let per_quantum = instructions_per_quantum();
+
+        backend.step_n(per_quantum + 1).expect("step");
+        let sampled_at = controller.borrow().mtime();
+        assert_eq!(
+            sampled_at,
+            u64::from(per_quantum) * crate::m12_engine::INSTRUCTION_COST_PS,
+            "第一次采样必须发生在**第一个量子边界**上"
+        );
+
+        // 下一批的第一条指令：离上一个量子边界只有 1 ns ⇒ **不许**再采样。
+        backend.step_n(1).expect("step");
+        assert_eq!(
+            controller.borrow().mtime(),
+            sampled_at,
+            "「上次采样时刻」必须**跨批次**保留 —— 挂在执行器上会让每个批次的\
+             第一条指令都采样一次"
+        );
+    }
+
+    /// 没装中断控制器时，后端**照常跑**（空端口什么都不做）。
+    ///
+    /// ⚠️ 这条是**回归护栏**：`install_interrupt_port` 之前的那些用法
+    /// （宿主之外的直接调用）不能因为端口字段变成必填就崩掉。
+    #[test]
+    fn a_backend_without_a_controller_still_runs() {
+        let mut backend = backend_with_demo();
+        let executed = backend.step_n(3).expect("step");
+        assert_eq!(executed, 3);
     }
 }
