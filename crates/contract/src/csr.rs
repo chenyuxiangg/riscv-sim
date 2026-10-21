@@ -255,4 +255,68 @@ mod tests {
         assert_ne!(NO_ACTIVE_IRQ, 0);
         assert_eq!(NO_ACTIVE_IRQ, u16::MAX);
     }
+
+    /// ⚠️ **只读规则的边界必须被钉死** —— 规则一旦被改成另一个**也说得通**
+    /// 的形式（例如「高两位都是 11」），平台用到的 CSR **恰好**都判成一样，
+    /// 于是**没有一条用例会红**：那种改法看上去「无害」，实际是把
+    /// `0x900..0x9FF` / `0xB00..0xBFF` 这两段标准里**可写**的区间
+    /// 悄悄判成只读。
+    ///
+    /// 这条用例把**四个区的边界**都写出来，让规则**换一种写法**也会变红。
+    #[test]
+    fn the_read_only_rule_is_pinned_at_the_quarter_boundaries() {
+        // 下半区（`0x000..0x7FF`）一律**可写**。
+        assert!(!is_csr_read_only(0x0000));
+        assert!(!is_csr_read_only(0x03FF));
+        assert!(!is_csr_read_only(0x0400));
+        assert!(!is_csr_read_only(0x07FF));
+        // 上半区（`0x800..0xFFF`）一律**只读**。
+        assert!(is_csr_read_only(0x0800));
+        assert!(is_csr_read_only(0x0900));
+        assert!(is_csr_read_only(0x0A00));
+        assert!(is_csr_read_only(0x0B00));
+        assert!(is_csr_read_only(0x0C00));
+        assert!(is_csr_read_only(0x0FFF));
+    }
+
+    /// ⚠️ **本平台的规则比 RISC-V 粗**，这里把差异**写死**。
+    ///
+    /// RISC-V 在 `0x800..0xBFF` 之内还按 bit 8 再分读写
+    /// （`0x8xx` / `0xAxx` 只读，`0x9xx` / `0xBxx` 可写）；
+    /// 本平台**一律**当只读（地址 bit 11 置位 ⇒ 只读）。
+    ///
+    /// 差异对本平台**无影响**：平台用到的 CSR 里**没有**落在这条差异上的
+    /// —— `mtime`（`0xBFF8`）按 RISC-V 本来就是**只读**的。
+    #[test]
+    fn the_coarser_read_only_rule_does_not_affect_any_csr_the_platform_uses() {
+        // 标准里「可写」而本平台判「只读」的两段里，平台**一个 CSR 都没有**。
+        // ⚠️ 这里比的是**最终效果**（写会不会被忽略），不是地址规则本身 ——
+        // `mip` 按地址规则是**可写**的（`0x344 < 0x800`），是**平台规则**
+        // 把它判成只读的（RISC-V：MEIP/MTIP 在 M 模式只读）。
+        for csr in [
+            CSR_MSTATUS,
+            CSR_MIE,
+            CSR_MTVEC,
+            CSR_MEPC,
+            CSR_MCAUSE,
+            CSR_MTVAL,
+            CSR_MIP,
+            CSR_MTIME,
+            CSR_IRQ_CLEAR,
+        ] {
+            let standard_write_ignored = match csr {
+                // `mip`：RISC-V 规定 MEIP / MTIP 在 M 模式**只读**。
+                0x344 => true,
+                // `mtime`：RV32 规定它是**只读** CSR。
+                0xBFF8 => true,
+                // 其余全在 `0x000..0x7FF`（可写区）或 `0x7C0`（自定义可写区）。
+                _ => false,
+            };
+            assert_eq!(
+                csr_write_is_ignored(csr),
+                standard_write_ignored,
+                "csr {csr:#x} 的写是否被忽略，必须与 RISC-V 一致"
+            );
+        }
+    }
 }

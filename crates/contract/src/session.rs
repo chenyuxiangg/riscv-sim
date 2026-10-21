@@ -1643,14 +1643,57 @@ mod tests {
 
     /// 挂起队列里**同一条线出现两次** → 拒。
     ///
-    /// ⚠️ 同线去重是控制器的不变式：一条线在队列里只能有一条。
+    /// ⚠️ **不重复**（同线去重是控制器的不变式）。
+    ///
+    /// ⚠️ **夹具必须只踩这一条**：本用例的重复项**时刻不同**（`100` 与 `200`），
+    /// 所以队列的**顺序检查（第 11 项的后半段）不会**顺带把它拒掉 ——
+    /// 否则本用例就变成「顺序检查在起作用」的假判别式，**同线去重这一条
+    /// 就没人守了**。（这正是本条被反向变异自检抓出来的形状：把
+    /// 「同线去重」检查去掉，用例**照样绿**。）
     #[test]
     fn a_duplicated_pending_line_is_rejected() {
         let mut s = sample();
         let mut seg = well_formed_segment_5();
-        let dup = seg.pending[0].clone();
-        seg.pending[1] = dup;
+        // 行 1 出现两次，但**请求时刻不同** ⇒ 顺序仍是升序的。
+        seg.pending[1] = PendingIrqDto {
+            line: seg.pending[0].line,
+            prio: seg.pending[0].prio,
+            request_time_ps: 900,
+            insert_seq: 9,
+            trigger_type: 1,
+            source_type: "uart".to_string(),
+        };
         s.m16_intc = seg;
+        let err = s.validate().expect_err("同线重复必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// ⚠️ **反面**：**时刻不同**的重复行**确实**能穿过顺序检查 ⇒
+    /// 证明上一条用例钉住的是**同线去重**这一条，而不是顺序检查。
+    ///
+    /// 没有这一条，上一条用例就可能因为「顺序检查顺带拒了它」而变绿 ——
+    /// 那样「同线去重」这条规则就**没有守卫**。
+    #[test]
+    fn a_duplicated_line_with_distinct_times_keeps_the_queue_ordered() {
+        let mut s = sample();
+        let mut seg = well_formed_segment_5();
+        seg.pending[1] = PendingIrqDto {
+            line: seg.pending[0].line,
+            prio: seg.pending[0].prio,
+            request_time_ps: 900,
+            insert_seq: 9,
+            trigger_type: 1,
+            source_type: "uart".to_string(),
+        };
+        // 队列**顺序**本身是好的（100 < 900）。
+        let keys: Vec<(u64, u64)> = seg
+            .pending
+            .iter()
+            .map(|p| (p.request_time_ps, p.insert_seq))
+            .collect();
+        assert!(keys[0] < keys[1], "夹具必须满足顺序检查");
+        s.m16_intc = seg;
+        // 而它**仍然**必须被拒 —— 理由只能是「同线去重」。
         let err = s.validate().expect_err("同线重复必须被拒");
         assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
     }
