@@ -268,6 +268,19 @@ pub struct DeltaRegister {
 ⚠️ **`WriteRegister` 的 `index > 31` 是拒绝而不是钳位**——写钳位会**静默**写到别的寄存器。
 `ReadRegisters` 则是**钳位**（读越界没有副作用）。
 
+⚠️ **错误码用契约常量，不要裸字符串**：
+
+| 码 | 契约常量 | 含义 |
+| --- | --- | --- |
+| `E_DBG-01` | `error::E_DBG_01_INVALID_REGISTER_INDEX` | 寄存器下标越界（**写**才拒绝） |
+| `E_PROTO-01` | `error::E_PROTO_01_VERSION_MISMATCH` | 协议版本不匹配 |
+
+`ErrorFamily::Debug`（`"DBG"`）是契约**早已声明**的调试服务族（M-08 / M-09 / M-10），
+M-09 也已声明 `FAMILY = ErrorFamily::Debug`；但 LLD 的错误码表此前**只列了**
+`CTX / BUS / ISS / PP / PROTO` 五族，**没有 DBG 的场景码**。本批把
+`E_DBG-01` 固化进契约（族 + 场景码一起），并要求在 LLD 错误码表补 DBG 一行
+——**族与场景码必须同时有落点**，只给族等于只给了一半（D-32 缺口 5 的教训）。
+
 ---
 
 ## 6. D-34 命名歧义的处置
@@ -311,6 +324,15 @@ pub struct DeltaRegister {
 ⚠️ **与既有的 `Transport`（`"TRX"`）并存**：两个族**职责不同**——
 `TRX` 是**传输适配器**自身的故障（连接、断线、超时），`PROTO` 是**协议层**
 的故障（版本不协商、信封畸形、CRC 不符）。
+
+**族与场景码一起落地**：契约的 `error` 模块同时给出
+`E_PROTO_01_VERSION_MISMATCH` … `E_PROTO_08_BAD_MESSAGE` 八个场景常量
+（含义逐字抄自 LLD 第 6 章的错误码表）。只给族不给场景码，等于只给了一半落点——
+内核仍然只能把 `"E_PROTO-01"` 当裸字符串拼，那正是这类拼写漂移的来源。
+
+另加 `E_DBG_01_INVALID_REGISTER_INDEX`（`ErrorFamily::Debug`）：LLD 错误码表
+此前没有 DBG 族，但契约的 `ErrorFamily::Debug` 文档本就点名 M-08 / M-09 / M-10，
+M-09 也已声明 `FAMILY = ErrorFamily::Debug`——本批把它的**第一个场景码**定下来。
 
 ### 7.2 传输帧的 `crc`（**属于 `front/lib/frame.js`，不属于契约信封**）
 
@@ -432,6 +454,8 @@ D-64 说「随 M-16 一并做」。本批**刻意不加** `SimState.mtval` 字�
 | 3 | 虚拟时间字段的**线上表示是十进制字符串** | 契约层 JSON 形状断言 + JS 镜像断言 |
 | 4 | `psToNumber` 超过 2⁵³ **抛错**而不是静默截断 | JS 单测 |
 | 5 | `ErrorFamily::Protocol.as_str() == "PROTO"` | 契约层单测 |
+| 5b | **`E_PROTO_01`..`E_PROTO_08` 与 `E_DBG_01` 的场景常量已固化**，渲染出的码与 LLD 逐字一致 | 契约层单测（`error::tests`） |
+| 5c | **LLD 错误码表补 DBG 一行**（`E_DBG-01` = 寄存器下标越界） | 文档核对 |
 | 6 | 传输帧 `crc` 正确计算；算错 → `E_PROTO-06`；**缺失** → 放行 | JS 单测 |
 | 7 | `Waveform` → `WaveformHistory` 改名完成，topic 同步 | 全仓 grep 无残留 + 前后端对拍 |
 | 8 | `validate()` 拒绝「队列到期时刻 < 当前虚拟时间」 | 契约层单测 |

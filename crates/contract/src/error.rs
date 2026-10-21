@@ -110,6 +110,72 @@ impl ErrorFamily {
     }
 }
 
+/// Error family used by the protocol-level codes below.
+pub const PROTO_FAMILY: ErrorFamily = ErrorFamily::Protocol;
+
+/// Error family used by the debug-service codes below.
+pub const DEBUG_FAMILY: ErrorFamily = ErrorFamily::Debug;
+
+// ---------------------------------------------------------------------------
+// Protocol family — `E_PROTO-01`..`E_PROTO-08`
+// ---------------------------------------------------------------------------
+
+/// The LLD's protocol-error codes, verbatim.
+///
+/// The **family** landed in contract v2 (D-32 gap 5 — before v2 the LLD's
+/// `E_PROTO-*` codes had no contract-side home at all). The **scenario
+/// codes** land with it: a family without its scenarios is only half a
+/// home, and the kernel would otherwise have to spell `"E_PROTO-01"` as a
+/// bare string literal — which is exactly how the typo class of bug this
+/// ledger keeps catching gets in.
+///
+/// Each meaning below is copied from the module design specification's
+/// error-code table (chapter 6).
+///
+/// Scenario code: the protocol version does not match the one this build
+/// speaks (or the host asked for a version it cannot speak).
+pub const E_PROTO_01_VERSION_MISMATCH: u16 = 1;
+
+/// Scenario code: an unknown field was seen. **Ignored** (the contract's
+/// "only add, never change" rule) — logged only.
+pub const E_PROTO_02_UNKNOWN_FIELD: u16 = 2;
+
+/// Scenario code: malformed ELF / HEX / DWARF input.
+pub const E_PROTO_03_MALFORMED_IMAGE: u16 = 3;
+
+/// Scenario code: the input exceeds a size / complexity limit.
+pub const E_PROTO_04_INPUT_TOO_LARGE: u16 = 4;
+
+/// Scenario code: a sequence-number gap (the transport resumes by pulling
+/// the missing messages).
+pub const E_PROTO_05_SEQUENCE_GAP: u16 = 5;
+
+/// Scenario code: the transport frame's CRC did not match.
+pub const E_PROTO_06_CRC_MISMATCH: u16 = 6;
+
+/// Scenario code: a critical event's acknowledgement timed out.
+pub const E_PROTO_07_ACK_TIMEOUT: u16 = 7;
+
+/// Scenario code: the message's shape is malformed (missing field, wrong
+/// type, unknown variant).
+pub const E_PROTO_08_BAD_MESSAGE: u16 = 8;
+
+// ---------------------------------------------------------------------------
+// Debug family — `E_DBG-01`
+// ---------------------------------------------------------------------------
+
+/// Scenario code: the register index is outside the 32-entry register
+/// file.
+///
+/// **Write-only.** Reading out of range is *clamped* (a read has no side
+/// effect), but writing out of range is **rejected** — clamping a write
+/// would silently write a *different* register than the caller named.
+///
+/// The `Debug` family is the contract's declared home for the debug
+/// services (breakpoint / step / register-and-memory, i.e. M-08 / M-09 /
+/// M-10); M-09 already declares it as its family.
+pub const E_DBG_01_INVALID_REGISTER_INDEX: u16 = 1;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +199,46 @@ mod tests {
         assert_ne!(
             ErrorFamily::Transport.as_str(),
             ErrorFamily::Protocol.as_str()
+        );
+    }
+
+    /// The scenario constants must render as the LLD's codes, digit for
+    /// digit. A constant that renders `E_PROTO-06` but is *spelled*
+    /// `E_PROTO-6` in a table somewhere is how the two drift apart.
+    #[test]
+    fn the_protocol_scenario_codes_render_as_the_lld_spells_them() {
+        let cases = [
+            (E_PROTO_01_VERSION_MISMATCH, "E_PROTO-01"),
+            (E_PROTO_02_UNKNOWN_FIELD, "E_PROTO-02"),
+            (E_PROTO_03_MALFORMED_IMAGE, "E_PROTO-03"),
+            (E_PROTO_04_INPUT_TOO_LARGE, "E_PROTO-04"),
+            (E_PROTO_05_SEQUENCE_GAP, "E_PROTO-05"),
+            (E_PROTO_06_CRC_MISMATCH, "E_PROTO-06"),
+            (E_PROTO_07_ACK_TIMEOUT, "E_PROTO-07"),
+            (E_PROTO_08_BAD_MESSAGE, "E_PROTO-08"),
+        ];
+        for (scenario, expected) in cases {
+            let err = PlatformError::new(PROTO_FAMILY, scenario, "x");
+            assert_eq!(
+                err.to_string(),
+                format!("{expected}: x"),
+                "场景码 {scenario} 渲染成了 {err}"
+            );
+        }
+    }
+
+    /// The debug family renders `E_DBG-01` — the code the contract-v2
+    /// spec uses for "register index out of range".
+    #[test]
+    fn the_debug_scenario_code_renders_as_e_dbg_01() {
+        let err = PlatformError::new(
+            DEBUG_FAMILY,
+            E_DBG_01_INVALID_REGISTER_INDEX,
+            "register index 99 is out of range",
+        );
+        assert_eq!(
+            err.to_string(),
+            "E_DBG-01: register index 99 is out of range"
         );
     }
 }
