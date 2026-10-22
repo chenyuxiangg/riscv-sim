@@ -71,6 +71,24 @@
 //! （捕获环没满），而**不是**「捕获环是空的」——后者会让 osz 每发一个
 //! 字节就卡死一次，shell 的输出根本走不出去。
 //!
+//! ## 接收 FIFO（v0.24 · 一行 shell 输入要能**整个**送进去）
+//!
+//! ⚠️ **v0.23 的模型是「1 字节深」**（`rx: Option<u8>`）⇒ 宿主一条
+//! `WriteConsole` 命令写三个字节，只有**第一个**进得去，后两个被丢并
+//! 锁存 `LSR` 的 overrun 位 ⇒ **一行 shell 命令根本送不进去**（冻结规格
+//! STAGE-9 裁决 B 第一步写的是「把**字节**塞进 UART 的 RX FIFO」——
+//! 复数 ⇒ 规格假定 FIFO 能装多个字节）。
+//!
+//! ⇒ 现在接收侧是真正的 **FIFO**（[`RX_FIFO_CAPACITY`] 字节深）：
+//!
+//! - `LSR` 的 **RX_VALID(bit0)** = FIFO **非空**；
+//! - guest 读 `RHR` = **弹出队头**（不是「读最后一个」，也不是「读了不清」）；
+//! - [`Uart16550::receive`] = **入队尾**；
+//! - FIFO **满**时**丢最新的那个**并**锁存** `LSR` 的 overrun 位（bit2，
+//!   W1C）—— 与 TX 捕获环**同一口径**（见下面「环满时的策略」）。
+//!
+//! ⚠️ **TX 侧一个字节都没动**：无损 TX 捕获环是 v0.23 的成果。
+//!
 //! ## 无损 TX 捕获环
 //!
 //! TX 不再是 1 字节深的 FIFO，而是一个**可配置容量的环形缓冲**
@@ -126,6 +144,23 @@ pub const UART_WINDOW: u32 = 0x8;
 
 /// Default capacity of the lossless TX capture ring (4 KiB).
 pub const DEFAULT_TX_CAPTURE_CAPACITY: usize = 4096;
+
+/// 接收 FIFO 的**深度**（字节数）。
+///
+/// ⚠️ **为什么是 16**：接收侧的用途是「宿主把**一行** shell 输入送进
+/// guest」（冻结规格 STAGE-9 裁决 B）⇒ 深度必须**够放一行**：典型命令
+/// 加换行（"help\n" 是 5 字节，"version\n" 是 8 字节）⇒ 16 字节既有
+/// 余量，又不会把会话快照撑大（`UartStateDto.rx_queue` 最长 16 字节 ⇒
+/// 载荷的增量**有界**）。
+///
+/// ⚠️ **为什么不是 1**（v0.23 的旧模型）：1 字节深的 FIFO 意味着「一条
+/// 命令只能送进去**一个字符**」⇒ 一行命令送不进去 ⇒ 与本批的目标
+/// （「让 osz 的 shell **真的能用**」）不符。
+///
+/// ⚠️ **满时的策略与 TX 环一致**：**丢最新、保最早**（见
+/// [`Uart16550::receive`]）⇒ 丢是**看得见的**（`LSR` 的 overrun 位
+/// 被锁存），不是静默的。
+pub const RX_FIFO_CAPACITY: usize = 16;
 
 /// Probe signal name for a transmitted byte (D-12 / N5).
 ///
@@ -193,8 +228,11 @@ pub mod lcr_bits {
 
 /// `LSR` bits (ns16550 line status register).
 pub mod lsr_bits {
-    /// bit 0 — RX data ready (`DR`): the RX FIFO holds a byte.
-    /// osz calls it `LSR_RX_VALID`.
+    /// bit 0 — RX data ready (`DR`): the RX FIFO holds **at least one**
+    /// byte. osz calls it `LSR_RX_VALID`.
+    ///
+    /// ⚠️ **v0.24**：接收 FIFO 不止一个字节 ⇒ 判据是「**非空**」，不是
+    /// 「恰好一个字节」。
     pub const RX_VALID: u8 = 0x01;
     /// bit 1 — transmitter holding register empty (`THRE`): always 1
     /// (a THR write completes instantly in this model).
@@ -364,8 +402,11 @@ pub struct Uart16550 {
     dll: u8,
     /// `DLM` (`0x1`, while `DLAB` is set) — divisor latch high.
     dlm: u8,
-    /// RX FIFO (1 byte deep, MVP).
-    rx: Option<u8>,
+    /// RX FIFO（最多 [`RX_FIFO_CAPACITY`] 字节；**队头**是下一个待读字节）。
+    ///
+    /// ⚠️ **v0.24**：从「1 字节深」（`Option<u8>`）加深成真正的 FIFO ——
+    /// 见模块文档「接收 FIFO」。
+    rx: VecDeque<u8>,
     /// Latched RX overrun (LSR bit 2).
     rx_overrun: bool,
     /// Latched TX capture overrun (LSR bit 3).
@@ -410,7 +451,7 @@ impl Uart16550 {
             scr: 0,
             dll: 0,
             dlm: 0,
-            rx: None,
+            rx: VecDeque::new(),
             rx_overrun: false,
             tx_overrun: false,
             tx: TxCapture::new(tx_capacity),
@@ -463,7 +504,7 @@ impl Uart16550 {
     /// The line status register (`LSR @ 0x5`) — see [`lsr_bits`].
     pub fn line_status(&self) -> u8 {
         let mut s = lsr_bits::THRE | lsr_bits::TEMT;
-        if self.rx.is_some() {
+        if !self.rx.is_empty() {
             s |= lsr_bits::RX_VALID;
         }
         if self.rx_overrun {
@@ -554,14 +595,21 @@ impl Uart16550 {
 
     /// Receive `byte` from the wire (host-supplied — the firmware will
     /// read the RHR later).
+    ///
+    /// ⚠️ **入队尾**：字节排在**队尾**，guest 读 `RHR` 取的是**队头**
+    /// ⇒ 多个字节进来时**顺序不丢、不乱序**。
+    ///
+    /// ⚠️ **FIFO 满时丢最新的那个，并锁存 `LSR` 的 overrun 位（bit2）**
+    /// —— 与 TX 捕获环**同一口径**（模块文档「环满时的策略」）：最早的
+    /// 字节是输入流的**前缀**，丢前缀比丢尾巴更难诊断 ⇒ 丢**新来的**那个。
+    /// ⇒ 「丢」是**看得见的**：overrun 位被**锁存**（W1C 清），不是静默的。
     pub fn receive(&mut self, byte: u8) {
-        if self.rx.is_some() {
-            // The RX FIFO is 1 byte deep: the new byte is dropped and
-            // the overrun is latched (LSR bit 2).
+        if self.rx.len() >= RX_FIFO_CAPACITY {
+            // 满了：丢**最新**的这个字节（保住最早的），并锁存 overrun。
             self.rx_overrun = true;
             return;
         }
-        self.rx = Some(byte);
+        self.rx.push_back(byte);
     }
 
     /// TX pin level: `true` when the transmitter is idle (nothing is
@@ -572,7 +620,7 @@ impl Uart16550 {
 
     /// RX pin level (debug — we don't model an electrical line in MVP).
     pub fn rx_pin(&self) -> bool {
-        self.rx.is_none()
+        self.rx.is_empty()
     }
 
     /// Picoseconds per bit at the configured baud rate. Floored at
@@ -601,7 +649,7 @@ impl Uart16550 {
                 if self.dlab_enabled() {
                     self.dll
                 } else {
-                    self.rx.unwrap_or(0)
+                    self.rx.front().copied().unwrap_or(0)
                 }
             }
             reg::IER => {
@@ -664,7 +712,7 @@ impl Uart16550 {
     /// Apply the FIFO control register's reset bits.
     fn apply_fifo_control(&mut self, fcr: u8) {
         if fcr & fcr_bits::RX_FIFO_RESET != 0 {
-            self.rx = None;
+            self.rx.clear();
             self.rx_overrun = false;
         }
         if fcr & fcr_bits::TX_FIFO_RESET != 0 {
@@ -704,18 +752,23 @@ impl Uart16550 {
 
     /// The UART's **own** integrity rules for a session state.
     ///
-    /// ⚠️ Two rules, both **UART-specific** — the contract layer cannot
-    /// check them: it knows the *shape* of a UART state, but not what
-    /// the `LSR` bits **mean**.
+    /// ⚠️ Three rules, all **UART-specific** — the contract layer knows
+    /// the *shape* of a UART state, but not what the `LSR` bits **mean**
+    /// nor how deep this model's FIFO is:
     ///
     /// 1. **Only the defined bits.** The `LSR` may only carry the bits
     ///    this model defines. A state with other bits set could not have
     ///    been produced by this UART — it came from somewhere else (or
     ///    from a hand-built payload).
     /// 2. **The RX flag must agree with the RX FIFO.** `LSR_RX_VALID` is
-    ///    set exactly when the RX FIFO holds a byte. A state that
-    ///    contradicts itself would restore a UART whose register **lies**
-    ///    about its own FIFO — and the firmware would believe it.
+    ///    set exactly when the RX FIFO holds **at least one** byte (v0.24:
+    ///    the FIFO is deeper than one byte ⇒ 判据是「队列**非空**」，不是
+    ///    「恰好一个字节」). A state that contradicts itself would restore
+    ///    a UART whose register **lies** about its own FIFO — and the
+    ///    firmware would believe it.
+    /// 3. **The queue must fit this model's FIFO.** A payload carrying
+    ///    more bytes than [`RX_FIFO_CAPACITY`] describes a UART that this
+    ///    model cannot be ⇒ 还原时必然要**截断**（丢字节）⇒ 必须被拒。
     ///
     /// ⚠️ There is deliberately **no** rule about the TX side: the DTO can
     /// only carry **one** byte of the capture ring, so the ring's
@@ -737,8 +790,38 @@ impl Uart16550 {
                 ),
             ));
         }
+        if state.rx_queue.len() > RX_FIFO_CAPACITY {
+            return Err(PlatformError::new(
+                super::PERIPHERAL_FAMILY,
+                super::E_PER_04_UNSUPPORTED_SESSION_STATE,
+                format!(
+                    "UART '{}' 的会话状态带 {} 个待读字节，器件的接收 FIFO 只有 {} 字节深",
+                    self.id,
+                    state.rx_queue.len(),
+                    RX_FIFO_CAPACITY
+                ),
+            ));
+        }
+        // ⚠️ `rx` 必须是 `rx_queue` 的**队头** —— 两者不一致的载荷是
+        // **自相矛盾**的（它同时说「队头是 0x41」和「队头是 0x42」）。
+        //
+        // ⚠️ 契约层的 `validate()` 也查这一条（**形状**规则）；这里再查一遍
+        // 是**防御性冗余**：器件的恢复路径（注册表那条）**不经过**契约层
+        // 的校验器 ⇒ 只在契约层查的话，这条路径会漏。
+        if state.rx != state.rx_queue.first().copied() {
+            return Err(PlatformError::new(
+                super::PERIPHERAL_FAMILY,
+                super::E_PER_04_UNSUPPORTED_SESSION_STATE,
+                format!(
+                    "UART '{}' 的会话状态自相矛盾：rx 是 {:?}，但 rx_queue 的队头是 {:?}",
+                    self.id,
+                    state.rx,
+                    state.rx_queue.first().copied()
+                ),
+            ));
+        }
         let rx_valid = state.status & u32::from(lsr_bits::RX_VALID) != 0;
-        if rx_valid != state.rx.is_some() {
+        if rx_valid != !state.rx_queue.is_empty() {
             return Err(PlatformError::new(
                 super::PERIPHERAL_FAMILY,
                 super::E_PER_04_UNSUPPORTED_SESSION_STATE,
@@ -746,7 +829,11 @@ impl Uart16550 {
                     "UART '{}' 的会话状态自相矛盾：LSR.RX_VALID = {}，但 RX FIFO 是 {}",
                     self.id,
                     rx_valid,
-                    if state.rx.is_some() { "满" } else { "空" }
+                    if state.rx_queue.is_empty() {
+                        "空"
+                    } else {
+                        "非空"
+                    }
                 ),
             ));
         }
@@ -784,7 +871,8 @@ impl Peripheral for Uart16550 {
     fn read_clear(&mut self, offset: u32, size: WriteSize) -> Result<u32, PlatformError> {
         let bytes = self.read_bytes(offset, size)?;
         if self.covers_rhr(offset) {
-            self.rx = None;
+            // ⚠️ 读 `RHR` = **弹出队头**（不是「读了不清空」也不是「读最后一个」）。
+            self.rx.pop_front();
             self.rx_overrun = false;
         }
         Ok(assemble_le(&bytes))
@@ -838,7 +926,9 @@ impl Peripheral for Uart16550 {
         Some(PeripheralSessionState::Uart(UartStateDto {
             id: self.id.clone(),
             tx: self.tx.peek(),
-            rx: self.rx,
+            // ⚠️ `rx` 是**队头**，`rx_queue` 是**全部**待读字节。
+            rx: self.rx.front().copied(),
+            rx_queue: self.rx.iter().copied().collect(),
             status: u32::from(self.line_status()),
             irq_line: self.irq_line,
             now_ps: self.now_ps,
@@ -900,7 +990,14 @@ impl Peripheral for Uart16550 {
         if let Some(byte) = s.tx {
             self.tx.push(byte);
         }
-        self.rx = s.rx;
+        self.rx.clear();
+        // ⚠️ **还原整个接收队列**（v0.24）—— 只还原队头会**丢字节** ⇒
+        // 还原出来的会话与采快照的那次**不是同一个**。
+        // ⚠️ 队列深度由 [`Uart16550::check_status`] 查过（不可能超深）⇒
+        // 这里不会截断。
+        for byte in &s.rx_queue {
+            self.rx.push_back(*byte);
+        }
         self.rx_overrun = s.status & u32::from(lsr_bits::OE) != 0;
         self.tx_overrun = s.status & u32::from(lsr_bits::TX_OVERRUN) != 0;
         self.irq_line = s.irq_line;
@@ -1107,11 +1204,17 @@ mod tests {
     }
 
     /// RX overrun 锁存在 `LSR` 的 bit2，且是 W1C。
+    ///
+    /// ⚠️ **v0.24**：RX FIFO 是 [`RX_FIFO_CAPACITY`] 字节深 ⇒ 要触发
+    /// overrun 必须**先把 FIFO 填满**，再塞一个 ⇒ 夹具里灌的是
+    /// `0x00..=0x0F` 这 16 个字节，第 17 个（`0xFF`）被丢。
     #[test]
     fn the_rx_overrun_is_latched_in_lsr_bit_two_and_is_w1c() {
         let mut u = uart();
-        u.receive(b'Z');
-        u.receive(b'Y'); // overrun: the RX FIFO is 1 byte deep
+        for i in 0..RX_FIFO_CAPACITY {
+            u.receive(i as u8);
+        }
+        u.receive(0xFF); // overrun: the RX FIFO is full
         let lsr = u.read(reg::LSR, WriteSize::Byte).unwrap();
         assert_eq!(lsr & u32::from(lsr_bits::OE), 0x04);
 
@@ -1125,6 +1228,103 @@ mod tests {
             .expect("write OE");
         let lsr = u.read(reg::LSR, WriteSize::Byte).unwrap();
         assert_eq!(lsr & u32::from(lsr_bits::OE), 0);
+    }
+
+    /// ⚠️ **v0.24 · 接收 FIFO 能装多个字节**，且**顺序不丢、不乱序**。
+    ///
+    /// ⚠️ 这是「一行 shell 输入能整个送进去」这条批次目标的**内核侧**落点
+    /// （冻结规格 STAGE-9 裁决 B 第一步）。
+    #[test]
+    fn the_rx_fifo_holds_several_bytes_in_order() {
+        let mut u = uart();
+        for byte in [0x41u8, 0x42, 0x43] {
+            u.receive(byte);
+        }
+
+        // LSR 的 RX_VALID = FIFO 非空。
+        let lsr = u.read(reg::LSR, WriteSize::Byte).unwrap();
+        assert_eq!(
+            lsr & u32::from(lsr_bits::RX_VALID),
+            u32::from(lsr_bits::RX_VALID),
+            "FIFO 里有字节 ⇒ RX_VALID 必须置位"
+        );
+        assert_eq!(
+            lsr & u32::from(lsr_bits::OE),
+            0,
+            "三个字节远没塞满 ⇒ 不许锁存 overrun"
+        );
+
+        // 读 RHR = **弹出队头**：0x41 → 0x42 → 0x43 → 空。
+        assert_eq!(u.read_clear(reg::THR, WriteSize::Byte).unwrap(), 0x41);
+        assert_eq!(u.read_clear(reg::THR, WriteSize::Byte).unwrap(), 0x42);
+        assert_eq!(u.read_clear(reg::THR, WriteSize::Byte).unwrap(), 0x43);
+        assert_eq!(
+            u.read_clear(reg::THR, WriteSize::Byte).unwrap(),
+            0,
+            "FIFO 空了 ⇒ RHR 读出来是 0"
+        );
+
+        // 读空之后 LSR 的 RX_VALID 也要跟着清。
+        let lsr = u.read(reg::LSR, WriteSize::Byte).unwrap();
+        assert_eq!(
+            lsr & u32::from(lsr_bits::RX_VALID),
+            0,
+            "FIFO 空了 ⇒ RX_VALID 必须清"
+        );
+    }
+
+    /// ⚠️ **v0.24 · FIFO 满时丢最新的那个**（与 TX 捕获环同一口径），
+    /// 并**锁存** overrun 位。
+    ///
+    /// ⚠️ **「最早的一个都不能丢」**：最早的字节是输入流的**前缀** ⇒
+    /// 丢前缀比丢尾巴更难诊断。
+    #[test]
+    fn the_rx_fifo_drops_the_newest_byte_when_it_is_full_and_latches_the_overrun() {
+        let mut u = uart();
+        for i in 0..RX_FIFO_CAPACITY {
+            u.receive(i as u8);
+        }
+        u.receive(0xFF); // 第 17 个字节 ⇒ 被丢
+
+        let lsr = u.read(reg::LSR, WriteSize::Byte).unwrap();
+        assert_eq!(
+            lsr & u32::from(lsr_bits::OE),
+            u32::from(lsr_bits::OE),
+            "丢是**看得见的**：overrun 位必须锁存"
+        );
+
+        // 留下的是**最早**的 16 个字节，顺序不变。
+        for i in 0..RX_FIFO_CAPACITY {
+            assert_eq!(
+                u.read_clear(reg::THR, WriteSize::Byte).unwrap(),
+                u32::from(i as u8),
+                "留下的必须是**最早**的字节，且顺序不变"
+            );
+        }
+        assert_eq!(
+            u.read_clear(reg::THR, WriteSize::Byte).unwrap(),
+            0,
+            "被丢的那个字节（0xFF）不许出现在 FIFO 里"
+        );
+    }
+
+    /// `FCR` 的 RX FIFO 复位位（bit1）清掉**整个**队列（不止一个字节）。
+    #[test]
+    fn the_rx_fifo_reset_bit_clears_the_whole_queue() {
+        let mut u = uart();
+        u.receive(0x41);
+        u.receive(0x42);
+        u.write(
+            reg::FCR,
+            WriteSize::Byte,
+            u32::from(fcr_bits::RX_FIFO_RESET),
+        )
+        .expect("fcr reset");
+        assert_eq!(
+            u.read_clear(reg::THR, WriteSize::Byte).unwrap(),
+            0,
+            "复位位必须把**整个**队列清掉"
+        );
     }
 
     /// 其它寄存器各就各位：写进去读得回来。

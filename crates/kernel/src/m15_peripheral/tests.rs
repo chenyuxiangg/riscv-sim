@@ -318,8 +318,11 @@ fn uart_status_clear_is_w1c() {
     // ⚠️ **v0.23**：状态寄存器是 ns16550 的 **LSR @ 0x5**，RX overrun
     // 在 bit2。
     let mut uart = Uart16550::new("UART0", 0, 9600, 0);
-    uart.receive(b'Z');
-    uart.receive(b'Y'); // triggers RX overrun
+    // ⚠️ **v0.24**：RX FIFO 有 16 字节深 ⇒ 要触发 overrun 必须**先填满**。
+    for i in 0..uart::RX_FIFO_CAPACITY {
+        uart.receive(i as u8);
+    }
+    uart.receive(0xFF); // triggers RX overrun
     let s = uart.read(0x5, WriteSize::Byte).unwrap();
     assert_eq!(s & u32::from(uart::lsr_bits::OE), 0x04);
 
@@ -1983,4 +1986,106 @@ fn the_clint_and_plic_round_trip_through_the_registry() {
         exported,
         "往返必须逐字段相等——CLINT 与 PLIC 的状态一个都不能少"
     );
+}
+
+// ---------------------------------------------------------------------------
+// v0.24 · 接收 FIFO 加深（16 字节）后的会话快照
+// ---------------------------------------------------------------------------
+
+/// ⚠️ **接收 FIFO 是整个队列**：UART 的会话状态必须带**全部**待读字节
+/// （不只是队头那一个）⇒ 否则快照往返会**丢字节** ⇒ 还原出来的会话与
+/// 采快照的那次**不是同一个**。
+#[test]
+fn the_uart_session_state_carries_the_whole_rx_queue() {
+    let mut u = Uart16550::new("UART0", 0x1000_0000, 115_200, 4);
+    for byte in [0x41u8, 0x42, 0x43] {
+        u.receive(byte);
+    }
+
+    let exported = u
+        .session_state()
+        .expect("the UART participates in the session state");
+    let PeripheralSessionState::Uart(s) = &exported else {
+        panic!("a UART must export a UART state");
+    };
+    assert_eq!(
+        s.rx_queue,
+        vec![0x41, 0x42, 0x43],
+        "整个接收队列必须带（不只是队头）"
+    );
+    assert_eq!(s.rx, Some(0x41), "rx 是**队头**那一个字节");
+    assert_eq!(
+        s.status & u32::from(uart::lsr_bits::RX_VALID),
+        u32::from(uart::lsr_bits::RX_VALID),
+        "FIFO 非空 ⇒ LSR 的 RX_VALID 必须置位"
+    );
+}
+
+/// ⚠️ **往返一次后队列逐字节相同** —— 还原出来的 UART 读出来的必须是
+/// **同样顺序**的同样三个字节。
+#[test]
+fn the_uart_session_state_round_trips_the_whole_rx_queue() {
+    let mut u = Uart16550::new("UART0", 0x1000_0000, 115_200, 4);
+    for byte in [0x41u8, 0x42, 0x43] {
+        u.receive(byte);
+    }
+    let exported = u
+        .session_state()
+        .expect("the UART participates in the session state");
+
+    let mut fresh = Uart16550::new("UART0", 0x1000_0000, 115_200, 4);
+    fresh
+        .restore_session_state(&exported)
+        .expect("the UART must accept its own state");
+    assert_eq!(
+        fresh.session_state(),
+        Some(exported.clone()),
+        "往返必须逐字段相等——接收队列一个字节都不能少"
+    );
+
+    for byte in [0x41u8, 0x42, 0x43] {
+        assert_eq!(
+            fresh.read_clear(0x0, WriteSize::Byte).unwrap(),
+            u32::from(byte),
+            "还原之后的 UART 读出来的必须是**同样顺序**的同样字节"
+        );
+    }
+}
+
+/// ⚠️ **队列比器件的 FIFO 深** ⇒ 必须被拒（还原时必然要**截断** ⇒
+/// 丢字节 ⇒ 那不是「还原」，是「还原成另一个东西」）。
+#[test]
+fn a_uart_state_with_a_longer_queue_than_the_fifo_is_rejected() {
+    let u = Uart16550::new("UART0", 0x1000, 9600, 4);
+    let bad = PeripheralSessionState::Uart(UartStateDto {
+        id: "UART0".to_string(),
+        rx: Some(0x00),
+        rx_queue: vec![0x00; uart::RX_FIFO_CAPACITY + 1],
+        status: u32::from(uart::lsr_bits::RX_VALID),
+        ..UartStateDto::default()
+    });
+    let err = u
+        .validate_session_state(&bad)
+        .expect_err("比 FIFO 深的队列必须被拒");
+    assert_eq!(err.family, ErrorFamily::Peripheral);
+    assert_eq!(err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE);
+}
+
+/// ⚠️ **`rx` 与 `rx_queue` 的队头不一致** ⇒ 器件侧也必须拒（载荷自相
+/// 矛盾：它同时说「队头是 0x41」和「队头是 0x42」）。
+#[test]
+fn a_uart_state_whose_head_disagrees_with_its_queue_is_rejected() {
+    let u = Uart16550::new("UART0", 0x1000, 9600, 4);
+    let bad = PeripheralSessionState::Uart(UartStateDto {
+        id: "UART0".to_string(),
+        rx: Some(0x41),
+        rx_queue: vec![0x42, 0x43],
+        status: u32::from(uart::lsr_bits::RX_VALID),
+        ..UartStateDto::default()
+    });
+    let err = u
+        .validate_session_state(&bad)
+        .expect_err("队头与队列不一致的状态必须被拒");
+    assert_eq!(err.family, ErrorFamily::Peripheral);
+    assert_eq!(err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE);
 }

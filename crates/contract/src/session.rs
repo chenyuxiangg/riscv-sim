@@ -221,7 +221,24 @@ pub struct UartStateDto {
     /// Byte waiting to be transmitted.
     pub tx: Option<u8>,
     /// Byte waiting to be read by the guest.
+    ///
+    /// ⚠️ **它就是「队头」那一个字节** —— 接收 FIFO 的**全部**内容在
+    /// [`Self::rx_queue`] 里 ⇒ 这个字段是**队头**的冗余表示（兼容既有
+    /// 语义），不是「FIFO 里只有一个字节」。
+    ///
+    /// ⚠️ **不变式**：`rx` **必须**等于 `rx_queue` 的**第一个**字节
+    /// （队列为空时 `rx` 必须是 `None`）⇒ [`SessionSnapshotDto::validate`]
+    /// 会拒掉不自洽的载荷。
     pub rx: Option<u8>,
+    /// 接收 FIFO 里的**全部**待读字节（**队头在前**，按到达顺序）。
+    ///
+    /// ⚠️ **为什么必须有它**：接收侧是真正的 **FIFO**（不止一个字节）⇒
+    /// 只带一个字节的快照在往返之后会**丢字节** ⇒ 还原出来的会话与采
+    /// 快照的那次**不是同一个**（guest 读到的输入流缺了一截）。
+    ///
+    /// ⚠️ **长度有界**：M-15 的接收 FIFO 是 [`crate::session`] 里
+    /// M-15 侧定的深度（16 字节）⇒ 载荷的增量有界。
+    pub rx_queue: Vec<u8>,
     /// Status register.
     ///
     /// ⚠️ **它就是 `LSR` 的值**（ns16550 语义，`0x00..=0x7F`）—— 不是
@@ -284,6 +301,7 @@ impl Default for UartStateDto {
             id: String::new(),
             tx: None,
             rx: None,
+            rx_queue: Vec::new(),
             status: 0,
             irq_line: 0,
             now_ps: 0,
@@ -678,6 +696,10 @@ impl SessionSnapshotDto {
     /// 7. `m15_periph` — no duplicate id, **across kinds** as well
     /// 8. `m15_periph.gpios[*].irq_lines` — exactly [`GPIO_PIN_COUNT`]
     ///    entries
+    ///
+    /// ⚠️ **v0.24 另加一条**（不是编号里的一条 ⇒ 它是**形状**检查，不是
+    /// 规格 §5 表里那 14 条之一）：`m15_periph.uarts[*].rx` 必须**等于**
+    /// `rx_queue` 的**队头**（两者必须一致）。
     /// 9. `m16_intc.raised` — ascending, no duplicates
     /// 10. the inner engine snapshot validates on its own terms
     /// 11. `m16_intc.pending` — one entry per line, in canonical
@@ -922,6 +944,25 @@ impl SessionSnapshotDto {
             }
         }
 
+        // 8b — every UART's `rx` must be the **head** of its `rx_queue`.
+        //
+        // ⚠️ **不变式**：`rx` 是队头的**冗余**表示 ⇒ 两处必须一致 ⇒
+        // 不一致的载荷是**自相矛盾**的（它同时说「队头是 0x41」和「队头
+        // 是 0x42」）⇒ 还原路径不知道该信哪一个 ⇒ 必须被拒。
+        //
+        // ⚠️ 这是**形状**规则（契约层查得了）；「队列不能比器件的 FIFO
+        // 深」是**器件能力**规则（契约层不知道这个 UART 有多深 ⇒ 归
+        // M-15 的 `validate_session_state`）。
+        for u in &self.m15_periph.uarts {
+            let head = u.rx_queue.first().copied();
+            if u.rx != head {
+                return Err(self.malformed(&format!(
+                    "UART '{}' 的 rx 是 {:?}，但 rx_queue 的队头是 {:?}——两者必须一致",
+                    u.id, u.rx, head
+                )));
+            }
+        }
+
         // 9 — the raised lines must be ascending and deduplicated.
         let mut prev: Option<u16> = None;
         for line in &self.m16_intc.raised {
@@ -1128,6 +1169,7 @@ mod tests {
                     id: "UART0".to_string(),
                     tx: Some(0x41),
                     rx: None,
+                    rx_queue: Vec::new(),
                     status: 0,
                     irq_line: 1,
                     now_ps: 500,
@@ -1253,10 +1295,10 @@ mod tests {
         assert_eq!(
             uk,
             vec![
-                "dll", "dlm", "fcr", "id", "ier", "irq_line", "lcr", "mcr", "now_ps", "rx", "scr",
-                "status", "tx",
+                "dll", "dlm", "fcr", "id", "ier", "irq_line", "lcr", "mcr", "now_ps", "rx",
+                "rx_queue", "scr", "status", "tx",
             ],
-            "UART 状态的键集必须精确固定——v2 多了 ns16550 的七个寄存器"
+            "UART 状态的键集必须精确固定——v2 多了 ns16550 的七个寄存器与整个接收队列"
         );
 
         // ⚠️ **GPIO 与定时器也要钉**——它们各自带**时间字段**
@@ -2504,5 +2546,41 @@ mod tests {
         sample_with_clint_and_plic()
             .validate()
             .expect("合法的载荷必须通过校验");
+    }
+
+    // ------------------------------------------------------------------
+    // v0.24：UART 的接收队列（`rx` 与 `rx_queue` 必须一致）
+    // ------------------------------------------------------------------
+
+    /// ⚠️ **`rx` 必须是 `rx_queue` 的队头** —— 两者不一致的载荷是
+    /// **自相矛盾**的（它同时说「队头是 0x41」和「队头是 0x42」）⇒
+    /// 还原路径不知道该信哪一个 ⇒ 必须被拒。
+    #[test]
+    fn a_uart_state_whose_head_disagrees_with_its_queue_is_rejected() {
+        let mut s = sample();
+        s.m15_periph.uarts[0].rx = Some(0x41);
+        s.m15_periph.uarts[0].rx_queue = vec![0x42, 0x43];
+        let err = s.validate().expect_err("队头与队列不一致必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// ⚠️ **队列为空时 `rx` 必须是 `None`** —— 反过来也一样。
+    #[test]
+    fn a_uart_state_with_an_empty_queue_must_have_no_head() {
+        let mut s = sample();
+        s.m15_periph.uarts[0].rx = Some(0x41);
+        s.m15_periph.uarts[0].rx_queue = Vec::new();
+        let err = s.validate().expect_err("空队列不许带队头");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// ⚠️ **反面**：队头与队列**一致**的载荷必须放行（队列非空 ⇒ `rx` 是
+    /// 它的第一个字节）。
+    #[test]
+    fn a_uart_state_whose_head_agrees_with_its_queue_is_accepted() {
+        let mut s = sample();
+        s.m15_periph.uarts[0].rx = Some(0x41);
+        s.m15_periph.uarts[0].rx_queue = vec![0x41, 0x42, 0x43];
+        s.validate().expect("队头与队列一致的载荷必须通过校验");
     }
 }
