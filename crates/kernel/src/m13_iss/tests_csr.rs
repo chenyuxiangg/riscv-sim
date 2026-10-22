@@ -690,10 +690,12 @@ fn a_user_write_to_mepc_is_masked_by_ialign() {
 /// trap taken on a **2-byte-aligned (compressed)** instruction can be
 /// returned to.
 ///
-/// ⚠️ **What this pins, precisely**: the trap path's mask is
-/// **IALIGN = 16** (`~1`), **not** IALIGN = 32 (`~3`).  A `~3` mask
-/// would turn `0x1002` into `0x1000` — i.e. land the handler's return
-/// in the **middle** of the compressed instruction.
+/// ⚠️ **What this pins, precisely**: the trap path writes the PC
+/// **verbatim** — `0x1002` comes back as `0x1002`, i.e. **no mask at
+/// all** on this path.  (The platform's IALIGN mask is **16** (`~1`),
+/// **not** 32 (`~3`): a `~3` mask would turn `0x1002` into `0x1000` —
+/// i.e. land the handler's return in the **middle** of the compressed
+/// instruction.  But that mask is **not** applied here.)
 ///
 /// ⚠️ **What it does *not* pin** (and cannot, at a legal address): the
 /// difference between the trap entry writing the PC *verbatim* and

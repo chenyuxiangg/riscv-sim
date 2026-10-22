@@ -133,9 +133,11 @@ impl TrapCause {
     /// * `OutOfRange` — RISC-V splits "the access was not allowed"
     ///   into three access faults (instruction / load / store), and the
     ///   variant does not say which one it means. It has **no
-    ///   producer** today (the bus reports an unmapped access as an
-    ///   `E_BUS` error, not as a trap), so its number is a
-    ///   **placeholder** and is unobservable;
+    ///   producer** today — the **unmapped** data access is now a
+    ///   trap (`LoadAccessFault` = 5 / `StoreAccessFault` = 7, v0.22
+    ///   批), and the **instruction** fetch side is still a plain
+    ///   error (台账 **D-103**) — so its number is a **placeholder**
+    ///   and is unobservable;
     /// * `IntegerDivideByZero` — RISC-V defines a division by zero as
     ///   an **architectural result**, not an exception, so there is no
     ///   code for it at all. Also a **dead** variant (ledger
@@ -1131,9 +1133,10 @@ pub fn execute_one<M: MemoryAccess>(
             //
             // ⚠️ **`mepc` 的对齐掩码只发生在这里**（台账 D-93 / STAGE-7 裁决 I）。
             //
-            // **写侧不掩码**：`csrr mepc` 必须读回写入的**精确**值（handler
-            // 要能看到真实的出错地址），陷入门也写**精确的 PC**（见
-            // [`csr::csr_write_raw`]）。
+            // **用户写会掩码**：`csrw mepc` 走 `apply_warl`（`~1`）—— 参考侧
+            // 实测：写 `0x1003` 读回 **`0x1002`**；陷入门则走
+            // [`csr::csr_write_raw`] 写**精确的 PC**（不丢 bit 1，handler
+            // 要能回到**出错的指令**）。
             //
             // **掩码按 IALIGN**：特权规范说 `mret` 取 PC 时按 IALIGN 清低位。
             // 本平台的 `misa` = `0x40001104` **声明支持 C 扩展** ⇒ IALIGN = 16

@@ -1538,9 +1538,12 @@ impl KernelHost {
     /// ⚠️ **两态可区分**（LLD 11-4）：没有 DWARF ⇒ `file = ""` / `line = 0`；
     /// 有 DWARF 但地址没命中 ⇒ `file = ""` / `line = u32::MAX`。
     ///
-    /// ⚠️ **Wave 1 的诚实口径**：M-11 的 `DwarfLines::resolve` **恒**返回
-    /// 降级态（真正的行表解析是 Wave 2）⇒ 宿主**不自己编造行号**，只把
-    /// M-11 的判定原样映射成契约形状（映射点见 [`source_location_event`]）。
+    /// ⚠️ **诚实口径**：宿主**不自己编造行号**，只把 M-11 的判定原样映射
+    /// 成契约形状（映射点见 [`source_location_event`]`）。
+    /// ⚠️ **v0.22 批（Wave 2a）**：M-11 的 `dwarf.rs` 已换成**真解析器**
+    /// （`.debug_line` 的 v2/v3/v4/v5 行号程序）⇒ 这里**第一次**能拿到
+    /// 真 `file` + 真 `line`；「查过行表、没命中」（`Missed`，`line =
+    /// u32::MAX`）与「没查」（`NoDwarf`，`line = 0`）**仍然分得开**。
     fn on_resolve_line(&mut self, addr: u32) -> Vec<EventPayload> {
         // ⚠️ **走 M-11 的端口**（`SymbolService::resolve_line`）—— 端口
         // 自己分得清「查过行表、没命中」（`Missed`）与「没查」（`NoDwarf`），

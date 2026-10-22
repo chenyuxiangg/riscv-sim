@@ -40,6 +40,7 @@ const m01 = await importFront("views/m01_workbench.js");
 const m02 = await importFront("views/m02_viewcomponents.js");
 const m03 = await importFront("views/m03_viewstore.js");
 const m05 = await importFront("services/m05_commandrouter.js");
+const m10 = await importFront("services/m10_registermemory.js");
 const { Command, Event: EventPayload, eventMessage } = await importFront("lib/message.js");
 const { createMockKernel } = await importFront("dev/mock-kernel.js");
 const sourceView = await importFront("views/components/source-view.js");
@@ -221,6 +222,21 @@ describe("源码路径匹配（裁决 F）", () => {
         assert.equal(sourceView.normalizePath("../../src/main.c"), "src/main.c");
         assert.equal(sourceView.normalizePath("/abs/path/x.c"), "/abs/path/x.c");
     });
+
+    // ⚠️ **中段**的 `..`（V-B 检视 VB-6）：前导的 `../` 尾部规则自己就能
+    // 吸收（短的那串本来就是长的那串的后缀）⇒ 那三条**匹配级**用例
+    // **碰不到**正规化 ⇒ 去掉正规化它们照样绿。真正只有正规化能救的是
+    // **中段**的 `..`：DWARF 给 `x/a/../b.c`、本地树给 `x/b.c` ⇒
+    // 不正规化就**匹配不上**。
+    test("尾部逐段匹配：中段的 .. 必须被正规化消解才匹配得上", () => {
+        const tree = { "x/b.c": "a" };
+        const match = sourceView.matchSourceFile(tree, "x/a/../b.c");
+        assert.deepEqual(
+            match,
+            { kind: "unique", key: "x/b.c" },
+            "中段的 `..` 消解后应当匹配上",
+        );
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -300,11 +316,22 @@ describe("源码视图（A-15 / A-16 / A-17 / A-18 / A-19）", () => {
         loadFiles(body, [fakeFile("main.c", "l1\nl2\nl3\nl4\n")]);
         await new Promise((r) => setTimeout(r, 0));
 
-        // PC 只能来自**既有**的状态源（M-10 推进的 `sim.pc`）。
-        m03.setState("source", (prev) => ({
-            ...prev,
-            sim: { ...(prev.sim ?? {}), pc: 0x1000 },
-        }));
+        // ⚠️ **PC 必须走生产接线**（M-10 → `viewIds` → source 视图）。
+        // 手工往状态里塞 `sim.pc` 断言的是「测试自己造出来的状态」，
+        // 不是生产状态 —— V-B 检视 **VB-1**：生产路径上 source 视图
+        // **永远**拿不到 PC（`viewIds` 默认值不含 `source`）⇒ 按钮恒问
+        // 地址 0，而门禁当时 243/243 **全绿**。
+        //
+        // ⚠️ 这里用 `app.REGISTER_MEMORY_VIEW_IDS`（**生产那一份**）：
+        // 常量里少了 `"source"` ⇒ 这条用例**跟着**变红 ⇒ 这才是判别力。
+        const regmem = await m10.mountRegisterMemory({
+            commandRouter: router,
+            transport,
+            viewStore: m03,
+            viewIds: app.REGISTER_MEMORY_VIEW_IDS,
+        });
+        transport.emit(EventPayload.simStateDelta([], 0x1000, 0));
+        regmem.flushRender();
         m01.route("#/source");
 
         const button = sourceBody().querySelector('[data-action="resolve-line"]');
@@ -312,7 +339,7 @@ describe("源码视图（A-15 / A-16 / A-17 / A-18 / A-19）", () => {
         assert.equal(
             button.getAttribute("data-addr"),
             String(0x1000),
-            "按钮必须带上当前 PC",
+            "按钮必须带上当前 PC（生产接线：M-10 → viewIds → source）",
         );
 
         /** @type {object[]} */
@@ -330,6 +357,25 @@ describe("源码视图（A-15 / A-16 / A-17 / A-18 / A-19）", () => {
         assert.equal(signals[0].viewId, "source");
         assert.equal(signals[0].params.addr, "4096", "参数是当前 PC");
 
+        // ⚠️ **必须断言命令真的被派发**（V-B 检视 **VB-3**）：只断言信号
+        // 的话，把 app.js 的 `case "resolve-line"` 整段删掉（视图发的信号
+        // 没人接、点按钮什么都不会发生）门禁照样 243/243 全绿。
+        //
+        // ⚠️ 线上是**信封**：`{ payload: { Command: { ResolveLine: {...} } } }`。
+        const resolveCmds = transport.sent.filter(
+            (m) => m.message?.payload?.Command?.ResolveLine !== undefined,
+        );
+        assert.equal(
+            resolveCmds.length,
+            1,
+            "必须**真的**派发一条 ResolveLine 命令到内核",
+        );
+        assert.equal(
+            Number(resolveCmds[0].message.payload.Command.ResolveLine.addr),
+            0x1000,
+            "派发的命令必须带上当前 PC",
+        );
+
         // 内核回了 `SourceLocation` ⇒ 落到视图状态 ⇒ 视图高亮那一行。
         transport.emit(
             EventPayload.sourceLocation(0x1000, "main.c", 3),
@@ -339,9 +385,32 @@ describe("源码视图（A-15 / A-16 / A-17 / A-18 / A-19）", () => {
         assert.equal(state.location?.line, 3);
 
         m01.route("#/source");
-        const html = sourceBody().innerHTML;
+        const body2 = sourceBody();
+        const html = body2.innerHTML;
         assert.match(html, /is-current/, "当前行必须高亮");
         assert.match(html, /data-src-line="3"/, "高亮的必须是第 3 行");
+        // ⚠️ **必须钉住「高亮的是哪一行」**（V-B 检视 **VB-4**）：只断言
+        // 「有 `is-current`」+「有 `data-src-line="3"`」的话，把高亮标到
+        // **相邻的错误行**（`no === wanted + 1`）门禁照样全绿 —— 那是
+        // **两个出自同一个变量**的断言，只验了自洽。
+        const marked = body2.querySelector(".src-line.is-current");
+        assert.ok(marked, "必须有一行被标成当前行");
+        assert.equal(
+            marked.getAttribute("data-src-line"),
+            "3",
+            "被标成当前行的**行号**必须正好是 3",
+        );
+        assert.match(
+            marked.textContent ?? "",
+            /l3/,
+            "被标成当前行的**内容**必须是第 3 行的内容",
+        );
+        const first = body2.querySelector(".src-line");
+        assert.equal(
+            first?.getAttribute("data-src-line"),
+            "1",
+            "第一行的行号必须是 1（不得整体偏移）",
+        );
     });
 
     test("多候选 ⇒ 视图列出候选，**不**静默挑一个", async () => {
@@ -371,23 +440,74 @@ describe("源码视图（A-15 / A-16 / A-17 / A-18 / A-19）", () => {
     });
 
     test("源码**不进内核**：装载工程后源码树仍在（A-20）", async () => {
-        await setup();
+        const { debug } = await setup();
         const body = sourceBody();
         loadFiles(body, [fakeFile("main.c", "x\n")]);
         await new Promise((r) => setTimeout(r, 0));
         assert.equal(Object.keys(m03.getState("source")?.source?.tree ?? {}).length, 1);
 
-        // 装载新工程（内核侧的事）⇒ 源码树**必须还在**。
-        const debug = { reset() {} };
+        // ⚠️ **必须用真的 `wireDebug(router).reset()`**（V-B 检视
+        // **VB-2**）：原用例传的是 `{ reset() {} }` **空壳 stub** ⇒ 生产里
+        // 真正会动源码树的那段代码**根本没被执行** ⇒ 把生产点改成
+        // 「装载工程时把 `source.tree` 一起清空」，门禁 243/243 **照样
+        // 全绿** ⇒ 这条断言是**恒绿**的。
+        //
+        // 这里先塞一个行号进去（模拟「上一个程序的行号」），这样
+        // 「清行号、留源码树」两半都能被钉住。
+        m03.setState("source", (prev) => ({
+            ...prev,
+            source: { ...(prev.source ?? {}), location: { addr: 0x1000, file: "main.c", line: 1 } },
+        }));
+
+        // 装载新工程（内核侧的事）⇒ 源码树**必须还在**，行号**必须清掉**。
         await app.loadProjectIntoKernel(
-            { registerMemory: { loadProject: async () => {} }, waveform: { reset() {}, subscribeProbeStream: async () => ({}) }, debug },
+            {
+                registerMemory: { loadProject: async () => {} },
+                waveform: { reset() {}, subscribeProbeStream: async () => ({}) },
+                debug,
+            },
             {},
         );
+        const after = m03.getState("source")?.source ?? {};
         assert.equal(
-            Object.keys(m03.getState("source")?.source?.tree ?? {}).length,
+            Object.keys(after.tree ?? {}).length,
             1,
             "装载工程**不得**把用户装的源码树清掉",
         );
+        assert.equal(
+            after.location,
+            null,
+            "装载工程**必须**清掉上一个程序的行号（新工程 = 新程序）",
+        );
+    });
+
+    // ⚠️ **内核的两种「没有答案」必须分开**（V-B 检视 **VB-5**）：
+    //   - `line === 0`          ⇒ 压根没有 DWARF
+    //   - `line === 0xFFFFFFFF` ⇒ 有 DWARF 但地址没命中行表
+    // 之前这两种与「**还没问**」渲染成**同一句**「尚未解析」⇒ 用户点完
+    // 按钮看到没变化 ⇒ 以为没点生效 ⇒ 无限点下去。
+    test("内核的两种「没有答案」必须与「尚未解析」分开显示（VB-5）", async () => {
+        const { transport } = await setup();
+        const body = sourceBody();
+        loadFiles(body, [fakeFile("main.c", "l1\nl2\n")]);
+        await new Promise((r) => setTimeout(r, 0));
+
+        // 压根没有 DWARF（内核的形状：file = ""，line = 0）
+        transport.emit(EventPayload.sourceLocation(0x1000, "", 0));
+        m01.route("#/source");
+        let html = sourceBody().innerHTML;
+        assert.match(html, /没有 DWARF 行表/, "没有 DWARF 必须说清楚");
+        assert.doesNotMatch(html, /尚未解析/, "不能与「尚未解析」混成一句");
+        assert.doesNotMatch(html, /4294967295/, "不得显示无意义的行号");
+        assert.doesNotMatch(html, /is-current/, "没有答案时不得高亮任何行");
+
+        // 有 DWARF 但地址没命中（内核的形状：file = ""，line = 0xFFFFFFFF）
+        transport.emit(EventPayload.sourceLocation(0x1000, "", 0xffffffff));
+        m01.route("#/source");
+        html = sourceBody().innerHTML;
+        assert.match(html, /不在 DWARF 行表内/, "地址没命中必须说清楚");
+        assert.doesNotMatch(html, /4294967295/, "不得显示无意义的行号");
+        assert.doesNotMatch(html, /is-current/, "没有答案时不得高亮任何行");
     });
 
     test("视图注册：#\/source 路由存在且带 view.source 能力位", async () => {

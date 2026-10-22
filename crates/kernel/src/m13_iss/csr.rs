@@ -40,9 +40,17 @@
 //! **0**（台账 **D-98**）—— 掩码常量住在契约层
 //! （[`MSTATUS_WARL_MASK`]），M-13 只**引用**它（「一个约束一个落点」）。
 //!
-//! ⚠️ **`mepc` 不在 WARL 这一类里**：`csrr mepc` 必须读回**写入的精确
-//! 值**（handler 要能读到真实的出错地址）⇒ **写侧不掩码**。
-//! `mret` 取 PC 时才按 **IALIGN** 掩码（见 [`mepc_aligned`]）。
+//! ⚠️ **`mepc` 的三条路径各管各的**（参考侧实测钉死 · v0.22 批）：
+//! ① **用户写** `csrw mepc` ⇒ **写侧按 IALIGN 掩码**（`~1`；IALIGN = 16
+//!    ⇒ 只清最低 1 位）—— 参考侧实测：写 `0x1003` 读回 **`0x1002`**；
+//! ② **陷入门**写 `mepc` ⇒ 写**精确的 PC**、**不丢 bit 1**（走
+//!    [`csr_write_raw`]）—— 陷入必须能回到**出错的指令**（压缩指令可能
+//!    落在 2 字节对齐的地址上）；
+//! ③ **`mret` 取 PC** ⇒ 再掩一次 `~1`（[`mepc_aligned`]）⇒ **幂等**。
+//!
+//! ⚠️ **①② 在合法指令地址上不可观测**（每条合法地址都是偶数，`~1` 的
+//! 掩码动不了它）⇒ 参考侧在陷入门那条路径上究竟写精确 PC 还是写被掩的
+//! PC **无法证明**；平台用原始写只是**把意图显式写下来**。
 
 use riscv_sim_contract::csr::{
     CSR_MCAUSE, CSR_MEPC, CSR_MISA, CSR_MISA_VALUE, CSR_MSTATUS, CSR_MTVAL, CSR_MTVEC,
@@ -96,9 +104,11 @@ pub(crate) fn csr_read(state: &SimState, csr: u16) -> u32 {
 /// * `mstatus` ⇒ the **reserved** bits are dropped（台账 **D-98**）—— guest
 ///   写 `0xFFFFFFFF` 读回的**保留位是 0**。
 ///
-/// ⚠️ **`mepc` 不在这里**：写侧**不掩码** ⇒ `csrr mepc` 读回**写入的精确
-/// 值**（handler 要能读到真实的出错地址）⇒ 掩码只发生在 `mret` 取 PC
-/// 的那一步（[`mepc_aligned`]）。
+/// ⚠️ **`mepc` 也在这一类里**：**用户写**按 **IALIGN** 掩码（`~1`）——
+/// 参考侧实测：写 `0x1003` 读回 **`0x1002`**。
+/// ⚠️ **陷入门不走这条路**（它走 [`csr_write_raw`]，写**精确的 PC**、
+/// 不丢 bit 1）—— 陷入必须能回到**出错的指令**；
+/// `mret` 取 PC 走 [`mepc_aligned`]。
 ///
 /// ⚠️ **平台的内部写走 [`csr_write_raw`]** —— 陷阱入口要把**精确的
 /// PC** 写进 `mepc`（压缩指令可能是 **2 字节对齐**的）⇒ 这一步显式地
@@ -158,15 +168,13 @@ fn apply_warl(csr: u16, value: u32) -> u32 {
 /// `4k+2`，第一次陷入后 handler `mret` ⇒ 参考侧**落回 `4k+2`**
 /// ⇒ 掩码是 `~1`。
 ///
-/// # The call site is **not** wired here
+/// # The call site **is** wired
 ///
-/// The `mret` **arm** lives in `m13_iss/executor.rs` — a file this batch
-/// does **not** own (the executor is being changed in parallel).
+/// The `mret` **arm** lives in `m13_iss/executor.rs` and calls
+/// [`mepc_aligned`]（**不再**裸读 `CSR_MEPC`）—— v0.22 批由统筹方接上。
 ///
-/// ⇒ **调用点需要统筹方在 `executor.rs` 的 `mret` 臂接上**：把那一处
-/// `csr::csr_read(state, CSR_MEPC)` 换成 `csr::mepc_aligned(state)`。
-/// 换完之后，**端到端**的判别式（`mepc` 写奇数地址 ⇒ `mret` 之后 PC 的
-/// 最低 1 位为 0）才成立 —— 本批只提供这条规则的落点与单测。
+/// ⇒ 端到端判别式成立：`mepc` 带 bit 1 ⇒ `mret` 之后 PC 的最低 1 位
+/// 被清掉（IALIGN = 16 ⇒ 掩 `~1`，**不是** `~3`）。
 pub fn mepc_aligned(state: &SimState) -> u32 {
     csr_read(state, CSR_MEPC) & MEPC_ALIGN_MASK
 }
@@ -316,11 +324,13 @@ mod tests {
         );
     }
 
-    /// **`csrr mepc` 读回写入的精确值**（含 bit 1）。
+    /// **`csrr mepc` 读回的是被 IALIGN 掩过的**值**。
     ///
-    /// ⚠️ **写侧不掩码**：`mepc` 的掩码只发生在 `mret` 取 PC 的那一步
-    /// （IALIGN = 16 ⇒ 只清最低 1 位）⇒ handler 必须能读到**精确的**
-    /// 出错地址（压缩指令可能在 2 字节对齐的地址上）。
+    /// ⚠️ **用户写会掩码**（`~1`；IALIGN = 16 ⇒ 只清最低 1 位）—— 参考侧
+    /// 实测：写 `0x1003` 读回 **`0x1002`**。
+    /// ⚠️ **陷入门不掩码**：它走 `csr_write_raw` 写**精确的 PC**（压缩
+    /// 指令可能落在 2 字节对齐的地址上）⇒ 那条路径由
+    /// `the_trap_entry_writes_the_exact_faulting_pc_into_mepc` 单独钉住。
     ///
     /// 判别式用**架构字面量**（`0x1232`），不是从掩码推出来的值。
     #[test]

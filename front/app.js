@@ -31,6 +31,23 @@ const KERNEL_WORKER_URL = "./kernel-worker.js";
 /** How many instructions a disassembly request asks for by default. */
 const DEFAULT_DISASM_COUNT = 16;
 
+/**
+ * The views that receive the **register / memory snapshot** pushed by M-10.
+ *
+ * ⚠️ **「source」必须在里面**（STAGE-7 验收 A-16）：源码视图的「解析当前
+ * PC 的源码行」按钮从 `state.sim.pc` 取地址 ⇒ 若这个列表里没有
+ * `source`，它**永远拿不到 PC** ⇒ 按钮恒问地址 **0**。
+ *
+ * ⚠️ 这条是 **V-B 检视（VB-1）查出的生产路径断裂**：M-10 的
+ * `viewIds` 默认值是 `["debug", "regmem"]`，而 `app.js` 调
+ * `mountRegisterMemory` 时**没传** ⇒ 走默认值 ⇒ `source` 收不到
+ * `sim.pc`。**用例当时是绿的**，因为它**手工**往 source 视图状态里塞了
+ * `sim.pc` ⇒ 断言的是一个**测试自己造出来的**状态，不是生产状态。
+ *
+ * ⇒ 这里把列表**显式**写出来（唯一真相），并让生产调用**用它**。
+ */
+export const REGISTER_MEMORY_VIEW_IDS = ["debug", "regmem", "source"];
+
 const status = document.getElementById("status");
 
 /**
@@ -608,6 +625,9 @@ async function bootstrap() {
         commandRouter,
         transport: transportApi,
         viewStore,
+        // ⚠️ **必须显式传**：M-10 的默认 `viewIds` 不含 `source`
+        // ⇒ 源码视图拿不到 `sim.pc`（V-B 检视 VB-1）。
+        viewIds: REGISTER_MEMORY_VIEW_IDS,
     });
     // 探针接线（D-46）必须在**任何**装载之前挂好：
     // `startSession` 会装载工程并订阅探针流，订阅的响应（通道列表）
