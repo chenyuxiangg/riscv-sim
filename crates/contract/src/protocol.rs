@@ -742,7 +742,10 @@ mod tests {
             file: String::new(),
             line: 0,
         };
-        assert_eq!(serde_json::to_value(&degraded).expect("json")["SourceLocation"]["line"], 0);
+        assert_eq!(
+            serde_json::to_value(&degraded).expect("json")["SourceLocation"]["line"],
+            0
+        );
 
         let missed = EventPayload::SourceLocation {
             addr: 0x1000,
