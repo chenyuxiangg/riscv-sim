@@ -27,6 +27,18 @@ pub mod render;
 pub mod symbols;
 pub mod trace;
 
+// 本 lane（C1）拥有的三个子组件的公开出口。
+//
+// ⚠️ `dwarf` / `trace` 的 `pub use` 由统筹方统一补（C2 拥有那两个文件），
+// 这里**不**加，免得两边同时改同一段。
+pub use disasm::{Disassembler, MAX_DISASM_COUNT};
+pub use render::{render_entry, render_mnemonic};
+pub use symbols::SymbolTable;
+
+// C2 的两个子组件的公开出口（统筹方统一补——C2 拥有那两个文件）。
+pub use dwarf::{DwarfLines, DwarfStatus};
+pub use trace::{ExportChunk, TraceBuffer, TraceEntry, TraceKind, TRACE_CAP};
+
 /// Result of an address → source-line lookup.
 ///
 /// The **two "no answer" states are distinct on purpose** (LLD 11-4):
