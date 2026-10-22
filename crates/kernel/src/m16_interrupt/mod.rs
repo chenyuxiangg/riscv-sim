@@ -36,16 +36,24 @@
 //! 接缝因此落在 **M-17 的执行器**里，M-12 的 `Engine` **零改动**。
 //!
 //! 本模块只认**契约层**的词汇（[`riscv_sim_contract::csr`] 的 CSR 编号 /
-//! `mie` 位映射 / `IRQ_BASE`）与**契约层**的会话载荷形状
+//! `mie` 位映射 / **架构 cause 码映射**）与**契约层**的会话载荷形状
 //! （[`M16IntcDto`]）——一个约束一个落点。
 //!
-//! # 线号空间与 `mie` 位号空间是**两个**空间
+//! # 线号空间、`mie` 位号空间、cause 码空间是**三个**空间
 //!
 //! 平台的**中断线**是 `1`（UART rx-ready）/ `2`（UART tx-empty）/
-//! `3`（timer-compare），而 `mie` 用的是 RISC-V 的**标准位号**
-//! `11`（`MEIE`）/ `7`（`MTIE`）。两者的映射**只有一处**
-//! （[`riscv_sim_contract::csr::mie_bit_for_line`]），本模块的使能刷新
-//! 从它取。
+//! `3`（timer-compare），`mie` 用的是 RISC-V 的**标准位号**
+//! `11`（`MEIE`）/ `7`（`MTIE`），而交付给 guest 的 **`mcause`** 用的是
+//! **架构 cause 码** `7`（定时器）/ `11`（外部）。
+//!
+//! * 线 → `mie` 位：映射**只有一处**
+//!   （[`riscv_sim_contract::csr::std_irq_bit_for_line`]），本模块的使能
+//!   刷新从它取；
+//! * 线 → 架构 cause 码：映射**只有一处**
+//!   （[`riscv_sim_contract::csr::arch_cause_for_line`]），**交付**从它取。
+//!
+//! ⚠️ **三个空间不许合并** —— 报 `mcause` 时用内部线号是**真 bug**
+//! （真实 M 模式 RTOS 的中断分发按架构码写 ⇒ 线号一个都匹配不上）。
 //!
 //! ⚠️ **`mip` 今天的**唯一**消费者还没有实现** —— guest 读 `mip` 恒得 0
 //! （平台是**推**式交付：中断直接陷入，不需要 guest 去轮询）。台账
@@ -53,8 +61,8 @@
 //! 是 P1 的落点。
 
 use riscv_sim_contract::csr::{
-    mie_bit_for_line, IRQ_BASE, IRQ_TIMER_COMPARE, IRQ_UART_RX_READY, IRQ_UART_TX_EMPTY,
-    MSTATUS_MIE_BIT, NO_ACTIVE_IRQ,
+    arch_mcause_for_line, mie_bit_for_line, IRQ_TIMER_COMPARE, IRQ_UART_RX_READY,
+    IRQ_UART_TX_EMPTY, MSTATUS_MIE_BIT, NO_ACTIVE_IRQ,
 };
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::port::InterruptSink;
@@ -86,8 +94,16 @@ pub const MAX_MASKABLE_LINE: u16 = 31;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PendingIntr {
     /// 中断线号。
+    ///
+    /// ⚠️ 这是**平台的内部线号**（`1 / 2 / 3`）—— 它**不**是 guest 看
+    /// 到的 `mcause`。
     pub line: u16,
-    /// `mcause` 的值（中断 = `IRQ_BASE | line`）。
+    /// `mcause` 的值（中断 = `IRQ_BASE | <架构 cause 码>`）。
+    ///
+    /// ⚠️ **架构 cause 码**（定时器 `7` / 外部 `11`）由契约层的
+    /// [`riscv_sim_contract::csr::arch_cause_for_line`] 给出 —— **不是**
+    /// 内部线号。内部线号当 cause 报出去是**真 bug**：guest 的中断
+    /// 分发按架构码写，一个都匹配不上。
     pub cause: u32,
 }
 
@@ -402,10 +418,23 @@ impl InterruptController {
 
         // 6. 登记交付（LLD 评审 16-4：交接结构，M-13 拉取）。
         let line = best.line;
-        let intr = PendingIntr {
-            line,
-            cause: IRQ_BASE | u32::from(line),
+        //
+        // ⚠️ **`mcause` 报的是架构 cause 码，不是内部线号**（v0.23 批）。
+        //
+        // 平台的内部线号是 `1 / 2 / 3`，而 RISC-V 的机器中断 cause 码是
+        // `3`（软件）/ `7`（定时器）/ `11`（外部）⇒ 交付给 guest 的
+        // `mcause` 必须是 `0x8000_0007`（定时器）/ `0x8000_000B`（外部）。
+        //
+        // 报内部线号是**真 bug**：真实 M 模式 RTOS 的中断分发完全按架构
+        // 码写 ⇒ 报线号的话**一个都匹配不上**。
+        //
+        // ⚠️ **没有架构 cause 码的线不交付** —— 交付一条 `mcause` 不是
+        // 架构码的中断，等于把上面那个缺陷换个形式再犯一次。这种线
+        // **保持挂起**（与「未使能不丢」同一条不变式）。
+        let Some(cause) = arch_mcause_for_line(line) else {
+            return Ok(None);
         };
+        let intr = PendingIntr { line, cause };
         self.pending_delivery = Some(intr);
         self.active_irq = line;
         Ok(Some(intr))

@@ -244,8 +244,8 @@ fn the_delivery_writes_the_trap_csr_and_jumps_to_the_vector_table() {
 
     assert_eq!(
         csr(&host, CSR_MCAUSE),
-        riscv_sim_contract::csr::IRQ_BASE | u32::from(LINE_1),
-        "mcause 必须是「中断位 | 线号」"
+        0x8000_000B,
+        "mcause 必须是「中断位 | **架构 cause 码 11**」（外部中断），不是内部线号"
     );
     assert_eq!(
         csr(&host, CSR_MEPC),

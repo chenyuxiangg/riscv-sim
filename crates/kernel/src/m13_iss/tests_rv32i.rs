@@ -1360,16 +1360,20 @@ fn a_csr_shaped_system_encoding_is_never_ebreak() {
 }
 
 /// SYSTEM with funct3 == 0 but an immediate other than 0 / 1 / 0x302 is
-/// neither ECALL nor EBREAK — WFI (`imm = 0x105`) and SRET
-/// (`imm = 0x102`) fall into this bucket and stay **illegal**.
+/// neither ECALL nor EBREAK — SRET (`imm = 0x102`) falls into this bucket
+/// and stays **illegal**.
 ///
-/// ⚠️ `MRET` (`imm = 0x302`) left this list when the CSR / trap
-/// family landed: it is a legal instruction now (pinned by the
-/// `tests_csr` module). SRET and WFI stay illegal — the platform is
-/// **M-mode only** (STAGE-4 §3.6).
+/// ⚠️ `MRET` (`imm = 0x302`) left this list when the CSR / trap family
+/// landed: it is a legal instruction now (pinned by the `tests_csr`
+/// module).
+///
+/// ⚠️ **`WFI` (`imm = 0x105`) 也离开了这张表**（v0.23 批）：它现在是
+/// **合法指令**（本平台把它实现成 nop），由 `tests_csr` 模块的
+/// `the_wfi_encoding_is_a_legal_instruction` 单独钉住。SRET 仍然是
+/// 非法的 —— 平台是 **M 模式**（STAGE-4 §3.6）。
 #[test]
 fn system_with_an_unexpected_immediate_traps_as_illegal_instruction() {
-    for imm in [2i32, 0x102, 0x105] {
+    for imm in [2i32, 0x102] {
         let mut h = Harness::new();
         let mut state = SimState::default();
         let word = enc_i(imm, 0, 0b000, 0, SYSTEM);

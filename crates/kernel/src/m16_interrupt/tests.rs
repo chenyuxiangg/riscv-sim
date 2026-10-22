@@ -503,9 +503,15 @@ fn the_sink_raise_uses_the_last_sampled_virtual_time() {
 // 交付交接
 // ---------------------------------------------------------------------------
 
-/// `mcause` 的编码：中断位（`IRQ_BASE`）+ 线号。
+/// `mcause` 的编码：中断位（`IRQ_BASE`）+ **架构 cause 码**。
+///
+/// ⚠️ **v0.23 批**：cause 报的是**架构码**（定时器 `7` / 外部 `11`），
+/// **不是**平台的内部线号 —— 内部线号是 `1 / 2 / 3`，拿它当 cause 报的
+/// 时候 guest 的中断分发**一个都匹配不上**。
+///
+/// ⚠️ 断言值是**架构字面量**（`0x8000_0007`），不是从映射函数反推的。
 #[test]
-fn the_delivery_cause_encodes_the_interrupt_bit_and_the_line() {
+fn the_delivery_cause_encodes_the_interrupt_bit_and_the_architectural_code() {
     let mut intc = InterruptController::new();
     intc.request(IRQ_TIMER_COMPARE, 100, "timer", LEVEL)
         .expect("request");
@@ -515,11 +521,105 @@ fn the_delivery_cause_encodes_the_interrupt_bit_and_the_line() {
         .expect("poll")
         .expect("应当交付一条");
 
-    assert_eq!(delivered.cause, IRQ_BASE | u32::from(IRQ_TIMER_COMPARE));
+    assert_eq!(
+        delivered.cause, 0x8000_0007,
+        "定时器线 ⇒ mcause = 中断位 | 架构码 7"
+    );
     assert_eq!(
         delivered.cause & IRQ_BASE,
         IRQ_BASE,
         "中断的 mcause[31] 必须置位"
+    );
+    // ⚠️ **内部线号不许混进 cause** —— 定时器线的内部线号是 3。
+    assert_ne!(
+        delivered.cause & 0x7FFF_FFFF,
+        u32::from(IRQ_TIMER_COMPARE),
+        "cause 的低位必须是**架构码**（7），不是内部线号（3）"
+    );
+}
+
+/// ⚠️ **外部线**交付时 `mcause` = 中断位 | **架构码 11**。
+///
+/// 两条 UART 线（内部线号 1 / 2）都映射到**外部中断**（架构码 11）——
+/// M 模式只有**一个**外部中断位（`MEIE` = 11），两条 UART 线与 `MEIP`
+/// 一样共享它。
+#[test]
+fn an_external_line_is_delivered_with_the_architectural_external_cause() {
+    for line in [IRQ_UART_RX_READY, IRQ_UART_TX_EMPTY] {
+        let mut intc = InterruptController::new();
+        intc.request(line, 100, "uart", EDGE).expect("request");
+
+        let delivered = intc
+            .poll(300, MIE_EXTERNAL, MSTATUS_ON)
+            .expect("poll")
+            .expect("应当交付一条");
+
+        assert_eq!(
+            delivered.cause, 0x8000_000B,
+            "外部线 {line} ⇒ mcause = 中断位 | 架构码 11"
+        );
+        assert_ne!(
+            delivered.cause & 0x7FFF_FFFF,
+            u32::from(line),
+            "cause 的低位必须是**架构码**（11），不是内部线号"
+        );
+    }
+}
+
+/// ⚠️ **交付的 cause 落到 guest 的 `mcause` 上** —— 端到端。
+///
+/// 这是本批修的那个缺陷的**真正判别式**：guest 的中断分发读的就是
+/// `mcause` ⇒ 它必须是**架构码**。
+///
+/// ⚠️ 判别式落在**输出**上（guest 读 `mcause` 的值），不是「控制器
+/// 调了某个函数」。
+#[test]
+fn the_delivered_cause_reaches_the_guest_as_mcause() {
+    // (线, `mie` 使能位, 期望的 guest `mcause`)
+    for (line, mie, expected) in [
+        (IRQ_TIMER_COMPARE, MIE_TIMER, 0x8000_0007u32),
+        (IRQ_UART_RX_READY, MIE_EXTERNAL, 0x8000_000B),
+    ] {
+        let mut intc = InterruptController::new();
+        intc.request(line, 100, "irq", EDGE).expect("request");
+        let delivered = intc
+            .poll(300, mie, MSTATUS_ON)
+            .expect("poll")
+            .expect("应当交付一条");
+
+        // 交付的 cause 送进**唯一的陷阱入口** ⇒ guest 的 `mcause`。
+        let mut state = riscv_sim_contract::model::SimState::default();
+        crate::m13_iss::enter_trap(&mut state, delivered.cause, 0);
+        assert_eq!(
+            crate::m13_iss::csr::csr_read(&state, riscv_sim_contract::csr::CSR_MCAUSE),
+            expected,
+            "线 {line} ⇒ guest 的 mcause 必须是架构码（0x8000_0007 / 0x8000_000B）"
+        );
+    }
+}
+
+/// ⚠️ **没有架构 cause 码的线不交付** —— 交付一条 `mcause` 不是架构码的
+/// 中断，等于把本批修掉的缺陷换个形式再犯一次。
+///
+/// 这种线**保持挂起**（与「未使能不丢」同一条不变式）。
+#[test]
+fn a_line_without_an_architectural_cause_is_not_delivered() {
+    let mut intc = InterruptController::new();
+    // 线 9：平台没有它 ⇒ 没有 `mie` 位，也没有架构 cause 码。
+    intc.request(9, 100, "platform", EDGE).expect("request");
+    // 强行打开它的使能位（平台 API 允许），使它成为唯一的候选。
+    intc.set_enabled_mask(1 << 9);
+
+    let delivered = intc.poll(300, 0, MSTATUS_ON).expect("poll 本身不报错");
+    assert!(
+        delivered.is_none(),
+        "没有架构 cause 码的线**不得**交付 —— 实得 {delivered:?}"
+    );
+    // ⚠️ **保持挂起** —— 挂起不丢。
+    assert_eq!(
+        intc.pending_lines(),
+        vec![9],
+        "没有架构 cause 码的线必须**保持挂起**"
     );
 }
 
@@ -752,8 +852,9 @@ fn one_timestamped_input_sequence_yields_one_fixed_delivery_sequence() {
     assert_eq!(
         run(),
         vec![
-            (IRQ_TIMER_COMPARE, IRQ_BASE | u32::from(IRQ_TIMER_COMPARE)),
-            (IRQ_UART_RX_READY, IRQ_BASE | u32::from(IRQ_UART_RX_READY)),
+            // ⚠️ 架构 cause 码（定时器 7 / 外部 11），不是内部线号。
+            (IRQ_TIMER_COMPARE, 0x8000_0007),
+            (IRQ_UART_RX_READY, 0x8000_000B),
         ],
         "同一串输入 ⇒ 同一串交付（先高优先级，再剩下的）"
     );
