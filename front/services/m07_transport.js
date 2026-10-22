@@ -51,6 +51,19 @@ let status = {
 /** Monotonic tx sequence — the M-07 `seqNo` anchor (M-07 LLD §2.1.1). */
 let txSeq = 0;
 
+/**
+ * Error code for a **transport channel** failure (the Worker `error` event /
+ * a WebSocket error).
+ *
+ * ⚠️ **D-48（语义收敛）**：这个码**只**表示「传输通道挂了」。WASM 宿主侧
+ * 的失败（WASM 初始化失败 / 内核抛错 / 返回值非法）**不是**传输通道错误
+ * ——它由 `front/kernel-worker.js` 用 **`E_TRX-05`** 报。
+ *
+ * 此前两边共用 `E_TRX-04` ⇒ 前端拿到错误**无法按码分派**（「通道断了要
+ * 重连」与「内核算错了要报错并拒掉这条命令」是两种处置）。
+ */
+export const TRANSPORT_CHANNEL_ERROR_CODE = "E_TRX-04";
+
 /** @type {Set<(status: TransportStatus) => void>} */
 const statusSubscribers = new Set();
 
@@ -210,7 +223,7 @@ function createWorkerAdapter(options) {
                 setStatus({
                     connected: false,
                     connState: "closed",
-                    lastError: `E_TRX-04 Worker 通道错误：${err?.message ?? err}`,
+                    lastError: `${TRANSPORT_CHANNEL_ERROR_CODE} Worker 通道错误：${err?.message ?? err}`,
                 });
             },
         );
@@ -272,7 +285,7 @@ function createWebSocketAdapter(options) {
         setStatus({
             connected: false,
             connState: "closed",
-            lastError: `E_TRX-04 WebSocket 错误：${ev?.message ?? "unknown"}`,
+            lastError: `${TRANSPORT_CHANNEL_ERROR_CODE} WebSocket 错误：${ev?.message ?? "unknown"}`,
         });
     };
     socket.onmessage = (ev) => {

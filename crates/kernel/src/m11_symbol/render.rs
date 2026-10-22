@@ -126,6 +126,15 @@ pub fn render_entry(d: &Decoded) -> DisasmEntryDto {
         code: d.raw,
         mnemonic: render_mnemonic(d),
         width: d.len,
+        // ⚠️ **契约 v4（D-102）新增的两个可选字段**：渲染器**不知道**源码
+        // 位置（行表在 M-11 的 dwarf 侧，`disasm.rs` 才有）⇒ 这里只能是
+        // `None`。
+        //
+        // ⚠️ **未实现**：真正的逐条行号填充是**下一批**的活（`disasm.rs`
+        // 的反汇编序列）。契约形状先定好（`None` 是合法值），内核侧不
+        // 伪造文件名与行号。
+        file: None,
+        line: None,
     }
 }
 

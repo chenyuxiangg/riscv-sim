@@ -283,7 +283,7 @@ function rustFieldDeclarations(source, containerName) {
 }
 
 describe("Message 信封（与 crates/contract 逐字对齐）", () => {
-    test("JS 镜像的 schema 版本与契约层一致（契约 v3 · M-11 调试面）", () => {
+    test("JS 镜像的 schema 版本与契约层一致（契约 v4 · Console + 逐条源码位置）", () => {
         // ⚠️ **不写死数字**：契约层升版时这条断言**不该**变红（错的不是
         // JS 镜像）—— 见 `rustSchemaVersion()` 的说明。
         assert.equal(SCHEMA_VERSION, rustSchemaVersion());
@@ -357,6 +357,8 @@ describe("Message 信封（与 crates/contract 逐字对齐）", () => {
         assert.equal(eventTopic("SourceLocation"), "debug.source");
         assert.equal(eventTopic("TraceExport"), "debug.export");
         assert.equal(eventTopic("TraceState"), "debug.trace");
+        // 契约 v4 新增：guest 的 console 字节流。
+        assert.equal(eventTopic("Console"), "sim.console");
         // 前向兼容：未知变体不抛异常。
         assert.equal(eventTopic("SomethingNew"), "unknown");
     });
@@ -424,6 +426,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Event.sourceLocation(0, "demo.c", 7)),
             variantOf(Event.traceExport("Waveform", "Vcd", 0, 10, 42, 128, "$var", false)),
             variantOf(Event.traceState(true, 5, 2)),
+            // 契约 v4 新增：guest 的 console 字节流。
+            variantOf(Event.console([104, 105])),
         ].sort();
         assert.deepEqual(js, rust, "JS 事件变体与 Rust EventPayload 不一致");
     });
@@ -462,6 +466,30 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             rustVariants(model, "TraceFormat").sort(),
             "TraceFormat 标签不一致",
         );
+    });
+
+    test("契约 v4 的 Console 事件：字节是**数组**，不是字符串（与 Rust 的 serde 逐字对齐）", () => {
+        requireRustSource();
+        // Rust 侧：`EventPayload::Console { bytes: Vec<u8> }` ⇒ serde 的
+        // 默认表示是 **JSON 数组**（`[104, 105]`）——**不是** base64、
+        // **不是**字符串。
+        //
+        // ⚠️ 判别力：把 JS 侧改成 `{ text: bytes.join("") }`（字符串）⇒
+        // 本用例**变红**（断言的是**形状**，不是「有东西」）。
+        const evt = Event.console([104, 105]);
+        assert.deepEqual(evt, { Console: { bytes: [104, 105] } });
+        assert.deepEqual(Object.keys(evt.Console), ["bytes"]);
+        assert.ok(Array.isArray(evt.Console.bytes), "bytes 必须是数组");
+        assert.equal(typeof evt.Console.bytes[0], "number", "字节必须是数字");
+        // 线上文本（帧 crc 覆盖的就是它）也必须是数组形态。
+        assert.equal(JSON.stringify(evt), '{"Console":{"bytes":[104,105]}}');
+        // 空字节流是**空数组**，不是 null。
+        assert.deepEqual(Event.console([]), { Console: { bytes: [] } });
+        // Rust 侧的变体名与字段名（源码推导）。
+        const protocol = readFileSync(protocolRs, "utf8");
+        const shape = rustVariantShape(protocol, "EventPayload", "Console");
+        assert.equal(shape.kind, "struct");
+        assert.deepEqual(shape.fields, ["bytes"]);
     });
 
     test("每个变体的内层字段名与 Rust 逐字一致（不只是变体名）", () => {
@@ -513,6 +541,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 SourceLocation: Event.sourceLocation(0, "demo.c", 7),
                 TraceExport: Event.traceExport("Waveform", "Vcd", 0, 10, 42, 128, "$var", false),
                 TraceState: Event.traceState(true, 5, 2),
+                // 契约 v4：guest 的 console 字节流。
+                Console: Event.console([104, 105]),
             },
         };
 
@@ -598,6 +628,43 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             rustStructFields(model, "Edge").sort(),
             "Edge 的字段名与 Rust 不一致",
         );
+    });
+
+    test("契约 v4：反汇编条目的源码位置是**可选**的（没有就是 null，绝不伪造）", () => {
+        requireRustSource();
+        const model = readFileSync(modelRs, "utf8");
+        // Rust 侧 `DisasmEntryDto` 多了 `file` / `line` 两个 `Option` 字段
+        // （台账 D-102）⇒ JS 镜像必须**也**带这两个键，且缺失时是
+        // **`null`**（serde 的 `Option` 默认表示）。
+        //
+        // ⚠️ 判别力：`null` 与「空串 / 0」是**不同**的东西——空串与 0 会
+        // 与 `SourceLocation` 事件的两种「没有答案」（`line == 0` = 根本
+        // 没有 DWARF，`line == u32::MAX` = 没命中行表）撞车 ⇒ 同一个地址
+        // 在两个 DTO 里讲出**互相矛盾**的故事。
+        const withoutSource = disasmEntry({
+            addr: 0x1000,
+            code: 0x02a00093,
+            mnemonic: "addi ra,zero,42",
+            width: 4,
+        });
+        assert.equal(withoutSource.file, null, "缺失的源码文件必须是 null");
+        assert.equal(withoutSource.line, null, "缺失的源码行号必须是 null");
+        assert.deepEqual(
+            Object.keys(withoutSource).sort(),
+            rustStructFields(model, "DisasmEntryDto").sort(),
+            "DisasmEntryDto 的字段名与 Rust 不一致",
+        );
+
+        const withSource = disasmEntry({
+            addr: 0x1000,
+            code: 0x02a00093,
+            mnemonic: "addi ra,zero,42",
+            width: 4,
+            file: "src/main.c",
+            line: 42,
+        });
+        assert.equal(withSource.file, "src/main.c");
+        assert.equal(withSource.line, 42);
     });
 
     test("虚拟时间字段在 Rust 侧必须挂 numstr 属性（§2 数值策略）", () => {

@@ -128,8 +128,14 @@ describe("WASM 传输宿主 · 帧 → 消息 → 帧", () => {
             { Event: { Tick: { elapsed_ps: "0", pc: 0 } } },
             "事件负载不是内核给出的契约形状",
         );
-        // The frame's seq is the event's own seq (spec §4).
-        assert.equal(frame.seq, frame.payload.seq, "帧 seq 必须等于事件的 seq");
+        // ⚠️ **D-47**：帧 seq 是**传输层自己的**单调计数（传输层的序列
+        // 空间），与内核 `Message.seq`（**载荷里的**一个字段）**解耦**。
+        //
+        // 此前这里断言的是「帧 seq == 事件的 seq」——那正是 D-47 说的
+        // **两个序列空间**混用：同一个 Worker 内，宿主合成的错误帧用的是
+        // 另一个计数器 ⇒ 帧 seq 可以从 11 跳回 1。
+        assert.equal(typeof frame.seq, "number");
+        assert.ok(Number.isInteger(frame.seq) && frame.seq > 0, "帧 seq 必须是正整数");
     });
 
     test("首个事件带 reqId，后续事件带 null（推送类）", async () => {
@@ -149,7 +155,7 @@ describe("WASM 传输宿主 · 帧 → 消息 → 帧", () => {
         );
     });
 
-    test("内核抛错 → 回一个 E_TRX-04 的 Error 事件", async () => {
+    test("内核抛错 → 回一个 E_TRX-05 的 Error 事件", async () => {
         const host = createWasmWorker("throw");
         host.send(commandFrame("Nop", { reqId: 9 }));
         await host.waitFor(() => host.frames().length >= 1);
@@ -158,7 +164,7 @@ describe("WASM 传输宿主 · 帧 → 消息 → 帧", () => {
         assert.equal(frame.type, "event");
         assert.equal(frame.reqId, 9, "错误帧必须带命令的 reqId");
         assert.equal(frame.payload.direction, "Event");
-        assert.equal(frame.payload.payload.Event.Error.code, "E_TRX-04");
+        assert.equal(frame.payload.payload.Event.Error.code, "E_TRX-05");
         assert.match(
             frame.payload.payload.Event.Error.message,
             /内核炸了/,
@@ -166,27 +172,27 @@ describe("WASM 传输宿主 · 帧 → 消息 → 帧", () => {
         );
     });
 
-    test("内核返回非法 JSON → 回一个 E_TRX-04 的 Error 事件", async () => {
+    test("内核返回非法 JSON → 回一个 E_TRX-05 的 Error 事件", async () => {
         const host = createWasmWorker("bad-json");
         host.send(commandFrame("Nop"));
         await host.waitFor(() => host.frames().length >= 1);
 
         const frame = host.frames()[0];
-        assert.equal(frame.payload.payload.Event.Error.code, "E_TRX-04");
+        assert.equal(frame.payload.payload.Event.Error.code, "E_TRX-05");
         assert.match(frame.payload.payload.Event.Error.message, /JSON/i);
     });
 
-    test("内核返回的不是数组 → 回一个 E_TRX-04 的 Error 事件", async () => {
+    test("内核返回的不是数组 → 回一个 E_TRX-05 的 Error 事件", async () => {
         const host = createWasmWorker("not-array");
         host.send(commandFrame("Nop"));
         await host.waitFor(() => host.frames().length >= 1);
 
         const frame = host.frames()[0];
-        assert.equal(frame.payload.payload.Event.Error.code, "E_TRX-04");
+        assert.equal(frame.payload.payload.Event.Error.code, "E_TRX-05");
         assert.match(frame.payload.payload.Event.Error.message, /数组/);
     });
 
-    test("内核返回空数组 → 回一个 E_TRX-04 的 Error 事件", async () => {
+    test("内核返回空数组 → 回一个 E_TRX-05 的 Error 事件", async () => {
         const host = createWasmWorker("empty");
         host.send(commandFrame("Nop", { reqId: 11 }));
         await host.waitFor(() => host.frames().length >= 1);
@@ -194,12 +200,63 @@ describe("WASM 传输宿主 · 帧 → 消息 → 帧", () => {
         const frame = host.frames()[0];
         assert.equal(frame.type, "event");
         assert.equal(frame.reqId, 11, "错误帧必须带命令的 reqId");
-        assert.equal(frame.payload.payload.Event.Error.code, "E_TRX-04");
+        assert.equal(frame.payload.payload.Event.Error.code, "E_TRX-05");
         assert.match(
             frame.payload.payload.Event.Error.message,
             /没有返回任何事件/,
             "空数组必须被明确拒绝（否则命令会静默无回帧，只能等超时）",
         );
+    });
+
+    test("D-47：帧 seq 是传输层自己的单调序列（内核事件帧与宿主错误帧交错也不回退）", async () => {
+        // ⚠️ **判别力**：这条用例守的是**帧 seq 只有一个序列空间**。
+        //
+        // 旧实现：内核事件帧用 `msg.seq`（内核的计数器）、宿主错误帧用
+        // `hostSeq`（另一个从 1 起的计数器）⇒ 本场景下帧 seq 是
+        // `[2, 3, 1]`——**从 3 跳回 1**。
+        //
+        // 新实现：全部帧走**传输层自己的**计数器 ⇒ `[1, 2, 3]`。
+        const host = createWasmWorker("mix");
+        host.send(commandFrame("Nop", { reqId: 1 }));
+        await host.waitFor(() => host.frames().length >= 2);
+        // 第二条命令让内核抛错 ⇒ 宿主回一帧**宿主侧错误**。
+        host.send(commandFrame("Nop", { reqId: 2 }));
+        await host.waitFor(() => host.frames().length >= 3);
+
+        const frames = host.frames();
+        assert.equal(frames.length, 3, "应当是 2 帧内核事件 + 1 帧宿主错误");
+        // 前两帧是内核事件帧（Tick / Halted），第三帧是宿主错误帧。
+        assert.ok(frames[0].payload.payload.Event.Tick, "第一帧应当是内核的 Tick 事件");
+        assert.ok(frames[1].payload.payload.Event.Halted, "第二帧应当是内核的 Halted 事件");
+        assert.equal(frames[2].payload.payload.Event.Error.code, "E_TRX-05");
+
+        const seqs = frames.map((f) => f.seq);
+        for (let i = 1; i < seqs.length; i += 1) {
+            assert.ok(
+                seqs[i] > seqs[i - 1],
+                `帧 seq 必须严格递增：第 ${i} 帧是 ${seqs[i]}，前一帧是 ${seqs[i - 1]}`,
+            );
+        }
+        // 帧 seq 与内核消息的 seq 是**两个空间**：第一帧的载荷 seq 是
+        // 内核自己编的（2），帧 seq 是传输层的（1）。
+        assert.notEqual(
+            frames[0].seq,
+            frames[0].payload.seq,
+            "帧 seq 不能直接复用内核 Message.seq（D-47）",
+        );
+    });
+
+    test("D-48：宿主侧错误是 E_TRX-05，**不是** E_TRX-04", async () => {
+        // ⚠️ 语义变更（不是「为了让测试过而改断言」）：此前宿主侧与传输
+        // 通道侧共用 `E_TRX-04` ⇒ 前端无法按码分派（「通道断了要重连」
+        // 与「内核算错了要报错」是两种处置）。⇒ 宿主侧改用 `E_TRX-05`。
+        const host = createWasmWorker("throw");
+        host.send(commandFrame("Nop", { reqId: 9 }));
+        await host.waitFor(() => host.frames().length >= 1);
+
+        const code = host.frames()[0].payload.payload.Event.Error.code;
+        assert.equal(code, "E_TRX-05", "宿主侧错误必须报 E_TRX-05");
+        assert.notEqual(code, "E_TRX-04", "E_TRX-04 只表示传输通道错误");
     });
 
     test("非命令类型的帧被忽略（不产生回帧）", async () => {
@@ -233,13 +290,13 @@ describe("WASM 传输宿主 · 帧 → 消息 → 帧", () => {
         assert.equal(host.frames()[0].type, "event");
     });
 
-    test("WASM 初始化失败 → 回一个 E_TRX-04 的 Error 事件", async () => {
+    test("WASM 初始化失败 → 回一个 E_TRX-05 的 Error 事件", async () => {
         const host = createWasmWorker("init-fail");
         // No command is sent: the failure must be reported on its own.
         await host.waitFor(() => host.frames().length >= 1);
 
         const frame = host.frames()[0];
-        assert.equal(frame.payload.payload.Event.Error.code, "E_TRX-04");
+        assert.equal(frame.payload.payload.Event.Error.code, "E_TRX-05");
         assert.match(
             frame.payload.payload.Event.Error.message,
             /初始化失败/,
@@ -263,7 +320,7 @@ describe("WASM 传输宿主 · 帧 → 消息 → 帧", () => {
         );
         const frame = frames[0];
         assert.equal(frame.reqId, 11, "错误帧必须带命令的 reqId（M-05 要靠它拒命令）");
-        assert.equal(frame.payload.payload.Event.Error.code, "E_TRX-04");
+        assert.equal(frame.payload.payload.Event.Error.code, "E_TRX-05");
         assert.match(frame.payload.payload.Event.Error.message, /初始化失败/);
     });
 

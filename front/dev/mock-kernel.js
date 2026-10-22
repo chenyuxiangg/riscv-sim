@@ -77,18 +77,21 @@ const TICK_PS = 1000;
  * mnemonics with M-11's renderer (ISA mnemonics only, compressed
  * instructions keep the `c.` prefix — ruling C). The mock only has to
  * produce a well-shaped `DisasmEntryDto` (`addr` / `code` / `mnemonic` /
- * `width`) so the front end can be exercised end to end.
+ * `width` / `file` / `line`) so the front end can be exercised end to end.
+ *
+ * ⚠️ **契约 v4（D-102）**：`file` / `line` 是**可选**的逐条源码位置 ⇒
+ * mock 给的是 **`null`**（= 没有行表）。**不**伪造文件名与行号。
  *
  * The addresses are consistent with the widths: a 4-byte entry advances
  * the address by 4, the 2-byte compressed entry by 2.
  */
 const MOCK_DISASM_ENTRIES = Object.freeze([
-    { addr: 0x0000_0000, code: 0x02a0_0093, mnemonic: "addi x1, x0, 42", width: 4 },
-    { addr: 0x0000_0004, code: 0x0070_0113, mnemonic: "addi x2, x0, 7", width: 4 },
-    { addr: 0x0000_0008, code: 0x0020_81b3, mnemonic: "add x3, x1, x2", width: 4 },
-    { addr: 0x0000_000a, code: 0x0000_2a00, mnemonic: "c.addi sp,-16", width: 2 },
-    { addr: 0x0000_000c, code: 0x1000_21a3, mnemonic: "sw x3, 256(x0)", width: 4 },
-    { addr: 0x0000_0010, code: 0x0400_006f, mnemonic: "jal x0, 64", width: 4 },
+    { addr: 0x0000_0000, code: 0x02a0_0093, mnemonic: "addi x1, x0, 42", width: 4, file: null, line: null },
+    { addr: 0x0000_0004, code: 0x0070_0113, mnemonic: "addi x2, x0, 7", width: 4, file: null, line: null },
+    { addr: 0x0000_0008, code: 0x0020_81b3, mnemonic: "add x3, x1, x2", width: 4, file: null, line: null },
+    { addr: 0x0000_000a, code: 0x0000_2a00, mnemonic: "c.addi sp,-16", width: 2, file: null, line: null },
+    { addr: 0x0000_000c, code: 0x1000_21a3, mnemonic: "sw x3, 256(x0)", width: 4, file: null, line: null },
+    { addr: 0x0000_0010, code: 0x0400_006f, mnemonic: "jal x0, 64", width: 4, file: null, line: null },
 ]);
 
 /**
