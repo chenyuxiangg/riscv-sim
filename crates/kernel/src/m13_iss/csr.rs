@@ -34,7 +34,8 @@
 //! public API grows by exactly **one** symbol — [`enter_trap`].
 
 use riscv_sim_contract::csr::{
-    CSR_MCAUSE, CSR_MEPC, CSR_MSTATUS, CSR_MTVAL, CSR_MTVEC, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT,
+    CSR_MCAUSE, CSR_MEPC, CSR_MISA, CSR_MISA_VALUE, CSR_MSTATUS, CSR_MTVAL, CSR_MTVEC,
+    MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_M, MSTATUS_MPP_SHIFT,
 };
 use riscv_sim_contract::model::SimState;
 
@@ -42,7 +43,25 @@ use riscv_sim_contract::model::SimState;
 ///
 /// A CSR that is **not in the file** reads as **0** — it does **not**
 /// trap (STAGE-4 §2.2: "读：找不到 ⇒ 返回 0（不是陷阱）").
+///
+/// ⚠️ **`misa` is the one exception**: it is **not** stored in the file
+/// but **computed** from the platform's constant ([`CSR_MISA_VALUE`]),
+/// because it reports what the platform *is* rather than what the guest
+/// last wrote.  Reading it must answer the same on every read — a guest
+/// that could write `misa` could otherwise claim an extension the
+/// platform does not have.
+///
+/// ⚠️ Keeping it out of the file also leaves the CSR file **empty** for a
+/// guest that has touched no CSR — which is what the session snapshot's
+/// emptiness predicate (`EngineSnapshotDto::is_empty`: "no registers
+/// written, **no CSRs**, no pending writes, clock at zero") reads. A
+/// pre-seeded `misa` entry would have broken that (see the frozen spec
+/// for this batch, `docs/detailed-design/STAGE-6_CSR_Golden_Coverage.md`
+/// §3.4).
 pub(crate) fn csr_read(state: &SimState, csr: u16) -> u32 {
+    if csr == CSR_MISA {
+        return CSR_MISA_VALUE;
+    }
     state
         .csrs
         .iter()
@@ -100,7 +119,8 @@ pub(crate) fn csr_zimm(raw: u32) -> u32 {
 /// 3. `mtval := mtval` — the auxiliary value (the faulting address,
 ///    the instruction word, …);
 /// 4. `mstatus`: `MPIE := MIE`, then `MIE := 0` — interrupts are off
-///    for the duration of the handler;
+///    for the duration of the handler; and `MPP := M` — the privilege
+///    level the trap was taken from;
 /// 5. `state.pc := mtvec` — **direct** mode jumps to the base,
 ///    **vectored** mode to `base + 4 × (cause & 0x7)`.
 ///
@@ -123,12 +143,24 @@ pub fn enter_trap(state: &mut SimState, cause: u32, mtval: u32) -> u32 {
     // 3. mtval := mtval.
     csr_write(state, CSR_MTVAL, mtval);
 
-    // 4. mstatus: MPIE := MIE, then MIE := 0.
+    // 4. mstatus: MPIE := MIE, then MIE := 0, then MPP := M.
+    //
+    // ⚠️ `MPP := M` is **not** cosmetic: the reference side sets it too
+    // (measured — Spike reports `mstatus = 0x0018_0080` inside a trap
+    // handler, this platform used to report `0x0000_0080`), and the
+    // M-13 LLD §5.2.4 says so explicitly ("MPIE←MIE，MIE←0，MPP←M").
+    // `MPP` is **WARL** and this platform implements M-mode only ⇒ `M`
+    // is the only legal value ⇒ the field is written, not masked.
     let mstatus = csr_read(state, CSR_MSTATUS);
     let mie = 1u32 << MSTATUS_MIE_BIT;
     let mpie = 1u32 << MSTATUS_MPIE_BIT;
+    let mpp = MSTATUS_MPP_M << MSTATUS_MPP_SHIFT;
     let saved = if mstatus & mie != 0 { mpie } else { 0 };
-    csr_write(state, CSR_MSTATUS, (mstatus & !(mie | mpie)) | saved);
+    csr_write(
+        state,
+        CSR_MSTATUS,
+        (mstatus & !(mie | mpie | mpp)) | saved | mpp,
+    );
 
     // 5. pc := mtvec (direct) or base + 4 × (cause & 0x7) (vectored).
     let mtvec = csr_read(state, CSR_MTVEC);

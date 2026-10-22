@@ -30,7 +30,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use riscv_sim_contract::csr::{CSR_IRQ_CLEAR, CSR_MIE, CSR_MSTATUS};
+use riscv_sim_contract::csr::{
+    pending_lines_to_mip_mask, CSR_IRQ_CLEAR, CSR_MIE, CSR_MIP, CSR_MSTATUS,
+};
 use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_01_INVALID_REGISTER_INDEX,
 };
@@ -43,7 +45,7 @@ use crate::m08_breakpoint::{BreakpointTable, WatchpointTable};
 use crate::m12_engine::{
     Engine, ExecOutcome, InstructionExecutor, PeripheralTicker, RunReason, TIME_QUANTUM_PS,
 };
-use crate::m13_iss::csr::csr_read;
+use crate::m13_iss::csr::{csr_read, csr_write};
 use crate::m13_iss::{enter_trap, write_gpr, Iss, StepOutcome};
 use crate::m14_bus::{AccessDir, Bus, BusWidth};
 use crate::m16_interrupt::{InterruptPort, PendingIntr, MAX_MASKABLE_LINE};
@@ -205,6 +207,15 @@ impl<T: InterruptPort + 'static> InterruptPort for SharedInterruptPort<T> {
         })?;
         controller.poll(now_ps, mie, mstatus)
     }
+
+    fn pending_lines(&self) -> Vec<u16> {
+        // 借不到就**当作没有挂起** —— 与 `pending_intr` 同一口径
+        // （查询接口没有错误通道）。
+        self.inner
+            .try_borrow()
+            .map(|controller| controller.pending_lines())
+            .unwrap_or_default()
+    }
 }
 
 /// 「没有装中断控制器」时的**空端口**。
@@ -229,6 +240,9 @@ impl InterruptPort for NullInterruptPort {
         _mstatus: u32,
     ) -> Result<Option<PendingIntr>, PlatformError> {
         Ok(None)
+    }
+    fn pending_lines(&self) -> Vec<u16> {
+        Vec::new()
     }
 }
 
@@ -326,13 +340,38 @@ impl<'a> IssExecutor<'a> {
     ///
     /// 掩码的 bit L = 清除 line L（平台自定义 CSR `irq_clear` 的口径）。
     ///
-    /// ⚠️ **写两次同一个值不会丢清除请求**：第一次写已经把那些线清掉了，
-    /// 第二次是**空操作**（M-17 只在「值**变了**」时才动手）。
+    /// ⚠️ **写两次同一个值不会丢清除请求**：清除的判据是「这条指令**写了**
+    /// `irq_clear`」，**不是**「值变了」（STAGE-4 §4 接缝 #4；v0.19 检视轮
+    /// **F-1**）—— guest 的 handler 每次都写**同一个**掩码，若按「值变了」
+    /// 判定，**第二次**就会被静默丢弃 ⇒ 那条线被单级防护**永久堵死**。
     fn clear_lines_by_mask(&mut self, mask: u32) {
         for line in 0..=MAX_MASKABLE_LINE {
             if mask & (1u32 << line) != 0 {
                 self.intc.clear(line);
             }
+        }
+    }
+
+    /// 把 M-16 的**挂起队列**投影进 CSR `mip`（D-84 / STAGE-6 裁决 B）。
+    ///
+    /// ⚠️ **落盘在 M-17，不在 M-13**：M-13 对 M-16 **零依赖**（裁决 B 的
+    /// 理由 1）⇒ 读侧投影要么给 `SimState` 加字段（= CSR 的**第二落点**），
+    /// 要么改 `csr_read` 的签名（≈10 个调用点）⇒ 侵入面远大于写侧。
+    ///
+    /// ⚠️ **平台的写不能经过 M-13 的「刚写了哪个 CSR」回报**（STAGE-4
+    /// §646）：否则 M-17 会把「写了 `mip`」当成「写了 `irq_clear``
+    /// ⇒ **清错线**。写侧投影天然规避这一点。
+    ///
+    /// ⚠️ **只在值变化时写** ⇒ 没有中断的 guest 的 CSR 文件**不含**
+    /// `(0x344, …)` 条目 ⇒ 保住会话快照的「空」判定语义（验收 #4）。
+    ///
+    /// ⚠️ **时机**：只有两个刷新点 —— 量子边界 `poll()` 之后、
+    /// `irq_clear` 副作用之后 ⇒ guest 读 `mip` 得到的是**上一个量子边界**
+    /// 的挂起快照（量子 = 1 µs = 1000 条指令）⇒ **不是精确值**。
+    fn project_mip(&self, state: &mut SimState) {
+        let mask = pending_lines_to_mip_mask(&self.intc.pending_lines());
+        if csr_read(state, CSR_MIP) != mask {
+            csr_write(state, CSR_MIP, mask);
         }
     }
 }
@@ -375,6 +414,10 @@ impl InstructionExecutor for IssExecutor<'_> {
             let mie = csr_read(state, CSR_MIE);
             let mstatus = csr_read(state, CSR_MSTATUS);
             self.intc.poll(now_ps, mie, mstatus)?;
+            // ⚠️ **刷新点 ①**（STAGE-6 裁决 B）：量子边界采样之后，把
+            //     M-16 的**挂起队列**投影进 CSR `mip` ⇒ guest 读 `mip`
+            //     能看到挂起线（验收 #1）。
+            self.project_mip(state);
         }
 
         // (2-bis) **把虚拟时间告诉总线**（M-14 的 `Bus::set_now_ps`）。
@@ -424,6 +467,9 @@ impl InstructionExecutor for IssExecutor<'_> {
         //     （v0.19 检视轮 **F-1**）。
         if self.iss.take_last_csr_written() == Some(CSR_IRQ_CLEAR) {
             self.clear_lines_by_mask(csr_read(state, CSR_IRQ_CLEAR));
+            // ⚠️ **刷新点 ②**（STAGE-6 裁决 B）：清线的副作用之后，
+            //     重新投影 `mip` ⇒ guest 清掉的线**立刻**从 `mip` 消失。
+            self.project_mip(state);
         }
         // ⚠️ 这个 `match` **穷举** `StepOutcome` 的全部变体，**没有**兜底臂 ——
         //    M-13 以后再加变体，M-17 会**编译不过**（而不是静默走兜底）。
@@ -1231,7 +1277,9 @@ pub const BACKEND_FAMILY: ErrorFamily = ErrorFamily::Iss;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use riscv_sim_contract::csr::{CSR_MCAUSE, CSR_MEPC, CSR_MTVAL, CSR_MTVEC};
+    use riscv_sim_contract::csr::{
+        std_irq_bit_for_line, CSR_MCAUSE, CSR_MEPC, CSR_MIE, CSR_MIP, CSR_MTVAL, CSR_MTVEC,
+    };
     use riscv_sim_contract::model::Breakpoint;
     use riscv_sim_contract::protocol::EventPayload;
 
@@ -2115,5 +2163,167 @@ mod tests {
         let mut backend = backend_with_demo();
         let executed = backend.step_n(3).expect("step");
         assert_eq!(executed, 3);
+    }
+
+    // ------------------------------------------------------------------
+    // `mip` 投影（D-84 / STAGE-6 裁决 B）
+    // ------------------------------------------------------------------
+
+    /// 一个**会写 `mip`** 的中断固件（验收 #5）。
+    ///
+    /// ```text
+    /// 0x00  addi  x5, x0, 0x20    → handler 地址
+    /// 0x04  lui   x6, 0x8         → 0x8000
+    /// 0x08  srli  x6, x6, 4       → 0x800（`mie` 的 MEIP 位 = 11）
+    /// 0x0c  csrrw x0, mtvec, x5
+    /// 0x10  csrrw x0, mie, x6
+    /// 0x14  csrrsi x0, mstatus, 8 → MIE = 1
+    /// 0x18  jal   x0, 0           → 主循环自旋
+    /// 0x1c  nop
+    /// 0x20  csrrwi x0, mip, 31    → handler：**写 `mip`**（必须被忽略）
+    /// 0x24  jal   x0, 0           → 自旋（**不清线** ⇒ 线一直挂起）
+    /// ```
+    const MIP_WRITE_FIRMWARE: [u8; 40] = [
+        0x93, 0x02, 0x00, 0x02, // 0x00 addi  x5, x0, 0x20
+        0x37, 0x83, 0x00, 0x00, // 0x04 lui   x6, 0x8
+        0x13, 0x53, 0x43, 0x00, // 0x08 srli  x6, x6, 4
+        0x73, 0x90, 0x52, 0x30, // 0x0c csrrw x0, mtvec, x5
+        0x73, 0x10, 0x43, 0x30, // 0x10 csrrw x0, mie, x6
+        0x73, 0x60, 0x04, 0x30, // 0x14 csrrsi x0, mstatus, 8
+        0x6f, 0x00, 0x00, 0x00, // 0x18 jal   x0, 0
+        0x13, 0x00, 0x00, 0x00, // 0x1c nop
+        0x73, 0xd0, 0x4f, 0x34, // 0x20 csrrwi x0, mip, 31
+        0x6f, 0x00, 0x00, 0x00, // 0x24 jal   x0, 0
+    ];
+
+    /// 造一个后端，**挂起**一条线，但**先不**跑任何指令。
+    fn backend_with_a_pending_line(
+        program: &[u8],
+    ) -> (
+        SelfIssBackend<NullSinks, NullSinks>,
+        Rc<RefCell<InterruptController>>,
+    ) {
+        let (backend, controller) = backend_with_irq(program);
+        controller
+            .borrow_mut()
+            .request(IRQ_LINE, 0, SOURCE_PLATFORM, TRIGGER_EDGE)
+            .expect("request");
+        (backend, controller)
+    }
+
+    /// ⚠️ **挂起的线必须在 `mip` 里看得见**（验收 #1）。
+    ///
+    /// 判别式落在**输出**上：guest 读 CSR `mip` 的值。
+    ///
+    /// ⚠️ 断言的是**位**而不是「`mip` 非零」：非零这条断言太弱
+    /// （任何一位被置上都能通过）⇒ 换成「**那条线的位**被置上」。
+    #[test]
+    fn a_pending_line_shows_up_in_mip() {
+        let (mut backend, _controller) = backend_with_a_pending_line(&IRQ_FIRMWARE_BYTES);
+        backend
+            .step_n(instructions_per_quantum() + 1)
+            .expect("step");
+
+        let mip = guest_csr(&backend, CSR_MIP);
+        let bit = std_irq_bit_for_line(IRQ_LINE).expect("线 1 有标准中断位");
+        assert_ne!(
+            mip & (1 << bit),
+            0,
+            "挂起的线必须在 mip 里看得见 —— 实得 {mip:#x}（期望位 {bit}）"
+        );
+        // ⚠️ **必须落在 CSR 文件里** —— `csr_read` 对「文件里没有的 CSR」
+        //    也返回 0 ⇒ 单独断言「值非零」不够，这里再钉住「文件里有」。
+        let state = backend.snapshot().expect("snapshot");
+        assert!(
+            state.csrs.iter().any(|(number, _)| *number == CSR_MIP),
+            "mip 必须落进 CSR 文件 —— 实得 {:?}",
+            state.csrs
+        );
+    }
+
+    /// ⚠️ **`mip` 与 `mie` 用的是**同一个位号**（验收 #2 / 裁决 C）。
+    ///
+    /// RISC-V 里 `MEIE` / `MEIP` 是**同一个 bit** ⇒ 同一条线在两个寄存器
+    /// 里必须落在**同一位**上。
+    ///
+    /// 固件写的 `mie` = `0x800`（位 11）⇒ `mip` 也必须是 `0x800`。
+    /// 若位号表写错（例如 UART 线映到位 7），这条立刻变红。
+    #[test]
+    fn the_mip_bit_is_the_same_bit_the_mie_bit_uses() {
+        let (mut backend, _controller) = backend_with_a_pending_line(&IRQ_FIRMWARE_BYTES);
+        backend
+            .step_n(instructions_per_quantum() + 1)
+            .expect("step");
+
+        let mie = guest_csr(&backend, CSR_MIE);
+        let mip = guest_csr(&backend, CSR_MIP);
+        assert_eq!(mie, 1 << 11, "固件写的是 `mie` 的 MEIP 位（11）");
+        assert_eq!(mip, mie, "同一条线的 `mip` 位号必须与 `mie` 位号相同");
+    }
+
+    /// ⚠️ **没有挂起线 ⇒ CSR 文件里**不得**多出 `mip` 条目**（验收 #4）。
+    ///
+    /// 投影是「**值变化才写**」⇒ 没有挂起线时 `mip` 恒为 0 ⇒ 平台
+    /// **一条都不写** ⇒ CSR 文件保持原样（保住会话快照的「空」判定）。
+    #[test]
+    fn a_guest_without_a_pending_line_has_no_mip_entry() {
+        let (mut backend, _controller) = backend_with_irq(&IRQ_FIRMWARE_BYTES);
+        backend
+            .step_n(instructions_per_quantum() + 1)
+            .expect("step");
+
+        let state = backend.snapshot().expect("snapshot");
+        assert!(
+            !state.csrs.iter().any(|(number, _)| *number == CSR_MIP),
+            "没有挂起线时 CSR 文件不得多出 mip 条目 —— 实得 {:?}",
+            state.csrs
+        );
+    }
+
+    /// ⚠️ **guest 写 `mip` 无效**（验收 #5）。
+    ///
+    /// RISC-V 里 `MEIP` / `MTIP` 在 **M 模式只读** ⇒ guest 不能靠写
+    /// `mip` 伪造一个「挂起中断」骗自己。
+    ///
+    /// ⚠️ 断言的**时机**很重要：必须在「写 `mip` 之后、下一个量子边界
+    /// 之前」断言 —— 再往后平台的投影会**把值刷回去**，那就能把一个
+    /// 「写被放行了」的缺陷**掩盖掉**。
+    #[test]
+    fn a_guest_write_to_mip_is_ignored() {
+        let (mut backend, _controller) = backend_with_a_pending_line(&MIP_WRITE_FIRMWARE);
+        backend
+            .step_n(instructions_per_quantum() + 1)
+            .expect("step");
+        let before = guest_csr(&backend, CSR_MIP);
+        assert_eq!(before, 1 << 11, "前置条件：投影已经落地");
+
+        // handler 的第一条指令 = `csrrwi x0, mip, 31`。
+        backend.step_n(1).expect("step");
+        let after = guest_csr(&backend, CSR_MIP);
+        assert_eq!(
+            after, before,
+            "guest 写 mip 必须无效 —— 实得 {after:#x}（写前 {before:#x}）"
+        );
+    }
+
+    /// ⚠️ **guest 清掉线 ⇒ `mip` 里的那位**立刻**消失**（刷新点 ②）。
+    ///
+    /// 刷新点 ② 在 `irq_clear` 副作用**之后** ⇒ 清线的**同一个指令
+    /// 边界**上，`mip` 就已经反映了「线没了」。
+    #[test]
+    fn clearing_the_line_takes_its_bit_out_of_mip() {
+        let (mut backend, _controller) = backend_with_a_pending_line(&IRQ_FIRMWARE_BYTES);
+        backend
+            .step_n(instructions_per_quantum() + 1)
+            .expect("step");
+        assert_eq!(guest_csr(&backend, CSR_MIP), 1 << 11, "前置条件：线已挂起");
+
+        // handler：`addi x7,x7,1` → `csrrwi x0, irq_clear, 2` → `mret`
+        backend.step_n(2).expect("step");
+        assert_eq!(
+            guest_csr(&backend, CSR_MIP),
+            0,
+            "线被清掉后 mip 的那一位必须消失（刷新点 ②）"
+        );
     }
 }

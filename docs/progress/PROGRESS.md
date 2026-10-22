@@ -1,11 +1,75 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.20.0
+> **Document version**: v0.21.0
 > **Created**: 2026-10-19
 > **Last updated**: 2026-10-22
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.21.0 变更摘要
+
+**CSR / 陷阱黄金覆盖：让对拍第一次照出 CSR 语义缺口**（分支
+`feature/golden-csr-coverage`，基线 `b014fed`；冻结规格
+`docs/detailed-design/STAGE-6_CSR_Golden_Coverage.md`，裁决 A~I）。
+
+台账**闭环 3 条**：**D-84**（`mip` 无生产者 ⇒ guest 读不到挂起中断）·
+**D-85**（黄金语料对 CSR / `mret` / 陷阱投递零覆盖）·
+**D-90**（`riscv-golden` 自带一套迷你 ELF 符号读取器 ⇒ 与 M-11 重复实现）。
+**新登记 11 条**：**D-91**（平台没有 `misa`）· **D-92**（未实现 CSR 的写被存下来）·
+**D-93**（`mret` 不屏蔽 `mepc[1:0]`）· **D-94**（S 扩展 / PMP / 计数器缺失）·
+**D-95**（`misa` 写语义与参考侧分歧）· **D-96**（三条「空洞的一致」）·
+**D-97**（陷入后 `mstatus.MPP` 未置 M）· **D-98**（`mstatus` 无 WARL 掩码）·
+**D-99**（访存异常 5/7 未实现）· **D-100**（`pending_lines` 争用时静默降级）·
+**D-101**（两处宽松解析）。
+
+### 一、核心命题：**「判决一致」和「覆盖等价」是两件事**
+
+本批第一次把 CSR / 陷阱送进跨实现对拍，于是对拍**照出了真缺口**：
+
+- **`misa`**：平台原本**没有** ⇒ guest 读回 0 ⇒ 固件按 `misa` 选路径必走错
+  ⇒ 补 `0x40001104`（MXL=1 + I/M/C）。
+- **未实现 CSR 的写**：原本**被存进 CSR 文件** ⇒ guest 能凭空造出平台没有的
+  寄存器 ⇒ 改成「**写被忽略、读回 0**」（与参考侧对 `tdata1` 的实测一致）。
+- **`mip`**：原本**全仓没有写入点** ⇒ guest 读 `mip` 恒得 0 ⇒ 接上生产者
+  （M-16 挂起队列 → 契约层掩码 → M-17 写侧落盘）。
+- **`mstatus.MPP`**：**陷入时没被置 M** ⇒ 与参考侧、与 M-13 自己的 LLD 都不符
+  ⇒ 收口轮修掉（**两路检视各自用探针独立复现**）。
+
+⇒ 语料从 **51 例扩到 64 例**（新增 **13 条 `rv32mi`**，走**新写的
+CSR-capable env 变体**）。
+
+### 二、本批的**主线教训**：「**实测基线**」也会是错的
+
+冻结规格 §0.1 有一张标着「**实测基线**（写规格时的证据，不是推演）」的表。
+两路独立检视把它**推翻**了——三条错的：
+
+| 规格原文 | 实测 |
+| --- | --- |
+| 「参考侧的 `misa` 还含 `Zicclsm` / `Zifencei` 位」 | 参考侧 = **0x40141104**（多出 **S / U** 两位）⇒ **没有** Z 扩展位 |
+| 「参考侧带 **IALIGN=32**（bit 29），我们不填 ⇒ 覆盖不等价」 | 两侧 IALIGN 字段**都是 0** ⇒ **逐位相同** ⇒ 真正的差异是 `misa` 的**写**语义 |
+| 「`MPP` 两侧读回都是 0 ⇒ **不构成缺口**」 | 探针测在**陷阱之外**且**没有写** ⇒ `MPP` 是 **WARL**，**陷入时**才被写成 M ⇒ 陷阱里读：参考侧 `0x0018_0080` / 我们 `0x0000_0080` |
+
+⇒ **方法论**：① 探针要测在**正确的上下文**里（WARL 字段必须在架构会写它的地方
+测）；② 「实测」两个字不保证它是**对的**——基线表要连「测在哪」一起写；
+③ **判决一致 ≠ 覆盖等价**：13 条 `rv32mi` 里有 **3 条**是**空洞的一致**
+（`csr` / `ma_fetch` / `instret_overflow`）⇒ 已逐条标注（**D-96**）；
+④ **harness 只编译一份镜像给两侧** ⇒ env 常量漂移**不会**表现为分歧，只会
+**悄悄换掉被测程序** ⇒ 已做成**硬门禁**（当场抓到 `PMP_A` `0x0c` vs 上游 `0x18`）。
+
+### 三、门禁（数字全部**从当前树重算**）
+
+- `cargo fmt --all -- --check` ✅ · `cargo clippy --workspace --all-targets -D warnings` ✅
+- `cargo test --workspace --no-fail-fast --lib --tests` **1033 全绿**
+  （契约 104 + kernel lib 813 + golden runner 14 + kernel 集成 102）
+  ⚠️ 基线 `b014fed` = 98 + 801 + 11 + 102 = **1012** ⇒ 本批 **+21** 条
+- `tools/check-front.sh` **228 用例 / 39 suite** ✅ ·
+  `tools/build-wasm.sh` + `node tools/wasm-smoke.mjs` ✅ ·
+  `tools/browser-verify.mjs`（真 Chrome）✅ ·
+  `tools/golden-run.sh --self-check` 三个对照一致 + `--keep-going` **64/64** ✅
+  （`total=64 ok=64 now-passing=0 expected-gap=0 mismatch=0 no-verdict=0 build-failed=0`）
+- → 检视归档见 `REVIEWS.md` **§3.12** · 冻结规格见
+  `docs/detailed-design/STAGE-6_CSR_Golden_Coverage.md`
 
 ## v0.20.0 变更摘要
 
@@ -172,7 +236,8 @@
 ### 二、两个位号空间：`line`（1/2/3）与 `mie` 位（11/7）
 
 平台的中断线是 `1 / 2 / 3`，RISC-V 的 `mie` 用标准位号 `11`（`MEIE`）/ `7`
-（`MTIE`）。两套编号，**唯一**互译点是契约层的 `mie_bit_for_line`。
+（`MTIE`）。两套编号，**唯一**互译点是契约层的 `std_irq_bit_for_line`
+（旧名 `mie_bit_for_line` 保留为别名，v0.21 改名）。
 
 ⚠️ **`mie` 的值是位图不是位号**：写 `mie = 1`（把位号当值）⇒ **一行都不
 使能**；要使能线 1 得写 `1 << 11 = 0x800`。
@@ -1369,7 +1434,7 @@ V-A 的 6 条中危里，**5 条不是实现写错**，而是变异测试时「�
 | --- | --- | --- |
 | 最小 env | `tests/golden/env/riscv_test.h` · `link.ld` | 零 CSR 的 `tohost` 判决协议 |
 | 变异金丝雀 | `tests/golden/canary/fail_3.S` | 自包含的**故意失败**用例，两侧都必须报 `FAIL 3` |
-| 语料清单 | `tests/golden/corpus.txt` | 51 例的权威清单（含 `march` 与 `status`） |
+| 语料清单 | `tests/golden/corpus.txt` | **64** 例的权威清单（含 `march` / `status` / `env` 变体；v0.21 起机器级语料走 `csr` env 变体） |
 | 候选侧 runner | `crates/kernel/src/bin/riscv-golden.rs` | M-06 加载 → M-14 总线 → M-13 ISS，按 HTIF 协议判判决 |
 | 对拍脚本 | `tools/golden-run.sh` | 两侧跑**同一个 ELF**，比对判决 |
 | 依赖获取 | `tools/fetch-golden-deps.sh` | 拉 riscv-tests + 交叉工具链（**仓库外**） |
