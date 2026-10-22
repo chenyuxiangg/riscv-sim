@@ -641,3 +641,78 @@ impl DropRange {
         self.seq_end <= self.seq_start
     }
 }
+
+/// One disassembled instruction (M-11, STAGE-5 §3.3).
+///
+/// The **decoding** is M-13's job — this type only carries the
+/// rendered result, so there is exactly one decoder in the platform
+/// (STAGE-5 裁决 A). `mnemonic` is the **ISA** mnemonic: no
+/// pseudo-instruction aliases (`mv` / `li` / `ret`), and a compressed
+/// instruction keeps its `c.` prefix (STAGE-5 裁决 C).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisasmEntryDto {
+    /// Address the instruction was fetched from.
+    pub addr: u32,
+    /// Machine code, **original encoding** — for a compressed
+    /// instruction this is the 16-bit original, not the expanded
+    /// 32-bit form (matches M-13's `Decoded::raw`).
+    pub code: u32,
+    /// ISA mnemonic, e.g. `"addi x1, x0, 42"` / `"c.addi sp, -16"`.
+    pub mnemonic: String,
+    /// Instruction width in bytes (2 for compressed, 4 for standard).
+    pub width: u8,
+}
+
+impl Default for DisasmEntryDto {
+    fn default() -> Self {
+        Self {
+            addr: 0,
+            code: 0,
+            mnemonic: String::new(),
+            width: 0,
+        }
+    }
+}
+
+/// Which buffer an export reads from (M-11 / M-19, STAGE-5 裁决 D).
+///
+/// The **routing** happens in the host assembly layer, so neither M-11
+/// nor M-19 has to depend on the other: `Waveform` reads M-19's edge
+/// ring, `Execution` reads M-11's own instruction/memory trace ring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TraceSource {
+    /// Waveform edges — data source is M-19's ring (closes D-50).
+    Waveform,
+    /// Execution trace (instructions + memory accesses) — data source
+    /// is M-11's trace buffer (closes D-51).
+    Execution,
+}
+
+impl Default for TraceSource {
+    fn default() -> Self {
+        Self::Execution
+    }
+}
+
+/// Export format (STAGE-5 §3.3).
+///
+/// ⚠️ **Not every combination is legal**: `Vcd` is only meaningful for
+/// [`TraceSource::Waveform`] (VCD models *signals changing over time*),
+/// and `Json` is only produced for [`TraceSource::Execution`]. An
+/// illegal combination is **rejected** with `E_CTX-03` — the kernel
+/// never silently substitutes another format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TraceFormat {
+    /// Comma-separated values.
+    Csv,
+    /// Value Change Dump — **only** for [`TraceSource::Waveform`].
+    Vcd,
+    /// JSON — **only** for [`TraceSource::Execution`].
+    Json,
+}
+
+impl Default for TraceFormat {
+    fn default() -> Self {
+        Self::Csv
+    }
+}

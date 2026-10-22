@@ -36,6 +36,12 @@
 //! `docs/detailed-design/STAGE-2_Contract_V2.md` — read that file
 //! before changing anything in this crate: every variant name, field
 //! name and wire representation listed there is **frozen**.
+//!
+//! Contract **v3** adds the M-11 debugging surface (disassembly,
+//! source lookup, trace export). Its frozen spec is
+//! `docs/detailed-design/STAGE-5_Symbol_Disasm_Trace.md` §3 — the
+//! same rule applies: every variant name, field name and wire
+//! representation listed there is **frozen**.
 
 // MVP: docs on every public variant field are TODO. PROGRESS.md §7
 // 2026-10-19 decision: workspace `missing_docs = "allow"` until each
@@ -53,6 +59,17 @@ pub mod snapshot;
 /// Protocol schema version. Bump on every breaking change; consumers
 /// negotiate via the `schema_version` field in every [`protocol::Message`].
 ///
+/// **v3** (STAGE-5, `docs/detailed-design/STAGE-5_Symbol_Disasm_Trace.md`):
+/// - new commands `Disasm` / `ResolveLine` / `ExportTrace` /
+///   `SetTraceEnabled`;
+/// - new events `Disasm` / `SourceLocation` / `TraceExport` /
+///   `TraceState`;
+/// - new DTOs `model::DisasmEntryDto`, `model::TraceSource`,
+///   `model::TraceFormat`.
+///
+/// The v3 shape is **frozen** by the STAGE-5 spec §3 — read it before
+/// changing anything about these variants.
+///
 /// **v2** (contract v2, spec `docs/detailed-design/STAGE-2_Contract_V2.md`):
 /// - the virtual-time fields travel as **decimal strings** (see
 ///   [`numstr`]) — a `u64` becomes a JSON number, and a JSON number is
@@ -63,4 +80,4 @@ pub mod snapshot;
 ///   variant `WaveformDelta` → `WaveformHistory` (D-34);
 /// - `ErrorFamily::Protocol` (`"PROTO"`) — the family the LLD's
 ///   `E_PROTO-01`..`E_PROTO-08` codes belong to.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;

@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    Breakpoint, DeltaRegister, Project, SimState, Watchpoint, WaveformHistory, WriteSize,
+    Breakpoint, DeltaRegister, DisasmEntryDto, Project, SimState, TraceFormat, TraceSource,
+    Watchpoint, WaveformHistory, WriteSize,
 };
 use crate::SCHEMA_VERSION;
 
@@ -207,6 +208,63 @@ pub enum CommandPayload {
     Admin {
         op: AdminOp,
     },
+    /// Disassemble a run of instructions (M-11).
+    ///
+    /// The reply is [`EventPayload::Disasm`]. The sequence may be
+    /// **shorter** than `count` — an unmapped address ends the walk
+    /// early (truncation, not an error; LLD 11-3).
+    ///
+    /// Added in contract v3 (STAGE-5).
+    Disasm {
+        /// Start address.
+        addr: u32,
+        /// Maximum number of instructions to return.
+        count: u32,
+    },
+    /// Resolve an address to a source location (M-11).
+    ///
+    /// The reply is [`EventPayload::SourceLocation`]. The reply carries
+    /// **two distinct "no answer" states** (LLD 11-4): no DWARF at
+    /// all ⇒ `file` empty and `line == 0`; DWARF present but the
+    /// address misses the line table ⇒ `file` empty and
+    /// `line == u32::MAX`.
+    ///
+    /// Added in contract v3 (STAGE-5).
+    ResolveLine {
+        /// Address to resolve (usually the PC).
+        addr: u32,
+    },
+    /// Export a trace (M-11 / M-19).
+    ///
+    /// The reply is [`EventPayload::TraceExport`]. The **source**
+    /// selects the buffer and the **format** selects the serializer;
+    /// an illegal combination is rejected with `E_CTX-03`. The host
+    /// assembly layer routes `source` to M-19 or M-11, so neither
+    /// module depends on the other (STAGE-5 裁决 D).
+    ///
+    /// Added in contract v3 (STAGE-5).
+    ExportTrace {
+        /// Which buffer to read from.
+        source: TraceSource,
+        /// Output format.
+        format: TraceFormat,
+        /// Resume point, in **entries** (0 for the first chunk).
+        offset: u64,
+        /// Maximum number of entries in this chunk (0 = kernel default).
+        limit: u32,
+    },
+    /// Turn execution-trace recording on or off (M-11, review R9).
+    ///
+    /// The reply is [`EventPayload::TraceState`]. While recording is
+    /// off the kernel records **nothing** (zero overhead); while it is
+    /// on and the simulation is running, the front end shows the
+    /// slowdown notice (LLD §6.1).
+    ///
+    /// Added in contract v3 (STAGE-5).
+    SetTraceEnabled {
+        /// True = record, false = stop recording.
+        enabled: bool,
+    },
 }
 
 impl Default for CommandPayload {
@@ -325,6 +383,60 @@ pub enum EventPayload {
     LinkDown {
         link_id: String,
     },
+    /// The result of a `Disasm` command (M-11).
+    ///
+    /// Added in contract v3 (STAGE-5).
+    Disasm {
+        /// The instruction rows, in address order.
+        ///
+        /// May be **shorter** than the requested count — that is
+        /// truncation (the walk hit an unmapped address), not an error.
+        entries: Vec<DisasmEntryDto>,
+    },
+    /// The result of a `ResolveLine` command (M-11).
+    ///
+    /// Added in contract v3 (STAGE-5).
+    SourceLocation {
+        /// The address that was resolved.
+        addr: u32,
+        /// Source file path (empty when there is no answer).
+        file: String,
+        /// 1-based line number — `0` means "no DWARF at all",
+        /// `u32::MAX` means "DWARF present but the address missed the
+        /// line table" (LLD 11-4).
+        line: u32,
+    },
+    /// One chunk of an exported trace (M-11 / M-19).
+    ///
+    /// Added in contract v3 (STAGE-5).
+    TraceExport {
+        /// The source that was read (echo).
+        source: TraceSource,
+        /// The format that was produced (echo).
+        format: TraceFormat,
+        /// Start of this chunk, in entries.
+        offset: u64,
+        /// Start of the next chunk — pass it back as `offset` to
+        /// resume (the continuation protocol, LLD 11-7).
+        next_offset: u64,
+        /// Total number of entries that match the filter.
+        total: u64,
+        /// Serialized size of this chunk, in bytes.
+        bytes: u64,
+        /// The chunk content.
+        chunk: String,
+    },
+    /// The state of execution-trace recording (M-11).
+    ///
+    /// Added in contract v3 (STAGE-5).
+    TraceState {
+        /// Whether recording is currently on.
+        enabled: bool,
+        /// Number of entries currently buffered.
+        len: u32,
+        /// How many entries were dropped by the ring overflow.
+        dropped: u64,
+    },
 }
 
 impl Default for EventPayload {
@@ -372,9 +484,11 @@ mod tests {
     /// The schema version is the contract's single version knob — the
     /// front end's JS mirror hard-codes the same number, and the
     /// `contract.test.mjs` gate compares the two.
+    ///
+    /// **v3** (STAGE-5) adds the M-11 debugging surface.
     #[test]
-    fn the_schema_version_is_two() {
-        assert_eq!(crate::SCHEMA_VERSION, 2);
+    fn the_schema_version_is_three() {
+        assert_eq!(crate::SCHEMA_VERSION, 3);
     }
 
     /// The three commands contract v2 adds (D-32 gaps 1, 2, 3).
@@ -507,6 +621,164 @@ mod tests {
         let msg = Message::command(7, CommandPayload::Nop);
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
-        assert_eq!(json["schema_version"], 2);
+        assert_eq!(json["schema_version"], 3);
+    }
+
+    // -----------------------------------------------------------------
+    // Contract v3 — the M-11 debugging surface (STAGE-5 §3).
+    //
+    // ⚠️ These shapes are **frozen** by the STAGE-5 spec: every variant
+    // name and field name below is part of the wire format, and the
+    // front end's JS mirror (`front/lib/message.js`) spells them the
+    // same way. Changing one without the other breaks the gate.
+    // -----------------------------------------------------------------
+
+    /// The four commands contract v3 adds (STAGE-5 §3.1).
+    #[test]
+    fn the_v3_commands_exist_with_their_frozen_field_names() {
+        let disasm = CommandPayload::Disasm {
+            addr: 0x1000,
+            count: 8,
+        };
+        assert_eq!(
+            serde_json::to_value(&disasm).expect("json"),
+            serde_json::json!({ "Disasm": { "addr": 4096, "count": 8 } })
+        );
+
+        let resolve = CommandPayload::ResolveLine { addr: 0x1004 };
+        assert_eq!(
+            serde_json::to_value(&resolve).expect("json"),
+            serde_json::json!({ "ResolveLine": { "addr": 4100 } })
+        );
+
+        let export = CommandPayload::ExportTrace {
+            source: TraceSource::Execution,
+            format: TraceFormat::Csv,
+            offset: 16,
+            limit: 32,
+        };
+        assert_eq!(
+            serde_json::to_value(&export).expect("json"),
+            serde_json::json!({ "ExportTrace": {
+                "source": "Execution", "format": "Csv",
+                "offset": 16, "limit": 32 } })
+        );
+
+        let enable = CommandPayload::SetTraceEnabled { enabled: true };
+        assert_eq!(
+            serde_json::to_value(&enable).expect("json"),
+            serde_json::json!({ "SetTraceEnabled": { "enabled": true } })
+        );
+    }
+
+    /// The four events contract v3 adds (STAGE-5 §3.2).
+    #[test]
+    fn the_v3_events_exist_with_their_frozen_field_names() {
+        let disasm = EventPayload::Disasm {
+            entries: vec![crate::model::DisasmEntryDto {
+                addr: 0x1000,
+                code: 0x0FF00093,
+                mnemonic: "addi x1, x0, 255".to_string(),
+                width: 4,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&disasm).expect("json"),
+            serde_json::json!({ "Disasm": { "entries": [
+                { "addr": 4096, "code": 267387027,
+                  "mnemonic": "addi x1, x0, 255", "width": 4 } ] } })
+        );
+
+        let source = EventPayload::SourceLocation {
+            addr: 0x1000,
+            file: "demo.c".to_string(),
+            line: 7,
+        };
+        assert_eq!(
+            serde_json::to_value(&source).expect("json"),
+            serde_json::json!({ "SourceLocation": {
+                "addr": 4096, "file": "demo.c", "line": 7 } })
+        );
+
+        let export = EventPayload::TraceExport {
+            source: TraceSource::Waveform,
+            format: TraceFormat::Vcd,
+            offset: 0,
+            next_offset: 10,
+            total: 42,
+            bytes: 128,
+            chunk: "$var".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&export).expect("json"),
+            serde_json::json!({ "TraceExport": {
+                "source": "Waveform", "format": "Vcd", "offset": 0,
+                "next_offset": 10, "total": 42, "bytes": 128,
+                "chunk": "$var" } })
+        );
+
+        let state = EventPayload::TraceState {
+            enabled: true,
+            len: 5,
+            dropped: 2,
+        };
+        assert_eq!(
+            serde_json::to_value(&state).expect("json"),
+            serde_json::json!({ "TraceState": {
+                "enabled": true, "len": 5, "dropped": 2 } })
+        );
+    }
+
+    /// The **two distinct "no answer" states** of a source lookup are
+    /// part of the wire format (LLD 11-4): `line == 0` means "no DWARF
+    /// at all", `line == u32::MAX` means "DWARF present but the address
+    /// missed the line table". Collapsing them would lose the
+    /// distinction the front end needs to render "no source info"
+    /// differently from "not this line".
+    #[test]
+    fn the_source_location_distinguishes_degraded_from_missed() {
+        let degraded = EventPayload::SourceLocation {
+            addr: 0x1000,
+            file: String::new(),
+            line: 0,
+        };
+        assert_eq!(serde_json::to_value(&degraded).expect("json")["SourceLocation"]["line"], 0);
+
+        let missed = EventPayload::SourceLocation {
+            addr: 0x1000,
+            file: String::new(),
+            line: u32::MAX,
+        };
+        assert_eq!(
+            serde_json::to_value(&missed).expect("json")["SourceLocation"]["line"],
+            serde_json::json!(4_294_967_295u64)
+        );
+    }
+
+    /// The export enums are pinned: `Vcd` is waveform-only and `Json` is
+    /// execution-only (STAGE-5 裁决 D). The kernel rejects the illegal
+    /// combinations — but the **wire names** must not drift.
+    #[test]
+    fn the_export_enums_are_pinned() {
+        assert_eq!(
+            serde_json::to_value(TraceSource::Waveform).expect("json"),
+            serde_json::json!("Waveform")
+        );
+        assert_eq!(
+            serde_json::to_value(TraceSource::Execution).expect("json"),
+            serde_json::json!("Execution")
+        );
+        assert_eq!(
+            serde_json::to_value(TraceFormat::Csv).expect("json"),
+            serde_json::json!("Csv")
+        );
+        assert_eq!(
+            serde_json::to_value(TraceFormat::Vcd).expect("json"),
+            serde_json::json!("Vcd")
+        );
+        assert_eq!(
+            serde_json::to_value(TraceFormat::Json).expect("json"),
+            serde_json::json!("Json")
+        );
     }
 }

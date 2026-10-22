@@ -272,7 +272,26 @@ TraceExport:    "debug.export"
 TraceState:     "debug.trace"
 ```
 
-⚠️ 主题前缀 `debug.` 是**新增命名空间**（既有前缀：`sim.` / `waveform.` / `snapshot.` / `link.` / `tick` / `halted` / `error` / `memory.read`）⇒ 前端的 `EVENT_TOPIC` 与 Rust 契约层的「变体 → topic」映射表**必须同时改**，且**逐字一致**（v0.17 批立的「表驱动、唯一真相 = `front/lib/message.js` 的 `EVENT_TOPIC`」纪律继续适用）。
+⚠️ 主题前缀 `debug.` 是**新增命名空间**（既有前缀：`sim.` / `waveform.` / `snapshot.` / `link.` / `tick` / `halted` / `error` / `memory.read`）。
+
+> ⚠️ **订正（对着代码现状核过）**：**Rust 侧没有集中的「变体 → topic」映射表**——
+> 唯一真相是**前端 `front/lib/message.js` 的 `EVENT_TOPIC`**（v0.17 批立的
+> 表驱动纪律）。Rust 侧只有**零散的 topic 常量**（例：
+> `kernel_host::TOPIC_REGISTERS = "sim.registers"`）。
+>
+> ⇒ **两侧一致性的保证方式**（不是「同一张表」，是「同一个字面量 + 各自被测试钉住」）：
+> 1. **Lane D 在 `kernel_host` 里定义 4 个常量**，值必须与前端 `EVENT_TOPIC`
+>    **逐字相同**：
+>    ```rust
+>    pub const TOPIC_DISASM: &str = "debug.disasm";
+>    pub const TOPIC_SOURCE: &str = "debug.source";
+>    pub const TOPIC_EXPORT: &str = "debug.export";
+>    pub const TOPIC_TRACE: &str = "debug.trace";
+>    ```
+> 2. **Rust 侧**一条测试断言这 4 个常量的字面量；
+> 3. **前端侧**一条测试断言 `EVENT_TOPIC` 里这 4 个键的值；
+> 4. 两边都改错时，**各自的测试会红**；两边改成**不同的**字面量时，
+>    本规格 §5.2 的验收 #22 与检视轮负责抓。
 
 ---
 
