@@ -95,14 +95,14 @@
 //!
 //! ## 会话快照（契约层的 `UartStateDto`）
 //!
-//! ⚠️ 契约层的 DTO 是**冻结**的，只有 `tx` / `rx` / `status` /
-//! `irq_line` / `now_ps` 五个字段，所以：
+//! ⚠️ **v0.24 起**：契约层的 `UartStateDto` **多了 ns16550 的七个
+//! 寄存器**（`LCR` / `IER` / `FCR` / `MCR` / `SCR` / `DLL` / `DLM`）
+//! —— 会话快照的版本因此 **1 → 2**（破坏性变更）。快照带的是：
 //!
 //! - `tx` = 捕获环的**队头**（环非空时 = 那个字节；环空时 = `None`）；
 //! - `status` = **LSR 的值**（ns16550 语义，`0x00..=0x7F`）；
-//! - `LCR` / `IER` / `FCR` / `MCR` / `SCR` / `DLL` / `DLM` **进不了**快照
-//!   （DTO 没有字段）⇒ 还原之后这些寄存器回到初值。这是**已知**的
-//!   取舍，记在 v0.23 批的遗留问题里。
+//! - 那**七个寄存器**的**原值**（含 `LCR` 的 `DLAB` 位 —— 它决定
+//!   `0x0`/`0x1` 是 `THR`/`IER` 还是 `DLL`/`DLM`）。
 //!
 //! ⚠️ LSR 的 bit5 是**导出值**（捕获环当时没满 ⇒ 1），而还原时环里只有
 //! 一个字节 ⇒ bit5 仍是 1 ⇒ 往返**逐字段相等**。唯一的例外是「导出时
@@ -820,16 +820,20 @@ impl Peripheral for Uart16550 {
     ///
     /// Every field the UART owns **that the contract can carry** is
     /// exported: the RX byte, the **head** of the TX capture ring, the
-    /// `LSR`, the IRQ line and the peripheral's **authoritative virtual
-    /// time**.
+    /// `LSR`, the IRQ line, the peripheral's **authoritative virtual
+    /// time** and — **since v0.24** — the ns16550 registers `LCR` /
+    /// `IER` / `FCR` / `MCR` / `SCR` / `DLL` / `DLM` (D-118).
     ///
     /// ⚠️ `now_ps` is not decoration: it is the timestamp the probe
     /// reports are stamped with. Losing it would make every edge that
     /// follows the restore land on the wrong point of the time axis.
     ///
-    /// ⚠️ The `LCR` / `IER` / `FCR` / `MCR` / `SCR` / `DLL` / `DLM`
-    /// registers are **not** in the snapshot: the contract's DTO has no
-    /// field for them (the contract is frozen for this batch).
+    /// ⚠️ **`LCR` 的 `DLAB` 位必须带**（它是 `LCR` 的一部分）：`DLAB`
+    /// 决定 `0x0` / `0x1` 是 `THR`/`IER` 还是 `DLL`/`DLM` ⇒ 少了这一位，
+    /// 还原出来的 UART 处在**错误的寄存器映射**上。
+    ///
+    /// ⚠️ **`LSR` 不还原原值** —— 它是**重算**出来的（见
+    /// [`Uart16550::restore_session_state`]）。
     fn session_state(&self) -> Option<PeripheralSessionState> {
         Some(PeripheralSessionState::Uart(UartStateDto {
             id: self.id.clone(),
@@ -838,6 +842,14 @@ impl Peripheral for Uart16550 {
             status: u32::from(self.line_status()),
             irq_line: self.irq_line,
             now_ps: self.now_ps,
+            // ---- ns16550 的七个寄存器（v0.24 · D-118）----
+            lcr: self.lcr,
+            ier: self.ier,
+            fcr: self.fcr,
+            mcr: self.mcr,
+            scr: self.scr,
+            dll: self.dll,
+            dlm: self.dlm,
         }))
     }
 
@@ -848,6 +860,13 @@ impl Peripheral for Uart16550 {
     /// carries (bit 2 = RX overrun, bit 3 = TX capture overrun). The
     /// recomputed value is what the guest reads, so restoring the raw
     /// number would let the register contradict its own FIFOs.
+    ///
+    /// ⚠️ The seven ns16550 registers **are** restored verbatim (v0.24 ·
+    /// D-118) — they are plain storage, no recomputation involved.
+    ///
+    /// ⚠️ **`FCR` 还原时不触发它的复位位**：`FCR` 的 bit1 / bit2 是
+    /// 「复位 RX / TX FIFO」，而 FIFO 的内容**由载荷给**（`tx` / `rx`）
+    /// ⇒ 还原时若把复位位也执行一遍，刚还原回来的字节会被**抹掉**。
     ///
     /// ⚠️ The UART's **own** rules are checked here as well
     /// ([`Uart16550::check_status`]) — **defensive redundancy**: the gate
@@ -867,6 +886,16 @@ impl Peripheral for Uart16550 {
         };
         super::check_same_id(&self.id, &s.id)?;
         self.check_status(s)?;
+        // ---- ns16550 的七个寄存器（v0.24 · D-118）----
+        // ⚠️ 顺序：**先**寄存器、**后** FIFO —— `FCR` 是按「纯存储」
+        // 还原（不执行它的复位位），所以这里不会把刚还原的 FIFO 抹掉。
+        self.lcr = s.lcr;
+        self.ier = s.ier;
+        self.fcr = s.fcr;
+        self.mcr = s.mcr;
+        self.scr = s.scr;
+        self.dll = s.dll;
+        self.dlm = s.dlm;
         self.tx.clear();
         if let Some(byte) = s.tx {
             self.tx.push(byte);
@@ -1374,6 +1403,8 @@ mod tests {
             status: 0x01,
             irq_line: 4,
             now_ps: 0,
+
+            ..UartStateDto::default()
         });
         let err = u
             .validate_session_state(&bad)
@@ -1395,6 +1426,8 @@ mod tests {
             status: 0x8000,
             irq_line: 4,
             now_ps: 0,
+
+            ..UartStateDto::default()
         });
         let err = u
             .validate_session_state(&bad)

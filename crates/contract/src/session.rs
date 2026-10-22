@@ -50,10 +50,20 @@
 //!
 //! # Compatibility
 //!
-//! Adding this module is **purely additive**: no existing type, field or
-//! trait method changed shape. The **frozen** [`crate::snapshot`]
-//! module is reused as-is — its `EngineSnapshotDto` is segment 1, and
-//! its shape is **not** touched.
+//! When this module was **added** it was purely additive: no existing
+//! type, field or trait method changed shape. The **frozen**
+//! [`crate::snapshot`] module is reused as-is — its `EngineSnapshotDto`
+//! is segment 1, and its shape is **not** touched.
+//!
+//! ⚠️ **v2 是破坏性变更**（v0.24 · 冻结规格 STAGE-9 裁决 F）：`UartStateDto`
+//! 加了 ns16550 的七个寄存器，`PeripheralSessionState` 加了 `Clint` /
+//! `Plic` 两个变体，`M15PeriphDto` 加了 `clints` / `plics` 两组 ⇒
+//! [`SESSION_SNAPSHOT_SCHEMA_VERSION`] **1 → 2**。
+//!
+//! ⚠️ **为什么旧载荷「读得回来」并不等于「兼容」**：一个 v1 载荷里的
+//! UART **没有**那七个寄存器 ⇒ 还原之后它们回到初值 ⇒ 还原出来的会话
+//! 与采快照的那次**不是同一台硬件**（波特率除数丢了）⇒ 那是**丢状态**，
+//! 所以版本必须**显式**升，让旧载荷被**明确地**拒掉。
 
 use serde::{Deserialize, Serialize};
 
@@ -69,7 +79,15 @@ use crate::snapshot::{EngineSnapshotDto, SNAPSHOT_FAMILY, SNAPSHOT_SCHEMA_VERSIO
 ///
 /// ⚠️ **This is not the same number as** [`crate::snapshot::SNAPSHOT_SCHEMA_VERSION`]
 /// — that one governs the **M-12/M-17 segment** reused as segment 1.
-pub const SESSION_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+///
+/// ⚠️ **v2**（v0.24 批 · 冻结规格 STAGE-9 裁决 F）：`UartStateDto` 加了
+/// ns16550 的**七个寄存器**，`PeripheralSessionState` 加了 `Clint` /
+/// `Plic` **两个变体**，`M15PeriphDto` 加了 `clints` / `plics` **两组**
+/// ⇒ **DTO 的形状变了** ⇒ **破坏性变更** ⇒ 版本必须**显式**升，
+/// 不能靠「反序列化能读回来」蒙混过关（旧载荷读得回来，但**含义**
+/// 已经不同：一个 v1 载荷里的 UART **没有**那七个寄存器，还原之后
+/// 那七个寄存器会回到初值 —— 那是**丢状态**，不是**兼容**）。
+pub const SESSION_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 /// Number of pins in a **GPIO bank** — the single landing spot for that
 /// number.
@@ -193,6 +211,9 @@ pub struct M14MapDto {
 }
 
 /// UART internal state — segment 4.
+///
+/// ⚠️ **v2 多了 ns16550 的七个寄存器**（`LCR` / `IER` / `FCR` / `MCR` /
+/// `SCR` / `DLL` / `DLM`）—— 见本类型下面那七个字段的说明。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UartStateDto {
     /// Peripheral id (the key used to match the live instance).
@@ -202,12 +223,79 @@ pub struct UartStateDto {
     /// Byte waiting to be read by the guest.
     pub rx: Option<u8>,
     /// Status register.
+    ///
+    /// ⚠️ **它就是 `LSR` 的值**（ns16550 语义，`0x00..=0x7F`）—— 不是
+    /// 「状态字」那种自定义含义。
     pub status: u32,
     /// IRQ line number.
     pub irq_line: u16,
     /// Peripheral's authoritative virtual timestamp — **decimal string**.
     #[serde(with = "crate::numstr::u64_decimal")]
     pub now_ps: u64,
+    // ----------------------------------------------------------------
+    // ns16550 的七个寄存器（v0.24 · D-118）
+    // ----------------------------------------------------------------
+    //
+    // ⚠️ **这七个都是**字节宽**（8 位）的 ns16550 寄存器 ⇒ 线上是
+    // `0..=255` 的 JSON 数字。
+    //
+    // ⚠️ **为什么它们必须进快照**：它们是 guest **写过的**寄存器状态
+    // —— `LCR` 决定数据字的宽度与停止位，`IER` 决定中断使能，`FCR`
+    // 决定 FIFO 行为，`MCR` / `SCR` 是 guest 可写的控制位，`DLL` /
+    // `DLM` 是**波特率除数**。还原之后这些全回到初值 ⇒ guest 看到的
+    // 硬件**与采快照的那一刻不是同一台硬件**（除数丢了 ⇒ 波特率变了）。
+    //
+    /// Line control register (`LCR @ 0x3`) — **bit 7 是 `DLAB`**。
+    ///
+    /// ⚠️ **`DLAB` 位本身必须被还原**：`DLAB = 1` 时 `0x0` / `0x1` 是
+    /// `DLL` / `DLM`，否则是 `THR` / `IER` ⇒ 少了这一位，还原出来的
+    /// UART 处在**错误的寄存器映射**上（guest 写 `0x0` 会把字节发出去，
+    /// 而不是写除数锁存器）。
+    pub lcr: u8,
+    /// Interrupt enable register (`IER @ 0x1`) — `DLAB` 置位时这个
+    /// 偏移是 `DLM`。
+    pub ier: u8,
+    /// FIFO control register (`FCR @ 0x2`).
+    pub fcr: u8,
+    /// Modem control register (`MCR @ 0x4`).
+    pub mcr: u8,
+    /// Scratch register (`SCR @ 0x7`).
+    pub scr: u8,
+    /// Divisor latch **low** byte (`DLL @ 0x0`, while `DLAB` is set).
+    pub dll: u8,
+    /// Divisor latch **high** byte (`DLM @ 0x1`, while `DLAB` is set).
+    pub dlm: u8,
+}
+
+/// The all-zero state of a UART — the state a freshly constructed UART
+/// is in.
+///
+/// ⚠️ **为什么有这个实现**：v2 给 [`UartStateDto`] 加了七个字段 ⇒
+/// **每个**结构体字面量都得跟着改，否则整仓编译不过（这正是「加字段」
+/// 的真实代价）。有了 `Default`，夹具只要写
+/// `..UartStateDto::default()` 就能只关心自己真正在测的那几个字段。
+///
+/// ⚠️ **这不是「可以随便用默认值」的许可**：`id` 是空串 ⇒ 一个
+/// **没有 id** 的 UART 状态在恢复路径上必然被拒（匹配不上任何活实例）
+/// —— 这是**故意**的：默认值是**夹具的省事**，不是**载荷的合法形态**。
+impl Default for UartStateDto {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            tx: None,
+            rx: None,
+            status: 0,
+            irq_line: 0,
+            now_ps: 0,
+            lcr: 0,
+            ier: 0,
+            fcr: 0,
+            mcr: 0,
+            scr: 0,
+            dll: 0,
+            dlm: 0,
+        }
+    }
 }
 
 /// GPIO bank internal state — segment 4.
@@ -250,6 +338,135 @@ pub struct TimerStateDto {
     pub mtimecmp: u64,
 }
 
+/// CLINT internal state — segment 4 (v0.24 · D-117).
+///
+/// ⚠️ **形状由 M-15 定，契约层只承载**（冻结规格 STAGE-9 裁决 F）。
+///
+/// ⚠️ **两个数组都是「每个 hart 一份」** ⇒ 数组的**长度**就是 hart 的
+/// 数量 ⇒ 载荷自己就能说清「我描述了几个 hart」，恢复路径因此能拿它
+/// 与**器件自己的** hart 数对照（数量不自洽的载荷必须被拒）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClintStateDto {
+    /// Peripheral id.
+    pub id: String,
+    /// 每个 hart 的 `msip` 寄存器**原始值**（bit 0 = 软件中断挂起位）。
+    ///
+    /// ⚠️ **带的是原始值，不是「挂起与否」这个派生位**：原始寄存器里
+    /// 还有别的位，丢掉它们会让还原出来的寄存器**与采快照时不一样**
+    /// （guest 读回来看到的值变了）。挂起位仍然是 bit 0 ⇒ 平台照旧
+    /// 按 bit 0 判定。
+    pub msip: Vec<u32>,
+    /// 每个 hart 的 `mtimecmp`（**周期**，**十进制字符串**）。
+    ///
+    /// ⚠️ **单位是周期不是 ps**（CLINT 的寄存器是周期计数器）；线上仍
+    /// 走十进制字符串 —— 周期数与 ps 一样是**随仿真时间增长的量**，
+    /// 走 JSON 数字会在 2^53 之后丢精度。
+    #[serde(with = "u64_decimal_list")]
+    pub mtimecmp_cycles: Vec<u64>,
+    /// `mtime`（**周期**，**十进制字符串**）—— 自由运行计数器的**当前值**。
+    ///
+    /// ⚠️ **必须带它**：`mtime` 的真相源是「锚点 + 虚拟时间」，锚点本身
+    /// 不是寄存器（guest 看不见它）⇒ 不带 `mtime` 就只能靠 `now_ps`
+    /// 反推，还原出来的 `mtime` 会与采快照时**不一样**。
+    #[serde(with = "crate::numstr::u64_decimal")]
+    pub mtime_cycles: u64,
+    /// 器件的权威虚拟时间（ps）—— **十进制字符串**。
+    #[serde(with = "crate::numstr::u64_decimal")]
+    pub now_ps: u64,
+}
+
+/// PLIC internal state — segment 4 (v0.24 · D-117).
+///
+/// ⚠️ **形状由 M-15 定，契约层只承载**（冻结规格 STAGE-9 裁决 F）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlicStateDto {
+    /// Peripheral id.
+    pub id: String,
+    /// 每个中断源的优先级（**按源号下标**）。
+    ///
+    /// ⚠️ **下标 0 是 PLIC 的保留源**（QEMU 语义：claim 从 1 开始扫，
+    /// 源 0 永远不会被交付）—— 它占一个槽位是**器件本身的事实**
+    /// （器件的优先级表就有那么多个槽）⇒ 快照**不凭空多造**一个源，
+    /// 也不**少带**一个槽位 ⇒ 长度必须**恰好**等于器件的源数
+    /// （那是**器件级**的检查，契约层查不了 —— 契约层不知道这个 PLIC
+    /// 有多少个源）。
+    pub priorities: Vec<u8>,
+    /// 每个 context 的**使能位图**（每个 `u32` 覆盖 32 个源）。
+    ///
+    /// ⚠️ **外层按 context、内层按字**（每 32 个源一个字）⇒ 外层长度
+    /// = context 数、内层长度 = 位图的字数 ⇒ 内层长度必须与
+    /// [`Self::pending`] 的长度**一致**（两者是同一张位图的分片）。
+    pub enables: Vec<Vec<u32>>,
+    /// 每个 context 的优先级门限。
+    pub thresholds: Vec<u8>,
+    /// **挂起位图**（每 32 个源一个字）。
+    pub pending: Vec<u32>,
+    /// 器件的权威虚拟时间（ps）—— **十进制字符串**。
+    #[serde(with = "crate::numstr::u64_decimal")]
+    pub now_ps: u64,
+}
+
+/// `Vec<u64>` 的十进制字符串形态 —— [`crate::numstr::u64_decimal`] 的
+/// **列表**版。
+///
+/// ⚠️ **只有一个实现**：本模块的**写出**逐元素调用标量版的
+/// [`crate::numstr::u64_decimal::serialize`]，**读入**逐元素调用标量版的
+/// [`crate::numstr::u64_decimal::deserialize`] ⇒ 列表与标量**不可能**
+/// 漂移成两套规则。
+///
+/// ⚠️ **它为什么住在 `session.rs` 而不是 `numstr.rs`**：数值策略的
+/// **标量**版住在契约层的 [`crate::numstr`]；本模块是它的**列表**形态，
+/// 而 CLINT 的「每个 hart 一个 `mtimecmp`」正好是这种形状。
+pub mod u64_decimal_list {
+    use crate::numstr::u64_decimal;
+    use serde::de::{SeqAccess, Visitor};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    /// One `u64` whose wire form is a decimal string.
+    struct Dec(u64);
+
+    impl Serialize for Dec {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            u64_decimal::serialize(&self.0, serializer)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for Dec {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            u64_decimal::deserialize(deserializer).map(Dec)
+        }
+    }
+
+    /// Write every element as a decimal string.
+    pub fn serialize<S: Serializer>(value: &[u64], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(value.iter().map(|v| Dec(*v)))
+    }
+
+    /// Read a list of decimal strings (or plain numbers — the scalar
+    /// version's leniency, unchanged).
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u64>, D::Error> {
+        struct ListVisitor;
+
+        impl<'de> Visitor<'de> for ListVisitor {
+            type Value = Vec<u64>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a list of decimal strings or non-negative integers")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(Dec(v)) = seq.next_element::<Dec>()? {
+                    out.push(v);
+                }
+                Ok(out)
+            }
+        }
+
+        deserializer.deserialize_seq(ListVisitor)
+    }
+}
+
 /// One peripheral's share of the session state — an element of segment 4.
 ///
 /// The variant carries the **kind**: a UART is always a UART, so the
@@ -263,6 +480,10 @@ pub enum PeripheralSessionState {
     Gpio(GpioStateDto),
     /// A timer's state.
     Timer(TimerStateDto),
+    /// A CLINT's state (v0.24 · D-117).
+    Clint(ClintStateDto),
+    /// A PLIC's state (v0.24 · D-117).
+    Plic(PlicStateDto),
 }
 
 impl PeripheralSessionState {
@@ -272,6 +493,8 @@ impl PeripheralSessionState {
             Self::Uart(s) => &s.id,
             Self::Gpio(s) => &s.id,
             Self::Timer(s) => &s.id,
+            Self::Clint(s) => &s.id,
+            Self::Plic(s) => &s.id,
         }
     }
 }
@@ -285,6 +508,10 @@ pub struct M15PeriphDto {
     pub gpios: Vec<GpioStateDto>,
     /// Timers, ordered by id.
     pub timers: Vec<TimerStateDto>,
+    /// CLINT instances, ordered by id (v0.24 · D-117).
+    pub clints: Vec<ClintStateDto>,
+    /// PLIC instances, ordered by id (v0.24 · D-117).
+    pub plics: Vec<PlicStateDto>,
 }
 
 /// Interrupt-controller state — segment 5.
@@ -308,8 +535,10 @@ pub struct M15PeriphDto {
 /// defaults are not merely tolerated, they are **correct** for that
 /// era: a stub-era session really had no queue, no enable mask and no
 /// active interrupt. The session payload's `schema_version` therefore
-/// stays `1` (adjudication F of the frozen spec
-/// `docs/detailed-design/STAGE-4_Interrupt_Controller.md` §1.2).
+/// **stayed `1`** when the segment-5 extension landed (adjudication F of
+/// the frozen spec `docs/detailed-design/STAGE-4_Interrupt_Controller.md`
+/// §1.2) — it is `2` **now** (v0.24 · adjudication F of STAGE-9), but
+/// for the **CLINT / PLIC / UART-registers** reason, not for this one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct M16IntcDto {
     /// Currently raised IRQ lines, ascending and deduplicated.
@@ -457,6 +686,22 @@ impl SessionSnapshotDto {
     /// 13. `m16_intc.active_irq` — either "none" or a line that **is**
     ///     in the pending queue
     /// 14. `m16_intc.pending` — every queued line is also in `raised`
+    /// 15. every `m15_periph` group — **ascending by id** (the payload
+    ///     is a canonical form) — v0.24
+    /// 16. `m15_periph.clints[*]` — the two per-hart lists have the
+    ///     **same length** (self-consistency) — v0.24
+    /// 17. `m15_periph.plics[*]` — the enable bitmaps line up with the
+    ///     pending bitmap and the threshold table (self-consistency) —
+    ///     v0.24
+    ///
+    /// ⚠️ Checks **15 ~ 17** were added by the v0.24 batch (frozen spec
+    /// `docs/detailed-design/STAGE-9_V024_Leftovers.md` §1 adjudication
+    /// F). Checks **15 ~ 17** are the **contract layer's** half of the
+    /// count discipline: they ask "is the payload **self-consistent**?"
+    /// — while "does the count match **this device**?" is the
+    /// **device's** own business (M-15's `validate_session_state`),
+    /// because the contract layer does not know how many harts / sources
+    /// / contexts a given peripheral has.
     ///
     /// ⚠️ Checks **11 ~ 14** were added by the M-16 landing batch
     /// (frozen spec `docs/detailed-design/STAGE-4_Interrupt_Controller.md`
@@ -579,8 +824,88 @@ impl SessionSnapshotDto {
                         .timers
                         .iter()
                         .map(|t| (t.id.as_str(), "定时器")),
+                )
+                .chain(
+                    self.m15_periph
+                        .clints
+                        .iter()
+                        .map(|c| (c.id.as_str(), "CLINT")),
+                )
+                .chain(
+                    self.m15_periph
+                        .plics
+                        .iter()
+                        .map(|p| (p.id.as_str(), "PLIC")),
                 ),
         )?;
+
+        // 7b — every group must be **canonically ordered by id**.
+        //
+        // ⚠️ The payload is a **canonical form**, not a snapshot of the
+        // registration order: two payloads describing the same session
+        // must be **byte-identical**, otherwise "diff two checkpoints"
+        // shows a difference that is not a difference in the session.
+        //
+        // ⚠️ One rule, one implementation — the **same** check runs for
+        // all five groups (a UART group that is sorted and a CLINT group
+        // that is not would make "the payload is canonical" a half-truth).
+        check_ordered_by_id(self.m15_periph.uarts.iter().map(|u| u.id.as_str()), "UART")?;
+        check_ordered_by_id(self.m15_periph.gpios.iter().map(|g| g.id.as_str()), "GPIO")?;
+        check_ordered_by_id(
+            self.m15_periph.timers.iter().map(|t| t.id.as_str()),
+            "定时器",
+        )?;
+        check_ordered_by_id(
+            self.m15_periph.clints.iter().map(|c| c.id.as_str()),
+            "CLINT",
+        )?;
+        check_ordered_by_id(self.m15_periph.plics.iter().map(|p| p.id.as_str()), "PLIC")?;
+
+        // 7c — the CLINT's two per-hart lists must have **the same
+        //      length** — they describe the same harts.
+        //
+        // ⚠️ This is the contract layer's half of the count check: the
+        // payload must be **self-consistent**. Whether the count matches
+        // the **device** is the device's own business (M-15's
+        // `validate_session_state`).
+        for c in &self.m15_periph.clints {
+            if c.msip.len() != c.mtimecmp_cycles.len() {
+                return Err(self.malformed(&format!(
+                    "CLINT '{}' 的 msip 有 {} 项、mtimecmp_cycles 有 {} 项——两者描述的是同一批 hart，长度必须一致",
+                    c.id,
+                    c.msip.len(),
+                    c.mtimecmp_cycles.len()
+                )));
+            }
+        }
+
+        // 7d — the PLIC's enable bitmaps must line up with the pending
+        //      bitmap and the threshold table.
+        //
+        // ⚠️ The enable bitmap is the **same** bitmap as the pending one,
+        // sliced per context ⇒ every context's bitmap must have the
+        // **same** number of words as the pending bitmap, and the number
+        // of contexts must be the number of thresholds.
+        for p in &self.m15_periph.plics {
+            if p.enables.len() != p.thresholds.len() {
+                return Err(self.malformed(&format!(
+                    "PLIC '{}' 的 enables 有 {} 项、thresholds 有 {} 项——两者描述的是同一批 context，长度必须一致",
+                    p.id,
+                    p.enables.len(),
+                    p.thresholds.len()
+                )));
+            }
+            for (ctx, words) in p.enables.iter().enumerate() {
+                if words.len() != p.pending.len() {
+                    return Err(self.malformed(&format!(
+                        "PLIC '{}' 的 context {ctx} 的使能位图有 {} 个字，挂起位图有 {} 个字——同一张位图的分片，字数必须一致",
+                        p.id,
+                        words.len(),
+                        p.pending.len()
+                    )));
+                }
+            }
+        }
 
         // 8 — every GPIO bank must carry **exactly one IRQ line per pin**.
         //
@@ -712,9 +1037,10 @@ fn unsupported_version(what: &str, got: u32, want: u32) -> PlatformError {
 /// Reject duplicate peripheral ids, and report them with the kind they
 /// came from.
 ///
-/// ⚠️ The check spans **all three kinds**: an id that is a UART *and* a
-/// GPIO is a duplicate too. The restore path matches by id, so one id
-/// with two entries is two states competing for one instance.
+/// ⚠️ The check spans **all five kinds** (v0.24 · D-117 之后是 UART /
+/// GPIO / 定时器 / CLINT / PLIC）：an id that is a UART *and* a GPIO is a
+/// duplicate too. The restore path matches by id, so one id with two
+/// entries is two states competing for one instance.
 fn check_unique<'a, I>(ids: I) -> Result<(), PlatformError>
 where
     I: Iterator<Item = (&'a str, &'a str)>,
@@ -726,11 +1052,44 @@ where
                 SNAPSHOT_FAMILY,
                 E_SNAP_06_MALFORMED_SESSION,
                 format!(
-                    "会话快照载荷畸形：{kind} 的 id 重复（{id}）——同一个 id 不能既是 UART 又是 GPIO"
+                    "会话快照载荷畸形：{kind} 的 id 重复（{id}）——同一个 id 不能同时属于两种外设"
                 ),
             ));
         }
         seen.push(id);
+    }
+    Ok(())
+}
+
+/// Reject a group whose ids are **not** in ascending order.
+///
+/// ⚠️ The payload is a **canonical form**: the same session must always
+/// produce the same bytes, whatever order the peripherals were registered
+/// in. An unsorted group means the producer is not emitting the canonical
+/// form ⇒ two payloads of one session would differ ⇒ "diff two
+/// checkpoints" would show a difference that is not a difference in the
+/// session.
+///
+/// ⚠️ **`<=` 而不是 `<`**：相等（重复 id）也在此被拒 —— 重复 id 是
+/// 另一种畸形，但它同样让这一组**不是规范形式**。
+fn check_ordered_by_id<'a, I>(ids: I, kind: &str) -> Result<(), PlatformError>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let mut prev: Option<&str> = None;
+    for id in ids {
+        if let Some(p) = prev {
+            if id <= p {
+                return Err(PlatformError::new(
+                    SNAPSHOT_FAMILY,
+                    E_SNAP_06_MALFORMED_SESSION,
+                    format!(
+                        "会话快照载荷畸形：{kind} 的 id 未按升序排列（{p} 之后是 {id}）——载荷必须是规范形式"
+                    ),
+                ));
+            }
+        }
+        prev = Some(id);
     }
     Ok(())
 }
@@ -772,6 +1131,14 @@ mod tests {
                     status: 0,
                     irq_line: 1,
                     now_ps: 500,
+                    // ns16550 的七个寄存器（v0.24 · D-118）。
+                    lcr: 0x03,
+                    ier: 0x01,
+                    fcr: 0x07,
+                    mcr: 0x0F,
+                    scr: 0x5A,
+                    dll: 0x0C,
+                    dlm: 0x00,
                 }],
                 gpios: vec![GpioStateDto {
                     id: "GPIO0".to_string(),
@@ -788,6 +1155,11 @@ mod tests {
                     mtime: 900,
                     mtimecmp: 1000,
                 }],
+                // ⚠️ 样例载荷里**不带** CLINT / PLIC —— 它们各有自己的
+                // 夹具（`sample_with_clint_and_plic`）⇒ 「八个十进制字符串
+                // 字段」那条用例的计数**不受**新器件影响。
+                clints: Vec::new(),
+                plics: Vec::new(),
             },
             m16_intc: M16IntcDto {
                 raised: vec![1, 3],
@@ -869,12 +1241,23 @@ mod tests {
             .expect("m15");
         let mut m15k: Vec<&str> = m15.keys().map(String::as_str).collect();
         m15k.sort_unstable();
-        assert_eq!(m15k, vec!["gpios", "timers", "uarts"]);
+        assert_eq!(
+            m15k,
+            vec!["clints", "gpios", "plics", "timers", "uarts"],
+            "段 4 的键集必须精确固定——五种外设各一组（v0.24 多了 clints 与 plics）"
+        );
         let uarts = m15.get("uarts").and_then(|v| v.as_array()).expect("uarts");
         let uart = uarts[0].as_object().expect("uart");
         let mut uk: Vec<&str> = uart.keys().map(String::as_str).collect();
         uk.sort_unstable();
-        assert_eq!(uk, vec!["id", "irq_line", "now_ps", "rx", "status", "tx"]);
+        assert_eq!(
+            uk,
+            vec![
+                "dll", "dlm", "fcr", "id", "ier", "irq_line", "lcr", "mcr", "now_ps", "rx", "scr",
+                "status", "tx",
+            ],
+            "UART 状态的键集必须精确固定——v2 多了 ns16550 的七个寄存器"
+        );
 
         // ⚠️ **GPIO 与定时器也要钉**——它们各自带**时间字段**
         // （`now_ps` / `mtime` / `mtimecmp`），不钉住键集就等于给
@@ -1128,8 +1511,8 @@ mod tests {
     #[test]
     fn a_float_is_not_accepted_as_a_virtual_time() {
         let raw = r#"{
-          "schema_version": 1,
-          "cp_meta": {"id":0,"t_virt":1.5,"t_host":"0","base_seq":0,"version":1},
+          "schema_version": 2,
+          "cp_meta": {"id":0,"t_virt":1.5,"t_host":"0","base_seq":0,"version":2},
           "m12_engine": null, "m13_state": null, "m14_map": null,
           "m15_periph": null, "m16_intc": null
         }"#;
@@ -1507,11 +1890,30 @@ mod tests {
     /// If it were symbolic, changing the constant would keep every test
     /// green while the payload format quietly moved. (The same shape of
     /// gap closed D-73 and V-A's high-risk #1.)
+    ///
+    /// ⚠️ **v2**（v0.24 · 裁决 F）：`UartStateDto` 加了七个寄存器、
+    /// `PeripheralSessionState` 加了 CLINT / PLIC 两个变体 ⇒ **破坏性
+    /// 变更** ⇒ 版本必须**显式**升到 2（旧载荷会被**明确地**拒掉，
+    /// 而不是被「读得回来但含义已变」地静默接受）。
     #[test]
-    fn the_session_snapshot_schema_version_is_one() {
+    fn the_session_snapshot_schema_version_is_two() {
         assert_eq!(
-            SESSION_SNAPSHOT_SCHEMA_VERSION, 1,
-            "会话载荷的格式版本必须是 1——改回去会让旧载荷被静默接受"
+            SESSION_SNAPSHOT_SCHEMA_VERSION, 2,
+            "会话载荷的格式版本必须是 2——v2 改了 DTO 的形状（UART 的七个寄存器 + CLINT/PLIC 两个变体）"
+        );
+    }
+
+    /// ⚠️ **旧版本号必须被拒** —— v1 的载荷**读得回来**（serde 会给
+    /// 缺字段填默认值），但它的**含义**已经不同（UART 没有那七个
+    /// 寄存器）⇒ 必须由 [`SessionSnapshotDto::validate`] **明确拒掉**。
+    #[test]
+    fn an_old_session_payload_version_is_rejected() {
+        let mut s = sample();
+        s.schema_version = 1;
+        let err = s.validate().expect_err("v1 的载荷必须被拒");
+        assert_eq!(
+            err.scenario,
+            crate::snapshot::E_SNAP_05_UNSUPPORTED_STATE_SCHEMA
         );
     }
 
@@ -1847,5 +2249,260 @@ mod tests {
         s.m16_intc = seg;
         s.validate()
             .expect("「拉起了但没排队」是 stub 时代的真实状态，必须放行");
+    }
+
+    // ------------------------------------------------------------------
+    // v2：CLINT / PLIC 两组（v0.24 · D-117）
+    // ------------------------------------------------------------------
+
+    /// 一份**带** CLINT 与 PLIC 的样例载荷。
+    ///
+    /// ⚠️ 与 [`sample`] **分开**：样例载荷里**不带**新器件 ⇒「八个
+    /// 十进制字符串字段」那条计数用例**不受**新器件影响（它的数字
+    /// 必须仍然是 8，否则那条用例的「8」就成了一句空话）。
+    fn sample_with_clint_and_plic() -> SessionSnapshotDto {
+        let mut s = sample();
+        s.m15_periph.clints = vec![ClintStateDto {
+            id: "CLINT0".to_string(),
+            msip: vec![1],
+            mtimecmp_cycles: vec![0x0123_4567_89AB_CDEF],
+            mtime_cycles: 42,
+            now_ps: 700,
+        }];
+        s.m15_periph.plics = vec![PlicStateDto {
+            id: "PLIC0".to_string(),
+            priorities: vec![0, 3, 7],
+            enables: vec![vec![0b0100_0000, 0]],
+            thresholds: vec![1],
+            pending: vec![0b0100_0000, 0],
+            now_ps: 800,
+        }];
+        s
+    }
+
+    /// 新两组的**键集**必须被钉住。
+    ///
+    /// ⚠️ 与既有三组同一口径：键集变了就是**载荷形状**变了 ⇒ 必须
+    /// 显式升版（这里已经是 v2）。
+    #[test]
+    fn the_clint_and_plic_groups_have_pinned_key_sets() {
+        let json = serde_json::to_value(sample_with_clint_and_plic()).expect("json");
+        let m15 = json
+            .get("m15_periph")
+            .and_then(|v| v.as_object())
+            .expect("m15");
+
+        let clints = m15
+            .get("clints")
+            .and_then(|v| v.as_array())
+            .expect("clints");
+        let clint = clints[0].as_object().expect("clint");
+        let mut ck: Vec<&str> = clint.keys().map(String::as_str).collect();
+        ck.sort_unstable();
+        assert_eq!(
+            ck,
+            vec!["id", "msip", "mtime_cycles", "mtimecmp_cycles", "now_ps"],
+            "CLINT 状态的键集必须精确固定"
+        );
+
+        let plics = m15.get("plics").and_then(|v| v.as_array()).expect("plics");
+        let plic = plics[0].as_object().expect("plic");
+        let mut pk: Vec<&str> = plic.keys().map(String::as_str).collect();
+        pk.sort_unstable();
+        assert_eq!(
+            pk,
+            vec![
+                "enables",
+                "id",
+                "now_ps",
+                "pending",
+                "priorities",
+                "thresholds",
+            ],
+            "PLIC 状态的键集必须精确固定"
+        );
+    }
+
+    /// ⚠️ **虚拟时间字段走十进制字符串** —— 新两组的四个字段
+    /// （CLINT 的 `mtimecmp_cycles` / `mtime_cycles` / `now_ps` 与 PLIC 的
+    /// `now_ps`）**一个都不许**是 JSON 数字。
+    ///
+    /// ⚠️ 判别式落在**线上表示**上（不是「能解析」）：`u64_decimal` 的
+    /// 反序列化**两种形态都收** ⇒ 悄悄退回 JSON 数字不会报错，只会
+    /// 悄悄回到 v1 的线上格式。
+    #[test]
+    fn the_clint_and_plic_time_fields_travel_as_decimal_strings() {
+        let json = serde_json::to_value(sample_with_clint_and_plic()).expect("json");
+
+        for (pointer, what) in [
+            (
+                "/m15_periph/clints/0/mtimecmp_cycles/0",
+                "clints[0].mtimecmp_cycles[0]",
+            ),
+            (
+                "/m15_periph/clints/0/mtime_cycles",
+                "clints[0].mtime_cycles",
+            ),
+            ("/m15_periph/clints/0/now_ps", "clints[0].now_ps"),
+            ("/m15_periph/plics/0/now_ps", "plics[0].now_ps"),
+        ] {
+            let got = json
+                .pointer(pointer)
+                .unwrap_or_else(|| panic!("路径 {pointer} 不在样例载荷里"));
+            assert!(
+                got.is_string(),
+                "{what} 的线上表示必须是**十进制字符串**，实际是 {got}"
+            );
+            let text = got.as_str().expect("刚断言过是字符串");
+            assert!(
+                text.chars().all(|c| c.is_ascii_digit()),
+                "{what} 的字符串形态必须是纯十进制，实际是 {text:?}"
+            );
+        }
+
+        // ⚠️ **具体值**：周期数必须**原样**写出去（不是被截断成 2^53）。
+        let cmp = json
+            .pointer("/m15_periph/clints/0/mtimecmp_cycles/0")
+            .expect("cmp");
+        assert_eq!(
+            cmp.as_str(),
+            Some("81985529216486895"),
+            "mtimecmp 的周期数必须逐字写出去"
+        );
+    }
+
+    /// ⚠️ **列表形态的十进制字符串**必须与**标量形态**是同一条规则。
+    ///
+    /// 断言的是**线上形态**（数组里的每一项都是字符串），不是「能解析」。
+    #[test]
+    fn the_cycle_list_travels_as_a_list_of_decimal_strings() {
+        let dto = ClintStateDto {
+            id: "CLINT0".to_string(),
+            msip: vec![0, 1],
+            mtimecmp_cycles: vec![0, 9_007_199_254_740_993],
+            mtime_cycles: 1,
+            now_ps: 2,
+        };
+        let json = serde_json::to_string(&dto).expect("json");
+        assert!(
+            json.contains(r#""mtimecmp_cycles":["0","9007199254740993"]"#),
+            "周期列表必须逐项走十进制字符串：{json}"
+        );
+        let back: ClintStateDto = serde_json::from_str(&json).expect("往返");
+        assert_eq!(back.mtimecmp_cycles, vec![0, 9_007_199_254_740_993]);
+    }
+
+    /// 载荷**自洽**：CLINT 的两个「每 hart 一份」的列表长度必须一致。
+    #[test]
+    fn a_clint_state_with_mismatched_hart_lists_is_rejected() {
+        let mut s = sample_with_clint_and_plic();
+        s.m15_periph.clints[0].mtimecmp_cycles.push(7);
+        let err = s
+            .validate()
+            .expect_err("两个每-hart 列表长度不一致必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// 载荷**自洽**：PLIC 的 context 数必须与门限数一致。
+    #[test]
+    fn a_plic_state_with_mismatched_context_lists_is_rejected() {
+        let mut s = sample_with_clint_and_plic();
+        s.m15_periph.plics[0].thresholds.push(2);
+        let err = s
+            .validate()
+            .expect_err("enables 与 thresholds 长度不一致必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// 载荷**自洽**：PLIC 的使能位图与挂起位图是**同一张位图**的分片
+    /// ⇒ 字数必须一致。
+    #[test]
+    fn a_plic_state_with_mismatched_enable_bitmaps_is_rejected() {
+        let mut s = sample_with_clint_and_plic();
+        s.m15_periph.plics[0].enables[0].pop();
+        let err = s
+            .validate()
+            .expect_err("使能位图与挂起位图的字数不一致必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// CLINT 的 id 重复 → 拒。
+    #[test]
+    fn a_duplicate_clint_id_is_rejected() {
+        let mut s = sample_with_clint_and_plic();
+        let clint = s.m15_periph.clints[0].clone();
+        s.m15_periph.clints = vec![clint.clone(), clint];
+        let err = s.validate().expect_err("同组内两条同 id 的记录必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// PLIC 的 id 重复 → 拒。
+    #[test]
+    fn a_duplicate_plic_id_is_rejected() {
+        let mut s = sample_with_clint_and_plic();
+        let plic = s.m15_periph.plics[0].clone();
+        s.m15_periph.plics = vec![plic.clone(), plic];
+        let err = s.validate().expect_err("同组内两条同 id 的记录必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// ⚠️ **跨类型**的 id 重复也是重复 —— CLINT 与 UART 抢同一个 id。
+    #[test]
+    fn a_peripheral_id_duplicated_between_a_clint_and_a_uart_is_rejected() {
+        let mut s = sample_with_clint_and_plic();
+        s.m15_periph.clints[0].id = s.m15_periph.uarts[0].id.clone();
+        let err = s.validate().expect_err("跨类型的 id 重复必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// ⚠️ **规范形式**：组内必须**按 id 升序**。
+    ///
+    /// ⚠️ 载荷是**规范形式**，不是注册顺序的快照 ⇒ 两份描述同一个会话
+    /// 的载荷必须**逐字节相同**，否则「diff 两个检查点」会显示一个
+    /// 并不存在的差异。
+    #[test]
+    fn unsorted_clints_are_rejected() {
+        let mut s = sample_with_clint_and_plic();
+        let first = s.m15_periph.clints[0].clone();
+        s.m15_periph.clints = vec![
+            ClintStateDto {
+                id: "CLINTB".to_string(),
+                ..first.clone()
+            },
+            ClintStateDto {
+                id: "CLINTA".to_string(),
+                ..first
+            },
+        ];
+        let err = s.validate().expect_err("组内没排序必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// ⚠️ **规范形式**：PLIC 组同样必须**按 id 升序**。
+    #[test]
+    fn unsorted_plics_are_rejected() {
+        let mut s = sample_with_clint_and_plic();
+        let first = s.m15_periph.plics[0].clone();
+        s.m15_periph.plics = vec![
+            PlicStateDto {
+                id: "PLICB".to_string(),
+                ..first.clone()
+            },
+            PlicStateDto {
+                id: "PLICA".to_string(),
+                ..first
+            },
+        ];
+        let err = s.validate().expect_err("组内没排序必须被拒");
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// ⚠️ **反面**：**排序正确**的载荷必须过校验 —— 否则上面那几条
+    /// 可能只是「校验器什么都拒」。
+    #[test]
+    fn a_well_formed_payload_with_clint_and_plic_is_accepted() {
+        sample_with_clint_and_plic()
+            .validate()
+            .expect("合法的载荷必须通过校验");
     }
 }

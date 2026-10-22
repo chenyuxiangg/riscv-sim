@@ -265,6 +265,8 @@ mod tests {
                 status: 0,
                 irq_line: 1,
                 now_ps: 500,
+
+                ..UartStateDto::default()
             }],
             ..M15PeriphDto::default()
         }

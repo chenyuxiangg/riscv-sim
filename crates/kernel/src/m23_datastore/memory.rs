@@ -150,6 +150,8 @@ mod tests {
                     status: 0,
                     irq_line: 1,
                     now_ps: 500,
+
+                    ..riscv_sim_contract::session::UartStateDto::default()
                 }],
                 ..M15PeriphDto::default()
             },

@@ -450,6 +450,9 @@ mod tests {
             status: 0,
             irq_line: 3,
             now_ps: 0,
+            // ns16550 的七个寄存器（v0.24 · D-118）—— 本夹具不关心它们，
+            // 用 `Default` 补齐（**不要**写死成别处用着的值）。
+            ..UartStateDto::default()
         })
     }
 
