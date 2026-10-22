@@ -130,3 +130,16 @@ rv32mi sw-misaligned rv32i_zicsr_zifencei active csr
 # sides stopped erroring" is **not** what these rows prove.
 local unmapped_store rv32i_zicsr_zifencei active csr
 local unmapped_load rv32i_zicsr_zifencei active csr
+#
+# `compressed_trap` — a **compressed** store to an unmapped address must
+# trap, and the trap context must carry the **exact** faulting PC.
+# The faulting store is placed at a 2-mod-4 address on purpose: the
+# reference side was measured writing `mepc = 0x8000014a` (bit 1
+# preserved), so a write-side mask on `mepc` would show up here as a
+# one-bit disagreement. Upstream riscv-tests never traps from a
+# 2-byte-aligned instruction, so nothing else in the corpus covers it.
+#
+# The guest checks all three context values itself (mcause == 7,
+# mtval == the faulting address, mepc == the faulting instruction) and
+# only reports PASS when all three are exactly right.
+local compressed_trap rv32ic_zicsr_zifencei active csr
