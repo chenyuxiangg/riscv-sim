@@ -33,8 +33,8 @@
 //!   the mapping agrees with itself.
 
 use riscv_sim_contract::csr::{
-    csr_write_is_ignored, CSR_IRQ_CLEAR, CSR_MCAUSE, CSR_MEPC, CSR_MIP, CSR_MSTATUS, CSR_MTVAL,
-    CSR_MTVEC, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT,
+    csr_write_is_ignored, CSR_IRQ_CLEAR, CSR_MCAUSE, CSR_MEPC, CSR_MIP, CSR_MISA, CSR_MISA_VALUE,
+    CSR_MSCRATCH, CSR_MSTATUS, CSR_MTVAL, CSR_MTVEC, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT,
 };
 use riscv_sim_contract::model::SimState;
 
@@ -1118,4 +1118,126 @@ fn a_repeated_write_of_the_same_value_still_reports_the_csr() {
              **哪怕写进去的值与上一次完全相同**"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// 裁决 E —— `misa`
+// ---------------------------------------------------------------------------
+
+/// `misa` 必须读出平台的**常量**值 —— 哪怕 guest 之前从没碰过它。
+///
+/// ⚠️ 断言的是**读出来的值**，不是「文件里有没有这一项」—— `misa` 是
+/// **算出来的**，不落在 CSR 文件里（那会让 `SimState::is_empty()` 的
+/// 语义变掉）。
+#[test]
+fn misa_reads_back_the_platform_value() {
+    let mut h = Harness::new();
+    let mut state = state_with_csrs(&[]);
+    // `csrrs rd, misa, x0` —— `rs1 == x0` ⇒ 纯读。
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MISA, 0, F_CSRRS, 2));
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert_eq!(
+        state.gpr[2], CSR_MISA_VALUE,
+        "misa 必须读出平台常量 0x{CSR_MISA_VALUE:08x}"
+    );
+}
+
+/// guest **写** `misa` 之后，读回来仍是平台常量。
+///
+/// ⚠️ `misa` 是 WARL 寄存器，但**本平台的规则是「写被忽略」**——
+/// guest 不能通过写 `misa` 宣称一个平台没有的扩展。
+#[test]
+fn a_write_to_misa_does_not_change_what_it_reads_back() {
+    let mut h = Harness::new();
+    let mut state = state_with_csrs(&[]);
+    state.gpr[1] = 0xFFFF_FFFF;
+    // `csrrw x2, misa, x1` —— x2 拿到**旧值**（平台常量）。
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MISA, 1, F_CSRRW, 2));
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert_eq!(
+        state.gpr[2], CSR_MISA_VALUE,
+        "csrrw 的 rd 拿到旧值 —— 旧值必须是平台常量"
+    );
+    // 再读一次：仍是常量（写没生效）。
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MISA, 0, F_CSRRS, 3));
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert_eq!(
+        state.gpr[3], CSR_MISA_VALUE,
+        "写 misa 之后读回来必须仍是平台常量"
+    );
+}
+
+/// ⚠️ **`misa` 不落在 CSR 文件里** —— 它是**算出来的**。
+///
+/// 理由：`SimState::csrs` 为空 ⇒ 会话快照的**「空」判定**
+/// （`EngineSnapshotDto::is_empty`：没有寄存器写入、**没有 CSR**、
+/// 没有 pending 写、虚拟时钟为零）仍然成立。若把 `misa` 预置进文件，
+/// 一个**只读了一次 `misa`** 的 guest 就不再是「空」的了。
+#[test]
+fn misa_is_not_stored_in_the_csr_file() {
+    let mut h = Harness::new();
+    let mut state = state_with_csrs(&[]);
+    assert!(state.csrs.is_empty(), "起点必须是空状态 —— 这条用例的前提");
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MISA, 0, F_CSRRS, 2));
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert!(
+        !csr_numbers(&state).contains(&CSR_MISA),
+        "misa 不得进 CSR 文件 —— 实得 {:?}",
+        csr_numbers(&state)
+    );
+    assert!(
+        state.csrs.is_empty(),
+        "读一次 misa 之后 CSR 文件仍必须是空的 —— 实得 {:?}",
+        state.csrs
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 裁决 D —— 未实现的 CSR：写被忽略，读回 0
+// ---------------------------------------------------------------------------
+
+/// ⚠️ **未实现的 CSR 写被忽略、读回 0** —— 与参考侧一致。
+///
+/// 这是黄金对拍查出来的缺陷（D-92）：平台原来把写**存进文件**并原样
+/// 读回，于是 guest 能**凭空造出**一个平台没有的寄存器。
+///
+/// ⚠️ 断言要落在**两处**：文件里**没有**这一项（不是「存了 0」），
+/// 以及读回来是 **0**。
+#[test]
+fn an_unimplemented_csr_ignores_the_write_and_reads_back_zero() {
+    for csr in [0x7A1u16, 0x7A2, 0x302, 0x303] {
+        let mut h = Harness::new();
+        let mut state = state_with_csrs(&[]);
+        state.gpr[1] = 0x0123_4567;
+        let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(csr, 1, F_CSRRW, 2));
+        assert_eq!(outcome, StepOutcome::Advanced, "csr {csr:#x}");
+        assert!(
+            !csr_numbers(&state).contains(&csr),
+            "csr {csr:#x} 未实现 ⇒ 不得进 CSR 文件 —— 实得 {:?}",
+            csr_numbers(&state)
+        );
+        // 读回来必须是 0。
+        let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(csr, 0, F_CSRRS, 3));
+        assert_eq!(outcome, StepOutcome::Advanced, "csr {csr:#x}");
+        assert_eq!(state.gpr[3], 0, "csr {csr:#x} 未实现 ⇒ 读回必须是 0");
+    }
+}
+
+/// 已实现的 CSR **照常**能写能读 —— 否则「未实现 ⇒ 写被忽略」这条规则
+/// 就过头了。
+///
+/// ⚠️ 用 `mscratch` 当样本：它是**普通存储 CSR**，上游 CSR 用例会拿它
+/// 做读改写语义 ⇒ 它必须真的存得住。
+#[test]
+fn an_implemented_csr_still_takes_the_write() {
+    let mut h = Harness::new();
+    let mut state = state_with_csrs(&[]);
+    state.gpr[1] = 0x0123_4567;
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSCRATCH, 1, F_CSRRW, 2));
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert_eq!(
+        csr_value(&state, CSR_MSCRATCH),
+        0x0123_4567,
+        "mscratch 是已实现的存储 CSR ⇒ 写必须落下"
+    );
 }

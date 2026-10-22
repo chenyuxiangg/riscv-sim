@@ -34,7 +34,8 @@
 //! public API grows by exactly **one** symbol — [`enter_trap`].
 
 use riscv_sim_contract::csr::{
-    CSR_MCAUSE, CSR_MEPC, CSR_MSTATUS, CSR_MTVAL, CSR_MTVEC, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT,
+    CSR_MCAUSE, CSR_MEPC, CSR_MISA, CSR_MISA_VALUE, CSR_MSTATUS, CSR_MTVAL, CSR_MTVEC,
+    MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT,
 };
 use riscv_sim_contract::model::SimState;
 
@@ -42,7 +43,25 @@ use riscv_sim_contract::model::SimState;
 ///
 /// A CSR that is **not in the file** reads as **0** — it does **not**
 /// trap (STAGE-4 §2.2: "读：找不到 ⇒ 返回 0（不是陷阱）").
+///
+/// ⚠️ **`misa` is the one exception**: it is **not** stored in the file
+/// but **computed** from the platform's constant ([`CSR_MISA_VALUE`]),
+/// because it reports what the platform *is* rather than what the guest
+/// last wrote.  Reading it must answer the same on every read — a guest
+/// that could write `misa` could otherwise claim an extension the
+/// platform does not have.
+///
+/// ⚠️ Keeping it out of the file also leaves the CSR file **empty** for a
+/// guest that has touched no CSR — which is what the session snapshot's
+/// emptiness predicate (`EngineSnapshotDto::is_empty`: "no registers
+/// written, **no CSRs**, no pending writes, clock at zero") reads. A
+/// pre-seeded `misa` entry would have broken that (see the frozen spec
+/// for this batch, `docs/detailed-design/STAGE-6_CSR_Golden_Coverage.md`
+/// §3.4).
 pub(crate) fn csr_read(state: &SimState, csr: u16) -> u32 {
+    if csr == CSR_MISA {
+        return CSR_MISA_VALUE;
+    }
     state
         .csrs
         .iter()
