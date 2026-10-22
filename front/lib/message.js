@@ -27,9 +27,19 @@
 //     variant follows the *content*);
 //   - the §2 numeric policy: virtual time travels as a **decimal string**
 //     (`ps()` / `psToNumber()`), everything else stays a JSON number.
+//
+// Contract v4 (`schema_version = 4`) adds:
+//   - one new event: `Console { bytes }` — the guest's console (UART TX)
+//     byte stream. The bytes travel as a **JSON array of numbers**
+//     (serde's default for `Vec<u8>`), **not** as a string and **not** as
+//     base64: the byte stream is the truth (the Spike comparison is
+//     byte-wise), the front end decodes it for display;
+//   - two **optional** DTO fields on `model::DisasmEntryDto` (`file` /
+//     `line`) — the per-instruction source location (D-102). `null` means
+//     "unknown"; it is **never** fabricated.
 
 /** Protocol schema version — mirrors `riscv_sim_contract::SCHEMA_VERSION`. */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /**
  * Largest virtual time (picoseconds) that survives a round trip through a
@@ -123,6 +133,8 @@ export const EVENT_TOPIC = Object.freeze({
     SourceLocation: "debug.source",
     TraceExport: "debug.export",
     TraceState: "debug.trace",
+    // 契约 v4 新增：guest 的 console（UART TX）字节流。
+    Console: "sim.console",
 });
 
 /** Topic that receives every event. */
@@ -368,7 +380,7 @@ export function deltaRegister(index, value) {
 
 /**
  * `model::DisasmEntryDto` — 一条反汇编条目（`addr` / `code` / `mnemonic` /
- * `width`）。
+ * `width` / `file` / `line`）。
  *
  * The DTO is **nested** inside the `Disasm` event payload, so the contract
  * gate has to look at it explicitly: the variant-level field check only sees
@@ -380,8 +392,13 @@ export function deltaRegister(index, value) {
  * 忘改 ⇒ 线上字段名不匹配 ⇒ **静默**。
  * ⇒ 门禁现在喂**非空**数组，元素字段名被钉住。
  *
- * @param {{addr?: number, code?: number, mnemonic?: string, width?: number}} e
- * @returns {{addr: number, code: number, mnemonic: string, width: number}}
+ * ⚠️ **契约 v4（D-102）新增两个可选字段**：`file`（源码文件）与 `line`
+ * （1 起的行号）。它们是 `Option` ⇒ 线上形态是 **`null`**（serde 默认），
+ * **不是**空串、**不是** 0。`null` 的含义是「**没有**行表 / 没命中」——
+ * **绝不**伪造一个文件名或行号出来。
+ *
+ * @param {{addr?: number, code?: number, mnemonic?: string, width?: number, file?: string|null, line?: number|null}} e
+ * @returns {{addr: number, code: number, mnemonic: string, width: number, file: string|null, line: number|null}}
  */
 export function disasmEntry(e) {
     return {
@@ -389,6 +406,8 @@ export function disasmEntry(e) {
         code: Number(e?.code) >>> 0,
         mnemonic: String(e?.mnemonic ?? ""),
         width: Number(e?.width),
+        file: e?.file === null || e?.file === undefined ? null : String(e.file),
+        line: e?.line === null || e?.line === undefined ? null : Number(e.line),
     };
 }
 
@@ -495,6 +514,21 @@ export const Event = Object.freeze({
             enabled: Boolean(enabled),
             len: Number(len),
             dropped: Number(dropped),
+        },
+    }),
+    /**
+     * `EventPayload::Console { bytes }` — guest 的 console（UART TX）字节流。
+     *
+     * ⚠️ **字节，不是字符串**：serde 把 `Vec<u8>` 默认序列化成 **JSON 数组**
+     * （`[104, 105]`）——**不是** base64、**不是**字符串。guest 可能吐出
+     * 任意字节（ANSI 转义、`\r`、半个 UTF-8 序列），**字节流才是真相**
+     * （与 Spike 的逐字节比对就是比它），显示层自己去解码。
+     *
+     * ⚠️ 每个字节被钳到 `0..=255`：线上形态必须是**无符号**字节值。
+     */
+    console: (bytes) => ({
+        Console: {
+            bytes: (bytes ?? []).map((b) => Number(b) & 0xff),
         },
     }),
 });

@@ -451,6 +451,22 @@ pub enum EventPayload {
         /// How many entries were dropped by the ring overflow.
         dropped: u64,
     },
+    /// Console output produced by the guest (UART TX byte stream).
+    ///
+    /// ⚠️ **Bytes, not a string** — the guest may emit arbitrary bytes
+    /// (ANSI escapes, `\r`, a half-written UTF-8 sequence). The byte
+    /// stream is the **truth** (the Spike comparison is byte-wise); the
+    /// front end decodes it for display.
+    ///
+    /// ⚠️ serde's default for `Vec<u8>` is a **JSON array of numbers**
+    /// (`[104, 105]`) — **not** base64 and **not** a string. The JS
+    /// mirror (`front/lib/message.js`) spells it the same way.
+    ///
+    /// Added in contract v4.
+    Console {
+        /// The raw bytes the guest wrote to the console UART.
+        bytes: Vec<u8>,
+    },
 }
 
 impl Default for EventPayload {
@@ -499,10 +515,11 @@ mod tests {
     /// front end's JS mirror hard-codes the same number, and the
     /// `contract.test.mjs` gate compares the two.
     ///
-    /// **v3** (STAGE-5) adds the M-11 debugging surface.
+    /// **v4** adds the guest console byte stream + the per-instruction
+    /// source location on the disassembly entries.
     #[test]
-    fn the_schema_version_is_three() {
-        assert_eq!(crate::SCHEMA_VERSION, 3);
+    fn the_schema_version_is_four() {
+        assert_eq!(crate::SCHEMA_VERSION, 4);
     }
 
     /// The three commands contract v2 adds (D-32 gaps 1, 2, 3).
@@ -635,7 +652,7 @@ mod tests {
         let msg = Message::command(7, CommandPayload::Nop);
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
-        assert_eq!(json["schema_version"], 3);
+        assert_eq!(json["schema_version"], 4);
     }
 
     // -----------------------------------------------------------------
@@ -694,13 +711,18 @@ mod tests {
                 code: 0x0FF00093,
                 mnemonic: "addi x1, x0, 255".to_string(),
                 width: 4,
+                // 契约 v4（D-102）新增的两个可选字段：没有行表 ⇒ `None`
+                // ⇒ 线上是 `null`。
+                file: None,
+                line: None,
             }],
         };
         assert_eq!(
             serde_json::to_value(&disasm).expect("json"),
             serde_json::json!({ "Disasm": { "entries": [
                 { "addr": 4096, "code": 267387027,
-                  "mnemonic": "addi x1, x0, 255", "width": 4 } ] } })
+                  "mnemonic": "addi x1, x0, 255", "width": 4,
+                  "file": null, "line": null } ] } })
         );
 
         let source = EventPayload::SourceLocation {
@@ -741,6 +763,45 @@ mod tests {
             serde_json::to_value(&state).expect("json"),
             serde_json::json!({ "TraceState": {
                 "enabled": true, "len": 5, "dropped": 2 } })
+        );
+    }
+
+    /// The console event contract v4 adds — the guest's UART TX byte
+    /// stream.
+    ///
+    /// ⚠️ The wire shape is **pinned**: serde's default for `Vec<u8>` is a
+    /// **JSON array of numbers** (`[104, 105]`) — **not** base64, **not** a
+    /// string. The JS mirror (`front/lib/message.js`'s `Event.console`)
+    /// spells it the same way, and the cross-layer gate compares the two
+    /// byte for byte.
+    ///
+    /// The bytes are **not** text: an empty stream is an **empty array**
+    /// (`[]`), never `null` — `null` would mean "no value at all", which
+    /// is a different thing than "the guest wrote nothing".
+    #[test]
+    fn the_v4_console_event_carries_the_raw_byte_stream() {
+        let console = EventPayload::Console {
+            bytes: vec![104, 105, 10],
+        };
+        assert_eq!(
+            serde_json::to_value(&console).expect("json"),
+            serde_json::json!({ "Console": { "bytes": [104, 105, 10] } })
+        );
+
+        // Round trip: the bytes survive unchanged (a byte is a byte).
+        let back: EventPayload =
+            serde_json::from_value(serde_json::to_value(&console).expect("json"))
+                .expect("round trip");
+        match back {
+            EventPayload::Console { bytes } => assert_eq!(bytes, vec![104, 105, 10]),
+            other => panic!("expected a Console, got {other:?}"),
+        }
+
+        // An empty stream is an empty array, not null.
+        let empty = EventPayload::Console { bytes: Vec::new() };
+        assert_eq!(
+            serde_json::to_value(&empty).expect("json"),
+            serde_json::json!({ "Console": { "bytes": [] } })
         );
     }
 

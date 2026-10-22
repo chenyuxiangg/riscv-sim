@@ -713,6 +713,36 @@ describe("契约 v2 · crc 的集成级强制力（§7.2）", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 契约 v4 · Console 事件与传输层序列空间
+// ---------------------------------------------------------------------------
+
+describe("契约 v4 · Console 事件（sim.console）", () => {
+    test("Console 事件的载荷是**字节数组**（与 Rust 的 serde 逐字一致）", () => {
+        // serde 的 `Vec<u8>` 默认序列化成 JSON 数组 —— 不是 base64、
+        // 不是字符串。guest 可能吐出任意字节（ANSI 转义、`\r`、半个
+        // UTF-8），**字节流才是真相**（与 Spike 的逐字节比对比它）。
+        assert.deepEqual(Event.console([104, 105]), { Console: { bytes: [104, 105] } });
+        assert.deepEqual(Event.console([]), { Console: { bytes: [] } });
+        // 非法字节（> 255）被钳到字节范围 —— 线上形态必须是无符号字节。
+        assert.deepEqual(Event.console([256, -1]), { Console: { bytes: [0, 255] } });
+    });
+
+    test("M-05 把 Console 事件路由到 sim.console", async () => {
+        // 事件 topic 的**唯一真相**是 `front/lib/message.js` 的
+        // `EVENT_TOPIC` ⇒ 契约层加了变体，前端路由**自动**跟上。
+        const transport = fakeTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        const seen = [];
+        router.subscribe("sim.console", (event) => seen.push(event));
+        transport.emit(eventFrame(null, Event.console([104, 105])));
+        assert.equal(seen.length, 1, "Console 事件没有送到 sim.console 订阅者");
+        assert.equal(seen[0].variant, "Console");
+        assert.deepEqual(seen[0].value, { bytes: [104, 105] });
+        router.close();
+    });
+});
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 

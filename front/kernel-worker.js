@@ -33,8 +33,19 @@ import { eventMessage, Event } from "./lib/message.js";
  */
 const DEFAULT_WASM_URL = new URL("./assets/pkg/riscv_sim_kernel.js", import.meta.url).href;
 
-/** Error code for every failure raised by this host (M-07 family). */
-const HOST_ERROR_CODE = "E_TRX-04";
+/**
+ * Error code for every failure raised by **this host** (the WASM side).
+ *
+ * ⚠️ **D-48（语义收敛）**：这个码**只**表示「宿主侧（WASM）出问题了」——
+ * 初始化失败 / 内核抛错 / 返回值非法 / 返回的不是数组 / 返回空数组。
+ *
+ * 「传输通道挂了」（Worker 的 `error` 事件 / WebSocket 错误）是**另一件事**，
+ * 它归 M-07 的传输适配器，用的是 **`E_TRX-04`**。此前两边共用一个码 ⇒
+ * 前端拿到错误**无法按码分派**（「通道断了要重连」与「内核算错了要报错」
+ * 是两种处置）。⇒ 宿主侧改用 **`E_TRX-05`**，`E_TRX-04` 的语义**收敛**
+ * 成「传输通道错误」一种。
+ */
+const HOST_ERROR_CODE = "E_TRX-05";
 
 if (typeof self !== "undefined" && typeof self.document === "undefined") {
     startKernelHost();
@@ -56,14 +67,33 @@ function startKernelHost() {
     let initPromise = null;
 
     /**
-     * Host-synthesised event counter.
+     * The **transport-level** frame sequence number (M-07 LLD §2.1.1
+     * `seqNo`).
      *
-     * The **kernel** owns the `seq` space of the events it produces
-     * (spec §2.1) — the host must not reuse it. The few events this
-     * host synthesises by itself (the error frames) therefore get their
-     * own counter.
+     * ⚠️ **D-47（帧 seq 只有一个序列空间）**：帧的 `seq` 是**传输层自己的**
+     * 单调递增计数，与内核 `Message.seq` **解耦**。
+     *
+     * 此前内核事件帧用 `msg.seq`（内核自己的计数器）、宿主合成的错误帧用
+     * `hostSeq`（另一个从 1 起的计数器）⇒ **同一个 Worker 内帧 seq 可以
+     * 从 11 跳回 1**。断线续拉（M-07 的 `resumeBySeq`）与缺口对账都以帧
+     * seq 为锚 ⇒ 一个会回退的 seq 空间会让「缺口」判据彻底失效。
+     *
+     * ⚠️ **别把它和契约 `Message.seq` 搞混**：后者是**载荷里的一个字段**，
+     * 由**消息的生产者**（内核 / 宿主）自己编号；M-05 的命令路由用的就是
+     * 契约 `Message.seq`（`m05_commandrouter.js` 的 `decoded.seq`），
+     * **不是**帧 seq。
      */
-    let hostSeq = 0;
+    let frameSeq = 0;
+
+    /**
+     * The next transport-level frame sequence number.
+     *
+     * @returns {number}
+     */
+    function nextFrameSeq() {
+        frameSeq += 1;
+        return frameSeq;
+    }
 
     /**
      * Number of commands currently **waiting for the WASM init**.
@@ -163,7 +193,7 @@ function startKernelHost() {
     function failFast(err) {
         if (!bootErrorPosted && inFlight === 0) {
             bootErrorPosted = true;
-            const seq = (hostSeq += 1);
+            const seq = nextFrameSeq();
             self.postMessage(encodeFrame({
                 type: FRAME_TYPE.Event,
                 seq,
@@ -206,7 +236,7 @@ function startKernelHost() {
      * @param {unknown} err
      */
     function postError(frame, err) {
-        const seq = (hostSeq += 1);
+        const seq = nextFrameSeq();
         self.postMessage(encodeFrame({
             type: FRAME_TYPE.Event,
             seq,
@@ -302,9 +332,10 @@ function startKernelHost() {
         messages.forEach((msg, index) => {
             self.postMessage(encodeFrame({
                 type: FRAME_TYPE.Event,
-                // The frame's seq is the event's own seq (same wording as
-                // the mock kernel).
-                seq: msg.seq,
+                // ⚠️ **D-47**：帧 seq 是**传输层自己的**计数，与内核
+                // `Message.seq`（载荷里的字段）**解耦**——内核的消息带着它
+                // 自己的 seq，帧另起一个单调序列。
+                seq: nextFrameSeq(),
                 sessionId: frame.sessionId,
                 role: frame.role,
                 // The **first** event answers the command (M-05 matches

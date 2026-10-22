@@ -667,6 +667,12 @@ impl DropRange {
 /// (STAGE-5 裁决 A). `mnemonic` is the **ISA** mnemonic: no
 /// pseudo-instruction aliases (`mv` / `li` / `ret`), and a compressed
 /// instruction keeps its `c.` prefix (STAGE-5 裁决 C).
+///
+/// ⚠️ **Contract v4 (debt ledger D-102)** adds the per-instruction
+/// source location: `file` / `line`. Both are **optional** and both are
+/// **never fabricated** — `None` means "no line table at all" or "the
+/// address missed the line table", and the two are told apart by the
+/// `SourceLocation` event (LLD 11-4), not by this DTO.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisasmEntryDto {
     /// Address the instruction was fetched from.
@@ -679,6 +685,11 @@ pub struct DisasmEntryDto {
     pub mnemonic: String,
     /// Instruction width in bytes (2 for compressed, 4 for standard).
     pub width: u8,
+    /// Source file the instruction maps to (`None` when no DWARF line
+    /// table is available). **Never fabricated.**
+    pub file: Option<String>,
+    /// 1-based source line (`None` when unknown).
+    pub line: Option<u32>,
 }
 
 impl Default for DisasmEntryDto {
@@ -688,6 +699,8 @@ impl Default for DisasmEntryDto {
             code: 0,
             mnemonic: String::new(),
             width: 0,
+            file: None,
+            line: None,
         }
     }
 }
@@ -732,5 +745,81 @@ pub enum TraceFormat {
 impl Default for TraceFormat {
     fn default() -> Self {
         Self::Csv
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The per-instruction source location (contract v4 · debt ledger
+    /// D-102) is **optional**, and `None` is a **legal** value.
+    ///
+    /// ⚠️ The wire shape is pinned: an absent source location travels as
+    /// **`null`** (serde's default for `Option`) — **not** an empty
+    /// string and **not** line 0. Those two would collide with the
+    /// `SourceLocation` event's "no answer" states (LLD 11-4: `file`
+    /// empty + `line == 0` means "no DWARF at all", `line == u32::MAX`
+    /// means "missed the line table") ⇒ the two DTOs would tell
+    /// contradictory stories about the same address.
+    ///
+    /// The values are also **never fabricated**: a DTO with a file but no
+    /// line (or the other way round) is not something this layer
+    /// produces — the kernel fills both or neither.
+    #[test]
+    fn the_disasm_entry_carries_an_optional_source_location() {
+        let without_source = DisasmEntryDto {
+            addr: 0x1000,
+            code: 0x02A0_0093,
+            mnemonic: "addi x1, x0, 42".to_string(),
+            width: 4,
+            file: None,
+            line: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&without_source).expect("json"),
+            serde_json::json!({
+                "addr": 4096,
+                "code": 44040339,
+                "mnemonic": "addi x1, x0, 42",
+                "width": 4,
+                "file": null,
+                "line": null,
+            })
+        );
+
+        // `None` round-trips — it is a value, not an absence.
+        let back: DisasmEntryDto =
+            serde_json::from_value(serde_json::to_value(&without_source).expect("json"))
+                .expect("round trip");
+        assert_eq!(back, without_source);
+        assert_eq!(back.file, None);
+        assert_eq!(back.line, None);
+
+        // The known case round-trips too.
+        let with_source = DisasmEntryDto {
+            addr: 0x1004,
+            code: 0x0070_0113,
+            mnemonic: "addi x2, x0, 7".to_string(),
+            width: 4,
+            file: Some("src/main.c".to_string()),
+            line: Some(42),
+        };
+        let json = serde_json::to_value(&with_source).expect("json");
+        assert_eq!(json["file"], "src/main.c");
+        assert_eq!(json["line"], 42);
+        let back: DisasmEntryDto = serde_json::from_value(json).expect("round trip");
+        assert_eq!(back, with_source);
+    }
+
+    /// The default DTO has **no** source location — a fresh entry must
+    /// not claim to know where it came from.
+    #[test]
+    fn the_default_disasm_entry_has_no_source_location() {
+        let entry = DisasmEntryDto::default();
+        assert_eq!(entry.file, None);
+        assert_eq!(entry.line, None);
+        assert_eq!(entry.addr, 0);
+        assert_eq!(entry.width, 0);
     }
 }
