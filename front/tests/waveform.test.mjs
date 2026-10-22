@@ -231,6 +231,11 @@ describe("探针流 · 装载工程后的强制重订", () => {
     /**
      * 造一套「服务替身」，记录 `loadProjectIntoKernel` 实际做了什么。
      *
+     * ⚠️ **v0.23 改动**：装载流程多了 **console 流**这一路（`console.reset`
+     * + `console.subscribeConsoleStream`）——`LoadProject` 清掉内核的主题
+     * 集合 ⇒ console 流不重订就**静默**收不到字节（与 D-45 / D-46 同一个坑）。
+     * ⇒ 期望序列从 3 步变成 5 步。
+     *
      * @returns {{services: object, calls: string[]}}
      */
     function fakeServices() {
@@ -252,18 +257,32 @@ describe("探针流 · 装载工程后的强制重订", () => {
                         calls.push("waveform.subscribeProbeStream");
                     },
                 },
+                console: {
+                    reset() {
+                        calls.push("console.reset");
+                    },
+                    async subscribeConsoleStream() {
+                        calls.push("console.subscribeConsoleStream");
+                    },
+                },
             },
         };
     }
 
-    test("三步都做了：reset → 装载（连带重订寄存器流）→ **重订探针流**", async () => {
+    test("每一步都做了：reset → 装载（连带重订寄存器流）→ **重订探针流与 console 流**", async () => {
         const { services, calls } = fakeServices();
         await app.loadProjectIntoKernel(services, { id: "p" });
         assert.deepEqual(
             calls,
-            ["waveform.reset", "registerMemory.loadProject", "waveform.subscribeProbeStream"],
-            "装载工程后必须重订探针流 —— LoadProject 把内核的主题集合清空了，\
-不重订的话探针流**静默停掉**（与 D-45 同一个坑）",
+            [
+                "waveform.reset",
+                "console.reset",
+                "registerMemory.loadProject",
+                "waveform.subscribeProbeStream",
+                "console.subscribeConsoleStream",
+            ],
+            "装载工程后必须重订探针流与 console 流 —— LoadProject 把内核的主题集合清空了，\
+不重订的话这两条流**静默停掉**（与 D-45 同一个坑）",
         );
     });
 
@@ -273,6 +292,7 @@ describe("探针流 · 装载工程后的强制重订", () => {
             commandRouter: router,
             registerMemory: { async loadProject() {} },
             waveform: app.wireWaveform(router),
+            console: app.wireConsole(router),
         };
         await app.loadProjectIntoKernel(services, { id: "p" });
         const subscribes = router.sent.filter(
@@ -280,10 +300,11 @@ describe("探针流 · 装载工程后的强制重订", () => {
         );
         assert.equal(
             subscribes.length,
-            1,
-            `必须有一条 Subscribe 命令，实际发出：${JSON.stringify(router.sent)}`,
+            2,
+            `必须有一条探针订阅 + 一条 console 订阅，实际发出：${JSON.stringify(router.sent)}`,
         );
         assert.deepEqual(subscribes[0], { Subscribe: { topic: "sim.waveform" } });
+        assert.deepEqual(subscribes[1], { Subscribe: { topic: "sim.console" } });
     });
 
     test("探针流重订失败**不牵连**前两步（工程已装载、寄存器流已重订）", async () => {
@@ -299,8 +320,15 @@ describe("探针流 · 装载工程后的强制重订", () => {
         const result = await app.loadProjectIntoKernel(services, { id: "p" });
         assert.deepEqual(
             calls,
-            ["waveform.reset", "registerMemory.loadProject", "waveform.subscribeProbeStream"],
-            "前两步**必须已经执行**——失败不能把它们回滚掉",
+            [
+                "waveform.reset",
+                "console.reset",
+                "registerMemory.loadProject",
+                "waveform.subscribeProbeStream",
+                "console.subscribeConsoleStream",
+            ],
+            "前两步**必须已经执行**——失败不能把它们回滚掉；\
+且 console 流的重订是**独立**的一路，不该被探针流的失败牵连",
         );
         assert.ok(result.probeError, "失败必须**报出来**（不静默）");
         assert.match(String(result.probeError?.message), /内核不回/);

@@ -32,6 +32,11 @@
 //     the "解析当前 PC 的源码行" button carries **the current PC** in
 //     its `data-addr` — not `0` (V-B's VB-1 broke exactly that link
 //     while the Node gate stayed green);
+//   - the **real RTOS** really runs in the browser: the out-of-repo osz
+//     ELF is fetched by URL, loaded, run to its shell prompt, and the
+//     terminal view shows `==== Enter Main ====` / `OSZ$` — concrete
+//     literals, not "some content" (v0.23 · Lane G). **Skipped, not
+//     failed**, when the ELF is not on this machine;
 //   - the console is clean: no `console.error`, no uncaught exception.
 //
 // What it does NOT verify
@@ -49,7 +54,9 @@
 //   - python3 (to serve `front/` over HTTP — ES modules and Workers
 //     need a same-origin HTTP(S) origin, `file://` is blocked);
 //   - **the WASM kernel artifact** — `tools/build-wasm.sh` must have been
-//     run (the front end now mounts the real kernel, not the mock).
+//     run (the front end now mounts the real kernel, not the mock);
+//   - **the osz ELF** (optional) — the real-RTOS section is **skipped**
+//     when it is absent. Path: `$OSZ_ELF`, else `/tmp/osz-artifacts/osz.elf`.
 //
 // Usage
 // -----
@@ -75,9 +82,10 @@
 //         *not* a verification failure
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { createReadStream, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -478,6 +486,9 @@ const PROBE_EXPRESSION = `(() => {
     return code ? String(code.textContent || "").trim() : "";
   };
   const waveItems = Array.from(document.querySelectorAll('[data-view-body="waveform"] .channel-list > li'));
+  // -- 终端视图（真实 RTOS 的 console）--
+  // ⚠️ 用 data-* 选择器取：**不靠文案匹配**去找元素。
+  const termOut = document.querySelector("[data-terminal-out]");
   // -- 源码视图（STAGE-7 裁决 E / F）--
   // ⚠️ 全部用 data-* 选择器取：**不靠文案匹配**去找元素。
   const sourceBody = document.querySelector('[data-view-body="source"]');
@@ -500,6 +511,8 @@ const PROBE_EXPRESSION = `(() => {
       ? String((waveItems[0].querySelector(".channel-label") || {}).textContent || "").trim()
       : "",
     waveItemText0: waveItems[0] ? String(waveItems[0].textContent || "").trim() : "",
+    // -- 终端视图 --
+    termText: termOut ? String(termOut.textContent || "") : "",
     // -- 源码视图 --
     sourceBtnCount: resolveButtons.length,
     sourceAddr: resolveBtn ? String(resolveBtn.getAttribute("data-addr") ?? "").trim() : "",
@@ -768,6 +781,233 @@ function sourceCommandCheck(probe) {
 }
 
 // ---------------------------------------------------------------------------
+// 真实 RTOS（osz）—— 仓外镜像的装载与 console 的可见性
+// ---------------------------------------------------------------------------
+
+/**
+ * osz 的 ELF 默认在哪（**在仓外**，不进仓库）。
+ *
+ * ⚠️ 路径来自 `$OSZ_ELF`，其次 `/tmp/osz-artifacts/osz.elf`。
+ */
+const OSZ_ELF_DEFAULT = "/tmp/osz-artifacts/osz.elf";
+
+/**
+ * 跑 osz 到提示符的**墙钟上限**（毫秒）。
+ *
+ * ⚠️ 真实 RTOS 是**死循环**（跑完提示符也不会自己停）⇒ 必须有上限，
+ * 否则浏览器测试会永远挂着。
+ */
+const OSZ_RUN_TIMEOUT_MS = 60000;
+
+/**
+ * 一个**带 CORS 头**的静态服务（给**仓外**的 osz ELF 用）。
+ *
+ * ⚠️ **为什么不能直接用前端的 HTTP 服务**：osz 的 ELF 在**仓外**
+ * （不进仓库），而前端的服务只服务 `front/` 目录 ⇒ 页面 `fetch` 不到它。
+ *
+ * ⚠️ **为什么需要 CORS 头**：产物服务与页面**不同源**（端口不同）⇒ 浏览器
+ * 的同源策略会拦掉 `fetch`。加 `Access-Control-Allow-Origin: *` 即可
+ * （这是一次性的本地复验设施，不是产品代码）。
+ *
+ * @param {string} root — 要服务的目录
+ * @returns {Promise<{port: number, close: () => void}>}
+ */
+function startArtifactServer(root) {
+    return new Promise((resolvePromise, rejectPromise) => {
+        const server = createServer((req, res) => {
+            const name = decodeURIComponent((req.url ?? "/").split("?")[0])
+                .replace(/^\/+/, "");
+            // ⚠️ **只服务该目录下的单个文件**（不做目录穿越）。
+            if (!name || name.includes("/") || name.includes("..")) {
+                res.writeHead(400);
+                res.end("bad path");
+                return;
+            }
+            const file = join(root, name);
+            if (!existsSync(file) || !statSync(file).isFile()) {
+                res.writeHead(404);
+                res.end("not found");
+                return;
+            }
+            res.writeHead(200, {
+                "Content-Type": "application/octet-stream",
+                "Content-Length": String(statSync(file).size),
+                "Access-Control-Allow-Origin": "*",
+            });
+            createReadStream(file).pipe(res);
+        });
+        server.on("error", rejectPromise);
+        server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            resolvePromise({
+                port: addr.port,
+                close: () => server.close(),
+            });
+        });
+    });
+}
+
+/**
+ * **终端视图**的检查：真实 RTOS 的 console 真的显示出来了。
+ *
+ * ⚠️ **断言值是具体字面量**，不是「非空」：只断言「终端里有内容」抓不到
+ * 「跑的是 demo 固件而不是 osz」这种错（demo 固件根本不打 console ⇒
+ * 终端会是空的，但将来某个别的固件可能会打点东西）。
+ *
+ * ⚠️ **断言 ANSI 转义还在**：osz 的 console 含 `\x1b[2K`（清行）⇒ 终端
+ * **不许过滤**它。（`\r` 不在这里断言：浏览器把 HTML 里的裸 `\r` 规范化成
+ * `\n` 那是 HTML 解析器的行为，不是前端过滤；字节级的 `\r` 由 Node 门禁
+ * 盯。）
+ *
+ * @param {object} probe
+ * @returns {{name: string, ok: boolean, detail: string}[]}
+ */
+function oszConsoleChecks(probe) {
+    const text = String(probe.termText ?? "");
+    const shown = JSON.stringify(text.slice(0, 200));
+    return [
+        {
+            name: "终端视图显示 osz 的启动行（==== Enter Main ====）",
+            ok: text.includes("==== Enter Main ===="),
+            detail: `termText=${shown}`,
+        },
+        {
+            name: "终端视图显示 osz 的提示符（OSZ$）",
+            ok: text.includes("OSZ$"),
+            detail: `termText=${shown}`,
+        },
+        {
+            name: "console 的 ANSI 转义原样显示（\\x1b[2K 没被过滤）",
+            ok: text.includes("\x1b[2K"),
+            detail: `termText=${shown}`,
+        },
+    ];
+}
+
+/**
+ * 真实 RTOS 那一段：装载仓外的 ELF → 跑起来 → 终端里看得见 console。
+ *
+ * ⚠️ **ELF 不在就跳过，不是判负**：osz 的产物**在仓外**（不进仓库）⇒
+ * 这一段在没装产物的机器上必须**跳过**（整体退出码仍是 0）。但**有**
+ * 产物却跑不出 console ⇒ **判负**。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
+ */
+async function runOszSection(cdp, opts) {
+    const elfPath = process.env.OSZ_ELF || OSZ_ELF_DEFAULT;
+    if (!existsSync(elfPath)) {
+        return {
+            skipped: true,
+            reason: `没有 osz ELF（${elfPath}；可用 $OSZ_ELF 指定）`,
+            checks: [],
+        };
+    }
+    console.log(`· osz ELF：${elfPath}`);
+
+    // -- 等页面上的装载入口就绪（bootstrap 是异步的）----------------------
+    const readyDeadline = Date.now() + opts.timeoutMs;
+    let ready = false;
+    while (Date.now() < readyDeadline) {
+        const res = await cdp.send("Runtime.evaluate", {
+            expression: 'typeof window.riscv_image === "object" && window.riscv_image !== null',
+            returnByValue: true,
+        });
+        if (res.result?.value === true) {
+            ready = true;
+            break;
+        }
+        await sleep(250);
+    }
+    if (!ready) {
+        return {
+            skipped: false,
+            checks: [{
+                name: "页面上的装载入口就绪（window.riscv_image）",
+                ok: false,
+                detail: "等不到（前端引导没起来？）",
+            }],
+        };
+    }
+
+    // -- 切到终端视图（终端面板要挂上，DOM 里才有 [data-terminal-out]）----
+    await cdp.send("Runtime.evaluate", {
+        expression: 'location.hash = "#/terminal";',
+        returnByValue: true,
+    });
+    await sleep(300);
+
+    const artifact = await startArtifactServer(dirname(elfPath));
+    try {
+        const elfUrl = `http://127.0.0.1:${artifact.port}/${basename(elfPath)}`;
+
+        // -- 装载：按 URL 取字节 → LoadProject → 强制重订 console 订阅 -----
+        const loadRes = await cdp.send("Runtime.evaluate", {
+            expression: `window.riscv_image.loadFromUrl(${JSON.stringify(elfUrl)})`,
+            awaitPromise: true,
+            returnByValue: true,
+        }, 120000);
+        if (loadRes.exceptionDetails) {
+            const err = loadRes.exceptionDetails.exception?.description
+                ?? loadRes.exceptionDetails.text
+                ?? "未知错误";
+            return {
+                skipped: false,
+                checks: [{
+                    name: "装载 osz 的 ELF（按 URL 取字节 → LoadProject）",
+                    ok: false,
+                    detail: String(err).slice(0, 300),
+                }],
+            };
+        }
+        const byteLength = Number(loadRes.result?.value?.byteLength ?? 0);
+        console.log(`· 已装载 osz：${byteLength} 字节`);
+
+        // -- 跑到提示符（一条一条 Continue，最多 60 秒）----------------------
+        const runRes = await cdp.send("Runtime.evaluate", {
+            expression:
+                `window.riscv_image.runUntilConsole("OSZ$ ", { timeoutMs: ${OSZ_RUN_TIMEOUT_MS} })`,
+            awaitPromise: true,
+            returnByValue: true,
+        }, OSZ_RUN_TIMEOUT_MS + 30000);
+        if (runRes.exceptionDetails) {
+            const err = runRes.exceptionDetails.exception?.description
+                ?? runRes.exceptionDetails.text
+                ?? "未知错误";
+            return {
+                skipped: false,
+                checks: [{
+                    name: "跑到 osz 的 shell 提示符",
+                    ok: false,
+                    detail: String(err).slice(0, 300),
+                }],
+            };
+        }
+        const batches = Number(runRes.result?.value?.batches ?? 0);
+        console.log(`· osz 跑了 ${batches} 批 Continue`);
+
+        // -- 断言**终端视图里**出现了那两段字面量 ---------------------------
+        const deadline = Date.now() + opts.timeoutMs;
+        let checks = [];
+        let probe = null;
+        while (Date.now() < deadline) {
+            const res = await cdp.send("Runtime.evaluate", {
+                expression: PROBE_EXPRESSION,
+                returnByValue: true,
+            });
+            probe = res.result?.value ?? null;
+            checks = probe ? oszConsoleChecks(probe) : [];
+            if (checks.length > 0 && checks.every((c) => c.ok)) break;
+            await sleep(250);
+        }
+        return { skipped: false, checks };
+    } finally {
+        artifact.close();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -1004,6 +1244,11 @@ async function main() {
             await sleep(250);
         }
 
+        // -- the REAL RTOS (osz): load the out-of-repo ELF and SEE its console -
+        // ⚠️ 这一段在**没有 osz ELF** 的机器上必须**跳过**（不是判负）——
+        // osz 的产物在**仓外**（不进仓库）。
+        const osz = await runOszSection(cdp, opts);
+
         // -- report ------------------------------------------------------------
         console.log("");
         console.log("落地页检查：");
@@ -1030,13 +1275,22 @@ async function main() {
         for (const check of waveform) {
             console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
         }
+        console.log("");
+        if (osz.skipped) {
+            console.log(`真实 RTOS 检查（osz）：skipped（${osz.reason}）`);
+        } else {
+            console.log("真实 RTOS 检查（osz：装载仓外 ELF → 跑 → 终端里的 console）：");
+            for (const check of osz.checks) {
+                console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
+            }
+        }
         if (consoleErrors.length > 0) {
             console.log("");
             console.log("控制台错误：");
             for (const err of consoleErrors) console.log(`  ✗ ${err}`);
         }
 
-        const failed = [...landing, ...render, ...kernelExec, ...source, ...waveform]
+        const failed = [...landing, ...render, ...kernelExec, ...source, ...waveform, ...osz.checks]
             .filter((c) => !c.ok);
         const ok = failed.length === 0 && consoleErrors.length === 0;
         console.log("");
