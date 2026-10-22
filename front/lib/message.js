@@ -37,9 +37,18 @@
 //   - two **optional** DTO fields on `model::DisasmEntryDto` (`file` /
 //     `line`) — the per-instruction source location (D-102). `null` means
 //     "unknown"; it is **never** fabricated.
+//
+// Contract v5 (`schema_version = 5`) adds:
+//   - one new command: `WriteConsole { bytes }` — the console **input**
+//     direction (UART RX). It is the exact mirror of v4's `Console`
+//     event (which is the TX direction): the bytes travel as a **JSON
+//     array of numbers** as well, because the guest's byte stream is the
+//     truth in **both** directions;
+//   - ⚠️ nothing else changed in v5: no new event, no DTO change, no
+//     renumbering.
 
 /** Protocol schema version — mirrors `riscv_sim_contract::SCHEMA_VERSION`. */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /**
  * Largest virtual time (picoseconds) that survives a round trip through a
@@ -355,6 +364,44 @@ export const Command = Object.freeze({
      * 关闭时内核**零开销**（什么都不记）；开启且仿真在跑时前端显示降速提示。
      */
     setTraceEnabled: (enabled) => ({ SetTraceEnabled: { enabled: Boolean(enabled) } }),
+    /**
+     * `CommandPayload::WriteConsole { bytes }` — 往 console UART **写**
+     * （RX 方向，契约 v5）。
+     *
+     * ⚠️ **字节，不是字符串**：与 `Event.console`（TX 方向）**同一个
+     * 口径** —— guest 的字节流两个方向都是真相 ⇒ 线上形态是 **JSON
+     * 数字数组**（`[104, 105]`），**不是** base64、**不是**字符串。
+     *
+     * ⚠️ **传字符串是错误用法，这里不默默接受**：字节必须是 **0..255
+     * 的整数数组**。传进来一个字符串（`'hi'`）会**当场抛错**，而不是
+     * 被逐字符拆成 `[104, 105]`（那是**另一个东西**，不是用户的意图）。
+     *
+     * @param {Array<number>} bytes
+     * @returns {{WriteConsole: {bytes: number[]}}}
+     * @throws {Error & {code: string}} E_PROTO-08（字节形态非法）
+     */
+    writeConsole: (bytes) => {
+        if (!Array.isArray(bytes)) {
+            throw protocolError(
+                "E_PROTO-08",
+                `WriteConsole 的 bytes 必须是字节数组（0..255 的整数），收到：${typeof bytes}`,
+            );
+        }
+        return {
+            WriteConsole: {
+                bytes: bytes.map((b) => {
+                    const n = Number(b);
+                    if (!Number.isInteger(n) || n < 0 || n > 255) {
+                        throw protocolError(
+                            "E_PROTO-08",
+                            `WriteConsole 的字节必须是 0..255 的整数：${String(b)}`,
+                        );
+                    }
+                    return n;
+                }),
+            },
+        };
+    },
 });
 
 // ---------------------------------------------------------------------------

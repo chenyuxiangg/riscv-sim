@@ -120,6 +120,21 @@
 //! ⚠️ **恢复顺序是规格 §3.7 的不变量，不可换**：校验 → 区域拓扑 → 内存页
 //! → 外设状态 → IRQ 行 → 引擎段。页写不进不存在的区域；外设状态写不进
 //! 未绑定的实例；引擎段**最后**还原（它会覆盖 `gpr` / `pc` / 虚拟时间）。
+//!
+//! ## 契约 v5 的 console 输入方向（STAGE-9 裁决 A）
+//!
+//! | 命令 | 内核行为 | 回复事件 |
+//! | --- | --- | --- |
+//! | `WriteConsole{bytes}` | 字节**逐个**进 UART0 的接收 FIFO ⇒ `LSR` 的 `RX_VALID` 置位 ⇒ 跑一次**同步器**（UART RX 就绪 **且** `IER` 的 RX 使能位开着 ⇒ PLIC 源 10 ⇒ M-16 的外部中断线 ⇒ guest 的 `mcause` = **`0x8000_000B`**） | `Tick{..}`（**至少一个**事件 —— 前端靠它落地 Promise） |
+//!
+//! ⚠️ **抬线是同步器的活，不是命令的活**：命令只负责「把字节放进去 +
+//! 让同步器跑一次」⇒ **一条命令不产生两个真相**。
+//!
+//! ⚠️ **空字节是幂等的**：什么都不做，但**照样回复**。
+//!
+//! ⚠️ **不复用 `WriteMemory`**：那会绕过外设的语义层（不走 FIFO、不置
+//! `RX_VALID`、不抬线）⇒ guest 读 `RHR` 拿到旧值而 `LSR` 说「没有数据」
+//! ⇒ **自相矛盾**。
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
@@ -1674,6 +1689,13 @@ impl KernelHost {
                 limit,
             } => self.on_export_trace(source, format, offset, limit),
             CommandPayload::SetTraceEnabled { enabled } => self.on_set_trace_enabled(enabled),
+            // ⚠️ 契约 v5 的 console **输入**方向（STAGE-9 裁决 A）。
+            //
+            // ⚠️ **不复用 `WriteMemory`**：写 UART 的寄存器地址在技术上
+            // 就是「写内存」，但它**绕过外设的语义层**（不走接收 FIFO、
+            // 不置 `LSR` 的 `RX_VALID`、不抬中断线）⇒ guest 读 `RHR`
+            // 拿到**旧值**而 `LSR` 说「没有数据」⇒ **自相矛盾**。
+            CommandPayload::WriteConsole { bytes } => self.on_write_console(bytes),
         }
     }
 
@@ -2031,6 +2053,55 @@ impl KernelHost {
         }]
     }
 
+    // -- 契约 v5 的 console 输入方向（STAGE-9 裁决 A） ---------------------
+
+    /// 往 console UART **写**（契约 v5 · `WriteConsole`）。
+    ///
+    /// ⚠️ **抬线是同步器的活，不是命令的活**：命令只负责「把字节放进去 +
+    /// 让同步器跑一次」。**一条命令不产生两个真相** —— 宿主**不**另写
+    /// 一份抬线逻辑（那会让「UART 就绪」与「中断线」各有一个判据）。
+    ///
+    /// ## 这个命令做**三件事**，顺序不能换
+    ///
+    /// 1. **把字节逐个塞进 UART 的接收 FIFO**（走
+    ///    [`Self::uart_receive`] ⇒ `Uart16550::receive`）。
+    /// 2. **`LSR` 的 `RX_VALID`（bit0）随之置位** —— 这是 **UART 模型
+    ///    自己的事**（`receive()` 已经做了）⇒ 宿主**不手动改 LSR**
+    ///    （手动改就是「第二个真相」：寄存器与 FIFO 各说各话）。
+    /// 3. **调一次同步器**（[`Self::sync_interrupts`]）⇒ UART 的 RX 就绪
+    ///    **且** `IER` 的 RX 中断使能位开着 ⇒ `plic.request(10)` ⇒ PLIC
+    ///    交付 ⇒ **M-16 的外部中断线**被拉起（`IRQ_UART_RX_READY` = 1）
+    ///    ⇒ guest 看到的 `mcause` 是 **`0x8000_000B`**（架构码 11）。
+    ///
+    /// ## 回复
+    ///
+    /// ⚠️ **必须至少有一个事件**：前端的 M-05 命令路由是「**第一个**带
+    /// `reqId` 的事件 resolve 掉这个命令」⇒ 返回空数组 ⇒ 前端的
+    /// Promise **永远不落地**（只能等超时）。⇒ 与 `SetBreakpoint` /
+    /// `ClearBreakpoint` / `Nop` 一致：返回 `vec![self.tick()]`。
+    ///
+    /// ## 空字节
+    ///
+    /// `bytes` 为空 ⇒ **什么都不做**（不碰 FIFO、不跑同步器），但
+    /// **照样回复** —— 幂等，**不是**错误。
+    ///
+    /// ⚠️ **本批不做「往哪个 UART 写」的选择**：平台只有 UART0（且只有
+    /// QEMU virt 档才映射它）。默认档没有 UART ⇒ 字节无处可去 ⇒
+    /// [`Self::uart_receive`] 什么都不做（**不报错**）。
+    fn on_write_console(&mut self, bytes: Vec<u8>) -> Vec<EventPayload> {
+        if bytes.is_empty() {
+            // ⚠️ 幂等：什么都不做，但**照样回复**（前端要看到回复落地）。
+            return vec![self.tick()];
+        }
+        for byte in bytes {
+            self.uart_receive(byte);
+        }
+        // ⚠️ 同步器**跑一次** ⇒ 外设的中断源被同步到 M-16（UART RX 就绪
+        // ⇒ PLIC 源 10 ⇒ M-16 的外部中断线）。
+        self.sync_interrupts();
+        vec![self.tick()]
+    }
+
     // -- 契约 v3 的调试面（M-11 · STAGE-5） ---------------------------------
 
     /// 反汇编（契约 v3 · `Disasm`）。
@@ -2045,11 +2116,21 @@ impl KernelHost {
     /// ⚠️ 取指**必须真的只读 `size` 字节**（「读一个字取低半」会让映射区
     /// 末端的压缩指令越界误报，LLD 11-1）——见 [`fetch_bytes`]。
     fn on_disasm(&mut self, addr: u32, count: u32) -> Vec<EventPayload> {
-        // 借用拆分：`self.backend`（总线）与 `self.disassembler` 是**两个
-        // 不同的字段** ⇒ 可以同时借。
+        // 借用拆分：`self.backend`（总线）、`self.index`（行表）与
+        // `self.disassembler`（可变）是**三个不同的字段** ⇒ 可以同时借。
+        //
+        // ⚠️ **不 `clone()` 索引**：osz 的符号表 + 行表不小，每条 `Disasm`
+        // 都克隆一遍是**白烧**（STAGE-9 裁决 C 的接线要求）。
         let bus = self.backend.bus();
+        let index = &self.index;
+        let disassembler = &mut self.disassembler;
         let mut read = |addr: u32, size: u32| fetch_bytes(bus, addr, size);
-        match self.disassembler.disasm(addr, count, &mut read) {
+        // ⚠️ 结果**先落到局部变量**：`Err` 分支要调 `self.error_from`
+        // （`&self`），而 `self.disassembler` 的可变借用在调用返回后就
+        // 结束了 —— 不落局部的话，match 的借用区间会横跨整个 match。
+        let result =
+            disassembler.disasm_with_lines(addr, count, &mut read, |a| index.resolve_line_entry(a));
+        match result {
             Ok(entries) => vec![EventPayload::Disasm { entries }],
             Err(err) => vec![self.error_from(&err)],
         }
@@ -2885,3 +2966,6 @@ mod tests_m11;
 
 #[cfg(test)]
 mod tests_osz_wiring;
+
+#[cfg(test)]
+mod tests_v024;
