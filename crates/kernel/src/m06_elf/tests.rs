@@ -838,3 +838,461 @@ fn raw_rejects_blob_larger_than_the_region_budget() {
         err.message
     );
 }
+
+// ---------------------------------------------------------------------------
+// STAGE-5 裁决 B · W1.1 — the section table and the debug-section
+// whitelist.
+//
+// The fixtures below build a **complete ELF32 image in memory** (byte
+// arrays, no external toolchain, no external file), so the section-table
+// parser is exercised against a hand-written container rather than a
+// toolchain artifact.
+// ---------------------------------------------------------------------------
+
+/// `sh_type` — ordinary file-backed section.
+pub(crate) const SHT_PROGBITS: u32 = 1;
+/// `sh_type` — string table.
+pub(crate) const SHT_STRTAB: u32 = 3;
+/// `sh_type` — the section occupies no space in the file.
+pub(crate) const SHT_NOBITS: u32 = 8;
+
+/// One section of the synthetic section table.
+pub(crate) struct TestSection {
+    /// Section name, as it appears in `.shstrtab`.
+    pub(crate) name: &'static str,
+    /// `sh_type`.
+    pub(crate) sh_type: u32,
+    /// File content. Ignored for `SHT_NOBITS`.
+    pub(crate) data: Vec<u8>,
+    /// `sh_size` override — defaults to `data.len()`.
+    pub(crate) size_override: Option<u32>,
+}
+
+impl TestSection {
+    /// A file-backed section with the given name and content.
+    pub(crate) fn progbits(name: &'static str, data: &[u8]) -> Self {
+        Self {
+            name,
+            sh_type: SHT_PROGBITS,
+            data: data.to_vec(),
+            size_override: None,
+        }
+    }
+
+    /// A `SHT_NOBITS` section: it declares `declared_size` bytes but
+    /// occupies no space in the file.
+    pub(crate) fn nobits(name: &'static str, declared_size: u32) -> Self {
+        Self {
+            name,
+            sh_type: SHT_NOBITS,
+            data: Vec::new(),
+            size_override: Some(declared_size),
+        }
+    }
+}
+
+/// The synthetic ELF plus the offsets a test needs in order to mutate
+/// it (the malformed-table cases live in `tests_malformed.rs`).
+pub(crate) struct TestElf {
+    /// The complete file.
+    pub(crate) bytes: Vec<u8>,
+    /// File offset of the section-header table.
+    pub(crate) shoff: u32,
+    /// `(file offset, length)` of the `.shstrtab` content.
+    pub(crate) shstrtab: (u32, u32),
+}
+
+impl TestElf {
+    /// File offset of section-header entry `index`.
+    pub(crate) fn shdr_offset(&self, index: usize) -> usize {
+        self.shoff as usize + index * 40
+    }
+}
+
+/// Build an ELF32 LE RV32 ET_EXEC with a section table.
+///
+/// Layout:
+///
+/// ```text
+/// [0, 52)          ELF header
+/// [52, 84)         program header (one PT_LOAD covering `.text`)
+/// [84, 88)         `.text` payload
+/// ...              section payloads, in the order given
+/// ...              `.shstrtab` payload
+/// [shoff, ...)     section header table:
+///                   [0] = SHT_NULL, [1] = `.shstrtab`, [2..] = the
+///                   user sections
+/// ```
+pub(crate) fn build_elf_with_sections(sections: &[TestSection]) -> TestElf {
+    const EHDR_SIZE: usize = 52;
+    const PHDR_SIZE: usize = 32;
+    const SHDR_SIZE: usize = 40;
+    const TEXT_OFF: u32 = (EHDR_SIZE + PHDR_SIZE) as u32;
+    const TEXT_LEN: u32 = 4;
+
+    // ----- `.shstrtab` payload -----
+    // Offset 0 is the empty name (the null section's `sh_name`).
+    let mut shstr: Vec<u8> = vec![0u8];
+    let mut name_offsets: Vec<u32> = Vec::with_capacity(sections.len());
+    for s in sections {
+        name_offsets.push(shstr.len() as u32);
+        shstr.extend_from_slice(s.name.as_bytes());
+        shstr.push(0);
+    }
+    let shstrtab_name_offset = shstr.len() as u32;
+    shstr.extend_from_slice(b".shstrtab");
+    shstr.push(0);
+
+    // ----- file body -----
+    let mut bytes: Vec<u8> = Vec::new();
+    bytes.extend_from_slice(&[0u8; EHDR_SIZE]); // ELF header (filled in below)
+    bytes.extend_from_slice(&[0u8; PHDR_SIZE]); // program header (filled in below)
+    bytes.extend_from_slice(&[0x93, 0x00, 0xA0, 0x02]); // `.text`: ADDI x1, x0, 42
+
+    // Section payloads.
+    let mut section_offsets: Vec<u32> = Vec::with_capacity(sections.len());
+    for s in sections {
+        section_offsets.push(bytes.len() as u32);
+        if s.sh_type != SHT_NOBITS {
+            bytes.extend_from_slice(&s.data);
+        }
+    }
+
+    // `.shstrtab` payload.
+    let shstrtab_offset = bytes.len() as u32;
+    let shstrtab_len = shstr.len() as u32;
+    bytes.extend_from_slice(&shstr);
+
+    // ----- section header table -----
+    let shnum = 2 + sections.len();
+    let shoff = bytes.len() as u32;
+    let mut shdrs: Vec<u8> = Vec::with_capacity(shnum * SHDR_SIZE);
+    shdrs.extend_from_slice(&[0u8; SHDR_SIZE]); // [0] SHT_NULL
+    push_shdr(
+        &mut shdrs,
+        shstrtab_name_offset,
+        SHT_STRTAB,
+        shstrtab_offset,
+        shstrtab_len,
+    );
+    for (i, s) in sections.iter().enumerate() {
+        let size = s.size_override.unwrap_or(s.data.len() as u32);
+        push_shdr(
+            &mut shdrs,
+            name_offsets[i],
+            s.sh_type,
+            section_offsets[i],
+            size,
+        );
+    }
+    bytes.extend_from_slice(&shdrs);
+
+    // ----- ELF header -----
+    bytes[0..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+    bytes[4] = 1; // EI_CLASS = ELFCLASS32
+    bytes[5] = 1; // EI_DATA  = ELFDATA2LSB
+    bytes[6] = 1; // EI_VERSION = EV_CURRENT
+    bytes[16..18].copy_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+    bytes[18..20].copy_from_slice(&0xF3u16.to_le_bytes()); // e_machine = EM_RISCV
+    bytes[20..24].copy_from_slice(&1u32.to_le_bytes()); // e_version
+    bytes[24..28].copy_from_slice(&0u32.to_le_bytes()); // e_entry
+    bytes[28..32].copy_from_slice(&(EHDR_SIZE as u32).to_le_bytes()); // e_phoff
+    bytes[32..36].copy_from_slice(&shoff.to_le_bytes()); // e_shoff
+    bytes[36..40].copy_from_slice(&0u32.to_le_bytes()); // e_flags
+    bytes[40..42].copy_from_slice(&(EHDR_SIZE as u16).to_le_bytes()); // e_ehsize
+    bytes[42..44].copy_from_slice(&(PHDR_SIZE as u16).to_le_bytes()); // e_phentsize
+    bytes[44..46].copy_from_slice(&1u16.to_le_bytes()); // e_phnum
+    bytes[46..48].copy_from_slice(&(SHDR_SIZE as u16).to_le_bytes()); // e_shentsize
+    bytes[48..50].copy_from_slice(&(shnum as u16).to_le_bytes()); // e_shnum
+    bytes[50..52].copy_from_slice(&1u16.to_le_bytes()); // e_shstrndx
+
+    // ----- program header (one PT_LOAD over `.text`) -----
+    bytes[52..56].copy_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+    bytes[56..60].copy_from_slice(&TEXT_OFF.to_le_bytes()); // p_offset
+    bytes[60..64].copy_from_slice(&0u32.to_le_bytes()); // p_vaddr
+    bytes[64..68].copy_from_slice(&0u32.to_le_bytes()); // p_paddr
+    bytes[68..72].copy_from_slice(&TEXT_LEN.to_le_bytes()); // p_filesz
+    bytes[72..76].copy_from_slice(&TEXT_LEN.to_le_bytes()); // p_memsz
+    bytes[76..80].copy_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R|PF_X
+    bytes[80..84].copy_from_slice(&4u32.to_le_bytes()); // p_align
+
+    TestElf {
+        bytes,
+        shoff,
+        shstrtab: (shstrtab_offset, shstrtab_len),
+    }
+}
+
+/// Append one ELF32 section header (40 bytes) to `out`.
+fn push_shdr(out: &mut Vec<u8>, sh_name: u32, sh_type: u32, sh_offset: u32, sh_size: u32) {
+    out.extend_from_slice(&sh_name.to_le_bytes()); // sh_name
+    out.extend_from_slice(&sh_type.to_le_bytes()); // sh_type
+    out.extend_from_slice(&0u32.to_le_bytes()); // sh_flags
+    out.extend_from_slice(&0u32.to_le_bytes()); // sh_addr
+    out.extend_from_slice(&sh_offset.to_le_bytes()); // sh_offset
+    out.extend_from_slice(&sh_size.to_le_bytes()); // sh_size
+    out.extend_from_slice(&0u32.to_le_bytes()); // sh_link
+    out.extend_from_slice(&0u32.to_le_bytes()); // sh_info
+    out.extend_from_slice(&1u32.to_le_bytes()); // sh_addralign
+    out.extend_from_slice(&0u32.to_le_bytes()); // sh_entsize
+}
+
+/// The section name of every extracted debug section, in order.
+fn debug_section_names(image: &LoadImage) -> Vec<&str> {
+    image
+        .debug_sections
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect()
+}
+
+/// The whitelist M-06 extracts (STAGE-5 裁决 B).
+const EXPECTED_WHITELIST: [&str; 7] = [
+    ".symtab",
+    ".strtab",
+    ".debug_line",
+    ".debug_line_str",
+    ".debug_str",
+    ".debug_abbrev",
+    ".debug_info",
+];
+
+/// The happy path: a minimal ELF with `.text` + `.symtab` + `.strtab`
+/// yields exactly the two whitelisted sections, with the bytes the
+/// fixture planted.
+#[test]
+fn elf_extracts_the_whitelisted_debug_sections_with_their_bytes() {
+    let symtab = vec![0x11u8; 24];
+    let strtab = b"\0sym_a\0".to_vec();
+    let elf = build_elf_with_sections(&[
+        TestSection::progbits(".symtab", &symtab),
+        TestSection::progbits(".strtab", &strtab),
+    ]);
+
+    let li = DefaultLoader
+        .load(&elf.bytes, Kind::Elf)
+        .expect("elf parse");
+
+    // The loadable image is unaffected by the section table.
+    assert_eq!(li.segments.len(), 1);
+    assert_eq!(li.segments[0].1, vec![0x93, 0x00, 0xA0, 0x02]);
+
+    assert_eq!(
+        debug_section_names(&li),
+        vec![".symtab", ".strtab"],
+        "exactly the two whitelisted sections, in section-header order"
+    );
+    assert_eq!(li.debug_sections[0].1, symtab, "`.symtab` bytes");
+    assert_eq!(li.debug_sections[1].1, strtab, "`.strtab` bytes");
+}
+
+/// The whitelist is exact: every whitelisted name is extracted, and
+/// nothing else is — `.shstrtab` (internal only), `.text`, `.comment`
+/// and arbitrary custom sections stay out.
+#[test]
+fn elf_debug_section_whitelist_is_exact() {
+    let mut sections: Vec<TestSection> = EXPECTED_WHITELIST
+        .iter()
+        .map(|name| TestSection::progbits(name, name.as_bytes()))
+        .collect();
+    sections.push(TestSection::progbits(".text", b"\x93\x00"));
+    sections.push(TestSection::progbits(".comment", b"a comment"));
+    sections.push(TestSection::progbits(".my_custom_section", b"custom"));
+
+    let elf = build_elf_with_sections(&sections);
+    let li = DefaultLoader
+        .load(&elf.bytes, Kind::Elf)
+        .expect("elf parse");
+
+    assert_eq!(
+        debug_section_names(&li),
+        EXPECTED_WHITELIST.to_vec(),
+        "the whitelist is exact, in section-header order"
+    );
+    for (name, bytes) in &li.debug_sections {
+        assert_eq!(
+            bytes,
+            name.as_bytes(),
+            "section {:?} must carry its own bytes",
+            name
+        );
+    }
+    // `.shstrtab` is used internally only — it must never be handed out.
+    assert!(
+        !debug_section_names(&li).contains(&".shstrtab"),
+        "`.shstrtab` is internal, not a debug section"
+    );
+}
+
+/// `SHT_NOBITS` sections occupy no file space: they are neither
+/// extracted nor counted against the debug-section byte budget.
+#[test]
+fn elf_skips_nobits_sections() {
+    let symtab = vec![0xAAu8; 8];
+    let elf = build_elf_with_sections(&[
+        TestSection::progbits(".symtab", &symtab),
+        // A 4 MiB `.debug_info` that lives in no file space at all.
+        TestSection::nobits(".debug_info", 4 * 1024 * 1024),
+    ]);
+
+    // A budget of 16 bytes is enough for `.symtab` — but only if the
+    // NOBITS section is *not* counted against it.
+    let limits = ParseLimits {
+        debug_section_bytes: 16,
+        ..ParseLimits::default()
+    };
+    let li = DefaultLoader
+        .load_with_limits(&elf.bytes, Kind::Elf, &limits)
+        .expect("a NOBITS section must not count against the budget");
+
+    assert_eq!(debug_section_names(&li), vec![".symtab"]);
+    assert_eq!(li.debug_sections[0].1, symtab);
+}
+
+/// An ELF without a section table (`e_shoff == 0`) loads fine and
+/// yields no debug sections — that is the normal bare-metal image.
+#[test]
+fn elf_without_a_section_table_yields_no_debug_sections() {
+    let elf = make_minimal_elf(4, 4); // e_shoff = 0
+    let li = DefaultLoader.load(&elf, Kind::Elf).expect("elf parse");
+    assert!(
+        li.debug_sections.is_empty(),
+        "an ELF without a section table has no debug sections"
+    );
+    assert_eq!(li.segments.len(), 1, "the loadable image is unaffected");
+}
+
+/// `e_shnum == 0` (the extended section count) is not an error either —
+/// M-06 does not implement that form and simply reports no debug
+/// sections.
+#[test]
+fn elf_with_the_extended_section_count_yields_no_debug_sections() {
+    let mut elf = build_elf_with_sections(&[TestSection::progbits(".symtab", &[0xAA; 4])]);
+    elf.bytes[48..50].copy_from_slice(&0u16.to_le_bytes()); // e_shnum = 0
+    let li = DefaultLoader
+        .load(&elf.bytes, Kind::Elf)
+        .expect("elf parse");
+    assert!(li.debug_sections.is_empty());
+    assert_eq!(li.segments.len(), 1, "the loadable image is unaffected");
+}
+
+/// A missing / out-of-range section-name table must not fail the load:
+/// without names the whitelist cannot be applied, so there are no debug
+/// sections.
+#[test]
+fn elf_with_an_unusable_section_name_table_yields_no_debug_sections() {
+    let mut elf = build_elf_with_sections(&[TestSection::progbits(".symtab", &[0xAA; 4])]);
+    // e_shstrndx (50..52) points past the end of the section table.
+    elf.bytes[50..52].copy_from_slice(&999u16.to_le_bytes());
+    let li = DefaultLoader
+        .load(&elf.bytes, Kind::Elf)
+        .expect("elf parse");
+    assert!(li.debug_sections.is_empty());
+    assert_eq!(li.segments.len(), 1, "the loadable image is unaffected");
+}
+
+/// The debug-section byte budget is a **limit, not a truncation**: an
+/// image whose whitelisted sections exceed it is rejected.
+#[test]
+fn elf_rejects_debug_sections_over_the_byte_budget() {
+    let elf = build_elf_with_sections(&[
+        TestSection::progbits(".symtab", &[0xAA; 32]),
+        TestSection::progbits(".strtab", &[0xBB; 32]),
+    ]);
+    let limits = ParseLimits {
+        debug_section_bytes: 48,
+        ..ParseLimits::default()
+    };
+    let err = DefaultLoader
+        .load_with_limits(&elf.bytes, Kind::Elf, &limits)
+        .unwrap_err();
+    assert_eq!(err.family, ErrorFamily::Loader);
+    assert_eq!(err.scenario, 2, "E_LDR-02 parse-limit");
+    assert!(
+        err.message.contains("debugSectionBytes"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+/// The budget is exactly the limit: sections that fit exactly are
+/// accepted (the boundary is inclusive, not off by one).
+#[test]
+fn elf_accepts_debug_sections_exactly_at_the_byte_budget() {
+    let elf = build_elf_with_sections(&[
+        TestSection::progbits(".symtab", &[0xAA; 32]),
+        TestSection::progbits(".strtab", &[0xBB; 16]),
+    ]);
+    let limits = ParseLimits {
+        debug_section_bytes: 48,
+        ..ParseLimits::default()
+    };
+    let li = DefaultLoader
+        .load_with_limits(&elf.bytes, Kind::Elf, &limits)
+        .expect("48 bytes of debug sections fit a 48-byte budget");
+    assert_eq!(debug_section_names(&li), vec![".symtab", ".strtab"]);
+}
+
+/// The order of `debug_sections` is the **section-header order** — not
+/// sorted, not de-duplicated. M-11 relies on it to find `.symtab` and
+/// its `.strtab`.
+#[test]
+fn elf_preserves_the_section_header_order() {
+    let elf = build_elf_with_sections(&[
+        TestSection::progbits(".debug_info", &[0x01]),
+        TestSection::progbits(".symtab", &[0x02]),
+        TestSection::progbits(".debug_line", &[0x03]),
+    ]);
+    let li = DefaultLoader
+        .load(&elf.bytes, Kind::Elf)
+        .expect("elf parse");
+    assert_eq!(
+        debug_section_names(&li),
+        vec![".debug_info", ".symtab", ".debug_line"],
+        "the order is the section-header order, not the whitelist order"
+    );
+}
+
+/// Two sections with the same name are both handed out (no
+/// de-duplication).
+#[test]
+fn elf_keeps_duplicate_section_names() {
+    let elf = build_elf_with_sections(&[
+        TestSection::progbits(".symtab", &[0x01]),
+        TestSection::progbits(".symtab", &[0x02]),
+    ]);
+    let li = DefaultLoader
+        .load(&elf.bytes, Kind::Elf)
+        .expect("elf parse");
+    assert_eq!(debug_section_names(&li), vec![".symtab", ".symtab"]);
+    assert_eq!(li.debug_sections[0].1, vec![0x01]);
+    assert_eq!(li.debug_sections[1].1, vec![0x02]);
+}
+
+/// A section whose content lies outside the file is malformed — even
+/// when the section is *not* whitelisted? No: only whitelisted sections
+/// are read, so a bogus offset on an ignored section must not fail the
+/// load. This pins that boundary.
+#[test]
+fn elf_ignores_a_bogus_offset_on_a_non_whitelisted_section() {
+    let mut elf = build_elf_with_sections(&[
+        TestSection::progbits(".symtab", &[0xAA; 4]),
+        TestSection::progbits(".comment", &[0xBB; 4]),
+    ]);
+    // The `.comment` header is entry #3 (null, .shstrtab, .symtab,
+    // .comment): point its content far outside the file.
+    let hdr = elf.shdr_offset(3);
+    elf.bytes[hdr + 16..hdr + 20].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    let li = DefaultLoader
+        .load(&elf.bytes, Kind::Elf)
+        .expect("an ignored section's offset must not fail the load");
+    assert_eq!(debug_section_names(&li), vec![".symtab"]);
+}
+
+/// The default budget is 8 MiB and `LoadImage::default()` carries no
+/// debug sections.
+#[test]
+fn parse_limits_default_debug_section_budget_is_8_mib() {
+    assert_eq!(ParseLimits::default().debug_section_bytes, 8 * 1024 * 1024);
+    assert!(LoadImage::default().debug_sections.is_empty());
+}
