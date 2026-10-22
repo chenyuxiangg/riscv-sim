@@ -28,6 +28,10 @@
 //   - the **real** probe pipeline really works: after the demo firmware
 //     drives `GPIO0.OUT`, the waveform view lists that channel **with
 //     its edge count** (D-46) — not "some content";
+//   - the **real** source view really works: after the kernel stepped,
+//     the "解析当前 PC 的源码行" button carries **the current PC** in
+//     its `data-addr` — not `0` (V-B's VB-1 broke exactly that link
+//     while the Node gate stayed green);
 //   - the console is clean: no `console.error`, no uncaught exception.
 //
 // What it does NOT verify
@@ -474,6 +478,12 @@ const PROBE_EXPRESSION = `(() => {
     return code ? String(code.textContent || "").trim() : "";
   };
   const waveItems = Array.from(document.querySelectorAll('[data-view-body="waveform"] .channel-list > li'));
+  // -- 源码视图（STAGE-7 裁决 E / F）--
+  // ⚠️ 全部用 data-* 选择器取：**不靠文案匹配**去找元素。
+  const sourceBody = document.querySelector('[data-view-body="source"]');
+  const resolveButtons = Array.from(document.querySelectorAll('[data-action="resolve-line"]'));
+  const resolveBtn = resolveButtons[0] || null;
+  const sourceStatusEl = document.querySelector("[data-source-status]");
   return {
     hasApp: Boolean(app),
     panelCount: panels.length,
@@ -490,9 +500,48 @@ const PROBE_EXPRESSION = `(() => {
       ? String((waveItems[0].querySelector(".channel-label") || {}).textContent || "").trim()
       : "",
     waveItemText0: waveItems[0] ? String(waveItems[0].textContent || "").trim() : "",
+    // -- 源码视图 --
+    sourceBtnCount: resolveButtons.length,
+    sourceAddr: resolveBtn ? String(resolveBtn.getAttribute("data-addr") ?? "").trim() : "",
+    sourceStatusText: sourceStatusEl ? String(sourceStatusEl.textContent || "").trim() : "",
+    sourceBodyChars: sourceBody ? String(sourceBody.innerHTML || "").trim().length : 0,
+    resolveLineCmds: Array.isArray(window.__bvResolveLineCmds)
+      ? window.__bvResolveLineCmds.map((v) => String(v))
+      : [],
     status: String((document.getElementById("status") || {}).textContent || "").trim(),
     note: String((document.getElementById("kernel-note") || {}).textContent || "").trim(),
   };
+})()`;
+
+/**
+ * 在页面里挂一个**命令捕获器**：记录每一条 `riscv:command` 信号里的
+ * `resolve-line` 地址。
+ *
+ * ⚠️ 这只是**运行时插桩**，不改前端源码：视图层发命令的方式就是往
+ * `window` 上抛 `riscv:command`（M-02 的 `emitCommand`）⇒ 在这里监听
+ * 就能看到「按钮点下去到底发了什么」。
+ */
+const CAPTURE_RESOLVE_LINE_EXPRESSION = `(() => {
+  if (!Array.isArray(window.__bvResolveLineCmds)) window.__bvResolveLineCmds = [];
+  if (!window.__bvResolveLineHooked) {
+    window.__bvResolveLineHooked = true;
+    window.addEventListener("riscv:command", (ev) => {
+      const detail = ev && ev.detail ? ev.detail : {};
+      if (detail.action !== "resolve-line") return;
+      window.__bvResolveLineCmds.push(String((detail.params || {}).addr ?? ""));
+    });
+  }
+  return window.__bvResolveLineCmds.length;
+})()`;
+
+/**
+ * 点一下「解析当前 PC 的源码行」按钮（用 `data-*` 选择器找，不靠文案）。
+ */
+const CLICK_RESOLVE_LINE_EXPRESSION = `(() => {
+  const btn = document.querySelector('[data-action="resolve-line"]');
+  if (!btn) return false;
+  btn.click();
+  return true;
 })()`;
 
 /**
@@ -633,6 +682,89 @@ function waveformChecks(probe) {
             detail: `item0="${probe.waveItemText0}"`,
         },
     ];
+}
+
+/**
+ * **源码视图**检查：这条链路必须真的通到「当前 PC」（VB-7）。
+ *
+ * ⚠️ **断言的是具体值**（D-45 的教训）：「解析当前 PC 的源码行」按钮的
+ * `data-addr` 必须**等于当前 PC 的十进制值**。
+ *
+ * 为什么要这么严：V-B 检视查出的 VB-1 是**生产路径真的断了**——源码视图
+ * 收不到 `sim.pc`（M-10 挂载时没把 `source` 列进去）⇒ 按钮**恒问地址 0**。
+ * 而门禁 243 条**全绿**，因为用例**手工注入**了 `sim.pc`。只断言「按钮
+ * 存在」或「地址非空」都抓不到它——**0 也是非空**。
+ *
+ * ⚠️ **期望值拿不到就让这条检查失败**（不许退化成弱断言）：当前 PC 取自
+ * 寄存器视图渲染出来的那行十六进制文本（`0x00000004`）⇒ 换成十进制才是
+ * `data-addr` 里的形态。取不到 ⇒ `expectedAddr` 为空 ⇒ 判红。
+ *
+ * @param {object} probe
+ * @returns {{name: string, ok: boolean, detail: string}[]}
+ */
+function sourceChecks(probe) {
+    const pcHex = String(probe.pc ?? "").trim();
+    const pcNum = /^0x[0-9a-fA-F]+$/.test(pcHex) ? Number.parseInt(pcHex, 16) : Number.NaN;
+    // `>>> 0` 与视图侧 `Number(...) >>> 0` 的口径一致（32 位无符号）。
+    const expectedAddr = Number.isFinite(pcNum) ? String(pcNum >>> 0) : "";
+    const addr = String(probe.sourceAddr ?? "").trim();
+
+    return [
+        {
+            name: "路由切到了源码视图（#/source）",
+            ok: probe.activePanel === "source",
+            detail: `active=${probe.activePanel}`,
+        },
+        {
+            name: "源码视图有标题文本",
+            ok: typeof probe.title === "string" && probe.title.length > 0,
+            detail: `title="${probe.title}"`,
+        },
+        {
+            name: "源码视图正文非空（不是白屏）",
+            ok: Number(probe.sourceBodyChars ?? 0) > 0,
+            detail: `sourceBodyChars=${probe.sourceBodyChars}`,
+        },
+        {
+            name: "「解析当前 PC 的源码行」按钮存在",
+            ok: probe.sourceBtnCount === 1,
+            detail: `buttons=${probe.sourceBtnCount} data-addr="${addr}"`,
+        },
+        {
+            name: "按钮的 data-addr 等于当前 PC（不是 0）",
+            ok: expectedAddr !== "" && expectedAddr !== "0" && addr === expectedAddr,
+            detail: `pc="${pcHex}" expected="${expectedAddr}" data-addr="${addr}"`,
+        },
+        {
+            name: "未装载源码时如实显示「未装载源码」",
+            ok: typeof probe.sourceStatusText === "string"
+                && probe.sourceStatusText.includes("未装载源码"),
+            detail: `status="${probe.sourceStatusText}"`,
+        },
+    ];
+}
+
+/**
+ * 源码视图的**命令腿**：点按钮 ⇒ 真的发出 `resolve-line` 命令，且命令里
+ * 带的地址**等于当前 PC**。
+ *
+ * ⚠️ 这一条查的是「按钮 → `riscv:command` 信号」那一段：按钮渲染对了但
+ * `onCommand` 没把地址带出去的话，前一条断言照样绿。
+ *
+ * @param {object} probe
+ * @returns {{name: string, ok: boolean, detail: string}}
+ */
+function sourceCommandCheck(probe) {
+    const pcHex = String(probe.pc ?? "").trim();
+    const pcNum = /^0x[0-9a-fA-F]+$/.test(pcHex) ? Number.parseInt(pcHex, 16) : Number.NaN;
+    const expectedAddr = Number.isFinite(pcNum) ? String(pcNum >>> 0) : "";
+    const cmds = Array.isArray(probe.resolveLineCmds) ? probe.resolveLineCmds : [];
+    return {
+        name: "点按钮真的发出 resolve-line 命令（地址等于当前 PC）",
+        ok: expectedAddr !== "" && expectedAddr !== "0"
+            && cmds.length > 0 && cmds[0] === expectedAddr,
+        detail: `cmds=${JSON.stringify(cmds)} expected="${expectedAddr}"`,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -792,6 +924,58 @@ async function main() {
             await sleep(250);
         }
 
+        // -- the source view really asks for the CURRENT PC (VB-7) ------------
+        //  ⚠️ 必须在**内核已经单步过**之后：当前 PC 是那一步推进的。
+        //  这条链路是「源码视图收到 `sim.pc` ⇒ 按钮的 `data-addr`」——
+        //  V-B 检视的 VB-1 断的就是它（源码视图收不到 `sim.pc` ⇒ 按钮
+        //  **恒问地址 0**），而 Node 门禁 243 条**全绿**（用例手工注入
+        //  了 `sim.pc`）⇒ 只有真机断言抓得到。
+        await cdp.send("Runtime.evaluate", {
+            expression: 'location.hash = "#/source";',
+            returnByValue: true,
+        });
+        let source = [];
+        const sourceDeadline = Date.now() + opts.timeoutMs;
+        while (Date.now() < sourceDeadline) {
+            const res = await cdp.send("Runtime.evaluate", {
+                expression: PROBE_EXPRESSION,
+                returnByValue: true,
+            });
+            probe = res.result?.value ?? null;
+            source = probe ? sourceChecks(probe) : [];
+            if (source.length > 0 && source.every((c) => c.ok)) break;
+            await sleep(250);
+        }
+
+        // -- the button really dispatches `resolve-line` with that address ----
+        //  ⚠️ **等上面全绿之后才点**：那时按钮上的 `data-addr` 已经等于当
+        //  前 PC，否则点下去抓到的是 0（那是时序问题，不是被测缺陷）。
+        await cdp.send("Runtime.evaluate", {
+            expression: CAPTURE_RESOLVE_LINE_EXPRESSION,
+            returnByValue: true,
+        });
+        await cdp.send("Runtime.evaluate", {
+            expression: CLICK_RESOLVE_LINE_EXPRESSION,
+            returnByValue: true,
+        });
+        let sourceCmd = null;
+        const sourceCmdDeadline = Date.now() + opts.timeoutMs;
+        while (Date.now() < sourceCmdDeadline) {
+            const res = await cdp.send("Runtime.evaluate", {
+                expression: PROBE_EXPRESSION,
+                returnByValue: true,
+            });
+            probe = res.result?.value ?? null;
+            sourceCmd = probe ? sourceCommandCheck(probe) : null;
+            if (sourceCmd && sourceCmd.ok) break;
+            await sleep(250);
+        }
+        source.push(sourceCmd ?? {
+            name: "点按钮真的发出 resolve-line 命令（地址等于当前 PC）",
+            ok: false,
+            detail: "没取到命令信号",
+        });
+
         // -- drive the probe pipeline (D-46) ----------------------------------
         //  The demo firmware writes `GPIO0.OUT` on its 8th instruction, so
         //  the program has to run that far. The single `step` above only
@@ -837,6 +1021,11 @@ async function main() {
             console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
         }
         console.log("");
+        console.log("源码视图检查（切到 #/source）：");
+        for (const check of source) {
+            console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
+        }
+        console.log("");
         console.log("探针流检查（切到 #/waveform）：");
         for (const check of waveform) {
             console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
@@ -847,11 +1036,12 @@ async function main() {
             for (const err of consoleErrors) console.log(`  ✗ ${err}`);
         }
 
-        const failed = [...landing, ...render, ...kernelExec, ...waveform].filter((c) => !c.ok);
+        const failed = [...landing, ...render, ...kernelExec, ...source, ...waveform]
+            .filter((c) => !c.ok);
         const ok = failed.length === 0 && consoleErrors.length === 0;
         console.log("");
         console.log(ok
-            ? "browser-verify: 通过（真机挂载 + 渲染路径 + 真内核执行 + 探针流 + 控制台）"
+            ? "browser-verify: 通过（真机挂载 + 渲染路径 + 真内核执行 + 源码视图 + 探针流 + 控制台）"
             : `browser-verify: 失败（${failed.length} 项断言未通过，${consoleErrors.length} 条控制台错误）`);
         return ok ? 0 : EXIT_FAILED;
     } finally {

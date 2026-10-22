@@ -13,9 +13,9 @@
 //! trapped, or paused at a breakpoint.
 
 use riscv_sim_contract::csr::{
-    csr_write_is_ignored, CSR_MEPC, CSR_MSTATUS, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT,
+    csr_write_is_ignored, CSR_MSTATUS, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT,
 };
-use riscv_sim_contract::error::PlatformError;
+use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{SimState, WriteSize};
 
 use super::alu;
@@ -69,6 +69,28 @@ pub enum TrapCause {
     LoadAddressMisaligned,
     /// Misaligned **store** address (`mcause = 6`).
     StoreAddressMisaligned,
+    /// **Load access fault** (`mcause = 5`).
+    ///
+    /// The guest loaded from an address that is **not mapped** in the
+    /// memory map.  RISC-V splits the three access faults into three
+    /// numbers — instruction (`1`), load (`5`) and store / AMO (`7`) —
+    /// and a single "access fault" variant would report the wrong
+    /// number for two of the three (the same split that ledger
+    /// **D-63** forced for the misaligned causes).
+    ///
+    /// ⚠️ **Only an unmapped address raises this.**  A bus error that
+    /// is a *configuration* mistake (a region that is too large, a
+    /// peripheral that is not wired, …) is **not** a guest-visible
+    /// fault: it is propagated to the host unchanged (STAGE-7
+    /// adjudication G / ledger **D-99**).
+    LoadAccessFault,
+    /// **Store access fault** (`mcause = 7`).
+    ///
+    /// The guest stored to an address that is **not mapped** in the
+    /// memory map.  Same scope as [`TrapCause::LoadAccessFault`]: only
+    /// an unmapped address traps; every other bus error is propagated
+    /// to the host unchanged.
+    StoreAccessFault,
     /// Out-of-range physical address.
     OutOfRange,
     /// Environment call from M-mode (`mcause = 11`).
@@ -102,17 +124,20 @@ impl TrapCause {
     ///
     /// The codes are the RISC-V exception codes:
     /// `0` instruction address misaligned · `2` illegal instruction ·
-    /// `3` breakpoint · `4` load address misaligned · `6` store address
-    /// misaligned · `11` environment call from M-mode.
+    /// `3` breakpoint · `4` load address misaligned · `5` load access
+    /// fault · `6` store address misaligned · `7` store / AMO access
+    /// fault · `11` environment call from M-mode.
     ///
     /// ⚠️ The two **dead** variants have **no architectural code**:
     ///
     /// * `OutOfRange` — RISC-V splits "the access was not allowed"
     ///   into three access faults (instruction / load / store), and the
     ///   variant does not say which one it means. It has **no
-    ///   producer** today (the bus reports an unmapped access as an
-    ///   `E_BUS` error, not as a trap), so its number is a
-    ///   **placeholder** and is unobservable;
+    ///   producer** today — the **unmapped** data access is now a
+    ///   trap (`LoadAccessFault` = 5 / `StoreAccessFault` = 7, v0.22
+    ///   批), and the **instruction** fetch side is still a plain
+    ///   error (台账 **D-103**) — so its number is a **placeholder**
+    ///   and is unobservable;
     /// * `IntegerDivideByZero` — RISC-V defines a division by zero as
     ///   an **architectural result**, not an exception, so there is no
     ///   code for it at all. Also a **dead** variant (ledger
@@ -126,7 +151,9 @@ impl TrapCause {
             TrapCause::IllegalInstruction => 2,
             TrapCause::Breakpoint => 3,
             TrapCause::LoadAddressMisaligned => 4,
+            TrapCause::LoadAccessFault => 5,
             TrapCause::StoreAddressMisaligned => 6,
+            TrapCause::StoreAccessFault => 7,
             TrapCause::Ecall => 11,
             TrapCause::OutOfRange => 16,
             TrapCause::IntegerDivideByZero => 17,
@@ -640,6 +667,34 @@ fn is_aligned(addr: u32, size: WriteSize) -> bool {
     }
 }
 
+/// The bus scenario code for "**the address is not mapped**" (`E_BUS-01`).
+///
+/// M-14's error table says it verbatim:
+/// `E_BUS-01 unmapped → PlatformError{Bus, 1}`.
+///
+/// ⚠️ The number is spelled **here** because M-14 has no named constant
+/// for `E_BUS-01` (it has them for `03` / `04` / `06` / `09` / `10` /
+/// `11` / `12`).  Writing the literal in one place — with the source
+/// of truth named in the comment — is better than a second spelling of
+/// the code scattered over the tree ("one code, two truths").
+const E_BUS_01_UNMAPPED: u16 = 1;
+
+/// Whether a failed memory access means "**the address is not mapped**".
+///
+/// ⚠️ The判据 is the error's **family + scenario code** — never its
+/// message text.  Matching on the message is the mistake ledger
+/// **D-29** calls out: a message is a human-readable string, not a
+/// contract, and it changes when somebody rewords it.
+///
+/// ⚠️ Only `E_BUS-01` qualifies.  A bus error that is a
+/// **configuration** mistake (a region that is too large, a peripheral
+/// that is not wired, a size mismatch) is a *host-side* problem: it is
+/// propagated unchanged and never becomes a guest trap (STAGE-7
+/// adjudication G).
+fn is_unmapped_access(err: &PlatformError) -> bool {
+    err.family == ErrorFamily::Bus && err.scenario == E_BUS_01_UNMAPPED
+}
+
 /// PC after an instruction that falls through to the next one.
 ///
 /// The step is the **decoded instruction length**, not a hard-coded
@@ -884,7 +939,35 @@ pub fn execute_one<M: MemoryAccess>(
                 csr::enter_trap(state, cause.mcause(), addr);
                 return Ok(StepOutcome::Trapped { cause });
             }
-            let raw = mem.read(addr, size)?;
+            let raw = match mem.read(addr, size) {
+                Ok(raw) => raw,
+                Err(err) => {
+                    // An unmapped address is a **guest-visible access
+                    // fault**, not a platform failure: the guest's trap
+                    // handler has to get a chance to run — that is what
+                    // the reference side does, and the divergence was
+                    // ledger **D-99** (STAGE-7 adjudication G).
+                    //
+                    // ⚠️ **Only** `E_BUS-01` lands here.  Every other
+                    // bus error is a host-side problem and is
+                    // propagated **unchanged** — it is not the guest's
+                    // fault and must not be laundered into a trap.
+                    if !is_unmapped_access(&err) {
+                        return Err(err);
+                    }
+                    let cause = TrapCause::LoadAccessFault;
+                    // `mtval` carries the **faulting address** — the
+                    // manual's rule for access faults.
+                    //
+                    // ⚠️ `enter_trap` takes `mepc` from `state.pc`,
+                    // which still holds the faulting instruction's
+                    // address (the PC is only advanced at the *end* of
+                    // `execute_one`) ⇒ **the PC does not advance** and
+                    // the handler returns to the faulting instruction.
+                    csr::enter_trap(state, cause.mcause(), addr);
+                    return Ok(StepOutcome::Trapped { cause });
+                }
+            };
             write_gpr(state, d.rd, extend_load(op, raw));
             sequential(d)
         }
@@ -898,7 +981,22 @@ pub fn execute_one<M: MemoryAccess>(
                 return Ok(StepOutcome::Trapped { cause });
             }
             let value = truncate_store(op, read_gpr(state, d.rs2));
-            mem.write(addr, size, value)?;
+            match mem.write(addr, size, value) {
+                Ok(()) => {}
+                Err(err) => {
+                    // Same rule as the load arm: **only** an unmapped
+                    // address becomes a trap; every other bus error is
+                    // propagated unchanged.
+                    if !is_unmapped_access(&err) {
+                        return Err(err);
+                    }
+                    let cause = TrapCause::StoreAccessFault;
+                    // `mtval` = the faulting address; `mepc` = the
+                    // faulting instruction (the PC does not advance).
+                    csr::enter_trap(state, cause.mcause(), addr);
+                    return Ok(StepOutcome::Trapped { cause });
+                }
+            }
             sequential(d)
         }
         Op::Beq | Op::Bne | Op::Blt | Op::Bge | Op::Bltu | Op::Bgeu => {
@@ -1032,7 +1130,23 @@ pub fn execute_one<M: MemoryAccess>(
         Op::Mret => {
             // `pc := mepc`; `mstatus.MIE := mstatus.MPIE`;
             // `mstatus.MPIE := 1`.
-            let target = csr::csr_read(state, CSR_MEPC);
+            //
+            // ⚠️ **`mepc` 的对齐掩码只发生在这里**（台账 D-93 / STAGE-7 裁决 I）。
+            //
+            // **用户写会掩码**：`csrw mepc` 走 `apply_warl`（`~1`）—— 参考侧
+            // 实测：写 `0x1003` 读回 **`0x1002`**；陷入门则走
+            // [`csr::csr_write_raw`] 写**精确的 PC**（不丢 bit 1，handler
+            // 要能回到**出错的指令**）。
+            //
+            // **掩码按 IALIGN**：特权规范说 `mret` 取 PC 时按 IALIGN 清低位。
+            // 本平台的 `misa` = `0x40001104` **声明支持 C 扩展** ⇒ IALIGN = 16
+            // ⇒ 只清**最低 1 位**（[`csr::mepc_aligned`]），**不是**低两位。
+            //
+            // **参考侧实测**（Spike，同一个探针 ELF 两侧跑）：一条位于
+            // `0x8000014a` 的压缩指令取陷阱后，`mret` 落回 `4k+2`（不是 `4k`）
+            // ⇒ 掩码确实是 `~1`。若这里写成 `~3`，压缩指令的陷入返回会
+            // **落进指令中间**。
+            let target = csr::mepc_aligned(state);
             let mstatus = csr::csr_read(state, CSR_MSTATUS);
             let mie = 1u32 << MSTATUS_MIE_BIT;
             let mpie = 1u32 << MSTATUS_MPIE_BIT;
@@ -1048,4 +1162,221 @@ pub fn execute_one<M: MemoryAccess>(
 
     state.pc = next_pc;
     Ok(StepOutcome::Advanced)
+}
+
+// ---------------------------------------------------------------------------
+// Tests — D-99: an unmapped access is an architectural trap
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::m13_iss::decoder::Decoder;
+    use crate::m13_iss::tests_common::{enc_i, enc_s, LOAD, STORE};
+    use riscv_sim_contract::csr::{CSR_MCAUSE, CSR_MEPC, CSR_MTVAL, CSR_MTVEC};
+
+    /// The address the tests fault on: outside every mapped region.
+    const FAULT_ADDR: u32 = 0x9000_0000;
+
+    /// The address of the faulting instruction.
+    const FAULT_PC: u32 = 0x1000;
+
+    /// The trap vector the tests install.
+    const MTVEC: u32 = 0x2000;
+
+    /// The bus error the M-14 raises for an unmapped address.
+    fn unmapped() -> PlatformError {
+        PlatformError::new(ErrorFamily::Bus, E_BUS_01_UNMAPPED, "unmapped")
+    }
+
+    /// A state with `mtvec` programmed and the PC on the faulting
+    /// instruction.
+    fn armed_state() -> SimState {
+        let mut state = SimState {
+            pc: FAULT_PC,
+            ..SimState::default()
+        };
+        csr::csr_write(&mut state, CSR_MTVEC, MTVEC);
+        state
+    }
+
+    /// `sw x6, 0(x5)` — a store whose address is `x5 + imm`.
+    fn store_word() -> u32 {
+        enc_s(0, 6, 5, 0b010, STORE)
+    }
+
+    /// `lw x6, 0(x5)` — a load whose address is `x5 + imm`.
+    fn load_word() -> u32 {
+        enc_i(0, 5, 0b010, 6, LOAD)
+    }
+
+    /// Execute one instruction whose every memory access fails with
+    /// `err`.
+    fn exec_failing(
+        state: &mut SimState,
+        word: u32,
+        err: &PlatformError,
+    ) -> Result<StepOutcome, PlatformError> {
+        let d = Decoder::default().decode(word, FAULT_PC);
+        let err = err.clone();
+        let mut exec = Executor::new(
+            |_addr, _size| Err(err.clone()),
+            |_addr, _size, _value| Err(err.clone()),
+        );
+        exec.execute(state, &d)
+    }
+
+    /// A load from an unmapped address traps with `mcause = 5`
+    /// (load access fault) and `mtval` = the faulting address.
+    ///
+    /// ⚠️ The **number** is asserted, not just the variant: the guest
+    /// reads `mcause` and compares it against the architectural value,
+    /// so a wrong number is a real divergence from the reference side.
+    #[test]
+    fn an_unmapped_load_traps_with_cause_five() {
+        let mut state = armed_state();
+        state.gpr[5] = FAULT_ADDR;
+
+        let outcome = exec_failing(&mut state, load_word(), &unmapped()).expect("no error escapes");
+
+        assert_eq!(
+            outcome,
+            StepOutcome::Trapped {
+                cause: TrapCause::LoadAccessFault
+            }
+        );
+        assert_eq!(
+            TrapCause::LoadAccessFault.mcause(),
+            5,
+            "load access fault is mcause 5"
+        );
+        assert_eq!(csr::csr_read(&state, CSR_MCAUSE), 5);
+        assert_eq!(
+            csr::csr_read(&state, CSR_MTVAL),
+            FAULT_ADDR,
+            "mtval must carry the faulting address"
+        );
+        assert_eq!(
+            state.gpr[6], 0,
+            "a faulting load must not write its destination register"
+        );
+    }
+
+    /// A store to an unmapped address traps with `mcause = 7`
+    /// (store access fault) and `mtval` = the faulting address.
+    #[test]
+    fn an_unmapped_store_traps_with_cause_seven() {
+        let mut state = armed_state();
+        state.gpr[5] = FAULT_ADDR;
+
+        let outcome =
+            exec_failing(&mut state, store_word(), &unmapped()).expect("no error escapes");
+
+        assert_eq!(
+            outcome,
+            StepOutcome::Trapped {
+                cause: TrapCause::StoreAccessFault
+            }
+        );
+        assert_eq!(
+            TrapCause::StoreAccessFault.mcause(),
+            7,
+            "store access fault is mcause 7"
+        );
+        assert_eq!(csr::csr_read(&state, CSR_MCAUSE), 7);
+        assert_eq!(
+            csr::csr_read(&state, CSR_MTVAL),
+            FAULT_ADDR,
+            "mtval must carry the faulting address"
+        );
+    }
+
+    /// The load and the store must report **different** numbers.
+    ///
+    /// ⚠️ This is the whole point of the split: one "access fault"
+    /// variant would make one of the two sides diverge from the
+    /// reference (the same class of defect ledger **D-63** forced the
+    /// misaligned causes apart for).
+    #[test]
+    fn load_and_store_access_faults_have_different_numbers() {
+        assert_eq!(TrapCause::LoadAccessFault.mcause(), 5);
+        assert_eq!(TrapCause::StoreAccessFault.mcause(), 7);
+        assert_ne!(
+            TrapCause::LoadAccessFault.mcause(),
+            TrapCause::StoreAccessFault.mcause()
+        );
+    }
+
+    /// The PC does **not** advance when the access faults: `mepc` is
+    /// the faulting instruction's address, and the PC is redirected to
+    /// the trap vector.
+    ///
+    /// ⚠️ If the PC advanced, the guest's handler would return to the
+    /// instruction *after* the faulting one and never re-execute it —
+    /// the architectural rule is "the handler returns to the faulting
+    /// instruction" (STAGE-7 adjudication G).
+    #[test]
+    fn a_faulting_access_does_not_advance_the_pc() {
+        let mut state = armed_state();
+        state.gpr[5] = FAULT_ADDR;
+
+        exec_failing(&mut state, store_word(), &unmapped()).expect("no error escapes");
+
+        assert_eq!(
+            csr::csr_read(&state, CSR_MEPC),
+            FAULT_PC,
+            "mepc must be the address of the faulting instruction"
+        );
+        assert_ne!(
+            csr::csr_read(&state, CSR_MEPC),
+            FAULT_PC + 4,
+            "mepc must not be the next instruction"
+        );
+        assert_eq!(
+            state.pc, MTVEC,
+            "the PC must be redirected to the trap vector"
+        );
+    }
+
+    /// Another bus error is **not** laundered into a trap: it is
+    /// propagated to the host unchanged (STAGE-7 adjudication G).
+    ///
+    /// ⚠️ `E_BUS-04` is "the region runs past the end of the bus" — a
+    /// **configuration** mistake, not the guest's fault.
+    #[test]
+    fn another_bus_error_is_propagated_unchanged() {
+        let mut state = armed_state();
+        state.gpr[5] = FAULT_ADDR;
+        let err = PlatformError::new(ErrorFamily::Bus, 4, "region out of range");
+
+        let got = exec_failing(&mut state, store_word(), &err).expect_err("must not be swallowed");
+
+        assert_eq!(got.family, ErrorFamily::Bus);
+        assert_eq!(got.scenario, 4, "the original scenario code must survive");
+        assert_eq!(
+            csr::csr_read(&state, CSR_MCAUSE),
+            0,
+            "a host-side error must not enter the trap path"
+        );
+        assert_eq!(state.pc, FAULT_PC, "the PC must not move");
+    }
+
+    /// Only `E_BUS-01` is an access fault: an error of another family
+    /// is propagated, even if its scenario code happens to be `1`.
+    ///
+    /// ⚠️ Without this case, a "family == Bus" check alone would be
+    /// enough to pass — and an `ISS-01` error (the ISS's own family)
+    /// would be turned into a guest trap.
+    #[test]
+    fn an_error_of_another_family_is_not_an_access_fault() {
+        let mut state = armed_state();
+        state.gpr[5] = FAULT_ADDR;
+        let err = PlatformError::new(ErrorFamily::Iss, 1, "unmapped read");
+
+        let got = exec_failing(&mut state, load_word(), &err).expect_err("must not be swallowed");
+
+        assert_eq!(got.family, ErrorFamily::Iss);
+        assert_eq!(got.scenario, 1);
+        assert_eq!(csr::csr_read(&state, CSR_MCAUSE), 0);
+    }
 }

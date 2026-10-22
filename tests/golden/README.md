@@ -316,6 +316,48 @@ instruction budget) the case is counted as `no-verdict` and **fails the
 run** — otherwise a harness whose two sides are both simply broken would
 report them as consistent and exit green.
 
+## The `local` suite — this repository's own cases
+
+Most corpus rows come from the upstream riscv-tests tree.  A few do
+not have to: some behaviours are **ours** to get right and upstream
+simply has no case for them.  Those live in the `local` suite:
+
+| row | source | what it pins |
+| --- | --- | --- |
+| `local/unmapped_store` | `tests/golden/local/unmapped_store.S` | a **store** to an unmapped address traps with `mcause = 7` (store access fault) |
+| `local/unmapped_load` | `tests/golden/local/unmapped_load.S` | a **load** from an unmapped address traps with `mcause = 5` (load access fault) |
+
+The harness resolves a row's source in this order:
+
+1. `$RISCV_TESTS_DIR/isa/<suite>/<test>.S` — the upstream tree (every
+   suite **except** `local`);
+2. `tests/golden/local/<test>.S` — this repository, for the `local`
+   suite only.
+
+The fallback can never shadow an upstream case: it is reachable **only**
+for the `local` suite, and the upstream tree has no `isa/local/`.
+
+### Why the verdict is the guest's own check
+
+⚠️ **The harness compares the tohost exit code** — it cannot see
+`mcause` or `mtval`.  So the *guest* has to check them: the trap
+handler reads `mcause`, `mtval` and `mepc` and writes `PASS` **only**
+when all three are exactly the expected values (`7` / `5`, the faulting
+address, the faulting instruction's address).  A wrong number on either
+side turns into `FAIL 3` on that side — a **mismatch**, not a quiet
+agreement.
+
+⚠️ This matters because the weaker criterion — "both sides stopped
+erroring" — is **green for two sides that both abort**, which is
+exactly the state the platform was in before ledger **D-99** was
+closed (the bus error was propagated verbatim and the guest's handler
+never ran).
+
+Both cases are **self-contained** (they include no riscv-tests source,
+like `canary/fail_3.S`) and they use the `csr` environment, because
+they need a trap vector, `mtvec`, CSR reads and `mret`-free trap
+handling.
+
 ## Adding a case
 
 1. Add the case to `corpus.txt` with its `march`, its `status` and its
@@ -333,4 +375,7 @@ report them as consistent and exit green.
 2. Run `tools/golden-run.sh --filter <suite/test>`.
 3. Machine-level cases need the `csr` environment; the supervisor-level
    ones need S-mode, which the platform does not have (**D-94**).
+4. A case that upstream riscv-tests does not have goes into the
+   `local` suite: put the source in `tests/golden/local/<test>.S` and
+   write the row as `local <test> <march> active <env>`.
 

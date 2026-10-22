@@ -143,6 +143,11 @@ fn the_mret_encoding_resolves_to_mret() {
 
 // ---------------------------------------------------------------------------
 // The CSR instructions — the read / write semantics
+//
+// ⚠️ **载体 CSR 是 `mscratch`，不是 `mstatus`**：`mstatus` 是 **WARL**
+// （台账 **D-98**）—— 它的**保留位**写被忽略、读回 0 ⇒ 它**不能**再当
+// 「一个普通的 32 位存储」用（写 `0xFFFF_FFFF` 读回的不是 `0xFFFF_FFFF`）。
+// `mscratch` 才是平台文档里那个「plain storage CSR」。
 // ---------------------------------------------------------------------------
 
 /// `CSRRW` swaps the CSR with the register: `rd` gets the **old** CSR
@@ -194,16 +199,16 @@ fn csrrw_with_rd_x0_still_writes_the_csr() {
 #[test]
 fn csrrw_reads_the_old_value_before_the_register_is_overwritten() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0x0F0F_0F0F)]);
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0x0F0F_0F0F)]);
     state.gpr[1] = 0x1234;
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 1, F_CSRRW, 1));
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSCRATCH, 1, F_CSRRW, 1));
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(
         state.gpr[1], 0x0F0F_0F0F,
         "x1 must end up holding the CSR's old value"
     );
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0x1234,
         "the CSR must receive the register's old value"
     );
@@ -213,13 +218,13 @@ fn csrrw_reads_the_old_value_before_the_register_is_overwritten() {
 #[test]
 fn csrrs_sets_the_bits_of_the_csr() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0x0F0F)]);
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0x0F0F)]);
     state.gpr[1] = 0x00F0;
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 1, F_CSRRS, 2));
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSCRATCH, 1, F_CSRRS, 2));
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(state.gpr[2], 0x0F0F, "rd must receive the old CSR value");
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0x0FFF,
         "CSRRS must set the source's bits"
     );
@@ -230,12 +235,12 @@ fn csrrs_sets_the_bits_of_the_csr() {
 #[test]
 fn csrrs_with_rs1_x0_is_a_pure_read() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0x0F0F)]);
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 0, F_CSRRS, 2));
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0x0F0F)]);
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSCRATCH, 0, F_CSRRS, 2));
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(state.gpr[2], 0x0F0F, "rd must receive the old CSR value");
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0x0F0F,
         "CSRRS with rs1 = x0 must not write the CSR"
     );
@@ -245,13 +250,13 @@ fn csrrs_with_rs1_x0_is_a_pure_read() {
 #[test]
 fn csrrc_clears_the_bits_of_the_csr() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0xFFFF)]);
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0xFFFF)]);
     state.gpr[1] = 0x0F0F;
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 1, F_CSRRC, 2));
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSCRATCH, 1, F_CSRRC, 2));
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(state.gpr[2], 0xFFFF, "rd must receive the old CSR value");
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0xF0F0,
         "CSRRC must clear the source's bits"
     );
@@ -261,12 +266,12 @@ fn csrrc_clears_the_bits_of_the_csr() {
 #[test]
 fn csrrc_with_rs1_x0_is_a_pure_read() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0xFFFF)]);
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 0, F_CSRRC, 2));
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0xFFFF)]);
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSCRATCH, 0, F_CSRRC, 2));
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(state.gpr[2], 0xFFFF, "rd must receive the old CSR value");
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0xFFFF,
         "CSRRC with rs1 = x0 must not write the CSR"
     );
@@ -276,16 +281,20 @@ fn csrrc_with_rs1_x0_is_a_pure_read() {
 #[test]
 fn csrrwi_writes_the_five_bit_immediate() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0xFFFF_FFFF)]);
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0xFFFF_FFFF)]);
     // The immediate lives in the `rs1` field (bits 19:15).
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 0x15, F_CSRRWI, 2));
+    let outcome = h.step_one_at(
+        &mut state,
+        0x1000,
+        csr_insn(CSR_MSCRATCH, 0x15, F_CSRRWI, 2),
+    );
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(
         state.gpr[2], 0xFFFF_FFFF,
         "rd must receive the old CSR value"
     );
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0x15,
         "CSRRWI must write the 5-bit immediate"
     );
@@ -295,12 +304,16 @@ fn csrrwi_writes_the_five_bit_immediate() {
 #[test]
 fn csrrsi_sets_the_bits_of_the_csr() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0x0F0F)]);
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 0x0F, F_CSRRSI, 2));
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0x0F0F)]);
+    let outcome = h.step_one_at(
+        &mut state,
+        0x1000,
+        csr_insn(CSR_MSCRATCH, 0x0F, F_CSRRSI, 2),
+    );
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(state.gpr[2], 0x0F0F, "rd must receive the old CSR value");
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0x0F0F,
         "CSRRSI must set the immediate's bits"
     );
@@ -310,12 +323,12 @@ fn csrrsi_sets_the_bits_of_the_csr() {
 #[test]
 fn csrrsi_with_a_zero_immediate_is_a_pure_read() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0x0F0F)]);
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 0, F_CSRRSI, 2));
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0x0F0F)]);
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSCRATCH, 0, F_CSRRSI, 2));
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(state.gpr[2], 0x0F0F, "rd must receive the old CSR value");
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0x0F0F,
         "CSRRSI with a zero immediate must not write the CSR"
     );
@@ -325,12 +338,16 @@ fn csrrsi_with_a_zero_immediate_is_a_pure_read() {
 #[test]
 fn csrrci_clears_the_bits_of_the_csr() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0xFFFF)]);
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 0x0F, F_CSRRCI, 2));
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0xFFFF)]);
+    let outcome = h.step_one_at(
+        &mut state,
+        0x1000,
+        csr_insn(CSR_MSCRATCH, 0x0F, F_CSRRCI, 2),
+    );
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(state.gpr[2], 0xFFFF, "rd must receive the old CSR value");
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0xFFF0,
         "CSRRCI must clear the immediate's bits"
     );
@@ -340,12 +357,12 @@ fn csrrci_clears_the_bits_of_the_csr() {
 #[test]
 fn csrrci_with_a_zero_immediate_is_a_pure_read() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0xFFFF)]);
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 0, F_CSRRCI, 2));
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0xFFFF)]);
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSCRATCH, 0, F_CSRRCI, 2));
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(state.gpr[2], 0xFFFF, "rd must receive the old CSR value");
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0xFFFF,
         "CSRRCI with a zero immediate must not write the CSR"
     );
@@ -579,6 +596,133 @@ fn mret_returns_to_the_address_in_mepc() {
     let outcome = h.step_one_at(&mut state, 0x2000, mret_insn());
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(state.pc, 0x1000, "MRET must jump to mepc");
+}
+
+/// `MRET` clears **only the lowest bit** of `mepc` — the mask follows
+/// **IALIGN**, and this platform declares the **C** extension in `misa`
+/// ⇒ IALIGN = 16 ⇒ one bit, not two.
+///
+/// ⚠️ **Why the discriminator is "bit 1 survives" and not "the low two
+/// bits are zero"**: the ledger's original wording (D-93) said
+/// "`mepc[1:0]` is treated as zero", which is the **IALIGN = 32** (no C)
+/// rule.  A mask of `~3` and a mask of `~1` **agree** on every 4-byte
+/// aligned address — which is *every* address the upstream corpus ever
+/// puts in `mepc` (it always `la`s an aligned label).  So the only
+/// address that tells the two masks apart is one with **bit 1 set**,
+/// i.e. the address of a **2-byte-aligned (compressed) instruction**.
+///
+/// ⇒ The reference side was measured doing exactly this: a `c.sw` at
+/// `0x8000014a` trapped, and `mret` landed back on `4k+2` (not `4k`)
+/// ⇒ mask `~1`.
+///
+/// ⚠️ The expected value is written as an **architecture literal**
+/// (`0x1002`), not derived from `MEPC_ALIGN_MASK` — otherwise changing
+/// the mask would move the expectation with it and the test would stay
+/// green (the ledger's own lesson: an assertion that shares a constant
+/// with the implementation has no discriminating power).
+#[test]
+fn mret_clears_only_the_lowest_bit_of_mepc() {
+    let mut h = Harness::new();
+    // 0x1002 — bit 1 set, bit 0 clear: the address of a compressed
+    // instruction.  A `~3` mask would give 0x1000 instead.
+    let mut state = state_with_csrs(&[(CSR_MEPC, 0x1002)]);
+    let outcome = h.step_one_at(&mut state, 0x2000, mret_insn());
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert_eq!(
+        state.pc, 0x1002,
+        "MRET must clear only mepc's lowest bit (IALIGN=16, C extension) — \
+         a `~3` mask would land on 0x1000, i.e. in the middle of the \
+         compressed instruction"
+    );
+}
+
+/// `MRET` clears `mepc`'s lowest bit when it is **set**.
+///
+/// This is the other half of the boundary: bit 0 set ⇒ it must be
+/// cleared.  Together with
+/// [`mret_clears_only_the_lowest_bit_of_mepc`] the two cases pin the
+/// mask from both sides — writing only one of them would let a
+/// `~0` (no mask at all) or a `~3` slip through.
+#[test]
+fn mret_clears_the_lowest_bit_of_mepc_when_it_is_set() {
+    let mut h = Harness::new();
+    // 0x1003 — bit 1 set **and** bit 0 set.
+    let mut state = state_with_csrs(&[(CSR_MEPC, 0x1003)]);
+    let outcome = h.step_one_at(&mut state, 0x2000, mret_insn());
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert_eq!(
+        state.pc, 0x1002,
+        "MRET must clear mepc's bit 0 and keep bit 1 (IALIGN=16)"
+    );
+}
+
+/// A **user** `csrw mepc` write is masked by **IALIGN** — `~1`.
+///
+/// ⚠️ This is a **different path** from the trap entry, and the
+/// difference is architecturally required:
+///
+/// | path | reference side (measured) | why |
+/// | --- | --- | --- |
+/// | **trap entry** writes `mepc` | **exact PC** — a `c.sw` at `0x8000014a` left `mepc = 0x8000014a` (bit 1 **preserved**) | the handler must return to **the faulting instruction**; masking bit 1 would land in its middle |
+/// | **user** `csrw mepc` | **masked `~1`** — `csrw mepc, 0x1003` read back **0x1002** | `mepc` is WARL: any legal value may be stored |
+///
+/// ⚠️ The trap-entry half is pinned by the golden corpus row
+/// `local/compressed_trap` (upstream riscv-tests never traps from a
+/// 2-byte-aligned instruction, so nothing else would notice).
+#[test]
+fn a_user_write_to_mepc_is_masked_by_ialign() {
+    let mut h = Harness::new();
+    let mut state = state_with_csrs(&[]);
+    // a0 — bit 1 **and** bit 0 set
+    state.gpr[10] = 0x1003;
+    // `csrrw a0, mepc, a0` — writes a0 into mepc, reads the old value back.
+    let csrrw = csr_insn(CSR_MEPC, 10, F_CSRRW, 10);
+    let _ = h.step_one_at(&mut state, 0x2000, csrrw);
+    assert_eq!(
+        csr_value(&state, CSR_MEPC),
+        0x1002,
+        "a user write to mepc must be masked by IALIGN (~1) — the \
+         reference side reads back 0x1002 for a 0x1003 write"
+    );
+}
+
+/// The **trap entry** writes `mepc` **without** dropping bit 1 — so a
+/// trap taken on a **2-byte-aligned (compressed)** instruction can be
+/// returned to.
+///
+/// ⚠️ **What this pins, precisely**: the trap path writes the PC
+/// **verbatim** — `0x1002` comes back as `0x1002`, i.e. **no mask at
+/// all** on this path.  (The platform's IALIGN mask is **16** (`~1`),
+/// **not** 32 (`~3`): a `~3` mask would turn `0x1002` into `0x1000` —
+/// i.e. land the handler's return in the **middle** of the compressed
+/// instruction.  But that mask is **not** applied here.)
+///
+/// ⚠️ **What it does *not* pin** (and cannot, at a legal address): the
+/// difference between the trap entry writing the PC *verbatim* and
+/// writing it through the IALIGN mask.  Every legal instruction
+/// address is **even** (bit 0 clear), so `~1` leaves it unchanged —
+/// the two are indistinguishable, and the reference side's behaviour
+/// there is **unobservable**.  The platform uses the verbatim write
+/// ([`csr::csr_write_raw`]) because it states the intent, but the
+/// reference side could not be shown to do the same.
+///
+/// The expected value is an **architecture literal** (`0x1002`), not
+/// derived from `MEPC_ALIGN_MASK` — an assertion that shares a
+/// constant with the implementation has no discriminating power.
+#[test]
+fn the_trap_entry_writes_the_exact_faulting_pc_into_mepc() {
+    let mut h = Harness::new();
+    let mut state = state_with_csrs(&[]);
+    // Trap at a 2-byte-aligned PC — the address of a compressed
+    // instruction.  `mepc` must come back **verbatim**.
+    let _ = h.step_one_at(&mut state, 0x1002, enc_i(0, 0, 0, 0, 0x0000_0073));
+    assert_eq!(
+        csr_value(&state, CSR_MEPC),
+        0x1002,
+        "the trap entry must write the exact PC — masking bit 1 would \
+         make a handler returning from a compressed instruction land in \
+         the middle of it (and would diverge from the reference side)"
+    );
 }
 
 /// `MRET` restores the global interrupt enable from `MPIE` and then
