@@ -56,6 +56,18 @@
 //!   `line`) — the per-instruction source location (debt ledger D-102).
 //!   `None` is a **legal** value and means "no line table / not hit";
 //!   the fields are **never** fabricated.
+//!
+//! Contract **v5** adds the **console input** direction:
+//!
+//! - new command `CommandPayload::WriteConsole { bytes }` — the bytes
+//!   the host writes **into** the console UART (the RX direction).
+//!   ⚠️ **Bytes, not a string**: the guest's byte stream is the truth
+//!   in **both** directions, so this command is the exact mirror of
+//!   v4's `EventPayload::Console { bytes }` (which is the TX
+//!   direction). serde's default for `Vec<u8>` is a **JSON array of
+//!   numbers** — not base64, not a string;
+//! - ⚠️ v5 changes **nothing else**: no new event, no DTO change, no
+//!   renumbering. The v4 shapes stay exactly as they were.
 
 // MVP: docs on every public variant field are TODO. PROGRESS.md §7
 // 2026-10-19 decision: workspace `missing_docs = "allow"` until each
@@ -72,6 +84,14 @@ pub mod snapshot;
 
 /// Protocol schema version. Bump on every breaking change; consumers
 /// negotiate via the `schema_version` field in every [`protocol::Message`].
+///
+/// **v5** (contract v5 — the console **input** direction):
+/// - new command `CommandPayload::WriteConsole { bytes }` — the bytes
+///   the host writes **into** the console UART (RX). serde serialises
+///   `Vec<u8>` as a **JSON array of numbers** (not base64, not a
+///   string) — the exact mirror of v4's `EventPayload::Console`
+///   (which is the TX direction);
+/// - ⚠️ **no other shape changed** in v5.
 ///
 /// **v4** (contract v4 — the OSZ runtime batch):
 /// - new event `EventPayload::Console { bytes }` — the guest's console
@@ -102,4 +122,4 @@ pub mod snapshot;
 ///   variant `WaveformDelta` → `WaveformHistory` (D-34);
 /// - `ErrorFamily::Protocol` (`"PROTO"`) — the family the LLD's
 ///   `E_PROTO-01`..`E_PROTO-08` codes belong to.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
