@@ -12,6 +12,10 @@
 //! - **序号不撞号**：插入序 `seq` 是引擎的**独立单调计数器**，不与事件
 //!   队列的内容耦合；恢复时会把计数器顶到队列已占用值之上，因此恢复后
 //!   继续 `schedule` 不会与队列中已有事件撞号（D-17）。
+//! - **停滞会被抓住**：唯一主循环带**无进展守卫**（LLD §3.5「watchdog
+//!   无进展检测」的引擎侧落点）—— 连续 [`NO_PROGRESS_WINDOW`] 次「既没有
+//!   指令退休、虚拟时间也没有前进、也没有到期事件被消费」⇒ **报错退出**，
+//!   而不是无限自旋（V-D 检视 · VD-F3）。
 //!
 //! 快照有三种形态：[`Engine::snapshot`] 返回契约级 [`SimState`]（M-17
 //! 交给宿主的那一份，签名保持不变）；[`Engine::snapshot_full`] 返回
@@ -77,13 +81,56 @@ pub const QUANTUM_INSTR_QUOTA: u32 = 1_000;
 pub const INSTRUCTION_COST_PS: u64 = TIME_QUANTUM_PS / QUANTUM_INSTR_QUOTA as u64;
 
 /// Default guest-instruction budget before the engine yields to the host.
-/// Implemented as the watchdog pre-check (M-12 §5.2 + LLD §4.12.6).
+///
+/// ⚠️ **它不是 watchdog**（V-D 检视 · **VD-F3** 的注释订正）：它是**一轮
+/// 运行窗口**的指令预算 —— 引擎跑满这么多条 guest 指令就让出给宿主
+/// （[`RunReason::BudgetExhausted`]）。LLD §2.1 把它叫「run-window 指令
+/// 预算」；LLD §3.5 的 **watchdog（无进展检测）**是**另一套**机制，由
+/// [`Engine::run_until`] 里的 [`NO_PROGRESS_WINDOW`] 守卫实现。
+///
+/// ⚠️ 旧注释写的是「watchdog pre-check（M-12 §5.2 + **LLD §4.12.6**）」——
+/// 那个章节**在 LLD 文本里根本不存在**（`4.12` 出现 0 次），而它描述的
+/// 机制也**没有**在这里实现 ⇒ 一条**假陈述**（V-D 实测确认）。
 ///
 /// The value lives in the contract so that a default-constructed
 /// [`riscv_sim_contract::snapshot::EngineSnapshotDto`] and a fresh engine
 /// agree on it — one source of truth, no drift.
 pub const DEFAULT_INSTRUCTION_BUDGET: u32 =
     riscv_sim_contract::snapshot::DEFAULT_INSTRUCTION_BUDGET;
+
+/// **无进展检测窗口**（LLD §3.5「watchdog 无进展检测」的引擎侧实现）。
+///
+/// 主循环里**连续**这么多次「既没有指令退休、虚拟时间也没有前进、也没有
+/// 到期事件被消费」⇒ 判定**停滞**（活锁 / guest 失控）⇒ [`Engine::run_until`]
+/// **报错退出**（`Err`），而不是**无限自旋**。
+///
+/// ⚠️ **口径**：LLD 的 `progressWindow` 默认 10⁶，单位是**指令**；这里的
+/// 单位是**「无进展的迭代」**——而停滞时**一条指令都没退休**，两者不可直接
+/// 换算。取 **1024** 的理由：
+///
+/// - **要小**：活锁必须在**有限步内**被抓到（否则整个测试二进制挂死，
+///   而且生产路径上这就是一个「永不返回的主循环」）；
+/// - **要大**：合法路径上「一次中断交付 → handler 的第一条指令退休」只
+///   产生**一次**无进展迭代 ⇒ 1024 留了**三个数量级**的余量，不会误伤。
+///
+/// ⚠️ LLD §3.5 的三类「外部可见进展」（事件分发 / 中断交付 / MMIO 访问）
+/// 在本引擎里的落点：**事件分发** = [`Engine::dispatch_due_events`] 派发了
+/// 至少一件事件；**指令退休 / 虚拟时间前进** = 执行器真的往前走了；
+/// **中断交付**本身**不算**进展 —— 一条被反复交付、从不退休的中断正是
+/// VD-F3 的活锁形态，把它算成进展就等于**把活锁放过去**。
+pub const NO_PROGRESS_WINDOW: u32 = 1_024;
+
+/// 场景码：事件总线发布失败（引擎 → 总线那条路断了）。
+pub const E_ENG_01_BUS_PUBLISH_FAILED: u16 = 1;
+
+/// 场景码：事件队列在 `peek` 与 `pop` 之间不一致（内部一致性被破坏）。
+pub const E_ENG_02_QUEUE_INCONSISTENT: u16 = 2;
+
+/// 场景码：主循环**无进展**（watchdog 判定停滞 / 活锁）。
+///
+/// 这是 LLD §3.5「watchdog 无进展检测」在引擎侧的第一个**真实落点**：
+/// 守卫触发时**报错退出**，而不是让主循环**永远转下去**（VD-F3）。
+pub const E_ENG_03_NO_PROGRESS: u16 = 3;
 
 /// Scheduling event held in the event queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,14 +295,37 @@ pub struct EngineSnapshot {
     pub instruction_budget: u32,
 }
 
+/// 一次「派发到期事件」的**结果**（内部结构体）。
+///
+/// ⚠️ 存在的理由只有一个：**「派发了多少件事件」是「外部可见进展」的判据**
+/// （LLD §3.5 的 progressBase 更新点 ①）—— 没有它，主循环**分不清**
+/// 「这一轮推进了」与「这一轮原地打转」，watchdog 的守卫也就无从谈起
+/// （V-D 检视 · **VD-F3**）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct DueDispatch {
+    /// 本次派发的事件条数（`> 0` ⇒ 有外部可见进展）。
+    dispatched: usize,
+    /// 本次派发的**外设 tick** 事件（`paddr`, 到期时刻）—— 调用方据此
+    /// **续排**下一个周期。
+    reticked: Vec<(u32, u64)>,
+}
+
 /// The event-driven engine itself.
 #[derive(Debug)]
 pub struct Engine<B: EventBus, I: InterruptSink> {
     /// Pending events, time-ordered by `(at_ps, seq)`.
     queue: EventQueue,
-    /// Instruction budget for the current quantum. Reserved for the
-    /// watchdog pre-check (M-12 §5.2 + LLD §4.12.6); not yet threaded
-    /// through `dispatch` in the MVP skeleton.
+    /// Instruction budget for the current **run window** — the engine
+    /// executes at most this many guest instructions per
+    /// [`Engine::run_until`] call, then yields to the host
+    /// ([`RunReason::BudgetExhausted`]).
+    ///
+    /// ⚠️ **它不是 watchdog**（V-D 检视 · **VD-F3** 的注释订正）：旧注释
+    /// 写的是「watchdog pre-check（M-12 §5.2 + **LLD §4.12.6**）」——
+    /// 那个章节**在 LLD 文本里不存在**（`4.12` 出现 0 次），而且这里
+    /// 描述的机制**确实已经接进主循环**（`run_until` 在**指令边界**上查
+    /// 预算），只是它**不是** watchdog。watchdog 是**另一套**机制：
+    /// [`NO_PROGRESS_WINDOW`] 的**无进展检测**（LLD §3.5）。
     instruction_budget: u32,
     /// Bus / event / interrupt sinks.
     bus: B,
@@ -609,7 +679,13 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
                     elapsed_ps: self.now_ps(),
                     pc: self.state.pc,
                 })
-                .map_err(|e| PlatformError::new(ErrorFamily::Engine, 1, e.to_string()))?;
+                .map_err(|e| {
+                    PlatformError::new(
+                        ErrorFamily::Engine,
+                        E_ENG_01_BUS_PUBLISH_FAILED,
+                        e.to_string(),
+                    )
+                })?;
             steps += 1;
             self.advance_steps = self.advance_steps.wrapping_add(1);
 
@@ -653,15 +729,17 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
 
     /// 派发**当前时刻已到期**的全部事件。
     ///
-    /// 返回本次派发的外设 tick 事件（`paddr`, 到期时刻）—— 调用方
-    /// （唯一主循环 [`Engine::run_until`]）据此**续排**下一个周期，
-    /// 从而让「外设时钟」这条时间驱动链路自持。
+    /// 返回本次派发的**结果**：派发了多少件事件（= **外部可见进展**的
+    /// 判据，LLD §3.5 的 progressBase 更新点 ①）与本次派发的外设 tick
+    /// 事件（`paddr`, 到期时刻）—— 调用方（唯一主循环 [`Engine::run_until`]）
+    /// 据此**续排**下一个周期，从而让「外设时钟」这条时间驱动链路自持。
     ///
     /// ⚠️ **续排不在这里做**：`run_until_idle` / `run_steps` 语义是
     /// 「把队列排空」，如果派发即续排，队列**永远不会空**，这两个方法
     /// 会死循环。周期性的续排只发生在唯一主循环里。
-    fn dispatch_due_events(&mut self) -> Result<Vec<(u32, u64)>, PlatformError> {
+    fn dispatch_due_events(&mut self) -> Result<DueDispatch, PlatformError> {
         let mut reticked = Vec::new();
+        let mut dispatched = 0usize;
         while let Some(t) = self.queue.peek().map(|e| e.at_ps) {
             if t > self.now_ps() {
                 break;
@@ -671,14 +749,22 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
             // worker down (WASM 里 panic = Worker 崩). Fail loudly
             // with an error instead (V-A 检视 · ⚪-4)。
             let evt = self.queue.pop().ok_or_else(|| {
-                PlatformError::new(ErrorFamily::Engine, 2, "事件队列在 peek 与 pop 之间不一致")
+                PlatformError::new(
+                    ErrorFamily::Engine,
+                    E_ENG_02_QUEUE_INCONSISTENT,
+                    "事件队列在 peek 与 pop 之间不一致",
+                )
             })?;
             if let SchedEvent::PeripheralTick { paddr, .. } = &evt.event {
                 reticked.push((*paddr, evt.at_ps));
             }
+            dispatched += 1;
             self.dispatch(evt.event)?;
         }
-        Ok(reticked)
+        Ok(DueDispatch {
+            dispatched,
+            reticked,
+        })
     }
 
     /// 队列里是否有**此刻已经到期**的事件（事件边界 = 抢占点）。
@@ -727,7 +813,12 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
     /// - 本轮指令预算（[`Engine::instruction_budget`]）耗尽
     ///   （[`RunReason::BudgetExhausted`]）——让出给宿主；
     /// - 执行器请求停止（断点 / 陷阱 / 观察点 / 暂停，
-    ///   [`RunReason::Stopped`]）。
+    ///   [`RunReason::Stopped`]）；
+    /// - **无进展守卫触发**（[`NO_PROGRESS_WINDOW`]）⇒ 返回 **`Err`**
+    ///   （`E_ENG-03`）——**不是** [`RunOutcome`] 的一种停止原因：
+    ///   「停滞」是**平台故障**（活锁 / guest 失控），不是 guest 的正常
+    ///   停止语义（LLD §3.5 · 评审 12-2 / 12-3：watchdog 与 guest trap
+    ///   **严格区分**）。
     ///
     /// **指令驱动与时间驱动如何交替**（D-07 的核心问题）：时间驱动是
     /// **骨架**（事件队列 + 量子边界），指令驱动是量子内的**填充物**。
@@ -745,6 +836,11 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
         let mut instructions = 0u64;
         let mut quanta = 0u64;
         let budget = u64::from(self.instruction_budget);
+        // **无进展计数**（LLD §3.5 的 watchdog · V-D 检视 VD-F3）：连续
+        // 多少次迭代「既没有指令退休、虚拟时间也没有前进、也没有到期事件
+        // 被消费」。它是**唯一**能抓住「活锁」的东西 —— 见
+        // [`NO_PROGRESS_WINDOW`]。
+        let mut no_progress = 0u32;
         loop {
             if self.now_ps() >= until_ps {
                 return Ok(RunOutcome {
@@ -760,8 +856,13 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
             //     续排之前先「确保」每个登记的外设都有一件 tick 在等着：
             //     事件被弄丢时（快照恢复、外设被换掉）链路会自愈。
             self.ensure_peripheral_ticks();
-            let reticked = self.dispatch_due_events()?;
-            for (paddr, at_ps) in &reticked {
+            let dispatched = self.dispatch_due_events()?;
+            // 派发了到期事件 ⇒ **外部可见进展**（LLD §3.5 的 progressBase
+            // 更新点 ①）⇒ 无进展计数归零。
+            if dispatched.dispatched > 0 {
+                no_progress = 0;
+            }
+            for (paddr, at_ps) in &dispatched.reticked {
                 // ⚠️ **陈旧事件不续排**（V-A 检视 · F6）：登记表被清空
                 // （换工程 = 换外设集合）之后，队列里还留着旧基址的 tick
                 // 事件——续排它就等于让一件**永远等不到主人**的事件永远
@@ -784,7 +885,11 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
             //
             // 只对**本量子的第一条**指令生效：第二条指令的时刻已经
             // 往前走了 1 ns，必须照常推进。
-            let mut just_ticked: Vec<u32> = reticked.iter().map(|(paddr, _)| *paddr).collect();
+            let mut just_ticked: Vec<u32> = dispatched
+                .reticked
+                .iter()
+                .map(|(paddr, _)| *paddr)
+                .collect();
 
             // (2) 量子内执行指令。
             let mut done = 0u32;
@@ -807,10 +912,15 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
                 let now = self.now_ps();
                 self.tick_peripherals_except(now, &just_ticked)?;
                 just_ticked.clear();
+                // 记下**执行前**的虚拟时间：执行器**可能**推进它（正规实现
+                // 在「中断交付」时不推进，但守卫不能依赖那条约定）。
+                let before_ps = self.now_ps();
                 match executor.step(self.state_mut())? {
                     ExecOutcome::Advanced => {
                         instructions += 1;
                         done += 1;
+                        // 有指令退休 ⇒ 有进展 ⇒ 无进展计数归零。
+                        no_progress = 0;
                     }
                     ExecOutcome::InterruptTaken => {
                         // 中断交付**没有**指令退休 ⇒ 既不计入 `instructions`
@@ -818,10 +928,36 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
                         // 配额 `done`，更**不是**停止原因 —— 中断是「透明」的：
                         // handler 紧接着在下一条指令边界后开始执行。
                         //
-                        // ⚠️ **不会空转**：交付由 M-16 的 `active_irq` 单级防护
-                        // 限死（未清除前不再交付），而「取走即消失」⇒ 一轮
-                        // 里最多一次交付；量子边界又要靠虚拟时间推进，而时间
-                        // 只随**指令退休**前进 ⇒ 这里不推进时间也不会卡死。
+                        // ⚠️ **这里曾经写着「不会空转」，那个论证是错的**
+                        // （V-D 检视 · **VD-F3**）：它依赖「M-16 的 `active_irq`
+                        // 单级防护（未清除前不再交付）」这条**不变式**——
+                        // 而**不变式破掉时没有任何守卫**：三个记账全不动
+                        // （不增 `instructions`、不增 `done`、不推进虚拟时间）
+                        // ⇒ 内层循环**永不退出**。V-D 实测：8 秒内执行器被调用
+                        // **334 956 736 次**，`run_until` 永不返回。
+                        //
+                        // ⇒ 现在由**无进展守卫**（LLD §3.5 的 watchdog）兜底：
+                        // 连续 [`NO_PROGRESS_WINDOW`] 次「既没有指令退休、
+                        // 虚拟时间也没有前进、也没有到期事件被消费」⇒ **报错
+                        // 退出**。
+                        if self.now_ps() != before_ps {
+                            // 虚拟时间前进了 ⇒ 有进展。
+                            no_progress = 0;
+                        } else {
+                            no_progress = no_progress.saturating_add(1);
+                            if no_progress >= NO_PROGRESS_WINDOW {
+                                return Err(PlatformError::new(
+                                    ErrorFamily::Engine,
+                                    E_ENG_03_NO_PROGRESS,
+                                    format!(
+                                        "主循环无进展：连续 {no_progress} 次既没有指令退休、\
+                                         虚拟时间也没有前进、也没有到期事件被消费 \
+                                         （watchdog 窗口 {NO_PROGRESS_WINDOW}）—— \
+                                         判定为停滞并中止"
+                                    ),
+                                ));
+                            }
+                        }
                     }
                     ExecOutcome::Stop { reason, consumed } => {
                         if consumed {
@@ -915,12 +1051,65 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
     ///
     /// This is the form that can be restored exactly: queue contents, queue
     /// order, the insertion counter and the virtual time (D-05).
+    ///
+    /// ## ⚠️ 队列里的**迟到事件会被归一化**（V-D 检视 · **VD-F1**）
+    ///
+    /// 契约层的 [`riscv_sim_contract::snapshot::EngineSnapshotDto::validate`]
+    /// 的**检查 7** 拒绝「队首事件的到期时刻**早于**快照的虚拟时间」——
+    /// 理由是「一件在快照时刻**已经到期**的事件，还原后会**立刻**触发，
+    /// 那就不是『T 时刻的状态』了」。
+    ///
+    /// ⚠️ 契约层那条注释里写着「**引擎不会产出这种快照**」——**那是错的**
+    /// （V-D 实测确认）：虚拟时钟会随指令退休往前冲，而事件只在**量子
+    /// 边界**派发 ⇒ 只要有一件事件的到期时刻落在两个派发点之间，队列里
+    /// 就会留下一件「**已到期未派发**」的事件 ⇒ 引擎**自己**产出的快照
+    /// **过不了自己的校验器** ⇒ `capture_session → restore_session` 与
+    /// `M23::put_snapshot` 一起失败。
+    ///
+    /// ⇒ 修法落在**引擎侧**（**不放宽契约层的校验器** —— 契约层本批不
+    /// 升版）：出快照时把**迟到**事件的到期时刻**拉到当前时刻**
+    /// （`max(at_ps, now)`）—— 这正是 [`Engine::schedule_event`] **入队
+    /// 时**已经在用的那条归一化规则（评审 12-6「迟到事件归一为当前
+    /// 时间」），契约层 [`riscv_sim_contract::snapshot::QueuedEventDto::at_ps`]
+    /// 的文档也**已经**这么写了（「it is normalised: a late event is pulled
+    /// forward to `max(at_ps, now)`」）—— 只是引擎**出快照时**漏了这一步。
+    ///
+    /// ⇒ 于是**引擎产出的快照永远能过自己的校验器**。
+    ///
+    /// ⚠️ **口径**：归一化**不改变事件何时触发** —— 一件已到期的事件在
+    /// 活着的引擎里本来就会在**下一次派发**时立刻触发（那一次派发就在
+    /// 当前时刻），归一化只是把「它到期于 5000 ps」这句话换成「它到期于
+    /// **当前**时刻」，而**当前时刻正是它本来就会被触发的那一刻**。
+    ///
+    /// ⚠️ **一处已知的次序代价**：若队列里有**两件以上**迟到事件，且它们
+    /// 的 `seq` 次序与到期时刻次序**相反**，归一化会把它们拉到同一个时刻
+    /// ⇒ 规范序（`(at_ps, seq)`）按 `seq` 排 ⇒ **出队次序可能与活着的
+    /// 引擎不同**。这是「同一时刻多件事件」这种边角情形的代价；相比之下
+    /// 「引擎产出的快照**根本落不了盘**」是更大的问题。
     pub fn snapshot_full(&self) -> EngineSnapshot {
         let mut state = self.state.clone();
         self.sync_state_seq(&mut state);
+        let now = state.virtual_time_ps;
+        let mut queue = self.queue.to_ordered_vec();
+        // 归一化「已到期未派发」的事件（VD-F1）：把它们拉到当前时刻 ⇒
+        // 队首事件的到期时刻**不再早于**快照的虚拟时间 ⇒ 契约的检查 7
+        // 通过。
+        let mut clamped = false;
+        for event in &mut queue {
+            if event.at_ps < now {
+                event.at_ps = now;
+                clamped = true;
+            }
+        }
+        if clamped {
+            // 归一化可能打乱规范序（`at_ps` 变了）⇒ 重新排一次。
+            // `(at_ps, seq)` 是**全序**（队列里 `seq` 互不相同）⇒ 排完
+            // 一定是规范序。
+            queue.sort_by_key(|e| e.sort_key());
+        }
         EngineSnapshot {
             state,
-            queue: self.queue.to_ordered_vec(),
+            queue,
             next_seq: self.next_seq,
             instruction_budget: self.instruction_budget,
         }
@@ -951,6 +1140,17 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
         // Defensive: a hand-built snapshot could name a `next_seq` that is
         // already taken by a queued event. For a consistent snapshot this
         // is a no-op (`next_seq` is always above every queued `seq`).
+        //
+        // ⚠️ **它不是死代码**（V-D 检视 · **VD-F2** 的结论）：本方法收的是
+        // **内部类型** [`EngineSnapshot`] —— 字段全公开，**外部可以手工
+        // 构造**一份 `next_seq` **小于**队列里最大 `seq` 的快照 ⇒ 没有这条
+        // 修正，恢复后第一次 `schedule` 就会**撞号**（D-17）。
+        //
+        // ⚠️ 走契约 DTO 那条路（[`Engine::restore_dto`]）时，契约的
+        // `validate()` 已经**先**查过「`next_seq` 严格大于每个排队
+        // `seq`」（检查 5）⇒ 那条路上它确实是 no-op —— 但**两条路不是
+        // 同一件事**：一条是「不可信存储」，一条是「公开 API 的入参」。
+        // 覆盖见用例 `restoring_a_hand_built_snapshot_raises_the_insertion_counter_above_the_queue`。
         let floor = self.queue.max_seq().map_or(0, |seq| seq.saturating_add(1));
         if self.next_seq < floor {
             self.next_seq = floor;
@@ -1628,6 +1828,251 @@ mod tests {
             outcome.reason,
             RunReason::BudgetExhausted,
             "中断交付**不是**停止原因——它是「透明」的，handler 紧接着跑"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // VD-F3 — watchdog：无进展检测（LLD §3.5）
+    // ------------------------------------------------------------------
+
+    /// 一个**永远**返回 [`ExecOutcome::InterruptTaken`] 的执行器 ——
+    /// 用来复现 VD-F3 的活锁形态。
+    ///
+    /// 它模拟的是「M-16 的 `active_irq` 单级防护破掉」之后的世界：中断被
+    /// **反复**交付，而每一次交付都**不退休指令、不推进虚拟时间**。
+    struct AlwaysInterrupt {
+        calls: u64,
+    }
+
+    impl InstructionExecutor for AlwaysInterrupt {
+        fn step(&mut self, _state: &mut SimState) -> Result<ExecOutcome, PlatformError> {
+            self.calls += 1;
+            // 中断交付：没有指令退休 ⇒ 时钟不推进 ⇒ 三个记账全不动。
+            Ok(ExecOutcome::InterruptTaken)
+        }
+    }
+
+    /// **活锁必须被抓住**：`run_until` 要**报错退出**，而不是永远自旋
+    /// （V-D 检视 · **VD-F3**）。
+    ///
+    /// ⚠️ **这条用例在修复前会挂死整个测试二进制**（VD-F 实测：8 秒内执行器
+    /// 被调用 3.35 亿次，`run_until` 永不返回）——所以「用例能跑完」本身就是
+    /// 这条判据的一部分：守卫必须在**有限步内**触发。
+    ///
+    /// ⚠️ 断言落在**错误族 / 场景码**上，而不只是「返回了 Err」：守卫触发时
+    /// 报的是「平台故障」（`E_ENG-03`），不是 guest 的正常停止语义
+    /// （LLD §3.5 · 评审 12-2 / 12-3：watchdog 与 guest trap 严格区分）。
+    #[test]
+    fn a_runaway_interrupt_delivery_is_reported_instead_of_spinning_forever() {
+        let mut eng: Engine<RecordingBus, RecordingIntc> = Engine::default();
+        let mut executor = AlwaysInterrupt { calls: 0 };
+
+        let err = eng
+            .run_until(&mut executor, u64::MAX)
+            .expect_err("活锁必须报错退出，而不是无限自旋");
+
+        assert_eq!(
+            err.family,
+            ErrorFamily::Engine,
+            "停滞是**平台故障**，必须落在引擎族里（实得 {:?}）",
+            err.family
+        );
+        assert_eq!(
+            err.scenario, E_ENG_03_NO_PROGRESS,
+            "必须是「无进展」这一个场景码（实得 {}）",
+            err.scenario
+        );
+        assert!(
+            executor.calls <= u64::from(NO_PROGRESS_WINDOW),
+            "守卫必须在有限步内触发（实得 {} 次调用，窗口 {}）",
+            executor.calls,
+            NO_PROGRESS_WINDOW
+        );
+    }
+
+    /// **合法路径不许被守卫误伤**：一串中断交付之后 handler 真的退休了
+    /// 指令 ⇒ 主循环必须正常跑完（让出给宿主），而不是报错。
+    ///
+    /// ⚠️ 交付 **500** 次（远小于 [`NO_PROGRESS_WINDOW`] = 1024）——这条用例
+    /// 钉住的是「守卫的阈值**不能太紧**」：阈值一旦被下调到 500 以下，它
+    /// 立刻变红。
+    #[test]
+    fn a_burst_of_interrupt_deliveries_still_makes_progress() {
+        let mut eng: Engine<RecordingBus, RecordingIntc> = Engine::default();
+        let mut executor = InterruptThenAdvance {
+            interrupts: 500,
+            calls: 0,
+        };
+
+        let outcome = eng
+            .run_until(&mut executor, u64::MAX)
+            .expect("合法路径不许被守卫误伤");
+
+        assert_eq!(
+            outcome.reason,
+            RunReason::BudgetExhausted,
+            "handler 退休了指令 ⇒ 有进展 ⇒ 主循环正常让出给宿主"
+        );
+        assert_eq!(
+            outcome.instructions,
+            u64::from(DEFAULT_INSTRUCTION_BUDGET),
+            "中断交付仍然不计入已执行条数"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // VD-F1 — 引擎自己产出的快照必须过契约自己的校验器
+    // ------------------------------------------------------------------
+
+    /// 造一个「队列里有一件**已到期未派发**事件」的引擎状态。
+    ///
+    /// ⚠️ 走**内部类型** [`EngineSnapshot`]（不是契约 DTO）——契约 DTO 那条
+    /// 路会先 `validate()`（检查 5 / 7）⇒ 坏快照**根本进不到**引擎里。
+    fn engine_with_a_due_event() -> (Engine<RecordingBus, RecordingIntc>, EngineSnapshot) {
+        let hand_built = EngineSnapshot {
+            state: SimState {
+                virtual_time_ps: 6_000,
+                event_queue_head: 1,
+                ..SimState::default()
+            },
+            queue: vec![QueuedEvent {
+                at_ps: 5_000,
+                seq: 0,
+                event: SchedEvent::TimerExpiry {
+                    irq: 7,
+                    at_ps: 5_000,
+                },
+            }],
+            next_seq: 1,
+            instruction_budget: DEFAULT_INSTRUCTION_BUDGET,
+        };
+        let mut eng: Engine<RecordingBus, RecordingIntc> = Engine::default();
+        eng.restore_full(&hand_built);
+        (eng, hand_built)
+    }
+
+    /// **引擎自己产出的快照必须过契约自己的校验器**（V-D 检视 · **VD-F1**）。
+    ///
+    /// 现象：队列里若有一件「**已到期未派发**」的事件（`at_ps < now_ps`），
+    /// 契约的检查 7 直接**拒收** ⇒ `capture_session → restore_session` 与
+    /// `M23::put_snapshot` 一起失败。
+    #[test]
+    fn a_snapshot_holding_a_due_event_still_passes_the_contract_validator() {
+        let (mut eng, hand_built) = engine_with_a_due_event();
+
+        // 对照：那份**未归一化**的手工快照确实过不了契约的校验器（检查 7）
+        // ⇒ 差别确实在「引擎出快照时有没有归一化」这一步。
+        let raw = riscv_sim_contract::snapshot::EngineSnapshotDto::from(&hand_built);
+        let raw_err = raw
+            .validate()
+            .expect_err("未归一化的快照必须被契约的校验器拒绝");
+        assert_eq!(
+            raw_err.scenario,
+            riscv_sim_contract::snapshot::E_SNAP_02_MALFORMED_QUEUE,
+            "拒收的原因必须是「队列畸形」（检查 7），实得 {}",
+            raw_err.scenario
+        );
+
+        // 引擎**自己**产出的快照必须能过自己的校验器。
+        let dto = eng.snapshot_dto();
+        dto.validate()
+            .expect("引擎产出的快照必须过契约自己的校验器");
+        assert_eq!(
+            dto.queue[0].at_ps, 6_000,
+            "迟到的事件必须被归一化到当前时刻（与入队时的归一化同一条规则）"
+        );
+
+        // 往返：还原必须成功，且那件事件**不许丢**。
+        eng.restore_dto(&dto).expect("往返必须成功");
+        assert_eq!(eng.pending_event_count(), 1, "事件不许在往返里丢掉");
+        // 再拍一次快照必须**逐字相同**（归一化是幂等的）。
+        assert_eq!(
+            eng.snapshot_dto(),
+            dto,
+            "归一化必须幂等：还原后再拍一次，快照必须逐字相同"
+        );
+    }
+
+    /// **会话级载荷**（`capture_session → restore_session` 与
+    /// `M23::put_snapshot` 走的那条路）必须也能过校验。
+    ///
+    /// 会话载荷的第 10 条检查 = 「引擎段自己过自己的校验器」⇒ 引擎段修好
+    /// 了，这条路才通。
+    #[test]
+    fn a_session_payload_carrying_the_engine_snapshot_validates() {
+        let (eng, _hand_built) = engine_with_a_due_event();
+        let payload = riscv_sim_contract::session::SessionSnapshotDto {
+            m12_engine: eng.snapshot_dto(),
+            ..Default::default()
+        };
+        payload.validate().expect("带着引擎段的会话载荷必须过校验");
+    }
+
+    // ------------------------------------------------------------------
+    // VD-F2 — `restore_full` 的 `next_seq` 下限修正必须有判别力
+    // ------------------------------------------------------------------
+
+    /// **恢复一份 `next_seq` 小于队列最大 `seq` 的快照 ⇒ 计数器必须被抬到
+    /// 队列之上**（V-D 检视 · **VD-F2**）。
+    ///
+    /// ⚠️ 必须走**内部类型** [`EngineSnapshot`]：契约 DTO 那条路会先
+    /// `validate()`（检查 5「`event.seq < next_seq`」）⇒ 坏快照**进不到**
+    /// `restore_full`。
+    ///
+    /// ⚠️ 断言落在**可观测后果**上（恢复后第一次 `schedule` 拿到的 `seq`
+    /// 必须没被用过），而不只是「计数器被抬了」——「抬了」是实现细节，
+    /// 「不撞号」才是这条修正要保的东西（D-17）。
+    #[test]
+    fn restoring_a_hand_built_snapshot_raises_the_insertion_counter_above_the_queue() {
+        let mut eng: Engine<RecordingBus, RecordingIntc> = Engine::default();
+        let hand_built = EngineSnapshot {
+            state: SimState::default(),
+            queue: vec![
+                QueuedEvent {
+                    at_ps: 1_000,
+                    seq: 3,
+                    event: SchedEvent::TimerExpiry {
+                        irq: 1,
+                        at_ps: 1_000,
+                    },
+                },
+                QueuedEvent {
+                    at_ps: 2_000,
+                    seq: 7,
+                    event: SchedEvent::TimerExpiry {
+                        irq: 2,
+                        at_ps: 2_000,
+                    },
+                },
+            ],
+            // ⚠️ **故意**给一个**小于**队列最大 `seq` 的计数器。
+            next_seq: 0,
+            instruction_budget: DEFAULT_INSTRUCTION_BUDGET,
+        };
+
+        eng.restore_full(&hand_built);
+
+        assert!(
+            eng.next_seq() > 7,
+            "插入序计数器必须被抬到队列最大 seq 之上（实得 {}）",
+            eng.next_seq()
+        );
+        let fresh = eng.schedule_event(
+            3_000,
+            SchedEvent::TimerExpiry {
+                irq: 3,
+                at_ps: 3_000,
+            },
+        );
+        assert!(
+            fresh > 7,
+            "恢复后排的事件必须拿到一个没被用过的 seq（实得 {fresh}）"
+        );
+        let seqs: Vec<u64> = eng.snapshot_full().queue.iter().map(|e| e.seq).collect();
+        assert_eq!(
+            seqs,
+            vec![3, 7, fresh],
+            "队列里的 seq 必须互不相同（D-17：不撞号）"
         );
     }
 }
