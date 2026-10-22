@@ -142,6 +142,25 @@ variant and the upstream test bodies reference.  They are upstream's values
 verbatim: they are encodings the specification fixes, not platform choices,
 and a "cleaned up" constant would silently diverge from the reference side.
 
+⚠️ **That claim is now enforced, not just asserted.**  The harness
+compares every constant in `env/encoding.h` against upstream's
+`env/encoding.h` (whitespace- and case-insensitive) **before it builds
+anything**, and a mismatch is a hard error:
+
+```
+golden-run: encoding.h: 'PMP_A' = '0x0c', upstream says '0x18' — the corpus must run upstream's program
+```
+
+⚠️ **Why a hard error and not a warning**: the harness compiles **one**
+image and hands it to **both** sides, so a drifted constant does not show up
+as a side-vs-side mismatch — it silently replaces the upstream test program
+with a slightly different one, and the corpus keeps comparing two different
+programs while looking green.  (The first version of `env/encoding.h` did
+carry such a drift: `PMP_A` was `0x0c` where upstream says `0x18`.)  The
+byte-identity check above remains the **second** line of defence — it proves
+the two *environments* agree; the constant check proves neither drifted
+from upstream.
+
 ### The upstream RV32 suites, and why each is in or out
 
 | upstream suite | cases | in the corpus? | why |
@@ -192,6 +211,31 @@ Spike raises an illegal-instruction exception for a CSR that does not exist
 in the configured ISA, while the platform reads any unimplemented CSR as 0
 without trapping (the rule STAGE-6 adjudication D chose).  That difference
 is recorded, not papered over.
+
+## `active` rows that agree **vacuously** — read this before citing coverage
+
+⚠️ **An `active` row means "both sides reach the same verdict".  It does
+NOT mean "both sides exercised the same thing".**  Three of the 13 `rv32mi`
+rows are **hollow agreements**: the verdicts match, but the two sides ran
+**different programs** (or the case asserts something the platform cannot
+fail).  They stay in the corpus — the agreement is real and worth keeping
+green — but they must **never** be cited as coverage of the behaviour they
+name.  The project's own rule (STAGE-6 adjudication I): **a hollow
+agreement is more dangerous than a divergence**, because a divergence is
+visible.
+
+| case | why the agreement is hollow | how that was established |
+| --- | --- | --- |
+| `rv32mi/csr` | the case branches on `misa[20]` (the **U** bit). The reference side runs with its default `--priv=MSU` ⇒ `misa = 0x40141104` ⇒ **U is set** ⇒ it runs the U-mode section (`csrwi mcounteren`, `sret` into user mode, "reading `sstatus` in user mode must trap"). This platform is **M-mode only** ⇒ `misa = 0x40001104` ⇒ **U is clear** ⇒ the case jumps straight to `finish` and passes early ⇒ **the whole user-mode / privilege-transition section never runs here** | instrumented copy of the upstream `rv64si/csr.S`: the reference side reaches the U-mode marker, we do not. Trap entries: reference side 5, ours 1. Ledger **D-96** |
+| `rv32mi/ma_fetch` | the case probes "can the `C` bit be switched off?" with `csrci misa, 1 << ('c'-'a')`. The reference side's `misa` is **WARL-writable** (the write really clears `C`); ours is **fully read-only** ⇒ the **same probe takes opposite branches**: the reference side continues into the IALIGN assertions, we skip to `pass` ⇒ **that half of the case is not covered here** | instrumented copy of the upstream `rv64si/ma_fetch.S`: the reference side hits the IALIGN-section marker, we do not. Ledger **D-95** |
+| `rv32mi/instret_overflow` | the platform has **no counter at all** ⇒ `minstret` writes are ignored and it always reads 0 ⇒ the case's `TEST_CASE(2/3/4)` (all expecting 0) are **unconditionally satisfied** ⇒ the row asserts "we have no counter", not "our counter matches the reference side" | the reference side's `csrwi minstret, 0` **lands** (`c2818_minstret 0x00000000`); ours ignores it. Same family as the `zicntr` row above ⇒ ledger **D-94** |
+
+⚠️ **The three differences above all come from the same root**: the
+platform implements **fewer** features than the reference side
+(U-mode, S-mode, PMP, counters) and reports that honestly in `misa`
+instead of pretending.  ⇒ A hollow agreement here is the **expected**
+consequence of an M-mode-only platform — the fix is **labelling**, not
+faking a match.
 
 
 ## The Zicclsm detail — read this before touching the ISA string
