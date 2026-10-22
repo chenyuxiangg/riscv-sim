@@ -866,6 +866,8 @@ pub(crate) struct TestSection {
     pub(crate) data: Vec<u8>,
     /// `sh_size` override — defaults to `data.len()`.
     pub(crate) size_override: Option<u32>,
+    /// `sh_entsize` — defaults to `0`（「未声明」）。
+    pub(crate) entsize: u32,
 }
 
 impl TestSection {
@@ -876,6 +878,7 @@ impl TestSection {
             sh_type: SHT_PROGBITS,
             data: data.to_vec(),
             size_override: None,
+            entsize: 0,
         }
     }
 
@@ -887,7 +890,17 @@ impl TestSection {
             sh_type: SHT_NOBITS,
             data: Vec::new(),
             size_override: Some(declared_size),
+            entsize: 0,
         }
+    }
+
+    /// A section that **declares** its entry size (`sh_entsize`).
+    ///
+    /// `0` means「未声明」in the ELF spec — some old toolchains write it
+    /// that way — and is accepted.
+    pub(crate) fn with_entsize(mut self, entsize: u32) -> Self {
+        self.entsize = entsize;
+        self
     }
 }
 
@@ -974,6 +987,7 @@ pub(crate) fn build_elf_with_sections(sections: &[TestSection]) -> TestElf {
         SHT_STRTAB,
         shstrtab_offset,
         shstrtab_len,
+        0,
     );
     for (i, s) in sections.iter().enumerate() {
         let size = s.size_override.unwrap_or(s.data.len() as u32);
@@ -983,6 +997,7 @@ pub(crate) fn build_elf_with_sections(sections: &[TestSection]) -> TestElf {
             s.sh_type,
             section_offsets[i],
             size,
+            s.entsize,
         );
     }
     bytes.extend_from_slice(&shdrs);
@@ -1024,7 +1039,14 @@ pub(crate) fn build_elf_with_sections(sections: &[TestSection]) -> TestElf {
 }
 
 /// Append one ELF32 section header (40 bytes) to `out`.
-fn push_shdr(out: &mut Vec<u8>, sh_name: u32, sh_type: u32, sh_offset: u32, sh_size: u32) {
+fn push_shdr(
+    out: &mut Vec<u8>,
+    sh_name: u32,
+    sh_type: u32,
+    sh_offset: u32,
+    sh_size: u32,
+    sh_entsize: u32,
+) {
     out.extend_from_slice(&sh_name.to_le_bytes()); // sh_name
     out.extend_from_slice(&sh_type.to_le_bytes()); // sh_type
     out.extend_from_slice(&0u32.to_le_bytes()); // sh_flags
@@ -1034,7 +1056,7 @@ fn push_shdr(out: &mut Vec<u8>, sh_name: u32, sh_type: u32, sh_offset: u32, sh_s
     out.extend_from_slice(&0u32.to_le_bytes()); // sh_link
     out.extend_from_slice(&0u32.to_le_bytes()); // sh_info
     out.extend_from_slice(&1u32.to_le_bytes()); // sh_addralign
-    out.extend_from_slice(&0u32.to_le_bytes()); // sh_entsize
+    out.extend_from_slice(&sh_entsize.to_le_bytes()); // sh_entsize
 }
 
 /// The section name of every extracted debug section, in order.
@@ -1295,4 +1317,81 @@ fn elf_ignores_a_bogus_offset_on_a_non_whitelisted_section() {
 fn parse_limits_default_debug_section_budget_is_8_mib() {
     assert_eq!(ParseLimits::default().debug_section_bytes, 8 * 1024 * 1024);
     assert!(LoadImage::default().debug_sections.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// D-101 ② — the symbol table's declared entry size must be self-consistent
+// ---------------------------------------------------------------------------
+
+/// **谎报 `sh_entsize` 的符号表必须被拒收**（台账 **D-101 ②** · 验收
+/// **C-5**）。
+///
+/// M-11 reads the symbol table with a **fixed 16-byte** stride and cannot
+/// see `sh_entsize` (it lives in the section header; M-11 only gets the
+/// raw `.symtab` bytes) ⇒ a file that claims `sh_entsize = 32` while its
+/// entries are still 16 bytes is **indistinguishable** from a correct
+/// file as far as M-11 is concerned.
+///
+/// ⇒ **the container check belongs to M-06** (the only ELF container
+/// parser in the tree) ⇒ the **whole image is rejected** ⇒ M-11 never
+/// sees the lying file.
+#[test]
+fn elf_rejects_a_symtab_that_lies_about_its_entry_size() {
+    let symtab = vec![0x11u8; 32]; // two 16-byte entries
+    let strtab = b"\0sym_a\0".to_vec();
+    let elf = build_elf_with_sections(&[
+        TestSection::progbits(".symtab", &symtab).with_entsize(32),
+        TestSection::progbits(".strtab", &strtab),
+    ]);
+
+    let err = DefaultLoader.load(&elf.bytes, Kind::Elf).unwrap_err();
+    assert_eq!(err.family, ErrorFamily::Loader);
+    assert_eq!(err.scenario, 1, "E_LDR-01 malformed");
+    assert!(
+        err.message.contains("sh_entsize"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+/// **显式声明 16 必须放行**（判据的另一侧）。
+#[test]
+fn elf_accepts_a_symtab_that_declares_the_right_entry_size() {
+    let symtab = vec![0x11u8; 32];
+    let elf =
+        build_elf_with_sections(&[TestSection::progbits(".symtab", &symtab).with_entsize(16)]);
+    let li = DefaultLoader
+        .load(&elf.bytes, Kind::Elf)
+        .expect("a symtab that declares 16 bytes per entry must be accepted");
+    assert_eq!(debug_section_names(&li), vec![".symtab"]);
+}
+
+/// **`sh_entsize == 0`（未声明）必须放行** —— ELF 里 0 表示「这一节没有
+/// 固定大小的条目」（一些老工具链这么写）。
+///
+/// ⚠️ 把 `0` 也拒掉会**误杀合法镜像** ⇒ 判据必须是「**显式声明了
+/// （非 0）且不等于 16** ⇒ 拒收」。
+#[test]
+fn elf_accepts_a_symtab_that_does_not_declare_its_entry_size() {
+    let symtab = vec![0x11u8; 32];
+    let elf = build_elf_with_sections(&[TestSection::progbits(".symtab", &symtab).with_entsize(0)]);
+    let li = DefaultLoader
+        .load(&elf.bytes, Kind::Elf)
+        .expect("sh_entsize = 0 means「未声明」and must be accepted");
+    assert_eq!(debug_section_names(&li), vec![".symtab"]);
+}
+
+/// **非符号表的节区不受这条校验约束** —— `.debug_info` 之类没有固定大小
+/// 的条目（`sh_entsize = 0`），而 `.debug_line` 之类自带条目步长的节区
+/// 也不该被符号表的规则误伤。
+#[test]
+fn elf_does_not_apply_the_symbol_entry_rule_to_other_sections() {
+    let elf = build_elf_with_sections(&[
+        TestSection::progbits(".symtab", &[0xAA; 16]),
+        TestSection::progbits(".debug_info", &[0xBB; 16]).with_entsize(64),
+    ]);
+    let li = DefaultLoader
+        .load(&elf.bytes, Kind::Elf)
+        .expect("the symbol-entry rule must not touch other sections");
+    assert_eq!(debug_section_names(&li), vec![".symtab", ".debug_info"]);
 }

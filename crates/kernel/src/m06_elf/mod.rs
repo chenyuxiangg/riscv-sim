@@ -57,6 +57,12 @@ pub mod hex;
 /// consistently (used here for `parseRaw` boundary checks).
 pub use crate::m14_bus::BUS_SIZE;
 
+/// The size of **one** ELF32 symbol-table entry (16 bytes).
+///
+/// Re-exported so that the symbol-table parser (M-11) and the container
+/// parser (M-06) share **one** landing spot for that number.
+pub use elf::SYM_ENTRY_SIZE;
+
 /// Output of a successful load.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadImage {
