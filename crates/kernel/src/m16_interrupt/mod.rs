@@ -158,6 +158,17 @@ pub trait InterruptPort {
         mie: u32,
         mstatus: u32,
     ) -> Result<Option<PendingIntr>, PlatformError>;
+    /// 当前**挂起**的中断线（**电平**语义：保持到 [`Self::clear`]）。
+    ///
+    /// ⚠️ 这是 CSR `mip` 的**唯一来源**（D-84）：`mip` = 这些线的
+    /// **位掩码投影**（位号表见契约层 `std_irq_bit_for_line`）。
+    ///
+    /// ⚠️ **不是** `raised`（断言线集）—— `raised` 是**边沿**语义，
+    /// 用完即清；`mip` 的位义是「中断**挂起**」。
+    ///
+    /// ⚠️ 这是一条**读**接口 ⇒ **没有错误通道**：拿不到状态就当作
+    /// 「没有挂起」（与 [`Self::pending_intr`] 同一口径）。
+    fn pending_lines(&self) -> Vec<u16>;
 }
 
 /// 中断控制器（简化 PLIC / CLINT）。
@@ -647,6 +658,10 @@ impl InterruptPort for InterruptController {
         mstatus: u32,
     ) -> Result<Option<PendingIntr>, PlatformError> {
         InterruptController::poll(self, now_ps, mie, mstatus)
+    }
+
+    fn pending_lines(&self) -> Vec<u16> {
+        InterruptController::pending_lines(self)
     }
 }
 
