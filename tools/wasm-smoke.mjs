@@ -71,6 +71,28 @@ await mod.default({ module_or_path: readFileSync(wasm) });
 /** 内核自己报的协议版本 —— 发命令时用它（见 `send()` 的注释）。 */
 const kernelSchemaVersion = mod.protocol_schema_version();
 
+/**
+ * 契约层（Rust）的 `SCHEMA_VERSION` —— **直接读源码**。
+ *
+ * ⚠️ **为什么不能在本脚本里再抄一份**：v0.20 之前，这里硬编码着 `2`。
+ * 契约升到 v3 时，那条断言**静默失配**（门禁红着，却没人发现它早该改）⇒
+ * 门禁脚本里的「协议版本」必须是**推导出来的**，不是**抄下来的**。
+ *
+ * ⚠️ 解析失败 ⇒ 直接抛错：读不到版本号时**不能**当成「跳过」——
+ * 那会让这条门禁**悄悄消失**。
+ */
+function rustSchemaVersion() {
+    const src = readFileSync(resolve(repoRoot, "crates/contract/src/lib.rs"), "utf8");
+    const m = src.match(/pub const SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/);
+    if (!m) {
+        throw new Error("读不到契约层的 SCHEMA_VERSION（crates/contract/src/lib.rs）");
+    }
+    return Number(m[1]);
+}
+
+/** 契约层（Rust）的协议版本。 */
+const contractSchemaVersion = rustSchemaVersion();
+
 let failures = 0;
 
 /**
@@ -160,14 +182,14 @@ console.log(`  ping                    = ${mod.ping("hello")}`);
 
 check("ping 回声正确", mod.ping("hello") === "pong:hello");
 check(
-    "内核的协议版本是 2",
-    kernelSchemaVersion === 2,
-    `实际 ${kernelSchemaVersion}`,
+    "契约层（Rust）的 SCHEMA_VERSION 与前端 JS 镜像一致",
+    contractSchemaVersion === SCHEMA_VERSION,
+    `Rust ${contractSchemaVersion} vs JS ${SCHEMA_VERSION}`,
 );
 check(
-    "内核的协议版本与前端 JS 镜像一致",
-    kernelSchemaVersion === SCHEMA_VERSION,
-    `内核 ${kernelSchemaVersion} vs 镜像 ${SCHEMA_VERSION}`,
+    "内核的协议版本与契约层一致",
+    kernelSchemaVersion === contractSchemaVersion,
+    `内核 ${kernelSchemaVersion} vs 契约 ${contractSchemaVersion}`,
 );
 
 // -- Nop ------------------------------------------------------------------
@@ -225,11 +247,16 @@ check(
 //     （E_DBG-01）而不是钳位——写钳位会静默写到别的寄存器。
 {
     // 协商：正常路径
-    const neg = find(send({ Negotiate: { min_schema_version: 2, cap_bits: 0 } }), "Negotiated");
+    // ⚠️ 宿主要求的**最低**版本 = 当前契约版本 ⇒ 内核的回包应当正好是它
+    //    （版本是**推导出来的**，不是抄在这个脚本里的常量）。
+    const neg = find(
+        send({ Negotiate: { min_schema_version: SCHEMA_VERSION, cap_bits: 0 } }),
+        "Negotiated",
+    );
     check("Negotiate 回一个 Negotiated 事件", neg !== undefined);
     check(
-        "协商的协议版本是 2",
-        neg?.Negotiated?.schema_version === 2,
+        "协商的协议版本 = 当前契约版本",
+        neg?.Negotiated?.schema_version === SCHEMA_VERSION,
         `实际 ${neg?.Negotiated?.schema_version}`,
     );
     check(
@@ -356,6 +383,88 @@ check(
         "ReadMemory 读回 sw 写的值 49",
         read?.MemoryRead?.value === 49,
         `实际 ${JSON.stringify(read?.MemoryRead)}`,
+    );
+}
+
+// -- 契约 v3 的调试面（M-11 · STAGE-5）-------------------------------------
+//
+// ⚠️ 这四条命令在**真 wasm 产物**上跑 ⇒ 证明「接缝被接上」，而不只是
+//    「Rust 侧的单元能过」。
+//    （浏览器里的生产路径就是这条：前端 → Worker → wasm → 内核。）
+{
+    // ① `Disasm` ⇒ 一条 `Disasm` 事件，条目带**真实**的助记符。
+    const disasm = find(send({ Disasm: { addr: 0, count: 3 } }), "Disasm");
+    const entries = disasm?.Disasm?.entries ?? [];
+    check("Disasm 回一个 Disasm 事件", disasm !== undefined);
+    check("Disasm 给出三条指令", entries.length === 3, `实际 ${entries.length}`);
+    check(
+        "Disasm 的第一条是 demo 固件的第一条指令（addi ra,zero,42）",
+        entries[0]?.mnemonic === "addi ra,zero,42",
+        `实际 ${JSON.stringify(entries[0])}`,
+    );
+    check(
+        "Disasm 的机器码是固件里的真机器码",
+        entries[0]?.code === 0x02a00093,
+        `实际 ${JSON.stringify(entries[0]?.code)}`,
+    );
+
+    // ② `ResolveLine` ⇒ 一条 `SourceLocation` 事件（Wave 1 = 降级态）。
+    const loc = find(send({ ResolveLine: { addr: 0 } }), "SourceLocation");
+    check("ResolveLine 回一个 SourceLocation 事件", loc !== undefined);
+    check(
+        "ResolveLine 在无 DWARF 时给降级态（行号 0）",
+        loc?.SourceLocation?.line === 0 && loc?.SourceLocation?.file === "",
+        `实际 ${JSON.stringify(loc?.SourceLocation)}`,
+    );
+
+    // ③ `SetTraceEnabled` ⇒ 一条 `TraceState` 事件。
+    const state = find(send({ SetTraceEnabled: { enabled: true } }), "TraceState");
+    check("SetTraceEnabled 回一个 TraceState 事件", state !== undefined);
+    check(
+        "SetTraceEnabled 回显开关状态",
+        state?.TraceState?.enabled === true,
+        `实际 ${JSON.stringify(state?.TraceState)}`,
+    );
+
+    // ④ `ExportTrace`（执行轨迹 / CSV）⇒ 一条 `TraceExport` 事件。
+    const exported = find(
+        send({ ExportTrace: { source: "Execution", format: "Csv", offset: 0, limit: 0 } }),
+        "TraceExport",
+    );
+    const chunk = exported?.TraceExport?.chunk ?? "";
+    check("ExportTrace 回一个 TraceExport 事件", exported !== undefined);
+    check(
+        "执行轨迹导出带 CSV 表头",
+        chunk.startsWith("time_ps,addr,kind,data,width"),
+        `实际 ${JSON.stringify(chunk.slice(0, 80))}`,
+    );
+    check(
+        "执行轨迹里能看到指令条目（kind = instruction）",
+        chunk.includes(",instruction,"),
+        `实际 ${JSON.stringify(chunk.slice(0, 200))}`,
+    );
+
+    // ⚠️ **时间轴必须真的动**：时间列**全是 0** ⇒ 导出看着有数据，却读不出
+    //    「什么时候发生的」（M-14 的 `Bus::set_now_ps` 没接线的症状）。
+    const stamps = chunk
+        .split("\n")
+        .slice(1)
+        .filter((l) => l.trim().length > 0)
+        .map((l) => Number(l.split(",")[0].replace(/"/g, "")));
+    check("执行轨迹导出行数不为 0", stamps.length > 0, `实际 ${stamps.length}`);
+    check(
+        "时间戳不是恒 0（时间轴是活的）",
+        stamps.some((t) => t > 0),
+        `实际 ${JSON.stringify(stamps)}`,
+    );
+
+    // ⑤ 非法组合被**拒绝**（不「换一个格式凑合」）。
+    const bad = send({ ExportTrace: { source: "Execution", format: "Vcd", offset: 0, limit: 0 } });
+    const err = find(bad, "Error");
+    check(
+        "执行轨迹 + VCD 被拒（E_CTX-03）",
+        err?.Error?.code === "E_CTX-03",
+        `实际 ${JSON.stringify(err?.Error)}`,
     );
 }
 
