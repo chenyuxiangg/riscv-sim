@@ -265,6 +265,37 @@ pub enum CommandPayload {
         /// True = record, false = stop recording.
         enabled: bool,
     },
+    /// Write bytes **into** the console UART (the RX direction).
+    ///
+    /// ⚠️ **This is the exact mirror of v4's [`EventPayload::Console`]**:
+    /// that event carries the bytes the guest **wrote out** (TX), this
+    /// command carries the bytes the host writes **in** (RX). Both
+    /// directions travel as **raw bytes**, because the guest's byte
+    /// stream is the truth (the Spike comparison is byte-wise).
+    ///
+    /// ⚠️ serde's default for `Vec<u8>` is a **JSON array of numbers**
+    /// (`[104, 105]`) — **not** base64, **not** a string. The JS
+    /// mirror (`front/lib/message.js`'s `Command.writeConsole`) spells
+    /// it the same way.
+    ///
+    /// ⚠️ **One command does one thing**: it writes to the session's
+    /// **only** UART (UART0). There is **no** "which UART" selector in
+    /// this batch — the platform has exactly one console UART.
+    ///
+    /// ⚠️ **Do not reuse [`CommandPayload::WriteMemory`]** for this:
+    /// writing `0x1000_0000` *is* "writing memory", but it bypasses
+    /// the peripheral's semantics (no RX FIFO, no LSR `RX_VALID`, no
+    /// interrupt line) ⇒ the guest would read a stale `RHR` while the
+    /// `LSR` says "no data" ⇒ **self-contradictory**.
+    ///
+    /// Added in contract v5.
+    WriteConsole {
+        /// The raw bytes to hand to the UART's receive FIFO, in order.
+        ///
+        /// An **empty** vector is legal and is a **no-op** (not an
+        /// error): the reply still comes back.
+        bytes: Vec<u8>,
+    },
 }
 
 impl Default for CommandPayload {
@@ -517,9 +548,11 @@ mod tests {
     ///
     /// **v4** adds the guest console byte stream + the per-instruction
     /// source location on the disassembly entries.
+    ///
+    /// **v5** adds the console **input** direction (`WriteConsole`).
     #[test]
-    fn the_schema_version_is_four() {
-        assert_eq!(crate::SCHEMA_VERSION, 4);
+    fn the_schema_version_is_five() {
+        assert_eq!(crate::SCHEMA_VERSION, 5);
     }
 
     /// The three commands contract v2 adds (D-32 gaps 1, 2, 3).
@@ -652,7 +685,7 @@ mod tests {
         let msg = Message::command(7, CommandPayload::Nop);
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
-        assert_eq!(json["schema_version"], 4);
+        assert_eq!(json["schema_version"], 5);
     }
 
     // -----------------------------------------------------------------
@@ -858,6 +891,96 @@ mod tests {
         assert_eq!(
             serde_json::to_value(TraceFormat::Json).expect("json"),
             serde_json::json!("Json")
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Contract v5 — the console **input** direction (STAGE-9 裁决 A).
+    //
+    // ⚠️ The wire shape is **pinned**: serde's default for `Vec<u8>` is a
+    // **JSON array of numbers** (`[104, 105]`) — **not** base64, **not** a
+    // string. The JS mirror (`front/lib/message.js`'s
+    // `Command.writeConsole`) spells it the same way.
+    // -----------------------------------------------------------------
+
+    /// The `WriteConsole` command's wire shape is **pinned** to the
+    /// string level.
+    ///
+    /// ⚠️ Why the **string** and not just `serde_json::json!`: the
+    /// macro compares **values**, so it would accept a *reordered* key
+    /// set as well as a renamed variant tag that happens to carry the
+    /// same payload. The **string** form pins the variant tag's exact
+    /// spelling, the field's exact spelling and the key order — a
+    /// rename on either side turns this red.
+    #[test]
+    fn the_v5_write_console_command_has_a_pinned_wire_shape() {
+        let cmd = CommandPayload::WriteConsole {
+            bytes: vec![104, 105],
+        };
+        assert_eq!(
+            serde_json::to_string(&cmd).expect("json"),
+            r#"{"WriteConsole":{"bytes":[104,105]}}"#
+        );
+        // ⚠️ **不是**字符串、**不是** base64 —— 字节就是字节。
+        assert_eq!(
+            serde_json::to_value(&cmd).expect("json"),
+            serde_json::json!({ "WriteConsole": { "bytes": [104, 105] } })
+        );
+        // 空字节流是**空数组**，不是 `null`（`null` 是「没有值」，
+        // 那与「没写任何字节」是**两件事**）。
+        assert_eq!(
+            serde_json::to_string(&CommandPayload::WriteConsole { bytes: Vec::new() })
+                .expect("json"),
+            r#"{"WriteConsole":{"bytes":[]}}"#
+        );
+    }
+
+    /// 往返之后**逐字节相同** —— 含 `0x00` / `0xFF` 这两个边界字节。
+    ///
+    /// ⚠️ 边界字节是这条用例的判别力所在：若线上表示被改成 base64 或
+    /// 字符串，`0x00`（NUL）与 `0xFF` 这类字节最先露馅。
+    #[test]
+    fn the_v5_write_console_bytes_survive_the_round_trip_byte_for_byte() {
+        let bytes = vec![0x00, 0x41, 0x7F, 0x80, 0xFF, 0x0D, 0x0A];
+        let cmd = CommandPayload::WriteConsole {
+            bytes: bytes.clone(),
+        };
+        let back: CommandPayload =
+            serde_json::from_str(&serde_json::to_string(&cmd).expect("json")).expect("round trip");
+        match back {
+            CommandPayload::WriteConsole { bytes: got } => {
+                assert_eq!(got, bytes, "每个字节都必须原样回来");
+                assert_eq!(got.len(), 7, "一个字节都不能多、也不能少");
+                assert_eq!(got[0], 0x00, "NUL 字节必须活下来");
+                assert_eq!(got[4], 0xFF, "0xFF 必须活下来");
+            }
+            other => panic!("expected a WriteConsole, got {other:?}"),
+        }
+    }
+
+    /// **两侧逐字对照**：Rust 侧读前端 JS 镜像的源码，断言里面**字面**
+    /// 出现了 `WriteConsole` 这个拼写。
+    ///
+    /// ⚠️ **为什么要有这条**：契约层是 Rust，JS 镜像是手抄的 ⇒ 改了
+    /// 一侧忘了另一侧 ⇒ 前端发出去的命令名内核**根本不认识** ⇒ 命令
+    /// 永远没有回复（前端只能等超时），而**两侧各自的测试都绿着**。
+    ///
+    /// ⚠️ 这里断言的是**字面出现**，不是「JS 的构造器行为对」——行为由
+    /// 前端自己的门禁（`front/tests/contract.test.mjs`）盯。
+    #[test]
+    fn the_v5_write_console_spelling_is_the_same_on_both_sides() {
+        // ⚠️ 路径：`crates/contract/src/protocol.rs` → 仓库根是 `../../..`
+        const JS_MIRROR: &str = include_str!("../../../front/lib/message.js");
+        assert!(
+            JS_MIRROR.contains("WriteConsole"),
+            "前端 JS 镜像里必须**字面**出现 `WriteConsole` —— 两侧拼写必须一致"
+        );
+        // ⚠️ 版本号也钉住：JS 镜像的 `SCHEMA_VERSION` 必须与 Rust 侧一样
+        // （前端门禁 `contract.test.mjs` 从 Rust 源码推导这个数，但那条
+        // 门禁**不在**契约层的编译依赖里 ⇒ 这里再钉一次）。
+        assert!(
+            JS_MIRROR.contains("export const SCHEMA_VERSION = 5;"),
+            "前端 JS 镜像的 SCHEMA_VERSION 必须与 Rust 侧的 5 一致"
         );
     }
 }
