@@ -1,11 +1,112 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.22.0
+> **Document version**: v0.23.0
 > **Created**: 2026-10-19
 > **Last updated**: 2026-10-22
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.23.0 变更摘要
+
+**让一个真实 M 模式 RTOS（osz）在本平台上跑起来**（分支 `feature/osz-runtime`；
+冻结规格 `docs/detailed-design/STAGE-8_OSZ_Runtime.md`，裁决 A~N + 修订 **C′**）。
+
+台账**闭环 3 条**：**D-47**（传输帧 `seq` 的双序列空间）· **D-48**（`E_TRX-04`
+同码多义）· **D-116**（`E_ENG_03` 未进契约层场景码表）。
+**新登记 5 条**：**D-117**（CLINT / PLIC 进不了会话快照）· **D-118**
+（`UartStateDto` 缺 ns16550 的七个寄存器）· **D-119**（guest 的 UART 没有输入
+通路 ⇒ shell 只能看不能打字）· **D-120**（M-12 仍自写一份 `E_ENG_*` 字面量）·
+**D-121**（`DisasmEntryDto` 的 `file`/`line` 内核侧还不会填 ⇒ D-102 只闭环一半）。
+
+### 一、核心命题：**「能跑」的判据是「**字节流逐字节相同**」**
+
+真实 RTOS（osz）不是 riscv-tests：它**没有 `tohost` 符号**（那是 HTIF 的约定，
+黄金对拍的老路靠它拿判决）⇒ 它的「判决」是**它自己打到 UART0 上的字节**。
+
+⇒ 本批把判决口径定成「**两侧 UART TX 字节流逐字节相同**」，并为此做了三件新东西：
+
+1. **headless 判决器 `osz-boot`**（`crates/kernel/src/bin/osz-boot.rs`）：加载 ELF、
+   反复 `Continue`、把 UART 字节流**原样**写到 stdout、把判决行写到 stderr
+   ⇒ stdout 可以直接与 Spike 的 stdout 用 `cmp` 比。
+2. **`tools/boot-osz.sh`**：候选侧跑 `osz-boot`、参考侧跑 Spike、两侧 `cmp`，
+   输出 `VERDICT MATCH / MISMATCH / NO-VERDICT`。
+3. **`tools/watchdog.pl`**：仓内可移植的超时看门狗（macOS 没有 `timeout`，
+   而 `perl -e 'alarm N; exec(@ARGV)'` 在 POSIX 下**不生效** —— `exec` 会重置 alarm）。
+
+**实测结果**：候选侧用 105 万条指令、1.05 s 虚拟时间跑到 `OSZ$ ` 提示符，
+产出 **31 字节**（`==== Enter Main ====\n` + `\x1b[2K` + `\r` + `OSZ$ `），
+与 Spike 参考侧 **逐字节完全相同**（`VERDICT MATCH`）。
+
+### 二、平台侧的三处**真 bug**（此前没有 guest 需要它们，所以一直没暴露）
+
+1. **`mcause` 报的是内部线号**（`IRQ_BASE | line` ⇒ `0x8000_0001`），而 RISC-V
+   架构规定机器中断的 cause 码是 **3 / 7 / 11** ⇒ osz 的中断分发**一个都匹配不上**。
+   修法：契约层新增「内部线号 → 架构 cause 码」的**纯函数**，交付时用它算
+   `mcause`；⚠️ **`mie`/`mip` 的位号映射一个字都没改**（那是 `mip` 投影的判据）。
+2. **`wfi` 是非法指令**（osz 的 idle 任务踩它）⇒ 实现成一条合法的 nop。
+   ⚠️ 诚实代价：guest 的 idle 任务退化成**忙等**（省不下 CPU）。
+3. **`mhartid` 未实现** ⇒ 读回 0 是「未实现 ⇒ 读 0」的**运气**，不是设计 ⇒
+   正式实现为 0（单核），并配了一条**有判别力**的用例（先把非零值塞进 CSR
+   文件，再断言读出来的仍是平台常量）。
+
+### 三、M-15：UART 重做成 ns16550 + **新建** CLINT / PLIC
+
+- UART 从「自定义两寄存器」重做成 **ns16550 字节寄存器文件**（THR/RHR/DLL@0x0 …
+  SCR@0x7），`LCR.DLAB` 真切换，`LSR` 按位义重排，并加了一个**无损 TX 捕获环**
+  ⇒ 判决器才拿得到字节流。
+  ⚠️ **`LSR` bit5 的语义是「发送器还能再收一个字节」（THRE）**，不是「环是空的」
+  —— osz 的 `hal_uart_putc` 是 `while ((LSR & (1<<5)) == 0);` **自旋** ⇒ 取错
+  语义会让 osz 每发一字节就卡死一次、shell 根本走不出去。
+- 新建 **CLINT**（`msip` / `mtimecmp` 分步 64 位写 / `mtime` 64 位读，单位是
+  **周期**）与 **PLIC**（priority / pending / enable / threshold / claim+complete）。
+
+### 四、宿主接线：三档内存图 + 三条外设中断通路 + console
+
+- **内存图分两档**（裁决 **C′**，对裁决 B/C 的修订）：`Default` 档**与今天一模一样**
+  （低段 1 MiB + 高段 4 MiB RAM）；`QemuVirt` 档铺 `0x8000_0000` 起 **128 MiB**
+  （8 × 16 MiB，受 M-14 每区域上限约束）+ 三个 QEMU virt 外设。
+  ⚠️ **为什么不一档铺满**：那 128 MiB 是**真的物理内存**（`map_ram` 用 `vec` 分配），
+  每个宿主实例都吃一份 ⇒ 仓里上千条用例 ⇒ 默认铺满会让测试进程吃掉几个 GiB。
+  ⚠️ **为什么 128 MiB 一字节都不能少**：osz 的 best-fit 分配器**会在堆尾写节点**
+  （`0x8800_0000` 附近）⇒ 少映射一个字节就是「未映射访问」陷阱。
+  ⚠️ 挑档的判据是「**镜像用到的地址**落在哪一档的窗口里」⇒ 装载顺序被改成
+  「**先解析**镜像 → **再挑档** → 再建图 → 最后写镜像」。
+- **三条中断通路**接通：CLINT 的 `mtimecmp`（周期）↔ M-16 的比较值（ps）·
+  UART 的 RX 就绪 → PLIC 源 10 · PLIC 的待交付源 → M-16 的外部中断线。
+  ⚠️ **claim 是 guest 的权利**，平台这一侧只读不代 claim。
+- **console 通路**：UART 的 TX 捕获环 → 宿主的 64 KiB backlog → 订阅
+  `sim.console` 时推契约 v4 的 `EventPayload::Console`（**原始字节数组**）。
+
+### 五、契约层升 **v4**（本批唯一一次升版，一次带齐五项）
+
+`SCHEMA_VERSION` 3 → 4；新增 **Console 事件**；**D-102** 的 `file`/`line` 字段；
+**D-116** 的三条引擎族场景码；**D-47 / D-48** 的传输层欠账。
+⚠️ 新变体进了 **Rust ↔ JS 的逐字对照表**（此前 26/26，现在两张表各 15 → 16 条）。
+
+### 六、本批的**主线教训**：「**加了守卫**」≠「**守卫接上了**」，而且**接线也会自己打结**
+
+- v0.22 的教训（「查它的**比较点**，不要只查它的变量」）在本批**又应验了一次**：
+  接线用例能证明「**写它那一刻**的形状」，但**新加的路径必须自己再被用例覆盖**
+  —— 宿主新增的 `collect_console` 与 `drain_console` **互相调用形成无限递归**，
+  release 构建当场**栈溢出**，而那 7 条接线用例**当时全绿**（它们写在这段代码之前）。
+  修法：把「从 UART 取字节」抽成独立的 `drain_uart`，**断开递归环**。
+- 另一条：**别让「约定」藏在 prose 里**。裁决 C 原本写的是「改**默认**内存图」，
+  落地时发现「默认铺 128 MiB」会让测试跑不动 ⇒ 规格**当批修订**（裁决 **C′**），
+  而不是偷偷改实现。
+
+### 七、门禁（数字全部**从当前树重算**）
+
+- `cargo fmt --all -- --check` · `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test --workspace --no-fail-fast --lib --tests` ⇒ **1159 全绿**
+  （契约 lib **115** + kernel lib **925** + 集成 **102** + `osz-boot` runner **3**
+  + golden runner **14**），零失败零挂死
+- `tools/check-front.sh` ⇒ **252 用例 / 42 suite**
+- `tools/golden-run.sh --self-check` + `--keep-going` ⇒ **67/67**
+- `tools/build-wasm.sh` + `node tools/wasm-smoke.mjs`
+- `node tools/browser-verify.mjs`（真 Chrome）
+- **本批专属**：`tools/boot-osz.sh` ⇒ **`VERDICT MATCH`**（两侧 31 字节逐字节相同）
+  —— ⚠️ **不进默认门禁**（需要仓外的 osz ELF 与本机的 Spike）
 
 ## v0.22.0 变更摘要
 

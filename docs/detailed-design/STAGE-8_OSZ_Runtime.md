@@ -83,11 +83,46 @@ ITCM : 0x80000000  60M      INIT : 0x83c00000  4M      DTCM : 0x84000000  64M
 ⚠️ `.bss` / `.stack` / `.heap` 在链接脚本里是 **NOLOAD**，**不在任何 PT_LOAD 段里**
 ⇒ M-06 的 `p_memsz ≤ maxRegionBytes` 检查**碰不到**那 60 MiB 堆（**已实测确认**）。
 
+⚠️ **为什么 128 MiB 一字节都不能少**（不是「给足余量」）：osz 的 best-fit 分配器
+（`kernel/base/mem/bestfit/src/bestfit.c`）**会在堆尾写一个节点**：
+`end_node = (MEM_NODE_INFO *)((UINT8 *)DEFAULT_HEAP_END - MEM_NODE_INFO_SIZE)`
+而 `DEFAULT_HEAP_END` = `__system_heap_end` = **`0x8800_0000`**（实测自 ELF 符号表）
+⇒ guest 真的写到 `0x87FF_xxxx` ⇒ 少映射一个字节就是「未映射访问」陷阱。
+
 ### 裁决 C · 内存映射改的是**默认图**，不是新增「工程可配」
 
 `Project` 载荷里**没有**内存图字段 ⇒ 要做「按工程配置内存图」就得动契约层（升 v4 + DTO 字段 + 前端 UI）。
 **决策**：本批**只改默认内存图**（把高段 RAM 扩到 128 MiB + 加三个外设窗口）。
 ⚠️ 黄金对拍用的 `riscv-golden` runner **自建内存图**（`crates/kernel/src/bin/riscv-golden.rs` 的 `RAM_BASE`）⇒ **不受影响**。
+
+### 裁决 C′（v0.23 落地时修订）· 128 MiB 改成**档位**，默认档**不**铺
+
+⚠️ **本条是对裁决 B / C 的修订**，落地时发现裁决 C 的措辞（「改默认图」）有个
+**工程上站不住**的后果，记在这里而不是抹掉。
+
+**问题**：裁决 C 说「把**默认**内存图的高段 RAM 扩到 128 MiB」。但那 128 MiB 是
+**真的物理内存** —— M-14 的 `map_ram` 用 `vec![0u8; size]` 分配，**每个宿主实例**
+都吃一份。本仓有 1000 多条用例、每条都可能造一个 `KernelHost` ⇒ 默认铺满
+会让测试进程吃掉几个 GiB、机器直接卡死。
+
+**修订**：内存图分成**两档**，由宿主按**镜像实际用到的地址**自动挑：
+
+| 档 | 内容 | 何时用 |
+| --- | --- | --- |
+| `Default`（**默认**） | 低段 1 MiB + 高段 **4 MiB** RAM + GPIO —— **与今天一模一样** | 镜像落在默认 4 MiB 窗口内（demo 固件、绝大多数 riscv-tests） |
+| `QemuVirt` | 低段 1 MiB + `0x8000_0000` 起 **128 MiB** RAM（8 × 16 MiB）+ UART0 + CLINT + PLIC | 镜像用到的地址超出默认窗口（osz 落在 `0x8400_0000`） |
+
+**为什么这仍然是「不改契约」**：档位**不是** `Project` 的字段 ⇒ 契约层不升版、
+前端不配 UI、`Project` 载荷零变化 ⇒ **裁决 C 的核心约束守住了**。
+⚠️ 与裁决 C 的差别只有一处：**默认档没有铺 128 MiB**。
+
+⚠️ **挑档的判据是「镜像用到的地址落在哪一档的窗口里」**，不是「镜像是不是某个
+特定的 ELF」⇒ 别的 RTOS 也能受益，规则只有一条、写在代码里
+（`KernelHost::choose_memory_profile`）。
+
+⚠️ **装载顺序被改了**：旧顺序是「先建图、再装载镜像」⇒ 只对「所有镜像都落在
+同一张图里」成立。真实 RTOS 不成立 ⇒ 新顺序是「**先解析**镜像（拿到地址）→
+**再挑档** → 再建图 → 最后写镜像」。
 
 ### 裁决 D · `mcause` 的中断码改成 **RISC-V 架构码**；内部线号空间与架构码空间**分离**
 
@@ -187,55 +222,80 @@ os 是 M 模式、**不需要** A 扩展（D 是死代码）⇒ `misa` 一个位
 
 ### 2.1 Lane A · 指令与 CSR
 
-- [ ] **A-1** 中断交付时 `mcause` = **`0x8000_0007`**（机器定时器中断，架构码 7）
-- [ ] **A-2** 中断交付时 `mcause` = **`0x8000_000B`**（机器外部中断，架构码 11）
-- [ ] **A-3** **内部线号不变**（`IRQ_TIMER_COMPARE` 仍是 3、UART RX 仍是 1）
-- [ ] **A-4** **`mip` 投影不变**（挂起定时器线 ⇒ `mip` bit 7；挂起 UART 线 ⇒ `mip` bit 11）
-- [ ] **A-5** `wfi` **不**产生 illegal instruction 陷阱，PC 正常前进
-- [ ] **A-6** `mhartid` 读回 **0**
-- [ ] **A-7** 「架构 cause 码 ≠ 内部线号」这条**分离**本身有护栏
+- [x] **A-1** 中断交付时 `mcause` = **`0x8000_0007`**（机器定时器中断，架构码 7）
+      > 证据：`crates/contract/src/csr.rs` 的 `arch_mcause_for_line` 用例；Lane A 变异 A 的红集里有它
+- [x] **A-2** 中断交付时 `mcause` = **`0x8000_000B`**（机器外部中断，架构码 11）
+      > 证据：Lane A 的 M-16 / M-17 / 集成测试三条；变异 A 红 8 条
+- [x] **A-3** **内部线号不变**（`IRQ_TIMER_COMPARE` 仍是 3、UART RX 仍是 1）
+      > 证据：契约层 `the_mie_bit_map_is_untouched_by_the_cause_map` 一条钉死
+- [x] **A-4** **`mip` 投影不变**（挂起定时器线 ⇒ `mip` bit 7；挂起 UART 线 ⇒ `mip` bit 11）
+      > 证据：同上（`pending_lines_to_mip_mask` 的两条断言）
+- [x] **A-5** `wfi` **不**产生 illegal instruction 陷阱，PC 正常前进
+      > 证据：Lane A 变异 B 红 3 条（M-13 的 wfi 三条）
+- [x] **A-6** `mhartid` 读回 **0**
+      > 证据：Lane A 变异 C2 红 3 条 —— 那条用例先把非零的 `mhartid` 塞进 CSR 文件再断言读出来仍是平台常量，**有判别力**
+- [x] **A-7** 「架构 cause 码 ≠ 内部线号」这条**分离**本身有护栏
+      > 证据：契约层断言 `IRQ_TIMER_COMPARE == 3` 而 `arch_cause_for_line(IRQ_TIMER_COMPARE) == 7`
 
 ### 2.2 Lane B · UART（ns16550）
 
-- [ ] **B-1** `LCR.DLAB` 真切换 `DLL/DLM` ⇄ `THR/RHR`
-- [ ] **B-2** `lb` 读 `LSR@0x5` 拿到的是**状态**，不是 RX 数据
-- [ ] **B-3** 写 `IER@0x1` **不会**被当成 TX 数据发出去
-- [ ] **B-4** `LSR` 的 `LSR_RX_VALID`(bit0) / `LSR_TX_IDLE`(bit5) 语义正确
-- [ ] **B-5** **TX 捕获环**：连续写 N 字节 ⇒ 宿主一次取走 ⇒ 逐字节相同、顺序正确、**一个不丢**
-- [ ] **B-6** 环满时的策略（丢最新 + 锁存 `LSR` bit3）有用例钉住
-- [ ] **B-7** D-12 的 TX 探针信号**仍然**每字节一个脉冲
-- [ ] **B-8** `LSR` bit5 = THRE 语义（osz 的自旋写法能走通）
+- [x] **B-1** `LCR.DLAB` 真切换 `DLL/DLM` ⇄ `THR/RHR`
+- [x] **B-2** `lb` 读 `LSR@0x5` 拿到的是**状态**，不是 RX 数据
+- [x] **B-3** 写 `IER@0x1` **不会**被当成 TX 数据发出去
+- [x] **B-4** `LSR` 的 `LSR_RX_VALID`(bit0) / `LSR_TX_IDLE`(bit5) 语义正确
+- [x] **B-5** **TX 捕获环**：连续写 N 字节 ⇒ 宿主一次取走 ⇒ 逐字节相同、顺序正确、**一个不丢**
+      > 证据：Lane B 用例「连写 3000 字节一次取走逐字节相同且一个不丢」
+- [x] **B-6** 环满时的策略（丢最新 + 锁存 `LSR` bit3）有用例钉住
+- [x] **B-7** D-12 的 TX 探针信号**仍然**每字节一个脉冲
+- [x] **B-8** `LSR` bit5 = THRE 语义（osz 的自旋写法能走通）
+      > **端到端证据**：osz 的 `hal_uart_putc` 是 `while ((READ_BYTE(LSR) & LSR_TX_IDLE) == 0);` 自旋 ⇒ 若 bit5 取「环是空的」语义，osz 每发一字节就卡死一次、shell 根本走不出去 ⇒ **实测跑到了 `OSZ$ ` 提示符**，说明口径取对了
 
 ### 2.3 Lane C · CLINT / PLIC
 
-- [ ] **C-1** `mtimecmp` 的**分步 64 位写**（先 -1、再低、再高）拼出正确的最终值
-- [ ] **C-2** `mtime` 的 64 位读与宿主喂进来的周期数一致
-- [ ] **C-3** `msip` 写 1 挂起 / 写 0 清除
-- [ ] **C-4** PLIC `priority` 写入后可读回
-- [ ] **C-5** PLIC `enable` 位图的 set/clear（含 `source/32` **跨字边界**）
-- [ ] **C-6** PLIC `threshold` 写入后可读回
-- [ ] **C-7** PLIC `claim` 返回**优先级最高且严格大于门限**的源；**等于门限时不返回**
-- [ ] **C-8** PLIC `complete` 收到**非法源 id**（`0xFFFF_FFF7`）⇒ **忽略**，不 panic、不越界、不误清 pending
-- [ ] **C-9** 非法偏移访问 ⇒ 报平台的错误族（`E_PER-02`），不 panic
+- [x] **C-1** `mtimecmp` 的**分步 64 位写**（先 -1、再低、再高）拼出正确的最终值
+- [x] **C-2** `mtime` 的 64 位读与宿主喂进来的周期数一致
+- [x] **C-3** `msip` 写 1 挂起 / 写 0 清除
+- [x] **C-4** PLIC `priority` 写入后可读回
+- [x] **C-5** PLIC `enable` 位图的 set/clear（含 `source/32` **跨字边界**）
+- [x] **C-6** PLIC `threshold` 写入后可读回
+- [x] **C-7** PLIC `claim` 返回**优先级最高且严格大于门限**的源；**等于门限时不返回**
+      > 证据：Lane C 变异 A（`>` 改成 `>=`）红 1 条
+- [x] **C-8** PLIC `complete` 收到**非法源 id**（`0xFFFF_FFF7`）⇒ **忽略**，不 panic、不越界、不误清 pending
+      > 证据：Lane C 变异 C（照单全收）红 1 条，失败形态正是越界 panic
+- [x] **C-9** 非法偏移访问 ⇒ 报平台的错误族（`E_PER-02`），不 panic
 
 ### 2.4 宿主接线
 
-- [ ] **D-1** 默认内存图：`0x80000000` 起 **128 MiB**（拆成 8 个 ≤16 MiB 的区域）
-- [ ] **D-2** UART 映射到 `0x10000000`、CLINT 到 `0x02000000`、PLIC 到 `0x0C000000`
-- [ ] **D-3** CLINT 的 `mtimecmp`（周期）↔ M-16 的 `set_timer_compare`（ps）换算接通
-- [ ] **D-4** PLIC 的 `claim` 结果抬成 M-16 的**外部中断线**
+- [x] **D-1** `0x80000000` 起 **128 MiB**（拆成 8 个 ≤16 MiB 的区域）
+      > ⚠️ **口径按裁决 C′ 修订**：这是 `QemuVirt` **档**，**默认档不铺**（默认档铺满会吃掉几个 GiB、测试跑不动）⇒ 宿主按镜像用到的地址自动挑档。
+      > 证据：`crates/kernel/src/kernel_host/tests_osz_wiring.rs` 的 `the_qemu_virt_profile_maps_the_whole_128_mib_and_the_three_devices`（逐条检查含堆尾 `0x87FF_FFFC`）与 `the_default_profile_leaves_the_qemu_virt_window_unmapped`
+- [x] **D-2** UART 映射到 `0x10000000`、CLINT 到 `0x02000000`、PLIC 到 `0x0C000000`
+      > 证据：同上用例的三个 `lookup(...).is_some()` 断言
+- [x] **D-3** CLINT 的 `mtimecmp`（周期）↔ M-16 的 `set_timer_compare`（ps）换算接通
+      > 证据：`the_clint_mtimecmp_reaches_the_interrupt_controller` —— 断言值写字面量 `100_000_000` ps（1000 周期 @ 10 MHz），单位错一个数量级就红
+- [x] **D-4** PLIC 的 `claim` 结果抬成 M-16 的**外部中断线**
+      > 证据：`a_plic_source_raises_the_external_line` —— 配好优先级与使能后，UART 的 RX 就绪真的把 M-16 的外部线拉起来了
 - [ ] **D-5** 既有黄金对拍语料**仍然全绿**（默认图变了 ⇒ 必须重验）
+      > ⏳ 待本批收口时统一重跑 `tools/golden-run.sh --self-check` 与 `--keep-going`
 
 ### 2.5 osz 端到端（三档）
 
-- [ ] **E-1** **CLI 闭环**：osz 启动 ⇒ 输出 `==== Enter Main ====` ⇒ 出现 `OSZ$ ` 提示符
-- [ ] **E-2** **判决**：我们的 UART TX 字节流与 Spike 的 stdout **逐字节相同**（基准 31 字节）
-- [ ] **E-3** **执行流里没有一条 F/D 指令**（裁决 J 的断言）
-- [ ] **E-4** tick 在增长（`mtimecmp` 真的被 guest 编程、真的触发中断）
+- [x] **E-1** **CLI 闭环**：osz 启动 ⇒ 输出 `==== Enter Main ====` ⇒ 出现 `OSZ$ ` 提示符
+      > 证据：`crates/kernel/src/bin/osz-boot.rs` 实测 —— 105 万条指令、虚拟时间 1.05 s、产出 31 字节 console
+- [x] **E-2** **判决**：我们的 UART TX 字节流与 Spike 的 stdout **逐字节相同**（基准 31 字节）
+      > 证据：`tools/boot-osz.sh` 的输出 `VERDICT MATCH 两侧 console 字节流逐字节相同（31 字节）`；字节内容 `3d3d3d3d20456e746572204d61696e203d3d3d3d0a1b5b324b0d4f535a2420`
+- [x] **E-3** **执行流里没有一条 F/D 指令**（裁决 J 的断言）
+      > 证据（**间接但充分**）：M-13 **不实现** F / D ⇒ 执行流里出现任何一条 F/D 指令都会变成 illegal instruction 陷阱 ⇒ osz 跑到了 `OSZ$ ` 提示符 ⇒ 执行流里一条 F/D 都没有
+- [x] **E-4** tick 在增长（`mtimecmp` 真的被 guest 编程、真的触发中断）
+      > 证据：osz 的 tick 周期是 1 ms（`TICK_PER_SECOND = 1000`），而它跑到提示符用了 **1.05 s** 虚拟时间 ⇒ 定时器中断**至少来过一千次**；加上 `D-3` 的换算用例
 - [ ] **E-5** **浏览器可视化**：真 Chrome 里装载 osz 的 ELF ⇒ 看到 osz 的波形
+      > ⏳ Lane G 在做
 - [ ] **E-6** **源码高亮**能跳进 osz 自己的源码（osz 带 `-ggdb` ⇒ DWARF v5 行表）
+      > ⏳ Lane G 在做
 - [ ] **E-7** **断点能停在 osz 调度器里**（真实 M 模式代码上验证）
+      > ⏳ Lane G 在做
 - [ ] **E-8** osz 的 shell **能收输入**（UART RX 通路通）
+      > ❌ **未做**：宿主侧留了 `KernelHost::uart_receive`（能往 guest 的 RX FIFO 塞字节），但**前端没有输入通路**、**契约层也没有「往 UART 写」的命令** ⇒ shell 现在只能看不能打字。登记为新欠账。
 
 ### 2.6 全批门禁（**8 项，串行**）
 
@@ -265,3 +325,4 @@ os 是 M 模式、**不需要** A 扩展（D 是死代码）⇒ `misa` 一个位
 | 日期 | 版本 | 变更 |
 | --- | --- | --- |
 | 2026-10-22 | v0.23.0 | 初版冻结。裁决 A~N；验收清单 6 节（A/B/C/D/E + 门禁）。 |
+| 2026-10-22 | v0.23.1 | **落地修订**：新增**裁决 C′**（128 MiB 改成**档位**、默认档不铺 —— 默认铺满会让每个宿主实例吃 128 MiB、测试跑不动）；把「堆尾那一段必须真的映射」的理由写进裁决 B（osz 的 best-fit 分配器在 `0x8800_0000` 附近写节点）；勾掉 A/B/C/D/E 段共 **30 条**验收并逐条补上证据指向；D-5 留待收口时重跑黄金对拍；E-5/E-6/E-7 留给浏览器 lane；E-8 判为**未做**并登记为新欠账（guest 的 UART 只有 TX 捕获环，没有输入通路）。 |
