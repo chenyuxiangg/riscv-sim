@@ -167,6 +167,9 @@ pub const PROTO_FAMILY: ErrorFamily = ErrorFamily::Protocol;
 /// Error family used by the debug-service codes below.
 pub const DEBUG_FAMILY: ErrorFamily = ErrorFamily::Debug;
 
+/// Error family used by the engine-segment codes below.
+pub const ENGINE_FAMILY: ErrorFamily = ErrorFamily::Engine;
+
 // ---------------------------------------------------------------------------
 // Protocol family — `E_PROTO-01`..`E_PROTO-08`
 // ---------------------------------------------------------------------------
@@ -226,6 +229,35 @@ pub const E_PROTO_08_BAD_MESSAGE: u16 = 8;
 /// services (breakpoint / step / register-and-memory, i.e. M-08 / M-09 /
 /// M-10); M-09 already declares it as its family.
 pub const E_DBG_01_INVALID_REGISTER_INDEX: u16 = 1;
+
+// ---------------------------------------------------------------------------
+// Engine family — `E_ENG-01`..`E_ENG-03`
+// ---------------------------------------------------------------------------
+
+/// Scenario code: the engine could not publish an event onto the bus
+/// (M-12's event publication failed).
+///
+/// ⚠️ **Registered in contract v4** (debt ledger **D-116**): these three
+/// engine codes used to live **only** inside the kernel crate ⇒ the front
+/// end received the error but had **no contract-side registry** to
+/// dispatch on ⇒ it could not tell "the engine is wedged" from any other
+/// error family. The **contract layer** is the single home for a code
+/// that more than one module has to name.
+pub const E_ENG_01_BUS_PUBLISH_FAILED: u16 = 1;
+
+/// Scenario code: the engine's event queue is inconsistent (an event was
+/// scheduled in a way that violates the queue's invariants).
+pub const E_ENG_02_QUEUE_INCONSISTENT: u16 = 2;
+
+/// Scenario code: the engine made **no progress** — the guest kept
+/// executing without any observable state change for the whole
+/// no-progress window.
+///
+/// ⚠️ This is a **platform** fault, strictly distinct from a guest trap:
+/// the guest did not trap, the *engine* did not move. The front end must
+/// not present it as "the program crashed" — the session is wedged and
+/// the engine bailed out on purpose.
+pub const E_ENG_03_NO_PROGRESS: u16 = 3;
 
 #[cfg(test)]
 mod tests {
@@ -291,6 +323,47 @@ mod tests {
             err.to_string(),
             "E_DBG-01: register index 99 is out of range"
         );
+    }
+
+    /// The engine family's three scenario codes are **registered in the
+    /// contract layer** (debt ledger **D-116**).
+    ///
+    /// Before v4 they lived only inside the kernel crate ⇒ the front end
+    /// received `E_ENG-03` but had no contract-side table to look it up
+    /// in ⇒ it could not dispatch on the code.
+    ///
+    /// The assertion lands on the **rendered** code (digit for digit) and
+    /// on the **lookup**: a code that renders `E_ENG-3` (one digit) would
+    /// pass a "the constant is 3" check and still break every front-end
+    /// dispatch that greps for `E_ENG-03`.
+    #[test]
+    fn the_engine_scenario_codes_are_registered_in_the_contract_layer() {
+        // The lookup the front end does: family + scenario → the wire code.
+        let cases = [
+            (E_ENG_01_BUS_PUBLISH_FAILED, "E_ENG-01"),
+            (E_ENG_02_QUEUE_INCONSISTENT, "E_ENG-02"),
+            (E_ENG_03_NO_PROGRESS, "E_ENG-03"),
+        ];
+        for (scenario, expected) in cases {
+            let err = PlatformError::new(ENGINE_FAMILY, scenario, "x");
+            assert_eq!(
+                err.to_string(),
+                format!("{expected}: x"),
+                "场景码 {scenario} 渲染成了 {err}"
+            );
+        }
+
+        // The no-progress code is the one the front end has to be able to
+        // recognise: it is a **platform** fault, not a guest trap.
+        assert_eq!(E_ENG_03_NO_PROGRESS, 3);
+        let no_progress = PlatformError::new(
+            ENGINE_FAMILY,
+            E_ENG_03_NO_PROGRESS,
+            "引擎在 1024 条指令内没有进展",
+        );
+        assert_eq!(no_progress.family, ErrorFamily::Engine);
+        assert_eq!(no_progress.scenario, E_ENG_03_NO_PROGRESS);
+        assert!(no_progress.to_string().starts_with("E_ENG-03: "));
     }
 
     /// **Every** family's wire tag is pinned here.

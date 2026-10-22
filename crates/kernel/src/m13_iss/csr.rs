@@ -53,9 +53,9 @@
 //! PC **无法证明**；平台用原始写只是**把意图显式写下来**。
 
 use riscv_sim_contract::csr::{
-    CSR_MCAUSE, CSR_MEPC, CSR_MISA, CSR_MISA_VALUE, CSR_MSTATUS, CSR_MTVAL, CSR_MTVEC,
-    MEPC_ALIGN_MASK, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_M, MSTATUS_MPP_SHIFT,
-    MSTATUS_WARL_MASK,
+    CSR_MCAUSE, CSR_MEPC, CSR_MHARTID, CSR_MHARTID_VALUE, CSR_MISA, CSR_MISA_VALUE, CSR_MSTATUS,
+    CSR_MTVAL, CSR_MTVEC, MEPC_ALIGN_MASK, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_M,
+    MSTATUS_MPP_SHIFT, MSTATUS_WARL_MASK,
 };
 use riscv_sim_contract::model::SimState;
 
@@ -64,23 +64,36 @@ use riscv_sim_contract::model::SimState;
 /// A CSR that is **not in the file** reads as **0** — it does **not**
 /// trap (STAGE-4 §2.2: "读：找不到 ⇒ 返回 0（不是陷阱）").
 ///
-/// ⚠️ **`misa` is the one exception**: it is **not** stored in the file
-/// but **computed** from the platform's constant ([`CSR_MISA_VALUE`]),
-/// because it reports what the platform *is* rather than what the guest
-/// last wrote.  Reading it must answer the same on every read — a guest
-/// that could write `misa` could otherwise claim an extension the
-/// platform does not have.
+/// ⚠️ **Two CSRs are answered by the platform itself**, not by the file:
 ///
-/// ⚠️ Keeping it out of the file also leaves the CSR file **empty** for a
-/// guest that has touched no CSR — which is what the session snapshot's
-/// emptiness predicate (`EngineSnapshotDto::is_empty`: "no registers
-/// written, **no CSRs**, no pending writes, clock at zero") reads. A
-/// pre-seeded `misa` entry would have broken that (see the frozen spec
-/// for this batch, `docs/detailed-design/STAGE-6_CSR_Golden_Coverage.md`
-/// §3.4).
+/// * **`misa`** — it is **not** stored in the file but **computed**
+///   from the platform's constant ([`CSR_MISA_VALUE`]), because it
+///   reports what the platform *is* rather than what the guest last
+///   wrote.  Reading it must answer the same on every read — a guest
+///   that could write `misa` could otherwise claim an extension the
+///   platform does not have.
+///
+/// * **`mhartid`** — same reason, different direction: the platform is
+///   **single-core** ⇒ the answer is the constant
+///   [`CSR_MHARTID_VALUE`] (= 0).  ⚠️ **It must be answered by
+///   design**, not by the "not in the file ⇒ 0" accident: `mhartid` is
+///   read-only, so the file never legitimately holds it — a file that
+///   *did* hold a value (a restored session payload, say) must still
+///   read back as the platform's hart id, never as the file's content.
+///
+/// ⚠️ Keeping `misa` out of the file also leaves the CSR file **empty**
+/// for a guest that has touched no CSR — which is what the session
+/// snapshot's emptiness predicate (`EngineSnapshotDto::is_empty`: "no
+/// registers written, **no CSRs**, no pending writes, clock at zero")
+/// reads. A pre-seeded `misa` entry would have broken that (see the
+/// frozen spec for this batch,
+/// `docs/detailed-design/STAGE-6_CSR_Golden_Coverage.md` §3.4).
 pub(crate) fn csr_read(state: &SimState, csr: u16) -> u32 {
     if csr == CSR_MISA {
         return CSR_MISA_VALUE;
+    }
+    if csr == CSR_MHARTID {
+        return CSR_MHARTID_VALUE;
     }
     state
         .csrs
@@ -380,6 +393,33 @@ mod tests {
             csr_value(&state, CSR_MEPC),
             0x1232,
             "陷阱入口必须把**原样的** PC 写进 mepc（压缩指令是 2 字节对齐的）"
+        );
+    }
+
+    /// ⚠️ **`mhartid` 的值是平台的常量，不是 CSR 文件里的内容**。
+    ///
+    /// 这是「**正式实现**」与「碰巧读回 0」的区别：`mhartid` 是**只读**
+    /// CSR（`0xF14` 在只读区）⇒ 正常路径下文件里**永远没有**它 ⇒
+    /// 「文件里没有 ⇒ 读回 0」这条**巧合**会给出**同样的答案** ⇒ 光断言
+    /// 「读回 0」**证明不了**任何东西。
+    ///
+    /// ⇒ 这条用例**故意**往文件里塞一个非 0 的 `mhartid`（模拟一份畸形
+    /// 的会话载荷），然后断言读回来**仍然是** 0 —— 只有「按常量回答」
+    /// 的实现才过得了这一关。
+    #[test]
+    fn the_mhartid_value_is_the_platforms_constant_not_the_file_content() {
+        let mut state = SimState::default();
+        // 平台自己的写（原始写）—— 模拟一份塞了 `mhartid` 的载荷。
+        csr_write_raw(&mut state, CSR_MHARTID, 0x1234_5678);
+        assert_eq!(
+            csr_value(&state, CSR_MHARTID),
+            0x1234_5678,
+            "对照：文件里的内容确实被写进去了"
+        );
+        assert_eq!(
+            csr_read(&state, CSR_MHARTID),
+            0,
+            "读 mhartid 必须答平台的常量（单核 ⇒ 0），**不是**文件里的内容"
         );
     }
 }

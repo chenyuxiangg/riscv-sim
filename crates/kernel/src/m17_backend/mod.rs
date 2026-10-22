@@ -1965,13 +1965,16 @@ mod tests {
         backend.step_n(1).expect("step");
         assert_eq!(
             guest_csr(&backend, CSR_MCAUSE),
-            riscv_sim_contract::csr::IRQ_BASE | u32::from(IRQ_LINE),
-            "跨过量子边界就必须交付"
+            0x8000_000B,
+            "跨过量子边界就必须交付（mcause = 中断位 | **架构码 11** = 外部中断）"
         );
     }
 
-    /// 中断交付 ⇒ `pc` 跳到 `mtvec`，`mcause` = `IRQ_BASE | line`，
+    /// 中断交付 ⇒ `pc` 跳到 `mtvec`，`mcause` = `IRQ_BASE | <架构 cause 码>`，
     /// `mepc` = 被中断处（验收 27）。
+    ///
+    /// ⚠️ **v0.23 批**：`mcause` 报的是**架构 cause 码**（外部中断 = 11），
+    /// **不是**平台的内部线号（线 1）—— guest 的中断分发按架构码写。
     #[test]
     fn the_delivery_jumps_to_mtvec_and_records_the_cause() {
         let (mut backend, controller) = backend_with_irq(&IRQ_FIRMWARE_BYTES);
@@ -1991,8 +1994,8 @@ mod tests {
         );
         assert_eq!(
             crate::m13_iss::csr::csr_read(&state, CSR_MCAUSE),
-            riscv_sim_contract::csr::IRQ_BASE | u32::from(IRQ_LINE),
-            "mcause 必须是 `IRQ_BASE | line`"
+            0x8000_000B,
+            "mcause 必须是「中断位 | **架构 cause 码 11**」（外部中断）"
         );
         assert_eq!(
             crate::m13_iss::csr::csr_read(&state, CSR_MEPC),
@@ -2089,7 +2092,7 @@ mod tests {
         );
         assert_eq!(
             crate::m13_iss::csr::csr_read(&state, CSR_MCAUSE),
-            riscv_sim_contract::csr::IRQ_BASE | u32::from(IRQ_LINE),
+            0x8000_000B,
             "第二次交付的 mcause 一样"
         );
 

@@ -15,6 +15,10 @@
 //
 //   ?mode=nop       → one `Tick` event
 //   ?mode=two       → two events (the first one answers the command)
+//   ?mode=mix       → the **first** command answers with two events, the
+//                     **second** one throws (⇒ the worker posts a host-side
+//                     error frame *after* two kernel event frames — the
+//                     interleaving that D-47 is about)
 //   ?mode=throw     → `process_message` throws
 //   ?mode=bad-json  → `process_message` returns a non-JSON string
 //   ?mode=not-array → `process_message` returns a JSON object
@@ -28,6 +32,17 @@
 // test seam (see `front/kernel-worker.js`).
 
 const mode = new URL(import.meta.url).searchParams.get("mode") ?? "nop";
+
+/**
+ * How many times `process_message` was called in this module instance.
+ *
+ * Only the `mix` mode uses it — it needs to answer the first command with
+ * real events and fail the second one, so that the worker posts a
+ * **host-side** error frame *after* two **kernel** event frames.
+ *
+ * @type {number}
+ */
+let callCount = 0;
 
 /**
  * Build a contract `Message` (the frozen envelope, serde shape).
@@ -77,6 +92,20 @@ export function process_message(json) {
 
     if (mode === "throw") {
         throw new Error("假 WASM：内核炸了");
+    }
+    if (mode === "mix") {
+        callCount += 1;
+        if (callCount === 1) {
+            // Two **kernel** events …
+            return JSON.stringify([
+                eventMessage(commandSeq + 1, { Tick: { elapsed_ps: "1000", pc: 4 } }),
+                eventMessage(commandSeq + 2, { Halted: { reason: "Breakpoint", pc: 0x20 } }),
+            ]);
+        }
+        // … then a failure ⇒ the worker answers with a **host-side** error
+        // frame (D-47: the two frame kinds must share **one** monotonic
+        // transport sequence space).
+        throw new Error("假 WASM：第二条命令内核炸了");
     }
     if (mode === "bad-json") {
         return "not json at all";

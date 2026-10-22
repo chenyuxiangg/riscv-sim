@@ -3,6 +3,14 @@
 //! Coverage (v0.7.1 — M-15 review remediation):
 //! - UART register map + 1-byte FIFO + overrun (separate TX/RX bits) +
 //!   take_tx + read_clear + W1C status + sub-register byte access
+//!
+//! ⚠️ **v0.23（Lane B）**：UART 从「自定义两寄存器（DATA@0x0 /
+//! STATUS@0x4，字宽度）」重做成 **ns16550 兼容**（`THR/RHR/DLL@0x0` ·
+//! `IER/DLM@0x1` · `FCR@0x2` · `LCR@0x3` · `MCR@0x4` · `LSR@0x5` ·
+//! `MSR@0x6` · `SCR@0x7`，**字节偏移**），并加了**无损 TX 捕获环**。
+//! ⇒ 本文件里**属于 UART** 的那几条用例按新布局改了（逐条改动见
+//! v0.23 批的交卷记录）；新布局自己的用例写在 `uart.rs` 内部的
+//! `#[cfg(test)] mod tests` 里。
 //! - GPIO directions, OUT latch, TOGGLE register (doc semantics:
 //!   `1<<pin` flips), IN driven externally with direction-aware edge
 //!   IRQ, deduplicated pending IRQs, sub-register byte access
@@ -133,14 +141,20 @@ fn registry_handle_shares_the_same_instance() {
         let mut p = handle.borrow_mut();
         let _ = p.write(0x0, WriteSize::Byte, 0x41);
     }
-    let status = reg
+    // ⚠️ **v0.23**：`0x4` 现在是 **MCR**，不再是状态寄存器；能隔着
+    // `dyn Peripheral` 看见的「同一个实例」的证据是**会话状态**里的
+    // TX 捕获环队头。
+    let exported = reg
         .get("UART0")
         .unwrap()
-        .read(0x4, WriteSize::Byte)
-        .unwrap();
+        .session_state()
+        .expect("the UART participates in the session state");
+    let PeripheralSessionState::Uart(state) = exported else {
+        panic!("a UART must export a UART state");
+    };
     assert_eq!(
-        status & uart::status_bits::TX_READY,
-        0,
+        state.tx,
+        Some(0x41),
         "the registry and the handle must see the same instance"
     );
 }
@@ -190,24 +204,35 @@ fn registry_duplicate_id_returns_register_error() {
 #[test]
 fn registry_get_mut_allows_state_changes() {
     let mut reg = PeripheralRegistry::new();
-    reg.register(Uart16550::new("UART0", 0, 9600, 4)).unwrap();
+    let mut uart = Uart16550::new("UART0", 0, 9600, 4);
+    // 先塞一个 RX 字节，好让下面那条 `read_clear` 有东西可清。
+    uart.receive(b'Z');
+    reg.register(uart).unwrap();
     {
         let u = reg.get_mut("UART0").expect("registered");
         assert_eq!(u.id(), "UART0");
     }
-    // Mutate via the typed trait object: write DATA → TX FIFO.
+    // Mutate via the typed trait object: write THR → 进 TX 捕获环。
     // `get_mut` hands out a `RefMut` guard (the registry owns the
     // instance behind a `RefCell`), so the binding must be mutable to
     // reach the `&mut self` methods.
     let mut u = reg.get_mut("UART0").expect("registered");
     let _ = u.write(0x0, WriteSize::Byte, 0x41);
-    // Verify the mutation took effect through the STATUS register:
-    // TX_READY is cleared while a byte is in the TX FIFO.
-    let status = u.read(0x4, WriteSize::Byte).unwrap();
-    assert_eq!(status & uart::status_bits::TX_READY, 0);
-    // M-15 review #2: read_clear drains the read-destructive state.
-    let read_back = u.read_clear(0x4, WriteSize::Word).unwrap();
-    assert_eq!(read_back & uart::status_bits::TX_READY, 0);
+    // Verify the mutation took effect: 捕获环的队头就是那个字节。
+    let exported = u.session_state().expect("the UART participates");
+    let PeripheralSessionState::Uart(state) = exported else {
+        panic!("a UART must export a UART state");
+    };
+    assert_eq!(state.tx, Some(0x41), "the byte must be in the capture ring");
+    // M-15 review #2: read_clear drains the read-destructive state — in
+    // the ns16550 layout the **RHR @ 0x0** is the only such register.
+    let read_back = u.read_clear(0x0, WriteSize::Byte).unwrap();
+    assert_eq!(read_back, u32::from(b'Z'));
+    let exported = u.session_state().expect("the UART participates");
+    let PeripheralSessionState::Uart(state) = exported else {
+        panic!("a UART must export a UART state");
+    };
+    assert_eq!(state.rx, None, "the RX FIFO must have been drained");
 }
 
 #[test]
@@ -230,13 +255,14 @@ fn uart_register_window_layout() {
     assert_eq!(uart.id(), "UART0");
     assert_eq!(uart.base_addr(), 0x2000_0000);
     assert_eq!(uart.size(), uart::UART_WINDOW);
-    // Initial: TX ready, RX empty.
-    let status = uart.read(0x4, WriteSize::Byte).unwrap();
-    assert_eq!(
-        status & uart::status_bits::TX_READY,
-        uart::status_bits::TX_READY
-    );
-    assert_eq!(status & uart::status_bits::RX_FULL, 0);
+    // ⚠️ **v0.23**：ns16550 的寄存器文件是 **8 个字节寄存器**
+    // （`0x0..=0x7`），窗口必须正好盖住它们。
+    assert_eq!(uart::UART_WINDOW, 0x8);
+    // Initial LSR: THRE(0x02) | TX_IDLE(0x20) | TEMT(0x40) = 0x62;
+    // RX 是空的 ⇒ LSR_RX_VALID 清。
+    let lsr = uart.read(0x5, WriteSize::Byte).unwrap();
+    assert_eq!(lsr, 0x62);
+    assert_eq!(lsr & u32::from(uart::lsr_bits::RX_VALID), 0);
 }
 
 #[test]
@@ -245,77 +271,86 @@ fn uart_transmit_then_take_tx_drains_byte() {
     // `take_tx` returns the byte and clears the busy state.
     let mut uart = Uart16550::new("UART0", 0, 9600, 4);
     let _ = uart.write(0x0, WriteSize::Byte, u32::from(b'A'));
-    assert!(!uart.tx_pin(), "TX pin busy while FIFO holds a byte");
+    assert!(
+        !uart.tx_pin(),
+        "TX pin busy while the capture ring holds a byte"
+    );
 
     let drained = uart.take_tx();
     assert_eq!(drained, Some(b'A'));
     assert!(uart.tx_pin(), "TX pin idle after drain");
-    let status = uart.read(0x4, WriteSize::Byte).unwrap();
-    assert_eq!(
-        status & uart::status_bits::TX_READY,
-        uart::status_bits::TX_READY
-    );
+    // ⚠️ **v0.23**：状态寄存器是 **LSR @ 0x5**（不是旧布局的 0x4）。
+    let lsr = uart.read(0x5, WriteSize::Byte).unwrap();
+    assert_eq!(lsr & u32::from(uart::lsr_bits::TX_IDLE), 0x20);
 }
 
 #[test]
 fn uart_transmit_overflow_latches_tx_overrun_bit() {
     // M-15 review #4: TX overflow used to set RX_OVERRUN. Now
-    // TX_OVERRUN is a separate bit (0x8).
-    let mut uart = Uart16550::new("UART0", 0, 9600, 0);
+    // TX_OVERRUN is a separate bit.
+    // ⚠️ **v0.23**：TX 不再是 1 字节 FIFO，而是一个**可配置容量的捕获
+    // 环**；环满时的策略是「丢**最新**的那个字节」+ 在 **LSR 的 bit3**
+    // 锁存 overrun（RX overrun 仍在 bit2，两者是分开的位）。
+    let mut uart = Uart16550::new_with_tx_capacity("UART0", 0, 9600, 0, 2);
     let _ = uart.write(0x0, WriteSize::Byte, u32::from(b'A'));
-    let _ = uart.write(0x0, WriteSize::Byte, u32::from(b'B')); // overflow
-    let status = uart.read(0x4, WriteSize::Byte).unwrap();
+    let _ = uart.write(0x0, WriteSize::Byte, u32::from(b'B'));
+    let _ = uart.write(0x0, WriteSize::Byte, u32::from(b'C')); // overflow
+    let lsr = uart.read(0x5, WriteSize::Byte).unwrap();
     assert_eq!(
-        status & uart::status_bits::TX_OVERRUN,
-        uart::status_bits::TX_OVERRUN
+        lsr & u32::from(uart::lsr_bits::TX_OVERRUN),
+        0x08,
+        "the TX overrun is latched in LSR bit 3"
     );
-    assert_eq!(status & uart::status_bits::RX_OVERRUN, 0);
+    assert_eq!(
+        lsr & u32::from(uart::lsr_bits::OE),
+        0,
+        "the RX overrun is a separate bit and must stay clear"
+    );
+    // 丢的是**最新**的那个字节 ⇒ 留下的是最早的两个。
+    assert_eq!(uart.drain_tx(), vec![b'A', b'B']);
 }
 
 #[test]
 fn uart_status_clear_is_w1c() {
     // M-15 review #14: W1C (write-1-to-clear). Writing 0 must NOT
     // clear the overrun bit; writing the bit's value must.
+    // ⚠️ **v0.23**：状态寄存器是 ns16550 的 **LSR @ 0x5**，RX overrun
+    // 在 bit2。
     let mut uart = Uart16550::new("UART0", 0, 9600, 0);
     uart.receive(b'Z');
     uart.receive(b'Y'); // triggers RX overrun
-    let s = uart.read(0x4, WriteSize::Byte).unwrap();
-    assert_eq!(
-        s & uart::status_bits::RX_OVERRUN,
-        uart::status_bits::RX_OVERRUN
-    );
+    let s = uart.read(0x5, WriteSize::Byte).unwrap();
+    assert_eq!(s & u32::from(uart::lsr_bits::OE), 0x04);
 
     // Write 0 — bit stays.
-    let _ = uart.write(0x4, WriteSize::Byte, 0);
-    let s = uart.read(0x4, WriteSize::Byte).unwrap();
-    assert_eq!(
-        s & uart::status_bits::RX_OVERRUN,
-        uart::status_bits::RX_OVERRUN
-    );
+    let _ = uart.write(0x5, WriteSize::Byte, 0);
+    let s = uart.read(0x5, WriteSize::Byte).unwrap();
+    assert_eq!(s & u32::from(uart::lsr_bits::OE), 0x04);
 
-    // Write RX_OVERRUN bit (0x4) — clears RX_OVERRUN, leaves TX_OVERRUN
-    // (untouched, must stay 0).
-    let _ = uart.write(0x4, WriteSize::Byte, uart::status_bits::RX_OVERRUN);
-    let s = uart.read(0x4, WriteSize::Byte).unwrap();
-    assert_eq!(s & uart::status_bits::RX_OVERRUN, 0);
+    // Write the OE bit — clears the RX overrun.
+    let _ = uart.write(0x5, WriteSize::Byte, u32::from(uart::lsr_bits::OE));
+    let s = uart.read(0x5, WriteSize::Byte).unwrap();
+    assert_eq!(s & u32::from(uart::lsr_bits::OE), 0);
 }
 
 #[test]
 fn uart_read_clear_drains_rx_fifo() {
     // M-15 review #2: RX FIFO read used to be non-destructive.
     // `read_clear` (default-trait method) takes the byte out.
+    // ⚠️ **v0.23**：RX 寄存器是 ns16550 的 **RHR @ 0x0**，状态在
+    // **LSR @ 0x5**。
     let mut uart = Uart16550::new("UART0", 0, 9600, 0);
     uart.receive(b'Z');
     let first = uart.read_clear(0x0, WriteSize::Byte).unwrap();
     assert_eq!(first, u32::from(b'Z'));
-    // RX_FULL must clear.
-    let status = uart.read(0x4, WriteSize::Byte).unwrap();
-    assert_eq!(status & uart::status_bits::RX_FULL, 0);
+    // LSR_RX_VALID must clear.
+    let lsr = uart.read(0x5, WriteSize::Byte).unwrap();
+    assert_eq!(lsr & u32::from(uart::lsr_bits::RX_VALID), 0);
     // Second read returns 0 (FIFO empty), no overrun latched.
     let second = uart.read_clear(0x0, WriteSize::Byte).unwrap();
     assert_eq!(second, 0);
-    let status = uart.read(0x4, WriteSize::Byte).unwrap();
-    assert_eq!(status & uart::status_bits::RX_OVERRUN, 0);
+    let lsr = uart.read(0x5, WriteSize::Byte).unwrap();
+    assert_eq!(lsr & u32::from(uart::lsr_bits::OE), 0);
 }
 
 #[test]
@@ -670,7 +705,11 @@ fn uart_session_state_round_trips_every_field() {
         panic!("a UART must export a UART state");
     };
     assert_eq!(state.id, "UART0");
-    assert_eq!(state.tx, Some(b'A'), "the TX byte must be carried");
+    assert_eq!(
+        state.tx,
+        Some(b'A'),
+        "the TX capture ring head must be carried"
+    );
     assert_eq!(state.rx, Some(b'Z'), "the RX byte must be carried");
     assert_eq!(state.irq_line, 4);
     assert_eq!(
@@ -678,8 +717,8 @@ fn uart_session_state_round_trips_every_field() {
         "the peripheral's virtual time must be carried"
     );
     assert_eq!(
-        state.status, 0x2,
-        "the latched status register must be carried"
+        state.status, 0x63,
+        "the LSR must be carried: RX_VALID(0x01) | THRE(0x02) | TX_IDLE(0x20) | TEMT(0x40)"
     );
 
     // Restore into a *fresh* UART → the exported state must come back
@@ -1330,11 +1369,14 @@ fn a_uart_state_with_undefined_status_bits_is_rejected_before_anything_is_writte
     assert_eq!(after.gpios[0].outputs, 0, "被拒的载荷不许动任何外设");
 }
 
-/// ⚠️ **UART 的 STATUS 与 FIFO 自相矛盾** → 拒。
+/// ⚠️ **UART 的 LSR 与 FIFO 自相矛盾** → 拒。
 ///
-/// `RX_FULL` 说「RX FIFO 满了」，可 FIFO 里**没有**字节——这样的状态
-/// 不可能由这个 UART 产生（`refresh_status` 是 FIFO 位的**唯一**写者），
-/// 还原进去会让固件读到一份**说谎**的寄存器。
+/// `LSR_RX_VALID` 说「RX FIFO 里有字节」，可 FIFO 里**没有**字节——这样
+/// 的状态不可能由这个 UART 产生（`LSR` 的 RX 位是 RX FIFO 的**唯一**
+/// 写者），还原进去会让固件读到一份**说谎**的寄存器。
+///
+/// ⚠️ **v0.23**：状态寄存器从旧布局的自定义 STATUS 变成 ns16550 的
+/// **LSR**，RX 位从 `0x2` 挪到了 **bit0（0x01）**。
 #[test]
 fn a_uart_state_whose_status_contradicts_its_fifos_is_rejected() {
     let uart = Uart16550::new("UART0", 0x1000, 9600, 4);
@@ -1342,8 +1384,8 @@ fn a_uart_state_whose_status_contradicts_its_fifos_is_rejected() {
         id: "UART0".to_string(),
         tx: None,
         rx: None,
-        // RX_FULL 置位，可 RX FIFO 是空的。
-        status: 0x2,
+        // LSR_RX_VALID 置位，可 RX FIFO 是空的。
+        status: 0x1,
         irq_line: 4,
         now_ps: 0,
     });

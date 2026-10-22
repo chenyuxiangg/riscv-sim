@@ -167,7 +167,10 @@ describe("mock 内核 · M-11 的四条新命令", () => {
         for (const entry of entries) {
             assert.deepEqual(
                 Object.keys(entry).sort(),
-                ["addr", "code", "mnemonic", "width"],
+                // ⚠️ 契约 v4（D-102）给 `DisasmEntryDto` 加了两个**可选**的
+                // 逐条源码位置字段（`file` / `line`）⇒ mock 给的是
+                // `null`（没有行表），**不**伪造文件名与行号。
+                ["addr", "code", "file", "line", "mnemonic", "width"],
                 "条目字段必须与 DisasmEntryDto 一致",
             );
         }
@@ -342,6 +345,9 @@ describe("反汇编面板 (M-11)", () => {
                 registerMemory: { async loadProject() {} },
                 waveform: { reset() {}, async subscribeProbeStream() {} },
                 debug,
+                // ⚠️ **v0.23**：装载流程多了 console 流这一路（`LoadProject`
+                // 清掉内核的主题集合 ⇒ console 流必须被强制重订）。
+                console: { reset() {}, async subscribeConsoleStream() {} },
             },
             { id: "p" },
         );

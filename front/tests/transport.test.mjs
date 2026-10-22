@@ -114,6 +114,23 @@ describe("M-07 传输适配器 · worker 形态", () => {
         assert.equal(hits, after, "退订后仍收到状态变更");
     });
 
+    test("D-48：传输通道错误仍是 E_TRX-04（宿主侧才是 E_TRX-05）", async () => {
+        // ⚠️ 语义收敛（D-48）：`E_TRX-04` **只**表示「传输通道挂了」
+        // （Worker 的 `error` 事件 / WebSocket 错误）；WASM 宿主侧的失败
+        // （初始化失败 / 内核抛错 / 返回值非法）改用 `E_TRX-05`。
+        //
+        // 判别力：断言的是**码**（不是「有错」）⇒ 把宿主侧改回
+        // `E_TRX-04` 时，这条用例**不会**变红（那是 worker 那侧的用例），
+        // 但反过来把传输侧改成 `E_TRX-05` 时它**一定**变红。
+        const worker = createFakeWorker();
+        await m07.mountTransport({ mode: "worker", createWorker: () => worker });
+        worker.emit("error", { message: "boom" });
+        const lastError = m07.getTransportStatus().lastError ?? "";
+        assert.match(lastError, /^E_TRX-04 /, "传输通道错误必须报 E_TRX-04");
+        assert.doesNotMatch(lastError, /E_TRX-05/, "E_TRX-05 是宿主侧的码");
+        assert.equal(m07.getTransportStatus().connState, "closed", "通道错误应当关闭通道");
+    });
+
     test("出站命令被包成传输帧（带会话 / 角色 / 关联 id）", async () => {
         const worker = createFakeWorker();
         await m07.mountTransport({ mode: "worker", createWorker: () => worker });

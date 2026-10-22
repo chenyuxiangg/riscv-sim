@@ -465,6 +465,9 @@ describe("源码视图（A-15 / A-16 / A-17 / A-18 / A-19）", () => {
                 registerMemory: { loadProject: async () => {} },
                 waveform: { reset() {}, subscribeProbeStream: async () => ({}) },
                 debug,
+                // ⚠️ **v0.23**：装载流程多了 console 流这一路（`LoadProject`
+                // 清掉内核的主题集合 ⇒ console 流必须被强制重订）。
+                console: { reset() {}, subscribeConsoleStream: async () => ({}) },
             },
             {},
         );

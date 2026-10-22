@@ -2,7 +2,7 @@
 //!
 //! # Why this module exists
 //!
-//! Three facts are needed by **more than one** module, and each of them
+//! Four facts are needed by **more than one** module, and each of them
 //! used to live in exactly one place — which is how they drifted apart:
 //!
 //! 1. the **CSR numbers** the ISS reads and writes (M-13), the trap
@@ -14,10 +14,23 @@
 //!    refreshes the enable mask, M-13 reports the pending bits);
 //! 3. the **`mcause` interrupt bit** (`IRQ_BASE`), which both the
 //!    controller (when it hands an interrupt over) and the ISS (when it
-//!    enters the trap) must agree on.
+//!    enters the trap) must agree on;
+//! 4. the **line → architectural `mcause` code** mapping
+//!    ([`arch_cause_for_line`]) — a **third** numbering space, again
+//!    different from the two above: the architectural interrupt codes
+//!    are `3` (software) / `7` (timer) / `11` (external), while the
+//!    platform's internal line space is `1 / 2 / 3`.
 //!
 //! Putting them here makes each of them a **single landing spot**
 //! (one constraint, one home) instead of two copies that can drift.
+//!
+//! ⚠️ **The three numbering spaces are deliberately kept apart** (see
+//! [`arch_cause_for_line`]): folding the line space into the
+//! architectural cause space would break the `mie` / `mip` bit map
+//! (ledger **D-84 / D-100**), and reporting the line space as the
+//! cause code is a **real defect** — a guest that dispatches on the
+//! architectural cause code (every real M-mode RTOS does) would match
+//! **none** of them.
 //!
 //! # Scope
 //!
@@ -121,6 +134,25 @@ pub const CSR_MIP: u16 = 0x344;
 
 /// `mtime` — the wall-clock timer counter (RV32 read-only CSR).
 pub const CSR_MTIME: u16 = 0xBFF8;
+
+/// `mhartid` — the hart identifier (RV32 read-only CSR).
+///
+/// ⚠️ **It is read-only by the RISC-V address rule** (`0xF14` has bit 11
+/// set ⇒ `>= 0x800` ⇒ the read-only quarter) ⇒ a guest write is
+/// **ignored** by [`csr_write_is_ignored`] no matter what the
+/// implemented-CSR table says.
+pub const CSR_MHARTID: u16 = 0xF14;
+
+/// `mhartid` — the value this platform reports.
+///
+/// The platform is **single-core** ⇒ **hart 0**.
+///
+/// ⚠️ **It is a constant, not a CSR-file entry**: the platform
+/// **implements** the register (see [`csr_is_implemented`]), so the
+/// "unimplemented ⇒ reads 0" accident must not be what makes it read
+/// zero — the ISS answers with **this** value, whatever the CSR file
+/// happens to contain.
+pub const CSR_MHARTID_VALUE: u32 = 0;
 
 /// **`irq_clear`** — the platform's custom CSR for clearing an
 /// interrupt line.
@@ -239,9 +271,27 @@ pub const MIE_MTIE_BIT: u32 = 7;
 
 /// The interrupt bit of `mcause` — `mcause[31]`.
 ///
-/// An interrupt cause is `IRQ_BASE | line`; an exception cause is a
-/// small plain number (`0` / `2` / `3` / `4` / `6` / `11`).
+/// An interrupt cause is `IRQ_BASE | <architectural cause code>`; an
+/// exception cause is a small plain number (`0` / `2` / `3` / `4` / `6`
+/// / `11`).
+///
+/// ⚠️ The **architectural cause code** is **not** the platform's
+/// internal line number — see [`arch_cause_for_line`].
 pub const IRQ_BASE: u32 = 0x8000_0000;
+
+/// Architectural `mcause` code — **machine software interrupt**.
+///
+/// ⚠️ The platform has **no software-interrupt source** today ⇒
+/// [`arch_cause_for_line`] never returns this code.  It is spelled out
+/// anyway because the code is part of the architectural vocabulary the
+/// platform must speak: a guest that switches on `mcause` may name it.
+pub const CAUSE_MACHINE_SOFTWARE: u32 = 3;
+
+/// Architectural `mcause` code — **machine timer interrupt**.
+pub const CAUSE_MACHINE_TIMER: u32 = 7;
+
+/// Architectural `mcause` code — **machine external interrupt**.
+pub const CAUSE_MACHINE_EXTERNAL: u32 = 11;
 
 /// Interrupt line — UART receive-ready.
 ///
@@ -287,6 +337,12 @@ pub const NO_ACTIVE_IRQ: u16 = 0xFFFF;
 /// `docs/detailed-design/STAGE-6_CSR_Golden_Coverage.md` adjudication C,
 /// renamed the function to say so: the old name spelled only `mie`, and
 /// a name that serves two registers is a name with two meanings.)
+///
+/// ⚠️ **Do not merge this table with [`arch_cause_for_line`]** — RISC-V
+/// makes the bit numbers *happen to* equal the architectural cause
+/// codes (`MTIE` = 7 = the timer cause, `MEIE` = 11 = the external
+/// cause), but the platform's **internal line numbers** (`1 / 2 / 3`)
+/// are a **third** space, and the delivery path needs the *cause* one.
 pub fn std_irq_bit_for_line(line: u16) -> Option<u32> {
     match line {
         IRQ_UART_RX_READY | IRQ_UART_TX_EMPTY => Some(MIE_MEIE_BIT),
@@ -312,8 +368,9 @@ pub fn mie_bit_for_line(line: u16) -> Option<u32> {
 ///
 /// ⚠️ **Lines 1 and 2 collapse into one bit** (both are external
 /// interrupts and share `MEIP`) ⇒ a guest reading `mip` **cannot tell
-/// which** UART line is pending.  The line number only reaches the guest
-/// at delivery time, through `mcause = IRQ_BASE | line`.
+/// which** UART line is pending.  The architectural cause code only
+/// reaches the guest at delivery time, through `mcause` (see
+/// [`arch_cause_for_line`]).
 pub fn pending_lines_to_mip_mask(lines: &[u16]) -> u32 {
     let mut mask = 0u32;
     for &line in lines {
@@ -322,6 +379,69 @@ pub fn pending_lines_to_mip_mask(lines: &[u16]) -> u32 {
         }
     }
     mask
+}
+
+/// The platform's **internal interrupt line** → the **architectural
+/// `mcause` interrupt code**.
+///
+/// # Why this map exists at all
+///
+/// The platform numbers its interrupt lines `1 / 2 / 3` (UART rx-ready
+/// / UART tx-empty / timer-compare).  RISC-V numbers the *machine
+/// interrupt causes* `3` (software) / `7` (timer) / `11` (external).
+/// **Those are two different numbering spaces**, and the guest only
+/// ever sees the second one: `mcause` is what a trap handler reads.
+///
+/// Reporting the **internal line number** in `mcause` is therefore a
+/// **real defect**, not a cosmetic difference — a guest that dispatches
+/// on the architectural cause code (every real M-mode RTOS does) would
+/// match **none** of them.
+///
+/// # The three spaces, kept apart
+///
+/// | space | values | who uses it |
+/// | --- | --- | --- |
+/// | internal **line** | `1` / `2` / `3` | the controller, the enable mask, `irq_clear` |
+/// | **`mie` / `mip` bit** | `11` (MEIE) / `7` (MTIE) | [`std_irq_bit_for_line`] |
+/// | **architectural cause** | `3` / `7` / `11` | **this** map ⇒ `mcause` |
+///
+/// ⚠️ **This map does not touch the other two** — the `mie` / `mip` bit
+/// map keeps its own table ([`std_irq_bit_for_line`]), and the internal
+/// line numbers keep their own values.  Folding them together would
+/// break the `mip` projection (ledger **D-84 / D-100**).
+///
+/// # The mapping
+///
+/// * `3` (timer-compare) → **7** ([`CAUSE_MACHINE_TIMER`])
+/// * `1` / `2` (UART rx-ready / tx-empty) → **11**
+///   ([`CAUSE_MACHINE_EXTERNAL`]) — M-mode has **one** external
+///   interrupt bit, so both UART lines share the external cause, just
+///   as they share the `MEIP` bit
+/// * anything else → `None` — the line has **no** architectural cause
+///   code, so it **must not** be delivered to a guest (a delivered
+///   interrupt whose `mcause` is not an architectural code is exactly
+///   the defect this map exists to remove)
+///
+/// ⚠️ **The software-interrupt code (3) is never produced** — the
+/// platform has no software-interrupt source today
+/// ([`CAUSE_MACHINE_SOFTWARE`]).
+pub fn arch_cause_for_line(line: u16) -> Option<u32> {
+    match line {
+        IRQ_TIMER_COMPARE => Some(CAUSE_MACHINE_TIMER),
+        IRQ_UART_RX_READY | IRQ_UART_TX_EMPTY => Some(CAUSE_MACHINE_EXTERNAL),
+        _ => None,
+    }
+}
+
+/// The platform's internal interrupt line → the **full `mcause` value**
+/// the guest reads (`IRQ_BASE | <architectural cause code>`).
+///
+/// ⚠️ This is the **only** way an interrupt `mcause` is built: the
+/// architectural code comes from [`arch_cause_for_line`] and the
+/// interrupt bit from [`IRQ_BASE`].  The **internal line number is
+/// never OR-ed in** — it is a different numbering space.
+pub fn arch_mcause_for_line(line: u16) -> Option<u32> {
+    arch_cause_for_line(line).map(|code| IRQ_BASE | code)
 }
 
 /// Whether a CSR address is **read-only** by the RISC-V address rule.
@@ -371,10 +491,17 @@ pub fn is_csr_read_only(csr: u16) -> bool {
 /// recorded in the ledger (D-92 / D-94) — do **not** read this rule as
 /// "we match the reference side".
 ///
-/// ⚠️ The read-only quarter (`>= 0x800`) is uniformly "unimplemented" on
-/// this platform: `mhartid`, `mcycle`, `minstret`, `mtime` all read **0**
-/// and ignore writes.  The reference side **models** `mcycle` (it reads a
-/// real counter) ⇒ that is a counter gap, not a match (D-94).
+/// ⚠️ The read-only quarter (`>= 0x800`) is **not** uniformly
+/// "unimplemented" any more: `mhartid` **is** implemented (it answers
+/// [`CSR_MHARTID_VALUE`] — the single hart of this single-core
+/// platform), while `mcycle` / `minstret` / `mtime` still read **0**
+/// and ignore writes.  The reference side **models** `mcycle` (it reads
+/// a real counter) ⇒ that is a counter gap, not a match (D-94).
+///
+/// ⚠️ **Being implemented does not make a CSR writable**: `mhartid` is
+/// read-only by the RISC-V address rule (`0xF14 >= 0x800`), so
+/// [`csr_write_is_ignored`] rejects the write **anyway** — the two
+/// rules agree, which is what keeps the value stable.
 ///
 /// ⚠️ `medeleg` / `mideleg` are **not** in the list: delegation is an
 /// S-mode feature and this platform is M-mode only ⇒ a guest write to
@@ -394,6 +521,7 @@ pub fn csr_is_implemented(csr: u16) -> bool {
             | CSR_MTVAL
             | CSR_MIP
             | CSR_IRQ_CLEAR
+            | CSR_MHARTID
     )
 }
 
@@ -644,6 +772,126 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // v0.23 批 —— 内部线号 → 架构 cause 码（第三个编号空间）
+    // -----------------------------------------------------------------------
+
+    /// ⚠️ **架构 cause 码与内部线号是**两个**编号空间** —— 这条用例就是
+    /// 那条护栏。
+    ///
+    /// 平台的内部线号是 `1 / 2 / 3`，而 RISC-V 的机器中断 cause 码是
+    /// `3`（软件）/ `7`（定时器）/ `11`（外部）。
+    ///
+    /// ⚠️ **断言值写架构字面量**（`3` / `7` / `11`），**不是**从映射函数
+    /// 反推的 ⇒ 改了映射而忘了改语义，这条会红。
+    ///
+    /// ⚠️ **两者的数字必须**不相等**：如果哪天有人把「定时器线」的架构
+    /// 码写成 3（= 内部线号），这条会红 —— 那正是本批要修的缺陷本身
+    /// （`mcause` 报的是内部线号 ⇒ guest 一个都匹配不上）。
+    #[test]
+    fn the_architectural_cause_codes_are_not_the_internal_line_numbers() {
+        // 内部线号 —— 平台自己的空间，**一个字都不能改**。
+        assert_eq!(IRQ_UART_RX_READY, 1, "内部线号：UART rx-ready");
+        assert_eq!(IRQ_UART_TX_EMPTY, 2, "内部线号：UART tx-empty");
+        assert_eq!(IRQ_TIMER_COMPARE, 3, "内部线号：timer-compare");
+
+        // 架构 cause 码 —— RISC-V 的空间。
+        assert_eq!(CAUSE_MACHINE_SOFTWARE, 3, "架构码：机器软件中断");
+        assert_eq!(CAUSE_MACHINE_TIMER, 7, "架构码：机器定时器中断");
+        assert_eq!(CAUSE_MACHINE_EXTERNAL, 11, "架构码：机器外部中断");
+
+        // ⚠️ **护栏本体**：定时器线的**内部线号**是 3，而它的**架构码**
+        // 是 7 —— 两者**必须不相等**。
+        assert_eq!(IRQ_TIMER_COMPARE, 3);
+        assert_eq!(arch_cause_for_line(IRQ_TIMER_COMPARE), Some(7));
+        assert_ne!(
+            u32::from(IRQ_TIMER_COMPARE),
+            arch_cause_for_line(IRQ_TIMER_COMPARE).expect("定时器线有架构码"),
+            "内部线号与架构 cause 码**不能**是同一个数字"
+        );
+        // UART 线同理：内部 1 / 2，架构 11。
+        assert_ne!(
+            u32::from(IRQ_UART_RX_READY),
+            arch_cause_for_line(IRQ_UART_RX_READY).expect("UART 线有架构码"),
+            "内部线号与架构 cause 码**不能**是同一个数字"
+        );
+    }
+
+    /// 映射表本身：**架构码**。
+    ///
+    /// * 定时器线 ⇒ **7**（机器定时器中断）
+    /// * 两条 UART 线 ⇒ **11**（机器外部中断）—— M 模式只有**一个**外部
+    ///   中断位，两条 UART 线与 `MEIP` 一样共享它
+    /// * 其它线 ⇒ `None`（**没有**架构 cause 码 ⇒ 不得交付给 guest）
+    #[test]
+    fn the_arch_cause_map_speaks_the_riscv_codes() {
+        assert_eq!(arch_cause_for_line(IRQ_TIMER_COMPARE), Some(7));
+        assert_eq!(arch_cause_for_line(IRQ_UART_RX_READY), Some(11));
+        assert_eq!(arch_cause_for_line(IRQ_UART_TX_EMPTY), Some(11));
+        // 没有架构 cause 码的线 —— 一律 `None`。
+        assert_eq!(arch_cause_for_line(0), None);
+        assert_eq!(arch_cause_for_line(9), None);
+        assert_eq!(arch_cause_for_line(77), None);
+    }
+
+    /// 交付给 guest 的 **`mcause`** = 中断位 | **架构码**。
+    ///
+    /// ⚠️ **断言值是架构字面量**（`0x8000_0007` / `0x8000_000B`）——
+    /// 一个真实 M 模式 RTOS 的中断分发就是按这两个数字写的。
+    #[test]
+    fn the_full_mcause_is_the_interrupt_bit_plus_the_architectural_code() {
+        assert_eq!(
+            arch_mcause_for_line(IRQ_TIMER_COMPARE),
+            Some(0x8000_0007),
+            "定时器中断 ⇒ mcause = 0x8000_0007（架构码 7）"
+        );
+        assert_eq!(
+            arch_mcause_for_line(IRQ_UART_RX_READY),
+            Some(0x8000_000B),
+            "外部中断 ⇒ mcause = 0x8000_000B（架构码 11）"
+        );
+        assert_eq!(
+            arch_mcause_for_line(IRQ_UART_TX_EMPTY),
+            Some(0x8000_000B),
+            "外部中断 ⇒ mcause = 0x8000_000B（架构码 11）"
+        );
+        assert_eq!(arch_mcause_for_line(9), None);
+    }
+
+    /// ⚠️ **新增 cause 映射**不许**动** `mie` / `mip` 的位号映射。
+    ///
+    /// `mip` 投影是 D-84 / D-100 已闭环的语义 ⇒ 位号表必须**逐字节**保持。
+    /// 这条用例把位号**钉死**（架构字面量 `11` / `7`），并同时钉住
+    /// 「挂起定时器线 ⇒ bit 7、挂起 UART 线 ⇒ bit 11」。
+    #[test]
+    fn the_mie_bit_map_is_untouched_by_the_cause_map() {
+        // 位号表本身。
+        assert_eq!(std_irq_bit_for_line(IRQ_UART_RX_READY), Some(11));
+        assert_eq!(std_irq_bit_for_line(IRQ_UART_TX_EMPTY), Some(11));
+        assert_eq!(std_irq_bit_for_line(IRQ_TIMER_COMPARE), Some(7));
+        assert_eq!(std_irq_bit_for_line(0), None);
+        // `mip` 投影。
+        assert_eq!(
+            pending_lines_to_mip_mask(&[IRQ_TIMER_COMPARE]),
+            1 << 7,
+            "挂起定时器线 ⇒ mip 的 bit 7 置位"
+        );
+        assert_eq!(
+            pending_lines_to_mip_mask(&[IRQ_UART_RX_READY]),
+            1 << 11,
+            "挂起 UART 线 ⇒ mip 的 bit 11 置位"
+        );
+        // ⚠️ **RISC-V 有意让 `mie` / `mip` 的位号 = 中断的 cause 号**
+        // （MTIE 的位 7 = 定时器 cause 7；MEIE 的位 11 = 外部 cause 11）
+        // ⇒ 这两个空间**数字上重合**，但它们**不是**平台的内部线号空间
+        // （`1 / 2 / 3`）。⇒ 平台报 cause 时**必须**查 cause 映射表，
+        // 不能拿内部线号凑 —— 那正是本批修掉的缺陷。
+        assert_eq!(MIE_MTIE_BIT, 7);
+        assert_eq!(MIE_MEIE_BIT, 11);
+        assert_eq!(MIE_MTIE_BIT, CAUSE_MACHINE_TIMER);
+        assert_eq!(MIE_MEIE_BIT, CAUSE_MACHINE_EXTERNAL);
+    }
+
+    // -----------------------------------------------------------------------
     // 裁决 D —— 「已实现 CSR 表」
     // -----------------------------------------------------------------------
 
@@ -651,6 +899,10 @@ mod tests {
     ///
     /// ⚠️ 清单外的 CSR（`tdata1` / `medeleg` / …）写必须被忽略、读回 0
     /// —— 与参考侧一致（黄金对拍实测发现：参考侧写 `tdata1` 读回 0）。
+    ///
+    /// ⚠️ **`mhartid` 现在算已实现**（v0.23 批）：平台是**单核** ⇒
+    /// `mhartid` 恒为 **0**，而那个 0 必须是**设计**出来的（常量），不是
+    /// 「没实现 ⇒ 碰巧读回 0」的运气。
     #[test]
     fn the_implemented_csr_table_is_exactly_the_platforms_set() {
         for csr in [
@@ -664,6 +916,7 @@ mod tests {
             CSR_MTVAL,
             CSR_MIP,
             CSR_IRQ_CLEAR,
+            CSR_MHARTID,
         ] {
             assert!(csr_is_implemented(csr), "csr {csr:#x} 必须算已实现");
         }
@@ -673,7 +926,7 @@ mod tests {
             (0x7A2u16, "tdata2 —— 调试器 CSR，本平台没有"),
             (0x302u16, "medeleg —— S 模式委派，本平台只有 M 模式"),
             (0x303u16, "mideleg —— S 模式委派，本平台只有 M 模式"),
-            (0xF14u16, "mhartid —— 计数器，本平台没实现"),
+            (0xB00u16, "mcycle —— 计数器，本平台没实现（D-94）"),
         ] {
             assert!(
                 !csr_is_implemented(csr),
@@ -686,9 +939,12 @@ mod tests {
     ///
     /// ⚠️ 这是黄金对拍查出来的缺陷（D-92）：平台原来把写**存了**，
     /// 于是 guest 能**凭空造出**一个平台没有的寄存器。
+    ///
+    /// ⚠️ **`mhartid` 不在这张表里**（v0.23 批）：它**已实现**，但**只读**
+    /// —— 写照样被忽略，只是理由从「没实现」换成了「地址规则只读」。
     #[test]
     fn an_unimplemented_csr_ignores_the_write() {
-        for csr in [0x7A1u16, 0x7A2, 0x302, 0x303, 0xF14] {
+        for csr in [0x7A1u16, 0x7A2, 0x302, 0x303, 0xB00] {
             assert!(
                 csr_write_is_ignored(csr),
                 "csr {csr:#x} 未实现 ⇒ 写必须被忽略"
@@ -701,6 +957,28 @@ mod tests {
                 "csr {csr:#x} 已实现 ⇒ 写不能被忽略"
             );
         }
+    }
+
+    /// `mhartid`：**已实现**（单核 ⇒ 恒为 0）但**只读**。
+    ///
+    /// ⚠️ **两条规则必须同时成立**：实现 ⇒ 平台**答得出**这个 CSR 的值；
+    /// 只读 ⇒ guest **改不了**它（`0xF14` 在只读区 `>= 0x800`）。
+    ///
+    /// ⚠️ 断言值用**架构字面量**：`0xF14` 是 `mhartid` 的标准编号，
+    /// **0** 是单核平台的值 —— 不是从任何映射函数反推的。
+    #[test]
+    fn mhartid_is_implemented_and_read_only() {
+        assert_eq!(CSR_MHARTID, 0xF14, "mhartid 的标准 CSR 编号");
+        assert_eq!(CSR_MHARTID_VALUE, 0, "单核平台 ⇒ hart 0");
+        assert!(
+            csr_is_implemented(CSR_MHARTID),
+            "mhartid 已实现 ⇒ 平台必须答得出它的值"
+        );
+        assert!(
+            is_csr_read_only(CSR_MHARTID),
+            "mhartid 在只读区 ⇒ 地址规则本身必须拦它的写"
+        );
+        assert!(csr_write_is_ignored(CSR_MHARTID), "mhartid 的写必须被忽略");
     }
 
     // -----------------------------------------------------------------------

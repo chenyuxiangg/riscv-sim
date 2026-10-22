@@ -42,6 +42,20 @@
 //! `docs/detailed-design/STAGE-5_Symbol_Disasm_Trace.md` §3 — the
 //! same rule applies: every variant name, field name and wire
 //! representation listed there is **frozen**.
+//!
+//! Contract **v4** adds the guest **console** byte stream and the
+//! per-instruction source location on the disassembly entries:
+//!
+//! - new event `EventPayload::Console { bytes }` — the bytes the guest
+//!   wrote to the console UART. **Bytes, not a string**: the guest may
+//!   emit arbitrary bytes (ANSI escapes, `\r`, a half-written UTF-8
+//!   sequence) and the byte stream is the truth (the Spike comparison is
+//!   byte-wise). serde's default for `Vec<u8>` is a **JSON array of
+//!   numbers** — not base64, not a string;
+//! - two **optional** DTO fields on `model::DisasmEntryDto` (`file` /
+//!   `line`) — the per-instruction source location (debt ledger D-102).
+//!   `None` is a **legal** value and means "no line table / not hit";
+//!   the fields are **never** fabricated.
 
 // MVP: docs on every public variant field are TODO. PROGRESS.md §7
 // 2026-10-19 decision: workspace `missing_docs = "allow"` until each
@@ -59,6 +73,17 @@ pub mod snapshot;
 /// Protocol schema version. Bump on every breaking change; consumers
 /// negotiate via the `schema_version` field in every [`protocol::Message`].
 ///
+/// **v4** (contract v4 — the OSZ runtime batch):
+/// - new event `EventPayload::Console { bytes }` — the guest's console
+///   (UART TX) byte stream. serde serialises `Vec<u8>` as a **JSON array
+///   of numbers** (not base64, not a string);
+/// - `model::DisasmEntryDto` gains two **optional** fields: `file` and
+///   `line` (the per-instruction source location, debt ledger D-102).
+///   `None` is a legal value; it is **never** fabricated.
+///
+/// The v3 shape is **frozen** by the STAGE-5 spec §3 — read it before
+/// changing anything about those variants.
+///
 /// **v3** (STAGE-5, `docs/detailed-design/STAGE-5_Symbol_Disasm_Trace.md`):
 /// - new commands `Disasm` / `ResolveLine` / `ExportTrace` /
 ///   `SetTraceEnabled`;
@@ -66,9 +91,6 @@ pub mod snapshot;
 ///   `TraceState`;
 /// - new DTOs `model::DisasmEntryDto`, `model::TraceSource`,
 ///   `model::TraceFormat`.
-///
-/// The v3 shape is **frozen** by the STAGE-5 spec §3 — read it before
-/// changing anything about these variants.
 ///
 /// **v2** (contract v2, spec `docs/detailed-design/STAGE-2_Contract_V2.md`):
 /// - the virtual-time fields travel as **decimal strings** (see
@@ -80,4 +102,4 @@ pub mod snapshot;
 ///   variant `WaveformDelta` → `WaveformHistory` (D-34);
 /// - `ErrorFamily::Protocol` (`"PROTO"`) — the family the LLD's
 ///   `E_PROTO-01`..`E_PROTO-08` codes belong to.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;

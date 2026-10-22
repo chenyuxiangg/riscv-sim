@@ -126,6 +126,15 @@ pub fn render_entry(d: &Decoded) -> DisasmEntryDto {
         code: d.raw,
         mnemonic: render_mnemonic(d),
         width: d.len,
+        // ⚠️ **契约 v4（D-102）新增的两个可选字段**：渲染器**不知道**源码
+        // 位置（行表在 M-11 的 dwarf 侧，`disasm.rs` 才有）⇒ 这里只能是
+        // `None`。
+        //
+        // ⚠️ **未实现**：真正的逐条行号填充是**下一批**的活（`disasm.rs`
+        // 的反汇编序列）。契约形状先定好（`None` 是合法值），内核侧不
+        // 伪造文件名与行号。
+        file: None,
+        line: None,
     }
 }
 
@@ -226,6 +235,12 @@ fn render_wide(d: &Decoded, op: Op) -> String {
         Op::Ecall => "ecall".to_string(),
         Op::Ebreak => "ebreak".to_string(),
         Op::Mret => "mret".to_string(),
+        // ⚠️ **v0.23 批新增**：`wfi`（`0x10500073`）进了 M-13 的**唯一**
+        // 解码表 ⇒ 这里**必须**跟着长一条臂 —— 否则这条编码会被渲染成
+        // `.illegal`，而 M-13 **真的执行**它 ⇒ 同一串编码两个真相。
+        // （本臂是「M-13 加了新指令 ⇒ 消费者编译不过」的**设计意图**兑现，
+        // 不是可选的润色。）
+        Op::Wfi => "wfi".to_string(),
         // CSR：号 + 寄存器。
         Op::Csrrw | Op::Csrrs | Op::Csrrc => format!(
             "{} {},{},{}",
@@ -392,6 +407,7 @@ fn wide_name(op: Op) -> &'static str {
         Op::Ecall => "ecall",
         Op::Ebreak => "ebreak",
         Op::Mret => "mret",
+        Op::Wfi => "wfi",
         Op::Csrrw => "csrrw",
         Op::Csrrs => "csrrs",
         Op::Csrrc => "csrrc",
