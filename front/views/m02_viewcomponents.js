@@ -246,10 +246,10 @@ const debugView = register({
                     <h3>反汇编 (M-11)</h3>
                     <p class="muted">助记符是 <strong>ISA 助记符</strong>：压缩指令保留 <code>c.</code> 前缀，不做伪指令别名改写（裁决 C）。</p>
                     <table class="disasm-table">
-                        <thead><tr><th>地址</th><th>机器码</th><th>助记符</th><th>宽度</th></tr></thead>
+                        <thead><tr><th>地址</th><th>机器码</th><th>助记符</th><th>宽度</th><th>源码</th></tr></thead>
                         <tbody>
                             ${entries.map((entry) => renderDisasmRow(entry, pc)).join("")
-                                || `<tr><td colspan="4" class="muted">尚无反汇编 — 点击「反汇编」向内核请求一段（M-11）。</td></tr>`}
+                                || `<tr><td colspan="5" class="muted">尚无反汇编 — 点击「反汇编」向内核请求一段（M-11）。</td></tr>`}
                         </tbody>
                     </table>
                 </section>
@@ -307,6 +307,52 @@ const debugView = register({
 });
 
 /**
+ * 「**没有**行号」时的**如实**措辞（K-3）。
+ *
+ * ⚠️ **不许**显示空、**不许**显示 `0`、**不许**显示 `null`——那三种
+ * 形态读起来都像「有行号但值不对」，而真相是「**根本没有**行号」。
+ */
+export const NO_SOURCE_LINE_LABEL = "无行号";
+
+/**
+ * 一条反汇编条目的源码位置的**两个部分**（K-3）。
+ *
+ * ⚠️ **两个都空**才是「无行号」；只有一个有 ⇒ **如实**（别编一个出来）。
+ * ⚠️ `line` 是 **1 起**的行号 ⇒ `0` 与负数都**不算**「有行号」。
+ *
+ * @param {{file?: string|null, line?: number|null}|null|undefined} entry
+ * @returns {{file: string, line: number|null}}
+ */
+export function sourceLocationParts(entry) {
+    const rawFile = entry?.file;
+    const file = rawFile === null || rawFile === undefined ? "" : String(rawFile).trim();
+    const rawLine = entry?.line;
+    const lineNum = rawLine === null || rawLine === undefined ? null : Number(rawLine);
+    const line = lineNum !== null && Number.isFinite(lineNum) && lineNum > 0 ? lineNum : null;
+    return { file, line };
+}
+
+/**
+ * 把一条反汇编条目的**源码位置**渲染成一行文本。
+ *
+ * ⚠️ **绝不编造**（K-3）：`file` / `line` 是契约 v4 的两个 `Option` ⇒
+ * JS 侧是 `null` / `undefined` ⇒ **两个都空**才是「无行号」；只有一个
+ * 有 ⇒ **如实显示那一个**，**不编**另一半出来。
+ *
+ * @param {{file?: string|null, line?: number|null}|null|undefined} entry
+ * @returns {string}
+ */
+export function formatSourceLocation(entry) {
+    const { file, line } = sourceLocationParts(entry);
+    if (file && line !== null) return `${file}:${line}`;
+    // ⚠️ 只有文件名 ⇒ 如实说「这个文件有，但**行号**没有」。
+    if (file) return `${file}（${NO_SOURCE_LINE_LABEL}）`;
+    // ⚠️ 只有行号 ⇒ 如实说「**行号**有，但**文件名**没有」。
+    if (line !== null) return `（无文件）:${line}`;
+    return NO_SOURCE_LINE_LABEL;
+}
+
+/**
  * One row of the disassembly table.
  *
  * ⚠️ The mnemonic is shown **verbatim** (HTML-escaped, but otherwise
@@ -317,7 +363,10 @@ const debugView = register({
  *
  * The row the PC points at is highlighted (V-12).
  *
- * @param {{addr?: number, code?: number, mnemonic?: string, width?: number}} entry
+ * ⚠️ **逐条显示源码位置**（K-3）：`file` / `line` 来自内核的 DWARF 行表
+ * （契约 v4 的两个可选字段）⇒ 查不到就是「**无行号**」，**不编造**。
+ *
+ * @param {{addr?: number, code?: number, mnemonic?: string, width?: number, file?: string|null, line?: number|null}} entry
  * @param {number} pc
  * @returns {string}
  */
@@ -330,12 +379,17 @@ function renderDisasmRow(entry, pc) {
     // The machine code is padded to the instruction's **own** width: a
     // 16-bit compressed instruction shows 4 hex digits, a 32-bit one 8.
     const codeText = `0x${code.toString(16).padStart(width === 2 ? 4 : 8, "0")}`;
+    const sourceText = formatSourceLocation(entry);
+    // ⚠️ **机器可读**的两个 `data-*`：真机段要断言「`file` 是个真源码
+    // 路径」「`line` 大于 0」⇒ 从渲染出来的**文本**里猜是不行的。
+    const { file, line } = sourceLocationParts(entry);
     return `
         <tr class="disasm-row${isPc ? " is-pc" : ""}" data-disasm-addr="${addrText}"${isPc ? ' data-pc="1"' : ""}>
             <td><code>${addrText}</code></td>
             <td><code>${codeText}</code></td>
             <td class="disasm-mnemonic">${escapeHtml(entry?.mnemonic ?? "")}</td>
             <td>${width}</td>
+            <td class="disasm-source" data-disasm-file="${escapeHtml(file)}" data-disasm-line="${line === null ? "" : String(line)}">${escapeHtml(sourceText)}</td>
         </tr>
     `;
 }
@@ -648,15 +702,28 @@ const terminalView = register({
     channels: ["term"],
     render(state) {
         const buf = state?.term?.bytes ?? "";
+        // ⚠️ **草稿住在视图状态里**（K-1）：`applyRenderEvent` 每次都
+        // `body.innerHTML = html` ⇒ **输入框元素被重建** ⇒ 只存在 DOM 里
+        // 的草稿会**每来一个 console 字节就清一次** ⇒ 根本没法打字。
+        const draft = state?.term?.draft ?? "";
         return `
             <section class="terminal">
                 <h3>串口终端 (M-15 UART)</h3>
                 <pre class="terminal-out" data-terminal-out>${escapeHtml(buf)}</pre>
-                <p class="muted">MVP 阶段 UART 行为留到 M-15（FIQ 第 3 步）；此处只显示回显缓冲。</p>
+                <div class="terminal-input-row">
+                    <input type="text" class="terminal-input" data-terminal-input value="${escapeHtml(draft)}" placeholder="输入后按「发送」——字节会进 guest 的 UART0">
+                    <button type="button" class="terminal-send" data-action="console-send">发送</button>
+                </div>
+                <p class="muted">输入框里的文本<strong>按 UTF-8 编码</strong>成字节，发给 guest 的 UART0（契约 v5 的 <code>WriteConsole</code>）；<strong>回显来自 guest</strong>，平台不做本地回显。本批只送原始字节，不模拟终端控制序列。</p>
             </section>
         `;
     },
-    onCommand(_ev) {},
+    onCommand(ev) {
+        const el = ev.target?.closest?.("[data-action]");
+        const action = el?.dataset?.action;
+        if (action !== "console-send") return undefined;
+        return sendTerminalInput();
+    },
     /** Append new bytes to the terminal buffer in-place (T1 fast path). */
     onDelta(delta) {
         if (!delta?.termDelta) return;
@@ -687,8 +754,85 @@ const terminalView = register({
         out.textContent = next;
         out.scrollTop = out.scrollHeight;
     },
-    mountFor(el) {},
+    mountFor(el) {
+        // ⚠️ **事件委托**（K-1）：监听器绑在**容器**上，**不**绑在输入框上
+        // ——输入框元素每次重渲染都会被重建（`body.innerHTML = html`）⇒
+        // 绑在它身上的监听器**会丢**（点第二次就没反应了）。
+        el.addEventListener("click", (ev) => terminalView.onCommand(ev));
+        el.addEventListener("input", (ev) => {
+            const input = ev.target?.closest?.("[data-terminal-input]");
+            if (!input) return;
+            // 草稿进**视图状态**（不是 DOM）⇒ 重渲染也不会丢。
+            setTerminalDraft(input.value ?? "");
+        });
+        el.addEventListener("keydown", (ev) => {
+            const input = ev.target?.closest?.("[data-terminal-input]");
+            if (!input) return;
+            if (ev.key !== "Enter") return;
+            // 「Enter 键发送」是**可选**的加分项（K-1 §7）；送的仍然是
+            // **原始字节**（不追加换行——那不是终端控制序列）。
+            ev.preventDefault?.();
+            sendTerminalInput();
+        });
+    },
 });
+
+/**
+ * 把终端草稿写进 **M-03 视图状态**（`term.draft`）。
+ *
+ * ⚠️ **不在这里重渲染**：每敲一个键就重渲染会把输入框重建一次（焦点
+ * 都没了）⇒ 草稿的**写入**与**重渲染**必须分开。
+ *
+ * @param {unknown} text
+ */
+function setTerminalDraft(text) {
+    viewStore.setState("terminal", (prev) => ({
+        ...prev,
+        term: { ...(prev.term ?? {}), draft: String(text ?? "") },
+    }));
+}
+
+/**
+ * 让终端视图按**当前状态**重渲染。
+ *
+ * ⚠️ 走的是 M-01 的 `riscv:render` 事件（与源码视图的
+ * `publishSourceState` 同一条路）⇒ 视图层不直接摸 DOM。
+ */
+function publishTerminalState() {
+    window.dispatchEvent(new CustomEvent("riscv:render", {
+        detail: { viewId: "terminal", type: "update", state: viewStore.getState("terminal") },
+    }));
+    // 重渲染把 `.terminal-out` **重建**了 ⇒ 滚动位置回到顶部 ⇒ 把它推回
+    // 底部（与 `onDelta` 的既有行为一致）。
+    const out = document.querySelector("[data-terminal-out]");
+    if (out) out.scrollTop = out.scrollHeight;
+}
+
+/**
+ * 把输入框里的文本**按 UTF-8 编码**成字节 ⇒ 发 `console-send` 信号
+ * ⇒ 清空输入框。
+ *
+ * ⚠️ **字节，不是字符**（K-1）：guest 的 UART 收的是**字节**（契约 v5 的
+ * `WriteConsole { bytes: Vec<u8> }`）⇒ 这里用 `TextEncoder` 做 UTF-8 编码
+ * （`"A"` ⇒ `[65]`、`"你"` ⇒ `[228, 189, 160]`），**不**送字符串（内核会
+ * 按 `E_PROTO-08` 拒掉）。
+ *
+ * ⚠️ **先发命令，再清草稿**：清早了就把要发的内容一起清掉了。
+ *
+ * ⚠️ **视图层不许直接调服务层**（本模块的既有规矩）：这里只发信号，
+ * `app.js` 把它变成真的命令。
+ *
+ * @returns {string} the request id
+ */
+function sendTerminalInput() {
+    const input = document.querySelector("[data-terminal-input]");
+    const text = String(input?.value ?? "");
+    const bytes = Array.from(new TextEncoder().encode(text));
+    const requestId = emitCommand("console-send", "terminal", { bytes });
+    setTerminalDraft("");
+    publishTerminalState();
+    return requestId;
+}
 
 // ---------------------------------------------------------------------------
 // Render dispatcher — receives M-01 `riscv:render` CustomEvents.

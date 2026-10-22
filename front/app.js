@@ -172,6 +172,30 @@ function toInt(raw, fallback = 0) {
 }
 
 /**
+ * 一串 **0..255 的整数**（契约 v5 的 `WriteConsole.bytes`）。
+ *
+ * ⚠️ **传字符串会被内核按 `E_PROTO-08` 拒掉**（不会默默接受）⇒ 前端
+ * 在这里就把它挡下来，并给出**说清是哪个字节**的错。
+ *
+ * @param {unknown} raw
+ * @returns {number[]}
+ */
+export function toByteArray(raw) {
+    if (!Array.isArray(raw)) {
+        throw new Error(
+            `console-send 的 bytes 必须是字节数组（0..255 的整数），收到：${typeof raw}`,
+        );
+    }
+    return raw.map((b) => {
+        const n = Number(b);
+        if (!Number.isInteger(n) || n < 0 || n > 255) {
+            throw new Error(`console-send 的字节必须是 0..255 的整数：${JSON.stringify(b)}`);
+        }
+        return n;
+    });
+}
+
+/**
  * Translate a view-layer `riscv:command` signal into an M-05 command.
  *
  * The view layer does not know the service layer — it only emits the
@@ -244,6 +268,17 @@ export async function handleCommand(detail, services) {
                 // 问「行号」，问回来的也只有 `file` + `line`。
                 const addr = toInt(detail.params?.addr, 0);
                 await commandRouter.dispatchCommand(Command.resolveLine(addr));
+                break;
+            }
+            case "console-send": {
+                // 终端输入框：文本**按 UTF-8 编码**成的字节 ⇒ 往当前会话
+                // 唯一的 UART0 写（契约 v5 的 `WriteConsole`）。
+                //
+                // ⚠️ **只送原始字节**：不追加换行、不模拟终端控制序列
+                // （Ctrl-C / 退格 / 历史）。**回显来自 guest**，平台不做
+                // 本地回显。
+                const bytes = toByteArray(detail.params?.bytes);
+                await commandRouter.dispatchCommand(Command.writeConsole(bytes));
                 break;
             }
             case "export-trace": {
@@ -684,6 +719,170 @@ export function wireDebug(commandRouter) {
 }
 
 // ---------------------------------------------------------------------------
+// 可编程的源码树入口（K-2）
+//
+// ⚠️ **源码树只进 M-03 的视图状态，不进内核、不进契约**（STAGE-7 裁决 A
+// 的老规矩）：内核**不联网、不碰文件系统**（契约的 `ImageSource::Url`
+// 会报 `E_LDR-01` 就是这个道理）⇒ 源码只能由前端拿到。
+//
+// 这个入口是给**脚本**用的（真机脚本没法操作文件选择器）⇒ 页面上的
+// `window.riscv_source.setTree(treeMap)` 就是它。
+// ---------------------------------------------------------------------------
+
+/**
+ * 把一棵源码树**规整**成「路径 → 内容」的对象。
+ *
+ * ⚠️ **接受 `Map`**（任务书指定的形态）、**也**接受普通对象与
+ * `[key, value]` 对的数组 ⇒ 调用方不必为了喂它而改自己的数据结构。
+ *
+ * @param {Map<string, string>|Record<string, string>|Iterable<[string, string]>|null|undefined} tree
+ * @returns {Record<string, string>}
+ */
+export function normalizeSourceTree(tree) {
+    /** @type {Record<string, string>} */
+    const out = {};
+    if (!tree) return out;
+    // `Map`（有 `get` / `forEach`）。
+    if (typeof tree.get === "function" && typeof tree.forEach === "function") {
+        tree.forEach((value, key) => {
+            out[String(key)] = String(value ?? "");
+        });
+        return out;
+    }
+    // `[key, value]` 对的数组。
+    if (Array.isArray(tree)) {
+        for (const pair of tree) {
+            if (!Array.isArray(pair) || pair.length < 2) continue;
+            out[String(pair[0])] = String(pair[1] ?? "");
+        }
+        return out;
+    }
+    // 普通对象。
+    if (typeof tree === "object") {
+        for (const [key, value] of Object.entries(tree)) {
+            out[String(key)] = String(value ?? "");
+        }
+    }
+    return out;
+}
+
+/**
+ * 把一棵源码树写进 **M-03 视图状态**（**不进内核**）。
+ *
+ * ⚠️ **并入**已有的树，不丢用户已经装好的文件（与文件选择器那条路
+ * 同一口径）。
+ *
+ * @param {Map<string, string>|Record<string, string>|Iterable<[string, string]>} tree
+ * @returns {number} 树里的文件数
+ */
+export function setSourceTree(tree) {
+    const normalized = normalizeSourceTree(tree);
+    viewStore.setState("source", (prev) => ({
+        ...prev,
+        source: {
+            ...(prev.source ?? {}),
+            tree: { ...(prev.source?.tree ?? {}), ...normalized },
+        },
+    }));
+    publishViewState("source");
+    return Object.keys(normalized).length;
+}
+
+/**
+ * 把可编程的源码树入口暴露到 `window.riscv_source`。
+ *
+ * ⚠️ **这不是 dev-only 的 demo 辅助**（与 `window.riscv_demo` 不同）：
+ * 真机脚本（`tools/browser-verify.mjs`）没法操作文件选择器 ⇒ 需要一条
+ * **可编程**的路把源码树送进前端。
+ *
+ * @returns {void}
+ */
+export function exposeSourceLoader() {
+    window.riscv_source = {
+        setTree: (tree) => setSourceTree(tree),
+    };
+}
+
+/**
+ * 把一组「**脚本可调用**」的命令暴露给页面上的脚本。
+ *
+ * ⚠️ **这不是产品 UI**：真实 RTOS 的复验脚本（`tools/browser-verify.mjs`）
+ * 需要「发一条命令 ⇒ 拿到它的回复」这一段能力——而前端的 UI 里**没有**
+ * 「设置断点」或「读 UART 寄存器」的入口（那是 P1 的活）。
+ *
+ * ⚠️ **只暴露命名清楚的窄接口**，不把整个路由器塞给脚本 ⇒ 脚本能做的事
+ * 是**看得见**的（每加一个方法都是一次显式的决定）。
+ *
+ * @param {object} commandRouter
+ * @returns {void}
+ */
+export function exposeScriptCommands(commandRouter) {
+    /**
+     * 发一条命令，等它的回复事件 ⇒ 返回回复事件的 `value`。
+     *
+     * @param {object} payload — `CommandPayload` 的线上形态
+     * @param {number} [timeoutMs]
+     * @returns {Promise<object|null>}
+     */
+    async function dispatch(payload, timeoutMs) {
+        const event = await commandRouter.dispatchCommand(
+            payload,
+            timeoutMs ? { timeoutMs } : {},
+        );
+        return event?.value ?? null;
+    }
+
+    /**
+     * 最近一次「**停下**」的报告（契约的 `Halted` 事件）。
+     *
+     * ⚠️ **为什么要有它**：命令的**回复**是「带同一个 reqId 的第一个
+     * 事件」——那可能是 `Tick`、也可能是 `Console` ⇒ 从回复里**读不出**
+     * 「为什么停、停在哪儿」。⇒ 这里另外订阅 `halted` 主题，把
+     * `Halted { reason, pc }` **如实**记下来。
+     *
+     * @type {{reason: string|null, pc: number}|null}
+     */
+    let lastHalt = null;
+    commandRouter.subscribe("halted", (event) => {
+        lastHalt = {
+            reason: event.value?.reason ?? null,
+            pc: Number(event.value?.pc ?? 0) >>> 0,
+        };
+    });
+
+    window.riscv_kernel = {
+        /** 最近一次「停下」的原因与 PC（`Halted` 事件）；还没有就是 `null`。 */
+        lastHalt: () => lastHalt,
+        /**
+         * 在 `addr` 下断点（`id` 是 M-08 的断点号）。
+         *
+         * ⚠️ **地址必须对齐**（RISC-V 压缩指令 2 字节对齐）——M-08 会把
+         * 未对齐的地址按 `E_CTX-07` 拒掉。
+         */
+        setBreakpoint: (addr, id = 1) => dispatch(Command.setBreakpoint({
+            id: Number(id) >>> 0,
+            addr: Number(addr) >>> 0,
+            source_hint: null,
+            enabled: true,
+        })),
+        /** 撤掉一个断点。 */
+        clearBreakpoint: (id = 1) => dispatch(Command.clearBreakpoint(Number(id) >>> 0)),
+        /** 读一段内存（`size` 是契约的 `WriteSize` 标签：`Byte` / `Half` / `Word`）。 */
+        readMemory: (addr, size = "Word") => dispatch(
+            Command.readMemory(Number(addr) >>> 0, size),
+        ),
+        /**
+         * 继续跑。
+         *
+         * ⚠️ **超时放宽到 30 s**：M-05 的默认超时是 500 ms，而真实 RTOS
+         * 跑一批（到下一个事件 / 断点）常常超过它 ⇒ 默认值会让这条命令
+         * **假超时**（内核还在跑，前端却报了 `E_CTX-06`）。
+         */
+        continueRun: () => dispatch(Command.continueRun(), 30000),
+    };
+}
+
+// ---------------------------------------------------------------------------
 // 装载**仓外**的镜像（真实 RTOS 的 ELF 不进仓库）
 // ---------------------------------------------------------------------------
 
@@ -892,6 +1091,9 @@ async function bootstrap() {
 
     wireDevSeeding();
     exposeDevHelpers();
+    // ⚠️ 可编程的源码树入口（K-2）：真机脚本没法操作文件选择器 ⇒ 需要一条
+    // **可编程**的路把源码树送进前端（**不进内核**）。
+    exposeSourceLoader();
     describeWorkspace(workspace);
 
     // ⚠️ **console 接线**必须传给**每一个**装载点（`startSession` 与
@@ -905,6 +1107,9 @@ async function bootstrap() {
         console: consoleWiring,
     };
     exposeImageLoader(services);
+    // ⚠️ 脚本用的**命令门**（真机段要「下断点」/「读 UART 寄存器」——
+    // 前端 UI 里没有这两个入口）。
+    exposeScriptCommands(commandRouter);
 
     // The status bar follows the **live** transport state, not a
     // one-shot snapshot: the kernel worker connects a tick after the
