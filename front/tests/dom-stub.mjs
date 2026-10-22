@@ -219,6 +219,27 @@ export class StubElement extends StubEventTarget {
     get id() { return this.getAttribute("id") ?? ""; }
     set id(value) { this.setAttribute("id", value); }
 
+    /**
+     * The `value` **property** of a form control.
+     *
+     * ⚠️ **为什么要有它**：真实的 `<input>` 有两套「值」——
+     *   - `el.value`（**属性**）：用户当前输入的内容；
+     *   - `el.getAttribute("value")`（**属性值**）：HTML 里写下的**默认值**。
+     * 一旦用户敲了字，两者在真实浏览器里就**不再相等**（`value` 属性还
+     * 停在默认值上）。
+     *
+     * 前端代码必须读 `el.value`（用户输入的事实），**不是**
+     * `getAttribute("value")` ⇒ 替身也得给这个属性，否则替身会把
+     * 「用户输入」与「默认值」混为一谈（那种混法会**静默**通过一条其实
+     * 已经坏了的断言）。
+     *
+     * 替身里两者**共用**一个存储（`value` 属性）——这与真实浏览器的
+     * 差别只出现在「用户手动改过之后」；替身里改 `el.value` 也就等于
+     * 改了 `value` 属性，**读**的路径是同一个 ⇒ 断言照样抓得住。
+     */
+    get value() { return this.getAttribute("value") ?? ""; }
+    set value(v) { this.setAttribute("value", String(v)); }
+
     // --- tree ---------------------------------------------------------------
 
     appendChild(child) {

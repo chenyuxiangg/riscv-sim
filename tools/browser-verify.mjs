@@ -88,6 +88,8 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { loadElf, findFirstSymbol } from "./elf-symtab.mjs";
+
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
 const frontDir = join(repoRoot, "front");
@@ -558,6 +560,46 @@ const CLICK_RESOLVE_LINE_EXPRESSION = `(() => {
 })()`;
 
 /**
+ * 反汇编面板的**逐条源码位置**（K-3 / E-6）。
+ *
+ * ⚠️ **用 `data-*` 取，不从渲染文本里猜**：文件名里可能带 `:`，而
+ * 「真源码路径 + 行号」是**两个**独立的值（`file` / `line`）。
+ */
+const DISASM_ROWS_EXPRESSION = `(() => {
+  const rows = Array.from(document.querySelectorAll('[data-view-body="debug"] tr.disasm-row'));
+  return rows.map((r) => {
+    const cell = r.querySelector(".disasm-source");
+    return {
+      addr: String(r.getAttribute("data-disasm-addr") || ""),
+      file: cell ? String(cell.getAttribute("data-disasm-file") || "") : "",
+      line: cell ? String(cell.getAttribute("data-disasm-line") || "") : "",
+      text: cell ? String(cell.textContent || "") : "",
+    };
+  });
+})()`;
+
+/**
+ * 在终端视图的**输入框**里敲一段文本并点「发送」（K-1 / E-8）。
+ *
+ * ⚠️ 走的是**生产路径**：输入框 → `input` 事件 → 草稿进视图状态 →
+ * 「发送」按钮 → `riscv:command` 信号 → `WriteConsole` 命令。
+ *
+ * @param {string} text — 要送的文本（**按 UTF-8 编码**成字节）
+ * @returns {string} the expression to evaluate in the page
+ */
+function sendTerminalTextExpression(text) {
+    return `(() => {
+  const input = document.querySelector("[data-terminal-input]");
+  const btn = document.querySelector('[data-action="console-send"]');
+  if (!input || !btn) return { ok: false, reason: "输入框或发送按钮不在" };
+  input.value = ${JSON.stringify(text)};
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  btn.click();
+  return { ok: true, draft: String(input.value) };
+})()`;
+}
+
+/**
  * Landing-page checks: the workbench really came up.
  *
  * The landing view of the embedded role is the `embedded` panel, which
@@ -792,12 +834,38 @@ function sourceCommandCheck(probe) {
 const OSZ_ELF_DEFAULT = "/tmp/osz-artifacts/osz.elf";
 
 /**
+ * osz 的**调度器**符号候选（**按优先级**排）。
+ *
+ * ⚠️ **不要把某一个名字写死成唯一答案**（那会变成「恒绿」的断言）：
+ * 先**按名字去符号表里查**，找到**第一个**存在的就用它；一个都没有 ⇒
+ * 判负（并说明没找到哪些候选）。
+ */
+const SCHEDULER_SYMBOL_CANDIDATES = [
+    "first_schedule",
+    "schedule",
+    "os_preemp_reschedule",
+    "os_preemp_schedule_with_pm",
+];
+
+/** UART0（ns16550）的基址。 */
+const UART0_BASE = 0x10000000;
+/** ns16550 的 LSR 偏移（`0x5`）。 */
+const UART_LSR_OFFSET = 0x5;
+/** LSR 的寄存器地址。 */
+const UART_LSR_ADDR = UART0_BASE + UART_LSR_OFFSET;
+/** LSR 的 **bit0 = RX_VALID**（接收 FIFO 里有字节可读）。 */
+const LSR_RX_VALID = 0x1;
+
+/**
  * 跑 osz 到提示符的**墙钟上限**（毫秒）。
  *
  * ⚠️ 真实 RTOS 是**死循环**（跑完提示符也不会自己停）⇒ 必须有上限，
  * 否则浏览器测试会永远挂着。
  */
 const OSZ_RUN_TIMEOUT_MS = 60000;
+
+/** 断点命中后，等 DOM 里的 PC 更新上来的**上限**（毫秒）。 */
+const PC_SETTLE_TIMEOUT_MS = 5000;
 
 /**
  * 一个**带 CORS 头**的静态服务（给**仓外**的 osz ELF 用）。
@@ -906,6 +974,42 @@ async function runOszSection(cdp, opts) {
     }
     console.log(`· osz ELF：${elfPath}`);
 
+    // -- 符号表：按**名字**取调度器符号的地址（E-7）----------------------
+    // ⚠️ **不许写死地址**（写死就成了恒绿的断言）。这里用仓内的零依赖
+    // ELF32 解析器（`tools/elf-symtab.mjs`）读 `.symtab` ⇒ 不依赖用户
+    // 机器上有没有 `nm`。
+    /** @type {{name: string, value: number}|null} */
+    let scheduler = null;
+    let elfEntry = 0;
+    try {
+        const elf = loadElf(elfPath);
+        elfEntry = elf.entry;
+        scheduler = findFirstSymbol(elf, SCHEDULER_SYMBOL_CANDIDATES);
+    } catch (err) {
+        return {
+            skipped: false,
+            checks: [{
+                name: "解析 osz 的符号表（零依赖 ELF32 解析器）",
+                ok: false,
+                detail: String(err?.message ?? err).slice(0, 300),
+            }],
+        };
+    }
+    if (!scheduler) {
+        return {
+            skipped: false,
+            checks: [{
+                name: "在符号表里按**名字**找到 osz 的调度器符号",
+                ok: false,
+                detail: `候选一个都没找到：${SCHEDULER_SYMBOL_CANDIDATES.join(" / ")}`,
+            }],
+        };
+    }
+    console.log(
+        `· 调度器符号：${scheduler.name} = 0x${scheduler.value.toString(16)}`
+        + `（ELF 入口 0x${elfEntry.toString(16)}）`,
+    );
+
     // -- 等页面上的装载入口就绪（bootstrap 是异步的）----------------------
     const readyDeadline = Date.now() + opts.timeoutMs;
     let ready = false;
@@ -964,6 +1068,16 @@ async function runOszSection(cdp, opts) {
         const byteLength = Number(loadRes.result?.value?.byteLength ?? 0);
         console.log(`· 已装载 osz：${byteLength} 字节`);
 
+        // =================================================================
+        // E-7（K-5）· 在 osz 的**调度器符号**上下断点
+        //
+        // ⚠️⚠️ **断点必须在「跑之前」下**：osz 的调度器（`first_schedule`
+        // 之类）在 **shell 提示符出现之前**就执行过了 ⇒ 先跑到提示符再下
+        // 断点，那个符号**永远命中不了** ⇒ 这一段**必须**在「跑到提示符」
+        // **之前**跑。
+        // =================================================================
+        const breakpoint = await runBreakpointProbe(cdp, opts, scheduler);
+
         // -- 跑到提示符（一条一条 Continue，最多 60 秒）----------------------
         const runRes = await cdp.send("Runtime.evaluate", {
             expression:
@@ -977,7 +1091,7 @@ async function runOszSection(cdp, opts) {
                 ?? "未知错误";
             return {
                 skipped: false,
-                checks: [{
+                checks: [...breakpoint.checks, {
                     name: "跑到 osz 的 shell 提示符",
                     ok: false,
                     detail: String(err).slice(0, 300),
@@ -987,9 +1101,19 @@ async function runOszSection(cdp, opts) {
         const batches = Number(runRes.result?.value?.batches ?? 0);
         console.log(`· osz 跑了 ${batches} 批 Continue`);
 
+        // =================================================================
+        // E-6（K-4）· 反汇编面板出现 osz 的**真** file 与 line
+        // =================================================================
+        const disasm = await runDisasmSourceProbe(cdp, opts, scheduler, elfEntry);
+
+        // =================================================================
+        // E-8（K-6）· 送一个字节 ⇒ guest 的 UART LSR 的 bit0 置位
+        // =================================================================
+        const uart = await runUartRxProbe(cdp, opts);
+
         // -- 断言**终端视图里**出现了那两段字面量 ---------------------------
         const deadline = Date.now() + opts.timeoutMs;
-        let checks = [];
+        let consoleChecks = [];
         let probe = null;
         while (Date.now() < deadline) {
             const res = await cdp.send("Runtime.evaluate", {
@@ -997,14 +1121,312 @@ async function runOszSection(cdp, opts) {
                 returnByValue: true,
             });
             probe = res.result?.value ?? null;
-            checks = probe ? oszConsoleChecks(probe) : [];
-            if (checks.length > 0 && checks.every((c) => c.ok)) break;
+            consoleChecks = probe ? oszConsoleChecks(probe) : [];
+            if (consoleChecks.length > 0 && consoleChecks.every((c) => c.ok)) break;
             await sleep(250);
         }
-        return { skipped: false, checks };
+        return {
+            skipped: false,
+            checks: [
+                ...breakpoint.checks,
+                ...disasm.checks,
+                ...uart.checks,
+                ...consoleChecks,
+            ],
+        };
     } finally {
         artifact.close();
     }
+}
+
+/**
+ * 页面里取一份探针快照（DOM 现状）。
+ *
+ * @param {object} cdp
+ * @returns {Promise<object|null>}
+ */
+async function pageProbe(cdp) {
+    const res = await cdp.send("Runtime.evaluate", {
+        expression: PROBE_EXPRESSION,
+        returnByValue: true,
+    });
+    return res.result?.value ?? null;
+}
+
+/**
+ * E-7（K-5）· 在调度器符号上下断点 ⇒ 命中时 PC 落在那个符号的地址。
+ *
+ * ⚠️ **必须用符号名取地址**（写死就成恒绿）——地址是**外面**用零依赖
+ * ELF32 解析器按名字查出来的。
+ *
+ * ⚠️ **断点必须在跑之前下**：osz 的调度器在 shell 提示符之前就跑过了。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @param {{name: string, value: number}} scheduler
+ * @returns {Promise<{checks: object[]}>}
+ */
+async function runBreakpointProbe(cdp, opts, scheduler) {
+    /** @type {object[]} */
+    const checks = [];
+    const expectedHex = `0x${scheduler.value.toString(16).padStart(8, "0")}`;
+
+    checks.push({
+        name: "在符号表里按**名字**找到 osz 的调度器符号（不许写死地址）",
+        ok: true,
+        detail: `${scheduler.name} = 0x${scheduler.value.toString(16)}`
+            + `（候选：${SCHEDULER_SYMBOL_CANDIDATES.join(" / ")}）`,
+    });
+    checks.push({
+        name: "断点地址对齐（RISC-V 压缩指令 2 字节对齐）",
+        ok: scheduler.value % 2 === 0,
+        detail: `addr=0x${scheduler.value.toString(16)}`,
+    });
+
+    // -- 下断点 ------------------------------------------------------------
+    const setRes = await cdp.send("Runtime.evaluate", {
+        expression: `window.riscv_kernel.setBreakpoint(${scheduler.value}, 1)`,
+        awaitPromise: true,
+        returnByValue: true,
+    }, 30000);
+    if (setRes.exceptionDetails) {
+        const err = setRes.exceptionDetails.exception?.description
+            ?? setRes.exceptionDetails.text
+            ?? "未知错误";
+        checks.push({
+            name: "在调度器符号上下断点",
+            ok: false,
+            detail: String(err).slice(0, 300),
+        });
+        return { checks };
+    }
+    checks.push({
+        name: "在调度器符号上下断点",
+        ok: true,
+        detail: `addr=0x${scheduler.value.toString(16)} id=1`,
+    });
+
+    // -- 跑到命中（一条一条 Continue）---------------------------------------
+    // ⚠️ 每跑一批都要看一次「内核报告的停在哪」——那是**权威**的 PC；
+    // DOM 里的 PC 是寄存器流推到视图的**投影**（要晚一点）。
+    const deadline = Date.now() + opts.timeoutMs;
+    let halt = null;
+    let rounds = 0;
+    while (Date.now() < deadline && rounds < 400) {
+        const runRes = await cdp.send("Runtime.evaluate", {
+            expression: "window.riscv_kernel.continueRun()",
+            awaitPromise: true,
+            returnByValue: true,
+        }, 60000);
+        if (runRes.exceptionDetails) break;
+        rounds += 1;
+        const haltRes = await cdp.send("Runtime.evaluate", {
+            expression: "window.riscv_kernel.lastHalt()",
+            returnByValue: true,
+        });
+        halt = haltRes.result?.value ?? null;
+        if (halt && Number(halt.pc) === scheduler.value) break;
+    }
+    console.log(`· 断点跑了 ${rounds} 批 Continue`);
+
+    checks.push({
+        name: "断点命中时内核报告的 PC 落在那个符号的地址上",
+        ok: Boolean(halt) && Number(halt.pc) === scheduler.value,
+        detail: `halt=${JSON.stringify(halt)} expected="${expectedHex}"`,
+    });
+    checks.push({
+        name: "停下原因是「断点」（不是陷阱 / 跑完）",
+        ok: Boolean(halt) && halt.reason === "Breakpoint",
+        detail: `reason=${halt?.reason ?? "(无)"}`,
+    });
+
+    // -- DOM 里的 PC（用户看到的那一行）也要落在同一个地址 -----------------
+    let domPc = "";
+    const settleDeadline = Date.now() + PC_SETTLE_TIMEOUT_MS;
+    while (Date.now() < settleDeadline) {
+        const probe = await pageProbe(cdp);
+        domPc = String(probe?.pc ?? "").trim();
+        if (domPc === expectedHex) break;
+        await sleep(150);
+    }
+    checks.push({
+        name: "视图里的 PC 也落在那个符号的地址上（寄存器流推到视图）",
+        ok: domPc === expectedHex,
+        detail: `pc="${domPc}" expected="${expectedHex}"`,
+    });
+
+    // -- 撤掉断点（后面的 E-6 / E-8 不该再被它打断）------------------------
+    await cdp.send("Runtime.evaluate", {
+        expression: "window.riscv_kernel.clearBreakpoint(1)",
+        awaitPromise: true,
+        returnByValue: true,
+    }, 30000);
+
+    return { checks };
+}
+
+/**
+ * E-6（K-4）· 反汇编面板出现 osz 的**真** file 与 line。
+ *
+ * ⚠️ **断言特征，不断言具体路径**（路径会随 osz 的构建目录变）：
+ * `file` 必须**含 `.c`**，`line` 必须是**大于 0 的整数**。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @param {{name: string, value: number}} scheduler
+ * @param {number} elfEntry — ELF 的入口地址（兜底用的反汇编起点）
+ * @returns {Promise<{checks: object[]}>}
+ */
+async function runDisasmSourceProbe(cdp, opts, scheduler, elfEntry) {
+    /** @type {object[]} */
+    const checks = [];
+    /** @type {object[]} */
+    let rows = [];
+
+    /**
+     * 读一次面板上的反汇编行。
+     * @returns {Promise<object[]>}
+     */
+    async function readRows() {
+        const res = await cdp.send("Runtime.evaluate", {
+            expression: DISASM_ROWS_EXPRESSION,
+            returnByValue: true,
+        });
+        const value = res.result?.value;
+        return Array.isArray(value) ? value : [];
+    }
+
+    /**
+     * 让面板反汇编一段（**生产路径**：M-02 发信号 → `app.js` 发命令）。
+     * @param {number} addr
+     */
+    async function requestDisasm(addr) {
+        await cdp.send("Runtime.evaluate", {
+            expression: `window.dispatchEvent(new CustomEvent("riscv:command", { detail: { action: "disasm", params: { addr: ${addr}, count: 16 } } }));`,
+            returnByValue: true,
+        });
+    }
+
+    // -- 第 1 轮：**按钮**（用当前 PC 当起点）------------------------------
+    await cdp.send("Runtime.evaluate", {
+        expression: 'location.hash = "#/debug";',
+        returnByValue: true,
+    });
+    await sleep(300);
+    await cdp.send("Runtime.evaluate", {
+        expression: `document.querySelector('[data-action="disasm"]')?.click();`,
+        returnByValue: true,
+    });
+    let deadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < deadline) {
+        rows = await readRows();
+        if (rows.length > 0) break;
+        await sleep(200);
+    }
+    const pcRows = rows.slice();
+
+    // -- 第 2 轮（兜底）：PC 那一段没有行表时，改从**已知有源码的符号**
+    //    （调度器函数）开始反汇编 ---------------------------------------------
+    if (!pcRows.some((r) => r.file !== "" && r.line !== "")) {
+        await requestDisasm(scheduler.value);
+        deadline = Date.now() + opts.timeoutMs;
+        while (Date.now() < deadline) {
+            rows = await readRows();
+            if (rows.some((r) => r.file !== "" && r.line !== "")) break;
+            await sleep(200);
+        }
+    }
+
+    const all = [...pcRows, ...rows];
+    const withSource = all.filter((r) => r.file !== "" && r.line !== "");
+    const good = withSource.find(
+        (r) => r.file.includes(".c") && Number.isInteger(Number(r.line)) && Number(r.line) > 0,
+    );
+
+    checks.push({
+        name: "反汇编面板出现带**真源码路径**的条目（file 含 .c）",
+        ok: Boolean(good),
+        detail: good
+            ? `file="${good.file}" addr=${good.addr} line=${good.line}`
+            : `面板上 ${all.length} 条，没有一条带 .c 的源码路径：`
+                + JSON.stringify(all.slice(0, 3)),
+    });
+    checks.push({
+        name: "该条目的行号是**大于 0 的整数**（不是 0 / null）",
+        ok: Boolean(good)
+            && Number.isInteger(Number(good.line))
+            && Number(good.line) > 0,
+        detail: good ? `line=${good.line}` : "没有带行号的条目",
+    });
+
+    return { checks };
+}
+
+/**
+ * E-8（K-6）· 送一个字节 ⇒ guest 的 UART **RX 就绪**（LSR 的 bit0）。
+ *
+ * ⚠️ **断言要具体**：读 guest 的 UART0 的 LSR（`0x1000_0005`）⇒ 断言
+ * `value & 0x1 === 1`。
+ *
+ * ⚠️ **发送走终端输入框**（生产路径）——这同时是 K-1 的真机证据。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{checks: object[]}>}
+ */
+async function runUartRxProbe(cdp, opts) {
+    /** @type {object[]} */
+    const checks = [];
+
+    // -- 送一个字节（"A" = 0x41）-------------------------------------------
+    const sendRes = await cdp.send("Runtime.evaluate", {
+        expression: sendTerminalTextExpression("A"),
+        awaitPromise: true,
+        returnByValue: true,
+    });
+    const sent = sendRes.result?.value ?? null;
+    checks.push({
+        name: "在终端输入框敲一个字节并点「发送」",
+        ok: Boolean(sent?.ok),
+        detail: JSON.stringify(sent),
+    });
+
+    // -- 读 guest 的 LSR ---------------------------------------------------
+    // ⚠️ 读的是**外设寄存器**（UART0 是内存映射的）⇒ 用契约的
+    // `ReadMemory` 读 `0x1000_0005`。
+    let lsr = null;
+    const deadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < deadline) {
+        const res = await cdp.send("Runtime.evaluate", {
+            expression: `window.riscv_kernel.readMemory(${UART_LSR_ADDR}, "Byte")`,
+            awaitPromise: true,
+            returnByValue: true,
+        });
+        if (res.exceptionDetails) break;
+        const value = res.result?.value ?? null;
+        if (value && typeof value.value === "number") {
+            lsr = value.value >>> 0;
+            // ⚠️ **RX_VALID 置位**才算数 ⇒ 没置位就再读一次（读 LSR 本身
+            // 不会清掉它，但多读一次更稳）。
+            if ((lsr & LSR_RX_VALID) === 1) break;
+        }
+        await sleep(150);
+    }
+
+    checks.push({
+        name: `读得到 guest 的 UART LSR（0x${UART_LSR_ADDR.toString(16)}）`,
+        ok: lsr !== null,
+        detail: lsr === null ? "读不到（ReadMemory 失败？）" : `LSR=0x${lsr.toString(16)}`,
+    });
+    checks.push({
+        name: "LSR 的 bit0（RX_VALID）置位（字节进了 guest 的接收 FIFO）",
+        ok: lsr !== null && (lsr & LSR_RX_VALID) === 1,
+        detail: lsr === null
+            ? "读不到 LSR"
+            : `LSR=0x${lsr.toString(16)} (bit0=${lsr & 1})`,
+    });
+
+    return { checks };
 }
 
 // ---------------------------------------------------------------------------

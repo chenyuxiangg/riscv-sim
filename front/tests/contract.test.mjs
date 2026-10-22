@@ -402,6 +402,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Command.resolveLine(0)),
             variantOf(Command.exportTrace("Execution", "Csv", 0, 16)),
             variantOf(Command.setTraceEnabled(true)),
+            // 契约 v5 新增：往当前会话唯一的 UART0 写字节。
+            variantOf(Command.writeConsole([104, 105])),
         ].sort();
         assert.deepEqual(js, rust, "JS 命令变体与 Rust CommandPayload 不一致");
     });
@@ -523,6 +525,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 ResolveLine: Command.resolveLine(0),
                 ExportTrace: Command.exportTrace("Execution", "Csv", 0, 16),
                 SetTraceEnabled: Command.setTraceEnabled(true),
+                // 契约 v5：往当前会话唯一的 UART0 写字节。
+                WriteConsole: Command.writeConsole([104, 105]),
             },
             EventPayload: {
                 Tick: Event.tick(0, 0),
