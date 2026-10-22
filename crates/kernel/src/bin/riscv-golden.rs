@@ -415,7 +415,24 @@ fn run(cfg: &Config) -> Verdict {
         }
 
         if let StepOutcome::Trapped { cause } = outcome {
-            return Verdict::Error(format!("trap@{:#x}:{:?}", state.pc, cause));
+            // ⚠️ **陷阱不是错误** —— 它是程序的一部分。
+            //
+            // ISS 的 `enter_trap` 已经把 `mcause` / `mepc` / `mtval` /
+            // `mstatus` 写好，并把 PC 重定向到 `mtvec`（直接模式）或
+            // `mtvec + 4 × (cause & 7)`（向量模式）⇒ **陷阱已经投递完毕**。
+            //
+            // ⇒ 这里**继续跑**，让 guest 的 trap vector 去处理它。
+            // （`trap@0x80000004` 那个地址就是 trap vector 本身。）
+            //
+            // ⚠️ ** runaway 的兜底**：trap vector 自己再陷入 ⇒ 反复投递 ⇒
+            // 一直转到 `cfg.budget` 耗尽 ⇒ `Inconclusive`（NOVERDICT）——
+            // 这正是「程序发散」应有的判决，不是「平台故障」。
+            if cfg.verbose {
+                eprintln!(
+                    "[golden] trap at pc=0x{:08x} cause={:?} -> mtvec",
+                    state.pc, cause
+                );
+            }
         }
     }
 }
