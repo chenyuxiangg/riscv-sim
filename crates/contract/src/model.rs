@@ -547,6 +547,24 @@ pub struct TraceEvent {
     pub width: u8,
     /// Access direction.
     pub dir: TraceDir,
+    /// Whether this access was an **instruction fetch** rather than a
+    /// data access.
+    ///
+    /// ⚠️ **A fetch is a bus read like any other**, so the trace ring
+    /// (M-18) sees it too. Without this flag the two are
+    /// indistinguishable — and M-11's `TraceKind::Instruction` would
+    /// be **dead code**, which is exactly the "implemented but never
+    /// wired" shape the D-50 / D-51 ledger entries are about.
+    ///
+    /// The flag originates in M-14's `BusAccess::is_fetch` (added in
+    /// v0.13 for the watchpoint fix, V-A 🟠-2) and was carried up to
+    /// the contract in v3 (STAGE-5 §9.4).
+    ///
+    /// ⚠️ **This event carries no access *value*** — M-18's ring never
+    /// recorded one, so `data` in the exported trace is not available
+    /// for memory accesses (only for instructions). Filling that gap
+    /// means changing M-18's ring layout — P1, not this batch.
+    pub is_fetch: bool,
 }
 
 /// Edge event crossing the M-18 → M-19 boundary (M-19 v0.9 §1.1).

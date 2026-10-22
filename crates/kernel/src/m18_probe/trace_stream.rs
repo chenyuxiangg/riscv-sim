@@ -211,6 +211,7 @@ mod tests {
             addr,
             width: 4,
             dir: TraceDir::Write,
+            is_fetch: false,
         }
     }
 
@@ -306,12 +307,14 @@ mod tests {
             addr: 0,
             width: 1,
             dir: TraceDir::Read,
+            is_fetch: false,
         };
         let w = TraceEvent {
             t_ps: 0,
             addr: 0,
             width: 1,
             dir: TraceDir::Write,
+            is_fetch: false,
         };
         assert_eq!(r.dir.as_byte(), 0);
         assert_eq!(w.dir.as_byte(), 1);

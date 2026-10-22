@@ -238,6 +238,7 @@ mod field_tests {
             addr: 0x1000,
             width: 4,
             dir: TraceDir::Read,
+            is_fetch: false,
         };
         let json = serde_json::to_value(tr).expect("json");
         assert_decimal_string(&json, &["t_ps"], "model::TraceEvent::t_ps");
