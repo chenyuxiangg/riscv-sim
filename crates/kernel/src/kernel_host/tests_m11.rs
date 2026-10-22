@@ -60,6 +60,24 @@ fn demo_project() -> Project {
     }
 }
 
+/// DWARF 真产物的节区集合（`.debug_line` + `.debug_line_str`）。
+///
+/// ⚠️ 字节来自 **真工具链产物**（`riscv-none-elf-gcc` 15.2.0 编的真实
+/// RISC-V OS，完全链接）⇒ 仓库自包含，测试**不依赖**外部工具链。
+fn dwarf_sections() -> Vec<(String, Vec<u8>)> {
+    use crate::m11_symbol::dwarf::fixtures::{OSZ_DL, OSZ_DLS};
+    vec![
+        (
+            crate::m11_symbol::dwarf::DEBUG_LINE_SECTION.to_string(),
+            OSZ_DL.to_vec(),
+        ),
+        (
+            crate::m11_symbol::dwarf::DEBUG_LINE_STR_SECTION.to_string(),
+            OSZ_DLS.to_vec(),
+        ),
+    ]
+}
+
 /// 派发一条命令，返回它产生的事件。
 fn dispatch(host: &mut KernelHost, cmd: CommandPayload) -> Vec<EventPayload> {
     host.handle_message(&Message::command(1, cmd))
@@ -233,6 +251,59 @@ fn resolve_line_reports_the_degraded_state_when_there_is_no_dwarf() {
     assert_eq!(*addr, 0x1000);
     assert!(file.is_empty(), "没有 DWARF ⇒ 文件名是空串");
     assert_eq!(*line, 0, "没有 DWARF ⇒ 行号是 0");
+}
+
+#[test]
+fn resolve_line_returns_the_real_file_and_line_of_a_dwarf_image() {
+    // ⚠️ 验收 A-14：宿主 `ResolveLine` 命令返回**真的** `file` + `line`
+    // （契约形状**不变**：`SourceLocation { addr, file, line }`）。
+    //
+    // 夹具 = **真工具链产物**（`riscv-none-elf-gcc` 15.2.0 编的真实
+    // RISC-V OS，三个编译单元，DWARF 5）。
+    let mut host = KernelHost::new();
+    host.rebuild_symbol_index(&dwarf_sections())
+        .expect("索引重建不得报错");
+
+    assert_eq!(
+        host.dwarf_status(),
+        crate::m11_symbol::DwarfStatus::Supported(5),
+        "真产物的 DWARF 5 必须被**真的**解析"
+    );
+
+    // 命中 ⇒ 真的文件名 + 真的行号（真值来自 `addr2line` 与
+    // `readelf --debug-dump=decodedline` 两个**独立** oracle）。
+    let events = dispatch(&mut host, CommandPayload::ResolveLine { addr: 0x8000_0000 });
+    assert_eq!(events.len(), 1, "恰好一条事件：{events:?}");
+    let EventPayload::SourceLocation { addr, file, line } = &events[0] else {
+        panic!("没有 SourceLocation 事件：{events:?}");
+    };
+    assert_eq!(*addr, 0x8000_0000);
+    assert_eq!(
+        file, "/tmp/osz-probe/kernel/base/hook/src/hook.c",
+        "文件名必须来自 `.debug_line_str`（真实路径）"
+    );
+    assert_eq!(*line, 8, "行号必须是真的");
+
+    // 另一个编译单元的地址 ⇒ 也能查到（多单元归并）。
+    let events = dispatch(&mut host, CommandPayload::ResolveLine { addr: 0x8000_0060 });
+    let EventPayload::SourceLocation { file, line, .. } = &events[0] else {
+        panic!("没有 SourceLocation 事件：{events:?}");
+    };
+    assert_eq!(file, "/tmp/osz-probe/kernel/base/init/src/init.c");
+    assert_eq!(*line, 12);
+
+    // ⚠️ 「查过行表、没命中」⇒ `line = u32::MAX`（**不是** 0 —— 0 是
+    // 「没有 DWARF」）。两态**不得混**（STAGE-7 裁决 J）。
+    let events = dispatch(&mut host, CommandPayload::ResolveLine { addr: 0x1234_5678 });
+    let EventPayload::SourceLocation { file, line, .. } = &events[0] else {
+        panic!("没有 SourceLocation 事件：{events:?}");
+    };
+    assert!(file.is_empty());
+    assert_eq!(
+        *line,
+        u32::MAX,
+        "有 DWARF 但地址没命中 ⇒ `u32::MAX`（与「没有 DWARF」的 0 不同）"
+    );
 }
 
 #[test]
@@ -804,7 +875,7 @@ fn a_project_without_debug_sections_still_loads() {
     assert_eq!(host.symbol_count(), 0);
     assert_eq!(
         host.dwarf_status(),
-        Some(crate::m11_symbol::DwarfStatus::Absent),
+        crate::m11_symbol::DwarfStatus::Absent,
         "装载过了，但这个镜像没有 DWARF"
     );
 
