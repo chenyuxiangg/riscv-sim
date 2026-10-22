@@ -146,7 +146,7 @@ use crate::m06_elf::{DefaultLoader, Kind as LoadKind, ParseLimits};
 use crate::m11_symbol::disasm::fetch_instruction_code as m11_fetch_instruction_code;
 use crate::m11_symbol::trace::{E_CTX_03_ILLEGAL_EXPORT_FORMAT, TRACE_FAMILY};
 use crate::m11_symbol::{
-    Disassembler, DwarfLines, LineLookup, SymbolService, SymbolTable, TraceBuffer, TRACE_CAP,
+    Disassembler, LineLookup, SymbolIndex, SymbolService, TraceBuffer, TRACE_CAP,
 };
 use crate::m14_bus::{Bus, BusWidth};
 use crate::m15_peripheral;
@@ -471,15 +471,15 @@ pub struct KernelHost {
     snapshots: SnapshotManager,
     /// M-11 的反汇编器（按地址缓存 + 自修改代码失效，裁决 G）。
     disassembler: Disassembler,
-    /// M-11 的符号表（`.symtab` 解析结果）。
+    /// M-11 的索引：**符号表 + DWARF 行表**（`SymbolService` 端口的生产实现）。
     ///
     /// ⚠️ **装载工程时无条件重建**（STAGE-5 §9.2）：装载新工程 = 新会话，
     /// 旧工程的符号留着就是**两个真相**。
-    symbols: SymbolTable,
-    /// M-11 的 DWARF 行表（Wave 1 = **只识别不解析** ⇒ 恒降级态）。
     ///
-    /// `None` = **没有 DWARF**（还没装载镜像，或镜像里没有 `.debug_line`）。
-    dwarf: Option<DwarfLines>,
+    /// ⚠️ **为什么合成一个索引**（STAGE-7 裁决 J）：端口的 `resolve_line`
+    /// 必须能分清「查过行表、没命中」（`Missed`）与「没查」（`NoDwarf`）⇒
+    /// 端口必须**同时**持有符号表与行表。
+    index: SymbolIndex,
     /// M-11 的执行轨迹环（指令 + 访存）。
     ///
     /// ⚠️ 它是**访存历史的持有者**（D-51）：M-18 的环是**中转站**，
@@ -508,8 +508,8 @@ impl std::fmt::Debug for KernelHost {
             // M-11 的四个服务对象（契约 v3 的调试面）——它们的状态是
             // 「会话里发生了什么」的一部分，日志行要看得见。
             .field("disasm_cache", &self.disassembler.cache_len())
-            .field("symbols", &self.symbols.len())
-            .field("dwarf", &self.dwarf.as_ref().map(|d| d.status()))
+            .field("symbols", &self.index.symbol_count())
+            .field("dwarf", &self.index.dwarf_status())
             .field("trace_len", &self.trace.len())
             .field("trace_dropped", &self.trace.dropped())
             .finish()
@@ -558,8 +558,7 @@ impl KernelHost {
             // 镜像 ⇒ 确实没有 DWARF —— 不必为了造一个「空的行表」而
             // `unwrap` 一个永远走不到的错误分支（WASM 里 panic = Worker 崩）。
             disassembler: Disassembler::new(),
-            symbols: SymbolTable::default(),
-            dwarf: None,
+            index: SymbolIndex::default(),
             trace: TraceBuffer::new(TRACE_CAP),
             trace_events_discarded: 0,
         };
@@ -915,7 +914,7 @@ impl KernelHost {
 
     /// M-11 的符号表里有多少条符号。
     pub fn symbol_count(&self) -> usize {
-        self.symbols.len()
+        self.index.symbol_count()
     }
 
     /// 按**名字**查符号（走 M-11 的 [`SymbolService`] **端口**）。
@@ -926,7 +925,7 @@ impl KernelHost {
     /// 此前**全仓 0 处实现** ⇒ 它是**死代码**，「按地址查符号」这条能力
     /// 也**没有生产路径**。⇒ 宿主走端口 ⇒ 端口有实现者、也有调用者。
     pub fn lookup_symbol(&self, name: &str) -> Option<riscv_sim_contract::model::Symbol> {
-        self.symbols.lookup_symbol(name).ok().flatten()
+        self.index.lookup_symbol(name).ok().flatten()
     }
 
     /// 按**地址**查符号（走 M-11 的 [`SymbolService`] **端口**）—— 命中
@@ -934,12 +933,12 @@ impl KernelHost {
     ///
     /// 比所有符号的起始地址都小 ⇒ `None`（**不是错误**）。
     pub fn symbol_at(&self, addr: u32) -> Option<riscv_sim_contract::model::Symbol> {
-        self.symbols.symbol_at(addr).ok().flatten()
+        self.index.symbol_at(addr).ok().flatten()
     }
 
-    /// M-11 的 DWARF 状态（`None` = 这个会话没有 DWARF）。
-    pub fn dwarf_status(&self) -> Option<crate::m11_symbol::DwarfStatus> {
-        self.dwarf.as_ref().map(|d| d.status())
+    /// M-11 的 DWARF 状态（`Absent` = 这个会话没有 DWARF）。
+    pub fn dwarf_status(&self) -> crate::m11_symbol::DwarfStatus {
+        self.index.dwarf_status()
     }
 
     /// M-11 的执行轨迹环里有多少条目。
@@ -1543,12 +1542,10 @@ impl KernelHost {
     /// 降级态（真正的行表解析是 Wave 2）⇒ 宿主**不自己编造行号**，只把
     /// M-11 的判定原样映射成契约形状（映射点见 [`source_location_event`]）。
     fn on_resolve_line(&mut self, addr: u32) -> Vec<EventPayload> {
-        let lookup = match self.dwarf.as_ref() {
-            Some(dwarf) => dwarf.resolve(addr),
-            // 这个会话**没有** DWARF ⇒ 降级态（与「有 DWARF 但没命中」
-            // 是两回事，宿主不能把它们混成一个）。
-            None => LineLookup::NoDwarf,
-        };
+        // ⚠️ **走 M-11 的端口**（`SymbolService::resolve_line`）—— 端口
+        // 自己分得清「查过行表、没命中」（`Missed`）与「没查」（`NoDwarf`），
+        // 宿主**不自己编造**行号（STAGE-7 裁决 J）。
+        let lookup = self.index.resolve_line(addr).unwrap_or(LineLookup::NoDwarf);
         vec![source_location_event(addr, lookup)]
     }
 
@@ -1801,12 +1798,9 @@ impl KernelHost {
         &mut self,
         sections: &[(String, Vec<u8>)],
     ) -> Result<(), PlatformError> {
-        // 先把两个索引都**算出来**再落位 ⇒ 要么都换掉，要么都不换
+        // 先把索引**算出来**再落位 ⇒ 要么都换掉，要么都不换
         // （不会留下「符号是新的、行表是旧的」这种拼接体）。
-        let symbols = SymbolTable::from_sections(sections)?;
-        let dwarf = DwarfLines::from_sections(sections)?;
-        self.symbols = symbols;
-        self.dwarf = Some(dwarf);
+        self.index = SymbolIndex::from_sections(sections)?;
         self.disassembler = Disassembler::new();
         self.trace.clear();
         Ok(())
