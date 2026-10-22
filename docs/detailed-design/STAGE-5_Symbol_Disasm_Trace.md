@@ -337,7 +337,7 @@ crates/kernel/src/m11_symbol/
 | 6 | 符号按地址查 | `symbol_at(addr)` ⇒ 命中的符号名与 `nm -n` 一致 |
 | 7 | 符号按名查 | `lookup_symbol(name)` ⇒ 地址与 `nm` 一致；未知名 ⇒ `None`（**不是错误**） |
 | 8 | 符号表上限 | 超过 `ParseLimits.symbol_count` ⇒ **拒绝**（不是截断后静默少给） |
-| 9 | 调试节区上限 | 调试节区总字节超 `debug_section_bytes` ⇒ **拒绝**（`E_BUS` 族或 `E_CTX` 族，**一场景一码**） |
+| 9 | 调试节区上限 | 调试节区总字节超 `debug_section_bytes` ⇒ **拒绝**（不是截断后静默少给） |
 | 10 | `Disasm` 命令 → 事件 | 宿主 `handle` 一条 `Disasm` ⇒ **恰好一条** `Disasm` 事件，形状与 §3.2 精确一致 |
 | 11 | `ResolveLine` 命令 → 事件 | ⇒ 恰好一条 `SourceLocation` 事件；**两态可区分**（`line=0` vs `line=u32::MAX`） |
 | 12 | `ExportTrace`（波形） | `source=Waveform, format=Csv` ⇒ 数据**来自 M-19 的环**（**不是** M-18 的边沿存储）；`format=Vcd` ⇒ 合法 |
@@ -351,6 +351,13 @@ crates/kernel/src/m11_symbol/
 | 20 | 前端导出 | 前端可发起导出并拿到 `TraceExport` 事件的 `chunk` |
 | 21 | `schema_version` | 契约层与前端镜像**都是 3**；`Negotiate` 回显 3 |
 | 22 | 主题表一致 | Rust 契约层与 `front/lib/message.js` 的「变体 → topic」映射**逐字一致** |
+
+> ⚠️ **错误族的订正**（对着 M-06 的既有约定核过）：验收 #9 原写「`E_BUS` 族或
+> `E_CTX` 族」——**错**。M-06 的模块契约明写「所有错误用
+> `ErrorFamily::Loader`（`LDR` 族）」，且 M-06 **没有任何** `E_BUS` /
+> `E_CTX` 用例。⇒ 按**模块既有约定**（一场景一码、码族随模块）：
+> - 畸形节区表 ⇒ **`E_LDR-01`**（malformed）
+> - 调试节区总字节超限 ⇒ **`E_LDR-02`**（parse-limit）
 
 > ⚠️ **每一条验收项都必须在变异自检里有对应的反向变异**（v0.19 批立的纪律：**有正向用例、没有反向变异** = 判别力缺口）。
 
@@ -390,3 +397,73 @@ crates/kernel/src/m11_symbol/
 - 本文**冻结**：§2 的 8 条裁决 · §3 的契约形状 · §4 的模块结构 · §5.2 的 22 条验收清单 · §6 的 lane 划分。
 - 实现过程中若发现本文**自相矛盾**或**与代码现状冲突** ⇒ **先改本文**（并记入 REVIEWS.md §5 变更索引），**再改代码**。
 - 本批**不修改**：`M-06` 的 `segments` / `entry` 语义 · `M-13` 的任何文件 · `M-19` 的环实现 · 契约层既有命令与事件的形状（**只增不改**）。
+
+---
+
+## 9. 宿主接线细则（Lane D）
+
+> 追加于 Lane A 之后。§9.1 澄清一个**容易踩的坑**，§9.2~§9.6 是接线的逐条要求。
+
+### 9.1 这四个事件是**回复事件**，**不经 topic 过滤**
+
+宿主既有约定（`kernel_host/mod.rs` 的模块注释）：「**回复事件不走 topic 过滤**：`Registers` / `Negotiated` 是命令的回复」。前端 `m05_commandrouter.js` 用传输帧的 **`reqId`** 关联「命令 → 回复」。
+
+⇒ `Disasm` / `SourceLocation` / `TraceExport` / `TraceState` **都是命令的回复**：
+- 前端发命令 → 收到回复 → 用 `reqId` 归位 ⇒ **不需要先订阅**；
+- 它们在 `EVENT_TOPIC` 里的登记**与 `Registers` / `Negotiated` 同惯例**（登记变体名 → topic 名的字典），但**当前不构成可订阅的流**；
+- ⛔ **不要**为它们实现「订阅后才推送」——那会让前端等不到回复（回复本来就直发给发起方）。
+
+### 9.2 装载工程时重建 M-11 的索引
+
+`LoadProject` 时宿主把 M-06 的 `LoadImage.debug_sections` 交给 M-11：
+- `SymbolTable::from_sections(&debug_sections)`（Lane C1）
+- `DwarfLines::from_sections(&debug_sections)`（Lane C2）
+
+⚠️ **必须重建，不能缓存**：装载新工程 = 新会话（D-45 的既有教训：装载工程后内核侧的订阅/索引会失效，必须**强制**重建，幂等的「已就绪」检查不够）。⇒ 宿主在 `on_load_project` 里**无条件**重建这两个索引。
+
+### 9.3 `Disasm` 的取指来源
+
+宿主把 **M-17 的读内存**注入 `Disassembler` 的取指回调（M-11 **不依赖** M-17 ⇒ 依赖方向单向，见 LLD §9.1）。
+
+⚠️ 读未映射 ⇒ **提前结束序列、返回部分序列**，**不是**错误（LLD 11-3）。
+
+### 9.4 访存轨迹的两条来源（**闭环 D-51**）
+
+- **指令轨迹**（kind=0）：M-17 的指令钩子。
+- **访存轨迹**（kind=1 读 / kind=2 写）：M-18 的 `drain_trace()`。
+
+⚠️ **D-51 的处置口径**：M-18 的环（`TRACE_CAP = 200 000`）在 M-11 落地前**只写不读**（常驻 3~5 MB，边沿之外的数据全部白攒）。台账同时警告「**不能简单地在宿主里定期 drain 掉**——那会把 M-11 要用的历史冲掉」。
+⇒ **正解 = drain 与转移同时发生**：宿主每次从 M-18 `drain_trace()` 拿到的**立刻**进 M-11 的 `TraceBuffer`（M-11 的环才是**历史的持有者**）⇒ M-18 的环不再无界增长，而 M-11 要的历史一条不少。
+
+### 9.5 导出的两条路由（**闭环 D-50**）
+
+| `source` | `format` | 数据源 | 处置 |
+| --- | --- | --- | --- |
+| `Waveform` | `Csv` | **M-19 的环** | 调 M-19 的 `export_csv`（已有） |
+| `Waveform` | `Vcd` | **M-19 的环** | 调 M-19 的 `export_vcd`（已有） |
+| `Waveform` | `Json` | — | **拒绝** `E_CTX-03`（M-19 无 JSON 波形导出） |
+| `Execution` | `Csv` | **M-11 的 `TraceBuffer`** | Lane C2 的 `export` |
+| `Execution` | `Json` | **M-11 的 `TraceBuffer`** | Lane C2 的 `export` |
+| `Execution` | `Vcd` | — | **拒绝** `E_CTX-03`（执行轨迹不是信号波形） |
+
+⚠️ **D-50 的要点**：波形导出的数据源必须是 **M-19 的环**，**不是** M-18 的边沿存储 —— 否则 M-19 的环永远是「只写不读」。
+
+### 9.6 topic 常量
+
+在 `kernel_host` 里定义 4 个常量，值与前端 `EVENT_TOPIC` **逐字相同**（见 §3.5）：
+```rust
+pub const TOPIC_DISASM: &str = "debug.disasm";
+pub const TOPIC_SOURCE: &str = "debug.source";
+pub const TOPIC_EXPORT: &str = "debug.export";
+pub const TOPIC_TRACE: &str = "debug.trace";
+```
+⚠️ 但按 §9.1，这四个事件**当前不经 topic 过滤** ⇒ 这四个常量是**登记用**的（将来做推送流时启用），**不要**据此实现「订阅后才推送」。
+
+### 9.7 `SetTraceEnabled` 的副作用
+
+开启后：
+- 宿主的**访存轨迹转移**（§9.4）开始把 M-18 的事件喂进 M-11 的环；
+- 事件里回显 `enabled`（前端据此显示**降速提示**，评审 R9）。
+
+⚠️ `enabled = false` ⇒ **零开销**：宿主**不调用** `record`，M-11 的 `record` 自己也立即返回（双保险：规格 §2 裁决 H）。
+
