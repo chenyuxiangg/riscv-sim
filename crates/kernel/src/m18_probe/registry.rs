@@ -577,6 +577,12 @@ impl ProbeRegistry {
             addr: access.addr,
             width,
             dir,
+            // ⚠️ 取指与数据访问在总线上**都是读** —— 这个标志是唯一
+            // 能把它们分开的依据（M-14 的 `BusAccess::is_fetch`，
+            // v0.13 为观察点修的那个）。M-11 的执行轨迹要用它把取指
+            // 映射成 kind=0（指令），否则 `TraceKind::Instruction`
+            // 会是死代码。
+            is_fetch: access.is_fetch,
         };
         let _ = self.trace.push(ev);
     }

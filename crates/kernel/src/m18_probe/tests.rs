@@ -332,6 +332,30 @@ fn attach_conflict_rejects_existing_channel() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn a_fetch_access_is_marked_as_such_in_the_trace() {
+    // 取指与数据访问在总线上**都是读** —— 唯一能把它们分开的，是
+    // M-14 的 `BusAccess::is_fetch` 标志（v0.13 为观察点修的那个）。
+    //
+    // ⚠️ 这个标志必须**一路带到契约层**（契约 v3 的 `TraceEvent::is_fetch`）：
+    // M-11 的执行轨迹靠它把取指映射成 kind=0（指令），否则
+    // `TraceKind::Instruction` 会是**死代码**（D-50 记的「实现齐了 ≠
+    // 接上了」那种形态）。
+    let mut reg = ProbeRegistry::new();
+
+    let mut fetch = make_bus_access(10, 0x1000, BusWidth::Word, AccessDir::Read, true);
+    fetch.is_fetch = true;
+    reg.record_bus_access(&fetch);
+
+    let data = make_bus_access(20, 0x2000, BusWidth::Word, AccessDir::Read, true);
+    reg.record_bus_access(&data);
+
+    let drained: Vec<TraceEvent> = reg.drain_trace();
+    assert_eq!(drained.len(), 2, "两条访问都该进环");
+    assert!(drained[0].is_fetch, "取指没有带上 is_fetch 标志");
+    assert!(!drained[1].is_fetch, "数据访问被误标成取指");
+}
+
+#[test]
 fn bus_trace_ring_drops_oldest_on_overflow() {
     let mut reg = ProbeRegistry::new();
     // Push exactly TRACE_CAP + 5 events. The oldest 5 should be

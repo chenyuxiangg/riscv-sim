@@ -49,7 +49,7 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 - Build (native):  `cargo build`（开发）/ `cargo build --release`（发布）
 - Build (WASM):    `tools/build-wasm.sh` 或 `tools/build-wasm.sh --release`
 - Test:            `cargo test --workspace`（单元 + 集成 + 黄金对拍）
-- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，**208 用例 / 35 suite**；Node ≥ 22）
+- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，**228 用例 / 39 suite**；Node ≥ 22）
 - Test (WASM 桥): `node tools/wasm-smoke.mjs`（需先 `tools/build-wasm.sh`；在 Node 里驱动真 wasm 产物跑完整桥，产物不在则跳过）
 - Test (浏览器真机): `tools/browser-verify.mjs`（零依赖 CDP 脚本，需本机 Chrome + 已构建的 WASM 产物 + `python3 -m http.server 8080 --directory front`；**不进默认门禁**，按需运行）
 - Test (黄金对拍): `tools/fetch-golden-deps.sh`（拉 riscv-tests + 交叉工具链到**仓库外**）→ `tools/golden-run.sh --self-check`（变异金丝雀）→ `tools/golden-run.sh --keep-going`（全量）
@@ -103,29 +103,29 @@ riscv_sim/
 | 编号 | 模块 | 物理位置 | 状态 |
 | --- | --- | --- | --- |
 | M-01 | 工作台装配与多视图路由 | `front/views/m01_workbench.js` | ✅ v0.10 闭环（20/20 评审） |
-| M-02 | 视图组件库 | `front/views/m02_viewcomponents.js` | ✅ v0.10 闭环；v0.11 加调试命令条 + 寄存器/内存视图 |
+| M-02 | 视图组件库 | `front/views/m02_viewcomponents.js` | ✅ v0.10 闭环；v0.11 加调试命令条 + 寄存器/内存视图；✅ **v0.20：反汇编面板**（PC 高亮 V-12 / 压缩指令原样显示 / 导出入口与「继续导出」按钮） |
 | M-03 | 视图状态管理 | `front/views/m03_viewstore.js` | ✅ v0.10 闭环 |
 | M-04 | 会话管理器 | `front/services/m04_session.js` | ✅ v0.11 实现（状态机 + 断线重连） |
 | M-05 | 命令路由与事件分发 | `front/services/m05_commandrouter.js` | ✅ v0.11 实现（订阅/退订/一次性订阅）；v0.11.1 补 `once()` 一次性语义的观察与回归用例；✅ **v0.17 契约 v2**：topic 路由**表驱动**（唯一真相 = `front/lib/message.js` 的 `EVENT_TOPIC`），新增 3 个事件变体的路由（`Registers` → `sim.registers` / `Negotiated` → `sim.negotiated` / `SimStateDelta` → `sim.state.delta`）+ `WaveformHistory` 换 topic（`waveform.delta` → `waveform.history`）——**3 条新命令**（`ReadRegisters` / `WriteRegister` / `Negotiate`）的回复经同一条表驱动路径落位 |
-| M-06 | ELF / Raw-HEX 解析器 | `crates/kernel/src/m06_elf/` | ✅ v0.11 加固 + **首次模块级 review**（D-03 阻断级消除）；v0.11.1 检视轮再修 IHEX 嗅探判据 + bss gap 溢出 |
+| M-06 | ELF / Raw-HEX 解析器 | `crates/kernel/src/m06_elf/` | ✅ v0.11 加固 + **首次模块级 review**（D-03 阻断级消除）；v0.11.1 检视轮再修 IHEX 嗅探判据 + bss gap 溢出；✅ **v0.20：带出调试节区原始字节**（`LoadImage.debug_sections` + `ParseLimits.debug_section_bytes = 8 MiB`）——M-06 仍是**唯一**的 ELF 容器解析者，M-11 只解析 M-06 带出的节区字节 ⇒ **M-11 没有引入第二套 ELF 解析器**；⚠️ 但台账 🟡-4 的**残留动作仍在**：`riscv-golden` 自己的 `find_symbol`（`crates/kernel/src/bin/riscv-golden.rs`）**还是一套迷你 ELF 符号读取器** ⇒ 待切到 M-11（P1，M-11 侧能力已具备） |
 | M-07 | 传输适配器 | `front/services/m07_transport.js` | ✅ v0.11 实现（Worker + WebSocket 双适配器）；**v0.13 第 1 阶段起默认挂真 WASM 内核**（`front/kernel-worker.js`），mock 退化为测试替身；✅ **v0.17 契约 v2：传输帧新增 `crc` 字段**（`front/lib/frame.js` 实现 CRC-32 / IEEE 802.3 反射式，覆盖 payload 的**规范 JSON**（递归排序键）；8 位小写 hex；**缺失 → 放行**（旧生产者）/ **算错 → 拒绝该帧**（`E_PROTO-06`））——`crc` 属**前端传输帧**，**不在**契约信封上 |
 | M-08 | 断点管理器 | `crates/kernel/src/m08_breakpoint/` | ✅ **v0.13 第 1 阶段实现**（53 行 stub → 457 行）：断点表（按 addr 索引 + id 反查）/ 观察点表（地址 + 方向 + 宽度匹配）/ `hit_check` 取指前命中 / 未对齐与重复注册拒 `E_CTX-07` |
 | M-09 | 单步引擎 | `crates/kernel/src/m09_step/` | ✅ **v0.13 第 1 阶段实现**（71 行 stub → 308 行）：`StepKind` 四种粒度 + `Plan` + `StepOutcome`；`Over`/`Out`/`Line` **显式降级**为指令级（`degradation()` 把降级说出来，不悄悄降级） |
 | M-10 | 寄存器内存服务 | `front/services/m10_registermemory.js` | ✅ v0.11 实现（订阅寄存器/内存快照）；v0.11.1 补断线重连后重订阅；**v0.13 补 `resubscribe()` / `loadProject()`**——装载工程后内核侧订阅会失效，必须**强制**重订（幂等的 `ensureSubscribed()` 不够，台账 **D-45**）；✅ **v0.17 契约 v2：接 `ReadRegisters` / `WriteRegister` 命令 + `Registers` 事件**（`readRegisters()` / `writeRegister()` + `applyRegisters()` 落缓存；⚠️ `count = 0` **回复空区间**、**不是不回复**——见冻结规格 §5） |
-| M-11 | 符号表/DWARF/反汇编/trace 导出 | `crates/kernel/src/m11_symbol/` | stub |
+| M-11 | 符号表/DWARF/反汇编/trace 导出 | `crates/kernel/src/m11_symbol/` | ✅ **v0.20 落地**（53 行 stub → **3 206 行 / 75 条用例**）：五个子模块（`render.rs` 助记符渲染 / `symbols.rs` `.symtab` 解析 / `disasm.rs` 反汇编序列 + 按地址缓存 / `dwarf.rs` 行表降级态 / `trace.rs` 轨迹环 + CSV/JSON 导出）+ `SymbolService` 端口；**反汇编复用 M-13 的 `Decoder` + `classify`**（裁决 A ⇒ **零第二套解码表**——LLD §3.4 的「独立表 + 一致性门禁」作废，漂移**结构上不可能**）；**只出 ISA 助记符、压缩指令保留 `c.` 前缀、不做伪指令别名**（裁决 C，黄金参照 = `objdump -d -M no-aliases`）；**M-11 不依赖 M-19**（裁决 D ⇒ 导出由宿主路由）；⚠️ **DWARF 只识别不解析**（v2/v3/v4 识别、v5 报版本号；`resolve()` 在**所有**状态下都返回无 DWARF ⇒ **绝不**返回「未命中」——那等于宣称「查过行表、没命中」；Wave 2 才给行号）；⚠️ **访存轨迹不含访存值**（要改 M-18 的环布局，P1） |
 | M-12 | 事件驱动仿真引擎 | `crates/kernel/src/m12_engine/` | ✅ v0.11 加固（快照还原 now_ps+事件队列、推进不空转、seq 不撞号）；v0.11.2 增契约快照 DTO 转换层（`snapshot_dto` / `restore_dto`，**先校验后应用**）+ `Engine::reset()`；✅ **v0.15 D-07：唯一主循环 `run_until(executor, until_ps)`（LLD §3.1 结构）+ `InstructionExecutor` 内部接缝（M-12 不依赖 M-13）+ `tick_peripherals` 唯一外设时钟同步点 + `TIME_QUANTUM_PS` 订正为 1 µs**；⚠️ **至今无独立模块级 review**（台账 D-30） |
 | M-13 | RISC-V ISS（RV32IMC） | `crates/kernel/src/m13_iss/` | ✅ v0.11 **RV32I 全集 41 条** + 模块级 review；v0.11.1 检视轮修 SYSTEM funct3 阻断级缺陷；v0.12 **RV32I 与 Spike 逐例对拍通过**（语料 51 例中 42 例判决一致；失败用例号一致性由变异金丝雀证明）；v0.13 取指改走 `Bus::read_fetch`（**取指不匹配观察点**，V-A 🟠-2）；✅ **v0.16 M+C 扩展落地**（**RV32M 8 条 + RV32C 26 条**）：`compressed.rs` 字段级展开 + `alu.rs` 乘除 8 函数 + `Decoded` 增 `compressed`/`compressed_raw`/`illegal`；**golden 语料 51/51 全通**（D-43 闭环）；✅ **v0.19 M-16 落地批**（**6 856 行 / 187 条用例**，v0.19 批重算）：新增 **CSR 指令族**（`csrrw` / `csrrs` / `csrrc` / `csrrwi` / `csrrsi` / `csrrci`）+ **`mret`** + **唯一**陷阱入口 `enter_trap`（`mepc` / `mcause` / `mtval` 写 CSR、`mstatus.MIE` 关中断、跳 `mtvec`）；**`TrapCause` 拆三变体**（取指 0 / 读 4 / 写 6 —— **D-63**）；`mtval` 落 CSR `0x343`（**D-64**）；⚠️ **`StepOutcome` 只剩 `Advanced` / `Trapped`**（`HostPause` / `Breakpoint` / `Watchpoint` 三个死变体已删 —— **D-59 / D-72**）；⚠️ **M-13 只管写 CSR + 回报「刚写了哪个 CSR」**（`Iss::take_last_csr_written`），平台副作用在 M-17 |
 | M-14 | 总线与内存映射 | `crates/kernel/src/m14_bus/` | ✅ v0.4 完成 + v0.7.2 补完；v0.11 接线 PR；v0.13 新增 `read_only()`（调试读不计入统计 / trace / 观察点）与 `load_bytes()`（镜像装载的**唯一**写路径），并给 `BusAccess` 增 `is_fetch` 标记（**取指 vs 数据访问**）；**D-46 增 `add_hook()`（追加式 hook，`set_hook` 保留「替换全部」语义）+ `peripheral_instances()` + `tick_peripherals()`**；✅ **v0.18 会话快照：新增 `export_map()` / `load_map()` + `export_pages()` / `load_pages()`**（`load_map` 重建 **RAM 清零** / **ROM 原地保留内容**（`base`/`size` 不符报 `E_BUS-12`） / **外设区域原地保留**；新增 `E_BUS-10/11/12`） |
 | M-15 | 外设模型层 | `crates/kernel/src/m15_peripheral/` | ✅ v0.7 三外设 + v0.11 接线 PR；✅ **v0.18 会话快照：新增 `session_state()` / `restore_session_state()` + 自由函数 `collect_session_state()` / `restore_session_states()` / `validate_session_states()`**（回灌**两阶段**：先全量**只读**校验，全过才写一个字节） |
 | M-16 | 中断控制器 | `crates/kernel/src/m16_interrupt/` | ✅ **v0.19 落地**（44 行 stub → **1 453 行**，31 条用例）：挂起队列（按 `(request_time_ps, insert_seq)` **保序**）/ **同线去重** / 优先级仲裁（最高优先，同级按插入序）/ 量子边界 `poll()`（刷新 `mie` 使能 + 定时器电平轮询 + `mstatus.MIE` 闸门 + `active_irq` 单级防护）/ **拉取式**交付（`take_intr` **取走即消失**）/ `export_state()` + `load_state()`（**整体替换**）/ 脉冲回调（**D-26** 的生产者）；⚠️ **`mie` 位映射的唯一互译点是契约层 `mie_bit_for_line`**（`line` 空间 1/2/3 ↔ `mie` 位 11/7）；⚠️ **`mip` 无生产者**（guest 读 `mip` 恒得 0 → 台账 **D-84**，P1） |
-| M-17 | ExecutionBackend 执行后端 | `crates/kernel/src/m17_backend/` | ✅ **v0.13 第 1 阶段实现**（stub → **2 069 行**，v0.19 批重算）：`step_n` 真正驱动 M-13 ISS（断点取指前命中 / 陷阱 / 观察点总线 hook 命中）、`read_memory` / `write_memory` 接 M-14 总线、`set_breakpoint` / `set_watchpoint` 接 M-08 表；v0.11.2 的 `snapshot_full` / `restore_full` 接线保持；**D-46：观察点 hook 改 `add_hook`（不顶掉别人的）+ 每条指令前同步一次外设时钟（边沿才有真实时间戳）**；✅ **v0.19 M-16 落地批**：取指边界按「`now_ps - last_poll_ps >= TIME_QUANTUM_PS`」**采样** → `poll()` → **拉取式**取走交付 → `enter_trap`（**中断不停批次**）；**`irq_clear` CSR 写的副作用**（掩码 **bit L = 线 L**）落在 M-17；⚠️ **判据是「这条指令写了 `irq_clear`」**（M-13 回报），**不是**「值变了」——后者会把**第二次**清除**静默丢弃** ⇒ 那条线被**永久堵死**（v0.19 检视轮 **F-1**）；✅ **v0.15 D-07：`IssExecutor` 实现 M-12 的 `InstructionExecutor` 接缝（指令驱动与时间驱动**共用一条** ISS 路径）+ `install_peripheral_ticker`（外设 tick 接缝）+ `pending_writes` 真正提交到总线 + `continue_until_event` 走唯一主循环** |
-| M-18 | 探针 | `crates/kernel/src/m18_probe/` | ✅ v0.8 完整 `ProbeRegistry` + v0.9 `EdgeSink` + v0.11 接线 PR；v0.11.1 修总线 hook 的 RefCell 重入 panic；**D-46：正式挂上生产总线**（此前只在测试里接线） |
+| M-17 | ExecutionBackend 执行后端 | `crates/kernel/src/m17_backend/` | ✅ **v0.13 第 1 阶段实现**（stub → **2 119 行**，v0.20 批重算）：`step_n` 真正驱动 M-13 ISS（断点取指前命中 / 陷阱 / 观察点总线 hook 命中）、`read_memory` / `write_memory` 接 M-14 总线、`set_breakpoint` / `set_watchpoint` 接 M-08 表；v0.11.2 的 `snapshot_full` / `restore_full` 接线保持；**D-46：观察点 hook 改 `add_hook`（不顶掉别人的）+ 每条指令前同步一次外设时钟（边沿才有真实时间戳）**；✅ **v0.19 M-16 落地批**：取指边界按「`now_ps - last_poll_ps >= TIME_QUANTUM_PS`」**采样** → `poll()` → **拉取式**取走交付 → `enter_trap`（**中断不停批次**）；**`irq_clear` CSR 写的副作用**（掩码 **bit L = 线 L**）落在 M-17；⚠️ **判据是「这条指令写了 `irq_clear`」**（M-13 回报），**不是**「值变了」——后者会把**第二次**清除**静默丢弃** ⇒ 那条线被**永久堵死**（v0.19 检视轮 **F-1**）；✅ **v0.15 D-07：`IssExecutor` 实现 M-12 的 `InstructionExecutor` 接缝（指令驱动与时间驱动**共用一条** ISS 路径）+ `install_peripheral_ticker`（外设 tick 接缝）+ `pending_writes` 真正提交到总线 + `continue_until_event` 走唯一主循环**；✅ **v0.20：指令边界把虚拟时间告诉总线**（`self.bus.set_now_ps(now_ps)`）——M-14 的 `BusAccess::ts_ps` 由此才有真实时间；⚠️ **此前生产路径**从未调用过它** ⇒ 访存轨迹的时间戳**恒为 0**（导出看着有数据，时间轴却是平的） |
+| M-18 | 探针 | `crates/kernel/src/m18_probe/` | ✅ v0.8 完整 `ProbeRegistry` + v0.9 `EdgeSink` + v0.11 接线 PR；v0.11.1 修总线 hook 的 RefCell 重入 panic；**D-46：正式挂上生产总线**（此前只在测试里接线）；✅ **v0.20：访存轨迹加 `is_fetch` 标记**（取指 vs 数据访问**可区分**）——M-11 的反汇编缓存失效判据与轨迹导出**都靠它**分辨「取指」与「访客改内存」 |
 | M-19 | 波形管道 | `crates/kernel/src/m19_waveform/` | ✅ v0.9 完整 `WaveformPipeline`：边沿编码 + 每通道环 + ≤20ms 批量推送 + CSV/VCD 分块导出；✅ **v0.17 契约 v2 的命名边界**：**history 形**（`schema_version + streams[]`）随内容改名 → `model::WaveformHistory` + 事件变体 `EventPayload::WaveformHistory` + topic `waveform.history`；**live 批次形**（`seq_start/seq_end/t_virt/entries`）**保留原名** `model::WaveformDelta`（**不是**死代码，是 M-11 / **D-50** 的落点，本批未上线） |
 | M-20 | 快照与确定性事件流记录 | `crates/kernel/src/m20_snapshot/` | ✅ **v0.18 会话快照：按六段组装**（`capture_session()`）+ `record()` 落记录（`SnapshotRecord { id, payload, label }`——**无第二份 `cp_meta`**）+ `validate_session()`（**只校验、不还原**；⚠️ **同名不同义** = 「一码多义」的变体，有源码级守卫防回退）。⚠️ 输入事件流 / `CrashKit` 等**仍 stub** |
 | M-21 | 日志系统 | `crates/kernel/src/m21_logging/` | stub（含 `LogBuffer`） |
 | M-22 | 健康管理 HMS | `crates/kernel/src/m22_hms/` | stub（含 `Hms`） |
 | M-23 | 数据存储与持久化 DataStore | `crates/kernel/src/m23_datastore/` | ⚠️ **部分落地**（v0.18）：`DataStore::put_snapshot()` / `get_snapshot()` 改吃 `SessionSnapshotDto`（**写入前先 `validate()`**）+ 新增 `InMemoryDataStore`（键 = `cp_meta.id`）。⚠️ **IndexedDB / SQLite 后端仍 stub** |
-| **内核宿主**（装配层 · **不是 23 个模块之一**） | 协议装配：契约命令 ↔ 内核调用 | `crates/kernel/src/kernel_host/` | ✅ **v0.13 第 1 阶段新增**（**3 658 行** / **63 测试**，v0.18 重算）：16 条命令 → 事件的**规范映射**（形状见 `docs/detailed-design/STAGE-1_Wasm_Bridge.md` §3.1）/ 镜像装载（ELF + RawHex）/ 默认内存图 / 寄存器全量与增量波形流 / `handle_json` JSON 桥；**D-46：装上探针管道**（M-18 判沿 → M-19 环 → 契约 `WaveformHistory`）+ 默认内存图映射 GPIO 外设；✅ **v0.17 契约 v2：3 条新命令接线**（`ReadRegisters` / `WriteRegister` / `Negotiate` → `Registers` / `Negotiated`） |
+| **内核宿主**（装配层 · **不是 23 个模块之一**） | 协议装配：契约命令 ↔ 内核调用 | `crates/kernel/src/kernel_host/` | ✅ **v0.13 第 1 阶段新增**（**6 016 行** / **97 测试**，v0.20 批重算）：16 条命令 → 事件的**规范映射**（形状见 `docs/detailed-design/STAGE-1_Wasm_Bridge.md` §3.1）/ 镜像装载（ELF + RawHex）/ 默认内存图 / 寄存器全量与增量波形流 / `handle_json` JSON 桥；**D-46：装上探针管道**（M-18 判沿 → M-19 环 → 契约 `WaveformHistory`）+ 默认内存图映射 GPIO 外设；✅ **v0.17 契约 v2：3 条新命令接线**（`ReadRegisters` / `WriteRegister` / `Negotiate` → `Registers` / `Negotiated`）；✅ **v0.20 契约 v3：4 条调试面命令接线**（`Disasm` / `ResolveLine` / `ExportTrace` / `SetTraceEnabled`）——**宿主路由导出**（`Waveform` ⇒ M-19 的环 / `Execution` ⇒ M-11 的轨迹环）⇒ **闭环 D-50 / D-51** |
 
 > **MVP 跑通判据**（首个能 cargo test 通过的功能闭环）：
 > - `m12_engine::tests::engine_advances_time`（事件队列 + 时间推进）
@@ -298,6 +298,19 @@ riscv_sim/
 > - **新登记 3 条台账**：**D-83**（测试 / 变异工具链无超时保护 ⇒ 活锁表现为**挂死**而不是失败；**工具链侧本轮共修七处**（硬超时 + 杀整个进程组 / 红集 AND 语义 / 备份键撞名 / **编译与运行超时分离** / **跳过 doc-test** / **HANG 判据改看「二进制启动没有」** / **规模侧：收敛 target 集 + 预热**）⇒ **8 条「HANG」里 7 条是假的** ⇒ **只有 K-10 是真活锁**；**M-12 生产侧留账**，留给 **D-30** 那一轮）· **D-84**（`mip` 无生产者 ⇒ guest 读不到挂起中断；规格已订正）· **D-85**（黄金语料对 CSR / `mret` / 陷阱投递零覆盖）
 > - → 检视归档见 `docs/reviews/REVIEWS.md` **§3.10** · 冻结规格见 `docs/detailed-design/STAGE-4_Interrupt_Controller.md`
 
+> **v0.20 M-11 符号表 / DWARF / 反汇编 / trace 导出落地判据**（台账 **D-50 / D-51 闭环** · 新登记 **D-86 ~ D-90** · 冻结规格 `docs/detailed-design/STAGE-5_Symbol_Disasm_Trace.md`）：
+> - **工作区 1012 全绿**（契约 lib **98** + kernel lib **801** + 集成 **102** + golden runner **11**）——`cargo test --workspace --no-fail-fast --lib --tests`
+> - **M-11 落地**：**3 206 行 / 75 条用例**（`render` / `symbols` / `disasm` / `dwarf` / `trace` 五个子模块 + `SymbolService` 端口）；**反汇编复用 M-13 的 `Decoder` + `classify`**（裁决 A）⇒ **零第二套解码表** ⇒ LLD §3.4 的「独立表 + 一致性门禁」**作废**（门禁只能*发现*漂移，复用让漂移**结构上不可能**）
+> - **宿主接线**（Lane D）：4 条调试面命令 → 4 个事件（**占位分支已删**，不留「有形状、没内容」的变体）；**导出走宿主路由**（`Waveform` ⇒ M-19 的环 / `Execution` ⇒ M-11 的轨迹环）⇒ **D-50 / D-51 双闭环**；**D-50 的判别式是排除法**（抽干 M-18 的边沿存储后导出仍有内容 ⇒ 只可能来自 M-19 的环）
+> - ⚠️ **反汇编缓存的失效通道 = M-18 的访存写事件**（裁决 G）⇒ **只失效被写地址**（不是整表清空）；⚠️ **失效与记录开关必须解耦**（本轮修掉的真缺陷：耦合 ⇒ 关闭 trace 期间访客自改代码 ⇒ 缓存**陈旧** ⇒ 用户看到**旧的**反汇编）——缓存失效是**正确性**，记录开关是**性能**；⚠️ **失效通道必须永远无损** ⇒ **`StepN` 按指令预算（10 000）分块**（否则访存环溢出会丢掉写事件 ⇒ 缓存不失效）
+> - ⚠️ **访存轨迹的时间轴必须真的动**：M-14 的 `BusAccess::ts_ps` 来自 `Bus::set_now_ps`，而它**只**由 M-17 在指令边界调用 ⇒ 没有这一步，时间戳**恒为 0**（本轮修掉的真缺陷）
+> - ⚠️ **规格 §9.4 的「`disasmCache` 可以兜住（重复取指）」必须可观测** ⇒ `Disassembler::lookup(addr)` + `lookup_hits()` 计数（否则那句话只是一句散文）
+> - ⚠️ **门禁脚本里不许抄常量**（版本号 / 表头 / 字段名）——本轮修掉的真缺陷：`tools/wasm-smoke.mjs` 硬编码 `2` ⇒ 契约升 v3 后**一直红着**；⇒ 三处全部改成**从契约层源码推导**；冒烟门禁**补上本批 4 条命令的 13 项断言**（在**真 wasm 产物**上）
+> - ⚠️ **反向变异自检 20 条 ⇒ 20/20 按期望**（19 条判定**全部按期望变红** + 1 条对照 **0 红**）——首轮只 **18/20** ⇒ 两条「没按期望」**都不是实现的问题**：**V-03** 的变异形态写成 `ExportFilter::with_time_range(1, 0)`（**builder 不是关联构造器 ⇒ 编译不过** ⇒ 变异**无效**）⇒ 改成 `ExportFilter::all().with_time_range(1, 0)` ⇒ RED ✓；**V-14 变异存活** ⇒ **真判别力缺口**：夹具 `SELF_LOOP` 的机器码**手算错**（注释说 `beq x0, x0, -4`，实解 `beq x0, x0, -2` ⇒ 跳到未对齐未映射地址 ⇒ 访客**第 2 条指令就陷入** ⇒ `StepN(250_000)` **只跑 2 条** ⇒ 「访存环不许溢出」**恒成立** ⇒ **整批空转**）⇒ 改成 `beq x0, x0, 0`（`0x0000_0063`；⚠️「跳回自己」的偏移是 **0**）⇒ 实测 `elapsed_ps = 250 000 000` ⇒ RED ✓ ⇒ **「断言恒成立」是假绿的典型形态** ⇒ **夹具也要有自己的判别式**
+> - ⚠️ **「接上了」与「钉住了」是两件事**（本轮主线教训）：`Waveform+Vcd` 导出改成 CSV、波形导出的 `overflow_marked` 改成 `false` ⇒ **795 + 5 条用例全绿** ⇒ 判别力的落点必须在**被依赖方自己身上**（把映射抽成**可单独钉住的自由函数** + 喂**人造输入**）
+> - ⚠️ **Wave 1 的八处已知边界**（规格 §9.8，诚实标注）：访存轨迹**不含访存值**（P1）· 无时间/地址**筛选器**（P1）· **DWARF 只识别不解析**（Wave 2）· `limit` 只对 `Execution` 生效 · `Waveform` 的 `offset` 是回显请求值 · 轨迹机器码可能**时间倒流**（D-87）· 裁决 G 的**部分写粒度**（D-89）· 前端导出**无下载动作**（D-88）
+> - → 检视归档见 `docs/reviews/REVIEWS.md` **§3.11** · 冻结规格见 `docs/detailed-design/STAGE-5_Symbol_Disasm_Trace.md`
+
 ## Code style
 
 - **Rust**：
@@ -332,7 +345,14 @@ riscv_sim/
 要点速览：
 - 默认分支：`main` — **只接受从检视闭环的分支同步过来**，不接受直接往 `main` 提交
 - 分支命名：`<type>/<scope>`（如 `feature/m12-engine-quantum`、`fix/m13-iss-bug-123`）
-- Commit message：Conventional Commits 1.0.0（`feat:` / `fix:` / `docs:` / `refactor:` / `test:` / `perf:` / `build:` / `ci:` / `chore:` / `revert:`）
+- Commit message：**纯文本**（**不用 markdown**），固定五要素、**各占一行**：
+  1. `类型：Feature` 或 `类型：Bug`（本次修改的类型）
+  2. `说明：<本次修改的详细说明，一句话>`
+  3. `测试用例：<新增/改动了哪些用例，覆盖什么>`
+  4. `测试报告：<实际跑的命令与结果>`
+  5. `遗留问题：<已知未解决项；没有就写「无」>`
+  - ⛔ **不要**写 `feat:` / `fix:` 这类前缀、**不要**用 markdown 表格 / 加粗 / 列表 / 代码块
+  - ⚠️ 用 `git commit -F <file>`（**不要** heredoc）
 - 仓库 SSH：`git@github.com:chenyuxiangg/riscv-sim.git`（HTTPS 不支持）
 - PR：CI 绿 + 至少 1 个 reviewer 批准；commit message 关联 issue 或 ADR 编号
 - 架构变更（涉及 ADR、模块边界）：需更新 `docs/` 下对应设计文档后再合入
@@ -359,7 +379,7 @@ git checkout -b feature/m19-waveform  # 或 fix/... / docs/... / chore/...
 1. 改代码
 2. 过三关门禁：`cargo fmt --all -- --check` · `cargo clippy --workspace --all-targets -- -D warnings` · `cargo test --workspace`
 3. `git add` **用显式路径**——不要用 `git add -A` / `git add .` / `git add <目录>`。本仓库可能有并行会话在同时改动同一工作区，目录级 add 会把别人的改动一并收进你的 commit
-4. `git commit`：Conventional Commits；**一个 commit 一个逻辑单元**，跨模块的多件事拆成多个 commit
+4. `git commit`：commit message 按**上面的五要素纯文本格式**写；**一个 commit 一个逻辑单元**，跨模块的多件事拆成多个 commit
 5. 报告：向用户说明 commit hash、门禁结果、以及哪些改动**没有**提交及原因
 
 #### 3. 检视（review 闭环）

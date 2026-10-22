@@ -23,6 +23,7 @@
 //! | 截断的 ELF header | 头长于 52 字节但被截到一半 |
 //! | 非 UTF-8 字节 | HEX 路径收到非法 UTF-8 |
 //! | 整数溢出边界 | HEX 扩展地址 + 局部地址溢出；ELF `p_offset + p_filesz` 溢出 |
+//! | 畸形节区表 | 节区头表越界 / `e_shentsize != 40` / `e_shnum` 巨大 / 节区内容越界 / 节区名偏移越界 / 名字串无 NUL 终止（STAGE-5 裁决 B · W1.1） |
 //!
 //! 另有一条 fuzz 式回归用例（固定种子，保证确定性）喂随机字节与变异后的
 //! 合法镜像，要求同样「不得 panic」。
@@ -76,6 +77,17 @@ fn minimal_elf(memsz: u32) -> Vec<u8> {
     bytes.extend_from_slice(&4u32.to_le_bytes()); // p_align
     bytes.extend_from_slice(&0x02A0_0093u32.to_le_bytes()); // ADDI x1, x0, 42
     bytes
+}
+
+/// A well-formed ELF32 LE RV32 ET_EXEC **with a section table**: one
+/// whitelisted section (`.symtab`) plus the internal `.shstrtab`.
+/// The builder lives in `tests.rs` (it is the fixture for the whole
+/// section-table feature); this alias keeps the malformed table short.
+fn section_elf() -> super::tests::TestElf {
+    super::tests::build_elf_with_sections(&[
+        super::tests::TestSection::progbits(".symtab", &[0x11, 0x22, 0x33, 0x44]),
+        super::tests::TestSection::progbits(".strtab", b"\0sym_a\0"),
+    ])
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +315,103 @@ fn malformed_inputs_are_rejected_without_panicking() {
             },
             2,
         ),
+        // ----- 畸形节区表 (STAGE-5 裁决 B · W1.1) -----
+        MalformedCase::new(
+            "ELF section header table lies outside the file",
+            Kind::Elf,
+            {
+                let mut elf = section_elf().bytes;
+                // e_shoff (32..36) points far past the end of the file.
+                elf[32..36].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+                elf
+            },
+            1,
+        ),
+        MalformedCase::new(
+            "ELF e_shentsize is not 40",
+            Kind::Elf,
+            {
+                let mut elf = section_elf().bytes;
+                // e_shentsize (46..48).
+                elf[46..48].copy_from_slice(&41u16.to_le_bytes());
+                elf
+            },
+            1,
+        ),
+        MalformedCase::new(
+            "ELF e_shnum is huge",
+            Kind::Elf,
+            {
+                let mut elf = section_elf().bytes;
+                // e_shnum (48..50) = 0xFFFF ⇒ the section header table
+                // cannot fit in any file.
+                elf[48..50].copy_from_slice(&0xFFFFu16.to_le_bytes());
+                elf
+            },
+            1,
+        ),
+        MalformedCase::new(
+            "ELF whitelisted section content lies outside the file",
+            Kind::Elf,
+            {
+                let mut elf = section_elf();
+                // The `.symtab` header is entry #2 (null, `.shstrtab`,
+                // `.symtab`): its sh_size claims 1 MiB the file does not
+                // hold.
+                let hdr = elf.shdr_offset(2);
+                elf.bytes[hdr + 20..hdr + 24].copy_from_slice(&0x0010_0000u32.to_le_bytes());
+                elf.bytes
+            },
+            1,
+        ),
+        MalformedCase::new(
+            "ELF whitelisted section sh_offset + sh_size overflows",
+            Kind::Elf,
+            {
+                let mut elf = section_elf();
+                let hdr = elf.shdr_offset(2);
+                elf.bytes[hdr + 16..hdr + 20].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+                elf.bytes
+            },
+            1,
+        ),
+        MalformedCase::new(
+            "ELF section name offset lies outside the name table",
+            Kind::Elf,
+            {
+                let mut elf = section_elf();
+                let hdr = elf.shdr_offset(2);
+                elf.bytes[hdr..hdr + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+                elf.bytes
+            },
+            1,
+        ),
+        MalformedCase::new(
+            "ELF section name is not NUL-terminated",
+            Kind::Elf,
+            {
+                let mut elf = section_elf();
+                // The last byte of `.shstrtab` terminates the ".shstrtab"
+                // name; overwriting it leaves the name unterminated.
+                let (off, len) = elf.shstrtab;
+                let last = (off + len - 1) as usize;
+                elf.bytes[last] = b'X';
+                elf.bytes
+            },
+            1,
+        ),
+        MalformedCase::new(
+            "ELF section name table lies outside the file",
+            Kind::Elf,
+            {
+                let mut elf = section_elf();
+                // The `.shstrtab` header is entry #1.
+                let hdr = elf.shdr_offset(1);
+                elf.bytes[hdr + 20..hdr + 24].copy_from_slice(&0x0010_0000u32.to_le_bytes());
+                elf.bytes
+            },
+            1,
+        ),
     ];
 
     assert!(
@@ -436,5 +545,36 @@ fn mutated_valid_images_never_panic() {
             hex_bytes[idx] = rng.next_u8();
         }
         let _ = DefaultLoader.load_with_limits(&hex_bytes, Kind::Hex, &limits);
+    }
+}
+
+/// The section-table parser has the same contract: a mutated ELF with a
+/// section table must never panic — only `Err` (or a well-formed
+/// `Ok`).
+#[test]
+fn mutated_section_table_elves_never_panic() {
+    let limits = ParseLimits {
+        elf_size: 4096,
+        hex_size: 4096,
+        raw_size: 4096,
+        segment_count: 8,
+        total_image_bytes: 64 * 1024,
+        max_region_bytes: 64 * 1024,
+        ..ParseLimits::default()
+    };
+
+    let mut rng = Rng::new(0x5EED_1234_ABCD_0003);
+    let elf_seed = section_elf().bytes;
+
+    for _ in 0..2_000 {
+        let mut elf = elf_seed.clone();
+        let flips = 1 + rng.below(4);
+        for _ in 0..flips {
+            let idx = rng.below(elf.len());
+            elf[idx] = rng.next_u8();
+        }
+        // The result may be Ok or Err — a single byte flip can still
+        // leave a valid ELF. What matters is that it never panics.
+        let _ = DefaultLoader.load_with_limits(&elf, Kind::Elf, &limits);
     }
 }

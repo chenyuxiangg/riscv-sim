@@ -29,6 +29,8 @@ import {
     WRITE_SIZE,
     HALT_REASON,
     WATCH_ACCESS,
+    TRACE_SOURCE,
+    TRACE_FORMAT,
     Command,
     Event,
     commandMessage,
@@ -37,6 +39,7 @@ import {
     eventTopic,
     waveform,
     deltaRegister,
+    disasmEntry,
 } from "../lib/message.js";
 import { encodeFrame, decodeFrame, FRAME_TYPE } from "../lib/frame.js";
 import { buildMockProject } from "../dev/mock-project.js";
@@ -48,6 +51,22 @@ const repoRoot = resolve(frontDir, "..");
 const protocolRs = resolve(repoRoot, "crates/contract/src/protocol.rs");
 const modelRs = resolve(repoRoot, "crates/contract/src/model.rs");
 const snapshotRs = resolve(repoRoot, "crates/contract/src/snapshot.rs");
+const libRs = resolve(repoRoot, "crates/contract/src/lib.rs");
+
+/**
+ * 契约层（Rust）的 `SCHEMA_VERSION` —— **从源码推导**，不抄。
+ *
+ * ⚠️ **为什么不能抄**（v0.20 检视 B · D-7）：此前这条门禁写死
+ * `SCHEMA_VERSION === 3` ⇒ 契约升 v4 时它会**误红**（而错不在 JS 镜像），
+ * 于是人要么去改断言、要么把门禁删掉 ⇒ **一个会自己坏的断言**比没有还糟。
+ * ⇒ 唯一真相是契约层源码（`tools/wasm-smoke.mjs` 已经这么做了）。
+ */
+function rustSchemaVersion() {
+    const src = readFileSync(libRs, "utf8");
+    const m = /pub const SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/.exec(src);
+    assert.notEqual(m, null, "契约里读不到 SCHEMA_VERSION");
+    return Number(m[1]);
+}
 const hasRust = existsSync(protocolRs) && existsSync(modelRs);
 
 /**
@@ -264,8 +283,10 @@ function rustFieldDeclarations(source, containerName) {
 }
 
 describe("Message 信封（与 crates/contract 逐字对齐）", () => {
-    test("JS 镜像的 schema 版本是 2（契约 v2）", () => {
-        assert.equal(SCHEMA_VERSION, 2);
+    test("JS 镜像的 schema 版本与契约层一致（契约 v3 · M-11 调试面）", () => {
+        // ⚠️ **不写死数字**：契约层升版时这条断言**不该**变红（错的不是
+        // JS 镜像）—— 见 `rustSchemaVersion()` 的说明。
+        assert.equal(SCHEMA_VERSION, rustSchemaVersion());
     });
 
     test("信封字段名与 Rust Message 完全一致", () => {
@@ -331,6 +352,11 @@ describe("Message 信封（与 crates/contract 逐字对齐）", () => {
         assert.equal(eventTopic("Registers"), "sim.registers");
         assert.equal(eventTopic("Negotiated"), "sim.negotiated");
         assert.equal(eventTopic("SimStateDelta"), "sim.state.delta");
+        // 契约 v3 新增的四个事件变体（`debug.` 命名空间）。
+        assert.equal(eventTopic("Disasm"), "debug.disasm");
+        assert.equal(eventTopic("SourceLocation"), "debug.source");
+        assert.equal(eventTopic("TraceExport"), "debug.export");
+        assert.equal(eventTopic("TraceState"), "debug.trace");
         // 前向兼容：未知变体不抛异常。
         assert.equal(eventTopic("SomethingNew"), "unknown");
     });
@@ -369,6 +395,11 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Command.snapshot()),
             variantOf(Command.restore({})),
             variantOf(Command.admin({})),
+            // 契约 v3 新增的四条命令（M-11 调试面）。
+            variantOf(Command.disasm(0, 8)),
+            variantOf(Command.resolveLine(0)),
+            variantOf(Command.exportTrace("Execution", "Csv", 0, 16)),
+            variantOf(Command.setTraceEnabled(true)),
         ].sort();
         assert.deepEqual(js, rust, "JS 命令变体与 Rust CommandPayload 不一致");
     });
@@ -388,6 +419,11 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Event.snapshotCreated(1)),
             variantOf(Event.linkUp("l")),
             variantOf(Event.linkDown("l")),
+            // 契约 v3 新增的四个事件（M-11 调试面）。
+            variantOf(Event.disasm([])),
+            variantOf(Event.sourceLocation(0, "demo.c", 7)),
+            variantOf(Event.traceExport("Waveform", "Vcd", 0, 10, 42, 128, "$var", false)),
+            variantOf(Event.traceState(true, 5, 2)),
         ].sort();
         assert.deepEqual(js, rust, "JS 事件变体与 Rust EventPayload 不一致");
     });
@@ -415,6 +451,16 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             Object.values(WATCH_ACCESS).sort(),
             rustVariants(model, "WatchAccess").sort(),
             "WatchAccess 标签不一致",
+        );
+        assert.deepEqual(
+            Object.values(TRACE_SOURCE).sort(),
+            rustVariants(model, "TraceSource").sort(),
+            "TraceSource 标签不一致",
+        );
+        assert.deepEqual(
+            Object.values(TRACE_FORMAT).sort(),
+            rustVariants(model, "TraceFormat").sort(),
+            "TraceFormat 标签不一致",
         );
     });
 
@@ -444,6 +490,11 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 Snapshot: Command.snapshot(),
                 Restore: Command.restore({}),
                 Admin: Command.admin({}),
+                // 契约 v3（M-11 调试面）。
+                Disasm: Command.disasm(0, 8),
+                ResolveLine: Command.resolveLine(0),
+                ExportTrace: Command.exportTrace("Execution", "Csv", 0, 16),
+                SetTraceEnabled: Command.setTraceEnabled(true),
             },
             EventPayload: {
                 Tick: Event.tick(0, 0),
@@ -457,6 +508,11 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 SnapshotCreated: Event.snapshotCreated(1),
                 LinkUp: Event.linkUp("l"),
                 LinkDown: Event.linkDown("l"),
+                // 契约 v3（M-11 调试面）。
+                Disasm: Event.disasm([]),
+                SourceLocation: Event.sourceLocation(0, "demo.c", 7),
+                TraceExport: Event.traceExport("Waveform", "Vcd", 0, 10, 42, 128, "$var", false),
+                TraceState: Event.traceState(true, 5, 2),
             },
         };
 
@@ -516,6 +572,12 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             // `DeltaRegister` 嵌在 `SimStateDelta` 的 `registers[]` 里
             // ——变体级的字段名检查只比**外层**，进不到元素里（F3）。
             ["DeltaRegister", deltaRegister(1, 42)],
+            // ⚠️ `DisasmEntryDto` 嵌在 `Disasm` 的 `entries[]` 里
+            // ——同样进不到元素里（v0.20 检视 B · D-3：把 Rust 侧的
+            // `mnemonic` 改名成 `mnem`，**前端门禁 228/228 全绿** ⇒
+            // Rust 改而 JS 忘改 ⇒ 线上字段名不匹配 ⇒ **静默**）。
+            // ⇒ 这里**造一个非空**的 `entries[]`，把元素字段名也钉住。
+            ["DisasmEntryDto", disasmEntry({ addr: 0, code: 0x02a00093, mnemonic: "addi ra,zero,42", width: 4 })],
         ];
         for (const [structName, dto] of cases) {
             assert.deepEqual(

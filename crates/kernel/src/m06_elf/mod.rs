@@ -2,14 +2,19 @@
 //!
 //! MVP scope (LLD §4.6, M-06 v1.0):
 //!   - parse ELF32 LE RV32 (PT_LOAD segments → `Vec<(u32, Vec<u8>)>`).
+//!   - parse the ELF **section table** and extract the *whitelisted*
+//!     debug sections (`.symtab` / `.strtab` / `.debug_*`) as **raw
+//!     bytes** (STAGE-5 裁决 B). M-06 is the only ELF container parser;
+//!     M-11 owns the *meaning* of those bytes (symbol table semantics,
+//!     DWARF line-table programs).
 //!   - parse Raw `bytes` at a caller-provided base.
 //!   - parse Intel HEX text (with 0x02 / 0x04 extended-address records,
 //!     06-2 / 06-4).
 //!   - enforce `parseLimit` (ELF ≤16 MiB, segment ≤64, …) up front, so
 //!     a pathological host file never reaches M-14 / M-18.
-//!   - On success: return `LoadImage { segments, entry }`. The host
-//!     pushes it through M-05 → M-14 `loadImage` (M-06 §06-1 single
-//!     write path).
+//!   - On success: return `LoadImage { segments, entry, debug_sections }`.
+//!     The host pushes it through M-05 → M-14 `loadImage` (M-06 §06-1
+//!     single write path).
 //!
 //! ## Image-kind detection
 //!
@@ -22,6 +27,8 @@
 //! DWARF line-table parsing is out of scope (M-5 / M-11). The
 //! `LoadImage::entry` field is filled in from the ELF `e_entry`; for
 //! Raw / HEX it is `0` (caller may override before feeding M-13).
+//! What M-06 *does* hand over is the **raw bytes** of the whitelisted
+//! debug sections (`LoadImage::debug_sections`) — M-11 interprets them.
 //!
 //! ## Error codes
 //!
@@ -30,8 +37,8 @@
 //!
 //! | code    | name               | meaning                                       |
 //! | ------- | ------------------ | --------------------------------------------- |
-//! | LDR-01  | malformed          | bad ELF magic / class / version / machine; HEX checksum mismatch; unknown record type; missing EOF |
-//! | LDR-02  | parse-limit        | file > 16 MiB, >64 segments, record byte count >0xFF, etc. |
+//! | LDR-01  | malformed          | bad ELF magic / class / version / machine; HEX checksum mismatch; unknown record type; missing EOF; malformed section table |
+//! | LDR-02  | parse-limit        | file > 16 MiB, >64 segments, record byte count >0xFF, debug sections > `debug_section_bytes`, etc. |
 //! | LDR-03  | address-overflow   | paddr + memsz crosses 4 GiB; HEX extended+local base overflow |
 //! | LDR-04  | out-of-bus         | segment mapped outside the [0, 4 GiB) bus window (currently aliased to LDR-03) |
 //!
@@ -58,6 +65,11 @@ pub struct LoadImage {
     pub segments: Vec<(u32, Vec<u8>)>,
     /// Entry point (ELF `e_entry`, or 0 for raw / hex blobs).
     pub entry: u32,
+    /// Debug / symbol sections extracted from the ELF section table.
+    ///
+    /// Names are the raw section names (e.g. `.symtab`, `.debug_line`).
+    /// Only the whitelist is extracted — the whole file is never kept.
+    pub debug_sections: Vec<(String, Vec<u8>)>,
 }
 
 impl Default for LoadImage {
@@ -65,6 +77,7 @@ impl Default for LoadImage {
         Self {
             segments: Vec::new(),
             entry: 0,
+            debug_sections: Vec::new(),
         }
     }
 }
@@ -97,6 +110,9 @@ impl Default for Kind {
 /// parser, `raw_size` by the raw parser, `segment_count` by both the ELF
 /// and the HEX parser. `symbol_count` / `line_entry_count` bound the
 /// DWARF tables and are enforced by M-11, which owns that parsing.
+/// `debug_section_bytes` bounds the **raw bytes** M-06 extracts from the
+/// ELF section table and is enforced by the ELF parser (M-06 owns the
+/// extraction; M-11 owns the parsing of what is extracted).
 ///
 /// `total_image_bytes` and `max_region_bytes` bound the **memory the
 /// loader materialises**, not the size of the input file. They exist
@@ -118,6 +134,8 @@ pub struct ParseLimits {
     pub symbol_count: u32,
     /// Maximum number of DWARF line-table entries (default 2e5).
     pub line_entry_count: u32,
+    /// Maximum total bytes of the extracted debug sections (default 8 MiB).
+    pub debug_section_bytes: u32,
     /// Maximum number of bytes the loader may materialise in total
     /// across every segment of one image (default 64 MiB).
     pub total_image_bytes: u64,
@@ -135,6 +153,7 @@ impl Default for ParseLimits {
             segment_count: 64,
             symbol_count: 100_000,
             line_entry_count: 200_000,
+            debug_section_bytes: 8 * 1024 * 1024,
             total_image_bytes: 64 * 1024 * 1024,
             max_region_bytes: 16 * 1024 * 1024,
         }
@@ -441,6 +460,7 @@ pub fn parse_raw(
     Ok(LoadImage {
         segments: vec![(base, bytes.to_vec())],
         entry: 0,
+        debug_sections: Vec::new(),
     })
 }
 

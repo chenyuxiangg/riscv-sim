@@ -321,6 +321,7 @@ fn finalise(
     Ok(LoadImage {
         segments: final_segments,
         entry: 0,
+        debug_sections: Vec::new(),
     })
 }
 

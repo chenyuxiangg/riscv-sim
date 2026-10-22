@@ -29,7 +29,7 @@
 //     (`ps()` / `psToNumber()`), everything else stays a JSON number.
 
 /** Protocol schema version — mirrors `riscv_sim_contract::SCHEMA_VERSION`. */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /**
  * Largest virtual time (picoseconds) that survives a round trip through a
@@ -78,6 +78,31 @@ export const IMAGE_KIND = Object.freeze({
 });
 
 /**
+ * `model::TraceSource` — which buffer an export reads from.
+ *
+ * `Waveform` reads M-19's edge ring; `Execution` reads M-11's own
+ * instruction/memory trace ring. The **host** routes between them, so
+ * neither module depends on the other.
+ */
+export const TRACE_SOURCE = Object.freeze({
+    Waveform: "Waveform",
+    Execution: "Execution",
+});
+
+/**
+ * `model::TraceFormat` — export format.
+ *
+ * ⚠️ Not every combination is legal: `Vcd` is waveform-only (VCD models
+ * *signals changing over time*), `Json` is execution-only. An illegal
+ * combination is rejected by the kernel with `E_CTX-03`.
+ */
+export const TRACE_FORMAT = Object.freeze({
+    Csv: "Csv",
+    Vcd: "Vcd",
+    Json: "Json",
+});
+
+/**
  * Event variant → topic name. The topic is a **front-end** concept (M-05
  * subscription key); the variant names stay byte-identical to the Rust
  * contract.
@@ -94,6 +119,10 @@ export const EVENT_TOPIC = Object.freeze({
     SnapshotCreated: "snapshot.created",
     LinkUp: "link.up",
     LinkDown: "link.down",
+    Disasm: "debug.disasm",
+    SourceLocation: "debug.source",
+    TraceExport: "debug.export",
+    TraceState: "debug.trace",
 });
 
 /** Topic that receives every event. */
@@ -278,6 +307,42 @@ export const Command = Object.freeze({
     restore: (state) => ({ Restore: { state } }),
     /** `CommandPayload::Admin { op }` — admin channel only. */
     admin: (op) => ({ Admin: { op } }),
+    /**
+     * `CommandPayload::Disasm { addr, count }` — 反汇编一段指令（M-11）。
+     *
+     * 回复是 `Disasm` 事件。序列可能**短于** `count`（走到未映射地址 ⇒
+     * 提前结束 = 截断，**不是**错误）。
+     */
+    disasm: (addr, count) => ({ Disasm: { addr: Number(addr), count: Number(count) } }),
+    /**
+     * `CommandPayload::ResolveLine { addr }` — 地址 → 源码行（M-11）。
+     *
+     * 回复有**两种「没有答案」**：`file` 空且 `line === 0` = 根本没有
+     * DWARF；`file` 空且 `line === 0xFFFFFFFF` = 有 DWARF 但地址没命中
+     * 行表。
+     */
+    resolveLine: (addr) => ({ ResolveLine: { addr: Number(addr) } }),
+    /**
+     * `CommandPayload::ExportTrace { source, format, offset, limit }` — 导出。
+     *
+     * `source` 选数据源、`format` 选序列化器；**非法组合会被拒绝**
+     * （`Vcd` 只对 `Waveform` 合法，`Json` 只对 `Execution` 合法）。
+     * `offset` 是**条目偏移**，续传时传上次回复的 `next_offset`。
+     */
+    exportTrace: (source, format, offset, limit) => ({
+        ExportTrace: {
+            source,
+            format,
+            offset: Number(offset),
+            limit: Number(limit),
+        },
+    }),
+    /**
+     * `CommandPayload::SetTraceEnabled { enabled }` — 执行轨迹记录开关。
+     *
+     * 关闭时内核**零开销**（什么都不记）；开启且仿真在跑时前端显示降速提示。
+     */
+    setTraceEnabled: (enabled) => ({ SetTraceEnabled: { enabled: Boolean(enabled) } }),
 });
 
 // ---------------------------------------------------------------------------
@@ -299,6 +364,32 @@ export const Command = Object.freeze({
  */
 export function deltaRegister(index, value) {
     return { index: Number(index), value: Number(value) >>> 0 };
+}
+
+/**
+ * `model::DisasmEntryDto` — 一条反汇编条目（`addr` / `code` / `mnemonic` /
+ * `width`）。
+ *
+ * The DTO is **nested** inside the `Disasm` event payload, so the contract
+ * gate has to look at it explicitly: the variant-level field check only sees
+ * the **outer** `entries` field and never descends into the elements.
+ *
+ * ⚠️ **v0.20 检视 B · D-3**：此前这条门禁**根本比不到**元素的字段名
+ * （`Event.disasm([])` 传的是**空数组**）⇒ 把 Rust 侧的 `mnemonic` 改名成
+ * `mnem`（同步改 Rust 自测），**前端门禁 228/228 全绿** ⇒ Rust 改而 JS
+ * 忘改 ⇒ 线上字段名不匹配 ⇒ **静默**。
+ * ⇒ 门禁现在喂**非空**数组，元素字段名被钉住。
+ *
+ * @param {{addr?: number, code?: number, mnemonic?: string, width?: number}} e
+ * @returns {{addr: number, code: number, mnemonic: string, width: number}}
+ */
+export function disasmEntry(e) {
+    return {
+        addr: Number(e?.addr),
+        code: Number(e?.code) >>> 0,
+        mnemonic: String(e?.mnemonic ?? ""),
+        width: Number(e?.width),
+    };
 }
 
 /** Event payload builders. Same shape rule as `Command`. */
@@ -353,6 +444,59 @@ export const Event = Object.freeze({
     linkUp: (linkId) => ({ LinkUp: { link_id: String(linkId) } }),
     /** `EventPayload::LinkDown { link_id }`. */
     linkDown: (linkId) => ({ LinkDown: { link_id: String(linkId) } }),
+    /**
+     * `EventPayload::Disasm { entries }` — 反汇编结果（M-11）。
+     *
+     * `entries` 可能**短于**请求条数 ⇒ 那是**截断**（走到了未映射地址），
+     * 不是错误。
+     */
+    disasm: (entries) => ({
+        Disasm: {
+            entries: (entries ?? []).map((e) => disasmEntry(e)),
+        },
+    }),
+    /**
+     * `EventPayload::SourceLocation { addr, file, line }` — 地址 → 源码行。
+     *
+     * ⚠️ **两种「没有答案」要能区分**：`line === 0` = 根本没有 DWARF；
+     * `line === 0xFFFFFFFF` = 有 DWARF 但地址没命中行表。
+     */
+    sourceLocation: (addr, file, line) => ({
+        SourceLocation: {
+            addr: Number(addr),
+            file: String(file ?? ""),
+            line: Number(line),
+        },
+    }),
+    /**
+     * `EventPayload::TraceExport { source, format, offset, next_offset, total, bytes, chunk, overflow_marked }`.
+     *
+     * 续传：把 `next_offset` 作为下次 `exportTrace` 的 `offset` 参数传回。
+     *
+     * ⚠️ `overflowMarked` = **本次导出的窗口不是完整历史**（源环溢出过、
+     * 丢过最旧条目）。前端**必须**把它显示出来——否则会把一份被截断的
+     * 导出当成完整会话呈现。
+     */
+    traceExport: (source, format, offset, nextOffset, total, bytes, chunk, overflowMarked) => ({
+        TraceExport: {
+            source,
+            format,
+            offset: Number(offset),
+            next_offset: Number(nextOffset),
+            total: Number(total),
+            bytes: Number(bytes),
+            chunk: String(chunk ?? ""),
+            overflow_marked: Boolean(overflowMarked),
+        },
+    }),
+    /** `EventPayload::TraceState { enabled, len, dropped }` — 轨迹记录状态。 */
+    traceState: (enabled, len, dropped) => ({
+        TraceState: {
+            enabled: Boolean(enabled),
+            len: Number(len),
+            dropped: Number(dropped),
+        },
+    }),
 });
 
 // ---------------------------------------------------------------------------

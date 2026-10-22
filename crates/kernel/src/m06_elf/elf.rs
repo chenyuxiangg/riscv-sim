@@ -1,9 +1,15 @@
 //! M-06 ELF32 解析器 (RV32 little-endian, ET_EXEC).
 //!
 //! MVP scope (§1.3): parse the ELF header + program headers, materialise
-//! one `Segment` per `PT_LOAD` entry. Sections, dynamic linking,
-//! relocations, DWARF, and notes are out of scope — DWARF line-table
-//! parsing lives in M-5 (LLD §4.11) on the v0.3 critical path.
+//! one `Segment` per `PT_LOAD` entry. Dynamic linking, relocations and
+//! notes are out of scope.
+//!
+//! The **section table** is parsed too, but only to hand the *whitelisted*
+//! debug sections out as raw bytes (STAGE-5 裁决 B): M-06 is the only
+//! ELF container parser, M-11 interprets the bytes (symbol table
+//! semantics, DWARF line-table programs). The whole file is never kept —
+//! only the whitelisted sections are (bounded by
+//! [`ParseLimits::debug_section_bytes`]).
 //!
 //! The `object` crate is intentionally NOT pulled in for the MVP — a
 //! hand-rolled 32-bit LE parser keeps both the dependency surface and
@@ -25,6 +31,8 @@ const ELF_EI_NIDENT: usize = 16;
 const ELF32_EHDR_SIZE: usize = 52;
 /// ELF32 program-header entry size.
 const ELF32_PHDR_SIZE: usize = 32;
+/// ELF32 section-header entry size.
+const ELF32_SHDR_SIZE: usize = 40;
 
 /// ELF magic: `\x7FELF`.
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
@@ -43,6 +51,22 @@ const EM_RISCV: u16 = 0xF3;
 
 /// `p_type` — loadable segment.
 const PT_LOAD: u32 = 1;
+
+/// `sh_type` — the section occupies **no** space in the file.
+const SHT_NOBITS: u32 = 8;
+
+/// The debug / symbol sections M-06 extracts from the section table
+/// (STAGE-5 裁决 B). Everything else — including `.shstrtab`, which is
+/// only used internally to read the section names — is ignored.
+const DEBUG_SECTION_WHITELIST: [&str; 7] = [
+    ".symtab",
+    ".strtab",
+    ".debug_line",
+    ".debug_line_str",
+    ".debug_str",
+    ".debug_abbrev",
+    ".debug_info",
+];
 
 /// One PT_LOAD segment, materialised. `bss` (`data.is_empty()` while
 /// `size > 0`) is mapped to RAM with zero bytes at M-14 integration
@@ -138,7 +162,7 @@ pub fn parse(bytes: &[u8], limits: &ParseLimits) -> Result<LoadImage, PlatformEr
     let e_shnum = read_u16(bytes, 48)?;
     let e_shstrndx = read_u16(bytes, 50)?;
 
-    let _ = (e_shoff, e_flags, e_ehsize, e_shentsize, e_shnum, e_shstrndx); // unused in MVP
+    let _ = (e_flags, e_ehsize); // unused in MVP
 
     if e_type != ET_EXEC {
         return Err(PlatformError::new(
@@ -357,11 +381,209 @@ pub fn parse(bytes: &[u8], limits: &ParseLimits) -> Result<LoadImage, PlatformEr
         ));
     }
 
+    // The whitelisted debug sections (STAGE-5 裁决 B). M-06 hands the
+    // raw bytes over; M-11 interprets them.
+    let debug_sections =
+        extract_debug_sections(bytes, e_shoff, e_shentsize, e_shnum, e_shstrndx, limits)?;
+
     let load_image = LoadImage {
         segments,
         entry: e_entry,
+        debug_sections,
     };
     Ok(load_image)
+}
+
+/// Extract the whitelisted debug sections from the ELF section table.
+///
+/// Returns `(section name, raw bytes)` pairs in **section-header order**
+/// (not sorted, not de-duplicated).
+///
+/// The section table is optional: a bare-metal image or a stripped ELF
+/// legitimately has none, and a missing section-name table must not
+/// fail the whole load. Those cases yield an **empty** vector:
+///
+/// * `e_shoff == 0` — no section table at all;
+/// * `e_shnum == 0` — the extended form (the real count lives in
+///   section 0's `sh_size`), which we do not implement;
+/// * `e_shstrndx` out of range — the section names cannot be read, so
+///   the name whitelist cannot be applied.
+///
+/// Everything else that is *malformed* (a section-header table outside
+/// the file, `e_shentsize != 40`, a section whose content lies outside
+/// the file, an out-of-range or unterminated section name) is an
+/// `E_LDR-01` error — a malformed file must not be half-parsed.
+fn extract_debug_sections(
+    bytes: &[u8],
+    e_shoff: u32,
+    e_shentsize: u16,
+    e_shnum: u16,
+    e_shstrndx: u16,
+    limits: &ParseLimits,
+) -> Result<Vec<(String, Vec<u8>)>, PlatformError> {
+    // No section table (bare-metal image / stripped ELF).
+    if e_shoff == 0 {
+        return Ok(Vec::new());
+    }
+    // Extended section count (`e_shnum == 0` ⇒ the count lives in
+    // section 0's `sh_size`). Not implemented: report "no debug
+    // sections" instead of guessing a count.
+    if e_shnum == 0 {
+        return Ok(Vec::new());
+    }
+    if e_shentsize as usize != ELF32_SHDR_SIZE {
+        return Err(PlatformError::new(
+            FAMILY,
+            1,
+            format!(
+                "unexpected e_shentsize={} (ELF32 should be {})",
+                e_shentsize, ELF32_SHDR_SIZE
+            ),
+        ));
+    }
+
+    let shnum = e_shnum as usize;
+    let shoff = e_shoff as usize;
+    let table_bytes = shnum
+        .checked_mul(ELF32_SHDR_SIZE)
+        .ok_or_else(|| PlatformError::new(FAMILY, 1, "e_shnum * e_shentsize overflows usize"))?;
+    let sh_end = shoff.checked_add(table_bytes).ok_or_else(|| {
+        PlatformError::new(FAMILY, 1, "e_shoff + e_shnum*e_shentsize overflows usize")
+    })?;
+    if sh_end > bytes.len() {
+        return Err(PlatformError::new(
+            FAMILY,
+            1,
+            format!(
+                "section header table [0x{:x}, 0x{:x}) outside file ({})",
+                shoff,
+                sh_end,
+                bytes.len()
+            ),
+        ));
+    }
+
+    // The section-name table (`.shstrtab`) is internal: without it the
+    // name whitelist cannot be applied, so we report "no debug
+    // sections" rather than failing the load.
+    if e_shstrndx as usize >= shnum {
+        return Ok(Vec::new());
+    }
+
+    let shstr_base = shoff + e_shstrndx as usize * ELF32_SHDR_SIZE;
+    let shstr_hdr = &bytes[shstr_base..shstr_base + ELF32_SHDR_SIZE];
+    let shstr_type = read_u32(shstr_hdr, 4)?;
+    let shstr_offset = read_u32(shstr_hdr, 16)?;
+    let shstr_size = read_u32(shstr_hdr, 20)?;
+    if shstr_type == SHT_NOBITS {
+        // A NOBITS string table occupies no file space ⇒ no names.
+        return Ok(Vec::new());
+    }
+    let shstr_end = (shstr_offset as u64)
+        .checked_add(shstr_size as u64)
+        .ok_or_else(|| {
+            PlatformError::new(FAMILY, 1, "shstrtab sh_offset + sh_size overflows u64")
+        })?;
+    if shstr_end > bytes.len() as u64 {
+        return Err(PlatformError::new(
+            FAMILY,
+            1,
+            format!(
+                "section name table [0x{:x}, 0x{:x}) outside file ({})",
+                shstr_offset,
+                shstr_end,
+                bytes.len()
+            ),
+        ));
+    }
+    let shstrtab = &bytes[shstr_offset as usize..shstr_end as usize];
+
+    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+    // Total bytes of the extracted sections — bounded by
+    // `ParseLimits::debug_section_bytes`.
+    let mut total: u64 = 0;
+    for i in 0..shnum {
+        let base = shoff + i * ELF32_SHDR_SIZE;
+        let hdr = &bytes[base..base + ELF32_SHDR_SIZE];
+        let sh_name = read_u32(hdr, 0)?;
+        let sh_type = read_u32(hdr, 4)?;
+        let sh_offset = read_u32(hdr, 16)?;
+        let sh_size = read_u32(hdr, 20)?;
+
+        // `SHT_NOBITS` occupies no space in the file: it is not
+        // extracted and it does not count against the byte budget.
+        if sh_type == SHT_NOBITS {
+            continue;
+        }
+
+        let name = read_section_name(shstrtab, sh_name)?;
+        if !DEBUG_SECTION_WHITELIST.contains(&name.as_str()) {
+            continue;
+        }
+
+        let end = (sh_offset as u64)
+            .checked_add(sh_size as u64)
+            .ok_or_else(|| {
+                PlatformError::new(FAMILY, 1, "section sh_offset + sh_size overflows u64")
+            })?;
+        if end > bytes.len() as u64 {
+            return Err(PlatformError::new(
+                FAMILY,
+                1,
+                format!(
+                    "section {:?} bytes [0x{:x}, 0x{:x}) outside file ({})",
+                    name,
+                    sh_offset,
+                    end,
+                    bytes.len()
+                ),
+            ));
+        }
+
+        total += sh_size as u64;
+        if total > limits.debug_section_bytes as u64 {
+            return Err(PlatformError::new(
+                FAMILY,
+                2,
+                format!(
+                    "debug section bytes {} exceeds parseLimit.debugSectionBytes {}",
+                    total, limits.debug_section_bytes
+                ),
+            ));
+        }
+
+        out.push((name, bytes[sh_offset as usize..end as usize].to_vec()));
+    }
+    Ok(out)
+}
+
+/// Read a NUL-terminated section name out of the section-name table.
+///
+/// A name offset outside the table, or a name that is not terminated
+/// inside the table, is malformed (`E_LDR-01`) — the name is what the
+/// whitelist filter works on, so a bogus name cannot be ignored.
+fn read_section_name(table: &[u8], off: u32) -> Result<String, PlatformError> {
+    let start = off as usize;
+    if start >= table.len() {
+        return Err(PlatformError::new(
+            FAMILY,
+            1,
+            format!(
+                "section name offset {} outside the section name table ({})",
+                off,
+                table.len()
+            ),
+        ));
+    }
+    let rest = &table[start..];
+    let end = rest.iter().position(|b| *b == 0).ok_or_else(|| {
+        PlatformError::new(
+            FAMILY,
+            1,
+            format!("section name at offset {} is not NUL-terminated", off),
+        )
+    })?;
+    Ok(String::from_utf8_lossy(&rest[..end]).into_owned())
 }
 
 // ---------------------------------------------------------------------------

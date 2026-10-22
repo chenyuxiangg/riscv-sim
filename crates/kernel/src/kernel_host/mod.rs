@@ -76,6 +76,30 @@
 //! 生产者（谁在什么时候产生增量）等 M-10 的增量订阅落地后再定——
 //! 在那之前接线只会造出一个「有形状、没内容」的变体。
 //!
+//! ## 契约 v3 的四个调试面命令（M-11 · STAGE-5）
+//!
+//! 冻结规格：`docs/detailed-design/STAGE-5_Symbol_Disasm_Trace.md`。
+//!
+//! | 命令 | 内核行为 | 回复事件 |
+//! | --- | --- | --- |
+//! | `Disasm{addr,count}` | M-11 的 `Disassembler`；取指回调接 M-14 的总线 | `Disasm{entries}` |
+//! | `ResolveLine{addr}` | M-11 的 `DwarfLines`（Wave 1 = 只识别不解析） | `SourceLocation{addr,file,line}` |
+//! | `ExportTrace{source,format,offset,limit}` | **宿主路由**：`Waveform` ⇒ M-19 的环；`Execution` ⇒ M-11 的轨迹环 | `TraceExport{..}` |
+//! | `SetTraceEnabled{enabled}` | M-11 的轨迹环开关（裁决 H） | `TraceState{enabled,len,dropped}` |
+//!
+//! ⚠️ **这四个事件是「回复事件」，不经 topic 过滤**（STAGE-5 §9.1）：
+//! 前端靠传输帧的 `reqId` 关联「命令 → 回复」⇒ **不需要先订阅**。
+//! [`TOPIC_DISASM`] 等四个常量是**登记用**的（与前端 `EVENT_TOPIC`
+//! 逐字相同），**不要**据此实现「订阅后才推送」。
+//!
+//! ⚠️ **两条闭环**（本模块是它们的落点）：
+//!
+//! - **D-51**：M-18 的访存 trace 环**只写不读** ⇒ 宿主在每个事件批次
+//!   跑完后把环里的事件**立刻**转进 M-11 的轨迹环（**drain 与转移必须
+//!   同时发生**——只 drain 会把 M-11 要用的历史冲掉）。
+//! - **D-50**：波形导出的数据源是 **M-19 的环**，**不是** M-18 的边沿
+//!   存储 ⇒ 否则 M-19 的环永远是「只写不读」。
+//!
 //! ## 会话级快照（STAGE-3）
 //!
 //! 冻结规格：`docs/detailed-design/STAGE-3_Session_Snapshot.md`。
@@ -105,8 +129,8 @@ use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, E_PROTO_01_VERSION_MISMATCH, PROTO_FAMILY,
 };
 use riscv_sim_contract::model::{
-    Edge, ImageKind, ImageRef, ImageSource, Project, WaveformHistory, WaveformStream, WriteSize,
-    SIM_STATE_SCHEMA_VERSION,
+    Edge, ImageKind, ImageRef, ImageSource, Project, TraceEvent, TraceFormat, TraceSource,
+    WaveformHistory, WaveformStream, WriteSize, SIM_STATE_SCHEMA_VERSION,
 };
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
 use riscv_sim_contract::protocol::{
@@ -115,16 +139,22 @@ use riscv_sim_contract::protocol::{
 use riscv_sim_contract::session::{
     CheckpointMetaDto, M13StateDto, M14MapDto, M15PeriphDto, M16IntcDto, SessionSnapshotDto,
 };
-use riscv_sim_contract::snapshot::EngineSnapshotDto;
+use riscv_sim_contract::snapshot::{EngineSnapshotDto, DEFAULT_INSTRUCTION_BUDGET};
 use riscv_sim_contract::SCHEMA_VERSION;
 
 use crate::m06_elf::{DefaultLoader, Kind as LoadKind, ParseLimits};
+use crate::m11_symbol::disasm::fetch_instruction_code as m11_fetch_instruction_code;
+use crate::m11_symbol::trace::{E_CTX_03_ILLEGAL_EXPORT_FORMAT, TRACE_FAMILY};
+use crate::m11_symbol::{
+    Disassembler, DwarfLines, LineLookup, SymbolService, SymbolTable, TraceBuffer, TRACE_CAP,
+};
+use crate::m14_bus::{Bus, BusWidth};
 use crate::m15_peripheral;
 use crate::m15_peripheral::gpio::{GpioBank, GPIO_WINDOW};
 use crate::m16_interrupt::InterruptController;
 use crate::m17_backend::{SelfIssBackend, SharedInterruptPort};
 use crate::m18_probe::{ChannelDef, ChannelKind, ProbeRegistry, SampleCfg, CH_GPIO0, CH_IRQ_PULSE};
-use crate::m19_waveform::{ChannelMeta, SharedPipeline, WaveformPipeline};
+use crate::m19_waveform::{ChannelMeta, ExportFilter, SharedPipeline, WaveformPipeline};
 use crate::m20_snapshot::SnapshotManager;
 
 /// GPIO 外设的基址（PL061 惯例）。
@@ -206,6 +236,40 @@ pub const TOPIC_REGISTERS: &str = "sim.registers";
 
 /// 订阅主题：探针波形。
 pub const TOPIC_WAVEFORM: &str = "sim.waveform";
+
+// ---------------------------------------------------------------------------
+// 契约 v3 的四个调试面主题（STAGE-5 §3.5 / §9.6）
+// ---------------------------------------------------------------------------
+//
+// ⚠️ **值必须与前端 `front/lib/message.js` 的 `EVENT_TOPIC` 逐字相同**
+// ——Rust 侧没有集中的「变体 → topic」映射表（唯一真相在前端），两侧的
+// 一致性靠「同一个字面量 + 各自被测试钉住」保证。
+//
+// ⚠️ **登记用，不是订阅开关**：这四个事件是**命令的回复**（STAGE-5
+// §9.1），前端靠传输帧的 `reqId` 关联 ⇒ **不需要先订阅**。不要据此
+// 实现「订阅后才推送」——那会让前端等不到回复。
+
+/// 主题：反汇编序列（`EventPayload::Disasm` 的回复）。
+pub const TOPIC_DISASM: &str = "debug.disasm";
+
+/// 主题：地址 → 源码行（`EventPayload::SourceLocation` 的回复）。
+pub const TOPIC_SOURCE: &str = "debug.source";
+
+/// 主题：导出块（`EventPayload::TraceExport` 的回复）。
+pub const TOPIC_EXPORT: &str = "debug.export";
+
+/// 主题：轨迹记录状态（`EventPayload::TraceState` 的回复）。
+pub const TOPIC_TRACE: &str = "debug.trace";
+
+/// 场景码：M-19 的波形管道**不可用**（`RefCell` 争用 / 尚未装配）。
+///
+/// ⚠️ 这是**内部瞬时**状态，不是客户端的请求有错 ⇒ 它**不**用 `E_CTX-03`
+///（那是「请求参数 / 组合不合法」）。
+///
+/// ⚠️ **场景号是 2**：场景 1 已经是 M-19 的「通道配置非法」
+/// （`m19_waveform::channel::invalid_config`）——一个场景码一个真相，
+/// 不能两条不同的语义共用一个码。
+pub const E_OBS_02_PIPELINE_UNAVAILABLE: u16 = 2;
 
 /// 默认内存图 · 低段 RAM 的基址（复位向量）。
 pub const DEFAULT_RAM_LOW_BASE: u32 = 0x0000_0000;
@@ -405,6 +469,30 @@ pub struct KernelHost {
     /// M-20（规格 §3.5）——这样 M-20 不依赖 M-14 / M-15 / M-16，三段可以
     /// 各自演进。
     snapshots: SnapshotManager,
+    /// M-11 的反汇编器（按地址缓存 + 自修改代码失效，裁决 G）。
+    disassembler: Disassembler,
+    /// M-11 的符号表（`.symtab` 解析结果）。
+    ///
+    /// ⚠️ **装载工程时无条件重建**（STAGE-5 §9.2）：装载新工程 = 新会话，
+    /// 旧工程的符号留着就是**两个真相**。
+    symbols: SymbolTable,
+    /// M-11 的 DWARF 行表（Wave 1 = **只识别不解析** ⇒ 恒降级态）。
+    ///
+    /// `None` = **没有 DWARF**（还没装载镜像，或镜像里没有 `.debug_line`）。
+    dwarf: Option<DwarfLines>,
+    /// M-11 的执行轨迹环（指令 + 访存）。
+    ///
+    /// ⚠️ 它是**访存历史的持有者**（D-51）：M-18 的环是**中转站**，
+    /// 宿主每跑完一个批次就把 M-18 的环**转移**到这里 ⇒ M-18 的环不再
+    /// 无界增长，而 M-11 要用的历史一条不少。
+    trace: TraceBuffer,
+    /// 被**丢弃**的 M-18 访存事件数。
+    ///
+    /// ⚠️ **可见的丢弃**（不静默）：被丢掉的事件有两类 —— ① `load_bytes`
+    /// 逐字节写镜像产生的**宿主侧**噪声（不是访客的执行历史）；② trace
+    /// 开关**关闭**期间的事件（「关闭 ⇒ 零记录」，裁决 H）。计数暴露给
+    /// 调用方，免得「轨迹环里少了一批」变成一件没人知道的事。
+    trace_events_discarded: u64,
 }
 
 impl std::fmt::Debug for KernelHost {
@@ -417,6 +505,13 @@ impl std::fmt::Debug for KernelHost {
             .field("now_ps", &self.backend.engine().now_ps())
             .field("topics", &self.topics)
             .field("seq", &self.seq)
+            // M-11 的四个服务对象（契约 v3 的调试面）——它们的状态是
+            // 「会话里发生了什么」的一部分，日志行要看得见。
+            .field("disasm_cache", &self.disassembler.cache_len())
+            .field("symbols", &self.symbols.len())
+            .field("dwarf", &self.dwarf.as_ref().map(|d| d.status()))
+            .field("trace_len", &self.trace.len())
+            .field("trace_dropped", &self.trace.dropped())
             .finish()
     }
 }
@@ -452,6 +547,21 @@ impl KernelHost {
             waveform_edges_truncated: 0,
             intc,
             snapshots: SnapshotManager::new(),
+            // M-11 的四个服务对象（契约 v3 的调试面）。
+            //
+            // ⚠️ `TraceBuffer` 的 `enabled` **默认 true**（STAGE-5 §9.8
+            // 的裁决）：D-51 要求访存 trace「有消费者」，默认不写会让导出
+            // 永远是空的。用户可以用 `SetTraceEnabled(false)` 关掉它。
+            //
+            // ⚠️ `dwarf` 是 `Option`：`None` = 「这个会话没有 DWARF」
+            // （降级态，`file=""` / `line=0`）。**空会话**还没有装载任何
+            // 镜像 ⇒ 确实没有 DWARF —— 不必为了造一个「空的行表」而
+            // `unwrap` 一个永远走不到的错误分支（WASM 里 panic = Worker 崩）。
+            disassembler: Disassembler::new(),
+            symbols: SymbolTable::default(),
+            dwarf: None,
+            trace: TraceBuffer::new(TRACE_CAP),
+            trace_events_discarded: 0,
         };
         // The default memory map cannot fail on a fresh bus (the two
         // regions do not overlap and are far below the 16 MiB per-region
@@ -784,6 +894,119 @@ impl KernelHost {
         self.backend.bus().hook_count()
     }
 
+    // -- M-11 调试面的可观测性（契约 v3） -----------------------------------
+
+    /// M-11 的反汇编缓存里有多少条目（按地址索引）。
+    ///
+    /// 用来钉住「**只**失效被写的那个地址」（裁决 G）：失效一个地址之后，
+    /// 这个数应当**减少 1**，而不是清零。
+    pub fn disasm_cache_len(&self) -> usize {
+        self.disassembler.cache_len()
+    }
+
+    /// M-11 的反汇编缓存**命中**过多少次（`Disassembler::lookup`）。
+    ///
+    /// ⚠️ 规格 §9.4 说「`disasmCache` 可以兜住（访存轨迹那次重复取指）」
+    /// ⇒ 这个计数是那句话的**可观测**证据：访存轨迹转移时若命中缓存，
+    /// 宿主的**总线读次数**就少了一次。
+    pub fn disasm_cache_hits(&self) -> u64 {
+        self.disassembler.lookup_hits()
+    }
+
+    /// M-11 的符号表里有多少条符号。
+    pub fn symbol_count(&self) -> usize {
+        self.symbols.len()
+    }
+
+    /// 按**名字**查符号（走 M-11 的 [`SymbolService`] **端口**）。
+    ///
+    /// 未知名 ⇒ `None`（**不是错误**，验收 #7）。
+    ///
+    /// ⚠️ **走端口而不是直接摸 `SymbolTable`**（v0.20 检视 B · D-4）：端口
+    /// 此前**全仓 0 处实现** ⇒ 它是**死代码**，「按地址查符号」这条能力
+    /// 也**没有生产路径**。⇒ 宿主走端口 ⇒ 端口有实现者、也有调用者。
+    pub fn lookup_symbol(&self, name: &str) -> Option<riscv_sim_contract::model::Symbol> {
+        self.symbols.lookup_symbol(name).ok().flatten()
+    }
+
+    /// 按**地址**查符号（走 M-11 的 [`SymbolService`] **端口**）—— 命中
+    /// 「起始地址 ≤ `addr` 且**最近**的那个」。
+    ///
+    /// 比所有符号的起始地址都小 ⇒ `None`（**不是错误**）。
+    pub fn symbol_at(&self, addr: u32) -> Option<riscv_sim_contract::model::Symbol> {
+        self.symbols.symbol_at(addr).ok().flatten()
+    }
+
+    /// M-11 的 DWARF 状态（`None` = 这个会话没有 DWARF）。
+    pub fn dwarf_status(&self) -> Option<crate::m11_symbol::DwarfStatus> {
+        self.dwarf.as_ref().map(|d| d.status())
+    }
+
+    /// M-11 的执行轨迹环里有多少条目。
+    pub fn trace_len(&self) -> usize {
+        self.trace.len()
+    }
+
+    /// M-11 的执行轨迹环累计丢弃了多少条（溢出）。
+    pub fn trace_dropped(&self) -> u64 {
+        self.trace.dropped()
+    }
+
+    /// 执行轨迹的记录开关（裁决 H）。
+    pub fn trace_enabled(&self) -> bool {
+        self.trace.is_enabled()
+    }
+
+    /// M-18 的访存 trace 环里现在有多少条目。
+    ///
+    /// ⚠️ 这是 **D-51 的闭环观测点**：宿主每跑完一个批次就把它**转移**进
+    /// M-11 的环 ⇒ 跑完一批之后这个数应当回到 **0**（M-18 的环不再
+    /// 无界增长）。
+    pub fn probe_trace_len(&self) -> usize {
+        self.probes
+            .as_ref()
+            .and_then(|reg| reg.try_borrow().ok())
+            .map(|reg| reg.trace_len())
+            .unwrap_or(0)
+    }
+
+    /// M-18 的访存 trace 环**累计丢了多少条**（环溢出，丢最旧）。
+    ///
+    /// ⚠️ **非零 = 失效通道有损**（v0.20 检视 A · 重要 1）：这个环同时是
+    /// **反汇编缓存的失效通道**（裁决 G：访存写事件 ⇒ 失效对应地址）⇒
+    /// 写事件被丢掉 ⇒ 缓存条目不失效 ⇒ **反汇编给出旧机器码**。
+    ///
+    /// ⇒ 宿主把 `StepN` 按指令预算**分块**（[`KernelHost::step_in_chunks`]）
+    /// ⇒ 单块事件数 ≪ 环的容量 ⇒ 这个数**恒为 0**。
+    pub fn probe_trace_dropped(&self) -> u64 {
+        self.probes
+            .as_ref()
+            .and_then(|reg| reg.try_borrow().ok())
+            .map(|reg| reg.trace_dropped())
+            .unwrap_or(0)
+    }
+
+    /// M-18 的**边沿存储**里现在有多少条边沿。
+    ///
+    /// ⚠️ 这是 **D-50 的判别点**：M-18 的边沿存储与 M-19 的环是**两份**
+    /// 数据。把 M-18 的存储抽干（订阅会推一次波形历史）之后，波形导出
+    /// **仍然**有内容 ⇒ 它读的是 M-19 的环。
+    pub fn probe_edge_count(&self) -> usize {
+        self.probes
+            .as_ref()
+            .and_then(|reg| reg.try_borrow().ok())
+            .map(|reg| reg.edge_count())
+            .unwrap_or(0)
+    }
+
+    /// 被**丢弃**的 M-18 访存事件数（宿主侧的镜像写 + trace 关闭期间的事件
+    /// + 切换开关时的清场）。
+    ///
+    /// 非零 = 有事件**没有**进 M-11 的执行轨迹环。丢弃**可见**，不静默。
+    pub fn trace_events_discarded(&self) -> u64 {
+        self.trace_events_discarded
+    }
+
     // -- JSON 桥 ------------------------------------------------------------
 
     /// 处理一条契约消息的 JSON 文本，返回一批**事件**消息的 JSON 文本。
@@ -906,6 +1129,13 @@ impl KernelHost {
             CommandPayload::WriteMemory { addr, size, value } => {
                 match self.backend.write_memory(addr, size, value) {
                     Ok(()) => {
+                        // ⚠️ 调试器写内存**也是**一次总线写 ⇒ M-18 的访存
+                        // trace 环里多了一条写事件 ⇒ **两件事**跟着它走：
+                        // ① 它要**立刻**进 M-11 的轨迹环（D-51：drain 与
+                        //    转移必须同时发生）；
+                        // ② 它要**失效**对应地址的反汇编缓存（裁决 G：
+                        //    自修改代码）。
+                        self.transfer_trace();
                         let mut events = vec![self.tick()];
                         // 调试器写内存**也会**产生探针边沿（写 GPIO 的
                         // OUT 寄存器就是改电平）。不推的话这条边沿要等到
@@ -957,6 +1187,20 @@ impl KernelHost {
                 code: "E_CTX-05".to_string(),
                 message: "管理通道未启用（admin op 不在当前会话的能力面内）".to_string(),
             }],
+            // ⚠️ 契约 v3 的四个调试面命令（STAGE-5 §3.4 的规范映射表）。
+            //
+            // ⚠️ 这四个分支**曾经**是「故意返回错误」的占位（契约 v3
+            // 到位、M-11 未接线的那个窗口期）。现在它们是**真实现**——
+            // 占位分支已被删除（不留「有形状、没内容」的变体）。
+            CommandPayload::Disasm { addr, count } => self.on_disasm(addr, count),
+            CommandPayload::ResolveLine { addr } => self.on_resolve_line(addr),
+            CommandPayload::ExportTrace {
+                source,
+                format,
+                offset,
+                limit,
+            } => self.on_export_trace(source, format, offset, limit),
+            CommandPayload::SetTraceEnabled { enabled } => self.on_set_trace_enabled(enabled),
         }
     }
 
@@ -976,9 +1220,14 @@ impl KernelHost {
         }
 
         let mut entry = 0u32;
+        // M-06 带出的**调试节区原始字节**（裁决 B）⇒ 交给 M-11 解析。
+        //
+        // ⚠️ 多个镜像的节区**合并**（每个工程可能有好几个镜像）。
+        let mut debug_sections: Vec<(String, Vec<u8>)> = Vec::new();
         for image in &project.images {
             match self.load_image(image) {
-                Ok(image_entry) => {
+                Ok((image_entry, sections)) => {
+                    debug_sections.extend(sections);
                     // A raw blob has entry 0; it must not clobber an ELF's
                     // entry point.
                     if image_entry != 0 {
@@ -989,6 +1238,26 @@ impl KernelHost {
             }
         }
         self.backend.set_pc(entry);
+
+        // ⚠️ **无条件重建** M-11 的索引（STAGE-5 §9.2）：装载新工程 = 新
+        // 会话 ⇒ 旧的符号表 / 行表 / 反汇编缓存 / 轨迹环**全部**作废。
+        //
+        // ⚠️ 重建**失败**（符号表畸形 / 超上限）⇒ **拒绝**这次装载
+        // （`E_LDR-01` / `E_LDR-02`），**不**截断后静默少给（验收 #8）。
+        if let Err(err) = self.rebuild_symbol_index(&debug_sections) {
+            return vec![self.error_from(&err)];
+        }
+
+        // ⚠️ 镜像装载本身会写总线（`load_bytes` 逐字节写）⇒ M-18 的访存
+        // trace 环里多了一批**宿主侧**的写。
+        //
+        // 它们**不是**访客的执行历史 ⇒ **丢掉**（不是转移）。
+        //
+        // ⚠️ 为什么这里可以丢，而 D-51 说「不能定期 drain 掉」：D-51 怕的
+        // 是把**访客执行历史**冲掉；装载镜像发生在**任何访客执行之前**，
+        // 环里此刻只有宿主侧的镜像写。而且轨迹环是**定容**的 ⇒ 把这批噪声
+        // 塞进去会把访客的执行历史挤出去。
+        self.discard_m18_trace();
 
         // A new project is a new session: the old topic subscriptions die
         // with it (FR-13 — every session id owns its namespace). The host
@@ -1004,8 +1273,11 @@ impl KernelHost {
         events
     }
 
-    /// 加载一个镜像，返回它的入口地址。
-    fn load_image(&mut self, image: &ImageRef) -> Result<u32, PlatformError> {
+    /// 加载一个镜像，返回它的入口地址与**调试节区**原始字节。
+    ///
+    /// ⚠️ 调试节区**不过契约层**（契约只传查询结果，不传节区字节）⇒
+    /// 它在**内核内部**从 M-06 交给 M-11（STAGE-5 §4）。
+    fn load_image(&mut self, image: &ImageRef) -> Result<(u32, DebugSections), PlatformError> {
         let bytes = match &image.source {
             ImageSource::Bytes(bytes) => bytes.clone(),
             ImageSource::Url(url) => {
@@ -1030,7 +1302,7 @@ impl KernelHost {
         for (paddr, segment) in &loaded.segments {
             self.backend.bus_mut().load_bytes(*paddr, segment)?;
         }
-        Ok(loaded.entry)
+        Ok((loaded.entry, loaded.debug_sections))
     }
 
     /// 执行一批指令（`None` = 跑到停止条件，`Some(n)` = 恰好 n 条）。
@@ -1054,7 +1326,7 @@ impl KernelHost {
         // 两条路径共用同一个执行器（`m17_backend::IssExecutor`），所以
         // 「按指令跑」与「按时间跑」不会各自长出一套 ISS 逻辑（D-07）。
         let run = match steps {
-            Some(n) => self.backend.step_n(n).map(|_| ()),
+            Some(n) => self.step_in_chunks(n),
             None => self.backend.continue_until_event(),
         };
         match run {
@@ -1067,6 +1339,14 @@ impl KernelHost {
                 events.push(self.error_from(&err));
             }
         }
+        // ⚠️ **D-51 的落点**：本批跑完后，把 M-18 的访存 trace 环**立刻**
+        // 转进 M-11 的轨迹环。
+        //
+        // 「立刻」不是优化，是**要求**：M-18 的环（`TRACE_CAP = 200_000`）
+        // 在 M-11 落地前**只写不读**（常驻 3~5 MB）；而它又是 M-11 要用的
+        // 历史的**唯一来源** ⇒ drain 与转移必须同时发生，只 drain 会把
+        // 历史冲掉。
+        self.transfer_trace();
         events.push(self.tick());
         if let Some(wave) = self.register_waveform(false) {
             events.push(wave);
@@ -1090,6 +1370,41 @@ impl KernelHost {
             events.push(EventPayload::Halted { reason, pc });
         }
         events
+    }
+
+    /// 跑 `n` 条指令，**按指令预算分块**（`DEFAULT_INSTRUCTION_BUDGET`）。
+    ///
+    /// ⚠️ **为什么要分块**（v0.20 检视 A · 重要 1）：
+    /// M-18 的访存 trace 环是**有界**的（`TRACE_CAP = 200_000`，溢出丢最旧）
+    /// ⇒ 它同时是**反汇编缓存的失效通道**（裁决 G：访存写事件 ⇒ 失效对应
+    /// 地址）⇒ 环一旦溢出，**写事件被丢掉 ⇒ 缓存条目不失效 ⇒ 反汇编给出
+    /// 旧机器码**（调试器给出**错误**的指令）。
+    ///
+    /// ⇒ 分块 ⇒ 每块至多 `DEFAULT_INSTRUCTION_BUDGET`（10 000）条指令，
+    /// 每条至多 5 次总线访问（1 次取指 + 至多 4 个非对齐字节片）⇒ 单块
+    /// 事件数 ≤ 50 000 ≪ 200 000 ⇒ **失效通道永远无损**。
+    ///
+    /// ⚠️ **顺带消掉一处上界不对称**：`Continue` 走时间驱动主循环，一轮就是
+    /// `DEFAULT_INSTRUCTION_BUDGET` 条；而 `StepN` 此前**无上界** ⇒ 一条
+    /// `StepN { n: 500000 }` 能把宿主堵住很久，并让上面的环溢出。
+    ///
+    /// ⚠️ **语义不变**：仍然「恰好 n 条」——中途撞上断点 / 观察点 / 陷阱 /
+    /// 暂停就**停在那里**，剩下的**不**跑（与一次性 `step_n(n)` 一致）。
+    fn step_in_chunks(&mut self, n: u32) -> Result<(), PlatformError> {
+        let mut remaining = n;
+        while remaining > 0 {
+            let chunk = remaining.min(DEFAULT_INSTRUCTION_BUDGET);
+            let executed = self.backend.step_n(chunk)?;
+            remaining -= executed;
+            // ⚠️ **块没跑满 ⇒ 提前停**（停止条件命中）⇒ 剩下的**不**再跑。
+            if executed < chunk {
+                break;
+            }
+            // ⚠️ **块间转移**（D-51：drain 与转移必须同时发生）⇒ M-18 的
+            // 环不会涨到它的上限 ⇒ 失效通道保持无损。
+            self.transfer_trace();
+        }
+        Ok(())
     }
 
     /// 宿主请求暂停。
@@ -1193,6 +1508,308 @@ impl KernelHost {
             cap_bits: KERNEL_CAP_BITS,
             kernel: kernel_descriptor(),
         }]
+    }
+
+    // -- 契约 v3 的调试面（M-11 · STAGE-5） ---------------------------------
+
+    /// 反汇编（契约 v3 · `Disasm`）。
+    ///
+    /// * 取指来源 = **M-14 的总线**（经 M-11 注入的回调）：M-11 **不**
+    ///   依赖 M-17 / M-14 ⇒ 依赖方向单向（LLD §9.1）。
+    /// * 读未映射 ⇒ **提前结束序列**、返回**部分序列**（**不是**错误，
+    ///   LLD 11-3）——M-11 的 `disasm` 自己处理，宿主只把结果透传。
+    /// * `count > MAX_DISASM_COUNT` ⇒ **拒绝**（`E_CTX-02`，M-11 自己
+    ///   抛的，宿主只透传）。
+    ///
+    /// ⚠️ 取指**必须真的只读 `size` 字节**（「读一个字取低半」会让映射区
+    /// 末端的压缩指令越界误报，LLD 11-1）——见 [`fetch_bytes`]。
+    fn on_disasm(&mut self, addr: u32, count: u32) -> Vec<EventPayload> {
+        // 借用拆分：`self.backend`（总线）与 `self.disassembler` 是**两个
+        // 不同的字段** ⇒ 可以同时借。
+        let bus = self.backend.bus();
+        let mut read = |addr: u32, size: u32| fetch_bytes(bus, addr, size);
+        match self.disassembler.disasm(addr, count, &mut read) {
+            Ok(entries) => vec![EventPayload::Disasm { entries }],
+            Err(err) => vec![self.error_from(&err)],
+        }
+    }
+
+    /// 地址 → 源码行（契约 v3 · `ResolveLine`）。
+    ///
+    /// ⚠️ **两态可区分**（LLD 11-4）：没有 DWARF ⇒ `file = ""` / `line = 0`；
+    /// 有 DWARF 但地址没命中 ⇒ `file = ""` / `line = u32::MAX`。
+    ///
+    /// ⚠️ **Wave 1 的诚实口径**：M-11 的 `DwarfLines::resolve` **恒**返回
+    /// 降级态（真正的行表解析是 Wave 2）⇒ 宿主**不自己编造行号**，只把
+    /// M-11 的判定原样映射成契约形状（映射点见 [`source_location_event`]）。
+    fn on_resolve_line(&mut self, addr: u32) -> Vec<EventPayload> {
+        let lookup = match self.dwarf.as_ref() {
+            Some(dwarf) => dwarf.resolve(addr),
+            // 这个会话**没有** DWARF ⇒ 降级态（与「有 DWARF 但没命中」
+            // 是两回事，宿主不能把它们混成一个）。
+            None => LineLookup::NoDwarf,
+        };
+        vec![source_location_event(addr, lookup)]
+    }
+
+    /// 导出（契约 v3 · `ExportTrace`）—— **宿主路由**（STAGE-5 裁决 D）。
+    ///
+    /// | `source` | `format` | 数据源 |
+    /// | --- | --- | --- |
+    /// | `Waveform` | `Csv` / `Vcd` | **M-19 的环**（闭环 D-50） |
+    /// | `Waveform` | `Json` | **拒绝**（`E_CTX-03`） |
+    /// | `Execution` | `Csv` / `Json` | **M-11 的轨迹环**（闭环 D-51） |
+    /// | `Execution` | `Vcd` | **拒绝**（`E_CTX-03`） |
+    ///
+    /// ⚠️ **路由在宿主**：M-11 不依赖 M-19，M-19 也不依赖 M-11 ⇒ LLD §9.1
+    /// 的依赖方向不变。
+    ///
+    /// ⚠️ **`offset` 的单位是「条目数」**，M-19 的 `next_offset` 也是条目
+    /// 索引 ⇒ **直接透传**，不换算成字节。
+    fn on_export_trace(
+        &mut self,
+        source: TraceSource,
+        format: TraceFormat,
+        offset: u64,
+        limit: u32,
+    ) -> Vec<EventPayload> {
+        match source {
+            TraceSource::Waveform => self.export_waveform(format, offset),
+            TraceSource::Execution => self.export_execution(format, offset, limit),
+        }
+    }
+
+    /// 轨迹记录开关（契约 v3 · `SetTraceEnabled`，裁决 H）。
+    ///
+    /// * `enabled = true` ⇒ 宿主开始把访存轨迹**记录**进 M-11 的环；
+    /// * `enabled = false` ⇒ 停（**零开销**：宿主**不调用** `record`，
+    ///   M-11 的 `record` 自己也立即返回 —— 规格 §9.7 的「双保险」）。
+    ///
+    /// ⚠️ **drain 照做**（不受开关管）：M-18 的环是**有界**的，不 drain
+    /// 它会涨到上限（常驻几 MB）⇒ 「关闭 trace」反而更费内存。
+    ///
+    /// 回复里回显 `enabled` + `len` + `dropped`（前端据此显示降速提示，
+    /// 评审 R9）。
+    ///
+    /// ⚠️ **幂等**：重复设置同一个值是安全的（规格 §3.4）。
+    fn on_set_trace_enabled(&mut self, enabled: bool) -> Vec<EventPayload> {
+        // ⚠️ **先清场、再切开关**：开关**切换**的那一刻做一次 drain，把
+        // 「上一个状态」攒下的事件丢掉。
+        //
+        // - 打开：丢掉「关闭期间」攒的那批 —— 用户说「现在开始记录」，
+        //   把旧的那批倒回来会违反「关闭 ⇒ 零记录」；
+        // - 关闭：丢掉「切换之前」攒的那批 —— 它们属于上一个状态。
+        //
+        // ⚠️ 正常情况下此刻环里**已经是空的**（每批都 drain 过了）⇒ 这一步
+        // 是**防御性**的：万一上一批在转移之前就出错了（例如访存报错），
+        // 环里可能还留着半批 ⇒ 切换时清掉，免得它们混进下一个状态。
+        self.discard_m18_trace();
+        self.trace.set_enabled(enabled);
+        vec![EventPayload::TraceState {
+            enabled,
+            len: self.trace.len() as u32,
+            dropped: self.trace.dropped(),
+        }]
+    }
+
+    /// 波形导出（`source = Waveform`）—— 数据源 = **M-19 的环**。
+    ///
+    /// ⚠️ **D-50 的要点**：数据源必须是 M-19 的环，**不是** M-18 的边沿
+    /// 存储 —— 否则 M-19 的环永远是「只写不读」。
+    ///
+    /// ⚠️ `limit` 在这条路上**不适用**：M-19 的导出有自己的分块尺寸
+    /// （`EXPORT_CHUNK = 10_000` 条），它的 API 里没有 limit 参数 ⇒ 宿主
+    /// **不伪造**一个 limit（伪造会让续导协议算错 `next_offset`）。契约的
+    /// `limit` 只约束 `source = Execution` 那条路。
+    fn export_waveform(&mut self, format: TraceFormat, offset: u64) -> Vec<EventPayload> {
+        if format == TraceFormat::Json {
+            // M-19 没有 JSON 波形导出 ⇒ **拒绝**，不「换一个格式凑合」。
+            return vec![self.error_from(&illegal_export(
+                "波形导出不支持 JSON（M-19 只产出 CSV / VCD）",
+            ))];
+        }
+        let Some(pipeline) = self.waveform.clone() else {
+            return vec![self.error_from(&pipeline_unavailable(
+                "波形管道尚未装配（没有可读的 M-19 环）",
+            ))];
+        };
+        let Ok(mut pipe) = pipeline.try_pipeline_mut() else {
+            // 管道正被占用（M-18 正在推边沿）——这是**内部瞬时**状态，
+            // 不是客户端的请求有错。报出来而不是静默给一个空块（空块
+            // 会被前端当成「这段会话没有波形」）。
+            return vec![self.error_from(&pipeline_unavailable(
+                "M-19 的波形管道正被占用（RefCell 争用），本次导出未执行",
+            ))];
+        };
+        let filter = ExportFilter::all();
+        let next_offset = usize::try_from(offset).unwrap_or(usize::MAX);
+        let handle = match format {
+            TraceFormat::Csv => pipe.export_csv(&filter, next_offset, None),
+            TraceFormat::Vcd => pipe.export_vcd(&filter, next_offset, None),
+            // 上面已经拒了。
+            TraceFormat::Json => unreachable!("JSON 波形导出在上面已被拒绝"),
+        };
+        vec![waveform_export_event(handle, format, offset)]
+    }
+
+    /// 执行轨迹导出（`source = Execution`）—— 数据源 = **M-11 的轨迹环**。
+    ///
+    /// ⚠️ `TraceFormat::Vcd` 由 M-11 自己拒（`E_CTX-03`）：执行轨迹不是
+    /// 信号波形，VCD 语义不适用（STAGE-5 裁决 D）。
+    fn export_execution(
+        &mut self,
+        format: TraceFormat,
+        offset: u64,
+        limit: u32,
+    ) -> Vec<EventPayload> {
+        match self.trace.export(format, offset, limit) {
+            Ok(chunk) => vec![EventPayload::TraceExport {
+                source: TraceSource::Execution,
+                format,
+                offset: chunk.offset,
+                next_offset: chunk.next_offset,
+                total: chunk.total,
+                bytes: chunk.bytes,
+                chunk: chunk.chunk,
+                // ⚠️ M-11 的 `ExportChunk` **没有** `overflow_marked` ⇒ 用
+                // 环的丢弃计数算（丢了最旧的条目 ⇒ 这份导出**不是**完整
+                // 历史）。
+                overflow_marked: self.trace.dropped() > 0,
+            }],
+            Err(err) => vec![self.error_from(&err)],
+        }
+    }
+
+    /// 把 M-18 的访存 trace 环**转移**进 M-11 的轨迹环（闭环 D-51）。
+    ///
+    /// ⚠️ **drain 与转移必须同时发生**（台账 D-51）：「在宿主里定期 drain
+    /// 掉」会把 M-11 要用的历史冲掉 ⇒ 这里**从不**单独 drain。
+    ///
+    /// ⚠️ **drain 照做，record 才受开关管**（规格 §9.7 的「零开销」口径）：
+    /// 宿主**不调用** `record`、M-11 的 `record` 自己也立即返回（双保险）。
+    ///
+    /// ⚠️ **缓存失效与记录开关无关**（裁决 G）—— 这是本批修掉的一个
+    /// **真实缺陷**：缓存失效是**正确性**问题（「访客改了代码，反汇编必须
+    /// 跟着变」），记录开关是**性能**问题（「要不要把访存记进环里」）。
+    /// 两者耦合 ⇒ 关闭 trace 期间访客自改代码 ⇒ 缓存**陈旧** ⇒ 用户看到的
+    /// 反汇编是**旧的**。⇒ 失效**始终**执行，**只有 record** 受开关管。
+    ///
+    /// ⚠️ **关闭期间为什么还要 drain**：M-18 的环是**有界**的（`TRACE_CAP
+    /// = 200_000`，常驻几 MB）⇒ 不 drain 它会涨到上限 ⇒ 「关闭 trace」反而
+    /// 更费内存。drain 的成本 ≪ record 的成本（record 要 clone + 入环）。
+    fn transfer_trace(&mut self) {
+        let enabled = self.trace.is_enabled();
+        for ev in self.drain_m18_trace() {
+            // ⚠️ **写 ⇒ 失效反汇编缓存**（裁决 G 的失效通道 = M-18 的写
+            // 事件）。**先**失效，**后**决定要不要记录 —— 顺序不能反：
+            // 失效是正确性，record 是性能。
+            if !ev.is_fetch {
+                self.disassembler.invalidate_on_access(ev.addr, ev.dir);
+            }
+            if !enabled {
+                // 关闭 ⇒ **零记录**（裁决 H / 验收 #15）：事件被 drain 掉，
+                // 但**不进** M-11 的环。
+                //
+                // ⚠️ 丢弃**可见**（计数暴露给调用方），不静默。
+                self.trace_events_discarded += 1;
+                continue;
+            }
+            if ev.is_fetch {
+                // 取指 ⇒ 指令条目（kind = 0）。
+                //
+                // ⚠️ M-18 的事件**不带数据** ⇒ 机器码要**额外取一次指**
+                // （规格 §9.4 承认这是重复取指的性能代价；`disasmCache`
+                // 能兜住一部分 —— 见 [`fetch_instruction_code`]）。
+                let code = self.fetch_instruction_code(ev.addr);
+                self.trace.record_instruction(ev.t_ps, ev.addr, code);
+            } else {
+                self.trace.record(&ev);
+            }
+        }
+    }
+
+    /// 把 M-18 的访存 trace 环**丢掉**（**有理由**的丢弃，不是「定期 drain」）。
+    ///
+    /// 两个调用点：
+    ///
+    /// 1. **装载工程后**：环里是 `load_bytes` 逐字节写镜像产生的**宿主侧**
+    ///    写 —— 不是访客的执行历史（而且轨迹环是定容的，塞进去会把访客的
+    ///    执行历史挤出去）。
+    /// 2. **切换 trace 开关时**：用户说「现在开始记录」⇒ 记录从此刻开始；
+    ///    把上一个状态攒下的那批倒回来会违反「关闭 ⇒ 零记录」。
+    ///
+    /// ⚠️ 丢弃**可见**（计数暴露给调用方），不静默。
+    fn discard_m18_trace(&mut self) {
+        let events = self.drain_m18_trace();
+        self.trace_events_discarded += events.len() as u64;
+    }
+
+    /// 从 M-18 的环里**取走**全部访存事件（**唯一**的 drain 点）。
+    ///
+    /// ⚠️ 探针注册表正被占用（总线派发路径里）⇒ 这一轮**放弃**：事件
+    /// 留在环里（**不丢**），下一轮再取。
+    fn drain_m18_trace(&mut self) -> Vec<TraceEvent> {
+        let Some(registry) = self.probes.clone() else {
+            return Vec::new();
+        };
+        let Ok(mut reg) = registry.try_borrow_mut() else {
+            return Vec::new();
+        };
+        reg.drain_trace()
+    }
+
+    /// 取一次指，拿机器码（规格 §9.4：M-18 的事件不带数据）。
+    ///
+    /// ⚠️ **先查 M-11 的反汇编缓存**（规格 §9.4 的「M-11 的 `disasmCache`
+    /// 可以兜住它」）：缓存里有 ⇒ **不用**再取一次指 ⇒ 少一次总线读。
+    ///
+    /// ⚠️ 缓存里的 `code` 是**原码**（压缩指令 = 16 位原码），与下面现场
+    /// 取指的口径**一致** ⇒ 两条路给出同一个值。
+    ///
+    /// ⚠️ **取指口径只有一份实现**（M-11 的 `disasm::fetch_instruction_code`
+    ///）：先读 2 字节判宽度（低 2 位 ≠ `0b11` ⇒ 压缩指令，16 位原码就够），
+    /// 否则再读 4 字节。⚠️ **必须真的只读 `size` 字节**（「读一个字取低半」
+    /// 会让映射区**末端**的压缩指令越界 ⇒ 被误报成「未映射」，LLD 11-1）。
+    ///
+    /// ⚠️ 读不到 ⇒ `0`。`0` **不是**一条真的指令（全零的低 2 位是
+    /// `0b00` ⇒ 非法压缩指令）⇒ 它唯一可能的含义是「取指失败，机器码
+    /// 未知」。**不猜值**（与 M-11 对访存值的口径一致）。
+    fn fetch_instruction_code(&mut self, addr: u32) -> u32 {
+        if let Some(entry) = self.disassembler.lookup(addr) {
+            return entry.code;
+        }
+        let bus = self.backend.bus();
+        let mut read = |addr: u32, size: u32| fetch_bytes(bus, addr, size);
+        m11_fetch_instruction_code(&mut read, addr).unwrap_or(0)
+    }
+
+    /// 重建 M-11 的索引（装载工程时**无条件**重建，STAGE-5 §9.2）。
+    ///
+    /// ⚠️ **必须重建，不能缓存**：装载新工程 = 新会话（D-45 的教训：装载
+    /// 后内核侧的订阅 / 索引会失效，幂等的「已就绪」检查不够）。
+    ///
+    /// ⚠️ **节区可能为空**（裸机镜像 / 无节区表）⇒ 那也要能构造出**空的**
+    /// 符号表 / 行表：M-11 的 API 表达「空」的方式是**空表 + 降级态**，
+    /// 不是错误。
+    ///
+    /// ⚠️ **反汇编缓存必须清空**：旧工程的机器码留在缓存里，新工程在
+    /// 同一个地址上的指令会被**旧机器码**顶掉。
+    ///
+    /// ⚠️ **轨迹环也要清空**：轨迹是**会话级**的数据，两个会话的轨迹
+    /// 混在一起就是「两个真相」。
+    fn rebuild_symbol_index(
+        &mut self,
+        sections: &[(String, Vec<u8>)],
+    ) -> Result<(), PlatformError> {
+        // 先把两个索引都**算出来**再落位 ⇒ 要么都换掉，要么都不换
+        // （不会留下「符号是新的、行表是旧的」这种拼接体）。
+        let symbols = SymbolTable::from_sections(sections)?;
+        let dwarf = DwarfLines::from_sections(sections)?;
+        self.symbols = symbols;
+        self.dwarf = Some(dwarf);
+        self.disassembler = Disassembler::new();
+        self.trace.clear();
+        Ok(())
     }
 
     /// 订阅一个主题。
@@ -1520,6 +2137,24 @@ impl KernelHost {
         // ---- 第 3 步：外设内部状态（按 id 双向匹配；检查全在写入之前）。 ----
         m15_peripheral::restore_session_states(&instances, &payload.m15_periph)?;
 
+        // ---- 第 3.5 步：作废 M-11 的**会话级**缓存与历史。 ----
+        //
+        // ⚠️ 还原会**换掉内存里的机器码** ⇒ 反汇编缓存里那些按地址缓存的
+        // 条目**可能陈旧** ⇒ 必须**作废**（否则 `Disasm` 给出**上个会话**的
+        // 指令 ⇒ 调试器给出**错误**的指令）。
+        //
+        // ⚠️ 轨迹环是**会话级历史** ⇒ 还原后是**新会话** ⇒ 旧历史必须
+        // **清空**（否则两个会话的轨迹混在一起，而 `overflow_marked` 仍说
+        // 「没溢出」⇒ 前端会把不连续的轨迹当完整会话）。
+        //
+        // ⚠️ **符号表与行表是「工程级」的**（它们来自已装载工程的 ELF，
+        // 还原会话**不换工程**）⇒ **保留**，不清。
+        //
+        // ⚠️ 这与 STAGE-5 §9.2 是**同一条规矩**（「装载新工程 = 新会话 ⇒
+        // 旧的索引全部作废」）：还原会话也是新会话。
+        self.disassembler = Disassembler::new();
+        self.trace.clear();
+
         // ---- 第 4 步：已拉起的 IRQ 行。 ----
         self.load_intc_state(&payload.m16_intc)?;
 
@@ -1576,6 +2211,120 @@ impl KernelHost {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 契约 v3 调试面的自由函数
+// ---------------------------------------------------------------------------
+
+/// M-06 解析出的**调试节区**（名字 + 原始字节）。
+///
+/// ⚠️ 它**不过契约层**（契约只传查询结果，不传节区字节）⇒ 在**内核
+/// 内部**从 M-06 交给 M-11（STAGE-5 §4 的数据流）。
+type DebugSections = Vec<(String, Vec<u8>)>;
+
+/// 取指 / 读内存的**宽度映射**。
+///
+/// ⚠️ `BusWidth` **没有** `From<u32>` ⇒ 宽度要自己映射。
+/// ⚠️ **必须真的只读 `size` 字节**（「读一个字取低半」会让映射区**末端**
+/// 的压缩指令越界 ⇒ 被误报成「未映射」，LLD 11-1）。
+fn fetch_bytes(bus: &Bus, addr: u32, size: u32) -> Result<u32, PlatformError> {
+    let width = match size {
+        1 => BusWidth::Byte,
+        2 => BusWidth::Half,
+        4 => BusWidth::Word,
+        other => {
+            return Err(PlatformError::new(
+                ErrorFamily::Bus,
+                1,
+                format!("取指宽度 {other} 字节不受支持（只支持 1 / 2 / 4）"),
+            ))
+        }
+    };
+    // ⚠️ 用 `read_only`（不计入统计 / 不触发总线 hook）：调试器的读**不是**
+    // 访客的访存 ⇒ 它不能进 M-18 的访存 trace 环，也不能进观察点匹配。
+    bus.read_only(addr, width)
+}
+
+/// M-11 的行表判定 → 契约事件的**唯一**映射点（LLD 11-4 的两态）。
+///
+/// ⚠️ 抽成自由函数是为了让它**可测**：Wave 1 的 `DwarfLines::resolve` 恒
+/// 返回降级态 ⇒ 「有 DWARF 但未命中」这一态在生产路径上**走不到**，
+/// 只有直接喂三种 `LineLookup` 才能钉住这个映射。
+fn source_location_event(addr: u32, lookup: LineLookup) -> EventPayload {
+    match lookup {
+        LineLookup::Found(entry) => EventPayload::SourceLocation {
+            addr,
+            file: entry.file,
+            line: entry.line,
+        },
+        // 有 DWARF 但地址没命中 ⇒ `line = u32::MAX`（**不是** 0）。
+        LineLookup::Missed => EventPayload::SourceLocation {
+            addr,
+            file: String::new(),
+            line: u32::MAX,
+        },
+        // 压根没有 DWARF ⇒ `line = 0`。
+        LineLookup::NoDwarf => EventPayload::SourceLocation {
+            addr,
+            file: String::new(),
+            line: 0,
+        },
+    }
+}
+
+/// 「这个 `source` / `format` 组合不合法」的错误（`E_CTX-03`）。
+///
+/// ⚠️ **复用 M-11 已定义的常量**（一条错误码一个真相）：宿主**不**再
+/// 定义一份 `E_CTX-03`——M-11 的 `trace` 模块里那份才是权威。
+fn illegal_export(message: &str) -> PlatformError {
+    PlatformError::new(
+        TRACE_FAMILY,
+        E_CTX_03_ILLEGAL_EXPORT_FORMAT,
+        message.to_string(),
+    )
+}
+
+/// M-19 的 `ExportHandle` → 契约的 `TraceExport` 事件（**唯一的映射点**）。
+///
+/// ⚠️ **为什么抽成自由函数**：这条映射里有**两处**「形状对不上」需要人工
+/// 翻译 —— M-19 的 `ExportHandle` **没有** `offset` 字段（用请求里的回显）
+/// **也没有** `bytes` 字段（用块的长度）。把它们藏在一个方法里 ⇒ 没人能
+/// 单独测这条映射 ⇒ **v0.20 检视 B 实测**：把 `overflow_marked` 改成
+/// `false`，**795 + 5 条用例全绿** ⇒ 「导出窗口不完整却没人知道」正是
+/// 这个字段要防的事，而它在 `Waveform` 这一侧**没有判别力**。
+///
+/// ⚠️ 抽出来之后，那条映射**可以被单独钉住**（见 `waveform_export_event`
+/// 的用例）。
+fn waveform_export_event(
+    handle: crate::m19_waveform::export::ExportHandle,
+    format: TraceFormat,
+    offset: u64,
+) -> EventPayload {
+    EventPayload::TraceExport {
+        source: TraceSource::Waveform,
+        format,
+        // ⚠️ M-19 的 `ExportHandle` **没有** `offset` 字段 ⇒ 用**请求
+        // 里的** offset 回显（它就是本块的起点）。
+        offset,
+        next_offset: handle.next_offset as u64,
+        total: handle.total as u64,
+        // ⚠️ M-19 的 `ExportHandle` **没有** `bytes` 字段 ⇒ 用块的长度。
+        bytes: handle.chunk.len() as u64,
+        chunk: handle.chunk,
+        // ⚠️ **窗口不完整的标记必须原样传出去**（D-50 那一侧的「不完整」
+        // 也得看得见）——这一行**曾经**没有任何判别力。
+        overflow_marked: handle.overflow_marked,
+    }
+}
+
+/// 「M-19 的波形管道不可用」的错误（`E_OBS-02`）。
+fn pipeline_unavailable(message: &str) -> PlatformError {
+    PlatformError::new(
+        ErrorFamily::Observability,
+        E_OBS_02_PIPELINE_UNAVAILABLE,
+        message.to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -1587,3 +2336,6 @@ mod tests_contract_v2;
 
 #[cfg(test)]
 mod tests_intc;
+
+#[cfg(test)]
+mod tests_m11;
