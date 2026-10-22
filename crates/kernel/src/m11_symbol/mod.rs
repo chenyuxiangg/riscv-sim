@@ -134,6 +134,36 @@ impl SymbolIndex {
     pub fn dwarf_status(&self) -> DwarfStatus {
         self.dwarf.status()
     }
+
+    /// 地址 → **源码行条目**（三态 ⇒ 两态的**唯一**映射点）。
+    ///
+    /// * [`LineLookup::Found`] ⇒ `Some(entry)`（**真的** `file` + `line`）；
+    /// * [`LineLookup::Missed`] ⇒ `None`（查过行表、没命中）；
+    /// * [`LineLookup::NoDwarf`] ⇒ `None`（压根没有 DWARF）；
+    /// * 出错 ⇒ `None`。
+    ///
+    /// ⚠️ **两态不得混**（STAGE-7 裁决 J · STAGE-9 裁决 C）：上面两个
+    /// `None` 在**这个返回值上确实分不出来** ⇒ **要**分请用
+    /// [`SymbolService::resolve_line`]（它给回三态）。
+    ///
+    /// ⚠️ **绝不编造**：查不到就是 `None`——**不**返回 `Some("")`、
+    /// **不**返回 `Some(0)`、**不**拿别的地址的行号顶替。
+    ///
+    /// ⚠️ 这个方法是**给反汇编器用的**（契约 v4 · D-102 / D-121）：
+    /// [`crate::m11_symbol::Disassembler::disasm_with_lines`] 的解析器
+    /// 直接接它 ⇒ 「`file` / `line` 由 M-11 填、宿主不猜」。
+    pub fn resolve_line_entry(&self, addr: u32) -> Option<LineEntry> {
+        match self.resolve_line(addr) {
+            // ✅ 命中 ⇒ 给**真的**行。
+            Ok(LineLookup::Found(entry)) => Some(entry),
+            // ⚠️ 查过、没命中 ⇒ `None`（**不**拿上一行的行号顶替）。
+            Ok(LineLookup::Missed) => None,
+            // ⚠️ 压根没有 DWARF ⇒ `None`。
+            Ok(LineLookup::NoDwarf) => None,
+            // ⚠️ 出错 ⇒ `None`（**不猜**）。
+            Err(_) => None,
+        }
+    }
 }
 
 impl SymbolService for SymbolIndex {
@@ -152,5 +182,80 @@ impl SymbolService for SymbolIndex {
     fn symbol_at(&self, addr: u32) -> Result<Option<Symbol>, PlatformError> {
         // ⚠️ 命中「起始地址 ≤ `addr` 且最近的那个」；比所有符号都小 ⇒ `None`。
         Ok(self.symbols.at(addr).cloned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::m11_symbol::dwarf::fixtures::V2_DL;
+
+    /// v2 夹具的节区集合（只有 `.debug_line`）。
+    fn v2_sections() -> Vec<(String, Vec<u8>)> {
+        vec![(".debug_line".to_string(), V2_DL.to_vec())]
+    }
+
+    #[test]
+    fn resolve_line_entry_gives_the_true_entry_when_the_line_table_hits() {
+        // ⚠️ 断言值是**写死的字面量**（不从被测实现反推）。
+        let index = SymbolIndex::from_sections(&v2_sections()).expect("索引");
+        let entry = index
+            .resolve_line_entry(0x0001_0094)
+            .expect("命中 ⇒ 必须给出真行");
+        assert_eq!(entry.addr, 0x0001_0094);
+        assert_eq!(entry.file, "src/main.c");
+        assert_eq!(entry.line, 1);
+    }
+
+    #[test]
+    fn resolve_line_entry_is_none_when_the_line_table_misses() {
+        // 「查过行表、没命中」⇒ `None`（**不**拿别的地址的行号顶替）。
+        let index = SymbolIndex::from_sections(&v2_sections()).expect("索引");
+        assert_eq!(index.dwarf_status(), DwarfStatus::Supported(2));
+        // ⚠️ 0x0000_0000 **不在**任何一段行号序列里 ⇒ 真「没命中」。
+        assert_eq!(
+            index.resolve_line(0x0000_0000).expect("端口"),
+            LineLookup::Missed,
+            "前提：这一地址是 `Missed`（不是 `NoDwarf`）"
+        );
+        assert_eq!(
+            index.resolve_line_entry(0x0000_0000),
+            None,
+            "查过、没命中 ⇒ `None`"
+        );
+    }
+
+    #[test]
+    fn resolve_line_entry_is_none_when_there_is_no_dwarf_at_all() {
+        // 「压根没有 DWARF」⇒ `None`（**不查**）。
+        let index = SymbolIndex::from_sections(&[]).expect("索引");
+        assert_eq!(index.dwarf_status(), DwarfStatus::Absent);
+        assert_eq!(
+            index.resolve_line(0x0001_0094).expect("端口"),
+            LineLookup::NoDwarf,
+            "前提：这一状态是 `NoDwarf`（不是 `Missed`）"
+        );
+        assert_eq!(index.resolve_line_entry(0x0001_0094), None);
+    }
+
+    #[test]
+    fn the_two_no_answers_stay_distinguishable_on_the_port() {
+        // ⚠️ **两态不得混**（STAGE-7 裁决 J · STAGE-9 裁决 C）：DTO 上两态
+        // 都是 `None`（契约形状决定）⇒ **端口**上必须还能分出来。
+        let with_dwarf = SymbolIndex::from_sections(&v2_sections()).expect("索引");
+        let without_dwarf = SymbolIndex::from_sections(&[]).expect("索引");
+
+        assert_eq!(
+            with_dwarf.resolve_line(0x0000_0000).expect("端口"),
+            LineLookup::Missed
+        );
+        assert_eq!(
+            without_dwarf.resolve_line(0x0000_0000).expect("端口"),
+            LineLookup::NoDwarf
+        );
+        // 两者在 `resolve_line_entry` 上**都**是 `None` ⇒ 那一层**不**能
+        // 分（这是契约形状的必然，不是实现偷懒）。
+        assert_eq!(with_dwarf.resolve_line_entry(0x0000_0000), None);
+        assert_eq!(without_dwarf.resolve_line_entry(0x0000_0000), None);
     }
 }

@@ -39,12 +39,33 @@
 //! 取指失败（未映射 / 宿主侧失败）⇒ **提前结束**，返回**部分序列**
 //! （长度 < 请求条数），**不是**错误。宿主侧据此把「读不到」表达成
 //! 「序列到此为止」，而不是一条错误事件。
+//!
+//! ## 行号（契约 v4 · D-102 / D-121 · STAGE-9 裁决 C）
+//!
+//! [`DisasmEntryDto`] 的 `file` / `line` 由**本模块**填（宿主不猜）：
+//!
+//! * 走 [`Disassembler::disasm`]（**不带**解析器）⇒ 两个字段恒为 `None`；
+//! * 走 [`Disassembler::disasm_with_lines`]（带解析器）⇒ 解析器给出
+//!   `Some(entry)` 就填 `file = Some(entry.file)` / `line = Some(entry.line)`，
+//!   给出 `None` 就**都留 `None`**。
+//!
+//! ⚠️ **绝不编造**：查不到就填 `None`——**不**填 `Some("")`、**不**填
+//! `Some(0)`、**不**拿上一条的行号顶替。
+//!
+//! ⚠️ **「查过没命中」与「压根没查」在 DTO 上不可区分**（契约形状决定
+//! 的）：两者的 `file` / `line` 都是 `None`。**要**分这两态请用
+//! [`crate::m11_symbol::LineLookup`]（`Missed` / `NoDwarf`）——那是
+//! `EventPayload::SourceLocation` 那一路的事，**不归本模块**。
+//!
+//! ⚠️ **每条指令只查一次**：反汇编器**按地址缓存** ⇒ 条目连同它的
+//! `file` / `line` 一起进缓存 ⇒ 缓存命中**不重复查** ⇒ 不会引入 N 次
+//! DWARF 解析。这个承诺**必须可观测** ⇒ [`Disassembler::line_resolutions`]。
 
 use std::cell::Cell;
 use std::collections::HashMap;
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
-use riscv_sim_contract::model::{DisasmEntryDto, TraceDir};
+use riscv_sim_contract::model::{DisasmEntryDto, LineEntry, TraceDir};
 
 use crate::m13_iss::Decoder;
 
@@ -104,6 +125,10 @@ pub struct Disassembler {
     ///
     /// 条目里带着**机器码**（`code`）：自修改代码把某个地址改掉之后，
     /// 失效那个地址即可重新取指；缓存里的旧机器码**不会**被误当成新的。
+    ///
+    /// ⚠️ 条目里**还**带着 `file` / `line`（契约 v4 · D-102）：它们是
+    /// **渲染那一刻**查行表的结果 ⇒ 缓存命中**不再查**（见
+    /// [`Disassembler::line_resolutions`]）。
     cache: HashMap<u32, DisasmEntryDto>,
     /// [`Disassembler::lookup`] 命中缓存的次数。
     ///
@@ -111,6 +136,11 @@ pub struct Disassembler {
     /// （访存轨迹那次重复取指）」——那句话**必须可观测**，否则它只是一句
     /// 散文，谁也没法证明它成立。
     lookup_hits: Cell<u64>,
+    /// 行号解析器被调用的次数（**可观测性**）。
+    ///
+    /// ⚠️ 「每条指令只查一次行表」是**规格里的性能承诺**，散文不算数 ⇒
+    /// 必须能被读出来（用例钉住它）。
+    line_resolutions: Cell<u64>,
 }
 
 impl Disassembler {
@@ -120,6 +150,7 @@ impl Disassembler {
             decoder: Decoder::default(),
             cache: HashMap::new(),
             lookup_hits: Cell::new(0),
+            line_resolutions: Cell::new(0),
         }
     }
 
@@ -133,11 +164,63 @@ impl Disassembler {
     ///
     /// `read` 是**注入的取指源**：读 `addr` 处的 `size` 字节（2 或 4），
     /// 按**小端**拼成 `u32` 返回；读不到 ⇒ `Err`（⇒ 序列提前结束）。
+    ///
+    /// ⚠️ **本方法不带行号解析器** ⇒ 每条条目的 `file` / `line` 恒为
+    /// `None`（**不是** `Some("")`、**不是** `Some(0)`）。要填真行号请走
+    /// [`Disassembler::disasm_with_lines`]。
     pub fn disasm(
         &mut self,
         addr: u32,
         count: u32,
         read: &mut impl FnMut(u32, u32) -> Result<u32, PlatformError>,
+    ) -> Result<Vec<DisasmEntryDto>, PlatformError> {
+        self.disasm_core(addr, count, read, None)
+    }
+
+    /// 从 `addr` 开始反汇编**至多** `count` 条指令，**并**给每条条目填上
+    /// **真的**源码位置（契约 v4 · D-102 / D-121 · STAGE-9 裁决 C）。
+    ///
+    /// `resolve` 是**注入的行号解析器**：给它一个**地址**，它给出该地址
+    /// 的源码行。
+    ///
+    /// * `Some(entry)` ⇒ 条目填 `file = Some(entry.file)`、
+    ///   `line = Some(entry.line)`；
+    /// * `None` ⇒ 条目的 `file` / `line` **都留 `None`**（**不猜**：
+    ///   **不**填 `Some("")`、**不**填 `Some(0)`、**不**拿别的地址的行号
+    ///   顶替）。
+    ///
+    /// ⚠️ **解析器按条目自己的地址调用**：每条**新渲染**的指令查一次，
+    /// 查的是**它自己的**地址（不是「查一次就复用」）。
+    ///
+    /// ⚠️ **每条指令只查一次**：命中缓存的条目**不再查**（它的 `file` /
+    /// `line` 随条目一起缓存在里面）⇒ 缓存失效后重新取指时**会**再查
+    /// 一次（行号也可能随自修改代码变）⇒ 计数见
+    /// [`Disassembler::line_resolutions`]。
+    ///
+    /// ⚠️ **「查过没命中」与「压根没查」在这里都表现为 `None`**：那是
+    /// **契约形状**决定的（DTO 只有两个可空字段），不是本方法的 bug。
+    /// 要分这两态请用 [`crate::m11_symbol::LineLookup`]。
+    pub fn disasm_with_lines(
+        &mut self,
+        addr: u32,
+        count: u32,
+        read: &mut impl FnMut(u32, u32) -> Result<u32, PlatformError>,
+        mut resolve: impl FnMut(u32) -> Option<LineEntry>,
+    ) -> Result<Vec<DisasmEntryDto>, PlatformError> {
+        let resolve: &mut dyn FnMut(u32) -> Option<LineEntry> = &mut resolve;
+        self.disasm_core(addr, count, read, Some(resolve))
+    }
+
+    /// `disasm` 与 `disasm_with_lines` 的**共同实现**。
+    ///
+    /// `resolve` 为 `None` ⇒ **完全不查行表**（连计数器都不加）⇒ 条目的
+    /// `file` / `line` 恒为 `None`。
+    fn disasm_core(
+        &mut self,
+        addr: u32,
+        count: u32,
+        read: &mut impl FnMut(u32, u32) -> Result<u32, PlatformError>,
+        mut resolve: Option<&mut dyn FnMut(u32) -> Option<LineEntry>>,
     ) -> Result<Vec<DisasmEntryDto>, PlatformError> {
         if count > MAX_DISASM_COUNT {
             return Err(PlatformError::new(
@@ -152,6 +235,9 @@ impl Disassembler {
         while entries.len() < count as usize {
             // 缓存命中 ⇒ 不取指（这是「同一地址两次结果逐字段相同」的
             // 原因，也是自修改代码**必须显式失效**的原因）。
+            //
+            // ⚠️ 缓存命中**也不查行表**：条目里的 `file` / `line` 是**它
+            // 被渲染那一刻**查出来的 ⇒ 缓存里已经有了。
             if let Some(cached) = self.cache.get(&cursor) {
                 let cached = cached.clone();
                 cursor = cursor.wrapping_add(cached.width as u32);
@@ -165,7 +251,17 @@ impl Disassembler {
             };
 
             let decoded = self.decoder.decode(raw, cursor);
-            let entry = render_entry(&decoded);
+            let mut entry = render_entry(&decoded);
+            // ⚠️ 行号：**每条新渲染的指令查一次**，查的是**它自己的**
+            // 地址。查不到 ⇒ **留 `None`**（渲染器给的就是 `None`）⇒
+            // **绝不编造**。
+            if let Some(resolve) = resolve.as_mut() {
+                self.line_resolutions.set(self.line_resolutions.get() + 1);
+                if let Some(line) = resolve(cursor) {
+                    entry.file = Some(line.file);
+                    entry.line = Some(line.line);
+                }
+            }
             cursor = cursor.wrapping_add(entry.width as u32);
             self.cache.insert(entry.addr, entry.clone());
             entries.push(entry);
@@ -224,6 +320,20 @@ impl Disassembler {
     /// 兜住（重复取指）」只是一句散文。
     pub fn lookup_hits(&self) -> u64 {
         self.lookup_hits.get()
+    }
+
+    /// 行号解析器被调用的次数（契约 v4 · D-121）。
+    ///
+    /// ⚠️ 「**每条指令只查一次行表**」是规格里的**性能承诺**（STAGE-9
+    /// 裁决 C：「缓存命中时不重复查 ⇒ 不引入 N 次 DWARF 解析」）⇒ 散文
+    /// 不算数 ⇒ 必须有一条用例断言它。
+    ///
+    /// * 走 [`Disassembler::disasm`]（不带解析器）⇒ 这个数**恒为 0**
+    ///   （压根没查）。
+    /// * 走 [`Disassembler::disasm_with_lines`] ⇒ 每条**新渲染**的指令
+    ///   加 1；缓存命中**不加**；缓存失效后重新取指**再加 1**。
+    pub fn line_resolutions(&self) -> u64 {
+        self.line_resolutions.get()
     }
 }
 
@@ -542,5 +652,240 @@ mod tests {
         disasm.invalidate(BASE);
         assert!(disasm.lookup(BASE).is_none());
         assert_eq!(disasm.lookup_hits(), 1, "失效后的查询不算命中");
+    }
+
+    // -----------------------------------------------------------------
+    // 契约 v4 · D-121：反汇编条目填**真的** `file` / `line`。
+    //
+    // ⚠️ 断言值全部是**写死的字面量**（不从被测实现反推）⇒ 用例恒绿
+    // 的风险被堵死。
+    // -----------------------------------------------------------------
+
+    /// 一条**固定**的行记录（写死的字面量）。
+    const FILE: &str = "src/main.c";
+    const LINE: u32 = 42;
+
+    /// 解析器：给**任何**地址都返回同一条行记录。
+    fn fixed_resolver() -> impl FnMut(u32) -> Option<LineEntry> {
+        |_addr: u32| {
+            Some(LineEntry {
+                addr: 0x1000,
+                file: FILE.to_string(),
+                line: LINE,
+            })
+        }
+    }
+
+    #[test]
+    fn disasm_without_a_resolver_leaves_the_file_and_the_line_none() {
+        // 验收 J-5 的一半：**不传解析器** ⇒ 两个字段都**没有值**。
+        let mut disasm = Disassembler::new();
+        let mut read = memory(BASE, CODE.to_vec());
+        let entries = disasm.disasm(BASE, 3, &mut read).expect("disasm");
+
+        assert_eq!(entries.len(), 3);
+        for entry in &entries {
+            assert_eq!(
+                entry.file, None,
+                "不传解析器 ⇒ `file` 必须是 `None`（不是 `Some(\"\")`）"
+            );
+            assert_eq!(
+                entry.line, None,
+                "不传解析器 ⇒ `line` 必须是 `None`（不是 `Some(0)`）"
+            );
+        }
+        // 「压根没查」⇒ 计数器**恒为 0**。
+        assert_eq!(
+            disasm.line_resolutions(),
+            0,
+            "不带解析器 ⇒ 一次行表查询都不该发生"
+        );
+    }
+
+    #[test]
+    fn a_resolver_fills_the_true_file_and_the_line() {
+        let mut disasm = Disassembler::new();
+        let mut read = memory(BASE, CODE.to_vec());
+        let mut resolve = fixed_resolver();
+        let entries = disasm
+            .disasm_with_lines(BASE, 3, &mut read, &mut resolve)
+            .expect("disasm");
+
+        assert_eq!(entries.len(), 3);
+        for entry in &entries {
+            assert_eq!(entry.file, Some(FILE.to_string()));
+            assert_eq!(entry.line, Some(LINE));
+        }
+        assert_eq!(disasm.line_resolutions(), 3, "三条指令 ⇒ 查三次");
+    }
+
+    #[test]
+    fn a_resolver_that_finds_nothing_leaves_the_file_and_the_line_none() {
+        // 验收 J-5 的另一半：**查不到 ⇒ `None`**（**不猜**）。
+        let mut disasm = Disassembler::new();
+        let mut read = memory(BASE, CODE.to_vec());
+        let mut resolve = |_addr: u32| -> Option<LineEntry> { None };
+        let entries = disasm
+            .disasm_with_lines(BASE, 3, &mut read, &mut resolve)
+            .expect("disasm");
+
+        assert_eq!(entries.len(), 3);
+        for entry in &entries {
+            assert_eq!(entry.file, None, "查不到 ⇒ `file` 必须是 `None`");
+            assert_eq!(entry.line, None, "查不到 ⇒ `line` 必须是 `None`");
+        }
+        // ⚠️ 「查了但没命中」**仍然算一次查询**（区别只在**结果**上）。
+        assert_eq!(disasm.line_resolutions(), 3);
+    }
+
+    #[test]
+    fn a_cached_entry_does_not_resolve_the_line_again() {
+        // STAGE-9 裁决 C：「每条指令查一次行表**只发生一次** ⇒ 缓存命中
+        // 时不重复查」⇒ 这条**必须可观测**（计数器）。
+        let mut disasm = Disassembler::new();
+        let mut read = memory(BASE, CODE.to_vec());
+        let mut resolve = fixed_resolver();
+
+        let first = disasm
+            .disasm_with_lines(BASE, 3, &mut read, &mut resolve)
+            .expect("disasm");
+        assert_eq!(disasm.line_resolutions(), 3, "第一次：三条各查一次");
+
+        let second = disasm
+            .disasm_with_lines(BASE, 3, &mut read, &mut resolve)
+            .expect("disasm");
+        assert_eq!(
+            disasm.line_resolutions(),
+            3,
+            "第二次全是缓存命中 ⇒ **不得**再查行表"
+        );
+        assert_eq!(first, second, "两次结果逐字段相同");
+    }
+
+    #[test]
+    fn each_new_address_resolves_the_line_exactly_once() {
+        // 连续反汇编 N 条（地址各不相同）⇒ 解析器被调用 **N** 次。
+        let mut disasm = Disassembler::new();
+        let mut read = memory(BASE, CODE.to_vec());
+        let mut resolve = fixed_resolver();
+        let entries = disasm
+            .disasm_with_lines(BASE, 3, &mut read, &mut resolve)
+            .expect("disasm");
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].addr, 0x1000);
+        assert_eq!(entries[1].addr, 0x1004);
+        assert_eq!(entries[2].addr, 0x1006);
+        assert_eq!(
+            disasm.line_resolutions(),
+            3,
+            "每条各查一次（不是查一次就复用）"
+        );
+    }
+
+    #[test]
+    fn a_compressed_instruction_also_gets_its_line() {
+        // 压缩指令（宽度 2）**同样**要能填上行号。
+        let mut disasm = Disassembler::new();
+        let mut read = memory(BASE, CODE.to_vec());
+        let mut resolve = fixed_resolver();
+        let entries = disasm
+            .disasm_with_lines(BASE, 3, &mut read, &mut resolve)
+            .expect("disasm");
+
+        assert_eq!(entries[1].width, 2, "第二条是压缩指令");
+        assert_eq!(entries[1].mnemonic, "c.addi sp,-16");
+        assert_eq!(entries[1].file, Some(FILE.to_string()));
+        assert_eq!(entries[1].line, Some(LINE));
+    }
+
+    #[test]
+    fn the_resolver_is_asked_for_the_address_of_the_entry_itself() {
+        // 解析器**按地址**查 ⇒ 每条条目拿到的必须是**它自己**那个地址的
+        // 结果（不是「查一次就复用」的那一条）。
+        let queried = std::cell::RefCell::new(Vec::new());
+        let mut resolve = |addr: u32| -> Option<LineEntry> {
+            queried.borrow_mut().push(addr);
+            match addr {
+                0x1000 => Some(LineEntry {
+                    addr: 0x1000,
+                    file: "src/a.c".to_string(),
+                    line: 10,
+                }),
+                0x1004 => Some(LineEntry {
+                    addr: 0x1004,
+                    file: "src/b.c".to_string(),
+                    line: 20,
+                }),
+                0x1006 => Some(LineEntry {
+                    addr: 0x1006,
+                    file: "src/c.c".to_string(),
+                    line: 30,
+                }),
+                _ => None,
+            }
+        };
+        let mut disasm = Disassembler::new();
+        let mut read = memory(BASE, CODE.to_vec());
+        let entries = disasm
+            .disasm_with_lines(BASE, 3, &mut read, &mut resolve)
+            .expect("disasm");
+
+        assert_eq!(
+            *queried.borrow(),
+            vec![0x1000, 0x1004, 0x1006],
+            "解析器必须按**每条自己**的地址被问"
+        );
+        assert_eq!(entries[0].file, Some("src/a.c".to_string()));
+        assert_eq!(entries[0].line, Some(10));
+        assert_eq!(entries[1].file, Some("src/b.c".to_string()));
+        assert_eq!(entries[1].line, Some(20));
+        assert_eq!(entries[2].file, Some("src/c.c".to_string()));
+        assert_eq!(entries[2].line, Some(30));
+    }
+
+    #[test]
+    fn the_entry_address_comes_from_the_instruction_not_from_the_line_entry() {
+        // 解析器可以给出**别的地址**的行记录 ⇒ 但条目的 `addr` 仍然是
+        // **这条指令**的地址（行记录**不**覆盖指令地址）。
+        let mut disasm = Disassembler::new();
+        let mut read = memory(BASE, CODE.to_vec());
+        let mut resolve = |_addr: u32| -> Option<LineEntry> {
+            Some(LineEntry {
+                addr: 0xDEAD_BEEF,
+                file: FILE.to_string(),
+                line: LINE,
+            })
+        };
+        let entries = disasm
+            .disasm_with_lines(BASE, 1, &mut read, &mut resolve)
+            .expect("disasm");
+
+        assert_eq!(entries[0].addr, 0x1000, "地址来自指令");
+        assert_eq!(entries[0].file, Some(FILE.to_string()));
+        assert_eq!(entries[0].line, Some(LINE));
+    }
+
+    #[test]
+    fn invalidating_an_entry_resolves_the_line_again() {
+        // 缓存失效 ⇒ 重新取指 ⇒ **重新查一次行表**（行号也可能随自修改
+        // 代码变）⇒ **不**把旧的行号粘在新机器码上。
+        let mut disasm = Disassembler::new();
+        let mut read = memory(BASE, CODE.to_vec());
+        let mut resolve = fixed_resolver();
+        let _ = disasm
+            .disasm_with_lines(BASE, 1, &mut read, &mut resolve)
+            .expect("disasm");
+        assert_eq!(disasm.line_resolutions(), 1);
+
+        disasm.invalidate(BASE);
+        let _ = disasm
+            .disasm_with_lines(BASE, 1, &mut read, &mut resolve)
+            .expect("disasm");
+        assert_eq!(
+            disasm.line_resolutions(),
+            2,
+            "失效后重新取指 ⇒ 重新查一次行表"
+        );
     }
 }
