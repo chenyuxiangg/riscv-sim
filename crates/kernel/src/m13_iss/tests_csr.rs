@@ -682,6 +682,53 @@ fn entering_a_trap_with_interrupts_off_leaves_mpie_off() {
     );
 }
 
+/// The trap entry records the privilege level it was taken from in
+/// `mstatus.MPP`.
+///
+/// ⚠️ This is **not** cosmetic: the reference side does it (measured —
+/// Spike reports `mstatus = 0x0018_0080` inside a trap handler, this
+/// platform used to report `0x0000_0080` ⇒ the two sides disagreed
+/// field-for-field), and the M-13 LLD §5.2.4 says so explicitly
+/// ("`MPIE←MIE，MIE←0，MPP←M`").
+///
+/// The field is **WARL** and this platform implements M-mode only ⇒
+/// `M` (= 3) is the only legal value ⇒ the trap writes it, it does not
+/// merely preserve whatever the guest had put there.
+///
+/// ⚠️ **断言用架构字面量，不用契约层的常量** —— 写成
+/// `mstatus >> MSTATUS_MPP_SHIFT == MSTATUS_MPP_M` 的话，断言与生产代码
+/// **共用同一个常量** ⇒ 把常量改成 0 时断言照样成立 ⇒ **恒真式**，
+/// 断言不了任何东西（反向变异 **V-17** 实测：改成 0 时这条用例**没红**）。
+/// ⇒ 这里钉的是**架构事实**：`mstatus` 的 bits 12:11 = `0b11`。
+#[test]
+fn entering_a_trap_records_machine_mode_in_mpp() {
+    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0)]);
+    state.pc = 0x1234;
+    super::enter_trap(&mut state, MCAUSE_ILLEGAL, 0);
+    let mstatus = csr_value(&state, CSR_MSTATUS);
+    assert_eq!(
+        (mstatus >> 11) & 0b11,
+        0b11,
+        "the trap must record M-mode in mstatus.MPP (bits 12:11)"
+    );
+}
+
+/// The trap entry **overwrites** a guest-planted `MPP` — the field says
+/// "where the trap came from", not "what the guest last wrote".
+#[test]
+fn entering_a_trap_overwrites_a_guest_planted_mpp() {
+    let planted = 0b01 << 11; // "U-mode" — not a legal value here
+    let mut state = state_with_csrs(&[(CSR_MSTATUS, planted)]);
+    state.pc = 0x1234;
+    super::enter_trap(&mut state, MCAUSE_ILLEGAL, 0);
+    let mstatus = csr_value(&state, CSR_MSTATUS);
+    assert_eq!(
+        (mstatus >> 11) & 0b11,
+        0b11,
+        "a trap taken in M-mode must record M-mode, whatever the guest wrote"
+    );
+}
+
 /// The **direct** mode jumps to the vector table's base.
 #[test]
 fn the_direct_mode_jumps_to_the_vector_table_base() {

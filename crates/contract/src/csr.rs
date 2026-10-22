@@ -34,10 +34,21 @@ pub const CSR_MSTATUS: u16 = 0x300;
 
 /// `misa` — machine ISA register.
 ///
-/// ⚠️ **Read-only** (RISC-V: `misa` is WARL and reads back what the
-/// implementation supports; a guest write is ignored).  The address rule
-/// would make it writable (`0x301 < 0x800`) ⇒ the platform adds it to the
-/// read-only set — see [`csr_is_read_only`].
+/// ⚠️ **Read-only on this platform.**  Two different things must not be
+/// confused here:
+///
+/// * **What RISC-V says**: `misa` is **WARL and writable** — a guest may
+///   write it, and a legal write changes which extensions the
+///   implementation claims to support (the reference side honours that:
+///   `csrci misa, 4` really clears the `C` bit there).
+/// * **What this platform does**: a guest write is **ignored** and the
+///   register always reads back [`CSR_MISA_VALUE`].  The address rule
+///   would make it writable (`0x301 < 0x800`) ⇒ the platform adds it to
+///   the read-only set — see [`csr_is_read_only`].
+///
+/// ⇒ the platform's choice is **stricter than the specification**, and it
+/// is a **real difference** from the reference side (the ledger records it
+/// as D-95).  It is *not* "we match the reference side".
 pub const CSR_MISA: u16 = 0x301;
 
 /// `mscratch` — machine scratch register.
@@ -55,9 +66,28 @@ pub const CSR_MSCRATCH: u16 = 0x340;
 ///
 /// ⚠️ **Only the extensions we actually implement are set** — no `A`
 /// (atomics), no `F`/`D` (floating point), no `S`/`U` (privilege levels).
-/// ⇒ the reference side's `misa` (which also carries `Zicclsm` /
-/// `Zifencei`) is **not** bit-identical to ours ⇒ only the **MXL** field
-/// may be compared across implementations.
+/// The IALIGN field (bits 29:26) is left **0**, exactly as the
+/// reference side leaves it.
+///
+/// ⇒ the reference side's `misa` is **not** bit-identical to ours.
+/// Measured (the reference side runs with its default `--priv=MSU`):
+///
+/// | | MXL | I | M | C | **S** (18) | **U** (20) | IALIGN (29:26) |
+/// |---|---|---|---|---|---|---|---|
+/// | reference side | 1 | 1 | 1 | 1 | **1** | **1** | 0 |
+/// | this platform  | 1 | 1 | 1 | 1 | 0 | 0 | 0 |
+///
+/// ⇒ the difference is **exactly** the two privilege-level bits: the
+/// reference side implements S-mode and U-mode, this platform does
+/// not ⇒ reporting them would be a lie.  ⇒ **the MXL field and the
+/// I/M/C bits are comparable across implementations**; the
+/// privilege-level bits differ **by design**.
+///
+/// ⚠️ The reference side's `misa` is also **WARL-writable** (a guest
+/// may clear bits — measured: `csrci misa, 4` really clears `C`);
+/// ours is **read-only** (a guest write is ignored).  That is a real
+/// semantic difference, not a "coverage equivalence" — see the ledger
+/// (D-95).
 pub const CSR_MISA_VALUE: u32 = (1 << 30) | (1 << 8) | (1 << 12) | (1 << 2);
 
 /// `mie` — machine interrupt-enable register.
@@ -118,6 +148,30 @@ pub const MSTATUS_MIE_BIT: u32 = 3;
 ///
 /// Bit 7 of `mstatus` (standard).
 pub const MSTATUS_MPIE_BIT: u32 = 7;
+
+/// `mstatus.MPP` — the privilege level the hart was in when the trap
+/// was taken.
+///
+/// **Bits 12:11** of `mstatus` (standard).
+///
+/// ⚠️ The field is **WARL**: an implementation may only hold values
+/// that name a privilege level it actually supports.  This platform
+/// implements **M-mode only** ⇒ the only legal value is
+/// [`MSTATUS_MPP_M`] ⇒ `misa` reports **no `S` and no `U` bit**, and
+/// the three places that touch `MPP` (trap entry, `mret`, the guest's
+/// own `csrw mstatus`) all agree on that one value.
+///
+/// The reference side (Spike, default `--priv=MSU`) supports `S` and
+/// `U` as well ⇒ it may hold `0`/`1`/`3` ⇒ the two sides' `MPP` can
+/// differ after a `mret` (Spike drops to the least-privileged
+/// supported mode, i.e. `U` = 0, while this platform keeps `M` = 3).
+/// That difference is a **capability** difference, not a defect — the
+/// ledger records it (D-96).
+pub const MSTATUS_MPP_SHIFT: u32 = 11;
+
+/// The `mstatus.MPP` value for **machine mode** — the only privilege
+/// level this platform implements.
+pub const MSTATUS_MPP_M: u32 = 3;
 
 /// `mie.MEIE` — machine **external** interrupt enable (bit 11).
 pub const MIE_MEIE_BIT: u32 = 11;
@@ -236,22 +290,39 @@ pub fn is_csr_read_only(csr: u16) -> bool {
 /// Whether this platform **implements** a CSR.
 ///
 /// ⚠️ **This is the table that decides what a guest write does** (see
-/// [`csr_write_is_ignored`]).  The rule the reference side follows — and
-/// the one the platform's own golden comparison found us violating — is:
+/// [`csr_write_is_ignored`]).  The rule is a **platform rule**, chosen
+/// because the platform's own golden comparison found the previous
+/// behaviour ("store whatever the guest wrote") wrong:
 ///
 /// * **unimplemented** ⇒ the write is **ignored**, and a later read
 ///   returns **0**;
 /// * **implemented** ⇒ the write lands in the CSR file.
 ///
+/// ⚠️ **"Unimplemented ⇒ read 0, no trap" is NOT what the reference side
+/// does.**  Measured against the reference side (the golden corpus's
+/// Spike, default `--priv=MSU`):
+///
+/// | access | reference side | this platform |
+/// |---|---|---|
+/// | `csrr cycle` (no Zicntr) | **illegal-instruction trap** | reads 0, no trap |
+/// | `csrw mhartid, 0x123` (read-only CSR) | **illegal-instruction trap** | write ignored, reads 0 |
+/// | `csrw medeleg, 0x123` → `csrr medeleg` | **0x22** (delegation is implemented there; the write is masked) | 0 |
+///
+/// ⇒ the platform is deliberately **more permissive** here: reading a CSR
+/// the platform does not implement is *not* an error.  The difference is
+/// recorded in the ledger (D-92 / D-94) — do **not** read this rule as
+/// "we match the reference side".
+///
 /// ⚠️ The read-only quarter (`>= 0x800`) is uniformly "unimplemented" on
 /// this platform: `mhartid`, `mcycle`, `minstret`, `mtime` all read **0**
-/// and ignore writes.  That matches the reference side, where those
-/// counters are either absent or not modelled the same way.
+/// and ignore writes.  The reference side **models** `mcycle` (it reads a
+/// real counter) ⇒ that is a counter gap, not a match (D-94).
 ///
 /// ⚠️ `medeleg` / `mideleg` are **not** in the list: delegation is an
 /// S-mode feature and this platform is M-mode only ⇒ a guest write to
-/// them is **ignored**, which is what the reference side does with an
-/// unimplemented CSR.
+/// them is **ignored** and they read back 0.  The reference side (with
+/// its default `--priv=MSU`) **does** implement delegation ⇒ the two
+/// sides differ here (D-94).
 pub fn csr_is_implemented(csr: u16) -> bool {
     matches!(
         csr,
