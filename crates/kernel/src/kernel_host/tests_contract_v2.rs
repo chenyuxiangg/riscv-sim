@@ -380,14 +380,20 @@ fn negotiate_reports_the_current_schema_version() {
     let events = dispatch(
         &mut host,
         CommandPayload::Negotiate {
-            min_schema_version: 2,
+            min_schema_version: riscv_sim_contract::SCHEMA_VERSION,
             cap_bits: 0b111,
         },
     );
     let (schema_version, cap_bits, kernel) = first_negotiated(&events);
+    // ⚠️ **断言必须相对当前常量写**，不能硬编码版本号：契约升版时，
+    // 硬编码的断言要么**变红**（还算好），要么 —— 像下面那条
+    // 「拒绝高于支持版本」的用例那样 —— **静默失去判别力**
+    // （`min_schema_version: 3` 在版本升到 3 之后就不再「高于」了，
+    // 用例照样绿，却**什么都没测**）。
     assert_eq!(
-        schema_version, 2,
-        "协商结果必须是当前契约版本（schema_version = 2）"
+        schema_version,
+        riscv_sim_contract::SCHEMA_VERSION,
+        "协商结果必须是当前契约版本"
     );
     assert_eq!(
         cap_bits, KERNEL_CAP_BITS,
@@ -408,7 +414,9 @@ fn negotiate_rejects_a_minimum_version_above_the_supported_one() {
     let events = dispatch(
         &mut host,
         CommandPayload::Negotiate {
-            min_schema_version: 3,
+            // ⚠️ **相对当前版本**——硬编码一个数字会在升版后**静默失效**
+            // （见上一条用例的注释）。
+            min_schema_version: riscv_sim_contract::SCHEMA_VERSION + 1,
             cap_bits: 0,
         },
     );

@@ -203,6 +203,16 @@ LLD 给了 M-11 四项职责（符号表 / DWARF 行表 / 反汇编 / trace 导�
         bytes: u64,
         /// 本块内容（文本）。
         chunk: String,
+        /// **本次导出的窗口不是完整历史**（源环溢出过、丢过最旧条目）。
+        ///
+        /// ⚠️ **这不是装饰字段**：M-19 的边沿环与 M-11 的轨迹环都是
+        /// **有界**的，溢出时丢最旧。没有这个标志，前端会把一份**被截断
+        /// 的**导出当成完整会话呈现——正是 D-50 / D-51 记的那类「数据在，
+        /// 但没人知道它不完整」。
+        ///
+        /// - `Waveform` ⇒ M-19 的 `ExportHandle::overflow_marked`
+        /// - `Execution` ⇒ M-11 的轨迹环 `dropped > 0`
+        overflow_marked: bool,
     },
     /// trace 记录状态（开关 / 当前长度 / 丢弃计数）。
     TraceState {
@@ -262,6 +272,22 @@ pub enum TraceFormat {
 | `ResolveLine` | `SourceLocation { addr, file, line }` | `Error` | **两态**：无 DWARF ⇒ `file=""` `line=0`；有 DWARF 但未命中 ⇒ `file=""` `line=u32::MAX`（LLD 11-4） |
 | `ExportTrace` | `TraceExport { .. }` | `Error` | 非法 `source`/`format` 组合 ⇒ `E_CTX-03`；`offset` 越界 ⇒ 空块（`next_offset = offset`） |
 | `SetTraceEnabled` | `TraceState { enabled, len, dropped }` | `Error` | 幂等 |
+
+#### 错误码的「一场景一码」（**订正**）
+
+本批的错误码落在**既有的 CTX 族**（契约层没有 CTX 场景码常量，既有代码用
+硬编码字符串，沿用同一风格）：
+
+| 码 | 语义 | 本批的用法 |
+| --- | --- | --- |
+| `E_CTX-02` | **资源限制**（M-19 的内存预算已是这个语义） | `disasm` 的 `count > MAX_DISASM_COUNT` ⇒ 拒绝 |
+| `E_CTX-03` | **请求参数 / 组合不合法** | 导出组合非法（`Waveform`+`Json` / `Execution`+`Vcd`）、执行轨迹拒绝 VCD |
+| `E_CTX-05` | 管理通道未启用 | （既有语义，本批不用） |
+| `E_CTX-07` | M-08 的非法地址 / 重复注册 | （既有语义，本批不用） |
+
+⚠️ **订正**：M-11 的「`count` 超上限」初版写的是 `E_CTX-03` —— **同码不同义**
+（`E_CTX-03` 已经是「组合不合法」了）。⇒ 改为 **`E_CTX-02`**（资源限制，
+与 M-19 的内存预算同族同义）。
 
 ### 3.5 事件主题（前端 `EVENT_TOPIC` 镜像同步）
 

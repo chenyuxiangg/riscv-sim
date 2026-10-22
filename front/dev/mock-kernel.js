@@ -677,6 +677,12 @@ export function createMockKernel(options = {}) {
                 // `total` (STAGE-5 §3.2).
                 frames.push(makeFrame(reqId, Event.traceExport(
                     source, format, offset, end, total, chunk.length, chunk,
+                    // ⚠️ `overflow_marked` = the exported window is **not**
+                    // the complete history (the source ring overflowed).
+                    // The mock keeps a single overflow counter for both
+                    // sources (D-55: the mock is a test double, its
+                    // numbers are not the kernel's numbers).
+                    state.traceDropped > 0,
                 )));
                 break;
             }

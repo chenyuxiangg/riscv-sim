@@ -253,6 +253,9 @@ const debugView = register({
                     ${exportState
                         ? `<p class="muted" data-trace-progress>${escapeHtml(String(exportState.source))} / ${escapeHtml(String(exportState.format))} · 条目 ${Number(exportState.offset)} → ${Number(exportState.next_offset)} / ${Number(exportState.total)}</p>`
                         : `<p class="muted">尚未导出 — 选一个数据源与格式发起导出。</p>`}
+                    ${exportState?.overflow_marked === true
+                        ? `<p class="trace-overflow" data-trace-overflow>⚠️ 导出窗口<strong>不是完整历史</strong> —— 源环溢出过、丢过最旧条目（本次导出从第 ${Number(exportState.offset)} 条开始，更早的内容已不在环里）。</p>`
+                        : ""}
                     <pre class="trace-chunk" data-trace-chunk>${escapeHtml(String(exportState?.chunk ?? ""))}</pre>
                 </section>
                 <section class="regmem">

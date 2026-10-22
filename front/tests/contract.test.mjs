@@ -403,7 +403,7 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             // 契约 v3 新增的四个事件（M-11 调试面）。
             variantOf(Event.disasm([])),
             variantOf(Event.sourceLocation(0, "demo.c", 7)),
-            variantOf(Event.traceExport("Waveform", "Vcd", 0, 10, 42, 128, "$var")),
+            variantOf(Event.traceExport("Waveform", "Vcd", 0, 10, 42, 128, "$var", false)),
             variantOf(Event.traceState(true, 5, 2)),
         ].sort();
         assert.deepEqual(js, rust, "JS 事件变体与 Rust EventPayload 不一致");
@@ -492,7 +492,7 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 // 契约 v3（M-11 调试面）。
                 Disasm: Event.disasm([]),
                 SourceLocation: Event.sourceLocation(0, "demo.c", 7),
-                TraceExport: Event.traceExport("Waveform", "Vcd", 0, 10, 42, 128, "$var"),
+                TraceExport: Event.traceExport("Waveform", "Vcd", 0, 10, 42, 128, "$var", false),
                 TraceState: Event.traceState(true, 5, 2),
             },
         };

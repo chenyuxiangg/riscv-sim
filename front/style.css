@@ -153,6 +153,17 @@ main { padding: 24px; max-width: 1280px; margin: 0 auto; }
     color: #ff9a95;
     font-size: 12px;
 }
+/* The export window is NOT the complete history (the source ring
+   overflowed) — the same "incomplete data presented as if complete"
+   failure the D-50 / D-51 ledger entries are about. */
+.trace-overflow {
+    margin: 8px 0 0;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid #d9534f;
+    color: #ffcf9a;
+    font-size: 12px;
+}
 .trace-chunk {
     background: #000;
     color: #b6f0c4;

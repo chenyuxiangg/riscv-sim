@@ -391,6 +391,81 @@ describe("trace 导出入口", () => {
         router.close();
     });
 
+    /**
+     * The exported window is **not the complete history** when the
+     * source ring overflowed. The front end has to say so — presenting
+     * a truncated export as if it were the whole session is exactly the
+     * "the data exists but nobody is told it is incomplete" failure the
+     * D-50 / D-51 ledger entries are about.
+     *
+     * ⚠️ The state is injected **directly** into the store: the mock
+     * kernel never overflows its ring, so there is no way to reach this
+     * state through the command path. What is under test here is the
+     * **view's** job (render the flag), not the mock's.
+     */
+    test("导出窗口不完整时给出提示（overflow_marked）", async () => {
+        const { router } = await setup();
+        m03.setState("debug", (prev) => ({
+            ...prev,
+            debug: {
+                ...(prev.debug ?? {}),
+                export: {
+                    source: TRACE_SOURCE.Execution,
+                    format: TRACE_FORMAT.Csv,
+                    offset: 0,
+                    next_offset: 4,
+                    total: 4,
+                    bytes: 2,
+                    chunk: "a,b",
+                    overflow_marked: true,
+                },
+            },
+        }));
+        // ⚠️ M-02 的渲染事件**必须带 `state`**（`applyRenderEvent` 读的是
+        // `detail.state`，不是去 store 里读）。
+        window.dispatchEvent(new CustomEvent("riscv:render", {
+            detail: { viewId: "debug", state: m03.getState("debug") },
+        }));
+
+        const notice = dom.document.querySelector("[data-trace-overflow]");
+        assert.ok(notice, "没有「导出窗口不完整」的提示");
+        assert.ok(
+            notice.textContent.includes("不是完整历史"),
+            `提示没有说清窗口不完整：${notice.textContent}`,
+        );
+        router.close();
+    });
+
+    test("导出窗口完整时**不**给出「不完整」提示", async () => {
+        const { router } = await setup();
+        m03.setState("debug", (prev) => ({
+            ...prev,
+            debug: {
+                ...(prev.debug ?? {}),
+                export: {
+                    source: TRACE_SOURCE.Execution,
+                    format: TRACE_FORMAT.Csv,
+                    offset: 0,
+                    next_offset: 4,
+                    total: 4,
+                    bytes: 2,
+                    chunk: "a,b",
+                    overflow_marked: false,
+                },
+            },
+        }));
+        window.dispatchEvent(new CustomEvent("riscv:render", {
+            detail: { viewId: "debug", state: m03.getState("debug") },
+        }));
+
+        assert.equal(
+            dom.document.querySelector("[data-trace-overflow]"),
+            null,
+            "窗口完整却显示了「不完整」提示",
+        );
+        router.close();
+    });
+
     test("next_offset < total 时有「继续导出」按钮", async () => {
         const { router } = await setup();
         await router.dispatchCommand(

@@ -448,11 +448,15 @@ export const Event = Object.freeze({
         },
     }),
     /**
-     * `EventPayload::TraceExport { source, format, offset, next_offset, total, bytes, chunk }`.
+     * `EventPayload::TraceExport { source, format, offset, next_offset, total, bytes, chunk, overflow_marked }`.
      *
      * 续传：把 `next_offset` 作为下次 `exportTrace` 的 `offset` 参数传回。
+     *
+     * ⚠️ `overflowMarked` = **本次导出的窗口不是完整历史**（源环溢出过、
+     * 丢过最旧条目）。前端**必须**把它显示出来——否则会把一份被截断的
+     * 导出当成完整会话呈现。
      */
-    traceExport: (source, format, offset, nextOffset, total, bytes, chunk) => ({
+    traceExport: (source, format, offset, nextOffset, total, bytes, chunk, overflowMarked) => ({
         TraceExport: {
             source,
             format,
@@ -461,6 +465,7 @@ export const Event = Object.freeze({
             total: Number(total),
             bytes: Number(bytes),
             chunk: String(chunk ?? ""),
+            overflow_marked: Boolean(overflowMarked),
         },
     }),
     /** `EventPayload::TraceState { enabled, len, dropped }` — 轨迹记录状态。 */

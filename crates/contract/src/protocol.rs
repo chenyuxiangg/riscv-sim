@@ -425,6 +425,20 @@ pub enum EventPayload {
         bytes: u64,
         /// The chunk content.
         chunk: String,
+        /// **True when the exported window is not the complete
+        /// history** — the source ring overflowed and dropped entries.
+        ///
+        /// ⚠️ **This is not decoration.** M-19's edge ring and M-11's
+        /// trace ring are both **bounded** and drop their oldest
+        /// entries on overflow. Without this flag the front end would
+        /// present a truncated export as if it were the whole
+        /// session — the same "the data exists but nobody is told it
+        /// is incomplete" failure the D-50 / D-51 ledger entries are
+        /// about.
+        ///
+        /// - `Waveform` source ⇒ M-19's `ExportHandle::overflow_marked`
+        /// - `Execution` source ⇒ M-11's trace buffer dropped count > 0
+        overflow_marked: bool,
     },
     /// The state of execution-trace recording (M-11).
     ///
@@ -708,13 +722,14 @@ mod tests {
             total: 42,
             bytes: 128,
             chunk: "$var".to_string(),
+            overflow_marked: true,
         };
         assert_eq!(
             serde_json::to_value(&export).expect("json"),
             serde_json::json!({ "TraceExport": {
                 "source": "Waveform", "format": "Vcd", "offset": 0,
                 "next_offset": 10, "total": 42, "bytes": 128,
-                "chunk": "$var" } })
+                "chunk": "$var", "overflow_marked": true } })
         );
 
         let state = EventPayload::TraceState {
