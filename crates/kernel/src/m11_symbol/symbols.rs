@@ -65,7 +65,16 @@ pub const E_LDR_01_MALFORMED: u16 = 1;
 pub const E_LDR_02_PARSE_LIMIT: u16 = 2;
 
 /// `.symtab` 里一个条目的大小（ELF32 `Elf32_Sym` = 16 字节）。
-const SYM_ENTRY_SIZE: usize = 16;
+///
+/// ⚠️ **值的唯一落点在 M-06**（`crate::m06_elf::SYM_ENTRY_SIZE`）—— M-06
+/// 是全仓**唯一**的 ELF 容器解析者，容器事实住在它那里；这里只**引用**
+/// （同层先例：`p_filesz <= p_memsz` 的校验也在 M-06）。
+///
+/// ⚠️ **本模块看不到 `sh_entsize`**：它住在节区头里，而 M-11 只拿到
+/// `.symtab` 的**原始字节** ⇒ 「谎报条目大小」这件事由 M-06 在**容器**
+/// 层拒收（台账 D-101 ②）；本模块保留的那道检查挡的是**另一件事** ——
+/// 「字节长度不是 16 的整数倍」（截断）。
+const SYM_ENTRY_SIZE: usize = crate::m06_elf::SYM_ENTRY_SIZE as usize;
 
 /// 符号类型（`st_info` 的高 4 位）。
 const STT_NOTYPE: u8 = 0;

@@ -208,13 +208,14 @@ impl<T: InterruptPort + 'static> InterruptPort for SharedInterruptPort<T> {
         controller.poll(now_ps, mie, mstatus)
     }
 
-    fn pending_lines(&self) -> Vec<u16> {
-        // 借不到就**当作没有挂起** —— 与 `pending_intr` 同一口径
-        // （查询接口没有错误通道）。
+    fn pending_lines(&self) -> Option<Vec<u16>> {
+        // ⚠️ **借不到 ⇒ `None`（状态未知）**，**不是**「没有挂起」
+        // （台账 D-100）：把「读不到」当成「没有挂起」⇒ 算出来的 `mip`
+        // 掩码是 0 ⇒ 一次**失败的读**变成了 guest 看得见的状态改写。
         self.inner
             .try_borrow()
-            .map(|controller| controller.pending_lines())
-            .unwrap_or_default()
+            .ok()
+            .and_then(|controller| controller.pending_lines())
     }
 }
 
@@ -241,8 +242,9 @@ impl InterruptPort for NullInterruptPort {
     ) -> Result<Option<PendingIntr>, PlatformError> {
         Ok(None)
     }
-    fn pending_lines(&self) -> Vec<u16> {
-        Vec::new()
+    fn pending_lines(&self) -> Option<Vec<u16>> {
+        // 空端口**没有**挂起线 —— 这是**知道的**「没有」，不是「读不到」。
+        Some(Vec::new())
     }
 }
 
@@ -369,7 +371,18 @@ impl<'a> IssExecutor<'a> {
     /// `irq_clear` 副作用之后 ⇒ guest 读 `mip` 得到的是**上一个量子边界**
     /// 的挂起快照（量子 = 1 µs = 1000 条指令）⇒ **不是精确值**。
     fn project_mip(&self, state: &mut SimState) {
-        let mask = pending_lines_to_mip_mask(&self.intc.pending_lines());
+        // ⚠️ **读不到 ⇒ 不写**（台账 **D-100**）。
+        //
+        // 「读不到」**不是**「没有挂起」：把它当成「没有挂起」⇒ 算出的
+        // 掩码是 0 ⇒ **一次失败的读**变成了 guest 看得见的状态改写
+        // （`mip` 里的挂起位被抹掉，直到下一个刷新点才恢复）。
+        //
+        // ⇒ 状态未知时**保持原样**：guest 下一次读 `mip` 拿到的仍是**上
+        // 一次已知的**投影值，而不是一个被伪造出来的 0。
+        let Some(lines) = self.intc.pending_lines() else {
+            return;
+        };
+        let mask = pending_lines_to_mip_mask(&lines);
         if csr_read(state, CSR_MIP) != mask {
             csr_write(state, CSR_MIP, mask);
         }
@@ -2324,6 +2337,47 @@ mod tests {
             guest_csr(&backend, CSR_MIP),
             0,
             "线被清掉后 mip 的那一位必须消失（刷新点 ②）"
+        );
+    }
+
+    /// ⚠️ **读不到挂起线 ⇒ `mip` 不被写**（台账 **D-100** · 验收 **C-3**）。
+    ///
+    /// `pending_lines()` 在共享适配器**借不到**控制器时返回 `None`
+    /// （**状态未知**）。那一刻**绝不能**把「读不到」当成「没有挂起」
+    /// ⇒ 算出的掩码是 0 ⇒ **一次失败的读**变成了 guest 看得见的状态
+    /// 改写（`mip` 里的挂起位被抹掉）。
+    ///
+    /// ⚠️ **判别式**：先把 `mip` 弄成**非 0**（线 1 挂起 ⇒ `0x800`），
+    /// 再造争用，然后让 guest 走一次刷新点 ②（`irq_clear` 的副作用）——
+    /// 那一次刷新**读不到**挂起线 ⇒ `mip` 必须**保持原样**。
+    ///
+    /// ⚠️ **断言必须落在「值」上**：断言「`mip` 条目还在」不够（写 0
+    /// 也会留下条目）。
+    #[test]
+    fn a_contended_port_does_not_rewrite_mip() {
+        let (mut backend, controller) = backend_with_a_pending_line(&IRQ_FIRMWARE_BYTES);
+        backend
+            .step_n(instructions_per_quantum() + 1)
+            .expect("step");
+        // 前置条件：量子边界的刷新点 ① 已经把挂起线投影进 `mip`。
+        assert_eq!(
+            guest_csr(&backend, CSR_MIP),
+            1 << 11,
+            "前置条件：线 1 挂起 ⇒ mip 必须是 MEIP 位"
+        );
+
+        // ⚠️ **造争用**：借住控制器不放 ⇒ 端口的 `try_borrow` 失败 ⇒
+        // `pending_lines()` 返回 `None`（状态未知）。
+        let guard = controller.borrow_mut();
+        // handler 的两条指令：`addi x7,x7,1` → `csrrwi x0, irq_clear, 2`
+        // （第二条触发刷新点 ②）。
+        backend.step_n(2).expect("step");
+        drop(guard);
+
+        assert_eq!(
+            guest_csr(&backend, CSR_MIP),
+            1 << 11,
+            "读不到挂起线时 `mip` **不得**被改写（读失败 ≠ 没有挂起）"
         );
     }
 }

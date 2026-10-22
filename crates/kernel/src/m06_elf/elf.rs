@@ -55,6 +55,13 @@ const PT_LOAD: u32 = 1;
 /// `sh_type` — the section occupies **no** space in the file.
 const SHT_NOBITS: u32 = 8;
 
+/// The size of **one** ELF32 symbol-table entry (`Elf32_Sym` = 16 bytes).
+///
+/// ⚠️ **唯一的落点**：这个常量是「ELF32 的符号条目是 16 字节」这条
+/// 事实的**唯一**定义处 —— M-06 的容器校验（`sh_entsize`）与 M-11 的
+/// 条目步长**都引用**它，**不**各写一份字面量。
+pub const SYM_ENTRY_SIZE: u32 = 16;
+
 /// The debug / symbol sections M-06 extracts from the section table
 /// (STAGE-5 裁决 B). Everything else — including `.shstrtab`, which is
 /// only used internally to read the section names — is ignored.
@@ -519,6 +526,35 @@ fn extract_debug_sections(
         let name = read_section_name(shstrtab, sh_name)?;
         if !DEBUG_SECTION_WHITELIST.contains(&name.as_str()) {
             continue;
+        }
+
+        // ⚠️ **符号表的条目步长必须自洽**（台账 **D-101 ②** · 验收
+        // **C-5**）。
+        //
+        // M-11 按 **ELF32 固定 16 字节**的步长读符号条目，而它**看不到**
+        // `sh_entsize`（那住在节区头里，M-11 只拿到 `.symtab` 的**原始
+        // 字节**）⇒ 一个「谎报 `sh_entsize = 32`、条目仍是 16 字节」的
+        // 文件，在 M-11 眼里与一个正确文件**完全无法区分**。
+        //
+        // ⇒ **容器一致性校验本就是 M-06 的职责**（同层先例：`p_filesz <=
+        // p_memsz` 的校验就在 M-06）⇒ 在这里拒收**整个镜像**，M-11 就
+        // 永远看不到撒谎的文件。
+        //
+        // ⚠️ **判据是「显式声明了（非 0）且不等于 16」**：ELF 里 `0`
+        // 表示「这一节没有固定大小的条目」（一些老工具链这么写）⇒ 视作
+        // **未声明**，放行（按 16 处理）—— 把 `0` 也拒掉会误杀合法镜像。
+        if name == ".symtab" {
+            let sh_entsize = read_u32(hdr, 36)?;
+            if sh_entsize != 0 && sh_entsize != SYM_ENTRY_SIZE {
+                return Err(PlatformError::new(
+                    FAMILY,
+                    1,
+                    format!(
+                        "`.symtab` declares sh_entsize={} (ELF32 symbol entries are {} bytes)",
+                        sh_entsize, SYM_ENTRY_SIZE
+                    ),
+                ));
+            }
         }
 
         let end = (sh_offset as u64)

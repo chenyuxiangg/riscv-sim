@@ -166,9 +166,16 @@ pub trait InterruptPort {
     /// ⚠️ **不是** `raised`（断言线集）—— `raised` 是**边沿**语义，
     /// 用完即清；`mip` 的位义是「中断**挂起**」。
     ///
-    /// ⚠️ 这是一条**读**接口 ⇒ **没有错误通道**：拿不到状态就当作
-    /// 「没有挂起」（与 [`Self::pending_intr`] 同一口径）。
-    fn pending_lines(&self) -> Vec<u16>;
+    /// # `None` = **状态未知**（台账 **D-100**）
+    ///
+    /// 共享适配器（`Rc<RefCell<…>>`）在**借不到**的时候**读不到**
+    /// 挂起队列 —— 那**不是**「没有挂起」，而是「**不知道**有没有挂起」。
+    ///
+    /// ⇒ 返回 `None` 表示「**读不到**」，调用方**必须**把它与「没有挂起」
+    /// 分开处理：**读失败不得改写 guest 可见的状态**（把「读不到」当成
+    /// 「没有挂起」⇒ 算出的 `mip` 掩码是 0 ⇒ 一次**失败的读**变成了
+    /// 一次 guest 看得见的状态改写）。
+    fn pending_lines(&self) -> Option<Vec<u16>>;
 }
 
 /// 中断控制器（简化 PLIC / CLINT）。
@@ -660,8 +667,10 @@ impl InterruptPort for InterruptController {
         InterruptController::poll(self, now_ps, mie, mstatus)
     }
 
-    fn pending_lines(&self) -> Vec<u16> {
-        InterruptController::pending_lines(self)
+    fn pending_lines(&self) -> Option<Vec<u16>> {
+        // ⚠️ 控制器**自己**的挂起队列随时都读得到 ⇒ 永远是 `Some`
+        // （「读不到」只可能发生在**共享适配器**那一层）。
+        Some(InterruptController::pending_lines(self))
     }
 }
 

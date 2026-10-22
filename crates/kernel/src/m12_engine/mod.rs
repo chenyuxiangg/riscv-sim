@@ -38,6 +38,7 @@
 
 use std::fmt;
 
+use riscv_sim_contract::csr::csr_is_implemented;
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, SimState};
 use riscv_sim_contract::port::{EventBus, InterruptSink};
@@ -904,6 +905,7 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
     /// restore can never collide with a queued event (D-17).
     pub fn restore(&mut self, state: SimState) {
         self.state = state;
+        drop_unimplemented_csrs(&mut self.state);
         let floor = self.queue.max_seq().map_or(0, |seq| seq.saturating_add(1));
         self.next_seq = self.state.event_queue_head.max(floor);
         self.sync_seq_mirror();
@@ -932,6 +934,17 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
     /// never having restored (D-05 / FR-12).
     pub fn restore_full(&mut self, snapshot: &EngineSnapshot) {
         self.state = snapshot.state.clone();
+        // ⚠️ **过滤 CSR 文件**（台账 **D-101 ①** · 验收 **C-4**）。
+        //
+        // 快照是**外部**来的 ⇒ 里面可能有平台**没实现**的 CSR（`0x7A1`
+        // 之类）。平台的规则是「**未实现 ⇒ 写被忽略、读回 0**」（契约层
+        // `csr_write_is_ignored`）—— **整体克隆** CSR 文件会**绕过**那条
+        // 规则：外部构造的快照里塞一个 `0x7A1`，guest 就能读出非 0 ⇒
+        // 凭空多出一个平台根本没有的寄存器。
+        //
+        // ⇒ 恢复时按契约层的「已实现 CSR 表」过滤：**未实现的 CSR 不写**
+        // （不写 ⇒ 读回 0，与「写被忽略」的效果一致）。
+        drop_unimplemented_csrs(&mut self.state);
         self.queue = EventQueue::from_ordered_vec(snapshot.queue.clone());
         self.next_seq = snapshot.next_seq;
         self.instruction_budget = snapshot.instruction_budget;
@@ -973,6 +986,25 @@ where
     fn default() -> Self {
         Self::new(B::default(), I::default())
     }
+}
+
+/// Drop the CSRs the platform **does not implement** from a CSR file that
+/// came from **outside**（台账 **D-101 ①** · 验收 **C-4**）。
+///
+/// The platform's rule is "**unimplemented ⇒ the write is ignored and a
+/// later read returns 0**"（the contract layer's
+/// `csr_write_is_ignored`）—— cloning the CSR file wholesale **bypasses**
+/// that rule: a hand-built snapshot carrying `0x7A1` would let the guest
+/// read back a register the platform does not have.
+///
+/// ⇒ The restore paths filter the file through the contract's
+/// "**implemented CSR table**": an unimplemented CSR is **not written**
+/// (not written ⇒ it reads back 0, exactly like an ignored write).
+///
+/// ⚠️ The filter is **not** applied to the platform's own writes: the
+/// guest's write path already refuses them at the source.
+fn drop_unimplemented_csrs(state: &mut SimState) {
+    state.csrs.retain(|(number, _)| csr_is_implemented(*number));
 }
 
 /// Number of time quanta spanned by the half-open interval
@@ -1205,6 +1237,71 @@ mod tests {
         assert_eq!(eng.pending_event_count(), 1);
         eng.run_until_idle().expect("run");
         assert_eq!(eng.now_ps(), 4_000);
+    }
+
+    // ------------------------------------------------------------------
+    // D-101 ① — the restore path must not bypass "unimplemented ⇒ 0"
+    // ------------------------------------------------------------------
+
+    /// **恢复一份含未实现 CSR 的快照 ⇒ 那条 CSR 读回 0**（台账
+    /// **D-101 ①** · 验收 **C-4**）。
+    ///
+    /// The platform's rule is "**unimplemented ⇒ the write is ignored and
+    /// a later read returns 0**". The restore path used to clone the CSR
+    /// file wholesale ⇒ an **externally built** snapshot carrying `0x7A1`
+    /// would hand the guest a register the platform does not have.
+    ///
+    /// ⚠️ The assertion lands on the **file**, not on a value: "the CSR is
+    /// **not in the file**" is what makes the guest read 0 (M-13's rule:
+    /// a CSR that is not in the file reads 0 and does not trap). Asserting
+    /// "the value is 0" alone would be **vacuous** — an absent CSR reads 0
+    /// too.
+    ///
+    /// ⚠️ The **implemented** CSRs must survive — a filter that dropped
+    /// everything would make this assertion pass.
+    #[test]
+    fn restoring_a_snapshot_drops_the_csrs_the_platform_does_not_implement() {
+        let mut eng: Engine<RecordingBus, RecordingIntc> = Engine::default();
+        let mut snap = eng.snapshot_full();
+        // 一份**外部构造**的快照：一个平台**没实现**的 CSR（`tdata1`）与
+        // 一个**已实现**的（`mstatus`）。
+        snap.state.csrs.push((0x300, 0x0000_0088));
+        snap.state.csrs.push((0x7A1, 0x7A1_0000));
+
+        eng.restore_full(&snap);
+
+        assert!(
+            !eng.state.csrs.iter().any(|(number, _)| *number == 0x7A1),
+            "未实现的 CSR 不得被恢复 —— 实得 {:?}",
+            eng.state.csrs
+        );
+        assert_eq!(
+            eng.state
+                .csrs
+                .iter()
+                .find(|(number, _)| *number == 0x300)
+                .map(|(_, value)| *value),
+            Some(0x0000_0088),
+            "已实现的 CSR 必须活下来（过滤不能把整个文件清空）"
+        );
+    }
+
+    /// **部分恢复**（[`Engine::restore`]）走**同一条**过滤规则。
+    ///
+    /// ⚠️ 两条恢复路径面对的是同一类外部数据 ⇒ 只堵一条等于没堵。
+    #[test]
+    fn restoring_a_partial_state_drops_the_csrs_the_platform_does_not_implement() {
+        let mut eng: Engine<RecordingBus, RecordingIntc> = Engine::default();
+        let mut state = SimState::default();
+        state.csrs.push((0x7A1, 0x7A1_0000));
+
+        eng.restore(state);
+
+        assert!(
+            !eng.state.csrs.iter().any(|(number, _)| *number == 0x7A1),
+            "未实现的 CSR 不得被恢复 —— 实得 {:?}",
+            eng.state.csrs
+        );
     }
 
     // ------------------------------------------------------------------
