@@ -13,7 +13,7 @@
 //! trapped, or paused at a breakpoint.
 
 use riscv_sim_contract::csr::{
-    csr_write_is_ignored, CSR_MEPC, CSR_MSTATUS, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT,
+    csr_write_is_ignored, CSR_MSTATUS, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT,
 };
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{SimState, WriteSize};

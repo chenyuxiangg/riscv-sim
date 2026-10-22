@@ -673,7 +673,8 @@ fn mret_clears_the_lowest_bit_of_mepc_when_it_is_set() {
 fn a_user_write_to_mepc_is_masked_by_ialign() {
     let mut h = Harness::new();
     let mut state = state_with_csrs(&[]);
-    state.gpr[10] = 0x1003; // a0 — bit 1 **and** bit 0 set
+    // a0 — bit 1 **and** bit 0 set
+    state.gpr[10] = 0x1003;
     // `csrrw a0, mepc, a0` — writes a0 into mepc, reads the old value back.
     let csrrw = csr_insn(CSR_MEPC, 10, F_CSRRW, 10);
     let _ = h.step_one_at(&mut state, 0x2000, csrrw);
