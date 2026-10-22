@@ -125,6 +125,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
+use riscv_sim_contract::csr::IRQ_UART_RX_READY;
 use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, E_PROTO_01_VERSION_MISMATCH, PROTO_FAMILY,
 };
@@ -150,7 +151,10 @@ use crate::m11_symbol::{
 };
 use crate::m14_bus::{Bus, BusWidth};
 use crate::m15_peripheral;
+use crate::m15_peripheral::clint::{Clint, CLINT_WINDOW};
 use crate::m15_peripheral::gpio::{GpioBank, GPIO_WINDOW};
+use crate::m15_peripheral::plic::{Plic, PLIC_WINDOW};
+use crate::m15_peripheral::uart::{Uart16550, UART_WINDOW};
 use crate::m16_interrupt::InterruptController;
 use crate::m17_backend::{SelfIssBackend, SharedInterruptPort};
 use crate::m18_probe::{ChannelDef, ChannelKind, ProbeRegistry, SampleCfg, CH_GPIO0, CH_IRQ_PULSE};
@@ -261,6 +265,17 @@ pub const TOPIC_EXPORT: &str = "debug.export";
 /// 主题：轨迹记录状态（`EventPayload::TraceState` 的回复）。
 pub const TOPIC_TRACE: &str = "debug.trace";
 
+/// console 输出的 topic（与前端 `EVENT_TOPIC.Console` **逐字一致**）。
+pub const TOPIC_CONSOLE: &str = "sim.console";
+
+/// 宿主侧保留的 console 字节上限（**还没推给前端**的那些）。
+///
+/// ⚠️ **为什么要有上限**：UART 的捕获环是 4 KiB，满了会**丢最新**的
+/// 字节 ⇒ 宿主必须**及时**把字节取走，否则 console 会静默丢字。
+/// 而前端可能还没订阅 ⇒ 宿主得先攒着，攒多少得有个上限（丢**最旧**的，
+/// 因为最近发生的事更有用）。
+pub const CONSOLE_BACKLOG_MAX: usize = 64 * 1024;
+
 /// 场景码：M-19 的波形管道**不可用**（`RefCell` 争用 / 尚未装配）。
 ///
 /// ⚠️ 这是**内部瞬时**状态，不是客户端的请求有错 ⇒ 它**不**用 `E_CTX-03`
@@ -282,6 +297,93 @@ pub const DEFAULT_RAM_HIGH_BASE: u32 = 0x8000_0000;
 
 /// 默认内存图 · 高段 RAM 的大小（4 MiB）。
 pub const DEFAULT_RAM_HIGH_SIZE: u32 = 0x0040_0000;
+
+// ------------------------------------------------------------------
+// v0.23 批 · QEMU virt 兼容档（真实 RTOS 的落地形态）
+// ------------------------------------------------------------------
+
+/// QEMU virt 的 UART0 基址。
+///
+/// ⚠️ 与 osz 的 `platform/qemu_virt/include/platform.h` 里的
+/// `UART0_BASE_ADDR` **逐字一致**（0x1000_0000）⇒ 两边零改动。
+pub const QEMU_VIRT_UART0_BASE: u32 = 0x1000_0000;
+
+/// QEMU virt 的 CLINT 基址（osz 的 `CLINT_BASE_ADDR`）。
+pub const QEMU_VIRT_CLINT_BASE: u32 = 0x0200_0000;
+
+/// QEMU virt 的 PLIC 基址（osz 的 `PLIC_BASE_ADDR`）。
+pub const QEMU_VIRT_PLIC_BASE: u32 = 0x0C00_0000;
+
+/// QEMU virt 的 RAM 起点（ITCM）。
+pub const QEMU_VIRT_RAM_BASE: u32 = 0x8000_0000;
+
+/// QEMU virt 的 RAM 长度（**128 MiB** = ITCM 60M + INIT 4M + DTCM 64M）。
+///
+/// ⚠️ 这 128 MiB **不是**「随便给的大一点」——osz 的链接脚本把三个区
+/// 排成 `ITCM(0x8000_0000,60M)` / `INIT(0x83C0_0000,4M)` /
+/// `DTCM(0x8400_0000,64M)`，而它的 best-fit 分配器
+/// （`kernel/base/mem/bestfit/src/bestfit.c`）**会在堆尾写一个节点**：
+/// `end_node = (MEM_NODE_INFO *)((UINT8 *)DEFAULT_HEAP_END - MEM_NODE_INFO_SIZE)`
+/// ⇒ 堆尾是 `0x8800_0000` 附近 ⇒ **必须**真的映射到那里。
+pub const QEMU_VIRT_RAM_SIZE: u32 = 0x0800_0000;
+
+/// 单个 RAM 区域的大小（16 MiB）。
+///
+/// ⚠️ M-14 的**每区域**上限是 `DEFAULT_MAX_REGION_BYTES`（16 MiB，D-10）
+/// ⇒ 128 MiB **必须**拆成 8 个区域，不能当成一个大区域映射。
+pub const QEMU_VIRT_RAM_REGION: u32 = 0x0100_0000;
+
+/// QEMU virt 的时钟频率（**10 MHz**）。
+///
+/// ⚠️ 与 osz 的 `SYSTEM_BASE_FREQ`（10 000 000）**逐字一致**；CLINT 的
+/// `mtime` / `mtimecmp` 单位是**周期**，换算必须用这个数。
+pub const QEMU_VIRT_FREQ_HZ: u64 = 10_000_000;
+
+/// PLIC 上 UART 中断的**裸源号**。
+///
+/// ⚠️ osz 的 `UART_INT_NUM = 0x1A = 26`，而它的
+/// `EXTERNAL_INT_NUM_2_RAW(source_id) = source_id - LOCAL_INTERRUPT_MAX_NUM(16)`
+/// ⇒ 裸源号是 **10**（QEMU virt 上 UART0 的 IRQ 号也是 10）。
+pub const PLIC_SOURCE_UART: u32 = 10;
+
+/// PLIC 的机器上下文号（osz 用 hart0 的 machine context 0）。
+pub const PLIC_CONTEXT_MACHINE: u32 = 0;
+
+/// UART0 的外设 id。
+pub const UART0_PERIPH_ID: &str = "UART0";
+
+/// CLINT 的外设 id。
+pub const CLINT_PERIPH_ID: &str = "CLINT";
+
+/// PLIC 的外设 id。
+pub const PLIC_PERIPH_ID: &str = "PLIC";
+
+/// UART0 的波特率。
+///
+/// ⚠️ 平台的 UART 是**捕获环**（写进环就是「已发出」），波特率**不参与**
+/// 时序计算；这个值只是让 `ps_per_bit` 有个确定的分母。
+pub const UART0_BAUD_RATE: u32 = 115_200;
+
+/// 宿主的**内存图档位**。
+///
+/// ⚠️ **为什么不是一档**：QEMU virt 档要真的分配 **128 MiB** 物理内存
+/// （M-14 的 `map_ram` 用 `vec![0u8; size]`）⇒ 每个宿主实例都吃 128 MiB。
+/// 而本仓有上千条用例、每条都可能造一个宿主 ⇒ 默认档铺满会直接吃掉
+/// 几个 GiB、测试跑不动。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemoryProfile {
+    /// 默认档：低段 1 MiB + 高段 4 MiB RAM + 一个 GPIO 外设。
+    ///
+    /// 这是**今天**的行为，一个字节都没变。
+    #[default]
+    Default,
+    /// QEMU virt 兼容档：铺满 `0x8000_0000` 起的 128 MiB RAM，并挂上
+    /// ns16550 UART0 / CLINT / PLIC 三个 QEMU virt 外设。
+    ///
+    /// ⚠️ 这是**真实 RTOS（osz）能跑起来**的那一档：osz 的地址全部落在
+    /// `0x8000_0000..0x8800_0000`，且它的堆尾在 `0x8800_0000` 附近。
+    QemuVirt,
+}
 
 /// 波形（寄存器流）的 schema 版本。
 const WAVEFORM_SCHEMA_VERSION: u32 = 1;
@@ -493,6 +595,23 @@ pub struct KernelHost {
     /// 开关**关闭**期间的事件（「关闭 ⇒ 零记录」，裁决 H）。计数暴露给
     /// 调用方，免得「轨迹环里少了一批」变成一件没人知道的事。
     trace_events_discarded: u64,
+    /// 当前生效的**内存图档位**。
+    ///
+    /// ⚠️ 装载工程时宿主会**按镜像实际用到的地址**重新挑档（见
+    /// [`KernelHost::choose_memory_profile`]）⇒ 一个仓外的 RTOS 镜像
+    /// 落进 `0x8000_0000..0x8800_0000` 时会自动切到 QEMU virt 档。
+    memory_profile: MemoryProfile,
+    /// UART0 的句柄（**只有** QEMU virt 档才有）—— console 字节从这里取。
+    uart0: Option<Rc<RefCell<Uart16550>>>,
+    /// CLINT 的句柄（**只有** QEMU virt 档才有）—— `mtimecmp` 从这里喂给 M-16。
+    clint: Option<Rc<RefCell<Clint>>>,
+    /// PLIC 的句柄（**只有** QEMU virt 档才有）—— 外部中断的源头。
+    plic: Option<Rc<RefCell<Plic>>>,
+    /// 已经从 UART 取走、但**还没推给前端**的 console 字节。
+    ///
+    /// ⚠️ **必须**及时把 UART 的字节取走（捕获环满了会丢最新的字节），
+    /// 但前端不一定订阅了 console ⇒ 中间需要一个攒着的缓冲。
+    console_backlog: Vec<u8>,
 }
 
 impl std::fmt::Debug for KernelHost {
@@ -561,12 +680,17 @@ impl KernelHost {
             index: SymbolIndex::default(),
             trace: TraceBuffer::new(TRACE_CAP),
             trace_events_discarded: 0,
+            memory_profile: MemoryProfile::Default,
+            uart0: None,
+            clint: None,
+            plic: None,
+            console_backlog: Vec::new(),
         };
         // The default memory map cannot fail on a fresh bus (the two
         // regions do not overlap and are far below the 16 MiB per-region
         // cap). If it ever does, the failure is reported by the next
         // `LoadProject` — which re-maps the memory anyway.
-        let _ = host.map_default_memory();
+        let _ = host.map_memory(MemoryProfile::Default);
         // The interrupt controller reaches **two** places: the engine's
         // `InterruptSink` (peripherals *raise* IRQ lines) and M-17's
         // executor (quantum-boundary *sampling* / pull-style *delivery* /
@@ -604,20 +728,370 @@ impl KernelHost {
             ))));
     }
 
-    /// 建立默认内存图（低段 1 MiB + 高段 4 MiB RAM + 一个 GPIO 外设）。
-    fn map_default_memory(&mut self) -> Result<(), PlatformError> {
-        let bus = self.backend.bus_mut();
-        bus.map_ram(DEFAULT_RAM_LOW_BASE, DEFAULT_RAM_LOW_SIZE, &[])?;
-        bus.map_ram(DEFAULT_RAM_HIGH_BASE, DEFAULT_RAM_HIGH_SIZE, &[])?;
-        // GPIO 外设（D-46）：**没有外设就没有信号可观察**——波形管道
-        // 会一直是空的。基址取 PL061 惯例的 0x4000_0000，与两段 RAM
-        // 都不重叠。
-        let gpio = Rc::new(RefCell::new(GpioBank::new(
-            GPIO_PERIPH_ID,
-            DEFAULT_GPIO_BASE,
-        )));
-        bus.map_peripheral_instance(DEFAULT_GPIO_BASE, GPIO_WINDOW, gpio)?;
+    /// 创建一个**指定内存图档位**的会话。
+    ///
+    /// ⚠️ **默认档不铺 128 MiB** —— 那 128 MiB 是**真的**物理内存
+    /// （M-14 的 `map_ram` 用 `vec![0u8; size]`）⇒ 每个宿主实例都吃
+    /// 128 MiB。headless 跑真实 RTOS 时显式用
+    /// [`MemoryProfile::QemuVirt`]。
+    pub fn new_with_profile(profile: MemoryProfile) -> Self {
+        let mut host = Self::new();
+        if profile == MemoryProfile::Default {
+            return host;
+        }
+        host.memory_profile = profile;
+        // ⚠️ **必须先 `reset_memory_map()`**：默认档已经在 `0x8000_0000`
+        // 铺了 4 MiB RAM，直接再铺 128 MiB 会**区域重叠**（E_BUS-03）。
+        //
+        // `rebuild_platform()` 做的正是这件事：换一条全新的总线 → 建图 →
+        // 重装外设 tick 接缝 → 重装探针管道 → 重装外设探针回调。
+        if let Err(_err) = host.rebuild_platform() {
+            // 换档失败 ⇒ 退回默认档并**记一次**（不 panic）。
+            //
+            // ⚠️ 一个刚建好的宿主上只有「默认档能建成」这一条不变式；
+            // 真失败说明总线上已经有冲突的区域 —— 退回默认档让调用方
+            // 至少拿到一个能用的宿主。
+            host.memory_profile = MemoryProfile::Default;
+            let _ = host.rebuild_platform();
+            host.probe_wiring_failures += 1;
+        }
+        host
+    }
+
+    /// 建立内存图（按档位）。
+    ///
+    /// ⚠️ **两个档位都保留低段 1 MiB RAM**（复位向量）—— 今天的默认行为
+    /// 一个字节都没变，QEMU virt 档只是**加**了东西。
+    fn map_memory(&mut self, profile: MemoryProfile) -> Result<(), PlatformError> {
+        // ⚠️ 借用的作用域要收窄：`bus` 是 `self.backend` 的可变借用，
+        // 而下面要把新外设的句柄写回 `self` 的字段 —— 两个借用不能重叠。
+        let (uart0, clint, plic) = {
+            let bus = self.backend.bus_mut();
+            bus.map_ram(DEFAULT_RAM_LOW_BASE, DEFAULT_RAM_LOW_SIZE, &[])?;
+            match profile {
+                MemoryProfile::Default => {
+                    bus.map_ram(DEFAULT_RAM_HIGH_BASE, DEFAULT_RAM_HIGH_SIZE, &[])?;
+                }
+                MemoryProfile::QemuVirt => {
+                    // 128 MiB 拆成 8 个 16 MiB 的区域（M-14 的每区域上限）。
+                    //
+                    // ⚠️ 拆的是**地址连续**的 8 段 —— guest 看到的是一段
+                    // 连续地址空间，平台看到的是 8 个独立区域。
+                    let regions = QEMU_VIRT_RAM_SIZE / QEMU_VIRT_RAM_REGION;
+                    for i in 0..regions {
+                        let base = QEMU_VIRT_RAM_BASE + i * QEMU_VIRT_RAM_REGION;
+                        bus.map_ram(base, QEMU_VIRT_RAM_REGION, &[])?;
+                    }
+                }
+            }
+            // GPIO 外设（D-46）：**没有外设就没有信号可观察**——波形管道
+            // 会一直是空的。基址取 PL061 惯例的 0x4000_0000，与两段 RAM
+            // 都不重叠。
+            let gpio = Rc::new(RefCell::new(GpioBank::new(
+                GPIO_PERIPH_ID,
+                DEFAULT_GPIO_BASE,
+            )));
+            bus.map_peripheral_instance(DEFAULT_GPIO_BASE, GPIO_WINDOW, gpio)?;
+
+            // ---- QEMU virt 的三个外设 ----
+            let (uart0, clint, plic) = match profile {
+                MemoryProfile::Default => (None, None, None),
+                MemoryProfile::QemuVirt => {
+                    // UART0：ns16550 字节寄存器（Lane B 重做的那一版）。
+                    //
+                    // ⚠️ `irq_line` 填**内部线号** 1（`IRQ_UART_RX_READY`）：
+                    // 它是「平台内部线号空间」里的数，**不是** `mcause`
+                    // 的架构码 —— 架构码由 M-16 在**交付时**查映射表算。
+                    let uart = Rc::new(RefCell::new(Uart16550::new(
+                        UART0_PERIPH_ID,
+                        QEMU_VIRT_UART0_BASE,
+                        UART0_BAUD_RATE,
+                        IRQ_UART_RX_READY,
+                    )));
+                    bus.map_peripheral_instance(QEMU_VIRT_UART0_BASE, UART_WINDOW, uart.clone())?;
+
+                    // CLINT：msip / mtimecmp / mtime，**单位是周期**。
+                    let clint = Rc::new(RefCell::new(Clint::with_frequency(
+                        CLINT_PERIPH_ID,
+                        QEMU_VIRT_CLINT_BASE,
+                        1,
+                        QEMU_VIRT_FREQ_HZ,
+                    )));
+                    bus.map_peripheral_instance(QEMU_VIRT_CLINT_BASE, CLINT_WINDOW, clint.clone())?;
+
+                    // PLIC：64 源 / 16 context（QEMU virt 的默认规模）。
+                    let plic = Rc::new(RefCell::new(Plic::with_capacity(
+                        PLIC_PERIPH_ID,
+                        QEMU_VIRT_PLIC_BASE,
+                        64,
+                        16,
+                    )));
+                    bus.map_peripheral_instance(QEMU_VIRT_PLIC_BASE, PLIC_WINDOW, plic.clone())?;
+
+                    (Some(uart), Some(clint), Some(plic))
+                }
+            };
+            (uart0, clint, plic)
+        };
+        self.uart0 = uart0;
+        self.clint = clint;
+        self.plic = plic;
+        self.memory_profile = profile;
         Ok(())
+    }
+
+    /// 按镜像**实际用到的地址**挑内存图档位。
+    ///
+    /// ⚠️ **为什么需要这一步**：默认档的高段 RAM 只有 4 MiB
+    /// （`0x8000_0000..0x8040_0000`），而真实 RTOS（osz）的镜像落在
+    /// `0x8000_0000`（代码）、`0x83C0_0000`（init）、`0x8400_0000`（数据 /
+    /// bss / 栈 / 堆）三处 ⇒ 默认档**装不下**。
+    ///
+    /// ⚠️ **判据是「镜像用到的地址落在哪一档的映射范围内」**，不是
+    /// 「镜像是不是某个特定的 ELF」—— 这样别的 RTOS 也能受益，而规则
+    /// 只有一条、写在代码里。
+    fn choose_memory_profile(&self, ranges: &[(u32, u32)]) -> MemoryProfile {
+        /// 一个地址区间是否落在 `[base, base+size)` 里。
+        fn inside(base: u32, size: u32, lo: u32, hi: u32) -> bool {
+            lo >= base && hi <= base.saturating_add(size)
+        }
+        for &(lo, hi) in ranges {
+            let in_default_high = inside(DEFAULT_RAM_HIGH_BASE, DEFAULT_RAM_HIGH_SIZE, lo, hi);
+            let in_qemu_high = inside(QEMU_VIRT_RAM_BASE, QEMU_VIRT_RAM_SIZE, lo, hi);
+            if !in_default_high && !in_qemu_high {
+                // ⚠️ 落在两档之外（低段 1 MiB 之外、又不在高段窗口里）
+                // ⇒ 哪一档都装不下 ⇒ 交给映射阶段去报「未映射访问」。
+                continue;
+            }
+            if !in_default_high {
+                return MemoryProfile::QemuVirt;
+            }
+        }
+        MemoryProfile::Default
+    }
+
+    /// 把外设的中断源**同步**到 M-16（v0.23）。
+    ///
+    /// 三条通路，逐条说清楚：
+    ///
+    /// 1. **CLINT 的 `mtimecmp`（单位：周期）→ M-16 的定时器比较值
+    ///    （单位：ps）**。M-16 的 `poll()` 自己管「`mtime >= mtimecmp`
+    ///    ⇒ 挂起定时器线」，它只缺一个比较值 ⇒ 宿主每轮把 CLINT 的
+    ///    `mtimecmp` 换算成 ps 喂给它。
+    /// 2. **UART 的 RX 就绪 → PLIC 的源 10**。真实 RTOS 的 UART 中断是
+    ///    **外部中断**（经 PLIC 到 `MEIP`）⇒ 中断号落在 PLIC 上，不在
+    ///    M-16 上。
+    /// 3. **PLIC 的待交付源 → M-16 的外部中断线**。⚠️ **claim 是 guest
+    ///    的权利**：平台这一侧**只读** PLIC 的「当前该交付哪个源」，
+    ///    **不代 guest claim**（`Plic::claim` 不清挂起位，所以读它不会
+    ///    抢走 guest 的源）。
+    ///
+    /// ⚠️ **这一段是「宿主唯一知道外设挂了哪些」的地方**（同
+    /// [`SelfIssBackend::install_peripheral_ticker`] 的理由）—— 外设
+    /// 本身不持有 M-16 的引用（M-15 LLD 的形状），不知道该往哪抬线。
+    fn sync_interrupts(&mut self) {
+        let Some(clint) = self.clint.clone() else {
+            return;
+        };
+        let Some(plic) = self.plic.clone() else {
+            return;
+        };
+        let now_ps = self.backend.engine().now_ps();
+
+        // ---- 1) 定时器：CLINT 的 mtimecmp（周期）→ M-16（ps） ----
+        //
+        // ⚠️ `mtimecmp == 0` 在 CLINT 里表示「无期限」；M-16 里 `0` 也
+        // 表示「定时器关闭」⇒ 两边**同义**，直接传过去即可。
+        let cmp_ps = match clint.try_borrow() {
+            Ok(c) => c.mtimecmp_ps(),
+            Err(_) => return,
+        };
+        self.intc.controller.borrow_mut().set_timer_compare(cmp_ps);
+
+        // ---- 2) UART 的 RX 就绪 → PLIC 的源 10 ----
+        if let Some(uart) = self.uart0.clone() {
+            let rx_ready = match uart.try_borrow() {
+                Ok(u) => {
+                    // LSR bit0 = RX 有字节；IER bit0 = 允许 RX 中断。
+                    u.line_status() & 0x01 != 0 && u.interrupt_enable() & 0x01 != 0
+                }
+                Err(_) => return,
+            };
+            if rx_ready {
+                if let Ok(mut p) = plic.try_borrow_mut() {
+                    p.request(PLIC_SOURCE_UART);
+                }
+            }
+        }
+
+        // ---- 3) PLIC 的待交付源 → M-16 的外部中断线 ----
+        //
+        // ⚠️ 用**外部中断线**（`IRQ_UART_RX_READY` = 1）：平台的内部线号
+        // 空间里 1 与 2 都映射到**架构 cause 码 11**（外部中断）⇒
+        // guest 读到的 `mcause` 是 `0x8000_000B`，与 RISC-V 架构一致。
+        let claimed = match plic.try_borrow_mut() {
+            Ok(mut p) => p.claim(PLIC_CONTEXT_MACHINE),
+            Err(_) => return,
+        };
+        if let Some(_source) = claimed {
+            let _ = self.intc.controller.borrow_mut().request(
+                IRQ_UART_RX_READY,
+                now_ps,
+                "plic",
+                crate::m16_interrupt::TRIGGER_LEVEL,
+            );
+        }
+    }
+
+    /// 取走 UART0 **已经发出**的字节（console 输出）。
+    ///
+    /// ⚠️ **这是「guest 写进捕获环」的字节**，不是「平台写出去的字节」——
+    /// 平台的 UART 是**捕获环**模型（Lane B），没有真正的串口线。
+    ///
+    /// ⚠️ **取走即清空**：调用方拿走的就是全部，顺序不变、不丢不重。
+    ///
+    /// ⚠️ **它先 `collect_console()` 再取 backlog** —— 因为 UART 的字节
+    /// 可能已经被 [`Self::collect_console`] 收进 backlog 了（那是「及时
+    /// 取走、免得捕获环满了丢字节」的要求）。只读 UART 的话会拿到空。
+    pub fn drain_console(&mut self) -> Vec<u8> {
+        self.collect_console();
+        std::mem::take(&mut self.console_backlog)
+    }
+
+    /// **直接从 UART 的捕获环**取走字节（**不碰** backlog）。
+    ///
+    /// ⚠️ **为什么必须单独一个函数**：`collect_console`（收进 backlog）与
+    /// `drain_console`（收走 backlog）都需要「从 UART 取字节」这一步。
+    /// 如果两者都直接调 `drain_console`，而 `drain_console` 又要
+    /// `collect_console` ⇒ **无限递归 ⇒ 栈溢出**。
+    ///
+    /// ⚠️ 这个坑是**真的踩过**的：接线用例写完、跑绿之后才把
+    /// `drain_console` 改成「先 collect 再取 backlog」，release 构建当场
+    /// 栈溢出（debug 构建的栈帧更大，反而先崩在别处）。
+    fn drain_uart(&mut self) -> Vec<u8> {
+        let Some(uart) = self.uart0.clone() else {
+            return Vec::new();
+        };
+        // ⚠️ 绑到局部变量：`match` 的临时值会活到块尾，而 `uart` 在那
+        // 之前就被 drop 了 ⇒ 借用检查器不通过。
+        let out = match uart.try_borrow_mut() {
+            Ok(mut u) => u.drain_tx(),
+            // ⚠️ 争用 ⇒ **不 panic**，返回空并让调用方下一轮再取。
+            Err(_) => Vec::new(),
+        };
+        out
+    }
+
+    /// console 方向**已经发出**但还没被取走的字节数。
+    pub fn console_pending(&self) -> usize {
+        let Some(uart) = self.uart0.as_ref() else {
+            return 0;
+        };
+        let n = match uart.try_borrow() {
+            Ok(u) => u.tx_pending(),
+            Err(_) => 0,
+        };
+        n
+    }
+
+    /// 把 UART 的 TX 捕获环**取空**，攒进宿主的 backlog。
+    ///
+    /// ⚠️ **必须**及时取走：捕获环（4 KiB）满了会**丢最新的**字节 ⇒
+    /// 不取走就是静默丢 console 内容。
+    pub fn collect_console(&mut self) {
+        let chunk = self.drain_uart();
+        if chunk.is_empty() {
+            return;
+        }
+        self.console_backlog.extend_from_slice(&chunk);
+        if self.console_backlog.len() > CONSOLE_BACKLOG_MAX {
+            // 丢**最旧**的（最近发生的事更有用）。
+            let excess = self.console_backlog.len() - CONSOLE_BACKLOG_MAX;
+            self.console_backlog.drain(0..excess);
+        }
+    }
+
+    /// 造一个 `Console` 事件（**订阅了** console topic 才有）。
+    ///
+    /// ⚠️ **没订阅就返回 `None`** —— console 是**流**，不是命令的直接
+    /// 回复；没订阅就不推（与波形事件同一条口径）。
+    pub fn console_event(&mut self) -> Option<EventPayload> {
+        if !self.topics.contains(TOPIC_CONSOLE) {
+            return None;
+        }
+        // ⚠️ 先把 UART 里**还没收走**的字节收进 backlog —— 否则订阅的
+        // 那一刻正好赶在「跑完那一批」与「收走」之间，就会漏掉。
+        self.collect_console();
+        if self.console_backlog.is_empty() {
+            return None;
+        }
+        let bytes = std::mem::take(&mut self.console_backlog);
+        Some(EventPayload::Console { bytes })
+    }
+
+    /// 已经执行的指令总数（headless runner 的预算判据）。
+    pub fn total_executed(&self) -> u64 {
+        self.backend.total_executed()
+    }
+
+    /// 当前生效的内存图档位。
+    pub fn memory_profile(&self) -> MemoryProfile {
+        self.memory_profile
+    }
+
+    /// 只读地看总线（诊断 / 测试用）。
+    pub fn bus(&self) -> &Bus {
+        self.backend.bus()
+    }
+
+    /// 可变地看总线（装载镜像 / 测试用）。
+    pub fn bus_mut(&mut self) -> &mut Bus {
+        self.backend.bus_mut()
+    }
+
+    /// M-16 的**定时器比较值**（ps）—— guest 写下的 `mtimecmp` 换算后的值。
+    ///
+    /// ⚠️ `0` = 定时器关闭（M-16 的口径）。
+    pub fn intc_timer_compare_ps(&self) -> u64 {
+        match self.intc.controller.try_borrow() {
+            Ok(c) => c.timer_compare(),
+            Err(_) => 0,
+        }
+    }
+
+    /// M-16 当前**挂起**的中断线（内部线号）。
+    pub fn intc_pending_lines(&self) -> Vec<u16> {
+        match self.intc.controller.try_borrow() {
+            Ok(c) => c.pending_lines(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// 把外设的中断源**同步**到 M-16（宿主接线的公开入口）。
+    ///
+    /// ⚠️ 正常运行路径里它由 [`Self::on_run`] 自动调用；暴露出来是为了
+    /// 让「宿主接线真的接上了」这件事**可以被单独观察**（台账教训：
+    /// 「加了守卫」≠「守卫接上了」⇒ 要查它的**比较点**）。
+    pub fn sync_interrupts_now(&mut self) {
+        self.sync_interrupts();
+    }
+
+    /// 往 UART0 的**接收** FIFO 塞一个字节（宿主侧的 console 输入）。
+    ///
+    /// ⚠️ 平台的 UART 是**捕获环**模型：TX 方向是「guest 写进来、
+    /// 宿主取走」；RX 方向是「宿主塞进去、guest 取走」。
+    pub fn uart_receive(&mut self, byte: u8) {
+        let Some(uart) = self.uart0.clone() else {
+            return;
+        };
+        let done = match uart.try_borrow_mut() {
+            Ok(mut u) => {
+                u.receive(byte);
+                true
+            }
+            Err(_) => false,
+        };
+        let _ = done;
     }
 
     /// 装上探针管道（D-46）：M-14 总线 → M-18 判沿 → M-19 环形缓冲。
@@ -784,7 +1258,7 @@ impl KernelHost {
     /// 装载新工程时走这里——新工程 = 新会话，内存图与探针管道都要重来。
     fn rebuild_platform(&mut self) -> Result<(), PlatformError> {
         self.backend.reset_memory_map();
-        self.map_default_memory()?;
+        self.map_memory(self.memory_profile)?;
         // 时间驱动链路（D-07）也要重建——新外设是新实例，旧的 tick
         // 事件指着旧实例。
         self.install_peripheral_ticker();
@@ -1207,15 +1681,20 @@ impl KernelHost {
     fn on_load_project(&mut self, project: Project) -> Vec<EventPayload> {
         let _ = self.backend.reset();
         self.backend.clear_debug_state();
-        // 重建平台：**内存图 + 探针管道 + 外设探针回调**一起重来。
+
+        // ---- 第一步：**先解析**，不写总线 ----
         //
-        // ⚠️ 不能只 `reset_memory_map()` + `map_default_memory()`：
-        // `reset_memory_map` 换上一条**全新**的总线，总线上挂的 hook
-        // （M-17 的观察点 hook + M-18 的访存 trace hook）**一起没了**，
-        // 外设的探针回调也随旧外设一起没了。探针管道必须在新的总线上
-        // 重新装一遍（D-46）。
-        if let Err(err) = self.rebuild_platform() {
-            return vec![self.error_from(&err)];
+        // ⚠️ 顺序是刻意的：**档位要按镜像用到的地址挑** ⇒ 必须先知道
+        // 镜像落在哪些地址，才知道该建哪一张内存图。
+        //
+        // 旧顺序是「先建图、再装载」—— 那只对「所有镜像都落在同一张
+        // 图里」成立，真实 RTOS（osz）不成立。
+        let mut parsed: Vec<ParsedImage> = Vec::new();
+        for image in &project.images {
+            match self.parse_image(image) {
+                Ok(p) => parsed.push(p),
+                Err(err) => return vec![self.error_from(&err)],
+            }
         }
 
         let mut entry = 0u32;
@@ -1223,17 +1702,39 @@ impl KernelHost {
         //
         // ⚠️ 多个镜像的节区**合并**（每个工程可能有好几个镜像）。
         let mut debug_sections: Vec<(String, Vec<u8>)> = Vec::new();
-        for image in &project.images {
-            match self.load_image(image) {
-                Ok((image_entry, sections)) => {
-                    debug_sections.extend(sections);
-                    // A raw blob has entry 0; it must not clobber an ELF's
-                    // entry point.
-                    if image_entry != 0 {
-                        entry = image_entry;
-                    }
+        let mut ranges: Vec<(u32, u32)> = Vec::new();
+        for p in &parsed {
+            // A raw blob has entry 0; it must not clobber an ELF's
+            // entry point.
+            if p.entry != 0 {
+                entry = p.entry;
+            }
+            debug_sections.extend(p.debug_sections.iter().cloned());
+            for (addr, bytes) in &p.segments {
+                ranges.push((*addr, addr.saturating_add(bytes.len() as u32)));
+            }
+        }
+
+        // ---- 第二步：挑档位 + 重建平台 ----
+        //
+        // ⚠️ **重建平台**：**内存图 + 探针管道 + 外设探针回调**一起重来。
+        //
+        // ⚠️ 不能只 `reset_memory_map()` + 建图：
+        // `reset_memory_map` 换上一条**全新**的总线，总线上挂的 hook
+        // （M-17 的观察点 hook + M-18 的访存 trace hook）**一起没了**，
+        // 外设的探针回调也随旧外设一起没了。探针管道必须在新的总线上
+        // 重新装一遍（D-46）。
+        self.memory_profile = self.choose_memory_profile(&ranges);
+        if let Err(err) = self.rebuild_platform() {
+            return vec![self.error_from(&err)];
+        }
+
+        // ---- 第三步：把镜像**写进**总线 ----
+        for p in &parsed {
+            for (addr, bytes) in &p.segments {
+                if let Err(err) = self.backend.bus_mut().load_bytes(*addr, bytes) {
+                    return vec![self.error_from(&err)];
                 }
-                Err(err) => return vec![self.error_from(&err)],
             }
         }
         self.backend.set_pc(entry);
@@ -1272,11 +1773,14 @@ impl KernelHost {
         events
     }
 
-    /// 加载一个镜像，返回它的入口地址与**调试节区**原始字节。
+    /// **解析**一个镜像（**不写总线**），返回入口地址、段内容与调试节区。
+    ///
+    /// ⚠️ **为什么拆成「解析」与「写入」两步**：内存图档位要按镜像
+    /// 用到的地址挑 ⇒ 必须先知道地址，才知道该建哪张图。
     ///
     /// ⚠️ 调试节区**不过契约层**（契约只传查询结果，不传节区字节）⇒
     /// 它在**内核内部**从 M-06 交给 M-11（STAGE-5 §4）。
-    fn load_image(&mut self, image: &ImageRef) -> Result<(u32, DebugSections), PlatformError> {
+    fn parse_image(&mut self, image: &ImageRef) -> Result<ParsedImage, PlatformError> {
         let bytes = match &image.source {
             ImageSource::Bytes(bytes) => bytes.clone(),
             ImageSource::Url(url) => {
@@ -1298,10 +1802,11 @@ impl KernelHost {
             // blob always lands at 0 — which is the reset vector.
             ImageKind::RawHex => loader.load_raw_at(&bytes, 0, &limits)?,
         };
-        for (paddr, segment) in &loaded.segments {
-            self.backend.bus_mut().load_bytes(*paddr, segment)?;
-        }
-        Ok((loaded.entry, loaded.debug_sections))
+        Ok(ParsedImage {
+            entry: loaded.entry,
+            segments: loaded.segments,
+            debug_sections: loaded.debug_sections,
+        })
     }
 
     /// 执行一批指令（`None` = 跑到停止条件，`Some(n)` = 恰好 n 条）。
@@ -1315,6 +1820,14 @@ impl KernelHost {
         // `attach_signal` 对同一 `(source, signal)` 是**幂等**的，所以重复
         // 调用不会冲突。
         self.attach_peripheral_probes();
+
+        // ⚠️ **跑之前先同步一次外设中断源**（v0.23）。
+        //
+        // guest 在**上一批**里写下的 `mtimecmp` / PLIC 配置，只有宿主
+        // 把它喂给 M-16 才生效 ⇒ 不先同步，这一批里定时器不会来。
+        self.sync_interrupts();
+        // ⚠️ **先把 UART 的字节取走**（捕获环满了会丢最新的字节）。
+        self.collect_console();
 
         let mut events = Vec::new();
         // `Continue` → **时间驱动**：走 M-12 的唯一主循环（量子化执行 +
@@ -1346,6 +1859,15 @@ impl KernelHost {
         // 历史的**唯一来源** ⇒ drain 与转移必须同时发生，只 drain 会把
         // 历史冲掉。
         self.transfer_trace();
+        // ⚠️ **跑之后再同步一次**（v0.23）：guest 在这一批里写下的
+        // `mtimecmp` / PLIC 配置，下一批才用得上。
+        self.sync_interrupts();
+        // ⚠️ 跑完再取一次 —— 这一批里 guest 可能又写了 console。
+        self.collect_console();
+        // console 事件（v0.23 · 契约 v4）：订阅了才推。
+        if let Some(console) = self.console_event() {
+            events.push(console);
+        }
         events.push(self.tick());
         if let Some(wave) = self.register_waveform(false) {
             events.push(wave);
@@ -1813,6 +2335,7 @@ impl KernelHost {
     fn on_subscribe(&mut self, topic: String) -> Vec<EventPayload> {
         let want_registers = topic == TOPIC_REGISTERS;
         let want_waveform = topic == TOPIC_WAVEFORM;
+        let want_console = topic == TOPIC_CONSOLE;
         self.topics.insert(topic);
         let mut events = vec![self.tick()];
         if want_registers {
@@ -1830,6 +2353,16 @@ impl KernelHost {
             // 第一批边沿到来之前，前端会一直显示「尚无探针信号」。
             if let Some(wave) = self.waveform_event(true) {
                 events.push(wave);
+            }
+        }
+        if want_console {
+            // console（v0.23）：**补推**已经攒下的字节。
+            //
+            // ⚠️ 前端常常是「先订阅、后启动」，而 guest 的第一批输出
+            // 在它订阅之前就产生了 ⇒ 不补推的话，前端永远看不到启动
+            // 阶段那几行。
+            if let Some(console) = self.console_event() {
+                events.push(console);
             }
         }
         events
@@ -2218,6 +2751,19 @@ impl KernelHost {
 /// 内部**从 M-06 交给 M-11（STAGE-5 §4 的数据流）。
 type DebugSections = Vec<(String, Vec<u8>)>;
 
+/// **解析后**的镜像（**还没写进总线**）。
+///
+/// ⚠️ 「解析」与「写入」分成两步，是因为内存图档位要按镜像用到的
+/// **地址**挑 —— 见 [`KernelHost::parse_image`]。
+struct ParsedImage {
+    /// 入口地址（raw blob 是 0）。
+    entry: u32,
+    /// `(物理地址, 段内容)`。
+    segments: Vec<(u32, Vec<u8>)>,
+    /// 调试节区的原始字节（`(节名, 内容)`）。
+    debug_sections: DebugSections,
+}
+
 /// 取指 / 读内存的**宽度映射**。
 ///
 /// ⚠️ `BusWidth` **没有** `From<u32>` ⇒ 宽度要自己映射。
@@ -2336,3 +2882,6 @@ mod tests_intc;
 
 #[cfg(test)]
 mod tests_m11;
+
+#[cfg(test)]
+mod tests_osz_wiring;
