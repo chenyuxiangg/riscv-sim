@@ -17,6 +17,11 @@
 
 import * as viewStore from "./m03_viewstore.js";
 import { escapeHtml } from "../lib/escape.js";
+import {
+    describeMatch,
+    matchSourceFile,
+    renderSourceText,
+} from "./components/source-view.js";
 
 // ---------------------------------------------------------------------------
 // ViewComponent shape (LLD §2.1.1)
@@ -428,6 +433,156 @@ const waveformView = register({
     onDelta(_delta) {},
     mountFor(_el) {},
 });
+
+// ---------------------------------------------------------------------------
+// sourceView — 源码视图（STAGE-7 裁决 E / F）。
+//
+// ⚠️ **源码不进内核**（裁决 E）：文件由浏览器原生 `<input type="file">`
+// 读成文本 ⇒ 存进 **M-03 视图状态** ⇒ **不发**给内核、**不新增**任何
+// 契约命令。整个视图里只有一条命令会离开前端：`resolve-line`（问内核
+// 「这个地址对应哪一行」）—— 那条命令**早就存在**（契约 v3 的
+// `ResolveLine`），本批只是把它接上。
+//
+// ⚠️ **装载源码用的是浏览器原生能力**（`<input type="file">`），不是 File
+// System Access API：后者只在 Chromium 系可用，会让「零依赖、跨浏览器」
+// 的前端出现一条只在部分浏览器工作的路径（裁决 E）。
+// ---------------------------------------------------------------------------
+
+const sourceView = register({
+    id: "source",
+    channels: ["sim"],
+    render(state) {
+        const src = state?.source ?? {};
+        const tree = src.tree ?? {};
+        const keys = Object.keys(tree);
+        // PC 只能来自**既有**的状态源（M-10 推进的 `sim.pc`）—— 前端不许
+        // 自己造一个状态源（与反汇编面板同一条规矩）。
+        const pc = Number(state?.sim?.pc ?? 0) >>> 0;
+        // 内核回的 `SourceLocation { addr, file, line }`。
+        const location = src.location ?? null;
+        // 用户在**多个候选**里选定的那个（裁决 F：不静默挑第一个）。
+        const selected = src.selected ?? null;
+
+        // 匹配结果在**渲染时**算（纯函数）⇒ 状态里不存第二份真相。
+        const match = location?.file ? matchSourceFile(tree, location.file) : null;
+        // ⚠️ **三态如实区分**（裁决 J）：「没有源码树」/「匹配不到」/
+        // 「匹配到多个」—— 不合并成一个「无源码」。
+        const statusText = keys.length === 0
+            ? "尚未装载源码 — 用上面的入口选一个目录或若干文件。"
+            : (location?.file
+                ? describeMatch(match)
+                : "尚未解析 — 点击「解析当前 PC 的源码行」。");
+        const activeKey = selected ?? (match?.kind === "unique" ? match.key : null);
+        const text = activeKey ? (tree[activeKey] ?? "") : "";
+        const line = Number(location?.line ?? 0);
+
+        return `
+            <section class="source-view">
+                <h3>源码 (M-11 · DWARF 行号)</h3>
+                <div class="debug-toolbar">
+                    <label class="source-input">
+                        装载目录
+                        <input type="file" webkitdirectory multiple data-source-input="dir">
+                    </label>
+                    <label class="source-input">
+                        装载文件
+                        <input type="file" multiple data-source-input="files">
+                    </label>
+                    <button type="button" data-action="resolve-line" data-addr="${pc}">解析当前 PC 的源码行</button>
+                </div>
+                <p class="muted" data-source-summary>
+                    源码树：${keys.length} 个文件${keys.length > 0 ? `（${escapeHtml(keys.slice(0, 3).join("、"))}${keys.length > 3 ? " …" : ""}）` : ""}
+                </p>
+                <p class="source-status" data-source-status>${escapeHtml(statusText)}</p>
+                ${location
+                    ? `<p class="source-location" data-source-location>${escapeHtml(String(location.file ?? ""))}:${Number(location.line ?? 0)}（地址 0x${(Number(location.addr ?? 0) >>> 0).toString(16).padStart(8, "0")}）</p>`
+                    : `<p class="muted" data-source-location>尚未解析 — 点击「解析当前 PC 的源码行」。</p>`}
+                ${match?.kind === "ambiguous"
+                    ? `<ul class="source-candidates" data-source-candidates>${match.candidates.map((key) => `
+                        <li><button type="button" data-action="pick-candidate" data-key="${escapeHtml(key)}">${escapeHtml(key)}</button></li>
+                    `).join("")}</ul>`
+                    : ""}
+                ${activeKey
+                    ? `<pre class="source-code" data-source-code>${renderSourceText(text, line)}</pre>`
+                    : `<pre class="source-code muted" data-source-code>选中一个源码文件后显示内容。</pre>`}
+            </section>
+        `;
+    },
+    onCommand(ev) {
+        const el = ev.target?.closest?.("[data-action]");
+        const action = el?.dataset?.action;
+        if (!action) return undefined;
+        if (action === "resolve-line") {
+            // 问内核「这个地址对应哪一行」（契约 v3 的 `ResolveLine`）。
+            return emitCommand("resolve-line", "source", { addr: el.dataset.addr });
+        }
+        if (action === "pick-candidate") {
+            // 多个候选 ⇒ **让用户选**（裁决 F：⛔ 不静默挑第一个）。
+            // 这是**纯前端**的选择 ⇒ 不发命令。
+            viewStore.setState("source", (prev) => ({
+                ...prev,
+                source: { ...(prev.source ?? {}), selected: el.dataset.key ?? null },
+            }));
+            publishSourceState();
+            return "cmd-pick-candidate";
+        }
+        return undefined;
+    },
+    onDelta(_delta) {},
+    mountFor(el) {
+        el.addEventListener("click", (ev) => sourceView.onCommand(ev));
+        el.addEventListener("change", (ev) => {
+            const input = ev.target?.closest?.("[data-source-input]");
+            if (!input) return;
+            void loadSourceFiles(input.files);
+        });
+    },
+});
+
+/**
+ * 读用户选中的文件 ⇒ 存进 M-03 视图状态。
+ *
+ * ⚠️ **不进内核**（裁决 E）：这里**不发**任何命令 / 帧。
+ *
+ * @param {FileList|ArrayLike|null|undefined} fileList
+ */
+async function loadSourceFiles(fileList) {
+    const files = [...(fileList ?? [])];
+    if (files.length === 0) return;
+    /** @type {Record<string, string>} */
+    const tree = {};
+    for (const file of files) {
+        // 目录选择器给的是相对路径（`webkitRelativePath`）；多文件选择器
+        // 只有文件名。
+        const key = file.webkitRelativePath || file.name;
+        try {
+            tree[key] = await file.text();
+        } catch (_err) {
+            // 读不出来就**跳过**（不假装读到了）。
+        }
+    }
+    viewStore.setState("source", (prev) => ({
+        ...prev,
+        source: {
+            ...(prev.source ?? {}),
+            // 新选的**并入**已有的树（不丢用户已经装好的文件）。
+            tree: { ...(prev.source?.tree ?? {}), ...tree },
+        },
+    }));
+    publishSourceState();
+}
+
+/**
+ * 让源码视图按**当前状态**重渲染。
+ *
+ * ⚠️ 走的是 M-01 的 `riscv:render` 事件（与 `app.js` 的
+ * `publishViewState` 同一条路）⇒ 视图层不直接摸 DOM。
+ */
+function publishSourceState() {
+    window.dispatchEvent(new CustomEvent("riscv:render", {
+        detail: { viewId: "source", type: "update", state: viewStore.getState("source") },
+    }));
+}
 
 // ---------------------------------------------------------------------------
 // terminalView — UART echo placeholder, XSS-safe.

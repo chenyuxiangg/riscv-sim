@@ -31,6 +31,7 @@ const ROLE_CAPABILITIES = new Map([
         "view.waveform",
         "view.terminal",
         "view.regmem",
+        "view.source",
     ])],
 ]);
 
@@ -111,6 +112,15 @@ const VIEW_REGISTRY = new Map([
         name: "波形视图",
         capability: "view.waveform",
         panel: '[data-view-panel="waveform"]',
+        role: "embedded",
+    }],
+    // 源码视图（STAGE-7 裁决 E / F）：源码树**在前端本地**（不进内核），
+    // 视图只负责「装载 + 高亮」。
+    ["source", {
+        hash: "source",
+        name: "源码视图",
+        capability: "view.source",
+        panel: '[data-view-panel="source"]',
         role: "embedded",
     }],
     ["terminal", {

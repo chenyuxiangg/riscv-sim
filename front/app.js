@@ -215,6 +215,16 @@ export async function handleCommand(detail, services) {
                 await commandRouter.dispatchCommand(Command.disasm(addr, count));
                 break;
             }
+            case "resolve-line": {
+                // 源码视图问内核「当前 PC 对应哪一行」（契约 v3 的
+                // `ResolveLine`，M-11 的 DWARF 行表）。
+                //
+                // ⚠️ 源码**文本**不进内核（STAGE-7 裁决 E）：这条命令只
+                // 问「行号」，问回来的也只有 `file` + `line`。
+                const addr = toInt(detail.params?.addr, 0);
+                await commandRouter.dispatchCommand(Command.resolveLine(addr));
+                break;
+            }
             case "export-trace": {
                 // ⚠️ An **illegal** source/format combination is rejected
                 // by the kernel (`E_CTX-03`) — the front end does not
@@ -488,6 +498,30 @@ export function wireDebug(commandRouter) {
     });
 
     /**
+     * The kernel's source-location reply (M-11's DWARF line table).
+     *
+     * ⚠️ `SourceLocation` 是**回复事件**（不是推送流）⇒ 内核侧没有可
+     * 订阅的东西，但路由器会把每个事件发布给 topic 订阅者 ⇒ 源码视图
+     * 按 topic 接住它（与 `debug.disasm` 同一条路）。
+     *
+     * ⚠️ **两种「没有答案」要能区分**：`line === 0` = 根本没有 DWARF；
+     * `line === 0xFFFFFFFF` = 有 DWARF 但地址没命中行表。视图**如实**
+     * 区分这两种，不显示错误的行号。
+     */
+    commandRouter.subscribe("debug.source", (event) => {
+        viewStore.setState("source", (prev) => ({
+            ...prev,
+            source: {
+                ...(prev.source ?? {}),
+                location: event.value ?? null,
+                // 换了一个地址 ⇒ 之前选定的候选**不再适用**。
+                selected: null,
+            },
+        }));
+        publishViewState("source");
+    });
+
+    /**
      * The kernel's error replies (M-05's error path — the `Error` event
      * is published to the `error` topic **and** rejects the pending
      * command). The debug view shows the last one; there is no second
@@ -523,6 +557,15 @@ export function wireDebug(commandRouter) {
                 debug: { ...(prev.debug ?? {}), export: null },
             }));
             publishViewState("debug");
+            // ⚠️ **源码树留着**，但**行号**要清掉：行号是**上一个程序**的
+            // 数据（新工程 = 新程序 ⇒ 旧行号是错的）。源码树是**用户装的
+            // 资产**，与程序无关 ⇒ 不能跟着新工程一起没掉（STAGE-7 验收
+            // A-20：装载工程后源码树仍在）。
+            viewStore.setState("source", (prev) => ({
+                ...prev,
+                source: { ...(prev.source ?? {}), location: null, selected: null },
+            }));
+            publishViewState("source");
         },
     };
 }
