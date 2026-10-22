@@ -957,6 +957,21 @@ impl KernelHost {
                 code: "E_CTX-05".to_string(),
                 message: "管理通道未启用（admin op 不在当前会话的能力面内）".to_string(),
             }],
+            // ⚠️⚠️ **占位接线 —— 契约 v3（M-11）已就位，实现由 M-11 lane 补上。**
+            //
+            // 这四个分支**故意返回错误**而不是假装成功：「接缝存在」不等于
+            // 「接缝被接上」，一个返回 `Ok` 的空实现会让上层以为反汇编/导出
+            // 真的跑通了，而实际上什么也没做。
+            //
+            // ⇒ **M-11 lane 落地时必须替换掉这四个分支**（STAGE-5 规格 §3.4
+            // 的规范映射表）。留着它们就是欠账。
+            CommandPayload::Disasm { .. }
+            | CommandPayload::ResolveLine { .. }
+            | CommandPayload::ExportTrace { .. }
+            | CommandPayload::SetTraceEnabled { .. } => vec![EventPayload::Error {
+                code: "E_CTX-03".to_string(),
+                message: "M-11 调试面尚未接线（契约 v3 占位分支）".to_string(),
+            }],
         }
     }
 
