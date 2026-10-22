@@ -15,7 +15,7 @@
 // transport that does not exist yet.
 
 import { mountWorkbench } from "./views/m01_workbench.js";
-import { mountViewComponents, seedBus } from "./views/m02_viewcomponents.js";
+import { mountViewComponents, seedBus, get as getViewComponent } from "./views/m02_viewcomponents.js";
 import * as viewStore from "./views/m03_viewstore.js";
 import { mountSession } from "./services/m04_session.js";
 import { mountCommandRouter } from "./services/m05_commandrouter.js";
@@ -186,10 +186,12 @@ function toInt(raw, fallback = 0) {
  * @param {{commandRouter: object, registerMemory: object, waveform: object}} services
  */
 export async function handleCommand(detail, services) {
-    const { commandRouter, registerMemory, waveform, debug } = services;
+    const { commandRouter, registerMemory, waveform, debug, console: consoleWiring } = services;
     const action = detail?.action;
     /** 探针流重订失败（仅「reset」路径可能非空）。 */
     let resetProbeError = null;
+    /** console 流重订失败（仅「reset」路径可能非空）。 */
+    let resetConsoleError = null;
     try {
         switch (action) {
             case "step":
@@ -205,18 +207,20 @@ export async function handleCommand(detail, services) {
                 await commandRouter.dispatchCommand(Command.pause());
                 break;
             case "reset":
-                // 装载工程**并且**把两条内核侧订阅都强制重订
+                // 装载工程**并且**把三条内核侧订阅都强制重订
                 // （内核侧的订阅随工程一起失效了 —— 新工程 = 新会话，
-                // FR-13）。这三步绑在一个函数里，调用点不会漏掉后两步。
+                // FR-13）。这几步绑在一个函数里，调用点不会漏掉后两步。
                 //
-                // ⚠️ 探针流重订失败**不判复位失败**——工程装好了、寄存器
-                // 流也重订了（`loadProjectIntoKernel` 把失败单独兜住）。
-                resetProbeError = (
-                    await loadProjectIntoKernel(
-                        { commandRouter, registerMemory, waveform, debug },
+                // ⚠️ 探针流 / console 流重订失败**不判复位失败**——工程装好了、
+                // 寄存器流也重订了（`loadProjectIntoKernel` 把失败单独兜住）。
+                {
+                    const result = await loadProjectIntoKernel(
+                        { commandRouter, registerMemory, waveform, debug, console: consoleWiring },
                         buildMockProject(),
-                    )
-                ).probeError;
+                    );
+                    resetProbeError = result.probeError;
+                    resetConsoleError = result.consoleError;
+                }
                 break;
             case "read-regs":
                 await registerMemory.readRegisters();
@@ -265,8 +269,11 @@ export async function handleCommand(detail, services) {
                 return;
         }
         setNote(
-            resetProbeError
-                ? `命令 ${action} 完成，但探针流不可用：${resetProbeError?.message ?? resetProbeError}`
+            resetProbeError || resetConsoleError
+                ? `命令 ${action} 完成，但流订阅不可用：${[
+                    resetProbeError ? `探针流 ${resetProbeError?.message ?? resetProbeError}` : null,
+                    resetConsoleError ? `console 流 ${resetConsoleError?.message ?? resetConsoleError}` : null,
+                ].filter(Boolean).join("；")}`
                 : `命令 ${action} 完成`,
         );
     } catch (err) {
@@ -289,7 +296,7 @@ async function startSession(services) {
     try {
         await session.createSession({ role: workspace.role });
         const project = buildMockProject();
-        // 装载工程**并且**把两条内核侧订阅都强制重订。
+        // 装载工程**并且**把三条内核侧订阅都强制重订。
         //
         // 为什么必须是「强制」：`LoadProject` 会清掉内核侧的主题集合
         // （新工程 = 新会话，FR-13），而 `ensureSubscribed()` 是**幂等**
@@ -300,8 +307,8 @@ async function startSession(services) {
         //
         // 这个缺陷在 mock 内核时代就存在，是第 1 阶段前端接上**真内核**
         // 之后、被真机断言「x1 必须是 42」逼出来的。
-        const { probeError } = await loadProjectIntoKernel(
-            { commandRouter, registerMemory, waveform, debug },
+        const { probeError, consoleError } = await loadProjectIntoKernel(
+            { commandRouter, registerMemory, waveform, debug, console: services.console },
             project,
         );
         viewStore.setState("product", (prev) => ({
@@ -319,6 +326,11 @@ async function startSession(services) {
             setNote(`内核已就绪，但探针流不可用：${probeError?.message ?? probeError}`);
             return;
         }
+        if (consoleError) {
+            // 同理：console 流订阅不上 ⇒ 终端永远是空的，但内核是好的。
+            setNote(`内核已就绪，但 console 流不可用：${consoleError?.message ?? consoleError}`);
+            return;
+        }
         setNote("WASM 内核已就绪（Nop 往返成功）");
     } catch (err) {
         setNote(`内核未就绪：${err?.message ?? err}`);
@@ -326,31 +338,42 @@ async function startSession(services) {
 }
 
 /**
- * 装载工程，并把**两条**内核侧订阅都强制重订。
+ * 装载工程，并把**三条**内核侧订阅都强制重订。
  *
- * 三步绑在一个函数里（而不是散落在调用点的「记得再订阅一次」注释里）：
+ * 四步绑在一个函数里（而不是散落在调用点的「记得再订阅一次」注释里）：
  * 调用点只管调它，不会有人忘记后两步。
  *
  * 1. `waveform.reset()` —— 新工程 = 新会话，上一个会话的探针通道
  *    不该继续挂在视图上；
- * 2. `registerMemory.loadProject()` —— 装载工程 + 强制重订寄存器流
+ * 2. `console.reset()` —— 新程序 = 新 console，上一个程序打到串口上的
+ *    字节不该留在屏幕上（与 D-45 同一个坑：状态必须跟着工程一起重建）；
+ * 3. `registerMemory.loadProject()` —— 装载工程 + 强制重订寄存器流
  *    （D-45 的教训：内核侧的订阅会随工程一起失效）；
- * 3. `waveform.subscribeProbeStream()` —— 强制重订探针流。同样的道理：
- *    `LoadProject` 把内核的主题集合清空了，探针流不重订就**静默停掉**。
+ * 4. `waveform.subscribeProbeStream()` + `console.subscribeConsoleStream()`
+ *    —— 强制重订两条**流**订阅。同样的道理：`LoadProject` 把内核的主题
+ *    集合清空了，探针流与 console 流不重订就**静默停掉**。
  *
- * @param {{commandRouter: object, registerMemory: object, waveform: object, debug?: object}} services
+ * ⚠️ **`console` 接线是必需的**（不是可选参数）：漏传它 ⇒ console 流
+ * 永远订阅不上 ⇒ 终端**静默**是空的，而页面上看不出任何异常。宁可
+ * 抛错也不要静默。
+ *
+ * @param {{commandRouter: object, registerMemory: object, waveform: object, debug?: object, console: object}} services
  * @param {object} project — `model::Project` shaped value
- * @returns {Promise<{probeError: Error|null}>} — `probeError` 非空表示
- *   **探针流**重订失败；**工程已经装载、寄存器流已经重订**（前两步成功）
+ * @returns {Promise<{probeError: Error|null, consoleError: Error|null}>} —
+ *   `probeError` 非空表示**探针流**重订失败；`consoleError` 非空表示
+ *   **console 流**重订失败。**工程已经装载、寄存器流已经重订**（前 3 步成功）
  *
- * ⚠️ **第三步失败不许牵连前两步**（D-46 检视 V-B）。三步串在一起时，
- * 第 3 步抛错会让整个 `loadProjectIntoKernel` 失败——而前两步**已经
+ * ⚠️ **第 4 步失败不许牵连前 3 步**（D-46 检视 V-B）。几步串在一起时，
+ * 第 4 步抛错会让整个 `loadProjectIntoKernel` 失败——而前 3 步**已经
  * 成功了**：工程装好了、寄存器流也重订了。调用方若因此判定「内核未就绪」，
  * 就会连带跳过 Nop 往返、产品树渲染，提示语还会**误导**（说内核没就绪，
  * 其实内核好得很，只是探针流订阅不上）。
  *
- * 所以第 3 步**单独**兜住，失败作为 `probeError` 返回——**不静默**：
- * 调用点负责把它显示出来。
+ * 所以第 4 步**各自单独**兜住，失败作为 `probeError` / `consoleError` 返回
+ * ——**不静默**：调用点负责把它显示出来。
+ *
+ * ⚠️ **两条流各自兜住**（v0.23 · console）：探针流订阅不上**不该**牵连
+ * console 流（反之亦然）——它们是两条独立的流。
  *
  * ⚠️ **导出是为了让它可测**（D-46 检视 V-B）。此前它是**私有**函数，
  * 前端门禁里**一条用例都碰不到它**——把第 3 步（探针流重订）删掉，
@@ -359,20 +382,38 @@ async function startSession(services) {
  * 与 D-45 同一个坑——「我记得要重订」写在注释里，不如用一条用例钉住。
  */
 export async function loadProjectIntoKernel(services, project) {
-    const { registerMemory, waveform, debug } = services;
+    const { registerMemory, waveform, debug, console: consoleWiring } = services;
+    if (!consoleWiring) {
+        // ⚠️ **不静默**：console 接线漏了 ⇒ 终端永远是空的，而页面上看不出
+        // 任何异常 ⇒ 这是最难查的一类故障。宁可当场抛错。
+        throw new Error(
+            "loadProjectIntoKernel 缺少 console 接线：console 流必须被强制重订" +
+            "（LoadProject 清掉了内核的主题集合）",
+        );
+    }
     waveform.reset();
     // ⚠️ 新工程 = 新程序 ⇒ **上一个程序的反汇编**留在面板上就是错的
     // （同一个 D-45 的坑：状态必须跟着工程一起重建）。
     // `debug` 是可选的——不是每个调用点都装了调试面。
     debug?.reset?.();
+    // ⚠️ 新程序 ⇒ 上一个程序的 console 字节不算数（同一个坑）。
+    consoleWiring.reset();
     await registerMemory.loadProject(project);
+    let probeError = null;
     try {
         await waveform.subscribeProbeStream();
-        return { probeError: null };
     } catch (err) {
-        // 前两步的成功**保留**：工程已装载、寄存器流已重订。
-        return { probeError: err };
+        // 前面的成功**保留**：工程已装载、寄存器流已重订。
+        probeError = err;
     }
+    let consoleError = null;
+    try {
+        // ⚠️ **必须在装载之后**：内核侧的订阅随 `LoadProject` 一起失效了。
+        await consoleWiring.subscribeConsoleStream();
+    } catch (err) {
+        consoleError = err;
+    }
+    return { probeError, consoleError };
 }
 
 /**
@@ -464,6 +505,61 @@ export function wireWaveform(commandRouter) {
          */
         async subscribeProbeStream() {
             return commandRouter.dispatchCommand(Command.subscribe("sim.waveform"));
+        },
+    };
+}
+
+/**
+ * Wire the guest's **console** byte stream (contract v4's `Console` event)
+ * into the terminal view.
+ *
+ * ⚠️ **console 是流，不是命令的回复**：内核侧**订阅了** `sim.console`
+ * 才会推（`console_event()` 没订阅就返回 `None`）⇒ 前端必须先订阅。
+ *
+ * ⚠️ **载荷是字节数组**（`bytes: [104, 105]`），不是字符串 ⇒ 解码交给
+ * `terminalView.onDelta`（分块展开，几万个字节也不会爆调用栈）。
+ *
+ * ⚠️ **主题字面量**：`"sim.console"` 必须与 `front/lib/message.js` 的
+ * `EVENT_TOPIC.Console` **逐字一致**（唯一真相在那儿；这里是使用方，
+ * 与 `wireWaveform` 的 `"waveform.history"` 同一个口径）。
+ *
+ * @param {object} commandRouter
+ * @returns {{reset: () => void, subscribeConsoleStream: () => Promise<object>}}
+ */
+export function wireConsole(commandRouter) {
+    commandRouter.subscribe("sim.console", (event) => {
+        const bytes = event.value?.bytes;
+        if (!Array.isArray(bytes) || bytes.length === 0) return;
+        const terminal = getViewComponent("terminal");
+        if (!terminal) return;
+        // ⚠️ 走**既有的** `onDelta` 路径：它把字节追加进 store（唯一权威）
+        // 并用 `textContent` 写 DOM（**不解析 HTML** ⇒ ANSI 转义与 `<` `&`
+        // 都是安全的）。这条路径此前是**死接口**（`termDelta` 没有生产者）。
+        terminal.onDelta({ termDelta: { bytes } });
+    });
+
+    return {
+        /**
+         * 新程序 ⇒ 上一个程序打到串口上的字节不算数（与 D-45 同一个坑：
+         * 状态必须跟着工程一起重建）。
+         */
+        reset() {
+            viewStore.setState("terminal", (prev) => ({
+                ...prev,
+                term: { ...(prev.term ?? {}), bytes: "" },
+            }));
+            publishViewState("terminal");
+        },
+        /**
+         * 订阅内核侧的 console 流。
+         *
+         * 必须是**强制**的：`LoadProject` 清掉了内核的主题集合，不重订
+         * 的话 console 推送会**静默停掉**（和 D-45 / D-46 是同一个坑）。
+         *
+         * @returns {Promise<object>}
+         */
+        async subscribeConsoleStream() {
+            return commandRouter.dispatchCommand(Command.subscribe("sim.console"));
         },
     };
 }
@@ -587,6 +683,143 @@ export function wireDebug(commandRouter) {
     };
 }
 
+// ---------------------------------------------------------------------------
+// 装载**仓外**的镜像（真实 RTOS 的 ELF 不进仓库）
+// ---------------------------------------------------------------------------
+
+/**
+ * 按 URL 取镜像的**字节**。
+ *
+ * ⚠️ **内核不联网**：契约的 `ImageSource::Url` 会报 `E_LDR-01` ⇒ 前端
+ * 必须**先把字节取回来**，再把字节塞进 `LoadProject`。
+ *
+ * ⚠️ **不许截断**：`arrayBuffer()` 拿的是**完整**响应体（镜像有几百 KiB：
+ * osz 的 ELF 是 282 280 字节）⇒ 不能用「读一部分就停」的方式取。
+ *
+ * @param {string} url
+ * @returns {Promise<Uint8Array>}
+ */
+export async function fetchImageBytes(url) {
+    const res = await fetch(url);
+    if (!res.ok) {
+        throw new Error(`取镜像字节失败（HTTP ${res.status}）：${url}`);
+    }
+    const buf = await res.arrayBuffer();
+    return new Uint8Array(buf);
+}
+
+/**
+ * 造一个「只含一个镜像」的工程（`model::Project` 的线上形态）。
+ *
+ * ⚠️ **`source` 是外部标签枚举**：`model::ImageSource::Bytes(Vec<u8>)`
+ * 的 serde 形态是 `{"Bytes":[...]}`（**不是** base64、**不是**字符串）。
+ *
+ * ⚠️ **`isa` 必须是 `"RV32IMC"`**：契约层的 `ISA` 常量，别的值会被
+ * 内核判「工程 ISA 与内核支持的不一致」。
+ *
+ * @param {string} url — 镜像的来源（只用来取默认名字）
+ * @param {Uint8Array|number[]} bytes — 镜像字节
+ * @param {{id?: string, name?: string, imageName?: string, kind?: string, boardName?: string, toolchain?: string}} [options]
+ * @returns {object}
+ */
+export function buildImageProject(url, bytes, options = {}) {
+    const fileName = String(url).split("/").filter(Boolean).pop() ?? "";
+    const imageName = options.imageName ?? (fileName || "image.elf");
+    return {
+        id: options.id ?? "proj-external-image",
+        name: options.name ?? imageName,
+        tree: {
+            root: {
+                name: options.boardName ?? "MainBoard",
+                component_id: null,
+                children: [],
+            },
+        },
+        images: [{
+            name: imageName,
+            kind: options.kind ?? "Elf",
+            source: { Bytes: Array.from(bytes) },
+        }],
+        version: {
+            schema: 1,
+            isa: "RV32IMC",
+            toolchain: options.toolchain ?? "external (browser)",
+        },
+    };
+}
+
+/**
+ * 「按 URL 取镜像字节 → 发 `LoadProject`」的入口。
+ *
+ * ⚠️ **装载之后必须强制重订订阅**：`LoadProject` 会清掉内核侧的主题集合
+ * ⇒ 订阅 `sim.console` 必须在装载**之后**重订，否则 console 一个字节都
+ * 收不到（`loadProjectIntoKernel` 把这件事绑在装载流程里，调用点不会漏）。
+ *
+ * @param {{commandRouter: object, registerMemory: object, waveform: object, debug?: object, console: object}} services
+ * @param {string} url
+ * @param {object} [options] — 传给 {@link buildImageProject}
+ * @returns {Promise<{probeError: Error|null, consoleError: Error|null, byteLength: number, project: object}>}
+ */
+export async function loadImageFromUrl(services, url, options = {}) {
+    const bytes = await fetchImageBytes(url);
+    const project = buildImageProject(url, bytes, options);
+    const result = await loadProjectIntoKernel(services, project);
+    return { ...result, byteLength: bytes.length, project };
+}
+
+/**
+ * 反复发 `Continue`，直到 console 里出现 `needle`（或到点）。
+ *
+ * ⚠️ **必须一条一条地发**：M-07 的 Worker 是**串行**处理帧的（一条链），
+ * 而 M-05 的命令超时只有 500 ms ⇒ 一次并发发上百条的话，最后几条一定
+ * 超时（内核照样会跑，但前端会记一串 `E_CTX-06`，且判定不可信）。
+ *
+ * ⚠️ **判据是 console 里的具体字面量**（如 `"OSZ$ "`），不是「非空」——
+ * 「非空」抓不到「跑的是 demo 固件而不是真实 RTOS」这种错。
+ *
+ * @param {{commandRouter: object}} services
+ * @param {string} needle — 期待的 console 片段
+ * @param {{timeoutMs?: number, maxBatches?: number, commandTimeoutMs?: number}} [options]
+ * @returns {Promise<{matched: boolean, batches: number, text: string}>}
+ */
+export async function runUntilConsole(services, needle, options = {}) {
+    const { commandRouter } = services;
+    const timeoutMs = Number(options.timeoutMs ?? 60000);
+    const commandTimeoutMs = Number(options.commandTimeoutMs ?? 5000);
+    const deadline = Date.now() + timeoutMs;
+    let batches = 0;
+    let text = "";
+    while (Date.now() < deadline) {
+        await commandRouter.dispatchCommand(
+            Command.continueRun(),
+            { timeoutMs: commandTimeoutMs },
+        );
+        batches += 1;
+        text = viewStore.getState("terminal")?.term?.bytes ?? "";
+        if (needle && text.includes(needle)) {
+            return { matched: true, batches, text };
+        }
+        if (options.maxBatches && batches >= Number(options.maxBatches)) break;
+    }
+    return { matched: Boolean(needle) && text.includes(needle), batches, text };
+}
+
+/**
+ * 把「装载仓外镜像 + 跑到某个 console 前缀」暴露给页面上的脚本。
+ *
+ * ⚠️ 这**不是** dev-only 的 demo 辅助（`window.riscv_demo`）：真实 RTOS 的
+ * 镜像**在仓外**（不进仓库），浏览器要拿到它就得**自己**把字节取回来——
+ * 这条链没有 UI 入口，只能由脚本（`tools/browser-verify.mjs`）驱动。
+ *
+ * @param {object} services
+ */
+function exposeImageLoader(services) {
+    window.riscv_image = {
+        loadFromUrl: (url, options) => loadImageFromUrl(services, url, options),
+        runUntilConsole: (needle, options) => runUntilConsole(services, needle, options),
+    };
+}
+
 async function bootstrap() {
     status.textContent = "正在挂载模块…";
     // Two redundant safeguards guarantee that the view component library
@@ -637,6 +870,9 @@ async function bootstrap() {
     // 可能产生这些回复的命令之前挂好——回复事件虽然不订阅，但路由器会
     // 把每个事件发布给 topic 订阅者，订阅晚了这一批就丢了。
     const debug = wireDebug(commandRouter);
+    // console 流（契约 v4 的 `Console` 事件）同样必须**在任何**装载之前
+    // 挂好：内核侧**订阅了** `sim.console` 才会推字节流。
+    const consoleWiring = wireConsole(commandRouter);
 
     const pending = {
         components: componentsPromise,
@@ -658,6 +894,18 @@ async function bootstrap() {
     exposeDevHelpers();
     describeWorkspace(workspace);
 
+    // ⚠️ **console 接线**必须传给**每一个**装载点（`startSession` 与
+    // 「reset」命令）：漏了 ⇒ `loadProjectIntoKernel` 抛错（它要求
+    // console 流被强制重订）。
+    const services = {
+        commandRouter,
+        registerMemory,
+        waveform,
+        debug,
+        console: consoleWiring,
+    };
+    exposeImageLoader(services);
+
     // The status bar follows the **live** transport state, not a
     // one-shot snapshot: the kernel worker connects a tick after the
     // page came up, and the bar has to say so.
@@ -665,11 +913,11 @@ async function bootstrap() {
     renderStatus(transportApi.getTransportStatus());
 
     window.addEventListener("riscv:command", (ev) => {
-        void handleCommand(ev.detail, { commandRouter, registerMemory, waveform, debug });
+        void handleCommand(ev.detail, services);
     });
 
     // Fire and forget — the session comes up on its own.
-    void startSession({ session, commandRouter, registerMemory, waveform, debug, workspace });
+    void startSession({ session, ...services, workspace });
 }
 
 /**

@@ -345,6 +345,9 @@ describe("反汇编面板 (M-11)", () => {
                 registerMemory: { async loadProject() {} },
                 waveform: { reset() {}, async subscribeProbeStream() {} },
                 debug,
+                // ⚠️ **v0.23**：装载流程多了 console 流这一路（`LoadProject`
+                // 清掉内核的主题集合 ⇒ console 流必须被强制重订）。
+                console: { reset() {}, async subscribeConsoleStream() {} },
             },
             { id: "p" },
         );

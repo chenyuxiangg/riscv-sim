@@ -607,6 +607,42 @@ function publishSourceState() {
 // terminalView — UART echo placeholder, XSS-safe.
 // ---------------------------------------------------------------------------
 
+/**
+ * console 字节数组的**分块大小**（每次 `String.fromCharCode` 展开的字节数）。
+ *
+ * ⚠️ **为什么要分块**：`String.fromCharCode(...bytes)` 把**每个字节**当成
+ * 一个**实参**传给函数——几万个字节会**爆调用栈**（实参个数与栈帧都有限）。
+ * 真实 RTOS 的 console 一次能吐几万个字节 ⇒ 必须分块。
+ *
+ * 4096 是个安全的取值：远低于任何引擎的实参上限，而块数又少到不值得
+ * 为它做更细的调优。
+ */
+export const CONSOLE_DECODE_CHUNK = 4096;
+
+/**
+ * 把 console 的**字节数组**解成字符串。
+ *
+ * ⚠️ **字节，不是字符**：guest 可能吐出任意字节（ANSI 转义、`\r`、半个
+ * UTF-8 序列）⇒ 这里做的是「字节 → 码位」的一一映射（`String.fromCharCode`），
+ * **不**做 UTF-8 解码——**字节流才是真相**（与 Spike 的逐字节比对比的就是它）。
+ *
+ * ⚠️ **字符串原样返回**：既有的 `onDelta({ termDelta: { bytes: "<x>&y" } })`
+ * 走的是字符串路径（**既有渲染语义不许丢**）⇒ 这里不碰它。
+ *
+ * @param {unknown} bytes — 字节数组（`[104, 105]`）或字符串
+ * @returns {string}
+ */
+export function decodeConsoleBytes(bytes) {
+    if (typeof bytes === "string") return bytes;
+    if (!Array.isArray(bytes)) return "";
+    const parts = [];
+    for (let i = 0; i < bytes.length; i += CONSOLE_DECODE_CHUNK) {
+        const chunk = bytes.slice(i, i + CONSOLE_DECODE_CHUNK);
+        parts.push(String.fromCharCode(...chunk));
+    }
+    return parts.join("");
+}
+
 const terminalView = register({
     id: "terminal",
     channels: ["term"],
@@ -624,7 +660,13 @@ const terminalView = register({
     /** Append new bytes to the terminal buffer in-place (T1 fast path). */
     onDelta(delta) {
         if (!delta?.termDelta) return;
-        const bytes = delta.termDelta.bytes ?? "";
+        // ⚠️ **字节数组也要能吃**：契约 v4 的 `Console` 事件的载荷是
+        // `bytes: [104, 105]`（JSON **字节数组**，不是字符串）⇒ 这里解码成
+        // 字符串再喂给 store（store 里的 `term.bytes` 一直是**字符串**）。
+        //
+        // ⚠️ 解码是**分块**的（`decodeConsoleBytes`）：不分块的话几万个字节
+        // 会爆调用栈。
+        const bytes = decodeConsoleBytes(delta.termDelta.bytes ?? "");
         // The store is the single source of truth: the DOM is rewritten
         // from the accumulated value instead of appending to whatever the
         // DOM currently holds. Appending to the DOM would duplicate the
