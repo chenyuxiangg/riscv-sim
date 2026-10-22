@@ -1,11 +1,140 @@
 # Project Progress · 项目进度
 
-> **Document version**: v0.23.0
+> **Document version**: v0.24.0
 > **Created**: 2026-10-19
-> **Last updated**: 2026-10-22
+> **Last updated**: 2026-10-23
 > **Status**: active
 > **Owner**: zyzs
 > **Source of truth**: this document, synced with git history (`git log` + `git tag`)
+
+## v0.24.0 变更摘要
+
+**把 v0.23 的遗留一次做掉** —— 让 osz 的 shell **真的能用**（分支
+`feature/v024-h-contract-host` / `feature/v024-i-session-m15` /
+`feature/v024-j-m11-lines` / `feature/v024-k-frontend`；
+冻结规格 `docs/detailed-design/STAGE-9_V024_Leftovers.md`，裁决 A~I）。
+
+台账**闭环 6 条**：**D-102**（反汇编逐条行号 · 契约形状 v0.23 定了，内核侧这批才真的填）·
+**D-117**（CLINT / PLIC 进不了会话快照）· **D-118**（`UartStateDto` 缺 ns16550 的七个寄存器）·
+**D-119**（guest 的 UART 没有输入通路 ⇒ shell 只能看不能打字）·
+**D-120**（M-12 仍自写一份 `E_ENG_*` 字面量）·
+**D-121**（`DisasmEntryDto` 的 `file` / `line` 内核侧一律填 `None`）。
+**新登记 1 条**：**D-122**（UART 的接收 FIFO 只有 1 字节深 ⇒ 一行 shell 命令送不进去）。
+
+### 一、核心命题：**「能打字」不是「有一个输入框」，是「一整行命令进得去 guest」**
+
+v0.23 让 osz 跑到了 `OSZ$ ` 提示符，但那条链路的**交互侧是空的**：平台的 UART 只有
+TX 方向（guest 写 ⇒ 宿主取），**反向**通路不存在 ⇒ shell **只能看不能打字**。
+
+本批把「能打字」拆成三件**必须都真**的事，并给每件配了**断言具体值**的判别式：
+
+1. **内核侧**：契约层新增 `WriteConsole { bytes: Vec<u8> }` 命令 ⇒ 宿主把字节喂进
+   UART 的 **RX FIFO** ⇒ `LSR` 的 `RX_VALID` 置位 ⇒ 同步器在 `IER` 允许时抬
+   **PLIC 源 10** ⇒ guest 看到 `mcause = 0x8000_000B`（架构码 11）。
+   ⚠️ **不复用 `WriteMemory`**：写 `0x1000_0000` 在技术上就是「写内存」，但它
+   **绕过外设的语义层**（不走接收 FIFO、不置 `RX_VALID`、不抬中断线）⇒ guest 读
+   `RHR` 拿到**旧值**而 `LSR` 说「没有数据」⇒ **自相矛盾**。
+2. **模型侧**：⚠️ **D-122 是这一批最要紧的一条** —— v0.23 的接收侧是 `rx: Option<u8>`
+   （**单字节**），而裁决 B 第一步写的是「把**字节**塞进 UART 的 **RX FIFO**」
+   ⇒ 规格**假定** FIFO 能装多个字节 ⇒ 实际实现与规格**不符** ⇒ 一次送三个字节
+   **只有第一个进 FIFO**，其余被丢并锁存 `LSR` 的溢出位 ⇒ 「能打字」只做到
+   「能打一个字符」。⇒ 接收侧改成 **`RX_FIFO_CAPACITY = 16`** 的小队列
+   （`VecDeque<u8>`）：`RX_VALID` = 队列非空、读 `RHR` **弹出队头**、`receive()`
+   **入队尾**、队列满时**丢最新**并锁存溢出位（与 TX 捕获环「丢最新保最早」的口径
+   一致 ⇒ 丢失**看得见**不是静默的）。
+3. **前端侧**：终端视图加**输入框 + 发送按钮** ⇒ 输入按 UTF-8 编码成字节发
+   `WriteConsole` ⇒ **清空输入框**。⚠️ **回显不是平台做的** —— guest（osz 的 shell）
+   自己回显 ⇒ 终端上看到的回显**来自 guest** ⇒ 这是**端到端**的证据
+   （平台写进去 ⇒ guest 读出来 ⇒ guest 写回来）。
+
+### 二、本批最硬的坑：**重渲染会毁掉输入框**
+
+视图每次重渲染都 `body.innerHTML = html` ⇒ **输入框元素被重建** ⇒ ① 直接绑在
+输入框上的监听器**会丢**；② **用户打了一半的字会被清空** —— 而 console 事件一来
+就重渲染一次 ⇒ **每来一个字节清一次** ⇒ 根本没法打字。
+
+⇒ 草稿文本放进 **M-03 的视图状态**（渲染时写回），监听器绑在**容器**上做事件委托，
+并**各配一条用例**钉住「重渲染不丢草稿」与「重渲染不丢监听器」。
+⚠️ 这条是**接线用例钉不住的**：接线用例只能证明「写它那一刻」的形状。
+
+### 三、M-11：反汇编真的带上了源码行（D-121 + D-102 的内核侧）
+
+- `Disassembler` 新增 `disasm_with_lines(addr, count, read, resolve)`：`resolve`
+  接收地址、返回 `Option<LineEntry>`；给出 `Some` 就把条目的 `file` / `line` 填上，
+  给出 `None` 就两个字段**都留 `None`**。旧 API `disasm` 的签名**一字未改**。
+- ⚠️ **绝不编造**：查不到不填空串、不填 `0`、**不拿别的地址的行号顶替**；解析器
+  **按条目自己的地址**被问（查一次就复用会让第二条拿到第一条的行号）。
+- 新增可观测计数器 `line_resolutions()` ⇒ 「每条指令只查一次行表」这条**性能承诺**
+  是**可证的**，不是散文。
+- `SymbolIndex::resolve_line_entry` 把三态映射成 `Option`：`Found` ⇒ `Some`，
+  `Missed` / `NoDwarf` / 出错 ⇒ `None`。
+  ⚠️ 「查过没命中」与「压根没查」在 `DisasmEntryDto` 上**仍然不可区分**（契约只有
+  两个可空字段 —— **形状**决定的，不是实现偷懒）；要分这两态的那一路是
+  `SourceLocation` 事件（`Missed` ⇒ `line = u32::MAX`，`NoDwarf` ⇒ `line = 0`）。
+
+### 四、契约层升 **v5** + 会话快照升 **v2**（本批各升一次）
+
+- **契约层 v5**：`SCHEMA_VERSION` 4 → 5，新增命令 `WriteConsole { bytes }`
+  （线上形状 `{"WriteConsole":{"bytes":[104,105]}}` —— **字节数组**，不是字符串、
+  不是 base64，与 v0.23 的 `Console` 事件同口径，因为 guest 的字节流才是真相）。
+  ⚠️ 新变体进了 **Rust ↔ JS 的逐字对照表**，而且这条对照**由契约层的一条用例守着**
+  （`include_str!` 读 `front/lib/message.js` 的源码断言拼写两侧一致 ⇒ 镜像不会漂移）。
+- **会话快照 v2**：`SESSION_SNAPSHOT_SCHEMA_VERSION` 1 → **2**（破坏性变更**显式**
+  升版，旧载荷现在被 `E_SNAP-05` **显式拒绝**）；`PeripheralSessionState` 加
+  `Clint` / `Plic` 两个变体；`UartStateDto` 加 **LCR / IER / FCR / MCR / SCR /
+  DLL / DLM** 七个 ns16550 寄存器 + `rx_queue`（装**整个**接收队列，`rx` 保留为
+  队头字节，两者之间有一条不变式：`rx == rx_queue[0]`）。
+  ⚠️ **`LCR.DLAB` 位本身也要还原** —— 否则还原后「除数锁存器模式」的状态就丢了。
+- **M-12 的 `E_ENG_*` 去重**（D-120）：M-12 里自写的那份字面量**已删**，改为引用
+  契约层的具名常量 ⇒ 全仓只剩**一个**定义处。
+  ⚠️ 判别力不只看「定义处只有一处」：另配了**等值断言** + **行为对拍**（引擎实际
+  报的码与契约表一致）—— 只查定义处会漏掉「引用错了但值恰好一样」。
+
+### 五、门禁抓到的**真缺陷**：`tools/boot-osz.sh` 跑错了二进制
+
+v0.23 交付的 `tools/boot-osz.sh` 里，**构建**认 `CARGO_TARGET_DIR`，**运行**却写死
+`$REPO_ROOT/target/release/osz-boot` ⇒ 两者**指向不同的文件** ⇒ 设了
+`CARGO_TARGET_DIR`（**项目纪律要求每个 lane 独立 target 目录**）时，跑的是**上一批**
+留下的旧二进制或干脆不存在的文件 ⇒ 判决错得莫名其妙（表现为「候选侧文件缺失」而不是
+「候选侧跑挂了」）。
+
+⇒ 一条约束一个落点：构建目录只有一个真相，就是 `CARGO_TARGET_DIR`；
+并加了一条「二进制不存在就**当场报错**」的守卫（而不是让它滑到 `cmp` 才炸）。
+
+### 六、其余三条本批内闭环的小账
+
+- **前端门禁把 JS 构造器清单写死**（Lane H 新增命令 ⇒ 门禁 268 里 2 条红）⇒ Lane K 补清单。
+- **数值策略的列表形态落在 `session.rs` 而不是 `numstr.rs`** ⇒ 同一约束落了两个点 ⇒
+  折进 `numstr.rs`（「一个约束一个落点」）。
+- **终端输入框的三个 class 没有样式** ⇒ 补样式（Lane K 交付时该文件不归它）。
+
+### 七、本批的**主线教训**：**「规格写了什么」也要对着实现核一遍**
+
+裁决 B 第一步写的是「把**字节**塞进 UART 的 **RX FIFO**」—— 复数。实现却给了
+**单字节**的 FIFO。⇒ **规格本身也可能是错的**，或者实现只做到了规格的**字面最小值**。
+⇒ **判别式**：凡是规格里出现「**把 N 个东西放进某个容器**」，都要问一句「这个容器
+**装得下 N 个吗**」—— 规格的措辞里**复数**就是一条**容量约束**。
+
+### 八、门禁（数字全部**从当前树重算**）
+
+- **工作区 1 238 全绿**（契约 lib **134** + kernel lib **974** + 集成 **113** +
+  `osz-boot` runner **3** + golden runner **14**）——
+  相对 v0.23 的 1 159 增加 **79 条**（Lane J **24** + Lane H **14** + Lane I **41**）。
+- **前端门禁 288 用例 / 50 suite** 全绿（基线 268 / 47，增加 **20 条 3 个 suite**）。
+- **黄金语料 67 / 67**。
+- **8 项门禁失败项数 0**：`cargo fmt --all -- --check` ·
+  `cargo clippy --workspace --all-targets -- -D warnings` ·
+  `cargo test --workspace --no-fail-fast --lib --tests` · `tools/check-front.sh` ·
+  `tools/golden-run.sh --self-check` + `--keep-going` · `tools/build-wasm.sh` +
+  `node tools/wasm-smoke.mjs` · `node tools/browser-verify.mjs`（真 Chrome）
+  · 本批专属 `tools/boot-osz.sh` ⇒ **`VERDICT MATCH`**（两侧 31 字节逐字节相同）。
+- **真机三条判别式**（真 Chrome，`tools/browser-verify.mjs`）：
+  **E-6** `file = /tmp/osz-fresh/kernel/base/task/src/task.c`、`line = 41` ·
+  **E-7** 符号 `first_schedule` ⇒ `0x80002550`，命中时 `Halted { reason: Breakpoint,
+  pc: 0x80002550 }` · **E-8** UART 的 `LSR`（`0x1000_0005`）= **`0x63`**、bit0 置位。
+- ⚠️ **外部产物一律不进仓库**：osz 的 ELF / 源码 / 符号表都在**仓外**（`$OSZ_ELF`，
+  默认 `/tmp/osz-artifacts/osz.elf`）⇒ 真机段**缺文件就 skipped**（退出码仍是 0），
+  **有**文件却跑不出就**判负**。
 
 ## v0.23.0 变更摘要
 

@@ -292,12 +292,32 @@ os 是 M 模式、**不需要** A 扩展（D 是死代码）⇒ `misa` 一个位
 - [x] **E-5** **浏览器可视化**：真 Chrome 里装载 osz 的 ELF ⇒ 看到 osz 的输出
       > 证据：`tools/browser-verify.mjs` 的 osz 段（真 Chrome）—— 终端视图里出现 `==== Enter Main ====`、`OSZ$` 与 ANSI 转义 `\x1b[2K`。
       > ⚠️ **顺带证伪了一条风险**：osz 镜像落在 `0x8400_0000` ⇒ 宿主自动切 QEMU virt 档 ⇒ **WASM 的线性内存要涨过 128 MiB**（Lane G 交付时这条还是「未实测」）—— **实测通过**，真 Chrome 跑起来了。
-- [ ] **E-6** **源码高亮**能跳进 osz 自己的源码（osz 带 `-ggdb` ⇒ DWARF v5 行表）
-      > ❌ **未做**：浏览器侧源码视图本身是通的（真机复验里 demo 固件的 `resolve-line` 按钮工作正常），但 **osz 的行号还拿不到** —— 台账 **D-121**（`DisasmEntryDto` 的 `file`/`line` 内核侧一律填 `None`）⇒ M-11 的反汇编器还没去调 `resolve_line`。⚠️ 另有一层：osz 的**源码树**在仓外，浏览器要显示它得先把源码喂进前端。
-- [ ] **E-7** **断点能停在 osz 调度器里**（真实 M 模式代码上验证）
-      > ❌ **未做**：平台的断点机制本身是通的（真机复验里 demo 固件的断点命中 PC 停在对齐地址），但**没有在 osz 的调度器上验证过** ⇒ 缺一条「在真实 RTOS 的调度器入口下断点 ⇒ PC 停在那里」的证据。⚠️ osz 的调度器符号名要靠 M-11 的符号表取（osz 带 `-ggdb` ⇒ `.symtab` 在）⇒ 可行，只是本批没做。
-- [ ] **E-8** osz 的 shell **能收输入**（UART RX 通路通）
-      > ❌ **未做**：宿主侧留了 `KernelHost::uart_receive`（能往 guest 的 RX FIFO 塞字节），但**前端没有输入通路**、**契约层也没有「往 UART 写」的命令** ⇒ shell 现在只能看不能打字。登记为新欠账。
+- [x] **E-6** **源码高亮**能跳进 osz 自己的源码（osz 带 `-ggdb` ⇒ DWARF v5 行表）
+      > ✅ **v0.24 批闭环**（Lane J + Lane H + Lane K）：M-11 的反汇编器接上 `SymbolService::resolve_line`，
+      > `DisasmEntryDto` 的 `file` / `line` 填上**真值**（查不到就是 `None`，**绝不编造**）；
+      > 宿主把 `SymbolIndex` 接进反汇编器；前端反汇编面板**逐条**显示 `file` / `line`。
+      > **真机证据**（真 Chrome，`tools/browser-verify.mjs` 的 E-6 段）：osz 的一条指令实测
+      > `file = /tmp/osz-fresh/kernel/base/task/src/task.c`、`line = 41`
+      > ⇒ 断言 `file` 含 `.c` 且 `line` 是**大于 0 的整数**。
+      > ⚠️ **源码树仍在仓外**（osz 的源码不进制）⇒ 浏览器要显示源码正文得先把树喂进前端
+      > （v0.24 新增了那个可编程入口），但**「拿得到真行号」这件事本身已闭环**。
+- [x] **E-7** **断点能停在 osz 调度器里**（真实 M 模式代码上验证）
+      > ✅ **v0.24 批闭环**（Lane K）：真机段按**符号名**从 osz 的 `.symtab` 里取调度器地址
+      > （新增零依赖的 ELF32 解析器 `tools/elf-symtab.mjs`；候选名 `first_schedule` / `schedule` /
+      > `os_preemp_reschedule` / `os_preemp_schedule_with_pm`，取第一个存在的）
+      > ⇒ 在该地址下断点 ⇒ **实测命中**：内核回 `Halted { reason: Breakpoint, pc: 0x80002550 }`，
+      > 视图里的 PC 也是 `0x80002550`（与符号地址逐字相同）。
+      > ⚠️ **断点必须在「跑之前」下**：调度器在 shell 提示符出现**之前**就执行过了
+      > ⇒ 先跑到提示符再下断点，那个符号**永远命中不了**。
+- [x] **E-8** osz 的 shell **能收输入**（UART RX 通路通）
+      > ✅ **v0.24 批闭环**（Lane H + Lane I + Lane K）：契约层新增 `WriteConsole { bytes }` 命令
+      > （**不复用** `WriteMemory` —— 后者绕过外设语义层，会让 guest 读 `RHR` 拿到旧值而 `LSR`
+      > 说「没有数据」⇒ 自相矛盾）；宿主把字节喂进 UART 的 **RX FIFO**，`LSR` 的 `RX_VALID` 随之置位，
+      > 同步器在 `IER` 允许时抬 **PLIC 源 10** ⇒ guest 看到 `mcause = 0x8000_000B`（架构码 11）；
+      > 前端终端视图加**输入框 + 发送按钮**（草稿存视图状态 ⇒ 重渲染不丢；监听器绑容器 ⇒ 重渲染不丢）。
+      > **真机证据**：在输入框里送一个字节后读 UART 的 `LSR`（`0x1000_0005`）⇒ **实测 `0x63`**、
+      > **bit0 置位**。
+      > ⚠️ **回显来自 guest**（平台不做本地回显）⇒ 终端上看到的回显是**端到端**的证据。
 
 ### 2.6 全批门禁（**8 项，串行**）
 
@@ -327,5 +347,6 @@ os 是 M 模式、**不需要** A 扩展（D 是死代码）⇒ `misa` 一个位
 | 日期 | 版本 | 变更 |
 | --- | --- | --- |
 | 2026-10-22 | v0.23.0 | 初版冻结。裁决 A~N；验收清单 6 节（A/B/C/D/E + 门禁）。 |
+| 2026-10-23 | v0.24.0 | **E-6 / E-7 / E-8 三条未勾项由 v0.24 批闭环**（冻结规格 `docs/detailed-design/STAGE-9_V024_Leftovers.md`，裁决 A~I）：**E-6** M-11 的反汇编器接上 `resolve_line`，`DisasmEntryDto` 填真 `file` / `line`（查不到就是 `None`，绝不编造），宿主接线、前端逐条显示；真机实测 `file = /tmp/osz-fresh/kernel/base/task/src/task.c`、`line = 41`。**E-7** 真机段按**符号名**从 osz 的 `.symtab` 取调度器地址（新增零依赖的 `tools/elf-symtab.mjs`）⇒ 实测命中 `first_schedule = 0x80002550`，内核回 `Halted { reason: Breakpoint, pc: 0x80002550 }`。**E-8** 契约层新增 `WriteConsole { bytes }` 命令（不复用 `WriteMemory`），宿主把字节喂进 UART 的 RX FIFO 并让同步器抬 PLIC 源 10（guest 看到 `mcause = 0x8000_000B`），前端终端加输入框；真机实测 UART 的 `LSR`（`0x1000_0005`）= `0x63` 且 bit0 置位。⚠️ **回显来自 guest**（平台不做本地回显）⇒ 端到端证据。**本规格的 37 条验收至此全部勾选**（v0.23 时是 34 勾 3 未勾）。 |
 | 2026-10-22 | v0.23.2 | **浏览器档落地**（Lane G 合并）：勾掉 **E-5**（真 Chrome 里 osz 的输出上屏，并**证伪**了「WASM 线性内存涨不过 128 MiB」这条风险）；**E-6 / E-7 判为未做**并写清各自缺什么（D-121 的行号没填 / 缺「断点停在 osz 调度器」这条证据）；验收清单此刻 **34 条已勾 / 3 条未勾**（未勾的是 **E-6 / E-7 / E-8**）。 |
 | 2026-10-22 | v0.23.1 | **落地修订**：新增**裁决 C′**（128 MiB 改成**档位**、默认档不铺 —— 默认铺满会让每个宿主实例吃 128 MiB、测试跑不动）；把「堆尾那一段必须真的映射」的理由写进裁决 B（osz 的 best-fit 分配器在 `0x8800_0000` 附近写节点）；勾掉 A/B/C/D/E 段共 **30 条**验收并逐条补上证据指向；D-5 留待收口时重跑黄金对拍；E-5/E-6/E-7 留给浏览器 lane；E-8 判为**未做**并登记为新欠账（guest 的 UART 只有 TX 捕获环，没有输入通路）。 |

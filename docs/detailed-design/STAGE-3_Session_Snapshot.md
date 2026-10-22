@@ -224,6 +224,20 @@ pub struct UartStateDto {
     pub now_ps: u64,         // ⚠️ 十进制字符串
 }
 
+> ⚠️ **v0.24 更新（这份形状已被 STAGE-9 取代）**：本节展示的是**会话快照 v1** 的形状。
+> v0.24 批（冻结规格 `docs/detailed-design/STAGE-9_V024_Leftovers.md` 裁决 F）把它升到 **v2**：
+> * `UartStateDto` 加 **LCR / IER / FCR / MCR / SCR / DLL / DLM** 七个 ns16550 寄存器
+>   （台账 **D-118**；⚠️ **`LCR.DLAB` 位本身也要还原**）；
+> * `UartStateDto` 再加 `rx_queue: Vec<u8>` —— 装**整个**接收队列
+>   （台账 **D-122**：接收侧原本是**单字节**，一行 shell 命令送不进去 ⇒ v0.24 加深成
+>   `RX_FIFO_CAPACITY = 16` 的队列）；`rx` 保留为**队头字节**，两者之间有一条不变式
+>   （`rx == rx_queue[0]`，队列为空时 `rx` 必须为空）；
+> * `M15PeriphDto` 加 `clints` / `plics` 两组（台账 **D-117**）——
+>   `PeripheralSessionState` 相应加 `Clint` / `Plic` 两个变体。
+>
+> ⚠️ **`SESSION_SNAPSHOT_SCHEMA_VERSION` 已由 1 升到 2** ⇒ **破坏性变更**：
+> 旧载荷现在被**显式拒绝**（`E_SNAP-05`）—— 仓内无迁移问题，但**外部存过的 v1 载荷要重新采集**。
+
 pub struct GpioStateDto {
     pub id: String,
     pub directions: u32,     // 1 = 输出

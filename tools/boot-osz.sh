@@ -94,8 +94,21 @@ cargo build --offline --release --bin osz-boot >/dev/null 2>&1 || {
   exit 1
 }
 
+# ⚠️ **二进制路径必须跟着 `CARGO_TARGET_DIR` 走**（v0.24 门禁抓到的真缺陷）：
+# 上面那次 `cargo build` 认 `CARGO_TARGET_DIR`，而运行侧若写死
+# `$REPO_ROOT/target/release/osz-boot`，两者就会**指向不同的文件** ⇒
+# 跑的是**上一批**留下的旧二进制（或者干脆不存在）⇒ 判决错得莫名其妙
+# （表现为「候选侧文件缺失」而不是「候选侧跑挂了」）。
+# ⇒ 一条约束一个落点：构建目录只有一个真相，就是 `CARGO_TARGET_DIR`。
+PLAT_BIN="${CARGO_TARGET_DIR}/release/osz-boot"
+if [ ! -x "$PLAT_BIN" ]; then
+  echo "boot-osz.sh: candidate binary not found: $PLAT_BIN" >&2
+  echo "  hint: cargo build 用的 CARGO_TARGET_DIR 与运行侧必须一致" >&2
+  exit 1
+fi
+
 perl "$REPO_ROOT/tools/watchdog.pl" "$((TIMEOUT_MS / 1000 + 30))" \
-  "$REPO_ROOT/target/release/osz-boot" "$ELF" \
+  "$PLAT_BIN" "$ELF" \
   --budget 200000000 --timeout-ms "$TIMEOUT_MS" \
   --prefix "OSZ\$ " --out "$PLAT_OUT" \
   > "$WORK/platform.stdout" 2> "$WORK/platform.stderr"

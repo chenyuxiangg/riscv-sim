@@ -146,37 +146,90 @@ SCR / DLL / DLM** 七个字段。
 
 ### 2.1 Lane H · 契约层 v5
 
-- [ ] **H-1** `SCHEMA_VERSION` = **5**，`front/lib/message.js` 同步，**两侧逐字对照表**扩到含新命令与新变体
-- [ ] **H-2** 新命令 `WriteConsole { bytes: Vec<u8] }` 进契约层与 JS 镜像（**形状逐字一致**）
-- [ ] **H-3** `UartStateDto` 加 **7 个** ns16550 寄存器字段
-- [ ] **H-4** `PeripheralSessionState` 加 **Clint / Plic** 两个变体与对应 DTO
-- [ ] **H-5** `SESSION_SNAPSHOT_SCHEMA_VERSION` **1 → 2**（破坏性变更要**显式**）
-- [ ] **H-6** `E_ENG_*` 三个场景码在契约层有**具名常量**（M-12 引用它们，不复制字面量）
+- [x] **H-1** `SCHEMA_VERSION` = **5**，`front/lib/message.js` 同步，**两侧逐字对照表**扩到含新命令与新变体
+      > 证据：契约层 `crates/contract/src/lib.rs` 的 `SCHEMA_VERSION` = 5；`front/lib/message.js` 的
+      > `SCHEMA_VERSION` = 5。**两侧逐字对照**由契约层的一条用例守着
+      > （`the_v5_write_console_spelling_is_the_same_on_both_sides`：`include_str!` 读
+      > `front/lib/message.js` 的源码，断言里面字面出现 `WriteConsole` 且版本号是 5）。
+- [x] **H-2** 新命令 `WriteConsole { bytes: Vec<u8> }` 进契约层与 JS 镜像（**形状逐字一致**）
+      > 证据：线上形状被钉到字符串级 —— `{"WriteConsole":{"bytes":[104,105]}}`
+      > （`the_v5_write_console_command_has_a_pinned_wire_shape`）；字节逐字节往返相同
+      > （含 `0x00` / `0x7F` / `0x80` / `0xFF` / `0x0D` / `0x0A` 七个边界字节）；
+      > JS 侧构造器是 `Command.writeConsole(bytes)`。
+- [x] **H-3** `UartStateDto` 加 **7 个** ns16550 寄存器字段
+      > 证据：`LCR` / `IER` / `FCR` / `MCR` / `SCR` / `DLL` / `DLM`（Lane I 落地，验收 **I-1**）。
+- [x] **H-4** `PeripheralSessionState` 加 **Clint / Plic** 两个变体与对应 DTO
+      > 证据：`ClintStateDto` / `PlicStateDto`（Lane I 落地，验收 **I-2 / I-3 / I-4**）。
+- [x] **H-5** `SESSION_SNAPSHOT_SCHEMA_VERSION` **1 → 2**（破坏性变更要**显式**）
+      > 证据：契约层 `crates/contract/src/session.rs`；旧版本载荷现在被**显式拒绝**
+      > （`E_SNAP-05`）—— 仓内无迁移问题，但外部存过的 v1 载荷要重新采集。
+- [x] **H-6** `E_ENG_*` 三个场景码在契约层有**具名常量**（M-12 引用它们，不复制字面量）
+      > 证据：契约层 `crates/contract/src/error.rs` 里三个常量；M-12 改为引用它们
+      > （Lane I 落地，验收 **I-5**）；`grep "pub const E_ENG"` 的**唯一**定义处就是契约层。
 
 ### 2.2 Lane I · M-15 / M-12 生产侧
 
-- [ ] **I-1** UART 的会话状态**带**七个寄存器（`LCR` 的 `DLAB` 位在快照往返后**仍然**是原值）
-- [ ] **I-2** CLINT 的会话状态带 `mtimecmp`（**往返一次后不变**）
-- [ ] **I-3** PLIC 的会话状态带优先级 / 使能 / 门限（**往返一次后不变**）
-- [ ] **I-4** 两个新器件的 `validate_session_state()` **不是**默认放行（**畸形状态被拒**）
-- [ ] **I-5** M-12 **不再**自写 `E_ENG_*` 字面量（**全仓只有一个来源**）
+- [x] **I-1** UART 的会话状态**带**七个寄存器（`LCR` 的 `DLAB` 位在快照往返后**仍然**是原值）
+      > 证据：`the_uart_session_state_round_trips_the_registers_including_dlab` ——
+      > `LCR = 0x83`（DLAB 置位）往返后 `dlab_enabled()` 仍为真、除数 `0x010C` 不变。
+- [x] **I-2** CLINT 的会话状态带 `mtimecmp`（**往返一次后不变**）
+      > 证据：`the_clint_session_state_carries_mtimecmp_and_round_trips`。
+- [x] **I-3** PLIC 的会话状态带优先级 / 使能 / 门限（**往返一次后不变**）
+      > 证据：`the_plic_session_state_carries_priority_enable_and_threshold_and_round_trips`。
+- [x] **I-4** 两个新器件的 `validate_session_state()` **不是**默认放行（**畸形状态被拒**）
+      > 证据：四条畸形被拒（id 对不上 ⇒ `E_PER-05`；hart 数 / 源数 / context 数不符 ⇒ `E_PER-04`），
+      > 外加「CLINT 的状态喂给 PLIC」也被拒（两个方向各测一次）。
+- [x] **I-5** M-12 **不再**自写 `E_ENG_*` 字面量（**全仓只有一个来源**）
+      > 证据：`the_engine_scenario_codes_are_the_contract_layers_ones`（等值断言）+
+      > `the_reported_no_progress_code_is_the_contract_layers_code`（**行为**对拍：引擎实际报的码
+      > 与契约表一致）。
 
 ### 2.3 Lane J · 宿主 + M-11
 
-- [ ] **J-1** `WriteConsole` 命令被宿主接住 ⇒ 字节进 **UART 的 RX FIFO**
-- [ ] **J-2** 写进去之后 UART 的 **`LSR` RX_VALID(bit0)** 置位（guest 读 `RHR` 能读到）
-- [ ] **J-3** `IER` 的 RX 中断使能位开着 ⇒ 同步后 **M-16 的外部中断线**被拉起（`mcause = 0x8000_000B`）
-- [ ] **J-4** 反汇编的 `DisasmEntryDto` **填上真 `file` + `line`**（DWARF 行表命中时）
-- [ ] **J-5** 行表**没命中**时填 `None`（**不猜**）——「查过没命中」与「没查」**不得混**
+- [x] **J-1** `WriteConsole` 命令被宿主接住 ⇒ 字节进 **UART 的 RX FIFO**
+      > 证据：`write_console_puts_the_byte_into_the_uart_rx_fifo`（读 `RHR` 拿到 `0x41`）。
+- [x] **J-2** 写进去之后 UART 的 **`LSR` RX_VALID(bit0)** 置位（guest 读 `RHR` 能读到）
+      > 证据：`write_console_sets_the_lsr_rx_valid_bit` +
+      > `the_guest_reads_back_exactly_the_byte_that_was_written`（先写 `0x5A` 读掉、再写 `0x42`，
+      > 读到的是 `0x42` 而不是旧值）。
+- [x] **J-3** `IER` 的 RX 中断使能位开着 ⇒ 同步后 **M-16 的外部中断线**被拉起（`mcause = 0x8000_000B`）
+      > 证据：`the_rx_interrupt_reaches_the_guest_with_the_architectural_mcause`（架构字面量
+      > `0x8000_000B`）+ `without_the_rx_interrupt_enable_no_line_is_raised`（**判别力对**：
+      > `IER` 没开时既不挂起也不抬线）。
+- [x] **J-4** 反汇编的 `DisasmEntryDto` **填上真 `file` + `line`**（DWARF 行表命中时）
+      > 证据：`a_dwarf_image_gives_the_disassembly_real_file_and_line`；
+      > 真机段 E-6 实测 `file = /tmp/osz-fresh/kernel/base/task/src/task.c`、`line = 41`。
+- [x] **J-5** 行表**没命中**时填 `None`（**不猜**）——「查过没命中」与「没查」**不得混**
+      > 证据：`an_image_without_dwarf_leaves_the_disassembly_file_and_line_none`
+      > （`file` 与 `line` 都是 `None`，**不是** `Some("")`、**不是** `Some(0)`）；
+      > 「查过没命中」（`Missed`）与「没查」（`NoDwarf`）在**端口** `SymbolService::resolve_line`
+      > 上仍然分得开（`the_two_no_answers_stay_distinguishable_on_the_port`）——
+      > ⚠️ 在 `DisasmEntryDto` 上**分不开**是契约只有两个可空字段的形状决定的，**不是**实现偷懒。
 
 ### 2.4 Lane K · 前端 + 真机
 
-- [ ] **K-1** 终端视图有**输入框**，输入的字节发 `WriteConsole`
-- [ ] **K-2** 前端有**可编程的源码树入口**（供真机段用）
-- [ ] **K-3** 反汇编面板**逐条**显示 `file` / `line`（**没有行号的条目如实显示「无行号」**）
-- [ ] **K-4** **E-6 真机**：反汇编面板里出现 osz 的**真** `file` 与 `line`
-- [ ] **K-5** **E-7 真机**：在 osz 的调度器符号上下断点 ⇒ 命中时 **PC 落在那个符号的地址**
-- [ ] **K-6** **E-8 真机**：往终端送一个字节 ⇒ guest 的 UART RX 就绪（**断言具体位**）
+- [x] **K-1** 终端视图有**输入框**，输入的字节发 `WriteConsole`
+      > 证据：前端 9 条用例（输入框与按钮渲染、命令真的以 `{"WriteConsole":{"bytes":[65]}}` 上线、
+      > 中文按 UTF-8 编码成三个字节、发送后清空、**重渲染不丢草稿**、**重渲染不丢监听器**、
+      > 特殊字符原样送出、无本地回显）。
+- [x] **K-2** 前端有**可编程的源码树入口**（供真机段用）
+      > 证据：`window.riscv_source.setTree(...)`；⭐**内核侧一个字节都没收到**（用例断言线上
+      > 不出现任何源码内容或路径）—— 源码树只进 M-03 的视图状态。
+- [x] **K-3** 反汇编面板**逐条**显示 `file` / `line`（**没有行号的条目如实显示「无行号」**）
+      > 证据：前端 6 条用例（`file:line` 拼显、**无行号**显示「无行号」且明确不是空串与 `0` 与
+      > `null` 与 `undefined`、只有 `file` 时**不编造**行号、只有 `line` 时**不编造**文件名、
+      > `line === 0` 视为无行号）。
+- [x] **K-4** **E-6 真机**：反汇编面板里出现 osz 的**真** `file` 与 `line`
+      > 证据：真 Chrome 实测 `file = /tmp/osz-fresh/kernel/base/task/src/task.c`、
+      > `line = 41`（断言 `file` 含 `.c`、`line` 是**大于 0 的整数**）。
+- [x] **K-5** **E-7 真机**：在 osz 的调度器符号上下断点 ⇒ 命中时 **PC 落在那个符号的地址**
+      > 证据：按**符号名**取地址（零依赖的 `tools/elf-symtab.mjs` 解析 `.symtab`；
+      > 候选名 `first_schedule` / `schedule` / `os_preemp_reschedule` / `os_preemp_schedule_with_pm`，
+      > 取第一个存在的）⇒ 实测 `first_schedule = 0x80002550`；命中时内核回
+      > `Halted { reason: Breakpoint, pc: 0x80002550 }`，视图里的 PC 也是 `0x80002550`。
+      > ⚠️ **断点必须在「跑之前」下** —— 调度器在 shell 提示符出现**之前**就执行过了。
+- [x] **K-6** **E-8 真机**：往终端送一个字节 ⇒ guest 的 UART RX 就绪（**断言具体位**）
+      > 证据：真 Chrome 实测读 UART 的 `LSR`（`0x1000_0005`）= **`0x63`**、**bit0 置位**。
 
 ### 2.5 全批门禁（**8 项，串行**）
 
