@@ -275,8 +275,9 @@ os 是 M 模式、**不需要** A 扩展（D 是死代码）⇒ `misa` 一个位
       > 证据：`the_clint_mtimecmp_reaches_the_interrupt_controller` —— 断言值写字面量 `100_000_000` ps（1000 周期 @ 10 MHz），单位错一个数量级就红
 - [x] **D-4** PLIC 的 `claim` 结果抬成 M-16 的**外部中断线**
       > 证据：`a_plic_source_raises_the_external_line` —— 配好优先级与使能后，UART 的 RX 就绪真的把 M-16 的外部线拉起来了
-- [ ] **D-5** 既有黄金对拍语料**仍然全绿**（默认图变了 ⇒ 必须重验）
-      > ⏳ 待本批收口时统一重跑 `tools/golden-run.sh --self-check` 与 `--keep-going`
+- [x] **D-5** 既有黄金对拍语料**仍然全绿**（默认图变了 ⇒ 必须重验）
+      > 证据：收口时统一重跑 8 项门禁 —— `tools/golden-run.sh --self-check` **PASS**、`--keep-going` **PASS**（语料 67/67，mismatch 0、no-verdict 0）。
+      > ⚠️ **为什么不受影响**：黄金 runner `riscv-golden` **自建内存图**（自己的 `RAM_BASE`）⇒ 默认内存图怎么改都影响不到它。
 
 ### 2.5 osz 端到端（三档）
 
