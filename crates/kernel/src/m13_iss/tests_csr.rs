@@ -143,6 +143,11 @@ fn the_mret_encoding_resolves_to_mret() {
 
 // ---------------------------------------------------------------------------
 // The CSR instructions — the read / write semantics
+//
+// ⚠️ **载体 CSR 是 `mscratch`，不是 `mstatus`**：`mstatus` 是 **WARL**
+// （台账 **D-98**）—— 它的**保留位**写被忽略、读回 0 ⇒ 它**不能**再当
+// 「一个普通的 32 位存储」用（写 `0xFFFF_FFFF` 读回的不是 `0xFFFF_FFFF`）。
+// `mscratch` 才是平台文档里那个「plain storage CSR」。
 // ---------------------------------------------------------------------------
 
 /// `CSRRW` swaps the CSR with the register: `rd` gets the **old** CSR
@@ -194,16 +199,16 @@ fn csrrw_with_rd_x0_still_writes_the_csr() {
 #[test]
 fn csrrw_reads_the_old_value_before_the_register_is_overwritten() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0x0F0F_0F0F)]);
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0x0F0F_0F0F)]);
     state.gpr[1] = 0x1234;
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 1, F_CSRRW, 1));
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSCRATCH, 1, F_CSRRW, 1));
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(
         state.gpr[1], 0x0F0F_0F0F,
         "x1 must end up holding the CSR's old value"
     );
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0x1234,
         "the CSR must receive the register's old value"
     );
@@ -213,13 +218,13 @@ fn csrrw_reads_the_old_value_before_the_register_is_overwritten() {
 #[test]
 fn csrrs_sets_the_bits_of_the_csr() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0x0F0F)]);
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0x0F0F)]);
     state.gpr[1] = 0x00F0;
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 1, F_CSRRS, 2));
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSCRATCH, 1, F_CSRRS, 2));
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(state.gpr[2], 0x0F0F, "rd must receive the old CSR value");
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0x0FFF,
         "CSRRS must set the source's bits"
     );
@@ -230,12 +235,12 @@ fn csrrs_sets_the_bits_of_the_csr() {
 #[test]
 fn csrrs_with_rs1_x0_is_a_pure_read() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0x0F0F)]);
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 0, F_CSRRS, 2));
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0x0F0F)]);
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSCRATCH, 0, F_CSRRS, 2));
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(state.gpr[2], 0x0F0F, "rd must receive the old CSR value");
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0x0F0F,
         "CSRRS with rs1 = x0 must not write the CSR"
     );
@@ -245,13 +250,13 @@ fn csrrs_with_rs1_x0_is_a_pure_read() {
 #[test]
 fn csrrc_clears_the_bits_of_the_csr() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0xFFFF)]);
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0xFFFF)]);
     state.gpr[1] = 0x0F0F;
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 1, F_CSRRC, 2));
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSCRATCH, 1, F_CSRRC, 2));
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(state.gpr[2], 0xFFFF, "rd must receive the old CSR value");
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0xF0F0,
         "CSRRC must clear the source's bits"
     );
@@ -261,12 +266,12 @@ fn csrrc_clears_the_bits_of_the_csr() {
 #[test]
 fn csrrc_with_rs1_x0_is_a_pure_read() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0xFFFF)]);
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 0, F_CSRRC, 2));
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0xFFFF)]);
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSCRATCH, 0, F_CSRRC, 2));
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(state.gpr[2], 0xFFFF, "rd must receive the old CSR value");
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0xFFFF,
         "CSRRC with rs1 = x0 must not write the CSR"
     );
@@ -276,16 +281,20 @@ fn csrrc_with_rs1_x0_is_a_pure_read() {
 #[test]
 fn csrrwi_writes_the_five_bit_immediate() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0xFFFF_FFFF)]);
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0xFFFF_FFFF)]);
     // The immediate lives in the `rs1` field (bits 19:15).
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 0x15, F_CSRRWI, 2));
+    let outcome = h.step_one_at(
+        &mut state,
+        0x1000,
+        csr_insn(CSR_MSCRATCH, 0x15, F_CSRRWI, 2),
+    );
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(
         state.gpr[2], 0xFFFF_FFFF,
         "rd must receive the old CSR value"
     );
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0x15,
         "CSRRWI must write the 5-bit immediate"
     );
@@ -295,12 +304,16 @@ fn csrrwi_writes_the_five_bit_immediate() {
 #[test]
 fn csrrsi_sets_the_bits_of_the_csr() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0x0F0F)]);
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 0x0F, F_CSRRSI, 2));
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0x0F0F)]);
+    let outcome = h.step_one_at(
+        &mut state,
+        0x1000,
+        csr_insn(CSR_MSCRATCH, 0x0F, F_CSRRSI, 2),
+    );
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(state.gpr[2], 0x0F0F, "rd must receive the old CSR value");
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0x0F0F,
         "CSRRSI must set the immediate's bits"
     );
@@ -310,12 +323,12 @@ fn csrrsi_sets_the_bits_of_the_csr() {
 #[test]
 fn csrrsi_with_a_zero_immediate_is_a_pure_read() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0x0F0F)]);
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 0, F_CSRRSI, 2));
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0x0F0F)]);
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSCRATCH, 0, F_CSRRSI, 2));
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(state.gpr[2], 0x0F0F, "rd must receive the old CSR value");
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0x0F0F,
         "CSRRSI with a zero immediate must not write the CSR"
     );
@@ -325,12 +338,16 @@ fn csrrsi_with_a_zero_immediate_is_a_pure_read() {
 #[test]
 fn csrrci_clears_the_bits_of_the_csr() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0xFFFF)]);
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 0x0F, F_CSRRCI, 2));
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0xFFFF)]);
+    let outcome = h.step_one_at(
+        &mut state,
+        0x1000,
+        csr_insn(CSR_MSCRATCH, 0x0F, F_CSRRCI, 2),
+    );
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(state.gpr[2], 0xFFFF, "rd must receive the old CSR value");
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0xFFF0,
         "CSRRCI must clear the immediate's bits"
     );
@@ -340,12 +357,12 @@ fn csrrci_clears_the_bits_of_the_csr() {
 #[test]
 fn csrrci_with_a_zero_immediate_is_a_pure_read() {
     let mut h = Harness::new();
-    let mut state = state_with_csrs(&[(CSR_MSTATUS, 0xFFFF)]);
-    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSTATUS, 0, F_CSRRCI, 2));
+    let mut state = state_with_csrs(&[(CSR_MSCRATCH, 0xFFFF)]);
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MSCRATCH, 0, F_CSRRCI, 2));
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(state.gpr[2], 0xFFFF, "rd must receive the old CSR value");
     assert_eq!(
-        csr_value(&state, CSR_MSTATUS),
+        csr_value(&state, CSR_MSCRATCH),
         0xFFFF,
         "CSRRCI with a zero immediate must not write the CSR"
     );
