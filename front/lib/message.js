@@ -366,6 +366,32 @@ export function deltaRegister(index, value) {
     return { index: Number(index), value: Number(value) >>> 0 };
 }
 
+/**
+ * `model::DisasmEntryDto` — 一条反汇编条目（`addr` / `code` / `mnemonic` /
+ * `width`）。
+ *
+ * The DTO is **nested** inside the `Disasm` event payload, so the contract
+ * gate has to look at it explicitly: the variant-level field check only sees
+ * the **outer** `entries` field and never descends into the elements.
+ *
+ * ⚠️ **v0.20 检视 B · D-3**：此前这条门禁**根本比不到**元素的字段名
+ * （`Event.disasm([])` 传的是**空数组**）⇒ 把 Rust 侧的 `mnemonic` 改名成
+ * `mnem`（同步改 Rust 自测），**前端门禁 228/228 全绿** ⇒ Rust 改而 JS
+ * 忘改 ⇒ 线上字段名不匹配 ⇒ **静默**。
+ * ⇒ 门禁现在喂**非空**数组，元素字段名被钉住。
+ *
+ * @param {{addr?: number, code?: number, mnemonic?: string, width?: number}} e
+ * @returns {{addr: number, code: number, mnemonic: string, width: number}}
+ */
+export function disasmEntry(e) {
+    return {
+        addr: Number(e?.addr),
+        code: Number(e?.code) >>> 0,
+        mnemonic: String(e?.mnemonic ?? ""),
+        width: Number(e?.width),
+    };
+}
+
 /** Event payload builders. Same shape rule as `Command`. */
 export const Event = Object.freeze({
     /** `EventPayload::Tick { elapsed_ps, pc }` — `elapsed_ps` 走十进制字符串。 */
@@ -426,12 +452,7 @@ export const Event = Object.freeze({
      */
     disasm: (entries) => ({
         Disasm: {
-            entries: (entries ?? []).map((e) => ({
-                addr: Number(e?.addr),
-                code: Number(e?.code) >>> 0,
-                mnemonic: String(e?.mnemonic ?? ""),
-                width: Number(e?.width),
-            })),
+            entries: (entries ?? []).map((e) => disasmEntry(e)),
         },
     }),
     /**

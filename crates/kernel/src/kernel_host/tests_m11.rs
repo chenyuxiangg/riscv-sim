@@ -23,6 +23,7 @@ use riscv_sim_contract::model::{
     TraceSource,
 };
 use riscv_sim_contract::protocol::CommandPayload;
+use riscv_sim_contract::session::{CheckpointMetaDto, SESSION_SNAPSHOT_SCHEMA_VERSION};
 
 use crate::m11_symbol::disasm::E_CTX_02_DISASM_COUNT_EXCEEDED;
 use crate::m11_symbol::MAX_DISASM_COUNT;
@@ -813,7 +814,228 @@ fn a_project_without_debug_sections_still_loads() {
 }
 
 // ---------------------------------------------------------------------------
-// 11. 主题常量（STAGE-5 §3.5 / §9.6）
+// 11. 检视 A 的三条修复的判别式
+// ---------------------------------------------------------------------------
+
+/// 一条**自环**指令（`beq x0, x0, -4`）—— PC 永远回到自己 ⇒ 访客可以
+/// 一直跑下去（不会跑完、不会撞到未映射地址）。
+///
+/// ⚠️ 编码是**手算**的（B 型立即数）：`imm = -4` ⇒ `imm[12:1] = 0xFFE`
+/// ⇒ `imm[12]=1`（bit31）· `imm[11]=1`（bit7）· `imm[10:5]=0b111111`
+/// （bit30:25）· `imm[4:1]=0b1111`（bit11:8）。
+const SELF_LOOP: u32 = 0xFE00_0FE3;
+
+/// 造一个跑着**自环**固件的工程。
+fn loop_project() -> Project {
+    Project {
+        id: "proj-m11-loop".to_string(),
+        name: "m11-loop".to_string(),
+        tree: ProductTree::default(),
+        images: vec![ImageRef {
+            name: "loop.bin".to_string(),
+            kind: ImageKind::RawHex,
+            source: ImageSource::Bytes(SELF_LOOP.to_le_bytes().to_vec()),
+        }],
+        version: ProjectVersion::default(),
+    }
+}
+
+#[test]
+fn a_long_step_batch_keeps_the_invalidation_channel_lossless() {
+    // ⚠️ **失效通道必须永远无损**（v0.20 检视 A · 重要 1）：
+    // M-18 的访存环是**有界**的（`TRACE_CAP = 200_000`，溢出丢最旧）⇒ 它
+    // 同时是**反汇编缓存的失效通道**（裁决 G：访存写事件 ⇒ 失效对应地址）
+    // ⇒ 环一溢出，写事件就被丢掉 ⇒ 缓存条目不失效 ⇒ **反汇编给出旧机器码**
+    // （调试器给出**错误**的指令）。
+    //
+    // ⇒ `StepN` 按指令预算**分块** ⇒ 单块事件数 ≪ 环的容量 ⇒ 环**不溢出**。
+    let mut host = KernelHost::new();
+    dispatch(&mut host, CommandPayload::LoadProject(loop_project()));
+
+    // 25 万条指令 ⇒ 不分块的话，访存环（20 万条）**必然溢出**。
+    dispatch(&mut host, CommandPayload::StepN { n: 250_000 });
+
+    assert_eq!(
+        host.probe_trace_dropped(),
+        0,
+        "访存环**不许溢出**（否则缓存的失效通道有损 ⇒ 反汇编给出旧机器码）"
+    );
+}
+
+#[test]
+fn restoring_a_session_invalidates_the_m11_session_scoped_state() {
+    // ⚠️ **还原会话 = 新会话** ⇒ M-11 的**会话级**缓存与历史必须作废
+    // （STAGE-5 §9.2 的同一条规矩：「新会话 ⇒ 旧的索引全部作废」）。
+    let mut host = KernelHost::new();
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+
+    // 先反汇编（缓存里有条目）+ 跑几条（轨迹环里有历史）。
+    dispatch(&mut host, CommandPayload::Disasm { addr: 0, count: 3 });
+    assert_eq!(host.disasm_cache_len(), 3, "三条指令都该进缓存");
+    dispatch(&mut host, CommandPayload::StepN { n: 3 });
+    assert!(host.trace_len() > 0, "轨迹环里该有历史");
+
+    // 采集 + 还原。
+    let payload = host.capture_session(CheckpointMetaDto {
+        id: 1,
+        t_virt: 0,
+        t_host: 0,
+        base_seq: 0,
+        version: SESSION_SNAPSHOT_SCHEMA_VERSION,
+    });
+    host.restore_session(&payload).expect("还原必须成功");
+
+    assert_eq!(
+        host.disasm_cache_len(),
+        0,
+        "还原后反汇编缓存必须作废（否则 `Disasm` 给出**上个会话**的机器码）"
+    );
+    assert_eq!(
+        host.trace_len(),
+        0,
+        "还原后轨迹环必须清空（否则两个会话的轨迹混在一起，而 `overflow_marked` 仍说「没溢出」）"
+    );
+}
+
+#[test]
+fn the_trace_instruction_code_matches_the_disassembly_entry() {
+    // ⚠️ **取指口径只有一份实现**（M-11 的 `disasm::fetch_instruction_code`）：
+    // 访存轨迹里的机器码必须与反汇编条目的机器码**逐字段相同**。
+    // 压缩指令尤其要验：**16 位原码**，不是展开后的 32 位形式。
+    let mut host = KernelHost::new();
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+
+    // 把一条**压缩指令**写到地址 0 ⇒ 访客第一条取指就是它。
+    dispatch(
+        &mut host,
+        CommandPayload::WriteMemory {
+            addr: 0,
+            size: WriteSize::Half,
+            value: COMPRESSED_CODE,
+        },
+    );
+    dispatch(&mut host, CommandPayload::StepN { n: 1 });
+
+    // 反汇编条目。
+    let events = dispatch(&mut host, CommandPayload::Disasm { addr: 0, count: 1 });
+    let entries = disasm_entries(&events);
+    assert_eq!(entries[0].code, COMPRESSED_CODE, "16 位原码");
+    assert_eq!(entries[0].width, 2);
+
+    // 访存轨迹里的**指令**条目。
+    let events = dispatch(
+        &mut host,
+        CommandPayload::ExportTrace {
+            source: TraceSource::Execution,
+            format: TraceFormat::Csv,
+            offset: 0,
+            limit: 0,
+        },
+    );
+    let (_s, _f, _o, _n, _t, chunk, _ov) = trace_export(&events);
+    let row = chunk
+        .lines()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .find(|l| l.split(',').nth(2) == Some("instruction"))
+        .unwrap_or_else(|| panic!("轨迹里没有指令条目：{chunk}"));
+    let cols: Vec<&str> = row.split(',').collect();
+    assert_eq!(
+        cols[3].parse::<u32>().expect("机器码列"),
+        entries[0].code,
+        "轨迹里的机器码必须与反汇编条目**逐字段相同**（同一条取指口径）：{row}"
+    );
+}
+
+#[test]
+fn the_waveform_vcd_export_produces_a_vcd_product() {
+    // ⚠️ **合法组合必须真的产出那种格式**（v0.20 检视 B · D-1）：
+    // 规格 §5.2 #12 要求「`format=Vcd` ⇒ 合法」——但「**合法**」不等于
+    // 「**返回的是 VCD**」⇒ 把 `export_vcd` 换成 `export_csv`，**795 + 5 条
+    // 用例全绿** ⇒ 那条分支**没有判别力**。
+    let mut host = KernelHost::new();
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    dispatch(&mut host, CommandPayload::StepN { n: 8 });
+
+    let events = dispatch(
+        &mut host,
+        CommandPayload::ExportTrace {
+            source: TraceSource::Waveform,
+            format: TraceFormat::Vcd,
+            offset: 0,
+            limit: 0,
+        },
+    );
+    assert_eq!(events.len(), 1);
+    let (source, format, _o, _n, _t, chunk, _ov) = trace_export(&events);
+    assert_eq!(source, TraceSource::Waveform);
+    assert_eq!(format, TraceFormat::Vcd);
+    // ⚠️ **VCD 的形状**：时间标度 + 变量声明 + 定义结束。
+    assert!(chunk.contains("$timescale"), "VCD 必须有时间标度：{chunk}");
+    assert!(chunk.contains("$var"), "VCD 必须有变量声明：{chunk}");
+    assert!(
+        chunk.contains("$enddefinitions $end"),
+        "VCD 必须有定义结束：{chunk}"
+    );
+    assert!(
+        !chunk.contains("time_ps,addr,kind,data,width"),
+        "波形导出走 VCD 时**不许**是执行轨迹的 CSV 表头：{chunk}"
+    );
+}
+
+#[test]
+fn the_waveform_export_event_propagates_the_overflow_marker() {
+    // ⚠️ **「窗口不完整」的标记必须原样传出去**（v0.20 检视 B · D-2）：
+    // 把 `overflow_marked` 改成 `false`，**795 + 5 条用例全绿** ⇒
+    // `Waveform` 这一侧的标记**没有判别力**（只有 `Execution` 侧有断言）。
+    //
+    // ⇒ 这里直接喂一个**人造**的 `ExportHandle`（`overflow_marked = true`）
+    //    把那条映射**单独**钉住。
+    let handle = crate::m19_waveform::export::ExportHandle {
+        chunk: "x".to_string(),
+        next_offset: 3,
+        total: 9,
+        done: false,
+        progress_pct: 33,
+        overflow_marked: true,
+        dropped_ranges: Vec::new(),
+    };
+    let EventPayload::TraceExport {
+        overflow_marked, ..
+    } = waveform_export_event(handle, TraceFormat::Csv, 0)
+    else {
+        panic!("必须是 TraceExport 事件");
+    };
+    assert!(overflow_marked, "窗口不完整的标记必须传出去");
+}
+
+#[test]
+fn the_host_can_look_up_a_symbol_by_address() {
+    // ⚠️ **验收 #6 的生产路径**（v0.20 检视 B · D-4）：`SymbolService` 端口
+    // 此前**全仓 0 处实现** ⇒ 「按地址查符号」这条能力**只在 M-11 单元层**
+    // 被覆盖，**宿主根本没有它** ⇒ 与 D-50 / D-51 同形的「实现了 ≠ 接上了」。
+    let mut host = KernelHost::new();
+    let (symtab, strtab) = elf_symbol_table(&["alpha"]);
+    dispatch(
+        &mut host,
+        CommandPayload::LoadProject(elf_project(&[(".symtab", symtab), (".strtab", strtab)])),
+    );
+
+    let hit = host.symbol_at(0x1000).expect("按地址必须查得到");
+    assert_eq!(hit.name, "alpha");
+    assert_eq!(hit.addr, Some(0x1000));
+    // 比所有符号的起始地址都小 ⇒ `None`（**不是错误**）。
+    assert!(host.symbol_at(0x0).is_none());
+    // 按名字查（同一个端口）也要通。
+    assert_eq!(
+        host.lookup_symbol("alpha").map(|s| s.name),
+        Some("alpha".to_string())
+    );
+    assert!(host.lookup_symbol("nope").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// 12. 主题常量（STAGE-5 §3.5 / §9.6）
 // ---------------------------------------------------------------------------
 
 #[test]

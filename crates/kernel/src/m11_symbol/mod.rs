@@ -76,3 +76,30 @@ pub trait SymbolService {
 
 /// Family used by errors raised from this module.
 pub const SYMBOL_FAMILY: ErrorFamily = ErrorFamily::Loader;
+
+/// [`SymbolService`] 的**生产实现**——`SymbolTable` 自己的适配器。
+///
+/// ⚠️ **为什么要有这一层**（v0.20 检视 B · D-4）：`SymbolService` 是 M-11
+/// 对外的**端口**（LLD §9.1），但此前**全仓 0 处实现** ⇒ 端口是**死代码**
+/// ⇒ 「按地址查符号」这条能力**没有生产路径**（验收 #6 只在 M-11 单元层
+/// 被覆盖）。
+///
+/// ⇒ 宿主走**这个端口**取符号 ⇒ 端口有实现者、也有调用者。
+impl SymbolService for SymbolTable {
+    fn resolve_line(&self, _addr: u32) -> Result<LineLookup, PlatformError> {
+        // ⚠️ **Wave 1 的诚实口径**：M-11 的 `DwarfLines::resolve` 恒返回
+        // 降级态（真正的行表解析是 Wave 2）⇒ 端口这一侧**恒**是
+        // `NoDwarf` ⇒ **绝不**返回 `Missed`（那等于宣称「查过行表、没命中」）。
+        Ok(LineLookup::NoDwarf)
+    }
+
+    fn lookup_symbol(&self, name: &str) -> Result<Option<Symbol>, PlatformError> {
+        // ⚠️ 未知名 ⇒ `None`（**不是错误**，验收 #7）。
+        Ok(self.lookup(name).cloned())
+    }
+
+    fn symbol_at(&self, addr: u32) -> Result<Option<Symbol>, PlatformError> {
+        // ⚠️ 命中「起始地址 ≤ `addr` 且最近的那个」；比所有符号都小 ⇒ `None`。
+        Ok(self.at(addr).cloned())
+    }
+}

@@ -93,6 +93,24 @@ function rustSchemaVersion() {
 /** 契约层（Rust）的协议版本。 */
 const contractSchemaVersion = rustSchemaVersion();
 
+/**
+ * M-11 的执行轨迹 **CSV 表头** —— 从 Rust 源码推导。
+ *
+ * ⚠️ **不写死**（v0.20 检视 B · D-7）：门禁脚本里抄一份表头 ⇒ 改表头时
+ * 门禁**误红**（而错不在被测代码）⇒ 一个会自己坏的断言比没有还糟。
+ */
+function rustTraceCsvHeader() {
+    const src = readFileSync(
+        resolve(repoRoot, "crates/kernel/src/m11_symbol/trace.rs"),
+        "utf8",
+    );
+    const m = /pub const CSV_HEADER:\s*&str\s*=\s*"([^"]+)"/.exec(src);
+    if (!m) {
+        throw new Error("读不到 M-11 的 CSV_HEADER（crates/kernel/src/m11_symbol/trace.rs）");
+    }
+    return m[1];
+}
+
 let failures = 0;
 
 /**
@@ -435,7 +453,7 @@ check(
     check("ExportTrace 回一个 TraceExport 事件", exported !== undefined);
     check(
         "执行轨迹导出带 CSV 表头",
-        chunk.startsWith("time_ps,addr,kind,data,width"),
+        chunk.startsWith(rustTraceCsvHeader()),
         `实际 ${JSON.stringify(chunk.slice(0, 80))}`,
     );
     check(

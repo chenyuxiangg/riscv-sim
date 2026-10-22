@@ -66,6 +66,35 @@ pub const DISASM_FAMILY: ErrorFamily = ErrorFamily::Context;
 /// 同族同义。
 pub const E_CTX_02_DISASM_COUNT_EXCEEDED: u16 = 2;
 
+/// 取一条指令的机器码（**原码**）—— **取指口径的唯一实现**。
+///
+/// ⚠️ **口径**（LLD 11-1）：先读 2 字节判宽度（低 2 位 ≠ `0b11` ⇒ 压缩
+/// 指令，16 位原码就够），否则再读 4 字节。
+///
+/// ⚠️ **必须真的只读 `size` 字节**：「读一个字取低半」会让映射区**末端**的
+/// 压缩指令越界 ⇒ 被误报成「未映射」（LLD 11-1）。
+///
+/// ⚠️ **为什么是自由函数而不是方法**：这条规则**有两处消费者** ——
+/// [`Disassembler::disasm`]（要区分「读失败 ⇒ 序列截断」）与宿主的访存
+/// 轨迹转移（要机器码，失败时按「未知」处理）⇒ 规则**只写一遍**，两处
+/// 调用它 ⇒ **不存在「两份规则漂移」**。
+///
+/// ⚠️ 读不到 ⇒ `None`（**不是** 0）。`0` **不是**一条真的指令（全零的低
+/// 2 位是 `0b00` ⇒ 非法压缩指令）⇒ 它唯一可能的含义是「取指失败，机器码
+/// 未知」。**不猜值**（与 M-11 对访存值的口径一致）。
+pub fn fetch_instruction_code(
+    read: &mut impl FnMut(u32, u32) -> Result<u32, PlatformError>,
+    addr: u32,
+) -> Option<u32> {
+    let half = read(addr, 2).ok()?;
+    if half & 0b11 != 0b11 {
+        // 压缩指令：16 位原码就够了。
+        return Some(half & 0xFFFF);
+    }
+    // 32 位指令：补读 4 字节。
+    read(addr, 4).ok()
+}
+
 /// 反汇编器：按地址缓存已解码的指令条目。
 #[derive(Debug, Default)]
 pub struct Disassembler {
@@ -131,19 +160,8 @@ impl Disassembler {
             }
 
             // 先读 2 字节判宽度（见模块文档「取指口径」）。
-            let half = match read(cursor, 2) {
-                Ok(word) => word,
-                Err(_) => break,
-            };
-            let raw = if half & 0b11 != 0b11 {
-                // 压缩指令：16 位原码就够了。
-                half & 0xFFFF
-            } else {
-                // 32 位指令：补读 4 字节。
-                match read(cursor, 4) {
-                    Ok(word) => word,
-                    Err(_) => break,
-                }
+            let Some(raw) = fetch_instruction_code(read, cursor) else {
+                break;
             };
 
             let decoded = self.decoder.decode(raw, cursor);

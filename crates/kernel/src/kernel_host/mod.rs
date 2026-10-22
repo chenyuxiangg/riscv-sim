@@ -139,13 +139,14 @@ use riscv_sim_contract::protocol::{
 use riscv_sim_contract::session::{
     CheckpointMetaDto, M13StateDto, M14MapDto, M15PeriphDto, M16IntcDto, SessionSnapshotDto,
 };
-use riscv_sim_contract::snapshot::EngineSnapshotDto;
+use riscv_sim_contract::snapshot::{EngineSnapshotDto, DEFAULT_INSTRUCTION_BUDGET};
 use riscv_sim_contract::SCHEMA_VERSION;
 
 use crate::m06_elf::{DefaultLoader, Kind as LoadKind, ParseLimits};
+use crate::m11_symbol::disasm::fetch_instruction_code as m11_fetch_instruction_code;
 use crate::m11_symbol::trace::{E_CTX_03_ILLEGAL_EXPORT_FORMAT, TRACE_FAMILY};
 use crate::m11_symbol::{
-    Disassembler, DwarfLines, LineLookup, SymbolTable, TraceBuffer, TRACE_CAP,
+    Disassembler, DwarfLines, LineLookup, SymbolService, SymbolTable, TraceBuffer, TRACE_CAP,
 };
 use crate::m14_bus::{Bus, BusWidth};
 use crate::m15_peripheral;
@@ -917,11 +918,23 @@ impl KernelHost {
         self.symbols.len()
     }
 
-    /// 按**名字**查符号（M-11 的符号表）。
+    /// 按**名字**查符号（走 M-11 的 [`SymbolService`] **端口**）。
     ///
     /// 未知名 ⇒ `None`（**不是错误**，验收 #7）。
-    pub fn lookup_symbol(&self, name: &str) -> Option<&riscv_sim_contract::model::Symbol> {
-        self.symbols.lookup(name)
+    ///
+    /// ⚠️ **走端口而不是直接摸 `SymbolTable`**（v0.20 检视 B · D-4）：端口
+    /// 此前**全仓 0 处实现** ⇒ 它是**死代码**，「按地址查符号」这条能力
+    /// 也**没有生产路径**。⇒ 宿主走端口 ⇒ 端口有实现者、也有调用者。
+    pub fn lookup_symbol(&self, name: &str) -> Option<riscv_sim_contract::model::Symbol> {
+        self.symbols.lookup_symbol(name).ok().flatten()
+    }
+
+    /// 按**地址**查符号（走 M-11 的 [`SymbolService`] **端口**）—— 命中
+    /// 「起始地址 ≤ `addr` 且**最近**的那个」。
+    ///
+    /// 比所有符号的起始地址都小 ⇒ `None`（**不是错误**）。
+    pub fn symbol_at(&self, addr: u32) -> Option<riscv_sim_contract::model::Symbol> {
+        self.symbols.symbol_at(addr).ok().flatten()
     }
 
     /// M-11 的 DWARF 状态（`None` = 这个会话没有 DWARF）。
@@ -954,6 +967,22 @@ impl KernelHost {
             .as_ref()
             .and_then(|reg| reg.try_borrow().ok())
             .map(|reg| reg.trace_len())
+            .unwrap_or(0)
+    }
+
+    /// M-18 的访存 trace 环**累计丢了多少条**（环溢出，丢最旧）。
+    ///
+    /// ⚠️ **非零 = 失效通道有损**（v0.20 检视 A · 重要 1）：这个环同时是
+    /// **反汇编缓存的失效通道**（裁决 G：访存写事件 ⇒ 失效对应地址）⇒
+    /// 写事件被丢掉 ⇒ 缓存条目不失效 ⇒ **反汇编给出旧机器码**。
+    ///
+    /// ⇒ 宿主把 `StepN` 按指令预算**分块**（[`KernelHost::step_in_chunks`]）
+    /// ⇒ 单块事件数 ≪ 环的容量 ⇒ 这个数**恒为 0**。
+    pub fn probe_trace_dropped(&self) -> u64 {
+        self.probes
+            .as_ref()
+            .and_then(|reg| reg.try_borrow().ok())
+            .map(|reg| reg.trace_dropped())
             .unwrap_or(0)
     }
 
@@ -1297,7 +1326,7 @@ impl KernelHost {
         // 两条路径共用同一个执行器（`m17_backend::IssExecutor`），所以
         // 「按指令跑」与「按时间跑」不会各自长出一套 ISS 逻辑（D-07）。
         let run = match steps {
-            Some(n) => self.backend.step_n(n).map(|_| ()),
+            Some(n) => self.step_in_chunks(n),
             None => self.backend.continue_until_event(),
         };
         match run {
@@ -1341,6 +1370,41 @@ impl KernelHost {
             events.push(EventPayload::Halted { reason, pc });
         }
         events
+    }
+
+    /// 跑 `n` 条指令，**按指令预算分块**（`DEFAULT_INSTRUCTION_BUDGET`）。
+    ///
+    /// ⚠️ **为什么要分块**（v0.20 检视 A · 重要 1）：
+    /// M-18 的访存 trace 环是**有界**的（`TRACE_CAP = 200_000`，溢出丢最旧）
+    /// ⇒ 它同时是**反汇编缓存的失效通道**（裁决 G：访存写事件 ⇒ 失效对应
+    /// 地址）⇒ 环一旦溢出，**写事件被丢掉 ⇒ 缓存条目不失效 ⇒ 反汇编给出
+    /// 旧机器码**（调试器给出**错误**的指令）。
+    ///
+    /// ⇒ 分块 ⇒ 每块至多 `DEFAULT_INSTRUCTION_BUDGET`（10 000）条指令，
+    /// 每条至多 5 次总线访问（1 次取指 + 至多 4 个非对齐字节片）⇒ 单块
+    /// 事件数 ≤ 50 000 ≪ 200 000 ⇒ **失效通道永远无损**。
+    ///
+    /// ⚠️ **顺带消掉一处上界不对称**：`Continue` 走时间驱动主循环，一轮就是
+    /// `DEFAULT_INSTRUCTION_BUDGET` 条；而 `StepN` 此前**无上界** ⇒ 一条
+    /// `StepN { n: 500000 }` 能把宿主堵住很久，并让上面的环溢出。
+    ///
+    /// ⚠️ **语义不变**：仍然「恰好 n 条」——中途撞上断点 / 观察点 / 陷阱 /
+    /// 暂停就**停在那里**，剩下的**不**跑（与一次性 `step_n(n)` 一致）。
+    fn step_in_chunks(&mut self, n: u32) -> Result<(), PlatformError> {
+        let mut remaining = n;
+        while remaining > 0 {
+            let chunk = remaining.min(DEFAULT_INSTRUCTION_BUDGET);
+            let executed = self.backend.step_n(chunk)?;
+            remaining -= executed;
+            // ⚠️ **块没跑满 ⇒ 提前停**（停止条件命中）⇒ 剩下的**不**再跑。
+            if executed < chunk {
+                break;
+            }
+            // ⚠️ **块间转移**（D-51：drain 与转移必须同时发生）⇒ M-18 的
+            // 环不会涨到它的上限 ⇒ 失效通道保持无损。
+            self.transfer_trace();
+        }
+        Ok(())
     }
 
     /// 宿主请求暂停。
@@ -1585,19 +1649,7 @@ impl KernelHost {
             // 上面已经拒了。
             TraceFormat::Json => unreachable!("JSON 波形导出在上面已被拒绝"),
         };
-        vec![EventPayload::TraceExport {
-            source: TraceSource::Waveform,
-            format,
-            // ⚠️ M-19 的 `ExportHandle` **没有** `offset` 字段 ⇒ 用**请求
-            // 里的** offset 回显（它就是本块的起点）。
-            offset,
-            next_offset: handle.next_offset as u64,
-            total: handle.total as u64,
-            // ⚠️ M-19 的 `ExportHandle` **没有** `bytes` 字段 ⇒ 用块的长度。
-            bytes: handle.chunk.len() as u64,
-            chunk: handle.chunk,
-            overflow_marked: handle.overflow_marked,
-        }]
+        vec![waveform_export_event(handle, format, offset)]
     }
 
     /// 执行轨迹导出（`source = Execution`）—— 数据源 = **M-11 的轨迹环**。
@@ -1714,8 +1766,10 @@ impl KernelHost {
     /// ⚠️ 缓存里的 `code` 是**原码**（压缩指令 = 16 位原码），与下面现场
     /// 取指的口径**一致** ⇒ 两条路给出同一个值。
     ///
-    /// ⚠️ **与 `disasm` 同一个取指口径**（下面）：先读 2 字节判宽度（低
-    /// 2 位 ≠ `0b11` ⇒ 压缩指令，16 位原码就够），否则再读 4 字节。
+    /// ⚠️ **取指口径只有一份实现**（M-11 的 `disasm::fetch_instruction_code`
+    ///）：先读 2 字节判宽度（低 2 位 ≠ `0b11` ⇒ 压缩指令，16 位原码就够），
+    /// 否则再读 4 字节。⚠️ **必须真的只读 `size` 字节**（「读一个字取低半」
+    /// 会让映射区**末端**的压缩指令越界 ⇒ 被误报成「未映射」，LLD 11-1）。
     ///
     /// ⚠️ 读不到 ⇒ `0`。`0` **不是**一条真的指令（全零的低 2 位是
     /// `0b00` ⇒ 非法压缩指令）⇒ 它唯一可能的含义是「取指失败，机器码
@@ -1725,13 +1779,8 @@ impl KernelHost {
             return entry.code;
         }
         let bus = self.backend.bus();
-        let Ok(half) = bus.read_only(addr, BusWidth::Half) else {
-            return 0;
-        };
-        if half & 0b11 != 0b11 {
-            return half & 0xFFFF;
-        }
-        bus.read_only(addr, BusWidth::Word).unwrap_or(0)
+        let mut read = |addr: u32, size: u32| fetch_bytes(bus, addr, size);
+        m11_fetch_instruction_code(&mut read, addr).unwrap_or(0)
     }
 
     /// 重建 M-11 的索引（装载工程时**无条件**重建，STAGE-5 §9.2）。
@@ -2088,6 +2137,24 @@ impl KernelHost {
         // ---- 第 3 步：外设内部状态（按 id 双向匹配；检查全在写入之前）。 ----
         m15_peripheral::restore_session_states(&instances, &payload.m15_periph)?;
 
+        // ---- 第 3.5 步：作废 M-11 的**会话级**缓存与历史。 ----
+        //
+        // ⚠️ 还原会**换掉内存里的机器码** ⇒ 反汇编缓存里那些按地址缓存的
+        // 条目**可能陈旧** ⇒ 必须**作废**（否则 `Disasm` 给出**上个会话**的
+        // 指令 ⇒ 调试器给出**错误**的指令）。
+        //
+        // ⚠️ 轨迹环是**会话级历史** ⇒ 还原后是**新会话** ⇒ 旧历史必须
+        // **清空**（否则两个会话的轨迹混在一起，而 `overflow_marked` 仍说
+        // 「没溢出」⇒ 前端会把不连续的轨迹当完整会话）。
+        //
+        // ⚠️ **符号表与行表是「工程级」的**（它们来自已装载工程的 ELF，
+        // 还原会话**不换工程**）⇒ **保留**，不清。
+        //
+        // ⚠️ 这与 STAGE-5 §9.2 是**同一条规矩**（「装载新工程 = 新会话 ⇒
+        // 旧的索引全部作废」）：还原会话也是新会话。
+        self.disassembler = Disassembler::new();
+        self.trace.clear();
+
         // ---- 第 4 步：已拉起的 IRQ 行。 ----
         self.load_intc_state(&payload.m16_intc)?;
 
@@ -2214,6 +2281,39 @@ fn illegal_export(message: &str) -> PlatformError {
         E_CTX_03_ILLEGAL_EXPORT_FORMAT,
         message.to_string(),
     )
+}
+
+/// M-19 的 `ExportHandle` → 契约的 `TraceExport` 事件（**唯一的映射点**）。
+///
+/// ⚠️ **为什么抽成自由函数**：这条映射里有**两处**「形状对不上」需要人工
+/// 翻译 —— M-19 的 `ExportHandle` **没有** `offset` 字段（用请求里的回显）
+/// **也没有** `bytes` 字段（用块的长度）。把它们藏在一个方法里 ⇒ 没人能
+/// 单独测这条映射 ⇒ **v0.20 检视 B 实测**：把 `overflow_marked` 改成
+/// `false`，**795 + 5 条用例全绿** ⇒ 「导出窗口不完整却没人知道」正是
+/// 这个字段要防的事，而它在 `Waveform` 这一侧**没有判别力**。
+///
+/// ⚠️ 抽出来之后，那条映射**可以被单独钉住**（见 `waveform_export_event`
+/// 的用例）。
+fn waveform_export_event(
+    handle: crate::m19_waveform::export::ExportHandle,
+    format: TraceFormat,
+    offset: u64,
+) -> EventPayload {
+    EventPayload::TraceExport {
+        source: TraceSource::Waveform,
+        format,
+        // ⚠️ M-19 的 `ExportHandle` **没有** `offset` 字段 ⇒ 用**请求
+        // 里的** offset 回显（它就是本块的起点）。
+        offset,
+        next_offset: handle.next_offset as u64,
+        total: handle.total as u64,
+        // ⚠️ M-19 的 `ExportHandle` **没有** `bytes` 字段 ⇒ 用块的长度。
+        bytes: handle.chunk.len() as u64,
+        chunk: handle.chunk,
+        // ⚠️ **窗口不完整的标记必须原样传出去**（D-50 那一侧的「不完整」
+        // 也得看得见）——这一行**曾经**没有任何判别力。
+        overflow_marked: handle.overflow_marked,
+    }
 }
 
 /// 「M-19 的波形管道不可用」的错误（`E_OBS-02`）。

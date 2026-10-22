@@ -39,6 +39,7 @@ import {
     eventTopic,
     waveform,
     deltaRegister,
+    disasmEntry,
 } from "../lib/message.js";
 import { encodeFrame, decodeFrame, FRAME_TYPE } from "../lib/frame.js";
 import { buildMockProject } from "../dev/mock-project.js";
@@ -50,6 +51,22 @@ const repoRoot = resolve(frontDir, "..");
 const protocolRs = resolve(repoRoot, "crates/contract/src/protocol.rs");
 const modelRs = resolve(repoRoot, "crates/contract/src/model.rs");
 const snapshotRs = resolve(repoRoot, "crates/contract/src/snapshot.rs");
+const libRs = resolve(repoRoot, "crates/contract/src/lib.rs");
+
+/**
+ * 契约层（Rust）的 `SCHEMA_VERSION` —— **从源码推导**，不抄。
+ *
+ * ⚠️ **为什么不能抄**（v0.20 检视 B · D-7）：此前这条门禁写死
+ * `SCHEMA_VERSION === 3` ⇒ 契约升 v4 时它会**误红**（而错不在 JS 镜像），
+ * 于是人要么去改断言、要么把门禁删掉 ⇒ **一个会自己坏的断言**比没有还糟。
+ * ⇒ 唯一真相是契约层源码（`tools/wasm-smoke.mjs` 已经这么做了）。
+ */
+function rustSchemaVersion() {
+    const src = readFileSync(libRs, "utf8");
+    const m = /pub const SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/.exec(src);
+    assert.notEqual(m, null, "契约里读不到 SCHEMA_VERSION");
+    return Number(m[1]);
+}
 const hasRust = existsSync(protocolRs) && existsSync(modelRs);
 
 /**
@@ -266,8 +283,10 @@ function rustFieldDeclarations(source, containerName) {
 }
 
 describe("Message 信封（与 crates/contract 逐字对齐）", () => {
-    test("JS 镜像的 schema 版本是 3（契约 v3 · M-11 调试面）", () => {
-        assert.equal(SCHEMA_VERSION, 3);
+    test("JS 镜像的 schema 版本与契约层一致（契约 v3 · M-11 调试面）", () => {
+        // ⚠️ **不写死数字**：契约层升版时这条断言**不该**变红（错的不是
+        // JS 镜像）—— 见 `rustSchemaVersion()` 的说明。
+        assert.equal(SCHEMA_VERSION, rustSchemaVersion());
     });
 
     test("信封字段名与 Rust Message 完全一致", () => {
@@ -553,6 +572,12 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             // `DeltaRegister` 嵌在 `SimStateDelta` 的 `registers[]` 里
             // ——变体级的字段名检查只比**外层**，进不到元素里（F3）。
             ["DeltaRegister", deltaRegister(1, 42)],
+            // ⚠️ `DisasmEntryDto` 嵌在 `Disasm` 的 `entries[]` 里
+            // ——同样进不到元素里（v0.20 检视 B · D-3：把 Rust 侧的
+            // `mnemonic` 改名成 `mnem`，**前端门禁 228/228 全绿** ⇒
+            // Rust 改而 JS 忘改 ⇒ 线上字段名不匹配 ⇒ **静默**）。
+            // ⇒ 这里**造一个非空**的 `entries[]`，把元素字段名也钉住。
+            ["DisasmEntryDto", disasmEntry({ addr: 0, code: 0x02a00093, mnemonic: "addi ra,zero,42", width: 4 })],
         ];
         for (const [structName, dto] of cases) {
             assert.deepEqual(
