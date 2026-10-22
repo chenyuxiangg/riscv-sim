@@ -41,7 +41,7 @@ LLD 给了 M-11 四项职责（符号表 / DWARF 行表 / 反汇编 / trace 导�
 
 | 编号 | 内容 |
 | --- | --- |
-| **W2.1** | **M-11 DWARF 行表**：解析 `.debug_line`（**v2 / v3 / v4**，裁决 F）⇒ `resolve_line`（两态区分：无 DWARF `{NULL,0}` vs 未命中 `{NULL,0xFFFFFFFF}`，LLD 11-4） |
+| **W2.1** | **M-11 DWARF 行表**：解析 `.debug_line`（**v2 / v3 / v4**，裁决 F ⚠️ **v5 已由 STAGE-7 裁决 A 扩进支持集**）⇒ `resolve_line`（两态区分：无 DWARF `{NULL,0}` vs 未命中 `{NULL,0xFFFFFFFF}`，LLD 11-4） |
 | **W2.2** | **前端源码高亮**：单步 / 断点暂停后按 `resolve_line` 结果高亮源码行 |
 
 > ⚠️ **契约一次定型**：Wave 1 就把 `ResolveLine` 命令与对应事件加进契约（Wave 1 时**恒返回降级态**），Wave 2 **只改 M-11 内部实现** ⇒ `schema_version` 本批**只升一次**（2 → 3），Wave 2 不再升。
@@ -49,7 +49,9 @@ LLD 给了 M-11 四项职责（符号表 / DWARF 行表 / 反汇编 / trace 导�
 ### 明确不做（本批 out of scope）
 
 - **伪指令别名**（`mv` / `li` / `ret` / `j`）——裁决 C 排除。
-- **DWARF v5** 行表（`.debug_line_str` + v5 行表头）——裁决 F 明确降级。
+- **DWARF v5** 行表（`.debug_line_str` + v5 行表头）——裁决 F 明确降级
+  ⚠️ **已作废**：v5 已由 **STAGE-7 裁决 A** 扩进支持集（v0.22 Wave 2a 批落地）。
+  ⚠️ **已作废**：v5 已由 **STAGE-7 裁决 A** 扩进支持集（v0.22 Wave 2a 批落地）。
 - **`.debug_info` / DWARF 表达式 / 变量值读取**（GDB 式的变量检查）——不做。
 - **trace 压缩 / 持久化**（LLD 预留 P2）。
 - **JSON 导出的 schema 版本化**（LLD 预留 P2）。
