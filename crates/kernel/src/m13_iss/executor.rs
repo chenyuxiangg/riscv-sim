@@ -1128,7 +1128,22 @@ pub fn execute_one<M: MemoryAccess>(
         Op::Mret => {
             // `pc := mepc`; `mstatus.MIE := mstatus.MPIE`;
             // `mstatus.MPIE := 1`.
-            let target = csr::csr_read(state, CSR_MEPC);
+            //
+            // ⚠️ **`mepc` 的对齐掩码只发生在这里**（台账 D-93 / STAGE-7 裁决 I）。
+            //
+            // **写侧不掩码**：`csrr mepc` 必须读回写入的**精确**值（handler
+            // 要能看到真实的出错地址），陷入门也写**精确的 PC**（见
+            // [`csr::csr_write_raw`]）。
+            //
+            // **掩码按 IALIGN**：特权规范说 `mret` 取 PC 时按 IALIGN 清低位。
+            // 本平台的 `misa` = `0x40001104` **声明支持 C 扩展** ⇒ IALIGN = 16
+            // ⇒ 只清**最低 1 位**（[`csr::mepc_aligned`]），**不是**低两位。
+            //
+            // **参考侧实测**（Spike，同一个探针 ELF 两侧跑）：一条位于
+            // `0x8000014a` 的压缩指令取陷阱后，`mret` 落回 `4k+2`（不是 `4k`）
+            // ⇒ 掩码确实是 `~1`。若这里写成 `~3`，压缩指令的陷入返回会
+            // **落进指令中间**。
+            let target = csr::mepc_aligned(state);
             let mstatus = csr::csr_read(state, CSR_MSTATUS);
             let mie = 1u32 << MSTATUS_MIE_BIT;
             let mpie = 1u32 << MSTATUS_MPIE_BIT;

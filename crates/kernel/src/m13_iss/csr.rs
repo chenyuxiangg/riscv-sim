@@ -132,6 +132,14 @@ pub(crate) fn csr_write_raw(state: &mut SimState, csr: u16, value: u32) {
 fn apply_warl(csr: u16, value: u32) -> u32 {
     match csr {
         CSR_MSTATUS => value & MSTATUS_WARL_MASK,
+        // ⚠️ **`mepc` 的用户写被 IALIGN 掩码** —— 与参考侧逐位一致
+        // （实测：`csrw mepc, 0x1003` 读回 **0x1002**，即掩 `~1`）。
+        //
+        // ⚠️ **但陷入门不走这条路** —— [`enter_trap`] 用
+        // [`csr_write_raw`] 写**精确的 PC**。两条路径的差别在**合法
+        // 地址上不可观测**（每条合法指令地址都是偶数，`~1` 动不了它），
+        // 但用原始写把「陷入门要回到出错的那条指令」这件事**显式**写下来。
+        CSR_MEPC => value & MEPC_ALIGN_MASK,
         _ => value,
     }
 }

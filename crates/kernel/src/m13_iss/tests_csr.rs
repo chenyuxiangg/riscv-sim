@@ -598,6 +598,130 @@ fn mret_returns_to_the_address_in_mepc() {
     assert_eq!(state.pc, 0x1000, "MRET must jump to mepc");
 }
 
+/// `MRET` clears **only the lowest bit** of `mepc` — the mask follows
+/// **IALIGN**, and this platform declares the **C** extension in `misa`
+/// ⇒ IALIGN = 16 ⇒ one bit, not two.
+///
+/// ⚠️ **Why the discriminator is "bit 1 survives" and not "the low two
+/// bits are zero"**: the ledger's original wording (D-93) said
+/// "`mepc[1:0]` is treated as zero", which is the **IALIGN = 32** (no C)
+/// rule.  A mask of `~3` and a mask of `~1` **agree** on every 4-byte
+/// aligned address — which is *every* address the upstream corpus ever
+/// puts in `mepc` (it always `la`s an aligned label).  So the only
+/// address that tells the two masks apart is one with **bit 1 set**,
+/// i.e. the address of a **2-byte-aligned (compressed) instruction**.
+///
+/// ⇒ The reference side was measured doing exactly this: a `c.sw` at
+/// `0x8000014a` trapped, and `mret` landed back on `4k+2` (not `4k`)
+/// ⇒ mask `~1`.
+///
+/// ⚠️ The expected value is written as an **architecture literal**
+/// (`0x1002`), not derived from `MEPC_ALIGN_MASK` — otherwise changing
+/// the mask would move the expectation with it and the test would stay
+/// green (the ledger's own lesson: an assertion that shares a constant
+/// with the implementation has no discriminating power).
+#[test]
+fn mret_clears_only_the_lowest_bit_of_mepc() {
+    let mut h = Harness::new();
+    // 0x1002 — bit 1 set, bit 0 clear: the address of a compressed
+    // instruction.  A `~3` mask would give 0x1000 instead.
+    let mut state = state_with_csrs(&[(CSR_MEPC, 0x1002)]);
+    let outcome = h.step_one_at(&mut state, 0x2000, mret_insn());
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert_eq!(
+        state.pc, 0x1002,
+        "MRET must clear only mepc's lowest bit (IALIGN=16, C extension) — \
+         a `~3` mask would land on 0x1000, i.e. in the middle of the \
+         compressed instruction"
+    );
+}
+
+/// `MRET` clears `mepc`'s lowest bit when it is **set**.
+///
+/// This is the other half of the boundary: bit 0 set ⇒ it must be
+/// cleared.  Together with
+/// [`mret_clears_only_the_lowest_bit_of_mepc`] the two cases pin the
+/// mask from both sides — writing only one of them would let a
+/// `~0` (no mask at all) or a `~3` slip through.
+#[test]
+fn mret_clears_the_lowest_bit_of_mepc_when_it_is_set() {
+    let mut h = Harness::new();
+    // 0x1003 — bit 1 set **and** bit 0 set.
+    let mut state = state_with_csrs(&[(CSR_MEPC, 0x1003)]);
+    let outcome = h.step_one_at(&mut state, 0x2000, mret_insn());
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert_eq!(
+        state.pc, 0x1002,
+        "MRET must clear mepc's bit 0 and keep bit 1 (IALIGN=16)"
+    );
+}
+
+/// A **user** `csrw mepc` write is masked by **IALIGN** — `~1`.
+///
+/// ⚠️ This is a **different path** from the trap entry, and the
+/// difference is architecturally required:
+///
+/// | path | reference side (measured) | why |
+/// | --- | --- | --- |
+/// | **trap entry** writes `mepc` | **exact PC** — a `c.sw` at `0x8000014a` left `mepc = 0x8000014a` (bit 1 **preserved**) | the handler must return to **the faulting instruction**; masking bit 1 would land in its middle |
+/// | **user** `csrw mepc` | **masked `~1`** — `csrw mepc, 0x1003` read back **0x1002** | `mepc` is WARL: any legal value may be stored |
+///
+/// ⚠️ The trap-entry half is pinned by the golden corpus row
+/// `local/compressed_trap` (upstream riscv-tests never traps from a
+/// 2-byte-aligned instruction, so nothing else would notice).
+#[test]
+fn a_user_write_to_mepc_is_masked_by_ialign() {
+    let mut h = Harness::new();
+    let mut state = state_with_csrs(&[]);
+    state.gpr[10] = 0x1003; // a0 — bit 1 **and** bit 0 set
+    // `csrrw a0, mepc, a0` — writes a0 into mepc, reads the old value back.
+    let csrrw = csr_insn(CSR_MEPC, 10, F_CSRRW, 10);
+    let _ = h.step_one_at(&mut state, 0x2000, csrrw);
+    assert_eq!(
+        csr_value(&state, CSR_MEPC),
+        0x1002,
+        "a user write to mepc must be masked by IALIGN (~1) — the \
+         reference side reads back 0x1002 for a 0x1003 write"
+    );
+}
+
+/// The **trap entry** writes `mepc` **without** dropping bit 1 — so a
+/// trap taken on a **2-byte-aligned (compressed)** instruction can be
+/// returned to.
+///
+/// ⚠️ **What this pins, precisely**: the trap path's mask is
+/// **IALIGN = 16** (`~1`), **not** IALIGN = 32 (`~3`).  A `~3` mask
+/// would turn `0x1002` into `0x1000` — i.e. land the handler's return
+/// in the **middle** of the compressed instruction.
+///
+/// ⚠️ **What it does *not* pin** (and cannot, at a legal address): the
+/// difference between the trap entry writing the PC *verbatim* and
+/// writing it through the IALIGN mask.  Every legal instruction
+/// address is **even** (bit 0 clear), so `~1` leaves it unchanged —
+/// the two are indistinguishable, and the reference side's behaviour
+/// there is **unobservable**.  The platform uses the verbatim write
+/// ([`csr::csr_write_raw`]) because it states the intent, but the
+/// reference side could not be shown to do the same.
+///
+/// The expected value is an **architecture literal** (`0x1002`), not
+/// derived from `MEPC_ALIGN_MASK` — an assertion that shares a
+/// constant with the implementation has no discriminating power.
+#[test]
+fn the_trap_entry_writes_the_exact_faulting_pc_into_mepc() {
+    let mut h = Harness::new();
+    let mut state = state_with_csrs(&[]);
+    // Trap at a 2-byte-aligned PC — the address of a compressed
+    // instruction.  `mepc` must come back **verbatim**.
+    let _ = h.step_one_at(&mut state, 0x1002, enc_i(0, 0, 0, 0, 0x0000_0073));
+    assert_eq!(
+        csr_value(&state, CSR_MEPC),
+        0x1002,
+        "the trap entry must write the exact PC — masking bit 1 would \
+         make a handler returning from a compressed instruction land in \
+         the middle of it (and would diverge from the reference side)"
+    );
+}
+
 /// `MRET` restores the global interrupt enable from `MPIE` and then
 /// sets `MPIE` to 1.
 #[test]
