@@ -332,7 +332,14 @@ riscv_sim/
 要点速览：
 - 默认分支：`main` — **只接受从检视闭环的分支同步过来**，不接受直接往 `main` 提交
 - 分支命名：`<type>/<scope>`（如 `feature/m12-engine-quantum`、`fix/m13-iss-bug-123`）
-- Commit message：Conventional Commits 1.0.0（`feat:` / `fix:` / `docs:` / `refactor:` / `test:` / `perf:` / `build:` / `ci:` / `chore:` / `revert:`）
+- Commit message：**纯文本**（**不用 markdown**），固定五要素、**各占一行**：
+  1. `类型：Feature` 或 `类型：Bug`（本次修改的类型）
+  2. `说明：<本次修改的详细说明，一句话>`
+  3. `测试用例：<新增/改动了哪些用例，覆盖什么>`
+  4. `测试报告：<实际跑的命令与结果>`
+  5. `遗留问题：<已知未解决项；没有就写「无」>`
+  - ⛔ **不要**写 `feat:` / `fix:` 这类前缀、**不要**用 markdown 表格 / 加粗 / 列表 / 代码块
+  - ⚠️ 用 `git commit -F <file>`（**不要** heredoc）
 - 仓库 SSH：`git@github.com:chenyuxiangg/riscv-sim.git`（HTTPS 不支持）
 - PR：CI 绿 + 至少 1 个 reviewer 批准；commit message 关联 issue 或 ADR 编号
 - 架构变更（涉及 ADR、模块边界）：需更新 `docs/` 下对应设计文档后再合入
@@ -359,7 +366,7 @@ git checkout -b feature/m19-waveform  # 或 fix/... / docs/... / chore/...
 1. 改代码
 2. 过三关门禁：`cargo fmt --all -- --check` · `cargo clippy --workspace --all-targets -- -D warnings` · `cargo test --workspace`
 3. `git add` **用显式路径**——不要用 `git add -A` / `git add .` / `git add <目录>`。本仓库可能有并行会话在同时改动同一工作区，目录级 add 会把别人的改动一并收进你的 commit
-4. `git commit`：Conventional Commits；**一个 commit 一个逻辑单元**，跨模块的多件事拆成多个 commit
+4. `git commit`：commit message 按**上面的五要素纯文本格式**写；**一个 commit 一个逻辑单元**，跨模块的多件事拆成多个 commit
 5. 报告：向用户说明 commit hash、门禁结果、以及哪些改动**没有**提交及原因
 
 #### 3. 检视（review 闭环）
