@@ -33,8 +33,9 @@
 //!   the mapping agrees with itself.
 
 use riscv_sim_contract::csr::{
-    csr_write_is_ignored, CSR_IRQ_CLEAR, CSR_MCAUSE, CSR_MEPC, CSR_MIP, CSR_MISA, CSR_MISA_VALUE,
-    CSR_MSCRATCH, CSR_MSTATUS, CSR_MTVAL, CSR_MTVEC, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT,
+    csr_write_is_ignored, CSR_IRQ_CLEAR, CSR_MCAUSE, CSR_MEPC, CSR_MHARTID, CSR_MIP, CSR_MISA,
+    CSR_MISA_VALUE, CSR_MSCRATCH, CSR_MSTATUS, CSR_MTVAL, CSR_MTVEC, MSTATUS_MIE_BIT,
+    MSTATUS_MPIE_BIT,
 };
 use riscv_sim_contract::model::SimState;
 
@@ -81,6 +82,12 @@ fn csr_insn(csr: u16, rs1: u8, funct3: u8, rd: u8) -> u32 {
 /// immediate field holds `0x302`.
 fn mret_insn() -> u32 {
     enc_i(0x302, 0, 0b000, 0, SYSTEM)
+}
+
+/// The `WFI` encoding (`0x1050_0073`): `funct3 == 0` and the 12-bit
+/// immediate field holds `0x105`.
+fn wfi_insn() -> u32 {
+    enc_i(0x105, 0, 0b000, 0, SYSTEM)
 }
 
 /// A state with the CSR file pre-seeded with `entries`.
@@ -139,6 +146,21 @@ fn the_mret_encoding_resolves_to_mret() {
     let d = Decoder::default().decode(mret_insn(), 0x1000);
     assert_eq!(classify(&d), Some(Op::Mret));
     assert_eq!(d.imm, 0x302, "the MRET immediate field is 0x302");
+}
+
+/// `WFI` must resolve to [`Op::Wfi`] —— 它**不是**非法指令。
+///
+/// ⚠️ `WFI` 与 ECALL / EBREAK / MRET 共享 `funct3 == 0` 那个槽 ⇒ 二级
+/// 解码**必须**看立即数字段（`0x105`）。
+///
+/// ⚠️ **编码逐位钉死**：`0x1050_0073` 是架构标准编码（`funct3 = 0`、
+/// `imm = 0x105`）⇒ 写错一位这里就红。
+#[test]
+fn the_wfi_encoding_resolves_to_wfi() {
+    let d = Decoder::default().decode(wfi_insn(), 0x1000);
+    assert_eq!(classify(&d), Some(Op::Wfi), "0x105 必须解成 wfi");
+    assert_eq!(d.imm, 0x105, "the WFI immediate field is 0x105");
+    assert_eq!(wfi_insn(), 0x1050_0073, "wfi 的架构标准编码");
 }
 
 // ---------------------------------------------------------------------------
@@ -1431,4 +1453,93 @@ fn an_implemented_csr_still_takes_the_write() {
         0x0123_4567,
         "mscratch 是已实现的存储 CSR ⇒ 写必须落下"
     );
+}
+
+// ---------------------------------------------------------------------------
+// v0.23 批 —— `wfi`（等中断）与 `mhartid`（hart 号）
+// ---------------------------------------------------------------------------
+
+/// ⚠️ **`wfi` 不得产生非法指令陷阱，且 PC 正常前进**。
+///
+/// `wfi`（`0x1050_0073`）是 M 模式的 `SYSTEM` 指令；一个真实 M 模式
+/// RTOS 的启动兜底循环与 idle 任务都要用它 ⇒ 它落到「非法指令陷阱」
+/// 就等于让 guest **跑不起来**。
+///
+/// ⚠️ 断言落在**四处**：形状（`Advanced` 而不是 `Trapped`）、**PC**、
+/// **陷阱 CSR 一个都没被写**、以及 **CSR 文件没有被多写任何一项**。
+#[test]
+fn the_wfi_encoding_is_a_legal_instruction() {
+    let mut h = Harness::new();
+    let mut state = state_with_csrs(&[(CSR_MTVEC, 0x2000)]);
+    let outcome = h.step_one_at(&mut state, 0x1000, wfi_insn());
+
+    assert_eq!(
+        outcome,
+        StepOutcome::Advanced,
+        "wfi 必须**退休**，不能陷入非法指令"
+    );
+    assert_eq!(state.pc, 0x1004, "wfi 之后 PC 必须正常前进 4 字节");
+    // ⚠️ **陷阱路径会写 mepc / mcause / mtval** ⇒ 这三个 CSR 都必须是 0。
+    assert_eq!(csr_value(&state, CSR_MCAUSE), 0, "wfi 不得触发任何陷阱");
+    assert_eq!(csr_value(&state, CSR_MEPC), 0, "wfi 不得触发任何陷阱");
+    assert_eq!(csr_value(&state, CSR_MTVAL), 0, "wfi 不得触发任何陷阱");
+    // ⚠️ **CSR 文件里只许有预置的那一项** —— `wfi` 一个 CSR 都不许写。
+    assert_eq!(
+        csr_numbers(&state),
+        vec![CSR_MTVEC],
+        "wfi 不得写任何 CSR —— 实得 {:?}",
+        csr_numbers(&state)
+    );
+}
+
+/// ⚠️ **`wfi` 不得改变任何通用寄存器**（它是「什么都不做」）。
+#[test]
+fn the_wfi_encoding_leaves_the_registers_alone() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    state.gpr[1] = 0xDEAD_BEEF;
+    let before = state.gpr;
+    let outcome = h.step_one_at(&mut state, 0x1000, wfi_insn());
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert_eq!(state.gpr, before, "wfi 不得动任何通用寄存器");
+}
+
+/// ⚠️ **`mhartid` 读回 0**（单核平台）。
+///
+/// ⚠️ **架构字面量**：0 就是 0 —— 不是从任何映射函数反推的值。
+///
+/// ⚠️ 这条与「`mhartid` 未实现 ⇒ 读回 0」**不是**一回事：那个 0 是
+/// 「CSR 文件里没有这一项」的**巧合**，而这条要求平台**正式实现**它
+/// （契约层的已实现表里有它，值是平台自己的常量）。
+#[test]
+fn mhartid_reads_back_zero_on_this_single_core_platform() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    // `csrr t0, mhartid` —— rd = x5、rs1 = x0、funct3 = 0b010（CSRRS）。
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MHARTID, 0, F_CSRRS, 5));
+    assert_eq!(outcome, StepOutcome::Advanced, "读 mhartid 不得陷阱");
+    assert_eq!(state.gpr[5], 0, "单核平台 ⇒ mhartid 恒为 0");
+}
+
+/// ⚠️ **`mhartid` 是只读的**：guest 的写被忽略，**CSR 文件里也不得多出
+/// 这一项**。
+///
+/// ⚠️ 这条与 `misa` 的那条同款：`misa` 不进文件是为了保住会话快照的
+/// 「空」判定；`mhartid` 不进文件是同一个理由。
+#[test]
+fn a_write_to_mhartid_is_ignored_and_the_file_stays_clean() {
+    let mut h = Harness::new();
+    let mut state = state_with_csrs(&[]);
+    state.gpr[1] = 0x0123_4567;
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MHARTID, 1, F_CSRRW, 2));
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert!(
+        !csr_numbers(&state).contains(&CSR_MHARTID),
+        "mhartid 是只读 CSR ⇒ 写不得进 CSR 文件 —— 实得 {:?}",
+        csr_numbers(&state)
+    );
+    // 读回来仍然是平台的常量 0（**不是**写进去的那个值）。
+    let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MHARTID, 0, F_CSRRS, 3));
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert_eq!(state.gpr[3], 0, "mhartid 恒为 0，写不进去");
 }

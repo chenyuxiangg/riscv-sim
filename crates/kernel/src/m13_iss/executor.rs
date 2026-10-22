@@ -449,6 +449,11 @@ pub enum Op {
     Csrrci,
     /// MRET — return from a machine-mode trap handler.
     Mret,
+    /// WFI — wait for interrupt (`0x10500073`).
+    ///
+    /// ⚠️ **本平台把它实现成 nop**（退休、PC 前进、无副作用、无陷阱）——
+    /// 口径与理由写在**执行臂**上（见 `Op::Wfi` 的执行处）。
+    Wfi,
 }
 
 /// Second-level decode: map a decode key onto a concrete operation.
@@ -562,13 +567,16 @@ pub fn classify(d: &Decoded) -> Option<Op> {
         // **privileged** part of the opcode: `0x302` is MRET (the
         // machine-mode trap return), `0x105` is WFI, `0x102` is
         // SRET. This platform is **M-mode only** (STAGE-4 §3.6), so
-        // MRET is implemented and the others stay illegal.
+        // MRET and WFI are implemented and SRET stays illegal.
         0b111_0011 => match (d.funct3, d.imm) {
             (0b000, 0) => Some(Op::Ecall),
             (0b000, 1) => Some(Op::Ebreak),
             // MRET — the standard encoding is `0x3020_0073`, i.e. the
             // 12-bit immediate field holds 0x302.
             (0b000, 0x302) => Some(Op::Mret),
+            // WFI — the standard encoding is `0x1050_0073`, i.e. the
+            // 12-bit immediate field holds 0x105.
+            (0b000, 0x105) => Some(Op::Wfi),
             // The CSR instruction family (funct3 001..111; 0b100 is
             // reserved and stays illegal).
             (0b001, _) => Some(Op::Csrrw),
@@ -1125,6 +1133,42 @@ pub fn execute_one<M: MemoryAccess>(
                 csr::csr_write(state, number, old & !value);
                 *wrote_csr = Some(number);
             }
+            sequential(d)
+        }
+        Op::Wfi => {
+            // ⚠️ **本平台把 `wfi` 实现成 nop** —— 这是**明示的取舍**，不是
+            // 「忘了实现」。
+            //
+            // **架构语义**：`wfi` 是 M 模式的 `SYSTEM` 指令（编码
+            // `0x10500073`），语义是「**等中断**」；但特权规范本身把它
+            // 定义成一条 **hint** —— 「实现**可以**把它当成 nop」，尤其
+            // 在中断被关掉（`mstatus.MIE == 0`）的时候。
+            //
+            // **本平台选 nop 的理由**：
+            //
+            // 1. **真等待需要引擎级的支持**：让 `wfi` 真的阻塞在引擎里，
+            //    得改 M-12 的唯一主循环（`run_until`）与 M-17 的取指边界
+            //    —— 那是**别的模块**的落点（而且要动 `InstructionExecutor`
+            //    的接缝形状），不在本批的范围里。ISS 是「一条指令 = 一个
+            //    纯函数」的模型，**没有**「阻塞到某条件满足」的表达。
+            // 2. **ISS 这一层没有任何时间副作用**：ISS **不碰**虚拟时间
+            //    （虚拟时间由 M-12 / M-17 按退休指令数推进）⇒ `wfi`
+            //    在这里**不**多推时间、**不**改任何 CSR、**不**碰内存。
+            //    ⚠️ 但它**照常退休** ⇒ 在引擎那一层它与一条 nop **一样**
+            //    占用一条指令的时间成本（虚拟时间照常前进）。这正是
+            //    「不死锁」的关键（见第 3 点），也是「idle 任务退化成忙等」
+            //    的代价（见下面「代价」一段）。
+            // 3. **不会引入活锁**：这条指令**照常退休**、**PC 照常前进**
+            //    ⇒ 引擎的「无进展守卫」（M-12 的 `NO_PROGRESS_WINDOW`）
+            //    看到的是**进展**；虚拟时间照常前进 ⇒ 定时器中断照样会
+            //    到达 ⇒ guest 的 idle 循环**不会**把引擎卡死。
+            //
+            // **代价（如实记下）**：guest 的 idle 任务退化成**忙等** ——
+            // 它省不下 CPU，也拿不到「低功耗」语义；但功能上（定时器
+            // 中断最终会送达）是对的。
+            //
+            // ⚠️ **不要**在这里偷偷改成「真的阻塞」—— 那样会引入活锁
+            // （没有挂起中断时永远不返回）。
             sequential(d)
         }
         Op::Mret => {
