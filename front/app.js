@@ -21,12 +21,15 @@ import { mountSession } from "./services/m04_session.js";
 import { mountCommandRouter } from "./services/m05_commandrouter.js";
 import * as transportApi from "./services/m07_transport.js";
 import { mountRegisterMemory } from "./services/m10_registermemory.js";
-import { Command } from "./lib/message.js";
+import { Command, TRACE_FORMAT, TRACE_SOURCE } from "./lib/message.js";
 import { buildMockProject } from "./dev/mock-project.js";
 import { buildDemoStoreState, seedDemoState } from "./dev/demo-state.js";
 
 /** URL of the WASM kernel Worker (same-origin HTTP required). */
 const KERNEL_WORKER_URL = "./kernel-worker.js";
+
+/** How many instructions a disassembly request asks for by default. */
+const DEFAULT_DISASM_COUNT = 16;
 
 const status = document.getElementById("status");
 
@@ -136,17 +139,37 @@ function publishViewState(viewId) {
 }
 
 /**
+ * A non-negative integer from a command parameter (malformed → fallback).
+ *
+ * The parameters arrive from the DOM (`data-*` attributes ⇒ strings), so
+ * they need a conversion before they reach the contract. A malformed
+ * value must not become `NaN` on the wire — that is not valid JSON.
+ *
+ * @param {unknown} raw
+ * @param {number} [fallback]
+ * @returns {number}
+ */
+function toInt(raw, fallback = 0) {
+    const n = Math.trunc(Number(raw));
+    return Number.isFinite(n) ? n : fallback;
+}
+
+/**
  * Translate a view-layer `riscv:command` signal into an M-05 command.
  *
  * The view layer does not know the service layer — it only emits the
  * signal (the same rule the demo seeder follows). Every failure is
  * reported in the footer note; nothing is thrown at the view.
  *
- * @param {{action?: string, viewId?: string}} detail
+ * ⚠️ **导出是为了让它可测**（同 D-46 检视 V-B 的教训）：此前它是私有
+ * 函数，前端门禁里一条用例都碰不到它——把「视图 → 命令」这段接线删掉，
+ * 门禁仍然全绿。这个导出让那段接线**可被断言**。
+ *
+ * @param {{action?: string, viewId?: string, params?: object|null}} detail
  * @param {{commandRouter: object, registerMemory: object, waveform: object}} services
  */
-async function handleCommand(detail, services) {
-    const { commandRouter, registerMemory, waveform } = services;
+export async function handleCommand(detail, services) {
+    const { commandRouter, registerMemory, waveform, debug } = services;
     const action = detail?.action;
     /** 探针流重订失败（仅「reset」路径可能非空）。 */
     let resetProbeError = null;
@@ -173,7 +196,7 @@ async function handleCommand(detail, services) {
                 // 流也重订了（`loadProjectIntoKernel` 把失败单独兜住）。
                 resetProbeError = (
                     await loadProjectIntoKernel(
-                        { commandRouter, registerMemory, waveform },
+                        { commandRouter, registerMemory, waveform, debug },
                         buildMockProject(),
                     )
                 ).probeError;
@@ -183,6 +206,33 @@ async function handleCommand(detail, services) {
                 break;
             case "read-mem":
                 await registerMemory.readMemory(0x100, "Word");
+                break;
+            case "disasm": {
+                // The disassembly request (M-11): the panel asks for a
+                // bounded window starting at the current PC.
+                const addr = toInt(detail.params?.addr, 0);
+                const count = toInt(detail.params?.count, DEFAULT_DISASM_COUNT);
+                await commandRouter.dispatchCommand(Command.disasm(addr, count));
+                break;
+            }
+            case "export-trace": {
+                // ⚠️ An **illegal** source/format combination is rejected
+                // by the kernel (`E_CTX-03`) — the front end does not
+                // pre-validate it, it just displays the kernel's answer.
+                const source = String(detail.params?.source ?? TRACE_SOURCE.Execution);
+                const format = String(detail.params?.format ?? TRACE_FORMAT.Csv);
+                const offset = toInt(detail.params?.offset, 0);
+                const limit = toInt(detail.params?.limit, 0);
+                await commandRouter.dispatchCommand(
+                    Command.exportTrace(source, format, offset, limit),
+                );
+                break;
+            }
+            case "trace-enable":
+                await commandRouter.dispatchCommand(Command.setTraceEnabled(true));
+                break;
+            case "trace-disable":
+                await commandRouter.dispatchCommand(Command.setTraceEnabled(false));
                 break;
             default:
                 return;
@@ -208,7 +258,7 @@ async function handleCommand(detail, services) {
  * @param {{session: object, commandRouter: object, registerMemory: object, waveform: object, workspace: object}} services
  */
 async function startSession(services) {
-    const { session, commandRouter, registerMemory, waveform, workspace } = services;
+    const { session, commandRouter, registerMemory, waveform, debug, workspace } = services;
     try {
         await session.createSession({ role: workspace.role });
         const project = buildMockProject();
@@ -224,7 +274,7 @@ async function startSession(services) {
         // 这个缺陷在 mock 内核时代就存在，是第 1 阶段前端接上**真内核**
         // 之后、被真机断言「x1 必须是 42」逼出来的。
         const { probeError } = await loadProjectIntoKernel(
-            { commandRouter, registerMemory, waveform },
+            { commandRouter, registerMemory, waveform, debug },
             project,
         );
         viewStore.setState("product", (prev) => ({
@@ -261,7 +311,7 @@ async function startSession(services) {
  * 3. `waveform.subscribeProbeStream()` —— 强制重订探针流。同样的道理：
  *    `LoadProject` 把内核的主题集合清空了，探针流不重订就**静默停掉**。
  *
- * @param {{commandRouter: object, registerMemory: object, waveform: object}} services
+ * @param {{commandRouter: object, registerMemory: object, waveform: object, debug?: object}} services
  * @param {object} project — `model::Project` shaped value
  * @returns {Promise<{probeError: Error|null}>} — `probeError` 非空表示
  *   **探针流**重订失败；**工程已经装载、寄存器流已经重订**（前两步成功）
@@ -282,8 +332,12 @@ async function startSession(services) {
  * 与 D-45 同一个坑——「我记得要重订」写在注释里，不如用一条用例钉住。
  */
 export async function loadProjectIntoKernel(services, project) {
-    const { registerMemory, waveform } = services;
+    const { registerMemory, waveform, debug } = services;
     waveform.reset();
+    // ⚠️ 新工程 = 新程序 ⇒ **上一个程序的反汇编**留在面板上就是错的
+    // （同一个 D-45 的坑：状态必须跟着工程一起重建）。
+    // `debug` 是可选的——不是每个调用点都装了调试面。
+    debug?.reset?.();
     await registerMemory.loadProject(project);
     try {
         await waveform.subscribeProbeStream();
@@ -387,6 +441,92 @@ export function wireWaveform(commandRouter) {
     };
 }
 
+/**
+ * Wire the M-11 debug surface (disassembly / trace export / trace switch)
+ * into the debug view.
+ *
+ * The four events (`Disasm` / `SourceLocation` / `TraceExport` /
+ * `TraceState`) are **reply events** (STAGE-5 §9.1): the kernel sends
+ * them straight back to the requester, correlated by the transport
+ * frame's `reqId` — they are **not** pushed streams, so there is
+ * nothing to subscribe to on the kernel side.
+ *
+ * The router still publishes every event to its topic subscribers, so
+ * the debug view picks them up by topic exactly like M-10 does with
+ * `sim.registers`.
+ *
+ * @param {object} commandRouter
+ * @returns {{reset: () => void}}
+ */
+export function wireDebug(commandRouter) {
+    /** Push the disassembly entries into the debug view's state. */
+    commandRouter.subscribe("debug.disasm", (event) => {
+        const entries = Array.isArray(event.value?.entries) ? event.value.entries : [];
+        viewStore.setState("debug", (prev) => ({
+            ...prev,
+            sim: { ...(prev.sim ?? {}), disasm: entries },
+        }));
+        publishViewState("debug");
+    });
+
+    /** Push the export block into the debug view's state. */
+    commandRouter.subscribe("debug.export", (event) => {
+        viewStore.setState("debug", (prev) => ({
+            ...prev,
+            debug: { ...(prev.debug ?? {}), export: event.value ?? null },
+        }));
+        publishViewState("debug");
+    });
+
+    /** Push the trace recording state into the debug view's state. */
+    commandRouter.subscribe("debug.trace", (event) => {
+        viewStore.setState("debug", (prev) => ({
+            ...prev,
+            debug: { ...(prev.debug ?? {}), trace: event.value ?? null },
+        }));
+        publishViewState("debug");
+    });
+
+    /**
+     * The kernel's error replies (M-05's error path — the `Error` event
+     * is published to the `error` topic **and** rejects the pending
+     * command). The debug view shows the last one; there is no second
+     * error channel.
+     */
+    commandRouter.subscribe("error", (event) => {
+        viewStore.setState("debug", (prev) => ({
+            ...prev,
+            debug: {
+                ...(prev.debug ?? {}),
+                error: {
+                    code: event.value?.code ?? "E_PROTO-08",
+                    message: event.value?.message ?? "",
+                },
+            },
+        }));
+        publishViewState("debug");
+    });
+
+    return {
+        /**
+         * New session: the disassembly / export data of the **previous**
+         * program does not count.
+         *
+         * ⚠️ The trace **switch** state and the last error are **kept**:
+         * they are the kernel's last *report*, not program data — the
+         * front end does not second-guess the kernel about them.
+         */
+        reset() {
+            viewStore.setState("debug", (prev) => ({
+                ...prev,
+                sim: { ...(prev.sim ?? {}), disasm: [] },
+                debug: { ...(prev.debug ?? {}), export: null },
+            }));
+            publishViewState("debug");
+        },
+    };
+}
+
 async function bootstrap() {
     status.textContent = "正在挂载模块…";
     // Two redundant safeguards guarantee that the view component library
@@ -430,6 +570,10 @@ async function bootstrap() {
     // `startSession` 会装载工程并订阅探针流，订阅的响应（通道列表）
     // 到达时如果还没订阅 `waveform.history`，那批数据就丢了。
     const waveform = wireWaveform(commandRouter);
+    // M-11 调试面（反汇编 / trace 导出 / trace 开关）同样必须在**任何**
+    // 可能产生这些回复的命令之前挂好——回复事件虽然不订阅，但路由器会
+    // 把每个事件发布给 topic 订阅者，订阅晚了这一批就丢了。
+    const debug = wireDebug(commandRouter);
 
     const pending = {
         components: componentsPromise,
@@ -458,11 +602,11 @@ async function bootstrap() {
     renderStatus(transportApi.getTransportStatus());
 
     window.addEventListener("riscv:command", (ev) => {
-        void handleCommand(ev.detail, { commandRouter, registerMemory, waveform });
+        void handleCommand(ev.detail, { commandRouter, registerMemory, waveform, debug });
     });
 
     // Fire and forget — the session comes up on its own.
-    void startSession({ session, commandRouter, registerMemory, waveform, workspace });
+    void startSession({ session, commandRouter, registerMemory, waveform, debug, workspace });
 }
 
 /**

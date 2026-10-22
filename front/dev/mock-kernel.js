@@ -1,5 +1,8 @@
 // Dev-only mock kernel (pure JS, no DOM / no Worker API).
 //
+// ⚠️ **mock ≠ 真内核**（台账 D-55）：mock 的语义**可能**与真内核不同。
+// 这里给的是「形状正确的假数据」，不是真的反汇编器 / 真的 trace 记录器。
+//
 // The real WASM kernel has **no export layer yet** (`crates/kernel` has
 // no `wasm-bindgen` dependency, no `#[wasm_bindgen]` export and no
 // cdylib entry), so `tools/build-wasm.sh` cannot produce a loadable
@@ -63,6 +66,93 @@ const GPR_COUNT = 32;
 /** Virtual time added per executed instruction (picoseconds). */
 const TICK_PS = 1000;
 
+// ---------------------------------------------------------------------------
+// M-11 debug surface (contract v3) — fake data
+// ---------------------------------------------------------------------------
+
+/**
+ * The mock's disassembly entries — **shape-correct fake data**.
+ *
+ * ⚠️ The mock is **not** a disassembler: the real kernel renders the
+ * mnemonics with M-11's renderer (ISA mnemonics only, compressed
+ * instructions keep the `c.` prefix — ruling C). The mock only has to
+ * produce a well-shaped `DisasmEntryDto` (`addr` / `code` / `mnemonic` /
+ * `width`) so the front end can be exercised end to end.
+ *
+ * The addresses are consistent with the widths: a 4-byte entry advances
+ * the address by 4, the 2-byte compressed entry by 2.
+ */
+const MOCK_DISASM_ENTRIES = Object.freeze([
+    { addr: 0x0000_0000, code: 0x02a0_0093, mnemonic: "addi x1, x0, 42", width: 4 },
+    { addr: 0x0000_0004, code: 0x0070_0113, mnemonic: "addi x2, x0, 7", width: 4 },
+    { addr: 0x0000_0008, code: 0x0020_81b3, mnemonic: "add x3, x1, x2", width: 4 },
+    { addr: 0x0000_000a, code: 0x0000_2a00, mnemonic: "c.addi sp,-16", width: 2 },
+    { addr: 0x0000_000c, code: 0x1000_21a3, mnemonic: "sw x3, 256(x0)", width: 4 },
+    { addr: 0x0000_0010, code: 0x0400_006f, mnemonic: "jal x0, 64", width: 4 },
+]);
+
+/**
+ * The mock's export blocks — one **line** per entry.
+ *
+ * The key is `"{source}:{format}"`. Only the **legal** combinations of
+ * ruling D are present (`Waveform` + `Csv` / `Vcd`, `Execution` + `Csv` /
+ * `Json`); the illegal ones are missing **on purpose** so the mock
+ * rejects them with `E_CTX-03` exactly like the real kernel does.
+ */
+const MOCK_EXPORT_LINES = Object.freeze({
+    "Waveform:Csv": Object.freeze([
+        "t_ps,signal,value",
+        "1000,GPIO0.OUT,1",
+        "2000,GPIO0.OUT,0",
+        "3000,GPIO0.OUT,1",
+    ]),
+    "Waveform:Vcd": Object.freeze([
+        "$date mock $end",
+        "$var wire 1 ! GPIO0.OUT $end",
+        "$enddefinitions $end",
+        "$dumpvars",
+        "0!",
+        "1!",
+        "$end",
+    ]),
+    "Execution:Csv": Object.freeze([
+        "kind,addr,value",
+        "instr,00000000,02a00093",
+        "instr,00000004,00700113",
+        "mem,00000100,0000002a",
+    ]),
+    "Execution:Json": Object.freeze([
+        '{"kind":"instr","addr":0,"code":"02a00093"}',
+        '{"kind":"instr","addr":4,"code":"00700113"}',
+        '{"kind":"mem","addr":256,"value":42}',
+    ]),
+});
+
+/**
+ * Default number of entries per export block (the mock's "kernel default
+ * limit" — `limit = 0` in the command means "you decide").
+ *
+ * It is deliberately **smaller** than the block size: that is what makes
+ * the continuation path (`next_offset < total`) reachable at all.
+ */
+const MOCK_EXPORT_BLOCK = 2;
+
+/**
+ * A non-negative integer from a command field.
+ *
+ * A malformed field is **not** an error here — it degrades to `0` (the
+ * mock is a test double, not a validator; the real kernel owns the
+ * input limits).
+ *
+ * @param {unknown} raw
+ * @param {number} [fallback]
+ * @returns {number}
+ */
+function toCount(raw, fallback = 0) {
+    const n = Math.trunc(Number(raw));
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 /**
  * Create a mock kernel instance.
  *
@@ -83,6 +173,12 @@ export function createMockKernel(options = {}) {
         project: null,
         snapshotCounter: 0,
         executed: 0,
+        // Trace recording (contract v3 — `SetTraceEnabled`). The mock
+        // records a **count**, not real trace entries: `len` grows with
+        // the executed instructions while recording is on.
+        traceEnabled: false,
+        traceLen: 0,
+        traceDropped: 0,
     };
 
     /** Registers changed since the last delta push. */
@@ -106,6 +202,9 @@ export function createMockKernel(options = {}) {
         state.topics.clear();
         state.snapshotCounter = 0;
         state.executed = 0;
+        state.traceEnabled = false;
+        state.traceLen = 0;
+        state.traceDropped = 0;
         for (let i = 0; i < GPR_COUNT; i += 1) dirtyRegisters.add(i);
         pcDirty = true;
     }
@@ -148,6 +247,9 @@ export function createMockKernel(options = {}) {
         }
         state.timeVirt += TICK_PS;
         state.executed += 1;
+        // Trace recording is **off** by default and costs nothing while
+        // it is off (ruling H — the "zero overhead" rule).
+        if (state.traceEnabled) state.traceLen += 1;
         pcDirty = true;
     }
 
@@ -253,6 +355,28 @@ export function createMockKernel(options = {}) {
     function pushWaveform(frames) {
         if (!state.topics.has("sim.waveform")) return;
         frames.push(makeFrame(null, Event.waveformHistory(waveform(probeStreams()))));
+    }
+
+    /**
+     * The mock's disassembly sequence: the entries at (or after) `addr`,
+     * at most `count` of them.
+     *
+     * ⚠️ The sequence may be **shorter** than `count` — that is
+     * truncation (the real kernel stops at the first unmapped address),
+     * **not** an error.
+     *
+     * @param {number} addr
+     * @param {number} count
+     * @returns {Array<{addr: number, code: number, mnemonic: string, width: number}>}
+     */
+    function mockDisasmEntries(addr, count) {
+        if (count <= 0) return [];
+        const exact = MOCK_DISASM_ENTRIES.findIndex((e) => e.addr === addr);
+        const from = exact >= 0
+            ? exact
+            : MOCK_DISASM_ENTRIES.findIndex((e) => e.addr > addr);
+        if (from < 0) return [];
+        return MOCK_DISASM_ENTRIES.slice(from, from + count).map((e) => ({ ...e }));
     }
 
     // -- command handling ----------------------------------------------------
@@ -507,6 +631,68 @@ export function createMockKernel(options = {}) {
                 )));
                 break;
 
+            // -- M-11 debug surface (contract v3) ----------------------------
+
+            case "Disasm": {
+                // ⚠️ The sequence may be **shorter** than `count` — that is
+                // truncation (the real kernel stops at the first unmapped
+                // address), **not** an error.
+                const addr = toCount(value.addr);
+                const count = toCount(value.count);
+                frames.push(makeFrame(reqId, Event.disasm(mockDisasmEntries(addr, count))));
+                break;
+            }
+
+            case "ResolveLine": {
+                const addr = toCount(value.addr);
+                frames.push(makeFrame(reqId, Event.sourceLocation(addr, "demo.c", 7)));
+                break;
+            }
+
+            case "ExportTrace": {
+                const source = String(value.source ?? "");
+                const format = String(value.format ?? "");
+                const lines = MOCK_EXPORT_LINES[`${source}:${format}`];
+                if (!lines) {
+                    // An illegal source/format combination is **rejected**
+                    // by the kernel (ruling D / §9.5) — the mock rejects it
+                    // the same way, so the front end's error path can be
+                    // exercised.
+                    frames.push(makeFrame(reqId, Event.error(
+                        "E_CTX-03",
+                        `导出组合非法：source=${source} / format=${format}`,
+                    )));
+                    break;
+                }
+                const total = lines.length;
+                const offset = toCount(value.offset);
+                const wanted = toCount(value.limit);
+                // `limit = 0` means "the kernel picks the block size".
+                const limit = wanted > 0 ? wanted : MOCK_EXPORT_BLOCK;
+                const start = Math.min(offset, total);
+                const end = Math.min(start + limit, total);
+                const chunk = lines.slice(start, end).join("\n");
+                // `next_offset` is the **next** block's start (= this
+                // block's end); at the end of the buffer it equals
+                // `total` (STAGE-5 §3.2).
+                frames.push(makeFrame(reqId, Event.traceExport(
+                    source, format, offset, end, total, chunk.length, chunk,
+                )));
+                break;
+            }
+
+            case "SetTraceEnabled": {
+                const enabled = Boolean(value.enabled);
+                state.traceEnabled = enabled;
+                // ⚠️ `len` does **not** change when recording is turned off
+                // (acceptance #15: "zero recording, `len` unchanged") — the
+                // ring keeps what it already holds.
+                frames.push(makeFrame(reqId, Event.traceState(
+                    enabled, state.traceLen, state.traceDropped,
+                )));
+                break;
+            }
+
             default:
                 frames.push(makeFrame(reqId, Event.error(
                     "E_CTX-05",
@@ -532,6 +718,10 @@ export function createMockKernel(options = {}) {
             // by address, so the id → address resolution done by
             // `ClearBreakpoint` is observable here (dev / test only).
             breakpoints: [...state.breakpoints],
+            // Trace recording state (contract v3) — dev / test only.
+            traceEnabled: state.traceEnabled,
+            traceLen: state.traceLen,
+            traceDropped: state.traceDropped,
             seed,
         }),
     };

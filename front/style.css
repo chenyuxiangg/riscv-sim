@@ -124,7 +124,7 @@ main { padding: 24px; max-width: 1280px; margin: 0 auto; }
     grid-template-columns: 1fr 1fr;
     gap: 16px;
 }
-.disasm, .regmem { background: var(--bg3); border-radius: 8px; padding: 12px; }
+.disasm, .regmem, .trace-export { background: var(--bg3); border-radius: 8px; padding: 12px; }
 .disasm-table, .reg-grid {
     width: 100%;
     font-size: 12px;
@@ -132,6 +132,40 @@ main { padding: 24px; max-width: 1280px; margin: 0 auto; }
 }
 .disasm-table th, .disasm-table td { padding: 4px 6px; border-bottom: 1px solid var(--line); }
 .disasm-table th { color: var(--ink2); text-align: left; }
+.disasm-table code { font-family: ui-monospace, monospace; }
+/* The row the PC points at (V-12). */
+.disasm-row.is-pc { background: rgba(255, 193, 7, 0.14); }
+.disasm-row.is-pc td:first-child { box-shadow: inset 3px 0 0 var(--amber); }
+/* The trace slowdown notice (R9) + the kernel's error reply. */
+.trace-notice {
+    margin: 8px 0 0;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--amber);
+    color: var(--amber);
+    font-size: 12px;
+}
+.debug-error {
+    margin: 8px 0 0;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid #d9534f;
+    color: #ff9a95;
+    font-size: 12px;
+}
+.trace-chunk {
+    background: #000;
+    color: #b6f0c4;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    padding: 8px;
+    min-height: 80px;
+    max-height: 240px;
+    overflow: auto;
+    border-radius: 6px;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
 .reg-grid {
     display: grid;
     grid-template-columns: repeat(4, 1fr);

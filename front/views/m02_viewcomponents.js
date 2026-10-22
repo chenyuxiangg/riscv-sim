@@ -90,13 +90,18 @@ let requestCounter = 0;
  *
  * @param {string} action
  * @param {string} viewId
+ * @param {object|null} [params] — command parameters (address / count /
+ *   source / format / offset …). They travel **in the signal**: the view
+ *   layer must not talk to the service layer, and the DOM is not
+ *   reachable from the bootstrap's listener (the signal is dispatched on
+ *   `window`, so `event.target` is the window, not the button).
  * @returns {string} the request id
  */
-function emitCommand(action, viewId) {
+function emitCommand(action, viewId, params = null) {
     requestCounter += 1;
     const requestId = `cmd-${action}-${requestCounter}`;
     window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: { action, requestId, viewId },
+        detail: { action, requestId, viewId, params },
     }));
     return requestId;
 }
@@ -186,7 +191,7 @@ function renderMapTable(mappings) {
 }
 
 // ---------------------------------------------------------------------------
-// debugView — disasm + regs/mem stub (FR-05/08/09, MVP stub only).
+// debugView — 反汇编面板 (M-11) + 寄存器/内存 (FR-05/08/09)
 // ---------------------------------------------------------------------------
 
 const debugView = register({
@@ -194,6 +199,21 @@ const debugView = register({
     channels: ["sim"],
     render(state) {
         const sim = state?.sim ?? {};
+        const debug = state?.debug ?? {};
+        // The disassembly entries come from the kernel's `Disasm` event.
+        const entries = Array.isArray(sim.disasm) ? sim.disasm : [];
+        // The PC comes from the **existing** state source (M-10 pushes
+        // `sim.pc` from `sim.registers` / `sim.state.delta`) — the panel
+        // must not invent a second one.
+        const pc = Number(sim.pc ?? 0) >>> 0;
+        const exportState = debug.export ?? null;
+        const traceState = debug.trace ?? null;
+        const error = debug.error ?? null;
+        // The continuation is offered only while there is **more** to
+        // fetch (`next_offset < total`); the offset unit is the **entry
+        // count** (STAGE-5 §3.1).
+        const canContinue = exportState !== null
+            && Number(exportState.next_offset ?? 0) < Number(exportState.total ?? 0);
         return `
             <div class="debug-toolbar">
                 <button type="button" data-action="step">单步</button>
@@ -203,23 +223,37 @@ const debugView = register({
                 <button type="button" data-action="reset">复位</button>
                 <button type="button" data-action="read-regs">读寄存器</button>
                 <button type="button" data-action="read-mem">读内存 @0x100</button>
+                <button type="button" data-action="disasm" data-addr="${pc}" data-count="16">反汇编</button>
+                <button type="button" data-action="export-trace" data-source="Execution" data-format="Csv" data-offset="0" data-limit="0">导出执行轨迹 (CSV)</button>
+                <button type="button" data-action="export-trace" data-source="Waveform" data-format="Vcd" data-offset="0" data-limit="0">导出波形 (VCD)</button>
+                ${canContinue ? `<button type="button" data-action="export-trace" data-source="${escapeHtml(String(exportState.source))}" data-format="${escapeHtml(String(exportState.format))}" data-offset="${Number(exportState.next_offset)}" data-limit="0" data-continue="1">继续导出</button>` : ""}
+                <button type="button" data-action="trace-enable">开启 trace 记录</button>
+                <button type="button" data-action="trace-disable">关闭 trace 记录</button>
             </div>
+            ${traceState?.enabled === true
+                ? `<p class="trace-notice" data-trace-notice>trace 记录已开启 —— 仿真会明显降速（每条指令与访存都要记录）。</p>`
+                : ""}
+            ${error
+                ? `<p class="debug-error" data-debug-error>${escapeHtml(String(error.code))}：${escapeHtml(String(error.message))}</p>`
+                : ""}
             <div class="debug-grid">
                 <section class="disasm">
                     <h3>反汇编 (M-11)</h3>
-                    <p class="muted">DWARF 解析属 M-5（v0.3 决议，已纳入 MVP）。</p>
+                    <p class="muted">助记符是 <strong>ISA 助记符</strong>：压缩指令保留 <code>c.</code> 前缀，不做伪指令别名改写（裁决 C）。</p>
                     <table class="disasm-table">
-                        <thead><tr><th>PC</th><th>指令</th><th>字</th></tr></thead>
+                        <thead><tr><th>地址</th><th>机器码</th><th>助记符</th><th>宽度</th></tr></thead>
                         <tbody>
-                            ${(sim.disasm ?? []).map((row) => `
-                                <tr>
-                                    <td><code>0x${row.pc.toString(16).padStart(8, "0")}</code></td>
-                                    <td>${escapeHtml(row.inst ?? "?")}</td>
-                                    <td><code>0x${row.raw.toString(16).padStart(8, "0")}</code></td>
-                                </tr>
-                            `).join("") || `<tr><td colspan="3" class="muted">尚无指令（M-13 跑通后会填充）</td></tr>`}
+                            ${entries.map((entry) => renderDisasmRow(entry, pc)).join("")
+                                || `<tr><td colspan="4" class="muted">尚无反汇编 — 点击「反汇编」向内核请求一段（M-11）。</td></tr>`}
                         </tbody>
                     </table>
+                </section>
+                <section class="trace-export">
+                    <h3>trace 导出 (M-11 / M-19)</h3>
+                    ${exportState
+                        ? `<p class="muted" data-trace-progress>${escapeHtml(String(exportState.source))} / ${escapeHtml(String(exportState.format))} · 条目 ${Number(exportState.offset)} → ${Number(exportState.next_offset)} / ${Number(exportState.total)}</p>`
+                        : `<p class="muted">尚未导出 — 选一个数据源与格式发起导出。</p>`}
+                    <pre class="trace-chunk" data-trace-chunk>${escapeHtml(String(exportState?.chunk ?? ""))}</pre>
                 </section>
                 <section class="regmem">
                     <h3>寄存器 / 内存</h3>
@@ -244,15 +278,59 @@ const debugView = register({
         `;
     },
     onCommand(ev) {
-        const action = ev.target?.closest?.("[data-action]")?.dataset?.action;
+        const el = ev.target?.closest?.("[data-action]");
+        const action = el?.dataset?.action;
         if (!action) return undefined;
-        return emitCommand(action, "debug");
+        // The command's parameters travel **with the signal** — the
+        // bootstrap's listener runs on `window` and cannot see the button.
+        return emitCommand(action, "debug", {
+            addr: el.dataset.addr,
+            count: el.dataset.count,
+            source: el.dataset.source,
+            format: el.dataset.format,
+            offset: el.dataset.offset,
+            limit: el.dataset.limit,
+        });
     },
     onDelta(_delta) {},
     mountFor(el) {
         el.addEventListener("click", (ev) => debugView.onCommand(ev));
     },
 });
+
+/**
+ * One row of the disassembly table.
+ *
+ * ⚠️ The mnemonic is shown **verbatim** (HTML-escaped, but otherwise
+ * untouched): the kernel renders **ISA** mnemonics — compressed
+ * instructions keep their `c.` prefix and there are **no
+ * pseudo-instruction aliases** (ruling C). The front end must not
+ * "helpfully" rewrite `c.addi sp,-16` into `addi sp,sp,-16`.
+ *
+ * The row the PC points at is highlighted (V-12).
+ *
+ * @param {{addr?: number, code?: number, mnemonic?: string, width?: number}} entry
+ * @param {number} pc
+ * @returns {string}
+ */
+function renderDisasmRow(entry, pc) {
+    const addr = Number(entry?.addr ?? 0) >>> 0;
+    const width = Number(entry?.width ?? 4);
+    const code = Number(entry?.code ?? 0) >>> 0;
+    const isPc = addr === (Number(pc ?? 0) >>> 0);
+    const addrText = `0x${addr.toString(16).padStart(8, "0")}`;
+    // The machine code is padded to the instruction's **own** width: a
+    // 16-bit compressed instruction shows 4 hex digits, a 32-bit one 8.
+    const codeText = `0x${code.toString(16).padStart(width === 2 ? 4 : 8, "0")}`;
+    return `
+        <tr class="disasm-row${isPc ? " is-pc" : ""}" data-disasm-addr="${addrText}"${isPc ? ' data-pc="1"' : ""}>
+            <td><code>${addrText}</code></td>
+            <td><code>${codeText}</code></td>
+            <td class="disasm-mnemonic">${escapeHtml(entry?.mnemonic ?? "")}</td>
+            <td>${width}</td>
+        </tr>
+    `;
+}
 
 // ---------------------------------------------------------------------------
 // regmemView — the "寄存器/内存" view (M-10 data).
