@@ -43,6 +43,17 @@
 //! ⛔ **绝不**产出「猜出来的行号」：遇到不支持的 form（裁决 C）⇒ **整个
 //! 行号程序单元降级**，该单元**不贡献任何行记录**（不部分解析）。
 //!
+//! ⛔ **两条边界**（v0.22 检视轮 V-A 的 VA-01 / VA-02）：
+//!
+//! 1. **没有 `end_sequence` 收尾的段** ⇒ 它的**结束地址是未知的** ⇒
+//!    这一段只覆盖「最后一条行记录的地址 + 1」⇒ 更远的地址是 `Missed`
+//!    （⛔ **不是**「覆盖到地址空间的末尾」—— 那会把**任意**远处的地址
+//!    报成一条**自信但错误**的源码行）；
+//! 2. **取不到文件名的行**（文件索引越界）⇒ 跳过 ⇒ `Missed`
+//!    （⛔ 契约层**只有**两种「没有答案」：`Missed`（`line = u32::MAX`）
+//!    与 `NoDwarf`（`line = 0`）⇒ **绝不**产出 `file == ""` 但 `line`
+//!    是**真行号**的**第三态**）。
+//!
 //! # 畸形输入 ⇒ 降级，不是错误
 //!
 //! `.debug_line` 被截断、版本读不出来 ⇒ [`DwarfStatus::Malformed`]，
@@ -134,8 +145,15 @@ pub struct UnitHeaderInfo {
 struct Sequence {
     /// 这一段的行记录（按地址升序；同地址时**后出现的**在后 ⇒ 它生效）。
     rows: Vec<Row>,
-    /// `end_sequence` 的地址（这一段**不含**它）。
-    end_addr: u32,
+    /// 这一段的**结束地址**（这一段**不含**它）。
+    ///
+    /// - 正常收尾（`DW_LNE_end_sequence`）⇒ = `end_sequence` 当时的地址；
+    /// - **没收尾** ⇒ = **最后一条行记录的地址 + 1**（见 [`run_program`]）。
+    ///
+    /// ⚠️ 用 `u64` 而不是 `u32`：没收尾的那一段要表达
+    /// 「最后一行地址 + 1」⇒ `u32` 在 `0xffff_ffff` 处会**溢出**
+    /// （`saturating_add` 会把那一行变成永远查不到的死行）。
+    end_addr: u64,
 }
 
 /// 行号程序发出的一行。
@@ -358,7 +376,7 @@ impl DwarfLines {
         let mut best: Option<&Row> = None;
         for seq in &self.sequences {
             // 这一段**不覆盖**这个地址（`end_sequence` 的地址属于下一段）。
-            if addr >= seq.end_addr {
+            if u64::from(addr) >= seq.end_addr {
                 continue;
             }
             // 二分：最后一条 `addr <= 目标` 的行记录。
@@ -371,6 +389,20 @@ impl DwarfLines {
             // （DWARF 的 `line = 0` 语义）⇒ 不报行号（报 0 会与契约的
             // 「没有 DWARF」态撞车）。
             if row.line == 0 {
+                continue;
+            }
+            // ⚠️ **文件名为空**的行记录（VA-02）：文件索引越界 / 名字取不到
+            // ⇒ 这一行**不知道自己属于哪个文件** ⇒ 报出去就是契约层的
+            // **第三种「没有答案」**（`file == ""` 但 `line` 是**真行号**）
+            // ⇒ 与 `Missed`（`line = u32::MAX`）、`NoDwarf`（`line = 0`）
+            // **都不同** ⇒ 前端 `location?.file` 判空会把它**吞掉**
+            // （用户看到「没变化」，分不清是没点生效还是真的没有）。
+            //
+            // 处理方式与 `line == 0` **完全一致**：这一段**答不了**这个
+            // 地址 ⇒ 跳过这一段（`continue`），**不**退回到上一行 ——
+            // 上一行的行号是**上一行**的（DWARF 里行号是寄存器，逐行可变）
+            // ⇒ 拿它顶替就是「猜出来的行号」（裁决 J 第 1 条）。
+            if row.file.is_empty() {
                 continue;
             }
             let better = match best {
@@ -956,7 +988,7 @@ fn run_program(
                 1 => {
                     sequences.push(Sequence {
                         rows: std::mem::take(&mut rows),
-                        end_addr: clamp_u32(state.address),
+                        end_addr: u64::from(clamp_u32(state.address)),
                     });
                     // 序列结束 ⇒ 状态机复位（地址 / 文件 / 行都回到初值）。
                     state = LineState::new(header);
@@ -1062,10 +1094,34 @@ fn run_program(
     }
 
     if !rows.is_empty() {
-        // 没有 `end_sequence` 收尾的段 ⇒ 覆盖到地址空间的末尾。
+        // ⚠️ **没有 `end_sequence` 收尾的段**（VA-01）：DWARF 规定每段行号
+        // 序列**必须**以 `DW_LNE_end_sequence` 收尾 ⇒ 没收尾 ⇒ 这一段的
+        // **结束地址是未知的**。
+        //
+        // ⛔ 旧实现把它当成「覆盖到地址空间的末尾」（`end_addr = u32::MAX`）
+        // ⇒ **任意远处的地址**都会被报成 `Found`（带一个**自信但错误**的
+        // 源码行）⇒ 违反裁决 J 第 1 条「绝不产出猜出来的行号」。
+        //
+        // 修法：把 `end_addr` 收到**本段最后一条行记录的地址 + 1** ——
+        // 「我们真的看到的行」照常可用，**不再声称**覆盖到看不见的地方
+        // （越界 ⇒ `Missed`）。
+        //
+        // ⚠️ 为什么**不**把这一段整个丢掉（另一种修法）：那些行记录是
+        // **真的**（地址、文件、行号都是解析出来的真值）⇒ 丢掉它们是把
+        // 「真值」降级成「没有」；收窄区间只影响「我们没看见的那部分」
+        // ⇒ 诚实性的损失更小、保留的信息更多。
+        //
+        // ⚠️ 取**所有行里的最大地址**而不是「最后一条」：这一段的行记录
+        // 在 `parse` 里才排序 ⇒ 这里按**程序顺序**追加（DWARF 规定地址
+        // 单调递增，但取 max 不依赖这个前提）。
+        let last_addr = rows
+            .iter()
+            .map(|row| u64::from(row.addr))
+            .max()
+            .unwrap_or(0);
         sequences.push(Sequence {
             rows,
-            end_addr: u32::MAX,
+            end_addr: last_addr + 1,
         });
     }
     Ok(sequences)
@@ -2109,5 +2165,254 @@ mod tests {
         unit.extend_from_slice(&8u64.to_le_bytes());
         let lines = DwarfLines::from_sections(&v_sections(&unit)).expect("降级");
         assert_eq!(lines.status(), DwarfStatus::Malformed);
+    }
+
+    // -----------------------------------------------------------------
+    // VA-01 / VA-02 / VA-03 的**合成夹具**。
+    //
+    // ⚠️ 为什么这三条用**合成**字节，而不用真工具链产物：它们要钉的是
+    // 「行号程序**没有** `end_sequence` 收尾」「文件索引**越界**」「文件
+    // 寄存器**初值**」这三件**语义** —— 真工具链**不会**产出前两种
+    // （它总是 `end_sequence` 收尾，文件索引也不越界）⇒ 合成夹具是
+    // **唯一**能覆盖它们的方式；真产物夹具（OSZ_DL / V2_DL …）负责
+    // 覆盖「正常路径」，两者互补。
+    // -----------------------------------------------------------------
+
+    /// v2~v4 的行号程序头部：`min_inst_len = 1`、`line_base = -5`、
+    /// `line_range = 14`、`opcode_base = 13`；目录表只有一项 `inc`；
+    /// 文件表**索引 0 未用**、**索引 1** = `main.c`（目录索引 1 ⇒ 路径
+    /// 拼成 `inc/main.c`）。
+    fn v4_header_bytes() -> Vec<u8> {
+        let mut header: Vec<u8> = vec![
+            1,    // minimum_instruction_length
+            1,    // maximum_operations_per_instruction（v4+）
+            1,    // default_is_stmt
+            0xfb, // line_base = -5
+            0x0e, // line_range = 14
+            0x0d, // opcode_base = 13
+        ];
+        header.extend_from_slice(&[0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1]); // standard_opcode_lengths
+        header.extend_from_slice(b"inc\0"); // 目录 1
+        header.push(0); // 目录表结束（空串）
+        header.extend_from_slice(b"main.c\0"); // 文件 1
+        header.extend_from_slice(&[1, 0, 0]); // dir=1, mtime=0, len=0
+        header.push(0); // 文件表结束（空 name）
+        header
+    }
+
+    /// 组装一个 **v4** 单元（`unit_length` + `version` + `header_length`
+    /// + 头部 + 行号程序）。
+    fn v4_unit(program: &[u8]) -> Vec<u8> {
+        let header = v4_header_bytes();
+        let mut unit: Vec<u8> = Vec::new();
+        // `unit_length` 数的是**它自己之后**的字节数。
+        let body_len = 2 + 4 + header.len() + program.len();
+        unit.extend_from_slice(&(body_len as u32).to_le_bytes());
+        unit.extend_from_slice(&4u16.to_le_bytes());
+        unit.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        unit.extend_from_slice(&header);
+        unit.extend_from_slice(program);
+        unit
+    }
+
+    /// 行号程序：`set_address 0x1000` → `copy`（发一行）→ `advance_pc 4`
+    /// → `end_sequence`。
+    ///
+    /// ⚠️ **为什么中间要 `advance_pc`**：`end_sequence` 用的就是**当前
+    /// 地址**；若 `copy` 之后地址没动，`end_sequence` 的地址就等于那一行
+    /// 的地址 ⇒ 那一行**落在本段之外**（`addr >= end_addr`）⇒ 查不到。
+    fn copy_at_0x1000() -> Vec<u8> {
+        let mut program: Vec<u8> = Vec::new();
+        // DW_LNE_set_address（长度 = 1 + 4）
+        program.push(0);
+        program.push(5);
+        program.push(2);
+        program.extend_from_slice(&0x1000u32.to_le_bytes());
+        program.push(1); // DW_LNS_copy
+        program.push(2); // DW_LNS_advance_pc
+        program.push(4); // 操作数 4
+
+        // DW_LNE_end_sequence（长度 = 1）
+        program.push(0);
+        program.push(1);
+        program.push(1);
+        program
+    }
+
+    /// 组装一个 **v5** 单元：文件表**索引 0** = `v5-zero.c`、
+    /// **索引 1** = `v5-one.c`（目录表为空 ⇒ 路径就是文件名）。
+    ///
+    /// ⚠️ v5 的头部布局与 v2~v4 **不同**：多出 `address_size` /
+    /// `segment_selector_size`，而目录表 / 文件表改用
+    /// `(content_type, form)` 格式描述。
+    fn v5_default_file_unit() -> Vec<u8> {
+        let mut header: Vec<u8> = vec![
+            1,    // minimum_instruction_length
+            1,    // maximum_operations_per_instruction
+            1,    // default_is_stmt
+            0xfb, // line_base = -5
+            0x0e, // line_range = 14
+            0x0d, // opcode_base = 13
+        ];
+        header.extend_from_slice(&[0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1]); // standard_opcode_lengths
+
+        // 目录表：格式 0 项、数量 0 ⇒ 没有目录。
+        header.push(0); // directory_entry_format_count
+        header.push(0); // directories_count（ULEB）
+
+        // 文件表：格式 2 项 —— (DW_LNCT_path, DW_FORM_string) 与
+        // (DW_LNCT_directory_index, DW_FORM_udata)。
+        header.push(2); // file_name_entry_format_count
+        header.push(1); // DW_LNCT_path
+        header.push(0x08); // DW_FORM_string
+        header.push(2); // DW_LNCT_directory_index
+        header.push(0x0f); // DW_FORM_udata
+        header.push(2); // file_names_count（ULEB）
+        header.extend_from_slice(b"v5-zero.c\0");
+        header.push(0); // directory_index = 0
+        header.extend_from_slice(b"v5-one.c\0");
+        header.push(0); // directory_index = 0
+
+        let program = copy_at_0x1000();
+
+        let mut unit: Vec<u8> = Vec::new();
+        // v5 的 `unit_length` 之后是 version(2) + address_size(1) +
+        // segment_selector_size(1) + header_length(4) + 头部 + 程序。
+        let body_len = 2 + 1 + 1 + 4 + header.len() + program.len();
+        unit.extend_from_slice(&(body_len as u32).to_le_bytes());
+        unit.extend_from_slice(&5u16.to_le_bytes());
+        unit.push(4); // address_size
+        unit.push(0); // segment_selector_size
+        unit.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        unit.extend_from_slice(&header);
+        unit.extend_from_slice(&program);
+        unit
+    }
+
+    /// 行号程序：`set_address 0x1000` → `copy`（发一行）→ **没有**
+    /// `end_sequence` 收尾。
+    fn unterminated_program() -> Vec<u8> {
+        let mut program: Vec<u8> = Vec::new();
+        // DW_LNE_set_address（长度 = 1 + 4）
+        program.push(0);
+        program.push(5);
+        program.push(2);
+        program.extend_from_slice(&0x1000u32.to_le_bytes());
+        program.push(1); // DW_LNS_copy
+        program
+    }
+
+    /// 行号程序：`set_address 0x1000` → `set_file 9`（**越界**）→
+    /// `copy` → `advance_pc 4` → `end_sequence`。
+    fn out_of_range_file_program() -> Vec<u8> {
+        let mut program: Vec<u8> = Vec::new();
+        // DW_LNE_set_address（长度 = 1 + 4）
+        program.push(0);
+        program.push(5);
+        program.push(2);
+        program.extend_from_slice(&0x1000u32.to_le_bytes());
+        program.push(4); // DW_LNS_set_file
+        program.push(9); // 文件索引 9（文件表只有第 1 项 ⇒ **越界**）
+        program.push(1); // DW_LNS_copy
+        program.push(2); // DW_LNS_advance_pc
+        program.push(4); // 操作数 4
+                         // DW_LNE_end_sequence（长度 = 1）
+        program.push(0);
+        program.push(1);
+        program.push(1);
+        program
+    }
+
+    // -----------------------------------------------------------------
+    // VA-01：没有 `end_sequence` 收尾的段**不得**覆盖到地址空间的末尾。
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_sequence_without_end_sequence_does_not_cover_the_whole_address_space() {
+        let lines = DwarfLines::from_sections(&v_sections(&v4_unit(&unterminated_program())))
+            .expect("不得报错");
+        assert_eq!(lines.status(), DwarfStatus::Supported(4));
+        assert_eq!(lines.units_parsed(), 1);
+        assert_eq!(lines.units_degraded(), 0);
+        // 真的那一行**照常**查得到（不猜，也不把真值丢掉）。
+        assert_eq!(found(&lines, 0x1000), ("inc/main.c".to_string(), 1));
+        // ⛔ 但这一段**没有** `end_sequence` 收尾 ⇒ 它的**结束地址未知**
+        // ⇒ 远处的地址**不得**被报成命中（那是「自信但错误」的源码行）。
+        assert_eq!(
+            lines.resolve(0x9999_9999),
+            LineLookup::Missed,
+            "没收尾的段**不得**覆盖到地址空间的末尾"
+        );
+        // 紧挨着最后一行之后的地址同样查不到（这一段只到「最后一行 + 1」）。
+        assert_eq!(lines.resolve(0x1001), LineLookup::Missed);
+    }
+
+    // -----------------------------------------------------------------
+    // VA-02：文件名为空 ⇒ **不是** `Found{file:""}`（契约层不许有第三态）。
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_row_without_a_file_name_is_a_miss_not_an_empty_file() {
+        let lines = DwarfLines::from_sections(&v_sections(&v4_unit(&out_of_range_file_program())))
+            .expect("不得报错");
+        assert_eq!(lines.status(), DwarfStatus::Supported(4));
+        // 夹具前提：那一行**确实**没有文件名（文件索引越界）。
+        let rows = lines.raw_rows();
+        assert_eq!(rows.len(), 1, "这一段只发了一行");
+        assert!(
+            rows[0].file.is_empty(),
+            "夹具前提：文件索引越界 ⇒ 这一行**没有**文件名"
+        );
+        assert_eq!(rows[0].line, 1, "行号**是真的**（问题只在文件名）");
+        // ⛔ 契约层只许两种「没有答案」：`Missed`（line = u32::MAX）与
+        // `NoDwarf`（line = 0）⇒ **不许**出现「空文件名 + 真行号」的
+        // **第三态**。
+        assert_eq!(
+            lines.resolve(0x1000),
+            LineLookup::Missed,
+            "文件名取不到 ⇒ `Missed`（**不是**「空文件名 + 真行号」那种第三态）"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // VA-03：v5 与 v2~v4 的「文件索引基址」不同（0 vs 1）—— 零护栏。
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn the_v5_default_file_register_is_index_zero() {
+        // DWARF 5：行号程序的 `file` 寄存器**初值是 0** ⇒ 首行（**不**
+        // 显式 `set_file`）属于**文件表第 0 项**。
+        //
+        // ⚠️ 这一条以前**零护栏**：把 v5 的 `initial_file` 从 0 改成 1，
+        // 全仓**一条用例都不红**（首行会变成文件表第 1 项 ⇒ 路径错了，
+        // 但没人钉它）。
+        let lines =
+            DwarfLines::from_sections(&v_sections(&v5_default_file_unit())).expect("不得报错");
+        assert_eq!(lines.status(), DwarfStatus::Supported(5));
+        assert_eq!(lines.units_parsed(), 1);
+        assert_eq!(
+            found(&lines, 0x1000),
+            ("v5-zero.c".to_string(), 1),
+            "v5 的首行必须落在文件表第 **0** 项（不是第 1 项）"
+        );
+    }
+
+    #[test]
+    fn the_v2_v4_default_file_register_is_index_one() {
+        // DWARF 2/3/4：行号程序的 `file` 寄存器**初值是 1**（索引 0 未用、
+        // 是主源文件的占位）⇒ 首行（**不**显式 `set_file`）属于**文件表
+        // 第 1 项**。
+        //
+        // ⚠️ 这一条以前**零护栏**：把 v2~v4 的 `initial_file` 从 1 改成 0，
+        // 首行会指向**未用的索引 0** ⇒ 路径取不到，同样没人钉它。
+        let lines =
+            DwarfLines::from_sections(&v_sections(&v4_unit(&copy_at_0x1000()))).expect("不得报错");
+        assert_eq!(lines.status(), DwarfStatus::Supported(4));
+        assert_eq!(lines.units_parsed(), 1);
+        assert_eq!(
+            found(&lines, 0x1000),
+            ("inc/main.c".to_string(), 1),
+            "v2~v4 的首行必须落在文件表第 **1** 项（不是第 0 项）"
+        );
     }
 }
