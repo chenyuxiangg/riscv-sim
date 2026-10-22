@@ -377,6 +377,24 @@ impl InstructionExecutor for IssExecutor<'_> {
             self.intc.poll(now_ps, mie, mstatus)?;
         }
 
+        // (2-bis) **把虚拟时间告诉总线**（M-14 的 `Bus::set_now_ps`）。
+        //
+        //     总线上的每一次读 / 写都会带一个时间戳（`BusAccess::ts_ps`）
+        //     ⇒ M-18 的访存 trace 环里才有**真实**的时间轴。
+        //
+        //     ⚠️ **没有这一步**，M-18 的事件时间戳**恒为 0** ⇒ M-11 的
+        //     执行轨迹导出里时间列全是 `0` ⇒ 时间轴**无意义**（导出看着
+        //     有数据，却读不出「什么时候发生的」）。
+        //
+        //     ⚠️ M-14 的 `set_now_ps` 文档写着「Read / write callers
+        //     should call this first so the trace events carry the
+        //     current `now_ps`」——**这个接缝一直存在，只是没人接线**。
+        //
+        //     口径：**一条指令 = 一个时间戳**。取指、数据访存、待写提交
+        //     （外设的写也走同一条提交路径）都落在**这条指令的起始时刻**
+        //     ——与 D-46 的外设时钟同步点（指令边界）**同一个**口径。
+        self.bus.set_now_ps(now_ps);
+
         // (3) 交付：**拉取式**（LLD 评审 16-4）—— M-16 登记了交付，M-17
         //     在**取指边界**把它取走并陷入。
         //
@@ -1315,6 +1333,38 @@ mod tests {
             3 * INSTRUCTION_COST_PS,
             "每条指令推进一次虚拟时钟"
         );
+    }
+
+    #[test]
+    fn bus_accesses_carry_the_virtual_time() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        // ⚠️ **总线上的访问必须带真实的时间戳**（M-14 的 `BusAccess::ts_ps`）。
+        //
+        //     没有 `Bus::set_now_ps` 的那次接线 ⇒ 时间戳**恒为 0** ⇒
+        //     M-18 的访存 trace 环里全是 0 ⇒ M-11 的执行轨迹导出**时间轴是
+        //     平的**（数据看着有，却读不出「什么时候发生的」）。
+        //
+        // 判别式：**时间戳必须随指令递增**（全 0 ⇒ 不递增 ⇒ 变红）。
+        let stamps: Rc<RefCell<Vec<u64>>> = Rc::new(RefCell::new(Vec::new()));
+        let mut bus = Bus::new();
+        bus.map_ram(0, 0x1_0000, &DEMO).expect("map ram");
+        let sink = Rc::clone(&stamps);
+        bus.add_hook(Box::new(move |access: &crate::m14_bus::BusAccess| {
+            sink.borrow_mut().push(access.ts_ps);
+        }));
+
+        let mut backend = SelfIssBackend::new(NullSinks, NullSinks).with_memory_bus(bus);
+        backend.step_n(3).expect("step");
+
+        let seen = stamps.borrow().clone();
+        assert_eq!(seen.len(), 3, "三条指令 ⇒ 三次取指：{seen:?}");
+        // 第一条指令在 t=0 跑（虚拟时钟从 0 起）⇒ 第一个戳是 0；
+        // **后面**的必须**递增** ⇒ 恒 0 会在这里变红。
+        assert_eq!(seen[0], 0, "第一条指令跑在虚拟时刻 0");
+        assert_eq!(seen[1], INSTRUCTION_COST_PS, "第二条指令跑在上一条之后");
+        assert_eq!(seen[2], 2 * INSTRUCTION_COST_PS, "依次递增");
     }
 
     #[test]

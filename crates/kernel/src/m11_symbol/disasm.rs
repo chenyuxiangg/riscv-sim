@@ -40,6 +40,7 @@
 //! （长度 < 请求条数），**不是**错误。宿主侧据此把「读不到」表达成
 //! 「序列到此为止」，而不是一条错误事件。
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
@@ -75,6 +76,12 @@ pub struct Disassembler {
     /// 条目里带着**机器码**（`code`）：自修改代码把某个地址改掉之后，
     /// 失效那个地址即可重新取指；缓存里的旧机器码**不会**被误当成新的。
     cache: HashMap<u32, DisasmEntryDto>,
+    /// [`Disassembler::lookup`] 命中缓存的次数。
+    ///
+    /// ⚠️ **可观测性**：规格 §9.4 说「M-11 的 `disasmCache` 可以兜住
+    /// （访存轨迹那次重复取指）」——那句话**必须可观测**，否则它只是一句
+    /// 散文，谁也没法证明它成立。
+    lookup_hits: Cell<u64>,
 }
 
 impl Disassembler {
@@ -83,6 +90,7 @@ impl Disassembler {
         Disassembler {
             decoder: Decoder::default(),
             cache: HashMap::new(),
+            lookup_hits: Cell::new(0),
         }
     }
 
@@ -167,6 +175,37 @@ impl Disassembler {
     /// 当前缓存里的条目数（可观测性 + 用例）。
     pub fn cache_len(&self) -> usize {
         self.cache.len()
+    }
+
+    /// 按**地址**查缓存里已有的反汇编条目。
+    ///
+    /// ⚠️ **用途**（STAGE-5 §9.4）：访存轨迹里的**取指**事件要机器码，而
+    /// M-18 的 `TraceEvent` **不带数据** ⇒ 宿主要么**再取一次指**，要么
+    /// **复用这里的缓存**。规格 §9.4 的原话是「M-11 的 `disasmCache` 可以
+    /// 兜住它」——**这个方法就是那句话的落点**。
+    ///
+    /// ⚠️ **缓存里的 `code` 是原码**（压缩指令 = 16 位原码，不是展开后的
+    /// 32 位形式），与宿主现场取指的口径**一致** ⇒ 两条路给出同一个值。
+    ///
+    /// ⚠️ **命中 ≠ 一定新鲜**：失效是**写**驱动的（裁决 G）⇒ 只要访客
+    /// 写过那个地址，条目就**已经被移除**了 ⇒ 命中即新鲜。
+    ///
+    /// ⚠️ **命中会计数**（[`Disassembler::lookup_hits`]）：这是「缓存替我们
+    /// 省了一次取指」的**可观测**证据。
+    pub fn lookup(&self, addr: u32) -> Option<&DisasmEntryDto> {
+        let hit = self.cache.get(&addr);
+        if hit.is_some() {
+            self.lookup_hits.set(self.lookup_hits.get() + 1);
+        }
+        hit
+    }
+
+    /// [`Disassembler::lookup`] 命中缓存的次数。
+    ///
+    /// ⚠️ 这个数字**必须能被观测**，否则规格 §9.4 的「`disasmCache` 可以
+    /// 兜住（重复取指）」只是一句散文。
+    pub fn lookup_hits(&self) -> u64 {
+        self.lookup_hits.get()
     }
 }
 
@@ -460,5 +499,30 @@ mod tests {
         let entries = disasm.disasm(BASE, 0, &mut read).expect("not an error");
         assert!(entries.is_empty());
         assert_eq!(disasm.cache_len(), 0, "nothing was fetched");
+    }
+
+    #[test]
+    fn lookup_serves_the_cached_entry_and_counts_the_hits() {
+        // 规格 §9.4：「M-11 的 `disasmCache` 可以兜住（重复取指）」——
+        // 这个方法就是那句话的落点，**命中必须可计数**。
+        let mut disasm = Disassembler::new();
+        let mut read = memory(BASE, CODE.to_vec());
+        let _ = disasm.disasm(BASE, 1, &mut read).expect("disasm");
+        assert_eq!(disasm.cache_len(), 1);
+
+        // 未命中 ⇒ `None`，**不**计数。
+        assert!(disasm.lookup(BASE + 0x1000).is_none());
+        assert_eq!(disasm.lookup_hits(), 0, "未命中不计");
+
+        // 命中 ⇒ 给出**同一个**条目（含机器码）⇒ 计数 +1。
+        let hit = disasm.lookup(BASE).expect("cached");
+        assert_eq!(hit.code, 0x02A5_8513, "命中给的是缓存里的原码");
+        assert_eq!(hit.width, 4);
+        assert_eq!(disasm.lookup_hits(), 1);
+
+        // 失效之后 ⇒ 又查不到了。
+        disasm.invalidate(BASE);
+        assert!(disasm.lookup(BASE).is_none());
+        assert_eq!(disasm.lookup_hits(), 1, "失效后的查询不算命中");
     }
 }
