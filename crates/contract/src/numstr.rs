@@ -92,6 +92,72 @@ pub mod u64_decimal {
     }
 }
 
+/// `Vec<u64>` 的十进制字符串形态 —— [`u64_decimal`] 的**列表**版。
+///
+/// ⚠️ **只有一个实现**：本模块的**写出**逐元素调用标量版的
+/// [`u64_decimal::serialize`]，**读入**逐元素调用标量版的
+/// [`u64_decimal::deserialize`] ⇒ 列表与标量**不可能**漂移成两套规则。
+///
+/// ⚠️ **它为什么住在 `numstr.rs`**：数值策略的**标量**版与**列表**版
+/// 是**同一条约束**的两种形状 ⇒ 必须**同一个落点**（台账「一个约束一个落点」）。
+/// 第一个使用者是 CLINT 的「每个 hart 一个 `mtimecmp`」。
+///
+/// 用法：
+///
+/// ```ignore
+/// #[serde(with = "crate::numstr::u64_decimal_list")]
+/// pub mtimecmp_cycles: Vec<u64>,
+/// ```
+pub mod u64_decimal_list {
+    use super::u64_decimal;
+    use serde::de::{SeqAccess, Visitor};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    /// One `u64` whose wire form is a decimal string.
+    struct Dec(u64);
+
+    impl Serialize for Dec {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            u64_decimal::serialize(&self.0, serializer)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for Dec {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            u64_decimal::deserialize(deserializer).map(Dec)
+        }
+    }
+
+    /// Write every element as a decimal string.
+    pub fn serialize<S: Serializer>(value: &[u64], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(value.iter().map(|v| Dec(*v)))
+    }
+
+    /// Read a list of decimal strings (or plain numbers — the scalar
+    /// version's leniency, unchanged).
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u64>, D::Error> {
+        struct ListVisitor;
+
+        impl<'de> Visitor<'de> for ListVisitor {
+            type Value = Vec<u64>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a list of decimal strings or non-negative integers")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(Dec(v)) = seq.next_element::<Dec>()? {
+                    out.push(v);
+                }
+                Ok(out)
+            }
+        }
+
+        deserializer.deserialize_seq(ListVisitor)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::u64_decimal;

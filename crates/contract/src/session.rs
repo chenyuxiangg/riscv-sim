@@ -379,7 +379,7 @@ pub struct ClintStateDto {
     /// ⚠️ **单位是周期不是 ps**（CLINT 的寄存器是周期计数器）；线上仍
     /// 走十进制字符串 —— 周期数与 ps 一样是**随仿真时间增长的量**，
     /// 走 JSON 数字会在 2^53 之后丢精度。
-    #[serde(with = "u64_decimal_list")]
+    #[serde(with = "crate::numstr::u64_decimal_list")]
     pub mtimecmp_cycles: Vec<u64>,
     /// `mtime`（**周期**，**十进制字符串**）—— 自由运行计数器的**当前值**。
     ///
@@ -422,67 +422,6 @@ pub struct PlicStateDto {
     /// 器件的权威虚拟时间（ps）—— **十进制字符串**。
     #[serde(with = "crate::numstr::u64_decimal")]
     pub now_ps: u64,
-}
-
-/// `Vec<u64>` 的十进制字符串形态 —— [`crate::numstr::u64_decimal`] 的
-/// **列表**版。
-///
-/// ⚠️ **只有一个实现**：本模块的**写出**逐元素调用标量版的
-/// [`crate::numstr::u64_decimal::serialize`]，**读入**逐元素调用标量版的
-/// [`crate::numstr::u64_decimal::deserialize`] ⇒ 列表与标量**不可能**
-/// 漂移成两套规则。
-///
-/// ⚠️ **它为什么住在 `session.rs` 而不是 `numstr.rs`**：数值策略的
-/// **标量**版住在契约层的 [`crate::numstr`]；本模块是它的**列表**形态，
-/// 而 CLINT 的「每个 hart 一个 `mtimecmp`」正好是这种形状。
-pub mod u64_decimal_list {
-    use crate::numstr::u64_decimal;
-    use serde::de::{SeqAccess, Visitor};
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    /// One `u64` whose wire form is a decimal string.
-    struct Dec(u64);
-
-    impl Serialize for Dec {
-        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            u64_decimal::serialize(&self.0, serializer)
-        }
-    }
-
-    impl<'de> Deserialize<'de> for Dec {
-        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            u64_decimal::deserialize(deserializer).map(Dec)
-        }
-    }
-
-    /// Write every element as a decimal string.
-    pub fn serialize<S: Serializer>(value: &[u64], serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_seq(value.iter().map(|v| Dec(*v)))
-    }
-
-    /// Read a list of decimal strings (or plain numbers — the scalar
-    /// version's leniency, unchanged).
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u64>, D::Error> {
-        struct ListVisitor;
-
-        impl<'de> Visitor<'de> for ListVisitor {
-            type Value = Vec<u64>;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a list of decimal strings or non-negative integers")
-            }
-
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-                let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-                while let Some(Dec(v)) = seq.next_element::<Dec>()? {
-                    out.push(v);
-                }
-                Ok(out)
-            }
-        }
-
-        deserializer.deserialize_seq(ListVisitor)
-    }
 }
 
 /// One peripheral's share of the session state — an element of segment 4.
