@@ -4,6 +4,13 @@
 # Format:  <suite>  <test>  <march>  <status>  [env]  [reason]
 #
 #   suite   riscv-tests suite directory under isa/
+#           The `local` suite is the exception: it is **this
+#           repository's own** self-contained cases, read from
+#           `tests/golden/local/<test>.S` (the harness falls back to
+#           that directory when the upstream tree has no such file).
+#           It exists for behaviours upstream riscv-tests has no case
+#           for — e.g. an unmapped access trapping (STAGE-7
+#           adjudication H / ledger D-99).
 #   test    test case name (isa/<suite>/<test>.S)
 #   march   -march= value used to assemble the case
 #   status  active  — the case must agree with Spike; a mismatch fails the run
@@ -112,3 +119,14 @@ rv32mi scall rv32i_zicsr_zifencei active csr
 rv32mi sh-misaligned rv32i_zicsr_zifencei active csr
 rv32mi shamt rv32i_zicsr_zifencei active csr
 rv32mi sw-misaligned rv32i_zicsr_zifencei active csr
+# The `local` suite — this repository's own self-contained cases
+# (tests/golden/local/).  They cover behaviour upstream riscv-tests has
+# no case for: an **unmapped access** must trap (load ⇒ mcause 5,
+# store ⇒ mcause 7, mtval = the faulting address) instead of aborting
+# the run — ledger D-99, STAGE-7 adjudication G / H.
+#
+# ⚠️ The判据 is the **guest's own check** of mcause / mtval / mepc: the
+# guest writes PASS only when all three are exactly right, so "both
+# sides stopped erroring" is **not** what these rows prove.
+local unmapped_store rv32i_zicsr_zifencei active csr
+local unmapped_load rv32i_zicsr_zifencei active csr

@@ -239,8 +239,14 @@ build_args=(-p riscv_sim_kernel --bin riscv-golden)
 [ "$RELEASE" -eq 1 ] && build_args+=(--release)
 echo "==> building candidate runner (cargo ${build_args[*]})"
 cargo build "${build_args[@]}" || die "cargo build failed"
-RUNNER="$REPO_ROOT/target/debug/riscv-golden"
-[ "$RELEASE" -eq 1 ] && RUNNER="$REPO_ROOT/target/release/riscv-golden"
+# The runner lives in the **cargo target directory** — which is not
+# necessarily the workspace's own `target/` (an isolated
+# `CARGO_TARGET_DIR` is how parallel lanes avoid sharing a cargo
+# lock).  Hard-coding `$REPO_ROOT/target` made the script run a stale
+# binary (or none at all) whenever the target dir was overridden.
+TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+RUNNER="$TARGET_DIR/debug/riscv-golden"
+[ "$RELEASE" -eq 1 ] && RUNNER="$TARGET_DIR/release/riscv-golden"
 
 mkdir -p "$OUT_DIR"
 
@@ -450,6 +456,16 @@ for c in "${cases[@]}"; do
     total=$((total + 1))
 
     src="$RISCV_TESTS_DIR/isa/$suite/$test_name.S"
+    if [ ! -f "$src" ] && [ "$suite" = "local" ]; then
+        # The `local` suite is the repository's **own** self-contained
+        # cases (`tests/golden/local/`) — the ones that cannot come
+        # from the upstream riscv-tests tree because they test a
+        # behaviour upstream does not have a case for (e.g. an unmapped
+        # access trapping).  Every other suite resolves inside the
+        # upstream tree, so this fallback can never shadow an upstream
+        # case.
+        src="$REPO_ROOT/tests/golden/local/$test_name.S"
+    fi
     elf="$OUT_DIR/$suite-$test_name.elf"
 
     if [ ! -f "$src" ]; then

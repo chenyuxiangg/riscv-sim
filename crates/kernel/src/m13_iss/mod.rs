@@ -163,14 +163,23 @@ impl Iss {
     /// path — every fetch / load / store goes through the address
     /// decoder and contributes to the bus's stats / hook.
     ///
-    /// Errors raised by the bus (E_BUS-01 / E_BUS-02 / E_BUS-05) are
-    /// mapped to ISS `{family: Iss, scenario: 1}` errors by
-    /// [`BusMemory`] (which threads the error string through).
-    /// ⚠️ Turning a **bus error** into a guest trap (mcause + mtval) is
-    /// still **not** done — the bus error message is propagated
-    /// verbatim. (The trap path that *is* wired is the architectural
-    /// one: illegal instruction / ECALL / EBREAK / misaligned access,
-    /// which goes through [`enter_trap`].)
+    /// Errors raised by the bus are **not** flattened into one error
+    /// code: the bus's own family / scenario code is carried through
+    /// (only the message gains the address context).  That is what
+    /// lets the ISS tell an **unmapped address** (`E_BUS-01`) from
+    /// every other bus error.
+    ///
+    /// ⚠️ An unmapped **data** access is an architectural **access
+    /// fault**: the load traps with `mcause = 5`, the store with
+    /// `mcause = 7`, and `mtval` carries the faulting address — the
+    /// guest's trap handler gets a chance to run, exactly as on the
+    /// reference side (STAGE-7 adjudication G, ledger **D-99**).
+    /// Every **other** bus error is propagated to the host unchanged.
+    ///
+    /// ⚠️ The **fetch** path is different on purpose: an unmapped
+    /// fetch is still an `ISS-01` error here, because the instruction
+    /// access fault (`mcause = 1`) is **not** in this batch's scope
+    /// (STAGE-7 adjudication G covers data accesses only).
     pub fn step_one_via_bus(
         &mut self,
         state: &mut SimState,
@@ -238,9 +247,19 @@ impl<'a> BusMemory<'a> {
 impl MemoryAccess for BusMemory<'_> {
     fn read(&mut self, addr: u32, size: WriteSize) -> Result<u32, PlatformError> {
         self.bus.read(addr, BusWidth::from(size)).map_err(|e| {
+            // ⚠️ **保留总线的族与场景码**（STAGE-7 裁决 G）。
+            //
+            // 以前这里把总线错误**重新包成** `{Iss, 1}`，消息里留一句
+            // `E_BUS-01` 的文本。那样一来，执行器就**分不出**「地址没
+            // 映射」（⇒ 架构陷阱）与「其它总线错误」（⇒ 原样上抛）——
+            // 两者在错误里长得一模一样，只能靠**匹配消息文本**来分，
+            // 那正是台账 **D-29** 批评的做法。
+            //
+            // ⇒ 这里只**加地址上下文**（消息），**族与场景码原样带过来**：
+            // 执行器按 `family == Bus && scenario == 1` 判「未映射」。
             PlatformError::new(
-                ErrorFamily::Iss,
-                1,
+                e.family,
+                e.scenario,
                 format!("load at 0x{:08x}: {}", addr, e),
             )
         })
@@ -250,9 +269,10 @@ impl MemoryAccess for BusMemory<'_> {
         self.bus
             .write(addr, BusWidth::from(size), value)
             .map_err(|e| {
+                // 同上：**族与场景码原样带过来**（STAGE-7 裁决 G）。
                 PlatformError::new(
-                    ErrorFamily::Iss,
-                    1,
+                    e.family,
+                    e.scenario,
                     format!("store at 0x{:08x}: {}", addr, e),
                 )
             })
@@ -273,7 +293,9 @@ mod tests_rv32m;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::m13_iss::tests_common::{enc_i, enc_s, LOAD, STORE};
     use crate::m14_bus::Bus;
+    use riscv_sim_contract::csr::{CSR_MCAUSE, CSR_MEPC, CSR_MTVAL, CSR_MTVEC};
     use riscv_sim_contract::model::WriteSize;
     fn make_mem(contents: &[(u32, u32)]) -> Vec<(u32, u32)> {
         contents.to_vec()
@@ -362,5 +384,99 @@ mod tests {
         let err = iss.step_one_via_bus(&mut state, &mut bus).unwrap_err();
         assert_eq!(err.family, ErrorFamily::Iss);
         assert_eq!(err.scenario, 1, "fetch bus error must surface as ISS-01");
+    }
+
+    /// Integration: a store to an unmapped address traps with
+    /// `mcause = 7` on the **production** path (M-14 bus).
+    ///
+    /// ⚠️ This is the test that pins the **seam** the trap conversion
+    /// depends on: the bus's `E_BUS-01` has to reach the executor with
+    /// its family / scenario code intact.  The adapter used to
+    /// re-wrap every bus error as `{Iss, 1}`, which made "unmapped"
+    /// indistinguishable from every other bus error — and the only way
+    /// out would have been matching the **message text** (ledger
+    /// **D-29**).
+    #[test]
+    fn a_store_to_an_unmapped_address_traps_through_the_bus() {
+        let program = [enc_s(0, 6, 5, 0b010, STORE)];
+        let bytes: [u8; 4] = program
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+
+        let mut bus = Bus::new();
+        bus.map_ram(0, 0x1000, &bytes).expect("map ram");
+        let mut state = SimState {
+            pc: 0,
+            gpr: {
+                let mut gpr = [0u32; 32];
+                gpr[5] = 0x9000_0000; // not mapped by anybody
+                gpr
+            },
+            ..SimState::default()
+        };
+        csr::csr_write(&mut state, CSR_MTVEC, 0x2000);
+
+        let mut iss = Iss::default();
+        let outcome = iss
+            .step_one_via_bus(&mut state, &mut bus)
+            .expect("an unmapped access is a trap, not an error");
+
+        assert_eq!(
+            outcome,
+            StepOutcome::Trapped {
+                cause: TrapCause::StoreAccessFault
+            }
+        );
+        assert_eq!(csr::csr_read(&state, CSR_MCAUSE), 7);
+        assert_eq!(csr::csr_read(&state, CSR_MTVAL), 0x9000_0000);
+        assert_eq!(
+            csr::csr_read(&state, CSR_MEPC),
+            0,
+            "mepc is the faulting instruction"
+        );
+        assert_eq!(state.pc, 0x2000, "the PC goes to the trap vector");
+    }
+
+    /// Integration: a load from an unmapped address traps with
+    /// `mcause = 5` on the production path.
+    #[test]
+    fn a_load_from_an_unmapped_address_traps_through_the_bus() {
+        let program = [enc_i(0, 5, 0b010, 6, LOAD)];
+        let bytes: [u8; 4] = program
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+
+        let mut bus = Bus::new();
+        bus.map_ram(0, 0x1000, &bytes).expect("map ram");
+        let mut state = SimState {
+            pc: 0,
+            gpr: {
+                let mut gpr = [0u32; 32];
+                gpr[5] = 0x9000_0000;
+                gpr
+            },
+            ..SimState::default()
+        };
+        csr::csr_write(&mut state, CSR_MTVEC, 0x2000);
+
+        let mut iss = Iss::default();
+        let outcome = iss
+            .step_one_via_bus(&mut state, &mut bus)
+            .expect("an unmapped access is a trap, not an error");
+
+        assert_eq!(
+            outcome,
+            StepOutcome::Trapped {
+                cause: TrapCause::LoadAccessFault
+            }
+        );
+        assert_eq!(csr::csr_read(&state, CSR_MCAUSE), 5);
+        assert_eq!(csr::csr_read(&state, CSR_MTVAL), 0x9000_0000);
     }
 }
