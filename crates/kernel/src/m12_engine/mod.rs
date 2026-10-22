@@ -120,17 +120,19 @@ pub const DEFAULT_INSTRUCTION_BUDGET: u32 =
 /// VD-F3 的活锁形态，把它算成进展就等于**把活锁放过去**。
 pub const NO_PROGRESS_WINDOW: u32 = 1_024;
 
-/// 场景码：事件总线发布失败（引擎 → 总线那条路断了）。
-pub const E_ENG_01_BUS_PUBLISH_FAILED: u16 = 1;
-
-/// 场景码：事件队列在 `peek` 与 `pop` 之间不一致（内部一致性被破坏）。
-pub const E_ENG_02_QUEUE_INCONSISTENT: u16 = 2;
-
-/// 场景码：主循环**无进展**（watchdog 判定停滞 / 活锁）。
+/// ⚠️ **场景码住在契约层**（v0.24 · D-120 · 冻结规格 STAGE-9 裁决 G）
+/// —— M-12 **不再自写一份**字面量。
 ///
-/// 这是 LLD §3.5「watchdog 无进展检测」在引擎侧的第一个**真实落点**：
-/// 守卫触发时**报错退出**，而不是让主循环**永远转下去**（VD-F3）。
-pub const E_ENG_03_NO_PROGRESS: u16 = 3;
+/// ⚠️ **为什么是 `pub use` 而不是删掉**：这三个常量**曾经**是 M-12 的
+/// **公开 API**（`riscv_sim_kernel::m12_engine::E_ENG_03_NO_PROGRESS`）
+/// ⇒ 删掉它们会打断外部引用。`pub use` 让那条路径**继续存在**，而
+/// **值**来自契约层 ⇒ 全仓**只有一个定义处**（契约层的 `error.rs`）。
+///
+/// ⚠️ **依赖方向是对的**：内核 crate 依赖契约 crate（内核 → 契约）
+/// ⇒ **不构成循环依赖**。
+pub use riscv_sim_contract::error::{
+    E_ENG_01_BUS_PUBLISH_FAILED, E_ENG_02_QUEUE_INCONSISTENT, E_ENG_03_NO_PROGRESS,
+};
 
 /// Scheduling event held in the event queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2073,6 +2075,65 @@ mod tests {
             seqs,
             vec![3, 7, fresh],
             "队列里的 seq 必须互不相同（D-17：不撞号）"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // D-120：引擎族场景码**只住在契约层**（STAGE-9 裁决 G）
+    // ------------------------------------------------------------------
+
+    /// ⚠️ **等值断言**：M-12 用的三个场景码必须**等于**契约层的那三个。
+    ///
+    /// ⚠️ **为什么这条不是废话**：M-12 **曾经**自己定义过这三个常量
+    /// （各带一份字面量）⇒ 契约层登记了
+    /// 一份、M-12 又写了一份 ⇒ 将来改一处忘了另一处，契约层说的码与
+    /// 内核报的码就会**不一致**，而前端是按**契约层**的码分派的。
+    ///
+    /// ⚠️ 断言的是**值相等**（不是「源码里有几处 `E_ENG_0`」）——
+    /// 后者是**排版耦合**的检查（改个缩进就变红），而这一条在
+    /// 「M-12 又写回一份本地字面量」时**真的**变红。
+    #[test]
+    fn the_engine_scenario_codes_are_the_contract_layers_ones() {
+        assert_eq!(
+            E_ENG_01_BUS_PUBLISH_FAILED,
+            riscv_sim_contract::error::E_ENG_01_BUS_PUBLISH_FAILED,
+            "E_ENG-01 的值必须来自契约层"
+        );
+        assert_eq!(
+            E_ENG_02_QUEUE_INCONSISTENT,
+            riscv_sim_contract::error::E_ENG_02_QUEUE_INCONSISTENT,
+            "E_ENG-02 的值必须来自契约层"
+        );
+        assert_eq!(
+            E_ENG_03_NO_PROGRESS,
+            riscv_sim_contract::error::E_ENG_03_NO_PROGRESS,
+            "E_ENG-03 的值必须来自契约层"
+        );
+    }
+
+    /// ⚠️ **对拍用例**：M-12 **实际报出来的**码必须与**契约层场景码表**
+    /// 里的码**逐字相同**。
+    ///
+    /// ⚠️ 这条比上面那条更硬：上面那条比的是「M-12 用的常量」与「契约层
+    /// 的常量」，而这条比的是「**引擎报给调用方的那一个数**」——前端
+    /// 拿到的就是它。
+    #[test]
+    fn the_reported_no_progress_code_is_the_contract_layers_code() {
+        let mut eng: Engine<RecordingBus, RecordingIntc> = Engine::default();
+        let mut executor = AlwaysInterrupt { calls: 0 };
+
+        let err = eng
+            .run_until(&mut executor, u64::MAX)
+            .expect_err("活锁必须报错退出");
+
+        assert_eq!(
+            err.scenario,
+            riscv_sim_contract::error::E_ENG_03_NO_PROGRESS,
+            "M-12 报出来的码必须与契约层场景码表里的码逐字相同"
+        );
+        assert_eq!(
+            err.scenario, 3,
+            "E_ENG-03 的场景码字面量是 3（架构字面量，不从被测实现反推）"
         );
     }
 }

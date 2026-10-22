@@ -373,16 +373,19 @@ fn an_empty_write_console_is_a_no_op_that_still_answers() {
     );
 }
 
-/// (h-1) 一条命令写**多个**字节 ⇒ FIFO 里是**第一个**字节，且**溢出被
-/// 锁存**（不是静默地丢）。
+/// (h-1) 一条命令写**多个**字节 ⇒ **三个都进 FIFO**、**顺序不丢**。
 ///
-/// ⚠️ **UART 的 RX FIFO 只有 1 字节深**（M-15 的 MVP 模型）⇒ 一条命令
-/// 写 3 个字节 ⇒ 第一个进 FIFO，后两个被丢掉 ⇒ `LSR` 的溢出位（bit2）
-/// 必须**锁存** ⇒ 「丢」是**看得见的**，不是静默的。
+/// ⚠️ **v0.24 修正**：这条用例原先断言的是「UART 的 RX FIFO 只有 1 字节深
+/// ⇒ 一条命令写 3 个字节只有第一个进得去，其余丢弃并锁存 overrun」——
+/// 那与冻结规格 STAGE-9 裁决 B 第一步（「把**字节**塞进 UART 的 RX
+/// FIFO」，**复数**）以及批次目标（「让 osz 的 shell **真的能用**」＝
+/// **一行**命令送得进去）**不符** ⇒ 接收侧已加深成 16 字节深的 FIFO
+/// （M-15 · Lane I），本条改为断言**新语义**。
 ///
-/// ⚠️ 判别力：字节**没进** FIFO ⇒ `RHR` 读出来是 `0x00`（不是 `0x41`）。
+/// ⚠️ 判别力：字节**没进** FIFO ⇒ `RHR` 读出来是 `0x00`（不是 `0x41`）；
+/// 顺序乱了 ⇒ 第二、三个字节读出来的不是 `0x42` / `0x43`。
 #[test]
-fn several_bytes_in_one_command_keep_the_first_and_latch_the_overrun() {
+fn several_bytes_in_one_command_all_reach_the_fifo_in_order() {
     let mut host = host_with_uart();
     dispatch(
         &mut host,
@@ -392,23 +395,63 @@ fn several_bytes_in_one_command_keep_the_first_and_latch_the_overrun() {
     );
 
     // ⚠️ **先看 `LSR`，再读 `RHR`**：读 `RHR` 是**读清**（消费掉 FIFO 里
-    // 的字节）⇒ 读完 `RX_VALID` 就没了。
+    // 的**队头**）⇒ 读完最后一个字节 `RX_VALID` 才没了。
     let status = lsr(&host);
     assert_eq!(status & LSR_RX_VALID, LSR_RX_VALID, "RX_VALID 必须置位");
+    assert_eq!(
+        status & LSR_OVERRUN,
+        0x00,
+        "三个字节**没有**塞满 16 字节深的 FIFO ⇒ 不许锁存 overrun"
+    );
+
+    // 三个字节**都在** FIFO 里，**顺序**不变。
+    assert_eq!(read_reg(&host, UART0_RHR), 0x41, "队头必须是 0x41");
+    assert_eq!(read_reg(&host, UART0_RHR), 0x42, "第二个必须是 0x42");
+    assert_eq!(read_reg(&host, UART0_RHR), 0x43, "第三个必须是 0x43");
+    assert_eq!(
+        read_reg(&host, UART0_RHR),
+        0x00,
+        "三个字节读完之后 FIFO 必须空"
+    );
+}
+
+/// (h-1b) 一条命令写**超过 FIFO 深度**的字节 ⇒ 留下的是**最早**的那些，
+/// 多出来的被**丢**，且**丢是看得见的**（`LSR` 的 overrun 位锁存）。
+///
+/// ⚠️ **口径与 TX 捕获环一致**：**丢最新、保最早**（最早的字节是输入流的
+/// **前缀**，丢前缀比丢尾巴更难诊断）。
+#[test]
+fn a_write_console_longer_than_the_fifo_drops_the_newest_and_latches_the_overrun() {
+    let mut host = host_with_uart();
+    // 20 个字节 > 16 字节深的 FIFO ⇒ 最后 4 个（0x64..=0x67）被丢。
+    let bytes: Vec<u8> = (0x40u8..0x54).collect();
+    assert_eq!(bytes.len(), 20, "夹具：必须比 FIFO 深");
+    dispatch(&mut host, CommandPayload::WriteConsole { bytes });
+
+    let status = lsr(&host);
     assert_eq!(
         status & LSR_OVERRUN,
         LSR_OVERRUN,
         "多出来的字节被丢掉 ⇒ 溢出位（bit2）必须**锁存**（丢是看得见的）"
     );
     assert_eq!(
-        read_reg(&host, UART0_RHR),
-        0x41,
-        "FIFO 里必须是**第一个**字节（0x41）"
+        status & LSR_RX_VALID,
+        LSR_RX_VALID,
+        "FIFO 里还有字节 ⇒ RX_VALID 必须置位"
     );
+
+    // 留下的是**最早**的 16 个字节，顺序不变。
+    for i in 0..16u8 {
+        assert_eq!(
+            read_reg(&host, UART0_RHR),
+            0x40 + i,
+            "留下的必须是**最早**的字节，且顺序不变"
+        );
+    }
     assert_eq!(
         read_reg(&host, UART0_RHR),
         0x00,
-        "FIFO 只有 1 字节深 ⇒ 读完就空"
+        "被丢的那 4 个字节不许出现在 FIFO 里"
     );
 }
 

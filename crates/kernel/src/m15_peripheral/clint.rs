@@ -35,13 +35,20 @@
 //! 「暴露状态、由宿主驱动」，同 `gpio.rs` / `timer.rs`）。宿主拿
 //! [`Clint::mtimecmp_ps`] 与 [`Clint::timer_expired`] 自己去 M-16 抬线。
 //!
-//! ⚠️ 本外设**不参与会话快照**：契约层的 `PeripheralSessionState` 目前
-//! 只有 uart / gpio / timer 三个变体，加 CLINT/PLIC 要动契约层 ⇒ 本批
-//! 用契约层的默认实现（`session_state()` 返回 `None`）。
+//! ⚠️ 本外设**参与会话快照**（v0.24 · D-117）：契约层的
+//! `PeripheralSessionState` 加了 `Clint` 变体 ⇒ 本器件实现
+//! `session_state()` / `restore_session_state()` /
+//! `validate_session_state()` 三个方法。
+//!
+//! ⚠️ **快照带什么**：`msip`（每 hart 一份的**原始值**）· `mtimecmp`
+//! （每 hart 一份，**周期**）· `mtime`（**周期**，当前值）· `now_ps`。
+//! ⚠️ **为什么必须带 `mtime`**：它的真相源是「锚点 + 虚拟时间」，锚点
+//! **不是寄存器**（guest 看不见）⇒ 不带 `mtime` 就还原不出那个值。
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
 use riscv_sim_contract::port::{Peripheral, ProbeSink};
+use riscv_sim_contract::session::{ClintStateDto, PeripheralSessionState};
 
 use super::reg::{extract_subword, register_offset};
 use super::ProbeSlot;
@@ -275,6 +282,46 @@ impl Clint {
         let now = self.now_ps;
         self.probe.report(signal, value, now);
     }
+
+    /// The CLINT's **own** integrity rules for a session state.
+    ///
+    /// ⚠️ **数量必须与器件能力相符**：本器件有 `harts` 个 hart，而载荷的
+    /// 两个「每 hart 一份」的列表都必须**恰好**那么长 ——
+    ///
+    /// - 少了 ⇒ 某个 hart 的状态**没了**（还原出来的会话与采快照的**不是
+    ///   同一个**）；
+    /// - 多了 ⇒ 载荷描述了一个**不存在的** hart。
+    ///
+    /// ⚠️ 这条规则**只能**住在器件里：契约层知道「两个列表长度必须
+    /// 一致」（**自洽**），但它**不知道**这个 CLINT 有几个 hart。
+    fn check_state(&self, state: &ClintStateDto) -> Result<(), PlatformError> {
+        let harts = self.harts as usize;
+        if state.msip.len() != harts {
+            return Err(PlatformError::new(
+                super::PERIPHERAL_FAMILY,
+                super::E_PER_04_UNSUPPORTED_SESSION_STATE,
+                format!(
+                    "CLINT '{}' 的会话状态带 {} 个 hart 的 msip，器件只有 {} 个 hart",
+                    self.id,
+                    state.msip.len(),
+                    self.harts
+                ),
+            ));
+        }
+        if state.mtimecmp_cycles.len() != harts {
+            return Err(PlatformError::new(
+                super::PERIPHERAL_FAMILY,
+                super::E_PER_04_UNSUPPORTED_SESSION_STATE,
+                format!(
+                    "CLINT '{}' 的会话状态带 {} 个 hart 的 mtimecmp，器件只有 {} 个 hart",
+                    self.id,
+                    state.mtimecmp_cycles.len(),
+                    self.harts
+                ),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// 寄存器读写（`register_offset` / `extract_subword`）在 `super::reg`
@@ -365,6 +412,68 @@ impl Peripheral for Clint {
     /// 装上 / 摘掉 M-18 探针回调（D-12）。
     fn on_probe(&mut self, cb: Option<ProbeSink>) {
         self.probe.set(cb);
+    }
+
+    /// This CLINT's share of the **session snapshot** (segment 4 —
+    /// v0.24 · D-117).
+    ///
+    /// ⚠️ `mtimecmp` 的单位是**周期**（不是 ps）；`mtime` 也是周期。
+    ///
+    /// ⚠️ `mtime` 带的是**当前值**而不是「锚点」：锚点是**平台内部**的
+    /// 状态（guest 看不见它），而载荷是**会话的公开形状** ⇒ 带当前值 +
+    /// 当前虚拟时间，还原时就能**重建**一个等价的锚点。
+    fn session_state(&self) -> Option<PeripheralSessionState> {
+        Some(PeripheralSessionState::Clint(ClintStateDto {
+            id: self.id.clone(),
+            msip: self.msip.clone(),
+            mtimecmp_cycles: self.mtimecmp.clone(),
+            mtime_cycles: self.mtime_cycles(),
+            now_ps: self.now_ps,
+        }))
+    }
+
+    /// Restore the CLINT's session state (segment 4's consumer).
+    ///
+    /// ⚠️ **还原后 `mtime` 必须从还原点继续走**，而不是被下一次 tick
+    /// 拉回「虚拟时间的函数」⇒ 锚点被挪到「载荷的 `now_ps`」与「载荷的
+    /// `mtime_cycles`」上。
+    fn restore_session_state(
+        &mut self,
+        state: &PeripheralSessionState,
+    ) -> Result<(), PlatformError> {
+        let PeripheralSessionState::Clint(s) = state else {
+            return Err(super::wrong_state_kind(
+                &self.id,
+                super::SessionKind::Clint,
+                super::SessionKind::of(state),
+            ));
+        };
+        super::check_same_id(&self.id, &s.id)?;
+        self.check_state(s)?;
+        self.msip = s.msip.clone();
+        self.mtimecmp = s.mtimecmp_cycles.clone();
+        // ⚠️ 锚点 = (当前虚拟时间, 当前 mtime) ⇒ 还原之后 `mtime` 从这个
+        // 值继续走（而不是回到「虚拟时间的函数」）。
+        self.mtime_anchor = (s.now_ps, s.mtime_cycles);
+        self.now_ps = s.now_ps;
+        Ok(())
+    }
+
+    /// **Read-only** acceptance check for this CLINT's session state.
+    ///
+    /// ⚠️ **默认实现是「放行」** ⇒ 本器件**必须**覆盖它：否则一个
+    /// 数量对不上的载荷会被**静默接受**，还原出来的会话少了一个 hart
+    /// 的状态 —— 而载荷里没有任何东西能提示这件事。
+    fn validate_session_state(&self, state: &PeripheralSessionState) -> Result<(), PlatformError> {
+        let PeripheralSessionState::Clint(s) = state else {
+            return Err(super::wrong_state_kind(
+                &self.id,
+                super::SessionKind::Clint,
+                super::SessionKind::of(state),
+            ));
+        };
+        super::check_same_id(&self.id, &s.id)?;
+        self.check_state(s)
     }
 }
 

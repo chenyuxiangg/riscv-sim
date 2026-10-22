@@ -218,10 +218,11 @@ impl PeripheralRegistry {
     /// Export the internal state of **every** registered peripheral —
     /// segment 4's producer (STAGE-3 §3.3).
     ///
-    /// The states are grouped **by kind** (`uarts` / `gpios` / `timers`)
-    /// and each group is ordered by **id**. A peripheral that does not
-    /// implement [`Peripheral::session_state`] contributes nothing — it
-    /// has no session state to carry (the contract's default is `None`).
+    /// The states are grouped **by kind** (`uarts` / `gpios` / `timers` /
+    /// `clints` / `plics`) and each group is ordered by **id**. A
+    /// peripheral that does not implement [`Peripheral::session_state`]
+    /// contributes nothing — it has no session state to carry (the
+    /// contract's default is `None`).
     pub fn export_state(&self) -> M15PeriphDto {
         collect_session_state(&self.live_instances())
     }
@@ -313,6 +314,9 @@ pub fn collect_session_state(instances: &[(u32, SharedPeripheral)]) -> M15Periph
             Some(PeripheralSessionState::Uart(s)) => dto.uarts.push(s),
             Some(PeripheralSessionState::Gpio(s)) => dto.gpios.push(s),
             Some(PeripheralSessionState::Timer(s)) => dto.timers.push(s),
+            // v0.24 · D-117：CLINT / PLIC 也进快照。
+            Some(PeripheralSessionState::Clint(s)) => dto.clints.push(s),
+            Some(PeripheralSessionState::Plic(s)) => dto.plics.push(s),
             // A peripheral without session state contributes nothing.
             None => {}
         }
@@ -322,6 +326,8 @@ pub fn collect_session_state(instances: &[(u32, SharedPeripheral)]) -> M15Periph
     dto.uarts.sort_by(|a, b| a.id.cmp(&b.id));
     dto.gpios.sort_by(|a, b| a.id.cmp(&b.id));
     dto.timers.sort_by(|a, b| a.id.cmp(&b.id));
+    dto.clints.sort_by(|a, b| a.id.cmp(&b.id));
+    dto.plics.sort_by(|a, b| a.id.cmp(&b.id));
     dto
 }
 
@@ -471,6 +477,22 @@ fn match_peripherals(
             PeripheralSessionState::Timer(s.clone()),
         ));
     }
+    // v0.24 · D-117：CLINT / PLIC 两组也要摊平进来 ⇒ 双向匹配对它们
+    // 同样成立（载荷里的每个 id 都必须活着，活着的每个 id 都必须在载荷里）。
+    for s in &state.clints {
+        entries.push((
+            s.id.clone(),
+            SessionKind::Clint,
+            PeripheralSessionState::Clint(s.clone()),
+        ));
+    }
+    for s in &state.plics {
+        entries.push((
+            s.id.clone(),
+            SessionKind::Plic,
+            PeripheralSessionState::Plic(s.clone()),
+        ));
+    }
 
     // ---- Every id in the payload must be live. ----
     for (id, _kind, _state) in &entries {
@@ -524,6 +546,10 @@ pub(crate) enum SessionKind {
     Uart,
     Gpio,
     Timer,
+    /// v0.24 · D-117。
+    Clint,
+    /// v0.24 · D-117。
+    Plic,
 }
 
 impl SessionKind {
@@ -533,6 +559,8 @@ impl SessionKind {
             PeripheralSessionState::Uart(_) => Self::Uart,
             PeripheralSessionState::Gpio(_) => Self::Gpio,
             PeripheralSessionState::Timer(_) => Self::Timer,
+            PeripheralSessionState::Clint(_) => Self::Clint,
+            PeripheralSessionState::Plic(_) => Self::Plic,
         }
     }
 
@@ -542,6 +570,8 @@ impl SessionKind {
             Self::Uart => "UART",
             Self::Gpio => "GPIO",
             Self::Timer => "定时器",
+            Self::Clint => "CLINT",
+            Self::Plic => "PLIC",
         }
     }
 }

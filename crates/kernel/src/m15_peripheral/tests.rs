@@ -24,7 +24,8 @@ use super::*;
 use riscv_sim_contract::model::WriteSize;
 use riscv_sim_contract::port::ProbeSink;
 use riscv_sim_contract::session::{
-    GpioStateDto, M15PeriphDto, PeripheralSessionState, UartStateDto, GPIO_PIN_COUNT,
+    ClintStateDto, GpioStateDto, M15PeriphDto, PeripheralSessionState, PlicStateDto, UartStateDto,
+    GPIO_PIN_COUNT,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -317,8 +318,11 @@ fn uart_status_clear_is_w1c() {
     // ⚠️ **v0.23**：状态寄存器是 ns16550 的 **LSR @ 0x5**，RX overrun
     // 在 bit2。
     let mut uart = Uart16550::new("UART0", 0, 9600, 0);
-    uart.receive(b'Z');
-    uart.receive(b'Y'); // triggers RX overrun
+    // ⚠️ **v0.24**：RX FIFO 有 16 字节深 ⇒ 要触发 overrun 必须**先填满**。
+    for i in 0..uart::RX_FIFO_CAPACITY {
+        uart.receive(i as u8);
+    }
+    uart.receive(0xFF); // triggers RX overrun
     let s = uart.read(0x5, WriteSize::Byte).unwrap();
     assert_eq!(s & u32::from(uart::lsr_bits::OE), 0x04);
 
@@ -847,6 +851,8 @@ fn restoring_a_state_that_names_another_peripheral_is_rejected() {
         status: 0,
         irq_line: 1,
         now_ps: 0,
+
+        ..UartStateDto::default()
     });
     let err = uart
         .restore_session_state(&foreign)
@@ -990,6 +996,8 @@ fn registry_load_state_rejects_an_unknown_id() {
                 status: 0,
                 irq_line: 0,
                 now_ps: 0,
+
+                ..UartStateDto::default()
             },
             UartStateDto {
                 id: "NOPE".to_string(),
@@ -998,6 +1006,8 @@ fn registry_load_state_rejects_an_unknown_id() {
                 status: 0,
                 irq_line: 0,
                 now_ps: 0,
+
+                ..UartStateDto::default()
             },
         ],
         ..Default::default()
@@ -1025,6 +1035,8 @@ fn registry_load_state_writes_nothing_when_one_id_is_unknown() {
                 status: 0,
                 irq_line: 9,
                 now_ps: 42,
+
+                ..UartStateDto::default()
             },
             UartStateDto {
                 id: "GHOST".to_string(),
@@ -1033,6 +1045,8 @@ fn registry_load_state_writes_nothing_when_one_id_is_unknown() {
                 status: 0,
                 irq_line: 0,
                 now_ps: 0,
+
+                ..UartStateDto::default()
             },
         ],
         ..Default::default()
@@ -1144,6 +1158,8 @@ fn restore_session_states_rejects_an_unknown_id() {
                 status: 0,
                 irq_line: 0,
                 now_ps: 0,
+
+                ..UartStateDto::default()
             },
             UartStateDto {
                 id: "GHOST".to_string(),
@@ -1152,6 +1168,8 @@ fn restore_session_states_rejects_an_unknown_id() {
                 status: 0,
                 irq_line: 0,
                 now_ps: 0,
+
+                ..UartStateDto::default()
             },
         ],
         ..Default::default()
@@ -1222,6 +1240,8 @@ fn restore_session_states_writes_nothing_when_one_state_is_malformed() {
             status: 0,
             irq_line: 9,
             now_ps: 42,
+
+            ..UartStateDto::default()
         }],
         gpios: vec![GpioStateDto {
             id: "GPIO0".to_string(),
@@ -1233,6 +1253,7 @@ fn restore_session_states_writes_nothing_when_one_state_is_malformed() {
             now_ps: 0,
         }],
         timers: vec![],
+        ..M15PeriphDto::default()
     };
 
     let err = restore_session_states(&instances, &state).expect_err("畸形的 GPIO 状态必须被拒");
@@ -1289,6 +1310,8 @@ fn the_read_only_preflight_rejects_a_malformed_state_and_writes_nothing() {
             status: 0,
             irq_line: 9,
             now_ps: 42,
+
+            ..UartStateDto::default()
         }],
         gpios: vec![GpioStateDto {
             id: "GPIO0".to_string(),
@@ -1300,6 +1323,7 @@ fn the_read_only_preflight_rejects_a_malformed_state_and_writes_nothing() {
             now_ps: 0,
         }],
         timers: vec![],
+        ..M15PeriphDto::default()
     };
 
     let err =
@@ -1349,6 +1373,8 @@ fn a_uart_state_with_undefined_status_bits_is_rejected_before_anything_is_writte
             status: 0x8000,
             irq_line: 4,
             now_ps: 0,
+
+            ..UartStateDto::default()
         }],
         gpios: vec![GpioStateDto {
             id: "GPIO0".to_string(),
@@ -1360,6 +1386,7 @@ fn a_uart_state_with_undefined_status_bits_is_rejected_before_anything_is_writte
             now_ps: 0,
         }],
         timers: vec![],
+        ..M15PeriphDto::default()
     };
 
     let err = restore_session_states(&instances, &state).expect_err("未定义的 STATUS 位必须被拒");
@@ -1388,6 +1415,8 @@ fn a_uart_state_whose_status_contradicts_its_fifos_is_rejected() {
         status: 0x1,
         irq_line: 4,
         now_ps: 0,
+
+        ..UartStateDto::default()
     });
     let err = uart
         .validate_session_state(&bad)
@@ -1430,6 +1459,8 @@ fn every_participating_peripheral_overrides_its_own_acceptance_check() {
         status: 0x8000,
         irq_line: 4,
         now_ps: 0,
+
+        ..UartStateDto::default()
     });
     assert!(
         uart.validate_session_state(&bad_status).is_err(),
@@ -1446,4 +1477,615 @@ fn every_participating_peripheral_overrides_its_own_acceptance_check() {
         tim.validate_session_state(&own).is_ok(),
         "定时器必须接受自己的状态"
     );
+}
+
+// ---------------------------------------------------------------------------
+// v0.24 · 会话快照 v2：CLINT / PLIC 进快照（D-117）+ UART 的七个寄存器
+// （D-118）
+// ---------------------------------------------------------------------------
+
+/// 一台**写满了寄存器**的 ns16550 —— 用来断言「快照里带的是那七个
+/// 寄存器的**具体值**」。
+///
+/// ⚠️ `DLL` / `DLM` 必须在 `DLAB` 置位时写（否则写进去的是 `THR` /
+/// `IER`）⇒ 夹具里的**顺序**是语义的一部分。
+fn uart_with_registers_written() -> Uart16550 {
+    let mut u = Uart16550::new("UART0", 0x1000_0000, 115_200, 4);
+    // LCR = 0x80（DLAB）| 0x03（8N1）⇒ 除数锁存器可见。
+    u.write(uart::reg::LCR, WriteSize::Byte, 0x83)
+        .expect("set LCR with DLAB");
+    u.write(uart::reg::THR, WriteSize::Byte, 0x0C)
+        .expect("write DLL");
+    u.write(uart::reg::IER, WriteSize::Byte, 0x01)
+        .expect("write DLM");
+    // 回到 8N1（DLAB 清）⇒ `0x1` 又是 IER 了。
+    u.write(uart::reg::LCR, WriteSize::Byte, 0x03)
+        .expect("clear DLAB");
+    u.write(uart::reg::IER, WriteSize::Byte, 0x01)
+        .expect("write IER");
+    u.write(uart::reg::FCR, WriteSize::Byte, 0x07)
+        .expect("write FCR");
+    u.write(uart::reg::MCR, WriteSize::Byte, 0x0F)
+        .expect("write MCR");
+    u.write(uart::reg::SCR, WriteSize::Byte, 0x5A)
+        .expect("write SCR");
+    u
+}
+
+/// ⚠️ **I-1a**：UART 的会话状态**带** ns16550 的七个寄存器 —— 断言
+/// **具体值**，不是「非空」。
+#[test]
+fn the_uart_session_state_carries_the_seven_ns16550_registers() {
+    let u = uart_with_registers_written();
+    let exported = u
+        .session_state()
+        .expect("the UART participates in the session state");
+    let PeripheralSessionState::Uart(s) = exported else {
+        panic!("a UART must export a UART state");
+    };
+
+    assert_eq!(s.lcr, 0x03, "LCR 必须带（DLAB 已清）");
+    assert_eq!(s.ier, 0x01, "IER 必须带");
+    assert_eq!(s.fcr, 0x07, "FCR 必须带");
+    assert_eq!(s.mcr, 0x0F, "MCR 必须带");
+    assert_eq!(s.scr, 0x5A, "SCR 必须带");
+    assert_eq!(s.dll, 0x0C, "DLL 必须带");
+    assert_eq!(s.dlm, 0x01, "DLM 必须带");
+}
+
+/// ⚠️ **I-1b**：快照**往返一次**后，那七个寄存器（含 **`DLAB` 位**）
+/// **不变**。
+///
+/// ⚠️ **判别力**：这条用例能抓住「还原时漏了一个字段」——尤其是
+/// **`LCR`**：漏了它，除数锁存器的**访问模式**就丢了（`DLAB` 清 ⇒
+/// `0x0` 是 `THR` 而不是 `DLL`）⇒ guest 之后写 `0x0` 会把字节**发出去**
+/// 而不是写波特率除数。
+#[test]
+fn the_uart_session_state_round_trips_the_registers_including_dlab() {
+    // 夹具特意让 **DLAB 置位**（除数锁存器可见）。
+    let mut u = Uart16550::new("UART0", 0x1000_0000, 115_200, 4);
+    u.write(uart::reg::LCR, WriteSize::Byte, 0x83)
+        .expect("set LCR with DLAB");
+    u.write(uart::reg::THR, WriteSize::Byte, 0x0C)
+        .expect("write DLL");
+    u.write(uart::reg::IER, WriteSize::Byte, 0x01)
+        .expect("write DLM");
+
+    let exported = u
+        .session_state()
+        .expect("the UART participates in the session state");
+    let PeripheralSessionState::Uart(s) = &exported else {
+        panic!("a UART must export a UART state");
+    };
+    assert_eq!(s.lcr, 0x83, "夹具：LCR 的 DLAB 位是置位的");
+    assert_eq!(s.dll, 0x0C);
+    assert_eq!(s.dlm, 0x01);
+
+    let mut fresh = Uart16550::new("UART0", 0x1000_0000, 115_200, 4);
+    fresh
+        .restore_session_state(&exported)
+        .expect("the UART must accept its own state");
+
+    assert_eq!(
+        fresh.session_state(),
+        Some(exported.clone()),
+        "往返必须逐字段相等——七个寄存器一个都不能少"
+    );
+    assert_eq!(
+        fresh.line_control(),
+        0x83,
+        "LCR（含 DLAB 位）必须被还原——否则除数锁存器的访问模式就丢了"
+    );
+    assert!(fresh.dlab_enabled(), "还原之后 DLAB 必须仍然是置位的");
+    assert_eq!(fresh.divisor(), 0x010C, "除数锁存器必须被还原");
+}
+
+/// ⚠️ **反面**：**还原漏掉 `LCR`** 时这条会红（判别力的自证）。
+///
+/// 夹具故意造一个「`LCR` 不带 `DLAB`、但 `DLL`/`DLM` 有值」的载荷 ⇒
+/// 还原它之后除数还在、但访问模式错了 ⇒ `dlab_enabled()` 必须是 `false`
+/// ⇒ 这与上面那条（`true`）形成**对照**。
+#[test]
+fn a_payload_without_dlab_restores_without_dlab() {
+    let mut fresh = Uart16550::new("UART0", 0x1000_0000, 115_200, 4);
+    let state = PeripheralSessionState::Uart(UartStateDto {
+        id: "UART0".to_string(),
+        lcr: 0x03,
+        dll: 0x0C,
+        dlm: 0x01,
+        ..UartStateDto::default()
+    });
+    fresh
+        .restore_session_state(&state)
+        .expect("the UART must accept a well-formed state");
+    assert!(!fresh.dlab_enabled(), "DLAB 必须**照实**还原（这里是清）");
+    assert_eq!(fresh.divisor(), 0x010C, "除数本身仍然被还原");
+}
+
+/// ⚠️ **I-2**：CLINT 的会话状态带 `mtimecmp`（**具体周期数**），而且
+/// **往返一次后不变**。
+#[test]
+fn the_clint_session_state_carries_mtimecmp_and_round_trips() {
+    let mut clint = Clint::with_frequency("CLINT0", clint::CLINT_BASE, 1, 10_000_000);
+    // `mtimecmp` 是 64 位 ⇒ 分两半写（低半再高半）。
+    clint
+        .write(0x4000, WriteSize::Word, 0x89AB_CDEF)
+        .expect("mtimecmp low");
+    clint
+        .write(0x4004, WriteSize::Word, 0x0123_4567)
+        .expect("mtimecmp high");
+    clint.write(0x0, WriteSize::Word, 1).expect("msip = 1");
+    clint.tick(1_000_000_000).expect("tick");
+
+    let exported = clint
+        .session_state()
+        .expect("the CLINT participates in the session state");
+    let PeripheralSessionState::Clint(s) = &exported else {
+        panic!("a CLINT must export a CLINT state");
+    };
+    assert_eq!(s.id, "CLINT0");
+    assert_eq!(
+        s.mtimecmp_cycles,
+        vec![0x0123_4567_89AB_CDEF],
+        "mtimecmp 必须带（单位：周期）"
+    );
+    assert_eq!(s.msip, vec![1], "msip 的原始值必须带");
+    assert_eq!(s.now_ps, 1_000_000_000, "器件的虚拟时间必须带");
+    assert_eq!(
+        s.mtime_cycles, 10_000,
+        "mtime 必须带（1 ms @ 10 MHz = 10000 周期）"
+    );
+
+    let mut fresh = Clint::with_frequency("CLINT0", clint::CLINT_BASE, 1, 10_000_000);
+    fresh
+        .restore_session_state(&exported)
+        .expect("the CLINT must accept its own state");
+    assert_eq!(
+        fresh.session_state(),
+        Some(exported.clone()),
+        "往返必须逐字段相等"
+    );
+    assert_eq!(fresh.mtimecmp_cycles(), 0x0123_4567_89AB_CDEF);
+    assert!(fresh.msip_pending(), "msip 的挂起位必须被还原");
+    assert_eq!(
+        fresh.mtime_cycles(),
+        10_000,
+        "还原之后 mtime 必须从还原点继续走，而不是回到「虚拟时间的函数」"
+    );
+}
+
+/// ⚠️ **I-3**：PLIC 的会话状态带优先级 / 使能 / 门限（**具体值**），而且
+/// **往返一次后不变**。
+#[test]
+fn the_plic_session_state_carries_priority_enable_and_threshold_and_round_trips() {
+    let mut plic = Plic::with_capacity("PLIC0", plic::PLIC_BASE, 4, 2);
+    plic.set_priority(1, 3);
+    plic.enable(0, 1, true);
+    plic.set_threshold(0, 1);
+    plic.request(1);
+    plic.tick(500).expect("tick");
+
+    let exported = plic
+        .session_state()
+        .expect("the PLIC participates in the session state");
+    let PeripheralSessionState::Plic(s) = &exported else {
+        panic!("a PLIC must export a PLIC state");
+    };
+    assert_eq!(s.id, "PLIC0");
+    assert_eq!(
+        s.priorities,
+        vec![0, 3, 0, 0],
+        "每个源的优先级必须带（下标即源号；源 0 是保留源）"
+    );
+    assert_eq!(
+        s.enables,
+        vec![vec![0x0000_0002], vec![0x0000_0000]],
+        "每个 context 的使能位图必须带（context 0 使能了源 1）"
+    );
+    assert_eq!(s.thresholds, vec![1, 0], "每个 context 的门限必须带");
+    assert_eq!(s.pending, vec![0x0000_0002], "挂起位图必须带（源 1 挂着）");
+    assert_eq!(s.now_ps, 500);
+
+    let mut fresh = Plic::with_capacity("PLIC0", plic::PLIC_BASE, 4, 2);
+    fresh
+        .restore_session_state(&exported)
+        .expect("the PLIC must accept its own state");
+    assert_eq!(
+        fresh.session_state(),
+        Some(exported.clone()),
+        "往返必须逐字段相等"
+    );
+    assert_eq!(fresh.priority(1), Some(3), "优先级必须被还原");
+    assert!(fresh.enabled(0, 1).unwrap(), "使能位必须被还原");
+    assert_eq!(fresh.threshold(0), Some(1), "门限必须被还原");
+    assert!(fresh.pending(1), "挂起位必须被还原");
+}
+
+/// ⚠️ **I-4a**：CLINT 的 `validate_session_state()` **不是**默认放行 ——
+/// **外设 id 对不上**必须被拒。
+#[test]
+fn a_clint_rejects_a_state_that_names_another_peripheral() {
+    let clint = Clint::new("CLINT0", clint::CLINT_BASE);
+    let foreign = PeripheralSessionState::Clint(ClintStateDto {
+        id: "CLINT1".to_string(),
+        msip: vec![0],
+        mtimecmp_cycles: vec![0],
+        mtime_cycles: 0,
+        now_ps: 0,
+    });
+    let err = clint
+        .validate_session_state(&foreign)
+        .expect_err("id 对不上的状态必须被拒");
+    assert_eq!(err.family, ErrorFamily::Peripheral);
+    assert_eq!(err.scenario, E_PER_05_PERIPHERAL_SET_MISMATCH);
+}
+
+/// ⚠️ **I-4b**：CLINT 的**数量与器件能力不符**必须被拒（器件 2 个 hart，
+/// 载荷只描述了 1 个）。
+#[test]
+fn a_clint_rejects_a_state_with_the_wrong_number_of_harts() {
+    let clint = Clint::with_harts("CLINT0", clint::CLINT_BASE, 2);
+    let bad = PeripheralSessionState::Clint(ClintStateDto {
+        id: "CLINT0".to_string(),
+        msip: vec![0],
+        mtimecmp_cycles: vec![0],
+        mtime_cycles: 0,
+        now_ps: 0,
+    });
+    let err = clint
+        .validate_session_state(&bad)
+        .expect_err("hart 数对不上的状态必须被拒");
+    assert_eq!(err.family, ErrorFamily::Peripheral);
+    assert_eq!(err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE);
+}
+
+/// ⚠️ **I-4c**：PLIC 的**源数与器件能力不符**必须被拒（器件 4 个源，载荷
+/// 只描述了 3 个）。
+#[test]
+fn a_plic_rejects_a_state_with_the_wrong_number_of_sources() {
+    let plic = Plic::with_capacity("PLIC0", plic::PLIC_BASE, 4, 2);
+    let bad = PeripheralSessionState::Plic(PlicStateDto {
+        id: "PLIC0".to_string(),
+        priorities: vec![0, 0, 0],
+        enables: vec![vec![0], vec![0]],
+        thresholds: vec![0, 0],
+        pending: vec![0],
+        now_ps: 0,
+    });
+    let err = plic
+        .validate_session_state(&bad)
+        .expect_err("源数对不上的状态必须被拒");
+    assert_eq!(err.family, ErrorFamily::Peripheral);
+    assert_eq!(err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE);
+}
+
+/// ⚠️ **I-4d**：PLIC 的 **context 数与器件能力不符**必须被拒。
+#[test]
+fn a_plic_rejects_a_state_with_the_wrong_number_of_contexts() {
+    let plic = Plic::with_capacity("PLIC0", plic::PLIC_BASE, 4, 2);
+    let bad = PeripheralSessionState::Plic(PlicStateDto {
+        id: "PLIC0".to_string(),
+        priorities: vec![0, 0, 0, 0],
+        enables: vec![vec![0]],
+        thresholds: vec![0],
+        pending: vec![0],
+        now_ps: 0,
+    });
+    let err = plic
+        .validate_session_state(&bad)
+        .expect_err("context 数对不上的状态必须被拒");
+    assert_eq!(err.family, ErrorFamily::Peripheral);
+    assert_eq!(err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE);
+}
+
+/// ⚠️ **反面**：**数量对得上**的载荷必须被接受 —— 否则上面那几条可能
+/// 只是「校验器什么都拒」。
+#[test]
+fn a_clint_and_a_plic_accept_a_state_that_matches_their_capability() {
+    let clint = Clint::with_harts("CLINT0", clint::CLINT_BASE, 2);
+    let good = PeripheralSessionState::Clint(ClintStateDto {
+        id: "CLINT0".to_string(),
+        msip: vec![0, 0],
+        mtimecmp_cycles: vec![0, 0],
+        mtime_cycles: 0,
+        now_ps: 0,
+    });
+    assert!(
+        clint.validate_session_state(&good).is_ok(),
+        "数量对得上的 CLINT 状态必须被接受"
+    );
+
+    let plic = Plic::with_capacity("PLIC0", plic::PLIC_BASE, 4, 2);
+    let good = PeripheralSessionState::Plic(PlicStateDto {
+        id: "PLIC0".to_string(),
+        priorities: vec![0, 0, 0, 0],
+        enables: vec![vec![0], vec![0]],
+        thresholds: vec![0, 0],
+        pending: vec![0],
+        now_ps: 0,
+    });
+    assert!(
+        plic.validate_session_state(&good).is_ok(),
+        "数量对得上的 PLIC 状态必须被接受"
+    );
+}
+
+/// ⚠️ **附加 3**：器件**不匹配**时（把 CLINT 的状态喂给 PLIC）⇒ 报
+/// `E_PER-04` 那一族（**族 + 场景码**都断言）。
+#[test]
+fn a_clint_state_handed_to_a_plic_is_rejected() {
+    let plic = Plic::new("PLIC0", plic::PLIC_BASE);
+    let clint_state = PeripheralSessionState::Clint(ClintStateDto {
+        id: "PLIC0".to_string(),
+        msip: vec![0],
+        mtimecmp_cycles: vec![0],
+        mtime_cycles: 0,
+        now_ps: 0,
+    });
+    let err = plic
+        .validate_session_state(&clint_state)
+        .expect_err("PLIC 必须拒掉 CLINT 的状态");
+    assert_eq!(err.family, ErrorFamily::Peripheral, "族必须是 PER");
+    assert_eq!(
+        err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE,
+        "场景码必须是 E_PER-04"
+    );
+
+    // 反过来也一样：CLINT 不得吞掉 PLIC 的状态。
+    let clint = Clint::new("CLINT0", clint::CLINT_BASE);
+    let plic_state = PeripheralSessionState::Plic(PlicStateDto {
+        id: "CLINT0".to_string(),
+        priorities: vec![0],
+        enables: vec![vec![0]],
+        thresholds: vec![0],
+        pending: vec![0],
+        now_ps: 0,
+    });
+    let err = clint
+        .validate_session_state(&plic_state)
+        .expect_err("CLINT 必须拒掉 PLIC 的状态");
+    assert_eq!(err.family, ErrorFamily::Peripheral, "族必须是 PER");
+    assert_eq!(
+        err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE,
+        "场景码必须是 E_PER-04"
+    );
+}
+
+/// ⚠️ **附加 2**：收集顺序 —— 同一组内**按 id 升序**（与既有的
+/// uarts / gpios / timers 规矩一致）。
+#[test]
+fn the_collected_state_orders_the_new_groups_by_id() {
+    let clint_b = share(Clint::new("CLINTB", 0x0200_0000));
+    let clint_a = share(Clint::new("CLINTA", 0x0200_1000));
+    let plic_b = share(Plic::new("PLICB", 0x0C00_0000));
+    let plic_a = share(Plic::new("PLICA", 0x0C00_1000));
+    let instances: Vec<(u32, SharedPeripheral)> = vec![
+        (0x0200_0000, clint_b),
+        (0x0200_1000, clint_a),
+        (0x0C00_0000, plic_b),
+        (0x0C00_1000, plic_a),
+    ];
+
+    let dto = collect_session_state(&instances);
+    assert_eq!(dto.clints.len(), 2);
+    assert_eq!(dto.clints[0].id, "CLINTA", "CLINT 组必须按 id 升序");
+    assert_eq!(dto.clints[1].id, "CLINTB");
+    assert_eq!(dto.plics.len(), 2);
+    assert_eq!(dto.plics[0].id, "PLICA", "PLIC 组必须按 id 升序");
+    assert_eq!(dto.plics[1].id, "PLICB");
+}
+
+/// ⚠️ **双向匹配**对两个新器件**同样成立**：活着的 CLINT 必须被载荷
+/// 描述 —— 否则它的状态会被**静默丢掉**。
+#[test]
+fn a_live_clint_that_the_payload_does_not_describe_is_rejected() {
+    let clint = share(Clint::new("CLINT0", 0x0200_0000));
+    let instances: Vec<(u32, SharedPeripheral)> = vec![(0x0200_0000, clint)];
+
+    // 载荷里**没有**这个 CLINT ⇒ 双向匹配失败。
+    let state = M15PeriphDto {
+        clints: Vec::new(),
+        ..M15PeriphDto::default()
+    };
+    let err = restore_session_states(&instances, &state).expect_err("活着的 CLINT 必须被载荷描述");
+    assert_eq!(err.family, ErrorFamily::Peripheral);
+    assert_eq!(err.scenario, E_PER_05_PERIPHERAL_SET_MISMATCH);
+
+    // 反过来：载荷里**多**了一个不存在的 CLINT ⇒ 同样被拒。
+    let clint = share(Clint::new("CLINT0", 0x0200_0000));
+    let instances: Vec<(u32, SharedPeripheral)> = vec![(0x0200_0000, clint)];
+    let state = M15PeriphDto {
+        clints: vec![ClintStateDto {
+            id: "GHOST".to_string(),
+            msip: vec![0],
+            mtimecmp_cycles: vec![0],
+            mtime_cycles: 0,
+            now_ps: 0,
+        }],
+        ..M15PeriphDto::default()
+    };
+    let err =
+        restore_session_states(&instances, &state).expect_err("载荷里多出来的 CLINT 必须被拒");
+    assert_eq!(err.family, ErrorFamily::Peripheral);
+    assert_eq!(err.scenario, E_PER_05_PERIPHERAL_SET_MISMATCH);
+}
+
+/// ⚠️ **两阶段纪律**对两个新器件**同样成立**：畸形状态必须被**只读预检**
+/// 拒掉，且**一个字节都不许写**。
+#[test]
+fn the_read_only_preflight_rejects_a_malformed_clint_state() {
+    let clint = share(Clint::with_harts("CLINT0", 0x0200_0000, 2));
+    let instances: Vec<(u32, SharedPeripheral)> = vec![(0x0200_0000, Rc::clone(&clint))];
+
+    // 畸形：载荷只描述了 1 个 hart，器件有 2 个。
+    let state = M15PeriphDto {
+        clints: vec![ClintStateDto {
+            id: "CLINT0".to_string(),
+            msip: vec![0],
+            mtimecmp_cycles: vec![0],
+            mtime_cycles: 0,
+            now_ps: 0,
+        }],
+        ..M15PeriphDto::default()
+    };
+    // 只读预检**不许写**：器件的会话状态必须**逐字段**不变。
+    let before = clint.borrow().session_state();
+    let err = validate_session_states(&instances, &state)
+        .expect_err("畸形的 CLINT 状态必须在只读预检里被拒");
+    assert_eq!(err.family, ErrorFamily::Peripheral);
+    assert_eq!(err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE);
+    let after = clint.borrow().session_state();
+    assert_eq!(
+        before, after,
+        "预检不许写一个字节——器件的会话状态必须逐字段不变"
+    );
+}
+
+/// ⚠️ **正面**：两个新器件的**完整往返**（导出 → 还原 → 再导出）必须
+/// **逐字段相等**。
+#[test]
+fn the_clint_and_plic_round_trip_through_the_registry() {
+    let mut reg = PeripheralRegistry::new();
+    let mut clint = Clint::with_frequency("CLINT0", clint::CLINT_BASE, 1, 10_000_000);
+    clint
+        .write(0x4000, WriteSize::Word, 0x0000_0000_0000_1000)
+        .expect("mtimecmp");
+    clint.write(0x0, WriteSize::Word, 1).expect("msip");
+    clint.tick(1_000_000_000).expect("tick");
+    reg.register(clint).expect("clint");
+
+    let mut plic = Plic::with_capacity("PLIC0", plic::PLIC_BASE, 4, 2);
+    plic.set_priority(2, 5);
+    plic.enable(1, 2, true);
+    plic.set_threshold(1, 0);
+    plic.request(2);
+    reg.register(plic).expect("plic");
+
+    let exported = reg.export_state();
+    assert_eq!(exported.clints.len(), 1);
+    assert_eq!(exported.plics.len(), 1);
+
+    let mut fresh = PeripheralRegistry::new();
+    fresh
+        .register(Clint::with_frequency(
+            "CLINT0",
+            clint::CLINT_BASE,
+            1,
+            10_000_000,
+        ))
+        .expect("clint");
+    fresh
+        .register(Plic::with_capacity("PLIC0", plic::PLIC_BASE, 4, 2))
+        .expect("plic");
+    fresh
+        .load_state(&exported)
+        .expect("两个新器件必须接受自己的状态");
+
+    assert_eq!(
+        fresh.export_state(),
+        exported,
+        "往返必须逐字段相等——CLINT 与 PLIC 的状态一个都不能少"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// v0.24 · 接收 FIFO 加深（16 字节）后的会话快照
+// ---------------------------------------------------------------------------
+
+/// ⚠️ **接收 FIFO 是整个队列**：UART 的会话状态必须带**全部**待读字节
+/// （不只是队头那一个）⇒ 否则快照往返会**丢字节** ⇒ 还原出来的会话与
+/// 采快照的那次**不是同一个**。
+#[test]
+fn the_uart_session_state_carries_the_whole_rx_queue() {
+    let mut u = Uart16550::new("UART0", 0x1000_0000, 115_200, 4);
+    for byte in [0x41u8, 0x42, 0x43] {
+        u.receive(byte);
+    }
+
+    let exported = u
+        .session_state()
+        .expect("the UART participates in the session state");
+    let PeripheralSessionState::Uart(s) = &exported else {
+        panic!("a UART must export a UART state");
+    };
+    assert_eq!(
+        s.rx_queue,
+        vec![0x41, 0x42, 0x43],
+        "整个接收队列必须带（不只是队头）"
+    );
+    assert_eq!(s.rx, Some(0x41), "rx 是**队头**那一个字节");
+    assert_eq!(
+        s.status & u32::from(uart::lsr_bits::RX_VALID),
+        u32::from(uart::lsr_bits::RX_VALID),
+        "FIFO 非空 ⇒ LSR 的 RX_VALID 必须置位"
+    );
+}
+
+/// ⚠️ **往返一次后队列逐字节相同** —— 还原出来的 UART 读出来的必须是
+/// **同样顺序**的同样三个字节。
+#[test]
+fn the_uart_session_state_round_trips_the_whole_rx_queue() {
+    let mut u = Uart16550::new("UART0", 0x1000_0000, 115_200, 4);
+    for byte in [0x41u8, 0x42, 0x43] {
+        u.receive(byte);
+    }
+    let exported = u
+        .session_state()
+        .expect("the UART participates in the session state");
+
+    let mut fresh = Uart16550::new("UART0", 0x1000_0000, 115_200, 4);
+    fresh
+        .restore_session_state(&exported)
+        .expect("the UART must accept its own state");
+    assert_eq!(
+        fresh.session_state(),
+        Some(exported.clone()),
+        "往返必须逐字段相等——接收队列一个字节都不能少"
+    );
+
+    for byte in [0x41u8, 0x42, 0x43] {
+        assert_eq!(
+            fresh.read_clear(0x0, WriteSize::Byte).unwrap(),
+            u32::from(byte),
+            "还原之后的 UART 读出来的必须是**同样顺序**的同样字节"
+        );
+    }
+}
+
+/// ⚠️ **队列比器件的 FIFO 深** ⇒ 必须被拒（还原时必然要**截断** ⇒
+/// 丢字节 ⇒ 那不是「还原」，是「还原成另一个东西」）。
+#[test]
+fn a_uart_state_with_a_longer_queue_than_the_fifo_is_rejected() {
+    let u = Uart16550::new("UART0", 0x1000, 9600, 4);
+    let bad = PeripheralSessionState::Uart(UartStateDto {
+        id: "UART0".to_string(),
+        rx: Some(0x00),
+        rx_queue: vec![0x00; uart::RX_FIFO_CAPACITY + 1],
+        status: u32::from(uart::lsr_bits::RX_VALID),
+        ..UartStateDto::default()
+    });
+    let err = u
+        .validate_session_state(&bad)
+        .expect_err("比 FIFO 深的队列必须被拒");
+    assert_eq!(err.family, ErrorFamily::Peripheral);
+    assert_eq!(err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE);
+}
+
+/// ⚠️ **`rx` 与 `rx_queue` 的队头不一致** ⇒ 器件侧也必须拒（载荷自相
+/// 矛盾：它同时说「队头是 0x41」和「队头是 0x42」）。
+#[test]
+fn a_uart_state_whose_head_disagrees_with_its_queue_is_rejected() {
+    let u = Uart16550::new("UART0", 0x1000, 9600, 4);
+    let bad = PeripheralSessionState::Uart(UartStateDto {
+        id: "UART0".to_string(),
+        rx: Some(0x41),
+        rx_queue: vec![0x42, 0x43],
+        status: u32::from(uart::lsr_bits::RX_VALID),
+        ..UartStateDto::default()
+    });
+    let err = u
+        .validate_session_state(&bad)
+        .expect_err("队头与队列不一致的状态必须被拒");
+    assert_eq!(err.family, ErrorFamily::Peripheral);
+    assert_eq!(err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE);
 }

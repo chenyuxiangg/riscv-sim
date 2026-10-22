@@ -38,13 +38,23 @@
 //! [`Plic::claim`] 拿到「当前应该交付哪个源」，自己去 M-16 抬线；外设
 //! 抬线用 [`Plic::request`]。
 //!
-//! ⚠️ 本外设**不参与会话快照**：契约层的 `PeripheralSessionState` 目前
-//! 只有 uart / gpio / timer 三个变体，加 CLINT/PLIC 要动契约层 ⇒ 本批
-//! 用契约层的默认实现（`session_state()` 返回 `None`）。
+//! ⚠️ 本外设**参与会话快照**（v0.24 · D-117）：契约层的
+//! `PeripheralSessionState` 加了 `Plic` 变体 ⇒ 本器件实现
+//! `session_state()` / `restore_session_state()` /
+//! `validate_session_state()` 三个方法。
+//!
+//! ⚠️ **快照带什么**：每个源的**优先级** · 每个 context 的**使能位图**
+//! · 每个 context 的**门限** · **挂起位图** · `now_ps`。
+//!
+//! ⚠️ **源 0 是保留源**（QEMU 语义：claim 从 1 开始扫）：它占一个
+//! **槽位**是器件本身的事实（优先级表就有那么多个槽）⇒ 快照**不凭空
+//! 多造**一个源，也**不少带**一个槽位 ⇒ 优先级表的**长度**必须**恰好**
+//! 等于器件的源数。
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
 use riscv_sim_contract::port::{Peripheral, ProbeSink};
+use riscv_sim_contract::session::{PeripheralSessionState, PlicStateDto};
 
 use super::reg::{extract_subword, register_offset};
 use super::ProbeSlot;
@@ -353,6 +363,87 @@ impl Plic {
         }
         best.map(|(_, source)| source)
     }
+
+    /// The PLIC's **own** integrity rules for a session state.
+    ///
+    /// ⚠️ **数量必须与器件能力相符** ——
+    ///
+    /// - 优先级表的**长度** = 器件的**源数**（下标即源号 ⇒ 多一条就是
+    ///   「凭空多出一个源」，少一条就是「某个源没被描述」）；
+    /// - 门限 / 使能位图的**长度** = 器件的 **context 数**；
+    /// - 位图的**字数** = 器件的位图字数（每 32 个源一个字）。
+    ///
+    /// ⚠️ 这条规则**只能**住在器件里：契约层知道「两个列表长度必须
+    /// 一致」（**自洽**），但它**不知道**这个 PLIC 有多少个源 / context。
+    fn check_state(&self, state: &PlicStateDto) -> Result<(), PlatformError> {
+        let sources = self.source_count as usize;
+        let contexts = self.context_count as usize;
+        let words = self.pending_words() as usize;
+
+        if state.priorities.len() != sources {
+            return Err(PlatformError::new(
+                super::PERIPHERAL_FAMILY,
+                super::E_PER_04_UNSUPPORTED_SESSION_STATE,
+                format!(
+                    "PLIC '{}' 的会话状态带 {} 个源的优先级，器件只有 {} 个源",
+                    self.id,
+                    state.priorities.len(),
+                    self.source_count
+                ),
+            ));
+        }
+        if state.thresholds.len() != contexts {
+            return Err(PlatformError::new(
+                super::PERIPHERAL_FAMILY,
+                super::E_PER_04_UNSUPPORTED_SESSION_STATE,
+                format!(
+                    "PLIC '{}' 的会话状态带 {} 个 context 的门限，器件只有 {} 个 context",
+                    self.id,
+                    state.thresholds.len(),
+                    self.context_count
+                ),
+            ));
+        }
+        if state.enables.len() != contexts {
+            return Err(PlatformError::new(
+                super::PERIPHERAL_FAMILY,
+                super::E_PER_04_UNSUPPORTED_SESSION_STATE,
+                format!(
+                    "PLIC '{}' 的会话状态带 {} 个 context 的使能位图，器件只有 {} 个 context",
+                    self.id,
+                    state.enables.len(),
+                    self.context_count
+                ),
+            ));
+        }
+        if state.pending.len() != words {
+            return Err(PlatformError::new(
+                super::PERIPHERAL_FAMILY,
+                super::E_PER_04_UNSUPPORTED_SESSION_STATE,
+                format!(
+                    "PLIC '{}' 的会话状态带 {} 个字的挂起位图，器件的位图是 {} 个字",
+                    self.id,
+                    state.pending.len(),
+                    words
+                ),
+            ));
+        }
+        for (ctx, bitmap) in state.enables.iter().enumerate() {
+            if bitmap.len() != words {
+                return Err(PlatformError::new(
+                    super::PERIPHERAL_FAMILY,
+                    super::E_PER_04_UNSUPPORTED_SESSION_STATE,
+                    format!(
+                        "PLIC '{}' 的 context {ctx} 的使能位图有 {} 个字，器件的位图是 {} 个字",
+                        self.id,
+                        bitmap.len(),
+                        words
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// 寄存器读写（`register_offset` / `extract_subword`）在 `super::reg`
@@ -412,6 +503,64 @@ impl Peripheral for Plic {
     /// 装上 / 摘掉 M-18 探针回调（D-12）。
     fn on_probe(&mut self, cb: Option<ProbeSink>) {
         self.probe.set(cb);
+    }
+
+    /// This PLIC's share of the **session snapshot** (segment 4 —
+    /// v0.24 · D-117).
+    ///
+    /// ⚠️ **源 0 在优先级表里占一个槽位**（下标即源号）—— 它是器件
+    /// 自己的表头，不是快照**多造**的源。
+    fn session_state(&self) -> Option<PeripheralSessionState> {
+        Some(PeripheralSessionState::Plic(PlicStateDto {
+            id: self.id.clone(),
+            priorities: self.priority.clone(),
+            enables: self.enable.clone(),
+            thresholds: self.threshold.clone(),
+            pending: self.pending.clone(),
+            now_ps: self.now_ps,
+        }))
+    }
+
+    /// Restore the PLIC's session state (segment 4's consumer).
+    ///
+    /// ⚠️ **挂起位**一并还原 —— 它们是**器件的状态**（外设抬线留下的
+    /// 痕迹）⇒ 不还原 ⇒ 还原出来的 PLIC 少了一堆挂起的中断源。
+    fn restore_session_state(
+        &mut self,
+        state: &PeripheralSessionState,
+    ) -> Result<(), PlatformError> {
+        let PeripheralSessionState::Plic(s) = state else {
+            return Err(super::wrong_state_kind(
+                &self.id,
+                super::SessionKind::Plic,
+                super::SessionKind::of(state),
+            ));
+        };
+        super::check_same_id(&self.id, &s.id)?;
+        self.check_state(s)?;
+        self.priority = s.priorities.clone();
+        self.enable = s.enables.clone();
+        self.threshold = s.thresholds.clone();
+        self.pending = s.pending.clone();
+        self.now_ps = s.now_ps;
+        Ok(())
+    }
+
+    /// **Read-only** acceptance check for this PLIC's session state.
+    ///
+    /// ⚠️ **默认实现是「放行」** ⇒ 本器件**必须**覆盖它：否则一个数量
+    /// 对不上的载荷会被**静默接受**，还原出来的 PLIC 与采快照的**不是
+    /// 同一个**。
+    fn validate_session_state(&self, state: &PeripheralSessionState) -> Result<(), PlatformError> {
+        let PeripheralSessionState::Plic(s) = state else {
+            return Err(super::wrong_state_kind(
+                &self.id,
+                super::SessionKind::Plic,
+                super::SessionKind::of(state),
+            ));
+        };
+        super::check_same_id(&self.id, &s.id)?;
+        self.check_state(s)
     }
 }
 
