@@ -6,7 +6,7 @@
 //!
 //! ## What it does
 //!
-//! 1. Parses the ELF with M-06 and locates the `tohost` symbol.
+//! 1. Parses the ELF with M-06 and locates the `tohost` symbol (M-11).
 //! 2. Maps RAM on an M-14 bus and loads the image segments.
 //! 3. Runs the M-13 ISS until the guest writes to `tohost`.
 //! 4. Decodes the HTIF verdict and prints it.
@@ -62,10 +62,12 @@
 //! ## Scope note
 //!
 //! This binary is **harness code**, not a platform module: it composes
-//! M-06 / M-13 / M-14 directly and is deliberately kept out of the
-//! 23-module design (LLD).  The minimal ELF symbol lookup below is
-//! likewise harness-local — when M-11 (symbol table / DWARF) lands, the
-//! harness should switch to it rather than keep two symbol readers.
+//! M-06 / M-11 / M-13 / M-14 directly and is deliberately kept out of
+//! the 23-module design (LLD).  The `tohost` symbol comes from **M-11**
+//! (M-06 hands out the `.symtab` / `.strtab` bytes; M-11 parses them)
+//! — the harness used to carry its own mini ELF symbol reader, and that
+//! second reader is exactly the kind of drift the platform is not
+//! supposed to have (**D-90**).
 
 use std::cell::Cell;
 use std::fs;
@@ -74,7 +76,8 @@ use std::rc::Rc;
 
 use riscv_sim_contract::error::PlatformError;
 use riscv_sim_contract::model::SimState;
-use riscv_sim_kernel::m06_elf::{DefaultLoader, Kind};
+use riscv_sim_kernel::m06_elf::{DefaultLoader, Kind, LoadImage};
+use riscv_sim_kernel::m11_symbol::SymbolTable;
 use riscv_sim_kernel::m13_iss::{Iss, IssConfig, StepOutcome};
 use riscv_sim_kernel::m14_bus::{AccessDir, Bus, BusWidth};
 
@@ -291,21 +294,26 @@ fn run(cfg: &Config) -> Verdict {
         Err(e) => return Verdict::Error(format!("read:{}", e.message)),
     };
 
-    let tohost = match cfg
-        .tohost_override
-        .or_else(|| find_symbol(&bytes, "tohost"))
-    {
-        Some(a) => a,
-        None => {
-            return Verdict::Error(
-                "no `tohost` symbol in ELF (the golden env must define it)".to_string(),
-            )
-        }
-    };
-
+    // --- the image -------------------------------------------------------
+    //
+    // ⚠️ **装载在符号查找之前**：M-11 的符号表来自 M-06 带出来的
+    // `.symtab` / `.strtab` 原始字节 ⇒ 没有装载就没有节区。
     let image = match DefaultLoader.load(&bytes, Kind::Elf) {
         Ok(img) => img,
         Err(e) => return Verdict::Error(format!("load:{}", e.message)),
+    };
+
+    let tohost = match cfg.tohost_override {
+        Some(a) => a,
+        None => match lookup_symbol(&image, "tohost") {
+            Ok(Some(a)) => a,
+            Ok(None) => {
+                return Verdict::Error(
+                    "no `tohost` symbol in ELF (the golden env must define it)".to_string(),
+                )
+            }
+            Err(e) => return Verdict::Error(format!("symbols:{}", e.message)),
+        },
     };
 
     if cfg.verbose {
@@ -496,93 +504,20 @@ fn decode_htif(bus: &mut Bus, tohost: u32) -> Result<Option<Verdict>, PlatformEr
     }
 }
 
-/// Look up a symbol's value in an ELF32 little-endian file.
+/// Look up a symbol's address in the image's **symbol table** (M-11).
 ///
-/// Harness-local minimal reader: it walks the section headers, finds
-/// `SHT_SYMTAB`, and resolves one name against the linked string table.
-/// It returns `None` for anything it does not understand rather than
-/// failing, so a caller can fall back to an explicit `--tohost`.
+/// ⚠️ **M-11 是平台里唯一的符号读取者** —— M-06 负责把 `.symtab` /
+/// `.strtab` 的**原始字节**带出来，M-11 负责把它们解析成符号表。
+/// harness **不再自带**一套迷你 ELF 读取器（D-90）—— 那样平台上会有
+/// **两个**符号读取者，**漂移**只是时间问题。
 ///
-/// Every index is bounds-checked, so a malformed or truncated file
-/// yields `None` instead of a panic (review finding M-1 / the repo's
-/// standing "malformed input must not panic" rule).
-fn find_symbol(bytes: &[u8], want: &str) -> Option<u32> {
-    // ELF32 header: e_shoff@32, e_shentsize@46, e_shnum@48, e_shstrndx@50.
-    const SHT_SYMTAB: u32 = 2;
-    /// Smallest possible ELF32 symbol entry (st_name..st_shndx).
-    const MIN_SYM_ENT_SIZE: u32 = 16;
-
-    if bytes.len() < 52 || &bytes[0..4] != b"\x7fELF" {
-        return None;
-    }
-    if bytes[4] != 1 || bytes[5] != 1 {
-        // 64-bit or big-endian: not supported by this harness reader.
-        return None;
-    }
-
-    let rd_u16 = |off: usize| -> Option<u16> {
-        bytes
-            .get(off..off + 2)
-            .map(|s| u16::from_le_bytes([s[0], s[1]]))
-    };
-    let rd_u32 = |off: usize| -> Option<u32> {
-        bytes
-            .get(off..off + 4)
-            .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
-    };
-
-    let shoff = rd_u32(32)? as usize;
-    let shentsize = rd_u16(46)? as usize;
-    let shnum = rd_u16(48)? as usize;
-    if shentsize < 40 || shoff == 0 {
-        return None;
-    }
-
-    let section = |index: usize| -> Option<&[u8]> {
-        let off = shoff.checked_add(index.checked_mul(shentsize)?)?;
-        bytes.get(off..off + 40)
-    };
-
-    for i in 0..shnum {
-        let sh = section(i)?;
-        let sh_type = u32::from_le_bytes(sh[4..8].try_into().ok()?);
-        if sh_type != SHT_SYMTAB {
-            continue;
-        }
-        let sym_off = u32::from_le_bytes(sh[16..20].try_into().ok()?) as usize;
-        let sym_size = u32::from_le_bytes(sh[20..24].try_into().ok()?) as usize;
-        let str_index = u32::from_le_bytes(sh[24..28].try_into().ok()?) as usize;
-        let entsize = u32::from_le_bytes(sh[36..40].try_into().ok()?) as usize;
-
-        // A symbol entry must be at least `MIN_SYM_ENT_SIZE` bytes, or
-        // the walk below would read overlapping fields (review finding
-        // L-7).
-        if entsize < MIN_SYM_ENT_SIZE as usize {
-            return None;
-        }
-
-        let str_sh = section(str_index)?;
-        let str_off = u32::from_le_bytes(str_sh[16..20].try_into().ok()?) as usize;
-        let str_size = u32::from_le_bytes(str_sh[20..24].try_into().ok()?) as usize;
-        let strtab = bytes.get(str_off..str_off + str_size)?;
-
-        let mut p = sym_off;
-        let end = sym_off.saturating_add(sym_size);
-        while p.saturating_add(MIN_SYM_ENT_SIZE as usize) <= end {
-            // ELF32 symbol layout: st_name@0, st_value@4, st_size@8,
-            // st_info@12, st_other@13, st_shndx@14.
-            let name_off = rd_u32(p)? as usize;
-            let value = rd_u32(p + 4)?;
-            if let Some(name) = strtab.get(name_off..) {
-                let name = name.split(|b| *b == 0).next().unwrap_or(&[]);
-                if name == want.as_bytes() {
-                    return Some(value);
-                }
-            }
-            p = p.saturating_add(entsize);
-        }
-    }
-    None
+/// ⚠️ **畸形符号表 ⇒ `Err`**，不是「安静地查不到」：调用方要能区分
+/// 「这个 ELF 里没有这个符号」与「这个 ELF 的符号表坏了」。
+fn lookup_symbol(image: &LoadImage, want: &str) -> Result<Option<u32>, PlatformError> {
+    let symbols = SymbolTable::from_sections(&image.debug_sections)?;
+    // ⚠️ `addr == None` ⇒ **未定义符号**（`SHN_UNDEF`）⇒ 它没有地址
+    // ⇒ 与「查不到」同义。
+    Ok(symbols.lookup(want).and_then(|symbol| symbol.addr))
 }
 
 #[cfg(test)]
@@ -592,24 +527,42 @@ mod tests {
     /// Build a minimal but valid ELF32 little-endian image with one
     /// symbol table holding a single named symbol.
     ///
+    /// ⚠️ **节区必须有名字** —— M-06 的白名单是按**节区名**（`.symtab` /
+    /// `.strtab`）筛的，而名字来自 `.shstrtab`。没有 `.shstrtab` ⇒
+    /// M-06 带不出任何调试节区 ⇒ M-11 拿到的是**空表**。
+    ///
     /// Layout:
     /// ```text
     /// [0   .. 52)  ELF header
-    /// [52  .. 92)  section 0 — SHT_NULL
-    /// [92  .. 132) section 1 — SHT_SYMTAB
-    /// [132 .. 172) section 2 — SHT_STRTAB
-    /// [172 .. 204) symbol 0 — the mandatory null symbol
-    /// [204 .. 220) symbol 1 — `name`
-    /// [220 .. ..)  string table
+    /// [52  .. 212) section headers — 0: NULL, 1: .symtab, 2: .strtab, 3: .shstrtab
+    /// [212 .. 244) symbol 0 — the mandatory null symbol
+    /// [244 .. 260) symbol 1 — `name`
+    /// [260 .. ..)  .strtab, then .shstrtab
     /// ```
     fn synth_elf(name: &str, value: u32) -> Vec<u8> {
+        // `.strtab`: a leading NUL (offset 0 = "") then the name.
         let mut strtab = vec![0u8];
         strtab.extend_from_slice(name.as_bytes());
         strtab.push(0);
 
-        let symtab_off = 172usize;
-        let strtab_off = symtab_off + 32;
+        // `.shstrtab`: the section names, each NUL-terminated.
+        //   0 → ""        (section 0)
+        //   1 → ".symtab" (section 1)
+        //   9 → ".strtab" (section 2)
+        //  17 → ".shstrtab" (section 3)
+        let mut shstrtab = vec![0u8];
+        for section_name in [".symtab", ".strtab", ".shstrtab"] {
+            shstrtab.extend_from_slice(section_name.as_bytes());
+            shstrtab.push(0);
+        }
+        const NAME_SYMTAB: u32 = 1;
+        const NAME_STRTAB: u32 = 9;
+        const NAME_SHSTRTAB: u32 = 17;
+
         let shoff = 52usize;
+        let symtab_off = shoff + 4 * 40;
+        let strtab_off = symtab_off + 32;
+        let shstrtab_off = strtab_off + strtab.len();
 
         let mut out = vec![0u8; 52];
         out[0..4].copy_from_slice(b"\x7fELF");
@@ -622,17 +575,19 @@ mod tests {
         out[24..28].copy_from_slice(&0x8000_0000u32.to_le_bytes()); // e_entry
         out[32..36].copy_from_slice(&(shoff as u32).to_le_bytes());
         out[40..42].copy_from_slice(&16u16.to_le_bytes()); // e_ehsize
+                                                           // ⚠️ `e_phentsize` **必须**是 32（M-06 拒收别的值），
+                                                           // `e_phnum = 0` ⇒ 没有程序头 ⇒ 没有可装载段（本夹具只关心符号）。
+        out[42..44].copy_from_slice(&32u16.to_le_bytes()); // e_phentsize
+        out[44..46].copy_from_slice(&0u16.to_le_bytes()); // e_phnum
         out[46..48].copy_from_slice(&40u16.to_le_bytes()); // e_shentsize
-        out[48..50].copy_from_slice(&3u16.to_le_bytes()); // e_shnum
-        out[50..52].copy_from_slice(&0u16.to_le_bytes()); // e_shstrndx
+        out[48..50].copy_from_slice(&4u16.to_le_bytes()); // e_shnum
+        out[50..52].copy_from_slice(&3u16.to_le_bytes()); // e_shstrndx → section 3
 
-        // Section 0: SHT_NULL — the mandatory placeholder.  Without it
-        // the symtab would land at index 0 and `sh_link = 2` would point
-        // past the end of the section table.
+        // Section 0: SHT_NULL — the mandatory placeholder.
         out.extend_from_slice(&[0u8; 40]);
 
         // Section 1: SHT_SYMTAB.
-        out.extend_from_slice(&0u32.to_le_bytes()); // sh_name
+        out.extend_from_slice(&NAME_SYMTAB.to_le_bytes()); // sh_name
         out.extend_from_slice(&2u32.to_le_bytes()); // sh_type = SHT_SYMTAB
         out.extend_from_slice(&0u32.to_le_bytes()); // sh_flags
         out.extend_from_slice(&0u32.to_le_bytes()); // sh_addr
@@ -643,13 +598,25 @@ mod tests {
         out.extend_from_slice(&4u32.to_le_bytes()); // sh_addralign
         out.extend_from_slice(&16u32.to_le_bytes()); // sh_entsize
 
-        // Section 2: SHT_STRTAB.
-        out.extend_from_slice(&0u32.to_le_bytes()); // sh_name
+        // Section 2: SHT_STRTAB (`.strtab`).
+        out.extend_from_slice(&NAME_STRTAB.to_le_bytes()); // sh_name
         out.extend_from_slice(&3u32.to_le_bytes()); // sh_type = SHT_STRTAB
         out.extend_from_slice(&0u32.to_le_bytes()); // sh_flags
         out.extend_from_slice(&0u32.to_le_bytes()); // sh_addr
         out.extend_from_slice(&(strtab_off as u32).to_le_bytes()); // sh_offset
         out.extend_from_slice(&(strtab.len() as u32).to_le_bytes()); // sh_size
+        out.extend_from_slice(&0u32.to_le_bytes()); // sh_link
+        out.extend_from_slice(&0u32.to_le_bytes()); // sh_info
+        out.extend_from_slice(&1u32.to_le_bytes()); // sh_addralign
+        out.extend_from_slice(&0u32.to_le_bytes()); // sh_entsize
+
+        // Section 3: SHT_STRTAB (`.shstrtab`) — the section-name table.
+        out.extend_from_slice(&NAME_SHSTRTAB.to_le_bytes()); // sh_name
+        out.extend_from_slice(&3u32.to_le_bytes()); // sh_type = SHT_STRTAB
+        out.extend_from_slice(&0u32.to_le_bytes()); // sh_flags
+        out.extend_from_slice(&0u32.to_le_bytes()); // sh_addr
+        out.extend_from_slice(&(shstrtab_off as u32).to_le_bytes()); // sh_offset
+        out.extend_from_slice(&(shstrtab.len() as u32).to_le_bytes()); // sh_size
         out.extend_from_slice(&0u32.to_le_bytes()); // sh_link
         out.extend_from_slice(&0u32.to_le_bytes()); // sh_info
         out.extend_from_slice(&1u32.to_le_bytes()); // sh_addralign
@@ -668,25 +635,43 @@ mod tests {
 
         assert_eq!(out.len(), strtab_off);
         out.extend_from_slice(&strtab);
+        assert_eq!(out.len(), shstrtab_off);
+        out.extend_from_slice(&shstrtab);
         out
     }
 
-    #[test]
-    fn find_symbol_reads_the_st_value_field() {
-        let elf = synth_elf("tohost", 0x8000_1000);
-        assert_eq!(find_symbol(&elf, "tohost"), Some(0x8000_1000));
+    /// Load the image with M-06, then look the symbol up with M-11 —
+    /// exactly what [`run`] does.
+    fn load_and_lookup(bytes: &[u8], want: &str) -> Result<Option<u32>, PlatformError> {
+        let image = DefaultLoader.load(bytes, Kind::Elf)?;
+        lookup_symbol(&image, want)
     }
 
+    /// The `tohost` address must come from **M-11's symbol table**.
     #[test]
-    fn find_symbol_returns_none_for_an_unknown_name() {
+    fn the_tohost_address_comes_from_the_m11_symbol_table() {
         let elf = synth_elf("tohost", 0x8000_1000);
-        assert_eq!(find_symbol(&elf, "fromhost"), None);
+        assert_eq!(
+            load_and_lookup(&elf, "tohost"),
+            Ok(Some(0x8000_1000)),
+            "M-11 必须读出 .symtab 里的 st_value"
+        );
     }
 
+    /// 一个**不存在**的名字查不到（而不是「查到地址 0」）。
     #[test]
-    fn find_symbol_survives_malformed_input() {
-        // Every one of these must return None rather than panic: the
-        // repo's standing rule is that malformed input never panics.
+    fn an_unknown_symbol_name_is_not_found() {
+        let elf = synth_elf("tohost", 0x8000_1000);
+        assert_eq!(load_and_lookup(&elf, "fromhost"), Ok(None));
+    }
+
+    /// ⚠️ **畸形输入不得 panic** —— 这是仓库的**成文规矩**。
+    ///
+    /// 现在符号查找走的是 **M-06 + M-11** ⇒ 畸形输入由**它们**挡：
+    /// M-06 拒收装载，M-11 拒收畸形符号表。两条路都必须**返回错误**，
+    /// 不能 panic，也不能「安静地查到一个地址」。
+    #[test]
+    fn malformed_input_never_panics_and_never_resolves_a_symbol() {
         let elf = synth_elf("tohost", 0x8000_1000);
 
         let cases: Vec<(&str, Vec<u8>)> = vec![
@@ -719,29 +704,66 @@ mod tests {
             }),
             ("truncated body", elf[..100].to_vec()),
             ("truncated symbol table", elf[..180].to_vec()),
-            ("sh_entsize too small", {
-                let mut b = elf.clone();
-                // Section 1's sh_entsize lives at
-                // e_shoff + 1 * e_shentsize + 36.
-                let at = 52 + 40 + 36;
-                b[at..at + 4].copy_from_slice(&8u32.to_le_bytes());
-                b
-            }),
         ];
 
         for (name, bytes) in cases {
             // Must not panic, and must not resolve a symbol.
-            let got = find_symbol(&bytes, "tohost");
-            assert_eq!(got, None, "case {name} should not resolve a symbol");
+            let got = load_and_lookup(&bytes, "tohost");
+            assert!(
+                matches!(got, Err(_) | Ok(None)),
+                "case {name} must not resolve a symbol —— 实得 {got:?}"
+            );
         }
 
         // A section count larger than the real table is **not** a
-        // failure: the reader walks the table and finds the genuine
-        // symtab before running off the end.  The invariant here is only
-        // "no panic".
+        // failure: the loader walks the table and finds the genuine
+        // sections before running off the end.  The invariant here is
+        // only "no panic".
         let mut b = elf.clone();
         b[48..50].copy_from_slice(&0xffffu16.to_le_bytes());
-        let _ = find_symbol(&b, "tohost");
+        let _ = load_and_lookup(&b, "tohost");
+    }
+
+    /// ⚠️ **节区名丢了 ⇒ 符号表查不到**（而不是「退化到某个地址」）。
+    ///
+    /// 这是切到 M-11 之后**新出现**的失败模式：M-06 的白名单是按
+    /// **节区名**（`.symtab` / `.strtab`）筛的，而名字来自 `.shstrtab`
+    /// ⇒ 名字读不出来 ⇒ `.symtab` 带不出来 ⇒ M-11 拿到**空表**。
+    ///
+    /// ⚠️ 这条用例把「**为什么查不到**」钉死：否则一个「符号表不见了」
+    /// 的回归，会以「`tohost` 找不到」的形式出现，而排查方向会指向
+    /// 链接脚本而不是节区名。
+    #[test]
+    fn an_image_without_section_names_has_no_symbol_table() {
+        let mut elf = synth_elf("tohost", 0x8000_1000);
+        // `e_shstrndx` 越界 ⇒ M-06 读不出任何节区名 ⇒ 白名单没法用 ⇒
+        // 它**报告「没有调试节区」**（不是失败）⇒ M-11 是空表。
+        elf[50..52].copy_from_slice(&9u16.to_le_bytes());
+        assert_eq!(
+            load_and_lookup(&elf, "tohost"),
+            Ok(None),
+            "节区名读不出来 ⇒ M-06 带不出 .symtab ⇒ M-11 是空表"
+        );
+    }
+
+    /// ⚠️ **节区名表指向一个空节区 ⇒ M-06 拒收**（而不是「安静地放过」）。
+    ///
+    /// ⚠️ 这与上一条是**不同的**失败模式：`e_shstrndx = 0` 指向的是
+    /// `SHT_NULL` 节区（大小为 0）⇒ 名字表**是空的** ⇒ 读任何一个名字
+    /// 都越界 ⇒ M-06 报 `E_LDR-01`。
+    ///
+    /// 两条一起覆盖 ⇒ 「节区名出问题」不会悄悄变成「查到一个错的地址」。
+    #[test]
+    fn an_image_whose_section_name_table_is_empty_is_rejected() {
+        let mut elf = synth_elf("tohost", 0x8000_1000);
+        // Point `e_shstrndx` at the NULL section ⇒ its size is 0 ⇒ the
+        // section-name table is empty.
+        elf[50..52].copy_from_slice(&0u16.to_le_bytes());
+        let got = load_and_lookup(&elf, "tohost");
+        assert!(
+            !matches!(got, Ok(Some(_))),
+            "节区名表是空的 ⇒ 绝不能查到一个地址 —— 实得 {got:?}"
+        );
     }
 
     /// Build a bus with a RAM window and write `value` at `addr`.
