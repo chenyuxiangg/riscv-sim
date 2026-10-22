@@ -422,25 +422,35 @@ fn run(cfg: &Config) -> Verdict {
             }
         }
 
-        if let StepOutcome::Trapped { cause } = outcome {
-            // ⚠️ **陷阱不是错误** —— 它是程序的一部分。
-            //
-            // ISS 的 `enter_trap` 已经把 `mcause` / `mepc` / `mtval` /
-            // `mstatus` 写好，并把 PC 重定向到 `mtvec`（直接模式）或
-            // `mtvec + 4 × (cause & 7)`（向量模式）⇒ **陷阱已经投递完毕**。
-            //
-            // ⇒ 这里**继续跑**，让 guest 的 trap vector 去处理它。
-            // （`trap@0x80000004` 那个地址就是 trap vector 本身。）
-            //
-            // ⚠️ ** runaway 的兜底**：trap vector 自己再陷入 ⇒ 反复投递 ⇒
-            // 一直转到 `cfg.budget` 耗尽 ⇒ `Inconclusive`（NOVERDICT）——
-            // 这正是「程序发散」应有的判决，不是「平台故障」。
-            if cfg.verbose {
-                eprintln!(
-                    "[golden] trap at pc=0x{:08x} cause={:?} -> mtvec",
-                    state.pc, cause
-                );
+        // ⚠️ **穷举** `StepOutcome` —— 不是 `if let`。
+        //
+        // `StepOutcome` 今天只有 `Advanced` / `Trapped` 两个变体，可
+        // M-17（`m17_backend/mod.rs`）用的是穷举 `match`。用 `if let`
+        // 的话，将来若复活第三个变体（v0.19 删过 `HostPause` /
+        // `Breakpoint` / `Watchpoint`），这个 runner 会**静默忽略**新
+        // 变体并继续跑 ⇒ 判决可能悄悄改变。穷举让编译器逼着表态。
+        match outcome {
+            StepOutcome::Trapped { cause } => {
+                // ⚠️ **陷阱不是错误** —— 它是程序的一部分。
+                //
+                // ISS 的 `enter_trap` 已经把 `mcause` / `mepc` / `mtval` /
+                // `mstatus` 写好，并把 PC 重定向到 `mtvec`（直接模式）或
+                // `mtvec + 4 × (cause & 7)`（向量模式）⇒ **陷阱已经投递完毕**。
+                //
+                // ⇒ 这里**继续跑**，让 guest 的 trap vector 去处理它。
+                // （`trap@0x80000004` 那个地址就是 trap vector 本身。）
+                //
+                // ⚠️ ** runaway 的兜底**：trap vector 自己再陷入 ⇒ 反复投递 ⇒
+                // 一直转到 `cfg.budget` 耗尽 ⇒ `Inconclusive`（NOVERDICT）——
+                // 这正是「程序发散」应有的判决，不是「平台故障」。
+                if cfg.verbose {
+                    eprintln!(
+                        "[golden] trap at pc=0x{:08x} cause={:?} -> mtvec",
+                        state.pc, cause
+                    );
+                }
             }
+            StepOutcome::Advanced => {}
         }
     }
 }
@@ -638,6 +648,162 @@ mod tests {
         assert_eq!(out.len(), shstrtab_off);
         out.extend_from_slice(&shstrtab);
         out
+    }
+
+    /// Build a **loadable** ELF32 image whose entry point is a
+    /// self-loop (`jal x0, 0`) — the program never writes `tohost`, so
+    /// the runner must exhaust its budget and answer `NOVERDICT`.
+    ///
+    /// Layout:
+    /// ```text
+    /// [  0 ..  52) ELF header     (e_phoff = 52, e_shoff = 88)
+    /// [ 52 ..  84) program header (PT_LOAD → 0x8000_0000, 4 bytes)
+    /// [ 84 ..  88) the code: `jal x0, 0`
+    /// [ 88 .. 248) section headers — 0: NULL, 1: .symtab, 2: .strtab, 3: .shstrtab
+    /// [248 .. 280) symbols — 0: the null symbol, 1: `tohost`
+    /// [280 ..   ) .strtab, then .shstrtab
+    /// ```
+    fn synth_runaway_elf() -> Vec<u8> {
+        const CODE: u32 = 0x0000_006F; // `jal x0, 0` — a self-loop
+        const ENTRY: u32 = 0x8000_0000;
+        const TOHOST: u32 = 0x8000_1000;
+
+        // `.strtab`: a leading NUL (offset 0 = "") then the name.
+        let mut strtab = vec![0u8];
+        strtab.extend_from_slice(b"tohost");
+        strtab.push(0);
+
+        // `.shstrtab`: the section names, each NUL-terminated.
+        let mut shstrtab = vec![0u8];
+        for section_name in [".symtab", ".strtab", ".shstrtab"] {
+            shstrtab.extend_from_slice(section_name.as_bytes());
+            shstrtab.push(0);
+        }
+        const NAME_SYMTAB: u32 = 1;
+        const NAME_STRTAB: u32 = 9;
+        const NAME_SHSTRTAB: u32 = 17;
+
+        let shoff = 88usize;
+        let symtab_off = shoff + 4 * 40;
+        let strtab_off = symtab_off + 32;
+        let shstrtab_off = strtab_off + strtab.len();
+
+        let mut out = vec![0u8; 52];
+        out[0..4].copy_from_slice(b"\x7fELF");
+        out[4] = 1; // ELFCLASS32
+        out[5] = 1; // ELFDATA2LSB
+        out[6] = 1; // EV_CURRENT
+        out[16..18].copy_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+        out[18..20].copy_from_slice(&243u16.to_le_bytes()); // e_machine = EM_RISCV
+        out[20..24].copy_from_slice(&1u32.to_le_bytes()); // e_version
+        out[24..28].copy_from_slice(&ENTRY.to_le_bytes()); // e_entry
+        out[28..32].copy_from_slice(&52u32.to_le_bytes()); // e_phoff
+        out[32..36].copy_from_slice(&(shoff as u32).to_le_bytes()); // e_shoff
+        out[40..42].copy_from_slice(&52u16.to_le_bytes()); // e_ehsize
+        out[42..44].copy_from_slice(&32u16.to_le_bytes()); // e_phentsize
+        out[44..46].copy_from_slice(&1u16.to_le_bytes()); // e_phnum
+        out[46..48].copy_from_slice(&40u16.to_le_bytes()); // e_shentsize
+        out[48..50].copy_from_slice(&4u16.to_le_bytes()); // e_shnum
+        out[50..52].copy_from_slice(&3u16.to_le_bytes()); // e_shstrndx
+
+        // The program header: one PT_LOAD covering the code.
+        out.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+        out.extend_from_slice(&84u32.to_le_bytes()); // p_offset
+        out.extend_from_slice(&ENTRY.to_le_bytes()); // p_vaddr
+        out.extend_from_slice(&ENTRY.to_le_bytes()); // p_paddr
+        out.extend_from_slice(&4u32.to_le_bytes()); // p_filesz
+        out.extend_from_slice(&4u32.to_le_bytes()); // p_memsz
+        out.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
+        out.extend_from_slice(&4u32.to_le_bytes()); // p_align
+
+        // The code: one self-loop.
+        out.extend_from_slice(&CODE.to_le_bytes());
+        assert_eq!(out.len(), shoff);
+
+        // Section 0: SHT_NULL — the mandatory placeholder.
+        out.extend_from_slice(&[0u8; 40]);
+
+        // Section 1: SHT_SYMTAB.
+        out.extend_from_slice(&NAME_SYMTAB.to_le_bytes()); // sh_name
+        out.extend_from_slice(&2u32.to_le_bytes()); // sh_type = SHT_SYMTAB
+        out.extend_from_slice(&0u32.to_le_bytes()); // sh_flags
+        out.extend_from_slice(&0u32.to_le_bytes()); // sh_addr
+        out.extend_from_slice(&(symtab_off as u32).to_le_bytes()); // sh_offset
+        out.extend_from_slice(&32u32.to_le_bytes()); // sh_size (2 entries)
+        out.extend_from_slice(&2u32.to_le_bytes()); // sh_link -> strtab
+        out.extend_from_slice(&1u32.to_le_bytes()); // sh_info
+        out.extend_from_slice(&4u32.to_le_bytes()); // sh_addralign
+        out.extend_from_slice(&16u32.to_le_bytes()); // sh_entsize
+
+        // Section 2: SHT_STRTAB (`.strtab`).
+        out.extend_from_slice(&NAME_STRTAB.to_le_bytes()); // sh_name
+        out.extend_from_slice(&3u32.to_le_bytes()); // sh_type = SHT_STRTAB
+        out.extend_from_slice(&0u32.to_le_bytes()); // sh_flags
+        out.extend_from_slice(&0u32.to_le_bytes()); // sh_addr
+        out.extend_from_slice(&(strtab_off as u32).to_le_bytes()); // sh_offset
+        out.extend_from_slice(&(strtab.len() as u32).to_le_bytes()); // sh_size
+        out.extend_from_slice(&0u32.to_le_bytes()); // sh_link
+        out.extend_from_slice(&0u32.to_le_bytes()); // sh_info
+        out.extend_from_slice(&1u32.to_le_bytes()); // sh_addralign
+        out.extend_from_slice(&0u32.to_le_bytes()); // sh_entsize
+
+        // Section 3: SHT_STRTAB (`.shstrtab`) — the section-name table.
+        out.extend_from_slice(&NAME_SHSTRTAB.to_le_bytes()); // sh_name
+        out.extend_from_slice(&3u32.to_le_bytes()); // sh_type = SHT_STRTAB
+        out.extend_from_slice(&0u32.to_le_bytes()); // sh_flags
+        out.extend_from_slice(&0u32.to_le_bytes()); // sh_addr
+        out.extend_from_slice(&(shstrtab_off as u32).to_le_bytes()); // sh_offset
+        out.extend_from_slice(&(shstrtab.len() as u32).to_le_bytes()); // sh_size
+        out.extend_from_slice(&0u32.to_le_bytes()); // sh_link
+        out.extend_from_slice(&0u32.to_le_bytes()); // sh_info
+        out.extend_from_slice(&1u32.to_le_bytes()); // sh_addralign
+        out.extend_from_slice(&0u32.to_le_bytes()); // sh_entsize
+
+        assert_eq!(out.len(), symtab_off);
+        // Symbol 0 — the mandatory null symbol.
+        out.extend_from_slice(&[0u8; 16]);
+        // Symbol 1 — `tohost`.
+        out.extend_from_slice(&1u32.to_le_bytes()); // st_name (offset in strtab)
+        out.extend_from_slice(&TOHOST.to_le_bytes()); // st_value
+        out.extend_from_slice(&8u32.to_le_bytes()); // st_size
+        out.push(0); // st_info
+        out.push(0); // st_other
+        out.extend_from_slice(&1u16.to_le_bytes()); // st_shndx
+
+        assert_eq!(out.len(), strtab_off);
+        out.extend_from_slice(&strtab);
+        assert_eq!(out.len(), shstrtab_off);
+        out.extend_from_slice(&shstrtab);
+        out
+    }
+
+    /// A program that never writes `tohost` must exhaust the budget and
+    /// answer `NOVERDICT` — **not** `PASS`, **not** `ERROR`.
+    ///
+    /// ⚠️ This is the runner's **only** "the program diverged" verdict
+    /// (adjudication A's runaway backstop).  Without a case that pins
+    /// it the verdict has **no discriminating power**: turning the
+    /// budget check into an `ERROR` — or worse, into a `PASS` — would
+    /// leave the whole golden gate green while the diverged programs
+    /// were being reported as successes.
+    #[test]
+    fn a_runaway_program_answers_noverdict() {
+        let path =
+            std::env::temp_dir().join(format!("riscv-golden-runaway-{}.elf", std::process::id()));
+        std::fs::write(&path, synth_runaway_elf()).expect("write the runaway image");
+        let cfg = Config {
+            path: path.to_string_lossy().into_owned(),
+            tohost_override: None,
+            budget: 32,
+            verbose: false,
+        };
+        let verdict = run(&cfg);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            verdict,
+            Verdict::Inconclusive,
+            "a program that never writes tohost must answer NOVERDICT"
+        );
     }
 
     /// Load the image with M-06, then look the symbol up with M-11 —

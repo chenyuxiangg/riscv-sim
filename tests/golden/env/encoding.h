@@ -107,7 +107,7 @@
 #define PMP_R     0x01
 #define PMP_W     0x02
 #define PMP_X     0x04
-#define PMP_A     0x0c
+#define PMP_A     0x18
 #define PMP_NAPOT 0x18
 
 // ---------------------------------------------------------------------------

@@ -99,6 +99,65 @@ if [ -z "$SPIKE" ]; then
 fi
 [ -n "$SPIKE" ] && [ -x "$SPIKE" ] || die "spike not found on PATH (set \$SPIKE)"
 
+# ------------------------------------------------- env constants are upstream's
+#
+# `tests/golden/env/encoding.h` claims to carry **upstream's** values,
+# verbatim.  That claim is load-bearing: the harness compiles **one**
+# image and hands it to **both** sides, so a "cleaned up" constant does
+# not show up as a side-vs-side mismatch — it silently replaces the
+# upstream test program with a slightly different one, and the corpus
+# keeps comparing two different programs while looking green.
+#
+# ⇒ The drift is checked here, before anything is built.  A constant we
+# define that upstream does not define (or defines differently) is a
+# hard error, not a warning.
+#
+# ⚠️ The comparison is **textual** (whitespace-insensitive, case
+# insensitive): the constants are architectural encodings, so upstream's
+# spelling is the definition.
+check_env_constants() {
+    local ours="$ENV_DIR/encoding.h"
+    local upstream="$RISCV_TESTS_DIR/env/encoding.h"
+    [ -f "$ours" ] || die "missing env encoding: $ours"
+    [ -f "$upstream" ] || die "missing upstream encoding: $upstream"
+    local name value upstream_value
+    while IFS=$'\t' read -r name value; do
+        case "$name" in _*) continue ;; esac   # include guards, not constants
+        upstream_value="$(
+            awk -v n="$name" '
+                /^#define[ \t]/ {
+                    line = $0
+                    sub(/^#define[ \t]+/, "", line)
+                    name = line
+                    sub(/[ \t].*$/, "", name)
+                    if (name == n) {
+                        rest = line
+                        sub(/^[^ \t]+[ \t]+/, "", rest)
+                        print rest
+                        exit
+                    }
+                }
+            ' "$upstream"
+        )"
+        [ -n "$upstream_value" ] ||
+            die "encoding.h: '$name' is not defined upstream ($upstream)"
+        [ "$(printf '%s' "$value" | tr 'A-Z' 'a-z' | tr -d '[:space:]')" = \
+          "$(printf '%s' "$upstream_value" | tr 'A-Z' 'a-z' | tr -d '[:space:]')" ] ||
+            die "encoding.h: '$name' = '$value', upstream says '$upstream_value' — the corpus must run upstream's program"
+    done < <(awk '
+        /^#define[ \t]/ {
+            line = $0
+            sub(/^#define[ \t]+/, "", line)
+            name = line
+            sub(/[ \t].*$/, "", name)
+            rest = line
+            sub(/^[^ \t]+[ \t]+/, "", rest)
+            print name "\t" rest
+        }
+    ' "$ours")
+}
+check_env_constants
+
 # ---------------------------------------------------------------- corpus
 #
 # Manifest format:  <suite> <test> <march> <status> [env] [reason]
@@ -137,8 +196,21 @@ while IFS= read -r line; do
     # A pending case must say why it is out of scope and which ledger
     # entry tracks it -- otherwise the exception silently outlives the
     # reason that justified it.
-    if [ "$status" = "pending" ] && [ -z "$reason" ]; then
-        die "pending case '$suite/$test_name' has no reason / ledger entry"
+    #
+    # ⚠️ The reason must **start with the ledger id** (`D-<n> …`).
+    # Without that shape, a free-text reason whose first word happens
+    # to be a known env variant name ("csr …") would be parsed as the
+    # env column and silently select the wrong environment -- the guard
+    # above cannot tell "the 5th column is an env" from "the 5th column
+    # is prose" by looking at the word alone.
+    if [ "$status" = "pending" ]; then
+        if [ -z "$reason" ]; then
+            die "pending case '$suite/$test_name' has no reason / ledger entry"
+        fi
+        case "$reason" in
+            D-[0-9]*) ;;
+            *) die "pending case '$suite/$test_name' must cite a ledger id (D-<n> …) first in its reason, got: $reason" ;;
+        esac
     fi
     [ -n "$SUITE_FILTER" ] && [ "$suite" != "$SUITE_FILTER" ] && continue
     if [ -n "$FILTER" ]; then
@@ -431,21 +503,34 @@ for c in "${cases[@]}"; do
     elif [ "$status" = "pending" ]; then
         # Expected gap: the case needs an ISA extension M-13 does not
         # implement yet.  **Only** "the candidate cannot execute it at
-        # all" is tolerated -- ERROR / NOVERDICT.  Any other
-        # disagreement (e.g. Spike says PASS and we say FAIL 3) is a
-        # real defect and must fail the run; swallowing it under
-        # "expected gap" is exactly the kind of hole this ledger
-        # exists to close.
+        # all" is tolerated.  Any other disagreement (e.g. Spike says
+        # PASS and we say FAIL 3) is a real defect and must fail the
+        # run; swallowing it under "expected gap" is exactly the kind
+        # of hole this ledger exists to close.
+        #
+        # ⚠️ **白名单，不是黑名单**：可容忍的只有**执行之前**就失败的那几种
+        #   ——读文件 / 解析镜像 / 找符号 / 建内存图 / 写段。这些是
+        #   「harness 根本没跑起来」。
+        #   **运行期**的失败（`step@…` = guest fault、`trap@…` = runner
+        #   因为陷阱中止、`read tohost@…`）**一律不容忍** ⇒ 那是**行为**，
+        #   不是「跑不了」⇒ 参考侧在那里是**陷入**并让 guest 的 handler
+        #   继续跑（cause 5/7），我们却中止 ⇒ **真分歧**。
+        #   ⇒ 用黑名单（「只排除 step@」）会漏掉 `trap@…` ⇒ 改白名单。
+        tolerable=0
         case "$our_verdict" in
-            ERROR*|NOVERDICT)
-                printf '%-28s %-18s %-18s %s\n' "$suite/$test_name" "$spike_verdict" "$our_verdict" "expected-gap"
-                expected_gap=$((expected_gap + 1)) ;;
-            *)
-                printf '%-28s %-18s %-18s %s\n' "$suite/$test_name" "$spike_verdict" "$our_verdict" "MISMATCH"
-                mismatch=$((mismatch + 1))
-                failures+=("$suite/$test_name: spike=$spike_verdict ours=$our_verdict (pending)")
-                [ "$KEEP_GOING" -eq 1 ] || break ;;
+            NOVERDICT) tolerable=1 ;;
+            "ERROR read:"*|"ERROR load:"*|"ERROR symbols:"*|\
+            "ERROR map_ram:"*|"ERROR map_stack:"*|"ERROR load@"*) tolerable=1 ;;
         esac
+        if [ "$tolerable" -eq 1 ]; then
+            printf '%-28s %-18s %-18s %s\n' "$suite/$test_name" "$spike_verdict" "$our_verdict" "expected-gap"
+            expected_gap=$((expected_gap + 1))
+        else
+            printf '%-28s %-18s %-18s %s\n' "$suite/$test_name" "$spike_verdict" "$our_verdict" "MISMATCH"
+            mismatch=$((mismatch + 1))
+            failures+=("$suite/$test_name: spike=$spike_verdict ours=$our_verdict (pending)")
+            [ "$KEEP_GOING" -eq 1 ] || break
+        fi
     else
         printf '%-28s %-18s %-18s %s\n' "$suite/$test_name" "$spike_verdict" "$our_verdict" "MISMATCH"
         mismatch=$((mismatch + 1))
