@@ -280,11 +280,22 @@ tests/golden/env/
 | 状态 | 用例 | 依据 |
 | --- | --- | --- |
 | **active** | `breakpoint` `csr` `instret_overflow` `lh-misaligned` `lw-misaligned` `sh-misaligned` `sw-misaligned` `ma_addr` `ma_fetch` `mcsr` `sbreak` `scall` `shamt` | **13 例**（表 B 实测：裁决 D/E 落地后两侧一致） |
-| **pending** | `illegal` | 需 S 模式语义（`csrwi mip, MIP_SSIP` 写被忽略 ⇒ 挂死）⇒ **D-94** |
-| **pending** | `pmpaddr` | 平台**无 PMP** ⇒ `pmpaddr0` 写忽略后读回 0，与 Spike 的 PMP 语义**相反** ⇒ **D-94** |
-| **pending** | `zicntr` | **参考侧**（Spike）自己也判不出（FAIL 2）⇒ 平台无责 |
+| **pending** | `illegal` | 需 S 模式语义（`csrwi mip, MIP_SSIP` 写被忽略 ⇒ 挂死）⇒ **D-94**。实测：Spike `PASS` / 我们 `NOVERDICT` |
+| **pending** | `pmpaddr` | 平台**无 PMP** ⇒ `pmpaddr0` 写忽略后读回 0，与 Spike 的 PMP 语义**相反** ⇒ **D-94**。实测：Spike `PASS` / 我们 `FAIL 1` |
+| **pending** | `zicntr` | **参考侧**（Spike）自己也判不出（`FAIL 2`，因为该 ISA 配置下 Spike 没有 Zicntr、读 `cycle` 会陷入）⇒ 平台无责。实测：Spike `FAIL 2` / 我们 `PASS` |
 
-⚠️ **`rv32si` 6 例全部 `pending`**（S 扩展未实现 ⇒ **D-94**）。
+⚠️ **`rv32si` 6 例全部 `pending`**（S 扩展未实现 ⇒ **D-94**）。实测：
+`csr` → `FAIL 22`、`sbreak` / `scall` → `FAIL 669`、`wfi` → `FAIL 668`、
+`dirty` **连汇编都过不了**（缺 `SATP_MODE` / `SATP_MODE_SV32`）、
+`ma_fetch` 两侧**都 PASS**（但是**空洞的一致**——两侧都没走到它要测的 S 模式路径
+⇒ **不能**提升为 `active`）。
+
+⚠️ **pending 行为什么不进 `corpus.txt`**：harness 的 `pending` 规则**只**容忍
+「候选侧跑不了」（`ERROR` / `NOVERDICT`）。上表里 `pmpaddr`（我们 `FAIL 1`）与
+`zicntr`（我们 `PASS`）**跑得了、只是分歧** ⇒ 把它们列进去就得把规则放宽成
+「任何分歧都算预期缺口」——那正是这条规则当初要堵的洞。
+⇒ **改为**：pending 清单 + 逐例实测分歧写进 `tests/golden/README.md`，台账 **D-94** 跟踪。
+（`rv32si/ma_fetch` 那一行尤其说明了为什么：**空洞的一致**比分歧更危险。）
 
 ⚠️ **本批结束后语料从 51 例扩到 64 例**（51 + 13）⇒ 门禁数字**全部重算**。
 
@@ -368,7 +379,7 @@ pub fn csr_is_read_only(csr: u16) -> bool;            // = is_csr_read_only || m
 | 10 | `mscratch` 可用 | 12 条 RMW 语义正确（`csrrs`/`csrrc` 在 `rs1==x0` 时不写） |
 | 11 | 陷阱是程序的一部分 | runner 遇陷阱**继续** ⇒ guest 的 trap vector 能跑 |
 | 12 | 发散 ⇒ NOVERDICT | trap vector 自己再陷入 ⇒ 预算耗尽 ⇒ `Inconclusive`（**不是** ERROR、**不是** PASS） |
-| 13 | 语料扩容 | `corpus.txt` 含 **13 条 `rv32mi` active** + **4 条 pending**（3 条 `rv32mi` + 6 条 `rv32si`） |
+| 13 | 语料扩容 | `corpus.txt` 含 **13 条 `rv32mi` active**（`env` 列 = `csr`）⇒ 全表 **64 行**（51 旧 + 13 新）。⚠️ **本批不把 pending 行放进 `corpus.txt`**（原措辞「+ 4 条 pending」与 #14 的 64/64 自相矛盾，且实测三例的 pending 行**不满足** harness 的严格 pending 规则，见裁决 I）⇒ pending 清单与**逐例实测分歧**写进 `tests/golden/README.md`（§ "Cases that are *not* in the corpus"），由台账 **D-94** 跟踪 |
 | 14 | 语料全绿 | `tools/golden-run.sh --keep-going` ⇒ **64/64**（51 旧 + 13 新）判决逐例一致 |
 | 15 | 金丝雀仍有效 | `--self-check` 三个对照两侧一致（**语料扩容不得让金丝雀变弱**） |
 | 16 | 旧语料零影响 | 51 条旧用例的判决**逐例不变** |

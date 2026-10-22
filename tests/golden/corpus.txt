@@ -1,7 +1,7 @@
 # Golden corpus manifest — the authoritative list of riscv-tests cases that
 # the platform compares against Spike.
 #
-# Format:  <suite>  <test>  <march>  <status>  [reason]
+# Format:  <suite>  <test>  <march>  <status>  [env]  [reason]
 #
 #   suite   riscv-tests suite directory under isa/
 #   test    test case name (isa/<suite>/<test>.S)
@@ -14,18 +14,35 @@
 #                     run.  A pending case that starts agreeing is reported
 #                     as NOW-PASSING and **fails the run** — flip it to
 #                     `active` and the flag stops being stale.
+#   env     the environment variant to build the case with:
+#             (empty) / -   the default (CSR-free) environment
+#             csr           the CSR-capable environment (env/csr/)
+#           The variant's include path is searched **first**, so its
+#           `riscv_test.h` wins over the default one (STAGE-6 adjudication F).
 #   reason  REQUIRED for `pending`: why it is out of scope + the ledger
 #           entry that tracks it.  The harness validates that every
 #           pending row carries one.
 #
 # Scope rules (see tests/golden/env/riscv_test.h for the full rationale):
-#   * the environment is CSR-free, so `rv32mi` / `rv32si` are OUT — they
-#     need trap delivery and `mret`, which land with M-16 in phase 5;
+#   * the **default** environment is CSR-free, so `rv32mi` / `rv32si` are
+#     OUT with it — they need trap delivery and `mret`;
+#   * the **csr** environment (env/csr/) provides the trap vector, the
+#     `mtvec` programming and the `mret` epilogue, so the machine-level
+#     corpus becomes comparable;
 #   * `zifencei` is enabled everywhere so that `fence_i` assembles;
 #   * `rv32um` needs the M extension, `rv32uc` the C extension — both
 #     landed in v0.16 (ledger D-43 closed), so the corpus is now **all
 #     `active`**.  The `pending` mechanism stays in place for the next
 #     extension gap.
+#
+# The machine-level cases that are **still** out of scope are listed in
+# `tests/golden/README.md` (§ "Cases that are not in the corpus") together
+# with the divergence each one produces.  They are deliberately **not** rows
+# here: the harness's `pending` rule tolerates only "the candidate cannot
+# execute it", and three of them do execute — they merely diverge, because
+# the platform has no S mode, no PMP, and no Zicntr (ledger D-94).  Listing
+# them would force the rule to be loosened into a hole; leaving them in the
+# README keeps the manifest's rows all-or-nothing.
 #
 # Runtime ISA for the reference side is `rv32imc_zicclsm_zifencei`:
 # Zicclsm is what makes Spike *perform* misaligned accesses instead of
@@ -82,3 +99,16 @@ rv32um mulhu rv32im_zifencei active
 rv32um rem rv32im_zifencei active
 rv32um remu rv32im_zifencei active
 rv32uc rvc rv32ic_zifencei active
+rv32mi breakpoint rv32i_zicsr_zifencei active csr
+rv32mi csr rv32i_zicsr_zifencei active csr
+rv32mi instret_overflow rv32i_zicsr_zifencei active csr
+rv32mi lh-misaligned rv32i_zicsr_zifencei active csr
+rv32mi lw-misaligned rv32i_zicsr_zifencei active csr
+rv32mi ma_addr rv32i_zicsr_zifencei active csr
+rv32mi ma_fetch rv32i_zicsr_zifencei active csr
+rv32mi mcsr rv32i_zicsr_zifencei active csr
+rv32mi sbreak rv32i_zicsr_zifencei active csr
+rv32mi scall rv32i_zicsr_zifencei active csr
+rv32mi sh-misaligned rv32i_zicsr_zifencei active csr
+rv32mi shamt rv32i_zicsr_zifencei active csr
+rv32mi sw-misaligned rv32i_zicsr_zifencei active csr

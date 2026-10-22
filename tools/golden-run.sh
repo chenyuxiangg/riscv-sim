@@ -100,18 +100,39 @@ fi
 [ -n "$SPIKE" ] && [ -x "$SPIKE" ] || die "spike not found on PATH (set \$SPIKE)"
 
 # ---------------------------------------------------------------- corpus
+#
+# Manifest format:  <suite> <test> <march> <status> [env] [reason]
+#
+#   env    the environment variant to build the case with:
+#            (empty) / -   the default (CSR-free) environment, tests/golden/env/
+#            csr           the CSR-capable environment, tests/golden/env/csr/
+#          The variant's include path is searched **first**, so its
+#          `riscv_test.h` wins over the default one (STAGE-6 adjudication F).
+#          ⚠️ An unknown value is a **hard error**, not a reason: a reason
+#          that accidentally lands in the env column would otherwise be
+#          read as a variant name and silently select the wrong env.
+#   reason REQUIRED for `pending`: why it is out of scope + the ledger
+#          entry that tracks it.  The harness validates that every
+#          pending row carries one.
 cases=()
 while IFS= read -r line; do
     case "$line" in ''|'#'*) continue ;; esac
     # The reason column may contain spaces, so `read` is used (it puts
     # the remainder of the line into the last variable).
-    read -r suite test_name march status reason <<< "$line"
+    read -r suite test_name march status env_col reason <<< "$line"
     if [ -z "$suite" ] || [ -z "$test_name" ] || [ -z "$march" ] || [ -z "$status" ]; then
         die "malformed manifest line: $line"
     fi
     case "$status" in
         active|pending) ;;
         *) die "unknown status '$status' in manifest line: $line" ;;
+    esac
+    # The env column: empty / `-` = the default variant, otherwise a
+    # known variant name.  Anything else is a manifest bug.
+    case "$env_col" in
+        ''|'-') env_variant='' ;;
+        csr)     env_variant='csr' ;;
+        *) die "unknown env variant '$env_col' in manifest line: $line" ;;
     esac
     # A pending case must say why it is out of scope and which ledger
     # entry tracks it -- otherwise the exception silently outlives the
@@ -123,7 +144,7 @@ while IFS= read -r line; do
     if [ -n "$FILTER" ]; then
         echo "$suite/$test_name" | grep -Eq "$FILTER" || continue
     fi
-    cases+=("$suite|$test_name|$march|$status")
+    cases+=("$suite|$test_name|$march|$status|$env_variant")
 done < "$MANIFEST"
 
 # NOTE: macOS ships bash 3.2, where expanding an **empty** array under
@@ -173,11 +194,29 @@ esac
 [ "$TIMEOUT_SEC" -ge 1 ] || die "GOLDEN_TIMEOUT must be >= 1 (got '$TIMEOUT_SEC')"
 
 # Assemble one source file with the golden environment.
+#
+# build_case <src> <elf> <march> [env-variant]
+#
+# The env variant selects the include directory:
+#   (empty)  the default environment (tests/golden/env/)
+#   csr      the CSR-capable environment (tests/golden/env/csr/)
+#
+# ⚠️ The variant's include path comes **first** so that its `riscv_test.h`
+# wins over the default one; the default directory stays on the path as
+# well, because the variant's `encoding.h` is looked up as
+# `../encoding.h` — a path relative to the *including file*, i.e. inside
+# the default directory (STAGE-6 adjudication F).
+#
+# ⚠️ The linker script is the **default** one for every variant: upstream's
+# `env/p/link.ld` and ours are line-for-line equivalent (same layout, same
+# `.tohost` alignment), so a variant-specific script would be a copy.
 build_case() {
-    local src="$1" elf="$2" march="$3"
+    local src="$1" elf="$2" march="$3" env_variant="${4:-}"
+    local env_dir="$ENV_DIR"
+    [ -n "$env_variant" ] && env_dir="$ENV_DIR/$env_variant"
     "$GCC" -march="$march" -mabi=ilp32 -static -mcmodel=medany \
         -fvisibility=hidden -nostdlib -nostartfiles \
-        -I"$ENV_DIR" -I"$RISCV_TESTS_DIR/$MACRO_DIR_REL" \
+        -I"$env_dir" -I"$ENV_DIR" -I"$RISCV_TESTS_DIR/$MACRO_DIR_REL" \
         -T"$ENV_DIR/link.ld" "$src" -o "$elf"
 }
 
@@ -335,7 +374,7 @@ printf '\n%-28s %-18s %-18s %s\n' "CASE" "SPIKE" "OURS" "RESULT"
 printf '%s\n' "------------------------------------------------------------------------"
 
 for c in "${cases[@]}"; do
-    IFS='|' read -r suite test_name march status <<< "$c"
+    IFS='|' read -r suite test_name march status env_variant <<< "$c"
     total=$((total + 1))
 
     src="$RISCV_TESTS_DIR/isa/$suite/$test_name.S"
@@ -349,7 +388,7 @@ for c in "${cases[@]}"; do
         continue
     fi
 
-    if ! build_case "$src" "$elf" "$march" > "$OUT_DIR/$suite-$test_name.build.log" 2>&1; then
+    if ! build_case "$src" "$elf" "$march" "$env_variant" > "$OUT_DIR/$suite-$test_name.build.log" 2>&1; then
         printf '%-28s %-18s %-18s %s\n' "$suite/$test_name" "-" "-" "BUILD-FAILED"
         build_failed=$((build_failed + 1))
         failures+=("$suite/$test_name: build failed")

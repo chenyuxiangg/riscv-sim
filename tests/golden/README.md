@@ -107,38 +107,40 @@ Two further differences from upstream, both harmless for this corpus:
   `TEST_ST_OP`).  The stack itself is therefore never used by the
   corpus; the initial `sp` value is irrelevant to every result.
 
-## Why the environment is CSR-free
+## The two environments
 
-Upstream riscv-tests' `env/p/riscv_test.h` is machine-mode oriented:
+There are **two** golden environments, selected per case by the `env`
+column of `corpus.txt`:
 
-* `RVTEST_CODE_BEGIN` programs `mtvec`, `mstatus`, `mepc`, `satp`,
-  `pmpaddr0`, `pmpcfg0`, `mie`, `medeleg`, `mideleg`, `mnstatus`, reads
-  `mhartid`, and ends with `mret`;
-* `RVTEST_PASS` / `RVTEST_FAIL` report the verdict by raising an `ECALL`
-  (`a7 = 93`) that the trap vector converts into a `sw` to `tohost`.
+| variant | directory | what it provides | used by |
+| --- | --- | --- | --- |
+| *(default)* | `env/` | **CSR-free**: `tohost` is written directly, no trap vector, no `mtvec` programming, no `mret` | the 51 RV32I/M/C cases |
+| `csr` | `env/csr/` | **CSR-capable**: trap vector, `mtvec` / `mie` / `mstatus` programming, `mepc` + `mret` epilogue, and the verdict carried by the `ECALL` | the machine-level corpus |
 
-Assembling that needs the `zicsr` extension, and running it needs full
-trap delivery.  M-13 implements the RV32I *user-level* ISA; trap delivery
-and the interrupt controller (M-16) land later.
+The default environment is CSR-free because the HTIF wire format is much
+simpler than the route upstream takes to reach it: the whole CSR + trap
+machinery can be dropped and `tohost` written directly — **with the verdict
+encoding unchanged**.  The full rationale, including what is dropped and
+why it is safe, lives in the header comment of `env/riscv_test.h`.
 
-Because the HTIF wire format is much simpler than the route upstream takes
-to reach it, the whole CSR + trap machinery can be dropped and `tohost`
-written directly — **with the verdict encoding unchanged**.  The full
-rationale, including what is dropped and why it is safe, lives in the
-header comment of `env/riscv_test.h`.
+The `csr` environment exists because the machine-level corpus *is* about
+CSRs, traps and `mret` — the CSR-free environment has neither a trap vector
+nor a way to program `mtvec`, so those tests could not even be assembled
+meaningfully.  Its header comment explains the two sides' shared trap
+protocol and the three places where the platform's absences (no PMP, no
+RNMI, no paging, no delegation) make the upstream writes inert.
 
-The consequence for the corpus:
+⚠️ **`env/csr/riscv_test.h` is verified against upstream, not eyeballed.**
+The corpus build of all 16 `rv32mi` cases produces a **byte-identical
+`.text.init`** with our variant and with upstream's own `env/p/riscv_test.h`
+— i.e. the reimplementation executes the same instruction stream as the
+reference environment, so the golden comparison compares the same program on
+both sides.
 
-* `isa/rv32ui/*` — in scope (RV32I)
-* `isa/rv32um/*` — in scope, needs the **M** extension (landed in v0.16)
-* `isa/rv32uc/*` — in scope, needs the **C** extension (landed in v0.16)
-* `isa/rv32mi/*` — **out**: machine-level, needs CSR + trap delivery
-* `isa/rv32si/*` — **out**: supervisor-level, same
-
-`corpus.txt` is the authoritative list — its `status` column says
-whether a case must agree with Spike (`active`) or is a known gap
-(`pending`), and every `pending` row must carry the reason and the
-ledger entry that tracks it.
+`env/encoding.h` holds the handful of architectural constants the CSR
+variant and the upstream test bodies reference.  They are upstream's values
+verbatim: they are encodings the specification fixes, not platform choices,
+and a "cleaned up" constant would silently diverge from the reference side.
 
 ### The upstream RV32 suites, and why each is in or out
 
@@ -147,16 +149,50 @@ ledger entry that tracks it.
 | `rv32ui` | 42 | ✅ in (`active`) | the RV32I base — the whole point of this phase |
 | `rv32um` | 8 | ✅ in (`active`) | needs the **M** extension — landed in v0.16 (**D-43** closed) |
 | `rv32uc` | 1 | ✅ in (`active`) | needs the **C** extension — landed in v0.16 (**D-43** closed) |
-| `rv32mi` | 16 | ❌ out | machine-level: CSR access, breakpoints, PMP, `mret`, trap-and-continue handlers. Needs trap delivery → **M-16** (phase 5) |
-| `rv32si` | 6 | ❌ out | supervisor-level: the same plus S-mode → **M-16** (phase 5) |
+| `rv32mi` | 16 | ✅ 13 in (`active`, `csr` env) | machine-level: CSR access, breakpoints, `mret`, trap-and-continue handlers — trap delivery landed in v0.19, so 13 of the 16 are now comparable |
+| `rv32si` | 6 | ❌ out | supervisor-level: the same **plus S-mode** — the platform is M-mode only (**D-94**) |
 | `rv32ua` | 10 | ❌ out | **A** extension (atomics) — not implemented; a natural phase-3 addition next to M/C |
 | `rv32uf` / `rv32ud` | 11 / 11 | ❌ out | floating point — out of MVP scope by design (AD §3.3) |
 | `rv32up` | 446 | ❌ out | **P** extension — far beyond MVP scope |
 | `rv32uz*` (13 suites) | ~80 | ❌ out | Zba / Zbb / Zbc / Zbkb / Zbkx / Zbs / Zfh / Zicond / Zacas / Zalasr … — bit-manipulation and beyond; out of MVP scope |
 
-The excluded machine- and supervisor-level suites contain **155**
-CSR / trap instructions between them; the 51 in-scope cases contain
-**zero**.
+## Cases that are *not* in the corpus
+
+Three `rv32mi` cases and all six `rv32si` cases still diverge.  They are
+**not** rows in `corpus.txt`, and that is deliberate:
+
+* the harness's `pending` rule tolerates **only** "the candidate cannot
+  execute it at all" (`ERROR` / `NOVERDICT`).  Two of the three `rv32mi`
+  cases *do* execute — they merely diverge, because the platform lacks a
+  feature the case tests.  Listing them would force the rule to be loosened
+  into a hole ("any divergence is fine"), which is exactly what the rule was
+  written to prevent;
+* a divergence nobody watches is still a divergence — so each one is
+  recorded **here**, with the measured verdict, and tracked by the ledger.
+
+| case | Spike | ours | why it diverges |
+| --- | --- | --- | --- |
+| `rv32mi/illegal` | `PASS` | `NOVERDICT` | needs S-mode semantics: `csrwi mip, MIP_SSIP` is ignored on this platform, so the case never finishes → **D-94** |
+| `rv32mi/pmpaddr` | `PASS` | `FAIL 1` | the platform has **no PMP** ⇒ `pmpaddr0` reads back 0 instead of the address the case wrote → **D-94** |
+| `rv32mi/zicntr` | `FAIL 2` | `PASS` | the **reference side** does not implement Zicntr in this ISA configuration and traps on `cycle`; we read the unimplemented counter as 0 and do not trap → **D-94** |
+| `rv32si/csr` | `PASS` | `FAIL 22` | S-mode: the case runs in S-mode, we stay in M-mode → **D-94** |
+| `rv32si/ma_fetch` | `PASS` | `PASS` | agrees — but for a **vacuous** reason (neither side reaches the S-mode path the case is about) ⇒ it is *not* promoted to `active` until S-mode exists |
+| `rv32si/sbreak` | `PASS` | `FAIL 669` | S-mode → **D-94** |
+| `rv32si/scall` | `PASS` | `FAIL 669` | S-mode → **D-94** |
+| `rv32si/wfi` | `PASS` | `FAIL 668` | S-mode → **D-94** |
+| `rv32si/dirty` | — | — | does not even assemble: it needs `SATP_MODE` / `SATP_MODE_SV32`, which only matter for paging → **D-94** |
+
+⚠️ **`rv32si/ma_fetch` is the interesting one**: the two sides agree, so a
+naive "promote it to `active`" would put a **vacuous** agreement into the
+corpus — a green row that proves nothing.  It stays out until the S-mode
+path it actually tests exists.
+
+⚠️ The `zicntr` row is a **platform-vs-reference semantic difference**:
+Spike raises an illegal-instruction exception for a CSR that does not exist
+in the configured ISA, while the platform reads any unimplemented CSR as 0
+without trapping (the rule STAGE-6 adjudication D chose).  That difference
+is recorded, not papered over.
+
 
 ## The Zicclsm detail — read this before touching the ISA string
 
@@ -238,10 +274,19 @@ report them as consistent and exit green.
 
 ## Adding a case
 
-1. Add the case to `corpus.txt` with its `march` and its `status`.
+1. Add the case to `corpus.txt` with its `march`, its `status` and its
+   `env` variant:
+   ```
+   rv32mi scall rv32i_zicsr_zifencei active csr
+   rv32ui add  rv32i_zifencei        active
+   ```
    Use `pending` for anything M-13 does not implement yet — a `pending`
    case that starts agreeing is reported as `NOW-PASSING`, which is the
    signal to flip it to `active`.
+   ⚠️ An **unknown** `env` value is a hard error, not a reason: a reason
+   that accidentally lands in the env column would otherwise select the
+   wrong environment silently.
 2. Run `tools/golden-run.sh --filter <suite/test>`.
-3. `rv32mi` / `rv32si` cases need trap delivery; they cannot be added
-   before M-16 lands.
+3. Machine-level cases need the `csr` environment; the supervisor-level
+   ones need S-mode, which the platform does not have (**D-94**).
+
