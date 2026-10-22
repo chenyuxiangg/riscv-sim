@@ -49,7 +49,7 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 - Build (native):  `cargo build`（开发）/ `cargo build --release`（发布）
 - Build (WASM):    `tools/build-wasm.sh` 或 `tools/build-wasm.sh --release`
 - Test:            `cargo test --workspace`（单元 + 集成 + 黄金对拍）
-- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，**245 用例 / 41 suite**；Node ≥ 22）
+- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，**268 用例 / 47 suite**；Node ≥ 22）
 - Test (WASM 桥): `node tools/wasm-smoke.mjs`（需先 `tools/build-wasm.sh`；在 Node 里驱动真 wasm 产物跑完整桥，产物不在则跳过）
 - Test (浏览器真机): `tools/browser-verify.mjs`（零依赖 CDP 脚本，需本机 Chrome + 已构建的 WASM 产物 + `python3 -m http.server 8080 --directory front`；**不进默认门禁**，按需运行）
 - Test (黄金对拍): `tools/fetch-golden-deps.sh`（拉 riscv-tests + 交叉工具链到**仓库外**）→ `tools/golden-run.sh --self-check`（变异金丝雀）→ `tools/golden-run.sh --keep-going`（全量）
@@ -338,6 +338,18 @@ riscv_sim/
 > - ⚠️ **WARL 字段要逐路径测**：统筹方只测了「陷入门」就断言「写侧不掩码」，补测「用户写」才发现参考侧**是**掩的；⇒ **实测**两个字不保证它对（v0.21 批已栽过一次），且断言值要写**架构字面量**（不从掩码常量推导，否则用例会成**恒绿**）
 > - **三条修复 lane（W1 · W2 · W3）已合入，每条都配了反向变异**（红集逐条见 `REVIEWS.md` **§3.13.5** 三个小节）：**W1**（M-11 三条中危）5 条全红 + 1 对照 0 红 · **W2**（M-12 三条中危）6 条全红 + **2 条按预期挂死（HANG）** + 1 对照 0 红 · **W3**（真机复验）2 条全红 ⇒ **STAGE-7 的 31 条验收全部勾选**
 > - ⚠️ **「加了守卫」≠「守卫接上了」**：W2 的无进展计数器**自增了却从不被比较**（统筹方在工作树上实测发现）⇒ 守卫**空转** ⇒ 活锁**照样挂死** ⇒ **判别式**：查一个守卫接没接上，要**查它的比较点**，不能只查它的变量
+>
+> **v0.23 osz 落地批判据**（台账 **D-47 / D-48 / D-116 闭环** · 新登记 **D-117 ~ D-121** · 冻结规格 `docs/detailed-design/STAGE-8_OSZ_Runtime.md`，裁决 A~N + 修订 **C′**）：
+> - **三档验收全部达成**：① **CLI 闭环**（osz 跑到 `OSZ$ ` 提示符，105 万条指令 / 1.05 s 虚拟时间 / 31 字节 console）· ② **浏览器可视化**（真 Chrome 里终端视图出现 `==== Enter Main ====` 与 ANSI 转义 `\x1b[2K`）· ③ **与 Spike 逐字节对拍**（`tools/boot-osz.sh` ⇒ **`VERDICT MATCH`**，两侧 31 字节一模一样）
+> - **工作区 1 159 全绿**（契约 lib **115** + kernel lib **925** + 集成 **102** + `osz-boot` runner **3** + golden runner **14**）· **前端门禁 268 用例 / 47 suite**（基线 245 / 41）· **黄金语料 67/67** · **8 项门禁失败项数 0**
+> - **三处平台真 bug**（此前没有 guest 需要它们，所以一直没暴露）：① `mcause` 报的是**内部线号**（`IRQ_BASE | line`）而架构规定机器中断是 **3 / 7 / 11** ⇒ 改成契约层的「线号 → 架构 cause 码」纯函数，⚠️ **`mie`/`mip` 的位号映射一个字都没改**；② **`wfi` 是非法指令** ⇒ 实现成合法的 nop（⚠️ 诚实代价：guest 的 idle 任务退化成**忙等**）；③ **`mhartid` 未实现** ⇒ 读回 0 是「未实现 ⇒ 读 0」的**运气** ⇒ 正式实现为 0，并配了一条**有判别力**的用例（先塞非零值再断言读出来的仍是平台常量）
+> - **M-15**：UART 重做成 **ns16550**（8 个字节寄存器 + `LCR.DLAB` 真切换 + `LSR` 按位义重排 + **无损 TX 捕获环**）+ 新建 **CLINT / PLIC**。⚠️ **`LSR` bit5 = THRE**（发送器还能再收一个字节）**不是**「环是空的」—— osz 的 `hal_uart_putc` 是自旋，取错语义会让 osz 每发一字节就卡死一次
+> - **宿主接线**：内存图分**两档**（`Default` 与今天一模一样；`QemuVirt` 铺 `0x8000_0000` 起 **128 MiB**（8 × 16 MiB，受 M-14 每区域上限约束）+ UART0 @ `0x1000_0000` + CLINT @ `0x0200_0000` + PLIC @ `0x0C00_0000`），⚠️ **档位按镜像用到的地址自动挑**（装载顺序改成「先解析 → 再挑档 → 再建图 → 最后写镜像」）；**三条外设中断通路**（CLINT `mtimecmp` 周期↔M-16 ps · UART RX→PLIC 源 10 · PLIC 待交付源→M-16 外部线；⚠️ **claim 是 guest 的权利**、平台只读不代 claim）；**console 通路**（UART TX 捕获环 → 64 KiB backlog → 订阅 `sim.console` 推契约 v4 的 `Console` 事件）
+> - ⚠️ **为什么 128 MiB 一字节都不能少**：osz 的 best-fit 分配器**会在堆尾写节点**（`0x8800_0000` 附近）⇒ 少映射一个字节就是「未映射访问」陷阱。⚠️ **为什么不一档铺满**：那 128 MiB 是**真的物理内存**（`map_ram` 用 `vec` 分配），每个宿主实例都吃一份 ⇒ 仓里上千条用例 ⇒ 默认铺满会让测试进程吃掉几个 GiB ⇒ 规格**当批修订**成裁决 **C′**（而不是偷偷改实现）
+> - **契约层升 v4**（本批唯一一次升版，一次带齐五项）：`SCHEMA_VERSION` 3 → 4；新增 **Console 事件**（`bytes` 是**原始字节数组**）；**D-102** 的 `file`/`line` 字段；**D-116** 的三条引擎族场景码；**D-47 / D-48** 的传输层欠账。⚠️ 新变体进了 **Rust ↔ JS 的逐字对照表**
+> - ⚠️ **本批主线教训**：「**加了守卫**」≠「**守卫接上了**」在**接线**场景下又应验了一次 —— 宿主新增的 `collect_console` 与 `drain_console` **互相调用形成无限递归**，release 构建当场**栈溢出**，而那 7 条接线用例**当时全绿**（它们写在这段代码**之前**）⇒ **接线用例只能证明「写它那一刻」的形状**，新加的路径必须自己再被用例覆盖
+> - ⚠️ **另一条**：**别让约定藏在 prose 里** —— 裁决 C 原本写「改**默认**内存图」，落地时发现「默认铺 128 MiB」会让测试跑不动 ⇒ 规格**当批修订**（裁决 **C′**）
+> - ⚠️ **外部产物不进仓库**：osz 的源码 / ELF / Spike 输出都在**仓外**（`$OSZ_ELF`，默认 `/tmp/osz-artifacts/osz.elf`）⇒ `tools/boot-osz.sh` **不进默认门禁**；仓内只进**脚本与规则**
 > - → 检视归档见 `docs/reviews/REVIEWS.md` **§3.13** · 冻结规格见 `docs/detailed-design/STAGE-7_Wave2_DWARF_Lines.md`
 
 ## Code style

@@ -101,10 +101,14 @@
 - `cargo test --workspace --no-fail-fast --lib --tests` ⇒ **1159 全绿**
   （契约 lib **115** + kernel lib **925** + 集成 **102** + `osz-boot` runner **3**
   + golden runner **14**），零失败零挂死
-- `tools/check-front.sh` ⇒ **252 用例 / 42 suite**
+- `tools/check-front.sh` ⇒ **268 用例 / 47 suite**（浏览器档的 Lane G 又加了 16 条 / 5 suite）
 - `tools/golden-run.sh --self-check` + `--keep-going` ⇒ **67/67**
 - `tools/build-wasm.sh` + `node tools/wasm-smoke.mjs`
 - `node tools/browser-verify.mjs`（真 Chrome）
+- `node tools/browser-verify.mjs`（真 Chrome）⇒ **含 osz 段**：终端视图里真的出现
+  `==== Enter Main ====`、`OSZ$` 与 ANSI 转义 `\x1b[2K` ⇒ **三档验收全部达成**
+  （⚠️ 顺带**证伪**了「WASM 线性内存涨不过 128 MiB」这条风险：osz 的镜像落在
+  `0x8400_0000` ⇒ 自动切 QEMU virt 档 ⇒ WASM 要涨过 128 MiB，**实测通过**）
 - **本批专属**：`tools/boot-osz.sh` ⇒ **`VERDICT MATCH`**（两侧 31 字节逐字节相同）
   —— ⚠️ **不进默认门禁**（需要仓外的 osz ELF 与本机的 Spike）
 
