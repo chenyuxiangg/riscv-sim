@@ -24,7 +24,7 @@
 //! 至少不会把会话**变成两个真相**（覆盖 = 存储里只有一份，后来的读到的就是
 //! 后写的那份；报错 = 存储里留着旧的，调用方拿到的却是报错，两边对不上）。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use riscv_sim_contract::error::PlatformError;
 use riscv_sim_contract::model::Project;
@@ -41,6 +41,8 @@ pub struct InMemoryDataStore {
     project_order: Vec<String>,
     /// 快照表（按 `cp_meta.id` 索引）。
     snapshots: BTreeMap<u64, SessionSnapshotDto>,
+    /// 归档表（按**名字**索引）——通用字节归档（STAGE-13 §3.4 · 裁决 K）。
+    archives: HashMap<String, Vec<u8>>,
 }
 
 impl InMemoryDataStore {
@@ -57,6 +59,16 @@ impl InMemoryDataStore {
     /// 存着的快照数。
     pub fn snapshot_count(&self) -> usize {
         self.snapshots.len()
+    }
+
+    /// 存着的**归档**条数（按名字去重后的条数）。
+    pub fn archive_count(&self) -> usize {
+        self.archives.len()
+    }
+
+    /// 读回一段归档（按名字）——找不到返回 `None`（「没有」是**正常状态**）。
+    pub fn get_archive(&self, name: &str) -> Option<&[u8]> {
+        self.archives.get(name).map(|bytes| bytes.as_slice())
     }
 }
 
@@ -91,6 +103,16 @@ impl DataStore for InMemoryDataStore {
     /// **最新在前**。
     fn list_projects(&self) -> Result<Vec<String>, PlatformError> {
         Ok(self.project_order.iter().rev().cloned().collect())
+    }
+
+    /// **同名覆盖**（后写为准）——与快照同口径：存储里只有**一份**。
+    ///
+    /// ⚠️ 内存态后端**不会失败**（没有配额、没有后端不可用）⇒ 这里返回
+    /// `Ok(())`；真实后端（IndexedDB / SQLite）失败时必须报
+    /// [`super::STORE_FAMILY`] 族的场景码，**不是** HMS 族。
+    fn archive(&mut self, name: &str, bytes: &[u8]) -> Result<(), PlatformError> {
+        self.archives.insert(name.to_string(), bytes.to_vec());
+        Ok(())
     }
 }
 
@@ -397,5 +419,44 @@ mod tests {
             vec!["p1".to_string(), "p3".to_string(), "p2".to_string()]
         );
         assert_eq!(store.project_count(), 3, "重写不得让项目数变多");
+    }
+
+    // ------------------------------------------------------------------
+    // 通用字节归档（v0.28 · STAGE-13 §3.4 · 裁决 K）
+    // ------------------------------------------------------------------
+
+    /// ⚠️ **归档往返**：写进去 → 读回来 → **逐字节相同**（STAGE-13 §5.1 A-4）。
+    ///
+    /// 判别式落在**字节内容**上，不是「没报错」——含高位字节（`0x80` / `0xff`）
+    /// ⇒ 顺手钉住「字节是**原样**的，不是被当成文本处理过」。
+    #[test]
+    fn an_archived_blob_reads_back_byte_for_byte() {
+        let mut store = InMemoryDataStore::new();
+        let bytes: Vec<u8> = vec![0x00, 0x7f, 0x80, 0xff, b'k', b'i', b't'];
+
+        store.archive("kit-1", &bytes).expect("归档必须成功");
+
+        let back = store.get_archive("kit-1").expect("刚归档的必须读得到");
+        assert_eq!(back, bytes.as_slice(), "归档的字节必须一字不差");
+        assert_eq!(store.archive_count(), 1, "归档条数必须是 1");
+        assert!(
+            store.get_archive("nope").is_none(),
+            "没归档过的名字必须读不到"
+        );
+    }
+
+    /// ⚠️ **同名覆盖**（后写为准）——存储里只有**一份**（STAGE-13 §5.1 A-4）。
+    ///
+    /// 与快照同口径：同 id 不同内容 ⇒ 覆盖，**不**报错、**不**存成两份。
+    #[test]
+    fn archiving_the_same_name_overwrites() {
+        let mut store = InMemoryDataStore::new();
+
+        store.archive("kit-1", b"first").expect("第一次归档");
+        store.archive("kit-1", b"second").expect("第二次归档");
+
+        assert_eq!(store.archive_count(), 1, "同名不得存成两份");
+        let back = store.get_archive("kit-1").expect("必须读得到");
+        assert_eq!(back, b"second".as_slice(), "后写的必须赢");
     }
 }
