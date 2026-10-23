@@ -1,140 +1,376 @@
 # riscv_sim
 
-RISC-V（RV32IMC）指令集仿真与调试平台。
+**RISC-V（RV32IMC）指令集仿真与调试平台** —— 自研 ISS + 事件驱动仿真内核 + 零构建浏览器工作台。
 
-## 当前状态
+一个可以**真的跑起来**的 RISC-V 仿真器：自带指令集解释器、总线与外设模型、中断控制器、断点 / 单步 / 波形 / DWARF 源码行，在浏览器里给一个**真实的 M 模式 RTOS** 装上终端、让它跑起来、并与 **Spike 参考侧逐字节比对**。
 
-- ✅ **设计文档完整**：27 篇文档已归档
-  - 1 篇架构设计（4+1 视图 + ADR）
-  - 1 篇需求分析（v1.3）
-  - 1 篇模块设计说明书
-  - 23 篇模块详细设计（M-01..M-23）
-- ✅ **工程骨架就位**：Cargo workspace（contract / kernel / server 三 crate）+ 原生 JS 前端
-- ✅ **MVP 重点（M-12 引擎 + M-13 ISS）已写骨架 + 单元测试**：能跑通 `addi x1, x0, 42` 这条指令
-- ⏳ **其他 14 个模块（M-06/08/09/11/14/15/16/17/18/19/20/21/22/23）**：stub 状态，端口已定义，实现为 TODO(MVP)
-- ⏳ **前端 7 个模块（M-01/02/03/04/05/07/10）**：stub 状态，hash 路由 + 工作台骨架已就位
-- ⏳ **未 `git init`**：等 Rust 工具链装好并 `cargo check` 通过后初始化
+> **本文档面向人。** 给 AI Agent 的项目定义与工程纪律在 [`AGENTS.md`](./AGENTS.md)；贡献流程（分支 / commit / PR 约定）在 [`CONTRIBUTING.md`](./CONTRIBUTING.md)；**全部欠账与检视记录**在 [`docs/reviews/REVIEWS.md`](./docs/reviews/REVIEWS.md)。
 
-## 技术栈（来源：AD §9.7 选型矩阵 + 用户决策）
+---
 
-| 层 | 选型 |
-|---|---|
-| 仿真内核 | **Rust**（自研 RV32IMC ISS），编译为 native + WASM |
-| 仿真引擎 | 事件驱动（1µs 量子） |
-| 外设建模 | 分级 Peripheral（寄存器接口 + 行为时序） |
-| 前端 | **原生 JavaScript**（ES modules），零构建 |
-| 3D 引擎（P1） | three.js |
-| 持久化 | IndexedDB（前端 MVP）/ 服务端 P1 |
-| 传输 | postMessage（Worker）/ WebSocket（服务端 P1） |
-| WASM 工具链 | rustup + wasm32 target + wasm-pack |
-| 正确性对拍 | Spike golden + riscv-tests（外部工具） |
+## 目录
+
+- [这是什么](#这是什么)
+- [能力快照](#能力快照)
+- [快速开始](#快速开始)
+- [架构一览](#架构一览)
+- [模块地图](#模块地图)
+- [正确性：三层证据](#正确性三层证据)
+- [工程门禁](#工程门禁)
+- [已知缺口](#已知缺口)
+- [目录结构](#目录结构)
+- [文档索引](#文档索引)
+
+---
+
+## 这是什么
+
+三句话说明它由什么组成：
+
+1. **一个自研的 RV32IMC 指令集仿真器**（Rust）—— RV32I 41 条 + RV32M 8 条 + CSR 指令族 + `mret` / `wfi`，外加 RV32C 压缩指令 26 条；带**架构陷阱**（未映射访存 ⇒ cause 5 / 7）、`mepc` 三路径口径、`mstatus` WARL 掩码。
+2. **一个围绕它的事件驱动仿真内核** —— 1 µs 量子 + 唯一主循环；总线 / 内存映射 / 外设模型（**ns16550 UART · CLINT · PLIC · GPIO**）/ 中断控制器；断点、观察点、单步、探针、波形管道、符号表 / DWARF 行表 / 反汇编 / trace 导出；会话快照（**六段**）可落盘可还原。
+3. **一个零构建的浏览器工作台** —— 原生 ES modules（**无打包、无第三方依赖**）+ WASM 内核，**6 个视图**：产品树 / 调试 / 寄存器内存 / 波形 / 源码 / 终端。
+
+它的**验收标准不是「能跑一条指令」**，而是「**能跑一个真实 RTOS，且输出与 Spike 逐字节相同**」——见 [正确性](#正确性三层证据)。
+
+---
+
+## 能力快照
+
+> **口径**：以下数字**全部从当前树重算**（2026-10-23，`main` @ `1acf582`）。不是引用历史结论。
+
+### 指令与体系结构
+
+| 项 | 数字 | 说明 |
+| --- | --- | --- |
+| 基础 opcode | **57** | RV32I **41** + RV32M **8** + CSR 指令 **6** + `mret` / `wfi` **2** |
+| 压缩指令 | **26** | RV32C 基集全覆盖，字段级展开（`c.` 前缀保留，不做伪指令别名） |
+| 已实现 CSR | **10** | `mstatus` `misa` `mie` `mtvec` `mscratch` `mepc` `mcause` `mtval` `mip` `mhartid`（另有伪 CSR `irq_clear` `0x7C0`；`mtime` 只读且**真值走 CLINT 的 MMIO 窗口**，不走 CSR —— 未在文件里的 CSR 一律读回 **0**，**不陷阱**） |
+| 陷阱原因 | **10** 变体 | 9 个架构码 + 1 个内部 `OutOfRange`；⚠️ **缺 cause 1（取指访问故障）** ⇒ 台账 **D-103** |
+| `misa` | `0x4000_1104` | MXL=1 + I / M / C |
+
+### 契约层（模块之间**只**通过它通信）
+
+| 项 | 数字 |
+| --- | --- |
+| `schema_version` | **5** |
+| 命令 | **17** |
+| 事件 | **15** |
+| 错误族 | **14**（`CTX` `ISS` `ENG` `BUS` `PER` `INT` `DBG` `OBS` `SNAP` `LDR` `HMS` `STORE` `TRX` `PROTO`） |
+
+### 调试与观测
+
+| 项 | 数字 |
+| --- | --- |
+| 断点 | 按地址索引 + id 反查；**取指前**命中 |
+| 观察点 | 地址 + 方向（读 / 写）+ 宽度匹配；**追加式**总线 hook（不顶掉别人的） |
+| 单步粒度 | **4 种**（`Instruction` / `Over` / `Out` / `Line`）——⚠️ 后三种**显式降级**为指令级（`degradation()` 把降级说出来，**不悄悄降级**） |
+| DWARF 行表 | `.debug_line` **v2 / v3 / v4 / v5** 真解析（行号程序 + 行号状态机 + 特殊操作码 + 按单元降级 + 多单元归并） |
+| 反汇编 | **复用 M-13 的解码器** ⇒ **零第二套解码表**（漂移结构上不可能） |
+| 导出格式 | 波形 → **CSV / VCD**；执行轨迹 → **CSV / JSON** |
+| 会话快照 | **6 段**：`cp_meta` `m12_engine` `m13_state` `m14_map` `m15_periph` `m16_intc`（`SESSION_SNAPSHOT_SCHEMA_VERSION = 2`） |
+
+### 外设与中断
+
+| 器件 | 状态 |
+| --- | --- |
+| **UART（ns16550）** | 8 个字节寄存器（THR/RHR/DLL · IER/DLM · FCR · LCR · MCR · LSR · MSR · SCR）· `LCR.DLAB` 真切换 · **无损 TX 捕获环** 4 KiB · **16 字节深 RX FIFO**（满时丢最新并锁存溢出位） |
+| **CLINT** | `msip` / `mtimecmp`（分步 64 位写）/ `mtime` 64 位读，**单位是周期** |
+| **PLIC** | priority / pending / enable / threshold / claim + complete；claim 判据**严格大于门限** |
+| **GPIO** | PL061 惯例布局（`0x4000_0000`），驱动探针边沿 |
+| **中断控制器（M-16）** | 挂起队列按 `(虚拟时间, 插入序)` **保序** · 同线去重 · 优先级仲裁 · 量子边界采样 · **拉取式**交付（取走即消失）· `mie` + `mstatus.MIE` 双闸门 |
+
+### 工程规模
+
+| 项 | 数字 |
+| --- | --- |
+| 契约层 | 7 731 行 |
+| 仿真内核 | 52 121 行（含 16 个子模块 + 内核宿主装配层） |
+| 前端 | 14 906 行（`front/` 全量，含测试） |
+| 设计文档 | **46 篇**（26 篇 HTML + 20 篇 Markdown） |
+| 测试 | **1 238** 条 Rust（契约 lib 134 + 内核 lib 974 + 集成 113 + runner 17）+ **288** 条前端（50 suite） |
+
+---
 
 ## 快速开始
 
-### 1. 装 Rust 工具链
+### 依赖
 
 ```bash
-# macOS (Homebrew)
-brew install rustup-init && rustup-init -y --default-toolchain stable
-
-# 或用 rustup 官方脚本
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# 装 WASM target + wasm-pack
+# Rust stable + WASM target + wasm-pack
 rustup target add wasm32-unknown-unknown
 cargo install wasm-pack
+
+# 前端门禁需要 Node ≥ 22（零依赖，只用 node:test）
+node --version
 ```
 
-### 2. 编译并跑测试
+可选（**不进默认门禁**，按需运行）：
+
+- **Spike**（黄金对拍与真实 RTOS 对拍的参考侧）
+- **RISC-V 交叉工具链**（编 osz 等真实固件）
+- **Chrome**（`tools/browser-verify.mjs` 的真机复验）
+
+### 编译与测试
 
 ```bash
-cargo build                         # 编译 native
-cargo test --workspace              # 跑所有单元测试
-cargo clippy --workspace -- -D warnings
+cargo build                                    # native
+cargo test --workspace --no-fail-fast --lib --tests   # 1 238 条
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```
 
-### 3. 构建浏览器 WASM
+> ⚠️ **不要**用裸 `cargo test --workspace`：它会带上 doc-test，在 macOS 上会**假挂死**。用 `--lib --tests`（或加 `--offline`）。
+
+### 前端门禁
 
 ```bash
-tools/build-wasm.sh                 # 调试版
-tools/build-wasm.sh --release       # 发布版（更小）
+tools/check-front.sh        # node:test 冒烟门禁 —— 288 用例 / 50 suite
 ```
 
-输出到 `front/assets/pkg/riscv_sim_kernel_bg.wasm`。
-
-### 4. 打开前端
+### 构建浏览器内核（WASM）
 
 ```bash
-# 任何静态服务器都行（避免 file:// 的 Worker 限制）
+tools/build-wasm.sh             # 调试版
+tools/build-wasm.sh --release   # 发布版
+```
+
+产物落在 `front/assets/pkg/`（`--target web` ⇒ **原生 ES module + 具名导出**，零构建前端可直接 `import`）。
+
+### 打开前端
+
+```bash
 python3 -m http.server 8080 --directory front
 # 浏览器访问 http://localhost:8080
 ```
 
-## 模块全景（按职责）
+> ⚠️ **必须走 HTTP(S)**：前端用 **Worker + ES module**，两者都要求同源 ⇒ `file://` 直开会被浏览器拦截。
 
-### 仿真核心
-- M-12 事件驱动仿真引擎 — **MVP 重点** ✅
-- M-13 RISC-V ISS (RV32IMC) — **MVP 重点** ✅
-- M-14 总线与内存映射
-- M-15 外设模型层
-- M-16 中断控制器
-- M-17 ExecutionBackend 执行后端
-- M-20 快照与确定性事件流记录
+### 跑一个真实 RTOS（osz）并与 Spike 对拍
 
-### 调试与探针
-- M-08 断点管理器
-- M-09 单步引擎
-- M-11 符号表 / DWARF / 反汇编 / trace 导出
-- M-18 探针
-- M-19 波形管道
+```bash
+tools/boot-osz.sh --elf /path/to/osz.elf
+```
 
-### 前端 / 工作台
-- M-01 工作台装配与多视图路由
-- M-02 视图组件库
-- M-03 视图状态管理
+判决口径是「**两侧 UART TX 字节流逐字节相同**」（真实 RTOS 没有 riscv-tests 那套 HTIF `tohost` 判决 ⇒ 不能复用黄金对拍的老路）。
 
-### 基础设施
-- M-04 会话管理器
-- M-05 命令路由与事件分发
-- M-07 传输适配器
-- M-10 寄存器内存服务
-- M-21 日志系统
-- M-22 健康管理 HMS
-- M-23 数据存储与持久化 DataStore
+⚠️ **osz 的产物在仓外**（不进仓库）：默认读 `$OSZ_ELF`，其次 `/tmp/osz-artifacts/osz.elf`。判定为 `VERDICT MATCH / MISMATCH / NO-VERDICT`。
 
-### 解析器
-- M-06 ELF / Raw-HEX 解析器
+### 黄金对拍（riscv-tests）
 
-详细说明见 `docs/detailed-design/` 对应文件。
-
-## 目录
-
-| 路径 | 用途 |
-| --- | --- |
-| `AGENTS.md` | 给 AI Agent 读取的项目定义（agents.md 标准） |
-| `Cargo.toml` | Rust workspace manifest |
-| `crates/contract/` | 共享契约层（DTO/事件/错误码/端口签名） |
-| `crates/kernel/` | 仿真内核（16 个子模块） |
-| `crates/server/` | 服务端形态（P1 占位） |
-| `front/` | 原生 JS 前端（零构建） |
-| `tools/build-wasm.sh` | wasm-pack 包装 |
-| `tests/` | 集成测试 + Spike 对拍 |
-| `docs/architecture/` | 架构设计 |
-| `docs/requirements/` | 需求分析 |
-| `docs/module-design-spec/` | 模块设计说明书 |
-| `docs/detailed-design/` | 23 篇模块详细设计 |
-
-## 下一步
-
-1. **装 Rust 工具链**（见上方"快速开始"）
-2. **`cargo test --workspace` 验证 MVP 跑通**（M-12 引擎 + M-13 ISS 测试）
-3. **按实施批次推进**：
-   - 第 1 批：M-12 / M-13 / M-14 / M-15 / M-16 / M-17（仿真核心闭环）
-   - 第 2 批：M-08 / M-09 / M-10 / M-11 / M-18 / M-19 / M-20（调试与观测）
-   - 第 3 批：M-04 / M-05 / M-07 / M-21 / M-22 / M-23 / M-06 + 前端全部模块
-4. **接入 Spike 对拍**（`tests/golden/` 目录占位，待补脚本）
-5. **`git init` 初始化仓库 + 首次提交**
+```bash
+tools/fetch-golden-deps.sh        # 拉 riscv-tests + 交叉工具链到**仓库外**
+tools/golden-run.sh --self-check  # 变异金丝雀自检（两侧都必须报 FAIL 3）
+tools/golden-run.sh --keep-going  # 全量语料 —— 67 例
+```
 
 ---
 
-设计文档来源：[豆包云盘 - 详细设计合集](https://www.doubao.com/drive/shr/LvPXfddHzlxcVldau9KctmCKnBb)
+## 架构一览
+
+```
+                    ┌──────────────────────────────────────────┐
+   浏览器 (ESM)     │  M-01 工作台  →  M-02 视图库  →  M-03 状态 │
+   零构建 / 零依赖  │  M-04 会话 · M-05 命令路由 · M-07 传输     │
+                    │  M-10 寄存器内存服务                        │
+                    └───────────────┬──────────────────────────┘
+                                    │ 契约信封（schema_version = 5）
+                        ┌───────────┴────────────┐
+                        │                        │
+                 postMessage（Worker）        WebSocket（P1）
+                        │                        │
+              ┌─────────▼────────────────────────────┐
+              │  内核宿主（装配层 · 非 23 模块之一）    │
+              │  16 条命令 → 事件的规范映射 · 镜像装载  │
+              └──┬───────┬───────┬───────┬───────────┘
+                 │       │       │       │
+        ┌────────▼──┐ ┌──▼─────┐ ┌▼─────┐ ┌▼──────────────┐
+        │ M-12 引擎  │ │ M-13   │ │ M-14 │ │ M-16 中断      │
+        │ 事件/量子  │ │ ISS    │ │ 总线 │ │ 挂起/仲裁/交付  │
+        │ 唯一主循环 │ │ RV32IMC│ │ 内存图│ └───────────────┘
+        └────┬──────┘ └──┬─────┘ └──┬──┘
+             │           │        │
+             │      ┌────▼────┐ ┌─▼──────────────┐
+             │      │ M-15    │ │ M-17 执行后端    │
+             │      │ 外设模型 │ │ 断点/观察点/单步 │
+             │      │ UART·CLINT│ └────────────────┘
+             │      │ ·PLIC·GPIO│
+             │      └────┬────┘
+             │           │
+        ┌────▼───────────▼───────────────────────────┐
+        │ 调试与观测：M-08 断点 · M-09 单步 · M-11 符号 │
+        │ /DWARF/反汇编/trace · M-18 探针 · M-19 波形   │
+        └──────────────────────────────────────────────┘
+```
+
+**三条贯穿全仓的规矩**
+
+1. **契约先行** —— 模块之间只引 `riscv_sim_contract` 定义的 DTO / 事件 / 错误码 / 端口签名；内部实现语言不受约束。
+2. **一个约束一个落点** —— 同一件事**只**有一个定义处（例如 `mstatus` 的 WARL 掩码住在契约层，M-13 只引用不复制）。
+3. **确定性** —— 种子 + 时间戳化输入事件序列 ⇒ 结果唯一。
+
+---
+
+## 模块地图
+
+23 个模块（5 横层 + 3 横切）+ 1 个内核宿主装配层。
+
+### 仿真核心
+
+| 模块 | 职责 | 状态 |
+| --- | --- | --- |
+| **M-12** | 事件驱动仿真引擎（事件队列 + 1 µs 量子 + 唯一主循环 `run_until`） | ✅ |
+| **M-13** | RISC-V ISS（RV32IMC）—— 解码 / 执行 / 架构陷阱 / CSR | ✅ |
+| **M-14** | 总线与内存映射（region 表 + 追加式 hook + 统计） | ✅ |
+| **M-15** | 外设模型层（UART / CLINT / PLIC / GPIO） | ✅ |
+| **M-16** | 中断控制器（挂起队列 / 仲裁 / 拉取式交付） | ✅ |
+| **M-17** | ExecutionBackend 执行后端（驱动 M-13、接总线与断点表） | ✅ |
+| **M-20** | 快照与确定性事件流记录（六段会话快照组装） | 🟡 部分落地 |
+
+### 调试与探针
+
+| 模块 | 职责 | 状态 |
+| --- | --- | --- |
+| **M-08** | 断点管理器（断点表 + 观察点表） | ✅ |
+| **M-09** | 单步引擎（4 粒度 + **显式降级**） | ✅ |
+| **M-11** | 符号表 / DWARF / 反汇编 / trace 导出 | ✅ |
+| **M-18** | 探针（判沿 + 访存轨迹） | ✅ |
+| **M-19** | 波形管道（边沿编码 + 环 + CSV/VCD 分块导出） | ✅ |
+
+### 前端 / 工作台
+
+| 模块 | 职责 | 状态 |
+| --- | --- | --- |
+| **M-01** | 工作台装配与多视图路由（hash 路由） | ✅ |
+| **M-02** | 视图组件库（6 个视图） | ✅ |
+| **M-03** | 视图状态管理 | ✅ |
+
+### 基础设施
+
+| 模块 | 职责 | 状态 |
+| --- | --- | --- |
+| **M-04** | 会话管理器（状态机 + 断线重连） | ✅ |
+| **M-05** | 命令路由与事件分发（**表驱动**路由） | ✅ |
+| **M-07** | 传输适配器（Worker + WebSocket；帧 CRC-32） | ✅ |
+| **M-10** | 寄存器内存服务（订阅 + 读写寄存器） | ✅ |
+| **M-21** | 日志系统 | ⚪ stub |
+| **M-22** | 健康管理 HMS | ⚪ stub |
+| **M-23** | 数据存储与持久化 DataStore | 🟡 仅内存实现 |
+
+### 文件与解析
+
+| 模块 | 职责 | 状态 |
+| --- | --- | --- |
+| **M-06** | ELF / Raw-HEX 解析器（**全仓唯一的 ELF 容器解析者**） | ✅ |
+
+---
+
+## 正确性：三层证据
+
+本项目把「对不对」拆成三层，**每层都有可复现的门禁**：
+
+### 第一层 · 指令级（黄金对拍）
+
+riscv-tests 语料 **67 例**（`rv32ui` 42 + `rv32mi` 13 + `rv32um` 8 + `rv32uc` 1 + 本地 3），候选侧自研 runner 与 **Spike** 逐例比对判决。
+
+```bash
+tools/golden-run.sh --self-check   # 变异金丝雀：两侧都必须报 FAIL 3
+tools/golden-run.sh --keep-going   # 全量 —— 67/67
+```
+
+⚠️ 金丝雀只覆盖「判决运输路径」，**不证明成功路径有判别力** —— 判别力由**全量对拍**提供。
+
+### 第二层 · 系统级（真实 RTOS）
+
+一个**真实**的 M 模式 RTOS（osz）在本平台上跑到 shell 提示符，**两侧 UART TX 字节流逐字节相同**。
+
+```bash
+tools/boot-osz.sh
+# VERDICT MATCH 两侧 console 字节流逐字节相同（31 字节）
+```
+
+### 第三层 · 界面级（真浏览器）
+
+真 Chrome（CDP）里驱动前端，断言**值**而不是「非空」：断点真的停住、反汇编真的带出源码行号、UART 真的收到字节。
+
+```bash
+node tools/browser-verify.mjs
+```
+
+> **为什么三层都要**：单元测试全绿 ≠ 前端不白屏 ≠ 平台与参考侧一致。历史上这三层各抓出过**只有那一层能抓**的真缺陷。
+
+---
+
+## 工程门禁
+
+八项门禁，**失败项数必须为 0**。
+
+| # | 门禁 | 覆盖 |
+| --- | --- | --- |
+| 1 | `cargo fmt --all -- --check` | 格式 |
+| 2 | `cargo clippy --workspace --all-targets -- -D warnings` | 静态检查 |
+| 3 | `cargo test --workspace --no-fail-fast --lib --tests` | **1 238** 条 Rust 用例 |
+| 4 | `tools/check-front.sh` | **288** 用例 / **50** suite（ESM 链接期错误只有它能抓） |
+| 5 | `tools/golden-run.sh --self-check` + `--keep-going` | 指令级判决（**67/67**） |
+| 6 | `tools/build-wasm.sh` + `node tools/wasm-smoke.mjs` | 真 WASM 产物的桥接冒烟 |
+| 7 | `node tools/browser-verify.mjs` | 真 Chrome 里的端到端断言 |
+| 8 | `tools/boot-osz.sh` | 真实 RTOS 与 Spike 逐字节对拍（**需仓外 osz ELF + 本机 Spike**，不进默认门禁） |
+
+---
+
+## 已知缺口
+
+**完整的欠账清单在 [`docs/reviews/REVIEWS.md`](./docs/reviews/REVIEWS.md)**（含每一条的实证依据、阻塞关系与闭环方式）。当前几条要紧的：
+
+| 欠账 | 说的是什么 |
+| --- | --- |
+| **D-123** | **内存图是宿主硬编码的两档**（换平台要改宿主代码）。根因是 **RAM 急分配**而不是内存图形状的必然 ⇒ 通用化按 **C 做法**：RAM 页级懒分配 + 内存图由工程/平台描述 + 区域按需增删 |
+| **D-103** | 取指侧未映射访问还没有架构陷阱（cause 1）—— 目前是总线错误 |
+| **D-94** | S 扩展 / PMP / 计数器缺失（工作量 ≈ 实现半个特权级） |
+| **D-114 / D-115** | M-17 `step_n` 的同形状活锁；watchdog 只做了「无进展检测」这一半 |
+| **M-21 / M-22 / M-23** | 日志、健康管理、持久化后端仍是 stub |
+| — | UART 的 **TX 捕获环（4 KiB）仍不进会话快照**（RX 侧已进） |
+
+---
+
+## 目录结构
+
+```
+riscv_sim/
+├── crates/
+│   ├── contract/          # 契约层：DTO / 事件 / 错误码 / 端口签名（所有模块都引它）
+│   ├── kernel/            # 仿真内核：16 个子模块 + 内核宿主装配层
+│   └── server/            # 服务端形态（P1 占位）
+├── front/                 # 原生 JS 前端（ES modules，零构建零依赖）
+│   ├── views/             # M-01 / M-02 / M-03
+│   ├── services/          # M-04 / M-05 / M-07 / M-10
+│   ├── lib/               # 契约 JS 镜像 + 传输帧（CRC-32）
+│   └── dev/               # mock 内核 + demo 数据（仅开发期）
+├── tools/                 # 构建与门禁脚本（wasm-pack 包装 / 对拍 / 真机复验）
+├── tests/golden/          # 黄金对拍 harness（零 CSR 最小 env + 变异金丝雀 + 语料）
+└── docs/                  # 设计文档（架构 / 需求 / 模块规格 / 23 模块详设 / 9 份冻结规格 / 台账）
+```
+
+---
+
+## 文档索引
+
+| 文档 | 内容 |
+| --- | --- |
+| [`docs/architecture/RISC-V_Architecture_Design.html`](./docs/architecture/RISC-V_Architecture_Design.html) | 4+1 视图 + ADR |
+| [`docs/requirements/RISC-V_Requirements_v1.4.html`](./docs/requirements/RISC-V_Requirements_v1.4.html) | 13 条 P0 需求 + 6 层概念空间 |
+| [`docs/module-design-spec/RISC-V_Module_Design_Specification.html`](./docs/module-design-spec/RISC-V_Module_Design_Specification.html) | 23 个模块的 LLD |
+| `docs/detailed-design/M-01..M-23_*.html` | **23 篇模块详细设计** |
+| `docs/detailed-design/STAGE-1..STAGE-9_*.md` | **9 份冻结规格**（WASM 桥 / 契约 v2 / 会话快照 / 中断 / 符号 / CSR 黄金 / DWARF 行表 / osz RTOS / v0.24 遗留） |
+| [`docs/reviews/REVIEWS.md`](./docs/reviews/REVIEWS.md) | **检视与欠账的唯一入口**（§4 有 9 份模块报告索引） |
+| [`docs/progress/PROGRESS.md`](./docs/progress/PROGRESS.md) | 改动的完整叙事、决策记录与工作量 |
+| [`AGENTS.md`](./AGENTS.md) | 给 AI Agent 的项目定义与工程纪律 |
+| [`CONTRIBUTING.md`](./CONTRIBUTING.md) | 贡献流程（分支 / commit / PR） |
+
+---
+
+## 许可证
+
+**MIT OR Apache-2.0**（见 workspace `Cargo.toml`）。
+
+⚠️ **合规**：仿真内核**自研**，不复用 QEMU 源码（GPL）；如需引入 QEMU，走**进程隔离**。
