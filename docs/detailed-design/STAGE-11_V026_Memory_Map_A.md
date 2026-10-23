@@ -244,34 +244,111 @@ pub struct RamBackend {
 
 ### 2.1 Lane A · M-14 总线（A-1 ~ A-12）
 
-- [ ] **A-1** 读**没写过**的 RAM ⇒ 回 **0**（**不是**陷阱），且**零页**被物化
-      > 判据：`allocated_pages() == 0`（**计数器**，不是读值反推）。
-- [ ] **A-2** 读**没登记**的地址 ⇒ 架构陷阱 **cause 5 / 7**（**不是 0**）
-      > ⚠️ **这条是 D-99 的判别力** —— 两层合成一层就会当场破掉。
-- [ ] **A-3** 写**一页** ⇒ 恰好物化 **1 页**（`allocated_pages() == 1`、`allocated_bytes() == 4096`）
-- [ ] **A-4** 写**两页不相邻** ⇒ 物化 **2** 页；中间那页读回 **0**
-- [ ] **A-5** 护栏：**默认** cap 仍是 **16 MiB**；往一个 region 写超 16 MiB ⇒ **`E_BUS-09`**；**抬高** cap 后同样的写**成功**
+- [x] **A-1** 读**没写过**的 RAM ⇒ 回 **0**（**不是**陷阱），且**零页**被物化
+      > 证据：`crates/kernel/src/m14_bus/tests.rs` 的
+      > `reading_unwritten_ram_returns_zero_and_materializes_no_page` ——
+      > 读回 0、`allocated_bytes() == 0`、`allocated_pages() == 0`。
+      > 判据用**计数器**（**不是读值反推**）。
+- [x] **A-2** 读**没登记**的地址 ⇒ 架构陷阱 **cause 5 / 7**（**不是 0**）
+      > 证据（m14_bus 层）：`reading_an_unregistered_address_is_still_unmapped_not_zero`
+      > —— 未登记 ⇒ `family == Bus && scenario == 1`（**没变成 0**）、零物化。
+      > ⚠️ **架构陷阱那一半在 M-13 侧**（m13_iss 模块，**本批一个字未改**）：
+      > `an_unmapped_load_traps_with_cause_five`（`executor.rs:1313`）与
+      > `an_unmapped_store_traps_with_cause_seven`（`executor.rs:1345`）
+      > **两条仍然全绿** ⇒ **D-99 的判别力没破**（两层没合成一层）。
+- [x] **A-3** 写**一页** ⇒ 恰好物化 **1 页**（`allocated_pages() == 1`、`allocated_bytes() == 4096`）
+      > 证据：`writing_one_page_materializes_exactly_one_page` ——
+      > `pages == 1`、`bytes == 4096`。
+- [x] **A-4** 写**两页不相邻** ⇒ 物化 **2** 页；中间那页读回 **0**
+      > 证据：`writing_two_non_adjacent_pages_materializes_two_pages` ——
+      > `pages == 2`、`bytes == 8192`、中间页读回 0。
+- [x] **A-5** 护栏：**默认** cap 仍是 **16 MiB**；往一个 region 写超 16 MiB ⇒ **`E_BUS-09`**；**抬高** cap 后同样的写**成功**
       > ⇒ 「护栏只能放宽、不能去掉」**可证**。
-- [ ] **A-6** 单个 region 的**声明**大小可 > 16 MiB：`map_ram(base, 128 MiB, &[])` **成功**且**零物化页**
-- [ ] **A-7** **非 RAM** 的护栏行为**逐条不变**：`map_rom(base, 32 MiB, …)` ⇒ **`E_BUS-09`**；**外设窗口**超 cap ⇒ **`E_BUS-09`**（既有断言 `the_cap_also_guards_the_peripheral_window` **一条不许删**）
-- [ ] **A-8** `export_pages` 只导出**写过的页**：写 1 页 ⇒ 恰好 1 条、`base` **落在 region 的页网格上**、`bytes.len() == 4096`；不写 ⇒ **0 条**
-- [ ] **A-9** `load_pages` 仍是**两阶段**：一个越界页 ⇒ **整批拒收**且 RAM **原封不动**
-- [ ] **A-10** **D-13**：`Region` / `RamBackend` / `RomBackend` 的字段**不再是 `pub`**
+      > 证据：`the_default_physical_occupancy_cap_is_still_sixteen_mib`；
+      > 另有两处集成层钉住同一件事：
+      > `crates/kernel/tests/m14_m15_m19_wiring.rs` 的
+      > `oversized_region_is_rejected_without_allocating`（声明 256 MiB **成功**且
+      > `ram_allocated_bytes() == 0`；真占超预算 ⇒ `E_BUS-09` 且**零页留下**）与
+      > `the_region_size_cap_is_configurable`（声明免费 → 写第二个页被拒
+      > `scenario == 9` → 抬 cap 后同一个写成功 → `ram_allocated_bytes() == 2 * 4096`）。
+- [x] **A-6** 单个 region 的**声明**大小可 > 16 MiB：`map_ram(base, 128 MiB, &[])` **成功**且**零物化页**
+      > 证据：`a_ram_region_may_declare_more_than_the_cap_and_costs_nothing` ——
+      > 声明 128 MiB **成功**、零物化页；写后恰 4096 字节。
+- [x] **A-7** **非 RAM** 的护栏行为**逐条不变**：`map_rom(base, 32 MiB, …)` ⇒ **`E_BUS-09`**；**外设窗口**超 cap ⇒ **`E_BUS-09`**（既有断言 `the_cap_also_guards_the_peripheral_window` **一条不许删**）
+      > 证据：`non_ram_regions_keep_the_declared_size_cap` ——
+      > ROM 32 MiB ⇒ `E_BUS-09`；外设窗口超 cap ⇒ `E_BUS-09`；
+      > 既有断言 `oversized_rom_region_is_rejected_before_allocating` 与
+      > `the_cap_also_guards_the_peripheral_window` **一条没删**。
+- [x] **A-8** `export_pages` 只导出**写过的页**：写 1 页 ⇒ 恰好 1 条、`base` **落在 region 的页网格上**、`bytes.len() == 4096`；不写 ⇒ **0 条**
+      > 证据：`export_pages_carries_only_the_materialized_four_kib_pages` ——
+      > 不写 ⇒ **0 条**；写 1 页 ⇒ 恰好 1 条、base 落在页网格上、`bytes.len() == 4096`；
+      > 写两页不相邻 ⇒ **2 条**。
+- [x] **A-9** `load_pages` 仍是**两阶段**：一个越界页 ⇒ **整批拒收**且 RAM **原封不动**
+      > 证据：`load_pages_rejects_the_whole_batch_and_leaves_the_ram_untouched` ——
+      > 越界页 ⇒ `E_BUS-11`、原值读回不变、页数不变。
+      > 另两条 C-3 细则：`load_pages_rejects_a_page_off_the_regions_page_grid`、
+      > `load_pages_over_the_physical_occupancy_cap_is_rejected`。
+- [x] **A-10** **D-13**：`Region` / `RamBackend` / `RomBackend` 的字段**不再是 `pub`**
       > 用**源码级**守卫断言（扫源码文本），不是「编译不过」这种间接证据。
-- [ ] **A-11** 4 092 处的 4 字节写落在**同一页**内（物化 1 页）；⚠️ **并且** 4 095 处的 4 字节写**正确地跨两页**（物化 2 页、两个字节值都对）
-- [ ] **A-12** 既有断言**未被删改**：总线统计（`reads` / `ram_hits` / `misses` / `writes`）与改动前**逐条相同**
+      > 证据：`region_and_backend_fields_are_not_public_anymore` ——
+      > 扫源文本，`pub base:` / `pub size:` / `pub kind:` / `pub target:` / `pub bytes:` **零命中**
+      > + 只读访问器 `Region::base()` / `size()` / `kind()` 与 `RomBackend::bytes()` 存在。
+- [x] **A-11** 4 092 处的 4 字节写落在**同一页**内（物化 1 页）；⚠️ **并且** 4 095 处的 4 字节写**正确地跨两页**（物化 2 页、两个字节值都对）
+      > 证据：`a_four_byte_write_at_4092_stays_inside_one_page` —— 物化 1 页。
+      > ⚠️ 规格这条在施工中被**实测订正**（见 §1 裁决 A）：原文那条「一次访问永不跨页」的
+      > 算式**不成立**（`off == 4095` 时 4 字节写会跨页）⇒ 实现按「**最多跨两页**」写，
+      > **不依赖**那个快捷假设 ⇒ 跨页那一半也正确。
+- [x] **A-12** 既有断言**未被删改**：总线统计（`reads` / `ram_hits` / `misses` / `writes`）与改动前**逐条相同**
+      > 证据：`the_bus_statistics_are_unchanged_by_the_lazy_pages` ——
+      > reads=2 / writes=1 / ram_hits=2 / misses=1 / unmapped_splits=1 / unaligned_splits=0；
+      > 既有统计断言**一条没删**。
 
 ### 2.2 Lane B · 契约 + 宿主 + 外设（B-1 ~ B-9）
 
-- [ ] **B-1** `SESSION_SNAPSHOT_SCHEMA_VERSION == 3`；**旧载荷（version = 2）⇒ `E_SNAP-05`** 显式拒收
-- [ ] **B-2** 快照往返：写过的页**逐字节**相同 + **没写过的页仍读回 0**
-- [ ] **B-3** QemuVirt 档**空会话**（一个字没写）⇒ `mem_pages` **为空** ⇒ 整份 JSON **< 1 MiB**（基线 **258.06 MiB**）
-- [ ] **B-4** QemuVirt 档区域数 **13 → 6**（RAM 从 8 个 16 MiB 变 1 个 128 MiB）
-- [ ] **B-5** TX 捕获环进快照：往 THR 写 3 字节 ⇒ 快照里 `tx_ring` 有 **3** 字节、`tx == tx_ring[0]`；还原后 `drain_tx()` 拿回**同样 3 字节**（逐字节）
-- [ ] **B-6** `tx_dropped` 进快照；溢出丢弃**看得见**（不是静默）
-- [ ] **B-7** 契约层 `validate()` **拒掉** `tx != tx_ring[0]` 的载荷（与 `rx` / `rx_queue` 不变式同构）
-- [ ] **B-8** **osz 对拍仍 `VERDICT MATCH`**（内存图从 8 区域变 1 区域后，guest 看到的地址空间不变）
-- [ ] **B-9** **黄金语料 68/68** 仍逐例一致（Default 档未受影响）
+- [x] **B-1** `SESSION_SNAPSHOT_SCHEMA_VERSION == 3`；**旧载荷（version = 2）⇒ `E-SNAP-05`** 显式拒收
+      > 证据：`the_session_snapshot_schema_version_is_three`、
+      > `a_version_two_session_payload_is_rejected_with_e_snap_05`、
+      > `a_version_two_checkpoint_meta_is_rejected_with_e_snap_05`。
+      > ⚠️ 既有那条 `the_session_snapshot_schema_version_is_two` **改名**为
+      > `..._is_three` 并改断言 3 ⇒ **没删**。
+- [x] **B-2** 快照往返：写过的页**逐字节**相同 + **没写过的页仍读回 0**
+      > 证据：`crates/kernel/tests/v026_memory_map.rs` 的
+      > `a_hand_built_page_snapshot_restores_byte_for_byte`、
+      > `a_hand_built_page_snapshot_survives_the_host_round_trip`。
+      > ⚠️ **手工构造载荷**（不用 `export_pages()`）⇒ 在新旧两棵 M-14 树上都成立。
+- [x] **B-3** QemuVirt 档**空会话**（一个字没写）⇒ `mem_pages` **为空** ⇒ 整份 JSON **< 1 MiB**（基线 **258.06 MiB**）
+      > 证据：`crates/kernel/tests/v026_payload_slimming.rs` 的
+      > `an_untouched_qemu_virt_session_carries_no_memory_pages`；
+      > 另 `one_written_page_shows_up_as_exactly_one_page`
+      > （写一个字节 ⇒ 恰好 1 条、`bytes.len() == 4096`、首字节是写进去的值）。
+      > ⚠️ **先断言 QemuVirt 布局**再断言载荷 ⇒ 因为 `new_with_profile` 换档失败会
+      > **静默退回默认档**（不 panic）⇒ 只断言载荷小的话**降级也会绿**。
+- [x] **B-4** QemuVirt 档区域数 **13 → 6**（RAM 从 8 个 16 MiB 变 1 个 128 MiB）
+      > 证据：`the_qemuvirt_profile_maps_one_128_mib_ram_region`、
+      > `the_default_profile_keeps_its_own_region_layout`、
+      > `the_qemuvirt_profile_raises_the_per_region_guardrail_budget`。
+      > ⚠️ 断言**不只数区域条数**：同时落在「存在 `base == 0x8000_0000` 且
+      > `size == 128 MiB` 的 RAM 区域」与「没有静默降级」上。
+- [x] **B-5** TX 捕获环进快照：往 THR 写 3 字节 ⇒ 快照里 `tx_ring` 有 **3** 字节、`tx == tx_ring[0]`；还原后 `drain_tx()` 拿回**同样 3 字节**（逐字节）
+      > 证据：`the_tx_capture_ring_travels_into_the_session_snapshot`、
+      > `the_tx_capture_ring_survives_a_snapshot_round_trip`、
+      > `the_tx_capture_ring_travels_into_the_session_state`、
+      > `restoring_a_uart_state_puts_the_whole_tx_ring_back`。
+- [x] **B-6** `tx_dropped` 进快照；溢出丢弃**看得见**（不是静默）
+      > 证据：`the_dropped_byte_counter_travels_into_the_session_snapshot`、
+      > `the_dropped_byte_counter_survives_a_snapshot_round_trip`、
+      > `the_dropped_byte_counter_travels_into_the_session_state`、
+      > `the_dropped_byte_counter_is_overwritten_not_accumulated_on_restore`。
+- [x] **B-7** 契约层 `validate()` **拒掉** `tx != tx_ring[0]` 的载荷（与 `rx` / `rx_queue` 不变式同构）
+      > 证据：`a_uart_state_whose_tx_head_disagrees_with_its_ring_is_rejected`、
+      > `a_uart_state_with_an_empty_ring_must_have_no_tx_head`（+2 条反面放行）。
+      > ⚠️ 契约层那条不变式编号是 **8c**（与既有的 **8b** `rx`/`rx_queue` 同形）。
+- [x] **B-8** **osz 对拍仍 `VERDICT MATCH`**（内存图从 8 区域变 1 区域后，guest 看到的地址空间不变）
+      > 证据：`tools/boot-osz.sh` 实测 **VERDICT MATCH** ——
+      > 两侧 console 字节流 **31 字节逐字节相同**。
+- [x] **B-9** **黄金语料 68/68** 仍逐例一致（Default 档未受影响）
+      > 证据：`tools/golden-run.sh --self-check` 与 `--keep-going` 全绿，
+      > 语料 **68 例**逐例判决一致（mismatch 0 / no-verdict 0 / build-failed 0）。
 
 ---
 
@@ -311,19 +388,40 @@ pub struct RamBackend {
 
 **失败项数必须为 0。**
 
-### 3.3 实测结果（v0.26 收口时填）
+### 3.3 实测结果（v0.26 收口）
+
+**门禁失败项数 = 0。**
 
 | 门禁 | 实测 |
 | --- | --- |
-| `cargo fmt --all -- --check` | 待填 |
-| `cargo clippy --workspace --all-targets -- -D warnings` | 待填 |
-| `cargo test --workspace --no-fail-fast --lib --tests` | 待填 |
-| `tools/check-front.sh` | 待填 |
-| `tools/golden-run.sh --self-check` | 待填 |
-| `tools/golden-run.sh --keep-going` | 待填 |
-| `tools/build-wasm.sh` + `node tools/wasm-smoke.mjs` | 待填 |
-| `node tools/browser-verify.mjs`（真 Chrome） | 待填 |
-| `tools/boot-osz.sh` | 待填 |
+| `cargo fmt --all -- --check` | 通过（首轮红过一次：统筹方那两个新文件有格式细节 ⇒ `cargo fmt --all` 修好后重跑通过） |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 通过（**0 warning**） |
+| `cargo test --workspace --no-fail-fast --lib --tests` | **1 292** 条全绿（契约 lib **140** + kernel lib **1 001** + 集成 **134** + `osz-boot` runner **3** + golden runner **14**；基线 1 254 ⇒ **+38**） |
+| `tools/check-front.sh` | **312 用例 / 57 suite**，**0 红**（未变） |
+| `tools/golden-run.sh --self-check` | 通过（三个金丝雀全 ok） |
+| `tools/golden-run.sh --keep-going` | **68/68** 逐例一致（mismatch 0 / no-verdict 0 / build-failed 0） |
+| `tools/build-wasm.sh` + `node tools/wasm-smoke.mjs` | 通过 |
+| `node tools/browser-verify.mjs`（真 Chrome） | 通过 |
+| `tools/boot-osz.sh`（与 Spike 逐字节对拍） | **VERDICT MATCH** —— 两侧 console 字节流 **31 字节逐字节相同** |
+
+**本批专属三条**：
+
+- **S-1**（变异自检：每条变异能编译且按期望变红；每条 lane 至少一条对照 0 红）✅ ——
+  **Lane A 自测 4 条变异 + 1 条对照**（红 5 / 10 / 4 / 7 条，对照 **0** 条）；
+  **Lane B 自测 5 条变异 + 1 条对照**（红 12 / 4 / 2 / 2 条，对照 **0** 条）；
+  **统筹方另独立复验 2 条 + 1 条对照**：
+  ① 「读没写过的页回 0」改成回 **1** ⇒ **5 红**
+  （`reading_unwritten_ram_returns_zero_and_materializes_no_page` · `writing_two_non_adjacent_pages_materializes_two_pages` ·
+  `export_map_then_load_map_round_trips_the_topology` · `load_map_rebuilds_the_ram_region_and_zeroes_its_content` ·
+  `load_pages_writes_a_page_at_its_own_offset_inside_the_region`）；
+  ② 「TX 环漏出快照」（`tx_ring` 恒空）⇒ **8 红**（4 条 B-5 + 4 条既有 UART 会话状态）；
+  **对照（只改注释）⇒ 0 红**（退出码 0）。
+  ⚠️ 三处还原都用 `cp` + `md5` + `cmp` **逐字节**校验（`mod.rs` md5 `d1b9bc04…` · `uart.rs` md5 `abdf9cb8…`）⇒ **IDENTICAL**，**全程未用 `git checkout -- <file>`**；无 124 / HANG。
+- **S-2**（载荷瘦身实测：QemuVirt 档空会话快照 JSON **< 1 MiB**）✅ ——
+  `an_untouched_qemu_virt_session_carries_no_memory_pages` 实测通过（`mem_pages` **为空**、整份 JSON **< 1 MiB**），
+  另 `one_written_page_shows_up_as_exactly_one_page` 实测**恰好 1 条**、`bytes.len() == 4096` ⇒
+  相对台账基线 **258.06 MiB** ⇒ **载荷砍掉两个数量级**。
+- **S-3**（osz 对拍 `VERDICT MATCH` + 黄金 68/68）✅ —— 详见上表两行。
 
 ---
 

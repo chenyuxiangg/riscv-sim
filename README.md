@@ -88,7 +88,7 @@
 | 仿真内核 | 52 466 行（含 16 个子模块 + 内核宿主装配层） |
 | 前端 | 15 373 行（`front/` 全量，含测试） |
 | 设计文档 | **46 篇**（26 篇 HTML + 20 篇 Markdown） |
-| 测试 | **1 254** 条 Rust（契约 lib 134 + 内核 lib 980 + 集成 123 + runner 17）+ **312** 条前端（57 suite） |
+| 测试 | **1 292** 条 Rust（契约 lib 140 + 内核 lib 1 001 + 集成 134 + runner 17）+ **312** 条前端（57 suite） |
 
 ---
 
@@ -115,7 +115,7 @@ node --version
 
 ```bash
 cargo build                                    # native
-cargo test --workspace --no-fail-fast --lib --tests   # 1 254 条
+cargo test --workspace --no-fail-fast --lib --tests   # 1 292 条
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
@@ -309,7 +309,7 @@ node tools/browser-verify.mjs
 | --- | --- | --- |
 | 1 | `cargo fmt --all -- --check` | 格式 |
 | 2 | `cargo clippy --workspace --all-targets -- -D warnings` | 静态检查 |
-| 3 | `cargo test --workspace --no-fail-fast --lib --tests` | **1 254** 条 Rust 用例 |
+| 3 | `cargo test --workspace --no-fail-fast --lib --tests` | **1 292** 条 Rust 用例 |
 | 4 | `tools/check-front.sh` | **312** 用例 / **57** suite（ESM 链接期错误只有它能抓） |
 | 5 | `tools/golden-run.sh --self-check` + `--keep-going` | 指令级判决（**67/67**） |
 | 6 | `tools/build-wasm.sh` + `node tools/wasm-smoke.mjs` | 真 WASM 产物的桥接冒烟 |
@@ -324,7 +324,7 @@ node tools/browser-verify.mjs
 
 | 欠账 | 说的是什么 |
 | --- | --- |
-| **D-123** | **内存图是宿主硬编码的两档**（换平台要改宿主代码）。根因是 **RAM 急分配**而不是内存图形状的必然 ⇒ 通用化按 **C 做法**：RAM 页级懒分配 + 内存图由工程/平台描述 + 区域按需增删 |
+| **D-123** | **内存图是宿主硬编码的两档**（换平台要改宿主代码）。根因是 **RAM 急分配**而不是内存图形状的必然 ⇒ 通用化按 **C 做法**：RAM 页级懒分配 + 内存图由工程/平台描述 + 区域按需增删。⚠️ **A 批已落地**（v0.26：4 KiB 页级懒分配 + 护栏改按物理占用量 + 快照只装写过的页 ⇒ QemuVirt 档空会话载荷从 **258.06 MiB** 降到 **< 1 MiB**）⇒ **B 批**（内存图由工程/平台描述）未做 |
 | **D-94** | S 扩展 / PMP / 计数器缺失（工作量 ≈ 实现半个特权级） |
 | **D-114 / D-115** | M-17 `step_n` 的同形状活锁；watchdog 只做了「无进展检测」这一半 |
 | **M-21 / M-22 / M-23** | 日志、健康管理、持久化后端仍是 stub |
