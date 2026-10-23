@@ -147,6 +147,22 @@ HMS_FATAL + 幂等标志）** → **M-21（记 `EV_WATCHDOG`）**。而 **D-114*
 
 见 §2。
 
+### 1.7 M-12 守卫触发后的**重入语义**（实测读码，第二次订正的依据）
+
+* 守卫触发处（`m12_engine/mod.rs`）是 `return Err(PlatformError::new(Engine,
+  E_ENG_03_NO_PROGRESS, ..))` ⇒ **只是返回，不改任何引擎状态**（不推进虚拟时间、
+  不改寄存器、不动事件队列的游标）。
+* ⇒ **重入是安全的**：宿主可以再次调 `run_until`。
+* ⚠️ **但 `no_progress` 是 `run_until` 的局部变量** ⇒ **每次重入都从 0 重新计数**。
+  ⇒ 宿主做「三次确认」时，实际发生的空转次数是 **3 × `NO_PROGRESS_WINDOW`**，
+  **不是** `NO_PROGRESS_WINDOW`。⇒ 这一点必须写进代码注释（否则后来人会以为
+  「1024 次就停」）。
+* ⚠️ `run_until` 的内层循环 `while done < QUANTUM_INSTR_QUOTA`（1000）在
+  `InterruptTaken` 分支**不**增 `done` ⇒ 计数能越过 1000 累积到 1024 ⇒ 守卫可达 ✔。
+* ⚠️ `run_until(u64::MAX)` 的退出**只**靠指令预算（`instructions >= budget`）⇒
+  一次 `continue_until_event` = **一个 10 000 条指令的窗口** ✔ 与 LLD §3.5 的
+  「每 ≤10⁴ 条检查」字面吻合。
+
 ---
 
 ## §2 歧义处置（九个，逐条给「原文 / 实测 / 裁决」）
@@ -676,6 +692,17 @@ impl HostWatchdog {
   * `step_in_chunks` 的**每一个 chunk**（`DEFAULT_INSTRUCTION_BUDGET = 10 000` 条指令）；
   * `continue_until_event` 的**每一次调用**（M-17 ⇒ `engine.run_until(..)` 跑满一个
     指令预算窗口）。
+* ⚠️ **接线落点的精确位置（第二次订正的依据，见 §1.7）**：
+  * **`step_in_chunks`（`:2049`）**：看门狗判定必须落在**它自己的 `while remaining > 0`
+    循环体内**。理由：现有实现是 `let executed = self.backend.step_n(chunk)?;` ⇒
+    chunk 一旦停滞就**当场 `?` 上抛**，循环直接退出 ⇒ **三次确认在循环外根本
+    攒不起来**。⇒ 正确形态是「chunk 停滞 ⇒ 记一次窗口 ⇒ `streak < 3` 就**继续下一个
+    chunk**（`remaining` 不减，因为那一条没跑成）⇒ `streak >= 3` 才返回 `Err`」。
+  * **`on_run` 的 `Continue` 分支（`:1948`）**：`continue_until_event` 一次调用 = 一个
+    窗口。⇒ 正确形态是「停滞 ⇒ 记一次窗口 ⇒ `streak < 3` 就**再调一次**
+    `continue_until_event`（重入引擎）⇒ `streak >= 3` 才返回 `Err`」。
+    正常情况第一次就是 `Ok`（跑满预算）⇒ **不会**进入重入。
+  * ⇒ 两处共用**同一个** `HostWatchdog` 状态（连续性是它存在的意义）。
 * **每个窗口**：
   1. 记 `Instant::now()`；
   2. 跑引擎；
@@ -903,7 +930,7 @@ M-12/M-17 守卫触发  ──►  Err(E_ENG_03_NO_PROGRESS)
 
 | 欠账 | 闭环口径 |
 | --- | --- |
-| **D-115** | 宿主侧时间预算（`HOST_WATCHDOG_BUDGET_MS = 200`）+ 滑动窗口三次确认（`HOST_WATCHDOG_CONFIRMATIONS = 3`）+ **HMS 同步终止**（`Severity::Fatal` ⇒ `Health::Critical` + `DegradeAction::Terminate`）+ **`WATCHDOG` 日志**（M-21 环里 `ctx = "ENG-WATCHDOG"`）+ **幂等标志**（`watchdog_fired`）—— 判别式 D-3 / D-4 / D-5 / D-6 / D-10 |
+| **D-115** | 宿主侧时间预算（`HOST_WATCHDOG_BUDGET_MS = 200`）+ 滑动窗口三次确认（`HOST_WATCHDOG_CONFIRMATIONS = 3`）+ **HMS 同步终止**（`Severity::Fatal` ⇒ `Health::Critical` + `DegradeAction::Terminate`）+ **`WATCHDOG` 日志**（M-21 环里 `ctx = "ENG-WATCHDOG"`）+ **幂等标志**（`watchdog_fired`）—— 判别式 D-3 / D-4 / D-5 / D-6 / D-10。⚠️ **代价如实记录**：因 M-12 的 `no_progress` 是局部变量（§1.7），三次确认实际空转 **3 × 1024** 次 |
 | **D-114** | M-17 `step_n` 接上**同形状**的无进展守卫（复用 M-12 的 `NO_PROGRESS_WINDOW` ⇒ 不复制字面量）⇒ 同一个不变式（M-16 的 `active_irq` 单级防护）的**第二个落点**被堵上 —— 判别式 D-1 / D-2 |
 
 ### 8.2 本批新登记（**四**条）
