@@ -56,6 +56,7 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 - Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，**312 用例 / 57 suite**；Node ≥ 22）
 - Test (WASM 桥): `node tools/wasm-smoke.mjs`（需先 `tools/build-wasm.sh`；在 Node 里驱动真 wasm 产物跑完整桥，产物不在则跳过）
 - Test (浏览器真机): `tools/browser-verify.mjs`（零依赖 CDP 脚本，需本机 Chrome + 已构建的 WASM 产物 + `python3 -m http.server 8080 --directory front`；**不进默认门禁**，按需运行）
+  - ⚠️ **跑之前先确认 8080 是空的**：`lsof -nP -iTCP:8080 -sTCP:LISTEN`。**上一批遗留的孤儿 `http.server`**（它的工作目录是**已被删掉的** worktree ⇒ 任何路径都返回 **404**）会让脚本的探针判定「没在跑」⇒ 脚本**自起**一个 ⇒ **端口冲突** ⇒ `code=1` 退出 ⇒ 症状看着像「浏览器门禁坏了」，其实只是**端口被占**。⇒ 先 `kill` 掉那个孤儿再跑。
 - Test (黄金对拍): `tools/fetch-golden-deps.sh`（拉 riscv-tests + 交叉工具链到**仓库外**）→ `tools/golden-run.sh --self-check`（变异金丝雀）→ `tools/golden-run.sh --keep-going`（全量）
 - Test (真实 RTOS 对拍): `tools/boot-osz.sh`（**不进默认门禁**：需要**仓外**的 osz ELF 与本机的 Spike；ELF 路径取 `$OSZ_ELF`，默认 `/tmp/osz-artifacts/osz.elf`）⇒ 判决口径是「**两侧 UART TX 字节流逐字节相同**」⇒ 输出 `VERDICT MATCH / MISMATCH / NO-VERDICT`
 - Lint:            `cargo clippy --workspace --all-targets -- -D warnings`
