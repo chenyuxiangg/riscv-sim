@@ -61,6 +61,21 @@
 //!   `None` is a **legal** value and means "no line table / not hit";
 //!   the fields are **never** fabricated.
 //!
+//! Contract **v6** adds the **front-end configurable board memory map**
+//! (v0.29 · D-124):
+//!
+//! - new command `CommandPayload::SetMemoryMap { description }` — the
+//!   board the user configured **in the front end**. It carries a
+//!   **whole** [`platform::PlatformDescription`] — the description DTO
+//!   the contract layer **already has** ⇒ **zero new DTO** — and **not**
+//!   a patch ⇒ there is no "current value + patch" second truth;
+//! - new event `EventPayload::MemoryMap { description, pending }` — the
+//!   **currently effective** map (the front end's memory-map table's
+//!   data source ⇒ the mock table becomes real) plus a flag telling
+//!   whether the host holds a **pending** board configuration;
+//! - ⚠️ v6 changes **nothing else**: no DTO change, no renumbering. The
+//!   v5 shapes stay exactly as they were.
+//!
 //! Contract **v5** adds the **console input** direction:
 //!
 //! - new command `CommandPayload::WriteConsole { bytes }` — the bytes
@@ -89,6 +104,19 @@ pub mod snapshot;
 
 /// Protocol schema version. Bump on every breaking change; consumers
 /// negotiate via the `schema_version` field in every [`protocol::Message`].
+///
+/// **v6** (contract v6 — the front-end configurable board memory map):
+/// - new command `CommandPayload::SetMemoryMap { description }` — the
+///   board the user configured **in the front end**. It carries a
+///   **whole** [`platform::PlatformDescription`] (the contract layer
+///   **already has** it ⇒ **zero new DTO**), **not** a patch ⇒ there is
+///   no second source of truth;
+/// - new event `EventPayload::MemoryMap { description, pending }` — the
+///   **currently effective** map (the front end's memory-map table's
+///   data source) plus a flag telling whether the host holds a
+///   **pending** board configuration;
+/// - ⚠️ **no other shape changed** in v6: no DTO change, no
+///   renumbering. The v5 shapes stay exactly as they were.
 ///
 /// **v5** (contract v5 — the console **input** direction):
 /// - new command `CommandPayload::WriteConsole { bytes }` — the bytes
@@ -127,4 +155,4 @@ pub mod snapshot;
 ///   variant `WaveformDelta` → `WaveformHistory` (D-34);
 /// - `ErrorFamily::Protocol` (`"PROTO"`) — the family the LLD's
 ///   `E_PROTO-01`..`E_PROTO-08` codes belong to.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;

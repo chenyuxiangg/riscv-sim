@@ -9,6 +9,7 @@ use crate::model::{
     Breakpoint, DeltaRegister, DisasmEntryDto, Project, SimState, TraceFormat, TraceSource,
     Watchpoint, WaveformHistory, WriteSize,
 };
+use crate::platform::PlatformDescription;
 use crate::SCHEMA_VERSION;
 
 /// Direction of a message on the wire.
@@ -296,6 +297,24 @@ pub enum CommandPayload {
         /// error): the reply still comes back.
         bytes: Vec<u8>,
     },
+    /// **设置板级内存图**（用户在前端配的那张板）。
+    ///
+    /// ⚠️ **携带的是一整份描述**，不是 patch（裁决 A / 裁决 I / §2.1 ⑤）。
+    ///
+    /// ⚠️ **零新 DTO**：载荷用的是契约层**已有**的
+    /// [`PlatformDescription`]（[`crate::platform`]）⇒ 描述 DTO
+    /// **一字未改**（裁决 H）。
+    ///
+    /// ⚠️ **整份替换** ⇒ 没有「当前值 + 补丁」的第二个真相（D-137）。
+    ///
+    /// The reply is [`EventPayload::MemoryMap`] — carrying the
+    /// **currently effective** map plus a `pending` flag.
+    ///
+    /// Added in contract v6.
+    SetMemoryMap {
+        /// 板级描述（**契约层已有的** `PlatformDescription` ⇒ 零新 DTO）。
+        description: PlatformDescription,
+    },
 }
 
 impl Default for CommandPayload {
@@ -498,6 +517,21 @@ pub enum EventPayload {
         /// The raw bytes the guest wrote to the console UART.
         bytes: Vec<u8>,
     },
+    /// **当前生效的内存图**（前端内存映射表的数据源 ⇒ 闭环 D-124）。
+    ///
+    /// ⚠️ `description` 是**当前生效**的图，**不是**「用户配的那份」
+    /// （裁决 D）⇒ 前端内存映射表显示的**就是它**。
+    ///
+    /// ⚠️ **草稿不进事件**：前端「编辑器草稿」住在 M-03 视图状态里
+    /// （前端自己的东西）⇒ 事件只描述**内核的状态**（裁决 D）。
+    ///
+    /// Added in contract v6.
+    MemoryMap {
+        /// **当前生效**的图（裁决 D）。
+        description: PlatformDescription,
+        /// 宿主是否存着一份**待生效**的板级配置（裁决 B / D）。
+        pending: bool,
+    },
 }
 
 impl Default for EventPayload {
@@ -550,9 +584,12 @@ mod tests {
     /// source location on the disassembly entries.
     ///
     /// **v5** adds the console **input** direction (`WriteConsole`).
+    ///
+    /// **v6** adds the front-end configurable board memory map
+    /// (`SetMemoryMap` + `MemoryMap`).
     #[test]
-    fn the_schema_version_is_five() {
-        assert_eq!(crate::SCHEMA_VERSION, 5);
+    fn the_schema_version_is_six() {
+        assert_eq!(crate::SCHEMA_VERSION, 6);
     }
 
     /// The three commands contract v2 adds (D-32 gaps 1, 2, 3).
@@ -685,7 +722,7 @@ mod tests {
         let msg = Message::command(7, CommandPayload::Nop);
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
-        assert_eq!(json["schema_version"], 5);
+        assert_eq!(json["schema_version"], 6);
     }
 
     // -----------------------------------------------------------------
@@ -979,8 +1016,232 @@ mod tests {
         // （前端门禁 `contract.test.mjs` 从 Rust 源码推导这个数，但那条
         // 门禁**不在**契约层的编译依赖里 ⇒ 这里再钉一次）。
         assert!(
-            JS_MIRROR.contains("export const SCHEMA_VERSION = 5;"),
-            "前端 JS 镜像的 SCHEMA_VERSION 必须与 Rust 侧的 5 一致"
+            JS_MIRROR.contains("export const SCHEMA_VERSION = 6;"),
+            "前端 JS 镜像的 SCHEMA_VERSION 必须与 Rust 侧的 6 一致"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Contract v6 — the front-end configurable board memory map
+    // (STAGE-14 §3.1).
+    //
+    // ⚠️ These shapes are **frozen** by the STAGE-14 spec: every variant
+    // name and field name below is part of the wire format, and the
+    // front end's JS mirror (`front/lib/message.js`) spells them the
+    // same way. Changing one without the other breaks the gate.
+    //
+    // ⚠️ **Zero new DTO**: the payloads carry the contract layer's
+    // **existing** `PlatformDescription` — the description DTOs
+    // (`PlatformDescription` / `RegionSpec` / `DeviceSpec`) are
+    // **unchanged** (裁决 H).
+    // -----------------------------------------------------------------
+
+    /// 一张「用户在前端配的板」—— **在这里现搭**，不用内置平台。
+    ///
+    /// ⚠️ **为什么不用内置平台**：期望的 JSON 必须是**架构字面量**，
+    /// 而不是「内置平台今天恰好长什么样」的镜像 ⇒ 换个内置平台就误红。
+    fn a_user_configured_board() -> PlatformDescription {
+        PlatformDescription {
+            schema_version: crate::platform::PLATFORM_SCHEMA_VERSION,
+            id: "user-board".to_string(),
+            name: "User board".to_string(),
+            priority: 100,
+            auto_selectable: false,
+            region_budget_bytes: 0x0010_0000,
+            regions: vec![crate::platform::RegionSpec::Ram {
+                base: 0x0000_0000,
+                size: 0x0010_0000,
+            }],
+            description: None,
+        }
+    }
+
+    /// `SetMemoryMap` 命令的线上形态**钉到字符串**。
+    ///
+    /// ⚠️ **为什么钉字符串而不是只钉 `serde_json::json!`**：那个宏比较
+    /// **值** ⇒ 它接受一个**键序被打乱**的键集，也接受一个「换了名字
+    /// 但载荷一样」的变体标签。字符串形态把变体标签的**确切拼写**、
+    /// 字段的**确切拼写**与**键序**都钉住 ⇒ 任一侧改名都会红。
+    #[test]
+    fn the_v6_set_memory_map_command_has_a_pinned_wire_shape() {
+        let cmd = CommandPayload::SetMemoryMap {
+            description: a_user_configured_board(),
+        };
+        assert_eq!(
+            serde_json::to_string(&cmd).expect("json"),
+            r#"{"SetMemoryMap":{"description":{"schema_version":1,"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"regions":[{"kind":"ram","base":0,"size":1048576}]}}}"#
+        );
+        // ⚠️ 描述 DTO **一字未改** ⇒ 线上还是 `PlatformDescription` 的
+        // 原样形态（`kind` 标签、`auto_selectable`、省略的 `description`）。
+        assert_eq!(
+            serde_json::to_value(&cmd).expect("json"),
+            serde_json::json!({ "SetMemoryMap": { "description": {
+                "schema_version": 1,
+                "id": "user-board",
+                "name": "User board",
+                "priority": 100,
+                "auto_selectable": false,
+                "region_budget_bytes": 1048576,
+                "regions": [{ "kind": "ram", "base": 0, "size": 1048576 }]
+            } } })
+        );
+    }
+
+    /// `MemoryMap` 事件的线上形态**钉到字符串**。
+    ///
+    /// ⚠️ `pending` 排在 `description` **之后** ⇒ 字段的**声明顺序**也
+    /// 是线上形态的一部分。
+    #[test]
+    fn the_v6_memory_map_event_has_a_pinned_wire_shape() {
+        let ev = EventPayload::MemoryMap {
+            description: a_user_configured_board(),
+            pending: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&ev).expect("json"),
+            r#"{"MemoryMap":{"description":{"schema_version":1,"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"regions":[{"kind":"ram","base":0,"size":1048576}]},"pending":false}}"#
+        );
+        assert_eq!(
+            serde_json::to_value(&ev).expect("json"),
+            serde_json::json!({ "MemoryMap": { "description": {
+                "schema_version": 1,
+                "id": "user-board",
+                "name": "User board",
+                "priority": 100,
+                "auto_selectable": false,
+                "region_budget_bytes": 1048576,
+                "regions": [{ "kind": "ram", "base": 0, "size": 1048576 }]
+            }, "pending": false } })
+        );
+    }
+
+    /// `pending` 的**两个取值**都必须能往返。
+    ///
+    /// ⚠️ 判别力：只钉 `false` 的话，把字段**删掉**（serde 默认补
+    /// `false`）这条用例仍然绿 ⇒ `true` 那一半才是「字段真的在」、
+    /// 且**没有被丢掉**的证据。
+    #[test]
+    fn the_v6_memory_map_pending_flag_survives_the_round_trip() {
+        for pending in [true, false] {
+            let ev = EventPayload::MemoryMap {
+                description: a_user_configured_board(),
+                pending,
+            };
+            let back: EventPayload =
+                serde_json::from_str(&serde_json::to_string(&ev).expect("json"))
+                    .expect("round trip");
+            match back {
+                EventPayload::MemoryMap { pending: got, .. } => {
+                    assert_eq!(got, pending, "`pending` 必须原样回来");
+                }
+                other => panic!("expected a MemoryMap, got {other:?}"),
+            }
+        }
+    }
+
+    /// 整份描述**逐字段**往返 —— 含 ROM 段与**四种**器件。
+    ///
+    /// ⚠️ 这一条钉住「**零新 DTO**」：描述 DTO **一字未改** ⇒ 它的
+    /// 全部形态（`kind` / `device` 内部标签、器件参数）都还是原来的
+    /// 那些 ⇒ 一个字都不该变。
+    #[test]
+    fn the_v6_memory_map_description_survives_the_round_trip() {
+        let description = PlatformDescription {
+            schema_version: crate::platform::PLATFORM_SCHEMA_VERSION,
+            id: "full-board".to_string(),
+            name: "Full board".to_string(),
+            priority: 7,
+            auto_selectable: true,
+            region_budget_bytes: 0x0020_0000,
+            regions: vec![
+                crate::platform::RegionSpec::Ram {
+                    base: 0x0000_0000,
+                    size: 0x0010_0000,
+                },
+                crate::platform::RegionSpec::Rom {
+                    base: 0x0010_0000,
+                    size: 0x0001_0000,
+                },
+                crate::platform::RegionSpec::Peripheral {
+                    base: 0x1000_0000,
+                    device: crate::platform::DeviceSpec::Gpio {
+                        id: "GPIO0".to_string(),
+                    },
+                },
+                crate::platform::RegionSpec::Peripheral {
+                    base: 0x1000_1000,
+                    device: crate::platform::DeviceSpec::Uart16550 {
+                        id: "UART0".to_string(),
+                        irq_line: 1,
+                        baud_rate: 115_200,
+                    },
+                },
+                crate::platform::RegionSpec::Peripheral {
+                    base: 0x2000_0000,
+                    device: crate::platform::DeviceSpec::Clint {
+                        id: "CLINT".to_string(),
+                        freq_hz: 10_000_000,
+                        harts: 1,
+                    },
+                },
+                crate::platform::RegionSpec::Peripheral {
+                    base: 0x2000_1000,
+                    device: crate::platform::DeviceSpec::Plic {
+                        id: "PLIC".to_string(),
+                        sources: 16,
+                        contexts: 2,
+                    },
+                },
+            ],
+            description: Some("用户配的板".to_string()),
+        };
+        let cmd = CommandPayload::SetMemoryMap {
+            description: description.clone(),
+        };
+        let back: CommandPayload =
+            serde_json::from_str(&serde_json::to_string(&cmd).expect("json")).expect("round trip");
+        match back {
+            CommandPayload::SetMemoryMap { description: got } => {
+                assert_eq!(got, description, "整份描述必须逐字段原样回来");
+            }
+            other => panic!("expected a SetMemoryMap, got {other:?}"),
+        }
+    }
+
+    /// **两侧逐字对照**：Rust 侧读前端 JS 镜像的源码，断言里面**字面**
+    /// 出现了 `SetMemoryMap` / `MemoryMap` / `memory.map` 这几个拼写，
+    /// 且两个构造器产出的**形状**与 Rust 侧**逐字同形**。
+    ///
+    /// ⚠️ **为什么要有这条**：契约层是 Rust，JS 镜像是手抄的 ⇒ 改了
+    /// 一侧忘了另一侧 ⇒ 前端发出去的命令名内核**根本不认识** ⇒ 命令
+    /// 永远没有回复（前端只能等超时），而**两侧各自的测试都绿着**。
+    ///
+    /// ⚠️ 这里断言的是**字面出现**，不是「JS 的构造器行为对」——行为由
+    /// 前端自己的门禁（`front/tests/contract.test.mjs`）盯。
+    #[test]
+    fn the_v6_memory_map_spelling_is_the_same_on_both_sides() {
+        // ⚠️ 路径：`crates/contract/src/protocol.rs` → 仓库根是 `../../..`
+        const JS_MIRROR: &str = include_str!("../../../front/lib/message.js");
+        for literal in [
+            "SetMemoryMap",
+            "MemoryMap",
+            "memory.map",
+            "setMemoryMap",
+            "memoryMap",
+        ] {
+            assert!(
+                JS_MIRROR.contains(literal),
+                "前端 JS 镜像里必须**字面**出现 `{literal}` —— 两侧拼写必须一致"
+            );
+        }
+        // ⚠️ 两个构造器的**线上形状**必须与 Rust 侧**逐字同形**。
+        assert!(
+            JS_MIRROR.contains("({ SetMemoryMap: { description } })"),
+            "前端 JS 镜像的命令构造器形状必须与 Rust 侧逐字同形"
+        );
+        assert!(
+            JS_MIRROR.contains("({ MemoryMap: { description, pending: Boolean(pending) } })"),
+            "前端 JS 镜像的事件构造器形状必须与 Rust 侧逐字同形"
         );
     }
 }
