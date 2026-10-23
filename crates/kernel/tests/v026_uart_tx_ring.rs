@@ -14,8 +14,23 @@
 //! 有（默认档没有 UART）。
 
 use riscv_sim_contract::session::{CheckpointMetaDto, SESSION_SNAPSHOT_SCHEMA_VERSION};
-use riscv_sim_kernel::kernel_host::{KernelHost, MemoryProfile, QEMU_VIRT_UART0_BASE};
+use riscv_sim_kernel::kernel_host::platform;
+use riscv_sim_kernel::kernel_host::{KernelHost, MemoryProfile};
 use riscv_sim_kernel::m14_bus::BusWidth;
+
+// ---------------------------------------------------------------------------
+// 平台描述（**取值来源**：从描述查，不抄宿主常量 · 规格 §6.3 第 15 条）
+// ---------------------------------------------------------------------------
+
+/// `qemu-virt` 描述。
+fn qemu_virt_description() -> riscv_sim_contract::platform::PlatformDescription {
+    platform::builtin_description(platform::PLATFORM_ID_QEMU_VIRT).expect("内置描述 qemu-virt")
+}
+
+/// 描述里 UART0 的**基址** —— **取值来源 = 描述**。
+fn described_uart0_base() -> u32 {
+    platform::device_base(&qemu_virt_description(), "UART0").expect("qemu-virt 描述里有 UART0")
+}
 
 // ---------------------------------------------------------------------------
 // 架构字面量（**不从被测实现反推**）
@@ -54,8 +69,10 @@ fn qemuvirt_host() -> KernelHost {
 
 /// 往 UART0 的 THR 写一个字节。
 fn write_thr(host: &mut KernelHost, byte: u8) {
+    // ⚠️ **基址来自平台描述**（规格 §6.3 第 15 条 · v0.27 · D-123-B）⇒
+    // 地址不再抄一份宿主常量。
     host.bus_mut()
-        .write(QEMU_VIRT_UART0_BASE, BusWidth::Byte, u32::from(byte))
+        .write(described_uart0_base(), BusWidth::Byte, u32::from(byte))
         .expect("写 THR");
 }
 

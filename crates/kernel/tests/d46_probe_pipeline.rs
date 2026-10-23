@@ -27,13 +27,31 @@ use riscv_sim_contract::model::{
     ImageKind, ImageRef, ImageSource, ProductTree, Project, ProjectVersion, WaveformHistory,
     WriteSize,
 };
+use riscv_sim_contract::platform::PlatformDescription;
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload, Message};
+use riscv_sim_kernel::kernel_host::platform;
 use riscv_sim_kernel::kernel_host::{
-    KernelHost, DEFAULT_GPIO_BASE, GPIO_PERIPH_ID, GPIO_SIGNAL_NAME, MAX_WAVEFORM_EDGES_PER_EVENT,
-    TOPIC_WAVEFORM,
+    KernelHost, GPIO_PERIPH_ID, GPIO_SIGNAL_NAME, MAX_WAVEFORM_EDGES_PER_EVENT, TOPIC_WAVEFORM,
 };
 use riscv_sim_kernel::m17_backend::INSTRUCTION_COST_PS;
 use riscv_sim_kernel::m18_probe::{CH_GPIO0, EDGE_STORE_CAP};
+
+// ---------------------------------------------------------------------------
+// 平台描述（**取值来源**：从描述查，不抄宿主常量 · 规格 §6.3 第 15 条）
+// ---------------------------------------------------------------------------
+
+/// `default` 描述。
+fn default_description() -> PlatformDescription {
+    platform::builtin_description(platform::PLATFORM_ID_DEFAULT).expect("内置描述 default")
+}
+
+/// 描述里 GPIO 的**基址** —— **取值来源 = 描述**。
+///
+/// ⚠️ demo 固件是 raw hex（落在地址 `0x0`）⇒ 自动选档挑中 `default`
+/// ⇒ 这份描述就是这个宿主的内存图来源。
+fn described_gpio_base() -> u32 {
+    platform::device_base(&default_description(), "GPIO0").expect("默认描述里有 GPIO0")
+}
 
 /// demo 固件 —— **引用共享常量**，不抄一份。
 ///
@@ -143,7 +161,9 @@ fn a_fresh_host_already_has_the_probe_pipeline_wired() {
     let events = dispatch(
         &mut host,
         CommandPayload::WriteMemory {
-            addr: DEFAULT_GPIO_BASE + 0x04,
+            // ⚠️ **基址来自平台描述**（规格 §6.3 第 15 条 · v0.27 ·
+            // D-123-B）⇒ 地址不再抄一份宿主常量。
+            addr: described_gpio_base() + 0x04,
             size: WriteSize::Word,
             value: 1,
         },
@@ -306,7 +326,7 @@ fn the_gpio_window_is_mapped_in_the_default_memory_map() {
     // 读 GPIO 的 DIR 寄存器（偏移 0）——固件没配过方向，应当是 0，
     // 但**读得到**本身就说明窗口映射好了。
     let value = host
-        .read_memory(DEFAULT_GPIO_BASE, WriteSize::Word)
+        .read_memory(described_gpio_base(), WriteSize::Word)
         .expect("GPIO 窗口必须已映射");
     assert_eq!(value, 0, "GPIO 的 DIR 寄存器默认是 0");
 }
@@ -476,7 +496,8 @@ fn accumulate_gpio_edges(host: &mut KernelHost, n: u32) {
         dispatch(
             host,
             CommandPayload::WriteMemory {
-                addr: DEFAULT_GPIO_BASE + 0x04,
+                // ⚠️ **基址来自平台描述**（规格 §6.3 第 15 条）。
+                addr: described_gpio_base() + 0x04,
                 size: WriteSize::Word,
                 value,
             },

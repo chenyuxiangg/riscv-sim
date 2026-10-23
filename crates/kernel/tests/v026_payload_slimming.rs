@@ -28,19 +28,60 @@
 //!
 //! 页大小、RAM 长度、JSON 上限全部写成**架构字面量**，不从被测实现反推。
 
+use riscv_sim_contract::platform::{PlatformDescription, RegionSpec};
 use riscv_sim_contract::session::{CheckpointMetaDto, SESSION_SNAPSHOT_SCHEMA_VERSION};
 
+use riscv_sim_kernel::kernel_host::platform;
 use riscv_sim_kernel::kernel_host::{KernelHost, MemoryProfile};
 use riscv_sim_kernel::m14_bus::BusWidth;
+
+// ---------------------------------------------------------------------------
+// 平台描述（**取值来源**：从描述查，不抄宿主常量）
+// ---------------------------------------------------------------------------
+
+/// `qemu-virt` 描述。
+fn qemu_virt_description() -> PlatformDescription {
+    platform::builtin_description(platform::PLATFORM_ID_QEMU_VIRT).expect("内置描述 qemu-virt")
+}
+
+/// 描述里的**全部区域**（按 `base` 升序 —— 与 `export_map()` 的顺序一致）。
+fn described_regions() -> Vec<RegionSpec> {
+    platform::regions_by_base(&qemu_virt_description())
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
+/// 描述里的**高段 RAM**（`(base, size)`）—— 取**最大**的那段（无歧义，
+/// 不靠下标）。
+fn described_high_ram() -> (u32, u32) {
+    let mut rams: Vec<(u32, u32)> = described_regions()
+        .iter()
+        .filter_map(|region| match region {
+            RegionSpec::Ram { base, size } => Some((*base, *size)),
+            _ => None,
+        })
+        .collect();
+    rams.sort_by_key(|(_, size)| *size);
+    *rams.last().expect("qemu-virt 描述里有 RAM")
+}
 
 // ---------------------------------------------------------------------------
 // 架构字面量（**不从被测实现反推**）
 // ---------------------------------------------------------------------------
 
 /// QemuVirt 的 RAM 起点。
+///
+/// ⚠️ **自抄副本**（规格 §6.3 第 16 条）：它**故意不从描述取** ⇒ 它的
+/// 作用是「**不与实现同源**」⇒ 描述漂了它会红。
+/// ⚠️ **它与 `qemu-virt` 描述的对应关系**：描述里那段高段 RAM 的
+/// `base`（`base = 0x8000_0000` / `size = 134217728`）。
 const QEMU_VIRT_RAM_BASE: u32 = 0x8000_0000;
 
 /// QemuVirt 的 RAM 长度（128 MiB）。
+///
+/// ⚠️ **自抄副本**（规格 §6.3 第 16 条）⇒ **不从描述取**。
+/// ⚠️ **对应关系**：描述里那段高段 RAM 的 `size`。
 const QEMU_VIRT_RAM_SIZE: u32 = 128 * 1024 * 1024;
 
 /// 物化页的大小（4 KiB）。
@@ -50,6 +91,9 @@ const PAGE_BYTES: usize = 4096;
 const JSON_LIMIT: usize = 1024 * 1024;
 
 /// QemuVirt 档应有的区域总数（低段 RAM + 高段 RAM + GPIO + UART + CLINT + PLIC）。
+///
+/// ⚠️ **自抄副本**（规格 §6.3 第 16 条的口径）⇒ **不从描述取**。
+/// ⚠️ **对应关系**：`qemu-virt` 描述里 `regions` 的条数。
 const QEMU_VIRT_REGION_COUNT: usize = 6;
 
 /// 检查点元数据（段 0）。
@@ -68,16 +112,29 @@ fn meta(host: &KernelHost) -> CheckpointMetaDto {
 /// ⚠️ 这条断言是 B-3 / S-2 的**前提**：没有它，「载荷小」在降级时也成立。
 fn assert_qemu_virt_layout(host: &KernelHost) {
     let map = host.bus().export_map();
+    // ⚠️ **期望值从 `qemu-virt` 描述查**（规格 §6.3 第 8 条 · v0.27 ·
+    // D-123-B）：内存图是**数据** ⇒ 断言的来源也必须是那份数据 ⇒ 描述
+    // 的内容由 `tests_platform.rs` 的 B-2 用例（**字面量**）钉住。
+    let described_count = described_regions().len();
     assert_eq!(
         map.regions.len(),
-        QEMU_VIRT_REGION_COUNT,
-        "QemuVirt 档应有 {QEMU_VIRT_REGION_COUNT} 个区域（低段 RAM + 高段 RAM + GPIO + UART + CLINT + PLIC）\
-         —— 若是 3，那是换档失败后**静默退回默认档**了（`new_with_profile` 不 panic）"
+        described_count,
+        "QemuVirt 档的区域数必须与**描述**一致 —— 若是 3，那是换档失败后\
+         **静默退回默认档**了（`new_with_profile` 不 panic）"
     );
+    // ⚠️ **独立字面量交叉核对**（规格 §6.3 第 16 条的口径）：描述的条数
+    // 必须与**独立字面量**一致 ⇒ 描述漂了这条会红。
+    assert_eq!(
+        described_count, QEMU_VIRT_REGION_COUNT,
+        "qemu-virt 描述里的区域数必须还是 {QEMU_VIRT_REGION_COUNT}（独立字面量交叉核对）"
+    );
+
+    // ⚠️ **期望值从描述查**（规格 §6.3 第 8 条）。
+    let (described_base, described_size) = described_high_ram();
     let big_ram = map
         .regions
         .iter()
-        .filter(|r| r.kind == "ram" && r.base == QEMU_VIRT_RAM_BASE)
+        .filter(|r| r.kind == "ram" && r.base == described_base)
         .collect::<Vec<_>>();
     assert_eq!(
         big_ram.len(),
@@ -85,8 +142,18 @@ fn assert_qemu_virt_layout(host: &KernelHost) {
         "QemuVirt 的 RAM 必须是**一个** 128 MiB 区域（不是 8 个 16 MiB 的）"
     );
     assert_eq!(
-        big_ram[0].size, QEMU_VIRT_RAM_SIZE,
-        "QemuVirt 的 RAM 区域大小必须是 128 MiB"
+        big_ram[0].size, described_size,
+        "QemuVirt 的 RAM 区域大小必须与**描述**一致"
+    );
+    // ⚠️ **独立字面量交叉核对**（规格 §6.3 第 16 条）：那两份**自抄副本**
+    // **故意不从描述取** ⇒ 描述漂了它们会红。
+    assert_eq!(
+        described_base, QEMU_VIRT_RAM_BASE,
+        "qemu-virt 描述里高段 RAM 的 base 必须还是 0x8000_0000（独立字面量交叉核对）"
+    );
+    assert_eq!(
+        described_size, QEMU_VIRT_RAM_SIZE,
+        "qemu-virt 描述里高段 RAM 的 size 必须还是 128 MiB（独立字面量交叉核对）"
     );
 }
 

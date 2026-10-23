@@ -22,16 +22,76 @@
 use riscv_sim_contract::model::{
     ImageKind, ImageRef, ImageSource, ProductTree, Project, ProjectVersion, WriteSize,
 };
+use riscv_sim_contract::platform::{PlatformDescription, RegionSpec};
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload, Message};
 use riscv_sim_contract::session::{
     CheckpointMetaDto, M15PeriphDto, M16IntcDto, SESSION_SNAPSHOT_SCHEMA_VERSION,
 };
 use riscv_sim_contract::snapshot::QueuedEventDto;
 
-use riscv_sim_kernel::kernel_host::{
-    KernelHost, DEFAULT_GPIO_BASE, DEFAULT_RAM_HIGH_BASE, DEFAULT_RAM_HIGH_SIZE,
-    DEFAULT_RAM_LOW_BASE, DEFAULT_RAM_LOW_SIZE, DEMO_FIRMWARE_BYTES, GPIO_PERIPH_ID,
-};
+use riscv_sim_kernel::kernel_host::platform;
+use riscv_sim_kernel::kernel_host::{KernelHost, DEMO_FIRMWARE_BYTES};
+
+// ---------------------------------------------------------------------------
+// 平台描述（**取值来源**：从描述查，不抄宿主常量 · 规格 §6.3 第 12 / 15 条）
+// ---------------------------------------------------------------------------
+
+/// `default` 描述。
+///
+/// ⚠️ demo 固件是 **raw hex**（落在地址 `0x0`）⇒ 自动选档挑中 `default`
+/// （`priority` 更小）⇒ 这份描述就是这个宿主的内存图来源。
+fn default_description() -> PlatformDescription {
+    platform::builtin_description(platform::PLATFORM_ID_DEFAULT).expect("内置描述 default")
+}
+
+/// 描述里的**全部区域**（按 `base` 升序 —— 与 `export_map()` 的顺序一致）。
+fn described_regions() -> Vec<RegionSpec> {
+    platform::regions_by_base(&default_description())
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
+/// 描述里的**低段 RAM**（`(base, size)`）—— 取 `base == 0` 的那段。
+fn described_low_ram() -> (u32, u32) {
+    described_regions()
+        .iter()
+        .find_map(|region| match region {
+            RegionSpec::Ram { base, size } if *base == 0 => Some((*base, *size)),
+            _ => None,
+        })
+        .expect("default 描述里有 base 为 0 的低段 RAM")
+}
+
+/// 描述里的**高段 RAM**（`(base, size)`）—— 取**最大**的那段（无歧义，
+/// 不靠下标）。
+fn described_high_ram() -> (u32, u32) {
+    let mut rams: Vec<(u32, u32)> = described_regions()
+        .iter()
+        .filter_map(|region| match region {
+            RegionSpec::Ram { base, size } => Some((*base, *size)),
+            _ => None,
+        })
+        .collect();
+    rams.sort_by_key(|(_, size)| *size);
+    *rams.last().expect("default 描述里有 RAM")
+}
+
+/// 描述里 GPIO 的**基址** —— **取值来源 = 描述**。
+fn described_gpio_base() -> u32 {
+    platform::device_base(&default_description(), "GPIO0").expect("默认描述里有 GPIO0")
+}
+
+/// 描述里 GPIO 的**器件 id** —— **取值来源 = 描述**。
+fn described_gpio_id() -> String {
+    let base = described_gpio_base();
+    described_regions()
+        .iter()
+        .find(|region| region.base() == base)
+        .and_then(|region| region.device_id())
+        .expect("默认描述里的 GPIO 有器件 id")
+        .to_string()
+}
 
 // ---------------------------------------------------------------------------
 // 夹具
@@ -154,7 +214,9 @@ fn write_gpio_out(host: &mut KernelHost, value: u32) {
     let events = dispatch(
         host,
         CommandPayload::WriteMemory {
-            addr: DEFAULT_GPIO_BASE + 4,
+            // ⚠️ **基址来自平台描述**（规格 §6.3 第 15 条 · v0.27 ·
+            // D-123-B）：内存图是**数据** ⇒ 地址也必须**从那份数据查**。
+            addr: described_gpio_base() + 4,
             size: WriteSize::Word,
             value,
         },
@@ -223,10 +285,9 @@ fn final_state(host: &KernelHost) -> FinalState {
 /// ——两边的取数路径不同，才谈得上「终态相同」是个真结论。
 fn read_ram(host: &KernelHost) -> Vec<RamRegion> {
     let mut regions = Vec::new();
-    for (base, size) in [
-        (DEFAULT_RAM_LOW_BASE, DEFAULT_RAM_LOW_SIZE),
-        (DEFAULT_RAM_HIGH_BASE, DEFAULT_RAM_HIGH_SIZE),
-    ] {
+    // ⚠️ **两段 RAM 的 `(base, size)` 从平台描述查**（规格 §6.3 第 12 条
+    // · v0.27 · D-123-B）⇒ 不再抄一份宿主常量。
+    for (base, size) in [described_low_ram(), described_high_ram()] {
         let mut words = Vec::with_capacity((size / 4) as usize);
         let mut off = 0u32;
         while off < size {
@@ -549,7 +610,7 @@ fn the_peripheral_state_survives_the_round_trip() {
     step(&mut host, N_STEPS);
     let payload = host.capture_session(meta(&host));
     let want = payload.m15_periph.gpios[0].clone();
-    assert_eq!(want.id, GPIO_PERIPH_ID);
+    assert_eq!(want.id, described_gpio_id());
     assert_eq!(want.outputs, 1, "固件写过 GPIO.OUT");
 
     // 漂移：把 OUT 改掉。
