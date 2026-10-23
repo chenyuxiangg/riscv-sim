@@ -69,6 +69,7 @@
   "id": "qemu-virt",
   "name": "QEMU virt",
   "priority": 20,
+  "auto_selectable": true,
   "region_budget_bytes": 134217728,
   "regions": [ ... ]
 }
@@ -82,6 +83,7 @@
 | `id` | 字符串 | ✅ | 平台标识（`default` / `qemu-virt` / `minimal` / …）⇒ **平台的主键** |
 | `name` | 字符串 | ✅ | 人读名称 |
 | `priority` | 整数 | ✅ | **自动选档**时候选顺序，**小者优先**（裁决 E） |
+| `auto_selectable` | 布尔 | ❌（**默认 `true`**） | 这个描述**是否参与自动选档**（裁决 E）⇒ 演示平台设 `false` ⇒ 只能被**显式**指定 |
 | `region_budget_bytes` | 整数 | ✅ | **每区域**护栏预算（字节）⇒ 语义与 M-14 的 `max_region_bytes` 一致（§1.5 裁决 J'） |
 | `regions` | 数组 | ✅ | 区域列表，**允许乱序**（校验时按 `base` 排序） |
 | `description` | 字符串 | ❌ | 人读说明（JSON 不能写注释的补偿） |
@@ -138,6 +140,9 @@
 | V-7 | RAM / ROM 的**声明大小** > `region_budget_bytes` | `E_PLT-07` | ⚠️ 见下方**重要说明** |
 | V-8 | 未知器件种类 / 缺参数 / 参数类型错 | serde 错误 | 反序列化阶段就失败 |
 | V-9 | 外设器件的 `id` 与另一条重复 | `E_PLT-08` | 同名器件 ⇒ 恢复时按 id 反查会歧义 |
+| V-10 | **宿主侧**：请求的**平台 id 不存在** | `E_PLT-09` | 契约层拥有（施工期补） |
+| V-11 | **宿主侧**：描述**文件读不了** | `E_PLT-10` | 契约层拥有（施工期补） |
+| V-12 | **宿主侧**：描述**文件不是合法 JSON / 形态非法** | `E_PLT-11` | 契约层拥有（施工期补） |
 
 ⚠️ **V-7 为什么必须存在（一个真发现）**：v0.26 把 RAM 的护栏从「**声明大小**」改成了「**物理占用**」（`RamBackend` 懒分配 ⇒ `map_ram` 时物化页数 = 0）⇒ **「声明一段超大 RAM」在 M-14 的运行时护栏里已经拦不住了** ⇒ 描述层是**唯一**还能拦「声明期超大」的地方 ⇒ 它必须拦。
 ⚠️ 但 V-7（**声明期**）与 M-14 的 `E_BUS_09`（**运行期**，按物理占用）是**两个不同语义、不同阶段**的约束 ⇒ **不同码**（不合并）⇒ 且 V-7 的码**不叫** `E_BUS_09`（避免「一码多义」）。
@@ -195,8 +200,9 @@ pub enum DeviceSpec {
 ⚠️ **内部 tag 的名字是 `device` 而不是 `kind`**（`kind` 已被区域层占用）⇒ 线上键名是 `{"device": "uart16550", ...}` ⇒ **与 §1.5 的示例逐字一致**。
 
 **校验器**：`PlatformDescription::validate(&self) -> Result<(), PlatformError>`，**V-1 ~ V-9 全部落在这里** ⇒ **一个约束一个落点**（宿主与前端都调它，不各写一份）。
+⚠️ **V-10 ~ V-12 不落在 `validate` 里**（它们是**宿主侧**的三类失败：平台 id 不存在 / 描述文件读不了 / 描述文件形态非法 ⇒ 宿主在做**装载**时才知道）⇒ 但**它们的场景码仍归契约层所有**（`crates/contract/src/error.rs`）⇒ 宿主只**引用**、**不自建** ⇒ **约束的落点唯一**。
 
-⚠️ **错误码族**：新增第 **15 个**错误族 `ErrorFamily::Platform`（tag `"PLT"`，**3 字符** ⇒ 符合契约层「tag 是 3–5 字符」的约束）+ 场景码 `1..8`（线上 `E_PLT-01` .. `E_PLT-08`）。
+⚠️ **错误码族**：新增第 **15 个**错误族 `ErrorFamily::Platform`（tag `"PLT"`，**3 字符** ⇒ 符合契约层「tag 是 3–5 字符」的约束）+ 场景码 `1..11`（线上 `E_PLT-01` .. `E_PLT-11`）⇒ ⚠️ **十一条规则（V-1 ~ V-12，其中 V-8 落在 serde 层）对应十一个码**。
 
 ⚠️ **新增一族要改两处**（契约层的 `error_families!` 宏是「族」的真相源，但**族标签表 `TAGS` 是另一处**）：
 - `crates/contract/src/error.rs:119` 的 `error_families! { … }` 里加**一行** `Platform => "PLT",`；
@@ -241,10 +247,19 @@ pub enum DeviceSpec {
 
 ```rust
 /// 描述 → 器件实例。**一个 match、一个落点**。
-fn build_device(spec: &DeviceSpec, base: u32) -> Result<Rc<RefCell<dyn Peripheral>>, PlatformError>
+///
+/// ⚠️ **返回「两种视图」**（施工期订正）：总线侧要的是**类型擦除**的
+/// `Rc<RefCell<dyn Peripheral>>`，而宿主侧要的是**有类型**的句柄
+///（`self.uart0: Option<Rc<RefCell<Uart16550>>>`）⇒ ⚠️ `RefCell<T>` 是
+/// **不变**的 ⇒ `RefCell<dyn Peripheral>` **降不回** `RefCell<Uart16550>`
+/// ⇒ 一个返回值**不可能**同时满足两边 ⇒ ⇒ 工厂返回**两样东西**：
+/// ① 擦除视图（挂总线）② 有类型句柄（宿主用）。
+/// ⇒ 器件种类的 `match` 仍然**只有一处** ✓
+fn build_device(spec: &DeviceSpec, base: u32) -> Result<BuiltDevice, PlatformError>
 ```
 
-⚠️ **契约先行**：工厂返回 `Rc<RefCell<dyn Peripheral>>`（契约层 `port.rs` 的 trait 对象）⇒ 工厂**不认识** M-15 的具体类型，除了**构造**那一刻。
+⚠️ **契约先行**：工厂返回**两种视图**（① **擦除视图** `Rc<RefCell<dyn Peripheral>>` —— 契约层 `port.rs` 的 trait 对象，挂总线用；② **有类型句柄** —— 宿主自己用，如 `Rc<RefCell<Uart16550>>`）⇒ 工厂**不认识** M-15 的具体类型，除了**构造**那一刻。
+⚠️ **为什么必须是两种视图**：`RefCell<T>` 是**不变**的 ⇒ `RefCell<dyn Peripheral>` **降不回** `RefCell<Uart16550>` ⇒ 一个返回值**不可能**同时满足总线侧与宿主侧 ⇒ ⇒ 拆成两样东西 ⇒ 而**器件种类的 `match` 仍然只有一处** ✓（约束的落点没增加）。
 ⚠️ **新增一种器件种类 ⇒ 必须改这一个 match** ⇒ 这是**不可消除**的边界 ⇒ 规格明说：**平台（内存图）零代码，器件种类要代码**。
 
 ### 2.5 「一个约束一个落点」对照表（裁决 H）
@@ -283,21 +298,30 @@ fn build_device(spec: &DeviceSpec, base: u32) -> Result<Rc<RefCell<dyn Periphera
 
 ### 裁决 E · 自动选档判据（逐字等价于今天）
 
-**今天**（`mod.rs:918-936`）：镜像的每个地址区间 `(lo, hi)` 必须**完整**落在**某一个高段 RAM 窗口**内；落在 Default 高段 ⇒ Default；落在 QemuVirt 高段（但不在 Default 高段）⇒ QemuVirt；两档之外 ⇒ 跳过。
+**今天**（`mod.rs:918-936`）：镜像的每个地址区间 `(lo, hi)` **逐个过**；能被 Default 的**高段**窗口完整覆盖 ⇒ 继续下一个区间；**只**被 QemuVirt 的**高段**窗口完整覆盖 ⇒ **立即**选 QemuVirt；两档都覆盖不了 ⇒ 跳过；全部区间过完 ⇒ Default。
 
-**描述化后**：
+⚠️ **今天有两条隐含结构，必须原样搬过来**：① **区间在外层**（不是「描述在外层、找第一个能装下的」）② 判据只看**高段**窗口。
 
-1. 对每个描述，取它的**全部 RAM 区域**；
-2. 镜像的每个区间 `(lo, hi)` 必须被**某一个 RAM 区域完整覆盖**（`lo >= base && hi <= base + size`）；
-3. 候选描述按 `priority` **小者优先**（内置：`default` = 10 · `qemu-virt` = 20 · `minimal` = 30）；
-4. **无候选 ⇒ 回落 `default`**（与今天「`continue` ⇒ 最终返回 Default」等价）。
+**描述化后**（描述多了一个 `auto_selectable` 字段，见 §1.3）：
 
-⚠️ **等价性论证**（必须钉住，P-7）：
+1. 候选描述 = 全部 `auto_selectable == true` 的内置描述，按 `priority` **小者优先**（`default` = 10 · `qemu-virt` = 20）；
+2. **区间在外层**逐个过：对每个区间 `(lo, hi)`，找出**能完整覆盖它**的候选描述（`lo >= base && hi <= base + size`，在它的**全部 RAM 区域**里找）里 `priority` **最小**的那个；
+   - **找不到** ⇒ 跳过这个区间（= 今天的 `continue`）；
+   - 找到的是 **`default`** ⇒ 继续下一个区间（= 今天「被 Default 覆盖 ⇒ 不 return」）；
+   - 找到的是**别的** ⇒ **立即**选它（= 今天的 `return QemuVirt`）；
+3. 全部区间过完 ⇒ 回落 `default`。
+
+⚠️ **等价性论证**（必须钉住，B-9）：
 - 镜像落在 Default 高段 ⇒ 只有 `default` 覆盖 ⇒ 选 `default` ✓（今天同）
 - 镜像落在 QemuVirt 高段（`0x8040_0000` 以上）⇒ `default` **不**覆盖、`qemu-virt` 覆盖 ⇒ 选 `qemu-virt` ✓（今天同）
 - 镜像落在两档之外（如 `0x9000_0000`）⇒ 无候选 ⇒ 回落 `default` ✓（今天同 ⇒ 随后由 M-14 报未映射）
-- 镜像落在**低段**（`0x0..0x1000`）⇒ `default` 的低段 RAM **覆盖**它 ⇒ 选 `default` ✓（今天：`inside(default_high)` 为假 ⇒ `continue` ⇒ Default ⇒ 同）
-- ⚠️ **但今天只查高段**，描述化查**全部 RAM 区域** ⇒ 若某描述**只有低段 RAM**（`minimal`）而镜像落在低段 ⇒ `minimal` 也会成为候选 ⇒ 但 `minimal` 的 `priority = 30` > `default` 的 10 ⇒ **`default` 优先** ⇒ 仍选 `default` ✓（这就是 `priority` 字段存在的理由：**不靠注册顺序、不靠容量**）。
+- 镜像落在**低段**（`0x0..0x1000`）⇒ `default` 的**低段** RAM 覆盖它 ⇒ 选 `default` ✓（今天：`inside(default_high)` 为假 ⇒ `continue` ⇒ Default ⇒ 同）
+- 镜像落在**低段但超出 1 MiB**（如 `0x0..0x1000_01`）⇒ `default` 与 `qemu-virt` 的低段**都是 1 MiB** ⇒ 都覆盖不了 ⇒ 无候选 ⇒ 回落 `default` ⇒ 随后报未映射 ✓（**与今天逐字一致**：今天它落在两档**高段**之外 ⇒ `continue` ⇒ Default ⇒ 同样报未映射）
+
+⚠️ **`auto_selectable` 存在的唯一理由（这是本裁决的关键）**：`minimal` 的低段是 **2 MiB**（比 `default` 的 1 MiB 大）⇒ 若它参与自动选档，就会覆盖上面那条「超出 1 MiB」的镜像 ⇒ 选到 `minimal` ⇒ **今天绝不会发生** ⇒ ⇒ `minimal` 必须 `auto_selectable: false` ⇒ 它**只被显式指定**。
+⇒ ⚠️ **这就是把「今天只查高段」这个差异显式承载下来的地方** —— 靠**数据里的一个布尔**，而不是靠代码里的一份 id 名单（名单是「代码知道哪个平台是演示平台」⇒ 换个人写描述就会破）。
+
+⚠️ **两份真实平台描述都是 `auto_selectable: true`** ⇒ 它们之间**没有**低段差异（低段都是 1 MiB）⇒ 唯一有低段差异的 `minimal` 被排除 ⇒ ⇒ 整体**逐字等价** ✓
 
 ### 裁决 F · 内置描述 `include_str!` 编译进二进制 + 运行时文件路径入口
 
@@ -357,7 +381,7 @@ fn build_device(spec: &DeviceSpec, base: u32) -> Result<Rc<RefCell<dyn Periphera
 ```asm
         lui   x5, 0x84000        # x5 = 0x8400_0000（固件基址，QEMU virt 高段 RAM）
         addi  x5, x5, 0x28      # x5 = handler 的地址（0x28 == `handler` 的偏移，见下）
-        lui   x6, 0x20040       # x6 = 0x0200_4000 = CLINT 的 mtimecmp
+        lui   x6, 0x2004        # x6 = 0x0200_4000 = CLINT 的 mtimecmp（⚠️ **立即数是 0x2004**，不是 0x20040 —— 见下方字节表的「真缺陷」说明）
         li    x7, 1             # x7 = 1 周期
         sw    x7, 0(x6)         # 写 mtimecmp 低 32 位（高半保持 0 ⇒ 值 = 1 周期）
         li    x8, 0x80          # x8 = 1 << 7 = **MTIE 位号 7**
@@ -370,7 +394,7 @@ handler:
         csrr  x10, mepc         # x10 = guest 看到的 mepc
         csrr  x11, mtval        # x11 = guest 看到的 mtval
         addi  x12, x12, 1       # 计数：handler 跑了几遍
-        csrrwi x0, irq_clear, 8 # 清 line 3（**位掩码 bit 3 = 1 << 3 = 8**）
+        csrrwi x0, 0x7c0, 8 # 清 line 3（**位掩码 bit 3 = 1 << 3 = 8**；⚠️ **CSR 号是 0x7c0**，不是 0x7c1 —— 见下方字节表的「真缺陷」说明）
         mret
 ```
 
@@ -392,7 +416,7 @@ riscv-none-elf-objcopy -O binary --only-section=.text d82.o d82.bin
 | --- | --- | --- |
 | 0x00 | `lui x5, 0x84000` | `0x840002b7` |
 | 0x04 | `addi x5, x5, 0x28` | `0x02828293` |
-| 0x08 | `lui x6, 0x20040` | `0x20040337` |
+| 0x08 | `lui x6, 0x2004` | `0x02004337` |
 | 0x0c | `li x7, 1` | `0x00100393` |
 | 0x10 | `sw x7, 0(x6)` | `0x00732023` |
 | 0x14 | `li x8, 0x80` | `0x08000413` |
@@ -404,10 +428,25 @@ riscv-none-elf-objcopy -O binary --only-section=.text d82.o d82.bin
 | 0x2c | `csrr x10, mepc` | `0x34102573` |
 | 0x30 | `csrr x11, mtval` | `0x343025f3` |
 | 0x34 | `addi x12, x12, 1` | `0x00160613` |
-| 0x38 | `csrrwi x0, 0x7c1, 8` | `0x7c145073` |
+| 0x38 | `csrrwi x0, 0x7c0, 8` | `0x7c045073` |
 | 0x3c | `mret` | `0x30200073` |
 
+⚠️ ⚠️ **`0x38` 那条的 CSR 号是 `0x7c0`（不是 `0x7c1`）** —— 施工期第五次订正修掉的**真缺陷**：原字节表写的是 `csrrwi x0, 0x7c1, 8` / `0x7c145073` ⇒ **CSR 号错了一位** ⇒ 后果是**假绿**：
+- 契约层的 `irq_clear` 是 **`CSR_IRQ_CLEAR = 0x7C0`**（`crates/contract/src/csr.rs:171`）；
+- `0x7C1` **不在** `csr_is_implemented` 的名单里（`csr.rs` 的 `matches!` 只列了 `CSR_IRQ_CLEAR` = `0x7C0`）⇒ 按 `csr_write_is_ignored`（`csr.rs:565`）⇒ **guest 写 `0x7C1` 被静默忽略**；
+- ⇒ **定时器线永不清** ⇒ handler 里的 `mret` 落回 `mepc` 后**立刻再次陷入** ⇒ 判别式 4「handler 计数器 x12 ≥ 1」**照样能过** ⇒ **用例看起来绿，其实根本没测到「清线」这条通路** ⇒ 这正是「假绿」的定义；
+- ⇒ 修法：CSR 号改回 **`0x7c0`** ⇒ `csrrwi x0, 0x7c0, 8` ⇒ 机器码 **`0x7c045073`**（`csr` = `0x7c0` · `funct3` = 5（`csrrwi`）· `zimm` = 8）⇒ **已用仓外交叉工具链重新汇编 + `objdump` 逐条核对 + `objcopy` 逐字节核对**（`riscv-none-elf-as -march=rv32im_zicsr -mabi=ilp32` ⇒ `objdump -d` ⇒ `objcopy -O binary --only-section=.text` ⇒ 仍是 16 条 × 4 字节 = 64 字节）。
+- ⚠️ **顺带一提**：`csrrwi` 的 `zimm` 只有 **5 位** ⇒ 位掩码 `8`（`1 << 3`）放得进，但 `1 << 7` = 128 就**放不进** ⇒ 清**线 7** 用 `csrrwi` 是**做不到**的 ⇒ 用例注释里要写明这条限制（v0.24 那条 `csrrwi x0, irq_clear, 2` 同理）。
+
+⚠️ ⚠️ **`0x08` 那条的立即数是 `0x2004`（不是 `0x20040`）** —— 施工期第七次订正修掉的**真缺陷**（**三个缺陷里最致命的一个**）：原字节表写 `lui x6, 0x20040` / `0x20040337` ⇒ **`x6` 拿到的是 `0x2004_0000`，不是 `0x0200_4000`** ⇒ 后果是**固件根本到不了定时器**：
+- **`lui` 的立即数是 20 位、并且要左移 12 位**（`x = imm[19:0] << 12`）⇒ 要得到 `0x0200_4000` 需要的立即数是 **`0x0200_4000 >> 12 = 0x02004`** ⇒ 写成 `0x20040` 是**多写了一个 0**（把「地址的高位」当成立即数）⇒ `0x20040 << 12 = 0x2004_0000`；
+- `0x2004_0000` **不在 `qemu-virt` 描述的任何区域里**（`ram@0/1 MiB` · `ram@0x8000_0000/128 MiB` · `clint@0x0200_0000` · `plic@0x0C00_0000` · `uart@0x1000_0000` · `gpio@0x4000_0000`）⇒ guest 的 `sw x7, 0(x6)` 落到**未映射地址** ⇒ 触发**架构陷阱 cause 7（store access fault）**（D-99 的判别力）⇒ **guest 在第 5 条指令就死了**，压根跑不到「写 `mtimecmp` → 使能 `mie` → 陷入」那条路；
+- ⚠️ **而且那时 `mtvec` 还没设**（`mtvec` 在第 9 条指令才写，而 store 在第 5 条）⇒ 陷阱跳到 `mtvec = 0` ⇒ 落进低段 RAM 的全零区 ⇒ 执行非法指令 ⇒ **再次陷入** ⇒ **无限陷阱循环** ⇒ ⇒ 后果是「陷入确实发生了，但 `mcause` 是 store fault 的 `7`、不是定时器中断的 `0x8000_0007`」⇒ **判别式 1 会红**（这正是它该红的理由）。
+- ⇒ 修法：立即数改成 **`0x2004`** ⇒ 机器码 **`0x02004337`**（小端字节 `37 43 00 02`）⇒ **已用仓外交叉工具链重新汇编 + `objdump` 逐条核对 + `objcopy` 逐字节核对**（`objdump` 的反汇编行也自证：`sw t2,0(t1) # 2004000` ⇒ 目标地址 `0x0200_4000`）⇒ 仍是 16 条 × 4 字节 = 64 字节。
+- ⚠️ **教训（别再犯）**：`lui` 的立即数**不是**地址的高 20 位，而是「地址右移 12 位」⇒ 写 `lui` 之前先算 `addr >> 12` ⇒ **不许拿「看着像地址的一段」直接填**。
+
 ⚠️ **`handler` 在偏移 `0x28`** ⇒ `addi x5, x5, 0x28` 里的常量**与固件布局耦合**（`loop` 之前正好 10 条指令 × 4 字节）⇒ 改固件条数**必须**同步改这个常量 ⇒ 用例注释里要写明这一点。
+
 ⚠️ **`loop` 的绝对地址 = `0x8400_0024`**、`handler` 的绝对地址 = `0x8400_0028`（固件基址 `0x8400_0000` + 偏移）⇒ 这两个值**由固件布局决定**⇒ 断言时写**字面量**（不许写成 `FW_BASE + 0x24` 那种从常量反推的形式 —— 那跟实现同源，改实现时会跟着变，变成恒绿）。
 
 ⚠️ **`irq_clear` 的值是「位掩码」，不是「线号」**（M-17 `clear_lines_by_mask`，`m17_backend/mod.rs:349-354`：判据是 `mask & (1 << line) != 0`）⇒ 定时器线 3 ⇒ 写 **`8`**（`1 << 3`），**不是 3**。
@@ -424,24 +463,35 @@ riscv-none-elf-objcopy -O binary --only-section=.text d82.o d82.bin
 2. `mepc == 0x8400_0024`（**`loop` 指令的绝对地址**，架构无关但**由固件布局决定** ⇒ 写**字面量**，不许写成 `FW_BASE + 0x24`）；
 3. `mtval == 0`（定时器中断没有错因值 ⇒ M-17 调 `enter_trap(state, cause, 0)`，`m17_backend/mod.rs:464`）；
 4. handler 的计数器（x12）≥ 1 ⇒ 真的进了 handler，不是停在别处；
-5. ⚠️ **变异可红**：把固件的 `sw x7, 0(x6)` 去掉 ⇒ **必须红**（陷入不发生）⇒ 证明这条用例**真的在测那条通路**，不是恒绿。
+5. ⚠️ **变异可红**：把固件的 `sw x7, 0(x6)` 去掉 ⇒ **必须红**（陷入不发生）⇒ 证明这条用例**真的在测那条通路**，不是恒绿；
+5b. ⚠️ **变异可红（施工期第五次订正新增）**：把固件的 `li x7, 1` 改成 `li x7, 0`（`mtimecmp = 0`）⇒ **必须红**（陷入不发生）⇒ 理由：`mtimecmp == 0` 在 CLINT 侧是「无期限」、在 M-16 侧是「**定时器关闭**」（`poll()` 的判据是 `mtimecmp_ps != 0 && mtime_ps >= mtimecmp_ps`，`m16_interrupt/mod.rs:400`）⇒ 定时器**永不到期** ⇒ ⇒ 这条比第 5 条**更严格**：它证明「**比较值真的被喂进了 M-16**」（而不只是「guest 写总线这条路通」）。
+6. ⚠️ **变异可红（施工期第五次订正新增）**：把固件的 `csrrwi x0, 0x7c0, 8` 的 **CSR 号改回 `0x7c1`**（即原字节表那版）⇒ **必须红** ⇒ 证明用例**真的在测「清线」这条通路** ⇒ ⚠️ **这条判别式是上面那条「CSR 号错一位 = 假绿」的护栏** ⇒ 没有它，那条缺陷就查不出来。
+   ⇒ ⚠️ **「红」的标准是什么**：CSR 号改成 `0x7c1` ⇒ 写被**静默忽略**（`csr_write_is_ignored`，`csr.rs:565`）⇒ **定时器线永不被清** ⇒ M-16 的**挂起队列里线 3 一直在**、**`raised` 里线 3 一直在**、`active_irq` 一直指着 3 ⇒ ⇒ **判据是「M-16 的导出状态里线 3 已被清掉」**（`host.intc_state()` 是公开 API ⇒ `raised` / `pending` / `active_irq` 三个字段都能看）⇒ **CSR 号写错 ⇒ 线 3 仍在 ⇒ 红** ⇒ ✅ 这才是「清线真的发生了」的判别式。
+   ⇒ ⚠️ **为什么不用「陷入次数」当判据**：定时器是**电平**语义（M-16 `poll()`：`now_ps >= mtimecmp_ps` ⇒ 请求线 3）⇒ 清掉线之后比较值**仍然**是 100 000 ps、而 `now_ps` **只增不减** ⇒ **下一个量子边界 `poll()` 又会请求线 3** ⇒ **反复陷入是平台的正常行为** ⇒ ⇒ **「陷入恰好一次」不成立** ⇒ **不许**把「x12 == 1」当判据（会恒红）。
+
+⚠️ ⚠️ **判别式 4 的「x12 ≥ 1」为什么够用（写死，别推）**：判别式 4 只证明「**确实进了 handler**」（不是停在别处）⇒ 它与「清线有没有生效」是**两件独立的事** ⇒ 「清线」由**判别式 6**（M-16 导出状态）单独负责 ⇒ ⇒ **两条判据各管一件事，不互相顶替**。
 
 ⚠️ **时序（必须写进用例注释，否则一定写错）**：
 
 | 事实 | 数值 | 出处 |
 | --- | --- | --- |
-| 每条指令推进的虚拟时间 | `INSTRUCTION_COST_PS` = **1 000 ps**（1 ns） | `m17_backend/mod.rs:74` |
-| 时间量子 | `TIME_QUANTUM_PS` = **1 µs** = **1 000 条指令** | `m12_engine` |
-| M-16 的 `poll()` 采样点 | **量子边界**（每 1 000 条指令一次） | M-17 取指边界采样 |
-| CLINT 的频率 | 10 MHz ⇒ **1 周期 = 100 000 ps = 100 µs** | `QEMU_VIRT_FREQ_HZ` |
-| `mtimecmp = 1` 周期 ⇒ M-16 的比较值 | `100 000 ps` | `clint.mtimecmp_ps()` |
+| 每条指令推进的虚拟时间 | `INSTRUCTION_COST_PS` = **1 000 ps**（1 ns） | `m12_engine/mod.rs:81`（= `TIME_QUANTUM_PS / QUANTUM_INSTR_QUOTA`） |
+| 时间量子 | `TIME_QUANTUM_PS` = **1 µs** = **1 000 条指令** | `m12_engine/mod.rs:69` |
+| 一个量子的指令数 | `QUANTUM_INSTR_QUOTA` = **1 000 条** | `m12_engine/mod.rs:75` |
+| M-16 的 `poll()` 采样点 | **量子边界**（每 1 000 条指令一次） | M-17 取指边界采样（`m17_backend/mod.rs:425`） |
+| CLINT 的频率 | 10 MHz ⇒ **1 周期 = 100 000 ps = 100 ns** | `PS_PER_SEC / freq_hz`（`clint.rs:183`：`PS_PER_SEC = 1e12`） |
+| `mtimecmp = 1` 周期 ⇒ M-16 的比较值 | **100 000 ps** | `clint.mtimecmp_ps()`（`clint.rs:238`） |
 
-⇒ **要推进 100 µs 的虚拟时间 ⇒ 100 个量子 ⇒ 100 000 条指令**。
+⇒ **推进 100 000 ps 的虚拟时间 ⇒ 100 条指令**（`100 000 ps / 1 000 ps`）⇒ **但 `poll()` 只在量子边界采样** ⇒ **实际至少要跨过 1 个量子（1 000 条指令）**，比较值才可能被看到。
+⇒ ⇒ **用例第 2 条 `StepN` 跑 ≥ 2 000 条即可**（2 个量子，给足余量）⇒ 规格原文写的「100 000 条」**多算了 1 000 倍**（那是把 100 ns 误当成 100 µs 算出来的）⇒ 施工期第五次订正订正。
 
-⚠️ ⚠️ **`sync_interrupts` 在批次边界调用**（`kernel_host/mod.rs:1900` 跑之前 / `:1936` 跑之后）⇒ guest 在批次内写下的 `mtimecmp` ⇒ **本批次内**定时器不会来 ⇒ **下一批次**才被喂给 M-16。
+⚠️ ⚠️ **单位订正（施工期第五次订正）**：原文写「10 MHz ⇒ 1 周期 = 100 000 ps = **100 µs**」⇒ **错**：`100 000 ps = 100 ns = 0.1 µs` ⇒ 由此推出的「要推进 100 µs ⇒ 100 个量子 ⇒ 100 000 条指令」**整体偏大 1 000 倍**。
+⇒ **判据（写死）**：`PS_PER_SEC = 1_000_000_000_000` ps/s · `freq_hz = 10_000_000` ⇒ `ps_per_cycle = PS_PER_SEC / freq_hz = 100 000 ps`（`clint.rs:183` 的实现就是这一行）⇒ **断言里不许手算**，照抄实现那一行的算式。
+
+⚠️ ⚠️ **`sync_interrupts` 在批次边界调用**（`kernel_host/mod.rs:1963` 跑之前 / `:1999` 跑之后）⇒ guest 在批次内写下的 `mtimecmp` ⇒ **本批次内**定时器不会来 ⇒ **下一批次**才被喂给 M-16。
 ⇒ ⇒ **用例必须发**两条** `StepN`**：
 - **第 1 条**（跑够写 `mtimecmp` + 使能 `mie` + `mstatus.MIE` + `mtvec`，然后进自旋）⇒ 跑完时 `sync_interrupts` 把 `mtimecmp` 喂进 M-16；
-- **第 2 条**（跑 ≥ 200 000 条）⇒ 期间 `poll()` 在量子边界看到 `mtime >= mtimecmp` ⇒ 挂起线 3 ⇒ 拉取式交付 ⇒ `enter_trap` ⇒ guest 陷入。
+- **第 2 条**（跑 ≥ **2 000** 条 ⇒ 至少跨过 2 个量子边界）⇒ 期间 `poll()` 在量子边界看到 `now_ps >= mtimecmp_ps`（100 000 ps）⇒ 挂起线 3 ⇒ 拉取式交付 ⇒ `enter_trap` ⇒ guest 陷入。
 
 ⚠️ **一条 `StepN` 是不够的**（比较值在批次内还没进 M-16）⇒ 用例注释里要写明「**为什么是两条**」——否则后来的人会把它合并成一条，然后看到用例变红而不知道为什么。
 
@@ -459,11 +509,11 @@ riscv-none-elf-objcopy -O binary --only-section=.text d82.o d82.bin
 ### 5.1 Lane A · 契约层（A-1 ~ A-8）
 
 - [ ] **A-1** `PLATFORM_SCHEMA_VERSION == 1`；`schema_version != 1` ⇒ `E_PLT-01`
-- [ ] **A-2** 描述的**键集精确固定**（顶层**恰好 6 个键**：`schema_version` / `id` / `name` / `priority` / `region_budget_bytes` / `regions`；⚠️ `description` 带 `skip_serializing_if` ⇒ **不带说明时不出现**、带说明时才是 7 个 ⇒ 断言要写「**6 个 / 带说明时 7 个**」，不能笼统写「7 个」）⇒ 另断言 `regions[0]` 的键集合按 `kind` 分别是 `{kind, base, size}` / `{kind, base, device}`；断言器件条目的键集合按 `device` 分派。先例：`crates/contract/src/session.rs:2431` 的「CLINT 状态的键集必须精确固定」
-- [ ] **A-3** V-1 ~ V-9 **九条校验规则**各自**一个独立的场景码**（`E_PLT-01` .. `E_PLT-08` + serde 错误）⇒ 每条一条用例
+- [ ] **A-2** 描述的**键集精确固定**（顶层**恰好 7 个键**：`schema_version` / `id` / `name` / `priority` / `auto_selectable` / `region_budget_bytes` / `regions`；⚠️ `description` 带 `skip_serializing_if` ⇒ **不带说明时不出现**、带说明时才是 8 个 ⇒ 断言要写「**7 个 / 带说明时 8 个**」，不能笼统写「8 个」）⇒ ⚠️ **`auto_selectable` 是裁决 E 新增的顶层字段**（`#[serde(default = "default_true")]` ⇒ 缺省为 `true` ⇒ **它总是出现在序列化结果里**、解析时缺了也合法）⇒ 另加一条用例钉住「缺省 `auto_selectable` 的描述**按 `true`** 参与自动选档」⇒ 另断言 `regions[0]` 的键集合按 `kind` 分别是 `{kind, base, size}` / `{kind, base, device}`；断言器件条目的键集合按 `device` 分派。先例：`crates/contract/src/session.rs:2431` 的「CLINT 状态的键集必须精确固定」
+- [ ] **A-3** V-1 ~ V-12 **十二条校验规则**各自**一个独立的场景码**（`E_PLT-01` .. `E_PLT-08` + serde 错误 + `E_PLT-09` .. `E_PLT-11`）⇒ 每条一条用例；⚠️ **十二条规则对应十一个码**（V-8 落在 serde 层 ⇒ 用 serde 自己的错误、不占场景码）⇒ ⚠️ **V-10 ~ V-12 是宿主侧的三类失败，但码归契约层所有**（宿主只引用、不自建）⇒ 契约层 `crates/contract/src/error.rs` 里 `E_PLT_09_UNKNOWN_PLATFORM` / `E_PLT_10_PLATFORM_FILE_UNREADABLE` / `E_PLT_11_PLATFORM_FILE_MALFORMED` 三条**由契约层拥有** ⇒ 断言要写「**十二条规则 / 十一个码**」，不能笼统写「十二条码」
 - [ ] **A-4** 描述**往返**（serialize → deserialize ⇒ 逐字段相等），含边界值（`region_budget_bytes` = `u32::MAX`）⇒ ⚠️ **裁决 J'' · 数值策略**：`region_budget_bytes` 取 **`u32`**（不是 `u64`）⇒ ① 它是**每区域**的字节预算，而地址空间只有 4 GiB ⇒ 超过 `u32::MAX` 的预算**没有意义** ⇒ ② 用 `u32` ⇒ **超出范围在 serde 反序列化阶段就失败**（归 V-8 的 serde 错误）⇒ **不需要**新增一条校验规则（也不需要契约层的十进制字符串策略 `numstr.rs` —— 那是给**虚拟时间**这类真会超 2^53 的量用的）⇒ 用例钉住「`u32::MAX` 的预算能往返；`u32::MAX + 1` 在 serde 阶段被拒」
 - [ ] **A-5** `RegionSpec` / `DeviceSpec` 的**内部 tag 键名**逐字是 `"kind"` / `"device"`（不是 `type`、不是 `t`）
-- [ ] **A-6** 错误族 `ErrorFamily::Platform` 新增 ⇒ 契约层错误族清单从 **14 → 15**；⚠️ **两处都补**：`error_families!` 宏的**一行** + 族标签表 `TAGS` 的**一行** ⇒ 靠契约层既有的完整性用例（`the_error_family_list_is_complete`）兜住 ⇒ **不新增**这条用例
+- [ ] **A-6** 错误族 `ErrorFamily::Platform` 新增 ⇒ 契约层错误族清单从 **14 → 15**；⚠️ **两处都补**：`error_families!` 宏的**一行** + 族标签表 `TAGS` 的**一行** ⇒ 靠契约层既有的完整性用例（**`every_family_tag_is_pinned`**，在 `crates/contract/src/error.rs` 的测试模块里）兜住 ⇒ **不新增**这条用例
 - [ ] **A-7** `RegionDto.kind` 的三个常量（`REGION_KIND_*`）**上移到契约层**，M-14 改为 `pub use` ⇒ **M-14 内部调用点的字面量一条不改**
 - [ ] **A-8** 契约层**不升版本**（`SESSION_SNAPSHOT_SCHEMA_VERSION` 仍为 3）
 
@@ -477,7 +527,8 @@ riscv-none-elf-objcopy -O binary --only-section=.text d82.o d82.bin
 - [ ] **B-6** **零逻辑改动**：`map_memory` 的源码里**不得出现**任何地址字面量（`0x`）、任何器件构造调用、任何 `match profile` ⇒ 用例**读源码**断言（`include_str!` 读 `mod.rs` 文本）
 - [ ] **B-7** **换描述、宿主零改动**：`minimal` 描述（低段 2 MiB + 高段 16 MiB @ `0x1000_0000`，与两档**都不同**）⇒ 显式建图 ⇒ 内存图**逐条**等于描述 ⇒ **且没有任何一行宿主代码为它而写**
 - [ ] **B-8** **运行时路径**：`new_with_platform_file(path)` 从一个**仓外临时文件**读描述 ⇒ 建图成功 ⇒ 与同名内置描述**结果一致**
-- [ ] **B-9** **自动选档**（裁决 E）四条等价性：Default 高段 ⇒ `default`；QemuVirt 高段 ⇒ `qemu-virt`；两档之外 ⇒ 回落 `default`；低段 ⇒ `default`
+- [ ] **B-9** **自动选档**（裁决 E）**六条**等价性：Default 高段 ⇒ `default`；QemuVirt 高段 ⇒ `qemu-virt`；两档之外 ⇒ 回落 `default`；低段 ⇒ `default`；**低段超出 1 MiB** ⇒ 回落 `default`（⇒ 随后报未映射）；`minimal` **永不**被自动选中（`auto_selectable: false`）
+    > ⚠️ **「区间在外层」这条结构也要钉住**：镜像**有多个区间**时，判据是「逐个区间过、遇到只被更高优先级描述覆盖的区间就**立即**选它」⇒ 用例要有一个**多区间**的镜像（一个区间落 default 高段、另一个落 QemuVirt 高段）⇒ 结果必须是 `qemu-virt`。
 - [ ] **B-10** **兼容 API**：`memory_profile()` 对 `default`/`qemu-virt` 分别返回 `Default`/`QemuVirt`；新增 `platform_id()` 返回**真实 id**；`new_with_profile` 两条路径与今天**逐字等价**
 - [ ] **B-11** **描述坏了要报**：`schema_version` 不对 / 区域重叠 / 预算超了 ⇒ 各自**不同的码**（不是同一个）
 - [ ] **B-12** **M-14 行为一字不变**：既有 `m14_bus` 的**全部**用例（含 v0.26 的 14 条验收）**一条不改、一条不红**
@@ -546,7 +597,7 @@ riscv-none-elf-objcopy -O binary --only-section=.text d82.o d82.bin
 | 2 | `RegionDto.kind` 的三个常量**归属**上移到契约层（M-14 改 `pub use`） | M-14 内部（字面量不变） | 既有断言一条不改 |
 | 3 | `MemoryProfile` 的**语义**从「两档」变成「当前描述 id 的兼容投影」 | `memory_profile()` 5 个调用点 | 保留旧取值（裁决 C）⇒ **既有 4 条断言不改** |
 | 4 | `map_memory` 的**签名**从 `profile` 改成「描述引用」 | 仅宿主内部（2 个调用点） | 私有函数 ⇒ 外部不可达 |
-| 5 | **新增** `Platform` 错误族的场景码 `E_PLT-01` .. `E_PLT-08` | 契约层错误码清单 | §5.1 A-6 |
+| 5 | **新增** `Platform` 错误族的场景码 `E_PLT-01` .. `E_PLT-11` | 契约层错误码清单 | §5.1 A-6 |
 | 6 | **不升** `SESSION_SNAPSHOT_SCHEMA_VERSION`（仍 3） | — | ⚠️ 描述**不进会话载荷** ⇒ 前端镜像不动 |
 
 ⚠️ **不破坏的**：`SessionSnapshotDto` 的形状、快照的 `E-SNAP-05` 行为、`RegionDto` 的字段集、`M14MapDto` 的形状 ⇒ **会话载荷向后兼容**。

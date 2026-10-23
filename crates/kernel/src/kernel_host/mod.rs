@@ -135,6 +135,26 @@
 //! ⚠️ **不复用 `WriteMemory`**：那会绕过外设的语义层（不走 FIFO、不置
 //! `RX_VALID`、不抬线）⇒ guest 读 `RHR` 拿到旧值而 `LSR` 说「没有数据」
 //! ⇒ **自相矛盾**。
+//!
+//! ## 平台描述（v0.27 · D-123-B）
+//!
+//! 内存图**不再是源码里的两档常量**，而是**一份数据**：契约层的
+//! [`riscv_sim_contract::platform::PlatformDescription`]（JSON 形态见
+//! [`platform`] 模块里的三份**内置描述**）。
+//!
+//! | 约束 | 唯一落点 |
+//! | --- | --- |
+//! | 描述的**校验** | 契约层 `PlatformDescription::validate` |
+//! | 器件种类 → 构造 | [`platform`] 模块的器件工厂（**一个 match**） |
+//! | 外设**窗口大小** | 器件自己的 `Peripheral::size()` |
+//! | 每区域**预算** | 描述的 `region_budget_bytes` |
+//!
+//! ⇒ 下面那些 `pub const`（地址、器件 id、波特率、频率、预算）**不再是
+//! 宿主的取值来源** ⇒ 它们**保留**只为**公开 API 兼容** ⇒ 别再拿它们
+//! 当「真相」：真相在 `platforms/*.json` 里。
+//!
+//! ⚠️ [`KernelHost::memory_profile`] 仍是**兼容视图**（按当前描述的 `id`
+//! 投影，裁决 C）⇒ 真实 id 用 [`KernelHost::platform_id`]。
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
@@ -148,6 +168,7 @@ use riscv_sim_contract::model::{
     Edge, ImageKind, ImageRef, ImageSource, Project, TraceEvent, TraceFormat, TraceSource,
     WaveformHistory, WaveformStream, WriteSize, SIM_STATE_SCHEMA_VERSION,
 };
+use riscv_sim_contract::platform::PlatformDescription;
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
 use riscv_sim_contract::protocol::{
     CommandPayload, Direction, EventPayload, HaltReason, Message, Payload,
@@ -166,10 +187,9 @@ use crate::m11_symbol::{
 };
 use crate::m14_bus::{Bus, BusWidth};
 use crate::m15_peripheral;
-use crate::m15_peripheral::clint::{Clint, CLINT_WINDOW};
-use crate::m15_peripheral::gpio::{GpioBank, GPIO_WINDOW};
-use crate::m15_peripheral::plic::{Plic, PLIC_WINDOW};
-use crate::m15_peripheral::uart::{Uart16550, UART_WINDOW};
+use crate::m15_peripheral::clint::Clint;
+use crate::m15_peripheral::plic::Plic;
+use crate::m15_peripheral::uart::Uart16550;
 use crate::m16_interrupt::InterruptController;
 use crate::m17_backend::{SelfIssBackend, SharedInterruptPort};
 use crate::m18_probe::{ChannelDef, ChannelKind, ProbeRegistry, SampleCfg, CH_GPIO0, CH_IRQ_PULSE};
@@ -179,9 +199,17 @@ use crate::m20_snapshot::SnapshotManager;
 /// GPIO 外设的基址（PL061 惯例）。
 ///
 /// 与默认内存图的两段 RAM（`0x0000_0000` / `0x8000_0000`）都不重叠。
+///
+/// ⚠️ **v0.27 之后**：平台描述（`platforms/*.json`）才是这个值的
+/// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
+/// **公开 API 兼容**。
 pub const DEFAULT_GPIO_BASE: u32 = 0x4000_0000;
 
 /// GPIO 外设的实例 id（同时是 M-18 通道的 source）。
+///
+/// ⚠️ **v0.27 之后**：平台描述（`platforms/*.json`）才是这个值的
+/// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
+/// **公开 API 兼容**。
 pub const GPIO_PERIPH_ID: &str = "GPIO0";
 
 /// GPIO 的信号名（M-15 `gpio::SIGNAL_OUT`）。
@@ -302,15 +330,31 @@ pub const CONSOLE_BACKLOG_MAX: usize = 64 * 1024;
 pub const E_OBS_02_PIPELINE_UNAVAILABLE: u16 = 2;
 
 /// 默认内存图 · 低段 RAM 的基址（复位向量）。
+///
+/// ⚠️ **v0.27 之后**：平台描述（`platforms/*.json`）才是这个值的
+/// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
+/// **公开 API 兼容**。
 pub const DEFAULT_RAM_LOW_BASE: u32 = 0x0000_0000;
 
 /// 默认内存图 · 低段 RAM 的大小（1 MiB）。
+///
+/// ⚠️ **v0.27 之后**：平台描述（`platforms/*.json`）才是这个值的
+/// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
+/// **公开 API 兼容**。
 pub const DEFAULT_RAM_LOW_SIZE: u32 = 0x0010_0000;
 
 /// 默认内存图 · 高段 RAM 的基址（常规 RISC-V 内存，与 golden 对拍侧一致）。
+///
+/// ⚠️ **v0.27 之后**：平台描述（`platforms/*.json`）才是这个值的
+/// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
+/// **公开 API 兼容**。
 pub const DEFAULT_RAM_HIGH_BASE: u32 = 0x8000_0000;
 
 /// 默认内存图 · 高段 RAM 的大小（4 MiB）。
+///
+/// ⚠️ **v0.27 之后**：平台描述（`platforms/*.json`）才是这个值的
+/// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
+/// **公开 API 兼容**。
 pub const DEFAULT_RAM_HIGH_SIZE: u32 = 0x0040_0000;
 
 // ------------------------------------------------------------------
@@ -321,15 +365,31 @@ pub const DEFAULT_RAM_HIGH_SIZE: u32 = 0x0040_0000;
 ///
 /// ⚠️ 与 osz 的 `platform/qemu_virt/include/platform.h` 里的
 /// `UART0_BASE_ADDR` **逐字一致**（0x1000_0000）⇒ 两边零改动。
+///
+/// ⚠️ **v0.27 之后**：平台描述（`platforms/*.json`）才是这个值的
+/// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
+/// **公开 API 兼容**。
 pub const QEMU_VIRT_UART0_BASE: u32 = 0x1000_0000;
 
 /// QEMU virt 的 CLINT 基址（osz 的 `CLINT_BASE_ADDR`）。
+///
+/// ⚠️ **v0.27 之后**：平台描述（`platforms/*.json`）才是这个值的
+/// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
+/// **公开 API 兼容**。
 pub const QEMU_VIRT_CLINT_BASE: u32 = 0x0200_0000;
 
 /// QEMU virt 的 PLIC 基址（osz 的 `PLIC_BASE_ADDR`）。
+///
+/// ⚠️ **v0.27 之后**：平台描述（`platforms/*.json`）才是这个值的
+/// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
+/// **公开 API 兼容**。
 pub const QEMU_VIRT_PLIC_BASE: u32 = 0x0C00_0000;
 
 /// QEMU virt 的 RAM 起点（ITCM）。
+///
+/// ⚠️ **v0.27 之后**：平台描述（`platforms/*.json`）才是这个值的
+/// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
+/// **公开 API 兼容**。
 pub const QEMU_VIRT_RAM_BASE: u32 = 0x8000_0000;
 
 /// QEMU virt 的 RAM 长度（**128 MiB** = ITCM 60M + INIT 4M + DTCM 64M）。
@@ -340,6 +400,10 @@ pub const QEMU_VIRT_RAM_BASE: u32 = 0x8000_0000;
 /// （`kernel/base/mem/bestfit/src/bestfit.c`）**会在堆尾写一个节点**：
 /// `end_node = (MEM_NODE_INFO *)((UINT8 *)DEFAULT_HEAP_END - MEM_NODE_INFO_SIZE)`
 /// ⇒ 堆尾是 `0x8800_0000` 附近 ⇒ **必须**真的映射到那里。
+///
+/// ⚠️ **v0.27 之后**：平台描述（`platforms/*.json`）才是这个值的
+/// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
+/// **公开 API 兼容**。
 pub const QEMU_VIRT_RAM_SIZE: u32 = 0x0800_0000;
 
 /// QEMU virt 档的**每区域护栏预算**（v0.26 · STAGE-11 裁决 B / G）。
@@ -355,6 +419,10 @@ pub const QEMU_VIRT_RAM_SIZE: u32 = 0x0800_0000;
 ///
 /// ⚠️ **Default 档不抬**：它那两段 RAM 只有 1 MiB / 4 MiB ⇒ 保持默认的
 /// 16 MiB ⇒ 护栏在默认档上**一字未变**。
+///
+/// ⚠️ **v0.27 之后**：平台描述（`platforms/*.json`）才是这个值的
+/// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
+/// **公开 API 兼容**。
 pub const QEMU_VIRT_MAX_REGION_BYTES: u64 = QEMU_VIRT_RAM_SIZE as u64;
 
 /// ⚠️ **已退役**（v0.26 · STAGE-11 裁决 G）：单个 RAM 区域的大小（16 MiB）。
@@ -372,6 +440,10 @@ pub const QEMU_VIRT_RAM_REGION: u32 = 0x0100_0000;
 ///
 /// ⚠️ 与 osz 的 `SYSTEM_BASE_FREQ`（10 000 000）**逐字一致**；CLINT 的
 /// `mtime` / `mtimecmp` 单位是**周期**，换算必须用这个数。
+///
+/// ⚠️ **v0.27 之后**：平台描述（`platforms/*.json`）才是这个值的
+/// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
+/// **公开 API 兼容**。
 pub const QEMU_VIRT_FREQ_HZ: u64 = 10_000_000;
 
 /// PLIC 上 UART 中断的**裸源号**。
@@ -385,18 +457,34 @@ pub const PLIC_SOURCE_UART: u32 = 10;
 pub const PLIC_CONTEXT_MACHINE: u32 = 0;
 
 /// UART0 的外设 id。
+///
+/// ⚠️ **v0.27 之后**：平台描述（`platforms/*.json`）才是这个值的
+/// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
+/// **公开 API 兼容**。
 pub const UART0_PERIPH_ID: &str = "UART0";
 
 /// CLINT 的外设 id。
+///
+/// ⚠️ **v0.27 之后**：平台描述（`platforms/*.json`）才是这个值的
+/// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
+/// **公开 API 兼容**。
 pub const CLINT_PERIPH_ID: &str = "CLINT";
 
 /// PLIC 的外设 id。
+///
+/// ⚠️ **v0.27 之后**：平台描述（`platforms/*.json`）才是这个值的
+/// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
+/// **公开 API 兼容**。
 pub const PLIC_PERIPH_ID: &str = "PLIC";
 
 /// UART0 的波特率。
 ///
 /// ⚠️ 平台的 UART 是**捕获环**（写进环就是「已发出」），波特率**不参与**
 /// 时序计算；这个值只是让 `ps_per_bit` 有个确定的分母。
+///
+/// ⚠️ **v0.27 之后**：平台描述（`platforms/*.json`）才是这个值的
+/// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
+/// **公开 API 兼容**。
 pub const UART0_BAUD_RATE: u32 = 115_200;
 
 /// 宿主的**内存图档位**。
@@ -637,12 +725,16 @@ pub struct KernelHost {
     /// 开关**关闭**期间的事件（「关闭 ⇒ 零记录」，裁决 H）。计数暴露给
     /// 调用方，免得「轨迹环里少了一批」变成一件没人知道的事。
     trace_events_discarded: u64,
-    /// 当前生效的**内存图档位**。
+    /// 当前生效的**平台描述**（v0.27 · D-123-B）。
     ///
-    /// ⚠️ 装载工程时宿主会**按镜像实际用到的地址**重新挑档（见
-    /// [`KernelHost::choose_memory_profile`]）⇒ 一个仓外的 RTOS 镜像
-    /// 落进 `0x8000_0000..0x8800_0000` 时会自动切到 QEMU virt 档。
-    memory_profile: MemoryProfile,
+    /// ⚠️ **它取代了「档位」**：内存图不再是源码里的两档常量，而是**一份
+    /// 数据**（契约层的 `PlatformDescription`）⇒ 「换板子」不用改宿主
+    /// 源码（§2.2）。
+    ///
+    /// ⚠️ [`KernelHost::memory_profile`] 仍然存在 —— 它是这份描述的**兼容
+    /// 视图**（按 `id` 投影，裁决 C）⇒ 既有调用点一字不改。
+    platform: riscv_sim_contract::platform::PlatformDescription,
+
     /// UART0 的句柄（**只有** QEMU virt 档才有）—— console 字节从这里取。
     uart0: Option<Rc<RefCell<Uart16550>>>,
     /// CLINT 的句柄（**只有** QEMU virt 档才有）—— `mtimecmp` 从这里喂给 M-16。
@@ -685,7 +777,22 @@ impl Default for KernelHost {
 
 impl KernelHost {
     /// 创建一个空会话（内存图已建立，尚未加载任何镜像）。
+    ///
+    /// ⚠️ 今天的默认档 = 内置描述 `default`（v0.27 · D-123-B）⇒
+    /// **一个字节都没变**，只是那段「档位」变成了**一份数据**。
     pub fn new() -> Self {
+        // ⚠️ 内置描述是**编译期常量**（`include_str!`）⇒ 它的合法性由
+        // 用例钉住（`tests_platform.rs`）⇒ 这里取不到只可能是「发布的
+        // JSON 坏了」⇒ 那时**必须有声音**，不能静默。
+        let description = platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+            .expect("内置平台描述 default 必须是合法的（由 tests_platform.rs 钉住）");
+        Self::with_description(description)
+    }
+
+    /// 按**平台描述**造一个会话（描述 → 建图）。
+    ///
+    /// ⚠️ **建图失败 ⇒ 没有宿主**（返回 `Err`）⇒ 不会留下一个「半个平台」。
+    fn with_description(description: PlatformDescription) -> Self {
         // ⚠️ 中断控制器**先**造出来，再交给 `HostSinks`——两者**共享同一份**
         // （`Rc` 克隆），否则引擎拉起的 IRQ 行与宿主导出的段 5 就是两个真相。
         let intc = Rc::new(IntcLink::default());
@@ -722,17 +829,17 @@ impl KernelHost {
             index: SymbolIndex::default(),
             trace: TraceBuffer::new(TRACE_CAP),
             trace_events_discarded: 0,
-            memory_profile: MemoryProfile::Default,
+            platform: description.clone(),
             uart0: None,
             clint: None,
             plic: None,
             console_backlog: Vec::new(),
         };
-        // The default memory map cannot fail on a fresh bus (the two
-        // regions do not overlap and are far below the 16 MiB per-region
-        // cap). If it ever does, the failure is reported by the next
-        // `LoadProject` — which re-maps the memory anyway.
-        let _ = host.map_memory(MemoryProfile::Default);
+        // The default memory map cannot fail on a fresh bus (the regions do
+        // not overlap and are far below the per-region budget). If it ever
+        // does, the failure is reported by the next `LoadProject` — which
+        // re-maps the memory anyway.
+        let _ = host.map_memory(&description);
         // The interrupt controller reaches **two** places: the engine's
         // `InterruptSink` (peripherals *raise* IRQ lines) and M-17's
         // executor (quantum-boundary *sampling* / pull-style *delivery* /
@@ -754,6 +861,28 @@ impl KernelHost {
         // 只有「刚建好、还没装载工程」的宿主会**静默**观察不到任何边沿。
         host.attach_peripheral_probes();
         host
+    }
+
+    /// 按**平台 id** 显式建图（内置描述）。
+    ///
+    /// ⚠️ **这是「换平台」的主入口**：换一份内置描述 ⇒ 内存图整个换掉，
+    /// 宿主**零逻辑改动**。
+    ///
+    /// ⚠️ 描述**不合法 ⇒ 没有宿主**（`Err`）⇒ 不会留下「半个平台」。
+    pub fn new_with_platform(id: &str) -> Result<Self, PlatformError> {
+        let description = platform::builtin_description(id)?;
+        Ok(Self::with_description(description))
+    }
+
+    /// 按**文件路径**加载描述并建图（运行时路径 —— 裁决 F）。
+    ///
+    /// ⚠️ 与内置路径**共用同一个解析器 + 同一个校验器**（§2.5）⇒ 没有
+    /// 两份语义。
+    ///
+    /// ⚠️ 描述文件**不合法 ⇒ 没有宿主**（`Err`）。
+    pub fn new_with_platform_file(path: &std::path::Path) -> Result<Self, PlatformError> {
+        let description = platform::description_from_file(path)?;
+        Ok(Self::with_description(description))
     }
 
     /// 装上 M-16 的中断控制器**端口**（接缝 #2 / #3 / #4）。
@@ -781,131 +910,48 @@ impl KernelHost {
     /// ≈ 0**（只有写过的页才占物理内存）⇒ 两档的分工保留是为了**少造
     /// 一条总线**，不再是为了省内存。
     pub fn new_with_profile(profile: MemoryProfile) -> Self {
-        let mut host = Self::new();
-        if profile == MemoryProfile::Default {
-            return host;
+        // ⚠️ **兼容入口**（裁决 C）：`MemoryProfile` 是公开 API ⇒ 保留 ⇒
+        // 它现在只做一件事——**把档位翻译成内置描述的 id** ⇒ 13 个既有
+        // 调用点**一字不改**。
+        let id = match profile {
+            MemoryProfile::Default => platform::PLATFORM_ID_DEFAULT,
+            MemoryProfile::QemuVirt => platform::PLATFORM_ID_QEMU_VIRT,
+        };
+        match Self::new_with_platform(id) {
+            Ok(host) => host,
+            Err(_err) => {
+                // 换档失败 ⇒ 退回默认档并**记一次**（不 panic）。
+                //
+                // ⚠️ 一个刚建好的宿主上只有「默认档能建成」这一条不变式；
+                // 真失败说明描述或总线出了问题 —— 退回默认档让调用方
+                // 至少拿到一个能用的宿主。
+                let mut host = Self::new();
+                host.probe_wiring_failures += 1;
+                host
+            }
         }
-        host.memory_profile = profile;
-        // ⚠️ **必须先 `reset_memory_map()`**：默认档已经在 `0x8000_0000`
-        // 铺了 4 MiB RAM，直接再铺 128 MiB 会**区域重叠**（E_BUS-03）。
-        //
-        // `rebuild_platform()` 做的正是这件事：换一条全新的总线 → 建图 →
-        // 重装外设 tick 接缝 → 重装探针管道 → 重装外设探针回调。
-        if let Err(_err) = host.rebuild_platform() {
-            // 换档失败 ⇒ 退回默认档并**记一次**（不 panic）。
-            //
-            // ⚠️ 一个刚建好的宿主上只有「默认档能建成」这一条不变式；
-            // 真失败说明总线上已经有冲突的区域 —— 退回默认档让调用方
-            // 至少拿到一个能用的宿主。
-            host.memory_profile = MemoryProfile::Default;
-            let _ = host.rebuild_platform();
-            host.probe_wiring_failures += 1;
-        }
-        host
     }
 
-    /// 建立内存图（按档位）。
+    /// 建立内存图（按**描述**）。
     ///
-    /// ⚠️ **两个档位都保留低段 1 MiB RAM**（复位向量）—— 今天的默认行为
-    /// 一个字节都没变，QEMU virt 档只是**加**了东西。
-    fn map_memory(&mut self, profile: MemoryProfile) -> Result<(), PlatformError> {
+    /// ⚠️ **零逻辑改动**（B-6 的判别式）：这个函数里**没有**任何地址
+    /// 字面量、没有任何器件构造调用、没有 `match profile` ⇒ 「换描述、
+    /// 宿主零改动」在**源码层面**成立。
+    ///
+    /// ⚠️ 校验与建图**都**在 [`platform`] 模块里（校验器在**契约层**，
+    /// 器件工厂在**宿主**）⇒ 这里只做「把描述交给它」这一件事。
+    fn map_memory(&mut self, description: &PlatformDescription) -> Result<(), PlatformError> {
         // ⚠️ 借用的作用域要收窄：`bus` 是 `self.backend` 的可变借用，
         // 而下面要把新外设的句柄写回 `self` 的字段 —— 两个借用不能重叠。
-        let (uart0, clint, plic) = {
-            let bus = self.backend.bus_mut();
-            // ⚠️ **护栏预算是宿主策略**（v0.26 · STAGE-11 裁决 B / G）：
-            // M-14 的 `max_region_bytes` 是**每区域**的上限，**默认**是
-            // 16 MiB（D-10 的防 OOM 护栏）⇒ 宿主必须**按自己的内存图**
-            // 决定这个预算，否则「声明一段 128 MiB」会被 16 MiB 的默认值
-            // 挡下（`E_BUS-09`）。
-            //
-            // ⚠️ **Default 档保持默认 16 MiB**（它那两段 RAM 只有 1 MiB /
-            // 4 MiB，远低于上限）⇒ 护栏**没被削弱**，只是**按档位**取值。
-            let region_budget = match profile {
-                MemoryProfile::Default => crate::m14_bus::DEFAULT_MAX_REGION_BYTES,
-                MemoryProfile::QemuVirt => QEMU_VIRT_MAX_REGION_BYTES,
-            };
-            bus.set_max_region_bytes(region_budget);
-            bus.map_ram(DEFAULT_RAM_LOW_BASE, DEFAULT_RAM_LOW_SIZE, &[])?;
-            match profile {
-                MemoryProfile::Default => {
-                    bus.map_ram(DEFAULT_RAM_HIGH_BASE, DEFAULT_RAM_HIGH_SIZE, &[])?;
-                }
-                MemoryProfile::QemuVirt => {
-                    // ⚠️ **v0.26 · STAGE-11 裁决 G**：**一个** 128 MiB 的
-                    // RAM 区域（不是 8 个 16 MiB 的）。
-                    //
-                    // ⚠️ **guest 看到的地址空间不变**：0x8000_0000 起**连续**
-                    // 128 MiB —— osz 的链接脚本要 `ITCM(0x8000_0000,60M)` /
-                    // `INIT(0x83C0_0000,4M)` / `DTCM(0x8400_0000,64M)` ⇒
-                    // 1 个区域与 8 个**连续**区域覆盖**同一段**地址 ⇒
-                    // 访客**看不出区别**（参考侧 Spike 用的是
-                    // `-m2147479552:4096,2147483648:134217728` ⇒ 同样是
-                    // 128 MiB 连续 ⇒ 两侧**本来就**一致 ⇒ 改完**仍然**
-                    // 一致）。
-                    //
-                    // ⚠️ **区域数 13 → 6**（1 低段 + 1 高段 + GPIO + UART
-                    // + CLINT + PLIC）。
-                    bus.map_ram(QEMU_VIRT_RAM_BASE, QEMU_VIRT_RAM_SIZE, &[])?;
-                }
-            }
-            // GPIO 外设（D-46）：**没有外设就没有信号可观察**——波形管道
-            // 会一直是空的。基址取 PL061 惯例的 0x4000_0000，与两段 RAM
-            // 都不重叠。
-            let gpio = Rc::new(RefCell::new(GpioBank::new(
-                GPIO_PERIPH_ID,
-                DEFAULT_GPIO_BASE,
-            )));
-            bus.map_peripheral_instance(DEFAULT_GPIO_BASE, GPIO_WINDOW, gpio)?;
-
-            // ---- QEMU virt 的三个外设 ----
-            let (uart0, clint, plic) = match profile {
-                MemoryProfile::Default => (None, None, None),
-                MemoryProfile::QemuVirt => {
-                    // UART0：ns16550 字节寄存器（Lane B 重做的那一版）。
-                    //
-                    // ⚠️ `irq_line` 填**内部线号** 1（`IRQ_UART_RX_READY`）：
-                    // 它是「平台内部线号空间」里的数，**不是** `mcause`
-                    // 的架构码 —— 架构码由 M-16 在**交付时**查映射表算。
-                    let uart = Rc::new(RefCell::new(Uart16550::new(
-                        UART0_PERIPH_ID,
-                        QEMU_VIRT_UART0_BASE,
-                        UART0_BAUD_RATE,
-                        IRQ_UART_RX_READY,
-                    )));
-                    bus.map_peripheral_instance(QEMU_VIRT_UART0_BASE, UART_WINDOW, uart.clone())?;
-
-                    // CLINT：msip / mtimecmp / mtime，**单位是周期**。
-                    let clint = Rc::new(RefCell::new(Clint::with_frequency(
-                        CLINT_PERIPH_ID,
-                        QEMU_VIRT_CLINT_BASE,
-                        1,
-                        QEMU_VIRT_FREQ_HZ,
-                    )));
-                    bus.map_peripheral_instance(QEMU_VIRT_CLINT_BASE, CLINT_WINDOW, clint.clone())?;
-
-                    // PLIC：64 源 / 16 context（QEMU virt 的默认规模）。
-                    let plic = Rc::new(RefCell::new(Plic::with_capacity(
-                        PLIC_PERIPH_ID,
-                        QEMU_VIRT_PLIC_BASE,
-                        64,
-                        16,
-                    )));
-                    bus.map_peripheral_instance(QEMU_VIRT_PLIC_BASE, PLIC_WINDOW, plic.clone())?;
-
-                    (Some(uart), Some(clint), Some(plic))
-                }
-            };
-            (uart0, clint, plic)
-        };
-        self.uart0 = uart0;
-        self.clint = clint;
-        self.plic = plic;
-        self.memory_profile = profile;
+        let devices = platform::map_platform(self.backend.bus_mut(), description)?;
+        self.uart0 = devices.uart0;
+        self.clint = devices.clint;
+        self.plic = devices.plic;
+        self.platform = description.clone();
         Ok(())
     }
 
-    /// 按镜像**实际用到的地址**挑内存图档位。
+    /// 按镜像**实际用到的地址**挑平台描述（裁决 E）。
     ///
     /// ⚠️ **为什么需要这一步**：默认档的高段 RAM 只有 4 MiB
     /// （`0x8000_0000..0x8040_0000`），而真实 RTOS（osz）的镜像落在
@@ -915,24 +961,14 @@ impl KernelHost {
     /// ⚠️ **判据是「镜像用到的地址落在哪一档的映射范围内」**，不是
     /// 「镜像是不是某个特定的 ELF」—— 这样别的 RTOS 也能受益，而规则
     /// 只有一条、写在代码里。
-    fn choose_memory_profile(&self, ranges: &[(u32, u32)]) -> MemoryProfile {
-        /// 一个地址区间是否落在 `[base, base+size)` 里。
-        fn inside(base: u32, size: u32, lo: u32, hi: u32) -> bool {
-            lo >= base && hi <= base.saturating_add(size)
-        }
-        for &(lo, hi) in ranges {
-            let in_default_high = inside(DEFAULT_RAM_HIGH_BASE, DEFAULT_RAM_HIGH_SIZE, lo, hi);
-            let in_qemu_high = inside(QEMU_VIRT_RAM_BASE, QEMU_VIRT_RAM_SIZE, lo, hi);
-            if !in_default_high && !in_qemu_high {
-                // ⚠️ 落在两档之外（低段 1 MiB 之外、又不在高段窗口里）
-                // ⇒ 哪一档都装不下 ⇒ 交给映射阶段去报「未映射访问」。
-                continue;
-            }
-            if !in_default_high {
-                return MemoryProfile::QemuVirt;
-            }
-        }
-        MemoryProfile::Default
+    ///
+    /// ⚠️ **判据本身在 [`platform`] 里**（描述化，裁决 E）：今天它查的是
+    /// 「两档的**高段**窗口」；描述化之后它查的是「每个**参与自动选档**
+    /// 的描述（`auto_selectable == true`）的**全部 RAM 区域**」，
+    /// **区间在外层**逐个过，候选按 `priority` 小者优先，**无候选 ⇒ 回落
+    /// `default`** ⇒ **与今天逐字等价**（B-9 的六条用例钉住）。
+    fn choose_platform(&self, ranges: &[(u32, u32)]) -> Result<PlatformDescription, PlatformError> {
+        platform::choose_description(ranges)
     }
 
     /// 把外设的中断源**同步**到 M-16（v0.23）。
@@ -1099,9 +1135,28 @@ impl KernelHost {
         self.backend.total_executed()
     }
 
-    /// 当前生效的内存图档位。
+    /// 当前生效的内存图档位（**兼容视图**，裁决 C）。
+    ///
+    /// ⚠️ 它是当前生效的**平台描述的 `id` 的投影**：`default` ⇒
+    /// `Default`、`qemu-virt` ⇒ `QemuVirt`、**其它 id ⇒ `Default`**。
+    ///
+    /// ⚠️ **诚实但信息量低**：新平台（例如 `minimal`）会返回 `Default`
+    /// ⇒ 想知道**真实**的平台请用 [`KernelHost::platform_id`]。
+    ///
+    /// ⚠️ 这个 API 是**公开**的（5 个调用点）⇒ 既有断言**一条不改**。
     pub fn memory_profile(&self) -> MemoryProfile {
-        self.memory_profile
+        match self.platform.id.as_str() {
+            platform::PLATFORM_ID_QEMU_VIRT => MemoryProfile::QemuVirt,
+            _ => MemoryProfile::Default,
+        }
+    }
+
+    /// 当前生效的**平台 id**（**真实**的 id 字符串）。
+    ///
+    /// ⚠️ 这是 v0.27 **新增**的接口：内存图不再只有两档 ⇒ 「档位」这个
+    /// 概念已经装不下真实的信息 ⇒ 真实 id 由这里给出。
+    pub fn platform_id(&self) -> &str {
+        &self.platform.id
     }
 
     /// 只读地看总线（诊断 / 测试用）。
@@ -1323,7 +1378,9 @@ impl KernelHost {
     /// 装载新工程时走这里——新工程 = 新会话，内存图与探针管道都要重来。
     fn rebuild_platform(&mut self) -> Result<(), PlatformError> {
         self.backend.reset_memory_map();
-        self.map_memory(self.memory_profile)?;
+        // ⚠️ 借用不能重叠（`&mut self` + `&self.platform`）⇒ 先取一份。
+        let description = self.platform.clone();
+        self.map_memory(&description)?;
         // 时间驱动链路（D-07）也要重建——新外设是新实例，旧的 tick
         // 事件指着旧实例。
         self.install_peripheral_ticker();
@@ -1787,7 +1844,7 @@ impl KernelHost {
             }
         }
 
-        // ---- 第二步：挑档位 + 重建平台 ----
+        // ---- 第二步：挑平台描述 + 重建平台 ----
         //
         // ⚠️ **重建平台**：**内存图 + 探针管道 + 外设探针回调**一起重来。
         //
@@ -1796,7 +1853,13 @@ impl KernelHost {
         // （M-17 的观察点 hook + M-18 的访存 trace hook）**一起没了**，
         // 外设的探针回调也随旧外设一起没了。探针管道必须在新的总线上
         // 重新装一遍（D-46）。
-        self.memory_profile = self.choose_memory_profile(&ranges);
+        //
+        // ⚠️ **挑档判据已经描述化**（裁决 E）：挑出来的是**一份描述**
+        // （不是「档位」枚举）⇒ 内存图由它决定。
+        match self.choose_platform(&ranges) {
+            Ok(description) => self.platform = description,
+            Err(err) => return vec![self.error_from(&err)],
+        }
         if let Err(err) = self.rebuild_platform() {
             return vec![self.error_from(&err)];
         }
@@ -3019,3 +3082,14 @@ mod tests_osz_wiring;
 
 #[cfg(test)]
 mod tests_v024;
+
+#[cfg(test)]
+mod tests_platform;
+
+/// 平台描述的加载 · 器件工厂 · 建图（v0.27 · D-123-B）。
+///
+/// ⚠️ **它是公开的**：外部（headless runner / 将来的 server crate）可能
+/// 要**按 id 取一份描述**或**从文件读一份描述** ⇒ 入口在
+/// [`KernelHost::new_with_platform`] / [`KernelHost::new_with_platform_file`]，
+/// 描述本身在 [`platform`]。
+pub mod platform;

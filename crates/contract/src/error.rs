@@ -281,7 +281,7 @@ pub const E_ENG_02_QUEUE_INCONSISTENT: u16 = 2;
 pub const E_ENG_03_NO_PROGRESS: u16 = 3;
 
 // ---------------------------------------------------------------------------
-// Platform family — `E_PLT-01`..`E_PLT-08`
+// Platform family — `E_PLT-01`..`E_PLT-11`
 // ---------------------------------------------------------------------------
 
 /// Scenario code: the platform description's `schema_version` is not the
@@ -336,6 +336,31 @@ pub const E_PLT_07_OVER_BUDGET: u16 = 7;
 /// id** ⇒ two devices with one id are two states competing for one
 /// instance.
 pub const E_PLT_08_DUPLICATE_DEVICE_ID: u16 = 8;
+
+/// Scenario code: the requested **platform id** does not exist.
+///
+/// ⚠️ **Host-side rule (V-10) — owned by the contract layer.** The
+/// description's *declaration* rules are V-1 .. V-9; "the id you asked
+/// for names no built-in description" is a rule about **looking a
+/// description up**, and the frozen spec §1.6 puts it here ⇒ the host
+/// must **not** invent its own code for it (one constraint, one landing
+/// spot).
+pub const E_PLT_09_UNKNOWN_PLATFORM: u16 = 9;
+
+/// Scenario code: the platform description **file cannot be read**
+/// (missing path, denied permission, I/O failure).
+///
+/// ⚠️ **Host-side rule (V-11) — owned by the contract layer**, for the
+/// same reason as [`E_PLT_09_UNKNOWN_PLATFORM`].
+pub const E_PLT_10_PLATFORM_FILE_UNREADABLE: u16 = 10;
+
+/// Scenario code: the platform description file is **not a legal
+/// description** (not valid JSON, or a shape the serde layer rejects —
+/// rule V-8).
+///
+/// ⚠️ **Host-side rule (V-12) — owned by the contract layer**, for the
+/// same reason as [`E_PLT_09_UNKNOWN_PLATFORM`].
+pub const E_PLT_11_PLATFORM_FILE_MALFORMED: u16 = 11;
 
 #[cfg(test)]
 mod tests {

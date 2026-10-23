@@ -28,6 +28,7 @@
 //! | --- | --- | --- |
 //! | **serde** | the *shape* — unknown device kind, missing parameter, wrong parameter type | serde's own error (V-8) |
 //! | **this module** | the *declaration* — version, id, regions, sizes, overlaps, budget, duplicate device id | `E_PLT-01`..`E_PLT-08` |
+//! | **the host** | the *lookup* — unknown platform id, unreadable file, malformed file | `E_PLT-09`..`E_PLT-11` (owned **here**, judged by the host) |
 //! | **M-14** | the *live bus* — unmapped access, region over the runtime budget | `E_BUS-*` |
 //!
 //! ⚠️ The two budget rules are **not** the same constraint and must not
@@ -35,6 +36,10 @@
 //! (before anything is mapped), M-14's `E_BUS-09` judges the **physical
 //! occupancy** (after mapping — RAM is lazily allocated since v0.26, so
 //! a region may declare a large size and cost nothing).
+//!
+//! ⚠️ **The host-side codes live here too** (V-10 .. V-12): the *rules*
+//! are the host's, but a code with **two** landing spots is a code with
+//! two meanings ⇒ the contract layer owns every `E_PLT-*` number.
 
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +65,15 @@ use crate::session::{REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
 /// module therefore requires **no** front-end change at all.
 pub const PLATFORM_SCHEMA_VERSION: u32 = 1;
 
+/// The default value of [`PlatformDescription::auto_selectable`].
+///
+/// ⚠️ **Absent ⇒ `true`**: a description that says nothing about
+/// auto-selection **does** take part in it ⇒ a hand-written description
+/// behaves like a normal platform, not like a demo one.
+fn default_true() -> bool {
+    true
+}
+
 /// A platform description — the declared memory map of one board.
 ///
 /// The wire form is JSON (the only serialization format the repository
@@ -71,6 +85,7 @@ pub const PLATFORM_SCHEMA_VERSION: u32 = 1;
 ///   "id": "qemu-virt",
 ///   "name": "QEMU virt",
 ///   "priority": 20,
+///   "auto_selectable": true,
 ///   "region_budget_bytes": 134217728,
 ///   "regions": [
 ///     { "kind": "ram", "base": 0, "size": 1048576 },
@@ -92,6 +107,21 @@ pub struct PlatformDescription {
     /// Auto-selection order — **smaller wins** (the frozen spec §3 裁决 E:
     /// the order must not depend on registration order or on capacity).
     pub priority: u32,
+    /// Does this description take part in **auto-selection**?
+    ///
+    /// ⚠️ **This is where the "only the high segment is looked at"
+    /// difference lives** (the frozen spec §3 裁决 E). The auto-selection
+    /// judgement asks a description for **all** of its RAM regions, so a
+    /// description whose **low** segment is bigger than the other
+    /// platforms' would win images those platforms cannot hold ⇒ the
+    /// demo platform sets this to `false` ⇒ it can only be named
+    /// **explicitly**.
+    ///
+    /// ⚠️ **Default `true`**: absent from the JSON means "a normal
+    /// platform" ⇒ a hand-written description participates unless it says
+    /// otherwise.
+    #[serde(default = "default_true")]
+    pub auto_selectable: bool,
     /// Per-region budget in bytes — the ceiling for one region's
     /// **declared** size.
     ///
@@ -210,7 +240,14 @@ impl PlatformDescription {
     /// ⚠️ **V-8 lives in the serde layer, not here.** An unknown device
     /// kind or a missing parameter fails during deserialization, before
     /// any value exists to validate ⇒ this method never sees it. That is
-    /// why the family carries **eight** scenario codes and not nine.
+    /// why the **declaration** rules carry **eight** scenario codes and
+    /// not nine.
+    ///
+    /// ⚠️ **V-10 ~ V-12 are not judged here either** — they are the
+    /// *host-side* lookup rules (unknown platform id, unreadable file,
+    /// malformed file). Their codes are owned by the contract layer
+    /// (`E_PLT-09` .. `E_PLT-11`) so that a code has exactly one landing
+    /// spot, but the **host** is the one that detects them.
     ///
     /// ⚠️ **Judgements never look at the message text** — they assert
     /// `family == Platform && scenario == <code>`. Rewording a message
@@ -495,6 +532,7 @@ mod tests {
             id: "qemu-virt".to_string(),
             name: "QEMU virt".to_string(),
             priority: 20,
+            auto_selectable: true,
             region_budget_bytes: 134_217_728,
             regions: vec![
                 RegionSpec::Ram {
@@ -586,14 +624,20 @@ mod tests {
     /// **A-2** — the description's **top-level key set** is pinned.
     ///
     /// ⚠️ `description` is **absent** when it is `None` (it carries
-    /// `skip_serializing_if`) ⇒ the key set is the six mandatory keys,
-    /// not seven.
+    /// `skip_serializing_if`) ⇒ the key set is the seven mandatory keys,
+    /// not eight.
+    ///
+    /// ⚠️ `auto_selectable` **is** one of them: it is a plain field (no
+    /// `skip_serializing_if`) ⇒ it is always written, because a
+    /// description that hides it would hide **the difference between the
+    /// real platforms and the demo one**.
     #[test]
     fn a2_the_top_level_key_set_is_pinned() {
         let json = serde_json::to_value(sample()).expect("json");
         assert_eq!(
             keys(&json),
             vec![
+                "auto_selectable",
                 "id",
                 "name",
                 "priority",
@@ -601,7 +645,7 @@ mod tests {
                 "regions",
                 "schema_version",
             ],
-            "平台描述的顶层键集必须精确固定"
+            "平台描述的顶层键集必须精确固定（七个）"
         );
 
         // With a note attached, the optional key **appears** — and still
@@ -612,6 +656,7 @@ mod tests {
         assert_eq!(
             keys(&json),
             vec![
+                "auto_selectable",
                 "description",
                 "id",
                 "name",
@@ -621,6 +666,30 @@ mod tests {
                 "schema_version",
             ],
             "带说明的描述只多出 description 一个键"
+        );
+    }
+
+    /// **A-2 (续)** — a description that **omits** `auto_selectable` parses
+    /// with the default `true`.
+    ///
+    /// ⚠️ **The default is `true`, not `false`**: a hand-written
+    /// description that says nothing about auto-selection must behave
+    /// like a **normal** platform (it takes part in auto-selection) ⇒
+    /// only a description that **explicitly** opts out is excluded.
+    #[test]
+    fn a2_an_absent_auto_selectable_flag_defaults_to_true() {
+        let raw = r#"{
+            "schema_version": 1,
+            "id": "x",
+            "name": "x",
+            "priority": 1,
+            "region_budget_bytes": 4096,
+            "regions": [ { "kind": "ram", "base": 0, "size": 1024 } ]
+        }"#;
+        let desc: PlatformDescription = serde_json::from_str(raw).expect("必须能解析");
+        assert!(
+            desc.auto_selectable,
+            "没写 auto_selectable 的描述默认参与自动选档"
         );
     }
 
@@ -1084,6 +1153,7 @@ mod tests {
             "id": "qemu-virt",
             "name": "QEMU virt",
             "priority": 20,
+            "auto_selectable": true,
             "region_budget_bytes": 134217728,
             "regions": [
                 { "kind": "ram", "base": 0, "size": 1048576 },
@@ -1097,6 +1167,7 @@ mod tests {
         assert_eq!(desc.id, "qemu-virt");
         assert_eq!(desc.name, "QEMU virt");
         assert_eq!(desc.priority, 20);
+        assert!(desc.auto_selectable, "冻结示例里写明了 auto_selectable");
         assert_eq!(desc.region_budget_bytes, 134_217_728);
         assert_eq!(desc.description, None);
         assert_eq!(desc.regions.len(), 3);
@@ -1143,10 +1214,18 @@ mod tests {
         );
     }
 
-    /// **A-6** — the eight scenario codes render as the frozen spec's
-    /// codes, digit for digit.
+    /// **A-6** — the scenario codes render as the frozen spec's codes,
+    /// digit for digit.
+    ///
+    /// ⚠️ The three **host-side** codes (V-10 .. V-12) are listed here
+    /// too: they are owned by the contract layer even though the host is
+    /// the one that detects them ⇒ a code has exactly one landing spot.
     #[test]
     fn a6_the_platform_scenario_codes_render_as_the_spec_spells_them() {
+        use crate::error::{
+            E_PLT_09_UNKNOWN_PLATFORM, E_PLT_10_PLATFORM_FILE_UNREADABLE,
+            E_PLT_11_PLATFORM_FILE_MALFORMED,
+        };
         let cases = [
             (E_PLT_01_SCHEMA_VERSION, "E_PLT-01"),
             (E_PLT_02_EMPTY_ID, "E_PLT-02"),
@@ -1156,6 +1235,9 @@ mod tests {
             (E_PLT_06_OVERLAP, "E_PLT-06"),
             (E_PLT_07_OVER_BUDGET, "E_PLT-07"),
             (E_PLT_08_DUPLICATE_DEVICE_ID, "E_PLT-08"),
+            (E_PLT_09_UNKNOWN_PLATFORM, "E_PLT-09"),
+            (E_PLT_10_PLATFORM_FILE_UNREADABLE, "E_PLT-10"),
+            (E_PLT_11_PLATFORM_FILE_MALFORMED, "E_PLT-11"),
         ];
         for (scenario, expected) in cases {
             let err = PlatformError::new(PLATFORM_FAMILY, scenario, "x");
