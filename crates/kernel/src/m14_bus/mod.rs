@@ -93,16 +93,19 @@ pub const DEFAULT_MAX_REGION_BYTES: u64 = 16 * 1024 * 1024;
 /// pure padding, which is the very disease this batch removes.
 pub const MEM_PAGE_BYTES: usize = 4096;
 
-/// Region-kind tag of a RAM region, as it appears in
-/// [`RegionDto::kind`] — **lower case** (the wire form must survive a
-/// reordering of [`RegionType`]).
-pub const REGION_KIND_RAM: &str = "ram";
-
-/// Region-kind tag of a ROM region (see [`REGION_KIND_RAM`]).
-pub const REGION_KIND_ROM: &str = "rom";
-
-/// Region-kind tag of a peripheral region (see [`REGION_KIND_RAM`]).
-pub const REGION_KIND_PERIPHERAL: &str = "peripheral";
+/// Region-kind tags of the memory-map topology — **re-exported** from the
+/// contract layer (v0.27 · STAGE-12 §2.3).
+///
+/// ⚠️ **The definition moved up** (it used to live here): the platform
+/// description (contract layer) needs the very same three words, and the
+/// contract layer cannot depend on the kernel ⇒ the vocabulary's single
+/// home is `riscv_sim_contract::session` (next to [`RegionDto::kind`]),
+/// and this module re-exports it.
+///
+/// ⇒ **the literals did not change** and **no call site changed** — the
+/// bus's behaviour, its snapshot export and its assertions are all
+/// untouched.
+pub use riscv_sim_contract::session::{REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
 
 /// Scenario code: two regions overlap (or an address is already mapped).
 ///

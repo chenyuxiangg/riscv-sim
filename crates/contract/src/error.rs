@@ -5,7 +5,7 @@
 //! codes never change meaning.
 //!
 //! ⚠️ The tag length was **3–4** until contract v2, which was **wrong**:
-//! two of the fourteen families are 5 characters — `PROTO` (added in v2)
+//! two of the fifteen families are 5 characters — `PROTO` (added in v2)
 //! and `STORE` (pre-existing) — and the module design specification has
 //! always spelled the protocol family `E_PROTO-0x`. The constraint is
 //! now **3–5**; the tags themselves are unchanged, so no error code on
@@ -159,6 +159,24 @@ error_families! {
     /// failure *of the protocol* (version not negotiated, malformed
     /// envelope, CRC mismatch).
     Protocol => "PROTO",
+    /// Platform-description errors: the **memory map** described by a
+    /// platform description (debt ledger **D-123-B** · frozen spec
+    /// `docs/detailed-design/STAGE-12_V027_Platform_Description.md`).
+    ///
+    /// This family covers the **description layer** only — a malformed
+    /// platform description (wrong format version, empty id, no regions,
+    /// zero-sized / overflowing / overlapping regions, a region over the
+    /// declared budget, a duplicated device id). Its scenario codes live
+    /// in this file, next to the family they belong to.
+    ///
+    /// ⚠️ **Not** the bus family: the bus codes (`E_BUS-*`) are about a
+    /// **live** memory map on the wire; these are about the **declared**
+    /// one, before anything is mapped. A description that says "two
+    /// regions overlap" (`E_PLT-06`) and a bus that ends up with two
+    /// overlapping regions (`E_BUS-03`) are two different layers, so they
+    /// carry two different codes (one code, two meanings is the disease
+    /// this file keeps fighting).
+    Platform => "PLT",
 }
 
 /// Error family used by the protocol-level codes below.
@@ -169,6 +187,9 @@ pub const DEBUG_FAMILY: ErrorFamily = ErrorFamily::Debug;
 
 /// Error family used by the engine-segment codes below.
 pub const ENGINE_FAMILY: ErrorFamily = ErrorFamily::Engine;
+
+/// Error family used by the platform-description codes below.
+pub const PLATFORM_FAMILY: ErrorFamily = ErrorFamily::Platform;
 
 // ---------------------------------------------------------------------------
 // Protocol family — `E_PROTO-01`..`E_PROTO-08`
@@ -258,6 +279,88 @@ pub const E_ENG_02_QUEUE_INCONSISTENT: u16 = 2;
 /// not present it as "the program crashed" — the session is wedged and
 /// the engine bailed out on purpose.
 pub const E_ENG_03_NO_PROGRESS: u16 = 3;
+
+// ---------------------------------------------------------------------------
+// Platform family — `E_PLT-01`..`E_PLT-11`
+// ---------------------------------------------------------------------------
+
+/// Scenario code: the platform description's `schema_version` is not the
+/// one this build speaks.
+pub const E_PLT_01_SCHEMA_VERSION: u16 = 1;
+
+/// Scenario code: the platform description's `id` is empty.
+///
+/// The `id` is the platform's **primary key** (built-in descriptions are
+/// selected by it) ⇒ an empty one names nothing.
+pub const E_PLT_02_EMPTY_ID: u16 = 2;
+
+/// Scenario code: the platform description declares **no** region at all.
+pub const E_PLT_03_NO_REGIONS: u16 = 3;
+
+/// Scenario code: a RAM / ROM region declares `size == 0`.
+///
+/// ⚠️ **Same meaning, different layer, different code**: M-14's
+/// `E_BUS-06` says the same thing about a region on a **live** bus; this
+/// one says it about a **declared** region, before anything is mapped.
+pub const E_PLT_04_ZERO_SIZE: u16 = 4;
+
+/// Scenario code: a region's `base + size` overflows the 32-bit address
+/// space.
+///
+/// ⚠️ **Same meaning, different layer, different code**: M-14's
+/// `E_BUS-04` is the runtime check on a live bus.
+pub const E_PLT_05_OVERFLOW: u16 = 5;
+
+/// Scenario code: two declared regions **overlap**.
+pub const E_PLT_06_OVERLAP: u16 = 6;
+
+/// Scenario code: a RAM / ROM region's **declared size** exceeds the
+/// description's `region_budget_bytes`.
+///
+/// ⚠️ **This is a declaration-time check, and it is NOT the same
+/// constraint as M-14's `E_BUS-09`.** Two different layers, two different
+/// semantics, two different codes:
+///
+/// | | layer | measured |
+/// | --- | --- | --- |
+/// | `E_PLT_07` (this one) | **declaration** (before mapping) | the **declared** size |
+/// | `E_BUS-09` | **runtime** (after mapping) | the **physical occupancy** (RAM is lazily allocated) |
+///
+/// ⇒ they must not be merged, and this code deliberately does **not**
+/// reuse `E_BUS_09`'s number (one code, two meanings).
+pub const E_PLT_07_OVER_BUDGET: u16 = 7;
+
+/// Scenario code: two declared peripheral devices share the same `id`.
+///
+/// The restore path matches a device state onto a live instance **by
+/// id** ⇒ two devices with one id are two states competing for one
+/// instance.
+pub const E_PLT_08_DUPLICATE_DEVICE_ID: u16 = 8;
+
+/// Scenario code: the requested **platform id** does not exist.
+///
+/// ⚠️ **Host-side rule (V-10) — owned by the contract layer.** The
+/// description's *declaration* rules are V-1 .. V-9; "the id you asked
+/// for names no built-in description" is a rule about **looking a
+/// description up**, and the frozen spec §1.6 puts it here ⇒ the host
+/// must **not** invent its own code for it (one constraint, one landing
+/// spot).
+pub const E_PLT_09_UNKNOWN_PLATFORM: u16 = 9;
+
+/// Scenario code: the platform description **file cannot be read**
+/// (missing path, denied permission, I/O failure).
+///
+/// ⚠️ **Host-side rule (V-11) — owned by the contract layer**, for the
+/// same reason as [`E_PLT_09_UNKNOWN_PLATFORM`].
+pub const E_PLT_10_PLATFORM_FILE_UNREADABLE: u16 = 10;
+
+/// Scenario code: the platform description file is **not a legal
+/// description** (not valid JSON, or a shape the serde layer rejects —
+/// rule V-8).
+///
+/// ⚠️ **Host-side rule (V-12) — owned by the contract layer**, for the
+/// same reason as [`E_PLT_09_UNKNOWN_PLATFORM`].
+pub const E_PLT_11_PLATFORM_FILE_MALFORMED: u16 = 11;
 
 #[cfg(test)]
 mod tests {
@@ -400,6 +503,7 @@ mod tests {
             (ErrorFamily::Storage, "STORE"),
             (ErrorFamily::Transport, "TRX"),
             (ErrorFamily::Protocol, "PROTO"),
+            (ErrorFamily::Platform, "PLT"),
         ];
 
         // No family may be forgotten: the list must cover *every* variant.
