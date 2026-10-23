@@ -1,94 +1,450 @@
 //! M-21 日志系统 (Logging System).
 //!
-//! In-process ring buffer of structured log records. Only the
-//! admin channel surfaces logs in the front-end (LLD §4.21, P1
-//! gate). The buffer is bounded so an OOM guest cannot exhaust
-//! host memory.
+//! LLD M-21 的落地实现：**结构化日志条目（8 字段）** + **五级分带环形缓冲** +
+//! **UTF-8 字符边界截断** + 运行时级别过滤 + 管理员通道的 `query` / `export`。
 //!
-//! Status: stub — ring buffer + structured records are wired; the
-//! bridge to `tracing` / `log` is TODO.
+//! 冻结规格：`docs/detailed-design/STAGE-13_V028_Watchdog_HMS_Logging.md`
+//! （§2.3 裁决 C 五级无 `Fatal` · §2.5 裁决 E 五带 · §2.6 裁决 M 截断 ·
+//! §2.7 裁决 I / L 角色边界 · §3.1 冻结 API · §5.2 验收 B-1 ~ B-10）。
+//!
+//! # 五带模型（裁决 E）
+//!
+//! LLD 内部三处容量口径互相矛盾（§2.1「debug+info 10³」vs §2.2 每级一行 vs
+//! §1.2「共 7×10³ 条」），STAGE-13 §2.5 逐字对账后裁决为 **五级各一个带**：
+//! 带间**独立容量预算**、带间**独立溢出计数**（一个带满了不牵动别的带）。
+//!
+//! | 级别 | WASM 形态（默认） | 服务端 / 导出形态 |
+//! | --- | --- | --- |
+//! | TRACE | 4 000 | 100 000 |
+//! | DEBUG | 1 000 | 10 000 |
+//! | INFO | 1 000 | 10 000 |
+//! | WARN | 500 | 5 000 |
+//! | ERROR | 500 | 5 000 |
+//!
+//! 默认合计 **7 000 条**（= LLD §1.2 的「共 7×10³ 条」与 192B 槽 × 7×10³ ≈ 1.34MB
+//! 的内存预算逐字对账）。
+//!
+//! # 截断语义（裁决 M）
+//!
+//! `ctx ≤ 24` 字节、`err_code ≤ 12` 字节、`msg ≤ 128` 字节；**任一**字段被截 ⇒
+//! 该条目的 `truncated = true`。截断**只按 UTF-8 字符边界**切 ⇒ **绝不切半个
+//! 字符**（中文被切成乱码是最典型的失败形态）。**错误码与上下文不因 `msg`
+//! 被截而丢失** —— 三个字段各自独立截断。
+//!
+//! # ⚠️ 「零分配」**不承诺**（裁决 M）
+//!
+//! LLD §3.1 / §3.3 的原文是「槽位预分配于 RingBuffer 实例化时」「msg 定长槽
+//! 拷贝」⇒「log() 期间不分配大块内存」。**在 Rust 的 `String` 模型下这条不成立**：
+//! 「定长槽」要么用 `[u8; N]`（UTF-8 截断会切在多字节字符中间），要么用
+//! `String`（每次写入分配）。⇒ 本实现按 STAGE-13 §2.6 裁决 M **只承诺长度上界**
+//! （上面三条字节上限）与 **UTF-8 边界截断**，**不**承诺零分配（台账 **D-128**
+//! 如实登记「定长槽语义降级为有界长度」）。
+//!
+//! # ⚠️ 日志是**进程内通道**，**不上契约层**（裁决 I / L）
+//!
+//! LLD §3.4 的角色边界：产品 / 嵌入式工作台**不订阅**系统日志流（L1 边界）⇒
+//! 本模块的 `LogEntry` / `LogLevel` / `LogQuery` / `LogBuffer` **全部是进程内类型**
+//! （内核与宿主同进程）⇒ **契约层零 DTO / 零命令 / 零事件** ⇒ **前端零改动**
+//! 是本批的可验证判别式。服务端形态的「跨进程收集」是 **P1** ⇒ 届时再上契约层
+//! （台账 **D-129** 留账）。
+//!
+//! # 其它实现约定
+//!
+//! * **虚拟时间由调用方传入** —— 真相是 M-12 的时钟（评审 21-4），本模块**不**
+//!   自己取时钟 ⇒ 导出里的 `time_virt_ps` 是**真实值**，不是恒 0。
+//! * **入口过滤**：低于阈值 ⇒ 直接丢弃（不入带、**不计** `records_written`、
+//!   **计** `dropped_by_filter`），切换即时生效（`set_level` 返回**旧**阈值）。
+//! * **`query` 是纯读**：不移动任何游标、不改任何计数 ⇒ 连续两次 `query` 结果相同。
+//! * **结果顺序**：`query` / `export` 的结果按**级别带升序**（TRACE → ERROR），
+//!   带内按**写入先后**（旧 → 新）。规格未规定顺序 ⇒ 这是本实现选定的口径。
 
 use riscv_sim_contract::error::ErrorFamily;
 use std::collections::VecDeque;
 
-/// Maximum number of log records kept in the ring buffer.
-pub const MAX_LOG_RECORDS: usize = 4096;
+/// 上下文（`ctx`）字段的字节上界。
+const MAX_CTX_BYTES: usize = 24;
+/// 错误码（`err_code`）字段的字节上界。
+const MAX_ERR_CODE_BYTES: usize = 12;
+/// 消息（`msg`）字段的字节上界。
+const MAX_MSG_BYTES: usize = 128;
 
-/// Log severity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Level {
-    /// Diagnostic chatter.
-    Trace,
-    /// Useful operational info.
-    Info,
-    /// Recoverable anomaly.
-    Warn,
-    /// Recoverable error.
-    Error,
-    /// Unrecoverable; engine halted.
-    Fatal,
+/// CSV 导出的表头 —— 与 [`LogEntry`] 的 8 个字段**一一对应**（顺序也一致）。
+const CSV_HEADER: &str = "time_virt_ps,time_host_ms,session_id,level,ctx,err_code,msg,truncated";
+
+/// 日志级别（五级）。⚠️ **没有 `Fatal`** —— 致命属 M-22 的 `Severity`（裁决 C）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LogLevel {
+    Trace = 0,
+    Debug = 1,
+    Info = 2,
+    Warn = 3,
+    Error = 4,
 }
 
-impl Default for Level {
-    fn default() -> Self {
-        Self::Info
+impl LogLevel {
+    /// `"TRACE"` / `"DEBUG"` / `"INFO"` / `"WARN"` / `"ERROR"`
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LogLevel::Trace => "TRACE",
+            LogLevel::Debug => "DEBUG",
+            LogLevel::Info => "INFO",
+            LogLevel::Warn => "WARN",
+            LogLevel::Error => "ERROR",
+        }
+    }
+
+    /// 五级序（Trace = 0 … Error = 4）—— 过滤判据 `level.rank() >= filter.rank()`
+    pub fn rank(self) -> u8 {
+        // 判别式就是规范里的等级序（`Trace = 0` … `Error = 4`）⇒ 单一真相。
+        self as u8
+    }
+
+    /// 该级的默认带容量（WASM 形态，见 §2.5）
+    pub fn default_capacity(self) -> usize {
+        LevelCapacities::default().of(self)
     }
 }
 
-/// One log record.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LogRecord {
-    /// Unix epoch in milliseconds.
-    pub ts_ms: u64,
-    /// Severity.
-    pub level: Level,
-    /// Source module id (e.g. `"m12_engine"`).
-    pub source: String,
-    /// Human-readable message.
-    pub message: String,
+/// 各带容量（可配置覆盖；默认 = §2.5 的 WASM 形态）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelCapacities {
+    pub trace: usize,
+    pub debug: usize,
+    pub info: usize,
+    pub warn: usize,
+    pub error: usize,
 }
 
-impl Default for LogRecord {
+impl Default for LevelCapacities {
     fn default() -> Self {
+        // WASM 压缩形态（§2.5 裁决 E）：合计 7 000 条。
         Self {
-            ts_ms: 0,
-            level: Level::Info,
-            source: String::new(),
-            message: String::new(),
+            trace: 4_000,
+            debug: 1_000,
+            info: 1_000,
+            warn: 500,
+            error: 500,
         }
     }
 }
 
-/// Log buffer. Bounded by [`MAX_LOG_RECORDS`].
-#[derive(Debug, Default)]
+impl LevelCapacities {
+    /// 服务端 / 导出形态的容量（§2.5）
+    pub fn server_profile() -> Self {
+        Self {
+            trace: 100_000,
+            debug: 10_000,
+            info: 10_000,
+            warn: 5_000,
+            error: 5_000,
+        }
+    }
+
+    /// 查某一级的带容量
+    pub fn of(self, level: LogLevel) -> usize {
+        match level {
+            LogLevel::Trace => self.trace,
+            LogLevel::Debug => self.debug,
+            LogLevel::Info => self.info,
+            LogLevel::Warn => self.warn,
+            LogLevel::Error => self.error,
+        }
+    }
+}
+
+/// 结构化日志条目（LLD M-21 §2.1.1 的 `logEntry`，8 字段）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogEntry {
+    /// 虚拟时间（ps）—— 真相是 M-12 的时钟，调用方传入
+    pub time_virt_ps: u64,
+    /// 宿主时间（ms，单调）
+    pub time_host_ms: u64,
+    /// 会话关联标签（MVP 恒为 0，见 §2.8）
+    pub session_id: u32,
+    pub level: LogLevel,
+    /// 「模块-流程点」标识，≤ 24 字节
+    pub ctx: String,
+    /// 完整场景码，可空，≤ 12 字节
+    pub err_code: String,
+    /// 消息文本，≤ 128 字节
+    pub msg: String,
+    /// 任一字段被截断时为 true
+    pub truncated: bool,
+}
+
+/// 查询过滤（管理员通道）
+#[derive(Debug, Clone, Default)]
+pub struct LogQuery {
+    /// 最低级别（含）
+    pub min_level: Option<LogLevel>,
+    /// 会话过滤
+    pub session_id: Option<u32>,
+    /// 虚拟时间下界（含）
+    pub from_virt_ps: Option<u64>,
+    /// 虚拟时间上界（含）
+    pub to_virt_ps: Option<u64>,
+}
+
+/// 按级别分带的环形缓冲（五带，§2.5）
+#[derive(Debug, Clone)]
 pub struct LogBuffer {
-    records: VecDeque<LogRecord>,
+    session_id: u32,
+    filter: LogLevel,
+    /// ⚠️ 规格 §3.1 的结构体清单里没列这一格，但 `with_capacities` 必须**存住**
+    /// 容量才能判溢出 ⇒ 私有字段，不进公开 API。
+    capacities: LevelCapacities,
+    bands: [VecDeque<LogEntry>; 5],
+    overflow_counts: [u64; 5],
+    written: u64, // **入缓冲**的条数（被过滤掉的**不计**）
+    dropped_by_filter: u64,
 }
 
 impl LogBuffer {
-    /// New empty buffer.
-    pub fn new() -> Self {
-        Self::default()
+    /// 新缓冲（session_id 注入；默认容量 = WASM 形态）
+    pub fn new(session_id: u32) -> Self {
+        Self::with_capacities(session_id, LevelCapacities::default())
     }
 
-    /// Push a record, dropping the oldest if the buffer is full.
-    pub fn push(&mut self, rec: LogRecord) {
-        if self.records.len() >= MAX_LOG_RECORDS {
-            let _ = self.records.pop_front();
+    /// 新缓冲（自定义容量）
+    pub fn with_capacities(session_id: u32, caps: LevelCapacities) -> Self {
+        Self {
+            session_id,
+            // 默认阈值 = TRACE ⇒ **默认不过滤**（默认不丢任何一条）。
+            filter: LogLevel::Trace,
+            capacities: caps,
+            bands: std::array::from_fn(|_| VecDeque::new()),
+            overflow_counts: [0; 5],
+            written: 0,
+            dropped_by_filter: 0,
         }
-        self.records.push_back(rec);
     }
 
-    /// Drain all records (admin-only operation).
-    pub fn drain(&mut self) -> Vec<LogRecord> {
-        self.records.drain(..).collect()
+    /// 统一采集入口。**虚拟时间由调用方传入**（真相是 M-12 的时钟，§3.1 注）。
+    pub fn log(
+        &mut self,
+        level: LogLevel,
+        ctx: &str,
+        msg: &str,
+        err_code: &str,
+        time_virt_ps: u64,
+        time_host_ms: u64,
+    ) {
+        // ① 入口过滤：低于阈值 ⇒ 直接丢弃（不入带、不计 written、计 dropped）。
+        if level.rank() < self.filter.rank() {
+            self.dropped_by_filter += 1;
+            return;
+        }
+        // ② 逐字段独立截断（UTF-8 字符边界）⇒ 任一被截则 truncated = true。
+        let (ctx, ctx_cut) = truncate_utf8(ctx, MAX_CTX_BYTES);
+        let (err_code, code_cut) = truncate_utf8(err_code, MAX_ERR_CODE_BYTES);
+        let (msg, msg_cut) = truncate_utf8(msg, MAX_MSG_BYTES);
+        let entry = LogEntry {
+            time_virt_ps,
+            time_host_ms,
+            session_id: self.session_id,
+            level,
+            ctx,
+            err_code,
+            msg,
+            truncated: ctx_cut || code_cut || msg_cut,
+        };
+        // ③ 入带：满了 ⇒ 丢该带最旧一条 + 该带溢出计数（别的带不受影响）。
+        let idx = usize::from(level.rank());
+        let capacity = self.capacities.of(level);
+        let band = &mut self.bands[idx];
+        band.push_back(entry);
+        while band.len() > capacity {
+            band.pop_front();
+            self.overflow_counts[idx] += 1;
+        }
+        self.written += 1;
     }
 
-    /// Read-only access.
-    pub fn iter(&self) -> impl Iterator<Item = &LogRecord> {
-        self.records.iter()
+    /// 管理员检索：**快照读**，不移动游标、不改缓冲状态（LLD 评审 21-2）
+    pub fn query(&self, filter: &LogQuery) -> Vec<LogEntry> {
+        let mut out = Vec::new();
+        for band in &self.bands {
+            for entry in band {
+                if matches_query(entry, filter) {
+                    out.push(entry.clone());
+                }
+            }
+        }
+        out
     }
+
+    /// 导出 CSV（分块内容拼成一段；字段与 §3.1 的 8 字段一一对应）
+    pub fn export_csv(&self, filter: &LogQuery) -> String {
+        let mut out = String::with_capacity(CSV_HEADER.len() + 64);
+        out.push_str(CSV_HEADER);
+        out.push('\n');
+        for entry in self.query(filter) {
+            out.push_str(&entry.time_virt_ps.to_string());
+            out.push(',');
+            out.push_str(&entry.time_host_ms.to_string());
+            out.push(',');
+            out.push_str(&entry.session_id.to_string());
+            out.push(',');
+            out.push_str(entry.level.as_str());
+            out.push(',');
+            out.push_str(&csv_field(&entry.ctx));
+            out.push(',');
+            out.push_str(&csv_field(&entry.err_code));
+            out.push(',');
+            out.push_str(&csv_field(&entry.msg));
+            out.push(',');
+            out.push_str(if entry.truncated { "true" } else { "false" });
+            out.push('\n');
+        }
+        out
+    }
+
+    /// 导出 JSON（同上）
+    pub fn export_json(&self, filter: &LogQuery) -> String {
+        let mut out = String::from("[");
+        for (i, entry) in self.query(filter).iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push('{');
+            out.push_str("\"time_virt_ps\":");
+            out.push_str(&entry.time_virt_ps.to_string());
+            out.push_str(",\"time_host_ms\":");
+            out.push_str(&entry.time_host_ms.to_string());
+            out.push_str(",\"session_id\":");
+            out.push_str(&entry.session_id.to_string());
+            out.push_str(",\"level\":\"");
+            out.push_str(entry.level.as_str());
+            out.push_str("\",\"ctx\":");
+            out.push_str(&json_string(&entry.ctx));
+            out.push_str(",\"err_code\":");
+            out.push_str(&json_string(&entry.err_code));
+            out.push_str(",\"msg\":");
+            out.push_str(&json_string(&entry.msg));
+            out.push_str(",\"truncated\":");
+            out.push_str(if entry.truncated { "true" } else { "false" });
+            out.push('}');
+        }
+        out.push(']');
+        out
+    }
+
+    /// 运行时级别切换（仅管理员）。返回**旧**阈值。
+    pub fn set_level(&mut self, level: LogLevel) -> LogLevel {
+        std::mem::replace(&mut self.filter, level)
+    }
+
+    /// 当前阈值
+    pub fn level(&self) -> LogLevel {
+        self.filter
+    }
+
+    /// 总溢出次数（各带之和）
+    pub fn overflow_count(&self) -> u64 {
+        self.overflow_counts.iter().sum()
+    }
+
+    /// 某级的溢出次数
+    pub fn overflow_count_of(&self, level: LogLevel) -> u64 {
+        self.overflow_counts[usize::from(level.rank())]
+    }
+
+    /// 入缓冲的条数（被过滤掉的不计）
+    pub fn records_written(&self) -> u64 {
+        self.written
+    }
+
+    /// 被级别过滤丢弃的条数
+    pub fn dropped_by_filter(&self) -> u64 {
+        self.dropped_by_filter
+    }
+
+    /// 当前驻留条数
+    pub fn len(&self) -> usize {
+        self.bands.iter().map(VecDeque::len).sum()
+    }
+
+    /// 缓冲是否为空
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// 清空（保留计数器）
+    pub fn clear(&mut self) {
+        for band in &mut self.bands {
+            band.clear();
+        }
+    }
+
+    /// 会话标签
+    pub fn session_id(&self) -> u32 {
+        self.session_id
+    }
+}
+
+/// 查询判据（`min_level` / `session_id` / 虚拟时间区间）。
+fn matches_query(entry: &LogEntry, query: &LogQuery) -> bool {
+    if query
+        .min_level
+        .is_some_and(|min| entry.level.rank() < min.rank())
+    {
+        return false;
+    }
+    if query.session_id.is_some_and(|sid| entry.session_id != sid) {
+        return false;
+    }
+    if query
+        .from_virt_ps
+        .is_some_and(|from| entry.time_virt_ps < from)
+    {
+        return false;
+    }
+    if query.to_virt_ps.is_some_and(|to| entry.time_virt_ps > to) {
+        return false;
+    }
+    true
+}
+
+/// UTF-8 字符边界截断：返回（截断后的字符串，是否被截断）。
+///
+/// ⚠️ **绝不切半个字符** —— 切点回退到最近的字符边界。
+fn truncate_utf8(s: &str, max_bytes: usize) -> (String, bool) {
+    if s.len() <= max_bytes {
+        return (s.to_string(), false);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    (s[..end].to_string(), true)
+}
+
+/// CSV 字段转义（含逗号 / 引号 / 换行的字段加引号，里面的引号成对写出）。
+fn csv_field(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        let mut out = String::with_capacity(s.len() + 2);
+        out.push('"');
+        for ch in s.chars() {
+            if ch == '"' {
+                out.push('"');
+            }
+            out.push(ch);
+        }
+        out.push('"');
+        out
+    } else {
+        s.to_string()
+    }
+}
+
+/// JSON 字符串字面量（含引号与转义）。
+fn json_string(s: &str) -> String {
+    // `&str` 的序列化不会失败 ⇒ 失败分支只是防御性兜底。
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 /// Family used by errors raised from this module.
 pub const LOG_FAMILY: ErrorFamily = ErrorFamily::Context;
+
+#[cfg(test)]
+mod tests;
