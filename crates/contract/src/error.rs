@@ -281,6 +281,34 @@ pub const E_ENG_02_QUEUE_INCONSISTENT: u16 = 2;
 pub const E_ENG_03_NO_PROGRESS: u16 = 3;
 
 // ---------------------------------------------------------------------------
+// Health family — `E_HMS-01`..`E_HMS-02`
+// ---------------------------------------------------------------------------
+
+/// Scenario code: a degrade action failed after the retry budget (at most
+/// three tries) was exhausted — the **terminal** report of that action
+/// (LLD M-22 §3.4, terminal state 22-11).
+///
+/// ⚠️ This is a **platform** fault, strictly distinct from a guest trap:
+/// the guest did not trap — the *host-side* degrade action (terminate /
+/// snapshot restore / pause / disconnect / trace-down) could not be carried
+/// out after the retry budget ran out. The front end must not present it
+/// as "the program crashed": the program may well be fine and the
+/// *platform* failed to react to it.
+///
+/// ⚠️ **Registered in the contract layer** (v0.28 · frozen spec
+/// `docs/detailed-design/STAGE-13_V028_Watchdog_HMS_Logging.md` §0.3 ⑥):
+/// the Health family already existed (tag `HMS`), the batch adds the
+/// **scenarios** — not a family.
+pub const E_HMS_01_DEGRADE_FAILED: u16 = 1;
+
+/// Scenario code: a fatal health signal has terminated the kernel.
+///
+/// ⚠️ **Platform** fault as well: the kernel was stopped **on purpose**
+/// because the health-management system graded a signal as fatal (e.g.
+/// the guest-run watchdog timeout) — the guest itself did not trap.
+pub const E_HMS_02_FATAL_TERMINATED: u16 = 2;
+
+// ---------------------------------------------------------------------------
 // Platform family — `E_PLT-01`..`E_PLT-11`
 // ---------------------------------------------------------------------------
 
@@ -467,6 +495,152 @@ mod tests {
         assert_eq!(no_progress.family, ErrorFamily::Engine);
         assert_eq!(no_progress.scenario, E_ENG_03_NO_PROGRESS);
         assert!(no_progress.to_string().starts_with("E_ENG-03: "));
+    }
+
+    /// The two HMS scenario codes are **registered in the contract
+    /// layer** (v0.28 · frozen spec STAGE-13 §0.3 ⑥ / §5.1 A-1).
+    ///
+    /// The Health family (`HMS`) **already existed** — the batch adds
+    /// *scenarios*, not a family (STAGE-13 §1.4).
+    ///
+    /// The assertion lands on the **rendered** code (digit for digit) and
+    /// on the **numeric value**: a constant that renders `E_HMS-3` would
+    /// pass a "the constant is 3" check and still break every dispatch
+    /// that greps for `E_HMS-01`.
+    #[test]
+    fn the_hms_scenario_codes_are_registered_in_the_contract_layer() {
+        // The lookup the front end does: family + scenario → the wire code.
+        let cases = [
+            (E_HMS_01_DEGRADE_FAILED, "E_HMS-01"),
+            (E_HMS_02_FATAL_TERMINATED, "E_HMS-02"),
+        ];
+        for (scenario, expected) in cases {
+            let err = PlatformError::new(ErrorFamily::Health, scenario, "x");
+            assert_eq!(
+                err.to_string(),
+                format!("{expected}: x"),
+                "场景码 {scenario} 渲染成了 {err}"
+            );
+        }
+
+        assert_eq!(E_HMS_01_DEGRADE_FAILED, 1);
+        assert_eq!(E_HMS_02_FATAL_TERMINATED, 2);
+
+        // The family is the **pre-existing** Health family — no new family.
+        let degrade = PlatformError::new(
+            ErrorFamily::Health,
+            E_HMS_01_DEGRADE_FAILED,
+            "降级动作重试至多 3 次仍失败",
+        );
+        assert_eq!(degrade.family, ErrorFamily::Health);
+        assert_eq!(degrade.family.as_str(), "HMS");
+        assert!(degrade.to_string().starts_with("E_HMS-01: "));
+
+        let fatal = PlatformError::new(
+            ErrorFamily::Health,
+            E_HMS_02_FATAL_TERMINATED,
+            "致命信号已终止内核",
+        );
+        assert_eq!(fatal.family, ErrorFamily::Health);
+        assert!(fatal.to_string().starts_with("E_HMS-02: "));
+    }
+
+    /// ⚠️ **本批不加错误族**（STAGE-13 §5.1 A-2 · §7「契约层零新增 … 错误族」）。
+    ///
+    /// The family list is pinned to the **15** families the frozen spec
+    /// records (§1.4) ⇒ adding a family (e.g. a `Log` family for M-21)
+    /// turns this red. The pre-existing tag-completeness check
+    /// ([`every_family_tag_is_pinned`]) keeps the wire tags honest.
+    #[test]
+    fn the_family_list_is_still_the_fifteen_families() {
+        assert_eq!(
+            ALL_FAMILIES.len(),
+            15,
+            "错误族数量变了 —— 本批只补场景码，不新增族（STAGE-13 §1.4 记的是 15 个族）"
+        );
+        assert!(
+            ALL_FAMILIES.contains(&ErrorFamily::Health),
+            "HMS 族必须还在清单里"
+        );
+        assert_eq!(ErrorFamily::Health.as_str(), "HMS");
+    }
+
+    /// ⚠️ **全仓只有一处定义**（STAGE-13 §5.1 A-1 · 债项 **D-120** 纪律：
+    /// 场景码住一处，别处只引用不复制字面量）。
+    ///
+    /// The scenario codes live in **this file**; the kernel may only
+    /// *reference* them. A second `const E_HMS_0…` anywhere in the
+    /// workspace is a copy that will drift ⇒ this scan turns it red.
+    ///
+    /// The scan is the point: a behavioural assertion alone cannot tell
+    /// "the code is defined once" from "the code is defined twice and
+    /// the second copy happens to agree today".
+    #[test]
+    fn the_hms_scenario_codes_are_defined_in_exactly_one_place() {
+        // crates/ —— 契约层与内核都在它下面。
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut hits: Vec<String> = Vec::new();
+        scan_hms_scenario_definitions(&root, &root, &mut hits);
+
+        assert_eq!(
+            hits.len(),
+            2,
+            "E_HMS-01 / E_HMS-02 各只能有一处定义（契约层 error.rs）：{hits:?}"
+        );
+        for hit in &hits {
+            assert!(
+                hit.contains("contract/src/error.rs"),
+                "场景码的定义必须住在契约层 error.rs：{hit}"
+            );
+        }
+    }
+
+    /// 找出**定义** HMS 场景码常量的行（`… const E_HMS_0…`）。
+    ///
+    /// 注释行跳过（`//` / `///` / `//!`）⇒ 文档里提到常量名**不算**定义。
+    fn scan_hms_scenario_definitions(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        hits: &mut Vec<String>,
+    ) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                scan_hms_scenario_definitions(root, &path, hits);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for line in text.lines() {
+                let line = line.trim();
+                if line.starts_with("//") {
+                    continue;
+                }
+                // 只认**常量声明行**（`const` / `pub const` / `pub(crate) const` …）
+                // ⇒ 提到常量名的普通代码行不算定义。
+                let is_const_decl = line.starts_with("const ")
+                    || line.starts_with("pub const ")
+                    || line.starts_with("pub(crate) const ")
+                    || line.starts_with("pub(super) const ");
+                if is_const_decl && line.contains("E_HMS_0") && line.contains(": u16") {
+                    hits.push(format!("{rel}: {line}"));
+                }
+            }
+        }
     }
 
     /// **Every** family's wire tag is pinned here.
