@@ -28,13 +28,25 @@
 //! `Option<Box<dyn DataStore>>`（M-23）⇒ **M-22 → M-23 单向**。
 //! ⚠️ M-22 **不造**自己的归档后端（那会出现「两个真相」）；⚠️ M-23 **不**实现
 //! M-22 的 trait（那是**依赖倒置**）。
+//!
+//! **日志源也是注入的**（冻结规格 §3.2 · 第五次订正）：[`Hms`] 持有宿主注入的
+//! `Option<Rc<RefCell<LogBuffer>>>`（M-21）⇒ 管理员分发的 `log_ref` 从**真实**
+//! 日志环里取（`query` 结果的最后 8 条）；**没有注入时恒空**（如实降级，不编造）。
+//! ⇒ 产品 / 嵌入式角色**一条日志都拿不到**（角色边界的判别力落在这里）。
+//!
+//! ⚠️ **保留带无界增长**（台账 **D-133**）：LLD 要求 FATAL / CRITICAL 信号
+//! **永不丢弃**（取证需要）⇒ 极端场景（大量致命信号）下 `retained` **无上限**。
+//! ⇒ 本批按 LLD 实现、**不加护栏**；上限策略（超出后留最早还是留最新 +
+//! 「超出即计数」的可见性）待另立欠账。
 
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::rc::Rc;
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError, E_HMS_01_DEGRADE_FAILED};
 
-use crate::m21_logging::LogEntry;
+use crate::m21_logging::{LogBuffer, LogEntry, LogQuery};
 use crate::m23_datastore::{DataStore, E_STORE_01_ARCHIVE_FAILED};
 
 /// 健康信号流的环形容量（LLD M-22 §6.2 (11)「健康信号流环形 ≤10⁴ 条」）。
@@ -89,10 +101,12 @@ pub enum SignalKind {
 
 /// 分级（LLD M-22 §2.1.1 的 `Severity`）。
 ///
-/// ⚠️ **枚举的声明序不是「严重度序」**：`Fatal < Critical < Warning <
-/// InfoNoDegrade`（`Ord` 派生自声明序）⇒ 判定「谁更严重」时**不要**用 `Ord`，
-/// 用本模块内部的 `severity_rank`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// ⚠️ **刻意不 derive `PartialOrd` / `Ord`**（冻结规格 §3.2 · 第五次订正）：变体声明顺序是
+/// `Fatal` → `Critical` → `Warning` → `InfoNoDegrade`，而**致命是语义上最重的**
+/// ⇒ derive 出来的 `Ord` 会让 `Fatal` 变成**最小值** ⇒ 任何写
+/// `sev.max(other)` / `sev.min(other)` 的调用者都会**拿到相反的结论**。
+/// ⇒ 严重度比较一律走显式的 [`Severity::severity_rank`]（`Fatal` = 3 最大）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Severity {
     /// 致命（guest 失控）—— 终止内核。
     Fatal,
@@ -102,6 +116,20 @@ pub enum Severity {
     Warning,
     /// 仅提示 / 仅记录，**不降级**（guest trap 与分级表未命中的兜底）。
     InfoNoDegrade,
+}
+
+impl Severity {
+    /// 严重度序（**越大越严重**）：`InfoNoDegrade` = 0 … `Fatal` = 3。
+    ///
+    /// ⚠️ 这是**唯一**的严重度比较入口 —— 本类型**刻意不实现 `Ord`**（见类型文档）。
+    pub fn severity_rank(self) -> u8 {
+        match self {
+            Severity::InfoNoDegrade => 0,
+            Severity::Warning => 1,
+            Severity::Critical => 2,
+            Severity::Fatal => 3,
+        }
+    }
 }
 
 /// 信号上下文（LLD 里 `ctx` 是 uint32；`GUEST_RUN` 是关键取值）。
@@ -212,7 +240,8 @@ pub struct AdminDiagnosis {
     pub t_host_ms: u64,
     /// M-21 日志关联（**引用**，不是日志内容本身）。
     ///
-    /// ⚠️ 冻结 API **没有**「日志缓冲注入口」⇒ 本批该列表恒为空；
+    /// ⚠️ 内容来自**注入的**日志源（[`Hms::install_log_source`]）—— 管理员分支
+    /// 取 `query` 结果的**最后 8 条**；**没有注入日志源时恒空**（如实降级）。
     /// 关联的**类型**是 M-21 的 [`LogEntry`] ⇒ 依赖方向 **M-22 → M-21 单向**。
     pub log_ref: Vec<LogEntry>,
 }
@@ -290,8 +319,9 @@ pub trait DegradeExecutor {
 /// `degrade_failures`）—— 理由见各自的注释：前者撑起 §2.4 的「只降不升」，
 /// 后者是「终态上报 `E_HMS-01`」的**唯一可观察出口**（冻结 API 没有别的通道）。
 ///
-/// ⚠️ **不能** `#[derive(Clone)]`：注入的两个后端是 trait 对象（不可克隆）。
-/// `Debug` 是**手写**的（trait 对象没有 `Debug` 约束）。
+/// ⚠️ **不能 derive `Clone`**（冻结规格 §3.2 · 第五次订正）：`executor` 与 `store` 是
+/// **trait 对象**（`Box<dyn …>`）⇒ 既不可克隆也没有 `Debug` ⇒ `Clone` 派生
+/// **编译不过**。⇒ 本类型**不提供 `Clone`**，`Debug` **手写**。
 pub struct Hms {
     /// 角色（宿主设定，默认 `Product`）。
     role: Role,
@@ -321,6 +351,13 @@ pub struct Hms {
     ///
     /// ⚠️ **注入**的，不自己造（那会出现「两个真相」）。
     store: Option<Box<dyn DataStore>>,
+    /// M-21 的日志缓冲（可注入，宿主装配）—— 管理员分发的**日志关联**从这里取。
+    ///
+    /// ⚠️ 没有它，`AdminDiagnosis.log_ref` **恒空** ⇒ 「管理员看得到日志关联、
+    /// 产品看不到」这条**角色边界**只剩结构、**没有判别力** ⇒ 注入后 Admin 分支
+    /// 能真的带上日志条目，Product 分支一条都带不上。
+    /// ⚠️ 形状与 M-18 的探针表同款（`Rc<RefCell<…>>`，内核单线程）。
+    logs: Option<Rc<RefCell<LogBuffer>>>,
     /// 信号流的**粘性最大级别** —— `Health` 由此派生。
     ///
     /// ⚠️ 为什么需要它：信号流是**环形**的，最旧的会被丢掉 ⇒ 只看「当前窗口」
@@ -349,6 +386,7 @@ impl fmt::Debug for Hms {
             .field("degrade_failures", &self.degrade_failures.len())
             .field("executor_installed", &self.executor.is_some())
             .field("store_installed", &self.store.is_some())
+            .field("log_source_installed", &self.logs.is_some())
             .finish()
     }
 }
@@ -381,6 +419,7 @@ impl Hms {
             last_escalation: None,
             executor: None,
             store: None,
+            logs: None,
             worst_severity: Severity::InfoNoDegrade,
             degrade_failures: Vec::new(),
         }
@@ -395,6 +434,13 @@ impl Hms {
     /// 「没有归档通道」而不是静默成功。
     pub fn install_store(&mut self, store: Box<dyn DataStore>) {
         self.store = Some(store);
+    }
+
+    /// 注入日志缓冲（宿主装配）—— 管理员分发的日志关联从这里取。
+    ///
+    /// ⚠️ **没注入时 `log_ref` 恒空**（如实降级，不编造）。
+    pub fn install_log_source(&mut self, logs: Rc<RefCell<LogBuffer>>) {
+        self.logs = Some(logs);
     }
 
     /// 当前角色。
@@ -437,10 +483,13 @@ impl Hms {
         let _dispatched = self.dispatch(&signal, severity);
 
         // ⑤ 查策略 → ⑥ 降级。
-        //    ⚠️ `InfoNoDegrade` **不降级**（LLD §6.2 (4)(6)）：guest trap 与分级表
-        //    未命中的兜底都落这一档。
+        //    ⚠️ **降级闸门（规格 §3.2 实现要点 2）**：LLD §3.1 的伪码是
+        //    `if (act != NONE && (sev == FATAL || sev == CRITICAL)) degrade(act);`
+        //    ⇒ **只有 `Fatal` / `Critical` 才降级**；`Warning` 即使命中策略也
+        //    **只记录不降级**（不许写成「非 InfoNoDegrade 就降级」—— 那会让
+        //    `Warning` **越权**触发降级动作）。
         //    ⚠️ 幂等：标志为真 ⇒ **不重复触发**降级。
-        if severity != Severity::InfoNoDegrade && !self.watchdog_fired {
+        if matches!(severity, Severity::Fatal | Severity::Critical) && !self.watchdog_fired {
             if let Some(action) = self.degrade_policy.get(&severity).copied() {
                 if action != DegradeAction::None {
                     let _outcome = self.degrade(action);
@@ -552,6 +601,9 @@ impl Hms {
     /// - `Role::Product` ⇒ [`DispatchResult::Notice`]：**只有**级别 / 错误码 /
     ///   上下文 —— **不含任何日志条目**（角色边界）。
     /// - `Role::Admin` ⇒ [`DispatchResult::Admin`]：诊断详情（双时间戳）+ 日志关联。
+    ///
+    /// ⚠️ Admin 分支的日志关联从**注入的**日志源取（`query` 结果的最后 8 条）；
+    /// 没注入日志源 ⇒ `log_ref` **恒空**（如实降级，不编造）。
     pub fn dispatch(&self, signal: &HealthSignal, severity: Severity) -> DispatchResult {
         match self.role {
             Role::Product => DispatchResult::Notice(NoticeMsg {
@@ -565,11 +617,29 @@ impl Hms {
                 ctx: signal.ctx,
                 t_virt_ps: signal.t_virt_ps,
                 t_host_ms: signal.t_host_ms,
-                // ⚠️ 冻结 API 没有日志缓冲注入口 ⇒ 关联列表本批恒为空
-                //（**类型**是 M-21 的 LogEntry ⇒ 依赖方向 M-22 → M-21 单向）。
-                log_ref: Vec::new(),
+                // M-21 的日志关联（**类型**是 M-21 的 LogEntry ⇒ M-22 → M-21 单向）。
+                log_ref: self.log_ref_tail(),
             }),
         }
+    }
+
+    /// 管理员分发的日志关联：**注入日志源**里 `query` 结果的**最后 8 条**。
+    ///
+    /// ⚠️ **最保守的借用口径**：只克隆 `Rc`（不克隆缓冲本身），用 `try_borrow`
+    /// 取**只读**视图 ⇒ 万一别处正持有可变借用，**退化成空列表**而不是 panic
+    /// （诊断路径不该把内核打挂）。
+    fn log_ref_tail(&self) -> Vec<LogEntry> {
+        const LOG_REF_TAIL: usize = 8;
+        let Some(logs) = self.logs.as_ref() else {
+            // 没有注入日志源 ⇒ 恒空（如实降级，不编造）。
+            return Vec::new();
+        };
+        let Ok(buffer) = logs.try_borrow() else {
+            return Vec::new();
+        };
+        let entries = buffer.query(&LogQuery::default());
+        let start = entries.len().saturating_sub(LOG_REF_TAIL);
+        entries[start..].to_vec()
     }
 
     /// 采集指标（环形 4096，满则丢最旧）。
@@ -764,19 +834,9 @@ impl Hms {
     }
 }
 
-/// 严重度序（**不要**用 `Severity` 的 `Ord`：它的声明序是反的）。
-fn severity_rank(sev: Severity) -> u8 {
-    match sev {
-        Severity::Fatal => 3,
-        Severity::Critical => 2,
-        Severity::Warning => 1,
-        Severity::InfoNoDegrade => 0,
-    }
-}
-
-/// 两个级别里更严重的那个。
+/// 严重度序的内部口径 —— 走公开的 [`Severity::severity_rank`]（越大越严重）。
 fn worse(a: Severity, b: Severity) -> Severity {
-    if severity_rank(b) > severity_rank(a) {
+    if b.severity_rank() > a.severity_rank() {
         b
     } else {
         a
@@ -842,9 +902,26 @@ mod tests {
     use riscv_sim_contract::session::SessionSnapshotDto;
 
     use super::*;
+    use crate::m21_logging::LogLevel;
     use crate::m23_datastore::memory::InMemoryDataStore;
 
     // ---------------------------------------------------------------- 辅助
+
+    /// 造一个装了 `n` 条日志的日志源（M-21 的 `LogBuffer`）。
+    fn log_source_with_entries(n: usize) -> Rc<RefCell<LogBuffer>> {
+        let mut buffer = LogBuffer::new(0);
+        for i in 0..n {
+            buffer.log(
+                LogLevel::Error,
+                "M22",
+                &format!("日志条目 {i}"),
+                "E_HMS-01",
+                i as u64 * 10,
+                i as u64,
+            );
+        }
+        Rc::new(RefCell::new(buffer))
+    }
 
     fn watchdog_signal() -> HealthSignal {
         HealthSignal {
@@ -1182,9 +1259,73 @@ mod tests {
         assert_eq!(diag.severity, Severity::Fatal);
         assert_eq!(diag.t_virt_ps, signal.t_virt_ps);
         assert_eq!(diag.t_host_ms, signal.t_host_ms);
-        assert!(diag.log_ref.is_empty(), "本批没有日志注入口 ⇒ 关联列表为空");
+        assert!(
+            diag.log_ref.is_empty(),
+            "没有注入日志源 ⇒ 关联列表为空（如实降级）"
+        );
         // 管理员路径**确实**带日志关联字段（结构上可辨）。
         assert!(format!("{admin:?}").contains("log_ref"));
+    }
+
+    /// C-9 的 **Admin 半边**（有真判别力）：注入日志源 ⇒ `log_ref` **非空**，
+    /// 且内容与 M-21 的 `LogBuffer` **一致**（取 `query` 结果的**最后 8 条**）。
+    #[test]
+    fn c9_admin_dispatch_carries_the_log_association_when_a_log_source_is_installed() {
+        let logs = log_source_with_entries(10);
+        let mut hms = Hms::with_role(Role::Admin);
+        hms.install_log_source(logs.clone());
+
+        let admin = hms.dispatch(&watchdog_signal(), Severity::Fatal);
+        let diag = match &admin {
+            DispatchResult::Admin(d) => d,
+            other => panic!("Admin 角色的分发结果必须是诊断详情：{other:?}"),
+        };
+
+        // 非空，且就是 `query` 结果的**最后 8 条**。
+        let expected = logs.borrow().query(&LogQuery::default());
+        assert_eq!(expected.len(), 10);
+        assert_eq!(diag.log_ref.len(), 8, "日志关联取最后 8 条");
+        assert_eq!(diag.log_ref, expected[2..].to_vec());
+        // 内容确实来自那个日志环。
+        assert_eq!(diag.log_ref[0].msg, "日志条目 2");
+        assert_eq!(diag.log_ref[7].msg, "日志条目 9");
+        assert_eq!(diag.log_ref[7].err_code, "E_HMS-01");
+    }
+
+    /// C-9 的 **Product 半边**（注入日志源后仍然一条日志都拿不到）。
+    #[test]
+    fn c9_product_dispatch_carries_no_log_text_even_with_a_log_source() {
+        let mut hms = Hms::with_role(Role::Product);
+        hms.install_log_source(log_source_with_entries(10));
+
+        let product = hms.dispatch(&watchdog_signal(), Severity::Fatal);
+
+        // 结构性：Product 只能是脱敏提示。
+        let notice = match &product {
+            DispatchResult::Notice(n) => n,
+            other => panic!("Product 角色的分发结果必须是脱敏提示：{other:?}"),
+        };
+        assert_eq!(notice.severity, Severity::Fatal);
+
+        // 文本扫描：**真的去搜** —— 注入的日志源里的内容一条都不许漏过来。
+        let text = format!("{product:?}");
+        for forbidden in [
+            "LogEntry",
+            "log_ref",
+            "log",
+            "msg",
+            "truncated",
+            "time_virt",
+            "time_host",
+            "日志条目",
+            "M22",
+            "E_HMS-01",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "Product 的分发结果里搜到了日志文本 {forbidden:?}：{text}"
+            );
+        }
     }
 
     // ------------------------------------------- C-10 · 未实现动作 ⇒ Unsupported
@@ -1364,6 +1505,40 @@ mod tests {
         assert_eq!(sev, Severity::InfoNoDegrade);
         assert_eq!(calls.get(), 0, "InfoNoDegrade 不得触发降级");
         assert!(!hms.terminated());
+    }
+
+    /// 附加 · **降级闸门只限致命与严重**（规格 §3.2 实现要点 2）：`Warning`
+    /// 即使**命中降级策略**也**只记录不降级**（不许越权触发降级动作）。
+    #[test]
+    fn warning_never_degrades_even_with_a_matching_policy() {
+        let calls = Rc::new(Cell::new(0u32));
+        let mut hms = Hms::new();
+        hms.install_executor(Box::new(CountingExecutor::new(calls.clone())));
+        // 分级表把这条判成 Warning，且策略里**明确**配了 terminate。
+        hms.set_severity(SignalSrc::Command, "E_CTX-06", Severity::Warning);
+        hms.set_degrade_policy(Severity::Warning, DegradeAction::Terminate);
+
+        let sev = hms.report(heartbeat_signal("E_CTX-06"));
+        assert_eq!(sev, Severity::Warning);
+        assert_eq!(calls.get(), 0, "Warning 越权降级 ⇒ 执行器不得被调用");
+        assert!(!hms.terminated());
+        assert_eq!(hms.degrade_failures().len(), 0);
+        // 但状态**仍然**派生为 Degraded（记录 ≠ 不降级）。
+        assert_eq!(hms.state(), Health::Degraded);
+    }
+
+    /// 附加 · `Severity::severity_rank`：**越大越严重**，`Fatal` 是最大值。
+    ///
+    /// ⚠️ `Severity` **刻意不实现 `Ord`** ⇒ 这个方法是唯一的比较入口。
+    #[test]
+    fn severity_rank_is_monotonic_and_fatal_is_the_largest() {
+        assert!(Severity::Fatal.severity_rank() > Severity::Critical.severity_rank());
+        assert!(Severity::Critical.severity_rank() > Severity::Warning.severity_rank());
+        assert!(Severity::Warning.severity_rank() > Severity::InfoNoDegrade.severity_rank());
+        assert_eq!(Severity::Fatal.severity_rank(), 3);
+        assert_eq!(Severity::Critical.severity_rank(), 2);
+        assert_eq!(Severity::Warning.severity_rank(), 1);
+        assert_eq!(Severity::InfoNoDegrade.severity_rank(), 0);
     }
 
     /// 附加 · 旧的那个「致命常量」写法**不出现在本模块里**（裁决 A）。
