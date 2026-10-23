@@ -350,7 +350,7 @@ fn build_device(spec: &DeviceSpec, base: u32) -> Result<Rc<RefCell<dyn Periphera
 
 ```asm
         lui   x5, 0x84000        # x5 = 0x8400_0000（固件基址，QEMU virt 高段 RAM）
-        addi  x5, x5, 0x40      # x5 = handler 的地址
+        addi  x5, x5, 0x28      # x5 = handler 的地址（0x28 == `handler` 的偏移，见下）
         lui   x6, 0x20040       # x6 = 0x0200_4000 = CLINT 的 mtimecmp
         li    x7, 1             # x7 = 1 周期
         sw    x7, 0(x6)         # 写 mtimecmp 低 32 位（高半保持 0 ⇒ 值 = 1 周期）
@@ -368,9 +368,45 @@ handler:
         mret
 ```
 
+⚠️ **汇编命令与核对方式**（工具链在**仓外** `~/riscv-sim-golden/toolchain/bin`，不进仓库）：
+
+```bash
+riscv-none-elf-as -march=rv32im_zicsr -mabi=ilp32 d82.s -o d82.o
+riscv-none-elf-objdump -d d82.o          # 逐条核对
+riscv-none-elf-objcopy -O binary --only-section=.text d82.o d82.bin
+```
+
+⚠️ ⚠️ **`-march` 必须带 `zicsr`**（否则 `csrrw` / `csrr` / `csrrsi` / `csrrwi` 全部报 `unrecognized opcode ... extension 'zicsr' required`）⇒ 用 `rv32im`（**不带 `c`**）⇒ 每条指令 4 字节 ⇒ 偏移好算。
+⚠️ ⚠️ **不要用 `-march=rv32imc`**：压缩指令会被汇编器自动生成（`li` → `c.li`、`jal` → `c.j`）⇒ **指令长度变成 2 字节** ⇒ `handler` 的偏移不再是 4 的倍数、也不再是 0x28 ⇒ **偏移常量与固件布局耦合** ⇒ 改一条指令就要重算。
+⚠️ ⚠️ **不要用 `.option pic`**：那会让 `la` 展开成 `auipc` + **`lw`**（GOT 重定位）⇒ 未链接时是 `auipc t0,0x0` + `lw t0,0(t0)` ⇒ **从地址 0 读数据** ⇒ 完全错误。
+
+**已核对的字节**（`objdump` 逐条对过，16 条 × 4 字节 = **64 字节**，小端）：
+
+| 偏移 | 指令 | 机器码 |
+| --- | --- | --- |
+| 0x00 | `lui x5, 0x84000` | `0x840002b7` |
+| 0x04 | `addi x5, x5, 0x28` | `0x02828293` |
+| 0x08 | `lui x6, 0x20040` | `0x20040337` |
+| 0x0c | `li x7, 1` | `0x00100393` |
+| 0x10 | `sw x7, 0(x6)` | `0x00732023` |
+| 0x14 | `li x8, 0x80` | `0x08000413` |
+| 0x18 | `csrrw x0, mie, x8` | `0x30441073` |
+| 0x1c | `csrrsi x0, mstatus, 8` | `0x30046073` |
+| 0x20 | `csrrw x0, mtvec, x5` | `0x30529073` |
+| **0x24** | `jal x0, 0x24`（**`loop`**） | `0x0000006f` |
+| **0x28** | `csrr x9, mcause`（**`handler` 入口**） | `0x342024f3` |
+| 0x2c | `csrr x10, mepc` | `0x34102573` |
+| 0x30 | `csrr x11, mtval` | `0x343025f3` |
+| 0x34 | `addi x12, x12, 1` | `0x00160613` |
+| 0x38 | `csrrwi x0, 0x7c1, 8` | `0x7c145073` |
+| 0x3c | `mret` | `0x30200073` |
+
+⚠️ **`handler` 在偏移 `0x28`** ⇒ `addi x5, x5, 0x28` 里的常量**与固件布局耦合**（`loop` 之前正好 10 条指令 × 4 字节）⇒ 改固件条数**必须**同步改这个常量 ⇒ 用例注释里要写明这一点。
+⚠️ **`loop` 的绝对地址 = `0x8400_0024`**、`handler` 的绝对地址 = `0x8400_0028`（固件基址 `0x8400_0000` + 偏移）⇒ 这两个值**由固件布局决定**⇒ 断言时写**字面量**（不许写成 `FW_BASE + 0x24` 那种从常量反推的形式 —— 那跟实现同源，改实现时会跟着变，变成恒绿）。
+
 ⚠️ **`irq_clear` 的值是「位掩码」，不是「线号」**（M-17 `clear_lines_by_mask`，`m17_backend/mod.rs:349-354`：判据是 `mask & (1 << line) != 0`）⇒ 定时器线 3 ⇒ 写 **`8`**（`1 << 3`），**不是 3**。
 ⚠️ 对照：v0.24 那条 UART 用例写的是 `2`（清 line 1 ⇒ `1 << 1 = 2`）⇒ 两个值**长得像**但含义不同 ⇒ **这是最容易踩的坑**，用例注释里要写明。
-⚠️ ⚠️ **顺带发现（可登记）**：契约层 `crates/contract/src/csr.rs:404` 的「三个空间」表格把 `irq_clear` 列在「internal **line**」一栏 ⇒ **与实现不符**（实现是位掩码）⇒ 该表述要订正。
+⚠️ ⚠️ **顺带发现（已登记 D-127）**：契约层 `crates/contract/src/csr.rs:404` 的「三个空间」表格把 `irq_clear` 列在「internal **line**」一栏 ⇒ **与实现不符**（实现是位掩码）⇒ 该表述要订正。
 
 ⚠️ **三个架构字面量（不许从实现反推）**：
 - `mcause == 0x8000_0007`（`arch_mcause_for_line(IRQ_TIMER_COMPARE)`，契约层 `csr.rs:843-846`：**IRQ_BASE 0x8000_0000 | 架构 cause 7 = 机器定时器中断**）；
@@ -379,8 +415,8 @@ handler:
 
 **判别式**（每条都要能变红）：
 1. guest 陷入的 `mcause == 0x8000_0007`；
-2. `mepc` 落在自旋指令处（`loop` 的地址）；
-3. `mtval == 0`（定时器中断没有错因值）；
+2. `mepc == 0x8400_0024`（**`loop` 指令的绝对地址**，架构无关但**由固件布局决定** ⇒ 写**字面量**，不许写成 `FW_BASE + 0x24`）；
+3. `mtval == 0`（定时器中断没有错因值 ⇒ M-17 调 `enter_trap(state, cause, 0)`，`m17_backend/mod.rs:464`）；
 4. handler 的计数器（x12）≥ 1 ⇒ 真的进了 handler，不是停在别处；
 5. ⚠️ **变异可红**：把固件的 `sw x7, 0(x6)` 去掉 ⇒ **必须红**（陷入不发生）⇒ 证明这条用例**真的在测那条通路**，不是恒绿。
 
