@@ -131,6 +131,22 @@ rv32mi sw-misaligned rv32i_zicsr_zifencei active csr
 local unmapped_store rv32i_zicsr_zifencei active csr
 local unmapped_load rv32i_zicsr_zifencei active csr
 #
+# `unmapped_fetch` — an **instruction fetch** from an unmapped address
+# must trap with `mcause = 1` (instruction access fault), `mtval` = the
+# faulting fetch address and `mepc` = the same address (the instruction
+# that could not be fetched).  It is the third sibling of the two rows
+# above: RISC-V numbers the three access faults differently (instruction
+# `1`, load `5`, store `7`), so one case per number is what makes the
+# split observable — a platform that used one number for all three would
+# agree with the reference side on **one** case and diverge on the other
+# two.  Ledger D-103, STAGE-10 adjudication F.
+#
+# ⚠️ The guest checks all three values itself, and the reference side
+# agrees on all three (measured through the corpus' own tohost pipeline:
+# the three-check variant is PASS, the reverse control with a wrong
+# `mepc` expectation is FAIL 3 ⇒ the check has discriminating power).
+local unmapped_fetch rv32i_zicsr_zifencei active csr
+#
 # `compressed_trap` — a **compressed** store to an unmapped address must
 # trap, and the trap context must carry the **exact** faulting PC.
 # The faulting store is placed at a 2-mod-4 address on purpose: the

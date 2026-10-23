@@ -65,6 +65,32 @@ pub enum TrapCause {
     /// covering all three (the old `MisalignedAccess`) reported the
     /// wrong number for two of them (ledger **D-63**).
     InstructionAddressMisaligned,
+    /// **Instruction access fault** (`mcause = 1`).
+    ///
+    /// The guest tried to **fetch** an instruction from an address that
+    /// is **not mapped** in the memory map.  RISC-V splits the three
+    /// access faults into three numbers — instruction (`1`), load (`5`)
+    /// and store / AMO (`7`) — so the instruction side needs its own
+    /// variant (ledger **D-103**).
+    ///
+    /// ⚠️ **Only an unmapped address raises this.**  A bus error that
+    /// is a *configuration* mistake (a peripheral that is not wired, a
+    /// region that is too large, …) is **not** a guest-visible fault:
+    /// it is propagated to the host unchanged (STAGE-7 adjudication G
+    /// / ledger **D-99**, STAGE-10 adjudication B).
+    ///
+    /// ⚠️ **`mtval` carries the faulting fetch address; `mepc` carries
+    /// the PC at the trap entry** — which, on this path, **is** that
+    /// same address: the instruction that caused the trap is the one
+    /// that **could not be fetched**, and the PC still holds it when
+    /// the trap is taken (the PC is advanced nowhere else on this
+    /// path).  That is the platform's own trap-entry semantics
+    /// (`mepc := state.pc`), and the reference side agrees: measured
+    /// through the golden environment's own tohost pipeline, Spike
+    /// reports `mcause = 1`, `mtval = 0x9000_0000` and
+    /// `mepc = 0x9000_0000` for a fetch at `0x9000_0000` (see
+    /// `tests/golden/local/unmapped_fetch.S`).
+    InstructionAccessFault,
     /// Misaligned **load** address (`mcause = 4`).
     LoadAddressMisaligned,
     /// Misaligned **store** address (`mcause = 6`).
@@ -123,21 +149,20 @@ impl TrapCause {
     /// cannot drift away from the variant.
     ///
     /// The codes are the RISC-V exception codes:
-    /// `0` instruction address misaligned · `2` illegal instruction ·
-    /// `3` breakpoint · `4` load address misaligned · `5` load access
-    /// fault · `6` store address misaligned · `7` store / AMO access
-    /// fault · `11` environment call from M-mode.
+    /// `0` instruction address misaligned · `1` instruction access fault ·
+    /// `2` illegal instruction · `3` breakpoint · `4` load address
+    /// misaligned · `5` load access fault · `6` store address misaligned ·
+    /// `7` store / AMO access fault · `11` environment call from M-mode.
     ///
     /// ⚠️ The two **dead** variants have **no architectural code**:
     ///
     /// * `OutOfRange` — RISC-V splits "the access was not allowed"
     ///   into three access faults (instruction / load / store), and the
     ///   variant does not say which one it means. It has **no
-    ///   producer** today — the **unmapped** data access is now a
-    ///   trap (`LoadAccessFault` = 5 / `StoreAccessFault` = 7, v0.22
-    ///   批), and the **instruction** fetch side is still a plain
-    ///   error (台账 **D-103**) — so its number is a **placeholder**
-    ///   and is unobservable;
+    ///   producer** today — **all three** access faults are traps now
+    ///   (`InstructionAccessFault` = 1 / `LoadAccessFault` = 5 /
+    ///   `StoreAccessFault` = 7, v0.22 + v0.25 批) — so its number is a
+    ///   **placeholder** and is unobservable;
     /// * `IntegerDivideByZero` — RISC-V defines a division by zero as
     ///   an **architectural result**, not an exception, so there is no
     ///   code for it at all. Also a **dead** variant (ledger
@@ -148,6 +173,7 @@ impl TrapCause {
     pub fn mcause(self) -> u32 {
         match self {
             TrapCause::InstructionAddressMisaligned => 0,
+            TrapCause::InstructionAccessFault => 1,
             TrapCause::IllegalInstruction => 2,
             TrapCause::Breakpoint => 3,
             TrapCause::LoadAddressMisaligned => 4,
@@ -699,7 +725,14 @@ const E_BUS_01_UNMAPPED: u16 = 1;
 /// that is not wired, a size mismatch) is a *host-side* problem: it is
 /// propagated unchanged and never becomes a guest trap (STAGE-7
 /// adjudication G).
-fn is_unmapped_access(err: &PlatformError) -> bool {
+///
+/// ⚠️ **`pub(crate)`** (STAGE-10 裁决 B): the **fetch** path needs the
+/// **same**判据 as the data path — "unmapped" and "any other bus error"
+/// must stay distinguishable on both sides, or an unmapped fetch could
+/// not become the architectural instruction access fault (`mcause = 1`)
+/// without also swallowing the host-side errors.  Only the **visibility**
+/// changed; the判据 itself is untouched.
+pub(crate) fn is_unmapped_access(err: &PlatformError) -> bool {
     err.family == ErrorFamily::Bus && err.scenario == E_BUS_01_UNMAPPED
 }
 
