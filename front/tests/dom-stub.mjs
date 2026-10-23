@@ -310,6 +310,19 @@ export class StubElement extends StubEventTarget {
 
     // --- events -------------------------------------------------------------
 
+    /**
+     * Programmatically click the element.
+     *
+     * The real DOM dispatches a `click` event (bubbling + cancelable) — and
+     * that event is what actually **starts a download** for
+     * `<a download="…">`. Without this method the stub would let a
+     * "the download action never clicked anything" defect pass silently
+     * (the same class of false green as FRONTEND_Review.md #20).
+     */
+    click() {
+        this.dispatchEvent(new Event("click", { bubbles: true, cancelable: true }));
+    }
+
     /** Dispatch with capture + bubble phases — `event.target` is this node. */
     dispatchEvent(event) {
         setEventProp(event, "target", this);

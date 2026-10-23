@@ -45,8 +45,12 @@ const DEFAULT_DISASM_COUNT = 16;
  * `sim.pc` ⇒ 断言的是一个**测试自己造出来的**状态，不是生产状态。
  *
  * ⇒ 这里把列表**显式**写出来（唯一真相），并让生产调用**用它**。
+ *
+ * ⚠️ **「embedded」也必须在里面**（D-33 · STAGE-10 裁决 C）：落地视图要显示
+ * **当前 PC** 与**虚拟时间** ⇒ 它得跟调试视图一样收到 M-10 推进的那份
+ * `sim.pc` / `timeVirt` ⇒ 前端**不造**第二个 PC 来源。
  */
-export const REGISTER_MEMORY_VIEW_IDS = ["debug", "regmem", "source"];
+export const REGISTER_MEMORY_VIEW_IDS = ["debug", "regmem", "source", "embedded"];
 
 const status = document.getElementById("status");
 
@@ -153,6 +157,32 @@ function publishViewState(viewId) {
     window.dispatchEvent(new CustomEvent("riscv:render", {
         detail: { viewId, type: "update", state },
     }));
+}
+
+/**
+ * Push the **transport link state** into a view's state.
+ *
+ * ⚠️ **连接状态住在服务层**（M-07 的 `getTransportStatus()` / `onStatus()`）
+ * ⇒ 视图组件**不**直接摸服务层（那是 app.js 这一层的活）⇒ 这里把状态
+ * **推进**视图状态（M-03），落地视图再从 `state.link` 读。
+ *
+ * ⚠️ 只有**落地视图**（`embedded`）拿它 ⇒ 只推进这一个视图，不给每个视图都
+ * 塞一份连接状态。
+ *
+ * @param {{mode?: string, connected?: boolean, label?: string, lastError?: string|null}|undefined} transport
+ * @param {string} [viewId]
+ */
+export function publishLinkState(transport, viewId = "embedded") {
+    viewStore.setState(viewId, (prev) => ({
+        ...prev,
+        link: {
+            connected: transport?.connected === true,
+            mode: transport?.mode ?? "none",
+            label: transport?.label ?? "",
+            lastError: transport?.lastError ?? null,
+        },
+    }));
+    publishViewState(viewId);
 }
 
 /**
@@ -1114,8 +1144,15 @@ async function bootstrap() {
     // The status bar follows the **live** transport state, not a
     // one-shot snapshot: the kernel worker connects a tick after the
     // page came up, and the bar has to say so.
-    transportApi.onStatus((st) => renderStatus(st));
+    //
+    // ⚠️ **落地视图也要知道连接状态**（D-33 · 裁决 C 的最小内容之一）⇒ 状态
+    // 变化时**同时**推进视图状态（视图层不碰服务层 ⇒ 由这一层转递）。
+    transportApi.onStatus((st) => {
+        renderStatus(st);
+        publishLinkState(st);
+    });
     renderStatus(transportApi.getTransportStatus());
+    publishLinkState(transportApi.getTransportStatus());
 
     window.addEventListener("riscv:command", (ev) => {
         void handleCommand(ev.detail, services);
