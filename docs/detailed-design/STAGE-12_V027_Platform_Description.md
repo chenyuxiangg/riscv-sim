@@ -69,6 +69,7 @@
   "id": "qemu-virt",
   "name": "QEMU virt",
   "priority": 20,
+  "auto_selectable": true,
   "region_budget_bytes": 134217728,
   "regions": [ ... ]
 }
@@ -82,6 +83,7 @@
 | `id` | 字符串 | ✅ | 平台标识（`default` / `qemu-virt` / `minimal` / …）⇒ **平台的主键** |
 | `name` | 字符串 | ✅ | 人读名称 |
 | `priority` | 整数 | ✅ | **自动选档**时候选顺序，**小者优先**（裁决 E） |
+| `auto_selectable` | 布尔 | ❌（**默认 `true`**） | 这个描述**是否参与自动选档**（裁决 E）⇒ 演示平台设 `false` ⇒ 只能被**显式**指定 |
 | `region_budget_bytes` | 整数 | ✅ | **每区域**护栏预算（字节）⇒ 语义与 M-14 的 `max_region_bytes` 一致（§1.5 裁决 J'） |
 | `regions` | 数组 | ✅ | 区域列表，**允许乱序**（校验时按 `base` 排序） |
 | `description` | 字符串 | ❌ | 人读说明（JSON 不能写注释的补偿） |
@@ -138,6 +140,9 @@
 | V-7 | RAM / ROM 的**声明大小** > `region_budget_bytes` | `E_PLT-07` | ⚠️ 见下方**重要说明** |
 | V-8 | 未知器件种类 / 缺参数 / 参数类型错 | serde 错误 | 反序列化阶段就失败 |
 | V-9 | 外设器件的 `id` 与另一条重复 | `E_PLT-08` | 同名器件 ⇒ 恢复时按 id 反查会歧义 |
+| V-10 | **宿主侧**：请求的**平台 id 不存在** | `E_PLT-09` | 契约层拥有（施工期补） |
+| V-11 | **宿主侧**：描述**文件读不了** | `E_PLT-10` | 契约层拥有（施工期补） |
+| V-12 | **宿主侧**：描述**文件不是合法 JSON / 形态非法** | `E_PLT-11` | 契约层拥有（施工期补） |
 
 ⚠️ **V-7 为什么必须存在（一个真发现）**：v0.26 把 RAM 的护栏从「**声明大小**」改成了「**物理占用**」（`RamBackend` 懒分配 ⇒ `map_ram` 时物化页数 = 0）⇒ **「声明一段超大 RAM」在 M-14 的运行时护栏里已经拦不住了** ⇒ 描述层是**唯一**还能拦「声明期超大」的地方 ⇒ 它必须拦。
 ⚠️ 但 V-7（**声明期**）与 M-14 的 `E_BUS_09`（**运行期**，按物理占用）是**两个不同语义、不同阶段**的约束 ⇒ **不同码**（不合并）⇒ 且 V-7 的码**不叫** `E_BUS_09`（避免「一码多义」）。
@@ -241,7 +246,15 @@ pub enum DeviceSpec {
 
 ```rust
 /// 描述 → 器件实例。**一个 match、一个落点**。
-fn build_device(spec: &DeviceSpec, base: u32) -> Result<Rc<RefCell<dyn Peripheral>>, PlatformError>
+///
+/// ⚠️ **返回「两种视图」**（施工期订正）：总线侧要的是**类型擦除**的
+/// `Rc<RefCell<dyn Peripheral>>`，而宿主侧要的是**有类型**的句柄
+///（`self.uart0: Option<Rc<RefCell<Uart16550>>>`）⇒ ⚠️ `RefCell<T>` 是
+/// **不变**的 ⇒ `RefCell<dyn Peripheral>` **降不回** `RefCell<Uart16550>`
+/// ⇒ 一个返回值**不可能**同时满足两边 ⇒ ⇒ 工厂返回**两样东西**：
+/// ① 擦除视图（挂总线）② 有类型句柄（宿主用）。
+/// ⇒ 器件种类的 `match` 仍然**只有一处** ✓
+fn build_device(spec: &DeviceSpec, base: u32) -> Result<BuiltDevice, PlatformError>
 ```
 
 ⚠️ **契约先行**：工厂返回 `Rc<RefCell<dyn Peripheral>>`（契约层 `port.rs` 的 trait 对象）⇒ 工厂**不认识** M-15 的具体类型，除了**构造**那一刻。
@@ -283,21 +296,30 @@ fn build_device(spec: &DeviceSpec, base: u32) -> Result<Rc<RefCell<dyn Periphera
 
 ### 裁决 E · 自动选档判据（逐字等价于今天）
 
-**今天**（`mod.rs:918-936`）：镜像的每个地址区间 `(lo, hi)` 必须**完整**落在**某一个高段 RAM 窗口**内；落在 Default 高段 ⇒ Default；落在 QemuVirt 高段（但不在 Default 高段）⇒ QemuVirt；两档之外 ⇒ 跳过。
+**今天**（`mod.rs:918-936`）：镜像的每个地址区间 `(lo, hi)` **逐个过**；能被 Default 的**高段**窗口完整覆盖 ⇒ 继续下一个区间；**只**被 QemuVirt 的**高段**窗口完整覆盖 ⇒ **立即**选 QemuVirt；两档都覆盖不了 ⇒ 跳过；全部区间过完 ⇒ Default。
 
-**描述化后**：
+⚠️ **今天有两条隐含结构，必须原样搬过来**：① **区间在外层**（不是「描述在外层、找第一个能装下的」）② 判据只看**高段**窗口。
 
-1. 对每个描述，取它的**全部 RAM 区域**；
-2. 镜像的每个区间 `(lo, hi)` 必须被**某一个 RAM 区域完整覆盖**（`lo >= base && hi <= base + size`）；
-3. 候选描述按 `priority` **小者优先**（内置：`default` = 10 · `qemu-virt` = 20 · `minimal` = 30）；
-4. **无候选 ⇒ 回落 `default`**（与今天「`continue` ⇒ 最终返回 Default」等价）。
+**描述化后**（描述多了一个 `auto_selectable` 字段，见 §1.3）：
 
-⚠️ **等价性论证**（必须钉住，P-7）：
+1. 候选描述 = 全部 `auto_selectable == true` 的内置描述，按 `priority` **小者优先**（`default` = 10 · `qemu-virt` = 20）；
+2. **区间在外层**逐个过：对每个区间 `(lo, hi)`，找出**能完整覆盖它**的候选描述（`lo >= base && hi <= base + size`，在它的**全部 RAM 区域**里找）里 `priority` **最小**的那个；
+   - **找不到** ⇒ 跳过这个区间（= 今天的 `continue`）；
+   - 找到的是 **`default`** ⇒ 继续下一个区间（= 今天「被 Default 覆盖 ⇒ 不 return」）；
+   - 找到的是**别的** ⇒ **立即**选它（= 今天的 `return QemuVirt`）；
+3. 全部区间过完 ⇒ 回落 `default`。
+
+⚠️ **等价性论证**（必须钉住，B-9）：
 - 镜像落在 Default 高段 ⇒ 只有 `default` 覆盖 ⇒ 选 `default` ✓（今天同）
 - 镜像落在 QemuVirt 高段（`0x8040_0000` 以上）⇒ `default` **不**覆盖、`qemu-virt` 覆盖 ⇒ 选 `qemu-virt` ✓（今天同）
 - 镜像落在两档之外（如 `0x9000_0000`）⇒ 无候选 ⇒ 回落 `default` ✓（今天同 ⇒ 随后由 M-14 报未映射）
-- 镜像落在**低段**（`0x0..0x1000`）⇒ `default` 的低段 RAM **覆盖**它 ⇒ 选 `default` ✓（今天：`inside(default_high)` 为假 ⇒ `continue` ⇒ Default ⇒ 同）
-- ⚠️ **但今天只查高段**，描述化查**全部 RAM 区域** ⇒ 若某描述**只有低段 RAM**（`minimal`）而镜像落在低段 ⇒ `minimal` 也会成为候选 ⇒ 但 `minimal` 的 `priority = 30` > `default` 的 10 ⇒ **`default` 优先** ⇒ 仍选 `default` ✓（这就是 `priority` 字段存在的理由：**不靠注册顺序、不靠容量**）。
+- 镜像落在**低段**（`0x0..0x1000`）⇒ `default` 的**低段** RAM 覆盖它 ⇒ 选 `default` ✓（今天：`inside(default_high)` 为假 ⇒ `continue` ⇒ Default ⇒ 同）
+- 镜像落在**低段但超出 1 MiB**（如 `0x0..0x1000_01`）⇒ `default` 与 `qemu-virt` 的低段**都是 1 MiB** ⇒ 都覆盖不了 ⇒ 无候选 ⇒ 回落 `default` ⇒ 随后报未映射 ✓（**与今天逐字一致**：今天它落在两档**高段**之外 ⇒ `continue` ⇒ Default ⇒ 同样报未映射）
+
+⚠️ **`auto_selectable` 存在的唯一理由（这是本裁决的关键）**：`minimal` 的低段是 **2 MiB**（比 `default` 的 1 MiB 大）⇒ 若它参与自动选档，就会覆盖上面那条「超出 1 MiB」的镜像 ⇒ 选到 `minimal` ⇒ **今天绝不会发生** ⇒ ⇒ `minimal` 必须 `auto_selectable: false` ⇒ 它**只被显式指定**。
+⇒ ⚠️ **这就是把「今天只查高段」这个差异显式承载下来的地方** —— 靠**数据里的一个布尔**，而不是靠代码里的一份 id 名单（名单是「代码知道哪个平台是演示平台」⇒ 换个人写描述就会破）。
+
+⚠️ **两份真实平台描述都是 `auto_selectable: true`** ⇒ 它们之间**没有**低段差异（低段都是 1 MiB）⇒ 唯一有低段差异的 `minimal` 被排除 ⇒ ⇒ 整体**逐字等价** ✓
 
 ### 裁决 F · 内置描述 `include_str!` 编译进二进制 + 运行时文件路径入口
 
@@ -463,7 +485,7 @@ riscv-none-elf-objcopy -O binary --only-section=.text d82.o d82.bin
 - [ ] **A-3** V-1 ~ V-9 **九条校验规则**各自**一个独立的场景码**（`E_PLT-01` .. `E_PLT-08` + serde 错误）⇒ 每条一条用例
 - [ ] **A-4** 描述**往返**（serialize → deserialize ⇒ 逐字段相等），含边界值（`region_budget_bytes` = `u32::MAX`）⇒ ⚠️ **裁决 J'' · 数值策略**：`region_budget_bytes` 取 **`u32`**（不是 `u64`）⇒ ① 它是**每区域**的字节预算，而地址空间只有 4 GiB ⇒ 超过 `u32::MAX` 的预算**没有意义** ⇒ ② 用 `u32` ⇒ **超出范围在 serde 反序列化阶段就失败**（归 V-8 的 serde 错误）⇒ **不需要**新增一条校验规则（也不需要契约层的十进制字符串策略 `numstr.rs` —— 那是给**虚拟时间**这类真会超 2^53 的量用的）⇒ 用例钉住「`u32::MAX` 的预算能往返；`u32::MAX + 1` 在 serde 阶段被拒」
 - [ ] **A-5** `RegionSpec` / `DeviceSpec` 的**内部 tag 键名**逐字是 `"kind"` / `"device"`（不是 `type`、不是 `t`）
-- [ ] **A-6** 错误族 `ErrorFamily::Platform` 新增 ⇒ 契约层错误族清单从 **14 → 15**；⚠️ **两处都补**：`error_families!` 宏的**一行** + 族标签表 `TAGS` 的**一行** ⇒ 靠契约层既有的完整性用例（`the_error_family_list_is_complete`）兜住 ⇒ **不新增**这条用例
+- [ ] **A-6** 错误族 `ErrorFamily::Platform` 新增 ⇒ 契约层错误族清单从 **14 → 15**；⚠️ **两处都补**：`error_families!` 宏的**一行** + 族标签表 `TAGS` 的**一行** ⇒ 靠契约层既有的完整性用例（**`every_family_tag_is_pinned`**，在 `crates/contract/src/error.rs` 的测试模块里）兜住 ⇒ **不新增**这条用例
 - [ ] **A-7** `RegionDto.kind` 的三个常量（`REGION_KIND_*`）**上移到契约层**，M-14 改为 `pub use` ⇒ **M-14 内部调用点的字面量一条不改**
 - [ ] **A-8** 契约层**不升版本**（`SESSION_SNAPSHOT_SCHEMA_VERSION` 仍为 3）
 
@@ -477,7 +499,8 @@ riscv-none-elf-objcopy -O binary --only-section=.text d82.o d82.bin
 - [ ] **B-6** **零逻辑改动**：`map_memory` 的源码里**不得出现**任何地址字面量（`0x`）、任何器件构造调用、任何 `match profile` ⇒ 用例**读源码**断言（`include_str!` 读 `mod.rs` 文本）
 - [ ] **B-7** **换描述、宿主零改动**：`minimal` 描述（低段 2 MiB + 高段 16 MiB @ `0x1000_0000`，与两档**都不同**）⇒ 显式建图 ⇒ 内存图**逐条**等于描述 ⇒ **且没有任何一行宿主代码为它而写**
 - [ ] **B-8** **运行时路径**：`new_with_platform_file(path)` 从一个**仓外临时文件**读描述 ⇒ 建图成功 ⇒ 与同名内置描述**结果一致**
-- [ ] **B-9** **自动选档**（裁决 E）四条等价性：Default 高段 ⇒ `default`；QemuVirt 高段 ⇒ `qemu-virt`；两档之外 ⇒ 回落 `default`；低段 ⇒ `default`
+- [ ] **B-9** **自动选档**（裁决 E）**六条**等价性：Default 高段 ⇒ `default`；QemuVirt 高段 ⇒ `qemu-virt`；两档之外 ⇒ 回落 `default`；低段 ⇒ `default`；**低段超出 1 MiB** ⇒ 回落 `default`（⇒ 随后报未映射）；`minimal` **永不**被自动选中（`auto_selectable: false`）
+    > ⚠️ **「区间在外层」这条结构也要钉住**：镜像**有多个区间**时，判据是「逐个区间过、遇到只被更高优先级描述覆盖的区间就**立即**选它」⇒ 用例要有一个**多区间**的镜像（一个区间落 default 高段、另一个落 QemuVirt 高段）⇒ 结果必须是 `qemu-virt`。
 - [ ] **B-10** **兼容 API**：`memory_profile()` 对 `default`/`qemu-virt` 分别返回 `Default`/`QemuVirt`；新增 `platform_id()` 返回**真实 id**；`new_with_profile` 两条路径与今天**逐字等价**
 - [ ] **B-11** **描述坏了要报**：`schema_version` 不对 / 区域重叠 / 预算超了 ⇒ 各自**不同的码**（不是同一个）
 - [ ] **B-12** **M-14 行为一字不变**：既有 `m14_bus` 的**全部**用例（含 v0.26 的 14 条验收）**一条不改、一条不红**
