@@ -41,13 +41,14 @@
 - v0.26 之后：登记成本 ≈ 0（只有写过的页占物理内存）⇒ 换描述是**纯数据操作** ⇒ B 批才成立。
 - ⇒ **顺序不可交换**：A 是 B 的**成本前提**，B 是 A 的**兑现**。
 
-### 0.4 本批**新登记**的欠账（3 条，收口时进台账）
+### 0.4 本批**新登记**的欠账（4 条，收口时进台账）
 
 | 临时编号 | 内容 | 为什么本批不做 |
 | --- | --- | --- |
 | **D-124**（候选） | 契约层**没有** MemoryMap 命令 / 事件 ⇒ 前端拿不到**真实**内存图（今天渲染的是 dev 假数据） | 要升契约版本 + 改前端 + 改 `front/lib/message.js` 镜像 ⇒ 独立一批 |
 | **D-125**（候选） | **器件连线**（UART RX → PLIC 源 10）仍由宿主逻辑写死 ⇒ 「换平台」若改连线，**仍要改宿主代码** | 连线要变成描述 ⇒ 宿主 `sync_interrupts` 要改写成描述驱动 ⇒ 影响面比地址大得多 |
 | **D-126**（候选） | 参考侧地址**三份副本**（`crates/kernel/src/bin/riscv-golden.rs:89/119` · `tools/golden-run.sh:56` · `tools/boot-osz.sh:45`）与宿主描述**手工对齐** | 参考侧要对齐 **Spike**，不是对齐宿主 ⇒ 抽公共常量要跨 crate / 跨语言（shell）⇒ 独立一批 |
+| **D-127**（候选） | 契约层 `crates/contract/src/csr.rs:404` 的「三个空间」表格把 `irq_clear` 列在「internal **line**」一栏 ⇒ **与实现不符**（M-17 的 `clear_lines_by_mask` 判据是 `mask & (1 << line) != 0` ⇒ 值是**位掩码**）⇒ 两个值长得像（清 line 1 写 `2`、清 line 3 写 `8`）⇒ 极易踩错 | 改契约层注释要连带复核「三个空间」那张表的其余表述 ⇒ 与本批的契约层改动分开做更清楚 |
 
 ---
 
@@ -345,26 +346,64 @@ fn build_device(spec: &DeviceSpec, base: u32) -> Result<Rc<RefCell<dyn Periphera
 
 ### 4.4 本批怎么做（裁决 H）
 
-**补一条 guest 指令级的端到端用例**（固件机器码手写 + 汇编器产出 + `objdump` 核对，先例见 `crates/kernel/tests/intc_end_to_end.rs:65-73`）：
+**补一条 guest 指令级的端到端用例**（固件机器码**用仓外交叉工具链汇编产出 + `objdump` 核对**，先例见 `crates/kernel/tests/intc_end_to_end.rs:65-73`；工具链在 `~/riscv-sim-golden/toolchain/bin/riscv-none-elf-{as,objdump}`，**仓外**，不进仓库）：
 
+```asm
+        lui   x5, 0x84000        # x5 = 0x8400_0000（固件基址，QEMU virt 高段 RAM）
+        addi  x5, x5, 0x40      # x5 = handler 的地址
+        lui   x6, 0x20040       # x6 = 0x0200_4000 = CLINT 的 mtimecmp
+        li    x7, 1             # x7 = 1 周期
+        sw    x7, 0(x6)         # 写 mtimecmp 低 32 位（高半保持 0 ⇒ 值 = 1 周期）
+        li    x8, 0x80          # x8 = 1 << 7 = **MTIE 位号 7**
+        csrrw x0, mie, x8       # mie 使能定时器线（line 3）
+        csrrsi x0, mstatus, 8   # mstatus.MIE（bit 3）= 1
+        csrrw x0, mtvec, x5     # mtvec = handler（直接模式）
+loop:   jal   x0, loop         # 自旋，等中断
+handler:
+        csrr  x9,  mcause       # x9 = guest 看到的 mcause
+        csrr  x10, mepc         # x10 = guest 看到的 mepc
+        csrr  x11, mtval        # x11 = guest 看到的 mtval
+        addi  x12, x12, 1       # 计数：handler 跑了几遍
+        csrrwi x0, irq_clear, 8 # 清 line 3（**位掩码 bit 3 = 1 << 3 = 8**）
+        mret
 ```
-lui  t0, 0x20040        # t0 = 0x0200_4000 = CLINT 的 mtimecmp
-li   t1, 1000           # 1000 周期（10 MHz ⇒ 100 ms）
-sw   t1, 0(t0)          # 写 mtimecmp 低 32 位
-li   t2, 0x80           # mie 的 MTIE（bit 7）
-csrrw x0, mie, t2       # 使能定时器中断
-1:  j 1b                 # 自旋等中断
-```
 
-**判别式**（能变红）：
-1. guest 陷入的 `mcause` == `0x8000_0007`（**定时器中断**，cause 7 + 最高位中断标志）⇒ **架构字面量**；
-2. `mepc` 落在自旋指令处；
-3. `mtval` == 0（定时器中断没有错因值）；
-4. ⚠️ **变异可红**：把固件的 `sw t1, 0(t0)` 去掉 ⇒ **必须红**（陷入不发生）⇒ 证明这条用例**真的在测那条通路**，不是恒绿。
+⚠️ **`irq_clear` 的值是「位掩码」，不是「线号」**（M-17 `clear_lines_by_mask`，`m17_backend/mod.rs:349-354`：判据是 `mask & (1 << line) != 0`）⇒ 定时器线 3 ⇒ 写 **`8`**（`1 << 3`），**不是 3**。
+⚠️ 对照：v0.24 那条 UART 用例写的是 `2`（清 line 1 ⇒ `1 << 1 = 2`）⇒ 两个值**长得像**但含义不同 ⇒ **这是最容易踩的坑**，用例注释里要写明。
+⚠️ ⚠️ **顺带发现（可登记）**：契约层 `crates/contract/src/csr.rs:404` 的「三个空间」表格把 `irq_clear` 列在「internal **line**」一栏 ⇒ **与实现不符**（实现是位掩码）⇒ 该表述要订正。
 
-⚠️ **时序说明（写进用例注释）**：`sync_interrupts` 在**批次边界**调用 ⇒ guest 写完 `mtimecmp` 后，**本批次内**定时器不会来 ⇒ **下一批次**才生效 ⇒ 用例必须**跑够批次**（或显式多跑几轮）⇒ 断言不能假设「写完立刻中断」。
+⚠️ **三个架构字面量（不许从实现反推）**：
+- `mcause == 0x8000_0007`（`arch_mcause_for_line(IRQ_TIMER_COMPARE)`，契约层 `csr.rs:843-846`：**IRQ_BASE 0x8000_0000 | 架构 cause 7 = 机器定时器中断**）；
+- `mie` 的值 = `1 << 7` = **0x80**（`std_irq_bit_for_line(3) = 7`，契约层 `csr.rs:346-352`）；
+- ⚠️ **内部线号 3**（`IRQ_TIMER_COMPARE`）与**架构 cause 码 7** 是**两个不同的空间**，断言时只能用 **7**，写 3 就是错的。
 
-⚠️ **`mtimecmp` 的 64 位分步写**：固件只写低 32 位 ⇒ 高 32 位保持 0 ⇒ `mtimecmp = 1000` 周期 ⇒ 100 ms @ 10 MHz ⇒ 虚拟时间 `100_000_000 ps` ⇒ 触发需要虚拟时间推进 ⇒ **用例要跑够虚拟时间**（或直接推进时间）。
+**判别式**（每条都要能变红）：
+1. guest 陷入的 `mcause == 0x8000_0007`；
+2. `mepc` 落在自旋指令处（`loop` 的地址）；
+3. `mtval == 0`（定时器中断没有错因值）；
+4. handler 的计数器（x12）≥ 1 ⇒ 真的进了 handler，不是停在别处；
+5. ⚠️ **变异可红**：把固件的 `sw x7, 0(x6)` 去掉 ⇒ **必须红**（陷入不发生）⇒ 证明这条用例**真的在测那条通路**，不是恒绿。
+
+⚠️ **时序（必须写进用例注释，否则一定写错）**：
+
+| 事实 | 数值 | 出处 |
+| --- | --- | --- |
+| 每条指令推进的虚拟时间 | `INSTRUCTION_COST_PS` = **1 000 ps**（1 ns） | `m17_backend/mod.rs:74` |
+| 时间量子 | `TIME_QUANTUM_PS` = **1 µs** = **1 000 条指令** | `m12_engine` |
+| M-16 的 `poll()` 采样点 | **量子边界**（每 1 000 条指令一次） | M-17 取指边界采样 |
+| CLINT 的频率 | 10 MHz ⇒ **1 周期 = 100 000 ps = 100 µs** | `QEMU_VIRT_FREQ_HZ` |
+| `mtimecmp = 1` 周期 ⇒ M-16 的比较值 | `100 000 ps` | `clint.mtimecmp_ps()` |
+
+⇒ **要推进 100 µs 的虚拟时间 ⇒ 100 个量子 ⇒ 100 000 条指令**。
+
+⚠️ ⚠️ **`sync_interrupts` 在批次边界调用**（`kernel_host/mod.rs:1900` 跑之前 / `:1936` 跑之后）⇒ guest 在批次内写下的 `mtimecmp` ⇒ **本批次内**定时器不会来 ⇒ **下一批次**才被喂给 M-16。
+⇒ ⇒ **用例必须发**两条** `StepN`**：
+- **第 1 条**（跑够写 `mtimecmp` + 使能 `mie` + `mstatus.MIE` + `mtvec`，然后进自旋）⇒ 跑完时 `sync_interrupts` 把 `mtimecmp` 喂进 M-16；
+- **第 2 条**（跑 ≥ 200 000 条）⇒ 期间 `poll()` 在量子边界看到 `mtime >= mtimecmp` ⇒ 挂起线 3 ⇒ 拉取式交付 ⇒ `enter_trap` ⇒ guest 陷入。
+
+⚠️ **一条 `StepN` 是不够的**（比较值在批次内还没进 M-16）⇒ 用例注释里要写明「**为什么是两条**」——否则后来的人会把它合并成一条，然后看到用例变红而不知道为什么。
+
+⚠️ **`mtimecmp == 0` 表示「无期限」**（宿主把它原样传给 M-16，M-16 里 `0` 也表示「定时器关闭」）⇒ 固件**必须写 1**，不能写 0。
 
 ### 4.5 台账怎么改
 
