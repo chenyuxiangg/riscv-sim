@@ -280,8 +280,18 @@ v0.23 交付的 `tools/boot-osz.sh` 里，**构建**认 `CARGO_TARGET_DIR`，**�
    ⇒ stdout 可以直接与 Spike 的 stdout 用 `cmp` 比。
 2. **`tools/boot-osz.sh`**：候选侧跑 `osz-boot`、参考侧跑 Spike、两侧 `cmp`，
    输出 `VERDICT MATCH / MISMATCH / NO-VERDICT`。
-3. **`tools/watchdog.pl`**：仓内可移植的超时看门狗（macOS 没有 `timeout`，
-   而 `perl -e 'alarm N; exec(@ARGV)'` 在 POSIX 下**不生效** —— `exec` 会重置 alarm）。
+3. **`tools/watchdog.pl`**：仓内可移植的超时看门狗（macOS 没有 `timeout`）。
+   ⚠️ **2026-10-23 订正**：此处原写「`perl -e 'alarm N; exec(@ARGV)'` 在 POSIX 下**不生效**
+   —— `exec` 会重置 alarm」，**这个根因判断是错的**，按实测订正如下（macOS / Darwin，
+   `perl -e 'my $t = shift; alarm $t; exec(@ARGV)' -- 3 sleep 10` ⇒ **rc=142**、
+   **用时 3 s** ⇒ **alarm 能跨 `exec` 存活**，并没有被重置）。
+   ⚠️ **那次「十分钟不被杀」的真因**是**写法坏了**：`alarm N` 里的 `N` 是**字面量 bareword**
+   （不是变量）⇒ `alarm("N")` 不是数字 ⇒ **闹钟根本没设上** ⇒ 自然不会超时
+   （实测 `perl -e 'alarm N; exec(@ARGV)' -- sleep 10` ⇒ **rc=0、用时 10 s**，完整跑完）。
+   ⇒ **正确写法**：秒数**当变量传**（`my $t = shift; alarm $t;`）。
+   ⇒ **`tools/watchdog.pl` 仍然是更优选**：它超时后按**进程组** `SIGKILL`
+   （cargo 与它 spawn 的测试二进制**一起**被杀 ⇒ 不留孤儿），且超时退出码 **124 记为 HANG**
+   —— 这两点是 `perl alarm` 给不了的，**不是因为 alarm 活不过 exec**。
 
 **实测结果**：候选侧用 105 万条指令、1.05 s 虚拟时间跑到 `OSZ$ ` 提示符，
 产出 **31 字节**（`==== Enter Main ====\n` + `\x1b[2K` + `\r` + `OSZ$ `），
