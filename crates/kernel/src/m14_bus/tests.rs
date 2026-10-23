@@ -752,15 +752,23 @@ fn id_only_peripheral_mapping_still_reports_not_wired() {
 
 #[test]
 fn oversized_ram_region_is_rejected_before_allocating() {
-    // D-10: a malformed firmware image can declare a ~4 GiB segment.
-    // The cap must reject it *before* the backing store is allocated.
-    let mut bus = Bus::new();
+    // D-10 → v0.26 裁决 B: the cap measures the region's **physical
+    // occupancy** (its materialized pages), **not** its declared size.
+    // The guard is unchanged in kind — a region that really wants more
+    // memory than the host's budget is still refused, and it is refused
+    // **before** a single page is allocated.
+    let mut bus = Bus::with_max_region_bytes(0x1000);
     let err = bus
-        .map_ram(0, 0x4000_0000, &[])
-        .expect_err("a 1 GiB region must be rejected");
+        .map_ram(0, 0x8000, &[0u8; 0x2000])
+        .expect_err("a region over the physical-occupancy cap must be rejected");
     assert_eq!(err.family, ErrorFamily::Bus);
     assert_eq!(err.scenario, 9, "over-cap region → E_BUS-09");
     assert_eq!(bus.region_count(), 0);
+    assert_eq!(
+        bus.ram_allocated_bytes(),
+        0,
+        "the refused region must not have allocated a page"
+    );
 }
 
 #[test]
@@ -779,13 +787,16 @@ fn the_region_size_cap_is_configurable() {
     assert_eq!(bus.max_region_bytes(), 0x1000);
     bus.map_ram(0, 0x1000, &[])
         .expect("a region at the cap is fine");
+    // ⚠ v0.26 裁决 B: the cap is measured against the **physical
+    // occupancy** ⇒ the判据 is the pages the region would materialize,
+    // not the size it declares.
     let err = bus
-        .map_ram(0x2000, 0x1001, &[])
+        .map_ram(0x2000, 0x2000, &[0u8; 0x2000])
         .expect_err("a region over the cap must be rejected");
     assert_eq!(err.scenario, 9);
     // The cap can be raised at runtime (the host owns the budget).
     bus.set_max_region_bytes(0x2000);
-    bus.map_ram(0x2000, 0x1001, &[])
+    bus.map_ram(0x2000, 0x2000, &[0u8; 0x2000])
         .expect("raising the cap works");
 }
 
@@ -818,14 +829,14 @@ fn the_cap_also_guards_the_peripheral_window() {
 // segment 3 (memory-map topology).
 // ---------------------------------------------------------------------------
 
-/// The expected page-chunk size, spelled **literally**.
+/// The expected page size, spelled **literally**.
 ///
-/// ⚠️ Deliberately **not** `MEM_PAGE_CHUNK_BYTES`: an assertion that
+/// ⚠️ Deliberately **not** `MEM_PAGE_BYTES`: an assertion that
 /// quotes the implementation's own constant cannot tell "the behaviour
 /// changed" from "the behaviour stayed" — it moves with the
 /// implementation (the D-73 lesson). A literal turns a change of the
-/// chunk size red.
-const EXPECTED_PAGE_CHUNK: usize = 64 * 1024;
+/// page size red.
+const EXPECTED_PAGE_BYTES: usize = 4096;
 
 /// A bus with one RAM region, one ROM region and one **bound**
 /// peripheral window — the shape every test below starts from.
@@ -852,29 +863,34 @@ fn export_pages_covers_the_ram_content_only() {
 }
 
 #[test]
-fn export_pages_chunks_a_region_larger_than_one_page() {
+fn export_pages_uses_four_kib_pages_and_only_the_materialized_ones() {
+    // ⚠ v0.26 裁决 C-1 / C-2: the page size is the **physical**
+    // allocation granularity (4 KiB), and **only the pages that exist**
+    // are exported. The old 64 KiB chunking carried fifteen sixteenths
+    // of padding per entry — the payload bloat this batch removes.
     let mut bus = Bus::new();
-    let size = EXPECTED_PAGE_CHUNK * 2 + 17;
+    // Three pages' worth of content (the last one only 17 bytes).
+    let size = EXPECTED_PAGE_BYTES * 2 + 17;
     let init: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
     bus.map_ram(0x1000, size as u32, &init).expect("ram");
 
     let pages = bus.export_pages();
-    assert_eq!(pages.len(), 3, "a region larger than one page is chunked");
+    assert_eq!(pages.len(), 3, "one entry per materialized page");
     for p in &pages {
         assert!(
-            p.bytes.len() <= EXPECTED_PAGE_CHUNK,
-            "a page must not exceed the chunk size (got {})",
+            p.bytes.len() <= EXPECTED_PAGE_BYTES,
+            "a page must not exceed the page size (got {})",
             p.bytes.len()
         );
     }
     assert_eq!(pages[0].base, 0x1000);
-    assert_eq!(pages[1].base, 0x1000 + EXPECTED_PAGE_CHUNK as u32);
-    assert_eq!(pages[2].base, 0x1000 + 2 * EXPECTED_PAGE_CHUNK as u32);
+    assert_eq!(pages[1].base, 0x1000 + EXPECTED_PAGE_BYTES as u32);
+    assert_eq!(pages[2].base, 0x1000 + 2 * EXPECTED_PAGE_BYTES as u32);
     assert_eq!(pages[2].bytes.len(), 17, "the last page may be shorter");
     let joined: Vec<u8> = pages.iter().flat_map(|p| p.bytes.iter().copied()).collect();
     assert_eq!(
         joined, init,
-        "the chunks must concatenate back to the region"
+        "the pages must concatenate back to the region"
     );
 }
 
@@ -906,18 +922,19 @@ fn export_pages_then_load_pages_restores_the_content() {
 #[test]
 fn load_pages_writes_a_page_at_its_own_offset_inside_the_region() {
     // A page that does not start at the region's base must land at its
-    // own address — not at the region's start.
+    // own address — not at the region's start. The page sits on the
+    // **region's own** page grid (region-relative, 4 KiB — 裁决 C-3).
     let mut bus = Bus::new();
-    bus.map_ram(0x1000, 0x40, &[]).expect("ram");
-    bus.load_bytes(0x1010, &[0xDE, 0xAD, 0xBE, 0xEF])
+    bus.map_ram(0x1000, 0x8000, &[]).expect("ram");
+    bus.load_bytes(0x2000, &[0xDE, 0xAD, 0xBE, 0xEF])
         .expect("write");
     let page = MemPageDto {
-        base: 0x1010,
+        base: 0x2000,
         bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
     };
     bus.load_pages(&[page]).expect("load");
     assert_eq!(
-        bus.read_only(0x1010, BusWidth::Word).unwrap(),
+        bus.read_only(0x2000, BusWidth::Word).unwrap(),
         0xEFBE_ADDE,
         "the page must land at its own address"
     );
@@ -968,8 +985,10 @@ fn load_pages_rejects_a_page_that_runs_past_its_region() {
     bus.map_ram(0x1000, 0x10, &[0xAA; 0x10]).expect("ram");
     let err = bus
         .load_pages(&[MemPageDto {
-            base: 0x1008,
-            bytes: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            base: 0x1000,
+            // 20 bytes from 0x1000 ⇒ 0x1000..0x1014, but the region
+            // ends at 0x1010 ⇒ the page runs past it.
+            bytes: (1..=20).collect(),
         }])
         .expect_err("a page past the region end must be rejected");
     assert_eq!(err.scenario, E_BUS_11_PAGE_OUTSIDE_RAM);
@@ -1364,15 +1383,20 @@ fn load_map_rejects_a_region_whose_end_overflows_u32() {
 /// ⚠️ **E_BUS-09（区域超过单区上限）必须有用例钉住**。
 ///
 /// 同上：这条路径此前**无用例在守**。
+///
+/// ⚠️ v0.26 裁决 B：上限量的是**物理占用**——RAM 区域在拓扑阶段还**没有**
+/// 任何页（内容走段 2 `load_pages` 灌回来），所以**声明大小**不再被量；
+/// **ROM** 区域的内容本来就在内存里 ⇒ 它的声明大小**就是**物理占用 ⇒
+/// 这里用 ROM 来钉这条路径。
 #[test]
 fn load_map_rejects_a_region_larger_than_the_per_region_cap() {
     let mut bus = Bus::with_max_region_bytes(0x1000);
-    bus.map_ram(0x1000, 0x10, &[0xAA; 0x10]).expect("ram");
+    bus.map_rom(0x8000, 0x1000, &[]).expect("rom at the cap");
     let map = M14MapDto {
         regions: vec![RegionDto {
             base: 0x8000,
             size: 0x2000,
-            kind: "ram".to_string(),
+            kind: "rom".to_string(),
             target: String::new(),
         }],
     };
@@ -1610,4 +1634,406 @@ fn read_fetch_instruction_reports_a_non_unmapped_error_unchanged() {
         .read_fetch_instruction(0x1000)
         .expect_err("the peripheral is not wired");
     assert_eq!(err.scenario, 5, "E_BUS-05 — not the unmapped code");
+}
+
+// ---------------------------------------------------------------------------
+// v0.26 · Lane A · M-14 总线 —— 验收清单 A-1 ~ A-12.
+//
+// STAGE-11 裁决 A（页级懒分配）/ B（护栏语义转换）/ C（快照页 4 KiB +
+// 只装写过的页）/ D（字段可见性收紧）。
+//
+// ⚠ **断言值一律写架构字面量**（4096、16 * 1024 * 1024 …），不从被测
+// 实现反推——反推的断言会跟着实现一起动，证明不了任何事（D-73 的教训）。
+// ---------------------------------------------------------------------------
+
+/// The number of **materialized** pages of the RAM region at `base`.
+///
+/// ⚠ The counter, not a read value: "never written" and "written with a
+/// zero" are indistinguishable by reading (D-107's shape).
+fn ram_pages_at(bus: &Bus, base: u32) -> usize {
+    let region = bus.lookup(base).expect("the RAM region must be mapped");
+    let RegionTarget::Ram(ram) = &region.target else {
+        panic!("region 0x{base:08x} is not a RAM region");
+    };
+    ram.allocated_pages()
+}
+
+/// **A-1** 读**没写过**的 RAM ⇒ 回 **0**（不是陷阱），且**零页**被物化。
+#[test]
+fn reading_unwritten_ram_returns_zero_and_materializes_no_page() {
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10_0000, &[]).expect("ram");
+
+    assert_eq!(
+        bus.read(0x1000, BusWidth::Word).unwrap(),
+        0,
+        "a page that was never written reads back as zero"
+    );
+    assert_eq!(
+        bus.ram_allocated_bytes(),
+        0,
+        "the read must not materialize a page"
+    );
+    assert_eq!(ram_pages_at(&bus, 0x1000), 0, "zero materialized pages");
+}
+
+/// **A-2** 读**没登记**的地址 ⇒ 仍然是**未映射**（E_BUS-01），**不是** 0。
+///
+/// ⚠ **D-99 的判别力**：「登记了但没写过」⇒ 0；「**根本没登记**」⇒
+/// E_BUS-01（M-13 把它变成架构陷阱 cause 5 / 7）。把两层合成一层 ⇒
+/// guest 读一块从没写过的 RAM 会拿到 0 而不是陷阱 ⇒ 判别力当场破掉。
+#[test]
+fn reading_an_unregistered_address_is_still_unmapped_not_zero() {
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10, &[]).expect("ram");
+
+    let err = bus
+        .read(0x9000, BusWidth::Word)
+        .expect_err("nothing is mapped at 0x9000");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(
+        err.scenario, 1,
+        "E_BUS-01 — an unregistered address is not a zero read"
+    );
+    assert_eq!(
+        bus.ram_allocated_bytes(),
+        0,
+        "a failed read must not materialize a page"
+    );
+}
+
+/// **A-3** 写**一页** ⇒ 恰好物化 **1 页**（4096 字节）。
+#[test]
+fn writing_one_page_materializes_exactly_one_page() {
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10_0000, &[]).expect("ram");
+
+    bus.write(0x1000, BusWidth::Word, 0xDEAD_BEEF)
+        .expect("write");
+
+    assert_eq!(ram_pages_at(&bus, 0x1000), 1, "exactly one page");
+    assert_eq!(bus.ram_allocated_bytes(), 4096, "exactly one 4 KiB page");
+    assert_eq!(
+        bus.read_only(0x1000, BusWidth::Word).unwrap(),
+        0xDEAD_BEEF,
+        "the value must be readable back"
+    );
+}
+
+/// **A-4** 写**两页不相邻** ⇒ 物化 **2** 页；中间那页读回 **0**。
+#[test]
+fn writing_two_non_adjacent_pages_materializes_two_pages() {
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10_0000, &[]).expect("ram");
+
+    bus.write(0x1000, BusWidth::Word, 0x1111_1111)
+        .expect("first");
+    bus.write(0x9000, BusWidth::Word, 0x2222_2222)
+        .expect("second");
+
+    assert_eq!(
+        ram_pages_at(&bus, 0x1000),
+        2,
+        "two pages — not three, not the whole region"
+    );
+    assert_eq!(bus.ram_allocated_bytes(), 2 * 4096, "two 4 KiB pages");
+    assert_eq!(
+        bus.read_only(0x5000, BusWidth::Word).unwrap(),
+        0,
+        "the page in between was never written ⇒ it reads back as zero"
+    );
+    assert_eq!(bus.read_only(0x1000, BusWidth::Word).unwrap(), 0x1111_1111);
+    assert_eq!(bus.read_only(0x9000, BusWidth::Word).unwrap(), 0x2222_2222);
+}
+
+/// **A-5** 护栏：**默认** cap 仍是 **16 MiB**；往一个 region 写超 16 MiB
+/// ⇒ **E_BUS-09**；**抬高** cap 后同样的写**成功**。
+///
+/// ⇒ 「护栏只能放宽、不能去掉」**可证**。
+#[test]
+fn the_default_physical_occupancy_cap_is_still_sixteen_mib() {
+    let mut bus = Bus::new();
+    assert_eq!(
+        bus.max_region_bytes(),
+        16 * 1024 * 1024,
+        "the default cap is unchanged"
+    );
+    bus.map_ram(0x1000, 0x2000_0000, &[]).expect("ram");
+
+    // 16 MiB / 4 KiB = 4096 pages ⇒ the 4097th page is over the cap.
+    for i in 0..4096u32 {
+        bus.write(0x1000 + i * 4096, BusWidth::Byte, 1)
+            .expect("within the cap");
+    }
+    let err = bus
+        .write(0x1000 + 4096 * 4096, BusWidth::Byte, 1)
+        .expect_err("over the cap");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(err.scenario, 9, "E_BUS-09 — the cap is not gone");
+    assert_eq!(
+        bus.ram_allocated_bytes(),
+        4096 * 4096,
+        "the refused write must not leave a page behind"
+    );
+
+    // … and raising the cap makes the very same write succeed.
+    let mut roomy = Bus::new();
+    roomy.set_max_region_bytes(32 * 1024 * 1024);
+    roomy.map_ram(0x1000, 0x2000_0000, &[]).expect("ram");
+    for i in 0..4097u32 {
+        roomy
+            .write(0x1000 + i * 4096, BusWidth::Byte, 1)
+            .expect("the raised cap allows it");
+    }
+    assert_eq!(roomy.ram_allocated_bytes(), 4097 * 4096);
+}
+
+/// **A-6** 单个 region 的**声明**大小可 > 16 MiB ⇒ 映射**成功**且**零**
+/// 物化页。
+#[test]
+fn a_ram_region_may_declare_more_than_the_cap_and_costs_nothing() {
+    let mut bus = Bus::new();
+    bus.map_ram(0x8000_0000, 128 * 1024 * 1024, &[])
+        .expect("a 128 MiB declaration is legal");
+    assert_eq!(bus.region_count(), 1, "the region is registered");
+    assert_eq!(
+        bus.ram_allocated_bytes(),
+        0,
+        "the declaration costs nothing"
+    );
+
+    // A write still lands in exactly one page.
+    bus.write(0x8000_0000, BusWidth::Word, 0x1234_5678)
+        .expect("write");
+    assert_eq!(bus.ram_allocated_bytes(), 4096);
+}
+
+/// **A-7** **非 RAM** 的护栏行为**逐条不变**：`map_rom(base, 32 MiB, …)`
+/// ⇒ **E_BUS-09**；**外设窗口**超 cap ⇒ **E_BUS-09**。
+///
+/// ⚠ 规格订正：护栏是「单个 region 相对宿主预算的上限」，**被测量的量按
+/// region 种类定**：RAM 量**物理占用**，ROM 与外设窗口量**声明大小**
+/// （它们不持内存，量物理占用永远是 0 ⇒ 那条保护会静默消失）。
+#[test]
+fn non_ram_regions_keep_the_declared_size_cap() {
+    // ROM: its content is part of the firmware image ⇒ in memory by
+    // definition ⇒ the cap measures its declared size.
+    let mut bus = Bus::new();
+    let err = bus
+        .map_rom(0, 32 * 1024 * 1024, &[])
+        .expect_err("a 32 MiB ROM is over the 16 MiB cap");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(err.scenario, 9, "E_BUS-09");
+
+    // Peripheral window: it claims an *address interval*, not memory ⇒
+    // the cap measures its declared size too.
+    let mock = Rc::new(RefCell::new(MockPeripheral::new("MOCK0", 0x3000, 0x10)));
+    let mut bus = Bus::with_max_region_bytes(0x8);
+    let err = bus
+        .map_peripheral_instance(0x3000, 0x10, Rc::clone(&mock) as _)
+        .expect_err("an over-cap peripheral window must be rejected");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(err.scenario, 9, "E_BUS-09");
+}
+
+/// **A-8** `export_pages` 只导出**写过的页**：写 1 页 ⇒ 恰好 1 条、`base`
+/// 落在该 region 的页网格上、`bytes.len() == 4096`；不写 ⇒ **0** 条；
+/// 写两页不相邻 ⇒ **2** 条。
+#[test]
+fn export_pages_carries_only_the_materialized_four_kib_pages() {
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10_0000, &[]).expect("ram");
+
+    assert_eq!(
+        bus.export_pages().len(),
+        0,
+        "an untouched region carries no page at all"
+    );
+
+    bus.write(0x1000, BusWidth::Word, 0xAABB_CCDD)
+        .expect("write");
+    let pages = bus.export_pages();
+    assert_eq!(pages.len(), 1, "exactly the page that was written");
+    assert_eq!(pages[0].base, 0x1000, "the page starts at its own address");
+    assert_eq!(
+        pages[0].base % 4096,
+        0,
+        "the page sits on the region's page grid"
+    );
+    assert_eq!(
+        pages[0].bytes.len(),
+        4096,
+        "a materialized page is a full 4 KiB page"
+    );
+    assert_eq!(
+        pages[0].bytes[0..4],
+        [0xDDu8, 0xCC, 0xBB, 0xAA],
+        "the page carries the bytes that were written"
+    );
+
+    // Two non-adjacent pages ⇒ two entries.
+    bus.write(0x9000, BusWidth::Word, 0x1122_3344)
+        .expect("write");
+    let pages = bus.export_pages();
+    assert_eq!(pages.len(), 2, "two materialized pages ⇒ two entries");
+    assert_eq!(pages[1].base, 0x9000);
+    assert_eq!(pages[1].bytes.len(), 4096);
+}
+
+/// **A-9** `load_pages` 仍是**两阶段**：一个越界页 ⇒ **整批拒收**
+/// （E_BUS-11）且 RAM **原封不动**（读回原来的值，**连页都没多出来**）。
+#[test]
+fn load_pages_rejects_the_whole_batch_and_leaves_the_ram_untouched() {
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x8000, &[]).expect("ram");
+    bus.write(0x1000, BusWidth::Word, 0xAAAA_AAAA)
+        .expect("write");
+    let before = bus.ram_allocated_bytes();
+
+    let err = bus
+        .load_pages(&[
+            MemPageDto {
+                base: 0x1000,
+                bytes: vec![0x11; 16],
+            },
+            MemPageDto {
+                base: 0x9000,
+                bytes: vec![0x22; 16],
+            },
+        ])
+        .expect_err("the second page is outside every RAM region");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(err.scenario, E_BUS_11_PAGE_OUTSIDE_RAM, "E_BUS-11");
+    assert_eq!(
+        bus.read_only(0x1000, BusWidth::Word).unwrap(),
+        0xAAAA_AAAA,
+        "the first (valid) page must not have been written"
+    );
+    assert_eq!(
+        bus.ram_allocated_bytes(),
+        before,
+        "not even a page may be materialized by a rejected restore"
+    );
+}
+
+/// **A-10** **D-13 / 裁决 D**：`Region` / `RamBackend` / `RomBackend` 的
+/// 字段**不再是 `pub`**。
+///
+/// ⚠ **源码级**守卫（不是「编译不过」这种间接证据）：扫 `mod.rs` 的源
+/// 文本，断言那五个字段声明**零命中**。
+#[test]
+fn region_and_backend_fields_are_not_public_anymore() {
+    let source = include_str!("mod.rs");
+    for needle in [
+        "pub base:",
+        "pub size:",
+        "pub kind:",
+        "pub target:",
+        "pub bytes:",
+    ] {
+        assert!(
+            !source.contains(needle),
+            "`{needle}` must not appear in m14_bus/mod.rs — the fields are module-private (裁决 D)"
+        );
+    }
+    // … and the public read-only accessors are there.
+    assert!(
+        source.contains("pub fn bytes(&self) -> &[u8]"),
+        "RomBackend must expose its content through an accessor"
+    );
+}
+
+/// **A-11** 一次访问**不跨页**：4 092 处的 4 字节写落在**同一页**内
+/// （物化 1 页）。
+#[test]
+fn a_four_byte_write_at_4092_stays_inside_one_page() {
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10_0000, &[]).expect("ram");
+
+    bus.write(0x1000 + 4092, BusWidth::Word, 0x0403_0201)
+        .expect("write");
+
+    assert_eq!(
+        ram_pages_at(&bus, 0x1000 + 4092),
+        1,
+        "the write stays inside one page"
+    );
+    assert_eq!(
+        bus.read_only(0x1000 + 4092, BusWidth::Word).unwrap(),
+        0x0403_0201,
+        "the value must be readable back"
+    );
+}
+
+/// **A-12** 既有断言**未被删改**：总线统计（`reads` / `ram_hits` /
+/// `misses` / `writes`）与改动前**逐条相同**。
+///
+/// ⚠ 懒分配只动物理存储，**不动统计**：读一个**没写过的页**仍然算
+/// 落在 RAM 上的**一次命中**（地址是映射的）——计数器的口径是「访问落在
+/// 哪儿」，不是「页在不在」。
+#[test]
+fn the_bus_statistics_are_unchanged_by_the_lazy_pages() {
+    let mut bus = Bus::new();
+    // No init ⇒ the RAM region starts with **zero** materialized pages.
+    bus.map_ram(0x5000, 0x10, &[]).unwrap();
+    bus.read(0x5000, BusWidth::Word).expect("read ok");
+    bus.write(0x5000, BusWidth::Word, 0xABCD).expect("write ok");
+    let _ = bus.read(0x9000, BusWidth::Word); // miss — error ignored
+    let stats = bus.stats();
+    assert_eq!(stats.reads, 2);
+    assert_eq!(stats.writes, 1);
+    assert_eq!(
+        stats.ram_hits, 2,
+        "read + write on RAM both bump ram_hits — the lazy pages do not change it"
+    );
+    assert_eq!(stats.rom_hits, 0);
+    assert_eq!(stats.periph_hits, 0);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(
+        stats.unmapped_splits, 1,
+        "unmapped word read counted in unmapped_splits (review #5)"
+    );
+    assert_eq!(stats.unaligned_splits, 0);
+}
+
+// ---------------------------------------------------------------------------
+// v0.26 的两条补充用例（裁决 C-3 的两条细则）。
+// ---------------------------------------------------------------------------
+
+/// 裁决 C-3：页必须落在**它所属 region 的页网格**上 ⇒ 不在 ⇒
+/// **E_BUS-11**。
+#[test]
+fn load_pages_rejects_a_page_off_the_regions_page_grid() {
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x8000, &[]).expect("ram");
+    let err = bus
+        .load_pages(&[MemPageDto {
+            base: 0x1010,
+            bytes: vec![1, 2, 3, 4],
+        }])
+        .expect_err("a page off the region's page grid must be rejected");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(err.scenario, E_BUS_11_PAGE_OUTSIDE_RAM);
+    assert_eq!(bus.ram_allocated_bytes(), 0, "nothing was materialized");
+}
+
+/// 裁决 C-3：还原也要过护栏 ⇒ 物理占用超 cap ⇒ **E_BUS-09** ⇒ 还原失败
+/// （宿主预算不够就不还原——这是**预期行为**，不是缺陷）。
+#[test]
+fn load_pages_over_the_physical_occupancy_cap_is_rejected() {
+    let mut bus = Bus::with_max_region_bytes(0x1000);
+    bus.map_ram(0x1000, 0x10_0000, &[]).expect("ram");
+    let err = bus
+        .load_pages(&[MemPageDto {
+            base: 0x1000,
+            bytes: vec![0u8; 8192],
+        }])
+        .expect_err("a restore over the cap must be rejected");
+    assert_eq!(err.family, ErrorFamily::Bus);
+    assert_eq!(err.scenario, 9, "E_BUS-09");
+    assert_eq!(
+        bus.ram_allocated_bytes(),
+        0,
+        "a rejected restore must not leave a page behind"
+    );
 }
