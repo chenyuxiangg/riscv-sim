@@ -18,29 +18,77 @@
 //! 那样改实现时用例会跟着变，变成恒绿。
 
 use riscv_sim_contract::model::{ImageKind, ImageRef, ImageSource, ProductTree, Project};
+use riscv_sim_contract::platform::{PlatformDescription, RegionSpec};
 use riscv_sim_contract::protocol::{CommandPayload, Message};
 
 use crate::m14_bus::BusWidth;
 
-use super::{
-    KernelHost, MemoryProfile, PLIC_SOURCE_UART, QEMU_VIRT_CLINT_BASE, QEMU_VIRT_PLIC_BASE,
-    QEMU_VIRT_RAM_BASE, QEMU_VIRT_RAM_SIZE, QEMU_VIRT_UART0_BASE,
-};
+use super::platform;
+use super::{KernelHost, MemoryProfile, PLIC_SOURCE_UART};
 
-/// UART0 的 THR（发送保持寄存器）地址。
-const UART0_THR: u32 = QEMU_VIRT_UART0_BASE;
-/// UART0 的 IER（中断使能）地址。
-const UART0_IER: u32 = QEMU_VIRT_UART0_BASE + 1;
-/// CLINT 的 `mtimecmp` 低字地址。
-const CLINT_MTIMECMP_LO: u32 = QEMU_VIRT_CLINT_BASE + 0x4000;
-/// CLINT 的 `mtimecmp` 高字地址。
-const CLINT_MTIMECMP_HI: u32 = QEMU_VIRT_CLINT_BASE + 0x4004;
-/// PLIC 的 source 10 的优先级寄存器地址。
-const PLIC_PRIORITY_10: u32 = QEMU_VIRT_PLIC_BASE + 4 * PLIC_SOURCE_UART;
+/// `qemu-virt` 描述（**取值来源**：从描述查，不抄宿主常量）。
+fn qemu_virt_description() -> PlatformDescription {
+    platform::builtin_description(platform::PLATFORM_ID_QEMU_VIRT).expect("内置描述 qemu-virt")
+}
+
+/// 描述里某个**器件**的基址（按器件 id 查）。
+fn device_base(device_id: &str) -> u32 {
+    platform::device_base(&qemu_virt_description(), device_id)
+        .unwrap_or_else(|| panic!("qemu-virt 描述里必须有器件 {device_id}"))
+}
+
+/// 描述里那段**高段 RAM** 的 `(base, size)` —— **取值来源 = 描述**。
+///
+/// ⚠️ 描述里有两段 RAM（低段 1 MiB · 高段 128 MiB）⇒ 取**最大**的那段
+/// （无歧义，不靠下标）。
+fn described_high_ram() -> (u32, u32) {
+    let description = qemu_virt_description();
+    let mut rams: Vec<(u32, u32)> = platform::regions_by_base(&description)
+        .iter()
+        .filter_map(|region| match region {
+            RegionSpec::Ram { base, size } => Some((*base, *size)),
+            _ => None,
+        })
+        .collect();
+    rams.sort_by_key(|(_, size)| *size);
+    let (base, size) = *rams.last().expect("qemu-virt 描述里有 RAM");
+    (base, size)
+}
+
+/// UART0 的 THR（发送保持寄存器）地址 —— **基址来自描述** + 偏移 `0x0`。
+fn uart0_thr() -> u32 {
+    device_base("UART0")
+}
+
+/// UART0 的 IER（中断使能）地址 —— **基址来自描述** + 偏移 `0x1`。
+fn uart0_ier() -> u32 {
+    device_base("UART0") + 1
+}
+
+/// CLINT 的 `mtimecmp` 低字地址 —— **基址来自描述** + 偏移 `0x4000`。
+fn clint_mtimecmp_lo() -> u32 {
+    device_base("CLINT") + 0x4000
+}
+
+/// CLINT 的 `mtimecmp` 高字地址 —— **基址来自描述** + 偏移 `0x4004`。
+fn clint_mtimecmp_hi() -> u32 {
+    device_base("CLINT") + 0x4004
+}
+
+/// PLIC 的 source 10 的优先级寄存器地址 —— **基址来自描述** + 偏移。
+fn plic_priority_10() -> u32 {
+    device_base("PLIC") + 4 * PLIC_SOURCE_UART
+}
+
 /// PLIC 的 context 0 的 enable 寄存器地址（source 10 落在第 0 个字）。
-const PLIC_ENABLE_CTX0: u32 = QEMU_VIRT_PLIC_BASE + 0x2000;
+fn plic_enable_ctx0() -> u32 {
+    device_base("PLIC") + 0x2000
+}
+
 /// PLIC 的 context 0 的门限寄存器地址。
-const PLIC_THRESHOLD_CTX0: u32 = QEMU_VIRT_PLIC_BASE + 0x200000;
+fn plic_threshold_ctx0() -> u32 {
+    device_base("PLIC") + 0x200000
+}
 
 /// 造一个最小的 ELF32（RV32 / 小端 / ET_EXEC），只有一个 PT_LOAD。
 ///
@@ -142,7 +190,7 @@ fn the_default_profile_leaves_the_qemu_virt_window_unmapped() {
         "默认档不该映射 0x8400_0000"
     );
     assert!(
-        host.bus().lookup(QEMU_VIRT_UART0_BASE).is_none(),
+        host.bus().lookup(device_base("UART0")).is_none(),
         "默认档不该映射 UART0"
     );
 }
@@ -153,11 +201,13 @@ fn the_qemu_virt_profile_maps_the_whole_128_mib_and_the_three_devices() {
     assert_eq!(host.memory_profile(), MemoryProfile::QemuVirt);
 
     // RAM：起点、终点、**堆尾**（osz 的 best-fit 分配器在堆尾写节点）。
-    assert!(host.bus().lookup(QEMU_VIRT_RAM_BASE).is_some());
+    //
+    // ⚠️ **取值来源 = 描述**（v0.27 · D-123-B）：高段 RAM 的
+    // `(base, size)` 从 `qemu-virt` 描述查 ⇒ 不再抄一份宿主常量。
+    let (ram_base, ram_size) = described_high_ram();
+    assert!(host.bus().lookup(ram_base).is_some());
     assert!(
-        host.bus()
-            .lookup(QEMU_VIRT_RAM_BASE + QEMU_VIRT_RAM_SIZE - 4)
-            .is_some(),
+        host.bus().lookup(ram_base + ram_size - 4).is_some(),
         "128 MiB 的最后 4 字节必须被映射 —— osz 的堆尾在那儿"
     );
     // ⚠️ **v0.26 · STAGE-11 裁决 G**：128 MiB 现在是**一个**区域（不是 8 个
@@ -175,11 +225,7 @@ fn the_qemu_virt_profile_maps_the_whole_128_mib_and_the_three_devices() {
     let ram_in_window: Vec<_> = map
         .regions
         .iter()
-        .filter(|r| {
-            r.kind == "ram"
-                && r.base >= QEMU_VIRT_RAM_BASE
-                && r.base < QEMU_VIRT_RAM_BASE + QEMU_VIRT_RAM_SIZE
-        })
+        .filter(|r| r.kind == "ram" && r.base >= ram_base && r.base < ram_base + ram_size)
         .collect();
     assert_eq!(
         ram_in_window.len(),
@@ -189,22 +235,20 @@ fn the_qemu_virt_profile_maps_the_whole_128_mib_and_the_three_devices() {
     );
     for r in &ram_in_window {
         assert_eq!(
-            r.size,
-            128 * 1024 * 1024,
+            r.size, ram_size,
             "QemuVirt 的 RAM 必须是**一个** 128 MiB 的区域，0x{:08x} 那个却只有 {} 字节",
-            r.base,
-            r.size
+            r.base, r.size
         );
     }
     assert_eq!(
-        ram_in_window[0].base, QEMU_VIRT_RAM_BASE,
+        ram_in_window[0].base, ram_base,
         "那一个 RAM 区域必须从 0x8000_0000 起（guest 看到的地址空间不变）"
     );
 
     // 三个 QEMU virt 外设。
-    assert!(host.bus().lookup(QEMU_VIRT_UART0_BASE).is_some(), "UART0");
-    assert!(host.bus().lookup(QEMU_VIRT_CLINT_BASE).is_some(), "CLINT");
-    assert!(host.bus().lookup(QEMU_VIRT_PLIC_BASE).is_some(), "PLIC");
+    assert!(host.bus().lookup(device_base("UART0")).is_some(), "UART0");
+    assert!(host.bus().lookup(device_base("CLINT")).is_some(), "CLINT");
+    assert!(host.bus().lookup(device_base("PLIC")).is_some(), "PLIC");
 }
 
 /// 一个落在 QEMU virt 窗口里的镜像 ⇒ 宿主自动切档。
@@ -266,13 +310,13 @@ fn the_clint_mtimecmp_reaches_the_interrupt_controller() {
 
     // osz 的分步 64 位写：先写低位 -1，再写低位真值，最后写高位。
     host.bus_mut()
-        .write(CLINT_MTIMECMP_LO, BusWidth::Word, 0xFFFF_FFFF)
+        .write(clint_mtimecmp_lo(), BusWidth::Word, 0xFFFF_FFFF)
         .unwrap();
     host.bus_mut()
-        .write(CLINT_MTIMECMP_LO, BusWidth::Word, 1000)
+        .write(clint_mtimecmp_lo(), BusWidth::Word, 1000)
         .unwrap();
     host.bus_mut()
-        .write(CLINT_MTIMECMP_HI, BusWidth::Word, 0)
+        .write(clint_mtimecmp_hi(), BusWidth::Word, 0)
         .unwrap();
 
     // 同步之前 M-16 还没拿到比较值。
@@ -302,17 +346,17 @@ fn a_plic_source_raises_the_external_line() {
 
     // guest 侧的 PLIC 配置：source 10 优先级 1、context 0 使能、门限 0。
     host.bus_mut()
-        .write(PLIC_PRIORITY_10, BusWidth::Word, 1)
+        .write(plic_priority_10(), BusWidth::Word, 1)
         .unwrap();
     host.bus_mut()
-        .write(PLIC_ENABLE_CTX0, BusWidth::Word, 1 << PLIC_SOURCE_UART)
+        .write(plic_enable_ctx0(), BusWidth::Word, 1 << PLIC_SOURCE_UART)
         .unwrap();
     host.bus_mut()
-        .write(PLIC_THRESHOLD_CTX0, BusWidth::Word, 0)
+        .write(plic_threshold_ctx0(), BusWidth::Word, 0)
         .unwrap();
     // UART 的 IER bit0 = 允许 RX 中断。
     host.bus_mut()
-        .write(UART0_IER, BusWidth::Byte, 0x01)
+        .write(uart0_ier(), BusWidth::Byte, 0x01)
         .unwrap();
 
     assert!(
@@ -341,7 +385,7 @@ fn a_plic_source_raises_the_external_line() {
 fn the_uart_is_reachable_through_the_bus() {
     let mut host = KernelHost::new_with_profile(MemoryProfile::QemuVirt);
     host.bus_mut()
-        .write(UART0_THR, BusWidth::Byte, u32::from(b'A'))
+        .write(uart0_thr(), BusWidth::Byte, u32::from(b'A'))
         .unwrap();
     assert_eq!(host.drain_console(), b"A".to_vec());
 }

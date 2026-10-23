@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "id": "default",
+  "name": "Default",
+  "priority": 10,
+  "region_budget_bytes": 16777216,
+  "regions": [
+    {
+      "kind": "ram",
+      "base": 0,
+      "size": 1048576
+    },
+    {
+      "kind": "peripheral",
+      "base": 1073741824,
+      "device": {
+        "device": "gpio",
+        "id": "GPIO0"
+      }
+    },
+    {
+      "kind": "ram",
+      "base": 2147483648,
+      "size": 4194304
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "minimal",
+  "name": "Minimal (zero-change demo platform)",
+  "priority": 30,
+  "region_budget_bytes": 16777216,
+  "regions": [
+    {
+      "kind": "ram",
+      "base": 0,
+      "size": 2097152
+    },
+    {
+      "kind": "ram",
+      "base": 268435456,
+      "size": 16777216
+    }
+  ]
+}

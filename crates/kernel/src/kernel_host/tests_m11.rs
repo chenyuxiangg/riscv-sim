@@ -31,11 +31,27 @@ use crate::m11_symbol::MAX_DISASM_COUNT;
 /// demo 固件 —— **引用共享常量**，不抄一份。
 use super::DEMO_FIRMWARE_BYTES as DEMO_BYTES;
 
-/// 低段 RAM 的**末端**（`DEFAULT_RAM_LOW_BASE + DEFAULT_RAM_LOW_SIZE`）。
+/// 低段 RAM 的**末端** —— **取值来源 = 平台描述**（v0.27 · D-123-B）。
 ///
 /// ⚠️ 「压缩指令位于映射区**末端**」的用例要靠它：那里的最后 2 个字节
 /// 之后就是未映射地址 ⇒ 取指**必须**只读 2 字节。
-const RAM_LOW_END: u32 = DEFAULT_RAM_LOW_BASE + DEFAULT_RAM_LOW_SIZE;
+///
+/// ⚠️ 末端 = 描述里那段**低段 RAM** 的 `base + size` ⇒ 不再抄一份宿主
+/// 常量（宿主常量与描述是**同源**的 ⇒ 抄一份就多一个真相）。
+fn ram_low_end() -> u32 {
+    let description =
+        platform::builtin_description(platform::PLATFORM_ID_DEFAULT).expect("内置描述 default");
+    let low = platform::regions_by_base(&description)
+        .into_iter()
+        .find_map(|region| match region {
+            riscv_sim_contract::platform::RegionSpec::Ram { base, size } if *base == 0 => {
+                Some(base + size)
+            }
+            _ => None,
+        })
+        .expect("default 描述里有一段 base 为 0 的低段 RAM");
+    low
+}
 
 /// demo 固件的三条指令的机器码。
 const DEMO_CODE_0: u32 = 0x02A0_0093; // addi x1, x0, 42
@@ -205,7 +221,7 @@ fn the_fetch_reads_exactly_two_bytes_so_a_compressed_tail_is_not_a_false_miss() 
     // ⚠️ 这是「取指必须真的只读 2 字节」的判别式：若宿主「读一个字取
     // 低半」（4 字节），这 2 字节就会**跨界** ⇒ 被误报成「未映射」⇒
     // 序列变成空的（LLD 11-1）。
-    let tail = RAM_LOW_END - 2;
+    let tail = ram_low_end() - 2;
     dispatch(
         &mut host,
         CommandPayload::WriteMemory {
