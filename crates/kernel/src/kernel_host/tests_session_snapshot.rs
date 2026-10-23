@@ -49,6 +49,38 @@ const DEMO_FIRST_WORD: u32 = 0x02a0_0093;
 /// demo 固件里 GPIO `OUT` 寄存器的偏移（M-15 `gpio::reg::OUT`）。
 const GPIO_OUT_OFFSET: u32 = 4;
 
+/// 默认档的**平台描述**（**取值来源**：从描述查，不抄宿主常量）。
+///
+/// ⚠️ v0.27 之后内存图是**数据** ⇒ 断言的期望值应当**从描述查** ⇒
+/// 描述本身的内容由 `tests_platform.rs` 的 B-1 用例（字面量）钉住 ⇒
+/// 「描述 → 期望值」这条链不会断。
+fn default_description() -> riscv_sim_contract::platform::PlatformDescription {
+    platform::builtin_description(platform::PLATFORM_ID_DEFAULT).expect("内置描述 default")
+}
+
+/// 默认档描述里的区域（**按 base 升序** —— 与 `export_map()` 的顺序一致）。
+fn default_regions() -> Vec<riscv_sim_contract::platform::RegionSpec> {
+    platform::regions_by_base(&default_description())
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
+/// 默认档描述里 GPIO 的**基址**（**取值来源 = 描述**）。
+fn gpio_base() -> u32 {
+    platform::device_base(&default_description(), "GPIO0").expect("默认描述里有 GPIO0")
+}
+
+/// 默认档描述里 GPIO 的**器件 id**（**取值来源 = 描述**）。
+fn gpio_id() -> String {
+    default_regions()
+        .iter()
+        .find(|region| region.base() == gpio_base())
+        .and_then(|region| region.device_id())
+        .expect("默认描述里的 GPIO 有器件 id")
+        .to_string()
+}
+
 /// 测试用 UART 挂到总线上的基址（默认内存图上那块地址是空的）。
 const TEST_UART_BASE: u32 = 0x2000_0000;
 
@@ -146,7 +178,7 @@ fn write_gpio_out(host: &mut KernelHost, value: u32) {
     let events = host.handle_message(&Message::command(
         9,
         CommandPayload::WriteMemory {
-            addr: DEFAULT_GPIO_BASE + GPIO_OUT_OFFSET,
+            addr: gpio_base() + GPIO_OUT_OFFSET,
             size: WriteSize::Word,
             value,
         },
@@ -386,18 +418,26 @@ fn capture_session_assembles_the_six_segments_from_their_sources() {
     // 段 3 —— M-14 的区域拓扑。
     let map = host.backend.bus().export_map();
     assert_eq!(payload.m14_map, map, "段 3 必须等于总线的拓扑导出");
+    // ⚠️ **期望值从平台描述查**（v0.27 · D-123-B）：内存图是**数据**
+    // ⇒ 断言的来源也必须是那份数据 ⇒ 描述的内容由 `tests_platform.rs`
+    // 的 B-1 用例（字面量）钉住。
+    let described = default_regions();
     assert_eq!(
         payload.m14_map.regions.len(),
-        3,
-        "两段 RAM + 一个 GPIO 外设窗口"
+        described.len(),
+        "区域数量必须与**描述**一致（两段 RAM + 一个 GPIO 外设窗口）"
     );
-    assert_eq!(payload.m14_map.regions[0].base, 0);
-    assert_eq!(payload.m14_map.regions[0].kind, "ram");
-    assert_eq!(payload.m14_map.regions[1].base, DEFAULT_GPIO_BASE);
-    assert_eq!(payload.m14_map.regions[1].kind, "peripheral");
-    assert_eq!(payload.m14_map.regions[1].target, GPIO_PERIPH_ID);
-    assert_eq!(payload.m14_map.regions[2].base, DEFAULT_RAM_HIGH_BASE);
-    assert_eq!(payload.m14_map.regions[2].kind, "ram");
+    assert_eq!(payload.m14_map.regions[0].base, described[0].base());
+    assert_eq!(payload.m14_map.regions[0].kind, described[0].kind());
+    assert_eq!(payload.m14_map.regions[1].base, described[1].base());
+    assert_eq!(payload.m14_map.regions[1].kind, described[1].kind());
+    assert_eq!(
+        payload.m14_map.regions[1].target,
+        described[1].device_id().unwrap_or_default(),
+        "外设区域的 target 必须是描述里那个器件的 id"
+    );
+    assert_eq!(payload.m14_map.regions[2].base, described[2].base());
+    assert_eq!(payload.m14_map.regions[2].kind, described[2].kind());
 
     // 段 4 —— M-15 的外设内部状态。
     assert_eq!(
@@ -410,7 +450,7 @@ fn capture_session_assembles_the_six_segments_from_their_sources() {
         1,
         "demo 内存图上只有一个 GPIO"
     );
-    assert_eq!(payload.m15_periph.gpios[0].id, GPIO_PERIPH_ID);
+    assert_eq!(payload.m15_periph.gpios[0].id, gpio_id());
     assert_eq!(payload.m15_periph.gpios[0].outputs, 0);
     assert_eq!(payload.m15_periph.gpios[0].directions, 0);
     assert_eq!(payload.m15_periph.gpios[0].inputs, 0);
@@ -604,7 +644,7 @@ fn restore_session_rejects_an_unknown_peripheral_id_without_touching_the_periphe
     assert_eq!(err.scenario, 5, "必须是 E_PER-05（外设集合对不上）");
 
     let gpio = &host.peripheral_states().gpios[0];
-    assert_eq!(gpio.id, GPIO_PERIPH_ID, "活实例不许被换掉");
+    assert_eq!(gpio.id, gpio_id(), "活实例不许被换掉");
     assert_eq!(gpio.outputs, 1, "失败的那一步（外设回灌）没有写入任何东西");
     assert_eq!(
         gpio.now_ps,
@@ -827,7 +867,14 @@ fn a_successful_restore_puts_every_field_back() {
 fn restore_session_rebuilds_the_memory_map_topology() {
     let mut host = host_with_demo(2);
     let mut payload = host.capture_session(meta());
-    assert_eq!(host.memory_map().regions.len(), 3, "夹具的拓扑是三段");
+    // ⚠️ **期望值从平台描述查**（v0.27 · D-123-B）：夹具的拓扑就是默认
+    // 描述的那几段。
+    let described = default_regions();
+    assert_eq!(
+        host.memory_map().regions.len(),
+        described.len(),
+        "夹具的拓扑是描述里的那几段"
+    );
 
     // 给载荷加一段 RAM（插在升序的位置上：0x0 < 0x2000_0000 < 0x4000_0000）。
     payload.m14_map.regions.insert(
@@ -843,7 +890,11 @@ fn restore_session_rebuilds_the_memory_map_topology() {
     host.restore_session(&payload).expect("restore");
 
     let map = host.memory_map();
-    assert_eq!(map.regions.len(), 4, "恢复后总线必须照载荷重建出四段区域");
+    assert_eq!(
+        map.regions.len(),
+        described.len() + 1,
+        "恢复后总线必须照载荷重建出多一段区域"
+    );
     assert_eq!(map.regions[1].base, 0x2000_0000);
     assert_eq!(map.regions[1].size, 0x1000);
     assert_eq!(map.regions[1].kind, "ram");
@@ -918,7 +969,11 @@ fn a_restored_session_reproduces_the_captured_payload_segment_by_segment() {
 
     assert_eq!(host.intc_state().raised, Vec::<u16>::new());
     assert_eq!(host.peripheral_states().gpios[0].outputs, 0xF0);
-    assert_eq!(host.memory_map().regions.len(), 4);
+    assert_eq!(
+        host.memory_map().regions.len(),
+        default_regions().len() + 1,
+        "漂移：拓扑必须真的多了一段"
+    );
     assert_eq!(
         host.backend.engine().instruction_budget(),
         4321,

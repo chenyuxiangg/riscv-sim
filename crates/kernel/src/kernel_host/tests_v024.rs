@@ -27,20 +27,37 @@ use riscv_sim_contract::model::{
     DisasmEntryDto, ImageKind, ImageRef, ImageSource, ProductTree, Project, ProjectVersion,
     WriteSize,
 };
+use riscv_sim_contract::platform::PlatformDescription;
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload, Message};
 
 use crate::m14_bus::BusWidth;
 
-use super::{
-    KernelHost, MemoryProfile, PLIC_SOURCE_UART, QEMU_VIRT_PLIC_BASE, QEMU_VIRT_UART0_BASE,
-};
+use super::platform;
+use super::{KernelHost, MemoryProfile, PLIC_SOURCE_UART};
 
-/// UART0 的 RHR（接收保持寄存器）地址 —— 与 THR **同一个偏移**（`0x0`）。
-const UART0_RHR: u32 = QEMU_VIRT_UART0_BASE;
-/// UART0 的 IER（中断使能寄存器）地址。
-const UART0_IER: u32 = QEMU_VIRT_UART0_BASE + 1;
-/// UART0 的 LSR（线路状态寄存器）地址。
-const UART0_LSR: u32 = QEMU_VIRT_UART0_BASE + 5;
+/// `qemu-virt` 描述（**取值来源**：从描述查，不抄宿主常量）。
+fn qemu_virt_description() -> PlatformDescription {
+    platform::builtin_description(platform::PLATFORM_ID_QEMU_VIRT).expect("内置描述 qemu-virt")
+}
+
+/// 描述里某个**器件**的基址（按器件 id 查）。
+fn device_base(device_id: &str) -> u32 {
+    platform::device_base(&qemu_virt_description(), device_id)
+        .unwrap_or_else(|| panic!("qemu-virt 描述里必须有器件 {device_id}"))
+}
+
+/// UART0 的 RHR（接收保持寄存器）地址 —— **基址来自描述** + 偏移 `0x0`。
+fn uart0_rhr() -> u32 {
+    device_base("UART0")
+}
+/// UART0 的 IER（中断使能寄存器）地址 —— **基址来自描述** + 偏移 `0x1`。
+fn uart0_ier() -> u32 {
+    device_base("UART0") + 1
+}
+/// UART0 的 LSR（线路状态寄存器）地址 —— **基址来自描述** + 偏移 `0x5`。
+fn uart0_lsr() -> u32 {
+    device_base("UART0") + 5
+}
 
 /// `LSR` 的 `RX_VALID` 位（bit0）—— **RX FIFO 里有字节**。
 const LSR_RX_VALID: u8 = 0x01;
@@ -50,12 +67,18 @@ const LSR_OVERRUN: u8 = 0x04;
 /// `IER` 的 RX 中断使能位（bit0）。
 const IER_RX_ENABLE: u8 = 0x01;
 
-/// PLIC 的 source 10（UART RX）的优先级寄存器地址。
-const PLIC_PRIORITY_10: u32 = QEMU_VIRT_PLIC_BASE + 4 * PLIC_SOURCE_UART;
+/// PLIC 的 source 10（UART RX）的优先级寄存器地址 —— **基址来自描述**。
+fn plic_priority_10() -> u32 {
+    device_base("PLIC") + 4 * PLIC_SOURCE_UART
+}
 /// PLIC 的 context 0 的 enable 寄存器地址（source 10 落在第 0 个字）。
-const PLIC_ENABLE_CTX0: u32 = QEMU_VIRT_PLIC_BASE + 0x2000;
+fn plic_enable_ctx0() -> u32 {
+    device_base("PLIC") + 0x2000
+}
 /// PLIC 的 context 0 的门限寄存器地址。
-const PLIC_THRESHOLD_CTX0: u32 = QEMU_VIRT_PLIC_BASE + 0x200000;
+fn plic_threshold_ctx0() -> u32 {
+    device_base("PLIC") + 0x200000
+}
 
 /// 平台的**内部中断线号** —— UART 的 RX 就绪（`IRQ_UART_RX_READY` = 1）。
 ///
@@ -97,27 +120,27 @@ fn read_reg(host: &KernelHost, addr: u32) -> u8 {
 
 /// 读 UART 的 `LSR`。
 fn lsr(host: &KernelHost) -> u8 {
-    read_reg(host, UART0_LSR)
+    read_reg(host, uart0_lsr())
 }
 
 /// 把 guest 侧的 PLIC / UART 中断配置**摆好**（PLIC 源 10 优先级 1、
 /// context 0 使能、门限 0）。
 fn configure_plic(host: &mut KernelHost) {
     host.bus_mut()
-        .write(PLIC_PRIORITY_10, BusWidth::Word, 1)
+        .write(plic_priority_10(), BusWidth::Word, 1)
         .expect("写 PLIC 优先级");
     host.bus_mut()
-        .write(PLIC_ENABLE_CTX0, BusWidth::Word, 1 << PLIC_SOURCE_UART)
+        .write(plic_enable_ctx0(), BusWidth::Word, 1 << PLIC_SOURCE_UART)
         .expect("写 PLIC 使能");
     host.bus_mut()
-        .write(PLIC_THRESHOLD_CTX0, BusWidth::Word, 0)
+        .write(plic_threshold_ctx0(), BusWidth::Word, 0)
         .expect("写 PLIC 门限");
 }
 
 /// 打开 UART 的 RX 中断使能（`IER` bit0）。
 fn enable_uart_rx_interrupt(host: &mut KernelHost) {
     host.bus_mut()
-        .write(UART0_IER, BusWidth::Byte, u32::from(IER_RX_ENABLE))
+        .write(uart0_ier(), BusWidth::Byte, u32::from(IER_RX_ENABLE))
         .expect("写 UART 的 IER");
 }
 
@@ -255,7 +278,7 @@ fn host_with_firmware() -> KernelHost {
 fn write_console_puts_the_byte_into_the_uart_rx_fifo() {
     let mut host = host_with_uart();
     assert_eq!(
-        read_reg(&host, UART0_RHR),
+        read_reg(&host, uart0_rhr()),
         0x00,
         "还没写任何东西 ⇒ RHR 必须是空的（0）"
     );
@@ -267,7 +290,7 @@ fn write_console_puts_the_byte_into_the_uart_rx_fifo() {
     assert!(!events.is_empty(), "命令必须**有**回复");
 
     assert_eq!(
-        read_reg(&host, UART0_RHR),
+        read_reg(&host, uart0_rhr()),
         0x41,
         "guest 读 RHR 必须读到**刚写的那个字节**（0x41）"
     );
@@ -311,9 +334,9 @@ fn the_guest_reads_back_exactly_the_byte_that_was_written() {
         &mut host,
         CommandPayload::WriteConsole { bytes: vec![0x5A] },
     );
-    assert_eq!(read_reg(&host, UART0_RHR), 0x5A, "第一个字节必须能读出来");
+    assert_eq!(read_reg(&host, uart0_rhr()), 0x5A, "第一个字节必须能读出来");
     assert_eq!(
-        read_reg(&host, UART0_RHR),
+        read_reg(&host, uart0_rhr()),
         0x00,
         "读掉之后 FIFO 必须空（RHR 是**读清**寄存器）"
     );
@@ -324,7 +347,7 @@ fn the_guest_reads_back_exactly_the_byte_that_was_written() {
         CommandPayload::WriteConsole { bytes: vec![0x42] },
     );
     assert_eq!(
-        read_reg(&host, UART0_RHR),
+        read_reg(&host, uart0_rhr()),
         0x42,
         "读出来的必须是**刚写的**那个字节（0x42），不是上一个（0x5A）"
     );
@@ -405,11 +428,11 @@ fn several_bytes_in_one_command_all_reach_the_fifo_in_order() {
     );
 
     // 三个字节**都在** FIFO 里，**顺序**不变。
-    assert_eq!(read_reg(&host, UART0_RHR), 0x41, "队头必须是 0x41");
-    assert_eq!(read_reg(&host, UART0_RHR), 0x42, "第二个必须是 0x42");
-    assert_eq!(read_reg(&host, UART0_RHR), 0x43, "第三个必须是 0x43");
+    assert_eq!(read_reg(&host, uart0_rhr()), 0x41, "队头必须是 0x41");
+    assert_eq!(read_reg(&host, uart0_rhr()), 0x42, "第二个必须是 0x42");
+    assert_eq!(read_reg(&host, uart0_rhr()), 0x43, "第三个必须是 0x43");
     assert_eq!(
-        read_reg(&host, UART0_RHR),
+        read_reg(&host, uart0_rhr()),
         0x00,
         "三个字节读完之后 FIFO 必须空"
     );
@@ -443,13 +466,13 @@ fn a_write_console_longer_than_the_fifo_drops_the_newest_and_latches_the_overrun
     // 留下的是**最早**的 16 个字节，顺序不变。
     for i in 0..16u8 {
         assert_eq!(
-            read_reg(&host, UART0_RHR),
+            read_reg(&host, uart0_rhr()),
             0x40 + i,
             "留下的必须是**最早**的字节，且顺序不变"
         );
     }
     assert_eq!(
-        read_reg(&host, UART0_RHR),
+        read_reg(&host, uart0_rhr()),
         0x00,
         "被丢的那 4 个字节不许出现在 FIFO 里"
     );
@@ -469,7 +492,7 @@ fn one_byte_per_command_keeps_the_order() {
         );
         assert!(!events.is_empty(), "每条命令都必须有回复");
         assert_eq!(
-            read_reg(&host, UART0_RHR),
+            read_reg(&host, uart0_rhr()),
             byte,
             "读出来的必须就是这一条命令写的那个字节（顺序不能乱）"
         );
@@ -537,7 +560,7 @@ fn without_the_rx_interrupt_enable_no_line_is_raised() {
     configure_plic(&mut host);
     // ⚠️ **不开** `IER` 的 bit0（RX 中断使能）。
     host.bus_mut()
-        .write(UART0_IER, BusWidth::Byte, 0x00)
+        .write(uart0_ier(), BusWidth::Byte, 0x00)
         .expect("写 UART 的 IER");
 
     dispatch(
@@ -555,7 +578,7 @@ fn without_the_rx_interrupt_enable_no_line_is_raised() {
         "RX_VALID 必须置位（否则这条用例没有判别力）"
     );
     assert_eq!(
-        read_reg(&host, UART0_RHR),
+        read_reg(&host, uart0_rhr()),
         0x41,
         "字节必须真的进了 FIFO（否则这条用例没有判别力）"
     );

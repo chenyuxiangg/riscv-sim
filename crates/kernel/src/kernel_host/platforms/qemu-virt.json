@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "id": "qemu-virt",
+  "name": "QEMU virt",
+  "priority": 20,
+  "auto_selectable": true,
+  "region_budget_bytes": 134217728,
+  "regions": [
+    {
+      "kind": "ram",
+      "base": 0,
+      "size": 1048576
+    },
+    {
+      "kind": "peripheral",
+      "base": 33554432,
+      "device": {
+        "device": "clint",
+        "id": "CLINT",
+        "freq_hz": 10000000,
+        "harts": 1
+      }
+    },
+    {
+      "kind": "peripheral",
+      "base": 201326592,
+      "device": {
+        "device": "plic",
+        "id": "PLIC",
+        "sources": 64,
+        "contexts": 16
+      }
+    },
+    {
+      "kind": "peripheral",
+      "base": 268435456,
+      "device": {
+        "device": "uart16550",
+        "id": "UART0",
+        "irq_line": 1,
+        "baud_rate": 115200
+      }
+    },
+    {
+      "kind": "peripheral",
+      "base": 1073741824,
+      "device": {
+        "device": "gpio",
+        "id": "GPIO0"
+      }
+    },
+    {
+      "kind": "ram",
+      "base": 2147483648,
+      "size": 134217728
+    }
+  ]
+}
