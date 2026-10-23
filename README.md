@@ -80,15 +80,24 @@
 | **GPIO** | PL061 惯例布局（`0x4000_0000`），驱动探针边沿 |
 | **中断控制器（M-16）** | 挂起队列按 `(虚拟时间, 插入序)` **保序** · 同线去重 · 优先级仲裁 · 量子边界采样 · **拉取式**交付（取走即消失）· `mie` + `mstatus.MIE` 双闸门 |
 
+### 平台与内存图
+
+| 项 | 状态 |
+| --- | --- |
+| **平台描述** | **一份 JSON 数据**（`crates/kernel/src/kernel_host/platforms/*.json`，编译进二进制）承载**地址空间 + 器件清单** ⇒ 契约层有**唯一**校验器（V-1 ~ V-12）⇒ **换一份描述、宿主代码零改动** |
+| **内置描述** | `default`（低段 1 MiB + 高段 4 MiB + GPIO）· `qemu-virt`（低段 1 MiB + 高段 128 MiB + UART0 / CLINT / PLIC / GPIO）· `minimal`（演示用，`auto_selectable: false` ⇒ **只能被显式指定**） |
+| **自动选档** | 按镜像**实际用到的地址**挑描述（**区间在外层** · 候选按 `priority` 小者优先）⇒ 与历史行为**逐字等价**（六条等价性用例钉住） |
+| **外设窗口大小** | **不写进描述** ⇒ 由器件自己报（`Peripheral::size()`）⇒ 只有一个真相源 |
+
 ### 工程规模
 
 | 项 | 数字 |
 | --- | --- |
-| 契约层 | 7 731 行 |
-| 仿真内核 | 52 466 行（含 16 个子模块 + 内核宿主装配层） |
-| 前端 | 15 373 行（`front/` 全量，含测试） |
-| 设计文档 | **46 篇**（26 篇 HTML + 20 篇 Markdown） |
-| 测试 | **1 292** 条 Rust（契约 lib 140 + 内核 lib 1 001 + 集成 134 + runner 17）+ **312** 条前端（57 suite） |
+| 契约层 | 9 329 行 |
+| 仿真内核 | 55 174 行（含 16 个子模块 + 内核宿主装配层） |
+| 前端 | 15 669 行（`front/` 全量，含测试） |
+| 设计文档 | **49 篇**（26 篇 HTML + 23 篇 Markdown） |
+| 测试 | **1 344** 条 Rust（契约 lib 167 + 内核 lib 1 018 + 集成 142 + runner 17）+ **312** 条前端（57 suite） |
 
 ---
 
@@ -115,7 +124,7 @@ node --version
 
 ```bash
 cargo build                                    # native
-cargo test --workspace --no-fail-fast --lib --tests   # 1 292 条
+cargo test --workspace --no-fail-fast --lib --tests   # 1 344 条
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
@@ -275,7 +284,7 @@ riscv-tests 语料 **68 例**（`rv32ui` 42 + `rv32mi` 13 + `rv32um` 8 + `rv32uc
 
 ```bash
 tools/golden-run.sh --self-check   # 变异金丝雀：两侧都必须报 FAIL 3
-tools/golden-run.sh --keep-going   # 全量 —— 67/67
+tools/golden-run.sh --keep-going   # 全量 —— 68/68
 ```
 
 ⚠️ 金丝雀只覆盖「判决运输路径」，**不证明成功路径有判别力** —— 判别力由**全量对拍**提供。
@@ -303,15 +312,15 @@ node tools/browser-verify.mjs
 
 ## 工程门禁
 
-八项门禁，**失败项数必须为 0**。
+九项门禁，**失败项数必须为 0**。
 
 | # | 门禁 | 覆盖 |
 | --- | --- | --- |
 | 1 | `cargo fmt --all -- --check` | 格式 |
 | 2 | `cargo clippy --workspace --all-targets -- -D warnings` | 静态检查 |
-| 3 | `cargo test --workspace --no-fail-fast --lib --tests` | **1 292** 条 Rust 用例 |
+| 3 | `cargo test --workspace --no-fail-fast --lib --tests` | **1 344** 条 Rust 用例 |
 | 4 | `tools/check-front.sh` | **312** 用例 / **57** suite（ESM 链接期错误只有它能抓） |
-| 5 | `tools/golden-run.sh --self-check` + `--keep-going` | 指令级判决（**67/67**） |
+| 5 | `tools/golden-run.sh --self-check` + `--keep-going` | 指令级判决（**68/68**） |
 | 6 | `tools/build-wasm.sh` + `node tools/wasm-smoke.mjs` | 真 WASM 产物的桥接冒烟 |
 | 7 | `node tools/browser-verify.mjs` | 真 Chrome 里的端到端断言 |
 | 8 | `tools/boot-osz.sh` | 真实 RTOS 与 Spike 逐字节对拍（**需仓外 osz ELF + 本机 Spike**，不进默认门禁） |
@@ -320,11 +329,18 @@ node tools/browser-verify.mjs
 
 ## 已知缺口
 
-**完整的欠账清单在 [`docs/reviews/REVIEWS.md`](./docs/reviews/REVIEWS.md)**（含每一条的实证依据、阻塞关系与闭环方式）。当前几条要紧的：
+**完整的欠账清单在 [`docs/reviews/REVIEWS.md`](./docs/reviews/REVIEWS.md)**（含每一条的实证依据、阻塞关系与闭环方式）。
+
+✅ **v0.27 批已闭环两条**：**D-123**（内存图通用化 A + B 两批 ⇒ **换一份内存图描述、宿主代码零改动**这条唯一判别式成立）· **D-82**（CLINT 固件侧 MMIO ⇒ 台账原文已被实测推翻 ⇒ 真实缺口只是「缺 guest 指令级端到端判别力」⇒ 已补 `crates/kernel/tests/d82_clint_end_to_end.rs`）。
+
+当前几条要紧的：
 
 | 欠账 | 说的是什么 |
 | --- | --- |
-| **D-123** | **内存图是宿主硬编码的两档**（换平台要改宿主代码）。根因是 **RAM 急分配**而不是内存图形状的必然 ⇒ 通用化按 **C 做法**：RAM 页级懒分配 + 内存图由工程/平台描述 + 区域按需增删。⚠️ **A 批已落地**（v0.26：4 KiB 页级懒分配 + 护栏改按物理占用量 + 快照只装写过的页 ⇒ QemuVirt 档空会话载荷从 **258.06 MiB** 降到 **< 1 MiB**）⇒ **B 批**（内存图由工程/平台描述）未做 |
+| **D-124** | 契约层**无 MemoryMap 命令与事件** ⇒ 前端拿不到**真实**内存图（描述只在内核与宿主内部流动）⇒ 前端的内存映射表仍是 mock 数据（⚠️ 裁决 I 故意裁剪：描述不进会话载荷、不升契约版本） |
+| **D-125** | 器件之间的**连线**仍写死在宿主 ⇒ **换平台改连线仍要改代码**（描述只覆盖「地址空间」那一半） |
+| **D-126** | 参考侧对拍脚本里三份**手抄地址副本**与描述要**手工对齐**（⚠️ 裁决 J 故意不动：那是「对齐 Spike」的职责） |
+| **D-127** | 契约层 `csr.rs` 的「三个空间」表格把 `irq_clear` 列在「internal **line**」一栏 ⇒ **与实现的位掩码语义不符** ⇒ 清线 3 该写 `8` 不是 `3` |
 | **D-94** | S 扩展 / PMP / 计数器缺失（工作量 ≈ 实现半个特权级） |
 | **D-114 / D-115** | M-17 `step_n` 的同形状活锁；watchdog 只做了「无进展检测」这一半 |
 | **M-21 / M-22 / M-23** | 日志、健康管理、持久化后端仍是 stub |
