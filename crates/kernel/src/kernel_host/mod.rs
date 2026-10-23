@@ -159,7 +159,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::rc::Rc;
-use std::time::Instant;
 
 use riscv_sim_contract::csr::IRQ_UART_RX_READY;
 use riscv_sim_contract::error::{
@@ -585,6 +584,11 @@ pub use watchdog::{
 /// 宿主内部的窗口判定结果（不是公开 API —— 见 [`watchdog::WindowVerdict`]）。
 use self::watchdog::WindowVerdict;
 
+/// 宿主单调时钟（v0.28 · D-115 的**修复**）—— **不能**直接用
+/// `std::time::Instant`：它在 `wasm32-unknown-unknown` 上会 **panic**
+/// ⇒ WASM 构建一启动就崩。详见 [`clock`] 模块。
+use self::clock::{HostClock, HostInstant};
+
 /// 会话标签（M-21 的 `session_id`）。
 ///
 /// ⚠️ **MVP 是单会话** ⇒ 恒为 `0`（规格 §2.8 裁决 J）—— 如实登记，不编造
@@ -787,7 +791,7 @@ pub struct KernelHost {
     /// 共用**同一个**状态（连续性是它存在的意义）。
     watchdog: HostWatchdog,
     /// 会话起点（宿主单调时钟的零点）—— M-21 / M-22 的 `time_host_ms` 口径。
-    started_at: Instant,
+    started_at: HostClock,
 }
 
 impl std::fmt::Debug for KernelHost {
@@ -893,7 +897,7 @@ impl KernelHost {
             hms,
             log_buffer,
             watchdog: HostWatchdog::new(),
-            started_at: Instant::now(),
+            started_at: HostClock::new(),
         };
         // The default memory map cannot fail on a fresh bus (the regions do
         // not overlap and are far below the per-region budget). If it ever
@@ -2127,9 +2131,9 @@ impl KernelHost {
             // ⇒ 正确形态：「chunk 停滞 ⇒ 记一次窗口 ⇒ `streak < 3` 就
             // **继续下一个 chunk**（`remaining` 不减，因为那一条没跑成）⇒
             // `streak >= 3` 才返回 `Err`」。
-            let started = Instant::now();
+            let started = HostInstant::now();
             let result = self.backend.step_n(chunk);
-            let elapsed_ms = started.elapsed().as_millis() as u64;
+            let elapsed_ms = started.elapsed_ms_since();
             let executed = match self.judge_window(elapsed_ms, &result) {
                 WindowVerdict::Completed { executed } => executed,
                 // ⚠️ **停滞（未达确认次数）⇒ 吞掉**并继续下一个 chunk ——
@@ -2196,11 +2200,11 @@ impl KernelHost {
             );
         }
         // ① 记起点（宿主单调时钟）
-        let started = Instant::now();
+        let started = HostInstant::now();
         // ② 跑引擎（一次调用 = 一个指令预算窗口）
         let result = self.backend.continue_until_event().map(|()| 0u32);
         // ③ 算耗时
-        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let elapsed_ms = started.elapsed_ms_since();
         // ④⑤⑥ 判定 + 喂给看门狗
         self.judge_window(elapsed_ms, &result)
     }
@@ -2299,7 +2303,7 @@ impl KernelHost {
 
     /// 宿主单调时间（毫秒）—— M-21 / M-22 的 `time_host_ms` 口径。
     fn host_now_ms(&self) -> u64 {
-        self.started_at.elapsed().as_millis() as u64
+        self.started_at.elapsed_ms()
     }
 
     /// 宿主请求暂停。
@@ -3356,6 +3360,16 @@ mod tests_platform;
 /// （[`HostWatchdog`]）是**纯逻辑** ⇒ 谁都能单独测它；而**接线**留在宿主
 /// 内部（裁决 F：看门狗**全在宿主侧**，M-12 零改动）。
 pub mod watchdog;
+
+/// 宿主单调时钟（v0.28 · D-115 的**修复**）。
+///
+/// ⚠️ **它是公开的**：native 与 `wasm32` 各有一份实现，**对外形状一样**
+/// ⇒ 调用方（看门狗 / M-21 / M-22）**不需要**知道自己在哪个 target 上。
+///
+/// ⚠️ **为什么要有它**：`std::time::Instant::now()` 在
+/// `wasm32-unknown-unknown` 上**直接 panic** ⇒ 宿主若直接用它，
+/// **WASM 构建一启动就崩**（实测 panic 落在 `KernelHost::with_description`）。
+pub mod clock;
 
 #[cfg(test)]
 mod tests_watchdog;
