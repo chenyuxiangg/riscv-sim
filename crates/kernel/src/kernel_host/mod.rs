@@ -159,10 +159,12 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::rc::Rc;
+use std::time::Instant;
 
 use riscv_sim_contract::csr::IRQ_UART_RX_READY;
 use riscv_sim_contract::error::{
-    ErrorFamily, PlatformError, E_PROTO_01_VERSION_MISMATCH, PROTO_FAMILY,
+    ErrorFamily, PlatformError, E_ENG_03_NO_PROGRESS, E_HMS_02_FATAL_TERMINATED,
+    E_PROTO_01_VERSION_MISMATCH, PROTO_FAMILY,
 };
 use riscv_sim_contract::model::{
     Edge, ImageKind, ImageRef, ImageSource, Project, TraceEvent, TraceFormat, TraceSource,
@@ -195,6 +197,8 @@ use crate::m17_backend::{SelfIssBackend, SharedInterruptPort};
 use crate::m18_probe::{ChannelDef, ChannelKind, ProbeRegistry, SampleCfg, CH_GPIO0, CH_IRQ_PULSE};
 use crate::m19_waveform::{ChannelMeta, ExportFilter, SharedPipeline, WaveformPipeline};
 use crate::m20_snapshot::SnapshotManager;
+use crate::m21_logging::{LogBuffer, LogEntry, LogLevel, LogQuery};
+use crate::m22_hms::{DegradeAction, Health, HealthSignal, Hms, SignalCtx, SignalKind, SignalSrc};
 
 /// GPIO 外设的基址（PL061 惯例）。
 ///
@@ -566,6 +570,27 @@ pub const MAX_WAVEFORM_EDGES_PER_EVENT: usize = 4096;
 /// 照旧可用。
 pub use crate::m17_backend::E_INT_01_CONTROLLER_BUSY;
 
+/// 宿主看门狗（v0.28 · 台账 **D-115** · 冻结规格 STAGE-13 §3.3）。
+///
+/// ⚠️ **定义在 [`watchdog`] 子模块**、这里**转出**：看门狗是**宿主侧**的
+/// 东西（裁决 F），但它的**判定**是纯函数 ⇒ 谁都能单独测它。
+///
+/// 一个常量 / 一个判定**只能有一份定义** —— 两处各写一个 `200`，将来漂移了
+/// 没人知道。
+pub use watchdog::{
+    classify_window, HostWatchdog, WindowOutcome, HOST_WATCHDOG_BUDGET_MS,
+    HOST_WATCHDOG_CONFIRMATIONS, WATCHDOG_ERR_CODE, WATCHDOG_LOG_CTX,
+};
+
+/// 宿主内部的窗口判定结果（不是公开 API —— 见 [`watchdog::WindowVerdict`]）。
+use self::watchdog::WindowVerdict;
+
+/// 会话标签（M-21 的 `session_id`）。
+///
+/// ⚠️ **MVP 是单会话** ⇒ 恒为 `0`（规格 §2.8 裁决 J）—— 如实登记，不编造
+/// 一个「看起来像多会话」的数字。
+const HOST_SESSION_ID: u32 = 0;
+
 /// 中断汇与 M-16 控制器之间的**共享状态**。
 ///
 /// ⚠️ **共享同一份**：[`HostSinks`]（引擎的 `InterruptSink`）与
@@ -746,6 +771,23 @@ pub struct KernelHost {
     /// ⚠️ **必须**及时把 UART 的字节取走（捕获环满了会丢最新的字节），
     /// 但前端不一定订阅了 console ⇒ 中间需要一个攒着的缓冲。
     console_backlog: Vec<u8>,
+    /// M-22 健康管理（v0.28 · 台账 **D-115**）—— 看门狗触发的**处置**走它。
+    ///
+    /// ⚠️ **不提供 `Clone`**（M-22 持有 trait object 字段）⇒ 宿主**持有**
+    /// 它，不复制它。
+    hms: Hms,
+    /// M-21 日志缓冲 —— 与 [`KernelHost::hms`] **共享同一份**。
+    ///
+    /// ⚠️ **一个真相**：`Hms::install_log_source` 收的是
+    /// `Rc<RefCell<LogBuffer>>`（形状与 M-18 的探针表同款）⇒ 宿主持有
+    /// `Rc`、把它**克隆**给 HMS ⇒ 管理员通道看到的日志关联与宿主记的日志
+    /// 是**同一条**。存两份 `LogBuffer` 就是两个真相。
+    log_buffer: Rc<RefCell<LogBuffer>>,
+    /// 宿主看门狗（v0.28 · **D-115**）—— 两条驱动路径（`StepN` / `Continue`）
+    /// 共用**同一个**状态（连续性是它存在的意义）。
+    watchdog: HostWatchdog,
+    /// 会话起点（宿主单调时钟的零点）—— M-21 / M-22 的 `time_host_ms` 口径。
+    started_at: Instant,
 }
 
 impl std::fmt::Debug for KernelHost {
@@ -765,6 +807,11 @@ impl std::fmt::Debug for KernelHost {
             .field("dwarf", &self.index.dwarf_status())
             .field("trace_len", &self.trace.len())
             .field("trace_dropped", &self.trace.dropped())
+            // v0.28 · D-115：看门狗与健康状态是「会话里发生了什么」的
+            // 一部分 ⇒ 日志行要看得见（否则「内核为什么停了」查不出来）。
+            .field("watchdog_streak", &self.watchdog.streak())
+            .field("watchdog_fired", &self.watchdog.fired())
+            .field("health", &self.hms.state())
             .finish()
     }
 }
@@ -800,6 +847,15 @@ impl KernelHost {
             events: Rc::new(RefCell::new(Vec::new())),
             intc: Rc::clone(&intc),
         };
+        // ⚠️ **M-21 与 M-22 共享同一份日志缓冲**（v0.28 · D-115）：
+        // 宿主持有 `Rc`、把它**克隆**给 HMS ⇒ 管理员通道的「日志关联」
+        // 与宿主记的日志是同一条 ⇒ 两份缓冲就是两个真相。
+        //
+        // ⚠️ **角色默认 `Product`**（规格 §2.8 裁决 J）⇒ 产品 / 嵌入式
+        // 角色**看不见**原始日志（角色边界）。
+        let log_buffer = Rc::new(RefCell::new(LogBuffer::new(HOST_SESSION_ID)));
+        let mut hms = Hms::new();
+        hms.install_log_source(Rc::clone(&log_buffer));
         let mut host = Self {
             backend: SelfIssBackend::new(sinks.clone(), sinks.clone()),
             sinks,
@@ -834,6 +890,10 @@ impl KernelHost {
             clint: None,
             plic: None,
             console_backlog: Vec::new(),
+            hms,
+            log_buffer,
+            watchdog: HostWatchdog::new(),
+            started_at: Instant::now(),
         };
         // The default memory map cannot fail on a fresh bus (the regions do
         // not overlap and are far below the per-region budget). If it ever
@@ -1974,7 +2034,11 @@ impl KernelHost {
         // 「按指令跑」与「按时间跑」不会各自长出一套 ISS 逻辑（D-07）。
         let run = match steps {
             Some(n) => self.step_in_chunks(n),
-            None => self.backend.continue_until_event(),
+            // ⚠️ **`Continue` 分支就是看门狗的接线落点**（规格 §3.3）：
+            // 一次 `continue_until_event` = **一个**检查窗口 ⇒ 停滞时
+            // **不立即上抛**，而是**记一次窗口** ⇒ 连续三个窗口无进展才触发
+            // 处置（裁决 G）。
+            None => self.run_continue_windows(),
         };
         match run {
             Ok(()) => {}
@@ -2047,10 +2111,38 @@ impl KernelHost {
     /// ⚠️ **语义不变**：仍然「恰好 n 条」——中途撞上断点 / 观察点 / 陷阱 /
     /// 暂停就**停在那里**，剩下的**不**跑（与一次性 `step_n(n)` 一致）。
     fn step_in_chunks(&mut self, n: u32) -> Result<(), PlatformError> {
+        // ⚠️ **幂等**：内核已被看门狗终止 ⇒ 不再跑（规格 §3.3 的处置
+        // 第 ④ 步之后，内核就是死的）。
+        if self.watchdog.fired() {
+            return Err(self.terminated_error("内核已被看门狗终止，不再接受新的运行"));
+        }
         let mut remaining = n;
         while remaining > 0 {
             let chunk = remaining.min(DEFAULT_INSTRUCTION_BUDGET);
-            let executed = self.backend.step_n(chunk)?;
+            // ⚠️ **看门狗判定必须落在它自己的 `while remaining > 0` 循环体内**
+            // （规格 §3.3「接线落点的精确位置」）：现有实现是
+            // `let executed = self.backend.step_n(chunk)?;` ⇒ chunk 一旦停滞
+            // 就**当场 `?` 上抛**、循环直接退出 ⇒ **三次确认在循环外根本
+            // 攒不起来**。
+            // ⇒ 正确形态：「chunk 停滞 ⇒ 记一次窗口 ⇒ `streak < 3` 就
+            // **继续下一个 chunk**（`remaining` 不减，因为那一条没跑成）⇒
+            // `streak >= 3` 才返回 `Err`」。
+            let started = Instant::now();
+            let result = self.backend.step_n(chunk);
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            let executed = match self.judge_window(elapsed_ms, &result) {
+                WindowVerdict::Completed { executed } => executed,
+                // ⚠️ **停滞（未达确认次数）⇒ 吞掉**并继续下一个 chunk ——
+                // `remaining` **不减**（那一条指令没跑成，算不上进度）。
+                WindowVerdict::Stalled => {
+                    // ⚠️ **块间转移照样要做**（D-51：drain 与转移必须同时发生）
+                    // ⇒ 停滞的批次也不能让 M-18 的环涨起来。
+                    self.transfer_trace();
+                    continue;
+                }
+                // 看门狗触发（处置已做）⇒ 上抛；别的错误 ⇒ 照旧上抛。
+                WindowVerdict::Fired(err) | WindowVerdict::Failed(err) => return Err(err),
+            };
             remaining -= executed;
             // ⚠️ **块没跑满 ⇒ 提前停**（停止条件命中）⇒ 剩下的**不**再跑。
             if executed < chunk {
@@ -2061,6 +2153,153 @@ impl KernelHost {
             self.transfer_trace();
         }
         Ok(())
+    }
+
+    /// `Continue` 的驱动循环 —— **每个窗口一次 `continue_until_event`**。
+    ///
+    /// ⚠️ **接线落点**（规格 §3.3）：`on_run` 的 `Continue` 分支。一次
+    /// `continue_until_event` = 引擎跑满一个指令预算窗口 = **一个窗口**。
+    ///
+    /// ⚠️ **停滞不立即上抛**（裁决 G）：第 1、2 个窗口的停滞被**吞掉**，
+    /// 宿主**重入引擎**继续跑；第 3 个窗口才触发处置并上抛。
+    ///
+    /// ⚠️ **重入是安全的**：M-12 的守卫触发时只是 `return Err`，**不改任何
+    /// 引擎状态**（不推进虚拟时间、不改寄存器、不动事件队列的游标）⇒ 宿主
+    /// 再次调 `run_until` 得到**相同**的引擎快照（验收 **D-7**）。
+    ///
+    /// ⚠️ **实际空转 3 × `NO_PROGRESS_WINDOW` 次**：M-12 的 `no_progress` 是
+    /// `run_until` 的**局部变量** ⇒ **每次重入都从 0 重新计数** ⇒ 三次确认
+    /// 实际空转的是 3 × 1024 次，**不是** 1024 次（否则后来人会以为
+    /// 「1024 次就停」）。
+    fn run_continue_windows(&mut self) -> Result<(), PlatformError> {
+        loop {
+            match self.observe_continue_window() {
+                WindowVerdict::Completed { .. } => return Ok(()),
+                // 第 1、2 个窗口：吞掉停滞 ⇒ **重入引擎**再跑一个窗口。
+                WindowVerdict::Stalled => continue,
+                // 看门狗触发（处置已做）⇒ 上抛终止错误。
+                WindowVerdict::Fired(err) => return Err(err),
+                // 别的错误（不是活锁）⇒ 照旧上抛。
+                WindowVerdict::Failed(err) => return Err(err),
+            }
+        }
+    }
+
+    /// 跑**一个**检查窗口（时间驱动）并判定（规格 §3.3 的六步）。
+    fn observe_continue_window(&mut self) -> WindowVerdict {
+        // ⚠️ **幂等**：看门狗已经触发过 ⇒ 内核已被终止 ⇒ **不再跑引擎**。
+        // （否则死循环：引擎仍然是死的，而 `observe` 不会再返回 `true` ⇒
+        // 停滞永远被吞掉 ⇒ 永远重入。）
+        if self.watchdog.fired() {
+            return WindowVerdict::Fired(
+                self.terminated_error("内核已被看门狗终止，不再接受新的运行"),
+            );
+        }
+        // ① 记起点（宿主单调时钟）
+        let started = Instant::now();
+        // ② 跑引擎（一次调用 = 一个指令预算窗口）
+        let result = self.backend.continue_until_event().map(|()| 0u32);
+        // ③ 算耗时
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        // ④⑤⑥ 判定 + 喂给看门狗
+        self.judge_window(elapsed_ms, &result)
+    }
+
+    /// 把**一个窗口**的结果喂给看门狗（规格 §3.3 的第 ④⑤⑥ 步）。
+    ///
+    /// ⚠️ **只认一个码**：`stalled` 要求 family == `Engine` **且** scenario ==
+    /// `E_ENG-03` —— 别的错误**不是**活锁（它们照旧上抛）。
+    fn judge_window(
+        &mut self,
+        elapsed_ms: u64,
+        result: &Result<u32, PlatformError>,
+    ) -> WindowVerdict {
+        // ④ `stalled` = 该批次返回 `Err` **且** family == Engine **且**
+        //    scenario == E_ENG_03。
+        let stalled = match result {
+            Err(err) => err.family == ErrorFamily::Engine && err.scenario == E_ENG_03_NO_PROGRESS,
+            Ok(_) => false,
+        };
+        // ⑤ 窗口判定（**纯函数** ⇒ 不依赖真实时钟 ⇒ 可单测）
+        let outcome = classify_window(elapsed_ms, stalled);
+        // ⑥ 喂给看门狗 ⇒ 返回 `true` 表示**本次触发了**
+        if self.watchdog.observe(outcome) {
+            let err = self.handle_watchdog_trigger(elapsed_ms, stalled);
+            return WindowVerdict::Fired(err);
+        }
+        match result {
+            Ok(executed) => WindowVerdict::Completed {
+                executed: *executed,
+            },
+            // 停滞但**未达**确认次数 ⇒ 吞掉这个错误（宿主继续跑）。
+            Err(_) if stalled => WindowVerdict::Stalled,
+            // 别的错误 ⇒ 照旧上抛。
+            Err(err) => WindowVerdict::Failed(err.clone()),
+        }
+    }
+
+    /// 看门狗触发后的**处置**（顺序固定 · 规格 §3.3）。
+    ///
+    /// 1. 上报健康信号（M-22）⇒ `classify` 判成 `Severity::Fatal` ⇒
+    ///    `Health::Critical`；
+    /// 2. 记**一条** M-21 日志（`ctx = "ENG-WATCHDOG"`）；
+    /// 3. 置幂等标志（`mark_watchdog_fired`）；
+    /// 4. 降级：`DegradeAction::Terminate` ⇒ 终止内核。
+    ///
+    /// ⚠️ **场景码分工**（规格 §8.1）：`E_HMS_01_DEGRADE_FAILED` 由 **M-22**
+    /// 上报；**`E_HMS_02_FATAL_TERMINATED` 由宿主（这里）上报** ⇒ 前端据此
+    /// 区分「内核被终止」与「普通错误」。
+    fn handle_watchdog_trigger(&mut self, elapsed_ms: u64, stalled: bool) -> PlatformError {
+        let now_ps = self.backend.engine().now_ps();
+        let t_host_ms = self.host_now_ms();
+        let streak = self.watchdog.streak();
+        // ① 健康信号（**先分级再入流** ⇒ 流里存的是 `Severity::Fatal`）。
+        //    ⚠️ `err_code` 用**引擎侧**的停滞码（`E_ENG-03`）—— 那是让宿主
+        //    判定「停滞」的那个码；HMS 自己的终止码是 `E_HMS-02`（下面报）。
+        self.hms.report(HealthSignal {
+            src: SignalSrc::Engine,
+            kind: SignalKind::Watchdog,
+            ctx: SignalCtx::GuestRun,
+            err_code: Some(WATCHDOG_ERR_CODE.to_string()),
+            t_virt_ps: now_ps,
+            t_host_ms,
+        });
+        // ② M-21 环里一条 `WATCHDOG` 日志（`ctx` 12 字节 / `err_code` 9 字节
+        //    ⇒ 都在 M-21 的上限内 ⇒ **不会被截断**）。
+        let msg = format!("看门狗触发：连续 {streak} 个检查窗口无进展，已终止内核");
+        self.log_buffer.borrow_mut().log(
+            LogLevel::Error,
+            WATCHDOG_LOG_CTX,
+            &msg,
+            WATCHDOG_ERR_CODE,
+            now_ps,
+            t_host_ms,
+        );
+        // ③ 幂等标志（一次运行只处置一次）。
+        self.hms.mark_watchdog_fired();
+        // ④ 降级：终止内核（M-22 置 `terminated` ⇒ 宿主据此停止接受新动作）。
+        let _outcome = self.hms.degrade(DegradeAction::Terminate);
+        // ⑤ 上报终止错误（由**宿主**上报 —— 见上面的场景码分工）。
+        let detail = if stalled {
+            format!("{msg}（停滞场景码 {WATCHDOG_ERR_CODE}）")
+        } else {
+            format!("{msg}（宿主时间超窗：本窗口 {elapsed_ms} ms > {HOST_WATCHDOG_BUDGET_MS} ms）")
+        };
+        self.terminated_error(&detail)
+    }
+
+    /// 看门狗终止错误（**唯一**的构造落点 · 规格 §8.1）。
+    fn terminated_error(&self, detail: &str) -> PlatformError {
+        PlatformError::new(
+            ErrorFamily::Health,
+            E_HMS_02_FATAL_TERMINATED,
+            detail.to_string(),
+        )
+    }
+
+    /// 宿主单调时间（毫秒）—— M-21 / M-22 的 `time_host_ms` 口径。
+    fn host_now_ms(&self) -> u64 {
+        self.started_at.elapsed().as_millis() as u64
     }
 
     /// 宿主请求暂停。
@@ -2641,6 +2880,31 @@ impl KernelHost {
         self.backend.engine().now_ps()
     }
 
+    /// 整体健康状态（M-22 派生 · v0.28 · D-115）。
+    ///
+    /// ⚠️ **派生**语义：有 FATAL 信号 ⇒ `Critical`；只有 CRITICAL / WARNING
+    /// ⇒ `Degraded`；否则 `Ok` ⇒ **只降不升**。
+    pub fn health(&self) -> Health {
+        self.hms.state()
+    }
+
+    /// 看门狗是否已经触发过（幂等标志 · M-22）。
+    pub fn watchdog_fired(&self) -> bool {
+        self.hms.watchdog_fired()
+    }
+
+    /// M-21 日志环的快照（管理员通道的读出口 · v0.28 · D-115）。
+    ///
+    /// ⚠️ **纯读**：不改缓冲、不动计数。
+    /// ⚠️ 借不到缓冲（别处正持有着可变借用）⇒ **退化成空列表**而不是
+    /// panic —— 诊断路径不该把内核打挂。
+    pub fn log_entries(&self) -> Vec<LogEntry> {
+        self.log_buffer
+            .try_borrow()
+            .map(|buffer| buffer.query(&LogQuery::default()))
+            .unwrap_or_default()
+    }
+
     /// 事件队列里**待处理**的事件数（D-07）。
     ///
     /// 时间驱动链路的心跳：跑过一轮之后，队列里应当留着一件待派发的
@@ -3085,6 +3349,16 @@ mod tests_v024;
 
 #[cfg(test)]
 mod tests_platform;
+
+/// 宿主看门狗（v0.28 · 台账 **D-115** · 冻结规格 STAGE-13 §3.3）。
+///
+/// ⚠️ **它是公开的**：判定（[`classify_window`]）与状态机
+/// （[`HostWatchdog`]）是**纯逻辑** ⇒ 谁都能单独测它；而**接线**留在宿主
+/// 内部（裁决 F：看门狗**全在宿主侧**，M-12 零改动）。
+pub mod watchdog;
+
+#[cfg(test)]
+mod tests_watchdog;
 
 /// 平台描述的加载 · 器件工厂 · 建图（v0.27 · D-123-B）。
 ///
