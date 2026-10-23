@@ -147,7 +147,7 @@ pub struct RamBackend {
 **C-2 内容**：`export_pages`（`m14_bus/mod.rs:1182`）⇒ **只导出已物化的页**：
 
 - 条目 = 已物化的页，一页一条；
-- `base` = `region.base + 页号 × 4096` ⇒ **页对齐**；
+- `base` = `region.base + 页号 × 4096` ⇒ **落在该 region 的页网格上**（region 的 base 4096 对齐时就是绝对 4096 对齐）；
 - `bytes` = 该页在 region 内的**有效字节**（`min(4096, region.size - 页内偏移)`）⇒ **不补齐到页边界**（沿用契约层 `MemPageDto` 的既有约定，见 `crates/contract/src/session.rs:154`）。
 
 ⇒ **契约层 `MemPageDto` 的形状不变**（`{ base: u32, bytes: Vec<u8> }`）⇒ **只有语义变** ⇒ 这正是必须升 schema 的理由。
@@ -155,7 +155,10 @@ pub struct RamBackend {
 **C-3 还原**：`load_pages`（`m14_bus/mod.rs:1223`）⇒
 
 - **两阶段保留**（先全量只读校验，全过才写一个字节）⇒ 校验不过 ⇒ RAM **原封不动**（STAGE-3 §5 的不变式）；
-- 新增**页对齐校验**：页的 `base` 必须是 4096 的倍数 ⇒ 不对齐 ⇒ `E_BUS-11_PAGE_OUTSIDE_RAM`；
+- 新增**页网格对齐校验**：页必须落在**它所属 region 的页网格**上 ⇒ `page.base % 4096 == region.base % 4096` ⇒ 不对齐 ⇒ `E_BUS-11_PAGE_OUTSIDE_RAM`；
+  - ⚠️ **为什么不是「`base % 4096 == 0`」**：导出的一页是 **region 相对**的一页（`base = region.base + 页号 × 4096`）⇒ 若 region 的 base 本身不 4096 对齐，导出的 base 也不会对齐 ⇒ 用绝对对齐判会把**自己导出的东西**判成非法 ⇒ **往返就断了**。
+  - ⚠️ **宿主今天用的 base 全部 4096 对齐**（`0x0` · `0x8000_0000` · `QEMU_VIRT_RAM_BASE + i × 16 MiB`）⇒ 在这些 region 上，本规则**退化成**「`base % 4096 == 0`」⇒ 与「绝对对齐」**等价**。
+  - ⚠️ **契约层不要求对齐**（它只要求「页升序、不重叠、落在某个 RAM 区域内」）⇒ 本规则是 **M-14 自己的**规则 ⇒ 两层**不冲突**；
 - 写入时**按需物化**页（还原出来的页**就是**被写过的页）⇒ 还原后的物理占用 = 载荷里页数 × 4096；
 - ⚠️ **还原也要过护栏** ⇒ 一个 region 的物理占用超过 cap ⇒ `E_BUS-09` ⇒ **还原失败**。这是**预期行为**（宿主预算不够就不还原），不是缺陷。
 
@@ -246,7 +249,7 @@ pub struct RamBackend {
       > ⇒ 「护栏只能放宽、不能去掉」**可证**。
 - [ ] **A-6** 单个 region 的**声明**大小可 > 16 MiB：`map_ram(base, 128 MiB, &[])` **成功**且**零物化页**
 - [ ] **A-7** **非 RAM** 的护栏行为**逐条不变**：`map_rom(base, 32 MiB, …)` ⇒ **`E_BUS-09`**；**外设窗口**超 cap ⇒ **`E_BUS-09`**（既有断言 `the_cap_also_guards_the_peripheral_window` **一条不许删**）
-- [ ] **A-8** `export_pages` 只导出**写过的页**：写 1 页 ⇒ 恰好 1 条、`base` **页对齐**、`bytes.len() == 4096`；不写 ⇒ **0 条**
+- [ ] **A-8** `export_pages` 只导出**写过的页**：写 1 页 ⇒ 恰好 1 条、`base` **落在 region 的页网格上**、`bytes.len() == 4096`；不写 ⇒ **0 条**
 - [ ] **A-9** `load_pages` 仍是**两阶段**：一个越界页 ⇒ **整批拒收**且 RAM **原封不动**
 - [ ] **A-10** **D-13**：`Region` / `RamBackend` / `RomBackend` 的字段**不再是 `pub`**
       > 用**源码级**守卫断言（扫源码文本），不是「编译不过」这种间接证据。
