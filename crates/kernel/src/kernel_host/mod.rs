@@ -342,10 +342,30 @@ pub const QEMU_VIRT_RAM_BASE: u32 = 0x8000_0000;
 /// ⇒ 堆尾是 `0x8800_0000` 附近 ⇒ **必须**真的映射到那里。
 pub const QEMU_VIRT_RAM_SIZE: u32 = 0x0800_0000;
 
-/// 单个 RAM 区域的大小（16 MiB）。
+/// QEMU virt 档的**每区域护栏预算**（v0.26 · STAGE-11 裁决 B / G）。
 ///
-/// ⚠️ M-14 的**每区域**上限是 `DEFAULT_MAX_REGION_BYTES`（16 MiB，D-10）
-/// ⇒ 128 MiB **必须**拆成 8 个区域，不能当成一个大区域映射。
+/// ⚠️ **为什么它必须存在**：M-14 的 `max_region_bytes`（D-10 的防 OOM
+/// 护栏）**默认**是 16 MiB ⇒ 声明一段 128 MiB 的 RAM 会被**挡下**
+/// （`E_BUS-09`）⇒ 宿主必须**按自己的内存图**把预算抬到它声明的大小。
+///
+/// ⚠️ **它不是「护栏没了」**：护栏**还在**、**没被删**，只是它的**数值**
+/// 由宿主的内存图决定（`Bus::with_max_region_bytes` / `set_max_region_bytes`
+/// 的文档一直写着「use this constructor only when the host has its own
+/// budget policy」——这句话在 v0.26 之后**才真正成立**）。
+///
+/// ⚠️ **Default 档不抬**：它那两段 RAM 只有 1 MiB / 4 MiB ⇒ 保持默认的
+/// 16 MiB ⇒ 护栏在默认档上**一字未变**。
+pub const QEMU_VIRT_MAX_REGION_BYTES: u64 = QEMU_VIRT_RAM_SIZE as u64;
+
+/// ⚠️ **已退役**（v0.26 · STAGE-11 裁决 G）：单个 RAM 区域的大小（16 MiB）。
+///
+/// ⚠️ **为什么退役**：它存在**只因为** M-14 的每区域上限是 16 MiB ⇒
+/// 128 MiB **必须**拆成 8 个区域。v0.26 之后 QEMU virt 档是**一个**
+/// 128 MiB 的区域 ⇒ 这个数**不再**是「一个区域的大小」⇒ 留着它就是
+/// 留一个**陷阱**（谁再拿它去映射就又回到 8 段）。
+///
+/// ⚠️ **保留而不删**：它是 `pub` 常量（crate 的公开 API）⇒ 删掉是破坏性
+/// 变更 ⇒ 这里只**标退役**并说明**为什么**。
 pub const QEMU_VIRT_RAM_REGION: u32 = 0x0100_0000;
 
 /// QEMU virt 的时钟频率（**10 MHz**）。
@@ -381,10 +401,17 @@ pub const UART0_BAUD_RATE: u32 = 115_200;
 
 /// 宿主的**内存图档位**。
 ///
-/// ⚠️ **为什么不是一档**：QEMU virt 档要真的分配 **128 MiB** 物理内存
-/// （M-14 的 `map_ram` 用 `vec![0u8; size]`）⇒ 每个宿主实例都吃 128 MiB。
-/// 而本仓有上千条用例、每条都可能造一个宿主 ⇒ 默认档铺满会直接吃掉
-/// 几个 GiB、测试跑不动。
+/// ⚠️ **为什么不是一档**：QEMU virt 档要铺 **128 MiB** 的地址空间
+/// ⇒ 每个宿主实例都要**登记**那么大一段。
+///
+/// ⚠️ **v0.26 · STAGE-11 裁决 A 之后登记成本 ≈ 0**：M-14 的 RAM 改成
+/// **页级懒分配**（4 KiB 页、**写时**分配、读没写过的页回 0）⇒ 登记
+/// 一段 128 MiB 的 region **不占物理内存** ⇒ 「默认档不铺 128 MiB」现在
+/// 是为了**少造一条总线**，不再是为了**省内存**。
+///
+/// ⚠️ 在裁决 A 落地**之前**（旧 M-14 的 `map_ram` 用 `vec![0u8; size]`）
+/// 那 128 MiB 是**真的**物理内存 ⇒ 本仓有上千条用例、每条都可能造一个
+/// 宿主 ⇒ 默认档铺满会直接吃掉几个 GiB、测试跑不动 ⇒ 两档的分工保留。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MemoryProfile {
     /// 默认档：低段 1 MiB + 高段 4 MiB RAM + 一个 GPIO 外设。
@@ -745,10 +772,14 @@ impl KernelHost {
 
     /// 创建一个**指定内存图档位**的会话。
     ///
-    /// ⚠️ **默认档不铺 128 MiB** —— 那 128 MiB 是**真的**物理内存
-    /// （M-14 的 `map_ram` 用 `vec![0u8; size]`）⇒ 每个宿主实例都吃
-    /// 128 MiB。headless 跑真实 RTOS 时显式用
-    /// [`MemoryProfile::QemuVirt`]。
+    /// ⚠️ **默认档不铺 128 MiB** —— QEMU virt 档要铺的那 128 MiB 在
+    /// **裁决 A 落地之前**是**真的**物理内存（旧 M-14 的 `map_ram` 用
+    /// `vec![0u8; size]`）⇒ 每个宿主实例都吃 128 MiB。headless 跑真实
+    /// RTOS 时显式用 [`MemoryProfile::QemuVirt`]。
+    ///
+    /// ⚠️ **裁决 A 之后**（RAM 改页级懒分配）那 128 MiB 的**登记成本
+    /// ≈ 0**（只有写过的页才占物理内存）⇒ 两档的分工保留是为了**少造
+    /// 一条总线**，不再是为了省内存。
     pub fn new_with_profile(profile: MemoryProfile) -> Self {
         let mut host = Self::new();
         if profile == MemoryProfile::Default {
@@ -782,21 +813,40 @@ impl KernelHost {
         // 而下面要把新外设的句柄写回 `self` 的字段 —— 两个借用不能重叠。
         let (uart0, clint, plic) = {
             let bus = self.backend.bus_mut();
+            // ⚠️ **护栏预算是宿主策略**（v0.26 · STAGE-11 裁决 B / G）：
+            // M-14 的 `max_region_bytes` 是**每区域**的上限，**默认**是
+            // 16 MiB（D-10 的防 OOM 护栏）⇒ 宿主必须**按自己的内存图**
+            // 决定这个预算，否则「声明一段 128 MiB」会被 16 MiB 的默认值
+            // 挡下（`E_BUS-09`）。
+            //
+            // ⚠️ **Default 档保持默认 16 MiB**（它那两段 RAM 只有 1 MiB /
+            // 4 MiB，远低于上限）⇒ 护栏**没被削弱**，只是**按档位**取值。
+            let region_budget = match profile {
+                MemoryProfile::Default => crate::m14_bus::DEFAULT_MAX_REGION_BYTES,
+                MemoryProfile::QemuVirt => QEMU_VIRT_MAX_REGION_BYTES,
+            };
+            bus.set_max_region_bytes(region_budget);
             bus.map_ram(DEFAULT_RAM_LOW_BASE, DEFAULT_RAM_LOW_SIZE, &[])?;
             match profile {
                 MemoryProfile::Default => {
                     bus.map_ram(DEFAULT_RAM_HIGH_BASE, DEFAULT_RAM_HIGH_SIZE, &[])?;
                 }
                 MemoryProfile::QemuVirt => {
-                    // 128 MiB 拆成 8 个 16 MiB 的区域（M-14 的每区域上限）。
+                    // ⚠️ **v0.26 · STAGE-11 裁决 G**：**一个** 128 MiB 的
+                    // RAM 区域（不是 8 个 16 MiB 的）。
                     //
-                    // ⚠️ 拆的是**地址连续**的 8 段 —— guest 看到的是一段
-                    // 连续地址空间，平台看到的是 8 个独立区域。
-                    let regions = QEMU_VIRT_RAM_SIZE / QEMU_VIRT_RAM_REGION;
-                    for i in 0..regions {
-                        let base = QEMU_VIRT_RAM_BASE + i * QEMU_VIRT_RAM_REGION;
-                        bus.map_ram(base, QEMU_VIRT_RAM_REGION, &[])?;
-                    }
+                    // ⚠️ **guest 看到的地址空间不变**：0x8000_0000 起**连续**
+                    // 128 MiB —— osz 的链接脚本要 `ITCM(0x8000_0000,60M)` /
+                    // `INIT(0x83C0_0000,4M)` / `DTCM(0x8400_0000,64M)` ⇒
+                    // 1 个区域与 8 个**连续**区域覆盖**同一段**地址 ⇒
+                    // 访客**看不出区别**（参考侧 Spike 用的是
+                    // `-m2147479552:4096,2147483648:134217728` ⇒ 同样是
+                    // 128 MiB 连续 ⇒ 两侧**本来就**一致 ⇒ 改完**仍然**
+                    // 一致）。
+                    //
+                    // ⚠️ **区域数 13 → 6**（1 低段 + 1 高段 + GPIO + UART
+                    // + CLINT + PLIC）。
+                    bus.map_ram(QEMU_VIRT_RAM_BASE, QEMU_VIRT_RAM_SIZE, &[])?;
                 }
             }
             // GPIO 外设（D-46）：**没有外设就没有信号可观察**——波形管道

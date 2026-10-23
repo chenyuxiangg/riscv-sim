@@ -160,28 +160,46 @@ fn the_qemu_virt_profile_maps_the_whole_128_mib_and_the_three_devices() {
             .is_some(),
         "128 MiB 的最后 4 字节必须被映射 —— osz 的堆尾在那儿"
     );
-    // ⚠️ 128 MiB **必须**拆成 8 个 ≤16 MiB 的区域（M-14 的每区域上限）。
-    let regions_in_window = host
-        .bus()
-        .regions()
-        .filter(|(base, _)| {
-            // ⚠️ `filter` 给的是 `&Item` ⇒ `base` 是 `&&u32` ⇒ 要解**两**层。
-            **base >= QEMU_VIRT_RAM_BASE && **base < QEMU_VIRT_RAM_BASE + QEMU_VIRT_RAM_SIZE
+    // ⚠️ **v0.26 · STAGE-11 裁决 G**：128 MiB 现在是**一个**区域（不是 8 个
+    // 16 MiB 的）。
+    //
+    // ⚠️ **为什么不再拆**：旧 M-14 的每区域上限按**声明大小**卡（16 MiB）
+    // ⇒ 128 MiB 只能拆成 8 段；新 M-14 按**物理占用**卡 ⇒ 一个 128 MiB
+    // 的 region **登记成本 ≈ 0**（只有写过的页才占物理内存）⇒ 不需要拆。
+    //
+    // ⚠️ **走 `export_map()` 而不是 `bus().regions()`**：M-14 的 `Region`
+    // 字段在 D-13（裁决 D）之后是**私有**的 ⇒ 断言必须落在契约层的
+    // `RegionDto` 上（`base` / `size` / `kind` / `target` 是 `pub`）⇒
+    // 这个改法在**旧 M-14 与新 M-14 两棵树里都成立**。
+    let map = host.bus().export_map();
+    let ram_in_window: Vec<_> = map
+        .regions
+        .iter()
+        .filter(|r| {
+            r.kind == "ram"
+                && r.base >= QEMU_VIRT_RAM_BASE
+                && r.base < QEMU_VIRT_RAM_BASE + QEMU_VIRT_RAM_SIZE
         })
-        .count();
+        .collect();
     assert_eq!(
-        regions_in_window, 8,
-        "128 MiB 必须是 8 个 16 MiB 的区域（M-14 的每区域上限是 16 MiB）"
+        ram_in_window.len(),
+        1,
+        "128 MiB 必须是**一个** RAM 区域（v0.26 之前是 8 个 16 MiB 的），实际是 {:#?}",
+        ram_in_window
     );
-    for (base, region) in host.bus().regions() {
-        if *base >= QEMU_VIRT_RAM_BASE && *base < QEMU_VIRT_RAM_BASE + QEMU_VIRT_RAM_SIZE {
-            assert!(
-                region.size <= 16 * 1024 * 1024,
-                "区域 0x{base:08x} 有 {} 字节，超过 16 MiB 的每区域上限",
-                region.size
-            );
-        }
+    for r in &ram_in_window {
+        assert_eq!(
+            r.size,
+            128 * 1024 * 1024,
+            "QemuVirt 的 RAM 必须是**一个** 128 MiB 的区域，0x{:08x} 那个却只有 {} 字节",
+            r.base,
+            r.size
+        );
     }
+    assert_eq!(
+        ram_in_window[0].base, QEMU_VIRT_RAM_BASE,
+        "那一个 RAM 区域必须从 0x8000_0000 起（guest 看到的地址空间不变）"
+    );
 
     // 三个 QEMU virt 外设。
     assert!(host.bus().lookup(QEMU_VIRT_UART0_BASE).is_some(), "UART0");

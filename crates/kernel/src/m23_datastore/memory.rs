@@ -146,6 +146,10 @@ mod tests {
                 uarts: vec![riscv_sim_contract::session::UartStateDto {
                     id: "UART0".to_string(),
                     tx: Some(0x41),
+                    // ⚠️ `tx` 是**队头**，`tx_ring` 是**全部**待取字节
+                    // （v0.26 · STAGE-11 裁决 E）—— 两者必须一致。
+                    tx_ring: vec![0x41],
+                    tx_dropped: 0,
                     rx: None,
                     status: 0,
                     irq_line: 1,
