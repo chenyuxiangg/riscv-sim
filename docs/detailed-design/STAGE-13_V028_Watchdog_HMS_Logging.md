@@ -786,10 +786,23 @@ impl HostWatchdog {
   2. 记 **一条** M-21 日志：`level = Error`、`ctx = "ENG-WATCHDOG"`、
      `err_code = Some("E_ENG-03")`、`msg` 说明「第 N 个窗口无进展，已终止」；
   3. `hms.mark_watchdog_fired()` ⇒ 幂等；
-  4. `hms.degrade(DegradeAction::Terminate)` ⇒ 终止内核。
+  4. `hms.degrade(DegradeAction::Terminate)` ⇒ 终止内核；
+  5. **上抛终止错误**给调用方（族 `Health` / 场景码 `E_HMS_02_FATAL_TERMINATED`）
+     ⇒ 见下面「错误传播」。
 * **错误传播**：
   * 第 1、2 个窗口的停滞 **不**上抛 ⇒ 宿主**继续**跑（这正是「三次确认」的意义）；
-  * 第 3 个窗口 ⇒ 停滞错误**上抛**给调用方（`Err(E_ENG_03)`）⇒ 一次运行只报一次。
+  * 第 3 个窗口 ⇒ 处置做完 ⇒ 上抛**终止错误**给调用方 ⇒ 一次运行只报一次。
+  * ⚠️ **上抛的码是 `E_HMS_02_FATAL_TERMINATED`（族 `Health`），不是 `E_ENG_03`**
+    —— **这是第八次订正**：§3.3 原文写的是「`Err(E_ENG_03)`」，与 §8.1 的
+    「两个场景码的分工（**第五次订正**的裁定）」**冲突** ⇒ **以 §8.1 为准**
+    （它是**较晚**的裁定；且 D-115 的台账原文要的是「**报 HMS**」⇒
+    上报口就是 HMS 侧那个码）。
+    ⇒ **理由**：宿主层的事实是「**内核被终止了**」⇒ 前端据此区分「内核被终止」
+    与「普通错误」；若上抛 `E_ENG_03`，前端拿到的是**引擎内部**的停滞码 ⇒
+    分不清「停滞**已被处置**」还是「停滞**正在**上报」。
+  * ⚠️ **`E_ENG_03` 一字不丢**：它保留在**三处** ⇒ 「这次终止是因为引擎停滞」
+    这个事实仍然可查、可分派 —— ① 健康信号的 `err_code`；② M-21 日志条目的
+    `err_code`；③ 终止错误的**消息正文**。
 * ⚠️ **重入不改状态**：M-12 的守卫触发时只是 `return Err`，**不改引擎状态** ⇒ 宿主重入
   引擎必须得到**相同**的引擎快照（判别式 §5 D-7）。
 
@@ -832,14 +845,26 @@ use riscv_sim_kernel::m12_engine::NO_PROGRESS_WINDOW;   // 实际路径按 crate
 ```
 
 * `step_n` 的循环里维护 `no_progress: u32`：
+  * ⚠️ **假端口的返回值口径（第七次订正的实测依据）**：规格未规定假 `InterruptPort`
+    的 `poll` / `pending_lines` 该返回什么 ⇒ 取**最保守**口径：
+    `poll` → `Ok(None)`（不交付）；`pending_lines` → `Some(空 vec)`（**不伪造挂起线**）。
+    ⇒ 若将来要与 M-16 的真实语义对齐，另行补用例。
   * `Ok(ExecOutcome::InterruptTaken)` 分支：**虚拟时间没前进** ⇒
     `no_progress += 1`；`no_progress >= NO_PROGRESS_WINDOW` ⇒
     **返回 `Err(PlatformError::new(ErrorFamily::Engine, E_ENG_03_NO_PROGRESS, ..))`**；
   * 任何**有指令退休**（`Advanced` / `Stop { consumed: true }`）⇒ `no_progress = 0`。
+    ⚠️ **写法订正（第七次订正的实测依据）**：把这条写成 `Stop` 分支里的
+    `no_progress = 0` **在原结构下编译不过 `-D warnings`** —— `Stop` 分支必然 `break`，
+    该赋值在 rustc 眼里是**死赋值**（`unused_assignments`）⇒ 正确写法是
+    **在 `match` 之前按 `outcome` 统一判定**（语义等价，且没有死赋值）。
 * ⚠️ **口径与 M-12 一致**：中断交付**不算**进展（VD-F3）。
-* ⚠️ **触发条件苛刻**：`step_n(n)` 的循环最多跑 `n` 次 ⇒ 只有 `n > NO_PROGRESS_WINDOW`
-  才可能触发（台账 D-114 原文：「自旋的触发条件比 M-12 苛刻」）⇒ 判别式用例必须用
-  `n = NO_PROGRESS_WINDOW + 1` 以上。
+* ⚠️ **触发条件苛刻**：`step_n(n)` 的循环最多跑 `n` 次 ⇒ 只有 `n >= NO_PROGRESS_WINDOW`
+  才可能触发（台账 D-114 原文：「自旋的触发条件比 M-12 苛刻」）。
+  ⚠️ **口径订正（第七次订正的实测依据）**：原稿写的是「只有 `n > NO_PROGRESS_WINDOW`
+  才可能触发」，**实测 `n = NO_PROGRESS_WINDOW`（正好 1024）同样会触发** ——
+  守卫是在**第 `NO_PROGRESS_WINDOW` 次交付的那一轮**就判定的 ⇒ 真实条件是 **`n >=`**。
+  ⇒ 判别式用例仍取 `n = NO_PROGRESS_WINDOW + 1`（**保守**，留一步余量），
+  但**规格口径已订正为 `>=`**。
 
 ---
 
@@ -925,7 +950,7 @@ use riscv_sim_kernel::m12_engine::NO_PROGRESS_WINDOW;   // 实际路径按 crate
 | D-7 | **重入不改状态**：三次重入后引擎快照 == 一次重入后（除虚拟时间外一致） | 状态漂移 ⇒ 红 |
 | D-8 | `classify_window` 是**纯函数**：`(elapsed > 200, stalled = false)` ⇒ `NoProgress`；`(0, true)` ⇒ `NoProgress`；`(0, false)` ⇒ `Progress` | 判定错 ⇒ 红 |
 | D-9 | **前端零改动**：`git diff --stat` 里 `front/` **零命中**；契约层**零新增** DTO / 命令 / 事件（⚠️ **既有**的 `Admin` / `AdminOp` 保持不动，宿主对该命令**仍返回 `E_CTX-05`**） | 前端被改 / `Admin` 被启用 ⇒ 红（人工核对） |
-| D-10 | 停滞错误**第 3 次才上抛**；第 1、2 次宿主**继续**跑 | 立即上抛 ⇒ 红（G 裁决） |
+| D-10 | 停滞错误**第 3 次才上抛**；第 1、2 次宿主**继续**跑；上抛的码是 `E_HMS-02`（`E_ENG-03` 保留在健康信号 / 日志 / 消息里） | 立即上抛 ⇒ 红（G 裁决）；上抛 `E_ENG-03` ⇒ 红（第八次订正） |
 
 ### 5.5 本批的**唯一**判别式（源码层面成立）
 
@@ -999,6 +1024,7 @@ M-12/M-17 守卫触发  ──►  Err(E_ENG_03_NO_PROGRESS)
 | `m22_hms::Health` 语义变更（盲升 → 派生） | 同上 | 直接改；**语义变化要在模块文档里写明** |
 | `DataStore` trait **加**一个方法 `archive` | **对 trait 的实现方是破坏性的** | `InMemoryDataStore` 同批补实现；A-3 / A-6 钉住 |
 | 宿主停滞错误的**传播时机**（第 3 次才上抛） | 调用方看到错误的**时刻**变了 | §3.3「错误传播」写死；D-10 钉住 |
+| 宿主停滞错误的**码**（`E_ENG-03` ⇒ `E_HMS-02`） | 调用方看到的**错误码**变了（`E-ENG-03` ⇒ `E-HMS-02`） | §8.1「两个场景码的分工」（第五次订正）+ §3.3「错误传播」（**第八次订正**）；`E_ENG_03` 保留在健康信号 / 日志 / 消息里 ⇒ 事实不丢 |
 | 契约层 | **零新增** DTO / 命令 / 事件 / 错误族 | 只加两个 HMS **场景码常量**（不新增族 ⇒ 不改 `error_families!`） |
 
 ---
