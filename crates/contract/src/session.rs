@@ -200,6 +200,26 @@ pub struct M13StateDto {
     pub mem_pages: Vec<MemPageDto>,
 }
 
+/// Region-kind tag of a RAM region, as it appears in
+/// [`RegionDto::kind`] — **lower case** (the wire form must survive a
+/// reordering of the enum).
+///
+/// ⚠️ **This is the single home of the region-kind vocabulary** (v0.27 ·
+/// STAGE-12 §2.3): the values used to live in the kernel's `m14_bus`
+/// module, which made the contract layer unable to name them (the
+/// description layer needs the very same three words) ⇒ the contract
+/// could only reference the kernel, i.e. depend backwards. The kernel
+/// now `pub use`s these three constants, so **both layers speak one
+/// vocabulary** — and the platform description's `kind` values are
+/// literally these strings (no translation table anywhere).
+pub const REGION_KIND_RAM: &str = "ram";
+
+/// Region-kind tag of a ROM region (see [`REGION_KIND_RAM`]).
+pub const REGION_KIND_ROM: &str = "rom";
+
+/// Region-kind tag of a peripheral region (see [`REGION_KIND_RAM`]).
+pub const REGION_KIND_PERIPHERAL: &str = "peripheral";
+
 /// One entry of the memory-map topology — segment 3.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegionDto {
