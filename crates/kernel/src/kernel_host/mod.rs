@@ -314,6 +314,19 @@ pub const TOPIC_TRACE: &str = "debug.trace";
 /// console 输出的 topic（与前端 `EVENT_TOPIC.Console` **逐字一致**）。
 pub const TOPIC_CONSOLE: &str = "sim.console";
 
+// ---------------------------------------------------------------------------
+// 契约 v6 的板级内存图主题（STAGE-14 §1.8 · §3.2）
+// ---------------------------------------------------------------------------
+
+/// 主题：板级内存图（`EventPayload::MemoryMap`）。
+///
+/// ⚠️ **值必须与前端 `front/lib/message.js` 的 `EVENT_TOPIC.MemoryMap`
+/// 逐字相同**（= `"memory.map"`）⇒ 前端订阅它才收得到那张图。
+///
+/// ⚠️ 它归 **`memory.*` 族**（与 `memory.read` 同族）—— 这是事件主题族
+/// 的既有命名法（STAGE-14 §1.8），不是 `sim.*`。
+pub const TOPIC_MEMORY_MAP: &str = "memory.map";
+
 /// 宿主侧保留的 console 字节上限（**还没推给前端**的那些）。
 ///
 /// ⚠️ **为什么要有上限**：UART 的捕获环是 4 KiB，满了会**丢最新**的
@@ -764,6 +777,26 @@ pub struct KernelHost {
     /// 视图**（按 `id` 投影，裁决 C）⇒ 既有调用点一字不改。
     platform: riscv_sim_contract::platform::PlatformDescription,
 
+    /// 用户配的板（**跨 `LoadProject` 保持**）—— STAGE-14 §2.1 裁决 A 的那个字段。
+    ///
+    /// ⚠️ **它就是「用户意图」本身**，不是「待生效的那一份」——
+    /// 用户的板一旦配过，就**一直**在那儿 ⇒ `LoadProject` 始终优先用它建图
+    /// （§2.2 的施工期订正）。
+    ///
+    /// ⚠️ **为什么只留一个字段**：初版写的是「待生效的那一份」+ 单独一个
+    /// `pending` 标志 ⇒ 「配了板但没生效」与「标志忘了翻」是**两种不同的
+    /// 错**，前者推导不出来、后者无从发现 ⇒ 「待生效」改成**推导量**
+    /// （见 [`KernelHost::memory_map_pending`]）⇒ 少一个状态就少一处可能
+    /// 不同步的地方。
+    ///
+    /// ⚠️ **不持久化**（裁决 N）：刷新页面即失 ⇒ MVP 单会话。
+    user_board: Option<PlatformDescription>,
+    /// 当前会话是否已经装载过镜像（STAGE-14 §2.3 裁决 C）。
+    ///
+    /// ⚠️ 本批**不做**卸载命令 ⇒ 装载过之后就只能通过「重新装载工程」
+    /// 让新板生效（D-139）。
+    image_loaded: bool,
+
     /// UART0 的句柄（**只有** QEMU virt 档才有）—— console 字节从这里取。
     uart0: Option<Rc<RefCell<Uart16550>>>,
     /// CLINT 的句柄（**只有** QEMU virt 档才有）—— `mtimecmp` 从这里喂给 M-16。
@@ -890,6 +923,11 @@ impl KernelHost {
             trace: TraceBuffer::new(TRACE_CAP),
             trace_events_discarded: 0,
             platform: description.clone(),
+            // STAGE-14 §2.1 裁决 A：用户配的板住在**宿主会话内** ⇒ 新会话
+            // 一开始**没有**配过板。
+            user_board: None,
+            // STAGE-14 §2.3 裁决 C：新会话**还没装载过**镜像。
+            image_loaded: false,
             uart0: None,
             clint: None,
             plic: None,
@@ -1809,6 +1847,9 @@ impl KernelHost {
                 }
             }
             CommandPayload::Subscribe { topic } => self.on_subscribe(topic),
+            // ⚠️ 契约 v6 的板级内存图（STAGE-14 §3.2）——用户在界面上配的
+            // 那张板从这里进宿主。
+            CommandPayload::SetMemoryMap { description } => self.on_set_memory_map(description),
             CommandPayload::Unsubscribe { topic } => {
                 self.topics.remove(&topic);
                 vec![self.tick()]
@@ -1920,9 +1961,21 @@ impl KernelHost {
         //
         // ⚠️ **挑档判据已经描述化**（裁决 E）：挑出来的是**一份描述**
         // （不是「档位」枚举）⇒ 内存图由它决定。
-        match self.choose_platform(&ranges) {
-            Ok(description) => self.platform = description,
-            Err(err) => return vec![self.error_from(&err)],
+        //
+        // ⚠️ **STAGE-14 §3.2 第 2 步**：**配过板** ⇒ 用**用户的板**建图
+        // （跳过自动选档）；**从未配过板** ⇒ 走今天的自动选档（**逐字不变**，
+        // 验收 B-5）。
+        //
+        // ⚠️ **读，不消耗**（§2.2 的施工期订正）：初版这里是
+        // `pending_platform.take()` ⇒ 用完就没了 ⇒ **用户装载前配的板会被
+        // 紧接着的那次 `LoadProject` 覆盖掉** ⇒「装载前立即生效」成一句
+        // 空话 ⇒ 用户的板是**用户意图**，**跨 `LoadProject` 保持**。
+        match &self.user_board {
+            Some(board) => self.platform = board.clone(),
+            None => match self.choose_platform(&ranges) {
+                Ok(description) => self.platform = description,
+                Err(err) => return vec![self.error_from(&err)],
+            },
         }
         if let Err(err) = self.rebuild_platform() {
             return vec![self.error_from(&err)];
@@ -1965,11 +2018,97 @@ impl KernelHost {
         // The next register push must be a **full** snapshot.
         self.published_valid = false;
 
+        // ⚠️ **装载成功** ⇒ 本会话**已经装载过镜像**（STAGE-14 §2.3 裁决 C）。
+        //
+        // ⚠️ 置真的位置在**全部步骤成功之后** ⇒ 装载**失败**（中途
+        // `return`）时它**保持假** ⇒ 「有没有装载过」这个判据不会撒谎。
+        self.image_loaded = true;
+
         let mut events = vec![self.tick()];
         if let Some(wave) = self.register_waveform(true) {
             events.push(wave);
         }
         events
+    }
+
+    /// 「用户配的板」是不是**还没生效**（STAGE-14 §3.2 ④ 的**推导量**）。
+    ///
+    /// ⚠️ **推导，不单独存**：用户的板 ≠ 当前生效的图 ⇒ 还没生效。
+    ///
+    /// ⚠️ **为什么是推导量**：存两个字段（「配的板」+ 一个 `pending` 标志）
+    /// ⇒ 「配了板但没生效」与「标志忘了翻」是**两种不同的错** ⇒ 前者推导
+    /// 不出来、后者无从发现 ⇒ 只留一个字段就少一处可能不同步的地方。
+    ///
+    /// ⚠️ `PlatformDescription` 派生了 `PartialEq` ⇒ 这个比较是**类型安全**的。
+    fn memory_map_pending(&self) -> bool {
+        match &self.user_board {
+            Some(board) => self.platform != *board,
+            None => false,
+        }
+    }
+
+    /// **设置板级内存图**（用户在界面上配的那张板）。
+    ///
+    /// ⚠️ **顺序固定**（STAGE-14 §3.2，冻结规格）：
+    ///
+    /// ```text
+    /// ① description.validate()        ← 契约层那个唯一校验器
+    /// ② user_board = Some(description) ← 记下**用户意图**
+    /// ③ 若 !image_loaded ⇒ 立即生效（换图 + 重建总线）
+    /// ④ pending = user_board ≠ self.platform   ← **推导量**
+    /// ⑤ 回 EventPayload::MemoryMap { description: 当前生效的图, pending }
+    /// ```
+    ///
+    /// ⚠️ **校验失败时「什么都不动」**：不合规的描述**不能**污染宿主当前的
+    /// 内存图 ⇒ `self.platform` 与 `user_board` 都保持原样。
+    ///
+    /// ⚠️ **已装载镜像时不重建总线**（裁决 B）：正在跑的 guest **一字不受
+    /// 影响** ⇒ 新板等下一次 `LoadProject` 生效（事件回 `pending = true`）。
+    ///
+    /// ⚠️ **重建失败时 `user_board` 保留**：用户的板还在，只是**没生效**
+    /// ⇒ `pending` 变真 ⇒ 用户改板这件事**没有丢**。
+    fn on_set_memory_map(&mut self, description: PlatformDescription) -> Vec<EventPayload> {
+        // ---- ① 校验（契约层那个唯一校验器 ⇒ E_PLT-01..E_PLT-11）----
+        //
+        // ⚠️ 失败 ⇒ **什么都不动**（当前图与用户的板都不碰）⇒ 只回一条
+        // `Error` 事件。
+        if let Err(err) = description.validate() {
+            return vec![self.error_from(&err)];
+        }
+
+        // ---- ② 记下**用户配的板**（裁决 A：住在宿主会话内）----
+        //
+        // ⚠️ 存的是**一份拷贝** ⇒ 第 ③ 步可以把原件直接换进 `self.platform`
+        // （`PlatformDescription` 是 `Clone` 的数据，不是什么昂贵的东西）。
+        //
+        // ⚠️ **不消耗**它：用户的板是**用户意图** ⇒ 跨 `LoadProject` 保持
+        // （§2.2 的施工期订正）。
+        self.user_board = Some(description.clone());
+
+        // ---- ③ 未装载过镜像 ⇒ **立即生效**（裁决 B）----
+        if !self.image_loaded {
+            // ⚠️ `rebuild_platform()` 读的是 `self.platform` ⇒ 先换图。
+            let old = self.platform.clone();
+            self.platform = description;
+            if let Err(err) = self.rebuild_platform() {
+                // ⚠️ **恢复旧图**：重建的第一步就是 `reset_memory_map()` ⇒
+                // 失败后总线可能是**空的** ⇒ 不恢复的话用户拿到的是一张
+                // 空总线（比报错更糟）。
+                //
+                // ⚠️ 恢复是**尽力而为**（`let _ =`）：**原始错误**才是要
+                // 报出去的那一个 ⇒ 不被恢复的成败掩盖。
+                self.platform = old;
+                let _ = self.rebuild_platform();
+                // ⚠️ `user_board` **保留**（用户的板还在，只是没生效）。
+                return vec![self.error_from(&err)];
+            }
+        }
+
+        // ---- ④⑤ 回「当前生效的图」+「用户的板有没有生效」（裁决 D）----
+        vec![EventPayload::MemoryMap {
+            description: self.platform.clone(),
+            pending: self.memory_map_pending(),
+        }]
     }
 
     /// **解析**一个镜像（**不写总线**），返回入口地址、段内容与调试节区。
@@ -2773,6 +2912,7 @@ impl KernelHost {
         let want_registers = topic == TOPIC_REGISTERS;
         let want_waveform = topic == TOPIC_WAVEFORM;
         let want_console = topic == TOPIC_CONSOLE;
+        let want_memory_map = topic == TOPIC_MEMORY_MAP;
         self.topics.insert(topic);
         let mut events = vec![self.tick()];
         if want_registers {
@@ -2801,6 +2941,20 @@ impl KernelHost {
             if let Some(console) = self.console_event() {
                 events.push(console);
             }
+        }
+        if want_memory_map {
+            // 板级内存图（STAGE-14 §3.2 · 裁决 J）：**立即**推一条当前生效
+            // 的图。
+            //
+            // ⚠️ 前端靠它拿到**初始**的内存图（验收 B-6）⇒ 不推的话前端
+            // 的内存映射表在第一次改板之前是空的。
+            //
+            // ⚠️ 与 `sim.registers` / `waveform.history` **同一套路**
+            // （「订阅即强制推一条」）。
+            events.push(EventPayload::MemoryMap {
+                description: self.platform.clone(),
+                pending: self.memory_map_pending(),
+            });
         }
         events
     }
@@ -3353,6 +3507,13 @@ mod tests_v024;
 
 #[cfg(test)]
 mod tests_platform;
+
+/// 板级内存图（v0.29 · STAGE-14 · 验收 B-1 ~ B-9）。
+///
+/// ⚠️ 它钉的是**宿主**这一段：立即生效 / 待生效 / 装载时应用 /
+/// 订阅即推送。
+#[cfg(test)]
+mod tests_board_memory_map;
 
 /// 宿主看门狗（v0.28 · 台账 **D-115** · 冻结规格 STAGE-13 §3.3）。
 ///
