@@ -7,6 +7,8 @@ PROGRESS.md: [括号] 第 ? 行起的段落左右括号数不等（0 vs 1）
 PROGRESS.md: [锚点] 第 ? 行标题「一、本批的六件事，和**八件明确不做**的事」与第 ? 行重复 ⇒ slug 冲突（GitHub 会加 -1 后缀）
 PROGRESS.md: [锚点] 第 ? 行标题「五、方法论沉淀（本轮新增）」与第 ? 行重复 ⇒ slug 冲突（GitHub 会加 -1 后缀）
 PROGRESS.md: [锚点] 第 ? 行标题「五、门禁与变异自检」与第 ? 行重复 ⇒ slug 冲突（GitHub 会加 -1 后缀）
+PROGRESS.md: [锚点] 第 ? 行标题「五、门禁与变异自检」与第 ? 行重复 ⇒ slug 冲突（GitHub 会加 -1 后缀）
+PROGRESS.md: [锚点] 第 ? 行标题「六、本批之后」与第 ? 行重复 ⇒ slug 冲突（GitHub 会加 -1 后缀）
 PROGRESS.md: [锚点] 第 ? 行标题「六、本批之后」与第 ? 行重复 ⇒ slug 冲突（GitHub 会加 -1 后缀）
 PROGRESS.md: [锚点] 第 ? 行标题「六、门禁与产物」与第 ? 行重复 ⇒ slug 冲突（GitHub 会加 -1 后缀）
 PROGRESS.md: [锚点] 第 ? 行标题「契约层变更（additive · 不破坏 M-0 冻结）」与第 ? 行重复 ⇒ slug 冲突（GitHub 会加 -1 后缀）

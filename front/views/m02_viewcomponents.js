@@ -28,6 +28,19 @@ import {
     matchSourceFile,
     renderSourceText,
 } from "./components/source-view.js";
+import {
+    addRegion,
+    collectDraft,
+    countInvalidFields,
+    currentDraft,
+    defaultDraft,
+    draftFromDescription,
+    draftToDescription,
+    removeRegion,
+    renderMemoryMapPanel,
+    renderMemoryMapTable,
+    setDeviceKind,
+} from "./components/memory-map.js";
 
 // ---------------------------------------------------------------------------
 // ViewComponent shape (LLD §2.1.1)
@@ -126,7 +139,13 @@ const productTreeView = register({
     channels: ["sim"],
     /** Render to body. Pure: same storeState → same DOM string. */
     render(state) {
-        const mappings = state?.sim?.memoryMap ?? [];
+        // ⚠️ **真数据**（STAGE-14 ⑦ · 裁决 F）：内存映射来自内核的
+        // `memory.map` 事件（**当前生效**的板级内存图）⇒ 不再是 demo 的
+        // 假数据。
+        //
+        // ⚠️ **「没有数据」与「数据是空的」必须分得开**：没收到事件 ⇒
+        // 「尚无内存图数据」；收到了但 0 段 ⇒ 「当前生效的内存图为空」。
+        const memoryMap = state?.memoryMap ?? null;
         const tree = state?.tree ?? { root: { name: "未加载", children: [] } };
         return `
             <div class="product-grid">
@@ -136,17 +155,21 @@ const productTreeView = register({
                 </section>
                 <section class="memory-map">
                     <h3>内存映射 (M-14)</h3>
-                    ${renderMapTable(mappings)}
+                    ${renderMemoryMapTable(memoryMap)}
+                    <div class="debug-toolbar">
+                        <button type="button" data-action="go-memory-map">编辑板级内存图</button>
+                        <button type="button" data-action="seed-demo">重新 seed demo 状态（dev only）</button>
+                    </div>
                 </section>
             </div>
             <p class="muted">
-                提示：MVP 阶段内存映射来自一次性 seed；要刷新请调用
-                <code>window.riscv_demo.seedBus()</code>（dev only）。
+                内存映射表显示的是内核 <code>memory.map</code> 事件里的
+                <strong>当前生效</strong>的板级内存图；没有数据时如实显示空态，不显示假数据。
             </p>
         `;
     },
     onCommand(ev) {
-        // User action: ask for the demo memory map to be re-seeded.
+        // User action: ask for the demo product tree / sim state to be re-seeded.
         //
         // The button carries `data-action` itself and lives *outside* the
         // <table>, so it has no `[data-region-base]` ancestor — requiring
@@ -155,6 +178,12 @@ const productTreeView = register({
         if (target?.matches?.("[data-action='seed-demo']")) {
             seedBus("product");
             return "cmd-seed-demo";
+        }
+        // 「编辑板级内存图」⇒ 跳到板级内存图编辑器（独立工作面）。
+        const el = ev.target?.closest?.("[data-action]");
+        if (el?.dataset?.action === "go-memory-map") {
+            route("#/memory-map");
+            return "cmd-go-memory-map";
         }
         return undefined;
     },
@@ -177,29 +206,142 @@ function renderTree(node) {
     return `<li>${escapeHtml(node.name)} ${id}${children ? `<ul>${children}</ul>` : ""}</li>`;
 }
 
-function renderMapTable(mappings) {
-    if (mappings.length === 0) {
-        return `<p class="muted">尚无映射 — 调用 <code>seedBus()</code> demo。</p>`;
-    }
-    return `
-        <table class="map-table">
-            <thead>
-                <tr><th>区间</th><th>类型</th><th>size</th><th>详情</th></tr>
-            </thead>
-            <tbody>
-                ${mappings.map((m) => `
-                    <tr data-region-base="${m.base}">
-                        <td><code>0x${m.base.toString(16).padStart(8, "0")}</code></td>
-                        <td>${escapeHtml(m.type)}</td>
-                        <td><code>0x${m.size.toString(16)}</code></td>
-                        <td><pre>${escapeHtml(m.detail ?? "")}</pre></td>
-                    </tr>
-                `).join("")}
-            </tbody>
-        </table>
-        <button data-action="seed-demo">刷新 demo 映射</button>
-    `;
+// ---------------------------------------------------------------------------
+// memoryMapView — 板级内存图编辑器（STAGE-14 · v0.29）。
+//
+// ⚠️ **编辑器是独立工作面**：路由 `#/memory-map`、面板 `[data-view-panel="memory-map"]`。
+// 它**不**塞进产品树视图（规格 §3.3）。
+//
+// ⚠️ **草稿住 M-03 视图状态**（规格 §3.3 / 裁决 D）：草稿是**前端自己的东西**
+// ⇒ 不进契约、不进事件 ⇒ 刷新页面即失（D-136，规格已如实登记）。
+//
+// ⚠️ **视图层不碰服务层**：提交只发 `riscv:command` 信号（`emitCommand`），
+// 由 `app.js` 的 `handleCommand` 变成真正的 M-05 命令。
+// ---------------------------------------------------------------------------
+
+/** 编辑器面板的 DOM（挂载时记下 ⇒ 采集与渲染看的是**同一份**东西）。 */
+let memoryMapPanel = null;
+
+/**
+ * 内存图视图状态里的**当前草稿**（渲染与采集共用同一个基底）。
+ *
+ * @returns {object}
+ */
+function memoryMapDraft() {
+    return currentDraft(viewStore.getState("memory-map"));
 }
+
+/**
+ * 把编辑器面板的最新输入采集成草稿，写回 M-03 视图状态。
+ *
+ * ⚠️ **不重渲染**：重渲染会重建 DOM ⇒ 输入框失焦、正在敲的字丢掉。
+ * 草稿在视图状态里 ⇒ 下次重渲染时值还在。
+ *
+ * @param {Element} root — 面板元素
+ * @returns {object} 采集到的草稿
+ */
+function syncMemoryMapDraft(root) {
+    const draft = collectDraft(root, memoryMapDraft());
+    viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
+    return draft;
+}
+
+/**
+ * 让内存图编辑器按当前视图状态重渲染一次。
+ */
+function publishMemoryMapState() {
+    window.dispatchEvent(new CustomEvent("riscv:render", {
+        detail: {
+            viewId: "memory-map",
+            type: "update",
+            state: viewStore.getState("memory-map"),
+        },
+    }));
+}
+
+const memoryMapView = register({
+    id: "memory-map",
+    channels: ["sim"],
+    render(state) {
+        return renderMemoryMapPanel(state);
+    },
+    onCommand(ev) {
+        const el = ev.target?.closest?.("[data-action]");
+        const action = el?.dataset?.action;
+        if (!action) return undefined;
+        const index = Number(el?.dataset?.mmapIndex ?? -1);
+        const root = memoryMapPanel;
+        switch (action) {
+            case "add-ram":
+            case "add-rom":
+            case "add-peripheral": {
+                // ⚠️ 先采集再改：用户正在敲的数**不许**被这次点击冲掉。
+                const base = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
+                const kind = action === "add-ram" ? "ram" : action === "add-rom" ? "rom" : "peripheral";
+                const draft = addRegion(base, kind);
+                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
+                publishMemoryMapState();
+                return `cmd-${action}`;
+            }
+            case "remove-region": {
+                const base = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
+                const draft = removeRegion(base, index);
+                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
+                publishMemoryMapState();
+                return "cmd-remove-region";
+            }
+            case "load-current": {
+                const current = viewStore.getState("memory-map")?.memoryMap?.description ?? null;
+                const draft = draftFromDescription(current) ?? defaultDraft();
+                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
+                publishMemoryMapState();
+                return "cmd-load-current";
+            }
+            case "new-draft": {
+                viewStore.setState("memory-map", (prev) => ({ ...prev, draft: defaultDraft() }));
+                publishMemoryMapState();
+                return "cmd-new-draft";
+            }
+            case "submit-memory-map": {
+                const root2 = root;
+                const draft = root2 ? collectDraft(root2, memoryMapDraft()) : memoryMapDraft();
+                // ⚠️ 有栏没看懂 ⇒ **不提交**（提交一份内核看不懂的描述只会换来
+                // 一个更费解的错）。
+                const invalid = root2 ? countInvalidFields(root2) : 0;
+                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
+                if (invalid > 0) {
+                    publishMemoryMapState();
+                    return "cmd-submit-memory-map-invalid";
+                }
+                // ⚠️ 载荷形状 = 契约的 `PlatformDescription`（**逐字同形**）。
+                return emitCommand("submit-memory-map", "memory-map", {
+                    description: draftToDescription(draft),
+                });
+            }
+            case "reload-project":
+                // 「重新装载工程」⇒ 宿主在下次 LoadProject 时应用待生效的板级配置。
+                return emitCommand("reload-project", "memory-map");
+            default:
+                return undefined;
+        }
+    },
+    onDelta(_delta) {},
+    mountFor(el) {
+        memoryMapPanel = el;
+        el.addEventListener("click", (ev) => memoryMapView.onCommand(ev));
+        // ⚠️ 输入 ⇒ 采集进草稿（**不重渲染** ⇒ 不失焦）。
+        el.addEventListener("input", () => {
+            if (memoryMapPanel) syncMemoryMapDraft(memoryMapPanel);
+        });
+        // ⚠️ 换器件类型 ⇒ 参数集变了 ⇒ 必须重渲染（否则还挂着旧类型的参数栏）。
+        el.addEventListener("change", (ev) => {
+            if (!memoryMapPanel) return;
+            const changed = ev.target?.closest?.("[data-mm-device-kind]");
+            syncMemoryMapDraft(memoryMapPanel);
+            if (changed) publishMemoryMapState();
+        });
+    },
+});
 
 // ---------------------------------------------------------------------------
 // embeddedView — 落地视图（D-33 · STAGE-10 裁决 C）。

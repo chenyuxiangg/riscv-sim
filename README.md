@@ -88,16 +88,17 @@
 | **内置描述** | `default`（低段 1 MiB + 高段 4 MiB + GPIO）· `qemu-virt`（低段 1 MiB + 高段 128 MiB + UART0 / CLINT / PLIC / GPIO）· `minimal`（演示用，`auto_selectable: false` ⇒ **只能被显式指定**） |
 | **自动选档** | 按镜像**实际用到的地址**挑描述（**区间在外层** · 候选按 `priority` 小者优先）⇒ 与历史行为**逐字等价**（六条等价性用例钉住） |
 | **外设窗口大小** | **不写进描述** ⇒ 由器件自己报（`Peripheral::size()`）⇒ 只有一个真相源 |
+| **界面上可配置**（v0.29 批） | **用户能在浏览器里定制 RAM 段与 MMIO 窗口**：新增 `#/memory-map` **板级内存图编辑器**（增删 RAM / ROM 段、增删外设窗口 + 选 4 种器件 + 填器件参数 + 改 `region_budget_bytes`）⇒ 契约层加 `SetMemoryMap` 命令 + `MemoryMap` 事件（**升版 v6** ⇒ **零新 DTO**，描述 DTO 一字未改）⇒ 宿主持「**用户配的板**」⇒ 未装载时**立即生效**、已装载时**存为待生效**（下一次装载生效 ⇒ 用户的板**跨装载保持**）⇒ 前端的「M-14 内存映射表」**从 mock 换成真数据** ⇒ **D-124 闭环** |
 
 ### 工程规模
 
 | 项 | 数字 |
 | --- | --- |
-| 契约层 | 9 493 行 |
-| 仿真内核 | 59 198 行（含 16 个子模块 + 内核宿主装配层） |
-| 前端 | 15 364 行（`front/` 下**git 跟踪**的源码，含 `front/tests/`；⚠️ **不含** `front/assets/` —— 那是 wasm-pack 的**构建产物**且被 git 忽略，计进去会让这个数**随「跑没跑过 wasm 构建」变** ⇒ 不可复现） |
-| 设计文档 | **50 篇**（26 篇 HTML + 24 篇 Markdown） |
-| 测试 | **1 416** 条 Rust（契约 lib 170 + 内核 lib 1 087 + 集成 142 + runner 17）+ **312** 条前端（57 suite） |
+| 契约层 | 9 782 行 |
+| 仿真内核 | 60 430 行（含 16 个子模块 + 内核宿主装配层） |
+| 前端 | 17 327 行（`front/` 下**git 跟踪**的源码，含 `front/tests/`；⚠️ **不含** `front/assets/` —— 那是 wasm-pack 的**构建产物**且被 git 忽略，计进去会让这个数**随「跑没跑过 wasm 构建」变** ⇒ 不可复现；⚠️ 这个数由仓内 `tools/count_scale.py` **从当前树重算** ⇒ 规模数字只有**一份**算法） |
+| 设计文档 | **51 篇**（26 篇 HTML + 25 篇 Markdown） |
+| 测试 | **1 439** 条 Rust（契约 lib 175 + 内核 lib 1 105 + 集成 142 + runner 17）+ **342** 条前端（61 suite） |
 
 ---
 
@@ -124,7 +125,7 @@ node --version
 
 ```bash
 cargo build                                    # native
-cargo test --workspace --no-fail-fast --lib --tests   # 1 416 条
+cargo test --workspace --no-fail-fast --lib --tests   # 1 439 条
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
@@ -134,7 +135,7 @@ cargo fmt --all -- --check
 ### 前端门禁
 
 ```bash
-tools/check-front.sh        # node:test 冒烟门禁 —— 312 用例 / 57 suite
+tools/check-front.sh        # node:test 冒烟门禁 —— 342 用例 / 61 suite
 ```
 
 ### 构建浏览器内核（WASM）
@@ -250,8 +251,8 @@ tools/golden-run.sh --keep-going  # 全量语料 —— 68 例
 
 | 模块 | 职责 | 状态 |
 | --- | --- | --- |
-| **M-01** | 工作台装配与多视图路由（hash 路由） | ✅ |
-| **M-02** | 视图组件库（**7** 个视图 —— v0.25 补了落地视图 `embedded`） | ✅ |
+| **M-01** | 工作台装配与多视图路由（hash 路由） | ✅ **v0.29 增 `memory-map` 视图** |
+| **M-02** | 视图组件库（**8** 个视图 —— v0.25 补了落地视图 `embedded`，**v0.29 补了板级内存图编辑器 `memory-map`**） | ✅ |
 | **M-03** | 视图状态管理 | ✅ |
 
 ### 基础设施
@@ -259,7 +260,7 @@ tools/golden-run.sh --keep-going  # 全量语料 —— 68 例
 | 模块 | 职责 | 状态 |
 | --- | --- | --- |
 | **M-04** | 会话管理器（状态机 + 断线重连） | ✅ |
-| **M-05** | 命令路由与事件分发（**表驱动**路由） | ✅ |
+| **M-05** | 命令路由与事件分发（**表驱动**路由；v0.29 增 `SetMemoryMap` 命令与 `MemoryMap` 事件 ⇒ topic `memory.map`） | ✅ |
 | **M-07** | 传输适配器（Worker + WebSocket；帧 CRC-32） | ✅ |
 | **M-10** | 寄存器内存服务（订阅 + 读写寄存器） | ✅ |
 | **M-21** | 日志系统（**进程内**五带环形缓冲 + CSV / JSON 导出） | ✅ **v0.28 全量落地** |
@@ -300,7 +301,7 @@ tools/boot-osz.sh
 
 ### 第三层 · 界面级（真浏览器）
 
-真 Chrome（CDP）里驱动前端，断言**值**而不是「非空」：断点真的停住、反汇编真的带出源码行号、UART 真的收到字节。
+真 Chrome（CDP）里驱动前端，断言**值**而不是「非空」：断点真的停住、反汇编真的带出源码行号、UART 真的收到字节、**配一张板 ⇒ 内存映射表真的变成新图 ⇒ 新 RAM 段真的写进去读得回来**。
 
 ```bash
 node tools/browser-verify.mjs
@@ -318,8 +319,8 @@ node tools/browser-verify.mjs
 | --- | --- | --- |
 | 1 | `cargo fmt --all -- --check` | 格式 |
 | 2 | `cargo clippy --workspace --all-targets -- -D warnings` | 静态检查 |
-| 3 | `cargo test --workspace --no-fail-fast --lib --tests` | **1 416** 条 Rust 用例（⚠️ **不带 `--lib --tests` 会因 doc-test 假 HANG**；⚠️ 判「全绿」要看**退出码** + `grep -cE "^test result: FAILED"` 为 **0** —— 汇总的失败数在 `awk -F'[ ;]'` 的 **`$7`**（**不是 `$6`**）） |
-| 4 | `tools/check-front.sh` | **312** 用例 / **57** suite（ESM 链接期错误只有它能抓） |
+| 3 | `cargo test --workspace --no-fail-fast --lib --tests` | **1 439** 条 Rust 用例（⚠️ **不带 `--lib --tests` 会因 doc-test 假 HANG**；⚠️ 判「全绿」要看**退出码** + `grep -cE "^test result: FAILED"` 为 **0** —— 汇总的失败数在 `awk -F'[ ;]'` 的 **`$7`**（**不是 `$6`**）） |
+| 4 | `tools/check-front.sh` | **342** 用例 / **61** suite（ESM 链接期错误只有它能抓） |
 | 5 | `tools/golden-run.sh --self-check` + `--keep-going` | 指令级判决（**68/68**） |
 | 6 | `tools/build-wasm.sh` + `node tools/wasm-smoke.mjs` | 真 WASM 产物的桥接冒烟 |
 | 7 | `node tools/browser-verify.mjs` | 真 Chrome 里的端到端断言 |
@@ -332,6 +333,8 @@ node tools/browser-verify.mjs
 
 **完整的欠账清单在 [`docs/reviews/REVIEWS.md`](./docs/reviews/REVIEWS.md)**（含每一条的实证依据、阻塞关系与闭环方式）。
 
+✅ **v0.29 批已闭环一条**：**D-124**（契约层加 `SetMemoryMap` 命令 + `MemoryMap` 事件并**升版 v6** ⇒ 前端**既能写**也能**读**真实内存图 ⇒ 前端的「M-14 内存映射表」**从 mock 换成真数据** ⇒ **D-123-B 的成果在前端侧落地** ⇒ 用户在界面上就能定制 RAM 段与 MMIO 窗口）。
+
 ✅ **v0.28 批已闭环两条**：**D-114**（M-17 `step_n` 接上与 M-12 同形状的**无进展守卫** ⇒ 反复交付同一中断从**活锁挂死**变成**报错退出**）· **D-115**（**宿主看门狗**：时间预算 200 ms + 滑动窗口三次确认 + **HMS 同步终止** + `WATCHDOG` 日志 + **幂等标志** ⇒ 「活锁变成失败」推进到「失败**有处置、有记录**」）。
 
 ✅ **v0.27 批已闭环两条**：**D-123**（内存图通用化 A + B 两批 ⇒ **换一份内存图描述、宿主代码零改动**这条唯一判别式成立）· **D-82**（CLINT 固件侧 MMIO ⇒ 台账原文已被实测推翻 ⇒ 真实缺口只是「缺 guest 指令级端到端判别力」⇒ 已补 `crates/kernel/tests/d82_clint_end_to_end.rs`）。
@@ -340,7 +343,11 @@ node tools/browser-verify.mjs
 
 | 欠账 | 说的是什么 |
 | --- | --- |
-| **D-124** | 契约层**无 MemoryMap 命令与事件** ⇒ 前端拿不到**真实**内存图（描述只在内核与宿主内部流动）⇒ 前端的内存映射表仍是 mock 数据（⚠️ 裁决 I 故意裁剪：描述不进会话载荷、不升契约版本） |
+| **D-136** | **板级配置不持久化**（宿主会话内 ⇒ **刷新页面即失**）⇒ 且契约层的 `Project` DTO **没有**承载它的字段 ⇒ 「板」与「工程」是两件事 ⇒ **D-140**（多板并存）**依赖**它 |
+| **D-139** | **已装载镜像后不能直接改板**（本批**无卸载命令**）⇒ 改板要走「**重新装载工程**」⇒ 前端已给那个按钮，但**换个会话又得重来** |
+| **D-141** | **MMIO 器件参数的合法区间**没在契约层表达（`irq_line` / `freq_hz` / `sources` 等）⇒ 填错只能靠**运行期现象**发现 ⇒ ⚠️ 契约层 `E_PLT-01` .. `E_PLT-11` 已占满 ⇒ **`E_PLT-12` 空闲**正好可占 |
+| **D-137** | 描述的**差量更新**没做（`SetMemoryMap` 是**整份替换**）⇒ 载荷随图变大而变大、**多端并发会丢更新** |
+| **D-138** | `region_budget_bytes` 的**双重身份**（既是**声明期上界** V-7 又是**运行期物理占用上界**）⇒ 一个旋钮两个约束；⚠️ 且 v0.26 的**页级懒分配**已消解它当初要防的那个 OOM ⇒ 它的**原始目的已不复存在** |
 | **D-125** | 器件之间的**连线**仍写死在宿主 ⇒ **换平台改连线仍要改代码**（描述只覆盖「地址空间」那一半） |
 | **D-126** | 参考侧对拍脚本里三份**手抄地址副本**与描述要**手工对齐**（⚠️ 裁决 J 故意不动：那是「对齐 Spike」的职责） |
 | **D-127** | 契约层 `csr.rs` 的「三个空间」表格把 `irq_clear` 列在「internal **line**」一栏 ⇒ **与实现的位掩码语义不符** ⇒ 清线 3 该写 `8` 不是 `3` |

@@ -988,6 +988,349 @@ function oszConsoleChecks(probe) {
     ];
 }
 
+// ---------------------------------------------------------------------------
+// The board memory map (STAGE-14 · acceptance C-8)
+// ---------------------------------------------------------------------------
+
+/**
+ * 这一段配置的那张板。
+ *
+ * ⚠️ **必须是一份合法的描述**（契约层 V-1 ~ V-9）：`schema_version` 是
+ * **描述自己的版本 1**（**不是**契约的 6）· `id` 非空 · 每段的声明
+ * `size` ≤ `region_budget_bytes`（V-7）· 两段**不重叠**（V-6）。
+ *
+ * ⚠️ **为什么第一段在 0**：demo 固件落在基址 0 ⇒ 这张板必须装得下它，
+ * 否则「重新装载工程」会失败 ⇒ 用户的板就永远生效不了（那正是
+ * 「用户的板跨装载保持」这条要防的坑的**反面**）。
+ *
+ * ⚠️ **为什么第二段在 0x8000_0000**：它就是**被测的那一段** —— 8 MiB 的
+ * 新 RAM，写进去读得回来、越界写不进去。
+ */
+const BV_BOARD = {
+    schema_version: 1,
+    id: "browser-verify-board",
+    name: "browser-verify 板",
+    priority: 999,
+    region_budget_bytes: 8388608,
+    regions: [
+        { kind: "ram", base: 0, size: 1048576 },
+        { kind: "ram", base: 2147483648, size: 8388608 },
+    ],
+};
+/** 被测的新 RAM 段的基址（= 0x8000_0000）。 */
+const BV_NEW_RAM_BASE = 2147483648;
+/** 被测的新 RAM 段的大小（8 MiB）。 */
+const BV_NEW_RAM_SIZE = 8388608;
+/** 写进新 RAM 的那个值（0xA5A5_A5A5 ⇒ 肉眼可辨）。 */
+const BV_NEW_RAM_VALUE = 0xa5a5a5a5;
+
+/**
+ * 读产品视图里那张内存映射表的**行**（按 `data-*`，**不靠文案**）。
+ *
+ * ⚠️ `data-region-size` **外设行没有**（外设窗口的大小由器件自报，声明里
+ * **没有** ⇒ 挂了就是编数据）⇒ 这里用 `null` 如实表示「没有」。
+ */
+const BV_MEMORY_MAP_PROBE = `(() => {
+  const rows = Array.from(
+    document.querySelectorAll('[data-view-body="product"] [data-region-base]'),
+  );
+  const editor = document.querySelector('[data-view-body="memory-map"]');
+  const submit = document.querySelector('[data-action="submit-memory-map"]');
+  const pending = document.querySelector("[data-memory-map-pending]");
+  return {
+    rowCount: rows.length,
+    rows: rows.map((el) => ({
+      base: String(el.getAttribute("data-region-base") || ""),
+      kind: String(el.getAttribute("data-region-kind") || ""),
+      size: el.getAttribute("data-region-size") === null
+        ? null
+        : String(el.getAttribute("data-region-size")),
+    })),
+    editorPresent: Boolean(editor),
+    submitPresent: Boolean(submit),
+    pendingVisible: Boolean(pending),
+  };
+})()`;
+
+/**
+ * 在页面里挂一个**命令捕获器**：记录每一条 `riscv:command` 信号。
+ *
+ * ⚠️ 与 `CAPTURE_RESOLVE_LINE_EXPRESSION` 同一套路 —— 只是**运行时插桩**，
+ * 不改前端源码。
+ */
+const BV_CAPTURE_COMMANDS_EXPRESSION = `(() => {
+  if (!Array.isArray(window.__bvCmds)) window.__bvCmds = [];
+  if (!window.__bvCmdsHooked) {
+    window.__bvCmdsHooked = true;
+    window.addEventListener("riscv:command", (ev) => {
+      const detail = (ev && ev.detail) ? ev.detail : {};
+      window.__bvCmds.push({
+        action: String(detail.action || ""),
+        viewId: String(detail.viewId || ""),
+        params: detail.params ?? null,
+      });
+    });
+  }
+  return true;
+})()`;
+
+/**
+ * 板级内存图那一段（v0.29 批 · 验收 **C-8** 的端到端判别式）。
+ *
+ * 五步：
+ *   ① 编辑器的「提交」按钮**真的**发出 `set-memory-map` 命令（UI 层 ⇒ C-3）；
+ *   ② 这条命令走**真内核**（WASM 产物）⇒ 内存映射表变成新图
+ *      （**命令 → 内核 → 事件 → 视图**的整条链 ⇒ C-4）；
+ *   ③ 新 RAM 段**写-读往返**成功（证明那段真被映射了、且可写）；
+ *   ④ 写新 RAM **之外** ⇒ 失败（证明 size 真的是那个 size）。
+ *
+ * ⚠️ **这一段必须排在 osz 段之后**：用户的板一旦配过就**一直**保持（宿主里
+ * 那个字段存的是「用户意图」，不随一次会话结束而消失）⇒ 放在 osz 前面会把
+ * osz 段要用的那张板换掉 ⇒ osz 的控制台就没了。
+ *
+ * ⚠️ **越界写判的是「失败」不是「报错文案」**：内核对未映射访问报的是
+ * `E_BUS-01`，而**判据是「这次写没成功」** ⇒ 不靠 message 文本。
+ *
+ * ⚠️ **guest 指令级的越界陷阱（`mcause` 5 / 7）不在这一段**：浏览器里没法
+ * 方便地让访客执行一条越界访存指令 ⇒ 那条由 **B-8 的 guest 层用例**（Rust
+ * 侧）钉住；这一段钉的是「**新 RAM 段真的通了**」这条端到端链路。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
+ */
+async function runMemoryMapSection(cdp, opts) {
+    /** @type {{name: string, ok: boolean, detail: string}[]} */
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+
+    // -- ① 切到编辑器视图，等它挂上 ----------------------------------------
+    await cdp.send("Runtime.evaluate", {
+        expression: 'location.hash = "#/memory-map";',
+        returnByValue: true,
+    });
+    await cdp.send("Runtime.evaluate", {
+        expression: BV_CAPTURE_COMMANDS_EXPRESSION,
+        returnByValue: true,
+    });
+
+    let probe = null;
+    const readyDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < readyDeadline) {
+        const res = await cdp.send("Runtime.evaluate", {
+            expression: BV_MEMORY_MAP_PROBE,
+            returnByValue: true,
+        });
+        probe = res.result?.value ?? null;
+        if (probe?.submitPresent) break;
+        await sleep(250);
+    }
+    if (!probe?.submitPresent) {
+        return {
+            skipped: false,
+            checks: [{
+                name: "板级内存图编辑器挂上了（# 提交按钮在）",
+                ok: false,
+                detail: "等不到编辑器视图（前端引导没起来？）",
+            }],
+        };
+    }
+    add("板级内存图编辑器挂上了（`#/memory-map` 有提交按钮）", true, "submit 按钮在");
+
+    // -- ② 点提交 ⇒ 命令**真的**发出去了 -----------------------------------
+    await cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+            const btn = document.querySelector('[data-action="submit-memory-map"]');
+            if (!btn) return "no-button";
+            btn.click();
+            return "clicked";
+        })()`,
+        returnByValue: true,
+    });
+    await sleep(400);
+    const cmdsRes = await cdp.send("Runtime.evaluate", {
+        expression: 'JSON.stringify(window.__bvCmds ?? [])',
+        returnByValue: true,
+    });
+    let cmds = [];
+    try {
+        cmds = JSON.parse(String(cmdsRes.result?.value ?? "[]"));
+    } catch {
+        cmds = [];
+    }
+    const memoryMapCmd = cmds.find((c) => String(c.action ?? "") === "submit-memory-map");
+    const cmdDescription = memoryMapCmd?.params?.description ?? null;
+    add(
+        "编辑器的提交按钮**真的**发出 `SetMemoryMap` 命令（载荷带描述）",
+        Boolean(memoryMapCmd) && Boolean(cmdDescription) && Array.isArray(cmdDescription.regions),
+        `捕到 ${cmds.length} 条命令；memory-map 那条 = ${JSON.stringify(memoryMapCmd?.action ?? null)}`
+        + `，载荷 regions ${Array.isArray(cmdDescription?.regions) ? cmdDescription.regions.length : "无"}`,
+    );
+
+    // -- ③ 把**被测的那张板**经**真内核**送进去 ----------------------------
+    //
+    // ⚠️ 走的是**视图层发命令的那条通道**（`riscv:command`）⇒ 走的是
+    // app → M-05 → 传输 → **真 WASM 内核** ⇒ 整条链都在。
+    await cdp.send("Runtime.evaluate", {
+        expression: `window.dispatchEvent(new CustomEvent("riscv:command", {
+            detail: {
+                action: "submit-memory-map",
+                requestId: "bv-mm-board",
+                viewId: "memory-map",
+                params: { description: ${JSON.stringify(BV_BOARD)} },
+            },
+        }))`,
+        returnByValue: true,
+    });
+
+    // ⚠️ **必须等这条命令真的往返一趟**再发下一条（`reset`）。
+    //
+    // ⚠️ **为什么**：命令是**异步**的（Worker → WASM → 回事件）⇒ 若不等，
+    // `reset` 可能**先**到内核 ⇒ 那时装载用的是**旧**的图（用户还没配的
+    // 那张）⇒ 而 `set-memory-map` **后**到 ⇒ 用户的板变成「待生效」⇒
+    // 内存映射表**永远不变** ⇒ 症状是「明明配了板却没反应」。
+    //
+    // ⚠️ **判据**：此刻镜像**已经装载过**（osz 段装过）⇒ 宿主对新板**只
+    // 记下、不重建** ⇒ 回的事件里 `pending = true` ⇒ 编辑器上会出现
+    // **「待生效」**横幅 ⇒ 那条横幅**出现**就证明命令**往返完成**了。
+    const pendingDeadline = Date.now() + opts.timeoutMs;
+    let pendingSeen = false;
+    while (Date.now() < pendingDeadline) {
+        const res = await cdp.send("Runtime.evaluate", {
+            expression: `(() => {
+                const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+                return Boolean(el);
+            })()`,
+            returnByValue: true,
+        });
+        if (res.result?.value === true) {
+            pendingSeen = true;
+            break;
+        }
+        await sleep(200);
+    }
+    add(
+        "命令**往返完成**（内核回了「待生效」⇒ 用户的板已记下、正在跑的访客不受影响）",
+        pendingSeen,
+        pendingSeen
+            ? "看到了「待生效」横幅"
+            : "等不到「待生效」横幅 ⇒ 命令可能没发出去或内核没回",
+    );
+    await sleep(300);
+
+    // -- ④ 重新装载工程 ⇒ 用户的板**跨装载保持** ⇒ 新图生效 ----------------
+    //
+    // ⚠️ 用 **demo 工程**重载（不是 osz 那个）：osz 的镜像装不进这张板 ⇒
+    // 装它会失败 ⇒ 用户的板就永远生效不了。
+    await cdp.send("Runtime.evaluate", {
+        expression: `window.dispatchEvent(new CustomEvent("riscv:command", {
+            detail: { action: "reset", requestId: "bv-mm-reset", viewId: "memory-map", params: null },
+        }))`,
+        returnByValue: true,
+    });
+
+    // -- ⑤ 等产品视图的内存映射表变成新图 ----------------------------------
+    //
+    // ⚠️ 切到 `#/product` 之前**先等**：视图是懒挂载的（面板在切过去时才
+    // 建出来）。
+    const mapDeadline = Date.now() + opts.timeoutMs;
+    let rows = [];
+    while (Date.now() < mapDeadline) {
+        await cdp.send("Runtime.evaluate", {
+            expression: 'location.hash = "#/product";',
+            returnByValue: true,
+        });
+        const res = await cdp.send("Runtime.evaluate", {
+            expression: BV_MEMORY_MAP_PROBE,
+            returnByValue: true,
+        });
+        const p = res.result?.value ?? null;
+        rows = Array.isArray(p?.rows) ? p.rows : [];
+        const hasNewRam = rows.some(
+            (r) => String(r.base) === String(BV_NEW_RAM_BASE) && String(r.kind) === "ram",
+        );
+        if (hasNewRam && rows.length === BV_BOARD.regions.length) break;
+        await sleep(250);
+    }
+
+    const newRamRow = rows.find((r) => String(r.base) === String(BV_NEW_RAM_BASE)) ?? null;
+    add(
+        "内存映射表变成了新图（新 RAM 段在表里，基址与大小逐条一致）",
+        Boolean(newRamRow)
+        && String(newRamRow.kind) === "ram"
+        && String(newRamRow.size) === String(BV_NEW_RAM_SIZE)
+        && rows.length === BV_BOARD.regions.length,
+        `表里 ${rows.length} 行：${JSON.stringify(rows)}`,
+    );
+
+    // ⚠️ **「待生效」横幅应当消失** —— 用户的板**已经**变成当前生效的图
+    // ⇒ `pending` 是**推导量**（`user_board ≠ self.platform`）⇒ 两者相等
+    // ⇒ 推导出来就是「假」⇒ 横幅**必须**没了。
+    //
+    // ⚠️ **判据是横幅的**有无**，不是文案** ⇒ 不靠 message 文本。
+    const pendingAfter = await cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+            return Boolean(el);
+        })()`,
+        returnByValue: true,
+    });
+    add(
+        "装载后「待生效」横幅**消失**（用户的板已经变成当前生效的图）",
+        pendingAfter.result?.value === false,
+        pendingAfter.result?.value === false
+            ? "横幅没了 ⇒ user_board == 当前生效的图"
+            : "横幅还在 ⇒ 用户的板没真正生效",
+    );
+
+    // -- ⑥ 新 RAM 段：写进去 ⇒ 读得回来 ------------------------------------
+    const writeRes = await cdp.send("Runtime.evaluate", {
+        expression: `window.riscv_kernel.writeMemory(${BV_NEW_RAM_BASE}, "Word", ${BV_NEW_RAM_VALUE})`,
+        awaitPromise: true,
+        returnByValue: true,
+    }, 30000);
+    const writeOk = !writeRes.exceptionDetails;
+    add(
+        "新 RAM 段**写**得进去",
+        writeOk,
+        writeOk
+            ? `写入 ${BV_NEW_RAM_VALUE} @ 0x${BV_NEW_RAM_BASE.toString(16)}`
+            : `写失败：${String(writeRes.exceptionDetails?.exception?.description
+                ?? writeRes.exceptionDetails?.text ?? "?").slice(0, 200)}`,
+    );
+
+    const readRes = await cdp.send("Runtime.evaluate", {
+        expression: `window.riscv_kernel.readMemory(${BV_NEW_RAM_BASE}, "Word")`,
+        awaitPromise: true,
+        returnByValue: true,
+    }, 30000);
+    const readValue = readRes.result?.value?.value ?? null;
+    add(
+        "新 RAM 段**读**得回来（写-读往返相等）",
+        readValue === BV_NEW_RAM_VALUE,
+        `读回 ${readValue === null ? "null" : `0x${Number(readValue).toString(16)}`}`
+        + `（期望 0x${BV_NEW_RAM_VALUE.toString(16)}）`,
+    );
+
+    // -- ⑦ 写新 RAM **之外** ⇒ 失败（size 真的是那个 size） -------------------
+    const beyond = BV_NEW_RAM_BASE + BV_NEW_RAM_SIZE;
+    const beyondRes = await cdp.send("Runtime.evaluate", {
+        expression: `window.riscv_kernel.writeMemory(${beyond}, "Word", ${BV_NEW_RAM_VALUE})`,
+        awaitPromise: true,
+        returnByValue: true,
+    }, 30000);
+    const beyondFailed = Boolean(beyondRes.exceptionDetails);
+    add(
+        "写新 RAM **之外** ⇒ 失败（那段的大小真的是那个大小）",
+        beyondFailed,
+        beyondFailed
+            ? `写 0x${beyond.toString(16)}（超出段尾）被拒`
+            : `写 0x${beyond.toString(16)} 居然成功了 ⇒ size 没生效`,
+    );
+
+    return { skipped: false, checks };
+}
+
 /**
  * 真实 RTOS 那一段：装载仓外的 ELF → 跑起来 → 终端里看得见 console。
  *
@@ -1708,6 +2051,11 @@ async function main() {
         // osz 的产物在**仓外**（不进仓库）。
         const osz = await runOszSection(cdp, opts);
 
+        // -- the board memory map (STAGE-14 · C-8) --------------------------
+        // ⚠️ **必须排在 osz 之后**：用户的板一旦配过就**一直**保持 ⇒ 放在
+        // osz 前面会把 osz 要用的那张板换掉。
+        const memoryMap = await runMemoryMapSection(cdp, opts);
+
         // -- report ------------------------------------------------------------
         console.log("");
         console.log("落地页检查：");
@@ -1743,18 +2091,24 @@ async function main() {
                 console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
             }
         }
+        console.log("");
+        console.log("板级内存图检查（配一张板 → 映射表变新图 → 新 RAM 段可写可读）：");
+        for (const check of memoryMap.checks) {
+            console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
+        }
         if (consoleErrors.length > 0) {
             console.log("");
             console.log("控制台错误：");
             for (const err of consoleErrors) console.log(`  ✗ ${err}`);
         }
 
-        const failed = [...landing, ...render, ...kernelExec, ...source, ...waveform, ...osz.checks]
+        const failed = [...landing, ...render, ...kernelExec, ...source, ...waveform, ...osz.checks,
+            ...memoryMap.checks]
             .filter((c) => !c.ok);
         const ok = failed.length === 0 && consoleErrors.length === 0;
         console.log("");
         console.log(ok
-            ? "browser-verify: 通过（真机挂载 + 渲染路径 + 真内核执行 + 源码视图 + 探针流 + 控制台）"
+            ? "browser-verify: 通过（真机挂载 + 渲染路径 + 真内核执行 + 源码视图 + 探针流 + 板级内存图 + 控制台）"
             : `browser-verify: 失败（${failed.length} 项断言未通过，${consoleErrors.length} 条控制台错误）`);
         return ok ? 0 : EXIT_FAILED;
     } finally {

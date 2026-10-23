@@ -38,6 +38,17 @@
 //     `line`) — the per-instruction source location (D-102). `null` means
 //     "unknown"; it is **never** fabricated.
 //
+// Contract v6 (`schema_version = 6`) adds:
+//   - one new command: `SetMemoryMap { description }` — the board the user
+//     configured **in the front end**. It carries a **whole**
+//     `PlatformDescription` (the contract layer **already has** it ⇒
+//     **zero new DTO**), **not** a patch;
+//   - one new event: `MemoryMap { description, pending }` — the
+//     **currently effective** map (the front end's memory-map table's
+//     data source ⇒ the mock table becomes real) plus a flag telling
+//     whether the host holds a **pending** board configuration;
+//   - ⚠️ nothing else changed in v6: no DTO change, no renumbering.
+//
 // Contract v5 (`schema_version = 5`) adds:
 //   - one new command: `WriteConsole { bytes }` — the console **input**
 //     direction (UART RX). It is the exact mirror of v4's `Console`
@@ -48,7 +59,7 @@
 //     renumbering.
 
 /** Protocol schema version — mirrors `riscv_sim_contract::SCHEMA_VERSION`. */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /**
  * Largest virtual time (picoseconds) that survives a round trip through a
@@ -131,6 +142,8 @@ export const EVENT_TOPIC = Object.freeze({
     Halted: "halted",
     Error: "error",
     MemoryRead: "memory.read",
+    // 契约 v6 新增：当前生效的板级内存图（前端内存映射表的数据源）。
+    MemoryMap: "memory.map",
     Registers: "sim.registers",
     Negotiated: "sim.negotiated",
     SimStateDelta: "sim.state.delta",
@@ -402,6 +415,22 @@ export const Command = Object.freeze({
             },
         };
     },
+    /**
+     * `CommandPayload::SetMemoryMap { description }` — 设置板级内存图
+     * （用户在前端配的那张板，契约 v6）。
+     *
+     * ⚠️ **携带的是一整份描述**，不是 patch ⇒ 没有「当前值 + 补丁」的
+     * 第二个真相。
+     *
+     * ⚠️ **零新 DTO**：描述用的是契约层**已有**的 `PlatformDescription`
+     * ⇒ 描述 DTO **一字未改**。本函数**原样透传**它，不重写字段名。
+     *
+     * 回复是 `MemoryMap` 事件（当前生效的图 + `pending` 标志）。
+     *
+     * @param {object} description — `PlatformDescription`（契约层已有的 DTO）
+     * @returns {{SetMemoryMap: {description: object}}}
+     */
+    setMemoryMap: (description) => ({ SetMemoryMap: { description } }),
 });
 
 // ---------------------------------------------------------------------------
@@ -578,6 +607,21 @@ export const Event = Object.freeze({
             bytes: (bytes ?? []).map((b) => Number(b) & 0xff),
         },
     }),
+    /**
+     * `EventPayload::MemoryMap { description, pending }` — 当前生效的板级
+     * 内存图（契约 v6）。
+     *
+     * ⚠️ `description` 是**当前生效**的图（**不是**「用户配的那份」）
+     * ⇒ 前端内存映射表显示的**就是它**。
+     *
+     * ⚠️ `pending` = 宿主是否存着一份**待生效**的板级配置 ⇒ 前端要
+     * **显式**显示「待生效 —— 重新装载工程后应用」。
+     *
+     * @param {object} description — `PlatformDescription`（契约层已有的 DTO）
+     * @param {boolean} pending — 有无待生效的板级配置
+     * @returns {{MemoryMap: {description: object, pending: boolean}}}
+     */
+    memoryMap: (description, pending) => ({ MemoryMap: { description, pending: Boolean(pending) } }),
 });
 
 // ---------------------------------------------------------------------------
