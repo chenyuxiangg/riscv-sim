@@ -93,6 +93,10 @@ v0.24 批让「反汇编面板显示源码行」「断点停在调度器」「sh
 - 做法：`Blob` → `URL.createObjectURL` → `<a download="...">` → 点击后 `URL.revokeObjectURL`。
 - ⚠️ **NFR-04（XSS）**：文件名与内容都走 `escapeHtml`；`download` 属性用 `setAttribute` 设置（**不**把未转义的值拼进 HTML 字符串）。
 - ⚠️ **文件名由内容派生**（例如 `trace-execution.csv` / `trace-waveform.vcd`），**不是**写死的同一个名字。
+- ⚠️ **`<a download>` 是「下载动作」的产物，不是面板里常驻的元素**（落地时由 Lane B 实测确定，写在这里免得下一个人按字面理解）：
+  - **面板里常驻的是下载动作**（按钮）——因为 object URL **不能常驻**：裁决 D 同时要求「`download` 用 `setAttribute` 设置」与「点击后 `revokeObjectURL`」，若把 `<a download>` 常驻在面板里，它的 `blob:` href 就会**一直有效**（URL 不释放 ⇒ 泄漏）或**早就失效**（渲染时就释放 ⇒ 点不动）。
+  - 点击时**当场**造出 `<a download>`（`href` = `blob:`、`download` = 派生出的文件名）→ 点它 → **下一个宏任务**里 `revokeObjectURL`（同步释放会打断**尚未开始**的下载）。
+  - ⇒ 验收判据因此写成「面板里有下载动作，**点它**造出的 `<a download>` 满足…」而不是「面板里有一个 `<a download>`」。
 
 ### 裁决 E · 契约层：**不升版**，但**披露**取指宽度取值的变化
 
@@ -143,7 +147,7 @@ v0.24 批让「反汇编面板显示源码行」「断点停在调度器」「sh
 | --- | --- | --- |
 | **B-1** | `embedded` **有** M-02 组件 | 组件注册表里查得到 `embedded`（**不是**「查得到别的六个」） |
 | **B-2** | 真机：落地视图**正文非空** | `tools/browser-verify.mjs` 的「正文非空」断言**改回落地域图**（现在被放在 `#/regmem`）⇒ 断言 `[data-view-body="embedded"]` 里有实质内容 |
-| **B-3** | 导出面板有**下载动作** | `<a download>` 存在 · `href` 以 `blob:` 开头 · `download` 属性非空 · **文件名由内容派生**（源/格式 → 文件名） |
+| **B-3** | 导出面板有**下载动作** | 面板里有下载动作（按钮）· **点它**造出的 `<a download>`：`href` 以 `blob:` 开头 · `download` 属性非空 · **文件名由内容派生**（源/格式 → 文件名）· 锚点**确实被点了**（⚠️ 见裁决 D 末尾：`<a download>` 是动作的产物，不是常驻元素） |
 | **B-4** | 下载后**释放** object URL | `URL.revokeObjectURL` 被调用（不泄漏） |
 | **B-5** | 前端门禁覆盖 B-1 / B-3 / B-4 | 新增用例（**不是**只加断言，是能变红的用例） |
 
