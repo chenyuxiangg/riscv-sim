@@ -773,6 +773,18 @@ impl HostWatchdog {
   * ⇒ 两处共用**同一个** `HostWatchdog` 状态（连续性是它存在的意义）。
 * **每个窗口**：
   1. 记 `Instant::now()`；
+     ⚠️ **第九次订正的实测依据**：**不能直接**用 `std::time::Instant` ——
+     `Instant::now()` 在 `wasm32-unknown-unknown` 上是 **panic** 实现（该
+     target 没有可用的系统时钟）⇒ 宿主一构造就崩 ⇒ **WASM 构建整个起不来**
+     （实测 panic 栈顶 = `<std::time::Instant>::now`，落点 =
+     `KernelHost::with_description`；抓法 = §6 门禁的「WASM 桥冒烟」跑**真**
+     wasm 产物）。
+     ⇒ **第九次订正的裁定**：宿主时间**必须**经由一层**时钟抽象**
+     （`kernel_host::clock`）⇒ 对外形状两种 target **完全一样**：
+     native = `std::time::Instant`；wasm32 = JS 的 `performance.now()`。
+     ⚠️ 无 `performance` 的运行环境 ⇒ **优雅降级为 0**（不 trap、不 panic）
+     ⇒ 宿主时间预算这一路判据失效、只剩引擎停滞那一路 ⇒ 另立 **D-135**。
+
   2. 跑引擎；
   3. 算 `elapsed_ms`；
   4. `stalled` = 该批次返回 `Err` **且** `family == Engine` **且**
@@ -1042,7 +1054,7 @@ M-12/M-17 守卫触发  ──►  Err(E_ENG_03_NO_PROGRESS)
   ⇒ 两个码各有**唯一**落点，不重复。⚠️ **代价如实记录**：因 M-12 的 `no_progress` 是局部变量（§1.7），三次确认实际空转 **3 × 1024** 次 |
 | **D-114** | M-17 `step_n` 接上**同形状**的无进展守卫（复用 M-12 的 `NO_PROGRESS_WINDOW` ⇒ 不复制字面量）⇒ 同一个不变式（M-16 的 `active_irq` 单级防护）的**第二个落点**被堵上 —— 判别式 D-1 / D-2 |
 
-### 8.2 本批新登记（**七**条）
+### 8.2 本批新登记（**八**条）
 
 | 编号 | 事项 | 优先级 |
 | --- | --- | --- |
@@ -1053,6 +1065,7 @@ M-12/M-17 守卫触发  ──►  Err(E_ENG_03_NO_PROGRESS)
 | **D-132** | **场景码定义处分散在契约层与内核 crate**：契约层有 `PROTO` / `ENG` / `PLT` / `DBG` / `SNAP` / `PER` 等族的场景码，内核 crate 里又有 `BUS` / `CTX` / `LDR` / `INT` / `OBS` / `STORE` 等族的场景码 ⇒ 「场景码住哪」这条纪律**没有统一口径**（D-120 只禁了「同一码两份定义」，没禁「定义处分散」）。⚠️ 本批新增的 `E_STORE_01` 又添了一处。⇒ 需要一条明确口径（哪些族必须上契约层 —— 判据应是「**跨模块共享 / 前端要按码分派**」） | P2 |
 | **D-133** | **HMS 保留带无界增长**：LLD 要求 FATAL / CRITICAL 信号**永不丢弃**（取证需要）⇒ 极端场景（大量致命信号）下 `retained` 无上限 ⇒ 本批按 LLD 实现、**未加护栏** ⇒ 需要一条上限策略（超出后如何取舍：留最早还是留最新）与「超出即计数」的可见性 | P2 |
 | **D-134** | **M-21 的 `query` 没有「全局最近」的口径**：`query` 按**级别分带**返回（带序 trace → error，带内按写入顺序）⇒ 跨带没有全局时间序 ⇒ 管理员关联（`AdminDiagnosis.log_ref`）取「最后 N 条」时落点是**最高非空带的末尾**，**不是**全局最近 ⇒ 本批按字面实现并如实记录，但「按虚拟时间取最近 N 条」这个能力**没有** ⇒ 需要 M-21 提供一个按 `time_virt_ps` 排序的查询入口 | P2 |
+| **D-135** | **WASM 构建的宿主时钟依赖 JS 全局 `performance`**：`std::time::Instant::now()` 在 `wasm32-unknown-unknown` 上是 **panic**（该 target 没有系统时钟）⇒ 宿主时间**必须**经 `kernel_host::clock` 抽象（native = `Instant`；wasm32 = JS 的 `performance.now()`）。⚠️ **代价**：若运行环境**没有** `performance`（裸 wasm 运行时、无 JS 宿主的 wasmtime）⇒ 读数恒为 `0` ⇒ **宿主时间预算这一路判据失效**，看门狗只剩「引擎停滞」那一路 ⇒ 本批按**优雅降级**处理（不 trap、不 panic）⇒ 需要一条口径：这种宿主上「时间预算」这一路如何处置（恒不触发 / 换时钟源 / 显式关掉该判据），以及 `time_host_ms` 在该宿主上恒 0 的可见性 | P2 |
 
 ### 8.3 本批**不**动的欠账
 
