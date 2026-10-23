@@ -404,6 +404,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Command.setTraceEnabled(true)),
             // 契约 v5 新增：往当前会话唯一的 UART0 写字节。
             variantOf(Command.writeConsole([104, 105])),
+            // 契约 v6 新增：设置板级内存图（用户在前端配的那张板）。
+            variantOf(Command.setMemoryMap({})),
         ].sort();
         assert.deepEqual(js, rust, "JS 命令变体与 Rust CommandPayload 不一致");
     });
@@ -430,6 +432,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Event.traceState(true, 5, 2)),
             // 契约 v4 新增：guest 的 console 字节流。
             variantOf(Event.console([104, 105])),
+            // 契约 v6 新增：当前生效的板级内存图。
+            variantOf(Event.memoryMap({}, false)),
         ].sort();
         assert.deepEqual(js, rust, "JS 事件变体与 Rust EventPayload 不一致");
     });
@@ -527,6 +531,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 SetTraceEnabled: Command.setTraceEnabled(true),
                 // 契约 v5：往当前会话唯一的 UART0 写字节。
                 WriteConsole: Command.writeConsole([104, 105]),
+                // 契约 v6：设置板级内存图（用户在前端配的那张板）。
+                SetMemoryMap: Command.setMemoryMap({}),
             },
             EventPayload: {
                 Tick: Event.tick(0, 0),
@@ -547,6 +553,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 TraceState: Event.traceState(true, 5, 2),
                 // 契约 v4：guest 的 console 字节流。
                 Console: Event.console([104, 105]),
+                // 契约 v6：当前生效的板级内存图。
+                MemoryMap: Event.memoryMap({}, false),
             },
         };
 

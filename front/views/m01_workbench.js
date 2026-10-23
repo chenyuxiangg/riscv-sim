@@ -130,6 +130,21 @@ const VIEW_REGISTRY = new Map([
         panel: '[data-view-panel="terminal"]',
         role: "product",
     }],
+    // 板级内存图编辑器（STAGE-14 · v0.29）。
+    //
+    // ⚠️ **独立工作面**：编辑器**不**塞进产品树视图（规格 §3.3）⇒ 它是
+    // 自己的一条路由 + 自己的一块面板。
+    //
+    // ⚠️ **能力位复用 `view.productTree`**（两个角色都有它）⇒ 不新增能力位
+    // 概念、也不动内核的 `KERNEL_CAP_BITS`（那是内核的分级数值，与前端的
+    // 字符串能力位是两个不同的东西）。
+    ["memory-map", {
+        hash: "memory-map",
+        name: "板级内存图",
+        capability: "view.productTree",
+        panel: '[data-view-panel="memory-map"]',
+        role: "product",
+    }],
 ]);
 
 const FALLBACK_VIEW = {
