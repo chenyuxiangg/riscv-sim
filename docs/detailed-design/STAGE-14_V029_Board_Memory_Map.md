@@ -268,7 +268,13 @@ image_loaded: bool,
 | A-3 | **零新 DTO**：描述 DTO **一字未改**（`PlatformDescription` / `RegionSpec` / `DeviceSpec`） | 造第二份描述 DTO ⇒ 红（人工核对） |
 | A-4 | `MemoryMap` 有 topic `memory.map`，且 M-05 的表驱动路由**能路由到**它 | topic 拼错 ⇒ 前端收不到 ⇒ 红 |
 | A-5 | 契约层与前端镜像**逐字同形**（命令名 / 字段名 / topic） | 字段名不一致 ⇒ 一致性用例红 |
-| A-6 | 既有契约层断言**一条未改** | 改坏 ⇒ 红 |
+| A-6 | 既有契约层断言**除「钉版本号字面量」的那三条外**一条未改 | 改坏 ⇒ 红 |
+
+> ⚠️ **A-6 的一处必要例外（施工期实测）**：规格 §3.1 强制 `SCHEMA_VERSION` **5 → 6**
+> ⇒ 三条**钉旧版本号字面量**的既有断言（`the_schema_version_is_five`、
+> 信封 `json["schema_version"] == 5`、JS 镜像 `export const SCHEMA_VERSION = 5;`）
+> **必然要改** ⇒ 它们的**名字与断言值**改成 6（**改名**是因为名字里钉着版本号）。
+> ⇒ **例外仅限这三条**，其余既有契约层断言**一条未改**。
 
 ### 5.2 Lane B · 宿主（B-1 ~ B-9）
 
@@ -358,11 +364,20 @@ image_loaded: bool,
 | --- | --- | --- | --- |
 | **A** | `crates/contract/src/protocol.rs` · `crates/contract/src/lib.rs` · `front/lib/message.js` | 契约层命令 / 事件 / 升版 v6 + 前端镜像 | 无 |
 | **B** | `crates/kernel/src/kernel_host/**` | 板级配置 + 立即生效 / 待生效 + 装载时应用 + 订阅即推送 | **A** |
-| **C** | `front/views/**` · `front/app.js` · `front/dev/**` | 内存图编辑器 + 内存映射表换真数据 | **A**（镜像与命令/事件） |
+| **C** | `front/views/**` · `front/app.js` · `front/dev/**` · **`front/tests/**`** | 内存图编辑器 + 内存映射表换真数据 | **A**（镜像与命令/事件） |
+
+> ⚠️ **`front/tests/**` 归 Lane C（施工期实测补的归属）**：`front/tests/contract.test.mjs`
+> **从 Rust 源码推导**命令 / 事件的变体集合，再与它自己两份**硬编码枚举**比
+> ⇒ 契约层一加变体，它那两份枚举**必须同步**（否则前端门禁红 3 条）。
+> ⇒ 规格 §9 的 lane 表初版**漏**了这个归属 ⇒ 在此补上。
 
 ### 9.1 执行顺序（本机 8 核 / 8 GiB ⇒ **串行为主**）
 
 1. **Lane A** 先行（薄）；A 完成后 **B 与 C 并行**。
+   > ⚠️ **A 落地后工作区会暂时编译不过**（施工期实测）：`kernel_host::dispatch` 的
+   > `match cmd {` 是**穷举无 `_` 臂** ⇒ 契约层一加 `SetMemoryMap` 变体就报
+   > `E0004 non-exhaustive patterns` ⇒ **Lane B 补一条分支**即绿。
+   > ⇒ **A 的「工作区 clippy 红」不是 A 的缺陷**，全量门禁在集成分支上跑（§9.1 第 3 步）。
 2. ⚠️ **Lane C 依赖 A 的前端镜像** ⇒ C 的 worktree **必须基于 A 合入后的集成树重建**。
 3. 全量门禁在集成分支上跑；合回 main ⇒ 收口文档。
 
