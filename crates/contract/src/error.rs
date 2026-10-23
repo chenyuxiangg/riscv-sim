@@ -295,7 +295,7 @@ pub const E_ENG_03_NO_PROGRESS: u16 = 3;
 /// as "the program crashed": the program may well be fine and the
 /// *platform* failed to react to it.
 ///
-/// ⚠️ **Registered in contract v5** (v0.28 · frozen spec
+/// ⚠️ **Registered in the contract layer** (v0.28 · frozen spec
 /// `docs/detailed-design/STAGE-13_V028_Watchdog_HMS_Logging.md` §0.3 ⑥):
 /// the Health family already existed (tag `HMS`), the batch adds the
 /// **scenarios** — not a family.
