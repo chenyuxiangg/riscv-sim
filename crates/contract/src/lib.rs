@@ -23,6 +23,10 @@
 //!   (M-15) and the interrupt controller (M-16) are **not** part of it.
 //! - [`numstr`] — decimal-string transport for the virtual-time fields
 //!   (contract v2 spec §2).
+//! - [`platform`] — the **platform description** (v0.27 · D-123-B): the
+//!   declared memory map (regions + peripheral devices) plus the
+//!   **single** validator for it. Frozen spec:
+//!   `docs/detailed-design/STAGE-12_V027_Platform_Description.md` §1.
 //! - [`csr`] — the machine-mode CSR vocabulary and the platform's
 //!   interrupt-line space (CSR numbers · `mie` bit positions · the
 //!   line → `mie` bit mapping). Frozen spec:
@@ -77,6 +81,7 @@ pub mod csr;
 pub mod error;
 pub mod model;
 pub mod numstr;
+pub mod platform;
 pub mod port;
 pub mod protocol;
 pub mod session;
