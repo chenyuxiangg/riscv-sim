@@ -390,6 +390,10 @@ pub struct LogBuffer {
     overflow_counts: [u64; 5],
     written: u64,      // **入缓冲**的条数（被过滤掉的**不计**）
     dropped_by_filter: u64,
+    // ⚠️ **容量必须存住**（第四次订正）：`with_capacities` 要按它判溢出 ⇒
+    // 没有它就无法回答「这条是丢了最旧的还是要溢出了」。**私有**字段，
+    // 不进公开 API（公开面由 `LevelCapacities` 承载）。
+    capacities: LevelCapacities,
 }
 
 impl LogBuffer {
@@ -442,6 +446,11 @@ impl LogBuffer {
    **其它带不受影响**。
 4. **`query` 是纯读**：不移动任何游标、不改任何计数 ⇒ **连续两次 `query` 结果相同**，
    且 `query` 之后 `query` 仍能看到同样的条目。
+   ⚠️ **落地口径（第四次订正的实测澄清）**：`VecDeque` **本来就没有游标可动**
+   ⇒ 「不移动游标」在 Rust 里的确切含义是「**不取走条目**（`drain` 不用）、
+   **不改任何计数**（`written` / `dropped_by_filter` / 各带 `overflow_count`）」。
+   ⇒ 判别式按这三条钉：**两次 query 结果相同** + **query 后缓冲内容与全部计数
+   一条没变** + **query 后继续写仍能看到旧条目**。
 5. **导出不丢字段**：CSV 的表头与每行必须含
    `time_virt_ps,time_host_ms,session_id,level,ctx,err_code,msg,truncated` **全部 8 列**；
    JSON 同理。**虚拟时间必须是真实值**（不许恒 0 —— v0.20「访存轨迹时间戳恒为 0」的
@@ -551,6 +560,10 @@ pub struct Hms {
     last_escalation: Option<String>,
     // 降级动作执行器（可注入，宿主装配）
     executor: Option<Box<dyn DegradeExecutor>>,
+    // M-23 的归档后端（可注入，宿主装配）—— 诊断包归档走它。
+    // ⚠️ **第四次订正的裁定**：归档通道必须是**注入**的，不能让 M-22 自己
+    // 造一个后端 —— 那会出现「两个真相」（M-22 造的那个 + 宿主那个）。
+    store: Option<Box<dyn DataStore>>,
 }
 
 pub trait DegradeExecutor {
@@ -562,6 +575,9 @@ impl Hms {
     pub fn new() -> Self;                       // role = Product，watchdog_fired = false
     pub fn with_role(role: Role) -> Self;
     pub fn install_executor(&mut self, ex: Box<dyn DegradeExecutor>);
+    /// 注入归档后端（宿主装配）—— 不注入则 `archive_diagnostic_kit` 报
+    /// 「没有归档通道」而不是静默成功。
+    pub fn install_store(&mut self, store: Box<dyn DataStore>);
 
     /// 上报：**先分级再入流** → 分角色分发 → 查降级策略 → 降级（LLD §3.1）
     pub fn report(&mut self, signal: HealthSignal) -> Severity;
@@ -624,6 +640,9 @@ pub enum DispatchResult {
 ⇒ **M-22 → M-23 单向依赖**。
 ⇒ **M-21 不依赖 M-22**（日志溢出上报由**宿主**做，见 §3.3 与裁决 K 的同类理由）
 ⇒ 三个模块之间**无环**。
+⇒ **归档通道的形状**（第四次订正的裁定）：`Hms` 持有 `Option<Box<dyn DataStore>>`
+（**宿主注入**）⇒ M-22 → M-23 **单向**；⚠️ **不许**让 M-22 自己造一个归档后端
+（那会出现「两个真相」）；⚠️ **不许**让 M-23 实现 M-22 的 trait（那是**依赖倒置**）。
 ⚠️ **Lane C 的编译前提**：它引用 M-21 的 `LogEntry` ⇒ 必须等 **Lane B 的 M-21 落地**
 （合入 `integration/v028`）之后才能编译 ⇒ 见 §9.1 的执行顺序。
 
