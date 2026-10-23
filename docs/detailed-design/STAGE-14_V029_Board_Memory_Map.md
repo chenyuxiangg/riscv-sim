@@ -132,9 +132,16 @@ load_bytes(addr, bytes)           ← 把镜像写进总线
 * ⚠️ **已装载镜像时的处置，实施时改为「存为待生效」而不是「拒绝」** ——
   理由是**死锁**：拒绝 ⇒ 用户改不了板 ⇒ 而改板是「重新装载工程」的**前提**
   ⇒ 用户被卡死，且**没有出路**。
-  ⇒ 改为：命令**成功**、宿主存下**待生效配置**、**不重建总线**（⇒ 正在跑的 guest **一字不受影响**），
+  ⇒ 改为：命令**成功**、宿主记下**用户的板**、**不重建总线**（⇒ 正在跑的 guest **一字不受影响**），
   事件回 `pending: true`，前端**显式**显示「待生效 —— 重新装载工程后应用」并提供「重新装载工程」按钮。
   ⇒ ⚠️ **这与用户的「拒绝」裁定有一处最小偏离**，理由如上，**如实记录并请复核**。
+
+* ⚠️ **「装载前立即生效」必须活过下一次 `LoadProject`**（**施工期实测订正**）——
+  初版规格 §3.2 写的是「未装载 ⇒ 立即生效**且清掉待生效标记**」+「`LoadProject` 无待生效配置 ⇒ **无条件**自动选档」
+  ⇒ 两句合起来 ⇒ **用户装载前配的板会被紧接着的那次 `LoadProject` 用自动选档覆盖掉**
+  ⇒ 「装载前立即生效」变成**一句空话**（配了板、看着生效了、一装载就白配）。
+  ⇒ **订正**：用户的板是**跨 `LoadProject` 保持**的一份**用户意图**，
+  `LoadProject` **有用户的板就用它建图**，**只有从未配过板**才自动选档（见 §3.2 与裁决 B）。
 
 ### 2.3 「已装载」怎么判定（裁决 C）
 
@@ -193,33 +200,50 @@ EventPayload::MemoryMap {
 ```rust
 // crates/kernel/src/kernel_host/mod.rs
 
-/// 用户配的板（**待生效**）—— §2.1 裁决 A 的那个字段。
-pending_platform: Option<PlatformDescription>,
+/// 用户配的板（**跨 `LoadProject` 保持**）—— §2.1 裁决 A 的那个字段。
+///
+/// ⚠️ **它就是「用户意图」本身**，不是「待生效的那一份」——
+/// 用户的板一旦配过，就**一直**在那儿 ⇒ `LoadProject` 始终优先用它建图
+/// （§2.2 的施工期订正）。
+user_board: Option<PlatformDescription>,
 /// 当前会话是否已经装载过镜像（§2.3 裁决 C）。
 image_loaded: bool,
 ```
+
+⚠️ **为什么只留一个字段**（初版写的是 `pending_platform` + `image_loaded` 两个）：
+「待生效」这个量**可以推导**出来 ⇒ `pending = user_board.is_some() && self.platform != *user_board`
+（「用户配的板」≠「当前生效的图」⇒ 用户配的板**还没生效**）。
+⇒ **不单独存一个 `pending` 标志** ⇒ 少一个状态 ⇒ **少一处可能不同步的地方**
+（存两个字段 ⇒ 「配了板但没生效」与「标志忘了翻」是两种不同的错，前者推导不出来、后者无从发现）。
+⇒ `PlatformDescription` 派生了 `PartialEq`（契约层 `platform.rs`）⇒ 这个比较是**类型安全**的。
 
 **`SetMemoryMap` 的处理**（顺序固定；⚠️ **它只改总线、不动固件** ⇒ 裁决 M）：
 
 ```
 ① description.validate()          ← 契约层那个唯一校验器 ⇒ E_PLT-01..E_PLT-11
-② pending_platform = Some(description)
+   失败 ⇒ 返回错误事件；user_board 与 self.platform **都不动**
+② user_board = Some(description)
 ③ 若 !image_loaded ⇒
-       self.platform = description        ← 用户配的板成为「当前图」
-       rebuild_platform()                 ← 立即生效（未装载 ⇒ 不会丢任何东西）
-       pending_platform = None            ← 生效了 ⇒ 没有待生效的
-④ 回 EventPayload::MemoryMap { description: self.platform.clone(), pending: pending_platform.is_some() }
+       self.platform = description.clone()   ← 用户配的板成为「当前图」
+       rebuild_platform()                    ← 立即生效（未装载 ⇒ 不会丢任何东西）
+       ⚠️ 失败 ⇒ **恢复旧图**并**再重建一次**，只报**原始**错误
+       （rebuild_platform 第一步就是 reset_memory_map ⇒ 不恢复就会留下**半张图**）
+④ pending = user_board.is_some() && self.platform != *user_board
+⑤ 回 EventPayload::MemoryMap { description: self.platform.clone(), pending }
 ```
 
 **`LoadProject` 的处理**（只改第 2 步）：
 
 ```
-② 若 let Some(p) = pending_platform.take() ⇒ self.platform = p
+② 若 let Some(ub) = user_board ⇒ self.platform = ub.clone()   ← ★ 用户配的板**保持**
    否则 ⇒ choose_platform(&ranges)        ← ★ 今天的自动选档，逐字不变
 ```
 
+⚠️ **这一步是 §2.2 施工期订正的落点**：初版在这里写「无条件自动选档」⇒ **用户装载前配的板会被覆盖掉**
+⇒ 「装载前立即生效」就是一句空话 ⇒ **必须**先看 `user_board`。
+
 **`Subscribe { topic: "memory.map" }` 的处理**（§0.1 ⑤ · 裁决 J）：
-⇒ **立即推一条** `MemoryMap { description: self.platform.clone(), pending: ... }`
+⇒ **立即推一条** `MemoryMap { description: self.platform.clone(), pending: <同上推导> }`
 （与 `sim.registers` / `waveform.history` 的 `force = true` 同一套路）。
 
 ### 3.3 前端
@@ -241,7 +265,7 @@ image_loaded: bool,
 | # | 裁决 | 内容 |
 | --- | --- | --- |
 | **A** | 板级配置存**宿主会话内** | 契约层**零新 DTO**（复用 `PlatformDescription`）⇒ 不改 `Project`、不造第二份描述 |
-| **B** | 生效时机 | **未装载 ⇒ 立即生效**；**已装载 ⇒ 存为待生效**（⚠️ 与用户「拒绝」裁定有一处**最小偏离**，理由是**死锁**，见 §2.2） |
+| **B** | 生效时机 | **未装载 ⇒ 立即生效**；**已装载 ⇒ 记下用户的板但不重建总线**（⚠️ 与用户「拒绝」裁定有一处**最小偏离**，理由是**死锁**，见 §2.2）；⚠️ **用户的板跨 `LoadProject` 保持**（**施工期订正**：初版写「装载时无条件自动选档」⇒ **会把装载前配的板覆盖掉** ⇒ 「装载前立即生效」成空话） |
 | **C** | 「已装载」判定 | 宿主新增 `image_loaded: bool`；本批**不做**卸载命令 |
 | **D** | 事件载荷 | `description` = **当前生效**的图；`pending` = 有无待生效配置；**草稿不进事件** |
 | **E** | 校验 | 用**契约层那个唯一校验器** ⇒ `E_PLT-01..11` ⇒ **不新增场景码**、宿主不自写校验 |
@@ -283,8 +307,8 @@ image_loaded: bool,
 | B-1 | `SetMemoryMap`（未装载）⇒ 总线按新图重建：段数 / 基址 / 大小与描述**逐条一致** | 不重建 ⇒ 红 |
 | B-2 | 描述不合规（`size > region_budget_bytes`）⇒ **`E_PLT-07`**（**族是 `PLT`**，**不是** `CTX` 族 —— ⚠️ 契约层 `CTX` 族**没有**具名场景码 ⇒ 判据是**族 + 码**，不是文案） | 族或码错 ⇒ 红 |
 | B-3 | 已装载镜像时 `SetMemoryMap` ⇒ **不重建总线**（**正在跑的 guest 一字不受影响**）+ 事件 `pending = true` | 重建了 ⇒ 红（对比引擎快照） |
-| B-4 | 有待生效配置时 `LoadProject` ⇒ **用用户的图**建图（**不**走自动选档） | 仍走自动选档 ⇒ 红 |
-| B-5 | **没有**待生效配置时 `LoadProject` ⇒ 走今天的自动选档 ⇒ **逐字等价** | 行为变了 ⇒ 红（既有断言一条不改） |
+| B-4 | 有用户的板时 `LoadProject` ⇒ **用用户的图**建图（**不**走自动选档）—— ⚠️ **含「装载前配的板」这一路**（用户的板**跨装载保持**） | 仍走自动选档 ⇒ 红 |
+| B-5 | **用户从未配过板**时 `LoadProject` ⇒ 走今天的自动选档 ⇒ **逐字等价** | 行为变了 ⇒ 红（既有断言一条不改） |
 | B-6 | `Subscribe { topic: "memory.map" }` ⇒ **立即**收到一条当前生效的图 | 不推 ⇒ 红 |
 | B-7 | 配的板里**MMIO 器件真的挂上了**（UART / CLINT / PLIC / GPIO 各自实例可读） | 只建了 RAM 没挂器件 ⇒ 红 |
 | B-8 | **RAM 大小真的可定制**：配 8 MiB ⇒ 写 8 MiB 处**成功**、写 8 MiB 之外 ⇒ **架构陷阱 cause 5 / 7** | 改 size 不生效 ⇒ 红 |
