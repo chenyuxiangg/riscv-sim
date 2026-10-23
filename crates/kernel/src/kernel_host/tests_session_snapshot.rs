@@ -359,10 +359,19 @@ fn capture_session_assembles_the_six_segments_from_their_sources() {
         payload.m13_state.mem_pages, pages,
         "段 2 必须逐页等于总线的导出"
     );
+    // ⚠️ **v0.26（STAGE-11 裁决 C）**：页表从「每段 RAM 的全部 64 KiB 块」
+    // 变成「**只装写过的** 4 KiB 页」⇒ 段 2 只带**真正被碰过的**页。
+    //
+    // 这个会话碰过的页**恰好一页**：demo 固件落在低段 RAM 的**第一页**
+    // （`0x0`），跑的那 4 条指令里的 `sw x3, 0x100(x0)` 也落在同一页
+    // （`0x100`）⇒ 高段 4 MiB RAM **一个字节都没被碰过** ⇒ **零页**。
+    //
+    // ⚠️ 旧断言是 **80**（低段 1 MiB / 64 KiB = 16 页 + 高段 4 MiB / 64 KiB
+    // = 64 页）⇒ 那是「整块导出全零页」的形状 ⇒ **载荷里 79 页是零**。
     assert_eq!(
         payload.m13_state.mem_pages.len(),
-        80,
-        "低段 1 MiB（16 页）+ 高段 4 MiB（64 页），按 64 KiB 分页"
+        1,
+        "只装**写过的** 4 KiB 页：demo 固件与那 4 条指令只碰过低段 RAM 的第一页"
     );
     assert_eq!(
         payload.m13_state.mem_pages[0].base, 0,

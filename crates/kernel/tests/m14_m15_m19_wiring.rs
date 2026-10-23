@@ -489,32 +489,80 @@ fn timer_compare_hit_reaches_the_waveform_pipeline() {
 
 #[test]
 fn oversized_region_is_rejected_without_allocating() {
-    // D-10（M-14 侧）：畸形固件可以声明 GiB 级的段；总线必须在
-    // **分配之前** 拒绝它，否则浏览器标签页直接 OOM。
+    // D-10（M-14 侧）：畸形固件可以声明 GiB 级的段；总线必须**挡住**它，
+    // 否则浏览器标签页直接 OOM。
+    //
+    // ⚠️ **v0.26（STAGE-11 裁决 B）：护栏的「被测量」从「声明大小」改成
+    // 「物理占用」** ⇒ 一个 GiB 的**声明**现在**免费**（懒分配 ⇒ 零物理
+    // 代价）⇒ 但 D-10 的保护**没有丢**：它现在挡的是「**真占**那么多」。
+    //
+    // ⇒ 这条用例钉的是**两件事**：① 声明不花钱；② 真占超预算被拒，且
+    // **被拒时不留下任何已物化的页**。
     let mut bus = Bus::new();
-    let err = bus
-        .map_ram(0, 0x4000_0000, &[])
-        .expect_err("a 1 GiB region must be rejected");
+
+    // ① 声明一个 256 MiB 的区域：**成功**，而且**零物理占用**。
+    bus.map_ram(0, 0x1000_0000, &[])
+        .expect("a big declaration is free now — it materializes nothing");
+    assert_eq!(bus.region_count(), 1);
+    assert_eq!(
+        bus.ram_allocated_bytes(),
+        0,
+        "声明不占物理内存（这正是懒分配要买到的东西）"
+    );
+
+    // ② 真占超预算 ⇒ **E_BUS-09**，且**零页留下**。
+    let mut small = Bus::with_max_region_bytes(0x1000);
+    let err = small
+        .map_ram(0, 0x1000, &[0u8; 0x1001])
+        .expect_err("a region that really occupies more than the cap must be rejected");
     assert_eq!(err.family, ErrorFamily::Bus);
-    assert_eq!(err.scenario, 9, "over-cap region raises E_BUS-09");
-    assert_eq!(bus.region_count(), 0);
+    assert_eq!(err.scenario, 9, "over-cap occupancy raises E_BUS-09");
+    assert_eq!(
+        small.ram_allocated_bytes(),
+        0,
+        "被拒的区域**不得**留下任何已物化的页"
+    );
+    assert_eq!(small.region_count(), 0);
 }
 
 #[test]
 fn the_region_size_cap_is_configurable() {
     // 上限可配：默认 16 MiB，宿主可按自己的预算策略调整。
+    //
+    // ⚠️ **v0.26（STAGE-11 裁决 B）**：上限现在管的是**物理占用**，不是
+    // 声明大小 ⇒ 「声明多大」不再被拒，**「真占多少」才被拒**。
     let mut bus = Bus::with_max_region_bytes(0x1000);
     assert_eq!(bus.max_region_bytes(), 0x1000);
-    bus.map_ram(0, 0x1000, &[])
-        .expect("a region at the cap is fine");
-    let err = bus
-        .map_ram(0x2000, 0x1001, &[])
-        .expect_err("a region over the cap must be rejected");
-    assert_eq!(err.scenario, 9);
-    // 调整上限后同样的尺寸可以映射了。
-    bus.set_max_region_bytes(0x2000);
+
+    // 声明本身**免费** ⇒ 超过上限的声明也**合法**。
     bus.map_ram(0x2000, 0x1001, &[])
+        .expect("a declaration over the cap is free now");
+    assert_eq!(bus.ram_allocated_bytes(), 0);
+
+    // 但**物化**第二页就会超过上限（0x1000 = 1 页）⇒ 被拒。
+    //
+    // ⚠️ 区域必须**够大**（0x2000 = 2 页）才能让第二个写落在**区域内部**：
+    // 否则 `0x1000` 落在区域**外面** ⇒ 那报的是 **E_BUS-01（未映射）**，
+    // 压根走不到护栏 ⇒ 断言会挂在场景码上而不是挂在护栏上。
+    bus.map_ram(0, 0x2000, &[])
+        .expect("a two-page region is free to declare");
+    bus.write(0, BusWidth::Byte, 0xAA)
+        .expect("the first page fits");
+    let err = bus
+        .write(0x1000, BusWidth::Byte, 0xBB)
+        .expect_err("a second page is over the cap");
+    assert_eq!(err.scenario, 9, "over-cap occupancy raises E_BUS-09");
+    assert_eq!(
+        bus.ram_allocated_bytes(),
+        4096,
+        "被拒的那次写**不得**留下已物化的页"
+    );
+
+    // 调整上限后同样的写**成功** ⇒ 护栏**只能放宽，不能去掉**。
+    bus.set_max_region_bytes(0x2000);
+    bus.write(0x1000, BusWidth::Byte, 0xBB)
         .expect("raising the cap works");
+    assert_eq!(bus.ram_allocated_bytes(), 2 * 4096);
 }
 
 #[test]
