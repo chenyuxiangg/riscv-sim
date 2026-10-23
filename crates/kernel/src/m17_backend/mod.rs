@@ -34,7 +34,7 @@ use riscv_sim_contract::csr::{
     pending_lines_to_mip_mask, CSR_IRQ_CLEAR, CSR_MIE, CSR_MIP, CSR_MSTATUS,
 };
 use riscv_sim_contract::error::{
-    ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_01_INVALID_REGISTER_INDEX,
+    ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_01_INVALID_REGISTER_INDEX, E_ENG_03_NO_PROGRESS,
 };
 use riscv_sim_contract::model::{Breakpoint, SimState, WatchAccess, Watchpoint, WriteSize};
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
@@ -43,7 +43,8 @@ use riscv_sim_contract::snapshot::EngineSnapshotDto;
 
 use crate::m08_breakpoint::{BreakpointTable, WatchpointTable};
 use crate::m12_engine::{
-    Engine, ExecOutcome, InstructionExecutor, PeripheralTicker, RunReason, TIME_QUANTUM_PS,
+    Engine, ExecOutcome, InstructionExecutor, PeripheralTicker, RunReason, NO_PROGRESS_WINDOW,
+    TIME_QUANTUM_PS,
 };
 use crate::m13_iss::csr::{csr_read, csr_write};
 use crate::m13_iss::{enter_trap, write_gpr, Iss, StepOutcome};
@@ -967,6 +968,34 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             pause_requested,
         );
 
+        // **无进展计数**（LLD §3.5 的 watchdog · 冻结规格 STAGE-13 裁决 N ·
+        // 台账 **D-114**）：连续多少次迭代「既没有指令退休、虚拟时间也没有
+        // 前进」。
+        //
+        // ⚠️ **为什么 `step_n` 需要它**（M-12 **已经有**同一道守卫）：
+        // M-12 的守卫住的是**时间驱动**主循环（`run_until`）；`step_n` 是
+        // **指令驱动**路径，它**自己**转 `for _ in 0..n` 循环 ⇒ 同一个不变式
+        // （M-16 的 `active_irq` 单级防护：未清除前不再交付）一旦破掉，
+        // 这里就是**同一个不变式的第二个落点** —— 同样的活锁形态、同样的
+        // 挂死（VD-F3 实测：M-12 那条路径 8 秒内被调用 3.35 亿次不返回）。
+        //
+        // ⚠️ **口径与 M-12 一致**：**中断交付本身不算进展** —— 一条被反复
+        // 交付、从不退休的中断正是 VD-F3 的活锁形态，把它算成进展就等于
+        // **把活锁放过去**。
+        //
+        // ⚠️ **窗口常量复用 M-12 的**（裁决 N）：[`NO_PROGRESS_WINDOW`] 是
+        // **引用** M-12 的那一个，**不复制字面量** —— 一个约束一个落点
+        // （台账 **D-120**）。场景码 [`E_ENG_03_NO_PROGRESS`] 同理：它的
+        // **唯一定义处**在契约层（`riscv_sim_contract::error`），M-12 只是
+        // `pub use` 转出。
+        //
+        // ⚠️ **重入语义**（与 M-12 同）：守卫触发时**只是返回**，不改任何
+        // 引擎状态 ⇒ 宿主可以再次调 `step_n`；但 `no_progress` 是**本批次
+        // 的局部变量** ⇒ 每次重入都从 0 重新计数 ⇒ 宿主做「三次确认」时，
+        // 实际发生的空转次数是 **3 × `NO_PROGRESS_WINDOW`**，**不是**
+        // `NO_PROGRESS_WINDOW`。
+        let mut no_progress = 0u32;
+
         for _ in 0..n {
             // (1) 宿主暂停 —— 停在**下一条指令边界**（裁决 C）。
             //
@@ -1007,7 +1036,29 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             engine.tick_peripherals(now_ps)?;
 
             // (4) 执行一条指令（陷阱 / 观察点的判定都在执行器里）。
-            match executor.step(engine.state_mut()) {
+            //
+            //     ⚠️ 记下**执行前**的虚拟时间：执行器**可能**推进它 ——
+            //     正规实现只在指令退休时推进，但守卫**不能依赖**那条约定
+            //     （口径看事实，不看承诺）。
+            let before_ps = engine.now_ps();
+            let outcome = executor.step(engine.state_mut());
+            let after_ps = engine.now_ps();
+            // ⚠️ **有指令退休 ⇒ 有进展 ⇒ 无进展计数归零**。
+            //
+            //     归零放在 `match` **之前**：这样它在「继续循环」的那条
+            //     路径上是**活的**（下一轮还要读它）⇒ 编译器不会报「赋值
+            //     后从未被读」；`Stop` 分支随后 `break` —— 那条路径上计数
+            //     本就不再被读（语义上「归零」照样成立）。
+            let retired = match &outcome {
+                Ok(ExecOutcome::Advanced) => true,
+                // 陷进去的指令**也算执行了**（它被取指、被译码）⇒ 有指令退休。
+                Ok(ExecOutcome::Stop { consumed, .. }) => *consumed,
+                _ => false,
+            };
+            if retired {
+                no_progress = 0;
+            }
+            match outcome {
                 Ok(ExecOutcome::Advanced) => {
                     executed += 1;
                     *total_executed += 1;
@@ -1015,6 +1066,39 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
                 Ok(ExecOutcome::InterruptTaken) => {
                     // 中断交付**没有**指令退休 ⇒ 不计入 `executed` /
                     // `total_executed`（STAGE-4 裁决 I）。批次**不停**。
+                    //
+                    // ⚠️ **口径与 M-12 一致**：**中断交付本身不算进展**
+                    // （VD-F3 实测：把它算成进展 = 把活锁放过去）。
+                    //
+                    // ⚠️ 判据看**虚拟时间有没有前进**（执行器**可能**推进
+                    // 它 ⇒ 用前后比较判事实，不靠约定）。
+                    if after_ps != before_ps {
+                        // 虚拟时间前进了 ⇒ 有进展。
+                        no_progress = 0;
+                    } else {
+                        no_progress = no_progress.saturating_add(1);
+                        if no_progress >= NO_PROGRESS_WINDOW {
+                            // ⇒ **报错退出**（而不是继续自旋）。
+                            //
+                            // ⚠️ **只是返回，不改任何引擎状态**（不推进
+                            // 虚拟时间、不改寄存器）⇒ 宿主可以安全重入
+                            // （与 M-12 的守卫同口径）。
+                            //
+                            // ⚠️ **不记成 guest 陷阱**（`last_stop` 保持
+                            // `None`）：停滞是**平台故障**（活锁 / guest
+                            // 失控），与 guest 的正常停止语义**严格区分**
+                            // （LLD §3.5 · 评审 12-2 / 12-3）。
+                            return Err(PlatformError::new(
+                                ErrorFamily::Engine,
+                                E_ENG_03_NO_PROGRESS,
+                                format!(
+                                    "指令驱动批次无进展：连续 {no_progress} 次既没有指令退休、\
+                                     虚拟时间也没有前进（watchdog 窗口 {NO_PROGRESS_WINDOW}）—— \
+                                     判定为停滞并中止"
+                                ),
+                            ));
+                        }
+                    }
                 }
                 Ok(ExecOutcome::Stop { reason, consumed }) => {
                     if consumed {
@@ -1290,8 +1374,11 @@ pub const BACKEND_FAMILY: ErrorFamily = ErrorFamily::Iss;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
     use riscv_sim_contract::csr::{
-        std_irq_bit_for_line, CSR_MCAUSE, CSR_MEPC, CSR_MIE, CSR_MIP, CSR_MTVAL, CSR_MTVEC,
+        arch_mcause_for_line, std_irq_bit_for_line, CSR_MCAUSE, CSR_MEPC, CSR_MIE, CSR_MIP,
+        CSR_MTVAL, CSR_MTVEC, IRQ_TIMER_COMPARE,
     };
     use riscv_sim_contract::model::Breakpoint;
     use riscv_sim_contract::protocol::EventPayload;
@@ -1315,6 +1402,114 @@ mod tests {
         }
         fn lower(&mut self, _irq: u16) -> Result<(), PlatformError> {
             Ok(())
+        }
+    }
+
+    /// 假中断端口的**剧本**。
+    ///
+    /// ⚠️ 这个假端口存在的**唯一**理由是：造出「同一条中断被**反复交付**」
+    /// 的形态 —— 那是 **VD-F3 的活锁形态**，也是台账 **D-114** 说的
+    /// 「同一个不变式的第二个落点」（M-12 的守卫住在**时间驱动**主循环，
+    /// `step_n` 是**指令驱动**路径）。
+    #[derive(Debug, Clone, Copy)]
+    enum FakeScript {
+        /// **每次**都交付一条中断 ⇒ guest **一条指令也退休不了**
+        /// ⇒ 虚拟时间**一格也不前进** ⇒ 活锁。
+        Always,
+        /// **每隔一次**交付一条中断 ⇒ 「交付 → guest 退休一条指令 → 再交付」
+        /// 交替出现 ⇒ 每次交付的**无进展计数**都会被下一次退休**归零**。
+        EveryOther,
+    }
+
+    /// **假**的中断端口：按剧本交付中断。
+    ///
+    /// ⚠️ **为什么需要它**：`step_n` 内部**自己**构造执行器（**没有**注入
+    /// 执行器的接缝）⇒ 只能从**中断端口**这一侧注入 ⇒ 端口是唯一能造出
+    /// 「反复交付」的接缝（[`SelfIssBackend::install_interrupt_port`]）。
+    ///
+    /// ⚠️ **`poll` 返回 `Ok(None)`**：交付是**拉取式**的（执行器在取指
+    /// 边界调 `take_intr`）⇒ `poll` 的返回值在本形态里**用不上**；
+    /// `Ok(None)` 才是「本轮不仲裁出新交付」的诚实说法。
+    ///
+    /// ⚠️ **`pending_lines` 返回「没有挂起线」**：这个假端口**不**模拟
+    /// M-16 的挂起队列（交付是**当场**造的）⇒ 它没有「挂起线」这个事实可
+    /// 报 ⇒ 报「没有」而不是**伪造**一条（D-100 的同一条纪律：读不到 ≠
+    /// 有，但这里确实**没有**）。
+    struct FakeInterruptPort {
+        /// 交付剧本。
+        script: FakeScript,
+        /// `take_intr` 被调用的次数（测试用它钉住窗口大小）。
+        takes: Rc<Cell<u32>>,
+        /// `take_intr` **真的交付**了一条中断的次数。
+        delivered: Rc<Cell<u32>>,
+    }
+
+    impl FakeInterruptPort {
+        /// 造一个假端口，并把它**共享**的计数交给测试。
+        fn new(script: FakeScript) -> (Self, FakeCounters) {
+            let takes = Rc::new(Cell::new(0u32));
+            let delivered = Rc::new(Cell::new(0u32));
+            (
+                Self {
+                    script,
+                    takes: Rc::clone(&takes),
+                    delivered: Rc::clone(&delivered),
+                },
+                FakeCounters { takes, delivered },
+            )
+        }
+    }
+
+    /// 假端口的**共享计数**（端口被装进 `Box` 之后测试仍要读它）。
+    #[derive(Debug, Clone)]
+    struct FakeCounters {
+        /// `take_intr` 的调用次数。
+        takes: Rc<Cell<u32>>,
+        /// 真的交付了一条中断的次数。
+        delivered: Rc<Cell<u32>>,
+    }
+
+    impl InterruptPort for FakeInterruptPort {
+        fn pending_intr(&self) -> Option<PendingIntr> {
+            // 本端口**不**维护「已登记但尚未被取走」的状态（交付是当场
+            // 造的）⇒ 这里诚实地报「没有」。
+            None
+        }
+
+        fn take_intr(&mut self) -> Option<PendingIntr> {
+            let n = self.takes.get() + 1;
+            self.takes.set(n);
+            let deliver = match self.script {
+                FakeScript::Always => true,
+                FakeScript::EveryOther => n % 2 == 1,
+            };
+            if !deliver {
+                return None;
+            }
+            self.delivered.set(self.delivered.get() + 1);
+            // ⚠️ `mcause` 必须是**架构 cause 码**（`IRQ_BASE | 7`），不是
+            // 内部线号 —— 口径与 M-16 的交付构造一致。
+            Some(PendingIntr {
+                line: IRQ_TIMER_COMPARE,
+                cause: arch_mcause_for_line(IRQ_TIMER_COMPARE).unwrap_or(0),
+            })
+        }
+
+        fn clear(&mut self, _line: u16) {}
+
+        fn poll(
+            &mut self,
+            _now_ps: u64,
+            _mie: u32,
+            _mstatus: u32,
+        ) -> Result<Option<PendingIntr>, PlatformError> {
+            // 交付是**拉取式**的（`take_intr`）⇒ 仲裁在这里没有产出。
+            Ok(None)
+        }
+
+        fn pending_lines(&self) -> Option<Vec<u16>> {
+            // 没有挂起队列 ⇒ 没有挂起线（**知道的**「没有」，不是「读不到」）。
+            Some(Vec::new())
         }
     }
 
@@ -1470,6 +1665,78 @@ mod tests {
         let executed = backend.step_n(1).expect("step");
         assert_eq!(executed, 1, "陷入的指令计入执行数");
         assert_eq!(backend.last_stop_reason(), Some(HaltReason::Trap));
+    }
+
+    /// **D-1**：反复交付的同一条中断 ⇒ `step_n` 判为**停滞**并**报错退出**，
+    /// 而不是**自旋到挂死**（台账 **D-114** · 冻结规格 STAGE-13 §3.5 裁决 N）。
+    ///
+    /// ⚠️ **这条用例在守卫缺失时会让整个测试二进制挂死**（活锁自旋）⇒
+    /// 「用例能跑完」本身就是判据的一部分（跑它**必须**带 watchdog）。
+    ///
+    /// ⚠️ **触发条件苛刻**：`step_n(n)` 的循环最多跑 `n` 次 ⇒ 只有
+    /// `n > NO_PROGRESS_WINDOW` 才可能触发 ⇒ 这里用
+    /// `NO_PROGRESS_WINDOW + 1`。
+    #[test]
+    fn step_n_reports_no_progress_when_the_same_interrupt_keeps_being_delivered() {
+        let (port, counters) = FakeInterruptPort::new(FakeScript::Always);
+        let mut backend = backend_with_demo();
+        backend.install_interrupt_port(Box::new(port));
+
+        let err = backend
+            .step_n(NO_PROGRESS_WINDOW + 1)
+            .expect_err("反复交付的中断必须被判为停滞（E_ENG-03），不能一直自旋");
+
+        // ⚠️ 断言落在**族 + 场景码**上，**不**去匹配 message 文本。
+        assert_eq!(err.family, ErrorFamily::Engine);
+        assert_eq!(err.scenario, E_ENG_03_NO_PROGRESS);
+        // ⚠️ **窗口 = M-12 的 `NO_PROGRESS_WINDOW`**（复用，不是复制字面量）：
+        // 守卫在**第 `NO_PROGRESS_WINDOW` 次**交付后触发 ⇒ 交付次数正好
+        // 等于窗口。若 M-17 自己抄了一份字面量而 M-12 的窗口变了，这里
+        // 就会红。
+        assert_eq!(
+            counters.delivered.get(),
+            NO_PROGRESS_WINDOW,
+            "停滞判定发生在第 NO_PROGRESS_WINDOW 次无进展交付之后"
+        );
+    }
+
+    /// **D-2**（正向）：「交付 → guest 退休一条指令 → 再交付」交替出现时，
+    /// **不**触发守卫 —— 无进展计数被**正确归零**。
+    ///
+    /// ⚠️ 这条用例钉住的是**归零**这个动作：把「有指令退休 ⇒ 归零」那句
+    /// 删掉 ⇒ 无进展计数一路涨到窗口 ⇒ 守卫触发 ⇒ 这里**变红**（而 D-1
+    /// 那条仍然绿 ⇒ 两条用例互为补充）。
+    ///
+    /// ⚠️ **为什么 `n = 2 × 窗口`**：交替形态下「交付」的次数只有 `n / 2`
+    /// ⇒ 要让「不归零」的变异**真的**涨到窗口，交付次数必须**达到**窗口
+    /// ⇒ `n` 必须**不小于** `2 × 窗口`。取 `n = 2 × 窗口` 时交付次数**正好**
+    /// 等于窗口 ⇒ 变异恰好在最后一次交付上触发（红得**准**，不多不少）。
+    #[test]
+    fn an_advanced_instruction_resets_the_no_progress_counter() {
+        let (port, counters) = FakeInterruptPort::new(FakeScript::EveryOther);
+        let mut backend = backend_with_demo();
+        backend.install_interrupt_port(Box::new(port));
+
+        let n = 2 * NO_PROGRESS_WINDOW;
+        let executed = backend
+            .step_n(n)
+            .expect("每隔一次交付 ⇒ 每次交付后 guest 都退休了一条指令 ⇒ 不该触发守卫");
+
+        // 每隔一次交付 ⇒ 交付次数 = `n` 的一半（向上取整，第一次就交付）。
+        assert_eq!(
+            counters.delivered.get(),
+            n.div_ceil(2),
+            "「每隔一次」剧本：奇数次取交付 ⇒ 交付次数 = ceil(n / 2)"
+        );
+        // 每个迭代要么交付中断、要么退休一条指令 ⇒ 两者之和 = 迭代次数。
+        assert_eq!(
+            executed,
+            n - counters.delivered.get(),
+            "guest 必须真的退休了指令（否则这条用例证明不了「归零」）"
+        );
+        assert_eq!(counters.takes.get(), n, "每个指令边界都取一次交付");
+        // ⚠️ 停滞**不是** guest 陷阱 ⇒ `last_stop` 不该被记成 `Trap`。
+        assert_eq!(backend.last_stop_reason(), None);
     }
 
     #[test]
