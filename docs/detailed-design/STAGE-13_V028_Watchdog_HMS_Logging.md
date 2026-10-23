@@ -470,8 +470,19 @@ pub enum SignalSrc { Session, Command, Transport, Engine, Backend, Trap }
 pub enum SignalKind { Heartbeat, State, Error, Timeout, Crash, Conn, Watchdog, Trap }
 
 /// 分级（LLD §2.1.1 的 `Severity`）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// ⚠️ **刻意不 derive `PartialOrd` / `Ord`**（第五次订正的裁定）：变体声明顺序是
+/// `Fatal` → `Critical` → `Warning` → `InfoNoDegrade`，而**致命是语义上最重的**
+/// ⇒ derive 出来的 `Ord` 会让 `Fatal` 变成**最小值** ⇒ 任何写
+/// `sev.max(other)` / `sev.min(other)` 的调用者都会**拿到相反的结论**。
+/// ⇒ 严重度比较一律走显式的 [`Severity::severity_rank`]（Fatal = 3 最大）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Severity { Fatal, Critical, Warning, InfoNoDegrade }
+
+impl Severity {
+    /// 严重度序（**越大越严重**）：`InfoNoDegrade` = 0 … `Fatal` = 3。
+    pub fn severity_rank(self) -> u8;
+}
 
 /// 信号上下文（LLD 里 `ctx` 是 uint32；`GUEST_RUN` 是关键取值）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -545,7 +556,10 @@ pub struct DiagnosticKit {
 pub enum Health { Ok, Degraded, Critical }
 
 /// HMS
-#[derive(Debug, Clone)]
+///
+/// ⚠️ **不能 derive `Clone`**（第五次订正的裁定）：`executor` 与 `store` 是
+/// **trait 对象**（`Box<dyn …>`）⇒ 既不可克隆也没有 `Debug` ⇒ `Clone` 派生
+/// **编译不过**。⇒ 本类型**不提供 `Clone`**，`Debug` **手写**。
 pub struct Hms {
     role: Role,
     signals: VecDeque<HealthSignal>,
@@ -564,6 +578,12 @@ pub struct Hms {
     // ⚠️ **第四次订正的裁定**：归档通道必须是**注入**的，不能让 M-22 自己
     // 造一个后端 —— 那会出现「两个真相」（M-22 造的那个 + 宿主那个）。
     store: Option<Box<dyn DataStore>>,
+    // M-21 的日志缓冲（可注入，宿主装配）—— 管理员分发的**日志关联**从这里取。
+    // ⚠️ **第五次订正的裁定**：没有它，`AdminDiagnosis.log_ref` **恒空** ⇒
+    // 「管理员看得到日志关联、产品看不到」这条**角色边界**只剩结构、**没有判别力**
+    // ⇒ 注入后 Admin 分支能真的带上日志条目，Product 分支一条都带不上。
+    // ⚠️ 形状与 M-18 的探针表同款（`Rc<RefCell<…>>`，内核单线程）。
+    logs: Option<Rc<RefCell<LogBuffer>>>,
 }
 
 pub trait DegradeExecutor {
@@ -578,6 +598,8 @@ impl Hms {
     /// 注入归档后端（宿主装配）—— 不注入则 `archive_diagnostic_kit` 报
     /// 「没有归档通道」而不是静默成功。
     pub fn install_store(&mut self, store: Box<dyn DataStore>);
+    /// 注入日志缓冲（宿主装配）—— 管理员分发的日志关联从这里取。
+    pub fn install_log_source(&mut self, logs: Rc<RefCell<LogBuffer>>);
 
     /// 上报：**先分级再入流** → 分角色分发 → 查降级策略 → 降级（LLD §3.1）
     pub fn report(&mut self, signal: HealthSignal) -> Severity;
@@ -623,6 +645,10 @@ impl Hms {
 
     /// 执行降级（重试 ≤3 次；未实现动作 ⇒ `Unsupported`）
     pub fn degrade(&mut self, action: DegradeAction) -> DegradeOutcome;
+    /// **降级失败的累计记录**（第五次订正的裁定）：`degrade` 的返回值不带错误，
+    /// 而「终态上报 `E_HMS_01_DEGRADE_FAILED`」这条必须**可观察** ⇒ 这里给出
+    /// 出口（每次终态失败追加一条，**一次运行只上报一次**）。
+    pub fn degrade_failures(&self) -> &[PlatformError];
 }
 
 /// 分发结果
@@ -655,6 +681,10 @@ pub enum DispatchResult {
    4. 未命中 ⇒ `Severity::InfoNoDegrade`（**不降级**）。
 2. **`report` 的顺序**：`classify` → 入流 → 分发 → 查策略 → 降级 ⇒
    **流里存的是分级后的结果**（`severities` 与 `signals` 同序）。
+   ⚠️ **降级闸门（第五次订正的裁定）**：LLD §3.1 的伪码是
+   `if (act != NONE && (sev == FATAL || sev == CRITICAL)) degrade(act);`
+   ⇒ **只有 `Fatal` / `Critical` 才降级**；`Warning` 即使命中策略也**只记录不降级**。
+   ⇒ **不许**写成「非 `InfoNoDegrade` 就降级」—— 那会让 `Warning` 越权触发降级动作。
 3. **保留带**：FATAL / CRITICAL 的信号**另外**进 `retained`，**永不丢弃**。
 4. **崩溃冻结**：一旦有 FATAL 信号入流 ⇒ `frozen = true` ⇒ `signals` 不再丢最旧。
 5. **`Health` 派生**：有 FATAL ⇒ `Critical`；有 CRITICAL / WARNING ⇒ `Degraded`；否则 `Ok`。
@@ -662,6 +692,9 @@ pub enum DispatchResult {
 6. **幂等**：`watchdog_fired` 为真时，`report` **不重复触发降级**（D-115 的核心判据）。
 7. **角色边界**：`Role::Product` 的 `DispatchResult` **不含**任何日志条目；
    `Role::Admin` 的含 `log_ref`。⇒ 断言必须是「**Product 的结果里搜不到任何日志文本**」。
+   ⚠️ **`log_ref` 的取法（第五次订正的裁定）**：从注入的 `logs` 里取
+   `query(&LogQuery::default())` 结果的**最后 8 条**（最近的、最重的那些）⇒
+   **没有注入日志源时 `log_ref` 恒空**（如实降级，不编造）。
 8. **诊断包不含原始日志**：`DiagnosticKit` 的字段里**没有**日志条目 ⇒ 断言「诊断包里
    不含 `LogEntry`」。
 9. **`Unsupported` 不是失败**：本批只有 `Terminate` 有实现；其余动作 ⇒
@@ -670,6 +703,9 @@ pub enum DispatchResult {
 11. **重试 ≤3**：动作执行失败 ⇒ 重试，**至多 3 次** ⇒ 仍失败 ⇒ `Failed` ⇒
     **终态上报 `E_HMS_01_DEGRADE_FAILED`**（一次运行只上报一次）。
 12. **指标环**：容量 4096，满则丢最旧。
+13. **信号流环**：容量 **10⁴**（LLD §6.2(11)「健康信号流环形 ≤10⁴ 条」），满则丢最旧；
+    公开为 `SIGNAL_RING_CAPACITY`。⚠️ **保留带例外**：FATAL / CRITICAL 进
+    `retained` 且**永不丢弃** ⇒ 极端情况下无界增长（本批按 LLD 实现，护栏见 §8.2）。
 
 ### 3.3 宿主看门狗（`kernel_host`）（裁决 F + G）
 
@@ -968,7 +1004,11 @@ M-12/M-17 守卫触发  ──►  Err(E_ENG_03_NO_PROGRESS)
 
 | 欠账 | 闭环口径 |
 | --- | --- |
-| **D-115** | 宿主侧时间预算（`HOST_WATCHDOG_BUDGET_MS = 200`）+ 滑动窗口三次确认（`HOST_WATCHDOG_CONFIRMATIONS = 3`）+ **HMS 同步终止**（`Severity::Fatal` ⇒ `Health::Critical` + `DegradeAction::Terminate`）+ **`WATCHDOG` 日志**（M-21 环里 `ctx = "ENG-WATCHDOG"`）+ **幂等标志**（`watchdog_fired`）—— 判别式 D-3 / D-4 / D-5 / D-6 / D-10。⚠️ **代价如实记录**：因 M-12 的 `no_progress` 是局部变量（§1.7），三次确认实际空转 **3 × 1024** 次 |
+| **D-115** | 宿主侧时间预算（`HOST_WATCHDOG_BUDGET_MS = 200`）+ 滑动窗口三次确认（`HOST_WATCHDOG_CONFIRMATIONS = 3`）+ **HMS 同步终止**（`Severity::Fatal` ⇒ `Health::Critical` + `DegradeAction::Terminate`）+ **`WATCHDOG` 日志**（M-21 环里 `ctx = "ENG-WATCHDOG"`）+ **幂等标志**（`watchdog_fired`）—— 判别式 D-3 / D-4 / D-5 / D-6 / D-10。
++ ⚠️ **两个场景码的分工（第五次订正的裁定）**：`E_HMS_01_DEGRADE_FAILED` 由 **M-22**
+  在降级动作重试用尽时上报（终态）；`E_HMS_02_FATAL_TERMINATED` 由**宿主**在
+  看门狗触发并**终止内核**时上报（⇒ 前端能区分「内核被终止」与「普通错误」）
+  ⇒ 两个码各有**唯一**落点，不重复。⚠️ **代价如实记录**：因 M-12 的 `no_progress` 是局部变量（§1.7），三次确认实际空转 **3 × 1024** 次 |
 | **D-114** | M-17 `step_n` 接上**同形状**的无进展守卫（复用 M-12 的 `NO_PROGRESS_WINDOW` ⇒ 不复制字面量）⇒ 同一个不变式（M-16 的 `active_irq` 单级防护）的**第二个落点**被堵上 —— 判别式 D-1 / D-2 |
 
 ### 8.2 本批新登记（**四**条）
@@ -979,6 +1019,7 @@ M-12/M-17 守卫触发  ──►  Err(E_ENG_03_NO_PROGRESS)
 | **D-129** | **日志 / 健康信号的跨进程载体缺失**：本批判定为「进程内通道，前端不订阅」（角色边界）⇒ 服务端形态（P1）的「管理员跨进程收集」**没有契约载体**。⚠️ **具体证据（第一次订正）**：契约层**已有** `CommandPayload::Admin { op: AdminOp }` 与 `AdminOp::DrainLogs`（注释就写着「Dump the kernel log buffer (M-21)」）—— **空壳入口在，缺的是日志条目的 DTO 与回复事件** ⇒ 宿主对该命令只能一律返回 `E_CTX-05`「管理通道未启用」⇒ 管理员通道**接不上**。届时需上契约层 DTO + 回复事件 | P1（随服务端形态） |
 | **D-130** | **降级动作只落地 `Terminate`**：`SnapshotRestore` / `Pause` / `Disconnect` / `TraceDown` 声明但 `Unsupported` ⇒ 它们分别要 M-20 / M-04 / M-07 / M-19 | P2 |
 | **D-131** | **MVP 单会话 + 角色降级**：`session_id` 恒 0；`role` 由宿主设定、默认 `Product`；LLD M-21 §3.4 的三层鉴权（令牌）**未做** | P2 |
+| **D-133** | **HMS 保留带无界增长**：LLD 要求 FATAL / CRITICAL 信号**永不丢弃**（取证需要）⇒ 极端场景（大量致命信号）下 `retained` 无上限 ⇒ 本批按 LLD 实现、**未加护栏** ⇒ 需要一条上限策略（超出后如何取舍：留最早还是留最新）与「超出即计数」的可见性 | P2 |
 | **D-132** | **场景码定义处分散在契约层与内核 crate**：契约层有 `PROTO` / `ENG` / `PLT` / `DBG` / `SNAP` / `PER` 等族的场景码，内核 crate 里又有 `BUS` / `CTX` / `LDR` / `INT` / `OBS` / `STORE` 等族的场景码 ⇒ 「场景码住哪」这条纪律**没有统一口径**（D-120 只禁了「同一码两份定义」，没禁「定义处分散」）。⚠️ 本批新增的 `E_STORE_01` 又添了一处。⇒ 需要一条明确口径（哪些族必须上契约层 —— 判据应是「**跨模块共享 / 前端要按码分派**」） | P2 |
 
 ### 8.3 本批**不**动的欠账
