@@ -22,6 +22,8 @@ import { mountCommandRouter } from "./services/m05_commandrouter.js";
 import * as transportApi from "./services/m07_transport.js";
 import { mountRegisterMemory } from "./services/m10_registermemory.js";
 import { Command, TRACE_FORMAT, TRACE_SOURCE } from "./lib/message.js";
+// ⚠️ 只导入**纯函数**（错误码拆分）⇒ 不引入服务层依赖，也不构成循环依赖。
+import { splitErrorCode } from "./views/components/memory-map.js";
 import { buildMockProject } from "./dev/mock-project.js";
 import { buildDemoStoreState, seedDemoState } from "./dev/demo-state.js";
 
@@ -159,6 +161,39 @@ function publishViewState(viewId) {
     }));
 }
 
+// ---------------------------------------------------------------------------
+// 板级内存图（STAGE-14 · v0.29）的前端侧状态
+// ---------------------------------------------------------------------------
+
+/**
+ * **当前装载着的工程**（`model::Project` 的线上形态）。
+ *
+ * ⚠️ 「重新装载工程」按钮需要它：板级配置是**待生效**的，宿主在**下一次**
+ * `LoadProject` 时才应用 ⇒ 前端必须能**再发一次同一个工程**。
+ *
+ * ⚠️ 它由 {@link loadProjectIntoKernel} 记下 ⇒ **每一条**装载路径（启动、
+ * 「reset」命令、装载仓外镜像）都会被记到 ⇒ 不会漏。
+ *
+ * @type {object|null}
+ */
+let loadedProject = null;
+
+/**
+ * 把「上一次提交板级内存图的错误」写进「memory-map」视图状态并重渲染。
+ *
+ * ⚠️ **错误显示在面板上**，不只是页脚一行字：验收 C-5 要的是「校验失败必须
+ * 在界面上显示」⇒ 面板上有一块带 `data-memory-map-error` 与
+ * `data-error-code` / `data-error-family` / `data-error-scenario` 的区域。
+ *
+ * ⚠️ 判定靠**族 + 码**（`E_PLT-07` ⇒ 族 `PLT`、场景 `07`），**不靠文案**。
+ *
+ * @param {{code: string, message: string}|null} error — `null` 表示清掉
+ */
+function setMemoryMapError(error) {
+    viewStore.setState("memory-map", (prev) => ({ ...prev, error: error ?? null }));
+    publishViewState("memory-map");
+}
+
 /**
  * Push the **transport link state** into a view's state.
  *
@@ -240,12 +275,21 @@ export function toByteArray(raw) {
  * @param {{commandRouter: object, registerMemory: object, waveform: object}} services
  */
 export async function handleCommand(detail, services) {
-    const { commandRouter, registerMemory, waveform, debug, console: consoleWiring } = services;
+    const {
+        commandRouter,
+        registerMemory,
+        waveform,
+        debug,
+        console: consoleWiring,
+        memoryMap: memoryMapWiring,
+    } = services;
     const action = detail?.action;
     /** 探针流重订失败（仅「reset」路径可能非空）。 */
     let resetProbeError = null;
     /** console 流重订失败（仅「reset」路径可能非空）。 */
     let resetConsoleError = null;
+    /** 内存图流重订失败（仅装载路径可能非空）。 */
+    let resetMemoryMapError = null;
     try {
         switch (action) {
             case "step":
@@ -269,11 +313,19 @@ export async function handleCommand(detail, services) {
                 // 寄存器流也重订了（`loadProjectIntoKernel` 把失败单独兜住）。
                 {
                     const result = await loadProjectIntoKernel(
-                        { commandRouter, registerMemory, waveform, debug, console: consoleWiring },
+                        {
+                            commandRouter,
+                            registerMemory,
+                            waveform,
+                            debug,
+                            console: consoleWiring,
+                            memoryMap: memoryMapWiring,
+                        },
                         buildMockProject(),
                     );
                     resetProbeError = result.probeError;
                     resetConsoleError = result.consoleError;
+                    resetMemoryMapError = result.memoryMapError;
                 }
                 break;
             case "read-regs":
@@ -330,14 +382,65 @@ export async function handleCommand(detail, services) {
             case "trace-disable":
                 await commandRouter.dispatchCommand(Command.setTraceEnabled(false));
                 break;
+            case "submit-memory-map": {
+                // 提交板级内存图（契约 v6 的 `SetMemoryMap`）。
+                //
+                // ⚠️ **载荷是整份描述**（契约已有的 `PlatformDescription`）⇒
+                // 没有「当前值 + 补丁」的第二个真相。
+                //
+                // ⚠️ **前端不自写校验**（裁决 E）：契约层那个唯一校验器在内核
+                // 侧 ⇒ 校验失败由内核报 `E_PLT-*` ⇒ 这里**如实显示**它。
+                const description = detail?.params?.description ?? null;
+                try {
+                    await commandRouter.dispatchCommand(Command.setMemoryMap(description));
+                    setMemoryMapError(null);
+                } catch (err) {
+                    // ⚠️ **校验失败必须在界面上显示**（验收 C-5）⇒ 码与文案
+                    // 写进「memory-map」视图状态 ⇒ 面板上有一块
+                    // `data-memory-map-error`。
+                    setMemoryMapError(splitErrorCode(err));
+                    throw err;
+                }
+                break;
+            }
+            case "reload-project": {
+                // 「重新装载工程」⇒ 宿主在这次 `LoadProject` 时应用**待生效**的
+                // 板级配置（规格 §2.2 / 裁决 B：已装载镜像时不重建总线 ⇒ 新板
+                // 等下一次装载生效 ⇒ 界面必须显式呈现「待生效」）。
+                const project = loadedProject;
+                if (!project) {
+                    // ⚠️ **直接返回**：走到 switch 后面那行 `setNote` 会把这条
+                    // 具体的话覆盖成「命令完成」⇒ 用户看不到真正的原因。
+                    setNote("还没有装载过工程 —— 无从「重新装载」");
+                    return;
+                }
+                const result = await loadProjectIntoKernel(
+                    {
+                        commandRouter,
+                        registerMemory,
+                        waveform,
+                        debug,
+                        console: consoleWiring,
+                        memoryMap: memoryMapWiring,
+                    },
+                    project,
+                );
+                resetProbeError = result.probeError;
+                resetConsoleError = result.consoleError;
+                resetMemoryMapError = result.memoryMapError;
+                break;
+            }
             default:
                 return;
         }
         setNote(
-            resetProbeError || resetConsoleError
+            resetProbeError || resetConsoleError || resetMemoryMapError
                 ? `命令 ${action} 完成，但流订阅不可用：${[
                     resetProbeError ? `探针流 ${resetProbeError?.message ?? resetProbeError}` : null,
                     resetConsoleError ? `console 流 ${resetConsoleError?.message ?? resetConsoleError}` : null,
+                    resetMemoryMapError
+                        ? `内存图流 ${resetMemoryMapError?.message ?? resetMemoryMapError}`
+                        : null,
                 ].filter(Boolean).join("；")}`
                 : `命令 ${action} 完成`,
         );
@@ -361,7 +464,7 @@ async function startSession(services) {
     try {
         await session.createSession({ role: workspace.role });
         const project = buildMockProject();
-        // 装载工程**并且**把三条内核侧订阅都强制重订。
+        // 装载工程**并且**把内核侧订阅都强制重订。
         //
         // 为什么必须是「强制」：`LoadProject` 会清掉内核侧的主题集合
         // （新工程 = 新会话，FR-13），而 `ensureSubscribed()` 是**幂等**
@@ -372,8 +475,15 @@ async function startSession(services) {
         //
         // 这个缺陷在 mock 内核时代就存在，是第 1 阶段前端接上**真内核**
         // 之后、被真机断言「x1 必须是 42」逼出来的。
-        const { probeError, consoleError } = await loadProjectIntoKernel(
-            { commandRouter, registerMemory, waveform, debug, console: services.console },
+        const { probeError, consoleError, memoryMapError } = await loadProjectIntoKernel(
+            {
+                commandRouter,
+                registerMemory,
+                waveform,
+                debug,
+                console: services.console,
+                memoryMap: services.memoryMap,
+            },
             project,
         );
         viewStore.setState("product", (prev) => ({
@@ -394,6 +504,11 @@ async function startSession(services) {
         if (consoleError) {
             // 同理：console 流订阅不上 ⇒ 终端永远是空的，但内核是好的。
             setNote(`内核已就绪，但 console 流不可用：${consoleError?.message ?? consoleError}`);
+            return;
+        }
+        if (memoryMapError) {
+            // 同理：内存图流订阅不上 ⇒ 内存映射表是空的，但内核是好的。
+            setNote(`内核已就绪，但内存图流不可用：${memoryMapError?.message ?? memoryMapError}`);
             return;
         }
         setNote("WASM 内核已就绪（Nop 往返成功）");
@@ -422,11 +537,12 @@ async function startSession(services) {
  * 永远订阅不上 ⇒ 终端**静默**是空的，而页面上看不出任何异常。宁可
  * 抛错也不要静默。
  *
- * @param {{commandRouter: object, registerMemory: object, waveform: object, debug?: object, console: object}} services
+ * @param {{commandRouter: object, registerMemory: object, waveform: object, debug?: object, console: object, memoryMap?: object}} services
  * @param {object} project — `model::Project` shaped value
- * @returns {Promise<{probeError: Error|null, consoleError: Error|null}>} —
+ * @returns {Promise<{probeError: Error|null, consoleError: Error|null, memoryMapError: Error|null}>} —
  *   `probeError` 非空表示**探针流**重订失败；`consoleError` 非空表示
- *   **console 流**重订失败。**工程已经装载、寄存器流已经重订**（前 3 步成功）
+ *   **console 流**重订失败；`memoryMapError` 非空表示**内存图流**重订失败。
+ *   **工程已经装载、寄存器流已经重订**（前 3 步成功）
  *
  * ⚠️ **第 4 步失败不许牵连前 3 步**（D-46 检视 V-B）。几步串在一起时，
  * 第 4 步抛错会让整个 `loadProjectIntoKernel` 失败——而前 3 步**已经
@@ -456,6 +572,9 @@ export async function loadProjectIntoKernel(services, project) {
             "（LoadProject 清掉了内核的主题集合）",
         );
     }
+    // ⚠️ **记下当前工程** ⇒ 「重新装载工程」按钮能再发一次同一个工程
+    // （板级配置是**待生效**的 ⇒ 宿主在下一次 `LoadProject` 时才应用）。
+    loadedProject = project;
     waveform.reset();
     // ⚠️ 新工程 = 新程序 ⇒ **上一个程序的反汇编**留在面板上就是错的
     // （同一个 D-45 的坑：状态必须跟着工程一起重建）。
@@ -478,7 +597,18 @@ export async function loadProjectIntoKernel(services, project) {
     } catch (err) {
         consoleError = err;
     }
-    return { probeError, consoleError };
+    // ⚠️ **内存图流也要强制重订**（STAGE-14）：`LoadProject` 清掉了内核的
+    // 主题集合 ⇒ 不重订就**静默**停在旧图上（和 D-45 / D-46 同一个坑）。
+    //
+    // ⚠️ **接线是可选的**（`?.`）：不是每个调用点都装了内存图面 ⇒ 缺了不
+    // 该让整条装载流程失败。生产路径（`bootstrap()`）**必接**。
+    let memoryMapError = null;
+    try {
+        await services.memoryMap?.subscribeMemoryMapStream?.();
+    } catch (err) {
+        memoryMapError = err;
+    }
+    return { probeError, consoleError, memoryMapError };
 }
 
 /**
@@ -625,6 +755,79 @@ export function wireConsole(commandRouter) {
          */
         async subscribeConsoleStream() {
             return commandRouter.dispatchCommand(Command.subscribe("sim.console"));
+        },
+    };
+}
+
+// ---------------------------------------------------------------------------
+// 板级内存图（STAGE-14 · v0.29）
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire the kernel's **board memory map** (contract v6's `MemoryMap` event)
+ * into the product view's M-14 table and the board-memory-map editor.
+ *
+ * ⚠️ **唯一缓存**（规格 §3.3 / 裁决 F）：「当前生效的图」只有**一份** ⇒
+ * 产品视图那张 M-14 内存映射表与板级内存图编辑器拿到的是**同一个对象
+ * 引用**（不是两份拷贝）⇒「两个视图显示的是不是同一张图」这件事是**结构上**
+ * 成立的，不是靠两边各写一遍同步逻辑维持的。
+ *
+ * ⚠️ **事件载荷是「当前生效的图」**（不是「用户配的那份」）⇒ 表格显示的
+ * 就是内核此刻真正在用的那张图；「待生效」由事件里的 `pending` 标志给出
+ * （宿主的 `pending` 是**推导量**：用户的板 ≠ 当前生效的图）。
+ *
+ * ⚠️ **主题字面量**：`"memory.map"` 必须与 `front/lib/message.js` 的
+ * `EVENT_TOPIC.MemoryMap` 逐字一致（与 `wireConsole` 同一个口径）。
+ *
+ * @param {object} commandRouter
+ * @returns {{reset: () => void, subscribeMemoryMapStream: () => Promise<object>, get: () => object|null}}
+ */
+export function wireMemoryMap(commandRouter) {
+    /**
+     * **当前生效**的图（`{description, pending}`）——唯一的那一份。
+     *
+     * @type {{description: object|null, pending: boolean}|null}
+     */
+    let current = null;
+
+    commandRouter.subscribe("memory.map", (event) => {
+        current = {
+            description: event.value?.description ?? null,
+            pending: event.value?.pending === true,
+        };
+        // ⚠️ **同一个引用**写进两个视图状态 ⇒ 两个视图不可能显示不同的图。
+        viewStore.setState("product", (prev) => ({ ...prev, memoryMap: current }));
+        viewStore.setState("memory-map", (prev) => ({ ...prev, memoryMap: current }));
+        publishViewState("product");
+        publishViewState("memory-map");
+    });
+
+    return {
+        /**
+         * 新会话：上一个会话的内存图不算数（与 D-45 / D-46 同一个坑：状态
+         * 必须跟着工程一起重建）。
+         */
+        reset() {
+            current = null;
+            viewStore.setState("product", (prev) => ({ ...prev, memoryMap: current }));
+            viewStore.setState("memory-map", (prev) => ({ ...prev, memoryMap: current }));
+            publishViewState("product");
+            publishViewState("memory-map");
+        },
+        /**
+         * 订阅内核侧的内存图流。
+         *
+         * 必须是**强制**的：`LoadProject` 清掉了内核的主题集合 ⇒ 不重订就
+         * **静默**停在旧图上（和 D-45 / D-46 是同一个坑）。
+         *
+         * @returns {Promise<object>}
+         */
+        async subscribeMemoryMapStream() {
+            return commandRouter.dispatchCommand(Command.subscribe("memory.map"));
+        },
+        /** 当前缓存（测试用：断言两个视图拿到的是**同一个**对象）。 */
+        get() {
+            return current;
         },
     };
 }
@@ -902,6 +1105,16 @@ export function exposeScriptCommands(commandRouter) {
             Command.readMemory(Number(addr) >>> 0, size),
         ),
         /**
+         * 写一段内存（`size` 是契约的 `WriteSize` 标签：`Byte` / `Half` / `Word`）。
+         *
+         * ⚠️ **为什么前端 UI 里没有这个入口**：真实 RTOS 的复验脚本要往
+         * guest 看得见的地方写一个字节（判别式「新 RAM 段可写可读」），而
+         * 页面上没有「写内存」的按钮 ⇒ 只能由脚本走这条可编程的路。
+         */
+        writeMemory: (addr, size = "Word", value = 0) => dispatch(
+            Command.writeMemory(Number(addr) >>> 0, size, Number(value) >>> 0),
+        ),
+        /**
          * 继续跑。
          *
          * ⚠️ **超时放宽到 30 s**：M-05 的默认超时是 500 ms，而真实 RTOS
@@ -984,10 +1197,10 @@ export function buildImageProject(url, bytes, options = {}) {
  * ⇒ 订阅 `sim.console` 必须在装载**之后**重订，否则 console 一个字节都
  * 收不到（`loadProjectIntoKernel` 把这件事绑在装载流程里，调用点不会漏）。
  *
- * @param {{commandRouter: object, registerMemory: object, waveform: object, debug?: object, console: object}} services
+ * @param {{commandRouter: object, registerMemory: object, waveform: object, debug?: object, console: object, memoryMap?: object}} services
  * @param {string} url
  * @param {object} [options] — 传给 {@link buildImageProject}
- * @returns {Promise<{probeError: Error|null, consoleError: Error|null, byteLength: number, project: object}>}
+ * @returns {Promise<{probeError: Error|null, consoleError: Error|null, memoryMapError: Error|null, byteLength: number, project: object}>}
  */
 export async function loadImageFromUrl(services, url, options = {}) {
     const bytes = await fetchImageBytes(url);
@@ -1102,6 +1315,10 @@ async function bootstrap() {
     // console 流（契约 v4 的 `Console` 事件）同样必须**在任何**装载之前
     // 挂好：内核侧**订阅了** `sim.console` 才会推字节流。
     const consoleWiring = wireConsole(commandRouter);
+    // 板级内存图（契约 v6 的 `MemoryMap` 事件）同样必须**在任何**装载之前
+    // 挂好：内核侧**订阅了** `memory.map` 才会推那张图（裁决 J：订阅即强制
+    // 推一条当前生效的图）⇒ 不先挂好，第一批图就丢了。
+    const memoryMapWiring = wireMemoryMap(commandRouter);
 
     const pending = {
         components: componentsPromise,
@@ -1135,6 +1352,7 @@ async function bootstrap() {
         waveform,
         debug,
         console: consoleWiring,
+        memoryMap: memoryMapWiring,
     };
     exposeImageLoader(services);
     // ⚠️ 脚本用的**命令门**（真机段要「下断点」/「读 UART 寄存器」——

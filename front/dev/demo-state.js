@@ -2,20 +2,26 @@
 //
 // M-07 transport has not landed yet, so there is no live kernel behind
 // the workbench. To keep the view layer exercisable, the product view
-// renders a static "intelligent light" memory map mirroring what
-// `m14_bus::Bus::regions()` returns after a typical load.
+// renders a static "intelligent light" product tree.
 //
 // The demo data deliberately lives *outside* the production render path
 // (M-02): M-02 only emits the `riscv:seed` signal, and the dev wiring
 // in app.js is what turns that signal into state. When M-07 lands, this
 // file and the dev-only button go away together.
 //
+// ⚠️ **这里没有假内存映射**（STAGE-14 · v0.29 · 规格 §2.6）：内存映射表
+// 改成显示内核 `memory.map` 事件里的**当前生效**的图 ⇒ demo 塞一份假图进去
+// 就是「第二个真相源」⇒ 前端会显示一张内核根本没在用的板子。
+//
+// ⇒ 「没有数据」与「数据是空的」由**渲染层**分得开（`data-memory-map-table`
+// 的 `no-data` / `empty` 两种取值），不需要靠假数据撑场面。
+//
 // Related: FRONTEND_Review.md #15.
 
 import * as viewStore from "../views/m03_viewstore.js";
 
 /**
- * Build a fake `sim.memoryMap` plus a tiny product tree.
+ * Build a tiny product tree plus a minimal sim state.
  *
  * @returns {object} a store-state shaped object
  */
@@ -26,11 +32,6 @@ export function buildDemoStoreState() {
         sim: {
             pc: 0x0,
             gpr: Array(32).fill(0),
-            memoryMap: [
-                { base: 0x0000_0000, size: 0x1_0000, type: "RAM", detail: "[0, 64 KiB) firmware image" },
-                { base: 0x2000_0000, size: 0x1000, type: "PERIPHERAL", detail: "UART0 (id=1, 4 KiB)" },
-                { base: 0x4000_0000, size: 0x1000, type: "PERIPHERAL", detail: "GPIO0 (id=2, 4 KiB)" },
-            ],
             disasm: [],
         },
         wave: { channels: [] },
