@@ -131,25 +131,84 @@ v0.24 批让「反汇编面板显示源码行」「断点停在调度器」「sh
 
 ### 2.1 Lane A · 取指路径（A-1 ~ A-7）
 
-| # | 验收 | 判别式 |
-| --- | --- | --- |
-| **A-1** | 映射区**末端**只有 2 字节的压缩指令 ⇒ **它被执行** | 端到端：把一条压缩指令放在 RAM 区最后 2 字节，让访客**跑到**它 ⇒ PC 前进 2 且寄存器值正确（**不是**「反汇编能解出来」） |
-| **A-2** | 32 位指令的执行**不受影响** | PC 仍 +4、结果不变（回归） |
-| **A-3** | **一次取指 = 一个事件**，宽度 = 指令宽度 | 总线 hook 收到的取指条目：压缩 ⇒ `Half`、32 位 ⇒ `Word`；**条数**与指令数相等（不是 2 倍） |
-| **A-4** | 取指未映射 ⇒ 陷入 | `mcause == 1` · `mtval == 取指地址` · `mepc == 出错指令` |
-| **A-5** | **未映射**才陷阱，**别的总线错误**原样上抛 | 构造一个非「未映射」的总线错误（如外设未接线）⇒ **不被**判成 cause 1 |
-| **A-6** | 新黄金语料两侧**逐字节**判决一致 | `local unmapped_fetch` 进 corpus 且为 `active` ⇒ `tools/golden-run.sh` 判一致 |
-| **A-7** | `mcause` 的 **1** 只有**一个**定义处 | 源码级守卫：`mcause()` 之外的源码里 grep 不到 cause 1 的字面量映射 |
+- [x] **A-1** 映射区**末端**只有 2 字节的压缩指令 ⇒ **它被执行**
+      > 证据：`crates/kernel/tests/m13_fetch_path.rs` 的
+      > `a_compressed_instruction_in_the_last_two_bytes_of_a_region_executes` ——
+      > 把 `c.li x8,-16` 放在 RAM 区**最后 2 字节**，访客**真跑到它**：
+      > `x8 = 0xFFFF_FFF0`、PC `0xFE → 0x100`（前进 **2**）、总线 `reads=1` `ram_hits=1` `misses=0`
+      > ⇒ 不是「反汇编能解出来」，是**执行了**。
+      > 另有一条**反向半条**（`a_32_bit_instruction_that_does_not_fit_is_still_a_fault`）：
+      > 32 位指令只落 2 字节时**仍然**是取指失败（不能因为宽度探查而放行）。
+- [x] **A-2** 32 位指令的执行**不受影响**
+      > 证据：`a_32_bit_instruction_still_advances_the_pc_by_four` —— PC `0 → 4`、`x1 = 42`。
+- [x] **A-3** **一次取指 = 一个事件**，宽度 = 指令宽度
+      > 证据：`one_fetch_is_one_event_and_the_width_is_the_instruction_width` ——
+      > **两条**指令 ⇒ **两条**取指事件，宽度依次 `Half` / `Word`，`stats.reads = 2`（**不是 4**）。
+      > `a_failed_fetch_is_still_exactly_one_event` —— **失败的**取指也只产生 **1** 条事件
+      > （`ok = false`、`err_scenario = Some(1)`）。
+      > M-14 侧另有 `read_fetch_instruction_fires_one_event_with_the_instruction_width`
+      > 与 `read_fetch_instruction_counts_exactly_one_bus_access`。
+      > ⚠️ **根因**：宽度探查走 `read_only`（**纯 peek**：不计次、不 fire hook）⇒ 落点另行补记 ⇒
+      > **一次取指 = 一次读派发 + 一次落点 + 一个事件**（总线统计与改动前**逐条相同**，
+      > 既有断言 `reads == 1` / `ram_hits == 1` **一条没改**）。
+- [x] **A-4** 取指未映射 ⇒ 陷入
+      > 证据：`an_unmapped_fetch_traps_with_the_instruction_access_fault` ——
+      > `mcause == 1` · `mtval == 0x9000_0000` · PC 跳到 `mtvec`（`0x2000`）。
+      > `the_unmapped_fetch_trap_records_the_pc_at_the_trap_entry_in_mepc` ——
+      > `mepc == 0x9000_0000`（= 陷阱入口处的 PC）。
+      > `the_unmapped_fetch_trap_does_not_advance_the_pc_before_recording_mepc` ——
+      > PC **不前进**（先记 `mepc` 再跳陷阱向量）。
+      > ⚠️ **`mepc` 的口径**：本平台 `enter_trap` 取 `mepc := state.pc`；参考侧**实测一致**
+      > （Spike 报 `mepc = 0x9000_0000`）⇒ 两侧**不分歧**，不登记欠账。
+- [x] **A-5** **未映射**才陷阱，**别的总线错误**原样上抛
+      > 证据：`a_non_unmapped_bus_error_is_propagated_unchanged` —— 构造「外设未接线」
+      > （`E_BUS-05`）⇒ `family = Bus`、`scenario = 5`、`mcause` **保持 0**、PC **不动**
+      > ⇒ **不被**误判成 cause 1。
+      > M-14 侧：`read_fetch_instruction_reports_a_non_unmapped_error_unchanged`。
+- [x] **A-6** 新黄金语料两侧**逐字节**判决一致
+      > 证据：`tests/golden/corpus.txt` 增一行
+      > `local unmapped_fetch rv32i_zicsr_zifencei active csr`；
+      > `tools/golden-run.sh --keep-going` 实测 **68/68 逐例一致**（基线 67 + 新增 1），
+      > 该例 `spike=PASS ours=PASS`。
+      > ⚠️ **语料本体在参考侧另测过两项**：用黄金工具链编、Spike 跑 ⇒
+      > **退出码 0**；把 `mepc` 期望改成 `0` 的**反向对照** ⇒ **退出码 3**
+      > （`*** FAILED *** (tohost = 3)`）⇒ `mepc` 那条断言**有判别力**，不是「压根没跑到」。
+- [x] **A-7** `mcause` 的 **1** 只有**一个**定义处
+      > 证据：`the_cause_1_mapping_lives_in_exactly_one_place` —— **扫全内核源码树**：
+      > cause `1` 的字面量映射**恰好 1 处**（在 `crates/kernel/src/m13_iss/executor.rs` 的
+      > `mcause()` 里），并核对整个「变体 → 码」映射表**共 11 行**且**都在那一个文件**里
+      > ⇒ 「一个约束一个落点」是**可证的**，不是散文。
 
 ### 2.2 Lane B · 前端（B-1 ~ B-5）
 
-| # | 验收 | 判别式 |
-| --- | --- | --- |
-| **B-1** | `embedded` **有** M-02 组件 | 组件注册表里查得到 `embedded`（**不是**「查得到别的六个」） |
-| **B-2** | 真机：落地视图**正文非空** | `tools/browser-verify.mjs` 的「正文非空」断言**改回落地域图**（现在被放在 `#/regmem`）⇒ 断言 `[data-view-body="embedded"]` 里有实质内容 |
-| **B-3** | 导出面板有**下载动作** | 面板里有下载动作（按钮）· **点它**造出的 `<a download>`：`href` 以 `blob:` 开头 · `download` 属性非空 · **文件名由内容派生**（源/格式 → 文件名）· 锚点**确实被点了**（⚠️ 见裁决 D 末尾：`<a download>` 是动作的产物，不是常驻元素） |
-| **B-4** | 下载后**释放** object URL | `URL.revokeObjectURL` 被调用（不泄漏） |
-| **B-5** | 前端门禁覆盖 B-1 / B-3 / B-4 | 新增用例（**不是**只加断言，是能变红的用例） |
+- [x] **B-1** `embedded` **有** M-02 组件
+      > 证据：`front/views/m02_viewcomponents.js` 新注册 `id: "embedded"` 的组件；
+      > 前端门禁 `embedded-landing.test.mjs` 的两条（B-1）断言**组件注册表里查得到 `embedded`**
+      > 且**落地视图就是 `embedded` 且它有组件**；真机 `active=embedded title="嵌入式工作台"`。
+- [x] **B-2** 真机：落地视图**正文非空**
+      > 证据：`tools/browser-verify.mjs` 的「正文非空」断言从 `renderChecks`（挂在 `#/regmem`）
+      > **移到** `landingChecks` 并改查 `[data-view-body="embedded"]`，
+      > 另加**两条实质内容**断言 ⇒ 真机实测
+      > `embeddedBodyChars=1563` · `pc="0x00000000"` · `entries=4`
+      > `targets=[debug,regmem,waveform,source]` · `connected="1"`。
+      > ⚠️ **只判「非空」不够**（白屏也非空）⇒ 断言落到**具体内容**上。
+- [x] **B-3** 导出面板有**下载动作**
+      > 证据：`front/tests/trace-download.test.mjs` 断言面板里有下载动作、**点它**造出的
+      > `<a download>` 的 `href` 以 `blob:` 开头、`download` 属性非空且等于
+      > `trace-execution.csv` / `trace-waveform.vcd`（**文件名由内容派生**、两者**不同名**）、
+      > 锚点**确实被点了**。
+- [x] **B-4** 下载后**释放** object URL
+      > 证据：同文件断言 `revokedUrls.length === 1` 且 `revokedUrls[0] === createdUrls[0]`
+      > ⇒ 释放的**就是本次**那个 URL（不是别处的一次释放）。
+      > ⚠️ 释放时机在点击后的**下一个宏任务**（同步释放会打断尚未开始的下载）。
+- [x] **B-5** 前端门禁覆盖 B-1 / B-3 / B-4
+      > 证据：新增 `front/tests/embedded-landing.test.mjs`（**12 条 / 4 suite**）与
+      > `front/tests/trace-download.test.mjs`（**12 条 / 3 suite**）⇒ 门禁
+      > **288 用例 / 50 suite → 312 用例 / 57 suite**，**0 红**。
+      > `front/tests/dom-stub.mjs` 补 `click()`（真实 DOM 的 click 事件才是下载的触发点，
+      > 缺它会让「下载动作没点任何东西」**静默通过**）。
+      > ⚠️ **判别力实测**：把 `exportFileName` 改回写死 ⇒ **6 红**；只改注释 ⇒ **0 红**
+      > （统筹方独立复验，还原后 md5 逐字节一致）。
 
 ---
 
@@ -176,6 +235,43 @@ v0.24 批让「反汇编面板显示源码行」「断点停在调度器」「sh
 
 **失败项数必须为 0。**
 
+### 3.3 实测结果（v0.25 收口）
+
+**失败项数 = 0。**
+
+| 门禁 | 实测 |
+| --- | --- |
+| `cargo fmt --all -- --check` | 通过 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 通过（0 warning） |
+| `cargo test --workspace --no-fail-fast --lib --tests` | **1 254** 条全绿（契约 lib **134** + kernel lib **980** + 集成 **123** + runner **17**） |
+| `tools/check-front.sh` | **312 用例 / 57 suite**，**0 红**（基线 288 / 50） |
+| `tools/golden-run.sh --self-check` | 三个金丝雀全 ok（`canary/fail_3` 两侧 FAIL 3 · `add` 两侧 PASS · `mutated add` 两侧 FAIL 3） |
+| `tools/golden-run.sh --keep-going` | **68/68 逐例一致**（mismatch 0 / no-verdict 0 / build-failed 0） |
+| `tools/build-wasm.sh` + `node tools/wasm-smoke.mjs` | 通过 |
+| `node tools/browser-verify.mjs`（真 Chrome） | 通过；落地页 **9** 条断言全绿（其中 v0.25 新增的 embedded 三条：`embeddedBodyChars=1563` · `pc="0x00000000"` · `entries=4 targets=[debug,regmem,waveform,source]` · `connected="1"`） |
+| `tools/boot-osz.sh`（与 Spike 逐字节对拍） | **VERDICT MATCH** —— 两侧 console 字节流 **31** 字节逐字节相同 |
+
+**本批专属三条**：
+
+- **S-1**（新黄金语料 `local unmapped_fetch` 必须 `active` 且逐字节判决一致）✅ —— corpus 里它是
+  `local unmapped_fetch rv32i_zicsr_zifencei active csr`，`--keep-going` 判 `spike=PASS ours=PASS`；
+  ⚠️ 另外在参考侧另测了两项：**语料本体**（三项断言）Spike **退出码 0** · **反向对照**（`mepc` 期望改成 0）
+  **退出码 3** ⇒ 该断言**有判别力**而不是「压根没跑到」。
+- **S-2**（真机落地视图正文非空）✅ —— 真机断言已从 `#/regmem` **改回** `[data-view-body="embedded"]`，
+  且不止判非空，还落到**具体内容**（PC 十六进制 + 四个入口标记 + 连接状态）。
+- **S-3**（变异自检：每条变异能编译且按期望变红；每条 lane 至少一条对照 0 红）✅ ——
+  Lane A **4 条 + 1 对照**（红 2 / 9 / 7 / 2 条，对照 **0** 条）· Lane B **4 条 + 1 对照**
+  （红 9 / 2 / 1 / 真机 2 条，对照 **0** 条）；统筹方另在 Lane B 的工作树上独立复验了一条
+  变异（「文件名不派生」）⇒ **6 红** 与一条只改注释的对照 ⇒ **0 红**，还原后 md5 与改前**逐字节一致**。
+
+⚠️ **一轮跑出过三项失败（`cargo test` 报 124 / 黄金自检报 NOVERDICT / osz 对拍候选侧零字节）**——
+根因**不是代码**：macOS 对**新链接二进制**的首次 `exec` 会做安全评估，
+**实测单个二进制的 `--list` 耗 51 秒墙钟却只花 0.012 秒 CPU**（进程停在 `dyld` 阶段、只映射了主二进制）；
+**同一二进制第二次 `exec` 只要 0.05 秒** ⇒ 评估完成后即缓存。
+⚠️ **扫描期间杀掉进程 ⇒ 评估没做完 ⇒ 下一次又要重来** ⇒ 缓解手段是**串行预热**全部测试二进制
+（让每次评估自然跑完），本批据此重跑即全绿。**候选侧输出是零字节而不是错误字节**也可佐证这不是代码缺陷。
+
+
 ---
 
 ## §4 变更记录
@@ -183,3 +279,6 @@ v0.24 批让「反汇编面板显示源码行」「断点停在调度器」「sh
 | 日期 | 事件 | 摘要 |
 | --- | --- | --- |
 | 2026-10-23 | **STAGE-10 起草并冻结** | v0.25 批：范围（4 件事 + 9 件不做的事）· 裁决 A~G · 验收 A-1~A-7 与 B-1~B-5 · 门禁 8 项 + S-1~S-3 |
+| 2026-10-23 | **B-3 判别式措辞订正** | 裁决 D 落地时实测发现：**`<a download>` 不能常驻在面板里**（裁决 D 同时要求「`download` 用 `setAttribute` 设置」与「点击后 `revokeObjectURL`」⇒ 常驻的 `blob:` href 要么**一直有效**即泄漏、要么**早就失效**即点不动）⇒ B-3 的判别式由「导出面板里有一个 `<a download>` 链接」改成「面板里有下载动作（按钮）· **点它**造出的 `<a download>` 满足…」，裁决 D 末尾补了同一件事的说明。⚠️ **规格与实现冲突时改规格，但要写清为什么** —— 否则下一个人会按字面理解去面板里找一个常驻的链接 |
+| 2026-10-23 | **`mepc` 口径修正（撤销第一次修正）** | 起草时按「参考侧 `mepc` 与平台**疑似分歧**」写下了「guest 里只断言 `mcause` + `mtval`、不查 `mepc`」，并预告要登记一条新欠账。⚠️ **复核后结论翻转**：那个「疑似分歧」来自一个**手写探针**，而它的 tohost 判决管道本身有缺陷（env 的 `RVTEST_FAIL` 宏含数字标签与探针自己的标签冲突 · `andi` 立即数越界 · `addi` 不能用寄存器源 · `write_tohost` 标签名冲突）⇒ **结论不可靠**。改用**黄金 env 的可靠管线**（`RVTEST_PASS` / `RVTEST_FAIL` 的 tohost 协议）复测：**正变体（`mepc` 期望 = 取指地址）Spike 退出码 0** · **反向对照（`mepc` 期望 = 0）退出码 3** ⇒ 断言**有判别力**、且 **Spike 的 `mepc` 就是取指地址** ⇒ 与本平台 `mepc := state.pc` **一致**、**两侧不分歧** ⇒ **撤销第一次修正**、语料**恢复三项断言**、**不登记欠账**。⇒ **教训**：「参考侧不一致」这个结论**必须有可复现的判别式**（反向对照）才敢拿去做**架构决策**；一个**只会亮红灯的探针**测出的「不一致」，第一嫌疑是**探针自己** |
+| 2026-10-23 | **验收全部勾选 + 门禁通过** | A-1~A-7 与 B-1~B-5 **十二条全部勾选**并逐条补上可查的证据（用例名 + 实测值）；门禁 **8 项失败项数 0** + 本批专属 **S-1~S-3**（新语料两侧逐字节一致 · 真机落地视图正文非空且有实质内容 · 变异自检每条按期望变红、每条 lane 至少一条对照 0 红）。**关键 commit**：`1b8cab4`（起草）· `5d0200a`（合 main）· `863285f`（B-3 订正）· `a435390`（三处超时论断订正）· `f49420b`（Lane A）· `f35edf1`（Lane B）· `ea3b621` · `ccbf207`（合 main）· → 叙事见 `docs/progress/PROGRESS.md` **v0.25.0** 段 |

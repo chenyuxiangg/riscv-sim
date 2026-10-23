@@ -46,7 +46,7 @@
 | 基础 opcode | **57** | RV32I **41** + RV32M **8** + CSR 指令 **6** + `mret` / `wfi` **2** |
 | 压缩指令 | **26** | RV32C 基集全覆盖，字段级展开（`c.` 前缀保留，不做伪指令别名） |
 | 已实现 CSR | **10** | `mstatus` `misa` `mie` `mtvec` `mscratch` `mepc` `mcause` `mtval` `mip` `mhartid`（另有伪 CSR `irq_clear` `0x7C0`；`mtime` 只读且**真值走 CLINT 的 MMIO 窗口**，不走 CSR —— 未在文件里的 CSR 一律读回 **0**，**不陷阱**） |
-| 陷阱原因 | **10** 变体 | 9 个架构码 + 1 个内部 `OutOfRange`；⚠️ **缺 cause 1（取指访问故障）** ⇒ 台账 **D-103** |
+| 陷阱原因 | **11** 变体 | 10 个架构码（含 **cause 1 取指访问故障**） + 1 个内部 `OutOfRange`；⚠️ **`misa` 仍只读** ⇒ 台账 **D-95** |
 | `misa` | `0x4000_1104` | MXL=1 + I / M / C |
 
 ### 契约层（模块之间**只**通过它通信）
@@ -85,10 +85,10 @@
 | 项 | 数字 |
 | --- | --- |
 | 契约层 | 7 731 行 |
-| 仿真内核 | 52 121 行（含 16 个子模块 + 内核宿主装配层） |
-| 前端 | 14 906 行（`front/` 全量，含测试） |
+| 仿真内核 | 52 466 行（含 16 个子模块 + 内核宿主装配层） |
+| 前端 | 15 373 行（`front/` 全量，含测试） |
 | 设计文档 | **46 篇**（26 篇 HTML + 20 篇 Markdown） |
-| 测试 | **1 238** 条 Rust（契约 lib 134 + 内核 lib 974 + 集成 113 + runner 17）+ **288** 条前端（50 suite） |
+| 测试 | **1 254** 条 Rust（契约 lib 134 + 内核 lib 980 + 集成 123 + runner 17）+ **312** 条前端（57 suite） |
 
 ---
 
@@ -115,7 +115,7 @@ node --version
 
 ```bash
 cargo build                                    # native
-cargo test --workspace --no-fail-fast --lib --tests   # 1 238 条
+cargo test --workspace --no-fail-fast --lib --tests   # 1 254 条
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
@@ -125,7 +125,7 @@ cargo fmt --all -- --check
 ### 前端门禁
 
 ```bash
-tools/check-front.sh        # node:test 冒烟门禁 —— 288 用例 / 50 suite
+tools/check-front.sh        # node:test 冒烟门禁 —— 312 用例 / 57 suite
 ```
 
 ### 构建浏览器内核（WASM）
@@ -161,7 +161,7 @@ tools/boot-osz.sh --elf /path/to/osz.elf
 ```bash
 tools/fetch-golden-deps.sh        # 拉 riscv-tests + 交叉工具链到**仓库外**
 tools/golden-run.sh --self-check  # 变异金丝雀自检（两侧都必须报 FAIL 3）
-tools/golden-run.sh --keep-going  # 全量语料 —— 67 例
+tools/golden-run.sh --keep-going  # 全量语料 —— 68 例
 ```
 
 ---
@@ -242,7 +242,7 @@ tools/golden-run.sh --keep-going  # 全量语料 —— 67 例
 | 模块 | 职责 | 状态 |
 | --- | --- | --- |
 | **M-01** | 工作台装配与多视图路由（hash 路由） | ✅ |
-| **M-02** | 视图组件库（6 个视图） | ✅ |
+| **M-02** | 视图组件库（**7** 个视图 —— v0.25 补了落地视图 `embedded`） | ✅ |
 | **M-03** | 视图状态管理 | ✅ |
 
 ### 基础设施
@@ -271,7 +271,7 @@ tools/golden-run.sh --keep-going  # 全量语料 —— 67 例
 
 ### 第一层 · 指令级（黄金对拍）
 
-riscv-tests 语料 **67 例**（`rv32ui` 42 + `rv32mi` 13 + `rv32um` 8 + `rv32uc` 1 + 本地 3），候选侧自研 runner 与 **Spike** 逐例比对判决。
+riscv-tests 语料 **68 例**（`rv32ui` 42 + `rv32mi` 13 + `rv32um` 8 + `rv32uc` 1 + 本地 4），候选侧自研 runner 与 **Spike** 逐例比对判决。
 
 ```bash
 tools/golden-run.sh --self-check   # 变异金丝雀：两侧都必须报 FAIL 3
@@ -309,8 +309,8 @@ node tools/browser-verify.mjs
 | --- | --- | --- |
 | 1 | `cargo fmt --all -- --check` | 格式 |
 | 2 | `cargo clippy --workspace --all-targets -- -D warnings` | 静态检查 |
-| 3 | `cargo test --workspace --no-fail-fast --lib --tests` | **1 238** 条 Rust 用例 |
-| 4 | `tools/check-front.sh` | **288** 用例 / **50** suite（ESM 链接期错误只有它能抓） |
+| 3 | `cargo test --workspace --no-fail-fast --lib --tests` | **1 254** 条 Rust 用例 |
+| 4 | `tools/check-front.sh` | **312** 用例 / **57** suite（ESM 链接期错误只有它能抓） |
 | 5 | `tools/golden-run.sh --self-check` + `--keep-going` | 指令级判决（**67/67**） |
 | 6 | `tools/build-wasm.sh` + `node tools/wasm-smoke.mjs` | 真 WASM 产物的桥接冒烟 |
 | 7 | `node tools/browser-verify.mjs` | 真 Chrome 里的端到端断言 |
@@ -325,7 +325,6 @@ node tools/browser-verify.mjs
 | 欠账 | 说的是什么 |
 | --- | --- |
 | **D-123** | **内存图是宿主硬编码的两档**（换平台要改宿主代码）。根因是 **RAM 急分配**而不是内存图形状的必然 ⇒ 通用化按 **C 做法**：RAM 页级懒分配 + 内存图由工程/平台描述 + 区域按需增删 |
-| **D-103** | 取指侧未映射访问还没有架构陷阱（cause 1）—— 目前是总线错误 |
 | **D-94** | S 扩展 / PMP / 计数器缺失（工作量 ≈ 实现半个特权级） |
 | **D-114 / D-115** | M-17 `step_n` 的同形状活锁；watchdog 只做了「无进展检测」这一半 |
 | **M-21 / M-22 / M-23** | 日志、健康管理、持久化后端仍是 stub |
