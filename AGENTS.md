@@ -42,6 +42,7 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 - `docs/reviews/M-*_Review.md` / `FRONTEND_*_Review.md` — 9 份模块详细检视报告
 - `docs/detailed-design/STAGE-1_Wasm_Bridge.md` — **第 1 阶段 WASM 桥接口规格（冻结）**：契约命令 ↔ 事件的规范映射表（**线格式以 STAGE-2 为准**）
 - `docs/detailed-design/STAGE-2_Contract_V2.md` — **契约层 v2 规格（冻结，`schema_version = 2`）**：数值策略 / 命令与事件新增 / 命名歧义处置 / 错误族与传输帧 `crc` / 快照 DTO 小修 / 端口文档订正
+- `docs/detailed-design/STAGE-14_V029_Board_Memory_Map.md` — **第 14 阶段规格（v0.29 · 前端可配置的板级内存图批 · D-124 闭环，冻结）**：用户在**界面上**定制板子的 RAM 段与 MMIO 窗口 ⇒「换一块板」从「改宿主代码」降级成「点几下」/ **零新 DTO**（复用契约层已有的 `PlatformDescription` / `RegionSpec` / `DeviceSpec`）⇒ 契约层新增面**只有**一条命令 `SetMemoryMap` + 一条事件 `MemoryMap` + 升版 **v5 → v6**（topic = `memory.map`）/ 宿主「用户配的板」存会话内（`pending_platform` + `image_loaded`）/ 校验走**契约层那个唯一校验器** ⇒ `E_PLT-01..11`，**不新增场景码**/ 裁决 A~N / 验收 A-1~A-6 · B-1~B-9 · C-1~C-8
 - `docs/detailed-design/STAGE-13_V028_Watchdog_HMS_Logging.md` — **第 13 阶段规格（v0.28 · 活锁处置链路批 · D-115 + D-114 + M-21 / M-22 全量落地，冻结）**：宿主看门狗（时间预算 200 ms + 滑动窗口三次确认 + HMS 同步终止 + `WATCHDOG` 日志 + 幂等标志）/ M-21 日志五带环形缓冲 / M-22 健康管理 HMS / M-23 通用字节归档 / M-17 无进展守卫 / 裁决 A~N / 验收 A-1~A-6 · B-1~B-10 · C-1~C-12 · D-1~D-10（⚠️ 经**九次**施工期实测订正）
 - `docs/detailed-design/STAGE-12_V027_Platform_Description.md` — **第 12 阶段规格（v0.27 · 内存图通用化 B 批 · D-123-B + D-82，冻结）**：平台描述格式（JSON）/ 描述 DTO 与**唯一**校验器落契约层 `platform.rs`（V-1 ~ V-12 十二条规则）/ 器件工厂**双视图**（擦除视图 + 有类型句柄）/ 外设窗口大小由器件自报 / 自动选档的「区间在外层」算法与 `auto_selectable` 数据化 / **D-82 的定性**（台账原文已被实测推翻 ⇒ 不新增专用派发路径 ⇒ 改补 guest 指令级端到端判别力）/ 十七条既有测试锚点的逐条处置 / 验收 A-1 ~ A-8 · B-1 ~ B-12 · C-1 ~ C-4（⚠️ 经**七次**施工期实测订正）
 
@@ -89,6 +90,9 @@ riscv_sim/
 │   ├── build-wasm.sh         # wasm-pack 包装（`--target web`，输出带命名导出的原生 ESM）
 │   ├── check-front.sh        # 前端门禁（node:test）
 │   ├── stage13_check.py      # STAGE-13 冻结规格的 7 项自检（表格列数 / 标题层级 / 代码围栏 / 裁决引用 / 章节完整 / 验收交叉引用 / 关键约束字面量）
+│   ├── stage14_check.py      # STAGE-14 冻结规格的 7 项自检（同上七项 + 额外「已废止字面量禁列」）
+│   ├── doc_check.py          # Markdown 文档自检 7 项（表格列数 / 标题层级 / 围栏 / 分隔行 / 反引号 / 括号 / slug 锚点）
+│   ├── doc_check_baseline.txt # 文档自检的**历史欠账基线** ⇒ 判据 = **新增失败数 0**
 │   ├── browser-verify.mjs    # 浏览器真机复验（零依赖 CDP，按需运行，不进默认门禁；osz 段含 E-6 / E-7 / E-8 三条判别式）
 │   ├── wasm-smoke.mjs        # WASM 桥冒烟（Node 驱动真 wasm 产物，按需运行）
 │   ├── fetch-golden-deps.sh  # 拉 golden 外部依赖（riscv-tests + 交叉工具链）到仓库外
@@ -102,7 +106,7 @@ riscv_sim/
 │       ├── canary/           # 变异金丝雀（两侧都必须报 FAIL 3）
 │       ├── corpus.txt        # 68 例语料清单（march + status + env 变体）
 │       └── README.md         # 协议、语料边界、Zicclsm 口径
-└── docs/                     # 50 篇设计文档（26 篇 HTML + 24 篇 Markdown，含 STAGE-1 ~ STAGE-13 十三份规格）+ reviews/（1 入口 + 9 份模块报告）
+└── docs/                     # 51 篇设计文档（26 篇 HTML + 25 篇 Markdown，含 STAGE-1 ~ STAGE-14 十四份规格）+ reviews/（1 入口 + 9 份模块报告）
 ```
 
 ## Project layout
