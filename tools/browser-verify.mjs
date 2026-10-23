@@ -497,6 +497,14 @@ const PROBE_EXPRESSION = `(() => {
   const resolveButtons = Array.from(document.querySelectorAll('[data-action="resolve-line"]'));
   const resolveBtn = resolveButtons[0] || null;
   const sourceStatusEl = document.querySelector("[data-source-status]");
+  // -- 落地视图（embedded · D-33）--
+  // ⚠️ 用 data-* 选择器取：**不靠文案匹配**去找元素。
+  const embeddedBody = document.querySelector('[data-view-body="embedded"]');
+  const embeddedPc = document.querySelector('[data-view-body="embedded"] [data-embedded-pc]');
+  const embeddedLink = document.querySelector('[data-view-body="embedded"] [data-embedded-link]');
+  const embeddedEntries = Array.from(
+    document.querySelectorAll('[data-view-body="embedded"] [data-embedded-entry]'),
+  );
   return {
     hasApp: Boolean(app),
     panelCount: panels.length,
@@ -504,6 +512,14 @@ const PROBE_EXPRESSION = `(() => {
     activePanel: active ? active.getAttribute("data-view-panel") : null,
     title: heading ? String(heading.textContent || "").trim() : "",
     bodyChars: body ? String(body.innerHTML || "").trim().length : 0,
+    // -- 落地视图（embedded）--
+    embeddedBodyChars: embeddedBody ? String(embeddedBody.innerHTML || "").trim().length : 0,
+    embeddedPcText: embeddedPc ? String(embeddedPc.textContent || "").trim() : "",
+    embeddedLinkText: embeddedLink ? String(embeddedLink.textContent || "").trim() : "",
+    embeddedLinkConnected: embeddedLink ? String(embeddedLink.getAttribute("data-connected") ?? "") : "",
+    embeddedEntryCount: embeddedEntries.length,
+    embeddedEntryTargets: embeddedEntries.map((el) =>
+      String(el.getAttribute("data-embedded-entry") || "")),
     regCells: regCells.length,
     regX1: cellText(1),
     regX2: cellText(2),
@@ -602,16 +618,18 @@ function sendTerminalTextExpression(text) {
 /**
  * Landing-page checks: the workbench really came up.
  *
- * The landing view of the embedded role is the `embedded` panel, which
- * has **no** M-02 component in the MVP (it is a placeholder) — so the
- * body of the landing view is legitimately empty. The render path is
- * therefore checked on a view that *does* have a component (see
- * `renderChecks`).
+ * ⚠️ **落地视图就是 `embedded` 面板**（嵌入式角色的落地视图）⇒ 它的正文
+ * **必须**有实质内容（D-33 · STAGE-10 裁决 C：以前这里没有 M-02 组件 ⇒
+ * 「标题在、正文空」）。
+ *
+ * ⚠️ **判别力**：只断言「正文非空」对**白屏**是绿的 ⇒ 这里落到**具体内容**
+ * —— PC 的十六进制值 + 四个子视图入口的 `data-*` 标记 + 连接状态。
  *
  * @param {object} probe
  * @returns {{name: string, ok: boolean, detail: string}[]}
  */
 function landingChecks(probe) {
+    const entryTargets = Array.isArray(probe.embeddedEntryTargets) ? probe.embeddedEntryTargets : [];
     return [
         {
             name: "工作台容器 #app 存在",
@@ -642,6 +660,25 @@ function landingChecks(probe) {
             name: "WASM 内核已就绪（Nop 往返）",
             ok: typeof probe.note === "string" && probe.note.includes("WASM 内核已就绪"),
             detail: `note="${probe.note}"`,
+        },
+        {
+            name: "落地视图（embedded）正文非空（不是白屏）",
+            ok: Number(probe.embeddedBodyChars ?? 0) > 0,
+            detail: `embeddedBodyChars=${probe.embeddedBodyChars}`,
+        },
+        {
+            name: "落地视图正文有实质内容（PC 十六进制 + 四个子视图入口）",
+            ok: /^0x[0-9a-fA-F]{8}$/.test(String(probe.embeddedPcText ?? "").trim())
+                && Number(probe.embeddedEntryCount ?? 0) >= 4
+                && ["debug", "regmem", "waveform", "source"].every((t) => entryTargets.includes(t)),
+            detail: `pc="${probe.embeddedPcText}" entries=${probe.embeddedEntryCount} targets=[${entryTargets.join(",")}]`,
+        },
+        {
+            name: "落地视图显示内核连接状态（连接 / 未连接）",
+            ok: ["0", "1"].includes(String(probe.embeddedLinkConnected ?? ""))
+                && typeof probe.embeddedLinkText === "string"
+                && (probe.embeddedLinkText.includes("已连接") || probe.embeddedLinkText.includes("未连接")),
+            detail: `connected="${probe.embeddedLinkConnected}" text="${probe.embeddedLinkText}"`,
         },
     ];
 }
@@ -682,6 +719,10 @@ function kernelExecChecks(probe) {
  * arrives before the view component subscribed" leaves every view body
  * empty while the Node gate stays green (FRONTEND_Review.md #20).
  *
+ * ⚠️ **「落地视图正文非空」这一条住在 `landingChecks`**（D-33 · 裁决 C）：
+ * 它查的是**落地视图**（`embedded`）的正文 ⇒ 断言落点跟着落地视图走，
+ * 不再挂在 `regmem` 上（`regmem` 的正文由「32 个寄存器格」那条覆盖）。
+ *
  * @param {object} probe
  * @returns {{name: string, ok: boolean, detail: string}[]}
  */
@@ -696,11 +737,6 @@ function renderChecks(probe) {
             name: "该视图有标题文本",
             ok: typeof probe.title === "string" && probe.title.length > 0,
             detail: `title="${probe.title}"`,
-        },
-        {
-            name: "该视图正文非空（不是白屏）",
-            ok: probe.bodyChars > 0,
-            detail: `bodyChars=${probe.bodyChars}`,
         },
         {
             name: "寄存器视图渲染出 32 个寄存器格",
@@ -1544,9 +1580,10 @@ async function main() {
         }
 
         // -- switch to a view that has a component and check the render path --
-        // The landing panel of the embedded role is a placeholder without
-        // an M-02 component, so the body check runs on `regmem` — the
-        // white-screen check (FRONTEND_Review.md #20).
+        // ⚠️ **落地视图（`embedded`）的正文检查在 `landingChecks` 里**（D-33 ·
+        // 裁决 C：落地视图现在**有** M-02 组件了 ⇒ 它的正文必须非空且有实质
+        // 内容）。这里切到 `regmem` 是为了**渲染路径**本身（白屏回归守卫，
+        // FRONTEND_Review.md #20）⇒ 后续那些需要切视图的步骤**不动**。
         await cdp.send("Runtime.evaluate", {
             expression: 'location.hash = "#/regmem";',
             returnByValue: true,

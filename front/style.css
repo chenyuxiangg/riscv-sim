@@ -188,6 +188,27 @@ main { padding: 24px; max-width: 1280px; margin: 0 auto; }
 .grid-2 { display: grid; grid-template-columns: 1fr; gap: 8px; }
 .pc, .timeVirt { font-family: ui-monospace, monospace; }
 
+/* ----- embeddedView（落地视图 · D-33）----- */
+.embedded-view { background: var(--bg3); border-radius: 8px; padding: 12px; }
+.link-status { margin: 8px 0; }
+/* 四个子视图入口：排成一行，窄屏折行（NFR-05 的 375px 也要读得下）。 */
+.embedded-entries {
+    list-style: none;
+    padding: 0;
+    margin: 8px 0 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+/* 导出面板里的**下载**动作（D-88）。 */
+.trace-download-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+}
+
 /* ----- waveformView ----- */
 .waveform { background: var(--bg3); border-radius: 8px; padding: 12px; }
 .channel-list { list-style: none; padding: 0; margin: 0; }

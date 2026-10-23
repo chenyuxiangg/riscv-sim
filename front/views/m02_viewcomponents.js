@@ -16,6 +16,12 @@
 // wired yet) — components render with empty state and update locally.
 
 import * as viewStore from "./m03_viewstore.js";
+// ⚠️ **M-02 → M-01 是文档化的依赖方向**（M-02 LLD §9.1：「M-02（视图组件库）
+// 依赖 M-01（工作台装配与路由）」，且同段写明 M-02「**不自行实现路由**」）。
+// ⇒ 视图组件**请求**跳转，路由与能力位复校验仍然只有 M-01 一处。
+//
+// ⚠️ 这里**没有**循环依赖：M-01 只依赖 M-03（视图状态），不依赖 M-02。
+import { route } from "./m01_workbench.js";
 import { escapeHtml } from "../lib/escape.js";
 import {
     describeMatch,
@@ -196,6 +202,193 @@ function renderMapTable(mappings) {
 }
 
 // ---------------------------------------------------------------------------
+// embeddedView — 落地视图（D-33 · STAGE-10 裁决 C）。
+//
+// ⚠️ **为什么是「补组件」而不是「从落地视图列表去掉」**：去掉 ⇒ 嵌入式角色
+// **没有**落地视图 ⇒ tab 条上的「嵌入式」变成死标签（点了落到 fallback）
+// ⇒ 得同时改 tab 条与 `ROLE_DEFAULT_VIEW` ⇒ 改动面更大、用户拿到的信息更少
+// （STAGE-10 §1 裁决 C）。
+//
+// ⚠️ **它不是第二个寄存器表**：这里是**概览 + 入口** —— 连接状态、当前 PC、
+// 虚拟时间，加上四个子视图的入口。寄存器明细仍然只在 `regmem` 视图里。
+// ---------------------------------------------------------------------------
+
+/**
+ * 落地视图的**四个子视图入口**（裁决 C 的最小内容之一）。
+ *
+ * ⚠️ **这里只列入口**：某个入口当前**不可达**（能力位不满足）时，由 M-01 的
+ * 兜底页处理（E_CTX-05）⇒ 前端不再另造一份「可达性」真相。
+ *
+ * @type {ReadonlyArray<{view: string, label: string}>}
+ */
+export const EMBEDDED_VIEW_ENTRIES = [
+    { view: "debug", label: "调试视图" },
+    { view: "regmem", label: "寄存器 / 内存" },
+    { view: "waveform", label: "波形视图" },
+    { view: "source", label: "源码视图" },
+];
+
+const embeddedView = register({
+    id: "embedded",
+    channels: ["sim"],
+    render(state) {
+        // PC / 虚拟时间**只**来自既有状态源（M-10 推进的 `sim.pc` 与
+        // `timeVirt`）⇒ 落地视图**不造**第二个状态源（与调试视图同一条规矩）。
+        const pc = Number(state?.sim?.pc ?? 0) >>> 0;
+        const timeVirt = state?.timeVirt ?? 0;
+        // 连接状态来自 **M-07 的传输层状态**（由 `app.js` 推进视图状态）⇒
+        // 视图层**不**直接摸服务层。
+        const link = state?.link ?? {};
+        const connected = link.connected === true;
+        return `
+            <section class="embedded-view">
+                <h3>嵌入式工作台概览</h3>
+                <p class="link-status" data-embedded-link data-connected="${connected ? "1" : "0"}">
+                    内核连接：<strong>${connected ? "已连接" : "未连接"}</strong>${connected
+                        ? ""
+                        : `<span class="muted">（${escapeHtml(String(link.lastError ?? "内核传输层未就绪"))}）</span>`}
+                </p>
+                <div class="grid-2">
+                    <div>
+                        <h4>当前 PC</h4>
+                        <code class="pc" data-embedded-pc>0x${pc.toString(16).padStart(8, "0")}</code>
+                    </div>
+                    <div>
+                        <h4>虚拟时间</h4>
+                        <code class="timeVirt" data-embedded-time>${escapeHtml(String(timeVirt))} ps</code>
+                    </div>
+                </div>
+                <h4>子视图</h4>
+                <ul class="embedded-entries">
+                    ${EMBEDDED_VIEW_ENTRIES.map((entry) => `
+                        <li>
+                            <button type="button" data-action="go-view" data-embedded-entry="${escapeHtml(entry.view)}" data-view-target="${escapeHtml(entry.view)}">${escapeHtml(entry.label)}</button>
+                        </li>`).join("")}
+                </ul>
+            </section>
+        `;
+    },
+    onCommand(ev) {
+        const el = ev.target?.closest?.("[data-action]");
+        if (el?.dataset?.action !== "go-view") return undefined;
+        const target = String(el.dataset.viewTarget ?? "").trim();
+        if (!target) return undefined;
+        // ⚠️ **路由归 M-01**（M-02 LLD §9：M-02 → M-01 单向依赖，M-02
+        // 「不自行实现路由」）⇒ 组件**请求**跳转，不自己改 `location.hash`，
+        // 也不自己做能力位复校验（M-01 的 `route()` 两件都做了）。
+        route(`#/${target}`);
+        return `cmd-go-view-${target}`;
+    },
+    onDelta(_delta) {},
+    mountFor(el) {
+        el.addEventListener("click", (ev) => embeddedView.onCommand(ev));
+    },
+});
+
+// ---------------------------------------------------------------------------
+// trace 导出 → **下载**（D-88 · STAGE-10 裁决 D）。
+//
+// ⚠️ **为什么不是「改 LLD 措辞」**：M-11 LLD 写下的承诺是「分块下载」⇒
+// 兑现承诺比改文档便宜（STAGE-10 §1 裁决 D）。
+//
+// ⚠️ **文件名由内容派生**（源 + 格式）⇒ 不是写死的同一个名字：
+// `Execution` + `Csv` ⇒ `trace-execution.csv`；`Waveform` + `Vcd` ⇒
+// `trace-waveform.vcd`。
+// ---------------------------------------------------------------------------
+
+/**
+ * 把文件名的一段**消毒**成安全字符集。
+ *
+ * ⚠️ 源 / 格式来自内核（契约字段）⇒ 不能假定它们一定是字母数字 ⇒
+ * 文件名里只留 `[a-z0-9_-]`，其余一律换成 `-`（NFR-04 的同一道防线：
+ * 不把不可信的值原样带进文件系统）。
+ *
+ * ⚠️ **`.` 也不留**：扩展名的那个点由 `exportFileName` 自己拼 ⇒ 段里再带点
+ * 就可能出现 `..`（路径穿越的形状）。
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function sanitizeFileNamePart(text) {
+    return String(text)
+        .replace(/[^a-z0-9_-]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * 从导出状态派生**文件名**（源 + 格式）。
+ *
+ * ⚠️ 这是**纯函数** ⇒ 门禁可以直接断言「文件名由内容派生」，不需要真的
+ * 下载一次。
+ *
+ * @param {unknown} source — 导出源（契约的 `TraceSource`，如 `Execution`）
+ * @param {unknown} format — 导出格式（契约的 `TraceFormat`，如 `Csv`）
+ * @returns {string} 例如 `trace-execution.csv`
+ */
+export function exportFileName(source, format) {
+    const src = sanitizeFileNamePart(String(source ?? "").trim().toLowerCase()) || "trace";
+    const fmt = sanitizeFileNamePart(String(format ?? "").trim().toLowerCase()) || "txt";
+    return `trace-${src}.${fmt}`;
+}
+
+/**
+ * 导出格式 → MIME 类型（`Blob` 的 `type`）。
+ *
+ * @param {unknown} format
+ * @returns {string}
+ */
+export function exportMimeType(format) {
+    switch (String(format ?? "").trim().toLowerCase()) {
+        case "csv": return "text/csv;charset=utf-8";
+        case "json": return "application/json;charset=utf-8";
+        case "vcd": return "text/plain;charset=utf-8";
+        default: return "text/plain;charset=utf-8";
+    }
+}
+
+/**
+ * 把当前导出块**下载**成文件（D-88）。
+ *
+ * 做法（STAGE-10 §1 裁决 D）：`Blob` → `URL.createObjectURL` →
+ * `<a download="…">` → 点击 → `URL.revokeObjectURL`。
+ *
+ * ⚠️ **`download` 属性用 `setAttribute` 设置**（NFR-04）：文件名**不**拼进
+ * HTML 字符串 ⇒ 它永远不经过标记解析器。
+ *
+ * ⚠️ **释放是「点击之后」**（`setTimeout(..., 0)`）：同步释放会把**还没开始**
+ * 的下载打断（Firefox）；而默认动作（真正的下载）在事件派发**之后**发生 ⇒
+ * 下一个宏任务里释放是安全的（不泄漏，也不打断下载）。
+ *
+ * ⚠️ **视图层不碰服务层**：这里只用浏览器原生能力，不发任何契约命令。
+ *
+ * @param {{source?: unknown, format?: unknown, chunk?: unknown}|null|undefined} exportState
+ * @param {{document?: Document, URL?: typeof URL, Blob?: typeof Blob}} [deps] — 注入点（测试用）
+ * @returns {{filename: string, url: string, href: string, download: string, content: string, anchor: object}|null}
+ *   — `null` 表示没有可下载的内容。
+ */
+export function downloadExportChunk(exportState, deps = {}) {
+    if (!exportState) return null;
+    const doc = deps.document ?? globalThis.document;
+    const urlApi = deps.URL ?? globalThis.URL;
+    const BlobCtor = deps.Blob ?? globalThis.Blob;
+    if (!doc || !urlApi || !BlobCtor) return null;
+    const filename = exportFileName(exportState.source, exportState.format);
+    const content = String(exportState.chunk ?? "");
+    const blob = new BlobCtor([content], { type: exportMimeType(exportState.format) });
+    const url = urlApi.createObjectURL(blob);
+    const anchor = doc.createElement("a");
+    anchor.setAttribute("href", url);
+    anchor.setAttribute("download", filename);
+    // ⚠️ 这是**机器可读**的标记：真机 / 门禁按它取下载动作，别去猜文案。
+    anchor.setAttribute("data-trace-download", filename);
+    doc.body?.appendChild(anchor);
+    anchor.click?.();
+    anchor.parentNode?.removeChild?.(anchor);
+    setTimeout(() => urlApi.revokeObjectURL(url), 0);
+    return { filename, url, href: url, download: filename, content, anchor };
+}
+
+// ---------------------------------------------------------------------------
 // debugView — 反汇编面板 (M-11) + 寄存器/内存 (FR-05/08/09)
 // ---------------------------------------------------------------------------
 
@@ -262,6 +455,12 @@ const debugView = register({
                         ? `<p class="trace-overflow" data-trace-overflow>⚠️ 导出窗口<strong>不是完整历史</strong> —— 源环溢出过、丢过最旧条目（本次导出从第 ${Number(exportState.offset)} 条开始，更早的内容已不在环里）。</p>`
                         : ""}
                     <pre class="trace-chunk" data-trace-chunk>${escapeHtml(String(exportState?.chunk ?? ""))}</pre>
+                    ${exportState
+                        ? `<div class="trace-download-row">
+                            <button type="button" data-action="download-trace" data-trace-download-button>下载 ${escapeHtml(exportFileName(exportState.source, exportState.format))}</button>
+                            <span class="muted" data-trace-download-name>${escapeHtml(exportFileName(exportState.source, exportState.format))}</span>
+                        </div>`
+                        : ""}
                 </section>
                 <section class="regmem">
                     <h3>寄存器 / 内存</h3>
@@ -289,6 +488,13 @@ const debugView = register({
         const el = ev.target?.closest?.("[data-action]");
         const action = el?.dataset?.action;
         if (!action) return undefined;
+        // ⚠️ **下载**（D-88）：纯浏览器动作 ⇒ **不发**契约命令。
+        // 导出块取自**视图状态**（唯一真相）⇒ 与面板上显示的是同一块内容。
+        if (action === "download-trace") {
+            const exportState = viewStore.getState("debug")?.debug?.export ?? null;
+            const result = downloadExportChunk(exportState);
+            return result ? `cmd-download-trace-${result.filename}` : undefined;
+        }
         // The command's parameters travel **with the signal** — the
         // bootstrap's listener runs on `window` and cannot see the button.
         return emitCommand(action, "debug", {
