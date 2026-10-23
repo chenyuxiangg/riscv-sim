@@ -93,11 +93,11 @@
 
 | 项 | 数字 |
 | --- | --- |
-| 契约层 | 9 329 行 |
-| 仿真内核 | 55 174 行（含 16 个子模块 + 内核宿主装配层） |
-| 前端 | 15 669 行（`front/` 全量，含测试） |
-| 设计文档 | **49 篇**（26 篇 HTML + 23 篇 Markdown） |
-| 测试 | **1 344** 条 Rust（契约 lib 167 + 内核 lib 1 018 + 集成 142 + runner 17）+ **312** 条前端（57 suite） |
+| 契约层 | 9 493 行 |
+| 仿真内核 | 59 198 行（含 16 个子模块 + 内核宿主装配层） |
+| 前端 | 15 364 行（`front/` 下**git 跟踪**的源码，含 `front/tests/`；⚠️ **不含** `front/assets/` —— 那是 wasm-pack 的**构建产物**且被 git 忽略，计进去会让这个数**随「跑没跑过 wasm 构建」变** ⇒ 不可复现） |
+| 设计文档 | **50 篇**（26 篇 HTML + 24 篇 Markdown） |
+| 测试 | **1 416** 条 Rust（契约 lib 170 + 内核 lib 1 087 + 集成 142 + runner 17）+ **312** 条前端（57 suite） |
 
 ---
 
@@ -124,7 +124,7 @@ node --version
 
 ```bash
 cargo build                                    # native
-cargo test --workspace --no-fail-fast --lib --tests   # 1 344 条
+cargo test --workspace --no-fail-fast --lib --tests   # 1 416 条
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
@@ -262,9 +262,9 @@ tools/golden-run.sh --keep-going  # 全量语料 —— 68 例
 | **M-05** | 命令路由与事件分发（**表驱动**路由） | ✅ |
 | **M-07** | 传输适配器（Worker + WebSocket；帧 CRC-32） | ✅ |
 | **M-10** | 寄存器内存服务（订阅 + 读写寄存器） | ✅ |
-| **M-21** | 日志系统 | ⚪ stub |
-| **M-22** | 健康管理 HMS | ⚪ stub |
-| **M-23** | 数据存储与持久化 DataStore | 🟡 仅内存实现 |
+| **M-21** | 日志系统（**进程内**五带环形缓冲 + CSV / JSON 导出） | ✅ **v0.28 全量落地** |
+| **M-22** | 健康管理 HMS（分级 / 保留带 / 分角色分发 / 降级） | ✅ **v0.28 全量落地** |
+| **M-23** | 数据存储与持久化 DataStore | 🟡 仅内存实现（⚠️ **IndexedDB / SQLite 后端仍 stub**；v0.28 增**通用字节归档**接口 `archive(name, bytes)`） |
 
 ### 文件与解析
 
@@ -318,18 +318,21 @@ node tools/browser-verify.mjs
 | --- | --- | --- |
 | 1 | `cargo fmt --all -- --check` | 格式 |
 | 2 | `cargo clippy --workspace --all-targets -- -D warnings` | 静态检查 |
-| 3 | `cargo test --workspace --no-fail-fast --lib --tests` | **1 344** 条 Rust 用例 |
+| 3 | `cargo test --workspace --no-fail-fast --lib --tests` | **1 416** 条 Rust 用例（⚠️ **不带 `--lib --tests` 会因 doc-test 假 HANG**；⚠️ 判「全绿」要看**退出码** + `grep -cE "^test result: FAILED"` 为 **0** —— 汇总的失败数在 `awk -F'[ ;]'` 的 **`$7`**（**不是 `$6`**）） |
 | 4 | `tools/check-front.sh` | **312** 用例 / **57** suite（ESM 链接期错误只有它能抓） |
 | 5 | `tools/golden-run.sh --self-check` + `--keep-going` | 指令级判决（**68/68**） |
 | 6 | `tools/build-wasm.sh` + `node tools/wasm-smoke.mjs` | 真 WASM 产物的桥接冒烟 |
 | 7 | `node tools/browser-verify.mjs` | 真 Chrome 里的端到端断言 |
 | 8 | `tools/boot-osz.sh` | 真实 RTOS 与 Spike 逐字节对拍（**需仓外 osz ELF + 本机 Spike**，不进默认门禁） |
+| 9 | **变异自检**（每批至少一条「对照变异 0 红」） | **判别力**的证据：真变异必须**精确红**在预期的那几条上，对照变异必须 **0 红** ⇒ 证明门禁不是「逢改必红」 |
 
 ---
 
 ## 已知缺口
 
 **完整的欠账清单在 [`docs/reviews/REVIEWS.md`](./docs/reviews/REVIEWS.md)**（含每一条的实证依据、阻塞关系与闭环方式）。
+
+✅ **v0.28 批已闭环两条**：**D-114**（M-17 `step_n` 接上与 M-12 同形状的**无进展守卫** ⇒ 反复交付同一中断从**活锁挂死**变成**报错退出**）· **D-115**（**宿主看门狗**：时间预算 200 ms + 滑动窗口三次确认 + **HMS 同步终止** + `WATCHDOG` 日志 + **幂等标志** ⇒ 「活锁变成失败」推进到「失败**有处置、有记录**」）。
 
 ✅ **v0.27 批已闭环两条**：**D-123**（内存图通用化 A + B 两批 ⇒ **换一份内存图描述、宿主代码零改动**这条唯一判别式成立）· **D-82**（CLINT 固件侧 MMIO ⇒ 台账原文已被实测推翻 ⇒ 真实缺口只是「缺 guest 指令级端到端判别力」⇒ 已补 `crates/kernel/tests/d82_clint_end_to_end.rs`）。
 
@@ -341,9 +344,9 @@ node tools/browser-verify.mjs
 | **D-125** | 器件之间的**连线**仍写死在宿主 ⇒ **换平台改连线仍要改代码**（描述只覆盖「地址空间」那一半） |
 | **D-126** | 参考侧对拍脚本里三份**手抄地址副本**与描述要**手工对齐**（⚠️ 裁决 J 故意不动：那是「对齐 Spike」的职责） |
 | **D-127** | 契约层 `csr.rs` 的「三个空间」表格把 `irq_clear` 列在「internal **line**」一栏 ⇒ **与实现的位掩码语义不符** ⇒ 清线 3 该写 `8` 不是 `3` |
+| **D-129** | 契约层**无日志 / 健康的 DTO 与回复事件** ⇒ 服务端形态下「管理员跨进程收集」**没有契约载体**（⚠️ 契约层**已有** `Admin` / `AdminOp::DrainLogs` 空壳入口，**缺的是 DTO** ⇒ 宿主对该命令仍一律返回 `E_CTX-05`）⇒ 需**升契约版本** + 前端镜像 |
 | **D-94** | S 扩展 / PMP / 计数器缺失（工作量 ≈ 实现半个特权级） |
-| **D-114 / D-115** | M-17 `step_n` 的同形状活锁；watchdog 只做了「无进展检测」这一半 |
-| **M-21 / M-22 / M-23** | 日志、健康管理、持久化后端仍是 stub |
+| **M-23** | **持久化后端仍只有内存实现**（IndexedDB / SQLite 未做）⇒ 跨会话持久化要等它 |
 | — | UART 的 **TX 捕获环（4 KiB）仍不进会话快照**（RX 侧已进） |
 
 ---
