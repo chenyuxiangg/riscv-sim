@@ -3,6 +3,8 @@
 RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计已落地在 `docs/detailed-design/`，高层级设计在 `docs/{architecture,requirements,module-design-spec}/`。
 
 > 本文件给 AI Agent 读取，遵循 [agents.md](https://agents.md) 开放标准，可被 OpenCode / Codex / Cursor / Aider / Devin / Gemini CLI 等 Agent 共用。
+>
+> ⚠️ **本文档 ≠ 面向人的项目介绍**：人读的那份是 [`README.md`](./README.md)（能力快照 / 快速开始 / 架构图 / 门禁 / 已知缺口，数字同样从当前树重算）—— **改了代码或数字，两处都要同步**。
 
 ## Project overview
 
