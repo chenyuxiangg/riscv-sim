@@ -365,6 +365,35 @@ impl TxCapture {
         self.buf.drain(..).collect()
     }
 
+    /// The **whole** ring content, oldest first — **without** draining it.
+    ///
+    /// ⚠️ **为什么要有它**（v0.26 · STAGE-11 裁决 E）：会话快照要带走
+    /// 捕获环里的**全部**待取字节（只带走队头会**丢字节**）⇒ 快照的
+    /// **导出**路径需要一个**只读**的视图 ⇒ 这里**不**动 [`Self::drain`]
+    /// （那是宿主取走字节的出口）。
+    fn bytes(&self) -> Vec<u8> {
+        self.buf.iter().copied().collect()
+    }
+
+    /// Overwrite the lifetime drop counter.
+    ///
+    /// ⚠️ **为什么是「覆盖」而不是「累加」**（v0.26 · STAGE-11 裁决 E）：
+    /// 快照携带的是**取样瞬间**的累计值（快照 = 状态）⇒ 还原后必须
+    /// **等于**那个值 ⇒ 取「累加」会让还原后的计数与被快照的那次**不是
+    /// 同一个数**。
+    fn set_dropped(&mut self, dropped: u64) {
+        self.dropped = dropped;
+    }
+
+    /// Restore the ring content, **overwriting** whatever was there.
+    ///
+    /// ⚠️ 深度由 [`Uart16550::check_status`] 查过（不可能超深）⇒ 这里
+    /// 不会静默丢字节。
+    fn restore(&mut self, bytes: &[u8]) {
+        self.buf.clear();
+        self.buf.extend(bytes.iter().copied());
+    }
+
     fn len(&self) -> usize {
         self.buf.len()
     }
@@ -591,6 +620,18 @@ impl Uart16550 {
     /// How many bytes were dropped because the ring was full.
     pub fn tx_dropped(&self) -> u64 {
         self.tx.dropped
+    }
+
+    /// The **whole** TX capture ring, oldest first — a **read-only** view.
+    ///
+    /// ⚠️ **与 [`Self::drain_tx`] 的区别**：`drain_tx` 是**出口**（把字节
+    /// 取走）；这个是**快照的导出路径**（看一眼，不动它）。
+    ///
+    /// ⚠️ **为什么必须有它**（v0.26 · STAGE-11 裁决 E）：捕获环里的字节
+    /// 是**访客已经发出去、还没被宿主取走**的内容 ⇒ 它**是会话状态**
+    /// ⇒ 快照必须带走**全部**（只带走队头会**丢字节**）。
+    pub fn tx_bytes(&self) -> Vec<u8> {
+        self.tx.bytes()
     }
 
     /// Receive `byte` from the wire (host-supplied — the firmware will
@@ -820,6 +861,42 @@ impl Uart16550 {
                 ),
             ));
         }
+        // ⚠️ **v0.26 · STAGE-11 裁决 E**：`tx` 必须是 `tx_ring` 的**队头**
+        // —— 与上面那条 `rx` / `rx_queue` **同构**。
+        //
+        // ⚠️ 契约层的 `validate()` 也查这一条（**形状**规则）；这里再查一遍
+        // 是**防御性冗余**：器件的恢复路径（注册表那条）**不经过**契约层
+        // 的校验器 ⇒ 只在契约层查的话，这条路径会漏。
+        if state.tx != state.tx_ring.first().copied() {
+            return Err(PlatformError::new(
+                super::PERIPHERAL_FAMILY,
+                super::E_PER_04_UNSUPPORTED_SESSION_STATE,
+                format!(
+                    "UART '{}' 的会话状态自相矛盾：tx 是 {:?}，但 tx_ring 的队头是 {:?}",
+                    self.id,
+                    state.tx,
+                    state.tx_ring.first().copied()
+                ),
+            ));
+        }
+        // ⚠️ **器件能力规则**（契约层查不了）：捕获环**不能比器件的环深**
+        // —— 还原时超深的字节会被**静默丢掉**（丢最新、保最早）⇒ 必须
+        // 在**写入之前**拒掉。
+        //
+        // ⚠️ 这是 `rx_queue.len() > RX_FIFO_CAPACITY` 那条的**同构**形状：
+        // 「形状」归契约层，「深度」归器件。
+        if state.tx_ring.len() > self.tx.capacity {
+            return Err(PlatformError::new(
+                super::PERIPHERAL_FAMILY,
+                super::E_PER_04_UNSUPPORTED_SESSION_STATE,
+                format!(
+                    "UART '{}' 的会话状态带 {} 个待取字节，器件的 TX 捕获环只有 {} 字节深",
+                    self.id,
+                    state.tx_ring.len(),
+                    self.tx.capacity
+                ),
+            ));
+        }
         let rx_valid = state.status & u32::from(lsr_bits::RX_VALID) != 0;
         if rx_valid != !state.rx_queue.is_empty() {
             return Err(PlatformError::new(
@@ -926,6 +1003,17 @@ impl Peripheral for Uart16550 {
         Some(PeripheralSessionState::Uart(UartStateDto {
             id: self.id.clone(),
             tx: self.tx.peek(),
+            // ⚠️ **v0.26 · STAGE-11 裁决 E**：TX 捕获环的**全部**待取字节
+            // 进快照（`tx_ring`），`tx` 保留为**队头**的冗余表示 ⇒ 两者
+            // 必须一致（契约层的 `validate()` 查这条不变式）。
+            //
+            // ⚠️ **只带走队头会丢字节**：访客连写三个字节、宿主还没取走
+            // ⇒ 快照/还原一次，那两个字节就没了 ⇒ 还原出来的会话与采
+            // 快照的那次**不是同一个**。
+            tx_ring: self.tx.bytes(),
+            // ⚠️ **溢出丢弃的累计计数**也进快照 ⇒ 「丢最新、保最早」这
+            // 件事**看得见**，不是静默的。
+            tx_dropped: self.tx.dropped,
             // ⚠️ `rx` 是**队头**，`rx_queue` 是**全部**待读字节。
             rx: self.rx.front().copied(),
             rx_queue: self.rx.iter().copied().collect(),
@@ -955,8 +1043,17 @@ impl Peripheral for Uart16550 {
     /// D-118) — they are plain storage, no recomputation involved.
     ///
     /// ⚠️ **`FCR` 还原时不触发它的复位位**：`FCR` 的 bit1 / bit2 是
-    /// 「复位 RX / TX FIFO」，而 FIFO 的内容**由载荷给**（`tx` / `rx`）
-    /// ⇒ 还原时若把复位位也执行一遍，刚还原回来的字节会被**抹掉**。
+    /// 「复位 RX / TX FIFO」，而 FIFO 的内容**由载荷给**（`tx_ring` /
+    /// `rx_queue`）⇒ 还原时若把复位位也执行一遍，刚还原回来的字节会被
+    /// **抹掉**。
+    ///
+    /// ⚠️ **TX 捕获环整体还原**（v0.26 · STAGE-11 裁决 E）：载荷带的是
+    /// `tx_ring`（**全部**待取字节），`tx` 只是它的**队头**（冗余表示）
+    /// ⇒ 还原 `tx_ring` 即可 ⇒ 还原后 `drain_tx()` 拿回的字节与采快照
+    /// 那次**逐字节相同**。
+    ///
+    /// ⚠️ **溢出计数取「覆盖」**：快照 = 状态 ⇒ 还原后的 `tx_dropped`
+    /// 必须**等于**载荷里的那个值。
     ///
     /// ⚠️ The UART's **own** rules are checked here as well
     /// ([`Uart16550::check_status`]) — **defensive redundancy**: the gate
@@ -986,10 +1083,19 @@ impl Peripheral for Uart16550 {
         self.scr = s.scr;
         self.dll = s.dll;
         self.dlm = s.dlm;
-        self.tx.clear();
-        if let Some(byte) = s.tx {
-            self.tx.push(byte);
-        }
+        // ⚠️ **还原整个 TX 捕获环**（v0.26 · STAGE-11 裁决 E）—— 只还
+        // 原队头会**丢字节** ⇒ 还原出来的会话与采快照的那次**不是同一
+        // 个**。
+        //
+        // ⚠️ **`tx` 不单独还原**：它是 `tx_ring` 的**冗余**表示（队头）⇒
+        // 还原 `tx_ring` 就够了（与 `rx` / `rx_queue` 的口径一致）。
+        //
+        // ⚠️ 环的深度由 [`Uart16550::check_status`] 查过（不可能超深）⇒
+        // 这里不会截断、不会静默丢字节。
+        self.tx.restore(&s.tx_ring);
+        // ⚠️ **溢出计数取「覆盖」而不是「累加」**：快照携带的是取样瞬间
+        // 的累计值（快照 = 状态）⇒ 还原后必须**等于**那个值。
+        self.tx.set_dropped(s.tx_dropped);
         self.rx.clear();
         // ⚠️ **还原整个接收队列**（v0.24）—— 只还原队头会**丢字节** ⇒
         // 还原出来的会话与采快照的那次**不是同一个**。
