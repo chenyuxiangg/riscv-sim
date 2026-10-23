@@ -455,7 +455,7 @@ fn unsubscribe_stops_the_register_pushes() {
 }
 
 #[test]
-fn fetch_from_unmapped_memory_is_reported_as_an_error() {
+fn fetch_from_unmapped_memory_is_reported_as_a_trap() {
     let mut host = KernelHost::new();
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // 把 PC 挪到未映射地址（契约的 `Restore` 带完整 `SimState`）。
@@ -474,10 +474,17 @@ fn fetch_from_unmapped_memory_is_reported_as_an_error() {
         },
     );
     let events = dispatch(&mut host, CommandPayload::StepN { n: 1 });
-    let (code, _) = first_error(&events);
-    assert_eq!(code, "E_ISS-01", "取指失败由 M-13 包成 ISS 族错误");
+    // ⚠️ STAGE-10 裁决 B / ledger **D-103**：未映射取指现在是**架构陷阱**
+    // （`mcause = 1`），不是宿主侧的错误 ⇒ 宿主报「停在一个陷阱上」，
+    // **不再**报 `E_ISS-01` 错误事件。
     let (reason, _) = first_halted(&events);
     assert_eq!(reason, HaltReason::Trap);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Error { .. })),
+        "未映射取指是 guest 的陷阱，不是宿主错误：{events:?}"
+    );
 }
 
 // -- JSON 桥 --------------------------------------------------------------

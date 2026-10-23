@@ -1475,3 +1475,139 @@ fn region_kind_tag(kind: RegionType) -> String {
         RegionType::Peripheral => "peripheral".to_string(),
     }
 }
+
+// ---------------------------------------------------------------------------
+// The fetch entry point — STAGE-10 adjudication A.
+//
+// One fetch = one bus access: one read dispatch, one landing, one hook
+// event, and the event's width is the **instruction** width.
+// ---------------------------------------------------------------------------
+
+/// The wire tag of a bus width — spelled out so the test does not quote
+/// the implementation's own constants.
+fn width_tag(width: BusWidth) -> &'static str {
+    match width {
+        BusWidth::Byte => "byte",
+        BusWidth::Half => "half",
+        BusWidth::Word => "word",
+    }
+}
+
+/// A compressed instruction (`c.li x8, -16`, from the GNU-as golden
+/// table in `m13_iss::tests_rv32c`).
+const C_LI_X8_M16: u16 = 0x5441;
+
+#[test]
+fn read_fetch_instruction_reads_only_the_bytes_the_instruction_occupies() {
+    // A 16-byte region whose **last two bytes** hold a compressed
+    // instruction.  The old four-byte fetch could not serve this: it ran
+    // two bytes past the end of the region (ledger D-86).
+    let mut image = vec![0u8; 16];
+    image[14..].copy_from_slice(&C_LI_X8_M16.to_le_bytes());
+    let mut bus = Bus::new();
+    bus.map_ram(0, 16, &image).unwrap();
+
+    let raw = bus
+        .read_fetch_instruction(14)
+        .expect("the compressed instruction");
+    assert_eq!(
+        raw & 0xFFFF,
+        C_LI_X8_M16 as u32,
+        "the fetch returns the 16-bit original code"
+    );
+}
+
+#[test]
+fn read_fetch_instruction_fires_one_event_with_the_instruction_width() {
+    let mut image = vec![0u8; 16];
+    image[0..2].copy_from_slice(&C_LI_X8_M16.to_le_bytes());
+    image[4..8].copy_from_slice(&0x02A0_0093u32.to_le_bytes());
+    let mut bus = Bus::new();
+    bus.map_ram(0, 16, &image).unwrap();
+
+    let sink: Rc<RefCell<Vec<BusAccess>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink_for_hook = Rc::clone(&sink);
+    bus.add_hook(Box::new(move |a: &BusAccess| {
+        sink_for_hook.borrow_mut().push(*a);
+    }));
+
+    bus.read_fetch_instruction(0).expect("compressed fetch");
+    bus.read_fetch_instruction(4).expect("32-bit fetch");
+
+    let events = sink.borrow();
+    assert_eq!(
+        events.len(),
+        2,
+        "one event per fetched instruction — the width probe is not an event"
+    );
+    assert!(events[0].is_fetch, "a fetch must be flagged as such");
+    assert_eq!(events[0].width, BusWidth::Half, "compressed ⇒ half word");
+    assert_eq!(events[1].width, BusWidth::Word, "32-bit ⇒ word");
+    assert_eq!(
+        width_tag(events[0].width),
+        "half",
+        "the width tag is spelled out, not derived"
+    );
+    assert!(events.iter().all(|e| e.ok));
+}
+
+#[test]
+fn read_fetch_instruction_counts_exactly_one_bus_access() {
+    // The width probe is a **peek**: it counts neither as a read dispatch
+    // nor as a landing.  One instruction ⇒ one read, one landing.
+    let mut image = vec![0u8; 16];
+    image[0..2].copy_from_slice(&C_LI_X8_M16.to_le_bytes());
+    image[4..8].copy_from_slice(&0x02A0_0093u32.to_le_bytes());
+    let mut bus = Bus::new();
+    bus.map_ram(0, 16, &image).unwrap();
+
+    bus.read_fetch_instruction(0).expect("compressed fetch");
+    bus.read_fetch_instruction(4).expect("32-bit fetch");
+
+    let stats = bus.stats();
+    assert_eq!(stats.reads, 2, "one read dispatch per instruction");
+    assert_eq!(stats.ram_hits, 2, "one landing per instruction");
+    assert_eq!(stats.misses, 0);
+}
+
+#[test]
+fn read_fetch_instruction_fails_on_an_unmapped_address() {
+    let mut bus = Bus::new();
+    let err = bus
+        .read_fetch_instruction(0x9000_0000)
+        .expect_err("nothing is mapped");
+    assert_eq!(err.scenario, 1, "E_BUS-01 — the address is not mapped");
+    let stats = bus.stats();
+    assert_eq!(stats.reads, 1, "a failed fetch is still one dispatch");
+    assert_eq!(stats.misses, 1);
+}
+
+#[test]
+fn read_fetch_instruction_fails_when_a_32_bit_instruction_does_not_fit() {
+    // The probe says "32-bit" (the low two bits are `0b11`) but the
+    // upper half-word is past the end of the region ⇒ the fetch must
+    // fail — the probe must not launder a half-present instruction into
+    // a successful fetch.
+    let mut image = vec![0u8; 16];
+    image[14..].copy_from_slice(&0x0093u16.to_le_bytes());
+    let mut bus = Bus::new();
+    bus.map_ram(0, 16, &image).unwrap();
+
+    let err = bus
+        .read_fetch_instruction(14)
+        .expect_err("the upper half-word is not mapped");
+    assert_eq!(err.scenario, 1, "E_BUS-01");
+}
+
+#[test]
+fn read_fetch_instruction_reports_a_non_unmapped_error_unchanged() {
+    // A peripheral window that is **not wired**: the bus answers
+    // E_BUS-05, not E_BUS-01 — the caller (M-13) must be able to tell
+    // the two apart.
+    let mut bus = Bus::new();
+    bus.map_peripheral(0x1000, 0x10, PeripheralId(1)).unwrap();
+    let err = bus
+        .read_fetch_instruction(0x1000)
+        .expect_err("the peripheral is not wired");
+    assert_eq!(err.scenario, 5, "E_BUS-05 — not the unmapped code");
+}

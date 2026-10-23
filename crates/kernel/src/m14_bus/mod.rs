@@ -1476,6 +1476,109 @@ impl Bus {
         result
     }
 
+    /// Read **one instruction**, honouring its **real** width.
+    ///
+    /// This is the **single** fetch entry point (STAGE-10 裁决 A). The
+    /// width follows from the two low bits of the first half-word — the
+    /// **same** rule M-11's `fetch_instruction_code` uses and the **same**
+    /// rule the decoder uses (`0b11` ⇒ 32-bit, anything else ⇒ 16-bit
+    /// compressed):
+    ///
+    /// * the low half-word says `0b11` ⇒ 32-bit instruction ⇒ the full
+    ///   word is read;
+    /// * anything else ⇒ 16-bit compressed instruction ⇒ **only the two
+    ///   bytes that are really there** are read.
+    ///
+    /// ⚠️ **Why the width matters** (ledger **D-86**): a compressed
+    /// instruction sitting in the **last two bytes** of a mapped region
+    /// used to fault with `E_BUS-01` — the fetch read four bytes, two
+    /// of which were past the end of the region ⇒ the panel could
+    /// *show* the instruction (M-11 reads only what it needs) but the
+    /// guest could not *run* it.
+    ///
+    /// ⚠️ **One fetch is one bus access**: the width probe is a **peek**
+    /// — it counts neither as a read dispatch nor as a hook event — so
+    /// `stats.reads`, the landing counters and the hook see **exactly
+    /// one** access per fetched instruction, and the hook's `width` is
+    /// the **instruction width** (not the probe's).
+    ///
+    /// ⚠️ The probe does **not** turn a failed fetch into a successful
+    /// one: if the half-word itself is unmapped the fetch fails with
+    /// `E_BUS-01` — the caller decides what that means (M-13 turns it
+    /// into the architectural instruction access fault, `mcause = 1`).
+    ///
+    /// ⚠️ A 32-bit instruction is **physically** read as 2 + 4 = 6
+    /// bytes (probe + word) but it stays **one** fetch, one event.
+    pub fn read_fetch_instruction(&mut self, addr: u32) -> Result<u32, PlatformError> {
+        self.stats.reads += 1;
+
+        let (result, width) = self.fetch_instruction_measured(addr);
+        let (ok, scenario) = match &result {
+            Ok(_) => (true, None),
+            Err(e) => {
+                if matches!(e.family, BUS_FAMILY) && e.scenario == 1 {
+                    self.stats.misses += 1;
+                }
+                (false, Some(e.scenario))
+            }
+        };
+        self.fire_hook(addr, width, AccessDir::Read, ok, scenario, true);
+        result
+    }
+
+    /// The fetch itself: probe the width, then read the instruction.
+    ///
+    /// Returns the instruction **and** the width it was read with. The
+    /// width is reported even when the read failed: a fetch whose probe
+    /// succeeded was a 32-bit instruction, and a fetch whose probe
+    /// failed has an **unknown** width (reported as `Word`, the
+    /// historical fetch width).
+    fn fetch_instruction_measured(&mut self, addr: u32) -> (Result<u32, PlatformError>, BusWidth) {
+        // ⚠️ The probe is a **peek**: `read_only` returns the same
+        //    value and the same error as a counted read, but it touches
+        //    neither the counters nor the hook.
+        let half = match self.read_only(addr, BusWidth::Half) {
+            Ok(h) => h,
+            Err(e) => {
+                // The probe itself hit an unmapped address. A counted
+                // read would have bumped `unmapped_splits` for the same
+                // situation ⇒ the peek keeps the counter honest.
+                if matches!(e.family, BUS_FAMILY) && e.scenario == 1 {
+                    self.stats.unmapped_splits += 1;
+                }
+                return (Err(e), BusWidth::Word);
+            }
+        };
+        if half & 0b11 != 0b11 {
+            // Compressed instruction: the two probed bytes **are** the
+            // instruction ⇒ read nothing else. The landing is counted
+            // here because the probe counted nothing.
+            self.count_fetch_landing(addr);
+            (Ok(half & 0xFFFF), BusWidth::Half)
+        } else {
+            // 32-bit instruction: read the full word. This is a
+            // **counted** read ⇒ it bumps the landing counter (and the
+            // split counters) exactly like the old four-byte fetch did.
+            match self.read_inner(addr, BusWidth::Word) {
+                Ok(word) => (Ok(word), BusWidth::Word),
+                Err(e) => (Err(e), BusWidth::Word),
+            }
+        }
+    }
+
+    /// Count **one** landing for a fetch that was served by the width
+    /// probe (the probe itself counts nothing).
+    ///
+    /// Without this, a compressed fetch would bump **no** landing
+    /// counter at all — the probe is a peek — and the bus statistics
+    /// would say "this instruction was never fetched".
+    fn count_fetch_landing(&mut self, addr: u32) {
+        let kind = self.lookup(addr).map(|r| r.kind);
+        if let Some(kind) = kind {
+            self.bump_read_hit(kind);
+        }
+    }
+
     /// Bulk-write a byte blob into the bus (image loading path).
     ///
     /// This is the **single write path** for image loading (M-06 LLD

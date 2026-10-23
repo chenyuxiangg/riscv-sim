@@ -32,6 +32,7 @@ pub use executor::{
 /// "what a trap does to the architectural state" has one answer.
 pub use csr::enter_trap;
 
+use self::executor::is_unmapped_access;
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{SimState, WriteSize};
 
@@ -176,10 +177,13 @@ impl Iss {
     /// reference side (STAGE-7 adjudication G, ledger **D-99**).
     /// Every **other** bus error is propagated to the host unchanged.
     ///
-    /// ⚠️ The **fetch** path is different on purpose: an unmapped
-    /// fetch is still an `ISS-01` error here, because the instruction
-    /// access fault (`mcause = 1`) is **not** in this batch's scope
-    /// (STAGE-7 adjudication G covers data accesses only).
+    /// ⚠️ An unmapped **fetch** is an architectural **access fault**
+    /// too: the fetch traps with `mcause = 1`, `mtval` carries the
+    /// faulting fetch address and `mepc` carries the same address (the
+    /// instruction that could not be fetched) — exactly as the
+    /// reference side reports it (STAGE-10 adjudication B, ledger
+    /// **D-103**).  Every **other** bus error is propagated to the host
+    /// unchanged.
     pub fn step_one_via_bus(
         &mut self,
         state: &mut SimState,
@@ -198,18 +202,48 @@ impl Iss {
             enter_trap(state, cause.mcause(), state.pc);
             return Ok(StepOutcome::Trapped { cause });
         }
-        // The fetch goes through `read_fetch`, not `read`: an instruction
-        // fetch is a read on the bus, but a **watchpoint is about the
-        // guest's data accesses** — a read watchpoint placed on a code
-        // address must not fire on every instruction fetched from there
-        // (V-A 检视 · 🟠-2).
-        let raw = bus.read_fetch(state.pc, BusWidth::Word).map_err(|e| {
-            PlatformError::new(
-                ErrorFamily::Iss,
-                1,
-                format!("fetch at pc=0x{:08x}: {}", state.pc, e),
-            )
-        })?;
+        // The fetch goes through `read_fetch_instruction`, not `read`: an
+        // instruction fetch is a read on the bus, but a **watchpoint is
+        // about the guest's data accesses** — a read watchpoint placed
+        // on a code address must not fire on every instruction fetched
+        // from there (V-A 检视 · 🟠-2).
+        //
+        // ⚠️ `read_fetch_instruction` reads **only the bytes the
+        //    instruction really occupies** (2 for a compressed one, 4
+        //    otherwise) ⇒ a compressed instruction in the **last two
+        //    bytes** of a mapped region is executable (ledger **D-86**),
+        //    and the fetch stays **one** bus access (one event, width =
+        //    the instruction width).
+        let raw = match bus.read_fetch_instruction(state.pc) {
+            Ok(raw) => raw,
+            Err(e) => {
+                // ⚠️ **未映射 ⇒ 架构陷阱 cause 1**（STAGE-10 裁决 B）。
+                //
+                // The判据 is the **same** one the data path uses
+                // (`is_unmapped_access`: family `Bus` **and** scenario
+                // `E_BUS-01`) ⇒ "unmapped" and "any other bus error"
+                // stay distinguishable.
+                if !is_unmapped_access(&e) {
+                    // Every **other** bus error is a host-side problem:
+                    // it is propagated **unchanged** (family / scenario
+                    // code intact, only the message gains the address
+                    // context) and never laundered into a guest trap.
+                    return Err(PlatformError::new(
+                        e.family,
+                        e.scenario,
+                        format!("fetch at pc=0x{:08x}: {}", state.pc, e),
+                    ));
+                }
+                let cause = TrapCause::InstructionAccessFault;
+                // `mtval` = the faulting fetch address; `mepc` = the
+                // same address (`enter_trap` takes `mepc` from
+                // `state.pc`, which still holds the address that could
+                // **not** be fetched — the PC is not advanced anywhere
+                // else on this path).
+                enter_trap(state, cause.mcause(), state.pc);
+                return Ok(StepOutcome::Trapped { cause });
+            }
+        };
         let decoded = self.decoder.decode(raw, state.pc);
         let mut mem = BusMemory::new(bus);
         let mut wrote_csr = None;
@@ -367,11 +401,16 @@ mod tests {
         assert_eq!(stats.misses, 0);
     }
 
-    /// Integration: fetch from an unmapped PC surfaces the bus trap as
-    /// an `Iss` family error wrapping the E_BUS-01 message.
+    /// Integration: fetch from an unmapped PC is an **architectural
+    /// access fault** (`mcause = 1`), not a host-side error.
     ///
     /// The PC must stay even — an odd PC is a misaligned fetch and is
     /// reported as a trap, not as a bus error (LLD §3.1, 评审 13-3).
+    ///
+    /// ⚠️ STAGE-10 裁决 B / ledger **D-103**: this used to surface as
+    /// an `{Iss, 1}` error.  The reference side (Spike) traps with
+    /// `mcause = 1` — measured, see
+    /// `tests/golden/local/unmapped_fetch.S`.
     #[test]
     fn addi_via_bus_unmapped_pc_traps() {
         let mut bus = Bus::new();
@@ -380,10 +419,23 @@ mod tests {
             pc: 0xDEAD_BEE0,
             ..SimState::default()
         };
+        csr::csr_write(&mut state, CSR_MTVEC, 0x2000);
         let mut iss = Iss::default();
-        let err = iss.step_one_via_bus(&mut state, &mut bus).unwrap_err();
-        assert_eq!(err.family, ErrorFamily::Iss);
-        assert_eq!(err.scenario, 1, "fetch bus error must surface as ISS-01");
+        let outcome = iss
+            .step_one_via_bus(&mut state, &mut bus)
+            .expect("an unmapped fetch is a trap, not an error");
+        assert_eq!(
+            outcome,
+            StepOutcome::Trapped {
+                cause: TrapCause::InstructionAccessFault
+            }
+        );
+        // ⚠️ The **architectural** literals, not values derived from the
+        //    implementation under test.
+        assert_eq!(csr::csr_read(&state, CSR_MCAUSE), 1);
+        assert_eq!(csr::csr_read(&state, CSR_MTVAL), 0xDEAD_BEE0);
+        assert_eq!(csr::csr_read(&state, CSR_MEPC), 0xDEAD_BEE0);
+        assert_eq!(state.pc, 0x2000, "the PC goes to the trap vector");
     }
 
     /// Integration: a store to an unmapped address traps with

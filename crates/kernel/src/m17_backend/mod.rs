@@ -1296,6 +1296,7 @@ mod tests {
     use riscv_sim_contract::model::Breakpoint;
     use riscv_sim_contract::protocol::EventPayload;
 
+    use crate::m14_bus::PeripheralId;
     use crate::m16_interrupt::{InterruptController, SOURCE_PLATFORM, TRIGGER_EDGE};
 
     /// 事件总线 + 中断汇的最小实现。
@@ -1464,8 +1465,10 @@ mod tests {
     fn step_n_reports_a_trap_on_an_unmapped_fetch() {
         let mut backend: SelfIssBackend<NullSinks, NullSinks> =
             SelfIssBackend::new(NullSinks, NullSinks);
-        let err = backend.step_n(1).unwrap_err();
-        assert_eq!(err.family, ErrorFamily::Iss);
+        // ⚠️ STAGE-10 裁决 B / ledger **D-103**：未映射取指现在是**架构陷阱**
+        // （`mcause = 1`），不再向上抛宿主错误 ⇒ 批次以「陷阱」停。
+        let executed = backend.step_n(1).expect("step");
+        assert_eq!(executed, 1, "陷入的指令计入执行数");
         assert_eq!(backend.last_stop_reason(), Some(HaltReason::Trap));
     }
 
@@ -1702,11 +1705,22 @@ mod tests {
         assert_eq!(backend.total_executed(), 1);
         assert_eq!(backend.last_stop_reason(), Some(HaltReason::Trap));
 
-        // ② 用「没有任何内存映射」触发取指失败。
+        // ② 用「外设区域没有接线」触发取指失败。
+        //
+        // ⚠️ STAGE-10 裁决 B / ledger **D-103**：未映射取指**不再**是取指
+        // 失败——它是架构陷阱（`mcause = 1`）⇒ 走 ① 那条口径（计入执行
+        // 数）。要验「取指失败不算执行」，得用一条**仍然是错误**的取指
+        // 失败：外设区域没有接线 ⇒ `E_BUS-05`（不是 `E_BUS-01`）⇒ 原样
+        // 上抛。
         let mut backend: SelfIssBackend<NullSinks, NullSinks> =
             SelfIssBackend::new(NullSinks, NullSinks);
+        backend
+            .bus
+            .map_peripheral(0x1000, 0x10, PeripheralId(1))
+            .expect("map an unwired peripheral");
+        backend.set_pc(0x1000);
         let err = backend.step_n(1).unwrap_err();
-        assert_eq!(err.family, ErrorFamily::Iss);
+        assert_eq!(err.family, ErrorFamily::Bus);
         assert_eq!(
             backend.total_executed(),
             0,
