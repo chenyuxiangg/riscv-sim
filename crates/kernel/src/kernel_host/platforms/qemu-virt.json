@@ -3,6 +3,7 @@
   "id": "qemu-virt",
   "name": "QEMU virt",
   "priority": 20,
+  "auto_selectable": true,
   "region_budget_bytes": 134217728,
   "regions": [
     {

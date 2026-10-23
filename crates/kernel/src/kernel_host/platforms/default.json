@@ -3,6 +3,7 @@
   "id": "default",
   "name": "Default",
   "priority": 10,
+  "auto_selectable": true,
   "region_budget_bytes": 16777216,
   "regions": [
     {

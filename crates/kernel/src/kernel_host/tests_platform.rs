@@ -208,6 +208,7 @@ fn an_over_budget_region_is_rejected_before_anything_is_mapped() {
         id: "over-budget".to_string(),
         name: "Over budget".to_string(),
         priority: 5,
+        auto_selectable: true,
         region_budget_bytes: 16 * 1024 * 1024,
         regions: vec![
             RegionSpec::Ram {
@@ -393,18 +394,21 @@ fn write_temp_description(name: &str, description: &PlatformDescription) -> Path
 // B-9 · 自动选档（裁决 E：逐字等价于今天）
 // ---------------------------------------------------------------------------
 
-/// **B-9** 自动选档的四条等价性 + 与**今天**的判据**逐条对照**。
+/// **B-9** 自动选档的**六条**等价性 + 与**今天**的判据**逐条对照**。
 ///
 /// ⚠️ 「今天」的判据在测试里**照抄**一遍（参考实现）⇒ 两条路径对同一
 /// 组区间必须给出**同一个平台** ⇒ 「逐字等价」是**可证的**，不是散文。
 #[test]
 fn the_auto_selection_is_equivalent_to_todays_rule() {
-    // ⚠️ 四个区间：Default 高段 · QemuVirt 高段 · 两档之外 · 低段。
-    let cases: [(&str, &[(u32, u32)]); 4] = [
+    // ⚠️ 六个区间：Default 高段 · QemuVirt 高段 · 两档之外 · 低段 ·
+    // 低段**超出 1 MiB** · 只装得进**演示平台**的那一段。
+    let cases: [(&str, &[(u32, u32)]); 6] = [
         ("Default 高段", &[(0x8000_0000, 0x8000_1000)]),
         ("QemuVirt 高段", &[(0x8040_0000, 0x8040_1000)]),
         ("两档之外", &[(0x9000_0000, 0x9000_1000)]),
         ("低段", &[(0x0000_0000, 0x0000_1000)]),
+        ("低段超出 1 MiB", &[(0x0000_0000, 0x0010_0001)]),
+        ("只装得进演示平台", &[(0x0000_0000, 0x0020_0001)]),
     ];
     for (label, ranges) in cases {
         let chosen = platform::choose_description(ranges).expect("选档");
@@ -415,45 +419,128 @@ fn the_auto_selection_is_equivalent_to_todays_rule() {
         );
     }
 
-    // ⚠️ 四条**具体**的期望值（不靠参考实现兜底）。
+    // ⚠️ 六条**具体**的期望值（不靠参考实现兜底）。
     assert_eq!(
         platform::choose_description(&[(0x8000_0000, 0x8000_1000)])
             .expect("选档")
             .id,
         "default",
-        "Default 高段 ⇒ default"
+        "① Default 高段 ⇒ default"
     );
     assert_eq!(
         platform::choose_description(&[(0x8040_0000, 0x8040_1000)])
             .expect("选档")
             .id,
         "qemu-virt",
-        "QemuVirt 高段 ⇒ qemu-virt"
+        "② QemuVirt 高段 ⇒ qemu-virt"
     );
     assert_eq!(
         platform::choose_description(&[(0x9000_0000, 0x9000_1000)])
             .expect("选档")
             .id,
         "default",
-        "两档之外 ⇒ 回落 default"
+        "③ 两档之外 ⇒ 回落 default"
     );
     assert_eq!(
         platform::choose_description(&[(0x0000_0000, 0x0000_1000)])
             .expect("选档")
             .id,
         "default",
-        "低段 ⇒ default（minimal 的 priority 更大 ⇒ 选不到它）"
+        "④ 低段 ⇒ default（两份真实描述的低段都是 1 MiB，default 的 priority 更小）"
+    );
+
+    // ⑤ 低段**超出 1 MiB**：两份真实描述的低段都装不下 ⇒ 无候选 ⇒ 回落
+    // default ⇒ **随后报未映射**（与今天逐字一致）。
+    let over_low = [(0x0000_0000u32, 0x0010_0001u32)];
+    let chosen = platform::choose_description(&over_low).expect("选档");
+    assert_eq!(chosen.id, "default", "⑤ 低段超出 1 MiB ⇒ 回落 default");
+    assert!(
+        !holds(&chosen, over_low[0]),
+        "⑤ 回落的那一档**装不下**这段 ⇒ 随后的装载必然报未映射"
     );
 }
 
-/// **B-9 的补充**：**演示**平台（`minimal`）**不参与自动选档** ⇒ 一段
-/// 只装得进 `minimal` 的镜像**仍然**落到 `default` ⇒ 今天的既有行为
-/// （报 `E_BUS-01`）不变。
+/// 一份描述**装不装得下**某个区间（只看 RAM 区域 —— 与选档判据同口径）。
+fn holds(description: &PlatformDescription, range: (u32, u32)) -> bool {
+    description.regions.iter().any(|region| match region {
+        RegionSpec::Ram { base, size } => range.0 >= *base && range.1 <= base.saturating_add(*size),
+        RegionSpec::Rom { .. } | RegionSpec::Peripheral { .. } => false,
+    })
+}
+
+/// **B-9 的补充**：「**区间在外层**」这条结构必须钉住。
 ///
-/// ⚠️ 这是规格 §3 裁决 E 的一处**空白**（等价性论证只覆盖了「镜像**装得
-/// 进**低段」的情形）⇒ 这里把实际口径**钉住**，不让它以后悄悄变。
+/// ⚠️ 规格 §5.2 B-9 点名的形状：**一个区间落 default 高段、另一个落
+/// qemu-virt 高段** ⇒ 结果必须是 `qemu-virt`。
+#[test]
+fn a_multi_range_image_selects_by_range_not_by_description() {
+    // ① 规格点名的形状。
+    let default_high_then_qemu_high = [
+        (0x8000_0000u32, 0x8000_1000u32),
+        (0x8040_0000u32, 0x8040_1000u32),
+    ];
+    assert_eq!(
+        platform::choose_description(&default_high_then_qemu_high)
+            .expect("选档")
+            .id,
+        "qemu-virt",
+        "多区间镜像：遇到只被 qemu-virt 覆盖的区间 ⇒ 立即选 qemu-virt"
+    );
+
+    // ② **判别力**的那一条：第二个区间落在**两档之外** ⇒
+    // 「区间在外层」⇒ 第一个区间就**立即**选了 qemu-virt；
+    // 「描述在外层」（找第一个能装下**全部**区间的描述）⇒ **没有**描述
+    // 装得下 ⇒ 回落 default ⇒ 两者**结果不同** ⇒ 这条用例真的钉住了
+    // **结构**，不只是钉住了结果。
+    let qemu_high_then_outside = [
+        (0x8040_0000u32, 0x8040_1000u32),
+        (0x9000_0000u32, 0x9000_1000u32),
+    ];
+    assert_eq!(
+        platform::choose_description(&qemu_high_then_outside)
+            .expect("选档")
+            .id,
+        "qemu-virt",
+        "区间在外层 ⇒ 遇到只被 qemu-virt 覆盖的区间就立即选它（描述在外层会回落 default）"
+    );
+
+    // ③ 顺序也钉住：**倒过来** ⇒ 第一个区间落在两档之外（跳过）· 第二个
+    // 落 default 高段（⇒ 继续）⇒ 全部过完 ⇒ 回落 default。
+    let outside_then_default_high = [
+        (0x9000_0000u32, 0x9000_1000u32),
+        (0x8000_0000u32, 0x8000_1000u32),
+    ];
+    assert_eq!(
+        platform::choose_description(&outside_then_default_high)
+            .expect("选档")
+            .id,
+        "default",
+        "两档之外的区间被跳过 · default 高段的区间让选档继续 ⇒ 回落 default"
+    );
+}
+
+/// **B-9 的第六条**：`minimal` **永不**被自动选中。
+///
+/// ⚠️ 这条规则写在**数据里**：`minimal` 的 `auto_selectable` 是
+/// `false` ⇒ 它**不参与**自动选档 ⇒ 只能被**显式**指定 ⇒ 宿主**不按
+/// id 硬编码**候选集（那会是「代码知道哪个平台是演示平台」⇒ 换个人写
+/// 描述就会破）。
 #[test]
 fn the_demo_platform_is_never_auto_selected() {
+    // ⚠️ 三份内置描述的 `auto_selectable`（**数据**承载差异）。
+    assert!(
+        default_description().auto_selectable,
+        "default 参与自动选档"
+    );
+    assert!(
+        qemu_virt_description().auto_selectable,
+        "qemu-virt 参与自动选档"
+    );
+    assert!(
+        !minimal_description().auto_selectable,
+        "minimal（演示平台）不参与自动选档 ⇒ 只能被显式指定"
+    );
+
     // ⚠️ `minimal` 的低段 RAM 是 **2 MiB** ⇒ 这段（2 MiB + 1 字节）装得进
     // `minimal`、装不进 `default` 与 `qemu-virt`（两者的低段都是 1 MiB）。
     let only_minimal_fits = [(0x0000_0000u32, 0x0020_0001u32)];
@@ -563,6 +650,7 @@ fn a_broken_description_reports_its_own_code() {
         id: "overlap".to_string(),
         name: "Overlap".to_string(),
         priority: 5,
+        auto_selectable: true,
         region_budget_bytes: 16 * 1024 * 1024,
         regions: vec![
             RegionSpec::Ram {
@@ -582,6 +670,7 @@ fn a_broken_description_reports_its_own_code() {
         id: "budget".to_string(),
         name: "Budget".to_string(),
         priority: 5,
+        auto_selectable: true,
         region_budget_bytes: 1024,
         regions: vec![RegionSpec::Ram {
             base: 0,
@@ -595,6 +684,7 @@ fn a_broken_description_reports_its_own_code() {
         id: "dup".to_string(),
         name: "Duplicate".to_string(),
         priority: 5,
+        auto_selectable: true,
         region_budget_bytes: 16 * 1024 * 1024,
         regions: vec![
             RegionSpec::Peripheral {

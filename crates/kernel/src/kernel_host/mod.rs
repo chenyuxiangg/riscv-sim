@@ -963,9 +963,10 @@ impl KernelHost {
     /// 只有一条、写在代码里。
     ///
     /// ⚠️ **判据本身在 [`platform`] 里**（描述化，裁决 E）：今天它查的是
-    /// 「两档的**高段**窗口」；描述化之后它查的是「每个描述的**全部 RAM
-    /// 区域**」，候选按 `priority` 小者优先，**无候选 ⇒ 回落 `default`**
-    /// ⇒ **与今天逐字等价**（B-9 的四条用例钉住）。
+    /// 「两档的**高段**窗口」；描述化之后它查的是「每个**参与自动选档**
+    /// 的描述（`auto_selectable == true`）的**全部 RAM 区域**」，
+    /// **区间在外层**逐个过，候选按 `priority` 小者优先，**无候选 ⇒ 回落
+    /// `default`** ⇒ **与今天逐字等价**（B-9 的六条用例钉住）。
     fn choose_platform(&self, ranges: &[(u32, u32)]) -> Result<PlatformDescription, PlatformError> {
         platform::choose_description(ranges)
     }

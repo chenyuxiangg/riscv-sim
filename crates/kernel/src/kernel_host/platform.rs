@@ -40,7 +40,10 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
-use riscv_sim_contract::error::{PlatformError, PLATFORM_FAMILY};
+use riscv_sim_contract::error::{
+    PlatformError, E_PLT_09_UNKNOWN_PLATFORM, E_PLT_10_PLATFORM_FILE_UNREADABLE,
+    E_PLT_11_PLATFORM_FILE_MALFORMED, PLATFORM_FAMILY,
+};
 use riscv_sim_contract::platform::{DeviceSpec, PlatformDescription, RegionSpec};
 use riscv_sim_contract::port::Peripheral;
 
@@ -74,23 +77,15 @@ pub const PLATFORM_ID_QEMU_VIRT: &str = "qemu-virt";
 pub const PLATFORM_ID_MINIMAL: &str = "minimal";
 
 // ---------------------------------------------------------------------------
-// 宿主侧的加载错误码（E_PLT-09 .. E_PLT-11）
+// 宿主侧的三个场景码（E_PLT-09 .. E_PLT-11）—— **契约层所有**
 // ---------------------------------------------------------------------------
-
-/// 请求的**内置平台 id** 不存在。
-///
-/// ⚠️ **为什么宿主自己带码**：契约层拥有的是**描述的声明规则**（V-1 ~ V-9
-/// ⇒ `E_PLT-01` .. `E_PLT-08`）⇒ 「**按 id 取不到内置描述**」这条规则
-/// 属于**宿主**（谁负责按 id 找描述）⇒ 按契约层 `error.rs` 的规矩
-/// （「谁拥有这个场景，谁拥有这个码」），码住在**拥有它的模块**里。
-pub const E_PLT_09_UNKNOWN_PLATFORM: u16 = 9;
-
-/// 描述文件**读不到**（路径不存在 / 权限不足 / 读失败）。
-pub const E_PLT_10_DESCRIPTION_UNREADABLE: u16 = 10;
-
-/// 描述文件**解析不了**（不是合法 JSON / 形状不对 ⇒ 校验规则 **V-8**
-/// 的 serde 错误）。
-pub const E_PLT_11_DESCRIPTION_MALFORMED: u16 = 11;
+//
+// ⚠️ **码住在契约层**（`crates/contract/src/error.rs`）：规格 §1.6 的
+// V-10 ~ V-12 是**宿主侧**的规则（按 id 取不到描述 / 文件读不到 / 文件
+// 解析不了），但**码归契约层所有** ⇒ 宿主**只引用**，**不自建** ⇒
+// 同一个码在两处出现 = 一个约束两个落点。
+//
+// ⇒ 这里**不再**定义本地常量，只从契约层**引用**。
 
 // ---------------------------------------------------------------------------
 // 加载
@@ -107,41 +102,20 @@ const BUILTIN_DESCRIPTIONS: &[(&str, &str)] = &[
     (PLATFORM_ID_MINIMAL, BUILTIN_JSON_MINIMAL),
 ];
 
-/// 参与**自动选档**的内置描述。
-///
-/// ⚠️ **为什么 `minimal` 不在这里**（规格 §3 裁决 E 的一处**空白**）：
-/// `minimal` 是**演示**平台（规格 §0.1 第 6 条「第三份**演示**描述」）
-/// ⇒ 它的存在是为了证明「**换描述、宿主零改动**」⇒ 它**只能被显式
-/// 指定**。
-///
-/// ⚠️ **为什么这不是「按 id 硬编码内存图」**：这里列的是「**哪些平台
-/// 参与自动挑档**」，**不是**地址、**不是**器件、**不是**预算 ⇒ 换一份
-/// 描述的**内容**不需要改这里（§2.5 对照表的最后一行禁的是「按 id 硬
-/// 编码**预算**」）。
-///
-/// ⚠️ **若把 `minimal` 放进候选集，既有行为会变**：一段「比 `default`
-/// 的低段 RAM 大**一个字节**」的镜像（`0x0..0x10_0001`）装不进
-/// `default` / `qemu-virt`，却装得进 `minimal` 的 2 MiB 低段 ⇒ 它会
-/// **成为候选** ⇒ 宿主改用 `minimal` ⇒ 今天报 `E_BUS-01` 的那次装载
-/// **悄悄成功**了 ⇒ 规格 §3 裁决 E 的等价性论证只覆盖了「镜像**装得进**
-/// 低段」的情形，**没覆盖**这一种 ⇒ 这是规格的一处**空白**，由本模块
-/// 按「演示平台只显式指定」的口径收拢。
-const AUTO_SELECTABLE_IDS: &[&str] = &[PLATFORM_ID_DEFAULT, PLATFORM_ID_QEMU_VIRT];
-
 /// 解析一段描述文本 —— **唯一的解析器**。
 ///
 /// ⚠️ 内置路径与文件路径**共用这一个解析器 + 契约层那一个校验器**
 /// ⇒ 没有两份语义（§2.5 对照表第一行）。
 ///
 /// ⚠️ **serde 的错误**（V-8：未知器件种类 / 缺参数 / 参数类型错）在**解析
-/// 阶段**就失败 ⇒ 报 [`E_PLT_11_DESCRIPTION_MALFORMED`]；**声明规则**的
+/// 阶段**就失败 ⇒ 报 [`E_PLT_11_PLATFORM_FILE_MALFORMED`]；**声明规则**的
 /// 错误（V-1 ~ V-7 / V-9）由契约层的 `validate` 报 ⇒ `E_PLT-01` ..
 /// `E_PLT-08`。
 pub fn parse_description(json: &str) -> Result<PlatformDescription, PlatformError> {
     let description: PlatformDescription = serde_json::from_str(json).map_err(|err| {
         PlatformError::new(
             PLATFORM_FAMILY,
-            E_PLT_11_DESCRIPTION_MALFORMED,
+            E_PLT_11_PLATFORM_FILE_MALFORMED,
             format!("平台描述不是合法的 JSON：{err}"),
         )
     })?;
@@ -164,11 +138,11 @@ pub fn builtin_description(id: &str) -> Result<PlatformDescription, PlatformErro
     parse_description(json)
 }
 
-/// 全部**内置描述**（自动选档的候选集）。
+/// 全部**内置描述**（自动选档的**候选来源**）。
 ///
-/// ⚠️ 候选集**包含 `minimal`** —— 裁决 E 说候选按 `priority` 小者优先，
-/// `minimal` 的 `priority` 是 30（最大）⇒ 它**排在最后**⇒ 绝大多数情况
-/// 下选不到它。
+/// ⚠️ **这里返回的是「全部」**：哪一份**参与**自动选档，由描述自己的
+/// `auto_selectable` 字段决定（裁决 E）⇒ 宿主**不按 id 硬编码**候选集
+/// ⇒ 「演示平台只能被显式指定」这条规则写在**数据里**，不在代码里。
 pub fn builtin_descriptions() -> Result<Vec<PlatformDescription>, PlatformError> {
     BUILTIN_DESCRIPTIONS
         .iter()
@@ -184,7 +158,7 @@ pub fn description_from_file(path: &Path) -> Result<PlatformDescription, Platfor
     let text = std::fs::read_to_string(path).map_err(|err| {
         PlatformError::new(
             PLATFORM_FAMILY,
-            E_PLT_10_DESCRIPTION_UNREADABLE,
+            E_PLT_10_PLATFORM_FILE_UNREADABLE,
             format!("平台描述文件 {} 读不到：{err}", path.display()),
         )
     })?;
@@ -409,40 +383,58 @@ fn covered_by_ram(description: &PlatformDescription, lo: u32, hi: u32) -> bool {
 
 /// 按镜像**实际用到的地址**挑平台描述（裁决 E）。
 ///
-/// 判据：
+/// ## 判据（规格 §3 裁决 E 的**逐字**写法）
 ///
-/// 1. 对每个描述，取它的**全部 RAM 区域**；
-/// 2. 镜像的**每个**地址区间 `(lo, hi)` 必须被**某一个 RAM 区域**完整
-///    覆盖（`lo >= base && hi <= base + size`）；
-/// 3. 候选描述按 `priority` **小者优先**（内置：`default` = 10 ·
-///    `qemu-virt` = 20）；
-/// 4. **无候选 ⇒ 回落 `default`**（与今天「`continue` ⇒ 最终返回
-///    Default」等价）。
+/// 1. **候选描述** = 全部 `auto_selectable == true` 的内置描述 ⇒ 演示
+///    平台（`auto_selectable: false`）**只能被显式指定**；
+/// 2. **区间在外层**逐个过：对每个区间 `(lo, hi)`，在候选里找**能完整
+///    覆盖它**的那些（`lo >= base && hi <= base + size`，在它的**全部
+///    RAM 区域**里找）中 `priority` **最小**的那个：
+///    - **找不到** ⇒ 跳过这个区间（= 今天的 `continue`）；
+///    - 找到的是 **`default`** ⇒ **继续下一个区间**（= 今天「被 Default
+///      覆盖 ⇒ 不 return」）；
+///    - 找到的是**别的** ⇒ **立即**选它（= 今天的 `return QemuVirt`）；
+/// 3. **全部区间过完 ⇒ 回落 `default`**。
 ///
-/// ⚠️ **与今天的等价性**（B-9 的用例钉住）：今天只查**高段**窗口，
-/// 描述化查**全部 RAM 区域**⇒ `default` 的 `priority` 最小 ⇒ 低段镜像
-/// 仍然选 `default` ✓。
+/// ⚠️ **「区间在外层」这条结构不能倒过来**（规格 §5.2 B-9 的补充）：
+/// 「描述在外层、找第一个能装下**全部**区间的描述」在今天的两个真实
+/// 描述上**结果相同**，但它**不是**同一条规则 ⇒ 用例用一个「区间落在
+/// qemu-virt 高段 + 区间落在两档之外」的镜像把它**钉住**（区间在外层
+/// ⇒ `qemu-virt`；描述在外层 ⇒ `default`）。
 ///
-/// ⚠️ **为什么候选集里没有 `minimal`**（规格 §3 裁决 E 的一处**空白**，
-/// 详见 [`AUTO_SELECTABLE_IDS`]）：`minimal` 是**演示**平台 ⇒ 它**只能
-/// 被显式指定** ⇒ 若它参与自动选档，一段「比 `default` 的低段 RAM 大
-/// 一个字节」的镜像会**改选 `minimal`** ⇒ 今天报 `E_BUS-01` 的那次装载
-/// 会**悄悄成功** ⇒ **既有行为变了**。
+/// ⚠️ **为什么 `minimal` 不参与**（裁决 E 的**数据化**）：`minimal` 的
+/// **低段**是 2 MiB（比 `default` 的 1 MiB 大）⇒ 若它参与选档，一段
+/// 「比 `default` 低段大**一个字节**」的镜像会**改选 `minimal`** ⇒ 今天
+/// 报 `E_BUS-01` 的那次装载会**悄悄成功** ⇒ 「今天只查高段」这个差异
+/// 由 `auto_selectable: false` **显式承载在数据里** ⇒ 宿主**不按 id
+/// 硬编码**候选集。
 pub fn choose_description(ranges: &[(u32, u32)]) -> Result<PlatformDescription, PlatformError> {
-    let mut candidates: Vec<PlatformDescription> = builtin_descriptions()?
+    // ① 候选：全部 `auto_selectable == true` 的描述（裁决 E）。
+    let candidates: Vec<PlatformDescription> = builtin_descriptions()?
         .into_iter()
-        .filter(|description| AUTO_SELECTABLE_IDS.contains(&description.id.as_str()))
-        .filter(|description| {
-            ranges
-                .iter()
-                .all(|(lo, hi)| covered_by_ram(description, *lo, *hi))
-        })
+        .filter(|description| description.auto_selectable)
         .collect();
-    candidates.sort_by_key(|description| description.priority);
-    match candidates.into_iter().next() {
-        Some(description) => Ok(description),
-        // ⚠️ 无候选 ⇒ 回落 `default`（**今天**也是这样：两档都装不下 ⇒
-        // 返回 Default ⇒ 随后由 M-14 报「未映射访问」）。
-        None => builtin_description(PLATFORM_ID_DEFAULT),
+
+    // ② **区间在外层**逐个过。
+    for &(lo, hi) in ranges {
+        // 覆盖这个区间的候选里，`priority` 最小的那个。
+        let best = candidates
+            .iter()
+            .filter(|description| covered_by_ram(description, lo, hi))
+            .min_by_key(|description| description.priority);
+
+        match best {
+            // 找不到 ⇒ 跳过这个区间（= 今天的 `continue`）。
+            None => continue,
+            // 找到的是 `default` ⇒ 继续下一个区间（= 今天「被 Default
+            // 覆盖 ⇒ 不 return」）。
+            Some(description) if description.id == PLATFORM_ID_DEFAULT => continue,
+            // 找到的是别的 ⇒ **立即**选它（= 今天的 `return QemuVirt`）。
+            Some(description) => return Ok(description.clone()),
+        }
     }
+
+    // ③ 全部区间过完 ⇒ 回落 `default`（**今天**也是这样：两档都装不下 ⇒
+    // 返回 Default ⇒ 随后由 M-14 报「未映射访问」）。
+    builtin_description(PLATFORM_ID_DEFAULT)
 }
