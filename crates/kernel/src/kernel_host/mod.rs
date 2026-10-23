@@ -777,15 +777,20 @@ pub struct KernelHost {
     /// 视图**（按 `id` 投影，裁决 C）⇒ 既有调用点一字不改。
     platform: riscv_sim_contract::platform::PlatformDescription,
 
-    /// 用户配的板（**待生效**）—— STAGE-14 §2.1 裁决 A 的那个字段。
+    /// 用户配的板（**跨 `LoadProject` 保持**）—— STAGE-14 §2.1 裁决 A 的那个字段。
     ///
-    /// ⚠️ **它只在「当前会话已经装载过镜像」时才有值**（§2.3 裁决 C）：
-    /// 装载前发来的板级配置**立即生效**（`self.platform` 直接换掉）⇒
-    /// 没有「待生效」这一说；装载后发来的**先存着**，等下一次
-    /// `LoadProject` 把它用掉（§3.2 第 2 步）。
+    /// ⚠️ **它就是「用户意图」本身**，不是「待生效的那一份」——
+    /// 用户的板一旦配过，就**一直**在那儿 ⇒ `LoadProject` 始终优先用它建图
+    /// （§2.2 的施工期订正）。
+    ///
+    /// ⚠️ **为什么只留一个字段**：初版写的是「待生效的那一份」+ 单独一个
+    /// `pending` 标志 ⇒ 「配了板但没生效」与「标志忘了翻」是**两种不同的
+    /// 错**，前者推导不出来、后者无从发现 ⇒ 「待生效」改成**推导量**
+    /// （见 [`KernelHost::memory_map_pending`]）⇒ 少一个状态就少一处可能
+    /// 不同步的地方。
     ///
     /// ⚠️ **不持久化**（裁决 N）：刷新页面即失 ⇒ MVP 单会话。
-    pending_platform: Option<PlatformDescription>,
+    user_board: Option<PlatformDescription>,
     /// 当前会话是否已经装载过镜像（STAGE-14 §2.3 裁决 C）。
     ///
     /// ⚠️ 本批**不做**卸载命令 ⇒ 装载过之后就只能通过「重新装载工程」
@@ -919,8 +924,8 @@ impl KernelHost {
             trace_events_discarded: 0,
             platform: description.clone(),
             // STAGE-14 §2.1 裁决 A：用户配的板住在**宿主会话内** ⇒ 新会话
-            // 一开始**没有**待生效的板。
-            pending_platform: None,
+            // 一开始**没有**配过板。
+            user_board: None,
             // STAGE-14 §2.3 裁决 C：新会话**还没装载过**镜像。
             image_loaded: false,
             uart0: None,
@@ -1957,11 +1962,16 @@ impl KernelHost {
         // ⚠️ **挑档判据已经描述化**（裁决 E）：挑出来的是**一份描述**
         // （不是「档位」枚举）⇒ 内存图由它决定。
         //
-        // ⚠️ **STAGE-14 §3.2 第 2 步**：**有**用户配的板 ⇒ 用它建图
-        // （跳过自动选档）；**没有** ⇒ 走今天的自动选档（**逐字不变**，
+        // ⚠️ **STAGE-14 §3.2 第 2 步**：**配过板** ⇒ 用**用户的板**建图
+        // （跳过自动选档）；**从未配过板** ⇒ 走今天的自动选档（**逐字不变**，
         // 验收 B-5）。
-        match self.pending_platform.take() {
-            Some(description) => self.platform = description,
+        //
+        // ⚠️ **读，不消耗**（§2.2 的施工期订正）：初版这里是
+        // `pending_platform.take()` ⇒ 用完就没了 ⇒ **用户装载前配的板会被
+        // 紧接着的那次 `LoadProject` 覆盖掉** ⇒「装载前立即生效」成一句
+        // 空话 ⇒ 用户的板是**用户意图**，**跨 `LoadProject` 保持**。
+        match &self.user_board {
+            Some(board) => self.platform = board.clone(),
             None => match self.choose_platform(&ranges) {
                 Ok(description) => self.platform = description,
                 Err(err) => return vec![self.error_from(&err)],
@@ -2021,36 +2031,59 @@ impl KernelHost {
         events
     }
 
+    /// 「用户配的板」是不是**还没生效**（STAGE-14 §3.2 ④ 的**推导量**）。
+    ///
+    /// ⚠️ **推导，不单独存**：用户的板 ≠ 当前生效的图 ⇒ 还没生效。
+    ///
+    /// ⚠️ **为什么是推导量**：存两个字段（「配的板」+ 一个 `pending` 标志）
+    /// ⇒ 「配了板但没生效」与「标志忘了翻」是**两种不同的错** ⇒ 前者推导
+    /// 不出来、后者无从发现 ⇒ 只留一个字段就少一处可能不同步的地方。
+    ///
+    /// ⚠️ `PlatformDescription` 派生了 `PartialEq` ⇒ 这个比较是**类型安全**的。
+    fn memory_map_pending(&self) -> bool {
+        match &self.user_board {
+            Some(board) => self.platform != *board,
+            None => false,
+        }
+    }
+
     /// **设置板级内存图**（用户在界面上配的那张板）。
     ///
     /// ⚠️ **顺序固定**（STAGE-14 §3.2，冻结规格）：
     ///
     /// ```text
     /// ① description.validate()        ← 契约层那个唯一校验器
-    /// ② pending_platform = Some(description)
+    /// ② user_board = Some(description) ← 记下**用户意图**
     /// ③ 若 !image_loaded ⇒ 立即生效（换图 + 重建总线）
-    /// ④ 回 EventPayload::MemoryMap { description: 当前生效的图, pending }
+    /// ④ pending = user_board ≠ self.platform   ← **推导量**
+    /// ⑤ 回 EventPayload::MemoryMap { description: 当前生效的图, pending }
     /// ```
     ///
     /// ⚠️ **校验失败时「什么都不动」**：不合规的描述**不能**污染宿主当前的
-    /// 内存图 ⇒ `self.platform` 与 `pending_platform` 都保持原样。
+    /// 内存图 ⇒ `self.platform` 与 `user_board` 都保持原样。
     ///
     /// ⚠️ **已装载镜像时不重建总线**（裁决 B）：正在跑的 guest **一字不受
     /// 影响** ⇒ 新板等下一次 `LoadProject` 生效（事件回 `pending = true`）。
+    ///
+    /// ⚠️ **重建失败时 `user_board` 保留**：用户的板还在，只是**没生效**
+    /// ⇒ `pending` 变真 ⇒ 用户改板这件事**没有丢**。
     fn on_set_memory_map(&mut self, description: PlatformDescription) -> Vec<EventPayload> {
         // ---- ① 校验（契约层那个唯一校验器 ⇒ E_PLT-01..E_PLT-11）----
         //
-        // ⚠️ 失败 ⇒ **什么都不动**（当前图与待生效配置都不碰）⇒ 只回一条
+        // ⚠️ 失败 ⇒ **什么都不动**（当前图与用户的板都不碰）⇒ 只回一条
         // `Error` 事件。
         if let Err(err) = description.validate() {
             return vec![self.error_from(&err)];
         }
 
-        // ---- ② 先存下「用户配的板」（裁决 A：住在宿主会话内）----
+        // ---- ② 记下**用户配的板**（裁决 A：住在宿主会话内）----
         //
         // ⚠️ 存的是**一份拷贝** ⇒ 第 ③ 步可以把原件直接换进 `self.platform`
         // （`PlatformDescription` 是 `Clone` 的数据，不是什么昂贵的东西）。
-        self.pending_platform = Some(description.clone());
+        //
+        // ⚠️ **不消耗**它：用户的板是**用户意图** ⇒ 跨 `LoadProject` 保持
+        // （§2.2 的施工期订正）。
+        self.user_board = Some(description.clone());
 
         // ---- ③ 未装载过镜像 ⇒ **立即生效**（裁决 B）----
         if !self.image_loaded {
@@ -2066,16 +2099,15 @@ impl KernelHost {
                 // 报出去的那一个 ⇒ 不被恢复的成败掩盖。
                 self.platform = old;
                 let _ = self.rebuild_platform();
+                // ⚠️ `user_board` **保留**（用户的板还在，只是没生效）。
                 return vec![self.error_from(&err)];
             }
-            // 生效了 ⇒ 没有「待生效」的了。
-            self.pending_platform = None;
         }
 
-        // ---- ④ 回「当前生效的图」+「有没有待生效的」（裁决 D）----
+        // ---- ④⑤ 回「当前生效的图」+「用户的板有没有生效」（裁决 D）----
         vec![EventPayload::MemoryMap {
             description: self.platform.clone(),
-            pending: self.pending_platform.is_some(),
+            pending: self.memory_map_pending(),
         }]
     }
 
@@ -2921,7 +2953,7 @@ impl KernelHost {
             // （「订阅即强制推一条」）。
             events.push(EventPayload::MemoryMap {
                 description: self.platform.clone(),
-                pending: self.pending_platform.is_some(),
+                pending: self.memory_map_pending(),
             });
         }
         events
