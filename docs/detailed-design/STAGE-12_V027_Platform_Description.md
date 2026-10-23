@@ -200,8 +200,9 @@ pub enum DeviceSpec {
 ⚠️ **内部 tag 的名字是 `device` 而不是 `kind`**（`kind` 已被区域层占用）⇒ 线上键名是 `{"device": "uart16550", ...}` ⇒ **与 §1.5 的示例逐字一致**。
 
 **校验器**：`PlatformDescription::validate(&self) -> Result<(), PlatformError>`，**V-1 ~ V-9 全部落在这里** ⇒ **一个约束一个落点**（宿主与前端都调它，不各写一份）。
+⚠️ **V-10 ~ V-12 不落在 `validate` 里**（它们是**宿主侧**的三类失败：平台 id 不存在 / 描述文件读不了 / 描述文件形态非法 ⇒ 宿主在做**装载**时才知道）⇒ 但**它们的场景码仍归契约层所有**（`crates/contract/src/error.rs`）⇒ 宿主只**引用**、**不自建** ⇒ **约束的落点唯一**。
 
-⚠️ **错误码族**：新增第 **15 个**错误族 `ErrorFamily::Platform`（tag `"PLT"`，**3 字符** ⇒ 符合契约层「tag 是 3–5 字符」的约束）+ 场景码 `1..8`（线上 `E_PLT-01` .. `E_PLT-08`）。
+⚠️ **错误码族**：新增第 **15 个**错误族 `ErrorFamily::Platform`（tag `"PLT"`，**3 字符** ⇒ 符合契约层「tag 是 3–5 字符」的约束）+ 场景码 `1..11`（线上 `E_PLT-01` .. `E_PLT-11`）⇒ ⚠️ **十一条规则（V-1 ~ V-12，其中 V-8 落在 serde 层）对应十一个码**。
 
 ⚠️ **新增一族要改两处**（契约层的 `error_families!` 宏是「族」的真相源，但**族标签表 `TAGS` 是另一处**）：
 - `crates/contract/src/error.rs:119` 的 `error_families! { … }` 里加**一行** `Platform => "PLT",`；
@@ -257,7 +258,8 @@ pub enum DeviceSpec {
 fn build_device(spec: &DeviceSpec, base: u32) -> Result<BuiltDevice, PlatformError>
 ```
 
-⚠️ **契约先行**：工厂返回 `Rc<RefCell<dyn Peripheral>>`（契约层 `port.rs` 的 trait 对象）⇒ 工厂**不认识** M-15 的具体类型，除了**构造**那一刻。
+⚠️ **契约先行**：工厂返回**两种视图**（① **擦除视图** `Rc<RefCell<dyn Peripheral>>` —— 契约层 `port.rs` 的 trait 对象，挂总线用；② **有类型句柄** —— 宿主自己用，如 `Rc<RefCell<Uart16550>>`）⇒ 工厂**不认识** M-15 的具体类型，除了**构造**那一刻。
+⚠️ **为什么必须是两种视图**：`RefCell<T>` 是**不变**的 ⇒ `RefCell<dyn Peripheral>` **降不回** `RefCell<Uart16550>` ⇒ 一个返回值**不可能**同时满足总线侧与宿主侧 ⇒ ⇒ 拆成两样东西 ⇒ 而**器件种类的 `match` 仍然只有一处** ✓（约束的落点没增加）。
 ⚠️ **新增一种器件种类 ⇒ 必须改这一个 match** ⇒ 这是**不可消除**的边界 ⇒ 规格明说：**平台（内存图）零代码，器件种类要代码**。
 
 ### 2.5 「一个约束一个落点」对照表（裁决 H）
@@ -481,8 +483,8 @@ riscv-none-elf-objcopy -O binary --only-section=.text d82.o d82.bin
 ### 5.1 Lane A · 契约层（A-1 ~ A-8）
 
 - [ ] **A-1** `PLATFORM_SCHEMA_VERSION == 1`；`schema_version != 1` ⇒ `E_PLT-01`
-- [ ] **A-2** 描述的**键集精确固定**（顶层**恰好 6 个键**：`schema_version` / `id` / `name` / `priority` / `region_budget_bytes` / `regions`；⚠️ `description` 带 `skip_serializing_if` ⇒ **不带说明时不出现**、带说明时才是 7 个 ⇒ 断言要写「**6 个 / 带说明时 7 个**」，不能笼统写「7 个」）⇒ 另断言 `regions[0]` 的键集合按 `kind` 分别是 `{kind, base, size}` / `{kind, base, device}`；断言器件条目的键集合按 `device` 分派。先例：`crates/contract/src/session.rs:2431` 的「CLINT 状态的键集必须精确固定」
-- [ ] **A-3** V-1 ~ V-9 **九条校验规则**各自**一个独立的场景码**（`E_PLT-01` .. `E_PLT-08` + serde 错误）⇒ 每条一条用例
+- [ ] **A-2** 描述的**键集精确固定**（顶层**恰好 7 个键**：`schema_version` / `id` / `name` / `priority` / `auto_selectable` / `region_budget_bytes` / `regions`；⚠️ `description` 带 `skip_serializing_if` ⇒ **不带说明时不出现**、带说明时才是 8 个 ⇒ 断言要写「**7 个 / 带说明时 8 个**」，不能笼统写「8 个」）⇒ ⚠️ **`auto_selectable` 是裁决 E 新增的顶层字段**（`#[serde(default = "default_true")]` ⇒ 缺省为 `true` ⇒ **它总是出现在序列化结果里**、解析时缺了也合法）⇒ 另加一条用例钉住「缺省 `auto_selectable` 的描述**按 `true`** 参与自动选档」⇒ 另断言 `regions[0]` 的键集合按 `kind` 分别是 `{kind, base, size}` / `{kind, base, device}`；断言器件条目的键集合按 `device` 分派。先例：`crates/contract/src/session.rs:2431` 的「CLINT 状态的键集必须精确固定」
+- [ ] **A-3** V-1 ~ V-12 **十二条校验规则**各自**一个独立的场景码**（`E_PLT-01` .. `E_PLT-08` + serde 错误 + `E_PLT-09` .. `E_PLT-11`）⇒ 每条一条用例；⚠️ **十二条规则对应十一个码**（V-8 落在 serde 层 ⇒ 用 serde 自己的错误、不占场景码）⇒ ⚠️ **V-10 ~ V-12 是宿主侧的三类失败，但码归契约层所有**（宿主只引用、不自建）⇒ 契约层 `crates/contract/src/error.rs` 里 `E_PLT_09_UNKNOWN_PLATFORM` / `E_PLT_10_PLATFORM_FILE_UNREADABLE` / `E_PLT_11_PLATFORM_FILE_MALFORMED` 三条**由契约层拥有** ⇒ 断言要写「**十二条规则 / 十一个码**」，不能笼统写「十二条码」
 - [ ] **A-4** 描述**往返**（serialize → deserialize ⇒ 逐字段相等），含边界值（`region_budget_bytes` = `u32::MAX`）⇒ ⚠️ **裁决 J'' · 数值策略**：`region_budget_bytes` 取 **`u32`**（不是 `u64`）⇒ ① 它是**每区域**的字节预算，而地址空间只有 4 GiB ⇒ 超过 `u32::MAX` 的预算**没有意义** ⇒ ② 用 `u32` ⇒ **超出范围在 serde 反序列化阶段就失败**（归 V-8 的 serde 错误）⇒ **不需要**新增一条校验规则（也不需要契约层的十进制字符串策略 `numstr.rs` —— 那是给**虚拟时间**这类真会超 2^53 的量用的）⇒ 用例钉住「`u32::MAX` 的预算能往返；`u32::MAX + 1` 在 serde 阶段被拒」
 - [ ] **A-5** `RegionSpec` / `DeviceSpec` 的**内部 tag 键名**逐字是 `"kind"` / `"device"`（不是 `type`、不是 `t`）
 - [ ] **A-6** 错误族 `ErrorFamily::Platform` 新增 ⇒ 契约层错误族清单从 **14 → 15**；⚠️ **两处都补**：`error_families!` 宏的**一行** + 族标签表 `TAGS` 的**一行** ⇒ 靠契约层既有的完整性用例（**`every_family_tag_is_pinned`**，在 `crates/contract/src/error.rs` 的测试模块里）兜住 ⇒ **不新增**这条用例
@@ -569,7 +571,7 @@ riscv-none-elf-objcopy -O binary --only-section=.text d82.o d82.bin
 | 2 | `RegionDto.kind` 的三个常量**归属**上移到契约层（M-14 改 `pub use`） | M-14 内部（字面量不变） | 既有断言一条不改 |
 | 3 | `MemoryProfile` 的**语义**从「两档」变成「当前描述 id 的兼容投影」 | `memory_profile()` 5 个调用点 | 保留旧取值（裁决 C）⇒ **既有 4 条断言不改** |
 | 4 | `map_memory` 的**签名**从 `profile` 改成「描述引用」 | 仅宿主内部（2 个调用点） | 私有函数 ⇒ 外部不可达 |
-| 5 | **新增** `Platform` 错误族的场景码 `E_PLT-01` .. `E_PLT-08` | 契约层错误码清单 | §5.1 A-6 |
+| 5 | **新增** `Platform` 错误族的场景码 `E_PLT-01` .. `E_PLT-11` | 契约层错误码清单 | §5.1 A-6 |
 | 6 | **不升** `SESSION_SNAPSHOT_SCHEMA_VERSION`（仍 3） | — | ⚠️ 描述**不进会话载荷** ⇒ 前端镜像不动 |
 
 ⚠️ **不破坏的**：`SessionSnapshotDto` 的形状、快照的 `E-SNAP-05` 行为、`RegionDto` 的字段集、`M14MapDto` 的形状 ⇒ **会话载荷向后兼容**。
