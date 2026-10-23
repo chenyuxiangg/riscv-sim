@@ -62,7 +62,7 @@ HMS_FATAL + 幂等标志）** → **M-21（记 `EV_WATCHDOG`）**。而 **D-114*
 
 ### 1.1 M-21 现状
 
-* `crates/kernel/src/m21_logging/mod.rs`：**84 行** stub。
+* `crates/kernel/src/m21_logging/mod.rs`：**94 行** stub（第三次订正的实测订正）。
 * 现有公开类型：`Level { Trace, Info, Warn, Error, Fatal }`、`LogRecord { ts_ms, level,
   source, message }`、`LogBuffer`（单个 `VecDeque`，容量 `MAX_LOG_RECORDS = 4096`）、
   `LOG_FAMILY = ErrorFamily::Context`。
@@ -234,6 +234,14 @@ HMS_FATAL + 幂等标志）** → **M-21（记 `EV_WATCHDOG`）**。而 **D-114*
     **超限按 UTF-8 字符边界截断**（**绝不切半个字符**）并置 `truncated = true`。
   * **「零分配」不承诺**，按「不分配大块内存（单条 ≤ 128B 量级）」**近似满足**，
     并**如实登记**（§8 新欠账）。**不得**在文档里声称「零分配」。
+* ⚠️ **「槽位大小」与「有效载荷」的口径差一字节（第三次订正的显式记录）**：
+    LLD 的伪码是 C 的定长槽 —— `char ctx[24]` / `char errCode[12]` / `char msg[128]`
+    ⇒ C 的 `snprintf` 让**有效载荷**分别是 **23 / 11 / 127** 字节（末字节留给 NUL）。
+    本批取**有效载荷 24 / 12 / 128 字节**（Rust 的 `String` 无 NUL）⇒ **比 LLD 各多
+    1 字节**。这是**有意偏差**，在此显式记录，**不藏**：规格 §2.6 与 §5.2 的 B-3
+    写的是「≤128 / ≤24 / ≤12 字节」，指的是**有效载荷**。
+    ⇒ 代价：一条日志比 LLD 的槽位多存 1 字节；收益：不必在 Rust 里为「NUL 位」留坑
+    （留了反而会出现「槽位 128 里有效载荷只有 127」的第二个口径）。
 
 ### 2.7 日志与健康信号**不上契约层**（裁决 I + L）
 
@@ -713,6 +721,17 @@ pub trait DataStore {
 
 * `InMemoryDataStore` 补实现：`archives: HashMap<String, Vec<u8>>`，
   **同名覆盖**（后写覆盖先写）⇒ 提供 `get_archive(&self, name) -> Option<&[u8]>` 供测试读回。
+* ⚠️ **Storage 族此前零场景码**（第三次订正的实测依据）：契约层有 `Storage` 族标签与
+  `STORE_FAMILY`，但**一个场景码都没有**（LLD 第六章把 `E_STORE` 记为「已声明未接线」
+  族）⇒ A-5 的「用 Storage 族的合法场景码」在冻结规格写下时**无处可取**。
+  ⇒ **裁定**：`E_STORE_01_ARCHIVE_FAILED: u16 = 1` 定义在
+  **`crates/kernel/src/m23_datastore/mod.rs`**（**拥有该场景的模块**），
+  **不上契约层**（契约层本批冻结为「只加两个 HMS 场景码常量」，§7）。
+  ⚠️ **这不是违反 D-120**：D-120 禁的是「**同一个码有两份定义**」，
+  而**既有惯例**本来就是「场景码住在拥有该场景的模块里」——
+  M-14 的 `E_BUS_04/06/09/10/11/12`、M-08 的 `E_CTX_07`、M-11 的 `E_LDR_01/02`、
+  M-17 的 `E_INT_01`、宿主的 `E_OBS_02` **全都在内核 crate 里**。
+  ⇒ 全仓仍是**单一定义处** ✔。口径本身的分散问题另立 **D-132**（§8.2）。
 * ⚠️ **既有五方法的签名与语义一条不改**（`the_trait_has_exactly_the_five_methods` 这条
   现有用例**必须改名为六方法**并同步断言 —— **这是本批唯一被允许的既有断言改动**，
   且**只许加一条、不许放松其余**）。
@@ -914,6 +933,7 @@ M-12/M-17 守卫触发  ──►  Err(E_ENG_03_NO_PROGRESS)
 | **D-129** | **日志 / 健康信号的跨进程载体缺失**：本批判定为「进程内通道，前端不订阅」（角色边界）⇒ 服务端形态（P1）的「管理员跨进程收集」**没有契约载体**。⚠️ **具体证据（第一次订正）**：契约层**已有** `CommandPayload::Admin { op: AdminOp }` 与 `AdminOp::DrainLogs`（注释就写着「Dump the kernel log buffer (M-21)」）—— **空壳入口在，缺的是日志条目的 DTO 与回复事件** ⇒ 宿主对该命令只能一律返回 `E_CTX-05`「管理通道未启用」⇒ 管理员通道**接不上**。届时需上契约层 DTO + 回复事件 | P1（随服务端形态） |
 | **D-130** | **降级动作只落地 `Terminate`**：`SnapshotRestore` / `Pause` / `Disconnect` / `TraceDown` 声明但 `Unsupported` ⇒ 它们分别要 M-20 / M-04 / M-07 / M-19 | P2 |
 | **D-131** | **MVP 单会话 + 角色降级**：`session_id` 恒 0；`role` 由宿主设定、默认 `Product`；LLD M-21 §3.4 的三层鉴权（令牌）**未做** | P2 |
+| **D-132** | **场景码定义处分散在契约层与内核 crate**：契约层有 `PROTO` / `ENG` / `PLT` / `DBG` / `SNAP` / `PER` 等族的场景码，内核 crate 里又有 `BUS` / `CTX` / `LDR` / `INT` / `OBS` / `STORE` 等族的场景码 ⇒ 「场景码住哪」这条纪律**没有统一口径**（D-120 只禁了「同一码两份定义」，没禁「定义处分散」）。⚠️ 本批新增的 `E_STORE_01` 又添了一处。⇒ 需要一条明确口径（哪些族必须上契约层 —— 判据应是「**跨模块共享 / 前端要按码分派**」） | P2 |
 
 ### 8.3 本批**不**动的欠账
 
