@@ -832,14 +832,26 @@ use riscv_sim_kernel::m12_engine::NO_PROGRESS_WINDOW;   // 实际路径按 crate
 ```
 
 * `step_n` 的循环里维护 `no_progress: u32`：
+  * ⚠️ **假端口的返回值口径（第七次订正的实测依据）**：规格未规定假 `InterruptPort`
+    的 `poll` / `pending_lines` 该返回什么 ⇒ 取**最保守**口径：
+    `poll` → `Ok(None)`（不交付）；`pending_lines` → `Some(空 vec)`（**不伪造挂起线**）。
+    ⇒ 若将来要与 M-16 的真实语义对齐，另行补用例。
   * `Ok(ExecOutcome::InterruptTaken)` 分支：**虚拟时间没前进** ⇒
     `no_progress += 1`；`no_progress >= NO_PROGRESS_WINDOW` ⇒
     **返回 `Err(PlatformError::new(ErrorFamily::Engine, E_ENG_03_NO_PROGRESS, ..))`**；
   * 任何**有指令退休**（`Advanced` / `Stop { consumed: true }`）⇒ `no_progress = 0`。
+    ⚠️ **写法订正（第七次订正的实测依据）**：把这条写成 `Stop` 分支里的
+    `no_progress = 0` **在原结构下编译不过 `-D warnings`** —— `Stop` 分支必然 `break`，
+    该赋值在 rustc 眼里是**死赋值**（`unused_assignments`）⇒ 正确写法是
+    **在 `match` 之前按 `outcome` 统一判定**（语义等价，且没有死赋值）。
 * ⚠️ **口径与 M-12 一致**：中断交付**不算**进展（VD-F3）。
-* ⚠️ **触发条件苛刻**：`step_n(n)` 的循环最多跑 `n` 次 ⇒ 只有 `n > NO_PROGRESS_WINDOW`
-  才可能触发（台账 D-114 原文：「自旋的触发条件比 M-12 苛刻」）⇒ 判别式用例必须用
-  `n = NO_PROGRESS_WINDOW + 1` 以上。
+* ⚠️ **触发条件苛刻**：`step_n(n)` 的循环最多跑 `n` 次 ⇒ 只有 `n >= NO_PROGRESS_WINDOW`
+  才可能触发（台账 D-114 原文：「自旋的触发条件比 M-12 苛刻」）。
+  ⚠️ **口径订正（第七次订正的实测依据）**：原稿写的是「只有 `n > NO_PROGRESS_WINDOW`
+  才可能触发」，**实测 `n = NO_PROGRESS_WINDOW`（正好 1024）同样会触发** ——
+  守卫是在**第 `NO_PROGRESS_WINDOW` 次交付的那一轮**就判定的 ⇒ 真实条件是 **`n >=`**。
+  ⇒ 判别式用例仍取 `n = NO_PROGRESS_WINDOW + 1`（**保守**，留一步余量），
+  但**规格口径已订正为 `>=`**。
 
 ---
 
