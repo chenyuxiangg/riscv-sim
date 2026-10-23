@@ -2089,3 +2089,172 @@ fn a_uart_state_whose_head_disagrees_with_its_queue_is_rejected() {
     assert_eq!(err.family, ErrorFamily::Peripheral);
     assert_eq!(err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE);
 }
+
+// ---------------------------------------------------------------------------
+// v0.26 · STAGE-11 裁决 E —— TX 捕获环进会话快照
+// ---------------------------------------------------------------------------
+
+/// ⚠️ **B-5 的器件侧**：往 THR 写三个字节 ⇒ 快照里 `tx_ring` 有**三个**
+/// 字节、`tx` 是**队头**。
+///
+/// ⚠️ **为什么这条重要**：捕获环里的字节是**访客已经发出去、还没被宿主
+/// 取走**的内容 ⇒ 它**是会话状态** ⇒ 只带走队头（`tx`）会**丢字节** ⇒
+/// 还原出来的会话与采快照的那次**不是同一个**。
+#[test]
+fn the_tx_capture_ring_travels_into_the_session_state() {
+    let mut uart = Uart16550::new("UART0", 0x1000, 9600, 4);
+    for byte in *b"ABC" {
+        uart.write(0x0, WriteSize::Byte, u32::from(byte))
+            .expect("写 THR");
+    }
+
+    let exported = uart.session_state().expect("UART 参与会话状态");
+    let PeripheralSessionState::Uart(state) = exported else {
+        panic!("UART 必须导出 UART 状态");
+    };
+    assert_eq!(
+        state.tx_ring,
+        vec![b'A', b'B', b'C'],
+        "捕获环的**全部**待取字节必须进快照（队头在前）"
+    );
+    assert_eq!(state.tx, Some(b'A'), "`tx` 必须等于 `tx_ring` 的**队头**");
+}
+
+/// ⚠️ **B-5 的另一半**：还原之后 `drain_tx()` 必须拿回**同样三个字节**
+/// （逐字节）。
+#[test]
+fn restoring_a_uart_state_puts_the_whole_tx_ring_back() {
+    let mut source = Uart16550::new("UART0", 0x1000, 9600, 4);
+    for byte in *b"ABC" {
+        source
+            .write(0x0, WriteSize::Byte, u32::from(byte))
+            .expect("写 THR");
+    }
+    let exported = source.session_state().expect("UART 参与会话状态");
+
+    let mut target = Uart16550::new("UART0", 0x1000, 9600, 4);
+    target
+        .restore_session_state(&exported)
+        .expect("还原必须成功");
+    assert_eq!(
+        target.drain_tx(),
+        vec![b'A', b'B', b'C'],
+        "还原后必须拿回**逐字节相同**的三个字节"
+    );
+}
+
+/// ⚠️ **B-6**：把捕获环灌满触发丢弃 ⇒ 快照里 `tx_dropped > 0` ⇒ 丢失
+/// **看得见**，不是静默的。
+#[test]
+fn the_dropped_byte_counter_travels_into_the_session_state() {
+    // 捕获环只有 4 字节 ⇒ 写 6 个字节 ⇒ 至少丢 2 个。
+    let mut uart = Uart16550::new_with_tx_capacity("UART0", 0x1000, 9600, 4, 4);
+    for byte in *b"ABCDEF" {
+        uart.write(0x0, WriteSize::Byte, u32::from(byte))
+            .expect("写 THR");
+    }
+    assert_eq!(uart.tx_dropped(), 2, "环满之后丢的是**最新**的两个字节");
+
+    let exported = uart.session_state().expect("UART 参与会话状态");
+    let PeripheralSessionState::Uart(state) = exported else {
+        panic!("UART 必须导出 UART 状态");
+    };
+    assert!(
+        state.tx_dropped > 0,
+        "溢出丢弃的累计计数必须进快照（丢失要看得见），实际是 {}",
+        state.tx_dropped
+    );
+    assert_eq!(
+        state.tx_dropped, 2,
+        "丢弃计数必须**精确**等于实际丢掉的字节数"
+    );
+    // ⚠️ **丢最新、保最早** ⇒ 环里剩的是**最早**的四个字节。
+    assert_eq!(
+        state.tx_ring,
+        vec![b'A', b'B', b'C', b'D'],
+        "环满时保**最早**的字节、丢**最新**的"
+    );
+    assert_eq!(state.tx, Some(b'A'), "`tx` 必须等于 `tx_ring` 的队头");
+}
+
+/// ⚠️ **`tx_dropped` 还原时取「覆盖」而不是「累加」** —— 快照 = 状态 ⇒
+/// 还原后的计数必须**等于**载荷里的那个值。
+#[test]
+fn the_dropped_byte_counter_is_overwritten_not_accumulated_on_restore() {
+    let mut source = Uart16550::new_with_tx_capacity("UART0", 0x1000, 9600, 4, 4);
+    for byte in *b"ABCDE" {
+        source
+            .write(0x0, WriteSize::Byte, u32::from(byte))
+            .expect("写 THR");
+    }
+    let exported = source.session_state().expect("UART 参与会话状态");
+
+    // 目标器件自己先丢过 3 个字节 ⇒ 若还原是「累加」，结果会是 1 + 3。
+    let mut target = Uart16550::new_with_tx_capacity("UART0", 0x1000, 9600, 4, 4);
+    for byte in *b"xyzwv" {
+        target
+            .write(0x0, WriteSize::Byte, u32::from(byte))
+            .expect("写 THR");
+    }
+    assert_eq!(target.tx_dropped(), 1);
+
+    target
+        .restore_session_state(&exported)
+        .expect("还原必须成功");
+    assert_eq!(
+        target.tx_dropped(),
+        1,
+        "还原必须**覆盖**成载荷里的值（快照 = 状态），不许累加"
+    );
+}
+
+/// ⚠️ **`tx` 与 `tx_ring` 的队头不一致** ⇒ 器件侧也必须拒（载荷自相
+/// 矛盾：它同时说「队头是 0x41」和「队头是 0x42」）。
+#[test]
+fn a_uart_state_whose_tx_head_disagrees_with_its_ring_is_rejected() {
+    let u = Uart16550::new("UART0", 0x1000, 9600, 4);
+    let bad = PeripheralSessionState::Uart(UartStateDto {
+        id: "UART0".to_string(),
+        tx: Some(0x41),
+        tx_ring: vec![0x42, 0x43],
+        ..UartStateDto::default()
+    });
+    let err = u
+        .validate_session_state(&bad)
+        .expect_err("队头与捕获环不一致的状态必须被拒");
+    assert_eq!(err.family, ErrorFamily::Peripheral);
+    assert_eq!(err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE);
+}
+
+/// ⚠️ **捕获环比器件的环深** ⇒ 必须被拒（还原时必然要**截断** ⇒ 丢字节
+/// ⇒ 那不是「还原」，是「还原成另一个东西」）。
+#[test]
+fn a_uart_state_with_a_deeper_tx_ring_than_the_capture_ring_is_rejected() {
+    let u = Uart16550::new_with_tx_capacity("UART0", 0x1000, 9600, 4, 4);
+    let bad = PeripheralSessionState::Uart(UartStateDto {
+        id: "UART0".to_string(),
+        tx: Some(0x00),
+        tx_ring: vec![0x00; 5],
+        ..UartStateDto::default()
+    });
+    let err = u
+        .validate_session_state(&bad)
+        .expect_err("比捕获环深的环必须被拒");
+    assert_eq!(err.family, ErrorFamily::Peripheral);
+    assert_eq!(err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE);
+}
+
+/// ⚠️ **空捕获环 + `tx = None`** 是**合法**的（刚开机、还没发过字节的
+/// UART 就是这个状态）⇒ 器件侧不许拒。
+#[test]
+fn a_uart_state_with_an_empty_tx_ring_and_no_head_is_accepted() {
+    let u = Uart16550::new("UART0", 0x1000, 9600, 4);
+    let ok = PeripheralSessionState::Uart(UartStateDto {
+        id: "UART0".to_string(),
+        tx: None,
+        tx_ring: Vec::new(),
+        ..UartStateDto::default()
+    });
+    u.validate_session_state(&ok)
+        .expect("空捕获环 + 无队头必须被接受");
+}

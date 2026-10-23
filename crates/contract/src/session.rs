@@ -64,6 +64,15 @@
 //! UART **没有**那七个寄存器 ⇒ 还原之后它们回到初值 ⇒ 还原出来的会话
 //! 与采快照的那次**不是同一台硬件**（波特率除数丢了）⇒ 那是**丢状态**，
 //! 所以版本必须**显式**升，让旧载荷被**明确地**拒掉。
+//!
+//! ⚠️ **v3 是破坏性变更**（v0.26 · 冻结规格 STAGE-11 裁决 C-4 / E）：
+//! `UartStateDto` 加了 `tx_ring` / `tx_dropped` 两个字段（TX 捕获环的
+//! 全部待取字节 + 溢出丢弃的累计计数），`mem_pages` 的**语义**改成
+//! 「只装写过的页」⇒ [`SESSION_SNAPSHOT_SCHEMA_VERSION`] **2 → 3**。
+//!
+//! ⚠️ **前端不受影响**：`front/lib/message.js` 镜像的是**协议**的
+//! `schema_version`（5），**不是**会话快照的 schema ⇒ 契约层升版
+//! **不需要**动前端。
 
 use serde::{Deserialize, Serialize};
 
@@ -87,7 +96,18 @@ use crate::snapshot::{EngineSnapshotDto, SNAPSHOT_FAMILY, SNAPSHOT_SCHEMA_VERSIO
 /// 不能靠「反序列化能读回来」蒙混过关（旧载荷读得回来，但**含义**
 /// 已经不同：一个 v1 载荷里的 UART **没有**那七个寄存器，还原之后
 /// 那七个寄存器会回到初值 —— 那是**丢状态**，不是**兼容**）。
-pub const SESSION_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+///
+/// ⚠️ **v3**（v0.26 批 · 冻结规格 STAGE-11 裁决 C-4 / E）：`UartStateDto`
+/// 加了 `tx_ring` / `tx_dropped` **两个字段**（TX 捕获环的**全部**待取
+/// 字节 + 溢出丢弃的累计计数）⇒ **DTO 的形状又变了** ⇒ **破坏性变更**
+/// ⇒ 版本**必须**再升一次。
+///
+/// ⚠️ **v3 的另一个来源是 `mem_pages` 的语义**（STAGE-11 裁决 C-2）：
+/// `mem_pages` 现在**只装写过的页**（4 KiB 粒度）⇒ 载荷的**含义**变了，
+/// 即使 [`MemPageDto`] 的**形状**没变 ⇒ 一个 v2 载荷读得回来，但它装
+/// 的是「整段 RAM 按 64 KiB 切的全部块」⇒ 还原出来的会话与采快照的那次
+/// **不是同一个** ⇒ 同样必须**显式**拒收。
+pub const SESSION_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 
 /// Number of pins in a **GPIO bank** — the single landing spot for that
 /// number.
@@ -214,12 +234,40 @@ pub struct M14MapDto {
 ///
 /// ⚠️ **v2 多了 ns16550 的七个寄存器**（`LCR` / `IER` / `FCR` / `MCR` /
 /// `SCR` / `DLL` / `DLM`）—— 见本类型下面那七个字段的说明。
+///
+/// ⚠️ **v3 多了 TX 捕获环**（[`Self::tx_ring`] / [`Self::tx_dropped`]）——
+/// 见那两个字段的说明（冻结规格 STAGE-11 裁决 E）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UartStateDto {
     /// Peripheral id (the key used to match the live instance).
     pub id: String,
     /// Byte waiting to be transmitted.
+    ///
+    /// ⚠️ **v3 起它的语义不变**（仍是**队头**那一个字节）⇒ 既有读取方
+    /// 不受影响 ⇒ 但它现在**必须**等于 [`Self::tx_ring`] 的**第一个**
+    /// 字节（`tx_ring` 为空时必须是 `None`）⇒
+    /// [`SessionSnapshotDto::validate`] 会拒掉不自洽的载荷。
     pub tx: Option<u8>,
+    /// TX 捕获环里的**全部**待取字节（**队头在前**，按写入顺序）。
+    ///
+    /// ⚠️ **为什么必须有它**（冻结规格 STAGE-11 裁决 E）：捕获环里的字节
+    /// 是**访客已经发出去、还没被宿主取走**的内容 ⇒ 它**是会话状态**
+    /// ⇒ 不进快照 ⇒ 一次快照/还原就会**丢字节**（与 v0.24 的 `rx_queue`
+    /// 同形状的问题，那次已修）。
+    ///
+    /// ⚠️ **长度有界**：捕获环默认 4 KiB（`DEFAULT_TX_CAPTURE_CAPACITY`）
+    /// ⇒ 载荷的增量**有界**。
+    pub tx_ring: Vec<u8>,
+    /// 捕获环溢出时**丢弃的累计字节数**（生命周期计数，**不是**寄存器）。
+    ///
+    /// ⚠️ **丢失要看得见**：捕获环满时的策略是「丢最新、保最早」⇒ 没有
+    /// 这个计数，溢出就是**静默**的（访客以为自己发出去的字节到了，其实
+    /// 被丢了）⇒ 这个字段让那件事**可观测**。
+    ///
+    /// ⚠️ **还原时取「覆盖」而不是「累加」**：快照携带的是**取样瞬间**的
+    /// 累计值（快照 = 状态）⇒ 取「累加」会让还原后的计数与被快照的那次
+    /// **不是同一个数**。
+    pub tx_dropped: u64,
     /// Byte waiting to be read by the guest.
     ///
     /// ⚠️ **它就是「队头」那一个字节** —— 接收 FIFO 的**全部**内容在
@@ -300,6 +348,8 @@ impl Default for UartStateDto {
         Self {
             id: String::new(),
             tx: None,
+            tx_ring: Vec::new(),
+            tx_dropped: 0,
             rx: None,
             rx_queue: Vec::new(),
             status: 0,
@@ -639,6 +689,10 @@ impl SessionSnapshotDto {
     /// ⚠️ **v0.24 另加一条**（不是编号里的一条 ⇒ 它是**形状**检查，不是
     /// 规格 §5 表里那 14 条之一）：`m15_periph.uarts[*].rx` 必须**等于**
     /// `rx_queue` 的**队头**（两者必须一致）。
+    ///
+    /// ⚠️ **v0.26 再加一条**（**形状**检查，与上一条**同构**）：
+    /// `m15_periph.uarts[*].tx` 必须**等于** `tx_ring` 的**队头**
+    /// （`tx_ring` 为空时 `tx` 必须是 `None`）。
     /// 9. `m16_intc.raised` — ascending, no duplicates
     /// 10. the inner engine snapshot validates on its own terms
     /// 11. `m16_intc.pending` — one entry per line, in canonical
@@ -902,6 +956,29 @@ impl SessionSnapshotDto {
             }
         }
 
+        // 8c — every UART's `tx` must be the **head** of its `tx_ring`.
+        //
+        // ⚠️ **与 8b 同构**：TX 捕获环是**真正的环形队列**（访客可以连写
+        // 多个字节）⇒ 只带一个字节的快照在往返之后会**丢字节** ⇒ 捕获环
+        // 的**全部**内容进载荷（`tx_ring`），而 `tx` 保留为**队头**的
+        // 冗余表示（兼容既有语义）⇒ 两处**必须**一致。
+        //
+        // ⚠️ 不一致的载荷是**自相矛盾**的（它同时说「队头是 0x41」和
+        // 「队头是 0x42」）⇒ 还原路径不知道该信哪一个 ⇒ 必须被拒。
+        //
+        // ⚠️ 这是**形状**规则（契约层查得了）；「环不能比器件的捕获环
+        // 深」是**器件能力**规则（契约层不知道这个 UART 的环有多深 ⇒
+        // 归 M-15 的 `validate_session_state`）。
+        for u in &self.m15_periph.uarts {
+            let head = u.tx_ring.first().copied();
+            if u.tx != head {
+                return Err(self.malformed(&format!(
+                    "UART '{}' 的 tx 是 {:?}，但 tx_ring 的队头是 {:?}——两者必须一致",
+                    u.id, u.tx, head
+                )));
+            }
+        }
+
         // 9 — the raised lines must be ascending and deduplicated.
         let mut prev: Option<u16> = None;
         for line in &self.m16_intc.raised {
@@ -1107,6 +1184,10 @@ mod tests {
                 uarts: vec![UartStateDto {
                     id: "UART0".to_string(),
                     tx: Some(0x41),
+                    // ⚠️ `tx` 是**队头**，`tx_ring` 是**全部**待取字节
+                    // （v0.26 · STAGE-11 裁决 E）—— 两者必须一致。
+                    tx_ring: vec![0x41],
+                    tx_dropped: 0,
                     rx: None,
                     rx_queue: Vec::new(),
                     status: 0,
@@ -1234,10 +1315,25 @@ mod tests {
         assert_eq!(
             uk,
             vec![
-                "dll", "dlm", "fcr", "id", "ier", "irq_line", "lcr", "mcr", "now_ps", "rx",
-                "rx_queue", "scr", "status", "tx",
+                "dll",
+                "dlm",
+                "fcr",
+                "id",
+                "ier",
+                "irq_line",
+                "lcr",
+                "mcr",
+                "now_ps",
+                "rx",
+                "rx_queue",
+                "scr",
+                "status",
+                "tx",
+                "tx_dropped",
+                "tx_ring",
             ],
-            "UART 状态的键集必须精确固定——v2 多了 ns16550 的七个寄存器与整个接收队列"
+            "UART 状态的键集必须精确固定——v2 多了 ns16550 的七个寄存器与整个接收队列，\
+             v3 多了整个 TX 捕获环与它的溢出计数"
         );
 
         // ⚠️ **GPIO 与定时器也要钉**——它们各自带**时间字段**
@@ -1876,11 +1972,16 @@ mod tests {
     /// `PeripheralSessionState` 加了 CLINT / PLIC 两个变体 ⇒ **破坏性
     /// 变更** ⇒ 版本必须**显式**升到 2（旧载荷会被**明确地**拒掉，
     /// 而不是被「读得回来但含义已变」地静默接受）。
+    ///
+    /// ⚠️ **v3**（v0.26 · STAGE-11 裁决 C-4 / E）：`UartStateDto` 加了
+    /// `tx_ring` / `tx_dropped`，`mem_pages` 的**语义**改成「只装写过的
+    /// 页」⇒ **破坏性变更** ⇒ 版本必须**显式**升到 3。
     #[test]
-    fn the_session_snapshot_schema_version_is_two() {
+    fn the_session_snapshot_schema_version_is_three() {
         assert_eq!(
-            SESSION_SNAPSHOT_SCHEMA_VERSION, 2,
-            "会话载荷的格式版本必须是 2——v2 改了 DTO 的形状（UART 的七个寄存器 + CLINT/PLIC 两个变体）"
+            SESSION_SNAPSHOT_SCHEMA_VERSION, 3,
+            "会话载荷的格式版本必须是 3——v3 改了 DTO 的形状（UART 的 TX 捕获环两个字段）\
+             与 mem_pages 的语义"
         );
     }
 
@@ -1895,6 +1996,53 @@ mod tests {
         assert_eq!(
             err.scenario,
             crate::snapshot::E_SNAP_05_UNSUPPORTED_STATE_SCHEMA
+        );
+    }
+
+    /// ⚠️ **B-1**（v0.26 · STAGE-11 裁决 C-4）：**紧邻的旧版本**（v2）
+    /// 必须被 `E_SNAP-05` **显式拒收**。
+    ///
+    /// ⚠️ **为什么这条与上面那条不是重复**：上面那条钉的是「**v1** 被拒」
+    /// （v1 缺的是 ns16550 的七个寄存器）；这条钉的是「**v2** 被拒」
+    /// —— v2 的 UART **有**那七个寄存器，但**没有** TX 捕获环的两个
+    /// 字段，且它的 `mem_pages` 装的是「整段 RAM 按 64 KiB 切的全部块」
+    /// ⇒ 它的**含义**与 v3 不同 ⇒ 必须被拒。
+    ///
+    /// ⚠️ **判据落在 `family` + `scenario`**（不靠 message 文本）。
+    #[test]
+    fn a_version_two_session_payload_is_rejected_with_e_snap_05() {
+        let mut s = sample();
+        s.schema_version = 2;
+        let err = s.validate().expect_err("v2 的载荷必须被拒");
+        assert_eq!(
+            err.family,
+            crate::snapshot::SNAPSHOT_FAMILY,
+            "旧载荷必须报「快照」族的错"
+        );
+        assert_eq!(
+            err.scenario,
+            crate::snapshot::E_SNAP_05_UNSUPPORTED_STATE_SCHEMA,
+            "旧载荷必须报 E_SNAP-05（版本不受支持）"
+        );
+    }
+
+    /// ⚠️ **B-1 的另一半**：`cp_meta.version` 也必须同步 —— 一个
+    /// `schema_version` 是 3 但 `cp_meta.version` 是 2 的载荷**同样**
+    /// 必须被拒（否则「版本号有两个落点」这条老问题就回来了）。
+    #[test]
+    fn a_version_two_checkpoint_meta_is_rejected_with_e_snap_05() {
+        let mut s = sample();
+        s.cp_meta.version = 2;
+        let err = s.validate().expect_err("cp_meta 版本是 2 的载荷必须被拒");
+        assert_eq!(
+            err.family,
+            crate::snapshot::SNAPSHOT_FAMILY,
+            "旧载荷必须报「快照」族的错"
+        );
+        assert_eq!(
+            err.scenario,
+            crate::snapshot::E_SNAP_05_UNSUPPORTED_STATE_SCHEMA,
+            "旧载荷必须报 E_SNAP-05（版本不受支持）"
         );
     }
 
@@ -2521,5 +2669,57 @@ mod tests {
         s.m15_periph.uarts[0].rx = Some(0x41);
         s.m15_periph.uarts[0].rx_queue = vec![0x41, 0x42, 0x43];
         s.validate().expect("队头与队列一致的载荷必须通过校验");
+    }
+
+    // ------------------------------------------------------------------
+    // v0.26：UART 的 TX 捕获环（`tx` 与 `tx_ring` 必须一致）
+    // ------------------------------------------------------------------
+
+    /// ⚠️ **B-7**（v0.26 · STAGE-11 裁决 E）：**`tx` 必须是 `tx_ring` 的
+    /// 队头** —— 两者不一致的载荷是**自相矛盾**的（它同时说「队头是
+    /// 0x41」和「队头是 0x42」）⇒ 还原路径不知道该信哪一个 ⇒ 必须被拒。
+    ///
+    /// ⚠️ **与 `rx` / `rx_queue` 那条同构**（判别力靠「同构」而不是
+    /// 「碰巧」）。
+    #[test]
+    fn a_uart_state_whose_tx_head_disagrees_with_its_ring_is_rejected() {
+        let mut s = sample();
+        s.m15_periph.uarts[0].tx = Some(0x41);
+        s.m15_periph.uarts[0].tx_ring = vec![0x42, 0x43];
+        let err = s.validate().expect_err("队头与捕获环不一致必须被拒");
+        assert_eq!(err.family, SNAPSHOT_FAMILY);
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// ⚠️ **B-7 的另一半**：**捕获环为空时 `tx` 必须是 `None`** ——
+    /// 反过来也一样。
+    #[test]
+    fn a_uart_state_with_an_empty_ring_must_have_no_tx_head() {
+        let mut s = sample();
+        s.m15_periph.uarts[0].tx = Some(0x41);
+        s.m15_periph.uarts[0].tx_ring = Vec::new();
+        let err = s.validate().expect_err("空捕获环不许带队头");
+        assert_eq!(err.family, SNAPSHOT_FAMILY);
+        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    }
+
+    /// ⚠️ **反面**：队头与捕获环**一致**的载荷必须放行（环非空 ⇒ `tx` 是
+    /// 它的第一个字节）。
+    #[test]
+    fn a_uart_state_whose_tx_head_agrees_with_its_ring_is_accepted() {
+        let mut s = sample();
+        s.m15_periph.uarts[0].tx = Some(0x41);
+        s.m15_periph.uarts[0].tx_ring = vec![0x41, 0x42, 0x43];
+        s.validate().expect("队头与捕获环一致的载荷必须通过校验");
+    }
+
+    /// ⚠️ **空捕获环 + `tx = None`** 是**合法**的（刚开机、还没发过
+    /// 字节的 UART 就是这个状态）⇒ 校验器不许把它拒掉。
+    #[test]
+    fn a_uart_state_with_an_empty_ring_and_no_tx_head_is_accepted() {
+        let mut s = sample();
+        s.m15_periph.uarts[0].tx = None;
+        s.m15_periph.uarts[0].tx_ring = Vec::new();
+        s.validate().expect("空捕获环 + 无队头必须通过校验");
     }
 }
