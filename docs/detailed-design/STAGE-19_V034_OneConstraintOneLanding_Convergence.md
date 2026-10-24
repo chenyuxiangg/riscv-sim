@@ -352,6 +352,7 @@ impl PlatformDescription {
 | 5 | 规格 §2.1 的派生列表**漏了 `Eq`** ⇒ ⇒ 而 `PlatformDescription` 本身派生 `Eq` ⇒ ⇒ 新结构体不加 `Eq` **编译不过** ⇒ ⇒ 契约层 lane 补上 ⇒ ⇒ 规格的派生列表应为 `Debug, Clone, PartialEq, Eq, Serialize, Deserialize` | Lane A 实测（契约层 lane 报出） |
 | 6 | `ram_window` 的返回类型按规格给 `Option<(u32, u64)>`，而 `RegionSpec::Ram { size: u32 }` ⇒ ⇒ 内部做 u32→u64 **无损加宽** ⇒ ⇒ ⚠️ 这是**加宽不是截断** ⇒ ⇒ 不会丢精度 | Lane A 实测（契约层 lane 报出） |
 | 7 | ⚠️ **V-18 与 V-19 的分工**：V-18 = 「**引用**的器件必须存在 + 事件名只允许 `rx_ready`」；V-19 = 「**目标**须是 PLIC + `to.source < sources`」⇒ ⇒ 两者共用 `E_PLT_16`（同族）⇒ ⇒ 规格 §2.1 的字段注释与 §2.2 的规则表**措辞**已对齐 | Lane A 实测（契约层 lane 报出）+ 统筹方裁定 |
+| 8 | ⚠️ **连线列表的顺序算数据的一部分**（契约层是 `Vec`）⇒ ⇒ 顺序不同也判为「改动」⇒ ⇒ 会走**整份**替换 ⇒ ⇒ ⚠️ **当前不会假触发**（界面**没有** `wiring` 编辑器 ⇒ 顺序**改不了**）⇒ ⇒ 若将来给了编辑器，这条要**重新裁决**（是否改成「按 `(from.device, from.event)` 排序后再比」）⇒ ⇒ 已写进前端 `sameWiring` 的注释 | Lane D 实测（前端 lane 返工时报出） |
 
 ---
 
