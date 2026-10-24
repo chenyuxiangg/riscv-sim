@@ -81,7 +81,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RISCV_TESTS_DIR="${RISCV_TESTS_DIR:-$HOME/riscv-sim-golden/riscv-tests}"
 TOOLCHAIN_DIR="${RISCV_TOOLCHAIN_DIR:-$HOME/riscv-sim-golden/toolchain}"
 SPIKE="${SPIKE:-}"
-ISA="${GOLDEN_ISA:-rv32imc_zicclsm_zifencei}"
+ISA="${GOLDEN_ISA:-rv32imc_zicsr_zicclsm_zifencei_zicntr}"
 # Spike's **initial stack page** —— a **reference-side** feature, kept here
 # on purpose.
 #

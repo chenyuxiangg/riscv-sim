@@ -19,6 +19,7 @@ use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{SimState, WriteSize};
 
 use super::alu;
+use super::counters;
 use super::csr;
 use super::decoder::Decoded;
 
@@ -344,7 +345,8 @@ pub enum MisalignedPolicy {
     ///
     /// This default matches the **Zicclsm-enabled** Spike, which is what
     /// the golden comparison pins (`tools/golden-run.sh`, ISA
-    /// `rv32imc_zicclsm_zifencei`) — see `tests/golden/README.md`.
+    /// `rv32imc_zicsr_zicclsm_zifencei_zicntr`) — see
+    /// `tests/golden/README.md`.
     /// The wording in LLD §3.6(2) / §5.2.1 ("与 Spike 一致允许非对齐")
     /// is only true under that qualifier; the ledger entry **D-42**
     /// tracks the wording fix.
@@ -772,6 +774,15 @@ fn branch(d: &Decoded) -> u32 {
 /// ⚠️ The report is produced by the **write arms themselves**, so the
 /// "does this instruction write?" decision has exactly **one** home —
 /// there is no second copy of it to drift.
+///
+/// # The retirement accounting lives **here**
+///
+/// ⚠️ **自增的唯一落点** = 本函数的**正常完成出口**（STAGE-20 §3.2 /
+/// 裁决 F）—— 陷阱分支全部**提前 `return`** ⇒ ⇒ 陷阱指令**不**退休
+/// （裁决 G）⇒ ⇒ CSR 指令读到的值天然是**退休前**的值。
+///
+/// ⚠️ `wrote_csr` 同时是**抑制**的输入：写计数器的那条指令**自己**不 +1
+/// （裁决 H）⇒ ⇒ **零新增状态、零新增参数**。
 pub fn execute_one<M: MemoryAccess>(
     mem: &mut M,
     state: &mut SimState,
@@ -1238,6 +1249,30 @@ pub fn execute_one<M: MemoryAccess>(
     };
 
     state.pc = next_pc;
+
+    // ⚠️ **退休计数**（Zicntr）—— 自增的**唯一落点**（STAGE-20 §3.2 /
+    // 裁决 F）。
+    //
+    // ⚠️ **为什么落在这里**（三条理由，逐条可验）：
+    //
+    // 1. **两条 dispatch 路径都经 `execute_one`** ⇒ ⇒ 闭包口与总线口
+    //    **共用**这个函数 ⇒ ⇒ 不可能两条路径行为不一致（裁决 F）。
+    // 2. **陷阱指令天然被排除**（裁决 G）—— 上面每一个陷阱分支都是
+    //    **提前 `return`**（`Ecall` / `Ebreak` / 非法指令 / 非对齐 / 访问
+    //    故障）⇒ ⇒ **到不了**这一行 ⇒ ⇒ R11 自动成立，**不需要**额外
+    //    判「这是不是陷阱」。
+    // 3. **读到的值 = 退休前的值**（R5）—— CSR 指令在**本函数内部**读
+    //    文件 ⇒ ⇒ 读到的值是**自增前**的。
+    //
+    // ⚠️ **不要**把这一行搬到 [`crate::m13_iss::step_one`] /
+    // [`crate::m13_iss::step_one_via_bus`] 或 `m17_backend` 里 —— 那会变成
+    // **两个真相源**，而两条路径的计数就会**不一致**。
+    //
+    // ⚠️ **抑制**（写计数器的那条指令自己**不** +1）由
+    // [`counters::retire`] 按 `wrote_csr` 判定 ⇒ ⇒ **零新增状态、零新增
+    // 参数、零 DTO**（裁决 H）。
+    counters::retire(state, *wrote_csr);
+
     Ok(StepOutcome::Advanced)
 }
 

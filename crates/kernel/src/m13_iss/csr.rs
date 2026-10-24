@@ -53,9 +53,9 @@
 //! PC **无法证明**；平台用原始写只是**把意图显式写下来**。
 
 use riscv_sim_contract::csr::{
-    CSR_MCAUSE, CSR_MEPC, CSR_MHARTID, CSR_MHARTID_VALUE, CSR_MISA, CSR_MISA_VALUE, CSR_MSTATUS,
-    CSR_MTVAL, CSR_MTVEC, MEPC_ALIGN_MASK, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_M,
-    MSTATUS_MPP_SHIFT, MSTATUS_WARL_MASK,
+    counter_shadow, CSR_MCAUSE, CSR_MEPC, CSR_MHARTID, CSR_MHARTID_VALUE, CSR_MISA, CSR_MISA_VALUE,
+    CSR_MSTATUS, CSR_MTVAL, CSR_MTVEC, CSR_TIME, CSR_TIMEH, MEPC_ALIGN_MASK, MSTATUS_MIE_BIT,
+    MSTATUS_MPIE_BIT, MSTATUS_MPP_M, MSTATUS_MPP_SHIFT, MSTATUS_WARL_MASK,
 };
 use riscv_sim_contract::model::SimState;
 
@@ -88,6 +88,32 @@ use riscv_sim_contract::model::SimState;
 /// reads. A pre-seeded `misa` entry would have broken that (see the
 /// frozen spec for this batch,
 /// `docs/detailed-design/STAGE-6_CSR_Golden_Coverage.md` §3.4).
+///
+/// # The Zicntr **shadows**
+///
+/// ⚠️ **四个影子 CSR 是**推导量**，不是第二份存储**（STAGE-20 裁决 D）——
+///
+/// | 影子 | 它报告谁 |
+/// | --- | --- |
+/// | `cycle` | `mcycle` |
+/// | `cycleh` | `mcycleh` |
+/// | `instret` | `minstret` |
+/// | `instreth` | `minstreth` |
+///
+/// ⇒ ⇒ 读**影子** = 读**那个机器态计数器在 CSR 文件里的条目** ⇒ ⇒
+///
+/// * 快照里**不会出现两份值** ⇒ ⇒ 不存在「改一个不改另一个」的不同步；
+/// * 影子**不进**文件 ⇒ ⇒ 「文件里有 `cycle` 条目」这件事**结构上不可能**。
+///
+/// ⚠️ **影子指向只有契约层那一份**（[`counter_shadow`]）—— 这里**只引用**，
+/// **不**自己写一份 `match`（STAGE-20 裁决 C）。
+///
+/// ⚠️ **`time` / `timeh` 恒 0**（STAGE-20 裁决 K / R10）—— 参考侧也恒 0
+/// ⇒ ⇒ 逐位一致 ⇒ 不影响黄金对拍。⚠️ **但功能确实缺失**：真值要接 M-15 的
+/// CLINT ⇒ ⇒ 那是**单独登记的欠账**，**不是**本批的活。
+///
+/// ⚠️ **写路径不需要特判**：影子被**只读规则**拦住 ⇒ ⇒ 写不进文件 ⇒ ⇒
+/// [`counter_shadow`] 只在读路径用。
 pub(crate) fn csr_read(state: &SimState, csr: u16) -> u32 {
     if csr == CSR_MISA {
         return CSR_MISA_VALUE;
@@ -95,6 +121,25 @@ pub(crate) fn csr_read(state: &SimState, csr: u16) -> u32 {
     if csr == CSR_MHARTID {
         return CSR_MHARTID_VALUE;
     }
+    // ⚠️ **Zicntr 的影子**（裁决 D）—— 读它跟随的那个机器态计数器。
+    if let Some(source) = counter_shadow(csr) {
+        return file_value(state, source);
+    }
+    // ⚠️ **`time` / `timeh` 恒 0**（裁决 K）—— **平台自己**回答，不是
+    // 「文件里没有 ⇒ 读回 0」那条**巧合**（同 [`CSR_MHARTID`] 的理由：
+    // 一份畸形载荷把 `time` 塞进文件时，读回来**仍然**必须是 0）。
+    if csr == CSR_TIME || csr == CSR_TIMEH {
+        return 0;
+    }
+    file_value(state, csr)
+}
+
+/// The CSR file's raw content for `csr` — **0** when it is not in the file.
+///
+/// ⚠️ 这是「文件查找」这**一条**路径的唯一实现 —— [`csr_read`] 的三条
+/// 特判（`misa` / `mhartid` / 影子）**最终都落到这里** ⇒ ⇒ 「文件里有
+/// 什么」**只有一处答案**。
+fn file_value(state: &SimState, csr: u16) -> u32 {
     state
         .csrs
         .iter()

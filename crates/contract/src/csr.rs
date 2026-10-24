@@ -132,14 +132,112 @@ pub const CSR_MTVAL: u16 = 0x343;
 /// read-only in M-mode).
 pub const CSR_MIP: u16 = 0x344;
 
+/// `mcountinhibit` — machine counter-inhibit register (Zicntr).
+///
+/// ⚠️ **It is a plain read/write storage register on this platform** —
+/// a guest write **lands** and reads back (measured on the reference
+/// side: writing `5` reads back `5`).
+///
+/// ⚠️ **It does NOT gate anything here, and that is *correct*, not a
+/// hole.**  The RISC-V rule is that `mcountinhibit` inhibits the
+/// **user-mode** reads of `cycle` / `instret` / `time`; this platform
+/// is **M-mode only** ⇒ ⇒ in M-mode the inhibit has **no effect** by
+/// specification.  Measured on the reference side: writing `5` then
+/// reading `cycle` still yields the normal running count.
+///
+/// ⇒ The register is implemented (so writes do not trap and do read
+/// back) while the *gating* is a no-op — the two facts are separate,
+/// and the upstream `rv32mi/instret_overflow` case writes
+/// `csrci mcountinhibit, 0x4` precisely because the reset value is
+/// unspecified.
+pub const CSR_MCOUNTINHIBIT: u16 = 0x320;
+
+/// `mcycle` — machine cycle counter (Zicntr), **low 32 bits**.
+///
+/// ⚠️ **Writable** (RISC-V: machine-level read/write custom).  A guest
+/// write lands in the CSR file and reads back.
+///
+/// ⚠️ The counter is **64 bits wide**; `mcycle` is its **low half** and
+/// [`CSR_MCYCLEH`] is the high half.  See [`counter_pair`] — the
+/// platform keeps the two halves as **two CSR-file entries**, which is
+/// bit-for-bit equivalent to one 64-bit counter (with carry) and keeps
+/// the state inside the CSR file, so session snapshots round-trip it
+/// for free.
+pub const CSR_MCYCLE: u16 = 0xB00;
+
+/// `minstret` — machine retired-instruction counter (Zicntr), **low 32
+/// bits**.
+///
+/// ⚠️ **Writable**, same as [`CSR_MCYCLE`]; the high half is
+/// [`CSR_MINSTRETH`].
+pub const CSR_MINSTRET: u16 = 0xB02;
+
+/// `mcycleh` — machine cycle counter, **high 32 bits**.
+///
+/// ⚠️ **Writable** (machine-level read/write custom).  Writing it
+/// changes the **high half only** — the low half is untouched.
+pub const CSR_MCYCLEH: u16 = 0xB80;
+
+/// `minstreth` — machine retired-instruction counter, **high 32 bits**.
+///
+/// ⚠️ **Writable**, same as [`CSR_MCYCLEH`].
+pub const CSR_MINSTRETH: u16 = 0xB82;
+
+/// `cycle` — the **user-visible** cycle counter (Zicntr shadow).
+///
+/// ⚠️ **Read-only**, and it is a **shadow**: it reports the value of
+/// [`CSR_MCYCLE`].  It is **not** a second copy of the counter — the
+/// value is *derived* from the machine counter, so there is no second
+/// source of truth to drift.  See [`counter_shadow`].
+///
+/// ⚠️ The address rule makes it read-only: `0xC00` has bits
+/// `[11:10] == 0b11`.
+pub const CSR_CYCLE: u16 = 0xC00;
+
+/// `time` — the **user-visible** wall-clock timer (Zicntr shadow of the
+/// CLINT's `mtime`).
+///
+/// ⚠️ **Read-only** by the address rule.
+///
+/// ⚠️ **This platform reads it as `0`.**  The reference side also reads
+/// it as `0` (measured: its `mtime` is never advanced in the golden
+/// configuration) ⇒ ⇒ the two sides agree.  ⚠️ But the **feature** is
+/// still missing here — a real `time` needs the M-15 CLINT wired into
+/// the CSR read path, which is a cross-module change ⇒ ⇒ tracked as a
+/// ledger entry rather than silently pretended.
+pub const CSR_TIME: u16 = 0xC01;
+
+/// `instret` — the **user-visible** retired-instruction counter (Zicntr
+/// shadow).
+///
+/// ⚠️ **Read-only**, and a **shadow** of [`CSR_MINSTRET`] — see
+/// [`counter_shadow`].
+pub const CSR_INSTRET: u16 = 0xC02;
+
+/// `cycleh` — the **user-visible** cycle counter, **high 32 bits**.
+///
+/// ⚠️ **Read-only**, a shadow of [`CSR_MCYCLEH`].
+pub const CSR_CYCLEH: u16 = 0xC80;
+
+/// `timeh` — the **user-visible** wall-clock timer, **high 32 bits**.
+///
+/// ⚠️ **Read-only**, and reads as `0` like [`CSR_TIME`].
+pub const CSR_TIMEH: u16 = 0xC81;
+
+/// `instreth` — the **user-visible** retired-instruction counter, **high
+/// 32 bits**.
+///
+/// ⚠️ **Read-only**, a shadow of [`CSR_MINSTRETH`].
+pub const CSR_INSTRETH: u16 = 0xC82;
+
 /// `mtime` — the wall-clock timer counter (RV32 read-only CSR).
 pub const CSR_MTIME: u16 = 0xBFF8;
 
 /// `mhartid` — the hart identifier (RV32 read-only CSR).
 ///
-/// ⚠️ **It is read-only by the RISC-V address rule** (`0xF14` has bit 11
-/// set ⇒ `>= 0x800` ⇒ the read-only quarter) ⇒ a guest write is
-/// **ignored** by [`csr_write_is_ignored`] no matter what the
+/// ⚠️ **It is read-only by the RISC-V address rule** (`0xF14` has bits
+/// `[11:10] == 0b11` ⇒ the read-only range `0xC00..0xFFF`) ⇒ a guest
+/// write is **ignored** by [`csr_write_is_ignored`] no matter what the
 /// implemented-CSR table says.
 pub const CSR_MHARTID: u16 = 0xF14;
 
@@ -446,23 +544,126 @@ pub fn arch_mcause_for_line(line: u16) -> Option<u32> {
 
 /// Whether a CSR address is **read-only** by the RISC-V address rule.
 ///
-/// The rule is a single bit: **bit 11 set ⇒ read-only**. That splits the
-/// 12-bit CSR space into the four standard quarters —
+/// ⚠️ **This function used to be wrong, and the wrongness was a hard
+/// blocker** (ledger **D-94**, batch v0.36 / spec `STAGE-20`).
 ///
-/// | address | quarter | access |
+/// The old implementation was
+///
+/// ```text
+/// csr & 0x800 != 0
+/// ```
+///
+/// — "bit 11 set ⇒ read-only".  That is **not** the RISC-V rule, and it
+/// contradicts the very table in this function's own doc comment.  The
+/// real rule is the **CSR address mapping** (Privileged Spec): read-only
+/// ranges are
+///
+/// | range | meaning | access |
 /// | --- | --- | --- |
-/// | `0x000..0x3FF` | user | read / write |
-/// | `0x400..0x7FF` | supervisor | read / write |
-/// | `0x800..0xBFF` | user | **read-only** |
-/// | `0xC00..0xFFF` | machine / debug | **read-only** |
+/// | `0xC00..0xC7F` | machine-level read-only, standard | **read-only** |
+/// | `0xC80..0xCFF` | machine-level read-only, custom | **read-only** |
+/// | `0x900..0x9FF` | user-level read-only, custom | **read-only** |
+/// | `0xA20..0xA3F` | machine-level read-only, standard | **read-only** |
+/// | `0xAA0..0xABF` | machine-level read-only, standard | **read-only** |
+/// | `0xB20..0xB3F` | machine-level read-only, custom | **read-only** |
+/// | `0xBA0..0xBBF` | machine-level read-only, custom | **read-only** |
 ///
-/// Consequences on this platform: `mtime` (`0xBFF8`) is read-only,
-/// `mip` (`0x344`) is *writable by this rule* (see
-/// [`csr_write_is_ignored`] for the platform's extra rule), and the
-/// platform's `irq_clear` (`0x7C0`) is writable — it sits in the
+/// and the machine-level **read/write** ranges are `0x000..0x0FF`,
+/// `0x200..0x3FF`, `0x400..0x7FF`, `0x800..0x8FF`, `0xA00..0xA1F`,
+/// `0xA80..0xA9F`, `0xAC0..0xAFF`, `0xB00..0xB1F`, `0xB80..0xB9F`,
+/// `0xBC0..0xBFF` …
+///
+/// ⇒ ⇒ **the old bit-11 test wrongly made `0x800..0xBFF` read-only**,
+/// which included the Zicntr machine counters `mcycle` (`0xB00`),
+/// `minstret` (`0xB02`), `mcycleh` (`0xB80`) and `minstreth` (`0xB82`)
+/// ⇒ ⇒ a guest could not write them at all ⇒ ⇒ **the counters could
+/// not have been implemented at all**.
+///
+/// ⚠️ **`mtime` is the one place where the address rule and the
+/// architecture disagree**: `0xBFF8` lands in `0xBC0..0xBFF`, which the
+/// address mapping makes **read/write** — but `mtime` is
+/// **architecturally read-only** (it is the CLINT's timer register, not
+/// a plain CSR).  Its read-only-ness therefore lives in the **platform**
+/// list, not in the address rule — see [`csr_is_read_only`].
+///
+/// Consequences on this platform after the fix: `mcycle` / `minstret` /
+/// `mcycleh` / `minstreth` / `mcountinhibit` are **writable**; the
+/// Zicntr shadows `cycle` / `time` / `instret` / `cycleh` / `timeh` /
+/// `instreth` are **read-only**; `mip` (`0x344`) is *writable by this
+/// rule* (see [`csr_write_is_ignored`] for the platform's extra rule),
+/// and the platform's `irq_clear` (`0x7C0`) is writable — it sits in the
 /// read-write **custom** quarter `0x7C0..0x7FF`.
 pub fn is_csr_read_only(csr: u16) -> bool {
-    csr & 0x800 != 0
+    // ⚠️ **bits `[11:10] == 0b11` ⇒ read-only.**  This single test covers
+    // `0xC00..0xFFF` (machine-level read-only, standard `0xC00..0xC7F` and
+    // custom `0xC80..0xCFF`) **and** the `0xBC0..0xBFF` custom read-only
+    // slice — which is why `mtime` (`0xBFF8`) is read-only **by the rule
+    // itself**, with no platform exception needed.
+    if csr & 0xC00 == 0xC00 {
+        return true;
+    }
+    match csr & 0xF00 {
+        // 0x900..=0x9FF —— user-level read-only, custom.
+        0x900 => true,
+        // 0xA00..=0xAFF —— machine-level standard: `0xA20..=0xA3F` and
+        // `0xAA0..=0xABF` are read-only, the rest writable.
+        // ⚠️ The mask is `0xFE0` (bits `[11:5]`, 0x20 granularity), **not**
+        // `0x0F0`: the `0xA20..=0xA3F` slice spans **32** addresses and
+        // they do **not** share one `0x0F0` value.
+        0xA00 => matches!(csr & 0xFE0, 0xA20 | 0xAA0),
+        // 0xB00..=0xBFF —— machine-level custom: `0xB20..=0xB3F` and
+        // `0xBA0..=0xBBF` are read-only, the rest writable.
+        0xB00 => matches!(csr & 0xFE0, 0xB20 | 0xBA0),
+        // 0x800..=0x8FF is user-level **read/write** custom — writable.
+        _ => false,
+    }
+}
+
+/// The half-pair of a **Zicntr machine counter**.
+///
+/// The platform's counters are **64 bits wide** and the RISC-V CSR
+/// numbering splits each of them into a **low** and a **high** CSR:
+///
+/// | counter | low half | high half |
+/// | --- | --- | --- |
+/// | cycle | [`CSR_MCYCLE`] | [`CSR_MCYCLEH`] |
+/// | instret | [`CSR_MINSTRET`] | [`CSR_MINSTRETH`] |
+///
+/// ⚠️ **Both halves are writable and they are independent** — writing
+/// the high half does not disturb the low one (measured on the
+/// reference side).
+///
+/// ⇒ ⇒ This mapping is the **single landing spot** for "which two CSRs
+/// are the two halves of this counter" — the ISS must **not** write its
+/// own match on this.
+pub fn counter_pair(csr: u16) -> Option<(u16, u16)> {
+    match csr {
+        CSR_MCYCLE | CSR_MCYCLEH => Some((CSR_MCYCLE, CSR_MCYCLEH)),
+        CSR_MINSTRET | CSR_MINSTRETH => Some((CSR_MINSTRET, CSR_MINSTRETH)),
+        _ => None,
+    }
+}
+
+/// The machine counter a **user-visible shadow** reports.
+///
+/// Zicntr's user-level counters (`cycle` / `instret` and their high
+/// halves) are **shadows**: they report the machine counter's value
+/// rather than holding a copy of it.
+///
+/// ⚠️ **The shadow is *derived*, never stored** — there is no second
+/// copy of the counter in the CSR file, so the two can never drift.
+///
+/// ⚠️ **`time` / `timeh` are deliberately absent**: this platform reads
+/// them as `0` (the reference side does too), because a real `time`
+/// needs the M-15 CLINT wired into the CSR read path.
+pub fn counter_shadow(csr: u16) -> Option<u16> {
+    match csr {
+        CSR_CYCLE => Some(CSR_MCYCLE),
+        CSR_CYCLEH => Some(CSR_MCYCLEH),
+        CSR_INSTRET => Some(CSR_MINSTRET),
+        CSR_INSTRETH => Some(CSR_MINSTRETH),
+        _ => None,
+    }
 }
 
 /// Whether this platform **implements** a CSR.
@@ -491,16 +692,23 @@ pub fn is_csr_read_only(csr: u16) -> bool {
 /// recorded in the ledger (D-92 / D-94) — do **not** read this rule as
 /// "we match the reference side".
 ///
-/// ⚠️ The read-only quarter (`>= 0x800`) is **not** uniformly
+/// ⚠️ The read-only range (`0xC00..0xFFF`) is **not** uniformly
 /// "unimplemented" any more: `mhartid` **is** implemented (it answers
 /// [`CSR_MHARTID_VALUE`] — the single hart of this single-core
-/// platform), while `mcycle` / `minstret` / `mtime` still read **0**
-/// and ignore writes.  The reference side **models** `mcycle` (it reads
-/// a real counter) ⇒ that is a counter gap, not a match (D-94).
+/// platform).
+///
+/// ⚠️ **The Zicntr machine counters are implemented too** (batch v0.36,
+/// spec `STAGE-20`): `mcycle` / `mcycleh` / `minstret` / `minstreth`
+/// are writable and hold the two halves of two 64-bit counters, and
+/// `mcountinhibit` is writable storage.  ⚠️ **The user-level shadows
+/// (`cycle` / `instret` / `cycleh` / `instreth` / `time` / `timeh`) are
+/// deliberately NOT in this list** — they are **read-only by the
+/// address rule**, so they are already rejected by
+/// [`csr_write_is_ignored`] without needing an entry here.
 ///
 /// ⚠️ **Being implemented does not make a CSR writable**: `mhartid` is
-/// read-only by the RISC-V address rule (`0xF14 >= 0x800`), so
-/// [`csr_write_is_ignored`] rejects the write **anyway** — the two
+/// read-only by the RISC-V address rule (`0xF14` is in `0xC00..0xFFF`),
+/// so [`csr_write_is_ignored`] rejects the write **anyway** — the two
 /// rules agree, which is what keeps the value stable.
 ///
 /// ⚠️ `medeleg` / `mideleg` are **not** in the list: delegation is an
@@ -522,6 +730,11 @@ pub fn csr_is_implemented(csr: u16) -> bool {
             | CSR_MIP
             | CSR_IRQ_CLEAR
             | CSR_MHARTID
+            | CSR_MCOUNTINHIBIT
+            | CSR_MCYCLE
+            | CSR_MCYCLEH
+            | CSR_MINSTRET
+            | CSR_MINSTRETH
     )
 }
 
@@ -529,6 +742,12 @@ pub fn csr_is_implemented(csr: u16) -> bool {
 ///
 /// That is the case when the **address rule** makes it read-only, **or**
 /// when the platform lists it as read-only on top of that (`misa`).
+///
+/// ⚠️ **`mtime` does NOT need a platform entry**: its bits `[11:10]` are
+/// `0b11` ⇒ the **address rule itself** makes it read-only (it lands in
+/// the `0xBC0..0xBFF` custom read-only slice).  That is what keeps the
+/// address-rule fix ([`is_csr_read_only`]) **behaviour-preserving** for
+/// it.
 ///
 /// ⚠️ `mip` is *not* here: it is writable **by the address rule**, but
 /// RISC-V makes `MEIP` / `MTIP` **read-only in M-mode** — only the
@@ -596,6 +815,14 @@ mod tests {
         assert!(!csr_write_is_ignored(CSR_IRQ_CLEAR));
     }
 
+    /// ⚠️ **`mtime` 的只读来自**地址规则**本身** —— 不是平台清单。
+    ///
+    /// `0xBFF8` 的 bits `[11:10]` 就是 `0b11` ⇒ 它落在只读区
+    /// `0xBC0..0xBFF`（custom read-only）⇒ ⇒ 规则**自己**就拦它。
+    ///
+    /// ⇒ ⇒ 这条用例同时是**判别力**：若有人把规则改成「只判
+    /// `0xC00..0xFFF`」（漏掉 `0xBC0..0xBFF`），`mtime` 会变**可写**
+    /// ⇒ ⇒ 这里会**红** ⇒ ⇒ 那正是本批修掉的那个 bug 的形状。
     #[test]
     fn mtime_is_read_only_by_the_address_rule() {
         assert!(is_csr_read_only(CSR_MTIME));
@@ -643,38 +870,70 @@ mod tests {
     }
 
     /// ⚠️ **只读规则的边界必须被钉死** —— 规则一旦被改成另一个**也说得通**
-    /// 的形式（例如「高两位都是 11」），平台用到的 CSR **恰好**都判成一样，
-    /// 于是**没有一条用例会红**：那种改法看上去「无害」，实际是把
-    /// `0x900..0x9FF` / `0xB00..0xBFF` 这两段标准里**可写**的区间
-    /// 悄悄判成只读。
+    /// 的形式，平台用到的 CSR **恰好**都判成一样，于是**没有一条用例会红**：
+    /// 那种改法看上去「无害」，实际是把标准里**可写**的区间悄悄判成只读。
     ///
-    /// 这条用例把**四个区的边界**都写出来，让规则**换一种写法**也会变红。
+    /// ⚠️ **这条用例在本批被重写**：旧版本把 `0x800..0xBFF` **一律**当
+    /// 只读（地址 bit 11 置位）—— 而那正是本批修掉的 bug。旧版本之所以
+    /// 长期没红，是因为平台用到的 CSR **一个都不落在** `0x800..0xBFF`
+    /// 的**可写**子区间上（`mtime` 在 `0xBC0..0xBFF`，按标准本来就
+    /// 只读… ⚠️ 不，按标准它是**可写**区，只读性来自**架构**）⇒ ⇒
+    /// 直到本批要实现 `mcycle`（`0xB00`，标准里的**可写**区）才暴露。
+    ///
+    /// ⇒ ⇒ 现在按**标准 CSR 地址映射**逐区间钉死。
     #[test]
-    fn the_read_only_rule_is_pinned_at_the_quarter_boundaries() {
-        // 下半区（`0x000..0x7FF`）一律**可写**。
+    fn the_read_only_rule_is_pinned_at_the_spec_boundaries() {
+        // `0x000..0x7FF` —— 用户级 / 监管级：一律**可写**。
         assert!(!is_csr_read_only(0x0000));
         assert!(!is_csr_read_only(0x03FF));
         assert!(!is_csr_read_only(0x0400));
         assert!(!is_csr_read_only(0x07FF));
-        // 上半区（`0x800..0xFFF`）一律**只读**。
-        assert!(is_csr_read_only(0x0800));
+        // `0x800..0x8FF` —— 用户级 custom **可写**。
+        assert!(!is_csr_read_only(0x0800));
+        assert!(!is_csr_read_only(0x08FF));
+        // `0x900..0x9FF` —— 用户级 custom **只读**。
         assert!(is_csr_read_only(0x0900));
-        assert!(is_csr_read_only(0x0A00));
-        assert!(is_csr_read_only(0x0B00));
+        assert!(is_csr_read_only(0x09FF));
+        // `0xA00..0xA1F` 可写 · `0xA20..0xA3F` 只读 ·
+        // `0xA80..0xA9F` 可写 · `0xAA0..0xABF` 只读。
+        assert!(!is_csr_read_only(0x0A00));
+        assert!(!is_csr_read_only(0x0A1F));
+        assert!(is_csr_read_only(0x0A20));
+        assert!(is_csr_read_only(0x0A3F));
+        assert!(!is_csr_read_only(0x0A80));
+        assert!(!is_csr_read_only(0x0A9F));
+        assert!(is_csr_read_only(0x0AA0));
+        assert!(is_csr_read_only(0x0ABF));
+        // `0xB00..0xB1F` 可写 · `0xB20..0xB3F` 只读 ·
+        // `0xB80..0xB9F` 可写 · `0xBA0..0xBBF` 只读。
+        assert!(!is_csr_read_only(0x0B00));
+        assert!(!is_csr_read_only(0x0B1F));
+        assert!(is_csr_read_only(0x0B20));
+        assert!(is_csr_read_only(0x0B3F));
+        assert!(!is_csr_read_only(0x0B80));
+        assert!(!is_csr_read_only(0x0B9F));
+        assert!(is_csr_read_only(0x0BA0));
+        assert!(is_csr_read_only(0x0BBF));
+        // `0xC00..0xFFF` —— 机器级：**一律只读**。
         assert!(is_csr_read_only(0x0C00));
+        assert!(is_csr_read_only(0x0C7F));
+        assert!(is_csr_read_only(0x0C80));
         assert!(is_csr_read_only(0x0FFF));
     }
 
-    /// ⚠️ **本平台的规则比 RISC-V 粗**，这里把差异**写死**。
+    /// ⚠️ **本批改了只读规则 ⇒ 既有 CSR 的分类必须**逐条**不变。**
     ///
-    /// RISC-V 在 `0x800..0xBFF` 之内还按 bit 8 再分读写
-    /// （`0x8xx` / `0xAxx` 只读，`0x9xx` / `0xBxx` 可写）；
-    /// 本平台**一律**当只读（地址 bit 11 置位 ⇒ 只读）。
+    /// 旧版本（`the_coarser_read_only_rule_does_not_affect_any_csr_the_platform_uses`）
+    /// 钉的是「粗规则**无影响**」—— 现在规则不粗了 ⇒ ⇒ 那条用例的前提
+    /// 没了 ⇒ ⇒ 改成**回归**：既有 9 个 CSR 的「写是否被忽略」必须与
+    /// RISC-V **逐条**一致。
     ///
-    /// 差异对本平台**无影响**：平台用到的 CSR 里**没有**落在这条差异上的
-    /// —— `mtime`（`0xBFF8`）按 RISC-V 本来就是**只读**的。
+    /// ⚠️ 这里比的是**最终效果**（写会不会被忽略），不是地址规则本身 ——
+    /// `mip` 按地址规则是**可写**的（`0x344`），是**平台规则**把它判成
+    /// 只读的（RISC-V：MEIP/MTIP 在 M 模式只读）；`mtime` 按地址规则也是
+    /// **可写**的（`0xBC0..0xBFF`），是**架构 + 平台清单**把它判成只读的。
     #[test]
-    fn the_coarser_read_only_rule_does_not_affect_any_csr_the_platform_uses() {
+    fn the_read_only_rule_change_does_not_affect_the_pre_existing_csrs() {
         // 标准里「可写」而本平台判「只读」的两段里，平台**一个 CSR 都没有**。
         // ⚠️ 这里比的是**最终效果**（写会不会被忽略），不是地址规则本身 ——
         // `mip` 按地址规则是**可写**的（`0x344 < 0x800`），是**平台规则**
@@ -917,6 +1176,14 @@ mod tests {
             CSR_MIP,
             CSR_IRQ_CLEAR,
             CSR_MHARTID,
+            // ⚠️ Zicntr（batch v0.36）：机器态计数器**已实现** ——
+            // 之前它们在这个清单里是「未实现」⇒ 写被忽略 ⇒ 计数器根本
+            // 写不进去。
+            CSR_MCOUNTINHIBIT,
+            CSR_MCYCLE,
+            CSR_MCYCLEH,
+            CSR_MINSTRET,
+            CSR_MINSTRETH,
         ] {
             assert!(csr_is_implemented(csr), "csr {csr:#x} 必须算已实现");
         }
@@ -926,7 +1193,18 @@ mod tests {
             (0x7A2u16, "tdata2 —— 调试器 CSR，本平台没有"),
             (0x302u16, "medeleg —— S 模式委派，本平台只有 M 模式"),
             (0x303u16, "mideleg —— S 模式委派，本平台只有 M 模式"),
-            (0xB00u16, "mcycle —— 计数器，本平台没实现（D-94）"),
+            (
+                0x306u16,
+                "mcounteren —— U 模式计数器使能，本平台没有 U 模式",
+            ),
+            (
+                0xC00u16,
+                "cycle —— 用户态影子，它是**推导量**（读 mcycle）不是存储",
+            ),
+            (
+                0xC02u16,
+                "instret —— 用户态影子，它是**推导量**（读 minstret）不是存储",
+            ),
         ] {
             assert!(
                 !csr_is_implemented(csr),
@@ -944,7 +1222,10 @@ mod tests {
     /// —— 写照样被忽略，只是理由从「没实现」换成了「地址规则只读」。
     #[test]
     fn an_unimplemented_csr_ignores_the_write() {
-        for csr in [0x7A1u16, 0x7A2, 0x302, 0x303, 0xB00] {
+        // ⚠️ `0xB00`（`mcycle`）**不在**这个列表里了 —— 它在本批被
+        // **实现**了（Zicntr 计数器，见 `STAGE-20`）。⇒ 这里换成
+        // `0x306`（`mcounteren`）—— 本平台没有 U 模式 ⇒ 未实现。
+        for csr in [0x7A1u16, 0x7A2, 0x302, 0x303, 0x306] {
             assert!(
                 csr_write_is_ignored(csr),
                 "csr {csr:#x} 未实现 ⇒ 写必须被忽略"
@@ -1102,5 +1383,111 @@ mod tests {
             MEPC_ALIGN_MASK,
             "除最低一位外，其余位一个都不能少"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 裁决 C / E —— Zicntr 计数器（batch v0.36 · spec STAGE-20）
+    // -----------------------------------------------------------------------
+
+    /// ⚠️ **十二个计数器 CSR 的分类必须**逐个**钉死。**
+    ///
+    /// 这条用例是本批那个 bug 的**反例钉**：旧规则（bit 11 置位 ⇒ 只读）
+    /// 会把 `mcycle` / `minstret` / `mcycleh` / `minstreth` 判成只读 ⇒ ⇒
+    /// 计数器**根本写不进去** ⇒ ⇒ 这里会红。
+    #[test]
+    fn the_counter_csrs_are_classified_by_the_spec() {
+        // 机器态计数器与 `mcountinhibit`：**可写**。
+        for csr in [
+            CSR_MCYCLE,
+            CSR_MINSTRET,
+            CSR_MCYCLEH,
+            CSR_MINSTRETH,
+            CSR_MCOUNTINHIBIT,
+        ] {
+            assert!(!is_csr_read_only(csr), "csr {csr:#x} 必须可写");
+            assert!(csr_is_implemented(csr), "csr {csr:#x} 必须已实现");
+            assert!(!csr_write_is_ignored(csr), "csr {csr:#x} 的写不得被忽略");
+        }
+        // 用户态影子：**只读**（地址规则：`0xC00..0xFFF`）。
+        for csr in [
+            CSR_CYCLE,
+            CSR_TIME,
+            CSR_INSTRET,
+            CSR_CYCLEH,
+            CSR_TIMEH,
+            CSR_INSTRETH,
+        ] {
+            assert!(is_csr_read_only(csr), "csr {csr:#x} 必须只读");
+            assert!(csr_write_is_ignored(csr), "csr {csr:#x} 的写必须被忽略");
+        }
+    }
+
+    /// ⚠️ **两半的配对必须钉死** —— 半部配错 ⇒ 低半部回绕时不进位 ⇒
+    /// 高半部停在 `0xFFFFFFFF` ⇒ 上游 `rv32mi/instret_overflow` 的
+    /// `TEST_CASE(4)`（期望 `minstreth == 0`）就会红。
+    #[test]
+    fn the_counter_halves_are_paired() {
+        assert_eq!(
+            counter_pair(CSR_MCYCLE),
+            Some((CSR_MCYCLE, CSR_MCYCLEH)),
+            "mcycle 的两半"
+        );
+        assert_eq!(
+            counter_pair(CSR_MCYCLEH),
+            Some((CSR_MCYCLE, CSR_MCYCLEH)),
+            "mcycleh 的两半（低半部在前）"
+        );
+        assert_eq!(
+            counter_pair(CSR_MINSTRET),
+            Some((CSR_MINSTRET, CSR_MINSTRETH)),
+            "minstret 的两半"
+        );
+        assert_eq!(
+            counter_pair(CSR_MINSTRETH),
+            Some((CSR_MINSTRET, CSR_MINSTRETH)),
+            "minstreth 的两半（低半部在前）"
+        );
+        // 影子**不是**计数器 ⇒ 没有半部对。
+        for csr in [CSR_CYCLE, CSR_INSTRET, CSR_CYCLEH, CSR_INSTRETH] {
+            assert_eq!(counter_pair(csr), None, "影子 {csr:#x} 没有半部对");
+        }
+        // 别的 CSR 也没有。
+        assert_eq!(counter_pair(CSR_MSTATUS), None);
+        assert_eq!(counter_pair(CSR_MCOUNTINHIBIT), None);
+    }
+
+    /// ⚠️ **影子的指向必须钉死** —— 指错了 ⇒ guest 读 `instret` 读到的是
+    /// 周期数 ⇒ 行为完全错，而**编译期一点提示都没有**。
+    #[test]
+    fn the_shadows_point_at_their_machine_counter() {
+        assert_eq!(counter_shadow(CSR_CYCLE), Some(CSR_MCYCLE));
+        assert_eq!(counter_shadow(CSR_CYCLEH), Some(CSR_MCYCLEH));
+        assert_eq!(counter_shadow(CSR_INSTRET), Some(CSR_MINSTRET));
+        assert_eq!(counter_shadow(CSR_INSTRETH), Some(CSR_MINSTRETH));
+        // ⚠️ `time` / `timeh` **故意不在表里** —— 本平台读它们为 0
+        // （要接 M-15 的 CLINT 才能有真值）。
+        assert_eq!(counter_shadow(CSR_TIME), None);
+        assert_eq!(counter_shadow(CSR_TIMEH), None);
+        // 机器态计数器**自己**不是影子。
+        assert_eq!(counter_shadow(CSR_MCYCLE), None);
+        assert_eq!(counter_shadow(CSR_MINSTRET), None);
+        assert_eq!(counter_shadow(CSR_MSTATUS), None);
+    }
+
+    /// ⚠️ **半部与影子的地址必须钉死** —— 改地址 ⇒ guest 读到的 CSR
+    /// 完全不是那个东西，而**没有任何一条用例会立刻红**。
+    #[test]
+    fn the_counter_csr_numbers_are_pinned() {
+        assert_eq!(CSR_MCOUNTINHIBIT, 0x320);
+        assert_eq!(CSR_MCYCLE, 0xB00);
+        assert_eq!(CSR_MINSTRET, 0xB02);
+        assert_eq!(CSR_MCYCLEH, 0xB80);
+        assert_eq!(CSR_MINSTRETH, 0xB82);
+        assert_eq!(CSR_CYCLE, 0xC00);
+        assert_eq!(CSR_TIME, 0xC01);
+        assert_eq!(CSR_INSTRET, 0xC02);
+        assert_eq!(CSR_CYCLEH, 0xC80);
+        assert_eq!(CSR_TIMEH, 0xC81);
+        assert_eq!(CSR_INSTRETH, 0xC82);
     }
 }

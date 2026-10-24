@@ -28,7 +28,7 @@ that same ELF on two sides:
 
 | side      | what runs                                              |
 |-----------|--------------------------------------------------------|
-| reference | `spike --isa=rv32imc_zicclsm_zifencei -m0x80000000:0x400000` |
+| reference | `spike --isa=rv32imc_zicsr_zicclsm_zifencei_zicntr -m0x80000000:0x400000` |
 | candidate | `riscv-golden` (M-06 loader + M-14 bus + M-13 ISS)     |
 
 Both sides expose the **same memory map** (stack window 4 KiB at
@@ -177,15 +177,15 @@ from upstream.
 
 ## Cases that are *not* in the corpus
 
-Three `rv32mi` cases and all six `rv32si` cases still diverge.  They are
-**not** rows in `corpus.txt`, and that is deliberate:
+Three `rv32mi` cases and all six `rv32si` cases are **not** rows in
+`corpus.txt`, and that is deliberate:
 
 * the harness's `pending` rule tolerates **only** "the candidate cannot
   execute it at all" (`ERROR` / `NOVERDICT`).  Two of the three `rv32mi`
-  cases *do* execute — they merely diverge, because the platform lacks a
-  feature the case tests.  Listing them would force the rule to be loosened
-  into a hole ("any divergence is fine"), which is exactly what the rule was
-  written to prevent;
+  cases *do* execute — they merely diverge, or agree only vacuously,
+  because the platform lacks a feature the case tests.  Listing them would
+  force the rule to be loosened into a hole ("any divergence is fine"),
+  which is exactly what the rule was written to prevent;
 * a divergence nobody watches is still a divergence — so each one is
   recorded **here**, with the measured verdict, and tracked by the ledger.
 
@@ -193,7 +193,7 @@ Three `rv32mi` cases and all six `rv32si` cases still diverge.  They are
 | --- | --- | --- | --- |
 | `rv32mi/illegal` | `PASS` | `NOVERDICT` | needs S-mode semantics: `csrwi mip, MIP_SSIP` is ignored on this platform, so the case never finishes → **D-94** |
 | `rv32mi/pmpaddr` | `PASS` | `FAIL 1` | the platform has **no PMP** ⇒ `pmpaddr0` reads back 0 instead of the address the case wrote → **D-94** |
-| `rv32mi/zicntr` | `FAIL 2` | `PASS` | the **reference side** does not implement Zicntr in this ISA configuration and traps on `cycle`; we read the unimplemented counter as 0 and do not trap → **D-94** |
+| `rv32mi/zicntr` | `PASS` | `PASS` | the reference side now implements Zicntr — the default ISA carries `zicntr` ⇒ it no longer traps ⇒ but the agreement is **hollow**: the case only checks that reading `cycle` / `instret` / `cycleh` / `instreth` in four ways does **not** trap ⇒ a CSR read on this platform never traps ⇒ ⇒ the case **cannot fail here** ⇒ ⇒ it stays out of the corpus → **D-94** |
 | `rv32si/csr` | `PASS` | `FAIL 22` | S-mode: the case runs in S-mode, we stay in M-mode → **D-94** |
 | `rv32si/ma_fetch` | `PASS` | `PASS` | agrees — but for a **vacuous** reason (neither side reaches the S-mode path the case is about) ⇒ it is *not* promoted to `active` until S-mode exists |
 | `rv32si/sbreak` | `PASS` | `FAIL 669` | S-mode → **D-94** |
@@ -206,16 +206,20 @@ naive "promote it to `active`" would put a **vacuous** agreement into the
 corpus — a green row that proves nothing.  It stays out until the S-mode
 path it actually tests exists.
 
-⚠️ The `zicntr` row is a **platform-vs-reference semantic difference**:
-Spike raises an illegal-instruction exception for a CSR that does not exist
-in the configured ISA, while the platform reads any unimplemented CSR as 0
-without trapping (the rule STAGE-6 adjudication D chose).  That difference
-is recorded, not papered over.
+⚠️ The `zicntr` row is no longer a **platform-vs-reference semantic
+difference**: the reference side now implements Zicntr, so it no longer
+raises an illegal-instruction exception on `cycle`.  What is left is a
+**hollow agreement**: the case asserts only that the four reads do not
+trap, and a CSR read on this platform never traps — an implemented CSR
+returns its value, an unimplemented one reads 0 without trapping (the
+rule STAGE-6 adjudication D chose) ⇒ ⇒ the case cannot fail here ⇒ ⇒ it
+stays out of the corpus rather than becoming a green row that proves
+nothing.
 
 ## `active` rows that agree **vacuously** — read this before citing coverage
 
 ⚠️ **An `active` row means "both sides reach the same verdict".  It does
-NOT mean "both sides exercised the same thing".**  Three of the 13 `rv32mi`
+NOT mean "both sides exercised the same thing".**  Two of the 13 `rv32mi`
 rows are **hollow agreements**: the verdicts match, but the two sides ran
 **different programs** (or the case asserts something the platform cannot
 fail).  They stay in the corpus — the agreement is real and worth keeping
@@ -228,14 +232,12 @@ visible.
 | --- | --- | --- |
 | `rv32mi/csr` | the case branches on `misa[20]` (the **U** bit). The reference side runs with its default `--priv=MSU` ⇒ `misa = 0x40141104` ⇒ **U is set** ⇒ it runs the U-mode section (`csrwi mcounteren`, `sret` into user mode, "reading `sstatus` in user mode must trap"). This platform is **M-mode only** ⇒ `misa = 0x40001104` ⇒ **U is clear** ⇒ the case jumps straight to `finish` and passes early ⇒ **the whole user-mode / privilege-transition section never runs here** | instrumented copy of the upstream `rv64si/csr.S`: the reference side reaches the U-mode marker, we do not. Trap entries: reference side 5, ours 1. Ledger **D-96** |
 | `rv32mi/ma_fetch` | the case probes "can the `C` bit be switched off?" with `csrci misa, 1 << ('c'-'a')`. The reference side's `misa` is **WARL-writable** (the write really clears `C`); ours is **fully read-only** ⇒ the **same probe takes opposite branches**: the reference side continues into the IALIGN assertions, we skip to `pass` ⇒ **that half of the case is not covered here** | instrumented copy of the upstream `rv64si/ma_fetch.S`: the reference side hits the IALIGN-section marker, we do not. Ledger **D-95** |
-| `rv32mi/instret_overflow` | the platform has **no counter at all** ⇒ `minstret` writes are ignored and it always reads 0 ⇒ the case's `TEST_CASE(2/3/4)` (all expecting 0) are **unconditionally satisfied** ⇒ the row asserts "we have no counter", not "our counter matches the reference side" | the reference side's `csrwi minstret, 0` **lands** (`c2818_minstret 0x00000000`); ours ignores it. Same family as the `zicntr` row above ⇒ ledger **D-94** |
 
-⚠️ **The three differences above all come from the same root**: the
+⚠️ **The two differences above all come from the same root**: the
 platform implements **fewer** features than the reference side
-(U-mode, S-mode, PMP, counters) and reports that honestly in `misa`
-instead of pretending.  ⇒ A hollow agreement here is the **expected**
-consequence of an M-mode-only platform — the fix is **labelling**, not
-faking a match.
+(U-mode, S-mode, PMP) and reports that honestly in `misa` instead of
+pretending.  ⇒ A hollow agreement here is the **expected** consequence of
+an M-mode-only platform — the fix is **labelling**, not faking a match.
 
 
 ## The Zicclsm detail — read this before touching the ISA string
@@ -266,13 +268,40 @@ accesses, which matches Spike *with* Zicclsm.  The harness therefore
 pins the reference ISA to
 
 ```
-rv32imc_zicclsm_zifencei
+rv32imc_zicsr_zicclsm_zifencei_zicntr
 ```
 
 * `zicclsm` — so Spike performs misaligned accesses, like our default
   `Allow` policy;
 * `zifencei` — so `fence_i` assembles and runs;
-* `imc` — the base ISA plus the M and C extensions.
+* `imc` — the base ISA plus the M and C extensions;
+* `zicsr` — so the reference side has the CSR instructions the counter cases consist of;
+* `zicntr` — so the reference side has the counter CSRs, shadows included.
+
+⚠ **Why `zicsr` is in the string — and why it is *not* the load-bearing
+one.**  Measured on this machine's Spike: the base `rv32imc` already
+**implies** Zicsr ⇒ ⇒ `csrr` / `csrw` execute fine even under the old
+string `rv32imc_zicclsm_zifencei` ⇒ ⇒ the counter cases *do* run to
+completion there (under the old string the reference side already reports
+`PASS` for `rv32mi/instret_overflow`).  ⇒ ⇒ `zicsr` is in the string to
+**name** the dependency explicitly instead of relying on the implication —
+it is **not** what makes the counter cases work.
+
+⚠ **Why `zicntr` is in the string — this one *is* load-bearing.**  Zicntr
+brings the **shadow** counters — `cycle` / `instret` / `cycleh` /
+`instreth` — and those are **standard** CSRs ⇒ ⇒ Spike gates them by
+extension ⇒ ⇒ without `zicntr` reading `cycle` raises an
+illegal-instruction exception ⇒ ⇒ the `rv32mi/zicntr` case traps on the
+reference side instead of running ⇒ ⇒ that case cannot be compared at
+all.  Measured: with the previous string the reference side reported
+`FAIL 2` for it, with this one it reports `PASS`.
+
+⚠ **Mind the asymmetry, because it is easy to get backwards.**  Spike
+gates **standard** CSRs by extension but does **not** gate **custom**
+ones ⇒ ⇒ `mcycle` / `minstret` / `mcountinhibit` (custom addresses) were
+already readable **and writable** on the reference side under the old
+string — measured: writing `0xFFFFFFFF` into `minstret` lands and the
+counter wraps ⇒ ⇒ it is the **shadows** alone that need `zicntr`.
 
 Note that M-13's LLD says the default policy is "模拟器与 Spike 一致允许非对齐".
 That statement is only true of a Spike built with Zicclsm enabled — the

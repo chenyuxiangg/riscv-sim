@@ -59,7 +59,7 @@ TIMEOUT_MS=60000
 # ⚠️ **栈页是参考侧的特性**：候选侧映射的栈窗口是 [0x7fff_e000, 0x7fff_f000)
 #   ⇒ ⇒ 「两侧暴露同一地址集合」这句**不准确** ⇒ ⇒ 诚实口径（STAGE-19 裁决 I）：
 #   **RAM 窗口**两侧一致（**构造保证**）· **栈窗口**各是本侧特性。
-SPIKE_ISA="rv32imc_zicclsm_zifencei"
+SPIKE_ISA="rv32imc_zicsr_zicclsm_zifencei_zicntr"
 SPIKE_STACK_MEM="2147479552:4096"
 # The **RAM window** is **not** written down here: the candidate side
 # **prints** it (`osz-boot --print-memory`) and this script **reads** that
