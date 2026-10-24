@@ -23,6 +23,13 @@ import re
 import sys
 from pathlib import Path
 
+# ⚠️ **表格切分复用 `tools/doc_check.py` 的那一份**（**一个约束一个落点**）——
+# ⚠️ **不要**在这里再写一份朴素 `split("|")` ⇒ ⇒ 转义的 `\|`
+#    （字面竖线，GitHub **不切列**）会被**误切**成两格 ⇒ ⇒ 表格列数检查会**假红**
+#    ⇒ ⇒ 「表格怎么切」这条约束**必须只有一处定义** ⇒ ⇒ 本脚本**直接 import** 它。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from doc_check import split_row  # noqa: E402  (必须在 sys.path 调整之后)
+
 spec = Path(sys.argv[1] if len(sys.argv) > 1 else
             "docs/detailed-design/STAGE-17_V032_Delta_Equivalence_Ordering_Gate.md")
 lines = spec.read_text(encoding="utf-8").splitlines()
@@ -44,7 +51,7 @@ for i, line in enumerate(lines, 1):
     if in_fence:
         continue
     if line.strip().startswith("|") and line.strip().endswith("|"):
-        cols = len([c for c in line.strip().strip("|").split("|")])
+        cols = len(split_row(line.strip()))
         if table_start is None:
             table_start, table_cols = i, cols
         elif cols != table_cols:
