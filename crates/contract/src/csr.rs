@@ -273,6 +273,13 @@ pub const CSR_IRQ_CLEAR: u16 = 0x7C0;
 /// Bit 3 of `mstatus` (standard).
 pub const MSTATUS_MIE_BIT: u32 = 3;
 
+/// `mstatus`'s **modify privilege** bit — `MPRV` (F10 / F11).
+///
+/// ⚠️ When it is set, M-mode **loads and stores** go through the PMP check
+/// exactly like an S/U-mode access would (F10).  ⚠️ It does **not** affect
+/// instruction fetch (F11).
+pub const MSTATUS_MPRV_BIT: u32 = 17;
+
 /// `mstatus.MPIE` — "previous `MIE`", saved on trap entry and restored
 /// by `mret`.
 ///
@@ -712,6 +719,8 @@ pub const PMP_CFG_X: u8 = 0x04;
 pub const PMP_CFG_W: u8 = 0x02;
 /// `pmpcfg`'s read permission (F1).
 pub const PMP_CFG_R: u8 = 0x01;
+/// `pmpcfg`'s **reserved** bits 6:5 — they read back as zero (F20).
+pub const PMP_CFG_RESERVED: u8 = 0x60;
 
 /// Address-matching mode: the entry is **disabled** (F1).
 pub const PMP_A_OFF: u8 = 0;
@@ -828,6 +837,25 @@ pub fn pmp_region(cfg: PmpCfg, prev_addr: u32, cur_addr: u32) -> Option<PmpRegio
     }
 }
 
+/// The **WARL legalisation** of one `pmpcfg` byte (F20).
+///
+/// ⚠️ The reference side does **not** store the written byte verbatim:
+///
+/// * the **reserved** bits 6:5 read back as zero (`0xff` ⇒ `0x9f`);
+/// * **`R` = 0 together with `W` = 1 is a reserved combination** ⇒ ⇒ the
+///   reference side **drops the `W` bit** (`0x1a` ⇒ `0x18`, `0x2a` ⇒ `0x08`)
+///   ⇒ ⇒ and *that* is why such an entry cannot write at all (F9): the `W`
+///   bit is not even there any more.
+///
+/// ⇒ ⇒ everything else reads back verbatim (`0x01`, `0x04`, `0x1f`, …).
+pub fn pmp_cfg_warl(byte: u8) -> u8 {
+    let mut value = byte & !PMP_CFG_RESERVED;
+    if value & PMP_CFG_R == 0 {
+        value &= !PMP_CFG_W;
+    }
+    value
+}
+
 /// Does the entry grant the access?
 ///
 /// ⚠️ **`R` = 0 together with `W` = 1 is a reserved combination** (F9) ⇒ ⇒ the
@@ -884,7 +912,6 @@ pub fn pmp_access_allowed(
     // least one PMP entry is implemented, the access fails." (F8)
     !entries.iter().any(|(cfg, _)| cfg.a != PMP_A_OFF)
 }
-
 
 /// Whether this platform **implements** a CSR.
 ///
@@ -1745,6 +1772,16 @@ mod tests {
         assert!(pmp_decode_cfg(0x80).l);
     }
 
+    /// ⚠️ **`MPRV` 的位号必须钉死**（F10 / F11）—— 错一位 ⇒ M 模式的访存
+    /// 口径整个反过来，而**没有任何一条内部用例会立刻红**（只有判据语料会）。
+    ///
+    /// ⚠️ 这个位号是**实测**出来的：参考侧在置上它之后才从「M 模式旁路」
+    /// 变成「受检」。
+    #[test]
+    fn the_mprv_bit_is_pinned() {
+        assert_eq!(MSTATUS_MPRV_BIT, 17);
+    }
+
     /// ⚠️ **CSR 号必须钉死**（F1 / F2 / F15）—— 错一位 ⇒ 条目整个错位。
     #[test]
     fn the_pmp_csr_numbers_are_pinned() {
@@ -1892,6 +1929,34 @@ mod tests {
         assert!(!pmp_permits(pmp_decode_cfg(0x1c), PmpAccess::Load));
         assert!(pmp_permits(pmp_decode_cfg(0x1c), PmpAccess::Fetch));
         assert!(!pmp_permits(pmp_decode_cfg(0x19), PmpAccess::Fetch));
+    }
+
+    /// ⚠️ **`pmpcfg` 的写入会被合法化**（F20）—— 保留位 6:5 读回 0，
+    /// 保留组合 `R`=0 ∧ `W`=1 丢掉 `W` 位，其余**逐字**读回。
+    ///
+    /// ⚠️ **判别力**：这三条断言**互不相同** ⇒ ⇒ 「一律清零」「一律照抄」
+    /// 这两种写法都过不了 ⇒ ⇒ 合法化必须是**逐位**的那一种。
+    #[test]
+    fn the_pmp_cfg_writes_are_legalised() {
+        // 保留位 6:5 ⇒ 读回 0。
+        assert_eq!(pmp_cfg_warl(0xff), 0x9f);
+        assert_eq!(pmp_cfg_warl(0x60), 0x00);
+        // 保留组合 `R`=0 ∧ `W`=1 ⇒ 丢掉 `W` 位。
+        assert_eq!(pmp_cfg_warl(0x1a), 0x18);
+        assert_eq!(pmp_cfg_warl(0x1e), 0x1c);
+        assert_eq!(pmp_cfg_warl(0x2a), 0x08);
+        // 合法值**逐字**读回 ⇒ ⇒ 合法化不是「一律清零」，也不是「一律照抄」。
+        assert_eq!(pmp_cfg_warl(0x00), 0x00);
+        assert_eq!(pmp_cfg_warl(0x01), 0x01);
+        assert_eq!(pmp_cfg_warl(0x04), 0x04);
+        assert_eq!(pmp_cfg_warl(0x1b), 0x1b);
+        assert_eq!(pmp_cfg_warl(0x1f), 0x1f);
+        assert_eq!(pmp_cfg_warl(0x9f), 0x9f);
+        // ⚠️ **幂等**：合法化一个已经合法的值**不动它** ⇒ ⇒ 读回再写、
+        // 再读回是**同一个值**（快照往返稳定）。
+        for byte in [0x00u8, 0x01, 0x04, 0x1b, 0x1f, 0x9f] {
+            assert_eq!(pmp_cfg_warl(pmp_cfg_warl(byte)), byte, "合法化必须幂等");
+        }
     }
 
     /// ⚠️ **M 模式旁路，但锁住的条目照样管**（F10 / F12）⇒ ⇒ 这两条是
