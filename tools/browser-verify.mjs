@@ -1604,7 +1604,13 @@ async function runBoardArchiveSection(cdp, opts) {
                         resolve(JSON.stringify({
                             count: entries.length,
                             ids: entries.map((e) => String((e && e.id) || "")),
-                            canonical: entries.map((e) => canon(e)),
+                            // ⚠️ **比的是 e.description**（描述本身），**不是**整条
+                            // entry（entry 是 id 加 description 的**包装**）⇒
+                            // 拿包装去比描述 ⇒ 永远不等 ⇒ **假红**。
+                            entries: entries.map((e) => ({
+                                id: String((e && e.id) || ""),
+                                canonical: canon((e && e.description) ? e.description : null),
+                            })),
                         }));
                     };
                     all.onerror = () => resolve(JSON.stringify({ error: "getAll failed" }));
@@ -1630,15 +1636,26 @@ async function runBoardArchiveSection(cdp, opts) {
     );
 
     // ⚠️ **逐字段相同**：存下来的描述 vs 提交出去的那份 ⇒ 用**规范 JSON**比。
-    const storedCanonicals = Array.isArray(stored?.canonical) ? stored.canonical : [];
-    const sameField = submittedCanonical.length > 0
-        && storedCanonicals.some((c) => c === submittedCanonical);
+    //
+    // ⚠️ **按 `id` 配对**（不是「任意一条相等就算过」）⇒ 多块板时不会拿
+    // 另一块板的描述来顶替（那正是「拿别的地址的行号顶替」那类错误）。
+    const storedEntries = Array.isArray(stored?.entries) ? stored.entries : [];
+    const submittedId = (() => {
+        try {
+            return String(JSON.parse(submittedCanonical)?.id ?? "");
+        } catch {
+            return "";
+        }
+    })();
+    const paired = storedEntries.find((e) => String(e?.id ?? "") === submittedId) ?? null;
+    const sameField = Boolean(paired) && paired.canonical === submittedCanonical;
     add(
-        "存下来的描述与**提交出去的那份逐字段相同**（规范 JSON 比）",
+        "存下来的描述与**提交出去的那份逐字段相同**（规范 JSON 比，按 id 配对）",
         sameField,
         sameField
-            ? "两份规范 JSON 完全一致"
-            : `提交 = ${submittedCanonical.slice(0, 120)}；库存 = ${JSON.stringify(storedCanonicals.map((c) => String(c).slice(0, 120)))}`,
+            ? `板「${submittedId}」的两份规范 JSON 完全一致`
+            : `提交 id = ${JSON.stringify(submittedId)}，规范 JSON ${submittedCanonical.slice(0, 100)}；`
+              + `库存 = ${JSON.stringify(storedEntries.map((e) => ({ id: e?.id, c: String(e?.canonical ?? "").slice(0, 100) })))}`,
     );
 
     return { skipped: false, checks };
