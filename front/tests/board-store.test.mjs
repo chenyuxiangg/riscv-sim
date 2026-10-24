@@ -187,9 +187,12 @@ describe("板档案服务 · 纯逻辑层（B-1 ~ B-5 · B-8）", () => {
         assert.equal(result.actual, null);
     });
 
-    test("B-8 板档案条目**不含时间戳**：字段集合恰为 `id` + `description`", () => {
+    test("B-8 板档案条目**不含时间戳**：字段集合恰为 `id` + `description` + `rules_version`", () => {
         const entry = boardEntry(DESC_A);
-        assert.deepEqual(Object.keys(entry).sort(), ["description", "id"]);
+        // ⚠️ **三个**字段（STAGE-18 · 裁决 F）：`rules_version` 是「这块板是按
+        // 哪一版规则校验过的」⇒ 它落在**条目的容器**里 ⇒ **不塞进描述 DTO**
+        // （塞进去就是两个真相）。
+        assert.deepEqual(Object.keys(entry).sort(), ["description", "id", "rules_version"]);
         // ⚠️ `name` 在描述里 ⇒ 条目里**不另存**一份（否则就是第二份真相）
         assert.equal("name" in entry, false);
         assert.equal("createdAt" in entry, false);

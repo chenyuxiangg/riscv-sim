@@ -324,20 +324,24 @@ function setArchiveUnavailable(error) {
  * ⚠️ 没有存储 ⇒ **明确降级**为「只存在于本会话」（返回 `unsupported`），
  * 不假装存下来了；写失败 ⇒ 返回 `error`（调用方据此**不**改档案）。
  *
+ * ⚠️ **失败时把原因带回去**（`reason`）⇒ 上层**能说清**失败在哪 ⇒
+ * **不静默**（STAGE-18 裁决 I：升级失败要显示失败原因）。
+ *
  * @param {{boardStore?: object|null}} services
- * @param {{id: string, description: object}} entry
- * @returns {Promise<"ok"|"unsupported"|"error">}
+ * @param {{id: string, description: object, rules_version?: number}} entry
+ * @returns {Promise<{status: "ok"|"unsupported"|"error", reason: string|null}>}
  */
 async function persistBoard(services, entry) {
     const store = services?.boardStore ?? null;
-    if (!store) return "unsupported";
+    if (!store) return { status: "unsupported", reason: null };
     try {
         await store.put(entry);
-        return "ok";
+        return { status: "ok", reason: null };
     } catch (err) {
+        const reason = err?.message ?? String(err);
         setBoardState({ archiveStatus: "error" });
-        setNote(`板档案落库失败：${err?.message ?? err}`);
-        return "error";
+        setNote(`板档案落库失败：${reason}`);
+        return { status: "error", reason };
     }
 }
 
@@ -375,13 +379,13 @@ async function saveCurrentBoard(services) {
     }
     const merged = api.mergeBoard(state.archive, entry);
     const persisted = await persistBoard(services, entry);
-    if (persisted === "error") return;
+    if (persisted.status === "error") return;
     setBoardState({
         archive: merged.archive,
         selectedId: entry.id,
-        archiveStatus: persisted === "ok" ? "ok" : "unsupported",
+        archiveStatus: persisted.status === "ok" ? "ok" : "unsupported",
     });
-    setNote(persisted === "ok"
+    setNote(persisted.status === "ok"
         ? `已保存板「${entry.id}」`
         : `板「${entry.id}」已存入本会话（板档案只存在于本会话）`);
 }
@@ -432,13 +436,13 @@ async function saveBoardAs(services, params) {
     }
     const merged = api.mergeBoard(state.archive, entry);
     const persisted = await persistBoard(services, entry);
-    if (persisted === "error") return;
+    if (persisted.status === "error") return;
     // ⚠️ **选中项不变**：草稿一个字都没改 ⇒ 它仍代表原来那块板。
     setBoardState({
         archive: merged.archive,
-        archiveStatus: persisted === "ok" ? "ok" : "unsupported",
+        archiveStatus: persisted.status === "ok" ? "ok" : "unsupported",
     });
-    setNote(persisted === "ok"
+    setNote(persisted.status === "ok"
         ? `已另存为板「${newId}」（原板仍在档案里）`
         : `板「${newId}」已存入本会话（板档案只存在于本会话）`);
 }
@@ -448,6 +452,11 @@ async function saveBoardAs(services, params) {
  *
  * ⚠️ 载入**不是**接受：被载入的草稿**还要重新提交**才被内核接受 ⇒
  * 「保存 / 另存为」在重新提交前是**禁用**的（落库门槛，裁决 B）。
+ *
+ * ⚠️ **规则版本落后 ⇒ 明确提示**（STAGE-18 · D-143 · 裁决 I）：提示里**同时**
+ * 给出「这块板的规则版本」与「当前规则版本」⇒ ⇒ **不静默**。
+ * ⚠️ **提示之后仍然可以选用**（草稿照常载入）⇒ ⇒ 前端**不判**合法性
+ * （合法性**只**由内核那一处裁决 ⇒ 不写第二份校验器）。
  *
  * @param {string} id
  */
@@ -469,8 +478,13 @@ async function selectBoard(id) {
         setNote("这块板的描述读不出来 —— 档案可能坏了");
         return;
     }
+    // ⚠️ **规则版本判定在载入之前**（但**不拦**载入）⇒ 提示与「已选用」一起
+    // 说 ⇒ 用户既看得见差在哪，也照样能把板载进草稿。
+    const notice = api.boardRulesNotice(entry);
     setBoardState({ draft, selectedId: entry.id });
-    setNote(`已选用板「${entry.id}」（尚未提交 —— 要生效请点「提交板级内存图」）`);
+    setNote(notice
+        ? `已选用板「${entry.id}」—— ⚠️ ${notice}（尚未提交 —— 要生效请点「提交板级内存图」）`
+        : `已选用板「${entry.id}」（尚未提交 —— 要生效请点「提交板级内存图」）`);
 }
 
 /**
@@ -511,6 +525,59 @@ async function deleteBoard(services, id) {
     setNote(store
         ? `已删除板「${String(id ?? "")}」`
         : `已删除板「${String(id ?? "")}」（板档案只存在于本会话）`);
+}
+
+/**
+ * 内核**真的接受**了一份描述之后 ⇒ 把档案里对应的那一条**升级**到当前规则版本。
+ *
+ * ⚠️ **升级条件 = 内核真的接受过**（STAGE-18 · D-143 · 裁决 I 的最后一条）
+ * ⇒ ⇒ 不引入「前端说它没问题」这种第二判据 ⇒ ⇒ **只**在提交**成功**之后
+ * 调它。
+ *
+ * ⚠️ **升级动作 = 重写那一条**（带上当前 `rules_version`）⇒ ⇒ **不发任何
+ * 契约命令**（纯前端动作）。
+ *
+ * ⚠️ **升级失败不静默**（裁决 I）：写库失败 ⇒ 把原因带回去 ⇒ 上层显示它
+ * ⇒ ⇒ **描述仍然可用**（只是条目还是旧的 ⇒ 下次还会提示）。
+ *
+ * ⚠️ **按 `id` 找那一条**（不按描述逐字段比）：板档案的**主键就是 `id`**
+ * ⇒ 「那块板」= 那个 id ⇒ ⇒ 草稿 → 描述的往返**本来就不是逐字节相同**的
+ * （实测：器件会被补上 `irq_line: 0`、可选的 `max_region_bytes` 会掉）
+ * ⇒ ⇒ 若按字段相同来判 ⇒ **永远升级不了**（静默失效）⇒ ⇒ 按 id 判。
+ *
+ * @param {{boardStore?: object|null}} services
+ * @param {object|null|undefined} description — 内核刚接受的那份描述
+ * @returns {Promise<{status: "upgraded"|"current"|"skipped"|"error"|"unavailable", version?: number, reason: string|null, persisted?: "ok"|"unsupported"}>}
+ */
+async function upgradeBoardRules(services, description) {
+    const { api, error } = await loadBoardStoreModule();
+    if (!api) {
+        return {
+            status: "unavailable",
+            reason: `板档案服务不可用：${error?.message ?? error}`,
+        };
+    }
+    const id = api.boardId(description);
+    if (id === null) return { status: "skipped", reason: null };
+    const state = boardState();
+    const entry = api.findBoard(state.archive, id);
+    // ⚠️ 档案里**没有**这一块 ⇒ 没什么可升级（它还没被保存进档案）。
+    if (!entry) return { status: "skipped", reason: null };
+    // ⚠️ **已经是当前版本** ⇒ 不重写（不制造无谓的写）。
+    if (api.checkBoardRules(entry).ok) return { status: "current", reason: null };
+    const upgraded = { ...entry, rules_version: api.PLATFORM_RULES_VERSION };
+    const persisted = await persistBoard(services, upgraded);
+    if (persisted.status === "error") {
+        return { status: "error", reason: persisted.reason };
+    }
+    const merged = api.mergeBoard(state.archive, upgraded);
+    setBoardState({ archive: merged.archive });
+    return {
+        status: "upgraded",
+        version: api.PLATFORM_RULES_VERSION,
+        reason: null,
+        persisted: persisted.status,
+    };
 }
 
 /**
@@ -763,6 +830,29 @@ export async function handleCommand(detail, services) {
                         message: describeMemoryMapError(code, message),
                     });
                     throw err;
+                }
+                // ⚠️ **升级**（STAGE-18 · D-143 · 裁决 I / J）：内核**真的接受**
+                // 之后 ⇒ 把档案里对应的那一条**重写一次**（带上当前
+                // `rules_version`）⇒ ⇒ **有提示**（不静默迁移）。
+                //
+                // ⚠️ **落点在 `catch` 之后** ⇒ 走到这里**只可能**是内核接受
+                // 了（失败那条路 `catch` 里 `throw` 掉了）⇒ ⇒ **不引入**「前端
+                // 说它没问题」这种第二判据（裁决 I 的最后一条）。
+                //
+                // ⚠️ **不发任何契约命令** ⇒ 升级是**纯前端**动作（重写库里的
+                // 那一条）。
+                const upgrade = await upgradeBoardRules(services, description);
+                if (upgrade.status === "upgraded") {
+                    setNote(upgrade.persisted === "unsupported"
+                        ? `已升级到当前规则版本 ${upgrade.version}（板档案只存在于本会话）`
+                        : `已升级到当前规则版本 ${upgrade.version}`);
+                    return;
+                }
+                if (upgrade.status === "error") {
+                    // ⚠️ **失败不静默**（裁决 I）⇒ 显示原因 ⇒ 描述**仍然可用**
+                    // （只是条目还是旧的 ⇒ 下次还会提示）。
+                    setNote(`板档案升级失败：${upgrade.reason} —— 描述仍然可用（这块板的条目还是旧的，下次还会提示）`);
+                    return;
                 }
                 break;
             }
