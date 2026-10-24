@@ -35,7 +35,32 @@ const m07 = await importFront("services/m07_transport.js");
 
 /** Let the async bootstrap settle. */
 const tick = () => new Promise((r) => setTimeout(r, 0));
-await tick();
+
+/**
+ * 等应用**挂载完成**（而不是「等一个 tick」）。
+ *
+ * ⚠️ **为什么改成按条件等**（STAGE-15 · v0.30 的实测订正）：
+ * `app.js` 的引导自 v0.30 起**多了一个动态 import**（板档案服务
+ * `front/services/m23_boardstore.js` ⇒ 缺席时**显式降级**而不是白屏）
+ * ⇒ 挂载从「一个 tick」变成「两个 tick」⇒ 用「等一个 tick」会在**半挂载**
+ * 状态下断言 ⇒ 4 条用例假红（页脚两条、状态栏一条、demo 按钮一条 ——
+ * 后者是因为 app 的 `riscv:seed` 监听器**还没挂上**）。
+ *
+ * ⇒ 改成**按条件等**：状态栏不再是「正在挂载模块…」⇒ **有界**（最多 64 个
+ * tick）⇒ 真挂死仍然会红（超时返回 `false` ⇒ 后面的断言照样红）。
+ *
+ * ⚠️ **不放宽断言**：这里只改**等多久**，不改**断言什么**。
+ */
+const waitForMount = async (maxTicks = 64) => {
+    for (let i = 0; i < maxTicks; i += 1) {
+        const status = dom.document.getElementById("status");
+        const text = String(status?.textContent ?? "");
+        if (text && !text.includes("正在挂载")) return true;
+        await tick();
+    }
+    return false;
+};
+await waitForMount();
 // The real DOM fires `DOMContentLoaded` after the deferred module scripts
 // have run, so a module that registers a listener in its top level does
 // receive it. The stub dispatches it explicitly for the same reason

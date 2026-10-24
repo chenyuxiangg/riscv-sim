@@ -20,7 +20,7 @@ import {
     BOARD_DB_VERSION,
     BOARD_STORE_NAME,
     BOARD_STORE_KEY,
-    BOARD_DESCRIPTION_SCHEMA_VERSION,
+    PLATFORM_SCHEMA_VERSION,
     boardId,
     boardEntry,
     mergeBoard,
@@ -341,6 +341,6 @@ describe("板档案服务 · 存储门面（`createBoardStore`）", () => {
         assert.equal(BOARD_DB_VERSION, 1);
         assert.equal(BOARD_STORE_NAME, "boards");
         assert.equal(BOARD_STORE_KEY, "id");
-        assert.equal(BOARD_DESCRIPTION_SCHEMA_VERSION, 1);
+        assert.equal(PLATFORM_SCHEMA_VERSION, 1);
     });
 });
