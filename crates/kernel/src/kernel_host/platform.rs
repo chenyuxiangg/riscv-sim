@@ -311,7 +311,7 @@ pub struct MappedDevices {
 ///     ram        → bus.map_ram(base, size, &[])
 ///     rom        → bus.map_rom(base, size, &[])
 ///     peripheral → 工厂造实例 → bus.map_peripheral_instance(base, 实例.size(), 实例)
-/// 护栏预算 → bus.set_max_region_bytes(描述.region_budget_bytes)
+/// 护栏预算 → bus.set_max_region_bytes(描述.max_region_bytes ?? 描述.region_budget_bytes)
 /// ```
 ///
 /// ⚠️ **校验在建图之前**：不合规的描述**一个区域都不留**（B-5）⇒
