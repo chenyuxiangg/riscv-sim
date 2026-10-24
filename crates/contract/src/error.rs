@@ -440,6 +440,27 @@ pub const E_PLT_13_REVISION_CONFLICT: u16 = 13;
 /// **value**, this one judges a **lookup that found nothing**.
 pub const E_PLT_14_REGION_NOT_FOUND: u16 = 14;
 
+/// Scenario code: a peripheral device's **`id` is empty**.
+///
+/// ⚠️ **New in v0.33 (D-142)**: the restore path matches a device state
+/// onto a live instance **by id** ⇒ a device with an **empty** id has
+/// **no identity at all** ⇒ its state matches nothing ⇒ the state is
+/// **silently lost** on restore ⇒ such a declaration is rejected here,
+/// at declaration time.
+///
+/// ⚠️ **It judges exactly one thing**: a **single** peripheral device
+/// whose `id` is empty (rule V-17).
+///
+/// ⚠️ **It does not reuse [`E_PLT_02_EMPTY_ID`]**: that one means
+/// 「**描述**的 `id` 为空」⇒ one code, two meanings ⇒ forbidden. It does
+/// not reuse [`E_PLT_08_DUPLICATE_DEVICE_ID`] either: that one means
+/// 「两个器件共用一个 id」⇒ **two** empty ids are still caught by V-9
+/// (which is judged **earlier**) ⇒ this code only ever fires for **one**
+/// empty id. It does not reuse
+/// [`E_PLT_12_PARAMETER_OUT_OF_RANGE`] either: that one judges a device
+/// **parameter's value** ⇒ an `id` is **not** a parameter ⇒ forbidden.
+pub const E_PLT_15_DEVICE_EMPTY_ID: u16 = 15;
+
 #[cfg(test)]
 mod tests {
     use super::*;
