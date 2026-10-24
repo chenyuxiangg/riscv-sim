@@ -30,11 +30,25 @@
 //! 换平台**一字不改**；内置描述要加**一行** `include_str!` 登记（**数据
 //! 登记**，不是逻辑改动）。
 //!
-//! ## 连线**不**进描述（裁决 G）
+//! ## 连线**进**描述（v0.34 · D-125 —— 取代 STAGE-12 裁决 G）
 //!
-//! 「UART 的 RX 就绪 → PLIC 的源 10」是**器件之间的信号连线**，不是
-//! 地址空间 ⇒ 描述覆盖「有什么、在哪、参数是多少」，**不覆盖「谁连谁」**
-//! ⇒ 换平台若要改连线，**仍要改宿主代码**（台账 D-125）。
+//! ⚠️ **v0.27（STAGE-12 裁决 G）说的「连线不进描述」已经作废**：那时的
+//! 理由是「描述覆盖**有什么、在哪、参数是多少**，不覆盖**谁连谁**」⇒ ⇒
+//! 「UART 的 RX 就绪 → PLIC 的源 10」这条约束就**只**写在宿主代码里
+//! （台账 **D-125**：两个数已经漂了 —— 描述里 `irq_line: 1` / 前端 10 /
+//! 宿主 10，而描述里那个 1 **从来没生效过**）。
+//!
+//! **v0.34（冻结规格 STAGE-19 §3.1 · 裁决 E）**把连线收成**数据**：描述
+//! 多了**可选**的 `wiring` 段 ⇒ ⇒ 宿主在**建图**时从**生效的描述**编译出
+//! 一张**连线表** ⇒ ⇒ 「换一块板改连线」不用改宿主。
+//!
+//! ⚠️ **默认连线仍住在宿主里，但只有一处**（[`default_wiring`]）：那个写死
+//! 的 PLIC source 常量**已删**（保留 = 又一个真相源）⇒ ⇒ 宿主源码里**没有
+//! 第二处**写着那个源号。
+//!
+//! ⚠️ **`irq_line` 的语义不动**（STAGE-19 裁决 D）：它是 **M-15 内部中断
+//! 线号**，**不是** PLIC source，且当前不接进任何行为（死字段）⇒ ⇒ 连线
+//! **只**由 `wiring` 表达。
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -44,7 +58,9 @@ use riscv_sim_contract::error::{
     PlatformError, E_PLT_09_UNKNOWN_PLATFORM, E_PLT_10_PLATFORM_FILE_UNREADABLE,
     E_PLT_11_PLATFORM_FILE_MALFORMED, PLATFORM_FAMILY,
 };
-use riscv_sim_contract::platform::{DeviceSpec, PlatformDescription, RegionSpec};
+use riscv_sim_contract::platform::{
+    DeviceSpec, PlatformDescription, RegionSpec, WIRING_EVENT_RX_READY,
+};
 use riscv_sim_contract::port::Peripheral;
 
 use crate::m14_bus::Bus;
@@ -377,6 +393,136 @@ pub fn map_platform(
         }
     }
     Ok(devices)
+}
+
+// ---------------------------------------------------------------------------
+// 连线表（v0.34 · D-125 · 冻结规格 STAGE-19 §3.1）
+// ---------------------------------------------------------------------------
+
+/// 宿主侧**编译出来的一条连线**。
+///
+/// ⚠️ **它不是契约层的 `WiringSpec`**：契约层那份是**描述里的形状**（字段
+/// 名就是线上的名字）；宿主这份是**编译后的形状**——「谁的事件 ⇒ 抬哪个
+/// 源」已经判完了 ⇒ 运行时只需要这两个数。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wiring {
+    /// 源器件的 `id`（描述里的器件 id ⇒ 覆盖键的第一半）。
+    pub from_device: String,
+    /// 事件名（**只有** `rx_ready` ⇒ 契约层那个常量）。
+    pub event: String,
+    /// 目标器件的 `id`（PLIC）。
+    pub to_device: String,
+    /// 目标 PLIC 的**源号**。
+    pub source: u32,
+}
+
+/// 描述里**第一个** UART 的器件 id。
+///
+/// ⚠️ **口径 = 建图时「第一个同种器件被宿主认领」那一条**（按 base 升序）
+/// ⇒ ⇒ 「宿主手里那路 UART」与「这里的第一个 UART」**永远是同一个**。
+fn first_uart_id(description: &PlatformDescription) -> Option<String> {
+    regions_by_base(description)
+        .into_iter()
+        .find_map(|region| match region {
+            RegionSpec::Peripheral {
+                device: DeviceSpec::Uart16550 { id, .. },
+                ..
+            } => Some(id.clone()),
+            _ => None,
+        })
+}
+
+/// 描述里**第一个** PLIC 的 `(器件 id, 源数)`。
+///
+/// ⚠️ **口径同 [`first_uart_id`]**（按 base 升序的第一个 PLIC）⇒ ⇒ 与宿主
+/// 手里那个 PLIC 句柄**是同一个**。
+fn first_plic(description: &PlatformDescription) -> Option<(String, u32)> {
+    regions_by_base(description)
+        .into_iter()
+        .find_map(|region| match region {
+            RegionSpec::Peripheral {
+                device: DeviceSpec::Plic { id, sources, .. },
+                ..
+            } => Some((id.clone(), *sources)),
+            _ => None,
+        })
+}
+
+/// **默认连线**（宿主里**唯一**那处）—— 冻结规格 STAGE-19 §3.1 · 裁决 E。
+///
+/// ⚠️ **它说的是「这块板上的第一个 UART / 第一个 PLIC」**：宿主今天写死的
+/// 行为就是「**第一个** UART 的 RX 就绪 ⇒ 抬 PLIC 的**源 10**」⇒ ⇒ 用
+/// **角色**（而不是写死的器件 id）表述 ⇒ ⇒ 存量行为**一字未变**（B-2）。
+///
+/// ⚠️ **源号 10 在整个宿主里只写在这里**：那个写死的 PLIC source 常量
+/// **已删**（保留 = 又一个真相源；名字见冻结规格 STAGE-19 §3.1 · 裁决 E）
+/// ⇒ ⇒ 「换一块板改连线」不用改宿主（D-125）。
+///
+/// ⚠️ **两端器件缺一 ⇒ 没有默认连线**（不是空指针）：描述里没有 UART 或
+/// 没有 PLIC ⇒ 这根线**不生效**（B-3）。
+pub fn default_wiring(description: &PlatformDescription) -> Vec<Wiring> {
+    let (uart_id, (plic_id, plic_sources)) =
+        match (first_uart_id(description), first_plic(description)) {
+            (Some(uart_id), Some(plic)) => (uart_id, plic),
+            _ => return Vec::new(),
+        };
+    let wire = Wiring {
+        from_device: uart_id,
+        event: WIRING_EVENT_RX_READY.to_string(),
+        to_device: plic_id,
+        source: 10,
+    };
+    // ⚠️ **源号越界 ⇒ 不接这根线**：PLIC 的源数不够 ⇒ 抬不起来 ⇒ ⇒
+    // （今天的行为也一样：PLIC 的 `request` 忽略越界的源）⇒ ⇒ 描述里的
+    // `wiring` 仍可以给它一个合法的源号。
+    if wire.source >= plic_sources {
+        return Vec::new();
+    }
+    vec![wire]
+}
+
+/// 从**生效的描述**编译出**连线表**（冻结规格 STAGE-19 §3.1）。
+///
+/// ```text
+/// 生效描述 ──► 编译连线表 ──► sync_interrupts 按表抬线
+///   ├─ 默认连线：第一个 UART.rx_ready ──► 第一个 PLIC.source 10
+///   └─ 描述里的 wiring：按 (from.device, from.event) **覆盖**同键的默认项
+/// ```
+///
+/// ⚠️ **同一时刻一个键只有一根线**（覆盖 ⇒ **不**追加）⇒ ⇒ 「同一时刻只有
+/// 一个 source」是**构造保证**的，不是运行时判出来的。
+///
+/// ⚠️ **表里只有宿主真的抬得了的线**：源器件必须是**宿主手里那路 UART**、
+/// 目标器件必须是**宿主手里那个 PLIC** ⇒ ⇒ 描述里那些「指向别的器件」的
+/// 线（V-18 只要求器件**存在**）**不在表里** ⇒ ⇒ 它们**不会**让宿主在
+/// 「UART 的 RX 就绪」时去抬一个不属于它的源。
+pub fn compile_wiring(description: &PlatformDescription) -> Vec<Wiring> {
+    let mut table = default_wiring(description);
+
+    // 描述里的连线：**按 (from.device, from.event) 覆盖**同键的默认项。
+    for spec in description.wiring.iter().flatten() {
+        let wire = Wiring {
+            from_device: spec.from.device.clone(),
+            event: spec.from.event.clone(),
+            to_device: spec.to.device.clone(),
+            source: spec.to.source,
+        };
+        match table
+            .iter_mut()
+            .find(|w| w.from_device == wire.from_device && w.event == wire.event)
+        {
+            Some(slot) => *slot = wire,
+            None => table.push(wire),
+        }
+    }
+
+    // 只留宿主**真的抬得了**的那些线（见本函数的文档）。
+    let (uart_id, plic_id) = match (first_uart_id(description), first_plic(description)) {
+        (Some(uart_id), Some((plic_id, _))) => (uart_id, plic_id),
+        _ => return Vec::new(),
+    };
+    table.retain(|w| w.from_device == uart_id && w.to_device == plic_id);
+    table
 }
 
 // ---------------------------------------------------------------------------
