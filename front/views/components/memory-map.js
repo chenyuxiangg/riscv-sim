@@ -51,6 +51,30 @@
 // ⚠️ **落库门槛**（STAGE-15 裁决 B）：只有被内核接受过的描述才允许落库
 // ⇒ 库里不会有**永远装不上的板** ⇒ 前端**仍然不写第二份校验器**。
 
+//
+// # 器件连线 `wiring`（STAGE-19 · v0.34 · D-125 · 裁决 G）
+//
+// 「UART 的 RX 中断连到 PLIC 的哪个源」这条约束**进数据**（平台描述里的
+// **可选** `wiring` 段）⇒ 换一块板改连线**不用改代码**。
+//
+// ⚠️ **前端只做「透传」**（裁决 G）：编辑器**不暴露** `wiring` 的 UI ⇒ 「从
+// 界面提交的板永远没有 `wiring`」是**已知边界**（不假装界面支持）⇒ 这里
+// **只**保证「描述里有 ⇒ 草稿里有 ⇒ 提交回去还在」。
+//
+// ⚠️ **逐字段重建**（裁决 G）：`from.device` / `from.event` / `to.device` /
+// `to.source` **逐个重建** ⇒ 草稿里多出来的键**不可能**漏进契约 ⇒ 「逐
+// 字段重建」这条纪律**不许破**。
+//
+// ⚠️ **形状**：`[{ from: { device, event }, to: { device, source } }]`（契约
+// 层 `WiringSpec` / `WiringFrom` / `WiringTo`，规格 §2.1 钉死名字）⇒ 草稿
+// 里就按这个形状存（**数组**，不是对象）。
+//
+// ⚠️ **空 / 缺省 ⇒ 线上描述**不带** `wiring` 键**（不是 `null`、不是空数组）
+// ⇒ 与契约层 serde 的 `skip_serializing_if = "Option::is_none"` **同形** ⇒
+// 没有 `wiring` 的板往返后**仍然**没有 `wiring`（不给所有板都塞一个空数组）
+// ⇒ 内核回传的那份与前端提交的那份**逐字段相同** ⇒ 「已被内核接受」这个
+// 推导量**不会**因为多一个 `wiring: null` 而永远为假。
+
 import { escapeHtml } from "../../lib/escape.js";
 import { PLATFORM_SCHEMA_VERSION } from "../../lib/message.js";
 
@@ -274,7 +298,7 @@ export function defaultDraft() {
  */
 export function cloneDraft(draft) {
     const regions = Array.isArray(draft?.regions) ? draft.regions : [];
-    return {
+    const next = {
         ...draft,
         regions: regions.map((region) => {
             if (String(region?.kind) === "peripheral") {
@@ -283,6 +307,10 @@ export function cloneDraft(draft) {
             return { ...region };
         }),
     };
+    // ⚠️ `wiring` 也**深复制**（STAGE-19）：它是**对象数组** ⇒ 浅拷贝会让
+    // 「改草稿」改到内核给的那份 ⇒ ⇒ 与 `regions` 同一条纪律。
+    if (Array.isArray(next.wiring)) next.wiring = normalizeWiringList(next.wiring);
+    return next;
 }
 
 /**
@@ -311,7 +339,45 @@ export function regionToDraft(region) {
 }
 
 /**
+ * 一组器件连线 → **规范形状**（草稿形状 == 线上形状）。
+ *
+ * ⚠️ **唯一落点**（STAGE-19 裁决 G）：线上 → 草稿、草稿 → 线上**共用这一个
+ * 函数** ⇒ ⇒ 「连线长什么样」这条约束**只有一处定义**（不会漂）。
+ *
+ * ⚠️ **逐字段重建**：`from.device` / `from.event` / `to.device` /
+ * `to.source` **逐个重建** ⇒ ⇒ 草稿里多出来的键**不可能**漏进契约 ⇒ ⇒
+ * 「逐字段重建」这条纪律**不许破**。
+ *
+ * ⚠️ **形状**：`[{ from: { device, event }, to: { device, source } }]`（契约
+ * 层 `WiringSpec` / `WiringFrom` / `WiringTo`，规格 §2.1 钉死名字）。
+ *
+ * ⚠️ **不是数组 ⇒ 当作没有连线**（缺省）⇒ ⇒ 前端**不猜**。
+ *
+ * ⚠️ **不判合法性**：连线引用的器件存不存在、`to.source` 在不在范围内 ⇒ ⇒
+ * **只**由内核那一处裁决（`E_PLT_16`）⇒ ⇒ 前端**不写第二个校验器**。
+ *
+ * @param {unknown} wiring — 线上的 `wiring` 段 / 草稿里的 `wiring`
+ * @returns {Array<{from: {device: string, event: string}, to: {device: string, source: number}}>}
+ */
+export function normalizeWiringList(wiring) {
+    if (!Array.isArray(wiring)) return [];
+    return wiring.map((entry) => ({
+        from: {
+            device: String(entry?.from?.device ?? ""),
+            event: String(entry?.from?.event ?? ""),
+        },
+        to: {
+            device: String(entry?.to?.device ?? ""),
+            source: Number(entry?.to?.source ?? 0) >>> 0,
+        },
+    }));
+}
+
+/**
  * 把内核给的**当前生效的图**复制成一份草稿。
+ *
+ * ⚠️ **`wiring` 也读进来**（STAGE-19 · 裁决 G）：描述里有 ⇒ 草稿里有 ⇒ ⇒
+ * 提交回去还在；⚠️ **空 / 缺省 ⇒ 草稿里**不带**这个键**。
  *
  * @param {object|null|undefined} description
  * @returns {object|null}
@@ -319,7 +385,7 @@ export function regionToDraft(region) {
 export function draftFromDescription(description) {
     if (!description || typeof description !== "object") return null;
     const regions = Array.isArray(description.regions) ? description.regions : [];
-    return {
+    const draft = {
         schema_version: PLATFORM_SCHEMA_VERSION,
         id: String(description.id ?? ""),
         name: String(description.name ?? ""),
@@ -328,6 +394,13 @@ export function draftFromDescription(description) {
         region_budget_bytes: String(Number(description.region_budget_bytes ?? 0)),
         regions: regions.map((region) => regionToDraft(region)),
     };
+    // ⚠️ `wiring`（STAGE-19 · 裁决 G）：描述里有 ⇒ **草稿里带上** ⇒ ⇒
+    // 提交回去还在（否则「板档案里那块板」一提交就把连线丢了）。
+    //
+    // ⚠️ **空 / 缺省 ⇒ 草稿里**不带**这个键**（不给所有板都塞一个空数组）。
+    const wiring = normalizeWiringList(description.wiring);
+    if (wiring.length > 0) draft.wiring = wiring;
+    return draft;
 }
 
 /**
@@ -338,6 +411,10 @@ export function draftFromDescription(description) {
  *
  * ⚠️ **外设窗口没有 `size`** ⇒ 这里**绝不**补一个（补了就是编数据）。
  *
+ * ⚠️ **`wiring` 逐字段重建**（STAGE-19 · 裁决 G）：`from.device` /
+ * `from.event` / `to.device` / `to.source` **逐个重建** ⇒ ⇒ 草稿里多出来的
+ * 键**漏不进**契约；⚠️ **空 / 缺省 ⇒ 这个键**不带**（不是 `null`）。
+ *
  * @param {object} draft
  * @returns {object}
  */
@@ -347,7 +424,7 @@ export function draftToDescription(draft) {
         const n = parseNumber(raw);
         return n === null ? 0 : Math.max(0, Math.trunc(n)) >>> 0;
     };
-    return {
+    const description = {
         schema_version: PLATFORM_SCHEMA_VERSION,
         id: String(draft?.id ?? ""),
         name: String(draft?.name ?? ""),
@@ -370,6 +447,15 @@ export function draftToDescription(draft) {
             };
         }),
     };
+    // ⚠️ `wiring`（STAGE-19 · 裁决 G）：**逐字段重建**（同一个
+    // `normalizeWiringList`）⇒ ⇒ 草稿里多出来的键**不可能**漏进契约。
+    //
+    // ⚠️ **空 / 缺省 ⇒ 线上描述**不带**这个键**（不是 `null`、不是空数组）⇒ ⇒
+    // 与契约层 serde 的 `skip_serializing_if = "Option::is_none"` **同形** ⇒ ⇒
+    // 没有 `wiring` 的板往返后**仍然**没有 `wiring`。
+    const wiring = normalizeWiringList(draft?.wiring);
+    if (wiring.length > 0) description.wiring = wiring;
+    return description;
 }
 
 /**
@@ -593,6 +679,32 @@ export function sameMemoryMapMetadata(a, b) {
 }
 
 /**
+ * 两份描述的**器件连线**（`wiring`）一样吗。
+ *
+ * ⚠️ **用同一个归一化函数比**（STAGE-19 · 验收 C-5 的第 2 条）：两边都过
+ * `normalizeWiringList`（**唯一落点**）⇒ ⇒ 「同样的连线、**键序不同**」
+ * **不会**被判成不同 ⇒ ⇒ 不会**假触发**整份替换 ⇒ ⇒ 「一个约束一个落点」
+ * 这条纪律在**第二处**也成立。
+ *
+ * ⚠️ **缺省 = 没有连线**：两边都缺省 ⇒ 一样；一边缺省、一边有 ⇒ 不同 ⇒ ⇒
+ * 「删掉连线」也是**改动**（也得提交得出去）。
+ *
+ * ⚠️ **列表顺序算数据的一部分**（契约层是 `Vec`）⇒ 顺序不同 ⇒ 不同 ⇒ ⇒
+ * ⚠️ 但界面**没有** `wiring` 的编辑器 ⇒ 顺序**改不了** ⇒ ⇒ 不会假触发。
+ *
+ * ⚠️ **不判合法性**：连线引用的器件存不存在、`source` 在不在范围内 ⇒ ⇒
+ * **只**由内核那一处裁决 ⇒ ⇒ 前端**不写第二个校验器**。
+ *
+ * @param {object|null|undefined} a
+ * @param {object|null|undefined} b
+ * @returns {boolean}
+ */
+export function sameWiring(a, b) {
+    return canonicalJson(normalizeWiringList(a?.wiring))
+        === canonicalJson(normalizeWiringList(b?.wiring));
+}
+
+/**
  * 运行期上界（`max_region_bytes`）的**归一化值**。
  *
  * ⚠️ **缺省与 `null` 是同一件事**（契约层：`None` ⇒ 等于声明期那个）
@@ -679,6 +791,11 @@ export function diffMemoryMapOps(baseDescription, draftDescription) {
  * ⚠️ **差量为空**（什么都没改）⇒ `mode = "none"` ⇒ 前端**不发命令**
  * ⇒ 免得白涨一次修订号。
  *
+ * ⚠️ **`wiring` 变了 ⇒ 也走**整份**（STAGE-19 §9 第 1 条 · 验收 C-5）：
+ * 差量契约里**没有** `wiring` 操作 ⇒ ⇒ 差量路径**表达不了** ⇒ ⇒ 「元数据
+ * 变了 ⇒ **整份**」这条判据**同样**管 `wiring` ⇒ ⇒ `wiring` 的改动**必须**
+ * 能提交出去。
+ *
  * @param {object|null|undefined} baseDescription — **当前生效的图**
  * @param {object|null|undefined} draftDescription — 草稿转成的线上描述
  * @returns {{mode: "replace"|"patch"|"none", ops: Array<object>}}
@@ -686,6 +803,16 @@ export function diffMemoryMapOps(baseDescription, draftDescription) {
 export function planMemoryMapUpdate(baseDescription, draftDescription) {
     if (!baseDescription) return { mode: "replace", ops: [] };
     if (!sameMemoryMapMetadata(baseDescription, draftDescription)) {
+        return { mode: "replace", ops: [] };
+    }
+    // ⚠️ **`wiring` 变了 ⇒ 也走**整份**（STAGE-19 §9 第 1 条 · 验收 C-5）：
+    // 差量契约里**没有** `wiring` 操作 ⇒ ⇒ 差量路径**表达不了** ⇒ ⇒
+    // 「元数据变了 ⇒ **整份**」这条判据**同样**管 `wiring` ⇒ ⇒ `wiring` 的
+    // 改动**必须**能提交出去（否则它**永远**提交不出去）。
+    //
+    // ⚠️ **同一个归一化函数**（`sameWiring` ⇒ `normalizeWiringList`）⇒ ⇒
+    // 「同样的连线、键序不同」**不**算改动 ⇒ ⇒ 不会假触发整份替换。
+    if (!sameWiring(baseDescription, draftDescription)) {
         return { mode: "replace", ops: [] };
     }
     const ops = diffMemoryMapOps(baseDescription, draftDescription);

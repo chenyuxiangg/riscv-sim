@@ -33,7 +33,7 @@ use riscv_sim_contract::protocol::{CommandPayload, EventPayload, Message};
 use crate::m14_bus::BusWidth;
 
 use super::platform;
-use super::{KernelHost, MemoryProfile, PLIC_SOURCE_UART};
+use super::{KernelHost, MemoryProfile};
 
 /// `qemu-virt` 描述（**取值来源**：从描述查，不抄宿主常量）。
 fn qemu_virt_description() -> PlatformDescription {
@@ -67,11 +67,24 @@ const LSR_OVERRUN: u8 = 0x04;
 /// `IER` 的 RX 中断使能位（bit0）。
 const IER_RX_ENABLE: u8 = 0x01;
 
-/// PLIC 的 source 10（UART RX）的优先级寄存器地址 —— **基址来自描述**。
-fn plic_priority_10() -> u32 {
-    device_base("PLIC") + 4 * PLIC_SOURCE_UART
+/// 默认连线的**目标源号** —— **取值来源 = 默认连线那一份**。
+///
+/// ⚠️ **为什么不是写字面量 10**：v0.34（D-125）的主题是「一个约束一个
+/// 落点」⇒ ⇒ 那个源号在宿主里**只写一次**（[`platform::default_wiring`]
+/// 那一处）⇒ ⇒ 这里**引用**它，不另抄一份。
+fn default_plic_source() -> u32 {
+    platform::default_wiring(&qemu_virt_description())
+        .into_iter()
+        .next()
+        .expect("qemu-virt 描述必须有默认连线")
+        .source
 }
-/// PLIC 的 context 0 的 enable 寄存器地址（source 10 落在第 0 个字）。
+
+/// PLIC 的**默认连线源**（UART RX）的优先级寄存器地址 —— **基址来自描述**。
+fn plic_priority_uart_source() -> u32 {
+    device_base("PLIC") + 4 * default_plic_source()
+}
+/// PLIC 的 context 0 的 enable 寄存器地址（默认连线的源落在第 0 个字）。
 fn plic_enable_ctx0() -> u32 {
     device_base("PLIC") + 0x2000
 }
@@ -123,14 +136,18 @@ fn lsr(host: &KernelHost) -> u8 {
     read_reg(host, uart0_lsr())
 }
 
-/// 把 guest 侧的 PLIC / UART 中断配置**摆好**（PLIC 源 10 优先级 1、
-/// context 0 使能、门限 0）。
+/// 把 guest 侧的 PLIC / UART 中断配置**摆好**（PLIC 的**默认连线源**
+/// 优先级 1、context 0 使能、门限 0）。
 fn configure_plic(host: &mut KernelHost) {
     host.bus_mut()
-        .write(plic_priority_10(), BusWidth::Word, 1)
+        .write(plic_priority_uart_source(), BusWidth::Word, 1)
         .expect("写 PLIC 优先级");
     host.bus_mut()
-        .write(plic_enable_ctx0(), BusWidth::Word, 1 << PLIC_SOURCE_UART)
+        .write(
+            plic_enable_ctx0(),
+            BusWidth::Word,
+            1 << default_plic_source(),
+        )
         .expect("写 PLIC 使能");
     host.bus_mut()
         .write(plic_threshold_ctx0(), BusWidth::Word, 0)
