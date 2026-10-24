@@ -59,15 +59,15 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 - Build (native):  `cargo build`（开发）/ `cargo build --release`（发布）
 - Build (WASM):    `tools/build-wasm.sh` 或 `tools/build-wasm.sh --release`
 - Test:            `cargo test --workspace --no-fail-fast --lib --tests`（单元 + 集成 + 黄金对拍；⚠️ **不带 `--lib --tests` 会因 doc-test 假 HANG**）· ⚠️ **判「全绿」必须看退出码 + `grep -cE "^test result: FAILED"` 为 0**；汇总的失败数在 `awk -F'[ ;]'` 的 **`$7`**（**不是 `$6`** —— 连续分隔符会产生空字段 ⇒ `$6` 永远算出 0 = **假的**）
-- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，**462 用例 / 80 suite**；Node ≥ 22）
+- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，**462 用例 / 80 suite**；Node ≥ 22）⚠️ **v0.35 批起末尾追加**「台账前端两行的**归属口径** + **历史回归**」（`tools/front_test_attrib.py`）⇒ ⇒ 那两个数**由机器从当前树重算**、**不再人工累加** ⇒ ⇒ ⚠️ **python3 缺失时明确 SKIP**（**不静默通过**）
 - Test (WASM 桥): `node tools/wasm-smoke.mjs`（需先 `tools/build-wasm.sh`；在 Node 里驱动真 wasm 产物跑完整桥，产物不在则跳过）
 - Test (浏览器真机): `tools/browser-verify.mjs`（零依赖 CDP 脚本，需本机 Chrome + 已构建的 WASM 产物 + `python3 -m http.server 8080 --directory front`；**不进默认门禁**，按需运行）
   - ⚠️ **跑之前先确认 8080 是空的**：`lsof -nP -iTCP:8080 -sTCP:LISTEN`。**上一批遗留的孤儿 `http.server`**（它的工作目录是**已被删掉的** worktree ⇒ 任何路径都返回 **404**）会让脚本的探针判定「没在跑」⇒ 脚本**自起**一个 ⇒ **端口冲突** ⇒ `code=1` 退出 ⇒ 症状看着像「浏览器门禁坏了」，其实只是**端口被占**。⇒ 先 `kill` 掉那个孤儿再跑。
-- Test (黄金对拍): `tools/fetch-golden-deps.sh`（拉 riscv-tests + 交叉工具链到**仓库外**）→ `tools/golden-run.sh --self-check`（变异金丝雀）→ `tools/golden-run.sh --keep-going`（全量）
+- Test (黄金对拍): `tools/fetch-golden-deps.sh`（拉 riscv-tests + 交叉工具链到**仓库外**）→ `tools/golden-run.sh --self-check`（变异金丝雀）→ `tools/golden-run.sh --keep-going`（全量）⚠️ **v0.35 批起多一个开关**：`--check-mem` 把「参考侧喂给 Spike 的 RAM 窗口」做成**门禁显式项**（打印两侧并断言**逐字相同**）⇒ ⇒ **D-150 闭环**（⚠️ **价值边界如实记**：两侧**构造上同源** ⇒ ⇒ 正常时**必然绿** ⇒ ⇒ 抓的是「**构造被破坏**」⇒ ⇒ 治根仍需**做法 B**）⇒ ⇒ 另新增 `GOLDEN_MANIFEST` **覆盖口**（局部复跑用；⚠️ **门禁自身从不设置它**）
 - Test (真实 RTOS 对拍): `tools/boot-osz.sh`（**不进默认门禁**：需要**仓外**的 osz ELF 与本机的 Spike；ELF 路径取 `$OSZ_ELF`，默认 `/tmp/osz-artifacts/osz.elf`）⇒ 判决口径是「**两侧 UART TX 字节流逐字节相同**」⇒ 输出 `VERDICT MATCH / MISMATCH / NO-VERDICT`
 - Test (规格自检): `python3 tools/stage<N>_check.py docs/detailed-design/STAGE-<N>_*.md`（每份冻结规格自带**七项**自检 ⇒ 规格被悄悄改软 ⇒ 脚本**红**；⚠️ **切分口径只允许一处定义** ⇒ 新脚本一律 `from doc_check import split_row` ⇒ **禁**自己再写一份朴素 `split("|")`）
 - Test (台账口径): `python3 tools/ledger_check.py --ledger docs/reviews/REVIEWS.md` + `python3 tools/ledger_check.py --self-test`（**两个口径各有名字地**分开报：历史行 / 标记区；⚠️ **真台账跑绿不代表口径对** ⇒ 判别力**必须**有专门夹具盯着）
-- Test (前端归属口径): `python3 tools/front_test_attrib.py`（台账 §0.1 前端两行「M-01/02/03 与 M-04/05/07/10」的「测试」列的**唯一算法** ⇒ **从当前树重算** ⇒ ⇒ **不再逐批人工累加** ⇒ ⇒ ⚠️ **历史值不可复算**已查明（`disasm.test.mjs` 在 v0.20 批整文件记作 20 条、后追加的 describe 组**未回算**）⇒ ⇒ 本数与历史登记值**不可直接相减**） + `python3 tools/front_test_attrib.py --selftest`（**判别力 = 历史回归**：在 **v0.31 / v0.32 / v0.33 三棵树上逐字复现**台账当时登记的 **220/194 · 227/194 · 234/201** ⇒ ⇒ 口径**不是新造的**）
+- Test (前端归属口径): `python3 tools/front_test_attrib.py`（台账 §0.1 前端两行「M-01/02/03 与 M-04/05/07/10」的「测试」列的**唯一算法** ⇒ **从当前树重算** ⇒ ⇒ **不再逐批人工累加** ⇒ ⇒ ⚠️ **历史值不可复算**已查明（`disasm.test.mjs` 在 v0.20 批整文件记作 20 条、后追加的 describe 组**未回算**）⇒ ⇒ 本数与历史登记值**不可直接相减**） + `python3 tools/front_test_attrib.py --selftest`（**判别力 = 历史回归**：在 **v0.31 / v0.32 / v0.33 三棵树上逐字复现**台账当时登记的 **220/194 · 227/194 · 234/201** ⇒ ⇒ 口径**不是新造的**）⇒ ⇒ ⚠️ **v0.35 批起这两条已并入默认门禁**（挂在 `tools/check-front.sh` 末尾）⇒ ⇒ 单独跑仍可用；⚠️ 自检在**仓外**建三个 worktree 并**自己收掉**（`git worktree remove --force` + `prune`）⇒ ⇒ 门禁**不留垃圾**
 - Lint:            `cargo clippy --workspace --all-targets -- -D warnings`
 - Format:          `cargo fmt --all`
 - Typecheck:       N/A — Rust 编译器即类型检查
@@ -96,21 +96,22 @@ riscv_sim/
 │   └── style.css
 ├── tools/
 │   ├── build-wasm.sh         # wasm-pack 包装（`--target web`，输出带命名导出的原生 ESM）
-│   ├── check-front.sh        # 前端门禁（node:test）
+│   ├── check-front.sh        # 前端门禁（node:test）+ 末尾追加「台账前端两行的归属口径 + 历史回归」
 │   ├── stage13_check.py      # STAGE-13 冻结规格的 7 项自检（表格列数 / 标题层级 / 代码围栏 / 裁决引用 / 章节完整 / 验收交叉引用 / 关键约束字面量）
 │   ├── stage14_check.py      # STAGE-14 冻结规格的 7 项自检（同上七项 + 额外「已废止字面量禁列」）
 │   ├── stage15_check.py      # STAGE-15 冻结规格的 7 项自检（同构；禁列 `ValidateMemoryMap` / `SCHEMA_VERSION = 7` / `BOARD_DESCRIPTION_SCHEMA_VERSION`）
 │   ├── stage16_check.py      # STAGE-16 冻结规格的 7 项自检（同构；禁列 `E_PLT_15` / `SCHEMA_VERSION = 8` / `PLATFORM_SCHEMA_VERSION = 2`）
 │   ├── stage17_check.py      # STAGE-17 冻结规格的 7 项自检（同构；禁列 `E_PLT_15` / `SCHEMA_VERSION = 8` / `PLATFORM_SCHEMA_VERSION = 2`）
 │   ├── stage18_check.py      # STAGE-18 冻结规格的 7 项自检（同构；切分复用 `doc_check.split_row` ⇒ **禁**自己再写一份）
+│   ├── stage19_check.py      # STAGE-19 冻结规格的 7 项自检（同构；切分复用 `doc_check.split_row` ⇒ **禁**自己再写一份）
 │   ├── ledger_check.py       # 台账口径自检（`--ledger` 真台账 / `--self-test` 夹具；三个断言 + 两个口径各有名字地分开报）
-│   ├── front_test_attrib.py  # 台账 §0.1 前端两行「测试」列的**唯一算法**（从当前树重算；`--selftest` 在 v0.31/v0.32/v0.33 三棵树上逐字复现历史值）
+│   ├── front_test_attrib.py  # 台账 §0.1 前端两行「测试」列的**唯一算法**（从当前树重算；`--selftest` 在 v0.31/v0.32/v0.33 三棵树上逐字复现历史值）⇒ ⇒ **v0.35 批起并入默认门禁**（挂在 `check-front.sh` 末尾）⇒ ⇒ 自检**自清理 worktree**
 │   ├── doc_check.py          # Markdown 文档自检 7 项（表格列数 / 标题层级 / 围栏 / 分隔行 / 反引号 / 括号 / slug 锚点）
 │   ├── doc_check_baseline.txt # 文档自检的**历史欠账基线** ⇒ 判据 = **新增失败数 0**
 │   ├── browser-verify.mjs    # 浏览器真机复验（零依赖 CDP，按需运行，不进默认门禁；osz 段含 E-6 / E-7 / E-8 三条判别式）
 │   ├── wasm-smoke.mjs        # WASM 桥冒烟（Node 驱动真 wasm 产物，按需运行）
 │   ├── fetch-golden-deps.sh  # 拉 golden 外部依赖（riscv-tests + 交叉工具链）到仓库外
-│   ├── golden-run.sh         # Spike 对拍：同一 ELF 两侧跑，比对判决（含变异自检）
+│   ├── golden-run.sh         # Spike 对拍：同一 ELF 两侧跑，比对判决（含变异自检；`--check-mem` = 参考侧 RAM 窗口的**门禁显式项** ⇒ D-150 闭环）
 │   ├── elf-symtab.mjs        # 零依赖 ELF32 .symtab 解析器（真机段按**符号名**取地址）
 │   ├── fixtures/ledger/      # 台账口径自检的**夹具**（good / bad）⇒ 判别力的证据（真台账跑绿不代表口径对）
 │   └── watchdog.pl           # 可移植超时看门狗（fork + setpgrp + 进程组 SIGKILL；124 = HANG）
@@ -121,7 +122,7 @@ riscv_sim/
 │       ├── canary/           # 变异金丝雀（两侧都必须报 FAIL 3）
 │       ├── corpus.txt        # 68 例语料清单（march + status + env 变体）
 │       └── README.md         # 协议、语料边界、Zicclsm 口径
-└── docs/                     # 56 篇设计文档（26 篇 HTML + 30 篇 Markdown，含 STAGE-1 ~ STAGE-19 十九份规格）+ reviews/（1 入口 + 9 份模块报告）
+└── docs/                     # 57 篇设计文档（26 篇 HTML + 31 篇 Markdown，含 STAGE-1 ~ STAGE-19 十九份规格）+ reviews/（1 入口 + 9 份模块报告 + 1 份勘察报告 `V035_D94_Survey.md`）
 ```
 
 ## Project layout
