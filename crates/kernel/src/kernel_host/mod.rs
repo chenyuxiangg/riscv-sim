@@ -170,7 +170,7 @@ use riscv_sim_contract::model::{
     Edge, ImageKind, ImageRef, ImageSource, Project, TraceEvent, TraceFormat, TraceSource,
     WaveformHistory, WaveformStream, WriteSize, SIM_STATE_SCHEMA_VERSION,
 };
-use riscv_sim_contract::platform::PlatformDescription;
+use riscv_sim_contract::platform::{PlatformDescription, WIRING_EVENT_RX_READY};
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
 use riscv_sim_contract::protocol::{
     CommandPayload, Direction, EventPayload, HaltReason, MemoryMapOp, Message, Payload,
@@ -462,13 +462,6 @@ pub const QEMU_VIRT_RAM_REGION: u32 = 0x0100_0000;
 /// **唯一落点** ⇒ 这个常量**不再**是宿主的取值来源 ⇒ 保留只为
 /// **公开 API 兼容**。
 pub const QEMU_VIRT_FREQ_HZ: u64 = 10_000_000;
-
-/// PLIC 上 UART 中断的**裸源号**。
-///
-/// ⚠️ osz 的 `UART_INT_NUM = 0x1A = 26`，而它的
-/// `EXTERNAL_INT_NUM_2_RAW(source_id) = source_id - LOCAL_INTERRUPT_MAX_NUM(16)`
-/// ⇒ 裸源号是 **10**（QEMU virt 上 UART0 的 IRQ 号也是 10）。
-pub const PLIC_SOURCE_UART: u32 = 10;
 
 /// PLIC 的机器上下文号（osz 用 hart0 的 machine context 0）。
 pub const PLIC_CONTEXT_MACHINE: u32 = 0;
@@ -825,6 +818,14 @@ pub struct KernelHost {
     clint: Option<Rc<RefCell<Clint>>>,
     /// PLIC 的句柄（**只有** QEMU virt 档才有）—— 外部中断的源头。
     plic: Option<Rc<RefCell<Plic>>>,
+    /// **连线表**（v0.34 · D-125）—— 从**生效的描述**编译出来的。
+    ///
+    /// ⚠️ **它在建图时编译**（[`KernelHost::map_memory`]）⇒ ⇒ 换一块板
+    /// 就是换一张表 ⇒ ⇒ 宿主源码里**没有**第二个「PLIC 源号」。
+    ///
+    /// ⚠️ **它不是第二个真相源**：表里的每一行都来自**生效的描述**
+    /// （默认连线或描述里的 `wiring`）⇒ ⇒ 描述是真相，表是它的投影。
+    wiring: Vec<platform::Wiring>,
     /// 已经从 UART 取走、但**还没推给前端**的 console 字节。
     ///
     /// ⚠️ **必须**及时把 UART 的字节取走（捕获环满了会丢最新的字节），
@@ -957,6 +958,9 @@ impl KernelHost {
             uart0: None,
             clint: None,
             plic: None,
+            // ⚠️ v0.34（D-125）：连线表在**建图时**编译（`map_memory`）⇒
+            // 这里只是**初值**（还没有建图 ⇒ 还没有表）。
+            wiring: Vec::new(),
             console_backlog: Vec::new(),
             hms,
             log_buffer,
@@ -1076,6 +1080,10 @@ impl KernelHost {
         self.clint = devices.clint;
         self.plic = devices.plic;
         self.platform = description.clone();
+        // ⚠️ **v0.34（D-125）**：**连线表在建图时从生效的描述编译**（冻结
+        // 规格 STAGE-19 §3.1）⇒ ⇒ 「换一块板改连线」不用改宿主 ⇒ ⇒
+        // 宿主抬线时读的是**这张表**，不是源码里的一个数。
+        self.wiring = platform::compile_wiring(description);
         Ok(())
     }
 
@@ -1107,9 +1115,13 @@ impl KernelHost {
     ///    （单位：ps）**。M-16 的 `poll()` 自己管「`mtime >= mtimecmp`
     ///    ⇒ 挂起定时器线」，它只缺一个比较值 ⇒ 宿主每轮把 CLINT 的
     ///    `mtimecmp` 换算成 ps 喂给它。
-    /// 2. **UART 的 RX 就绪 → PLIC 的源 10**。真实 RTOS 的 UART 中断是
-    ///    **外部中断**（经 PLIC 到 `MEIP`）⇒ 中断号落在 PLIC 上，不在
-    ///    M-16 上。
+    /// 2. **UART 的 RX 就绪 → PLIC 的源（**按连线表**）**。真实 RTOS 的
+    ///    UART 中断是**外部中断**（经 PLIC 到 `MEIP`）⇒ 中断号落在 PLIC
+    ///    上，不在 M-16 上。
+    ///
+    ///    ⚠️ **v0.34（D-125）**：那个源号**不再是源码里的字面量** ⇒ 它来自
+    ///    **连线表**（默认连线或描述里的 `wiring`）⇒ ⇒ 换一块板改连线
+    ///    **不用改宿主**。
     /// 3. **PLIC 的待交付源 → M-16 的外部中断线**。⚠️ **claim 是 guest
     ///    的权利**：平台这一侧**只读** PLIC 的「当前该交付哪个源」，
     ///    **不代 guest claim**（`Plic::claim` 不清挂起位，所以读它不会
@@ -1137,7 +1149,7 @@ impl KernelHost {
         };
         self.intc.controller.borrow_mut().set_timer_compare(cmp_ps);
 
-        // ---- 2) UART 的 RX 就绪 → PLIC 的源 10 ----
+        // ---- 2) UART 的 RX 就绪 → PLIC 的源（**按连线表**）----
         if let Some(uart) = self.uart0.clone() {
             let rx_ready = match uart.try_borrow() {
                 Ok(u) => {
@@ -1148,7 +1160,16 @@ impl KernelHost {
             };
             if rx_ready {
                 if let Ok(mut p) = plic.try_borrow_mut() {
-                    p.request(PLIC_SOURCE_UART);
+                    // ⚠️ **源号来自连线表**（v0.34 · D-125）⇒ ⇒ 表里是
+                    // 「这个事件接到哪个源」⇒ ⇒ 换板改连线不用改宿主。
+                    for wire in self.wiring.iter() {
+                        // ⚠️ **事件名用契约层那个常量**（不写字面量）⇒ ⇒
+                        // 事件名只有一处定义。
+                        if wire.event != WIRING_EVENT_RX_READY {
+                            continue;
+                        }
+                        p.request(wire.source);
+                    }
                 }
             }
         }
@@ -1285,6 +1306,18 @@ impl KernelHost {
     /// 概念已经装不下真实的信息 ⇒ 真实 id 由这里给出。
     pub fn platform_id(&self) -> &str {
         &self.platform.id
+    }
+
+    /// 当前生效的**连线表**（v0.34 · D-125 · STAGE-19 §3.1）。
+    ///
+    /// ⚠️ **它是从生效的描述编译出来的** ⇒ 换一块板就是换一张表 ⇒ ⇒
+    /// 宿主源码里**没有**第二个「PLIC 源号」。
+    ///
+    /// ⚠️ **可观察**：B-5 用它证明「描述里的 `wiring` **覆盖**了默认连线的
+    /// 同键项 ⇒ **不**出现两条连线」—— 那是**表**的性质，不是运行时碰巧
+    /// 抬对了线。
+    pub fn wiring_table(&self) -> &[platform::Wiring] {
+        &self.wiring
     }
 
     /// 板级内存图的**修订号**（v0.31 · STAGE-16 裁决 A）。
@@ -2818,8 +2851,9 @@ impl KernelHost {
     ///    自己的事**（`receive()` 已经做了）⇒ 宿主**不手动改 LSR**
     ///    （手动改就是「第二个真相」：寄存器与 FIFO 各说各话）。
     /// 3. **调一次同步器**（[`Self::sync_interrupts`]）⇒ UART 的 RX 就绪
-    ///    **且** `IER` 的 RX 中断使能位开着 ⇒ `plic.request(10)` ⇒ PLIC
-    ///    交付 ⇒ **M-16 的外部中断线**被拉起（`IRQ_UART_RX_READY` = 1）
+    ///    **且** `IER` 的 RX 中断使能位开着 ⇒ **按连线表**抬 PLIC 的源
+    ///    （v0.34 · D-125：那个源号来自**描述**，不是源码里的字面量）⇒
+    ///    PLIC 交付 ⇒ **M-16 的外部中断线**被拉起（`IRQ_UART_RX_READY` = 1）
     ///    ⇒ guest 看到的 `mcause` 是 **`0x8000_000B`**（架构码 11）。
     ///
     /// ## 回复
@@ -3841,6 +3875,13 @@ mod tests_v024;
 
 #[cfg(test)]
 mod tests_platform;
+
+/// 器件连线**数据化**（v0.34 · D-125 · STAGE-19 · 验收 B-1 ~ B-5）。
+///
+/// ⚠️ 它钉的是**宿主这一段**：描述里的 `wiring` ⇒ 抬到哪个源 / 默认连线
+/// ⇒ 存量行为一字未变 / 缺一端 ⇒ 不抬线 / 写死的那个常量已消失。
+#[cfg(test)]
+mod tests_wiring_v034;
 
 /// 板级内存图（v0.29 · STAGE-14 · 验收 B-1 ~ B-9）。
 ///

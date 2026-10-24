@@ -100,6 +100,9 @@ fn user_board() -> PlatformDescription {
         priority: 100,
         auto_selectable: false,
         description: None,
+        // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
+        // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
+        wiring: None,
         region_budget_bytes: 16 * 1024 * 1024,
         max_region_bytes: None,
         regions: vec![
@@ -437,6 +440,9 @@ fn target_with_three_changes() -> PlatformDescription {
         priority: 100,
         auto_selectable: false,
         description: None,
+        // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
+        // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
+        wiring: None,
         // ⚠️ 改预算：声明期 16 MiB → 8 MiB。
         region_budget_bytes: 0x0080_0000,
         // ⚠️ 改预算：运行期上界 缺省 → 4 MiB。
