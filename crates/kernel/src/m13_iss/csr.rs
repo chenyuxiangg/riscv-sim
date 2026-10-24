@@ -172,6 +172,12 @@ fn file_value(state: &SimState, csr: u16) -> u32 {
 /// PC** 写进 `mepc`（压缩指令可能是 **2 字节对齐**的）⇒ 这一步显式地
 /// 「不掩码」，不让它依赖调用方的记性。
 pub(crate) fn csr_write(state: &mut SimState, csr: u16, value: u32) {
+    // ⚠️ **PMP 的 CSR 有自己的写规则**（合法化 + 锁）⇒ ⇒ 由 PMP 模块接管
+    //    （STAGE-21 裁决 E / F13）⇒ ⇒ 它们**不**走 [`apply_warl`]。
+    if let Some(value) = super::pmp::legalize_write(state, csr, value) {
+        csr_write_raw(state, csr, value);
+        return;
+    }
     csr_write_raw(state, csr, apply_warl(csr, value));
 }
 

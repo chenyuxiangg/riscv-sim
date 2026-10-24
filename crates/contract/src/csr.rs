@@ -273,6 +273,13 @@ pub const CSR_IRQ_CLEAR: u16 = 0x7C0;
 /// Bit 3 of `mstatus` (standard).
 pub const MSTATUS_MIE_BIT: u32 = 3;
 
+/// `mstatus`'s **modify privilege** bit — `MPRV` (F10 / F11).
+///
+/// ⚠️ When it is set, M-mode **loads and stores** go through the PMP check
+/// exactly like an S/U-mode access would (F10).  ⚠️ It does **not** affect
+/// instruction fetch (F11).
+pub const MSTATUS_MPRV_BIT: u32 = 17;
+
 /// `mstatus.MPIE` — "previous `MIE`", saved on trap entry and restored
 /// by `mret`.
 ///
@@ -665,6 +672,246 @@ pub fn counter_shadow(csr: u16) -> Option<u16> {
         _ => None,
     }
 }
+// ---------------------------------------------------------------------------
+// PMP — physical memory protection (STAGE-21 · v0.37)
+// ---------------------------------------------------------------------------
+//
+// ⚠️ **Every number in this block was measured against the reference side
+// first** (frozen spec §1.2, facts F1..F19) — none of them is guessed:
+//
+// * `pmpcfg`'s byte layout is `L` = bit 7, `A` = bits 4:3, `X` = bit 2,
+//   `W` = bit 1, `R` = bit 0 (F1) — **the same order upstream riscv-tests'
+//   `env/encoding.h` uses** ⇒ ⇒ that file needs **no** change;
+// * RV32's `pmpcfg{i}` holds **four** 8-bit entries (F2) ⇒ ⇒ entry *n* lives
+//   in `pmpcfg[n / 4]`, byte `n % 4`;
+// * `pmpaddr` stores the address **shifted right by two** (F3) ⇒ ⇒ the
+//   granularity is four bytes.
+
+/// `pmpcfg0` — PMP configuration of entries 0..3.
+pub const CSR_PMPCFG0: u16 = 0x3A0;
+/// `pmpcfg3` — PMP configuration of entries 12..15.
+pub const CSR_PMPCFG3: u16 = 0x3A3;
+/// `pmpaddr0` — PMP address register of entry 0.
+pub const CSR_PMPADDR0: u16 = 0x3B0;
+/// `pmpaddr15` — PMP address register of entry 15.
+pub const CSR_PMPADDR15: u16 = 0x3BF;
+
+/// How many PMP entries the platform implements (F15).
+///
+/// ⚠️ The reference side implements **16** entries for RV32 ⇒ ⇒ we match it.
+/// A 64-entry implementation would be a superset, but every entry beyond 16
+/// would be a **divergence** from the oracle the golden corpus compares
+/// against ⇒ ⇒ the platform deliberately stops at 16.
+pub const PMP_ENTRY_COUNT: usize = 16;
+
+/// `pmpaddr` holds the address shifted right by this many bits (F3).
+pub const PMP_GRAINULARITY_SHIFT: u32 = 2;
+
+/// `pmpcfg`'s lock bit (F1).
+pub const PMP_CFG_L: u8 = 0x80;
+/// `pmpcfg`'s address-matching mode field (F1).
+pub const PMP_CFG_A_MASK: u8 = 0x18;
+/// Shift of the address-matching mode field (F1).
+pub const PMP_CFG_A_SHIFT: u32 = 3;
+/// `pmpcfg`'s execute permission (F1).
+pub const PMP_CFG_X: u8 = 0x04;
+/// `pmpcfg`'s write permission (F1).
+pub const PMP_CFG_W: u8 = 0x02;
+/// `pmpcfg`'s read permission (F1).
+pub const PMP_CFG_R: u8 = 0x01;
+/// `pmpcfg`'s **reserved** bits 6:5 — they read back as zero (F20).
+pub const PMP_CFG_RESERVED: u8 = 0x60;
+
+/// Address-matching mode: the entry is **disabled** (F1).
+pub const PMP_A_OFF: u8 = 0;
+/// Address-matching mode: **top of range** (F1).
+pub const PMP_A_TOR: u8 = 1;
+/// Address-matching mode: **naturally aligned four bytes** (F1).
+pub const PMP_A_NA4: u8 = 2;
+/// Address-matching mode: **naturally aligned power of two** (F1).
+pub const PMP_A_NAPOT: u8 = 3;
+
+/// The three kinds of access PMP distinguishes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PmpAccess {
+    /// A load — needs the `R` permission.
+    Load,
+    /// A store — needs the `W` permission.
+    Store,
+    /// An instruction fetch — needs the `X` permission.
+    Fetch,
+}
+
+/// One decoded `pmpcfg` entry (F1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PmpCfg {
+    /// The lock bit: the entry's permissions are enforced in **every**
+    /// privilege mode, and its registers stop accepting writes (F12 / F13).
+    pub l: bool,
+    /// The address-matching mode ([`PMP_A_OFF`] .. [`PMP_A_NAPOT`]).
+    pub a: u8,
+    /// Read permission.
+    pub r: bool,
+    /// Write permission.
+    pub w: bool,
+    /// Execute permission.
+    pub x: bool,
+}
+
+/// Decode one 8-bit `pmpcfg` entry (F1).
+pub fn pmp_decode_cfg(byte: u8) -> PmpCfg {
+    PmpCfg {
+        l: byte & PMP_CFG_L != 0,
+        a: (byte >> PMP_CFG_A_SHIFT) & (PMP_CFG_A_MASK >> PMP_CFG_A_SHIFT),
+        r: byte & PMP_CFG_R != 0,
+        w: byte & PMP_CFG_W != 0,
+        x: byte & PMP_CFG_X != 0,
+    }
+}
+
+/// The address range one PMP entry covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PmpRegion {
+    /// The first byte of the range.
+    pub base: u64,
+    /// The length of the range, in bytes.
+    pub size: u64,
+}
+
+impl PmpRegion {
+    /// Does the range cover **every** byte of the access at `addr`?
+    ///
+    /// ⚠️ The spec requires the deciding entry to match **all** bytes of the
+    /// access ⇒ ⇒ a straddling access is denied unless one entry covers it
+    /// completely.
+    pub fn covers(&self, addr: u32, size: u32) -> bool {
+        let start = u64::from(addr);
+        let end = start + u64::from(size);
+        start >= self.base && end <= self.base + self.size
+    }
+}
+
+/// The address range a PMP entry covers, as `None` when it matches **nothing**.
+///
+/// * `prev_addr` — the **previous** entry's `pmpaddr` (zero for entry 0);
+///   the spec ignores the previous entry's *mode* here, so an `OFF` entry
+///   still provides the bound.
+/// * `cur_addr` — this entry's `pmpaddr`.
+///
+/// ⚠️ **The three modes differ in more than their formula** (F4 / F5 / F6):
+///
+/// * **NAPOT** — `n` = the number of trailing ones in `pmpaddr`; the range is
+///   `[(pmpaddr & !(2^n - 1)) << 2, + 2^(n+3))` — **half open**.
+/// * **NA4** — `pmpaddr << 2`, **four bytes**, **closed**.
+/// * **TOR** — `[prev_addr << 2, cur_addr << 2)` — **half open**; an entry
+///   whose lower bound is **not** below its upper bound matches nothing.
+pub fn pmp_region(cfg: PmpCfg, prev_addr: u32, cur_addr: u32) -> Option<PmpRegion> {
+    match cfg.a {
+        PMP_A_OFF => None,
+        PMP_A_NA4 => Some(PmpRegion {
+            base: u64::from(cur_addr) << PMP_GRAINULARITY_SHIFT,
+            size: 4,
+        }),
+        PMP_A_NAPOT => {
+            let n = cur_addr.trailing_ones();
+            let mask = if n >= u32::BITS {
+                u32::MAX
+            } else {
+                (1u32 << n) - 1
+            };
+            Some(PmpRegion {
+                base: u64::from(cur_addr & !mask) << PMP_GRAINULARITY_SHIFT,
+                size: 1u64 << (n + 3),
+            })
+        }
+        PMP_A_TOR => {
+            if cur_addr <= prev_addr {
+                return None;
+            }
+            Some(PmpRegion {
+                base: u64::from(prev_addr) << PMP_GRAINULARITY_SHIFT,
+                size: (u64::from(cur_addr) - u64::from(prev_addr)) << PMP_GRAINULARITY_SHIFT,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The **WARL legalisation** of one `pmpcfg` byte (F20).
+///
+/// ⚠️ The reference side does **not** store the written byte verbatim:
+///
+/// * the **reserved** bits 6:5 read back as zero (`0xff` ⇒ `0x9f`);
+/// * **`R` = 0 together with `W` = 1 is a reserved combination** ⇒ ⇒ the
+///   reference side **drops the `W` bit** (`0x1a` ⇒ `0x18`, `0x2a` ⇒ `0x08`)
+///   ⇒ ⇒ and *that* is why such an entry cannot write at all (F9): the `W`
+///   bit is not even there any more.
+///
+/// ⇒ ⇒ everything else reads back verbatim (`0x01`, `0x04`, `0x1f`, …).
+pub fn pmp_cfg_warl(byte: u8) -> u8 {
+    let mut value = byte & !PMP_CFG_RESERVED;
+    if value & PMP_CFG_R == 0 {
+        value &= !PMP_CFG_W;
+    }
+    value
+}
+
+/// Does the entry grant the access?
+///
+/// ⚠️ **`R` = 0 together with `W` = 1 is a reserved combination** (F9) ⇒ ⇒ the
+/// reference side denies such a store ⇒ ⇒ so do we: the spec calls the
+/// combination reserved, and "no write permission" is the only defensible
+/// reading of a reserved encoding.
+pub fn pmp_permits(cfg: PmpCfg, access: PmpAccess) -> bool {
+    match access {
+        PmpAccess::Load => cfg.r,
+        PmpAccess::Store => cfg.w && cfg.r,
+        PmpAccess::Fetch => cfg.x,
+    }
+}
+
+/// The whole PMP decision for one access.
+///
+/// * `entries` — `(cfg, pmpaddr)` per entry, **in entry order** (entry 0
+///   first); the slice may be shorter than [`PMP_ENTRY_COUNT`].
+/// * `m_mode_bypass` — the caller states that PMP does **not** constrain
+///   this access: an M-mode load/store with `mstatus.MPRV` = 0.  ⚠️ It is
+///   **never** set for a fetch — `MPRV` does not affect instruction fetch
+///   (F11).  A **locked** entry constrains the access anyway (F12).
+///
+/// The decision chain is: **find the deciding entry** (the lowest-numbered
+/// entry that covers every byte of the access — F7) ⇒ ⇒ **privilege**
+/// (F10 / F11 / F12) ⇒ ⇒ **permission bits** (F9).
+pub fn pmp_access_allowed(
+    entries: &[(PmpCfg, u32)],
+    addr: u32,
+    size: u32,
+    access: PmpAccess,
+    m_mode_bypass: bool,
+) -> bool {
+    let mut prev_addr = 0u32;
+    for (cfg, cur_addr) in entries {
+        if let Some(region) = pmp_region(*cfg, prev_addr, *cur_addr) {
+            if region.covers(addr, size) {
+                // M-mode is exempt unless the deciding entry is **locked**.
+                if m_mode_bypass && !cfg.l {
+                    return true;
+                }
+                return pmp_permits(*cfg, access);
+            }
+        }
+        prev_addr = *cur_addr;
+    }
+    // No entry matched the access.
+    if m_mode_bypass {
+        // "If no PMP entry matches an M-mode effective address, the access
+        // succeeds."
+        return true;
+    }
+    // "If no PMP entry matches an S-mode or U-mode effective address, but at
+    // least one PMP entry is implemented, the access fails." (F8)
+    !entries.iter().any(|(cfg, _)| cfg.a != PMP_A_OFF)
+}
 
 /// Whether this platform **implements** a CSR.
 ///
@@ -717,6 +964,11 @@ pub fn counter_shadow(csr: u16) -> Option<u16> {
 /// its default `--priv=MSU`) **does** implement delegation ⇒ the two
 /// sides differ here (D-94).
 pub fn csr_is_implemented(csr: u16) -> bool {
+    // ⚠️ **PMP 的 CSR 必须被认作已实现**（裁决 E）—— 否则
+    // [`csr_write_is_ignored`] 会把写吞掉 ⇒ ⇒ PMP 变成一排**不起作用的寄存器**。
+    if (CSR_PMPCFG0..=CSR_PMPCFG3).contains(&csr) || (CSR_PMPADDR0..=CSR_PMPADDR15).contains(&csr) {
+        return true;
+    }
     matches!(
         csr,
         CSR_MSTATUS
@@ -1489,5 +1741,293 @@ mod tests {
         assert_eq!(CSR_CYCLEH, 0xC80);
         assert_eq!(CSR_TIMEH, 0xC81);
         assert_eq!(CSR_INSTRETH, 0xC82);
+    }
+
+    // -----------------------------------------------------------------------
+    // PMP (STAGE-21 · v0.37) —— 全部断言都对着**参考侧实测**的事实
+    // -----------------------------------------------------------------------
+
+    /// ⚠️ **位序必须钉死**（F1）—— 错一位 ⇒ guest 的权限判定整个反过来，
+    /// 而**没有任何一条内部用例会立刻红**（只有判据语料会）。
+    #[test]
+    fn the_pmp_cfg_byte_layout_is_pinned() {
+        let cfg = pmp_decode_cfg(0x9f);
+        assert!(cfg.l);
+        assert_eq!(cfg.a, PMP_A_NAPOT);
+        assert!(cfg.r && cfg.w && cfg.x);
+        // 逐位：R = bit0、W = bit1、X = bit2；A = bit4:3。
+        assert!(pmp_decode_cfg(0x01).r);
+        assert!(!pmp_decode_cfg(0x01).w);
+        assert!(!pmp_decode_cfg(0x01).x);
+        assert!(!pmp_decode_cfg(0x02).r);
+        assert!(pmp_decode_cfg(0x02).w);
+        assert!(!pmp_decode_cfg(0x04).r);
+        assert!(!pmp_decode_cfg(0x04).w);
+        assert!(pmp_decode_cfg(0x04).x);
+        assert_eq!(pmp_decode_cfg(0x00).a, PMP_A_OFF);
+        assert_eq!(pmp_decode_cfg(0x08).a, PMP_A_TOR);
+        assert_eq!(pmp_decode_cfg(0x10).a, PMP_A_NA4);
+        assert_eq!(pmp_decode_cfg(0x18).a, PMP_A_NAPOT);
+        assert!(!pmp_decode_cfg(0x00).l);
+        assert!(pmp_decode_cfg(0x80).l);
+    }
+
+    /// ⚠️ **`MPRV` 的位号必须钉死**（F10 / F11）—— 错一位 ⇒ M 模式的访存
+    /// 口径整个反过来，而**没有任何一条内部用例会立刻红**（只有判据语料会）。
+    ///
+    /// ⚠️ 这个位号是**实测**出来的：参考侧在置上它之后才从「M 模式旁路」
+    /// 变成「受检」。
+    #[test]
+    fn the_mprv_bit_is_pinned() {
+        assert_eq!(MSTATUS_MPRV_BIT, 17);
+    }
+
+    /// ⚠️ **CSR 号必须钉死**（F1 / F2 / F15）—— 错一位 ⇒ 条目整个错位。
+    #[test]
+    fn the_pmp_csr_numbers_are_pinned() {
+        assert_eq!(CSR_PMPCFG0, 0x3A0);
+        assert_eq!(CSR_PMPCFG3, 0x3A3);
+        assert_eq!(CSR_PMPADDR0, 0x3B0);
+        assert_eq!(CSR_PMPADDR15, 0x3BF);
+        assert_eq!(PMP_ENTRY_COUNT, 16);
+        assert_eq!(PMP_GRAINULARITY_SHIFT, 2);
+    }
+
+    /// ⚠️ **NAPOT 的区间公式必须逐字对上参考侧**（F4）—— 三个**实测点**
+    /// 分别对应 4 KiB / 256 KiB / 1 MiB，**外加**全 1 的「整个空间」。
+    #[test]
+    fn napot_regions_match_the_reference_side() {
+        let napot = pmp_decode_cfg(0x1f);
+        // 4 KiB @ 0x80000000（pmpaddr = 0x80000000 >> 2，加 9 个末尾 1）。
+        let region = pmp_region(napot, 0, 0x2000_01ff).expect("NAPOT entry");
+        assert_eq!(region.base, 0x8000_0000);
+        assert_eq!(region.size, 4096);
+        assert!(region.covers(0x8000_0000, 4));
+        assert!(region.covers(0x8000_0ffc, 4));
+        assert!(!region.covers(0x8000_1000, 4));
+        // 256 KiB @ 0x80000000（17 个末尾 1 ⇒ 2^18 字节）。
+        let region = pmp_region(napot, 0, 0x2000_7fff).expect("NAPOT entry");
+        assert_eq!(region.base, 0x8000_0000);
+        assert_eq!(region.size, 256 * 1024);
+        assert!(region.covers(0x8003_fffc, 4));
+        assert!(!region.covers(0x8004_0000, 4));
+        // 1 MiB @ 0x80000000（19 个末尾 1 ⇒ 2^20 字节）。
+        let region = pmp_region(napot, 0, 0x2001_ffff).expect("NAPOT entry");
+        assert_eq!(region.base, 0x8000_0000);
+        assert_eq!(region.size, 1024 * 1024);
+        assert!(region.covers(0x800f_fffc, 4));
+        assert!(!region.covers(0x8010_0000, 4));
+        // 全 1 ⇒ n = 32 ⇒ base = 0、size = 2^35 ⇒ 覆盖**整个** 32 位空间。
+        let region = pmp_region(napot, 0, u32::MAX).expect("NAPOT entry");
+        assert_eq!(region.base, 0);
+        assert_eq!(region.size, 1u64 << 35);
+        assert!(region.covers(0x0000_0000, 4));
+        assert!(region.covers(0x7fff_f000, 4));
+        assert!(region.covers(0x803f_fffc, 4));
+    }
+
+    /// ⚠️ **NA4 是四个字节**（F5）—— 差一位 ⇒ 一条判据就绿了。
+    #[test]
+    fn na4_regions_match_the_reference_side() {
+        let na4 = pmp_decode_cfg(0x17);
+        let region = pmp_region(na4, 0, 0x2000_0800).expect("NA4 entry");
+        assert_eq!(region.base, 0x8000_2000);
+        assert_eq!(region.size, 4);
+        assert!(region.covers(0x8000_2000, 4));
+        assert!(!region.covers(0x8000_2004, 4));
+    }
+
+    /// ⚠️ **TOR 的上界是半开的**（F6）—— 闭区间会多放行一个地址。
+    #[test]
+    fn tor_regions_match_the_reference_side() {
+        let tor = pmp_decode_cfg(0x0f);
+        // 条目 0 的下界是 0 ⇒ [0, 0x8000_7ffc)。
+        let region = pmp_region(tor, 0, 0x2000_1fff).expect("TOR entry");
+        assert_eq!(region.base, 0);
+        assert_eq!(region.size, 0x8000_7ffc);
+        assert!(region.covers(0x8000_0000, 4));
+        assert!(region.covers(0x8000_7ff8, 4));
+        assert!(!region.covers(0x8000_7ffc, 4));
+        // 下界不小于上界 ⇒ **不匹配任何地址**。
+        assert!(pmp_region(tor, 0x2000_1fff, 0x2000_1fff).is_none());
+        assert!(pmp_region(tor, 0x2000_2000, 0x2000_1fff).is_none());
+    }
+
+    /// ⚠️ **优先级 = 最低编号的「命中」条目**（F7）—— 这条判别力直接对着
+    /// 「任一放行即可」那个错判 ⇒ ⇒ 两条用例分别测两个方向。
+    #[test]
+    fn the_lowest_numbered_matching_entry_decides() {
+        // 条目 0 命中但**没有 W**；条目 1 也命中且**有 W** ⇒ ⇒ 条目 0 说了算 ⇒ 拒。
+        let entries = [
+            (pmp_decode_cfg(0x1d), 0x2000_01ff),
+            (pmp_decode_cfg(0x16), 0x2000_0000),
+        ];
+        assert!(!pmp_access_allowed(
+            &entries,
+            0x8000_0000,
+            4,
+            PmpAccess::Store,
+            false
+        ));
+        // 条目 0 命中且**有 W**；条目 1 命中但**没有 W** ⇒ ⇒ 放行。
+        let entries = [
+            (pmp_decode_cfg(0x1f), 0x2000_01ff),
+            (pmp_decode_cfg(0x15), 0x2000_0000),
+        ];
+        assert!(pmp_access_allowed(
+            &entries,
+            0x8000_0000,
+            4,
+            PmpAccess::Store,
+            false
+        ));
+        // 条目 0 **不命中**、条目 1 命中 ⇒ ⇒ 条目 1 说了算 ⇒ 放行。
+        let entries = [
+            (pmp_decode_cfg(0x18), 0x2001_01ff),
+            (pmp_decode_cfg(0x1f), 0x2001_ffff),
+        ];
+        assert!(pmp_access_allowed(
+            &entries,
+            0x8000_2000,
+            4,
+            PmpAccess::Load,
+            false
+        ));
+    }
+
+    /// ⚠️ **没有条目命中 ⇒ 拒**（F8）—— 只要有 ≥1 个 A≠OFF 的条目。
+    #[test]
+    fn an_access_without_a_matching_entry_is_denied() {
+        let entries = [(pmp_decode_cfg(0x1f), 0x2000_01ff)];
+        assert!(!pmp_access_allowed(
+            &entries,
+            0x8000_3000,
+            4,
+            PmpAccess::Load,
+            false
+        ));
+        // 全部条目都是 OFF ⇒ PMP 未实现 ⇒ 放行。
+        let entries = [(pmp_decode_cfg(0x00), 0x2000_01ff)];
+        assert!(pmp_access_allowed(
+            &entries,
+            0x8000_3000,
+            4,
+            PmpAccess::Load,
+            false
+        ));
+    }
+
+    /// ⚠️ **`R`=0 且 `W`=1 是保留组合 ⇒ 写被拒**（F9）。
+    #[test]
+    fn write_permission_needs_read_permission() {
+        assert!(!pmp_permits(pmp_decode_cfg(0x1a), PmpAccess::Store));
+        assert!(!pmp_permits(pmp_decode_cfg(0x1e), PmpAccess::Store));
+        assert!(pmp_permits(pmp_decode_cfg(0x1b), PmpAccess::Store));
+        assert!(pmp_permits(pmp_decode_cfg(0x1f), PmpAccess::Store));
+        // 读与取指各自只看自己那一位。
+        assert!(pmp_permits(pmp_decode_cfg(0x19), PmpAccess::Load));
+        assert!(!pmp_permits(pmp_decode_cfg(0x1c), PmpAccess::Load));
+        assert!(pmp_permits(pmp_decode_cfg(0x1c), PmpAccess::Fetch));
+        assert!(!pmp_permits(pmp_decode_cfg(0x19), PmpAccess::Fetch));
+    }
+
+    /// ⚠️ **`pmpcfg` 的写入会被合法化**（F20）—— 保留位 6:5 读回 0，
+    /// 保留组合 `R`=0 ∧ `W`=1 丢掉 `W` 位，其余**逐字**读回。
+    ///
+    /// ⚠️ **判别力**：这三条断言**互不相同** ⇒ ⇒ 「一律清零」「一律照抄」
+    /// 这两种写法都过不了 ⇒ ⇒ 合法化必须是**逐位**的那一种。
+    #[test]
+    fn the_pmp_cfg_writes_are_legalised() {
+        // 保留位 6:5 ⇒ 读回 0。
+        assert_eq!(pmp_cfg_warl(0xff), 0x9f);
+        assert_eq!(pmp_cfg_warl(0x60), 0x00);
+        // 保留组合 `R`=0 ∧ `W`=1 ⇒ 丢掉 `W` 位。
+        assert_eq!(pmp_cfg_warl(0x1a), 0x18);
+        assert_eq!(pmp_cfg_warl(0x1e), 0x1c);
+        assert_eq!(pmp_cfg_warl(0x2a), 0x08);
+        // 合法值**逐字**读回 ⇒ ⇒ 合法化不是「一律清零」，也不是「一律照抄」。
+        assert_eq!(pmp_cfg_warl(0x00), 0x00);
+        assert_eq!(pmp_cfg_warl(0x01), 0x01);
+        assert_eq!(pmp_cfg_warl(0x04), 0x04);
+        assert_eq!(pmp_cfg_warl(0x1b), 0x1b);
+        assert_eq!(pmp_cfg_warl(0x1f), 0x1f);
+        assert_eq!(pmp_cfg_warl(0x9f), 0x9f);
+        // ⚠️ **幂等**：合法化一个已经合法的值**不动它** ⇒ ⇒ 读回再写、
+        // 再读回是**同一个值**（快照往返稳定）。
+        for byte in [0x00u8, 0x01, 0x04, 0x1b, 0x1f, 0x9f] {
+            assert_eq!(pmp_cfg_warl(pmp_cfg_warl(byte)), byte, "合法化必须幂等");
+        }
+    }
+
+    /// ⚠️ **M 模式旁路，但锁住的条目照样管**（F10 / F12）⇒ ⇒ 这两条是
+    /// 「MPRV 口径」与「L 位的意义」各自的判别力。
+    #[test]
+    fn m_mode_is_exempt_unless_the_entry_is_locked() {
+        // 条目 0 命中、没有 W、**没锁** ⇒ M 模式（MPRV=0）⇒ 放行。
+        let entries = [(pmp_decode_cfg(0x1d), 0x2000_01ff)];
+        assert!(pmp_access_allowed(
+            &entries,
+            0x8000_0000,
+            4,
+            PmpAccess::Store,
+            true
+        ));
+        // 同样的条目，**MPRV=1** ⇒ 受检 ⇒ 拒。
+        assert!(!pmp_access_allowed(
+            &entries,
+            0x8000_0000,
+            4,
+            PmpAccess::Store,
+            false
+        ));
+        // **锁住** ⇒ M 模式也强制执行 ⇒ 拒。
+        let entries = [(pmp_decode_cfg(0x9d), 0x2000_01ff)];
+        assert!(!pmp_access_allowed(
+            &entries,
+            0x8000_0000,
+            4,
+            PmpAccess::Store,
+            true
+        ));
+        // 没有条目命中时，M 模式 ⇒ 放行。
+        let entries = [(pmp_decode_cfg(0x1f), 0x2000_01ff)];
+        assert!(pmp_access_allowed(
+            &entries,
+            0x8000_3000,
+            4,
+            PmpAccess::Store,
+            true
+        ));
+    }
+
+    /// ⚠️ **PMP 的 CSR 必须被认作已实现**（裁决 E）—— 不认 ⇒ 写被吞 ⇒ ⇒
+    /// PMP 变成一排**不起作用的寄存器**，而**没有任何一条用例会立刻红**。
+    #[test]
+    fn the_pmp_csrs_are_implemented() {
+        for csr in CSR_PMPCFG0..=CSR_PMPCFG3 {
+            assert!(
+                csr_is_implemented(csr),
+                "pmpcfg {csr:#x} must be implemented"
+            );
+            assert!(
+                !csr_write_is_ignored(csr),
+                "pmpcfg {csr:#x} must accept writes"
+            );
+            assert!(!is_csr_read_only(csr), "pmpcfg {csr:#x} must be writable");
+        }
+        for csr in CSR_PMPADDR0..=CSR_PMPADDR15 {
+            assert!(
+                csr_is_implemented(csr),
+                "pmpaddr {csr:#x} must be implemented"
+            );
+            assert!(
+                !csr_write_is_ignored(csr),
+                "pmpaddr {csr:#x} must accept writes"
+            );
+        }
+        // 未实现的那些 ⇒ 写被忽略、读回 0（WARL）。
+        assert!(!csr_is_implemented(0x3A4));
+        assert!(csr_write_is_ignored(0x3A4));
+        assert!(!csr_is_implemented(0x3C0));
     }
 }

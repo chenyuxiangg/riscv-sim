@@ -13,7 +13,7 @@
 //! trapped, or paused at a breakpoint.
 
 use riscv_sim_contract::csr::{
-    csr_write_is_ignored, CSR_MSTATUS, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT,
+    csr_write_is_ignored, PmpAccess, CSR_MSTATUS, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT,
 };
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{SimState, WriteSize};
@@ -22,6 +22,7 @@ use super::alu;
 use super::counters;
 use super::csr;
 use super::decoder::Decoded;
+use super::pmp;
 
 /// Result of a single instruction execution.
 ///
@@ -991,6 +992,13 @@ pub fn execute_one<M: MemoryAccess>(
                 csr::enter_trap(state, cause.mcause(), addr);
                 return Ok(StepOutcome::Trapped { cause });
             }
+            // ⚠️ **PMP 在未映射检查之前**（裁决 K）—— 规范把 PMP 放在物理
+            //    地址一级 ⇒ ⇒ 被 PMP 拒的访问根本不会走到总线。
+            if !pmp::pmp_allows(state, addr, pmp::access_bytes(size), PmpAccess::Load) {
+                let cause = TrapCause::LoadAccessFault;
+                csr::enter_trap(state, cause.mcause(), addr);
+                return Ok(StepOutcome::Trapped { cause });
+            }
             let raw = match mem.read(addr, size) {
                 Ok(raw) => raw,
                 Err(err) => {
@@ -1029,6 +1037,12 @@ pub fn execute_one<M: MemoryAccess>(
             if misaligned == MisalignedPolicy::Trap && !is_aligned(addr, size) {
                 // A misaligned **store** is `mcause = 6`.
                 let cause = TrapCause::StoreAddressMisaligned;
+                csr::enter_trap(state, cause.mcause(), addr);
+                return Ok(StepOutcome::Trapped { cause });
+            }
+            // ⚠️ **PMP 在未映射检查之前**（裁决 K）。
+            if !pmp::pmp_allows(state, addr, pmp::access_bytes(size), PmpAccess::Store) {
+                let cause = TrapCause::StoreAccessFault;
                 csr::enter_trap(state, cause.mcause(), addr);
                 return Ok(StepOutcome::Trapped { cause });
             }

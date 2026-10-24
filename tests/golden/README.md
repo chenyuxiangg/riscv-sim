@@ -130,6 +130,12 @@ meaningfully.  Its header comment explains the two sides' shared trap
 protocol and the three places where the platform's absences (no PMP, no
 RNMI, no paging, no delegation) make the upstream writes inert.
 
+⚠️ **The `no PMP` clause of that sentence is stale as of v0.37.**  The
+platform *does* implement PMP now ⇒ ⇒ the upstream `INIT_PMP` write is no
+longer ignored ⇒ ⇒ the deviation is registered in the section
+*The `csr` environment's `INIT_PMP` comment is stale* below — the env file
+itself is a verbatim mirror of upstream and **cannot** be edited.
+
 ⚠️ **`env/csr/riscv_test.h` is verified against upstream, not eyeballed.**
 The corpus build of all 16 `rv32mi` cases produces a **byte-identical
 `.text.init`** with our variant and with upstream's own `env/p/riscv_test.h`
@@ -192,7 +198,7 @@ Three `rv32mi` cases and all six `rv32si` cases are **not** rows in
 | case | Spike | ours | why it diverges |
 | --- | --- | --- | --- |
 | `rv32mi/illegal` | `PASS` | `NOVERDICT` | needs S-mode semantics: `csrwi mip, MIP_SSIP` is ignored on this platform, so the case never finishes → **D-94** |
-| `rv32mi/pmpaddr` | `PASS` | `FAIL 1` | the platform has **no PMP** ⇒ `pmpaddr0` reads back 0 instead of the address the case wrote → **D-94** |
+| `rv32mi/pmpaddr` | `PASS` | `PASS` | agrees — but **vacuously**: the case auto-detects the granularity `G` from the read-back of `pmpaddr0`, and the reference side stores `pmpaddr` **verbatim** (writing all ones reads back `0xffffffff` — measured) ⇒ ⇒ the lowest set bit is bit 0 ⇒ ⇒ `G` = 0 ⇒ ⇒ the case takes its **own** `beqz a7, pass` early exit ⇒ ⇒ **the main test never runs on the reference side** ⇒ ⇒ the agreement proves nothing ⇒ ⇒ it stays out of the corpus → **D-94** |
 | `rv32mi/zicntr` | `PASS` | `PASS` | the reference side now implements Zicntr — the default ISA carries `zicntr` ⇒ it no longer traps ⇒ but the agreement is **hollow**: the case only checks that reading `cycle` / `instret` / `cycleh` / `instreth` in four ways does **not** trap ⇒ a CSR read on this platform never traps ⇒ ⇒ the case **cannot fail here** ⇒ ⇒ it stays out of the corpus → **D-94** |
 | `rv32si/csr` | `PASS` | `FAIL 22` | S-mode: the case runs in S-mode, we stay in M-mode → **D-94** |
 | `rv32si/ma_fetch` | `PASS` | `PASS` | agrees — but for a **vacuous** reason (neither side reaches the S-mode path the case is about) ⇒ it is *not* promoted to `active` until S-mode exists |
@@ -235,9 +241,14 @@ visible.
 
 ⚠️ **The two differences above all come from the same root**: the
 platform implements **fewer** features than the reference side
-(U-mode, S-mode, PMP) and reports that honestly in `misa` instead of
+(U-mode, S-mode) and reports that honestly in `misa` instead of
 pretending.  ⇒ A hollow agreement here is the **expected** consequence of
 an M-mode-only platform — the fix is **labelling**, not faking a match.
+
+⚠️ **PMP used to be on that list** (v0.36 and earlier).  As of **v0.37**
+the platform implements PMP ⇒ ⇒ the remaining gap is **U-mode and S-mode**
+only ⇒ ⇒ `rv32mi/pmpaddr` now agrees for a *different* reason (it is
+**hollow on the reference side**, not hollow on ours — see its row above).
 
 
 ## The Zicclsm detail — read this before touching the ISA string
@@ -355,6 +366,77 @@ simply has no case for them.  Those live in the `local` suite:
 | --- | --- | --- |
 | `local/unmapped_store` | `tests/golden/local/unmapped_store.S` | a **store** to an unmapped address traps with `mcause = 7` (store access fault) |
 | `local/unmapped_load` | `tests/golden/local/unmapped_load.S` | a **load** from an unmapped address traps with `mcause = 5` (load access fault) |
+| `local/unmapped_fetch` | `tests/golden/local/unmapped_fetch.S` | an **instruction fetch** from an unmapped address traps with `mcause = 1` (instruction access fault), `mtval` = `mepc` = the fetch address |
+| `local/compressed_trap` | `tests/golden/local/compressed_trap.S` | a **compressed** store to an unmapped address traps, and the trap context carries the **exact** faulting PC (bit 1 preserved) |
+| `local/pmp_deny` | `tests/golden/local/pmp_deny.S` | **PMP denies a store to a mapped address**: with `mstatus.MPRV = 1`, entry 0 (NAPOT, 4 KiB at `0x80040000`, **no permissions**) matches ⇒ the store traps with `mcause = 7` and `mtval = 0x80040000` |
+
+The corpus is **69** cases now (it was 68 before `local/pmp_deny`).
+
+### `pmp_deny` — PMP must deny a store to an address that **is** mapped
+
+This is the one behaviour the upstream tree cannot supply: **PMP has no
+upstream case that exercises a *denial*.**  `rv32mi/pmpaddr` writes a
+`pmpaddr` register and reads it back — it never performs an access that
+PMP could refuse ⇒ ⇒ a platform that *stores* the PMP registers but
+ignores them on the access path would still agree with it ⇒ ⇒ that case
+is hollow (see the *Cases that are not in the corpus* section above)
+⇒ ⇒ the corpus needs a case of our own.
+
+`pmp_deny.S` is that case, and it pins four things:
+
+1. **What is denied.**  With `mstatus.MPRV = 1` (M-mode loads and stores
+   are subject to PMP only while `MPRV` is set), PMP entry 0 (NAPOT,
+   4 KiB at `0x80040000`, **no** `R`/`W`/`X`) matches the access ⇒ ⇒ the
+   store is denied ⇒ ⇒ the guest's trap handler must see `mcause == 7`
+   (store access fault), `mtval == 0x80040000` and `mepc` == the address
+   of that `sw`.
+2. **Why the denied address has to be mapped.**  `0x80040000` is
+   **inside** the RAM window **both** sides map (`0x8000_0000` + 4 MiB)
+   ⇒ ⇒ the store can fail **only** because of PMP, not because the
+   address is unmapped ⇒ ⇒ that is exactly what separates this case
+   from `unmapped_store` (which faults on `0x90000000`, unmapped on both
+   sides).  A PMP denial and an unmapped access carry the **same** cause
+   numbers, so the **address** — not the cause — is what tells them
+   apart.
+3. **The control group.**  Entry 1 (NAPOT, 1 MiB at `0x8000_0000`,
+   `R`+`W`+`X`) permits the rest of the low RAM ⇒ ⇒ the guest stores to
+   `0x80002000` — inside entry 1, outside entry 0 — and reads the value
+   back, and both must succeed ⇒ ⇒ without that control, an
+   implementation that denies *every* access would be green too.
+4. **The criterion is the guest's own check** (see below): the guest
+   reports PASS only when `mcause`, `mtval` and `mepc` are all exactly
+   right ⇒ ⇒ a platform without PMP lets the store succeed, falls
+   through to `fail` and reports **FAIL 3** ⇒ ⇒ the row has
+   discriminating power.
+
+⚠️ **The failure modes carry distinct numbers**, so a red row says *which*
+invariant broke — a single "FAIL 3" for everything would hide the
+difference between "PMP refused nothing" and "PMP refused the wrong
+address":
+
+| verdict | meaning |
+| --- | --- |
+| `PASS` | the reference side's exact behaviour (all three fields match) |
+| `FAIL 3` | the denied store was **not** denied (PMP did not refuse) |
+| `FAIL 4` | the **control group** broke (PMP refused an access entry 1 permits, or the read-back did not match) |
+| `FAIL 5` | the trap happened but `mcause` / `mtval` / `mepc` did **not** match (e.g. PMP refused the *wrong* address) |
+
+⚠️ **Every verdict path clears `mstatus.MPRV` first.**  The verdict travels
+through an `ecall`, and the environment's trap vector turns it into the
+`tohost` write — which is a **store** ⇒ ⇒ with `MPRV` still set, that
+write is itself subject to PMP ⇒ ⇒ if no entry covers the `tohost`
+address, the case could report nothing and would **hang** instead of
+failing ⇒ ⇒ the failure path must be able to report, too.
+
+⚠️ **The packing pitfall, because it is easy to get wrong.**  RV32's
+`pmpcfg{i}` register holds **four** 8-bit entries (byte 0 = entry 0,
+byte 1 = entry 1) ⇒ ⇒ entry 1 has to be packed into **byte 1 of
+`pmpcfg0`**, so the whole register is `pmpcfg0 = 0x1f18` (entry 0 =
+`0x18`, entry 1 = `0x1f`).  Writing `pmpcfg1` instead configures entries
+**4..7** ⇒ ⇒ entry 1 would silently never exist ⇒ ⇒ the control group
+would then fail for the wrong reason.  (The `pmpcfg` byte layout itself
+— `L` = bit 7, `A` = bits 4:3, `X` = bit 2, `W` = bit 1, `R` = bit 0 —
+matches upstream's `env/encoding.h`, so that file needs no change.)
 
 The harness resolves a row's source in this order:
 
@@ -382,10 +464,55 @@ exactly the state the platform was in before ledger **D-99** was
 closed (the bus error was propagated verbatim and the guest's handler
 never ran).
 
-Both cases are **self-contained** (they include no riscv-tests source,
-like `canary/fail_3.S`) and they use the `csr` environment, because
-they need a trap vector, `mtvec`, CSR reads and `mret`-free trap
-handling.
+All five `local` cases are **self-contained** (they include no
+riscv-tests source, like `canary/fail_3.S`) and they use the `csr`
+environment, because they need a trap vector, `mtvec`, CSR reads and
+`mret`-free trap handling.
+
+## The `csr` environment's `INIT_PMP` comment is stale — and cannot be fixed
+
+⚠️ **`tests/golden/env/` is a verbatim mirror of upstream riscv-tests.**
+`tools/golden-run.sh`'s `check_env_constants` compares it byte for byte
+against the upstream tree ⇒ ⇒ **not one character of it may be edited**
+⇒ ⇒ a comment in it that has become wrong **cannot be corrected in
+place** ⇒ ⇒ the deviation has to be registered **here**, in this file.
+
+The comment in question sits next to `INIT_PMP` in
+`tests/golden/env/csr/riscv_test.h`:
+
+```
+// A permissive PMP entry.  ⚠️ **Ignored on this platform** (no PMP) — but
+// the write stays, so that both sides execute the same instruction stream.
+```
+
+It claims the platform has no PMP ⇒ ⇒ the write is ignored ⇒ ⇒ every
+access is permitted.  After v0.37 that is **half** wrong:
+
+* `INIT_PMP` writes `pmpaddr0 = 0x7fffffff` and `pmpcfg0 = 0x1f`
+  (`PMP_NAPOT | PMP_R | PMP_W | PMP_X`);
+* the platform **does** implement PMP now ⇒ ⇒ that write **takes
+  effect** — it is no longer ignored;
+* but the entry it configures is a NAPOT entry whose `pmpaddr` ends in
+  **31** ones ⇒ ⇒ its range is `[0, 2^34)` ⇒ ⇒ it covers the **whole
+  32-bit space** ⇒ ⇒ with `R`+`W`+`X` it still permits **everything**.
+
+⇒ ⇒ **The behaviour is unchanged**: the reference side has always run
+under exactly one "permit all" PMP entry, and so does ours.  ⇒ ⇒ **The
+verdicts of the 68 pre-existing corpus cases do not change** — this
+batch has zero effect on them (STAGE-21 fact F19).  ⇒ ⇒ With
+`local/pmp_deny` the corpus itself grows from **68** to **69** cases.
+
+⚠️ **Related, and not fixable in the env either**: the `rv32mi/pmpaddr`
+row in the *Cases that are not in the corpus* section above carries a
+**pre-v0.37 measurement** — back then the platform had no PMP at all, so
+`pmpaddr0` read back 0, the case's `beqz a7, fail` fired, and the
+verdict was `FAIL 1`.  ⇒ ⇒ That row has been **re-measured** since the
+kernel side landed: both sides now say `PASS`.  Its *disposition* is
+fixed either way (STAGE-21 adjudication O): it stays **out** of the
+corpus, because the agreement is **hollow on the reference side** — the
+reference side stores `pmpaddr` verbatim, so the case detects `G` = 0
+and takes its own "trivially passes" early exit without ever running its
+main test (STAGE-21 fact F21).
 
 ## Adding a case
 

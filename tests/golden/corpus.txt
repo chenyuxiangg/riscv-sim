@@ -131,7 +131,9 @@ rv32mi sw-misaligned rv32i_zicsr_zifencei active csr
 # (tests/golden/local/).  They cover behaviour upstream riscv-tests has
 # no case for: an **unmapped access** must trap (load ⇒ mcause 5,
 # store ⇒ mcause 7, mtval = the faulting address) instead of aborting
-# the run — ledger D-99, STAGE-7 adjudication G / H.
+# the run — ledger D-99, STAGE-7 adjudication G / H — and a **PMP
+# denial** must trap on an address that **is** mapped — ledger D-94,
+# STAGE-21 adjudication L.
 #
 # ⚠️ The判据 is the **guest's own check** of mcause / mtval / mepc: the
 # guest writes PASS only when all three are exactly right, so "both
@@ -167,3 +169,46 @@ local unmapped_fetch rv32i_zicsr_zifencei active csr
 # mtval == the faulting address, mepc == the faulting instruction) and
 # only reports PASS when all three are exactly right.
 local compressed_trap rv32ic_zicsr_zifencei active csr
+#
+# `pmp_deny` — **PMP must deny a store to an address that IS mapped**.
+# With `mstatus.MPRV = 1` (M-mode loads/stores are subject to PMP only
+# while MPRV is set), PMP entry 0 (NAPOT, 4 KiB at `0x80040000`, **no**
+# permissions) matches the access ⇒ ⇒ the store is denied ⇒ ⇒ the
+# guest's trap handler must see `mcause == 7` (store access fault),
+# `mtval == 0x80040000` and `mepc` == the address of that `sw`.
+# Upstream riscv-tests has **no** case for this: `rv32mi/pmpaddr` only
+# writes a `pmpaddr` register and reads it back, it never performs an
+# access that PMP could refuse ⇒ ⇒ a platform that *stores* the PMP
+# registers but ignores them on the access path would still agree with
+# it ⇒ ⇒ the corpus needs a case of its own (STAGE-21 adjudication L).
+#
+# ⚠️ The denied address `0x80040000` is **inside the RAM window both
+# sides map** (`0x8000_0000` + 4 MiB) ⇒ ⇒ the store can fail **only**
+# because of PMP, not because the address is unmapped ⇒ ⇒ that is what
+# separates this row from `unmapped_store` (which faults on
+# `0x90000000`, unmapped on both sides) ⇒ ⇒ a PMP denial and an
+# unmapped access share the same cause numbers, so the **address**,
+# not the cause, is what tells them apart.
+#
+# ⚠️ Entry 1 (NAPOT, 1 MiB at `0x8000_0000`, `R`+`W`+`X`) is the
+# **control group**: the guest stores to `0x80002000` — inside entry 1,
+# outside entry 0 — and reads the value back, and both must succeed
+# ⇒ ⇒ without it, an implementation that denies *every* access would
+# be green too.
+#
+# ⚠️ **Packing pitfall**: RV32's `pmpcfg` register holds **four** 8-bit
+# entries (byte 0 = entry 0, byte 1 = entry 1) ⇒ ⇒ entry 1 has to be
+# packed into **byte 1 of `pmpcfg0`** ⇒ ⇒ the whole register is
+# `pmpcfg0 = 0x1f18` (entry 0 = `0x18`, entry 1 = `0x1f`).  Writing
+# `pmpcfg1` instead configures entries **4..7** ⇒ ⇒ entry 1 would
+# silently never exist ⇒ ⇒ the control group would then fail for the
+# wrong reason.
+#
+# ⚠️ The criterion is the **guest's own check** of mcause / mtval / mepc:
+# the guest writes PASS only when all three are exactly right, so "both
+# sides stopped erroring" is **not** what this row proves.  Without PMP
+# the store simply succeeds ⇒ ⇒ the guest falls through to `fail` ⇒ ⇒
+# the row reports FAIL 3 ⇒ ⇒ it has discriminating power.
+#
+# With this row the corpus grows from **68** to **69** cases.
+local pmp_deny rv32i_zicsr_zifencei active csr

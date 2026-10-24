@@ -14,6 +14,8 @@
 //! watchpoint traps. The skeleton below compiles and exposes the
 //! `decode + execute_one` API for tests.
 
+use riscv_sim_contract::csr::PmpAccess;
+
 pub mod alu;
 pub mod compressed;
 pub mod csr;
@@ -26,6 +28,12 @@ pub mod executor;
 /// 符号：计数器的**读**在 [`csr::csr_read`] 里，**自增**的**唯一落点**在
 /// [`executor::execute_one`] 的正常完成出口（STAGE-20 裁决 F）。
 mod counters;
+
+/// PMP —— 物理内存保护（STAGE-21 · v0.37）。
+///
+/// ⚠️ 它是**内部**部件：判定只有一个入口 [`pmp::pmp_allows`]，取指与读与写
+/// 三条访存路径都调它（裁决 G）⇒ ⇒ 对外不导出任何符号。
+mod pmp;
 
 pub use decoder::{Decoded, Decoder};
 pub use executor::{
@@ -152,6 +160,19 @@ impl Iss {
             enter_trap(state, cause.mcause(), state.pc);
             return Ok(StepOutcome::Trapped { cause });
         }
+        // ⚠️ **取指也受 PMP 约束**（F14）—— 没有 `X` 权限 ⇒ ⇒ `mcause = 1`。
+        //
+        // ⚠️ 这里查的是 **4 字节**（指令的最大长度）：取指前还不知道这条指令
+        //    是 2 字节还是 4 字节 ⇒ ⇒ 用**最大**窗口 ⇒ ⇒ 宁可多拒一点，也不要
+        //    让一次跨边界的取指「半截通过」。
+        //
+        // ⚠️ 判定走的是**共享**的 [`fetch_pmp_trap`] ⇒ ⇒ 与
+        //    [`Iss::step_one_via_bus`] 那条路**同口径**（D-11）⇒ ⇒ 不会出现
+        //    「一条路查 PMP、另一条不查」的分裂。
+        if let Some(cause) = fetch_pmp_trap(state) {
+            enter_trap(state, cause.mcause(), state.pc);
+            return Ok(StepOutcome::Trapped { cause });
+        }
         let raw = read_mem(state.pc, WriteSize::Word).map_err(|e| {
             PlatformError::new(
                 ErrorFamily::Iss,
@@ -221,6 +242,18 @@ impl Iss {
         //    bytes** of a mapped region is executable (ledger **D-86**),
         //    and the fetch stays **one** bus access (one event, width =
         //    the instruction width).
+        // ⚠️ **取指也受 PMP 约束**（F14）—— 没有 `X` 权限 ⇒ ⇒ `mcause = 1`。
+        //
+        // ⚠️ 这里查的是 **4 字节**（指令的最大长度）：取指前还不知道这条指令
+        // 是 2 字节还是 4 字节 ⇒ ⇒ 用**最大**窗口 ⇒ ⇒ 宁可多拒一点，也不要
+        // 让一次跨边界的取指「半截通过」。
+        //
+        // ⚠️ 判定走的是**共享**的 [`fetch_pmp_trap`] ⇒ ⇒ 与 [`Iss::step_one`]
+        // 那条路**同口径**（D-11）⇒ ⇒ 不会出现「一条路查 PMP、另一条不查」。
+        if let Some(cause) = fetch_pmp_trap(state) {
+            enter_trap(state, cause.mcause(), state.pc);
+            return Ok(StepOutcome::Trapped { cause });
+        }
         let raw = match bus.read_fetch_instruction(state.pc) {
             Ok(raw) => raw,
             Err(e) => {
@@ -263,6 +296,27 @@ impl Iss {
 impl Default for Iss {
     fn default() -> Self {
         Self::new(IssConfig::default())
+    }
+}
+
+/// The PMP check for an **instruction fetch** — one implementation, two
+/// dispatch routes.
+///
+/// ⚠️ **两条派发路径必须同口径**（D-11）：[`Iss::step_one`]（闭包内存口）与
+/// [`Iss::step_one_via_bus`]（M-14 总线口）都走这一个函数 ⇒ ⇒ 不会出现
+/// 「一条路查 PMP、另一条不查」的分裂 —— 这正是本批实测抓到的那个坑
+/// （取指的检查一度只落在总线口那条路上）。
+///
+/// ⚠️ 查的是 **4 字节**（指令的最大长度）：取指前还不知道这条指令是 2 字节
+/// 还是 4 字节 ⇒ ⇒ 用**最大**窗口 ⇒ ⇒ 宁可多拒一点，也不要让一次跨边界的
+/// 取指「半截通过」。
+///
+/// ⚠️ 返回 `Some(cause)` ⇒ ⇒ 调用方负责**陷阱化**（`mcause` + `mtval`）。
+fn fetch_pmp_trap(state: &SimState) -> Option<TrapCause> {
+    if pmp::pmp_allows(state, state.pc, 4, PmpAccess::Fetch) {
+        None
+    } else {
+        Some(TrapCause::InstructionAccessFault)
     }
 }
 
@@ -326,6 +380,8 @@ mod tests_common;
 mod tests_counters;
 #[cfg(test)]
 mod tests_csr;
+#[cfg(test)]
+mod tests_pmp;
 #[cfg(test)]
 mod tests_rv32c;
 #[cfg(test)]
