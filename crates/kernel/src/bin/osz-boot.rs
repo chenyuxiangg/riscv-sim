@@ -50,7 +50,9 @@ use std::time::{Duration, Instant};
 use riscv_sim_contract::model::{ImageKind, ImageRef, ImageSource, ProductTree, Project};
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload, Message};
 
+use riscv_sim_kernel::kernel_host::platform;
 use riscv_sim_kernel::kernel_host::KernelHost;
+use riscv_sim_kernel::m14_bus::REGION_KIND_RAM;
 
 /// 指令预算（默认）。
 const DEFAULT_BUDGET: u64 = 200_000_000;
@@ -70,6 +72,8 @@ struct Config {
     timeout_ms: u64,
     max_console: usize,
     verbose: bool,
+    /// 只打印 RAM 窗口（`base:size`，十进制）然后退出 —— **查询**，不是运行。
+    print_memory: bool,
 }
 
 /// 解析命令行。**绝不 panic** —— 每个畸形输入都变成一条错误消息。
@@ -81,6 +85,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut timeout_ms = DEFAULT_TIMEOUT_MS;
     let mut max_console = DEFAULT_MAX_CONSOLE;
     let mut verbose = false;
+    let mut print_memory = false;
 
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -111,6 +116,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
                     .parse::<usize>()
                     .map_err(|_| format!("bad --max-console value: {raw}"))?;
             }
+            "--print-memory" => print_memory = true,
             "-v" | "--verbose" => verbose = true,
             other if other.starts_with('-') && other != "-" => {
                 return Err(format!("unknown option {other}"));
@@ -133,6 +139,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
         timeout_ms,
         max_console,
         verbose,
+        print_memory,
     })
 }
 
@@ -190,18 +197,21 @@ fn main() -> ExitCode {
         }
     };
 
+    // ⚠️ `--print-memory` 是**查询**：打印窗口然后退出 ⇒ ⇒ **不跑** guest
+    // ⇒ ⇒ stdout 上只有那一个 `base:size`（console 一个字节也没有）。
+    if cfg.print_memory {
+        return print_memory(&cfg);
+    }
+
     let verdict = run(&cfg);
     eprintln!("{}", verdict.line());
     ExitCode::from(verdict.exit_code())
 }
 
-/// 跑一遍，把 console 字节流写到 stdout（以及可选的文件）。
-fn run(cfg: &Config) -> Verdict {
-    let bytes = match std::fs::read(&cfg.path) {
-        Ok(b) => b,
-        Err(e) => return Verdict::Error(format!("read:{}:{}", cfg.path, e)),
-    };
-
+/// 装载镜像 —— **自动选档**要靠镜像的地址区间。
+///
+/// ⚠️ 装载**不跑** guest ⇒ ⇒ 只是把描述挑出来、把内存图建好。
+fn load_host(bytes: Vec<u8>) -> Result<KernelHost, String> {
     let project = Project {
         id: "osz-boot".to_string(),
         name: "osz-boot".to_string(),
@@ -215,15 +225,113 @@ fn run(cfg: &Config) -> Verdict {
     };
 
     let mut host = KernelHost::new();
-    let mut seq: u64 = 0;
-
-    // ---- 装载 ----
-    let events = host.handle_message(&Message::command(seq, CommandPayload::LoadProject(project)));
-    seq += 1;
+    let events = host.handle_message(&Message::command(0, CommandPayload::LoadProject(project)));
     if let Some(err) = first_error(&events) {
-        return Verdict::KernelError(err);
+        return Err(err);
+    }
+    Ok(host)
+}
+
+/// 打印**实际会用的**那份描述的 RAM 窗口（`base:size`，**十进制**）。
+///
+/// ⚠️ **必须装载镜像**：自动选档（按镜像用到的地址挑描述）只有在**装载
+/// 之后**才知道挑了哪一份 ⇒ ⇒ 打印的窗口才是「**它实际会用的**那一份」
+/// 的窗口（STAGE-19 §6.2）。
+///
+/// ⚠️ **十进制**：Spike 的多段 `-m` 只吃十进制 ⇒ ⇒ 参考侧直接拼，不做
+/// 进制转换。
+fn print_memory(cfg: &Config) -> ExitCode {
+    let bytes = match std::fs::read(&cfg.path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("osz-boot: read:{}:{}", cfg.path, e);
+            return ExitCode::from(1);
+        }
+    };
+    let host = match load_host(bytes) {
+        Ok(host) => host,
+        Err(err) => {
+            eprintln!("osz-boot: {err}");
+            return ExitCode::from(3);
+        }
+    };
+
+    // ⚠️ 生效的那份描述 = **宿主选出来的那一份** ⇒ ⇒ 按 **id** 取回**同一份**
+    // 内置描述 ⇒ ⇒ 「取哪个 RAM 段」这条规则仍然只有**契约层**那一个落点。
+    let id = host.platform_id().to_string();
+    let description = match platform::builtin_description(&id) {
+        Ok(description) => description,
+        Err(err) => {
+            eprintln!("osz-boot: {err}");
+            return ExitCode::from(3);
+        }
+    };
+    let Some((base, size)) = description.ram_window() else {
+        eprintln!("osz-boot: the effective description declares no RAM region");
+        return ExitCode::from(3);
+    };
+
+    // The line the reference side reads.
+    let printed = format!("{base}:{size}");
+
+    // ⚠️ **T-5**：打印的那一行**必须**是宿主**实际映射**的窗口 ⇒ ⇒ 判据
+    // 取自**总线自己的导出**（`host.memory_map()`），并把**打印的那一行**
+    // **解回来**再比 ⇒ ⇒ 不是「我打印的 == 我打印的」那种同义反复 ⇒ ⇒
+    // 谁把打印的值换成手写常量，**这里**就红。
+    let (printed_base, printed_size) = match parse_window(&printed) {
+        Ok(parsed) => parsed,
+        Err(msg) => {
+            eprintln!("osz-boot: {msg}");
+            return ExitCode::from(3);
+        }
+    };
+    let map = host.memory_map();
+    let mapped = map.regions.iter().any(|region| {
+        region.kind == REGION_KIND_RAM
+            && region.base == printed_base
+            && u64::from(region.size) == printed_size
+    });
+    if !mapped {
+        eprintln!(
+            "osz-boot: T-5: the RAM window we print ({printed}) is not the window the host mapped"
+        );
+        return ExitCode::from(3);
     }
 
+    println!("{printed}");
+    ExitCode::SUCCESS
+}
+
+/// 把 `base:size`（**十进制**）解回 `(base, size)`。
+///
+/// ⚠️ 这是 T-5 那条断言的**另一半**：判据必须取自「**真的**打印出去的那
+/// 一行」，而不是「我们打算打印的那个变量」⇒ ⇒ 谁改了打印的内容，这里
+/// 就解不出 / 解错 ⇒ ⇒ 断言红。
+fn parse_window(text: &str) -> Result<(u32, u64), String> {
+    let (base, size) = text
+        .split_once(':')
+        .ok_or_else(|| format!("the RAM window {text:?} is not `base:size`"))?;
+    let base = base
+        .parse::<u32>()
+        .map_err(|_| format!("the RAM window's base {base:?} is not a decimal u32"))?;
+    let size = size
+        .parse::<u64>()
+        .map_err(|_| format!("the RAM window's size {size:?} is not a decimal u64"))?;
+    Ok((base, size))
+}
+
+/// 跑一遍，把 console 字节流写到 stdout（以及可选的文件）。
+fn run(cfg: &Config) -> Verdict {
+    let bytes = match std::fs::read(&cfg.path) {
+        Ok(b) => b,
+        Err(e) => return Verdict::Error(format!("read:{}:{}", cfg.path, e)),
+    };
+
+    let mut host = match load_host(bytes) {
+        Ok(host) => host,
+        Err(err) => return Verdict::KernelError(err),
+    };
+    let mut seq: u64 = 1;
     if cfg.verbose {
         eprintln!(
             "[osz-boot] profile={:?} entry-pc=0x{:08x}",
@@ -373,6 +481,14 @@ mod tests {
                 "args {args:?} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn parse_args_accepts_print_memory() {
+        // ⚠️ `--print-memory` **仍然要 ELF** —— 自动选档要靠镜像的地址区间。
+        let cfg = parse_args(&["a.elf".to_string(), "--print-memory".to_string()]).unwrap();
+        assert!(cfg.print_memory);
+        assert_eq!(cfg.path, "a.elf");
     }
 
     #[test]
