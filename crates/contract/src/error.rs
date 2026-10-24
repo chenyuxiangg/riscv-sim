@@ -409,6 +409,37 @@ pub const E_PLT_11_PLATFORM_FILE_MALFORMED: u16 = 11;
 /// 「两个器件共用一个 id」⇒ one code, two meanings ⇒ forbidden.
 pub const E_PLT_12_PARAMETER_OUT_OF_RANGE: u16 = 12;
 
+/// Scenario code: the submission's **expected revision** does not match
+/// the host's current one — the memory map was changed by somebody else
+/// in the meantime.
+///
+/// ⚠️ **New in v0.31 (D-137)**: `SetMemoryMap` / `PatchMemoryMap` carry an
+/// **optional** `expected_revision`; when it is given and it does not
+/// equal the host's current revision, the submission is **rejected** and
+/// **nothing changes** ⇒ a lost update becomes **visible** instead of
+/// silent.
+///
+/// ⚠️ **It does not reuse [`E_PLT_08_DUPLICATE_DEVICE_ID`]**: that one means
+/// 「两个器件共用一个 id」⇒ one code, two meanings ⇒ forbidden. It does
+/// not reuse [`E_PLT_12_PARAMETER_OUT_OF_RANGE`] either: that one means
+/// 「某个参数的值不在它的合法取值域内」⇒ a **stale** submission is not an
+/// out-of-range parameter.
+pub const E_PLT_13_REVISION_CONFLICT: u16 = 13;
+
+/// Scenario code: the delta asks to **remove** a region that is **not** in
+/// the effective memory map.
+///
+/// ⚠️ **New in v0.31 (D-137)**: `PatchMemoryMap`'s `RemoveRegion { base }`
+/// locates its target **by `base`**; if that `base` is not in the
+/// effective map the delta is **rejected** and **nothing changes** ⇒ a
+/// delta that silently did nothing is forbidden.
+///
+/// ⚠️ **It does not reuse [`E_PLT_08_DUPLICATE_DEVICE_ID`]**: that one means
+/// 「两个器件共用一个 id」⇒ one code, two meanings ⇒ forbidden. It does
+/// not reuse [`E_PLT_12_PARAMETER_OUT_OF_RANGE`] either: that one judges a
+/// **value**, this one judges a **lookup that found nothing**.
+pub const E_PLT_14_REGION_NOT_FOUND: u16 = 14;
+
 #[cfg(test)]
 mod tests {
     use super::*;

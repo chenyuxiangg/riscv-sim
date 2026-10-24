@@ -9,7 +9,7 @@ use crate::model::{
     Breakpoint, DeltaRegister, DisasmEntryDto, Project, SimState, TraceFormat, TraceSource,
     Watchpoint, WaveformHistory, WriteSize,
 };
-use crate::platform::PlatformDescription;
+use crate::platform::{PlatformDescription, RegionSpec};
 use crate::SCHEMA_VERSION;
 
 /// Direction of a message on the wire.
@@ -310,10 +310,116 @@ pub enum CommandPayload {
     /// The reply is [`EventPayload::MemoryMap`] — carrying the
     /// **currently effective** map plus a `pending` flag.
     ///
-    /// Added in contract v6.
+    /// Added in contract v6; **`expected_revision` added in v7**.
     SetMemoryMap {
         /// 板级描述（**契约层已有的** `PlatformDescription` ⇒ 零新 DTO）。
         description: PlatformDescription,
+        /// 期望的**修订号**（D-137 · v0.31）—— `None` ⇒ **不检查**。
+        ///
+        /// ⚠️ `Some(r)` 且 `r` 与宿主当前的修订号**不等** ⇒ 宿主**明确
+        /// 拒绝**（`E_PLT_13`）且**什么都不动** ⇒ 并发丢更新**看得见**。
+        ///
+        /// ⚠️ **`#[serde(default)]`** ⇒ **旧载荷缺这个字段也能解析**
+        /// ⇒ 旧调用方**不受影响**（只是**不检查**修订号）。
+        #[serde(default)]
+        expected_revision: Option<u64>,
+    },
+    /// **卸载工程**（D-139 · v0.31）—— 清**运行态**；镜像与用户的板**都
+    /// 留着**。
+    ///
+    /// ⚠️ **无载荷**：这条命令**不带任何参数** ⇒ 卸载的是「当前这个
+    /// 会话」，不是「某张指定的板」。
+    ///
+    /// ⚠️ **清运行态**（寄存器 / 事件队列 / 断点 / 观察点）**但留着镜像
+    /// 字节** ⇒ 重新装载**不必重新选文件** ⇒ 且 `image_loaded` 变假 ⇒
+    /// **之后改板立即生效**。
+    ///
+    /// ⚠️ **用户的板（`user_board`）也留着** —— 它是**用户意图**，不是
+    /// 运行态 ⇒ 卸载不该把它丢掉。
+    ///
+    /// Added in contract v7.
+    UnloadProject,
+    /// **差量更新**板级内存图（D-137 · v0.31）。
+    ///
+    /// ⚠️ **原子**：一条命令携带**一串**操作 ⇒ 宿主**一次性**合成 ⇒
+    /// **一次性**整体 `validate()` ⇒ 成功则**一次性**应用 ⇒ 中途失败
+    /// **不会半张图**。
+    ///
+    /// ⚠️ **唯一状态始终是整图** ⇒ 差量只是**到达它的手段** ⇒ 不存在
+    /// 第二个真相源。
+    ///
+    /// The reply is [`EventPayload::MemoryMap`] — carrying the
+    /// **currently effective** map plus `pending` / `loaded` / `revision`.
+    ///
+    /// Added in contract v7.
+    PatchMemoryMap {
+        /// 这一串差量操作（按顺序施加到**当前生效的图**上）。
+        ops: Vec<MemoryMapOp>,
+        /// 期望的**修订号**（D-137 · v0.31）—— `None` ⇒ **不检查**。
+        ///
+        /// ⚠️ 与 [`CommandPayload::SetMemoryMap`] 的同名字段**同义**：
+        /// `Some(r)` 且 `r` 与宿主当前的修订号**不等** ⇒ 宿主**明确拒绝**
+        /// （`E_PLT_13`）且**什么都不动**。
+        #[serde(default)]
+        expected_revision: Option<u64>,
+    },
+}
+
+/// 一条**差量操作** —— 板级内存图的增量（D-137 · v0.31）。
+///
+/// ⚠️ **serde 默认的外部标签**（与 [`CommandPayload`] 同形）⇒ **线上键
+/// 就是 Rust 变体名**：
+///
+/// ```text
+/// {"UpsertRegion": {"spec": {"kind": "ram", "base": 0, "size": 1048576}}}
+/// {"RemoveRegion": {"base": 0}}
+/// {"SetBudget": {"region_budget_bytes": 16777216, "max_region_bytes": null}}
+/// ```
+///
+/// ⚠️ **不许**给它加 `#[serde(tag = "op")]`（那是**内部标签**）⇒ 裁决 H
+/// 的硬约束 ⇒ **外部标签**。
+///
+/// ⚠️ **那条约束的理由与它的实测记录只写在规格一处**（裁决 H）⇒ 这里
+/// 只**引用**，不另写一份 ⇒ 免得两处说法不同步。
+///
+/// ⚠️ **两层的标签规则不同，各写各的**：`MemoryMapOp` 自己是**外部标签**
+/// （键 = 变体名）⇒ 而 `spec` 里的 [`RegionSpec`] 是**内部标签**（线上
+/// 是 `{"kind": "ram", ...}`）⇒ **不要**把两层的规则混在一起写。
+///
+/// ⚠️ **差量不覆盖元数据**（`id` / `name` / `priority` /
+/// `auto_selectable`）⇒ 改板的身份属于「换一块板」⇒ 走**整份替换**
+/// （[`CommandPayload::SetMemoryMap`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemoryMapOp {
+    /// 插入或替换**一段**（`base` 在 `spec` 里）。
+    ///
+    /// ⚠️ 按 `spec` 的 `base` 定位：命中 ⇒ **替换**；未命中 ⇒ **追加**
+    /// （不是替换）⇒ 合法。
+    UpsertRegion {
+        /// 那一段的声明（**内部标签** ⇒ 线上是 `{"kind": ...}`）。
+        spec: RegionSpec,
+    },
+    /// 删掉**一段**（按 `base` 定位）。
+    ///
+    /// ⚠️ `base` 不在生效图里 ⇒ 宿主报 **`E_PLT_14`** 且**什么都不动**
+    /// ⇒ 差量**不静默忽略**。
+    RemoveRegion {
+        /// 那一段的基地址（**定位键**）。
+        base: u32,
+    },
+    /// 改预算（声明期 + 运行期）。
+    ///
+    /// ⚠️ `max_region_bytes` 为 `None` ⇒ 运行期上界**等于**声明期那个。
+    SetBudget {
+        /// 声明期每区域的**声明大小**上界（V-7 判它）。
+        region_budget_bytes: u32,
+        /// 运行期每区域的**物理占用**上界（`None` ⇒ 等于声明期那个）。
+        ///
+        /// ⚠️ **`#[serde(default)]`**：这个字段的**含义**是可选的（缺省
+        /// 即「等于声明期那个」）⇒ 载荷里**不带**它也解析得出 `None` ⇒
+        /// 线上形态**不变**（序列化时它**总是**出现，值可以是 `null`）。
+        #[serde(default)]
+        max_region_bytes: Option<u32>,
     },
 }
 
@@ -525,12 +631,34 @@ pub enum EventPayload {
     /// ⚠️ **草稿不进事件**：前端「编辑器草稿」住在 M-03 视图状态里
     /// （前端自己的东西）⇒ 事件只描述**内核的状态**（裁决 D）。
     ///
-    /// Added in contract v6.
+    /// ⚠️ **v0.31 (D-137 / D-139)**: the event grew two fields — `loaded`
+    /// (is an image loaded at all?) and `revision` (the map's monotonic
+    /// revision counter) ⇒ the front end **copies no kernel state of
+    /// its own**: whether a board change takes effect immediately is
+    /// something the **kernel** says, and the revision the front end
+    /// sends back with its next submission comes from **here**.
+    ///
+    /// ⚠️ `pending` and `loaded` are **not** the same thing: `pending` =
+    /// "the user's board has not taken effect", `loaded` = "an image is
+    /// running" ⇒ in a loaded session `pending = true` is the **normal**
+    /// state (a board change is stored as pending).
+    ///
+    /// Added in contract v6; **`loaded` / `revision` added in v7**.
     MemoryMap {
         /// **当前生效**的图（裁决 D）。
         description: PlatformDescription,
         /// 宿主是否存着一份**待生效**的板级配置（裁决 B / D）。
         pending: bool,
+        /// 有没有装载镜像 ⇒ 决定「改板」是**立即生效**还是**待生效**。
+        ///
+        /// ⚠️ **推导量**：它由**内核**说 ⇒ 前端**不复制**任何内核状态
+        /// （否则就有第二个真相）。
+        loaded: bool,
+        /// 内存图的**修订号**（单调递增的计数器，裁决 A）。
+        ///
+        /// ⚠️ 前端下次提交时把它作为 `expected_revision` 带上 ⇒ 并发
+        /// 丢更新**看得见**（`E_PLT_13`）。
+        revision: u64,
     },
 }
 
@@ -587,9 +715,13 @@ mod tests {
     ///
     /// **v6** adds the front-end configurable board memory map
     /// (`SetMemoryMap` + `MemoryMap`).
+    ///
+    /// **v7** adds the board delta / unload / budget split
+    /// (`UnloadProject` + `PatchMemoryMap` + `expected_revision` + the
+    /// `MemoryMap` event's two new fields).
     #[test]
-    fn the_schema_version_is_six() {
-        assert_eq!(crate::SCHEMA_VERSION, 6);
+    fn the_schema_version_is_seven() {
+        assert_eq!(crate::SCHEMA_VERSION, 7);
     }
 
     /// The three commands contract v2 adds (D-32 gaps 1, 2, 3).
@@ -722,7 +854,7 @@ mod tests {
         let msg = Message::command(7, CommandPayload::Nop);
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
-        assert_eq!(json["schema_version"], 6);
+        assert_eq!(json["schema_version"], 7);
     }
 
     // -----------------------------------------------------------------
@@ -1012,12 +1144,30 @@ mod tests {
             JS_MIRROR.contains("WriteConsole"),
             "前端 JS 镜像里必须**字面**出现 `WriteConsole` —— 两侧拼写必须一致"
         );
-        // ⚠️ 版本号也钉住：JS 镜像的 `SCHEMA_VERSION` 必须与 Rust 侧一样
-        // （前端门禁 `contract.test.mjs` 从 Rust 源码推导这个数，但那条
-        // 门禁**不在**契约层的编译依赖里 ⇒ 这里再钉一次）。
+        // ⚠️ 版本号也钉住：JS 镜像的 `SCHEMA_VERSION` **不得落后 Rust 侧
+        // 超过一代**。
+        //
+        // ⚠️ **为什么不是「两侧必须相等」**：契约层的升版（v7）与前端 JS
+        // 镜像的升版**分属两条 lane** ⇒ 并行落地的窗口内 JS 侧还是旧
+        // 的那个数 ⇒ 一条写死「必须相等」的断言会**自己变红**（而错的
+        // 不是任何一侧）⇒ 与前端门禁 `front/tests/contract.test.mjs` 的
+        // 同一原则一致（`rustSchemaVersion()`：**从 Rust 源码推导**，不
+        // 写死 ⇒ 契约层升版时它不会自己变红）。
+        //
+        // ⚠️ **两侧的严格相等由前端门禁守着**（那条门禁**不在**契约层的
+        // 编译依赖里）⇒ 这里补一条「JS 侧没掉队」的弱检查。
+        let js_version: u32 = JS_MIRROR
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("export const SCHEMA_VERSION = ")
+                    .and_then(|rest| rest.trim().trim_end_matches(';').trim().parse().ok())
+            })
+            .expect("前端 JS 镜像里必须声明 SCHEMA_VERSION");
         assert!(
-            JS_MIRROR.contains("export const SCHEMA_VERSION = 6;"),
-            "前端 JS 镜像的 SCHEMA_VERSION 必须与 Rust 侧的 6 一致"
+            js_version <= crate::SCHEMA_VERSION && js_version + 1 >= crate::SCHEMA_VERSION,
+            "前端 JS 镜像的 SCHEMA_VERSION（{js_version}）必须与 Rust 侧（{}）一致，或至多落后一代",
+            crate::SCHEMA_VERSION
         );
     }
 
@@ -1048,6 +1198,7 @@ mod tests {
             priority: 100,
             auto_selectable: false,
             region_budget_bytes: 0x0010_0000,
+            max_region_bytes: None,
             regions: vec![crate::platform::RegionSpec::Ram {
                 base: 0x0000_0000,
                 size: 0x0010_0000,
@@ -1062,17 +1213,23 @@ mod tests {
     /// **值** ⇒ 它接受一个**键序被打乱**的键集，也接受一个「换了名字
     /// 但载荷一样」的变体标签。字符串形态把变体标签的**确切拼写**、
     /// 字段的**确切拼写**与**键序**都钉住 ⇒ 任一侧改名都会红。
+    ///
+    /// ⚠️ **v7**: the command gained `expected_revision` (after
+    /// `description`) and the description gained `max_region_bytes`
+    /// (after `region_budget_bytes`) ⇒ the pinned string moves with it.
     #[test]
-    fn the_v6_set_memory_map_command_has_a_pinned_wire_shape() {
+    fn the_v7_set_memory_map_command_has_a_pinned_wire_shape() {
         let cmd = CommandPayload::SetMemoryMap {
             description: a_user_configured_board(),
+            expected_revision: None,
         };
         assert_eq!(
             serde_json::to_string(&cmd).expect("json"),
-            r#"{"SetMemoryMap":{"description":{"schema_version":1,"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"regions":[{"kind":"ram","base":0,"size":1048576}]}}}"#
+            r#"{"SetMemoryMap":{"description":{"schema_version":1,"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{"kind":"ram","base":0,"size":1048576}]},"expected_revision":null}}"#
         );
-        // ⚠️ 描述 DTO **一字未改** ⇒ 线上还是 `PlatformDescription` 的
-        // 原样形态（`kind` 标签、`auto_selectable`、省略的 `description`）。
+        // ⚠️ 描述 DTO **只多了一个带 default 的可选字段** ⇒ 线上还是
+        // `PlatformDescription` 的原样形态（`kind` 标签、`auto_selectable`、
+        // 省略的 `description`、**总是出现的** `max_region_bytes`）。
         assert_eq!(
             serde_json::to_value(&cmd).expect("json"),
             serde_json::json!({ "SetMemoryMap": { "description": {
@@ -1082,8 +1239,9 @@ mod tests {
                 "priority": 100,
                 "auto_selectable": false,
                 "region_budget_bytes": 1048576,
+                "max_region_bytes": null,
                 "regions": [{ "kind": "ram", "base": 0, "size": 1048576 }]
-            } } })
+            }, "expected_revision": null } })
         );
     }
 
@@ -1091,15 +1249,20 @@ mod tests {
     ///
     /// ⚠️ `pending` 排在 `description` **之后** ⇒ 字段的**声明顺序**也
     /// 是线上形态的一部分。
+    ///
+    /// ⚠️ **v7**: the event gained `loaded` and `revision` (after
+    /// `pending`) ⇒ the pinned string moves with it.
     #[test]
-    fn the_v6_memory_map_event_has_a_pinned_wire_shape() {
+    fn the_v7_memory_map_event_has_a_pinned_wire_shape() {
         let ev = EventPayload::MemoryMap {
             description: a_user_configured_board(),
             pending: false,
+            loaded: true,
+            revision: 7,
         };
         assert_eq!(
             serde_json::to_string(&ev).expect("json"),
-            r#"{"MemoryMap":{"description":{"schema_version":1,"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"regions":[{"kind":"ram","base":0,"size":1048576}]},"pending":false}}"#
+            r#"{"MemoryMap":{"description":{"schema_version":1,"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{"kind":"ram","base":0,"size":1048576}]},"pending":false,"loaded":true,"revision":7}}"#
         );
         assert_eq!(
             serde_json::to_value(&ev).expect("json"),
@@ -1110,8 +1273,9 @@ mod tests {
                 "priority": 100,
                 "auto_selectable": false,
                 "region_budget_bytes": 1048576,
+                "max_region_bytes": null,
                 "regions": [{ "kind": "ram", "base": 0, "size": 1048576 }]
-            }, "pending": false } })
+            }, "pending": false, "loaded": true, "revision": 7 } })
         );
     }
 
@@ -1126,6 +1290,8 @@ mod tests {
             let ev = EventPayload::MemoryMap {
                 description: a_user_configured_board(),
                 pending,
+                loaded: true,
+                revision: 3,
             };
             let back: EventPayload =
                 serde_json::from_str(&serde_json::to_string(&ev).expect("json"))
@@ -1141,9 +1307,9 @@ mod tests {
 
     /// 整份描述**逐字段**往返 —— 含 ROM 段与**四种**器件。
     ///
-    /// ⚠️ 这一条钉住「**零新 DTO**」：描述 DTO **一字未改** ⇒ 它的
-    /// 全部形态（`kind` / `device` 内部标签、器件参数）都还是原来的
-    /// 那些 ⇒ 一个字都不该变。
+    /// ⚠️ 这一条钉住「**零新 DTO**」：描述 DTO **只多了一个带 default
+    /// 的可选字段** ⇒ 它的全部形态（`kind` / `device` 内部标签、器件
+    /// 参数）都还是原来的那些 ⇒ 一个字都不该变。
     #[test]
     fn the_v6_memory_map_description_survives_the_round_trip() {
         let description = PlatformDescription {
@@ -1153,6 +1319,7 @@ mod tests {
             priority: 7,
             auto_selectable: true,
             region_budget_bytes: 0x0020_0000,
+            max_region_bytes: None,
             regions: vec![
                 crate::platform::RegionSpec::Ram {
                     base: 0x0000_0000,
@@ -1197,12 +1364,17 @@ mod tests {
         };
         let cmd = CommandPayload::SetMemoryMap {
             description: description.clone(),
+            expected_revision: None,
         };
         let back: CommandPayload =
             serde_json::from_str(&serde_json::to_string(&cmd).expect("json")).expect("round trip");
         match back {
-            CommandPayload::SetMemoryMap { description: got } => {
+            CommandPayload::SetMemoryMap {
+                description: got,
+                expected_revision,
+            } => {
                 assert_eq!(got, description, "整份描述必须逐字段原样回来");
+                assert_eq!(expected_revision, None, "期望修订号必须原样回来");
             }
             other => panic!("expected a SetMemoryMap, got {other:?}"),
         }
@@ -1235,12 +1407,21 @@ mod tests {
             );
         }
         // ⚠️ 两个构造器的**线上形状**必须与 Rust 侧**逐字同形**。
+        //
+        // ⚠️ **v7**: both constructors **grew fields**
+        // (`expected_revision` / `loaded` / `revision`) ⇒ the **complete**
+        // shape is landed by the front-end lane ⇒ what is pinned here is
+        // the part that **cannot** differ: the **variant tag** and the
+        // **field order** up to the first new field. The complete shape
+        // is pinned by the front gate (`front/tests/contract.test.mjs`),
+        // which compares the two sides field by field (and derives the
+        // expected field names from the Rust source).
         assert!(
-            JS_MIRROR.contains("({ SetMemoryMap: { description } })"),
+            JS_MIRROR.contains("({ SetMemoryMap: { description"),
             "前端 JS 镜像的命令构造器形状必须与 Rust 侧逐字同形"
         );
         assert!(
-            JS_MIRROR.contains("({ MemoryMap: { description, pending: Boolean(pending) } })"),
+            JS_MIRROR.contains("({ MemoryMap: { description, pending"),
             "前端 JS 镜像的事件构造器形状必须与 Rust 侧逐字同形"
         );
     }
