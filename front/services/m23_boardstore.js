@@ -30,14 +30,20 @@
 //
 // # 确定性
 //
-// 落库条目 = `{ id, description }`，**不存时间戳**（规格裁决 E）⇒ 同一个
-// 描述落库两次 ⇒ 库里是同一条、同样的字节（AD §8.1 D0「种子 + 时间戳化
+// 落库条目 = `{ id, description, rules_version }`，**不存时间戳**（规格裁决 E）
+// ⇒ 同一个描述落库两次 ⇒ 库里是同一条、同样的字节（AD §8.1 D0「种子 + 时间戳化
 // 输入事件序列 → 结果唯一」⇒ 落库内容里**不引入**时间戳）。
 //
 // ⚠️ **不另存 `name`** —— `name` 在描述里面 ⇒ 另存一份就是**第二份真相**
 // （名字改了会两边不一致）。
+//
+// ⚠️ **`rules_version` 是「这块板是按哪一版规则校验过的」**（STAGE-18 · D-143
+// · 裁决 F / G）⇒ 它是**库这一侧的元数据** ⇒ **不塞进描述 DTO**（塞进去就是
+// 两个真相：描述 + 版本戳 ⇒ 两者会不一致）⇒ ⇒ 落在**条目的容器**里。
+//
+// ⚠️ **它不参与描述的形状** ⇒ `PLATFORM_SCHEMA_VERSION` **不升**（仍 1）。
 
-import { PLATFORM_SCHEMA_VERSION } from "../lib/message.js";
+import { PLATFORM_RULES_VERSION, PLATFORM_SCHEMA_VERSION } from "../lib/message.js";
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -81,6 +87,20 @@ export const BOARD_STORE_KEY = "id";
  */
 export { PLATFORM_SCHEMA_VERSION };
 
+/**
+ * 合法性**规则集**版本 —— **从契约镜像层 import**
+ * （`front/lib/message.js` 的 `PLATFORM_RULES_VERSION`，
+ *  镜像 `crates/contract/src/platform.rs` 的同名常量）。
+ *
+ * ⚠️ **它与 `PLATFORM_SCHEMA_VERSION` 是两个不同的东西**：前者管**形状**
+ * （描述长什么样），它管**合法性规则集**（哪些描述合法）⇒ ⇒ **本批两个
+ * 版本号都不升**（STAGE-18 裁决 O）。
+ *
+ * ⚠️ **唯一落点**在 `front/lib/message.js`（STAGE-18 裁决 E）⇒ 这里只是
+ * **re-export** ⇒ 服务层与视图层**都从那里 import** ⇒ **一个定义处**。
+ */
+export { PLATFORM_RULES_VERSION };
+
 // ---------------------------------------------------------------------------
 // 纯逻辑（与存储无关 ⇒ 可测）
 // ---------------------------------------------------------------------------
@@ -104,16 +124,84 @@ export function boardId(description) {
 /**
  * 把一个描述变成**落库条目**。
  *
- * ⚠️ 字段集合**恰为两个**：`id` + `description` ⇒ **不存时间戳**
- * （确定性）、**不存 `name`**（`name` 在描述里 ⇒ 另存就是第二份真相）。
+ * ⚠️ 字段集合**恰为三个**：`id` + `description` + `rules_version` ⇒
+ * **不存时间戳**（确定性）、**不存 `name`**（`name` 在描述里 ⇒ 另存就是
+ * 第二份真相）。
+ *
+ * ⚠️ **`rules_version` = 这块板是按哪一版合法性规则校验过的**
+ * （STAGE-18 · D-143 · 裁决 F）⇒ 它**不**进描述 DTO（那是两个真相）⇒
+ * ⇒ 落在**条目这个容器**里。
+ *
+ * ⚠️ **描述字段一个都不改** ⇒ ⇒ `PLATFORM_SCHEMA_VERSION` **不升**。
  *
  * @param {object|null|undefined} description
- * @returns {{id: string, description: object}|null} 取不到 `id` ⇒ `null`
+ * @returns {{id: string, description: object, rules_version: number}|null} 取不到 `id` ⇒ `null`
  */
 export function boardEntry(description) {
     const id = boardId(description);
     if (id === null) return null;
-    return { id, description };
+    return { id, description, rules_version: PLATFORM_RULES_VERSION };
+}
+
+/**
+ * 取一条板档案条目的**规则集版本**。
+ *
+ * ⚠️ **缺失 / 不是数字 ⇒ 隐含 1**（STAGE-18 · 裁决 G）：
+ *   - 隐含值 **1** 的依据 = 「规则集收紧**之前**的那一版」（裁决 E）⇒ ⇒
+ *     老条目的语义**如实**是「按老规则校验过的」；
+ *   - **容忍缺省是必须的** ⇒ 否则老库**直接读不出来**（破坏性变更预警第①条）。
+ *
+ * @param {object|null|undefined} entry — 板档案条目
+ * @returns {number} 条目上的规则集版本（缺省 ⇒ 1）
+ */
+export function boardRulesVersion(entry) {
+    const version = entry?.rules_version;
+    if (typeof version === "number" && Number.isFinite(version)) return version;
+    return 1;
+}
+
+/**
+ * 查一条板档案条目的**合法性规则集版本**对不对。
+ *
+ * ⚠️ **与 `checkBoardVersion` 是两件事**（STAGE-18 · 裁决 H）：
+ *   - `checkBoardVersion` 管**形状**（`schema_version` 不等于 1）⇒
+ *     `reason: "version"`；
+ *   - 本函数管**规则已收紧**（条目是老规则下校验过的）⇒ `reason: "rules"`。
+ * ⇒ ⇒ **两个 reason 不共用** ⇒ 前端能**分开显示**。
+ *
+ * ⚠️ **它不判「这块板现在合不合法」** ⇒ 合法性**只**由内核那一处裁决 ⇒
+ * ⇒ 前端**不写第二份校验器**（STAGE-14 裁决 E / STAGE-18 裁决 I）。
+ *
+ * @param {object|null|undefined} entry — 板档案条目
+ * @returns {{ok: true}|{ok: false, reason: "rules", expected: number, actual: number}}
+ */
+export function checkBoardRules(entry) {
+    const actual = boardRulesVersion(entry);
+    if (actual === PLATFORM_RULES_VERSION) return { ok: true };
+    return {
+        ok: false,
+        reason: "rules",
+        expected: PLATFORM_RULES_VERSION,
+        actual,
+    };
+}
+
+/**
+ * 一块**规则版本落后**的板 ⇒ 选用时**必须说清楚**的那句话。
+ *
+ * ⚠️ **不静默**（STAGE-18 · 裁决 I）：提示里**同时**给出「这块板的规则版本」
+ * 与「当前规则版本」⇒ ⇒ 用户看得见差在哪。
+ *
+ * ⚠️ **它只是提示** ⇒ 提示之后**仍然可以选用**（草稿照常载入）⇒ ⇒
+ * 前端**不判**合法性（合法性只由内核裁决）。
+ *
+ * @param {object|null|undefined} entry — 板档案条目
+ * @returns {string|null} 需要提示时给一句话；规则版本已是当前 ⇒ `null`
+ */
+export function boardRulesNotice(entry) {
+    const check = checkBoardRules(entry);
+    if (check.ok) return null;
+    return `这块板是按旧规则保存的（规则版本 ${check.actual}），当前规则版本 ${check.expected}`;
 }
 
 /**
@@ -127,8 +215,8 @@ export function boardEntry(description) {
  * - 新 `id` ⇒ **追加**到末尾（`changed: true`）；
  * - `entry` 为 `null`（或没有合法 `id`）⇒ `{archive, changed: false}`。
  *
- * @param {Array<object>} archive — 板档案（元素形如 `{ id, description }`）
- * @param {{id: string, description: object}|null} entry
+ * @param {Array<object>} archive — 板档案（元素形如 `{ id, description, rules_version }`）
+ * @param {{id: string, description: object, rules_version?: number}|null} entry
  * @returns {{archive: Array<object>, changed: boolean}}
  */
 export function mergeBoard(archive, entry) {
@@ -174,7 +262,7 @@ export function dropBoard(archive, id) {
  *
  * @param {Array<object>} archive
  * @param {string} id
- * @returns {{id: string, description: object}|null}
+ * @returns {{id: string, description: object, rules_version?: number}|null}
  */
 export function findBoard(archive, id) {
     const base = asArchive(archive);
@@ -260,7 +348,7 @@ export function createMemoryBackend() {
         /**
          * 按 `entry.id` 写入（**覆盖**同 `id` 的旧条目）。
          *
-         * @param {{id: string, description: object}} entry
+         * @param {{id: string, description: object, rules_version?: number}} entry
          * @returns {Promise<void>}
          */
         async put(entry) {
@@ -409,7 +497,7 @@ export function createIndexedDbBackend() {
         /**
          * 按 `entry.id` 写入（**覆盖**同 `id` 的旧条目）。
          *
-         * @param {{id: string, description: object}} entry
+         * @param {{id: string, description: object, rules_version?: number}} entry
          * @returns {Promise<void>}
          */
         async put(entry) {
@@ -487,7 +575,7 @@ export function createBoardStore(backend) {
         /**
          * 写一条（按 `entry.id` **覆盖**）。
          *
-         * @param {{id: string, description: object}} entry
+         * @param {{id: string, description: object, rules_version?: number}} entry
          * @returns {Promise<void>}
          */
         async put(entry) {

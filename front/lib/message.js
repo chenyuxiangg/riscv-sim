@@ -95,6 +95,30 @@ export const SCHEMA_VERSION = 7;
 export const PLATFORM_SCHEMA_VERSION = 1;
 
 /**
+ * 合法性**规则集**版本 — mirrors `riscv_sim_contract::platform::PLATFORM_RULES_VERSION`.
+ *
+ * ⚠️ **它与 `PLATFORM_SCHEMA_VERSION`（形状）是两个不同的东西**：
+ *   - `PLATFORM_SCHEMA_VERSION` = **形状**版本（内存图描述**长什么样**）；
+ *   - `PLATFORM_RULES_VERSION` = **合法性规则集**版本（**哪些**描述合法）。
+ *
+ * ⚠️ **值 2 的含义**：版本 **1** = V-17 之前那套规则（**存量**按它判）⇒
+ * 版本 **2** = 加上 V-17 之后那套 ⇒ ⇒ **老库存缺这个戳 ⇒ 隐含版本 1**
+ * （STAGE-18 裁决 G）⇒ ⇒ 「库存量是不是老库存」**判得出来**。
+ *
+ * ⚠️ **每收紧一次规则集 ⇒ 这个数 +1** ⇒ 它就是「再收紧合法性规则时必须给
+ * 迁移口径」那条规程的**可判依据**（台账 D-143）。
+ *
+ * ⚠️ **本批不升任何版本号**（STAGE-18 裁决 O）：`PLATFORM_SCHEMA_VERSION`
+ * **仍是 1**、`SCHEMA_VERSION` **仍是 7** ⇒ ⇒ 契约层**零新 DTO / 零新命令 /
+ * 零新事件** ⇒ ⇒ 前端镜像**不用改**那两个版本号 ⇒ ⇒ 这是**第三个**版本号，
+ * 它**不**替代前两个。
+ *
+ * ⚠️ **唯一落点**（STAGE-18 裁决 E）：住在这**一层**（`front/lib/`）⇒ 服务层
+ * 与视图层**都从这里 import** ⇒ **一个定义处** ⇒ 依赖方向仍单向。
+ */
+export const PLATFORM_RULES_VERSION = 2;
+
+/**
  * Largest virtual time (picoseconds) that survives a round trip through a
  * JS number without losing a single bit — 2^53.
  *
