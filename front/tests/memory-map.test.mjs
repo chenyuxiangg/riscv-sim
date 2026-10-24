@@ -85,7 +85,10 @@ const USER_BOARD = {
  * ⇒ 装载之后不重订，内核就**不再推** `memory.map` ⇒ 内存映射表**永远**停在
  * 旧图上，而页面上看不出任何异常（与 D-45 / D-46 同一个坑）。
  *
- * @param {{rejectSetMemoryMap?: Error}} [options]
+ * ⚠️ **v0.31**：`UnloadProject` 也清主题集合（裁决 C 第 2 步：新会话 ⇒
+ * 订阅全部失效）⇒ 卸载之后**必须重订全部流**。
+ *
+ * @param {{rejectSetMemoryMap?: Error, rejectPatchMemoryMap?: Error}} [options]
  * @returns {object} the router double
  */
 function fakeKernel(options = {}) {
@@ -93,12 +96,14 @@ function fakeKernel(options = {}) {
     const subs = new Map();
     /** @type {object[]} */
     const sent = [];
-    /** 内核侧的主题集合（`LoadProject` 会清空它）。 */
+    /** 内核侧的主题集合（`LoadProject` / `UnloadProject` 会清空它）。 */
     const topics = new Set();
 
     return {
         sent,
         topics,
+        /** 前端侧（router 侧）的订阅表 —— 「这条流还活着吗」看它。 */
+        subs,
         subscribe(topic, handler) {
             if (!subs.has(topic)) subs.set(topic, new Set());
             subs.get(topic).add(handler);
@@ -112,6 +117,11 @@ function fakeKernel(options = {}) {
                 topics.add(payload.Subscribe.topic);
             } else if (payload && typeof payload === "object" && "SetMemoryMap" in payload) {
                 if (options.rejectSetMemoryMap) throw options.rejectSetMemoryMap;
+            } else if (payload && typeof payload === "object" && "PatchMemoryMap" in payload) {
+                if (options.rejectPatchMemoryMap) throw options.rejectPatchMemoryMap;
+            } else if (payload === "UnloadProject") {
+                // ⚠️ **unit 变体** ⇒ 线上形态是裸字符串（不是 `{UnloadProject:{}}`）。
+                topics.clear();
             }
             return { value: {} };
         },
@@ -120,14 +130,16 @@ function fakeKernel(options = {}) {
          *
          * ⚠️ 这一条**不**看内核侧的主题集合：它是「内核推了一条事件」这件事
          * 本身（内核侧订没订由 `emitMemoryMapIfSubscribed` 单独守）。
+         *
+         * ⚠️ **v0.31**：事件多了 `loaded` 与 `revision` 两个字段（裁决 M）。
          */
-        emitMemoryMap(description, pending = false) {
+        emitMemoryMap(description, pending = false, loaded = false, revision = 0) {
             const handlers = subs.get("memory.map");
             if (!handlers || handlers.size === 0) return false;
             const event = {
                 variant: "MemoryMap",
                 topic: "memory.map",
-                value: { description, pending },
+                value: { description, pending, loaded, revision },
             };
             for (const fn of handlers) fn(event);
             return true;
@@ -319,11 +331,19 @@ describe("板级内存图 · 编辑器（规格 §3.3）", () => {
             { commandRouter: router },
         );
         const cmd = router.sent.find((c) => c && typeof c === "object" && "SetMemoryMap" in c);
+        // ⚠️ **契约 v7（v0.31 · D-137）**：`SetMemoryMap` **多了一个**
+        // `expected_revision` 字段（并发丢更新看得见）⇒ 线上字段是**这两个**
+        // ⇒ 断言跟着契约走（不是「前端自己加的字段」）。
         assert.deepEqual(
-            Object.keys(cmd.SetMemoryMap),
-            ["description"],
-            "`SetMemoryMap` 只带一整份描述，不带「当前值 + 补丁」",
+            Object.keys(cmd.SetMemoryMap).sort(),
+            ["description", "expected_revision"],
+            "`SetMemoryMap` 带一整份描述 + 期望修订号，不带「当前值 + 补丁」",
         );
+        assert.equal(
+            cmd.SetMemoryMap.ops, undefined,
+            "`SetMemoryMap` **不带**差量操作（差量走 `PatchMemoryMap`）",
+        );
+        assert.deepEqual(cmd.SetMemoryMap.description, USER_BOARD);
     });
 
     test("C-5 校验失败（E_PLT-07）⇒ **界面上说出来**（不静默、只进日志不行）", async () => {
@@ -1107,6 +1127,456 @@ describe("板档案与多板并存（STAGE-15 · C-1 ~ C-10）", () => {
         assert.ok(
             !/\b(1024|4096|1000000000000)\b/.test(note.textContent),
             `前端不许显示区间常量：${note.textContent}`,
+        );
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 第 14 批（STAGE-16 · v0.31）· Lane C —— 差量 / 修订号 / 卸载（D-137 / D-139）
+//
+// 本套件盯住验收 C-1 ~ C-14：
+//
+//   C-1  提交时**带上** `expected_revision`（内核事件带来的那个）
+//   C-2  **没收到过** `memory.map` 事件 ⇒ `expected_revision` 为 `null`
+//   C-3  改一段的 size ⇒ 提交的是 **`PatchMemoryMap`** ⇒ 只有那一段的 op
+//   C-4  删一段 ⇒ 载荷里是 `RemoveRegion` ⇒ base 正确
+//   C-5  改预算 ⇒ 载荷里是 `SetBudget` ⇒ 两个预算字段都带上
+//   C-6  改 `id`（元数据）⇒ 提交的是**整份替换**（`SetMemoryMap`）
+//   C-7  段**重排** ⇒ 差量**按 base 定位** ⇒ 命中同一条
+//   C-8  `E_PLT-13`（修订号冲突）⇒ **如实显示**在错误区（不吞掉）
+//   C-9  「卸载工程」按钮 ⇒ 发出 `UnloadProject` ⇒ 不发别的契约命令
+//   C-10 卸载之后 ⇒ **五条流全部被重订**（D-45 / D-46 同形状）
+//   C-11 卸载之后 ⇒ 前端缓存**清空**（寄存器 / 波形 / 反汇编 / console）
+//   C-12 「卸载工程」**不**清「当前工程」的记忆 ⇒ 「重新装载工程」仍可用
+//   C-13 编辑器**没有**第二个预算输入框（裁决 L）
+//   C-14 差量提交成功后 ⇒ 「已被内核接受」的那一份**逐字段等于草稿**
+//
+// ⚠️ **判据是族 + 码，不靠文案**（与本文件既有口径一致）。
+// ---------------------------------------------------------------------------
+
+/**
+ * 一块**两段**的板（字面量，不从被测实现反推）—— C-7 的「段重排」要用。
+ */
+const TWO_REGION_BOARD = {
+    schema_version: 1,
+    id: "two-region-board",
+    name: "两段板",
+    priority: 100,
+    auto_selectable: false,
+    region_budget_bytes: 8388608,
+    regions: [
+        { kind: "ram", base: 2147483648, size: 8388608 },
+        { kind: "rom", base: 4096, size: 1048576 },
+    ],
+};
+
+/**
+ * 装一套「**卸载路径**」用的服务接线。
+ *
+ * ⚠️ **用真的 M-10**（不是替身）⇒ 「卸载之后寄存器缓存被清空」这条断言
+ * 看的是**真的**缓存 ⇒ 替身自己编的数骗不了人。
+ *
+ * ⚠️ **前端侧（router 侧）的订阅**由这些**真的**接线建立：
+ * M-10 订 `sim.registers` + `sim.state.delta`；`wireWaveform` 订
+ * `waveform.history`；`wireConsole` 订 `sim.console`；`wireMemoryMap` 订
+ * `memory.map` ⇒ **正好五条**（裁决 F 点名的那五条）。
+ *
+ * @param {object} router
+ * @returns {Promise<object>} the services object
+ */
+async function unloadServices(router) {
+    const m10 = await importFront("services/m10_registermemory.js");
+    const registerMemory = await m10.mountRegisterMemory({
+        commandRouter: router,
+        viewStore: m03,
+    });
+    return {
+        commandRouter: router,
+        registerMemory,
+        waveform: app.wireWaveform(router),
+        console: app.wireConsole(router),
+        memoryMap: app.wireMemoryMap(router),
+        debug: app.wireDebug(router),
+    };
+}
+
+/**
+ * 提交一次草稿（走 app 层的真实路径）。
+ *
+ * @param {object} router
+ * @param {object} draft — 草稿
+ */
+async function submitDraft(router, draft) {
+    m03.setState("memory-map", (prev) => ({ ...prev, draft }));
+    await app.handleCommand(
+        { action: "submit-memory-map", params: { description: mm.draftToDescription(draft) } },
+        { commandRouter: router },
+    );
+}
+
+/**
+ * 找一条命令（按变体名）。
+ *
+ * @param {object[]} sent
+ * @param {string} variant
+ * @returns {object|undefined}
+ */
+function findCommand(sent, variant) {
+    return sent.find((c) => c && typeof c === "object" && variant in c);
+}
+
+describe("板级内存图 · 差量与期望修订号（STAGE-16 · C-1 ~ C-8）", () => {
+    test("C-1 提交时**带上** `expected_revision`（内核事件带来的那个）", async () => {
+        setup();
+        const router = fakeKernel();
+        app.wireMemoryMap(router);
+        router.emitMemoryMap(USER_BOARD, false, true, 7);
+        const draft = mm.draftFromDescription(USER_BOARD);
+        draft.regions[0].size = "4194304";
+        await submitDraft(router, draft);
+        const cmd = findCommand(router.sent, "PatchMemoryMap");
+        assert.ok(cmd, "改一段的 size 应当走差量");
+        assert.equal(
+            cmd.PatchMemoryMap.expected_revision, 7,
+            "必须带上内核事件里的修订号（并发丢更新才看得见）",
+        );
+    });
+
+    test("C-2 **没收到过** `memory.map` 事件 ⇒ `expected_revision` 为 `null`（不检查）", async () => {
+        setup();
+        const router = fakeKernel();
+        await submitDraft(router, mm.draftFromDescription(USER_BOARD));
+        const cmd = findCommand(router.sent, "SetMemoryMap");
+        assert.ok(cmd, "没有基底 ⇒ 整份替换");
+        assert.equal(
+            cmd.SetMemoryMap.expected_revision, null,
+            "没收到过事件 ⇒ 不检查修订号（传 null）",
+        );
+    });
+
+    test("C-3 改一段的 size ⇒ 提交的是 `PatchMemoryMap`，载荷里**只有**那一段的 op", async () => {
+        setup();
+        const router = fakeKernel();
+        app.wireMemoryMap(router);
+        router.emitMemoryMap(USER_BOARD, false, true, 3);
+        const draft = mm.draftFromDescription(USER_BOARD);
+        draft.regions[0].size = "4194304";
+        await submitDraft(router, draft);
+        const cmd = findCommand(router.sent, "PatchMemoryMap");
+        assert.ok(cmd, "改一段的 size 不该重发整图");
+        assert.equal(
+            findCommand(router.sent, "SetMemoryMap"), undefined,
+            "不该同时发整份替换（那是两条路 ⇒ 两个真相）",
+        );
+        assert.equal(cmd.PatchMemoryMap.ops.length, 1, "载荷里**只有**那一段的 op");
+        assert.deepEqual(cmd.PatchMemoryMap.ops[0], {
+            UpsertRegion: { spec: { kind: "ram", base: 2147483648, size: 4194304 } },
+        });
+    });
+
+    test("C-4 删一段 ⇒ 载荷里是 `RemoveRegion`，base 正确", async () => {
+        setup();
+        const router = fakeKernel();
+        app.wireMemoryMap(router);
+        router.emitMemoryMap(USER_BOARD, false, true, 3);
+        const draft = mm.draftFromDescription(USER_BOARD);
+        draft.regions = draft.regions.filter((r) => r.kind === "ram");
+        await submitDraft(router, draft);
+        const cmd = findCommand(router.sent, "PatchMemoryMap");
+        assert.ok(cmd, "删一段应当走差量");
+        assert.deepEqual(cmd.PatchMemoryMap.ops, [
+            { RemoveRegion: { base: 1073741824 } },
+        ]);
+    });
+
+    test("C-5 改预算 ⇒ 载荷里是 `SetBudget`，两个预算字段都带上", async () => {
+        setup();
+        const router = fakeKernel();
+        app.wireMemoryMap(router);
+        router.emitMemoryMap(USER_BOARD, false, true, 3);
+        const draft = mm.draftFromDescription(USER_BOARD);
+        draft.region_budget_bytes = "16777216";
+        await submitDraft(router, draft);
+        const cmd = findCommand(router.sent, "PatchMemoryMap");
+        assert.ok(cmd, "改预算应当走差量");
+        assert.equal(cmd.PatchMemoryMap.ops.length, 1, "载荷里只有预算那一条 op");
+        const op = cmd.PatchMemoryMap.ops[0];
+        assert.deepEqual(Object.keys(op), ["SetBudget"], "操作名必须是 `SetBudget`");
+        assert.deepEqual(
+            Object.keys(op.SetBudget).sort(),
+            ["max_region_bytes", "region_budget_bytes"],
+            "两个预算字段都要带上（契约层那两个字段）",
+        );
+        assert.equal(op.SetBudget.region_budget_bytes, 16777216);
+    });
+
+    test("C-6 改 `id`（元数据）⇒ 提交的是**整份替换**（`SetMemoryMap`）", async () => {
+        setup();
+        const router = fakeKernel();
+        app.wireMemoryMap(router);
+        router.emitMemoryMap(USER_BOARD, false, true, 3);
+        const draft = mm.draftFromDescription(USER_BOARD);
+        draft.id = "another-board";
+        await submitDraft(router, draft);
+        assert.equal(
+            findCommand(router.sent, "PatchMemoryMap"), undefined,
+            "改了元数据不许走差量（差量不覆盖元数据 ⇒ 裁决 D）",
+        );
+        const cmd = findCommand(router.sent, "SetMemoryMap");
+        assert.ok(cmd, "改了元数据必须走整份替换");
+        assert.equal(cmd.SetMemoryMap.description.id, "another-board");
+    });
+
+    test("C-7 段**重排** ⇒ 差量**按 base 定位** ⇒ 命中同一条", async () => {
+        setup();
+        const router = fakeKernel();
+        app.wireMemoryMap(router);
+        router.emitMemoryMap(TWO_REGION_BOARD, false, true, 3);
+        // ⚠️ **重排**（数组顺序变了）+ 改其中一段的 size。
+        const draft = mm.draftFromDescription(TWO_REGION_BOARD);
+        draft.regions.reverse();
+        draft.regions[0].size = "2097152"; // 改的是 **ROM** 那一段（现在是第 0 段）
+        await submitDraft(router, draft);
+        const cmd = findCommand(router.sent, "PatchMemoryMap");
+        assert.ok(cmd, "应当走差量");
+        assert.equal(
+            cmd.PatchMemoryMap.ops.length, 1,
+            "重排不该产生额外的 op（按 base 定位 ⇒ 命中同一条）",
+        );
+        assert.deepEqual(cmd.PatchMemoryMap.ops[0], {
+            UpsertRegion: { spec: { kind: "rom", base: 4096, size: 2097152 } },
+        });
+    });
+
+    test("C-7 纯重排（内容没变）⇒ **不发命令**（差量为空 ⇒ 不白涨修订号）", async () => {
+        setup();
+        const router = fakeKernel();
+        app.wireMemoryMap(router);
+        router.emitMemoryMap(TWO_REGION_BOARD, false, true, 3);
+        const draft = mm.draftFromDescription(TWO_REGION_BOARD);
+        draft.regions.reverse();
+        await submitDraft(router, draft);
+        assert.equal(
+            router.sent.length, 0,
+            "什么都没改（只是顺序变了）⇒ 不该发任何命令",
+        );
+        const note = dom.document.getElementById("kernel-note").textContent;
+        assert.ok(note.includes("没有改动"), `必须明说「没有改动」：${note}`);
+    });
+
+    test("C-8 `E_PLT-13`（修订号冲突）⇒ **如实显示**在错误区（不吞掉）", async () => {
+        setup();
+        const router = fakeKernel({
+            rejectPatchMemoryMap: message.protocolError(
+                "E_PLT-13",
+                "期望的修订号与当前的不一致",
+            ),
+        });
+        app.wireMemoryMap(router);
+        router.emitMemoryMap(USER_BOARD, false, true, 3);
+        const draft = mm.draftFromDescription(USER_BOARD);
+        draft.regions[0].size = "4194304";
+        await submitDraft(router, draft);
+        const box = $("[data-memory-map-error]");
+        assert.ok(box, "面板上没有错误块（冲突被吞掉了？）");
+        assert.equal(box.getAttribute("data-error-code"), "E_PLT-13");
+        assert.equal(box.getAttribute("data-error-family"), "PLT", "族必须是 PLT");
+        assert.equal(box.getAttribute("data-error-scenario"), "13");
+        assert.ok(box.textContent.includes("E_PLT-13"), "错误块里必须能看到错误码");
+        assert.ok(
+            box.textContent.includes("刷新"),
+            `必须说清下一步（刷新后再提交）：${box.textContent}`,
+        );
+    });
+
+    test("修订号显示在面板上（没收到过事件 ⇒ `0`；收到过 ⇒ 那个数）", () => {
+        setup();
+        const el = $("[data-mmap-revision]");
+        assert.ok(el, "面板上没有修订号元素");
+        assert.equal(el.textContent, "0", "没收到过事件时必须显示 0（不许是 undefined / 空）");
+        const router = fakeKernel();
+        app.wireMemoryMap(router);
+        router.emitMemoryMap(USER_BOARD, false, true, 9);
+        assert.equal($("[data-mmap-revision]").textContent, "9");
+    });
+});
+
+describe("板级内存图 · 卸载工程（STAGE-16 · C-9 ~ C-13）", () => {
+    test("C-9 「卸载工程」按钮 ⇒ 发出 `UnloadProject` ⇒ **不发别的契约命令**", async () => {
+        setup();
+        const router = fakeKernel();
+        const services = await unloadServices(router);
+        let detail = null;
+        const listener = (ev) => { detail = ev.detail; };
+        dom.window.addEventListener("riscv:command", listener);
+        $("[data-action='unload-project']").dispatchEvent(new Event("click"));
+        dom.window.removeEventListener("riscv:command", listener);
+        assert.ok(detail, "点「卸载工程」没有发出命令信号");
+        assert.equal(detail.action, "unload-project");
+        const before = router.sent.length;
+        await app.handleCommand(detail, services);
+        const sent = router.sent.slice(before);
+        // ⚠️ **unit 变体** ⇒ 线上形态是**裸字符串** `"UnloadProject"`。
+        assert.ok(
+            sent.includes("UnloadProject"),
+            `必须发出 UnloadProject，实际发出：${JSON.stringify(sent)}`,
+        );
+        const others = sent.filter(
+            (c) => !(c && typeof c === "object" && "Subscribe" in c) && c !== "UnloadProject",
+        );
+        assert.deepEqual(
+            others, [],
+            `卸载不许发别的契约命令（重订订阅除外）：${JSON.stringify(others)}`,
+        );
+    });
+
+    test("C-10 卸载之后 ⇒ **五条流全部被重订**（漏一个就是静默停流）", async () => {
+        setup();
+        const router = fakeKernel();
+        const services = await unloadServices(router);
+        // ⚠️ **先订阅上**（内核侧）⇒ 卸载把它们清掉 ⇒ 之后必须全在。
+        await services.waveform.subscribeProbeStream();
+        await services.console.subscribeConsoleStream();
+        await services.memoryMap.subscribeMemoryMapStream();
+        await services.registerMemory.resubscribe();
+        assert.equal(router.topics.size, 4, "前置：四条内核侧订阅都在");
+        await app.handleCommand({ action: "unload-project" }, services);
+        // ① **内核侧**：卸载清空了主题集合 ⇒ 之后必须被重订回来。
+        for (const topic of ["sim.registers", "sim.waveform", "sim.console", "memory.map"]) {
+            assert.equal(
+                router.topics.has(topic), true,
+                `卸载之后 ${topic} 没有被重订 —— 那条流会静默停掉`,
+            );
+        }
+        // ② **前端侧**：五条事件流的前端订阅还活着。
+        for (const topic of [
+            "sim.registers",
+            "sim.state.delta",
+            "waveform.history",
+            "sim.console",
+            "memory.map",
+        ]) {
+            assert.equal(
+                router.subs.has(topic), true,
+                `前端侧 ${topic} 的订阅没了 —— 那条流没人消费了`,
+            );
+        }
+    });
+
+    test("C-11 卸载之后 ⇒ 前端缓存**清空**（寄存器 / 波形 / 反汇编 / console）", async () => {
+        setup();
+        const router = fakeKernel();
+        const services = await unloadServices(router);
+        // ⚠️ 造出「上一个程序」的状态（寄存器 / 波形 / 反汇编 / console）。
+        //
+        // ⚠️ **寄存器缓存必须真的非零**：否则「缓存被清空」这条断言会**恒
+        // 真**（清零一个本来就是零的缓存 ⇒ 看不出区别）⇒ 那样它就**钉不住**
+        // 任何东西（实测：把「卸载不清寄存器缓存」这个变异放进去，全量仍
+        // 409 条全绿 ⇒ 判别力缺口 ⇒ 补上**真的**非零缓存）。
+        for (const fn of router.subs.get("sim.registers") ?? []) {
+            fn({ variant: "Registers", topic: "sim.registers", value: { index: 1, values: [42] } });
+        }
+        assert.equal(
+            services.registerMemory.getSnapshot().gpr[1], 42,
+            "前置：寄存器缓存里必须有一个非零值",
+        );
+        m03.setState("waveform", {
+            wave: { channels: [{ id: "x", label: "x", edges: 1, lastValue: 1 }] },
+        });
+        m03.setState("debug", {
+            sim: { disasm: [{ addr: 1, code: 2, mnemonic: "nop", width: 4, file: null, line: null }] },
+        });
+        m03.setState("terminal", { term: { bytes: "hello" } });
+        assert.equal(m03.getState("terminal").term.bytes, "hello");
+        await app.handleCommand({ action: "unload-project" }, services);
+        assert.deepEqual(
+            services.registerMemory.getSnapshot().gpr,
+            new Array(32).fill(0),
+            "寄存器缓存没被清空（状态必须跟着会话一起重建）",
+        );
+        assert.equal(services.registerMemory.getSnapshot().pc, 0, "PC 没被清空");
+        assert.deepEqual(m03.getState("waveform").wave.channels, [], "波形缓存没被清空");
+        assert.deepEqual(m03.getState("debug").sim.disasm, [], "反汇编面板没被清空");
+        assert.equal(m03.getState("terminal").term.bytes, "", "console 已收字节没被清空");
+    });
+
+    test("C-12 「卸载工程」**不**清「当前工程」的记忆 ⇒ 「重新装载工程」仍可用", async () => {
+        setup();
+        const router = fakeKernel();
+        const services = await unloadServices(router);
+        const project = { id: "p", name: "工程" };
+        await app.loadProjectIntoKernel(services, project);
+        await app.handleCommand({ action: "unload-project" }, services);
+        const count = () => router.sent.filter(
+            (c) => c && typeof c === "object" && "LoadProject" in c,
+        ).length;
+        const before = count();
+        await app.handleCommand({ action: "reload-project" }, services);
+        assert.equal(
+            count(), before + 1,
+            "卸载之后「重新装载工程」必须仍可用（用户不必重新选文件）",
+        );
+        const note = dom.document.getElementById("kernel-note").textContent;
+        assert.ok(
+            !note.includes("还没有装载过工程"),
+            `卸载不该清掉「当前工程」的记忆：${note}`,
+        );
+    });
+
+    test("C-13 编辑器**没有**第二个预算输入框（裁决 L）", () => {
+        setup();
+        assert.equal(
+            $$("[data-mmap-field='region_budget_bytes']").length, 1,
+            "预算输入框必须只有一个",
+        );
+        assert.equal(
+            $$("[data-mmap-field='max_region_bytes']").length, 0,
+            "不许出现第二个预算旋钮（运行期上界由内核管）",
+        );
+        const note = $("[data-mmap-budget-note]");
+        assert.ok(note, "没有预算说明");
+        assert.ok(
+            !note.textContent.includes("运行期物理占用"),
+            `旧措辞（同一个数还是运行期物理占用的上界）必须改掉：${note.textContent}`,
+        );
+        assert.ok(
+            !note.textContent.includes("同一个数"),
+            `旧措辞必须改掉：${note.textContent}`,
+        );
+        assert.ok(
+            note.textContent.includes("声明大小上限"),
+            `必须说清这是「每段的声明大小上限」：${note.textContent}`,
+        );
+    });
+});
+
+describe("板级内存图 · 差量提交后的落库门槛（STAGE-16 · C-14）", () => {
+    test("C-14 差量提交成功后 ⇒ 「已被内核接受」的那一份**逐字段等于草稿**", async () => {
+        setup();
+        const router = fakeKernel();
+        app.wireMemoryMap(router);
+        router.emitMemoryMap(USER_BOARD, false, true, 2);
+        const draft = mm.draftFromDescription(USER_BOARD);
+        draft.regions[0].size = "4194304";
+        await submitDraft(router, draft);
+        const state = m03.getState("memory-map");
+        const accepted = state.acceptedDescription;
+        assert.ok(accepted, "提交成功后必须记下被内核接受的那一份");
+        assert.ok(
+            mm.sameDescription(accepted, mm.draftToDescription(draft)),
+            "被接受的那一份必须与草稿**逐字段相同**（裁决 I 的推论）",
+        );
+        assert.equal(
+            mm.isDraftAccepted(state), true,
+            "「已被内核接受」这个推导量必须为真",
+        );
+        assert.equal(
+            $("[data-mmap-validated]").getAttribute("data-mmap-validated"), "1",
+            "面板上的校验状态必须变成「已接受」",
+        );
+        assert.equal(
+            $("[data-action='save-memory-map']").hasAttribute("disabled"), false,
+            "落库门槛必须照旧可用（差量提交成功后也能存板）",
         );
     });
 });

@@ -454,6 +454,27 @@ export async function mountRegisterMemory(options = {}) {
         await resubscribe();
     }
 
+    /**
+     * 清**寄存器缓存**（新会话 = 新状态）。
+     *
+     * ⚠️ **状态必须跟着会话一起重建**（D-45 的坑）：卸载工程之后，视图上
+     * 留着**上一个程序**的寄存器 / PC / 虚拟时间 ⇒ 用户看到的是一份**不
+     * 存在**的状态。
+     *
+     * ⚠️ **只清缓存，不碰订阅** ⇒ 重订是**另一件事**（`resubscribe()`）⇒
+     * 两件事各归各处（与 `waveform.reset()` / `console.reset()` 同形）。
+     *
+     * @returns {void}
+     */
+    function reset() {
+        for (let i = 0; i < gpr.length; i += 1) gpr[i] = 0;
+        pc = 0;
+        timeVirt = 0;
+        for (const key of Object.keys(memory)) delete memory[key];
+        notify();
+        flushRender();
+    }
+
     return {
         readRegisters,
         writeRegister,
@@ -464,6 +485,8 @@ export async function mountRegisterMemory(options = {}) {
         subscribe,
         ensureSubscribed,
         resubscribe,
+        /** 清缓存（新会话 = 新状态；不动订阅）。 */
+        reset,
         /** Force an immediate store push (the gate uses it instead of waiting). */
         flushRender,
         close() {

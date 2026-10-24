@@ -74,8 +74,14 @@ import { PLATFORM_SCHEMA_VERSION } from "../../lib/message.js";
  */
 export { PLATFORM_SCHEMA_VERSION };
 
-/** 契约信封的版本（只用于**文案**提醒，不是描述的版本号）。 */
-export const CONTRACT_SCHEMA_VERSION = 6;
+/**
+ * 契约信封的版本（只用于**文案**提醒，不是描述的版本号）。
+ *
+ * ⚠️ **v0.31（契约 v7）**：它跟着 `front/lib/message.js` 的
+ * `SCHEMA_VERSION` 走 ⇒ 契约层升版时**这里也要跟着改**（否则面板上的
+ * 文案会撒谎）。
+ */
+export const CONTRACT_SCHEMA_VERSION = 7;
 
 /** 器件类型（`DeviceSpec` 的四个变体，snake_case 线上名）。 */
 export const DEVICE_KINDS = Object.freeze(["gpio", "uart16550", "clint", "plic"]);
@@ -539,6 +545,171 @@ export function isDraftAccepted(state) {
     const accepted = state?.acceptedDescription ?? null;
     if (!accepted) return false;
     return sameDescription(accepted, draftToDescription(currentDraft(state)));
+}
+
+// ---------------------------------------------------------------------------
+// 差量更新（STAGE-16 · v0.31 · D-137）
+//
+// ⚠️ **差量的基底 = 最近一次 `memory.map` 事件带回来的生效图**（裁决 I）
+// ⇒ 与宿主作用的对象**是同一个东西** ⇒ 不需要额外的「草稿基座」状态
+// ⇒ 少一个可能不同步的地方。
+//
+// ⚠️ **按 `base` 定位 ⇒ 与数组顺序无关**（台账判别力 ③）。
+//
+// ⚠️ **元数据变了走整份替换**（裁决 D）：`id` / `name` / `priority` /
+// `auto_selectable` 是**板的身份** ⇒ 改身份属于「换一块板」。
+// ---------------------------------------------------------------------------
+
+/**
+ * 一个段的**定位键**（`base`）。
+ *
+ * ⚠️ 契约层保证**生效图里不可能有两个同 `base` 的段**（V-6 重叠检查）
+ * ⇒ 按 `base` 定位**永远唯一**。
+ *
+ * @param {unknown} region
+ * @returns {number}
+ */
+export function regionBase(region) {
+    return Number(region?.base ?? 0) >>> 0;
+}
+
+/**
+ * 两份描述的**元数据**（板的身份）一样吗。
+ *
+ * ⚠️ **只比这四个字段**（裁决 D）：`schema_version` 两边恒等（前端**只**
+ * 写 `PLATFORM_SCHEMA_VERSION`）⇒ 不必比；`description`（备注）**前端
+ * 不暴露** ⇒ 也不必比。
+ *
+ * @param {object|null|undefined} a
+ * @param {object|null|undefined} b
+ * @returns {boolean}
+ */
+export function sameMemoryMapMetadata(a, b) {
+    if (!a || !b) return false;
+    return String(a.id ?? "") === String(b.id ?? "")
+        && String(a.name ?? "") === String(b.name ?? "")
+        && (Number(a.priority ?? 0) >>> 0) === (Number(b.priority ?? 0) >>> 0)
+        && (a.auto_selectable === true) === (b.auto_selectable === true);
+}
+
+/**
+ * 运行期上界（`max_region_bytes`）的**归一化值**。
+ *
+ * ⚠️ **缺省与 `null` 是同一件事**（契约层：`None` ⇒ 等于声明期那个）
+ * ⇒ 归一化成 `null` 才能比较 ⇒ 否则「基底没有这个键」与「草稿没有这个
+ * 键」会被判成「不同」⇒ 差量**永远不空**。
+ *
+ * @param {object|null|undefined} description
+ * @returns {number|null}
+ */
+function normalizedMaxRegionBytes(description) {
+    const raw = description?.max_region_bytes;
+    if (raw === null || raw === undefined) return null;
+    return Number(raw) >>> 0;
+}
+
+/**
+ * **差量**：草稿 vs 生效图 ⇒ 一串差量操作。
+ *
+ * ⚠️ **按 `base` 定位**（不是按数组下标）⇒ 段**重排**不产生任何操作
+ * ⇒ 命中**同一条**（台账判别力 ③）。
+ *
+ * ⚠️ **「内容不同」比字段，不比对象引用** ⇒ 用既有那份
+ * {@link sameDescription}（键序无关）⇒ **不另写第二份比较**。
+ *
+ * ⚠️ **外设段的 `spec` 是完整的段对象**（含 `kind`）⇒ 线上形状就是
+ * `{"UpsertRegion": {"spec": {"kind": "peripheral", ...}}}`。
+ *
+ * @param {object|null|undefined} baseDescription — **当前生效的图**
+ * @param {object|null|undefined} draftDescription — 草稿转成的线上描述
+ * @returns {Array<object>} 差量操作（外部标签：键 = Rust 变体名）
+ */
+export function diffMemoryMapOps(baseDescription, draftDescription) {
+    /** @type {Array<object>} */
+    const ops = [];
+    const baseRegions = Array.isArray(baseDescription?.regions) ? baseDescription.regions : [];
+    const draftRegions = Array.isArray(draftDescription?.regions) ? draftDescription.regions : [];
+
+    /** 生效图：按 `base` 索引。 */
+    const baseByBase = new Map();
+    for (const region of baseRegions) baseByBase.set(regionBase(region), region);
+
+    /** 草稿里出现过的 `base`。 */
+    const draftBases = new Set();
+    for (const region of draftRegions) {
+        const base = regionBase(region);
+        draftBases.add(base);
+        const current = baseByBase.get(base);
+        // ⚠️ **不在生效图里** 或 **内容不同** ⇒ 插入 / 替换。
+        if (!current || !sameDescription(current, region)) {
+            ops.push({ UpsertRegion: { spec: region } });
+        }
+    }
+    // ⚠️ 生效图里有、草稿里没有的段 ⇒ 删掉。
+    for (const region of baseRegions) {
+        const base = regionBase(region);
+        if (!draftBases.has(base)) ops.push({ RemoveRegion: { base } });
+    }
+
+    // ⚠️ **预算**：两个字段任一不同 ⇒ `SetBudget`。
+    const baseBudget = Number(baseDescription?.region_budget_bytes ?? 0) >>> 0;
+    const draftBudget = Number(draftDescription?.region_budget_bytes ?? 0) >>> 0;
+    const baseMax = normalizedMaxRegionBytes(baseDescription);
+    const draftMax = normalizedMaxRegionBytes(draftDescription);
+    if (baseBudget !== draftBudget || baseMax !== draftMax) {
+        ops.push({
+            SetBudget: {
+                region_budget_bytes: draftBudget,
+                max_region_bytes: draftMax,
+            },
+        });
+    }
+    return ops;
+}
+
+/**
+ * 一次提交**该怎么走**：整份替换 / 差量 / 什么都不发。
+ *
+ * ⚠️ **判据住在前端**（裁决 D）：只有前端知道草稿的元数据 ⇒ 规则**只写
+ * 在这一处** ⇒ 宿主不做这个判断。
+ *
+ * ⚠️ **没有基底**（还没收到过 `memory.map` 事件）⇒ **整份替换**（没有
+ * 差量可算）。
+ *
+ * ⚠️ **差量为空**（什么都没改）⇒ `mode = "none"` ⇒ 前端**不发命令**
+ * ⇒ 免得白涨一次修订号。
+ *
+ * @param {object|null|undefined} baseDescription — **当前生效的图**
+ * @param {object|null|undefined} draftDescription — 草稿转成的线上描述
+ * @returns {{mode: "replace"|"patch"|"none", ops: Array<object>}}
+ */
+export function planMemoryMapUpdate(baseDescription, draftDescription) {
+    if (!baseDescription) return { mode: "replace", ops: [] };
+    if (!sameMemoryMapMetadata(baseDescription, draftDescription)) {
+        return { mode: "replace", ops: [] };
+    }
+    const ops = diffMemoryMapOps(baseDescription, draftDescription);
+    if (ops.length === 0) return { mode: "none", ops: [] };
+    return { mode: "patch", ops };
+}
+
+/**
+ * 板级内存图的**错误文案**（内核的原文 + 前端的一句白话）。
+ *
+ * ⚠️ **`E_PLT-13`（修订号冲突）必须说清下一步**（规格 §4.3）：用户的
+ * 提交是基于一张**已经被改过**的图 ⇒ 告诉他「刷新后再提交」⇒ 否则用户
+ * 只会看到一串看不懂的码。
+ *
+ * @param {string} code — 错误码（如 `"E_PLT-13"`）
+ * @param {string} message — 内核给的消息
+ * @returns {string}
+ */
+export function describeMemoryMapError(code, message) {
+    const text = String(message ?? "");
+    if (String(code ?? "") === "E_PLT-13") {
+        return `${text}${text ? " —— " : ""}图已被改，请刷新后再提交。`;
+    }
+    return text;
 }
 
 // ---------------------------------------------------------------------------
@@ -1041,6 +1212,19 @@ export function renderMemoryMapPanel(state) {
           `改板只换总线、不动固件）。</p>`
         : "";
 
+    // ⚠️ **修订号**（裁决 A · v0.31）：它是**内核事件带回来的**⇒ 与
+    // 「当前生效的图」住在**同一个对象**里（不是另设的标志位）⇒
+    // 提交时原样带上 ⇒ 并发丢更新看得见（`E_PLT-13`）。
+    //
+    // ⚠️ **没收到过事件 ⇒ 显示 0**（不许显示 `undefined` / 空）。
+    const revision = Number(memoryMap?.revision ?? 0);
+    const loaded = memoryMap?.loaded === true;
+    const revisionBox =
+        `<p class="muted" data-mmap-revision-line>` +
+        `内存图修订号：<span data-mmap-revision>${escapeHtml(String(revision))}</span>` +
+        ` · <span data-mmap-loaded="${loaded ? "1" : "0"}">${loaded ? "已装载工程" : "未装载工程"}</span>` +
+        `</p>`;
+
     const regions = Array.isArray(draft.regions) ? draft.regions : [];
     const memoryRows = [];
     const peripheralRows = [];
@@ -1060,6 +1244,7 @@ export function renderMemoryMapPanel(state) {
             <h3>板级内存图（M-14 · 板级配置）</h3>
             ${pendingBox}
             ${errorBox}
+            ${revisionBox}
             <p class="muted">
                 描述格式版本固定为 <code>${PLATFORM_SCHEMA_VERSION}</code>
                 （<code>PLATFORM_SCHEMA_VERSION</code>）——它与契约信封的
@@ -1072,7 +1257,7 @@ export function renderMemoryMapPanel(state) {
                 ${field({ field: "priority", label: "优先级 priority", value: draft.priority ?? "0" })}
                 ${field({
                     field: "region_budget_bytes",
-                    label: "region_budget_bytes（字节）",
+                    label: "每段的声明大小上限（region_budget_bytes，字节）",
                     value: draft.region_budget_bytes ?? "0",
                     hex: hex32(parseNumber(draft.region_budget_bytes) ?? 0),
                     extra: "data-mm-budget",
@@ -1080,9 +1265,9 @@ export function renderMemoryMapPanel(state) {
             </div>
             <p class="muted" data-mmap-budget-note>
                 ⚠️ <strong>V-7</strong>：任一 RAM / ROM 段的<strong>声明</strong> size
-                不得超过 <code>region_budget_bytes</code>（超出 ⇒ 内核报 <code>E_PLT-07</code>）；
-                同一个数还是<strong>运行期物理占用</strong>的上界 ⇒ 想换 1 GiB RAM
-                就必须把它一起抬到 1 GiB。
+                不得超过 <code>region_budget_bytes</code>（超出 ⇒ 内核报 <code>E_PLT-07</code>）——
+                它是<strong>每段的声明大小上限</strong>；运行期的占用上限由内核
+                按各段的声明值另算，<strong>界面只提供这一个旋钮</strong>。
             </p>
             <h4>RAM / ROM 段</h4>
             <table class="map-table" data-mmap-memory-rows>
@@ -1106,7 +1291,8 @@ export function renderMemoryMapPanel(state) {
                 <button type="button" data-action="add-peripheral">+ 外设窗口</button>
             </div>
             <div class="debug-toolbar">
-                <button type="button" data-action="submit-memory-map">提交板级内存图（SetMemoryMap）</button>
+                <button type="button" data-action="submit-memory-map">提交板级内存图（整份替换 / 差量）</button>
+                <button type="button" data-action="unload-project">卸载工程</button>
                 <button type="button" data-action="reload-project">重新装载工程</button>
                 <button type="button" data-action="load-current">从当前生效的图载入</button>
                 <button type="button" data-action="new-draft">重建草稿</button>

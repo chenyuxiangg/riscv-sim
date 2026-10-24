@@ -406,6 +406,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Command.writeConsole([104, 105])),
             // 契约 v6 新增：设置板级内存图（用户在前端配的那张板）。
             variantOf(Command.setMemoryMap({})),
+            // 契约 v7 新增：卸载工程（unit 变体）+ 差量更新。
+            variantOf(Command.unloadProject()),
+            variantOf(Command.patchMemoryMap([], null)),
         ].sort();
         assert.deepEqual(js, rust, "JS 命令变体与 Rust CommandPayload 不一致");
     });
@@ -432,8 +435,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Event.traceState(true, 5, 2)),
             // 契约 v4 新增：guest 的 console 字节流。
             variantOf(Event.console([104, 105])),
-            // 契约 v6 新增：当前生效的板级内存图。
-            variantOf(Event.memoryMap({}, false)),
+            // 契约 v6 新增：当前生效的板级内存图（v7 多了 loaded / revision）。
+            variantOf(Event.memoryMap({}, false, true, 0)),
         ].sort();
         assert.deepEqual(js, rust, "JS 事件变体与 Rust EventPayload 不一致");
     });
@@ -532,7 +535,10 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 // 契约 v5：往当前会话唯一的 UART0 写字节。
                 WriteConsole: Command.writeConsole([104, 105]),
                 // 契约 v6：设置板级内存图（用户在前端配的那张板）。
-                SetMemoryMap: Command.setMemoryMap({}),
+                SetMemoryMap: Command.setMemoryMap({}, null),
+                // 契约 v7：卸载工程（unit 变体）+ 差量更新。
+                UnloadProject: Command.unloadProject(),
+                PatchMemoryMap: Command.patchMemoryMap([], null),
             },
             EventPayload: {
                 Tick: Event.tick(0, 0),
@@ -553,8 +559,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 TraceState: Event.traceState(true, 5, 2),
                 // 契约 v4：guest 的 console 字节流。
                 Console: Event.console([104, 105]),
-                // 契约 v6：当前生效的板级内存图。
-                MemoryMap: Event.memoryMap({}, false),
+                // 契约 v6：当前生效的板级内存图（v7 多了 loaded / revision）。
+                MemoryMap: Event.memoryMap({}, false, true, 0),
             },
         };
 
