@@ -11,6 +11,42 @@
 //! 3. Runs the M-13 ISS until the guest writes to `tohost`.
 //! 4. Decodes the HTIF verdict and prints it.
 //!
+//! ## The RAM window —— **the platform description is the single source**
+//!
+//! The window this harness maps is **not** written down here: it is
+//! **asked for** — [`PlatformDescription::ram_window`] picks the RAM
+//! segment with the **highest base** out of the **built-in platform
+//! description** (compiled in with `include_str!`, so the harness still
+//! reads **no** file at run time).
+//!
+//! ⚠️ **Why that matters** (STAGE-19 §6.2 · 裁决 I): the **reference
+//! side** (Spike) needs the *same* window, and until now it had its
+//! **own hand-copied** copy of the address ⇒ ⇒ the two could drift
+//! silently.  Now the reference side **reads** the window this harness
+//! prints (`--print-memory`) ⇒ ⇒ the two agree **by construction**.
+//!
+//! ### The honest wording about the two memory maps
+//!
+//! ⚠️ The two sides do **not** expose the **same** address set:
+//!
+//! | window  | candidate side (this harness) | reference side (Spike) |
+//! |---------|-------------------------------|-----------------------|
+//! | **RAM** | the description's RAM window  | **the same one** (read from `--print-memory`) |
+//! | **stack** | `[0x7fff_e000, 0x7fff_f000)` | `[0x7fff_f000, 0x7fff_f000 + 4096)` |
+//!
+//! ⇒ ⇒ **the RAM window agrees by construction**; the **stack window is
+//! each side's own feature** (Spike puts its initial stack page at
+//! `0x7fff_f000` and the reference script keeps that one segment) ⇒ ⇒
+//! "the memory map **both** sides expose" would be **inaccurate** ⇒ ⇒
+//! do not write that.
+//!
+//! ## `--print-memory`
+//!
+//! Prints the RAM window as `base:size` — **decimal** (Spike's
+//! multi-region `-m` only accepts decimal) — and exits.  It is a
+//! **query**, not a run ⇒ ⇒ it prints **no** `VERDICT` line; the
+//! reference side reads that one line and feeds it to Spike.
+//!
 //! ## The HTIF verdict protocol
 //!
 //! Spike's built-in HTIF treats `tohost` as a 64-bit word, but the
@@ -76,27 +112,51 @@ use std::rc::Rc;
 
 use riscv_sim_contract::error::PlatformError;
 use riscv_sim_contract::model::SimState;
+use riscv_sim_contract::platform::PlatformDescription;
+use riscv_sim_kernel::kernel_host::platform::{BUILTIN_JSON_DEFAULT, PLATFORM_ID_DEFAULT};
 use riscv_sim_kernel::m06_elf::{DefaultLoader, Kind, LoadImage};
 use riscv_sim_kernel::m11_symbol::SymbolTable;
 use riscv_sim_kernel::m13_iss::{Iss, IssConfig, StepOutcome};
-use riscv_sim_kernel::m14_bus::{AccessDir, Bus, BusWidth};
+use riscv_sim_kernel::m14_bus::{AccessDir, Bus, BusWidth, REGION_KIND_RAM};
 
-/// Base of the RAM window the loaded image lives in.
+/// The platform description this harness runs on —— **compiled in**.
 ///
-/// The golden environment's linker script places the image at
-/// `0x8000_0000` (the RISC-V reset vector), which is also where Spike's
-/// default memory starts.
-const RAM_BASE: u32 = 0x8000_0000;
+/// ⚠️ **Zero run-time dependency**: the host's `include_str!` puts the
+/// description **inside the binary** ⇒ the harness still reads **no**
+/// file at run time (and still runs without a network).
+///
+/// ⚠️ The JSON comes from the **host's own constant** ⇒ ⇒ the path of
+/// the built-in description is written down in **exactly one** place
+/// (`kernel_host::platform`) ⇒ ⇒ this harness cannot end up pointing at
+/// a **different** file than the host does ⇒ ⇒ no drift.
+///
+/// ⚠️ This harness still does **not** use the host: it composes M-06 /
+/// M-11 / M-13 / M-14 directly and never builds a `KernelHost` ⇒ ⇒ it
+/// only *borrows* the description's **text**.
+const PLATFORM_JSON: &str = BUILTIN_JSON_DEFAULT;
 
-/// Size of the RAM window, in bytes.
+/// The **id** of that description —— this harness's **one** explicit
+/// choice.
 ///
-/// This must match the **reference** side's memory map exactly
-/// (`spike -m0x80000000:0x400000`).  If the candidate mapped only the
-/// image's own span, a program touching an address *outside* the image
-/// but *inside* Spike's memory would fault on the candidate while the
-/// reference ran fine — a false mismatch.  Both sides therefore expose
-/// the same 4 MiB.
-const RAM_BYTES: u32 = 0x0040_0000;
+/// ⚠️ **Chosen by id, never by address** (STAGE-19 §6.2) ⇒ ⇒ "which
+/// board do we run on" has **exactly one** landing spot (this constant)
+/// ⇒ ⇒ **no** address is written down here.
+///
+/// ⚠️ **Why `default`**: the golden corpus's images are linked at
+/// `0x8000_0000` and span a few kilobytes ⇒ `default`'s high RAM
+/// segment (4 MiB) holds them and is the **smallest** window that does
+/// ⇒ ⇒ the reference side's `-m` does not claim 128 MiB for nothing
+/// (that is `qemu-virt`'s high segment — a real RTOS needs it).
+const PLATFORM_ID: &str = PLATFORM_ID_DEFAULT;
+
+/// The base the image is loaded at —— **the RISC-V reset vector**.
+///
+/// ⚠️ This is a **guard**, **not** the window's definition: the window
+/// comes from the **description** ([`PlatformDescription::ram_window`])
+/// ⇒ ⇒ but the **base** must be the reset vector ⇒ ⇒ a description
+/// that moves the base ⇒ ⇒ **fails loudly** instead of drifting
+/// silently (STAGE-19 §6.2).
+const REQUIRED_RAM_BASE: u32 = 0x8000_0000;
 
 /// Stack window.
 ///
@@ -109,10 +169,16 @@ const RAM_BYTES: u32 = 0x0040_0000;
 /// of that window (`0x7fff_f000`), so a downward-growing stack lands
 /// inside the mapped region.
 ///
-/// ⚠️ The window deliberately ends **one page below** `RAM_BASE`.  An
-/// earlier revision used `STACK_BASE = 0x7fff_f000` and set
+/// ⚠️ **This window is the candidate side's own feature** —— the
+/// reference side (Spike) keeps its **initial stack page** at
+/// `0x7fff_f000` instead ⇒ ⇒ the two sides' **stack** windows are
+/// **not** the same ⇒ ⇒ only the **RAM** window is shared (see the
+/// module docs).
+///
+/// ⚠️ The window deliberately ends **one page below** the image's base.
+/// An earlier revision used `STACK_BASE = 0x7fff_f000` and set
 /// `sp = STACK_BASE + STACK_BYTES`, which computes to `0x8000_0000` —
-/// the **exact address the image is loaded at**.  It only worked because
+/// the **exact address the image is loaded at**. It only worked because
 /// the golden env overwrote `sp` before the first push; any program
 /// that did not go through that env would have pushed over its own
 /// code.
@@ -144,14 +210,19 @@ const HTIF_PAYLOAD_MASK: u64 = 0x0000_ffff_ffff_ffff;
 
 // Compile-time invariants of the memory map.
 //
-// The stack window must not overlap the loaded image, and the initial
+// ⚠️ The stack window must not overlap the loaded image, and the initial
 // `sp` must sit *inside* the mapped stack window — the RISC-V stack
 // grows downwards, so the first push lands at `sp - 4`.  An earlier
 // revision mapped the window *above* `sp`, which put the first push
 // outside the region (review finding M-5).
+//
+// ⚠️ The image's base is **not** a constant of this file any more —— it
+// comes from the **description** —— but the description's base **must**
+// be `REQUIRED_RAM_BASE` (checked at run time, with a loud error) ⇒ ⇒
+// this compile-time invariant may use it.
 const _: () = {
     assert!(
-        STACK_TOP <= RAM_BASE,
+        STACK_TOP <= REQUIRED_RAM_BASE,
         "the stack window must not overlap the image"
     );
     assert!(STACK_TOP > STACK_BASE, "the stack window must not be empty");
@@ -160,6 +231,92 @@ const _: () = {
         "the first push (sp - 4) must land inside the stack window"
     );
 };
+
+/// The platform description this harness runs on —— **parsed + validated**.
+///
+/// ⚠️ **One parser, one validator**: the description is parsed by
+/// `serde` (the contract's own derive) and judged by the contract's
+/// [`PlatformDescription::validate`] ⇒ ⇒ this harness does **not** own a
+/// second set of description rules.
+fn platform_description() -> Result<PlatformDescription, String> {
+    let description: PlatformDescription = serde_json::from_str(PLATFORM_JSON)
+        .map_err(|err| format!("the built-in platform description is not valid JSON: {err}"))?;
+    description
+        .validate()
+        .map_err(|err| format!("the built-in platform description is invalid: {err}"))?;
+    if description.id != PLATFORM_ID {
+        return Err(format!(
+            "the built-in platform description's id is {:?}, this harness expects {PLATFORM_ID:?}",
+            description.id
+        ));
+    }
+    Ok(description)
+}
+
+/// The RAM window this harness maps —— **asked for, not written down**.
+///
+/// ⚠️ **The single source of truth is the platform description**
+/// (STAGE-19 裁决 I): "which RAM segment is *the* one" is decided by
+/// the contract's [`PlatformDescription::ram_window`] (the segment with
+/// the **highest base**) ⇒ ⇒ this harness writes **no** address ⇒ ⇒ the
+/// reference side, which **reads** the printed value, cannot drift away
+/// from it.
+///
+/// ⚠️ The **base** is still guarded: it must be the RISC-V reset vector
+/// ⇒ ⇒ a description that moves the base **fails loudly** here instead
+/// of silently running the image somewhere else.
+fn ram_window(description: &PlatformDescription) -> Result<(u32, u64), String> {
+    let (base, size) = description
+        .ram_window()
+        .ok_or_else(|| "the platform description declares no RAM region".to_string())?;
+    if base != REQUIRED_RAM_BASE {
+        return Err(format!(
+            "the RAM window's base must be 0x{REQUIRED_RAM_BASE:08x} (the RISC-V reset \
+             vector), the description says 0x{base:08x}"
+        ));
+    }
+    Ok((base, size))
+}
+
+/// The window **as the reference side reads it**: `base:size`, **decimal**.
+///
+/// ⚠️ **Decimal is not a choice**: Spike's multi-region `-m` parser only
+/// accepts decimal numbers (its single-region form does accept hex)
+/// ⇒ ⇒ the reference side pastes this line **as is** ⇒ ⇒ no base
+/// conversion anywhere.
+fn format_window(window: (u32, u64)) -> String {
+    format!("{}:{}", window.0, window.1)
+}
+
+/// **T-5**: the window we **print** must be the window we **actually
+/// mapped**.
+///
+/// ⚠️ The criterion is read from the **bus' own export**
+/// ([`Bus::export_map`]) ⇒ ⇒ that is *what is really mapped* ⇒ ⇒ this is
+/// **not** the "what I print equals what I print" tautology ⇒ ⇒ whoever
+/// replaces the window with a hand-written constant **fails here**
+/// (STAGE-19 §6.2 · T-5).
+fn assert_mapped_window(bus: &Bus, printed: (u32, u64)) -> Result<(), String> {
+    let map = bus.export_map();
+    let mapped = map.regions.iter().any(|region| {
+        region.kind == REGION_KIND_RAM
+            && region.base == printed.0
+            && u64::from(region.size) == printed.1
+    });
+    if mapped {
+        return Ok(());
+    }
+    let actual: Vec<String> = map
+        .regions
+        .iter()
+        .map(|region| format!("0x{:08x}:{}:{}", region.base, region.size, region.kind))
+        .collect();
+    Err(format!(
+        "T-5: the RAM window we print ({}) is not the window we mapped (the bus has {})",
+        format_window(printed),
+        actual.join(", ")
+    ))
+}
 
 /// Verdict of one golden run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,7 +355,11 @@ impl Verdict {
 /// Parsed command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Config {
-    path: String,
+    /// The ELF to run —— **absent** in `--print-memory` mode (that mode
+    /// queries the **description**, not an image).
+    path: Option<String>,
+    /// Print the RAM window and exit (a **query**, not a run).
+    print_memory: bool,
     tohost_override: Option<u32>,
     budget: u64,
     verbose: bool,
@@ -209,6 +370,7 @@ struct Config {
 /// `VERDICT ERROR` line plus exit code 3 (review finding H-2).
 fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut path: Option<String> = None;
+    let mut print_memory = false;
     let mut tohost_override: Option<u32> = None;
     let mut budget = DEFAULT_BUDGET;
     let mut verbose = false;
@@ -216,6 +378,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "--print-memory" => print_memory = true,
             "--tohost" => {
                 let raw = it.next().ok_or("--tohost needs a value")?;
                 tohost_override = Some(parse_hex_u32(raw)?);
@@ -239,9 +402,17 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
         }
     }
 
-    let path = path.ok_or("missing <elf> argument")?;
+    // ⚠️ `--print-memory` **does not** need an ELF: the window comes from
+    // the **description** ⇒ ⇒ the reference side can ask for it once,
+    // before it runs anything.
+    let path = if print_memory {
+        path
+    } else {
+        Some(path.ok_or("missing <elf> argument")?)
+    };
     Ok(Config {
         path,
+        print_memory,
         tohost_override,
         budget,
         verbose,
@@ -269,27 +440,81 @@ fn main() -> ExitCode {
 
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!(
-            "usage: riscv-golden <elf> [--tohost <hex>] [--budget <n>] [-v]\n\
+            "usage: riscv-golden [--print-memory] <elf> [--tohost <hex>] [--budget <n>] [-v]\n\
              \n\
-             Runs the ELF on the M-13 ISS and prints the HTIF verdict."
+             Runs the ELF on the M-13 ISS and prints the HTIF verdict.\n\
+             \n\
+             --print-memory prints the RAM window (base:size, decimal) and exits.\n\
+             It is a query, not a run: it prints no VERDICT line."
         );
         return ExitCode::SUCCESS;
     }
 
-    let verdict = match parse_args(&args) {
-        Ok(cfg) => run(&cfg),
+    let cfg = match parse_args(&args) {
+        Ok(cfg) => cfg,
         Err(msg) => {
             eprintln!("riscv-golden: {msg}");
-            Verdict::Error(msg)
+            println!("{}", Verdict::Error(msg).line());
+            return ExitCode::from(3);
         }
     };
+
+    // ⚠️ `--print-memory` is a **query**: it prints the window and exits
+    // ⇒ ⇒ **no** VERDICT line ⇒ ⇒ stdout is exactly the one line the
+    // reference side pastes into Spike's `-m`.
+    if cfg.print_memory {
+        return print_memory();
+    }
+
+    let verdict = run(&cfg);
     println!("{}", verdict.line());
     ExitCode::from(verdict.exit_code())
 }
 
+/// Print the RAM window (`base:size`, decimal) and exit.
+///
+/// ⚠️ This is what the **reference side** reads: `tools/golden-run.sh`
+/// runs it once and feeds the line to Spike's `-m` ⇒ ⇒ the reference
+/// side no longer **writes down** an address ⇒ ⇒ the two sides' RAM
+/// windows agree **by construction** (STAGE-19 裁决 I).
+fn print_memory() -> ExitCode {
+    let window = match platform_description().and_then(|description| ram_window(&description)) {
+        Ok(window) => window,
+        Err(msg) => {
+            eprintln!("riscv-golden: {msg}");
+            println!("{}", Verdict::Error(msg).line());
+            return ExitCode::from(3);
+        }
+    };
+    println!("{}", format_window(window));
+    ExitCode::SUCCESS
+}
+
 /// Load and run one image, returning its verdict.
 fn run(cfg: &Config) -> Verdict {
-    let bytes = match read_capped(&cfg.path) {
+    // ⚠️ `--print-memory` never reaches here ⇒ ⇒ a path is always present
+    // in a run ⇒ ⇒ the guard below is unreachable in practice (it is here
+    // because the type says "maybe").
+    let Some(path) = cfg.path.as_deref() else {
+        return Verdict::Error("missing <elf> argument".to_string());
+    };
+
+    // --- the platform description (the RAM window's single source) --------
+    //
+    // ⚠️ 解析 + 校验都在**契约层**那一份 ⇒ ⇒ 本 harness 不写第二套规则。
+    let description = match platform_description() {
+        Ok(description) => description,
+        Err(msg) => return Verdict::Error(msg),
+    };
+    // The window we are going to **print** (the reference side reads it)
+    // and the window we are going to **map** —— **one** value, **one**
+    // source ⇒ ⇒ the two cannot drift apart.
+    let window = match ram_window(&description) {
+        Ok(window) => window,
+        Err(msg) => return Verdict::Error(msg),
+    };
+
+    let bytes = match read_capped(path) {
         Ok(b) => b,
         Err(e) => return Verdict::Error(format!("read:{}", e.message)),
     };
@@ -332,26 +557,41 @@ fn run(cfg: &Config) -> Verdict {
     }
 
     // --- memory map -------------------------------------------------------
-    // The RAM window is the reference side's window (4 MiB at RAM_BASE),
-    // widened if the image itself reaches past it.
-    let mut ram_end = RAM_BASE + RAM_BYTES;
-    for (paddr, seg) in &image.segments {
-        let end = paddr.wrapping_add(seg.len() as u32);
-        if end > ram_end {
-            ram_end = end;
+    //
+    // ⚠️ **The window is the description's RAM segment** —— there is
+    // **no** hand-written address left here ⇒ ⇒ the mapped window **is**
+    // the one printed to the reference side ⇒ ⇒ the two sides agree **by
+    // construction** (STAGE-19 裁决 I).
+    //
+    // ⚠️ **No widening by the image's span any more**: widening would
+    // make the candidate map **more** than the reference side's `-m`
+    // ⇒ ⇒ the two drift (and that drift is **invisible** in a green
+    // run) ⇒ ⇒ an image that does not fit now **fails loudly** (the
+    // `load@0x…` error below) instead of silently widening.
+    let map_bytes = match u32::try_from(window.1) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return Verdict::Error(format!(
+                "the RAM window's size {} does not fit in 32 bits",
+                window.1
+            ))
         }
-    }
-    let ram_bytes = ram_end
-        .wrapping_sub(RAM_BASE)
-        .next_multiple_of(0x1000)
-        .max(RAM_BYTES);
+    };
 
     let mut bus = Bus::new();
-    if let Err(e) = bus.map_ram(RAM_BASE, ram_bytes, &[]) {
+    if let Err(e) = bus.map_ram(window.0, map_bytes, &[]) {
         return Verdict::Error(format!("map_ram:{}", e.message));
     }
     if let Err(e) = bus.map_ram(STACK_BASE, STACK_BYTES, &[]) {
         return Verdict::Error(format!("map_stack:{}", e.message));
+    }
+
+    // --- T-5: the printed window == the window we actually mapped ---------
+    //
+    // ⚠️ 判据取自**总线自己的导出** ⇒ ⇒ 那是**真正映射了的东西** ⇒ ⇒
+    // 谁把窗口换成手写常量，**这里**就红。
+    if let Err(msg) = assert_mapped_window(&bus, window) {
+        return Verdict::Error(msg);
     }
 
     for (paddr, seg) in &image.segments {
@@ -533,6 +773,7 @@ fn lookup_symbol(image: &LoadImage, want: &str) -> Result<Option<u32>, PlatformE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use riscv_sim_contract::platform::RegionSpec;
 
     /// Build a minimal but valid ELF32 little-endian image with one
     /// symbol table holding a single named symbol.
@@ -792,7 +1033,8 @@ mod tests {
             std::env::temp_dir().join(format!("riscv-golden-runaway-{}.elf", std::process::id()));
         std::fs::write(&path, synth_runaway_elf()).expect("write the runaway image");
         let cfg = Config {
-            path: path.to_string_lossy().into_owned(),
+            path: Some(path.to_string_lossy().into_owned()),
+            print_memory: false,
             tohost_override: None,
             budget: 32,
             verbose: false,
@@ -1038,10 +1280,73 @@ mod tests {
             "-v".to_string(),
         ];
         let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.path, "prog.elf");
+        assert_eq!(cfg.path.as_deref(), Some("prog.elf"));
         assert_eq!(cfg.tohost_override, Some(0x8000_1000));
         assert_eq!(cfg.budget, 1234);
         assert!(cfg.verbose);
+        assert!(!cfg.print_memory);
+    }
+
+    #[test]
+    fn parse_args_accepts_print_memory_without_an_elf() {
+        // ⚠️ `--print-memory` 问的是**描述**，不是镜像 ⇒ ⇒ **不需要** ELF。
+        let cfg = parse_args(&["--print-memory".to_string()]).unwrap();
+        assert!(cfg.print_memory);
+        assert_eq!(cfg.path, None);
+    }
+
+    #[test]
+    fn the_printed_window_is_the_description_s_ram_window() {
+        // ⚠️ T-5 的**前半段**：打印值 == 描述的窗口（**十进制**，`base:size`）。
+        let description = platform_description().expect("the built-in description is valid");
+        let (base, size) = ram_window(&description).expect("the description declares RAM");
+        assert_eq!(base, REQUIRED_RAM_BASE);
+        assert_eq!(description.id, PLATFORM_ID);
+        let printed = format_window((base, size));
+        assert_eq!(printed, format!("{base}:{size}"));
+        // ⚠️ **十进制**：Spike 的多段 `-m` 只吃十进制。
+        assert!(printed.chars().all(|c| c.is_ascii_digit() || c == ':'));
+    }
+
+    #[test]
+    fn a_description_whose_base_is_not_the_reset_vector_is_rejected() {
+        // ⚠️ 护栏：描述改了 base ⇒ ⇒ **明确报错**，不静默漂移。
+        let mut description = platform_description().expect("the built-in description is valid");
+        description.regions = vec![RegionSpec::Ram {
+            base: 0x1000_0000,
+            size: 4096,
+        }];
+        let err = ram_window(&description).expect_err("the base guard must fire");
+        assert!(err.contains("reset vector"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn the_window_follows_the_description() {
+        // ⚠️ 裁决 J 的第 ① 条（「改描述 ⇒ 打印值**跟着变**」）的**缩微版**：
+        //    描述里的 RAM 段改了 ⇒ ⇒ **打印值跟着变** ⇒ ⇒ 窗口**不是**常量
+        //    ⇒ ⇒ 参考侧读到的那一行会**自动**跟着描述变 ⇒ ⇒ 两侧不会漂。
+        //
+        // ⚠️ 真机上那条变异要改**内置描述 JSON**（`kernel_host/platforms/`），
+        //    那份文件**不**归本 lane ⇒ ⇒ 这里用同一份描述的**另一组**段
+        //    来证明「窗口来自描述」这条机制。
+        let mut description = platform_description().expect("the built-in description is valid");
+        description.regions = vec![
+            RegionSpec::Ram {
+                base: 0,
+                size: 4096,
+            },
+            RegionSpec::Ram {
+                base: REQUIRED_RAM_BASE,
+                size: 8 * 1024 * 1024,
+            },
+        ];
+        let (base, size) = ram_window(&description).expect("the description declares RAM");
+        assert_eq!(base, REQUIRED_RAM_BASE);
+        assert_eq!(size, 8 * 1024 * 1024);
+        assert_eq!(
+            format_window((base, size)),
+            format!("{base}:{}", 8 * 1024 * 1024)
+        );
     }
 
     #[test]
