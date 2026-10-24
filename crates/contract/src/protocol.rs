@@ -1207,6 +1207,7 @@ mod tests {
                 size: 0x0010_0000,
             }],
             description: None,
+            wiring: None,
         }
     }
 
@@ -1364,6 +1365,7 @@ mod tests {
                 },
             ],
             description: Some("用户配的板".to_string()),
+            wiring: None,
         };
         let cmd = CommandPayload::SetMemoryMap {
             description: description.clone(),

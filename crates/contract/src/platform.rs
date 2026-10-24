@@ -27,7 +27,7 @@
 //! | layer | what it judges | codes |
 //! | --- | --- | --- |
 //! | **serde** | the *shape* — unknown device kind, missing parameter, wrong parameter type | serde's own error (V-8) |
-//! | **this module** | the *declaration* — version, id, regions, sizes, overlaps, budget, duplicate device id, empty device id, device parameters' legal value domain | `E_PLT-01`..`E_PLT-08` · `E_PLT-12` · `E_PLT-15` |
+//! | **this module** | the *declaration* — version, id, regions, sizes, overlaps, budget, duplicate device id, empty device id, device parameters' legal value domain, the wiring's references | `E_PLT-01`..`E_PLT-08` · `E_PLT-12` · `E_PLT-15` · `E_PLT-16` |
 //! | **the host** | the *lookup* — unknown platform id, unreadable file, malformed file, a stale revision, a delta that targets a missing region | `E_PLT-09`..`E_PLT-11` · `E_PLT-13` · `E_PLT-14` (owned **here**, judged by the host) |
 //! | **M-14** | the *live bus* — unmapped access, region over the runtime budget | `E_BUS-*` |
 //!
@@ -56,7 +56,7 @@ use crate::error::{
     PlatformError, E_PLT_01_SCHEMA_VERSION, E_PLT_02_EMPTY_ID, E_PLT_03_NO_REGIONS,
     E_PLT_04_ZERO_SIZE, E_PLT_05_OVERFLOW, E_PLT_06_OVERLAP, E_PLT_07_OVER_BUDGET,
     E_PLT_08_DUPLICATE_DEVICE_ID, E_PLT_12_PARAMETER_OUT_OF_RANGE, E_PLT_15_DEVICE_EMPTY_ID,
-    PLATFORM_FAMILY,
+    E_PLT_16_WIRING_INVALID, PLATFORM_FAMILY,
 };
 use crate::session::{REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
 
@@ -81,16 +81,24 @@ pub const PLATFORM_SCHEMA_VERSION: u32 = 1;
 /// contract's [`crate::SCHEMA_VERSION`] either ⇒ the three numbers mean
 /// three different things and none of them replaces another:
 ///
-/// | constant | judges | v0.33 |
+/// | constant | judges | v0.34 |
 /// | --- | --- | --- |
 /// | [`crate::SCHEMA_VERSION`] | the **message** shape (the contract envelope) | `7` |
 /// | [`PLATFORM_SCHEMA_VERSION`] | the **description** shape (what a description looks like) | `1` |
-/// | `PLATFORM_RULES_VERSION` | the **legality rules** (which descriptions are legal) | `2` |
+/// | `PLATFORM_RULES_VERSION` | the **legality rules** (which descriptions are legal) | `3` |
 ///
-/// ⚠️ **Version 1** = the rule set **before** V-17 ⇒ **existing** boards
-/// are judged by it ⇒ **version 2** = the rule set **with** V-17 (every
-/// peripheral device's `id` must be non-empty) ⇒ ⇒ the difference
-/// between the two versions is **exactly** V-17.
+/// ⚠️ **Version 1** = the rule set **before** V-17 ⇒ **version 2** = the
+/// rule set **with** V-17 (every peripheral device's `id` must be
+/// non-empty) ⇒ **version 3** = the rule set **with** V-18 / V-19 (the
+/// optional `wiring` section's references must resolve, and its target
+/// PLIC must actually have that source) ⇒ ⇒ each step adds **exactly**
+/// the rules it names and nothing else.
+///
+/// ⚠️ **v0.34 (D-125)**: the rule set **tightened** ⇒ 2 → 3 ⇒ the boards
+/// stored under version 2 go through v0.33's migration path (an
+/// **explicit** prompt, the kernel's verdict, then the stored entry is
+/// **upgraded**) ⇒ ⇒ the front end writes **no** second validator ⇒ the
+/// legality of a description is judged by **this** module only.
 ///
 /// ⚠️ **Every time the rule set is tightened ⇒ this number goes +1.**
 /// That is what makes 「存量怎么办」 (what happens to the boards stored
@@ -102,7 +110,7 @@ pub const PLATFORM_SCHEMA_VERSION: u32 = 1;
 /// ⚠️ **Tightening a rule does NOT change the description's shape** ⇒
 /// [`PLATFORM_SCHEMA_VERSION`] does **not** move with it ⇒ ⇒ no stored
 /// description becomes unreadable.
-pub const PLATFORM_RULES_VERSION: u32 = 2;
+pub const PLATFORM_RULES_VERSION: u32 = 3;
 
 /// The **upper bound** of a CLINT's timer frequency (1 THz).
 ///
@@ -241,6 +249,90 @@ pub struct PlatformDescription {
     /// carry comments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The **wiring** between the devices (optional).
+    ///
+    /// ⚠️ **v0.34 (D-125)**: the wiring between the devices became
+    /// **data** ⇒ the host compiles the interrupt routing from the
+    /// description instead of from a hard-coded table ⇒ "use a different
+    /// board with a different wiring" stops meaning "edit the host".
+    ///
+    /// ⚠️ **Absent ⇒ the host's default wiring** ⇒ an old description
+    /// (one without this key) behaves **byte for byte** as before ⇒ the
+    /// stored boards are **not** invalidated by this batch ⇒ ⇒ this is
+    /// why [`PLATFORM_SCHEMA_VERSION`] does **not** move (裁决 B — the
+    /// same shape as v0.31's `max_region_bytes`).
+    ///
+    /// ⚠️ **`skip_serializing_if`** ⇒ the key is **absent** when there is
+    /// no wiring ⇒ the wire shape of a description without wiring is
+    /// **unchanged** ⇒ the front end's mirror needs no rewrite for the
+    /// boards it already has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wiring: Option<Vec<WiringSpec>>,
+}
+
+/// One **wire** between two devices — the wiring table's row.
+///
+/// ⚠️ **The shape is pinned** (frozen spec STAGE-19 §2.1): the field
+/// names `from` / `to` and the nested `device` / `event` / `source` are
+/// **one word each** ⇒ the host, the front end and the contract layer
+/// must spell them the same way ⇒ a rename on one side turns the
+/// others' tests red instead of drifting silently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WiringSpec {
+    /// The **source** end of the wire.
+    pub from: WiringFrom,
+    /// The **target** end of the wire.
+    pub to: WiringTo,
+}
+
+/// The **source** end of a wire — a device and one of its events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WiringFrom {
+    /// The source device's `id` — must exist in the **same** description's
+    /// device set (rule V-18).
+    pub device: String,
+    /// The event name — currently **only** [`WIRING_EVENT_RX_READY`] is
+    /// allowed (rule V-18).
+    pub event: String,
+}
+
+/// The **target** end of a wire — a device and one of its inputs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WiringTo {
+    /// The target device's `id` — must exist in the **same** description's
+    /// device set (rule V-18) and must be a **PLIC** (rule V-19).
+    pub device: String,
+    /// The target PLIC's source number — must be **below** that PLIC's
+    /// `sources` (rule V-19).
+    pub source: u32,
+}
+
+/// The one event name the wiring vocabulary currently allows:
+/// **`rx_ready`** — a UART's "a byte has arrived" event.
+///
+/// ⚠️ **This is the only place the string lives** ⇒ the host, the front
+/// end and the contract layer all **reference** it ⇒ the vocabulary has
+/// **one** landing spot (one constraint, one landing spot) ⇒ adding a
+/// second event name is a **rule change** (it tightens the rule set ⇒
+/// [`PLATFORM_RULES_VERSION`] goes +1), not a spelling change.
+pub const WIRING_EVENT_RX_READY: &str = "rx_ready";
+
+/// Which wiring rule a description violates — **internal to this
+/// module**.
+///
+/// ⚠️ The **order of the variants** is the **report order**: V-18 is
+/// judged before V-19 ⇒ the frozen spec's order is observable
+/// **structurally** (through [`PlatformDescription::wiring_violation`])
+/// even though the two rules **share** one scenario code (`E_PLT-16`)
+/// ⇒ the code alone cannot tell them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WiringRule {
+    /// **V-18** — the wiring names a device that the map does not
+    /// declare, or an event name outside the vocabulary.
+    V18References,
+    /// **V-19** — the wiring's target is not a PLIC, or its source is not
+    /// below that PLIC's source count.
+    V19Source,
 }
 
 /// One declared region — internally tagged by **`kind`**.
@@ -345,6 +437,8 @@ impl PlatformDescription {
     /// | V-15 | a UART's `irq_line` is not a valid PLIC source id (only when the map has a PLIC) | `E_PLT-12` |
     /// | V-16 | `max_region_bytes` is given and is **zero** (the runtime ceiling must be ≥ 1) | `E_PLT-12` |
     /// | V-17 | a peripheral device's `id` is empty | `E_PLT-15` |
+    /// | V-18 | a `wiring` entry names a device that is **not** in the map (or an unknown event name) | `E_PLT-16` |
+    /// | V-19 | a `wiring` entry's target is not a PLIC, or its `to.source` is **not below** that PLIC's `sources` | `E_PLT-16` |
     ///
     /// ⚠️ **V-2 judges the *description's* `id`** — the **device's** `id`
     /// is judged by **V-17** ⇒ they are two different objects with two
@@ -380,6 +474,19 @@ impl PlatformDescription {
     /// particular **V-9 still comes first** ⇒ **two** devices with an
     /// empty `id` are still rejected by **V-9 / `E_PLT-08`** ⇒ V-17
     /// only ever fires for a **single** empty `id`.
+    ///
+    /// ⚠️ **V-18 / V-19 were appended after V-17** (v0.34 · D-125) ⇒ the
+    /// report order of V-1 ~ V-17 is **unchanged, byte for byte** ⇒ the
+    /// two empty ids are still caught by **V-9** ⇒ and V-18 is judged
+    /// **before** V-19 ⇒ the two rules **share** one scenario code
+    /// (`E_PLT-16`) but their order is still **observable** (through
+    /// [`Self::wiring_violation`]) ⇒ a wiring that is broken in two ways
+    /// reports the **V-18** one.
+    ///
+    /// ⚠️ **A description without a `wiring` section is judged by
+    /// V-1 ~ V-17 only** ⇒ the stored boards (which have no wiring) are
+    /// **not** rejected by the new rules ⇒ the rule set may be tightened
+    /// without invalidating a single stored board.
     ///
     /// ⚠️ **Judgements never look at the message text** — they assert
     /// `family == Platform && scenario == <code>`. Rewording a message
@@ -689,7 +796,169 @@ impl PlatformDescription {
             }
         }
 
+        // V-18 / V-19 — the optional `wiring` section
+        // (v0.34 · D-125 · frozen spec STAGE-19 §2.2).
+        //
+        // ⚠️ **Appended after V-17** ⇒ the report order of V-1 ~ V-17 is
+        // unchanged, byte for byte ⇒ in particular **V-9 still comes
+        // first** ⇒ **two** devices with an empty `id` are still rejected
+        // by **V-9 / `E_PLT-08`** ⇒ V-17 does not take that case away
+        // from V-9 either.
+        //
+        // ⚠️ **V-18 and V-19 share one scenario code** (`E_PLT-16`): a
+        // wiring that names a device that is not there and a wiring whose
+        // source is out of range mean the same thing — 「这条连线非法」
+        // ⇒ one code, not two (the same shape as V-13 / V-14 / V-15
+        // sharing `E_PLT-12`).
+        //
+        // ⚠️ **The two rules are judged in this order** (V-18 first) ⇒ the
+        // order is **observable** through
+        // [`Self::wiring_violation`] even though the code cannot tell
+        // the two apart ⇒ one rule, one landing spot, one order.
+        if let Some((_rule, message)) = self.wiring_violation() {
+            return Err(PlatformError::new(
+                PLATFORM_FAMILY,
+                E_PLT_16_WIRING_INVALID,
+                message,
+            ));
+        }
+
         Ok(())
+    }
+
+    /// The RAM window this description declares — the **base-maximal**
+    /// RAM region's `(base, size)`; `None` when the description declares
+    /// **no** RAM region at all.
+    ///
+    /// ⚠️ **This is the single landing spot of "which RAM segment is *the*
+    /// one"** (frozen spec STAGE-19 §6.2 · 裁决 I): the candidate side
+    /// and the reference side both ask **this** method ⇒ the two can no
+    /// longer drift apart ⇒ the hand-copied addresses go away.
+    ///
+    /// ⚠️ **"Base-maximal", not "largest"**: the segment whose **base** is
+    /// the highest one wins, whatever its size ⇒ the rule is a **total
+    /// order on the base**, not a comparison of sizes ⇒ it is decided by
+    /// the description alone and never by the host's preferences.
+    ///
+    /// ⚠️ **The size is widened to `u64`** — a RAM region's declared size
+    /// is a `u32` in [`RegionSpec`] ⇒ the widening is **lossless** and it
+    /// keeps the window's two halves in the same unit family as the
+    /// reference side's decimal rendering.
+    pub fn ram_window(&self) -> Option<(u32, u64)> {
+        self.regions
+            .iter()
+            .filter_map(|region| match region {
+                RegionSpec::Ram { base, size } => Some((*base, u64::from(*size))),
+                RegionSpec::Rom { .. } | RegionSpec::Peripheral { .. } => None,
+            })
+            .max_by_key(|(base, _)| *base)
+    }
+
+    /// The **first** wiring rule this description violates — `None` when
+    /// the wiring is legal (or absent).
+    ///
+    /// ⚠️ **V-18 is judged before V-19** ⇒ the returned
+    /// [`WiringRule`] is the one the frozen spec's order names ⇒ the
+    /// order is pinned by a **structural** assertion (no message text is
+    /// ever looked at) even though the two rules **share** one scenario
+    /// code and the code alone cannot tell them apart.
+    ///
+    /// ⚠️ **One rule, one landing spot**: this method is the **only**
+    /// place the wiring is judged ⇒ the host does not write a second
+    /// checker for it.
+    fn wiring_violation(&self) -> Option<(WiringRule, String)> {
+        let wiring = self.wiring.as_ref()?;
+        if wiring.is_empty() {
+            return None;
+        }
+
+        // The declared devices' ids — read through the **same** accessor
+        // as V-9's / V-17's ⇒ there is **one** way to get a device's id
+        // in this module ⇒ no second spelling of it.
+        let device_ids: Vec<&str> = self
+            .regions
+            .iter()
+            .filter_map(RegionSpec::device_id)
+            .collect();
+
+        // V-18 — the wiring's references must resolve.
+        for spec in wiring {
+            if !device_ids.contains(&spec.from.device.as_str()) {
+                return Some((
+                    WiringRule::V18References,
+                    format!(
+                        "连线的源器件 {} 不在本描述声明的器件集合里",
+                        spec.from.device
+                    ),
+                ));
+            }
+            if !device_ids.contains(&spec.to.device.as_str()) {
+                return Some((
+                    WiringRule::V18References,
+                    format!(
+                        "连线的目标器件 {} 不在本描述声明的器件集合里",
+                        spec.to.device
+                    ),
+                ));
+            }
+            if spec.from.event != WIRING_EVENT_RX_READY {
+                return Some((
+                    WiringRule::V18References,
+                    format!(
+                        "连线的事件名 {} 不合法（目前只允许 {}）",
+                        spec.from.event, WIRING_EVENT_RX_READY
+                    ),
+                ));
+            }
+        }
+
+        // V-19 — the target must be a PLIC and the source must be below
+        // that PLIC's source count.
+        for spec in wiring {
+            let target = self.regions.iter().find_map(|region| {
+                let RegionSpec::Peripheral { device, .. } = region else {
+                    return None;
+                };
+                (device.id() == spec.to.device).then_some(device)
+            });
+            match target {
+                // ⚠️ **Unreachable in practice**: V-18 has already
+                // checked that the device exists ⇒ the `None` arm only
+                // exists because the compiler cannot know that.
+                None => {
+                    return Some((
+                        WiringRule::V19Source,
+                        format!(
+                            "连线的目标器件 {} 不在本描述声明的器件集合里",
+                            spec.to.device
+                        ),
+                    ));
+                }
+                Some(DeviceSpec::Plic { sources, .. }) => {
+                    if spec.to.source >= *sources {
+                        return Some((
+                            WiringRule::V19Source,
+                            format!(
+                                "连线的目标 PLIC {} 只有 {} 个中断源，而连线用了源号 {}",
+                                spec.to.device, sources, spec.to.source
+                            ),
+                        ));
+                    }
+                }
+                Some(other) => {
+                    return Some((
+                        WiringRule::V19Source,
+                        format!(
+                            "连线的目标器件 {} 是 {}，不是 PLIC",
+                            spec.to.device,
+                            other.kind()
+                        ),
+                    ));
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -922,6 +1191,7 @@ mod tests {
                 },
             ],
             description: None,
+            wiring: None,
         }
     }
 
@@ -1646,6 +1916,7 @@ mod tests {
                 })
                 .collect(),
             description: None,
+            wiring: None,
         }
     }
 
@@ -2762,16 +3033,25 @@ mod tests {
         );
     }
 
-    /// **STAGE-18 A-5** — the **rule set**'s version is `2` and the
-    /// **shape**'s version is still `1` ⇒ the two numbers are **not** the
-    /// same thing and only the first one moved.
+    /// **STAGE-18 A-5** — the **rule set**'s version and the **shape**'s
+    /// version are **not** the same thing ⇒ only the first one ever moves.
+    ///
+    /// ⚠️ **v0.34 (D-125)**: the rule set was **tightened** again (V-18 /
+    /// V-19) ⇒ the rule set's version is now **3** ⇒ the literal `2` of
+    /// this case is **history** ⇒ what survives is the **invariant** it
+    /// pinned (the two numbers are never the same) ⇒ the rule set's
+    /// **current** number is pinned by the STAGE-19 case
+    /// ([`s19_a6_the_rules_version_is_three_and_the_other_two_versions_are_untouched`]).
     ///
     /// ⚠️ Asserted against the **literals**, not against the constants
     /// they define ⇒ a constant cannot vouch for itself.
     #[test]
-    fn s18_a5_the_rules_version_is_two_and_the_shape_version_is_still_one() {
-        assert_eq!(PLATFORM_RULES_VERSION, 2);
+    fn s18_a5_the_shape_version_is_still_one_and_never_equals_the_rules_version() {
         assert_eq!(PLATFORM_SCHEMA_VERSION, 1);
+        assert_ne!(
+            PLATFORM_RULES_VERSION, PLATFORM_SCHEMA_VERSION,
+            "规则集版本与形状版本是两个不同的东西，永不相等"
+        );
     }
 
     /// **STAGE-18 A-6** — **regression**: a non-empty device `id` behaves
@@ -2842,5 +3122,376 @@ mod tests {
             PlatformError::new(PLATFORM_FAMILY, E_PLT_15_DEVICE_EMPTY_ID, "x").to_string(),
             "E_PLT-15: x"
         );
+    }
+
+    // -------------------------------------------------------------
+    // STAGE-19 · v0.34 · D-125 — the **A group**
+    // (frozen spec STAGE-19 §5).
+    //
+    // ⚠️ The **A-n** labels below are the frozen spec STAGE-19 §5's
+    // acceptance items (A-1 ~ A-7) — **not** the older "A-n" labels the
+    // STAGE-12 / STAGE-15 / STAGE-16 / STAGE-18 cases above carry ⇒
+    // every label here says "STAGE-19" and every test name says "s19".
+    // -------------------------------------------------------------
+
+    /// 一条连线 —— **现搭**（不读内核 crate 的任何文件）。
+    ///
+    /// ⚠️ **为什么现搭**：契约层 crate **不得**依赖内核 crate ⇒ 连线
+    /// 的样本只能在这里搭 ⇒ 但搭出来的**形状**与线上一致（外部标签的
+    /// 普通结构体 ⇒ `{"from":{…},"to":{…}}`）⇒ 下面那条钉字符串的用例
+    /// 把它钉死。
+    fn wiring(from: &str, to: &str, source: u32) -> WiringSpec {
+        WiringSpec {
+            from: WiringFrom {
+                device: from.to_string(),
+                event: WIRING_EVENT_RX_READY.to_string(),
+            },
+            to: WiringTo {
+                device: to.to_string(),
+                source,
+            },
+        }
+    }
+
+    /// 一块「有 UART 与 PLIC」的板 —— 两条新规则都拿它当底板。
+    ///
+    /// ⚠️ PLIC 的 `sources = 16` ⇒ 合法源号是 `0 ..= 15` ⇒ 越界样本
+    /// 写 `16` 与 `99` 都能越界。
+    fn board_with_uart_and_plic() -> PlatformDescription {
+        board_with(vec![
+            DeviceSpec::Uart16550 {
+                id: "UART0".to_string(),
+                irq_line: 1,
+                baud_rate: 115_200,
+            },
+            DeviceSpec::Plic {
+                id: "PLIC".to_string(),
+                sources: 16,
+                contexts: 1,
+            },
+        ])
+    }
+
+    /// **STAGE-19 A-1** — a `wiring` entry that names a device the map
+    /// does **not** declare is rejected with `E_PLT-16`.
+    ///
+    /// ⚠️ The judgement is on `family` + `scenario`, **not** on the
+    /// message text.
+    ///
+    /// ⚠️ **Both ends are checked**: the source end and the target end
+    /// ⇒ a wire into a device that is not there is as illegal as a wire
+    /// out of one that is not there.
+    #[test]
+    fn s19_a1_a_wiring_that_names_a_missing_device_is_rejected() {
+        // The **source** end names a device that is not in the map.
+        let mut desc = board_with_uart_and_plic();
+        desc.wiring = Some(vec![wiring("UART9", "PLIC", 3)]);
+        let err = desc.validate().expect_err("引用不存在器件的连线必须被拒");
+        assert_eq!(err.family, PLATFORM_FAMILY);
+        assert_eq!(
+            err.scenario, E_PLT_16_WIRING_INVALID,
+            "V-18 的场景码必须是 E_PLT-16（实际 {err}）"
+        );
+
+        // The **target** end names a device that is not in the map.
+        let mut desc = board_with_uart_and_plic();
+        desc.wiring = Some(vec![wiring("UART0", "PLIC9", 3)]);
+        let err = desc.validate().expect_err("指向不存在器件的连线必须被拒");
+        assert_eq!(err.family, PLATFORM_FAMILY);
+        assert_eq!(
+            err.scenario, E_PLT_16_WIRING_INVALID,
+            "V-18 的场景码必须是 E_PLT-16（实际 {err}）"
+        );
+    }
+
+    /// **STAGE-19 A-2** — a `wiring` entry whose `to.source` is **not
+    /// below** the target PLIC's `sources` is rejected with `E_PLT-16`.
+    ///
+    /// ⚠️ **The bound is exclusive**: `source == sources` is already
+    /// **too large** ⇒ the highest legal source is `sources - 1`.
+    ///
+    /// ⚠️ **The bound comes from the target PLIC** — the one the wire
+    /// names — not from the smallest one in the map ⇒ a board with two
+    /// PLICs is judged per wire.
+    #[test]
+    fn s19_a2_a_wiring_source_beyond_the_plic_source_count_is_rejected() {
+        let mut desc = board_with_uart_and_plic();
+        // `sources = 16` ⇒ source 16 is **not** below it.
+        desc.wiring = Some(vec![wiring("UART0", "PLIC", 16)]);
+        let err = desc.validate().expect_err("越界的中断源号必须被拒");
+        assert_eq!(err.family, PLATFORM_FAMILY);
+        assert_eq!(
+            err.scenario, E_PLT_16_WIRING_INVALID,
+            "V-19 的场景码必须是 E_PLT-16（实际 {err}）"
+        );
+
+        // The highest legal source is accepted.
+        let mut desc = board_with_uart_and_plic();
+        desc.wiring = Some(vec![wiring("UART0", "PLIC", 15)]);
+        assert!(
+            desc.validate().is_ok(),
+            "最高合法源号（sources - 1）本身必须合法"
+        );
+    }
+
+    /// **STAGE-19 A-3** — the new rules are reported **after** V-17, and
+    /// V-18 is reported **before** V-19 ⇒ the report order of V-1 ~ V-17
+    /// is **unchanged, byte for byte**.
+    ///
+    /// ⚠️ **Why the second half needs a structural assertion**: V-18 and
+    /// V-19 **share** one scenario code (`E_PLT-16`) ⇒ the code alone
+    /// cannot tell them apart ⇒ the order is pinned through
+    /// [`PlatformDescription::wiring_violation`] (which returns **which**
+    /// rule was violated) ⇒ the judgement never looks at the message
+    /// text.
+    #[test]
+    fn s19_a3_the_wiring_rules_come_after_v17_and_in_order() {
+        // V-17 (one device with an empty id) + V-18 (a wire naming a
+        // device that is not there) ⇒ **V-17** is reported.
+        let mut desc = board_with(vec![DeviceSpec::Gpio { id: String::new() }]);
+        desc.wiring = Some(vec![wiring("UART0", "PLIC", 3)]);
+        let err = desc.validate().expect_err("必须被拒");
+        assert_eq!(err.family, PLATFORM_FAMILY);
+        assert_eq!(
+            err.scenario, E_PLT_15_DEVICE_EMPTY_ID,
+            "V-17 排在 V-18 之前（实际 {err}）"
+        );
+
+        // V-18 (an event name outside the vocabulary) + V-19 (a source
+        // beyond the PLIC's count) ⇒ **V-18** is reported.
+        //
+        // ⚠️ **Why the event name and not a missing device**: the two
+        // rules share one code ⇒ their order can only be told apart
+        // **structurally** ⇒ and a missing device must stay usable as
+        // the *other* rule's failure mode (the mutation that drops the
+        // existence check must not move this order).
+        let mut desc = board_with_uart_and_plic();
+        let mut spec = wiring("UART0", "PLIC", 99);
+        spec.from.event = "tx_done".to_string();
+        desc.wiring = Some(vec![spec]);
+        assert_eq!(
+            desc.wiring_violation().map(|(rule, _)| rule),
+            Some(WiringRule::V18References),
+            "V-18 排在 V-19 之前"
+        );
+        assert_eq!(
+            desc.validate().expect_err("必须被拒").scenario,
+            E_PLT_16_WIRING_INVALID,
+            "两条规则共用一个场景码"
+        );
+    }
+
+    /// **STAGE-19 A-4** — **two** devices with an empty `id` are still
+    /// rejected by **V-9 / `E_PLT-08`** ⇒ the new rules did not take
+    /// that case away from V-9.
+    #[test]
+    fn s19_a4_two_empty_device_ids_are_still_rejected_by_v9() {
+        let desc = board_with(vec![
+            DeviceSpec::Gpio { id: String::new() },
+            DeviceSpec::Gpio { id: String::new() },
+        ]);
+        let err = desc.validate().expect_err("两个空 id 的器件必须被拒");
+        assert_eq!(err.family, PLATFORM_FAMILY);
+        assert_eq!(
+            err.scenario, E_PLT_08_DUPLICATE_DEVICE_ID,
+            "两个空 id 仍然归 V-9 / E_PLT-08（实际 {err}）"
+        );
+    }
+
+    /// **STAGE-19 A-5** — the new scenario code means **exactly one
+    /// thing** ⇒ it is distinct from the four codes it must not be
+    /// confused with.
+    #[test]
+    fn s19_a5_the_new_scenario_code_is_distinct_from_the_ones_it_must_not_reuse() {
+        assert_eq!(E_PLT_16_WIRING_INVALID, 16);
+        assert_ne!(
+            E_PLT_16_WIRING_INVALID, E_PLT_02_EMPTY_ID,
+            "连线非法不得复用「描述的 id 为空」"
+        );
+        assert_ne!(
+            E_PLT_16_WIRING_INVALID, E_PLT_08_DUPLICATE_DEVICE_ID,
+            "连线非法不得复用「两个器件共用一个 id」"
+        );
+        assert_ne!(
+            E_PLT_16_WIRING_INVALID, E_PLT_12_PARAMETER_OUT_OF_RANGE,
+            "连线非法不得复用「器件参数越界」"
+        );
+        assert_ne!(
+            E_PLT_16_WIRING_INVALID, E_PLT_15_DEVICE_EMPTY_ID,
+            "连线非法不得复用「器件的 id 为空」"
+        );
+        assert_eq!(
+            PlatformError::new(PLATFORM_FAMILY, E_PLT_16_WIRING_INVALID, "x").to_string(),
+            "E_PLT-16: x"
+        );
+    }
+
+    /// **STAGE-19 A-6** — the **rule set**'s version is `3` and the
+    /// other two numbers did **not** move.
+    ///
+    /// ⚠️ Asserted against the **literals**, not against the constants
+    /// they define ⇒ a constant cannot vouch for itself.
+    ///
+    /// ⚠️ **Why only the rule set moves**: the rule set was **tightened**
+    /// (two more rules) ⇒ the **shape** did not change (one optional
+    /// field with a default) ⇒ `PLATFORM_SCHEMA_VERSION` stays **1** and
+    /// the contract envelope is untouched ⇒ `SCHEMA_VERSION` stays **7**.
+    #[test]
+    fn s19_a6_the_rules_version_is_three_and_the_other_two_versions_are_untouched() {
+        assert_eq!(PLATFORM_RULES_VERSION, 3);
+        assert_eq!(crate::SCHEMA_VERSION, 7);
+        assert_eq!(PLATFORM_SCHEMA_VERSION, 1);
+    }
+
+    /// **STAGE-19 A-7** — a description **without** a `wiring` section is
+    /// still legal ⇒ ⇒ the stored boards are **not** rejected by the new
+    /// rules ⇒ ⇒ the rule set may be tightened without invalidating a
+    /// single stored board.
+    ///
+    /// ⚠️ The three **built-in** descriptions are read as **hand-written
+    /// copies** — the contract layer does **not** depend on the kernel
+    /// crate ⇒ the copies live in [`BUILTIN_DEFAULT_RAW`] /
+    /// [`BUILTIN_MINIMAL_RAW`] / [`BUILTIN_QEMU_VIRT_RAW`] ⇒ one copy,
+    /// several readers.
+    #[test]
+    fn s19_a7_a_description_without_wiring_is_still_legal() {
+        assert_eq!(sample().wiring, None, "样例板没有连线段");
+        assert!(sample().validate().is_ok(), "没有连线的描述必须仍然合法");
+
+        for (name, raw) in builtin_copies() {
+            let desc: PlatformDescription = serde_json::from_str(raw)
+                .unwrap_or_else(|e| panic!("内置描述 {name} 必须能解析：{e}"));
+            assert_eq!(desc.wiring, None, "内置描述 {name} 没有连线段");
+            assert!(
+                desc.validate().is_ok(),
+                "内置描述 {name} 必须仍然合法（存量板不被新规则拒）"
+            );
+        }
+    }
+
+    /// **STAGE-19 补强** — an **unknown event name** is rejected with
+    /// `E_PLT-16` too ⇒ the event vocabulary has **one** landing spot
+    /// ([`WIRING_EVENT_RX_READY`]) and it is judged **here**.
+    #[test]
+    fn s19_a_wiring_that_names_an_unknown_event_is_rejected() {
+        let mut desc = board_with_uart_and_plic();
+        let mut spec = wiring("UART0", "PLIC", 3);
+        spec.from.event = "tx_done".to_string();
+        desc.wiring = Some(vec![spec]);
+        let err = desc.validate().expect_err("不认识的事件名必须被拒");
+        assert_eq!(err.family, PLATFORM_FAMILY);
+        assert_eq!(
+            err.scenario, E_PLT_16_WIRING_INVALID,
+            "非法事件名归 E_PLT-16（实际 {err}）"
+        );
+    }
+
+    /// **STAGE-19 补强** — a wire whose target is **not** a PLIC is
+    /// rejected with `E_PLT-16` ⇒ a wire can only land on an interrupt
+    /// controller.
+    #[test]
+    fn s19_a_wiring_that_targets_a_non_plic_is_rejected() {
+        let mut desc = board_with(vec![
+            DeviceSpec::Uart16550 {
+                id: "UART0".to_string(),
+                irq_line: 1,
+                baud_rate: 115_200,
+            },
+            DeviceSpec::Gpio {
+                id: "GPIO0".to_string(),
+            },
+        ]);
+        desc.wiring = Some(vec![wiring("UART0", "GPIO0", 3)]);
+        let err = desc.validate().expect_err("目标不是 PLIC 的连线必须被拒");
+        assert_eq!(err.family, PLATFORM_FAMILY);
+        assert_eq!(
+            err.scenario, E_PLT_16_WIRING_INVALID,
+            "目标不是 PLIC 归 E_PLT-16（实际 {err}）"
+        );
+    }
+
+    /// **STAGE-19 补强** — the `wiring` section's **wire shape** is
+    /// pinned ⇒ the host and the front end spell it the same way.
+    ///
+    /// ⚠️ **The key is absent when there is no wiring** ⇒ the wire shape
+    /// of a description without wiring is **unchanged** ⇒ the boards the
+    /// front end already has need no rewrite.
+    #[test]
+    fn s19_the_wiring_wire_shape_is_pinned() {
+        let mut desc = board_with_uart_and_plic();
+        assert_eq!(desc.wiring, None);
+
+        // No wiring ⇒ no `wiring` key at all.
+        let json = serde_json::to_value(&desc).expect("json");
+        assert!(
+            json.get("wiring").is_none(),
+            "没有连线时 `wiring` 键必须不出现（skip_serializing_if）"
+        );
+        assert_eq!(
+            keys(&json),
+            vec![
+                "auto_selectable",
+                "id",
+                "max_region_bytes",
+                "name",
+                "priority",
+                "region_budget_bytes",
+                "regions",
+                "schema_version",
+            ],
+            "加连线段**没有**改动没有连线的描述的顶层键集"
+        );
+
+        // With wiring ⇒ the exact shape, field by field.
+        desc.wiring = Some(vec![wiring("UART0", "PLIC", 3)]);
+        let json = serde_json::to_value(&desc).expect("json");
+        let entry = json
+            .get("wiring")
+            .and_then(|v| v.as_array())
+            .expect("wiring 数组");
+        assert_eq!(entry.len(), 1, "一条连线就是一个数组元素");
+        assert_eq!(
+            entry[0],
+            serde_json::json!({
+                "from": { "device": "UART0", "event": "rx_ready" },
+                "to": { "device": "PLIC", "source": 3 }
+            }),
+            "连线的线上形状必须逐字固定"
+        );
+
+        // …and it survives the round trip.
+        let text = serde_json::to_string(&desc).expect("json");
+        let back: PlatformDescription = serde_json::from_str(&text).expect("必须能解析");
+        assert_eq!(back.wiring, desc.wiring, "连线段必须逐字段原样回来");
+    }
+
+    /// **STAGE-19 补强** — the **RAM window** is the **base-maximal**
+    /// RAM region ⇒ the single landing spot both sides ask.
+    ///
+    /// ⚠️ **"Base-maximal", not "largest"**: a **small** segment at a
+    /// **high** base wins ⇒ the rule is a comparison of the **base**
+    /// alone ⇒ the host cannot pick a different one by taste.
+    #[test]
+    fn s19_the_ram_window_is_the_base_maximal_ram_region() {
+        let mut desc = sample();
+        // The sample board has a 1 MiB RAM at 0 and a 128 MiB RAM at
+        // 0x8000_0000 ⇒ the latter is the one.
+        assert_eq!(desc.ram_window(), Some((0x8000_0000, 134_217_728)));
+
+        // A **small** segment at a **higher** base wins ⇒ the size does
+        // not decide it.
+        desc.regions.push(RegionSpec::Ram {
+            base: 0x9000_0000,
+            size: 4096,
+        });
+        assert_eq!(desc.ram_window(), Some((0x9000_0000, 4096)));
+
+        // A ROM segment is **not** a RAM window.
+        let mut desc = sample();
+        desc.regions = vec![RegionSpec::Rom {
+            base: 0x9000_0000,
+            size: 4096,
+        }];
+        assert_eq!(desc.ram_window(), None, "没有 RAM 段时必须返回 None");
     }
 }
