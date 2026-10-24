@@ -5,6 +5,7 @@
   "priority": 30,
   "auto_selectable": false,
   "region_budget_bytes": 16777216,
+  "max_region_bytes": null,
   "regions": [
     {
       "kind": "ram",
