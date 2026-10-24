@@ -52,19 +52,27 @@
 // ⇒ 库里不会有**永远装不上的板** ⇒ 前端**仍然不写第二份校验器**。
 
 import { escapeHtml } from "../../lib/escape.js";
+import { PLATFORM_SCHEMA_VERSION } from "../../lib/message.js";
 
 // ---------------------------------------------------------------------------
 // 常量
 // ---------------------------------------------------------------------------
 
 /**
- * 描述格式版本（`crates/contract/src/platform.rs` 的
- * `PLATFORM_SCHEMA_VERSION`）。
+ * 描述格式版本 —— **从契约镜像层 re-export**
+ * （`front/lib/message.js` 的 `PLATFORM_SCHEMA_VERSION`，
+ *  镜像 `crates/contract/src/platform.rs` 的同名常量）。
  *
  * ⚠️ **这与契约信封的 `schema_version`（现在是 6）是两个不同的东西**：前者管
  * 「内存图描述长什么样」，后者管「消息信封长什么样」。
+ *
+ * ⚠️ **为什么 re-export 而不是就地定义**（STAGE-15 裁决 K）：本模块的
+ * 兄弟模块 `front/services/m23_boardstore.js` 也要用同一个值 ⇒ 两处各定义
+ * 一份就是**两个真相**（会漂移）⇒ 常量住在**中立层** `front/lib/` ⇒
+ * 服务层与视图层**都从那里 import** ⇒ **一个定义处**，而依赖方向依然单向
+ * （两边都只依赖 `front/lib/`，**互不依赖**）。
  */
-export const PLATFORM_SCHEMA_VERSION = 1;
+export { PLATFORM_SCHEMA_VERSION };
 
 /** 契约信封的版本（只用于**文案**提醒，不是描述的版本号）。 */
 export const CONTRACT_SCHEMA_VERSION = 6;

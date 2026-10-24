@@ -37,6 +37,8 @@
 // ⚠️ **不另存 `name`** —— `name` 在描述里面 ⇒ 另存一份就是**第二份真相**
 // （名字改了会两边不一致）。
 
+import { PLATFORM_SCHEMA_VERSION } from "../lib/message.js";
+
 // ---------------------------------------------------------------------------
 // 常量
 // ---------------------------------------------------------------------------
@@ -64,18 +66,20 @@ export const BOARD_STORE_NAME = "boards";
 export const BOARD_STORE_KEY = "id";
 
 /**
- * 描述格式版本（= `PLATFORM_SCHEMA_VERSION`）。
+ * 描述格式版本 —— **从契约镜像层 import**
+ * （`front/lib/message.js` 的 `PLATFORM_SCHEMA_VERSION`，
+ *  镜像 `crates/contract/src/platform.rs` 的同名常量）。
  *
  * ⚠️ **这与契约信封的 `schema_version`（现在是 6）是两个不同的东西**：
  * 前者管「内存图描述长什么样」，后者管「消息信封长什么样」。
  *
- * ⚠️ **它与 `front/views/components/memory-map.js` 的
- * `PLATFORM_SCHEMA_VERSION` 是同一个值（描述格式版本 = 1），但本模块
- * **不 import 视图层**（服务层不该依赖视图层 ⇒ 依赖方向要单一）⇒ 两处
- * 若要改**必须同步**。**
- * ⚠️ **本批已登记为待改项**（台账 D-143 同批的新登记之一）。
+ * ⚠️ **为什么住在 `front/lib/` 而不是本模块**（STAGE-15 裁决 K）：
+ * 视图层 `front/views/components/memory-map.js` 要用**同一个**值 ⇒
+ * 两处各定义一份就是**两个真相**（会漂移）⇒ 常量住在**中立层** `front/lib/`
+ * ⇒ 服务层与视图层**都从那里 import** ⇒ **一个定义处**，而依赖方向依然单向
+ * （两边都只依赖 `front/lib/`，**互不依赖** ⇒ 服务层**不 import 视图层**）。
  */
-export const BOARD_DESCRIPTION_SCHEMA_VERSION = 1;
+export { PLATFORM_SCHEMA_VERSION };
 
 // ---------------------------------------------------------------------------
 // 纯逻辑（与存储无关 ⇒ 可测）
@@ -209,11 +213,11 @@ export function isBoardIdTaken(archive, id) {
  */
 export function checkBoardVersion(description) {
     const actual = description?.schema_version;
-    if (actual === BOARD_DESCRIPTION_SCHEMA_VERSION) return { ok: true };
+    if (actual === PLATFORM_SCHEMA_VERSION) return { ok: true };
     return {
         ok: false,
         reason: "version",
-        expected: BOARD_DESCRIPTION_SCHEMA_VERSION,
+        expected: PLATFORM_SCHEMA_VERSION,
         // ⚠️ 缺失（`undefined`）与「版本是 null」在**判据上**都是「不等于
         // 期望版本」⇒ 如实报成 `null`，不假装它是 0。
         actual: actual ?? null,

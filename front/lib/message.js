@@ -62,6 +62,21 @@
 export const SCHEMA_VERSION = 6;
 
 /**
+ * 描述格式版本 — mirrors `riscv_sim_contract::platform::PLATFORM_SCHEMA_VERSION`.
+ *
+ * ⚠️ **这与 `SCHEMA_VERSION`（契约信封的版本）是两个不同的东西**：
+ * 前者管「**内存图描述**长什么样」（描述里那个 `schema_version` 字段），
+ * 后者管「**消息信封**长什么样」。
+ *
+ * ⚠️ **它住在契约镜像层**（`front/lib/`）而不是视图层或服务层 ⇒
+ * `front/views/components/memory-map.js` 与
+ * `front/services/m23_boardstore.js` **都从这里 import** ⇒
+ * **一个定义处**（STAGE-15 裁决 K：初版让服务层「另立一个同值常量」⇒
+ * 那是**两个真相** ⇒ 不接受）。
+ */
+export const PLATFORM_SCHEMA_VERSION = 1;
+
+/**
  * Largest virtual time (picoseconds) that survives a round trip through a
  * JS number without losing a single bit — 2^53.
  *
