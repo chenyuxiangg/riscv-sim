@@ -317,6 +317,7 @@ compose_memory_map(base: &PlatformDescription, ops: &[MemoryMapOp])
 | --- | --- | --- | --- |
 | 1 | **C-5 拆成两半**：原口径「乱序之后提交 ⇒ 内核接受」在**默认前端门禁**里**不可证** —— `front/assets/pkg/` 被 `.gitignore` 忽略 ⇒ 默认门禁用的是 `front/tests/fake-wasm-module.mjs`（**假 wasm**）⇒ ⇒ **默认门禁里没有真内核** ⇒ ⇒ C-5 改为「前端层可证的那半」（带的是**较新**修订号 + 基底是**较新**那张图），「真内核接受」那半落到真机层 **T-6**（注入更旧事件 ⇒ 真提交 ⇒ 真内核接受 ⇒ 不出现 `E_PLT_13`）⇒ ⇒ 两条合起来覆盖原口径 | 实测：`front/tests/fake-wasm-module.mjs` 的文件头注释「The wasm build itself is **not committed** (`front/assets/pkg/` is **gitignored**)」+ `git check-ignore -v front/assets/pkg/` ⇒ 命中 `.gitignore:27` | §5 的 **C-5**（拆）+ §5 的 **T 组**（新增 **T-6**）+ §4.2 + §8 的 lane C 行 |
 | 2 | **T-5 的变异执行位置从 Lane C 移到整合批**：该变异要改**内核源码**（`compose` 的「追加」→「替换第一段」）⇒ ⇒ **跨 lane 的文件所有权** ⇒ ⇒ 放在**整合批**做（那时内核与工具层都在统筹方手里）⇒ ⇒ Lane C 自己的变异改成「**漏登记**一段」（⇒ 期望红：**T-2**），它直接钉 D-147 的核心承诺 | 规格 §8 的 lane 表：Lane C 只拥有 `tools/**`；§10 的变异清单原把跨层变异派给 Lane C ⇒ 与文件所有权冲突 | §10 的**变异自检**行 + §8 的 lane 表（Lane C 行补上「漏登记」那条变异） |
+| 3 | **T-6 的执行位置 = 整合批**：T-6（注入更旧事件 ⇒ 真提交 ⇒ 真内核接受）**依赖 Lane B 的前端护栏** —— 没有护栏时前端会被更旧的事件覆盖 ⇒ 提交带的是**更旧**的修订号 ⇒ 真内核**必然**拒（`E_PLT_13`）⇒ ⇒ Lane C 单独跑时 T-6 **必然红** ⇒ ⇒ 它的**执行**放在**整合批**（三条 lane 都合上之后）⇒ ⇒ Lane C 只负责**写**那段代码（**不**把它写弱成「跳过」） | 实测落点：护栏的唯一落点是 `front/app.js` 的 `wireMemoryMap` 事件处理器（`front/app.js:1253~1265`）⇒ ⇒ 它在 **Lane B 的文件所有权**里 ⇒ ⇒ Lane C 碰不到 | §5 的 **T-6** + §8 的 lane 表（Lane C 行标注「写」与「执行」分属两批）+ §4.1 |
 
 ---
 
