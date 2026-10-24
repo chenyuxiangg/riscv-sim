@@ -1193,7 +1193,10 @@ mod tests {
             (0x7A2u16, "tdata2 —— 调试器 CSR，本平台没有"),
             (0x302u16, "medeleg —— S 模式委派，本平台只有 M 模式"),
             (0x303u16, "mideleg —— S 模式委派，本平台只有 M 模式"),
-            (0x306u16, "mcounteren —— U 模式计数器使能，本平台没有 U 模式"),
+            (
+                0x306u16,
+                "mcounteren —— U 模式计数器使能，本平台没有 U 模式",
+            ),
             (
                 0xC00u16,
                 "cycle —— 用户态影子，它是**推导量**（读 mcycle）不是存储",
@@ -1403,10 +1406,7 @@ mod tests {
         ] {
             assert!(!is_csr_read_only(csr), "csr {csr:#x} 必须可写");
             assert!(csr_is_implemented(csr), "csr {csr:#x} 必须已实现");
-            assert!(
-                !csr_write_is_ignored(csr),
-                "csr {csr:#x} 的写不得被忽略"
-            );
+            assert!(!csr_write_is_ignored(csr), "csr {csr:#x} 的写不得被忽略");
         }
         // 用户态影子：**只读**（地址规则：`0xC00..0xFFF`）。
         for csr in [
