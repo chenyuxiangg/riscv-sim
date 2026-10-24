@@ -409,6 +409,25 @@ is hollow (see the *Cases that are not in the corpus* section above)
    through to `fail` and reports **FAIL 3** ⇒ ⇒ the row has
    discriminating power.
 
+⚠️ **The failure modes carry distinct numbers**, so a red row says *which*
+invariant broke — a single "FAIL 3" for everything would hide the
+difference between "PMP refused nothing" and "PMP refused the wrong
+address":
+
+| verdict | meaning |
+| --- | --- |
+| `PASS` | the reference side's exact behaviour (all three fields match) |
+| `FAIL 3` | the denied store was **not** denied (PMP did not refuse) |
+| `FAIL 4` | the **control group** broke (PMP refused an access entry 1 permits, or the read-back did not match) |
+| `FAIL 5` | the trap happened but `mcause` / `mtval` / `mepc` did **not** match (e.g. PMP refused the *wrong* address) |
+
+⚠️ **Every verdict path clears `mstatus.MPRV` first.**  The verdict travels
+through an `ecall`, and the environment's trap vector turns it into the
+`tohost` write — which is a **store** ⇒ ⇒ with `MPRV` still set, that
+write is itself subject to PMP ⇒ ⇒ if no entry covers the `tohost`
+address, the case could report nothing and would **hang** instead of
+failing ⇒ ⇒ the failure path must be able to report, too.
+
 ⚠️ **The packing pitfall, because it is easy to get wrong.**  RV32's
 `pmpcfg{i}` register holds **four** 8-bit entries (byte 0 = entry 0,
 byte 1 = entry 1) ⇒ ⇒ entry 1 has to be packed into **byte 1 of

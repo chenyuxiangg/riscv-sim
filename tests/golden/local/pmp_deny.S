@@ -47,8 +47,23 @@
 // source, so it keeps working if the upstream tree changes shape (same rule
 // as `unmapped_store.S`).
 //
-//   TESTNUM = 3  ->  the failure path reports FAIL 3 on both sides
-//                   (the encoding is upstream's: tohost = (3 << 1) | 1)
+// ⚠️ **The failure path must always be able to report.**  The verdict travels
+// through an `ecall`, and the environment's trap vector turns it into the
+// `tohost` write — which is a **store** ⇒ ⇒ with `mstatus.MPRV` still set,
+// that write is itself subject to PMP ⇒ ⇒ if no entry covers the `tohost`
+// address, the case could not report anything and would **hang** instead of
+// failing.  ⇒ ⇒ every verdict path clears `MPRV` first (the same rule the
+// probe infrastructure follows).
+//
+// ⚠️ **The failure modes carry distinct numbers**, so a red row says *which*
+// invariant broke:
+//
+//   TESTNUM = 1  ->  PASS (the reference side's exact behaviour)
+//   TESTNUM = 3  ->  the denied store was **not** denied (PMP did not refuse)
+//   TESTNUM = 4  ->  the **control group** broke (PMP refused an access that
+//                    entry 1 permits, or the read-back did not match)
+//   TESTNUM = 5  ->  the trap happened but `mcause` / `mtval` / `mepc` did
+//                    **not** match (e.g. PMP refused the *wrong* address)
 #include "riscv_test.h"
 
 RVTEST_RV32M
@@ -79,7 +94,7 @@ RVTEST_CODE_BEGIN
   li    t3, 0x55
   sw    t3, 0(t1)                // permitted write (entry 1 has W)
   lw    t2, 0(t1)                // permitted read  (entry 1 has R)
-  bne   t2, t3, fail            // the read must deliver the stored value
+  bne   t2, t3, control_failed   // the read must deliver the stored value
 
   // What the trap handler will check.
   li    s0, 7                   // mcause: store access fault
@@ -89,23 +104,41 @@ RVTEST_CODE_BEGIN
   li    t1, 0x1234
 faulting_store:
   sw    t1, 0(s1)               // <- the faulting store
-  j     fail                    // (unreachable: the trap diverts first)
+  j     not_denied              // (unreachable: the trap diverts first)
 
   .align 2
 mtvec_handler:
   csrr  t0, mcause
   csrr  t1, mtval
   csrr  t2, mepc
-  bne   t0, s0, fail
-  bne   t1, s1, fail
-  bne   t2, s2, fail
+  bne   t0, s0, wrong_trap
+  bne   t1, s1, wrong_trap
+  bne   t2, s2, wrong_trap
   // All three match: the store access fault is exactly what the
   // reference side reports.
   li    TESTNUM, 1
+  j     report_pass
+
+control_failed:
+  li    TESTNUM, 4
+  j     report_fail
+
+not_denied:
+  li    TESTNUM, 3
+  j     report_fail
+
+wrong_trap:
+  li    TESTNUM, 5
+  j     report_fail
+
+report_pass:
+  li    t3, 0x20000       // MPRV
+  csrc  mstatus, t3       // ⚠️ clear MPRV ⇒ the `tohost` write is never blocked
   RVTEST_PASS
 
-fail:
-  li    TESTNUM, 3
+report_fail:
+  li    t3, 0x20000       // MPRV
+  csrc  mstatus, t3       // ⚠️ 同上 —— **失败路径必须也能报告**
   RVTEST_FAIL
 
 RVTEST_CODE_END
