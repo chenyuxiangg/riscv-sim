@@ -53,8 +53,8 @@
 
 | 项 | 数字 |
 | --- | --- |
-| `schema_version` | **6** |
-| 命令 | **25** |
+| `schema_version` | **7** |
+| 命令 | **27** |
 | 事件 | **17** |
 | 错误族 | **14**（`CTX` `ISS` `ENG` `BUS` `PER` `INT` `DBG` `OBS` `SNAP` `LDR` `HMS` `STORE` `TRX` `PROTO`） |
 
@@ -84,23 +84,25 @@
 
 | 项 | 状态 |
 | --- | --- |
-| **平台描述** | **一份 JSON 数据**（`crates/kernel/src/kernel_host/platforms/*.json`，编译进二进制）承载**地址空间 + 器件清单** ⇒ 契约层有**唯一**校验器（V-1 ~ V-15）⇒ **换一份描述、宿主代码零改动** |
+| **平台描述** | **一份 JSON 数据**（`crates/kernel/src/kernel_host/platforms/*.json`，编译进二进制）承载**地址空间 + 器件清单** ⇒ 契约层有**唯一**校验器（V-1 ~ V-16）⇒ **换一份描述、宿主代码零改动** |
 | **内置描述** | `default`（低段 1 MiB + 高段 4 MiB + GPIO）· `qemu-virt`（低段 1 MiB + 高段 128 MiB + UART0 / CLINT / PLIC / GPIO）· `minimal`（演示用，`auto_selectable: false` ⇒ **只能被显式指定**） |
 | **自动选档** | 按镜像**实际用到的地址**挑描述（**区间在外层** · 候选按 `priority` 小者优先）⇒ 与历史行为**逐字等价**（六条等价性用例钉住） |
 | **外设窗口大小** | **不写进描述** ⇒ 由器件自己报（`Peripheral::size()`）⇒ 只有一个真相源 |
 | **界面上可配置**（v0.29 批） | **用户能在浏览器里定制 RAM 段与 MMIO 窗口**：新增 `#/memory-map` **板级内存图编辑器**（增删 RAM / ROM 段、增删外设窗口 + 选 4 种器件 + 填器件参数 + 改 `region_budget_bytes`）⇒ 契约层加 `SetMemoryMap` 命令 + `MemoryMap` 事件（**升版 v6** ⇒ **零新 DTO**，描述 DTO 一字未改）⇒ 宿主持「**用户配的板**」⇒ 未装载时**立即生效**、已装载时**存为待生效**（下一次装载生效 ⇒ 用户的板**跨装载保持**）⇒ 前端的「M-14 内存映射表」**从 mock 换成真数据** ⇒ **D-124 闭环** |
 | **器件参数的合法区间**（v0.30 批） | 契约层 `validate()` 追加 **V-13 / V-14 / V-15**（单字段下界 / 单字段上界 / **跨字段**：`irq_line` 须落在 PLIC 源数之内）⇒ 越界报**一个**新场景码 `E_PLT_12_PARAMETER_OUT_OF_RANGE`（**不**复用 `E_PLT_08`）⇒ ⚠️ **上界全部来自器件模型的 MMIO 寄存器布局**（PLIC `sources ≤ 1024` / `contexts ≤ 16`、CLINT `harts ≤ 4096` / `freq_hz ≤ 1 THz`）⇒ **不是拍脑袋**；⚠️ **`baud_rate` 不设上界**（架构没有规定 ⇒ 不拍数字）⇒ ⚠️ **原样拒、不静默纠正** ⇒ **D-141 闭环** |
 | **板档案持久化 + 多板并存**（v0.30 批） | 板级配置存**前端 IndexedDB**（库 `riscv-sim-board-store` / 表 `boards` / 主键 = 描述的 `id`）⇒ **刷新页面不丢**；界面给「**保存 / 另存为 / 选用 / 删除**」⇒ **多板并存**（已有板的 `id` **只读**）⇒ **D-136 / D-140 闭环**；⚠️ **落库门槛 = 只有内核接受过的描述才允许落库** ⇒ 前端**不写第二份校验器** ⇒ 库里不会有**永远装不上的板**；⚠️ **零新 DTO / 零新命令 / 零新事件** ⇒ **两个版本都不升**（`SCHEMA_VERSION` 仍 6、`PLATFORM_SCHEMA_VERSION` 仍 1） |
+| **差量改板 + 并发可见 + 显式卸载**（v0.31 批） | 契约层加 `PatchMemoryMap`（**原子**：按 `base` 定位 ⇒ 段**重排**不产生操作）与 `UnloadProject` 两条命令 ⇒ **D-137 / D-139 闭环**；宿主持**单调递增的修订号** + `expected_revision` ⇒ **并发丢更新看得见**（过期 ⇒ `E_PLT_13_REVISION_CONFLICT` ⇒ **图、用户的板、修订号三者都不动**）；⚠️ **唯一状态始终是整图** ⇒ 差量只是到达它的手段 ⇒ **不是两个真相源**；⚠️ **卸载 = 全重置**（清运行态、清订阅）⇒ **「改图不自动重载运行中的 guest」那条护栏没删**，但**镜像与用户的板留着** ⇒ 重装不必重新选文件 |
+| **声明期 / 运行期两层预算拆开**（v0.31 批） | 描述加**可选**字段 `max_region_bytes`（缺省 = 声明期那个）⇒ 声明期（V-7 / `E_PLT-07`）与运行期（`E_BUS_09`）**各管各的** ⇒ **D-138 闭环**；⚠️ **声明期那条护栏没删** ⇒ ⚠️ **线上字段名不改**（改名留到下一批与 D-143 一起做）⇒ ⚠️ **描述格式版本不升**（`PLATFORM_SCHEMA_VERSION` 仍 1）⇒ 只有契约信封升版（`SCHEMA_VERSION` 6 → **7**） |
 
 ### 工程规模
 
 | 项 | 数字 |
 | --- | --- |
-| 契约层 | **10 553** 行 |
-| 仿真内核 | **60 430** 行（含 16 个子模块 + 内核宿主装配层） |
-| 前端 | **19 446** 行（`front/` 下**git 跟踪**的源码，含 `front/tests/`；⚠️ **不含** `front/assets/` —— 那是 wasm-pack 的**构建产物**且被 git 忽略，计进去会让这个数**随「跑没跑过 wasm 构建」变** ⇒ 不可复现；⚠️ 这个数由仓内 `tools/count_scale.py` **从当前树重算** ⇒ 规模数字只有**一份**算法） |
-| 设计文档 | **52 篇**（26 篇 HTML + 26 篇 Markdown） |
-| 测试 | **1 468** 条 Rust（契约 lib 204 + 内核 lib 1 105 + 集成 142 + runner 17）+ **390** 条前端（65 suite） |
+| 契约层 | **11 589** 行 |
+| 仿真内核 | **61 866** 行（含 16 个子模块 + 内核宿主装配层） |
+| 前端 | **20 492** 行（`front/` 下**git 跟踪**的源码，含 `front/tests/`；⚠️ **不含** `front/assets/` —— 那是 wasm-pack 的**构建产物**且被 git 忽略，计进去会让这个数**随「跑没跑过 wasm 构建」变** ⇒ 不可复现；⚠️ 这个数由仓内 `tools/count_scale.py` **从当前树重算** ⇒ 规模数字只有**一份**算法） |
+| 设计文档 | **53 篇**（26 篇 HTML + 27 篇 Markdown） |
+| 测试 | **1 505** 条 Rust（契约 lib 217 + 内核 lib 1 129 + 集成 142 + runner 17）+ **414** 条前端（70 suite） |
 
 ---
 
@@ -127,7 +129,7 @@ node --version
 
 ```bash
 cargo build                                    # native
-cargo test --workspace --no-fail-fast --lib --tests   # 1 468 条
+cargo test --workspace --no-fail-fast --lib --tests   # 1 505 条
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
@@ -137,7 +139,7 @@ cargo fmt --all -- --check
 ### 前端门禁
 
 ```bash
-tools/check-front.sh        # node:test 冒烟门禁 —— 390 用例 / 65 suite
+tools/check-front.sh        # node:test 冒烟门禁 —— 414 用例 / 70 suite
 ```
 
 ### 构建浏览器内核（WASM）
@@ -186,7 +188,7 @@ tools/golden-run.sh --keep-going  # 全量语料 —— 68 例
    零构建 / 零依赖  │  M-04 会话 · M-05 命令路由 · M-07 传输     │
                     │  M-10 寄存器内存服务                        │
                     └───────────────┬──────────────────────────┘
-                                    │ 契约信封（schema_version = 6）
+                                    │ 契约信封（schema_version = 7）
                         ┌───────────┴────────────┐
                         │                        │
                  postMessage（Worker）        WebSocket（P1）
@@ -321,8 +323,8 @@ node tools/browser-verify.mjs
 | --- | --- | --- |
 | 1 | `cargo fmt --all -- --check` | 格式 |
 | 2 | `cargo clippy --workspace --all-targets -- -D warnings` | 静态检查 |
-| 3 | `cargo test --workspace --no-fail-fast --lib --tests` | **1 468** 条 Rust 用例（⚠️ **不带 `--lib --tests` 会因 doc-test 假 HANG**；⚠️ 判「全绿」要看**退出码** + `grep -cE "^test result: FAILED"` 为 **0** —— 汇总的失败数在 `awk -F'[ ;]'` 的 **`$7`**（**不是 `$6`**）） |
-| 4 | `tools/check-front.sh` | **390** 用例 / **65** suite（ESM 链接期错误只有它能抓） |
+| 3 | `cargo test --workspace --no-fail-fast --lib --tests` | **1 505** 条 Rust 用例（⚠️ **不带 `--lib --tests` 会因 doc-test 假 HANG**；⚠️ 判「全绿」要看**退出码** + `grep -cE "^test result: FAILED"` 为 **0** —— 汇总的失败数在 `awk -F'[ ;]'` 的 **`$7`**（**不是 `$6`**）） |
+| 4 | `tools/check-front.sh` | **414** 用例 / **70** suite（ESM 链接期错误只有它能抓） |
 | 5 | `tools/golden-run.sh --self-check` + `--keep-going` | 指令级判决（**68/68**） |
 | 6 | `tools/build-wasm.sh` + `node tools/wasm-smoke.mjs` | 真 WASM 产物的桥接冒烟 |
 | 7 | `node tools/browser-verify.mjs` | 真 Chrome 里的端到端断言 |
@@ -334,6 +336,10 @@ node tools/browser-verify.mjs
 ## 已知缺口
 
 **完整的欠账清单在 [`docs/reviews/REVIEWS.md`](./docs/reviews/REVIEWS.md)**（含每一条的实证依据、阻塞关系与闭环方式）。
+
+✅ **v0.31 批已闭环三条**：**D-137**（**差量更新**：一条 `PatchMemoryMap` ⇒ 只发改动的那几段 ⇒ 提交不必重发整图；⚠️ **原子** ⇒ 不会半张图）· **D-138**（`region_budget_bytes` 的**双重身份拆开** ⇒ 新增可选的 `max_region_bytes` ⇒ 声明期与运行期**各管各的**；⚠️ **声明期那条护栏没删**）· **D-139**（**显式卸载**：`UnloadProject` ⇒ 卸载后改板**立即生效**；⚠️ **镜像与用户的板留着** ⇒ 重装不必重新选文件）。⚠️ 本批契约信封**升版 v6 → v7**，**描述格式版本不升**（`PLATFORM_SCHEMA_VERSION` 仍 1）。
+
+⚠️ **本批新登记三条**（明细见台账）：**D-145**（差量与整份两条路径的**等价性**用例未写）· **D-146**（差量基准依赖 `memory.map` 事件 ⇒ **乱序到达**无用例）· **D-147**（**门禁的断言接不进判定**这一类缺口 ⇒ 通用判据：新段落必须并进判定聚合、探测必须 `await`、输入尽量由被测系统自己产出）。
 
 ✅ **v0.30 批已闭环三条**：**D-136**（板级配置**持久化**到前端 IndexedDB ⇒ **刷新页面不丢**；⚠️ **落库门槛 = 只有内核接受过的描述才允许落库** ⇒ 前端**不写第二份校验器**）· **D-140**（**多板并存** = 选用 / 另存为 / 删除，已有板的 `id` **只读**）· **D-141**（MMIO 器件参数的**合法取值域**落进契约层 `validate()` = V-13 / V-14 / V-15 + **一个**场景码 `E_PLT_12_PARAMETER_OUT_OF_RANGE`；⚠️ **上界全部来自器件模型的 MMIO 寄存器布局** ⇒ **不是拍脑袋**）。
 
@@ -378,7 +384,7 @@ riscv_sim/
 │   └── dev/               # mock 内核 + demo 数据（仅开发期）
 ├── tools/                 # 构建与门禁脚本（wasm-pack 包装 / 对拍 / 真机复验）
 ├── tests/golden/          # 黄金对拍 harness（零 CSR 最小 env + 变异金丝雀 + 语料）
-└── docs/                  # 设计文档（架构 / 需求 / 模块规格 / 23 模块详设 / 15 份冻结规格 / 台账）
+└── docs/                  # 设计文档（架构 / 需求 / 模块规格 / 23 模块详设 / 16 份冻结规格 / 台账）
 ```
 
 ---
@@ -391,7 +397,7 @@ riscv_sim/
 | [`docs/requirements/RISC-V_Requirements_v1.4.html`](./docs/requirements/RISC-V_Requirements_v1.4.html) | 13 条 P0 需求 + 6 层概念空间 |
 | [`docs/module-design-spec/RISC-V_Module_Design_Specification.html`](./docs/module-design-spec/RISC-V_Module_Design_Specification.html) | 23 个模块的 LLD |
 | `docs/detailed-design/M-01..M-23_*.html` | **23 篇模块详细设计** |
-| `docs/detailed-design/STAGE-1..STAGE-15_*.md` | **15 份冻结规格**（WASM 桥 / 契约 v2 / 会话快照 / 中断 / 符号 / CSR 黄金 / DWARF 行表 / osz RTOS / v0.24 遗留 / 内存图 A / 内存图 B / v0.28 看门狗 · HMS · 日志 / v0.29 板级内存图 / **v0.30 板档案与器件参数区间**） |
+| `docs/detailed-design/STAGE-1..STAGE-16_*.md` | **16 份冻结规格**（WASM 桥 / 契约 v2 / 会话快照 / 中断 / 符号 / CSR 黄金 / DWARF 行表 / osz RTOS / v0.24 遗留 / 内存图 A / 内存图 B / v0.28 看门狗 · HMS · 日志 / v0.29 板级内存图 / v0.30 板档案与器件参数区间 / **v0.31 板级差量 · 卸载 · 预算拆分**） |
 | [`docs/reviews/REVIEWS.md`](./docs/reviews/REVIEWS.md) | **检视与欠账的唯一入口**（§4 有 9 份模块报告索引） |
 | [`docs/progress/PROGRESS.md`](./docs/progress/PROGRESS.md) | 改动的完整叙事、决策记录与工作量 |
 | [`AGENTS.md`](./AGENTS.md) | 给 AI Agent 的项目定义与工程纪律 |
