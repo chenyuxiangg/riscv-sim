@@ -340,16 +340,37 @@ export function createIndexedDbBackend() -> backend
 export function createBoardStore(backend) -> {list, put, remove, clear}
 ```
 
-**backend 契约**（三个方法）：
+**backend 契约**（**四个**方法 —— 施工期订正，见 §11）：
 
 ```js
-backend.list()   -> Promise<entry[]>      // 读全部
+backend.list()   -> Promise<entry[]>      // 读全部（按 id 升序）
 backend.put(entry) -> Promise<void>       // 按 entry.id 写入（覆盖）
 backend.remove(id) -> Promise<void>       // 按 id 删除
+backend.clear()  -> Promise<void>         // 清空全部
 ```
 
+⚠️ **`clear()` 必须在契约里**（施工期订正）：初版只写了三个方法，
+但 `createBoardStore` 的门面暴露了 `clear()` ⇒ **契约与方法集不自洽** ⇒
+要么把契约补成四个，要么门面不做 `clear`。⇒ **补成四个**（加法 ⇒ 不破坏任何已有实现）。
+⚠️ `createBoardStore.clear()` **优先调 `backend.clear`**；若某个 backend 没实现它，
+**退化成「逐条 remove」** ⇒ 三方法的老 backend 仍然可用。
+
 ⚠️ **`createIndexedDbBackend()` 在不支持 IndexedDB 的环境要能「明确地失败」**
-⇒ 返回 `{ supported: false }` ⇒ 前端**降级为「只在本会话内」**并**显式提示**（不静默假装成功）。
+⇒ 返回 `{ supported: false, reason }` ⇒ 前端**降级为「只在本会话内」**并**显式提示**（不静默假装成功）。
+
+⚠️ **存储不可用时，写操作要「明确地失败」**（施工期订正）：
+`list()` ⇒ `[]`（能读，只是空的）；**`put` / `remove` / `clear` ⇒ 明确地抛错**
+⇒ **不许**变成「静默的空操作」⇒ 否则用户以为存上了、其实没存。
+⇒ 因此 `createBoardStore(backend)` 的返回值**附加**一个布尔标志 `supported`
+（`true` / `false`）⇒ 视图层**先判后调**（见 §3.5）。
+
+⚠️ **描述格式版本常量的落点**（施工期订正 ⇒ 裁决 K）：
+`PLATFORM_SCHEMA_VERSION`（= 1，描述格式版本，**不是**契约信封的 `schema_version` = 6）
+**唯一**定义在 **`front/lib/message.js`**（前端契约镜像层）⇒
+`front/views/components/memory-map.js` 与 `front/services/m23_boardstore.js`
+**都从那里 import** ⇒ **一个定义处**。
+⚠️ 初版规格让服务层「自己另立一个同值常量」⇒ 那是**两个真相**（同一个值两处定义 ⇒ 漂移）
+⇒ **不接受** ⇒ 由**统筹方**在集成时上移（服务层与视图层都改 ⇒ 跨 lane ⇒ 统筹方做）。
 
 ### 3.4 前端视图层 —— `memory-map` 视图的**新增区块**
 
@@ -373,6 +394,13 @@ backend.remove(id) -> Promise<void>       // 按 id 删除
 | `select-memory-map` | 选中档案里的一块 ⇒ **载入草稿**（`draftFromDescription`）⇒ **不改内核状态**（要生效由用户点提交） |
 | `delete-memory-map` | 从档案里删一块 ⇒ **不改内核状态** |
 
+⚠️ **调用写操作前先看 `store.supported`**（施工期订正）：存储不可用时
+`put` / `remove` / `clear` **明确地抛错**（§3.3）⇒ 视图层**先判后调** ⇒
+不可用时**不调**写操作，直接把 `archiveStatus` 设为 `"unsupported"` 并**显式提示**。
+
+⚠️ **落库的失败也要显式**：`put` / `remove` 的 Promise **reject**（或抛错）⇒
+`archiveStatus = "error"` ⇒ 界面显示错误 ⇒ **不静默**。
+
 ---
 
 ## §4 裁决 A~J
@@ -389,6 +417,7 @@ backend.remove(id) -> Promise<void>       // 按 id 删除
 | **H** | `E_PLT_12` **一个码**覆盖单字段与跨字段越界 | 含义一致；不新增第二个码；不复用 `E_PLT_08` |
 | **I** | **两个版本都不升** | 零新 DTO / 零新命令 / 零新事件 ⇒ 载荷形状一字未改 |
 | **J** | 本批**次序**：D-141 先、D-136 后 | 库存量风险为零（库里每条都是新规则下接受过的） |
+| **K** | 描述格式版本常量**上移到 `front/lib/message.js`** | **施工期订正**（Lane B 实测提出）⇒ 服务层与视图层**共用一个定义处** ⇒ 初版「服务层另立同值常量」是**两个真相** ⇒ **不接受** |
 
 ---
 
@@ -408,7 +437,7 @@ backend.remove(id) -> Promise<void>       // 按 id 删除
 | **A-8** | **三个内置描述全部仍合法** | 逐个 `validate()` ⇒ `Ok`（防「收紧校验把内核自带的板判非法」） |
 | **A-9** | **报告顺序不变**：同时违反 V-2（描述 `id` 空）与 V-13 ⇒ 报的是 **V-2**；同时违反 V-9 与 V-13 ⇒ 报的是 **V-9** | 既有判别力**一条没被破坏** |
 
-### 5.2 Lane B · 前端服务层（B-1 ~ B-8）
+### 5.2 Lane B · 前端服务层（B-1 ~ B-10）
 
 | # | 验收 | 判据 |
 | --- | --- | --- |
@@ -420,6 +449,8 @@ backend.remove(id) -> Promise<void>       // 按 id 删除
 | **B-6** | 内存 backend 往返：写入 ⇒ `list()` 读回**逐字段相同**；`remove` ⇒ 读不到 | 存储适配层 |
 | **B-7** | IndexedDB backend 在**不支持**的环境 ⇒ **明确地**返回「不支持」⇒ **不静默假装成功** | 降级路径 |
 | **B-8** | 板档案条目**不含时间戳**（字段集合恰为 `id` + `description`） | 确定性（裁决 E） |
+| **B-9** | 存储不可用时，**写操作明确地失败**（抛错）⇒ **不是**静默的空操作 | 施工期订正 |
+| **B-10** | `createBoardStore(backend)` 暴露布尔标志 `supported`（不支持时为 `false`） | 施工期订正 |
 
 ### 5.3 Lane C · 前端视图层（C-1 ~ C-10）
 
@@ -469,7 +500,7 @@ backend.remove(id) -> Promise<void>       // 按 id 删除
 ### 6.3 ⚠️ 本批的**覆盖缺口**（明写）
 
 **IndexedDB 适配层只有浏览器真机门禁覆盖**（T-3）—— 因为前端**零依赖** ⇒ 不能引 `fake-indexeddb`。
-⇒ 默认门禁（node:test）覆盖的是**纯逻辑层 + 内存 backend**（B-1 ~ B-8），
+⇒ 默认门禁（node:test）覆盖的是**纯逻辑层 + 内存 backend**（B-1 ~ B-10），
 **真实 IndexedDB 那一层靠 T-3** ⇒ ⚠️ 两者都要跑才算绿。
 
 ### 6.4 ⚠️ macOS 的坑（不变）
@@ -557,6 +588,23 @@ D-139（已装载后不能直接改板）· D-13（字段可见性）· D-94（S
 - 合 main 一律 `--no-ff`；**绝不**直接往 `main` 提交。
 - ⚠️ `git add` **必须**显式路径；**禁** `git add -A`。
 - ⚠️ `git push` **需用户明确指示**。
+
+### 9.4 施工期订正记录
+
+> **本节的每一条都有实测依据**（谁测的、测出什么、原文在哪）。
+> 订正由**统筹方**做（规格由统筹方独占修改）；lane 只报「实测事实 + 规格原文 + 行号」。
+
+**第一次订正**（2026-10-24 · Lane B 实测提出 · 统筹方裁决）：
+
+| # | 规格初版写的 | 实测发现 | 订正为 |
+| --- | --- | --- | --- |
+| 1 | §3.3 的 **backend 契约只写了三个方法**（`list` / `put` / `remove`） | 但同一节的 `createBoardStore` 门面暴露了 **`clear()`** ⇒ **契约与方法集不自洽** | backend 契约补成**四个方法**（加 `clear`）⇒ 门面的 `clear()` 优先调 `backend.clear`，缺则**退化成逐条 remove** ⇒ 三方法的老 backend 仍可用（**加法** ⇒ 不破坏任何已有实现） |
+| 2 | 存储不可用时只规定了 `list()` ⇒ `[]` | **写操作**（`put` / `remove` / `clear`）的行为**规格没写** | 写操作**明确地抛错** ⇒ **不许**静默的空操作（否则用户以为存上了、其实没存）⇒ 并**附加**布尔标志 `store.supported` ⇒ 视图层**先判后调** |
+| 3 | 描述格式版本常量：服务层**自己另立**一个同值常量 | 那是**同一个值两处定义** ⇒ **两个真相**（会漂移） | **裁决 K**：常量**上移**到 `front/lib/message.js`（前端契约镜像层）⇒ 服务层与视图层**都从那里 import** ⇒ **一个定义处**（⚠️ 跨 lane ⇒ 由**统筹方**在集成时做） |
+
+⚠️ **订正 3 推翻了初版的一句话** ⇒ 初版说「服务层**不该** import 视图层（依赖方向不对）」——
+**这句话是对的**，但解法**不是**「另立一个同值常量」（那是两个真相）⇒
+**正解**是把常量放到**中立层**（`front/lib/`）⇒ **依赖方向依然单向**（服务层 → `front/lib/`，视图层 → `front/lib/`）。
 
 ---
 

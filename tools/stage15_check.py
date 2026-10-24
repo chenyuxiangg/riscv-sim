@@ -7,7 +7,7 @@
     1. Markdown 表格列数一致
     2. 标题层级不跳级
     3. 代码围栏配平
-    4. 裁决编号 A~J 无悬空引用
+    4. 裁决编号 A~K 无悬空引用
     5. 章节 §0~§10 完整
     6. 验收编号交叉引用无未定义项（分组 A / B / C / **T**）
     7. 关键约束字面量钉住（含已废止字面量的禁列）
@@ -73,14 +73,14 @@ if n_fence % 2 != 0:
 # ---- 4. 裁决编号 A~J 无悬空引用 ------------------------------------------
 verdicts = set()
 for line in lines:
-    m = re.match(r"^\|\s*\*\*([A-J])\*\*\s*\|", line)
+    m = re.match(r"^\|\s*\*\*([A-K])\*\*\s*\|", line)
     if m:
         verdicts.add(m.group(1))
-expected = set("ABCDEFGHIJ")
+expected = set("ABCDEFGHIJK")
 missing = expected - verdicts
 if missing:
     err(f"[裁决] 裁决表缺 {sorted(missing)}")
-body = "\n".join(l for l in lines if not re.match(r"^\|\s*\*\*[A-J]\*\*\s*\|", l))
+body = "\n".join(l for l in lines if not re.match(r"^\|\s*\*\*[A-K]\*\*\s*\|", l))
 for v in sorted(verdicts):
     if not (re.search(rf"\*\*{v}\*\*", body)
             or re.search(rf"裁决[^。\n|]{{0,8}}?{v}\b", body)):
@@ -147,6 +147,9 @@ must = [
     "D-136",
     "D-140",
     "D-141",
+    "front/lib/message.js",   # 描述格式版本常量的**单一落点**（裁决 K）
+    "store.supported",       # 存储不可用时先判后调
+    "施工期订正",              # 施工期订正记录节
 ]
 text = "\n".join(lines)
 for m in must:
@@ -159,6 +162,7 @@ forbidden = [
     "E_PLAT_12",
     "ValidateMemoryMap",  # 本批**不加**这条命令（裁决 G）
     "SCHEMA_VERSION = 7",  # 本批**不升**契约版本（裁决 I）
+    "BOARD_DESCRIPTION_SCHEMA_VERSION",  # 裁决 K 否掉的「另立同值常量」
 ]
 for f in forbidden:
     if f in text:
