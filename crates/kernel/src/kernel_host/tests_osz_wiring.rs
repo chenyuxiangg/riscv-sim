@@ -24,7 +24,7 @@ use riscv_sim_contract::protocol::{CommandPayload, Message};
 use crate::m14_bus::BusWidth;
 
 use super::platform;
-use super::{KernelHost, MemoryProfile, PLIC_SOURCE_UART};
+use super::{KernelHost, MemoryProfile};
 
 /// `qemu-virt` 描述（**取值来源**：从描述查，不抄宿主常量）。
 fn qemu_virt_description() -> PlatformDescription {
@@ -75,12 +75,25 @@ fn clint_mtimecmp_hi() -> u32 {
     device_base("CLINT") + 0x4004
 }
 
-/// PLIC 的 source 10 的优先级寄存器地址 —— **基址来自描述** + 偏移。
-fn plic_priority_10() -> u32 {
-    device_base("PLIC") + 4 * PLIC_SOURCE_UART
+/// 默认连线的**目标源号** —— **取值来源 = 默认连线那一份**。
+///
+/// ⚠️ **为什么不是写字面量 10**：v0.34（D-125）的主题是「一个约束一个
+/// 落点」⇒ ⇒ 那个源号在宿主里**只写一次**（[`platform::default_wiring`]
+/// 那一处）⇒ ⇒ 这里**引用**它，不另抄一份。
+fn default_plic_source() -> u32 {
+    platform::default_wiring(&qemu_virt_description())
+        .into_iter()
+        .next()
+        .expect("qemu-virt 描述必须有默认连线")
+        .source
 }
 
-/// PLIC 的 context 0 的 enable 寄存器地址（source 10 落在第 0 个字）。
+/// PLIC 的**默认连线源**的优先级寄存器地址 —— **基址来自描述** + 偏移。
+fn plic_priority_uart_source() -> u32 {
+    device_base("PLIC") + 4 * default_plic_source()
+}
+
+/// PLIC 的 context 0 的 enable 寄存器地址（默认连线的源落在第 0 个字）。
 fn plic_enable_ctx0() -> u32 {
     device_base("PLIC") + 0x2000
 }
@@ -344,12 +357,16 @@ fn the_clint_mtimecmp_reaches_the_interrupt_controller() {
 fn a_plic_source_raises_the_external_line() {
     let mut host = KernelHost::new_with_profile(MemoryProfile::QemuVirt);
 
-    // guest 侧的 PLIC 配置：source 10 优先级 1、context 0 使能、门限 0。
+    // guest 侧的 PLIC 配置：默认连线的源优先级 1、context 0 使能、门限 0。
     host.bus_mut()
-        .write(plic_priority_10(), BusWidth::Word, 1)
+        .write(plic_priority_uart_source(), BusWidth::Word, 1)
         .unwrap();
     host.bus_mut()
-        .write(plic_enable_ctx0(), BusWidth::Word, 1 << PLIC_SOURCE_UART)
+        .write(
+            plic_enable_ctx0(),
+            BusWidth::Word,
+            1 << default_plic_source(),
+        )
         .unwrap();
     host.bus_mut()
         .write(plic_threshold_ctx0(), BusWidth::Word, 0)
