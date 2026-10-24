@@ -36,6 +36,20 @@
 // 契约层那个唯一校验器（`PlatformDescription::validate` ⇒ E_PLT-01..11）
 // 是**内核**与**前端**的同一套判据（裁决 E）⇒ 前端**不自写一份校验**
 // ⇒ 编辑器只**呈现**约束（V-7），最终由内核裁决。
+//
+// # 板档案（STAGE-15 · v0.30 · D-136 / D-140）
+//
+// 板档案的**存储**在 `front/services/m23_boardstore.js`（服务层，另一条
+// lane 的产出）⇒ 本模块**只**做两件纯的事：
+//   - 「当前草稿**已被内核接受过**」这个**推导量**（`isDraftAccepted`）；
+//   - 板档案区块的**渲染**（`renderArchivePanel`）。
+//
+// ⚠️ 「已被内核接受」是**推导量**（`acceptedDescription` 与当前草稿
+// **逐字段相同**）⇒ 不是标志位 ⇒ 不需要「一改输入就手工清标志」那种
+// 失效逻辑（那是第二个真相）。
+//
+// ⚠️ **落库门槛**（STAGE-15 裁决 B）：只有被内核接受过的描述才允许落库
+// ⇒ 库里不会有**永远装不上的板** ⇒ 前端**仍然不写第二份校验器**。
 
 import { escapeHtml } from "../../lib/escape.js";
 
@@ -452,6 +466,74 @@ export function currentDraft(state) {
 }
 
 // ---------------------------------------------------------------------------
+// 规范 JSON 与「已被内核接受」这个**推导量**（STAGE-15 · v0.30）
+// ---------------------------------------------------------------------------
+
+/**
+ * 规范 JSON：**键排序**后的序列化（递归）。
+ *
+ * ⚠️ **为什么不用 `JSON.stringify` 直接比**：对象键的插入顺序不同 ⇒ 同一份
+ * 数据能序列化出两个不同的串 ⇒ 「逐字段相同」会被误判成「不同」。
+ *
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+function canonicalize(value) {
+    if (Array.isArray(value)) return value.map(canonicalize);
+    if (value && typeof value === "object") {
+        const out = {};
+        for (const key of Object.keys(value).sort()) out[key] = canonicalize(value[key]);
+        return out;
+    }
+    return value;
+}
+
+/**
+ * 规范 JSON 串（键排序后序列化）。
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function canonicalJson(value) {
+    return JSON.stringify(canonicalize(value));
+}
+
+/**
+ * 两份描述**逐字段相同**吗。
+ *
+ * @param {unknown} a
+ * @param {unknown} b
+ * @returns {boolean}
+ */
+export function sameDescription(a, b) {
+    if (a === null || a === undefined) return false;
+    if (b === null || b === undefined) return false;
+    return canonicalJson(a) === canonicalJson(b);
+}
+
+/**
+ * 当前草稿**已被内核接受过**吗（**推导量**，不是标志位）。
+ *
+ * ⚠️ **判据只有一条**：`acceptedDescription`（内核接受过的那份描述快照）
+ * **非空**，且与**当前草稿**转成的描述**逐字段相同**。
+ *
+ * ⇒ 用户改一笔草稿 ⇒ 推导量自动变假 ⇒ **不需要**「一改输入就手工清标志」
+ * 那种失效逻辑（那是**第二个真相**：标志与内容各说各话）。
+ *
+ * ⚠️ 这条是 STAGE-15 裁决 B（落库门槛）的**前端侧落点**：只有被内核接受过
+ * 的描述才允许落库 ⇒ 库里不会有**永远装不上的板**（前端**不写第二份
+ * 校验器**，延续 STAGE-14 裁决 E）。
+ *
+ * @param {object} state — 「memory-map」视图状态
+ * @returns {boolean}
+ */
+export function isDraftAccepted(state) {
+    const accepted = state?.acceptedDescription ?? null;
+    if (!accepted) return false;
+    return sameDescription(accepted, draftToDescription(currentDraft(state)));
+}
+
+// ---------------------------------------------------------------------------
 // 内存映射表：描述 → 表格行
 // ---------------------------------------------------------------------------
 
@@ -584,6 +666,114 @@ export function renderEffectiveSummary(memoryMap) {
         `（${escapeHtml(hex32(budget))}）· 板 id ${escapeHtml(String(memoryMap.description.id ?? ""))}` +
         `</p>`
     );
+}
+
+// ---------------------------------------------------------------------------
+// 板档案（STAGE-15 · v0.30 · D-136 / D-140）
+// ---------------------------------------------------------------------------
+
+/**
+ * 板档案的**持久化状态** → 一句话说明。
+ *
+ * ⚠️ 三种状态**都要说出来**（不静默）：`ok` = 存在本机浏览器里；
+ * `unsupported` = **板档案只存在于本会话**；`error` = 落库失败。
+ *
+ * @param {string} status
+ * @returns {string}
+ */
+function archiveStatusText(status) {
+    if (status === "unsupported") {
+        return "板档案只存在于本会话 —— 本浏览器没有可用的持久化存储 ⇒ 刷新即失。";
+    }
+    if (status === "error") {
+        return "板档案落库失败 —— 当前只存在于本会话（原因见页脚提示）。";
+    }
+    return "板档案存在本机浏览器的持久化存储里 —— 刷新后还在（但**要重新提交**才生效）。";
+}
+
+/**
+ * 板档案表的**一行**（一块板）。
+ *
+ * ⚠️ **钩子挂在行上**（`data-mmap-board-id` / `data-mmap-board-name`）⇒
+ * 门禁脚本按**数据属性**取值，**不靠文案**。
+ *
+ * ⚠️ 按钮上的 id 用**另一个**属性名（`data-mmap-target-id`）⇒ 这样
+ * `[data-mmap-board-id]` 在整页里**一块板只命中一次**（行）⇒ 数板的时候
+ * 不会把按钮也数进去。
+ *
+ * @param {object} entry — `{id, description}`
+ * @param {string|null} selectedId — 当前选中的板 id
+ * @returns {string}
+ */
+export function renderArchiveRow(entry, selectedId) {
+    const id = String(entry?.id ?? "");
+    const name = String(entry?.description?.name ?? "");
+    const selected = selectedId !== null && selectedId !== undefined
+        && String(selectedId) === id;
+    return `
+        <tr data-mmap-board-row="${escapeHtml(id)}" data-mmap-board-id="${escapeHtml(id)}" data-mmap-board-name="${escapeHtml(name)}"${selected ? ` data-mmap-board-selected="1"` : ""}>
+            <td data-mmap-board-cell="name">${escapeHtml(name)}</td>
+            <td data-mmap-board-cell="id"><code>${escapeHtml(id)}</code></td>
+            <td><button type="button" data-action="select-memory-map" data-mmap-target-id="${escapeHtml(id)}">选用</button></td>
+            <td><button type="button" data-action="delete-memory-map" data-mmap-target-id="${escapeHtml(id)}">删除</button></td>
+        </tr>
+    `;
+}
+
+/**
+ * 板档案区块（表 + 工具条 + 新板输入 + 持久化状态 + 校验状态）。
+ *
+ * ⚠️ **落库门槛的呈现**：「保存 / 另存为」在草稿**没被内核接受过**时
+ * `disabled`，并有一句明说的话 ⇒ 用户不会以为自己存下来了。
+ *
+ * ⚠️ **前端不显示参数区间常量**（那会是第二份真相）⇒ 只在器件参数旁写
+ * 一句「区间由内核校验（`E_PLT-12`）」。
+ *
+ * @param {object} state — 「memory-map」视图状态
+ * @returns {string}
+ */
+export function renderArchivePanel(state) {
+    const archive = Array.isArray(state?.archive) ? state.archive : [];
+    const selectedId = state?.selectedId ?? null;
+    const status = String(state?.archiveStatus ?? "ok");
+    const accepted = isDraftAccepted(state);
+
+    const rows = archive.map((entry) => renderArchiveRow(entry, selectedId)).join("");
+    const table = archive.length === 0
+        ? `<tr><td colspan="4" class="muted" data-mmap-archive-empty="1">还没有板档案 —— 提交一块板之后可以「保存当前板」。</td></tr>`
+        : rows;
+
+    const disabled = accepted ? "" : " disabled";
+
+    return `
+        <section class="memory-map-archive">
+            <h4>板档案</h4>
+            <p class="muted" data-mmap-archive-status="${escapeHtml(status)}">${escapeHtml(archiveStatusText(status))}</p>
+            <p class="muted" data-mmap-validated="${accepted ? "1" : "0"}">${accepted
+                ? "当前草稿已被内核接受（校验通过）—— 可以保存进板档案。"
+                : "当前草稿尚未被内核接受 —— 先提交，校验通过后才能保存。"}</p>
+            <table class="map-table" data-mmap-archive="1">
+                <thead><tr><th>板名</th><th>id</th><th></th><th></th></tr></thead>
+                <tbody>${table}</tbody>
+            </table>
+            <div class="debug-toolbar">
+                <button type="button" data-action="save-memory-map"${disabled}>保存当前板</button>
+                <button type="button" data-action="save-memory-map-as"${disabled}>另存为板</button>
+                <button type="button" data-action="new-memory-map">新板</button>
+            </div>
+            <div class="grid-2">
+                <label class="mmap-field"><span>新板 id</span>
+                    <input type="text" data-mmap-new-id value=""></label>
+                <label class="mmap-field"><span>新板名</span>
+                    <input type="text" data-mmap-new-name value=""></label>
+            </div>
+            <p class="muted" data-mmap-archive-note>
+                「保存 / 另存为」只写**本机浏览器**的板档案，**不改内核状态** ——
+                板要生效仍需「提交板级内存图」。已存在的板**不能改 id**（id 是它的主键）
+                ⇒ 想换一块板请用「另存为板」。
+            </p>
+        </section>
+    `;
 }
 
 // ---------------------------------------------------------------------------
@@ -851,6 +1041,12 @@ export function renderMemoryMapPanel(state) {
         else memoryRows.push(renderMemoryRow(region, index));
     });
 
+    // ⚠️ **已有板的 id 只读**（STAGE-15 裁决 E）：主键 = 描述的 `id`
+    // ⇒ 改 id 就是「另一块板」⇒ **改 id 的入口不存在**（`selectedId` 为空
+    // = 正在起一块**新**板 ⇒ 那时 id 才可编辑）。
+    const selectedId = state?.selectedId ?? null;
+    const idExtra = selectedId === null || selectedId === undefined ? "" : "readonly";
+
     return `
         <section class="memory-map-editor">
             <h3>板级内存图（M-14 · 板级配置）</h3>
@@ -863,7 +1059,7 @@ export function renderMemoryMapPanel(state) {
                 <code>auto_selectable</code> 固定为 <code>false</code>（用户配的板不参与自动选档）。
             </p>
             <div class="grid-2">
-                ${field({ field: "id", label: "板 id", value: draft.id ?? "" })}
+                ${field({ field: "id", label: "板 id", value: draft.id ?? "", extra: idExtra })}
                 ${field({ field: "name", label: "板名", value: draft.name ?? "" })}
                 ${field({ field: "priority", label: "优先级 priority", value: draft.priority ?? "0" })}
                 ${field({
@@ -890,6 +1086,10 @@ export function renderMemoryMapPanel(state) {
                 <button type="button" data-action="add-rom">+ ROM 段</button>
             </div>
             <h4>外设窗口</h4>
+            <p class="muted" data-mmap-device-range-note>
+                器件参数的合法区间**由内核校验**（越界 ⇒ <code>E_PLT-12</code>）——
+                前端**不写第二份区间表**（那会是第二个真相）⇒ 区间值只在内核的消息里给出。
+            </p>
             <table class="map-table" data-mmap-peripheral-rows>
                 <thead><tr><th>基址</th><th>器件类型</th><th>器件参数</th><th></th></tr></thead>
                 <tbody>${peripheralRows.join("") || `<tr><td colspan="4" class="muted">还没有外设窗口。</td></tr>`}</tbody>
@@ -903,6 +1103,7 @@ export function renderMemoryMapPanel(state) {
                 <button type="button" data-action="load-current">从当前生效的图载入</button>
                 <button type="button" data-action="new-draft">重建草稿</button>
             </div>
+            ${renderArchivePanel(state)}
             <h4>当前生效的内存图</h4>
             ${renderEffectiveSummary(memoryMap)}
         </section>

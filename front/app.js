@@ -22,8 +22,15 @@ import { mountCommandRouter } from "./services/m05_commandrouter.js";
 import * as transportApi from "./services/m07_transport.js";
 import { mountRegisterMemory } from "./services/m10_registermemory.js";
 import { Command, TRACE_FORMAT, TRACE_SOURCE } from "./lib/message.js";
-// ⚠️ 只导入**纯函数**（错误码拆分）⇒ 不引入服务层依赖，也不构成循环依赖。
-import { splitErrorCode } from "./views/components/memory-map.js";
+// ⚠️ 只导入**纯函数**（错误码拆分、草稿转换、「已被内核接受」推导量）⇒
+// 不引入服务层依赖，也不构成循环依赖。
+import {
+    currentDraft,
+    draftFromDescription,
+    draftToDescription,
+    isDraftAccepted,
+    splitErrorCode,
+} from "./views/components/memory-map.js";
 import { buildMockProject } from "./dev/mock-project.js";
 import { buildDemoStoreState, seedDemoState } from "./dev/demo-state.js";
 
@@ -192,6 +199,316 @@ let loadedProject = null;
 function setMemoryMapError(error) {
     viewStore.setState("memory-map", (prev) => ({ ...prev, error: error ?? null }));
     publishViewState("memory-map");
+}
+
+// ---------------------------------------------------------------------------
+// 板档案（STAGE-15 · v0.30 · D-136 / D-140）
+//
+// ⚠️ **落库门槛**（裁决 B）：只有**被内核接受过**的描述才允许落库 ⇒ 库里
+// 不会有「永远装不上的板」⇒ 前端**不写第二份校验器**（延续裁决 E）。
+//
+// ⚠️ **保存 ≠ 生效**（裁决 C）：「保存 / 另存为 / 选用 / 删除」**都不改内核
+// 状态**（不发契约命令）⇒ 板要生效仍需「提交板级内存图」。
+// ---------------------------------------------------------------------------
+
+/**
+ * 板档案服务（M-23）的**懒加载**句柄。
+ *
+ * ⚠️ **为什么是动态 import 而不是静态 import**：板档案服务是**另一条
+ * lane** 的产出（规格 §3.3 冻结了 API 形状）⇒ 前端**不因为它缺席就
+ * 白屏**（D-01 / D-02 的教训：缺一个模块 ⇒ 整个页面空白，而且页面上看不出
+ * 任何异常）⇒ 缺席时**显式**降级为「板档案不可用」，**不静默假装成功**。
+ *
+ * @type {Promise<{api: object|null, error: Error|null}>|null}
+ */
+let boardStoreModulePromise = null;
+
+/**
+ * 取板档案服务模块（**只加载一次**）。
+ *
+ * @returns {Promise<{api: object|null, error: Error|null}>}
+ */
+export function loadBoardStoreModule() {
+    if (!boardStoreModulePromise) {
+        boardStoreModulePromise = import("./services/m23_boardstore.js")
+            .then((api) => ({ api, error: null }))
+            .catch((error) => ({ api: null, error }));
+    }
+    return boardStoreModulePromise;
+}
+
+/**
+ * 板档案在**视图状态**里的四个字段（读的时候把缺省值补上 ⇒ 调用方不必判空）。
+ *
+ * ⚠️ 这四个字段住在 M-03 的「memory-map」视图状态里（**前端自己的东西**）
+ * ⇒ 不进契约、不进事件。
+ *
+ * @param {object} [state] — 「memory-map」视图状态（不给就读当前状态）
+ * @returns {{archive: object[], selectedId: string|null, archiveStatus: string, acceptedDescription: object|null}}
+ */
+export function boardState(state) {
+    const src = state ?? viewStore.getState("memory-map") ?? {};
+    return {
+        archive: Array.isArray(src.archive) ? src.archive : [],
+        selectedId: src.selectedId ?? null,
+        archiveStatus: src.archiveStatus ?? "ok",
+        acceptedDescription: src.acceptedDescription ?? null,
+    };
+}
+
+/**
+ * 把板档案的四个字段**初始化**进视图状态（缺什么补什么 ⇒ 不覆盖已有值）。
+ *
+ * @returns {object} 初始化后的视图状态
+ */
+export function ensureBoardState() {
+    const prev = viewStore.getState("memory-map") ?? {};
+    const next = { ...prev, ...boardState(prev) };
+    viewStore.setState("memory-map", next);
+    return next;
+}
+
+/**
+ * 写板档案的视图状态并重渲染一次。
+ *
+ * @param {object} patch
+ */
+function setBoardState(patch) {
+    viewStore.setState("memory-map", (prev) => ({ ...prev, ...patch }));
+    publishViewState("memory-map");
+}
+
+/**
+ * 建板档案的**存储实例**（持久化层）。
+ *
+ * ⚠️ **不支持就明确说**（裁决 B / C-10）：`{supported: false}` ⇒ 状态
+ * `unsupported` ⇒ 界面明说「板档案只存在于本会话」⇒ **不静默假装成功**。
+ *
+ * @returns {Promise<{store: object|null, status: string, reason: string|null}>}
+ */
+async function createBoardStoreInstance() {
+    const { api, error } = await loadBoardStoreModule();
+    if (!api) {
+        return {
+            store: null,
+            status: "error",
+            reason: `板档案服务不可用：${error?.message ?? error}`,
+        };
+    }
+    const backend = api.createIndexedDbBackend();
+    if (!backend || backend.supported !== true) {
+        return {
+            store: null,
+            status: "unsupported",
+            reason: String(backend?.reason ?? "本浏览器没有可用的持久化存储"),
+        };
+    }
+    return { store: api.createBoardStore(backend), status: "ok", reason: null };
+}
+
+/**
+ * 板档案服务缺席时的**显式**降级（不静默）。
+ *
+ * @param {unknown} error
+ */
+function setArchiveUnavailable(error) {
+    setBoardState({ archiveStatus: "error" });
+    setNote(`板档案服务不可用：${error?.message ?? error}`);
+}
+
+/**
+ * 把一条档案写进**持久化存储**。
+ *
+ * ⚠️ 没有存储 ⇒ **明确降级**为「只存在于本会话」（返回 `unsupported`），
+ * 不假装存下来了；写失败 ⇒ 返回 `error`（调用方据此**不**改档案）。
+ *
+ * @param {{boardStore?: object|null}} services
+ * @param {{id: string, description: object}} entry
+ * @returns {Promise<"ok"|"unsupported"|"error">}
+ */
+async function persistBoard(services, entry) {
+    const store = services?.boardStore ?? null;
+    if (!store) return "unsupported";
+    try {
+        await store.put(entry);
+        return "ok";
+    } catch (err) {
+        setBoardState({ archiveStatus: "error" });
+        setNote(`板档案落库失败：${err?.message ?? err}`);
+        return "error";
+    }
+}
+
+/**
+ * 「保存当前板」⇒ 把**当前草稿**写进板档案（键 = 草稿的 `id`）。
+ *
+ * ⚠️ **不改内核状态**（不发契约命令）⇒ 板要生效仍需「提交」。
+ *
+ * @param {object} services
+ */
+async function saveCurrentBoard(services) {
+    ensureBoardState();
+    if (!isDraftAccepted(viewStore.getState("memory-map"))) {
+        setNote("当前草稿还没被内核接受过 —— 先提交，校验通过后才能保存");
+        return;
+    }
+    const { api, error } = await loadBoardStoreModule();
+    if (!api) {
+        setArchiveUnavailable(error);
+        return;
+    }
+    const state = boardState();
+    const description = draftToDescription(currentDraft(viewStore.getState("memory-map")));
+    const entry = api.boardEntry(description);
+    if (!entry) {
+        setNote("板 id 为空 —— 这块板存不进档案（先给板 id）");
+        return;
+    }
+    // ⚠️ **新板**（没选中档案里的一块）⇒ id 不能与已有档案撞。
+    // ⇒ 这不是「描述合法性」（那是内核的事）⇒ 是**档案的主键唯一性**
+    //   （裁决 E：「前端唯一会判的事：档案里 id 不重复」）。
+    if (state.selectedId === null && api.isBoardIdTaken(state.archive, entry.id)) {
+        setNote(`板 id「${entry.id}」已被占用 —— 改个 id，或先「选用」那块板再保存（那是覆盖）`);
+        return;
+    }
+    const merged = api.mergeBoard(state.archive, entry);
+    const persisted = await persistBoard(services, entry);
+    if (persisted === "error") return;
+    setBoardState({
+        archive: merged.archive,
+        selectedId: entry.id,
+        archiveStatus: persisted === "ok" ? "ok" : "unsupported",
+    });
+    setNote(persisted === "ok"
+        ? `已保存板「${entry.id}」`
+        : `板「${entry.id}」已存入本会话（板档案只存在于本会话）`);
+}
+
+/**
+ * 「另存为板」⇒ 以当前草稿为模板**新建**一块板（新 `id` + 新 `name`）。
+ *
+ * ⚠️ **只改 `id` / `name`** ⇒ 其余字段与**已通过校验**的那份逐字相同 ⇒
+ * 合法性必然相同 ⇒ **不需要第二次提交、也不需要第二次校验**。
+ *
+ * ⚠️ **不改内核状态**（不发契约命令）。
+ *
+ * @param {object} services
+ * @param {{id?: string, name?: string}} [params]
+ */
+async function saveBoardAs(services, params) {
+    ensureBoardState();
+    if (!isDraftAccepted(viewStore.getState("memory-map"))) {
+        setNote("当前草稿还没被内核接受过 —— 先提交，校验通过后才能保存");
+        return;
+    }
+    const { api, error } = await loadBoardStoreModule();
+    if (!api) {
+        setArchiveUnavailable(error);
+        return;
+    }
+    const state = boardState();
+    const newId = String(params?.id ?? "").trim();
+    const newName = String(params?.name ?? "").trim();
+    if (newId === "") {
+        setNote("另存为需要一个新的板 id —— 填了再点");
+        return;
+    }
+    if (newName === "") {
+        setNote("另存为需要一个新的板名 —— 填了再点");
+        return;
+    }
+    // ⚠️ **id 唯一**（裁决 E）：已被占用 ⇒ 明确拒绝，不静默覆盖。
+    if (api.isBoardIdTaken(state.archive, newId)) {
+        setNote(`板 id「${newId}」已被占用 —— 换一个没被占用的 id`);
+        return;
+    }
+    const description = draftToDescription(currentDraft(viewStore.getState("memory-map")));
+    const entry = api.boardEntry({ ...description, id: newId, name: newName });
+    if (!entry) {
+        setNote("板 id 为空 —— 这块板存不进档案");
+        return;
+    }
+    const merged = api.mergeBoard(state.archive, entry);
+    const persisted = await persistBoard(services, entry);
+    if (persisted === "error") return;
+    // ⚠️ **选中项不变**：草稿一个字都没改 ⇒ 它仍代表原来那块板。
+    setBoardState({
+        archive: merged.archive,
+        archiveStatus: persisted === "ok" ? "ok" : "unsupported",
+    });
+    setNote(persisted === "ok"
+        ? `已另存为板「${newId}」（原板仍在档案里）`
+        : `板「${newId}」已存入本会话（板档案只存在于本会话）`);
+}
+
+/**
+ * 「选用」档案里的一块 ⇒ **载入草稿**（**不改内核状态**）。
+ *
+ * ⚠️ 载入**不是**接受：被载入的草稿**还要重新提交**才被内核接受 ⇒
+ * 「保存 / 另存为」在重新提交前是**禁用**的（落库门槛，裁决 B）。
+ *
+ * @param {string} id
+ */
+async function selectBoard(id) {
+    ensureBoardState();
+    const { api, error } = await loadBoardStoreModule();
+    if (!api) {
+        setArchiveUnavailable(error);
+        return;
+    }
+    const state = boardState();
+    const entry = api.findBoard(state.archive, String(id ?? ""));
+    if (!entry) {
+        setNote(`板档案里没有 id「${String(id ?? "")}」这一块`);
+        return;
+    }
+    const draft = draftFromDescription(entry.description);
+    if (!draft) {
+        setNote("这块板的描述读不出来 —— 档案可能坏了");
+        return;
+    }
+    setBoardState({ draft, selectedId: entry.id });
+    setNote(`已选用板「${entry.id}」（尚未提交 —— 要生效请点「提交板级内存图」）`);
+}
+
+/**
+ * 「删除」档案里的一块 ⇒ **不改内核状态**。
+ *
+ * @param {object} services
+ * @param {string} id
+ */
+async function deleteBoard(services, id) {
+    ensureBoardState();
+    const { api, error } = await loadBoardStoreModule();
+    if (!api) {
+        setArchiveUnavailable(error);
+        return;
+    }
+    const state = boardState();
+    const dropped = api.dropBoard(state.archive, String(id ?? ""));
+    if (!dropped.changed) {
+        setNote(`板档案里没有 id「${String(id ?? "")}」这一块`);
+        return;
+    }
+    const store = services?.boardStore ?? null;
+    if (store) {
+        try {
+            await store.remove(String(id ?? ""));
+        } catch (err) {
+            setBoardState({ archiveStatus: "error" });
+            setNote(`板档案删除失败：${err?.message ?? err}`);
+            return;
+        }
+    }
+    setBoardState({
+        archive: dropped.archive,
+        // ⚠️ 被删的那块不再是「选中项」⇒ 选中清空（草稿还在，id 重新可编辑）。
+        selectedId: state.selectedId === String(id ?? "") ? null : state.selectedId,
+        archiveStatus: store ? "ok" : "unsupported",
+    });
+    setNote(store
+        ? `已删除板「${String(id ?? "")}」`
+        : `已删除板「${String(id ?? "")}」（板档案只存在于本会话）`);
 }
 
 /**
@@ -391,9 +708,17 @@ export async function handleCommand(detail, services) {
                 // ⚠️ **前端不自写校验**（裁决 E）：契约层那个唯一校验器在内核
                 // 侧 ⇒ 校验失败由内核报 `E_PLT-*` ⇒ 这里**如实显示**它。
                 const description = detail?.params?.description ?? null;
+                // ⚠️ 板档案的四个字段**先**初始化（缺省值就是规格里的初值）
+                // ⇒ 「失败时 `acceptedDescription` 不动」这条断言看得见的是
+                //   `null`（初值），而不是「字段压根不存在」。
+                ensureBoardState();
                 try {
                     await commandRouter.dispatchCommand(Command.setMemoryMap(description));
                     setMemoryMapError(null);
+                    // ⚠️ **成功后**才记「这份描述被内核接受过」（裁决 B 的落库
+                    // 门槛）⇒ 失败时**不动** `acceptedDescription`（失败分支
+                    // 只做 `setMemoryMapError`）⇒ 库里不会有没校验过的板。
+                    setBoardState({ acceptedDescription: description ?? null });
                 } catch (err) {
                     // ⚠️ **校验失败必须在界面上显示**（验收 C-5）⇒ 码与文案
                     // 写进「memory-map」视图状态 ⇒ 面板上有一块
@@ -430,6 +755,22 @@ export async function handleCommand(detail, services) {
                 resetMemoryMapError = result.memoryMapError;
                 break;
             }
+            case "save-memory-map":
+                // 「保存当前板」⇒ 落库（**不改内核状态**）。
+                await saveCurrentBoard(services);
+                return;
+            case "save-memory-map-as":
+                // 「另存为板」⇒ 新建一块板落库（**不改内核状态**）。
+                await saveBoardAs(services, detail?.params);
+                return;
+            case "select-memory-map":
+                // 「选用」⇒ 把档案里那块板载进草稿（**不改内核状态**）。
+                await selectBoard(detail?.params?.id);
+                return;
+            case "delete-memory-map":
+                // 「删除」⇒ 从档案里删一块（**不改内核状态**）。
+                await deleteBoard(services, detail?.params?.id);
+                return;
             default:
                 return;
         }
@@ -1319,6 +1660,29 @@ async function bootstrap() {
     // 挂好：内核侧**订阅了** `memory.map` 才会推那张图（裁决 J：订阅即强制
     // 推一条当前生效的图）⇒ 不先挂好，第一批图就丢了。
     const memoryMapWiring = wireMemoryMap(commandRouter);
+    // 板档案（STAGE-15 · v0.30）：建存储实例 + **恢复档案列表**。
+    //
+    // ⚠️ **不自动重新提交**（裁决 D）：刷新后板**还在**，但**要重新提交**才
+    // 生效 ⇒ 自动提交在「已装载镜像」时会变成「挂起待生效」⇒ 用户刷新
+    // 一次就多一次「改了板没反应」的困惑 ⇒ 这里**不发任何命令**。
+    const board = await createBoardStoreInstance();
+    ensureBoardState();
+    if (board.store) {
+        try {
+            const entries = await board.store.list();
+            setBoardState({
+                archive: Array.isArray(entries) ? entries : [],
+                archiveStatus: "ok",
+            });
+        } catch (err) {
+            setBoardState({ archiveStatus: "error" });
+            setNote(`板档案读取失败：${err?.message ?? err}`);
+        }
+    } else {
+        // ⚠️ **显式**降级（不静默）：面板上明说「板档案只存在于本会话」。
+        setBoardState({ archiveStatus: board.status });
+        if (board.reason) setNote(board.reason);
+    }
 
     const pending = {
         components: componentsPromise,
@@ -1353,6 +1717,8 @@ async function bootstrap() {
         debug,
         console: consoleWiring,
         memoryMap: memoryMapWiring,
+        // ⚠️ 板档案的**存储实例**（可能是 `null` ⇒ 「只存在于本会话」）。
+        boardStore: board.store,
     };
     exposeImageLoader(services);
     // ⚠️ 脚本用的**命令门**（真机段要「下断点」/「读 UART 寄存器」——
