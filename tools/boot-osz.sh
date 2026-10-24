@@ -10,6 +10,20 @@
 #
 # ⇒ 这里的判决口径是「**两侧 UART TX 字节流逐字节相同**」。
 #
+# ## 内存图：RAM 窗口的**单一真相源 = 平台描述**
+#
+# ⚠️ 候选侧（osz-boot）**按镜像用到的地址自动选档**，并把**它实际会用
+# 的**那份描述的 RAM 窗口**打印**出来（`--print-memory`）⇒ ⇒ 本脚本
+# **读**那一行，**不**再手抄地址 ⇒ ⇒ 描述改了高段大小 ⇒ ⇒ 两边**自动**
+# 跟着变 ⇒ ⇒ 不可能漂（STAGE-19 裁决 I）。
+#
+# ⚠️ **栈页是参考侧的特性**：Spike 的初始栈页留在脚本里（候选侧的栈窗口
+#   是另一段）⇒ ⇒ 「两侧暴露同一地址集合」这句**不准确** ⇒ ⇒ 诚实口径：
+#   **RAM 窗口**两侧一致（构造保证）· **栈窗口**各是本侧特性。
+#
+# ⚠️ **覆盖口**：`SPIKE_MEM` 环境变量仍然可以**整个替换** `-m` 的值 ⇒ ⇒
+#   给了就**不**用候选侧打印的值。
+#
 # ## 用法
 #
 #   tools/boot-osz.sh [--elf <path>] [--spike <cmd>] [--timeout-ms <n>]
@@ -39,10 +53,20 @@ TIMEOUT_MS=60000
 
 # Spike 的 ISA 串与内存图（v0.23 批实测确定，**不要**随便改）。
 #
-# ⚠️ 内存图的**栈窗口是必需的**：Spike 默认把初始栈放在 0x7FFF_F000，
+# ⚠️ 内存图的**栈页是必需的**：Spike 默认把初始栈放在 0x7FFF_F000，
 # 缺了那一段会报 "Memory address 0x7ffff000 is invalid" 直接退出。
+#
+# ⚠️ **栈页是参考侧的特性**：候选侧映射的栈窗口是 [0x7fff_e000, 0x7fff_f000)
+#   ⇒ ⇒ 「两侧暴露同一地址集合」这句**不准确** ⇒ ⇒ 诚实口径（STAGE-19 裁决 I）：
+#   **RAM 窗口**两侧一致（**构造保证**）· **栈窗口**各是本侧特性。
 SPIKE_ISA="rv32imc_zicclsm_zifencei"
-SPIKE_MEM="2147479552:4096,2147483648:134217728"
+SPIKE_STACK_MEM="2147479552:4096"
+# The **RAM window** is **not** written down here: the candidate side
+# **prints** it (`osz-boot --print-memory`) and this script **reads** that
+# one line ⇒ ⇒ the RAM window's single source of truth is the **platform
+# description** ⇒ ⇒ the two sides cannot drift apart (STAGE-19 裁决 I).
+# ⚠️ `SPIKE_MEM` 一旦给了 ⇒ ⇒ **不**用打印值（**覆盖口优先**）。
+SPIKE_MEM="${SPIKE_MEM:-}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -50,7 +74,9 @@ while [ $# -gt 0 ]; do
     --spike)      SPIKE="$2"; shift 2 ;;
     --timeout-ms) TIMEOUT_MS="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,30p' "${BASH_SOURCE[0]}"
+      # ⚠️ 帮助文本 = **头部注释块** ⇒ ⇒ 不能写死行号（头部会变长 ⇒ ⇒ 行号
+      # 会把帮助**截断在半句**）⇒ ⇒ 取到第一行**不是**注释为止。
+      sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | sed '$d'
       exit 0 ;;
     *)
       echo "boot-osz.sh: unknown option $1" >&2
@@ -106,6 +132,27 @@ if [ ! -x "$PLAT_BIN" ]; then
   echo "  hint: cargo build 用的 CARGO_TARGET_DIR 与运行侧必须一致" >&2
   exit 1
 fi
+
+# ---- 候选侧打印它**实际会用的**那份 RAM 窗口 ------------------------------
+#
+# ⚠️ **单一真相源 = 平台描述**（STAGE-19 裁决 I）：候选侧按镜像用到的地址
+# **自动选档**，把窗口**打印**出来 ⇒ ⇒ 这里**不写地址** ⇒ ⇒ 描述改了高段
+# 大小 ⇒ ⇒ 两边**自动**跟着变 ⇒ ⇒ 不可能漂。
+#
+# ⚠️ **覆盖口优先**：`SPIKE_MEM` 一旦给了 ⇒ ⇒ **不**用打印值。
+if [ -z "$SPIKE_MEM" ]; then
+  CANDIDATE_MEM="$("$PLAT_BIN" --print-memory "$ELF")" || {
+    echo "boot-osz.sh: the candidate could not print its RAM window" >&2
+    exit 1
+  }
+  # ⚠️ 形状必须是 `base:size` 且**十进制** ⇒ ⇒ Spike 的 `-m` 才吃得下。
+  if ! printf '%s' "$CANDIDATE_MEM" | grep -Eq '^[0-9]+:[0-9]+$'; then
+    echo "boot-osz.sh: the candidate printed an unusable RAM window: '$CANDIDATE_MEM'" >&2
+    exit 1
+  fi
+  SPIKE_MEM="$SPIKE_STACK_MEM,$CANDIDATE_MEM"
+fi
+echo "  spike 内存图: $SPIKE_MEM"
 
 perl "$REPO_ROOT/tools/watchdog.pl" "$((TIMEOUT_MS / 1000 + 30))" \
   "$PLAT_BIN" "$ELF" \

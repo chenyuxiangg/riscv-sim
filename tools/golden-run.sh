@@ -21,6 +21,28 @@
 #   * riscv-none-elf-gcc    $TOOLCHAIN_DIR/bin
 #   * spike                  on $PATH
 #
+# ## The memory map
+#
+# Spike's `-m` gets **two** segments:
+#
+#   * Spike's **initial stack page** (`0x7fff_f000`, 4096 bytes) —— a
+#     **reference-side** feature, kept in this script on purpose;
+#   * the **RAM window** —— **read from the candidate side**, which
+#     prints it (`riscv-golden --print-memory`) after taking it from the
+#     **platform description** ⇒ ⇒ the RAM window's single source of
+#     truth is the description ⇒ ⇒ the two sides cannot drift apart
+#     (STAGE-19 裁决 I).
+#
+# ⚠️ The two sides do **not** expose the **same** address set: the
+# candidate's stack window is `[0x7fff_e000, 0x7fff_f000)` while Spike's
+# initial stack page is `[0x7fff_f000, 0x7fff_f000 + 4096)` ⇒ ⇒ "the
+# memory map **both** sides expose" would be **inaccurate** ⇒ ⇒ the
+# honest wording is: **the RAM window agrees by construction**, the
+# **stack window is each side's own feature**.
+#
+# ⚠️ `GOLDEN_MEM` still overrides the whole `-m` value ⇒ ⇒ when it is
+# given, the printed window is **not** used.
+#
 # Usage:
 #   tools/golden-run.sh [options]
 #
@@ -41,19 +63,29 @@ RISCV_TESTS_DIR="${RISCV_TESTS_DIR:-$HOME/riscv-sim-golden/riscv-tests}"
 TOOLCHAIN_DIR="${RISCV_TOOLCHAIN_DIR:-$HOME/riscv-sim-golden/toolchain}"
 SPIKE="${SPIKE:-}"
 ISA="${GOLDEN_ISA:-rv32imc_zicclsm_zifencei}"
-# The memory map **both** sides expose.
+# Spike's **initial stack page** —— a **reference-side** feature, kept here
+# on purpose.
 #
-#   2147479552 = 0x7fff_f000   stack window, 4096 bytes
-#   2147483648 = 0x80000000   RAM, 4 MiB
+#   2147479552 = 0x7fff_f000   stack page, 4096 bytes
 #
-# Spike's multi-region `-m` parser only accepts **decimal** numbers
-# (its single-region form does accept hex), hence the decimal literals.
+# ⚠️ Spike 默认把初始栈放在 0x7FFF_F000，缺了那一段会报
+#   "Memory address 0x7ffff000 is invalid" 直接退出 ⇒ ⇒ 这一段**必须**留着。
 #
-# The two sides must expose the *same* addressable set: if the candidate
-# mapped only the image's own span, a program touching an address
-# outside the image but inside Spike's memory would fault on one side
-# and run fine on the other — a false mismatch (review finding M-3).
-MEM="${GOLDEN_MEM:-2147479552:4096,2147483648:4194304}"
+# ⚠️ **它与候选侧的栈窗口不是同一段**：候选侧映射的是
+#   [0x7fff_e000, 0x7fff_f000) ⇒ ⇒ 「两侧暴露同一地址集合」这句**不准确**
+#   ⇒ ⇒ 诚实口径（STAGE-19 裁决 I）是：**RAM 窗口**两侧一致（**构造保证**）
+#   · **栈窗口**各是本侧特性。
+#
+# ⚠️ Spike 的多区域 `-m` parser 只接受 **十进制** 数字（它的单区域形式
+#   才接受十六进制）⇒ ⇒ 这里的字面量是十进制。
+SPIKE_STACK_MEM="2147479552:4096"
+# The **RAM window** is **not** written down here: the candidate side
+# **prints** it (`riscv-golden --print-memory`) and the reference side
+# **reads** that one line ⇒ ⇒ the RAM window's single source of truth is
+# the **platform description** ⇒ ⇒ the two sides cannot drift apart
+# (STAGE-19 裁决 I).  The value is assembled **after** the candidate has
+# been built — see below.
+MEM=""
 TIMEOUT_SEC="${GOLDEN_TIMEOUT:-10}"
 BUDGET="${GOLDEN_BUDGET:-1000000}"
 OUT_DIR="${GOLDEN_OUT:-$REPO_ROOT/tests/golden/_out}"
@@ -80,7 +112,11 @@ while [ $# -gt 0 ]; do
         --self-check)  SELF_CHECK=1; shift ;;
         --release)     RELEASE=1; shift ;;
         --keep-going)  KEEP_GOING=1; shift ;;
-        -h|--help)     sed -n '2,42p' "$0"; exit 0 ;;
+        # ⚠️ The help text is the **header comment block** ⇒ ⇒ it must not
+        # be a hard-coded line range (the header grows ⇒ ⇒ the range
+        # would cut it in the middle) ⇒ ⇒ take it up to the first line
+        # that is not a comment.
+        -h|--help)     sed -n '2,/^[^#]/p' "$0" | sed '$d'; exit 0 ;;
         *) echo "golden-run: unknown option $1" >&2; exit 2 ;;
     esac
 done
@@ -247,6 +283,26 @@ cargo build "${build_args[@]}" || die "cargo build failed"
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 RUNNER="$TARGET_DIR/debug/riscv-golden"
 [ "$RELEASE" -eq 1 ] && RUNNER="$TARGET_DIR/release/riscv-golden"
+
+# ------------------------------------------------------- the RAM window
+#
+# ⚠️ **单一真相源 = 平台描述**（STAGE-19 裁决 I）：候选侧从**描述**取窗口
+# 并**打印**它（`--print-memory`）⇒ ⇒ 这里**不写地址** ⇒ ⇒ 描述改了高段
+# 大小 ⇒ ⇒ 候选侧**自动**跟着变 ⇒ ⇒ 参考侧**自动**跟着变 ⇒ ⇒ 不可能漂。
+#
+# ⚠️ **覆盖口优先**：`GOLDEN_MEM` 一旦给了 ⇒ ⇒ **不**用打印值（也不去问
+# 候选侧）⇒ ⇒ 手工覆盖**永远压得住**自动值。
+if [ -n "${GOLDEN_MEM:-}" ]; then
+    MEM="$GOLDEN_MEM"
+else
+    CANDIDATE_MEM="$("$RUNNER" --print-memory)" || die "the candidate could not print its RAM window"
+    # ⚠️ 形状必须是 `base:size` 且**十进制** ⇒ ⇒ Spike 的 `-m` 才吃得下。
+    if ! printf '%s' "$CANDIDATE_MEM" | grep -Eq '^[0-9]+:[0-9]+$'; then
+        die "the candidate printed an unusable RAM window: '$CANDIDATE_MEM'"
+    fi
+    MEM="$SPIKE_STACK_MEM,$CANDIDATE_MEM"
+fi
+echo "==> spike memory: $MEM"
 
 mkdir -p "$OUT_DIR"
 
