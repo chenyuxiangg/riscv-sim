@@ -397,11 +397,25 @@ rv32imc_zicsr_zicclsm_zifencei_zicntr
 ⇒ ⇒ **为什么安全**：第 18 批**已实测**——用这个 ISA 跑全量 68 例 ⇒ ⇒ **仍 68/68 全绿**（无
 spike ISA 报错）⇒ ⇒ 参考侧多支持两个扩展**不破**已有对拍。
 
-⚠️ **为什么必须加**：不 `zicsr`，参考侧**不实现 Zicsr** ⇒ ⇒ 读 `cycle` 会**陷入**
-⇒ ⇒ `rv32mi/instret_overflow` 在参考侧**根本跑不完** ⇒ ⇒ **没有真判据**。
+⚠️ **为什么必须加 `zicntr`**（⚠️ **本段在施工期订正过一次**，见 §8 订正 5）：**Zicntr
+带来的**影子** CSR（`cycle` / `instret` / `cycleh` / `instreth`）是 **standard** CSR ⇒ ⇒
+Spike **按扩展门控**它们 ⇒ ⇒ 没有 `zicntr` ⇒ ⇒ **读 `cycle` 陷入非法指令** ⇒ ⇒
+`rv32mi/zicntr` 用例在参考侧**根本跑不完**（实测：旧串下参考侧报 `FAIL 2`，新串下报
+`PASS`）⇒ ⇒ **没有真判据**。
 
-⚠️ **`zicntr` 也要加**：参考侧**不实现 Zicntr** ⇒ ⇒ `minstret` / `mcycle` 在参考侧**不可用**
-⇒ ⇒ 用例里的 `csrwi minstret, 0` 在参考侧会**陷入**。
+⚠️ **而 `zicsr` 的理由要改**（同上）：初稿说「不 `zicsr` ⇒ 参考侧不实现 Zicsr ⇒ ⇒ 读
+`cycle` 会陷入 ⇒ ⇒ `instret_overflow` 跑不完」—— ⚠️ **实测逐条不成立**：① Spike 的基
+`rv32imc` **已隐含** Zicsr ⇒ ⇒ 旧串下 `csrr` / `csrw` **照常执行**；② `rv32mi/instret_overflow`
+在旧串下**跑得完**（参考侧 `PASS`）；③ `mcycle` / `minstret` / `mcountinhibit` 住在
+**custom** CSR 区（`0xB00..0xB1F` / `0x200..0x3FF`）⇒ ⇒ Spike **不按扩展门控**它们 ⇒ ⇒
+旧串下**可用**（实测：写 `minstret` = `0xFFFFFFFF` 落地、随后回绕读回 `0`）。
+
+⇒ ⇒ **精确口径**：**只有 `zicntr` 是必需的**（它门控的是 **standard** 影子 CSR）；
+`zicsr` 保留在串里是**显式点名 `i` 的隐含依赖**（不依赖隐含 ⇒ ⇒ 更不容易被误解），**不是**
+「没有它就跑不了」。
+
+⇒ ⇒ **决策不变**：默认 ISA 改成 `rv32imc_zicsr_zicclsm_zifencei_zicntr`（新串已实测全量
+**68 / 68** 不破）。
 
 ⇒ ⇒ **两个都要**。
 
@@ -577,7 +591,9 @@ spike ISA 报错）⇒ ⇒ 参考侧多支持两个扩展**不破**已有对拍�
 
 ### 裁决 M · 默认 Golden ISA 加 `zicsr` + `zicntr`
 
-理由见 §4.1 ⇒ ⇒ **两个都要** ⇒ ⇒ 参考侧不带 `zicsr` ⇒ 用例在参考侧根本跑不完 ⇒ ⇒ 没有真判据。
+理由见 §4.1 ⇒ ⇒ **必须加的是 `zicntr`**（它门控 **standard** 影子 CSR ⇒ ⇒ 缺了它读 `cycle`
+**陷入** ⇒ ⇒ `rv32mi/zicntr` 在参考侧跑不完 ⇒ ⇒ 没有真判据）；⇒ ⇒ `zicsr` 保留是**显式点名
+`i` 的隐含依赖**，**不是**必需（⚠️ 施工期实测订正，见 §8 订正 5）。
 
 ### 裁决 N · §0.1 三个合计数的口径
 
@@ -648,6 +664,39 @@ bits `[11:10]` 就是 `0b11` ⇒ ⇒ 它落在 `0xBC0..0xBFF` 这个**只读**�
 
 ⚠️ **影响面**：其余 **1146** 条内核 lib 用例在契约层改动后**全部通过** ⇒ ⇒ 契约层改动对内核
 **零回归**。
+
+### 订正 5 · 默认 ISA 的两条理由被实测**逐条推翻**（Lane C 实测 + 统筹方复核）
+
+⚠️ **现象**：初稿 §4.1 与裁决 M 写「不 `zicsr` ⇒ 参考侧不实现 Zicsr ⇒ ⇒ 读 `cycle` 会陷入 ⇒ ⇒
+`rv32mi/instret_overflow` 在参考侧**根本跑不完**」与「不 `zicntr` ⇒ ⇒ `minstret` / `mcycle`
+在参考侧**不可用** ⇒ ⇒ `csrwi minstret, 0` 会陷入」。
+
+⚠️ **根因**：**把两类 CSR 混为一谈** ⇒ ⇒ **standard** CSR（`cycle` / `instret` / `cycleh` /
+`instreth`）Spike **按扩展门控** ⇒ ⇒ 缺 `zicntr` 就**陷入**；⇒ ⇒ 而 **custom** CSR
+（`mcycle` / `minstret` / `mcountinhibit`）Spike **不按扩展门控** ⇒ ⇒ 缺 `zicntr` 也**照常可用**；
+⇒ ⇒ 而 **Zicsr 的指令**（`csrr` / `csrw` / …）由基 `rv32imc` **隐含** ⇒ ⇒ 旧串下**照常执行**。
+
+⚠️ **实测证据**（两条独立路径测得**同一结论**）：Lane C 用 `spike --log-commits` 逐指令核对，
+统筹方用独立探针在**两个 ISA** 下各跑一遍：
+
+| 探针 | 旧串 `rv32imc_zicclsm_zifencei` | 新串 `rv32imc_zicsr_zicclsm_zifencei_zicntr` |
+| --- | --- | --- |
+| 读 `cycle`（**standard** 影子） | **陷入**（`tohost` = 异常值） | 读到 **9** |
+| 读 `minstret`（**custom**） | 读到 **9** | 读到 **9** |
+| 写 `minstret`=100 再读（**custom**） | 读回 **100** | 读回 **100** |
+| `mcountinhibit`（**custom**） | 可读 | 可读 |
+
+⇒ ⇒ **订正**：§4.1 与裁决 M 改成上面的**精确口径** ⇒ ⇒ **只有 `zicntr` 是必需的**；
+`zicsr` 保留的理由改成「显式点名 `i` 的隐含依赖」⇒ ⇒ **决策本身不变**（新串实测全量
+**68 / 68**）。
+
+⚠️ **连带订正**：`tests/golden/README.md` 里 Lane C 按初稿理由写的 `zicsr` 段落（「without it
+there is no `csrr` / `csrw` ⇒ ⇒ the counter cases cannot run to completion」）**与实测矛盾**
+⇒ ⇒ 统筹方改成实测口径；`zicntr` 段落**本来就对**（它说的正是「读 `cycle` 陷入」）⇒ ⇒ 保留。
+
+⚠️ **教训**：**「某个扩展缺失 ⇒ 某个 CSR 不可用」不是一条能想当然的规则** ⇒ ⇒ Spike 对
+**standard** CSR 按扩展门控、对 **custom** CSR **不**门控 ⇒ ⇒ 差别**只在地址段**里 ⇒ ⇒
+**必须实测**（这条与第 18 批「上一轮探针结论互相矛盾」是同一条纪律的另一个面）。
 
 ---
 
