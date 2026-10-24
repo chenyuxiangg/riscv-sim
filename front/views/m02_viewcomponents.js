@@ -321,6 +321,12 @@ const memoryMapView = register({
             case "reload-project":
                 // 「重新装载工程」⇒ 宿主在下次 LoadProject 时应用待生效的板级配置。
                 return emitCommand("reload-project", "memory-map");
+            case "unload-project":
+                // 「卸载工程」⇒ 契约 v7 的 `UnloadProject`（D-139）。
+                //
+                // ⚠️ **只发这一个信号**：真正发命令的是 app 层（它持有服务
+                // 接线）⇒ 视图层**不**自己碰内核。
+                return emitCommand("unload-project", "memory-map");
             case "save-memory-map": {
                 // 「保存当前板」⇒ 把**当前草稿**写进板档案（键 = 草稿的 id）。
                 //

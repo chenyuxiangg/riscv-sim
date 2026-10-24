@@ -210,6 +210,8 @@ fn an_over_budget_region_is_rejected_before_anything_is_mapped() {
         priority: 5,
         auto_selectable: true,
         region_budget_bytes: 16 * 1024 * 1024,
+        // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
+        max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
                 base: 0,
@@ -652,6 +654,8 @@ fn a_broken_description_reports_its_own_code() {
         priority: 5,
         auto_selectable: true,
         region_budget_bytes: 16 * 1024 * 1024,
+        // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
+        max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
                 base: 0,
@@ -672,6 +676,8 @@ fn a_broken_description_reports_its_own_code() {
         priority: 5,
         auto_selectable: true,
         region_budget_bytes: 1024,
+        // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
+        max_region_bytes: None,
         regions: vec![RegionSpec::Ram {
             base: 0,
             size: 4096,
@@ -686,6 +692,8 @@ fn a_broken_description_reports_its_own_code() {
         priority: 5,
         auto_selectable: true,
         region_budget_bytes: 16 * 1024 * 1024,
+        // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
+        max_region_bytes: None,
         regions: vec![
             RegionSpec::Peripheral {
                 base: 0x4000_0000,

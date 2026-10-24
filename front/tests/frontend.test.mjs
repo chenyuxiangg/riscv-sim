@@ -514,3 +514,69 @@ describe("DOM stub 保真度", () => {
         assert.equal(el.innerHTML, "&lt;b&gt;&amp;");
     });
 });
+
+// ---------------------------------------------------------------------------
+// 板级内存图面板（STAGE-16 · v0.31）—— DOM 层的**冻结钩子**与措辞
+//
+// ⚠️ **钩子名是冻结的**（规格 §4.6）⇒ 这里逐字钉住：
+//   `data-action="unload-project"` · `data-mmap-revision` ·
+//   `data-mmap-field="region_budget_bytes"` · `data-mmap-budget-note`。
+//
+// ⚠️ **不放宽断言**：这里只钉**钩子与文案**，不钉行为（行为在
+// `front/tests/memory-map.test.mjs`）。
+// ---------------------------------------------------------------------------
+
+describe("板级内存图面板（STAGE-16 · v0.31）", () => {
+    /** 路由到板级内存图编辑器（**产品角色**才有这个面）。 */
+    const gotoMemoryMap = () => {
+        m01.assembleWorkspace("product");
+        m01.route("#/memory-map");
+    };
+
+    test("「卸载工程」按钮在面板上（`data-action=\"unload-project\"`）", () => {
+        gotoMemoryMap();
+        const button = $("[data-action='unload-project']");
+        assert.ok(button, "面板上没有「卸载工程」按钮");
+        let detail = null;
+        const listener = (ev) => { detail = ev.detail; };
+        dom.window.addEventListener("riscv:command", listener);
+        button.dispatchEvent(new Event("click"));
+        dom.window.removeEventListener("riscv:command", listener);
+        assert.ok(detail, "点「卸载工程」没有发出命令信号");
+        assert.equal(detail.action, "unload-project");
+    });
+
+    test("修订号元素在面板上（没收到过事件 ⇒ 十进制字符串，不许是空 / undefined）", () => {
+        gotoMemoryMap();
+        const el = $("[data-mmap-revision]");
+        assert.ok(el, "面板上没有修订号元素");
+        assert.match(
+            el.textContent, /^[0-9]+$/,
+            `修订号必须是十进制字符串：${el.textContent}`,
+        );
+    });
+
+    test("编辑器**只有一个**预算旋钮（裁决 L）", () => {
+        gotoMemoryMap();
+        assert.equal(
+            $$("[data-mmap-field='region_budget_bytes']").length, 1,
+            "预算输入框必须只有一个（复用既有的那个）",
+        );
+        assert.equal(
+            $$("[data-mmap-field='max_region_bytes']").length, 0,
+            "不许出现第二个预算旋钮（运行期的占用上限由内核管）",
+        );
+        const note = $("[data-mmap-budget-note]");
+        assert.ok(note, "没有预算说明");
+        assert.ok(note.textContent.includes("V-7"), "必须写出 V-7 这条约束");
+        assert.ok(note.textContent.includes("E_PLT-07"), "必须说出超预算会报什么码");
+        assert.ok(
+            note.textContent.includes("声明大小上限"),
+            `必须说清这是「每段的声明大小上限」：${note.textContent}`,
+        );
+        assert.ok(
+            !note.textContent.includes("同一个数"),
+            `旧措辞（同一个数还是运行期物理占用的上界）必须改掉：${note.textContent}`,
+        );
+    });
+});

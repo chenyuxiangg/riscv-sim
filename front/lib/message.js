@@ -49,6 +49,24 @@
 //     whether the host holds a **pending** board configuration;
 //   - ⚠️ nothing else changed in v6: no DTO change, no renumbering.
 //
+// Contract v7 (`schema_version = 7`) adds:
+//   - one new command: `UnloadProject` — a **unit** variant (no payload)
+//     ⇒ the wire form is the **bare string** `"UnloadProject"` (same
+//     shape as `Nop` / `Continue`);
+//   - one new command: `PatchMemoryMap { ops, expected_revision }` — the
+//     **delta** update of the board memory map. `ops` is a list of
+//     `MemoryMapOp`s, which use serde's **externally tagged** form ⇒ the
+//     wire key **is** the Rust variant name (`UpsertRegion` /
+//     `RemoveRegion` / `SetBudget`), **not** `op` / `upsert_region`;
+//   - one new command field: `SetMemoryMap` gained `expected_revision`
+//     (`None` ⇒ the host does **not** check the revision);
+//   - one new event field pair: `MemoryMap` gained `loaded` (is an image
+//     running?) and `revision` (the monotonically increasing map
+//     revision ⇒ the front end sends it back as `expected_revision`).
+//   - ⚠️ `PLATFORM_SCHEMA_VERSION` (the **description** format version)
+//     is **unchanged** (still 1) — v7 only adds one optional field to
+//     `PlatformDescription` ⇒ old descriptions still parse unchanged.
+//
 // Contract v5 (`schema_version = 5`) adds:
 //   - one new command: `WriteConsole { bytes }` — the console **input**
 //     direction (UART RX). It is the exact mirror of v4's `Console`
@@ -59,7 +77,7 @@
 //     renumbering.
 
 /** Protocol schema version — mirrors `riscv_sim_contract::SCHEMA_VERSION`. */
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 /**
  * 描述格式版本 — mirrors `riscv_sim_contract::platform::PLATFORM_SCHEMA_VERSION`.
@@ -431,8 +449,9 @@ export const Command = Object.freeze({
         };
     },
     /**
-     * `CommandPayload::SetMemoryMap { description }` — 设置板级内存图
-     * （用户在前端配的那张板，契约 v6）。
+     * `CommandPayload::SetMemoryMap { description, expected_revision }` —
+     * 设置板级内存图（用户在前端配的那张板，契约 v6 · **v7 多了
+     * `expected_revision`**）。
      *
      * ⚠️ **携带的是一整份描述**，不是 patch ⇒ 没有「当前值 + 补丁」的
      * 第二个真相。
@@ -440,12 +459,59 @@ export const Command = Object.freeze({
      * ⚠️ **零新 DTO**：描述用的是契约层**已有**的 `PlatformDescription`
      * ⇒ 描述 DTO **一字未改**。本函数**原样透传**它，不重写字段名。
      *
-     * 回复是 `MemoryMap` 事件（当前生效的图 + `pending` 标志）。
+     * ⚠️ **`expected_revision`（v7 · D-137）**：前端的**期望修订号** ⇒
+     * `null` ⇒ **不检查**（旧调用方的行为）；给了数字 ⇒ 宿主发现它与
+     * 当前的修订号不符 ⇒ **明确拒绝**（`E_PLT-13`）且**什么都不动**
+     * ⇒ 并发丢更新**看得见**。
+     *
+     * 回复是 `MemoryMap` 事件（当前生效的图 + `pending` / `loaded` /
+     * `revision`）。
      *
      * @param {object} description — `PlatformDescription`（契约层已有的 DTO）
-     * @returns {{SetMemoryMap: {description: object}}}
+     * @param {number|null} [expectedRevision] — 期望修订号（默认 `null` = 不检查）
+     * @returns {{SetMemoryMap: {description: object, expected_revision: number|null}}}
      */
-    setMemoryMap: (description) => ({ SetMemoryMap: { description } }),
+    setMemoryMap: (description, expectedRevision = null) => ({
+        SetMemoryMap: {
+            description,
+            expected_revision: expectedRevision ?? null,
+        },
+    }),
+    /**
+     * `CommandPayload::PatchMemoryMap { ops, expected_revision }` — 板级
+     * 内存图的**差量**更新（契约 v7 · D-137）。
+     *
+     * ⚠️ **一条命令一次合成一次校验一次应用** ⇒ 不会半张图。
+     *
+     * ⚠️ **`ops` 的线上形状**：`MemoryMapOp` 用 serde 的**外部标签**
+     * ⇒ 键**就是 Rust 变体名**：
+     *   `{"UpsertRegion": {"spec": {"kind": "ram", "base": 0, "size": 1048576}}}`
+     *   `{"RemoveRegion": {"base": 0}}`
+     *   `{"SetBudget": {"region_budget_bytes": 16777216, "max_region_bytes": null}}`
+     * ⇒ ⚠️ **不是** `{"op": "upsert_region", ...}`。
+     *
+     * @param {Array<object>} ops — 差量操作（按顺序施加）
+     * @param {number|null} [expectedRevision] — 期望修订号（默认 `null` = 不检查）
+     * @returns {{PatchMemoryMap: {ops: Array<object>, expected_revision: number|null}}}
+     */
+    patchMemoryMap: (ops, expectedRevision = null) => ({
+        PatchMemoryMap: {
+            ops: ops ?? [],
+            expected_revision: expectedRevision ?? null,
+        },
+    }),
+    /**
+     * `CommandPayload::UnloadProject` — **卸载工程**（契约 v7 · D-139）。
+     *
+     * ⚠️ **unit 变体** ⇒ 线上形态是**裸字符串** `"UnloadProject"`
+     * （与 `nop` / `continueRun` 同形 ⇒ 不是 `{UnloadProject: {}}`）。
+     *
+     * ⚠️ 卸载 = **清运行态**（寄存器 / 事件队列 / 断点 / 观察点）⇒
+     * **镜像字节与用户的板都留着** ⇒ 重新装载**不必重新选文件**。
+     *
+     * @returns {"UnloadProject"}
+     */
+    unloadProject: () => "UnloadProject",
 });
 
 // ---------------------------------------------------------------------------
@@ -623,8 +689,8 @@ export const Event = Object.freeze({
         },
     }),
     /**
-     * `EventPayload::MemoryMap { description, pending }` — 当前生效的板级
-     * 内存图（契约 v6）。
+     * `EventPayload::MemoryMap { description, pending, loaded, revision }` —
+     * 当前生效的板级内存图（契约 v6 · **v7 多了 `loaded` 与 `revision`**）。
      *
      * ⚠️ `description` 是**当前生效**的图（**不是**「用户配的那份」）
      * ⇒ 前端内存映射表显示的**就是它**。
@@ -632,11 +698,27 @@ export const Event = Object.freeze({
      * ⚠️ `pending` = 宿主是否存着一份**待生效**的板级配置 ⇒ 前端要
      * **显式**显示「待生效 —— 重新装载工程后应用」。
      *
+     * ⚠️ `loaded` = 有没有装载镜像 ⇒ 决定「改板」是**立即生效**还是
+     * **待生效**（裁决 M：它由**内核**说 ⇒ 前端**不复制**任何内核状态）。
+     *
+     * ⚠️ `revision` = 内存图的**修订号**（单调递增）⇒ 前端下次提交时
+     * 把它作为 `expected_revision` 带上 ⇒ 并发丢更新**看得见**
+     * （`E_PLT-13`）。
+     *
      * @param {object} description — `PlatformDescription`（契约层已有的 DTO）
      * @param {boolean} pending — 有无待生效的板级配置
-     * @returns {{MemoryMap: {description: object, pending: boolean}}}
+     * @param {boolean} loaded — 有没有装载镜像
+     * @param {number} revision — 当前的修订号（缺省 0）
+     * @returns {{MemoryMap: {description: object, pending: boolean, loaded: boolean, revision: number}}}
      */
-    memoryMap: (description, pending) => ({ MemoryMap: { description, pending: Boolean(pending) } }),
+    memoryMap: (description, pending, loaded, revision) => ({
+        MemoryMap: {
+            description,
+            pending: Boolean(pending),
+            loaded: Boolean(loaded),
+            revision: Number(revision ?? 0),
+        },
+    }),
 });
 
 // ---------------------------------------------------------------------------
