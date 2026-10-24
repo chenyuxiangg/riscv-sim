@@ -48,10 +48,29 @@
 #
 #   --suite NAME     only run one suite (rv32ui / rv32um / rv32uc)
 #   --filter REGEX   only run cases whose "suite/test" matches REGEX
+#   --check-mem      print both sides' RAM windows and assert they agree
+#                    **byte for byte** (D-150 · 做法 C) ⇒ ⇒ a drift of the
+#                    **reference** side's window becomes **visible** here
 #   --list           list the corpus and exit
 #   --self-check     run the mutation canaries only (see below)
 #   --release        build the candidate runner in release mode
 #   --keep-going     do not stop at the first mismatch
+#
+# Environment overrides (all of them default to the canonical value):
+#   RISCV_TESTS_DIR     upstream riscv-tests tree
+#   RISCV_TOOLCHAIN_DIR cross toolchain
+#   SPIKE               the spike binary
+#   GOLDEN_ISA          the ISA string handed to **both** sides
+#   GOLDEN_MEM          overrides the **whole** `-m` value (see above)
+#   GOLDEN_TIMEOUT      per-case wall-clock cap, in seconds
+#   GOLDEN_BUDGET       per-case instruction budget
+#   GOLDEN_OUT          where the artifacts go
+#   GOLDEN_MANIFEST     **another** corpus manifest
+#                       ⇒ ⇒ ⚠️ this one is **not** the gate's corpus ⇒ ⇒ it is
+#                       for **local / partial re-runs** (e.g. the D-94 survey's
+#                       nine out-of-scope cases, `docs/reviews/V035_D94_Survey.md`)
+#                       ⇒ ⇒ the gate itself never sets it ⇒ ⇒ the gate keeps
+#                       comparing the canonical corpus.
 #
 # Exit status: 0 when every compared case agrees, 1 otherwise.
 
@@ -90,7 +109,13 @@ TIMEOUT_SEC="${GOLDEN_TIMEOUT:-10}"
 BUDGET="${GOLDEN_BUDGET:-1000000}"
 OUT_DIR="${GOLDEN_OUT:-$REPO_ROOT/tests/golden/_out}"
 
-MANIFEST="$REPO_ROOT/tests/golden/corpus.txt"
+MANIFEST="${GOLDEN_MANIFEST:-$REPO_ROOT/tests/golden/corpus.txt}"
+# ⚠️ `GOLDEN_MANIFEST` points the run at **another** manifest ⇒ ⇒ the gate
+#    never sets it (it compares the canonical corpus) ⇒ ⇒ it exists for
+#    **local / partial re-runs** only.
+if [ -n "${GOLDEN_MANIFEST:-}" ]; then
+    echo "==> NOTE: running a NON-canonical manifest: $MANIFEST"
+fi
 ENV_DIR="$REPO_ROOT/tests/golden/env"
 CANARY_DIR="$REPO_ROOT/tests/golden/canary"
 MACRO_DIR_REL="isa/macros/scalar"
@@ -98,6 +123,7 @@ MACRO_DIR_REL="isa/macros/scalar"
 SUITE_FILTER=""
 FILTER=""
 LIST_ONLY=0
+CHECK_MEM=0
 SELF_CHECK=0
 KEEP_GOING=0
 RELEASE=0
@@ -108,6 +134,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --suite)       [ $# -ge 2 ] || die "--suite needs a suite name"; SUITE_FILTER="$2"; shift 2 ;;
         --filter)      [ $# -ge 2 ] || die "--filter needs a REGEX"; FILTER="$2"; shift 2 ;;
+        --check-mem)   CHECK_MEM=1; shift ;;
         --list)        LIST_ONLY=1; shift ;;
         --self-check)  SELF_CHECK=1; shift ;;
         --release)     RELEASE=1; shift ;;
@@ -294,6 +321,9 @@ RUNNER="$TARGET_DIR/debug/riscv-golden"
 # 候选侧）⇒ ⇒ 手工覆盖**永远压得住**自动值。
 if [ -n "${GOLDEN_MEM:-}" ]; then
     MEM="$GOLDEN_MEM"
+    # ⚠️ 覆盖口 ⇒ 候选侧**没被问** ⇒ ⇒ 拿不到它的窗口 ⇒ ⇒ 覆盖口下
+    #    「两侧一致」**无从断言** ⇒ ⇒ 明确说出来（**不假装验过了**）。
+    CANDIDATE_MEM=""
 else
     CANDIDATE_MEM="$("$RUNNER" --print-memory)" || die "the candidate could not print its RAM window"
     # ⚠️ 形状必须是 `base:size` 且**十进制** ⇒ ⇒ Spike 的 `-m` 才吃得下。
@@ -303,6 +333,32 @@ else
     MEM="$SPIKE_STACK_MEM,$CANDIDATE_MEM"
 fi
 echo "==> spike memory: $MEM"
+
+# ------------------------------------------------------- the window self-check
+#
+# ⚠️ **D-150 · 做法 C**：把「参考侧喂给 Spike 的 RAM 窗口」做成**门禁显式项**
+#    ⇒ ⇒ 参考侧的窗口**漂移**在这里**看得见**（此前只有 osz 那一侧能显出）。
+#
+# ⚠️ **判据是「参考侧的 RAM 段 == 候选侧打印的窗口」**（**逐字**）：
+#    Spike 的 `-m` = 「它的初始栈页」+「候选侧的窗口」⇒ ⇒ 参考侧那一段
+#    **就是**候选侧那一份 ⇒ ⇒ 漂了 ⇒ ⇒ 逐字比对**必然不等**。
+if [ "$CHECK_MEM" -eq 1 ]; then
+    if [ -z "$CANDIDATE_MEM" ]; then
+        # ⚠️ `GOLDEN_MEM` 覆盖口 ⇒ 候选侧**没被问** ⇒ ⇒ 无从断言 ⇒ ⇒
+        #    **不静默放过** ⇒ ⇒ 明确失败（要断言就别用覆盖口）。
+        die "--check-mem needs the candidate's window ⇒ ⇒ do NOT set GOLDEN_MEM"
+    fi
+    REFERENCE_RAM="${MEM#*,}"          # 去掉 Spike 的初始栈页 ⇒ 只剩 RAM 段
+    echo "==> candidate RAM window: $CANDIDATE_MEM"
+    echo "==> reference RAM window: $REFERENCE_RAM"
+    if [ "$REFERENCE_RAM" != "$CANDIDATE_MEM" ]; then
+        echo "golden-run: the reference side's RAM window drifted" >&2
+        echo "  candidate (from the platform description): $CANDIDATE_MEM" >&2
+        echo "  reference (what Spike was handed):          $REFERENCE_RAM" >&2
+        exit 1
+    fi
+    echo "==> RAM windows agree (byte for byte)"
+fi
 
 mkdir -p "$OUT_DIR"
 
