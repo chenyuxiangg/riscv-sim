@@ -51,10 +51,18 @@
 # them would force the rule to be loosened into a hole; leaving them in the
 # README keeps the manifest's rows all-or-nothing.
 #
-# Runtime ISA for the reference side is `rv32imc_zicclsm_zifencei`:
-# Zicclsm is what makes Spike *perform* misaligned accesses instead of
-# trapping on them, which is what our ISS's default MisalignedPolicy::Allow
-# does.  See tests/golden/README.md for the full note.
+# Runtime ISA for the reference side is
+# `rv32imc_zicsr_zicclsm_zifencei_zicntr`:
+#   * Zicclsm is what makes Spike *perform* misaligned accesses instead of
+#     trapping on them, which is what our ISS's default MisalignedPolicy::Allow
+#     does;
+#   * Zicntr is load-bearing: the Zicntr *shadow* counters (`cycle` / `instret`
+#     / `cycleh` / `instreth`) are **standard** CSRs and Spike gates them by
+#     extension ⇒ ⇒ without it, reading `cycle` traps on the reference side
+#     and `rv32mi/zicntr` cannot be compared at all;
+#   * Zicsr is named explicitly rather than relied on as implied by `rv32imc`
+#     (measured: the `csrr` / `csrw` instructions run fine either way).
+# See tests/golden/README.md for the full note.
 rv32ui add rv32i_zifencei active
 rv32ui addi rv32i_zifencei active
 rv32ui and rv32i_zifencei active

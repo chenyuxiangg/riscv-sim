@@ -1,7 +1,8 @@
 //! `riscv-golden` — run one RISC-V ELF to its verdict and print it.
 //!
 //! This is the **candidate** side of the golden comparison (Phase 2).
-//! The **reference** side is Spike (`spike --isa=rv32imc_zicclsm_zifencei`),
+//! The **reference** side is Spike
+//! (`spike --isa=rv32imc_zicsr_zicclsm_zifencei_zicntr`),
 //! and `tools/golden-run.sh` drives both and compares.
 //!
 //! ## What it does

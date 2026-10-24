@@ -278,22 +278,30 @@ rv32imc_zicsr_zicclsm_zifencei_zicntr
 * `zicsr` — so the reference side has the CSR instructions the counter cases consist of;
 * `zicntr` — so the reference side has the counter CSRs, shadows included.
 
-⚠ **Why `zicsr` is in the string.**  The counter cases are nothing but CSR
-instructions, so the reference side has to implement Zicsr for them to run
-at all — without it there is no `csrr` / `csrw` ⇒ ⇒ the counter cases
-cannot run to completion on the reference side ⇒ ⇒ there would be no
-criterion to compare against: the case would fail to *run*, not to
-*agree*.  The string names the extension explicitly instead of relying on
-the base `rv32imc` to imply it.
+⚠ **Why `zicsr` is in the string — and why it is *not* the load-bearing
+one.**  Measured on this machine's Spike: the base `rv32imc` already
+**implies** Zicsr ⇒ ⇒ `csrr` / `csrw` execute fine even under the old
+string `rv32imc_zicclsm_zifencei` ⇒ ⇒ the counter cases *do* run to
+completion there (under the old string the reference side already reports
+`PASS` for `rv32mi/instret_overflow`).  ⇒ ⇒ `zicsr` is in the string to
+**name** the dependency explicitly instead of relying on the implication —
+it is **not** what makes the counter cases work.
 
-⚠ **Why `zicntr` is in the string too.**  Zicntr is what makes the
-**shadow** counters — `cycle` / `instret` / `cycleh` / `instreth` — exist
-on the reference side; without it those CSRs are not there ⇒ ⇒ reading
-`cycle` raises an illegal-instruction exception ⇒ ⇒ the
-`rv32mi/zicntr` case traps on the reference side instead of running ⇒ ⇒
-that case cannot be compared at all.  Measured: with the previous string
-the reference side reported `FAIL 2` for it, with this one it reports
-`PASS`.
+⚠ **Why `zicntr` is in the string — this one *is* load-bearing.**  Zicntr
+brings the **shadow** counters — `cycle` / `instret` / `cycleh` /
+`instreth` — and those are **standard** CSRs ⇒ ⇒ Spike gates them by
+extension ⇒ ⇒ without `zicntr` reading `cycle` raises an
+illegal-instruction exception ⇒ ⇒ the `rv32mi/zicntr` case traps on the
+reference side instead of running ⇒ ⇒ that case cannot be compared at
+all.  Measured: with the previous string the reference side reported
+`FAIL 2` for it, with this one it reports `PASS`.
+
+⚠ **Mind the asymmetry, because it is easy to get backwards.**  Spike
+gates **standard** CSRs by extension but does **not** gate **custom**
+ones ⇒ ⇒ `mcycle` / `minstret` / `mcountinhibit` (custom addresses) were
+already readable **and writable** on the reference side under the old
+string — measured: writing `0xFFFFFFFF` into `minstret` lands and the
+counter wraps ⇒ ⇒ it is the **shadows** alone that need `zicntr`.
 
 Note that M-13's LLD says the default policy is "模拟器与 Spike 一致允许非对齐".
 That statement is only true of a Spike built with Zicclsm enabled — the
