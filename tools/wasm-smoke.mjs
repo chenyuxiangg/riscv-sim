@@ -30,7 +30,16 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { DEMO_FIRMWARE_BYTES } from "../front/dev/demo-firmware.js";
-import { SCHEMA_VERSION } from "../front/lib/message.js";
+import { PLATFORM_SCHEMA_VERSION, SCHEMA_VERSION } from "../front/lib/message.js";
+// ⚠️ **命名空间导入**：`PLATFORM_RULES_VERSION` 住在**同一个**镜像模块里，
+//   但它**这一条 lane 上还不存在**（契约层与前端镜像各由别的 lane 落）
+//   ⇒ ⇒ 具名导入在它还不存在时**把整个脚本打成链接期错误** ⇒ ⇒ 这里用
+//   命名空间导入读它（不存在时是 `undefined` ⇒ ⇒ 那正是「跳过」的情形）。
+import * as messageMirror from "../front/lib/message.js";
+// ⚠️ **真前端算法**（D-148 缺的那半）：`diffMemoryMapOps` 是前端自己的
+//   **纯函数** ⇒ ⇒ 直接 import 它 ⇒ ⇒ **不复制**一份到工具层
+//   （复制的那份**永远不会跑** ⇒ 又是 D-147 那种「接不进判定」的缺口）。
+import { diffMemoryMapOps } from "../front/views/components/memory-map.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
@@ -92,6 +101,25 @@ function rustSchemaVersion() {
 
 /** 契约层（Rust）的协议版本。 */
 const contractSchemaVersion = rustSchemaVersion();
+
+/**
+ * 契约层（Rust）的**合法性规则集版本** —— **直接读源码**。
+ *
+ * ⚠️ **与 `rustSchemaVersion()` 同一个手法**：读源码 + 正则推导 ⇒ ⇒
+ *   **不抄常量**（抄的那份会与契约层**静默漂移**）。
+ *
+ * ⚠️ **读不到 ⇒ 返回 `null`**（不是抛错）：这个常量**比本脚本新**
+ *   ⇒ ⇒ 契约层那一侧还没施工时它** legitimately 不存在** ⇒ ⇒ 那是
+ *   「**环境不完整**」，不是「版本对不上」⇒ ⇒ 抛错会把「还没施工」
+ *   说成「坏了」。
+ *
+ * @returns {number|null}
+ */
+function rustPlatformRulesVersion() {
+    const src = readFileSync(resolve(repoRoot, "crates/contract/src/platform.rs"), "utf8");
+    const m = src.match(/pub const PLATFORM_RULES_VERSION:\s*u32\s*=\s*(\d+)/);
+    return m ? Number(m[1]) : null;
+}
 
 /**
  * M-11 的执行轨迹 **CSV 表头** —— 从 Rust 源码推导。
@@ -209,6 +237,30 @@ check(
     kernelSchemaVersion === contractSchemaVersion,
     `内核 ${kernelSchemaVersion} vs 契约 ${contractSchemaVersion}`,
 );
+
+// -- 合法性规则集版本的一致性（裁决 O 的配套 · D-143）----------------------
+//
+// ⚠️ **口径**：这条断言钉的是「前端镜像 ↔ 契约层」的**漂移** ⇒ ⇒
+//   **契约层还没有这个常量**时 ⇒ ⇒ **跳过并打印一句说明**（**不是**判红）
+//   ⇒ ⇒ 那是「**环境不完整**」（两侧不同批就位），不是缺陷 ⇒ ⇒
+//   判红等于把「还没施工」说成「坏了」。
+// ⚠️ **一旦读到了该常量而值不一致** ⇒ ⇒ **必须红**（镜像漂了）。
+{
+    const rustRulesVersion = rustPlatformRulesVersion();
+    if (rustRulesVersion === null) {
+        console.log(
+            "  skip  契约层暂无 PLATFORM_RULES_VERSION ⇒ 本条待整合批验证"
+            + "（两侧同时就位后它会变成一条真断言）",
+        );
+    } else {
+        const jsRulesVersion = messageMirror.PLATFORM_RULES_VERSION;
+        check(
+            "前端镜像的 PLATFORM_RULES_VERSION 与契约层一致",
+            jsRulesVersion === rustRulesVersion,
+            `Rust ${rustRulesVersion} vs JS ${jsRulesVersion ?? "（前端镜像没有这个常量）"}`,
+        );
+    }
+}
 
 // -- Nop ------------------------------------------------------------------
 {
@@ -523,6 +575,279 @@ check(
     );
     const err = out[0]?.payload?.Event?.Error;
     check("错误码是 E_PROTO-08", err?.code === "E_PROTO-08", `实际 ${err?.code}`);
+}
+
+// -- 板级差量等价性（D-148 · STAGE-18 §4.1 · 裁决 K / L）------------------
+//
+// 这一段钉的是台账 **D-148**：等价性**只覆盖了手写的 ops** ⇒ 「前端算出来
+// 的 ops」那半边只有**真机层**（T-4）覆盖，而真机门禁**不进默认门禁**
+// ⇒ ⇒ 默认门禁里**没有**那条覆盖。
+//
+// 这里补上的正是那半：ops 由**真前端算法**（`diffMemoryMapOps`，前端自己
+// 的纯函数）算出来 ⇒ ⇒ 验的是「**前端算 ops + 内核合成**」**合起来**那条
+// 链 ⇒ ⇒ **真 WASM 产物**（不是 mock）+ **真前端算法**（不是手抄）。
+//
+// ⚠️ **流程顺序固定**（规格 §4.1）：
+//   ① `UnloadProject` ⇒ `image_loaded` 变假 ⇒ 之后的 `SetMemoryMap`
+//      **立即生效**（已装载工程时它是「挂起待生效」⇒ 生效图**不变**⇒
+//      ⇒ 等价性会**假红 / 假绿**）。
+//   ② 基座描述 `base` + 草稿描述 `draft`（**元数据逐字段相同** ⇒ 差量路径
+//      才成立 —— 差量**不覆盖元数据**）。
+//   ③ `SetMemoryMap { base }` ⇒ 生效图 **A**。
+//   ④ **真前端算法**算 ops ⇒ `PatchMemoryMap { ops }` ⇒ 生效图 **B**。
+//   ⑤ **独立**地再走一遍整份路径 ⇒ 生效图 **C**。
+//   ⑥ 断言 `canonical(B) ≡ canonical(C)`（**逐字段相同**）。
+//   ⑦ **必要对照**：断言 `canonical(B) ≢ canonical(A)`（**确实改了**）。
+//
+// ⚠️ **规范形式的口径与宿主层同一个**（`crates/kernel/src/kernel_host/
+//   tests_board_delta_equivalence.rs` 的 `canonical_value`）⇒ ⇒ 工具层与
+//   宿主层**各一份**、**同口径**（规格 §4.1）⇒ ⇒ **不**把宿主层那份
+//   搬过来抄成第二份真相。
+{
+    /**
+     * 一张描述的**规范形式**（键序无关 —— 裁决 L）。
+     *
+     * ⚠️ **对象键递归排序** ⇒ 键的顺序**不进判据**。
+     * ⚠️ **`regions` 按基址排序** ⇒ 两条路径各自的段列表顺序（整份路径 =
+     *   调用方给的顺序、差量路径 = 基座的顺序）**不会**让等价性判红 ⇒ ⇒
+     *   而段的**集合**与每一段的**每一个字段**仍然被**逐条**比。
+     *
+     * @param {unknown} value
+     * @returns {unknown}
+     */
+    function canonicalValue(value) {
+        if (Array.isArray(value)) return value.map(canonicalValue);
+        if (value !== null && typeof value === "object") {
+            const out = {};
+            for (const key of Object.keys(value).sort()) {
+                let item = canonicalValue(value[key]);
+                if (key === "regions" && Array.isArray(item)) {
+                    item = [...item].sort(
+                        (a, b) =>
+                            (Number(a?.base ?? 0) >>> 0) - (Number(b?.base ?? 0) >>> 0),
+                    );
+                }
+                out[key] = item;
+            }
+            return out;
+        }
+        return value;
+    }
+
+    /**
+     * 规范形式的**字符串**（比较用）。
+     *
+     * ⚠️ **缺图时给一个显式的哨兵**（不是 `undefined`）⇒ ⇒ 两个都缺图
+     *   时**不会**因为「`undefined === undefined`」而判成**相等** ⇒ ⇒
+     *   「内核根本没回 MemoryMap 事件」不会变成**假绿**。
+     *
+     * @param {unknown} description
+     * @returns {string}
+     */
+    function canonicalDescription(description) {
+        if (description === undefined || description === null) return "<没有生效图>";
+        return JSON.stringify(canonicalValue(description));
+    }
+
+    /** 截断详情（断言的 detail 不该刷屏）。 */
+    function brief(text, max = 220) {
+        const value = String(text);
+        return value.length > max ? `${value.slice(0, max)}…` : value;
+    }
+
+    /**
+     * 一张「用户配的板」的**元数据** —— 两条路径**共用**同一份定义。
+     *
+     * ⚠️ **每次调用都新建** ⇒ ⇒ 两条路径的基座**互不影响**（裁决 L：
+     *   「别在同一份描述上先跑整份再跑差量」——第一次运行**可能改了**基座）。
+     *
+     * @returns {object}
+     */
+    function boardMetadata() {
+        return {
+            schema_version: PLATFORM_SCHEMA_VERSION,
+            id: "smoke-board",
+            name: "Smoke board",
+            priority: 100,
+            auto_selectable: false,
+            region_budget_bytes: 16 * 1024 * 1024,
+            max_region_bytes: null,
+        };
+    }
+
+    /**
+     * **基座** —— 一段 RAM + 一个 UART 外设窗口。
+     *
+     * ⚠️ 器件参数**合法**（V-13 / V-14 会查区间 ⇒ `baud_rate ≥ 1`；
+     *   图里**没有 PLIC** ⇒ V-15 不适用）。
+     *
+     * @returns {object}
+     */
+    function boardBaseDescription() {
+        return {
+            ...boardMetadata(),
+            regions: [
+                { kind: "ram", base: 0x0000_0000, size: 0x0001_0000 },
+                {
+                    kind: "peripheral",
+                    base: 0x6000_0000,
+                    device: {
+                        device: "uart16550",
+                        id: "UART0",
+                        irq_line: 10,
+                        baud_rate: 115200,
+                    },
+                },
+            ],
+        };
+    }
+
+    /**
+     * **草稿** —— 改 RAM 的 `size` + 加一段 ROM + 删掉那个外设窗口。
+     *
+     * ⚠️ **元数据与基座逐字段相同** ⇒ ⇒ 差量路径才成立（差量**不覆盖**
+     *   元数据 ⇒ 改身份属于「换一块板」⇒ 走整份替换）。
+     *
+     * ⚠️ **段的顺序刻意与基座不同**（ROM 在前）⇒ ⇒ 整份路径保留**调用方
+     *   给的顺序**、差量路径保留**基座的顺序** ⇒ ⇒ 两条路径的**段列表顺序
+     *   天然不同** ⇒ ⇒ 「规范形式里按基址排序」这一步**真的被走到**
+     *   （去掉它 ⇒ 等价性立刻**假红** ⇒ ⇒ 那正是规格 §10.1 的变异 C-1）。
+     *
+     * @returns {object}
+     */
+    function boardDraftDescription() {
+        return {
+            ...boardMetadata(),
+            regions: [
+                { kind: "rom", base: 0x5000_0000, size: 0x0000_1000 },
+                { kind: "ram", base: 0x0000_0000, size: 0x0002_0000 },
+            ],
+        };
+    }
+
+    // ---- ① 卸载工程 ⇒ `image_loaded` 变假 ⇒ 之后改板**立即生效** --------
+    {
+        const unloaded = send("UnloadProject");
+        const unloadMap = find(unloaded, "MemoryMap");
+        check("UnloadProject 回一个 MemoryMap 事件", unloadMap !== undefined);
+        check(
+            "卸载之后没有镜像（loaded = false）⇒ 之后的改板立即生效",
+            unloadMap?.MemoryMap?.loaded === false,
+            `实际 loaded=${unloadMap?.MemoryMap?.loaded}`,
+        );
+    }
+
+    // ---- ② + ③ 差量路径的基座 ⇒ 生效图 **A** -----------------------------
+    const baseForDelta = boardBaseDescription();
+    const draftForDelta = boardDraftDescription();
+    let effectiveA;
+    {
+        const events = send({
+            SetMemoryMap: { description: baseForDelta, expected_revision: null },
+        });
+        const map = find(events, "MemoryMap");
+        check("SetMemoryMap 回一个 MemoryMap 事件", map !== undefined);
+        check(
+            "基座**立即生效**（pending = false ⇒ 不是「挂起待生效」）",
+            map?.MemoryMap?.pending === false,
+            `实际 pending=${map?.MemoryMap?.pending}`,
+        );
+        effectiveA = map?.MemoryMap?.description;
+        check(
+            "生效图 A 就是基座（内核逐字段照收）",
+            canonicalDescription(effectiveA) === canonicalDescription(baseForDelta),
+            `A=${brief(canonicalDescription(effectiveA))}`,
+        );
+    }
+
+    // ---- ④ **真前端算法**算 ops（**不是手写 ops** —— D-148 缺的那半）------
+    const ops = diffMemoryMapOps(effectiveA, draftForDelta);
+    {
+        const kinds = ops.map((op) => Object.keys(op)[0]).sort();
+        check(
+            "真前端差量算法算出三种操作中的两种（2 × UpsertRegion + 1 × RemoveRegion）",
+            kinds.join(",") === "RemoveRegion,UpsertRegion,UpsertRegion",
+            `实际 ${JSON.stringify(kinds)}`,
+        );
+    }
+
+    // ---- ⑤ 差量路径 ⇒ 生效图 **B** ---------------------------------------
+    let effectiveB;
+    {
+        const events = send({ PatchMemoryMap: { ops, expected_revision: null } });
+        const map = find(events, "MemoryMap");
+        check("PatchMemoryMap 回一个 MemoryMap 事件", map !== undefined);
+        effectiveB = map?.MemoryMap?.description;
+    }
+
+    // ---- ⑥ **独立**地再走一遍整份路径 ⇒ 生效图 **C** ---------------------
+    //
+    // ⚠️ **两条路径各自一份独立的基座**（裁决 L）⇒ ⇒ 这里重新**造**一份，
+    //   不是复用上面那个对象。
+    const baseForWhole = boardBaseDescription();
+    const draftForWhole = boardDraftDescription();
+    let effectiveC;
+    {
+        send("UnloadProject");
+        const baseEvents = send({
+            SetMemoryMap: { description: baseForWhole, expected_revision: null },
+        });
+        const baseMap = find(baseEvents, "MemoryMap");
+        check(
+            "整份路径的基座也**立即生效**（pending = false）",
+            baseMap?.MemoryMap?.pending === false,
+            `实际 pending=${baseMap?.MemoryMap?.pending}`,
+        );
+        const events = send({
+            SetMemoryMap: { description: draftForWhole, expected_revision: null },
+        });
+        const map = find(events, "MemoryMap");
+        check("整份路径回一个 MemoryMap 事件", map !== undefined);
+        effectiveC = map?.MemoryMap?.description;
+    }
+
+    // ---- ⑦ 断言：等价性 + 必要对照 ---------------------------------------
+    {
+        const haveA = effectiveA !== undefined && effectiveA !== null;
+        const haveB = effectiveB !== undefined && effectiveB !== null;
+        const haveC = effectiveC !== undefined && effectiveC !== null;
+
+        // ⚠️ **图缺失 ⇒ 不许判成「相等」**（`undefined === undefined` 是假绿）。
+        const equivalent = haveB && haveC
+            && canonicalDescription(effectiveB) === canonicalDescription(effectiveC);
+        // ⚠️ **必要对照**：两条路径**确实改了** ⇒ ⇒ 否则「两条路径都没改」
+        //   也会相等 ⇒ ⇒ 那是**假绿**。
+        const changed = haveA && haveB
+            && canonicalDescription(effectiveB) !== canonicalDescription(effectiveA);
+
+        check(
+            "T-1 两条路径的生效图**逐字段相同**"
+            + "（规范形式：对象键递归排序 + `regions` 按基址排序）",
+            // ⚠️ **必要对照是 T-1 的前提**：两条路径**都没改**时它们本来就
+            //   相等 ⇒ ⇒ 那样这条断言什么也证明不了 ⇒ ⇒ 判据里带着它。
+            equivalent && changed,
+            `逐字段相同=${equivalent} 确实改了=${changed}`
+            + ` | B=${brief(canonicalDescription(effectiveB))}`
+            + ` | C=${brief(canonicalDescription(effectiveC))}`,
+        );
+        check(
+            "T-2 必要对照：生效图与**改动前**不同"
+            + "（否则「两条路径都没改」也会相等 ⇒ 假绿）",
+            changed,
+            `A=${brief(canonicalDescription(effectiveA))}`
+            + ` | B=${brief(canonicalDescription(effectiveB))}`,
+        );
+        check(
+            "差量路径的生效图 = 草稿",
+            canonicalDescription(effectiveB) === canonicalDescription(draftForDelta),
+            `B=${brief(canonicalDescription(effectiveB))}`,
+        );
+        check(
+            "整份路径的生效图 = 草稿",
+            canonicalDescription(effectiveC) === canonicalDescription(draftForWhole),
+            `C=${brief(canonicalDescription(effectiveC))}`,
+        );
+    }
 }
 
 if (failures > 0) {
