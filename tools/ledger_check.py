@@ -122,18 +122,26 @@ class Failure:
 def split_cells(line: str) -> list[str]:
     """一行 Markdown 表格 ⇒ 单元格列表。
 
-    ⚠️ **容忍**两类真实的台账怪癖（实测，见 §0.2）：
+    ⚠️ **切分口径 = `tools/doc_check.py` 的那一份**（**一个约束一个落点**）：
+    按 GitHub 的规则切 ⇒ ⇒ **转义**的 `\\|` 是**字面竖线**、**不切列**。
 
-    ① 行**不以** `|` 结尾（D-83 / D-84 / D-85）；
-    ② 单元格里**有**一个没转义的 `|` ⇒ 切出来的格子**多于**五列
-       （D-69 / D-84 / D-85）⇒ ⇒ 末列 = 第 5 格**及其后**的格子合起来。
+    ⚠️ **为什么必须按 GitHub 规则**（实测，2026-10-24）：台账里有**转义**的
+    `\\|`（例如 D-69 的那一格写着 `grep "E_PP" docs/ \\| grep -v …`）⇒ ⇒
+    朴素 `split("|")` 会把它**误切**成两格 ⇒ ⇒ 「问题」列被**截断**、
+    末列**错位** ⇒ ⇒ 判定读到的是**错位的格子** ⇒ ⇒ **假红 / 假绿**。
+
+    ⚠️ **容忍**行**不以** `|` 结尾（台账里 D-83 / D-84 / D-85 是这样）⇒ ⇒
+    GitHub 也容忍 ⇒ ⇒ 本脚本与渲染**同口径**。
+
+    ⚠️ 末列 = **第 5 格及其后**的格子合起来（容忍畸形行）⇒ ⇒ 宁可多算，
+    不可错位。
     """
     text = line.strip()
     if text.startswith("|"):
         text = text[1:]
     if text.endswith("|"):
         text = text[:-1]
-    return [cell.strip() for cell in text.split("|")]
+    return [cell.strip() for cell in re.split(r"(?<!\\)\|", text)]
 
 
 def parse_row(line: str, line_no: int):
@@ -294,10 +302,15 @@ def check_ledger(path: Path) -> int:
 # ---------------------------------------------------------------------------
 
 #: 好夹具的期望报告（历史行条数 / 标记区条数 / 已闭环 / 未闭环）。
+#:
+#: ⚠️ **D-150 那行是「切分口径」的判别力证据** —— 它的「问题」列里含一个
+#: **转义**的竖线（`\|`）⇒ ⇒ 按 GitHub 规则切 ⇒ 末格**为空** ⇒ ⇒ 不红；
+#: ⇒ ⇒ 朴素 `split("|")` 会把它误切 ⇒ ⇒ 末格**错位**成非空 ⇒ ⇒ **断言 3 红**
+#: ⇒ ⇒ 「切分口径对不对」**不是靠嘴说**，是**夹具逼出来的**。
 GOOD_EXPECTED_REPORT = Report(
     history_count=2,
-    marked_count=3,
-    closed_count=2,
+    marked_count=4,
+    closed_count=3,
     open_count=1,
 )
 
