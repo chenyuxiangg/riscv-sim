@@ -2,9 +2,9 @@
 //
 // 本套件盯住验收 **B-1 ~ B-7**：
 //
-//   B-1 新落库的条目**带** `rules_version`（= 当前版本 2）
+//   B-1 新落库的条目**带** `rules_version`（= 当前版本 3）
 //   B-2 没有 `rules_version` 的老条目 ⇒ `checkBoardRules` 报
-//       `{ok:false, reason:"rules"}`（expected = 2、actual = 1）
+//       `{ok:false, reason:"rules"}`（expected = 3、actual = 1）
 //   B-3 当前版本条目 ⇒ `checkBoardRules` ⇒ ok
 //   B-4 `checkBoardVersion` 对 `schema_version != 1` 仍报 `reason:"version"`
 //       ⇒ ⇒ **不与 `rules` 混**（两个 reason，两件事）
@@ -12,7 +12,12 @@
 //   B-6 内核**接受** ⇒ 条目**被升级**（带上当前 `rules_version`）⇒ 且**有提示**
 //   B-7 内核**拒绝** ⇒ 显示**内核原文** ⇒ **不吞**、**不静默失效**
 //
-// ⚠️ **断言值是写死的字面量**，不从被测实现反推（`2` / `1` 写死，不读常量）。
+//   C-4 存量板（`rules_version = 2`）⇒ 选用**明确提示** ⇒ 内核**接受**后 ⇒
+//       条目**升级**到 3（STAGE-19 · 裁决 F：规则集**收紧** ⇒ 版本 2 → 3 ⇒ ⇒
+//       存量板**必须**走 v0.33 铺好的那套机制 ⇒ ⇒ 这是那套机制的**第一次
+//       实战** ⇒ ⇒ 「机制只是写在 prose 里」这条风险**被证伪**）
+//
+// ⚠️ **断言值是写死的字面量**，不从被测实现反推（`3` / `2` / `1` 写死，不读常量）。
 // ⚠️ **用例必须能变红**（不许恒真断言）⇒ 每条断言都在钉一个具体行为。
 //
 // # 为什么 B-5 ~ B-7 走 app 层而不是纯函数
@@ -94,6 +99,19 @@ const BOARD_DESC = {
  * 「规则集收紧之前」的存量。
  */
 const OLD_ENTRY = { id: "rules-board", description: BOARD_DESC };
+
+/**
+ * 一条**上一批落库的条目**：`rules_version = 2`。
+ *
+ * ⚠️ **这就是本批的「存量板」**（STAGE-19 · 裁决 F）：规则集**收紧**了
+ * （2 → 3）⇒ ⇒ 库里那些**按 2 校验过**的板就是存量 ⇒ ⇒ 它们**必须**走
+ * v0.33 铺好的机制（**明确提示** ⇒ 内核**接受** ⇒ **升级**）⇒ ⇒ 这条机制
+ * 在本批**第一次实战**。
+ *
+ * ⚠️ 与 `OLD_ENTRY`（**没有** `rules_version` ⇒ 隐含 1）是**两件事** ⇒ ⇒
+ * 两条用例都要在（一条盯「更老的存量」，一条盯「上一批的存量」）。
+ */
+const V33_ENTRY = { id: "rules-board", description: BOARD_DESC, rules_version: 2 };
 
 /**
  * 一块**带外设器件**的板（字面量）。
@@ -189,7 +207,7 @@ async function makeStore(entry = OLD_ENTRY) {
 // ---------------------------------------------------------------------------
 
 describe("板档案 · 规则集版本（B-1 ~ B-4）", () => {
-    test("B-1 新落库的条目**带** `rules_version`（= 当前版本 2）", () => {
+    test("B-1 新落库的条目**带** `rules_version`（= 当前版本 3）", () => {
         const entry = boardstore.boardEntry(BOARD_DESC);
         assert.ok(entry, "boardEntry 应当产出一条");
         assert.deepEqual(
@@ -197,7 +215,7 @@ describe("板档案 · 规则集版本（B-1 ~ B-4）", () => {
             ["description", "id", "rules_version"],
             "条目字段集合必须是 { id, description, rules_version } 三个",
         );
-        assert.equal(entry.rules_version, 2, "规则版本必须是当前版本 2");
+        assert.equal(entry.rules_version, 3, "规则版本必须是当前版本 3");
         assert.equal(entry.id, "rules-board");
         assert.deepEqual(entry.description, BOARD_DESC, "描述一个字段都不许改");
         // ⚠️ **不存时间戳、不存 `name`**（既有纪律一字不变）。
@@ -211,14 +229,14 @@ describe("板档案 · 规则集版本（B-1 ~ B-4）", () => {
         await store.put(boardstore.boardEntry(BOARD_DESC));
         const rows = await store.list();
         assert.equal(rows.length, 1);
-        assert.equal(rows[0].rules_version, 2, "读回来的条目必须带着规则版本");
+        assert.equal(rows[0].rules_version, 3, "读回来的条目必须带着规则版本");
     });
 
     test("B-2 老条目（**没有** `rules_version`）⇒ 报 `{ok:false, reason:\"rules\"}`", () => {
         const result = boardstore.checkBoardRules(OLD_ENTRY);
         assert.equal(result.ok, false);
         assert.equal(result.reason, "rules");
-        assert.equal(result.expected, 2, "期望的是当前规则版本 2");
+        assert.equal(result.expected, 3, "期望的是当前规则版本 3");
         assert.equal(result.actual, 1, "老条目隐含的规则版本是 1");
         // ⚠️ **隐含值 1** = 「规则集收紧**之前**的那一版」（裁决 G）。
         assert.equal(boardstore.boardRulesVersion(OLD_ENTRY), 1);
@@ -239,7 +257,7 @@ describe("板档案 · 规则集版本（B-1 ~ B-4）", () => {
         const result = boardstore.checkBoardRules(entry);
         assert.equal(result.ok, true);
         assert.equal("reason" in result, false, "通过的结果里不该带 reason");
-        assert.equal(boardstore.boardRulesVersion(entry), 2);
+        assert.equal(boardstore.boardRulesVersion(entry), 3);
     });
 
     test("B-4 `checkBoardVersion` 对 `schema_version != 1` 仍报 `reason:\"version\"`", () => {
@@ -281,7 +299,7 @@ describe("板档案 · 选用与升级（app 层 · B-5 ~ B-7）", () => {
             `提示里必须含「这块板的规则版本」（实际提示：${text}）`,
         );
         assert.ok(
-            text.includes("当前规则版本 2"),
+            text.includes("当前规则版本 3"),
             `提示里必须含「当前规则版本」（实际提示：${text}）`,
         );
         // ⚠️ **提示之后仍然可以选用**（前端**不判**合法性）⇒ 草稿照常载入。
@@ -329,17 +347,17 @@ describe("板档案 · 选用与升级（app 层 · B-5 ~ B-7）", () => {
         // ⚠️ **库里那一条被重写了**（带上当前规则版本）。
         const rows = await store.list();
         assert.equal(rows.length, 1);
-        assert.equal(rows[0].rules_version, 2, "条目必须被升级到当前规则版本");
+        assert.equal(rows[0].rules_version, 3, "条目必须被升级到当前规则版本");
         assert.deepEqual(rows[0].description, BOARD_DESC, "描述一个字都不许改");
 
         // ⚠️ **视图状态里的档案**也跟着升级（不是第二个真相源：同一份条目）。
         const archived = m03.getState("memory-map").archive;
         assert.equal(archived.length, 1);
-        assert.equal(archived[0].rules_version, 2);
+        assert.equal(archived[0].rules_version, 3);
 
         // ⚠️ **升级要说得出来**（裁决 J：不静默迁移）。
         assert.ok(
-            noteText().includes("已升级到当前规则版本 2"),
+            noteText().includes("已升级到当前规则版本 3"),
             `升级必须有用户可见的提示（实际：${noteText()}）`,
         );
     });
@@ -366,7 +384,7 @@ describe("板档案 · 选用与升级（app 层 · B-5 ~ B-7）", () => {
 
         const rows = await store.list();
         assert.equal(rows.length, 1);
-        assert.equal(rows[0].rules_version, 2, "带器件的板也必须升级（按 id 判）");
+        assert.equal(rows[0].rules_version, 3, "带器件的板也必须升级（按 id 判）");
     });
 
     test("B-6（对照）内核**接受**但档案里**没有**这一块 ⇒ 不升级、不谎报", async () => {
@@ -441,6 +459,99 @@ describe("板档案 · 选用与升级（app 层 · B-5 ~ B-7）", () => {
             state.acceptedDescription,
             null,
             "内核拒绝 ⇒ 这份描述**不算**被接受过",
+        );
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 存量板（`rules_version = 2`）—— STAGE-19 · 裁决 F 的**第一次实战**
+// ---------------------------------------------------------------------------
+
+describe("存量板（rules_version = 2）· C-4", () => {
+    test("C-4 `checkBoardRules` 对存量板报 `{ok:false, reason:\"rules\", expected:3, actual:2}`", () => {
+        const result = boardstore.checkBoardRules(V33_ENTRY);
+        assert.equal(result.ok, false);
+        assert.equal(result.reason, "rules", "规则集收紧 ⇒ reason 仍是 `rules`");
+        assert.equal(result.expected, 3, "期望的是当前规则版本 3");
+        assert.equal(result.actual, 2, "存量板就是按 2 校验过的");
+        assert.equal(boardstore.boardRulesVersion(V33_ENTRY), 2);
+    });
+
+    test("C-4 选用存量板 ⇒ **明确提示**（规则版本 2 / 当前规则版本 3）", async () => {
+        setup();
+        seedArchive(V33_ENTRY);
+
+        await app.handleCommand(
+            { action: "select-memory-map", params: { id: "rules-board" } },
+            { commandRouter: fakeKernel() },
+        );
+
+        const text = noteText();
+        assert.ok(
+            text.includes("规则版本 2"),
+            `提示里必须含「这块板的规则版本」（实际提示：${text}）`,
+        );
+        assert.ok(
+            text.includes("当前规则版本 3"),
+            `提示里必须含「当前规则版本」（实际提示：${text}）`,
+        );
+        // ⚠️ **提示之后仍然可以选用**（前端**不判**合法性）⇒ 草稿照常载入。
+        assert.equal(
+            m03.getState("memory-map").selectedId,
+            "rules-board",
+            "提示不许挡住选用",
+        );
+        assert.ok(m03.getState("memory-map").draft, "草稿必须照常载入");
+    });
+
+    test("C-4 内核**接受** ⇒ 条目**升级**到 3 ⇒ 且**有提示**（不静默迁移）", async () => {
+        setup();
+        seedArchive(V33_ENTRY);
+        const { store } = await makeStore(V33_ENTRY);
+        const router = fakeKernel();
+
+        await app.handleCommand(
+            { action: "submit-memory-map", params: { description: BOARD_DESC } },
+            { commandRouter: router, boardStore: store },
+        );
+
+        // ⚠️ **内核真的接受过**（命令发出去且成功往返）。
+        assert.equal(router.sent.length, 1, "应当只发一条命令");
+        assert.ok("SetMemoryMap" in router.sent[0]);
+
+        // ⚠️ **库里那一条被重写了**（带上当前规则版本 3）。
+        const rows = await store.list();
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0].rules_version, 3, "存量条目必须被升级到当前规则版本 3");
+        assert.deepEqual(rows[0].description, BOARD_DESC, "描述一个字都不许改");
+
+        // ⚠️ **视图状态里的档案**也跟着升级（不是第二个真相源：同一份条目）。
+        const archived = m03.getState("memory-map").archive;
+        assert.equal(archived.length, 1);
+        assert.equal(archived[0].rules_version, 3);
+
+        // ⚠️ **升级要说得出来**（裁决 J：不静默迁移）。
+        assert.ok(
+            noteText().includes("已升级到当前规则版本 3"),
+            `升级必须有用户可见的提示（实际：${noteText()}）`,
+        );
+    });
+
+    test("C-4（对照）选用**当前规则**的板 ⇒ **不**提示规则版本", async () => {
+        setup();
+        seedArchive(boardstore.boardEntry(BOARD_DESC));
+
+        await app.handleCommand(
+            { action: "select-memory-map", params: { id: "rules-board" } },
+            { commandRouter: fakeKernel() },
+        );
+
+        const text = noteText();
+        assert.ok(text.includes("已选用板"), `应当说选用了（实际：${text}）`);
+        assert.equal(
+            text.includes("当前规则版本"),
+            false,
+            `当前版本的板**不**该被提示成旧规则（实际：${text}）`,
         );
     });
 });
