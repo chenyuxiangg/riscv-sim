@@ -1867,24 +1867,46 @@ async function runBoardDeltaSection(cdp, opts) {
 
     // -- ④ 改一段 RAM 的大小（元数据**一字不动**）⇒ 走**差量** ---------------
     //
-    // ⚠️ **元数据不动**是走差量的前提（裁决 D）⇒ 只改第二段 RAM 的 size。
-    const patchedBoard = {
-        ...BV_BOARD,
-        regions: BV_BOARD.regions.map((r) =>
-            Number(r.base) === BV_DELTA_RAM_BASE ? { ...r, size: BV_DELTA_RAM_SIZE } : r,
-        ),
-    };
-    await cdp.send("Runtime.evaluate", {
-        expression: `window.dispatchEvent(new CustomEvent("riscv:command", {
-            detail: {
-                action: "submit-memory-map",
-                requestId: "bv-delta-patch",
-                viewId: "memory-map",
-                params: { description: ${JSON.stringify(patchedBoard)} },
-            },
-        }))`,
-        returnByValue: true,
-    });
+    // ⚠️ **走真 UI 动作**（不是手工拼一份描述发过去）：
+    //   ① 点「从当前生效的图载入」⇒ 编辑器的草稿 = **当前生效的图**；
+    //   ② 把那一段的 size 输入框改成 4 MiB；
+    //   ③ 点「提交」。
+    //
+    // ⚠️ **为什么不能手工拼**：拼出来的那份描述**会漏掉内核补上的缺省**
+    // （`auto_selectable` 缺省是 **true**）⇒ 与「当前生效的图」的元数据
+    // **对不上** ⇒ 前端按裁决 D 判成「整份替换」⇒ **差量这条路根本没被
+    // 走到** ⇒ 门禁会**假红**（而且是「测的不是那条路」的红）。
+    //
+    // ⚠️ **走真 UI 还有一层好处**：编辑器那一份是**七字段**（没有
+    // `max_region_bytes`），而「当前生效的图」是**八字段**（内核恒定写出）
+    // ⇒ 这一段**顺带**验了「缺省 ≡ null」的归一化。
+    const editResult = await evalValue(`(() => {
+        const loadBtn = document.querySelector('[data-action="load-current"]');
+        if (!loadBtn) return "no-load-current";
+        loadBtn.click();
+        const rows = Array.from(document.querySelectorAll("[data-mmap-row]"));
+        let target = null;
+        for (const row of rows) {
+            const baseInput = row.querySelector('[data-mmap-region-field="base"]');
+            if (!baseInput) continue;
+            const base = parseInt(String(baseInput.value ?? "").trim(), 10);
+            if (base === ${BV_DELTA_RAM_BASE}) { target = row; break; }
+        }
+        if (!target) return "no-row";
+        const sizeInput = target.querySelector('[data-mmap-region-field="size"]');
+        if (!sizeInput) return "no-size-input";
+        sizeInput.value = String(${BV_DELTA_RAM_SIZE});
+        sizeInput.dispatchEvent(new Event("input", { bubbles: true }));
+        const btn = document.querySelector('[data-action="submit-memory-map"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    add(
+        "编辑器能**载入当前生效的图**并改那一段的大小（真 UI 动作）",
+        editResult === "clicked",
+        `编辑结果 = ${JSON.stringify(editResult)}`,
+    );
 
     let patchFrame = "";
     const patchDeadline = Date.now() + opts.timeoutMs;
@@ -1963,37 +1985,50 @@ async function runBoardDeltaSection(cdp, opts) {
         landing.length === 0 ? "落地页检查没跑起来" : `落地页 ${landing.filter((c) => c.ok).length}/${landing.length}`,
     );
 
-    const archive = await evalValue(`(() => {
-        return new Promise((resolve) => {
-            let req;
-            try {
-                req = indexedDB.open("riscv-sim-board-store", 1);
-            } catch (e) {
-                resolve({ ok: false, ids: [] });
-                return;
-            }
-            req.onerror = () => resolve({ ok: false, ids: [] });
-            req.onsuccess = () => {
-                const db = req.result;
+    // ⚠️ **必须 `awaitPromise`**：`indexedDB.open` 走的是 Promise ⇒ 不 await
+    // 的话这里拿到的是**一个还没 resolve 的 Promise 对象** ⇒ 「档案空了」
+    // 与「探测失败」会**长得一模一样**（一条假红）。
+    const archiveRes = await cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+            return new Promise((resolve) => {
+                let req;
                 try {
-                    const tx = db.transaction("boards", "readonly");
-                    const store = tx.objectStore("boards");
-                    const all = store.getAll();
-                    all.onsuccess = () => {
-                        const ids = (all.result || []).map((e) => String(e && e.id || ""));
-                        resolve({ ok: true, ids });
-                    };
-                    all.onerror = () => resolve({ ok: false, ids: [] });
+                    // ⚠️ **不带版本号**：带版本号打开会与前端自己那次打开
+                    // 撞版本（versionchange ⇒ blocked）⇒ 探测直接失败。
+                    req = indexedDB.open("riscv-sim-board-store");
                 } catch (e) {
-                    resolve({ ok: false, ids: [] });
+                    resolve({ ok: false, why: "open-throws", ids: [] });
+                    return;
                 }
-            };
-        });
-    })()`);
+                req.onerror = () => resolve({ ok: false, why: "open-error", ids: [] });
+                req.onblocked = () => resolve({ ok: false, why: "open-blocked", ids: [] });
+                req.onsuccess = () => {
+                    const db = req.result;
+                    try {
+                        const tx = db.transaction("boards", "readonly");
+                        const store = tx.objectStore("boards");
+                        const all = store.getAll();
+                        all.onsuccess = () => {
+                            const ids = (all.result || []).map((e) => String(e && e.id || ""));
+                            resolve({ ok: true, why: "ok", ids });
+                        };
+                        all.onerror = () => resolve({ ok: false, why: "getAll-error", ids: [] });
+                    } catch (e) {
+                        resolve({ ok: false, why: "tx-throws", ids: [] });
+                    }
+                };
+            });
+        })()`,
+        awaitPromise: true,
+        returnByValue: true,
+    });
+    const archive = archiveRes.result?.value ?? null;
     add(
         "刷新后**板档案还在**（本批没把上一批的能力弄坏）",
         Boolean(archive?.ok) && Array.isArray(archive?.ids) && archive.ids.length > 0,
-        `库里 ${JSON.stringify(archive?.ids ?? [])}`,
+        archive?.ok
+            ? `库里 ${JSON.stringify(archive?.ids ?? [])}`
+            : `档案探测**失败**（why = ${JSON.stringify(archive?.why ?? null)}）—— 不等于「库里空了」`,
     );
 
     return { skipped: false, checks };
@@ -2792,12 +2827,12 @@ async function main() {
         }
 
         const failed = [...landing, ...render, ...kernelExec, ...source, ...waveform, ...osz.checks,
-            ...memoryMap.checks, ...boardArchive.checks]
+            ...memoryMap.checks, ...boardArchive.checks, ...boardDelta.checks]
             .filter((c) => !c.ok);
         const ok = failed.length === 0 && consoleErrors.length === 0;
         console.log("");
         console.log(ok
-            ? "browser-verify: 通过（真机挂载 + 渲染路径 + 真内核执行 + 源码视图 + 探针流 + 板级内存图 + 板档案 + 控制台）"
+            ? "browser-verify: 通过（真机挂载 + 渲染路径 + 真内核执行 + 源码视图 + 探针流 + 板级内存图 + 板档案 + 板级差量/卸载 + 控制台）"
             : `browser-verify: 失败（${failed.length} 项断言未通过，${consoleErrors.length} 条控制台错误）`);
         return ok ? 0 : EXIT_FAILED;
     } finally {
