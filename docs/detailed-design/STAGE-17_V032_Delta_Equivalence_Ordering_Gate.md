@@ -252,7 +252,7 @@ compose_memory_map(base: &PlatformDescription, ops: &[MemoryMapOp])
 | **C-2** | 收到**相同**修订号的事件 ⇒ **照收**（⚠️ 卸载后的重订推送是**同号** ⇒ 必须放行）。 |
 | **C-3** | 收到**更新**的事件 ⇒ **照收** ⇒ 状态推进（修订号与描述都变成新的）。 |
 | **C-4** | 护栏**不**改提交路径：基底旧了就**照常提交**（载荷形状不变）⇒ ⇒ 内核的 `expected_revision` **照常兜底**。 |
-| **C-5** | **乱序之后提交** ⇒ 内核**接受**（⇒ 差量确实算在**较新**的那份上 ⇒ 这就是 D-146 的判别式）。 |
+| **C-5** | **乱序之后提交** ⇒ 提交带上的是**较新**的修订号（前端层可证：载荷里的 `expected_revision` == 较新那个，且差量基底 == 较新那张图）⇒ ⇒ **真内核接受**那一半由 **T-6** 在真机层验 ⇒ ⇒ 合起来就是 D-146 的判别式。 |
 | **C-6** | 护栏**不**改「已被内核接受」这个**推导量** ⇒ ⇒ 落库门槛**照旧可用**。 |
 
 ### T 组 · 工具层（门禁注册表 + 真机等价性）
@@ -264,6 +264,7 @@ compose_memory_map(base: &PlatformDescription, ops: &[MemoryMapOp])
 | **T-3** | 所有取回值的探测**统一**走 `awaitEval`（内部 `awaitPromise: true`）⇒ ⇒ 「忘了 await」**写不出来**。 |
 | **T-4** | 真机层：差量路径与整份路径 ⇒ **生效图逐字段相同**；⚠️ 且**与改动前不相同**（⇒ 差量**真的**生效了 ⇒ 不是两边都没变）。 |
 | **T-5** | 真机层：把内核的**合成逻辑**改错（变异）⇒ ⇒ T-4 **必须红** ⇒ ⇒ 证明它**真的**在验那条路。 |
+| **T-6** | 真机层：注入一个**更旧**的 `memory.map` 事件（走 `BV_WIRE_HOOK_EXPRESSION` 那条钩子）⇒ ⇒ 随后**真提交** ⇒ ⇒ **真内核接受**（⚠️ **不出现** `E_PLT_13`）⇒ ⇒ 证明前端确实把基底守在**较新**的那份上。 |
 
 ---
 
@@ -302,7 +303,7 @@ compose_memory_map(base: &PlatformDescription, ops: &[MemoryMapOp])
 | --- | --- | --- |
 | **A** | `crates/kernel/src/kernel_host/**` | `compose_memory_map` 纯函数 · 差量路径改用它 · 等价性用例（B 组） |
 | **B** | `front/**` | 乱序护栏（`wireMemoryMap`）· 丢弃计数 · 乱序用例（C 组） |
-| **C** | `tools/**` | 门禁**注册表** · 期望段名表 · `awaitEval` · 真机等价性段（T 组）· `tools/stage17_check.py` |
+| **C** | `tools/**` | 门禁**注册表** · 期望段名表 · `awaitEval` · 真机等价性段（**T-4**）· 注入更旧事件的段（**T-6**）· `tools/stage17_check.py` |
 
 - ⚠️ **契约层不动** ⇒ ⇒ **没有**契约 lane ⇒ ⇒ 前端镜像**不用改版本号** ⇒ ⇒ 三条 lane **零冲突**。
 
@@ -314,7 +315,8 @@ compose_memory_map(base: &PlatformDescription, ops: &[MemoryMapOp])
 
 | 次 | 订正内容 | 实测依据 | 影响的条款 |
 | --- | --- | --- | --- |
-| — | （暂无） | — | — |
+| 1 | **C-5 拆成两半**：原口径「乱序之后提交 ⇒ 内核接受」在**默认前端门禁**里**不可证** —— `front/assets/pkg/` 被 `.gitignore` 忽略 ⇒ 默认门禁用的是 `front/tests/fake-wasm-module.mjs`（**假 wasm**）⇒ ⇒ **默认门禁里没有真内核** ⇒ ⇒ C-5 改为「前端层可证的那半」（带的是**较新**修订号 + 基底是**较新**那张图），「真内核接受」那半落到真机层 **T-6**（注入更旧事件 ⇒ 真提交 ⇒ 真内核接受 ⇒ 不出现 `E_PLT_13`）⇒ ⇒ 两条合起来覆盖原口径 | 实测：`front/tests/fake-wasm-module.mjs` 的文件头注释「The wasm build itself is **not committed** (`front/assets/pkg/` is **gitignored**)」+ `git check-ignore -v front/assets/pkg/` ⇒ 命中 `.gitignore:27` | §5 的 **C-5**（拆）+ §5 的 **T 组**（新增 **T-6**）+ §4.2 + §8 的 lane C 行 |
+| 2 | **T-5 的变异执行位置从 Lane C 移到整合批**：该变异要改**内核源码**（`compose` 的「追加」→「替换第一段」）⇒ ⇒ **跨 lane 的文件所有权** ⇒ ⇒ 放在**整合批**做（那时内核与工具层都在统筹方手里）⇒ ⇒ Lane C 自己的变异改成「**漏登记**一段」（⇒ 期望红：**T-2**），它直接钉 D-147 的核心承诺 | 规格 §8 的 lane 表：Lane C 只拥有 `tools/**`；§10 的变异清单原把跨层变异派给 Lane C ⇒ 与文件所有权冲突 | §10 的**变异自检**行 + §8 的 lane 表（Lane C 行补上「漏登记」那条变异） |
 
 ---
 
@@ -332,7 +334,7 @@ compose_memory_map(base: &PlatformDescription, ops: &[MemoryMapOp])
 | 8 | `tools/boot-osz.sh` | 真实 RTOS 对拍（⚠️ 产物在**仓外** ⇒ 没有就**跳过**，不是判负） |
 | 9 | `python3 tools/stage17_check.py docs/detailed-design/STAGE-17_V032_Delta_Equivalence_Ordering_Gate.md` | 本规格的七项自检 |
 
-- ⚠️ **变异自检**（每条 lane 至少一条**对照 0 红**）：A = 把 `compose` 的「定位不到就报错」改成静默忽略（⇒ 期望红：B-5 / B-7）· B = 把护栏的「严格更旧才挡」改成「不等就挡」（⇒ 期望红：C-2）· C = 把 `compose` 的**追加**改成**替换第一段**（⇒ 期望红：T-4 / T-5）。
+- ⚠️ **变异自检**（每条 lane 至少一条**对照 0 红**）：A = 把 `compose` 的「定位不到就报错」改成静默忽略（⇒ 期望红：B-5 / B-7）· B = 把护栏的「严格更旧才挡」改成「不等就挡」（⇒ 期望红：C-2）· C = 让门禁**漏登记**一段（⇒ 期望红：T-2）· **整合批** = 把 `compose` 的**追加**改成**替换第一段**（⇒ 期望红：T-4 / T-5）⇒ ⚠️ 这一条**跨 lane 的文件所有权**（要动内核源码）⇒ ⇒ 放在**整合批**做（§9 订正 2）。
 
 ---
 
