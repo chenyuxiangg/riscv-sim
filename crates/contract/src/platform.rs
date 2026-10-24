@@ -27,7 +27,7 @@
 //! | layer | what it judges | codes |
 //! | --- | --- | --- |
 //! | **serde** | the *shape* — unknown device kind, missing parameter, wrong parameter type | serde's own error (V-8) |
-//! | **this module** | the *declaration* — version, id, regions, sizes, overlaps, budget, duplicate device id, device parameters' legal value domain | `E_PLT-01`..`E_PLT-08` · `E_PLT-12` |
+//! | **this module** | the *declaration* — version, id, regions, sizes, overlaps, budget, duplicate device id, empty device id, device parameters' legal value domain | `E_PLT-01`..`E_PLT-08` · `E_PLT-12` · `E_PLT-15` |
 //! | **the host** | the *lookup* — unknown platform id, unreadable file, malformed file, a stale revision, a delta that targets a missing region | `E_PLT-09`..`E_PLT-11` · `E_PLT-13` · `E_PLT-14` (owned **here**, judged by the host) |
 //! | **M-14** | the *live bus* — unmapped access, region over the runtime budget | `E_BUS-*` |
 //!
@@ -55,7 +55,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{
     PlatformError, E_PLT_01_SCHEMA_VERSION, E_PLT_02_EMPTY_ID, E_PLT_03_NO_REGIONS,
     E_PLT_04_ZERO_SIZE, E_PLT_05_OVERFLOW, E_PLT_06_OVERLAP, E_PLT_07_OVER_BUDGET,
-    E_PLT_08_DUPLICATE_DEVICE_ID, E_PLT_12_PARAMETER_OUT_OF_RANGE, PLATFORM_FAMILY,
+    E_PLT_08_DUPLICATE_DEVICE_ID, E_PLT_12_PARAMETER_OUT_OF_RANGE, E_PLT_15_DEVICE_EMPTY_ID,
+    PLATFORM_FAMILY,
 };
 use crate::session::{REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
 
@@ -73,6 +74,35 @@ use crate::session::{REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
 /// **memory-map description shape** (what the host reads). Adding this
 /// module therefore requires **no** front-end change at all.
 pub const PLATFORM_SCHEMA_VERSION: u32 = 1;
+
+/// The version of the platform description's **legality rule set**.
+///
+/// ⚠️ **This is not [`PLATFORM_SCHEMA_VERSION`]** and it is not the
+/// contract's [`crate::SCHEMA_VERSION`] either ⇒ the three numbers mean
+/// three different things and none of them replaces another:
+///
+/// | constant | judges | v0.33 |
+/// | --- | --- | --- |
+/// | [`crate::SCHEMA_VERSION`] | the **message** shape (the contract envelope) | `7` |
+/// | [`PLATFORM_SCHEMA_VERSION`] | the **description** shape (what a description looks like) | `1` |
+/// | `PLATFORM_RULES_VERSION` | the **legality rules** (which descriptions are legal) | `2` |
+///
+/// ⚠️ **Version 1** = the rule set **before** V-17 ⇒ **existing** boards
+/// are judged by it ⇒ **version 2** = the rule set **with** V-17 (every
+/// peripheral device's `id` must be non-empty) ⇒ ⇒ the difference
+/// between the two versions is **exactly** V-17.
+///
+/// ⚠️ **Every time the rule set is tightened ⇒ this number goes +1.**
+/// That is what makes 「存量怎么办」 (what happens to the boards stored
+/// earlier) **decidable** instead of a matter of taste: a stored board
+/// can carry the rule version it was accepted under ⇒ the front end can
+/// say 「this board was saved under the old rules」 instead of silently
+/// letting it fail at submit time.
+///
+/// ⚠️ **Tightening a rule does NOT change the description's shape** ⇒
+/// [`PLATFORM_SCHEMA_VERSION`] does **not** move with it ⇒ ⇒ no stored
+/// description becomes unreadable.
+pub const PLATFORM_RULES_VERSION: u32 = 2;
 
 /// The **upper bound** of a CLINT's timer frequency (1 THz).
 ///
@@ -302,7 +332,7 @@ impl PlatformDescription {
     /// | rule | judgement | code |
     /// | --- | --- | --- |
     /// | V-1 | `schema_version != PLATFORM_SCHEMA_VERSION` | `E_PLT-01` |
-    /// | V-2 | `id` is empty | `E_PLT-02` |
+    /// | V-2 | the **description's** `id` is empty | `E_PLT-02` |
     /// | V-3 | `regions` is empty | `E_PLT-03` |
     /// | V-4 | a RAM / ROM region's `size == 0` | `E_PLT-04` |
     /// | V-5 | `base + size` overflows `u32` | `E_PLT-05` |
@@ -314,6 +344,11 @@ impl PlatformDescription {
     /// | V-14 | a device parameter is **above** its legal upper bound | `E_PLT-12` |
     /// | V-15 | a UART's `irq_line` is not a valid PLIC source id (only when the map has a PLIC) | `E_PLT-12` |
     /// | V-16 | `max_region_bytes` is given and is **zero** (the runtime ceiling must be ≥ 1) | `E_PLT-12` |
+    /// | V-17 | a peripheral device's `id` is empty | `E_PLT-15` |
+    ///
+    /// ⚠️ **V-2 judges the *description's* `id`** — the **device's** `id`
+    /// is judged by **V-17** ⇒ they are two different objects with two
+    /// different codes ⇒ neither rule may be used for the other.
     ///
     /// ⚠️ **V-8 lives in the serde layer, not here.** An unknown device
     /// kind or a missing parameter fails during deserialization, before
@@ -339,6 +374,12 @@ impl PlatformDescription {
     /// existing "V-2 before V-9 / V-13" order assertions still hold. It
     /// **shares** `E_PLT-12` as well: a zero runtime ceiling is a
     /// parameter outside its legal value domain ⇒ one code, not two.
+    ///
+    /// ⚠️ **V-17 was appended after V-16** (v0.33 · D-142) ⇒ the report
+    /// order of V-1 ~ V-16 is **unchanged, byte for byte** ⇒ in
+    /// particular **V-9 still comes first** ⇒ **two** devices with an
+    /// empty `id` are still rejected by **V-9 / `E_PLT-08`** ⇒ V-17
+    /// only ever fires for a **single** empty `id`.
     ///
     /// ⚠️ **Judgements never look at the message text** — they assert
     /// `family == Platform && scenario == <code>`. Rewording a message
@@ -608,6 +649,42 @@ impl PlatformDescription {
                     format!(
                         "运行期每区域的物理占用上界 {max_region_bytes} 为 0（必须 ≥ 1，否则每一段都超限）"
                     ),
+                ));
+            }
+        }
+
+        // V-17 — a device must have an **identity**
+        // (v0.33 · D-142 · frozen spec STAGE-18 §2.1).
+        //
+        // ⚠️ **Appended after V-16** ⇒ the report order of V-1 ~ V-16 is
+        // unchanged, byte for byte ⇒ in particular **V-9 still comes
+        // first** ⇒ **two** devices with an empty `id` are still rejected
+        // by V-9 / `E_PLT-08` ⇒ V-17 only ever fires for **one** of them.
+        //
+        // ⚠️ **Why it matters**: the restore path matches a device state
+        // onto a live instance **by id** ⇒ a device with an **empty** id
+        // matches nothing ⇒ its state is **silently lost** on restore ⇒
+        // the declaration is rejected here, at declaration time, where
+        // the reason can still be seen.
+        //
+        // ⚠️ **The judgement is `is_empty()`** — **not**
+        // `trim().is_empty()` ⇒ the very same wording as V-2 ⇒ the
+        // front end and the kernel do not diverge on what "empty" means
+        // ⇒ `id: " "` (one space) is **legal** (a deliberate choice, not
+        // an oversight).
+        //
+        // ⚠️ The device's `id` is read through the **same** accessor as
+        // V-9's (`RegionSpec::device_id()`) ⇒ there is **one** way to
+        // get a device's id in this module ⇒ no second spelling of it.
+        for region in &self.regions {
+            let Some(id) = region.device_id() else {
+                continue;
+            };
+            if id.is_empty() {
+                return Err(PlatformError::new(
+                    PLATFORM_FAMILY,
+                    E_PLT_15_DEVICE_EMPTY_ID,
+                    format!("外设器件（基址 {:#x}）的 id 为空", region.base()),
                 ));
             }
         }
@@ -2540,6 +2617,194 @@ mod tests {
             names,
             vec!["description", "loaded", "pending", "revision"],
             "事件的字段名集合必须精确固定"
+        );
+    }
+
+    // -------------------------------------------------------------
+    // STAGE-18 · v0.33 · D-142 / D-143 — the **A group**
+    // (frozen spec STAGE-18 §5).
+    //
+    // ⚠️ The **A-n** labels below are the frozen spec STAGE-18 §5's
+    // acceptance items (A-1 ~ A-7) — **not** the older "A-n" labels the
+    // STAGE-12 / STAGE-15 / STAGE-16 cases above carry ⇒ every label here
+    // says "STAGE-18" and every test name says "s18".
+    // -------------------------------------------------------------
+
+    /// **STAGE-18 A-1** — a board with **one** device whose `id` is empty
+    /// is **rejected** with `E_PLT-15`.
+    ///
+    /// ⚠️ The judgement is on `family` + `scenario`, **not** on the
+    /// message text.
+    ///
+    /// ⚠️ **Why "one"**: with **two** empty ids, V-9 fires first (A-2)
+    /// ⇒ the case that reaches V-17 at all is exactly the **single** one.
+    #[test]
+    fn s18_a1_a_single_empty_device_id_is_rejected() {
+        let desc = board_with(vec![DeviceSpec::Gpio { id: String::new() }]);
+        let err = desc.validate().expect_err("空 id 的器件必须被拒");
+        assert_eq!(err.family, PLATFORM_FAMILY);
+        assert_eq!(
+            err.scenario, E_PLT_15_DEVICE_EMPTY_ID,
+            "V-17 的场景码必须是 E_PLT-15（实际 {err}）"
+        );
+    }
+
+    /// **STAGE-18 A-2** — **two** devices with an empty `id` are still
+    /// rejected by **V-9 / `E_PLT-08`** ⇒ V-17 does **not** take that
+    /// case away from V-9.
+    #[test]
+    fn s18_a2_two_empty_device_ids_are_still_rejected_by_v9() {
+        let desc = board_with(vec![
+            DeviceSpec::Gpio { id: String::new() },
+            DeviceSpec::Gpio { id: String::new() },
+        ]);
+        let err = desc.validate().expect_err("两个空 id 的器件必须被拒");
+        assert_eq!(err.family, PLATFORM_FAMILY);
+        assert_eq!(
+            err.scenario, E_PLT_08_DUPLICATE_DEVICE_ID,
+            "两个空 id 仍然归 V-9 / E_PLT-08（实际 {err}）"
+        );
+    }
+
+    /// **STAGE-18 A-3** — the three **built-in** descriptions are still
+    /// legal under V-17 ⇒ the **stock risk is zero**: the boards the
+    /// kernel ships with have **no** empty device id.
+    ///
+    /// ⚠️ **The real files are read here** — not a hand-written copy:
+    /// the point of A-3 is a fact about **those** files ⇒ a copy could
+    /// drift from the truth without turning anything red. (`include_str!`
+    /// ⇒ a **missing** file is a **compile** error, never a silent
+    /// skip.)
+    ///
+    /// ⚠️ **Why the kernel crate's files**: the built-in descriptions
+    /// live in the **host** crate (`crates/kernel/src/kernel_host/
+    /// platforms/`) — the contract crate does not depend on the kernel
+    /// crate, but the crate already reaches into another crate's tree
+    /// in its own tests (`protocol.rs` reads `front/lib/message.js`) ⇒
+    /// one precedent, one way of doing it.
+    #[test]
+    fn s18_a3_the_builtin_descriptions_are_still_legal() {
+        let builtins: [(&str, &str); 3] = [
+            (
+                "default",
+                include_str!("../../kernel/src/kernel_host/platforms/default.json"),
+            ),
+            (
+                "minimal",
+                include_str!("../../kernel/src/kernel_host/platforms/minimal.json"),
+            ),
+            (
+                "qemu-virt",
+                include_str!("../../kernel/src/kernel_host/platforms/qemu-virt.json"),
+            ),
+        ];
+        for (name, raw) in builtins {
+            let desc: PlatformDescription = serde_json::from_str(raw)
+                .unwrap_or_else(|e| panic!("内置描述 {name} 必须能解析：{e}"));
+            assert_eq!(desc.id, name, "内置描述的 id 必须与文件名一致");
+            let outcome = desc.validate();
+            assert!(
+                outcome.is_ok(),
+                "内置描述 {name} 必须仍然合法（实际 {:?}）",
+                outcome.err()
+            );
+        }
+    }
+
+    /// **STAGE-18 A-4** — the **description's** `id` is empty ⇒ still
+    /// rejected by **V-2 / `E_PLT-02`** ⇒ V-17 did not take that case
+    /// away from V-2 either.
+    #[test]
+    fn s18_a4_an_empty_description_id_is_still_rejected_by_v2() {
+        let mut desc = sample();
+        desc.id = String::new();
+        let err = desc.validate().expect_err("空的描述 id 必须被拒");
+        assert_eq!(err.family, PLATFORM_FAMILY);
+        assert_eq!(
+            err.scenario, E_PLT_02_EMPTY_ID,
+            "描述的 id 归 V-2 / E_PLT-02（实际 {err}）"
+        );
+    }
+
+    /// **STAGE-18 A-5** — the **rule set**'s version is `2` and the
+    /// **shape**'s version is still `1` ⇒ the two numbers are **not** the
+    /// same thing and only the first one moved.
+    ///
+    /// ⚠️ Asserted against the **literals**, not against the constants
+    /// they define ⇒ a constant cannot vouch for itself.
+    #[test]
+    fn s18_a5_the_rules_version_is_two_and_the_shape_version_is_still_one() {
+        assert_eq!(PLATFORM_RULES_VERSION, 2);
+        assert_eq!(PLATFORM_SCHEMA_VERSION, 1);
+    }
+
+    /// **STAGE-18 A-6** — **regression**: a non-empty device `id` behaves
+    /// **exactly** as before ⇒ V-17 changed nothing for the legal cases.
+    #[test]
+    fn s18_a6_a_non_empty_device_id_behaves_exactly_as_before() {
+        // The sample board (five devices, all with non-empty ids) is legal.
+        assert!(
+            sample().validate().is_ok(),
+            "非空 id 的一切既有行为必须一字不变"
+        );
+
+        // Two devices sharing a **non-empty** id are still rejected by
+        // V-9 / `E_PLT-08` ⇒ V-17 did not swallow that case either.
+        let desc = board_with(vec![
+            DeviceSpec::Gpio {
+                id: "DUP".to_string(),
+            },
+            DeviceSpec::Uart16550 {
+                id: "DUP".to_string(),
+                irq_line: 1,
+                baud_rate: 115_200,
+            },
+        ]);
+        let err = desc.validate().expect_err("重复的器件 id 必须被拒");
+        assert_eq!(err.family, PLATFORM_FAMILY);
+        assert_eq!(
+            err.scenario, E_PLT_08_DUPLICATE_DEVICE_ID,
+            "非空 id 的重复仍然归 V-9 / E_PLT-08（实际 {err}）"
+        );
+    }
+
+    /// **STAGE-18 A-7** — a device `id` that is **one space** is
+    /// **legal** ⇒ the judgement is `is_empty()`, **not**
+    /// `trim().is_empty()` ⇒ the front end and the kernel use **one**
+    /// wording for "empty".
+    #[test]
+    fn s18_a7_a_blank_device_id_is_legal() {
+        let desc = board_with(vec![DeviceSpec::Gpio {
+            id: " ".to_string(),
+        }]);
+        assert!(
+            desc.validate().is_ok(),
+            "只含一个空格的 id 必须合法（判据是 is_empty，不 trim）"
+        );
+    }
+
+    /// The new scenario code means **exactly one thing** ⇒ it is
+    /// distinct from the three codes it must not be confused with
+    /// (the description's empty id / two devices sharing an id / a
+    /// parameter out of range).
+    #[test]
+    fn s18_the_new_scenario_code_is_distinct_from_the_ones_it_must_not_reuse() {
+        assert_eq!(E_PLT_15_DEVICE_EMPTY_ID, 15);
+        assert_ne!(
+            E_PLT_15_DEVICE_EMPTY_ID, E_PLT_02_EMPTY_ID,
+            "器件的 id 为空不得复用「描述的 id 为空」"
+        );
+        assert_ne!(
+            E_PLT_15_DEVICE_EMPTY_ID, E_PLT_08_DUPLICATE_DEVICE_ID,
+            "器件的 id 为空不得复用「两个器件共用一个 id」"
+        );
+        assert_ne!(
+            E_PLT_15_DEVICE_EMPTY_ID, E_PLT_12_PARAMETER_OUT_OF_RANGE,
+            "器件的 id 为空不得复用「器件参数越界」"
+        );
+        assert_eq!(
+            PlatformError::new(PLATFORM_FAMILY, E_PLT_15_DEVICE_EMPTY_ID, "x").to_string(),
+            "E_PLT-15: x"
         );
     }
 }
