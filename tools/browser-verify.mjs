@@ -1332,6 +1332,319 @@ async function runMemoryMapSection(cdp, opts) {
 }
 
 /**
+ * 板档案（STAGE-15 · 验收 **T-3**）的探针：**只读数据属性**，不靠文案。
+ *
+ * ⚠️ 持久化状态从 `data-mmap-archive-status` 读 ⇒ 前端若把它写成
+ * `"unsupported"`（本机没有 IndexedDB）这一段就会红 ⇒ **不静默**。
+ */
+const BV_BOARD_ARCHIVE_PROBE = `(() => {
+  const rows = Array.from(
+    document.querySelectorAll('[data-view-body="memory-map"] [data-mmap-board-id]'),
+  );
+  const status = document.querySelector('[data-view-body="memory-map"] [data-mmap-archive-status]');
+  const saveBtn = document.querySelector('[data-action="save-memory-map"]');
+  const validated = document.querySelector('[data-view-body="memory-map"] [data-mmap-validated]');
+  return {
+    rowCount: rows.length,
+    rows: rows.map((el) => ({
+      id: String(el.getAttribute("data-mmap-board-id") || ""),
+      name: String(el.getAttribute("data-mmap-board-name") || ""),
+    })),
+    status: status ? String(status.getAttribute("data-mmap-archive-status") || "") : "",
+    savePresent: Boolean(saveBtn),
+    saveDisabled: saveBtn ? Boolean(saveBtn.disabled) : null,
+    validated: validated ? String(validated.getAttribute("data-mmap-validated") || "") : "",
+  };
+})()`;
+
+/**
+ * **规范 JSON**（键排序）—— 用来比较「提交出去的描述」与「存下来的描述」。
+ *
+ * ⚠️ 为什么要排序：JS 对象的键序取决于**构造顺序** ⇒ 直接
+ * `JSON.stringify` 比较两个「内容相同但键序不同」的对象会判不等。
+ */
+const BV_CANONICAL_JSON = `(value) => {
+  const canon = (v) => {
+    if (Array.isArray(v)) return v.map(canon);
+    if (v && typeof v === "object") {
+      const out = {};
+      for (const k of Object.keys(v).sort()) out[k] = canon(v[k]);
+      return out;
+    }
+    return v;
+  };
+  return JSON.stringify(canon(value));
+}`;
+
+/**
+ * 板级配置**持久化**那一段（v0.30 批 · STAGE-15 · 验收 **T-3**）。
+ *
+ * ⚠️ **这一段是本批唯一的「真 IndexedDB」覆盖**：默认门禁（node:test）只
+ * 覆盖纯逻辑层与内存 backend ⇒ IndexedDB 适配层**只能**在这里被验到
+ * （前端零依赖 ⇒ 不能引 `fake-indexeddb`）。
+ *
+ * 四步：
+ *   ① 提交一张板 ⇒ 等内核**往返完成**（「待生效」横幅出现）⇒ 「保存当前板」
+ *      **解禁**（证明「已被内核接受」这个**推导量**成立）；
+ *   ② 点「保存当前板」⇒ 板档案里**多一块**（按 `data-mmap-board-id` 判）；
+ *   ③ **刷新页面**（`Page.reload`）⇒ 前端重新引导 ⇒ 板档案**从 IndexedDB
+ *      读回来**；
+ *   ④ 板**还在**，且存下来的描述与提交出去的那份**逐字段相同**。
+ *
+ * ⚠️ **必须排在板级内存图段之后**：用户的板是**黏的**（宿主里那个字段存的是
+ * 用户意图）⇒ 放前面会把 osz 段要用的那张板换掉。
+ *
+ * ⚠️ **第 ④ 步直接读 IndexedDB**，不读 DOM ⇒ 验的是「**真的存下来了**」，
+ * 不是「界面上画出来了」⇒ 两者不是一回事。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
+ */
+async function runBoardArchiveSection(cdp, opts) {
+    /** @type {{name: string, ok: boolean, detail: string}[]} */
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+
+    // -- ① 切到编辑器视图，等它挂上 ----------------------------------------
+    await cdp.send("Runtime.evaluate", {
+        expression: 'location.hash = "#/memory-map";',
+        returnByValue: true,
+    });
+    await cdp.send("Runtime.evaluate", {
+        expression: BV_CAPTURE_COMMANDS_EXPRESSION,
+        returnByValue: true,
+    });
+
+    let probe = null;
+    const readyDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < readyDeadline) {
+        const res = await cdp.send("Runtime.evaluate", {
+            expression: BV_BOARD_ARCHIVE_PROBE,
+            returnByValue: true,
+        });
+        probe = res.result?.value ?? null;
+        if (probe?.savePresent) break;
+        await sleep(250);
+    }
+    if (!probe?.savePresent) {
+        return {
+            skipped: false,
+            checks: [{
+                name: "板档案区块挂上了（`#/memory-map` 有「保存当前板」按钮）",
+                ok: false,
+                detail: "等不到板档案区块（前端引导没起来？）",
+            }],
+        };
+    }
+    add("板档案区块挂上了（`#/memory-map` 有「保存当前板」按钮）", true, "保存按钮在");
+    add(
+        "持久化状态是「可用」（不是 `unsupported` ⇒ 本机有 IndexedDB）",
+        probe.status === "ok",
+        `data-mmap-archive-status = ${JSON.stringify(probe.status)}`,
+    );
+
+    // -- ② 提交一张板 ⇒ 等内核**往返完成** --------------------------------
+    //
+    // ⚠️ **落库门槛**：只有**内核接受过**的描述才允许落库（STAGE-15 裁决 B）
+    // ⇒ 「保存当前板」在草稿**没被接受过**时必须是**禁用**的。
+    //
+    // ⚠️ **判据**：此刻镜像**已经装载过**（板级内存图段装过）⇒ 宿主对新板
+    // **只记下、不重建** ⇒ 回的事件里 `pending = true` ⇒ 「待生效」横幅出现
+    // ⇒ 那条横幅**出现**就证明命令**往返完成**了（也证明内核**接受**了）。
+    await cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+            const btn = document.querySelector('[data-action="submit-memory-map"]');
+            if (!btn) return "no-button";
+            btn.click();
+            return "clicked";
+        })()`,
+        returnByValue: true,
+    });
+
+    const pendingDeadline = Date.now() + opts.timeoutMs;
+    let pendingSeen = false;
+    while (Date.now() < pendingDeadline) {
+        const res = await cdp.send("Runtime.evaluate", {
+            expression: `(() => {
+                const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+                return Boolean(el);
+            })()`,
+            returnByValue: true,
+        });
+        if (res.result?.value === true) {
+            pendingSeen = true;
+            break;
+        }
+        await sleep(200);
+    }
+    add(
+        "命令**往返完成**（内核回了「待生效」⇒ 这份描述**已被内核接受**）",
+        pendingSeen,
+        pendingSeen ? "看到了「待生效」横幅" : "等不到「待生效」横幅 ⇒ 命令没发出去或内核没回",
+    );
+
+    // ⚠️ 「保存当前板」此刻必须**解禁** ⇒ 证明「已被内核接受」这个推导量成立。
+    let afterSubmit = null;
+    const saveDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < saveDeadline) {
+        const res = await cdp.send("Runtime.evaluate", {
+            expression: BV_BOARD_ARCHIVE_PROBE,
+            returnByValue: true,
+        });
+        afterSubmit = res.result?.value ?? null;
+        if (afterSubmit && afterSubmit.saveDisabled === false) break;
+        await sleep(200);
+    }
+    add(
+        "草稿**已被内核接受** ⇒ 「保存当前板」**解禁**（落库门槛成立）",
+        afterSubmit?.saveDisabled === false,
+        `saveDisabled = ${JSON.stringify(afterSubmit?.saveDisabled ?? null)}`,
+    );
+
+    // -- ③ 点「保存当前板」⇒ 档案里多一块 ----------------------------------
+    const submittedRes = await cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+            const cmds = Array.isArray(window.__bvCmds) ? window.__bvCmds : [];
+            const cmd = cmds.find((c) => String(c.action || "") === "submit-memory-map");
+            if (!cmd) return "";
+            const canon = ${BV_CANONICAL_JSON};
+            return canon(cmd.params && cmd.params.description ? cmd.params.description : null);
+        })()`,
+        returnByValue: true,
+    });
+    const submittedCanonical = String(submittedRes.result?.value ?? "");
+    add(
+        "捕到**提交出去**的那份描述（后面拿它跟存下来的那份逐字段比）",
+        submittedCanonical.length > 0,
+        submittedCanonical ? `规范 JSON ${submittedCanonical.length} 字节` : "没捕到提交命令",
+    );
+
+    await cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+            const btn = document.querySelector('[data-action="save-memory-map"]');
+            if (!btn) return "no-button";
+            btn.click();
+            return "clicked";
+        })()`,
+        returnByValue: true,
+    });
+
+    let saved = null;
+    const savedDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < savedDeadline) {
+        const res = await cdp.send("Runtime.evaluate", {
+            expression: BV_BOARD_ARCHIVE_PROBE,
+            returnByValue: true,
+        });
+        saved = res.result?.value ?? null;
+        if (saved && saved.rowCount > 0) break;
+        await sleep(200);
+    }
+    const savedRows = Array.isArray(saved?.rows) ? saved.rows : [];
+    add(
+        "点「保存当前板」⇒ 板档案里**多了一块**",
+        savedRows.length > 0,
+        `档案 ${savedRows.length} 行：${JSON.stringify(savedRows.map((r) => r.id))}`,
+    );
+
+    // -- ④ 刷新页面 ⇒ 板**还在**（逐字段相同） ------------------------------
+    //
+    // ⚠️ **直接读 IndexedDB**，不读 DOM ⇒ 验的是「**真的存下来了**」。
+    const reloadLoaded = new Promise((resolve) => {
+        const off = cdp.on("Page.loadEventFired", () => {
+            off();
+            resolve(true);
+        });
+    });
+    await cdp.send("Page.reload", { ignoreCache: false });
+    await Promise.race([reloadLoaded, sleep(opts.timeoutMs)]);
+
+    // ⚠️ 刷新后前端要**重新引导**（Worker / WASM 内核也重启了）⇒ 等它起来。
+    const bootDeadline = Date.now() + opts.timeoutMs;
+    let booted = false;
+    while (Date.now() < bootDeadline) {
+        const res = await cdp.send("Runtime.evaluate", {
+            expression: PROBE_EXPRESSION,
+            returnByValue: true,
+        });
+        const p = res.result?.value ?? null;
+        const landing = p ? landingChecks(p) : [];
+        if (landing.length > 0 && landing.every((c) => c.ok)) {
+            booted = true;
+            break;
+        }
+        await sleep(250);
+    }
+    add(
+        "刷新后前端**重新引导**成功（落地页检查全过）",
+        booted,
+        booted ? "落地页检查全过" : "刷新后前端没起来",
+    );
+
+    const storedRes = await cdp.send("Runtime.evaluate", {
+        expression: `new Promise((resolve) => {
+            const canon = ${BV_CANONICAL_JSON};
+            let req;
+            try {
+                req = indexedDB.open("riscv-sim-board-store");
+            } catch (err) {
+                resolve(JSON.stringify({ error: String(err) }));
+                return;
+            }
+            req.onerror = () => resolve(JSON.stringify({ error: "open failed" }));
+            req.onsuccess = () => {
+                const db = req.result;
+                try {
+                    const tx = db.transaction("boards", "readonly");
+                    const store = tx.objectStore("boards");
+                    const all = store.getAll();
+                    all.onsuccess = () => {
+                        const entries = Array.isArray(all.result) ? all.result : [];
+                        resolve(JSON.stringify({
+                            count: entries.length,
+                            ids: entries.map((e) => String((e && e.id) || "")),
+                            canonical: entries.map((e) => canon(e)),
+                        }));
+                    };
+                    all.onerror = () => resolve(JSON.stringify({ error: "getAll failed" }));
+                } catch (err) {
+                    resolve(JSON.stringify({ error: String(err) }));
+                }
+            };
+        })`,
+        awaitPromise: true,
+        returnByValue: true,
+    });
+    let stored = null;
+    try {
+        stored = JSON.parse(String(storedRes.result?.value ?? "{}"));
+    } catch {
+        stored = null;
+    }
+    const storedIds = Array.isArray(stored?.ids) ? stored.ids : [];
+    add(
+        "刷新后 IndexedDB 里**那块板还在**",
+        storedIds.length > 0 && storedIds.length === savedRows.length,
+        `库里 ${storedIds.length} 条：${JSON.stringify(storedIds)}`,
+    );
+
+    // ⚠️ **逐字段相同**：存下来的描述 vs 提交出去的那份 ⇒ 用**规范 JSON**比。
+    const storedCanonicals = Array.isArray(stored?.canonical) ? stored.canonical : [];
+    const sameField = submittedCanonical.length > 0
+        && storedCanonicals.some((c) => c === submittedCanonical);
+    add(
+        "存下来的描述与**提交出去的那份逐字段相同**（规范 JSON 比）",
+        sameField,
+        sameField
+            ? "两份规范 JSON 完全一致"
+            : `提交 = ${submittedCanonical.slice(0, 120)}；库存 = ${JSON.stringify(storedCanonicals.map((c) => String(c).slice(0, 120)))}`,
+    );
+
+    return { skipped: false, checks };
+}
+
+/**
  * 真实 RTOS 那一段：装载仓外的 ELF → 跑起来 → 终端里看得见 console。
  *
  * ⚠️ **ELF 不在就跳过，不是判负**：osz 的产物**在仓外**（不进仓库）⇒
@@ -2056,6 +2369,12 @@ async function main() {
         // osz 前面会把 osz 要用的那张板换掉。
         const memoryMap = await runMemoryMapSection(cdp, opts);
 
+        // -- the board ARCHIVE (STAGE-15 · T-3) ------------------------------
+        // ⚠️ **必须排在板级内存图段之后**：这一段会**提交一张新板**
+        // （落库门槛要求「已被内核接受」）⇒ 放在前面会把 osz 段要用的
+        // 那张板换掉。
+        const boardArchive = await runBoardArchiveSection(cdp, opts);
+
         // -- report ------------------------------------------------------------
         console.log("");
         console.log("落地页检查：");
@@ -2096,6 +2415,11 @@ async function main() {
         for (const check of memoryMap.checks) {
             console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
         }
+        console.log("");
+        console.log("板档案检查（提交 → 保存 → 刷新页面 → 板还在且逐字段相同）：");
+        for (const check of boardArchive.checks) {
+            console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
+        }
         if (consoleErrors.length > 0) {
             console.log("");
             console.log("控制台错误：");
@@ -2103,12 +2427,12 @@ async function main() {
         }
 
         const failed = [...landing, ...render, ...kernelExec, ...source, ...waveform, ...osz.checks,
-            ...memoryMap.checks]
+            ...memoryMap.checks, ...boardArchive.checks]
             .filter((c) => !c.ok);
         const ok = failed.length === 0 && consoleErrors.length === 0;
         console.log("");
         console.log(ok
-            ? "browser-verify: 通过（真机挂载 + 渲染路径 + 真内核执行 + 源码视图 + 探针流 + 板级内存图 + 控制台）"
+            ? "browser-verify: 通过（真机挂载 + 渲染路径 + 真内核执行 + 源码视图 + 探针流 + 板级内存图 + 板档案 + 控制台）"
             : `browser-verify: 失败（${failed.length} 项断言未通过，${consoleErrors.length} 条控制台错误）`);
         return ok ? 0 : EXIT_FAILED;
     } finally {
