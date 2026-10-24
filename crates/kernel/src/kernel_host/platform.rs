@@ -311,7 +311,7 @@ pub struct MappedDevices {
 ///     ram        → bus.map_ram(base, size, &[])
 ///     rom        → bus.map_rom(base, size, &[])
 ///     peripheral → 工厂造实例 → bus.map_peripheral_instance(base, 实例.size(), 实例)
-/// 护栏预算 → bus.set_max_region_bytes(描述.region_budget_bytes)
+/// 护栏预算 → bus.set_max_region_bytes(描述.max_region_bytes ?? 描述.region_budget_bytes)
 /// ```
 ///
 /// ⚠️ **校验在建图之前**：不合规的描述**一个区域都不留**（B-5）⇒
@@ -327,7 +327,19 @@ pub fn map_platform(
     description.validate()?;
 
     // 护栏预算：描述说了算（§2.5 对照表最后一行）。
-    bus.set_max_region_bytes(u64::from(description.region_budget_bytes));
+    //
+    // ⚠️ **v0.31（STAGE-16 §3.5 · D-138）**：**运行期**上界 =
+    // `max_region_bytes`（缺省 = **声明期**那个）⇒ 与拆字段之前**逐字
+    // 相同** ⇒ 既有断言（「`bus.max_region_bytes() == region_budget_bytes`」）
+    // **一条不改**。
+    //
+    // ⚠️ **两层护栏各管各的**：声明期那条判 V-7（`E_PLT_07`），运行期这条
+    // 判**物理占用**（`E_BUS_09`）⇒ 两个码**故意不复用**。
+    bus.set_max_region_bytes(u64::from(
+        description
+            .max_region_bytes
+            .unwrap_or(description.region_budget_bytes),
+    ));
 
     let mut devices = MappedDevices::default();
     // ⚠️ 按 **base 升序**建图（与总线的 `BTreeMap` 顺序一致）⇒ 建图

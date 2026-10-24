@@ -79,11 +79,16 @@ fn raw_project(id: &str, bytes: Vec<u8>) -> Project {
 }
 
 /// 取第一条 `MemoryMap` 事件（描述 + `pending` 标志）。
+///
+/// ⚠️ **v0.31（STAGE-16 裁决 M）**：事件**多两个**字段（`loaded` ·
+/// `revision`）⇒ 这里用 `..` **只取**本文件要的那两个 ⇒ **既有断言一条
+/// 不改**（新字段由 STAGE-16 那份用例单独钉）。
 fn first_memory_map(events: &[EventPayload]) -> (PlatformDescription, bool) {
     for e in events {
         if let EventPayload::MemoryMap {
             description,
             pending,
+            ..
         } = e
         {
             return (description.clone(), *pending);
@@ -126,6 +131,8 @@ fn user_board() -> PlatformDescription {
         auto_selectable: false,
         description: None,
         region_budget_bytes: 16 * 1024 * 1024,
+        // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
+        max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
                 base: 0x0000_0000,
@@ -155,6 +162,8 @@ fn board_with_four_devices() -> PlatformDescription {
         auto_selectable: false,
         description: None,
         region_budget_bytes: 16 * 1024 * 1024,
+        // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
+        max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
                 base: 0x0000_0000,
@@ -208,6 +217,8 @@ fn board_with_eight_mib_ram() -> PlatformDescription {
         auto_selectable: false,
         description: None,
         region_budget_bytes: 16 * 1024 * 1024,
+        // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
+        max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
                 base: 0x0000_0000,
@@ -347,6 +358,7 @@ fn b1_set_memory_map_before_loading_rebuilds_the_bus_to_match_the_description() 
         &mut host,
         CommandPayload::SetMemoryMap {
             description: board.clone(),
+            expected_revision: None,
         },
     );
     let (description, pending) = first_memory_map(&events);
@@ -382,6 +394,7 @@ fn b1_the_rebuilt_bus_has_exactly_the_described_regions() {
         &mut host,
         CommandPayload::SetMemoryMap {
             description: board.clone(),
+            expected_revision: None,
         },
     );
 
@@ -429,6 +442,8 @@ fn b1_the_old_map_is_restored_when_the_new_one_cannot_be_mapped() {
         auto_selectable: false,
         description: None,
         region_budget_bytes: 16 * 1024 * 1024,
+        // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
+        max_region_bytes: None,
         regions: vec![
             RegionSpec::Peripheral {
                 base: 0x7002_0000,
@@ -453,6 +468,7 @@ fn b1_the_old_map_is_restored_when_the_new_one_cannot_be_mapped() {
         &mut host,
         CommandPayload::SetMemoryMap {
             description: overlapping,
+            expected_revision: None,
         },
     );
     assert_eq!(
@@ -509,13 +525,21 @@ fn b2_an_over_budget_description_is_rejected_with_e_plt_07() {
         description: None,
         // 预算 4 KiB，段却要 64 KiB ⇒ 违反 V-7。
         region_budget_bytes: 0x1000,
+        // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
+        max_region_bytes: None,
         regions: vec![RegionSpec::Ram {
             base: 0x0000_0000,
             size: 0x0001_0000,
         }],
     };
 
-    let events = dispatch(&mut host, CommandPayload::SetMemoryMap { description: bad });
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: bad,
+            expected_revision: None,
+        },
+    );
     assert_eq!(
         first_error_code(&events),
         "E_PLT-07",
@@ -536,12 +560,20 @@ fn b2_a_rejected_description_changes_nothing() {
         auto_selectable: false,
         description: None,
         region_budget_bytes: 0x1000,
+        // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
+        max_region_bytes: None,
         regions: vec![RegionSpec::Ram {
             base: 0x0000_0000,
             size: 0x0001_0000,
         }],
     };
-    dispatch(&mut host, CommandPayload::SetMemoryMap { description: bad });
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: bad,
+            expected_revision: None,
+        },
+    );
 
     // 当前生效的图**一字未动**（还是内置默认档），而且**用户的板没被记下**
     // ⇒ 没有待生效的。
@@ -580,6 +612,7 @@ fn b3_set_memory_map_after_loading_is_pending_and_leaves_the_guest_alone() {
         &mut host,
         CommandPayload::SetMemoryMap {
             description: user_board(),
+            expected_revision: None,
         },
     );
     let (description, pending) = first_memory_map(&events);
@@ -625,6 +658,7 @@ fn b4_load_project_uses_the_user_board_instead_of_auto_selection() {
         &mut host,
         CommandPayload::SetMemoryMap {
             description: board.clone(),
+            expected_revision: None,
         },
     );
     assert!(
@@ -662,6 +696,7 @@ fn b4_a_board_configured_before_loading_survives_the_load() {
         &mut host,
         CommandPayload::SetMemoryMap {
             description: board.clone(),
+            expected_revision: None,
         },
     );
     let (description, pending) = first_memory_map(&events);
@@ -765,6 +800,7 @@ fn b5_a_failed_load_does_not_mark_the_session_as_loaded() {
         &mut host,
         CommandPayload::SetMemoryMap {
             description: board_with_eight_mib_ram(),
+            expected_revision: None,
         },
     );
     // 一个**装不下**的镜像（9 MiB > 8 MiB + 64 KiB）⇒ 装载失败。
@@ -784,6 +820,7 @@ fn b5_a_failed_load_does_not_mark_the_session_as_loaded() {
         &mut host,
         CommandPayload::SetMemoryMap {
             description: user_board(),
+            expected_revision: None,
         },
     );
     let (_, pending) = first_memory_map(&events);
@@ -838,6 +875,7 @@ fn b7_the_user_board_really_mounts_its_peripheral_devices() {
         &mut host,
         CommandPayload::SetMemoryMap {
             description: board.clone(),
+            expected_revision: None,
         },
     );
 
@@ -877,6 +915,7 @@ fn b7_the_mounted_uart_really_carries_bytes() {
         &mut host,
         CommandPayload::SetMemoryMap {
             description: board_with_four_devices(),
+            expected_revision: None,
         },
     );
 
@@ -907,6 +946,7 @@ fn b8_the_ram_size_is_really_customizable() {
         &mut host,
         CommandPayload::SetMemoryMap {
             description: board.clone(),
+            expected_revision: None,
         },
     );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
@@ -946,6 +986,7 @@ fn b8_an_unmapped_load_traps_with_cause_5() {
         &mut host,
         CommandPayload::SetMemoryMap {
             description: board_with_eight_mib_ram(),
+            expected_revision: None,
         },
     );
     dispatch(
@@ -1014,6 +1055,7 @@ fn b8_an_unmapped_store_traps_with_cause_7() {
         &mut host,
         CommandPayload::SetMemoryMap {
             description: board_with_eight_mib_ram(),
+            expected_revision: None,
         },
     );
     dispatch(
