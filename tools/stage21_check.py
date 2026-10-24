@@ -11,6 +11,8 @@
     5. 章节 §0~§11 完整
     6. 验收编号交叉引用无未定义项（分组 A / B / C / T / X）
     7. 关键约束字面量钉住（含已废止字面量的禁列）
+       ＋ 7b. §1.2 的实测事实表必须是 **F1~F21 连续**（删掉一条实测事实
+          也是「把规格改软」⇒ ⇒ 事实表本身要钉住）
 
 ⚠️ **表格切分复用 `tools/doc_check.py` 的那一份**（**一个约束一个落点**）——
 ⚠️ **不要**在这里再写一份朴素 `split("|")` ⇒ ⇒ 本脚本自己**必须**是那个「只有一处定义」的样本。
@@ -146,7 +148,9 @@ must = [
     "PMP_GRAINULARITY_SHIFT",
     "pmp_decode_cfg",
     "pmp_region",
-    "pmp_entry_matches",
+    "PmpRegion",
+    "covers",           # §8 订正 8：落点是 PmpRegion::covers，不是 pmp_entry_matches
+    "pmp_cfg_warl",     # F20：pmpcfg 的写入要合法化
     "pmp_access_allowed",
     "csr_is_implemented",     # 裁决 E：不补 ⇒ PMP 成一排不起作用的寄存器
     "csr_write_is_ignored",
@@ -161,6 +165,8 @@ must = [
     "pmp_allows",
     "MPRV",                              # 裁决 H：特权口径
     "mstatus.MPRV",
+    "MSTATUS_MPRV_BIT",                  # F10 / F11：位号钉死
+    "fetch_pmp_trap",                    # §8 订正 9：两条派发路径共用取指判定
     "TrapCause::LoadAccessFault",        # 裁决 J：cause 5
     "TrapCause::StoreAccessFault",       # 裁决 J：cause 7
     "TrapCause::InstructionAccessFault",  # 裁决 J：cause 1
@@ -177,6 +183,8 @@ must = [
     "0x1f18",        # 判据的打包值（条目 0 = 0x18、条目 1 = 0x1f）
     "0x200101ff",    # 判据的条目 0 地址编码
     "0x2001ffff",    # 判据的条目 1 地址编码
+    "0x9f",          # F20：pmpcfg 的保留位清零后读回的值
+    "0x1a",          # F20：保留组合（R=0 ∧ W=1）的写法
     "rv32mi/pmpaddr",   # 裁决 O：空洞，不入库
     "local/pmp_deny",
     "D-94",              # 本批闭环的那一条
@@ -207,6 +215,24 @@ forbidden = [
 for f in forbidden:
     if f in text:
         err(f"[禁列] 规格出现已废止字面量 {f}")
+
+# ---- 7b. §1.2 的实测事实表：F1~F21 必须**连续**且齐全 --------------------
+# ⚠️ **删掉一条实测事实**也是「把规格改软」的一种 ⇒ ⇒ 事实表本身要钉住。
+facts = []
+grab = False
+for line in lines:
+    if line.startswith("### §1.2"):
+        grab = True
+        continue
+    if grab and line.startswith("### "):
+        grab = False
+    if grab:
+        m = re.match(r"^\|\s*(F\d+)\s*\|", line)
+        if m:
+            facts.append(m.group(1))
+want = [f"F{i}" for i in range(1, 22)]
+if facts != want:
+    err(f"[事实] §1.2 的实测事实表不是 F1~F21 连续：{facts}")
 
 print(f"检查项：7  失败 {len(fail)}")
 for f in fail:
