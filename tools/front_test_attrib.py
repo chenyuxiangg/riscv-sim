@@ -334,22 +334,32 @@ def run_front_gate_counts(repo):
 def selftest(repo):
     """判别力回归：在 v0.31 / v0.32 / v0.33 三棵树上**逐字**复现台账历史值。
 
-    ⚠️ 回归用的 worktree 建在**仓外**（`$TMPDIR`）⇒ 不污染仓库目录。
+    ⚠️ 回归用的 worktree 建在**仓外**（`$TMPDIR`）⇒ 不污染仓库目录；
+    ⚠️ 跑完**自己收掉**（`git worktree remove`）⇒ ⇒ 可以安全地进默认门禁
+       （门禁脚本不该在仓外留垃圾）。
     """
     ok = True
     regress_root = os.path.join(tempfile.gettempdir(), "front-attrib-regress")
-    for label, commit, exp_a, exp_b, exp_total in REGRESSION:
-        work = os.path.join(regress_root, label)
-        if not os.path.isdir(work):
-            subprocess.run(["git", "worktree", "add", "--detach", work, commit],
-                           cwd=repo, check=True, capture_output=True, text=True)
-        counts = run_front_gate_counts(work)
-        a, b, t, _ = attribute(work, counts)
-        good = (a, b, sum(counts.values())) == (exp_a, exp_b, exp_total)
-        ok = ok and good
-        print("  %-8s 期望 %d/%d（合计 %d）  实测 %d/%d（合计 %d）  %s" % (
-            label, exp_a, exp_b, exp_total, a, b, sum(counts.values()),
-            "OK" if good else "★红★"))
+    created = []
+    try:
+        for label, commit, exp_a, exp_b, exp_total in REGRESSION:
+            work = os.path.join(regress_root, label)
+            if not os.path.isdir(work):
+                subprocess.run(["git", "worktree", "add", "--detach", work, commit],
+                               cwd=repo, check=True, capture_output=True, text=True)
+                created.append(work)
+            counts = run_front_gate_counts(work)
+            a, b, t, _ = attribute(work, counts)
+            good = (a, b, sum(counts.values())) == (exp_a, exp_b, exp_total)
+            ok = ok and good
+            print("  %-8s 期望 %d/%d（合计 %d）  实测 %d/%d（合计 %d）  %s" % (
+                label, exp_a, exp_b, exp_total, a, b, sum(counts.values()),
+                "OK" if good else "★红★"))
+    finally:
+        for work in created:
+            subprocess.run(["git", "worktree", "remove", "--force", work],
+                           cwd=repo, capture_output=True, text=True)
+        subprocess.run(["git", "worktree", "prune"], cwd=repo, capture_output=True, text=True)
     return ok
 
 
