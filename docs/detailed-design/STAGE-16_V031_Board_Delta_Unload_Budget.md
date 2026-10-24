@@ -110,7 +110,8 @@
 
 ### 裁决 H · 差量操作枚举用**外部标签**
 
-- `MemoryMapOp` 用 serde **默认的外部标签**（与 `CommandPayload` 同形）⇒ 线上形如 `{"UpsertRegion": {"spec": {...}}}`。
+- `MemoryMapOp` 用 serde **默认的外部标签**（与 `CommandPayload` 同形 ⇒ **线上键就是 Rust 变体名**）⇒ 线上形如 `{"UpsertRegion": {"spec": {...}}}`。
+- ⚠️ **不许**给它加 `#[serde(tag = "op")]` ⇒ 那会变成内部标签 ⇒ 内部标签**不能**嵌套内部标签的 `RegionSpec`。
 - ⚠️ **理由是 serde 的硬限制**：`RegionSpec` / `DeviceSpec` 是**内部标签**枚举 ⇒ 内部标签的变体**不能**再直接放进另一个内部标签枚举的变体里（内部标签先把内容缓冲成 map ⇒ 嵌套的内部标签枚举读不回来）⇒ **外部标签没有这个限制**（与今天 `PlatformDescription.regions: Vec<RegionSpec>` 能正常工作是同一条理由）。
 - ⚠️ **一条约束一个落点**：这个限制**只写在规格一处**（本条），实现与前端镜像都**引用**它，不各写一遍。
 
@@ -219,7 +220,8 @@ PatchMemoryMap {
 ### 2.5 差量操作枚举（**外部标签**，裁决 H）
 
 ```rust
-#[serde(tag = "op", rename_all = "snake_case")]  // ⚠️ 外部标签，不是内部标签
+// ⚠️ **不写** `#[serde(tag = ...)]` ⇒ 用 serde **默认的外部标签**
+//    （与 `CommandPayload` 同形 ⇒ 线上键就是 Rust 变体名）。
 pub enum MemoryMapOp {
     /// 插入或替换**一段**（`base` 在 `spec` 里）。
     UpsertRegion { spec: RegionSpec },
@@ -233,8 +235,11 @@ pub enum MemoryMapOp {
 }
 ```
 
-- ⚠️ **线上形状**：`{"op": "upsert_region", "spec": {...}}` / `{"op": "remove_region", "base": 0}` / `{"op": "set_budget", "region_budget_bytes": 16777216, "max_region_bytes": null}`。
-  （`MemoryMapOp` 自己是**外部标签** ⇒ 线上的键是变体名；`spec` 里的 `RegionSpec` 是**内部标签** ⇒ 线上是 `{"kind": "ram", ...}`。**两层的标签规则不同，各写各的**。）
+- ⚠️ **线上形状（外部标签 ⇒ 键是 Rust 变体名）**：
+  `{"UpsertRegion": {"spec": {"kind": "ram", "base": 0, "size": 1048576}}}`
+  / `{"RemoveRegion": {"base": 0}}`
+  / `{"SetBudget": {"region_budget_bytes": 16777216, "max_region_bytes": null}}`。
+- ⚠️ **两层的标签规则不同，各写各的**：`MemoryMapOp` 是**外部标签**（键 = 变体名）⇒ 而 `spec` 里的 `RegionSpec` 是**内部标签**（线上是 `{"kind": "ram", ...}`）⇒ **不要**给 `MemoryMapOp` 加 `#[serde(tag = "op")]` ⇒ 那会变成内部标签 ⇒ 而内部标签**不能**嵌套内部标签的 `RegionSpec`（serde 会把内容先缓冲成 map ⇒ 读不回来）⇒ ⇒ **裁决 H 的硬约束**。
 
 ### 2.6 事件（**一条改形状**）
 
