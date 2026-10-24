@@ -1661,6 +1661,344 @@ async function runBoardArchiveSection(cdp, opts) {
     return { skipped: false, checks };
 }
 
+// ---------------------------------------------------------------------------
+// STAGE-16 · 板级差量 / 卸载（v0.31 · T-1 / T-2 / T-3）
+// ---------------------------------------------------------------------------
+
+/**
+ * 被测的第二块 RAM 段（差量改的就是它）。
+ *
+ * ⚠️ 只改**大小**，**元数据一字不动** ⇒ 前端才走**差量**那条路（裁决 D）。
+ */
+const BV_DELTA_RAM_BASE = 2147483648;
+const BV_DELTA_RAM_SIZE = 4194304; // 4 MiB（原 8 MiB）
+
+/**
+ * 装一个**线上的**命令捕获器：记录每一条发进 Worker 的传输帧。
+ *
+ * ⚠️ **为什么必须看线上帧**：`submit-memory-map` 这条**应用层动作**在「整份
+ * 替换」与「差量」两条路上**完全一样** ⇒ 只看应用层信号**分不出**走了哪条
+ * ⇒ ⇒ 必须看到**契约命令名**（`SetMemoryMap` 还是 `PatchMemoryMap`）⇒
+ * ⇒ 那是**线上帧的载荷**里才有的东西。
+ *
+ * ⚠️ **只插桩，不改前端源码**（与 `BV_CAPTURE_COMMANDS_EXPRESSION` 同一套路）。
+ * ⚠️ **刷新页面后钩子会丢** ⇒ 每次刷新之后**重新装一次**。
+ */
+const BV_WIRE_HOOK_EXPRESSION = `(() => {
+  if (!Array.isArray(window.__bvWire)) window.__bvWire = [];
+  if (!window.__bvWireHooked) {
+    window.__bvWireHooked = true;
+    const orig = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (msg) {
+      try { window.__bvWire.push(JSON.stringify(msg)); } catch (e) {}
+      return orig.apply(this, arguments);
+    };
+  }
+  return "hooked";
+})()`;
+
+/** 读修订号 / 待生效横幅 / 卸载按钮 / 已捕到的线上帧。 */
+const BV_DELTA_PROBE = `(() => {
+  const rev = document.querySelector('[data-mmap-revision]');
+  const pending = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+  const unload = document.querySelector('[data-action="unload-project"]');
+  return {
+    revision: rev ? String(rev.textContent ?? "").trim() : null,
+    pending: Boolean(pending),
+    unloadPresent: Boolean(unload),
+    wire: Array.isArray(window.__bvWire) ? window.__bvWire.slice() : [],
+  };
+})()`;
+
+/** 线上帧里有没有某个契约命令名。 */
+function bvWireHas(wire, name) {
+  return wire.some((s) => String(s ?? "").includes(name));
+}
+
+/** 线上帧里 `PatchMemoryMap` 那一条的载荷（取第一条）。 */
+function bvWireFind(wire, name) {
+  for (const s of wire) {
+    const str = String(s ?? "");
+    if (str.includes(name)) return str;
+  }
+  return "";
+}
+
+/**
+ * 板级差量 / 卸载那一段。
+ *
+ * ⚠️ **必须排在板档案段之后**：这一段会**卸载工程**（⇒ 内核重启、用户的板
+ * 不存在）⇒ 放在前面会把板档案段要用的板换掉。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
+ */
+async function runBoardDeltaSection(cdp, opts) {
+    /** @type {{name: string, ok: boolean, detail: string}[]} */
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+
+    const evalValue = async (expression) => {
+        const res = await cdp.send("Runtime.evaluate", { expression, returnByValue: true });
+        return res.result?.value ?? null;
+    };
+
+    // -- ① 切到编辑器视图 + 装线上钩子 --------------------------------------
+    await cdp.send("Runtime.evaluate", {
+        expression: 'location.hash = "#/memory-map";',
+        returnByValue: true,
+    });
+    await evalValue(BV_WIRE_HOOK_EXPRESSION);
+
+    let probe = null;
+    const readyDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < readyDeadline) {
+        probe = await evalValue(BV_DELTA_PROBE);
+        if (probe?.unloadPresent) break;
+        await sleep(250);
+    }
+    if (!probe?.unloadPresent) {
+        return {
+            skipped: false,
+            checks: [{
+                name: "「卸载工程」按钮挂上了（`#/memory-map` 有 `data-action=\"unload-project\"`）",
+                ok: false,
+                detail: "等不到卸载按钮（前端引导没起来？）",
+            }],
+        };
+    }
+    add(
+        "「卸载工程」按钮挂上了（`#/memory-map` 有 `data-action=\"unload-project\"`）",
+        true,
+        "卸载按钮在",
+    );
+
+    // -- ② 点「卸载工程」⇒ 命令真的发到内核 --------------------------------
+    await evalValue(`(() => {
+        const btn = document.querySelector('[data-action="unload-project"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+
+    let unloadSeen = false;
+    const unloadDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < unloadDeadline) {
+        probe = await evalValue(BV_DELTA_PROBE);
+        if (probe && bvWireHas(probe.wire, "UnloadProject")) {
+            unloadSeen = true;
+            break;
+        }
+        await sleep(200);
+    }
+    add(
+        "「卸载工程」**真的**发出 `UnloadProject` 命令（线上帧里看得见）",
+        unloadSeen,
+        unloadSeen ? "线上帧里有 UnloadProject" : "线上帧里没有 UnloadProject",
+    );
+    // ⚠️ 等命令**往返**（异步）⇒ 否则下一步的提交可能排在卸载前面。
+    await sleep(600);
+
+    // -- ③ 提交一张板 ⇒ **必须立即生效**（卸载的判别力） ---------------------
+    //
+    // ⚠️ **判据不是「按钮点过了」而是「改板立即生效」**：卸载之前提交只会
+    // 变成「待生效」（宿主对已装载的会话只记下、不重建）⇒ ⇒ 提交后**生效图
+    // 真的变成那张板** ⇒ 就证明 `image_loaded` 真的被清掉了 ⇒ ⇒ 这才是
+    // 「卸载 ⇒ 改板立即生效」的端到端判别式（D-139 判别力 ⑤）。
+    await cdp.send("Runtime.evaluate", {
+        expression: `window.dispatchEvent(new CustomEvent("riscv:command", {
+            detail: {
+                action: "submit-memory-map",
+                requestId: "bv-delta-board",
+                viewId: "memory-map",
+                params: { description: ${JSON.stringify(BV_BOARD)} },
+            },
+        }))`,
+        returnByValue: true,
+    });
+
+    let effectiveRows = [];
+    let appliedImmediately = false;
+    const applyDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < applyDeadline) {
+        await cdp.send("Runtime.evaluate", {
+            expression: 'location.hash = "#/product";',
+            returnByValue: true,
+        });
+        const p = await evalValue(BV_MEMORY_MAP_PROBE);
+        effectiveRows = Array.isArray(p?.rows) ? p.rows : [];
+        const hasNewRam = effectiveRows.some(
+            (r) => String(r.base) === String(BV_NEW_RAM_BASE) && String(r.kind) === "ram",
+        );
+        if (hasNewRam && effectiveRows.length === BV_BOARD.regions.length) {
+            appliedImmediately = true;
+            break;
+        }
+        await sleep(250);
+    }
+    add(
+        "卸载之后改板**立即生效**（生效图真的变成那张板 ⇒ `image_loaded` 被清了）",
+        appliedImmediately,
+        appliedImmediately
+            ? `生效图 ${effectiveRows.length} 行，含新 RAM 段`
+            : `生效图没变成那张板（${effectiveRows.length} 行）`,
+    );
+
+    // ⚠️ 「待生效」横幅**必须不出现**（立即生效 ⇒ 没有待生效的那一份）。
+    await cdp.send("Runtime.evaluate", {
+        expression: 'location.hash = "#/memory-map";',
+        returnByValue: true,
+    });
+    await sleep(300);
+    probe = await evalValue(BV_DELTA_PROBE);
+    add(
+        "立即生效 ⇒ **没有**「待生效」横幅",
+        probe?.pending === false,
+        `pending = ${JSON.stringify(probe?.pending ?? null)}`,
+    );
+
+    const revisionBefore = probe?.revision ?? null;
+    add(
+        "面板上**看得见修订号**（`data-mmap-revision`）",
+        revisionBefore !== null && /^[0-9]+$/.test(String(revisionBefore)),
+        `revision = ${JSON.stringify(revisionBefore)}`,
+    );
+
+    // -- ④ 改一段 RAM 的大小（元数据**一字不动**）⇒ 走**差量** ---------------
+    //
+    // ⚠️ **元数据不动**是走差量的前提（裁决 D）⇒ 只改第二段 RAM 的 size。
+    const patchedBoard = {
+        ...BV_BOARD,
+        regions: BV_BOARD.regions.map((r) =>
+            Number(r.base) === BV_DELTA_RAM_BASE ? { ...r, size: BV_DELTA_RAM_SIZE } : r,
+        ),
+    };
+    await cdp.send("Runtime.evaluate", {
+        expression: `window.dispatchEvent(new CustomEvent("riscv:command", {
+            detail: {
+                action: "submit-memory-map",
+                requestId: "bv-delta-patch",
+                viewId: "memory-map",
+                params: { description: ${JSON.stringify(patchedBoard)} },
+            },
+        }))`,
+        returnByValue: true,
+    });
+
+    let patchFrame = "";
+    const patchDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < patchDeadline) {
+        probe = await evalValue(BV_DELTA_PROBE);
+        const wire = probe?.wire ?? [];
+        if (bvWireHas(wire, "PatchMemoryMap")) {
+            patchFrame = bvWireFind(wire, "PatchMemoryMap");
+            break;
+        }
+        await sleep(200);
+    }
+    add(
+        "只改一段 ⇒ 命令**走差量**（线上帧里是 `PatchMemoryMap`，**不是** `SetMemoryMap`）",
+        patchFrame.length > 0,
+        patchFrame ? `帧长 ${patchFrame.length} 字节` : "线上帧里没有 PatchMemoryMap",
+    );
+    add(
+        "差量的载荷里**只有那一段**（一个 `UpsertRegion`，基址 = 被改的那段）",
+        patchFrame.includes("UpsertRegion") && patchFrame.includes(String(BV_DELTA_RAM_BASE)),
+        patchFrame ? patchFrame.slice(0, 220) : "没有差量帧",
+    );
+
+    // -- ⑤ 生效图里那一段**真的变了** ---------------------------------------
+    let patchedRows = [];
+    const patchedDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < patchedDeadline) {
+        await cdp.send("Runtime.evaluate", {
+            expression: 'location.hash = "#/product";',
+            returnByValue: true,
+        });
+        const p = await evalValue(BV_MEMORY_MAP_PROBE);
+        patchedRows = Array.isArray(p?.rows) ? p.rows : [];
+        const row = patchedRows.find((r) => String(r.base) === String(BV_DELTA_RAM_BASE));
+        if (row && String(row.size) === String(BV_DELTA_RAM_SIZE)) break;
+        await sleep(250);
+    }
+    const patchedRow = patchedRows.find((r) => String(r.base) === String(BV_DELTA_RAM_BASE));
+    add(
+        "生效图里**那一段真的变了**（大小 = 4 MiB）",
+        Boolean(patchedRow) && String(patchedRow.size) === String(BV_DELTA_RAM_SIZE),
+        `行 = ${JSON.stringify(patchedRow ?? null)}`,
+    );
+
+    // -- ⑥ 修订号 **+1** ----------------------------------------------------
+    await cdp.send("Runtime.evaluate", {
+        expression: 'location.hash = "#/memory-map";',
+        returnByValue: true,
+    });
+    await sleep(300);
+    probe = await evalValue(BV_DELTA_PROBE);
+    const revisionAfter = probe?.revision ?? null;
+    add(
+        "修订号**真的 +1**（并发可见性的凭据）",
+        Number(revisionAfter) === Number(revisionBefore) + 1,
+        `${JSON.stringify(revisionBefore)} → ${JSON.stringify(revisionAfter)}`,
+    );
+
+    // -- ⑦ 刷新页面 ⇒ 重新引导成功 + **板档案还在**（回归守卫） --------------
+    await cdp.send("Runtime.evaluate", {
+        expression: "location.reload();",
+        returnByValue: true,
+    });
+    await sleep(1200);
+    let landing = [];
+    const landingDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < landingDeadline) {
+        const p = await evalValue(PROBE_EXPRESSION);
+        landing = p ? landingChecks(p) : [];
+        if (landing.length > 0 && landing.every((c) => c.ok)) break;
+        await sleep(250);
+    }
+    add(
+        "刷新后前端**重新引导**成功（落地页检查全过）",
+        landing.length > 0 && landing.every((c) => c.ok),
+        landing.length === 0 ? "落地页检查没跑起来" : `落地页 ${landing.filter((c) => c.ok).length}/${landing.length}`,
+    );
+
+    const archive = await evalValue(`(() => {
+        return new Promise((resolve) => {
+            let req;
+            try {
+                req = indexedDB.open("riscv-sim-board-store", 1);
+            } catch (e) {
+                resolve({ ok: false, ids: [] });
+                return;
+            }
+            req.onerror = () => resolve({ ok: false, ids: [] });
+            req.onsuccess = () => {
+                const db = req.result;
+                try {
+                    const tx = db.transaction("boards", "readonly");
+                    const store = tx.objectStore("boards");
+                    const all = store.getAll();
+                    all.onsuccess = () => {
+                        const ids = (all.result || []).map((e) => String(e && e.id || ""));
+                        resolve({ ok: true, ids });
+                    };
+                    all.onerror = () => resolve({ ok: false, ids: [] });
+                } catch (e) {
+                    resolve({ ok: false, ids: [] });
+                }
+            };
+        });
+    })()`);
+    add(
+        "刷新后**板档案还在**（本批没把上一批的能力弄坏）",
+        Boolean(archive?.ok) && Array.isArray(archive?.ids) && archive.ids.length > 0,
+        `库里 ${JSON.stringify(archive?.ids ?? [])}`,
+    );
+
+    return { skipped: false, checks };
+}
+
 /**
  * 真实 RTOS 那一段：装载仓外的 ELF → 跑起来 → 终端里看得见 console。
  *
@@ -2392,6 +2730,11 @@ async function main() {
         // 那张板换掉。
         const boardArchive = await runBoardArchiveSection(cdp, opts);
 
+        // -- the board DELTA + UNLOAD (STAGE-16 · T-1 / T-2 / T-3) ------------
+        // ⚠️ **必须排在板档案段之后**：这一段会**卸载工程** ⇒ 内核重启、用户
+        // 的板不存在 ⇒ 放在前面会把板档案段要用的板换掉。
+        const boardDelta = await runBoardDeltaSection(cdp, opts);
+
         // -- report ------------------------------------------------------------
         console.log("");
         console.log("落地页检查：");
@@ -2435,6 +2778,11 @@ async function main() {
         console.log("");
         console.log("板档案检查（提交 → 保存 → 刷新页面 → 板还在且逐字段相同）：");
         for (const check of boardArchive.checks) {
+            console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
+        }
+        console.log("");
+        console.log("板级差量与卸载检查（卸载 → 改板立即生效 → 只改一段走差量 → 修订号 +1）：");
+        for (const check of boardDelta.checks) {
             console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
         }
         if (consoleErrors.length > 0) {
