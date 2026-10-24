@@ -1079,6 +1079,25 @@ describe("板档案与多板并存（STAGE-15 · C-1 ~ C-10）", () => {
         assert.equal(detail.params.id, "board-a", "板 id 必须带在命令参数里");
     });
 
+    test("规范 JSON **按键排序** ⇒ 键序不同的同内容描述判为**相同**", () => {
+        // ⚠️ **这条钉的是「排序」本身**（**统筹方在收口阶段补的判别力缺口**）：
+        // 把 `canonicalize` 里的 `.sort()` 去掉 ⇒ 两份**键序不同**但内容相同
+        // 的描述就**不再相等** ⇒ 「已被内核接受」这个**推导量**会**静默失效**
+        // （用户明明没改草稿，却一直被判定成「没被接受」）⇒ 而当时
+        // **没有任何用例会红**（实测：删掉 `.sort()` 后全量 389 条仍全绿）。
+        //
+        // ⇒ 内容**不同**的必须判为**不同**（别把比较写成恒真）。
+        const a = { b: 2, a: 1, regions: [{ size: 4, base: 8 }] };
+        const b = { a: 1, b: 2, regions: [{ base: 8, size: 4 }] };
+        assert.equal(
+            mm.canonicalJson(a),
+            mm.canonicalJson(b),
+            "键序不同的同内容必须规范化成同一串",
+        );
+        assert.ok(mm.sameDescription(a, b), "sameDescription 必须判为相同");
+        assert.equal(mm.sameDescription(a, { ...b, b: 3 }), false, "内容不同必须判为不同");
+    });
+
     test("前端**不显示**器件参数的区间常量（区间由内核校验）", () => {
         setup();
         const note = $("[data-mmap-device-range-note]");
