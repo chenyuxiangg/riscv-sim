@@ -20,6 +20,13 @@ pub mod csr;
 pub mod decoder;
 pub mod executor;
 
+/// Zicntr 硬件计数器（`mcycle` / `minstret` 与它们的影子）。
+///
+/// ⚠️ 它是 [`executor::execute_one`] 的**内部**部件 —— 对外**不导出**任何
+/// 符号：计数器的**读**在 [`csr::csr_read`] 里，**自增**的**唯一落点**在
+/// [`executor::execute_one`] 的正常完成出口（STAGE-20 裁决 F）。
+mod counters;
+
 pub use decoder::{Decoded, Decoder};
 pub use executor::{
     classify, execute_one, read_gpr, write_gpr, Executor, MemoryAccess, MisalignedPolicy, Op,
@@ -315,6 +322,8 @@ impl MemoryAccess for BusMemory<'_> {
 
 #[cfg(test)]
 mod tests_common;
+#[cfg(test)]
+mod tests_counters;
 #[cfg(test)]
 mod tests_csr;
 #[cfg(test)]

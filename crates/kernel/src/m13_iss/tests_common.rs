@@ -14,6 +14,7 @@
 
 use std::cell::RefCell;
 
+use riscv_sim_contract::csr::counter_pair;
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{SimState, WriteSize};
 
@@ -230,6 +231,23 @@ pub(super) fn csr_value(state: &SimState, csr: u16) -> u32 {
 /// The CSR numbers present in the state's CSR file, in file order.
 pub(super) fn csr_numbers(state: &SimState) -> Vec<u16> {
     state.csrs.iter().map(|(number, _)| *number).collect()
+}
+
+/// The CSR numbers present in the state's CSR file, **minus the Zicntr
+/// counters**.
+///
+/// ⚠️ 计数器的条目是**平台自己**写进去的（**退休计数**，STAGE-20 裁决 F）
+/// ⇒ ⇒ 它们**与被测的那条指令无关** ⇒ ⇒ 「这条指令写了哪些 CSR」这条
+/// 判据必须把**它们**排除掉 —— 否则每一条**跑过指令**的用例都会看到两个
+/// **恒定存在**的条目（`mcycle` / `minstret`）。
+///
+/// ⚠️ 排除用的是契约层的 [`counter_pair`] ⇒ ⇒ 「哪些 CSR 是计数器」**只有
+/// 一处答案**（STAGE-20 裁决 C）。
+pub(super) fn csr_numbers_without_counters(state: &SimState) -> Vec<u16> {
+    csr_numbers(state)
+        .into_iter()
+        .filter(|number| counter_pair(*number).is_none())
+        .collect()
 }
 
 /// ISS + RAM harness driving the closure memory port.

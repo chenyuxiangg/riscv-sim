@@ -33,9 +33,9 @@
 //!   the mapping agrees with itself.
 
 use riscv_sim_contract::csr::{
-    csr_write_is_ignored, CSR_IRQ_CLEAR, CSR_MCAUSE, CSR_MEPC, CSR_MHARTID, CSR_MIP, CSR_MISA,
-    CSR_MISA_VALUE, CSR_MSCRATCH, CSR_MSTATUS, CSR_MTVAL, CSR_MTVEC, MSTATUS_MIE_BIT,
-    MSTATUS_MPIE_BIT,
+    csr_write_is_ignored, CSR_IRQ_CLEAR, CSR_MCAUSE, CSR_MCYCLE, CSR_MCYCLEH, CSR_MEPC,
+    CSR_MHARTID, CSR_MINSTRET, CSR_MINSTRETH, CSR_MIP, CSR_MISA, CSR_MISA_VALUE, CSR_MSCRATCH,
+    CSR_MSTATUS, CSR_MTVAL, CSR_MTVEC, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT,
 };
 use riscv_sim_contract::model::SimState;
 
@@ -397,13 +397,28 @@ fn csrrci_with_a_zero_immediate_is_a_pure_read() {
 /// A write to a **read-only** CSR must be ignored — the value in the
 /// file must not change.
 ///
-/// The read-only quarter is the whole `0x800..=0xFFF` range (address
-/// bit 11 set). `mtime` (`0xBFF8`) lives in that quarter, but a CSR
-/// instruction can only address **12 bits**, so the encoding of
-/// `mtime` is its low half (`0xFF8`) — which is in the same quarter.
+/// ⚠️ **只读区按 RISC-V 的 CSR 地址映射判定**，**不是**「`0x800..=0xFFF`
+/// 整段」—— 旧规则 `csr & 0x800 != 0`（bit 11）把 `0x800..=0xBFF` 一律
+/// 判成只读，**连 `mcycle`（`0xB00`）都被误判** ⇒ ⇒ guest 根本写不进
+/// 计数器 ⇒ ⇒ 台账 **D-94** 的第 ① 件事（Zicntr）根本无法施工。地址
+/// 映射的只读段是：
+///
+/// | 区间 | 含义 |
+/// | --- | --- |
+/// | `0x900..=0x9FF` | 用户级只读 custom |
+/// | `0xA20..=0xA3F` | 机器级只读 standard |
+/// | `0xAA0..=0xABF` | 机器级只读 standard |
+/// | `0xB20..=0xB3F` | 机器级只读 custom |
+/// | `0xBA0..=0xBBF` | 机器级只读 custom |
+/// | `0xC00..=0xFFF` | 机器级只读（standard + custom）—— `bits[11:10] == 0b11` |
+///
+/// ⚠️ **判别力**：只读段里绝大多数 CSR 本平台**未实现** ⇒ ⇒ 它们的写
+/// 也会被「未实现 ⇒ 写被忽略」那条规则兜住 ⇒ ⇒ 光断言「写没进去」
+/// **分不清**是哪条规则拦的 ⇒ ⇒ `mhartid`（`0xF14`）是本平台**已实现**
+/// **且**只读的那个 ⇒ ⇒ 它才是这条用例里**真正**的判别样本。
 #[test]
 fn a_write_to_a_read_only_csr_is_ignored() {
-    for csr in 0x800u16..=0xFFF {
+    for csr in read_only_csr_addresses() {
         let mut h = Harness::new();
         let mut state = state_with_csrs(&[(csr, 0x0F0F)]);
         state.gpr[1] = 0xFFFF_FFFF;
@@ -413,6 +428,52 @@ fn a_write_to_a_read_only_csr_is_ignored() {
             csr_value(&state, csr),
             0x0F0F,
             "csr {csr:#x} is read-only — the write must be ignored"
+        );
+    }
+}
+
+/// The **read-only** CSR addresses of the RISC-V CSR address mapping.
+///
+/// ⚠️ 这些区间是**架构字面量**，**不是**从 `is_csr_read_only` 推出来的 ——
+/// 用实现自己的规则去挑样例 ⇒ ⇒ 判据会**自证** ⇒ ⇒ 规则改错了这条也绿。
+fn read_only_csr_addresses() -> Vec<u16> {
+    let mut addrs = Vec::new();
+    for range in [
+        0x900u16..=0x9FF,
+        0xA20..=0xA3F,
+        0xAA0..=0xABF,
+        0xB20..=0xB3F,
+        0xBA0..=0xBBF,
+        0xC00..=0xFFF,
+    ] {
+        addrs.extend(range);
+    }
+    addrs
+}
+
+/// **反向断言** —— 机器态计数器**不再**被只读规则拦。
+///
+/// ⚠️ 这是契约层那条**真 bug**（旧规则 `csr & 0x800 != 0` 把 bit 11 置位
+/// 的地址一律判成只读）的**判别力证据** ⇒ ⇒ 把规则改回旧写法 ⇒ ⇒
+/// `mcycle` / `minstret` 会被判成只读 ⇒ ⇒ 下面这条**红**。
+#[test]
+fn a_write_to_a_writable_machine_counter_is_not_ignored() {
+    for csr in [CSR_MCYCLE, CSR_MINSTRET, CSR_MCYCLEH, CSR_MINSTRETH] {
+        assert!(
+            !csr_write_is_ignored(csr),
+            "csr {csr:#x} 是机器态计数器 ⇒ ⇒ **不得**被只读规则拦"
+        );
+        // ⚠️ 光断言 `csr_write_is_ignored` 是**半条**证据 ⇒ ⇒ 再走一遍
+        // **真指令** ⇒ ⇒ 写必须**真的**落进 CSR 文件。
+        let mut h = Harness::new();
+        let mut state = state_with_csrs(&[]);
+        state.gpr[1] = 0x1234_5678;
+        let outcome = h.step_one_at(&mut state, 0x1000, csr_insn(csr, 1, F_CSRRW, 2));
+        assert_eq!(outcome, StepOutcome::Advanced);
+        assert_eq!(
+            csr_value(&state, csr),
+            0x1234_5678,
+            "csr {csr:#x} 的写必须**真的**落进 CSR 文件"
         );
     }
 }
@@ -576,6 +637,12 @@ fn mtvec_is_readable_and_writable_although_its_low_bits_are_not_zero() {
 
 /// The CSR file stays **ascending by number** and holds **at most one**
 /// entry per number, however the writes are ordered.
+///
+/// ⚠️ **计数器的条目不在这个判据里** —— 它们是**平台自己**写进去的
+/// （**退休计数**，STAGE-20 裁决 F）⇒ ⇒ 与被测的三次写**无关** ⇒ ⇒
+/// 判据必须把它们排除掉（[`csr_numbers_without_counters`]）。
+/// ⚠️ **升序这条判据仍然看**整个文件（**含**计数器条目）—— 那才是文件
+/// 真正的性质。
 #[test]
 fn the_csr_file_stays_sorted_and_holds_one_entry_per_csr() {
     let mut h = Harness::new();
@@ -586,16 +653,20 @@ fn the_csr_file_stays_sorted_and_holds_one_entry_per_csr() {
         h.step_one_at(&mut state, 0x1000, csr_insn(csr, 1, F_CSRRW, 0));
     }
     let numbers = csr_numbers(&state);
+    assert!(
+        numbers.windows(2).all(|pair| pair[0] < pair[1]),
+        "the CSR file must stay ascending by number —— 实得 {numbers:?}"
+    );
     assert_eq!(
-        numbers,
+        csr_numbers_without_counters(&state),
         vec![CSR_MSTATUS, CSR_MTVEC, CSR_MEPC],
-        "the CSR file must stay ascending by number"
+        "被测的三次写之外不得有多余条目"
     );
     // Writing the same CSR again must **overwrite**, not append.
     state.gpr[1] = 0x7777;
     h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MTVEC, 1, F_CSRRW, 0));
     assert_eq!(
-        csr_numbers(&state),
+        csr_numbers_without_counters(&state),
         vec![CSR_MSTATUS, CSR_MTVEC, CSR_MEPC],
         "a second write must not add a second entry"
     );
@@ -1382,10 +1453,18 @@ fn a_write_to_misa_does_not_change_what_it_reads_back() {
 
 /// ⚠️ **`misa` 不落在 CSR 文件里** —— 它是**算出来的**。
 ///
-/// 理由：`SimState::csrs` 为空 ⇒ 会话快照的**「空」判定**
-/// （`EngineSnapshotDto::is_empty`：没有寄存器写入、**没有 CSR**、
-/// 没有 pending 写、虚拟时钟为零）仍然成立。若把 `misa` 预置进文件，
-/// 一个**只读了一次 `misa`** 的 guest 就不再是「空」的了。
+/// 理由：`SimState::csrs` 里**没有** `misa` ⇒ ⇒ 一个**只读了一次
+/// `misa`** 的 guest 不会因此多出**一条**记录 ⇒ ⇒ 「这条 CSR 是不是被
+/// 存下来了」这条判据仍然有分辨力。
+///
+/// ⚠️ **「文件仍然是空的」这条已经不成立了** —— **Zicntr 的退休计数**
+/// （STAGE-20 裁决 F）把 `mcycle` / `minstret` 写进了同一个文件 ⇒ ⇒
+/// **任何跑过指令的 guest 的 CSR 文件都非空**。
+///
+/// ⚠️ 这**不影响**会话快照的**「空」判定**（`EngineSnapshotDto::is_empty`）：
+/// 那条判据还看 `pc == 0` 与 `virtual_time_ps == 0` ⇒ ⇒ **跑过指令的
+/// guest 早就不是「空」的了**（`pc` 已经前进）⇒ ⇒ 计数器条目**不改变**
+/// 那条判据的**结论**。
 #[test]
 fn misa_is_not_stored_in_the_csr_file() {
     let mut h = Harness::new();
@@ -1398,10 +1477,11 @@ fn misa_is_not_stored_in_the_csr_file() {
         "misa 不得进 CSR 文件 —— 实得 {:?}",
         csr_numbers(&state)
     );
+    // ⚠️ **除了计数器**，文件里不得有任何别的条目。
     assert!(
-        state.csrs.is_empty(),
-        "读一次 misa 之后 CSR 文件仍必须是空的 —— 实得 {:?}",
-        state.csrs
+        csr_numbers_without_counters(&state).is_empty(),
+        "读一次 misa 之后 CSR 文件里不得有**别的**条目 —— 实得 {:?}",
+        csr_numbers(&state)
     );
 }
 
@@ -1484,8 +1564,10 @@ fn the_wfi_encoding_is_a_legal_instruction() {
     assert_eq!(csr_value(&state, CSR_MEPC), 0, "wfi 不得触发任何陷阱");
     assert_eq!(csr_value(&state, CSR_MTVAL), 0, "wfi 不得触发任何陷阱");
     // ⚠️ **CSR 文件里只许有预置的那一项** —— `wfi` 一个 CSR 都不许写。
+    // ⚠️ **计数器的条目除外** —— 那是**平台自己**的**退休计数**
+    // （STAGE-20 裁决 F），**与 `wfi` 无关**。
     assert_eq!(
-        csr_numbers(&state),
+        csr_numbers_without_counters(&state),
         vec![CSR_MTVEC],
         "wfi 不得写任何 CSR —— 实得 {:?}",
         csr_numbers(&state)
