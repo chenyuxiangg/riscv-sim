@@ -679,6 +679,32 @@ export function sameMemoryMapMetadata(a, b) {
 }
 
 /**
+ * 两份描述的**器件连线**（`wiring`）一样吗。
+ *
+ * ⚠️ **用同一个归一化函数比**（STAGE-19 · 验收 C-5 的第 2 条）：两边都过
+ * `normalizeWiringList`（**唯一落点**）⇒ ⇒ 「同样的连线、**键序不同**」
+ * **不会**被判成不同 ⇒ ⇒ 不会**假触发**整份替换 ⇒ ⇒ 「一个约束一个落点」
+ * 这条纪律在**第二处**也成立。
+ *
+ * ⚠️ **缺省 = 没有连线**：两边都缺省 ⇒ 一样；一边缺省、一边有 ⇒ 不同 ⇒ ⇒
+ * 「删掉连线」也是**改动**（也得提交得出去）。
+ *
+ * ⚠️ **列表顺序算数据的一部分**（契约层是 `Vec`）⇒ 顺序不同 ⇒ 不同 ⇒ ⇒
+ * ⚠️ 但界面**没有** `wiring` 的编辑器 ⇒ 顺序**改不了** ⇒ ⇒ 不会假触发。
+ *
+ * ⚠️ **不判合法性**：连线引用的器件存不存在、`source` 在不在范围内 ⇒ ⇒
+ * **只**由内核那一处裁决 ⇒ ⇒ 前端**不写第二个校验器**。
+ *
+ * @param {object|null|undefined} a
+ * @param {object|null|undefined} b
+ * @returns {boolean}
+ */
+export function sameWiring(a, b) {
+    return canonicalJson(normalizeWiringList(a?.wiring))
+        === canonicalJson(normalizeWiringList(b?.wiring));
+}
+
+/**
  * 运行期上界（`max_region_bytes`）的**归一化值**。
  *
  * ⚠️ **缺省与 `null` 是同一件事**（契约层：`None` ⇒ 等于声明期那个）
@@ -765,6 +791,11 @@ export function diffMemoryMapOps(baseDescription, draftDescription) {
  * ⚠️ **差量为空**（什么都没改）⇒ `mode = "none"` ⇒ 前端**不发命令**
  * ⇒ 免得白涨一次修订号。
  *
+ * ⚠️ **`wiring` 变了 ⇒ 也走**整份**（STAGE-19 §9 第 1 条 · 验收 C-5）：
+ * 差量契约里**没有** `wiring` 操作 ⇒ ⇒ 差量路径**表达不了** ⇒ ⇒ 「元数据
+ * 变了 ⇒ **整份**」这条判据**同样**管 `wiring` ⇒ ⇒ `wiring` 的改动**必须**
+ * 能提交出去。
+ *
  * @param {object|null|undefined} baseDescription — **当前生效的图**
  * @param {object|null|undefined} draftDescription — 草稿转成的线上描述
  * @returns {{mode: "replace"|"patch"|"none", ops: Array<object>}}
@@ -772,6 +803,16 @@ export function diffMemoryMapOps(baseDescription, draftDescription) {
 export function planMemoryMapUpdate(baseDescription, draftDescription) {
     if (!baseDescription) return { mode: "replace", ops: [] };
     if (!sameMemoryMapMetadata(baseDescription, draftDescription)) {
+        return { mode: "replace", ops: [] };
+    }
+    // ⚠️ **`wiring` 变了 ⇒ 也走**整份**（STAGE-19 §9 第 1 条 · 验收 C-5）：
+    // 差量契约里**没有** `wiring` 操作 ⇒ ⇒ 差量路径**表达不了** ⇒ ⇒
+    // 「元数据变了 ⇒ **整份**」这条判据**同样**管 `wiring` ⇒ ⇒ `wiring` 的
+    // 改动**必须**能提交出去（否则它**永远**提交不出去）。
+    //
+    // ⚠️ **同一个归一化函数**（`sameWiring` ⇒ `normalizeWiringList`）⇒ ⇒
+    // 「同样的连线、键序不同」**不**算改动 ⇒ ⇒ 不会假触发整份替换。
+    if (!sameWiring(baseDescription, draftDescription)) {
         return { mode: "replace", ops: [] };
     }
     const ops = diffMemoryMapOps(baseDescription, draftDescription);
