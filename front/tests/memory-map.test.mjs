@@ -637,6 +637,92 @@ describe("板级内存图 · 描述形状（契约逐字同形）", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 整合批（v0.31）—— 真内核回传的描述**多一个键**时，差量路径不许退化
+// ---------------------------------------------------------------------------
+
+describe("整合批 · 真内核的八字段描述 vs 前端的七字段草稿", () => {
+    /**
+     * 真内核回传的那份描述 —— serde **恒定写出** `max_region_bytes`
+     * （契约层钉死了顶层键集：八个）⇒ **八个顶层键**。
+     *
+     * ⚠️ 这一份**不是**从被测实现反推的：它是「契约层序列化出来的形状」
+     * 的手写副本（键名与值都写死）。
+     */
+    const KERNEL_SHAPED = {
+        schema_version: 1,
+        id: "custom",
+        name: "自定义板",
+        priority: 100,
+        auto_selectable: false,
+        region_budget_bytes: 8388608,
+        max_region_bytes: null,
+        regions: [{ kind: "ram", base: 2147483648, size: 8388608 }],
+    };
+
+    test("前端提交的描述**不带** `max_region_bytes`（裁决 L：只暴露一个预算旋钮）", () => {
+        const description = mm.draftToDescription(mm.defaultDraft());
+        assert.equal(
+            Object.prototype.hasOwnProperty.call(description, "max_region_bytes"),
+            false,
+            "前端的线上描述**没有**这个键（缺省 ⇒ 内核按 `None` 处理）",
+        );
+    });
+
+    test("基底多一个 `max_region_bytes: null` ⇒ **不**被判成整份替换", () => {
+        // ⚠️ 这一条是**真内核**那一侧的形状 ⇒ 假内核回传的是七字段
+        // ⇒ 没有这条用例，归一化被删掉也**没人会发现**。
+        const draftDescription = mm.draftToDescription(mm.defaultDraft());
+        const plan = mm.planMemoryMapUpdate(KERNEL_SHAPED, draftDescription);
+        assert.notEqual(
+            plan.mode,
+            "replace",
+            "缺省与 null 是同一件事 ⇒ 不能被判成整份替换",
+        );
+        assert.equal(plan.mode, "none", "什么都没改 ⇒ 不发命令");
+    });
+
+    test("基底多一个 `max_region_bytes: null` ⇒ 改一段仍然走 **patch**（载荷只有一个 op）", () => {
+        // ⚠️ 这是**真内核**那一侧最要紧的一条：改了段 ⇒ 必须是差量，
+        // 且载荷里**只有**那一段（验收 C-3 的形状，但基底是八个键）。
+        const draft = mm.cloneDraft(mm.defaultDraft());
+        draft.regions = [{ kind: "ram", base: "2147483648", size: "4194304" }];
+        const draftDescription = mm.draftToDescription(draft);
+        const plan = mm.planMemoryMapUpdate(KERNEL_SHAPED, draftDescription);
+        assert.equal(plan.mode, "patch", `差量路径必须还在（实际是 ${plan.mode}）`);
+        assert.deepEqual(
+            plan.ops.map((op) => Object.keys(op)[0]),
+            ["UpsertRegion"],
+            "载荷里**只有**那一段（不能混进别的 op）",
+        );
+    });
+
+    test("基底多一个 `max_region_bytes: null` ⇒ **不产生**多余的 `SetBudget`", () => {
+        const draftDescription = mm.draftToDescription(mm.defaultDraft());
+        const ops = mm.diffMemoryMapOps(KERNEL_SHAPED, draftDescription);
+        assert.deepEqual(
+            ops.filter((op) => "SetBudget" in op),
+            [],
+            "预算没改 ⇒ 不该有 `SetBudget`（否则每次提交都白涨一次修订号）",
+        );
+    });
+
+    test("基底带**真值**的 `max_region_bytes` ⇒ 必须产生 `SetBudget`（不许静默忽略）", () => {
+        // ⚠️ 这一条是上面那条的**反面**：让「缺省 ≡ null」与「真值」不等价
+        // ⇒ 运行期上界的变化**看得见**（而不是被当成没变）。
+        const base = { ...KERNEL_SHAPED, max_region_bytes: 4096 };
+        const draftDescription = mm.draftToDescription(mm.defaultDraft());
+        const ops = mm.diffMemoryMapOps(base, draftDescription);
+        const budgets = ops.filter((op) => "SetBudget" in op);
+        assert.equal(budgets.length, 1, "运行期上界变了 ⇒ 必须有一条 `SetBudget`");
+        assert.deepEqual(
+            budgets[0].SetBudget,
+            { region_budget_bytes: 8388608, max_region_bytes: null },
+            "`SetBudget` 两个字段都要带上（验收 C-5）",
+        );
+    });
+});
+
+// ---------------------------------------------------------------------------
 // 第 13 批（STAGE-15 · v0.30）· Lane C —— 板档案 + 多板并存（D-136 / D-140）
 //
 // 本套件盯住验收 C-1 ~ C-10：
