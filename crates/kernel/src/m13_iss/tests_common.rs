@@ -24,6 +24,91 @@ use super::executor::StepOutcome;
 use super::Iss;
 
 // ---------------------------------------------------------------------------
+// CSR encodings
+// ---------------------------------------------------------------------------
+//
+// ⚠️ **These live here, not in one test file** (STAGE-21): the PMP tests and
+// the counter tests both need them ⇒ ⇒ one copy ⇒ ⇒ the two files cannot
+// drift apart.
+
+/// `CSRRW`（`funct3 == 0b001`）。
+pub(super) const F_CSRRW: u8 = 0b001;
+/// `CSRRS`（`funct3 == 0b010`）—— **纯读**用的就是它（`rs1 == x0`）。
+pub(super) const F_CSRRS: u8 = 0b010;
+/// `CSRRC`（`funct3 == 0b011`）。
+pub(super) const F_CSRRC: u8 = 0b011;
+/// `CSRRWI`（`funct3 == 0b101`）。
+pub(super) const F_CSRRWI: u8 = 0b101;
+/// `CSRRSI`（`funct3 == 0b110`）。
+pub(super) const F_CSRRSI: u8 = 0b110;
+/// `CSRRCI`（`funct3 == 0b111`）。
+pub(super) const F_CSRRCI: u8 = 0b111;
+
+/// Encode a CSR instruction.
+///
+/// The CSR number lives in bits 31:20 — the same field the ECALL / EBREAK
+/// immediate occupies — and the `rs1` field (bits 19:15) is the source
+/// operand (a register for the register forms, a 5-bit immediate for the
+/// immediate forms).
+pub(super) fn csr_insn(csr: u16, rs1: u8, funct3: u8, rd: u8) -> u32 {
+    enc_i(csr as i32, rs1, funct3, rd, SYSTEM)
+}
+
+/// `csrr <rd>, <csr>` —— a **pure read**.
+///
+/// ⚠️ It is `csrrs rd, csr, x0`, **not** `csrrw`: `csrrw` with `rs1 == x0`
+/// **writes** the CSR (writing zero into it!) ⇒ ⇒ 拿它读计数器会把计数器
+/// **清零** ⇒ ⇒ 而 `csrrs` with `rs1 == x0` 是规范定义的**纯读**
+/// （不写 ⇒ ⇒ 也不触发「写计数器抑制 +1」那条规则）。
+pub(super) fn csrr(csr: u16, rd: u8) -> u32 {
+    csr_insn(csr, 0, F_CSRRS, rd)
+}
+
+/// `csrw <csr>, <rs1>` —— a **write** with no read-back.
+pub(super) fn csrw(csr: u16, rs1: u8) -> u32 {
+    csr_insn(csr, rs1, F_CSRRW, 0)
+}
+
+/// `csrrs <rd>, <csr>, <rs1>` —— set bits from a register.
+pub(super) fn csrrs(csr: u16, rs1: u8, rd: u8) -> u32 {
+    csr_insn(csr, rs1, F_CSRRS, rd)
+}
+
+/// `csrrc <rd>, <csr>, <rs1>` —— clear bits with a register.
+pub(super) fn csrrc(csr: u16, rs1: u8, rd: u8) -> u32 {
+    csr_insn(csr, rs1, F_CSRRC, rd)
+}
+
+/// `csrrsi <rd>, <csr>, <imm>` —— set bits with a 5-bit immediate.
+pub(super) fn csrrsi(csr: u16, imm: u8, rd: u8) -> u32 {
+    csr_insn(csr, imm, F_CSRRSI, rd)
+}
+
+/// `csrwi <csr>, <imm>` —— a write with a 5-bit immediate.
+pub(super) fn csrwi(csr: u16, imm: u8) -> u32 {
+    csr_insn(csr, imm, F_CSRRWI, 0)
+}
+
+/// `csrci <csr>, <imm>` — the form upstream `rv32mi/instret_overflow` uses
+/// on `mcountinhibit`.
+pub(super) fn csrci(csr: u16, imm: u8) -> u32 {
+    csr_insn(csr, imm, F_CSRRCI, 0)
+}
+
+/// The address the test programs live at.
+pub(super) const BASE: u32 = 0x1000;
+
+/// `addi x0, x0, 0` —— the canonical `nop`.
+pub(super) fn nop() -> u32 {
+    enc_i(0, 0, 0b000, 0, OP_IMM)
+}
+
+/// `ecall` — the environment call.
+pub(super) fn ecall() -> u32 {
+    enc_i(0, 0, 0b000, 0, SYSTEM)
+}
+
+// ---------------------------------------------------------------------------
 // Instruction encoders
 // ---------------------------------------------------------------------------
 
