@@ -1794,6 +1794,41 @@ mod tests {
         assert!(desc.validate().is_ok(), "irq_line 15 必须被接受");
     }
 
+    /// **STAGE-15 A-6 / V-15** — with **two** PLICs (16 and 64 sources), a
+    /// UART whose `irq_line` is **20** is rejected with `E_PLT-12`.
+    ///
+    /// ⚠️ **这条用例钉的是「取最小的 `sources`」这个语义**，不是单块 PLIC 的
+    /// 越界（那条已由上一条用例钉住）。规格 §2.7 写的是「`irq_line` 必须
+    /// `< min(所有 plic.sources)`」⇒ **保守**取法：这条中断线要对**每一个**
+    /// PLIC 都合法。
+    ///
+    /// ⚠️ **没有它会怎样**：把实现里的 `min()` 改成 `max()` ⇒ 上面那条
+    /// 「单块 PLIC」的用例**照样绿**（只有一块 PLIC 时 `min` 与 `max` 相同）
+    /// ⇒ **规则被悄悄放松**（ irq_line 20 在 64 源的 PLIC 上合法、在 16 源
+    /// 的那个上**不合法** ⇒ guest 永远收不到这条中断）⇒ **判别力缺口**。
+    /// ⇒ 本条是**统筹方在收口阶段补的**（实测发现的缺口，见 §9.4）。
+    #[test]
+    fn v15_the_irq_line_must_be_legal_for_every_plic_in_the_map() {
+        let desc = board_with(vec![
+            DeviceSpec::Plic {
+                id: "PLIC_SMALL".to_string(),
+                sources: 16,
+                contexts: 16,
+            },
+            DeviceSpec::Plic {
+                id: "PLIC_BIG".to_string(),
+                sources: 64,
+                contexts: 16,
+            },
+            DeviceSpec::Uart16550 {
+                id: "UART0".to_string(),
+                irq_line: 20,
+                baud_rate: 115_200,
+            },
+        ]);
+        assert_parameter_out_of_range(&desc, "在最小那个 PLIC 上越界的中断线");
+    }
+
     /// **STAGE-15 A-6 / V-15** — with a PLIC of **16 sources**, a UART
     /// whose `irq_line` is **16** — one past the highest legal id — is
     /// rejected with `E_PLT-12`.
