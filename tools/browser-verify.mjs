@@ -215,7 +215,10 @@ async function runSection(name, fn) {
  * `JSON.stringify` 比较两个「内容相同但键序不同」的对象会判不等 ⇒ ⇒
  * 字段顺序**不进判据**（顺序是**线上形状**的事，不是**图的内容**的事）。
  *
- * ⚠️ **数组的顺序仍然进判据**（段的顺序是内容的一部分）。
+ * ⚠️ **数组的顺序仍然进判据**（一般值如此）⇒ ⇒ ⚠️ **但内存图的段列表另有口径**
+ * ⇒ ⇒ 见 {@link canonicalMemoryMap}（裁决 B：**`regions` 按基址排序**）⇒ ⇒
+ * 「两条路径产出的图必须一致」这条判据在**两层**（宿主层 + 工具层）必须是
+ * **同一个**口径 ⇒ ⇒ 否则两层会给出**不同的**判决。
  *
  * @param {unknown} value
  * @returns {string}
@@ -231,6 +234,40 @@ function canonicalJson(value) {
         return v;
     };
     return JSON.stringify(canon(value));
+}
+
+/**
+ * The canonical JSON of a **memory-map description**（裁决 B）。
+ *
+ * ⚠️ **两处**归一化：① **对象键**递归排序（键序不进判据）② **`regions`
+ * 按基址排序**（段的**列表顺序**也是**线上形状**的事，不是**图的内容**的事）。
+ *
+ * ⚠️ **为什么必须归一化列表顺序**：整份路径保留**调用方给的顺序**，差量路径
+ * 保留**基座的顺序**（命中**原地替换** / 未命中**末尾追加**）⇒ ⇒ 同一组改动
+ * 在两条路径上的**列表顺序天然不同**⇒ ⇒ 不归一化 ⇒ 真机层（T-4）会因
+ * 「同图不同序」**假红**。
+ *
+ * ⚠️ **与宿主层同一个口径** ⇒ ⇒ 宿主层的等价性用例（`crates/kernel/src/
+ * kernel_host/tests_board_delta_equivalence.rs`）用的也是「键序无关 +
+ * `regions` 按基址排序」⇒ ⇒ 两层的判决**必须一致** ⇒ ⇒ 否则一层绿、另一层
+ * 红，两边都说不清是哪儿错了。
+ *
+ * @param {unknown} description — a `PlatformDescription`（线上形状）
+ * @returns {string}
+ */
+function canonicalMemoryMap(description) {
+    if (!description || typeof description !== "object") {
+        return canonicalJson(description);
+    }
+    const copy = { ...description };
+    if (Array.isArray(copy.regions)) {
+        copy.regions = [...copy.regions].sort((a, b) => {
+            const ab = Number(a?.base ?? 0);
+            const bb = Number(b?.base ?? 0);
+            return ab === bb ? 0 : ab - bb;
+        });
+    }
+    return canonicalJson(copy);
 }
 
 /**
@@ -2262,8 +2299,8 @@ async function runBoardDeltaSection(cdp, opts) {
         }
         await sleep(200);
     }
-    const e1Canonical = canonicalJson(e1?.description ?? null);
-    const e2Canonical = canonicalJson(e2?.description ?? null);
+    const e1Canonical = canonicalMemoryMap(e1?.description ?? null);
+    const e2Canonical = canonicalMemoryMap(e2?.description ?? null);
     const wholeErr = await awaitEval(cdp, BV_LAST_ERROR_EVENT_EXPRESSION);
     add(
         "T-4：差量路径与整份路径的**生效图逐字段相同**（规范 JSON · 键序无关）",
@@ -2272,13 +2309,13 @@ async function runBoardDeltaSection(cdp, opts) {
             ? `E1 ${e1Canonical.length} 字节 / E2 ${e2Canonical.length} 字节 ⇒ ${e1Canonical === e2Canonical ? "相同" : "**不同**"}`
             : `整份路径没回来（内核没回事件？内核最后的错误：`
               + `${JSON.stringify(wholeErr ?? null)}；送出去的描述：`
-              + `${draftDescription ? `${canonicalJson(draftDescription).length} 字节` : "**没捕到提交命令**"}）`,
+              + `${draftDescription ? `${canonicalMemoryMap(draftDescription).length} 字节` : "**没捕到提交命令**"}）`,
     );
     add(
         "T-4：生效图与**改动前**那张**不相同**（⇒ 差量**真的**生效了，不是两边都没变）",
-        canonicalJson(e0?.description ?? null) !== e1Canonical
-            && canonicalJson(e0?.description ?? null) !== "null",
-        `改动前 ${canonicalJson(e0?.description ?? null).length} 字节 vs 改动后 ${e1Canonical.length} 字节`,
+        canonicalMemoryMap(e0?.description ?? null) !== e1Canonical
+            && canonicalMemoryMap(e0?.description ?? null) !== "null",
+        `改动前 ${canonicalMemoryMap(e0?.description ?? null).length} 字节 vs 改动后 ${e1Canonical.length} 字节`,
     );
 
     // -- ⑦ 刷新页面 ⇒ 重新引导成功 + **板档案还在**（回归守卫） --------------
