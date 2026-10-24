@@ -2228,6 +2228,12 @@ impl KernelHost {
     /// （V-6 重叠检查、V-7 预算都在其中）。
     ///
     /// ⚠️ **按 `base` 定位 ⇒ 与数组顺序无关**（台账判别力 ③）。
+    ///
+    /// ⚠️ **v0.32 · STAGE-17 裁决 A**：第 ② 步的合成已剥成**纯函数**
+    /// [`compose_memory_map`] ⇒ 它**只读** `self.platform` + **只写**返回值
+    /// ⇒ ⇒ 「合成期间不碰任何状态」这条既有语义**一字不改** ⇒ ⇒ 而「两条
+    /// 路径产出的图必须一致」这条承诺从此有了一条**可执行的断言**
+    /// （`tests_board_delta_equivalence.rs` · B-1 ~ B-7）。
     fn on_patch_memory_map(
         &mut self,
         ops: Vec<MemoryMapOp>,
@@ -2238,55 +2244,22 @@ impl KernelHost {
             return vec![self.error_from(&err)];
         }
 
-        // ---- ② 合成整图（**副本** ⇒ 合成期间不碰任何状态）----
+        // ---- ② 合成整图（**纯函数** ⇒ 合成期间不碰任何状态）----
         //
         // ⚠️ **基底 = 当前生效的图**（`self.platform`，裁决 I）⇒ 与前端
         // 算差量的基准（最近一次 `memory.map` 事件带回来的生效图）**是同
         // 一个东西** ⇒ 不需要额外的「草稿基座」状态。
-        let mut synthesized = self.platform.clone();
-        for op in &ops {
-            match op {
-                MemoryMapOp::UpsertRegion { spec } => {
-                    // ⚠️ 按 **`spec.base`** 定位：命中 ⇒ 替换；未命中 ⇒ 追加。
-                    let base = spec.base();
-                    match synthesized
-                        .regions
-                        .iter()
-                        .position(|region| region.base() == base)
-                    {
-                        Some(index) => synthesized.regions[index] = spec.clone(),
-                        None => synthesized.regions.push(spec.clone()),
-                    }
-                }
-                MemoryMapOp::RemoveRegion { base } => {
-                    // ⚠️ 定位不到 ⇒ **明确报错**，不静默忽略（裁决 N）。
-                    match synthesized
-                        .regions
-                        .iter()
-                        .position(|region| region.base() == *base)
-                    {
-                        Some(index) => {
-                            synthesized.regions.remove(index);
-                        }
-                        None => {
-                            return vec![self.error_from(&PlatformError::new(
-                                PLATFORM_FAMILY,
-                                E_PLT_14_REGION_NOT_FOUND,
-                                format!("差量要删的那一段（基址 {base:#010x}）不在当前生效的图里"),
-                            ))];
-                        }
-                    }
-                }
-                MemoryMapOp::SetBudget {
-                    region_budget_bytes,
-                    max_region_bytes,
-                } => {
-                    // ⚠️ **两个预算字段一起改**（声明期 + 运行期）。
-                    synthesized.region_budget_bytes = *region_budget_bytes;
-                    synthesized.max_region_bytes = *max_region_bytes;
-                }
-            }
-        }
+        //
+        // ⚠️ **合成失败 ⇒ 什么都不动**（第 ② / ③ 步失败 ⇒ 宿主的图、
+        // 用户的板、修订号**三者都不变**）⇒ 只回一条 `Error` 事件。
+        //
+        // ⚠️ **校验不在纯函数里**（v0.32 · STAGE-17 裁决 A）：纯函数**不跑**
+        // `validate()` ⇒ 校验**留在第 ③ 步**（契约层那个唯一校验器）⇒
+        // ⇒ **既有语义一字不改**（裁决 M）。
+        let synthesized = match compose_memory_map(&self.platform, &ops) {
+            Ok(synthesized) => synthesized,
+            Err(err) => return vec![self.error_from(&err)],
+        };
 
         // ---- ③ 合成结果**整体**校验（契约层那个唯一校验器）----
         //
@@ -3640,6 +3613,85 @@ impl KernelHost {
 }
 
 // ---------------------------------------------------------------------------
+// 差量合成（v0.32 · STAGE-17 裁决 A · D-145）
+// ---------------------------------------------------------------------------
+
+/// **差量合成** —— 把一串差量操作施加到一张**基座**图上，返回**整图**
+/// （v0.32 · STAGE-17 裁决 A · **D-145** 闭环）。
+///
+/// ⚠️ **纯函数**：只读 `base` + 只写返回值 ⇒ **不碰宿主任何状态**
+/// （生效的图 / 用户的板 / 修订号 / 总线）⇒ ⇒ 合成失败 ⇒ 宿主状态
+/// **一个字都不动**。
+///
+/// ⚠️ **不进契约层**（裁决 A）：它是**宿主内部**的实现细节 ⇒ 契约层的
+/// 公开表面**一字未改** ⇒ 前端镜像**不需要**升版。
+///
+/// ⚠️ **不跑 `validate()`**：校验**留在调用点**
+/// （[`KernelHost::on_patch_memory_map`] 的第 ③ 步）⇒ ⇒ **既有语义一字
+/// 不改**（裁决 M）⇒ ⇒ 这个函数可以被**单独调用**来测「合成逻辑」。
+///
+/// ⚠️ **合成顺序与语义照搬 v0.31 的循环体**（裁决 M）：
+/// ① `UpsertRegion` —— 按 **`spec.base()`** 定位 ⇒ 命中**替换** / 未命中
+///    **追加**（⇒ 与数组顺序无关）
+/// ② `RemoveRegion` —— 定位不到 ⇒ **`E_PLT_14`**，**不静默忽略**
+/// ③ `SetBudget` —— **两个预算字段一起改**（声明期 + 运行期）
+fn compose_memory_map(
+    base: &PlatformDescription,
+    ops: &[MemoryMapOp],
+) -> Result<PlatformDescription, PlatformError> {
+    // ---- ① 复制 `base` 到工作副本（⇒ 原件一个字都不动）----
+    let mut synthesized = base.clone();
+
+    // ---- ② 逐条施加 `ops` ----
+    for op in ops {
+        match op {
+            MemoryMapOp::UpsertRegion { spec } => {
+                // ⚠️ 按 **`spec.base`** 定位：命中 ⇒ 替换；未命中 ⇒ 追加。
+                let region_base = spec.base();
+                match synthesized
+                    .regions
+                    .iter()
+                    .position(|region| region.base() == region_base)
+                {
+                    Some(index) => synthesized.regions[index] = spec.clone(),
+                    None => synthesized.regions.push(spec.clone()),
+                }
+            }
+            MemoryMapOp::RemoveRegion { base } => {
+                // ⚠️ 定位不到 ⇒ **明确报错**，不静默忽略（裁决 N）。
+                match synthesized
+                    .regions
+                    .iter()
+                    .position(|region| region.base() == *base)
+                {
+                    Some(index) => {
+                        synthesized.regions.remove(index);
+                    }
+                    None => {
+                        return Err(PlatformError::new(
+                            PLATFORM_FAMILY,
+                            E_PLT_14_REGION_NOT_FOUND,
+                            format!("差量要删的那一段（基址 {base:#010x}）不在当前生效的图里"),
+                        ));
+                    }
+                }
+            }
+            MemoryMapOp::SetBudget {
+                region_budget_bytes,
+                max_region_bytes,
+            } => {
+                // ⚠️ **两个预算字段一起改**（声明期 + 运行期）。
+                synthesized.region_budget_bytes = *region_budget_bytes;
+                synthesized.max_region_bytes = *max_region_bytes;
+            }
+        }
+    }
+
+    // ---- ③ 返回工作副本 ----
+    Ok(synthesized)
+}
+
+// ---------------------------------------------------------------------------
 // 契约 v3 调试面的自由函数
 // ---------------------------------------------------------------------------
 
@@ -3804,6 +3856,14 @@ mod tests_board_memory_map;
 /// 「既有断言一条不改」这件事由 `git diff` **一眼可见**。
 #[cfg(test)]
 mod tests_board_delta_unload;
+
+/// 板级内存图 · **差量与整份两条路径的等价性**（v0.32 · STAGE-17 · 验收
+/// B-1 ~ B-7 · 台账 **D-145** 闭环）。
+///
+/// ⚠️ 与 [`tests_board_delta_unload`]（v0.31 的那批）**分开一个文件** ⇒
+/// 「纯函数化是**等价重构**」由「那边**一条不改**仍绿」**证明**。
+#[cfg(test)]
+mod tests_board_delta_equivalence;
 
 /// 宿主看门狗（v0.28 · 台账 **D-115** · 冻结规格 STAGE-13 §3.3）。
 ///
