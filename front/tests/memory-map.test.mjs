@@ -615,3 +615,479 @@ describe("板级内存图 · 描述形状（契约逐字同形）", () => {
         );
     });
 });
+
+// ---------------------------------------------------------------------------
+// 第 13 批（STAGE-15 · v0.30）· Lane C —— 板档案 + 多板并存（D-136 / D-140）
+//
+// 本套件盯住验收 C-1 ~ C-10：
+//
+//   C-1 板档案表渲染出**每块板**的名字与 `id`（按 `data-*` 判，不靠文案）
+//   C-2 「保存当前板」⇒ 档案里**多一块**；「另存为」⇒ 多一块且旧块仍在
+//   C-3 「选用」⇒ 草稿被**载入**（逐字段相同）⇒ **内核状态不变**
+//   C-4 编辑已有板时 `id` 输入框**只读**（改 `id` 的入口不存在）
+//   C-5 另存为给**已存在**的 `id` ⇒ **拒**并明说
+//   C-6 删除一块板 ⇒ 其余板**不受影响**；被删的从档案里消失
+//   C-7 草稿**未被内核接受过** ⇒ 「保存 / 另存为」**禁用**并明说「先提交」
+//   C-8 提交**成功后** ⇒ 「保存 / 另存为」**解禁**
+//   C-9 提交**失败**（`E_PLT-12`）⇒ 错误**如实显示** ⇒ **不落库**
+//   C-10 持久化不可用 ⇒ 界面**显式**提示「板档案只存在于本会话」
+//
+// ⚠️ **板档案服务（M-23）是 Lane B 的产出**（规格 §3.3 冻结了 API 形状）
+// ⇒ 本文件用**受保护的动态导入**：它缺席时**只有**下面这批新用例红（并说清
+// 原因），既有用例一条不受影响 ⇒ 统筹方把 B 合进来之后重跑即可。
+// ---------------------------------------------------------------------------
+
+let boardStoreApi = null;
+let boardStoreImportError = null;
+try {
+    boardStoreApi = await importFront("services/m23_boardstore.js");
+} catch (err) {
+    boardStoreImportError = err;
+}
+
+/**
+ * 取板档案服务（缺席 ⇒ **明确失败**，不静默跳过 ⇒ 不会「假绿」）。
+ *
+ * @returns {object}
+ */
+function requireBoardStoreApi() {
+    if (!boardStoreApi) {
+        throw new Error(
+            "板档案服务（front/services/m23_boardstore.js）尚未并入"
+            + "（Lane B 的产出）⇒ 本批视图层用例无法运行"
+            + (boardStoreImportError ? `：${boardStoreImportError.message}` : ""),
+        );
+    }
+    return boardStoreApi;
+}
+
+/**
+ * 一套**内存后端**的板档案存储（走服务层的冻结 API）。
+ *
+ * @returns {object}
+ */
+function memoryBoardStore() {
+    const api = requireBoardStoreApi();
+    return api.createBoardStore(api.createMemoryBackend());
+}
+
+/**
+ * 一份草稿（**字面量**，不从被测实现反推）。
+ *
+ * @param {string} id
+ * @param {string} name
+ * @returns {object}
+ */
+function customDraft(id, name) {
+    return {
+        schema_version: 1,
+        id,
+        name,
+        priority: "100",
+        auto_selectable: false,
+        region_budget_bytes: "8388608",
+        regions: [{ kind: "ram", base: "2147483648", size: "8388608" }],
+    };
+}
+
+/**
+ * 让当前草稿**被内核接受过**（走真实的提交命令）。
+ *
+ * @param {object} router
+ * @param {object} draft
+ * @returns {Promise<object>} 实际提交的描述
+ */
+async function acceptDraft(router, draft) {
+    m03.setState("memory-map", (prev) => ({ ...prev, draft }));
+    const description = mm.draftToDescription(draft);
+    await app.handleCommand(
+        { action: "submit-memory-map", params: { description } },
+        { commandRouter: router },
+    );
+    return description;
+}
+
+/**
+ * 让面板按当前视图状态重渲染一次（重入当前视图也会派发 render 事件）。
+ */
+function rerender() {
+    m01.route("#/memory-map");
+}
+
+/**
+ * 档案里的 id 列表（**按字母序** ⇒ 不依赖 `mergeBoard` 的插入顺序）。
+ *
+ * @returns {string[]}
+ */
+function archiveIds() {
+    const state = m03.getState("memory-map") ?? {};
+    const archive = Array.isArray(state.archive) ? state.archive : [];
+    return archive.map((e) => String(e.id)).sort();
+}
+
+describe("板档案与多板并存（STAGE-15 · C-1 ~ C-10）", () => {
+    test("C-1 板档案表渲染出每块板的名字与 id（按 data-* 判，不靠文案）", () => {
+        setup();
+        m03.setState("memory-map", (prev) => ({
+            ...prev,
+            archive: [
+                { id: "board-a", description: { ...USER_BOARD, id: "board-a", name: "板 A" } },
+                { id: "board-b", description: { ...USER_BOARD, id: "board-b", name: "板 B" } },
+            ],
+        }));
+        rerender();
+        const rows = $$("[data-mmap-board-row]");
+        assert.equal(rows.length, 2, "板档案表该有两行");
+        assert.deepEqual(
+            rows.map((r) => r.getAttribute("data-mmap-board-id")),
+            ["board-a", "board-b"],
+            "每块的 id 必须挂在 data-mmap-board-id 上",
+        );
+        assert.deepEqual(
+            rows.map((r) => r.getAttribute("data-mmap-board-name")),
+            ["板 A", "板 B"],
+            "每块的板名必须挂在 data-mmap-board-name 上",
+        );
+        assert.ok($("[data-mmap-archive]"), "没有板档案表");
+    });
+
+    test("C-2 「保存当前板」⇒ 档案里多一块（键 = 草稿的 id）", async () => {
+        setup();
+        const router = fakeKernel();
+        const store = memoryBoardStore();
+        await acceptDraft(router, customDraft("saved-board", "保存的板"));
+        await app.handleCommand(
+            { action: "save-memory-map" },
+            { commandRouter: router, boardStore: store },
+        );
+        assert.deepEqual(archiveIds(), ["saved-board"], "档案里该多出这一块板");
+        const stored = await store.list();
+        assert.deepEqual(
+            stored.map((e) => String(e.id)),
+            ["saved-board"],
+            "板必须真的落库（不是只改了界面上的数组）",
+        );
+        rerender();
+        assert.equal($$("[data-mmap-board-row]").length, 1, "面板上要看得见这一块板");
+    });
+
+    test("C-2 「另存为」给新 id ⇒ 多一块且旧块仍在", async () => {
+        setup();
+        const router = fakeKernel();
+        const store = memoryBoardStore();
+        const services = { commandRouter: router, boardStore: store };
+        await acceptDraft(router, customDraft("saved-board", "保存的板"));
+        await app.handleCommand({ action: "save-memory-map" }, services);
+        await app.handleCommand(
+            { action: "save-memory-map-as", params: { id: "copy-board", name: "副本" } },
+            services,
+        );
+        assert.deepEqual(
+            archiveIds(),
+            ["copy-board", "saved-board"],
+            "另存为要多一块，旧块仍在",
+        );
+        const stored = await store.list();
+        assert.deepEqual(
+            stored.map((e) => String(e.id)).sort(),
+            ["copy-board", "saved-board"],
+            "两块板都要落库",
+        );
+    });
+
+    test("C-3 「选用」某块板 ⇒ 草稿被载入（逐字段相同）⇒ 内核状态不变", async () => {
+        setup();
+        const router = fakeKernel();
+        const store = memoryBoardStore();
+        const services = { commandRouter: router, boardStore: store };
+        await acceptDraft(router, customDraft("saved-board", "保存的板"));
+        await app.handleCommand({ action: "save-memory-map" }, services);
+        const sentBefore = router.sent.length;
+        await app.handleCommand(
+            { action: "select-memory-map", params: { id: "saved-board" } },
+            services,
+        );
+        assert.equal(
+            router.sent.length, sentBefore,
+            "「选用」不许发任何内核命令（内核状态不变）",
+        );
+        const state = m03.getState("memory-map");
+        assert.equal(state.selectedId, "saved-board", "选中的板 id 要跟着变");
+        const loaded = mm.draftToDescription(state.draft);
+        const archived = state.archive.find((e) => e.id === "saved-board").description;
+        assert.ok(
+            mm.sameDescription(loaded, archived),
+            "载入的草稿必须与档案里那份**逐字段相同**",
+        );
+    });
+
+    test("C-4 选中已有板 ⇒ id 输入框只读（改 id 的入口不存在）", async () => {
+        setup();
+        const router = fakeKernel();
+        const store = memoryBoardStore();
+        const services = { commandRouter: router, boardStore: store };
+        await acceptDraft(router, customDraft("saved-board", "保存的板"));
+        await app.handleCommand({ action: "save-memory-map" }, services);
+        rerender();
+        const input = $("[data-mmap-field='id']");
+        assert.ok(input, "没有板 id 输入框");
+        assert.equal(input.hasAttribute("readonly"), true, "已有板的 id 必须只读");
+        // 新板（没选中档案里的一块）⇒ id **可编辑**（否则新板起不了名）。
+        m03.setState("memory-map", (prev) => ({ ...prev, selectedId: null }));
+        rerender();
+        assert.equal(
+            $("[data-mmap-field='id']").hasAttribute("readonly"), false,
+            "新板的 id 必须可编辑",
+        );
+    });
+
+    test("C-5 另存为用已存在的 id ⇒ 拒绝并明说", async () => {
+        setup();
+        const router = fakeKernel();
+        const store = memoryBoardStore();
+        const services = { commandRouter: router, boardStore: store };
+        await acceptDraft(router, customDraft("saved-board", "保存的板"));
+        await app.handleCommand({ action: "save-memory-map" }, services);
+        await app.handleCommand(
+            { action: "save-memory-map-as", params: { id: "saved-board", name: "重名" } },
+            services,
+        );
+        assert.deepEqual(archiveIds(), ["saved-board"], "被拒绝的另存为不许落库");
+        const note = dom.document.getElementById("kernel-note").textContent;
+        assert.ok(note.includes("已被占用"), `必须明说为什么拒绝：${note}`);
+    });
+
+    test("C-6 删除一块板 ⇒ 其余板不受影响，被删的从档案里消失", async () => {
+        setup();
+        const router = fakeKernel();
+        const store = memoryBoardStore();
+        const services = { commandRouter: router, boardStore: store };
+        await acceptDraft(router, customDraft("saved-board", "保存的板"));
+        await app.handleCommand({ action: "save-memory-map" }, services);
+        await app.handleCommand(
+            { action: "save-memory-map-as", params: { id: "copy-board", name: "副本" } },
+            services,
+        );
+        await app.handleCommand(
+            { action: "delete-memory-map", params: { id: "copy-board" } },
+            services,
+        );
+        assert.deepEqual(
+            archiveIds(),
+            ["saved-board"],
+            "被删的那块要从档案里消失，其余板不受影响",
+        );
+        const stored = await store.list();
+        assert.deepEqual(
+            stored.map((e) => String(e.id)),
+            ["saved-board"],
+            "持久化层也要删掉（不然刷新后它又回来了）",
+        );
+        rerender();
+        const rows = $$("[data-mmap-board-row]");
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0].getAttribute("data-mmap-board-id"), "saved-board");
+    });
+
+    test("C-7 草稿没被内核接受过 ⇒ 「保存 / 另存为」禁用并明说「先提交」", () => {
+        setup();
+        const save = $("[data-action='save-memory-map']");
+        const saveAs = $("[data-action='save-memory-map-as']");
+        assert.ok(save && saveAs, "板档案工具条上的按钮不在");
+        assert.equal(save.hasAttribute("disabled"), true, "没被接受过就不许保存");
+        assert.equal(saveAs.hasAttribute("disabled"), true, "没被接受过就不许另存为");
+        const validated = $("[data-mmap-validated]");
+        assert.ok(validated, "没有校验状态");
+        assert.equal(validated.getAttribute("data-mmap-validated"), "0");
+        assert.ok(validated.textContent.includes("先提交"), "必须明说「先提交」");
+    });
+
+    test("C-8 提交成功后 ⇒ 「保存 / 另存为」解禁", async () => {
+        setup();
+        const router = fakeKernel();
+        await acceptDraft(router, customDraft("saved-board", "保存的板"));
+        assert.equal(
+            $("[data-mmap-validated]").getAttribute("data-mmap-validated"), "1",
+            "提交成功后校验状态必须变成「已接受」",
+        );
+        assert.equal(
+            $("[data-action='save-memory-map']").hasAttribute("disabled"), false,
+            "提交成功后「保存当前板」必须解禁",
+        );
+        assert.equal(
+            $("[data-action='save-memory-map-as']").hasAttribute("disabled"), false,
+            "提交成功后「另存为板」必须解禁",
+        );
+    });
+
+    test("C-9 提交失败（E_PLT-12）⇒ 错误如实显示 ⇒ 不落库", async () => {
+        setup();
+        const router = fakeKernel({
+            rejectSetMemoryMap: message.protocolError(
+                "E_PLT-12",
+                "器件参数 baud_rate 不在合法取值域内",
+            ),
+        });
+        await app.handleCommand(
+            { action: "submit-memory-map", params: { description: USER_BOARD } },
+            { commandRouter: router },
+        );
+        const box = $("[data-memory-map-error]");
+        assert.ok(box, "面板上没有错误块");
+        assert.equal(box.getAttribute("data-error-code"), "E_PLT-12");
+        assert.equal(box.getAttribute("data-error-family"), "PLT", "族必须是 PLT");
+        assert.equal(box.getAttribute("data-error-scenario"), "12");
+        assert.ok(box.textContent.includes("E_PLT-12"), "错误块里必须能看到错误码");
+        assert.ok(
+            box.textContent.includes("合法取值域"),
+            `错误块里必须能看到内核给的消息：${box.textContent}`,
+        );
+        // ⚠️ **不落库**：失败时 `acceptedDescription` 不动 ⇒ 保存仍然禁用。
+        assert.equal(m03.getState("memory-map").acceptedDescription, null);
+        assert.equal(
+            $("[data-action='save-memory-map']").hasAttribute("disabled"), true,
+            "提交失败后仍然不许保存",
+        );
+        assert.deepEqual(archiveIds(), [], "失败的提交不许落库");
+    });
+
+    test("落库门槛：草稿没被内核接受过 ⇒ 「保存 / 另存为」都被拒绝（档案不变）", async () => {
+        setup();
+        const router = fakeKernel();
+        const store = memoryBoardStore();
+        const services = { commandRouter: router, boardStore: store };
+        // ⚠️ **不提交** ⇒ 草稿没被内核接受过 ⇒ 前端**不许**落库
+        // （STAGE-15 裁决 B：库里不许有永远装不上的板）。
+        m03.setState("memory-map", (prev) => ({
+            ...prev,
+            draft: customDraft("never-accepted", "没提交过的板"),
+        }));
+        await app.handleCommand({ action: "save-memory-map" }, services);
+        await app.handleCommand(
+            { action: "save-memory-map-as", params: { id: "copy-never", name: "副本" } },
+            services,
+        );
+        assert.deepEqual(archiveIds(), [], "没被内核接受过的描述不许落库");
+        const stored = await store.list();
+        assert.deepEqual(
+            stored.map((e) => String(e.id)),
+            [],
+            "持久化层也不许落库（不只是界面上的数组没变）",
+        );
+        const note = dom.document.getElementById("kernel-note").textContent;
+        assert.ok(note.includes("先提交"), `必须明说「先提交」：${note}`);
+    });
+
+    test("C-10 没有持久化存储 ⇒ 界面显式提示「板档案只存在于本会话」", async () => {
+        setup();
+        const router = fakeKernel();
+        await acceptDraft(router, customDraft("saved-board", "保存的板"));
+        // ⚠️ **不给** `boardStore` ⇒ 没有持久化存储（等价于「浏览器不支持
+        // IndexedDB」）⇒ 必须**显式**降级，不静默假装成功。
+        await app.handleCommand({ action: "save-memory-map" }, { commandRouter: router });
+        const status = $("[data-mmap-archive-status]");
+        assert.ok(status, "没有持久化状态");
+        assert.equal(
+            status.getAttribute("data-mmap-archive-status"), "unsupported",
+            "持久化不可用时状态必须是 unsupported",
+        );
+        assert.ok(
+            status.textContent.includes("板档案只存在于本会话"),
+            `必须明说「板档案只存在于本会话」：${status.textContent}`,
+        );
+    });
+
+    test("「已被内核接受」是**推导量**：改了草稿就自动失效", async () => {
+        setup();
+        const router = fakeKernel();
+        const draft = customDraft("saved-board", "保存的板");
+        await acceptDraft(router, draft);
+        assert.equal($("[data-mmap-validated]").getAttribute("data-mmap-validated"), "1");
+        // 改一笔草稿 ⇒ 推导量自动变假（**不靠**手工清标志）。
+        m03.setState("memory-map", (prev) => ({
+            ...prev,
+            draft: { ...draft, name: "改过的板" },
+        }));
+        rerender();
+        assert.equal(
+            $("[data-mmap-validated]").getAttribute("data-mmap-validated"), "0",
+            "草稿一改，「已被内核接受」就必须自动失效",
+        );
+        assert.equal(
+            $("[data-action='save-memory-map']").hasAttribute("disabled"), true,
+            "草稿一改就不许保存（落库门槛）",
+        );
+    });
+
+    test("「另存为」按钮读面板上的两个输入框（不用 prompt）", async () => {
+        setup();
+        const router = fakeKernel();
+        // ⚠️ 按钮在被接受前是 `disabled` ⇒ 真浏览器里点不动 ⇒ 先让它解禁。
+        await acceptDraft(router, customDraft("saved-board", "保存的板"));
+        const idInput = $("[data-mmap-new-id]");
+        const nameInput = $("[data-mmap-new-name]");
+        assert.ok(idInput, "没有新板 id 输入框");
+        assert.ok(nameInput, "没有新板名输入框");
+        idInput.value = "new-board";
+        nameInput.value = "新板";
+        let detail = null;
+        const listener = (ev) => { detail = ev.detail; };
+        dom.window.addEventListener("riscv:command", listener);
+        $("[data-action='save-memory-map-as']").dispatchEvent(new Event("click"));
+        dom.window.removeEventListener("riscv:command", listener);
+        assert.ok(detail, "点「另存为」没有发出命令信号");
+        assert.equal(detail.action, "save-memory-map-as");
+        assert.equal(detail.params.id, "new-board", "新 id 必须从输入框读");
+        assert.equal(detail.params.name, "新板", "新板名必须从输入框读");
+    });
+
+    test("「选用」按钮把板 id 带进命令信号（视图层不自己改档案）", () => {
+        setup();
+        m03.setState("memory-map", (prev) => ({
+            ...prev,
+            archive: [
+                { id: "board-a", description: { ...USER_BOARD, id: "board-a", name: "板 A" } },
+            ],
+        }));
+        rerender();
+        let detail = null;
+        const listener = (ev) => { detail = ev.detail; };
+        dom.window.addEventListener("riscv:command", listener);
+        $("[data-action='select-memory-map']").dispatchEvent(new Event("click"));
+        dom.window.removeEventListener("riscv:command", listener);
+        assert.ok(detail, "点「选用」没有发出命令信号");
+        assert.equal(detail.action, "select-memory-map");
+        assert.equal(detail.params.id, "board-a", "板 id 必须带在命令参数里");
+    });
+
+    test("「删除」按钮把板 id 带进命令信号", () => {
+        setup();
+        m03.setState("memory-map", (prev) => ({
+            ...prev,
+            archive: [
+                { id: "board-a", description: { ...USER_BOARD, id: "board-a", name: "板 A" } },
+            ],
+        }));
+        rerender();
+        let detail = null;
+        const listener = (ev) => { detail = ev.detail; };
+        dom.window.addEventListener("riscv:command", listener);
+        $("[data-action='delete-memory-map']").dispatchEvent(new Event("click"));
+        dom.window.removeEventListener("riscv:command", listener);
+        assert.ok(detail, "点「删除」没有发出命令信号");
+        assert.equal(detail.action, "delete-memory-map");
+        assert.equal(detail.params.id, "board-a", "板 id 必须带在命令参数里");
+    });
+
+    test("前端**不显示**器件参数的区间常量（区间由内核校验）", () => {
+        setup();
+        const note = $("[data-mmap-device-range-note]");
+        assert.ok(note, "没有器件参数区间的说明");
+        assert.ok(note.textContent.includes("E_PLT-12"), "必须说出越界会报什么码");
+        // ⚠️ **不许**出现具体的上界数字（那会是第二份真相）。
+        assert.ok(
+            !/\b(1024|4096|1000000000000)\b/.test(note.textContent),
+            `前端不许显示区间常量：${note.textContent}`,
+        );
+    });
+});

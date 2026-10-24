@@ -321,6 +321,57 @@ const memoryMapView = register({
             case "reload-project":
                 // 「重新装载工程」⇒ 宿主在下次 LoadProject 时应用待生效的板级配置。
                 return emitCommand("reload-project", "memory-map");
+            case "save-memory-map": {
+                // 「保存当前板」⇒ 把**当前草稿**写进板档案（键 = 草稿的 id）。
+                //
+                // ⚠️ **不改内核状态** ⇒ 不发契约命令 ⇒ 只发 `riscv:command`
+                // 信号给 app.js（它持有板档案存储）。
+                // ⚠️ **先采集再发**：用户正在敲的内容以 DOM 为准。
+                const draft = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
+                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
+                return emitCommand("save-memory-map", "memory-map");
+            }
+            case "save-memory-map-as": {
+                // 「另存为板」⇒ 以当前草稿为模板**新建**一块板（新 id + 新 name）。
+                //
+                // ⚠️ 新 id / 新 name 从**面板上的两个输入框**读（不用 `prompt()`
+                // —— 浏览器真机门禁没法驱动 `prompt`）。
+                const draft = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
+                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
+                const newId = root?.querySelector?.("[data-mmap-new-id]")?.value ?? "";
+                const newName = root?.querySelector?.("[data-mmap-new-name]")?.value ?? "";
+                return emitCommand("save-memory-map-as", "memory-map", {
+                    id: String(newId ?? ""),
+                    name: String(newName ?? ""),
+                });
+            }
+            case "select-memory-map": {
+                // 「选用」档案里的一块 ⇒ **载入草稿**（`draftFromDescription`）
+                // ⇒ `selectedId` 跟着变。
+                //
+                // ⚠️ **不发契约命令**（内核状态不变）⇒ 但**要发** `riscv:command`
+                // 信号：档案与 `selectedId` 住在 app.js 那一侧的视图状态里。
+                const id = String(el?.dataset?.mmapTargetId ?? "");
+                return emitCommand("select-memory-map", "memory-map", { id });
+            }
+            case "delete-memory-map": {
+                // 「删除」档案里的一块 ⇒ 不改内核状态。
+                const id = String(el?.dataset?.mmapTargetId ?? "");
+                return emitCommand("delete-memory-map", "memory-map", { id });
+            }
+            case "new-memory-map": {
+                // 「新板」⇒ 清空当前编辑（草稿回到默认、**取消选中**）。
+                //
+                // ⚠️ **不发命令**：它只改**草稿**与 `selectedId`（都在视图状态里）
+                // ⇒ 落库与否是「保存」那一步的事。
+                viewStore.setState("memory-map", (prev) => ({
+                    ...prev,
+                    draft: defaultDraft(),
+                    selectedId: null,
+                }));
+                publishMemoryMapState();
+                return "cmd-new-memory-map";
+            }
             default:
                 return undefined;
         }
