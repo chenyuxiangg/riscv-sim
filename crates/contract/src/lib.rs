@@ -61,6 +61,32 @@
 //!   `None` is a **legal** value and means "no line table / not hit";
 //!   the fields are **never** fabricated.
 //!
+//! Contract **v7** adds the **board delta / unload / budget split** batch
+//! (v0.31 · D-137 / D-138 / D-139):
+//!
+//! - new command `CommandPayload::UnloadProject` — **unload** the project
+//!   (clear the *running* state; the image bytes and the user's board
+//!   both stay ⇒ re-loading does not need the file picker again);
+//! - new command `CommandPayload::PatchMemoryMap { ops, expected_revision }`
+//!   — the **atomic delta** update of the board memory map (located by
+//!   `base` ⇒ independent of the array order);
+//! - `CommandPayload::SetMemoryMap` gains `expected_revision` — the
+//!   **optional** expected revision ⇒ a submission based on a stale
+//!   revision is **rejected** (`E_PLT_13`) instead of silently overwriting
+//!   somebody else's change;
+//! - new enum `protocol::MemoryMapOp` — the delta operations
+//!   (`UpsertRegion` / `RemoveRegion` / `SetBudget`). ⚠️ **serde's
+//!   default external tagging** (same shape as `CommandPayload`) ⇒ the
+//!   wire keys are the Rust variant names;
+//! - `platform::PlatformDescription` gains `max_region_bytes` — the
+//!   **runtime** physical-occupancy ceiling, split away from
+//!   `region_budget_bytes` (the **declaration-time** ceiling). Absent ⇒
+//!   it **equals** the declaration-time one ⇒ old descriptions behave
+//!   **byte for byte** as before ⇒ **the description format version does
+//!   not move** (`PLATFORM_SCHEMA_VERSION` stays `1`);
+//! - new event `EventPayload::MemoryMap { description, pending, loaded,
+//!   revision }` — the board memory map's **complete** state.
+//!
 //! Contract **v6** adds the **front-end configurable board memory map**
 //! (v0.29 · D-124):
 //!
@@ -104,6 +130,28 @@ pub mod snapshot;
 
 /// Protocol schema version. Bump on every breaking change; consumers
 /// negotiate via the `schema_version` field in every [`protocol::Message`].
+///
+/// **v7** (contract v7 — the board delta / unload / budget split batch,
+/// v0.31 · D-137 / D-138 / D-139):
+/// - new command `CommandPayload::UnloadProject` — **unload** the project
+///   (clear the *running* state; the image bytes and the user's board
+///   both stay);
+/// - new command `CommandPayload::PatchMemoryMap { ops, expected_revision }`
+///   — the **atomic delta** update of the board memory map;
+/// - `CommandPayload::SetMemoryMap` gains the **optional**
+///   `expected_revision` ⇒ a stale submission is **rejected**
+///   (`E_PLT_13`) instead of silently overwriting;
+/// - new enum `protocol::MemoryMapOp` (`UpsertRegion` / `RemoveRegion` /
+///   `SetBudget`) — ⚠️ **serde's default external tagging** ⇒ the wire
+///   keys are the Rust variant names;
+/// - `platform::PlatformDescription` gains `max_region_bytes` (the
+///   **runtime** ceiling; absent ⇒ it **equals**
+///   `region_budget_bytes`) ⇒ ⚠️ the **description format version does
+///   not move** (`PLATFORM_SCHEMA_VERSION` stays `1`: the format only
+///   **gained** one field with a default ⇒ an old description is still
+///   legal ⇒ raising it would invalidate every board stored by v0.30);
+/// - new event shape `EventPayload::MemoryMap { description, pending,
+///   loaded, revision }` — the board memory map's **complete** state.
 ///
 /// **v6** (contract v6 — the front-end configurable board memory map):
 /// - new command `CommandPayload::SetMemoryMap { description }` — the
@@ -155,4 +203,4 @@ pub mod snapshot;
 ///   variant `WaveformDelta` → `WaveformHistory` (D-34);
 /// - `ErrorFamily::Protocol` (`"PROTO"`) — the family the LLD's
 ///   `E_PROTO-01`..`E_PROTO-08` codes belong to.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;

@@ -28,7 +28,7 @@
 //! | --- | --- | --- |
 //! | **serde** | the *shape* — unknown device kind, missing parameter, wrong parameter type | serde's own error (V-8) |
 //! | **this module** | the *declaration* — version, id, regions, sizes, overlaps, budget, duplicate device id, device parameters' legal value domain | `E_PLT-01`..`E_PLT-08` · `E_PLT-12` |
-//! | **the host** | the *lookup* — unknown platform id, unreadable file, malformed file | `E_PLT-09`..`E_PLT-11` (owned **here**, judged by the host) |
+//! | **the host** | the *lookup* — unknown platform id, unreadable file, malformed file, a stale revision, a delta that targets a missing region | `E_PLT-09`..`E_PLT-11` · `E_PLT-13` · `E_PLT-14` (owned **here**, judged by the host) |
 //! | **M-14** | the *live bus* — unmapped access, region over the runtime budget | `E_BUS-*` |
 //!
 //! ⚠️ The two budget rules are **not** the same constraint and must not
@@ -36,6 +36,15 @@
 //! (before anything is mapped), M-14's `E_BUS-09` judges the **physical
 //! occupancy** (after mapping — RAM is lazily allocated since v0.26, so
 //! a region may declare a large size and cost nothing).
+//!
+//! ⚠️ **v0.31 (D-138)**: the **numbers** behind those two rules used to
+//! be the **same field** (`region_budget_bytes` fed both) ⇒ they are
+//! split into two: `region_budget_bytes` stays the **declaration-time**
+//! ceiling (judged here by V-7) and
+//! [`PlatformDescription::max_region_bytes`] is the **runtime** ceiling
+//! (judged by M-14's `E_BUS-09`). Absent ⇒ the runtime one **equals**
+//! the declaration-time one ⇒ an old description behaves **byte for
+//! byte** as before.
 //!
 //! ⚠️ **The host-side codes live here too** (V-10 .. V-12): the *rules*
 //! are the host's, but a code with **two** landing spots is a code with
@@ -167,7 +176,34 @@ pub struct PlatformDescription {
     /// (M-14's `E_BUS-09`) measures the **physical occupancy** instead
     /// (RAM is lazily allocated) ⇒ two constraints, two layers, two
     /// codes.
+    ///
+    /// ⚠️ **v0.31 (D-138)**: this field used to carry **two** meanings
+    /// (the declaration-time ceiling **and** the runtime physical
+    /// occupancy ceiling) ⇒ they are split: the declaration-time one
+    /// stays here (V-7 / [`E_PLT_07_OVER_BUDGET`]), the runtime one
+    /// moved to [`PlatformDescription::max_region_bytes`].
     pub region_budget_bytes: u32,
+    /// The **runtime** ceiling for one region's **physical occupancy**
+    /// (optional) — `None` means **equal to** `region_budget_bytes`.
+    ///
+    /// ⚠️ **v0.31 (D-138)**: this is the **second half** of the split —
+    /// the declaration-time ceiling is [`Self::region_budget_bytes`]
+    /// (judged by V-7 / `E_PLT_07`), the runtime physical occupancy
+    /// ceiling is **this** one (judged by M-14's `E_BUS-09`). Two
+    /// layers, two semantics, two codes — the two are **not** merged.
+    ///
+    /// ⚠️ **`None` means "the same as the declaration-time budget"**,
+    /// **not** "unlimited" ⇒ an old description (one without this key)
+    /// behaves **byte for byte** as before. To say "unlimited"
+    /// explicitly, write a large enough value (`u32::MAX` ≈ 4 GiB − 1)
+    /// ⇒ one number is harder to misread than a vague word.
+    ///
+    /// ⚠️ **No `skip_serializing_if`**: the key is **always** written
+    /// (the value may be `null`) ⇒ the wire shape is **unique** ⇒ the
+    /// contract layer and the front-end mirror can be compared field by
+    /// field.
+    #[serde(default)]
+    pub max_region_bytes: Option<u32>,
     /// The declared regions — may be listed in any order (the overlap
     /// check sorts by `base` first).
     pub regions: Vec<RegionSpec>,
@@ -277,6 +313,7 @@ impl PlatformDescription {
     /// | V-13 | a device parameter is **below** its legal lower bound | `E_PLT-12` |
     /// | V-14 | a device parameter is **above** its legal upper bound | `E_PLT-12` |
     /// | V-15 | a UART's `irq_line` is not a valid PLIC source id (only when the map has a PLIC) | `E_PLT-12` |
+    /// | V-16 | `max_region_bytes` is given and is **zero** (the runtime ceiling must be ≥ 1) | `E_PLT-12` |
     ///
     /// ⚠️ **V-8 lives in the serde layer, not here.** An unknown device
     /// kind or a missing parameter fails during deserialization, before
@@ -296,6 +333,12 @@ impl PlatformDescription {
     /// (`E_PLT-12`): a single field out of range and a broken cross-field
     /// relation mean the same thing — 「某个器件参数的值不在它的合法取值域内」
     /// ⇒ one code, not two.
+    ///
+    /// ⚠️ **V-16 was appended after V-15** (v0.31 · D-138) ⇒ the report
+    /// order of V-1 ~ V-15 is **unchanged, byte for byte** ⇒ the
+    /// existing "V-2 before V-9 / V-13" order assertions still hold. It
+    /// **shares** `E_PLT-12` as well: a zero runtime ceiling is a
+    /// parameter outside its legal value domain ⇒ one code, not two.
     ///
     /// ⚠️ **Judgements never look at the message text** — they assert
     /// `family == Platform && scenario == <code>`. Rewording a message
@@ -543,6 +586,32 @@ impl PlatformDescription {
             }
         }
 
+        // V-16 — the **runtime** ceiling's legal value domain
+        // (v0.31 · D-138 · frozen spec STAGE-16 §2.3).
+        //
+        // ⚠️ **Appended after V-15** ⇒ the report order of V-1 ~ V-15 is
+        // unchanged, byte for byte.
+        //
+        // ⚠️ **Why zero is illegal**: a runtime ceiling of **zero** would
+        // make **every** region exceed it ⇒ the board could not be used
+        // at all ⇒ it is rejected **here** (at declaration time) rather
+        // than at the first write.
+        //
+        // ⚠️ The rule is judged on the **declared** value only: `None`
+        // means "the same as the declaration-time budget" (and that one
+        // is judged by V-7) ⇒ no number is invented here.
+        if let Some(max_region_bytes) = self.max_region_bytes {
+            if max_region_bytes == 0 {
+                return Err(PlatformError::new(
+                    PLATFORM_FAMILY,
+                    E_PLT_12_PARAMETER_OUT_OF_RANGE,
+                    format!(
+                        "运行期每区域的物理占用上界 {max_region_bytes} 为 0（必须 ≥ 1，否则每一段都超限）"
+                    ),
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -734,6 +803,7 @@ mod tests {
             priority: 20,
             auto_selectable: true,
             region_budget_bytes: 134_217_728,
+            max_region_bytes: None,
             regions: vec![
                 RegionSpec::Ram {
                     base: 0,
@@ -831,6 +901,11 @@ mod tests {
     /// `skip_serializing_if`) ⇒ it is always written, because a
     /// description that hides it would hide **the difference between the
     /// real platforms and the demo one**.
+    ///
+    /// ⚠️ **v0.31**: `max_region_bytes` **is** one of them too ⇒ it is
+    /// **always** written (the value may be `null`) ⇒ the wire shape is
+    /// **unique** ⇒ the contract layer and the front-end mirror can be
+    /// compared field by field.
     #[test]
     fn a2_the_top_level_key_set_is_pinned() {
         let json = serde_json::to_value(sample()).expect("json");
@@ -839,13 +914,14 @@ mod tests {
             vec![
                 "auto_selectable",
                 "id",
+                "max_region_bytes",
                 "name",
                 "priority",
                 "region_budget_bytes",
                 "regions",
                 "schema_version",
             ],
-            "平台描述的顶层键集必须精确固定（七个）"
+            "平台描述的顶层键集必须精确固定（八个）"
         );
 
         // With a note attached, the optional key **appears** — and still
@@ -859,6 +935,7 @@ mod tests {
                 "auto_selectable",
                 "description",
                 "id",
+                "max_region_bytes",
                 "name",
                 "priority",
                 "region_budget_bytes",
@@ -1439,6 +1516,8 @@ mod tests {
             (E_PLT_10_PLATFORM_FILE_UNREADABLE, "E_PLT-10"),
             (E_PLT_11_PLATFORM_FILE_MALFORMED, "E_PLT-11"),
             (E_PLT_12_PARAMETER_OUT_OF_RANGE, "E_PLT-12"),
+            (E_PLT_13_REVISION_CONFLICT, "E_PLT-13"),
+            (E_PLT_14_REGION_NOT_FOUND, "E_PLT-14"),
         ];
         for (scenario, expected) in cases {
             let err = PlatformError::new(PLATFORM_FAMILY, scenario, "x");
@@ -1480,6 +1559,7 @@ mod tests {
             priority: 1,
             auto_selectable: true,
             region_budget_bytes: 134_217_728,
+            max_region_bytes: None,
             regions: devices
                 .into_iter()
                 .enumerate()
@@ -2006,6 +2086,460 @@ mod tests {
         assert_eq!(
             err.scenario, E_PLT_08_DUPLICATE_DEVICE_ID,
             "同时违反 V-9 与 V-13 时必须先报 V-9（实际 {err}）"
+        );
+    }
+
+    // -------------------------------------------------------------
+    // STAGE-16 · v0.31 · D-137 / D-138 / D-139 — the **A group**
+    // (frozen spec STAGE-16 §5).
+    //
+    // ⚠️ The **A-n** labels below are the frozen spec STAGE-16 §5's
+    // acceptance items (A-1 ~ A-12) — **not** the older "A-n" labels the
+    // STAGE-12 / STAGE-15 cases above carry ⇒ every label here says
+    // "STAGE-16" and every test name says "s16_a".
+    //
+    // ⚠️ **Why the protocol-shaped cases live here**: the A group is the
+    // **contract layer's** group ⇒ its cases are collected in one place
+    // ⇒ the protocol-side DTOs are imported from
+    // [`crate::protocol`] (the contract layer's own module — no cycle,
+    // no second copy of a DTO).
+    // -------------------------------------------------------------
+
+    use crate::error::{E_PLT_13_REVISION_CONFLICT, E_PLT_14_REGION_NOT_FOUND};
+    use crate::protocol::{CommandPayload, EventPayload, MemoryMapOp};
+
+    /// **STAGE-16 A-1** — the **contract envelope**'s schema version is
+    /// `7`.
+    ///
+    /// ⚠️ Asserted against the **literal** `7`, not against the constant
+    /// it also defines ⇒ the constant cannot vouch for itself.
+    #[test]
+    fn s16_a1_the_contract_schema_version_is_seven() {
+        assert_eq!(crate::SCHEMA_VERSION, 7);
+    }
+
+    /// **STAGE-16 A-2** — the **description format**'s version is still
+    /// `1`.
+    ///
+    /// ⚠️ The format only **gained** one field with a `serde(default)`
+    /// ⇒ it is **not** a breaking change ⇒ raising the number would
+    /// invalidate **every** board stored by v0.30 (D-143) ⇒ it stays.
+    #[test]
+    fn s16_a2_the_platform_schema_version_is_still_one() {
+        assert_eq!(PLATFORM_SCHEMA_VERSION, 1);
+    }
+
+    /// **STAGE-16 A-3** — the three built-in descriptions parse
+    /// **unchanged** ⇒ `max_region_bytes` is `None` ⇒ their behaviour is
+    /// **byte for byte** the same.
+    ///
+    /// ⚠️ **Why the hand-written copies**: the contract layer does
+    /// **not** depend on the kernel crate ⇒ the equivalent copies live
+    /// here (the parameters are copied field by field).
+    #[test]
+    fn s16_a3_the_builtin_descriptions_parse_unchanged() {
+        let builtins = [
+            r#"{
+                "schema_version": 1,
+                "id": "default",
+                "name": "Default",
+                "priority": 10,
+                "auto_selectable": true,
+                "region_budget_bytes": 16777216,
+                "regions": [
+                    { "kind": "ram", "base": 0, "size": 1048576 },
+                    { "kind": "peripheral", "base": 1073741824,
+                      "device": { "device": "gpio", "id": "GPIO0" } },
+                    { "kind": "ram", "base": 2147483648, "size": 4194304 }
+                ]
+            }"#,
+            r#"{
+                "schema_version": 1,
+                "id": "minimal",
+                "name": "Minimal (zero-change demo platform)",
+                "priority": 30,
+                "auto_selectable": false,
+                "region_budget_bytes": 16777216,
+                "regions": [
+                    { "kind": "ram", "base": 0, "size": 2097152 },
+                    { "kind": "ram", "base": 268435456, "size": 16777216 }
+                ]
+            }"#,
+            r#"{
+                "schema_version": 1,
+                "id": "qemu-virt",
+                "name": "QEMU virt",
+                "priority": 20,
+                "auto_selectable": true,
+                "region_budget_bytes": 134217728,
+                "regions": [
+                    { "kind": "ram", "base": 0, "size": 1048576 },
+                    { "kind": "peripheral", "base": 33554432,
+                      "device": { "device": "clint", "id": "CLINT", "freq_hz": 10000000, "harts": 1 } },
+                    { "kind": "peripheral", "base": 201326592,
+                      "device": { "device": "plic", "id": "PLIC", "sources": 64, "contexts": 16 } },
+                    { "kind": "peripheral", "base": 268435456,
+                      "device": { "device": "uart16550", "id": "UART0", "irq_line": 1, "baud_rate": 115200 } },
+                    { "kind": "peripheral", "base": 1073741824,
+                      "device": { "device": "gpio", "id": "GPIO0" } },
+                    { "kind": "ram", "base": 2147483648, "size": 134217728 }
+                ]
+            }"#,
+        ];
+        for raw in builtins {
+            let desc: PlatformDescription = serde_json::from_str(raw).expect("内置描述必须能解析");
+            assert_eq!(
+                desc.max_region_bytes, None,
+                "内置描述不含 max_region_bytes ⇒ 缺省必须是 None"
+            );
+            assert!(desc.validate().is_ok(), "内置描述 {} 必须仍然合法", desc.id);
+        }
+    }
+
+    /// **STAGE-16 A-4** — an **old** description (a JSON without
+    /// `max_region_bytes`) parses ⇒ `max_region_bytes == None`.
+    ///
+    /// ⚠️ This is the "old descriptions keep working" half of 裁决 E: the
+    /// field carries `#[serde(default)]` ⇒ **not** naming it is legal.
+    ///
+    /// ⚠️ **Measured note (v0.31, serde 1.0.229)**: serde's derive
+    /// already fills a **missing `Option` field** with `None` ⇒ the
+    /// attribute is belt-and-braces ⇒ what this case pins is the
+    /// **behaviour** (an old description parses and stays legal), which
+    /// is the acceptance criterion.
+    #[test]
+    fn s16_a4_an_old_description_without_the_new_field_parses() {
+        let raw = r#"{
+            "schema_version": 1,
+            "id": "x",
+            "name": "x",
+            "priority": 1,
+            "region_budget_bytes": 4096,
+            "regions": [ { "kind": "ram", "base": 0, "size": 1024 } ]
+        }"#;
+        let desc: PlatformDescription = serde_json::from_str(raw).expect("必须能解析");
+        assert_eq!(
+            desc.max_region_bytes, None,
+            "旧描述缺这个键 ⇒ 必须是 None（= 等于声明期那个预算）"
+        );
+        assert!(desc.validate().is_ok(), "旧描述必须仍然合法");
+    }
+
+    /// **STAGE-16 A-5** — `max_region_bytes = Some(0)` is **rejected**
+    /// with `E_PLT-12`.
+    ///
+    /// ⚠️ A runtime ceiling of **zero** would make **every** region
+    /// exceed it ⇒ the board would be unusable ⇒ it is rejected at
+    /// declaration time.
+    #[test]
+    fn s16_a5_a_zero_runtime_ceiling_is_rejected() {
+        let mut desc = sample();
+        desc.max_region_bytes = Some(0);
+        let err = desc.validate().expect_err("运行期上界为 0 必须被拒");
+        assert_eq!(err.family, PLATFORM_FAMILY);
+        assert_eq!(
+            err.scenario, E_PLT_12_PARAMETER_OUT_OF_RANGE,
+            "V-16 的场景码必须是 E_PLT-12（实际 {err}）"
+        );
+    }
+
+    /// **STAGE-16 A-6** — `max_region_bytes = Some(1)` is **legal**: the
+    /// lower bound itself is a legal value.
+    ///
+    /// ⚠️ The judgement is on `family` + `scenario`, **not** on the
+    /// message text.
+    #[test]
+    fn s16_a6_the_lowest_legal_runtime_ceiling_is_accepted() {
+        let mut desc = sample();
+        desc.max_region_bytes = Some(1);
+        assert!(desc.validate().is_ok(), "运行期上界的下界 1 本身必须合法");
+    }
+
+    /// **STAGE-16 A-7** — V-16 is reported **after** the old rules ⇒ the
+    /// existing "V-2 first" / "V-9 first" order assertions still hold.
+    ///
+    /// ⚠️ **Why not "V-15 before V-16"?** V-15 and V-16 **share** the
+    /// scenario code `E_PLT-12` ⇒ their relative order **cannot** be
+    /// told apart by the code (and the judgement never looks at the
+    /// message text) ⇒ the order is pinned through the rules with
+    /// **distinct** codes (V-2 / V-9), which are earlier than V-15 and
+    /// therefore earlier than V-16 as well.
+    #[test]
+    fn s16_a7_the_old_rules_are_reported_before_v16() {
+        // V-2 (empty id) + V-16 (zero runtime ceiling) ⇒ V-2 first.
+        let mut desc = sample();
+        desc.id = String::new();
+        desc.max_region_bytes = Some(0);
+        let err = desc.validate().expect_err("空 id 必须被拒");
+        assert_eq!(
+            err.scenario, E_PLT_02_EMPTY_ID,
+            "同时违反 V-2 与 V-16 时必须先报 V-2（实际 {err}）"
+        );
+
+        // V-9 (two devices share an id) + V-16 ⇒ V-9 first.
+        let mut desc = board_with(vec![
+            DeviceSpec::Uart16550 {
+                id: "DUP".to_string(),
+                irq_line: 0,
+                baud_rate: 115_200,
+            },
+            DeviceSpec::Gpio {
+                id: "DUP".to_string(),
+            },
+        ]);
+        desc.max_region_bytes = Some(0);
+        let err = desc.validate().expect_err("重复的器件 id 必须被拒");
+        assert_eq!(
+            err.scenario, E_PLT_08_DUPLICATE_DEVICE_ID,
+            "同时违反 V-9 与 V-16 时必须先报 V-9（实际 {err}）"
+        );
+    }
+
+    /// **STAGE-16 A-8** — `E_PLT_13` / `E_PLT_14` are **new** scenario
+    /// codes ⇒ each means exactly one thing ⇒ none of them reuses
+    /// `E_PLT_08` or `E_PLT-12`.
+    #[test]
+    fn s16_a8_the_new_scenario_codes_are_distinct_from_the_old_ones() {
+        assert_eq!(E_PLT_13_REVISION_CONFLICT, 13);
+        assert_eq!(E_PLT_14_REGION_NOT_FOUND, 14);
+
+        assert_ne!(
+            E_PLT_13_REVISION_CONFLICT, E_PLT_08_DUPLICATE_DEVICE_ID,
+            "修订号冲突不得复用「器件 id 重复」"
+        );
+        assert_ne!(
+            E_PLT_13_REVISION_CONFLICT, E_PLT_12_PARAMETER_OUT_OF_RANGE,
+            "修订号冲突不得复用「参数越界」"
+        );
+        assert_ne!(
+            E_PLT_14_REGION_NOT_FOUND, E_PLT_08_DUPLICATE_DEVICE_ID,
+            "段不存在不得复用「器件 id 重复」"
+        );
+        assert_ne!(
+            E_PLT_14_REGION_NOT_FOUND, E_PLT_12_PARAMETER_OUT_OF_RANGE,
+            "段不存在不得复用「参数越界」"
+        );
+
+        // …and they render as the frozen spec spells them.
+        assert_eq!(
+            PlatformError::new(PLATFORM_FAMILY, E_PLT_13_REVISION_CONFLICT, "x").to_string(),
+            "E_PLT-13: x"
+        );
+        assert_eq!(
+            PlatformError::new(PLATFORM_FAMILY, E_PLT_14_REGION_NOT_FOUND, "x").to_string(),
+            "E_PLT-14: x"
+        );
+    }
+
+    /// **STAGE-16 A-9** — the `MemoryMapOp` **wire shape** is pinned, one
+    /// case per variant ⇒ and the nested `RegionSpec` stays
+    /// **internally tagged** ⇒ **the two layers' rules differ**.
+    ///
+    /// ⚠️ **External tagging** ⇒ the wire key is the **Rust variant
+    /// name** (`UpsertRegion` / `RemoveRegion` / `SetBudget`) ⇒ there is
+    /// **no** `op` key (that would be the internal tagging).
+    ///
+    /// ⚠️ The nested `RegionSpec` is **internally tagged** ⇒ its wire
+    /// form is `{"kind": "ram", ...}` ⇒ the two layers write their own
+    /// rules.
+    #[test]
+    fn s16_a9_the_memory_map_op_wire_shape_is_pinned() {
+        let upsert = MemoryMapOp::UpsertRegion {
+            spec: RegionSpec::Ram {
+                base: 0,
+                size: 1_048_576,
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&upsert).expect("json"),
+            r#"{"UpsertRegion":{"spec":{"kind":"ram","base":0,"size":1048576}}}"#
+        );
+
+        let remove = MemoryMapOp::RemoveRegion { base: 0 };
+        assert_eq!(
+            serde_json::to_string(&remove).expect("json"),
+            r#"{"RemoveRegion":{"base":0}}"#
+        );
+
+        let budget = MemoryMapOp::SetBudget {
+            region_budget_bytes: 16_777_216,
+            max_region_bytes: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&budget).expect("json"),
+            r#"{"SetBudget":{"region_budget_bytes":16777216,"max_region_bytes":null}}"#
+        );
+
+        // The two layers' tag rules differ: the outer key is the variant
+        // name, the inner one is `kind`.
+        let value = serde_json::to_value(&upsert).expect("json");
+        assert!(
+            value.get("UpsertRegion").is_some(),
+            "外层键必须是变体名（外部标签）"
+        );
+        assert!(
+            value.get("op").is_none(),
+            "不许有 op 键（那是内部标签 ⇒ 裁决 H 的硬约束）"
+        );
+        let spec = value
+            .get("UpsertRegion")
+            .and_then(|v| v.get("spec"))
+            .expect("spec");
+        assert_eq!(
+            spec.get("kind").and_then(|v| v.as_str()),
+            Some("ram"),
+            "内层的 RegionSpec 仍是内部标签（kind）"
+        );
+    }
+
+    /// **STAGE-16 A-10** — a `RegionSpec` **nested in** a `MemoryMapOp`
+    /// survives the round trip ⇒ serde's nested internal tag limit is
+    /// **not** hit.
+    ///
+    /// ⚠️ This is 裁决 H's discriminating case: the delta operation
+    /// carries a **whole** region spec ⇒ if the two tag rules were
+    /// mixed up, the spec would not come back.
+    ///
+    /// ⚠️ **Measured note (v0.31, serde 1.0.229)**: the round trip
+    /// succeeds under **both** taggings ⇒ what actually holds the tag
+    /// rule is the **pinned wire shape** (A-9), not this round trip.
+    #[test]
+    fn s16_a10_a_region_spec_nested_in_a_memory_map_op_round_trips() {
+        let specs = [
+            RegionSpec::Ram {
+                base: 0,
+                size: 1_048_576,
+            },
+            RegionSpec::Rom {
+                base: 0x0010_0000,
+                size: 0x0001_0000,
+            },
+            RegionSpec::Peripheral {
+                base: 0x1000_0000,
+                device: DeviceSpec::Gpio {
+                    id: "GPIO0".to_string(),
+                },
+            },
+            RegionSpec::Peripheral {
+                base: 0x2000_0000,
+                device: DeviceSpec::Uart16550 {
+                    id: "UART0".to_string(),
+                    irq_line: 1,
+                    baud_rate: 115_200,
+                },
+            },
+        ];
+        for spec in specs {
+            let op = MemoryMapOp::UpsertRegion { spec: spec.clone() };
+            let text = serde_json::to_string(&op).expect("json");
+            let back: MemoryMapOp = serde_json::from_str(&text)
+                .unwrap_or_else(|e| panic!("嵌套的内部标签必须读得回来（{text}）：{e}"));
+            assert_eq!(
+                back,
+                MemoryMapOp::UpsertRegion { spec },
+                "嵌套的 RegionSpec 必须逐字段原样回来（{text}）"
+            );
+        }
+    }
+
+    /// **STAGE-16 A-11** — an **old payload** (one without
+    /// `expected_revision`) still parses ⇒ `expected_revision == None`
+    /// ⇒ the old caller is **not** affected.
+    ///
+    /// ⚠️ **Measured note (v0.31, serde 1.0.229)**: serde's derive
+    /// already fills a **missing `Option` field** with `None` ⇒ the
+    /// frozen spec's `#[serde(default)]` on `expected_revision` is
+    /// belt-and-braces ⇒ what this case pins is the **behaviour** (an old
+    /// payload parses ⇒ `None` ⇒ the revision is **not** checked), not
+    /// the presence of the attribute.
+    #[test]
+    fn s16_a11_an_old_payload_without_the_expected_revision_still_parses() {
+        // `SetMemoryMap` without the key.
+        let mut value = serde_json::to_value(CommandPayload::SetMemoryMap {
+            description: sample(),
+            expected_revision: Some(9),
+        })
+        .expect("json");
+        value["SetMemoryMap"]
+            .as_object_mut()
+            .expect("object")
+            .remove("expected_revision");
+        match serde_json::from_value::<CommandPayload>(value).expect("旧载荷必须能解析") {
+            CommandPayload::SetMemoryMap {
+                expected_revision, ..
+            } => assert_eq!(
+                expected_revision, None,
+                "旧载荷缺这个键 ⇒ 必须解析成 None（= 不检查修订号）"
+            ),
+            other => panic!("expected a SetMemoryMap, got {other:?}"),
+        }
+
+        // `PatchMemoryMap` without the key.
+        let mut value = serde_json::to_value(CommandPayload::PatchMemoryMap {
+            ops: vec![MemoryMapOp::RemoveRegion { base: 0 }],
+            expected_revision: Some(9),
+        })
+        .expect("json");
+        value["PatchMemoryMap"]
+            .as_object_mut()
+            .expect("object")
+            .remove("expected_revision");
+        match serde_json::from_value::<CommandPayload>(value).expect("旧载荷必须能解析") {
+            CommandPayload::PatchMemoryMap {
+                ops,
+                expected_revision,
+            } => {
+                assert_eq!(
+                    expected_revision, None,
+                    "旧载荷缺这个键 ⇒ 必须解析成 None（= 不检查修订号）"
+                );
+                assert_eq!(
+                    ops,
+                    vec![MemoryMapOp::RemoveRegion { base: 0 }],
+                    "差量操作必须原样回来"
+                );
+            }
+            other => panic!("expected a PatchMemoryMap, got {other:?}"),
+        }
+    }
+
+    /// **STAGE-16 A-12** — the `MemoryMap` event's fields are pinned,
+    /// **name and order**.
+    ///
+    /// ⚠️ The order is pinned on the **string** form: `serde_json`'s
+    /// `Value` sorts its keys (a `BTreeMap`) ⇒ comparing values would
+    /// accept a shuffled key set ⇒ the string form is the one that
+    /// holds the declaration order.
+    #[test]
+    fn s16_a12_the_memory_map_event_fields_are_pinned() {
+        let ev = EventPayload::MemoryMap {
+            description: sample(),
+            pending: false,
+            loaded: true,
+            revision: 42,
+        };
+
+        let description_json = serde_json::to_string(&sample()).expect("json");
+        let expected = format!(
+            r#"{{"MemoryMap":{{"description":{description_json},"pending":false,"loaded":true,"revision":42}}}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ev).expect("json"),
+            expected,
+            "事件的字段名字与顺序必须逐字固定"
+        );
+
+        let value = serde_json::to_value(&ev).expect("json");
+        let inner = value
+            .get("MemoryMap")
+            .and_then(|v| v.as_object())
+            .expect("MemoryMap");
+        let mut names: Vec<&str> = inner.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec!["description", "loaded", "pending", "revision"],
+            "事件的字段名集合必须精确固定"
         );
     }
 }
