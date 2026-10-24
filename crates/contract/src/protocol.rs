@@ -1144,18 +1144,20 @@ mod tests {
             JS_MIRROR.contains("WriteConsole"),
             "前端 JS 镜像里必须**字面**出现 `WriteConsole` —— 两侧拼写必须一致"
         );
-        // ⚠️ 版本号也钉住：JS 镜像的 `SCHEMA_VERSION` **不得落后 Rust 侧
-        // 超过一代**。
+        // ⚠️ 版本号也钉住：JS 镜像的 `SCHEMA_VERSION` 与 Rust 侧**必须
+        // 严格相等**。
         //
-        // ⚠️ **为什么不是「两侧必须相等」**：契约层的升版（v7）与前端 JS
-        // 镜像的升版**分属两条 lane** ⇒ 并行落地的窗口内 JS 侧还是旧
-        // 的那个数 ⇒ 一条写死「必须相等」的断言会**自己变红**（而错的
-        // 不是任何一侧）⇒ 与前端门禁 `front/tests/contract.test.mjs` 的
-        // 同一原则一致（`rustSchemaVersion()`：**从 Rust 源码推导**，不
-        // 写死 ⇒ 契约层升版时它不会自己变红）。
+        // ⚠️ **为什么是「严格相等」而不是「至多落后一代」**：契约层的
+        // 升版与前端 JS 镜像的升版**分属两条 lane** ⇒ 并行落地的窗口内
+        // JS 侧还是旧的那个数 ⇒ 一条写死「必须相等」的断言会**自己变红**
+        // （而错的不是任何一侧）⇒ Lane A 在落地时把它放松成「至多落后
+        // 一代」⇒ **那是一个临时的护栏，不是契约**。
         //
-        // ⚠️ **两侧的严格相等由前端门禁守着**（那条门禁**不在**契约层的
-        // 编译依赖里）⇒ 这里补一条「JS 侧没掉队」的弱检查。
+        // ⚠️ **窗口已经关闭**（前端那条 lane 已落地 ⇒ 两侧都是 7）⇒
+        // 这里恢复成严格相等 ⇒ 「升版只改一侧」这件事**不再能悄悄通过**
+        // （前端门禁 `front/tests/contract.test.mjs` 的 `rustSchemaVersion()`
+        // 从 Rust 源码推导、不写死 ⇒ 它守的是「字段集合」；这条守的是
+        // **版本号本身**）。
         let js_version: u32 = JS_MIRROR
             .lines()
             .find_map(|line| {
@@ -1164,9 +1166,10 @@ mod tests {
                     .and_then(|rest| rest.trim().trim_end_matches(';').trim().parse().ok())
             })
             .expect("前端 JS 镜像里必须声明 SCHEMA_VERSION");
-        assert!(
-            js_version <= crate::SCHEMA_VERSION && js_version + 1 >= crate::SCHEMA_VERSION,
-            "前端 JS 镜像的 SCHEMA_VERSION（{js_version}）必须与 Rust 侧（{}）一致，或至多落后一代",
+        assert_eq!(
+            js_version,
+            crate::SCHEMA_VERSION,
+            "前端 JS 镜像的 SCHEMA_VERSION（{js_version}）必须与 Rust 侧（{}）**严格相等**",
             crate::SCHEMA_VERSION
         );
     }
@@ -1406,23 +1409,262 @@ mod tests {
                 "前端 JS 镜像里必须**字面**出现 `{literal}` —— 两侧拼写必须一致"
             );
         }
-        // ⚠️ 两个构造器的**线上形状**必须与 Rust 侧**逐字同形**。
-        //
-        // ⚠️ **v7**: both constructors **grew fields**
-        // (`expected_revision` / `loaded` / `revision`) ⇒ the **complete**
-        // shape is landed by the front-end lane ⇒ what is pinned here is
-        // the part that **cannot** differ: the **variant tag** and the
-        // **field order** up to the first new field. The complete shape
-        // is pinned by the front gate (`front/tests/contract.test.mjs`),
-        // which compares the two sides field by field (and derives the
-        // expected field names from the Rust source).
-        assert!(
-            JS_MIRROR.contains("({ SetMemoryMap: { description"),
-            "前端 JS 镜像的命令构造器形状必须与 Rust 侧逐字同形"
+    }
+
+    // -----------------------------------------------------------------
+    // v7 — the **shape** cross-check (Rust source vs. the JS mirror).
+    // -----------------------------------------------------------------
+
+    /// Tokenize `src` into identifiers / punctuation / string literals,
+    /// **skipping** comments.
+    ///
+    /// ⚠️ **Why a tokenizer and not a literal substring**: the JS mirror
+    /// is **hand-written** ⇒ its formatting is nobody's contract ⇒ a
+    /// literal check (`"({ SetMemoryMap: { description"`) breaks the
+    /// moment somebody spreads a constructor over several lines (which
+    /// is exactly what v7 did) ⇒ the assertion would go red **for a
+    /// reason that has nothing to do with the wire format**.
+    ///
+    /// ⚠️ **Comments are skipped** ⇒ a doc comment that mentions a
+    /// variant name can never be mistaken for the variant itself.
+    ///
+    /// @param src — the source text
+    /// @param single_quote_is_a_string — `true` for JavaScript (`'x'` is
+    ///   a string), `false` for Rust (`'a` is a lifetime)
+    /// @returns the token list (identifiers are bare, strings are quoted)
+    fn tokenize(src: &str, single_quote_is_a_string: bool) -> Vec<String> {
+        let bytes = src.as_bytes();
+        let mut out: Vec<String> = Vec::new();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let c = bytes[i];
+            // line comment
+            if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            // block comment
+            if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+            // string literal
+            let is_quote = c == b'"' || c == b'`' || (single_quote_is_a_string && c == b'\'');
+            if is_quote {
+                let quote = c;
+                i += 1;
+                let start = i;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == quote {
+                        break;
+                    }
+                    i += 1;
+                }
+                let text = src.get(start..i.min(src.len())).unwrap_or("");
+                out.push(format!("\"{text}\""));
+                i = (i + 1).min(bytes.len());
+                continue;
+            }
+            // identifier
+            if c.is_ascii_alphabetic() || c == b'_' || c == b'$' {
+                let start = i;
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
+                {
+                    i += 1;
+                }
+                out.push(src[start..i].to_string());
+                continue;
+            }
+            if c.is_ascii_whitespace() {
+                i += 1;
+                continue;
+            }
+            out.push((c as char).to_string());
+            i += 1;
+        }
+        out
+    }
+
+    /// Is `token` an identifier (not punctuation, not a string literal)?
+    fn is_identifier(token: &str) -> bool {
+        let mut chars = token.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$' => {}
+            _ => return false,
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    }
+
+    /// The **top-level keys** of the block that follows the `key` token,
+    /// in source order.
+    ///
+    /// ⚠️ **What counts as a key**: an identifier that sits *where a key
+    /// sits* — right after a `{` or a `,` at the block's own depth.
+    /// ⇒ Rust's `description: PlatformDescription` and JavaScript's
+    /// shorthand `description` both count; a **value**
+    /// (`expected_revision: expectedRevision`) does **not** (it never
+    /// follows a `{` or a `,`).
+    ///
+    /// ⚠️ **Rust attributes** (`#[serde(default)]`) sit between the `,`
+    /// and the field ⇒ they are skipped as a unit, and they do **not**
+    /// consume the key position.
+    ///
+    /// @param tokens — the token list
+    /// @param key — the variant name
+    /// @param js_style — `true` for JavaScript (`Key: { … }`), `false`
+    ///   for Rust (`Key { … }`)
+    /// @returns the key list, or `None` when the variant is not found
+    fn variant_keys(tokens: &[String], key: &str, js_style: bool) -> Option<Vec<String>> {
+        let mut idx = 0usize;
+        while idx < tokens.len() {
+            if tokens[idx] == key {
+                // ⚠️ A Rust **declaration** is not preceded by `::` ⇒ a
+                // `Type::Variant` construction (or a path) is skipped.
+                let is_path = idx > 0 && tokens[idx - 1] == ":";
+                let mut next = idx + 1;
+                if js_style {
+                    // `Key: {` — the colon belongs to the object literal.
+                    if next < tokens.len() && tokens[next] == ":" {
+                        next += 1;
+                    } else {
+                        idx += 1;
+                        continue;
+                    }
+                }
+                if !is_path && next < tokens.len() && tokens[next] == "{" {
+                    return Some(block_keys(tokens, next));
+                }
+            }
+            idx += 1;
+        }
+        None
+    }
+
+    /// Collect the top-level keys of the block whose `{` is at `open`.
+    fn block_keys(tokens: &[String], open: usize) -> Vec<String> {
+        let mut keys: Vec<String> = Vec::new();
+        let mut depth = 0i32;
+        let mut parens = 0i32;
+        let mut brackets = 0i32;
+        let mut at_key_position = false;
+        let mut i = open;
+        while i < tokens.len() {
+            let token = tokens[i].as_str();
+            match token {
+                "{" => {
+                    depth += 1;
+                    at_key_position = true;
+                }
+                "}" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    at_key_position = false;
+                }
+                "(" => parens += 1,
+                ")" => parens -= 1,
+                "[" => brackets += 1,
+                "]" => brackets -= 1,
+                "," => {
+                    // ⚠️ A comma **inside** a call or an index expression
+                    // does not separate two keys.
+                    if parens == 0 && brackets == 0 {
+                        at_key_position = true;
+                    }
+                }
+                "#" => {
+                    // ⚠️ A Rust attribute (`#[serde(default)]`) sits
+                    // between the `,` and the field ⇒ skip it as a unit
+                    // and **keep** the key position.
+                    if i + 1 < tokens.len() && tokens[i + 1] == "[" {
+                        let mut j = i + 1;
+                        let mut inner = 0i32;
+                        while j < tokens.len() {
+                            match tokens[j].as_str() {
+                                "[" => inner += 1,
+                                "]" => {
+                                    inner -= 1;
+                                    if inner == 0 {
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                            j += 1;
+                        }
+                        i = j;
+                    }
+                }
+                _ => {
+                    if at_key_position && parens == 0 && brackets == 0 && is_identifier(token) {
+                        keys.push(token.to_string());
+                        at_key_position = false;
+                    }
+                }
+            }
+            i += 1;
+        }
+        keys
+    }
+
+    /// **v7** — the three payload shapes must be **the same on both
+    /// sides**, field by field, in the same order.
+    ///
+    /// ⚠️ **Both sides are derived from their own source** ⇒ this is a
+    /// real cross-layer check, not a copied truth: the Rust side is read
+    /// out of **this very file**, the JavaScript side out of the JS
+    /// mirror. ⇒ a field added on one side only shows up here.
+    ///
+    /// ⚠️ **The order is part of the contract** ⇒ it is compared too.
+    ///
+    /// ⚠️ **The front gate does the same thing** (`front/tests/contract.test.mjs`
+    /// derives the expected shapes from the Rust source) ⇒ this one is
+    /// the Rust-side half of the same check, and it fires even when the
+    /// front gate is not run.
+    #[test]
+    fn the_v7_payload_shapes_are_the_same_on_both_sides() {
+        // ⚠️ 路径：`crates/contract/src/protocol.rs` → 仓库根是 `../../..`
+        const JS_MIRROR: &str = include_str!("../../../front/lib/message.js");
+        // ⚠️ 路径：相对于**本文件** ⇒ 就是本文件自己。
+        const RUST_SOURCE: &str = include_str!("protocol.rs");
+
+        let rust_tokens = tokenize(RUST_SOURCE, false);
+        let js_tokens = tokenize(JS_MIRROR, true);
+
+        for variant in ["SetMemoryMap", "PatchMemoryMap", "MemoryMap"] {
+            let rust_keys = variant_keys(&rust_tokens, variant, false)
+                .unwrap_or_else(|| panic!("Rust 源码里必须能找到变体 `{variant}`"));
+            let js_keys = variant_keys(&js_tokens, variant, true)
+                .unwrap_or_else(|| panic!("JS 镜像里必须能找到 `{variant}`"));
+            assert_eq!(
+                js_keys, rust_keys,
+                "`{variant}` 的线上形状两侧必须**逐字段同形且同序**（Rust 侧 {rust_keys:?} / JS 侧 {js_keys:?}）"
+            );
+        }
+
+        // ⚠️ `UnloadProject` 是 **unit 变体** ⇒ 线上形态是**裸字符串**
+        // （不是 `{UnloadProject: {}}`）⇒ Rust 侧用 serde 说，JS 侧用
+        // 「必须有一个**字符串字面量** `"UnloadProject"`」说。
+        assert_eq!(
+            serde_json::to_value(CommandPayload::UnloadProject).expect("json"),
+            serde_json::Value::String("UnloadProject".to_string()),
+            "`UnloadProject` 是 unit 变体 ⇒ 线上必须是裸字符串"
         );
         assert!(
-            JS_MIRROR.contains("({ MemoryMap: { description, pending"),
-            "前端 JS 镜像的事件构造器形状必须与 Rust 侧逐字同形"
+            js_tokens.iter().any(|t| t == "\"UnloadProject\""),
+            "JS 镜像里必须**字面**出现字符串 `\"UnloadProject\"`（unit 变体的线上形态）"
         );
     }
 }
