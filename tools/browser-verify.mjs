@@ -99,6 +99,177 @@ const EXIT_PRECONDITION = 127;
 /** The verification itself failed. */
 const EXIT_FAILED = 1;
 
+// ---------------------------------------------------------------------------
+// The section registry (STAGE-17 · 裁决 I / J · D-147)
+// ---------------------------------------------------------------------------
+
+/**
+ * The **section registry** —— 判定聚合的**唯一**来源。
+ *
+ * ⚠️ **为什么不是一串手写的展开**（D-147）：v0.31 批把差量段的断言**忘了
+ * 并进**聚合 ⇒ 那段的断言**永远不会红** ⇒ 门禁形同虚设 ⇒ ⇒ 现在**每一段
+ * 跑完就登记自己** ⇒ 判定聚合**只**从注册表取 ⇒ ⇒ 「新加一段忘了并进」
+ * 这件事**结构上不可能**（让 bug **写不出来**，而不是靠 review 抓）。
+ *
+ * ⚠️ **顺序即登记顺序** ⇒ 报告也按登记顺序打印（不重排可读顺序）。
+ *
+ * ⚠️ **skipped 的段也要登记**（空数组 + `skipped: true`）⇒ ⇒ 「没跑」与
+ * 「跑了但没登记」**分得开**（前者是显式的跳过，后者才是漏）。
+ *
+ * @type {{name: string, title: string, skippedTitle: string|null, checks: {name: string, ok: boolean, detail: string}[], skipped: boolean, reason: string|null}[]}
+ */
+const SECTION_REGISTRY = [];
+
+/**
+ * The **expected** section names（裁决 J）—— **故意写死**。
+ *
+ * ⚠️ **这张表是本批对 D-147 的结构性护栏**：跑完断言「注册表里的段名集合
+ * == 这张表」⇒ 不等就**红** ⇒ ⇒ 兜住「跑过了但没登记」与「登记了但不在
+ * 期望表里」两种漏。
+ *
+ * ⚠️ **加段时必须同时改这张表** ⇒ 漏了就红 ⇒ ⇒ 这是**故意的摩擦**（不是
+ * 缺陷）：一张写死的表把「加一段」这件事变成一次**必须显式**的动作。
+ *
+ * ⚠️ **段名要稳定**（前端 / 文档 / 报告都靠它）⇒ ⇒ 改名 = 改契约。
+ */
+const EXPECTED_SECTION_NAMES = Object.freeze([
+    "landing",
+    "render",
+    "kernelExec",
+    "source",
+    "waveform",
+    "osz",
+    "memoryMap",
+    "boardArchive",
+    "boardDelta",
+    "boardOrdering",
+]);
+
+/**
+ * Register one section's checks（裁决 I）。
+ *
+ * @param {string} name — the section name (must be in {@link EXPECTED_SECTION_NAMES})
+ * @param {{name: string, ok: boolean, detail: string}[]} checks
+ * @param {{title?: string, skippedTitle?: string|null, skipped?: boolean, reason?: string|null}} [opts]
+ * @returns {void}
+ */
+function registerSection(name, checks, opts = {}) {
+    SECTION_REGISTRY.push({
+        name: String(name),
+        title: String(opts.title ?? name),
+        skippedTitle: opts.skippedTitle ?? null,
+        checks: Array.isArray(checks) ? checks : [],
+        skipped: opts.skipped === true,
+        reason: opts.reason ?? null,
+    });
+}
+
+/**
+ * The registry-vs-expected-table diff（裁决 J）。
+ *
+ * @returns {{missing: string[], extra: string[], duplicated: string[], ok: boolean}}
+ */
+function registryDiff() {
+    const actual = SECTION_REGISTRY.map((s) => s.name);
+    const missing = EXPECTED_SECTION_NAMES.filter((n) => !actual.includes(n));
+    const extra = actual.filter((n) => !EXPECTED_SECTION_NAMES.includes(n));
+    const duplicated = actual.filter((n, i) => actual.indexOf(n) !== i);
+    return {
+        missing,
+        extra,
+        duplicated,
+        ok: missing.length === 0 && extra.length === 0 && duplicated.length === 0,
+    };
+}
+
+/**
+ * 跑一段 ⇒ **异常也变成一条判负的断言**（而不是把整趟跑挂掉）。
+ *
+ * ⚠️ **为什么**：门禁的价值在于「**跑完**」⇒ 一段抛异常时，后面的段**还没
+ * 跑**⇒ ⇒ 报告就少了 ⇒ ⇒ 看不到「哪一段炸了、后面的段是什么状态」⇒ ⇒
+ * ⇒ 这里把异常**如实**变成一条红 ⇒ ⇒ 后面那些段照跑。
+ *
+ * @param {string} name — the section name (for the message)
+ * @param {() => Promise<{skipped: boolean, reason?: string, checks: object[]}>} fn
+ * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
+ */
+async function runSection(name, fn) {
+    try {
+        return await fn();
+    } catch (err) {
+        return {
+            skipped: false,
+            checks: [{
+                name: `这一段（${name}）抛异常了`,
+                ok: false,
+                detail: String(err?.message ?? err).slice(0, 300),
+            }],
+        };
+    }
+}
+
+/**
+ * The canonical JSON of a value（**键序无关**）—— 用来比「逐字段相同」。
+ *
+ * ⚠️ **为什么要排序**：JS 对象的键序取决于**构造顺序** ⇒ 直接
+ * `JSON.stringify` 比较两个「内容相同但键序不同」的对象会判不等 ⇒ ⇒
+ * 字段顺序**不进判据**（顺序是**线上形状**的事，不是**图的内容**的事）。
+ *
+ * ⚠️ **数组的顺序仍然进判据**（一般值如此）⇒ ⇒ ⚠️ **但内存图的段列表另有口径**
+ * ⇒ ⇒ 见 {@link canonicalMemoryMap}（裁决 B：**`regions` 按基址排序**）⇒ ⇒
+ * 「两条路径产出的图必须一致」这条判据在**两层**（宿主层 + 工具层）必须是
+ * **同一个**口径 ⇒ ⇒ 否则两层会给出**不同的**判决。
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+function canonicalJson(value) {
+    const canon = (v) => {
+        if (Array.isArray(v)) return v.map(canon);
+        if (v && typeof v === "object") {
+            const out = {};
+            for (const k of Object.keys(v).sort()) out[k] = canon(v[k]);
+            return out;
+        }
+        return v;
+    };
+    return JSON.stringify(canon(value));
+}
+
+/**
+ * The canonical JSON of a **memory-map description**（裁决 B）。
+ *
+ * ⚠️ **两处**归一化：① **对象键**递归排序（键序不进判据）② **`regions`
+ * 按基址排序**（段的**列表顺序**也是**线上形状**的事，不是**图的内容**的事）。
+ *
+ * ⚠️ **为什么必须归一化列表顺序**：整份路径保留**调用方给的顺序**，差量路径
+ * 保留**基座的顺序**（命中**原地替换** / 未命中**末尾追加**）⇒ ⇒ 同一组改动
+ * 在两条路径上的**列表顺序天然不同**⇒ ⇒ 不归一化 ⇒ 真机层（T-4）会因
+ * 「同图不同序」**假红**。
+ *
+ * ⚠️ **与宿主层同一个口径** ⇒ ⇒ 宿主层的等价性用例（`crates/kernel/src/
+ * kernel_host/tests_board_delta_equivalence.rs`）用的也是「键序无关 +
+ * `regions` 按基址排序」⇒ ⇒ 两层的判决**必须一致** ⇒ ⇒ 否则一层绿、另一层
+ * 红，两边都说不清是哪儿错了。
+ *
+ * @param {unknown} description — a `PlatformDescription`（线上形状）
+ * @returns {string}
+ */
+function canonicalMemoryMap(description) {
+    if (!description || typeof description !== "object") {
+        return canonicalJson(description);
+    }
+    const copy = { ...description };
+    if (Array.isArray(copy.regions)) {
+        copy.regions = [...copy.regions].sort((a, b) => {
+            const ab = Number(a?.base ?? 0);
+            const bb = Number(b?.base ?? 0);
+            return ab === bb ? 0 : ab - bb;
+        });
+    }
+    return canonicalJson(copy);
+}
+
 /**
  * Console noise that is *not* a front-end defect: the browser asks for
  * `/favicon.ico`, the dev server has none, and the failed request shows
@@ -395,6 +566,59 @@ class CdpClient {
             // already closed
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Page probes (STAGE-17 · 裁决 K · D-147)
+// ---------------------------------------------------------------------------
+
+/**
+ * Evaluate an expression in the page **and await its value**.
+ *
+ * ⚠️ **这是本脚本唯一的「取回值」入口**（STAGE-17 · 裁决 K）：helper 内部
+ * 已经是 `awaitPromise: true` ⇒ ⇒ 「用 Promise 却忘了 await」在**语法层面**
+ * 不可能（那是 helper 的内部细节，调用点根本拿不到一个未 await 的 Promise）。
+ *
+ * ⚠️ **同步探针也走它**（形态统一 ⇒ **零**心智负担）：`awaitPromise` 对
+ * 非 Promise 的返回值是无害的。
+ *
+ * ⚠️ **副作用型的调用不要走它**（比如 `location.hash = ...` / `btn.click()`）
+ * —— 那些**不取回值** ⇒ 用 {@link runEffect}。
+ *
+ * @param {object} cdp
+ * @param {string} expression — the expression to evaluate in the page
+ * @param {number} [timeoutMs]
+ * @returns {Promise<unknown>} the value the expression produced
+ * @throws {Error} when the page threw (the message carries the description)
+ */
+async function awaitEval(cdp, expression, timeoutMs = 15000) {
+    const res = await cdp.send("Runtime.evaluate", {
+        expression,
+        awaitPromise: true,
+        returnByValue: true,
+    }, timeoutMs);
+    if (res.exceptionDetails) {
+        const err = res.exceptionDetails.exception?.description
+            ?? res.exceptionDetails.text
+            ?? "未知错误";
+        throw new Error(`页面求值失败：${String(err).slice(0, 300)}`);
+    }
+    return res.result?.value ?? null;
+}
+
+/**
+ * Evaluate an expression in the page for its **side effect** only.
+ *
+ * ⚠️ **返回值被丢弃** ⇒ ⇒ 用它就等于声明「我不要这个值」⇒ ⇒ 「忘了 await
+ * 一个 Promise」这件事在这条路上**也**不成立（副作用型的调用本来就不看值）。
+ *
+ * @param {object} cdp
+ * @param {string} expression
+ * @param {number} [timeoutMs]
+ * @returns {Promise<void>}
+ */
+async function runEffect(cdp, expression, timeoutMs = 15000) {
+    await cdp.send("Runtime.evaluate", { expression, returnByValue: true }, timeoutMs);
 }
 
 /**
@@ -1105,23 +1329,14 @@ async function runMemoryMapSection(cdp, opts) {
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
 
     // -- ① 切到编辑器视图，等它挂上 ----------------------------------------
-    await cdp.send("Runtime.evaluate", {
-        expression: 'location.hash = "#/memory-map";',
-        returnByValue: true,
-    });
-    await cdp.send("Runtime.evaluate", {
-        expression: BV_CAPTURE_COMMANDS_EXPRESSION,
-        returnByValue: true,
-    });
+    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
 
     let probe = null;
     const readyDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < readyDeadline) {
-        const res = await cdp.send("Runtime.evaluate", {
-            expression: BV_MEMORY_MAP_PROBE,
-            returnByValue: true,
-        });
-        probe = res.result?.value ?? null;
+        const value = await awaitEval(cdp, BV_MEMORY_MAP_PROBE);
+        probe = value ?? null;
         if (probe?.submitPresent) break;
         await sleep(250);
     }
@@ -1138,23 +1353,17 @@ async function runMemoryMapSection(cdp, opts) {
     add("板级内存图编辑器挂上了（`#/memory-map` 有提交按钮）", true, "submit 按钮在");
 
     // -- ② 点提交 ⇒ 命令**真的**发出去了 -----------------------------------
-    await cdp.send("Runtime.evaluate", {
-        expression: `(() => {
-            const btn = document.querySelector('[data-action="submit-memory-map"]');
-            if (!btn) return "no-button";
-            btn.click();
-            return "clicked";
-        })()`,
-        returnByValue: true,
-    });
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-action="submit-memory-map"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
     await sleep(400);
-    const cmdsRes = await cdp.send("Runtime.evaluate", {
-        expression: 'JSON.stringify(window.__bvCmds ?? [])',
-        returnByValue: true,
-    });
+    const cmdsText = await awaitEval(cdp, 'JSON.stringify(window.__bvCmds ?? [])');
     let cmds = [];
     try {
-        cmds = JSON.parse(String(cmdsRes.result?.value ?? "[]"));
+        cmds = JSON.parse(String(cmdsText ?? "[]"));
     } catch {
         cmds = [];
     }
@@ -1171,17 +1380,14 @@ async function runMemoryMapSection(cdp, opts) {
     //
     // ⚠️ 走的是**视图层发命令的那条通道**（`riscv:command`）⇒ 走的是
     // app → M-05 → 传输 → **真 WASM 内核** ⇒ 整条链都在。
-    await cdp.send("Runtime.evaluate", {
-        expression: `window.dispatchEvent(new CustomEvent("riscv:command", {
-            detail: {
-                action: "submit-memory-map",
-                requestId: "bv-mm-board",
-                viewId: "memory-map",
-                params: { description: ${JSON.stringify(BV_BOARD)} },
-            },
-        }))`,
-        returnByValue: true,
-    });
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "submit-memory-map",
+            requestId: "bv-mm-board",
+            viewId: "memory-map",
+            params: { description: ${JSON.stringify(BV_BOARD)} },
+        },
+    }))`);
 
     // ⚠️ **必须等这条命令真的往返一趟**再发下一条（`reset`）。
     //
@@ -1196,14 +1402,11 @@ async function runMemoryMapSection(cdp, opts) {
     const pendingDeadline = Date.now() + opts.timeoutMs;
     let pendingSeen = false;
     while (Date.now() < pendingDeadline) {
-        const res = await cdp.send("Runtime.evaluate", {
-            expression: `(() => {
-                const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
-                return Boolean(el);
-            })()`,
-            returnByValue: true,
-        });
-        if (res.result?.value === true) {
+        const pendingNow = await awaitEval(cdp, `(() => {
+            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+            return Boolean(el);
+        })()`);
+        if (pendingNow === true) {
             pendingSeen = true;
             break;
         }
@@ -1222,12 +1425,9 @@ async function runMemoryMapSection(cdp, opts) {
     //
     // ⚠️ 用 **demo 工程**重载（不是 osz 那个）：osz 的镜像装不进这张板 ⇒
     // 装它会失败 ⇒ 用户的板就永远生效不了。
-    await cdp.send("Runtime.evaluate", {
-        expression: `window.dispatchEvent(new CustomEvent("riscv:command", {
-            detail: { action: "reset", requestId: "bv-mm-reset", viewId: "memory-map", params: null },
-        }))`,
-        returnByValue: true,
-    });
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: { action: "reset", requestId: "bv-mm-reset", viewId: "memory-map", params: null },
+    }))`);
 
     // -- ⑤ 等产品视图的内存映射表变成新图 ----------------------------------
     //
@@ -1236,15 +1436,8 @@ async function runMemoryMapSection(cdp, opts) {
     const mapDeadline = Date.now() + opts.timeoutMs;
     let rows = [];
     while (Date.now() < mapDeadline) {
-        await cdp.send("Runtime.evaluate", {
-            expression: 'location.hash = "#/product";',
-            returnByValue: true,
-        });
-        const res = await cdp.send("Runtime.evaluate", {
-            expression: BV_MEMORY_MAP_PROBE,
-            returnByValue: true,
-        });
-        const p = res.result?.value ?? null;
+        await runEffect(cdp, 'location.hash = "#/product";');
+        const p = await awaitEval(cdp, BV_MEMORY_MAP_PROBE);
         rows = Array.isArray(p?.rows) ? p.rows : [];
         const hasNewRam = rows.some(
             (r) => String(r.base) === String(BV_NEW_RAM_BASE) && String(r.kind) === "ram",
@@ -1268,43 +1461,41 @@ async function runMemoryMapSection(cdp, opts) {
     // ⇒ 推导出来就是「假」⇒ 横幅**必须**没了。
     //
     // ⚠️ **判据是横幅的**有无**，不是文案** ⇒ 不靠 message 文本。
-    const pendingAfter = await cdp.send("Runtime.evaluate", {
-        expression: `(() => {
-            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
-            return Boolean(el);
-        })()`,
-        returnByValue: true,
-    });
+    const pendingAfter = await awaitEval(cdp, `(() => {
+        const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+        return Boolean(el);
+    })()`);
     add(
         "装载后「待生效」横幅**消失**（用户的板已经变成当前生效的图）",
-        pendingAfter.result?.value === false,
-        pendingAfter.result?.value === false
+        pendingAfter === false,
+        pendingAfter === false
             ? "横幅没了 ⇒ user_board == 当前生效的图"
             : "横幅还在 ⇒ 用户的板没真正生效",
     );
 
     // -- ⑥ 新 RAM 段：写进去 ⇒ 读得回来 ------------------------------------
-    const writeRes = await cdp.send("Runtime.evaluate", {
-        expression: `window.riscv_kernel.writeMemory(${BV_NEW_RAM_BASE}, "Word", ${BV_NEW_RAM_VALUE})`,
-        awaitPromise: true,
-        returnByValue: true,
-    }, 30000);
-    const writeOk = !writeRes.exceptionDetails;
+    let writeOk = true;
+    let writeWhy = "";
+    try {
+        await awaitEval(cdp,
+            `window.riscv_kernel.writeMemory(${BV_NEW_RAM_BASE}, "Word", ${BV_NEW_RAM_VALUE})`,
+            30000);
+    } catch (err) {
+        writeOk = false;
+        writeWhy = String(err?.message ?? err).slice(0, 200);
+    }
     add(
         "新 RAM 段**写**得进去",
         writeOk,
         writeOk
             ? `写入 ${BV_NEW_RAM_VALUE} @ 0x${BV_NEW_RAM_BASE.toString(16)}`
-            : `写失败：${String(writeRes.exceptionDetails?.exception?.description
-                ?? writeRes.exceptionDetails?.text ?? "?").slice(0, 200)}`,
+            : `写失败：${writeWhy}`,
     );
 
-    const readRes = await cdp.send("Runtime.evaluate", {
-        expression: `window.riscv_kernel.readMemory(${BV_NEW_RAM_BASE}, "Word")`,
-        awaitPromise: true,
-        returnByValue: true,
-    }, 30000);
-    const readValue = readRes.result?.value?.value ?? null;
+    const readReply = await awaitEval(cdp,
+        `window.riscv_kernel.readMemory(${BV_NEW_RAM_BASE}, "Word")`,
+        30000);
+    const readValue = readReply?.value ?? null;
     add(
         "新 RAM 段**读**得回来（写-读往返相等）",
         readValue === BV_NEW_RAM_VALUE,
@@ -1314,12 +1505,14 @@ async function runMemoryMapSection(cdp, opts) {
 
     // -- ⑦ 写新 RAM **之外** ⇒ 失败（size 真的是那个 size） -------------------
     const beyond = BV_NEW_RAM_BASE + BV_NEW_RAM_SIZE;
-    const beyondRes = await cdp.send("Runtime.evaluate", {
-        expression: `window.riscv_kernel.writeMemory(${beyond}, "Word", ${BV_NEW_RAM_VALUE})`,
-        awaitPromise: true,
-        returnByValue: true,
-    }, 30000);
-    const beyondFailed = Boolean(beyondRes.exceptionDetails);
+    let beyondFailed = false;
+    try {
+        await awaitEval(cdp,
+            `window.riscv_kernel.writeMemory(${beyond}, "Word", ${BV_NEW_RAM_VALUE})`,
+            30000);
+    } catch (_err) {
+        beyondFailed = true;
+    }
     add(
         "写新 RAM **之外** ⇒ 失败（那段的大小真的是那个大小）",
         beyondFailed,
@@ -1407,23 +1600,14 @@ async function runBoardArchiveSection(cdp, opts) {
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
 
     // -- ① 切到编辑器视图，等它挂上 ----------------------------------------
-    await cdp.send("Runtime.evaluate", {
-        expression: 'location.hash = "#/memory-map";',
-        returnByValue: true,
-    });
-    await cdp.send("Runtime.evaluate", {
-        expression: BV_CAPTURE_COMMANDS_EXPRESSION,
-        returnByValue: true,
-    });
+    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
 
     let probe = null;
     const readyDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < readyDeadline) {
-        const res = await cdp.send("Runtime.evaluate", {
-            expression: BV_BOARD_ARCHIVE_PROBE,
-            returnByValue: true,
-        });
-        probe = res.result?.value ?? null;
+        const value = await awaitEval(cdp, BV_BOARD_ARCHIVE_PROBE);
+        probe = value ?? null;
         if (probe?.savePresent) break;
         await sleep(250);
     }
@@ -1452,27 +1636,21 @@ async function runBoardArchiveSection(cdp, opts) {
     // ⚠️ **判据**：此刻镜像**已经装载过**（板级内存图段装过）⇒ 宿主对新板
     // **只记下、不重建** ⇒ 回的事件里 `pending = true` ⇒ 「待生效」横幅出现
     // ⇒ 那条横幅**出现**就证明命令**往返完成**了（也证明内核**接受**了）。
-    await cdp.send("Runtime.evaluate", {
-        expression: `(() => {
-            const btn = document.querySelector('[data-action="submit-memory-map"]');
-            if (!btn) return "no-button";
-            btn.click();
-            return "clicked";
-        })()`,
-        returnByValue: true,
-    });
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-action="submit-memory-map"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
 
     const pendingDeadline = Date.now() + opts.timeoutMs;
     let pendingSeen = false;
     while (Date.now() < pendingDeadline) {
-        const res = await cdp.send("Runtime.evaluate", {
-            expression: `(() => {
-                const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
-                return Boolean(el);
-            })()`,
-            returnByValue: true,
-        });
-        if (res.result?.value === true) {
+        const pendingNow = await awaitEval(cdp, `(() => {
+            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+            return Boolean(el);
+        })()`);
+        if (pendingNow === true) {
             pendingSeen = true;
             break;
         }
@@ -1488,11 +1666,7 @@ async function runBoardArchiveSection(cdp, opts) {
     let afterSubmit = null;
     const saveDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < saveDeadline) {
-        const res = await cdp.send("Runtime.evaluate", {
-            expression: BV_BOARD_ARCHIVE_PROBE,
-            returnByValue: true,
-        });
-        afterSubmit = res.result?.value ?? null;
+        afterSubmit = await awaitEval(cdp, BV_BOARD_ARCHIVE_PROBE);
         if (afterSubmit && afterSubmit.saveDisabled === false) break;
         await sleep(200);
     }
@@ -1503,41 +1677,31 @@ async function runBoardArchiveSection(cdp, opts) {
     );
 
     // -- ③ 点「保存当前板」⇒ 档案里多一块 ----------------------------------
-    const submittedRes = await cdp.send("Runtime.evaluate", {
-        expression: `(() => {
-            const cmds = Array.isArray(window.__bvCmds) ? window.__bvCmds : [];
-            const cmd = cmds.find((c) => String(c.action || "") === "submit-memory-map");
-            if (!cmd) return "";
-            const canon = ${BV_CANONICAL_JSON};
-            return canon(cmd.params && cmd.params.description ? cmd.params.description : null);
-        })()`,
-        returnByValue: true,
-    });
-    const submittedCanonical = String(submittedRes.result?.value ?? "");
+    const submittedCanonical = String(await awaitEval(cdp, `(() => {
+        const cmds = Array.isArray(window.__bvCmds) ? window.__bvCmds : [];
+        const cmd = cmds.find((c) => String(c.action || "") === "submit-memory-map");
+        if (!cmd) return "";
+        const canon = ${BV_CANONICAL_JSON};
+        return canon(cmd.params && cmd.params.description ? cmd.params.description : null);
+    })()`) ?? "");
     add(
         "捕到**提交出去**的那份描述（后面拿它跟存下来的那份逐字段比）",
         submittedCanonical.length > 0,
         submittedCanonical ? `规范 JSON ${submittedCanonical.length} 字节` : "没捕到提交命令",
     );
 
-    await cdp.send("Runtime.evaluate", {
-        expression: `(() => {
-            const btn = document.querySelector('[data-action="save-memory-map"]');
-            if (!btn) return "no-button";
-            btn.click();
-            return "clicked";
-        })()`,
-        returnByValue: true,
-    });
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-action="save-memory-map"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
 
     let saved = null;
     const savedDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < savedDeadline) {
-        const res = await cdp.send("Runtime.evaluate", {
-            expression: BV_BOARD_ARCHIVE_PROBE,
-            returnByValue: true,
-        });
-        saved = res.result?.value ?? null;
+        const value = await awaitEval(cdp, BV_BOARD_ARCHIVE_PROBE);
+        saved = value ?? null;
         if (saved && saved.rowCount > 0) break;
         await sleep(200);
     }
@@ -1564,11 +1728,7 @@ async function runBoardArchiveSection(cdp, opts) {
     const bootDeadline = Date.now() + opts.timeoutMs;
     let booted = false;
     while (Date.now() < bootDeadline) {
-        const res = await cdp.send("Runtime.evaluate", {
-            expression: PROBE_EXPRESSION,
-            returnByValue: true,
-        });
-        const p = res.result?.value ?? null;
+        const p = await awaitEval(cdp, PROBE_EXPRESSION);
         const landing = p ? landingChecks(p) : [];
         if (landing.length > 0 && landing.every((c) => c.ok)) {
             booted = true;
@@ -1582,8 +1742,7 @@ async function runBoardArchiveSection(cdp, opts) {
         booted ? "落地页检查全过" : "刷新后前端没起来",
     );
 
-    const storedRes = await cdp.send("Runtime.evaluate", {
-        expression: `new Promise((resolve) => {
+    const storedText = await awaitEval(cdp, `new Promise((resolve) => {
             const canon = ${BV_CANONICAL_JSON};
             let req;
             try {
@@ -1618,13 +1777,10 @@ async function runBoardArchiveSection(cdp, opts) {
                     resolve(JSON.stringify({ error: String(err) }));
                 }
             };
-        })`,
-        awaitPromise: true,
-        returnByValue: true,
-    });
+        })`);
     let stored = null;
     try {
-        stored = JSON.parse(String(storedRes.result?.value ?? "{}"));
+        stored = JSON.parse(String(storedText ?? "{}"));
     } catch {
         stored = null;
     }
@@ -1686,15 +1842,134 @@ const BV_DELTA_RAM_SIZE = 4194304; // 4 MiB（原 8 MiB）
  */
 const BV_WIRE_HOOK_EXPRESSION = `(() => {
   if (!Array.isArray(window.__bvWire)) window.__bvWire = [];
+  if (!Array.isArray(window.__bvIn)) window.__bvIn = [];
   if (!window.__bvWireHooked) {
     window.__bvWireHooked = true;
     const orig = Worker.prototype.postMessage;
     Worker.prototype.postMessage = function (msg) {
       try { window.__bvWire.push(JSON.stringify(msg)); } catch (e) {}
+      // ⚠️ **顺手把 worker 实例留下来**（STAGE-17 · T-4 / T-6 要用）：
+      //   · 读**入向**帧（内核 → 主机）——「当前生效的图」就在里面；
+      //   · 往 worker **注入**一个事件帧（乱序到达那一条）。
+      //
+      // ⚠️ **入向的监听器是在 transport 之后注册的** ⇒ 内核的帧**先**到
+      // 前端（状态推进）**再**到这里的捕获 ⇒ ⇒ 「捕获到的最后一帧」就是
+      // 「前端已经处理过的最后一帧」⇒ ⇒ 两者不会错位。
+      try {
+        if (window.__bvWorker !== this) {
+          window.__bvWorker = this;
+          this.addEventListener("message", (ev) => {
+            try { window.__bvIn.push(JSON.stringify(ev.data)); } catch (e) {}
+          });
+        }
+      } catch (e) {}
       return orig.apply(this, arguments);
     };
   }
   return "hooked";
+})()`;
+
+/**
+ * 注入帧的**哨兵 seq**（负数）。
+ *
+ * ⚠️ 注入的帧**也会**被上面的入向捕获器看见（它就挂在同一个 worker 上）
+ * ⇒ ⇒ 读「内核说的生效图」时必须**跳过**它 ⇒ ⇒ 用一个**不可能**由传输层
+ * 产生的 seq（传输层的 seq 是从 1 起的单调计数）把它标出来。
+ */
+const BV_INJECTED_FRAME_SEQ = -1;
+
+/**
+ * 工具自己发给内核的**命令帧**的 seq。
+ *
+ * ⚠️ **必须是正数**：契约信封的 `seq` 是 `u64` ⇒ 负数会让内核**整个信封**
+ * 解析失败（`E_PROTO-08`）⇒ ⇒ 这里用一个**传输层不可能发到的**大数。
+ */
+const BV_TOOL_COMMAND_SEQ = 900001;
+
+/**
+ * 读**最后一条**内核推回来的 `memory.map` 事件（内核说的当前生效的图）。
+ *
+ * ⚠️ **注入的帧被跳过**（哨兵 seq）⇒ ⇒ 这里读到的**永远是内核说的**那份。
+ *
+ * ⚠️ **生效图 = 事件载荷的 `description`**（不是 DOM 上的投影）⇒ ⇒ 比的
+ * 是**图本身**。
+ */
+const BV_LAST_MEMORY_MAP_EXPRESSION = `(() => {
+  const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
+  let last = null;
+  for (const raw of frames) {
+    let frame = null;
+    try { frame = JSON.parse(String(raw)); } catch (e) { continue; }
+    const seq = Number(frame && frame.seq);
+    if (!Number.isFinite(seq) || seq < 0) continue;
+    const msg = (frame && frame.payload) ? frame.payload : null;
+    const body = (msg && msg.payload) ? msg.payload : null;
+    const ev = (body && body.Event) ? body.Event : null;
+    if (!ev || !ev.MemoryMap) continue;
+    last = {
+      description: ev.MemoryMap.description ?? null,
+      pending: ev.MemoryMap.pending === true,
+      loaded: ev.MemoryMap.loaded === true,
+      revision: Number(ev.MemoryMap.revision ?? 0),
+    };
+  }
+  return last;
+})()`;
+
+/**
+ * 读**最后一条**内核推回来的**错误**事件（内核拒了什么）。
+ *
+ * ⚠️ **读的是内核的码**（`E_PLT-13` / `E_PLT-07` …）⇒ ⇒ 不靠文案匹配。
+ */
+const BV_LAST_ERROR_EVENT_EXPRESSION = `(() => {
+  const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
+  let last = null;
+  for (const raw of frames) {
+    let frame = null;
+    try { frame = JSON.parse(String(raw)); } catch (e) { continue; }
+    const seq = Number(frame && frame.seq);
+    if (!Number.isFinite(seq) || seq < 0) continue;
+    const msg = (frame && frame.payload) ? frame.payload : null;
+    const body = (msg && msg.payload) ? msg.payload : null;
+    const ev = (body && body.Event) ? body.Event : null;
+    if (!ev || !ev.Error) continue;
+    last = {
+      code: String(ev.Error.code ?? ""),
+      message: String(ev.Error.message ?? ""),
+    };
+  }
+  return last;
+})()`;
+
+/**
+ * 最后一次「提交板级内存图」命令带的那份描述（= 用户配的那张板）。
+ *
+ * ⚠️ **这是草稿转成的线上描述**（七键、没有内核补上的缺省）⇒ ⇒ 拿它做
+ * **整份**提交 ⇒ ⇒ 内核会自己补缺省 ⇒ ⇒ 与差量路径的结果可比。
+ */
+const BV_LAST_SUBMITTED_DESCRIPTION_EXPRESSION = `(() => {
+  const cmds = Array.isArray(window.__bvCmds) ? window.__bvCmds : [];
+  let last = null;
+  for (const c of cmds) {
+    if (String((c && c.action) ? c.action : "") !== "submit-memory-map") continue;
+    const params = (c && c.params) ? c.params : null;
+    last = (params && params.description) ? params.description : null;
+  }
+  return last;
+})()`;
+
+/**
+ * 板级内存图的**错误码**（内核拒了就会出现在这儿）。
+ *
+ * ⚠️ **读的是 `data-error-code`**（内核的码）⇒ ⇒ 不靠文案匹配。
+ */
+const BV_MEMORY_MAP_ERROR_PROBE = `(() => {
+  const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-error]');
+  return {
+    present: Boolean(el),
+    code: el ? String(el.getAttribute("data-error-code") ?? "") : "",
+    text: el ? String(el.textContent ?? "").trim() : "",
+  };
 })()`;
 
 /** 读修订号 / 待生效横幅 / 卸载按钮 / 已捕到的线上帧。 */
@@ -1739,22 +2014,17 @@ async function runBoardDeltaSection(cdp, opts) {
     const checks = [];
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
 
-    const evalValue = async (expression) => {
-        const res = await cdp.send("Runtime.evaluate", { expression, returnByValue: true });
-        return res.result?.value ?? null;
-    };
-
     // -- ① 切到编辑器视图 + 装线上钩子 --------------------------------------
-    await cdp.send("Runtime.evaluate", {
-        expression: 'location.hash = "#/memory-map";',
-        returnByValue: true,
-    });
-    await evalValue(BV_WIRE_HOOK_EXPRESSION);
+    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
+    // ⚠️ **命令捕获器也得装**（板档案段刷新过页面 ⇒ 钩子没了）⇒ ⇒ T-4 要
+    // 从「提交出去的那条命令」里拿**用户配的那张板**（草稿转成的线上描述）。
+    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
 
     let probe = null;
     const readyDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < readyDeadline) {
-        probe = await evalValue(BV_DELTA_PROBE);
+        probe = await awaitEval(cdp, BV_DELTA_PROBE);
         if (probe?.unloadPresent) break;
         await sleep(250);
     }
@@ -1775,7 +2045,7 @@ async function runBoardDeltaSection(cdp, opts) {
     );
 
     // -- ② 点「卸载工程」⇒ 命令真的发到内核 --------------------------------
-    await evalValue(`(() => {
+    await runEffect(cdp, `(() => {
         const btn = document.querySelector('[data-action="unload-project"]');
         if (!btn) return "no-button";
         btn.click();
@@ -1785,7 +2055,7 @@ async function runBoardDeltaSection(cdp, opts) {
     let unloadSeen = false;
     const unloadDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < unloadDeadline) {
-        probe = await evalValue(BV_DELTA_PROBE);
+        probe = await awaitEval(cdp, BV_DELTA_PROBE);
         if (probe && bvWireHas(probe.wire, "UnloadProject")) {
             unloadSeen = true;
             break;
@@ -1806,27 +2076,21 @@ async function runBoardDeltaSection(cdp, opts) {
     // 变成「待生效」（宿主对已装载的会话只记下、不重建）⇒ ⇒ 提交后**生效图
     // 真的变成那张板** ⇒ 就证明 `image_loaded` 真的被清掉了 ⇒ ⇒ 这才是
     // 「卸载 ⇒ 改板立即生效」的端到端判别式（D-139 判别力 ⑤）。
-    await cdp.send("Runtime.evaluate", {
-        expression: `window.dispatchEvent(new CustomEvent("riscv:command", {
-            detail: {
-                action: "submit-memory-map",
-                requestId: "bv-delta-board",
-                viewId: "memory-map",
-                params: { description: ${JSON.stringify(BV_BOARD)} },
-            },
-        }))`,
-        returnByValue: true,
-    });
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "submit-memory-map",
+            requestId: "bv-delta-board",
+            viewId: "memory-map",
+            params: { description: ${JSON.stringify(BV_BOARD)} },
+        },
+    }))`);
 
     let effectiveRows = [];
     let appliedImmediately = false;
     const applyDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < applyDeadline) {
-        await cdp.send("Runtime.evaluate", {
-            expression: 'location.hash = "#/product";',
-            returnByValue: true,
-        });
-        const p = await evalValue(BV_MEMORY_MAP_PROBE);
+        await runEffect(cdp, 'location.hash = "#/product";');
+        const p = await awaitEval(cdp, BV_MEMORY_MAP_PROBE);
         effectiveRows = Array.isArray(p?.rows) ? p.rows : [];
         const hasNewRam = effectiveRows.some(
             (r) => String(r.base) === String(BV_NEW_RAM_BASE) && String(r.kind) === "ram",
@@ -1846,12 +2110,9 @@ async function runBoardDeltaSection(cdp, opts) {
     );
 
     // ⚠️ 「待生效」横幅**必须不出现**（立即生效 ⇒ 没有待生效的那一份）。
-    await cdp.send("Runtime.evaluate", {
-        expression: 'location.hash = "#/memory-map";',
-        returnByValue: true,
-    });
+    await runEffect(cdp, 'location.hash = "#/memory-map";');
     await sleep(300);
-    probe = await evalValue(BV_DELTA_PROBE);
+    probe = await awaitEval(cdp, BV_DELTA_PROBE);
     add(
         "立即生效 ⇒ **没有**「待生效」横幅",
         probe?.pending === false,
@@ -1867,6 +2128,11 @@ async function runBoardDeltaSection(cdp, opts) {
 
     // -- ④ 改一段 RAM 的大小（元数据**一字不动**）⇒ 走**差量** ---------------
     //
+    // ⚠️ **先记下「改动前」的生效图**（T-4 第 ⑥ 条的对照量）⇒ ⇒ 它必须
+    // 在**差量提交之前**取 ⇒ ⇒ 取的是**内核推回来的**那份（线上帧里的
+    // `memory.map` 事件）⇒ ⇒ 不是 DOM 上的投影。
+    const e0 = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
+    //
     // ⚠️ **走真 UI 动作**（不是手工拼一份描述发过去）：
     //   ① 点「从当前生效的图载入」⇒ 编辑器的草稿 = **当前生效的图**；
     //   ② 把那一段的 size 输入框改成 4 MiB；
@@ -1880,7 +2146,7 @@ async function runBoardDeltaSection(cdp, opts) {
     // ⚠️ **走真 UI 还有一层好处**：编辑器那一份是**七字段**（没有
     // `max_region_bytes`），而「当前生效的图」是**八字段**（内核恒定写出）
     // ⇒ 这一段**顺带**验了「缺省 ≡ null」的归一化。
-    const editResult = await evalValue(`(() => {
+    const editResult = await awaitEval(cdp, `(() => {
         const loadBtn = document.querySelector('[data-action="load-current"]');
         if (!loadBtn) return "no-load-current";
         loadBtn.click();
@@ -1911,7 +2177,7 @@ async function runBoardDeltaSection(cdp, opts) {
     let patchFrame = "";
     const patchDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < patchDeadline) {
-        probe = await evalValue(BV_DELTA_PROBE);
+        probe = await awaitEval(cdp, BV_DELTA_PROBE);
         const wire = probe?.wire ?? [];
         if (bvWireHas(wire, "PatchMemoryMap")) {
             patchFrame = bvWireFind(wire, "PatchMemoryMap");
@@ -1934,11 +2200,8 @@ async function runBoardDeltaSection(cdp, opts) {
     let patchedRows = [];
     const patchedDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < patchedDeadline) {
-        await cdp.send("Runtime.evaluate", {
-            expression: 'location.hash = "#/product";',
-            returnByValue: true,
-        });
-        const p = await evalValue(BV_MEMORY_MAP_PROBE);
+        await runEffect(cdp, 'location.hash = "#/product";');
+        const p = await awaitEval(cdp, BV_MEMORY_MAP_PROBE);
         patchedRows = Array.isArray(p?.rows) ? p.rows : [];
         const row = patchedRows.find((r) => String(r.base) === String(BV_DELTA_RAM_BASE));
         if (row && String(row.size) === String(BV_DELTA_RAM_SIZE)) break;
@@ -1952,12 +2215,9 @@ async function runBoardDeltaSection(cdp, opts) {
     );
 
     // -- ⑥ 修订号 **+1** ----------------------------------------------------
-    await cdp.send("Runtime.evaluate", {
-        expression: 'location.hash = "#/memory-map";',
-        returnByValue: true,
-    });
+    await runEffect(cdp, 'location.hash = "#/memory-map";');
     await sleep(300);
-    probe = await evalValue(BV_DELTA_PROBE);
+    probe = await awaitEval(cdp, BV_DELTA_PROBE);
     const revisionAfter = probe?.revision ?? null;
     add(
         "修订号**真的 +1**（并发可见性的凭据）",
@@ -1965,16 +2225,106 @@ async function runBoardDeltaSection(cdp, opts) {
         `${JSON.stringify(revisionBefore)} → ${JSON.stringify(revisionAfter)}`,
     );
 
+    // =================================================================
+    // T-4（STAGE-17 · §4.2 · D-145 的**真机层**）· 差量 ≡ 整份
+    // =================================================================
+    //
+    // ⚠️ **六步**（规格 §4.2 的原文口径）：
+    //   ① 真前端把「当前生效的图」载入编辑器 ⇒ 改一段 ⇒ 提交 ⇒ ⇒ 走**差量**；
+    //   ② 记下生效图 **E1**；
+    //   ③ 把**同一张板**（含那处改动）**整份**提交一次 ⇒ ⇒ 走**整份**；
+    //   ④ 记下生效图 **E2**；
+    //   ⑤ 断言：E1 与 E2 **逐字段相同**；
+    //   ⑥ 断言：E1 与「改动前的图」**不相同**。
+    //
+    // ⚠️ **① 已经做完了**（就是上面第 ④ 步那个「只改一段 ⇒ 走差量」）⇒
+    // 这里从 **②** 接着做。
+    //
+    // ⚠️ **「生效图」从哪来**：**内核推回来的 `memory.map` 事件**（线上帧
+    // 里那个 `MemoryMap` 载荷的 `description`）⇒ ⇒ 那是**内核说的**当前
+    // 生效的图，不是 DOM 上的投影 ⇒ ⇒ 「逐字段相同」比的是**图本身**。
+    //
+    // ⚠️ **③ 为什么走线上帧**：前端的路由规则（裁决 D）是「**元数据**变了
+    // ⇒ 整份；否则 ⇒ 差量」⇒ ⇒ **同一张板**在前端那里**只可能**走差量 ⇒
+    // ⇒ 「整份路径」只能由**别的入口**触发 ⇒ 这里直接把 `SetMemoryMap`
+    // 命令**发到 worker**（**用前端自己的契约镜像** `front/lib/frame.js` +
+    // `front/lib/message.js` ⇒ **不另写一份线上形状**）⇒ ⇒ 内核走的是
+    // **它自己的整份路径**（`on_set_memory_map`）⇒ ⇒ 两条路径比的是
+    // **同一个内核**的两条路。
+    //
+    // ⚠️ **E2 用的是「用户配的那张板」**（草稿转成的七键描述）⇒ ⇒ 内核
+    // 自己补缺省（`auto_selectable` / `max_region_bytes`）⇒ ⇒ 与 E1
+    // （差量合成 ⇒ 也是内核补过缺省的）**可比**。
+    const draftDescription = await awaitEval(cdp, BV_LAST_SUBMITTED_DESCRIPTION_EXPRESSION);
+    const revisionNow = Number(revisionAfter);
+    // ⚠️ **E1 = 差量路径的生效图**（= 整份提交**之前**内核说的那张）。
+    const e1 = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
+
+    const wholeSubmit = await awaitEval(cdp, `(async () => {
+        const { encodeFrame } = await import("./lib/frame.js");
+        const { Command, commandMessage } = await import("./lib/message.js");
+        if (!window.__bvWorker) return { ok: false, why: "no-worker" };
+        const seq = ${BV_TOOL_COMMAND_SEQ};
+        const payload = commandMessage(seq, Command.setMemoryMap(
+            ${JSON.stringify(draftDescription)},
+            ${revisionNow},
+        ));
+        const frame = encodeFrame({
+            type: "command",
+            seq: seq,
+            sessionId: null,
+            role: null,
+            reqId: null,
+            payload: payload,
+        });
+        window.__bvWorker.postMessage(frame);
+        return { ok: true, seq: seq };
+    })()`);
+    add(
+        "整份路径的命令**真的发到内核**了（线上帧里是 `SetMemoryMap`）",
+        Boolean(wholeSubmit?.ok),
+        wholeSubmit?.ok
+            ? `已发 SetMemoryMap（期望修订号 ${revisionNow}）`
+            : `发不出去：${JSON.stringify(wholeSubmit?.why ?? null)}`,
+    );
+
+    // 等内核把整份路径的结果推回来（E2）。
+    let e2 = null;
+    const e2Deadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < e2Deadline) {
+        const now = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
+        if (now && Number(now.revision) > revisionNow) {
+            e2 = now;
+            break;
+        }
+        await sleep(200);
+    }
+    const e1Canonical = canonicalMemoryMap(e1?.description ?? null);
+    const e2Canonical = canonicalMemoryMap(e2?.description ?? null);
+    const wholeErr = await awaitEval(cdp, BV_LAST_ERROR_EVENT_EXPRESSION);
+    add(
+        "T-4：差量路径与整份路径的**生效图逐字段相同**（规范 JSON · 键序无关）",
+        Boolean(e2) && e1Canonical === e2Canonical && e1Canonical !== "null",
+        e2
+            ? `E1 ${e1Canonical.length} 字节 / E2 ${e2Canonical.length} 字节 ⇒ ${e1Canonical === e2Canonical ? "相同" : "**不同**"}`
+            : `整份路径没回来（内核没回事件？内核最后的错误：`
+              + `${JSON.stringify(wholeErr ?? null)}；送出去的描述：`
+              + `${draftDescription ? `${canonicalMemoryMap(draftDescription).length} 字节` : "**没捕到提交命令**"}）`,
+    );
+    add(
+        "T-4：生效图与**改动前**那张**不相同**（⇒ 差量**真的**生效了，不是两边都没变）",
+        canonicalMemoryMap(e0?.description ?? null) !== e1Canonical
+            && canonicalMemoryMap(e0?.description ?? null) !== "null",
+        `改动前 ${canonicalMemoryMap(e0?.description ?? null).length} 字节 vs 改动后 ${e1Canonical.length} 字节`,
+    );
+
     // -- ⑦ 刷新页面 ⇒ 重新引导成功 + **板档案还在**（回归守卫） --------------
-    await cdp.send("Runtime.evaluate", {
-        expression: "location.reload();",
-        returnByValue: true,
-    });
+    await runEffect(cdp, "location.reload();");
     await sleep(1200);
     let landing = [];
     const landingDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < landingDeadline) {
-        const p = await evalValue(PROBE_EXPRESSION);
+        const p = await awaitEval(cdp, PROBE_EXPRESSION);
         landing = p ? landingChecks(p) : [];
         if (landing.length > 0 && landing.every((c) => c.ok)) break;
         await sleep(250);
@@ -1988,9 +2338,8 @@ async function runBoardDeltaSection(cdp, opts) {
     // ⚠️ **必须 `awaitPromise`**：`indexedDB.open` 走的是 Promise ⇒ 不 await
     // 的话这里拿到的是**一个还没 resolve 的 Promise 对象** ⇒ 「档案空了」
     // 与「探测失败」会**长得一模一样**（一条假红）。
-    const archiveRes = await cdp.send("Runtime.evaluate", {
-        expression: `(() => {
-            return new Promise((resolve) => {
+    const archive = await awaitEval(cdp, `(() => {
+        return new Promise((resolve) => {
                 let req;
                 try {
                     // ⚠️ **不带版本号**：带版本号打开会与前端自己那次打开
@@ -2018,17 +2367,228 @@ async function runBoardDeltaSection(cdp, opts) {
                     }
                 };
             });
-        })()`,
-        awaitPromise: true,
-        returnByValue: true,
-    });
-    const archive = archiveRes.result?.value ?? null;
+        })()`);
     add(
         "刷新后**板档案还在**（本批没把上一批的能力弄坏）",
         Boolean(archive?.ok) && Array.isArray(archive?.ids) && archive.ids.length > 0,
         archive?.ok
             ? `库里 ${JSON.stringify(archive?.ids ?? [])}`
             : `档案探测**失败**（why = ${JSON.stringify(archive?.why ?? null)}）—— 不等于「库里空了」`,
+    );
+
+    return { skipped: false, checks };
+}
+
+// ---------------------------------------------------------------------------
+// STAGE-17 · 乱序到达（T-6 · D-146 的**真机层**）
+// ---------------------------------------------------------------------------
+
+/**
+ * 走**真 UI**改一段的大小并提交（返回改了什么）。
+ *
+ * ⚠️ **走真 UI 动作**（载入当前生效的图 → 改一栏 → 点提交）⇒ ⇒ 前端
+ * **自己**算差量、自己算期望修订号 ⇒ ⇒ 这条路验的才是「真前端」。
+ *
+ * ⚠️ **改的是第一段带 size 的 RAM/ROM**（外设窗口**没有** size 栏 ⇒
+ * 跳过）⇒ ⇒ 改成**一半**（保证一定变小 ⇒ 差量非空 ⇒ 前端**真的**会发
+ * 命令）。
+ */
+function bvEditFirstRamSizeExpression() {
+    return `(() => {
+        const loadBtn = document.querySelector('[data-action="load-current"]');
+        if (!loadBtn) return { ok: false, why: "no-load-current" };
+        loadBtn.click();
+        const rows = Array.from(document.querySelectorAll("[data-mmap-row]"));
+        let target = null;
+        for (const row of rows) {
+            const sizeInput = row.querySelector('[data-mmap-region-field="size"]');
+            if (!sizeInput) continue;
+            target = { row: row, sizeInput: sizeInput };
+            break;
+        }
+        if (!target) return { ok: false, why: "no-ram-row" };
+        const baseInput = target.row.querySelector('[data-mmap-region-field="base"]');
+        const before = Number(String(target.sizeInput.value ?? "").trim());
+        const after = Math.max(1, Math.floor(before / 2));
+        if (!Number.isFinite(before) || before <= 1 || after === before) {
+            return { ok: false, why: "cannot-halve", before: before };
+        }
+        target.sizeInput.value = String(after);
+        target.sizeInput.dispatchEvent(new Event("input", { bubbles: true }));
+        const btn = document.querySelector('[data-action="submit-memory-map"]');
+        if (!btn) return { ok: false, why: "no-submit" };
+        btn.click();
+        return {
+            ok: true,
+            base: baseInput ? String(baseInput.value ?? "") : "",
+            before: before,
+            after: after,
+        };
+    })()`;
+}
+
+/**
+ * 乱序到达那一段（STAGE-17 · §5 的 **T-6**）。
+ *
+ * ⚠️ **依赖 Lane B 的前端护栏**（`wireMemoryMap` 的「**严格更旧**才挡」）：
+ * 没有那条护栏时 ⇒ 前端会被更旧的事件覆盖 ⇒ 提交带的是**更旧**的修订号
+ * ⇒ 真内核**必然**拒（`E_PLT-13`）⇒ ⇒ **这条 lane 单独跑时 T-6 必然红**
+ * ⇒ ⇒ 它在**整合批**（三条 lane 合上之后）才会变绿。
+ *
+ * ⚠️ **注入的是「线上帧」**：走的是**内核 → 主机**那条路（worker 的
+ * `message` 事件）⇒ ⇒ 用**前端自己的契约镜像**造那个帧（`frame.js` 的
+ * `encodeFrame` + `message.js` 的 `Event.memoryMap`）⇒ ⇒ **不另写一份
+ * 线上形状** ⇒ ⇒ 帧的 `crc` 也是前端自己算的。
+ *
+ * ⚠️ **注入的是「更旧」的事件**：修订号**严格小于**当前那个 ⇒ ⇒ 前端若
+ * 没有护栏，它就会拿这份更旧的修订号去提交 ⇒ ⇒ 内核拒（`E_PLT-13`）。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
+ */
+async function runBoardOrderingSection(cdp, opts) {
+    /** @type {{name: string, ok: boolean, detail: string}[]} */
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+
+    // -- ① 切到编辑器视图 + **重装**线上钩子（上一页刷新过 ⇒ 钩子丢了） ----
+    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
+    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
+
+    let probe = null;
+    const readyDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < readyDeadline) {
+        probe = await awaitEval(cdp, BV_DELTA_PROBE);
+        if (probe?.unloadPresent) break;
+        await sleep(250);
+    }
+    if (!probe?.unloadPresent) {
+        return {
+            skipped: false,
+            checks: [{
+                name: "板级内存图编辑器挂上了（`#/memory-map`）",
+                ok: false,
+                detail: "等不到编辑器视图（前端引导没起来？）",
+            }],
+        };
+    }
+    add("板级内存图编辑器挂上了（`#/memory-map`）", true, "编辑器在");
+
+    // -- ② 先真提交一次 ⇒ 拿到一个**非零**的修订号 --------------------------
+    //
+    // ⚠️ **为什么先提交一次**：要注入的「更旧」事件必须**严格更旧** ⇒ ⇒
+    // 当前修订号得 **> 0** ⇒ ⇒ 先让内核接受一次变更。
+    //
+    // ⚠️ **必须真的改一处** ⇒ 否则前端的计划是「什么都没改」⇒ **不发
+    // 命令** ⇒ ⇒ 白跑一趟。
+    const firstEdit = await awaitEval(cdp, bvEditFirstRamSizeExpression());
+    add(
+        "先真提交一次（改一段的大小 ⇒ 差量非空 ⇒ 前端**真的**发命令）",
+        Boolean(firstEdit?.ok),
+        firstEdit?.ok
+            ? `基址 ${firstEdit.base} 的大小 ${firstEdit.before} → ${firstEdit.after}`
+            : `没改成：${JSON.stringify(firstEdit?.why ?? null)}`,
+    );
+    if (!firstEdit?.ok) {
+        return { skipped: false, checks };
+    }
+
+    // 等内核把这次提交的结果推回来（修订号 +1）。
+    let afterFirst = null;
+    const firstDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < firstDeadline) {
+        const now = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
+        if (now && Number(now.revision) >= 1) {
+            afterFirst = now;
+            break;
+        }
+        await sleep(200);
+    }
+    const revisionBefore = Number(afterFirst?.revision ?? -1);
+    add(
+        "内核接受了那一次提交（内核说的修订号 **+1**）",
+        revisionBefore >= 1,
+        `内核的修订号 = ${revisionBefore}`,
+    );
+
+    // -- ③ 注入一个**更旧**的 `memory.map` 事件 ----------------------------
+    //
+    // ⚠️ **注入的是事件帧**（`type: "event"`）⇒ ⇒ 走的是**内核 → 主机**
+    // 那条路 ⇒ ⇒ 前端收到它的方式与收到内核的真事件**完全一样** ⇒ ⇒
+    // 「更旧的事件先到/后到」这件事被**真的**演练了一遍。
+    //
+    // ⚠️ **描述用当前生效的那份**（只有修订号更旧）⇒ ⇒ 判据落在**修订号**
+    // 上（D-146 的判别式）⇒ ⇒ 不会顺手把前端的图换成别的。
+    const injectSeq = BV_INJECTED_FRAME_SEQ;
+    const injected = await awaitEval(cdp, `(async () => {
+        const { encodeFrame } = await import("./lib/frame.js");
+        const { Event, eventMessage } = await import("./lib/message.js");
+        if (!window.__bvWorker) return { ok: false, why: "no-worker" };
+        const payload = eventMessage(
+            ${injectSeq},
+            Event.memoryMap(
+                ${JSON.stringify(afterFirst?.description ?? null)},
+                ${afterFirst?.pending === true},
+                ${afterFirst?.loaded === true},
+                ${Math.max(0, revisionBefore - 1)},
+            ),
+        );
+        const frame = encodeFrame({
+            type: "event",
+            seq: ${injectSeq},
+            sessionId: null,
+            role: null,
+            reqId: null,
+            payload: payload,
+        });
+        window.__bvWorker.dispatchEvent(new MessageEvent("message", { data: frame }));
+        return { ok: true, revision: ${Math.max(0, revisionBefore - 1)} };
+    })()`);
+    add(
+        "注入了一个**更旧**的 `memory.map` 事件（修订号 **严格更旧**）",
+        Boolean(injected?.ok),
+        injected?.ok
+            ? `注入的修订号 = ${injected.revision}（当前 ${revisionBefore}）`
+            : `注不进去：${JSON.stringify(injected?.why ?? null)}`,
+    );
+    if (!injected?.ok) {
+        return { skipped: false, checks };
+    }
+    await sleep(300);
+
+    // -- ④ 再真提交一次（改另一处 ⇒ 走差量）⇒ 看内核的答复 ----------------
+    const secondEdit = await awaitEval(cdp, bvEditFirstRamSizeExpression());
+    add(
+        "乱序之后**再真提交一次**（真 UI 动作 ⇒ 走差量）",
+        Boolean(secondEdit?.ok),
+        secondEdit?.ok
+            ? `基址 ${secondEdit.base} 的大小 ${secondEdit.before} → ${secondEdit.after}`
+            : `没改成：${JSON.stringify(secondEdit?.why ?? null)}`,
+    );
+
+    // 等内核答复（接受 ⇒ 修订号 +1；拒 ⇒ 只有一条错误事件、修订号不动）。
+    let kernelRevision = revisionBefore;
+    const secondDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < secondDeadline) {
+        const now = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
+        if (now && Number(now.revision) > kernelRevision) {
+            kernelRevision = Number(now.revision);
+            break;
+        }
+        await sleep(200);
+    }
+    const errProbe = await awaitEval(cdp, BV_MEMORY_MAP_ERROR_PROBE);
+    const errCode = String(errProbe?.code ?? "");
+    add(
+        "T-6：乱序之后真提交 ⇒ **真内核接受**（**不出现** `E_PLT-13`，且内核的修订号 +1）",
+        errCode !== "E_PLT-13" && kernelRevision === revisionBefore + 1,
+        `错误区：${errProbe?.present ? `码 ${JSON.stringify(errCode)}` : "没有错误"}；`
+        + `内核修订号 ${revisionBefore} → ${kernelRevision}`
+        + (errCode === "E_PLT-13"
+            ? " ⇒ **前端把基底守在了更旧的那份上** ⇒ 护栏缺失"
+            : " ⇒ 内核接受了这次提交"),
     );
 
     return { skipped: false, checks };
@@ -2096,11 +2656,9 @@ async function runOszSection(cdp, opts) {
     const readyDeadline = Date.now() + opts.timeoutMs;
     let ready = false;
     while (Date.now() < readyDeadline) {
-        const res = await cdp.send("Runtime.evaluate", {
-            expression: 'typeof window.riscv_image === "object" && window.riscv_image !== null',
-            returnByValue: true,
-        });
-        if (res.result?.value === true) {
+        const imageReady = await awaitEval(cdp,
+            'typeof window.riscv_image === "object" && window.riscv_image !== null');
+        if (imageReady === true) {
             ready = true;
             break;
         }
@@ -2118,10 +2676,7 @@ async function runOszSection(cdp, opts) {
     }
 
     // -- 切到终端视图（终端面板要挂上，DOM 里才有 [data-terminal-out]）----
-    await cdp.send("Runtime.evaluate", {
-        expression: 'location.hash = "#/terminal";',
-        returnByValue: true,
-    });
+    await runEffect(cdp, 'location.hash = "#/terminal";');
     await sleep(300);
 
     const artifact = await startArtifactServer(dirname(elfPath));
@@ -2129,25 +2684,22 @@ async function runOszSection(cdp, opts) {
         const elfUrl = `http://127.0.0.1:${artifact.port}/${basename(elfPath)}`;
 
         // -- 装载：按 URL 取字节 → LoadProject → 强制重订 console 订阅 -----
-        const loadRes = await cdp.send("Runtime.evaluate", {
-            expression: `window.riscv_image.loadFromUrl(${JSON.stringify(elfUrl)})`,
-            awaitPromise: true,
-            returnByValue: true,
-        }, 120000);
-        if (loadRes.exceptionDetails) {
-            const err = loadRes.exceptionDetails.exception?.description
-                ?? loadRes.exceptionDetails.text
-                ?? "未知错误";
+        let loadReply = null;
+        try {
+            loadReply = await awaitEval(cdp,
+                `window.riscv_image.loadFromUrl(${JSON.stringify(elfUrl)})`,
+                120000);
+        } catch (err) {
             return {
                 skipped: false,
                 checks: [{
                     name: "装载 osz 的 ELF（按 URL 取字节 → LoadProject）",
                     ok: false,
-                    detail: String(err).slice(0, 300),
+                    detail: String(err?.message ?? err).slice(0, 300),
                 }],
             };
         }
-        const byteLength = Number(loadRes.result?.value?.byteLength ?? 0);
+        const byteLength = Number(loadReply?.byteLength ?? 0);
         console.log(`· 已装载 osz：${byteLength} 字节`);
 
         // =================================================================
@@ -2161,26 +2713,22 @@ async function runOszSection(cdp, opts) {
         const breakpoint = await runBreakpointProbe(cdp, opts, scheduler);
 
         // -- 跑到提示符（一条一条 Continue，最多 60 秒）----------------------
-        const runRes = await cdp.send("Runtime.evaluate", {
-            expression:
+        let runReply = null;
+        try {
+            runReply = await awaitEval(cdp,
                 `window.riscv_image.runUntilConsole("OSZ$ ", { timeoutMs: ${OSZ_RUN_TIMEOUT_MS} })`,
-            awaitPromise: true,
-            returnByValue: true,
-        }, OSZ_RUN_TIMEOUT_MS + 30000);
-        if (runRes.exceptionDetails) {
-            const err = runRes.exceptionDetails.exception?.description
-                ?? runRes.exceptionDetails.text
-                ?? "未知错误";
+                OSZ_RUN_TIMEOUT_MS + 30000);
+        } catch (err) {
             return {
                 skipped: false,
                 checks: [...breakpoint.checks, {
                     name: "跑到 osz 的 shell 提示符",
                     ok: false,
-                    detail: String(err).slice(0, 300),
+                    detail: String(err?.message ?? err).slice(0, 300),
                 }],
             };
         }
-        const batches = Number(runRes.result?.value?.batches ?? 0);
+        const batches = Number(runReply?.batches ?? 0);
         console.log(`· osz 跑了 ${batches} 批 Continue`);
 
         // =================================================================
@@ -2198,11 +2746,8 @@ async function runOszSection(cdp, opts) {
         let consoleChecks = [];
         let probe = null;
         while (Date.now() < deadline) {
-            const res = await cdp.send("Runtime.evaluate", {
-                expression: PROBE_EXPRESSION,
-                returnByValue: true,
-            });
-            probe = res.result?.value ?? null;
+            const value = await awaitEval(cdp, PROBE_EXPRESSION);
+            probe = value ?? null;
             consoleChecks = probe ? oszConsoleChecks(probe) : [];
             if (consoleChecks.length > 0 && consoleChecks.every((c) => c.ok)) break;
             await sleep(250);
@@ -2228,11 +2773,7 @@ async function runOszSection(cdp, opts) {
  * @returns {Promise<object|null>}
  */
 async function pageProbe(cdp) {
-    const res = await cdp.send("Runtime.evaluate", {
-        expression: PROBE_EXPRESSION,
-        returnByValue: true,
-    });
-    return res.result?.value ?? null;
+    return await awaitEval(cdp, PROBE_EXPRESSION);
 }
 
 /**
@@ -2266,19 +2807,15 @@ async function runBreakpointProbe(cdp, opts, scheduler) {
     });
 
     // -- 下断点 ------------------------------------------------------------
-    const setRes = await cdp.send("Runtime.evaluate", {
-        expression: `window.riscv_kernel.setBreakpoint(${scheduler.value}, 1)`,
-        awaitPromise: true,
-        returnByValue: true,
-    }, 30000);
-    if (setRes.exceptionDetails) {
-        const err = setRes.exceptionDetails.exception?.description
-            ?? setRes.exceptionDetails.text
-            ?? "未知错误";
+    try {
+        await awaitEval(cdp,
+            `window.riscv_kernel.setBreakpoint(${scheduler.value}, 1)`,
+            30000);
+    } catch (err) {
         checks.push({
             name: "在调度器符号上下断点",
             ok: false,
-            detail: String(err).slice(0, 300),
+            detail: String(err?.message ?? err).slice(0, 300),
         });
         return { checks };
     }
@@ -2295,18 +2832,13 @@ async function runBreakpointProbe(cdp, opts, scheduler) {
     let halt = null;
     let rounds = 0;
     while (Date.now() < deadline && rounds < 400) {
-        const runRes = await cdp.send("Runtime.evaluate", {
-            expression: "window.riscv_kernel.continueRun()",
-            awaitPromise: true,
-            returnByValue: true,
-        }, 60000);
-        if (runRes.exceptionDetails) break;
+        try {
+            await awaitEval(cdp, "window.riscv_kernel.continueRun()", 60000);
+        } catch (_err) {
+            break;
+        }
         rounds += 1;
-        const haltRes = await cdp.send("Runtime.evaluate", {
-            expression: "window.riscv_kernel.lastHalt()",
-            returnByValue: true,
-        });
-        halt = haltRes.result?.value ?? null;
+        halt = await awaitEval(cdp, "window.riscv_kernel.lastHalt()");
         if (halt && Number(halt.pc) === scheduler.value) break;
     }
     console.log(`· 断点跑了 ${rounds} 批 Continue`);
@@ -2338,11 +2870,7 @@ async function runBreakpointProbe(cdp, opts, scheduler) {
     });
 
     // -- 撤掉断点（后面的 E-6 / E-8 不该再被它打断）------------------------
-    await cdp.send("Runtime.evaluate", {
-        expression: "window.riscv_kernel.clearBreakpoint(1)",
-        awaitPromise: true,
-        returnByValue: true,
-    }, 30000);
+    await awaitEval(cdp, "window.riscv_kernel.clearBreakpoint(1)", 30000);
 
     return { checks };
 }
@@ -2370,11 +2898,7 @@ async function runDisasmSourceProbe(cdp, opts, scheduler, elfEntry) {
      * @returns {Promise<object[]>}
      */
     async function readRows() {
-        const res = await cdp.send("Runtime.evaluate", {
-            expression: DISASM_ROWS_EXPRESSION,
-            returnByValue: true,
-        });
-        const value = res.result?.value;
+        const value = await awaitEval(cdp, DISASM_ROWS_EXPRESSION);
         return Array.isArray(value) ? value : [];
     }
 
@@ -2383,22 +2907,13 @@ async function runDisasmSourceProbe(cdp, opts, scheduler, elfEntry) {
      * @param {number} addr
      */
     async function requestDisasm(addr) {
-        await cdp.send("Runtime.evaluate", {
-            expression: `window.dispatchEvent(new CustomEvent("riscv:command", { detail: { action: "disasm", params: { addr: ${addr}, count: 16 } } }));`,
-            returnByValue: true,
-        });
+        await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", { detail: { action: "disasm", params: { addr: ${addr}, count: 16 } } }));`);
     }
 
     // -- 第 1 轮：**按钮**（用当前 PC 当起点）------------------------------
-    await cdp.send("Runtime.evaluate", {
-        expression: 'location.hash = "#/debug";',
-        returnByValue: true,
-    });
+    await runEffect(cdp, 'location.hash = "#/debug";');
     await sleep(300);
-    await cdp.send("Runtime.evaluate", {
-        expression: `document.querySelector('[data-action="disasm"]')?.click();`,
-        returnByValue: true,
-    });
+    await runEffect(cdp, `document.querySelector('[data-action="disasm"]')?.click();`);
     let deadline = Date.now() + opts.timeoutMs;
     while (Date.now() < deadline) {
         rows = await readRows();
@@ -2461,12 +2976,7 @@ async function runUartRxProbe(cdp, opts) {
     const checks = [];
 
     // -- 送一个字节（"A" = 0x41）-------------------------------------------
-    const sendRes = await cdp.send("Runtime.evaluate", {
-        expression: sendTerminalTextExpression("A"),
-        awaitPromise: true,
-        returnByValue: true,
-    });
-    const sent = sendRes.result?.value ?? null;
+    const sent = await awaitEval(cdp, sendTerminalTextExpression("A"));
     checks.push({
         name: "在终端输入框敲一个字节并点「发送」",
         ok: Boolean(sent?.ok),
@@ -2479,13 +2989,14 @@ async function runUartRxProbe(cdp, opts) {
     let lsr = null;
     const deadline = Date.now() + opts.timeoutMs;
     while (Date.now() < deadline) {
-        const res = await cdp.send("Runtime.evaluate", {
-            expression: `window.riscv_kernel.readMemory(${UART_LSR_ADDR}, "Byte")`,
-            awaitPromise: true,
-            returnByValue: true,
-        });
-        if (res.exceptionDetails) break;
-        const value = res.result?.value ?? null;
+        let value = null;
+        try {
+            value = await awaitEval(cdp,
+                `window.riscv_kernel.readMemory(${UART_LSR_ADDR}, "Byte")`,
+                30000);
+        } catch (_err) {
+            break;
+        }
         if (value && typeof value.value === "number") {
             lsr = value.value >>> 0;
             // ⚠️ **RX_VALID 置位**才算数 ⇒ 没置位就再读一次（读 LSR 本身
@@ -2615,59 +3126,49 @@ async function main() {
         let probe = null;
         const deadline = Date.now() + opts.timeoutMs;
         while (Date.now() < deadline) {
-            const res = await cdp.send("Runtime.evaluate", {
-                expression: PROBE_EXPRESSION,
-                returnByValue: true,
-            });
-            probe = res.result?.value ?? null;
+            const value = await awaitEval(cdp, PROBE_EXPRESSION);
+            probe = value ?? null;
             landing = probe ? landingChecks(probe) : [];
             if (landing.length > 0 && landing.every((c) => c.ok)) break;
             await sleep(250);
         }
+        // ⚠️ **登记**（裁决 I）：判定聚合**只**从注册表取 ⇒ ⇒ 「新加一段
+        // 忘了并进」这件事**结构上不可能**。
+        registerSection("landing", landing, { title: "落地页检查" });
 
         // -- switch to a view that has a component and check the render path --
         // ⚠️ **落地视图（`embedded`）的正文检查在 `landingChecks` 里**（D-33 ·
         // 裁决 C：落地视图现在**有** M-02 组件了 ⇒ 它的正文必须非空且有实质
         // 内容）。这里切到 `regmem` 是为了**渲染路径**本身（白屏回归守卫，
         // FRONTEND_Review.md #20）⇒ 后续那些需要切视图的步骤**不动**。
-        await cdp.send("Runtime.evaluate", {
-            expression: 'location.hash = "#/regmem";',
-            returnByValue: true,
-        });
+        await runEffect(cdp, 'location.hash = "#/regmem";');
         let render = [];
         const renderDeadline = Date.now() + opts.timeoutMs;
         while (Date.now() < renderDeadline) {
-            const res = await cdp.send("Runtime.evaluate", {
-                expression: PROBE_EXPRESSION,
-                returnByValue: true,
-            });
-            probe = res.result?.value ?? null;
+            const value = await awaitEval(cdp, PROBE_EXPRESSION);
+            probe = value ?? null;
             render = probe ? renderChecks(probe) : [];
             if (render.length > 0 && render.every((c) => c.ok)) break;
             await sleep(250);
         }
+        registerSection("render", render, { title: "渲染路径检查（切到 #/regmem）" });
 
         // -- drive the REAL kernel -------------------------------------------
         //  Send a `step` command through the view layer's signal and check
         //  that the register view shows the value the **WASM kernel**
         //  actually computed (`addi x1, x0, 42` → x1 = 0x2a).
-        await cdp.send("Runtime.evaluate", {
-            expression:
-                'window.dispatchEvent(new CustomEvent("riscv:command", { detail: { action: "step" } }));',
-            returnByValue: true,
-        });
+        await runEffect(cdp,
+            'window.dispatchEvent(new CustomEvent("riscv:command", { detail: { action: "step" } }));');
         let kernelExec = [];
         const execDeadline = Date.now() + opts.timeoutMs;
         while (Date.now() < execDeadline) {
-            const res = await cdp.send("Runtime.evaluate", {
-                expression: PROBE_EXPRESSION,
-                returnByValue: true,
-            });
-            probe = res.result?.value ?? null;
+            const value = await awaitEval(cdp, PROBE_EXPRESSION);
+            probe = value ?? null;
             kernelExec = probe ? kernelExecChecks(probe) : [];
             if (kernelExec.length > 0 && kernelExec.every((c) => c.ok)) break;
             await sleep(250);
         }
+        registerSection("kernelExec", kernelExec, { title: "真内核执行检查（发一条 step 命令）" });
 
         // -- the source view really asks for the CURRENT PC (VB-7) ------------
         //  ⚠️ 必须在**内核已经单步过**之后：当前 PC 是那一步推进的。
@@ -2675,18 +3176,12 @@ async function main() {
         //  V-B 检视的 VB-1 断的就是它（源码视图收不到 `sim.pc` ⇒ 按钮
         //  **恒问地址 0**），而 Node 门禁 243 条**全绿**（用例手工注入
         //  了 `sim.pc`）⇒ 只有真机断言抓得到。
-        await cdp.send("Runtime.evaluate", {
-            expression: 'location.hash = "#/source";',
-            returnByValue: true,
-        });
+        await runEffect(cdp, 'location.hash = "#/source";');
         let source = [];
         const sourceDeadline = Date.now() + opts.timeoutMs;
         while (Date.now() < sourceDeadline) {
-            const res = await cdp.send("Runtime.evaluate", {
-                expression: PROBE_EXPRESSION,
-                returnByValue: true,
-            });
-            probe = res.result?.value ?? null;
+            const value = await awaitEval(cdp, PROBE_EXPRESSION);
+            probe = value ?? null;
             source = probe ? sourceChecks(probe) : [];
             if (source.length > 0 && source.every((c) => c.ok)) break;
             await sleep(250);
@@ -2695,22 +3190,13 @@ async function main() {
         // -- the button really dispatches `resolve-line` with that address ----
         //  ⚠️ **等上面全绿之后才点**：那时按钮上的 `data-addr` 已经等于当
         //  前 PC，否则点下去抓到的是 0（那是时序问题，不是被测缺陷）。
-        await cdp.send("Runtime.evaluate", {
-            expression: CAPTURE_RESOLVE_LINE_EXPRESSION,
-            returnByValue: true,
-        });
-        await cdp.send("Runtime.evaluate", {
-            expression: CLICK_RESOLVE_LINE_EXPRESSION,
-            returnByValue: true,
-        });
+        await runEffect(cdp, CAPTURE_RESOLVE_LINE_EXPRESSION);
+        await runEffect(cdp, CLICK_RESOLVE_LINE_EXPRESSION);
         let sourceCmd = null;
         const sourceCmdDeadline = Date.now() + opts.timeoutMs;
         while (Date.now() < sourceCmdDeadline) {
-            const res = await cdp.send("Runtime.evaluate", {
-                expression: PROBE_EXPRESSION,
-                returnByValue: true,
-            });
-            probe = res.result?.value ?? null;
+            const value = await awaitEval(cdp, PROBE_EXPRESSION);
+            probe = value ?? null;
             sourceCmd = probe ? sourceCommandCheck(probe) : null;
             if (sourceCmd && sourceCmd.ok) break;
             await sleep(250);
@@ -2720,6 +3206,7 @@ async function main() {
             ok: false,
             detail: "没取到命令信号",
         });
+        registerSection("source", source, { title: "源码视图检查（切到 #/source）" });
 
         // -- drive the probe pipeline (D-46) ----------------------------------
         //  The demo firmware writes `GPIO0.OUT` on its 8th instruction, so
@@ -2727,98 +3214,77 @@ async function main() {
         //  ran one instruction (it is the one the `x1 == 42` assertion
         //  checks), so push a `step10` on top of it — 1 + 10 instructions
         //  is past the GPIO write.
-        await cdp.send("Runtime.evaluate", {
-            expression:
-                'window.dispatchEvent(new CustomEvent("riscv:command", { detail: { action: "step10" } }));',
-            returnByValue: true,
-        });
-        await cdp.send("Runtime.evaluate", {
-            expression: 'location.hash = "#/waveform";',
-            returnByValue: true,
-        });
+        await runEffect(cdp,
+            'window.dispatchEvent(new CustomEvent("riscv:command", { detail: { action: "step10" } }));');
+        await runEffect(cdp, 'location.hash = "#/waveform";');
         let waveform = [];
         const waveDeadline = Date.now() + opts.timeoutMs;
         while (Date.now() < waveDeadline) {
-            const res = await cdp.send("Runtime.evaluate", {
-                expression: PROBE_EXPRESSION,
-                returnByValue: true,
-            });
-            probe = res.result?.value ?? null;
+            const value = await awaitEval(cdp, PROBE_EXPRESSION);
+            probe = value ?? null;
             waveform = probe ? waveformChecks(probe) : [];
             if (waveform.length > 0 && waveform.every((c) => c.ok)) break;
             await sleep(250);
         }
+        registerSection("waveform", waveform, { title: "探针流检查（切到 #/waveform）" });
 
         // -- the REAL RTOS (osz): load the out-of-repo ELF and SEE its console -
         // ⚠️ 这一段在**没有 osz ELF** 的机器上必须**跳过**（不是判负）——
         // osz 的产物在**仓外**（不进仓库）。
-        const osz = await runOszSection(cdp, opts);
+        const osz = await runSection("osz", () => runOszSection(cdp, opts));
+        registerSection("osz", osz.checks, {
+            title: "真实 RTOS 检查（osz：装载仓外 ELF → 跑 → 终端里的 console）",
+            skippedTitle: "真实 RTOS 检查（osz）",
+            skipped: osz.skipped,
+            reason: osz.reason,
+        });
 
         // -- the board memory map (STAGE-14 · C-8) --------------------------
         // ⚠️ **必须排在 osz 之后**：用户的板一旦配过就**一直**保持 ⇒ 放在
         // osz 前面会把 osz 要用的那张板换掉。
-        const memoryMap = await runMemoryMapSection(cdp, opts);
+        const memoryMap = await runSection("memoryMap", () => runMemoryMapSection(cdp, opts));
+        registerSection("memoryMap", memoryMap.checks, {
+            title: "板级内存图检查（配一张板 → 映射表变新图 → 新 RAM 段可写可读）",
+        });
 
         // -- the board ARCHIVE (STAGE-15 · T-3) ------------------------------
         // ⚠️ **必须排在板级内存图段之后**：这一段会**提交一张新板**
         // （落库门槛要求「已被内核接受」）⇒ 放在前面会把 osz 段要用的
         // 那张板换掉。
-        const boardArchive = await runBoardArchiveSection(cdp, opts);
+        const boardArchive = await runSection("boardArchive", () => runBoardArchiveSection(cdp, opts));
+        registerSection("boardArchive", boardArchive.checks, {
+            title: "板档案检查（提交 → 保存 → 刷新页面 → 板还在且逐字段相同）",
+        });
 
         // -- the board DELTA + UNLOAD (STAGE-16 · T-1 / T-2 / T-3) ------------
         // ⚠️ **必须排在板档案段之后**：这一段会**卸载工程** ⇒ 内核重启、用户
         // 的板不存在 ⇒ 放在前面会把板档案段要用的板换掉。
-        const boardDelta = await runBoardDeltaSection(cdp, opts);
+        const boardDelta = await runSection("boardDelta", () => runBoardDeltaSection(cdp, opts));
+        registerSection("boardDelta", boardDelta.checks, {
+            title: "板级差量与卸载检查（卸载 → 改板立即生效 → 只改一段走差量 → 修订号 +1 → 差量 ≡ 整份）",
+        });
+
+        // -- the board ORDERING (STAGE-17 · T-6) --------------------------------
+        // ⚠️ **必须排在差量段之后**：这一段会**注入一个更旧的内存图事件**
+        // ⇒ ⇒ 前面的段看到的必须是**没被污染过**的那份图。
+        const boardOrdering = await runSection("boardOrdering", () => runBoardOrderingSection(cdp, opts));
+        registerSection("boardOrdering", boardOrdering.checks, {
+            title: "乱序到达检查（注入更旧的 memory.map 事件 → 真提交 → 真内核接受）",
+        });
 
         // -- report ------------------------------------------------------------
-        console.log("");
-        console.log("落地页检查：");
-        for (const check of landing) {
-            console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
-        }
-        console.log("");
-        console.log("渲染路径检查（切到 #/regmem）：");
-        for (const check of render) {
-            console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
-        }
-        console.log("");
-        console.log("真内核执行检查（发一条 step 命令）：");
-        for (const check of kernelExec) {
-            console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
-        }
-        console.log("");
-        console.log("源码视图检查（切到 #/source）：");
-        for (const check of source) {
-            console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
-        }
-        console.log("");
-        console.log("探针流检查（切到 #/waveform）：");
-        for (const check of waveform) {
-            console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
-        }
-        console.log("");
-        if (osz.skipped) {
-            console.log(`真实 RTOS 检查（osz）：skipped（${osz.reason}）`);
-        } else {
-            console.log("真实 RTOS 检查（osz：装载仓外 ELF → 跑 → 终端里的 console）：");
-            for (const check of osz.checks) {
+        //
+        // ⚠️ **按登记顺序打印**（裁决 I）⇒ ⇒ 报告的可读顺序 = 段的运行顺序。
+        for (const section of SECTION_REGISTRY) {
+            console.log("");
+            if (section.skipped) {
+                console.log(`${section.skippedTitle ?? section.title}：skipped（${section.reason}）`);
+                continue;
+            }
+            console.log(`${section.title}：`);
+            for (const check of section.checks) {
                 console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
             }
-        }
-        console.log("");
-        console.log("板级内存图检查（配一张板 → 映射表变新图 → 新 RAM 段可写可读）：");
-        for (const check of memoryMap.checks) {
-            console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
-        }
-        console.log("");
-        console.log("板档案检查（提交 → 保存 → 刷新页面 → 板还在且逐字段相同）：");
-        for (const check of boardArchive.checks) {
-            console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
-        }
-        console.log("");
-        console.log("板级差量与卸载检查（卸载 → 改板立即生效 → 只改一段走差量 → 修订号 +1）：");
-        for (const check of boardDelta.checks) {
-            console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
         }
         if (consoleErrors.length > 0) {
             console.log("");
@@ -2826,14 +3292,27 @@ async function main() {
             for (const err of consoleErrors) console.log(`  ✗ ${err}`);
         }
 
-        const failed = [...landing, ...render, ...kernelExec, ...source, ...waveform, ...osz.checks,
-            ...memoryMap.checks, ...boardArchive.checks, ...boardDelta.checks]
-            .filter((c) => !c.ok);
-        const ok = failed.length === 0 && consoleErrors.length === 0;
+        // -- the verdict --------------------------------------------------------
+        //
+        // ⚠️ **聚合只从注册表取**（裁决 I）⇒ ⇒ **不存在**手写的展开串 ⇒ ⇒
+        // 「新加一段忘了并进」**结构上不可能**。
+        const failed = SECTION_REGISTRY.flatMap((s) => s.checks).filter((c) => !c.ok);
+        // ⚠️ **期望段名表**（裁决 J）：登记的段名集合必须**等于**那张表 ⇒ 不等
+        // 就**红** ⇒ ⇒ 兜住「跑过了但没登记」与「登记了但不在期望表里」。
+        const diff = registryDiff();
+        console.log("");
+        console.log("注册表一致性检查（期望段名表 vs 实际登记）：");
+        console.log(`  ${diff.ok ? "✓" : "✗"} 登记的段名集合 == 期望段名表`
+            + `（期望 ${EXPECTED_SECTION_NAMES.length} 段，实际 ${SECTION_REGISTRY.length} 段）`
+            + (diff.missing.length > 0 ? `；**该有却没有**：${diff.missing.join(" / ")}` : "")
+            + (diff.extra.length > 0 ? `；**多出来没有**：${diff.extra.join(" / ")}` : "")
+            + (diff.duplicated.length > 0 ? `；**重复登记**：${diff.duplicated.join(" / ")}` : ""));
+        const ok = failed.length === 0 && consoleErrors.length === 0 && diff.ok;
         console.log("");
         console.log(ok
-            ? "browser-verify: 通过（真机挂载 + 渲染路径 + 真内核执行 + 源码视图 + 探针流 + 板级内存图 + 板档案 + 板级差量/卸载 + 控制台）"
-            : `browser-verify: 失败（${failed.length} 项断言未通过，${consoleErrors.length} 条控制台错误）`);
+            ? "browser-verify: 通过（真机挂载 + 渲染路径 + 真内核执行 + 源码视图 + 探针流 + 板级内存图 + 板档案 + 板级差量/卸载 + 乱序到达 + 注册表一致 + 控制台）"
+            : `browser-verify: 失败（${failed.length} 项断言未通过，${consoleErrors.length} 条控制台错误，`
+              + `注册表一致性 ${diff.ok ? "通过" : "**不通过**"}）`);
         return ok ? 0 : EXIT_FAILED;
     } finally {
         cdp?.close();

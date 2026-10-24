@@ -1235,8 +1235,12 @@ export function wireConsole(commandRouter) {
  * ⚠️ **主题字面量**：`"memory.map"` 必须与 `front/lib/message.js` 的
  * `EVENT_TOPIC.MemoryMap` 逐字一致（与 `wireConsole` 同一个口径）。
  *
+ * ⚠️ **乱序护栏**（STAGE-17 · v0.32 · D-146 · 裁决 F / G）：事件**乱序
+ * 到达**时（迟到的旧事件），**更旧**的那份**不许覆盖**较新那份 ⇒ 状态留在
+ * 较新那份 ⇒ 差量**算在较新的那张图上**（而不是算在旧图上）。
+ *
  * @param {object} commandRouter
- * @returns {{reset: () => void, subscribeMemoryMapStream: () => Promise<object>, get: () => object|null}}
+ * @returns {{reset: () => void, subscribeMemoryMapStream: () => Promise<object>, get: () => object|null, discardedCount: () => number}}
  */
 export function wireMemoryMap(commandRouter) {
     /**
@@ -1250,13 +1254,41 @@ export function wireMemoryMap(commandRouter) {
      */
     let current = null;
 
+    /**
+     * **乱序丢弃计数**（STAGE-17 · D-146 · 裁决 F：「丢弃要可观测」）。
+     *
+     * ⚠️ **只记数、不记内容** ⇒ 它**不是**「当前生效的图」的第二份副本
+     * ⇒ 不构成第二个真相源。
+     *
+     * ⚠️ **只增不减**：`reset()`（新会话）**不**清它 ⇒ 清掉等于把「丢弃
+     * 发生过」的证据悄悄抹掉 ⇒ 「不静默」这条承诺就破了。
+     *
+     * @type {number}
+     */
+    let discardedOutOfOrder = 0;
+
     commandRouter.subscribe("memory.map", (event) => {
-        current = {
+        const next = {
             description: event.value?.description ?? null,
             pending: event.value?.pending === true,
             loaded: event.value?.loaded === true,
             revision: Number(event.value?.revision ?? 0),
         };
+        // ⚠️ **乱序护栏**（裁决 F）：`revision` **严格更旧**的事件 ⇒ **不覆盖**
+        // 已有状态 ⇒ 状态留在较新那份 ⇒ 差量**算在较新的那张图上**。
+        //
+        // ⚠️ **判据是「严格更旧」不是「不等」**（裁决 G）：`UnloadProject`
+        // 清订阅 ⇒ 前端重订 ⇒ 内核**立即**推一次当前图 ⇒ 那次推送的
+        // `revision` 与手上那份**相同**（卸载**不改图** ⇒ 修订号不 +1）⇒
+        // 「不等就挡」会让卸载后的前端**停在旧状态**。
+        //
+        // ⚠️ **护栏不改提交路径的其它行为**（裁决 H）：基底被判为旧时，提交
+        // **照常**发命令 ⇒ 内核的 `expected_revision` 检查**照常兜底**。
+        if (current !== null && next.revision < current.revision) {
+            discardedOutOfOrder += 1;
+            return;
+        }
+        current = next;
         // ⚠️ **同一个引用**写进两个视图状态 ⇒ 两个视图不可能显示不同的图。
         viewStore.setState("product", (prev) => ({ ...prev, memoryMap: current }));
         viewStore.setState("memory-map", (prev) => ({ ...prev, memoryMap: current }));
@@ -1290,6 +1322,18 @@ export function wireMemoryMap(commandRouter) {
         /** 当前缓存（测试用：断言两个视图拿到的是**同一个**对象）。 */
         get() {
             return current;
+        },
+        /**
+         * **被丢弃的乱序（旧）事件数**（STAGE-17 · D-146 · 裁决 F）。
+         *
+         * ⚠️ 「不静默」靠**这个数** ⇒ 判定不靠文案、靠**数**。
+         *
+         * ⚠️ **不**随 `reset()` 清零（见上面那条注释：清掉等于抹掉证据）。
+         *
+         * @returns {number}
+         */
+        discardedCount() {
+            return discardedOutOfOrder;
         },
     };
 }
