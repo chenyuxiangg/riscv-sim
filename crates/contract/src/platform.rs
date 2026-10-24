@@ -2033,16 +2033,23 @@ mod tests {
     // STAGE-15 A-8 — the built-in descriptions stay legal
     // -------------------------------------------------------------
 
-    /// **STAGE-15 A-8** — the built-in `default` description is still
-    /// legal under the new rules.
+    /// The built-in `default` description — a **hand-written copy** of
+    /// `kernel_host/platforms/default.json`.
     ///
-    /// ⚠️ **This copy is hand-written from
-    /// `kernel_host/platforms/default.json`** — the contract layer does
-    /// **not** depend on the kernel crate ⇒ the equivalent copy lives
-    /// here (the parameters are copied field by field).
-    #[test]
-    fn a8_the_builtin_default_description_is_still_legal() {
-        let raw = r#"{
+    /// ⚠️ **The contract layer does not depend on the kernel crate** ⇒
+    /// the equivalent copy lives **here** (the parameters are copied
+    /// field by field) ⇒ the dependency direction stays one-way.
+    ///
+    /// ⚠️ **This is the only copy** ⇒ the STAGE-15 A-8 cases **and** the
+    /// STAGE-18 A-3 case both read it ⇒ there is no second copy that
+    /// could drift from this one unnoticed.
+    ///
+    /// ⚠️ **If a copy drifts from the real file**, the **kernel** side
+    /// catches it (`kernel_host::tests_platform`'s
+    /// `the_builtin_descriptions_are_well_formed` reads the **real**
+    /// files) ⇒ the two layers have one job each: **this** crate judges
+    /// the **rules**, the **host** judges the **files**.
+    const BUILTIN_DEFAULT_RAW: &str = r#"{
             "schema_version": 1,
             "id": "default",
             "name": "Default",
@@ -2056,19 +2063,13 @@ mod tests {
                 { "kind": "ram", "base": 2147483648, "size": 4194304 }
             ]
         }"#;
-        let desc: PlatformDescription = serde_json::from_str(raw).expect("必须能解析");
-        assert!(desc.validate().is_ok(), "内置 default 描述必须仍然合法");
-    }
 
-    /// **STAGE-15 A-8** — the built-in `minimal` description is still
-    /// legal under the new rules.
+    /// The built-in `minimal` description — a **hand-written copy** of
+    /// `kernel_host/platforms/minimal.json`.
     ///
-    /// ⚠️ **This copy is hand-written from
-    /// `kernel_host/platforms/minimal.json`** — see the note in the
-    /// `default` case above.
-    #[test]
-    fn a8_the_builtin_minimal_description_is_still_legal() {
-        let raw = r#"{
+    /// ⚠️ See the note in [`BUILTIN_DEFAULT_RAW`] (the contract layer
+    /// does not depend on the kernel crate; this is **the** copy).
+    const BUILTIN_MINIMAL_RAW: &str = r#"{
             "schema_version": 1,
             "id": "minimal",
             "name": "Minimal (zero-change demo platform)",
@@ -2080,22 +2081,13 @@ mod tests {
                 { "kind": "ram", "base": 268435456, "size": 16777216 }
             ]
         }"#;
-        let desc: PlatformDescription = serde_json::from_str(raw).expect("必须能解析");
-        assert!(desc.validate().is_ok(), "内置 minimal 描述必须仍然合法");
-    }
 
-    /// **STAGE-15 A-8** — the built-in `qemu-virt` description is still
-    /// legal under the new rules.
+    /// The built-in `qemu-virt` description — a **hand-written copy** of
+    /// `kernel_host/platforms/qemu-virt.json`.
     ///
-    /// ⚠️ **This copy is hand-written from
-    /// `kernel_host/platforms/qemu-virt.json`** — see the note in the
-    /// `default` case above.
-    ///
-    /// ⚠️ Its PLIC has **16 contexts** ⇒ it sits **exactly on** the upper
-    /// bound ⇒ a `>=` comparison would reject the kernel's own board.
-    #[test]
-    fn a8_the_builtin_qemu_virt_description_is_still_legal() {
-        let raw = r#"{
+    /// ⚠️ See the note in [`BUILTIN_DEFAULT_RAW`] (the contract layer
+    /// does not depend on the kernel crate; this is **the** copy).
+    const BUILTIN_QEMU_VIRT_RAW: &str = r#"{
             "schema_version": 1,
             "id": "qemu-virt",
             "name": "QEMU virt",
@@ -2115,7 +2107,62 @@ mod tests {
                 { "kind": "ram", "base": 2147483648, "size": 134217728 }
             ]
         }"#;
-        let desc: PlatformDescription = serde_json::from_str(raw).expect("必须能解析");
+
+    /// The three built-in descriptions as **hand-written copies**, in the
+    /// order the kernel crate ships them.
+    ///
+    /// ⚠️ **One copy, several readers** ⇒ the STAGE-15 A-8 cases and the
+    /// STAGE-18 A-3 case all read **these** ⇒ the contract layer never
+    /// reaches into the kernel crate's tree.
+    fn builtin_copies() -> [(&'static str, &'static str); 3] {
+        [
+            ("default", BUILTIN_DEFAULT_RAW),
+            ("minimal", BUILTIN_MINIMAL_RAW),
+            ("qemu-virt", BUILTIN_QEMU_VIRT_RAW),
+        ]
+    }
+
+    /// **STAGE-15 A-8** — the built-in `default` description is still
+    /// legal under the new rules.
+    ///
+    /// ⚠️ This is a **hand-written copy** of
+    /// `kernel_host/platforms/default.json` — the contract layer does
+    /// **not** depend on the kernel crate ⇒ the equivalent copy lives
+    /// here (the parameters are copied field by field) ⇒ the copy itself
+    /// lives in [`BUILTIN_DEFAULT_RAW`].
+    #[test]
+    fn a8_the_builtin_default_description_is_still_legal() {
+        let desc: PlatformDescription =
+            serde_json::from_str(BUILTIN_DEFAULT_RAW).expect("必须能解析");
+        assert!(desc.validate().is_ok(), "内置 default 描述必须仍然合法");
+    }
+
+    /// **STAGE-15 A-8** — the built-in `minimal` description is still
+    /// legal under the new rules.
+    ///
+    /// ⚠️ This is a **hand-written copy** of
+    /// `kernel_host/platforms/minimal.json` — see the note in the
+    /// `default` case above.
+    #[test]
+    fn a8_the_builtin_minimal_description_is_still_legal() {
+        let desc: PlatformDescription =
+            serde_json::from_str(BUILTIN_MINIMAL_RAW).expect("必须能解析");
+        assert!(desc.validate().is_ok(), "内置 minimal 描述必须仍然合法");
+    }
+
+    /// **STAGE-15 A-8** — the built-in `qemu-virt` description is still
+    /// legal under the new rules.
+    ///
+    /// ⚠️ This is a **hand-written copy** of
+    /// `kernel_host/platforms/qemu-virt.json` — see the note in the
+    /// `default` case above.
+    ///
+    /// ⚠️ Its PLIC has **16 contexts** ⇒ it sits **exactly on** the upper
+    /// bound ⇒ a `>=` comparison would reject the kernel's own board.
+    #[test]
+    fn a8_the_builtin_qemu_virt_description_is_still_legal() {
+        let desc: PlatformDescription =
+            serde_json::from_str(BUILTIN_QEMU_VIRT_RAW).expect("必须能解析");
         assert!(desc.validate().is_ok(), "内置 qemu-virt 描述必须仍然合法");
     }
 
@@ -2670,35 +2717,24 @@ mod tests {
     /// legal under V-17 ⇒ the **stock risk is zero**: the boards the
     /// kernel ships with have **no** empty device id.
     ///
-    /// ⚠️ **The real files are read here** — not a hand-written copy:
-    /// the point of A-3 is a fact about **those** files ⇒ a copy could
-    /// drift from the truth without turning anything red. (`include_str!`
-    /// ⇒ a **missing** file is a **compile** error, never a silent
-    /// skip.)
+    /// ⚠️ **These are hand-written copies** — the contract layer does
+    /// **not** depend on the kernel crate ⇒ the equivalent copies live
+    /// here (the parameters are copied field by field) ⇒ the dependency
+    /// direction stays one-way.
     ///
-    /// ⚠️ **Why the kernel crate's files**: the built-in descriptions
-    /// live in the **host** crate (`crates/kernel/src/kernel_host/
-    /// platforms/`) — the contract crate does not depend on the kernel
-    /// crate, but the crate already reaches into another crate's tree
-    /// in its own tests (`protocol.rs` reads `front/lib/message.js`) ⇒
-    /// one precedent, one way of doing it.
+    /// ⚠️ **The copies are the STAGE-15 A-8 ones** ([`BUILTIN_DEFAULT_RAW`]
+    /// / [`BUILTIN_MINIMAL_RAW`] / [`BUILTIN_QEMU_VIRT_RAW`]) ⇒ **one**
+    /// copy, several readers ⇒ no second copy that could drift from the
+    /// first one unnoticed.
+    ///
+    /// ⚠️ **If a copy drifts from the real file**, the **kernel** side
+    /// catches it (`kernel_host::tests_platform`'s
+    /// `the_builtin_descriptions_are_well_formed` reads the **real**
+    /// files) ⇒ the two layers have one job each: **this** crate judges
+    /// the **rules**, the **host** judges the **files**.
     #[test]
     fn s18_a3_the_builtin_descriptions_are_still_legal() {
-        let builtins: [(&str, &str); 3] = [
-            (
-                "default",
-                include_str!("../../kernel/src/kernel_host/platforms/default.json"),
-            ),
-            (
-                "minimal",
-                include_str!("../../kernel/src/kernel_host/platforms/minimal.json"),
-            ),
-            (
-                "qemu-virt",
-                include_str!("../../kernel/src/kernel_host/platforms/qemu-virt.json"),
-            ),
-        ];
-        for (name, raw) in builtins {
+        for (name, raw) in builtin_copies() {
             let desc: PlatformDescription = serde_json::from_str(raw)
                 .unwrap_or_else(|e| panic!("内置描述 {name} 必须能解析：{e}"));
             assert_eq!(desc.id, name, "内置描述的 id 必须与文件名一致");
