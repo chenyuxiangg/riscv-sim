@@ -27,7 +27,7 @@
 //! | layer | what it judges | codes |
 //! | --- | --- | --- |
 //! | **serde** | the *shape* — unknown device kind, missing parameter, wrong parameter type | serde's own error (V-8) |
-//! | **this module** | the *declaration* — version, id, regions, sizes, overlaps, budget, duplicate device id | `E_PLT-01`..`E_PLT-08` |
+//! | **this module** | the *declaration* — version, id, regions, sizes, overlaps, budget, duplicate device id, device parameters' legal value domain | `E_PLT-01`..`E_PLT-08` · `E_PLT-12` |
 //! | **the host** | the *lookup* — unknown platform id, unreadable file, malformed file | `E_PLT-09`..`E_PLT-11` (owned **here**, judged by the host) |
 //! | **M-14** | the *live bus* — unmapped access, region over the runtime budget | `E_BUS-*` |
 //!
@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{
     PlatformError, E_PLT_01_SCHEMA_VERSION, E_PLT_02_EMPTY_ID, E_PLT_03_NO_REGIONS,
     E_PLT_04_ZERO_SIZE, E_PLT_05_OVERFLOW, E_PLT_06_OVERLAP, E_PLT_07_OVER_BUDGET,
-    E_PLT_08_DUPLICATE_DEVICE_ID, PLATFORM_FAMILY,
+    E_PLT_08_DUPLICATE_DEVICE_ID, E_PLT_12_PARAMETER_OUT_OF_RANGE, PLATFORM_FAMILY,
 };
 use crate::session::{REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
 
@@ -64,6 +64,44 @@ use crate::session::{REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
 /// **memory-map description shape** (what the host reads). Adding this
 /// module therefore requires **no** front-end change at all.
 pub const PLATFORM_SCHEMA_VERSION: u32 = 1;
+
+/// The **upper bound** of a CLINT's timer frequency (1 THz).
+///
+/// ⚠️ The platform's smallest time granularity is **1 ps**
+/// (`PS_PER_SEC = 1e12`) ⇒ a frequency above 1 THz means a period
+/// **shorter than one picosecond** ⇒ the platform cannot express it (the
+/// device model's `ps_per_cycle()` would compute `0`).
+///
+/// ⚠️ This is the **only** place the number lives: M-15 / the host
+/// **reference** it, they never copy it (one constant, one truth — the
+/// same discipline as v0.22's `MSTATUS_WARL_MASK`).
+pub const MAX_CLINT_FREQ_HZ: u64 = 1_000_000_000_000;
+
+/// The **upper bound** of the number of harts a CLINT serves (4096).
+///
+/// ⚠️ From the device model's register layout (not from taste): the
+/// `msip` area is `0x0 + 4×hart` and must not run into the `mtimecmp`
+/// area at `0x4000` ⇒ `hart < 4096`; the `mtimecmp` area
+/// (`0x4000 + 8×hart`) must not run into the `mtime` area at `0xBFF8` ⇒
+/// the same bound, from another road.
+pub const MAX_CLINT_HARTS: u32 = 4096;
+
+/// The **upper bound** of the number of interrupt sources a PLIC has
+/// (1024).
+///
+/// ⚠️ From the device model's register layout: the Priority area is
+/// `0x0 + 4×source` and must not run into the Pending area at `0x1000`
+/// ⇒ `source < 1024`; the Enable area gives the same bound from another
+/// road (32 words per context ⇒ `ceil(sources/32) ≤ 32`).
+pub const MAX_PLIC_SOURCES: u32 = 1024;
+
+/// The **upper bound** of the number of interrupt contexts a PLIC has
+/// (16).
+///
+/// ⚠️ From the device model's register layout: the Threshold / Claim area
+/// is `0x200000 + 0x1000×ctx` and must stay inside the `0x210000` window
+/// ⇒ `ctx ≤ 16`.
+pub const MAX_PLIC_CONTEXTS: u32 = 16;
 
 /// The default value of [`PlatformDescription::auto_selectable`].
 ///
@@ -236,6 +274,9 @@ impl PlatformDescription {
     /// | V-7 | a RAM / ROM region's **declared** size `> region_budget_bytes` | `E_PLT-07` |
     /// | V-8 | unknown device kind / missing parameter / wrong parameter type | **serde** (not here) |
     /// | V-9 | two peripheral devices share an `id` | `E_PLT-08` |
+    /// | V-13 | a device parameter is **below** its legal lower bound | `E_PLT-12` |
+    /// | V-14 | a device parameter is **above** its legal upper bound | `E_PLT-12` |
+    /// | V-15 | a UART's `irq_line` is not a valid PLIC source id (only when the map has a PLIC) | `E_PLT-12` |
     ///
     /// ⚠️ **V-8 lives in the serde layer, not here.** An unknown device
     /// kind or a missing parameter fails during deserialization, before
@@ -248,6 +289,13 @@ impl PlatformDescription {
     /// malformed file). Their codes are owned by the contract layer
     /// (`E_PLT-09` .. `E_PLT-11`) so that a code has exactly one landing
     /// spot, but the **host** is the one that detects them.
+    ///
+    /// ⚠️ **V-13 ~ V-15 were appended after V-9** (v0.30 · D-141) ⇒ the
+    /// report order of V-1 ~ V-9 is **unchanged, byte for byte** ⇒ no
+    /// existing judgement moves. They **share one** scenario code
+    /// (`E_PLT-12`): a single field out of range and a broken cross-field
+    /// relation mean the same thing — 「某个器件参数的值不在它的合法取值域内」
+    /// ⇒ one code, not two.
     ///
     /// ⚠️ **Judgements never look at the message text** — they assert
     /// `family == Platform && scenario == <code>`. Rewording a message
@@ -390,6 +438,111 @@ impl PlatformDescription {
             seen.push(id);
         }
 
+        // V-13 / V-14 / V-15 — the devices' **legal value domain**
+        // (v0.30 · D-141 · frozen spec STAGE-15 §3.1).
+        //
+        // ⚠️ **Appended after V-9** ⇒ the report order of V-1 ~ V-9 is
+        // unchanged, byte for byte (the frozen spec's acceptance A-9).
+        //
+        // ⚠️ **All three rules share one scenario code** (`E_PLT-12`): a
+        // single field out of range and a broken cross-field relation
+        // mean the same thing — 「某个器件参数的值不在它的合法取值域内」
+        // ⇒ one code, not two.
+        //
+        // ⚠️ The description layer **rejects as written** — it does not
+        // "helpfully" correct the value (the device models clamp
+        // `harts` / `freq_hz` / `sources` / `contexts` to at least 1, which
+        // would silently hide the mistake ⇒ the model layer's clamping is
+        // only a fallback for code paths that bypass the description).
+
+        // V-13 — the **lower** bounds (one field at a time).
+        for region in &self.regions {
+            let RegionSpec::Peripheral { device, .. } = region else {
+                continue;
+            };
+            for (field, value, lower, _) in device.numeric_parameters() {
+                if value < lower {
+                    return Err(PlatformError::new(
+                        PLATFORM_FAMILY,
+                        E_PLT_12_PARAMETER_OUT_OF_RANGE,
+                        format!(
+                            "器件 {id}（{kind}）的参数 {field} = {value} 小于合法下界 {lower}",
+                            id = device.id(),
+                            kind = device.kind(),
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // V-14 — the **upper** bounds (one field at a time).
+        //
+        // ⚠️ Only the fields that have an upper bound at all take part:
+        // `uart16550.baud_rate` has **none** (the RISC-V architecture does
+        // not cap the baud rate) ⇒ **no number is invented** for it.
+        for region in &self.regions {
+            let RegionSpec::Peripheral { device, .. } = region else {
+                continue;
+            };
+            for (field, value, _, upper) in device.numeric_parameters() {
+                let Some(upper) = upper else {
+                    continue;
+                };
+                if value > upper {
+                    return Err(PlatformError::new(
+                        PLATFORM_FAMILY,
+                        E_PLT_12_PARAMETER_OUT_OF_RANGE,
+                        format!(
+                            "器件 {id}（{kind}）的参数 {field} = {value} 超过合法上界 {upper}",
+                            id = device.id(),
+                            kind = device.kind(),
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // V-15 — the **cross-field** rule: a UART's `irq_line` must be a
+        // valid PLIC source id.
+        //
+        // ⚠️ **Judged only when the map has a PLIC** (裁决 G): no PLIC does
+        // **not** make the board illegal — it just has no interrupt
+        // routing ⇒ `irq_line` is meaningless but harmless ⇒ refusing such
+        // a board would refuse a legal one.
+        //
+        // ⚠️ The bound is the **smallest** `sources` in the map ⇒ every
+        // PLIC in the map accepts the line ⇒ conservative and unambiguous.
+        let plic_sources = self.regions.iter().filter_map(|region| {
+            let RegionSpec::Peripheral {
+                device: DeviceSpec::Plic { sources, .. },
+                ..
+            } = region
+            else {
+                return None;
+            };
+            Some(*sources)
+        });
+        if let Some(min_sources) = plic_sources.min() {
+            for region in &self.regions {
+                let RegionSpec::Peripheral {
+                    device: DeviceSpec::Uart16550 { id, irq_line, .. },
+                    ..
+                } = region
+                else {
+                    continue;
+                };
+                if u32::from(*irq_line) >= min_sources {
+                    return Err(PlatformError::new(
+                        PLATFORM_FAMILY,
+                        E_PLT_12_PARAMETER_OUT_OF_RANGE,
+                        format!(
+                            "器件 {id}（uart16550）的参数 irq_line = {irq_line} 不在 PLIC 的中断源数之内（图中最小的 sources = {min_sources}）"
+                        ),
+                    ));
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -451,6 +604,53 @@ impl DeviceSpec {
             DeviceSpec::Uart16550 { .. } => "uart16550",
             DeviceSpec::Clint { .. } => "clint",
             DeviceSpec::Plic { .. } => "plic",
+        }
+    }
+
+    /// The device's **numeric** parameters and their legal value domain.
+    ///
+    /// The tuple is `(field name, value, lower bound, upper bound)`; the
+    /// upper bound is `None` when the architecture gives **no** upper bound
+    /// — that is the case for `uart16550.baud_rate` (the RISC-V
+    /// architecture does not cap the baud rate ⇒ **no number is
+    /// invented** for it).
+    ///
+    /// ⚠️ `gpio` has **no** numeric parameter ⇒ it yields an empty list ⇒
+    /// **no** new rule applies to it.
+    ///
+    /// ⚠️ The bounds live in **this** module ([`MAX_CLINT_FREQ_HZ`] and
+    /// friends) ⇒ one definition, everybody else references them.
+    fn numeric_parameters(&self) -> Vec<(&'static str, u64, u64, Option<u64>)> {
+        match self {
+            DeviceSpec::Gpio { .. } => Vec::new(),
+            DeviceSpec::Uart16550 { baud_rate, .. } => {
+                vec![("baud_rate", u64::from(*baud_rate), 1, None)]
+            }
+            DeviceSpec::Clint { freq_hz, harts, .. } => vec![
+                ("freq_hz", *freq_hz, 1, Some(MAX_CLINT_FREQ_HZ)),
+                (
+                    "harts",
+                    u64::from(*harts),
+                    1,
+                    Some(u64::from(MAX_CLINT_HARTS)),
+                ),
+            ],
+            DeviceSpec::Plic {
+                sources, contexts, ..
+            } => vec![
+                (
+                    "sources",
+                    u64::from(*sources),
+                    1,
+                    Some(u64::from(MAX_PLIC_SOURCES)),
+                ),
+                (
+                    "contexts",
+                    u64::from(*contexts),
+                    1,
+                    Some(u64::from(MAX_PLIC_CONTEXTS)),
+                ),
+            ],
         }
     }
 }
@@ -1238,6 +1438,7 @@ mod tests {
             (E_PLT_09_UNKNOWN_PLATFORM, "E_PLT-09"),
             (E_PLT_10_PLATFORM_FILE_UNREADABLE, "E_PLT-10"),
             (E_PLT_11_PLATFORM_FILE_MALFORMED, "E_PLT-11"),
+            (E_PLT_12_PARAMETER_OUT_OF_RANGE, "E_PLT-12"),
         ];
         for (scenario, expected) in cases {
             let err = PlatformError::new(PLATFORM_FAMILY, scenario, "x");
@@ -1255,5 +1456,521 @@ mod tests {
     #[test]
     fn a8_the_session_payload_version_is_untouched() {
         assert_eq!(crate::session::SESSION_SNAPSHOT_SCHEMA_VERSION, 3);
+    }
+
+    // -----------------------------------------------------------------
+    // STAGE-15 · v0.30 · D-141 — the devices' legal value domain
+    // (V-13 ~ V-15 · `E_PLT-12`)
+    //
+    // ⚠️ The **A-n** labels below are the frozen spec STAGE-15 §5.1's
+    // acceptance items (A-1 ~ A-9) — **not** the older "A-n" labels the
+    // STAGE-12 cases above carry ⇒ every label here says "STAGE-15".
+    // -----------------------------------------------------------------
+
+    /// A description made of the given **peripheral devices** only.
+    ///
+    /// ⚠️ Each device gets its own window base ⇒ the map has **no**
+    /// overlap (V-6) ⇒ the cases below are about the **device
+    /// parameters**, not about the regions.
+    fn board_with(devices: Vec<DeviceSpec>) -> PlatformDescription {
+        PlatformDescription {
+            schema_version: PLATFORM_SCHEMA_VERSION,
+            id: "board-under-test".to_string(),
+            name: "Board under test".to_string(),
+            priority: 1,
+            auto_selectable: true,
+            region_budget_bytes: 134_217_728,
+            regions: devices
+                .into_iter()
+                .enumerate()
+                .map(|(index, device)| RegionSpec::Peripheral {
+                    base: 0x1000_0000u32 + (index as u32) * 0x1_0000,
+                    device,
+                })
+                .collect(),
+            description: None,
+        }
+    }
+
+    /// Assert that a description is rejected with the platform family's
+    /// `E_PLT-12` scenario code.
+    ///
+    /// ⚠️ The judgement is on `family` + `scenario`, **never** on the
+    /// message text ⇒ rewording the message must not turn any case red.
+    fn assert_parameter_out_of_range(desc: &PlatformDescription, what: &str) {
+        let err = desc.validate().expect_err(what);
+        assert_eq!(err.family, PLATFORM_FAMILY, "{what} 的族不是 Platform");
+        assert_eq!(
+            err.scenario, E_PLT_12_PARAMETER_OUT_OF_RANGE,
+            "{what} 的场景码不是 E_PLT-12（实际 {err}）"
+        );
+    }
+
+    // -------------------------------------------------------------
+    // STAGE-15 A-1 — V-13: the lower bounds
+    // -------------------------------------------------------------
+
+    /// **STAGE-15 A-1 / V-13** — a UART whose `baud_rate` is **zero** is
+    /// rejected with `E_PLT-12`.
+    ///
+    /// ⚠️ The map has **no PLIC** ⇒ V-15 does not apply ⇒ this case is
+    /// about the **single field** alone.
+    #[test]
+    fn v13_a_zero_baud_rate_is_rejected() {
+        let desc = board_with(vec![DeviceSpec::Uart16550 {
+            id: "UART0".to_string(),
+            irq_line: 0,
+            baud_rate: 0,
+        }]);
+        assert_parameter_out_of_range(&desc, "波特率为 0 的 UART");
+    }
+
+    /// **STAGE-15 A-2 / V-13** — a CLINT whose `freq_hz` is **zero** is
+    /// rejected with `E_PLT-12`.
+    #[test]
+    fn v13_a_zero_clint_frequency_is_rejected() {
+        let desc = board_with(vec![DeviceSpec::Clint {
+            id: "CLINT0".to_string(),
+            freq_hz: 0,
+            harts: 1,
+        }]);
+        assert_parameter_out_of_range(&desc, "频率为 0 的 CLINT");
+    }
+
+    /// **STAGE-15 A-3 / V-13** — a CLINT with **zero harts** is rejected
+    /// with `E_PLT-12`.
+    #[test]
+    fn v13_a_clint_without_harts_is_rejected() {
+        let desc = board_with(vec![DeviceSpec::Clint {
+            id: "CLINT0".to_string(),
+            freq_hz: 10_000_000,
+            harts: 0,
+        }]);
+        assert_parameter_out_of_range(&desc, "hart 数为 0 的 CLINT");
+    }
+
+    /// **STAGE-15 A-3 / V-13** — a PLIC with **zero sources** is rejected
+    /// with `E_PLT-12`.
+    #[test]
+    fn v13_a_plic_without_sources_is_rejected() {
+        let desc = board_with(vec![DeviceSpec::Plic {
+            id: "PLIC0".to_string(),
+            sources: 0,
+            contexts: 16,
+        }]);
+        assert_parameter_out_of_range(&desc, "中断源数为 0 的 PLIC");
+    }
+
+    /// **STAGE-15 A-3 / V-13** — a PLIC with **zero contexts** is rejected
+    /// with `E_PLT-12`.
+    #[test]
+    fn v13_a_plic_without_contexts_is_rejected() {
+        let desc = board_with(vec![DeviceSpec::Plic {
+            id: "PLIC0".to_string(),
+            sources: 64,
+            contexts: 0,
+        }]);
+        assert_parameter_out_of_range(&desc, "context 数为 0 的 PLIC");
+    }
+
+    // -------------------------------------------------------------
+    // STAGE-15 A-4 — V-14: the upper bounds
+    // -------------------------------------------------------------
+
+    /// **STAGE-15 A-4 / V-14** — a CLINT whose `freq_hz` is **one above
+    /// 1 THz** is rejected with `E_PLT-12`.
+    ///
+    /// ⚠️ The bound is written as an **architecture literal**
+    /// (`1_000_000_000_001`), not as `MAX_CLINT_FREQ_HZ + 1` ⇒ a wrong
+    /// constant cannot make this case pass.
+    #[test]
+    fn v14_a_clint_frequency_above_one_terahertz_is_rejected() {
+        let desc = board_with(vec![DeviceSpec::Clint {
+            id: "CLINT0".to_string(),
+            freq_hz: 1_000_000_000_001,
+            harts: 1,
+        }]);
+        assert_parameter_out_of_range(&desc, "频率超过 1 THz 的 CLINT");
+    }
+
+    /// **STAGE-15 A-4 / V-14** — a CLINT with **4097 harts** is rejected
+    /// with `E_PLT-12`.
+    #[test]
+    fn v14_a_clint_with_more_than_4096_harts_is_rejected() {
+        let desc = board_with(vec![DeviceSpec::Clint {
+            id: "CLINT0".to_string(),
+            freq_hz: 10_000_000,
+            harts: 4097,
+        }]);
+        assert_parameter_out_of_range(&desc, "hart 数超过 4096 的 CLINT");
+    }
+
+    /// **STAGE-15 A-4 / V-14** — a PLIC with **1025 sources** is rejected
+    /// with `E_PLT-12`.
+    #[test]
+    fn v14_a_plic_with_more_than_1024_sources_is_rejected() {
+        let desc = board_with(vec![DeviceSpec::Plic {
+            id: "PLIC0".to_string(),
+            sources: 1025,
+            contexts: 16,
+        }]);
+        assert_parameter_out_of_range(&desc, "中断源数超过 1024 的 PLIC");
+    }
+
+    /// **STAGE-15 A-4 / V-14** — a PLIC with **17 contexts** is rejected
+    /// with `E_PLT-12`.
+    #[test]
+    fn v14_a_plic_with_more_than_16_contexts_is_rejected() {
+        let desc = board_with(vec![DeviceSpec::Plic {
+            id: "PLIC0".to_string(),
+            sources: 64,
+            contexts: 17,
+        }]);
+        assert_parameter_out_of_range(&desc, "context 数超过 16 的 PLIC");
+    }
+
+    // -------------------------------------------------------------
+    // STAGE-15 A-5 — the boundary values are legal
+    // -------------------------------------------------------------
+
+    /// **STAGE-15 A-5 / V-13** — a baud rate of **1** is legal (the lower
+    /// bound is inclusive).
+    #[test]
+    fn v13_the_lowest_legal_baud_rate_is_accepted() {
+        let desc = board_with(vec![DeviceSpec::Uart16550 {
+            id: "UART0".to_string(),
+            irq_line: 0,
+            baud_rate: 1,
+        }]);
+        assert!(desc.validate().is_ok(), "波特率 1 必须被接受");
+    }
+
+    /// **STAGE-15 A-5 / V-13** — a CLINT frequency of **1 Hz** is legal.
+    #[test]
+    fn v13_the_lowest_legal_clint_frequency_is_accepted() {
+        let desc = board_with(vec![DeviceSpec::Clint {
+            id: "CLINT0".to_string(),
+            freq_hz: 1,
+            harts: 1,
+        }]);
+        assert!(desc.validate().is_ok(), "频率 1 Hz 必须被接受");
+    }
+
+    /// **STAGE-15 A-5 / V-13** — **one hart** is legal.
+    #[test]
+    fn v13_the_lowest_legal_clint_hart_count_is_accepted() {
+        let desc = board_with(vec![DeviceSpec::Clint {
+            id: "CLINT0".to_string(),
+            freq_hz: 10_000_000,
+            harts: 1,
+        }]);
+        assert!(desc.validate().is_ok(), "单 hart 的 CLINT 必须被接受");
+    }
+
+    /// **STAGE-15 A-5 / V-13** — **one source** is legal.
+    #[test]
+    fn v13_the_lowest_legal_plic_source_count_is_accepted() {
+        let desc = board_with(vec![DeviceSpec::Plic {
+            id: "PLIC0".to_string(),
+            sources: 1,
+            contexts: 1,
+        }]);
+        assert!(desc.validate().is_ok(), "单中断源的 PLIC 必须被接受");
+    }
+
+    /// **STAGE-15 A-5 / V-13** — **one context** is legal.
+    #[test]
+    fn v13_the_lowest_legal_plic_context_count_is_accepted() {
+        let desc = board_with(vec![DeviceSpec::Plic {
+            id: "PLIC0".to_string(),
+            sources: 64,
+            contexts: 1,
+        }]);
+        assert!(desc.validate().is_ok(), "单 context 的 PLIC 必须被接受");
+    }
+
+    /// **STAGE-15 A-5 / V-14** — a CLINT frequency of exactly
+    /// **1 THz** is legal (the upper bound is inclusive).
+    #[test]
+    fn v14_the_highest_legal_clint_frequency_is_accepted() {
+        let desc = board_with(vec![DeviceSpec::Clint {
+            id: "CLINT0".to_string(),
+            freq_hz: 1_000_000_000_000,
+            harts: 1,
+        }]);
+        assert!(desc.validate().is_ok(), "1 THz 的 CLINT 必须被接受");
+    }
+
+    /// **STAGE-15 A-5 / V-14** — exactly **4096 harts** are legal.
+    #[test]
+    fn v14_the_highest_legal_clint_hart_count_is_accepted() {
+        let desc = board_with(vec![DeviceSpec::Clint {
+            id: "CLINT0".to_string(),
+            freq_hz: 10_000_000,
+            harts: 4096,
+        }]);
+        assert!(desc.validate().is_ok(), "4096 个 hart 的 CLINT 必须被接受");
+    }
+
+    /// **STAGE-15 A-5 / V-14** — exactly **1024 sources** are legal.
+    #[test]
+    fn v14_the_highest_legal_plic_source_count_is_accepted() {
+        let desc = board_with(vec![DeviceSpec::Plic {
+            id: "PLIC0".to_string(),
+            sources: 1024,
+            contexts: 16,
+        }]);
+        assert!(desc.validate().is_ok(), "1024 个中断源的 PLIC 必须被接受");
+    }
+
+    /// **STAGE-15 A-5 / V-14** — exactly **16 contexts** are legal.
+    #[test]
+    fn v14_the_highest_legal_plic_context_count_is_accepted() {
+        let desc = board_with(vec![DeviceSpec::Plic {
+            id: "PLIC0".to_string(),
+            sources: 64,
+            contexts: 16,
+        }]);
+        assert!(desc.validate().is_ok(), "16 个 context 的 PLIC 必须被接受");
+    }
+
+    /// **STAGE-15 A-5 / V-14** — the baud rate has **no upper bound**.
+    ///
+    /// ⚠️ The RISC-V architecture does not cap the baud rate ⇒ the
+    /// description layer must not invent one ⇒ the largest value the
+    /// field can hold is still legal.
+    #[test]
+    fn v14_the_baud_rate_has_no_upper_bound() {
+        let desc = board_with(vec![DeviceSpec::Uart16550 {
+            id: "UART0".to_string(),
+            irq_line: 0,
+            baud_rate: u32::MAX,
+        }]);
+        assert!(desc.validate().is_ok(), "波特率没有上界 ⇒ 不该被拒");
+    }
+
+    // -------------------------------------------------------------
+    // STAGE-15 A-6 / A-7 — V-15: the cross-field rule
+    // -------------------------------------------------------------
+
+    /// **STAGE-15 A-6 / V-15** — with a PLIC of **16 sources**, a UART
+    /// whose `irq_line` is **20** is rejected with `E_PLT-12`.
+    ///
+    /// ⚠️ PLIC source ids are **0-based** ⇒ the legal ids of a 16-source
+    /// PLIC are `0 ..= 15` ⇒ `20` is outside them.
+    #[test]
+    fn v15_an_irq_line_beyond_the_plic_source_count_is_rejected() {
+        let desc = board_with(vec![
+            DeviceSpec::Plic {
+                id: "PLIC0".to_string(),
+                sources: 16,
+                contexts: 16,
+            },
+            DeviceSpec::Uart16550 {
+                id: "UART0".to_string(),
+                irq_line: 20,
+                baud_rate: 115_200,
+            },
+        ]);
+        assert_parameter_out_of_range(&desc, "中断线超出 PLIC 源数的 UART");
+    }
+
+    /// **STAGE-15 A-6 / V-15** — with a PLIC of **16 sources**, a UART
+    /// whose `irq_line` is **15** (the highest legal id) is accepted.
+    #[test]
+    fn v15_the_highest_legal_irq_line_is_accepted() {
+        let desc = board_with(vec![
+            DeviceSpec::Plic {
+                id: "PLIC0".to_string(),
+                sources: 16,
+                contexts: 16,
+            },
+            DeviceSpec::Uart16550 {
+                id: "UART0".to_string(),
+                irq_line: 15,
+                baud_rate: 115_200,
+            },
+        ]);
+        assert!(desc.validate().is_ok(), "irq_line 15 必须被接受");
+    }
+
+    /// **STAGE-15 A-6 / V-15** — with a PLIC of **16 sources**, a UART
+    /// whose `irq_line` is **16** — one past the highest legal id — is
+    /// rejected with `E_PLT-12`.
+    ///
+    /// ⚠️ PLIC source ids are **0-based** ⇒ a 16-source PLIC's legal ids
+    /// are `0 ..= 15` ⇒ `16` is the first **illegal** one. This is the
+    /// case that separates `<` from `<=`.
+    #[test]
+    fn v15_an_irq_line_equal_to_the_plic_source_count_is_rejected() {
+        let desc = board_with(vec![
+            DeviceSpec::Plic {
+                id: "PLIC0".to_string(),
+                sources: 16,
+                contexts: 16,
+            },
+            DeviceSpec::Uart16550 {
+                id: "UART0".to_string(),
+                irq_line: 16,
+                baud_rate: 115_200,
+            },
+        ]);
+        assert_parameter_out_of_range(&desc, "中断线等于 PLIC 源数的 UART");
+    }
+
+    /// **STAGE-15 A-7 / V-15** — a map with **no PLIC** and a UART whose
+    /// `irq_line` is **65535** is accepted.
+    ///
+    /// ⚠️ **No PLIC does not make the board illegal** (裁决 G): the board
+    /// simply has no interrupt routing ⇒ `irq_line` is meaningless but
+    /// harmless ⇒ refusing it would refuse a legal board.
+    #[test]
+    fn v15_an_irq_line_without_any_plic_is_not_judged() {
+        let desc = board_with(vec![DeviceSpec::Uart16550 {
+            id: "UART0".to_string(),
+            irq_line: 65_535,
+            baud_rate: 115_200,
+        }]);
+        assert!(
+            desc.validate().is_ok(),
+            "没有 PLIC 时 irq_line 不该被判非法"
+        );
+    }
+
+    // -------------------------------------------------------------
+    // STAGE-15 A-8 — the built-in descriptions stay legal
+    // -------------------------------------------------------------
+
+    /// **STAGE-15 A-8** — the built-in `default` description is still
+    /// legal under the new rules.
+    ///
+    /// ⚠️ **This copy is hand-written from
+    /// `kernel_host/platforms/default.json`** — the contract layer does
+    /// **not** depend on the kernel crate ⇒ the equivalent copy lives
+    /// here (the parameters are copied field by field).
+    #[test]
+    fn a8_the_builtin_default_description_is_still_legal() {
+        let raw = r#"{
+            "schema_version": 1,
+            "id": "default",
+            "name": "Default",
+            "priority": 10,
+            "auto_selectable": true,
+            "region_budget_bytes": 16777216,
+            "regions": [
+                { "kind": "ram", "base": 0, "size": 1048576 },
+                { "kind": "peripheral", "base": 1073741824,
+                  "device": { "device": "gpio", "id": "GPIO0" } },
+                { "kind": "ram", "base": 2147483648, "size": 4194304 }
+            ]
+        }"#;
+        let desc: PlatformDescription = serde_json::from_str(raw).expect("必须能解析");
+        assert!(desc.validate().is_ok(), "内置 default 描述必须仍然合法");
+    }
+
+    /// **STAGE-15 A-8** — the built-in `minimal` description is still
+    /// legal under the new rules.
+    ///
+    /// ⚠️ **This copy is hand-written from
+    /// `kernel_host/platforms/minimal.json`** — see the note in the
+    /// `default` case above.
+    #[test]
+    fn a8_the_builtin_minimal_description_is_still_legal() {
+        let raw = r#"{
+            "schema_version": 1,
+            "id": "minimal",
+            "name": "Minimal (zero-change demo platform)",
+            "priority": 30,
+            "auto_selectable": false,
+            "region_budget_bytes": 16777216,
+            "regions": [
+                { "kind": "ram", "base": 0, "size": 2097152 },
+                { "kind": "ram", "base": 268435456, "size": 16777216 }
+            ]
+        }"#;
+        let desc: PlatformDescription = serde_json::from_str(raw).expect("必须能解析");
+        assert!(desc.validate().is_ok(), "内置 minimal 描述必须仍然合法");
+    }
+
+    /// **STAGE-15 A-8** — the built-in `qemu-virt` description is still
+    /// legal under the new rules.
+    ///
+    /// ⚠️ **This copy is hand-written from
+    /// `kernel_host/platforms/qemu-virt.json`** — see the note in the
+    /// `default` case above.
+    ///
+    /// ⚠️ Its PLIC has **16 contexts** ⇒ it sits **exactly on** the upper
+    /// bound ⇒ a `>=` comparison would reject the kernel's own board.
+    #[test]
+    fn a8_the_builtin_qemu_virt_description_is_still_legal() {
+        let raw = r#"{
+            "schema_version": 1,
+            "id": "qemu-virt",
+            "name": "QEMU virt",
+            "priority": 20,
+            "auto_selectable": true,
+            "region_budget_bytes": 134217728,
+            "regions": [
+                { "kind": "ram", "base": 0, "size": 1048576 },
+                { "kind": "peripheral", "base": 33554432,
+                  "device": { "device": "clint", "id": "CLINT", "freq_hz": 10000000, "harts": 1 } },
+                { "kind": "peripheral", "base": 201326592,
+                  "device": { "device": "plic", "id": "PLIC", "sources": 64, "contexts": 16 } },
+                { "kind": "peripheral", "base": 268435456,
+                  "device": { "device": "uart16550", "id": "UART0", "irq_line": 1, "baud_rate": 115200 } },
+                { "kind": "peripheral", "base": 1073741824,
+                  "device": { "device": "gpio", "id": "GPIO0" } },
+                { "kind": "ram", "base": 2147483648, "size": 134217728 }
+            ]
+        }"#;
+        let desc: PlatformDescription = serde_json::from_str(raw).expect("必须能解析");
+        assert!(desc.validate().is_ok(), "内置 qemu-virt 描述必须仍然合法");
+    }
+
+    // -------------------------------------------------------------
+    // STAGE-15 A-9 — the report order of V-1 ~ V-9 does not move
+    // -------------------------------------------------------------
+
+    /// **STAGE-15 A-9** — a description that breaks **both** V-2 (empty
+    /// `id`) and V-13 (a zero baud rate) reports **V-2**.
+    ///
+    /// ⚠️ The new rules were **appended after V-9** ⇒ the report order
+    /// of the old rules is untouched.
+    #[test]
+    fn a9_the_empty_id_is_reported_before_a_parameter_violation() {
+        let mut desc = board_with(vec![DeviceSpec::Uart16550 {
+            id: "UART0".to_string(),
+            irq_line: 0,
+            baud_rate: 0,
+        }]);
+        desc.id = String::new();
+        let err = desc.validate().expect_err("空 id 必须被拒");
+        assert_eq!(err.family, PLATFORM_FAMILY);
+        assert_eq!(
+            err.scenario, E_PLT_02_EMPTY_ID,
+            "同时违反 V-2 与 V-13 时必须先报 V-2（实际 {err}）"
+        );
+    }
+
+    /// **STAGE-15 A-9** — a description that breaks **both** V-9 (two
+    /// devices share an `id`) and V-13 (a zero baud rate) reports **V-9**.
+    #[test]
+    fn a9_the_duplicated_device_id_is_reported_before_a_parameter_violation() {
+        let desc = board_with(vec![
+            DeviceSpec::Uart16550 {
+                id: "DUP".to_string(),
+                irq_line: 0,
+                baud_rate: 0,
+            },
+            DeviceSpec::Gpio {
+                id: "DUP".to_string(),
+            },
+        ]);
+        let err = desc.validate().expect_err("重复的器件 id 必须被拒");
+        assert_eq!(err.family, PLATFORM_FAMILY);
+        assert_eq!(
+            err.scenario, E_PLT_08_DUPLICATE_DEVICE_ID,
+            "同时违反 V-9 与 V-13 时必须先报 V-9（实际 {err}）"
+        );
     }
 }

@@ -166,8 +166,9 @@ error_families! {
     /// This family covers the **description layer** only — a malformed
     /// platform description (wrong format version, empty id, no regions,
     /// zero-sized / overflowing / overlapping regions, a region over the
-    /// declared budget, a duplicated device id). Its scenario codes live
-    /// in this file, next to the family they belong to.
+    /// declared budget, a duplicated device id, a device parameter outside
+    /// its legal value domain). Its scenario codes live in this file, next
+    /// to the family they belong to.
     ///
     /// ⚠️ **Not** the bus family: the bus codes (`E_BUS-*`) are about a
     /// **live** memory map on the wire; these are about the **declared**
@@ -389,6 +390,24 @@ pub const E_PLT_10_PLATFORM_FILE_UNREADABLE: u16 = 10;
 /// ⚠️ **Host-side rule (V-12) — owned by the contract layer**, for the
 /// same reason as [`E_PLT_09_UNKNOWN_PLATFORM`].
 pub const E_PLT_11_PLATFORM_FILE_MALFORMED: u16 = 11;
+
+/// Scenario code: a device parameter's value is **outside its legal value
+/// domain**.
+///
+/// ⚠️ **One code covers two shapes** (frozen spec STAGE-15 §2.8 裁决 H):
+///
+/// | shape | example |
+/// | --- | --- |
+/// | **single field** | `uart16550.baud_rate = 0` · `clint.freq_hz = 0` · `plic.sources = 1025` |
+/// | **cross field** | `uart16550.irq_line = 20` while the map's smallest PLIC has `sources = 16` |
+///
+/// ⇒ both mean the **same** thing — 「某个器件参数的值不在它的合法取值域内」
+/// ⇒ **one code**. Two codes with nearly the same meaning would leave the
+/// user unable to tell them apart (and the front end unable to react).
+///
+/// ⚠️ **It does not reuse [`E_PLT_08_DUPLICATE_DEVICE_ID`]**: that one means
+/// 「两个器件共用一个 id」⇒ one code, two meanings ⇒ forbidden.
+pub const E_PLT_12_PARAMETER_OUT_OF_RANGE: u16 = 12;
 
 #[cfg(test)]
 mod tests {
