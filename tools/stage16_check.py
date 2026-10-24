@@ -159,6 +159,9 @@ must = [
     "D-139",
     "D-145",                       # 本批新登记的第一条
     "D-146",                       # 本批新登记的第二条
+    "data-mmap-revision",           # 冻结的 DOM 钩子（修订号）
+    "data-action=\"unload-project\"",  # 冻结的 DOM 钩子（卸载按钮）
+    "data-mmap-budget-note",        # 既有钩子（措辞要改）
     "STAGE-17",                    # I2C 那批的规格号让位
     "施工期订正",                   # 施工期订正记录节
 ]
