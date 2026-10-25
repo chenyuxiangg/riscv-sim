@@ -228,6 +228,12 @@ check_env_constants
 #   env    the environment variant to build the case with:
 #            (empty) / -   the default (CSR-free) environment, tests/golden/env/
 #            csr           the CSR-capable environment, tests/golden/env/csr/
+#            smode         the supervisor-capable environment, tests/golden/env/smode/
+#                        — the `csr` environment plus a *direct* `tohost`
+#                        verdict and a **strict** M-level trap vector
+#                        (STAGE-22 adjudication M): without the strict
+#                        vector, a wrong `sret` landing in S mode is a
+#                        **false green on both sides**.
 #          The variant's include path is searched **first**, so its
 #          `riscv_test.h` wins over the default one (STAGE-6 adjudication F).
 #          ⚠️ An unknown value is a **hard error**, not a reason: a reason
@@ -254,6 +260,7 @@ while IFS= read -r line; do
     case "$env_col" in
         ''|'-') env_variant='' ;;
         csr)     env_variant='csr' ;;
+        smode)   env_variant='smode' ;;
         *) die "unknown env variant '$env_col' in manifest line: $line" ;;
     esac
     # A pending case must say why it is out of scope and which ledger
@@ -390,6 +397,7 @@ esac
 # The env variant selects the include directory:
 #   (empty)  the default environment (tests/golden/env/)
 #   csr      the CSR-capable environment (tests/golden/env/csr/)
+#   smode    the supervisor-capable environment (tests/golden/env/smode/)
 #
 # ⚠️ The variant's include path comes **first** so that its `riscv_test.h`
 # wins over the default one; the default directory stays on the path as
