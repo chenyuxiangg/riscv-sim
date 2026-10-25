@@ -47,7 +47,7 @@
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
-use riscv_sim_contract::port::{Peripheral, ProbeSink};
+use riscv_sim_contract::port::{Peripheral, ProbeSink, TimeSource};
 use riscv_sim_contract::session::{ClintStateDto, PeripheralSessionState};
 
 use super::reg::{extract_subword, register_offset};
@@ -324,8 +324,22 @@ impl Clint {
     }
 }
 
+/// **时钟的只读端口**（D-151 · 冻结规格 STAGE-26 §3.2 / 裁决 G）。
+///
+/// ⚠️ **单位 = 周期（tick）**，**不是** ps、**不是**指令数 ⇒ ⇒ 与
+/// [`Clint::mtime_cycles`] **逐字同源** ⇒ ⇒ guest 读 `time` 与宿主读
+/// `mtime` 是**同一份**读数，不是各算一份。
+///
+/// ⚠️ **只读**：端口**没有**写方法 ⇒ ⇒ `time` 这个**只读** CSR 的语义
+/// 在端口这一层就被守住了。
+impl TimeSource for Clint {
+    fn time_ticks(&self) -> u64 {
+        self.mtime_cycles()
+    }
+}
+
 /// 寄存器读写（`register_offset` / `extract_subword`）在 `super::reg`
-///（M-15 review N1 的 DRY 合并）。
+/// （M-15 review N1 的 DRY 合并）。
 impl Peripheral for Clint {
     fn id(&self) -> &str {
         &self.id

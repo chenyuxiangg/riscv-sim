@@ -113,13 +113,45 @@ use riscv_sim_contract::model::SimState;
 /// ⚠️ **影子指向只有契约层那一份**（[`counter_shadow`]）—— 这里**只引用**，
 /// **不**自己写一份 `match`（STAGE-20 裁决 C）。
 ///
-/// ⚠️ **`time` / `timeh` 恒 0**（STAGE-20 裁决 K / R10）—— 参考侧也恒 0
-/// ⇒ ⇒ 逐位一致 ⇒ 不影响黄金对拍。⚠️ **但功能确实缺失**：真值要接 M-15 的
-/// CLINT ⇒ ⇒ 那是**单独登记的欠账**，**不是**本批的活。
+/// ⚠️ **`time` / `timeh` 的真值**（D-151 · 冻结规格 STAGE-26 §2.4）——
+/// STAGE-20 判它「恒 0」（参考侧也恒 0 ⇒ 逐位一致）⇒ ⇒ 那是**功能缺失** ⇒
+/// ⇒ **D-151 欠账**：真值要接 M-15 的 CLINT ⇒ ⇒ **本批已闭环** ⇒ ⇒ 真值由
+/// [`csr_read_with_time`] 给出（**永远不从 CSR 文件读** ⇒ ⇒ 畸形载荷那条
+/// 护栏**仍在**）。
+///
+/// ⚠️ **明示取舍**（STAGE-26 裁决 J）：落地后**有 CLINT 的宿主**上，`time`
+/// 的值由**平台**定义 ⇒ ⇒ 参考侧在黄金配置下恒 0 ⇒ ⇒ **两侧不再可比**
+/// ⇒ ⇒ 黄金对拍**零翻红**（黄金 runner 没有 CLINT）⇒ ⇒ 判别力**全部**落在
+/// Rust 单测。
 ///
 /// ⚠️ **写路径不需要特判**：影子被**只读规则**拦住 ⇒ ⇒ 写不进文件 ⇒ ⇒
 /// [`counter_shadow`] 只在读路径用。
+/// ⚠️ **`time` / `timeh` 的真值**（D-151 · 冻结规格 STAGE-26 §2.4 / 裁决
+/// H / 裁决 K）—— **有真值源就报真值，没有就报 0**。
+///
+/// ⚠️ **但值永远不从 CSR 文件读** ⇒ ⇒ 「畸形载荷把 `time` 塞进文件 ⇒ 读回
+/// 非 0」那条**护栏仍在**（与 `misa` / `mhartid` 是同一道防线）⇒ ⇒ 规则从
+/// 「恒 0」改成「有源报源、无源报 0」，**不是**把护栏删掉。
+///
+/// ⚠️ **单位 = 平台时钟 tick**（不是 ps、不是指令数）⇒ ⇒ 与 M-15 的
+/// [`Clint::mtime_cycles`](crate::m15_peripheral::clint::Clint::mtime_cycles)
+/// **同源**。
+///
+/// ⚠️ **写路径不需要特判**：`time` 是**只读** CSR ⇒ ⇒ 写被契约层的
+/// `csr_write_is_ignored` 拦住 ⇒ ⇒ 写不进文件 ⇒ ⇒ 读路径**没有必要**去
+/// 区分「文件里那个值」与「真值」。
 pub(crate) fn csr_read(state: &SimState, csr: u16) -> u32 {
+    csr_read_with_time(state, csr, 0)
+}
+
+/// 读一个 CSR —— **带平台时钟**（D-151 · 冻结规格 STAGE-26 §2.4 / 裁决 K）。
+///
+/// ⚠️ **「`time` 报什么」这条规则只有这一个落点** ⇒ ⇒ [`csr_read`] 是它的
+/// **薄封装**（`time_ticks = 0`）⇒ ⇒ **不是**第二个真相源。
+///
+/// ⚠️ **`csr_read` 的签名一个字都没改**（裁决 K）—— 它是 M-17 调试读 CSR 的
+/// **唯一入口** ⇒ ⇒ 改它会波及 10 处 ⇒ ⇒ 改成「加一个新函数」。
+pub(crate) fn csr_read_with_time(state: &SimState, csr: u16, time_ticks: u64) -> u32 {
     if csr == CSR_MISA {
         return CSR_MISA_VALUE;
     }
@@ -130,11 +162,18 @@ pub(crate) fn csr_read(state: &SimState, csr: u16) -> u32 {
     if let Some(source) = counter_shadow(csr) {
         return file_value(state, source);
     }
-    // ⚠️ **`time` / `timeh` 恒 0**（裁决 K）—— **平台自己**回答，不是
-    // 「文件里没有 ⇒ 读回 0」那条**巧合**（同 [`CSR_MHARTID`] 的理由：
-    // 一份畸形载荷把 `time` 塞进文件时，读回来**仍然**必须是 0）。
-    if csr == CSR_TIME || csr == CSR_TIMEH {
-        return 0;
+    // ⚠️ **`time` / `timeh` 的真值**（STAGE-26 裁决 H）—— **平台自己**回答，
+    // 不是「文件里没有 ⇒ 读回 0」那条**巧合**（同 [`CSR_MHARTID`] 的理由：
+    // 一份畸形载荷把 `time` 塞进文件时，读回来**仍然**必须是真值源给的数，
+    // **不是**文件里的数）。
+    //
+    // ⚠️ **低半部 / 高半部各取各的** ⇒ ⇒ 与 CLINT 的 `mtime` 寄存器那
+    // **两个 32 位半字**同形（`mtime` 的偏移 `0xBFF8` / `0xBFFC`）。
+    if csr == CSR_TIME {
+        return time_ticks as u32;
+    }
+    if csr == CSR_TIMEH {
+        return (time_ticks >> 32) as u32;
     }
     // ⚠️ **伪 CSR `CSR_PRIV`**（STAGE-22 §2.5）—— 客体的读**必须**是 **0**
     //    ⇒ ⇒ 平台自己读特权级**不走这条路**（走 [`priv_get`]）⇒ ⇒ 两个
