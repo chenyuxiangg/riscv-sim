@@ -23,11 +23,21 @@
 //! | 「最低编号的条目说了算」（「任一放行即可」也能过） | **两个方向各一条**：低编号禁写 / 低编号放行 |
 //! | 「写回等于写进去」（**合法化**也能过） | 合法值**逐字**读回 + 保留组合**被改写** |
 //! | 「取指要 `X`」（「取指永远被拒」也能过） | **控制组**：给 `X` 之后取指**放行** |
+//! | 「跨界访问**被拒**」（「一律按整段判」也能过） | **两个方向各一条**：尾部落进 DENY ⇒ **拒** / 跨两个 ALLOW ⇒ **放行** |
+//!
+//! ## v0.39：逐片判（对参考侧实测）
+//!
+//! ⚠️ 未对齐的 4 字节访问**跨过** 4 字节块边界 ⇒ ⇒ 参考侧**逐片**判 ⇒ ⇒
+//! 平台的旧规则（「决定条目必须覆盖访问的**全部**字节」）**两侧都错** ⇒ ⇒
+//! 这一节把新规则钉住，并给每条用例配**必要对照**。
 
-use riscv_sim_contract::csr::{CSR_MSTATUS, CSR_PMPADDR0, CSR_PMPCFG0, MSTATUS_MPRV_BIT};
-use riscv_sim_contract::model::SimState;
+use riscv_sim_contract::csr::{
+    PmpAccess, CSR_MSTATUS, CSR_PMPADDR0, CSR_PMPCFG0, MSTATUS_MPRV_BIT,
+};
+use riscv_sim_contract::model::{SimState, WriteSize};
 
 use super::executor::{StepOutcome, TrapCause};
+use super::pmp::pmp_allows;
 use super::tests_common::*;
 
 // ---------------------------------------------------------------------------
@@ -368,4 +378,269 @@ fn an_instruction_fetch_is_allowed_with_the_x_permission() {
         "给了 X ⇒ 取指必须放行（实际 {:?}）",
         outcome
     );
+}
+
+// ---------------------------------------------------------------------------
+// v0.39 —— **逐片**判（对参考侧**实测**）
+// ---------------------------------------------------------------------------
+//
+// ⚠️ 下面这些条目是**参考侧实测**用的那两套配置（探针 `b_access.S` 与
+// `b_access2.S`）⇒ ⇒ 地址与权限**逐字**照抄 ⇒ ⇒ 判据与参考侧同形。
+//
+// * `pmpaddr` 存的是**右移两位**的地址（F3）；
+// * `pmpcfg` 字节：`0x18` = NAPOT 且**无权限**（DENY），
+//   `0x1f` = NAPOT 且 R+W+X（ALLOW）。
+
+/// 探针的**条目 0** —— NAPOT 4 KiB @ `0x80040000`，**无权限**（DENY）。
+const PROBE_DENY_ENTRY: (u32, u8) = (0x2001_01ff, 0x18);
+/// 探针的**条目 1** —— NAPOT 1 MiB @ `0x80000000`，R+W+X（ALLOW）。
+const PROBE_ALLOW_ENTRY: (u32, u8) = (0x2001_ffff, 0x1f);
+/// 探针 `b_access2.S` 的**条目 1** —— NAPOT 1 MiB @ `0x80100000`，R+W+X。
+const PROBE_ALLOW2_ENTRY: (u32, u8) = (0x2005_ffff, 0x1f);
+
+/// 配置**条目 0 与条目 1**（都是 NAPOT）—— 靠**跑** `csrw` 指令。
+///
+/// ⚠️ **两个条目必须一起写进 `pmpcfg0`**（RV32 一个寄存器装 4 个条目）⇒ ⇒
+/// 一次写就把两个字节都带上 ⇒ ⇒ 免得「写第二条时把第一条抹成 OFF」。
+fn configure_two_entries(
+    h: &mut Harness,
+    state: &mut SimState,
+    pc: u32,
+    entry0: (u32, u8),
+    entry1: (u32, u8),
+) {
+    state.gpr[1] = entry0.0;
+    h.step_one_at(state, pc, csrw(CSR_PMPADDR0, 1));
+    state.gpr[1] = entry1.0;
+    h.step_one_at(state, pc + 4, csrw(CSR_PMPADDR0 + 1, 1));
+    state.gpr[1] = u32::from(entry1.1) << 8 | u32::from(entry0.1);
+    h.step_one_at(state, pc + 8, csrw(CSR_PMPCFG0, 1));
+}
+
+/// ⚠️ **判别式**：未对齐的 4 字节访问**跨过** 4 字节块边界 ⇒ ⇒ 参考侧
+/// **逐片**判 ⇒ ⇒ 「整个访问必须落在同一条目内」那个旧读法**过不了**这一对。
+///
+/// * 尾部落进 DENY 条目 ⇒ ⇒ 参考侧**拒**（mcause 5）；
+/// * 跨两个 ALLOW 条目 ⇒ ⇒ 参考侧**放行**。
+///
+/// ⚠️ **两条方向相反** ⇒ ⇒ 「一律按起始条目判」「一律按整段判」「一律拒」
+/// 这三种写法**都过不了这一对** ⇒ ⇒ 这一对就是**必要对照**。
+#[test]
+fn a_straddling_access_is_judged_piece_by_piece() {
+    // 条目 0 = DENY（NAPOT 4 KiB @ 0x80040000），条目 1 = ALLOW
+    // （NAPOT 1 MiB @ 0x80000000）。
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_two_entries(
+        &mut h,
+        &mut state,
+        BASE,
+        PROBE_DENY_ENTRY,
+        PROBE_ALLOW_ENTRY,
+    );
+    set_mprv(&mut h, &mut state, BASE + 12);
+    // 未对齐 4 字节读 @ 0x8003FFFE：低 2 字节在 ALLOW 条目 1 里，高 2
+    // 字节落进 DENY 条目 0 ⇒ ⇒ **逐片** ⇒ ⇒ **拒**。
+    assert!(
+        !pmp_allows(&state, 0x8003_fffe, 4, PmpAccess::Load),
+        "尾部落进 DENY 条目 ⇒ 必须被拒（参考侧实测：mcause 5）"
+    );
+
+    // 两个 ALLOW 条目 ⇒ ⇒ 未对齐 4 字节读 @ 0x800FFFFE **放行**。
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_two_entries(
+        &mut h,
+        &mut state,
+        BASE,
+        PROBE_ALLOW_ENTRY,
+        PROBE_ALLOW2_ENTRY,
+    );
+    set_mprv(&mut h, &mut state, BASE + 12);
+    assert!(
+        pmp_allows(&state, 0x800f_fffe, 4, PmpAccess::Load),
+        "跨两个 ALLOW 条目 ⇒ 必须放行（参考侧实测：放行，读到混合值）"
+    );
+    // 写**同样**放行（参考侧实测：未对齐跨界写**完成**）。
+    assert!(
+        pmp_allows(&state, 0x800f_fffe, 4, PmpAccess::Store),
+        "跨两个 ALLOW 条目 ⇒ 写必须放行（参考侧实测：写完成）"
+    );
+}
+
+/// ⚠️ **MPRV 路径没有被逐片判削弱**：`MPRV` = 1 ⇒ ⇒ M 模式的访存**受检**
+/// ⇒ ⇒ 同一串访问**被拒**；`MPRV` = 0 ⇒ ⇒ **放行**。
+///
+/// ⚠️ **控制组**：两条**只差 `MPRV`** ⇒ ⇒ 「全部被拒」与「全部放行」这两个
+/// 实现**都过不了这一对**。
+#[test]
+fn the_mprv_path_is_not_weakened_by_the_piece_split() {
+    // 条目 0 = DENY（NAPOT 4 KiB @ 0x80040000），条目 1 = ALLOW
+    // （NAPOT 1 MiB @ 0x80000000）⇒ ⇒ 尾部落进 DENY 条目的那一次访问。
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_two_entries(
+        &mut h,
+        &mut state,
+        BASE,
+        PROBE_DENY_ENTRY,
+        PROBE_ALLOW_ENTRY,
+    );
+    set_mprv(&mut h, &mut state, BASE + 12);
+    assert!(
+        !pmp_allows(&state, 0x8003_fffe, 4, PmpAccess::Load),
+        "MPRV = 1 ⇒ M 模式受检 ⇒ 必须被拒"
+    );
+
+    // ⚠️ **控制组**：同样的条目，`MPRV` = 0 ⇒ ⇒ M 模式旁路 ⇒ ⇒ 放行。
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_two_entries(
+        &mut h,
+        &mut state,
+        BASE,
+        PROBE_DENY_ENTRY,
+        PROBE_ALLOW_ENTRY,
+    );
+    assert!(
+        pmp_allows(&state, 0x8003_fffe, 4, PmpAccess::Load),
+        "MPRV = 0 ⇒ M 模式旁路 ⇒ 必须放行"
+    );
+}
+
+/// ⚠️ **锁住的条目逐片强制**（F12）—— M 模式也不例外。
+///
+/// ⚠️ **控制组**：同一个条目**不锁**时，M 模式**放行** ⇒ ⇒ 「锁没生效」与
+/// 「一律被拒」这两个实现**都过不了这一对**。
+#[test]
+fn a_locked_entry_constrains_a_straddling_access_in_m_mode() {
+    // 条目 0 = **锁住**的 DENY（NAPOT 4 KiB @ 0x80040000），条目 1 = ALLOW。
+    let locked_entry = (PROBE_DENY_ENTRY.0, PROBE_DENY_ENTRY.1 | 0x80);
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_two_entries(&mut h, &mut state, BASE, locked_entry, PROBE_ALLOW_ENTRY);
+    // ⚠️ **不**设 `MPRV` ⇒ ⇒ 这一条走的是「M 模式旁路」那条路 ⇒ ⇒ 锁住的
+    // 条目**照样**强制 ⇒ ⇒ 拒。
+    assert!(
+        !pmp_allows(&state, 0x8003_fffe, 4, PmpAccess::Load),
+        "锁住的条目 ⇒ M 模式也必须被拒"
+    );
+
+    // ⚠️ **控制组**：同一个条目**不锁** ⇒ ⇒ M 模式旁路 ⇒ ⇒ 放行。
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_two_entries(
+        &mut h,
+        &mut state,
+        BASE,
+        PROBE_DENY_ENTRY,
+        PROBE_ALLOW_ENTRY,
+    );
+    assert!(
+        pmp_allows(&state, 0x8003_fffe, 4, PmpAccess::Load),
+        "没锁的条目 ⇒ M 模式旁路 ⇒ 必须放行"
+    );
+}
+
+/// ⚠️ **端到端**：未对齐的 4 字节读**跨过**两个 ALLOW 条目的边界 ⇒ ⇒ 参考侧
+/// **执行**它并读回**混合值** `0xBBBB_AAAA` ⇒ ⇒ 平台现在**读回同一个值**。
+///
+/// ⚠️ **控制组**：**对齐**的读（同一块 RAM、同一套条目）⇒ ⇒ 放行并读回
+/// `0xAAAAAAAA` ⇒ ⇒ 「RAM 没准备好」这种失败**不会**伪装成通过。
+#[test]
+fn a_straddling_load_across_two_allowed_entries_executes() {
+    // 条目 0 = ALLOW（NAPOT 32 KiB @ 0x00000000），条目 1 = ALLOW
+    // （NAPOT 32 KiB @ 0x00008000）⇒ ⇒ 两个条目**都**允许。
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_two_entries(&mut h, &mut state, BASE, (0xfff, 0x1f), (0x2fff, 0x1f));
+    set_mprv(&mut h, &mut state, BASE + 12);
+    // RAM：边界**两侧**各放一个字 ⇒ ⇒ 未对齐读会读到**混合值**。
+    h.load(0x7ffc, &[0xaaaa_aaaa]);
+    h.load(0x8000, &[0xbbbb_bbbb]);
+
+    // 未对齐 4 字节读 @ 0x7FFE ⇒ ⇒ 跨过边界 ⇒ ⇒ 两片**各自**被允许 ⇒ ⇒
+    // **执行** ⇒ ⇒ 读回混合值。
+    state.gpr[2] = 0x7ffe;
+    let outcome = h.step_one_at(&mut state, BASE + 16, lw(3, 2));
+    assert!(
+        matches!(outcome, StepOutcome::Advanced),
+        "跨两个 ALLOW 条目 ⇒ 未对齐读必须执行（实际 {:?}）",
+        outcome
+    );
+    assert_eq!(state.gpr[3], 0xbbbb_aaaa, "参考侧实测读回的就是这个混合值");
+
+    // ⚠️ **控制组**：**对齐**的读（同一个 RAM、同一套条目）⇒ ⇒ 放行。
+    state.gpr[2] = 0x7ffc;
+    let outcome = h.step_one_at(&mut state, BASE + 20, lw(3, 2));
+    assert!(
+        matches!(outcome, StepOutcome::Advanced),
+        "对齐读必须放行（实际 {:?}）",
+        outcome
+    );
+    assert_eq!(state.gpr[3], 0xaaaa_aaaa, "对齐读读回的是它自己那个字");
+}
+
+/// ⚠️ **端到端**：未对齐的 4 字节**写**跨过两个 ALLOW 条目的边界 ⇒ ⇒ 参考侧
+/// **写完成** ⇒ ⇒ 平台的**四个字节都落地**。
+///
+/// ⚠️ 平台的旧规则会把这一次写**整个拒掉**（连低 2 字节都不落地）⇒ ⇒
+/// 这一条正是那个差异的**端到端**证据。
+#[test]
+fn a_straddling_store_across_two_allowed_entries_lands() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_two_entries(&mut h, &mut state, BASE, (0xfff, 0x1f), (0x2fff, 0x1f));
+    set_mprv(&mut h, &mut state, BASE + 12);
+
+    state.gpr[1] = 0x1122_3344;
+    state.gpr[2] = 0x7ffe;
+    let outcome = h.step_one_at(&mut state, BASE + 16, sw(1, 2));
+    assert!(
+        matches!(outcome, StepOutcome::Advanced),
+        "跨两个 ALLOW 条目 ⇒ 未对齐写必须完成（实际 {:?}）",
+        outcome
+    );
+    // 四个字节**都**落地了 ⇒ ⇒ 读回整个字。
+    let value = h
+        .ram
+        .borrow()
+        .read(0x7ffe, WriteSize::Word)
+        .expect("read back");
+    assert_eq!(value, 0x1122_3344, "未对齐跨界写的四个字节都要落地");
+}
+
+/// ⚠️ **端到端**：未对齐的 4 字节读**尾部**落进 DENY 条目 ⇒ ⇒ 参考侧**拒**
+/// （mcause 5）⇒ ⇒ 平台也**拒** ⇒ ⇒ **架构陷阱**（不是宿主错误）。
+#[test]
+fn a_straddling_load_into_a_deny_entry_traps() {
+    // 条目 0 = DENY（NAPOT 4 KiB @ 0x00008000），条目 1 = ALLOW
+    // （NAPOT 64 KiB @ 0x00000000）⇒ ⇒ 尾部两字节落进 DENY 条目。
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_two_entries(&mut h, &mut state, BASE, (0x21ff, 0x18), (0x1fff, 0x1f));
+    set_mprv(&mut h, &mut state, BASE + 12);
+    h.load(0x7ffc, &[0xaaaa_aaaa]);
+    h.load(0x8000, &[0xbbbb_bbbb]);
+
+    state.gpr[2] = 0x7ffe;
+    let outcome = h.step_one_at(&mut state, BASE + 16, lw(3, 2));
+    match outcome {
+        StepOutcome::Trapped { cause } => {
+            assert_eq!(cause, TrapCause::LoadAccessFault);
+            assert_eq!(cause.mcause(), 5, "load access fault 的 mcause 是 5");
+        }
+        other => panic!("尾部落进 DENY 条目 ⇒ 必须被拒（实际 {:?}）", other),
+    }
+    assert_eq!(csr_value(&state, 0x343), 0x7ffe, "mtval 必须是出错地址");
+
+    // ⚠️ **控制组**：**对齐**的读（同一块 RAM、同一套条目）⇒ ⇒ 放行。
+    state.gpr[2] = 0x7ffc;
+    let outcome = h.step_one_at(&mut state, BASE + 20, lw(3, 2));
+    assert!(
+        matches!(outcome, StepOutcome::Advanced),
+        "对齐读必须放行（实际 {:?}）",
+        outcome
+    );
+    assert_eq!(state.gpr[3], 0xaaaa_aaaa, "对齐读读回的是它自己那个字");
 }

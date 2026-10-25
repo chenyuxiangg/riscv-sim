@@ -976,6 +976,14 @@ pub const PMP_ENTRY_COUNT: usize = 16;
 /// `pmpaddr` holds the address shifted right by this many bits (F3).
 pub const PMP_GRAINULARITY_SHIFT: u32 = 2;
 
+/// The PMP granularity in **bytes** (F3) — the unit an access is split
+/// into before it is judged.
+///
+/// ⚠️ **One landing**: the number is *derived* from
+/// [`PMP_GRAINULARITY_SHIFT`] ⇒ ⇒ "four" is written down in exactly one
+/// place (the shift), and this constant is only its byte count.
+pub const PMP_GRAINULARITY: u64 = 1u64 << PMP_GRAINULARITY_SHIFT;
+
 /// `pmpcfg`'s lock bit (F1).
 pub const PMP_CFG_L: u8 = 0x80;
 /// `pmpcfg`'s address-matching mode field (F1).
@@ -1048,11 +1056,21 @@ pub struct PmpRegion {
 }
 
 impl PmpRegion {
-    /// Does the range cover **every** byte of the access at `addr`?
+    /// Does the range contain **every** byte of `[addr, addr + size)`?
     ///
-    /// ⚠️ The spec requires the deciding entry to match **all** bytes of the
-    /// access ⇒ ⇒ a straddling access is denied unless one entry covers it
-    /// completely.
+    /// ⚠️ **This is the *piece* containment test** — the decision runs on
+    /// **one piece at a time** (see [`pmp_access_allowed`]) ⇒ ⇒ the range
+    /// is asked about a **piece** (a sub-range of one four-byte block),
+    /// never about a whole access.
+    ///
+    /// ⚠️ **What the platform used to do** (and why it changed): the
+    /// question used to be asked about the **whole access** ⇒ ⇒ the
+    /// deciding entry had to cover **every** byte of it ⇒ ⇒ that is the
+    /// **stricter** reading, and it **diverged from the reference side**
+    /// (measured — a straddling load whose **tail** lands in a deny entry
+    /// was *allowed*, and a straddling load **across two allow entries**
+    /// was *denied*; the reference side does the **opposite** in both
+    /// cases ⇒ ⇒ the reference side judges **piece by piece**).
     pub fn covers(&self, addr: u32, size: u32) -> bool {
         let start = u64::from(addr);
         let end = start + u64::from(size);
@@ -1143,14 +1161,53 @@ pub fn pmp_permits(cfg: PmpCfg, access: PmpAccess) -> bool {
 ///
 /// * `entries` — `(cfg, pmpaddr)` per entry, **in entry order** (entry 0
 ///   first); the slice may be shorter than [`PMP_ENTRY_COUNT`].
+/// * `addr` / `size` — the access: the `size` bytes starting at `addr`.
+/// * `access` — which kind of access it is (`Load` / `Store` / `Fetch`);
+///   the required permission bit follows from it.
 /// * `m_mode_bypass` — the caller states that PMP does **not** constrain
 ///   this access: an M-mode load/store with `mstatus.MPRV` = 0.  ⚠️ It is
 ///   **never** set for a fetch — `MPRV` does not affect instruction fetch
 ///   (F11).  A **locked** entry constrains the access anyway (F12).
 ///
-/// The decision chain is: **find the deciding entry** (the lowest-numbered
-/// entry that covers every byte of the access — F7) ⇒ ⇒ **privilege**
-/// (F10 / F11 / F12) ⇒ ⇒ **permission bits** (F9).
+/// # The rule: **one piece at a time**
+///
+/// ⚠️ **Measured against the reference side** (the v0.39 probe — facts F9 /
+/// F10): the reference side judges an access **piece by piece** — an access
+/// that crosses a four-byte boundary is judged as **two** accesses, each
+/// with its own deciding entry.
+///
+/// ⚠️ **What the platform used to do** (and why it changed): it judged the
+/// access with **one** deciding entry and required that entry to cover
+/// **every** byte of the access ⇒ ⇒ that is the **stricter** reading, and
+/// it **diverged from the reference side in both directions**:
+///
+/// | access | reference side | the old platform rule |
+/// | --- | --- | --- |
+/// | misaligned load whose **tail** lands in a deny entry | **denied** | allowed ⚠️ |
+/// | misaligned load **across two allow entries** | **allowed** | **denied** ⚠️ |
+///
+/// ⇒ ⇒ the rule now is:
+///
+/// 1. the access is split into **pieces** at the PMP granularity
+///    ([`PMP_GRAINULARITY`] — four bytes);
+/// 2. **each piece** runs the whole decision chain: find the **deciding
+///    entry** (the lowest-numbered entry whose region contains the piece
+///    — F7) ⇒ ⇒ **privilege** (F10 / F11 / F12) ⇒ ⇒ **permission bits**
+///    (F9);
+/// 3. a piece that matches **no** entry falls back to the old rule (F8) —
+///    ⚠️ **per piece**, not per access (a piece that matches nothing fails
+///    in S / U mode **even if another piece was allowed**);
+/// 4. the access is permitted **iff every piece** is permitted.
+///
+/// ⚠️ **Splitting per four-byte block is observationally the same as
+/// splitting per byte**: every entry's bounds are **four-byte aligned**
+/// (NAPOT / NA4 / TOR all produce four-byte-aligned bounds) ⇒ ⇒ a block
+/// lies either wholly inside an entry's region or wholly outside it ⇒ ⇒
+/// every byte of a block gets the same verdict ⇒ ⇒ the two splits cannot
+/// be told apart by any access.
+///
+/// ⚠️ **An aligned access never straddles a block** ⇒ ⇒ it is exactly one
+/// piece ⇒ ⇒ **its verdict is unchanged** by this rule.
 pub fn pmp_access_allowed(
     entries: &[(PmpCfg, u32)],
     addr: u32,
@@ -1158,10 +1215,58 @@ pub fn pmp_access_allowed(
     access: PmpAccess,
     m_mode_bypass: bool,
 ) -> bool {
+    let start = u64::from(addr);
+    let end = start + u64::from(size);
+    let first_block = start / PMP_GRAINULARITY;
+    // ⚠️ `size` = 0 ⇒ the access is an empty range ⇒ ⇒ it is judged as one
+    // empty piece (the old code judged it as one zero-length range).
+    let last_block = if end <= start {
+        first_block
+    } else {
+        (end - 1) / PMP_GRAINULARITY
+    };
+    let mut block = first_block;
+    loop {
+        let block_start = block * PMP_GRAINULARITY;
+        // The piece = the intersection of the access with this block.
+        let piece_start = start.max(block_start);
+        let piece_end = end.min(block_start + PMP_GRAINULARITY);
+        if !pmp_piece_allowed(
+            entries,
+            piece_start as u32,
+            (piece_end - piece_start) as u32,
+            access,
+            m_mode_bypass,
+        ) {
+            return false;
+        }
+        if block == last_block {
+            return true;
+        }
+        block += 1;
+    }
+}
+
+/// The decision chain for **one piece** of an access.
+///
+/// ⚠️ This is the chain that used to run on the **whole** access; it now
+/// runs on **each piece** (see [`pmp_access_allowed`]) ⇒ ⇒ the deciding
+/// entry, the privilege rule and the permission bits are all **per piece**.
+///
+/// * `piece_addr` / `piece_size` — the piece: the `piece_size` bytes
+///   starting at `piece_addr`.  ⚠️ A piece never crosses a four-byte
+///   block ⇒ ⇒ the containment test ([`PmpRegion::covers`]) is exact.
+fn pmp_piece_allowed(
+    entries: &[(PmpCfg, u32)],
+    piece_addr: u32,
+    piece_size: u32,
+    access: PmpAccess,
+    m_mode_bypass: bool,
+) -> bool {
     let mut prev_addr = 0u32;
     for (cfg, cur_addr) in entries {
         if let Some(region) = pmp_region(*cfg, prev_addr, *cur_addr) {
-            if region.covers(addr, size) {
+            if region.covers(piece_addr, piece_size) {
                 // M-mode is exempt unless the deciding entry is **locked**.
                 if m_mode_bypass && !cfg.l {
                     return true;
@@ -1171,7 +1276,7 @@ pub fn pmp_access_allowed(
         }
         prev_addr = *cur_addr;
     }
-    // No entry matched the access.
+    // No entry matched **this piece**.
     if m_mode_bypass {
         // "If no PMP entry matches an M-mode effective address, the access
         // succeeds."
@@ -1179,6 +1284,8 @@ pub fn pmp_access_allowed(
     }
     // "If no PMP entry matches an S-mode or U-mode effective address, but at
     // least one PMP entry is implemented, the access fails." (F8)
+    // ⚠️ **Per piece**: the piece that matched nothing fails on its own,
+    // even when another piece of the same access was allowed.
     !entries.iter().any(|(cfg, _)| cfg.a != PMP_A_OFF)
 }
 
@@ -2317,6 +2424,156 @@ mod tests {
             PmpAccess::Store,
             true
         ));
+    }
+
+    // ------------------------------------------------------------------
+    // v0.39 —— **逐片**判（对参考侧**实测**）
+    // ------------------------------------------------------------------
+    //
+    // ⚠️ 下面这几条对着的是**参考侧实测**的两组配置（探针 `b_access.S` 与
+    // `b_access2.S`）⇒ ⇒ 地址与权限**逐字**照抄 ⇒ ⇒ 判据与参考侧同形。
+
+    /// ⚠️ **判别式**：未对齐的 4 字节访问**跨过** 4 字节块边界 ⇒ ⇒ 参考侧
+    /// **逐片**判 ⇒ ⇒ 「整个访问必须落在同一条目内」那个旧读法**过不了**
+    /// 这一对。
+    ///
+    /// | 访问 | 参考侧实测 | 平台的旧读法 |
+    /// | --- | --- | --- |
+    /// | 尾部落进 DENY 条目 | **拒**（mcause 5） | 放行 ⚠️ |
+    /// | 跨两个 ALLOW 条目 | **放行** | **拒** ⚠️ |
+    ///
+    /// ⚠️ **两条方向相反** ⇒ ⇒ 「只按起始地址判」「整段必须落在同一条目内」
+    /// 「一律拒」这三种写法**都过不了这一对** ⇒ ⇒ 这一对就是**必要对照**。
+    #[test]
+    fn a_straddling_access_is_judged_piece_by_piece() {
+        // 条目 0 = NAPOT 4 KiB @ 0x80040000，**无权限**（DENY）；
+        // 条目 1 = NAPOT 1 MiB @ 0x80000000，R+W+X（ALLOW）。
+        let deny_then_allow = [
+            (pmp_decode_cfg(0x18), 0x2001_01ff),
+            (pmp_decode_cfg(0x1f), 0x2001_ffff),
+        ];
+        // 未对齐 4 字节读 @ 0x8003FFFE：低 2 字节在 ALLOW 条目 1 里，
+        // 高 2 字节落进 DENY 条目 0 ⇒ ⇒ **逐片** ⇒ ⇒ **拒**。
+        assert!(
+            !pmp_access_allowed(&deny_then_allow, 0x8003_fffe, 4, PmpAccess::Load, false),
+            "尾部落进 DENY 条目 ⇒ 必须被拒（参考侧实测：mcause 5）"
+        );
+        // 条目 0 = ALLOW（1 MiB @ 0x80000000）；条目 1 = ALLOW（1 MiB @
+        // 0x80100000）⇒ ⇒ 未对齐 4 字节读 @ 0x800FFFFE 的两片**各自**落在
+        // 一个被允许的条目里 ⇒ ⇒ **放行**。
+        let allow_then_allow = [
+            (pmp_decode_cfg(0x1f), 0x2001_ffff),
+            (pmp_decode_cfg(0x1f), 0x2005_ffff),
+        ];
+        assert!(
+            pmp_access_allowed(&allow_then_allow, 0x800f_fffe, 4, PmpAccess::Load, false),
+            "跨两个 ALLOW 条目 ⇒ 必须放行（参考侧实测：放行，读到混合值）"
+        );
+        // 写**同样**放行（参考侧实测：未对齐跨界写**完成**）。
+        assert!(
+            pmp_access_allowed(&allow_then_allow, 0x800f_fffe, 4, PmpAccess::Store, false),
+            "跨两个 ALLOW 条目 ⇒ 写必须放行（参考侧实测：写完成）"
+        );
+    }
+
+    /// ⚠️ **对齐访问**永不跨块 ⇒ ⇒ **一片** ⇒ ⇒ 判决**一字不改**。
+    ///
+    /// ⚠️ 这一条是**稳定性**判据（不是判别式）—— 它保证「逐片」这条新规则
+    /// 没有把**既有**的行为改掉。
+    #[test]
+    fn an_aligned_access_keeps_its_old_verdict() {
+        let entries = [
+            (pmp_decode_cfg(0x18), 0x2001_01ff), // DENY  [0x80040000, 0x80041000)
+            (pmp_decode_cfg(0x1f), 0x2001_ffff), // ALLOW [0x80000000, 0x80100000)
+        ];
+        // 区间**正下方**的对齐读 ⇒ ⇒ 落在 ALLOW 条目 1 ⇒ 放行。
+        assert!(pmp_access_allowed(
+            &entries,
+            0x8003_fffc,
+            4,
+            PmpAccess::Load,
+            false
+        ));
+        // 正落在 4 KiB 边界上的对齐读 ⇒ ⇒ 落进 DENY 条目 0 ⇒ 拒。
+        assert!(!pmp_access_allowed(
+            &entries,
+            0x8004_0000,
+            4,
+            PmpAccess::Load,
+            false
+        ));
+        // DENY 区间内 offset 4092 的对齐读 ⇒ ⇒ 同一个 DENY 条目盖住它 ⇒ 拒。
+        assert!(!pmp_access_allowed(
+            &entries,
+            0x8004_0ffc,
+            4,
+            PmpAccess::Load,
+            false
+        ));
+        // ALLOW 区间的最后一个对齐字 ⇒ ⇒ 放行。
+        assert!(pmp_access_allowed(
+            &entries,
+            0x800f_fffc,
+            4,
+            PmpAccess::Load,
+            false
+        ));
+        // ALLOW 区间**上方**的第一个字 ⇒ ⇒ **没有条目命中** ⇒ ⇒ S/U 模式 ⇒ 拒。
+        assert!(!pmp_access_allowed(
+            &entries,
+            0x8010_0000,
+            4,
+            PmpAccess::Load,
+            false
+        ));
+    }
+
+    /// ⚠️ **「没有条目命中」也是**逐片**的**（F8 / F10）—— 一片命中了
+    /// 别的条目**救不了**另一片。
+    #[test]
+    fn a_piece_that_matches_no_entry_fails_on_its_own() {
+        let entries = [
+            (pmp_decode_cfg(0x18), 0x2001_01ff), // DENY  [0x80040000, 0x80041000)
+            (pmp_decode_cfg(0x1f), 0x2001_ffff), // ALLOW [0x80000000, 0x80100000)
+        ];
+        // 未对齐 4 字节读 @ 0x800FFFFE：低 2 字节命中 ALLOW 条目 1；高 2
+        // 字节（0x80100000..）**没有条目命中** ⇒ ⇒ S/U 模式 ⇒ 拒。
+        assert!(
+            !pmp_access_allowed(&entries, 0x800f_fffe, 4, PmpAccess::Load, false),
+            "一片没有条目命中 ⇒ 整个访问被拒（参考侧实测：mcause 5）"
+        );
+        // ⚠️ **控制组**：**M 模式**（旁路）⇒ ⇒ 「没有条目命中」的那一片
+        // 放行 ⇒ ⇒ 整个访问放行 ⇒ ⇒ 「一律拒」的实现过不了这一条。
+        assert!(
+            pmp_access_allowed(&entries, 0x800f_fffe, 4, PmpAccess::Load, true),
+            "M 模式 ⇒ 没有条目命中的那一片放行"
+        );
+    }
+
+    /// ⚠️ **锁住的条目逐片强制**（F12）—— M 模式也不例外。
+    #[test]
+    fn a_locked_entry_constrains_every_piece_in_m_mode() {
+        // 条目 0 = NAPOT 4 KiB @ 0x80040000，**锁住**且无权限（DENY）；
+        // 条目 1 = NAPOT 1 MiB @ 0x80000000，R+W+X（ALLOW，没锁）。
+        let locked = [
+            (pmp_decode_cfg(0x98), 0x2001_01ff),
+            (pmp_decode_cfg(0x1f), 0x2001_ffff),
+        ];
+        // 未对齐 4 字节读 @ 0x8003FFFE：高 2 字节命中**锁住的** DENY 条目
+        // ⇒ ⇒ M 模式（旁路）也**强制** ⇒ ⇒ 拒。
+        assert!(
+            !pmp_access_allowed(&locked, 0x8003_fffe, 4, PmpAccess::Load, true),
+            "锁住的条目 ⇒ M 模式也必须被拒"
+        );
+        // ⚠️ **控制组**：同一个条目**不锁** ⇒ ⇒ M 模式旁路 ⇒ ⇒ 放行。
+        let unlocked = [
+            (pmp_decode_cfg(0x18), 0x2001_01ff),
+            (pmp_decode_cfg(0x1f), 0x2001_ffff),
+        ];
+        assert!(
+            pmp_access_allowed(&unlocked, 0x8003_fffe, 4, PmpAccess::Load, true),
+            "没锁的条目 ⇒ M 模式旁路 ⇒ 必须放行"
+        );
     }
 
     /// ⚠️ **PMP 的 CSR 必须被认作已实现**（裁决 E）—— 不认 ⇒ 写被吞 ⇒ ⇒
