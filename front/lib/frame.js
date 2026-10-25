@@ -28,6 +28,8 @@
 // ⚠️ **帧的两端都在 JS 里**（内核只认契约消息，帧是前端的包裹层），
 // 所以这一处实现同时覆盖 worker 与主线程两侧。
 
+import { RUST_ERROR_CODE_REFS } from "./message.js";
+
 /** Frame kinds — M-07 LLD §2.1.1 `TransportFrame.type`. */
 export const FRAME_TYPE = Object.freeze({
     /** Host → kernel. */
@@ -39,7 +41,7 @@ export const FRAME_TYPE = Object.freeze({
 });
 
 /** Error code for a frame whose `crc` does not match its payload. */
-export const CRC_MISMATCH_CODE = "E_PROTO-06";
+export const CRC_MISMATCH_CODE = RUST_ERROR_CODE_REFS["E_PROTO-06"];
 
 /**
  * CRC-32 lookup table — IEEE 802.3 / zlib polynomial `0xEDB88320`,
@@ -139,11 +141,11 @@ export function frameCrc(payload) {
  */
 export function encodeFrame(parts) {
     if (!parts || typeof parts !== "object") {
-        throw frameError("E_PROTO-08", "帧参数非法");
+        throw frameError(RUST_ERROR_CODE_REFS["E_PROTO-08"], "帧参数非法");
     }
     const payload = parts.payload;
     if (!payload || typeof payload !== "object") {
-        throw frameError("E_PROTO-08", "帧 payload 缺失");
+        throw frameError(RUST_ERROR_CODE_REFS["E_PROTO-08"], "帧 payload 缺失");
     }
     return {
         type: parts.type,
@@ -175,17 +177,17 @@ export function encodeFrame(parts) {
  */
 export function decodeFrame(raw) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-        throw frameError("E_PROTO-08", "传输帧不是对象");
+        throw frameError(RUST_ERROR_CODE_REFS["E_PROTO-08"], "传输帧不是对象");
     }
     const f = /** @type {any} */ (raw);
     if (f.type !== FRAME_TYPE.Command && f.type !== FRAME_TYPE.Event) {
-        throw frameError("E_PROTO-08", `未知帧类型：${String(f.type)}`);
+        throw frameError(RUST_ERROR_CODE_REFS["E_PROTO-08"], `未知帧类型：${String(f.type)}`);
     }
     if (typeof f.seq !== "number" || !Number.isFinite(f.seq)) {
-        throw frameError("E_PROTO-08", "帧 seq 缺失或非法");
+        throw frameError(RUST_ERROR_CODE_REFS["E_PROTO-08"], "帧 seq 缺失或非法");
     }
     if (!f.payload || typeof f.payload !== "object") {
-        throw frameError("E_PROTO-08", "帧 payload 缺失");
+        throw frameError(RUST_ERROR_CODE_REFS["E_PROTO-08"], "帧 payload 缺失");
     }
     // `undefined` / `null` means "this producer does not carry a crc" —
     // the old-producer branch. Anything else has to be *exactly* the

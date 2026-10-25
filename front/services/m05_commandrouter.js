@@ -29,7 +29,10 @@ import {
     commandMessage,
     decodeMessage,
     eventTopic,
+    FRONT_ERROR_CODES,
+    MIRRORED_ERROR_CODES,
     protocolError,
+    RUST_ERROR_CODE_REFS,
     TOPIC_ALL,
 } from "../lib/message.js";
 
@@ -149,7 +152,7 @@ export async function mountCommandRouter(options = {}) {
             publish({
                 variant: "Error",
                 value: {
-                    code: err?.code ?? "E_PROTO-08",
+                    code: err?.code ?? RUST_ERROR_CODE_REFS["E_PROTO-08"],
                     message: err?.message ?? String(err),
                 },
                 topic: "error",
@@ -177,7 +180,7 @@ export async function mountCommandRouter(options = {}) {
             clearTimeout(entry.timer);
             if (event.variant === "Error") {
                 entry.reject(protocolError(
-                    event.value?.code ?? "E_CTX-05",
+                    event.value?.code ?? MIRRORED_ERROR_CODES["E_CTX-05"],
                     event.value?.message ?? "kernel error",
                 ));
             } else {
@@ -200,7 +203,7 @@ export async function mountCommandRouter(options = {}) {
     function dispatchCommand(payload, opts = {}) {
         const timeoutMs = Number(opts.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
         if (!transport) {
-            return Promise.reject(protocolError("E_TRX-01", "未挂载传输适配器（M-07）"));
+            return Promise.reject(protocolError(FRONT_ERROR_CODES["E_TRX-01"], "未挂载传输适配器（M-07）"));
         }
         seq += 1;
         const message = commandMessage(seq, payload);
@@ -209,7 +212,7 @@ export async function mountCommandRouter(options = {}) {
             const timer = setTimeout(() => {
                 pending.delete(reqId);
                 reject(protocolError(
-                    "E_CTX-06",
+                    FRONT_ERROR_CODES["E_CTX-06"],
                     `命令超时（${timeoutMs}ms）：${describePayload(payload)}`,
                 ));
             }, timeoutMs);
@@ -237,11 +240,11 @@ export async function mountCommandRouter(options = {}) {
 
     const offMessage = transport?.onMessage?.(handleFrame) ?? null;
     const offStatus = transport?.onStatus?.((st) => {
-        if (!st.connected) failPending("E_CTX-06", "传输通道断开，命令未完成");
+        if (!st.connected) failPending(FRONT_ERROR_CODES["E_CTX-06"], "传输通道断开，命令未完成");
     }) ?? null;
 
     function close() {
-        failPending("E_CTX-06", "命令路由器已关闭");
+        failPending(FRONT_ERROR_CODES["E_CTX-06"], "命令路由器已关闭");
         offMessage?.();
         offStatus?.();
         subscribers.clear();

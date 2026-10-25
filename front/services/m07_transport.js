@@ -24,6 +24,7 @@
 // kernel connects).
 
 import { encodeFrame, decodeFrame, FRAME_TYPE } from "../lib/frame.js";
+import { FRONT_ERROR_CODES } from "../lib/message.js";
 
 /**
  * @typedef {object} TransportStatus
@@ -62,7 +63,7 @@ let txSeq = 0;
  * 此前两边共用 `E_TRX-04` ⇒ 前端拿到错误**无法按码分派**（「通道断了要
  * 重连」与「内核算错了要报错并拒掉这条命令」是两种处置）。
  */
-export const TRANSPORT_CHANNEL_ERROR_CODE = "E_TRX-04";
+export const TRANSPORT_CHANNEL_ERROR_CODE = FRONT_ERROR_CODES["E_TRX-04"];
 
 /** @type {Set<(status: TransportStatus) => void>} */
 const statusSubscribers = new Set();
@@ -185,7 +186,7 @@ function bindWorker(worker, onFrame, onError) {
         worker.on("error", (err) => onError(err));
         return;
     }
-    throw transportError("E_TRX-02", "Worker 适配器缺少事件接口");
+    throw transportError(FRONT_ERROR_CODES["E_TRX-02"], "Worker 适配器缺少事件接口");
 }
 
 /**
@@ -203,7 +204,7 @@ function createWorkerAdapter(options) {
     } catch (err) {
         return {
             ok: false,
-            error: `E_TRX-02 无法创建 Worker（${options.workerUrl}）：${err?.message ?? err}`,
+            error: `${FRONT_ERROR_CODES["E_TRX-02"]} 无法创建 Worker（${options.workerUrl}）：${err?.message ?? err}`,
         };
     }
     try {
@@ -263,17 +264,17 @@ function createWebSocketAdapter(options) {
     if (!url) {
         return {
             ok: false,
-            error: "E_TRX-03 未配置 WebSocket URL（服务端形态为 P1，当前仅保留接口骨架）",
+            error: `${FRONT_ERROR_CODES["E_TRX-03"]} 未配置 WebSocket URL（服务端形态为 P1，当前仅保留接口骨架）`,
         };
     }
     if (typeof WebSocket === "undefined") {
-        return { ok: false, error: "E_TRX-03 当前环境没有 WebSocket（服务端形态为 P1）" };
+        return { ok: false, error: `${FRONT_ERROR_CODES["E_TRX-03"]} 当前环境没有 WebSocket（服务端形态为 P1）` };
     }
     let socket;
     try {
         socket = new WebSocket(url);
     } catch (err) {
-        return { ok: false, error: `E_TRX-03 WebSocket 创建失败：${err?.message ?? err}` } ;
+        return { ok: false, error: `${FRONT_ERROR_CODES["E_TRX-03"]} WebSocket 创建失败：${err?.message ?? err}` } ;
     }
     socket.onopen = () => {
         setStatus({ connected: true, connState: "ready", lastError: null });
@@ -382,7 +383,7 @@ export async function mountTransport(options = {}) {
  */
 export function sendCommand(message, options = {}) {
     if (!adapter) {
-        throw transportError("E_TRX-01", "传输通道未就绪");
+        throw transportError(FRONT_ERROR_CODES["E_TRX-01"], "传输通道未就绪");
     }
     txSeq += 1;
     const frame = encodeFrame({

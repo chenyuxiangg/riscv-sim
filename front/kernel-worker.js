@@ -21,7 +21,7 @@
 // 连 `Worker` 全局都没有）。
 
 import { decodeFrame, encodeFrame, FRAME_TYPE } from "./lib/frame.js";
-import { eventMessage, Event } from "./lib/message.js";
+import { eventMessage, Event, FRONT_ERROR_CODES } from "./lib/message.js";
 
 /**
  * Default location of the wasm-pack ESM build of `crates/kernel`
@@ -45,7 +45,7 @@ const DEFAULT_WASM_URL = new URL("./assets/pkg/riscv_sim_kernel.js", import.meta
  * 是两种处置）。⇒ 宿主侧改用 **`E_TRX-05`**，`E_TRX-04` 的语义**收敛**
  * 成「传输通道错误」一种。
  */
-const HOST_ERROR_CODE = "E_TRX-05";
+const HOST_ERROR_CODE = FRONT_ERROR_CODES["E_TRX-05"];
 
 if (typeof self !== "undefined" && typeof self.document === "undefined") {
     startKernelHost();

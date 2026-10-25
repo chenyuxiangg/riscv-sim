@@ -75,9 +75,26 @@
 //     truth in **both** directions;
 //   - ⚠️ nothing else changed in v5: no new event, no DTO change, no
 //     renumbering.
+//
+// Contract v8 (`schema_version = 8`) adds:
+//   - two **reply events** for the admin channel: `AdminLogs { entries }`
+//     (the exported log entries) and `AdminDiag { diag }` (the health
+//     management system's diagnostic kit) — contract v8 §2.2;
+//   - ⚠️ **no new command**: `CommandPayload::Admin { op }` already
+//     existed ⇒ ⇒ the channel only gained its **reply side**;
+//   - two **scenario-code tables** on the front side (`FRONT_ERROR_CODES`
+//     / `MIRRORED_ERROR_CODES` + `RUST_ERROR_CODE_REFS`) ⇒ ⇒ the front's
+//     own codes finally have a **definition site** ⇒ ⇒ the "unique
+//     definition" invariant can bite them too (STAGE-29 裁决 E / F).
+//
+// ⚠️ The two admin DTOs (`LogEntryDto` / `AdminDiagDto`) have **one**
+//   truth: `crates/contract/fixtures/admin-dto.json` ⇒ ⇒ the Rust side
+//   asserts its serialisation against that file and the front side reads
+//   the same file (`front/tests/admin-dto.test.mjs`) ⇒ ⇒ a shape change
+//   on either side turns the other side red.
 
 /** Protocol schema version — mirrors `riscv_sim_contract::SCHEMA_VERSION`. */
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 /**
  * 描述格式版本 — mirrors `riscv_sim_contract::platform::PLATFORM_SCHEMA_VERSION`.
@@ -111,10 +128,14 @@ export const PLATFORM_SCHEMA_VERSION = 1;
  * 迁移口径」那条规程的**可判依据**（台账 D-143）。
  *
  * ⚠️ **本批只升规则集版本**（STAGE-19 裁决 F）：规则集**收紧**了 ⇒ ⇒ 这个数
- * **2 → 3**；⚠️ **另外两个版本号一个都不升** ⇒ `SCHEMA_VERSION` **仍 7**
- * （契约信封**零**变更）、`PLATFORM_SCHEMA_VERSION` **仍 1**（只加了一个
+ * **2 → 3**；⚠️ **另外两个版本号一个都不升** ⇒ `SCHEMA_VERSION` **不因本批
+ * 而变**（契约信封**零**变更）、`PLATFORM_SCHEMA_VERSION` **仍 1**（只加了一个
  * **带缺省**的**可选**字段 `wiring` ⇒ 按 STAGE-16 `max_region_bytes` 的
  * **同形先例** ⇒ **不是**破坏性格式变更 ⇒ ⇒ 存量板**不被新规则拒**）。
+ *
+ * ⚠️ **「不因本批而变」≠「永远是那个数」**：契约信封版本后来在 **v0.44 批**
+ * （STAGE-29 · 管理员通道）升到了 **8** ⇒ ⇒ 那**不是**规则集版本 ⇒ ⇒ 本表
+ * 的值**仍**是 3、`PLATFORM_SCHEMA_VERSION` **仍**是 1 ⇒ ⇒ 两者互不影响。
  *
  * ⚠️ **存量板走 v0.33 铺好的机制**（STAGE-19 裁决 F）：选用旧规则的板 ⇒
  * **明确提示**（**不静默**）⇒ 内核**接受** ⇒ **升级**落库条目（**按板 `id`**
@@ -125,6 +146,75 @@ export const PLATFORM_SCHEMA_VERSION = 1;
  * 与视图层**都从这里 import** ⇒ **一个定义处** ⇒ 依赖方向仍单向。
  */
 export const PLATFORM_RULES_VERSION = 3;
+
+// ---------------------------------------------------------------------------
+// 场景码表（STAGE-29 · 裁决 E · v0.44 批）
+// ---------------------------------------------------------------------------
+
+/**
+ * 前端**自有**的场景码 —— **定义处就在这张表里**（前端镜像层）。
+ *
+ * ⚠️ **形状是「键就是码本身」**（`"E_CTX-01": "E_CTX-01"`）⇒ ⇒ 工具
+ * （`tools/error_code_check.py`）既能从表里**抽出码集合**，又能把
+ * 「前端常量表里的条目」与「Rust 侧的定义」**分开记账** ⇒ ⇒ 「唯一定义」
+ * 不变式（台账 D-120）对前端码**真正生效**。
+ *
+ * ⚠️ **只放前端自产的码** ⇒ ⇒ 契约层 / 内核 crate 的码**不许**出现在这里
+ * ⇒ ⇒ 那是**镜像** ⇒ ⇒ 镜像表见下面 ⇒ ⇒ 两处定义会破「唯一定义」。
+ *
+ * ⚠️ **前端服务层不许再写裸字面量** ⇒ ⇒ 每个码都从这里取 ⇒ ⇒ 改一个码的
+ * 拼写只改这一处。
+ */
+export const FRONT_ERROR_CODES = Object.freeze({
+    "E_CTX-01": "E_CTX-01",
+    "E_CTX-06": "E_CTX-06",
+    "E_CTX-11": "E_CTX-11",
+    "E_TRX-01": "E_TRX-01",
+    "E_TRX-02": "E_TRX-02",
+    "E_TRX-03": "E_TRX-03",
+    "E_TRX-04": "E_TRX-04",
+    "E_TRX-05": "E_TRX-05",
+    "E_STORE-01": "E_STORE-01",
+    "E_STORE-02": "E_STORE-02",
+    "E_STORE-03": "E_STORE-03",
+});
+
+/**
+ * **契约层镜像**的场景码 —— 本批采纳的那一个。
+ *
+ * ⚠️ **这里不是定义处** ⇒ ⇒ 定义处在 `crates/contract/src/error.rs`
+ * （`E_CTX_05_ADMIN_CHANNEL_DISABLED`）⇒ ⇒ 这张表只给前端一个**可引用的
+ * 名字** ⇒ ⇒ 「唯一定义」判据**不会**因为它多算一处。
+ *
+ * ⚠️ **不许**与 `FRONT_ERROR_CODES` 重叠（裁决 E / 验收 C-3）⇒ ⇒
+ * `E_CTX-05` 只在这里、不在自有表里。
+ */
+export const MIRRORED_ERROR_CODES = Object.freeze({
+    "E_CTX-05": "E_CTX-05",
+});
+
+/**
+ * **Rust 侧**（契约层）已定义、前端**按码分派**时要用到的其余码 ——
+ * **只是「引用用的名字」** ⇒ ⇒ **不是定义处**（定义处仍在 Rust 侧）。
+ *
+ * ⚠️ **为什么单列一张表**：`MIRRORED_ERROR_CODES` 装的是**本批**采纳的那个
+ * 契约层镜像（`E_CTX-05`）；这张表装的是**其余**契约层镜像 ⇒ ⇒ 两张表
+ * 合起来 = 前端用到的**全部** Rust 侧码 ⇒ ⇒ 而**前端自产**的码在
+ * `FRONT_ERROR_CODES` 里 ⇒ ⇒ 三张表**互不重叠**。
+ *
+ * ⚠️ **内核 crate** 自有的码**不许**进这张表 ⇒ ⇒ 前端服务层一旦**用到**
+ * 它，工具的「前端 × 内核撞号」判据就会判红（台账 D-157）⇒ ⇒ 那类码在
+ * 前端只以**散文**出现。
+ */
+export const RUST_ERROR_CODE_REFS = Object.freeze({
+    "E_DBG-01": "E_DBG-01",
+    "E_PLT-13": "E_PLT-13",
+    "E_PROTO-01": "E_PROTO-01",
+    "E_PROTO-02": "E_PROTO-02",
+    "E_PROTO-04": "E_PROTO-04",
+    "E_PROTO-06": "E_PROTO-06",
+    "E_PROTO-08": "E_PROTO-08",
+});
 
 /**
  * Largest virtual time (picoseconds) that survives a round trip through a
@@ -222,7 +312,23 @@ export const EVENT_TOPIC = Object.freeze({
     TraceState: "debug.trace",
     // 契约 v4 新增：guest 的 console（UART TX）字节流。
     Console: "sim.console",
+    // 契约 v8 新增：管理员通道的**回复侧**（D-129）。
+    AdminLogs: "admin.logs",
+    AdminDiag: "admin.diag",
 });
+
+/**
+ * 管理员通道的两个 topic —— **派生**自 `EVENT_TOPIC` ⇒ ⇒ **不是第二份真相**
+ * ⇒ ⇒ 加一个 admin 事件只改 `EVENT_TOPIC` 一处。
+ *
+ * ⚠️ 订阅它们**不需要**改 M-05 的路由表（STAGE-29 裁决 K）：回包是**按
+ * `reqId`** 匹配的 ⇒ ⇒ 新增事件变体只是多了一个 topic ⇒ ⇒ 通用分发路径
+ * 已经覆盖。
+ */
+export const ADMIN_TOPICS = Object.freeze([
+    EVENT_TOPIC.AdminLogs,
+    EVENT_TOPIC.AdminDiag,
+]);
 
 /** Topic that receives every event. */
 export const TOPIC_ALL = "*";
@@ -297,30 +403,30 @@ export function ps(value) {
 export function psToNumber(text) {
     if (typeof text === "number") {
         if (!Number.isFinite(text)) {
-            throw protocolError("E_PROTO-08", `虚拟时间不是有限数：${String(text)}`);
+            throw protocolError(RUST_ERROR_CODE_REFS["E_PROTO-08"], `虚拟时间不是有限数：${String(text)}`);
         }
         if (!Number.isInteger(text)) {
-            throw protocolError("E_PROTO-08", `虚拟时间不是整数：${String(text)}`);
+            throw protocolError(RUST_ERROR_CODE_REFS["E_PROTO-08"], `虚拟时间不是整数：${String(text)}`);
         }
         if (text < 0) {
-            throw protocolError("E_PROTO-08", `虚拟时间为负：${String(text)}`);
+            throw protocolError(RUST_ERROR_CODE_REFS["E_PROTO-08"], `虚拟时间为负：${String(text)}`);
         }
         if (text > MAX_EXACT_PS) {
-            throw protocolError("E_PROTO-04", `虚拟时间超过 2^53，无法精确表示：${String(text)}`);
+            throw protocolError(RUST_ERROR_CODE_REFS["E_PROTO-04"], `虚拟时间超过 2^53，无法精确表示：${String(text)}`);
         }
         return text;
     }
     if (typeof text === "string") {
         if (!/^\d+$/.test(text)) {
-            throw protocolError("E_PROTO-08", `虚拟时间不是十进制整数字符串：${text}`);
+            throw protocolError(RUST_ERROR_CODE_REFS["E_PROTO-08"], `虚拟时间不是十进制整数字符串：${text}`);
         }
         const exact = BigInt(text);
         if (exact > BigInt(MAX_EXACT_PS)) {
-            throw protocolError("E_PROTO-04", `虚拟时间超过 2^53，无法精确表示：${text}`);
+            throw protocolError(RUST_ERROR_CODE_REFS["E_PROTO-04"], `虚拟时间超过 2^53，无法精确表示：${text}`);
         }
         return Number(exact);
     }
-    throw protocolError("E_PROTO-08", `虚拟时间形态非法：${String(text)}`);
+    throw protocolError(RUST_ERROR_CODE_REFS["E_PROTO-08"], `虚拟时间形态非法：${String(text)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -461,7 +567,7 @@ export const Command = Object.freeze({
     writeConsole: (bytes) => {
         if (!Array.isArray(bytes)) {
             throw protocolError(
-                "E_PROTO-08",
+                RUST_ERROR_CODE_REFS["E_PROTO-08"],
                 `WriteConsole 的 bytes 必须是字节数组（0..255 的整数），收到：${typeof bytes}`,
             );
         }
@@ -471,7 +577,7 @@ export const Command = Object.freeze({
                     const n = Number(b);
                     if (!Number.isInteger(n) || n < 0 || n > 255) {
                         throw protocolError(
-                            "E_PROTO-08",
+                            RUST_ERROR_CODE_REFS["E_PROTO-08"],
                             `WriteConsole 的字节必须是 0..255 的整数：${String(b)}`,
                         );
                     }
@@ -751,6 +857,34 @@ export const Event = Object.freeze({
             revision: Number(revision ?? 0),
         },
     }),
+    /**
+     * `EventPayload::AdminLogs { entries }` — 管理员通道导出的**日志条目**
+     * （契约 v8 · D-129）。
+     *
+     * ⚠️ **条目原样透传** ⇒ ⇒ 前端**不复制**契约层的 DTO 形状 ⇒ ⇒ 形状的
+     * **唯一真相**是 `crates/contract/fixtures/admin-dto.json` ⇒ ⇒ Rust 侧
+     * 断言自己的序列化与那份文件逐字相符，前端侧读**同一份**文件
+     * （`front/tests/admin-dto.test.mjs`）⇒ ⇒ 任何一侧改了形状，另一侧就红。
+     *
+     * ⚠️ **条目的两个时间字段是十进制字符串**（契约 v2 §2.2 的 `u64_decimal`
+     * 策略）⇒ ⇒ 前端**不**把它们当数字用。
+     *
+     * @param {Array<object>} entries — `LogEntryDto` 列表（契约层已有的 DTO）
+     * @returns {{AdminLogs: {entries: Array<object>}}}
+     */
+    adminLogs: (entries) => ({ AdminLogs: { entries: entries ?? [] } }),
+    /**
+     * `EventPayload::AdminDiag { diag }` — 管理员**诊断包**（契约 v8 · D-129）。
+     *
+     * ⚠️ 挂在 `AdminOp::Custom("diag")` 上 ⇒ ⇒ 契约层**零**新命令。
+     *
+     * ⚠️ **原样透传**（理由同 `adminLogs`）⇒ ⇒ `AdminDiagDto` 的**四个**字段
+     * 由那份 fixture 钉住。
+     *
+     * @param {object} diag — `AdminDiagDto`（契约层已有的 DTO）
+     * @returns {{AdminDiag: {diag: object}}}
+     */
+    adminDiag: (diag) => ({ AdminDiag: { diag } }),
 });
 
 // ---------------------------------------------------------------------------
@@ -803,34 +937,34 @@ export function eventMessage(seq, payload) {
  */
 export function decodeMessage(raw) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-        throw protocolError("E_PROTO-08", "消息不是对象");
+        throw protocolError(RUST_ERROR_CODE_REFS["E_PROTO-08"], "消息不是对象");
     }
     const msg = /** @type {any} */ (raw);
     if (typeof msg.schema_version !== "number" || !Number.isFinite(msg.schema_version)) {
-        throw protocolError("E_PROTO-08", "schema_version 缺失或非法");
+        throw protocolError(RUST_ERROR_CODE_REFS["E_PROTO-08"], "schema_version 缺失或非法");
     }
     if (msg.schema_version < SCHEMA_VERSION) {
         throw protocolError(
-            "E_PROTO-01",
+            RUST_ERROR_CODE_REFS["E_PROTO-01"],
             `协议版本不兼容：${msg.schema_version} < ${SCHEMA_VERSION}`,
         );
     }
     if (msg.direction !== DIRECTION.Command && msg.direction !== DIRECTION.Event) {
-        throw protocolError("E_PROTO-08", `未知 direction：${String(msg.direction)}`);
+        throw protocolError(RUST_ERROR_CODE_REFS["E_PROTO-08"], `未知 direction：${String(msg.direction)}`);
     }
     if (typeof msg.seq !== "number" || !Number.isFinite(msg.seq)) {
-        throw protocolError("E_PROTO-08", "seq 缺失或非法");
+        throw protocolError(RUST_ERROR_CODE_REFS["E_PROTO-08"], "seq 缺失或非法");
     }
     if (!msg.payload || typeof msg.payload !== "object" || Array.isArray(msg.payload)) {
-        throw protocolError("E_PROTO-08", "payload 缺失或非法");
+        throw protocolError(RUST_ERROR_CODE_REFS["E_PROTO-08"], "payload 缺失或非法");
     }
     const tag = msg.direction === DIRECTION.Command ? "Command" : "Event";
     const other = tag === "Command" ? "Event" : "Command";
     if (!(tag in msg.payload)) {
-        throw protocolError("E_PROTO-08", `payload 缺少 ${tag} 判别式`);
+        throw protocolError(RUST_ERROR_CODE_REFS["E_PROTO-08"], `payload 缺少 ${tag} 判别式`);
     }
     if (other in msg.payload) {
-        throw protocolError("E_PROTO-08", "payload 同时带 Command 与 Event 判别式");
+        throw protocolError(RUST_ERROR_CODE_REFS["E_PROTO-08"], "payload 同时带 Command 与 Event 判别式");
     }
     const inner = msg.payload[tag];
     let variant;
@@ -841,12 +975,12 @@ export function decodeMessage(raw) {
     } else if (inner && typeof inner === "object" && !Array.isArray(inner)) {
         const keys = Object.keys(inner);
         if (keys.length !== 1) {
-            throw protocolError("E_PROTO-08", "payload 必须恰好带一个变体判别式");
+            throw protocolError(RUST_ERROR_CODE_REFS["E_PROTO-08"], "payload 必须恰好带一个变体判别式");
         }
         variant = keys[0];
         value = inner[variant];
     } else {
-        throw protocolError("E_PROTO-08", "payload 变体格式非法");
+        throw protocolError(RUST_ERROR_CODE_REFS["E_PROTO-08"], "payload 变体格式非法");
     }
     return {
         schema_version: msg.schema_version,

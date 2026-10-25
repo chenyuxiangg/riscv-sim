@@ -35,7 +35,14 @@
 // re-render, throttled to ≤200 ms (M-10 LLD §2.2 — the delta push
 // budget).
 
-import { Command, WRITE_SIZE, psToNumber, protocolError } from "../lib/message.js";
+import {
+    Command,
+    FRONT_ERROR_CODES,
+    psToNumber,
+    protocolError,
+    RUST_ERROR_CODE_REFS,
+    WRITE_SIZE,
+} from "../lib/message.js";
 
 /** Render push throttle (M-10 LLD — ≤200ms). */
 export const RENDER_THROTTLE_MS = 200;
@@ -197,7 +204,7 @@ export async function mountRegisterMemory(options = {}) {
         const raw = event.value?.elapsed_ps;
         if (raw === undefined || raw === null) {
             lastError = protocolError(
-                "E_PROTO-08",
+                RUST_ERROR_CODE_REFS["E_PROTO-08"],
                 "Tick 事件缺少 elapsed_ps（虚拟时间字段是必需的）",
             ).message;
         } else {
@@ -226,7 +233,7 @@ export async function mountRegisterMemory(options = {}) {
     }) ?? null;
 
     const offError = router?.subscribe?.("error", (event) => {
-        lastError = `${event.value?.code ?? "E_PROTO-08"}: ${event.value?.message ?? ""}`;
+        lastError = `${event.value?.code ?? RUST_ERROR_CODE_REFS["E_PROTO-08"]}: ${event.value?.message ?? ""}`;
         notify();
         scheduleRender();
     }) ?? null;
@@ -295,7 +302,7 @@ export async function mountRegisterMemory(options = {}) {
      * @returns {Promise<object>} the `Registers` event
      */
     async function readRegisters(index = 0, count = GPR_COUNT) {
-        if (!router) throw new Error("E_TRX-01: 未挂载命令路由器（M-05）");
+        if (!router) throw new Error(`${FRONT_ERROR_CODES["E_TRX-01"]}: 未挂载命令路由器（M-05）`);
         const event = await router.dispatchCommand(Command.readRegisters(index, count));
         applyRegisters(event.value);
         notify();
@@ -316,7 +323,7 @@ export async function mountRegisterMemory(options = {}) {
      * @returns {Promise<object>} the `Registers` event
      */
     async function writeRegister(index, value) {
-        if (!router) throw new Error("E_TRX-01: 未挂载命令路由器（M-05）");
+        if (!router) throw new Error(`${FRONT_ERROR_CODES["E_TRX-01"]}: 未挂载命令路由器（M-05）`);
         const event = await router.dispatchCommand(Command.writeRegister(index, value));
         applyRegisters(event.value);
         notify();
@@ -334,7 +341,7 @@ export async function mountRegisterMemory(options = {}) {
      * @returns {Promise<object>}
      */
     async function subscribeRegisterTopic() {
-        if (!router) throw new Error("E_TRX-01: 未挂载命令路由器（M-05）");
+        if (!router) throw new Error(`${FRONT_ERROR_CODES["E_TRX-01"]}: 未挂载命令路由器（M-05）`);
         const event = await router.dispatchCommand(Command.subscribe("sim.registers"));
         // The kernel-side subscription only survives while the link is
         // up: a disconnect during the round-trip invalidates it, and
@@ -352,7 +359,7 @@ export async function mountRegisterMemory(options = {}) {
      * @returns {Promise<{addr: number, size: string, value: number}>}
      */
     async function readMemory(addr, size = WRITE_SIZE.Word) {
-        if (!router) throw new Error("E_TRX-01: 未挂载命令路由器（M-05）");
+        if (!router) throw new Error(`${FRONT_ERROR_CODES["E_TRX-01"]}: 未挂载命令路由器（M-05）`);
         const event = await router.dispatchCommand(Command.readMemory(addr, size));
         return event.value;
     }
@@ -367,7 +374,7 @@ export async function mountRegisterMemory(options = {}) {
      * @returns {Promise<{addr: number, size: string, value: number}>}
      */
     async function writeMemory(addr, size = WRITE_SIZE.Word, value = 0) {
-        if (!router) throw new Error("E_TRX-01: 未挂载命令路由器（M-05）");
+        if (!router) throw new Error(`${FRONT_ERROR_CODES["E_TRX-01"]}: 未挂载命令路由器（M-05）`);
         await router.dispatchCommand(Command.writeMemory(addr, size, value));
         return readMemory(addr, size);
     }
@@ -449,7 +456,7 @@ export async function mountRegisterMemory(options = {}) {
      * @returns {Promise<void>}
      */
     async function loadProject(project) {
-        if (!router) throw new Error("E_TRX-01: 未挂载命令路由器（M-05）");
+        if (!router) throw new Error(`${FRONT_ERROR_CODES["E_TRX-01"]}: 未挂载命令路由器（M-05）`);
         await router.dispatchCommand(Command.loadProject(project));
         await resubscribe();
     }

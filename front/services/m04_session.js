@@ -25,6 +25,8 @@
 // negotiate. Until that changes the workbench keeps using the static role
 // capability bits of M-01.
 
+import { FRONT_ERROR_CODES } from "../lib/message.js";
+
 /** Legal session state transitions. */
 const LEGAL_TRANSITIONS = Object.freeze({
     idle: ["creating", "closed"],
@@ -100,7 +102,7 @@ export async function mountSession(options = {}) {
         const legal = LEGAL_TRANSITIONS[session.state] ?? [];
         if (!legal.includes(next)) {
             const err = sessionError(
-                "E_CTX-01",
+                FRONT_ERROR_CODES["E_CTX-01"],
                 `非法会话状态迁移：${session.state} → ${next}`,
             );
             session = { ...session, lastError: err.message };
@@ -134,7 +136,7 @@ export async function mountSession(options = {}) {
      */
     async function createSession(opts = {}) {
         if (session.state === "creating" || session.state === "ready") {
-            throw sessionError("E_CTX-01", `会话已存在（state=${session.state}）`);
+            throw sessionError(FRONT_ERROR_CODES["E_CTX-01"], `会话已存在（state=${session.state}）`);
         }
         const id = opts.id ?? mintSessionId();
         const role = opts.role ?? null;
@@ -168,7 +170,11 @@ export async function mountSession(options = {}) {
     async function closeSession() {
         if (session.state === "closed" || session.state === "idle") {
             if (session.id === null) {
-                throw sessionError("E_CTX-11", "会话不存在");
+                // ⚠️ **v0.44 批（STAGE-29 · 裁决 E）之前**这里写的是裸字面量
+                //    `throw sessionError("E_CTX-11", "会话不存在")` ⇒ ⇒ 那个码
+                //    **没有定义处** ⇒ ⇒ 「唯一定义」对前端码结构上无法生效
+                //    ⇒ ⇒ 现在从 `FRONT_ERROR_CODES` 取 ⇒ ⇒ 定义处在前端。
+                throw sessionError(FRONT_ERROR_CODES["E_CTX-11"], "会话不存在");
             }
             return getSession();
         }

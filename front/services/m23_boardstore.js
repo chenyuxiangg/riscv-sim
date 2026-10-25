@@ -43,7 +43,12 @@
 //
 // ⚠️ **它不参与描述的形状** ⇒ `PLATFORM_SCHEMA_VERSION` **不升**（仍 1）。
 
-import { PLATFORM_RULES_VERSION, PLATFORM_SCHEMA_VERSION, protocolError } from "../lib/message.js";
+import {
+    FRONT_ERROR_CODES,
+    PLATFORM_RULES_VERSION,
+    PLATFORM_SCHEMA_VERSION,
+    protocolError,
+} from "../lib/message.js";
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -547,14 +552,14 @@ export function createIndexedDbBackend() {
  */
 export function createBoardStore(backend) {
     if (!backend || typeof backend !== "object") {
-        throw protocolError("E_STORE-03", "createBoardStore 需要一个 backend（list / put / remove）");
+        throw protocolError(FRONT_ERROR_CODES["E_STORE-03"], "createBoardStore 需要一个 backend（list / put / remove）");
     }
     const supported = backend.supported !== false;
     // ⚠️ **不支持的 backend 允许「没有方法」**：`createIndexedDbBackend()` 在
     // 没有 IndexedDB 的环境里只返回 `{ supported: false, reason }` ⇒ 门面
     // 必须能装上它（否则上层连「显式降级」都做不到）。
     if (supported && (typeof backend.list !== "function" || typeof backend.put !== "function")) {
-        throw protocolError("E_STORE-03", "createBoardStore 需要一个 backend（list / put / remove）");
+        throw protocolError(FRONT_ERROR_CODES["E_STORE-03"], "createBoardStore 需要一个 backend（list / put / remove）");
     }
 
     return {
@@ -647,7 +652,7 @@ function asArchive(archive) {
 function requireEntryId(entry) {
     const id = entry?.id;
     if (typeof id !== "string" || id.length === 0) {
-        throw protocolError("E_STORE-02", "板档案条目缺少合法的 id（主键就是描述的 id）");
+        throw protocolError(FRONT_ERROR_CODES["E_STORE-02"], "板档案条目缺少合法的 id（主键就是描述的 id）");
     }
     return id;
 }
@@ -658,7 +663,7 @@ function requireEntryId(entry) {
  * @returns {Error}
  */
 function unsupportedError() {
-    return protocolError("E_STORE-01", "板档案存储不可用（没有 IndexedDB）⇒ 板只存在于本会话");
+    return protocolError(FRONT_ERROR_CODES["E_STORE-01"], "板档案存储不可用（没有 IndexedDB）⇒ 板只存在于本会话");
 }
 
 /**
