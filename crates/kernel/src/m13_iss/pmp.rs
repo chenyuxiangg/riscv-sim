@@ -28,6 +28,12 @@
 //! * `pmpaddr` holds the address **shifted right by two** (F3);
 //! * the **lowest-numbered matching** entry decides (F7) — not "any entry
 //!   that permits";
+//! * an access is judged **piece by piece** (v0.39 实测) — a piece is the
+//!   intersection of the access with one four-byte block ⇒ ⇒ **each piece**
+//!   finds **its own** deciding entry ⇒ ⇒ the access is permitted **iff
+//!   every piece** is ⇒ ⇒ the platform's **old** rule ("the deciding entry
+//!   must cover **every** byte of the access") **diverged from the
+//!   reference side in both directions** and is gone;
 //! * `R` = 0 with `W` = 1 is **reserved** ⇒ ⇒ the reference side drops the
 //!   `W` bit on write (F20) ⇒ ⇒ such an entry cannot write (F9);
 //! * M-mode is exempt unless `MPRV` = 1 (F10) — and `MPRV` does **not**
@@ -108,10 +114,21 @@ pub(crate) fn access_bytes(size: WriteSize) -> u32 {
 ///   the required permission bit follows from it.
 /// * `size` — the number of bytes the access touches.
 ///
+/// ⚠️ **`size` is the size of the WHOLE access** ⇒ ⇒ the **split** into
+/// pieces happens in the **contract layer** ([`pmp_access_allowed`]) ⇒ ⇒
+/// this function does **not** need to know anything about alignment ⇒ ⇒
+/// one landing: the *rule* lives in the contract layer, this function only
+/// reads the state and hands the entries over.
+///
 /// ⚠️ **The hot path is the M-mode one**: an M-mode access with `MPRV` = 0 is
 /// **exempt** unless some entry is **locked** ⇒ ⇒ the common case answers
 /// with one pass over the CSR file and a couple of mask tests — no entry
 /// array is rebuilt (STAGE-21 裁决 I).
+///
+/// ⚠️ **That hot path is still exact under the per-piece rule**: with no
+/// locked entry, **every** piece is either decided by an unlocked entry
+/// (⇒ M-mode exempt ⇒ allowed) or matches no entry at all (⇒ M-mode ⇒
+/// allowed) ⇒ ⇒ every piece is allowed ⇒ ⇒ the whole access is allowed.
 ///
 /// ⚠️ **Instruction fetch never looks at `MPRV`** (F11) ⇒ ⇒ an M-mode fetch
 /// is exempt the same way — only a **locked** entry constrains it (F12).

@@ -441,9 +441,13 @@ simply has no case for them.  Those live in the `local` suite:
 | `local/pmp_deny` | `tests/golden/local/pmp_deny.S` | **PMP denies a store to a mapped address**: with `mstatus.MPRV = 1`, entry 0 (NAPOT, 4 KiB at `0x80040000`, **no permissions**) matches ⇒ the store traps with `mcause = 7` and `mtval = 0x80040000` |
 | `local/smode_csr` | `tests/golden/local/smode_csr.S` | the **S-mode** CSR set and their WARL rules, the **per-level accessibility** rule (an M-mode or unimplemented CSR in S mode ⇒ illegal instruction), the **delegation routing** (`medeleg`'s bit 2 decides which entry the trap lands on), and where **`sret` lands** |
 | `local/mstatus_warl` | `tests/golden/local/mstatus_warl.S` | `mstatus.MPP` is WARL: writing the **reserved** value 2 **legalises the field to 0** while the rest of the same write lands normally |
+| `local/pmp_lock_tor` | `tests/golden/local/pmp_lock_tor.S` | **three** lock semantics: a **locked** (`L` = 1) **TOR** entry **freezes the previous entry's `pmpaddr`**, a **locked entry's own** `pmpaddr` is **read-only**, and an **unlocked** entry's predecessor is **not** frozen (ledger D-152) |
+| `local/pmp_straddle` | `tests/golden/local/pmp_straddle.S` | **two** boundary-crossing semantics of the PMP decision: a misaligned 4-byte **load** whose **tail** lands in a **DENY** entry is **denied** (`mcause` = 5), and a misaligned 4-byte **load** that straddles **two ALLOW** entries is **allowed** and returns the **mixed** value `0xBBBB_AAAA` (ledger D-152, branch ②) |
 
-The corpus is **74** cases now (it was 69 before the v0.38 supervisor batch:
-three upstream `rv32si/*` rows and two new `local` rows).
+The corpus is **76** cases now (it was 69 before the v0.38 supervisor batch:
+three upstream `rv32si/*` rows and two new `local` rows; the `local` suite
+grew by one more with `local/pmp_lock_tor`, and by one more still with
+`local/pmp_straddle`).
 
 ### `pmp_deny` — PMP must deny a store to an address that **is** mapped
 
@@ -511,6 +515,238 @@ would then fail for the wrong reason.  (The `pmpcfg` byte layout itself
 — `L` = bit 7, `A` = bits 4:3, `X` = bit 2, `W` = bit 1, `R` = bit 0 —
 matches upstream's `env/encoding.h`, so that file needs no change.)
 
+### `pmp_lock_tor` — the three lock semantics of a `pmpcfg` entry
+
+The RISC-V privileged spec (§3.7.6) says that setting `L` in a `pmpcfg`
+entry makes that entry read-only **and**, when the locked entry's `A` field
+is **TOR**, it also freezes the `pmpaddr` register of the **preceding**
+entry.  The platform implements this (`m13_iss/pmp.rs` →
+`legalize_write`), but until this row existed it had **never been measured
+against the reference side** ⇒ ⇒ ledger **D-152**.
+
+⇒ ⇒ **This row is the measurement.**  It is `active`, so the harness runs
+the very same ELF on both sides and compares the two exit codes ⇒ ⇒ if the
+reference side disagrees, the row goes **red** — that is a **finding**,
+not a defect of the case.
+
+**The measured result: the reference side agrees on all three.**  Both sides
+read `pmpaddr2` back as **`0x1400_0400`** after a write of `0x1400_0c00`
+into a `pmpaddr` whose *next* entry is a locked TOR entry, **and** both
+sides read `pmpaddr3` back as **`0x1400_0800`** after the same write into
+the **locked entry's own** `pmpaddr` ⇒ ⇒ the platform and the reference
+side **agree** ⇒ ⇒ the behaviour is now pinned by the default gate, and the
+row is green on both sides.
+
+The case is **one** case with **three** scenarios in the **same** `pmpcfg0`
+register, because a locked entry's `pmpcfg` byte is read-only ⇒ ⇒ it can
+never be unlocked ⇒ ⇒ the scenarios **cannot share an entry**:
+
+| # | scenario | what it asserts | basis |
+| --- | --- | --- | --- |
+| 1 | the **frozen** scenario | entry 3 is a locked **TOR** entry ⇒ ⇒ the **preceding** entry's `pmpaddr2` is frozen ⇒ ⇒ the write is dropped | privileged spec §3.7.6 — **newly measured** by this row (D-152) |
+| 2 | the **locked entry's own** `pmpaddr` | entry 3 **is** locked ⇒ ⇒ **its own** `pmpaddr3` is read-only ⇒ ⇒ the write is dropped | **F12 / F13** of the v0.37 batch (STAGE-21) — measured then, pinned in the corpus now |
+| 3 | the **mandatory control** | entry 2 is a TOR entry that is **not** locked ⇒ ⇒ its predecessor's `pmpaddr1` must still take a written value | the **negative** half — without it, "frozen" and "ignored" are the same observation |
+
+⚠️ **Scenarios 1 and 2 are two different rules.**  Rule 1 is about the
+entry **before** a locked TOR entry; rule 2 is about the locked entry
+**itself** ⇒ ⇒ neither substitutes for the other ⇒ ⇒ a platform that
+implemented only one of them would pass the other half of this case ⇒ ⇒
+both are asserted, separately, with separate verdict numbers.
+
+The register layout:
+
+| entry | mode | `pmpcfg0` byte | `pmpaddr` | what it is for |
+| --- | --- | --- | --- | --- |
+| 0 | NAPOT, `R`+`W`+`X`, not locked | `0x1f` | `0x7fffffff` ⇒ NAPOT over `[0x0000_0000, 2^34)` | the **permit-all** entry — it keeps the access path permissive on both sides |
+| 1 | OFF | `0x00` | — | — |
+| 2 | TOR, **not** locked | `0x08` | `pmpaddr1 = 0x1400_0000`, `pmpaddr2 = 0x1400_0400` | the **control** — its predecessor's `pmpaddr` must still take a written value |
+| 3 | TOR, **locked** | `0x88` | `pmpaddr3 = 0x1400_0800` | the **freezing** entry — it freezes `pmpaddr2` **and** makes its own `pmpaddr3` read-only |
+
+⇒ ⇒ `pmpcfg0` = **`0x8808_001f`**.
+
+⚠️ **The control is mandatory.**  Without it, "the value was frozen" and
+"the write was **ignored**" are the **same observation** ⇒ ⇒ a platform
+that dropped every `pmpaddr` write would be green too ⇒ ⇒ a false green.
+The control here is entry 2: a **TOR** entry that is **not** locked ⇒ ⇒
+`pmpaddr1` must still take a written value, **even though** a locked
+entry exists elsewhere in the same register.
+
+⚠️ **The order of the checks matters**, and it is the order the spec's
+rules stack in: write the four `pmpaddr` registers ⇒ ⇒ read them all back
+(the **control group**, before anything is locked) ⇒ ⇒ lock entry 3 ⇒ ⇒
+read `pmpcfg0` back (the lock really took) ⇒ ⇒ judge `pmpaddr2` (frozen) ⇒
+⇒ judge `pmpaddr3` (the locked entry's own) ⇒ ⇒ judge `pmpaddr1` (the
+control landed) ⇒ ⇒ PASS.  The `pmpaddr3` register therefore has **two**
+read-backs — **one before the lock** (in the control group) and **one
+after** — and they are two different assertions.
+
+⚠️ **Entry 0 stays the permit-all NAPOT on purpose.**  The verdict travels
+through an `ecall` → trap vector → **`tohost` store**, and the `tohost`
+word sits at **`0x8000_1000`** (`tests/golden/env/link.ld`).  Entry 0 is
+the **lowest-numbered** entry and matches **every** address ⇒ ⇒ it decides
+every access ⇒ ⇒ it permits it ⇒ ⇒ the verdict can always be written.
+The two *other* ranges are far away anyway — entry 2 covers
+`[0x5000_0000, 0x5000_1000)` and the locked entry 3 covers
+`[0x5000_1000, 0x5000_2000)` ⇒ ⇒ neither covers the code at `0x8000_0000`
+nor the `tohost` word ⇒ ⇒ **the locked range cannot swallow the program
+or its verdict**.  The case is about **CSR write behaviour**, not about
+access control ⇒ ⇒ the access path is deliberately kept boring, so the
+*only* thing the two sides can disagree about is the freeze.
+
+⚠️ **`mstatus.MPRV` is not set.**  With `MPRV` = 0 an M-mode load or
+store bypasses PMP ⇒ ⇒ the verdict write is safe by construction.  (This
+is *not* the model of `local/pmp_deny.S`, which **does** set `MPRV` and
+therefore has to clear it on every verdict path.)
+
+⚠️ **The failure modes carry distinct numbers**, so a red row says *which*
+invariant broke:
+
+| verdict | meaning |
+| --- | --- |
+| `PASS` | both sides agree — the frozen write was dropped **and** the control write landed |
+| `FAIL 3` | the **frozen** value was **not** frozen: the write to `pmpaddr2` landed although entry 3 is a locked TOR entry |
+| `FAIL 4` | the **control**'s write did **not** land: `pmpaddr1` (whose *next* entry, entry 2, is a TOR entry but **not** locked) did not take the written value ⇒ ⇒ the write is frozen even though it must not be |
+| `FAIL 5` | the **control group** broke: a `pmpaddr` written while **nothing** was locked did not read back ⇒ ⇒ the case is not alive ⇒ ⇒ every other verdict would be meaningless |
+| `FAIL 6` | the `pmpcfg0` read-back did not match ⇒ ⇒ the lock never took effect ⇒ ⇒ the frozen scenario was not actually exercised |
+| `FAIL 7` | the **locked entry's own** address register was **not** read-only: the write to `pmpaddr3` landed although entry 3 **is** locked ⇒ ⇒ rule 2 (F12 / F13) does not hold |
+
+⚠️ **The row has discriminating power — measured, not asserted.**  Three
+mutations of the platform's freeze rules were applied one at a time (and
+then reverted byte-for-byte), and each one turns the row **red** — with a
+**different** verdict number, so the three scenarios are told apart:
+
+| mutation | Spike | the platform | verdict |
+| --- | --- | --- | --- |
+| the freeze is **disabled** | `PASS` | **`FAIL 3`** | mismatch ⇒ ⇒ the **frozen scenario** is what carries that half |
+| the freeze **drops the "the next entry is locked" condition** | `PASS` | **`FAIL 4`** | mismatch ⇒ ⇒ **the control** is what carries that half |
+| a locked entry's **own** `pmpaddr` is no longer read-only | `PASS` | **`FAIL 7`** | mismatch ⇒ ⇒ **the locked-own scenario** is what carries that half |
+
+### `pmp_straddle` — the two boundary-crossing semantics of a PMP access
+
+Ledger **D-152** (branch ②) said that "an entry must cover **all** bytes of
+the access".  That wording describes the **platform's** rule — the platform
+picks **one** "deciding entry" (the lowest-numbered matching one) and then
+requires that entry to cover the **whole** access.  The **reference side**
+was **measured** (STAGE-23 §1.2) and it decides **piece by piece**, at the
+4-byte PMP granularity ⇒ ⇒ the two rules **diverge in both directions**.
+
+⇒ ⇒ **This row asserts the reference side's behaviour**, not ours.  It is
+`active`, so the harness runs the very same ELF on both sides and compares
+the two exit codes ⇒ ⇒ **the red row on our side is the measurement**, not a
+defect of the case, and the assertion must **not** be softened to make our
+side green.
+
+**The two scenarios, and why one of them is not enough.**  There are three
+possible readings of the rule, and only the **pair** tells them apart
+(STAGE-23 F11):
+
+| # | scenario | "only the start address decides" | "one entry must cover everything" | "**per piece**" (the reference side) |
+| --- | --- | --- | --- | --- |
+| A | a misaligned 4-byte **load** at `0x8003_FFFE` whose **tail** lands in a **DENY** entry | allow | allow | **deny** (`mcause` = 5) |
+| B | a misaligned 4-byte **load** at `0x800F_FFFE` that straddles **two ALLOW** entries | allow | **deny** | **allow**, value `0xBBBB_AAAA` |
+
+⇒ ⇒ scenario A alone is also compatible with "only the start address
+decides", and scenario B alone is also compatible with "the deciding entry
+must cover everything" ⇒ ⇒ **a single case cannot separate the three
+readings** ⇒ ⇒ both are in this row.
+
+**The measured result — the reference side agrees, the platform does not.**
+The reference side (Spike) runs this ELF and reports **PASS**: every
+assertion below holds on it.  The platform reports **FAIL 3** — it let
+scenario A's access through ⇒ ⇒ the platform is currently **too loose**
+there (the *security* direction).  The same platform is **too strict** for
+scenario B: measured on its own, it **denies** the cross-boundary load with
+`mcause` = 5 and `mtval` = `0x800F_FFFE` (the **effective** address) ⇒ ⇒ the
+load never returns and the value stays the `0xDEAD_BEEF` sentinel ⇒ ⇒ the
+divergence is in **both** directions.
+⇒ ⇒ the row is **red on our side** until the decision rule becomes
+per-piece, and then it is green on **both** sides and the behaviour is
+pinned by the default gate forever.
+
+**The register layouts.**  RV32's `pmpcfg0` holds **four** entries (byte 0 =
+entry 0, byte 1 = entry 1) ⇒ ⇒ `pmpcfg1` would configure entries 4..7 and is
+never used here.
+
+| configuration | entry | mode | `pmpcfg0` byte | `pmpaddr` | region |
+| --- | --- | --- | --- | --- | --- |
+| A (scenario A + the controls) | 0 | NAPOT, **no** permissions | `0x18` | `0x2001_01ff` | `[0x8004_0000, 0x8004_1000)` — **DENY** |
+| A | 1 | NAPOT, `R`+`W`+`X` | `0x1f` | `0x2001_ffff` | `[0x8000_0000, 0x8010_0000)` — **ALLOW** |
+| B (scenario B) | 0 | NAPOT, `R`+`W`+`X` | `0x1f` | `0x2001_ffff` | `[0x8000_0000, 0x8010_0000)` — **ALLOW** |
+| B | 1 | NAPOT, `R`+`W`+`X` | `0x1f` | `0x2005_ffff` | `[0x8010_0000, 0x8020_0000)` — **ALLOW** |
+
+⇒ ⇒ configuration A is `pmpcfg0 = 0x1f18`, configuration B is
+`pmpcfg0 = 0x1f1f`.  Both config bytes survive the reference side's WARL
+legalisation unchanged (the reserved bits 6:5 read back as zero — our bytes
+already have them zero — and `R`=0 ∧ `W`=1 never occurs: `0x18` has neither
+`R` nor `W`, `0x1f` has both).
+
+⚠️ **`pmpcfg0` is written first** when the case switches from configuration
+A to configuration B, **on purpose**: that way **no** intermediate state
+ever has a DENY entry covering the code or the `tohost` word ⇒ ⇒ the verdict
+path can never be blocked.
+
+⚠️ **The control group is mandatory.**  An **aligned** 4-byte load and a
+**misaligned** 4-byte load that stay **fully inside** the ALLOW region must
+both succeed and return the expected values.  The misaligned control is a
+**real** control, not an assumption: the reference side **executes**
+misaligned accesses (STAGE-23 F8) and so do we (F15) ⇒ ⇒ without the
+control, a platform that denied *every* access would be green too.
+
+⚠️ **The mixed value is what proves the crossing.**  The two halves are
+pre-filled with **different** bytes (`0xAA` below `0x8010_0000`, `0xBB` from
+`0x8010_0000` on) ⇒ ⇒ scenario B asserts the loaded word is exactly
+`0xBBBB_AAAA` ⇒ ⇒ a case that merely observed "no trap" would **not** prove
+that the load crossed the boundary.
+
+⚠️ **`mstatus.MPRV` = 1 **and** `mstatus.MPP` = 0 are both needed.**  M-mode
+loads and stores bypass PMP unless `MPRV` is set, and with `MPRV` set the
+data accesses run at the privilege held in `MPP` ⇒ ⇒ `MPP` = 0 (U-mode) is
+what makes PMP bite at all.  (The platform's own decision function ignores
+`MPP`, but the **reference side** honours it ⇒ ⇒ setting `MPP` = 0 is what
+makes the two sides comparable.)  Because `MPP` = 0 would drop the hart into
+U-mode on an `mret`, the trap handler **does not `mret`** — it simply carries
+on with the next scenario, so the hart stays in M-mode for the whole case.
+
+⚠️ **No entry may cover the code or the verdict word.**  The verdict travels
+through an `ecall` → trap vector → **`tohost` store**, and the `tohost` word
+sits at **`0x8000_1000`** (`tests/golden/env/link.ld`) while the code sits
+at `0x8000_0000`.  A **locked** entry is enforced in **every** privilege
+mode ⇒ ⇒ a locked entry covering those addresses would make the case
+**hang** instead of failing.  **No entry here is locked**, and the regions
+were checked against the real numbers: in configuration A the DENY entry
+covers `[0x8004_0000, 0x8004_1000)` — neither the code nor `tohost` — and
+although entry 0 is the **lower-numbered** entry, it does not match those
+addresses, so entry 1 decides them and **allows** them; in configuration B
+entry 0 covers `[0x8000_0000, 0x8010_0000)` and **allows** both.  Every
+verdict path also clears `MPRV` first, so the `tohost` store runs at
+M-mode privilege and PMP does not apply to it at all.
+
+⚠️ **The failure modes carry distinct numbers**, so a red row says *which*
+scenario broke:
+
+| verdict | meaning |
+| --- | --- |
+| `PASS` | the reference side's exact behaviour — the DENY-tail load was denied with `mcause` = 5, and the cross-boundary load was allowed and returned the mixed value |
+| `FAIL 3` | scenario A: the DENY-tail load was **not** denied — the platform is too **loose** |
+| `FAIL 4` | the **control group** broke: the **aligned** load inside the ALLOW region did not return the expected value ⇒ ⇒ the case is not alive |
+| `FAIL 5` | a trap happened but `mcause` was **not** 5 (the wrong *kind* of denial) |
+| `FAIL 6` | `mcause` was 5 but `mepc` was **not** the faulting instruction ⇒ ⇒ the trap came from somewhere else |
+| `FAIL 7` | scenario B: the cross-boundary load was **denied** — the platform is too **strict** |
+| `FAIL 8` | scenario B: the load was allowed but the value was **not** the mixed one ⇒ ⇒ it did not cross the boundary |
+| `FAIL 9` | the **control group** broke: the **misaligned** load inside the ALLOW region did not return the expected value |
+
+⚠️ **`mtval` is deliberately **not** asserted.**  The reference side reports
+`mtval` = `0x8004_0000` — the address of the **failing piece** — while the
+platform reports `mtval` = the **effective address** of the access
+(`0x8003_FFFE`); `crates/kernel/src/m13_iss/executor.rs` hands the
+effective address to `enter_trap`, and STAGE-23 §3.1 / B-6 keep that call
+site **unchanged**.  "Which address does a PMP trap report" is a
+**different rule** from "which access is denied", it is **outside** this
+batch's scope, and asserting it would keep this row red for a reason the
+per-piece fix does not address.  What **is** asserted is `mcause` = 5, which
+pins "denied, and denied as a **load access fault**" and separates it from a
+misaligned-load trap (cause 4) or a bus error.
+
 The harness resolves a row's source in this order:
 
 1. `$RISCV_TESTS_DIR/isa/<suite>/<test>.S` — the upstream tree (every
@@ -537,8 +773,8 @@ exactly the state the platform was in before ledger **D-99** was
 closed (the bus error was propagated verbatim and the guest's handler
 never ran).
 
-All **seven** `local` cases are **self-contained** (they include no
-riscv-tests source, like `canary/fail_3.S`).  Five of them use the `csr`
+All **nine** `local` cases are **self-contained** (they include no
+riscv-tests source, like `canary/fail_3.S`).  Six of them use the `csr`
 environment, because they need a trap vector, `mtvec`, CSR reads and
 `mret`-free trap handling; `local/smode_csr` uses the **`smode`**
 environment, because it runs in S mode and needs the strict trap vector;
