@@ -338,3 +338,53 @@ local pmp_lock_tor rv32i_zicsr_zifencei active csr
 #
 # With these five rows the corpus grows from **69** to **74** cases, and
 # with this one from **74** to **75**.
+
+# ---------------------------------------------------------------------------
+# The PMP per-piece corpus (STAGE-23 · v0.39 · PMP 逐片判定批)
+# ---------------------------------------------------------------------------
+#
+# `local/pmp_straddle` pins the **two** boundary-crossing semantics of the
+# PMP decision rule.  The platform used to decide a whole access with **one**
+# "deciding entry" and to require that entry to cover **every** byte; the
+# **reference side** (Spike) was **measured** (STAGE-23 §1.2) and it decides
+# **piece by piece**, at the 4-byte PMP granularity:
+#
+#   * scenario A — a misaligned 4-byte **load** at `0x8003_FFFE` whose **tail**
+#     lands in a **DENY** entry ⇒ the reference side **denies** it
+#     (`mcause` = 5) ⇒ ⇒ "only the start address decides" is falsified;
+#   * scenario B — a misaligned 4-byte **load** at `0x8000_FFFE` that
+#     straddles **two ALLOW** entries ⇒ the reference side **allows** it and
+#     the loaded value is the **mixed** one (`0xBBBB_AAAA`) ⇒ ⇒ "one entry
+#     must cover the whole access" is falsified.
+#
+# ⚠️ **Both rows are needed** — F10 alone is also compatible with "only the
+# start address decides", and F9 alone is also compatible with "the deciding
+# entry must cover everything" ⇒ ⇒ only the **pair** separates the three
+# readings (STAGE-23 F11) ⇒ ⇒ a single case cannot.
+#
+# ⚠️ The row asserts the **reference side's** behaviour (STAGE-23 §4.3
+# 裁决 L) ⇒ ⇒ **before** the platform is changed it is **RED on our side**
+# and that red row **is** the discriminating-power evidence ⇒ ⇒ the
+# assertion must **not** be softened to make our side green.
+#
+# ⚠️ A third check — the **control group** — proves the case is alive: an
+# **aligned** load and a **misaligned** load that stay **fully inside** the
+# ALLOW region must both succeed and return the expected values (the
+# reference side **executes** misaligned accesses — STAGE-23 F8 — and so do
+# we, F15).
+#
+# ⚠️ `mstatus.MPRV` = 1 **and** `mstatus.MPP` = 0 are both needed: MPRV
+# turns the M-mode bypass off and MPP = 0 (U-mode) is the privilege the data
+# accesses then run at ⇒ ⇒ PMP really applies.  Every verdict path clears
+# MPRV first, so the `tohost` store (`0x8000_1000`) can never be denied.
+#
+# ⚠️ The failure numbers tell **which** scenario broke:
+#   1 = PASS · 3 = scenario A was **not** denied (platform too loose) ·
+#   4 = the aligned control broke · 5 = a trap happened but `mcause` was not 5 ·
+#   6 = `mcause` was 5 but `mepc` was not the faulting instruction ·
+#   7 = scenario B was **denied** (platform too strict) ·
+#   8 = scenario B was allowed but the value was not the mixed one ·
+#   9 = the misaligned control broke.
+#
+# With this row the corpus grows from **75** to **76** cases.
+local pmp_straddle rv32i_zicsr_zifencei active csr
