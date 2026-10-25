@@ -389,6 +389,22 @@ _repo_root = Path(__file__).resolve().parent.parent
 FILE_RE = re.compile(r"(crates/[A-Za-z0-9_./-]+\.(?:rs|py))")
 QUOTE_RE = re.compile(r"「([^」]{8,})」")
 
+#: ⚠️ **台账路径**（F1 的兜底落点）⇒ ⇒ **只此一处**定义。
+LEDGER_REL = "docs/reviews/REVIEWS.md"
+
+#: ⚠️ **哪些行允许「台账兜底」** —— 判据是「**这条事实是修前的，修掉它就必然
+#:    把它从源文件里删掉**」⇒ ⇒ 它的原文的**正确落点**是台账的**留痕**
+#:    （本批 T-1 要求「正文按实测改写并保留原表述留痕」）⇒ ⇒ 查「源文件
+#:    **或** 台账」。
+#:    · **F1** = 修前的事实（那张表里 `irq_clear` 曾被列在 internal line 栏）
+#:      ⇒ ⇒ **D-127 的修复必然把那一行从源文件里删掉** ⇒ ⇒ 「只查源文件」
+#:      这条判据与「修复」**互斥** ⇒ ⇒ ⇒ 允许兜底。
+#:      ⚠️ 源文件那一侧的保证**另有**用例钉住（Lane B 的
+#:      `the_three_spaces_table_keeps_irq_clear_out_of_the_line_column`
+#:      逐字读源文件）⇒ ⇒ 这里放宽**不丢**判别力。
+#:    · **F2** = 实现侧**当前**的注释 ⇒ ⇒ **只查源文件** ⇒ ⇒ **不放宽**。
+FALLBACK_LEDGER_ROWS = {"F1"}
+
 
 def _norm(s: str) -> str:
     """比对方去掉 Markdown 粗体标记与转义竖线。"""
@@ -415,8 +431,19 @@ for row in rows12:
         continue
     body_txt = _norm(target.read_text(encoding="utf-8"))
     quoted = _norm(qm.group(1))
-    if quoted not in body_txt:
-        err(f"[跨层] {row[0]} 引用的原文在 {rel} 里**逐字找不到** ⇒ ⇒ 规格与实现漂移了")
+    if quoted in body_txt:
+        continue
+    # ⚠️ **台账兜底**（只对「修前的事实」开放 ⇒ ⇒ 见 FALLBACK_LEDGER_ROWS）。
+    if row[0] in FALLBACK_LEDGER_ROWS:
+        ledger = _repo_root / LEDGER_REL
+        if not ledger.exists():
+            err(f"[跨层] 找不到台账 {LEDGER_REL} ⇒ ⇒ 兜底检查**静默失效** ⇒ ⇒ 必须红")
+            continue
+        if quoted in _norm(ledger.read_text(encoding="utf-8")):
+            # ⇒ ⇒ 原文在台账的**留痕**里在位 ⇒ ⇒ 这是「修前事实」的**正确落点**。
+            continue
+    err(f"[跨层] {row[0]} 引用的原文在 {rel} 里**逐字找不到**"
+        f"（台账兜底也不在位）⇒ ⇒ 规格与实现漂移了")
 
 # ---- 7f. D-128 的 LLD 订正**真的落地**（规格 ≠ 落地 ⇒ ⇒ 必须红）--------------
 #: ⚠️ **这一项钉的是「落地」**：规格里写了「改成有界长度」⇒ ⇒ **LLD 没改** ⇒ ⇒
