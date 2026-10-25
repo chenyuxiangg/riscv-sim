@@ -234,6 +234,10 @@ fn render_wide(d: &Decoded, op: Op) -> String {
         Op::Ecall => "ecall".to_string(),
         Op::Ebreak => "ebreak".to_string(),
         Op::Mret => "mret".to_string(),
+        // ⚠️ **v0.38 新增**：`sret`（`0x10200073`）进了 M-13 的**唯一**
+        // 解码表 ⇒ 这里**必须**跟着长一条臂 —— 否则这条编码会被渲染成
+        // `.illegal`，而 M-13 **真的执行**它 ⇒ 同一串编码两个真相。
+        Op::Sret => "sret".to_string(),
         // ⚠️ **v0.23 批新增**：`wfi`（`0x10500073`）进了 M-13 的**唯一**
         // 解码表 ⇒ 这里**必须**跟着长一条臂 —— 否则这条编码会被渲染成
         // `.illegal`，而 M-13 **真的执行**它 ⇒ 同一串编码两个真相。
@@ -406,6 +410,7 @@ fn wide_name(op: Op) -> &'static str {
         Op::Ecall => "ecall",
         Op::Ebreak => "ebreak",
         Op::Mret => "mret",
+        Op::Sret => "sret",
         Op::Wfi => "wfi",
         Op::Csrrw => "csrrw",
         Op::Csrrs => "csrrs",
@@ -449,6 +454,17 @@ fn csr_name(csr: u32) -> String {
         0x001 => "fflags",
         0x002 => "frm",
         0x003 => "fcsr",
+        // ---- S-mode / U-mode (STAGE-22 · v0.38) ----
+        0x005 => "ucounteren",
+        0x100 => "sstatus",
+        0x104 => "sie",
+        0x105 => "stvec",
+        0x140 => "sscratch",
+        0x141 => "sepc",
+        0x142 => "scause",
+        0x143 => "stval",
+        0x144 => "sip",
+        0x180 => "satp",
         0x300 => "mstatus",
         0x301 => "misa",
         0x302 => "medeleg",
@@ -475,6 +491,7 @@ fn csr_name(csr: u32) -> String {
         0xc80 => "cycleh",
         0xc81 => "timeh",
         0xc82 => "instreth",
+        0x906 => "scounteren",
         0xf11 => "mvendorid",
         0xf12 => "marchid",
         0xf13 => "mimpid",
