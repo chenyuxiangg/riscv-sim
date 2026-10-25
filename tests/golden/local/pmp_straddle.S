@@ -17,7 +17,7 @@
 //   * **F10** — a misaligned 4-byte **load** at `0x8003_FFFE` whose **tail**
 //     lands in a **DENY** entry ⇒ the reference side **denies** it
 //     (`mcause` = 5) ⇒ ⇒ "only the start address decides" is **falsified**.
-//   * **F9**  — a misaligned 4-byte **load** at `0x8000_FFFE` that straddles
+//   * **F9**  — a misaligned 4-byte **load** at `0x800F_FFFE` that straddles
 //     **two ALLOW** entries ⇒ the reference side **allows** it and the
 //     loaded value is the **mixed** one (`0xBBBB_AAAA`)
 //     ⇒ ⇒ "one entry must cover the whole access" is **falsified**.

@@ -643,7 +643,7 @@ possible readings of the rule, and only the **pair** tells them apart
 | # | scenario | "only the start address decides" | "one entry must cover everything" | "**per piece**" (the reference side) |
 | --- | --- | --- | --- | --- |
 | A | a misaligned 4-byte **load** at `0x8003_FFFE` whose **tail** lands in a **DENY** entry | allow | allow | **deny** (`mcause` = 5) |
-| B | a misaligned 4-byte **load** at `0x8000_FFFE` that straddles **two ALLOW** entries | allow | **deny** | **allow**, value `0xBBBB_AAAA` |
+| B | a misaligned 4-byte **load** at `0x800F_FFFE` that straddles **two ALLOW** entries | allow | **deny** | **allow**, value `0xBBBB_AAAA` |
 
 ⇒ ⇒ scenario A alone is also compatible with "only the start address
 decides", and scenario B alone is also compatible with "the deciding entry

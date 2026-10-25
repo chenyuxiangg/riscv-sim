@@ -338,6 +338,45 @@ for line in lines:
 if len(sec13) < 4:
     err(f"[旧结论] §1.3 的被推翻旧结论不足 4 条（实测 {len(sec13)} 行）")
 
+# ---- 7e. 跨层一致性：同一个地址字面量在**四处**必须逐字相同 ----------------
+# ⚠️ **本批实测抓到的真缺口**：b12 的起始地址被写成 `0x8000_FFFE`
+#    （**少一位**十六进制数字）⇒ ⇒ 而同一个地址要**手抄**到**四处**
+#    ⇒ ⇒ **规格** / **语料源码的注释** / **语料登记的注释** / **golden README**
+#    ⇒ ⇒ 结果是**三处抄错、一处（代码里的那条指令）是对的**
+#    ⇒ ⇒ ⇒ 「**手抄同一个字面量到多处**」这件事**本身**就是缺陷
+#    ⇒ ⇒ ⇒ **跨层逐字比对**必须进门禁（否则下一次照样抄错）。
+#: ⚠️ **归一化**：汇编里写的是 `0x800ffffe`（无下划线、小写）而散文里写的是
+#:    `0x800F_FFFE`（有下划线、大写）⇒ ⇒ 比的是**归一化后**的形状。
+def _norm_addr(s: str) -> str:
+    return s.replace("_", "").lower()
+
+
+CROSS_LAYER_FILES = [
+    "docs/detailed-design/STAGE-23_V039_PMP_Per_Piece.md",
+    "tests/golden/local/pmp_straddle.S",
+    "tests/golden/corpus.txt",
+    "tests/golden/README.md",
+]
+#: ⚠️ **必须出现在全部四处**的那几个地址（两条判别式的起始地址）。
+CROSS_LAYER_REQUIRED = ["0x800F_FFFE", "0x8003_FFFE"]
+#: ⚠️ **一处都不许出现**的那两个地址（**抄错**的形态 ⇒ ⇒ 出现即红）。
+CROSS_LAYER_FORBIDDEN = ["0x8000_FFFE", "0x8001_0000"]
+
+_repo_root = Path(__file__).resolve().parent.parent
+for _rel in CROSS_LAYER_FILES:
+    _p = _repo_root / _rel
+    if not _p.exists():
+        # ⚠️ **文件没了 ⇒ ⇒ 跨层检查静默失效** ⇒ ⇒ 与「找不到候选清单块」同形
+        err(f"[跨层] 找不到 {_rel} ⇒ ⇒ 跨层一致性检查**静默失效** ⇒ ⇒ 必须红")
+        continue
+    _body = _norm_addr(_p.read_text(encoding="utf-8"))
+    for _lit in CROSS_LAYER_REQUIRED:
+        if _norm_addr(_lit) not in _body:
+            err(f"[跨层] {_rel} 缺少关键地址字面量 {_lit}")
+    for _lit in CROSS_LAYER_FORBIDDEN:
+        if _norm_addr(_lit) in _body:
+            err(f"[跨层] {_rel} 出现**抄错的**地址字面量 {_lit}")
+
 print(f"检查项：7  失败 {len(fail)}")
 for f in fail:
     print("  ✗", f)
