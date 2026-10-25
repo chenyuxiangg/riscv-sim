@@ -438,12 +438,19 @@ pub const MSTATUS_MPIE_BIT: u32 = 7;
 ///
 /// ⇒ **保留位** = `0` / `2` / `4` / `6` / `23` / `24` ~ `30`；另有一批
 /// **本平台不支持的扩展位**（`VS` 9:10 / `XS` 15:16 的一半 / `UBE`）⇒ ⇒
-/// 掩码 = **`0x807E_79AA`**。
+/// 掩码 = **`0x007E_79AA`**。
 ///
 /// ⚠️ **这个掩码是**实测**出来的，不是照规范抄的**（STAGE-22 · **F6**）：
 /// 参考侧「写 `0xFFFFFFFF` 之后读回 `0x807E_79AA`」⇒ ⇒ 本平台现在
 /// **与参考侧逐位相同** ⇒ ⇒ 台账 **D-98** 的「写全 1 之后两侧的
 /// `mstatus` 不会逐位相等」这条**已知残留已消除**。
+///
+/// ⚠️ **bit 31（`SD`）不在这个掩码里**（**F40**）：`SD` 是**推导位** ⇒ ⇒
+/// **不可直接写**（实测：写 `0x8000_0000` ⇒ 读回 `0x0000_0000`）⇒ ⇒ 它
+/// 由 `FS` / `XS` 推出来 ⇒ ⇒ 推导在 [`mstatus_warl`] 里 ⇒ ⇒ **写全 1
+/// 之后读回的是 `0x807E_79AA`**（`FS = 3` ⇒ `SD = 1`）⇒ ⇒ 掩码与读回值
+/// **差的那一位就是 `SD`** ⇒ ⇒ 两条**不是**矛盾，是「可写位」与「最终值」的
+/// 区别。
 ///
 /// ⚠️ **旧值 `0x807F_FFEA` 是超集**（多出 bit 6 / 9 / 10 / 15 / 16）⇒ ⇒
 /// guest 能写那些「扩展不存在就不该可写」的位而参考侧会丢掉 ⇒ ⇒ **真
@@ -455,7 +462,24 @@ pub const MSTATUS_MPIE_BIT: u32 = 7;
 ///
 /// ⚠️ **掩码表达不了「保留值 ⇒ 整次写被丢弃」**（F5）⇒ ⇒ **`mstatus` 的
 /// 写侧必须走 [`mstatus_warl`] 这个函数**，不能只做 `& mask`。
-pub const MSTATUS_WARL_MASK: u32 = 0x807E_79AA;
+pub const MSTATUS_WARL_MASK: u32 = 0x007E_79AA;
+
+/// `mstatus.FS` 字段（bits 14:13）—— **浮点脏位**，`3` = Dirty。
+pub const MSTATUS_FS_MASK: u32 = 0x3 << 13;
+
+/// `mstatus.XS` 字段（bits 16:15）—— **向量脏位**，`3` = Dirty。
+///
+/// ⚠️ 本平台**不实现向量扩展** ⇒ ⇒ `XS` **不可写**（不在
+/// [`MSTATUS_WARL_MASK`] 里）⇒ ⇒ 它**恒为 0** ⇒ ⇒ 但 [`mstatus_warl`]
+/// 仍然按规范把 `XS` 算进 `SD` 的推导 ⇒ ⇒ 口径与参考侧同形。
+pub const MSTATUS_XS_MASK: u32 = 0x3 << 15;
+
+/// `mstatus.SD`（bit 31）—— **推导位**：= (`FS` == Dirty) ∨ (`XS` == Dirty)。
+///
+/// ⚠️ **实测（F40）**：参考侧「只把 `FS` 写成 3（`0x6000`）、不碰 bit 31」
+/// ⇒ ⇒ 读回 **`0x8000_6000`** ⇒ ⇒ `SD` 被**推成 1**；而「直接写 bit 31」
+/// ⇒ ⇒ 读回 **`0x0000_0000`** ⇒ ⇒ **直接写无效** ⇒ ⇒ `SD` **不是存储位**。
+pub const MSTATUS_SD_BIT: u32 = 1 << 31;
 
 /// `mstatus` 的 WARL 合法化 —— **唯一的落点**。
 ///
@@ -494,7 +518,17 @@ pub fn mstatus_warl(new: u32) -> u32 {
         // 保留值 ⇒ **合法化到 0**（U），**不是**保留旧值（F39）。
         MSTATUS_MPP_U
     };
-    (masked & !mpp_mask) | (mpp << MSTATUS_MPP_SHIFT)
+    // ⚠️ `SD`（bit 31）是**推导位**（F40）⇒ ⇒ 不可直接写 ⇒ ⇒ 由 `FS` /
+    // `XS` 推出来 ⇒ ⇒ 「写全 1」读回 `0x807E_79AA`（`FS = 3` ⇒ `SD = 1`），
+    // 而「只写 `FS = 3`」也读回 `0x8000_6000`（实测逐位相同）。
+    let fs = masked & MSTATUS_FS_MASK;
+    let xs = masked & MSTATUS_XS_MASK;
+    let sd = if fs == MSTATUS_FS_MASK || xs == MSTATUS_XS_MASK {
+        MSTATUS_SD_BIT
+    } else {
+        0
+    };
+    (masked & !mpp_mask) | (mpp << MSTATUS_MPP_SHIFT) | sd
 }
 
 /// `sstatus` 的**客体写**掩码 —— 客体写 `sstatus` 时会落到 `mstatus` 的哪些位。
@@ -1823,11 +1857,16 @@ mod tests {
     /// `MSTATUS_WARL_MASK` 自己 ⇒ 改了常量而忘了改语义，这条会红。
     #[test]
     fn the_mstatus_warl_mask_drops_the_reserved_bits_and_keeps_the_fields() {
-        // ⚠️ **掩码是实测出来的**（STAGE-22 · F6）⇒ ⇒ 这里钉的是**那个
-        // 值**，不是「按规范推出来的值」。
+        // ⚠️ **掩码是实测出来的**（STAGE-22 · F6 / **F40**）⇒ ⇒ 这里钉的是
+        // **那个值**，不是「按规范推出来的值」。
         assert_eq!(
-            MSTATUS_WARL_MASK, 0x807E_79AA,
-            "mstatus 的真实可写掩码必须与参考侧逐位相同（F6）"
+            MSTATUS_WARL_MASK, 0x007E_79AA,
+            "mstatus 的**直接可写位**必须与参考侧逐位相同（F6 / F40）"
+        );
+        assert_eq!(
+            MSTATUS_WARL_MASK & MSTATUS_SD_BIT,
+            0,
+            "SD 是推导位 ⇒ 不可直接写 ⇒ 必须在掩码之外（F40）"
         );
         // 保留位（WPRI）：0 / 2 / 4 / 23 / 24~30。
         for (bits, name) in [
@@ -1870,7 +1909,7 @@ mod tests {
             (0x0010_0000, "TVM"),
             (0x0020_0000, "TW"),
             (0x0040_0000, "TSR"),
-            (0x8000_0000, "SD"),
+            (0x0000_6000, "FS"),
         ] {
             assert_eq!(
                 MSTATUS_WARL_MASK & bits,
@@ -1878,6 +1917,9 @@ mod tests {
                 "{name} 是已定义的字段 ⇒ 必须在掩码之内"
             );
         }
+        // ⚠️ **`SD` 是唯一的例外**：它是**推导位**（F40）⇒ ⇒ **不可直接写**
+        // ⇒ ⇒ 不在掩码之内（上面的断言已经钉住）⇒ ⇒ 它的值由 `FS`/`XS` 推
+        // 出来 ⇒ ⇒ 见 `mstatus_warl_derives_the_sd_bit_from_fs_and_xs`。
     }
 
     /// `mepc` 的对齐掩码：**只**去掉最低一位（IALIGN = 16，因为本平台
@@ -2312,6 +2354,34 @@ mod tests {
             mstatus_warl(0xFFFF_FFFF),
             0x807E_79AA,
             "写全 1 之后 mstatus 必须读回参考侧实测的那个值（F6）"
+        );
+    }
+
+    /// **F40** · `mstatus.SD`（bit 31）是**推导位**：= (`FS` == 3) ∨ (`XS` == 3)。
+    ///
+    /// ⚠️ **三条实测**：① 只写 `FS = 3`（`0x6000`）⇒ ⇒ 读回 **`0x8000_6000`**
+    /// （`SD` 被**推成 1**）；② 只写 `FS = 1`（`0x2000`）⇒ ⇒ 读回
+    /// **`0x0000_2000`**（`SD` 是 0）；③ 直接写 bit 31（`0x8000_0000`）⇒ ⇒
+    /// 读回 **`0x0000_0000`** ⇒ ⇒ **直接写无效** ⇒ ⇒ 它**不是**存储位。
+    ///
+    /// ⚠️ 判别式用的是**架构字面量**，不是常量自己 ⇒ ⇒ 改了常量而忘了改
+    /// 语义，这条会红。
+    #[test]
+    fn mstatus_warl_derives_the_sd_bit_from_fs_and_xs() {
+        assert_eq!(
+            mstatus_warl(0x0000_6000),
+            0x8000_6000,
+            "只把 FS 写成 3 ⇒ SD 必须被推成 1（F40）"
+        );
+        assert_eq!(
+            mstatus_warl(0x0000_2000),
+            0x0000_2000,
+            "FS = 1（Initial）⇒ SD 必须是 0（F40）"
+        );
+        assert_eq!(
+            mstatus_warl(0x8000_0000),
+            0x0000_0000,
+            "直接写 SD 无效 ⇒ 它是推导位（F40）"
         );
     }
 
