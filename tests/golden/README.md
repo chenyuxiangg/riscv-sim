@@ -107,15 +107,16 @@ Two further differences from upstream, both harmless for this corpus:
   `TEST_ST_OP`).  The stack itself is therefore never used by the
   corpus; the initial `sp` value is irrelevant to every result.
 
-## The two environments
+## The three environments
 
-There are **two** golden environments, selected per case by the `env`
+There are **three** golden environments, selected per case by the `env`
 column of `corpus.txt`:
 
 | variant | directory | what it provides | used by |
 | --- | --- | --- | --- |
 | *(default)* | `env/` | **CSR-free**: `tohost` is written directly, no trap vector, no `mtvec` programming, no `mret` | the 51 RV32I/M/C cases |
 | `csr` | `env/csr/` | **CSR-capable**: trap vector, `mtvec` / `mie` / `mstatus` programming, `mepc` + `mret` epilogue, and the verdict carried by the `ECALL` | the machine-level corpus |
+| `smode` | `env/smode/` | **supervisor-capable**: the `csr` variant **plus** a *direct* `tohost` verdict and a **strict** M-level trap vector | the supervisor-level corpus (`rv32si/*`, `local/smode_csr`) |
 
 The default environment is CSR-free because the HTIF wire format is much
 simpler than the route upstream takes to reach it: the whole CSR + trap
@@ -142,6 +143,72 @@ The corpus build of all 16 `rv32mi` cases produces a **byte-identical
 — i.e. the reimplementation executes the same instruction stream as the
 reference environment, so the golden comparison compares the same program on
 both sides.
+
+### The `smode` environment — why a **third** one
+
+`env/smode/riscv_test.h` is a **verbatim copy** of `env/csr/riscv_test.h`
+with five documented changes (the file's own header comment carries the
+"why" for each one).  In short:
+
+1. the verdict is written **straight to `tohost`** — the *encoding* is byte
+   for byte the `csr` variant's (PASS = `1`, FAIL n = `(n<<1)|1`), so the
+   harness's comparison is unchanged;
+2. the M-level trap vector is **strict** — it no longer reports the three
+   ECALL causes (8 / 9 / 11) as PASS;
+3. `medeleg` gets **one extra bit** over upstream's mask (bit 2, illegal
+   instruction), so that "read / write an M-mode CSR in S mode" reaches the
+   S-level handler;
+4. `stvec` points at the test's own `stvec_handler` (unchanged from `csr`,
+   but **load-bearing** — see below);
+5. `medeleg`'s mask value.
+
+⚠️ **Why the strict trap vector is load-bearing.**  Under the `csr`
+environment, `rv32si/scall` is a **false green**: if the `sret` wrongly
+lands in **S** mode, the `scall`'s cause is **9**, which the `csr` trap
+vector reports as **PASS** ⇒ ⇒ *both* sides report PASS ⇒ ⇒ the row proves
+nothing.  Tightening the trap vector alone is not enough either — the
+`RVTEST_PASS` *inside* the S-level handler is another `ecall` (cause 9) ⇒
+⇒ still PASS ⇒ ⇒ the only way to take the false green away is to take the
+verdict **out of the trap path** ⇒ ⇒ the direct `tohost` write.
+
+⚠️ **That false green is measured, not argued.**  A copy of upstream's
+`rv64si/scall.S` with one instruction changed (`csrc sstatus, t0` ⇒
+`csrs sstatus, t0`, i.e. `sstatus.SPP` is set so that the `sret` lands in
+**S** mode) was built under both environments and run on the reference side:
+
+| environment | verdict |
+| --- | --- |
+| `csr` | **PASS** (exit 0) ⇒ ⇒ the false green |
+| `smode` | **FAIL** (the unexpected-trap verdict) ⇒ ⇒ the false green is gone |
+
+⚠️ **The mask's value is `0xB10D`, and it lands on the same value on both
+sides.**  `0xB10D` = upstream's `0xB109` + bit 2 (illegal instruction)
+⇒ ⇒ but the reference side's `medeleg` has a **legal bit set** of
+`0x0008_B3FE` (per-bit WARL) ⇒ ⇒ **bit 0** (misaligned instruction fetch)
+is **not** delegable ⇒ ⇒ both sides store **`0xB10C`** ⇒ ⇒ the two sides
+agree ⇒ ⇒ the mask value needs no change.  (Writing `0xB109` reads back
+`0xB108` on the reference side — measured.)
+
+⚠️ **The `stvec_handler` / `medeleg` coupling.**  The reset sequence is
+
+```
+la t0, stvec_handler;
+beqz t0, 1f;            <-- jumps **past** the `csrw medeleg`
+csrw stvec, t0;
+...
+csrw medeleg, t0;
+```
+
+⇒ ⇒ a test that does **not** define `stvec_handler` never reaches the
+`csrw medeleg` ⇒ ⇒ its delegation surface is **zero** ⇒ ⇒ every test that
+wants to observe delegation **must** define one (the `rv32si/*` cases do,
+and so does `local/smode_csr.S`).
+
+⚠️ **`env/csr/riscv_test.h` stays byte for byte what it is.**  That is not
+only "don't break the M-mode corpus": the M-mode corpus defines
+`__MACHINE_MODE`, which aliases `stvec_handler` to `mtvec_handler` ⇒ ⇒ the
+symbol does not exist ⇒ ⇒ `medeleg` is never written there ⇒ ⇒ the
+M-mode corpus's delegation surface is zero **by construction**.
 
 `env/encoding.h` holds the handful of architectural constants the CSR
 variant and the upstream test bodies reference.  They are upstream's values
@@ -175,7 +242,7 @@ from upstream.
 | `rv32um` | 8 | ✅ in (`active`) | needs the **M** extension — landed in v0.16 (**D-43** closed) |
 | `rv32uc` | 1 | ✅ in (`active`) | needs the **C** extension — landed in v0.16 (**D-43** closed) |
 | `rv32mi` | 16 | ✅ 13 in (`active`, `csr` env) | machine-level: CSR access, breakpoints, `mret`, trap-and-continue handlers — trap delivery landed in v0.19, so 13 of the 16 are now comparable |
-| `rv32si` | 6 | ❌ out | supervisor-level: the same **plus S-mode** — the platform is M-mode only (**D-94**) |
+| `rv32si` | 6 | ✅ 3 in (`active`, `smode` env) | supervisor-level: the same **plus S-mode** — S mode and U mode landed in v0.38 (**D-94** closed) ⇒ ⇒ `sbreak` / `scall` / `csr` are comparable now; the other three need paging / S-level interrupts / S-level page faults and stay out |
 | `rv32ua` | 10 | ❌ out | **A** extension (atomics) — not implemented; a natural phase-3 addition next to M/C |
 | `rv32uf` / `rv32ud` | 11 / 11 | ❌ out | floating point — out of MVP scope by design (AD §3.3) |
 | `rv32up` | 446 | ❌ out | **P** extension — far beyond MVP scope |
@@ -183,7 +250,7 @@ from upstream.
 
 ## Cases that are *not* in the corpus
 
-Three `rv32mi` cases and all six `rv32si` cases are **not** rows in
+Three `rv32mi` cases and three `rv32si` cases are **not** rows in
 `corpus.txt`, and that is deliberate:
 
 * the harness's `pending` rule tolerates **only** "the candidate cannot
@@ -200,17 +267,20 @@ Three `rv32mi` cases and all six `rv32si` cases are **not** rows in
 | `rv32mi/illegal` | `PASS` | `NOVERDICT` | needs S-mode semantics: `csrwi mip, MIP_SSIP` is ignored on this platform, so the case never finishes → **D-94** |
 | `rv32mi/pmpaddr` | `PASS` | `PASS` | agrees — but **vacuously**: the case auto-detects the granularity `G` from the read-back of `pmpaddr0`, and the reference side stores `pmpaddr` **verbatim** (writing all ones reads back `0xffffffff` — measured) ⇒ ⇒ the lowest set bit is bit 0 ⇒ ⇒ `G` = 0 ⇒ ⇒ the case takes its **own** `beqz a7, pass` early exit ⇒ ⇒ **the main test never runs on the reference side** ⇒ ⇒ the agreement proves nothing ⇒ ⇒ it stays out of the corpus → **D-94** |
 | `rv32mi/zicntr` | `PASS` | `PASS` | the reference side now implements Zicntr — the default ISA carries `zicntr` ⇒ it no longer traps ⇒ but the agreement is **hollow**: the case only checks that reading `cycle` / `instret` / `cycleh` / `instreth` in four ways does **not** trap ⇒ a CSR read on this platform never traps ⇒ ⇒ the case **cannot fail here** ⇒ ⇒ it stays out of the corpus → **D-94** |
-| `rv32si/csr` | `PASS` | `FAIL 22` | S-mode: the case runs in S-mode, we stay in M-mode → **D-94** |
-| `rv32si/ma_fetch` | `PASS` | `PASS` | agrees — but for a **vacuous** reason (neither side reaches the S-mode path the case is about) ⇒ it is *not* promoted to `active` until S-mode exists |
-| `rv32si/sbreak` | `PASS` | `FAIL 669` | S-mode → **D-94** |
-| `rv32si/scall` | `PASS` | `FAIL 669` | S-mode → **D-94** |
-| `rv32si/wfi` | `PASS` | `FAIL 668` | S-mode → **D-94** |
-| `rv32si/dirty` | — | — | does not even assemble: it needs `SATP_MODE` / `SATP_MODE_SV32`, which only matter for paging → **D-94** |
+| `rv32si/csr` | `PASS` | — | **in the corpus now** (env `smode`) — S mode and U mode landed in v0.38 ⇒ ⇒ the row's divergence is gone; see *The supervisor-level corpus* below |
+| `rv32si/sbreak` | `PASS` | — | **in the corpus now** (env `smode`) |
+| `rv32si/scall` | `PASS` | — | **in the corpus now** (env `smode`) — and under `smode` it is no longer a *false green*: the strict trap vector makes a wrong `sret` landing a failure |
+| `rv32si/ma_fetch` | `PASS` | — | **still out**: the case is about the **misaligned-instruction trap** (cause 0) ⇒ ⇒ it compares the platform's `IALIGN` behaviour (the `misa.C` bit) and the S-mode delegation of cause 0 against the reference side's ⇒ ⇒ that is not comparable yet.  ⚠️ the **reference side passes it** under `smode` (measured) ⇒ ⇒ it is a promotion candidate as soon as the platform side is verified |
+| `rv32si/wfi` | `PASS` | — | **still out**: the case needs **S-level interrupts** — `sie` / `sip` written from S mode (gated by `mideleg`) and a `wfi` that behaves like the reference side's ⇒ ⇒ that is not comparable yet.  ⚠️ the **reference side passes it** under `smode` (measured) |
+| `rv32si/dirty` | — | — | does not even assemble: it needs `SATP_MODE` / `SATP_MODE_SV32` / `DRAM_BASE`, which only matter for paging → **D-94** |
 
-⚠️ **`rv32si/ma_fetch` is the interesting one**: the two sides agree, so a
-naive "promote it to `active`" would put a **vacuous** agreement into the
-corpus — a green row that proves nothing.  It stays out until the S-mode
-path it actually tests exists.
+⚠️ **`rv32si/ma_fetch` is the interesting one**: before v0.38 the two sides
+agreed, so a naive "promote it to `active`" would have put a **vacuous**
+agreement into the corpus — a green row that proves nothing.  It stayed out
+until the S-mode path it actually tests existed.  ⇒ ⇒ Now that S mode
+exists, the **reference side** passes it under `smode` (measured), and the
+only thing left is to verify the **platform** side ⇒ ⇒ it is the first
+promotion candidate of this batch.
 
 ⚠️ The `zicntr` row is no longer a **platform-vs-reference semantic
 difference**: the reference side now implements Zicntr, so it no longer
@@ -369,8 +439,11 @@ simply has no case for them.  Those live in the `local` suite:
 | `local/unmapped_fetch` | `tests/golden/local/unmapped_fetch.S` | an **instruction fetch** from an unmapped address traps with `mcause = 1` (instruction access fault), `mtval` = `mepc` = the fetch address |
 | `local/compressed_trap` | `tests/golden/local/compressed_trap.S` | a **compressed** store to an unmapped address traps, and the trap context carries the **exact** faulting PC (bit 1 preserved) |
 | `local/pmp_deny` | `tests/golden/local/pmp_deny.S` | **PMP denies a store to a mapped address**: with `mstatus.MPRV = 1`, entry 0 (NAPOT, 4 KiB at `0x80040000`, **no permissions**) matches ⇒ the store traps with `mcause = 7` and `mtval = 0x80040000` |
+| `local/smode_csr` | `tests/golden/local/smode_csr.S` | the **S-mode** CSR set and their WARL rules, the **per-level accessibility** rule (an M-mode or unimplemented CSR in S mode ⇒ illegal instruction), the **delegation routing** (`medeleg`'s bit 2 decides which entry the trap lands on), and where **`sret` lands** |
+| `local/mstatus_warl` | `tests/golden/local/mstatus_warl.S` | `mstatus.MPP` is WARL: writing the **reserved** value 2 **legalises the field to 0** while the rest of the same write lands normally |
 
-The corpus is **69** cases now (it was 68 before `local/pmp_deny`).
+The corpus is **74** cases now (it was 69 before the v0.38 supervisor batch:
+three upstream `rv32si/*` rows and two new `local` rows).
 
 ### `pmp_deny` — PMP must deny a store to an address that **is** mapped
 
@@ -464,10 +537,119 @@ exactly the state the platform was in before ledger **D-99** was
 closed (the bus error was propagated verbatim and the guest's handler
 never ran).
 
-All five `local` cases are **self-contained** (they include no
-riscv-tests source, like `canary/fail_3.S`) and they use the `csr`
+All **seven** `local` cases are **self-contained** (they include no
+riscv-tests source, like `canary/fail_3.S`).  Five of them use the `csr`
 environment, because they need a trap vector, `mtvec`, CSR reads and
-`mret`-free trap handling.
+`mret`-free trap handling; `local/smode_csr` uses the **`smode`**
+environment, because it runs in S mode and needs the strict trap vector;
+`local/mstatus_warl` uses the `csr` environment, because it is an M-mode
+case.
+
+## The supervisor-level corpus (v0.38 · S mode)
+
+Three upstream rows and two of our own — all five built with the **`smode`**
+environment except `local/mstatus_warl`, which is an M-mode case.
+
+| row | env | what it pins |
+| --- | --- | --- |
+| `rv32si/sbreak` | `smode` | an S-mode `sbreak` traps with cause 3 and is **delegated** to `stvec` |
+| `rv32si/scall` | `smode` | the `sret` lands in **U mode** ⇒ the `scall`'s cause is 8 ⇒ ⇒ **this row is the only judge of where `sret` lands** |
+| `rv32si/csr` | `smode` | the S-mode CSR instructions (`sscratch` and friends) behave as the reference side does |
+| `local/smode_csr` | `smode` | the S-mode CSR set, the per-level accessibility rule, the delegation routing, and where `sret` lands |
+| `local/mstatus_warl` | `csr` | `mstatus.MPP`'s WARL semantics |
+
+⚠️ **The reference side passes all five** (measured with
+`spike --isa=rv32imc_zicsr_zicclsm_zifencei_zicntr -m2147479552:4096,2147483648:4194304`,
+each case in its own ELF, exit code 0).
+
+⚠️ **`rv32si/scall` is the row that only the `smode` environment can judge.**
+Under the `csr` environment it is a **false green** (see *The `smode`
+environment* above): a `sret` that wrongly lands in S mode produces cause 9,
+which the `csr` trap vector reports as PASS ⇒ ⇒ both sides report PASS.
+
+⚠️ **The other three `rv32si` cases stay out**, each for its own reason
+(the rows are in *Cases that are not in the corpus* above):
+
+| case | why it stays out |
+| --- | --- |
+| `rv32si/dirty` | it does not even **assemble** — it needs `SATP_MODE` / `SATP_MODE_SV32` / `DRAM_BASE` ⇒ ⇒ **paging** ⇒ ⇒ and paging is not comparable anyway (the reference side has Sv32, the platform has Bare) |
+| `rv32si/ma_fetch` | it compares the **misaligned-instruction trap** (cause 0) ⇒ ⇒ the platform's `IALIGN` behaviour (the `misa.C` bit) and the S-mode delegation of cause 0 have to match the reference side's exactly ⇒ ⇒ not comparable yet.  ⚠️ the reference side **passes** it under `smode` (measured) ⇒ ⇒ promotion candidate |
+| `rv32si/wfi` | it needs **S-level interrupts** — `sie` / `sip` written from S mode (gated by `mideleg`) and a `wfi` that behaves like the reference side's ⇒ ⇒ not comparable yet.  ⚠️ the reference side **passes** it under `smode` (measured) |
+
+### `local/smode_csr` — the failure-number table
+
+The case reports **which** invariant broke through the `tohost` exit code:
+
+| verdict | meaning |
+| --- | --- |
+| `PASS` | every assertion held |
+| `FAIL 1` | `sscratch` did not read back what was written |
+| `FAIL 2` | `stvec` did not read back what was written, or its MODE field was not legalised |
+| `FAIL 3` | `sepc`'s low bit was not masked off (IALIGN is 32) |
+| `FAIL 4` | `scause` / `stval` did not read back what was written |
+| `FAIL 5` | `sstatus` did not take the reference side's guest write mask — the low byte after writing `0xFFFFFFFF` is not `0x22`, or `SPP` did not land |
+| `FAIL 6` | reading an M-mode CSR in S mode did not trap with cause 2 **on `stvec`** |
+| `FAIL 7` | writing an M-mode CSR in S mode did not trap with cause 2 **on `stvec`** |
+| `FAIL 8` | reading an unimplemented CSR in S mode did not trap with cause 2 |
+| `FAIL 9` | the delegation bit did not decide the trap entry (or an unexpected trap reached `mtvec`) |
+| `FAIL 10` | `sret` did not land in U mode |
+| `FAIL 11` | writing `sstatus.SPP` on its own did not leave exactly `0x0000_0100` |
+| `FAIL 12` | the `sstatus` **read view** does not show `SD` (once `mstatus.FS` is dirty) |
+
+⚠️ **Every trap-shaped assertion also checks that a trap really happened**
+(a flag the handler sets), so a platform that does **not** trap is caught
+too — "no trap" can never be mistaken for "pass".
+
+⚠️ **Checks 5, 11 and 12 are written against the reference side's
+*untruncated* measurement** (`0x800C_6122` / `0x0000_0100` / `0x800D_E162`).
+The first round's "write mask `0x22`" and "read view `0x122`" were the
+**low byte** of those aggregates, observed through the HTIF exit code (a
+POSIX exit code is 8 bits) ⇒ ⇒ the corpus must not repeat them.
+
+### `local/mstatus_warl` — the failure-number table
+
+| verdict | meaning |
+| --- | --- |
+| `PASS` | every assertion held |
+| `FAIL 3` | `SIE` was **lost** ⇒ ⇒ the whole write was discarded |
+| `FAIL 4` | the `MPP` field did **not** legalise to 0 (it kept the old value, or it took the reserved value as written) |
+| `FAIL 5` | the **control group** broke (a legal `MPP` value was not taken ⇒ ⇒ the field is simply read-only) |
+
+### Known deviations — measured on the reference side
+
+⚠️ These are places where the **reference side** and the **platform** do
+**not** agree (or cannot be compared at all).  They are registered here so
+that nobody reads the corpus's green rows as "the platform matches the
+reference side in these particulars".
+
+⚠️ **All the numbers below are the reference side's, measured without
+truncation.**  The first round's numbers came back through the HTIF **exit
+code**, and a POSIX exit code is **8 bits** ⇒ ⇒ a 32-bit value was only ever
+seen as its **low byte** ⇒ ⇒ "the write mask is `0x22`" was really "the
+aggregate value's low byte is `0x22`", and "the read view is `0x122`" was
+really "the aggregate value's low 16 bits".  ⇒ ⇒ **a 32-bit quantity must
+not be observed through one 8-bit channel.**
+
+| # | what | reference side (measured, untruncated) | platform |
+| --- | --- | --- | --- |
+| 1 | **`sstatus`'s guest write mask** | writing `0xFFFFFFFF` reads back **`0x800C_6122`**; writing `0x100` reads back **`0x0000_0100`** ⇒ ⇒ **S mode can write `sstatus.SPP`** — the privileged spec says `SPP` is writable in **M** mode only ⇒ ⇒ the reference side is the **wider** one here | the platform **aligns with the reference side** (guest write mask **`0x804C_61A2`**) ⇒ ⇒ this is **not** a deviation any more; it is a **deliberate divergence from the privileged spec**, and it is the reason `local/smode_csr` check 5 and check 11 exist |
+| 2 | **`sstatus`'s read view** | the view carries `SIE` / `SPIE` / `SPP` / `FS` / `XS` / `SUM` / `MXR` / `UBE` / **`SD`** ⇒ ⇒ measured **`0x800D_E162`** ⇒ ⇒ **`SD` is visible from S mode** | the platform **aligns with the reference side** (view mask **`0x800D_E162`**) ⇒ ⇒ again a deliberate divergence from the spec's narrower "S-mode visible field set"; `local/smode_csr` check 12 pins `SD` |
+| 3 | **`mstatus.MPP` with the reserved value 2** | the field is **legalised to 0** — measured for the old values 0, 1 **and** 3 ⇒ ⇒ the full read-back is **`0x0000_0002`** ⇒ ⇒ "legalised" and "kept the old value" are only distinguishable when the old value is not 0 | the platform **aligns with the reference side** (`mstatus_warl` legalises the reserved value to 0) ⇒ ⇒ **not** a deviation any more ⇒ ⇒ `local/mstatus_warl` is the row that pins it |
+| 4 | **`medeleg`'s write mask** | the legal bit set is **`0x0008_B3FE`** (per-bit WARL) ⇒ ⇒ writing `0xFFFFFFFF` reads back `0x0008_B3FE`, writing `0xFFFF` reads back `0x0000_B3FE`, writing `0xB109` reads back **`0xB108`** ⇒ ⇒ **bit 0** (misaligned instruction fetch) is **not** delegable | the platform applies the **same** legal-bit mask ⇒ ⇒ **both sides drop bit 0** ⇒ ⇒ the `smode` environment's `0xB10D` becomes `0xB10C` on **both** sides ⇒ ⇒ **consistent** ⇒ ⇒ not a deviation, but a fact worth writing down |
+| 5 | **`satp`** | the reference side has **Sv32** ⇒ ⇒ `satp` is **not comparable** | the platform supports **Bare** only ⇒ ⇒ `satp` does not enter the corpus |
+
+⚠️ **Rows 1 and 2 are deviations from the *privileged spec*, not from the
+reference side.**  The platform follows the reference side here, because the
+reference side is the oracle the corpus compares against ⇒ ⇒ the corpus's
+assertions (checks 5, 11 and 12 of `local/smode_csr`) are written against
+the **reference side's measured values** ⇒ ⇒ a platform that still follows
+the old `0x22` / `0x122` masks reports **FAIL 5** / **FAIL 11** / **FAIL 12**
+⇒ ⇒ which is the point: a divergence nobody watches is still a divergence.
+
+⚠️ **`mstatus.MPP` is no longer a deviation.**  The first round recorded it
+as one ("the platform keeps the old value, the reference side legalises to
+0"); the platform has been brought in line ⇒ ⇒ the row is **gone** from this
+table, and `local/mstatus_warl` is the row that keeps it honest.
 
 ## The `csr` environment's `INIT_PMP` comment is stale — and cannot be fixed
 
@@ -520,6 +702,7 @@ main test (STAGE-21 fact F21).
    `env` variant:
    ```
    rv32mi scall rv32i_zicsr_zifencei active csr
+   rv32si scall rv32i_zicsr_zifencei active smode
    rv32ui add  rv32i_zifencei        active
    ```
    Use `pending` for anything M-13 does not implement yet — a `pending`
@@ -530,7 +713,9 @@ main test (STAGE-21 fact F21).
    wrong environment silently.
 2. Run `tools/golden-run.sh --filter <suite/test>`.
 3. Machine-level cases need the `csr` environment; the supervisor-level
-   ones need S-mode, which the platform does not have (**D-94**).
+   ones need the **`smode`** environment (S mode landed in v0.38, **D-94**
+   closed) ⇒ ⇒ a supervisor-level case built with `csr` would be a **false
+   green**, so the `smode` variant is not optional there.
 4. A case that upstream riscv-tests does not have goes into the
    `local` suite: put the source in `tests/golden/local/<test>.S` and
    write the row as `local <test> <march> active <env>`.
