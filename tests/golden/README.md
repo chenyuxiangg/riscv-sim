@@ -441,9 +441,11 @@ simply has no case for them.  Those live in the `local` suite:
 | `local/pmp_deny` | `tests/golden/local/pmp_deny.S` | **PMP denies a store to a mapped address**: with `mstatus.MPRV = 1`, entry 0 (NAPOT, 4 KiB at `0x80040000`, **no permissions**) matches ⇒ the store traps with `mcause = 7` and `mtval = 0x80040000` |
 | `local/smode_csr` | `tests/golden/local/smode_csr.S` | the **S-mode** CSR set and their WARL rules, the **per-level accessibility** rule (an M-mode or unimplemented CSR in S mode ⇒ illegal instruction), the **delegation routing** (`medeleg`'s bit 2 decides which entry the trap lands on), and where **`sret` lands** |
 | `local/mstatus_warl` | `tests/golden/local/mstatus_warl.S` | `mstatus.MPP` is WARL: writing the **reserved** value 2 **legalises the field to 0** while the rest of the same write lands normally |
+| `local/pmp_lock_tor` | `tests/golden/local/pmp_lock_tor.S` | a **locked** (`L` = 1) **TOR** PMP entry **freezes the previous entry's `pmpaddr`** — the write is dropped and the old value reads back (ledger D-152) |
 
-The corpus is **74** cases now (it was 69 before the v0.38 supervisor batch:
-three upstream `rv32si/*` rows and two new `local` rows).
+The corpus is **75** cases now (it was 69 before the v0.38 supervisor batch:
+three upstream `rv32si/*` rows and two new `local` rows; the `local` suite
+grew by one more with `local/pmp_lock_tor`).
 
 ### `pmp_deny` — PMP must deny a store to an address that **is** mapped
 
@@ -511,6 +513,85 @@ would then fail for the wrong reason.  (The `pmpcfg` byte layout itself
 — `L` = bit 7, `A` = bits 4:3, `X` = bit 2, `W` = bit 1, `R` = bit 0 —
 matches upstream's `env/encoding.h`, so that file needs no change.)
 
+### `pmp_lock_tor` — a locked TOR entry freezes the previous entry's `pmpaddr`
+
+The RISC-V privileged spec (§3.7.6) says that setting `L` in a `pmpcfg`
+entry makes that entry read-only **and**, when the locked entry's `A` field
+is **TOR**, it also freezes the `pmpaddr` register of the **preceding**
+entry.  The platform implements this (`m13_iss/pmp.rs` →
+`legalize_write`), but until this row existed it had **never been measured
+against the reference side** ⇒ ⇒ ledger **D-152**.
+
+⇒ ⇒ **This row is the measurement.**  It is `active`, so the harness runs
+the very same ELF on both sides and compares the two exit codes ⇒ ⇒ if the
+reference side disagrees, the row goes **red** — that is a **finding**,
+not a defect of the case.
+
+**The measured result: the reference side freezes too.**  Both sides read
+`pmpaddr2` back as **`0x1400_0400`** after a write of `0x1400_0c00` into a
+`pmpaddr` whose *next* entry is a locked TOR entry ⇒ ⇒ the platform and the
+reference side **agree** ⇒ ⇒ the behaviour is now pinned by the default
+gate, and the row is green on both sides.
+
+The case is **one** case with **two** scenarios in the **same** `pmpcfg0`
+register, because a locked entry's `pmpcfg` byte is read-only ⇒ ⇒ it can
+never be unlocked ⇒ ⇒ the frozen scenario and the unlocked control
+**cannot share an entry**:
+
+| entry | mode | `pmpcfg0` byte | `pmpaddr` | what it is for |
+| --- | --- | --- | --- | --- |
+| 0 | NAPOT, `R`+`W`+`X`, not locked | `0x1f` | `0x7fffffff` ⇒ NAPOT over `[0x0000_0000, 2^34)` | the **permit-all** entry — it keeps the access path permissive on both sides |
+| 1 | OFF | `0x00` | — | — |
+| 2 | TOR, **not** locked | `0x08` | `pmpaddr1 = 0x1400_0000`, `pmpaddr2 = 0x1400_0400` | the **control** — its predecessor's `pmpaddr` must still take a written value |
+| 3 | TOR, **locked** | `0x88` | `pmpaddr3 = 0x1400_0800` | the **freezing** entry — it freezes `pmpaddr2` |
+
+⇒ ⇒ `pmpcfg0` = **`0x8808_001f`**.
+
+⚠️ **The control is mandatory.**  Without it, "the value was frozen" and
+"the write was **ignored**" are the **same observation** ⇒ ⇒ a platform
+that dropped every `pmpaddr` write would be green too ⇒ ⇒ a false green.
+The control here is entry 2: a **TOR** entry that is **not** locked ⇒ ⇒
+`pmpaddr1` must still take a written value, **even though** a locked
+entry exists elsewhere in the same register.
+
+⚠️ **Entry 0 stays the permit-all NAPOT on purpose.**  The verdict travels
+through an `ecall` → trap vector → **`tohost` store**, and the `tohost`
+word sits at **`0x8000_1000`** (`tests/golden/env/link.ld`).  Entry 0 is
+the **lowest-numbered** entry and matches **every** address ⇒ ⇒ it decides
+every access ⇒ ⇒ it permits it ⇒ ⇒ the verdict can always be written.
+The two *other* ranges are far away anyway — entry 2 covers
+`[0x5000_0000, 0x5000_1000)` and the locked entry 3 covers
+`[0x5000_1000, 0x5000_2000)` ⇒ ⇒ neither covers the code at `0x8000_0000`
+nor the `tohost` word ⇒ ⇒ **the locked range cannot swallow the program
+or its verdict**.  The case is about **CSR write behaviour**, not about
+access control ⇒ ⇒ the access path is deliberately kept boring, so the
+*only* thing the two sides can disagree about is the freeze.
+
+⚠️ **`mstatus.MPRV` is not set.**  With `MPRV` = 0 an M-mode load or
+store bypasses PMP ⇒ ⇒ the verdict write is safe by construction.  (This
+is *not* the model of `local/pmp_deny.S`, which **does** set `MPRV` and
+therefore has to clear it on every verdict path.)
+
+⚠️ **The failure modes carry distinct numbers**, so a red row says *which*
+invariant broke:
+
+| verdict | meaning |
+| --- | --- |
+| `PASS` | both sides agree — the write to `pmpaddr2` was frozen |
+| `FAIL 3` | the **frozen** value was **not** frozen: the write to `pmpaddr2` landed although entry 3 is a locked TOR entry |
+| `FAIL 4` | the **control**'s write did **not** land: `pmpaddr1` (whose *next* entry, entry 2, is a TOR entry but **not** locked) did not take the written value ⇒ ⇒ the write is frozen even though it must not be |
+| `FAIL 5` | the **control group** broke: a `pmpaddr` written while **nothing** was locked did not read back ⇒ ⇒ the case is not alive ⇒ ⇒ every other verdict would be meaningless |
+| `FAIL 6` | the `pmpcfg0` read-back did not match ⇒ ⇒ the lock never took effect ⇒ ⇒ the frozen scenario was not actually exercised |
+
+⚠️ **The row has discriminating power — measured, not asserted.**  Two
+mutations of the platform's freeze rule were applied one at a time (and
+then reverted byte-for-byte), and each one turns the row **red**:
+
+| mutation | Spike | the platform | verdict |
+| --- | --- | --- | --- |
+| the freeze is **disabled** | `PASS` | **`FAIL 3`** | mismatch ⇒ ⇒ the frozen scenario is what carries the row |
+| the freeze **drops the "the next entry is locked" condition** | `PASS` | **`FAIL 4`** | mismatch ⇒ ⇒ **the control** is what carries that half |
+
 The harness resolves a row's source in this order:
 
 1. `$RISCV_TESTS_DIR/isa/<suite>/<test>.S` — the upstream tree (every
@@ -537,8 +618,8 @@ exactly the state the platform was in before ledger **D-99** was
 closed (the bus error was propagated verbatim and the guest's handler
 never ran).
 
-All **seven** `local` cases are **self-contained** (they include no
-riscv-tests source, like `canary/fail_3.S`).  Five of them use the `csr`
+All **eight** `local` cases are **self-contained** (they include no
+riscv-tests source, like `canary/fail_3.S`).  Six of them use the `csr`
 environment, because they need a trap vector, `mtvec`, CSR reads and
 `mret`-free trap handling; `local/smode_csr` uses the **`smode`**
 environment, because it runs in S mode and needs the strict trap vector;

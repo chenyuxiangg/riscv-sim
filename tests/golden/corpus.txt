@@ -145,7 +145,8 @@ rv32mi sw-misaligned rv32i_zicsr_zifencei active csr
 # store ⇒ mcause 7, mtval = the faulting address) instead of aborting
 # the run — ledger D-99, STAGE-7 adjudication G / H — and a **PMP
 # denial** must trap on an address that **is** mapped — ledger D-94,
-# STAGE-21 adjudication L.
+# STAGE-21 adjudication L — and a **locked TOR PMP entry freezes the
+# previous entry's `pmpaddr`** — ledger D-152.
 #
 # ⚠️ The判据 is the **guest's own check** of mcause / mtval / mepc: the
 # guest writes PASS only when all three are exactly right, so "both
@@ -299,4 +300,28 @@ local smode_csr rv32i_zicsr_zifencei active smode
 # exactly what `pmp_deny.S` does too.
 local mstatus_warl rv32i_zicsr_zifencei active csr
 #
-# With these five rows the corpus grows from **69** to **74** cases.
+# `pmp_lock_tor` — a **locked** (`L` = 1) **TOR** PMP entry **freezes the
+# previous entry's `pmpaddr`** (privileged spec §3.7.6: "if the locked
+# entry's `A` field is set to TOR, the `pmpaddr` register of the preceding
+# entry is also frozen") ⇒ ⇒ the write is silently dropped and the **old**
+# value reads back.  The platform implements this per the spec, but it had
+# **never been measured against the reference side** ⇒ ⇒ this row **is**
+# that measurement: it is `active`, so the harness runs it on **both** sides
+# and compares the two exit codes ⇒ ⇒ a disagreement is a **red row**, i.e.
+# a finding about the reference side, not a defect of the case.  Ledger
+# D-152.
+#
+# ⚠️ The case carries its **mandatory control** in the same register: entry
+# 2 is a TOR entry that is **not** locked ⇒ ⇒ its predecessor's `pmpaddr`
+# must still take a written value ⇒ ⇒ "the value was frozen" and "the write
+# was ignored" are told apart ⇒ ⇒ without it, a platform that drops every
+# `pmpaddr` write would be green too.
+#
+# ⚠️ Entry 0 stays the **permit-all** NAPOT entry ⇒ ⇒ the verdict store to
+# `tohost` (`0x8000_1000`) can never be denied by the locked entry ⇒ ⇒ the
+# row measures the **CSR write behaviour** only, not the access path (that
+# is `local/pmp_deny`'s job).
+local pmp_lock_tor rv32i_zicsr_zifencei active csr
+#
+# With these five rows the corpus grows from **69** to **74** cases, and
+# with this one from **74** to **75**.
