@@ -31,7 +31,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use riscv_sim_contract::csr::{
-    pending_lines_to_mip_mask, CSR_IRQ_CLEAR, CSR_MIE, CSR_MIP, CSR_MSTATUS,
+    irq_clear_mask_targets, pending_lines_to_mip_mask, CSR_IRQ_CLEAR, CSR_MIE, CSR_MIP, CSR_MSTATUS,
 };
 use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_01_INVALID_REGISTER_INDEX, E_ENG_03_NO_PROGRESS,
@@ -49,7 +49,7 @@ use crate::m12_engine::{
 use crate::m13_iss::csr::{csr_read, csr_read_with_time, csr_write};
 use crate::m13_iss::{enter_trap, write_gpr, Iss, StepOutcome};
 use crate::m14_bus::{AccessDir, Bus, BusWidth};
-use crate::m16_interrupt::{InterruptPort, PendingIntr, MAX_MASKABLE_LINE};
+use crate::m16_interrupt::{InterruptPort, PendingIntr};
 
 /// 「中断控制器正被占用」的场景码（`INT` 族）。
 ///
@@ -343,15 +343,17 @@ impl<'a> IssExecutor<'a> {
     ///
     /// 掩码的 bit L = 清除 line L（平台自定义 CSR `irq_clear` 的口径）。
     ///
+    /// ⚠️ **判据的唯一落点在契约层**（台账 **D-127**）⇒ ⇒ 这里**直接调**
+    ///   契约层的 [`irq_clear_mask_targets`] ⇒ ⇒ 「一条约束一个落点」
+    ///   ⇒ ⇒ 契约层与内核**不会各写一份**而漂移（v0.42 批统筹方收敛）。
+    ///
     /// ⚠️ **写两次同一个值不会丢清除请求**：清除的判据是「这条指令**写了**
     /// `irq_clear`」，**不是**「值变了」（STAGE-4 §4 接缝 #4；v0.19 检视轮
     /// **F-1**）—— guest 的 handler 每次都写**同一个**掩码，若按「值变了」
     /// 判定，**第二次**就会被静默丢弃 ⇒ 那条线被单级防护**永久堵死**。
     fn clear_lines_by_mask(&mut self, mask: u32) {
-        for line in 0..=MAX_MASKABLE_LINE {
-            if mask & (1u32 << line) != 0 {
-                self.intc.clear(line);
-            }
+        for line in irq_clear_mask_targets(mask) {
+            self.intc.clear(line);
         }
     }
 
