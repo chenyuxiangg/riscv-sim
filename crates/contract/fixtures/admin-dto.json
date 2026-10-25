@@ -1,0 +1,28 @@
+{
+  "logs_event": {
+    "AdminLogs": {
+      "entries": [
+        {
+          "time_virt_ps": "1000",
+          "time_host_ms": "7",
+          "session_id": 0,
+          "level": "info",
+          "ctx": "m21-logging",
+          "err_code": null,
+          "msg": "hello",
+          "truncated": false
+        }
+      ]
+    }
+  },
+  "diag_event": {
+    "AdminDiag": {
+      "diag": {
+        "err_code": null,
+        "snapshot_summary": "no snapshot",
+        "input_seq_tail": ["1", "2"],
+        "host_clock_available": true
+      }
+    }
+  }
+}

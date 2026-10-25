@@ -2504,13 +2504,17 @@ mod tests {
     use crate::protocol::{CommandPayload, EventPayload, MemoryMapOp};
 
     /// **STAGE-16 A-1** — the **contract envelope**'s schema version is
-    /// `7`.
+    /// pinned to a **literal** ⇒ the constant cannot vouch for itself.
     ///
-    /// ⚠️ Asserted against the **literal** `7`, not against the constant
+    /// ⚠️ Asserted against the **literal**, not against the constant
     /// it also defines ⇒ the constant cannot vouch for itself.
+    ///
+    /// ⚠️ **v0.44** (STAGE-29 · 裁决 A) moved the envelope version
+    /// **7 → 8** ⇒ ⇒ the literal follows ⇒ ⇒ the *name* follows too
+    /// ⇒ ⇒ a name that still said "seven" would be a lie.
     #[test]
-    fn s16_a1_the_contract_schema_version_is_seven() {
-        assert_eq!(crate::SCHEMA_VERSION, 7);
+    fn s16_a1_the_contract_schema_version_is_eight() {
+        assert_eq!(crate::SCHEMA_VERSION, 8);
     }
 
     /// **STAGE-16 A-2** — the **description format**'s version is still
@@ -3327,19 +3331,26 @@ mod tests {
     }
 
     /// **STAGE-19 A-6** — the **rule set**'s version is `3` and the
-    /// other two numbers did **not** move.
+    /// **description format**'s version did **not** move.
     ///
     /// ⚠️ Asserted against the **literals**, not against the constants
     /// they define ⇒ a constant cannot vouch for itself.
     ///
     /// ⚠️ **Why only the rule set moves**: the rule set was **tightened**
     /// (two more rules) ⇒ the **shape** did not change (one optional
-    /// field with a default) ⇒ `PLATFORM_SCHEMA_VERSION` stays **1** and
-    /// the contract envelope is untouched ⇒ `SCHEMA_VERSION` stays **7**.
+    /// field with a default) ⇒ `PLATFORM_SCHEMA_VERSION` stays **1** ⇒ ⇒
+    /// **every board stored by v0.30 (D-143) stays valid**.
+    ///
+    /// ⚠️ **v0.44** (STAGE-29 · 裁决 A) moved the **contract envelope**'s
+    /// version on purpose (the admin channel's reply side is a **wire
+    /// shape** ⇒ ⇒ it must be versioned) ⇒ ⇒ the old wording ("the
+    /// **other two** versions are untouched") would be a lie ⇒ ⇒ this
+    /// test now pins the two versions that **did** stay, and the
+    /// envelope version is pinned by
+    /// `protocol::tests::the_schema_version_is_eight`.
     #[test]
-    fn s19_a6_the_rules_version_is_three_and_the_other_two_versions_are_untouched() {
+    fn s19_a6_the_rules_version_is_three_and_the_description_version_is_still_one() {
         assert_eq!(PLATFORM_RULES_VERSION, 3);
-        assert_eq!(crate::SCHEMA_VERSION, 7);
         assert_eq!(PLATFORM_SCHEMA_VERSION, 1);
     }
 

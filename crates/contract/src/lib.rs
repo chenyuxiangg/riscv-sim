@@ -118,6 +118,7 @@
 // 2026-10-19 decision: workspace `missing_docs = "allow"` until each
 // public item is documented, then re-tighten to `deny`.
 
+pub mod admin;
 pub mod csr;
 pub mod error;
 pub mod model;
@@ -203,4 +204,21 @@ pub mod snapshot;
 ///   variant `WaveformDelta` → `WaveformHistory` (D-34);
 /// - `ErrorFamily::Protocol` (`"PROTO"`) — the family the LLD's
 ///   `E_PROTO-01`..`E_PROTO-08` codes belong to.
-pub const SCHEMA_VERSION: u32 = 7;
+///
+/// **v8** (contract v8 — the **admin channel**):
+/// - new DTOs [`admin::LogEntryDto`] and [`admin::AdminDiagDto`] — the
+///   cross-process shapes of the kernel's log entry (M-21) and of the
+///   health-management system's diagnostic kit (M-22). ⚠️ **Shapes
+///   only**: the conversions live in the kernel crate ⇒ ⇒ the contract
+///   layer does not depend on the kernel;
+/// - new events `EventPayload::AdminLogs { entries }` and
+///   `EventPayload::AdminDiag { diag }` — the **reply side** of the
+///   admin channel, which the command side (`CommandPayload::Admin`)
+///   never had (debt ledger **D-129**);
+/// - new code [`error::E_CTX_05_ADMIN_CHANNEL_DISABLED`] — the one
+///   scenario code **both sides of the process boundary** name ⇒ ⇒ it
+///   lives here so that there is exactly **one** spelling of it;
+/// - ⚠️ **no other shape changed** in v8: no command was added (the
+///   `Admin` command already existed), no error family was added
+///   (`CTX` was already declared), no snapshot segment moved.
+pub const SCHEMA_VERSION: u32 = 8;

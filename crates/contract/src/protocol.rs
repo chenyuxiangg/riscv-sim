@@ -660,6 +660,32 @@ pub enum EventPayload {
         /// 丢更新**看得见**（`E_PLT_13`）。
         revision: u64,
     },
+    /// 管理通道：导出的**日志条目**（回复 `CommandPayload::Admin { op:
+    /// AdminOp::DrainLogs }`）。
+    ///
+    /// ⚠ **v8 新增**（STAGE-29 · D-129）⇒ ⇒ 在此之前 `Admin` 命令
+    /// **只有命令侧、没有回复侧** ⇒ ⇒ 管理员通道接不上。
+    ///
+    /// ⚠ 条目的形状是 [`crate::admin::LogEntryDto`] ⇒ ⇒ 转换住在
+    /// **M-21**（日志环的拥有者）⇒ ⇒ 契约层不依赖内核。
+    ///
+    /// ⚠ **有上界**：一次导出**不是**整个日志环 ⇒ ⇒ 超出部分**明确
+    /// 告知被截断**（**不是静默**）。
+    AdminLogs {
+        /// The exported log entries, in virtual-time order.
+        entries: Vec<crate::admin::LogEntryDto>,
+    },
+    /// 管理通道：**管理员诊断包**（回复 `CommandPayload::Admin { op:
+    /// AdminOp::Custom("diag") }`）。
+    ///
+    /// ⚠ **v8 新增**（STAGE-29 · D-129）。
+    ///
+    /// ⚠ 形状是 [`crate::admin::AdminDiagDto`] ⇒ ⇒ 逐字镜像 M-22 的
+    /// `DiagnosticKit`（**不多不少**）⇒ ⇒ 转换住在 **M-22**。
+    AdminDiag {
+        /// The diagnostic kit.
+        diag: crate::admin::AdminDiagDto,
+    },
 }
 
 impl Default for EventPayload {
@@ -719,9 +745,15 @@ mod tests {
     /// **v7** adds the board delta / unload / budget split
     /// (`UnloadProject` + `PatchMemoryMap` + `expected_revision` + the
     /// `MemoryMap` event's two new fields).
+    ///
+    /// **v8** adds the **admin channel**'s reply side
+    /// (`EventPayload::AdminLogs` + `EventPayload::AdminDiag` + the
+    /// `admin::LogEntryDto` / `admin::AdminDiagDto` DTOs) and the one
+    /// cross-boundary scenario code `E_CTX-05`
+    /// (STAGE-29 §2.1..§2.3).
     #[test]
-    fn the_schema_version_is_seven() {
-        assert_eq!(crate::SCHEMA_VERSION, 7);
+    fn the_schema_version_is_eight() {
+        assert_eq!(crate::SCHEMA_VERSION, 8);
     }
 
     /// The three commands contract v2 adds (D-32 gaps 1, 2, 3).
@@ -851,10 +883,10 @@ mod tests {
     /// one the front end negotiates against.
     #[test]
     fn the_envelope_carries_the_current_schema_version() {
-        let msg = Message::command(7, CommandPayload::Nop);
+        let msg = Message::command(8, CommandPayload::Nop);
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
-        assert_eq!(json["schema_version"], 7);
+        assert_eq!(json["schema_version"], 8);
     }
 
     // -----------------------------------------------------------------
