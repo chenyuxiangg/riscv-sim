@@ -21,9 +21,17 @@
 1. **标记区**（D-124 ~）每行**必须**带标记，且标记 ∈ {`✅ **已闭环**`, `⏳ **未闭环**`}
 2. **历史行**（D-15 ~ D-123）每行**必须不带**标记
 3. **末列非空**的行**必须不带**标记
-4. **标记与正文不得自相矛盾**（标记区行）：标记说「未闭环」而正文写着「已闭环」（或反过来）
+4. **标记与正文不得自相矛盾**（标记区行）：
+   * 标记说「未闭环」而正文**断言**已闭环 ⇒ ⇒ 正文里出现 `CLOSURE_CLAIM_WORDS`
+     里的**任一**形态（`已闭环` / `批闭环`）⇒ ⇒ 报错里说清**命中的是哪一个形态**
+     并附**原文片段**
+   * 标记说「已闭环」而正文写着「未闭环」（**只查这一个形态** ⇒ ⇒ 不加词）
    ⇒ ⇒ 这条抓的是 **v0.33 批的「台账标记回填批」**那类**机械回填**留下的错
    （`4c5401c` 给 16 行统一插了 `⏳ **未闭环**`，**没逐行核状态** ⇒ ⇒ **D-124 被漏掉**）
+   ⇒ ⇒ ⚠️ **判据是实测出来的**（逐行扫真台账 29 行标记区正文）：`已闭环` 与 `批闭环`
+   两个形态各只出现在该出现的地方 ⇒ ⇒ 误伤 **0** 条 ⇒ ⇒ 而**只查「已闭环」抓不到
+   D-124 那个真错**（它的正文写的是「✅ v0.29 批闭环」、**没有「已」字**）⇒ ⇒
+   **这个检查必须抓得到它自己被造出来要抓的那个错**
 5. **每一个「标记区未闭环」的 ID 都必须出现在 §2.1 的候选清单里**
    ⇒ ⇒ 抓的是「**人维护的清单**悄悄漏了一条」⇒ ⇒ 「漏了」变成**门禁能红的事**
 6. **候选清单里列着的「标记区」项必须是未闭环的**
@@ -96,9 +104,23 @@ KIND_CANDIDATE_ALREADY_CLOSED = "候选清单列着已闭环项"
 #: **找不到候选清单块**的名字（⇒ ⇒ 断言 ⑤ / ⑥ 会**静默失效** ⇒ ⇒ 必须红）。
 KIND_CANDIDATE_BLOCK_MISSING = "找不到候选清单块"
 
-#: 正文里那两个**关键词**（**不含**标记的 `**` 与 emoji ⇒ ⇒ 只当「散文里自述的状态」看）。
-WORD_CLOSED = "已闭环"
+#: **反向**方向用的那个词（标记说「已闭环」而正文写着「未闭环」⇒ ⇒ 自相矛盾）。
+#: ⚠️ 这个方向**只查这一个形态** —— 实测真台账 29 行标记区正文里
+#: 「未闭环」出现 **0** 次 ⇒ ⇒ 放宽它只会**扩大误伤面**、没有价值 ⇒ ⇒ **不加词**。
 WORD_OPEN = "未闭环"
+
+#: **正向**方向用的**两个**形态：标记说「未闭环」而正文**断言**已闭环。
+#: ⚠️ 这两个形态是**实测**出来的（逐行扫真台账 29 行标记区正文）：
+#:   * `已闭环` —— D-144 的反例里引用的 `✅ **已闭环**`
+#:   * `批闭环` —— D-124 正文里的 `✅ v0.29 批闭环`（**没有「已」字**
+#:     ⇒ ⇒ 只查「已闭环」**抓不到** D-124 那个真错 ⇒ ⇒ 那个检查
+#:     **抓不到它自己被造出来要抓的那个错**）
+#: ⚠️ **不能**放宽成「含『闭环』」—— 那会**误伤 D-152** 的**条件句**
+#: 「本条**直接闭环**」（⇒ ⇒ 条件句**不是**断言）。
+#: ⚠️ 「批闭环」这个形态之所以安全：它是**批次 + 过去式**
+#: （`v0.29 批闭环` / `本批闭环`）⇒ ⇒ D-152 那句的主语是「本条」、
+#: **没有批次号**、且是**条件句** ⇒ ⇒ 实测真台账上「批闭环」只出现在 D-124 一行。
+CLOSURE_CLAIM_WORDS = ("已闭环", "批闭环")
 
 #: §1.3 的**小节标题**（`### 1.3 跨模块中低危`）。
 SECTION_HEADING_RE = re.compile(r"^#{2,6}\s+1\.3(?![0-9])")
@@ -174,6 +196,19 @@ class Failure:
     kind: str
     row: LedgerRow | None
     message: str
+
+
+def excerpt(body: str, word: str, span: int = 16) -> str:
+    """命中词前后各取一点 ⇒ 报错里能看出**是哪一句话**把它判死的。
+
+    ⚠️ 只用于**报错文案** ⇒ ⇒ 不参与任何判定 ⇒ ⇒ 截多截少都不影响红绿。
+    """
+    index = body.find(word)
+    if index < 0:
+        return ""
+    start = max(0, index - span)
+    end = min(len(body), index + len(word) + span)
+    return body[start:end].replace("\n", " ")
 
 
 def split_cells(line: str) -> list[str]:
@@ -432,16 +467,22 @@ def check_rows(rows: list[LedgerRow]) -> tuple[Report, list[Failure]]:
         # ---- 断言 ④：标记与正文不得自相矛盾（标记区行）----
         if zone == "标记区" and row.marker is not None:
             body = row.body
-            if row.marker == MARKER_OPEN and WORD_CLOSED in body:
-                failures.append(
-                    Failure(
-                        KIND_MARKER_CONTRADICTS_BODY,
-                        row,
-                        f"标记是「未闭环」而正文写着「{WORD_CLOSED}」"
-                        " ⇒ ⇒ 标记与正文自相矛盾 ⇒ ⇒ 核实这一行的真实状态",
+            if row.marker == MARKER_OPEN:
+                # 正向：标记说「未闭环」而正文**断言**已闭环 ⇒ ⇒ 命中**哪一个形态**
+                # 要在报错里说清（⇒ ⇒ 报错要能让人一眼看出**是哪句话**把它判死的）。
+                hit = next((word for word in CLOSURE_CLAIM_WORDS if word in body), None)
+                if hit is not None:
+                    failures.append(
+                        Failure(
+                            KIND_MARKER_CONTRADICTS_BODY,
+                            row,
+                            f"标记是「未闭环」而正文断言「{hit}」"
+                            f"（命中形态 = {hit}）⇒ 原文片段「…{excerpt(body, hit)}…」"
+                            " ⇒ ⇒ 标记与正文自相矛盾 ⇒ ⇒ 核实这一行的真实状态",
+                        )
                     )
-                )
             elif row.marker == MARKER_CLOSED and WORD_OPEN in body:
+                # 反向：⚠️ **只查「未闭环」这一个形态**（实测真台账 0 误伤）⇒ ⇒ 不加词。
                 failures.append(
                     Failure(
                         KIND_MARKER_CONTRADICTS_BODY,
@@ -505,12 +546,16 @@ def check_ledger(path: Path) -> int:
 #: ⇒ ⇒ 「切分口径对不对」**不是靠嘴说**，是**夹具逼出来的**。
 GOOD_EXPECTED_REPORT = Report(
     history_count=2,
-    marked_count=4,
-    closed_count=3,
+    marked_count=5,
+    closed_count=4,
     open_count=1,
 )
 
-#: 坏夹具的期望失败（**每种坏法各红一次** ⇒ ⇒ 证明脚本有判别力）。
+#: 坏夹具的期望失败（**每种坏法至少红一次** ⇒ ⇒ 证明脚本有判别力）。
+#:
+#: ⚠️ **断言 ④ 会红两次**（D-127 走「已闭环」那个形态、D-133 走「批闭环」那个形态）
+#: ⇒ ⇒ 所以这里比的是**集合**、条数另外用 `BAD_EXPECTED_FAILURE_COUNT` 钉住
+#: ⇒ ⇒ **不放松**「每种坏法都被覆盖」这件事。
 BAD_EXPECTED_KINDS = (
     KIND_MARKED_MISSING,
     KIND_HISTORY_HAS_MARKER,
@@ -519,6 +564,9 @@ BAD_EXPECTED_KINDS = (
     KIND_OPEN_ITEM_NOT_LISTED,
     KIND_CANDIDATE_ALREADY_CLOSED,
 )
+
+#: 坏夹具的期望失败**条数**（= 坏法行数 ⇒ ⇒ 断言 ④ 那两行各红一次）。
+BAD_EXPECTED_FAILURE_COUNT = 7
 
 
 def self_test() -> int:
@@ -558,10 +606,15 @@ def self_test() -> int:
     print_report(bad_path, bad_report, bad_failures)
     got_kinds = sorted(f.kind for f in bad_failures)
     want_kinds = sorted(BAD_EXPECTED_KINDS)
-    if got_kinds != want_kinds:
+    if set(got_kinds) != set(want_kinds):
         problems.append(
             "坏夹具的红集与期望不符："
             f"期望 {want_kinds}，实际 {got_kinds}"
+        )
+    if len(bad_failures) != BAD_EXPECTED_FAILURE_COUNT:
+        problems.append(
+            f"坏夹具的失败条数与期望不符："
+            f"期望 {BAD_EXPECTED_FAILURE_COUNT} 条，实际 {len(bad_failures)} 条"
         )
 
     if problems:
