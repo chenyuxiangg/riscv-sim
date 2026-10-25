@@ -277,7 +277,7 @@ pub fn mstatus_warl(new: u32) -> u32;
 | `crates/contract/src/csr.rs` | 全部常量 + `mstatus_warl` + `csr_is_implemented` + `csr_is_read_only`（**唯一**落点） |
 | `crates/kernel/src/m13_iss/csr.rs` | CSR 的读写路径（`medeleg` 的写**必须**过 `MEDELEG_WRITABLE_MASK`）、按级可访问性、伪 CSR `CSR_PRIV` 的读写保护、特权级的读写（`priv_get` / `priv_set`） |
 | `crates/kernel/src/m13_iss/executor.rs` | 特权指令（`mret` / `sret`）、CSR 指令的按级检查、陷阱入口的分级、**新解码 `Op::Sret`（`0x102`）** |
-| `crates/kernel/src/m13_iss/mod.rs` | 特权级状态的对外读��（`priv_get` / `priv_set`） |
+| `crates/kernel/src/m13_iss/mod.rs` | 特权级状态的对外读写（`priv_get` / `priv_set`） |
 | `crates/kernel/src/m11_symbol/render.rs` | `Op::Sret` 的**两处**渲染（反汇编文本 + 助记符） |
 | `tests/golden/env/smode/riscv_test.h` | 新 env 变体（**新**） |
 | `tests/golden/local/smode_csr.S` | 自包含判据语料（**新**） |
@@ -611,7 +611,7 @@ U 模式已实现 ⇒ ⇒ 前提满足 ⇒ ⇒ 另新增一条自包含判据 `l
 ### 订正 2 · §4.1 「新 env 的真正理由」——**不是「走不通」，是「假绿」**
 
 - **初稿原文**：「⇒ ⇒ **S 模式的判决必须是「直接写 `tohost`」** ⇒ ⇒ 与 `csr` env 的形状**不同** ⇒ ⇒ ⇒ **新开 `tests/golden/env/smode/riscv_test.h`**」
-- **依据**：**上游 `csr` env 的 M 级陷阱向量把 `CAUSE_USER_ECALL`(8) / `CAUSE_SUPERVISOR_ECALL`(9) / `CAUSE_MACHINE_ECALL`(11) 三种 `ecall` 一律当成「PASS」**（`trap_vector` 的三个 `beq`）。⇒ ⇒ 于��� **`rv32si/scall` 在 `sret` 错误地落在 S 模式时**：`ecall` 的 cause 是 **9** ⇒ ⇒ 落到 `mtvec` ⇒ ⇒ 被当成 PASS ⇒ ⇒ **两侧都报 PASS ⇒ ⇒ 这条语料的判别力为零**。⇒ ⇒ 而且**改陷阱向量也不够**：S 级处理器里的 `RVTEST_PASS` 又是一次 `ecall` ⇒ cause 9 ⇒ 又被当成 PASS ⇒ ⇒ **假绿照旧**。⇒ ⇒ **唯一能拆掉假绿的办法是「判决不��� `ecall`」** ⇒ ⇒ 即**直接写 `tohost`**。
+- **依据**：**上游 `csr` env 的 M 级陷阱向量把 `CAUSE_USER_ECALL`(8) / `CAUSE_SUPERVISOR_ECALL`(9) / `CAUSE_MACHINE_ECALL`(11) 三种 `ecall` 一律当成「PASS」**（`trap_vector` 的三个 `beq`）。⇒ ⇒ 于是 **`rv32si/scall` 在 `sret` 错误地落在 S 模式时**：`ecall` 的 cause 是 **9** ⇒ ⇒ 落到 `mtvec` ⇒ ⇒ 被当成 PASS ⇒ ⇒ **两侧都报 PASS ⇒ ⇒ 这条语料的判别力为零**。⇒ ⇒ 而且**改陷阱向量也不够**：S 级处理器里的 `RVTEST_PASS` 又是一次 `ecall` ⇒ cause 9 ⇒ 又被当成 PASS ⇒ ⇒ **假绿照旧**。⇒ ⇒ **唯一能拆掉假绿的办法是「判决不经 `ecall`」** ⇒ ⇒ 即**直接写 `tohost`**。
 - **已改成什么**：**新 env 的理由改成「假绿」** ⇒ ⇒ 新的 `smode` env 的 M 级陷阱向量**严格**：任何不是「客体预期的陷阱」都写**失败**判决 ⇒ ⇒ `cause 9` ⇒ ⇒ **红**。⇒ ⇒ 配合「直接写 `tohost`」⇒ ⇒ `rv32si/scall` 才真的能判别 `sret` 的落点。
 
 ### 订正 3 · §0.3 / §1.3 的「D-96 顺带闭环」——**机制要说清，否则会被当成空话**
