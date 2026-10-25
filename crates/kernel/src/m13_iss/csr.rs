@@ -58,8 +58,8 @@ use riscv_sim_contract::csr::{
     CSR_MHARTID_VALUE, CSR_MIDELEG, CSR_MISA, CSR_MISA_VALUE, CSR_MSTATUS, CSR_MTVAL, CSR_MTVEC,
     CSR_PRIV, CSR_SATP, CSR_SCAUSE, CSR_SCOUNTEREN, CSR_SEPC, CSR_SIE, CSR_SIP, CSR_SSCRATCH,
     CSR_SSTATUS, CSR_STVAL, CSR_STVEC, CSR_TIME, CSR_TIMEH, CSR_UCOUNTEREN, IRQ_BASE,
-    MEPC_ALIGN_MASK, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_SHIFT, MSTATUS_SIE_BIT,
-    MSTATUS_SPIE_BIT, MSTATUS_SPP_BIT, PRIV_M, PRIV_S, PRIV_U, SSTATUS_VIEW_MASK,
+    MEDELEG_WRITABLE_MASK, MEPC_ALIGN_MASK, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_SHIFT,
+    MSTATUS_SIE_BIT, MSTATUS_SPIE_BIT, MSTATUS_SPP_BIT, PRIV_M, PRIV_S, PRIV_U, SSTATUS_VIEW_MASK,
     SSTATUS_WARL_MASK,
 };
 use riscv_sim_contract::model::SimState;
@@ -145,7 +145,8 @@ pub(crate) fn csr_read(state: &SimState, csr: u16) -> u32 {
     // ⚠️ **`sstatus` 是 `mstatus` 的**位视图**，不是第二份存储（**F30**）：
     //    M 模式写 `sstatus`（`0x22`）⇒ S 模式读回 `0x22` ⇒ ⇒ 同一个字段。
     //
-    //    ⚠️ 视图掩码 `0x122`（`SIE` | `SPIE` | `SPP`）**不含 `SD`**（**F29**）。
+    //    ⚠️ 视图掩码（契约层的 `SSTATUS_VIEW_MASK` = **`0x800D_E162`**）
+    //    **含 `SD`**（实测 F39）⇒ ⇒ 「`FS` 变脏」这件事 S 模式**看得见**。
     if csr == CSR_SSTATUS {
         return file_value(state, CSR_MSTATUS) & SSTATUS_VIEW_MASK;
     }
@@ -220,11 +221,15 @@ pub(crate) fn csr_write(state: &mut SimState, csr: u16, value: u32) {
     // ⚠️ **`sstatus` 不是第二份存储**（**F30**）—— 客体的写落到 `mstatus`
     //    的对应位上 ⇒ ⇒ 同一个字段。
     //
-    //    ⚠️ **写掩码是客体的那一份**（`0x22` ⇒ 只有 `SIE` 与 `SPIE`，
-    //    **F8**）⇒ ⇒ **`SPP` 写不进去**（参考侧实测：`sstatus.SPP` 恒 0）。
+    //    ⚠️ **写掩码是契约层那一份**（`SSTATUS_WARL_MASK` = **`0x804C_61A2`**，
+    //    实测 F39）⇒ ⇒ **`SPP` 写得进去**（旧口径的 `0x22` 把它挡在外面
+    //    ⇒ ⇒ 那是**被 8 位退出码截断**的观测给出的**低字节**）。
+    //
+    //    ⚠️ **S / U 模式与 M 模式的写掩码相同**（实测 F39）⇒ ⇒ 参考侧
+    //    **不按特权裁剪** ⇒ ⇒ 这里**不**按级别分叉。
     //
     //    ⚠️ **旧值取自 `mstatus` 文件条目**（不是 `sstatus` 的读视图）⇒ ⇒
-    //    客体的一次 `csrs sstatus, x` **不会**把平台自己写进去的 `SPP`
+    //    客体的一次 `csrs sstatus, x` **不会**把平台自己写进去的位
     //    顺手清掉 ⇒ ⇒ 「客体写不到它」与「平台写得到它」两件事分开。
     if csr == CSR_SSTATUS {
         let old = file_value(state, CSR_MSTATUS);
@@ -260,13 +265,33 @@ pub(crate) fn csr_write_raw(state: &mut SimState, csr: u16, value: u32) {
 /// [`MEPC_ALIGN_MASK`]）—— 这里只**引用**，**不**另写一份字面量。
 ///
 /// ⚠️ **`mstatus` 走的是**函数**[`mstatus_warl`] 而不是掩码**（STAGE-22
-/// 裁决 C）：掩码表达不了「`MPP` 写保留值 2 ⇒ **该字段**保留旧值、同一次
-/// 写里的其它位照常落进去」（**F33**）⇒ ⇒ 「整次丢弃」会把 `SIE` 也吞掉。
+/// 裁决 C）：掩码表达不了「`MPP` 写保留值 2 ⇒ **合法化到 0**」这条语义
+/// （实测 F39）⇒ ⇒ 函数才表达得了 ⇒ ⇒ 旧口径的「保留旧值」与「整次丢弃」
+/// **两条都是错的** ⇒ ⇒ 都不是本平台的口径。
 fn apply_warl(state: &SimState, csr: u16, value: u32) -> u32 {
     match csr {
         // ⚠️ **`mstatus` 的 WARL 是函数**（`MPP` 的保留值语义）—— 见
         //    [`mstatus_warl`]。
-        CSR_MSTATUS => mstatus_warl(file_value(state, CSR_MSTATUS), value),
+        //
+        //    ⚠️ **签名是 `(new)`** —— 「`MPP` 写保留值 2 ⇒ **合法化到 0**」
+        //    这条语义**不依赖旧值** ⇒ ⇒ 旧值那个参数是多余的 ⇒ ⇒ 去掉。
+        //
+        // ⚠️ **`SD` 是推导位**（实测 F40）—— 它**不可直接写**，由 `FS` 与
+        //    `XS` 推出来 ⇒ ⇒ **推导落在契约层的 [`mstatus_warl`] 里**
+        //    ⇒ ⇒ 这里**只调它**、**不**自己再推一遍 ⇒ ⇒ 一个约束一个落点。
+        //
+        //    ⚠️ **为什么这条推导必须在**：guest 经 `sstatus` 把 `FS` 写成 3
+        //    之后，读回的 `sstatus` 里**必须带 `SD`** ⇒ ⇒ 否则与参考侧
+        //    **逐位不等**（黄金语料 `local/smode_csr` 的第 12 条检查会红）。
+        CSR_MSTATUS => mstatus_warl(value),
+        // ⚠️ **`medeleg` 的合法位集合**（实测 F40）—— **per-bit WARL** ⇒ ⇒
+        //    客体的写**必须**先过 [`MEDELEG_WRITABLE_MASK`] ⇒ ⇒ 否则本平台
+        //    会把「指令地址未对齐」（bit 0）也当成可委托 ⇒ ⇒ 与参考侧
+        //    **逐位不等**。
+        //
+        //    ⚠️ **这一条有独立落点**（自己的臂 + 自己的常量）⇒ ⇒ 不塞进
+        //    `mstatus_warl` 之类的地方。
+        CSR_MEDELEG => value & MEDELEG_WRITABLE_MASK,
         // ⚠️ **`mepc` / `sepc` 的用户写被 IALIGN 掩码** —— 与参考侧逐位一致
         // （实测：`csrw mepc, 0x1003` 读回 **0x1002**，即掩 `~1`；`sepc` 的
         // bit 0 恒 **0**，**F15**）。
@@ -381,12 +406,13 @@ pub fn priv_set(state: &mut SimState, level: u32) {
 
 /// The **platform's own** write to `mstatus`'s bits.
 ///
-/// ⚠️ 它**绕过客体的 `sstatus` 掩码**（`0x22`）⇒ ⇒ 陷阱入口与 `sret`
-/// **能**写 `SPP`（bit 8）与 `SPIE` ⇒ ⇒ 那就是 **F28**（委托陷阱之后
+/// ⚠️ 它**绕过客体的 `sstatus` 掩码** ⇒ ⇒ 陷阱入口与 `sret` **能**写
+/// `SPP`（bit 8）与 `SPIE` ⇒ ⇒ 那就是 **F28**（委托陷阱之后
 /// `sstatus.SPP` = **1** ⇒ `sret` 回到 **S 模式**）的实现方式。
 ///
-/// ⚠️ **客体的写走 [`csr_write`]** —— 它被 `0x22` 约束 ⇒ ⇒ 「平台写得到
-/// 它、客体写不到它」这两件事**分处两条路径** ⇒ ⇒ 不会互相覆盖。
+/// ⚠️ **客体的写走 [`csr_write`]** —— 它被契约层的 `SSTATUS_WARL_MASK`
+/// 约束 ⇒ ⇒ 「平台写」与「客体写」这两件事**分处两条路径** ⇒ ⇒ 不会互相
+/// 覆盖。
 pub(crate) fn mstatus_bits(state: &mut SimState, clear: u32, set: u32) {
     let old = file_value(state, CSR_MSTATUS);
     csr_write_raw(state, CSR_MSTATUS, (old & !clear) | set);
@@ -533,15 +559,15 @@ pub(crate) fn csr_zimm(raw: u32) -> u32 {
 /// The trap **target** for a vector table (`tvec`).
 ///
 /// ⚠️ **MODE 字段是 1 位**（**F13**：写 2 ⇒ 读 0；写 3 ⇒ 读 1）⇒ ⇒ 向量
-/// 模式的偏移 = `4 × (cause & 0x3)` ⇒ ⇒ **最多 4 项**（**不是** `0x7` ——
+/// 模式的偏移 = `4 × (cause & 0x7)` ⇒ ⇒ **最多 8 项**。
 ///
-/// 那只对 2 位的 MODE 字段成立）。
-///
-/// ⚠️ **两个向量表同口径** —— `mtvec` 与 `stvec` 走**这一个**函数。
+/// ⚠️ **口径是 `0x7`**（统筹方裁决）—— 既有 `mtvec` 实现用的就是 `0x7`
+/// ⇒ ⇒ 两个向量表**同口径** ⇒ ⇒ **零黄金回归**（语料的 env 用的是**直接**
+/// 模式 ⇒ 向量偏移那条路径根本不被语料走到）。
 fn trap_target(tvec: u32, cause: u32) -> u32 {
     let base = tvec & !0x3;
     if tvec & 0x1 != 0 {
-        base.wrapping_add(4 * (cause & 0x3))
+        base.wrapping_add(4 * (cause & 0x7))
     } else {
         base
     }
@@ -562,7 +588,7 @@ fn trap_target(tvec: u32, cause: u32) -> u32 {
 ///    for the duration of the handler; and `MPP := M` — the privilege
 ///    level the trap was taken from;
 /// 5. `state.pc := mtvec` — **direct** mode jumps to the base,
-///    **vectored** mode to `base + 4 × (cause & 0x3)`.
+///    **vectored** mode to `base + 4 × (cause & 0x7)`.
 ///
 /// Returns the **new PC** (the value written into [`SimState::pc`]),
 /// so the caller can report it without reading the state back.
@@ -591,6 +617,11 @@ pub fn enter_trap(state: &mut SimState, cause: u32, mtval: u32) -> u32 {
         return enter_machine_trap(state, cause, mtval, PRIV_M);
     }
     // S / U：查 `medeleg` 的委托位。
+    //
+    // ⚠️ **这条是规格的补齐**（统筹方裁决 (e)）—— STAGE-22 §3.3 的陷阱入口
+    // 表只写了 `medeleg[cause]`，**没有**说「cause 带 `IRQ_BASE` 高位时怎么
+    // 读那位」⇒ ⇒ 这里定死：**先剥掉高位**，再判 `cause < 64` ⇒ ⇒ 越界
+    // 一律**不委托**。
     //
     // ⚠️ **cause 可能是中断 cause**（带 `IRQ_BASE` 的高位）⇒ ⇒ 读位之前
     // **先剥掉高位** ⇒ ⇒ 并且 `medeleg` 只有 64 位 ⇒ ⇒ 越界一律**不委托**。
@@ -648,7 +679,7 @@ fn enter_machine_trap(state: &mut SimState, cause: u32, mtval: u32, from_level: 
     // ⇒ ⇒ 既有 M 模式语料**零回归**。
     priv_set(state, PRIV_M);
 
-    // 5. pc := mtvec (direct) or base + 4 × (cause & 0x3) (vectored).
+    // 5. pc := mtvec (direct) or base + 4 × (cause & 0x7) (vectored).
     let target = trap_target(file_value(state, CSR_MTVEC), cause);
     state.pc = target;
     target
@@ -657,7 +688,7 @@ fn enter_machine_trap(state: &mut SimState, cause: u32, mtval: u32, from_level: 
 /// The **S-level** trap entry —— 委托的陷阱落这里。
 ///
 /// ⚠️ **`sstatus` 的三个位走 `mstatus` 的原始位操作**（[`mstatus_bits`]）⇒
-/// ⇒ **不受客体的 `0x22` 掩码约束** ⇒ ⇒ `SPP` 能被写成 **1** ⇒ ⇒ 那就是
+/// ⇒ **不受客体的 `sstatus` 写掩码约束** ⇒ ⇒ `SPP` 能被写成 **1** ⇒ ⇒ 那就是
 /// **F28**。
 fn enter_supervisor_trap(state: &mut SimState, cause: u32, mtval: u32, from_level: u32) -> u32 {
     // 1. sepc := pc — **原始写**（与 `mepc` 同口径：精确的 PC）。
@@ -685,7 +716,7 @@ fn enter_supervisor_trap(state: &mut SimState, cause: u32, mtval: u32, from_leve
     // 5. 特权级 ← S（S 模式 CSR 从这里开始可见）。
     priv_set(state, PRIV_S);
 
-    // 6. pc := stvec (direct) or base + 4 × (cause & 0x3) (vectored).
+    // 6. pc := stvec (direct) or base + 4 × (cause & 0x7) (vectored).
     let target = trap_target(file_value(state, CSR_STVEC), cause);
     state.pc = target;
     target

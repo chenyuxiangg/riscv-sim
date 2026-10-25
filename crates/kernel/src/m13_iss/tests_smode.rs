@@ -4,7 +4,8 @@
 //!
 //! ## 判别力纪律
 //!
-//! 每条断言都用**架构字面量**（`0x22` / `0x122` / `cause 2` / `MPP = 1` …），
+//! 每条断言都用**架构字面量**（`0x804C_61A2` / `0x800D_E162` / `0x0008_B3FE`
+//! / `cause 2` / `MPP = 1` …），
 //! **不**从被测的常量推出来 ⇒ ⇒ 把常量改坏时这条测试**必须变红**。
 //!
 //! ⚠️ **`sstatus` 的断言走「真的 `csrr` 指令」**：它是 `mstatus` 的**位视图**
@@ -54,8 +55,20 @@ const MPP_S: u32 = 1;
 /// `mstatus.MPP` = **M**（3）。
 const MPP_M: u32 = 3;
 
-/// `sstatus` 的**客体写**掩码 —— 只有 `SIE`(1) 与 `SPIE`(5)（**F8**）。
-const SSTATUS_WRITE_MASK: u32 = 0x0000_0022;
+/// `sstatus` 的**客体写**掩码 —— **实测**（F39）。
+///
+/// ⚠️ **不是**旧口径的 `0x22` —— 那个数是**被 8 位退出码截断**的观测给出的
+/// **低字节**（真正的写掩码的**低字节**恰好也是 `0x22`，所以截断观测「看
+/// 起来」自洽 ⇒ ⇒ 这就是它骗人的地方）。
+const SSTATUS_WRITE_MASK: u32 = 0x804C_61A2;
+
+/// `sstatus` 的**读视图**掩码 —— **实测**（F39）。
+///
+/// ⚠️ **不是**旧口径的 `0x122` —— 那是**低 16 位**。
+const SSTATUS_VIEW_MASK: u32 = 0x800D_E162;
+
+/// `medeleg` 的**合法位集合** —— **实测**（F40，per-bit WARL）。
+const MEDELEG_LEGAL_BITS: u32 = 0x0008_B3FE;
 /// `mstatus.SPP`（bit 8）—— `sstatus.SPP` 与它是**同一个字段**（**F7**）。
 const MSTATUS_SPP: u32 = 0x0000_0100;
 /// `mstatus.SIE`（bit 1）。
@@ -363,13 +376,15 @@ fn an_unimplemented_csr_traps_in_supervisor_mode_but_reads_zero_in_machine_mode(
 /// **`sstatus` 在 M / S 两级是同一存储**（**F30**，验收 **B-18**）。
 ///
 /// ⚠️ M 模式写 `sstatus`（`0x22`）⇒ ⇒ S 模式读回 **`0x22`**。
+/// ⚠️ 写的值只碰 `SIE` 与 `SPIE` ⇒ ⇒ 读回**逐字相同** ⇒ ⇒ 读路径与写
+/// 路径在**同一个存储**上工作。
 #[test]
 fn sstatus_is_the_same_storage_in_machine_and_supervisor_mode() {
     let mut h = Harness::new();
     let mut state = SimState::default();
 
-    // M 模式写 `sstatus`。
-    let outcome = csrw_with(&mut h, &mut state, CSR_SSTATUS, 1, SSTATUS_WRITE_MASK);
+    // M 模式写 `sstatus`（`0x22` = `SIE` | `SPIE`，只碰这两位）。
+    let outcome = csrw_with(&mut h, &mut state, CSR_SSTATUS, 1, 0x22);
     assert_eq!(outcome, StepOutcome::Advanced);
 
     // 切到 S 模式再读。
@@ -377,61 +392,187 @@ fn sstatus_is_the_same_storage_in_machine_and_supervisor_mode() {
     let (outcome, value) = guest_read(&mut h, &mut state, CSR_SSTATUS);
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(
-        value, SSTATUS_WRITE_MASK,
+        value, 0x22,
         "M 模式写 sstatus ⇒ S 模式读回同一份存储（F30）"
+    );
+    assert_eq!(
+        csr_value(&state, CSR_MSTATUS),
+        0x22,
+        "mstatus 上落的就是那两位（同一份存储，F30）"
     );
 }
 
-/// **客体的写掩码是 `0x22`**（**F8**）⇒ ⇒ `SPP` **写不进去**。
+/// **客体的写掩码是实测的那一个**（**F39**）—— 不是旧口径的 `0x22`。
 ///
-/// ⚠️ 判别式是**架构字面量** `0x22`（不是从被测常量推出来的）。
+/// ⚠️ 判别式是**架构字面量**（不是从被测常量推出来的）：
+/// * **S 模式**写 `sstatus = 0xFFFFFFFF` ⇒ ⇒ 读回 **`0x800C_6122`**
+///   （= 写掩码 ∧ 读视图 ⇒ ⇒ **逐字**是参考侧实测的那个值）；
+/// * **M 模式**写 `sstatus = 0xFFFFFFFF` ⇒ ⇒ `mstatus` 读回
+///   **`0x804C_61A2`**（= 契约层的写掩码）。
+///
+/// ⚠️ **S 模式与 M 模式的写掩码相同**（F39）⇒ ⇒ 参考侧**不按特权裁剪**
+/// ⇒ ⇒ 两条断言合起来把「写掩码」钉死。
 #[test]
-fn the_guest_write_mask_of_sstatus_is_zero_x22() {
+fn the_guest_write_mask_of_sstatus_is_the_measured_one() {
+    // S 模式：写全 1 ⇒ 读回 `0x800C_6122`。
     let mut h = Harness::new();
     let mut state = state_in(PRIV_S);
-    // 写全 1 ⇒ 读回 `0x22`。
     let outcome = csrw_with(&mut h, &mut state, CSR_SSTATUS, 1, 0xFFFF_FFFF);
     assert_eq!(outcome, StepOutcome::Advanced);
     let (_, value) = guest_read(&mut h, &mut state, CSR_SSTATUS);
     assert_eq!(
-        value, SSTATUS_WRITE_MASK,
-        "sstatus 的客体写掩码必须是 0x22（F8）"
+        value, 0x800C_6122,
+        "S 模式写 sstatus 全 1 ⇒ 读回 0x800C6122（F39 实测）"
     );
+
+    // M 模式：写全 1 ⇒ `mstatus` 读回 `0x804C_61A2`（写掩码本身）。
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    let outcome = csrw_with(&mut h, &mut state, CSR_SSTATUS, 1, 0xFFFF_FFFF);
+    assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(
-        value & MSTATUS_SPP,
-        0,
-        "SPP **写不进去** ⇒ sstatus.SPP 恒 0"
+        csr_value(&state, CSR_MSTATUS),
+        SSTATUS_WRITE_MASK,
+        "M 模式写 sstatus 全 1 ⇒ mstatus 读回写掩码 0x804C61A2（F39）"
     );
 }
 
-/// **读视图是 `0x122`**（**F29 / F30**）⇒ ⇒ **不含 `SD`**。
+/// **S 模式可以写 `sstatus.SPP`** —— **本轮新增的判别点**。
 ///
-/// ⚠️ `mstatus` 的 `SD`（bit 31）在 M 模式下置 1 ⇒ ⇒ S 模式读 `sstatus`
-/// 看到的**仍然是 0**。
+/// ⚠️ **实测（F39）**：S 模式写 `sstatus = 0x100` ⇒ ⇒ 读回 **`0x0000_0100`**
+/// ⇒ ⇒ **参考侧允许 S 模式写 `sstatus.SPP`**（与特权规范不同，本平台**对齐
+/// 参考侧** —— 黄金对拍的口径就是参考侧）。
+///
+/// ⚠️ **旧口径的 `0x22` 写掩码会把 `SPP` 挡在外面** ⇒ ⇒ 旧实现读回 **0**
+/// ⇒ ⇒ 这条用例对「写掩码取错」有**判别力**。
 #[test]
-fn the_read_view_of_sstatus_is_zero_x122_and_excludes_sd() {
+fn supervisor_mode_can_write_the_spp_bit_of_sstatus() {
+    let mut h = Harness::new();
+    let mut state = state_in(PRIV_S);
+    let outcome = csrw_with(&mut h, &mut state, CSR_SSTATUS, 1, 0x100);
+    assert_eq!(outcome, StepOutcome::Advanced);
+    let (_, value) = guest_read(&mut h, &mut state, CSR_SSTATUS);
+    assert_eq!(
+        value, 0x0000_0100,
+        "S 模式写 sstatus.SPP ⇒ 读回 0x100（F39 实测）"
+    );
+    assert_eq!(
+        value & MSTATUS_SPP,
+        MSTATUS_SPP,
+        "S 模式写进去的 SPP 必须真的落在 mstatus.SPP 上（F39）"
+    );
+    assert_eq!(
+        csr_value(&state, CSR_MSTATUS) & MSTATUS_SPP,
+        MSTATUS_SPP,
+        "mstatus.SPP 必须真的被写进去（同一份存储，F30）"
+    );
+}
+
+/// **读视图**里**含 `SD`**（**F39**）—— 旧口径的 `0x122` 把 `SD` 挡在外面。
+///
+/// ⚠️ **两步**：① M 模式把 `mstatus.FS` **变脏**（写 `0x6000` ⇒ `FS` = 0b11）
+/// ⇒ ⇒ 硬件把 `SD`（bit 31）**置位**（`SD` 是**只读**的，由 `FS` / `XS` 决定）
+/// ⇒ ⇒ ② S 模式读 `sstatus` ⇒ ⇒ **看得见 `SD`**。
+#[test]
+fn the_read_view_of_sstatus_contains_sd() {
     let mut h = Harness::new();
     let mut state = SimState::default();
-    // M 模式：`mstatus` 的 SD 置 1，`sstatus` 的两个可写位置 1。
-    csr::csr_write(&mut state, CSR_MSTATUS, 0x8000_0000 | SSTATUS_WRITE_MASK);
+    // M 模式：把 `mstatus.FS` 变脏 ⇒ `SD` 由硬件置位。
+    let outcome = csrw_with(&mut h, &mut state, CSR_MSTATUS, 1, 0x6000);
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert_eq!(
+        csr_value(&state, CSR_MSTATUS),
+        0x8000_6000,
+        "FS 变脏 ⇒ SD 置位（SD 是只读的，由 FS / XS 决定）"
+    );
 
     csr::priv_set(&mut state, PRIV_S);
     let (_, value) = guest_read(&mut h, &mut state, CSR_SSTATUS);
     assert_eq!(
-        value, SSTATUS_WRITE_MASK,
-        "sstatus 的读视图是 0x122 ⇒ 只看得到 SIE | SPIE | SPP（F29）"
+        value & 0x8000_0000,
+        0x8000_0000,
+        "sstatus 的读视图**含 SD** ⇒ S 模式看得见 FS 变脏（F39）"
     );
-    assert_eq!(value & 0x8000_0000, 0, "视图**不含** SD");
+    assert_eq!(
+        value, 0x8000_6000,
+        "S 模式读 sstatus ⇒ FS[14:13] 与 SD 都看得见（F39）"
+    );
 }
 
-/// **`mstatus` 的每一个可写位都落到 `sstatus` 的视图里吗？** —— 只有
-/// `SIE` | `SPIE` | `SPP` 这**三位**。
+/// **`SD` 是推导位**（**F40**）—— S 模式经 `sstatus` 把 `FS` 写成 3 ⇒ ⇒
+/// 读回的 `sstatus` 里**必须带 `SD`**。
+///
+/// ⚠️ **实测（F40）**：只把 `FS` 写成 3（`0x6000`）且**不碰 bit 31** ⇒ ⇒
+/// 参考侧读回 **`0x8000_6000`** ⇒ ⇒ `SD` 被**推成 1** ⇒ ⇒ `SD` 是**推导
+/// 位**，不是存储位。
+///
+/// ⚠️ **为什么这条要紧**：黄金语料 `local/smode_csr` 的**第 12 条检查**
+/// 就是「把 `FS` 写成 3 之后 S 模式读 `sstatus` 要看到 `SD`」⇒ ⇒ 若内核
+/// 按纯存储实现 ⇒ ⇒ 那一条**红** ⇒ ⇒ 与参考侧**逐位不等**。
+///
+/// ⚠️ 判别式用**架构字面量** `0x0000_6000`（`FS = 3`）与 `0x8000_0000`
+/// （`SD`）—— **不**从契约层的常量推。
+#[test]
+fn supervisor_mode_writing_fs_through_sstatus_sees_the_derived_sd_bit() {
+    let mut h = Harness::new();
+    let mut state = state_in(PRIV_S);
+
+    // S 模式经 `sstatus` 把 `FS` 写成 3。
+    let outcome = csrw_with(&mut h, &mut state, CSR_SSTATUS, 1, 0x0000_6000);
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert_eq!(
+        csr_value(&state, CSR_MSTATUS) & 0x0000_6000,
+        0x0000_6000,
+        "FS 必须真的落在 mstatus 上"
+    );
+
+    // 读回的 `sstatus` 里 bit 31（`SD`）是 1 —— 那是**推导**出来的。
+    let (_, value) = guest_read(&mut h, &mut state, CSR_SSTATUS);
+    assert_eq!(
+        value & 0x8000_0000,
+        0x8000_0000,
+        "SD 必须跟着 FS 一起被推导出来（F40）"
+    );
+    assert_eq!(
+        value & 0x0000_6000,
+        0x0000_6000,
+        "FS[14:13] 也必须看得见（F40）"
+    );
+}
+
+/// **直接写 `SD` 无效**（**F40**）—— `SD` **不是**存储位。
+///
+/// ⚠️ **实测（F40）**：写 `mstatus = 0x8000_0000` ⇒ ⇒ 参考侧读回
+/// **`0x0000_0000`** ⇒ ⇒ 直接写 bit 31 **无效**。
+///
+/// ⚠️ **判别力**：一个「按纯存储实现 `SD`」的错法会读回 `0x8000_0000`
+/// ⇒ ⇒ 这条用例**必红** ⇒ ⇒ 它与「`FS` 变脏 ⇒ `SD` 被推成 1」那一条
+/// 合起来才把「推导位」钉死。
+#[test]
+fn writing_the_sd_bit_directly_has_no_effect() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    let outcome = csrw_with(&mut h, &mut state, CSR_MSTATUS, 1, 0x8000_0000);
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert_eq!(
+        csr_value(&state, CSR_MSTATUS),
+        0x0000_0000,
+        "直接写 SD 无效 ⇒ 读回 0（F40 实测）"
+    );
+}
+
+/// **`mstatus` 的每一个可写位都落到 `sstatus` 的视图里吗？** —— 只有**实测**
+/// 出来的那**若干位**。
 ///
 /// ⚠️ **这是视图掩码最锐利的一条判据**：M 模式把 `mstatus` 的**全部**
 /// 可写位（`0x807E79AA`）都置上 ⇒ ⇒ S 模式读 `sstatus` 看到的**必须**
-/// 恰好是 **`0x122`** —— 多一位（视图太宽）或少一位（视图太窄）都红。
+/// 恰好是 **`0x800C_6122`** —— 多一位（视图太宽）或少一位（视图太窄）都红。
+///
+/// ⚠️ **实测（F39）**：参考侧「M 模式写 `mstatus` 全 1 ⇒ 读 `sstatus`」
+/// 的观测值**就是** `0x800C_6122` ⇒ ⇒ 视图掩码 = `0x800C_6122` 与
+/// `mstatus` 的可写位的交集 = **`0x800D_E162`**。
 #[test]
-fn the_view_of_sstatus_is_exactly_sie_spie_and_spp() {
+fn the_view_of_sstatus_is_the_measured_one() {
     let mut h = Harness::new();
     let mut state = SimState::default();
     // 写全 1 ⇒ `mstatus` 的 WARL 掩码留下 `0x807E79AA`（实测掩码，F6）。
@@ -446,8 +587,13 @@ fn the_view_of_sstatus_is_exactly_sie_spie_and_spp() {
     csr::priv_set(&mut state, PRIV_S);
     let (_, value) = guest_read(&mut h, &mut state, CSR_SSTATUS);
     assert_eq!(
-        value, 0x0000_0122,
-        "sstatus 的读视图必须**恰好**是 SIE | SPIE | SPP（F29 / F30）"
+        value, 0x800C_6122,
+        "sstatus 的读视图必须**恰好**是实测的那一个（F39）"
+    );
+    assert_eq!(
+        SSTATUS_VIEW_MASK & 0x8000_0000,
+        0x8000_0000,
+        "视图**含 SD**（F39）"
     );
 }
 
@@ -1041,17 +1187,95 @@ fn cycle_in_machine_mode_needs_no_enable_chain() {
 }
 
 // ---------------------------------------------------------------------------
+// `medeleg` —— the legal bit set (F40)
+// ---------------------------------------------------------------------------
+
+/// **`medeleg` 的写受合法位集合约束**（**F40**，per-bit WARL）。
+///
+/// ⚠️ **实测**：写 `0xFFFFFFFF` ⇒ 读回 **`0x0008_B3FE`**；写 `0x0000_FFFF`
+/// ⇒ 读回 **`0x0000_B3FE`** ⇒ ⇒ 两者都是「请求值 ∧ **同一个**合法位集合」。
+///
+/// ⚠️ **这条有独立落点**（M-13 的 CSR 写路径自己的臂 + 契约层自己的常量）
+/// ⇒ ⇒ 不是塞进 `mstatus_warl` 之类的地方。
+#[test]
+fn medeleg_writes_are_masked_to_the_legal_bit_set() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+
+    // 写全 1 ⇒ 读回 `0x0008_B3FE`。
+    let outcome = csrw_with(&mut h, &mut state, CSR_MEDELEG, 1, 0xFFFF_FFFF);
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert_eq!(
+        csr_value(&state, CSR_MEDELEG),
+        MEDELEG_LEGAL_BITS,
+        "medeleg 写全 1 ⇒ 读回 0x0008B3FE（F40 实测）"
+    );
+
+    // 写低 16 位 ⇒ 读回 `0x0000_B3FE`（同一个掩码的另一条证据）。
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    let outcome = csrw_with(&mut h, &mut state, CSR_MEDELEG, 1, 0x0000_FFFF);
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert_eq!(
+        csr_value(&state, CSR_MEDELEG),
+        0x0000_B3FE,
+        "medeleg 写低 16 位 ⇒ 读回 0x0000B3FE（F40 实测）"
+    );
+
+    // 写 `0xB109` ⇒ 读回 `0xB108`（bit 0 不可写 —— 「指令地址未对齐」不是
+    // 一个可委托的陷阱）。
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    let outcome = csrw_with(&mut h, &mut state, CSR_MEDELEG, 1, 0xB109);
+    assert_eq!(outcome, StepOutcome::Advanced);
+    assert_eq!(
+        csr_value(&state, CSR_MEDELEG),
+        0x0000_B108,
+        "medeleg 写 0xB109 ⇒ 读回 0xB108（F40 实测：bit 0 不可写）"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The vector table offset
+// ---------------------------------------------------------------------------
+
+/// **向量模式的偏移取 `cause & 0x7`** —— 不是 `0x3`。
+///
+/// ⚠️ **口径**：既有 `mtvec` 实现用的就是 `0x7` ⇒ ⇒ 两个向量表**同口径**
+/// ⇒ ⇒ **零黄金回归**（语料的 env 用的是**直接**模式）。
+///
+/// ⚠️ **判别式**：cause **5**（load access fault）⇒ ⇒ 偏移 = `4 × 5` =
+/// **20** ⇒ ⇒ `0x3` 口径会算成 **12** ⇒ ⇒ 两者**差 8 字节** ⇒ ⇒ 这条
+/// 用例对「偏移掩码取错」有判别力。
+#[test]
+fn the_vector_offset_uses_the_low_three_bits_of_the_cause() {
+    let mut state = SimState::default();
+    // `mtvec` = 基址 | 1（向量模式）。
+    csr::csr_write(&mut state, CSR_MTVEC, MTVEC | 1);
+    let target = csr::enter_trap(&mut state, 5, 0);
+    assert_eq!(
+        target,
+        MTVEC + 20,
+        "向量模式的偏移 = 4 × (cause & 0x7) ⇒ cause 5 ⇒ +20"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // `mstatus` —— the WARL function
 // ---------------------------------------------------------------------------
 
-/// **`mstatus` 的 `MPP` 保留值语义**（**F33**，验收 **B-21**）。
+/// **`mstatus` 的 `MPP` 保留值语义**（**F39**，验收 **B-21**）。
 ///
-/// ⚠️ 判别式是**架构字面量** `0x0002` / `0x1802`。
+/// ⚠️ 判别式是**架构字面量** `0x0002`。
 ///
-/// ⚠️ **不是「整次丢弃」**：写 `0x1002`（`MPP = 2` 且 `SIE = 1`）⇒ ⇒
-/// **`SIE` 落进去**、`MPP` 保留旧值。
+/// ⚠️ **合法化到 0**：写 `0x1002`（`MPP = 2` 且 `SIE = 1`）⇒ ⇒ 读回
+/// **`0x0002`** ⇒ ⇒ `MPP` **被覆盖成 0**（U），**不是**保留旧值 ⇒ ⇒ 但
+/// `SIE` **落进去了** ⇒ ⇒ 也**不是**「整次丢弃」。
+///
+/// ⚠️ **旧口径的「保留旧值」是错的**：它来自**被 8 位退出码截断**的观测 ⇒
+/// ⇒ 截断值 `0x02` 被当成了完整值 ⇒ ⇒ 旧值到底是 0 还是 3 分不出来。
 #[test]
-fn mstatus_keeps_the_old_mpp_for_the_reserved_value_but_lands_the_other_bits() {
+fn mstatus_legalizes_the_reserved_mpp_to_zero_but_lands_the_other_bits() {
     // 旧值 0 ⇒ 写 `0x1002` ⇒ 结果 `0x0002`。
     let mut h = Harness::new();
     let mut state = SimState::default();
@@ -1060,7 +1284,7 @@ fn mstatus_keeps_the_old_mpp_for_the_reserved_value_but_lands_the_other_bits() {
     let mstatus = csr_value(&state, CSR_MSTATUS);
     assert_eq!(
         mstatus, 0x0002,
-        "写 MPP=2 且 SIE=1 ⇒ 读回 0x0002（F33：只丢 MPP 字段）"
+        "写 MPP=2 且 SIE=1 ⇒ 读回 0x0002（F39：MPP 合法化到 0）"
     );
     assert_ne!(
         mstatus & MSTATUS_SIE,
@@ -1068,7 +1292,7 @@ fn mstatus_keeps_the_old_mpp_for_the_reserved_value_but_lands_the_other_bits() {
         "同一次写里的 SIE **落进去了**（不是整次丢弃）"
     );
 
-    // 旧值 3 ⇒ 写 `0x1002` ⇒ 结果 `0x1802`（`MPP` 保留旧值 3）。
+    // 旧值 3 ⇒ 写 `0x1002` ⇒ 结果**仍是** `0x0002`（旧值被**覆盖**成 0）。
     let mut h = Harness::new();
     let mut state = SimState::default();
     let outcome = csrw_with(&mut h, &mut state, CSR_MSTATUS, 1, MPP_M << 11);
@@ -1079,8 +1303,13 @@ fn mstatus_keeps_the_old_mpp_for_the_reserved_value_but_lands_the_other_bits() {
     assert_eq!(outcome, StepOutcome::Advanced);
     let mstatus = csr_value(&state, CSR_MSTATUS);
     assert_eq!(
-        mstatus, 0x1802,
-        "旧的 MPP=3 ⇒ 写保留值 ⇒ MPP 保留 3，SIE 落进去（F33）"
+        mstatus, 0x0002,
+        "旧的 MPP=3 ⇒ 写保留值 ⇒ 读回**仍是** 0x0002（F39：旧值被覆盖成 0）"
+    );
+    assert_eq!(
+        mstatus & 0x0000_1800,
+        0,
+        "MPP 必须被覆盖成 0（U），**不是**保留旧值 3"
     );
 }
 
