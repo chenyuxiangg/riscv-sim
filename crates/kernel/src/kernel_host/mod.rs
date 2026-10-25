@@ -198,7 +198,9 @@ use crate::m18_probe::{ChannelDef, ChannelKind, ProbeRegistry, SampleCfg, CH_GPI
 use crate::m19_waveform::{ChannelMeta, ExportFilter, SharedPipeline, WaveformPipeline};
 use crate::m20_snapshot::SnapshotManager;
 use crate::m21_logging::{LogBuffer, LogEntry, LogLevel, LogQuery};
-use crate::m22_hms::{DegradeAction, Health, HealthSignal, Hms, SignalCtx, SignalKind, SignalSrc};
+use crate::m22_hms::{
+    DegradeAction, DiagnosticKit, Health, HealthSignal, Hms, SignalCtx, SignalKind, SignalSrc,
+};
 
 /// GPIO 外设的基址（PL061 惯例）。
 ///
@@ -2659,7 +2661,12 @@ impl KernelHost {
             Ok(_) => false,
         };
         // ⑤ 窗口判定（**纯函数** ⇒ 不依赖真实时钟 ⇒ 可单测）
-        let outcome = classify_window(elapsed_ms, stalled);
+        //    ⚠️ **v0.43 批（D-135 · 裁决 C / K）**：**走带时钟可用性的那个**
+        //    ⇒ ⇒ `clock_available` 由**宿主**取（**谁持有时钟谁回答**）⇒ ⇒
+        //    **宿主时钟读不到时，「时间预算」那一路恒不触发**（**不是**「按 0
+        //    算」），而「**引擎停滞**」那一路**照常**。
+        let outcome =
+            classify_window_with_clock(elapsed_ms, stalled, self.started_at.is_available());
         // ⑥ 喂给看门狗 ⇒ 返回 `true` 表示**本次触发了**
         if self.watchdog.observe(outcome) {
             let err = self.handle_watchdog_trigger(elapsed_ms, stalled);
@@ -2738,6 +2745,28 @@ impl KernelHost {
     /// 宿主单调时间（毫秒）—— M-21 / M-22 的 `time_host_ms` 口径。
     fn host_now_ms(&self) -> u64 {
         self.started_at.elapsed_ms()
+    }
+
+    /// 产出脱敏诊断包（**不含原始日志**）。
+    ///
+    /// ⚠️ **v0.43 批（D-135 · 裁决 C / K）**：**宿主是宿主时钟的持有者** ⇒ ⇒
+    /// 「宿主时钟可不可用」这个**事实**由**这里**喂进去 ⇒ ⇒ **M-22 不主动去问
+    /// 时钟**（⇒ ⇒ M-22 **不依赖** `kernel_host` ⇒ ⇒ 依赖方向仍单向）。
+    ///
+    /// ⚠️ **这是真实的生产调用点** ⇒ ⇒ 诊断包里那个**显式**的布尔字段**不是**
+    /// 纸面承诺 ⇒ ⇒ 「宿主时钟读不到」在诊断包里**看得见**。
+    pub fn export_diagnostic_kit(&self, err_code: Option<&str>) -> DiagnosticKit {
+        self.hms
+            .export_diagnostic_kit(err_code, self.started_at.is_available())
+    }
+
+    /// 归档脱敏诊断包（走 M-23 的 `archive`）。
+    ///
+    /// ⚠️ 时钟事实**同样**由宿主喂进去（与 [`KernelHost::export_diagnostic_kit`]
+    /// 同一个来源 ⇒ ⇒ 两个出口**看到的是同一个事实**）。
+    pub fn archive_diagnostic_kit(&mut self, err_code: Option<&str>) -> Result<(), PlatformError> {
+        self.hms
+            .archive_diagnostic_kit(err_code, self.started_at.is_available())
     }
 
     /// 宿主请求暂停。
