@@ -348,9 +348,28 @@ else:
         want_corr = list(range(1, len(corrections) + 1))
         if sorted(corrections) != want_corr:
             err(f"[订正] §8 的施工期订正编号不是 1..{len(corrections)} 连续：{sorted(corrections)}")
-        n_changed = sec8_text.count("已改成")
-        if n_changed < len(corrections):
-            err(f"[订正] §8 的「已改成」不足 {len(corrections)} 条（实测 {n_changed}）")
+        # ⚠️ **必须逐条判，不能数全局次数**（实测出来的坑，见 STAGE-26 §8 订正 8）：
+        #    §8 开头那句提示语里就有一个「**已改成什么**」⇒ ⇒ **全局计数**会把它
+        #    当成某一条订正的「已改成」⇒ ⇒ **删掉某一条真的「已改成」也可能不红**
+        #    ⇒ ⇒ **零判别力** ⇒ ⇒ 判据落在「**每一条订正自己的那段里**」。
+        missing_changed = []
+        for idx, line in enumerate(sec8):
+            m = re.match(r"^#{2,4}\s*.*?订正\s*(\d+)", line)
+            if not m:
+                continue
+            # 这一条订正的正文 = 从它的标题到**下一条订正标题**（或 §8 末尾）为止。
+            body = []
+            for follow in sec8[idx + 1 :]:
+                if re.match(r"^#{2,4}\s*.*?订正\s*(\d+)", follow):
+                    break
+                body.append(follow)
+            if "已改成" not in "\n".join(body):
+                missing_changed.append(m.group(1))
+        if missing_changed:
+            err(
+                f"[订正] §8 的这些订正**自己那段里**没有「已改成」：{missing_changed}"
+                " ⇒ ⇒ 逐条判（不是数全局次数）"
+            )
 
 # ---- 7e. 跨层一致性：§1.2 的 F1 / F3 两行里的地址必须与语料两处逐字相同 -
 # ⚠️ **规格里 §1.2 的 F1 行（参考侧报的那个数）与 F3 行（平台报的那个数）**是
