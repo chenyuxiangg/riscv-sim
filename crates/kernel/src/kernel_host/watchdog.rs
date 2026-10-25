@@ -14,6 +14,10 @@
 //!
 //! ⚠️ **判定是纯函数**（[`classify_window`]）⇒ 不依赖真实时钟 ⇒ 可单测
 //! （验收 **D-8**）。
+//!
+//! ⚠️ **宿主时钟不可用**时的那一套（台账 **D-135**）是
+//! [`classify_window_with_clock`] ⇒ ⇒ 旧的 [`classify_window`] **一字未改**
+//! （保留成薄封装 · 裁决 F）⇒ ⇒ 既有断言**一条不红**。
 
 /// 宿主时间辅助预算（毫秒）—— LLD M-12 §3.5 的 `hostBudgetUs`（台账 D-115 的默认值）。
 pub const HOST_WATCHDOG_BUDGET_MS: u64 = 200;
@@ -49,8 +53,39 @@ pub enum WindowOutcome {
 /// * `elapsed_ms` = 该批次耗掉的**宿主**时间。
 ///
 /// ⚠️ 两条判据是**或**的关系：任一成立就算「这个窗口没有进展」。
+///
+/// ⚠️ **它保留成薄封装**（规格 §2.5 · 裁决 F）：它的**签名与行为一个字
+/// 没改** ⇒ ⇒ 既有断言**一条不红** ⇒ ⇒ 它 ≡
+/// [`classify_window_with_clock`]（`clock_available = true`）。
 pub fn classify_window(elapsed_ms: u64, stalled: bool) -> WindowOutcome {
-    if stalled || elapsed_ms > HOST_WATCHDOG_BUDGET_MS {
+    classify_window_with_clock(elapsed_ms, stalled, true)
+}
+
+/// **纯函数**：窗口判定（**带宿主时钟可用性** · 台账 **D-135**）。
+///
+/// * `stalled` = 该批次报的是**停滞**（`E_ENG-03`）；
+/// * `elapsed_ms` = 该批次耗掉的**宿主**时间；
+/// * `clock_available` = 宿主单调时钟**读得到吗**（见
+///   [`crate::kernel_host::clock::HostClock::is_available`]）。
+///
+/// ⚠️ **新语义**：`clock_available == false` ⇒ ⇒ 「**时间预算**」那一路
+/// **恒不触发**（**不是**「按 0 算」）⇒ ⇒ 但「**引擎停滞**」那一路
+/// **照常**（`stalled` 仍是或项）。
+///
+/// ⚠️ **为什么这样才对**：宿主时钟**读不到**时（wasm 侧环境**没有**
+/// `performance`）⇒ ⇒ 耗时**恒为 0** ⇒ ⇒ 「按 0 算」与「恒不触发」在
+/// **数值**上碰巧一样 ⇒ ⇒ 但**语义**上它们**不是**一回事 ⇒ ⇒ 「恒不
+/// 触发」是**唯一安全**的选择（台账 D-135 做法 B 的口径）。
+///
+/// ⚠️ **native 侧逐字同结果**：`available` 恒 `true` ⇒ ⇒ 本函数与旧的
+/// [`classify_window`] **逐字同结果** ⇒ ⇒ native 的行为**一个字不变**
+/// （规格 §3.4 的**必要对照**）。
+pub fn classify_window_with_clock(
+    elapsed_ms: u64,
+    stalled: bool,
+    clock_available: bool,
+) -> WindowOutcome {
+    if stalled || (clock_available && elapsed_ms > HOST_WATCHDOG_BUDGET_MS) {
         WindowOutcome::NoProgress
     } else {
         WindowOutcome::Progress
@@ -131,4 +166,103 @@ pub(crate) enum WindowVerdict {
     Fired(riscv_sim_contract::error::PlatformError),
     /// 窗口失败但**不是**停滞（别的错误码）⇒ 照旧上抛。
     Failed(riscv_sim_contract::error::PlatformError),
+}
+
+// ---------------------------------------------------------------------------
+// 用例 · 宿主时钟**不可用**时的窗口判定（台账 **D-135**）
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 宿主时钟**不可用** ⇒ ⇒ 「**时间预算**」那一路**恒不触发**。
+    ///
+    /// ⚠️ **判别力**：把 `clock_available &&` 去掉 ⇒ 本条立刻变红
+    /// （`elapsed_ms` 超预算时仍判「有进展」）。
+    #[test]
+    fn the_time_budget_never_fires_when_the_clock_is_unavailable() {
+        assert_eq!(
+            classify_window_with_clock(HOST_WATCHDOG_BUDGET_MS + 1, false, false),
+            WindowOutcome::Progress,
+            "时钟不可用 ⇒ 「时间预算」那一路**恒不触发**（**不是**「按 0 算」）"
+        );
+        assert_eq!(
+            classify_window_with_clock(u64::MAX, false, false),
+            WindowOutcome::Progress,
+            "时钟不可用 ⇒ 就算耗时是大数也不触发"
+        );
+        assert_eq!(
+            classify_window_with_clock(0, false, false),
+            WindowOutcome::Progress,
+            "时钟不可用 ⇒ 读数为 0 时也不触发"
+        );
+    }
+
+    /// 宿主时钟**不可用** ⇒ ⇒ 「**引擎停滞**」那一路**照常**。
+    ///
+    /// ⚠️ **判别力**：把整个判定写成 `clock_available && (..)` ⇒ 本条变红
+    /// （停滞被**吞掉**了 ⇒ 活锁永远不触发 ⇒ 那是**安全方向**的漏洞）。
+    #[test]
+    fn the_stall_branch_still_fires_when_the_clock_is_unavailable() {
+        assert_eq!(
+            classify_window_with_clock(0, true, false),
+            WindowOutcome::NoProgress,
+            "时钟不可用**不得**吞掉「引擎停滞」"
+        );
+        assert_eq!(
+            classify_window_with_clock(u64::MAX, true, false),
+            WindowOutcome::NoProgress,
+            "时钟不可用**不得**吞掉「引擎停滞」"
+        );
+    }
+
+    /// 旧的 [`classify_window`] **一字未改** ⇒ ⇒ 它 ≡
+    /// [`classify_window_with_clock`]（`clock_available = true`）。
+    ///
+    /// ⚠️ **判别力**：把薄封装改成 `clock_available = false` ⇒ 本条变红。
+    #[test]
+    fn the_legacy_function_is_the_new_one_with_an_available_clock() {
+        for elapsed in [
+            0u64,
+            1,
+            HOST_WATCHDOG_BUDGET_MS,
+            HOST_WATCHDOG_BUDGET_MS + 1,
+            u64::MAX,
+        ] {
+            for stalled in [false, true] {
+                assert_eq!(
+                    classify_window(elapsed, stalled),
+                    classify_window_with_clock(elapsed, stalled, true),
+                    "旧函数 ≡ 新函数(clock_available = true)：elapsed={elapsed} stalled={stalled}"
+                );
+            }
+        }
+    }
+
+    /// 旧函数的**既有行为**（裁决 F · 既有断言一条不红）。
+    #[test]
+    fn the_legacy_function_keeps_its_behavior() {
+        assert_eq!(
+            classify_window(HOST_WATCHDOG_BUDGET_MS + 1, false),
+            WindowOutcome::NoProgress,
+            "宿主时间超窗 ⇒ 无进展"
+        );
+        assert_eq!(
+            classify_window(0, true),
+            WindowOutcome::NoProgress,
+            "停滞 ⇒ 无进展"
+        );
+        assert_eq!(
+            classify_window(0, false),
+            WindowOutcome::Progress,
+            "又快又不停 ⇒ 有进展"
+        );
+        // 边界：预算**之内**（含）算有进展（判据是严格大于）。
+        assert_eq!(
+            classify_window(HOST_WATCHDOG_BUDGET_MS, false),
+            WindowOutcome::Progress,
+            "恰好等于预算 ⇒ 仍在预算之内"
+        );
+    }
 }
