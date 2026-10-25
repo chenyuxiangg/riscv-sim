@@ -295,7 +295,7 @@ nothing.
 ## `active` rows that agree **vacuously** — read this before citing coverage
 
 ⚠️ **An `active` row means "both sides reach the same verdict".  It does
-NOT mean "both sides exercised the same thing".**  Two of the 13 `rv32mi`
+NOT mean "both sides exercised the same thing".**  **Two** of the 13 `rv32mi`
 rows are **hollow agreements**: the verdicts match, but the two sides ran
 **different programs** (or the case asserts something the platform cannot
 fail).  They stay in the corpus — the agreement is real and worth keeping
@@ -306,18 +306,33 @@ visible.
 
 | case | why the agreement is hollow | how that was established |
 | --- | --- | --- |
-| `rv32mi/csr` | the case branches on `misa[20]` (the **U** bit). The reference side runs with its default `--priv=MSU` ⇒ `misa = 0x40141104` ⇒ **U is set** ⇒ it runs the U-mode section (`csrwi mcounteren`, `sret` into user mode, "reading `sstatus` in user mode must trap"). This platform is **M-mode only** ⇒ `misa = 0x40001104` ⇒ **U is clear** ⇒ the case jumps straight to `finish` and passes early ⇒ **the whole user-mode / privilege-transition section never runs here** | instrumented copy of the upstream `rv64si/csr.S`: the reference side reaches the U-mode marker, we do not. Trap entries: reference side 5, ours 1. Ledger **D-96** |
+| `rv32mi/breakpoint` | the case tests the **debug trigger** mechanism (`tcontrol` / `tselect` / `tdata1` / `tdata2`) ⇒ ⇒ this platform does **not** implement those CSRs ⇒ ⇒ they read back **0** ⇒ ⇒ the case's own guard (`csrr a1, tdata1` → 0 ≠ the requested value ⇒ ⇒ jump to the skip label) fires ⇒ ⇒ **no breakpoint trigger is ever exercised here** ⇒ ⇒ the case leaves through the **skip path** (`TEST_PASSFAIL` with a non-zero `TESTNUM` ⇒ ⇒ PASS). The reference side *does* implement the triggers far enough to take **8** trap deliveries ⇒ ⇒ it exercised them ⇒ ⇒ **the two sides ran different programs** ⇒ ⇒ the agreement is in name only | the **v0.41** hollow-agreement detector (`tools/vacuity_check.py`): reference side **251** committed instructions / **8** traps vs ours **118** retired / **1** trap — the **largest** divergence in the whole corpus. Ours took **1** trap in total while the trigger section needs **at least three** trap deliveries (execute / load / store) ⇒ ⇒ ours cannot have entered it. Ledger **D-156** |
 | `rv32mi/ma_fetch` | the case probes "can the `C` bit be switched off?" with `csrci misa, 1 << ('c'-'a')`. The reference side's `misa` is **WARL-writable** (the write really clears `C`); ours is **fully read-only** ⇒ the **same probe takes opposite branches**: the reference side continues into the IALIGN assertions, we skip to `pass` ⇒ **that half of the case is not covered here** | instrumented copy of the upstream `rv64si/ma_fetch.S`: the reference side hits the IALIGN-section marker, we do not. Ledger **D-95** |
 
-⚠️ **The two differences above all come from the same root**: the
-platform implements **fewer** features than the reference side
-(U-mode, S-mode) and reports that honestly in `misa` instead of
-pretending.  ⇒ A hollow agreement here is the **expected** consequence of
-an M-mode-only platform — the fix is **labelling**, not faking a match.
+⚠️ **The two rows above no longer share a root.**  A **third** row used to
+sit here — `rv32mi/csr` — and it **stopped being hollow in v0.38**: the
+platform gained U-mode and now reports `misa = 0x40141104`, so the case's
+U-mode section really runs.  Measured by the **v0.41** detector: reference
+side **235** committed instructions / **4** traps vs ours **230** retired /
+**3** traps ⇒ ⇒ the same program ⇒ ⇒ **not** a hollow agreement ⇒ ⇒ its row
+was **stale** and has been **removed** here.
+
+⇒ ⇒ What is left are two **different** gaps, and they must not be merged:
+
+* `rv32mi/ma_fetch` ⇒ ⇒ the platform's `misa` is **read-only** for the
+  guest (the reference side's is **WARL-writable** ⇒ ⇒ `csrci misa, 4`
+  really clears `C` there) ⇒ ⇒ the same probe takes opposite branches.
+* `rv32mi/breakpoint` ⇒ ⇒ the platform does **not** implement the **debug
+  trigger registers** ⇒ ⇒ the case leaves through its own skip path.
+
+⇒ ⇒ A hollow agreement here is the **expected** consequence of a platform
+that implements fewer features than the reference side and **reports that
+honestly** instead of faking a match ⇒ ⇒ the fix is **labelling**, not
+faking.
 
 ⚠️ **PMP used to be on that list** (v0.36 and earlier).  As of **v0.37**
-the platform implements PMP ⇒ ⇒ the remaining gap is **U-mode and S-mode**
-only ⇒ ⇒ `rv32mi/pmpaddr` now agrees for a *different* reason (it is
+the platform implements PMP ⇒ ⇒ the remaining gaps are the **debug trigger
+registers** and the platform's **read-only `misa`** ⇒ ⇒ `rv32mi/pmpaddr` now agrees for a *different* reason (it is
 **hollow on the reference side**, not hollow on ours — see its row above).
 
 
@@ -653,16 +668,17 @@ readings** ⇒ ⇒ both are in this row.
 
 **The measured result — the reference side agrees, the platform does not.**
 The reference side (Spike) runs this ELF and reports **PASS**: every
-assertion below holds on it.  The platform reports **FAIL 3** — it let
-scenario A's access through ⇒ ⇒ the platform is currently **too loose**
-there (the *security* direction).  The same platform is **too strict** for
-scenario B: measured on its own, it **denies** the cross-boundary load with
-`mcause` = 5 and `mtval` = `0x800F_FFFE` (the **effective** address) ⇒ ⇒ the
-load never returns and the value stays the `0xDEAD_BEEF` sentinel ⇒ ⇒ the
-divergence is in **both** directions.
-⇒ ⇒ the row is **red on our side** until the decision rule becomes
-per-piece, and then it is green on **both** sides and the behaviour is
-pinned by the default gate forever.
+assertion below holds on it.  ⚠️ **That measurement was taken before v0.39
+landed the per-piece rule** ⇒ ⇒ the platform **reported FAIL 3** back then —
+it let scenario A's access through ⇒ ⇒ it was **too loose** there (the
+*security* direction).  The same platform was **too strict** for scenario B:
+measured on its own, it **denied** the cross-boundary load with
+`mcause` = 5 and `mtval` = `0x800F_FFFE` (the **effective** address — the
+platform now reports the **failing piece's start**, see the `mtval` table
+below) ⇒ ⇒ the load never returned and the value stayed the `0xDEAD_BEEF`
+sentinel ⇒ ⇒ the divergence was in **both** directions.
+⇒ ⇒ the row is green on **both** sides today, and the behaviour is pinned by
+the default gate forever.
 
 **The register layouts.**  RV32's `pmpcfg0` holds **four** entries (byte 0 =
 entry 0, byte 1 = entry 1) ⇒ ⇒ `pmpcfg1` would configure entries 4..7 and is
@@ -722,6 +738,21 @@ entry 0 covers `[0x8000_0000, 0x8010_0000)` and **allows** both.  Every
 verdict path also clears `MPRV` first, so the `tohost` store runs at
 M-mode privilege and PMP does not apply to it at all.
 
+**The `mtval` expectation — the reference side reports the start of the
+failing piece.**  The two sides' `mcause` are **the same** (5) ⇒ ⇒ `mcause`
+alone **cannot** tell them apart ⇒ ⇒ the case asserts the reported address
+itself:
+
+| access | the failing piece | the reference side's `mtval` | the platform's `mtval` (v0.41) |
+| --- | --- | --- | --- |
+| scenario A's DENY-tail load @ `0x8003_FFFE` | piece 2 = `[0x8004_0000, 0x8004_0002)` | **`0x8004_0000`** | **`0x8004_0000`** |
+| the control loads (fully inside the ALLOW region) | — (they do **not** trap) | — | — |
+
+⇒ ⇒ the **contrast** for that assertion is the access's own **effective
+address** (`0x8003_FFFE`) — **not** the control group: the control loads stay
+inside the ALLOW region ⇒ ⇒ they do not trap ⇒ ⇒ `mtval` has nothing to say
+about them.
+
 ⚠️ **The failure modes carry distinct numbers**, so a red row says *which*
 scenario broke:
 
@@ -735,18 +766,21 @@ scenario broke:
 | `FAIL 7` | scenario B: the cross-boundary load was **denied** — the platform is too **strict** |
 | `FAIL 8` | scenario B: the load was allowed but the value was **not** the mixed one ⇒ ⇒ it did not cross the boundary |
 | `FAIL 9` | the **control group** broke: the **misaligned** load inside the ALLOW region did not return the expected value |
+| `FAIL 10` | `mtval` was **not** the start of the failing piece — the reference side reports `0x8004_0000` (the start of the **second** piece), not the access's effective address `0x8003_FFFE` |
 
-⚠️ **`mtval` is deliberately **not** asserted.**  The reference side reports
-`mtval` = `0x8004_0000` — the address of the **failing piece** — while the
-platform reports `mtval` = the **effective address** of the access
-(`0x8003_FFFE`); `crates/kernel/src/m13_iss/executor.rs` hands the
-effective address to `enter_trap`, and STAGE-23 §3.1 / B-6 keep that call
-site **unchanged**.  "Which address does a PMP trap report" is a
-**different rule** from "which access is denied", it is **outside** this
-batch's scope, and asserting it would keep this row red for a reason the
-per-piece fix does not address.  What **is** asserted is `mcause` = 5, which
-pins "denied, and denied as a **load access fault**" and separates it from a
-misaligned-load trap (cause 4) or a bus error.
+⚠️ **`mtval` **is** asserted** — it was **not**, until v0.41 (ledger
+**D-154**).  The reference side reports `mtval` = the **start of the failing
+piece** — for scenario A that is **`0x8004_0000`** — while the platform used
+to report the **effective address** of the access (`0x8003_FFFE`); the two
+differ by one offset, and the two sides' `mcause` are **the same** (5) ⇒ ⇒
+`mcause` alone **cannot** tell them apart.  The platform now reports the
+**failing piece's start** too ⇒ ⇒ the two sides agree **byte for byte** on
+`mtval`.
+
+⚠️ **The three assertions are three separate questions**: `mcause` = 5 pins
+"denied, and denied as a **load access fault**" (and separates it from a
+misaligned-load trap (cause 4) or a bus error), `mepc` pins "is it the
+*right* trap?", and `mtval` pins "is the reported address **exact**?".
 
 ### `pmp_privilege` — the five cells of PMP's privilege rule
 

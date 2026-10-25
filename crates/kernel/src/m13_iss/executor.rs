@@ -280,14 +280,18 @@ where
     }
 
     /// Execute one decoded instruction, mutating the [`SimState`].
+    ///
+    /// ⚠️ `time` = `None` ⇒ ⇒ 没有真值源 ⇒ ⇒ `time` / `timeh` 报 **0**
+    /// （D-151 · 冻结规格 STAGE-26 裁决 H：「有真值源就报真值，没有就报 0」）。
     pub fn execute(
         &mut self,
         state: &mut SimState,
         d: &Decoded,
+        time: Option<&dyn riscv_sim_contract::port::TimeSource>,
     ) -> Result<StepOutcome, PlatformError> {
         let misaligned = self.misaligned;
         let mut wrote_csr = None;
-        execute_one(self, state, d, misaligned, &mut wrote_csr)
+        execute_one(self, state, d, misaligned, &mut wrote_csr, time)
     }
 
     /// Execute one decoded instruction **and report** which CSR it
@@ -296,14 +300,17 @@ where
     /// This is the variant the platform layer uses: the ISS *reports*
     /// what it did, and the platform decides what a write to a platform
     /// CSR *means* (STAGE-4 §4 接缝 #4).
+    ///
+    /// ⚠️ `time` = `None` ⇒ ⇒ `time` / `timeh` 报 **0**（D-151 · 裁决 H）。
     pub fn execute_with_report(
         &mut self,
         state: &mut SimState,
         d: &Decoded,
         wrote_csr: &mut Option<u16>,
+        time: Option<&dyn riscv_sim_contract::port::TimeSource>,
     ) -> Result<StepOutcome, PlatformError> {
         let misaligned = self.misaligned;
-        execute_one(self, state, d, misaligned, wrote_csr)
+        execute_one(self, state, d, misaligned, wrote_csr, time)
     }
 }
 
@@ -813,6 +820,26 @@ fn is_csr_op(op: Op) -> bool {
     )
 }
 
+/// 读一个 CSR —— **带上平台时钟**（D-151 · 冻结规格 STAGE-26 §3.2）。
+///
+/// ⚠️ 这是 [`csr::csr_read_with_time`] 的**薄转发** ⇒ ⇒ 「`time` 报什么」
+/// 那条规则**仍然只有一个落点**（`csr_read_with_time`）⇒ ⇒ 这里**不**重写
+/// 那条规则。
+///
+/// ⚠️ **「端口怎么读」也只有这一个落点** ⇒ ⇒ 六条 CSR 指令**共用**它 ⇒ ⇒
+/// 「`None` ⇒ 报 0」这条口径不会在六处漂移。
+///
+/// ⚠️ **端口类型用全路径** ⇒ ⇒ 本文件顶部的 `use` 导入块**一个字都不动**
+/// （同批的 Lane A 也在改这个文件）。
+fn csr_read_at(
+    state: &SimState,
+    number: u16,
+    time: Option<&dyn riscv_sim_contract::port::TimeSource>,
+) -> u32 {
+    let time_ticks = time.map(|source| source.time_ticks()).unwrap_or(0);
+    csr::csr_read_with_time(state, number, time_ticks)
+}
+
 /// The single execution path shared by every dispatch route.
 ///
 /// `mem` is the memory port: it is threaded through here so that both
@@ -837,12 +864,25 @@ fn is_csr_op(op: Op) -> bool {
 ///
 /// ⚠️ `wrote_csr` 同时是**抑制**的输入：写计数器的那条指令**自己**不 +1
 /// （裁决 H）⇒ ⇒ **零新增状态、零新增参数**。
+///
+/// # The platform clock (`time` / `timeh`)
+///
+/// ⚠️ `time` 是**平台时钟**（D-151 · 冻结规格 STAGE-26 §3.2）⇒ ⇒ 六条 CSR
+/// 指令的**读**那一支要拿到真值 ⇒ ⇒ 本函数**末尾**多一个参数
+/// `time: Option<&dyn TimeSource>`。
+///
+/// ⚠️ **`None` ⇒ 报 0**（裁决 H：「有真值源就报真值，没有就报 0」）⇒ ⇒ 没有
+/// 平台的宿主（黄金 runner）行为**逐字不变**。
+///
+/// ⚠️ **端口类型用全路径**（`riscv_sim_contract::port::TimeSource`）⇒ ⇒ 本
+/// 文件顶部的 `use` 导入块**一个字都不动**（同批的 Lane A 也在改这个文件）。
 pub fn execute_one<M: MemoryAccess>(
     mem: &mut M,
     state: &mut SimState,
     d: &Decoded,
     misaligned: MisalignedPolicy,
     wrote_csr: &mut Option<u16>,
+    time: Option<&dyn riscv_sim_contract::port::TimeSource>,
 ) -> Result<StepOutcome, PlatformError> {
     let op = match classify(d) {
         Some(op) => op,
@@ -1065,9 +1105,16 @@ pub fn execute_one<M: MemoryAccess>(
             }
             // ⚠️ **PMP 在未映射检查之前**（裁决 K）—— 规范把 PMP 放在物理
             //    地址一级 ⇒ ⇒ 被 PMP 拒的访问根本不会走到总线。
-            if !pmp::pmp_allows(state, addr, pmp::access_bytes(size), PmpAccess::Load) {
+            //
+            // ⚠️ **`mtval` 报的是「失败那一片的起始地址」**（台账 **D-154** ·
+            //    参考侧实测 F1）⇒ ⇒ **不是**访问的有效地址 ⇒ ⇒ 失败片地址
+            //    **由判定本身产出**（裁决 C）⇒ ⇒ **不许**在这里用「有效地址 +
+            //    偏移」重算。
+            if let Some(fault_addr) =
+                pmp::pmp_fault_addr(state, addr, pmp::access_bytes(size), PmpAccess::Load)
+            {
                 let cause = TrapCause::LoadAccessFault;
-                csr::enter_trap(state, cause.mcause(), addr);
+                csr::enter_trap(state, cause.mcause(), fault_addr);
                 return Ok(StepOutcome::Trapped { cause });
             }
             let raw = match mem.read(addr, size) {
@@ -1112,9 +1159,16 @@ pub fn execute_one<M: MemoryAccess>(
                 return Ok(StepOutcome::Trapped { cause });
             }
             // ⚠️ **PMP 在未映射检查之前**（裁决 K）。
-            if !pmp::pmp_allows(state, addr, pmp::access_bytes(size), PmpAccess::Store) {
+            //
+            // ⚠️ **`mtval` 报的是「失败那一片的起始地址」**（台账 **D-154** ·
+            //    参考侧实测 F1）⇒ ⇒ **不是**访问的有效地址 ⇒ ⇒ 失败片地址
+            //    **由判定本身产出**（裁决 C）⇒ ⇒ **不许**在这里用「有效地址 +
+            //    偏移」重算。
+            if let Some(fault_addr) =
+                pmp::pmp_fault_addr(state, addr, pmp::access_bytes(size), PmpAccess::Store)
+            {
                 let cause = TrapCause::StoreAccessFault;
-                csr::enter_trap(state, cause.mcause(), addr);
+                csr::enter_trap(state, cause.mcause(), fault_addr);
                 return Ok(StepOutcome::Trapped { cause });
             }
             let value = truncate_store(op, read_gpr(state, d.rs2));
@@ -1194,7 +1248,7 @@ pub fn execute_one<M: MemoryAccess>(
             let number = csr::csr_number(d.raw);
             let value = read_gpr(state, d.rs1);
             if d.rd != 0 {
-                let old = csr::csr_read(state, number);
+                let old = csr_read_at(state, number, time);
                 write_gpr(state, d.rd, old);
             }
             if !csr_write_is_ignored(number) {
@@ -1210,7 +1264,7 @@ pub fn execute_one<M: MemoryAccess>(
             // already holds).
             let number = csr::csr_number(d.raw);
             let value = read_gpr(state, d.rs1);
-            let old = csr::csr_read(state, number);
+            let old = csr_read_at(state, number, time);
             write_gpr(state, d.rd, old);
             if d.rs1 != 0 && !csr_write_is_ignored(number) {
                 csr::csr_write(state, number, old | value);
@@ -1223,7 +1277,7 @@ pub fn execute_one<M: MemoryAccess>(
             // `rs1 == x0`" rule as [`Op::Csrrs`].
             let number = csr::csr_number(d.raw);
             let value = read_gpr(state, d.rs1);
-            let old = csr::csr_read(state, number);
+            let old = csr_read_at(state, number, time);
             write_gpr(state, d.rd, old);
             if d.rs1 != 0 && !csr_write_is_ignored(number) {
                 csr::csr_write(state, number, old & !value);
@@ -1236,7 +1290,7 @@ pub fn execute_one<M: MemoryAccess>(
             let number = csr::csr_number(d.raw);
             let value = csr::csr_zimm(d.raw);
             if d.rd != 0 {
-                let old = csr::csr_read(state, number);
+                let old = csr_read_at(state, number, time);
                 write_gpr(state, d.rd, old);
             }
             if !csr_write_is_ignored(number) {
@@ -1250,7 +1304,7 @@ pub fn execute_one<M: MemoryAccess>(
             // A zero immediate means "read only" — no write.
             let number = csr::csr_number(d.raw);
             let value = csr::csr_zimm(d.raw);
-            let old = csr::csr_read(state, number);
+            let old = csr_read_at(state, number, time);
             write_gpr(state, d.rd, old);
             if value != 0 && !csr_write_is_ignored(number) {
                 csr::csr_write(state, number, old | value);
@@ -1263,7 +1317,7 @@ pub fn execute_one<M: MemoryAccess>(
             // A zero immediate means "read only" — no write.
             let number = csr::csr_number(d.raw);
             let value = csr::csr_zimm(d.raw);
-            let old = csr::csr_read(state, number);
+            let old = csr_read_at(state, number, time);
             write_gpr(state, d.rd, old);
             if value != 0 && !csr_write_is_ignored(number) {
                 csr::csr_write(state, number, old & !value);
@@ -1473,7 +1527,7 @@ mod tests {
             |_addr, _size| Err(err.clone()),
             |_addr, _size, _value| Err(err.clone()),
         );
-        exec.execute(state, &d)
+        exec.execute(state, &d, None)
     }
 
     /// A load from an unmapped address traps with `mcause = 5`

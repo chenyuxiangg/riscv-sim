@@ -61,7 +61,7 @@ use riscv_sim_contract::error::{
 use riscv_sim_contract::platform::{
     DeviceSpec, PlatformDescription, RegionSpec, WIRING_EVENT_RX_READY,
 };
-use riscv_sim_contract::port::Peripheral;
+use riscv_sim_contract::port::{Peripheral, TimeSource};
 
 use crate::m14_bus::Bus;
 use crate::m15_peripheral::clint::Clint;
@@ -393,6 +393,49 @@ pub fn map_platform(
         }
     }
     Ok(devices)
+}
+
+// ---------------------------------------------------------------------------
+// 时钟适配器（D-151 · 冻结规格 STAGE-26 §3.2）
+// ---------------------------------------------------------------------------
+
+/// **CLINT ⇒ `TimeSource`** 的适配器（D-151）。
+///
+/// ⚠️ **它包的是宿主已经持有的那一个 CLINT 句柄** ⇒ ⇒ 与总线上的那个
+/// CLINT 是**同一个实例** ⇒ ⇒ `time` 与 `mtime` 是**同一份**读数 ⇒ ⇒
+/// **不另造一个 CLINT**（那会变成两份真相）。
+///
+/// ⚠️ **用 `try_borrow`** ⇒ ⇒ 争用时**不 panic**、降级为 **0** ⇒ ⇒ 与
+/// [`BoundPeripheral::instance_id`](crate::m14_bus::BoundPeripheral::instance_id)
+/// **同形**。
+///
+/// ⚠️ **单位 = 周期（tick）** ⇒ ⇒ 与 CLINT 的 `mtime_cycles()` 逐字相同
+/// ⇒ ⇒ 不是 ps、不是指令数（STAGE-26 裁决 G）。
+pub struct ClintTimeSource {
+    /// 宿主持有的**那一个** CLINT 句柄。
+    clint: Rc<RefCell<Clint>>,
+}
+
+impl TimeSource for ClintTimeSource {
+    fn time_ticks(&self) -> u64 {
+        // ⚠️ **争用 ⇒ 0，不 panic**：平台的规矩是「不许 panic」（WASM 里
+        // panic = Worker 崩）⇒ ⇒ 拿不到读数就报 0 ⇒ ⇒ 「没有真值源就报 0」
+        // 那条规则（裁决 H）在**争用**这一支上同样成立。
+        match self.clint.try_borrow() {
+            Ok(clint) => clint.mtime_cycles(),
+            Err(_) => 0,
+        }
+    }
+}
+
+/// 把宿主的 CLINT 句柄**适配**成 `Rc<dyn TimeSource>`。
+///
+/// ⚠️ **幂等**：重复调用只是多造一个**指向同一个 CLINT** 的适配器 ⇒ ⇒
+/// 时钟仍然只有**一份**。
+pub fn clint_time_source(clint: &Rc<RefCell<Clint>>) -> Rc<dyn TimeSource> {
+    Rc::new(ClintTimeSource {
+        clint: Rc::clone(clint),
+    })
 }
 
 // ---------------------------------------------------------------------------

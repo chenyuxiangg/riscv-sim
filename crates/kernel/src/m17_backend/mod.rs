@@ -37,7 +37,7 @@ use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_01_INVALID_REGISTER_INDEX, E_ENG_03_NO_PROGRESS,
 };
 use riscv_sim_contract::model::{Breakpoint, SimState, WatchAccess, Watchpoint, WriteSize};
-use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
+use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink, TimeSource};
 use riscv_sim_contract::protocol::HaltReason;
 use riscv_sim_contract::snapshot::EngineSnapshotDto;
 
@@ -46,7 +46,7 @@ use crate::m12_engine::{
     Engine, ExecOutcome, InstructionExecutor, PeripheralTicker, RunReason, NO_PROGRESS_WINDOW,
     TIME_QUANTUM_PS,
 };
-use crate::m13_iss::csr::{csr_read, csr_write};
+use crate::m13_iss::csr::{csr_read, csr_read_with_time, csr_write};
 use crate::m13_iss::{enter_trap, write_gpr, Iss, StepOutcome};
 use crate::m14_bus::{AccessDir, Bus, BusWidth};
 use crate::m16_interrupt::{InterruptPort, PendingIntr, MAX_MASKABLE_LINE};
@@ -694,6 +694,33 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
     /// 当前装着的 M-16 端口（只读）。
     pub fn interrupt_port(&self) -> &dyn InterruptPort {
         self.intc_port.as_ref()
+    }
+
+    /// 装上平台时钟的**只读**端口（D-151 · 冻结规格 STAGE-26 §3.2）。
+    ///
+    /// ⚠️ **真值源 = M-15 的 CLINT**（宿主把 CLINT 的 `Rc<RefCell<Clint>>`
+    /// **适配**成 `Rc<dyn TimeSource>` ⇒ ⇒ 同一个实例 ⇒ ⇒ 不是两份真相）。
+    ///
+    /// ⚠️ **`None` = 没有时钟** ⇒ ⇒ `time` / `timeh` 报 **0** ⇒ ⇒ 没有
+    /// CLINT 的板（黄金 runner、`default` 档、`minimal` 档）行为**逐字不变**。
+    ///
+    /// ⚠️ **后端只做转发** ⇒ ⇒ 时钟住在 **ISS** 里 ⇒ ⇒ 两条派发路径
+    /// （闭包口 / 总线口）**同一个源** ⇒ ⇒ 不会分裂（D-11 的延续）。
+    pub fn install_time_source(&mut self, source: Option<Rc<dyn TimeSource>>) {
+        self.iss.set_time_source(source);
+    }
+
+    /// 读 guest 的一个 CSR —— **调试视图**（D-151 · 冻结规格 STAGE-26 验收
+    /// B-9）。
+    ///
+    /// ⚠️ **与 guest 读同源**：走 [`csr_read_with_time`] ⇒ ⇒ 用的是**同一个**
+    /// 时钟 ⇒ ⇒ 调试面板看到的 `time` 与 guest 读到的 `time` **逐字相同**
+    /// ⇒ ⇒ 不会出现「一边有一个值、一边是 0」。
+    ///
+    /// ⚠️ **没有时钟 ⇒ 报 0** ⇒ ⇒ 与 guest 那边的 `None` 分支**同口径**。
+    pub fn read_guest_csr(&self, csr: u16) -> u32 {
+        let state = self.engine.snapshot();
+        csr_read_with_time(&state, csr, self.iss.time_ticks())
     }
 
     /// The M-08 breakpoint table (read-only).
@@ -2214,10 +2241,10 @@ mod tests {
         (crate::m12_engine::TIME_QUANTUM_PS / crate::m12_engine::INSTRUCTION_COST_PS) as u32
     }
 
-    /// 读 guest 的一个 CSR（**唯一**入口是 M-13 的 `csr_read`）。
+    /// 读 guest 的一个 CSR（**唯一**入口是 M-17 的 `read_guest_csr` ⇒ ⇒
+    /// **调试视图与 guest 视图同源** —— 同一个时钟、同一个读法）。
     fn guest_csr(backend: &SelfIssBackend<NullSinks, NullSinks>, csr: u16) -> u32 {
-        let state = backend.snapshot().expect("snapshot");
-        crate::m13_iss::csr::csr_read(&state, csr)
+        backend.read_guest_csr(csr)
     }
 
     /// **量子边界**才仲裁（验收 26）。

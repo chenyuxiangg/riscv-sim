@@ -363,9 +363,14 @@ local pmp_lock_tor rv32i_zicsr_zifencei active csr
 # readings (STAGE-23 F11) ⇒ ⇒ a single case cannot.
 #
 # ⚠️ The row asserts the **reference side's** behaviour (STAGE-23 §4.3
-# 裁决 L) ⇒ ⇒ **before** the platform is changed it is **RED on our side**
-# and that red row **is** the discriminating-power evidence ⇒ ⇒ the
-# assertion must **not** be softened to make our side green.
+# 裁决 L) ⇒ ⇒ it was **RED on our side** until **v0.41** closed ledger
+# **D-154** (the failing piece's start address is now reported) ⇒ ⇒ that
+# red row **was** the discriminating-power evidence ⇒ ⇒ the assertion
+# must **not** be softened.
+#
+# ⚠️ **v0.41 (D-154) added a second assertion**: the trap's `mtval` must be
+# the **start of the failing piece** (`0x8004_0000`) ⇒ ⇒ **not** the access's
+# effective address (`0x8003_FFFE`) ⇒ ⇒ both sides now agree on it.
 #
 # ⚠️ A third check — the **control group** — proves the case is alive: an
 # **aligned** load and a **misaligned** load that stay **fully inside** the
@@ -384,7 +389,8 @@ local pmp_lock_tor rv32i_zicsr_zifencei active csr
 #   6 = `mcause` was 5 but `mepc` was not the faulting instruction ·
 #   7 = scenario B was **denied** (platform too strict) ·
 #   8 = scenario B was allowed but the value was not the mixed one ·
-#   9 = the misaligned control broke.
+#   9 = the misaligned control broke ·
+#   10 = the trap's `mtval` was **not** the failing piece's start (**v0.41**).
 #
 # With this row the corpus grows from **75** to **76** cases.
 local pmp_straddle rv32i_zicsr_zifencei active csr
@@ -474,11 +480,13 @@ local pmp_straddle rv32i_zicsr_zifencei active csr
 # ⇒ ⇒ the failure is reported from there ⇒ ⇒ it cannot be confused with
 # "denied with the wrong cause".
 #
-# ⚠️ `mtval` is deliberately **not** asserted (ledger **D-154**: the reference
-# side reports the failing piece's address, the platform reports the access's
-# effective address ⇒ ⇒ the two sides agree on `mcause` and differ only
-# there ⇒ ⇒ asserting it would keep this row red for a rule this batch does
-# not own).
+# ⚠️ `mtval` is still **not** asserted here — but the **reason changed**:
+# ledger **D-154** was closed in **v0.41** ⇒ ⇒ the platform now reports the
+# **failing piece's start address**, exactly like the reference side ⇒ ⇒
+# asserting it here **would be green** ⇒ ⇒ it is **not asserted because it
+# would be a duplicate**, not because it cannot be asserted ⇒ ⇒ the
+# cross-piece `mtval` assertion lives in `local/pmp_straddle` (it expects
+# `0x8004_0000`).
 #
 # ⚠️ The failure numbers tell **which** cell broke:
 #   1 = PASS · 3 = cell A was denied · 4 = cell A's value was wrong ·

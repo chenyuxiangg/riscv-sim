@@ -1,0 +1,26 @@
+# 好夹具 —— 「**没有**空洞一致」的测量表。
+#
+# 口径：`case,ref_commits,ref_traps,cand_retired,cand_traps,ref_verdict,cand_verdict`
+#   ref_commits  参考侧在**判决写**处截断后的**提交数**（Spike 的提交行）
+#   ref_traps    参考侧在判决前的**陷入次数**（`exception trap_*` 行）
+#   cand_retired 平台侧**退休**的指令数（`GOLDEN-STATS retired=`）
+#   cand_traps   平台侧的**陷入次数**（`GOLDEN-STATS traps=`）
+#   ref_verdict / cand_verdict 两侧的判决（`FAIL 3` 写成 `FAIL:3`）
+#
+# ⚠️ 这一份**期望 0 红** ⇒ ⇒ 探测器对它必须是绿的 ⇒ ⇒ 它证明「探测器不会
+# 乱报」（⇒ ⇒ 与坏夹具一起构成「不是恒绿」的证据）。
+#
+# 前两行的数字是**实测**的（`rv32ui/add` 与 `rv32mi/csr`，v0.41 批）⇒ ⇒
+# 两侧的提交数**同量级**（差的是参考侧的 5 条 boot ROM 指令）。
+rv32ui/add,470,0,464,0,PASS,PASS
+rv32mi/csr,235,4,230,3,PASS,PASS
+#
+# ⚠️ **两侧分歧的行不是「空洞一致」** ⇒ ⇒ 「空洞」的前提是「**一致**」⇒ ⇒
+# 这一行**故意**把平台侧的提交数写成 0（平台侧根本没跑出判决）⇒ ⇒ 它
+# **期望 0 红** ⇒ ⇒ 它钉住的是「判据的第一条前提」：分歧是**看得见**的，
+# 黄金门禁已经盯着它 ⇒ ⇒ 不归本工具管。
+rv32mi/illegal,9000,2,0,0,PASS,NOVERDICT
+#
+# ⚠️ **门槛以内的行也不报**：参考侧只提交了 12 条指令 ⇒ ⇒ 低于
+# `MIN_REFERENCE_COMMITS`（100）⇒ ⇒ 「差得再多也说明不了什么」⇒ ⇒ 0 红。
+local/tiny,12,0,0,0,PASS,PASS

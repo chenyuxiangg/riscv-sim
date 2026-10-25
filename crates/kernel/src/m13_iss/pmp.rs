@@ -57,7 +57,7 @@
 //!   `mcause = 1`.
 
 use riscv_sim_contract::csr::{
-    pmp_access_allowed, pmp_cfg_warl, pmp_decode_cfg, pmp_effective_privilege, pmp_exempt,
+    pmp_cfg_warl, pmp_decode_cfg, pmp_effective_privilege, pmp_exempt, pmp_fault_piece_addr,
     PmpAccess, CSR_MSTATUS, CSR_PMPADDR0, CSR_PMPCFG0, CSR_PRIV, PMP_A_TOR, PMP_CFG_L,
     PMP_ENTRY_COUNT,
 };
@@ -170,6 +170,33 @@ pub(crate) fn access_bytes(size: WriteSize) -> u32 {
 /// 时**施加** PMP（落在无权限条目里 ⇒ ⇒ 拒，`mcause` 5）· S 模式的取指落在无
 /// `X` 权限的条目里 ⇒ ⇒ 拒（`mcause` 1）
 pub(crate) fn pmp_allows(state: &SimState, addr: u32, size: u32, access: PmpAccess) -> bool {
+    // ⚠️ **一个约束一个落点**（STAGE-26 裁决 B）：判定**仍然只有这一个入口**
+    // ⇒ ⇒ 「允不允许」与「被拒时报哪一个地址」**不可能漂移**。
+    pmp_fault_addr(state, addr, size, access).is_none()
+}
+
+/// The **failing piece's start address** of an access that PMP rejects — or
+/// `None` when the access is permitted.
+///
+/// ⚠️ **它是 [`pmp_allows`] 的实现**（STAGE-26 裁决 B）⇒ ⇒ 判定**仍然只有
+/// 一个入口**（这个模块）⇒ ⇒ 读与写与取指三条路径**问的是同一件事**。
+///
+/// ⚠️ **为什么要有它**（台账 **D-154**）：参考侧在 PMP 拒绝时 `mtval` 报的是
+/// 「**出错那一片的起始地址**」（实测 F1）⇒ ⇒ 平台原来报「访问的有效地址」
+/// ⇒ ⇒ 两侧的 `mcause` **相同**（都是 5）⇒ ⇒ 只看 `mcause` **分不出**这一条。
+///
+/// ⚠️ **失败片地址由判定本身产出**（STAGE-26 裁决 C）⇒ ⇒ ⛔ **不许**在调用方
+/// 用「有效地址 + 偏移」重算 ⇒ ⇒ 那等于**重新实现**一次切片 ⇒ ⇒ 两个真相源。
+///
+/// ⚠️ **热路径不许被改慢**：M 模式豁免那一支**先返回 `None`**（与既有
+/// [`pmp_allows`] 的早退**同形**）⇒ ⇒ 常见情形仍然只扫一遍 CSR 文件 + 几个
+/// 掩码判断。
+pub(crate) fn pmp_fault_addr(
+    state: &SimState,
+    addr: u32,
+    size: u32,
+    access: PmpAccess,
+) -> Option<u32> {
     let view = PmpView::read(state);
 
     // ---- 有效特权级 ----------------------------------------------------
@@ -195,7 +222,8 @@ pub(crate) fn pmp_allows(state: &SimState, addr: u32, size: u32, access: PmpAcce
     // **有效特权级** ⇒ ⇒ S 模式的访存**不再**走这条路。
     let any_locked = (0..PMP_ENTRY_COUNT).any(|index| view.locked(index));
     if pmp_exempt(effective, any_locked) {
-        return true;
+        // ⚠️ **豁免 ⇒ ⇒ 没有失败片** ⇒ ⇒ `None`（放行）。
+        return None;
     }
 
     // ---- slow path: hand the entries to the contract layer ------------
@@ -203,7 +231,7 @@ pub(crate) fn pmp_allows(state: &SimState, addr: u32, size: u32, access: PmpAcce
     for (index, slot) in entries.iter_mut().enumerate() {
         *slot = (pmp_decode_cfg(view.cfg_byte(index)), view.addr[index]);
     }
-    pmp_access_allowed(&entries, addr, size, access, effective)
+    pmp_fault_piece_addr(&entries, addr, size, access, effective)
 }
 
 /// The write rules of the PMP CSRs — `Some(value)` means "the PMP owns this
