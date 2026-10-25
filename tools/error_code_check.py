@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """场景码的「**定义处 / 引用处**」清单 + 「**唯一定义**」不变式的机器化检查
-（台账 **D-132** · v0.42 批 · STAGE-27 §2.3 / §3.3 · 裁决 C / D）。
+（台账 **D-132** · v0.42 批 · STAGE-27 §2.3 / §3.3 · 裁决 C / D）
+＋ **前端服务层 × 内核 crate 的撞号判据**
+（台账 **D-157** · v0.43 批 · STAGE-28 §2.4 / §3.3 · 裁决 G / H / I / N）。
 
 台账 **D-132** 的现状（原文）：
 
@@ -30,16 +32,40 @@
 * **引用 crate**（哪些 crate 引用了它 ⇒ ⇒ 跨 crate 引用 = 判据 ① 的材料）
 * **前端提及**（前端**运行时代码**有没有点名它 ⇒ ⇒ 判据 ② 的材料）
 
-## 本脚本**断言**的三件事（每条一个**独立**的失败种类）
+## 本脚本**断言**的四件事（每条一个**独立**的失败种类）
 
 | 种类 | 断言 | 对应 |
 | --- | --- | --- |
 | `重复定义` | 同一个 `E_XXX_NN` **只有一处**定义 | 台账 **D-120** |
 | `值与名不符` | 常量的值 == 名字里的两位场景号 | 「一个码一个含义」 |
 | `族未声明` | 族标签在 `error_families!` 里声明过 | 「**加码不加族**」 |
+| `前端与内核撞号` | 前端**服务层**自产的码与**内核 crate**自产的码**不共用同一个号** | 台账 **D-157** |
 
 ⚠️ **判据 ① 的键是「码」**（`E_XXX_NN`），**不是**常量的名字 ⇒ ⇒ 两处
 **名字不同**、但**同一个码**的定义**照样**被抓出来（那正是 D-120 的形状）。
+
+## 第四条断言的**规则**（STAGE-28 §2.4 裁决 G / H）
+
+⇒ ⇒ **同一个族里，前端服务层自产的码与内核自产的码，不许用同一个号**
+⇒ ⇒ **不**规定具体号段（现有码已经不符那种约定）⇒ ⇒ 只禁**重叠**
+⇒ ⇒ **规则住在工具里**（一个约束一个落点）⇒ ⇒ 文字版写进台账。
+
+⇒ ⇒ **判红必须「逐条判」**（每个码**单独**判 ⇒ ⇒ 失败清单里**每个码一行**）
+⇒ ⇒ ⛔ **禁**「全仓一共有几个撞号」那种数法（STAGE-28 裁决 N）。
+
+| 项 | 口径 |
+| --- | --- |
+| 前端「使用」 | **代码**里出现（**注释不算**）· **`front/dev/` 不算**（模拟内核的替身）· **`front/tests/` 不算**（测试） |
+| 内核「定义」 | `crates/**` 里的 `const E_XXX_NN`（**含契约层**） |
+| **豁免一** | 前端用到、而**契约层**也定义的码 ⇒ ⇒ **正当镜像** ⇒ ⇒ **不红** |
+| **豁免二** | 前端用到、但只出现在 `front/dev/` ⇒ ⇒ **模拟内核** ⇒ ⇒ **不红** |
+| **判红** | 前端**服务层**用到、而**内核 crate**（**不含契约层**）也定义了 ⇒ ⇒ **撞号 ⇒ ⇒ 红** |
+
+⚠️ **「前端服务层」的口径写死在本文件里**（`FRONT_SERVICE_DIRS` /
+`FRONT_SERVICE_FILES`）⇒ ⇒ `front/services/**` 与 `front/lib/**`
+（契约层的 JS 镜像）+ `front/kernel-worker.js`（传输宿主）⇒ ⇒
+**视图层**（`front/views/**` + `front/app.js`）**只消费、不自产** ⇒ ⇒
+**不判红** ⇒ ⇒ 依据是 STAGE-28 事实 **F8**：实测到的真撞号只出现在服务层。
 
 ## 它**不能**查什么（裁决 D · 验收 A-5）
 
@@ -63,7 +89,7 @@
 
 ## 用法
 
-    python3 tools/error_code_check.py               # 扫真仓（清单 + 三条断言）
+    python3 tools/error_code_check.py               # 扫真仓（清单 + 四条断言）
     python3 tools/error_code_check.py --no-listing   # 只报断言结果
     python3 tools/error_code_check.py --self-test    # 用**自带夹具**自测
     python3 tools/error_code_check.py --help
@@ -78,15 +104,18 @@
 
 ⚠️ **两种失败必须能分开** ⇒ ⇒ 「报出问题」是 **1**，「工具坏了」是 **2**。
 
-## 夹具（验收 A-6）
+## 夹具（验收 A-6 / A-8）
 
 ⚠️ 夹具**内嵌在本文件里** ⇒ ⇒ `--self-test` 把它写进一个**临时目录**再跑
 ⇒ ⇒ **不往仓里写一个字节** ⇒ ⇒ 而「好夹具 0 红 / 坏夹具红」这条**对照**
 本身**必须成立** ⇒ ⇒ 否则这个检查就是**恒绿**的。
 
-* **好夹具**：每个码**一处**定义、值与名相符、族已声明 ⇒ ⇒ **0 红**。
-* **坏夹具**：**三种坏法各一处** ⇒ ⇒ 红集 = {`重复定义`, `值与名不符`,
-  `族未声明`} ⇒ ⇒ 三条断言被**单独**钉住（⇒ ⇒ 变异自检可以逐条打掉）。
+* **好夹具**：每个码**一处**定义、值与名相符、族已声明、**前端服务层不撞
+  内核** ⇒ ⇒ **0 红** ⇒ ⇒ 顺带把**豁免一**（契约层的码被前端镜像）与
+  **豁免二**（只出现在 `front/dev/` 的码）都**跑一遍**。
+* **坏夹具**：**四种坏法各一处** ⇒ ⇒ 红集 = {`重复定义`, `值与名不符`,
+  `族未声明`, `前端与内核撞号`} ⇒ ⇒ 四条断言被**单独**钉住（⇒ ⇒ 变异自检
+  可以逐条打掉）⇒ ⇒ 红集**逐字**比对（不许只比「有红」）。
 """
 
 from __future__ import annotations
@@ -116,6 +145,27 @@ FRONT_ROOT = "front"
 
 #: 前端的**测试**目录 ⇒ ⇒ 里面的提及**不算**「前端按码分派」。
 FRONT_TEST_DIR = "front/tests"
+
+#: 前端**模拟内核的替身**目录 ⇒ ⇒ 里面的码**豁免**（裁决 H 豁免二）。
+FRONT_DEV_DIR = "front/dev"
+
+#: 契约层的 crate 名 ⇒ ⇒ **豁免一**：契约层定义的码被前端**镜像** ⇒ ⇒ 正当。
+CONTRACT_CRATE = "contract"
+
+#: 前端**服务层** ⇒ ⇒ 前端**自产码**住在这一层 ⇒ ⇒ **判红只看这一层**。
+#:
+#: ⚠️ **口径写死在这里**（不许散落在别处）⇒ ⇒ 「前端服务层」这个说法**只有
+#: 这一处定义** ⇒ ⇒ 改口径 = 改这一处。
+FRONT_SERVICE_DIRS = ("front/services/", "front/lib/")
+
+#: 前端**服务层**里的**单个**文件（浏览器的传输宿主 ⇒ ⇒ M-07 那一侧 ⇒ ⇒
+#: 它**自产**码 ⇒ ⇒ 与 `front/services/` 同一层）。
+FRONT_SERVICE_FILES = ("front/kernel-worker.js",)
+
+#: 前端**视图层** ⇒ ⇒ 只**消费**码、不**自产**码 ⇒ ⇒ **不判红**
+#: （依据：STAGE-28 事实 F8 实测到的真撞号只出现在**服务层**）。
+FRONT_VIEW_DIRS = ("front/views/",)
+FRONT_VIEW_FILES = ("front/app.js",)
 
 #: Rust 的 `const` 定义 ⇒ ⇒ `E_<FAM>_<NN>[_<MEANING>]`。
 DEF_RE = re.compile(
@@ -156,6 +206,10 @@ KIND_VALUE_MISMATCH = "值与名不符"
 #: 族标签**没有**在 `error_families!` 里声明过 ⇒ ⇒ 「加码不加族」。
 KIND_FAMILY_UNDECLARED = "族未声明"
 
+#: 前端**服务层**自产的码与**内核 crate**自产的码**撞号** ⇒ ⇒ 台账 **D-157**
+#: （STAGE-28 §2.4 裁决 G / H · 一条约束一个落点 ⇒ ⇒ **规则住在工具里**）。
+KIND_FRONT_KERNEL_COLLISION = "前端与内核撞号"
+
 #: 退出码。
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -163,9 +217,12 @@ EXIT_TOOL_ERROR = 2
 
 #: **判别力边界声明**（裁决 D）—— **每一次运行都打印**。
 BOUNDARY_STATEMENT = (
-    "BOUNDARY: this tool reports FACTS only — the definition site, every\n"
+    "BOUNDARY: this tool reports FACTS — the definition site, every\n"
     "          reference site, which crates reference the code, and whether the\n"
-    "          front end names it.  It does NOT decide where a scenario code\n"
+    "          front end names it.  On top of the facts it enforces four\n"
+    "          MECHANICAL rules (unique definition / value matches the name /\n"
+    "          the family is declared / the front service layer does not collide\n"
+    "          with the kernel crates).  It does NOT decide where a scenario code\n"
     "          'lives': that is the criterion (cross-module shared OR the front\n"
     "          end dispatches on it) plus a human judgement (STAGE-27 §2.3).\n"
     "          （本工具**不**判定「场景码住哪」⇒ ⇒ 那是**判据 + 人工**。）"
@@ -243,6 +300,26 @@ class CodeReport:
             o for o in self.front_refs if not is_front_test(o.rel_path) and o.comment
         ]
 
+    @property
+    def front_service_uses(self) -> list[Occurrence]:
+        """前端**服务层**里**真的用到**这个码。
+
+        ⇒ ⇒ 注释不算（`front_uses` 已经排掉）⇒ ⇒
+        ⇒ ⇒ `front/tests/`（测试）· `front/dev/`（模拟内核的替身）·
+        ⇒ ⇒ `front/views/` + `front/app.js`（视图层）**都不算**。
+        """
+        return [o for o in self.front_uses if is_front_service(o.rel_path)]
+
+    @property
+    def front_view_uses(self) -> list[Occurrence]:
+        """前端**视图层**里用到这个码（⇒ ⇒ **不判红**，只作观察）。"""
+        return [o for o in self.front_uses if is_front_view(o.rel_path)]
+
+    @property
+    def front_dev_uses(self) -> list[Occurrence]:
+        """前端**模拟内核的替身**（`front/dev/`）里用到这个码（⇒ ⇒ **豁免二**）。"""
+        return [o for o in self.front_uses if is_front_dev(o.rel_path)]
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -282,6 +359,29 @@ def crate_of(rel_path: str) -> str:
 def is_front_test(rel_path: str) -> bool:
     """前端**测试**里的提及不算「前端按码分派」。"""
     return rel_path.startswith(FRONT_TEST_DIR + "/")
+
+
+def is_front_dev(rel_path: str) -> bool:
+    """前端**模拟内核的替身**（`front/dev/`）⇒ ⇒ 豁免二。"""
+    return rel_path.startswith(FRONT_DEV_DIR + "/")
+
+
+def is_front_service(rel_path: str) -> bool:
+    """前端**服务层** ⇒ ⇒ 前端**自产码**住在这一层。
+
+    ⚠️ **口径写死**（`FRONT_SERVICE_DIRS` / `FRONT_SERVICE_FILES`）⇒ ⇒
+    「前端服务层」这个说法**只有这一处定义**。
+    """
+    if rel_path in FRONT_SERVICE_FILES:
+        return True
+    return any(rel_path.startswith(prefix) for prefix in FRONT_SERVICE_DIRS)
+
+
+def is_front_view(rel_path: str) -> bool:
+    """前端**视图层** ⇒ ⇒ 只**消费**码 ⇒ ⇒ **不判红**。"""
+    if rel_path in FRONT_VIEW_FILES:
+        return True
+    return any(rel_path.startswith(prefix) for prefix in FRONT_VIEW_DIRS)
 
 
 def collect_sources(root: Path) -> list[tuple[str, str]]:
@@ -500,6 +600,52 @@ def judge(definitions: list[Definition], family_tags: list[str]) -> list[Finding
     return findings
 
 
+def judge_front_kernel_collisions(codes: dict[str, CodeReport]) -> list[Finding]:
+    """跑**第四条断言**：前端**服务层** × **内核 crate** 的**撞号**。
+
+    ⇒ ⇒ **规则**（STAGE-28 §2.4 裁决 G）：**同一个族里，前端服务层自产的码
+    与内核自产的码，不许用同一个号** ⇒ ⇒ 不规定具体号段 ⇒ ⇒ 只禁**重叠**。
+
+    ⇒ ⇒ **逐条判**（每个码**单独**判 ⇒ ⇒ 失败清单里**每个码一行**）⇒ ⇒
+    ⛔ **禁**「全仓一共有几个撞号」那种数法（STAGE-28 裁决 N）。
+
+    ⇒ ⇒ **豁免一**：契约层**也**定义 ⇒ ⇒ 前端镜像的是契约层的码 ⇒ ⇒ 正当
+    ⇒ ⇒ **不红**（那种「重复定义」另有断言 ① 兜着）。
+    ⇒ ⇒ **豁免二**：前端用到、但**只**出现在 `front/dev/` ⇒ ⇒ 模拟内核 ⇒ ⇒
+    **不红**（⇒ ⇒ `front/dev/` **不在**服务层 ⇒ ⇒ 自然落进这一支）。
+    ⇒ ⇒ **判红**：前端**服务层**用到、而**内核 crate**（**不含契约层**）也
+    定义了 ⇒ ⇒ **撞号 ⇒ ⇒ 红**。
+    """
+    findings: list[Finding] = []
+    for code in sorted(codes):
+        item = codes[code]
+        uses = item.front_service_uses
+        if not uses:
+            continue
+        contract_defs = [d for d in item.definitions if d.crate == CONTRACT_CRATE]
+        if contract_defs:
+            # ---- 豁免一：契约层也定义 ⇒ ⇒ 正当镜像 ⇒ ⇒ 不红 ----
+            continue
+        kernel_defs = [d for d in item.definitions if d.crate != CONTRACT_CRATE]
+        if not kernel_defs:
+            continue
+        where_front = "、".join(f"{o.rel_path}:{o.line}" for o in uses)
+        where_kernel = "、".join(
+            f"{d.rel_path}:{d.line}（{d.const_name}）" for d in kernel_defs
+        )
+        findings.append(
+            Finding(
+                kind=KIND_FRONT_KERNEL_COLLISION,
+                code=code,
+                detail=(
+                    f"前端服务层在 {where_front} 用到它，"
+                    f"而内核 crate 在 {where_kernel}也定义了它"
+                ),
+            )
+        )
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # 报告
 # ---------------------------------------------------------------------------
@@ -548,7 +694,7 @@ def build_report(root: Path) -> Report:
     )
 
     return Report(
-        findings=judge(definitions, family_tags),
+        findings=judge(definitions, family_tags) + judge_front_kernel_collisions(codes),
         codes=codes,
         named_without_definition=named_without_definition,
         undefined_occurrences={
@@ -602,7 +748,13 @@ def print_listing(report: Report) -> None:
         print(f"  引用 crate : {', '.join(item.ref_crates) if item.ref_crates else '（无）'}")
         front_use = format_occurrences(item.front_uses)
         front_note = format_occurrences(item.front_comments)
+        front_service = format_occurrences(item.front_service_uses)
+        front_view = format_occurrences(item.front_view_uses)
+        front_dev = format_occurrences(item.front_dev_uses)
         print(f"  前端**使用** : {'; '.join(front_use) if front_use else '（无）'}")
+        print(f"  前端**服务层** : {'; '.join(front_service) if front_service else '（无）'}")
+        print(f"  前端**视图层** : {'; '.join(front_view) if front_view else '（无）'}")
+        print(f"  前端**dev 替身** : {'; '.join(front_dev) if front_dev else '（无）'}")
         print(f"  前端**注释** : {'; '.join(front_note) if front_note else '（无）'}")
         print()
 
@@ -702,7 +854,8 @@ error_families! {
 }
 """
 
-#: **好夹具** —— 每个码**一处**定义、值与名相符、族已声明 ⇒ ⇒ 期望 **0 红**。
+#: **好夹具** —— 每个码**一处**定义、值与名相符、族已声明、**前端服务层不撞
+#: 内核** ⇒ ⇒ 期望 **0 红**。
 FIXTURE_GOOD: dict[str, str] = {
     "crates/contract/src/error.rs": (
         "//! 好夹具的契约层错误码。\n" + _FIXTURE_FAMILIES + """
@@ -723,6 +876,7 @@ pub const E_PLT_01_SCHEMA_VERSION: u16 = 1;
         "//! 好夹具：内核自有的码。\n"
         "pub const E_LDR_02_PARSE_LIMIT: u16 = 2;\n"
         "/// 文档里提到 `E_BUS-03`（**文本提及**）。\n"
+        "pub const E_BUS_04_OUT_OF_RANGE: u16 = 4;\n"
     ),
     "front/services/m05_commandrouter.js": (
         '// 好夹具：前端点名一个契约层的码。\n'
@@ -733,9 +887,25 @@ pub const E_PLT_01_SCHEMA_VERSION: u16 = 1;
         "// ⚠️ 前端**测试**里的提及**不算**「前端按码分派」。\n"
         'export const ONLY_IN_TESTS = "E_LDR-02";\n'
     ),
+    # ---- 豁免二：前端**模拟内核的替身**（`front/dev/`）⇒ ⇒ **不红** ----
+    "front/dev/mock-kernel.js": (
+        "// 好夹具：模拟内核用了一个**内核 crate 也定义**的码\n"
+        "// ⇒ ⇒ 豁免二 ⇒ ⇒ **不红**（它不是前端的**服务层**）。\n"
+        'export const BUS_OVERLAP = "E_BUS-03";\n'
+    ),
+    # ---- 视图层：只**消费**码、不**自产**码 ⇒ ⇒ **不红** ----
+    "front/app.js": (
+        "// 好夹具：视图层用了一个**内核 crate 也定义**的码\n"
+        "// ⇒ ⇒ 视图层**不判红**（依据：STAGE-28 事实 F8）。\n"
+        'export const BUS_RANGE = "E_BUS-04";\n'
+    ),
+    "front/views/components/memory-map.js": (
+        "// 好夹具：视图组件同上 ⇒ ⇒ **不红**。\n"
+        'export const BUS_RANGE = "E_BUS-04";\n'
+    ),
 }
 
-#: **坏夹具** —— **三种坏法各一处** ⇒ ⇒ 红集 = 三种失败各一次。
+#: **坏夹具** —— **四种坏法各一处** ⇒ ⇒ 红集 = 四种失败各一次。
 FIXTURE_BAD: dict[str, str] = {
     "crates/contract/src/error.rs": (
         "//! 坏夹具的契约层错误码。\n" + _FIXTURE_FAMILIES + """
@@ -752,20 +922,62 @@ pub const E_ZZZ_01_UNKNOWN_FAMILY: u16 = 1;
     "crates/kernel/src/m14_bus/mod.rs": (
         "//! 坏夹具 ② 的对照行：一个**正常**的码（⇒ ⇒ 它**不该**红）。\n"
         "pub const E_BUS_03_OVERLAP: u16 = 3;\n"
+        "//! 坏夹具 ③：内核 crate **自己**的码（⇒ ⇒ 前端服务层撞上它 ⇒ ⇒ 红）。\n"
+        "pub const E_BUS_01_UNMAPPED: u16 = 1;\n"
     ),
     "front/services/m05_commandrouter.js": (
         "// 坏夹具：前端点名一个**存在**的码（⇒ ⇒ 前端提及不是失败）。\n"
         'export const UNKNOWN = "E_PLT-01";\n'
+        "// 坏夹具 ③：前端**服务层**用了一个**内核 crate 也定义**的码。\n"
+        'export const BUS_UNMAPPED = "E_BUS-01";\n'
     ),
 }
 
-#: 坏夹具的**期望红集**（⇒ ⇒ 三条断言被**单独**钉住）。
+#: 坏夹具的**期望红集**（⇒ ⇒ 四条断言被**单独**钉住）。
+#:
+#: ⚠️ **逐条**（`(种类, 码)`）⇒ ⇒ 不许只比「有红」⇒ ⇒ 红集**内容**要对得上。
 BAD_EXPECTED_KINDS = sorted(
-    [KIND_DUPLICATE_DEFINITION, KIND_VALUE_MISMATCH, KIND_FAMILY_UNDECLARED]
+    [
+        KIND_DUPLICATE_DEFINITION,
+        KIND_VALUE_MISMATCH,
+        KIND_FAMILY_UNDECLARED,
+        KIND_FRONT_KERNEL_COLLISION,
+    ]
 )
 
 #: 坏夹具的**期望失败条数**（每种坏法各一次）。
-BAD_EXPECTED_COUNT = 3
+BAD_EXPECTED_COUNT = 4
+
+#: 坏夹具的**期望红集（逐条）** ⇒ ⇒ `(种类, 码)` 的多重集。
+BAD_EXPECTED_PAIRS = sorted(
+    [
+        (KIND_DUPLICATE_DEFINITION, "E_CTX_07"),
+        (KIND_VALUE_MISMATCH, "E_PLT_01"),
+        (KIND_FAMILY_UNDECLARED, "E_ZZZ_01"),
+        (KIND_FRONT_KERNEL_COLLISION, "E_BUS_01"),
+    ]
+)
+
+
+def _line_of(tree: dict[str, str], rel: str, needle: str) -> int:
+    """夹具里某一行（含 `needle`）的行号 ⇒ ⇒ 期望值**从夹具算出来**。
+
+    ⇒ ⇒ 夹具改了行号 ⇒ ⇒ 期望**自动跟着改** ⇒ ⇒ 不会「假红」也不会「假绿」。
+    """
+    for index, line in enumerate(tree[rel].split("\n"), start=1):
+        if needle in line:
+            return index
+    raise ToolError(f"夹具里找不到 {needle}（{rel}）")
+
+
+#: 坏夹具里**撞号**那一条的**逐字**期望（行号从夹具文本**算出来**）。
+BAD_COLLISION_DETAIL = (
+    "前端服务层在 front/services/m05_commandrouter.js:"
+    f"{_line_of(FIXTURE_BAD, 'front/services/m05_commandrouter.js', 'E_BUS-01')} 用到它，"
+    "而内核 crate 在 crates/kernel/src/m14_bus/mod.rs:"
+    f"{_line_of(FIXTURE_BAD, 'crates/kernel/src/m14_bus/mod.rs', 'E_BUS_01_UNMAPPED')}"
+    "（E_BUS_01_UNMAPPED）也定义了它"
+)
 
 
 def self_test() -> int:
@@ -801,6 +1013,34 @@ def self_test() -> int:
         problems.append("注释里的提及被算成了「前端**使用**」⇒ ⇒ 口径破了")
     if not good.codes.get("E_PLT_02") or not good.codes["E_PLT_02"].front_comments:
         problems.append("好夹具里 `E_PLT_02` 的前端**注释**没列出来 ⇒ ⇒ 清单不全")
+    # ---- 第四条断言的三条口径（豁免一 / 豁免二 / 视图层）⇒ ⇒ 逐条钉住 ----
+    # ⚠️ **豁免一**：契约层也定义 ⇒ ⇒ 前端**镜像**它 ⇒ ⇒ **不红**。
+    if not good.codes.get("E_PLT_01") or not good.codes["E_PLT_01"].front_service_uses:
+        problems.append(
+            "好夹具里 `E_PLT_01` 的**服务层**使用没列出来 ⇒ ⇒ 豁免一这条口径没法验"
+        )
+    # ⚠️ **豁免二**：只出现在 `front/dev/` ⇒ ⇒ **不红** ⇒ ⇒ 但**它确实被前端用到**。
+    dev_code = good.codes.get("E_BUS_03")
+    if dev_code is None:
+        problems.append("好夹具里 `E_BUS_03` 消失了 ⇒ ⇒ 清单没列全")
+    elif not dev_code.front_uses:
+        problems.append(
+            "好夹具里 `E_BUS_03` 的 `front/dev/` 提及没算成「前端使用」⇒ ⇒ 口径破了"
+        )
+    elif dev_code.front_service_uses:
+        problems.append(
+            "`front/dev/`（模拟内核的替身）被算成了**前端服务层**⇒ ⇒ 豁免二破了"
+        )
+    # ⚠️ **视图层**只**消费**码 ⇒ ⇒ **不判红** ⇒ ⇒ 但**它确实被前端用到**。
+    view_code = good.codes.get("E_BUS_04")
+    if view_code is None:
+        problems.append("好夹具里 `E_BUS_04` 消失了 ⇒ ⇒ 清单没列全")
+    elif not view_code.front_uses:
+        problems.append("好夹具里 `E_BUS_04` 的视图层提及没算成「前端使用」⇒ ⇒ 口径破了")
+    elif view_code.front_service_uses:
+        problems.append("**视图层**被算成了前端服务层 ⇒ ⇒ 「只判服务层」这条口径破了")
+    elif not view_code.front_view_uses:
+        problems.append("好夹具里 `E_BUS_04` 的视图层使用没列出来 ⇒ ⇒ 清单不全")
 
     print()
     print("== 坏夹具（期望红）==")
@@ -815,13 +1055,31 @@ def self_test() -> int:
             "坏夹具的失败条数与期望不符："
             f"期望 {BAD_EXPECTED_COUNT} 条，实际 {len(bad.findings)} 条"
         )
+    # ⚠️ **红集内容**要**逐字**对得上 ⇒ ⇒ 不许只比「有红」。
+    got_pairs = sorted((f.kind, f.code) for f in bad.findings)
+    if got_pairs != BAD_EXPECTED_PAIRS:
+        problems.append(
+            f"坏夹具的**逐条**红集与期望不符：期望 {BAD_EXPECTED_PAIRS}，实际 {got_pairs}"
+        )
+    collisions = [f for f in bad.findings if f.kind == KIND_FRONT_KERNEL_COLLISION]
+    if len(collisions) != 1:
+        problems.append(
+            f"坏夹具的「{KIND_FRONT_KERNEL_COLLISION}」应当**恰好一条**，"
+            f"实际 {len(collisions)} 条"
+        )
+    elif collisions[0].detail != BAD_COLLISION_DETAIL:
+        problems.append(
+            "坏夹具的撞号那条**详情**与期望不符：\n"
+            f"      期望：{BAD_COLLISION_DETAIL}\n"
+            f"      实际：{collisions[0].detail}"
+        )
 
     if problems:
         print("\nFAIL: 自测不通过", file=sys.stderr)
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
         return EXIT_FINDINGS
-    print("\nPASS: 场景码检查自测全过（好夹具 0 红，坏夹具红且红集相符）")
+    print("\nPASS: 场景码检查自测全过（好夹具 0 红，坏夹具红且红集逐字相符）")
     return EXIT_OK
 
 
