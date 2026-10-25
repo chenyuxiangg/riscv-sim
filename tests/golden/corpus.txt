@@ -388,3 +388,115 @@ local pmp_lock_tor rv32i_zicsr_zifencei active csr
 #
 # With this row the corpus grows from **75** to **76** cases.
 local pmp_straddle rv32i_zicsr_zifencei active csr
+
+# ---------------------------------------------------------------------------
+# The PMP privilege-scope corpus (v0.40 · D-153 · PMP 的「特权口径」)
+# ---------------------------------------------------------------------------
+#
+# `local/pmp_privilege` pins the **five cells** of the rule "at which
+# privilege level does an access run", because that is what decides whether
+# PMP applies to it at all.  The privileged spec's rule (§3.7.6) is:
+#
+#   effective privilege = MPRV ? MPP : current privilege   (loads / stores)
+#   fetch always uses the current privilege                 (MPRV is irrelevant)
+#   effective privilege == M  =>  PMP is exempt            (unless the deciding
+#                                                             entry is locked)
+#
+# The platform used to collapse that formula into "look at MPRV only" — and
+# the fetch path was **unconditionally** exempt ⇒ ⇒ it is wrong in **three**
+# directions (ledger **D-153** for the first two):
+#
+#   * **(a) too strict** — `MPRV` = 1 and `MPP` = 3 (M) ⇒ ⇒ the effective
+#     privilege is M ⇒ ⇒ PMP must be **exempt** (allow) · the platform checked
+#     it anyway (deny);
+#   * **(b) too loose — ⚠️ the security direction** — **S mode** with
+#     `MPRV` = 0 ⇒ ⇒ the effective privilege is S ⇒ ⇒ PMP **must** apply
+#     (deny) · the platform **exempted** it (allow) ⇒ ⇒ S-mode code can
+#     reach memory it must not reach;
+#   * **(c) too loose — ⚠️ the security direction** — an **instruction fetch**
+#     in **S mode** into an entry with **no `X`** ⇒ ⇒ the reference side
+#     **denies** it (`mcause` = 1, instruction access fault) · the platform
+#     **exempted every fetch** ⇒ ⇒ allowed.
+#
+# ⚠️ **The five cells.**  **One** program runs all five; the four data cells
+# use the **same** address `T` = `0x8004_0000` (which sits in the DENY
+# entry), and the fetch cell jumps to that same address:
+#
+#   A — M mode · `MPRV` = 0 · `MPP` = 0 ⇒ ⇒ effective privilege M ⇒ ⇒
+#       **allow** (and the loaded value must be the pre-filled one)
+#   B — M mode · `MPRV` = 1 · `MPP` = 0 (U) ⇒ ⇒ effective privilege U ⇒ ⇒
+#       **deny** ⇒ ⇒ a trap with `mcause` = 5
+#   C — M mode · `MPRV` = 1 · `MPP` = 3 (M) ⇒ ⇒ effective privilege M ⇒ ⇒
+#       **allow** (and the loaded value must be the pre-filled one)
+#   D — **S mode** · `MPRV` = 0 ⇒ ⇒ effective privilege S ⇒ ⇒ **deny** ⇒ ⇒
+#       a trap with `mcause` = 5
+#   E — **S mode** · an **instruction fetch** @ `T` ⇒ ⇒ the fetch uses the
+#       **current** privilege ⇒ ⇒ PMP applies ⇒ ⇒ **deny** ⇒ ⇒ a trap with
+#       `mcause` = 1 (instruction access fault) and `mepc` = the target address
+#
+# ⚠️ Cell A alone has **zero** discriminating power (the old and the new
+# implementation agree on it) ⇒ ⇒ the discriminating power lives in cell C
+# (catches (a)), cell D (catches (b)) and cell E (catches (c)) ⇒ ⇒ **all
+# three** must be there.  ⚠️ And D / E are not substitutes for each other:
+# they are **two different code paths** in the platform (the data path's
+# `m_mode_bypass` and the fetch path's unconditional exemption) ⇒ ⇒ pinning
+# one leaves the other hole open.
+# ⚠️ And A / B are not redundant either: they differ **only** in `MPRV` ⇒ ⇒
+# that pair pins what `MPRV` actually does (it swaps the effective privilege
+# of a load / store for `MPP` — it is **not** "turn the check on").
+#
+# ⚠️ **One program for the five cells** ⇒ ⇒ a "half-fixed" implementation
+# cannot look green ⇒ ⇒ the verdict is per-cell and independent.
+#
+# ⚠️ **Only the FIRST failing cell is reported** (the verdict is a single
+# number) ⇒ ⇒ fixing one cell means re-running to see the next one ⇒ ⇒ the
+# order is: the **control group** first (it proves the setup), then the two
+# cells both implementations agree on (A / B — if they fail, the setup is
+# broken and every later verdict is meaningless), then C (the only M-mode
+# discriminating cell), then D and E last (they need the S-mode entry, which
+# is therefore exercised exactly once and needs no "back to M mode" machinery).
+#
+# ⚠️ The **control group**: an access inside the ALLOW entry (and outside the
+# DENY one) must deliver the pre-filled value — and it is run with PMP
+# **actually in effect** (`MPRV` = 1, `MPP` = 0 ⇒ ⇒ the same window as cell B)
+# ⇒ ⇒ without it, an implementation that denies *every* checked access would
+# satisfy cells B, D and E.
+#
+# ⚠️ **The trap's causality**: `mcause` must be **5** (load access fault) for
+# the data cells and **1** (instruction access fault) for the fetch cell, and
+# `mepc` must be **the faulting instruction** (data) or **the target
+# address** (fetch) ⇒ ⇒ a trap from somewhere else cannot pass as a denial.
+#
+# ⚠️ **Cell E's "not denied" is visible.**  The word pre-filled at the target
+# (`0xfeedface`) is **not** a valid instruction ⇒ ⇒ if the fetch is allowed,
+# that word is *executed* ⇒ ⇒ illegal instruction (`mcause` = 2) ⇒ ⇒ and
+# cause 2 **is** delegated ⇒ ⇒ so that trap lands on the **S-level** handler
+# ⇒ ⇒ the failure is reported from there ⇒ ⇒ it cannot be confused with
+# "denied with the wrong cause".
+#
+# ⚠️ `mtval` is deliberately **not** asserted (ledger **D-154**: the reference
+# side reports the failing piece's address, the platform reports the access's
+# effective address ⇒ ⇒ the two sides agree on `mcause` and differ only
+# there ⇒ ⇒ asserting it would keep this row red for a rule this batch does
+# not own).
+#
+# ⚠️ The failure numbers tell **which** cell broke:
+#   1 = PASS · 3 = cell A was denied · 4 = cell A's value was wrong ·
+#   5 = cell B was not denied · 6 = cell B's `mcause` was not 5 ·
+#   7 = cell B's `mepc` was not the faulting instruction ·
+#   8 = cell C was denied (the platform is too **strict**) ·
+#   9 = cell C's value was wrong · 10 = cell D was not denied (the platform
+#   is too **loose** — ⚠️ the security direction) · 11 = cell D's `mcause`
+#   was not 5 · 12 = cell D's `mepc` was not the faulting instruction ·
+#   13 = the control group broke · 14 = an unexpected trap ·
+#   15 = the "we really are in S mode" proof did not happen ·
+#   16 = cell E's fetch was **not** denied (the platform is too **loose** —
+#   ⚠️ the security direction) · 17 = cell E's `mepc` was not the target
+#   address.
+#
+# ⚠️ **The platform side is RED until D-153 is fixed** ⇒ ⇒ that red row **is**
+# the discriminating-power evidence ⇒ ⇒ the assertion must **not** be softened
+# to make our side green.
+#
+# With this row the corpus grows from **76** to **77** cases.
+local pmp_privilege rv32i_zicsr_zifencei active smode

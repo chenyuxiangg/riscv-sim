@@ -443,11 +443,12 @@ simply has no case for them.  Those live in the `local` suite:
 | `local/mstatus_warl` | `tests/golden/local/mstatus_warl.S` | `mstatus.MPP` is WARL: writing the **reserved** value 2 **legalises the field to 0** while the rest of the same write lands normally |
 | `local/pmp_lock_tor` | `tests/golden/local/pmp_lock_tor.S` | **three** lock semantics: a **locked** (`L` = 1) **TOR** entry **freezes the previous entry's `pmpaddr`**, a **locked entry's own** `pmpaddr` is **read-only**, and an **unlocked** entry's predecessor is **not** frozen (ledger D-152) |
 | `local/pmp_straddle` | `tests/golden/local/pmp_straddle.S` | **two** boundary-crossing semantics of the PMP decision: a misaligned 4-byte **load** whose **tail** lands in a **DENY** entry is **denied** (`mcause` = 5), and a misaligned 4-byte **load** that straddles **two ALLOW** entries is **allowed** and returns the **mixed** value `0xBBBB_AAAA` (ledger D-152, branch ②) |
+| `local/pmp_privilege` | `tests/golden/local/pmp_privilege.S` | the **five cells** of PMP's **privilege rule** — the effective privilege of an access is `MPRV` ? `MPP` : the current privilege, and PMP is exempt only when that is M: M-mode + `MPRV` = 0 ⇒ ⇒ allowed · M-mode + `MPRV` = 1 + `MPP` = 0 ⇒ ⇒ denied · M-mode + `MPRV` = 1 + `MPP` = 3 ⇒ ⇒ allowed · **S mode** + `MPRV` = 0 ⇒ ⇒ denied · **S mode** + an **instruction fetch** into a no-`X` entry ⇒ ⇒ denied (ledger D-153) |
 
-The corpus is **76** cases now (it was 69 before the v0.38 supervisor batch:
+The corpus is **77** cases now (it was 69 before the v0.38 supervisor batch:
 three upstream `rv32si/*` rows and two new `local` rows; the `local` suite
-grew by one more with `local/pmp_lock_tor`, and by one more still with
-`local/pmp_straddle`).
+grew by one more with `local/pmp_lock_tor`, by one more still with
+`local/pmp_straddle`, and by one more with `local/pmp_privilege`).
 
 ### `pmp_deny` — PMP must deny a store to an address that **is** mapped
 
@@ -747,6 +748,152 @@ per-piece fix does not address.  What **is** asserted is `mcause` = 5, which
 pins "denied, and denied as a **load access fault**" and separates it from a
 misaligned-load trap (cause 4) or a bus error.
 
+### `pmp_privilege` — the five cells of PMP's privilege rule
+
+The privileged spec (§3.7.6) says a **data** access runs at the **effective
+privilege level** = `MPRV` ? `MPP` : the current privilege level, that an
+**instruction fetch** always uses the **current** privilege level, and that PMP
+is **exempt** when the effective privilege level is M (unless the deciding
+entry is locked).  The platform used to collapse that formula into "look at
+`MPRV` only" — and the **fetch** path was **unconditionally** exempt ⇒ ⇒ it was
+wrong in **three** directions (ledger **D-153** for the first two):
+
+| direction | situation | privileged spec | the platform (before D-153) |
+| --- | --- | --- | --- |
+| **(a) too strict** | `MPRV` = 1 and `MPP` = 3 (M) | the effective privilege is M ⇒ ⇒ **exempt** ⇒ ⇒ allow | checked anyway ⇒ ⇒ **denied** |
+| **(b) too loose** ⚠️ **the security direction** | **S mode** and `MPRV` = 0 | the effective privilege is S ⇒ ⇒ PMP **applies** ⇒ ⇒ deny | **exempted** ⇒ ⇒ **allowed** ⇒ ⇒ S-mode code can reach memory it must not reach |
+| **(c) too loose** ⚠️ **the security direction** | an **instruction fetch** in **S mode** into an entry with **no `X`** | the fetch uses the current privilege (S) ⇒ ⇒ PMP **applies** ⇒ ⇒ deny (`mcause` = 1) | **every fetch was exempt** ⇒ ⇒ **allowed** |
+
+⇒ ⇒ **One program** runs the **five** cells of the rule — the four data cells
+on the **same** address `T` = `0x8004_0000` (which sits inside the DENY
+entry), the fetch cell jumping to that same address ⇒ ⇒ a "half-fixed"
+implementation cannot look green ⇒ ⇒ every cell has its **own** verdict number.
+
+| cell | current privilege | `MPRV` | `MPP` | effective privilege | access | expected |
+| --- | --- | --- | --- | --- | --- | --- |
+| A | M | 0 | 0 | **M** | load @ `T` | **allowed**, and the value must be the pre-filled one |
+| B | M | 1 | 0 (U) | **U** | load @ `T` | **denied** ⇒ ⇒ a trap with `mcause` = 5 |
+| C | M | 1 | 3 (M) | **M** | load @ `T` | **allowed**, and the value must be the pre-filled one |
+| D | **S** | 0 | — | **S** | load @ `T` | **denied** ⇒ ⇒ a trap with `mcause` = 5 |
+| E | **S** | 0 | — | **S** (a fetch uses the current privilege) | **fetch** @ `T` | **denied** ⇒ ⇒ a trap with `mcause` = 1 and `mepc` = the target address |
+
+⚠️ **Cells C, D and E are the ones that carry the discriminating power** —
+cell A alone has **zero** (the old and the new implementation agree on it) ⇒ ⇒
+C catches direction (a), D catches direction (b) and E catches direction (c)
+⇒ ⇒ **all three** must be there.
+⚠️ **D and E are not substitutes for each other**: they are **two different
+code paths** in the platform (the data path's `m_mode_bypass` and the fetch
+path's unconditional exemption) ⇒ ⇒ pinning one leaves the other hole open.
+⚠️ Cells A / B are not redundant either: they differ **only** in `MPRV` ⇒ ⇒
+that pair pins what `MPRV` actually does (it swaps the effective privilege of
+a load / store for `MPP` — it is **not** "turn the check on").
+
+⚠️ **Only the FIRST failing cell is reported** — the verdict is a single number
+⇒ ⇒ fixing one cell means re-running to see the next one ⇒ ⇒ so the order is:
+the **control group** first (it proves the setup), then the two cells both
+implementations agree on (A / B — if they fail, the setup is broken and every
+later verdict is meaningless), then C (the only M-mode discriminating cell),
+then D and E **last** (they need the S-mode entry ⇒ ⇒ so it is exercised
+exactly once, and no "back to M mode" machinery is needed ⇒ ⇒ and the
+M-mode verdict cannot be masked by an S-mode bootstrap problem).
+
+**The register layout.**  RV32's `pmpcfg0` holds **four** entries (byte 0 =
+entry 0, byte 1 = entry 1) ⇒ ⇒ `pmpcfg1` would configure entries 4..7 and is
+never used here.
+
+| entry | mode | `pmpcfg0` byte | `pmpaddr` | region |
+| --- | --- | --- | --- | --- |
+| 0 | NAPOT, **no** permissions | `0x18` | `0x2001_01ff` | `[0x8004_0000, 0x8004_1000)` — **DENY** |
+| 1 | NAPOT, `R`+`W`+`X` | `0x1f` | `0x2001_ffff` | `[0x8000_0000, 0x8010_0000)` — **ALLOW** |
+
+⇒ ⇒ `pmpcfg0` = **`0x1f18`**.  `T` = `0x8004_0000` sits in **both** entries ⇒ ⇒
+the **lower-numbered** entry 0 decides ⇒ ⇒ DENY wins.  The control address
+`0x8000_2000`, the code (`0x8000_0000`) and the verdict word (`0x8000_1000`)
+are all inside entry 1 ⇒ ⇒ the verdict path can never be denied.
+
+⚠️ **Cell E's target has to be inside entry 0.**  The deciding entry is the
+**lowest-numbered** matching one ⇒ ⇒ for a fetch to be **denied** it must fall
+in an entry with a lower number ⇒ ⇒ entry 1 (ALLOW, with `X`) covers the whole
+low MiB ⇒ ⇒ anything inside it is decided by entry 1 ⇒ ⇒ **allowed** ⇒ ⇒ the
+fetch target can only be inside entry 0 ⇒ ⇒ and entry 0 has **no `X`** ⇒ ⇒ the
+fetch is denied ⇒ ⇒ so cell E pins "**a fetch needs `X` too**".
+
+⚠️ **`pmpcfg0` is written twice on purpose** — first as `0x1f1f` (both
+entries permissive) ⇒ ⇒ **no** intermediate state ever leaves the code or the
+verdict word without a matching entry ⇒ ⇒ the case can never lock itself out
+of its own verdict.
+
+⚠️ **The control group** is an access to `0x8000_2000` that must deliver the
+pre-filled value — and it runs with PMP **actually in effect** (`MPRV` = 1,
+`MPP` = 0 ⇒ ⇒ the same window as cell B) ⇒ ⇒ without it, an implementation
+that denies *every* checked access would satisfy cells B, D and E.
+
+⚠️ **The trap's causality**: `mcause` must be **5** (load access fault) for
+the data cells and **1** (instruction access fault) for the fetch cell, and
+`mepc` must be **the faulting instruction** (data) or **the target address**
+(fetch) ⇒ ⇒ a trap from somewhere else cannot pass as a denial.  `mtval` is
+**not** asserted (ledger **D-154**: the reference side reports the failing
+piece's address, the platform reports the access's effective address ⇒ ⇒ the
+two sides agree on `mcause` and differ only there ⇒ ⇒ asserting it would keep
+this row red for a rule this batch does not own).
+
+⚠️ **The other half of the fetch rule is deliberately not asserted.**  "A
+fetch uses the **current** privilege, `MPRV` does **not** downgrade it" would
+need a **sixth** cell (M mode · `MPRV` = 1 · a fetch into a no-`X` entry ⇒ ⇒
+still **allowed**) ⇒ ⇒ this row does **not** carry it ⇒ ⇒ cell E pins the
+"S-mode fetch is checked" half ⇒ ⇒ the other half is covered by the kernel's
+own unit tests.
+
+⚠️ **Cell E's "the jump" and "the fetch" are told apart.**  The jump itself
+sits in the current code section (entry 1, with `X`) ⇒ ⇒ **its** fetch
+succeeds ⇒ ⇒ the fetch that is refused is the one **at the target address**
+⇒ ⇒ the verdict is pinned on `mepc` == the target address, **not** on "the
+jump failed".  ⚠️ The reference side's log says exactly that
+(`trap_instruction_access_fault, epc 0x80040000`).
+
+⚠️ **Cell E's "not denied" is visible, and it arrives on the S-level vector.**
+The word pre-filled at the target (`0xfeedface`) is **not** a valid
+instruction ⇒ ⇒ if the fetch is allowed, that word is *executed* ⇒ ⇒ illegal
+instruction (`mcause` = 2) ⇒ ⇒ and cause 2 **is** delegated ⇒ ⇒ so that trap
+lands on the **S-level** handler, **not** on `mtvec` ⇒ ⇒ the failure is
+reported from there ⇒ ⇒ it cannot be confused with "denied with the wrong
+cause".  ⚠️ This was **measured**: before that path was added, the pre-fix
+platform reported **FAIL 14** ("unexpected trap") instead of naming the real
+symptom.
+
+⚠️ **The case proves it really is in S mode.**  After the `mret` into S mode
+it reads `mstatus` — an M-mode CSR ⇒ ⇒ **illegal instruction** (cause 2) ⇒ ⇒
+**delegated** ⇒ ⇒ the S-level handler runs ⇒ ⇒ *being there at all* is the
+proof.  ⚠️ This is **not** decoration: the first draft set `MPP` with
+`csrs mstatus, 0x800`, and `csrs` only **sets** bits ⇒ ⇒ `MPP` stayed 3 ⇒ ⇒
+the `mret` landed back in **M mode** ⇒ ⇒ the reference side reported
+`FAIL 10` — and the platform would have reported **the same code** ⇒ ⇒ the
+comparison harness calls that an **agreement** ⇒ ⇒ a **false green**.  ⇒ ⇒
+`MPP` is now cleared (`csrc`) before it is set (`csrs`), and the S-mode proof
+turns that class of mistake **loud** instead of silent.
+
+⚠️ **The failure modes carry distinct numbers**, so a red row says *which*
+cell broke:
+
+| verdict | meaning |
+| --- | --- |
+| `PASS` | all four cells held |
+| `FAIL 3` | cell A: the load was **denied** (it must be allowed) ⇒ ⇒ the platform is too **strict** |
+| `FAIL 4` | cell A: the load was allowed but the value was **not** the pre-filled one |
+| `FAIL 5` | cell B: the load was **not** denied ⇒ ⇒ the platform is too **loose** |
+| `FAIL 6` | cell B: a trap happened but `mcause` was **not** 5 |
+| `FAIL 7` | cell B: `mcause` was 5 but `mepc` was **not** the faulting instruction |
+| `FAIL 8` | cell C: the load was **denied** (it must be allowed) ⇒ ⇒ the platform is too **strict** ⇒ ⇒ this is the cell that catches direction (a) |
+| `FAIL 9` | cell C: the load was allowed but the value was **not** the pre-filled one |
+| `FAIL 10` | cell D: the load was **not** denied ⇒ ⇒ the platform is too **loose** ⇒ ⇒ this is the cell that catches direction (b) ⚠️ the security direction |
+| `FAIL 11` | cell D: a trap happened but `mcause` was **not** 5 |
+| `FAIL 12` | cell D: `mcause` was 5 but `mepc` was **not** the faulting instruction |
+| `FAIL 13` | the **control group** broke ⇒ ⇒ the case is not alive |
+| `FAIL 14` | an **unexpected** trap (no cell matched, or the S-mode proof's `scause` was not 2) |
+| `FAIL 15` | the "we really are in S mode" proof did **not** happen ⇒ ⇒ the program never entered S mode ⇒ ⇒ cells D and E were not measured at all |
+| `FAIL 16` | cell E: the fetch at the target was **not** denied ⇒ ⇒ the platform is too **loose** ⇒ ⇒ this is the cell that catches direction (c) ⚠️ the security direction ⇒ ⇒ it is reported from the **S-level** handler, because the wrongly executed word traps with a **delegated** illegal instruction |
+| `FAIL 17` | cell E: `mcause` was 1 but `mepc` was **not** the target address |
+
 The harness resolves a row's source in this order:
 
 1. `$RISCV_TESTS_DIR/isa/<suite>/<test>.S` — the upstream tree (every
@@ -773,11 +920,13 @@ exactly the state the platform was in before ledger **D-99** was
 closed (the bus error was propagated verbatim and the guest's handler
 never ran).
 
-All **nine** `local` cases are **self-contained** (they include no
-riscv-tests source, like `canary/fail_3.S`).  Six of them use the `csr`
+All **ten** `local` cases are **self-contained** (they include no
+riscv-tests source, like `canary/fail_3.S`).  Eight of them use the `csr`
 environment, because they need a trap vector, `mtvec`, CSR reads and
-`mret`-free trap handling; `local/smode_csr` uses the **`smode`**
-environment, because it runs in S mode and needs the strict trap vector;
+`mret`-free trap handling; `local/smode_csr` and `local/pmp_privilege` use
+the **`smode`** environment, because they run in S mode and need the strict
+trap vector (the `csr` variant's trap vector reports the three ECALL causes
+as PASS ⇒ ⇒ under it, a wrong landing is a **false green on both sides**);
 `local/mstatus_warl` uses the `csr` environment, because it is an M-mode
 case.
 
