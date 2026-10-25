@@ -326,6 +326,26 @@ pub const E_PER_04_UNSUPPORTED_SESSION_STATE: u16 = 4;
 /// leave the restored session **silently different** from the captured one.
 pub const E_PER_05_PERIPHERAL_SET_MISMATCH: u16 = 5;
 
+/// Driven port: the platform's **wall clock** (M-13 ← M-15 CLINT).
+///
+/// ⚠️ **只读**、**无 DTO**、**不升版**（台账 D-151 做法 B · 冻结规格
+/// STAGE-26 §2.3 / 裁决 F / 裁决 A）。
+///
+/// ⚠️ **单位 = 平台时钟 tick**（不是 ps、不是指令数）—— 与 CLINT 的
+/// `mtime_cycles()` **同源** ⇒ ⇒ 两侧是**同一份**读数，不是各算一份。
+///
+/// ⚠️ **它不是 DTO** ⇒ ⇒ [`crate::SCHEMA_VERSION`] **不动** ⇒ ⇒ 前端镜像
+/// **不用**改版本号 ⇒ ⇒ 不制造 D-143 那类存量问题。
+///
+/// ⚠️ **它不带写语义** ⇒ ⇒ `time` 是**只读** CSR ⇒ ⇒ 端口也**只读**。
+///
+/// ⚠️ **它没有 `Debug` 超约束**（同 [`Peripheral`] 的先例）⇒ ⇒ 持有它的
+///   类型（`Iss` 等）要**手写** `Debug`。
+pub trait TimeSource {
+    /// The platform's clock reading, in the platform's clock ticks.
+    fn time_ticks(&self) -> u64;
+}
+
 /// Driven port: peripheral → interrupt controller (M-15 → M-16).
 pub trait InterruptSink {
     /// Raise an IRQ line. Idempotent.

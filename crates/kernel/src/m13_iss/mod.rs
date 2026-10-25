@@ -15,6 +15,9 @@
 //! `decode + execute_one` API for tests.
 
 use riscv_sim_contract::csr::PmpAccess;
+use riscv_sim_contract::port::TimeSource;
+
+use std::rc::Rc;
 
 pub mod alu;
 pub mod compressed;
@@ -81,7 +84,11 @@ impl Default for IssConfig {
 }
 
 /// The ISS itself: pure interpreter over [`SimState`].
-#[derive(Debug)]
+///
+/// ⚠️ **手写 `Debug`**（不是 `derive`）：`dyn TimeSource` **没有** `Debug`
+/// 超约束（契约层的 [`Peripheral`] 也没有 ⇒ ⇒ 同一先例 ⇒ ⇒ 契约层**不加**
+/// 那个约束）⇒ ⇒ 持有它的那一层要**自己**写 `Debug`（同 M-14 的
+/// `BoundPeripheral`）。
 pub struct Iss {
     /// Reserved for the M-12 instruction-budget check; the MVP
     /// skeleton does not yet thread the budget through `step_one`.
@@ -100,6 +107,33 @@ pub struct Iss {
     /// 丢弃** —— 那是 v0.19 检视轮查出的 **F-1**（第二次 `irq_clear`
     /// 被跳过 ⇒ `active_irq` 永不复位 ⇒ 那条线被单级防护**永久堵死**）。
     last_csr_written: Option<u16>,
+    /// 平台时钟的**只读**端口（`None` = 没有时钟 ⇒ ⇒ `time` 报 0）。
+    ///
+    /// ⚠️ **真值源 = M-15 的 CLINT**（D-151 · 冻结规格 STAGE-26 §3.2 /
+    /// 裁决 G）⇒ ⇒ 单位 = **平台时钟 tick**（周期），不是 ps、不是指令数。
+    ///
+    /// ⚠️ **两条派发路径传的是同一个源**（D-11 的延续）⇒ ⇒ 闭包口与总线口
+    /// 读到的 `time` **逐字相同** ⇒ ⇒ 不会出现「一条路有、一条路没有」。
+    ///
+    /// ⚠️ **它是 `Rc`** ⇒ ⇒ 宿主与 ISS 看到的是**同一个**时钟 ⇒ ⇒ 不存在
+    /// 两份真相。
+    time_source: Option<Rc<dyn TimeSource>>,
+}
+
+/// `dyn TimeSource` 没有 `Debug` 约束 —— 手写 `Debug`（同 `BoundPeripheral`
+/// 的先例）。
+impl std::fmt::Debug for Iss {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Iss")
+            .field("cfg", &self.cfg)
+            .field("decoder", &self.decoder)
+            .field("misaligned", &self.misaligned)
+            .field("last_csr_written", &self.last_csr_written)
+            // ⚠️ **只报「有没有」不报「读数」**：读数会**随时间变** ⇒ ⇒ 打印
+            // 它会让 `Debug` 的输出**不稳定** ⇒ ⇒ 不能拿它做判别力。
+            .field("has_time_source", &self.time_source.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Iss {
@@ -110,7 +144,44 @@ impl Iss {
             decoder: Decoder::default(),
             misaligned: MisalignedPolicy::default(),
             last_csr_written: None,
+            time_source: None,
         }
+    }
+
+    /// 装上平台时钟的**只读**端口（D-151 · 冻结规格 STAGE-26 §3.2）。
+    ///
+    /// ⚠️ **真值源 = M-15 的 CLINT** ⇒ ⇒ 单位 = **平台时钟 tick**（周期）。
+    ///
+    /// ⚠️ **两条派发路径共用这一个源**（D-11 的延续）⇒ ⇒ 闭包口
+    /// ([`Iss::step_one`]) 与总线口 ([`Iss::step_one_via_bus`]) 读到的
+    /// `time` **逐字相同**。
+    pub fn with_time_source(mut self, source: Rc<dyn TimeSource>) -> Self {
+        self.time_source = Some(source);
+        self
+    }
+
+    /// 装上 / 摘掉平台时钟的**只读**端口（`None` = 没有时钟 ⇒ ⇒ `time` 报
+    /// **0**）。
+    ///
+    /// ⚠️ **幂等**：重复装只是换掉那个 `Rc` ⇒ ⇒ 时钟还是**同一个**实例。
+    pub fn set_time_source(&mut self, source: Option<Rc<dyn TimeSource>>) {
+        self.time_source = source;
+    }
+
+    /// 当前装着的时钟端口（只读）。
+    pub fn time_source(&self) -> Option<&Rc<dyn TimeSource>> {
+        self.time_source.as_ref()
+    }
+
+    /// 平台的时钟读数（**tick**）—— 没有时钟 ⇒ ⇒ **0**。
+    ///
+    /// ⚠️ **这是「端口 ⇒ 读数」的唯一落点** ⇒ ⇒ guest 读 `time` 与宿主
+    /// 调试读 `time` **同源**（STAGE-26 验收 B-9）。
+    pub fn time_ticks(&self) -> u64 {
+        self.time_source
+            .as_ref()
+            .map(|source| source.time_ticks())
+            .unwrap_or(0)
     }
 
     /// 取走「上一条指令写入的 CSR 号」（**取走即消失**）。
@@ -189,7 +260,11 @@ impl Iss {
         let decoded = self.decoder.decode(raw, state.pc);
         let mut exec = Executor::new(read_mem, write_mem).with_misaligned_policy(self.misaligned);
         let mut wrote_csr = None;
-        let outcome = exec.execute_with_report(state, &decoded, &mut wrote_csr);
+        // ⚠️ **闭包口也传时钟**（D-151 · STAGE-26 §3.2）⇒ ⇒ 与总线口
+        //    ([`Iss::step_one_via_bus`]) **同一个源** ⇒ ⇒ 两条派发路径
+        //    **同口径**（D-11 的延续）。
+        let outcome =
+            exec.execute_with_report(state, &decoded, &mut wrote_csr, self.time_source.as_deref());
         self.last_csr_written = wrote_csr;
         outcome
     }
@@ -293,7 +368,17 @@ impl Iss {
         let decoded = self.decoder.decode(raw, state.pc);
         let mut mem = BusMemory::new(bus);
         let mut wrote_csr = None;
-        let outcome = execute_one(&mut mem, state, &decoded, self.misaligned, &mut wrote_csr);
+        // ⚠️ **总线口也传时钟**（D-151 · STAGE-26 §3.2）⇒ ⇒ 与闭包口
+        //    ([`Iss::step_one`]) **同一个源** ⇒ ⇒ 两条派发路径**同口径**
+        //    （D-11 的延续）⇒ ⇒ 不会出现「一条路有、一条路没有」。
+        let outcome = execute_one(
+            &mut mem,
+            state,
+            &decoded,
+            self.misaligned,
+            &mut wrote_csr,
+            self.time_source.as_deref(),
+        );
         self.last_csr_written = wrote_csr;
         outcome
     }

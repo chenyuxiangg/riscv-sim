@@ -1079,6 +1079,14 @@ impl KernelHost {
         self.uart0 = devices.uart0;
         self.clint = devices.clint;
         self.plic = devices.plic;
+        // ⚠️ **D-151**：把**同一个** CLINT 适配成**只读**时钟端口，装进后端
+        // ⇒ ⇒ guest 读 `time` 与宿主调试读 `time` **同源**（STAGE-26 验收
+        // B-9）⇒ ⇒ 平台时钟的真相**只有一份**（CLINT 自己那份）。
+        //
+        // ⚠️ **没有 CLINT 的板 ⇒ 没有时钟** ⇒ ⇒ `time` / `timeh` 报 **0**
+        // ⇒ ⇒ `default` / `minimal` 两档与黄金 runner 的行为**逐字不变**。
+        let time_source = self.clint.as_ref().map(platform::clint_time_source);
+        self.backend.install_time_source(time_source);
         self.platform = description.clone();
         // ⚠️ **v0.34（D-125）**：**连线表在建图时从生效的描述编译**（冻结
         // 规格 STAGE-19 §3.1）⇒ ⇒ 「换一块板改连线」不用改宿主 ⇒ ⇒
@@ -3875,6 +3883,15 @@ mod tests_v024;
 
 #[cfg(test)]
 mod tests_platform;
+
+/// **D-151** —— `time` / `timeh` 的真值接 M-15 的 CLINT（冻结规格
+/// STAGE-26 §4.2 / 裁决 F~K）。
+///
+/// ⚠️ **判别力全部落在这里**（裁决 J）：参考侧在**黄金配置**下 `time`
+/// **恒读 0** ⇒ ⇒ 两侧**不可比** ⇒ ⇒ ⛔ **不许**新增查 `time` 的黄金语料
+/// ⇒ ⇒ 五条判别式**全部**是 Rust 单测。
+#[cfg(test)]
+mod tests_time_source;
 
 /// 器件连线**数据化**（v0.34 · D-125 · STAGE-19 · 验收 B-1 ~ B-5）。
 ///
