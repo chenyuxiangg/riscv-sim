@@ -11,7 +11,7 @@
     5. 章节 §0~§11 完整
     6. 验收编号交叉引用无未定义项（分组 A / B / C / T / X）
     7. 关键约束字面量钉住（含已废止字面量的禁列）
-       ＋ 7b. §1.2 的实测事实表必须是 **F1~F41 连续**（删掉一条实测事实
+       ＋ 7b. §1.2 的实测事实表必须是 **F1~F42 连续**（删掉一条实测事实
           也是「把规格改软」⇒ ⇒ 事实表本身要钉住）
        ＋ 7c. §8 的施工期订正必须是 **订正 1~15 连续**且每条都有「已改成什么」
 
@@ -282,11 +282,11 @@ for line in lines:
         m = re.match(r"^\|\s*\**\s*(F\d+)\s*\**\s*\|", line)
         if m:
             facts.append(m.group(1))
-want = [f"F{i}" for i in range(1, 42)]
+want = [f"F{i}" for i in range(1, 43)]
 if facts != want:
-    err(f"[事实] §1.2 的实测事实表不是 F1~F41 连续：{facts}")
+    err(f"[事实] §1.2 的实测事实表不是 F1~F42 连续：{facts}")
 
-# ---- 7c. §8 施工期订正：编号必须 **1..15 连续**且每条都有「已改成什么」 ----
+# ---- 7c. §8 施工期订正：编号必须 **1..16 连续**且每条都有「已改成什么」 ----
 # ⚠️ **施工期订正是规格被实测推翻的账** ⇒ ⇒ 删掉一条 = 把已被推翻的判据
 # 悄悄留回规格里 ⇒ ⇒ 必须钉住。
 corrections = []
@@ -301,9 +301,9 @@ for line in lines:
         m = re.match(r"^###\s*订正\s*(\d+)\s*·", line)
         if m:
             corrections.append(int(m.group(1)))
-want_corr = list(range(1, 16))
+want_corr = list(range(1, 17))
 if corrections != want_corr:
-    err(f"[订正] §8 的施工期订正编号不是 1..15 连续：{corrections}")
+    err(f"[订正] §8 的施工期订正编号不是 1..16 连续：{corrections}")
 
 sec8 = []
 grab = False
@@ -316,8 +316,8 @@ for line in lines:
     if grab:
         sec8.append(line)
 sec8_text = "\n".join(sec8)
-if sec8_text.count("已改成什么") < 15:
-    err(f"[订正] §8 的「已改成什么」不足 15 条（实测 {sec8_text.count('已改成什么')}）")
+if sec8_text.count("已改成什么") < 16:
+    err(f"[订正] §8 的「已改成什么」不足 16 条（实测 {sec8_text.count('已改成什么')}）")
 
 print(f"检查项：7  失败 {len(fail)}")
 for f in fail:
