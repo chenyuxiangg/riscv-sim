@@ -78,30 +78,30 @@ pub const CSR_MSCRATCH: u16 = 0x340;
 /// * extension bits: **I** (bit 8) · **M** (bit 12) · **C** (bit 2).
 ///
 /// ⚠️ **Only the extensions we actually implement are set** — no `A`
-/// (atomics), no `F`/`D` (floating point), no `S`/`U` (privilege levels).
-/// The IALIGN field (bits 29:26) is left **0**, exactly as the
-/// reference side leaves it.
+/// (atomics), no `F`/`D` (floating point).  The IALIGN field (bits 29:26)
+/// is left **0**, exactly as the reference side leaves it.
 ///
-/// ⇒ the reference side's `misa` is **not** bit-identical to ours.
-/// Measured (the reference side runs with its default `--priv=MSU`):
+/// ⇒ since **v0.38** this platform implements **S-mode and U-mode**
+/// ⇒ ⇒ the two privilege-level bits are set too ⇒ ⇒ the reference
+/// side's `misa` is now **bit-identical** to ours.
+///
+/// Measured (the reference side runs the **golden ISA string**,
+/// `rv32imc_zicsr_zicclsm_zifencei_zicntr`, **without** `--priv` — that
+/// is exactly how the golden harness runs it):
 ///
 /// | | MXL | I | M | C | **S** (18) | **U** (20) | IALIGN (29:26) |
 /// |---|---|---|---|---|---|---|---|
 /// | reference side | 1 | 1 | 1 | 1 | **1** | **1** | 0 |
-/// | this platform  | 1 | 1 | 1 | 1 | 0 | 0 | 0 |
+/// | this platform  | 1 | 1 | 1 | 1 | **1** | **1** | 0 |
 ///
-/// ⇒ the difference is **exactly** the two privilege-level bits: the
-/// reference side implements S-mode and U-mode, this platform does
-/// not ⇒ reporting them would be a lie.  ⇒ **the MXL field and the
-/// I/M/C bits are comparable across implementations**; the
-/// privilege-level bits differ **by design**.
+/// ⇒ ⇒ **逐位相同**（STAGE-22 · F3 / F24 / F27）⇒ ⇒ 验收 **X-1**。
 ///
 /// ⚠️ The reference side's `misa` is also **WARL-writable** (a guest
 /// may clear bits — measured: `csrci misa, 4` really clears `C`);
 /// ours is **read-only** (a guest write is ignored).  That is a real
 /// semantic difference, not a "coverage equivalence" — see the ledger
 /// (D-95).
-pub const CSR_MISA_VALUE: u32 = (1 << 30) | (1 << 8) | (1 << 12) | (1 << 2);
+pub const CSR_MISA_VALUE: u32 = (1 << 30) | (1 << 20) | (1 << 18) | (1 << 8) | (1 << 12) | (1 << 2);
 
 /// `mie` — machine interrupt-enable register.
 pub const CSR_MIE: u16 = 0x304;
@@ -268,6 +268,139 @@ pub const CSR_MHARTID_VALUE: u32 = 0;
 /// standard. The difference is registered in the M-16 LLD §3.5.
 pub const CSR_IRQ_CLEAR: u16 = 0x7C0;
 
+// ---------------------------------------------------------------------------
+// S-mode / U-mode (STAGE-22 · v0.38)
+// ---------------------------------------------------------------------------
+
+/// `sstatus` — supervisor status (**a bit-view of `mstatus`**, not a
+/// second storage — see [`SSTATUS_VIEW_MASK`]).
+pub const CSR_SSTATUS: u16 = 0x100;
+
+/// `sie` — supervisor interrupt-enable.
+pub const CSR_SIE: u16 = 0x104;
+
+/// `stvec` — supervisor trap-vector base address and mode.
+pub const CSR_STVEC: u16 = 0x105;
+
+/// `sscratch` — supervisor scratch register.
+pub const CSR_SSCRATCH: u16 = 0x140;
+
+/// `sepc` — the address the supervisor trap handler returns to.
+pub const CSR_SEPC: u16 = 0x141;
+
+/// `scause` — the supervisor trap reason.
+pub const CSR_SCAUSE: u16 = 0x142;
+
+/// `stval` — the supervisor trap's auxiliary value.
+pub const CSR_STVAL: u16 = 0x143;
+
+/// `sip` — supervisor interrupt-pending.
+pub const CSR_SIP: u16 = 0x144;
+
+/// `satp` — supervisor address translation and protection.
+///
+/// ⚠️ **Only Bare is supported** ⇒ ⇒ the reference side (which has Sv32) is
+/// **not comparable** ⇒ ⇒ `satp` does **not** enter the golden corpus
+/// (STAGE-22 §10 第 1 条).
+pub const CSR_SATP: u16 = 0x180;
+
+/// `medeleg` — the trap delegation register.
+pub const CSR_MEDELEG: u16 = 0x302;
+
+/// `mideleg` — the interrupt delegation register.
+pub const CSR_MIDELEG: u16 = 0x303;
+
+/// `mcounteren` — machine counter-enable.
+pub const CSR_MCOUNTEREN: u16 = 0x306;
+
+/// `scounteren` — supervisor counter-enable.
+pub const CSR_SCOUNTEREN: u16 = 0x906;
+
+/// `ucounteren` — user counter-enable.
+pub const CSR_UCOUNTEREN: u16 = 0x005;
+
+/// `CSR_PRIV` — the **pseudo CSR** that holds the current privilege level.
+///
+/// ⚠️ **This is not an architectural CSR.** It is the platform's way of
+/// keeping the privilege level **inside the CSR file** instead of adding a
+/// field to `SimState` (which would bump `SIM_STATE_SCHEMA_VERSION` and
+/// invalidate every stored snapshot — ledger D-143's family).
+///
+/// * address: **`0x0C0`** — the custom read-only quarter (`0x000`~`0x0FF`),
+///   so a guest writing it is architecturally illegal;
+/// * value: the privilege level, encoded **exactly like `mstatus.MPP`**
+///   ([`PRIV_U`] / [`PRIV_S`] / [`PRIV_M`]) ⇒ ⇒ **one** set of literals.
+///
+/// ⚠️ **Two guards, each with its own landing spot**:
+///
+/// * the guest's **write** is dropped — enforced by [`csr_is_read_only`]
+///   (STAGE-22 订正 6: leaning on "unimplemented CSRs ignore writes" is
+///   **false** here, because `CSR_PRIV` **must** be in
+///   [`csr_is_implemented`] for the snapshot to round-trip);
+/// * the guest's **read** returns **0** — enforced by the kernel's
+///   `csr_read` special case ⇒ ⇒ the platform reads the level through
+///   `priv_get`, which goes to the **file** directly.
+pub const CSR_PRIV: u16 = 0x0C0;
+
+/// The **user** privilege level.
+pub const PRIV_U: u32 = 0;
+
+/// The **supervisor** privilege level.
+pub const PRIV_S: u32 = 1;
+
+/// The **machine** privilege level.
+pub const PRIV_M: u32 = 3;
+
+/// `mstatus.SIE` — the supervisor interrupt-enable bit (bit 1).
+pub const MSTATUS_SIE_BIT: u32 = 1;
+
+/// `mstatus.SPIE` — "previous `SIE`" (bit 5).
+pub const MSTATUS_SPIE_BIT: u32 = 5;
+
+/// `mstatus.SPP` — "previous privilege" (bit 8).
+///
+/// ⚠️ **Measured (F7)**: writable in M-mode, and **the same field** as
+/// `sstatus.SPP`.
+pub const MSTATUS_SPP_BIT: u32 = 8;
+
+/// `mstatus.MPP` — the **user** privilege level (the `MPP` encoding).
+pub const MSTATUS_MPP_U: u32 = 0;
+
+/// `mstatus.MPP` — the **supervisor** privilege level.
+pub const MSTATUS_MPP_S: u32 = 1;
+
+/// `mcounteren` / `scounteren` / `ucounteren` — the `cycle` counter bit.
+pub const COUNTEREN_CY: u32 = 0;
+
+/// `mcounteren` / `scounteren` / `ucounteren` — the `time` counter bit.
+pub const COUNTEREN_TM: u32 = 1;
+
+/// `mcounteren` / `scounteren` / `ucounteren` — the `instret` counter bit.
+pub const COUNTEREN_IR: u32 = 2;
+
+// ---------------------------------------------------------------------------
+// Trap causes (exceptions — **not** interrupts)
+// ---------------------------------------------------------------------------
+
+/// Exception cause **2** — illegal instruction.
+///
+/// ⚠️ **This is the exception cause**, not the interrupt cause: the
+/// interrupt cause 3 is [`CAUSE_MACHINE_SOFTWARE`] and the interrupt cause
+/// 11 is [`CAUSE_MACHINE_EXTERNAL`] — **same numbers, different spaces**.
+pub const CAUSE_ILLEGAL_INSTRUCTION: u32 = 2;
+
+/// Exception cause **3** — breakpoint (`ebreak` / `sbreak`).
+pub const CAUSE_BREAKPOINT: u32 = 3;
+
+/// Exception cause **8** — environment call from **U-mode**.
+pub const CAUSE_USER_ECALL: u32 = 8;
+
+/// Exception cause **9** — environment call from **HS-mode** (S-mode).
+pub const CAUSE_SUPERVISOR_ECALL: u32 = 9;
+
+/// Exception cause **11** — environment call from **M-mode**.
+pub const CAUSE_MACHINE_ECALL: u32 = 11;
+
 /// `mstatus.MIE` — the **global** interrupt-enable bit.
 ///
 /// Bit 3 of `mstatus` (standard).
@@ -303,24 +436,156 @@ pub const MSTATUS_MPIE_BIT: u32 = 7;
 /// | 11:12 | `MPP` | 31 | `SD` |
 /// | 13:14 | `FS` | | |
 ///
-/// ⇒ **保留位** = `0` / `2` / `4` / `23` / `24` ~ `30` ⇒ 掩码 =
-/// `0x807F_FFEA`。
+/// ⇒ **保留位** = `0` / `2` / `4` / `6` / `23` / `24` ~ `30`；另有一批
+/// **本平台不支持的扩展位**（`VS` 9:10 / `XS` 15:16 的一半 / `UBE`）⇒ ⇒
+/// 掩码 = **`0x007E_79AA`**。
 ///
-/// ⚠️ **`MPP`（11:12）留在掩码里**：`MPP` 是 WARL，但本批**不**改它的
-/// 取值口径 —— 台账 **D-98** 明确说「参考侧支持 U/S ⇒ `MPP` 合法值有
-/// 3 个，我们只实现 M ⇒ 只有 1 个」是**能力差异**，**不是缺陷**
-/// （⇒ 不要在这里把它钉成 M）。
+/// ⚠️ **这个掩码是**实测**出来的，不是照规范抄的**（STAGE-22 · **F6**）：
+/// 参考侧「写 `0xFFFFFFFF` 之后读回 `0x807E_79AA`」⇒ ⇒ 本平台现在
+/// **与参考侧逐位相同** ⇒ ⇒ 台账 **D-98** 的「写全 1 之后两侧的
+/// `mstatus` 不会逐位相等」这条**已知残留已消除**。
 ///
-/// ⚠️ **本掩码与参考侧逐位不等 —— 已知残留（D-98）**：参考侧实测「写
-/// `0xFFFFFFFF` 之后读回 `0xAA797E80`」（台账 **D-98** 的测量）⇒ 它的
-/// **有效写掩码**与本平台按 20191213 版布局定的 `0x807F_FFEA` **不是
-/// 同一个位集合**（两侧在若干位上不同）⇒ **写全 1 之后两侧的
-/// `mstatus` 不会逐位相等**。
+/// ⚠️ **bit 31（`SD`）不在这个掩码里**（**F40**）：`SD` 是**推导位** ⇒ ⇒
+/// **不可直接写**（实测：写 `0x8000_0000` ⇒ 读回 `0x0000_0000`）⇒ ⇒ 它
+/// 由 `FS` / `XS` 推出来 ⇒ ⇒ 推导在 [`mstatus_warl`] 里 ⇒ ⇒ **写全 1
+/// 之后读回的是 `0x807E_79AA`**（`FS = 3` ⇒ `SD = 1`）⇒ ⇒ 掩码与读回值
+/// **差的那一位就是 `SD`** ⇒ ⇒ 两条**不是**矛盾，是「可写位」与「最终值」的
+/// 区别。
 ///
-/// ⇒ 本批**不**照抄参考侧的掩码：照抄会让本平台的**保留位读出 1**，
-/// 直接违背「保留位写被忽略、读回 0」这条规则本身。⇒ 差的这几类是
-/// **已知残留**，如实登记，不在本批的范围内。
-pub const MSTATUS_WARL_MASK: u32 = 0x807F_FFEA;
+/// ⚠️ **旧值 `0x807F_FFEA` 是超集**（多出 bit 6 / 9 / 10 / 15 / 16）⇒ ⇒
+/// guest 能写那些「扩展不存在就不该可写」的位而参考侧会丢掉 ⇒ ⇒ **真
+/// bug**，v0.38 修掉。
+///
+/// ⚠️ **`MPP`（11:12）留在掩码里**：`MPP` 是 **WARL**，合法值 = **{0 = U,
+/// 1 = S, 3 = M}**（F5）⇒ ⇒ 它的**合法化**不在这个掩码里 ⇒ ⇒ 见
+/// [`mstatus_warl`]。
+///
+/// ⚠️ **掩码表达不了「保留值 ⇒ 整次写被丢弃」**（F5）⇒ ⇒ **`mstatus` 的
+/// 写侧必须走 [`mstatus_warl`] 这个函数**，不能只做 `& mask`。
+pub const MSTATUS_WARL_MASK: u32 = 0x007E_79AA;
+
+/// `mstatus.FS` 字段（bits 14:13）—— **浮点脏位**，`3` = Dirty。
+pub const MSTATUS_FS_MASK: u32 = 0x3 << 13;
+
+/// `mstatus.XS` 字段（bits 16:15）—— **向量脏位**，`3` = Dirty。
+///
+/// ⚠️ 本平台**不实现向量扩展** ⇒ ⇒ `XS` **不可写**（不在
+/// [`MSTATUS_WARL_MASK`] 里）⇒ ⇒ 它**恒为 0** ⇒ ⇒ 但 [`mstatus_warl`]
+/// 仍然按规范把 `XS` 算进 `SD` 的推导 ⇒ ⇒ 口径与参考侧同形。
+pub const MSTATUS_XS_MASK: u32 = 0x3 << 15;
+
+/// `mstatus.SD`（bit 31）—— **推导位**：= (`FS` == Dirty) ∨ (`XS` == Dirty)。
+///
+/// ⚠️ **实测（F40）**：参考侧「只把 `FS` 写成 3（`0x6000`）、不碰 bit 31」
+/// ⇒ ⇒ 读回 **`0x8000_6000`** ⇒ ⇒ `SD` 被**推成 1**；而「直接写 bit 31」
+/// ⇒ ⇒ 读回 **`0x0000_0000`** ⇒ ⇒ **直接写无效** ⇒ ⇒ `SD` **不是存储位**。
+pub const MSTATUS_SD_BIT: u32 = 1 << 31;
+
+/// `mstatus` 的 WARL 合法化 —— **唯一的落点**。
+///
+/// ⚠️ **它不是掩码**：掩码表达不了「`MPP` 保留值 ⇒ **合法化到 0**」。
+///
+/// **实测（F5 + F39）**：写保留值 `MPP = 2` ⇒ 参考侧**把该字段合法化到 0**
+/// ⇒ ⇒ **不是**「保留旧值」⇒ ⇒ **也**不是「整次写被丢弃」——同一次写里的 `SIE`
+/// **落进去了**：清零后写 `0x1002`（`MPP = 2` 且 `SIE = 1`）⇒ 读回
+/// **`0x0000_0002`**；先写 `0x1800`（`MPP = 3`）再写 `0x1002` ⇒ 读回**仍是
+/// `0x0000_0002`** ⇒ ⇒ 旧值被**覆盖成 0**，不是被保留。
+///
+/// **规则（顺序钉死）**：
+///
+/// 1. `masked = new & MSTATUS_WARL_MASK`（实测掩码，F6）；
+/// 2. 取 `masked` 的 `MPP` 字段（bits 12:11）；
+/// 3. 若该字段 ∉ **{0, 1, 3}**（保留值 = **2**）⇒ ⇒ **该字段合法化到 0**
+///    ⇒ ⇒ **同一次写里的其它位照常落进去**；
+/// 4. 否则 ⇒ `MPP` 取新值；
+/// 5. 返回「掩码后的新值」+「合法化后的 `MPP`」。
+///
+/// ⚠️ **为什么没有 `old` 参数**：合法化到 0 的语义**不依赖旧值** ⇒ ⇒ 留一个
+/// 读不到用处的参数就是**谎言** ⇒ ⇒ 函数**只吃新值**。
+///
+/// ⚠️ **`mstatus.SPP`（bit 8）在 M 模式可写**（F7）⇒ ⇒ 它在掩码里 ⇒ ⇒
+/// 由这条规则一并处理。
+///
+/// ⚠️ **唯一落点**：M-13 的 CSR 写路径**只调用**它，**不**另写一份
+/// `& mask`（同 v0.37 的 `pmpcfg` 纪律）。
+pub fn mstatus_warl(new: u32) -> u32 {
+    let masked = new & MSTATUS_WARL_MASK;
+    let mpp_mask = 0x3 << MSTATUS_MPP_SHIFT;
+    let mpp_new = (masked & mpp_mask) >> MSTATUS_MPP_SHIFT;
+    let mpp = if mpp_new == MSTATUS_MPP_U || mpp_new == MSTATUS_MPP_S || mpp_new == MSTATUS_MPP_M {
+        mpp_new
+    } else {
+        // 保留值 ⇒ **合法化到 0**（U），**不是**保留旧值（F39）。
+        MSTATUS_MPP_U
+    };
+    // ⚠️ `SD`（bit 31）是**推导位**（F40）⇒ ⇒ 不可直接写 ⇒ ⇒ 由 `FS` /
+    // `XS` 推出来 ⇒ ⇒ 「写全 1」读回 `0x807E_79AA`（`FS = 3` ⇒ `SD = 1`），
+    // 而「只写 `FS = 3`」也读回 `0x8000_6000`（实测逐位相同）。
+    let fs = masked & MSTATUS_FS_MASK;
+    let xs = masked & MSTATUS_XS_MASK;
+    let sd = if fs == MSTATUS_FS_MASK || xs == MSTATUS_XS_MASK {
+        MSTATUS_SD_BIT
+    } else {
+        0
+    };
+    (masked & !mpp_mask) | (mpp << MSTATUS_MPP_SHIFT) | sd
+}
+
+/// `sstatus` 的**客体写**掩码 —— 客体写 `sstatus` 时会落到 `mstatus` 的哪些位。
+///
+/// ⚠️ **实测（F41 · 逐位）**：参考侧**先把 `mstatus` 清零**、再**单独**写
+/// `sstatus` 的**每一位**、然后读回 `mstatus` ⇒ ⇒ 落进去的位 =
+/// **`0x000C_6122`**（`SIE` \| `SPIE` \| `SPP` \| `FS[14:13]` \| `SUM` \|
+/// `MXR`）⇒ ⇒ **不含** `MPIE`（bit 7）/ `UBE`（6）/ `XS`（15:16）/
+/// `MPRV`（17）/ `TVM`（20）/ `TW`（21）/ `TSR`（22）/ `MPP`（11:12）/
+/// `MIE`（3）/ `SD`（31，推导位）。
+///
+/// ⚠️ **为什么必须逐位测**（**这条是本批最大的坑**）：聚合观测
+/// 「M 模式写 `sstatus = 0xFFFFFFFF` ⇒ 读回 `mstatus` = `0x800C_61A2`」
+/// **看起来**比读视图 `0x800C_6122` 多一位 `MPIE` ⇒ ⇒ 很自然会推成
+/// 「写掩码 = `0x804C_61A2`」⇒ ⇒ **错的** ⇒ ⇒ 因为那一位 `MPIE` 是
+/// **env 初始化留下的**（参考侧的 env 在 `csrwi mstatus, 0` 之后又
+/// `csrs mstatus, MSTATUS_MPP`），**不是** `sstatus` 的写带进去的 ⇒ ⇒
+/// ⇒ **逐位测之前必须先把 `mstatus` 清零**，否则会把「本来就在那里的位」
+/// 算成「写进去的位」。
+///
+/// ⚠️ **S 模式与 M 模式的写掩码相同**（F33）⇒ ⇒ 参考侧**不按特权裁剪**
+/// `sstatus` 的写掩码。
+///
+/// ⚠️ **与特权规范的差异（明示取舍，登记在 `tests/golden/README.md` 的已知偏差
+/// 表）**：特权规范里 `SPP` 只在 M 模式可写、`SUM` / `MXR` 是 M 级字段；而参考侧
+/// **允许 S 模式写 `sstatus.SPP`**，`SUM` / `MXR` 也**在 `sstatus` 的视图里**
+/// ⇒ ⇒ 本平台**对齐参考侧**（黄金对拍的口径就是参考侧）。
+pub const SSTATUS_WARL_MASK: u32 = 0x000C_6122;
+
+/// `sstatus` 的**读视图**掩码 —— `sstatus` 是 `mstatus` 的**位视图**。
+///
+/// ⚠️ **不是**一份第二存储（F30）：M 模式写 `sstatus` ⇒ S 模式读回**同一个
+/// 字段** ⇒ ⇒ 同一份存储。
+///
+/// ⚠️ **实测（F38）**：M 模式把 `mstatus` 写满（读回 `0x807E_79AA`）⇒ S 模式
+/// 读 `sstatus` = **`0x800C_6122`** ⇒ ⇒ 视图掩码 = **`0x800D_E162`**
+/// （`SIE` \| `SPIE` \| `UBE` \| `SPP` \| `FS[14:13]` \| `XS[16:15]` \| `SUM` \|
+/// `MXR` \| `SD`）。
+///
+/// ⚠️ **`UBE`（bit 6）与 `XS`（bits 16:15）在参考侧恒为 0**（`mstatus` 的写掩码
+/// `0x807E_79AA` 不含这两处）⇒ ⇒ 它们在不在视图里**都不可观测** ⇒ ⇒ 取
+/// 「在视图里」是为了与参考侧的掩码**逐字一致**。
+///
+/// ⚠️ **不含** `MIE`（bit 3）/ `MPIE`（bit 7）/ `MPP`（bits 12:11）/ `MPRV`
+/// （bit 17）/ `TVM` / `TW` / `TSR` ⇒ ⇒ **S 模式看不到机器态的字段**。
+pub const SSTATUS_VIEW_MASK: u32 = 0x800D_E162;
+
+/// `medeleg` 的**合法位集合**（per-bit WARL）—— 参考侧实测。
+///
+/// ⚠️ **实测（F35 + F36）**：参考侧写 `medeleg = 0xFFFFFFFF` ⇒ 读回 **`0x0008_B3FE`**；
+/// 写 `0x0000_FFFF` ⇒ 读回 **`0x0000_B3FE`** ⇒ ⇒ 两者都是「请求值 ∧ 同一个
+/// 合法位集合」⇒ ⇒ **per-bit WARL**，合法位集合 = **`0x0008_B3FE`**。
+///
+/// ⚠️ **落点**：M-13 的 CSR 写路径对 `medeleg` **必须**先过这个掩码 ⇒ ⇒ 否则
+/// 本平台会把「指令地址未对齐」（bit 0）也当成可委托 ⇒ ⇒ 与参考侧**逐位不等**
+/// （参考侧把 bit 0 丢掉）。
+pub const MEDELEG_WRITABLE_MASK: u32 = 0x0008_B3FE;
 
 /// `mepc` 取 PC 时要**掩掉**的位：`mret` 跳到 `mepc` 时按 **IALIGN**
 /// 掩码（特权规范）—— 本平台实现了 **C 扩展**（`misa` 的 C 位 = 1）⇒
@@ -350,22 +615,20 @@ pub const MEPC_ALIGN_MASK: u32 = 0xFFFF_FFFE;
 /// **Bits 12:11** of `mstatus` (standard).
 ///
 /// ⚠️ The field is **WARL**: an implementation may only hold values
-/// that name a privilege level it actually supports.  This platform
-/// implements **M-mode only** ⇒ the only legal value is
-/// [`MSTATUS_MPP_M`] ⇒ `misa` reports **no `S` and no `U` bit**, and
-/// the three places that touch `MPP` (trap entry, `mret`, the guest's
-/// own `csrw mstatus`) all agree on that one value.
+/// that name a privilege level it actually supports.  Since **v0.38** this
+/// platform supports **M, S and U** ⇒ ⇒ the legal values are **{0 = U,
+/// 1 = S, 3 = M}** (STAGE-22 · **F5**) ⇒ ⇒ `misa` reports the `S` and
+/// the `U` bit ⇒ ⇒ and the three places that touch `MPP` (the trap entry,
+/// `mret`, the guest's own `csrw mstatus`) all agree on that set.
 ///
-/// The reference side (Spike, default `--priv=MSU`) supports `S` and
-/// `U` as well ⇒ it may hold `0`/`1`/`3` ⇒ the two sides' `MPP` can
-/// differ after a `mret` (Spike drops to the least-privileged
-/// supported mode, i.e. `U` = 0, while this platform keeps `M` = 3).
-/// That difference is a **capability** difference, not a defect — the
-/// ledger records it (D-96).
+/// ⚠️ **Writing a reserved value (2) drops the WHOLE write** (F5) ⇒ ⇒ that
+/// rule lives in [`mstatus_warl`], **not** in a mask.
+///
+/// The reference side (Spike, default `--priv=MSU`) supports the same
+/// three levels ⇒ ⇒ the two sides' `MPP` agree.
 pub const MSTATUS_MPP_SHIFT: u32 = 11;
 
-/// The `mstatus.MPP` value for **machine mode** — the only privilege
-/// level this platform implements.
+/// The `mstatus.MPP` value for **machine mode**.
 pub const MSTATUS_MPP_M: u32 = 3;
 
 /// `mie.MEIE` — machine **external** interrupt enable (bit 11).
@@ -610,8 +873,14 @@ pub fn is_csr_read_only(csr: u16) -> bool {
         return true;
     }
     match csr & 0xF00 {
-        // 0x900..=0x9FF —— user-level read-only, custom.
-        0x900 => true,
+        // 0x900..=0x9FF —— **supervisor-level read/write** (custom).
+        //
+        // ⚠️ **STAGE-22 订正**：这一段**不是**只读区 —— 特权规范的地址映射
+        // 里 bits `[11:10] == 0b10` 是「监管者级**可读写**」⇒ ⇒
+        // `scounteren`（`0x906`）**必须可写**（实测 F19：置位之后 S 模式才
+        // 能读 `cycle`）⇒ ⇒ 把它当只读 ⇒ ⇒ 那次写被**吞掉** ⇒ ⇒ 使能链
+        // **永远接不上**。
+        0x900 => false,
         // 0xA00..=0xAFF —— machine-level standard: `0xA20..=0xA3F` and
         // `0xAA0..=0xABF` are read-only, the rest writable.
         // ⚠️ The mask is `0xFE0` (bits `[11:5]`, 0x20 granularity), **not**
@@ -987,6 +1256,25 @@ pub fn csr_is_implemented(csr: u16) -> bool {
             | CSR_MCYCLEH
             | CSR_MINSTRET
             | CSR_MINSTRETH
+            // ---- S-mode / U-mode (STAGE-22 · 裁决 F) ----
+            | CSR_SSTATUS
+            | CSR_SIE
+            | CSR_STVEC
+            | CSR_SSCRATCH
+            | CSR_SEPC
+            | CSR_SCAUSE
+            | CSR_STVAL
+            | CSR_SIP
+            | CSR_SATP
+            | CSR_MEDELEG
+            | CSR_MIDELEG
+            | CSR_MCOUNTEREN
+            | CSR_SCOUNTEREN
+            | CSR_UCOUNTEREN
+            // ⚠️ **伪 CSR 必须被认作已实现**（STAGE-22 裁决 F）—— 否则
+            // 快照的 `csrs.retain(csr_is_implemented)` 会把它**丢掉** ⇒ ⇒
+            // 还原之后**特权级归零** ⇒ ⇒ 快照不往返。
+            | CSR_PRIV
     )
 }
 
@@ -1007,7 +1295,12 @@ pub fn csr_is_implemented(csr: u16) -> bool {
 /// fake a pending interrupt.  That is the **platform's** rule, and it
 /// lives in [`csr_write_is_ignored`] with `mip`'s own line of defence.
 pub fn csr_is_read_only(csr: u16) -> bool {
-    is_csr_read_only(csr) || csr == CSR_MISA
+    // ⚠️ **伪 CSR `CSR_PRIV` 必须在这里**（STAGE-22 订正 6）—— 否则客体的
+    // 写会**真的落进** CSR 文件 ⇒ ⇒ guest 能改自己的特权级。
+    // ⚠️ 靠「未实现 ⇒ 写被忽略」是**假的**：裁决 F 要求 `CSR_PRIV` 进
+    // [`csr_is_implemented`]（否则快照不往返）⇒ ⇒ 那时
+    // `!csr_is_implemented` 那一条**不再成立** ⇒ ⇒ 必须有**这一条**。
+    is_csr_read_only(csr) || csr == CSR_MISA || csr == CSR_PRIV
 }
 
 /// Whether a write to a CSR is **ignored**.
@@ -1143,9 +1436,12 @@ mod tests {
         // `0x800..0x8FF` —— 用户级 custom **可写**。
         assert!(!is_csr_read_only(0x0800));
         assert!(!is_csr_read_only(0x08FF));
-        // `0x900..0x9FF` —— 用户级 custom **只读**。
-        assert!(is_csr_read_only(0x0900));
-        assert!(is_csr_read_only(0x09FF));
+        // `0x900..0x9FF` —— **监管者级 custom 可写**（STAGE-22 订正）。
+        // ⚠️ **STAGE-22 订正**：`0x0900..=0x09FF` 是**监管者级可读写**，
+        // 不是只读区 ⇒ ⇒ `scounteren`（`0x906`）必须能写（F19）。
+        assert!(!is_csr_read_only(0x0900));
+        assert!(!is_csr_read_only(CSR_SCOUNTEREN));
+        assert!(!is_csr_read_only(0x09FF));
         // `0xA00..0xA1F` 可写 · `0xA20..0xA3F` 只读 ·
         // `0xA80..0xA9F` 可写 · `0xAA0..0xABF` 只读。
         assert!(!is_csr_read_only(0x0A00));
@@ -1443,12 +1739,7 @@ mod tests {
         for (csr, why) in [
             (0x7A1u16, "tdata1 —— 调试器 CSR，本平台没有"),
             (0x7A2u16, "tdata2 —— 调试器 CSR，本平台没有"),
-            (0x302u16, "medeleg —— S 模式委派，本平台只有 M 模式"),
-            (0x303u16, "mideleg —— S 模式委派，本平台只有 M 模式"),
-            (
-                0x306u16,
-                "mcounteren —— U 模式计数器使能，本平台没有 U 模式",
-            ),
+            (0x308u16, "mstatush —— 本平台不实现 64 位的高半部 mstatus"),
             (
                 0xC00u16,
                 "cycle —— 用户态影子，它是**推导量**（读 mcycle）不是存储",
@@ -1477,7 +1768,10 @@ mod tests {
         // ⚠️ `0xB00`（`mcycle`）**不在**这个列表里了 —— 它在本批被
         // **实现**了（Zicntr 计数器，见 `STAGE-20`）。⇒ 这里换成
         // `0x306`（`mcounteren`）—— 本平台没有 U 模式 ⇒ 未实现。
-        for csr in [0x7A1u16, 0x7A2, 0x302, 0x303, 0x306] {
+        // ⚠️ `0x306`（`mcounteren`）/ `0x302`（`medeleg`）/ `0x303`
+        // （`mideleg`）**不在**这个列表里了 —— v0.38 起它们**已实现**
+        // （STAGE-22 裁决 F）。
+        for csr in [0x7A1u16, 0x7A2, 0x308, 0x30A, 0x30C] {
             assert!(
                 csr_write_is_ignored(csr),
                 "csr {csr:#x} 未实现 ⇒ 写必须被忽略"
@@ -1543,13 +1837,15 @@ mod tests {
         assert_ne!(CSR_MISA_VALUE & (1 << 8), 0, "I 扩展位");
         assert_ne!(CSR_MISA_VALUE & (1 << 12), 0, "M 扩展位");
         assert_ne!(CSR_MISA_VALUE & (1 << 2), 0, "C 扩展位");
+        // 已实现（v0.38 起）：S（bit 18）、U（bit 20）⇒ ⇒ 与参考侧**逐位
+        // 相同**（STAGE-22 · F3 / F24 / F27）。
+        assert_ne!(CSR_MISA_VALUE & (1 << 18), 0, "S 扩展位（v0.38 起已实现）");
+        assert_ne!(CSR_MISA_VALUE & (1 << 20), 0, "U 扩展位（v0.38 起已实现）");
         // 未实现 ⇒ 位必须**清零**。
         for (bit, name) in [
             (0u32, "A（原子）"),
             (3, "D（双精度浮点）"),
             (5, "F（单精度浮点）"),
-            (18, "S（监管者模式）"),
-            (20, "U（用户模式）"),
             (29, "IALIGN = 32"),
         ] {
             assert_eq!(
@@ -1571,6 +1867,17 @@ mod tests {
     /// `MSTATUS_WARL_MASK` 自己 ⇒ 改了常量而忘了改语义，这条会红。
     #[test]
     fn the_mstatus_warl_mask_drops_the_reserved_bits_and_keeps_the_fields() {
+        // ⚠️ **掩码是实测出来的**（STAGE-22 · F6 / **F40**）⇒ ⇒ 这里钉的是
+        // **那个值**，不是「按规范推出来的值」。
+        assert_eq!(
+            MSTATUS_WARL_MASK, 0x007E_79AA,
+            "mstatus 的**直接可写位**必须与参考侧逐位相同（F6 / F40）"
+        );
+        assert_eq!(
+            MSTATUS_WARL_MASK & MSTATUS_SD_BIT,
+            0,
+            "SD 是推导位 ⇒ 不可直接写 ⇒ 必须在掩码之外（F40）"
+        );
         // 保留位（WPRI）：0 / 2 / 4 / 23 / 24~30。
         for (bits, name) in [
             (0x0000_0001u32, "bit 0"),
@@ -1585,25 +1892,34 @@ mod tests {
                 "{name} 是保留位 ⇒ 必须在掩码之外"
             );
         }
-        // 已定义的字段：一个都不能被掩掉。
+        // 本平台**不支持**的扩展位 ⇒ 参考侧也写不进去（F6）⇒ ⇒ 必须**在
+        // 掩码之外**：UBE（6）、VS（9:10）、XS 的高位（16）。
+        for (bits, name) in [
+            (0x0000_0040u32, "UBE"),
+            (0x0000_0600, "VS"),
+            (0x0001_0000, "XS 的高位（16）"),
+        ] {
+            assert_eq!(
+                MSTATUS_WARL_MASK & bits,
+                0,
+                "{name} 是本平台不支持的扩展位 ⇒ 参考侧写不进去 ⇒ 必须在掩码之外（F6）"
+            );
+        }
+        // 本平台**用到**的字段：一个都不能被掩掉。
         for (bits, name) in [
             (0x0000_0002u32, "SIE"),
             (0x0000_0008, "MIE"),
             (0x0000_0020, "SPIE"),
-            (0x0000_0040, "UBE"),
             (0x0000_0080, "MPIE"),
             (0x0000_0100, "SPP"),
-            (0x0000_0600, "VS"),
             (0x0000_1800, "MPP"),
-            (0x0000_6000, "FS"),
-            (0x0001_8000, "XS"),
             (0x0002_0000, "MPRV"),
             (0x0004_0000, "SUM"),
             (0x0008_0000, "MXR"),
             (0x0010_0000, "TVM"),
             (0x0020_0000, "TW"),
             (0x0040_0000, "TSR"),
-            (0x8000_0000, "SD"),
+            (0x0000_6000, "FS"),
         ] {
             assert_eq!(
                 MSTATUS_WARL_MASK & bits,
@@ -1611,6 +1927,9 @@ mod tests {
                 "{name} 是已定义的字段 ⇒ 必须在掩码之内"
             );
         }
+        // ⚠️ **`SD` 是唯一的例外**：它是**推导位**（F40）⇒ ⇒ **不可直接写**
+        // ⇒ ⇒ 不在掩码之内（上面的断言已经钉住）⇒ ⇒ 它的值由 `FS`/`XS` 推
+        // 出来 ⇒ ⇒ 见 `mstatus_warl_derives_the_sd_bit_from_fs_and_xs`。
     }
 
     /// `mepc` 的对齐掩码：**只**去掉最低一位（IALIGN = 16，因为本平台
@@ -2029,5 +2348,223 @@ mod tests {
         assert!(!csr_is_implemented(0x3A4));
         assert!(csr_write_is_ignored(0x3A4));
         assert!(!csr_is_implemented(0x3C0));
+    }
+
+    // ------------------------------------------------------------------
+    // STAGE-22 · v0.38 · S 模式（验收 A-1 ~ A-11）
+    // ------------------------------------------------------------------
+
+    /// **A-1** · `mstatus` 的真实可写掩码 = **`0x807E_79AA`**（F6）。
+    ///
+    /// ⚠️ 判别式用的是**架构字面量**，不是 `MSTATUS_WARL_MASK` 自己 ⇒
+    /// 把掩码改坏（或整个去掉）这条会红。
+    #[test]
+    fn mstatus_warl_keeps_exactly_the_measured_writable_bits() {
+        assert_eq!(
+            mstatus_warl(0xFFFF_FFFF),
+            0x807E_79AA,
+            "写全 1 之后 mstatus 必须读回参考侧实测的那个值（F6）"
+        );
+    }
+
+    /// **F40** · `mstatus.SD`（bit 31）是**推导位**：= (`FS` == 3) ∨ (`XS` == 3)。
+    ///
+    /// ⚠️ **三条实测**：① 只写 `FS = 3`（`0x6000`）⇒ ⇒ 读回 **`0x8000_6000`**
+    /// （`SD` 被**推成 1**）；② 只写 `FS = 1`（`0x2000`）⇒ ⇒ 读回
+    /// **`0x0000_2000`**（`SD` 是 0）；③ 直接写 bit 31（`0x8000_0000`）⇒ ⇒
+    /// 读回 **`0x0000_0000`** ⇒ ⇒ **直接写无效** ⇒ ⇒ 它**不是**存储位。
+    ///
+    /// ⚠️ 判别式用的是**架构字面量**，不是常量自己 ⇒ ⇒ 改了常量而忘了改
+    /// 语义，这条会红。
+    #[test]
+    fn mstatus_warl_derives_the_sd_bit_from_fs_and_xs() {
+        assert_eq!(
+            mstatus_warl(0x0000_6000),
+            0x8000_6000,
+            "只把 FS 写成 3 ⇒ SD 必须被推成 1（F40）"
+        );
+        assert_eq!(
+            mstatus_warl(0x0000_2000),
+            0x0000_2000,
+            "FS = 1（Initial）⇒ SD 必须是 0（F40）"
+        );
+        assert_eq!(
+            mstatus_warl(0x8000_0000),
+            0x0000_0000,
+            "直接写 SD 无效 ⇒ 它是推导位（F40）"
+        );
+    }
+
+    /// **A-2** · `MPP` 的**保留值 ⇒ 合法化到 0**，**同一次写里的其它位照常落
+    /// 进去**（F5 + **F39**）。
+    ///
+    /// ⚠️ 关键在**「只丢 `MPP` 字段」**：清零后写 `0x1002`（`MPP = 2` 且
+    /// `SIE = 1`）⇒ 参考侧读回低字节 **`0x02`** ⇒ ⇒ `SIE` **落进去了**
+    /// ⇒ ⇒ 「整次丢弃」那个读法会让这条**红**。
+    ///
+    /// ⚠️ 关键在**「不是保留旧值」**：先写 `0x1800`（`MPP = 3`）再写
+    /// `0x1002` ⇒ 参考侧读回**仍是 `0x0000_0002`** ⇒ ⇒ 旧值被**覆盖成 0**
+    /// ⇒ ⇒ 「保留旧值」那个读法会让这条**红**。
+    ///
+    /// ⚠️ `MPP` 字段是 **bits 12:11** ⇒ `MPP = 2` 写的是 **`0x1000`**
+    /// （`0x1800` 是 `MPP = 3`，**合法** ⇒ ⇒ 用它测「保留值」是测不到的）。
+    #[test]
+    fn mstatus_warl_legalizes_the_reserved_mpp_to_zero() {
+        assert_eq!(
+            mstatus_warl(0x0000_1002),
+            0x0000_0002,
+            "MPP = 2 是保留值 ⇒ 该字段合法化到 0，但 SIE 必须落进去（F39）"
+        );
+        assert_eq!(
+            mstatus_warl(0x0000_1000),
+            0x0000_0000,
+            "只写 MPP = 2 ⇒ 整次写没有任何可落的位 ⇒ 结果是 0（F39）"
+        );
+        assert_eq!(
+            mstatus_warl(0x0000_1802),
+            0x0000_1802,
+            "MPP = 3 是合法值 ⇒ 原样落进去（F5）"
+        );
+    }
+
+    /// **A-2 的另一半** · 合法的 `MPP` 值 {0, 1, 3} 都**不**触发合法化。
+    #[test]
+    fn mstatus_warl_accepts_the_legal_mpp_values() {
+        for mpp in [MSTATUS_MPP_U, MSTATUS_MPP_S, MSTATUS_MPP_M] {
+            let new = mpp << MSTATUS_MPP_SHIFT;
+            assert_eq!(
+                mstatus_warl(new),
+                new,
+                "MPP = {mpp} 是合法值 ⇒ 写必须落进去（F5）"
+            );
+        }
+    }
+
+    /// **A-4** · 14 个新 CSR **必须**被认作已实现 ⇒ ⇒ 它们的写**不被吞掉**。
+    #[test]
+    fn the_s_and_u_mode_csr_are_implemented() {
+        for csr in [
+            CSR_SSTATUS,
+            CSR_SIE,
+            CSR_STVEC,
+            CSR_SSCRATCH,
+            CSR_SEPC,
+            CSR_SCAUSE,
+            CSR_STVAL,
+            CSR_SIP,
+            CSR_SATP,
+            CSR_MEDELEG,
+            CSR_MIDELEG,
+            CSR_MCOUNTEREN,
+            CSR_SCOUNTEREN,
+            CSR_UCOUNTEREN,
+        ] {
+            assert!(
+                csr_is_implemented(csr),
+                "csr {csr:#x} 必须被认作已实现，否则写会被吞掉（裁决 F）"
+            );
+            assert!(
+                !csr_write_is_ignored(csr),
+                "csr {csr:#x} 必须接受写（裁决 F）"
+            );
+        }
+    }
+
+    /// **A-3 / A-10** · 伪 CSR `CSR_PRIV`：**已实现**（快照要留住它）**且**
+    /// **只读**（客体改不了自己的特权级）。
+    #[test]
+    fn the_privilege_pseudo_csr_is_implemented_but_read_only() {
+        assert!(
+            csr_is_implemented(CSR_PRIV),
+            "CSR_PRIV 必须被认作已实现 ⇒ 否则快照的 retain 会丢掉它 ⇒ 特权级归零"
+        );
+        assert!(
+            csr_is_read_only(CSR_PRIV),
+            "CSR_PRIV 必须只读 ⇒ 否则客体的写会真的落进文件 ⇒ guest 能改自己的特权级"
+        );
+        assert!(
+            csr_write_is_ignored(CSR_PRIV),
+            "CSR_PRIV 的客体写必须被忽略"
+        );
+    }
+
+    /// **A-5 / A-9** · `misa` 与参考侧**逐位相同**（F3 / F24 / F27）。
+    #[test]
+    fn misa_is_bit_identical_to_the_reference_side() {
+        assert_eq!(
+            CSR_MISA_VALUE, 0x4014_1104,
+            "misa 必须与参考侧逐位相同：MXL=1、I、M、C、S 位、U 位、X 位"
+        );
+        assert_ne!(CSR_MISA_VALUE & (1 << 18), 0, "S 位（18）必须置着");
+        assert_ne!(CSR_MISA_VALUE & (1 << 20), 0, "U 位（20）必须置着");
+    }
+
+    /// **A-6** · `sstatus` 的客体写掩码 = **`0x000C_6122`**（F41 · 逐位实测）。
+    ///
+    /// ⚠️ 判别式用的是**架构字面量**，不是常量自己 ⇒ ⇒ 把掩码改坏这条会红。
+    ///
+    /// ⚠️ **`MPIE`（bit 7）不在掩码里** ⇒ ⇒ 这正是「从聚合值反推掩码」会
+    /// 算错的那一位（那个观测里的 `MPIE` 是 env 初始化留下的，不是写进去的）。
+    #[test]
+    fn the_sstatus_write_mask_is_the_measured_one() {
+        assert_eq!(SSTATUS_WARL_MASK, 0x000C_6122);
+        assert_ne!(
+            SSTATUS_WARL_MASK & (1 << MSTATUS_SPP_BIT),
+            0,
+            "SPP 在写掩码里 ⇒ ⇒ 参考侧允许 S 模式写 sstatus.SPP（F41）"
+        );
+        assert_ne!(
+            SSTATUS_WARL_MASK & (1 << MSTATUS_SIE_BIT),
+            0,
+            "SIE 在写掩码里（F41）"
+        );
+        assert_eq!(
+            SSTATUS_WARL_MASK & (1 << MSTATUS_MPP_SHIFT),
+            0,
+            "MPP 不在 sstatus 的写掩码里（F41）"
+        );
+        assert_eq!(
+            SSTATUS_WARL_MASK & (1 << 7),
+            0,
+            "MPIE 不在 sstatus 的写掩码里 ⇒ ⇒ 逐位实测钉死的（F41）"
+        );
+        assert_eq!(
+            SSTATUS_WARL_MASK & (1 << 22),
+            0,
+            "TSR 不在 sstatus 的写掩码里 ⇒ ⇒ 逐位实测钉死的（F41）"
+        );
+    }
+
+    /// **A-11** · `sstatus` 的读视图 = **`0x800D_E162`** ⇒ ⇒ **含 `SD`**（F38）。
+    #[test]
+    fn the_sstatus_view_mask_is_the_measured_one() {
+        assert_eq!(SSTATUS_VIEW_MASK, 0x800D_E162);
+        assert_ne!(SSTATUS_VIEW_MASK & (1 << 31), 0, "SD 在视图里（F38）");
+        assert_ne!(
+            SSTATUS_VIEW_MASK & (1 << MSTATUS_SPP_BIT),
+            0,
+            "SPP 在视图里（F7）"
+        );
+        assert_eq!(
+            SSTATUS_VIEW_MASK & (1 << 3),
+            0,
+            "MIE 不在视图里 ⇒ ⇒ S 模式看不到机器态的使能位（F38）"
+        );
+    }
+
+    /// **F35** · `medeleg` 的合法位集合 = **`0x0008_B3FE`**（per-bit WARL）。
+    #[test]
+    fn the_medeleg_writable_mask_is_the_measured_one() {
+        assert_eq!(MEDELEG_WRITABLE_MASK, 0x0008_B3FE);
+        assert_eq!(
+            MEDELEG_WRITABLE_MASK & 0x0000_B109,
+            0x0000_B108,
+            "参考侧把 medeleg 的 bit 0 丢掉（F35 + F36）"
+        );
+        assert_eq!(
+            MEDELEG_WRITABLE_MASK & 0x0000_FFFF,
+            0x0000_B3FE,
+            "只写低 16 位 ⇒ 高位那些位拿不到（F35）"
+        );
     }
 }
