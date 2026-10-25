@@ -117,21 +117,34 @@
 // PMP-checked.
 //
 // ---------------------------------------------------------------------------
-// ⚠️ WHAT IS **NOT** ASSERTED, AND WHY
+// ⚠️ `mtval` **IS** ASSERTED NOW — and it asserts the **failing piece**
 // ---------------------------------------------------------------------------
 // The reference side reports `mtval` = `0x8004_0000` — the address of the
-// **failing piece** — while the platform reports `mtval` = the **effective
-// address** of the access (`0x8003_FFFE`); `crates/kernel/src/m13_iss/
-// executor.rs` passes the effective address to `enter_trap`, and STAGE-23
-// §3.1 / B-6 keep that call site **unchanged**.
+// **failing piece** — while the platform used to report `mtval` = the
+// **effective address** of the access (`0x8003_FFFE`).  The two differ by one
+// offset, and the two sides' `mcause` are **the same** (5) ⇒ ⇒ `mcause`
+// alone **cannot** tell them apart.
 //
-// ⇒ ⇒ **`mtval` is deliberately NOT asserted here.**  "Which address does a
-// PMP trap report" is a **different rule** from "which access is denied",
-// it is **outside** this batch's scope, and asserting it would keep this
-// row red for a reason the per-piece fix does not address (STAGE-23 C-3
-// wants this row to go **green**).  What *is* asserted is `mcause` = 5 —
-// which pins "denied, and denied as a **load access fault**" and separates
-// it from a misaligned-load trap (cause 4) or a bus error.
+// ⇒ ⇒ the case now asserts `mtval` = **`0x8004_0000`**, which is what the
+// reference side reports (measured; ledger **D-154**, closed in v0.41).
+//
+// ⚠️ **What exactly is asserted**: the access covers
+// `[0x8003_FFFE, 0x8004_0002)` ⇒ ⇒ piece 1 = `[0x8003_FFFE, 0x8004_0000)`
+// (inside the ALLOW entry) ⇒ ⇒ piece 2 = `[0x8004_0000, 0x8004_0002)`
+// (inside the DENY entry) ⇒ ⇒ **the failing piece is the second one** ⇒ ⇒
+// its **start** is `0x8004_0000` ⇒ ⇒ **not** the effective address
+// `0x8003_FFFE`.
+//
+// ⚠️ **The `mcause` and `mepc` assertions stay**: `mcause` = 5 is the primary
+// criterion ("is the verdict right?" — denied, and denied as a **load access
+// fault**, not a misaligned-load trap (cause 4) and not a bus error), `mepc`
+// pins "is it the *right* trap?".  `mtval` is the third, separate question:
+// "is the reported address **exact**?".
+//
+// ⚠️ **The control group stays**: a load that stays **fully inside** the
+// ALLOW region does **not** trap at all ⇒ ⇒ `mtval` has nothing to say there
+// ⇒ ⇒ it **cannot** be used as the contrast for this assertion (the contrast
+// is the access's own **effective address**, asserted in the trap handler).
 //
 // ---------------------------------------------------------------------------
 // ⚠️ THE FAILURE NUMBERS (so a red row says *which* scenario broke)
@@ -151,6 +164,10 @@
 //                    **not** the mixed one ⇒ ⇒ it did not cross the boundary
 //   TESTNUM = 9  ->  control: the **misaligned** load inside the ALLOW
 //                    region did not return the expected value
+//   TESTNUM = 10 ->  `mtval` was **not** the start of the failing piece
+//                    (the reference side reports `0x8004_0000` — the start of
+//                    the **second** piece — not the access's effective
+//                    address `0x8003_FFFE`)
 //
 // The file is deliberately **self-contained**: it includes no riscv-tests
 // source, so it keeps working if the upstream tree changes shape (same rule
@@ -274,6 +291,14 @@ trap_in_scenario_a:
   li    t2, 5
   bne   t0, t2, wrong_cause      // mcause must be 5 (load access fault)
   bne   t1, s2, wrong_mepc       // mepc must be the faulting instruction
+  // ⚠️ **`mtval` 报的是「出错那一片的起始地址」**（台账 D-154 · 参考侧实测）
+  //    ⇒ ⇒ 访问覆盖 [0x8003FFFE, 0x80040002) ⇒ ⇒ 片 1 = [0x8003FFFE,
+  //    0x80040000)（ALLOW 条目）⇒ ⇒ 片 2 = [0x80040000, 0x80040002)（DENY
+  //    条目）⇒ ⇒ **失败片是第二片** ⇒ ⇒ 参考侧报 **`0x8004_0000`** ⇒ ⇒
+  //    **不是**访问的有效地址（`0x8003_FFFE`）。
+  csrr  t3, mtval
+  li    t2, 0x80040000
+  bne   t3, t2, wrong_mtval
   // ⇒ ⇒ the denial is exactly what the reference side reports ⇒ ⇒ carry on
   //      with scenario B.  ⚠️ **No `mret`**: `MPP` = 0 would drop the hart
   //      into U-mode, and the case never needs to return to `mepc`.
@@ -285,6 +310,10 @@ wrong_cause:
 
 wrong_mepc:
   li    TESTNUM, 6
+  j     report_fail
+
+wrong_mtval:
+  li    TESTNUM, 10
   j     report_fail
 
 scenario_b_setup:
