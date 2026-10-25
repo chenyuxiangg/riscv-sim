@@ -24,8 +24,16 @@
 #   env     the environment variant to build the case with:
 #             (empty) / -   the default (CSR-free) environment
 #             csr           the CSR-capable environment (env/csr/)
+#             smode         the supervisor-capable environment (env/smode/)
 #           The variant's include path is searched **first**, so its
 #           `riscv_test.h` wins over the default one (STAGE-6 adjudication F).
+#           ⚠️ `smode` is the `csr` variant **plus** a *direct* `tohost`
+#           verdict and a **strict** M-level trap vector (STAGE-22
+#           adjudication M) ⇒ ⇒ it is the only environment in which a
+#           supervisor-level case can tell "the `sret` landed in U mode"
+#           from "the `sret` landed in S mode" ⇒ ⇒ the `csr` variant's
+#           trap vector reports the three ECALL causes as PASS ⇒ ⇒ under
+#           it, a wrong `sret` landing is a **false green on both sides**.
 #   reason  REQUIRED for `pending`: why it is out of scope + the ledger
 #           entry that tracks it.  The harness validates that every
 #           pending row carries one.
@@ -36,6 +44,10 @@
 #   * the **csr** environment (env/csr/) provides the trap vector, the
 #     `mtvec` programming and the `mret` epilogue, so the machine-level
 #     corpus becomes comparable;
+#   * the **smode** environment (env/smode/) is the same room **plus** a
+#     *direct* `tohost` verdict and a **strict** M-level trap vector, so
+#     the supervisor-level corpus becomes comparable **and** meaningful
+#     (STAGE-22 adjudication M / §8 correction 2);
 #   * `zifencei` is enabled everywhere so that `fence_i` assembles;
 #   * `rv32um` needs the M extension, `rv32uc` the C extension — both
 #     landed in v0.16 (ledger D-43 closed), so the corpus is now **all
@@ -212,3 +224,76 @@ local compressed_trap rv32ic_zicsr_zifencei active csr
 #
 # With this row the corpus grows from **68** to **69** cases.
 local pmp_deny rv32i_zicsr_zifencei active csr
+
+# ---------------------------------------------------------------------------
+# The supervisor-level corpus (STAGE-22 · v0.38 · S mode)
+# ---------------------------------------------------------------------------
+#
+# `rv32si/sbreak`, `rv32si/scall` and `rv32si/csr` are upstream's
+# supervisor-level cases.  They are built with the **`smode`** environment
+# (`env/smode/`), which is the `csr` environment plus two behavioural
+# changes (STAGE-22 adjudication M / §8 correction 2):
+#
+#   * the verdict is written **straight to `tohost`** instead of travelling
+#     through `ecall` -> trap -> `tohost` — the *encoding* is byte for byte
+#     the same (PASS = 1, FAIL n = `(n<<1)|1`), so the harness's comparison
+#     is unchanged;
+#   * the M-level trap vector is **strict**: it no longer reports the three
+#     ECALL causes (8 / 9 / 11) as PASS.
+#
+# ⚠️ **Why the second change is load-bearing**: under the `csr` environment,
+# `rv32si/scall` is a **false green** — if the `sret` wrongly lands in S
+# mode, the `scall`'s cause is 9, which the `csr` trap vector reports as
+# PASS ⇒ ⇒ **both sides report PASS** ⇒ ⇒ the row proves nothing.  Under
+# `smode` the same situation is a **failure** ⇒ ⇒ the row really pins where
+# `sret` lands.
+#
+# ⚠️ The `march` column does **not** grow a new value: the toolchain
+# rejects `-march=..._s` (F22), and `sbreak` / `scall` / `sret` /
+# `csrr sstatus` all assemble under `rv32i_zicsr_zifencei` ⇒ ⇒ the column
+# keeps its existing vocabulary.
+#
+# The reference side passes all three (measured; see
+# `tests/golden/README.md`).
+rv32si sbreak rv32i_zicsr_zifencei active smode
+rv32si scall rv32i_zicsr_zifencei active smode
+rv32si csr rv32i_zicsr_zifencei active smode
+
+# `smode_csr` — the **self-contained** supervisor-level case (STAGE-22
+# adjudication N).  Upstream's three cases above cannot observe **why** an
+# S-mode trap went where it went, and none of them touches the S-mode CSR
+# set; this one does:
+#
+#   * the S-mode CSRs (`sscratch` / `stvec` / `sepc` / `scause` / `stval` /
+#     `sstatus`), each with its WARL rule;
+#   * the **per-level accessibility** rule — reading or writing an M-mode
+#     CSR in S mode is an **illegal instruction** (cause 2), and so is
+#     touching an unimplemented CSR;
+#   * the **delegation routing** — with `medeleg`'s bit 2 cleared, the very
+#     same trap lands on **`mtvec`** instead of `stvec`;
+#   * where **`sret` lands** (U mode ⇒ a U-mode `sstatus` read is an
+#     illegal instruction).
+#
+# ⚠️ Every trap-shaped assertion checks a "a trap really happened" flag, so
+# a platform that does **not** trap is caught ("no trap" can never be
+# mistaken for "pass").
+#
+# ⚠️ The case **defines `stvec_handler`** on purpose: the environment only
+# writes `medeleg` when the test defines one ⇒ ⇒ without it the delegation
+# surface would be zero and the case would prove nothing.
+local smode_csr rv32i_zicsr_zifencei active smode
+
+# `mstatus_warl` — `mstatus.MPP` is WARL, and writing the **reserved** value
+# 2 **legalises the field to 0** while the rest of the same write lands
+# normally (measured on the reference side for every old value: 0, 1, 3).
+# This row is the golden-side carrier of the `MPP` semantics: it is what
+# tells "legalised to 0" from "kept the old value" (the old value is set to
+# 3 first) and from "the whole write was discarded" (the low byte must
+# still carry `SIE`).
+#
+# It runs under the **`csr`** environment: it is an M-mode case, and its
+# verdict travels through the environment's `ecall` trap path — which is
+# exactly what `pmp_deny.S` does too.
+local mstatus_warl rv32i_zicsr_zifencei active csr
+#
+# With these five rows the corpus grows from **69** to **74** cases.
