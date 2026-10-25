@@ -81,9 +81,9 @@ pub const PLATFORM_SCHEMA_VERSION: u32 = 1;
 /// contract's [`crate::SCHEMA_VERSION`] either ⇒ the three numbers mean
 /// three different things and none of them replaces another:
 ///
-/// | constant | judges | v0.34 |
+/// | constant | judges | v0.44 |
 /// | --- | --- | --- |
-/// | [`crate::SCHEMA_VERSION`] | the **message** shape (the contract envelope) | `7` |
+/// | [`crate::SCHEMA_VERSION`] | the **message** shape (the contract envelope) | `8` |
 /// | [`PLATFORM_SCHEMA_VERSION`] | the **description** shape (what a description looks like) | `1` |
 /// | `PLATFORM_RULES_VERSION` | the **legality rules** (which descriptions are legal) | `3` |
 ///
