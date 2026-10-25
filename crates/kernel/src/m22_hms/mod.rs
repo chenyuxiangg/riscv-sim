@@ -41,6 +41,14 @@
 //! （[`RETAINED_BAND_CAPACITY`]）⇒ 满了之后**不是**「丢最旧的」（那就**违背**
 //! 了「永不丢弃」）⇒ ⇒ **整带折叠成**一个聚合信号**（保**首条**原文 +
 //! **计数**，见 [`Hms::retained_total`]）⇒ ⇒ **条数**有界 ⇒ **内存**有界。
+//!
+//! **宿主时钟的可见性（v0.43 批 · 台账 **D-135** · 裁决 C / K）**：诊断包
+//! [`DiagnosticKit`] 有一个**显式**的布尔字段
+//! [`DiagnosticKit::host_clock_available`] ⇒ ⇒ 「宿主时钟**读不到**」这件事
+//! **看得见**（**不是**「从别的字段推出来」、**不是**「用数值 0 兼职」）⇒ ⇒
+//! 摘要里**另有一句人话**。
+//! ⚠️ **谁持有时钟谁回答** ⇒ ⇒ 这个**事实**由**宿主**注入（形参）⇒ ⇒
+//! **M-22 不主动去问时钟** ⇒ ⇒ **本模块不依赖 `kernel_host`**。
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -50,7 +58,9 @@ use std::rc::Rc;
 use riscv_sim_contract::error::{ErrorFamily, PlatformError, E_HMS_01_DEGRADE_FAILED};
 
 use crate::m21_logging::{LogBuffer, LogEntry, LogQuery};
-use crate::m23_datastore::{DataStore, E_STORE_01_ARCHIVE_FAILED};
+use crate::m23_datastore::{
+    DataStore, E_STORE_04_ARCHIVE_BACKEND_MISSING, E_STORE_05_KIT_SERIALIZE_FAILED,
+};
 
 /// 健康信号流的环形容量（LLD M-22 §6.2 (11)「健康信号流环形 ≤10⁴ 条」）。
 pub const SIGNAL_RING_CAPACITY: usize = 10_000;
@@ -287,6 +297,16 @@ pub struct DiagnosticKit {
     /// ⚠️ M-20 的输入序列通道本批**不可达** ⇒ 这里放的是**信号流尾部**的渲染
     /// （取证要素，**不含原始日志**）。
     pub input_seq_tail: Vec<String>,
+    /// **宿主单调时钟可用吗**（v0.43 批 · 台账 **D-135** · 裁决 K）。
+    ///
+    /// ⚠️ 它是**显式**的一等公民：**不是**「从别的字段推出来的」、**不是**
+    /// 「用数值 0 兼职」⇒ ⇒ 宿主时钟**读不到**时它**明确为假**（**不是**
+    /// 「没这个键」）。
+    ///
+    /// ⚠️ **谁持有时钟谁回答**（裁决 C）：这个**事实**由**宿主**注入 ⇒ ⇒
+    /// **M-22 不主动去问时钟** ⇒ ⇒ 本模块**不依赖** `kernel_host`（否则 M-22
+    /// 就要反向依赖宿主装配层 ⇒ ⇒ 那是**依赖方向**问题）。
+    pub host_clock_available: bool,
 }
 
 /// 整体健康状态（冻结规格 §2.4 · 裁决 D）。
@@ -740,45 +760,70 @@ impl Hms {
     /// 导出脱敏诊断包（**不含原始日志**）。
     ///
     /// `err_code` 为 `None` 时回落到**最近一条致命 / 严重信号**的错误码。
-    pub fn export_diagnostic_kit(&self, err_code: Option<&str>) -> DiagnosticKit {
+    ///
+    /// ⚠️ `host_clock_available` 是**宿主注入的**「宿主单调时钟可不可用」这个
+    /// **事实**（台账 **D-135** · 裁决 C：谁持有时钟谁回答 ⇒ ⇒ **M-22 不主动
+    /// 去问时钟** ⇒ ⇒ 本模块**不依赖** `kernel_host`）。
+    pub fn export_diagnostic_kit(
+        &self,
+        err_code: Option<&str>,
+        host_clock_available: bool,
+    ) -> DiagnosticKit {
         let code = match err_code {
             Some(code) => Some(code.to_string()),
             None => self.last_retained_code(),
         };
+        // ⚠️ **人话那句**（裁决 K）：诊断包的**快照摘要**是**人看的那份** ⇒ ⇒
+        // 时钟状态**必须**在里面说清楚 ⇒ ⇒ 「读不到时钟」与「一切正常」**分得开**。
+        let clock_note = if host_clock_available {
+            "宿主时钟=可用"
+        } else {
+            "宿主时钟=不可用（读不到单调时钟）"
+        };
         let snapshot_summary = format!(
-            "health={:?} signals={} retained={} retained_total={} frozen={} terminated={} watchdog_fired={}",
+            "health={:?} signals={} retained={} retained_total={} frozen={} terminated={} watchdog_fired={} {}",
             self.state(),
             self.signals.len(),
             self.retained.len(),
             self.retained_total,
             self.frozen,
             self.terminated,
-            self.watchdog_fired
+            self.watchdog_fired,
+            clock_note
         );
         DiagnosticKit {
             err_code: code,
             snapshot_summary,
             input_seq_tail: self.signal_tail(),
+            host_clock_available,
         }
     }
 
     /// 归档诊断包（调 M-23 的 `archive`，§3.4）。
     ///
     /// ⚠️ **没有归档通道**（宿主没注入后端）⇒ 报错，**不**静默成功。
-    pub fn archive_diagnostic_kit(&mut self, err_code: Option<&str>) -> Result<(), PlatformError> {
-        let kit = self.export_diagnostic_kit(err_code);
+    ///
+    /// ⚠️ **两个触发点各用各的码**（v0.43 批 · D-157 · 裁决 E）：**序列化失败**
+    /// ⇒ `E_STORE-05`；**没有归档通道** ⇒ `E_STORE-04` ⇒ ⇒ 「一个线上码两个
+    /// 含义」这条**在内核自己内部**也修掉了。
+    pub fn archive_diagnostic_kit(
+        &mut self,
+        err_code: Option<&str>,
+        host_clock_available: bool,
+    ) -> Result<(), PlatformError> {
+        let kit = self.export_diagnostic_kit(err_code, host_clock_available);
         let name = Self::diagnostic_kit_name(kit.err_code.as_deref());
         let bytes = serde_json::to_vec(&kit_to_json(&kit)).map_err(|e| {
             PlatformError::new(
                 ErrorFamily::Storage,
-                E_STORE_01_ARCHIVE_FAILED,
+                E_STORE_05_KIT_SERIALIZE_FAILED,
                 format!("诊断包序列化失败：{e}"),
             )
         })?;
         let store = self.store.as_mut().ok_or_else(|| {
             PlatformError::new(
                 ErrorFamily::Storage,
-                E_STORE_01_ARCHIVE_FAILED,
+                E_STORE_04_ARCHIVE_BACKEND_MISSING,
                 "没有归档通道：宿主未注入归档后端（install_store）",
             )
         })?;
@@ -956,6 +1001,12 @@ fn kit_to_json(kit: &DiagnosticKit) -> serde_json::Value {
                 .map(|s| serde_json::Value::String(s.clone()))
                 .collect(),
         ),
+    );
+    // ⚠️ v0.43 批（D-135 · 裁决 K）：「宿主时钟可不可用」**必须**在导出件里
+    // ⇒ ⇒ **显式**的键 ⇒ ⇒ 不可用时**明确为 `false`**（**不是**「没这个键」）。
+    obj.insert(
+        "host_clock_available".to_string(),
+        serde_json::Value::Bool(kit.host_clock_available),
     );
     serde_json::Value::Object(obj)
 }
@@ -1482,7 +1533,7 @@ mod tests {
         hms.report(heartbeat_signal("E_CTX-06"));
 
         // 结构 + 文本：**没有**日志条目。
-        let kit = hms.export_diagnostic_kit(Some("E_HMS-01"));
+        let kit = hms.export_diagnostic_kit(Some("E_HMS-01"), true);
         assert_eq!(kit.err_code.as_deref(), Some("E_HMS-01"));
         let text = format!("{kit:?}");
         for forbidden in ["LogEntry", "log_ref", "msg:", "level"] {
@@ -1497,7 +1548,7 @@ mod tests {
         hms.install_store(Box::new(SharedStore {
             inner: store.clone(),
         }));
-        hms.archive_diagnostic_kit(Some("E_HMS-01"))
+        hms.archive_diagnostic_kit(Some("E_HMS-01"), true)
             .expect("归档必须成功");
 
         let name = Hms::diagnostic_kit_name(Some("E_HMS-01"));
@@ -1669,7 +1720,7 @@ mod tests {
             hms.report(signal);
         }
         assert_eq!(hms.retained().len(), 1, "已折叠");
-        let kit = hms.export_diagnostic_kit(None);
+        let kit = hms.export_diagnostic_kit(None, true);
         let expected = format!("E_FATAL-{last}");
         assert_eq!(
             kit.err_code.as_deref(),
@@ -1714,14 +1765,23 @@ mod tests {
     }
 
     /// 附加 · 没有归档通道 ⇒ 报错，**不**静默成功。
+    ///
+    /// ⚠️ **v0.43 批（D-157 · 裁决 E）**：这一路的场景码是 **`E_STORE-04`**
+    /// （**没有归档通道**）⇒ ⇒ 断言落在**码**上（**不是** message 文本）。
+    ///
+    /// ⚠️ **判别力**：把两个触发点的码**换回去**（都用同一个码）⇒ 本条变红
+    /// ⇒ ⇒ 「一个码两个含义」在**内核自己内部**也修掉了。
     #[test]
     fn archiving_without_a_store_reports_no_archive_channel() {
         let mut hms = Hms::new();
         let err = hms
-            .archive_diagnostic_kit(Some("E_HMS-01"))
+            .archive_diagnostic_kit(Some("E_HMS-01"), true)
             .expect_err("没有归档通道必须报错");
         assert_eq!(err.family, ErrorFamily::Storage);
-        assert_eq!(err.scenario, E_STORE_01_ARCHIVE_FAILED);
+        assert_eq!(
+            err.scenario, E_STORE_04_ARCHIVE_BACKEND_MISSING,
+            "「没有归档通道」这一路的场景码必须是 E_STORE-04"
+        );
         assert!(err.to_string().contains("归档通道"));
     }
 
@@ -1816,5 +1876,175 @@ mod tests {
         }
         // 引用处确实落在契约层。
         assert_eq!(E_HMS_01_DEGRADE_FAILED, 1);
+    }
+
+    // --------------------------------- D-135 · 诊断包里的宿主时钟可见性
+
+    /// ⚠️ **v0.43 批（D-135 · 裁决 K）**：诊断包的**导出 JSON** 里**有**那个
+    /// **显式**的键 ⇒ ⇒ 且**宿主时钟不可用时它明确为假**（**不是**「没这个
+    /// 键」）。
+    ///
+    /// ⚠️ **走的是真路径**：导出 → 归档 → **读回落档字节** → 解析 JSON ⇒ ⇒ 断言
+    /// 落在**线上形状**上（**不是**「内部字段对不对」）。
+    ///
+    /// ⚠️ **判别力**：把 `kit_to_json` 里那个键删掉 ⇒ 本条变红（取不到 ⇒
+    /// `Null` ≠ `false`）；把「不可用」改成「没这个键」⇒ 也变红。
+    #[test]
+    fn the_diagnostic_kit_json_states_the_host_clock_availability_explicitly() {
+        // ---- 宿主时钟**不可用** ⇒ 那个键**明确为假** ----
+        let mut hms = Hms::new();
+        let store = Rc::new(RefCell::new(InMemoryDataStore::new()));
+        hms.install_store(Box::new(SharedStore {
+            inner: store.clone(),
+        }));
+        hms.archive_diagnostic_kit(Some("E_HMS-01"), false)
+            .expect("归档必须成功");
+        let name = Hms::diagnostic_kit_name(Some("E_HMS-01"));
+        let bytes = store
+            .borrow()
+            .get_archive(&name)
+            .expect("归档的字节必须读得回")
+            .to_vec();
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("归档的字节必须是合法 JSON");
+
+        assert!(
+            parsed.get("host_clock_available").is_some(),
+            "导出件里**必须有**那个键（不可用时是**明确为假**，不是「没这个键」）"
+        );
+        assert_eq!(
+            parsed["host_clock_available"],
+            serde_json::json!(false),
+            "宿主时钟不可用 ⇒ 那个键必须**明确为假**"
+        );
+
+        // ---- 宿主时钟**可用** ⇒ 那个键**明确为真** ----
+        let mut hms = Hms::new();
+        let store = Rc::new(RefCell::new(InMemoryDataStore::new()));
+        hms.install_store(Box::new(SharedStore {
+            inner: store.clone(),
+        }));
+        hms.archive_diagnostic_kit(Some("E_HMS-02"), true)
+            .expect("归档必须成功");
+        let name = Hms::diagnostic_kit_name(Some("E_HMS-02"));
+        let bytes = store
+            .borrow()
+            .get_archive(&name)
+            .expect("归档的字节必须读得回")
+            .to_vec();
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("归档的字节必须是合法 JSON");
+        assert_eq!(
+            parsed["host_clock_available"],
+            serde_json::json!(true),
+            "宿主时钟可用 ⇒ 那个键必须**明确为真**"
+        );
+    }
+
+    /// ⚠️ **v0.43 批（D-135 · 裁决 K）**：诊断包的**快照摘要**里**另有一句
+    /// 人话**说明时钟状态（**人看的那份**也要说清楚）。
+    ///
+    /// ⚠️ **判别力**：把那句人话删掉 ⇒ 本条变红；把它写成「时钟坏了」这种
+    /// **不含状态**的散文 ⇒ 也变红（断言落在**确切的那句**上）。
+    #[test]
+    fn the_diagnostic_kit_summary_says_the_clock_state_in_plain_words() {
+        let hms = Hms::new();
+
+        let unavailable = hms.export_diagnostic_kit(Some("E_HMS-01"), false);
+        assert!(
+            unavailable.snapshot_summary.contains("宿主时钟=不可用"),
+            "摘要里必须**有一句人话**说明时钟不可用：{}",
+            unavailable.snapshot_summary
+        );
+
+        let available = hms.export_diagnostic_kit(Some("E_HMS-01"), true);
+        assert!(
+            available.snapshot_summary.contains("宿主时钟=可用"),
+            "摘要里必须**有一句人话**说明时钟可用：{}",
+            available.snapshot_summary
+        );
+
+        // ⚠️ **既有摘要一个字不许变**（只许**加**）⇒ ⇒ 既有断言一条不红。
+        assert!(
+            available.snapshot_summary.contains("watchdog_fired=false"),
+            "既有摘要字段必须原样保留：{}",
+            available.snapshot_summary
+        );
+        assert!(
+            available.snapshot_summary.contains("health=Ok"),
+            "既有摘要字段必须原样保留：{}",
+            available.snapshot_summary
+        );
+    }
+
+    /// ⚠️ **v0.43 批（D-157 · 裁决 E）**：M-22 那**两个**归档触发点**各用各的**
+    /// 码 ⇒ ⇒ 「一个线上码两个含义」在**内核自己内部**也修掉了。
+    ///
+    /// ⚠️ **为什么是源码级断言**：「诊断包序列化失败」那一路在**当前**实现里
+    /// **结构上不可达**（`serde_json::to_vec(&Value)` **不会**失败）⇒ ⇒ 行为级
+    /// 的用例**造不出**那个场景 ⇒ ⇒ 只能把「哪个触发点用哪个码」**静态**钉住。
+    ///
+    /// ⚠️ **判别力**：把两个码换回同一个 ⇒ 本条变红；把某个码**张冠李戴** ⇒
+    /// 「配对」那几条断言变红。
+    #[test]
+    fn the_two_archive_triggers_use_different_scenario_codes() {
+        let text = include_str!("mod.rs");
+        let start = text
+            .find("pub fn archive_diagnostic_kit")
+            .expect("归档入口必须在");
+        let end = start + text[start..].find("\n    }").expect("归档入口必须有结尾");
+        let body = &text[start..end];
+
+        // 两个码**各出现恰好一次** ⇒ ⇒ 两个触发点**没有共用**一个码。
+        assert_eq!(
+            body.matches("E_STORE_04_ARCHIVE_BACKEND_MISSING").count(),
+            1,
+            "「没有归档通道」那个码必须**恰好**出现一次：{body}"
+        );
+        assert_eq!(
+            body.matches("E_STORE_05_KIT_SERIALIZE_FAILED").count(),
+            1,
+            "「诊断包序列化失败」那个码必须**恰好**出现一次：{body}"
+        );
+
+        // ⚠️ **配对**：逐个看两处 `PlatformError::new(...)` 的实参 ⇒ 每个码必须
+        // 落在**它自己**那句含义上（不许张冠李戴）。
+        let mut channel_call = None;
+        let mut serialize_call = None;
+        for call in body.split("PlatformError::new(").skip(1) {
+            let args = &call[..call.find(')').unwrap_or(call.len())];
+            if args.contains("E_STORE_04_ARCHIVE_BACKEND_MISSING") {
+                channel_call = Some(args);
+            }
+            if args.contains("E_STORE_05_KIT_SERIALIZE_FAILED") {
+                serialize_call = Some(args);
+            }
+        }
+
+        let channel = channel_call.expect("「没有归档通道」那一路必须用 E_STORE-04");
+        assert!(
+            channel.contains("没有归档通道"),
+            "E_STORE-04 那一路必须报「没有归档通道」：{channel}"
+        );
+        assert!(
+            !channel.contains("E_STORE_05"),
+            "「没有归档通道」那一路不许用序列化失败那个码：{channel}"
+        );
+
+        let serialize = serialize_call.expect("「诊断包序列化失败」那一路必须用 E_STORE-05");
+        assert!(
+            serialize.contains("诊断包序列化失败"),
+            "E_STORE-05 那一路必须报「诊断包序列化失败」：{serialize}"
+        );
+        assert!(
+            !serialize.contains("E_STORE_04"),
+            "「诊断包序列化失败」那一路不许用没有归档通道那个码：{serialize}"
+        );
+
+        // 两个码**不同** ⇒ 「一个码一个含义」。
+        assert_ne!(
+            E_STORE_04_ARCHIVE_BACKEND_MISSING, E_STORE_05_KIT_SERIALIZE_FAILED,
+            "两个触发点不许共用一个场景码"
+        );
     }
 }

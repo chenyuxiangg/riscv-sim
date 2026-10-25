@@ -35,6 +35,20 @@
 //! ⚠️ **归档失败走 `Storage` 族（`STORE`），不是 HMS 族**：归档失败是**存储层**
 //! 的故障，与健康管理（降级 / 终止）不是一回事 ⇒ 调用方按**族**分流，不去读
 //! message 文本。
+//!
+//! # 场景码（v0.43 批 · 台账 **D-157** · 裁决 E）
+//!
+//! ⇒ ⇒ **一个码一个含义**：原先 M-22 的两个归档触发点**共用**一个码 ⇒ ⇒ 现在
+//! **各用各的**：
+//!
+//! | 码 | 含义 | 谁报 |
+//! | --- | --- | --- |
+//! | [`E_STORE_04_ARCHIVE_BACKEND_MISSING`] | **没有归档通道**（宿主未注入后端） | M-22 |
+//! | [`E_STORE_05_KIT_SERIALIZE_FAILED`] | **诊断包序列化失败** | M-22 |
+//! | [`E_STORE_06_ARCHIVE_WRITE_FAILED`] | **归档写入失败**（后端拒绝写） | M-23 |
+//!
+//! ⚠️ **号段让开前端**（裁决 G · §2.4）：前端服务层自产的 STORE 码占 `01` /
+//! `02` / `03` ⇒ ⇒ 内核从 **04** 起 ⇒ ⇒ **不重叠**。
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::Project;
@@ -84,17 +98,39 @@ pub trait DataStore {
 /// Family used by errors raised from this module.
 pub const STORE_FAMILY: ErrorFamily = ErrorFamily::Storage;
 
-/// Scenario code: the storage backend could not archive the named content.
+/// 场景码：**没有归档通道**（宿主**没有**注入归档后端）。
 ///
-/// ⚠️ **本批新增**（v0.28 · STAGE-13 §3.4 只冻结了 `archive` 的**签名**，没有
-/// 冻结 Storage 族的场景码；而在此之前 `E_STORE` 是 LLD §6 记的「**已声明未
-/// 接线**」族 —— 族标签在契约层，**场景码一个都没有**）。
+/// ⚠️ **v0.43 批新增**（冻结规格 STAGE-28 §2.3 · 台账 **D-157** · 裁决 E）：
+/// M-22 的两个归档触发点原先**共用**一个码 ⇒ ⇒ 「**一个线上码两个含义**」
+/// ⇒ ⇒ 现在**各用各的**：本码 = **没有归档通道**，序列化失败那个是
+/// [`E_STORE_05_KIT_SERIALIZE_FAILED`]。
 ///
-/// 这里补第一个，落在**拥有该族的模块**里：契约层 `error_families!` 的文档写
-/// 死了这条规矩（「场景码住在拥有该场景的模块里」—— `E_BUS-*` 就在 M-14 里），
-/// 而契约层本批**只**允许加两个 HMS 场景码（STAGE-13 §7「只加两个 HMS 场景码
-/// 常量」）⇒ Storage 的场景码只能落在这里。
-pub const E_STORE_01_ARCHIVE_FAILED: u16 = 1;
+/// ⚠️ **号段让开前端**（裁决 G · §2.4）：前端服务层自产的 STORE 码占 `01` /
+/// `02` / `03` ⇒ ⇒ 内核从 **04** 起 ⇒ ⇒ **不重叠** ⇒ ⇒ 「一个码一个含义」。
+pub const E_STORE_04_ARCHIVE_BACKEND_MISSING: u16 = 4;
+
+/// 场景码：**诊断包序列化失败**（`serde_json` 序列化诊断包失败）。
+///
+/// ⚠️ **v0.43 批新增**（STAGE-28 §2.3 · D-157 · 裁决 E）：见
+/// [`E_STORE_04_ARCHIVE_BACKEND_MISSING`] 的说明 —— 这两个触发点原先**共用**
+/// 一个码 ⇒ ⇒ 现在**各用各的**。
+pub const E_STORE_05_KIT_SERIALIZE_FAILED: u16 = 5;
+
+/// 场景码：**归档写入失败**（后端**拒绝**写入）。
+///
+/// ⚠️ **v0.43 批新增**（STAGE-28 §2.3 · D-157 · 裁决 E）：这个码承接的是
+/// **M-23 自己**的场景 —— [`DataStore::archive`] 的**后端拒绝写入**（配额满 /
+/// 目录不存在 / IndexedDB 事务回滚 …）⇒ ⇒ 与 M-22 那两个触发点**不是**一回事
+/// ⇒ ⇒ **各用各的**（一个码一个含义）。
+///
+/// ⚠️ **谁拥有它**：**M-23**（拥有该场景的模块）—— 契约层 `error_families!` 的
+/// 文档写死了这条规矩（「场景码住在拥有该场景的模块里」—— `E_BUS-*` 就在 M-14
+/// 里），而 Storage 的场景码只能落在这里。
+///
+/// ⚠️ **v0.28 批只冻结了 `archive` 的**签名**，没有冻结 Storage 族的场景码；
+/// 而在此之前 `E_STORE` 是 LLD §6 记的「**已声明未接线**」族 —— 族标签在
+/// 契约层，**场景码一个都没有** ⇒ ⇒ 这三个码都落在这里。
+pub const E_STORE_06_ARCHIVE_WRITE_FAILED: u16 = 6;
 
 #[cfg(test)]
 mod tests {
@@ -193,7 +229,7 @@ mod tests {
         fn archive(&mut self, _name: &str, _bytes: &[u8]) -> Result<(), PlatformError> {
             Err(PlatformError::new(
                 STORE_FAMILY,
-                E_STORE_01_ARCHIVE_FAILED,
+                E_STORE_06_ARCHIVE_WRITE_FAILED,
                 "归档区不可写",
             ))
         }
@@ -206,6 +242,10 @@ mod tests {
     ///
     /// 断言落在 **family + scenario** 上，**不**匹配 message 文本——
     /// message 是给人看的，族与码才是机器分流依据。
+    ///
+    /// ⚠️ **v0.43 批（D-157）**：**后端拒绝写入**是 **M-23 自己**的场景 ⇒ ⇒
+    /// 它的码是 `E_STORE-06` ⇒ ⇒ 与 M-22 那两个触发点（`E_STORE-04` /
+    /// `E_STORE-05`）**各用各的**。
     #[test]
     fn a_failed_archive_reports_the_storage_family() {
         let mut store = FailingArchiveStore;
@@ -217,8 +257,8 @@ mod tests {
         assert_eq!(err.family, ErrorFamily::Storage, "归档失败的族必须是 STORE");
         assert_eq!(err.family.as_str(), "STORE");
         assert_eq!(
-            err.scenario, E_STORE_01_ARCHIVE_FAILED,
-            "场景码必须是 E_STORE-01"
+            err.scenario, E_STORE_06_ARCHIVE_WRITE_FAILED,
+            "场景码必须是 E_STORE-06（**归档写入失败**）"
         );
         assert_ne!(
             err.family,
@@ -251,5 +291,100 @@ mod tests {
                 "{name} 的生产代码不得引用 HMS_FAMILY"
             );
         }
+    }
+
+    // ------------------------------------- D-157 · 拆号（v0.43 批）
+
+    /// ⚠️ **v0.43 批（D-157 · 裁决 E）**：三个新码的**值与名一致**，且**不与前端
+    /// 占的 `01` / `02` / `03` 重叠**。
+    ///
+    /// ⚠️ **判别力**：把 `E_STORE_05_…` 的值写成 `4` ⇒ 本条变红（值与名不符）；
+    /// 把 `E_STORE_04_…` 的值写成 `1` ⇒ 本条变红（撞前端占的号）。
+    #[test]
+    fn the_new_store_codes_are_numbered_and_do_not_clash_with_the_front_end() {
+        assert_eq!(
+            E_STORE_04_ARCHIVE_BACKEND_MISSING, 4,
+            "「没有归档通道」= E_STORE-04 ⇒ 值必须是 4"
+        );
+        assert_eq!(
+            E_STORE_05_KIT_SERIALIZE_FAILED, 5,
+            "「诊断包序列化失败」= E_STORE-05 ⇒ 值必须是 5"
+        );
+        assert_eq!(
+            E_STORE_06_ARCHIVE_WRITE_FAILED, 6,
+            "「归档写入失败」= E_STORE-06 ⇒ 值必须是 6"
+        );
+
+        // 前端服务层自产的 STORE 码占 01 / 02 / 03 ⇒ ⇒ 内核**不许**撞。
+        for front_num in [1u16, 2, 3] {
+            assert_ne!(
+                E_STORE_04_ARCHIVE_BACKEND_MISSING, front_num,
+                "内核的新码撞上了前端占的 E_STORE-0{front_num}"
+            );
+            assert_ne!(
+                E_STORE_05_KIT_SERIALIZE_FAILED, front_num,
+                "内核的新码撞上了前端占的 E_STORE-0{front_num}"
+            );
+            assert_ne!(
+                E_STORE_06_ARCHIVE_WRITE_FAILED, front_num,
+                "内核的新码撞上了前端占的 E_STORE-0{front_num}"
+            );
+        }
+
+        // 三个码**互不相同** ⇒ 「一个码一个含义」。
+        assert_ne!(
+            E_STORE_04_ARCHIVE_BACKEND_MISSING, E_STORE_05_KIT_SERIALIZE_FAILED,
+            "「没有归档通道」与「诊断包序列化失败」不许共用一个码"
+        );
+        assert_ne!(
+            E_STORE_05_KIT_SERIALIZE_FAILED, E_STORE_06_ARCHIVE_WRITE_FAILED,
+            "「诊断包序列化失败」与「归档写入失败」不许共用一个码"
+        );
+    }
+
+    /// ⚠️ **v0.43 批（D-157 · 裁决 E）**：被拆掉的那个旧归档失败码，在**整个
+    /// `crates/` 树**里**零命中**。
+    ///
+    /// ⚠️ **为什么扫全树**（而不只扫本模块）：「旧码还留在某个角落」⇒ ⇒ 下一个人
+    /// 会以为还能用 ⇒ ⇒ **删除也要干净**（规格 §3.2）。
+    ///
+    /// ⚠️ **针脚是拼出来的** ⇒ ⇒ 本用例的**源码里**不出现那个字面量 ⇒ ⇒ 它
+    /// **不会把自己扫成红**（自指的断言分不出「改行为」与「没改行为」）。
+    ///
+    /// ⚠️ **判别力**：把旧码写回任何一处（定义 / 导入 / 用例 / 注释）⇒ 本条
+    /// 立刻变红。
+    #[test]
+    fn the_retired_archive_failure_code_is_gone_from_the_whole_crates_tree() {
+        let needle = ["E_STORE", "01", "ARCHIVE", "FAILED"].join("_");
+        let crates_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crate 目录的上级必须是 crates/")
+            .to_path_buf();
+
+        let mut hits: Vec<String> = Vec::new();
+        let mut stack = vec![crates_root.clone()];
+        while let Some(dir) = stack.pop() {
+            let entries = std::fs::read_dir(&dir).expect("目录必须读得到");
+            for entry in entries {
+                let entry = entry.expect("目录项必须读得到");
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                // ⚠️ 非 UTF-8（**二进制**）⇒ 读不动 ⇒ 跳过（那不是源码）。
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                if text.contains(&needle) {
+                    hits.push(path.display().to_string());
+                }
+            }
+        }
+
+        assert!(
+            hits.is_empty(),
+            "被拆掉的旧归档失败码在 crates/ 树里仍有残留：{hits:?}"
+        );
     }
 }
