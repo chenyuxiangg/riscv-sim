@@ -181,6 +181,14 @@ verdict **out of the trap path** ⇒ ⇒ the direct `tohost` write.
 | `csr` | **PASS** (exit 0) ⇒ ⇒ the false green |
 | `smode` | **FAIL** (the unexpected-trap verdict) ⇒ ⇒ the false green is gone |
 
+⚠️ **The mask's value is `0xB10D`, and it lands on the same value on both
+sides.**  `0xB10D` = upstream's `0xB109` + bit 2 (illegal instruction)
+⇒ ⇒ but the reference side's `medeleg` has a **legal bit set** of
+`0x0008_B3FE` (per-bit WARL) ⇒ ⇒ **bit 0** (misaligned instruction fetch)
+is **not** delegable ⇒ ⇒ both sides store **`0xB10C`** ⇒ ⇒ the two sides
+agree ⇒ ⇒ the mask value needs no change.  (Writing `0xB109` reads back
+`0xB108` on the reference side — measured.)
+
 ⚠️ **The `stvec_handler` / `medeleg` coupling.**  The reset sequence is
 
 ```
@@ -579,16 +587,24 @@ The case reports **which** invariant broke through the `tohost` exit code:
 | `FAIL 2` | `stvec` did not read back what was written, or its MODE field was not legalised |
 | `FAIL 3` | `sepc`'s low bit was not masked off (IALIGN is 32) |
 | `FAIL 4` | `scause` / `stval` did not read back what was written |
-| `FAIL 5` | `sstatus` is not the view of `mstatus` the reference side has (see the known deviations below) |
+| `FAIL 5` | `sstatus` did not take the reference side's guest write mask — the low byte after writing `0xFFFFFFFF` is not `0x22`, or `SPP` did not land |
 | `FAIL 6` | reading an M-mode CSR in S mode did not trap with cause 2 **on `stvec`** |
 | `FAIL 7` | writing an M-mode CSR in S mode did not trap with cause 2 **on `stvec`** |
 | `FAIL 8` | reading an unimplemented CSR in S mode did not trap with cause 2 |
 | `FAIL 9` | the delegation bit did not decide the trap entry (or an unexpected trap reached `mtvec`) |
 | `FAIL 10` | `sret` did not land in U mode |
+| `FAIL 11` | writing `sstatus.SPP` on its own did not leave exactly `0x0000_0100` |
+| `FAIL 12` | the `sstatus` **read view** does not show `SD` (once `mstatus.FS` is dirty) |
 
 ⚠️ **Every trap-shaped assertion also checks that a trap really happened**
 (a flag the handler sets), so a platform that does **not** trap is caught
 too — "no trap" can never be mistaken for "pass".
+
+⚠️ **Checks 5, 11 and 12 are written against the reference side's
+*untruncated* measurement** (`0x800C_6122` / `0x0000_0100` / `0x800D_E162`).
+The first round's "write mask `0x22`" and "read view `0x122`" were the
+**low byte** of those aggregates, observed through the HTIF exit code (a
+POSIX exit code is 8 bits) ⇒ ⇒ the corpus must not repeat them.
 
 ### `local/mstatus_warl` — the failure-number table
 
@@ -601,24 +617,39 @@ too — "no trap" can never be mistaken for "pass".
 
 ### Known deviations — measured on the reference side
 
-⚠️ These are places where the **reference side** and the platform's current
-contract **disagree**.  They are registered here so that nobody reads the
-corpus's green rows as "the platform matches the reference side in these
-particulars".
+⚠️ These are places where the **reference side** and the **platform** do
+**not** agree (or cannot be compared at all).  They are registered here so
+that nobody reads the corpus's green rows as "the platform matches the
+reference side in these particulars".
 
-| # | what | reference side (measured) | platform's contract |
+⚠️ **All the numbers below are the reference side's, measured without
+truncation.**  The first round's numbers came back through the HTIF **exit
+code**, and a POSIX exit code is **8 bits** ⇒ ⇒ a 32-bit value was only ever
+seen as its **low byte** ⇒ ⇒ "the write mask is `0x22`" was really "the
+aggregate value's low byte is `0x22`", and "the read view is `0x122`" was
+really "the aggregate value's low 16 bits".  ⇒ ⇒ **a 32-bit quantity must
+not be observed through one 8-bit channel.**
+
+| # | what | reference side (measured, untruncated) | platform |
 | --- | --- | --- | --- |
-| 1 | **`sstatus`'s guest write mask** | writing `0xFFFFFFFF` reads back **`0x800C6122`**; writing `0x100` (SPP) reads back **`0x00000100`** ⇒ ⇒ `SPP` **is** writable from S mode (which is also what the privileged spec says) | `SSTATUS_WARL_MASK = 0x22` ⇒ ⇒ `SPP` is **not** writable ⇒ ⇒ `local/smode_csr` reports **FAIL 5** |
-| 2 | **`mstatus.MPP` with the reserved value 2** | the field is **legalised to 0** — measured for the old values 0, 1 **and** 3 ⇒ ⇒ "legalised" and "kept the old value" are only distinguishable when the old value is not 0 | `mstatus_warl` keeps the **old** value ⇒ ⇒ `local/mstatus_warl` reports **FAIL 4** |
-| 3 | **`medeleg`'s write mask** | writing `0xB10D` reads back **`0xB10C`** ⇒ ⇒ bit 0 (misaligned instruction fetch) is **not** writable | the contract does not pin `medeleg`'s write mask |
-| 4 | **`satp`** | the reference side has **Sv32** ⇒ ⇒ `satp` is **not comparable** | the platform supports **Bare** only ⇒ ⇒ `satp` does not enter the corpus |
-| 5 | **`sstatus`'s read view** | the reference side's read view carries `SIE` / `SPIE` / `SPP` / `FS` / `SUM` / `MXR` / `SD` | the contract's `SSTATUS_VIEW_MASK = 0x122` carries `SIE` / `SPIE` / `SPP` only ⇒ ⇒ `SD` / `FS` / `VS` / `XS` are **not** visible |
+| 1 | **`sstatus`'s guest write mask** | writing `0xFFFFFFFF` reads back **`0x800C_6122`**; writing `0x100` reads back **`0x0000_0100`** ⇒ ⇒ **S mode can write `sstatus.SPP`** — the privileged spec says `SPP` is writable in **M** mode only ⇒ ⇒ the reference side is the **wider** one here | the platform **aligns with the reference side** (guest write mask **`0x804C_61A2`**) ⇒ ⇒ this is **not** a deviation any more; it is a **deliberate divergence from the privileged spec**, and it is the reason `local/smode_csr` check 5 and check 11 exist |
+| 2 | **`sstatus`'s read view** | the view carries `SIE` / `SPIE` / `SPP` / `FS` / `XS` / `SUM` / `MXR` / `UBE` / **`SD`** ⇒ ⇒ measured **`0x800D_E162`** ⇒ ⇒ **`SD` is visible from S mode** | the platform **aligns with the reference side** (view mask **`0x800D_E162`**) ⇒ ⇒ again a deliberate divergence from the spec's narrower "S-mode visible field set"; `local/smode_csr` check 12 pins `SD` |
+| 3 | **`mstatus.MPP` with the reserved value 2** | the field is **legalised to 0** — measured for the old values 0, 1 **and** 3 ⇒ ⇒ the full read-back is **`0x0000_0002`** ⇒ ⇒ "legalised" and "kept the old value" are only distinguishable when the old value is not 0 | the platform **aligns with the reference side** (`mstatus_warl` legalises the reserved value to 0) ⇒ ⇒ **not** a deviation any more ⇒ ⇒ `local/mstatus_warl` is the row that pins it |
+| 4 | **`medeleg`'s write mask** | the legal bit set is **`0x0008_B3FE`** (per-bit WARL) ⇒ ⇒ writing `0xFFFFFFFF` reads back `0x0008_B3FE`, writing `0xFFFF` reads back `0x0000_B3FE`, writing `0xB109` reads back **`0xB108`** ⇒ ⇒ **bit 0** (misaligned instruction fetch) is **not** delegable | the platform applies the **same** legal-bit mask ⇒ ⇒ **both sides drop bit 0** ⇒ ⇒ the `smode` environment's `0xB10D` becomes `0xB10C` on **both** sides ⇒ ⇒ **consistent** ⇒ ⇒ not a deviation, but a fact worth writing down |
+| 5 | **`satp`** | the reference side has **Sv32** ⇒ ⇒ `satp` is **not comparable** | the platform supports **Bare** only ⇒ ⇒ `satp` does not enter the corpus |
 
-⚠️ **Rows 1 and 2 are the two places where the corpus's own assertions are
-written against the *reference side's* measured behaviour** — not against
-the platform's contract ⇒ ⇒ until the contract is brought in line, those two
-rows report a failure ⇒ ⇒ which is the point: a divergence nobody watches is
-still a divergence.
+⚠️ **Rows 1 and 2 are deviations from the *privileged spec*, not from the
+reference side.**  The platform follows the reference side here, because the
+reference side is the oracle the corpus compares against ⇒ ⇒ the corpus's
+assertions (checks 5, 11 and 12 of `local/smode_csr`) are written against
+the **reference side's measured values** ⇒ ⇒ a platform that still follows
+the old `0x22` / `0x122` masks reports **FAIL 5** / **FAIL 11** / **FAIL 12**
+⇒ ⇒ which is the point: a divergence nobody watches is still a divergence.
+
+⚠️ **`mstatus.MPP` is no longer a deviation.**  The first round recorded it
+as one ("the platform keeps the old value, the reference side legalises to
+0"); the platform has been brought in line ⇒ ⇒ the row is **gone** from this
+table, and `local/mstatus_warl` is the row that keeps it honest.
 
 ## The `csr` environment's `INIT_PMP` comment is stale — and cannot be fixed
 

@@ -11,7 +11,10 @@
 //   2. `stvec`    — writable, and its MODE field is a **1-bit WARL**;
 //   3. `sepc`     — writable, and its low bit is **always** 0 (IALIGN = 32);
 //   4. `scause` / `stval` — writable;
-//   5. `sstatus`  — a **bit view** of `mstatus`, writable mask `0x22`;
+//   5. `sstatus`  — a **bit view** of `mstatus`; the guest write mask is
+//      **0x804C_61A2**, i.e. **S mode can write `sstatus.SPP`** (the
+//      privileged spec says `SPP` is writable in M mode only ⇒ ⇒ the
+//      reference side is the *wider* one here);
 //   6. reading an **M-mode** CSR in S mode ⇒ **illegal instruction** (cause 2)
 //      and the trap is **delegated** ⇒ it lands on `stvec`;
 //   7. writing an **M-mode** CSR in S mode ⇒ the same;
@@ -19,7 +22,21 @@
 //   9. the **delegation bit decides the entry**: with `medeleg`'s bit 2
 //      cleared, the very same trap lands on **`mtvec`** instead;
 //  10. `sret` with `sstatus.SPP = 0` lands in **U mode** — which is visible
-//      because a U-mode `sstatus` read is an illegal instruction.
+//      because a U-mode `sstatus` read is an illegal instruction;
+//  11. writing `sstatus.SPP` on its own from S mode ⇒ the read-back is
+//      **exactly `0x0000_0100`** (and the other writable fields of the same
+//      write are cleared);
+//  12. the `sstatus` **read view** contains `SD` ⇒ ⇒ once `mstatus.FS` is
+//      dirty, an S-mode read of `sstatus` shows `SD` (the reference side's
+//      view is **0x800D_E162**, not the narrow `0x122`).
+//
+// ⚠️ **Checks 5, 11 and 12 are written against the reference side's
+// **non-truncated** measurement.**  The first round's numbers came back
+// through the HTIF **exit code**, and a POSIX exit code is **8 bits** ⇒ ⇒
+// `0x800C_6122` was seen as `0x22` and `0x800D_E162` as `0x62` ⇒ ⇒ the
+// "write mask = 0x22" / "read view = 0x122" / "`SPP` cannot be written"
+// conclusions were the **low byte** of an aggregate value ⇒ ⇒ they are
+// **wrong**, and the corpus must not repeat them.
 //
 // ⚠️ **The verdict is the guest's own check.**  The harness compares the
 // `tohost` exit code, so the guest checks every value itself and only
@@ -53,12 +70,15 @@
 //   TESTNUM = 2  ->  `stvec` did not read back what was written / MODE not legalised
 //   TESTNUM = 3  ->  `sepc`'s low bit was not masked off
 //   TESTNUM = 4  ->  `scause` / `stval` did not read back what was written
-//   TESTNUM = 5  ->  `sstatus` is not the `0x22`-masked view of `mstatus`
+//   TESTNUM = 5  ->  `sstatus` did not take the reference side's guest write
+//                    mask (`SIE` / `SPIE` / `SPP` all land)
 //   TESTNUM = 6  ->  reading an M-mode CSR in S mode did not trap with cause 2 on `stvec`
 //   TESTNUM = 7  ->  writing an M-mode CSR in S mode did not trap with cause 2 on `stvec`
 //   TESTNUM = 8  ->  reading an unimplemented CSR in S mode did not trap with cause 2
 //   TESTNUM = 9  ->  the delegation bit did not decide the trap entry
 //   TESTNUM = 10 ->  `sret` did not land in U mode
+//   TESTNUM = 11 ->  writing `sstatus.SPP` did not leave exactly `0x00000100`
+//   TESTNUM = 12 ->  the `sstatus` read view does not show `SD`
 #include "riscv_test.h"
 
 RVTEST_RV32S
@@ -137,32 +157,37 @@ RVTEST_CODE_BEGIN
   bne t1, t2, fail4
 
   // =================== check 5 · sstatus ==============================
-  // ⚠️ **The reference side's `sstatus` is WIDER than the contract's
-  // `SSTATUS_WARL_MASK = 0x22`.**  Measured on the reference side (Spike,
-  // `--priv=MSU`), from **both** M mode and S mode:
+  // ⚠️ **The reference side's `sstatus` is WIDER than the "0x22" reading
+  // that an 8-bit probe produced.**  The measured values (reference side,
+  // Spike `--priv=MSU`, one ELF per observation, the 32-bit value read back
+  // **byte by byte** so that nothing is truncated):
   //
-  //   write 0xFFFFFFFF -> read back **0x800C6122**  (low byte `0x22`)
-  //   write 0x100      -> read back **0x00000100**  (`SPP` is **set**)
-  //   write 0x22       -> read back **0x00000022**
+  //   S mode: `sstatus` <- 0xFFFFFFFF  ⇒  read back **0x800C_6122**
+  //   S mode: `sstatus` <- 0x100       ⇒  read back **0x0000_0100**
+  //   M mode: `sstatus` <- 0xFFFFFFFF  ⇒  read back **0x800C_6122**
   //
-  // ⇒ ⇒ the low byte of the all-ones write is `0x22` — but `SPP` **is**
-  // writable from S mode (which is also what the privileged spec says:
-  // `SPP` is writable in S mode).  ⇒ ⇒ the assertions below are the
-  // **reference side's measured behaviour**, not the contract's mask ⇒ ⇒
-  // a platform whose `sstatus` follows the `0x22` mask alone reports
-  // **FAIL 5** here ⇒ ⇒ that divergence is **visible**, not hidden.
-  // (The finding is registered in `tests/golden/README.md`.)
+  // ⇒ ⇒ **S mode CAN write `sstatus.SPP`** — the privileged spec says `SPP`
+  // is writable in M mode only ⇒ ⇒ the reference side is the *wider* one
+  // here — and the guest write mask is **0x804C_61A2**, not `0x22`.
+  //
+  // ⚠️ **The old "0x22" was a truncation artefact**: the probe reported the
+  // value through the HTIF **exit code**, and a POSIX exit code is **8 bits**
+  // ⇒ ⇒ `0x800C_6122` was seen as `0x22` ⇒ ⇒ "the write mask is 0x22" and
+  // "SPP cannot be written" were the **low byte** of an aggregate value.
+  //
+  // ⇒ ⇒ The two assertions below are the **reference side's measured**
+  // behaviour ⇒ ⇒ a platform that follows the old `0x22` mask reports
+  // **FAIL 5** ⇒ ⇒ that divergence is **visible**, not hidden.  (The
+  // finding is registered in `tests/golden/README.md`.)
   li t0, 0xffffffff
   csrw sstatus, t0
   csrr t1, sstatus
   andi t1, t1, 0xff                // the low byte is SIE | SPIE
   li t2, 0x22
   bne t1, t2, fail5
-  li t0, 0x100                     // SPP on its own
-  csrw sstatus, t0
   csrr t1, sstatus
-  andi t1, t1, SSTATUS_SPP
-  beqz t1, fail5                   // the reference side leaves SPP set
+  andi t1, t1, SSTATUS_SPP         // SPP must land too — the old "0x22" said
+  beqz t1, fail5                   // it could not; the reference side says it can
 
   // =================== check 6 · read an M-mode CSR ====================
   // In S mode, `mstatus` is an M-mode CSR ⇒ illegal instruction (cause 2).
@@ -241,10 +266,51 @@ c9_trapped:
   li t2, 2
   bne s1, t2, fail9                 // cause 2 = illegal instruction
 
+  // =================== check 12 · the `sstatus` read view ===============
+  // ⚠️ The reference side's `sstatus` read view is **0x800D_E162** ⇒ ⇒ it
+  // contains `SD` (bit 31) / `SUM` / `MXR` / `XS` / `UBE` — **not** the
+  // narrow `0x122` that an 8-bit probe suggested.
+  //
+  // ⇒ ⇒ `SD` is the **derived** dirty bit ⇒ ⇒ it is set once `mstatus.FS`
+  // is dirty ⇒ ⇒ the M-level handler above made `FS = 3` ⇒ ⇒ an S-mode
+  // read of `sstatus` must **show** `SD`.
+  //
+  // ⚠️ The measured reference-side value for exactly this situation is
+  // **0x8000_6000** (FS = 3 ⇒ SD = 1, and `SD` visible in S mode).
+  csrr t1, sstatus
+  li t2, 0x80000000
+  and t1, t1, t2
+  beqz t1, fail12                     // `SD` must be visible in S mode
+
+  // =================== check 11 · writing `sstatus.SPP` ===================
+  // ⚠️ **S mode CAN write `sstatus.SPP`** ⇒ ⇒ writing `SPP` on its own
+  // leaves the read-back **exactly 0x0000_0100** ⇒ ⇒ the other writable
+  // fields of the same write are cleared (a CSR write replaces the whole
+  // register), and `SD` goes back to 0 (FS is no longer dirty).
+  //
+  // ⚠️ This is the check that the old "0x22" reading made **impossible**:
+  // under the old mask the read-back would have been 0 ⇒ ⇒ the case would
+  // have been a **false green** on a platform that follows it.
+  li t0, 0x100                         // SPP on its own
+  csrw sstatus, t0
+  csrr t1, sstatus
+  li t2, 0x00000100
+  bne t1, t2, fail11
+
   // =================== check 10 · where does `sret` land? ==============
   // `sstatus.SPP` is 0 (the platform clears it when `sret`ing out of a
   // trap) ⇒ ⇒ `sret` must land in **U mode** ⇒ ⇒ reading `sstatus` there
   // is an illegal instruction (cause 2) ⇒ ⇒ delegated ⇒ ⇒ `stvec`.
+  //
+  // ⚠️ **The premise is set explicitly**, because check 11 above leaves
+  // `SPP` = 1 (it wrote it!) ⇒ ⇒ without this the case would measure the
+  // wrong thing: an `sret` with `SPP` = 1 lands in **S** mode ⇒ ⇒ the
+  // `sstatus` read there does **not** trap ⇒ ⇒ the check would fail for a
+  // reason that has nothing to do with where `sret` lands.
+  csrr t1, sstatus
+  li t2, ~SSTATUS_SPP
+  and t1, t1, t2
+  csrw sstatus, t1                    // ⇒ SPP = 0
   li s0, 1
   li s2, 0
   li s3, 0
@@ -297,6 +363,12 @@ fail9:
 fail10:
   li TESTNUM, 10
   j report_fail
+fail11:
+  li TESTNUM, 11
+  j report_fail
+fail12:
+  li TESTNUM, 12
+  j report_fail
 
 report_fail:
   RVTEST_FAIL
@@ -335,6 +407,10 @@ boot_phase:
   bne s1, t2, fail9                // the bootstrap trap must be cause 9
   li t0, 4                          // bit 2 = illegal instruction
   csrc medeleg, t0                  // ⇒ cause 2 is no longer delegated
+  // Make `mstatus.FS` dirty ⇒ ⇒ `SD` is set ⇒ ⇒ check 12 can observe the
+  // `sstatus` read view's `SD` bit from S mode.
+  li t0, 0x6000                     // FS = 3 (dirty)
+  csrs mstatus, t0
   j mtvec_return
 check9_phase:
   li t2, 2

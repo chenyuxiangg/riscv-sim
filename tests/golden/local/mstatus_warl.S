@@ -11,22 +11,32 @@
 // `MPP = 3`, which is **legal** (`M`), and would therefore prove nothing.
 //
 // ⚠️ **The reference side's measured behaviour** (Spike, `--priv=MSU`; one
-// ELF per observation, the value reported through the `tohost` exit code):
+// ELF per observation, the 32-bit value read back **byte by byte** so that
+// nothing is truncated):
 //
 //   * old `MPP` = 0, write `0x1002` (`MPP = 2` reserved, `SIE = 1`)
-//     ⇒ read back low byte **`0x02`**, `MPP` field **`0`**;
-//   * old `MPP` = 1, write `0x1002` ⇒ low byte **`0x02`**, `MPP` field **`0`**;
-//   * old `MPP` = 3, write `0x1002` ⇒ low byte **`0x02`**, `MPP` field **`0`**;
+//     ⇒ read back **`0x0000_0002`**;
+//   * old `MPP` = 1, write `0x1002` ⇒ read back **`0x0000_0002`**;
+//   * old `MPP` = 3, write `0x1002` ⇒ read back **`0x0000_0002`**;
 //
 // ⇒ ⇒ **the reserved value is legalised to 0, whatever the old value was**,
 // and **`SIE` lands** ⇒ ⇒ "the whole write is discarded" is **wrong** (it
-// would lose `SIE` ⇒ the low byte would be `0x00`).
+// would lose `SIE` ⇒ the read-back would be `0x0000_0000`).
+//
+// ⚠️ **The first round's "keeps the old value" was a truncation artefact**:
+// the probe reported the value through the HTIF **exit code**, and a POSIX
+// exit code is **8 bits** ⇒ ⇒ `0x0000_0002` was seen as `0x02` ⇒ ⇒ and a
+// value whose low bits are 0 cannot be told apart from "the old value was
+// kept" unless the **old** value is non-zero ⇒ ⇒ the case below sets it to
+// 3 first.
 //
 // ⚠️ **Why the old value matters, and why this case sets it.**  With the old
 // value `0`, "legalised to 0" and "kept the old value" are **the same
 // observation** ⇒ ⇒ a case that only ever starts from 0 cannot tell them
 // apart ⇒ ⇒ the old value is set to **3** (legal, `M`) first ⇒ ⇒ that is
-// the observation that discriminates.
+// the observation that discriminates: the reference side reads back
+// `0x0000_0002` (legalised), while a "keeps the old value" implementation
+// would read back `0x0000_1802`.
 //
 // ⚠️ **The control group is what makes the case meaningful.**  Without it, a
 // platform that **never** changed `MPP` would also read 0 ⇒ ⇒ the case also

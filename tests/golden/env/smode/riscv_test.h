@@ -83,6 +83,13 @@
 // per-level accessibility cannot observe it at all ⇒ ⇒ the delegation
 // surface has to be **live** for cause 2.
 //
+// ⚠️ **Both sides land on `0xB10C`, and that is fine**: the reference
+// side's `medeleg` has a **legal bit set** of `0x0008_B3FE` (per-bit
+// WARL) ⇒ ⇒ **bit 0** (misaligned instruction fetch) is **not**
+// delegable ⇒ ⇒ the value written here (`0xB10D`) is stored as **`0xB10C`**
+// on the reference side **and** on the platform side ⇒ ⇒ the two sides
+// agree ⇒ ⇒ the mask value needs no change.
+//
 // ⚠️ **Why the mask is `0xB10D` and not `0x11AD`**: `0x11AD` is *not*
 // "upstream's mask plus one bit" — upstream's mask is **0xB109** (bits
 // {0, 3, 8, 12, 13, 15}), which is what `env/p/riscv_test.h` actually
