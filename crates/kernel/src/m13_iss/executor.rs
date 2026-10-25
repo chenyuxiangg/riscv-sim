@@ -1105,9 +1105,16 @@ pub fn execute_one<M: MemoryAccess>(
             }
             // ⚠️ **PMP 在未映射检查之前**（裁决 K）—— 规范把 PMP 放在物理
             //    地址一级 ⇒ ⇒ 被 PMP 拒的访问根本不会走到总线。
-            if !pmp::pmp_allows(state, addr, pmp::access_bytes(size), PmpAccess::Load) {
+            //
+            // ⚠️ **`mtval` 报的是「失败那一片的起始地址」**（台账 **D-154** ·
+            //    参考侧实测 F1）⇒ ⇒ **不是**访问的有效地址 ⇒ ⇒ 失败片地址
+            //    **由判定本身产出**（裁决 C）⇒ ⇒ **不许**在这里用「有效地址 +
+            //    偏移」重算。
+            if let Some(fault_addr) =
+                pmp::pmp_fault_addr(state, addr, pmp::access_bytes(size), PmpAccess::Load)
+            {
                 let cause = TrapCause::LoadAccessFault;
-                csr::enter_trap(state, cause.mcause(), addr);
+                csr::enter_trap(state, cause.mcause(), fault_addr);
                 return Ok(StepOutcome::Trapped { cause });
             }
             let raw = match mem.read(addr, size) {
@@ -1152,9 +1159,16 @@ pub fn execute_one<M: MemoryAccess>(
                 return Ok(StepOutcome::Trapped { cause });
             }
             // ⚠️ **PMP 在未映射检查之前**（裁决 K）。
-            if !pmp::pmp_allows(state, addr, pmp::access_bytes(size), PmpAccess::Store) {
+            //
+            // ⚠️ **`mtval` 报的是「失败那一片的起始地址」**（台账 **D-154** ·
+            //    参考侧实测 F1）⇒ ⇒ **不是**访问的有效地址 ⇒ ⇒ 失败片地址
+            //    **由判定本身产出**（裁决 C）⇒ ⇒ **不许**在这里用「有效地址 +
+            //    偏移」重算。
+            if let Some(fault_addr) =
+                pmp::pmp_fault_addr(state, addr, pmp::access_bytes(size), PmpAccess::Store)
+            {
                 let cause = TrapCause::StoreAccessFault;
-                csr::enter_trap(state, cause.mcause(), addr);
+                csr::enter_trap(state, cause.mcause(), fault_addr);
                 return Ok(StepOutcome::Trapped { cause });
             }
             let value = truncate_store(op, read_gpr(state, d.rs2));

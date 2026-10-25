@@ -58,7 +58,7 @@ use riscv_sim_contract::model::{SimState, WriteSize};
 
 use super::csr;
 use super::executor::{StepOutcome, TrapCause};
-use super::pmp::pmp_allows;
+use super::pmp::{pmp_allows, pmp_fault_addr};
 use super::tests_common::*;
 
 // ---------------------------------------------------------------------------
@@ -671,7 +671,15 @@ fn a_straddling_load_into_a_deny_entry_traps() {
         }
         other => panic!("尾部落进 DENY 条目 ⇒ 必须被拒（实际 {:?}）", other),
     }
-    assert_eq!(csr_value(&state, 0x343), 0x7ffe, "mtval 必须是出错地址");
+    // ⚠️ **`mtval` 报的是「失败那一片的起始地址」**（台账 D-154 · 参考侧实测）
+    // ⇒ ⇒ 这一次的访问是 [0x7ffe, 0x8002) ⇒ ⇒ 片 1 = [0x7ffe, 0x8000)（被条目 1
+    // 允许）⇒ ⇒ 片 2 = [0x8000, 0x8002)（落进 DENY 条目）⇒ ⇒ 失败片的起始是
+    // **0x8000**，**不是**访问的有效地址 **0x7ffe**。
+    assert_eq!(
+        csr_value(&state, 0x343),
+        0x8000,
+        "mtval 必须是**失败片的起始**（参考侧口径），不是访问的有效地址"
+    );
 
     // ⚠️ **控制组**：**对齐**的读（同一块 RAM、同一套条目）⇒ ⇒ 放行。
     state.gpr[2] = 0x7ffc;
@@ -909,4 +917,233 @@ fn an_instruction_fetch_in_machine_mode_is_not_affected_by_mprv() {
             other
         ),
     }
+}
+
+// ---------------------------------------------------------------------------
+// v0.41 —— **失败片的起始地址**（D-154 · PMP 拒绝时上报的 `mtval`）
+// ---------------------------------------------------------------------------
+//
+// ⚠️ **参考侧的口径**（实测，STAGE-26 §1.2 F1 + 本节 §「探针」）：
+//
+// * 未对齐 4 字节读 @ `0x8003_FFFE`（尾部两字节落进 DENY 区间）⇒ ⇒ 参考侧
+//   `mtval` = **`0x8004_0000`** —— **出错那一片的起始**，**不是**访问的有效
+//   地址（`0x8003_FFFE`）⇒ ⇒ 差**一个偏移量**；
+// * 两侧的 `mcause` **都是 5** ⇒ ⇒ 只看 `mcause` **分不出**这一条；
+// * ⚠️ **「片」的口径**（本批用探针补测）：参考侧报的是**片与 4 字节块的交集
+//   的起点**，**不是**那个 4 字节块自己的起点 ⇒ ⇒ 访问 @ `0x8003_FFFE` 且
+//   **第一片**被拒时，参考侧报 `0x8003_FFFE`（**不是** `0x8003_FFFC`）。
+//
+// ⚠️ **判别力在哪一条**：**第一片**失败时，「片的起始」**恒等于**访问的有效
+// 地址 ⇒ ⇒ 那一条**单独**分不出两种口径 ⇒ ⇒ **判别力全在「第二片」那一条**
+// ⇒ ⇒ 下面第 ① 条**必须**钉住它。
+//
+// ⚠️ **一个约束一个落点**（STAGE-26 裁决 B / C）：失败片地址**由判定本身产出**
+// ⇒ ⇒ `pmp_fault_addr` 是**唯一的**判定入口 ⇒ ⇒ `pmp_allows` **由它实现**
+// ⇒ ⇒ 「允不允许」与「报哪一个地址」**不可能漂移**。
+
+/// ① —— **失败片是第二片** ⇒ ⇒ 报的**就是那一片的起始**（`0x8004_0000`），
+/// **不是**访问的有效地址（`0x8003_FFFE`）。
+///
+/// ⚠️ **这一条是整批的判别力所在**：参考侧实测 `mtval` = `0x8004_0000`
+/// ⇒ ⇒ 「报有效地址」那个写法**过不了**它。
+#[test]
+fn the_failing_piece_of_a_straddling_load_is_the_second_piece_start() {
+    // 条目 0 = DENY（NAPOT 4 KiB @ 0x80040000），条目 1 = ALLOW
+    // （NAPOT 1 MiB @ 0x80000000）—— 与语料 `local/pmp_straddle` 的配置 A 同形。
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_two_entries(
+        &mut h,
+        &mut state,
+        BASE,
+        PROBE_DENY_ENTRY,
+        PROBE_ALLOW_ENTRY,
+    );
+    set_mprv(&mut h, &mut state, BASE + 12);
+    // 未对齐 4 字节读 @ 0x8003FFFE ⇒ ⇒ 片 1 = [0x8003FFFE, 0x80040000)（ALLOW）
+    // ⇒ ⇒ 片 2 = [0x80040000, 0x80040002)（DENY）⇒ ⇒ **失败片是第二片**。
+    let fault = pmp_fault_addr(&state, 0x8003_fffe, 4, PmpAccess::Load);
+    assert_eq!(
+        fault,
+        Some(0x8004_0000),
+        "失败片的起始 = 0x80040000（参考侧实测 F1）"
+    );
+    assert_ne!(
+        fault,
+        Some(0x8003_fffe),
+        "⚠️ 失败片的起始**不是**访问的有效地址（D-154 的那一个偏移量）"
+    );
+    // ⚠️ **同一条链**（裁决 B）：`pmp_allows` **由** `pmp_fault_addr` **实现**
+    // ⇒ ⇒ 「允不允许」与「报哪一个地址」**不可能漂移**。
+    assert!(
+        !pmp_allows(&state, 0x8003_fffe, 4, PmpAccess::Load),
+        "同一个访问必须**同时**被判为「被拒」"
+    );
+}
+
+/// ② —— **失败片是第一片** ⇒ ⇒ 报的**也是那一片的起始**。
+///
+/// ⚠️ **配置**：条目 0 = NA4 @ `0x8003_FFFC`（**无权限** ⇒ DENY）⇒ ⇒ 访问的
+/// **第一片**（`[0x8003FFFE, 0x80040000)`）就落在它里面 ⇒ ⇒ 失败的是**第一片**。
+///
+/// ⚠️ **本条**单独**分不出**「片的起始」与「有效地址」两种口径（第一片失败时
+/// 两者**恒等**）⇒ ⇒ 判别力在 ① ⇒ ⇒ 但它**钉住**「失败片的起始**不是**那个
+/// 4 字节块自己的起点」（`0x8003_FFFC`）⇒ ⇒ 参考侧实测报的是 `0x8003_FFFE`。
+#[test]
+fn the_failing_piece_of_an_access_whose_first_piece_fails_is_that_piece_start() {
+    // 条目 0 = NA4 @ 0x8003FFFC（`pmpaddr` = 0x8003FFFC >> 2 = 0x2000FFFF，
+    // `A` = NA4 = 0b10 ⇒ `pmpcfg` 字节 0 = 0x10），**无权限** ⇒ DENY。
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_two_entries(
+        &mut h,
+        &mut state,
+        BASE,
+        (0x2000_ffff, 0x10),
+        PROBE_ALLOW_ENTRY,
+    );
+    set_mprv(&mut h, &mut state, BASE + 12);
+    let fault = pmp_fault_addr(&state, 0x8003_fffe, 4, PmpAccess::Load);
+    assert_eq!(
+        fault,
+        Some(0x8003_fffe),
+        "失败片是第一片 ⇒ ⇒ 报的是**那一片的起始**（不是块起点 0x8003FFFC）"
+    );
+    assert_ne!(
+        fault,
+        Some(0x8003_fffc),
+        "⚠️ 失败片的起始**不是**那个 4 字节块自己的起点（参考侧实测）"
+    );
+}
+
+/// ③ —— 整个访问落在**允许**的条目里 ⇒ ⇒ **没有失败片** ⇒ ⇒ `None`（不陷）。
+///
+/// ⚠️ **控制组**：这一条**必须**在 ⇒ ⇒ 「一律报一个地址」的实现过不了它。
+#[test]
+fn an_access_entirely_inside_an_allowed_entry_has_no_failing_piece() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_two_entries(
+        &mut h,
+        &mut state,
+        BASE,
+        PROBE_ALLOW_ENTRY,
+        PROBE_ALLOW2_ENTRY,
+    );
+    set_mprv(&mut h, &mut state, BASE + 12);
+    // 对齐的读，完整落在条目 0（ALLOW）里 ⇒ ⇒ 没有失败片。
+    assert_eq!(
+        pmp_fault_addr(&state, 0x8000_2000, 4, PmpAccess::Load),
+        None,
+        "完整落在允许条目里的访问 ⇒ ⇒ 没有失败片"
+    );
+    // 跨**两个** ALLOW 条目的未对齐读 ⇒ ⇒ 两片**各自**被允许 ⇒ ⇒ 也没有失败片。
+    assert_eq!(
+        pmp_fault_addr(&state, 0x800f_fffe, 4, PmpAccess::Load),
+        None,
+        "跨两个 ALLOW 条目的读 ⇒ ⇒ 没有失败片"
+    );
+    assert_eq!(
+        pmp_fault_addr(&state, 0x800f_fffe, 4, PmpAccess::Store),
+        None,
+        "跨两个 ALLOW 条目的写 ⇒ ⇒ 没有失败片"
+    );
+}
+
+/// ④ —— 「**没有条目命中**」那一支在 **S 模式**下 ⇒ ⇒ 失败 ⇒ ⇒ `Some`（**不是**
+/// `None`）⇒ ⇒ **兜底也是逐片的**。
+///
+/// ⚠️ **配置**：条目 0 = NAPOT 4 KiB @ `BASE`（带 `X` ⇒ ⇒ S 模式的取指被允许）
+/// ⇒ ⇒ 条目 1 = NA4 @ `0x8000`（只有 `R`）⇒ ⇒ 访问的**第一片**
+/// `[0x8002, 0x8004)` 被条目 1 允许，**第二片** `[0x8004, 0x8006)`
+/// **一条条目都不命中** ⇒ ⇒ 走「没有条目命中」那一支 ⇒ ⇒ S 模式下**必拒**。
+///
+/// ⚠️ **这一条钉住**：「兜底」**不是**按整次访问判的 ⇒ ⇒ **逐片**。
+#[test]
+fn the_no_entry_matched_fallback_is_also_per_piece() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    // 条目 0 = NAPOT 4 KiB @ BASE，带 `X` ⇒ ⇒ S 模式的取指被允许。
+    configure_entry0(&mut h, &mut state, BASE, (BASE >> 2) | 0x1ff, 0x1d);
+    // 条目 1 = NA4 @ 0x8000（`pmpaddr` = 0x8000 >> 2 = 0x2000），只有 `R`。
+    configure_entry1(&mut h, &mut state, BASE + 4, 0x2000, 0x1d, 0x11);
+    // 切到 S 模式 ⇒ ⇒ 有效特权级 = S ⇒ ⇒ 「没有条目命中」的那一支**必拒**。
+    csr::priv_set(&mut state, PRIV_S);
+    let fault = pmp_fault_addr(&state, 0x8002, 4, PmpAccess::Load);
+    assert_eq!(
+        fault,
+        Some(0x8004),
+        "第二片**一条条目都不命中** ⇒ ⇒ S 模式下**必拒** ⇒ ⇒ 兜底也是**逐片**的"
+    );
+    // ⚠️ **控制组**：**对齐**的读（同一套条目）⇒ ⇒ 完整落在条目 1 里 ⇒ ⇒ 放行。
+    assert_eq!(
+        pmp_fault_addr(&state, 0x8000, 4, PmpAccess::Load),
+        None,
+        "对齐的读完整落在允许条目里 ⇒ ⇒ 没有失败片"
+    );
+}
+
+/// ⑤ —— **端到端**：被 PMP 拒的**读**上报的 `mtval` 是**失败片的起始**。
+///
+/// ⚠️ 这是**内核**那条链的端到端证据（裁决 B）：`executor.rs` 的 load 臂把
+/// **失败片地址**交给 `enter_trap` ⇒ ⇒ `mtval` = `0x8004_0000` ⇒ ⇒ **不是**
+/// 访问的有效地址 `0x8003_FFFE`。
+#[test]
+fn a_pmp_load_trap_reports_the_failing_piece_start_not_the_effective_address() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_two_entries(
+        &mut h,
+        &mut state,
+        BASE,
+        PROBE_DENY_ENTRY,
+        PROBE_ALLOW_ENTRY,
+    );
+    set_mprv(&mut h, &mut state, BASE + 12);
+    state.gpr[2] = 0x8003_fffe;
+    let outcome = h.step_one_at(&mut state, BASE + 16, lw(3, 2));
+    match outcome {
+        StepOutcome::Trapped { cause } => {
+            assert_eq!(cause, TrapCause::LoadAccessFault);
+            assert_eq!(cause.mcause(), 5, "load access fault 的 mcause 是 5");
+        }
+        other => panic!("尾部落进 DENY 条目 ⇒ 必须被拒（实际 {:?}）", other),
+    }
+    assert_eq!(
+        csr_value(&state, 0x343),
+        0x8004_0000,
+        "mtval 必须是**失败片的起始**（参考侧实测），不是访问的有效地址"
+    );
+}
+
+/// ⑥ —— **端到端**：被 PMP 拒的**写**上报的 `mtval` **也是**失败片的起始。
+///
+/// ⚠️ 它与 ⑤ **成对**（读与写两条臂）⇒ ⇒ 「只改了读」的实现过不了它。
+#[test]
+fn a_pmp_store_trap_reports_the_failing_piece_start_not_the_effective_address() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_two_entries(
+        &mut h,
+        &mut state,
+        BASE,
+        PROBE_DENY_ENTRY,
+        PROBE_ALLOW_ENTRY,
+    );
+    set_mprv(&mut h, &mut state, BASE + 12);
+    state.gpr[1] = 0x1122_3344;
+    state.gpr[2] = 0x8003_fffe;
+    let outcome = h.step_one_at(&mut state, BASE + 16, sw(1, 2));
+    match outcome {
+        StepOutcome::Trapped { cause } => {
+            assert_eq!(cause, TrapCause::StoreAccessFault);
+            assert_eq!(cause.mcause(), 7, "store access fault 的 mcause 是 7");
+        }
+        other => panic!("尾部落进 DENY 条目 ⇒ 必须被拒（实际 {:?}）", other),
+    }
+    assert_eq!(
+        csr_value(&state, 0x343),
+        0x8004_0000,
+        "mtval 必须是**失败片的起始**（参考侧实测），不是访问的有效地址"
+    );
 }

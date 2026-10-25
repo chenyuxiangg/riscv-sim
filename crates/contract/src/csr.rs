@@ -1339,6 +1339,52 @@ pub fn pmp_access_allowed(
     access: PmpAccess,
     privilege: u32,
 ) -> bool {
+    // ⚠️ **一个约束一个落点**（STAGE-26 裁决 B / C）：本函数**由**
+    // [`pmp_fault_piece_addr`] **实现** ⇒ ⇒ 两条路径**走的是同一条链** ⇒ ⇒
+    // 「允不允许」与「报哪一个地址」**不可能漂移**。
+    //
+    // ⚠️ **签名一个字都不改**（v0.40 裁决 F 的延续）⇒ ⇒ 既有调用点**零改动**
+    // ⇒ ⇒ 契约层**零升版**。
+    pmp_fault_piece_addr(entries, addr, size, access, privilege).is_none()
+}
+
+/// The **first failing piece** of an access — or `None` when the access is
+/// permitted.
+///
+/// * `entries` — `(cfg, pmpaddr)` per entry, **in entry order** (entry 0
+///   first); the slice may be shorter than [`PMP_ENTRY_COUNT`].
+/// * `addr` / `size` — the access: the `size` bytes starting at `addr`.
+/// * `access` — which kind of access it is (`Load` / `Store` / `Fetch`).
+/// * `privilege` — the **effective privilege level** of this access (see
+///   [`pmp_effective_privilege`]).
+///
+/// # 判据
+///
+/// * **放行** ⇒ ⇒ `None`；
+/// * **被拒** ⇒ ⇒ `Some(失败片的起始地址)` —— **不是**访问的有效地址、**不是**
+///   失败片的末尾、**不是**「有效地址 + 偏移」重算出来的数。
+///
+/// ⚠️ **为什么要有这个函数**（台账 **D-154**）：参考侧在 PMP 拒绝时 `mtval` 报
+/// 的是「**出错那一片的起始地址**」（实测 F1：未对齐 4B 读 @ `0x8003_FFFE` ⇒ ⇒
+/// 参考侧 `mtval` = **`0x8004_0000`**）⇒ ⇒ 平台原来报「访问的有效地址」
+/// （`0x8003_FFFE`）⇒ ⇒ 差**一个偏移量**⇒ ⇒ 两侧的 `mcause` **相同**（都是 5）
+/// ⇒ ⇒ 只看 `mcause` **分不出**这一条。
+///
+/// ⚠️ **失败片地址必须由判定本身产出**（STAGE-26 裁决 C）⇒ ⇒ 本函数**就是**
+/// 那个判定 ⇒ ⇒ ⛔ **不许**在调用方用「有效地址 + 偏移」重算 ⇒ ⇒ 那等于
+/// **重新实现**一次切片 ⇒ ⇒ 两个真相源。
+///
+/// ⚠️ **「片」是什么**：一次访问按 4 字节粒度（[`PMP_GRAINULARITY`]）切成若干
+/// **片**，每一片 = 「这次访问」与「那个 4 字节块」的**交集** ⇒ ⇒ 本函数报的
+/// 是**那个交集的起点** ⇒ ⇒ 对齐的访问只有一片 ⇒ ⇒ 报的**就是**那个地址
+/// ⇒ ⇒ **对齐访问的行为一个字都不变**。
+pub fn pmp_fault_piece_addr(
+    entries: &[(PmpCfg, u32)],
+    addr: u32,
+    size: u32,
+    access: PmpAccess,
+    privilege: u32,
+) -> Option<u32> {
     let start = u64::from(addr);
     let end = start + u64::from(size);
     let first_block = start / PMP_GRAINULARITY;
@@ -1362,10 +1408,11 @@ pub fn pmp_access_allowed(
             access,
             privilege,
         ) {
-            return false;
+            // ⚠️ **失败片的起始**（不是有效地址、不是末尾）—— 参考侧口径（F1）。
+            return Some(piece_start as u32);
         }
         if block == last_block {
-            return true;
+            return None;
         }
         block += 1;
     }

@@ -653,16 +653,17 @@ readings** ⇒ ⇒ both are in this row.
 
 **The measured result — the reference side agrees, the platform does not.**
 The reference side (Spike) runs this ELF and reports **PASS**: every
-assertion below holds on it.  The platform reports **FAIL 3** — it let
-scenario A's access through ⇒ ⇒ the platform is currently **too loose**
-there (the *security* direction).  The same platform is **too strict** for
-scenario B: measured on its own, it **denies** the cross-boundary load with
-`mcause` = 5 and `mtval` = `0x800F_FFFE` (the **effective** address) ⇒ ⇒ the
-load never returns and the value stays the `0xDEAD_BEEF` sentinel ⇒ ⇒ the
-divergence is in **both** directions.
-⇒ ⇒ the row is **red on our side** until the decision rule becomes
-per-piece, and then it is green on **both** sides and the behaviour is
-pinned by the default gate forever.
+assertion below holds on it.  ⚠️ **That measurement was taken before v0.39
+landed the per-piece rule** ⇒ ⇒ the platform **reported FAIL 3** back then —
+it let scenario A's access through ⇒ ⇒ it was **too loose** there (the
+*security* direction).  The same platform was **too strict** for scenario B:
+measured on its own, it **denied** the cross-boundary load with
+`mcause` = 5 and `mtval` = `0x800F_FFFE` (the **effective** address — the
+platform now reports the **failing piece's start**, see the `mtval` table
+below) ⇒ ⇒ the load never returned and the value stayed the `0xDEAD_BEEF`
+sentinel ⇒ ⇒ the divergence was in **both** directions.
+⇒ ⇒ the row is green on **both** sides today, and the behaviour is pinned by
+the default gate forever.
 
 **The register layouts.**  RV32's `pmpcfg0` holds **four** entries (byte 0 =
 entry 0, byte 1 = entry 1) ⇒ ⇒ `pmpcfg1` would configure entries 4..7 and is
@@ -722,6 +723,21 @@ entry 0 covers `[0x8000_0000, 0x8010_0000)` and **allows** both.  Every
 verdict path also clears `MPRV` first, so the `tohost` store runs at
 M-mode privilege and PMP does not apply to it at all.
 
+**The `mtval` expectation — the reference side reports the start of the
+failing piece.**  The two sides' `mcause` are **the same** (5) ⇒ ⇒ `mcause`
+alone **cannot** tell them apart ⇒ ⇒ the case asserts the reported address
+itself:
+
+| access | the failing piece | the reference side's `mtval` | the platform's `mtval` (v0.41) |
+| --- | --- | --- | --- |
+| scenario A's DENY-tail load @ `0x8003_FFFE` | piece 2 = `[0x8004_0000, 0x8004_0002)` | **`0x8004_0000`** | **`0x8004_0000`** |
+| the control loads (fully inside the ALLOW region) | — (they do **not** trap) | — | — |
+
+⇒ ⇒ the **contrast** for that assertion is the access's own **effective
+address** (`0x8003_FFFE`) — **not** the control group: the control loads stay
+inside the ALLOW region ⇒ ⇒ they do not trap ⇒ ⇒ `mtval` has nothing to say
+about them.
+
 ⚠️ **The failure modes carry distinct numbers**, so a red row says *which*
 scenario broke:
 
@@ -735,18 +751,21 @@ scenario broke:
 | `FAIL 7` | scenario B: the cross-boundary load was **denied** — the platform is too **strict** |
 | `FAIL 8` | scenario B: the load was allowed but the value was **not** the mixed one ⇒ ⇒ it did not cross the boundary |
 | `FAIL 9` | the **control group** broke: the **misaligned** load inside the ALLOW region did not return the expected value |
+| `FAIL 10` | `mtval` was **not** the start of the failing piece — the reference side reports `0x8004_0000` (the start of the **second** piece), not the access's effective address `0x8003_FFFE` |
 
-⚠️ **`mtval` is deliberately **not** asserted.**  The reference side reports
-`mtval` = `0x8004_0000` — the address of the **failing piece** — while the
-platform reports `mtval` = the **effective address** of the access
-(`0x8003_FFFE`); `crates/kernel/src/m13_iss/executor.rs` hands the
-effective address to `enter_trap`, and STAGE-23 §3.1 / B-6 keep that call
-site **unchanged**.  "Which address does a PMP trap report" is a
-**different rule** from "which access is denied", it is **outside** this
-batch's scope, and asserting it would keep this row red for a reason the
-per-piece fix does not address.  What **is** asserted is `mcause` = 5, which
-pins "denied, and denied as a **load access fault**" and separates it from a
-misaligned-load trap (cause 4) or a bus error.
+⚠️ **`mtval` **is** asserted** — it was **not**, until v0.41 (ledger
+**D-154**).  The reference side reports `mtval` = the **start of the failing
+piece** — for scenario A that is **`0x8004_0000`** — while the platform used
+to report the **effective address** of the access (`0x8003_FFFE`); the two
+differ by one offset, and the two sides' `mcause` are **the same** (5) ⇒ ⇒
+`mcause` alone **cannot** tell them apart.  The platform now reports the
+**failing piece's start** too ⇒ ⇒ the two sides agree **byte for byte** on
+`mtval`.
+
+⚠️ **The three assertions are three separate questions**: `mcause` = 5 pins
+"denied, and denied as a **load access fault**" (and separates it from a
+misaligned-load trap (cause 4) or a bus error), `mepc` pins "is it the
+*right* trap?", and `mtval` pins "is the reported address **exact**?".
 
 ### `pmp_privilege` — the five cells of PMP's privilege rule
 
