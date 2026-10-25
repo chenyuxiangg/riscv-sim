@@ -584,8 +584,8 @@ pub use crate::m17_backend::E_INT_01_CONTROLLER_BUSY;
 /// 一个常量 / 一个判定**只能有一份定义** —— 两处各写一个 `200`，将来漂移了
 /// 没人知道。
 pub use watchdog::{
-    classify_window, HostWatchdog, WindowOutcome, HOST_WATCHDOG_BUDGET_MS,
-    HOST_WATCHDOG_CONFIRMATIONS, WATCHDOG_ERR_CODE, WATCHDOG_LOG_CTX,
+    classify_window, classify_window_with_clock, HostWatchdog, WindowOutcome,
+    HOST_WATCHDOG_BUDGET_MS, HOST_WATCHDOG_CONFIRMATIONS, WATCHDOG_ERR_CODE, WATCHDOG_LOG_CTX,
 };
 
 /// 宿主内部的窗口判定结果（不是公开 API —— 见 [`watchdog::WindowVerdict`]）。
