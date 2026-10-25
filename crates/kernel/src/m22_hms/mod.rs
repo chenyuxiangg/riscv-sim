@@ -55,6 +55,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::rc::Rc;
 
+use riscv_sim_contract::admin::AdminDiagDto;
 use riscv_sim_contract::error::{ErrorFamily, PlatformError, E_HMS_01_DEGRADE_FAILED};
 
 use crate::m21_logging::{LogBuffer, LogEntry, LogQuery};
@@ -307,6 +308,28 @@ pub struct DiagnosticKit {
     /// **M-22 不主动去问时钟** ⇒ ⇒ 本模块**不依赖** `kernel_host`（否则 M-22
     /// 就要反向依赖宿主装配层 ⇒ ⇒ 那是**依赖方向**问题）。
     pub host_clock_available: bool,
+}
+
+impl DiagnosticKit {
+    /// 跨进程形状（契约 v8 · STAGE-29 · D-129）—— **逐字段镜像**。
+    ///
+    /// ⚠️ **转换住在 M-22**（诊断包是**它**拥有的形状 · 裁决 I）⇒ 契约层
+    /// **不依赖内核**（依赖方向仍单向：内核 → 契约层）。
+    ///
+    /// ⚠️ **四个字段**（**不多不少** · 裁决 I）：`err_code` ·
+    /// `snapshot_summary` · `input_seq_tail` · `host_clock_available`
+    /// ⇒ ⇒ 逐个**原样复制** ⇒ ⇒ 线上形状与内核形状**逐字一致**。
+    ///
+    /// ⚠️ **没有 u64 时间字段** ⇒ ⇒ 「虚拟时间走十进制字符串」那条策略**只**
+    /// 影响 M-21 的 [`LogEntry`] 那一侧（裁决 J）。
+    pub fn to_dto(&self) -> AdminDiagDto {
+        AdminDiagDto {
+            err_code: self.err_code.clone(),
+            snapshot_summary: self.snapshot_summary.clone(),
+            input_seq_tail: self.input_seq_tail.clone(),
+            host_clock_available: self.host_clock_available,
+        }
+    }
 }
 
 /// 整体健康状态（冻结规格 §2.4 · 裁决 D）。
@@ -2046,5 +2069,44 @@ mod tests {
             E_STORE_04_ARCHIVE_BACKEND_MISSING, E_STORE_05_KIT_SERIALIZE_FAILED,
             "两个触发点不许共用一个场景码"
         );
+    }
+    // -----------------------------------------------------------------------
+    // 跨进程形状（契约 v8 · STAGE-29 · D-129 · 裁决 I）
+    // -----------------------------------------------------------------------
+
+    /// 转换住在 **M-22**（诊断包是**它**拥有的形状）⇒ ⇒ 契约层不依赖内核。
+    #[test]
+    fn the_admin_diag_dto_mirrors_the_diagnostic_kit_field_by_field() {
+        let hms = Hms::new();
+        let kit = hms.export_diagnostic_kit(Some("E_HMS-01"), true);
+        let dto = kit.to_dto();
+        assert_eq!(dto.err_code, kit.err_code, "err_code 逐字镜像");
+        assert_eq!(dto.snapshot_summary, kit.snapshot_summary, "摘要逐字镜像");
+        assert_eq!(
+            dto.input_seq_tail, kit.input_seq_tail,
+            "输入序列尾部逐字镜像"
+        );
+        assert!(
+            dto.host_clock_available,
+            "宿主时钟可用这件事**原样**传过去（显式布尔，不是缺键）"
+        );
+    }
+
+    /// ⚠️ **四个字段**（不多不少 · 裁决 I）⇒ ⇒ 线上形状与内核形状一致。
+    #[test]
+    fn the_admin_diag_dto_has_exactly_four_fields() {
+        let hms = Hms::new();
+        let dto = hms.export_diagnostic_kit(None, false).to_dto();
+        let json = serde_json::to_value(&dto).expect("json");
+        let obj = json.as_object().expect("DTO 是一个对象");
+        assert_eq!(obj.len(), 4, "AdminDiagDto 必须**恰好**四个字段");
+        for key in [
+            "err_code",
+            "snapshot_summary",
+            "input_seq_tail",
+            "host_clock_available",
+        ] {
+            assert!(obj.contains_key(key), "AdminDiagDto 少了 `{key}`");
+        }
     }
 }

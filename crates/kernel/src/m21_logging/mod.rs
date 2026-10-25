@@ -40,13 +40,19 @@
 //! （上面三条字节上限）与 **UTF-8 边界截断**，**不**承诺零分配（台账 **D-128**
 //! 如实登记「定长槽语义降级为有界长度」）。
 //!
-//! # ⚠️ 日志是**进程内通道**，**不上契约层**（裁决 I / L）
+//! # ⚠️ 日志的**订阅面**仍是进程内的（裁决 I / L），但**管理员通道**已上契约层
 //!
 //! LLD §3.4 的角色边界：产品 / 嵌入式工作台**不订阅**系统日志流（L1 边界）⇒
-//! 本模块的 `LogEntry` / `LogLevel` / `LogQuery` / `LogBuffer` **全部是进程内类型**
-//! （内核与宿主同进程）⇒ **契约层零 DTO / 零命令 / 零事件** ⇒ **前端零改动**
-//! 是本批的可验证判别式。服务端形态的「跨进程收集」是 **P1** ⇒ 届时再上契约层
-//! （台账 **D-129** 留账）。
+//! 本模块的 `LogEntry` / `LogLevel` / `LogQuery` / `LogBuffer` **仍然是进程内类型**
+//! （内核与宿主同进程）⇒ **前端零订阅改动**是那条边界的可验证判别式。
+//!
+//! ⚠️ **v0.44（STAGE-29 · D-129）**：**管理员通道**要跨进程边界 ⇒ 契约层
+//! **新增了一份形状** [`riscv_sim_contract::admin::LogEntryDto`] ⇒ 但**转换住在
+//! 本模块**（日志条目是**它**拥有的形状 · 裁决 I）⇒ **契约层不依赖内核**
+//! （依赖方向仍是单向：内核 → 契约层）。
+//!
+//! ⚠️ **这不是「日志流上契约层」**：订阅面（L1 角色边界）**一个字未改** ⇒
+//! 变的只有**管理员通道**这一条显式出口（宿主侧有开关 · 默认关 · 裁决 G）。
 //!
 //! # 其它实现约定
 //!
@@ -73,6 +79,7 @@
 //!   ⇒ 带序 = TRACE → DEBUG → INFO → WARN → ERROR（= `LogLevel::rank()`）；
 //!   带内写入序 = 该带里的写入先后 ⇒ ⇒ 两次跑**逐条相同**。
 
+use riscv_sim_contract::admin::LogEntryDto;
 use riscv_sim_contract::error::ErrorFamily;
 use std::collections::VecDeque;
 
@@ -185,6 +192,40 @@ pub struct LogEntry {
     pub msg: String,
     /// 任一字段被截断时为 true
     pub truncated: bool,
+}
+
+impl LogEntry {
+    /// 跨进程形状（契约 v8 · STAGE-29 · D-129）—— **逐字段镜像**。
+    ///
+    /// ⚠️ **转换住在 M-21**（日志条目是**它**拥有的形状 · 裁决 I）⇒ 契约层
+    /// **不依赖内核**（依赖方向仍单向：内核 → 契约层）。
+    ///
+    /// ⚠️ **两处类型不一样**（这正是转换存在的理由）：
+    ///
+    /// - `level` 是**枚举** [`LogLevel`] ⇒ 线上是**字符串** ⇒ 取**内核自己的
+    ///   拼写**（`TRACE` / `DEBUG` / `INFO` / `WARN` / `ERROR`，**大写** ·
+    ///   **没有** `fatal` 那一级）；
+    /// - `err_code` 是**普通字符串**，**空串 = 没有码** ⇒ 线上是
+    ///   `Option<String>` ⇒ **空串 ⇒ `None`**（“没有码”与“空码”**分得开**）。
+    ///
+    /// ⚠️ 两个时间字段是 `u64` ⇒ **直接复制**（十进制字符串的策略由契约层的
+    /// `u64_decimal` 负责 · 裁决 J）。
+    pub fn to_dto(&self) -> LogEntryDto {
+        LogEntryDto {
+            time_virt_ps: self.time_virt_ps,
+            time_host_ms: self.time_host_ms,
+            session_id: self.session_id,
+            level: self.level.as_str().to_string(),
+            ctx: self.ctx.clone(),
+            err_code: if self.err_code.is_empty() {
+                None
+            } else {
+                Some(self.err_code.clone())
+            },
+            msg: self.msg.clone(),
+            truncated: self.truncated,
+        }
+    }
 }
 
 /// 查询过滤（管理员通道）

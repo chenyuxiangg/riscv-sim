@@ -160,6 +160,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
+use riscv_sim_contract::admin::LogEntryDto;
 use riscv_sim_contract::csr::IRQ_UART_RX_READY;
 use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, E_ENG_03_NO_PROGRESS, E_HMS_02_FATAL_TERMINATED,
@@ -173,7 +174,7 @@ use riscv_sim_contract::model::{
 use riscv_sim_contract::platform::{PlatformDescription, WIRING_EVENT_RX_READY};
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
 use riscv_sim_contract::protocol::{
-    CommandPayload, Direction, EventPayload, HaltReason, MemoryMapOp, Message, Payload,
+    AdminOp, CommandPayload, Direction, EventPayload, HaltReason, MemoryMapOp, Message, Payload,
 };
 use riscv_sim_contract::session::{
     CheckpointMetaDto, M13StateDto, M14MapDto, M15PeriphDto, M16IntcDto, SessionSnapshotDto,
@@ -220,6 +221,44 @@ pub const GPIO_PERIPH_ID: &str = "GPIO0";
 
 /// GPIO 的信号名（M-15 `gpio::SIGNAL_OUT`）。
 pub const GPIO_SIGNAL_NAME: &str = "OUT";
+
+/// 管理员通道：**一次日志导出**的条目数**上界**（v0.44 · STAGE-29 · B-6）。
+///
+/// ⚠️ **为什么必须有上界**：管理员通道**跨进程边界** ⇒ ⇒ 一次
+/// `DrainLogs` 若不设上界，就能把**整个日志环**搬过边界（WASM 形态默认
+/// 7 000 条、服务端形态 13 万条）⇒ ⇒ 载荷体积不可控 ⇒ ⇒ 收消息的一侧
+/// 会被一次 admin 请求打爆。
+///
+/// ⚠️ **为什么是 256**：与 M-22 的
+/// [`RETAINED_BAND_CAPACITY`](crate::m22_hms::RETAINED_BAND_CAPACITY)（= 256）**同族**
+/// ——「取证要留多少」的同一量级 ⇒ ⇒ 一条日志约 200 字节 ⇒ ⇒ 一次导出
+/// 约 50 KB ⇒ ⇒ 对 `postMessage` / JSON 载荷都是**温和**的量。
+/// ⚠️ **将来调小不影响语义**（只是更早截断）⇒ ⇒ 截断**必须明确告知**
+/// （**不是静默** · 见 [`KernelHost::on_admin`]）。
+pub const ADMIN_DRAIN_MAX_ENTRIES: usize = 256;
+
+/// 管理员通道：**诊断包**这个 op 的名字（`AdminOp::Custom` 的字符串）。
+///
+/// ⚠️ **它是一个约定，不是一个类型**（台账 D-129 的已知边界 4）⇒ ⇒ 只有
+/// **逐字等于** `"diag"` 的 `Custom` 才走诊断包 ⇒ ⇒ **别的** `Custom`
+/// 字符串一律回 `E_CTX-05`（**不猜**别的 op 名）。
+pub const ADMIN_DIAG_OP: &str = "diag";
+
+/// 管理员通道：**截断说明**那条日志的 `ctx`（≤ 24 字节 · M-21 的上限）。
+pub const ADMIN_DRAIN_LOG_CTX: &str = "ADMIN-DRAIN";
+
+/// 管理通道未启用时**原样**回的那句消息（**一字不改** · X-3）。
+///
+/// ⚠️ **默认行为一字不变**（裁决 G）：宿主对 `Admin` 命令的**默认**回应
+/// **必须**与 v0.43 之前**逐字相同** ⇒ ⇒ 这句**逐字保留**。
+///
+/// ⚠️ **为什么开启通道后 `KillGuest` / `PersistProject` 也回这一句**
+/// （裁决 H · 不假装实现了）：**一个码一个含义** ⇒ ⇒ `E_CTX-05` 这个码
+/// 只表示「管理通道对这个 op 没开」⇒ ⇒ 括号里那句「admin op 不在当前会话
+/// 的能力面内」对**未实现的 op** 同样**成立**（它们确实不在能力面内）
+/// ⇒ ⇒ 不给同一个码**换第二个含义**。
+pub const ADMIN_CHANNEL_DISABLED_MESSAGE: &str =
+    "管理通道未启用（admin op 不在当前会话的能力面内）";
 
 /// **demo 固件**（40 字节，RV32I 手写编码，小端）。
 ///
@@ -850,6 +889,20 @@ pub struct KernelHost {
     watchdog: HostWatchdog,
     /// 会话起点（宿主单调时钟的零点）—— M-21 / M-22 的 `time_host_ms` 口径。
     started_at: HostClock,
+    /// 管理通道**是否启用**（裁决 G · v0.44 · STAGE-29）。
+    ///
+    /// ⚠️ **默认关** ⇒ 宿主对 `Admin` 命令的**默认**回应**仍然**是 `E_CTX-05`
+    /// ⇒ **默认行为一字不变** ⇒ 零回归风险。
+    ///
+    /// ⚠️ **「谁有资格开」没做**（台账 **D-131**）⇒ 这里只有**一个布尔开关**
+    /// ⇒ 开关本身**没有**鉴权含义。
+    admin_enabled: bool,
+    /// 管理员通道的日志导出**被上界截掉**的条数（累计 · B-6）。
+    ///
+    /// ⚠️ **可见的丢弃**（不静默）：截断发生时除了在 M-21 的环里写一条
+    /// 说明（见 [`KernelHost::on_admin`]），这里还留一个**机器可读**的计数
+    /// ⇒ 「少了一批」这件事**两处都看得见**。
+    admin_drain_truncated: u64,
 }
 
 impl std::fmt::Debug for KernelHost {
@@ -968,6 +1021,10 @@ impl KernelHost {
             log_buffer,
             watchdog: HostWatchdog::new(),
             started_at: HostClock::new(),
+            // ⚠️ 管理通道**默认关**（裁决 G）⇒ 宿主对 `Admin` 命令的**默认**
+            // 回应**一字不变**（仍是 `E_CTX-05`）。
+            admin_enabled: false,
+            admin_drain_truncated: 0,
         };
         // The default memory map cannot fail on a fresh bus (the regions do
         // not overlap and are far below the per-region budget). If it ever
@@ -1017,6 +1074,36 @@ impl KernelHost {
     pub fn new_with_platform_file(path: &std::path::Path) -> Result<Self, PlatformError> {
         let description = platform::description_from_file(path)?;
         Ok(Self::with_description(description))
+    }
+
+    /// **打开 / 关闭**管理通道（裁决 G · v0.44 · STAGE-29）。
+    ///
+    /// ⚠️ **默认关** ⇒ 宿主对 `Admin` 命令的**默认**回应**仍然**是
+    /// `E_CTX-05` ⇒ **默认行为一字不变** ⇒ 零回归风险。
+    ///
+    /// ⚠️ **「谁有资格开」没做**（台账 **D-131**）⇒ 这个开关**没有**鉴权
+    /// 含义 ⇒ ⇒ 它只是「这条能力面开不开」的**显式开关**。
+    ///
+    /// ⚠️ **本批只兑现两个 op**（裁决 H）：`DrainLogs` 与
+    /// `Custom("diag")` ⇒ ⇒ `KillGuest` / `PersistProject` **仍**回
+    /// `E_CTX-05`（**不假装实现了** · X-4）。
+    pub fn with_admin_channel(mut self, enabled: bool) -> Self {
+        self.admin_enabled = enabled;
+        self
+    }
+
+    /// 管理通道**是否启用**（读出口）。
+    pub fn admin_enabled(&self) -> bool {
+        self.admin_enabled
+    }
+
+    /// 管理员通道的日志导出**累计被上界截掉**的条数（B-6 · 可见的丢弃）。
+    ///
+    /// ⚠️ **不是静默**：截断发生时 M-21 的环里**还会**留下一条说明
+    /// （见 [`KernelHost::on_admin`]）⇒ ⇒ 「少了一批」这件事**两处都看得见**
+    /// ⇒ ⇒ 一处是**人看的**（日志），一处是**机器读的**（这个计数）。
+    pub fn admin_drain_truncated_entries(&self) -> u64 {
+        self.admin_drain_truncated
     }
 
     /// 装上 M-16 的中断控制器**端口**（接缝 #2 / #3 / #4）。
@@ -1981,10 +2068,7 @@ impl KernelHost {
                     }
                 }
             }
-            CommandPayload::Admin { .. } => vec![EventPayload::Error {
-                code: "E_CTX-05".to_string(),
-                message: "管理通道未启用（admin op 不在当前会话的能力面内）".to_string(),
-            }],
+            CommandPayload::Admin { op } => self.on_admin(op),
             // ⚠️ 契约 v3 的四个调试面命令（STAGE-5 §3.4 的规范映射表）。
             //
             // ⚠️ 这四个分支**曾经**是「故意返回错误」的占位（契约 v3
@@ -2007,6 +2091,121 @@ impl KernelHost {
             // 拿到**旧值**而 `LSR` 说「没有数据」⇒ **自相矛盾**。
             CommandPayload::WriteConsole { bytes } => self.on_write_console(bytes),
         }
+    }
+
+    /// 管理通道未启用的那个错误（**`E_CTX-05` 的唯一构造落点** · §3.3）。
+    ///
+    /// ⚠️ **码字符串从契约层常量推导**（**一个约束一个落点**）：族名来自
+    /// [`riscv_sim_contract::error::CONTEXT_FAMILY`] · 场景号来自
+    /// [`riscv_sim_contract::error::E_CTX_05_ADMIN_CHANNEL_DISABLED`]
+    /// ⇒ ⇒ 契约层**只**给 `u16`（**不**加第二份字符串常量）⇒ ⇒ 宿主**不许**
+    /// 再写裸的 `"E_CTX-05"` 字面量 ⇒ ⇒ **族名与场景号各只有一个落点**。
+    ///
+    /// ⚠️ **渲染复用宿主既有的那一个渲染点**（[`KernelHost::error_from`] —— 它
+    /// 是宿主里**所有**错误码的**唯一**渲染处）⇒ ⇒ 「`E_<族>-<两位号>」这个
+    /// 写法在宿主里**只有一处** ⇒ ⇒ 宿主**不**另写第二份 `format!`。
+    ///
+    /// ⚠️ **渲染结果与旧字面量逐字相同** ⇒ ⇒ **默认行为一字不变**（X-3）。
+    fn admin_channel_disabled_error(&self) -> EventPayload {
+        self.error_from(&PlatformError::new(
+            riscv_sim_contract::error::CONTEXT_FAMILY,
+            riscv_sim_contract::error::E_CTX_05_ADMIN_CHANNEL_DISABLED,
+            ADMIN_CHANNEL_DISABLED_MESSAGE,
+        ))
+    }
+
+    /// 管理员通道（v0.44 · STAGE-29 · 裁决 G / H / I）。
+    ///
+    /// ⚠️ **默认关**（[`KernelHost::admin_enabled`] 的**默认**是 `false`）⇒
+    /// 默认回应**一字不变**（`E_CTX-05` · B-1 / X-3）。
+    ///
+    /// ⚠️ **本批只兑现两个 op**（裁决 H）：
+    ///
+    /// | op | 回应 |
+    /// | --- | --- |
+    /// | `DrainLogs` | **恰好一个** [`EventPayload::AdminLogs`]（B-2 / B-3） |
+    /// | `Custom("diag")` | **恰好一个** [`EventPayload::AdminDiag`]（B-4） |
+    /// | `KillGuest` / `PersistProject` / 其它 `Custom` | **仍** `E_CTX-05`（B-5 / X-4） |
+    ///
+    /// ⚠️ **「不假装实现了」**（裁决 H）：`KillGuest` / `PersistProject` **本批
+    /// 没有实现** ⇒ ⇒ 回**同一个** `E_CTX-05` ⇒ ⇒ 不给这个码**换第二个含义**
+    /// （**一个码一个含义**）。
+    fn on_admin(&mut self, op: AdminOp) -> Vec<EventPayload> {
+        // ⚠️ **默认关** ⇒ 默认回应**一字不变**（X-3）⇒ ⇒ 这一句在**最前面**
+        // （默认路径**不碰**任何其它逻辑 ⇒ ⇒ 默认行为**零副作用**）。
+        if !self.admin_enabled {
+            return vec![self.admin_channel_disabled_error()];
+        }
+        match op {
+            AdminOp::DrainLogs => {
+                vec![EventPayload::AdminLogs {
+                    entries: self.drain_log_entries(),
+                }]
+            }
+            // ⚠️ `Custom` 的**字符串**是**约定**不是类型 ⇒ ⇒ 只有**逐字等于**
+            // `ADMIN_DIAG_OP` 的才走诊断包 ⇒ ⇒ **别的** `Custom` 一律 `E_CTX-05`
+            // （**不猜**别的 op 名）。
+            AdminOp::Custom(ref name) if name == ADMIN_DIAG_OP => {
+                // ⚠️ `host_clock_available` 是**宿主注入**的事实（v0.43 · D-135
+                // · 裁决 C：谁持有时钟谁回答）⇒ ⇒ 这里复用宿主已有的那个出口
+                // ⇒ ⇒ **M-22 不主动去问时钟**。
+                let kit = self.export_diagnostic_kit(None);
+                vec![EventPayload::AdminDiag { diag: kit.to_dto() }]
+            }
+            _ => vec![self.admin_channel_disabled_error()],
+        }
+    }
+
+    /// 管理员通道：**导出日志条目**（一次导出**有上界** · B-6）。
+    ///
+    /// ⚠️ **条数与顺序取自 M-21 的环**（B-3）：用
+    /// [`LogBuffer::query_recent`]（**按虚拟时间**的全局最近）⇒ ⇒ 顺序
+    /// **天然**是虚拟时间序 ⇒ ⇒ **不重排**、**不造条目**、**不去重**。
+    ///
+    /// ⚠️ **截断必须明确告知（不是静默）**，而 `AdminLogs` 的**线上形状是
+    /// 冻结的**（只有 `entries` 一个字段 ⇒ 跨层 fixture 已钉住）⇒ ⇒ 三条
+    /// 约束同时成立的做法是：**在 M-21 自己的环里写一条说明截断的日志**
+    /// ⇒ ⇒ ① 用户**看得见**（下一次 `DrainLogs` 与宿主日志里都有）②
+    /// `AdminLogs` 事件**恰好一个** ③ `entries` 里**没有**合成条目。
+    ///
+    /// ⚠️ **为什么不往 `entries` 里塞「已截断」的合成条目**：那会破 B-3 的
+    /// 「条数与 M-21 环里一致」⇒ ⇒ **不许**。
+    ///
+    /// ⚠️ **为什么不加第二个事件**：那会破 B-2 的「**恰好一个**」⇒ ⇒
+    /// **不许**。
+    fn drain_log_entries(&mut self) -> Vec<LogEntryDto> {
+        // ① 取**环里**的最近 N 条（`N` = 上界）+ 环里**现驻留**的总条数。
+        //
+        // ⚠️ `len()` 是**驻留条数**（已被环自己挤掉的不算 —— 那是环的语义，
+        // 不是本次导出的语义）⇒ ⇒ 「被本次导出截掉」= 驻留条数 - 导出条数。
+        let (entries, resident) = {
+            let buffer = self.log_buffer.borrow();
+            let entries = buffer.query_recent(&LogQuery::default(), ADMIN_DRAIN_MAX_ENTRIES);
+            (entries, buffer.len())
+        };
+        let dropped = resident.saturating_sub(entries.len());
+        // ② 截断 ⇒ **明确告知**（写进 M-21 自己的环 ⇒ 下次导出与宿主日志
+        //    都看得见 ⇒ ⇒ **不是静默**）。
+        if dropped > 0 {
+            self.admin_drain_truncated = self.admin_drain_truncated.wrapping_add(dropped as u64);
+            let now_ps = self.backend.engine().now_ps();
+            let t_host_ms = self.host_now_ms();
+            let msg = format!(
+                "日志导出被截断：环内 {resident} 条，本次只导出最近 {ADMIN_DRAIN_MAX_ENTRIES} 条，另有 {dropped} 条未导出"
+            );
+            // ⚠️ `err_code` 传**空串** = 没有码 ⇒ ⇒ 线上是 `None`
+            // ⇒ ⇒ **不发明**一个新码（那会「一个码两个含义」）。
+            self.log_buffer.borrow_mut().log(
+                LogLevel::Warn,
+                ADMIN_DRAIN_LOG_CTX,
+                &msg,
+                "",
+                now_ps,
+                t_host_ms,
+            );
+        }
+        // ③ 转换住在 **M-21**（日志条目是它拥有的形状 · 裁决 I）。
+        entries.iter().map(LogEntry::to_dto).collect()
     }
 
     /// 装载工程：复位 → 重建平台 → 加载镜像 → 换新会话（清订阅）。
@@ -3951,6 +4150,13 @@ mod tests_board_delta_unload;
 /// 「纯函数化是**等价重构**」由「那边**一条不改**仍绿」**证明**。
 #[cfg(test)]
 mod tests_board_delta_equivalence;
+
+/// 管理员通道（v0.44 · 台账 **D-129** · 冻结规格 STAGE-29 §3.1 ~ §3.3）。
+///
+/// ⚠️ 覆盖验收 **B-1 ~ B-6** 与边界 **X-3 / X-4** ⇒ ⇒ 默认关时回应**逐字
+/// 不变**，开启后**恰好一个**回复事件，未实现的 op **不假装实现了**。
+#[cfg(test)]
+mod tests_admin_channel;
 
 /// 宿主看门狗（v0.28 · 台账 **D-115** · 冻结规格 STAGE-13 §3.3）。
 ///
