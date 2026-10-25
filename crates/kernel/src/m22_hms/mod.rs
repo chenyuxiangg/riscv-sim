@@ -31,13 +31,16 @@
 //!
 //! **日志源也是注入的**（冻结规格 §3.2 · 第五次订正）：[`Hms`] 持有宿主注入的
 //! `Option<Rc<RefCell<LogBuffer>>>`（M-21）⇒ 管理员分发的 `log_ref` 从**真实**
-//! 日志环里取（`query` 结果的最后 8 条）；**没有注入时恒空**（如实降级，不编造）。
+//! 日志环里取（`query_recent` 结果的**最后 8 条**，即**按虚拟时间**的全局最近）；
+//! **没有注入时恒空**（如实降级，不编造）。
 //! ⇒ 产品 / 嵌入式角色**一条日志都拿不到**（角色边界的判别力落在这里）。
 //!
-//! ⚠️ **保留带无界增长**（台账 **D-133**）：LLD 要求 FATAL / CRITICAL 信号
-//! **永不丢弃**（取证需要）⇒ 极端场景（大量致命信号）下 `retained` **无上限**。
-//! ⇒ 本批按 LLD 实现、**不加护栏**；上限策略（超出后留最早还是留最新 +
-//! 「超出即计数」的可见性）待另立欠账。
+//! ⚠️ **保留带有上界，满了之后**聚合**（台账 **D-133**）：LLD 要求 FATAL /
+//! CRITICAL 信号**永不丢弃**（取证需要）⇒ 极端场景（大量致命信号）下保留带
+//! 会**无上限**增长 ⇒ ⇒ 本批给它**一条常量上界**
+//! （[`RETAINED_BAND_CAPACITY`]）⇒ 满了之后**不是**「丢最旧的」（那就**违背**
+//! 了「永不丢弃」）⇒ ⇒ **整带折叠成**一个聚合信号**（保**首条**原文 +
+//! **计数**，见 [`Hms::retained_total`]）⇒ ⇒ **条数**有界 ⇒ **内存**有界。
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -60,6 +63,17 @@ pub const METRIC_RING_CAPACITY: usize = 4096;
 /// ⚠️ 口径：**至多 3 次尝试**（不是「1 次 + 3 次重试」）—— 终态上报
 /// `E_HMS-01` 时 `tries == 3`。
 pub const DEGRADE_MAX_TRIES: u32 = 3;
+
+/// 保留带（FATAL / CRITICAL）的**明细上界**（台账 **D-133**）。
+///
+/// ⚠️ **一条常量**（不散落在多处）⇒ 满了之后**整带折叠成**一个聚合信号
+///   （保**首条**原文 + **计数**，见 [`Hms::retained_total`]）⇒ ⇒ **不是**
+///   「丢最旧的」（那会违背 LLD 的「永不丢弃」）⇒ ⇒ 取证要的「有过致命信号」
+///   这个**事实**由**计数**承载。
+///
+/// ⚠️ **取值口径**：致命 / 严重信号是**稀有**事件 ⇒ 明细留 256 条足够逐条取证；
+///   再往后的**条数**由 [`Hms::retained_total`] 承载（**只增不减**）。
+pub const RETAINED_BAND_CAPACITY: usize = 256;
 
 /// 信号源（LLD M-22 §2.1.1 的 `src`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -241,7 +255,8 @@ pub struct AdminDiagnosis {
     /// M-21 日志关联（**引用**，不是日志内容本身）。
     ///
     /// ⚠️ 内容来自**注入的**日志源（[`Hms::install_log_source`]）—— 管理员分支
-    /// 取 `query` 结果的**最后 8 条**；**没有注入日志源时恒空**（如实降级）。
+    /// 取 `query_recent` 的**最后 8 条**（**按虚拟时间**的全局最近）；
+    /// **没有注入日志源时恒空**（如实降级）。
     /// 关联的**类型**是 M-21 的 [`LogEntry`] ⇒ 依赖方向 **M-22 → M-21 单向**。
     pub log_ref: Vec<LogEntry>,
 }
@@ -329,8 +344,25 @@ pub struct Hms {
     signals: VecDeque<HealthSignal>,
     /// 与 `signals` **同序**的分级结果（流里存的是**分级后**的值）。
     severities: VecDeque<Severity>,
-    /// FATAL / CRITICAL 保留带 —— **永不丢弃**。
+    /// FATAL / CRITICAL 保留带 —— **永不丢弃**（**有上界**，见 [`RETAINED_BAND_CAPACITY`]）。
+    ///
+    /// ⚠️ **上界满了之后不是「丢最旧的」** ⇒ ⇒ **整带折叠成**一个聚合信号
+    ///   （保**首条**原文）⇒ 折叠后本字段**只留 1 条** ⇒ 条数有界 ⇒ 内存有界。
+    /// ⚠️ **返回形状不许改**（改了就是破坏性变更 ⇒ 就要升版 ⇒ 本批不升版）
+    ///   ⇒ ⇒ 只改**内部存储** ⇒ 折叠出来的**条数**由 [`Hms::retained_total`] 承载。
     retained: VecDeque<(HealthSignal, Severity)>,
+    /// 进入过保留带的 FATAL / CRITICAL 信号**总数**（**只增不减**）。
+    ///
+    /// ⚠️ 折叠**之前**它等于 `retained.len()`；折叠**之后**它**大于**
+    ///   `retained.len()` ⇒ ⇒ 「有多少条致命信号」这个**事实**不丢（不静默丢）。
+    retained_total: u64,
+    /// 保留带是否已经**折叠**成聚合信号（折叠后**只计数**、不再展开明细）。
+    retained_collapsed: bool,
+    /// 最近一条带错误码的致命 / 严重信号（**派生量**）。
+    ///
+    /// ⚠️ 折叠后明细里只剩**首条** ⇒ 「最近一条带码的致命信号」若只从明细里找
+    ///   会**答错** ⇒ ⇒ 这里单独留住它（口径与折叠**前**逐字相同）。
+    retained_last_code: Option<String>,
     /// 崩溃冻结（有过 FATAL 信号 ⇒ 不再丢最旧）。
     frozen: bool,
     /// 分级映射（可配置）。
@@ -410,6 +442,9 @@ impl Hms {
             signals: VecDeque::new(),
             severities: VecDeque::new(),
             retained: VecDeque::new(),
+            retained_total: 0,
+            retained_collapsed: false,
+            retained_last_code: None,
             frozen: false,
             severity_table: HashMap::new(),
             degrade_policy: HashMap::new(),
@@ -465,9 +500,28 @@ impl Hms {
         }
         self.push_signal(signal.clone(), severity);
 
-        // ③ 保留带（FATAL / CRITICAL **永不丢弃**）。
+        // ③ 保留带（FATAL / CRITICAL **永不丢弃** ⇒ 但**有上界**，D-133）。
         if matches!(severity, Severity::Fatal | Severity::Critical) {
-            self.retained.push_back((signal.clone(), severity));
+            // ③-1 **条数**先记下来（**只增不减**）⇒ 折叠后「有多少条」不丢。
+            self.retained_total += 1;
+            // ③-2 最近一条带码的致命 / 严重信号（派生量 ⇒ 折叠后仍答得出）。
+            if let Some(code) = signal.err_code.as_deref() {
+                self.retained_last_code = Some(code.to_string());
+            }
+            if self.retained_collapsed {
+                // 已折叠 ⇒ **只计数**，不再展开明细（带长有界）。
+            } else if self.retained.len() >= RETAINED_BAND_CAPACITY {
+                // ⚠️ 满了 ⇒ **整带折叠成**一个聚合信号（保**首条**原文 + 计数）。
+                //    **不是**「丢最旧的」—— 那会**违背** LLD 的「永不丢弃」。
+                let first = self.retained.front().cloned();
+                self.retained.clear();
+                if let Some(first) = first {
+                    self.retained.push_back(first);
+                }
+                self.retained_collapsed = true;
+            } else {
+                self.retained.push_back((signal.clone(), severity));
+            }
         }
 
         // 单调性：粘性最大级别（§2.4「只降不升」）。
@@ -587,8 +641,21 @@ impl Hms {
     }
 
     /// 保留带（FATAL / CRITICAL 不丢）。
+    ///
+    /// ⚠️ **返回形状不许改**（改了就是破坏性变更 ⇒ 就要升版 ⇒ 本批不升版）。
+    /// ⚠️ 保留带**满了之后**会**折叠**成**一个**聚合信号（保**首条**原文）⇒
+    ///   ⇒ 折叠后本方法返回**一条** ⇒ 「有多少条」看 [`Hms::retained_total`]。
     pub fn retained(&self) -> Vec<(HealthSignal, Severity)> {
         self.retained.iter().cloned().collect()
+    }
+
+    /// 进入过保留带的 FATAL / CRITICAL 信号**总数**（**只增不减**）。
+    ///
+    /// ⚠️ 折叠**之前**它等于 `retained().len()`；折叠**之后**它**大于**
+    ///   `retained().len()` ⇒ ⇒ 「有过多少条致命信号」这个**事实**不丢
+    ///   （**不静默丢** ⇒ 裁决 H）。
+    pub fn retained_total(&self) -> u64 {
+        self.retained_total
     }
 
     /// 信号流是否已冻结（崩溃后不再丢最旧）。
@@ -602,8 +669,9 @@ impl Hms {
     ///   上下文 —— **不含任何日志条目**（角色边界）。
     /// - `Role::Admin` ⇒ [`DispatchResult::Admin`]：诊断详情（双时间戳）+ 日志关联。
     ///
-    /// ⚠️ Admin 分支的日志关联从**注入的**日志源取（`query` 结果的最后 8 条）；
-    /// 没注入日志源 ⇒ `log_ref` **恒空**（如实降级，不编造）。
+    /// ⚠️ Admin 分支的日志关联从**注入的**日志源取（`query_recent` 的最后 8 条，
+    ///   即**按虚拟时间**的全局最近）；没注入日志源 ⇒ `log_ref` **恒空**
+    ///   （如实降级，不编造）。
     pub fn dispatch(&self, signal: &HealthSignal, severity: Severity) -> DispatchResult {
         match self.role {
             Role::Product => DispatchResult::Notice(NoticeMsg {
@@ -623,7 +691,11 @@ impl Hms {
         }
     }
 
-    /// 管理员分发的日志关联：**注入日志源**里 `query` 结果的**最后 8 条**。
+    /// 管理员分发的日志关联：**注入日志源**里**按虚拟时间**的**全局最近 8 条**。
+    ///
+    /// ⚠️ 走 M-21 的 [`LogBuffer::query_recent`]（台账 **D-134**）⇒ ⇒ 「最后
+    ///   8 条」**名副其实**（旧的 `query` 是**按带**返回的 ⇒ 它的「最后 8 条」
+    ///   落点是**最高非空带的末尾**、**不是**全局最近）。
     ///
     /// ⚠️ **最保守的借用口径**：只克隆 `Rc`（不克隆缓冲本身），用 `try_borrow`
     /// 取**只读**视图 ⇒ 万一别处正持有可变借用，**退化成空列表**而不是 panic
@@ -637,9 +709,7 @@ impl Hms {
         let Ok(buffer) = logs.try_borrow() else {
             return Vec::new();
         };
-        let entries = buffer.query(&LogQuery::default());
-        let start = entries.len().saturating_sub(LOG_REF_TAIL);
-        entries[start..].to_vec()
+        buffer.query_recent(&LogQuery::default(), LOG_REF_TAIL)
     }
 
     /// 采集指标（环形 4096，满则丢最旧）。
@@ -676,10 +746,11 @@ impl Hms {
             None => self.last_retained_code(),
         };
         let snapshot_summary = format!(
-            "health={:?} signals={} retained={} frozen={} terminated={} watchdog_fired={}",
+            "health={:?} signals={} retained={} retained_total={} frozen={} terminated={} watchdog_fired={}",
             self.state(),
             self.signals.len(),
             self.retained.len(),
+            self.retained_total,
             self.frozen,
             self.terminated,
             self.watchdog_fired
@@ -812,11 +883,11 @@ impl Hms {
     }
 
     /// 最近一条带错误码的致命 / 严重信号（保留带倒序找）。
+    ///
+    /// ⚠️ 口径与折叠**前**逐字相同 ⇒ ⇒ 折叠后**仍**答得出「最近那条带码的
+    ///   致命信号」（否则折叠会把这个事实**静默**丢掉 ⇒ 违背裁决 H）。
     fn last_retained_code(&self) -> Option<String> {
-        self.retained
-            .iter()
-            .rev()
-            .find_map(|(signal, _)| signal.err_code.clone())
+        self.retained_last_code.clone()
     }
 
     /// 信号流尾部的渲染（取证要素，**不含原始日志**）。
@@ -1268,7 +1339,10 @@ mod tests {
     }
 
     /// C-9 的 **Admin 半边**（有真判别力）：注入日志源 ⇒ `log_ref` **非空**，
-    /// 且内容与 M-21 的 `LogBuffer` **一致**（取 `query` 结果的**最后 8 条**）。
+    /// 且内容与 M-21 的 `LogBuffer` **一致**（取**最后 8 条**）。
+    ///
+    /// ⚠️ 取法是 `query_recent`（D-134）⇒ 但那个缓冲**单带** ⇒ 「按带」与
+    ///   「按虚拟时间」**恰好**同序 ⇒ 本条的**取值**不变。
     #[test]
     fn c9_admin_dispatch_carries_the_log_association_when_a_log_source_is_installed() {
         let logs = log_source_with_entries(10);
@@ -1281,7 +1355,7 @@ mod tests {
             other => panic!("Admin 角色的分发结果必须是诊断详情：{other:?}"),
         };
 
-        // 非空，且就是 `query` 结果的**最后 8 条**。
+        // 非空，且就是**最后 8 条**。
         let expected = logs.borrow().query(&LogQuery::default());
         assert_eq!(expected.len(), 10);
         assert_eq!(diag.log_ref.len(), 8, "日志关联取最后 8 条");
@@ -1442,6 +1516,175 @@ mod tests {
                 "归档字节里搜到了日志文本 {forbidden:?}：{json_text}"
             );
         }
+    }
+
+    // ---------------------------------------------- D-134 · `log_ref` 改走
+    //                                                 `query_recent`
+
+    /// D-134 · `log_ref` **改走** `query_recent` ⇒ 「最后 N 条」**名副其实**：
+    /// 跨带交错写入时，`log_ref` 按**虚拟时间**排（**不是**按带）。
+    ///
+    /// ⚠️ 这条用例对**旧实现**（取 `query` 的尾部）是**红的** ⇒ ⇒ 真判别力。
+    #[test]
+    fn admin_log_ref_follows_the_global_virtual_time_order() {
+        let mut buffer = LogBuffer::new(0);
+        // 跨带交错 ⇒ 带序 ≠ 时间序。
+        // ⚠️ 宿主时间与虚拟时间**故意反向** ⇒ 用宿主时间排序会给出**另一个**顺序。
+        buffer.log(LogLevel::Error, "M22", "e1", "E_HMS-01", 10, 40);
+        buffer.log(LogLevel::Trace, "M22", "t1", "E_HMS-01", 20, 30);
+        buffer.log(LogLevel::Info, "M22", "i1", "E_HMS-01", 30, 20);
+        buffer.log(LogLevel::Trace, "M22", "t2", "E_HMS-01", 40, 10);
+        let logs = Rc::new(RefCell::new(buffer));
+
+        let mut hms = Hms::with_role(Role::Admin);
+        hms.install_log_source(logs.clone());
+        let admin = hms.dispatch(&watchdog_signal(), Severity::Fatal);
+        let diag = match &admin {
+            DispatchResult::Admin(d) => d,
+            other => panic!("Admin 角色的分发结果必须是诊断详情：{other:?}"),
+        };
+
+        let msgs: Vec<&str> = diag.log_ref.iter().map(|e| e.msg.as_str()).collect();
+        assert_eq!(
+            msgs,
+            vec!["e1", "t1", "i1", "t2"],
+            "log_ref 按虚拟时间排（不是按带）"
+        );
+
+        // 旧的 `query`（按带）给的是**另一个**顺序 ⇒ 两者确实分得开。
+        let by_band_entries = logs.borrow().query(&LogQuery::default());
+        let by_band: Vec<&str> = by_band_entries.iter().map(|e| e.msg.as_str()).collect();
+        assert_eq!(by_band, vec!["t1", "t2", "i1", "e1"], "query 仍按带返回");
+    }
+
+    /// D-134 · **角色不变式不许破**（D-131 陷阱③）：`Role::Product` 的诊断结果里
+    /// **仍然搜不到任何日志文本** —— 哪怕日志源里**有** `query_recent` 能取到的条目。
+    #[test]
+    fn product_dispatch_carries_no_log_text_even_when_query_recent_would_return_entries() {
+        let mut buffer = LogBuffer::new(0);
+        buffer.log(LogLevel::Error, "M22", "机密日志正文甲", "E_HMS-01", 10, 1);
+        buffer.log(LogLevel::Trace, "M22", "机密日志正文乙", "E_HMS-01", 20, 2);
+        let logs = Rc::new(RefCell::new(buffer));
+
+        // 前提：`query_recent` 在那个缓冲上**确实**能取到条目 ⇒ 这条用例**不空转**。
+        assert_eq!(
+            logs.borrow().query_recent(&LogQuery::default(), 8).len(),
+            2,
+            "前提：日志源里确实有可取的条目"
+        );
+
+        let mut hms = Hms::with_role(Role::Product);
+        hms.install_log_source(logs);
+        let product = hms.dispatch(&watchdog_signal(), Severity::Fatal);
+
+        // 文本扫描：**真的去搜** —— 注入的日志源里的内容一条都不许漏过来。
+        let text = format!("{product:?}");
+        for forbidden in [
+            "LogEntry",
+            "log_ref",
+            "log",
+            "msg",
+            "truncated",
+            "time_virt",
+            "time_host",
+            "机密日志正文",
+            "M22",
+            "E_HMS-01",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "Product 的分发结果里搜到了日志文本 {forbidden:?}：{text}"
+            );
+        }
+    }
+
+    // ------------------------------------------- D-133 · 保留带上界 + 聚合
+
+    /// D-133 · 保留带**有上界**（**一条常量**）⇒ 插满之后**折叠**成**一个**
+    /// 聚合信号 ⇒ 保**首条**原文 + **计数** ⇒ ⇒ **不静默丢**（裁决 H）。
+    #[test]
+    fn retained_band_is_bounded_and_aggregates_when_full() {
+        let mut hms = Hms::new();
+
+        // 插到**刚好满** ⇒ 明细一条不少（**返回形状不变**）。
+        for i in 0..RETAINED_BAND_CAPACITY {
+            let mut signal = watchdog_signal();
+            signal.err_code = Some(format!("E_FATAL-{i}"));
+            signal.t_virt_ps = i as u64;
+            hms.report(signal);
+        }
+        let retained = hms.retained();
+        assert_eq!(retained.len(), RETAINED_BAND_CAPACITY, "满之前明细一条不少");
+        assert_eq!(
+            hms.retained_total(),
+            RETAINED_BAND_CAPACITY as u64,
+            "折叠前计数 = 明细条数"
+        );
+        assert_eq!(retained[0].0.err_code.as_deref(), Some("E_FATAL-0"));
+        assert_eq!(retained[0].1, Severity::Fatal);
+
+        // 再插一条 ⇒ **折叠**：明细只剩**首条**（原文逐字保留），**条数**由计数承载。
+        let mut extra = watchdog_signal();
+        extra.err_code = Some("E_FATAL-OVERFLOW".to_string());
+        extra.t_virt_ps = RETAINED_BAND_CAPACITY as u64;
+        hms.report(extra);
+
+        let folded = hms.retained();
+        assert_eq!(folded.len(), 1, "折叠后明细只剩一条（带长有界）");
+        assert_eq!(
+            folded[0].0.err_code.as_deref(),
+            Some("E_FATAL-0"),
+            "首条原文保留"
+        );
+        assert_eq!(folded[0].1, Severity::Fatal, "首条的分级也保留");
+        assert_eq!(
+            hms.retained_total(),
+            RETAINED_BAND_CAPACITY as u64 + 1,
+            "计数正确（折叠的那条也算）"
+        );
+
+        // 再插 10 条 ⇒ 带长**不再涨**（有界），计数**继续涨**（**不静默丢**）。
+        for i in 0..10 {
+            let mut signal = watchdog_signal();
+            signal.err_code = Some(format!("E_FATAL-MORE-{i}"));
+            hms.report(signal);
+        }
+        assert_eq!(hms.retained().len(), 1, "带长有界");
+        assert_eq!(
+            hms.retained_total(),
+            RETAINED_BAND_CAPACITY as u64 + 11,
+            "计数只增不减"
+        );
+    }
+
+    /// D-133 · 折叠**之后**，「最近一条带码的致命信号」**仍**答得出（口径与
+    /// 折叠**前**逐字相同 ⇒ 折叠不许把这个事实**静默**丢掉）。
+    #[test]
+    fn the_last_retained_code_survives_the_aggregation() {
+        let mut hms = Hms::new();
+        let last = RETAINED_BAND_CAPACITY + 4;
+        for i in 0..=last {
+            let mut signal = watchdog_signal();
+            signal.err_code = Some(format!("E_FATAL-{i}"));
+            hms.report(signal);
+        }
+        assert_eq!(hms.retained().len(), 1, "已折叠");
+        let kit = hms.export_diagnostic_kit(None);
+        let expected = format!("E_FATAL-{last}");
+        assert_eq!(
+            kit.err_code.as_deref(),
+            Some(expected.as_str()),
+            "折叠后仍答得出最近一条带码的致命信号"
+        );
+        // 诊断包摘要里**条数**也可见（不静默丢）。
+        assert!(
+            kit.snapshot_summary.contains(&format!(
+                "retained_total={}",
+                RETAINED_BAND_CAPACITY as u64 + 5
+            )),
+            "摘要里应当看得到保留带的总条数：{}",
+            kit.snapshot_summary
+        );
     }
 
     // ------------------------------------------------ 附加 · 其它口径的钉子

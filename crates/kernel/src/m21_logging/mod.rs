@@ -57,6 +57,21 @@
 //! * **`query` 是纯读**：不移动任何游标、不改任何计数 ⇒ 连续两次 `query` 结果相同。
 //! * **结果顺序**：`query` / `export` 的结果按**级别带升序**（TRACE → ERROR），
 //!   带内按**写入先后**（旧 → 新）。规格未规定顺序 ⇒ 这是本实现选定的口径。
+//!
+//! # 全局最近口径（`query_recent` · 台账 **D-134**）
+//!
+//! `query` 的形状是「**带 → 条目**」两层（管理员通常要「错误级的全部」）⇒
+//! **跨带没有全局时间序** ⇒ 「**全局最近 N 条**」是**另一个形状**（要按虚拟
+//! 时间排序的**扁平**列表）⇒ ⇒ 本模块**新增**一个入口 [`LogBuffer::query_recent`]，
+//! **既有的 `query` 一个字未改**（带状返回是管理员视图的既有形状 ⇒ 改了会破掉
+//! 既有断言 ⇒ 那是破坏性变更 ⇒ 要升版 ⇒ 本批不升版）。
+//!
+//! * **排序键 = `time_virt_ps`（虚拟时间）** ⇒ ⇒ **不用**宿主时间（宿主时间
+//!   **不可复现** ⇒ 同一份快照两次回放的顺序会不同 ⇒ 违反「确定性范围」那条
+//!   架构约束）。
+//! * **同刻条目的次序是确定的**：排序键 = `(time_virt_ps, 带序, 带内写入序)`
+//!   ⇒ 带序 = TRACE → DEBUG → INFO → WARN → ERROR（= `LogLevel::rank()`）；
+//!   带内写入序 = 该带里的写入先后 ⇒ ⇒ 两次跑**逐条相同**。
 
 use riscv_sim_contract::error::ErrorFamily;
 use std::collections::VecDeque;
@@ -271,6 +286,43 @@ impl LogBuffer {
             }
         }
         out
+    }
+
+    /// 管理员检索：**全局最近 N 条**（按**虚拟时间**排序的**扁平**列表）。
+    ///
+    /// ⚠️ **排序键 = `time_virt_ps`（虚拟时间）** —— **不用**宿主时间
+    ///   （宿主时间**不可复现** ⇒ 同一份快照两次回放的顺序会不同 ⇒ 违反
+    ///   「确定性范围」那条架构约束）。
+    /// ⚠️ **同刻（虚拟时间相同）条目的次序是确定的**：排序键 =
+    ///   `(time_virt_ps, 带序, 带内写入序)` ⇒ 带序 = TRACE → DEBUG → INFO →
+    ///   WARN → ERROR（= `LogLevel::rank()`）；带内写入序 = 该带里的写入先后
+    ///   ⇒ ⇒ 两次跑**逐条相同**。
+    /// ⚠️ **既有的 [`LogBuffer::query`] 一个字未改**（带状返回是管理员视图的
+    ///   既有形状）⇒ ⇒ 本入口是**新增**的另一种形状。
+    ///
+    /// `n` 的边界：`0` ⇒ **空**；`> 命中条数` ⇒ **全部**（按序）。
+    ///
+    /// 返回的是**虚拟时间上最新**的那 `n` 条（按虚拟时间**升序**排列 ⇒
+    /// 最后一条是最新的）。
+    pub fn query_recent(&self, filter: &LogQuery, n: usize) -> Vec<LogEntry> {
+        if n == 0 {
+            return Vec::new();
+        }
+        // 收集：按**带序**（TRACE → ERROR）逐带收 ⇒ 带内是写入先后 ⇒
+        // 这个初始顺序就是「(带序, 带内写入序)」。
+        let mut out: Vec<LogEntry> = Vec::new();
+        for band in &self.bands {
+            for entry in band {
+                if matches_query(entry, filter) {
+                    out.push(entry.clone());
+                }
+            }
+        }
+        // ⚠️ `sort_by_key` 是**稳定**排序 ⇒ 同刻条目保持上面的初始顺序。
+        out.sort_by_key(|entry| entry.time_virt_ps);
+        // 取**最后** n 条（虚拟时间上最新的那些）⇒ 「最近」名副其实。
+        let start = out.len().saturating_sub(n);
+        out.split_off(start)
     }
 
     /// 导出 CSV（分块内容拼成一段；字段与 §3.1 的 8 字段一一对应）
