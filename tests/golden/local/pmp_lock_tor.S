@@ -1,11 +1,33 @@
 // A golden case: a **locked** (`L` = 1) **TOR** PMP entry **freezes the
 // previous entry's `pmpaddr`** — the write is silently dropped and the
-// **old** value reads back.
+// **old** value reads back — **and** a locked entry's **own** `pmpaddr` is
+// read-only.
 //
 // STAGE-21 (v0.37 · PMP) implements this per the RISC-V privileged spec
 // (§3.7.6): "if the locked entry's `A` field is set to TOR, the `pmpaddr`
 // register of the preceding entry is also frozen".  The platform's
 // implementation is `m13_iss/pmp.rs` → `legalize_write`.
+//
+// ⚠️ **This case pins THREE different lock semantics**, and they are
+// **three separate rules** — none of them substitutes for another:
+//
+//   1. **the frozen scenario** — the **next** entry (entry 3) is a locked
+//      TOR entry ⇒ ⇒ the **preceding** entry's address register
+//      (`pmpaddr2`) is **frozen** ⇒ ⇒ the write is dropped;
+//   2. **the locked entry's own address register** — entry 3 **itself** is
+//      locked ⇒ ⇒ **its own** `pmpaddr3` is read-only ⇒ ⇒ the write is
+//      dropped.  ⚠️ The basis is **F12 / F13** of the v0.37 batch
+//      (STAGE-21): "a **locked** entry is enforced in **every** privilege
+//      mode, and its registers stop accepting writes" ⇒ ⇒ that one was
+//      already measured on the reference side;
+//   3. **the mandatory control** — entry 2 is a TOR entry that is **not**
+//      locked ⇒ ⇒ **its** predecessor's `pmpaddr1` must still take a
+//      written value ⇒ ⇒ the freeze is not a blanket rule.
+//
+// ⚠️ **Rules 1 and 2 are different rules.**  Rule 1 is about the entry
+// **before** a locked TOR entry; rule 2 is about the locked entry **itself**
+// ⇒ ⇒ a platform that implements only one of them would pass the other
+// half of this case ⇒ ⇒ both are asserted here, separately.
 //
 // ⚠️ **This case is the MEASUREMENT of the reference side.**  A corpus row
 // with status `active` is executed on **both** sides (this platform and
@@ -34,6 +56,10 @@
 //   TESTNUM = 6  ->  the `pmpcfg0` read-back did not match ⇒ ⇒ the lock
 //                    never took effect ⇒ ⇒ the frozen scenario was not
 //                    actually exercised
+//   TESTNUM = 7  ->  the **locked entry's own** address register was **not**
+//                    read-only: the write to `pmpaddr3` landed although
+//                    entry 3 **is** locked ⇒ ⇒ rule 2 (F12 / F13) does not
+//                    hold
 //
 // ⚠️ **The control is MANDATORY.**  Without it, "the value was frozen" and
 // "the write was **ignored**" are the **same observation** ⇒ ⇒ a platform
@@ -166,6 +192,25 @@ RVTEST_CODE_BEGIN
   li    t2, 0x14000400           // the **old** value — the write was frozen
   bne   t1, t2, fail_not_frozen
 
+  // ---- the locked entry's **own** address register is read-only ----------
+  // ⚠️ **This is a DIFFERENT rule from the frozen scenario above** ⇒ ⇒ the
+  // two must not be confused:
+  //   * above: the **next** entry (entry 3) is a locked TOR entry ⇒ ⇒ the
+  //     **preceding** entry's `pmpaddr` (`pmpaddr2`) is frozen;
+  //   * here: entry 3 **itself** is locked ⇒ ⇒ **its own** `pmpaddr3` is
+  //     read-only.
+  // ⇒ ⇒ neither rule substitutes for the other ⇒ ⇒ both are asserted.
+  //
+  // ⚠️ The basis is **F12 / F13** of the v0.37 batch (STAGE-21): "a
+  // **locked** entry is enforced in **every** privilege mode, and its
+  // registers stop accepting writes" ⇒ ⇒ that one was already measured on
+  // the reference side ⇒ ⇒ this segment pins it in the corpus.
+  li    t0, 0x14000c00
+  csrw  pmpaddr3, t0
+  csrr  t1, pmpaddr3
+  li    t2, 0x14000800           // the **old** value — the write was dropped
+  bne   t1, t2, fail_own_readonly
+
   // ---- the mandatory control ---------------------------------------------
   // Entry 2 is a TOR entry but it is **not** locked ⇒ ⇒ `pmpaddr1` is
   // **not** frozen ⇒ ⇒ this write must **land**, **even though** a locked
@@ -193,6 +238,9 @@ fail_control_group:
   j     report_fail
 fail_lock:
   li    TESTNUM, 6
+  j     report_fail
+fail_own_readonly:
+  li    TESTNUM, 7
   j     report_fail
 
 report_fail:

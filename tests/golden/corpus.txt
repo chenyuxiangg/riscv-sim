@@ -317,6 +317,19 @@ local mstatus_warl rv32i_zicsr_zifencei active csr
 # was ignored" are told apart ⇒ ⇒ without it, a platform that drops every
 # `pmpaddr` write would be green too.
 #
+# ⚠️ It pins **three** lock semantics, each with its own verdict number:
+#   1. the **frozen** scenario — entry 3 is a locked **TOR** entry ⇒ ⇒ the
+#      **preceding** entry's `pmpaddr2` is frozen (FAIL 3);
+#   2. the **locked entry's own** `pmpaddr3` is read-only — that is the
+#      v0.37 batch's **F12 / F13** ("a **locked** entry … its registers stop
+#      accepting writes"), measured then and pinned in the corpus now
+#      (FAIL 7);
+#   3. the **mandatory control** — an unlocked TOR entry's predecessor is
+#      **not** frozen (FAIL 4).
+# ⇒ ⇒ rules 1 and 2 are two **different** rules (the entry *before* a
+# locked TOR entry vs. the locked entry *itself*) ⇒ ⇒ neither substitutes
+# for the other ⇒ ⇒ both are asserted separately.
+#
 # ⚠️ Entry 0 stays the **permit-all** NAPOT entry ⇒ ⇒ the verdict store to
 # `tohost` (`0x8000_1000`) can never be denied by the locked entry ⇒ ⇒ the
 # row measures the **CSR write behaviour** only, not the access path (that
