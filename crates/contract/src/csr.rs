@@ -512,12 +512,7 @@ pub fn mstatus_warl(new: u32) -> u32 {
     let masked = new & MSTATUS_WARL_MASK;
     let mpp_mask = 0x3 << MSTATUS_MPP_SHIFT;
     let mpp_new = (masked & mpp_mask) >> MSTATUS_MPP_SHIFT;
-    let mpp = if mpp_new == MSTATUS_MPP_U || mpp_new == MSTATUS_MPP_S || mpp_new == MSTATUS_MPP_M {
-        mpp_new
-    } else {
-        // 保留值 ⇒ **合法化到 0**（U），**不是**保留旧值（F39）。
-        MSTATUS_MPP_U
-    };
+    let mpp = mpp_legalized(mpp_new);
     // ⚠️ `SD`（bit 31）是**推导位**（F40）⇒ ⇒ 不可直接写 ⇒ ⇒ 由 `FS` /
     // `XS` 推出来 ⇒ ⇒ 「写全 1」读回 `0x807E_79AA`（`FS = 3` ⇒ `SD = 1`），
     // 而「只写 `FS = 3`」也读回 `0x8000_6000`（实测逐位相同）。
@@ -529,6 +524,28 @@ pub fn mstatus_warl(new: u32) -> u32 {
         0
     };
     (masked & !mpp_mask) | (mpp << MSTATUS_MPP_SHIFT) | sd
+}
+
+/// `mstatus.MPP` 字段的 **WARL 合法化** —— **唯一落点**。
+///
+/// ⚠️ 合法值 = **{0 = U, 1 = S, 3 = M}**（STAGE-22 · **F5**）⇒ ⇒ 保留值
+/// **2** ⇒ ⇒ **合法化到 0（U）**（**F39**：参考侧**覆盖**旧值，**不是**保留旧值，
+/// 也**不是**「整次写被丢弃」⇒ ⇒ **同一次写里的其它位照常落进去**）。
+///
+/// ⚠️ **为什么单独抽成一个函数**：**写侧**（[`mstatus_warl`]）与 **PMP 的
+/// 特权口径**（[`pmp_effective_privilege`]）**都要**用这一条 ⇒ ⇒ 留两份
+/// 字面量 ⇒ ⇒ 迟早漂移 ⇒ ⇒ **一个约束一个落点**。
+///
+/// ⚠️ **`MPP` 的编码与特权级的编码同构**（[`MSTATUS_MPP_U`] = [`PRIV_U`] =
+/// 0 · [`MSTATUS_MPP_S`] = [`PRIV_S`] = 1 · [`MSTATUS_MPP_M`] = [`PRIV_M`] = 3）
+/// ⇒ ⇒ 合法化之后**直接**就是一个特权级 ⇒ ⇒ 调用方**不需要**再翻译一遍。
+fn mpp_legalized(mpp: u32) -> u32 {
+    if mpp == MSTATUS_MPP_U || mpp == MSTATUS_MPP_S || mpp == MSTATUS_MPP_M {
+        mpp
+    } else {
+        // ⚠️ 保留值 ⇒ **合法化到 0**（U），**不是**保留旧值（F39）。
+        MSTATUS_MPP_U
+    }
 }
 
 /// `sstatus` 的**客体写**掩码 —— 客体写 `sstatus` 时会落到 `mstatus` 的哪些位。
@@ -1157,6 +1174,100 @@ pub fn pmp_permits(cfg: PmpCfg, access: PmpAccess) -> bool {
     }
 }
 
+/// **有效特权级** —— PMP 判定用的那个级别。
+///
+/// * `mstatus` —— 机器的 `mstatus`（平台读 CSR 文件里的那一条）；
+/// * `current_privilege` —— hart **当前**的特权级（[`PRIV_U`] / [`PRIV_S`] /
+///   [`PRIV_M`]）；
+/// * `access` —— 这次访问是哪一类（`Load` / `Store` / `Fetch`）。
+///
+/// # 口径
+///
+/// * **load / store** ⇒ ⇒ 有效特权级 = **（当前特权级 == M **且** `MPRV` = 1）
+///   ? `MPP` : 当前特权级**；
+/// * **取指** ⇒ ⇒ 有效特权级 = **当前特权级**（**永远**）。
+///
+/// ⚠️ **「`MPRV` 只在当前特权级是 M 时才生效」这个门** —— 两条理由：
+///
+/// 1. **规范口径**：RISC-V 特权规范说 `MPRV` **只在当前特权级是 M 时**才让
+///    M 模式的访存降级去过 PMP ⇒ ⇒ 「`MPRV` ? `MPP` : 当前特权级」那个
+///    **字面读法是不完整的**（它把 `MPRV` 在 S / U 模式下也算数）；
+/// 2. ⚠️ **安全方向**（这条更重要）：「当前级是 S / U **且** `MPRV` = 1 **且**
+///    `MPP` = 3（M）」这个状态，**guest 代码走不到**（进 S 模式要求 `MPP` = S，
+///    而 `mret` 不改 `MPP`）⇒ ⇒ **但是它可以从「快照恢复」到达**（`mstatus`
+///    与伪 CSR `CSR_PRIV` **都在快照里**）⇒ ⇒ 那个状态下若按字面读法算，
+///    **有效特权级会被抬到 M ⇒ ⇒ 豁免 PMP** ⇒ ⇒ ⚠️ **安全方向的洞** ⇒ ⇒
+///    这个门是**必须**的。
+///
+/// ⚠️ **两个方向都会错**（旧口径塌缩成「只看 `mstatus.MPRV`」⇒ ⇒ 台账
+/// **D-153**）：
+///
+/// * `MPRV` = 1 且 `MPP` = 3（M）⇒ ⇒ 有效特权级是 M ⇒ ⇒ **豁免** ⇒ ⇒ 只看
+///   `MPRV` 的写法会**过严**；
+/// * **S 模式**且 `MPRV` = 0 ⇒ ⇒ 有效特权级是 S ⇒ ⇒ **不豁免** ⇒ ⇒ 只看
+///   `MPRV` 的写法会**过松** ⇒ ⇒ ⚠️ **安全方向的漏洞**（S 模式的代码能访问它
+///   不该访问的内存）。
+///
+/// ⚠️ **取指不受 `MPRV` 影响**（本平台**实测** F11：M 模式 + `MPRV` = 1 +
+/// `MPP` = U + 代码条目**无 `X`** ⇒ ⇒ 取指**仍然放行**）⇒ ⇒ fetch 那一支
+/// **恒**取当前特权级 ⇒ ⇒ 取指**不吃** `MPRV` / `MPP` ⇒ ⇒ 这条**不是**实现
+/// 细节。
+///
+/// ⚠️ **S / U 模式下的访存与取指都要过 PMP**（**实测 F5 / F6 / F7 / F8**）⇒ ⇒
+/// S 模式 + `MPRV` = 0 ⇒ ⇒ 参考侧**施加** PMP（落在无权限条目里 ⇒ ⇒ 拒，
+/// `mcause` 5）· U 模式同理 ⇒ ⇒ S 模式的**取指**落在无 `X` 权限的条目里 ⇒ ⇒
+/// 参考侧**拒**（`mcause` = 1）· 落在有 `X` 权限的条目里 ⇒ ⇒ 放行。
+///
+/// ⚠️ **`MPP` 的保留值（2）⇒ 合法化到 0（U）**（**实测 F9**：参考侧读回 **0**
+/// ⇒ ⇒ **不是** 3（M））—— 与**写侧** ([`mstatus_warl`]) **同一个落点**
+/// ([`mpp_legalized`]) ⇒ ⇒ 一个约束一个落点 ⇒ ⇒ **不**另写一份字面量。
+pub fn pmp_effective_privilege(mstatus: u32, current_privilege: u32, access: PmpAccess) -> u32 {
+    match access {
+        // ⚠️ **取指永远用当前特权级**（实测 F11）⇒ ⇒ `MPRV` / `MPP` 在这一支
+        // **不**起作用 ⇒ ⇒ 「`MPRV` 置位时连取指也降级」那种写法是**错的**。
+        PmpAccess::Fetch => current_privilege,
+        PmpAccess::Load | PmpAccess::Store => {
+            // ⚠️ **门**：`MPRV` 只在**当前特权级是 M** 时才生效 ⇒ ⇒
+            // ① 规范口径；② 当前级是 S / U 时**不许**把有效特权级抬到 M ⇒ ⇒
+            // 那个状态**能从快照恢复到达** ⇒ ⇒ 不加这个门就是**安全方向的洞**。
+            if current_privilege == PRIV_M && (mstatus & (1u32 << MSTATUS_MPRV_BIT)) != 0 {
+                let mpp = (mstatus >> MSTATUS_MPP_SHIFT) & 0x3;
+                // ⚠️ 保留值（2）⇒ ⇒ 合法化到 0（U）—— 与写侧同一个落点（F9）。
+                mpp_legalized(mpp)
+            } else {
+                current_privilege
+            }
+        }
+    }
+}
+
+/// 这次访问**豁免** PMP 吗？
+///
+/// * `privilege` —— 访问的**有效特权级**（见 [`pmp_effective_privilege`]）；
+/// * `locked` —— **决定条目**（the deciding entry）是不是**锁住**的（`L` = 1）。
+///
+/// ⚠️ **规则**：有效特权级 == M（[`PRIV_M`]）**且** 相关条目**没被锁住** ⇒ ⇒
+/// 豁免。
+///
+/// ⚠️ **为什么 `locked` 是「这一条」而不是「全局有没有锁住的条目」**（**实测
+/// F10 + F14**）：
+///
+/// * **F10** —— **命中**的锁条目在**所有**特权级强制 ⇒ ⇒ 连「有效特权级 == M」
+///   也**拒**（`mcause` 5）⇒ ⇒ 豁免**不能**盖住它；
+/// * **F14** —— **没命中**的锁条目**不影响** M 模式的访问（未命中 ⇒ ⇒ 放行）
+///   ⇒ ⇒ **不是**「只要有锁条目就整张 PMP 生效」⇒ ⇒ 判据**必须**是
+///   「**决定条目**有没有被锁」。
+///
+/// ⚠️ **规范那句话**：「若 `L` 被清零且访问是 M 模式，访问成功」⇒ ⇒ 豁免是
+/// **逐条目**的 ⇒ ⇒ 判定必须是「有效特权级 == M ∧ **这条**没锁」。
+///
+/// ⚠️ **「没有条目命中」那一支**传的是 `false` ⇒ ⇒ 那一支**没有**条目 ⇒ ⇒
+/// 自然没有锁 ⇒ ⇒ 语义与规范那句「若没有 PMP 条目命中 M 模式的有效地址，
+/// 访问成功」同形。
+pub fn pmp_exempt(privilege: u32, locked: bool) -> bool {
+    privilege == PRIV_M && !locked
+}
+
 /// The whole PMP decision for one access.
 ///
 /// * `entries` — `(cfg, pmpaddr)` per entry, **in entry order** (entry 0
@@ -1164,10 +1275,23 @@ pub fn pmp_permits(cfg: PmpCfg, access: PmpAccess) -> bool {
 /// * `addr` / `size` — the access: the `size` bytes starting at `addr`.
 /// * `access` — which kind of access it is (`Load` / `Store` / `Fetch`);
 ///   the required permission bit follows from it.
-/// * `m_mode_bypass` — the caller states that PMP does **not** constrain
-///   this access: an M-mode load/store with `mstatus.MPRV` = 0.  ⚠️ It is
-///   **never** set for a fetch — `MPRV` does not affect instruction fetch
-///   (F11).  A **locked** entry constrains the access anyway (F12).
+/// * `privilege` — the **effective privilege level** of this access (see
+///   [`pmp_effective_privilege`]): for a load / store it is `MPP` **only when
+///   the current privilege is M and `MPRV` is set**, and **the current
+///   privilege** for a fetch.
+///
+/// ⚠️ **口径变更（v0.40 · D-153）**：这个参数**以前**是 `m_mode_bypass`
+/// （一个 `bool`，含义是「调用方说这次访问不受 PMP 约束」）⇒ ⇒ 那个口径
+/// **塌缩成只看 `mstatus.MPRV`** ⇒ ⇒ 既不知道**当前特权级**、也不知道
+/// `MPRV` 生效时的**有效特权级（= `MPP`）** ⇒ ⇒ 两个方向都错（**S 模式**
+/// ⇒ ⇒ **过松** ⇒ ⇒ ⚠️ **安全方向的漏洞**）⇒ ⇒ 现在**传有效特权级**，豁免
+/// 规则由 [`pmp_exempt`] 判 ⇒ ⇒ 一个约束一个落点。
+///
+/// ⚠️ **取指不受 `MPRV` 影响**（F11）⇒ ⇒ 调用方**必须**用**当前特权级**填
+/// 这一支 ⇒ ⇒ 本函数**不再**替调用方判断「取指要不要看 `MPRV`」。
+///
+/// ⚠️ **锁住的条目照样强制**（F12）⇒ ⇒ 豁免是**逐条目**的 ⇒ ⇒ 见
+/// [`pmp_exempt`]。
 ///
 /// # The rule: **one piece at a time**
 ///
@@ -1213,7 +1337,7 @@ pub fn pmp_access_allowed(
     addr: u32,
     size: u32,
     access: PmpAccess,
-    m_mode_bypass: bool,
+    privilege: u32,
 ) -> bool {
     let start = u64::from(addr);
     let end = start + u64::from(size);
@@ -1236,7 +1360,7 @@ pub fn pmp_access_allowed(
             piece_start as u32,
             (piece_end - piece_start) as u32,
             access,
-            m_mode_bypass,
+            privilege,
         ) {
             return false;
         }
@@ -1261,14 +1385,17 @@ fn pmp_piece_allowed(
     piece_addr: u32,
     piece_size: u32,
     access: PmpAccess,
-    m_mode_bypass: bool,
+    privilege: u32,
 ) -> bool {
     let mut prev_addr = 0u32;
     for (cfg, cur_addr) in entries {
         if let Some(region) = pmp_region(*cfg, prev_addr, *cur_addr) {
             if region.covers(piece_addr, piece_size) {
-                // M-mode is exempt unless the deciding entry is **locked**.
-                if m_mode_bypass && !cfg.l {
+                // ⚠️ 有效特权级 == M **且** 这一条**没被锁住** ⇒ ⇒ 豁免。
+                //
+                // ⚠️ **锁住的那一条在所有特权级强制**（F12）⇒ ⇒ M 模式的豁免
+                // **不覆盖**它 ⇒ ⇒ 豁免**逐条目**判。
+                if pmp_exempt(privilege, cfg.l) {
                     return true;
                 }
                 return pmp_permits(*cfg, access);
@@ -1277,7 +1404,10 @@ fn pmp_piece_allowed(
         prev_addr = *cur_addr;
     }
     // No entry matched **this piece**.
-    if m_mode_bypass {
+    //
+    // ⚠️ **这一支没有条目** ⇒ ⇒ 自然没有锁 ⇒ ⇒ `locked` 传 `false` ⇒ ⇒
+    // 「豁免」这一支只剩「有效特权级 == M」这一个条件。
+    if pmp_exempt(privilege, false) {
         // "If no PMP entry matches an M-mode effective address, the access
         // succeeds."
         return true;
@@ -2293,7 +2423,7 @@ mod tests {
             0x8000_0000,
             4,
             PmpAccess::Store,
-            false
+            PRIV_S
         ));
         // 条目 0 命中且**有 W**；条目 1 命中但**没有 W** ⇒ ⇒ 放行。
         let entries = [
@@ -2305,7 +2435,7 @@ mod tests {
             0x8000_0000,
             4,
             PmpAccess::Store,
-            false
+            PRIV_S
         ));
         // 条目 0 **不命中**、条目 1 命中 ⇒ ⇒ 条目 1 说了算 ⇒ 放行。
         let entries = [
@@ -2317,7 +2447,7 @@ mod tests {
             0x8000_2000,
             4,
             PmpAccess::Load,
-            false
+            PRIV_S
         ));
     }
 
@@ -2330,7 +2460,7 @@ mod tests {
             0x8000_3000,
             4,
             PmpAccess::Load,
-            false
+            PRIV_S
         ));
         // 全部条目都是 OFF ⇒ PMP 未实现 ⇒ 放行。
         let entries = [(pmp_decode_cfg(0x00), 0x2000_01ff)];
@@ -2339,7 +2469,7 @@ mod tests {
             0x8000_3000,
             4,
             PmpAccess::Load,
-            false
+            PRIV_S
         ));
     }
 
@@ -2396,7 +2526,7 @@ mod tests {
             0x8000_0000,
             4,
             PmpAccess::Store,
-            true
+            PRIV_M
         ));
         // 同样的条目，**MPRV=1** ⇒ 受检 ⇒ 拒。
         assert!(!pmp_access_allowed(
@@ -2404,7 +2534,7 @@ mod tests {
             0x8000_0000,
             4,
             PmpAccess::Store,
-            false
+            PRIV_S
         ));
         // **锁住** ⇒ M 模式也强制执行 ⇒ 拒。
         let entries = [(pmp_decode_cfg(0x9d), 0x2000_01ff)];
@@ -2413,7 +2543,7 @@ mod tests {
             0x8000_0000,
             4,
             PmpAccess::Store,
-            true
+            PRIV_M
         ));
         // 没有条目命中时，M 模式 ⇒ 放行。
         let entries = [(pmp_decode_cfg(0x1f), 0x2000_01ff)];
@@ -2422,7 +2552,7 @@ mod tests {
             0x8000_3000,
             4,
             PmpAccess::Store,
-            true
+            PRIV_M
         ));
     }
 
@@ -2455,7 +2585,7 @@ mod tests {
         // 未对齐 4 字节读 @ 0x8003FFFE：低 2 字节在 ALLOW 条目 1 里，
         // 高 2 字节落进 DENY 条目 0 ⇒ ⇒ **逐片** ⇒ ⇒ **拒**。
         assert!(
-            !pmp_access_allowed(&deny_then_allow, 0x8003_fffe, 4, PmpAccess::Load, false),
+            !pmp_access_allowed(&deny_then_allow, 0x8003_fffe, 4, PmpAccess::Load, PRIV_S),
             "尾部落进 DENY 条目 ⇒ 必须被拒（参考侧实测：mcause 5）"
         );
         // 条目 0 = ALLOW（1 MiB @ 0x80000000）；条目 1 = ALLOW（1 MiB @
@@ -2466,12 +2596,12 @@ mod tests {
             (pmp_decode_cfg(0x1f), 0x2005_ffff),
         ];
         assert!(
-            pmp_access_allowed(&allow_then_allow, 0x800f_fffe, 4, PmpAccess::Load, false),
+            pmp_access_allowed(&allow_then_allow, 0x800f_fffe, 4, PmpAccess::Load, PRIV_S),
             "跨两个 ALLOW 条目 ⇒ 必须放行（参考侧实测：放行，读到混合值）"
         );
         // 写**同样**放行（参考侧实测：未对齐跨界写**完成**）。
         assert!(
-            pmp_access_allowed(&allow_then_allow, 0x800f_fffe, 4, PmpAccess::Store, false),
+            pmp_access_allowed(&allow_then_allow, 0x800f_fffe, 4, PmpAccess::Store, PRIV_S),
             "跨两个 ALLOW 条目 ⇒ 写必须放行（参考侧实测：写完成）"
         );
     }
@@ -2492,7 +2622,7 @@ mod tests {
             0x8003_fffc,
             4,
             PmpAccess::Load,
-            false
+            PRIV_S
         ));
         // 正落在 4 KiB 边界上的对齐读 ⇒ ⇒ 落进 DENY 条目 0 ⇒ 拒。
         assert!(!pmp_access_allowed(
@@ -2500,7 +2630,7 @@ mod tests {
             0x8004_0000,
             4,
             PmpAccess::Load,
-            false
+            PRIV_S
         ));
         // DENY 区间内 offset 4092 的对齐读 ⇒ ⇒ 同一个 DENY 条目盖住它 ⇒ 拒。
         assert!(!pmp_access_allowed(
@@ -2508,7 +2638,7 @@ mod tests {
             0x8004_0ffc,
             4,
             PmpAccess::Load,
-            false
+            PRIV_S
         ));
         // ALLOW 区间的最后一个对齐字 ⇒ ⇒ 放行。
         assert!(pmp_access_allowed(
@@ -2516,7 +2646,7 @@ mod tests {
             0x800f_fffc,
             4,
             PmpAccess::Load,
-            false
+            PRIV_S
         ));
         // ALLOW 区间**上方**的第一个字 ⇒ ⇒ **没有条目命中** ⇒ ⇒ S/U 模式 ⇒ 拒。
         assert!(!pmp_access_allowed(
@@ -2524,7 +2654,7 @@ mod tests {
             0x8010_0000,
             4,
             PmpAccess::Load,
-            false
+            PRIV_S
         ));
     }
 
@@ -2539,13 +2669,13 @@ mod tests {
         // 未对齐 4 字节读 @ 0x800FFFFE：低 2 字节命中 ALLOW 条目 1；高 2
         // 字节（0x80100000..）**没有条目命中** ⇒ ⇒ S/U 模式 ⇒ 拒。
         assert!(
-            !pmp_access_allowed(&entries, 0x800f_fffe, 4, PmpAccess::Load, false),
+            !pmp_access_allowed(&entries, 0x800f_fffe, 4, PmpAccess::Load, PRIV_S),
             "一片没有条目命中 ⇒ 整个访问被拒（参考侧实测：mcause 5）"
         );
         // ⚠️ **控制组**：**M 模式**（旁路）⇒ ⇒ 「没有条目命中」的那一片
         // 放行 ⇒ ⇒ 整个访问放行 ⇒ ⇒ 「一律拒」的实现过不了这一条。
         assert!(
-            pmp_access_allowed(&entries, 0x800f_fffe, 4, PmpAccess::Load, true),
+            pmp_access_allowed(&entries, 0x800f_fffe, 4, PmpAccess::Load, PRIV_M),
             "M 模式 ⇒ 没有条目命中的那一片放行"
         );
     }
@@ -2562,7 +2692,7 @@ mod tests {
         // 未对齐 4 字节读 @ 0x8003FFFE：高 2 字节命中**锁住的** DENY 条目
         // ⇒ ⇒ M 模式（旁路）也**强制** ⇒ ⇒ 拒。
         assert!(
-            !pmp_access_allowed(&locked, 0x8003_fffe, 4, PmpAccess::Load, true),
+            !pmp_access_allowed(&locked, 0x8003_fffe, 4, PmpAccess::Load, PRIV_M),
             "锁住的条目 ⇒ M 模式也必须被拒"
         );
         // ⚠️ **控制组**：同一个条目**不锁** ⇒ ⇒ M 模式旁路 ⇒ ⇒ 放行。
@@ -2571,8 +2701,161 @@ mod tests {
             (pmp_decode_cfg(0x1f), 0x2001_ffff),
         ];
         assert!(
-            pmp_access_allowed(&unlocked, 0x8003_fffe, 4, PmpAccess::Load, true),
+            pmp_access_allowed(&unlocked, 0x8003_fffe, 4, PmpAccess::Load, PRIV_M),
             "没锁的条目 ⇒ M 模式旁路 ⇒ 必须放行"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // v0.40 —— **有效特权级**（D-153）
+    // ------------------------------------------------------------------
+    //
+    // ⚠️ 这一节的公式**不依赖 guest 代码** ⇒ ⇒ 它是**独立于任何语料**的一条
+    // 断言 ⇒ ⇒ 「公式写错了」这件事**立刻**红，而不必等一条语料碰巧走到那个
+    // 组合上。
+
+    /// ⚠️ **表驱动**：有效特权级 = `MPRV` ? `MPP` : 当前特权级（load /
+    /// store）；**取指**恒取当前特权级。
+    ///
+    /// ⚠️ **判别力**：这十八格**互相不同** ⇒ ⇒ 「只看 `MPRV`」「只看当前特权级」
+    /// 「取指也看 `MPRV`」这三种写法**都过不了** ⇒ ⇒ 公式必须是**这一条**。
+    #[test]
+    fn the_effective_privilege_is_mprv_then_mpp_or_the_current_level() {
+        /// `MPRV` 置位时用的那个 `mstatus` 位。
+        const MPRV: u32 = 1u32 << MSTATUS_MPRV_BIT;
+        /// `(MPRV, 当前特权级, MPP, 访问)` ⇒ ⇒ **有效特权级**。
+        const CASES: &[(u32, u32, u32, PmpAccess, u32)] = &[
+            // ---- `MPRV` = 0 ⇒ ⇒ 有效特权级 = **当前特权级** ----------
+            (0, PRIV_M, MSTATUS_MPP_M, PmpAccess::Load, PRIV_M),
+            (0, PRIV_S, MSTATUS_MPP_M, PmpAccess::Load, PRIV_S),
+            (0, PRIV_U, MSTATUS_MPP_M, PmpAccess::Load, PRIV_U),
+            (0, PRIV_M, MSTATUS_MPP_M, PmpAccess::Store, PRIV_M),
+            (0, PRIV_S, MSTATUS_MPP_M, PmpAccess::Store, PRIV_S),
+            (0, PRIV_U, MSTATUS_MPP_M, PmpAccess::Store, PRIV_U),
+            (0, PRIV_M, MSTATUS_MPP_M, PmpAccess::Fetch, PRIV_M),
+            (0, PRIV_S, MSTATUS_MPP_M, PmpAccess::Fetch, PRIV_S),
+            (0, PRIV_U, MSTATUS_MPP_M, PmpAccess::Fetch, PRIV_U),
+            // ---- `MPRV` = 1 ⇒ ⇒ 访存用 `MPP`，**取指恒用当前特权级** ----
+            (MPRV, PRIV_M, MSTATUS_MPP_U, PmpAccess::Load, PRIV_U),
+            (MPRV, PRIV_M, MSTATUS_MPP_S, PmpAccess::Load, PRIV_S),
+            (MPRV, PRIV_M, MSTATUS_MPP_M, PmpAccess::Load, PRIV_M),
+            (MPRV, PRIV_M, MSTATUS_MPP_U, PmpAccess::Store, PRIV_U),
+            (MPRV, PRIV_M, MSTATUS_MPP_S, PmpAccess::Store, PRIV_S),
+            (MPRV, PRIV_M, MSTATUS_MPP_M, PmpAccess::Store, PRIV_M),
+            (MPRV, PRIV_M, MSTATUS_MPP_U, PmpAccess::Fetch, PRIV_M),
+            (MPRV, PRIV_M, MSTATUS_MPP_S, PmpAccess::Fetch, PRIV_M),
+            (MPRV, PRIV_M, MSTATUS_MPP_M, PmpAccess::Fetch, PRIV_M),
+            // ---- **门**：`MPRV` 只在**当前级是 M** 时才生效 --------------
+            (MPRV, PRIV_S, MSTATUS_MPP_M, PmpAccess::Load, PRIV_S),
+            (MPRV, PRIV_S, MSTATUS_MPP_M, PmpAccess::Store, PRIV_S),
+            (MPRV, PRIV_S, MSTATUS_MPP_U, PmpAccess::Load, PRIV_S),
+            (MPRV, PRIV_U, MSTATUS_MPP_M, PmpAccess::Load, PRIV_U),
+            (MPRV, PRIV_U, MSTATUS_MPP_M, PmpAccess::Store, PRIV_U),
+            (MPRV, PRIV_S, MSTATUS_MPP_M, PmpAccess::Fetch, PRIV_S),
+            (MPRV, PRIV_U, MSTATUS_MPP_M, PmpAccess::Fetch, PRIV_U),
+        ];
+        for (mprv, current, mpp, access, expected) in CASES {
+            let mstatus = mprv | (mpp << MSTATUS_MPP_SHIFT);
+            assert_eq!(
+                pmp_effective_privilege(mstatus, *current, *access),
+                *expected,
+                "MPRV = {mprv:#x}、当前 = {current}、MPP = {mpp}、{access:?} ⇒ ⇒ \
+                 有效特权级必须是 {expected}"
+            );
+        }
+    }
+
+    /// ⚠️ **`MPP` 的保留值（2）⇒ 合法化到 0（U）** —— 与**写侧**
+    /// ([`mstatus_warl`]) **同一个落点**（[`mpp_legalized`]）⇒ ⇒ 一份字面量。
+    #[test]
+    fn a_reserved_mpp_is_legalised_to_user_level() {
+        let mstatus = (1u32 << MSTATUS_MPRV_BIT) | (2u32 << MSTATUS_MPP_SHIFT);
+        assert_eq!(
+            pmp_effective_privilege(mstatus, PRIV_M, PmpAccess::Load),
+            PRIV_U,
+            "MPP = 2（保留值）⇒ ⇒ 访存的有效特权级合法化到 U"
+        );
+        assert_eq!(
+            pmp_effective_privilege(mstatus, PRIV_M, PmpAccess::Store),
+            PRIV_U,
+            "MPP = 2（保留值）⇒ ⇒ 写的有效特权级合法化到 U"
+        );
+    }
+
+    /// ⚠️ **安全方向的护栏**（**这一格是必须的**）：`current` = **S** ·
+    /// `MPRV` = 1 · `MPP` = 3（M）⇒ ⇒ 有效特权级**必须**是 **S** ⇒ ⇒ **不是**
+    /// M。
+    ///
+    /// ⚠️ **为什么这一格必须钉**：那个状态**guest 代码走不到**（进 S 模式要求
+    /// `MPP` = S，而 `mret` 不改 `MPP`）⇒ ⇒ **但是它能从「快照恢复」到达**
+    /// （`mstatus` 与伪 CSR `CSR_PRIV` **都在快照里**）⇒ ⇒ 若按字面读法算，
+    /// 有效特权级会被抬到 M ⇒ ⇒ **豁免 PMP** ⇒ ⇒ ⚠️ **安全方向的洞** ⇒ ⇒
+    /// `MPRV` 必须**带门**（只在当前级是 M 时才生效）。
+    ///
+    /// ⚠️ **判别力**：这一格对「`MPRV` 不带门」那个写法**恒红** ⇒ ⇒ 「加了门
+    /// 但门开反了」（即门开在 `current != M` 时）也**红**。
+    #[test]
+    fn mprv_does_not_apply_outside_machine_mode() {
+        let mstatus = (1u32 << MSTATUS_MPRV_BIT) | (MSTATUS_MPP_M << MSTATUS_MPP_SHIFT);
+        assert_eq!(
+            pmp_effective_privilege(mstatus, PRIV_S, PmpAccess::Load),
+            PRIV_S,
+            "current = S 且 MPRV = 1 且 MPP = M ⇒ ⇒ 有效特权级**必须**是 S（不许抬到 M）"
+        );
+        assert_eq!(
+            pmp_effective_privilege(mstatus, PRIV_S, PmpAccess::Store),
+            PRIV_S,
+            "current = S 且 MPRV = 1 且 MPP = M ⇒ ⇒ 写也一样 ⇒ ⇒ 有效特权级是 S"
+        );
+        assert_eq!(
+            pmp_effective_privilege(mstatus, PRIV_U, PmpAccess::Load),
+            PRIV_U,
+            "current = U ⇒ ⇒ 有效特权级**恒**是 U"
+        );
+        assert_eq!(
+            pmp_effective_privilege(mstatus, PRIV_U, PmpAccess::Store),
+            PRIV_U,
+            "current = U ⇒ ⇒ 写也一样 ⇒ ⇒ 有效特权级是 U"
+        );
+        // ⚠️ **控制组**：**M 模式** ⇒ ⇒ `MPRV` **生效** ⇒ ⇒ 有效特权级 = `MPP`。
+        assert_eq!(
+            pmp_effective_privilege(mstatus, PRIV_M, PmpAccess::Load),
+            PRIV_M,
+            "current = M 且 MPRV = 1 且 MPP = M ⇒ ⇒ 有效特权级 = MPP = M"
+        );
+    }
+
+    /// ⚠️ **豁免规则**：有效特权级 == M **且** 那一条目**没被锁住** ⇒ ⇒ 豁免。
+    ///
+    /// ⚠️ **判别力**：「永远豁免」「永远不豁免」「M 模式也豁免锁住的条目」这
+    /// 三种写法**都过不了** ⇒ ⇒ 豁免必须**同时**看这两个条件。
+    #[test]
+    fn only_machine_level_is_exempt_and_a_locked_entry_never_is() {
+        assert!(pmp_exempt(PRIV_M, false), "M 模式 + 没锁 ⇒ ⇒ 豁免");
+        assert!(!pmp_exempt(PRIV_M, true), "M 模式 + 锁住 ⇒ ⇒ 不豁免");
+        assert!(!pmp_exempt(PRIV_S, false), "S 模式 ⇒ ⇒ 恒不豁免");
+        assert!(!pmp_exempt(PRIV_U, false), "U 模式 ⇒ ⇒ 恒不豁免");
+        assert!(!pmp_exempt(PRIV_S, true), "S 模式 + 锁住 ⇒ ⇒ 恒不豁免");
+        assert!(!pmp_exempt(PRIV_U, true), "U 模式 + 锁住 ⇒ ⇒ 恒不豁免");
+    }
+
+    /// ⚠️ **同一个条目、同一串地址，只差有效特权级** ⇒ ⇒ 判决**必须**不同 ⇒ ⇒
+    /// `pmp_access_allowed` 的第五个参数**真的有判别力**（不是被忽略的参数）。
+    #[test]
+    fn the_privilege_argument_changes_the_verdict() {
+        // 条目 0 = NAPOT，只有 `R`（没有 `W`）⇒ ⇒ 若被检查，写必被拒。
+        let entries = [(pmp_decode_cfg(0x1d), 0x2000_01ff)];
+        assert!(
+            pmp_access_allowed(&entries, 0x8000_0000, 4, PmpAccess::Store, PRIV_M),
+            "M 模式 ⇒ ⇒ 豁免 ⇒ ⇒ 放行"
+        );
+        assert!(
+            !pmp_access_allowed(&entries, 0x8000_0000, 4, PmpAccess::Store, PRIV_S),
+            "S 模式 ⇒ ⇒ 不豁免 ⇒ ⇒ 写被拒"
+        );
+        assert!(
+            !pmp_access_allowed(&entries, 0x8000_0000, 4, PmpAccess::Store, PRIV_U),
+            "U 模式 ⇒ ⇒ 不豁免 ⇒ ⇒ 写被拒"
         );
     }
 
