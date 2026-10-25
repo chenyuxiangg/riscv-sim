@@ -533,11 +533,21 @@ pub fn mstatus_warl(new: u32) -> u32 {
 
 /// `sstatus` 的**客体写**掩码 —— 客体写 `sstatus` 时会落到 `mstatus` 的哪些位。
 ///
-/// ⚠️ **实测（F38）**：参考侧在 **S 模式**写 `sstatus = 0xFFFFFFFF` ⇒ 读回
-/// **`0x800C_6122`**；在 **M 模式**写同一个值 ⇒ 读回 `mstatus` =
-/// **`0x800C_61A2`** ⇒ ⇒ 两者**只差 `MPIE`（bit 7）** ⇒ ⇒ 写掩码 =
-/// **`0x804C_61A2`**（`SIE` \| `SPIE` \| `MPIE` \| `SPP` \| `FS[14:13]` \|
-/// `SUM` \| `MXR` \| `SD`）。
+/// ⚠️ **实测（F41 · 逐位）**：参考侧**先把 `mstatus` 清零**、再**单独**写
+/// `sstatus` 的**每一位**、然后读回 `mstatus` ⇒ ⇒ 落进去的位 =
+/// **`0x000C_6122`**（`SIE` \| `SPIE` \| `SPP` \| `FS[14:13]` \| `SUM` \|
+/// `MXR`）⇒ ⇒ **不含** `MPIE`（bit 7）/ `UBE`（6）/ `XS`（15:16）/
+/// `MPRV`（17）/ `TVM`（20）/ `TW`（21）/ `TSR`（22）/ `MPP`（11:12）/
+/// `MIE`（3）/ `SD`（31，推导位）。
+///
+/// ⚠️ **为什么必须逐位测**（**这条是本批最大的坑**）：聚合观测
+/// 「M 模式写 `sstatus = 0xFFFFFFFF` ⇒ 读回 `mstatus` = `0x800C_61A2`」
+/// **看起来**比读视图 `0x800C_6122` 多一位 `MPIE` ⇒ ⇒ 很自然会推成
+/// 「写掩码 = `0x804C_61A2`」⇒ ⇒ **错的** ⇒ ⇒ 因为那一位 `MPIE` 是
+/// **env 初始化留下的**（参考侧的 env 在 `csrwi mstatus, 0` 之后又
+/// `csrs mstatus, MSTATUS_MPP`），**不是** `sstatus` 的写带进去的 ⇒ ⇒
+/// ⇒ **逐位测之前必须先把 `mstatus` 清零**，否则会把「本来就在那里的位」
+/// 算成「写进去的位」。
 ///
 /// ⚠️ **S 模式与 M 模式的写掩码相同**（F33）⇒ ⇒ 参考侧**不按特权裁剪**
 /// `sstatus` 的写掩码。
@@ -546,7 +556,7 @@ pub fn mstatus_warl(new: u32) -> u32 {
 /// 表）**：特权规范里 `SPP` 只在 M 模式可写、`SUM` / `MXR` 是 M 级字段；而参考侧
 /// **允许 S 模式写 `sstatus.SPP`**，`SUM` / `MXR` 也**在 `sstatus` 的视图里**
 /// ⇒ ⇒ 本平台**对齐参考侧**（黄金对拍的口径就是参考侧）。
-pub const SSTATUS_WARL_MASK: u32 = 0x804C_61A2;
+pub const SSTATUS_WARL_MASK: u32 = 0x000C_6122;
 
 /// `sstatus` 的**读视图**掩码 —— `sstatus` 是 `mstatus` 的**位视图**。
 ///
@@ -2489,26 +2499,39 @@ mod tests {
         assert_ne!(CSR_MISA_VALUE & (1 << 20), 0, "U 位（20）必须置着");
     }
 
-    /// **A-6** · `sstatus` 的客体写掩码 = **`0x804C_61A2`**（F38）。
+    /// **A-6** · `sstatus` 的客体写掩码 = **`0x000C_6122`**（F41 · 逐位实测）。
     ///
     /// ⚠️ 判别式用的是**架构字面量**，不是常量自己 ⇒ ⇒ 把掩码改坏这条会红。
+    ///
+    /// ⚠️ **`MPIE`（bit 7）不在掩码里** ⇒ ⇒ 这正是「从聚合值反推掩码」会
+    /// 算错的那一位（那个观测里的 `MPIE` 是 env 初始化留下的，不是写进去的）。
     #[test]
     fn the_sstatus_write_mask_is_the_measured_one() {
-        assert_eq!(SSTATUS_WARL_MASK, 0x804C_61A2);
+        assert_eq!(SSTATUS_WARL_MASK, 0x000C_6122);
         assert_ne!(
             SSTATUS_WARL_MASK & (1 << MSTATUS_SPP_BIT),
             0,
-            "SPP 在写掩码里 ⇒ ⇒ 参考侧允许 S 模式写 sstatus.SPP（F38）"
+            "SPP 在写掩码里 ⇒ ⇒ 参考侧允许 S 模式写 sstatus.SPP（F41）"
         );
         assert_ne!(
             SSTATUS_WARL_MASK & (1 << MSTATUS_SIE_BIT),
             0,
-            "SIE 在写掩码里（F38）"
+            "SIE 在写掩码里（F41）"
         );
         assert_eq!(
             SSTATUS_WARL_MASK & (1 << MSTATUS_MPP_SHIFT),
             0,
-            "MPP 不在 sstatus 的写掩码里（F38）"
+            "MPP 不在 sstatus 的写掩码里（F41）"
+        );
+        assert_eq!(
+            SSTATUS_WARL_MASK & (1 << 7),
+            0,
+            "MPIE 不在 sstatus 的写掩码里 ⇒ ⇒ 逐位实测钉死的（F41）"
+        );
+        assert_eq!(
+            SSTATUS_WARL_MASK & (1 << 22),
+            0,
+            "TSR 不在 sstatus 的写掩码里 ⇒ ⇒ 逐位实测钉死的（F41）"
         );
     }
 

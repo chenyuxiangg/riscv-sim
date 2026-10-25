@@ -12,9 +12,9 @@
 //   3. `sepc`     — writable, and its low bit is **always** 0 (IALIGN = 32);
 //   4. `scause` / `stval` — writable;
 //   5. `sstatus`  — a **bit view** of `mstatus`; the guest write mask is
-//      **0x804C_61A2**, i.e. **S mode can write `sstatus.SPP`** (the
-//      privileged spec says `SPP` is writable in M mode only ⇒ ⇒ the
-//      reference side is the *wider* one here);
+//      **0x000C_6122** (measured **bit by bit**), i.e. **S mode can write
+//      `sstatus.SPP`** (the privileged spec says `SPP` is writable in M mode
+//      only ⇒ ⇒ the reference side is the *wider* one here);
 //   6. reading an **M-mode** CSR in S mode ⇒ **illegal instruction** (cause 2)
 //      and the trap is **delegated** ⇒ it lands on `stvec`;
 //   7. writing an **M-mode** CSR in S mode ⇒ the same;
@@ -37,6 +37,16 @@
 // "write mask = 0x22" / "read view = 0x122" / "`SPP` cannot be written"
 // conclusions were the **low byte** of an aggregate value ⇒ ⇒ they are
 // **wrong**, and the corpus must not repeat them.
+//
+// ⚠️ **And the write mask must be measured BIT BY BIT** — an aggregate
+// observation cannot tell "this bit is writable" from "this bit was already
+// set".  The reference environment's init leaves `mstatus.MPIE` set, so the
+// aggregate "M mode: `sstatus` <- 0xFFFFFFFF ⇒ `mstatus` = 0x800C_61A2"
+// reads as if `MPIE` were writable — **it is not**.  Measured bit by bit
+// (with `mstatus` cleared first) the guest write mask is **0x000C_6122**:
+// `SIE` | `SPIE` | `SPP` | `FS` | `SUM` | `MXR` — and **not** `MPIE`,
+// **not** `UBE`, **not** `XS`, **not** `MPRV`, **not** `TVM` / `TW` / `TSR`,
+// **not** `MPP`, **not** `MIE`, and **not** `SD` (which is derived).
 //
 // ⚠️ **The verdict is the guest's own check.**  The harness compares the
 // `tohost` exit code, so the guest checks every value itself and only
@@ -164,11 +174,17 @@ RVTEST_CODE_BEGIN
   //
   //   S mode: `sstatus` <- 0xFFFFFFFF  ⇒  read back **0x800C_6122**
   //   S mode: `sstatus` <- 0x100       ⇒  read back **0x0000_0100**
-  //   M mode: `sstatus` <- 0xFFFFFFFF  ⇒  read back **0x800C_6122**
+  //   M mode: `sstatus` <- 0xFFFFFFFF  ⇒  `mstatus` reads back
+  //                                          **0x800C_6122**
   //
   // ⇒ ⇒ **S mode CAN write `sstatus.SPP`** — the privileged spec says `SPP`
   // is writable in M mode only ⇒ ⇒ the reference side is the *wider* one
-  // here — and the guest write mask is **0x804C_61A2**, not `0x22`.
+  // here — and the guest write mask is **0x000C_6122**, not `0x22`.
+  //
+  // ⚠️ The write mask was measured **bit by bit** (see the file header):
+  // `0x000C_6122` = `SIE` | `SPIE` | `SPP` | `FS` | `SUM` | `MXR`.  The
+  // extra `SD` in the read-back is the **derived** dirty bit (`FS = 3` ⇒ dirty
+  // ⇒ `SD = 1`), and it is **not** writable.
   //
   // ⚠️ **The old "0x22" was a truncation artefact**: the probe reported the
   // value through the HTIF **exit code**, and a POSIX exit code is **8 bits**
@@ -182,6 +198,8 @@ RVTEST_CODE_BEGIN
   li t0, 0xffffffff
   csrw sstatus, t0
   csrr t1, sstatus
+  li t2, 0x800c6122                 // the **whole** 32-bit read-back
+  bne t1, t2, fail5                 // ⇒ ⇒ the mask is pinned bit by bit
   andi t1, t1, 0xff                // the low byte is SIE | SPIE
   li t2, 0x22
   bne t1, t2, fail5

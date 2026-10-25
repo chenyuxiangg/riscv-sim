@@ -267,7 +267,7 @@ rv32si csr rv32i_zicsr_zifencei active smode
 #   * the S-mode CSRs (`sscratch` / `stvec` / `sepc` / `scause` / `stval` /
 #     `sstatus`), each with its WARL rule — including the two `sstatus`
 #     judgements that the **untruncated** measurement pins: the guest write
-#     mask is `0x804C_61A2` (⇒ ⇒ **S mode can write `sstatus.SPP`**) and the
+#     mask is `0x000C_6122` (⇒ ⇒ **S mode can write `sstatus.SPP`**) and the
 #     read view is `0x800D_E162` (⇒ ⇒ **`SD` is visible**);
 #   * the **per-level accessibility** rule — reading or writing an M-mode
 #     CSR in S mode is an **illegal instruction** (cause 2), and so is

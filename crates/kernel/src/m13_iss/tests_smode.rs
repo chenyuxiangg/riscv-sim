@@ -4,7 +4,7 @@
 //!
 //! ## 判别力纪律
 //!
-//! 每条断言都用**架构字面量**（`0x804C_61A2` / `0x800D_E162` / `0x0008_B3FE`
+//! 每条断言都用**架构字面量**（`0x000C_6122` / `0x800D_E162` / `0x0008_B3FE`
 //! / `cause 2` / `MPP = 1` …），
 //! **不**从被测的常量推出来 ⇒ ⇒ 把常量改坏时这条测试**必须变红**。
 //!
@@ -60,7 +60,7 @@ const MPP_M: u32 = 3;
 /// ⚠️ **不是**旧口径的 `0x22` —— 那个数是**被 8 位退出码截断**的观测给出的
 /// **低字节**（真正的写掩码的**低字节**恰好也是 `0x22`，所以截断观测「看
 /// 起来」自洽 ⇒ ⇒ 这就是它骗人的地方）。
-const SSTATUS_WRITE_MASK: u32 = 0x804C_61A2;
+const SSTATUS_WRITE_MASK: u32 = 0x000C_6122;
 
 /// `sstatus` 的**读视图**掩码 —— **实测**（F39）。
 ///
@@ -402,18 +402,24 @@ fn sstatus_is_the_same_storage_in_machine_and_supervisor_mode() {
     );
 }
 
-/// **客体的写掩码是实测的那一个**（**F39**）—— 不是旧口径的 `0x22`。
+/// **客体的写掩码是实测的那一个**（**F41**）—— 不是旧口径的 `0x22`。
 ///
 /// ⚠️ 判别式是**架构字面量**（不是从被测常量推出来的）：
 /// * **S 模式**写 `sstatus = 0xFFFFFFFF` ⇒ ⇒ 读回 **`0x800C_6122`**
 ///   （= 写掩码 ∧ 读视图 ⇒ ⇒ **逐字**是参考侧实测的那个值）；
 /// * **M 模式**写 `sstatus = 0xFFFFFFFF` ⇒ ⇒ `mstatus` 读回
-///   **`0x804C_61A2`**（= 契约层的写掩码）。
+///   **`0x800C_6122`**（= 写掩码 `0x000C_6122` ∪ 推导位 `SD`）。
 ///
 /// ⚠️ **S 模式与 M 模式的写掩码相同**（F39）⇒ ⇒ 参考侧**不按特权裁剪**
 /// ⇒ ⇒ 两条断言合起来把「写掩码」钉死。
 #[test]
 fn the_guest_write_mask_of_sstatus_is_the_measured_one() {
+    // 写掩码本身：**逐位**实测（F41）= `0x000C_6122`。
+    // ⚠️ 这里用**架构字面量**钉住它 ⇒ ⇒ 改了本地常量而忘了改语义，这条会红。
+    assert_eq!(
+        SSTATUS_WRITE_MASK, 0x000C_6122,
+        "sstatus 的客体写掩码必须是逐位实测的那个值（F41）"
+    );
     // S 模式：写全 1 ⇒ 读回 `0x800C_6122`。
     let mut h = Harness::new();
     let mut state = state_in(PRIV_S);
@@ -425,15 +431,16 @@ fn the_guest_write_mask_of_sstatus_is_the_measured_one() {
         "S 模式写 sstatus 全 1 ⇒ 读回 0x800C6122（F39 实测）"
     );
 
-    // M 模式：写全 1 ⇒ `mstatus` 读回 `0x804C_61A2`（写掩码本身）。
+    // M 模式：写全 1 ⇒ `mstatus` 读回 `0x800C_6122`（写掩码 ∪ 推导位 `SD`）。
     let mut h = Harness::new();
     let mut state = SimState::default();
     let outcome = csrw_with(&mut h, &mut state, CSR_SSTATUS, 1, 0xFFFF_FFFF);
     assert_eq!(outcome, StepOutcome::Advanced);
     assert_eq!(
         csr_value(&state, CSR_MSTATUS),
-        SSTATUS_WRITE_MASK,
-        "M 模式写 sstatus 全 1 ⇒ mstatus 读回写掩码 0x804C61A2（F39）"
+        0x800C_6122,
+        "M 模式写 sstatus 全 1 ⇒ mstatus 读回 0x800C6122（F41 逐位实测：\
+         写掩码 0x000C6122 ∪ 推导位 SD）"
     );
 }
 
