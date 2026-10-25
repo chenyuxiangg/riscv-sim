@@ -24,9 +24,12 @@
 //! 错误事件、引擎的快照。没有一条断言是「我调用了某个内部函数」。
 
 use riscv_sim_contract::csr::{arch_mcause_for_line, IRQ_TIMER_COMPARE};
-use riscv_sim_contract::error::{ErrorFamily, PlatformError, E_HMS_02_FATAL_TERMINATED};
+use riscv_sim_contract::error::{
+    ErrorFamily, PlatformError, E_ENG_03_NO_PROGRESS, E_HMS_02_FATAL_TERMINATED,
+};
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload, Message};
 
+use super::clock::HostClock;
 use super::watchdog::{
     classify_window, HostWatchdog, WindowOutcome, WindowVerdict, HOST_WATCHDOG_BUDGET_MS,
     HOST_WATCHDOG_CONFIRMATIONS,
@@ -464,4 +467,121 @@ fn only_the_no_progress_code_counts_as_a_stall() {
     }
     assert_eq!(host.hms.signal_count(), 0, "别的错误不得触发上报");
     assert!(!host.watchdog_fired());
+}
+
+// ---------------------------------------------------------------------------
+// D-135 · 宿主时钟的可见性与接线（v0.43 批 · 裁决 C / K）
+// ---------------------------------------------------------------------------
+
+/// 造一个「宿主时钟**读不到**」的宿主 —— 把会话级钟换成那个**读不到**的钟。
+///
+/// ⚠️ native 侧的时钟**永远可用** ⇒ ⇒ 「时钟不可用」那个宿主**只能造出来**
+/// ⇒ ⇒ 没有这个夹具，「时钟不可用」那几条**在 native 上没人钉**。
+fn host_with_unavailable_clock() -> KernelHost {
+    let mut host = KernelHost::new();
+    host.started_at = HostClock::unavailable_for_tests();
+    host
+}
+
+/// ⚠️ **D-135 · 裁决 K**：宿主时钟**读不到** ⇒ ⇒ 「**时间预算**」那一路
+/// **恒不触发**（**极端耗时也不触发**）。
+///
+/// ⚠️ **判别力**：把 `judge_window` 改回调旧的 `classify_window`（⇒ 恒按
+/// `clock_available = true` 算）⇒ 本条变红（极端耗时会把看门狗点着）。
+#[test]
+fn the_time_budget_never_fires_when_the_host_clock_is_unavailable() {
+    let mut host = host_with_unavailable_clock();
+
+    for window in 1..=(HOST_WATCHDOG_CONFIRMATIONS + 2) {
+        let verdict = host.judge_window(u64::MAX, &Ok(0));
+        assert!(
+            matches!(verdict, WindowVerdict::Completed { .. }),
+            "第 {window} 个窗口不得因「时间预算」被判成无进展：{verdict:?}"
+        );
+        assert!(!host.watchdog_fired(), "时钟读不到 ⇒ 看门狗**不得**触发");
+    }
+    assert_eq!(host.hms.signal_count(), 0, "不得上报健康信号");
+}
+
+/// ⚠️ **D-135 · 裁决 K**：宿主时钟**读不到** ⇒ ⇒ 「**引擎停滞**」那一路
+/// **照常**（**不得**被一起吞掉 —— 那是**安全方向**的漏洞）。
+///
+/// ⚠️ **判别力**：把判定写成 `clock_available && (stalled || …)` ⇒ 本条变红
+/// （停滞被吞掉 ⇒ 活锁永远不触发）。
+#[test]
+fn the_stall_branch_still_fires_when_the_host_clock_is_unavailable() {
+    let mut host = host_with_unavailable_clock();
+    let stall = PlatformError::new(ErrorFamily::Engine, E_ENG_03_NO_PROGRESS, "假停滞");
+
+    // 第 1、2 个窗口：停滞被**吞掉**（裁决 G：前两个不上抛）。
+    for _ in 0..(HOST_WATCHDOG_CONFIRMATIONS - 1) {
+        assert_eq!(
+            host.judge_window(0, &Err(stall.clone())),
+            WindowVerdict::Stalled,
+            "时钟不可用**不得**吞掉「引擎停滞」"
+        );
+    }
+    // 第 3 个窗口：看门狗**必须**触发（处置照常）。
+    let verdict = host.judge_window(0, &Err(stall));
+    assert!(
+        matches!(verdict, WindowVerdict::Fired(_)),
+        "时钟不可用时，停滞仍必须触发看门狗：{verdict:?}"
+    );
+    assert!(host.watchdog_fired());
+}
+
+/// ⚠️ **必要对照**（D-135 · 裁决 K）：宿主时钟**可用**时 ⇒ ⇒ 「时间预算」那一路
+/// **照常**触发 ⇒ ⇒ **既有行为一个字没变**（新旧两个判定函数逐字同结果）。
+///
+/// ⚠️ **判别力**：把 `judge_window` 改成恒传 `clock_available = false` ⇒ 本条
+/// 变红（超预算再也不触发）。
+#[test]
+fn the_time_budget_still_fires_when_the_host_clock_is_available() {
+    let mut host = KernelHost::new();
+    assert!(
+        host.started_at.is_available(),
+        "native 的宿主时钟永远可用（前提）"
+    );
+
+    for _ in 0..(HOST_WATCHDOG_CONFIRMATIONS - 1) {
+        let verdict = host.judge_window(HOST_WATCHDOG_BUDGET_MS + 1, &Ok(0));
+        assert!(
+            matches!(verdict, WindowVerdict::Completed { .. }),
+            "时钟可用 ⇒ 前两个超预算窗口只记数、不触发：{verdict:?}"
+        );
+    }
+    let verdict = host.judge_window(HOST_WATCHDOG_BUDGET_MS + 1, &Ok(0));
+    assert!(
+        matches!(verdict, WindowVerdict::Fired(_)),
+        "时钟可用 ⇒ 超预算必须触发看门狗：{verdict:?}"
+    );
+    assert!(host.watchdog_fired());
+}
+
+/// ⚠️ **D-135 · 裁决 K / 裁决 C**：诊断包里那个**显式**的时钟字段**真的**由宿主
+/// 喂进去 ⇒ ⇒ **不是**纸面承诺。
+///
+/// ⚠️ **判别力**：把宿主那一侧的喂入去掉（或喂成常量 `true`）⇒ 本条变红。
+#[test]
+fn the_host_feeds_its_clock_availability_into_the_diagnostic_kit() {
+    // native：宿主时钟**可用** ⇒ ⇒ 诊断包必须**明确为真**。
+    let host = KernelHost::new();
+    let kit = host.export_diagnostic_kit(Some("E_HMS-01"));
+    assert!(
+        kit.host_clock_available,
+        "宿主必须把 `self.started_at.is_available()` 喂进诊断包"
+    );
+
+    // 换成「读不到」的钟 ⇒ ⇒ 诊断包必须**明确为假**。
+    let host = host_with_unavailable_clock();
+    let kit = host.export_diagnostic_kit(Some("E_HMS-01"));
+    assert!(
+        !kit.host_clock_available,
+        "宿主时钟读不到 ⇒ 诊断包必须**明确为假**（不是「没这个键」）"
+    );
+    assert!(
+        kit.snapshot_summary.contains("宿主时钟=不可用"),
+        "摘要里必须**有一句人话**说明时钟状态：{}",
+        kit.snapshot_summary
+    );
 }

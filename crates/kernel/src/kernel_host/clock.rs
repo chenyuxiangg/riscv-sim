@@ -155,6 +155,33 @@ impl HostClock {
     pub fn is_available(&self) -> bool {
         self.origin.is_available()
     }
+
+    /// 造一个「宿主时钟**读不到**」的会话级钟 —— **只给用例用**。
+    ///
+    /// ⚠️ **只给用例用**（`#[cfg(test)]`）⇒ ⇒ 生产构建里**没有**这个入口 ⇒ ⇒
+    /// 平台**不可能**在真实运行时装出一个「时钟不可用」的宿主。
+    ///
+    /// ⚠️ **为什么需要它**：native 侧的时钟**永远可用** ⇒ ⇒ 「时钟不可用」那一支
+    /// 在 native 上**结构上走不到** ⇒ ⇒ 用例必须能**造**出那个宿主 ⇒ ⇒ 否则
+    /// 「时钟不可用 ⇒ 时间预算恒不触发」这条**在 native 上没人钉**。
+    ///
+    /// ⚠️ 走**同一条**判据（[`reading_available`] 喂 `NaN`）⇒ ⇒ 造出来的
+    /// 那个宿主与 wasm 侧「环境**没有** `performance`」的那个宿主**同形**。
+    #[cfg(test)]
+    pub(crate) fn unavailable_for_tests() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            HostClock {
+                origin: HostInstant::from_parts(NativeInstant::now(), reading_available(f64::NAN)),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            HostClock {
+                origin: HostInstant::from_parts(f64::NAN, reading_available(f64::NAN)),
+            }
+        }
+    }
 }
 
 impl Default for HostClock {
