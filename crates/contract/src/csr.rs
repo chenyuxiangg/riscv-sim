@@ -766,6 +766,28 @@ pub fn pending_lines_to_mip_mask(lines: &[u16]) -> u32 {
     mask
 }
 
+/// The internal interrupt lines that a write to [`CSR_IRQ_CLEAR`] clears.
+///
+/// ⚠️ **`irq_clear` takes a bitmask, not a line number** (ledger
+/// **D-127**) — **bit L = clear line L**.  Writing `0b0010` therefore
+/// clears **line 1** and leaves **line 2** alone; the *same* value read as
+/// a line number would clear line 2 instead.  The two readings do **not**
+/// agree, and the **mask** reading is the one the platform implements
+/// (M-17's `clear_lines_by_mask`: `mask & (1 << line) != 0` ⇒ clear).
+///
+/// ⇒ ⇒ this function is the **single statement of that rule** on the
+/// contract side, so the semantics can be asserted **without** reaching
+/// into the kernel crate (one rule, one landing spot).
+///
+/// ⚠️ The mask is a `u32`, so it can name lines `0 ..= 31`; **line 0 does
+/// not exist** (the platform's lines are `1 / 2 / 3` — see
+/// [`IRQ_UART_RX_READY`]), so bit 0 is simply inert.
+pub fn irq_clear_mask_targets(mask: u32) -> Vec<u16> {
+    (0u16..32)
+        .filter(|line| mask & (1u32 << line) != 0)
+        .collect()
+}
+
 /// The platform's **internal interrupt line** → the **architectural
 /// `mcause` interrupt code**.
 ///
@@ -786,9 +808,16 @@ pub fn pending_lines_to_mip_mask(lines: &[u16]) -> u32 {
 ///
 /// | space | values | who uses it |
 /// | --- | --- | --- |
-/// | internal **line** | `1` / `2` / `3` | the controller, the enable mask, `irq_clear` |
+/// | internal **line** | `1` / `2` / `3` | the controller, the enable mask |
 /// | **`mie` / `mip` bit** | `11` (MEIE) / `7` (MTIE) | [`std_irq_bit_for_line`] |
 /// | **architectural cause** | `3` / `7` / `11` | **this** map ⇒ `mcause` |
+///
+/// ⚠️ **`irq_clear` is not in any of those three spaces** — it was wrongly
+/// listed in the "internal **line**" row above (ledger **D-127**).  The
+/// **line numbers** live in that space; the **value** written to
+/// [`CSR_IRQ_CLEAR`] does not.  That value is a **bitmask over the
+/// internal line space** — **bit L = clear line L** — so it is **not** a
+/// line number ⇒ ⇒ see [`irq_clear_mask_targets`].
 ///
 /// ⚠️ **This map does not touch the other two** — the `mie` / `mip` bit
 /// map keeps its own table ([`std_irq_bit_for_line`]), and the internal
@@ -1642,6 +1671,135 @@ mod tests {
         // the interrupt could never be cleared.
         assert!(!is_csr_read_only(CSR_IRQ_CLEAR));
         assert!(!csr_write_is_ignored(CSR_IRQ_CLEAR));
+    }
+
+    // -----------------------------------------------------------------------
+    // 裁决 B —— `irq_clear` 是**位掩码**，不是行号（台账 D-127）
+    //
+    // ⚠️ **判据必须能让两种读法给出不同结果**（STAGE-27 §2.2）：写
+    // `0b0010` ⇒ ⇒ **掩码语义**清 **line 1**、**行号语义**清 **line 2**
+    // ⇒ ⇒ 两条 line 的状态**必然不同** ⇒ ⇒ 判别力成立。
+    // -----------------------------------------------------------------------
+
+    /// ⚠️ **判别式**：`0b0010` 的 **bit 1** 置位 ⇒ ⇒ 掩码语义清的是
+    /// **line 1** ⇒ ⇒ 同一个值按**行号**读会清 **line 2** ⇒ ⇒ 两种读法
+    /// 在这一条上**结果不同**。
+    #[test]
+    fn irq_clear_is_a_bitmask_not_a_line_number() {
+        let mask = 0b0010u32;
+        let targets = irq_clear_mask_targets(mask);
+
+        // ⚠️ 掩码语义：bit 1 置位 ⇒ ⇒ 清 **line 1**。
+        assert_eq!(
+            targets,
+            vec![1u16],
+            "掩码 0b0010 的 bit 1 置位 ⇒ ⇒ 清的是 line 1"
+        );
+        // ⚠️ 行号语义下同一个值会清 **line 2** ⇒ ⇒ 两种读法**分得开**。
+        assert!(
+            !targets.contains(&2),
+            "行号语义下 0b0010 = 2 ⇒ ⇒ 会清 line 2 ⇒ ⇒ 两种读法分不开"
+        );
+    }
+
+    /// ⚠️ **两条 line 的状态必须能分别观察** —— 同一个掩码对 line 1 与
+    /// line 2 的作用**不同** ⇒ ⇒ 「掩码语义」与「行号语义」分得开。
+    #[test]
+    fn one_irq_clear_write_tells_line_1_and_line_2_apart() {
+        // 两条线都挂着 ⇒ ⇒ 写一次 `irq_clear` ⇒ ⇒ 看**哪一条**被清了。
+        // ⚠️ 下标 = **线号**（0 号线不存在，占位）。
+        let mut pending = [false; 4];
+        pending[1] = true;
+        pending[2] = true;
+
+        for target in irq_clear_mask_targets(0b0010) {
+            pending[target as usize] = false;
+        }
+
+        assert!(!pending[1], "line 1 必须被清（掩码语义）");
+        assert!(
+            pending[2],
+            "line 2 必须**没**被清 —— 行号语义会清它 ⇒ ⇒ 两种读法分不开"
+        );
+    }
+
+    /// ⚠️ **那张「三个空间」的表必须逐字钉住**（台账 **D-127** ·
+    /// 验收 **A-1** / **A-3**）⇒ ⇒ 它是**文档** ⇒ ⇒ 用例读**自己的源文件**
+    /// 来钉它（与 M-22 的 `include_str!("mod.rs")` **同形**）。
+    ///
+    /// ⚠️ **期望串必须拆成两半再拼** ⇒ ⇒ 否则那段字面量**自己**就在源文件
+    /// 里 ⇒ ⇒ `contains` 永远为真 ⇒ ⇒ 断言**空洞**（本批的通用判据）。
+    #[test]
+    fn the_three_spaces_table_keeps_irq_clear_out_of_the_line_column() {
+        let source = include_str!("csr.rs");
+
+        // ---- 验收 A-1：`irq_clear` **不在**「internal line」那一栏 ----
+        let line_row = [
+            "/// | internal **line** | `1` / `2` / `3` | ",
+            "the controller, the enable mask |",
+        ]
+        .concat();
+        assert!(
+            source.contains(&line_row),
+            "「internal **line**」那一栏必须逐字是这一行（`irq_clear` **不许**在里面）"
+        );
+        let old_line_row = [
+            "/// | internal **line** | `1` / `2` / `3` | ",
+            "the controller, the enable mask, `irq_clear` |",
+        ]
+        .concat();
+        assert!(
+            !source.contains(&old_line_row),
+            "「internal **line**」那一栏**不许**再列 `irq_clear`（那是**行号**栏）"
+        );
+
+        // ---- 验收 A-3：另外两栏**一个字未改**（D-84 / D-100 的不变量）----
+        let bit_row = [
+            "/// | **`mie` / `mip` bit** | `11` (MEIE) / `7` (MTIE) | ",
+            "[`std_irq_bit_for_line`] |",
+        ]
+        .concat();
+        assert!(
+            source.contains(&bit_row),
+            "`mie`/`mip` bit 那一栏**不许**被改"
+        );
+        let cause_row = [
+            "/// | **architectural cause** | `3` / `7` / `11` | ",
+            "**this** map ⇒ `mcause` |",
+        ]
+        .concat();
+        assert!(
+            source.contains(&cause_row),
+            "architectural cause 那一栏**不许**被改"
+        );
+
+        // ---- 裁决 B：`irq_clear` **另起一行**写它是**位掩码** ----
+        let note = [
+            "/// ⚠️ **`irq_clear` is not in any of those three ",
+            "spaces**",
+        ]
+        .concat();
+        assert!(
+            source.contains(&note),
+            "表下面必须**另起一行**写明 `irq_clear` 是**位掩码**"
+        );
+    }
+
+    /// ⚠️ **反向对照**：位掩码语义下**一行**只清它自己 ⇒ ⇒ 写
+    /// `0b0010` 与写 `0b0100` 的**作用不同** ⇒ ⇒ 「掩码」与「行号」
+    /// 两种读法给出**不同结果**。
+    #[test]
+    fn the_irq_clear_mask_and_the_line_number_reading_disagree() {
+        // 掩码语义 ⇒ 清 line 1。
+        assert_eq!(irq_clear_mask_targets(0b0010), vec![1u16]);
+        // 行号语义 ⇒ 清 line 2 ⇒ ⇒ 掩码语义下**不是**它。
+        assert_eq!(irq_clear_mask_targets(0b0100), vec![2u16]);
+        // ⚠️ 行号读法会把 `0b0010` 当成「2」⇒ ⇒ 它与掩码读法**冲突**。
+        assert_ne!(
+            irq_clear_mask_targets(0b0010),
+            vec![2u16],
+            "掩码读法与行号读法必须给出不同结果"
+        );
     }
 
     /// ⚠️ **`mtime` 的只读来自**地址规则**本身** —— 不是平台清单。
