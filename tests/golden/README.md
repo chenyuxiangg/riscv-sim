@@ -295,7 +295,7 @@ nothing.
 ## `active` rows that agree **vacuously** — read this before citing coverage
 
 ⚠️ **An `active` row means "both sides reach the same verdict".  It does
-NOT mean "both sides exercised the same thing".**  Two of the 13 `rv32mi`
+NOT mean "both sides exercised the same thing".**  **Two** of the 13 `rv32mi`
 rows are **hollow agreements**: the verdicts match, but the two sides ran
 **different programs** (or the case asserts something the platform cannot
 fail).  They stay in the corpus — the agreement is real and worth keeping
@@ -306,18 +306,33 @@ visible.
 
 | case | why the agreement is hollow | how that was established |
 | --- | --- | --- |
-| `rv32mi/csr` | the case branches on `misa[20]` (the **U** bit). The reference side runs with its default `--priv=MSU` ⇒ `misa = 0x40141104` ⇒ **U is set** ⇒ it runs the U-mode section (`csrwi mcounteren`, `sret` into user mode, "reading `sstatus` in user mode must trap"). This platform is **M-mode only** ⇒ `misa = 0x40001104` ⇒ **U is clear** ⇒ the case jumps straight to `finish` and passes early ⇒ **the whole user-mode / privilege-transition section never runs here** | instrumented copy of the upstream `rv64si/csr.S`: the reference side reaches the U-mode marker, we do not. Trap entries: reference side 5, ours 1. Ledger **D-96** |
+| `rv32mi/breakpoint` | the case tests the **debug trigger** mechanism (`tcontrol` / `tselect` / `tdata1` / `tdata2`) ⇒ ⇒ this platform does **not** implement those CSRs ⇒ ⇒ they read back **0** ⇒ ⇒ the case's own guard (`csrr a1, tdata1` → 0 ≠ the requested value ⇒ ⇒ jump to the skip label) fires ⇒ ⇒ **no breakpoint trigger is ever exercised here** ⇒ ⇒ the case leaves through the **skip path** (`TEST_PASSFAIL` with a non-zero `TESTNUM` ⇒ ⇒ PASS). The reference side *does* implement the triggers far enough to take **8** trap deliveries ⇒ ⇒ it exercised them ⇒ ⇒ **the two sides ran different programs** ⇒ ⇒ the agreement is in name only | the **v0.41** hollow-agreement detector (`tools/vacuity_check.py`): reference side **251** committed instructions / **8** traps vs ours **118** retired / **1** trap — the **largest** divergence in the whole corpus. Ours took **1** trap in total while the trigger section needs **at least three** trap deliveries (execute / load / store) ⇒ ⇒ ours cannot have entered it. Ledger **D-156** |
 | `rv32mi/ma_fetch` | the case probes "can the `C` bit be switched off?" with `csrci misa, 1 << ('c'-'a')`. The reference side's `misa` is **WARL-writable** (the write really clears `C`); ours is **fully read-only** ⇒ the **same probe takes opposite branches**: the reference side continues into the IALIGN assertions, we skip to `pass` ⇒ **that half of the case is not covered here** | instrumented copy of the upstream `rv64si/ma_fetch.S`: the reference side hits the IALIGN-section marker, we do not. Ledger **D-95** |
 
-⚠️ **The two differences above all come from the same root**: the
-platform implements **fewer** features than the reference side
-(U-mode, S-mode) and reports that honestly in `misa` instead of
-pretending.  ⇒ A hollow agreement here is the **expected** consequence of
-an M-mode-only platform — the fix is **labelling**, not faking a match.
+⚠️ **The two rows above no longer share a root.**  A **third** row used to
+sit here — `rv32mi/csr` — and it **stopped being hollow in v0.38**: the
+platform gained U-mode and now reports `misa = 0x40141104`, so the case's
+U-mode section really runs.  Measured by the **v0.41** detector: reference
+side **235** committed instructions / **4** traps vs ours **230** retired /
+**3** traps ⇒ ⇒ the same program ⇒ ⇒ **not** a hollow agreement ⇒ ⇒ its row
+was **stale** and has been **removed** here.
+
+⇒ ⇒ What is left are two **different** gaps, and they must not be merged:
+
+* `rv32mi/ma_fetch` ⇒ ⇒ the platform's `misa` is **read-only** for the
+  guest (the reference side's is **WARL-writable** ⇒ ⇒ `csrci misa, 4`
+  really clears `C` there) ⇒ ⇒ the same probe takes opposite branches.
+* `rv32mi/breakpoint` ⇒ ⇒ the platform does **not** implement the **debug
+  trigger registers** ⇒ ⇒ the case leaves through its own skip path.
+
+⇒ ⇒ A hollow agreement here is the **expected** consequence of a platform
+that implements fewer features than the reference side and **reports that
+honestly** instead of faking a match ⇒ ⇒ the fix is **labelling**, not
+faking.
 
 ⚠️ **PMP used to be on that list** (v0.36 and earlier).  As of **v0.37**
-the platform implements PMP ⇒ ⇒ the remaining gap is **U-mode and S-mode**
-only ⇒ ⇒ `rv32mi/pmpaddr` now agrees for a *different* reason (it is
+the platform implements PMP ⇒ ⇒ the remaining gaps are the **debug trigger
+registers** and the platform's **read-only `misa`** ⇒ ⇒ `rv32mi/pmpaddr` now agrees for a *different* reason (it is
 **hollow on the reference side**, not hollow on ours — see its row above).
 
 
