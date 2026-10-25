@@ -16,11 +16,29 @@
     python3 tools/ledger_check.py --ledger docs/reviews/REVIEWS.md   # 检查真台账（整合批跑）
     python3 tools/ledger_check.py --self-test                          # 用仓内夹具自测（Lane C 的对照体）
 
-## 三条断言（裁决 N）
+## 六条断言（裁决 M / N + v0.39 批追加两条）
 
 1. **标记区**（D-124 ~）每行**必须**带标记，且标记 ∈ {`✅ **已闭环**`, `⏳ **未闭环**`}
 2. **历史行**（D-15 ~ D-123）每行**必须不带**标记
 3. **末列非空**的行**必须不带**标记
+4. **标记与正文不得自相矛盾**（标记区行）：标记说「未闭环」而正文写着「已闭环」（或反过来）
+   ⇒ ⇒ 这条抓的是 **v0.33 批的「台账标记回填批」**那类**机械回填**留下的错
+   （`4c5401c` 给 16 行统一插了 `⏳ **未闭环**`，**没逐行核状态** ⇒ ⇒ **D-124 被漏掉**）
+5. **每一个「标记区未闭环」的 ID 都必须出现在 §2.1 的候选清单里**
+   ⇒ ⇒ 抓的是「**人维护的清单**悄悄漏了一条」⇒ ⇒ 「漏了」变成**门禁能红的事**
+6. **候选清单里列着的「标记区」项必须是未闭环的**
+   ⇒ ⇒ 与断言 5 配对：清单**过期**（列着一条已闭环的项）也要红
+
+⚠️ **断言 5 / 6 的方向**：
+* 断言 5 是**单向**的：**未闭环 ⇒ 必须在清单里**；清单里**可以**多列**历史行**条目
+  （D-75 / D-54 / D-87 / D-60 / D-62 / D-27、D-104 ~ D-112 —— 它们**不是标记区**行
+  ⇒ ⇒ 不参与这两个判定）。
+* 断言 6 只看**清单里的条目行**（**行首**就是编号的那些行）⇒ ⇒ 散文里顺带提到的编号
+  （例如「**D-141** 已把器件参数怎么校验定死」）**不算**条目 ⇒ ⇒ 不会误报。
+
+⚠️ **找不到候选清单块 ⇒ ⇒ 必须红**（`KIND_CANDIDATE_BLOCK_MISSING`）⇒ ⇒
+否则断言 5 / 6 会**静默失效** ⇒ ⇒ 门禁**恒绿** ⇒ ⇒ 与这一批要治的病**同形**
+⇒ ⇒ 台账的命名约定若改了，就要**同批改脚本**。
 
 ⚠️ **分界线是写死的两个编号**（D-123 / D-124）⇒ ⇒ **不是**用正则去猜
 「哪批是老行、哪批是新行」⇒ ⇒ 台账原文给出了这个事实（v0.27 起新登记的那批）。
@@ -66,8 +84,36 @@ KIND_MARKED_MISSING = "标记区缺标记"
 KIND_HISTORY_HAS_MARKER = "历史行带标记"
 KIND_TAIL_HAS_MARKER = "末列非空带标记"
 
+#: 断言 ④ 的名字：**标记与正文自相矛盾**（标记区行）。
+KIND_MARKER_CONTRADICTS_BODY = "标记与正文自相矛盾"
+
+#: 断言 ⑤ 的名字：**未闭环项没列进 §2.1 的候选清单**。
+KIND_OPEN_ITEM_NOT_LISTED = "未闭环项未列入候选清单"
+
+#: 断言 ⑥ 的名字：**候选清单里列着一条已闭环的标记区项**（清单过期）。
+KIND_CANDIDATE_ALREADY_CLOSED = "候选清单列着已闭环项"
+
+#: **找不到候选清单块**的名字（⇒ ⇒ 断言 ⑤ / ⑥ 会**静默失效** ⇒ ⇒ 必须红）。
+KIND_CANDIDATE_BLOCK_MISSING = "找不到候选清单块"
+
+#: 正文里那两个**关键词**（**不含**标记的 `**` 与 emoji ⇒ ⇒ 只当「散文里自述的状态」看）。
+WORD_CLOSED = "已闭环"
+WORD_OPEN = "未闭环"
+
 #: §1.3 的**小节标题**（`### 1.3 跨模块中低危`）。
 SECTION_HEADING_RE = re.compile(r"^#{2,6}\s+1\.3(?![0-9])")
+
+#: §2.1 的**小节标题**（`### 2.1 批次拓扑（…）`）。
+SECTION_2_1_HEADING_RE = re.compile(r"^#{2,6}\s+2\.1(?![0-9])")
+
+#: 候选清单块的**标题行**判据（台账的命名约定：「候选（留到第 N 批及以后）」）。
+CANDIDATE_HEADING_RE = re.compile(r"候选（留到第\s*\d+\s*批及以后）")
+
+#: 候选清单里**一个条目**的判据（**行首**就是编号 ⇒ 散文里顺带提到的编号**不算**条目）。
+CANDIDATE_ENTRY_RE = re.compile(r"^\s*D-\d+")
+
+#: §2.1 里**一个批次块**的开头（`第 20 批 · ✅ …`）⇒ ⇒ 候选清单块到这儿为止。
+BATCH_BLOCK_RE = re.compile(r"^第\s*\d+\s*批")
 
 #: 任何 Markdown 标题（⇒ 用来判断「小节结束了」）。
 ANY_HEADING_RE = re.compile(r"^#{1,6}\s")
@@ -101,6 +147,17 @@ class LedgerRow:
         return None
 
     @property
+    def body(self) -> str:
+        """「问题」列**去掉标记前缀**之后剩下的正文。
+
+        ⚠️ 断言 ④（标记与正文自相矛盾）**只看正文** ⇒ ⇒ 标记本身
+        （`⏳ **未闭环**` 里就带着「未闭环」三个字）**必须先剥掉**。
+        """
+        if self.marker is None:
+            return self.problem
+        return self.problem[len(self.marker) :]
+
+    @property
     def zone(self) -> str:
         """这一行属于哪个口径（`历史行` / `标记区` / `越界`）。"""
         if self.id_number >= MARKED_ZONE_LOWER_BOUND:
@@ -115,7 +172,7 @@ class Failure:
     """一条断言失败。"""
 
     kind: str
-    row: LedgerRow
+    row: LedgerRow | None
     message: str
 
 
@@ -192,6 +249,119 @@ def extract_section_rows(text: str) -> list[LedgerRow]:
 
 
 # ---------------------------------------------------------------------------
+# 候选清单（§2.1）
+# ---------------------------------------------------------------------------
+
+
+def extract_candidate_entries(text: str) -> tuple[dict[int, int], int]:
+    """§2.1 的**当前**候选清单 ⇒ （条目编号 → 行号，标题行号）。
+
+    ⚠️ **只取最后一个「候选（留到第 N 批及以后）」块** —— §2.1 里**每个批次块**
+    都留过一份「下一批做什么」的清单 ⇒ ⇒ 旧批次那些块是**历史快照** ⇒ ⇒
+    **只有最新那份**是「当前清单」⇒ ⇒
+    ⚠️ **为什么不能把所有块并起来算**（**判别力的要害**）：
+    并起来算 ⇒ ⇒ 「**从当前清单里删掉一条**」会被**旧块掩盖** ⇒ ⇒
+    门禁**看不见**这次删除 ⇒ ⇒ **零判别力** ⇒ ⇒ 与断言 ⑤ 要抓的失败模式**正好相反**。
+
+    ⚠️ **一个「条目」的判据 = 行首就是编号**（`CANDIDATE_ENTRY_RE`）⇒ ⇒
+    散文里顺带提到的编号（例如候选块里那句「**D-141** 已把器件参数怎么校验定死」）
+    **不算**条目 ⇒ ⇒ 断言 ⑥ 不会误报。
+
+    ⚠️ 候选块**到下一个批次块为止**（`BATCH_BLOCK_RE`）⇒ ⇒ 也**到围栏结束为止**
+    ⇒ ⇒ §2.1 围栏**外面**的散文**不参与**判定。
+    """
+    lines = text.split("\n")
+    start = None
+    for index, line in enumerate(lines):
+        if SECTION_2_1_HEADING_RE.match(line):
+            start = index
+            break
+    if start is None:
+        return {}, 0
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if ANY_HEADING_RE.match(lines[index]):
+            end = index
+            break
+    section = lines[start + 1 : end]
+
+    heading_index = None
+    for index, line in enumerate(section):
+        if CANDIDATE_HEADING_RE.search(line):
+            heading_index = index
+    if heading_index is None:
+        return {}, 0
+
+    entries: dict[int, int] = {}
+    for index in range(heading_index + 1, len(section)):
+        line = section[index]
+        if BATCH_BLOCK_RE.match(line):
+            break
+        if line.lstrip().startswith("```"):
+            break
+        match = CANDIDATE_ENTRY_RE.match(line)
+        if match:
+            # ⚠️ **一个条目行里可能有多个编号**（例如「D-130 / D-131 / D-133 / …」
+            # 与「D-75 / D-54 / D-87 / D-60 / D-62 / D-27」）⇒ ⇒ 全部收进来。
+            for id_match in LEDGER_ID_RE.finditer(line):
+                number = int(id_match.group(1))
+                entries.setdefault(number, start + 2 + index)
+    return entries, start + 2 + heading_index
+
+
+def check_candidates(rows: list[LedgerRow], text: str) -> list[Failure]:
+    """断言 ⑤ / ⑥ ⇒ 失败清单。"""
+    failures: list[Failure] = []
+    entries, _heading_line = extract_candidate_entries(text)
+    if _heading_line == 0:
+        # ⚠️ **找不到候选清单块 ⇒ ⇒ 断言 ⑤ / ⑥ 会「静默不生效」**
+        # ⇒ ⇒ 那就等于门禁**恒绿** ⇒ ⇒ 与这一批要治的病**同形**
+        # ⇒ ⇒ 所以这里**必须红**（⇒ ⇒ 命名约定改了就要同批改脚本）。
+        failures.append(
+            Failure(
+                KIND_CANDIDATE_BLOCK_MISSING,
+                None,
+                "台账里找不到 §2.1 的候选清单块（标题行须含「候选（留到第 N 批及以后）」）"
+                " ⇒ ⇒ 断言 ⑤ / ⑥ **静默失效** ⇒ ⇒ 命名约定若改了就要同批改脚本",
+            )
+        )
+        return failures
+    by_number = {row.id_number: row for row in rows}
+
+    # ---- 断言 ⑤：每一个「标记区未闭环」的 ID 都必须列在候选清单里 ----
+    for number in sorted(by_number):
+        row = by_number[number]
+        if row.zone != "标记区" or row.marker != MARKER_OPEN:
+            continue
+        if number not in entries:
+            failures.append(
+                Failure(
+                    KIND_OPEN_ITEM_NOT_LISTED,
+                    row,
+                    "这一行是「标记区未闭环」⇒ ⇒ 必须出现在 §2.1 的候选清单里"
+                    f"（当前清单在第 {_heading_line} 行那块）",
+                )
+            )
+
+    # ---- 断言 ⑥：候选清单里列着的**标记区**项必须是未闭环的（否则清单过期）----
+    for number in sorted(entries):
+        row = by_number.get(number)
+        if row is None or row.zone != "标记区":
+            # 不是台账条目、或者是**历史行** ⇒ 清单里多列着**允许**（断言 5 是单向的）。
+            continue
+        if row.marker == MARKER_CLOSED:
+            failures.append(
+                Failure(
+                    KIND_CANDIDATE_ALREADY_CLOSED,
+                    row,
+                    "候选清单里列着这一条 ⇒ ⇒ 但它在 §1.3 里**已闭环**"
+                    " ⇒ ⇒ 清单过期 ⇒ ⇒ 把这一条从清单里划掉",
+                )
+            )
+    return failures
+
+
+# ---------------------------------------------------------------------------
 # 判定
 # ---------------------------------------------------------------------------
 
@@ -259,6 +429,28 @@ def check_rows(rows: list[LedgerRow]) -> tuple[Report, list[Failure]]:
                 )
             )
 
+        # ---- 断言 ④：标记与正文不得自相矛盾（标记区行）----
+        if zone == "标记区" and row.marker is not None:
+            body = row.body
+            if row.marker == MARKER_OPEN and WORD_CLOSED in body:
+                failures.append(
+                    Failure(
+                        KIND_MARKER_CONTRADICTS_BODY,
+                        row,
+                        f"标记是「未闭环」而正文写着「{WORD_CLOSED}」"
+                        " ⇒ ⇒ 标记与正文自相矛盾 ⇒ ⇒ 核实这一行的真实状态",
+                    )
+                )
+            elif row.marker == MARKER_CLOSED and WORD_OPEN in body:
+                failures.append(
+                    Failure(
+                        KIND_MARKER_CONTRADICTS_BODY,
+                        row,
+                        f"标记是「已闭环」而正文写着「{WORD_OPEN}」"
+                        " ⇒ ⇒ 标记与正文自相矛盾 ⇒ ⇒ 核实这一行的真实状态",
+                    )
+                )
+
     return report, failures
 
 
@@ -278,10 +470,12 @@ def print_report(path: Path, report: Report, failures: list[Failure]) -> None:
     if failures:
         print(f"  失败 {len(failures)} 条：")
         for failure in failures:
-            print(
-                f"    第 {failure.row.line_no} 行 · {failure.row.id_text} · {failure.kind}："
-                f"{failure.message}"
+            where = (
+                f"第 {failure.row.line_no} 行 · {failure.row.id_text}"
+                if failure.row is not None
+                else "（无对应台账行）"
             )
+            print(f"    {where} · {failure.kind}：{failure.message}")
     else:
         print("  失败 0 条")
 
@@ -291,8 +485,10 @@ def check_ledger(path: Path) -> int:
     if not path.exists():
         print(f"台账不存在：{path}", file=sys.stderr)
         return 2
-    rows = extract_section_rows(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    rows = extract_section_rows(text)
     report, failures = check_rows(rows)
+    failures += check_candidates(rows, text)
     print_report(path, report, failures)
     return 1 if failures else 0
 
@@ -319,6 +515,9 @@ BAD_EXPECTED_KINDS = (
     KIND_MARKED_MISSING,
     KIND_HISTORY_HAS_MARKER,
     KIND_TAIL_HAS_MARKER,
+    KIND_MARKER_CONTRADICTS_BODY,
+    KIND_OPEN_ITEM_NOT_LISTED,
+    KIND_CANDIDATE_ALREADY_CLOSED,
 )
 
 
@@ -332,8 +531,10 @@ def self_test() -> int:
     if not good_path.exists():
         print(f"夹具不存在：{good_path}", file=sys.stderr)
         return 2
-    good_rows = extract_section_rows(good_path.read_text(encoding="utf-8"))
+    good_text = good_path.read_text(encoding="utf-8")
+    good_rows = extract_section_rows(good_text)
     good_report, good_failures = check_rows(good_rows)
+    good_failures += check_candidates(good_rows, good_text)
     print_report(good_path, good_report, good_failures)
     if good_failures:
         problems.append(
@@ -350,8 +551,10 @@ def self_test() -> int:
     if not bad_path.exists():
         print(f"夹具不存在：{bad_path}", file=sys.stderr)
         return 2
-    bad_rows = extract_section_rows(bad_path.read_text(encoding="utf-8"))
+    bad_text = bad_path.read_text(encoding="utf-8")
+    bad_rows = extract_section_rows(bad_text)
     bad_report, bad_failures = check_rows(bad_rows)
+    bad_failures += check_candidates(bad_rows, bad_text)
     print_report(bad_path, bad_report, bad_failures)
     got_kinds = sorted(f.kind for f in bad_failures)
     want_kinds = sorted(BAD_EXPECTED_KINDS)
