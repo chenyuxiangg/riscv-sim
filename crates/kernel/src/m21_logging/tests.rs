@@ -530,6 +530,164 @@ fn b10_server_profile_capacities() {
 }
 
 // ---------------------------------------------------------------------------
+// D-134 · `query_recent`：按**虚拟时间**的全局最近
+// ---------------------------------------------------------------------------
+
+#[test]
+fn query_recent_sorts_by_virtual_time_across_bands() {
+    let mut buf = LogBuffer::new(0);
+    // 跨带交错写入 ⇒ 带序与时间序**不一致** ⇒ 判别力成立。
+    buf.log(LogLevel::Error, "C", "e1", "", 10, 1);
+    buf.log(LogLevel::Trace, "C", "t1", "", 20, 2);
+    buf.log(LogLevel::Info, "C", "i1", "", 30, 3);
+    buf.log(LogLevel::Trace, "C", "t2", "", 40, 4);
+
+    // ⚠️ 既有 `query` 的**形状一个字没变**：仍是「按带升序 + 带内写入先后」。
+    let by_band: Vec<String> = buf
+        .query(&LogQuery::default())
+        .into_iter()
+        .map(|e| e.msg)
+        .collect();
+    assert_eq!(by_band, vec!["t1", "t2", "i1", "e1"], "query 仍按带返回");
+
+    // 新入口：按**虚拟时间**混排（**不是**按带）。
+    let by_time: Vec<String> = buf
+        .query_recent(&LogQuery::default(), 10)
+        .into_iter()
+        .map(|e| e.msg)
+        .collect();
+    assert_eq!(
+        by_time,
+        vec!["e1", "t1", "i1", "t2"],
+        "query_recent 按虚拟时间排（跨带混排）"
+    );
+    let times: Vec<u64> = buf
+        .query_recent(&LogQuery::default(), 10)
+        .iter()
+        .map(|e| e.time_virt_ps)
+        .collect();
+    assert_eq!(times, vec![10, 20, 30, 40], "时间戳逐条升序");
+}
+
+#[test]
+fn query_recent_sorts_by_virtual_time_not_by_host_time() {
+    let mut buf = LogBuffer::new(0);
+    // ⚠️ 宿主时间与虚拟时间**故意反向** ⇒ 用宿主时间排序会给出**另一个**顺序
+    //   ⇒ 这条用例对「拿宿主时间当排序键」的变异**是红的**。
+    buf.log(LogLevel::Info, "C", "a", "", 10, 900);
+    buf.log(LogLevel::Info, "C", "b", "", 20, 100);
+    let got: Vec<String> = buf
+        .query_recent(&LogQuery::default(), 10)
+        .into_iter()
+        .map(|e| e.msg)
+        .collect();
+    assert_eq!(
+        got,
+        vec!["a", "b"],
+        "按虚拟时间排（宿主时间反向 ⇒ 用宿主时间排会得到 b,a）"
+    );
+}
+
+#[test]
+fn query_recent_ties_are_ordered_by_band_then_insertion() {
+    let mut buf = LogBuffer::new(0);
+    // 全部**同一虚拟时刻** ⇒ 次序只能靠 (带序, 带内写入序) 决定。
+    buf.log(LogLevel::Error, "C", "e1", "", 100, 1);
+    buf.log(LogLevel::Trace, "C", "t1", "", 100, 2);
+    buf.log(LogLevel::Info, "C", "i1", "", 100, 3);
+    buf.log(LogLevel::Trace, "C", "t2", "", 100, 4);
+    buf.log(LogLevel::Debug, "C", "d1", "", 100, 5);
+    buf.log(LogLevel::Warn, "C", "w1", "", 100, 6);
+
+    // 带序 = trace → debug → info → warn → error；带内 = 写入先后。
+    let expected = vec!["t1", "t2", "d1", "i1", "w1", "e1"];
+    let got: Vec<String> = buf
+        .query_recent(&LogQuery::default(), 10)
+        .into_iter()
+        .map(|e| e.msg)
+        .collect();
+    assert_eq!(got, expected, "同刻 ⇒ 带序 + 带内写入序");
+
+    // 两次跑**逐条相同**（确定性）。
+    let again: Vec<String> = buf
+        .query_recent(&LogQuery::default(), 10)
+        .into_iter()
+        .map(|e| e.msg)
+        .collect();
+    assert_eq!(got, again, "同刻次序确定 ⇒ 两次跑逐条相同");
+}
+
+#[test]
+fn query_recent_n_boundaries() {
+    let mut buf = LogBuffer::new(0);
+    for i in 0..5u64 {
+        buf.log(LogLevel::Info, "C", &format!("m{i}"), "", (i + 1) * 10, i);
+    }
+
+    // `n = 0` ⇒ 空。
+    assert!(
+        buf.query_recent(&LogQuery::default(), 0).is_empty(),
+        "n = 0 ⇒ 空"
+    );
+
+    // `n > 总数` ⇒ 全部（按序）。
+    let all = buf.query_recent(&LogQuery::default(), 99);
+    assert_eq!(all.len(), 5);
+    let msgs: Vec<&str> = all.iter().map(|e| e.msg.as_str()).collect();
+    assert_eq!(msgs, vec!["m0", "m1", "m2", "m3", "m4"]);
+
+    // `n` 命中 ⇒ **最后** n 条（虚拟时间上最新的那些）。
+    let last2 = buf.query_recent(&LogQuery::default(), 2);
+    let msgs2: Vec<&str> = last2.iter().map(|e| e.msg.as_str()).collect();
+    assert_eq!(msgs2, vec!["m3", "m4"], "取的是最后 n 条");
+}
+
+#[test]
+fn query_recent_respects_the_filter() {
+    let mut buf = LogBuffer::new(0);
+    buf.log(LogLevel::Trace, "C", "t", "", 10, 1);
+    buf.log(LogLevel::Info, "C", "i", "", 20, 2);
+    buf.log(LogLevel::Error, "C", "e", "", 30, 3);
+
+    let warn_plus = buf.query_recent(
+        &LogQuery {
+            min_level: Some(LogLevel::Warn),
+            ..LogQuery::default()
+        },
+        10,
+    );
+    assert_eq!(warn_plus.len(), 1);
+    assert_eq!(warn_plus[0].msg, "e");
+
+    let in_range = buf.query_recent(
+        &LogQuery {
+            from_virt_ps: Some(15),
+            to_virt_ps: Some(25),
+            ..LogQuery::default()
+        },
+        10,
+    );
+    assert_eq!(in_range.len(), 1);
+    assert_eq!(in_range[0].msg, "i");
+}
+
+#[test]
+fn query_recent_is_pure_read() {
+    let mut buf = LogBuffer::new(0);
+    buf.log(LogLevel::Info, "C", "a", "", 10, 1);
+    buf.log(LogLevel::Warn, "C", "b", "E_X", 20, 2);
+
+    let before = buf.query(&LogQuery::default());
+    let first = buf.query_recent(&LogQuery::default(), 1);
+    let second = buf.query_recent(&LogQuery::default(), 1);
+    assert_eq!(first, second, "连续两次结果相同");
+    assert_eq!(buf.query(&LogQuery::default()), before, "缓冲内容没变");
+    assert_eq!(buf.len(), 2);
+    assert_eq!(buf.records_written(), 2);
+    assert_eq!(buf.overflow_count(), 0);
+}
+
+// ---------------------------------------------------------------------------
 // 补充用例（裁决 E / M 与通用语义）
 // ---------------------------------------------------------------------------
 
