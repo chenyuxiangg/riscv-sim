@@ -48,7 +48,7 @@
 | **F6** | `tools/error_code_check.py` 的**码集合只从 Rust 侧定义来**（`parse_definitions` 只扫 `crates/**`）⇒ ⇒ 前端自产码只落进「**被点名但无定义**」⇒ ⇒ 「前端 × 内核撞号」判据**对它们恒绿** ⇒ ⇒ **零判别力** | `tools/error_code_check.py`：`def parse_definitions` / `def judge_front_kernel_collisions` |
 | **F7** | 前端那 12 个码**全是裸字面量字符串**（**无定义处**）⇒ ⇒ D-120 的「**唯一定义**」不变式对它们**结构上无法生效** | `front/services/m23_boardstore.js`：`protocolError("E_STORE-01", …)`；`front/services/m04_session.js`：`throw sessionError("E_CTX-11", "会话不存在")` |
 | **F8** | 契约层**已有** `CommandPayload::Admin { op: AdminOp }` 与 `AdminOp::{DrainLogs, KillGuest, PersistProject, Custom}` ⇒ ⇒ **空壳入口在** | `crates/contract/src/protocol.rs`：`pub enum CommandPayload` / `pub enum AdminOp` / `DrainLogs` / `KillGuest` / `PersistProject` |
-| **F9** | 宿主 `dispatch` 对 `CommandPayload::Admin { .. }` **一律**回 `EventPayload::Error`（码是 `E_CTX-05`）⇒ ⇒ **管理员通道接不上** | `crates/kernel/src/kernel_host/mod.rs`：`CommandPayload::Admin { .. } => vec![EventPayload::Error {` |
+| **F9** | 宿主 `dispatch` 对 `CommandPayload::Admin { .. }` **一律**回 `EventPayload::Error`（码是 `E_CTX-05`）⇒ ⇒ **管理员通道接不上** | `crates/kernel/src/kernel_host/mod.rs`：`CommandPayload::Admin { op } => self.on_admin(op)`；`fn on_admin(&mut self, op: AdminOp) -> Vec<EventPayload>` |
 | **F10** | 宿主**没有** `Role` 概念（契约层与 `kernel_host` 里 `Role` 零命中）；`KERNEL_CAP_BITS = 0b111` 是 **L1/L2/L3 调试能力分级**，与 admin 无关 ⇒ ⇒ 「会话的**能力面**」这句措辞**没有实现支撑** | `crates/kernel/src/kernel_host/mod.rs`：`pub const KERNEL_CAP_BITS: u64 = 0b111;` |
 | **F11** | M-21 的 `LogEntry` 有 **8** 个字段（`time_virt_ps` · `time_host_ms` · `session_id` · `level` · `ctx` · `err_code` · `msg` · `truncated`），查询 API 是 `query(&LogQuery) -> Vec<LogEntry>` 与 `query_recent(&LogQuery, n) -> Vec<LogEntry>`；契约层的十进制字符串策略 `numstr::u64_decimal` **现成** | `crates/kernel/src/m21_logging/mod.rs`：`pub struct LogEntry` / `pub fn query(` / `pub fn query_recent(`；`crates/contract/src/numstr.rs`：`pub mod u64_decimal` |
 | **F12** | 前端镜像 `front/lib/message.js` 已有 `SCHEMA_VERSION` / `EVENT_TOPIC`（**15** 个 topic）/ `protocolError(code, message)` / `Command.admin(op)` / `Event` 构造器组 ⇒ ⇒ **挂载点现成** | `front/lib/message.js`：`export const SCHEMA_VERSION` / `export const EVENT_TOPIC` / `export function protocolError` / `admin: (op) => ({ Admin: { op } })` |
@@ -419,7 +419,46 @@ F15 · D-132 留的「下一批订正」⇒ ⇒ 「two modules need to name」�
 
 ### §9.3 判别力**边界**的自查
 
-（待填）
+> ⚠️ **本节回答一个问题**：本批的门禁**抓不到**什么？⇒ ⇒ 「全绿」**不等于**「平台对」⇒ ⇒ 边界必须**写下来**，否则下一个人会误读「十六项全绿」。
+
+1. ⚠️ **规格自检（`stage29_check.py`）只检**规格文本** ⇒ ⇒ 它**不**证明平台真的做到了 ⇒ ⇒ 平台的判别力**全部**来自**三处**：**契约层 Rust 单测** · **内核 Rust 单测** · **前端 node 测试 + 工具夹具** ⇒ ⇒ ⇒ **别拿 §9 的红绿当平台行为的证据**。
+2. ⚠️ **工具的「前端服务层」扫描**覆盖 `front/services/` + `front/lib/` + `front/kernel-worker.js` ⇒ ⇒ **不覆盖**视图层（`front/views/**`）与 `front/dev/` ⇒ ⇒ **视图层里的裸字面量结构上抓不到** ⇒ ⇒ 本批**手工**改掉了 `front/views/components/memory-map.js` 里那个写死的版本号（它会被拼进给人看的说明文字 ⇒ ⇒ 不改就是**撒谎**）⇒ ⇒ 但**没有**工具钉住它 ⇒ ⇒ **已知覆盖缺口**。
+3. ⚠️ **wasm（浏览器内）形态下管理通道默认关** ⇒ ⇒ **浏览器真机门禁碰不到它** ⇒ ⇒ **真机层对 admin 的覆盖是空的** ⇒ ⇒ （§10 第 7 条已登记）⇒ ⇒ 本批**没有任何真机层证据**。
+4. ⚠️ **「谁有资格开管理通道」没做**（D-131）⇒ ⇒ 闸门只是**一个布尔开关** ⇒ ⇒ 「谁能开」这件事**没有**用例能覆盖 ⇒ ⇒ **结构上不可测**（平台里**没有**那个概念可供测）⇒ ⇒ 而且 `admin_enabled` **仓内没有任何调用点** ⇒ ⇒ 管理通道**实际不可达**。
+5. ⚠️ **`AdminOp::Custom(String)` 的 `"diag"` 是字符串约定不是类型** ⇒ ⇒ 一个**拼错**的 op 会**静默**回 `E_CTX-05` ⇒ ⇒ ⇒ **没有**用例能区分「拼错了」与「这个 op 没实现」⇒ ⇒ 这是本批**有意**保留的缺口（§10 第 4 条）⇒ ⇒ 若将来加第二个 admin op，**必须**换掉这个约定。
+6. ⚠️ **`E_CTX-05` 的「两侧同义」靠的是同一个字符串** ⇒ ⇒ 而**跨层 fixture 里没有那个码**（fixture 钉的是两个 DTO 的形状）⇒ ⇒ ⇒ 若某一侧偷偷改了那个码串，**跨层一致性用例抓不到** ⇒ ⇒ ⇒ 真正钉住它的是**别处**：内核侧那条「渲染结果与旧串逐字相同」的断言 + 前端常量表那条 + 规格自检的 7g-② ⇒ ⇒ ⇒ **三处**才够 ⇒ ⇒ **一处不算**。
+7. ⚠️ **日志导出的上界取值（256）是写死的** ⇒ ⇒ 用例钉的是「**有条数上界**」这个**性质**，**不是**「恰好 256 条」这个**数值** ⇒ ⇒ 钉数值是**耦合**⇒ ⇒ 数值一改语义不变 ⇒ ⇒ ⇒ 那是**对照**不是**判别** ⇒ ⇒ ⇒ 本批**刻意不**钉数值。
+8. ⚠️ **「截断明确告知」的实现方式是「宿主往 M-21 环里写一条 WARN 级说明 + 一个计数」** ⇒ ⇒ 用例钉的是「**截断发生时环里多了一条说明**」⇒ ⇒ 但「**人是否真的看得到**」**不在**机器可测的范围 ⇒ ⇒ ⇒ 「不静默」这条**只做到可观测**，**没做到可读性**。
+9. ⚠️ **台账兜底（`FALLBACK_LEDGER_ROWS`）是「原文与源码都可能找得到」** ⇒ ⇒ 它**放宽**了 7e ⇒ ⇒ ⇒ 代价是：**一个落点可以靠台账活着** ⇒ ⇒ ⇒ 所以台账那一侧**必须**逐字记着那个形态（订正 8 已记）⇒ ⇒ ⇒ **放宽与收紧是一对**，不能只做一半。
+
+### 订正 7 · §4.1 的「**两张**码表」不够 ⇒ ⇒ 实测是**三张**
+
+- **规格原文**（§4.1 · 裁决 E）：「前端加**两张码表**（`FRONT_ERROR_CODES` = 前端自有 · `MIRRORED_ERROR_CODES` = 契约层镜像）⇒ ⇒ 裸字面量**判红**」。
+- **实测事实**：前端服务层**用到**的码里，**只有 11 个是前端自产的** ⇒ ⇒ 其余那些是 **Rust 侧定义**的码（契约层或内核 crate）⇒ ⇒ 而 C-2 要求「前端服务层**不许**留裸字面量」⇒ ⇒ 那些 Rust 侧码在前端**也必须有名字可引** ⇒ ⇒ ⇒ ⇒ **两张表装不下** ⇒ ⇒ ⇒ ⇒ 拆成**三张**：`FRONT_ERROR_CODES`（11 个前端自有码 = **定义处**）· `MIRRORED_ERROR_CODES`（`E_CTX-05`）· `RUST_ERROR_CODE_REFS`（其余 Rust 侧码的**引用名**，**不是**定义处）。
+- ⚠️ **裁决 E 的**意图**（前端服务层零裸字面量）**一字未动** ⇒ ⇒ 变的只是**表的张数** ⇒ ⇒ 而**多出来的那张**恰恰是「不是定义处」的那张 ⇒ ⇒ 「唯一定义」不变式**不受影响**。
+- **已改成**：前端镜像**已改成**三张表 ⇒ ⇒ 工具的「定义处」口径**只**认 `FRONT_ERROR_CODES`（**唯一**那张）⇒ ⇒ `MIRRORED_ERROR_CODES` 与 `RUST_ERROR_CODE_REFS` **都**不是定义处 ⇒ ⇒ 契约层 / 内核 crate 的码**不许**进 `FRONT_ERROR_CODES`（进去就触发「重复定义」）。
+- **谁钉住了它**：工具的新断言 ⑤（「前端服务层用到的码必须有定义处」）+ 断言 ④（「前端 × 内核撞号」）+ 前端用例 C-2 / C-3 + 规格自检的 7g-②（两张表的表体必须找得到）。
+
+### 订正 8 · §1.2 的 F7 落点与裁决 E **互斥** ⇒ ⇒ 落点改由**台账留痕**兜底
+
+- **规格原文**（§1.2 F7 的落点列）：`front/services/m04_session.js`：`throw sessionError("E_CTX-11", "会话不存在")`。
+- **实测事实**：那正是 C-2 **要求删掉**的裸字面量 ⇒ ⇒ **两者不可兼得** ⇒ ⇒ 而 7e 的跨层检查是**对文件原文做子串匹配、不区分注释与代码** ⇒ ⇒ ⇒ 若不处置 ⇒ ⇒ 规格要么**逼着**前端留裸字面量（破 C-2），要么**逼着**前端留一份「**为了过检查而存在的注释**」（⇒ ⇒ 那个检查**永远绿着** ⇒ ⇒ **零判别力**）。
+- **已改成**：走 STAGE-27 **已有**的机制（`FALLBACK_LEDGER_ROWS` = 台账兜底）⇒ ⇒ **F7 已加入**那张名单 ⇒ ⇒ F7 的落点**由台账留痕**兜底（D-129 的销账条目里**逐字**记着那个修前形态）⇒ ⇒ 而**源文件里不再留**那份「为了过检查而存在的注释」（只留一句「这里原先写的是裸字面量」的说明，**不带**旧句原文）⇒ ⇒ ⇒ 那个检查**真的**依赖台账 ⇒ ⇒ **有判别力**。
+- **谁钉住了它**：规格自检的 7e（`F7` 不在台账留痕里 ⇒ ⇒ **红**）⇒ ⇒ 与「台账写错字」这条失败路径**逐条**分开。
+
+### 订正 9 · 交底时给 lane 的**三个实测数字**订正
+
+- **「前端服务层用到 21 个码」** ⇒ ⇒ **口径错了** ⇒ ⇒ 实测：**代码里用到 16 个**（**含注释**被提到的是 20 个）⇒ ⇒ 而「用到的 16 个」里**只有 11 个是前端自产的** ⇒ ⇒ 其余 5 个是 Rust 侧定义（`E_CTX-03` · `E_CTX-05` · `E_DBG-01` · `E_PLT-13` · `E_PROTO-01/02/04/06/08` 中的被用到者）⇒ ⇒ ⚠️ **`E_CTX-03` 尤其容易误判** ⇒ ⇒ 它的定义处在**内核 crate**（`crates/kernel/src/m11_symbol/trace.rs`）⇒ ⇒ **不是**契约层 ⇒ ⇒ 也**不是**前端的。
+- **`RETAINED_BAND_CAPACITY` 在 M-21** ⇒ ⇒ **写错了** ⇒ ⇒ 实测它在 **M-22**（`crates/kernel/src/m22_hms/mod.rs`）⇒ ⇒ 内核侧导出上界取 **256**、与**它**同族。
+- **内核侧那个码串「自己拼一次」** ⇒ ⇒ **不必** ⇒ ⇒ 宿主**本来就有一个**统一的渲染点（`error_from`，宿主所有错误码共用的那一个）⇒ ⇒ **已改成**复用它 ⇒ ⇒ 于是宿主里 `format!("E_{}-{:02}")` **只有一处** ⇒ ⇒ 族名与场景号**各**只有一个落点。
+
+### 订正 10 · Lane C 的 C-2 判据**首版是空的** ⇒ ⇒ 被它自己的变异抓出来
+
+- **实测事实**：Lane C 写的「服务层无裸字面量」那条判据，用正则去抓**引号里裹着码**的写法 ⇒ ⇒ 首版的引号字符类**漏了外层捕获组** ⇒ ⇒ `\1` **没有组可回引** ⇒ ⇒ 退化成「匹配一个字面的 1」⇒ ⇒ ⇒ **一条都匹配不到** ⇒ ⇒ ⇒ **恒绿** ⇒ ⇒ ⇒ **零判别力**。
+- **怎么抓出来的**：**不是**靠人读 ⇒ ⇒ 是靠它自己的**变异自检**（MT4「把服务层退回裸字面量」）⇒ ⇒ **首轮 0 红** ⇒ ⇒ ⇒ 「变异打在被测路径真正走的分支上」这条纪律**救了它** ⇒ ⇒ 修好捕获组后**红 1 条**。
+- **已改成**：那条判据**已改成**带捕获组的形式 ⇒ ⇒ 并在源码里**写明**这个坑。
+- ⚠️ **一条可复用的判据**：**「自检脚本绿了」不是判别力证据** ⇒ ⇒ **「变异打上去它红不红」才是** ⇒ ⇒ 而「变异 0 红」有**两种**含义（① 这条路**没人测** ② 这条路**测了但判据是空的**）⇒ ⇒ ⇒ **两种都要查** ⇒ ⇒ ⇒ 前者查「测试树里有没有覆盖那条分支」，后者查「判据本身是不是恒真」。
+- **谁钉住了它**：Lane C 的 MT4 变异（改坏 ⇒ ⇒ **红 1 条**）。
 
 ---
 

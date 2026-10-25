@@ -170,10 +170,12 @@ export async function mountSession(options = {}) {
     async function closeSession() {
         if (session.state === "closed" || session.state === "idle") {
             if (session.id === null) {
-                // ⚠️ **v0.44 批（STAGE-29 · 裁决 E）之前**这里写的是裸字面量
-                //    `throw sessionError("E_CTX-11", "会话不存在")` ⇒ ⇒ 那个码
-                //    **没有定义处** ⇒ ⇒ 「唯一定义」对前端码结构上无法生效
-                //    ⇒ ⇒ 现在从 `FRONT_ERROR_CODES` 取 ⇒ ⇒ 定义处在前端。
+                // ⚠️ **v0.44 批（STAGE-29 · 裁决 E）之前**这里写的是**裸字面量**
+                //    ⇒ ⇒ 那个码**没有定义处** ⇒ ⇒ 「唯一定义」对前端码结构上
+                //    无法生效 ⇒ ⇒ 现在从 `FRONT_ERROR_CODES` 取 ⇒ ⇒ 定义处在前端。
+                //    ⚠️ **修前的那份逐字形态**记在台账 **D-129** 的销账条目里
+                //    ⇒ ⇒ **不**在这里再留一份 ⇒ ⇒ 否则规格的跨层检查会**永远
+                //    绿着** ⇒ ⇒ **零判别力**。
                 throw sessionError(FRONT_ERROR_CODES["E_CTX-11"], "会话不存在");
             }
             return getSession();

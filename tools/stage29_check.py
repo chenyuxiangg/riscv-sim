@@ -70,9 +70,15 @@ LEDGER_REL = "docs/reviews/REVIEWS.md"
 
 #: ⚠️ **哪些行允许「台账兜底」** —— 判据是「**这条事实是修前的，修掉它就必然
 #:    把它从源文件里删掉**」⇒ ⇒ 允许查「源文件**或** 台账」。
-#:    本批只有 F3：前端码表化**可能**让 `TRANSPORT_CHANNEL_ERROR_CODE` /
-#:    `HOST_ERROR_CODE` 这两个导出名消失 ⇒ ⇒ 允许台账留痕兜底。
-FALLBACK_LEDGER_ROWS = {"F3"}
+#:    * **F3**：前端码表化**可能**让 `TRANSPORT_CHANNEL_ERROR_CODE` /
+#:      `HOST_ERROR_CODE` 这两个导出名消失 ⇒ ⇒ 允许台账留痕兜底。
+#:    * **F7**：F7 的落点引的是**修前**的裸字面量形态
+#:      （`throw sessionError("E_CTX-11", "会话不存在")`）⇒ ⇒ 而本批的裁决 E
+#:      **要求**把那处裸字面量**删掉**（改走 `FRONT_ERROR_CODES`）⇒ ⇒
+#:      ⇒ **两者不可兼得** ⇒ ⇒ 落点由**台账留痕**兜底（D-129 的销账条目里
+#:      **逐字**记着那个修前形态）⇒ ⇒ 而**源文件**里**不许**再留一份
+#:      「为了过检查而存在的注释」⇒ ⇒ 否则那个检查**永远绿着**⇒ ⇒ **零判别力**。
+FALLBACK_LEDGER_ROWS = {"F3", "F7"}
 
 
 def err(msg):
