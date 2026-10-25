@@ -347,3 +347,68 @@ describe("板档案服务 · 存储门面（`createBoardStore`）", () => {
         assert.equal(PLATFORM_SCHEMA_VERSION, 1);
     });
 });
+
+// ---------------------------------------------------------------------------
+// STAGE-28 裁决 F —— 那三个错误改用 `protocolError`（**只多一个 `err.code`**）
+// ---------------------------------------------------------------------------
+
+describe("板档案服务 · 错误**带码**（STAGE-28 · 裁决 F · A-7）", () => {
+    test("E_STORE-01（存储不可用）⇒ 错误**带 `err.code`**（消息形状**不变**）", async () => {
+        const store = createBoardStore(createIndexedDbBackend());
+        assert.equal(store.supported, false);
+
+        const err = await store.put(boardEntry(DESC_A)).then(
+            () => null,
+            (e) => e,
+        );
+        assert.ok(err instanceof Error, "写操作必须明确失败");
+        assert.equal(err.code, "E_STORE-01", "前端终于能按码分派");
+        // ⚠️ **消息形状一个字都不许变** ⇒ ⇒ 既有断言（正则匹配消息）仍绿。
+        assert.equal(
+            err.message,
+            "E_STORE-01: 板档案存储不可用（没有 IndexedDB）⇒ 板只存在于本会话",
+        );
+    });
+
+    test("E_STORE-02（条目缺合法 id）⇒ 错误**带 `err.code`**（消息形状**不变**）", async () => {
+        const store = createBoardStore(createMemoryBackend());
+
+        const err = await store.put({ id: "" }).then(
+            () => null,
+            (e) => e,
+        );
+        assert.ok(err instanceof Error, "缺 id 必须明确失败");
+        assert.equal(err.code, "E_STORE-02", "前端终于能按码分派");
+        assert.equal(
+            err.message,
+            "E_STORE-02: 板档案条目缺少合法的 id（主键就是描述的 id）",
+        );
+    });
+
+    test("E_STORE-03（缺 backend）⇒ 错误**带 `err.code`**（消息形状**不变**）", () => {
+        // ⚠️ **两条触发路径**（backend 根本不是对象 / backend 缺方法）⇒ ⇒
+        // 两条都必须是**同一个码**（⇒ ⇒ 上层一个 `err.code` 分支就够）。
+        for (const bad of [null, undefined, 42, { list: () => [] }]) {
+            const err = (() => {
+                try {
+                    createBoardStore(bad);
+                    return null;
+                } catch (e) {
+                    return e;
+                }
+            })();
+            assert.ok(err instanceof Error, "缺 backend 必须明确失败");
+            assert.equal(err.code, "E_STORE-03", "前端终于能按码分派");
+            assert.equal(
+                err.message,
+                "E_STORE-03: createBoardStore 需要一个 backend（list / put / remove）",
+            );
+        }
+    });
+
+    test("（对照）**成功路径**不抛错 ⇒ ⇒ 那三个码**只在失败时**出现", async () => {
+        const store = createBoardStore(createMemoryBackend());
+        await store.put(boardEntry(DESC_A));
+        assert.deepEqual((await store.list()).map((row) => row.id), ["board-a"]);
+    });
+});
