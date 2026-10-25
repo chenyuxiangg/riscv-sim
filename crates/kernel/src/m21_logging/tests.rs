@@ -781,3 +781,73 @@ fn export_of_empty_buffer_still_has_the_header() {
     let json = buf.export_json(&LogQuery::default());
     assert_eq!(json.trim(), "[]");
 }
+
+// ---------------------------------------------------------------------------
+// 跨进程形状（契约 v8 · STAGE-29 · D-129 · 裁决 I）
+// ---------------------------------------------------------------------------
+
+/// 转换住在 **M-21**（日志条目是**它**拥有的形状）⇒ ⇒ 契约层不依赖内核。
+#[test]
+fn the_log_entry_dto_mirrors_the_kernel_entry_field_by_field() {
+    let entry = LogEntry {
+        time_virt_ps: 12_345,
+        time_host_ms: 67,
+        session_id: 3,
+        level: LogLevel::Warn,
+        ctx: "m21-logging".to_string(),
+        err_code: "E_CTX-07".to_string(),
+        msg: "一条日志".to_string(),
+        truncated: true,
+    };
+    let dto = entry.to_dto();
+    assert_eq!(dto.time_virt_ps, 12_345);
+    assert_eq!(dto.time_host_ms, 67);
+    assert_eq!(dto.session_id, 3);
+    assert_eq!(dto.level, "WARN", "级别取**内核自己的拼写**（大写）");
+    assert_eq!(dto.ctx, "m21-logging");
+    assert_eq!(dto.err_code, Some("E_CTX-07".to_string()));
+    assert_eq!(dto.msg, "一条日志");
+    assert!(dto.truncated);
+}
+
+/// ⚠️ **空串 ⇒ `None`**（「没有码」≠「空码」）—— 这一条是 DTO 与内核形状
+/// **唯一**的类型差异 ⇒ ⇒ 不钉住它就会把「没有码」传成「空码」。
+#[test]
+fn an_empty_err_code_becomes_none() {
+    let entry = LogEntry {
+        time_virt_ps: 0,
+        time_host_ms: 0,
+        session_id: 0,
+        level: LogLevel::Info,
+        ctx: "c".to_string(),
+        err_code: String::new(),
+        msg: "m".to_string(),
+        truncated: false,
+    };
+    assert_eq!(entry.to_dto().err_code, None);
+}
+
+/// 五个级别的**拼写**逐个钉住（线上就是这五个字符串 · **没有** `fatal`）。
+#[test]
+fn every_level_travels_with_the_kernel_spelling() {
+    let spellings = [
+        (LogLevel::Trace, "TRACE"),
+        (LogLevel::Debug, "DEBUG"),
+        (LogLevel::Info, "INFO"),
+        (LogLevel::Warn, "WARN"),
+        (LogLevel::Error, "ERROR"),
+    ];
+    for (level, spelling) in spellings {
+        let entry = LogEntry {
+            time_virt_ps: 0,
+            time_host_ms: 0,
+            session_id: 0,
+            level,
+            ctx: "c".to_string(),
+            err_code: String::new(),
+            msg: "m".to_string(),
+            truncated: false,
+        };
+        assert_eq!(entry.to_dto().level, spelling);
+    }
+}
