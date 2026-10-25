@@ -5,7 +5,8 @@
 //   C-1 `draftFromDescription` → `draftToDescription` 往返 ⇒ `wiring` **逐字段**保留
 //   C-2 草稿里 `wiring` 的**多余键** ⇒ ⇒ **不**进契约产物
 //   C-3 前端镜像的 `PLATFORM_RULES_VERSION` = **3**
-//       （`SCHEMA_VERSION` **仍 7**、`PLATFORM_SCHEMA_VERSION` **仍 1**）
+//       （`PLATFORM_SCHEMA_VERSION` **仍 1**；`SCHEMA_VERSION` 在 v0.44 批
+//       因管理员通道的回复侧升到了 **8**）
 //   C-5 **仅** `wiring` 不同（其余相同）⇒ 计划为**整份** `SetMemoryMap`
 //       （差量契约里**没有** wiring 操作 ⇒ 差量路径**表达不了**）⇒ ⇒
 //       ⇒ `wiring` 的改动**必须**能提交出去
@@ -489,7 +490,11 @@ describe("规则集版本 · 前端镜像（C-3）", () => {
     });
 
     test("C-3 另外两个版本号**一个都不升**", () => {
-        assert.equal(message.SCHEMA_VERSION, 7, "契约信封版本必须仍是 7（零信封变更）");
+        assert.equal(
+            message.SCHEMA_VERSION,
+            8,
+            "契约信封版本是 8（v0.44 批加了管理员通道的回复侧：AdminLogs / AdminDiag）",
+        );
         assert.equal(
             message.PLATFORM_SCHEMA_VERSION,
             1,

@@ -104,8 +104,11 @@ export { PLATFORM_SCHEMA_VERSION };
  * ⚠️ **v0.31（契约 v7）**：它跟着 `front/lib/message.js` 的
  * `SCHEMA_VERSION` 走 ⇒ 契约层升版时**这里也要跟着改**（否则面板上的
  * 文案会撒谎）。
+ *
+ * ⚠️ **v0.44（契约 v8）**：管理员通道的**回复侧**（`AdminLogs` /
+ * `AdminDiag`）⇒ ⇒ 信封版本 **7 → 8** ⇒ ⇒ 文案跟着改。
  */
-export const CONTRACT_SCHEMA_VERSION = 7;
+export const CONTRACT_SCHEMA_VERSION = 8;
 
 /** 器件类型（`DeviceSpec` 的四个变体，snake_case 线上名）。 */
 export const DEVICE_KINDS = Object.freeze(["gpio", "uart16550", "clint", "plic"]);
