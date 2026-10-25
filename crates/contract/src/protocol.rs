@@ -435,8 +435,19 @@ impl From<CommandPayload> for Payload {
     }
 }
 
-/// Reserved admin / sysadmin operations (M-22 + M-23 + M-21). Always
-/// gated by an admin role check on the receiving side.
+/// Reserved admin / sysadmin operations (M-22 + M-23 + M-21).
+///
+/// ⚠️ **Gated by the receiving side's own switch** ⇒ ⇒ the contract
+/// layer carries **no** role / token concept ⇒ ⇒ the host's
+/// `admin_enabled` flag (default **off**) decides whether the channel
+/// answers at all ⇒ ⇒ **who** is allowed to turn it on is a **separate**
+/// ledger item (**D-131**) ⇒ ⇒ **not** implemented here.
+///
+/// ⚠️ **v0.44** (STAGE-29 · 裁决 L) rewrote this paragraph ⇒ ⇒ the
+/// previous wording promised a check that **does not exist** anywhere
+/// in the platform ⇒ ⇒ **the behaviour never changed** (only the prose)
+/// ⇒ ⇒ and the previous sentence is **gone** (⛔ it is **not** quoted
+/// here either ⇒ ⇒ so that this file cannot reintroduce it by accident).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdminOp {
     /// Dump the kernel log buffer (M-21).
@@ -754,6 +765,53 @@ mod tests {
     #[test]
     fn the_schema_version_is_eight() {
         assert_eq!(crate::SCHEMA_VERSION, 8);
+    }
+
+    /// `AdminOp`'s **doc** must not promise a check the platform does
+    /// not have.
+    ///
+    /// ⚠️ The old wording promised an admin-role gate on the receiving
+    /// side ⇒ ⇒ but the platform has **no role concept at all** (the
+    /// ledger's **D-131** is still open) ⇒ ⇒ the gate is the **host's
+    /// own switch** ⇒ ⇒ the prose had to change ⇒ ⇒ **the behaviour
+    /// never changed** (only the prose).
+    ///
+    /// ⚠️ The check is scoped to **the enum's own doc block** ⇒ ⇒ a
+    /// whole-file scan would hit **this test's own source** ⇒ ⇒ and a
+    /// test that can only fail is not a test.
+    #[test]
+    fn the_admin_op_documentation_does_not_promise_a_role_check() {
+        let source = include_str!("protocol.rs");
+        let (before_enum, _) = source
+            .split_once("pub enum AdminOp")
+            .expect("the AdminOp enum");
+        let mut doc_lines: Vec<&str> = Vec::new();
+        for line in before_enum.lines().rev() {
+            if line.trim_start().starts_with("///") {
+                doc_lines.push(line);
+            } else if line.trim_start().starts_with("#[") {
+                // An attribute (`#[derive(...)]`) may sit between the doc
+                // block and the item ⇒ ⇒ skip it, do not stop there.
+                continue;
+            } else {
+                break;
+            }
+        }
+        doc_lines.reverse();
+        let doc = doc_lines.join("\n");
+        assert!(!doc.is_empty(), "AdminOp must keep a doc block of its own");
+        assert!(
+            !doc.contains("role check"),
+            "AdminOp's documentation still promises a role check that does not exist"
+        );
+        assert!(
+            doc.contains("the receiving side's own switch"),
+            "AdminOp's documentation must state that the host's own switch gates the channel"
+        );
+        assert!(
+            doc.contains("D-131"),
+            "AdminOp's documentation must point at the open ledger item for the missing role check"
+        );
     }
 
     /// The three commands contract v2 adds (D-32 gaps 1, 2, 3).
