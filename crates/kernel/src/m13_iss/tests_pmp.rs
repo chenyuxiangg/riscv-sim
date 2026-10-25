@@ -30,12 +30,33 @@
 //! ⚠️ 未对齐的 4 字节访问**跨过** 4 字节块边界 ⇒ ⇒ 参考侧**逐片**判 ⇒ ⇒
 //! 平台的旧规则（「决定条目必须覆盖访问的**全部**字节」）**两侧都错** ⇒ ⇒
 //! 这一节把新规则钉住，并给每条用例配**必要对照**。
+//!
+//! ## v0.40：PMP 的**特权口径**（D-153）
+//!
+//! ⚠️ 有效特权级 = `MPRV` ? `MPP` : 当前特权级（**取指永远用当前特权级**）⇒ ⇒
+//! 旧口径塌缩成「只看 `MPRV`」⇒ ⇒ 两个方向都错 ⇒ ⇒ 这一节把**四格**钉住。
+//!
+//! ⚠️ **四格各自的判别力**（**变异实测**：把内核改回旧的「只看 `MPRV`」口径
+//! 之后跑这一节）：
+//!
+//! * `(a)` M 模式 + `MPRV` = 0 ⇒ ⇒ 旧实现**也**放行 ⇒ ⇒ **零判别力**
+//!   ⇒ ⇒ 它是 `(b)` 的**控制组**；
+//! * `(b)` M 模式 + `MPRV` = 1 且 `MPP` = 3 ⇒ ⇒ 旧实现**拒** / 新实现**放行**
+//!   ⇒ ⇒ **有判别力**（旧口径「过严」的那一格）；
+//! * `(c)` M 模式 + `MPRV` = 1 且 `MPP` = 0 ⇒ ⇒ 旧实现**也**拒 ⇒ ⇒ 对旧口径
+//!   **零判别力** ⇒ ⇒ 但它**钉住**「`MPRV` = 1 ⇒ ⇒ 不等于 M」这条 ⇒ ⇒ 它是
+//!   `(b)` 的**控制组**；
+//! * `(d)` **S 模式** + `MPRV` = 0 ⇒ ⇒ 旧实现**放行** / 新实现**拒** ⇒ ⇒ **有
+//!   判别力** ⇒ ⇒ ⚠️ 而且是**安全方向**的那一条（旧实现 ⇒ ⇒ S 模式的代码能写
+//!   它不该写的内存）。
 
 use riscv_sim_contract::csr::{
-    PmpAccess, CSR_MSTATUS, CSR_PMPADDR0, CSR_PMPCFG0, MSTATUS_MPRV_BIT,
+    PmpAccess, CSR_MSTATUS, CSR_PMPADDR0, CSR_PMPCFG0, MSTATUS_MPP_M, MSTATUS_MPP_SHIFT,
+    MSTATUS_MPP_U, MSTATUS_MPRV_BIT, PRIV_S,
 };
 use riscv_sim_contract::model::{SimState, WriteSize};
 
+use super::csr;
 use super::executor::{StepOutcome, TrapCause};
 use super::pmp::pmp_allows;
 use super::tests_common::*;
@@ -77,6 +98,24 @@ fn write_then_read(csr: u16, value: u32) -> u32 {
 fn set_mprv(h: &mut Harness, state: &mut SimState, pc: u32) {
     state.gpr[1] = 1u32 << MSTATUS_MPRV_BIT;
     h.step_one_at(state, pc, csrrs(CSR_MSTATUS, 1, 0));
+}
+
+/// 把 `mstatus` 写成「`MPP` = `mpp`，**`MPRV` = 0**」。
+///
+/// ⚠️ **为什么用 `csrw` 而不是 `csrrs`**：`csrrs` 只会**置位** ⇒ ⇒ 摆不出
+/// 「`MPP` = 0」那一种 ⇒ ⇒ 这一节要**显式**摆 `MPP` ⇒ ⇒ 写整个寄存器。
+fn set_mpp(h: &mut Harness, state: &mut SimState, pc: u32, mpp: u32) {
+    state.gpr[1] = mpp << MSTATUS_MPP_SHIFT;
+    h.step_one_at(state, pc, csrw(CSR_MSTATUS, 1));
+}
+
+/// 把 `mstatus` 写成「`MPRV` = 1 **且** `MPP` = `mpp`」。
+///
+/// ⚠️ **为什么用 `csrw` 而不是 `csrrs`**：`csrrs` 只会**置位** ⇒ ⇒ 摆不出
+/// 「`MPP` = 0」那一种 ⇒ ⇒ 这一节要**显式**摆 `MPP` ⇒ ⇒ 写整个寄存器。
+fn set_mprv_and_mpp(h: &mut Harness, state: &mut SimState, pc: u32, mpp: u32) {
+    state.gpr[1] = (1u32 << MSTATUS_MPRV_BIT) | (mpp << MSTATUS_MPP_SHIFT);
+    h.step_one_at(state, pc, csrw(CSR_MSTATUS, 1));
 }
 
 /// Configure entry 0 (`pmpaddr0` + the byte 0 of `pmpcfg0`).
@@ -643,4 +682,231 @@ fn a_straddling_load_into_a_deny_entry_traps() {
         outcome
     );
     assert_eq!(state.gpr[3], 0xaaaa_aaaa, "对齐读读回的是它自己那个字");
+}
+
+// ---------------------------------------------------------------------------
+// v0.40 —— **有效特权级**（D-153 · PMP 的特权口径）
+// ---------------------------------------------------------------------------
+//
+// ⚠️ 这一节的四格**互相只差一个变量** ⇒ ⇒ 它们合起来就是**必要对照**：
+//
+// | 格 | 当前特权级 | `MPRV` | `MPP` | 有效特权级 | 判决 |
+// | --- | --- | --- | --- | --- | --- |
+// | (a) | M | 0 | 任意 | **M** | **放行** |
+// | (b) | M | 1 | M | **M** | **放行** |
+// | (c) | M | 1 | U | **U** | **拒** |
+// | (d) | **S** | 0 | 任意 | **S** | **拒** |
+//
+// ⚠️ **四格各自的判别力**（**变异实测**：把内核改回旧的「只看 `MPRV`」口径之后
+// 跑这一节 ⇒ ⇒ 红的正好是 `(b)` 与 `(d)` 这两格 + 「S 模式取指」那一条）：
+//
+// * `(a)` 旧实现**也**放行 ⇒ ⇒ 零判别力 ⇒ ⇒ 它是 `(b)` 的**控制组**；
+// * `(b)` 旧实现**拒** / 新实现**放行** ⇒ ⇒ 有判别力（旧口径「过严」那格）；
+// * `(c)` 旧实现**也**拒 ⇒ ⇒ 对旧口径零判别力 ⇒ ⇒ 它钉住「`MPRV` = 1 ⇒ ⇒
+//   **不等于** M」⇒ ⇒ 它是 `(b)` 的**控制组**；
+// * `(d)` 旧实现**放行** / 新实现**拒** ⇒ ⇒ 有判别力 ⇒ ⇒ ⚠️ 而且是**安全
+//   方向**的那一条（旧实现 ⇒ ⇒ S 模式的代码能写它不该写的内存）。
+
+/// **(a)** —— **M 模式 + `MPRV` = 0** ⇒ ⇒ 有效特权级是 **M** ⇒ ⇒ 豁免 ⇒ ⇒
+/// **放行**。
+///
+/// ⚠️ **控制组**：`(b)` 与它**只差 `MPRV`** ⇒ ⇒ 「M 模式一律被拒」的实现过不了
+/// 这一对。
+#[test]
+fn an_m_mode_access_is_exempt_when_mprv_is_clear_whatever_mpp_says() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    // 条目 0 = NA4 @ 0x200，只有 `R`（没有 `W`）⇒ ⇒ 若被检查，写必被拒。
+    configure_entry0(&mut h, &mut state, BASE, DATA >> 2, 0x11);
+    // `MPRV` = 0 ⇒ ⇒ `MPP` 摆成什么都**不**影响有效特权级 ⇒ ⇒ 这里摆成 M。
+    set_mpp(&mut h, &mut state, BASE + 8, MSTATUS_MPP_M);
+    let outcome = store_to_data(&mut h, &mut state, BASE + 12);
+    assert!(
+        matches!(outcome, StepOutcome::Advanced),
+        "MPRV = 0 ⇒ ⇒ 有效特权级 = 当前特权级 = M ⇒ ⇒ 豁免（实际 {:?}）",
+        outcome
+    );
+}
+
+/// **(b)** —— **M 模式 + `MPRV` = 1 + `MPP` = 3（M）** ⇒ ⇒ 有效特权级是
+/// **M** ⇒ ⇒ 豁免 ⇒ ⇒ **放行**。
+///
+/// ⚠️ **这条是旧实现错的那一格**（旧口径只看 `MPRV` ⇒ ⇒ `MPRV` = 1 ⇒ ⇒ 一律
+/// 受检 ⇒ ⇒ 拒）⇒ ⇒ 它与 `(a)` 构成**必要对照**（只差 `MPRV`）⇒ ⇒ 也能钉住
+/// 「`MPRV` = 1 就一定被拒」那个写法。
+#[test]
+fn an_m_mode_access_is_exempt_when_mprv_is_set_and_mpp_is_machine() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_entry0(&mut h, &mut state, BASE, DATA >> 2, 0x11);
+    set_mprv_and_mpp(&mut h, &mut state, BASE + 8, MSTATUS_MPP_M);
+    let outcome = store_to_data(&mut h, &mut state, BASE + 12);
+    assert!(
+        matches!(outcome, StepOutcome::Advanced),
+        "MPRV = 1 且 MPP = 3 ⇒ ⇒ 有效特权级 = M ⇒ ⇒ 豁免（实际 {:?}）",
+        outcome
+    );
+}
+
+/// **(c)** —— **M 模式 + `MPRV` = 1 + `MPP` = 0（U）** ⇒ ⇒ 有效特权级是
+/// **U** ⇒ ⇒ **施加 PMP** ⇒ ⇒ **拒**。
+///
+/// ⚠️ 它与 `(b)` **只差 `MPP`** ⇒ ⇒ 「`MPRV` = 1 ⇒ ⇒ 一律 M 模式豁免」与
+/// 「`MPRV` = 1 ⇒ ⇒ 一律受检」这两个写法**都过不了**这一对。
+#[test]
+fn an_m_mode_access_is_checked_when_mprv_is_set_and_mpp_is_user() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_entry0(&mut h, &mut state, BASE, DATA >> 2, 0x11);
+    set_mprv_and_mpp(&mut h, &mut state, BASE + 8, MSTATUS_MPP_U);
+    let outcome = store_to_data(&mut h, &mut state, BASE + 12);
+    match outcome {
+        StepOutcome::Trapped { cause } => {
+            assert_eq!(cause, TrapCause::StoreAccessFault);
+            assert_eq!(cause.mcause(), 7, "store access fault 的 mcause 是 7");
+        }
+        other => panic!(
+            "MPRV = 1 且 MPP = 0 ⇒ ⇒ 有效特权级 = U ⇒ ⇒ 必须被拒（实际 {:?}）",
+            other
+        ),
+    }
+    assert_eq!(csr_value(&state, 0x343), DATA, "mtval 必须是出错地址");
+}
+
+/// **(d)** —— **S 模式 + `MPRV` = 0** ⇒ ⇒ 有效特权级是 **S** ⇒ ⇒ **施加
+/// PMP** ⇒ ⇒ **拒**。
+///
+/// ⚠️ **这一格是旧实现错得最厉害的那一格**：旧口径只看 `MPRV` ⇒ ⇒ `MPRV` = 0
+/// ⇒ ⇒ 豁免 ⇒ ⇒ **放行** ⇒ ⇒ ⚠️ **安全方向的漏洞**（S 模式的代码能写它不该写
+/// 的内存）⇒ ⇒ 它与 `(a)` **只差当前特权级** ⇒ ⇒ 构成**必要对照**。
+///
+/// ⚠️ **取指也要能被允许**：S 模式下**执行**这条指令 ⇒ ⇒ 取指落在条目 0 里
+/// ⇒ ⇒ 条目 0 必须给 `X` ⇒ ⇒ 否则先撞上的是「取指被拒」而不是「写被拒」。
+#[test]
+fn a_supervisor_mode_access_is_checked_even_when_mprv_is_clear() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    // 条目 0 = NAPOT 4 KiB @ 0x1000（代码那块），带 `X` ⇒ ⇒ S 模式的取指被允许。
+    // 条目 1 = NA4 @ 0x200（DATA），只有 `R`（没有 `W`）⇒ ⇒ S 模式的写被拒。
+    configure_entry0(&mut h, &mut state, BASE, (BASE >> 2) | 0x1ff, 0x1d);
+    configure_entry1(&mut h, &mut state, BASE + 4, DATA >> 2, 0x1d, 0x11);
+    // 切到 S 模式（`MPRV` = 0 ⇒ ⇒ 有效特权级 = 当前特权级 = S）。
+    csr::priv_set(&mut state, PRIV_S);
+    let outcome = store_to_data(&mut h, &mut state, BASE + 8);
+    match outcome {
+        StepOutcome::Trapped { cause } => {
+            assert_eq!(cause, TrapCause::StoreAccessFault);
+            assert_eq!(cause.mcause(), 7, "store access fault 的 mcause 是 7");
+        }
+        other => panic!("S 模式 ⇒ ⇒ PMP 必须被施加 ⇒ ⇒ 写被拒（实际 {:?}）", other),
+    }
+    assert_eq!(csr_value(&state, 0x343), DATA, "mtval 必须是出错地址");
+}
+
+/// ⚠️ **安全方向的护栏**（端到端）：**S 模式** + `MPRV` = 1 + `MPP` = 3（M）
+/// ⇒ ⇒ 有效特权级**必须**是 **S** ⇒ ⇒ PMP **必须**被施加 ⇒ ⇒ 写被拒。
+///
+/// ⚠️ **为什么这一格是必须的**：那个状态**guest 代码走不到**（进 S 模式要求
+/// `MPP` = S，而 `mret` 不改 `MPP`）⇒ ⇒ **但是它能从「快照恢复」到达**
+/// （`mstatus` 与伪 CSR `CSR_PRIV` **都在快照里**）⇒ ⇒ 若有效特权级被抬到 M
+/// ⇒ ⇒ 豁免 PMP ⇒ ⇒ ⚠️ **安全方向的洞** ⇒ ⇒ `MPRV` 必须**带门**。
+///
+/// ⚠️ **判别力**：对「`MPRV` 不带门」那个写法**恒红** ⇒ ⇒ 「门开反了」也红。
+#[test]
+fn mprv_does_not_lift_a_supervisor_mode_access_to_machine_level() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    // 条目 0 = NAPOT 4 KiB @ 0x1000（代码那块），带 `X` ⇒ ⇒ S 模式的取指被允许。
+    // 条目 1 = NA4 @ 0x200（DATA），只有 `R`（没有 `W`）⇒ ⇒ S 模式的写被拒。
+    configure_entry0(&mut h, &mut state, BASE, (BASE >> 2) | 0x1ff, 0x1d);
+    configure_entry1(&mut h, &mut state, BASE + 4, DATA >> 2, 0x1d, 0x11);
+    // `MPRV` = 1 且 `MPP` = 3（M）⇒ ⇒ **M 模式**下有效特权级是 M ⇒ ⇒ 豁免。
+    set_mprv_and_mpp(&mut h, &mut state, BASE + 8, MSTATUS_MPP_M);
+    // 切到 S 模式 ⇒ ⇒ `MPRV` **不再生效**（门）⇒ ⇒ 有效特权级**恒**是 S。
+    csr::priv_set(&mut state, PRIV_S);
+    let outcome = store_to_data(&mut h, &mut state, BASE + 12);
+    match outcome {
+        StepOutcome::Trapped { cause } => {
+            assert_eq!(cause, TrapCause::StoreAccessFault);
+            assert_eq!(cause.mcause(), 7, "store access fault 的 mcause 是 7");
+        }
+        other => panic!(
+            "S 模式 ⇒ ⇒ MPRV 不生效 ⇒ ⇒ 有效特权级 = S ⇒ ⇒ 必须被拒（实际 {:?}）",
+            other
+        ),
+    }
+    assert_eq!(csr_value(&state, 0x343), DATA, "mtval 必须是出错地址");
+}
+
+/// ⚠️ **取指在 S 模式下不被豁免** —— `MPRV` **不**影响取指（F11）⇒ ⇒ 取指的
+/// 有效特权级 = **当前特权级** ⇒ ⇒ S 模式的取指**要**过 PMP ⇒ ⇒ 落在没有 `X`
+/// 权限的条目里 ⇒ ⇒ 拒。
+///
+/// ⚠️ **控制组**：同一个条目，**M 模式** ⇒ ⇒ 豁免 ⇒ ⇒ 放行 ⇒ ⇒ 「取指永远被
+/// 拒」的实现过不了这一对。
+#[test]
+fn an_instruction_fetch_is_not_exempt_in_supervisor_mode() {
+    // 条目 0 = NAPOT 4 KiB @ 0x2000，**没有 `X`** ⇒ ⇒ S 模式的取指被拒。
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_entry0(&mut h, &mut state, BASE, (FETCH_TARGET >> 2) | 0x1ff, 0x19);
+    csr::priv_set(&mut state, PRIV_S);
+    assert!(
+        !pmp_allows(&state, FETCH_TARGET, 4, PmpAccess::Fetch),
+        "S 模式 ⇒ ⇒ 取指**不**豁免 ⇒ ⇒ 没有 X 权限 ⇒ ⇒ 必须被拒"
+    );
+
+    // ⚠️ **控制组**：同一个条目，**M 模式** ⇒ ⇒ 豁免 ⇒ ⇒ 放行。
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_entry0(&mut h, &mut state, BASE, (FETCH_TARGET >> 2) | 0x1ff, 0x19);
+    assert!(
+        pmp_allows(&state, FETCH_TARGET, 4, PmpAccess::Fetch),
+        "M 模式 ⇒ ⇒ 取指豁免 ⇒ ⇒ 必须放行"
+    );
+}
+
+/// ⚠️ **M 模式下的取指不吃 `MPRV`** —— 取指的有效特权级 = **当前特权级**
+/// （F11）⇒ ⇒ `MPRV` = 1 且 `MPP` = 0（U）时 ⇒ ⇒ **取指**仍然**放行**
+/// （当前特权级是 M ⇒ ⇒ 豁免）⇒ ⇒ 而**同一状态**下的**数据访存**被**拒**
+/// （有效特权级 = U ⇒ ⇒ 施加 PMP）⇒ ⇒ 这两条断言**成对**，缺一不可：
+///
+/// * 只钉「取指放行」⇒ ⇒ 「`MPRV` 一律被忽略」的那个实现也能过；
+/// * 只钉「数据访存被拒」⇒ ⇒ 「`MPRV` 一律生效（包括取指）」的那个实现
+///   也能过。
+///
+/// ⚠️ **取指为什么落在条目 0 上**：条目 0 = NAPOT 4 KiB @ `FETCH_TARGET`，
+/// **只有 `R`**（既没有 `W`，也没有 `X`）⇒ ⇒ 若这条取指**要**过 PMP ⇒ ⇒
+/// 它必被拒 ⇒ ⇒ 「放行」这一条断言**只可能**来自「M 模式豁免」。
+///
+/// ⚠️ **数据访存为什么落在「没有条目命中」那一支**：`DATA` **不在**条目 0
+/// 的区间里 ⇒ ⇒ 这一条走的是「没有任何条目命中」那一支 ⇒ ⇒ 有效特权级是
+/// U 时**必拒**、是 M 时**必放行** ⇒ ⇒ 「被拒」这一条断言**只可能**来自
+/// 「`MPRV` 把数据访存的有效特权级换成了 `MPP`」。
+#[test]
+fn an_instruction_fetch_in_machine_mode_is_not_affected_by_mprv() {
+    let mut h = Harness::new();
+    let mut state = SimState::default();
+    configure_entry0(&mut h, &mut state, BASE, (FETCH_TARGET >> 2) | 0x1ff, 0x19);
+    // M 模式 + `MPRV` = 1 + `MPP` = 0（U）⇒ ⇒ **数据访存**的有效特权级是 U。
+    set_mprv_and_mpp(&mut h, &mut state, BASE + 8, MSTATUS_MPP_U);
+
+    // ---- 取指：有效特权级 = 当前特权级（M）⇒ ⇒ 豁免 ⇒ ⇒ 放行 ----------
+    assert!(
+        pmp_allows(&state, FETCH_TARGET, 4, PmpAccess::Fetch),
+        "取指的有效特权级 = 当前特权级（M）⇒ ⇒ MPRV 不影响取指 ⇒ ⇒ 必须放行"
+    );
+
+    // ---- 同一状态下的数据访存：有效特权级 = U ⇒ ⇒ 施加 PMP ⇒ ⇒ 拒 ----
+    let outcome = store_to_data(&mut h, &mut state, BASE + 12);
+    match outcome {
+        StepOutcome::Trapped { cause } => {
+            assert_eq!(cause, TrapCause::StoreAccessFault);
+            assert_eq!(cause.mcause(), 7, "store access fault 的 mcause 是 7");
+        }
+        other => panic!(
+            "MPRV = 1 且 MPP = 0 ⇒ ⇒ 数据访存的有效特权级 = U ⇒ ⇒ 必须被拒（实际 {:?}）",
+            other
+        ),
+    }
 }
