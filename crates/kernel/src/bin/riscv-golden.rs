@@ -81,7 +81,13 @@
 //!
 //! ## Output contract
 //!
-//! The last line is always `VERDICT <kind> [<detail>]`, where `<kind>`
+//! A run prints **two** lines on stdout, in this order:
+//!
+//! 1. `GOLDEN-STATS retired=<n> traps=<n> tohost=0x<addr>` —— the **run
+//!    statistics** (see below);
+//! 2. `VERDICT <kind> [<detail>]` —— the verdict.
+//!
+//! The last line is always the `VERDICT` line, where `<kind>`
 //! is one of:
 //!
 //! | kind        | meaning                                              |
@@ -95,6 +101,31 @@
 //! `2` = NOVERDICT, `3` = ERROR.  **Every** exit path prints a `VERDICT`
 //! line — including a malformed command line — so the shell harness can
 //! always parse the outcome.
+//!
+//! ## The `GOLDEN-STATS` line —— the **platform side's** observation source
+//!
+//! ⚠️ **Why it exists** (ledger **D-96**): a "hollow agreement" is a row
+//! where **both sides reach the same verdict** but the two sides **ran
+//! different programs** ⇒ ⇒ the agreement proves nothing ⇒ ⇒ it must be
+//! **machine-detectable**, not "spotted by reading the spec".
+//!
+//! The **reference** side's observation source is Spike's commit log
+//! (`spike -l --log-commits` ⇒ one line per committed instruction), so
+//! the **candidate** side has to publish the same quantity ⇒ ⇒ this line.
+//!
+//! | field     | meaning |
+//! |-----------|---------|
+//! | `retired` | instructions that **retired** (= committed) — a trapping instruction does **not** retire (STAGE-20 裁决 C), so this is directly comparable with Spike's **committed** count |
+//! | `traps`   | traps taken — comparable with Spike's `exception trap_*` lines |
+//! | `tohost`  | the address of the `tohost` word — the reference side's log records the verdict write at that address ⇒ ⇒ it is what lets the reader truncate the reference log **at the verdict** (the golden env ends with an endless `j .`, so the raw log is much longer than the program) |
+//!
+//! ⚠️ The line is **not** part of the verdict protocol ⇒ ⇒ the shell
+//! harness's `sed -n 's/^VERDICT //p'` still sees exactly one verdict
+//! line ⇒ ⇒ `tools/golden-run.sh` is unaffected.
+//!
+//! ⚠️ `--print-memory` prints **only** the window line ⇒ ⇒ that mode is
+//! still exactly one line of output (the reference side pastes it into
+//! Spike's `-m` verbatim).
 //!
 //! ## Scope note
 //!
@@ -353,6 +384,38 @@ impl Verdict {
     }
 }
 
+/// The **run statistics** — the platform side's observation source for
+/// the "hollow agreement" probe (ledger **D-96**).
+///
+/// ⚠️ **One landing spot**: the counters are filled **inside the run
+/// loop** ⇒ ⇒ `retired` counts exactly the instructions that committed
+/// (a trapping instruction does **not** retire ⇒ ⇒ it is counted in
+/// `traps`, not in `retired`) ⇒ ⇒ the number is directly comparable with
+/// the reference side's **committed** count.
+///
+/// ⚠️ `tohost` is filled as soon as the symbol is resolved ⇒ ⇒ it is
+/// known even when the run fails afterwards ⇒ ⇒ the reader can still
+/// truncate the reference log at the verdict write.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RunStats {
+    /// Instructions that **retired** (= committed).
+    retired: u64,
+    /// Traps taken.
+    traps: u64,
+    /// The address of the `tohost` word (`0` when it was never resolved).
+    tohost: u32,
+}
+
+impl RunStats {
+    /// The machine-readable one-liner the probe reads.
+    fn line(&self) -> String {
+        format!(
+            "GOLDEN-STATS retired={} traps={} tohost=0x{:08x}",
+            self.retired, self.traps, self.tohost
+        )
+    }
+}
+
 /// Parsed command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Config {
@@ -460,6 +523,11 @@ fn main() -> ExitCode {
         }
     };
 
+    // ⚠️ The statistics start at zero ⇒ ⇒ a run that dies before the
+    // image is loaded still reports an all-zero line (and `tohost = 0`
+    // ⇒ ⇒ "the `tohost` word was never resolved").
+    let mut stats = RunStats::default();
+
     // ⚠️ `--print-memory` is a **query**: it prints the window and exits
     // ⇒ ⇒ **no** VERDICT line ⇒ ⇒ stdout is exactly the one line the
     // reference side pastes into Spike's `-m`.
@@ -467,7 +535,11 @@ fn main() -> ExitCode {
         return print_memory();
     }
 
-    let verdict = run(&cfg);
+    let verdict = run(&cfg, &mut stats);
+    // ⚠️ The stats line comes **before** the verdict line ⇒ ⇒ "the last
+    // line is always the VERDICT line" still holds ⇒ ⇒ the shell harness
+    // is unaffected.
+    println!("{}", stats.line());
     println!("{}", verdict.line());
     ExitCode::from(verdict.exit_code())
 }
@@ -492,7 +564,12 @@ fn print_memory() -> ExitCode {
 }
 
 /// Load and run one image, returning its verdict.
-fn run(cfg: &Config) -> Verdict {
+///
+/// ⚠️ The **statistics** are filled in place ⇒ ⇒ every early return
+/// (load error, budget exhausted, …) still leaves a coherent line ⇒ ⇒
+/// the probe can tell "the run never happened" (all zeros) from "the run
+/// happened but retired nothing".
+fn run(cfg: &Config, stats: &mut RunStats) -> Verdict {
     // ⚠️ `--print-memory` never reaches here ⇒ ⇒ a path is always present
     // in a run ⇒ ⇒ the guard below is unreachable in practice (it is here
     // because the type says "maybe").
@@ -541,6 +618,9 @@ fn run(cfg: &Config) -> Verdict {
             Err(e) => return Verdict::Error(format!("symbols:{}", e.message)),
         },
     };
+    // ⚠️ The address is known from here on ⇒ ⇒ the probe can truncate the
+    // reference log at the verdict write even if the run dies later.
+    stats.tohost = tohost;
 
     if cfg.verbose {
         eprintln!(
@@ -684,6 +764,11 @@ fn run(cfg: &Config) -> Verdict {
                 // ⚠️ ** runaway 的兜底**：trap vector 自己再陷入 ⇒ 反复投递 ⇒
                 // 一直转到 `cfg.budget` 耗尽 ⇒ `Inconclusive`（NOVERDICT）——
                 // 这正是「程序发散」应有的判决，不是「平台故障」。
+                //
+                // ⚠️ **统计口径**：陷入的指令**不退休**（STAGE-20 裁决 C）
+                // ⇒ ⇒ 它**不**计入 `retired`，只计入 `traps` ⇒ ⇒ `retired`
+                // 与参考侧的**提交数**同一口径。
+                stats.traps += 1;
                 if cfg.verbose {
                     eprintln!(
                         "[golden] trap at pc=0x{:08x} cause={:?} -> mtvec",
@@ -691,7 +776,10 @@ fn run(cfg: &Config) -> Verdict {
                     );
                 }
             }
-            StepOutcome::Advanced => {}
+            StepOutcome::Advanced => {
+                // ⚠️ **退休 = 提交** ⇒ ⇒ 与参考侧的提交日志同一口径。
+                stats.retired += 1;
+            }
         }
     }
 }
@@ -1040,13 +1128,21 @@ mod tests {
             budget: 32,
             verbose: false,
         };
-        let verdict = run(&cfg);
+        let mut stats = RunStats::default();
+        let verdict = run(&cfg, &mut stats);
         let _ = std::fs::remove_file(&path);
         assert_eq!(
             verdict,
             Verdict::Inconclusive,
             "a program that never writes tohost must answer NOVERDICT"
         );
+        // ⚠️ **统计也要有意义**：预算耗尽 ⇒ ⇒ 每一步都**退休**（自环不陷入）
+        // ⇒ ⇒ 退休数 == 步数 == 预算 ⇒ ⇒ 「退休数」不是恒 0 的装饰。
+        assert_eq!(
+            stats.retired, 32,
+            "the runaway program retires one instruction per step"
+        );
+        assert_eq!(stats.traps, 0, "the runaway program never traps");
     }
 
     /// Load the image with M-06, then look the symbol up with M-11 —
