@@ -47,6 +47,12 @@ pub use executor::{
 /// "what a trap does to the architectural state" has one answer.
 pub use csr::enter_trap;
 
+/// The current **privilege level** —— `M` / `S` / `U`（STAGE-22）。
+///
+/// ⚠️ 它住在 CSR 文件里的**伪 CSR** `CSR_PRIV` 那一条 ⇒ ⇒ 快照天然一致
+/// ⇒ ⇒ **不升** `SIM_STATE_SCHEMA_VERSION`。
+pub use csr::{priv_get, priv_set};
+
 use self::executor::is_unmapped_access;
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{SimState, WriteSize};
@@ -388,6 +394,8 @@ mod tests_rv32c;
 mod tests_rv32i;
 #[cfg(test)]
 mod tests_rv32m;
+#[cfg(test)]
+mod tests_smode;
 
 #[cfg(test)]
 mod tests {

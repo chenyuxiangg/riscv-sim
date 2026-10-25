@@ -405,12 +405,18 @@ fn csrrci_with_a_zero_immediate_is_a_pure_read() {
 ///
 /// | 区间 | 含义 |
 /// | --- | --- |
-/// | `0x900..=0x9FF` | 用户级只读 custom |
+/// | `0x900..=0x9FF` | **监管者级可读写** custom（⚠️ **不是**只读） |
 /// | `0xA20..=0xA3F` | 机器级只读 standard |
 /// | `0xAA0..=0xABF` | 机器级只读 standard |
 /// | `0xB20..=0xB3F` | 机器级只读 custom |
 /// | `0xBA0..=0xBBF` | 机器级只读 custom |
 /// | `0xC00..=0xFFF` | 机器级只读（standard + custom）—— `bits[11:10] == 0b11` |
+///
+/// ⚠️ **`0x900..=0x9FF` 在 v0.38 之前被当成了只读区** —— 特权规范的地址
+/// 映射里 bits `[11:10] == 0b10` 是「**监管者级可读写**」⇒ ⇒ `scounteren`
+/// （`0x906`）被误判成只读 ⇒ ⇒ **写被吞掉** ⇒ ⇒ 计数器的使能链**永远接
+/// 不上**（实测 **F19**：置位之后 S 模式才读得到 `cycle`）⇒ ⇒ 那是一处
+/// **真 bug**，契约层已修（STAGE-22）。
 ///
 /// ⚠️ **判别力**：只读段里绝大多数 CSR 本平台**未实现** ⇒ ⇒ 它们的写
 /// 也会被「未实现 ⇒ 写被忽略」那条规则兜住 ⇒ ⇒ 光断言「写没进去」
@@ -436,11 +442,13 @@ fn a_write_to_a_read_only_csr_is_ignored() {
 ///
 /// ⚠️ 这些区间是**架构字面量**，**不是**从 `is_csr_read_only` 推出来的 ——
 /// 用实现自己的规则去挑样例 ⇒ ⇒ 判据会**自证** ⇒ ⇒ 规则改错了这条也绿。
+///
+/// ⚠️ **`0x900..=0x9FF` 不在里面** —— 那一段是「监管者级**可读写**」
+/// （见上一条的说明）。
 fn read_only_csr_addresses() -> Vec<u16> {
     let mut addrs = Vec::new();
     for range in [
-        0x900u16..=0x9FF,
-        0xA20..=0xA3F,
+        0xA20u16..=0xA3F,
         0xAA0..=0xABF,
         0xB20..=0xB3F,
         0xBA0..=0xBBF,
@@ -663,7 +671,13 @@ fn the_csr_file_stays_sorted_and_holds_one_entry_per_csr() {
         "被测的三次写之外不得有多余条目"
     );
     // Writing the same CSR again must **overwrite**, not append.
-    state.gpr[1] = 0x7777;
+    //
+    // ⚠️ **写进去的值取 `0x7774`** —— `mtvec` 的 MODE 字段（低 2 位）是
+    // **1 位 WARL**（实测 **F13**：写 2 ⇒ 读 0；写 3 ⇒ 读 1）⇒ ⇒ 写
+    // `0x7777` 会读回 **`0x7775`** ⇒ ⇒ 那条**合法化**由
+    // `m13_iss::tests_smode::the_tvec_mode_field_is_one_bit_warl` 单独钉住
+    // ⇒ ⇒ 这条用例只管「**覆盖**、不是**追加**」。
+    state.gpr[1] = 0x7774;
     h.step_one_at(&mut state, 0x1000, csr_insn(CSR_MTVEC, 1, F_CSRRW, 0));
     assert_eq!(
         csr_numbers_without_counters(&state),
@@ -672,7 +686,7 @@ fn the_csr_file_stays_sorted_and_holds_one_entry_per_csr() {
     );
     assert_eq!(
         csr_value(&state, CSR_MTVEC),
-        0x7777,
+        0x7774,
         "a second write must overwrite the value"
     );
 }
@@ -1496,9 +1510,13 @@ fn misa_is_not_stored_in_the_csr_file() {
 ///
 /// ⚠️ 断言要落在**两处**：文件里**没有**这一项（不是「存了 0」），
 /// 以及读回来是 **0**。
+///
+/// ⚠️ **样例必须是「本平台真的没实现」的 CSR** —— `medeleg`（`0x302`）与
+/// `mideleg`（`0x303`）在 **v0.38** 之后**已实现**（委托是 S 模式功能的
+/// 前提）⇒ ⇒ 它们**不能**再当「未实现」的样例。
 #[test]
 fn an_unimplemented_csr_ignores_the_write_and_reads_back_zero() {
-    for csr in [0x7A1u16, 0x7A2, 0x302, 0x303] {
+    for csr in [0x7A1u16, 0x7A2, 0x30A, 0x310] {
         let mut h = Harness::new();
         let mut state = state_with_csrs(&[]);
         state.gpr[1] = 0x0123_4567;

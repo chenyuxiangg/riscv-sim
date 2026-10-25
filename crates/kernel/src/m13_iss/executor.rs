@@ -13,7 +13,9 @@
 //! trapped, or paused at a breakpoint.
 
 use riscv_sim_contract::csr::{
-    csr_write_is_ignored, PmpAccess, CSR_MSTATUS, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT,
+    csr_write_is_ignored, PmpAccess, CAUSE_MACHINE_ECALL, CAUSE_SUPERVISOR_ECALL, CAUSE_USER_ECALL,
+    CSR_MSTATUS, MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_M, MSTATUS_MPP_S,
+    MSTATUS_MPP_SHIFT, MSTATUS_SIE_BIT, MSTATUS_SPIE_BIT, MSTATUS_SPP_BIT, PRIV_M, PRIV_S, PRIV_U,
 };
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{SimState, WriteSize};
@@ -122,6 +124,14 @@ pub enum TrapCause {
     /// Out-of-range physical address.
     OutOfRange,
     /// Environment call from M-mode (`mcause = 11`).
+    ///
+    /// ⚠️ **cause 的编号按当前特权级而定**（STAGE-22 裁决 K / **F19**）：
+    /// M ⇒ **11**，S ⇒ **9**，U ⇒ **8** ⇒ ⇒ 写 `mcause` 的那一步走
+    /// [`ecall_cause`]（**唯一**那张按级的表）⇒ ⇒ 这里给出的 **11** 是
+    /// **M 模式**那一个。
+    ///
+    /// ⚠️ **工具链把 `scall` 汇编成 `ecall`**（**F32**）⇒ ⇒ **不需要**新的
+    /// `SCALL` 操作码 ⇒ ⇒ 只需要**按当前特权级选 cause**。
     Ecall,
     /// Guest `EBREAK` (`mcause = 3`). Distinct from a *host* breakpoint
     /// inserted by M-08 (which M-17 checks **before** the fetch, so it
@@ -154,7 +164,8 @@ impl TrapCause {
     /// `0` instruction address misaligned · `1` instruction access fault ·
     /// `2` illegal instruction · `3` breakpoint · `4` load address
     /// misaligned · `5` load access fault · `6` store address misaligned ·
-    /// `7` store / AMO access fault · `11` environment call from M-mode.
+    /// `7` store / AMO access fault · `8` environment call from U-mode ·
+    /// `9` environment call from S-mode · `11` environment call from M-mode.
     ///
     /// ⚠️ The two **dead** variants have **no architectural code**:
     ///
@@ -478,6 +489,11 @@ pub enum Op {
     Csrrci,
     /// MRET — return from a machine-mode trap handler.
     Mret,
+    /// SRET — return from a supervisor-mode trap handler.
+    ///
+    /// ⚠️ **仅 S 模式**（STAGE-22 裁决 J）—— 在 M / U 模式 ⇒ ⇒ **cause 2**
+    /// （非法指令）。
+    Sret,
     /// WFI — wait for interrupt (`0x10500073`).
     ///
     /// ⚠️ **本平台把它实现成 nop**（退休、PC 前进、无副作用、无陷阱）——
@@ -594,15 +610,18 @@ pub fn classify(d: &Decoded) -> Option<Op> {
         //
         // `funct3 == 0b000` with an immediate other than 0 / 1 is the
         // **privileged** part of the opcode: `0x302` is MRET (the
-        // machine-mode trap return), `0x105` is WFI, `0x102` is
-        // SRET. This platform is **M-mode only** (STAGE-4 §3.6), so
-        // MRET and WFI are implemented and SRET stays illegal.
+        // machine-mode trap return), `0x105` is WFI, `0x102` is SRET.
+        // ⚠️ **SRET 是 v0.38 新解码的**（STAGE-22 订正 8）—— 之前
+        // `0x102` 落在「非法」那一档 ⇒ ⇒ 现在它是一条**真的**指令。
         0b111_0011 => match (d.funct3, d.imm) {
             (0b000, 0) => Some(Op::Ecall),
             (0b000, 1) => Some(Op::Ebreak),
             // MRET — the standard encoding is `0x3020_0073`, i.e. the
             // 12-bit immediate field holds 0x302.
             (0b000, 0x302) => Some(Op::Mret),
+            // SRET — the standard encoding is `0x1020_0073`, i.e. the
+            // 12-bit immediate field holds 0x102.
+            (0b000, 0x102) => Some(Op::Sret),
             // WFI — the standard encoding is `0x1050_0073`, i.e. the
             // 12-bit immediate field holds 0x105.
             (0b000, 0x105) => Some(Op::Wfi),
@@ -760,6 +779,40 @@ fn branch(d: &Decoded) -> u32 {
     d.pc.wrapping_add(d.imm as u32)
 }
 
+/// The architectural `mcause` code of an **environment call** taken from
+/// `level`.
+///
+/// ⚠️ **cause 按级**（STAGE-22 裁决 K / **F19**）：M ⇒ **11**，S ⇒ **9**，
+/// U ⇒ **8**。
+///
+/// ⚠️ **数字只有一个落点** —— 契约层的 `CAUSE_MACHINE_ECALL` /
+/// `CAUSE_SUPERVISOR_ECALL` / `CAUSE_USER_ECALL` ⇒ ⇒ 这里**只引用**，
+/// **不**另写一份字面量。
+///
+/// ⚠️ **为什么它不是 `TrapCause` 的一个变体**：变体表是**架构分类**
+/// （「环境调用」就是「环境调用」），**编号**才是按级的那一份 ⇒ ⇒ 两件事
+/// 分处两处 ⇒ ⇒ 变体表**不变**（⇒ ⇒ M-13 的集成门禁
+/// `m13_fetch_path::the_cause_1_mapping_lives_in_exactly_one_place` 钉住
+/// 的「变体 → 编号」那张表的**行数**也不变）。
+fn ecall_cause(level: u32) -> u32 {
+    match level {
+        PRIV_M => CAUSE_MACHINE_ECALL,
+        PRIV_S => CAUSE_SUPERVISOR_ECALL,
+        _ => CAUSE_USER_ECALL,
+    }
+}
+
+/// Is this operation one of the **six CSR instructions**?
+///
+/// ⚠️ **唯一**的「这条指令要不要走按级检查」判据 ⇒ ⇒ 六条指令**共用**
+/// 那一处检查（读与写**同形**，**F26**）。
+fn is_csr_op(op: Op) -> bool {
+    matches!(
+        op,
+        Op::Csrrw | Op::Csrrs | Op::Csrrc | Op::Csrrwi | Op::Csrrsi | Op::Csrrci
+    )
+}
+
 /// The single execution path shared by every dispatch route.
 ///
 /// `mem` is the memory port: it is threaded through here so that both
@@ -817,6 +870,24 @@ pub fn execute_one<M: MemoryAccess>(
             return Ok(StepOutcome::Trapped { cause });
         }
     };
+
+    // ⚠️ **CSR 指令的按级检查**（STAGE-22 裁决 H / 订正 5）—— **六条** CSR
+    // 指令（`csrrw` / `csrrs` / `csrrc` / `csrrwi` / `csrrsi` / `csrrci`）
+    // **共用**这一处 ⇒ ⇒ 读与写**同形**（**F26**：S 模式**写** M 模式 CSR
+    // 也是 **cause 2**，不是「被忽略」）。
+    //
+    // ⚠️ **判据只有一条**：当前级别能不能访问这个 CSR ⇒ ⇒ **不实现**的 CSR
+    // 在 M 模式**照旧**（读回 0 / 写被忽略，台账 **D-92**）⇒ ⇒ **M 模式
+    // 语料零回归**。
+    if is_csr_op(op) {
+        let number = csr::csr_number(d.raw);
+        if !csr::csr_access_allowed(state, number) {
+            let cause = TrapCause::IllegalInstruction;
+            // ⚠️ `mtval` 携带**指令字**（与「解码不出来」那条路径同口径）。
+            csr::enter_trap(state, cause.mcause(), d.raw);
+            return Ok(StepOutcome::Trapped { cause });
+        }
+    }
 
     let next_pc = match op {
         Op::Lui => {
@@ -1094,9 +1165,16 @@ pub fn execute_one<M: MemoryAccess>(
             sequential(d)
         }
         Op::Ecall => {
+            // ⚠️ **cause 按当前特权级**（STAGE-22 裁决 K / **F19**）：
+            // M ⇒ **11**，S ⇒ **9**，U ⇒ **8**。
+            //
+            // ⚠️ **不需要新的 `SCALL` 操作码**（**F32**）：工具链在语料的
+            // march 下把 `scall` 汇编成 `ecall` ⇒ ⇒ 现有这条 `ecall` 按级
+            // 选 cause 就够。
+            //
             // An environment call carries **no** auxiliary value.
             let cause = TrapCause::Ecall;
-            csr::enter_trap(state, cause.mcause(), 0);
+            csr::enter_trap(state, ecall_cause(csr::priv_get(state)), 0);
             return Ok(StepOutcome::Trapped { cause });
         }
         Op::Ebreak => {
@@ -1230,6 +1308,14 @@ pub fn execute_one<M: MemoryAccess>(
             sequential(d)
         }
         Op::Mret => {
+            // ⚠️ **`mret` 仅 M 模式**（STAGE-22 裁决 J / **F23**）：`mepc`
+            // 在 S 模式**不可访问** ⇒ ⇒ S 模式**根本回不去 M 模式** ⇒ ⇒
+            // 在 S / U 模式执行 `mret` ⇒ ⇒ **cause 2**（非法指令）。
+            if csr::priv_get(state) != PRIV_M {
+                let cause = TrapCause::IllegalInstruction;
+                csr::enter_trap(state, cause.mcause(), d.raw);
+                return Ok(StepOutcome::Trapped { cause });
+            }
             // `pc := mepc`; `mstatus.MIE := mstatus.MPIE`;
             // `mstatus.MPIE := 1`.
             //
@@ -1241,7 +1327,7 @@ pub fn execute_one<M: MemoryAccess>(
             // 要能回到**出错的指令**）。
             //
             // **掩码按 IALIGN**：特权规范说 `mret` 取 PC 时按 IALIGN 清低位。
-            // 本平台的 `misa` = `0x40001104` **声明支持 C 扩展** ⇒ IALIGN = 16
+            // 本平台的 `misa` **声明支持 C 扩展** ⇒ IALIGN = 16
             // ⇒ 只清**最低 1 位**（[`csr::mepc_aligned`]），**不是**低两位。
             //
             // **参考侧实测**（Spike，同一个探针 ELF 两侧跑）：一条位于
@@ -1252,12 +1338,50 @@ pub fn execute_one<M: MemoryAccess>(
             let mstatus = csr::csr_read(state, CSR_MSTATUS);
             let mie = 1u32 << MSTATUS_MIE_BIT;
             let mpie = 1u32 << MSTATUS_MPIE_BIT;
+            let mpp_mask = 0x3u32 << MSTATUS_MPP_SHIFT;
+            // ⚠️ **特权级来自「旧的 `MPP`」** ⇒ ⇒ **先读旧值再清** ⇒ ⇒
+            // `MPP := U` 的那一步**不能**影响这一次读取（STAGE-22 裁决 J）。
+            let old_mpp = (mstatus & mpp_mask) >> MSTATUS_MPP_SHIFT;
             let restored = if mstatus & mpie != 0 { mie } else { 0 };
-            csr::csr_write(
-                state,
-                CSR_MSTATUS,
-                (mstatus & !(mie | mpie)) | restored | mpie,
-            );
+            // `MIE := 旧 MPIE`；`MPIE := 1`；`MPP := U(0)`。
+            csr::mstatus_bits(state, mie | mpie | mpp_mask, restored | mpie);
+            // 特权级 ← 旧的 `MPP`（`M` ⇒ M、`S` ⇒ S、`U` ⇒ U）。
+            let level = match old_mpp {
+                MSTATUS_MPP_S => PRIV_S,
+                MSTATUS_MPP_M => PRIV_M,
+                _ => PRIV_U,
+            };
+            csr::priv_set(state, level);
+            target
+        }
+        Op::Sret => {
+            // ⚠️ **`sret` 仅 S 模式**（STAGE-22 裁决 J）—— 在 M / U 模式 ⇒ ⇒
+            // **cause 2**（非法指令）。
+            if csr::priv_get(state) != PRIV_S {
+                let cause = TrapCause::IllegalInstruction;
+                csr::enter_trap(state, cause.mcause(), d.raw);
+                return Ok(StepOutcome::Trapped { cause });
+            }
+            // `pc := sepc`; `sstatus.SIE := sstatus.SPIE`;
+            // `sstatus.SPIE := 1`; `sstatus.SPP := U(0)`.
+            //
+            // ⚠️ **`sepc` 的对齐掩码与 `mepc` 同口径**（[`csr::sepc_aligned`]）
+            // ⇒ ⇒ 两个向量表**同规则**。
+            let target = csr::sepc_aligned(state);
+            let mstatus = csr::csr_read(state, CSR_MSTATUS);
+            let sie = 1u32 << MSTATUS_SIE_BIT;
+            let spie = 1u32 << MSTATUS_SPIE_BIT;
+            let spp = 1u32 << MSTATUS_SPP_BIT;
+            // ⚠️ **落点由 `SPP` 决定**（**F9**）：`SPP` = 1 ⇒ ⇒ 回到 **S
+            // 模式**（陷阱处理器，**F28**）；`SPP` = 0 ⇒ ⇒ 落到 **U 模式**。
+            let previous = mstatus & spp != 0;
+            let restored = if mstatus & spie != 0 { sie } else { 0 };
+            // `SIE := 旧 SPIE`；`SPIE := 1`；`SPP := 0`。
+            //
+            // ⚠️ **走 `mstatus` 的原始位操作**（[`csr::mstatus_bits`]）⇒ ⇒
+            // **不受客体的 `0x22` 掩码约束** ⇒ ⇒ `SPP` 清得掉。
+            csr::mstatus_bits(state, sie | spie | spp, restored | spie);
+            csr::priv_set(state, if previous { PRIV_S } else { PRIV_U });
             target
         }
     };
