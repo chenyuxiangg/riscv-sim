@@ -56,11 +56,21 @@ pub struct LogEntryDto {
     pub time_host_ms: u64,
     /// The session this entry belongs to (always `0` in the MVP).
     pub session_id: u32,
-    /// The severity: `info` / `warn` / `error` / `fatal`.
+    /// The severity, as the **kernel's** own spelling: `TRACE` /
+    /// `DEBUG` / `INFO` / `WARN` / `ERROR`.
+    ///
+    /// ⚠️ The five levels are M-21's own `LogLevel` — **there is no
+    /// `fatal` level** ⇒ ⇒ the DTO carries the string **verbatim**
+    /// ⇒ ⇒ the kernel crate owns the mapping.
     pub level: String,
     /// The "module - flow point" tag.
     pub ctx: String,
     /// The full scenario code, when the entry carries one.
+    ///
+    /// ⚠️ M-21's `LogEntry` stores it as a **plain string** (empty means
+    /// "no code") ⇒ ⇒ the conversion maps "empty" to `None` ⇒ ⇒ **this
+    /// side** is the one that knows the difference between "no code" and
+    /// "the empty code".
     pub err_code: Option<String>,
     /// The message text.
     pub msg: String,
@@ -121,7 +131,7 @@ mod tests {
             time_virt_ps: 1000,
             time_host_ms: 7,
             session_id: 0,
-            level: "info".to_string(),
+            level: "INFO".to_string(),
             ctx: "m21-logging".to_string(),
             err_code: None,
             msg: "hello".to_string(),

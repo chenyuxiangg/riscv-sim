@@ -6,7 +6,7 @@
           "time_virt_ps": "1000",
           "time_host_ms": "7",
           "session_id": 0,
-          "level": "info",
+          "level": "INFO",
           "ctx": "m21-logging",
           "err_code": null,
           "msg": "hello",
