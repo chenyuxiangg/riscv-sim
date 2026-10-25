@@ -435,8 +435,19 @@ impl From<CommandPayload> for Payload {
     }
 }
 
-/// Reserved admin / sysadmin operations (M-22 + M-23 + M-21). Always
-/// gated by an admin role check on the receiving side.
+/// Reserved admin / sysadmin operations (M-22 + M-23 + M-21).
+///
+/// ⚠️ **Gated by the receiving side's own switch** ⇒ ⇒ the contract
+/// layer carries **no** role / token concept ⇒ ⇒ the host's
+/// `admin_enabled` flag (default **off**) decides whether the channel
+/// answers at all ⇒ ⇒ **who** is allowed to turn it on is a **separate**
+/// ledger item (**D-131**) ⇒ ⇒ **not** implemented here.
+///
+/// ⚠️ **v0.44** (STAGE-29 · 裁决 L) rewrote this paragraph ⇒ ⇒ the
+/// previous wording promised a check that **does not exist** anywhere
+/// in the platform ⇒ ⇒ **the behaviour never changed** (only the prose)
+/// ⇒ ⇒ and the previous sentence is **gone** (⛔ it is **not** quoted
+/// here either ⇒ ⇒ so that this file cannot reintroduce it by accident).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdminOp {
     /// Dump the kernel log buffer (M-21).
@@ -660,6 +671,32 @@ pub enum EventPayload {
         /// 丢更新**看得见**（`E_PLT_13`）。
         revision: u64,
     },
+    /// 管理通道：导出的**日志条目**（回复 `CommandPayload::Admin { op:
+    /// AdminOp::DrainLogs }`）。
+    ///
+    /// ⚠ **v8 新增**（STAGE-29 · D-129）⇒ ⇒ 在此之前 `Admin` 命令
+    /// **只有命令侧、没有回复侧** ⇒ ⇒ 管理员通道接不上。
+    ///
+    /// ⚠ 条目的形状是 [`crate::admin::LogEntryDto`] ⇒ ⇒ 转换住在
+    /// **M-21**（日志环的拥有者）⇒ ⇒ 契约层不依赖内核。
+    ///
+    /// ⚠ **有上界**：一次导出**不是**整个日志环 ⇒ ⇒ 超出部分**明确
+    /// 告知被截断**（**不是静默**）。
+    AdminLogs {
+        /// The exported log entries, in virtual-time order.
+        entries: Vec<crate::admin::LogEntryDto>,
+    },
+    /// 管理通道：**管理员诊断包**（回复 `CommandPayload::Admin { op:
+    /// AdminOp::Custom("diag") }`）。
+    ///
+    /// ⚠ **v8 新增**（STAGE-29 · D-129）。
+    ///
+    /// ⚠ 形状是 [`crate::admin::AdminDiagDto`] ⇒ ⇒ 逐字镜像 M-22 的
+    /// `DiagnosticKit`（**不多不少**）⇒ ⇒ 转换住在 **M-22**。
+    AdminDiag {
+        /// The diagnostic kit.
+        diag: crate::admin::AdminDiagDto,
+    },
 }
 
 impl Default for EventPayload {
@@ -719,9 +756,62 @@ mod tests {
     /// **v7** adds the board delta / unload / budget split
     /// (`UnloadProject` + `PatchMemoryMap` + `expected_revision` + the
     /// `MemoryMap` event's two new fields).
+    ///
+    /// **v8** adds the **admin channel**'s reply side
+    /// (`EventPayload::AdminLogs` + `EventPayload::AdminDiag` + the
+    /// `admin::LogEntryDto` / `admin::AdminDiagDto` DTOs) and the one
+    /// cross-boundary scenario code `E_CTX-05`
+    /// (STAGE-29 §2.1..§2.3).
     #[test]
-    fn the_schema_version_is_seven() {
-        assert_eq!(crate::SCHEMA_VERSION, 7);
+    fn the_schema_version_is_eight() {
+        assert_eq!(crate::SCHEMA_VERSION, 8);
+    }
+
+    /// `AdminOp`'s **doc** must not promise a check the platform does
+    /// not have.
+    ///
+    /// ⚠️ The old wording promised an admin-role gate on the receiving
+    /// side ⇒ ⇒ but the platform has **no role concept at all** (the
+    /// ledger's **D-131** is still open) ⇒ ⇒ the gate is the **host's
+    /// own switch** ⇒ ⇒ the prose had to change ⇒ ⇒ **the behaviour
+    /// never changed** (only the prose).
+    ///
+    /// ⚠️ The check is scoped to **the enum's own doc block** ⇒ ⇒ a
+    /// whole-file scan would hit **this test's own source** ⇒ ⇒ and a
+    /// test that can only fail is not a test.
+    #[test]
+    fn the_admin_op_documentation_does_not_promise_a_role_check() {
+        let source = include_str!("protocol.rs");
+        let (before_enum, _) = source
+            .split_once("pub enum AdminOp")
+            .expect("the AdminOp enum");
+        let mut doc_lines: Vec<&str> = Vec::new();
+        for line in before_enum.lines().rev() {
+            if line.trim_start().starts_with("///") {
+                doc_lines.push(line);
+            } else if line.trim_start().starts_with("#[") {
+                // An attribute (`#[derive(...)]`) may sit between the doc
+                // block and the item ⇒ ⇒ skip it, do not stop there.
+                continue;
+            } else {
+                break;
+            }
+        }
+        doc_lines.reverse();
+        let doc = doc_lines.join("\n");
+        assert!(!doc.is_empty(), "AdminOp must keep a doc block of its own");
+        assert!(
+            !doc.contains("role check"),
+            "AdminOp's documentation still promises a role check that does not exist"
+        );
+        assert!(
+            doc.contains("the receiving side's own switch"),
+            "AdminOp's documentation must state that the host's own switch gates the channel"
+        );
+        assert!(
+            doc.contains("D-131"),
+            "AdminOp's documentation must point at the open ledger item for the missing role check"
+        );
     }
 
     /// The three commands contract v2 adds (D-32 gaps 1, 2, 3).
@@ -851,10 +941,10 @@ mod tests {
     /// one the front end negotiates against.
     #[test]
     fn the_envelope_carries_the_current_schema_version() {
-        let msg = Message::command(7, CommandPayload::Nop);
+        let msg = Message::command(8, CommandPayload::Nop);
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
-        assert_eq!(json["schema_version"], 7);
+        assert_eq!(json["schema_version"], 8);
     }
 
     // -----------------------------------------------------------------

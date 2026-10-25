@@ -97,9 +97,26 @@ impl std::error::Error for PlatformError {}
 /// the protocol codes in this file, the engine-segment codes in
 /// [`crate::snapshot`], the session-payload codes in [`crate::session`],
 /// the peripheral-port codes in [`crate::port`], the bus codes in the
-/// kernel's `m14_bus`. A code that **two** modules need to name must
-/// live in the **contract layer** — otherwise the same number ends up
-/// spelled in two places and drifts apart (one code, two truths).
+/// kernel's `m14_bus`.
+///
+/// ⚠️ **A code lives in the contract layer when *either* of these holds**
+/// (debt ledger **D-132** · 判据 **C** · v0.44 · STAGE-29 裁决 M):
+///
+/// 1. it is **shared across modules** (**another crate** has to name it),
+///    **or**
+/// 2. the **front end dispatches on it** (the front end has to decide
+///    what to do when it receives that code).
+///
+/// ⚠️ **The criterion is "or", not "and"** ⇒ ⇒ ⛔ do not read it as
+/// "every error code lives in the contract layer" ⇒ ⇒ that would turn
+/// this crate into a junk drawer and break its "only **cross-module**
+/// things live here" purpose.
+///
+/// ⚠️ **v0.44** (STAGE-29 · 裁决 M) rewrote this paragraph: the previous
+/// wording turned the criterion into an **"and"** ⇒ ⇒ it contradicted the
+/// criterion above ⇒ ⇒ **the behaviour did not change** (only the prose)
+/// ⇒ ⇒ and the previous sentence is **gone** (⛔ it is **not** quoted here
+/// either ⇒ ⇒ so that this file cannot reintroduce it by accident).
 macro_rules! error_families {
     ($( $(#[$meta:meta])* $variant:ident => $tag:literal, )*) => {
         /// Top-level subsystem family for error codes.
@@ -211,6 +228,24 @@ pub const ENGINE_FAMILY: ErrorFamily = ErrorFamily::Engine;
 
 /// Error family used by the platform-description codes below.
 pub const PLATFORM_FAMILY: ErrorFamily = ErrorFamily::Platform;
+
+// ---------------------------------------------------------------------------
+// Context family — `E_CTX-05`
+// ---------------------------------------------------------------------------
+
+/// Error family used by the context codes below.
+pub const CONTEXT_FAMILY: ErrorFamily = ErrorFamily::Context;
+
+/// Scenario code: the **admin channel** is not enabled.
+///
+/// ⚠ **The one code both sides of the process boundary name** (v0.44 ·
+/// STAGE-29 · D-129 / 裁决 C) ⇒ ⇒ the kernel answers with it and the
+/// front end falls back to it ⇒ ⇒ **both spell it from here** ⇒ ⇒
+/// "one constraint, one landing site" ⇒ ⇒ ⛔ no second string constant.
+///
+/// ⚠ **The value is the scenario number** (`05`) ⇒ ⇒ the tooling's
+/// "value matches the name" rule holds without a special case.
+pub const E_CTX_05_ADMIN_CHANNEL_DISABLED: u16 = 5;
 
 // ---------------------------------------------------------------------------
 // Protocol family — `E_PROTO-01`..`E_PROTO-08`
@@ -515,6 +550,88 @@ pub const E_PLT_16_WIRING_INVALID: u16 = 16;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The **macro's own documentation** is part of the contract: it
+    /// states **where a scenario code lives** ⇒ ⇒ a contradiction in it
+    /// is a real defect, not a style nit.
+    ///
+    /// ⚠️ The old wording turned the criterion into an **"and"**
+    /// ("only a code that **two modules** must name belongs here")
+    /// ⇒ ⇒ it contradicted the criterion the ledger settled on
+    /// (D-132 · 判据 C · **"or"**) ⇒ ⇒ v0.44 corrected it ⇒ ⇒
+    /// **the behaviour never changed** (only the prose) ⇒ ⇒ this test
+    /// pins the prose so it cannot drift back.
+    ///
+    /// ⚠️ **The check is scoped to the macro's own doc block**, not to
+    /// the whole file ⇒ ⇒ because this very test names the old wording
+    /// ⇒ ⇒ a whole-file scan would hit **itself** ⇒ ⇒ a test that can
+    /// only fail is not a test. The block is the run of `///` lines that
+    /// ends right before `macro_rules!`.
+    #[test]
+    fn the_family_macros_documentation_states_the_or_criterion() {
+        let source = include_str!("error.rs");
+        let (before_macro, _) = source
+            .split_once("macro_rules! error_families")
+            .expect("the family macro");
+        let mut doc_lines: Vec<&str> = Vec::new();
+        for line in before_macro.lines().rev() {
+            if line.trim_start().starts_with("///") {
+                doc_lines.push(line);
+            } else {
+                break;
+            }
+        }
+        doc_lines.reverse();
+        let doc = doc_lines.join("\n");
+        assert!(
+            !doc.is_empty(),
+            "the family macro must keep a doc block of its own"
+        );
+        assert!(
+            !doc.contains("need to name"),
+            "the macro documentation still carries the old \"and\" wording"
+        );
+        assert!(
+            doc.contains("shared across modules"),
+            "the macro documentation must state the \"shared across modules\" branch"
+        );
+        assert!(
+            doc.contains("front end dispatches on it"),
+            "the macro documentation must state the \"front end dispatches on it\" branch"
+        );
+    }
+
+    /// The `CTX` family existed but had **no** scenario code ⇒ ⇒ v0.44
+    /// added exactly **one** (`E_CTX-05`, the admin channel) ⇒ ⇒ the
+    /// family count stays **15** ⇒ ⇒ "add a code, not a family".
+    #[test]
+    fn the_admin_channel_code_is_the_only_context_scenario_code() {
+        assert_eq!(E_CTX_05_ADMIN_CHANNEL_DISABLED, 5);
+        assert_eq!(CONTEXT_FAMILY.as_str(), "CTX");
+        // The family itself is declared (it always was) — the code is
+        // what landed, not the family.
+        //
+        // ⚠️ The block is located by the **invocation line itself**
+        // (a line that is exactly `error_families! {`) ⇒ ⇒ the
+        // module-level documentation also contains a (commented-out)
+        // example of the very same call ⇒ ⇒ a plain substring search
+        // would land on the **example** and count the example's one
+        // family instead of the fifteen real ones.
+        let source = include_str!("error.rs");
+        let invocation = source
+            .lines()
+            .position(|l| l.trim_end() == "error_families! {")
+            .expect("the family invocation block");
+        let tags: Vec<&str> = source
+            .lines()
+            .skip(invocation + 1)
+            .take_while(|l| l.trim() != "}")
+            .filter_map(|l| l.split_once("=> "))
+            .map(|(_, rest)| rest.split('"').nth(1).unwrap_or_default())
+            .collect();
+        assert_eq!(tags.len(), 15, "the family count must not move");
+        assert!(tags.contains(&"CTX"));
+    }
 
     /// The LLD's protocol-error codes are spelled `E_PROTO-0x` — the
     /// family tag has to match the LLD **verbatim**, or every code in

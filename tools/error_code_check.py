@@ -3,7 +3,9 @@
 """场景码的「**定义处 / 引用处**」清单 + 「**唯一定义**」不变式的机器化检查
 （台账 **D-132** · v0.42 批 · STAGE-27 §2.3 / §3.3 · 裁决 C / D）
 ＋ **前端服务层 × 内核 crate 的撞号判据**
-（台账 **D-157** · v0.43 批 · STAGE-28 §2.4 / §3.3 · 裁决 G / H / I / N）。
+（台账 **D-157** · v0.43 批 · STAGE-28 §2.4 / §3.3 · 裁决 G / H / I / N）
+＋ **前端自有码的定义处**与「**前端服务层用到的码必须有定义处**」
+（STAGE-29 §4.2 · 裁决 E / F · v0.44 批）。
 
 台账 **D-132** 的现状（原文）：
 
@@ -32,7 +34,7 @@
 * **引用 crate**（哪些 crate 引用了它 ⇒ ⇒ 跨 crate 引用 = 判据 ① 的材料）
 * **前端提及**（前端**运行时代码**有没有点名它 ⇒ ⇒ 判据 ② 的材料）
 
-## 本脚本**断言**的四件事（每条一个**独立**的失败种类）
+## 本脚本**断言**的五件事（每条一个**独立**的失败种类）
 
 | 种类 | 断言 | 对应 |
 | --- | --- | --- |
@@ -40,9 +42,33 @@
 | `值与名不符` | 常量的值 == 名字里的两位场景号 | 「一个码一个含义」 |
 | `族未声明` | 族标签在 `error_families!` 里声明过 | 「**加码不加族**」 |
 | `前端与内核撞号` | 前端**服务层**自产的码与**内核 crate**自产的码**不共用同一个号** | 台账 **D-157** |
+| `前端码无定义处` | 前端**服务层**用到的码**必须有定义处** | STAGE-29 §4.2 裁决 F |
 
 ⚠️ **判据 ① 的键是「码」**（`E_XXX_NN`），**不是**常量的名字 ⇒ ⇒ 两处
 **名字不同**、但**同一个码**的定义**照样**被抓出来（那正是 D-120 的形状）。
+
+## 「定义处」的两个**落点**（STAGE-29 裁决 E / F）
+
+一个码的**定义处**可以是**两处**：
+
+| 落点 | 是什么 | 怎么认出来 |
+| --- | --- | --- |
+| **Rust 侧** | `crates/**` 里的 `const E_XXX_NN…` | `DEF_RE` |
+| **前端自有码表** | `front/lib/message.js` 的 `FRONT_ERROR_CODES` 表 | `FRONT_CODE_TABLE_RE` |
+
+⇒ ⇒ **两处都算「定义处」** ⇒ ⇒ 「唯一定义」对前端码**真正生效**。
+
+⚠️⚠️ **一个必须避开的坑**（STAGE-29 统筹方实测）：
+
+* 前端码表的条目**必须单独记账** ⇒ ⇒ **绝对不许**把它们混进「内核定义」
+  那一组 ⇒ ⇒ 否则「前端 × 内核撞号」判据会把**前端自产码**当成
+  「前端撞内核」⇒ ⇒ **假红**。
+* ⇒ ⇒ 本脚本用**两个独立**的列表：`CodeReport.definitions`（**只有** Rust
+  的 `const`）与 `CodeReport.front_definitions`（**只有**前端自有码表）。
+
+⚠️ **镜像表不是定义处**：前端镜像契约层 / 内核 crate 的码时用的那些表
+（`MIRRORED_ERROR_CODES` / `RUST_ERROR_CODE_REFS`）**只是「引用用的名字」**
+⇒ ⇒ 它们的**定义处仍在 Rust 侧** ⇒ ⇒ 本脚本**不**把它们算成定义处。
 
 ## 第四条断言的**规则**（STAGE-28 §2.4 裁决 G / H）
 
@@ -79,6 +105,9 @@
   ⚠️ 前端镜像契约层的码是**既有设计**（如 `front/lib/frame.js` 的
   `CRC_MISMATCH_CODE = "E_PROTO-06"`）⇒ ⇒ 把它算成「第二处定义」会把
   **既有设计**报成违例 ⇒ ⇒ 前端**只**算**引用**。
+* **定义（前端侧）** = 前端**自有码表**（`FRONT_ERROR_CODES`）里的条目
+  ⇒ ⇒ 那是**前端自产码**的定义处 ⇒ ⇒ 契约层 / 内核 crate 的码**不许**
+  进那张表 ⇒ ⇒ 两处定义 ⇒ ⇒ 「重复定义」判红。
 * **引用** = 源码里出现的**码**（两种拼写都算）：
   * **符号引用** = 那个 Rust 常量名（`E_PLT_07_OVER_BUDGET`）；
   * **文本提及** = 别的拼写（裸的 `E_PLT_07`、线上格式 `E_PLT-07`）。
@@ -111,11 +140,12 @@
 本身**必须成立** ⇒ ⇒ 否则这个检查就是**恒绿**的。
 
 * **好夹具**：每个码**一处**定义、值与名相符、族已声明、**前端服务层不撞
-  内核** ⇒ ⇒ **0 红** ⇒ ⇒ 顺带把**豁免一**（契约层的码被前端镜像）与
-  **豁免二**（只出现在 `front/dev/` 的码）都**跑一遍**。
-* **坏夹具**：**四种坏法各一处** ⇒ ⇒ 红集 = {`重复定义`, `值与名不符`,
-  `族未声明`, `前端与内核撞号`} ⇒ ⇒ 四条断言被**单独**钉住（⇒ ⇒ 变异自检
-  可以逐条打掉）⇒ ⇒ 红集**逐字**比对（不许只比「有红」）。
+  内核**、**前端服务层用到的码都有定义处** ⇒ ⇒ **0 红** ⇒ ⇒ 顺带把
+  **豁免一**（契约层的码被前端镜像）、**豁免二**（只出现在 `front/dev/` 的
+  码）、**前端自有码表**（前端自产码的定义处）都**跑一遍**。
+* **坏夹具**：**五种坏法各一处** ⇒ ⇒ 红集 = {`重复定义`, `值与名不符`,
+  `族未声明`, `前端与内核撞号`, `前端码无定义处`} ⇒ ⇒ 五条断言被**单独**
+  钉住（⇒ ⇒ 变异自检可以逐条打掉）⇒ ⇒ 红集**逐字**比对（不许只比「有红」）。
 """
 
 from __future__ import annotations
@@ -174,6 +204,19 @@ DEF_RE = re.compile(
     r"[ \t]*=[ \t]*([0-9]+|0[xX][0-9a-fA-F]+)[uUlL]*[ \t]*;"
 )
 
+#: 前端**自有码表**的名字（⇒ ⇒ 前端自产码的**定义处**就在那张表里）。
+#:
+#: ⚠️ **只此一张表**是定义处 ⇒ ⇒ 契约层 / 内核 crate 的码**不许**进它
+#: ⇒ ⇒ 那是**镜像** ⇒ ⇒ 镜像表**不是**定义处。
+FRONT_CODE_TABLE_NAME = "FRONT_ERROR_CODES"
+
+#: 前端**自有码表**的表体 ⇒ ⇒ `Object.freeze({ … })` ⇒ ⇒ 里面出现的码
+#: 就是**前端自产码的定义处**。
+FRONT_CODE_TABLE_RE = re.compile(
+    r"\b" + FRONT_CODE_TABLE_NAME + r"\b\s*=\s*Object\.freeze\(\{(.*?)\}\)",
+    re.S,
+)
+
 #: 源码里出现的**码**（两种拼写 + 可选的常量名后缀）。
 CODE_TOKEN_RE = re.compile(r"\bE_[A-Z]{3,5}(?:_[0-9]{2}|-[0-9]{2})(?:_[A-Z0-9]+)*\b")
 
@@ -210,6 +253,10 @@ KIND_FAMILY_UNDECLARED = "族未声明"
 #: （STAGE-28 §2.4 裁决 G / H · 一条约束一个落点 ⇒ ⇒ **规则住在工具里**）。
 KIND_FRONT_KERNEL_COLLISION = "前端与内核撞号"
 
+#: 前端**服务层**用到的码**没有定义处**（Rust 侧没有 `const`，前端自有码表
+#: 里也没有）⇒ ⇒ STAGE-29 §4.2 裁决 F 的**新断言 ⑤**。
+KIND_FRONT_CODE_NO_DEFINITION = "前端码无定义处"
+
 #: 退出码。
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -219,10 +266,11 @@ EXIT_TOOL_ERROR = 2
 BOUNDARY_STATEMENT = (
     "BOUNDARY: this tool reports FACTS — the definition site, every\n"
     "          reference site, which crates reference the code, and whether the\n"
-    "          front end names it.  On top of the facts it enforces four\n"
+    "          front end names it.  On top of the facts it enforces five\n"
     "          MECHANICAL rules (unique definition / value matches the name /\n"
     "          the family is declared / the front service layer does not collide\n"
-    "          with the kernel crates).  It does NOT decide where a scenario code\n"
+    "          with the kernel crates / every code the front service layer uses\n"
+    "          has a definition site).  It does NOT decide where a scenario code\n"
     "          'lives': that is the criterion (cross-module shared OR the front\n"
     "          end dispatches on it) plus a human judgement (STAGE-27 §2.3).\n"
     "          （本工具**不**判定「场景码住哪」⇒ ⇒ 那是**判据 + 人工**。）"
@@ -254,6 +302,21 @@ class Definition:
 
 
 @dataclass(frozen=True)
+class FrontDefinition:
+    """前端**自有码表**里的一处**定义处**。
+
+    ⚠️ **它与 Rust 的 `Definition` 是两回事** ⇒ ⇒ **必须分开记账** ⇒ ⇒
+    否则「前端 × 内核撞号」判据会把前端自产码当成「前端撞内核」⇒ ⇒
+    **假红**（STAGE-29 统筹方实测出来的坑）。
+    """
+
+    code: str
+    spelling: str
+    rel_path: str
+    line: int
+
+
+@dataclass(frozen=True)
 class Occurrence:
     """一处**出现**（引用或文本提及）。"""
 
@@ -269,9 +332,15 @@ class CodeReport:
 
     code: str
     definitions: list[Definition] = field(default_factory=list)
+    front_definitions: list[FrontDefinition] = field(default_factory=list)
     symbol_refs: list[Occurrence] = field(default_factory=list)
     text_refs: list[Occurrence] = field(default_factory=list)
     front_refs: list[Occurrence] = field(default_factory=list)
+
+    @property
+    def has_definition(self) -> bool:
+        """这个码**有没有定义处**（Rust 侧**或**前端自有码表）。"""
+        return bool(self.definitions or self.front_definitions)
 
     @property
     def def_crates(self) -> list[str]:
@@ -434,6 +503,63 @@ def parse_definitions(sources: list[tuple[str, str]]) -> list[Definition]:
     return found
 
 
+def parse_front_definitions(
+    sources: list[tuple[str, str]],
+) -> tuple[list[FrontDefinition], set[tuple[str, int]]]:
+    """把前端**自有码表**里的条目挑出来 ⇒ ⇒ **前端自产码的定义处**。
+
+    ⇒ ⇒ 返回两样东西：
+
+    * **定义处清单**（`FrontDefinition`）—— 每个条目一个；
+    * **表体所在的行**（`(相对路径, 行号)`）—— 表体里的出现**不算引用**
+      ⇒ ⇒ 它们**就是**定义处本身（与 Rust 侧 `const` 的处理一致）。
+
+    ⚠️ **只认前端**（`front/**`）⇒ ⇒ Rust 源码里的同名标识符不算。
+    ⚠️ **`front/tests/` 与 `front/dev/` 不算** ⇒ ⇒ 前端**服务层**才是
+    「前端自产码」的落点（口径与 `is_front_service` 一致）。
+    """
+    found: list[FrontDefinition] = []
+    table_lines: set[tuple[str, int]] = set()
+    seen: set[tuple[str, int, str]] = set()
+    for rel, text in sources:
+        if not rel.startswith(FRONT_ROOT + "/"):
+            continue
+        if is_front_test(rel) or is_front_dev(rel):
+            continue
+        for block in FRONT_CODE_TABLE_RE.finditer(text):
+            body = block.group(1)
+            body_start = block.start(1)
+            # 表体里出现的**每一个码**都是一处定义处 ⇒ ⇒ 先算出它所在的行。
+            offset = 0
+            for lineno, line in enumerate(body.split("\n"), start=1):
+                for match in CODE_TOKEN_RE.finditer(line):
+                    prefix = CODE_PREFIX_RE.match(match.group(0))
+                    if prefix is None:  # pragma: no cover —— 正则保证形状
+                        continue
+                    code = f"{prefix.group(1)}_{prefix.group(2)}"
+                    abs_offset = body_start + offset + match.start()
+                    abs_line = text.count("\n", 0, abs_offset) + 1
+                    table_lines.add((rel, abs_line))
+                    # ⚠️ **一个条目** = 一个定义处 ⇒ ⇒ 表的形状是
+                    #    `"E_XXX-NN": "E_XXX-NN"` ⇒ ⇒ 同一个码在**同一行**上
+                    #    出现**两次**（键 + 值）⇒ ⇒ **必须去重** ⇒ ⇒ 否则
+                    #    「唯一定义」会把**一个**条目当成**两处**定义。
+                    key = (rel, abs_line, code)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    found.append(
+                        FrontDefinition(
+                            code=code,
+                            spelling=match.group(0),
+                            rel_path=rel,
+                            line=abs_line,
+                        )
+                    )
+                offset += len(line) + 1
+    return found, table_lines
+
+
 def parse_family_tags(root: Path) -> list[str]:
     """从 `error_families!` 里读出**族标签**（唯一落点）。"""
     path = root / FAMILY_DECL_PATH
@@ -551,26 +677,46 @@ def collect_occurrences(sources: list[tuple[str, str]]) -> dict[str, list[Occurr
 # ---------------------------------------------------------------------------
 
 
-def judge(definitions: list[Definition], family_tags: list[str]) -> list[Finding]:
-    """跑**三条断言** ⇒ ⇒ 返回失败清单。"""
+def judge(
+    definitions: list[Definition],
+    front_definitions: list[FrontDefinition],
+    family_tags: list[str],
+) -> list[Finding]:
+    """跑**三条断言** ⇒ ⇒ 返回失败清单。
+
+    ⚠️ **「唯一定义」现在跨两处落点**（Rust 的 `const` **或**前端自有码表）
+    ⇒ ⇒ 前端自产码**不再**是「没有定义处」的码 ⇒ ⇒ 它们**照样**受这条
+    不变式约束（STAGE-29 裁决 E / F · 验收 C-4）。
+    """
     findings: list[Finding] = []
     by_code: dict[str, list[Definition]] = {}
     for definition in definitions:
         by_code.setdefault(definition.code, []).append(definition)
+    front_by_code: dict[str, list[FrontDefinition]] = {}
+    for front_definition in front_definitions:
+        front_by_code.setdefault(front_definition.code, []).append(front_definition)
 
-    for code in sorted(by_code):
-        sites = by_code[code]
+    for code in sorted(set(by_code) | set(front_by_code)):
+        sites = by_code.get(code, [])
+        front_sites = front_by_code.get(code, [])
         # ---- 断言 ①：唯一定义（台账 D-120）----
-        if len(sites) > 1:
-            where = "、".join(f"{d.rel_path}:{d.line}（{d.const_name}）" for d in sites)
+        total = len(sites) + len(front_sites)
+        if total > 1:
+            where = "、".join(
+                f"{d.rel_path}:{d.line}（{d.const_name}）" for d in sites
+            )
+            where += "、".join(
+                f"{d.rel_path}:{d.line}（前端自有码表 {FRONT_CODE_TABLE_NAME}）"
+                for d in front_sites
+            )
             findings.append(
                 Finding(
                     kind=KIND_DUPLICATE_DEFINITION,
                     code=code,
-                    detail=f"{len(sites)} 处定义：{where}",
+                    detail=f"{total} 处定义：{where}",
                 )
             )
-        # ---- 断言 ②：值 == 名字里的两位场景号 ----
+        # ---- 断言 ②：值 == 名字里的两位场景号（只有 Rust 的 `const` 有值）----
         number = int(code.rsplit("_", 1)[1])
         for definition in sites:
             if definition.value != number:
@@ -646,6 +792,50 @@ def judge_front_kernel_collisions(codes: dict[str, CodeReport]) -> list[Finding]
     return findings
 
 
+def judge_front_codes_have_definition(codes: dict[str, CodeReport]) -> list[Finding]:
+    """跑**第五条断言**：前端**服务层**用到的码**必须有定义处**。
+
+    ⇒ ⇒ **定义处** = Rust 侧的 `const` **或** 前端**自有码表**
+    （`FRONT_ERROR_CODES`）里的条目。
+
+    ⚠️ **逐条判**（每个码**单独**判 ⇒ ⇒ 失败清单里**每个码一行）⇒ ⇒
+    ⛔ **禁**「一共有几个没定义处」那种数法（沿用 STAGE-28 裁决 N）。
+
+    ⚠️ **镜像表不算定义处** ⇒ ⇒ `MIRRORED_ERROR_CODES` /
+    `RUST_ERROR_CODE_REFS` 里的码**必须**在 Rust 侧有 `const` ⇒ ⇒ 否则
+    这里判红。
+
+    ⚠️ **口径**与「前端 × 内核撞号」一致 ⇒ ⇒ **前端服务层**
+    （`front/services/**` + `front/lib/**` + `front/kernel-worker.js`）
+    ⇒ ⇒ `front/tests/`（测试）· `front/dev/`（模拟内核的替身）·
+    `front/views/` + `front/app.js`（只消费）**都不算**。
+    """
+    findings: list[Finding] = []
+    for code in sorted(codes):
+        item = codes[code]
+        uses = item.front_service_uses
+        if not uses:
+            continue
+        if item.definitions:
+            # ---- Rust 侧有定义处 ⇒ ⇒ 不红 ----
+            continue
+        if item.front_definitions:
+            # ---- 前端**自有码表**里有定义处 ⇒ ⇒ 不红 ----
+            continue
+        where_front = "、".join(f"{o.rel_path}:{o.line}" for o in uses)
+        findings.append(
+            Finding(
+                kind=KIND_FRONT_CODE_NO_DEFINITION,
+                code=code,
+                detail=(
+                    f"前端服务层在 {where_front} 用到它，"
+                    "但它没有定义处（Rust 侧没有 `const`，前端自有码表里也没有）"
+                ),
+            )
+        )
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # 报告
 # ---------------------------------------------------------------------------
@@ -656,28 +846,38 @@ def build_report(root: Path) -> Report:
     sources = collect_sources(root)
     family_tags = parse_family_tags(root)
     definitions = parse_definitions(sources)
+    front_definitions, front_table_lines = parse_front_definitions(sources)
     occurrences = collect_occurrences(sources)
 
+    # ⚠️ **每一个**被提到的码都要有一份报告 ⇒ ⇒ 否则「前端服务层用到、而
+    #    两侧都没有定义处」的码会**整段消失** ⇒ ⇒ 断言 ⑤ **恒绿**
+    #    ⇒ ⇒ **零判别力**。
     codes: dict[str, CodeReport] = {}
+    for code in occurrences:
+        codes.setdefault(code, CodeReport(code=code))
     for definition in definitions:
         codes.setdefault(definition.code, CodeReport(code=definition.code)).definitions.append(
             definition
         )
+    for front_definition in front_definitions:
+        codes.setdefault(
+            front_definition.code, CodeReport(code=front_definition.code)
+        ).front_definitions.append(front_definition)
 
     const_names = {d.const_name for d in definitions}
     for code, occs in occurrences.items():
-        report = codes.get(code)
+        report = codes[code]
         for occurrence in occs:
             is_definition_site = any(
                 occurrence.rel_path == d.rel_path
                 and occurrence.line == d.line
                 and occurrence.spelling == d.const_name
-                for d in (report.definitions if report else [])
+                for d in report.definitions
             )
             if is_definition_site:
                 continue
-            if report is None:
-                # ⚠️ 这个码**没有** Rust 定义 ⇒ ⇒ 只出现在「被点名但无定义」里。
+            # ⚠️ **前端自有码表**里的出现**就是**定义处 ⇒ ⇒ 不算引用。
+            if (occurrence.rel_path, occurrence.line) in front_table_lines:
                 continue
             if occurrence.rel_path.startswith(FRONT_ROOT + "/"):
                 report.front_refs.append(occurrence)
@@ -689,16 +889,20 @@ def build_report(root: Path) -> Report:
     named_without_definition = sorted(
         code
         for code, occs in occurrences.items()
-        if code not in codes
+        if not codes[code].has_definition
         and any(not is_front_test(o.rel_path) for o in occs)
     )
 
     return Report(
-        findings=judge(definitions, family_tags) + judge_front_kernel_collisions(codes),
+        findings=(
+            judge(definitions, front_definitions, family_tags)
+            + judge_front_kernel_collisions(codes)
+            + judge_front_codes_have_definition(codes)
+        ),
         codes=codes,
         named_without_definition=named_without_definition,
         undefined_occurrences={
-            code: occs for code, occs in occurrences.items() if code not in codes
+            code: occs for code, occs in occurrences.items() if not codes[code].has_definition
         },
         family_tags=family_tags,
     )
@@ -727,15 +931,21 @@ def format_occurrences(occurrences: list[Occurrence]) -> list[str]:
 
 def print_listing(report: Report) -> None:
     """打印**清单**（每个码的定义处 + 全部引用处）。"""
-    print(f"== 场景码清单（{len(report.codes)} 个码）==")
+    defined = [code for code in sorted(report.codes) if report.codes[code].has_definition]
+    print(f"== 场景码清单（{len(defined)} 个码）==")
     print("判据（裁决 C，**不由本脚本判定**）：跨模块共享 **或** 前端要按码分派。")
     print()
-    for code in sorted(report.codes):
+    for code in defined:
         item = report.codes[code]
         names = "、".join(sorted({d.const_name for d in item.definitions}))
-        print(f"{code}  ({names})")
+        print(f"{code}  ({names if names else '（前端自有码表）'})")
         for definition in item.definitions:
             print(f"  定义处   : {definition.rel_path}:{definition.line}")
+        for front_definition in item.front_definitions:
+            print(
+                f"  前端定义处 : {front_definition.rel_path}:{front_definition.line}"
+                f"（{FRONT_CODE_TABLE_NAME}）"
+            )
         if item.symbol_refs:
             print("  符号引用 :")
             for line in format_occurrences(item.symbol_refs):
@@ -744,7 +954,7 @@ def print_listing(report: Report) -> None:
             print("  文本提及 :")
             for line in format_occurrences(item.text_refs):
                 print(f"    {line}")
-        print(f"  定义 crate : {', '.join(item.def_crates)}")
+        print(f"  定义 crate : {', '.join(item.def_crates) if item.def_crates else '（前端自有码表）'}")
         print(f"  引用 crate : {', '.join(item.ref_crates) if item.ref_crates else '（无）'}")
         front_use = format_occurrences(item.front_uses)
         front_note = format_occurrences(item.front_comments)
@@ -759,9 +969,10 @@ def print_listing(report: Report) -> None:
         print()
 
     if report.named_without_definition:
-        print("== 被点名、但 Rust 侧**没有定义**的码（**观察**，不是发现）==")
-        print("⚠️ 这些码**没有** Rust 定义 ⇒ ⇒ 它们要么**只活在前端**（宿主侧），")
+        print("== 被点名、但**两侧都没有定义处**的码（**观察**，不是发现）==")
+        print("⚠️ 这些码**没有**定义处 ⇒ ⇒ 它们要么**只活在前端**（宿主侧），")
         print("   要么是**只被提到**、从没被定义过 ⇒ ⇒ 「住哪」要按判据判。")
+        print("⚠️ **前端服务层**用到的那些 ⇒ ⇒ 断言「前端码无定义处」会判红。")
         for code in report.named_without_definition:
             spots = format_occurrences(
                 [o for o in report.undefined_occurrences.get(code, []) if not is_front_test(o.rel_path)]
@@ -851,6 +1062,10 @@ error_families! {
     Platform => "PLT",
     /// ELF / DWARF / object parsing.
     Loader => "LDR",
+    /// Front-end transport errors.
+    Transport => "TRX",
+    /// Front-end board-store errors.
+    Storage => "STORE",
 }
 """
 
@@ -882,6 +1097,19 @@ pub const E_PLT_01_SCHEMA_VERSION: u16 = 1;
         '// 好夹具：前端点名一个契约层的码。\n'
         'export const UNKNOWN = "E_PLT-01";\n'
         '// ⚠️ 注释里**提到** `E_PLT-02` ⇒ ⇒ 「提到」**不等于**「用到」。\n'
+    ),
+    # ---- 前端**自有码表** ⇒ ⇒ 前端自产码的**定义处**就在这里 ----
+    "front/lib/message.js": (
+        "// 好夹具：前端**自有码表** ⇒ ⇒ 前端自产码的**定义处**就在这张表里。\n"
+        "// ⚠️ 键就是码本身 ⇒ ⇒ 工具据此抽出码集合。\n"
+        "export const FRONT_ERROR_CODES = Object.freeze({\n"
+        '    "E_TRX-07": "E_TRX-07",\n'
+        "});\n"
+    ),
+    "front/services/m07_transport.js": (
+        "// 好夹具：前端**服务层**用了一个**前端自有码** ⇒ ⇒ 它**有定义处**\n"
+        "// ⇒ ⇒ 断言「前端码无定义处」**不红**。\n"
+        'export const TRANSPORT_CHANNEL_ERROR_CODE = "E_TRX-07";\n'
     ),
     "front/tests/only-in-tests.mjs": (
         "// ⚠️ 前端**测试**里的提及**不算**「前端按码分派」。\n"
@@ -931,9 +1159,16 @@ pub const E_ZZZ_01_UNKNOWN_FAMILY: u16 = 1;
         "// 坏夹具 ③：前端**服务层**用了一个**内核 crate 也定义**的码。\n"
         'export const BUS_UNMAPPED = "E_BUS-01";\n'
     ),
+    # ---- 坏夹具 ⑤：前端**服务层**用了一个**没有定义处**的码 ----
+    "front/services/m23_boardstore.js": (
+        "// 坏夹具 ⑤：前端**服务层**用了一个**两侧都没有定义处**的码\n"
+        "// ⇒ ⇒ 断言「前端码无定义处」判红（Rust 侧没有 `const`，\n"
+        "// 前端自有码表里也没有它）。\n"
+        'export const STORE_MISSING = "E_STORE-09";\n'
+    ),
 }
 
-#: 坏夹具的**期望红集**（⇒ ⇒ 四条断言被**单独**钉住）。
+#: 坏夹具的**期望红集**（⇒ ⇒ 五条断言被**单独**钉住）。
 #:
 #: ⚠️ **逐条**（`(种类, 码)`）⇒ ⇒ 不许只比「有红」⇒ ⇒ 红集**内容**要对得上。
 BAD_EXPECTED_KINDS = sorted(
@@ -942,11 +1177,12 @@ BAD_EXPECTED_KINDS = sorted(
         KIND_VALUE_MISMATCH,
         KIND_FAMILY_UNDECLARED,
         KIND_FRONT_KERNEL_COLLISION,
+        KIND_FRONT_CODE_NO_DEFINITION,
     ]
 )
 
 #: 坏夹具的**期望失败条数**（每种坏法各一次）。
-BAD_EXPECTED_COUNT = 4
+BAD_EXPECTED_COUNT = 5
 
 #: 坏夹具的**期望红集（逐条）** ⇒ ⇒ `(种类, 码)` 的多重集。
 BAD_EXPECTED_PAIRS = sorted(
@@ -955,6 +1191,7 @@ BAD_EXPECTED_PAIRS = sorted(
         (KIND_VALUE_MISMATCH, "E_PLT_01"),
         (KIND_FAMILY_UNDECLARED, "E_ZZZ_01"),
         (KIND_FRONT_KERNEL_COLLISION, "E_BUS_01"),
+        (KIND_FRONT_CODE_NO_DEFINITION, "E_STORE_09"),
     ]
 )
 
@@ -1041,6 +1278,29 @@ def self_test() -> int:
         problems.append("**视图层**被算成了前端服务层 ⇒ ⇒ 「只判服务层」这条口径破了")
     elif not view_code.front_view_uses:
         problems.append("好夹具里 `E_BUS_04` 的视图层使用没列出来 ⇒ ⇒ 清单不全")
+    # ---- 前端**自有码表**这条新口径 ⇒ ⇒ 逐条钉住 ----
+    # ⚠️ **前端自产码**的定义处在**前端码表**里 ⇒ ⇒ 「唯一定义」对它生效
+    # ⇒ ⇒ 它**不是**「没有定义处」的码 ⇒ ⇒ 断言 ⑤ **不红**。
+    own_code = good.codes.get("E_TRX_07")
+    if own_code is None:
+        problems.append("好夹具里 `E_TRX_07` 消失了 ⇒ ⇒ 清单没列全")
+    elif not own_code.front_definitions:
+        problems.append(
+            "前端**自有码表**里的条目没被算成「定义处」⇒ ⇒ 「唯一定义」对前端码无效"
+        )
+    elif own_code.definitions:
+        problems.append("前端自有码被算成了 Rust 侧的定义 ⇒ ⇒ 两类定义处混在一起了")
+    elif not own_code.front_service_uses:
+        problems.append("好夹具里 `E_TRX_07` 的**服务层**使用没列出来 ⇒ ⇒ 口径破了")
+    elif not own_code.has_definition:
+        problems.append("好夹具里 `E_TRX_07` 没有定义处 ⇒ ⇒ 断言 ⑤ 会误红")
+    # ⚠️ **前端码表里的码**必须**只**算**一处**定义 ⇒ ⇒ 表的形状是
+    #    `"E_XXX-NN": "E_XXX-NN"` ⇒ ⇒ 键 + 值是**同一个条目**。
+    if own_code is not None and len(own_code.front_definitions) != 1:
+        problems.append(
+            f"前端码表里的 `E_TRX_07` 被算成了 {len(own_code.front_definitions)} 处定义"
+            " ⇒ ⇒ 键 + 值必须去重"
+        )
 
     print()
     print("== 坏夹具（期望红）==")

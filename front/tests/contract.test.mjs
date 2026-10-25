@@ -437,6 +437,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Event.console([104, 105])),
             // 契约 v6 新增：当前生效的板级内存图（v7 多了 loaded / revision）。
             variantOf(Event.memoryMap({}, false, true, 0)),
+            // 契约 v8 新增：管理员通道的**回复侧**（D-129）。
+            variantOf(Event.adminLogs([])),
+            variantOf(Event.adminDiag({})),
         ].sort();
         assert.deepEqual(js, rust, "JS 事件变体与 Rust EventPayload 不一致");
     });
@@ -561,6 +564,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 Console: Event.console([104, 105]),
                 // 契约 v6：当前生效的板级内存图（v7 多了 loaded / revision）。
                 MemoryMap: Event.memoryMap({}, false, true, 0),
+                // 契约 v8：管理员通道的**回复侧**（D-129）。
+                AdminLogs: Event.adminLogs([]),
+                AdminDiag: Event.adminDiag({}),
             },
         };
 
