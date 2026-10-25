@@ -100,6 +100,30 @@ def table_rows(sec_lines):
     return rows
 
 
+def _body_lines():
+    """规格的**正文**（**去掉 §9 变异自检那一节**）。
+
+    ⚠️ **为什么必须去掉 §9**：§9 的变异表**逐字引用**变异内容 ⇒ ⇒ 里面
+    **故意**出现「不存在的验收编号」（`A-9`）与「故意写错的版本号」（`8`）
+    ⇒ ⇒ 若不排除 ⇒ ⇒ **§9 自己把门禁弄红** ⇒ ⇒ ⇒ ⇒ **零判别力**
+    ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ **判据**：§9 记的是「**做过什么**」，
+    **不是**「规格现在说什么」⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ 排除它。
+    """
+    out = []
+    in_s9 = False
+    for line in lines:
+        if re.match(r"^##\s+§9\b", line):
+            in_s9 = True
+            continue
+        if in_s9:
+            if re.match(r"^##\s+§\d+", line):
+                in_s9 = False
+            else:
+                continue
+        out.append(line)
+    return out
+
+
 # ---- 1. Markdown 表格列数一致 --------------------------------------------
 in_fence = False
 table_start = None
@@ -198,10 +222,15 @@ for grp, want in ACCEPT_EXPECT.items():
 for sub in sorted(sub_ids):
     if sub not in defined:
         err(f"[验收] 子编号 {sub}b 的**母号** {sub} 不在 §5 的验收里")
-# ⚠️ **§5 之外不许出现未定义的验收编号** ⇒ ⇒ 别处引用一个不存在的号 ⇒ 红。
-for m in re.finditer(r"\b([ABCTX]-\d+)\b", "\n".join(lines)):
+# ⚠️⚠️ **§9 的变异表必须排除在这条之外** —— 它**逐字引用**变异内容
+#    （例如「把 `A-5` 改成 `A-9`」这句话里就有一个**故意不存在**的验收编号）
+#    ⇒ ⇒ 若不排除 ⇒ ⇒ §9 自己会把门禁弄红 ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ **零判别力**
+#    （门禁只会逼着人**别写 §9**）⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ **要排除**。
+#: ⇒ ⇒ 判据是「§9 记的是**做过什么**，不是**规格现在说什么**」。
+body_lines = _body_lines()
+for m in re.finditer(r"\b([ABCTX]-\d+)\b", "\n".join(body_lines)):
     if m.group(1) not in defined:
-        line_no = "\n".join(lines)[:m.start()].count("\n") + 1
+        line_no = "\n".join(body_lines)[:m.start()].count("\n") + 1
         err(f"[验收] 第 {line_no} 行出现未在 §5 定义的验收编号 {m.group(1)}")
 
 # ---- 7. 关键约束字面量钉住（防规格被悄悄改软） --------------------------
@@ -352,14 +381,18 @@ for const, want in VERSION_PINS:
     #:    本项会**恒绿**（零判别力）⇒ ⇒ 那也是红。
     WINDOW = 24
     n_stated = 0
-    for m in pat.finditer(text):
-        win = text[m.end():m.end() + WINDOW]
+    # ⚠️⚠️ **只扫正文**（**去掉 §9 变异自检那一节**）—— §9 的变异表**逐字引用**
+    #    「把版本号写成 8」这句话 ⇒ ⇒ 若不排除 ⇒ ⇒ **§9 自己把门禁弄红**
+    #    ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ **零判别力** ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ 排除它。
+    body_text = "\n".join(_body_lines())
+    for m in pat.finditer(body_text):
+        win = body_text[m.end():m.end() + WINDOW]
         dm = re.search(r"(?<![A-Za-z0-9_-])(\d)", win)
         if not dm:
             continue
         n_stated += 1
         if dm.group(1) != want:
-            line_no = text[:m.start()].count("\n") + 1
+            line_no = body_text[:m.start()].count("\n") + 1
             err(f"[禁列] 第 {line_no} 行把 {const} 的值写成 {dm.group(1)}"
                 f"（本批**不升** ⇒ 必须是 {want}）")
     if n_stated == 0:
