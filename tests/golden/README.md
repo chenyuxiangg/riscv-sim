@@ -441,7 +441,7 @@ simply has no case for them.  Those live in the `local` suite:
 | `local/pmp_deny` | `tests/golden/local/pmp_deny.S` | **PMP denies a store to a mapped address**: with `mstatus.MPRV = 1`, entry 0 (NAPOT, 4 KiB at `0x80040000`, **no permissions**) matches ⇒ the store traps with `mcause = 7` and `mtval = 0x80040000` |
 | `local/smode_csr` | `tests/golden/local/smode_csr.S` | the **S-mode** CSR set and their WARL rules, the **per-level accessibility** rule (an M-mode or unimplemented CSR in S mode ⇒ illegal instruction), the **delegation routing** (`medeleg`'s bit 2 decides which entry the trap lands on), and where **`sret` lands** |
 | `local/mstatus_warl` | `tests/golden/local/mstatus_warl.S` | `mstatus.MPP` is WARL: writing the **reserved** value 2 **legalises the field to 0** while the rest of the same write lands normally |
-| `local/pmp_lock_tor` | `tests/golden/local/pmp_lock_tor.S` | a **locked** (`L` = 1) **TOR** PMP entry **freezes the previous entry's `pmpaddr`** — the write is dropped and the old value reads back (ledger D-152) |
+| `local/pmp_lock_tor` | `tests/golden/local/pmp_lock_tor.S` | **three** lock semantics: a **locked** (`L` = 1) **TOR** entry **freezes the previous entry's `pmpaddr`**, a **locked entry's own** `pmpaddr` is **read-only**, and an **unlocked** entry's predecessor is **not** frozen (ledger D-152) |
 
 The corpus is **75** cases now (it was 69 before the v0.38 supervisor batch:
 three upstream `rv32si/*` rows and two new `local` rows; the `local` suite
@@ -513,7 +513,7 @@ would then fail for the wrong reason.  (The `pmpcfg` byte layout itself
 — `L` = bit 7, `A` = bits 4:3, `X` = bit 2, `W` = bit 1, `R` = bit 0 —
 matches upstream's `env/encoding.h`, so that file needs no change.)
 
-### `pmp_lock_tor` — a locked TOR entry freezes the previous entry's `pmpaddr`
+### `pmp_lock_tor` — the three lock semantics of a `pmpcfg` entry
 
 The RISC-V privileged spec (§3.7.6) says that setting `L` in a `pmpcfg`
 entry makes that entry read-only **and**, when the locked entry's `A` field
@@ -527,23 +527,38 @@ the very same ELF on both sides and compares the two exit codes ⇒ ⇒ if the
 reference side disagrees, the row goes **red** — that is a **finding**,
 not a defect of the case.
 
-**The measured result: the reference side freezes too.**  Both sides read
-`pmpaddr2` back as **`0x1400_0400`** after a write of `0x1400_0c00` into a
-`pmpaddr` whose *next* entry is a locked TOR entry ⇒ ⇒ the platform and the
-reference side **agree** ⇒ ⇒ the behaviour is now pinned by the default
-gate, and the row is green on both sides.
+**The measured result: the reference side agrees on all three.**  Both sides
+read `pmpaddr2` back as **`0x1400_0400`** after a write of `0x1400_0c00`
+into a `pmpaddr` whose *next* entry is a locked TOR entry, **and** both
+sides read `pmpaddr3` back as **`0x1400_0800`** after the same write into
+the **locked entry's own** `pmpaddr` ⇒ ⇒ the platform and the reference
+side **agree** ⇒ ⇒ the behaviour is now pinned by the default gate, and the
+row is green on both sides.
 
-The case is **one** case with **two** scenarios in the **same** `pmpcfg0`
+The case is **one** case with **three** scenarios in the **same** `pmpcfg0`
 register, because a locked entry's `pmpcfg` byte is read-only ⇒ ⇒ it can
-never be unlocked ⇒ ⇒ the frozen scenario and the unlocked control
-**cannot share an entry**:
+never be unlocked ⇒ ⇒ the scenarios **cannot share an entry**:
+
+| # | scenario | what it asserts | basis |
+| --- | --- | --- | --- |
+| 1 | the **frozen** scenario | entry 3 is a locked **TOR** entry ⇒ ⇒ the **preceding** entry's `pmpaddr2` is frozen ⇒ ⇒ the write is dropped | privileged spec §3.7.6 — **newly measured** by this row (D-152) |
+| 2 | the **locked entry's own** `pmpaddr` | entry 3 **is** locked ⇒ ⇒ **its own** `pmpaddr3` is read-only ⇒ ⇒ the write is dropped | **F12 / F13** of the v0.37 batch (STAGE-21) — measured then, pinned in the corpus now |
+| 3 | the **mandatory control** | entry 2 is a TOR entry that is **not** locked ⇒ ⇒ its predecessor's `pmpaddr1` must still take a written value | the **negative** half — without it, "frozen" and "ignored" are the same observation |
+
+⚠️ **Scenarios 1 and 2 are two different rules.**  Rule 1 is about the
+entry **before** a locked TOR entry; rule 2 is about the locked entry
+**itself** ⇒ ⇒ neither substitutes for the other ⇒ ⇒ a platform that
+implemented only one of them would pass the other half of this case ⇒ ⇒
+both are asserted, separately, with separate verdict numbers.
+
+The register layout:
 
 | entry | mode | `pmpcfg0` byte | `pmpaddr` | what it is for |
 | --- | --- | --- | --- | --- |
 | 0 | NAPOT, `R`+`W`+`X`, not locked | `0x1f` | `0x7fffffff` ⇒ NAPOT over `[0x0000_0000, 2^34)` | the **permit-all** entry — it keeps the access path permissive on both sides |
 | 1 | OFF | `0x00` | — | — |
 | 2 | TOR, **not** locked | `0x08` | `pmpaddr1 = 0x1400_0000`, `pmpaddr2 = 0x1400_0400` | the **control** — its predecessor's `pmpaddr` must still take a written value |
-| 3 | TOR, **locked** | `0x88` | `pmpaddr3 = 0x1400_0800` | the **freezing** entry — it freezes `pmpaddr2` |
+| 3 | TOR, **locked** | `0x88` | `pmpaddr3 = 0x1400_0800` | the **freezing** entry — it freezes `pmpaddr2` **and** makes its own `pmpaddr3` read-only |
 
 ⇒ ⇒ `pmpcfg0` = **`0x8808_001f`**.
 
@@ -553,6 +568,15 @@ that dropped every `pmpaddr` write would be green too ⇒ ⇒ a false green.
 The control here is entry 2: a **TOR** entry that is **not** locked ⇒ ⇒
 `pmpaddr1` must still take a written value, **even though** a locked
 entry exists elsewhere in the same register.
+
+⚠️ **The order of the checks matters**, and it is the order the spec's
+rules stack in: write the four `pmpaddr` registers ⇒ ⇒ read them all back
+(the **control group**, before anything is locked) ⇒ ⇒ lock entry 3 ⇒ ⇒
+read `pmpcfg0` back (the lock really took) ⇒ ⇒ judge `pmpaddr2` (frozen) ⇒
+⇒ judge `pmpaddr3` (the locked entry's own) ⇒ ⇒ judge `pmpaddr1` (the
+control landed) ⇒ ⇒ PASS.  The `pmpaddr3` register therefore has **two**
+read-backs — **one before the lock** (in the control group) and **one
+after** — and they are two different assertions.
 
 ⚠️ **Entry 0 stays the permit-all NAPOT on purpose.**  The verdict travels
 through an `ecall` → trap vector → **`tohost` store**, and the `tohost`
@@ -577,20 +601,23 @@ invariant broke:
 
 | verdict | meaning |
 | --- | --- |
-| `PASS` | both sides agree — the write to `pmpaddr2` was frozen |
+| `PASS` | both sides agree — the frozen write was dropped **and** the control write landed |
 | `FAIL 3` | the **frozen** value was **not** frozen: the write to `pmpaddr2` landed although entry 3 is a locked TOR entry |
 | `FAIL 4` | the **control**'s write did **not** land: `pmpaddr1` (whose *next* entry, entry 2, is a TOR entry but **not** locked) did not take the written value ⇒ ⇒ the write is frozen even though it must not be |
 | `FAIL 5` | the **control group** broke: a `pmpaddr` written while **nothing** was locked did not read back ⇒ ⇒ the case is not alive ⇒ ⇒ every other verdict would be meaningless |
 | `FAIL 6` | the `pmpcfg0` read-back did not match ⇒ ⇒ the lock never took effect ⇒ ⇒ the frozen scenario was not actually exercised |
+| `FAIL 7` | the **locked entry's own** address register was **not** read-only: the write to `pmpaddr3` landed although entry 3 **is** locked ⇒ ⇒ rule 2 (F12 / F13) does not hold |
 
-⚠️ **The row has discriminating power — measured, not asserted.**  Two
-mutations of the platform's freeze rule were applied one at a time (and
-then reverted byte-for-byte), and each one turns the row **red**:
+⚠️ **The row has discriminating power — measured, not asserted.**  Three
+mutations of the platform's freeze rules were applied one at a time (and
+then reverted byte-for-byte), and each one turns the row **red** — with a
+**different** verdict number, so the three scenarios are told apart:
 
 | mutation | Spike | the platform | verdict |
 | --- | --- | --- | --- |
-| the freeze is **disabled** | `PASS` | **`FAIL 3`** | mismatch ⇒ ⇒ the frozen scenario is what carries the row |
+| the freeze is **disabled** | `PASS` | **`FAIL 3`** | mismatch ⇒ ⇒ the **frozen scenario** is what carries that half |
 | the freeze **drops the "the next entry is locked" condition** | `PASS` | **`FAIL 4`** | mismatch ⇒ ⇒ **the control** is what carries that half |
+| a locked entry's **own** `pmpaddr` is no longer read-only | `PASS` | **`FAIL 7`** | mismatch ⇒ ⇒ **the locked-own scenario** is what carries that half |
 
 The harness resolves a row's source in this order:
 
