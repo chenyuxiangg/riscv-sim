@@ -11,7 +11,7 @@
     5. 章节 §0~§11 完整
     6. 验收编号交叉引用无未定义项（分组 A / B / C / T / X）
     7. 关键约束字面量钉住（含已废止字面量的禁列）
-       ＋ 7b. §1.2 的实测事实表必须是 **F1~F32 连续**（删掉一条实测事实
+       ＋ 7b. §1.2 的实测事实表必须是 **F1~F33 连续**（删掉一条实测事实
           也是「把规格改软」⇒ ⇒ 事实表本身要钉住）
 
 ⚠️ **表格切分复用 `tools/doc_check.py` 的那一份**（**一个约束一个落点**）——
@@ -205,7 +205,8 @@ must = [
     "X-4",           # 判别力：U 模式段真的跑了
     "CSR_PRIV",      # 裁决 E
     "0x10200073",    # F32：sret 的编码
-    "F32",           # 施工期补测的最后一条
+    "F32",           # 施工期补测的倒数第二条
+    "F33",           # 施工期补测的最后一条（推翻初稿的「整次丢弃」）
 
     # ---- 纪律 ----
     "一个约束一个落点",
@@ -230,7 +231,7 @@ for f in forbidden:
     if f in text:
         err(f"[禁列] 规格出现已废止字面量 {f}")
 
-# ---- 7b. §1.2 的实测事实表：F1~F32 必须**连续**且齐全 --------------------
+# ---- 7b. §1.2 的实测事实表：F1~F33 必须**连续**且齐全 --------------------
 # ⚠️ **删掉一条实测事实**也是「把规格改软」的一种 ⇒ ⇒ 事实表本身要钉住。
 facts = []
 grab = False
@@ -244,9 +245,9 @@ for line in lines:
         m = re.match(r"^\|\s*\**\s*(F\d+)\s*\**\s*\|", line)
         if m:
             facts.append(m.group(1))
-want = [f"F{i}" for i in range(1, 33)]
+want = [f"F{i}" for i in range(1, 34)]
 if facts != want:
-    err(f"[事实] §1.2 的实测事实表不是 F1~F32 连续：{facts}")
+    err(f"[事实] §1.2 的实测事实表不是 F1~F33 连续：{facts}")
 
 # ---- 7c. §8 施工期订正：编号必须 **1..8 连续**且每条都有「已改成什么」 ----
 # ⚠️ **施工期订正是规格被实测推翻的账** ⇒ ⇒ 删掉一条 = 把已被推翻的判据
@@ -263,9 +264,9 @@ for line in lines:
         m = re.match(r"^###\s*订正\s*(\d+)\s*·", line)
         if m:
             corrections.append(int(m.group(1)))
-want_corr = list(range(1, 9))
+want_corr = list(range(1, 10))
 if corrections != want_corr:
-    err(f"[订正] §8 的施工期订正编号不是 1..8 连续：{corrections}")
+    err(f"[订正] §8 的施工期订正编号不是 1..9 连续：{corrections}")
 
 sec8 = []
 grab = False
@@ -278,8 +279,8 @@ for line in lines:
     if grab:
         sec8.append(line)
 sec8_text = "\n".join(sec8)
-if sec8_text.count("已改成什么") < 8:
-    err(f"[订正] §8 的「已改成什么」不足 8 条（实测 {sec8_text.count('已改成什么')}）")
+if sec8_text.count("已改成什么") < 9:
+    err(f"[订正] §8 的「已改成什么」不足 9 条（实测 {sec8_text.count('已改成什么')}）")
 
 print(f"检查项：7  失败 {len(fail)}")
 for f in fail:
