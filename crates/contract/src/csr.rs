@@ -460,67 +460,92 @@ pub const MSTATUS_WARL_MASK: u32 = 0x807E_79AA;
 
 /// `mstatus` 的 WARL 合法化 —— **唯一的落点**。
 ///
-/// ⚠️ **它不是掩码**：掩码表达不了「保留值 ⇒ **整次写被丢弃**」。
+/// ⚠️ **它不是掩码**：掩码表达不了「`MPP` 保留值 ⇒ **合法化到 0**」。
 ///
-/// **实测（F5）**：把 `mstatus` 清零后写 `MPP = 2` ⇒ 读回 **`0`**（旧值
-/// 保留）；旧值是 `3` 时写 `0x1802`（`MPP = 2` 且 `SIE = 1`）⇒ 读回
-/// **`0x1800`** ⇒ ⇒ 连同一次写里的 `SIE` **也没落进去** ⇒ ⇒ 「整次丢弃」
-/// 是**实测口径**，不是推测。
+/// **实测（F5 + F33 + F39）**：写保留值 `MPP = 2` ⇒ 参考侧**把该字段合法化到 0**
+/// ⇒ ⇒ **不是**「保留旧值」⇒ ⇒ **也**不是「整次写被丢弃」——同一次写里的 `SIE`
+/// **落进去了**：清零后写 `0x1002`（`MPP = 2` 且 `SIE = 1`）⇒ 读回
+/// **`0x0000_0002`**；先写 `0x1800`（`MPP = 3`）再写 `0x1002` ⇒ 读回**仍是
+/// `0x0000_0002`** ⇒ ⇒ 旧值被**覆盖成 0**，不是被保留。
 ///
 /// **规则（顺序钉死）**：
 ///
 /// 1. `masked = new & MSTATUS_WARL_MASK`（实测掩码，F6）；
 /// 2. 取 `masked` 的 `MPP` 字段（bits 12:11）；
-/// 3. 若该字段 ∉ **{0, 1, 3}**（保留值 = **2**，F5）⇒ ⇒ **该字段保留旧值**
-///    ⇒ ⇒ **同一次写里的其它位照常落进去**（⚠️ **不是**「整次丢弃」——
-///    见下面那条订正）；
+/// 3. 若该字段 ∉ **{0, 1, 3}**（保留值 = **2**）⇒ ⇒ **该字段合法化到 0**
+///    ⇒ ⇒ **同一次写里的其它位照常落进去**；
 /// 4. 否则 ⇒ `MPP` 取新值；
 /// 5. 返回「掩码后的新值」+「合法化后的 `MPP`」。
 ///
-/// ⚠️ **「整次丢弃」是**错的**（STAGE-22 订正 9 · **F33**）：实测「清零后写
-/// `0x1002`（`MPP = 2` 且 `SIE = 1`）⇒ 读回低字节 **`0x02`**」⇒ ⇒ `SIE`
-/// **落进去了** ⇒ ⇒ 只有 `MPP` 字段被**保留成旧值**。⇒ ⇒ 「整次丢弃」
-/// 这个读法会把 `SIE` 也吞掉 ⇒ ⇒ 与参考侧**逐位不等**。
+/// ⚠️ **为什么没有 `old` 参数**：合法化到 0 的语义**不依赖旧值** ⇒ ⇒ 留一个
+/// 读不到用处的参数就是**谎言** ⇒ ⇒ 函数**只吃新值**。
 ///
 /// ⚠️ **`mstatus.SPP`（bit 8）在 M 模式可写**（F7）⇒ ⇒ 它在掩码里 ⇒ ⇒
 /// 由这条规则一并处理。
 ///
 /// ⚠️ **唯一落点**：M-13 的 CSR 写路径**只调用**它，**不**另写一份
 /// `& mask`（同 v0.37 的 `pmpcfg` 纪律）。
-pub fn mstatus_warl(old: u32, new: u32) -> u32 {
+pub fn mstatus_warl(new: u32) -> u32 {
     let masked = new & MSTATUS_WARL_MASK;
     let mpp_mask = 0x3 << MSTATUS_MPP_SHIFT;
     let mpp_new = (masked & mpp_mask) >> MSTATUS_MPP_SHIFT;
-    let mpp_old = (old & mpp_mask) >> MSTATUS_MPP_SHIFT;
     let mpp = if mpp_new == MSTATUS_MPP_U
         || mpp_new == MSTATUS_MPP_S
         || mpp_new == MSTATUS_MPP_M
     {
         mpp_new
     } else {
-        mpp_old
+        // 保留值 ⇒ **合法化到 0**（U），**不是**保留旧值（F39）。
+        MSTATUS_MPP_U
     };
     (masked & !mpp_mask) | (mpp << MSTATUS_MPP_SHIFT)
 }
 
-/// `sstatus` 的**客体写**掩码 —— 只有 `SIE` 与 `SPIE` 可写。
+/// `sstatus` 的**客体写**掩码 —— 客体写 `sstatus` 时会落到 `mstatus` 的哪些位。
 ///
-/// ⚠️ **实测（F8）**：参考侧在 S 模式写 `sstatus` ⇒ 读回 **`0x22`** ⇒ ⇒
-/// `SPP` / `SUM` / `MXR` / `SD` **都写不进去** ⇒ ⇒ ⇒ **`sstatus.SPP`
-/// 恒 0**（除非**平台自己**写它 —— 见 [`SSTATUS_VIEW_MASK`] 与 STAGE-22
-/// 裁决 D / 订正 7）。
-pub const SSTATUS_WARL_MASK: u32 = 0x0000_0022;
+/// ⚠️ **实测（F39）**：参考侧在 **S 模式**写 `sstatus = 0xFFFFFFFF` ⇒ 读回
+/// **`0x800C_6122`**；在 **M 模式**写同一个值 ⇒ 读回 `mstatus` =
+/// **`0x800C_61A2`** ⇒ ⇒ 两者**只差 `MPIE`（bit 7）** ⇒ ⇒ 写掩码 =
+/// **`0x804C_61A2`**（`SIE` \| `SPIE` \| `MPIE` \| `SPP` \| `FS[14:13]` \|
+/// `SUM` \| `MXR` \| `SD`）。
+///
+/// ⚠️ **S 模式与 M 模式的写掩码相同**（F39）⇒ ⇒ 参考侧**不按特权裁剪**
+/// `sstatus` 的写掩码。
+///
+/// ⚠️ **与特权规范的差异（明示取舍，登记在 `tests/golden/README.md` 的已知偏差
+/// 表）**：特权规范里 `SPP` 只在 M 模式可写、`SUM` / `MXR` 是 M 级字段；而参考侧
+/// **允许 S 模式写 `sstatus.SPP`**，`SUM` / `MXR` 也**在 `sstatus` 的视图里**
+/// ⇒ ⇒ 本平台**对齐参考侧**（黄金对拍的口径就是参考侧）。
+pub const SSTATUS_WARL_MASK: u32 = 0x804C_61A2;
 
 /// `sstatus` 的**读视图**掩码 —— `sstatus` 是 `mstatus` 的**位视图**。
 ///
-/// ⚠️ **不是**一份第二存储（F30）：M 模式写 `sstatus`（`0x22`）⇒ S 模式
-/// 读回 **`0x22`** ⇒ ⇒ 同一个字段。
+/// ⚠️ **不是**一份第二存储（F30）：M 模式写 `sstatus` ⇒ S 模式读回**同一个
+/// 字段** ⇒ ⇒ 同一份存储。
 ///
-/// ⚠️ **视图只含 `SIE` | `SPIE` | `SPP`**（F29）：M 模式把 `mstatus.SD`
-/// 置 1 ⇒ S 模式读 `sstatus` 的 `SD` 位**仍是 0** ⇒ ⇒ `SD` / `FS` /
-/// `VS` / `XS` **不在视图里** ⇒ ⇒ 这与特权规范的「S 级可见字段全集」
-/// **不同**，是本平台的**明示取舍**（STAGE-22 §10 第 6 条）。
-pub const SSTATUS_VIEW_MASK: u32 = 0x0000_0122;
+/// ⚠️ **实测（F39）**：M 模式把 `mstatus` 写满（读回 `0x807E_79AA`）⇒ S 模式
+/// 读 `sstatus` = **`0x800C_6122`** ⇒ ⇒ 视图掩码 = **`0x800D_E162`**
+/// （`SIE` \| `SPIE` \| `UBE` \| `SPP` \| `FS[14:13]` \| `XS[16:15]` \| `SUM` \|
+/// `MXR` \| `SD`）。
+///
+/// ⚠️ **`UBE`（bit 6）与 `XS`（bits 16:15）在参考侧恒为 0**（`mstatus` 的写掩码
+/// `0x807E_79AA` 不含这两处）⇒ ⇒ 它们在不在视图里**都不可观测** ⇒ ⇒ 取
+/// 「在视图里」是为了与参考侧的掩码**逐字一致**。
+///
+/// ⚠️ **不含** `MIE`（bit 3）/ `MPIE`（bit 7）/ `MPP`（bits 12:11）/ `MPRV`
+/// （bit 17）/ `TVM` / `TW` / `TSR` ⇒ ⇒ **S 模式看不到机器态的字段**。
+pub const SSTATUS_VIEW_MASK: u32 = 0x800D_E162;
+
+/// `medeleg` 的**合法位集合**（per-bit WARL）—— 参考侧实测。
+///
+/// ⚠️ **实测（F40）**：参考侧写 `medeleg = 0xFFFFFFFF` ⇒ 读回 **`0x0008_B3FE`**；
+/// 写 `0x0000_FFFF` ⇒ 读回 **`0x0000_B3FE`** ⇒ ⇒ 两者都是「请求值 ∧ 同一个
+/// 合法位集合」⇒ ⇒ **per-bit WARL**，合法位集合 = **`0x0008_B3FE`**。
+///
+/// ⚠️ **落点**：M-13 的 CSR 写路径对 `medeleg` **必须**先过这个掩码 ⇒ ⇒ 否则
+/// 本平台会把「指令地址未对齐」（bit 0）也当成可委托 ⇒ ⇒ 与参考侧**逐位不等**
+/// （参考侧把 bit 0 丢掉）。
+pub const MEDELEG_WRITABLE_MASK: u32 = 0x0008_B3FE;
 
 /// `mepc` 取 PC 时要**掩掉**的位：`mret` 跳到 `mepc` 时按 **IALIGN**
 /// 掩码（特权规范）—— 本平台实现了 **C 扩展**（`misa` 的 C 位 = 1）⇒
@@ -2291,47 +2316,51 @@ mod tests {
     #[test]
     fn mstatus_warl_keeps_exactly_the_measured_writable_bits() {
         assert_eq!(
-            mstatus_warl(0, 0xFFFF_FFFF),
+            mstatus_warl(0xFFFF_FFFF),
             0x807E_79AA,
             "写全 1 之后 mstatus 必须读回参考侧实测的那个值（F6）"
         );
     }
 
-    /// **A-2** · `MPP` 的**保留值 ⇒ 该字段保留旧值**，**同一次写里的其它位
-    /// 照常落进去**（F5 + **F33**）。
+    /// **A-2** · `MPP` 的**保留值 ⇒ 合法化到 0**，**同一次写里的其它位照常落
+    /// 进去**（F5 + **F33** + **F39**）。
     ///
     /// ⚠️ 关键在**「只丢 `MPP` 字段」**：清零后写 `0x1002`（`MPP = 2` 且
     /// `SIE = 1`）⇒ 参考侧读回低字节 **`0x02`** ⇒ ⇒ `SIE` **落进去了**
     /// ⇒ ⇒ 「整次丢弃」那个读法会让这条**红**。
     ///
+    /// ⚠️ 关键在**「不是保留旧值」**：先写 `0x1800`（`MPP = 3`）再写
+    /// `0x1002` ⇒ 参考侧读回**仍是 `0x0000_0002`** ⇒ ⇒ 旧值被**覆盖成 0**
+    /// ⇒ ⇒ 「保留旧值」那个读法会让这条**红**。
+    ///
     /// ⚠️ `MPP` 字段是 **bits 12:11** ⇒ `MPP = 2` 写的是 **`0x1000`**
     /// （`0x1800` 是 `MPP = 3`，**合法** ⇒ ⇒ 用它测「保留值」是测不到的）。
     #[test]
-    fn mstatus_warl_keeps_the_old_mpp_on_a_reserved_value() {
+    fn mstatus_warl_legalizes_the_reserved_mpp_to_zero() {
         assert_eq!(
-            mstatus_warl(0x0000_0000, 0x0000_1002),
+            mstatus_warl(0x0000_1002),
             0x0000_0002,
-            "MPP = 2 是保留值 ⇒ 该字段保留旧值（0），但 SIE 必须落进去（F33）"
+            "MPP = 2 是保留值 ⇒ 该字段合法化到 0，但 SIE 必须落进去（F39）"
         );
         assert_eq!(
-            mstatus_warl(0x0000_0000, 0x0000_1000),
+            mstatus_warl(0x0000_1000),
             0x0000_0000,
-            "只写 MPP = 2 ⇒ 整次写没有任何可落的位 ⇒ 结果是 0（F5）"
+            "只写 MPP = 2 ⇒ 整次写没有任何可落的位 ⇒ 结果是 0（F39）"
         );
         assert_eq!(
-            mstatus_warl(0x0000_1800, 0x0000_1002),
+            mstatus_warl(0x0000_1802),
             0x0000_1802,
-            "MPP = 2 ⇒ 该字段保留旧值（3），SIE 照落（F33）"
+            "MPP = 3 是合法值 ⇒ 原样落进去（F5）"
         );
     }
 
-    /// **A-2 的另一半** · 合法的 `MPP` 值 {0, 1, 3} 都**不**触发丢弃。
+    /// **A-2 的另一半** · 合法的 `MPP` 值 {0, 1, 3} 都**不**触发合法化。
     #[test]
     fn mstatus_warl_accepts_the_legal_mpp_values() {
         for mpp in [MSTATUS_MPP_U, MSTATUS_MPP_S, MSTATUS_MPP_M] {
             let new = mpp << MSTATUS_MPP_SHIFT;
             assert_eq!(
-                mstatus_warl(0xFFFF_FFFF, new),
+                mstatus_warl(new),
                 new,
                 "MPP = {mpp} 是合法值 ⇒ 写必须落进去（F5）"
             );
@@ -2405,17 +2434,59 @@ mod tests {
         );
     }
 
-    /// **A-6** · `sstatus` 的客体写掩码 = **`0x22`**（F8）。
+    /// **A-6** · `sstatus` 的客体写掩码 = **`0x804C_61A2`**（F39）。
+    ///
+    /// ⚠️ 判别式用的是**架构字面量**，不是常量自己 ⇒ ⇒ 把掩码改坏这条会红。
     #[test]
-    fn the_sstatus_write_mask_is_exactly_sie_and_spie() {
-        assert_eq!(SSTATUS_WARL_MASK, 0x0000_0022);
+    fn the_sstatus_write_mask_is_the_measured_one() {
+        assert_eq!(SSTATUS_WARL_MASK, 0x804C_61A2);
+        assert_ne!(
+            SSTATUS_WARL_MASK & (1 << MSTATUS_SPP_BIT),
+            0,
+            "SPP 在写掩码里 ⇒ ⇒ 参考侧允许 S 模式写 sstatus.SPP（F39）"
+        );
+        assert_ne!(
+            SSTATUS_WARL_MASK & (1 << MSTATUS_SIE_BIT),
+            0,
+            "SIE 在写掩码里（F39）"
+        );
+        assert_eq!(
+            SSTATUS_WARL_MASK & (1 << MSTATUS_MPP_SHIFT),
+            0,
+            "MPP 不在 sstatus 的写掩码里（F39）"
+        );
     }
 
-    /// **A-11** · `sstatus` 的读视图 = **`0x122`** ⇒ ⇒ **不含 `SD`**（F29）。
+    /// **A-11** · `sstatus` 的读视图 = **`0x800D_E162`** ⇒ ⇒ **含 `SD`**（F39）。
     #[test]
-    fn the_sstatus_view_mask_excludes_sd() {
-        assert_eq!(SSTATUS_VIEW_MASK, 0x0000_0122);
-        assert_eq!(SSTATUS_VIEW_MASK & (1 << 31), 0, "SD 不在视图里（F29）");
-        assert_ne!(SSTATUS_VIEW_MASK & (1 << MSTATUS_SPP_BIT), 0, "SPP 在视图里（F7）");
+    fn the_sstatus_view_mask_is_the_measured_one() {
+        assert_eq!(SSTATUS_VIEW_MASK, 0x800D_E162);
+        assert_ne!(SSTATUS_VIEW_MASK & (1 << 31), 0, "SD 在视图里（F39）");
+        assert_ne!(
+            SSTATUS_VIEW_MASK & (1 << MSTATUS_SPP_BIT),
+            0,
+            "SPP 在视图里（F7）"
+        );
+        assert_eq!(
+            SSTATUS_VIEW_MASK & (1 << 3),
+            0,
+            "MIE 不在视图里 ⇒ ⇒ S 模式看不到机器态的使能位（F39）"
+        );
+    }
+
+    /// **F40** · `medeleg` 的合法位集合 = **`0x0008_B3FE`**（per-bit WARL）。
+    #[test]
+    fn the_medeleg_writable_mask_is_the_measured_one() {
+        assert_eq!(MEDELEG_WRITABLE_MASK, 0x0008_B3FE);
+        assert_eq!(
+            MEDELEG_WRITABLE_MASK & 0x0000_B109,
+            0x0000_B108,
+            "参考侧把 medeleg 的 bit 0 丢掉（F40）"
+        );
+        assert_eq!(
+            MEDELEG_WRITABLE_MASK & 0x0000_FFFF,
+            0x0000_B3FE,
+            "只写低 16 位 ⇒ 高位那些位拿不到（F40）"
+        );
     }
 }
