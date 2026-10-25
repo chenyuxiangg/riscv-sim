@@ -2,7 +2,7 @@
 
 > **状态**：冻结。**规格号 STAGE-22**（STAGE-21 已被 v0.37 的 PMP 批占用）。
 > **主题**：台账 **D-94** 拆出的**第 ③ 件事** —— S 扩展。
-> **实测来源**：仓外探针 `/tmp/v038-probe`，**六轮、约 60 个独立 ELF**。
+> **实测来源**：仓外探针 `/tmp/v038-probe`，**十轮、约 90 个独立 ELF**。
 
 ---
 
@@ -64,9 +64,11 @@
 5. ⚠️ **不能把「被拒」推出「匹配上了」**（沿用 v0.37 的纪律）。
 6. 每个探针**自带对照**：先证明「能读到」再问「读到的是什么」。
 
-### §1.2 二十五条**实测**事实
+### §1.2 三十二条**实测**事实
 
-> 记号 `F1`~`F25`。每条都注明**探针来源**（仓外 `/tmp/v038-probe/roundN.py` 里的探针名）。
+> 记号 `F1`~`F32`。每条都注明**探针来源**（仓外 `/tmp/v038-probe/roundN.py` 里的探针名）。
+>
+> ⚠️ **F26~F32 是施工期补测的**（规格冻结后追加）⇒ ⇒ 它们的原文与判据见 **§8 施工期订正**。
 
 | # | 事实 | 探针 |
 | --- | --- | --- |
@@ -95,6 +97,13 @@
 | **F23** | `mepc` 在 S 模式**不可访问**（cause 2）⇒ ⇒ **从 S 模式无法 `mret` 回 M 模式** ⇒ ⇒ 离开 S 模式的唯一途径是 `sret` | `r5_mret_from_s_mpp`、`r6_mret_from_s_mpp` |
 | **F24** | 本平台现有的 `CSR_MISA_VALUE` = `(1<<30)\|(1<<8)\|(1<<12)\|(1<<2)` = `0x4000_1104` ⇒ ⇒ **X 位已置** ⇒ ⇒ 与参考侧**只差 S 位与 U 位** | `crates/contract/src/csr.rs:104` |
 | **F25** | `sstatus` 初始值 0（进 S 模式后未写即读回 0）⇒ ⇒ 我们的 `sstatus` 初值必须也是 0 | `r3_sstatus_fresh` |
+| **F26** | S 模式**写** M 模式 CSR ⇒ **cause 2**（不是「被忽略」）：`csrw mstatus` / `csrw mcounteren` / `csrw misa` 全部 cause 2 ⇒ ⇒ **按级可访问性对读与写同形**。⇒ S/U 模式读写**未实现**的 CSR（`0x0C1` / `fcsr`）⇒ 参考侧也是 **cause 2** ⇒ ⇒ 我们读回 0 ⇒ ⇒ **既有分歧类别**（本批修） | `r7_s_write_mstatus`、`r7_s_write_mcounteren`、`r7_s_write_misa`、`r7_s_read_misa`、`r7_s_write_unimpl`、`r7_s_read_fcsr`、`r7_u_read_sstatus` |
+| **F27** | 参考侧 `misa` 在**黄金门禁的 ISA 串**下（`rv32imc_zicsr_zicclsm_zifencei_zicntr`，**不带 `--priv`**）**仍是 `0x4014_1104`** ⇒ ⇒ 门禁跑的就是这个参考侧 ⇒ ⇒ 我们置上 S+U 位**不会**与门禁分歧 | `r8m_b0..3` |
+| **F28** | **委托陷阱之后 `sstatus.SPP` = 1** ⇒ ⇒ 陷阱入口对 `sstatus` 的写**不受客体的 `0x22` 掩码约束** ⇒ ⇒ `sret` 从陷阱处理器**回到 S 模式**（而不是 U 模式）⇒ ⇒ 与「F8 的 SPP 写不进去」**不矛盾**：那是**客体写**，这是**平台写** | `r9_spp_after_trap` |
+| **F29** | 委托陷阱之后 `sstatus` 的**低字节 = 0**（`SIE` / `SPIE` 都清）；M 模式把 `mstatus.SD` 置 1 后，S 模式读 `sstatus` 的 `SD` 位**仍是 0** ⇒ ⇒ `sstatus` 的读视图**不含** `SD` | `r9_sstatus_after_trap`、`r9_sstatus_after_m_trap`、`r10_sstatus_sd` |
+| **F30** | M 模式写 `sstatus`（`0x22`）⇒ 之后 S 模式读 `sstatus` 读回 **`0x22`**；S 模式 `csrs sstatus, 2` ⇒ 读回 **2** ⇒ ⇒ **`sstatus` 在 M / S 两级是同一个存储**，且 `SIE` 在 S 模式**可写** ⇒ ⇒ `sstatus` 是 `mstatus` 的**位视图**，不是第二份存储 | `r10_m_write_sstatus`、`r10_s_write_sie` |
+| **F31** | `sie` / `sip` / `satp` 在 S 模式的初值**都是 0** | `r10_sie_read`、`r10_sip_read`、`r10_satp_read` |
+| **F32** | 汇编器在 `-march=rv32i_zicsr_zifencei` 下把 **`scall` / `sbreak` 汇编成 `ecall` / `ebreak`**（`0x00000073` / `0x00100073`）⇒ ⇒ **不需要新的 `SCALL` / `SBREAK` 操作码** ⇒ ⇒ 现有 `Op::Ecall` / `Op::Ebreak` 只需**按当前特权级选 cause**（11 / 9 / 8，cause 3 恒定）⇒ ⇒ 但 **`sret` 必须新解码**（`0x10200073`，现有解码器把 `0x102` 留给「非法」） | 工具链 `objdump` 逐条 dump |
 
 ### §1.3 **四条被推翻的旧结论**（必须写进规格，否则会被再犯）
 
@@ -137,16 +146,22 @@
 | `CSR_MIDELEG` | `0x303` | 规范 |
 | `CSR_SCOUNTEREN` | `0x906` | 规范 |
 | `CSR_UCOUNTEREN` | `0x005` | 规范 |
+| `CSR_PRIV` | `0x0C0` | **裁决 E**（自定义只读区） |
 | `MSTATUS_SIE_BIT` | `1` | 规范 |
 | `MSTATUS_SPIE_BIT` | `5` | 规范 |
 | `MSTATUS_SPP_BIT` | `8` | **F7** |
 | `MSTATUS_MPP_SHIFT` | `11` | 规范 |
 | `MSTATUS_MPP_U` / `_S` / `_M` | `0` / `1` / `3` | **F5** |
+| `PRIV_U` / `PRIV_S` / `PRIV_M` | `0` / `1` / `3` | **裁决 G**（与 `MPP` 同构 ⇒ 一份字面量） |
 | `MSTATUS_WARL_MASK` | **`0x807E_79AA`** | **F6（实测替换旧的 `0x807F_FFEA`）** |
-| `SSTATUS_WARL_MASK` | **`0x22`** | **F8** |
-| `CAUSE_SUPERVISOR_ECALL` | `9` | **F19** |
-| `CAUSE_USER_ECALL` | `8` | **F19** |
-| `CAUSE_BREAKPOINT` | `3` | **F19** |
+| `SSTATUS_WARL_MASK` | **`0x22`** | **F8**（客体的写掩码） |
+| `SSTATUS_VIEW_MASK` | **`0x0000_0122`** | **F29 / F30**（`SIE` \| `SPIE` \| `SPP` ⇒ **不含 `SD`**） |
+| `CAUSE_ILLEGAL_INSTRUCTION` | `2` | 规范（F26） |
+| `CAUSE_BREAKPOINT` | `3` | 规范（F19） |
+| `CAUSE_USER_ECALL` | `8` | 规范（F19） |
+| `CAUSE_SUPERVISOR_ECALL` | `9` | 规范（F19） |
+| `CAUSE_MACHINE_ECALL` | `11` | 规范（F19） |
+| `COUNTEREN_CY` / `_TM` / `_IR` | `0` / `1` / `2` | 规范（`mcounteren` / `scounteren` / `ucounteren` 的位） |
 
 ⚠️ **一个约束一个落点**：内核**只引用**这些常量，**不**另写一份字面量（同 v0.37 的 `pmpcfg` 纪律）。
 
@@ -174,9 +189,13 @@ pub fn mstatus_warl(old: u32, new: u32) -> u32;
 
 ### §2.4 `sstatus` 的独立写掩码（裁决 D）
 
-- `sstatus` 的**写**掩码 = **`0x22`**（`SIE` | `SPIE`）⇒ ⇒ **`SPP` 写不进去**（F8）。
-- `sstatus` 的**读**是 `mstatus` 的**位视图**：SPP 与 `mstatus.SPP` **同一个字段**（F7）⇒ ⇒ M 模式写 `mstatus.SPP` 后，S 模式读 `sstatus.SPP` 能看到。
+- `sstatus` 的**客体写**掩码 = **`0x22`**（`SIE` | `SPIE`）⇒ ⇒ **`SPP` 写不进去**（F8）。
+- `sstatus` 的**读**是 `mstatus` 的**位视图**，视图掩码 = **`0x0000_0122`**（`SIE` | `SPIE` | `SPP`）⇒ ⇒
+  - `SPP` 与 `mstatus.SPP` **同一个字段**（F7）⇒ ⇒ M 模式写 `mstatus.SPP` 后，S 模式读 `sstatus.SPP` 能看到；
+  - 视图**不含 `SD`**（F29）⇒ ⇒ M 模式置 `mstatus.SD` 后 S 模式读 `sstatus` 的 `SD` 位仍是 0；
+  - M 模式写 `sstatus`（`0x22`）⇒ S 模式读回 `0x22`（F30）⇒ ⇒ **同一存储**，不是第二份。
 - ⚠️ `sstatus` 在 **M 模式可读**（F11）⇒ ⇒ M 模式读到的值是 S 级状态。
+- ⚠️ **平台自己的写**（陷阱入口写 `SPP` / `SPIE` / `SIE`、`sret` 写 `SPP`）**不受客体的 `0x22` 掩码约束** ⇒ ⇒ 走 `mstatus` 的**原始位操作** ⇒ ⇒ ⇒ 这就是 F28（委托陷阱后 `sstatus.SPP` = 1）的实现方式。
 
 ### §2.5 特权级：**住在 CSR 文件里**（裁决 E）
 
@@ -191,10 +210,14 @@ pub fn mstatus_warl(old: u32, new: u32) -> u32;
 
 | 方向 | 行为 | 理由 |
 | --- | --- | --- |
-| guest **写** | **忽略**（不落到文件） | 与「未实现 CSR 的写被忽略」**同形** ⇒ ⇒ guest 改不了自己的特权级 |
+| guest **写** | **忽略**（不落到文件） | ⚠️ **必须靠 `csr_is_read_only` 显式拦下**（**订正 6**）—— 只靠「与未实现 CSR 同形」是**假的**：裁决 F 要求 `CSR_PRIV` 进 `csr_is_implemented` ⇒ ⇒ 那时 `!csr_is_implemented` 那一条不再成立 ⇒ ⇒ 客体的写会真的落进文件 ⇒ ⇒ **guest 能改自己的特权级** |
 | guest **读** | **读回 0** | 与「未实现 CSR 读回 0」**同形** ⇒ ⇒ **不引入新的分歧类别**（平台本来就读未实现 CSR 回 0） |
 
+⚠️ **读回 0 的实现落点**：`csr_read` 对 `CSR_PRIV` **特判**返回 0 ⇒ ⇒ **平台自己读特权级不能走 `csr_read`** ⇒ ⇒ 走 `priv_get`（**直接读 CSR 文件的那个条目**）⇒ ⇒ **两个落点，两条路径，互不干扰**。
+
 ⚠️ **`CSR_PRIV` 必须进 `csr_is_implemented`** ⇒ ⇒ 否则 `m12_engine` 的 `csrs.retain(csr_is_implemented)` 会把它**丢掉** ⇒ ⇒ **快照还原后特权级归零** ⇒ ⇒ 快照**不往返**。⇒ ⇒ 这是「一个约束一个落点」的**硬依赖**，验收项 A-3 专门盯它。
+
+⚠️ **`CSR_PRIV` 必须进 `csr_is_read_only`** ⇒ ⇒ 客体的写被拦下（**订正 6**）⇒ ⇒ 而**平台自己的写**走 `csr_write_raw`，不受这条影响（与 `mip` 同一条纪律）。
 
 ### §2.6 `csr_is_implemented` 的新增项（裁决 F）
 
@@ -202,6 +225,8 @@ pub fn mstatus_warl(old: u32, new: u32) -> u32;
 
 - 新 CSR 的写会被**吞掉**（`csr_write_is_ignored`）⇒ ⇒ S 模式 CSR **一排不起作用的寄存器**（v0.37 的原话，裁决 E 的同一条纪律）。
 - `CSR_PRIV` 会被快照的 retain **丢掉**（§2.5）。
+
+⚠️ **`csr_is_read_only` 也要补 `CSR_PRIV`**（**订正 6**）⇒ ⇒ 否则客体的写会真的落进那个条目 ⇒ ⇒ guest 能改自己的特权级 ⇒ ⇒ 这是**另一条**护栏，**不是**上一条。
 
 ---
 
@@ -211,13 +236,15 @@ pub fn mstatus_warl(old: u32, new: u32) -> u32;
 
 | 落点 | 干什么 |
 | --- | --- |
-| `crates/contract/src/csr.rs` | 全部常量 + `mstatus_warl` + `csr_is_implemented`（**唯一**落点） |
-| `crates/kernel/src/m13_iss/csr.rs` | CSR 的读写路径、按级可访问性、伪 CSR `CSR_PRIV` 的读写保护 |
-| `crates/kernel/src/m13_iss/executor.rs` | 特权指令（`mret` / `sret`）、CSR 指令的按级检查、陷阱入口的分级 |
-| `crates/kernel/src/m13_iss/mod.rs` | 特权级状态的读写（`priv_get` / `priv_set`） |
+| `crates/contract/src/csr.rs` | 全部常量 + `mstatus_warl` + `csr_is_implemented` + `csr_is_read_only`（**唯一**落点） |
+| `crates/kernel/src/m13_iss/csr.rs` | CSR 的读写路径、按级可访问性、伪 CSR `CSR_PRIV` 的读写保护、特权级的读写（`priv_get` / `priv_set`） |
+| `crates/kernel/src/m13_iss/executor.rs` | 特权指令（`mret` / `sret`）、CSR 指令的按级检查、陷阱入口的分级、**新解码 `Op::Sret`（`0x102`）** |
+| `crates/kernel/src/m13_iss/mod.rs` | 特权级状态的对外读��（`priv_get` / `priv_set`） |
+| `crates/kernel/src/m11_symbol/render.rs` | `Op::Sret` 的**两处**渲染（反汇编文本 + 助记符） |
 | `tests/golden/env/smode/riscv_test.h` | 新 env 变体（**新**） |
 | `tests/golden/local/smode_csr.S` | 自包含判据语料（**新**） |
 | `tests/golden/corpus.txt` | 语料清单（新增四条） |
+| `tools/golden-run.sh` | env 变体白名单加 `smode`（**唯一**允许的第三种取值） |
 | `tests/golden/README.md` | 入库 / 不入库 / 已知偏差的登记 |
 
 ### §3.1 特权级模型（裁决 G）
@@ -230,6 +257,16 @@ pub fn mstatus_warl(old: u32, new: u32) -> u32;
 
 **唯一入口** = 一张**按级查表**，三条路径（取指无关；读 / 写 / 特权指令）都问它：
 
+⚠️ **要问两问**（**订正 5**）：① 这个 CSR **实现了吗**？② 实现了的话，**当前级别**能访问吗？
+
+**第一问 · 实现了吗**
+
+| | M 模式 | S 模式 | U 模式 |
+| --- | --- | --- | --- |
+| **未实现**的 CSR | 读回 **0** / 写被忽略（既有行为，D-92） | **cause 2**（F26） | **cause 2**（F26） |
+
+**第二问 · 实现了的话，按族分**
+
 | CSR 族 | M 模式 | S 模式 | U 模式 |
 | --- | --- | --- | --- |
 | M 模式 CSR（`mstatus` / `misa` / `mepc` / `medeleg` / `mcounteren` …） | ✅ | ❌ **非法指令**（F10） | ❌ 非法指令 |
@@ -238,6 +275,10 @@ pub fn mstatus_warl(old: u32, new: u32) -> u32;
 
 ⚠️ **M 模式读 S 模式 CSR 不陷阱**（F11）⇒ ⇒ **不是**「统一按级拒」⇒ ⇒ 查表必须**逐 CSR 族**写死，不能用「特权级 ≤ 当前级」的粗判。
 
+⚠️ **读与写同形**（F26）：S 模式**写** M 模式 CSR 也是 cause 2（不是「被忽略」）⇒ ⇒ 六条 CSR 指令的读写路径用**同一张表**。
+
+⚠️ **计数器的使能链**（裁决 L）：S 模式需 `mcounteren` **且** `scounteren`；U 模式再需 `ucounteren` ⇒ ⇒ 缺一 ⇒ **cause 2**。位与计数器的对应：`cycle`/`cycleh` ⇒ `CY`(0)、`time`/`timeh` ⇒ `TM`(1)、`instret`/`instreth` ⇒ `IR`(2)。M 模式**不需要**使能链。
+
 ### §3.3 陷阱入口（裁决 I）
 
 **唯一的陷阱入口**（沿用 v0.20 的 `enter_trap` 形状）分成两级：
@@ -245,10 +286,17 @@ pub fn mstatus_warl(old: u32, new: u32) -> u32;
 | 陷入时的特权级 | 委托 | 落点 | 状态 CSR |
 | --- | --- | --- | --- |
 | M | — | `mtvec` | `mcause` / `mepc` / `mtval` |
-| S / U | `medeleg[cause]` = 1 | `stvec` | `scause` / `sepc` / `stval` |
-| S / U | `medeleg[cause]` = 0 | `mtvec` | `mcause` / `mepc` / `mtval` |
+| S | `medeleg[cause]` = 1 | `stvec` | `scause` / `sepc` / `stval` |
+| S | `medeleg[cause]` = 0 | `mtvec` | `mcause` / `mepc` / `mtval` |
+| U | `medeleg[cause]` = 1 | `stvec` | `scause` / `sepc` / `stval` |
+| U | `medeleg[cause]` = 0 | `mtvec` | `mcause` / `mepc` / `mtval` |
 
 ⚠️ **为什么 M 模式不受 `medeleg` 影响**：委托只作用于 S/U 模式下发生的陷阱 ⇒ ⇒ M 模式的陷阱**永远**走 `mtvec` ⇒ ⇒ 这条**不需要**额外实现。
+
+⚠️ **委托陷阱的状态位**（F28 / F29）：
+- `sstatus.SPP` ← **陷入前的级别**（S 模式陷入 ⇒ `SPP` = 1 ⇒ ⇒ `sret` 回到 **S** 模式；U 模式陷入 ⇒ `SPP` = 0 ⇒ ⇒ 回到 **U** 模式）⇒ ⇒ 这**不受**客体写掩码 `0x22` 约束（**平台自己的写**）。
+- `sstatus.SPIE` ← 旧的 `SIE`；`sstatus.SIE` ← 0。
+- 未委托的陷阱（落 `mtvec`）⇒ ⇒ `mstatus.MPP` ← 陷入前的级别。
 
 ⚠️ **向量模式的位移**：`stvec` 的 MODE 字段是 **1 位**（F13）⇒ ⇒ 向量模式的偏移 = `4 × (cause & 0x3)`（**不是** `0x7`，因为只有 1 位可表示 ⇒ ⇒ 最多 4 项）。⚠️ 这是**实测**口径（与 `mtvec` 现有实现的口径一致 ⇒ ⇒ 两个向量表**同口径**）。
 
@@ -256,10 +304,14 @@ pub fn mstatus_warl(old: u32, new: u32) -> u32;
 
 | 指令 | 可用级别 | 行为 |
 | --- | --- | --- |
-| `mret` | **仅 M**（F23：`mepc` 在 S 模式不可访问 ⇒ ⇒ S 模式**根本回不去 M 模式**） | PC ← `mepc`（IALIGN 掩码）；特权级 ← M；`MPP` ← **U(0)**；`MPIE` ← `MIE`；`MIE` ← 1 |
+| `mret` | **仅 M**（F23：`mepc` 在 S 模式不可访问 ⇒ ⇒ S 模式**根本回不去 M 模式**） | PC ← `mepc`（IALIGN 掩码）；特权级 ← **旧的 `MPP`**；`MPP` ← **U(0)**；`MPIE` ← `MIE`；`MIE` ← 1 |
 | `sret` | **仅 S** | PC ← `sepc`（IALIGN 掩码）；特权级 ← (`SPP` ? S : U)；`SPP` ← 0；`SPIE` ← `SIE`；`SIE` ← 1 |
 
+⚠️ **`mret` 的特权级来自「旧的 `MPP`」** ⇒ ⇒ 必须**先读旧值再清** ⇒ ⇒ `MPP` ← 0 的那一步不能影响这一次读取。
+
 ⚠️ **`sret` 落 U 模式是**实测**口径**（F9）：参考侧 `sstatus.SPP` 恒 0（F8）⇒ ⇒ `sret` 总是落 U ⇒ ⇒ 我们的 `sstatus` 写掩码也排除 SPP（F8）⇒ ⇒ **默认也是落 U** ⇒ ⇒ **两边一致，无需登记偏差**。
+
+⚠️ **但从陷阱处理器 `sret` 会回到 S 模式**（F28）⇒ ⇒ 因为**平台自己的写**把 `SPP` 置成了 1 ⇒ ⇒ ⇒ 两条路径的 `SPP` 初值不同 ⇒ ⇒ **不是矛盾**。
 
 ⇒ ⇒ **这是「把 U 模式一起做」最直接的收益**（§0.3）。
 
@@ -274,6 +326,10 @@ pub fn mstatus_warl(old: u32, new: u32) -> u32;
 
 ⚠️ **实测依据**（F19）：`scall` 在 S 模式 ⇒ cause 9；`ebreak` 与 `sbreak` 在 S 模式 ⇒ **都是** cause 3 ⇒ ⇒ **`sbreak` 不是「非法指令」**。
 
+⚠️ **`scall` / `sbreak` 不需要新操作码**（**订正 8** · F32）：工具链在语料的 march（`rv32i_zicsr_zifencei`）下把 `scall` / `sbreak` **汇编成 `ecall` / `ebreak`** ⇒ ⇒ 上游语料的二进制里**没有** `SCALL` / `SBREAK` 操作码 ⇒ ⇒ ⇒ 现有 `Op::Ecall` / `Op::Ebreak` **按当前特权级选 cause** 就够（11 / 9 / 8；`ebreak` 恒 3）⇒ ⇒ **少一整族新操作码**。
+
+⚠️ **`sret` 必须新解码**：`0x10200073` ⇒ ⇒ 现有解码器把 `(funct3=000, imm=0x102)` 留给「非法」⇒ ⇒ 本批加 `Op::Sret`。⚠️ **同时** `m11_symbol/render.rs` 的**两处**渲染要补 `sret`（反汇编文本 + 助记符表）⇒ ⇒ 否则符号服务会把 `sret` 打成未知。
+
 ### §3.6 计数器的使能链（裁决 L）
 
 - **M 模式**：直接可读。
@@ -287,20 +343,24 @@ pub fn mstatus_warl(old: u32, new: u32) -> u32;
 
 ### §4.1 新 env 变体 `smode`（裁决 M）
 
-⚠️ **为什么必须新开一个变体，而不是改 `csr`**：
+⚠️ **为什么必须新开一个变体，而不是改 `csr`**（**订正 1 / 2**）：
 
-- `csr` env 的判决路径是 **`ecall` → 陷阱向量 → `tohost`**（注释写明「每一条测试都过一遍陷阱路径」）。
-- ⚠️ **在 S 模式这条路走不通**（F20）：`ecall` 在 S 模式 ⇒ cause 9 ⇒ **要么**被委托回 S 级处理器（⇒ **死循环**，因为判决又是一次 `ecall`）**要么**落到 M 级陷阱向量（⇒ 那里读 `mcause` ⇒ **非法指令** ⇒ **挂死**）。
-- ⇒ ⇒ **S 模式的判决必须是「直接写 `tohost`」** ⇒ ⇒ 与 `csr` env 的形状**不同** ⇒ ⇒ ⇒ **新开 `tests/golden/env/smode/riscv_test.h`** ⇒ ⇒ `csr` env **一字不动** ⇒ ⇒ **M 模式语料零回归**。
+- `csr` env 的判决路径是 **`ecall` → 陷阱向量 → `tohost`**。
+- ⚠️ **初稿以为「S 模式这条路走不通」**（F20）—— **判错了**：F20 那条探针的前提是 `medeleg` 被**拉满**（`0xFFFF`）；而**上游 env 的 `medeleg` 掩码是 `0x11A9`**（位 `{0,3,5,7,8,12}`）⇒ ⇒ **位 9 不在其中** ⇒ ⇒ S 模式的 `ecall`（cause 9）**落到 `mtvec` 的 M 级陷阱向量** ⇒ ⇒ 那里读 `mcause` 是**合法**的 ⇒ ⇒ **不死循环、也不挂死**。
+- ⇒ ⇒ **真正的理由是「假绿」**：`csr` env 的 M 级陷阱向量把 `CAUSE_USER_ECALL`(8) / `CAUSE_SUPERVISOR_ECALL`(9) / `CAUSE_MACHINE_ECALL`(11) **一律当成 PASS** ⇒ ⇒ 于是 **`rv32si/scall` 在 `sret` 错误地落在 S 模式时**：`ecall` 的 cause 是 **9** ⇒ ⇒ 被当成 PASS ⇒ ⇒ **两侧都报 PASS ⇒ ⇒ 这条语料的判别力为零**。
+- ⇒ ⇒ **改陷阱向量也不够**：S 级处理器里的 `RVTEST_PASS` 又是一次 `ecall` ⇒ cause 9 ⇒ 又被当成 PASS ⇒ ⇒ **假绿照旧**。
+- ⇒ ⇒ **唯一能拆掉假绿的办法是「判决不经 `ecall`」** ⇒ ⇒ 即 **直接写 `tohost`**。
+
+⇒ ⇒ ⇒ **新开 `tests/golden/env/smode/riscv_test.h`** ⇒ ⇒ `csr` env **一字不动** ⇒ ⇒ **M 模式语料零回归**（而且「一字不动」这条约束**有结构性理由**：M 级语料因 `__MACHINE_MODE` 把 `stvec_handler` **别名**成 `mtvec_handler` ⇒ ⇒ `la t0, stvec_handler` = 0 ⇒ ⇒ **`medeleg` 一次都没被写过** ⇒ ⇒ **M 级语料的委托面是零** ⇒ ⇒ 见**订正 4**）。
 
 `smode` env 的形状：
 
 | 项 | 取值 | 理由 |
 | --- | --- | --- |
-| 判决 | **直接写 `tohost`**（PASS 写 1、FAIL 写 `(k<<1)\|1`） | F20 ⇒ 判决不能依赖陷阱 |
-| `mtvec` | → M 级陷阱向量（只读 `mcause`） | M 模式可读 `mcause` |
+| 判决 | **直接写 `tohost`**（PASS 写 1、FAIL 写 `(k<<1)\|1`） | 拆掉「假绿」（订正 2） |
+| `mtvec` → M 级陷阱向量 | **严格**：任何不是客体预期的陷阱 ⇒ 写**失败**判决 ⇒ ⇒ **cause 9 不再被当成 PASS** | 同上 |
 | `stvec` | → 测试自己的 `stvec_handler` | S 级陷阱的落点 |
-| `medeleg` | **全 1**（`0xFFFF`） | ⇒ S 模式下的陷阱**都**可观测（F20） |
+| `medeleg` | **上游的掩码 `0x11A9`**（位 `{0,3,5,7,8,12}`） | 与上游 env **逐字同形** ⇒ ⇒ 两侧同一份程序 ⇒ ⇒ 委托面**是**活的（cause 3 / cause 8） |
 | `mideleg` | 由 `RVTEST_ENABLE_SUPERVISOR` 设 | 沿用上游 |
 | `mstatus.MPP` | `init` 钩子设成 **S** ⇒ 复位后的 `mret` **进 S 模式** | 沿用上游 `RVTEST_RV32S` |
 
@@ -314,6 +374,8 @@ pub fn mstatus_warl(old: u32, new: u32) -> u32;
 | `local/smode_csr` | `rv32i_zicsr_zifencei` | `smode` | **新增**（自包含） | 承载 S 模式 CSR 读写 + 按级可访问性 + 委托路由的判别力 |
 
 ⚠️ **`rv32si/scall` 与 `rv32si/csr` 的处置**：本批**实现了 U 模式** ⇒ ⇒ 它们的前提**已被满足** ⇒ ⇒ ⇒ **两条都入库**（`active`）⇒ ⇒ 台账点名的三个上游用例**全部入库** ⇒ ⇒ ⇒ 唯一**需要新写**的是 `local/smode_csr`（自包含，测上游测不到的东西：按级可访问性）。
+
+⚠️ **委托面在 M 级语料与 S 级语料之间不同**（**订正 4**）：`rv32mi/csr` 与 `rv32mi/scall` 在 `__MACHINE_MODE` 下把 `stvec_handler` **别名**成 `mtvec_handler` ⇒ ⇒ 符号 `stvec_handler` 不存在 ⇒ ⇒ 上游 env 的 `la t0, stvec_handler; beqz t0, 1f; … csrw medeleg, t0` **直接跳走** ⇒ ⇒ **`medeleg` 一次都没被写过** ⇒ ⇒ **M 级语料的委托面是零** ⇒ ⇒ 而 `rv32si/*` 不定义 `__MACHINE_MODE` ⇒ ⇒ `medeleg` = `0x11A9` **会**被写上 ⇒ ⇒ 委托面**是**活的（cause 3 / cause 8）⇒ ⇒ 这两条才是本批委托语义的真正判据。
 
 ⚠️ **`rv32si/dirty` / `ma_fetch` / `wfi`** ⇒ ⇒ **不入库**（要分页 / 要 S 级中断），理由登记在 `tests/golden/README.md`。
 
@@ -341,6 +403,9 @@ pub fn mstatus_warl(old: u32, new: u32) -> u32;
 | A-6 | `SSTATUS_WARL_MASK` = **`0x22`**（F8） |
 | A-7 | 三个版本常量**都不动**：`SCHEMA_VERSION = 7`、`SIM_STATE_SCHEMA_VERSION = 2`、`PLATFORM_SCHEMA_VERSION = 1` |
 | A-8 | `CSR_PRIV` 的读写保护：guest 写 ⇒ **文件里那个条目不变**；guest 读 ⇒ **读回 0** |
+| A-9 | `misa` 在**黄金门禁的 ISA 串**下与参考侧**逐位相同**（F27）⇒ ⇒ 门禁跑的那个参考侧就是 `0x4014_1104` |
+| A-10 | `CSR_PRIV` 在 `csr_is_read_only` 里 ⇒ ⇒ 客体的写被**地址规则之外的那一条**拦下（**订正 6**） |
+| A-11 | `SSTATUS_VIEW_MASK` = **`0x0000_0122`** ⇒ ⇒ 视图**不含 `SD`**（F29） |
 
 ### §5.2 B 组 · 内核
 
@@ -361,6 +426,11 @@ pub fn mstatus_warl(old: u32, new: u32) -> u32;
 | B-13 | `satp` 只支持 **Bare**：MODE 字段恒 0 ⇒ ⇒ 写 `0x1` 读回 **0** |
 | B-14 | 委托路由：`medeleg[cause]` = 0 ⇒ ⇒ 陷阱落 `mtvec`（`mcause`）；= 1 ⇒ ⇒ 落 `stvec`（`scause`） |
 | B-15 | `mret` 在 S 模式 ⇒ **cause 2**（`mepc` 不可访问 ⇒ 非法指令，F23） |
+| B-16 | **未实现**的 CSR 在 S 模式 ⇒ **cause 2**（F26）⇒ ⇒ 而在 M 模式 ⇒ 读回 0 / 写被忽略（D-92 的既有行为**不变**） |
+| B-17 | 委托陷阱之后 `sstatus.SPP` = **1**（F28）⇒ ⇒ `sret` 从陷阱处理器**回到 S 模式** |
+| B-18 | `sstatus` 在 M / S 两级是**同一存储**（F30）⇒ ⇒ M 模式写 `sstatus`（`0x22`）⇒ S 模式读回 `0x22` |
+| B-19 | `mret` 的特权级来自**旧的 `MPP`** ⇒ ⇒ `MPP` = 1 ⇒ ⇒ 落到 **S 模式**；`MPP` = 0 ⇒ ⇒ 落到 **U 模式** |
+| B-20 | `ecall` 在 **U 模式** ⇒ cause **8**（F19 / §3.5） |
 
 ### §5.3 C 组 · 工具层
 
@@ -388,6 +458,7 @@ pub fn mstatus_warl(old: u32, new: u32) -> u32;
 | X-1 | `misa` 在两侧**逐位相同**（`0x4014_1104`）⇒ ⇒ 这条**只可能**在实现了 S + U 位时成立 ⇒ ⇒ 是一条**强判别力** |
 | X-2 | `rv32mi/csr` 的 U 模式段**两侧都跑**⇒ ⇒ **D-96 的空洞被填上** ⇒ ⇒ 陷阱条目数两侧一致 |
 | X-3 | 变异自检的三条**红集互不相同**，且三条对照**全 0 红**（§9） |
+| X-4 | ⚠️ **本批最强的一条**：`rv32mi/csr` 的 U 模式段**两侧都真的跑了**（**不是**假绿）⇒ ⇒ **判别式**：变异 **M2**（让 S/U 模式读 M 模式 CSR 不判非法）**必须**让 `rv32mi/csr` 变红 ⇒ ⇒ 若它**不红** ⇒ ⇒ 说明 U 模式那段**根本没跑** ⇒ ⇒ **D-96 没有闭环**（**订正 3**） |
 
 ---
 
@@ -479,8 +550,56 @@ U 模式已实现 ⇒ ⇒ 前提满足 ⇒ ⇒ 另新增一条自包含判据 `l
 ## §8 施工期订正
 
 > 规格在施工期被实测推翻的内容**逐条记在这里** ⇒ ⇒ 格式与 STAGE-21 的 §8 一致：**订正 N · 标题（初稿判错 ⇒ 已改）+ 原文 + 依据 + 已改成什么**。
->
-> ⚠️ **本节现在是空的** —— 规格冻结时尚未发生施工期订正 ⇒ ⇒ 施工期一旦有，**当场补** ⇒ ⇒ `tools/stage22_check.py` 的连续性检查会盯住它。
+
+### 订正 1 · §4.1 「S 模式的判决不能经陷阱」——**理由不成立**（⇒ 改成「假绿」）
+
+- **初稿原文**：「⚠️ **在 S 模式这条路走不通**（F20）：`ecall` 在 S 模式 ⇒ cause 9 ⇒ **要么**被委托回 S 级处理器（⇒ **死循环**，因为判决又是一次 `ecall`）**要么**落到 M 级陷阱向量（⇒ 那里读 `mcause` ⇒ **非法指令** ⇒ **挂死**）。⇒ ⇒ **S 模式的判决必须是「直接写 `tohost`」**」
+- **依据**：**F20 那条探针的前提是 `medeleg` 被拉满（`0xFFFF`）** ⇒ ⇒ 委托位全置 ⇒ cause 9 也被委托 ⇒ 才死循环。而**上游 env 的 `medeleg` 掩码是 `0x11A9`**（位 `{0,3,5,7,8,12}`）⇒ ⇒ **位 9 不在其中** ⇒ ⇒ S 模式的 `ecall`（cause 9）**落到 `mtvec` 的 M 级陷阱向量** ⇒ ⇒ 那里读 `mcause` 是**合法**的（M 模式）⇒ ⇒ **不死循环、也不挂死**。⇒ ⇒ **初稿的理由是拿「探针的 `medeleg` 拉满」当成了「env 的 `medeleg`」** ⇒ ⇒ **判错了**。
+- **已改成什么**：**判决仍然改成「直接写 `tohost`」** ⇒ ⇒ 但**理由换掉了**（见订正 2）。⇒ ⇒ §4.1 的表格与正文按此改写。
+
+### 订正 2 · §4.1 「新 env 的真正理由」——**不是「走不通」，是「假绿」**
+
+- **初稿原文**：「⇒ ⇒ **S 模式的判决必须是「直接写 `tohost`」** ⇒ ⇒ 与 `csr` env 的形状**不同** ⇒ ⇒ ⇒ **新开 `tests/golden/env/smode/riscv_test.h`**」
+- **依据**：**上游 `csr` env 的 M 级陷阱向量把 `CAUSE_USER_ECALL`(8) / `CAUSE_SUPERVISOR_ECALL`(9) / `CAUSE_MACHINE_ECALL`(11) 三种 `ecall` 一律当成「PASS」**（`trap_vector` 的三个 `beq`）。⇒ ⇒ 于��� **`rv32si/scall` 在 `sret` 错误地落在 S 模式时**：`ecall` 的 cause 是 **9** ⇒ ⇒ 落到 `mtvec` ⇒ ⇒ 被当成 PASS ⇒ ⇒ **两侧都报 PASS ⇒ ⇒ 这条语料的判别力为零**。⇒ ⇒ 而且**改陷阱向量也不够**：S 级处理器里的 `RVTEST_PASS` 又是一次 `ecall` ⇒ cause 9 ⇒ 又被当成 PASS ⇒ ⇒ **假绿照旧**。⇒ ⇒ **唯一能拆掉假绿的办法是「判决不��� `ecall`」** ⇒ ⇒ 即**直接写 `tohost`**。
+- **已改成什么**：**新 env 的理由改成「假绿」** ⇒ ⇒ 新的 `smode` env 的 M 级陷阱向量**严格**：任何不是「客体预期的陷阱」都写**失败**判决 ⇒ ⇒ `cause 9` ⇒ ⇒ **红**。⇒ ⇒ 配合「直接写 `tohost`」⇒ ⇒ `rv32si/scall` 才真的能判别 `sret` 的落点。
+
+### 订正 3 · §0.3 / §1.3 的「D-96 顺带闭环」——**机制要说清，否则会被当成空话**
+
+- **初稿原文**：「⇒ ⇒ **附带收益**（F3 + F24 + F27）：本平台的 `misa` 已经是 `0x4000_1104`（**X 位已置**），参考侧是 `0x4014_1104` ⇒ ⇒ **差的就是 S 位与 U 位** ⇒ ⇒ 本批做完 ⇒ ⇒ **`misa` 与参考侧逐位相同** ⇒ ⇒ 台账 **D-96**（`rv32mi/csr` 因 U 位缺失而只跑一半）**顺带闭环**。
+
+⚠️ **「闭环」的准确含义**（施工期补测 · 订正 3）：`rv32mi/csr` 在**参考侧**其实**真的进了 U 模式**并跑了 `TEST_CASE(14)` / `(15)`（两次都应当是非法指令 ⇒ cause 2 ⇒ 参考侧真的处理了它们）；而**我们侧**因为 `misa` 的 U 位**没置** ⇒ ⇒ `beqz a0, finish` **直接跳走** ⇒ ⇒ **那段根本没跑** ⇒ ⇒ **两侧都报 PASS ⇒ ⇒ 这一行今天是「假绿」** ⇒ ⇒ **零判别力**。⇒ ⇒ 本批置上 U 位 **且** 真的实现 U 模式 ⇒ ⇒ 那段才真的跑起来 ⇒ ⇒ **D-96 才算闭环**（判别式见 §5.5 的 **X-4**）。」
+- **依据**：`rv32mi/csr` 在**参考侧**其实**真的进了 U 模式**（`misa` 的 U 位置着 ⇒ `beqz a0, finish` **不**跳）⇒ ⇒ 它真的跑了 `TEST_CASE(14)`（U 模式的 `cycle` 读）与 `TEST_CASE(15)`（U 模式的 `sstatus` 读）⇒ ⇒ 两次都应当**非法指令（cause 2）**⇒ ⇒ 参考侧真的处理了它们。而**我们侧**因为 `misa` 的 U 位**没置** ⇒ ⇒ `beqz a0, finish` **直接跳到 `finish`** ⇒ ⇒ **那段根本没跑** ⇒ ⇒ **两侧都报 PASS ⇒ ⇒ 这一行今天是「假绿」** ⇒ ⇒ **零判别力**。⇒ ⇒ 这才是 D-96 的原文「只跑一半」的**准确含义**：参考侧跑满，我们侧只跑一半，而门禁看不出来。
+- **已改成什么**：§0.3 的「附带收益」补上这段机制；§5.5 加一条**强判别力**验收 **X-4**：**变异 M2（让 S/U 模式读 M 模式 CSR 不判非法）必须让 `rv32mi/csr` 变红** ⇒ ⇒ 若它**不红** ⇒ ⇒ 说明 U 模式那段**根本没跑** ⇒ ⇒ 那就还是假绿。
+
+### 订正 4 · §4.2 「三条全部入库」——**要写清「为什么 `csr` env 可以一字不动」**
+
+- **初稿原文**：「⇒ ⇒ 本批**实现了 U 模式** ⇒ ⇒ 它们的前提**已被满足** ⇒ ⇒ ⇒ **两条都入库**（`active`）⇒ ⇒ 台账点名的三个上游用例**全部入库**」
+- **依据**：`rv32mi/csr` 与 `rv32mi/scall` 在 `__MACHINE_MODE` 下把 `stvec_handler` **别名**成 `mtvec_handler` ⇒ ⇒ **符号 `stvec_handler` 根本不存在** ⇒ ⇒ 上游 env 里那句 `la t0, stvec_handler; beqz t0, 1f; … csrw medeleg, t0` ⇒ ⇒ **`beqz` 直接跳走** ⇒ ⇒ **`medeleg` 一次都没被写过** ⇒ ⇒ **M 级语料的委托面是零** ⇒ ⇒ 这正是 `csr` env 能**一字不动**的原因（而 `rv32si/*` 不定义 `__MACHINE_MODE` ⇒ `stvec_handler` 是真符号 ⇒ ⇒ `medeleg` = `0x11A9` 会被写上 ⇒ ⇒ 委托面**是**活的）。
+- **已改成什么**：§4.2 补上这段 ⇒ ⇒ **「`csr` env 一字不动」这条约束从「怕回归」升级为「有结构性理由」**。
+
+### 订正 5 · §3.2 「按级可访问性」——**要区分「未实现」与「实现但级别不对」**
+
+- **初稿原文**：「| M 模式 CSR（…） | ✅ | ❌ **非法指令**（F10） | ❌ 非法指令 |」——只有一张按**族**分的表。
+- **依据**：**F26** 补测出**未实现**的 CSR 在 S 模式**也是 cause 2**（参考侧），而**我们侧读回 0** ⇒ ⇒ ⇒ 规则必须**分两问**：① 这个 CSR **实现了吗**？② 实现了的话，**当前级别**能访问吗？⇒ ⇒ **M 模式**：未实现 ⇒ 读回 0 / 写被忽略（既有行为，D-92）；**S / U 模式**：未实现 ⇒ **cause 2**（F26）。
+- **已改成什么**：§3.2 的表改成**两问**（族 + 实现与否）；§5.2 加验收 **B-16**。
+
+### 订正 6 · §2.5 「`CSR_PRIV` 的读写保护」——**只靠「未实现 CSR 同形」不够，它必须被显式列为只读**
+
+- **初稿原文**：「| guest **写** | **忽略**（不落到文件） | 与「未实现 CSR 的写被忽略」**同形** |」
+- **依据**：契约层的 `csr_write_is_ignored` = `csr_is_read_only(csr) \|\| csr == CSR_MIP \|\| !csr_is_implemented(csr)` ⇒ ⇒ `CSR_PRIV` 若只加进 `csr_is_implemented`（裁决 F 要求）⇒ ⇒ **`!csr_is_implemented` 那一条不成立** ⇒ ⇒ **客体的写会真的落进文件** ⇒ ⇒ **guest 能改自己的特权级** ⇒ ⇒ 「同形」这条理由**在实现层是假的**。
+- **已改成什么**：**`CSR_PRIV` 必须同时进 `csr_is_read_only`** ⇒ ⇒ 写被地址规则之外的那一条显式拦下 ⇒ ⇒ 读仍走「读回 0」那条 ⇒ ⇒ 两条保护各自有**独立落点**（不再靠「同形」）。
+
+### 订正 7 · §2.4 「`sstatus` 的读是 `mstatus` 的位视图」——**视图掩码要钉死，且不含 `SD`**
+
+- **初稿原文**：「- `sstatus` 的**读**是 `mstatus` 的**位视图**：SPP 与 `mstatus.SPP` **同一个字段**（F7）⇒ ⇒ M 模式写 `mstatus.SPP` 后，S 模式读 `sstatus.SPP` 能看到。」
+- **依据**：**F29 / F30** 补测出：M 模式写 `sstatus`（`0x22`）⇒ S 模式读回 `0x22`（⇒ **同一存储**）；M 模式把 `mstatus.SD` 置 1 ⇒ S 模式读 `sstatus` 的 `SD` 位**仍是 0**（⇒ **视图不含 `SD`**）；S 模式 `csrs sstatus, 2` ⇒ 读回 2（⇒ `SIE` 可写）；委托陷阱后 `sstatus.SPP` = **1**（F28 ⇒ **平台的写不受客体掩码约束**）。
+- **已改成什么**：**`SSTATUS_VIEW_MASK = 0x0000_0122`**（`SIE` \| `SPIE` \| `SPP`）钉进契约层；`sstatus` 的**客体写**掩码仍是 `0x22`；**平台自己的写**（陷阱入口 / `sret`）走 `mstatus` 的原始位操作 ⇒ ⇒ `SPP` 由平台写 ⇒ ⇒ `sret` 从陷阱处理器**回到 S 模式**（F28）。
+
+### 订正 8 · §3.5 「指令语义」——**`scall` / `sbreak` 不需要新操作码**
+
+- **初稿原文**：「| `ecall` | cause **11** | cause **9** | cause **8** |」——只提 `ecall`，**没提 `scall` / `sbreak` 的编码归属**。
+- **依据**：**F32**：工具链在 `-march=rv32i_zicsr_zifencei` 下把 `scall` / `sbreak` **汇编成 `ecall` / `ebreak`** ⇒ ⇒ 上游 `rv32si/scall` / `rv32si/sbreak` 的**二进制里根本没有 `SCALL` / `SBREAK` 操作码** ⇒ ⇒ ⇒ 现有 `Op::Ecall` / `Op::Ebreak` **按当前特权级选 cause** 就够了 ⇒ ⇒ **少一整族新操作码** ⇒ ⇒ 但 **`sret`（`0x10200073`）必须新解码**。
+- **已改成什么**：§3.5 的表补上「`scall` / `sbreak` **在语料的 march 下就是 `ecall` / `ebreak`**」这一行 ⇒ ⇒ §3.0 的落点表补「解码器新增 `Op::Sret`（`0x102`）」与「`m11_symbol/render.rs` 补 `sret` 的两处渲染」。
 
 ---
 
@@ -501,10 +620,14 @@ U 模式已实现 ⇒ ⇒ 前提满足 ⇒ ⇒ 另新增一条自包含判据 `l
 | 编号 | 落点 | 预期红 | 目的 |
 | --- | --- | --- | --- |
 | **M1** | 契约层 `mstatus_warl`：去掉「保留值 ⇒ 整次丢弃」那一步 | 契约层 + 内核 + 黄金 | 验 MPP 的 WARL 真的被实现 |
-| **M2** | 内核：S 模式读 M 模式 CSR **不判非法指令** | 内核 + 黄金 | 验按级可访问性真的被实现 |
-| **M3** | 内核：`sret` 落 **S 模式**（而不是 U） | 内核 + 黄金 | 验 `sret` 的落点真的被实现 |
+| **M2** | 内核：S/U 模式读 M 模式 CSR **不判非法指令** | 内核 + 黄金（**必须含 `rv32mi/csr`** ⇒ ⇒ **X-4**） | 验按级可访问性真的被实现 ⇒ ⇒ **顺带验 D-96 真的闭环** |
+| **M3** | 内核：`sret` 落 **S 模式**（而不是 U） | 内核 + 黄金（**必须含 `rv32si/scall`**） | 验 `sret` 的落点真的被实现 ⇒ ⇒ **这条的判别力来自 `smode` env 的「严格陷阱向量」**（**订正 2**） |
 
 ⇒ ⇒ **三条红集必须互不相同** ⇒ ⇒ 否则说明有两条走的是同一条路径 ⇒ ⇒ 判别力不成立。
+
+⚠️ **M2 与 M3 的红集里各带一条「只有本批才有」的语料** ⇒ ⇒ 这是**判别力清单**的核心：⇒
+- **M2 的专属**：`rv32mi/csr`（今天**不**红 ⇒ 因为 U 模式那段根本没跑 ⇒ ⇒ 做完本批它**才**有判别力）；
+- **M3 的专属**：`rv32si/scall`（今天**不**存在 ⇒ ⇒ 本批新入库 ⇒ ⇒ 它是 `sret` 落点的**唯一**判据）。
 
 ### §9.3 三条对照变异（语义不变 ⇒ 必须 **0 红**）
 
@@ -524,8 +647,10 @@ U 模式已实现 ⇒ ⇒ 前提满足 ⇒ ⇒ 另新增一条自包含判据 `l
 | 2 | **`misa` 的 X 位**：参考侧无条件置 1（F3），本平台也置（F24）⇒ ⇒ **本批之后逐位相同** ⇒ ⇒ **不是**偏差 | 验收 X-1 钉住 |
 | 3 | **S 级中断不交付** | 本批不做；`rv32si/wfi` 不入库 |
 | 4 | **`mepc` 在 S 模式不可访问** ⇒ ⇒ **S 模式回不去 M 模式**（F23） | 这是**架构事实**，不是缺陷；验收 B-15 钉住 |
-| 5 | **非委托陷阱在 S 模式无法观测**（F20）⇒ ⇒ 我们的 S 模式处理器**收不到**未委托的陷阱 | 与参考侧**同形**（同一条 env 限制）⇒ ⇒ 不是偏差 |
-| 6 | **伪 CSR `CSR_PRIV` 落在 guest 可见的地址空间** | 读回 0 / 写被忽略 ⇒ ⇒ 与「未实现 CSR」**同形** ⇒ ⇒ 不引入新的分歧类别；验收 A-8 钉住 |
+| 5 | **伪 CSR `CSR_PRIV` 落在 guest 可见的地址空间** | 读回 0 / 写被忽略 ⇒ ⇒ 与「未实现 CSR」**同形** ⇒ ⇒ 不引入新的分歧类别；验收 A-8 / A-10 钉住 |
+| 6 | **`sstatus` 的读视图不含 `SD` / `FS` / `VS` / `XS`**（F29）⇒ ⇒ 与规范的「S 级可见字段全集」**不同** | 视图掩码 `0x122` **钉死**在契约层 ⇒ ⇒ 语料观测不到 ⇒ ⇒ 登记在 `tests/golden/README.md`；**不**登记成台账欠账 |
+| 7 | **`mret` 的 `MPP` 只在实现 U 模式时置 U(0)** | 与参考侧同形（参考侧也实现 U）⇒ ⇒ 不是偏差；验收 B-1 / B-19 钉住 |
+| 8 | **`sie` / `sip` 的写掩码 = `mideleg`**（F18）⇒ ⇒ 委托位之外的位**写不进去** | 与参考侧同形 ⇒ ⇒ 不是偏差；验收 B-11 钉住 |
 
 ---
 
@@ -542,6 +667,19 @@ python3 round3.py    # sstatus 位图 / stval / sie / sip / satp / 使能链
 python3 round4.py    # SPP 归属 / sret 落点 / mstatus 的 WARL 掩码
 python3 round5.py    # misa 逐字节 / mstatus 高字节 / sip 门控
 python3 round6.py    # mret 语义 / mtvec 的 MODE / MPP 保留值
+python3 round7.py    # 写侧的按级检查（cause 2）—— F26
+python3 round8.py    # 黄金 ISA 串下的 misa —— F27
+python3 round9.py    # 委托陷阱后的 sstatus 形状 —— F28 / F29
+python3 round10.py   # sstatus 的读视图 / sie / sip / satp —— F30 / F31
+```
+
+⚠️ **F32 的取证方式**（不是探针，是工具链）：
+
+```bash
+printf 'ecall\nebreak\nscall\nsbreak\nsret\nmret\nwfi\n' > /tmp/enc.S
+riscv-none-elf-gcc -march=rv32i_zicsr_zifencei -mabi=ilp32 -c /tmp/enc.S -o /tmp/enc.o
+riscv-none-elf-objdump -d /tmp/enc.o
+# ⇒ `scall` 被汇编成 `ecall`(0x00000073)、`sbreak` 被汇编成 `ebreak`(0x00100073)
 ```
 
 ### §11.2 判据（两侧同程序）
