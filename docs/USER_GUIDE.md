@@ -83,6 +83,7 @@ python3 -m http.server 8080 --directory front
   - 点「加载」⇒ ⇒ 字节交给内核 ⇒ ⇒ 装载**成功**后面板显示「**已装载**〈文件名〉（N 字节）」；
   - ⚠️ **装完就停**：平台**不会**替你自动跑 ⇒ ⇒ 想跑自己去调试视图点「**继续**」；
   - ⚠️ **装载失败会把内核的原话显示出来**（含错误码，如 `E_LDR-01`），**面板与页脚两处**都写 ⇒ ⇒ 不吞。
+  - ⚠️ **v0.48 批**：**页头**（品牌名右边）**常驻**一个「**加载固件**」入口 ⇒ ⇒ **任何视图都能直接加载**，**不必**切到这一页 ⇒ ⇒ 两处**共用同一份状态**与**同一条装载路径**。
 
 ### 3.2 嵌入式（`#/embedded`）
 
@@ -244,12 +245,18 @@ tools/boot-osz.sh --elf <path/to/osz.elf>   # 真实 RTOS 与 Spike 逐字节比
 
 ### 5.4 在浏览器里加载自己的固件
 
-#### 路 A：界面上点一下（**推荐**，v0.47 批起有）
+#### 路 A：界面上点一下（**推荐**，v0.47 批起有 · **v0.48 批起入口在页头**）
 
-1. 打开页面 ⇒ ⇒ 进「**产品**」视图（`#/product`）；
-2. 在「**加载固件**」那块选一个文件（`.elf` / `.out` 按 ELF 解析，其余按原始字节）；
-3. 面板显示「已选择〈文件名〉（N 字节）」⇒ ⇒ 点「**加载**」；
-4. 面板变成「已装载」⇒ ⇒ 回调试视图点「**继续**」开始跑。
+1. 打开页面 ⇒ ⇒ **页头**（品牌名**右边**）就有「**固件镜像**」的文件选择器和
+   「**加载固件**」按钮 ⇒ ⇒ **任何视图都在**，**不用**切标签页；
+2. 选一个文件（`.elf` / `.out` 按 ELF 解析，其余按原始字节）⇒ ⇒ 页头那条短状态
+   显示「已选择〈文件名〉（N 字节）」；
+3. 点「**加载固件**」⇒ ⇒ 短状态变成「已装载〈文件名〉」；
+4. 回调试视图点「**继续**」开始跑。
+
+⚠️ **产品视图里也有一块同样的面板**（`#/product` ⇒ ⇒ 页面最下面那块）⇒ ⇒ 两处
+**共用同一份状态**与**同一条装载路径** ⇒ ⇒ 在哪一处选、在哪一处装都一样 ⇒ ⇒
+**页头那一处更顺手**（任何视图都能直接点）。
 
 ⚠️ **不需要**任何 HTTP 服务、**不需要** CORS、**不需要**起后端 ⇒ ⇒ 文件在**浏览器里**读成字节再交给内核（内核**不联网**）。
 ⚠️ **装完就停** ⇒ ⇒ 第 4 步的「继续」是**你的**动作。
@@ -358,7 +365,7 @@ node tools/browser-verify.mjs        # 需要本机 Chrome
 | 搞懂架构 | [`docs/architecture/RISC-V_Architecture_Design.html`](./architecture/RISC-V_Architecture_Design.html)（4+1 视图 + ADR） |
 | 看需求 | [`docs/requirements/RISC-V_Requirements_v1.4.html`](./requirements/RISC-V_Requirements_v1.4.html) |
 | 看某个模块怎么设计 | [`docs/module-design-spec/RISC-V_Module_Design_Specification.html`](./module-design-spec/RISC-V_Module_Design_Specification.html)（23 模块 LLD）+ [`docs/detailed-design/M-01..M-23_*.html`](./detailed-design/) |
-| 看某一批的规格与裁决 | [`docs/detailed-design/STAGE-1..STAGE-32_*.md`](./detailed-design/)（31 份冻结规格） |
+| 看某一批的规格与裁决 | [`docs/detailed-design/STAGE-1..STAGE-33_*.md`](./detailed-design/)（32 份冻结规格） |
 | 看改动的完整叙事 | [`docs/progress/PROGRESS.md`](./progress/PROGRESS.md) |
 | 看欠账与已知缺口 | [`docs/reviews/REVIEWS.md`](./reviews/REVIEWS.md) |
 | 参与开发 | [`CONTRIBUTING.md`](../CONTRIBUTING.md) + [`AGENTS.md`](../AGENTS.md) |
