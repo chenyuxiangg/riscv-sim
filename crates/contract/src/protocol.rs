@@ -437,11 +437,11 @@ impl From<CommandPayload> for Payload {
 
 /// Reserved admin / sysadmin operations (M-22 + M-23 + M-21).
 ///
-/// ⚠️ **Gated by the receiving side's own switch** ⇒ ⇒ the contract
+/// ⚠️ **Gated by the receiving side's own role** ⇒ ⇒ the contract
 /// layer carries **no** role / token concept ⇒ ⇒ the host's
-/// `admin_enabled` flag (default **off**) decides whether the channel
-/// answers at all ⇒ ⇒ **who** is allowed to turn it on is a **separate**
-/// ledger item (**D-131**) ⇒ ⇒ **not** implemented here.
+/// **role** (`Admin` / `Product`, default `Product`) decides whether the
+/// channel answers at all ⇒ ⇒ **who** is allowed to *hold* that role is a
+/// **separate** ledger item (**D-131**) ⇒ ⇒ **not** implemented here.
 ///
 /// ⚠️ **v0.44** (STAGE-29 · 裁决 L) rewrote this paragraph ⇒ ⇒ the
 /// previous wording promised a check that **does not exist** anywhere

@@ -23,9 +23,10 @@
 //! depend on the kernel** — it only says *how their data travels*.
 //!
 //! ⚠ **It carries no authorisation.**  Whether the admin channel is
-//! enabled at all is the **host's** switch (`admin_enabled`, default
-//! **off**) ⇒ ⇒ "who is allowed to turn it on" is a **separate** ledger
-//! item (**D-131**) ⇒ ⇒ **no role concept is introduced here**.
+//! enabled at all is the **host's** decision (its **role**: `Admin` vs
+//! `Product`, default `Product`) ⇒ ⇒ "who is allowed to hold that
+//! role" is a **separate** ledger item (**D-131**) ⇒ ⇒ **no role
+//! concept is introduced here**.
 //!
 //! # The two timestamps
 //!
