@@ -101,7 +101,11 @@ const EXPECTED_LOG_CTX: &str = "ENG-WATCHDOG";
 const EXPECTED_ERR_CODE: &str = "E_ENG-03";
 
 /// 造一个**注定停滞**的宿主（假中断端口已装好）。
-fn stalled_host() -> KernelHost {
+///
+/// ⚠️ 它**对同层的 `tests_degrade.rs` 也可见**（`pub(super)`）⇒ ⇒ 「造一个
+/// 停滞宿主」这件事**只有一处**（不复制夹具 ⇒ ⇒ 两个文件看到的是同一种
+/// 停滞形态）。
+pub(super) fn stalled_host() -> KernelHost {
     let mut host = KernelHost::new();
     host.backend
         .install_interrupt_port(Box::new(AlwaysPendingPort::new()));
@@ -109,12 +113,12 @@ fn stalled_host() -> KernelHost {
 }
 
 /// 发一条命令，收它的事件。
-fn dispatch(host: &mut KernelHost, cmd: CommandPayload) -> Vec<EventPayload> {
+pub(super) fn dispatch(host: &mut KernelHost, cmd: CommandPayload) -> Vec<EventPayload> {
     host.handle_message(&Message::command(1, cmd))
 }
 
 /// 事件里的错误条目（`code`, `message`）。
-fn errors_of(events: &[EventPayload]) -> Vec<(String, String)> {
+pub(super) fn errors_of(events: &[EventPayload]) -> Vec<(String, String)> {
     events
         .iter()
         .filter_map(|event| match event {
