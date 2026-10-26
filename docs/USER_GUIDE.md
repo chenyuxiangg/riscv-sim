@@ -1,0 +1,315 @@
+# RISC-V 仿真/调试平台 · 用户指南
+
+> **读者**：想用这个平台跑固件、看波形、对拍 RTOS 的人。
+> **本文档**讲**怎么用**；架构与设计在 [`docs/architecture/RISC-V_Architecture_Design.html`](./architecture/RISC-V_Architecture_Design.html)，
+> 欠账与已知缺口在 [`docs/reviews/REVIEWS.md`](./reviews/REVIEWS.md)。
+>
+> ⚠️ **本文档里的每个数字都从当前树实测**（`tools/count_scale.py` + 门禁输出）⇒ ⇒ **不写死历史值**。
+
+---
+
+## 1. 这个平台是什么
+
+一个 **RV32IMC（+ S/U 特权级 · PMP · Zicntr）** 的指令集仿真与调试平台：
+
+- **仿真内核**（Rust，自研，BSD/MIT）——事件驱动引擎 + ISS + 总线/内存图 + 外设模型（UART / CLINT / PLIC / GPIO）+ 断点/单步 + DWARF 行号 + 探针/波形 + 快照；
+- **浏览器工作台**（原生 ES modules，**零构建 · 零依赖**）——七个视图 + 一个板级内存图编辑器；
+- **两种运行形态**——浏览器内 WASM（默认）/ 服务端 P1（仅占位）；
+- **正确性对拍**——与 **Spike** 逐条比判决（riscv-tests 语料）或逐字节比 UART 字节流（真实 RTOS）。
+
+⚠️ **一句话边界**：这是**仿真器**，不是 QEMU 的替代品，也没有 QEMU 的系统仿真广度——它面向**固件级验证**（跑你自己的裸机/RTOS 镜像、看它的寄存器与波形、与参考侧对齐）。
+
+---
+
+## 2. 五分钟跑起来
+
+### 2.1 装依赖
+
+```bash
+# Rust + WASM 目标 + wasm-pack
+rustup target add wasm32-unknown-unknown
+cargo install wasm-pack
+
+# 前端门禁需要 Node ≥ 22（零依赖，只用 node:test）
+node --version
+```
+
+可选（**不进默认门禁**，按需运行）：**Spike**（参考侧）、**RISC-V 交叉工具链**（编固件）、**Chrome**（真机复验）。
+
+### 2.2 编译 + 构建 WASM 内核
+
+```bash
+cargo build                 # native
+tools/build-wasm.sh         # 浏览器内核（调试版）；--release 出发布版
+```
+
+产物落在 `front/assets/pkg/`（wasm-pack `--target web` ⇒ **原生 ES module + 具名导出**，零构建前端可直接 `import`）。
+⚠️ 这一步**不能跳**——不构建 WASM，浏览器里就没有内核（页面会起来，但全是空态）。
+
+### 2.3 起前端
+
+```bash
+python3 -m http.server 8080 --directory front
+# 浏览器打开 http://localhost:8080
+```
+
+> ⚠️ **必须走 HTTP(S)**：前端用 **Worker + ES module**，两者都要求同源 ⇒ `file://` 直开被浏览器拦（页面顶栏会明写「请通过 HTTP 打开」）。
+
+### 2.4 确认内核真的连上了
+
+打开页面后看两处：
+
+| 位置 | 正常长什么样 | 不正常说明什么 |
+| --- | --- | --- |
+| 顶栏右侧状态 | `kernel 已连接 — wasm worker` | `工作台已就绪 — kernel transport 未连接（…）` ⇒ **WASM 没构建**或 Worker 起不来 |
+| 页脚右侧 | `WASM 内核已就绪（Nop 往返成功）` | `内核未就绪：…` ⇒ 内核侧报错（把整句抄下来） |
+
+⚠️ **页脚这句话比状态栏更准**：它是一次真实的 `Nop` 往返的结果。
+⚠️ 状态栏可能显示「已连接」但页脚说「**探针流不可用**」⇒⇒ 那**不是**内核没就绪（是波形那条流订阅不上，寄存器与反汇编仍可用）。
+
+---
+
+## 3. 界面导览
+
+顶栏七个 tab 对应七个视图；另有一个**独立工作面**「板级内存图」不在 tab 条上（在「产品」视图里点「编辑板级内存图」进去）。
+
+### 3.1 产品（`#/product`）
+
+- **产品树**：当前装载的工程结构（板 → 芯片 → 外设）。
+- **内存映射 (M-14)** 表：**当前生效**的板级内存图（来自内核 `memory.map` 事件，不是假数据）。没有数据时如实显示空态。
+- 按钮「**编辑板级内存图**」⇒ 跳到编辑器；「**重新 seed demo 状态**」是 dev-only。
+
+### 3.2 嵌入式（`#/embedded`）
+
+落地工作台的概览页：**内核连接状态**、**当前 PC**、**虚拟时间**，以及四个子视图入口按钮（调试 / 寄存器·内存 / 波形 / 源码）。
+
+### 3.3 调试（`#/debug`）
+
+平台的主操作面。工具条：
+
+| 按钮 | 做什么 | 看完什么 |
+| --- | --- | --- |
+| **单步** / **单步 ×10** | 推进 1 / 10 条指令 | 「寄存器 / 内存」面板里 `x0..x31` 与 PC 变化 |
+| **继续** | 一直跑到停下（断点 / 预算 / 事件） | 页脚给出停下原因 |
+| **暂停** | 打断正在跑的仿真 | PC 停在原地 |
+| **复位** | 重新装载当前工程 | PC 回到复位向量 |
+| **读寄存器** | 拉一次全量寄存器 | 32 个通用寄存器刷新 |
+| **读内存 @0x100** | 读 `0x100` 起一个字 | 「内存单元」表出现一行 |
+| **反汇编** | 请求**当前 PC** 起 16 条的反汇编 | 表格出现：地址 / 机器码 / 助记符 / 宽度 / 源码 |
+| **导出执行轨迹 (CSV)** | 导出执行轨迹 | 面板出现进度行 + 内容块 + **下载**按钮 |
+| **导出波形 (VCD)** | 导出波形 | 同上（文件名 `trace-waveform.vcd`） |
+| **继续导出** | 还有剩余条目时出现 | 进度行从 `next_offset` 继续 |
+| **开启 / 关闭 trace 记录** | 控制访存轨迹记录 | 开启后有「仿真会明显降速」的提示 |
+
+⚠️ **助记符是 ISA 助记符**：压缩指令保留 `c.` 前缀，**不做伪指令别名改写**。
+⚠️ **导出窗口不是完整历史**：源环溢出过 ⇒ 面板会明确标「⚠️ 导出窗口**不是完整历史**」。
+⚠️ **下载按钮**出现后点它，文件名由「源 + 格式」派生（`trace-execution.csv` / `trace-waveform.vcd`），不是写死的。
+
+### 3.4 寄存器 / 内存（`#/regmem`）
+
+通用寄存器 `x0..x31`、PC、虚拟时间，以及「读内存 @0x100」读回的内存单元表。
+
+### 3.5 波形（`#/waveform`）
+
+探针通道列表：通道名 + **边沿数** + 最新值。空态说明「尚无探针信号」——固件得真的驱动外设引脚才会有（内建的 demo 固件会写 `GPIO0.OUT`）。
+
+### 3.6 终端（`#/terminal`）
+
+串口终端。输入框里的文本按 **UTF-8 编码**成字节，发给 guest 的 **UART0**（契约 v5 的 `WriteConsole`）。
+
+- 「**发送**」按钮，或在输入框里**按 Enter**；
+- ⚠️ **回显来自 guest**，平台不做本地回显；也**不**模拟终端控制序列（不追加换行、不处理 Ctrl-C / 退格 / 历史）；
+- ⚠️ 只送**原始字节**——送字符串会被内核按 `E_PROTO-08` 拒掉。
+
+### 3.7 源码（`#/source`）
+
+- **装载目录 / 装载文件**：用浏览器原生文件选择器把源码读进**前端**（**不进内核**，刷新即失）。
+- **解析当前 PC 的源码行**：问内核「这个地址对应哪一行」（DWARF 行表）。
+- ⚠️ **三种「没有答案」分得很清楚**：没问过 / 镜像没有 DWARF 行表（要 `-g` 重编译）/ 地址不在行表内。
+- ⚠️ 匹配到**多个**候选文件时，界面**列出候选让你选**，不静默挑第一个。
+
+---
+
+## 4. 换一块板（板级内存图编辑器）
+
+这是平台目前最有特色的能力：**在界面上定制板子的 RAM 段与 MMIO 窗口**，不用改宿主代码。
+
+### 4.1 编辑
+
+| 字段 | 说明 |
+| --- | --- |
+| **板 id** | 板的主键；**已保存的板只读**（改 id 就是另一块板 ⇒ 用「另存为板」） |
+| **板名** | 显示名 |
+| **优先级 priority** | 多板共存时的排序意图 |
+| **每段的声明大小上限** `region_budget_bytes` | 任一 RAM/ROM 段的**声明** size 不得超过它（超出 ⇒ 内核报 `E_PLT-07`） |
+| **RAM / ROM 段** | 逐段填 `base` + `size` |
+| **外设窗口** | 填 `base` + 器件类型 + 器件参数 |
+
+器件类型与参数：
+
+| 器件 | 参数 |
+| --- | --- |
+| `gpio` | 无 |
+| `uart16550` | `irq_line` · `baud_rate`（**不设上界**——架构没有） |
+| `clint` | `freq_hz` · `harts` |
+| `plic` | `sources` · `contexts` |
+
+⚠️ 参数的**合法区间由内核校验**（越界 ⇒ `E_PLT-12`）⇒ ⇒ 界面**不写第二份区间表**，只在内核的消息里给出。
+
+### 4.2 提交
+
+点「**提交板级内存图（整份替换 / 差量）**」：
+
+- 元数据（id / name / priority / auto_selectable）改了 ⇒ **整份替换**；否则 ⇒ **差量**（只发改动的那几段）；
+- 什么都没改 ⇒ **不发命令**（页脚说「板级内存图没有改动 —— 不用提交」）；
+- **校验失败** ⇒ 面板上出现带**场景码**的错误块（如 `E_PLT-06` 地址重叠 / `E_PLT-07` 超预算）⇒ ⇒ **前端不自己判合法性**，只如实显示内核的裁决；
+- **并发丢更新看得见**：提交带着期望修订号，图被别人改过 ⇒ `E_PLT-13`（界面会提示「图已被改，请刷新后再提交」）。
+
+### 4.3 生效时机
+
+| 情形 | 效果 |
+| --- | --- |
+| 还没装载镜像 | **立即生效**（改完总线直接重建） |
+| **已装载**镜像 | **待生效**（面板顶部出现「待生效 —— 重新装载工程后应用」）⇒ 改板只换总线、不动正在跑的固件 |
+| 点「**卸载工程**」 | 清运行态（**镜像与用户的板留着**）⇒ 此后改板**立即生效** |
+
+⚠️ 「待生效」是**推导量**（用户配的板 ≠ 当前生效的图），不是独立的标志位。
+
+### 4.4 板档案
+
+「保存当前板 / 另存为板 / 选用 / 删除」四个动作**一律不发契约命令**——只动**本机浏览器**的板档案。
+
+- ⚠️ **落库门槛 = 只有被内核接受过的描述才允许落库** ⇒ 草稿没提交过 ⇒ 「保存 / 另存为」是**禁用**的（面板上明说「当前草稿尚未被内核接受」）；
+- ⚠️ **保存 ≠ 生效**：板要生效仍需「提交板级内存图」；
+- ⚠️ **另存为必须给新的板 id**（id 撞了会被明确拒绝，不静默覆盖）；
+- ⚠️ **选中项不跨刷新保留**（档案条目只有 id 与描述两个字段）；
+- ⚠️ 浏览器没有可用持久化存储 ⇒ 面板明说「板档案只存在于本会话 —— 刷新即失」，**不静默假装成功**；
+- 选用**旧规则版本**的板 ⇒ **明确提示**（不静默迁移）；内核接受后档案条目**升级**到当前规则版本。
+
+---
+
+## 5. 命令行用法
+
+平台有两个 headless runner，都在 `crates/kernel/src/bin/`。
+
+### 5.1 `riscv-golden` —— 跑一个 ELF 出判决
+
+```bash
+cargo run --bin riscv-golden -- <path/to.elf>
+```
+
+输出**两行**：
+
+```
+GOLDEN-STATS retired=<n> traps=<n> tohost=0x<addr>
+VERDICT <PASS|FAIL <n>|NOVERDICT|ERROR>
+```
+
+最后一行永远是 `VERDICT` 行；**进程退出码与判决一致**（`0` = PASS / `1` = FAIL / `2` = NOVERDICT / `3` = ERROR）。
+
+### 5.2 `osz-boot` —— 跑真实 RTOS，抓 UART 字节流
+
+```bash
+cargo run --bin osz-boot -- <path/to.elf> [--out <path>] [--prefix <text>] \
+                            [--budget <n>] [--timeout-ms <n>] [--max-console <n>]
+```
+
+- **stdout** = console 的**原始字节**（可直接 `cmp`）；**stderr** = 判决行；
+- `--prefix` 让它「看到这段文字就停」（真实 RTOS 是死循环，没有墙钟兜底会永远跑下去）。
+
+### 5.3 与 Spike 对拍
+
+```bash
+tools/fetch-golden-deps.sh          # 拉 riscv-tests + 交叉工具链到**仓库外**
+tools/golden-run.sh --self-check    # 变异金丝雀自检
+tools/golden-run.sh --keep-going    # 全量语料 —— 77 例
+tools/golden-run.sh --check-mem     # 额外打印两侧 RAM 窗口并断言逐字相同
+```
+
+判决口径：**两侧的判决必须一致**（`FAIL` 还要一致到**测试号**）。
+
+```bash
+tools/boot-osz.sh --elf <path/to/osz.elf>   # 真实 RTOS 与 Spike 逐字节比 UART
+```
+
+判决口径：**两侧 UART TX 字节流逐字节相同** ⇒ 打印 `VERDICT MATCH / MISMATCH / NO-VERDICT`。
+
+⚠️ 这两个脚本**不进默认门禁**（需要仓外的镜像与本机的 Spike）。
+⚠️ osz 的产物**在仓外**（默认读 `$OSZ_ELF`，其次 `/tmp/osz-artifacts/osz.elf`）。
+
+---
+
+## 6. 常见问题
+
+| 症状 | 多半是 | 怎么办 |
+| --- | --- | --- |
+| 页面全白 / 顶栏写「请通过 HTTP 打开」 | 用 `file://` 打开了 | `python3 -m http.server 8080 --directory front` |
+| 顶栏「kernel transport 未连接」 | 没构建 WASM | `tools/build-wasm.sh` |
+| 页脚「内核未就绪：…」 | 内核侧真报错 | 把整句抄下来查（码是 `E_*` 家族） |
+| 波形视图一直空 | 固件没驱动外设引脚 | 确认固件真的写了 GPIO/UART |
+| 终端没输出 | 固件没往 UART0 写，或没订阅 console 流 | 看页脚是否说「console 流不可用」 |
+| 板级内存图提交报 `E_PLT-06` | 两段地址重叠 | 改 `base` |
+| 板级内存图提交报 `E_PLT-07` | 某段声明 size 超预算 | 调 `region_budget_bytes` 或调小该段 |
+| 板级内存图提交报 `E_PLT-12` | 器件参数越界 | 按器件模型的寄存器布局改参数 |
+| 板级内存图提交报 `E_PLT-13` | 图被别人改过（并发丢更新） | 刷新后重新提交 |
+| 「保存当前板」按钮是灰的 | 草稿还没被内核接受过 | 先「提交板级内存图」，校验通过才能存 |
+| 板档案刷新就没了 | 浏览器没有可用持久化存储 | 面板会明说「只存在于本会话」 |
+
+⚠️ **场景码速查**（契约层是唯一定义处；`tools/error_code_check.py` 会守着「一个码一个含义」）：
+
+| 族 | 含义 |
+| --- | --- |
+| `E_CTX-*` | 上下文 / 通道（如超时、管理通道未开） |
+| `E_PROTO-*` | 协议层（版本不符、CRC 不符、消息非法） |
+| `E_PLT-*` | 平台 / 内存图（见上表） |
+| `E_HMS-*` | 健康管理（降级失败、致命终止） |
+| `E_TRX-*` | 传输层（通道未就绪 / 挂 / WASM 宿主侧失败） |
+| `E_STORE-*` | 持久化（板档案 / 归档） |
+| `E_DBG-*` / `E_ENG-*` | 调试面 / 引擎 |
+
+---
+
+## 7. 跑一遍自检（确认这份仓是好的）
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --no-fail-fast --lib --tests   # ⚠️ 别用裸 cargo test --workspace（doc-test 会假挂死）
+tools/check-front.sh
+tools/golden-run.sh --self-check && tools/golden-run.sh --keep-going
+tools/build-wasm.sh && node tools/wasm-smoke.mjs
+node tools/browser-verify.mjs        # 需要本机 Chrome
+```
+
+⚠️ 判「全绿」看**退出码**，别只看汇总行。
+⚠️ `tools/browser-verify.mjs` 在**真 Chrome** 里跑真内核：它验的不只是「页面没白屏」，还包括「单步之后 `x1 = 0x2a`」「波形视图列出了 `GPIO0.OUT` 通道」「源码视图的按钮带着**当前 PC** 而不是 0」。
+
+---
+
+## 8. 已知限制（如实说）
+
+| 限制 | 说明 |
+| --- | --- |
+| **服务端形态是占位** | `crates/server/src/main.rs` 只有 20 行；HTTP / WebSocket 宿主是 P1 的活 |
+| **板档案只在浏览器里** | 服务端持久化（SQLite）还没做 ⇒ 跨进程持久化要等它 |
+| **源码树只在前端** | 源码**不进内核**、**刷新即失** |
+| **管理通道实际不可达** | 准入已收口成「角色」，但**令牌 → role** 那一段还没做 ⇒ 宿主侧设角色没有认证门槛 |
+| **降级只落地两档** | `Terminate` 与 `TraceDown` 有实现；`SnapshotRestore` / `Pause` / `Disconnect` 还够不着（要跨进程 ⇒ 得升契约版本） |
+| **前端没有断点 UI** | 断点/写内存只有脚本接口（`window.riscv_kernel.*`），页面上没有对应按钮 |
+| **`time` 与参考侧不再可比** | 计数器那批把 `time` 接上了 CLINT ⇒ 有意为之的明示取舍 |
+
+⚠️ **完整的欠账清单**（每一条的实证依据、阻塞关系、闭环方式）在 [`docs/reviews/REVIEWS.md`](./reviews/REVIEWS.md) ⇒ ⇒ **不要**以「文档没说」当成「没这回事」。
+
+---
+
+## 9. 想去哪
+
+| 你想…… | 去哪 |
+| --- | --- |
+| 搞懂架构 | [`docs/architecture/RISC-V_Architecture_Design.html`](./architecture/RISC-V_Architecture_Design.html)（4+1 视图 + ADR） |
+| 看需求 | [`docs/requirements/RISC-V_Requirements_v1.4.html`](./requirements/RISC-V_Requirements_v1.4.html) |
+| 看某个模块怎么设计 | [`docs/module-design-spec/RISC-V_Module_Design_Specification.html`](./module-design-spec/RISC-V_Module_Design_Specification.html)（23 模块 LLD）+ [`docs/detailed-design/M-01..M-23_*.html`](./detailed-design/) |
+| 看某一批的规格与裁决 | [`docs/detailed-design/STAGE-1..STAGE-31_*.md`](./detailed-design/)（30 份冻结规格） |
+| 看改动的完整叙事 | [`docs/progress/PROGRESS.md`](./progress/PROGRESS.md) |
+| 看欠账与已知缺口 | [`docs/reviews/REVIEWS.md`](./reviews/REVIEWS.md) |
+| 参与开发 | [`CONTRIBUTING.md`](../CONTRIBUTING.md) + [`AGENTS.md`](../AGENTS.md) |
