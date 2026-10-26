@@ -41,6 +41,13 @@ import {
     renderMemoryMapTable,
     setDeviceKind,
 } from "./components/memory-map.js";
+import {
+    imageKindFor as imageKindForName,
+    publishProductState,
+    readImageFile,
+    renderImageLoader,
+    setImageLoadState,
+} from "./components/image-loader.js";
 
 // ---------------------------------------------------------------------------
 // ViewComponent shape (LLD §2.1.1)
@@ -162,6 +169,7 @@ const productTreeView = register({
                     </div>
                 </section>
             </div>
+            ${renderImageLoader(state?.imageLoad)}
             <p class="muted">
                 内存映射表显示的是内核 <code>memory.map</code> 事件里的
                 <strong>当前生效</strong>的板级内存图；没有数据时如实显示空态，不显示假数据。
@@ -185,6 +193,34 @@ const productTreeView = register({
             route("#/memory-map");
             return "cmd-go-memory-map";
         }
+        // 「加载」⇒ **读用户选的文件** ⇒ ⇒ 发一条 `load-image` 信号。
+        //
+        // ⚠️ **视图层不碰服务层**（本模块的既有规矩）⇒ ⇒ 这里只发信号，
+        // 真正发命令的是 app 层（它持有服务接线）。
+        //
+        // ⚠️ **字节在信号里**：文件选择器的 `files` 拿不到（点击时它是
+        // 空的——浏览器只把文件交给 `change` 事件）⇒ ⇒ 必须在 `change`
+        // 里**先把字节读出来**再存下来（见 `mountFor`）⇒ ⇒ 这里读的是
+        // 那份**已读好的字节**。
+        if (el?.dataset?.action === "load-image") {
+            const pending = pendingImage();
+            if (!pending) {
+                setImageLoadState({
+                    status: "error",
+                    error: "没有待加载的文件 —— 请先用上面的选择器选一个固件镜像",
+                    pending: null,
+                });
+                publishProductState();
+                return "cmd-load-image-no-file";
+            }
+            setImageLoadState({ status: "loading", error: null });
+            publishProductState();
+            return emitCommand("load-image", "product", {
+                bytes: pending.bytes,
+                name: pending.name,
+                kind: pending.kind,
+            });
+        }
         return undefined;
     },
     onDelta(_delta) {
@@ -192,8 +228,78 @@ const productTreeView = register({
     },
     mountFor(el) {
         el.addEventListener("click", (ev) => productTreeView.onCommand(ev));
+        // ⚠️ **文件选择器的 `change`**：浏览器把选中的文件**只**交给这个
+        // 事件（点击时 `input.files` 是空的）⇒ ⇒ 必须在这里读字节。
+        el.addEventListener("change", (ev) => {
+            const input = ev.target?.closest?.("[data-image-input]");
+            if (!input) return;
+            const file = input.files?.[0] ?? null;
+            if (!file) return;
+            void loadImageFileIntoPending(file);
+        });
     },
 });
+
+// ---------------------------------------------------------------------------
+// 固件加载（STAGE-32 · v0.47 批）—— 视图层这一侧
+// ---------------------------------------------------------------------------
+
+/**
+ * **待加载的镜像**（字节 + 文件名 + 类型）。
+ *
+ * ⚠️ **住在视图状态里**（`product` 视图的 `imageLoad.pending`）⇒ ⇒
+ * **单一真相** ⇒ ⇒ 视图状态一重置（`m03.reset()` / 换工作台）它就没了
+ * ⇒ ⇒ **不会**出现「上一个会话的字节还挂着」那种状态。
+ *
+ * ⚠️ **为什么必须先存**：视图层只能发信号（`emitCommand`），而命令的载荷
+ * **在信号里**⇒ ⇒ 字节必须先**存**在某处才能在点击「加载」时取到。
+ *
+ * ⚠️ **为什么不是「点击时读文件」**：点击时 `input.files` 已经是空的了
+ * （浏览器把文件交给 `change` 事件后就清掉了）⇒ ⇒ 必须在 `change` 里
+ * 读。
+ *
+ * @returns {{bytes: number[], name: string, kind: string}|null}
+ */
+function pendingImage() {
+    return viewStore.getState("product")?.imageLoad?.pending ?? null;
+}
+
+/**
+ * 写「镜像加载」这块视图状态。
+ *
+ * ⚠️ **实现在 `components/image-loader.js`**（视图层与 app 层**共用**
+ * ⇒ ⇒ 住在一处 ⇒ ⇒ **不写第二份**）。
+ */
+
+/**
+ * 读用户选的文件 ⇒ 存成「待加载的镜像」。
+ *
+ * ⚠️ **读失败如实显示**（规格 §3 裁决 J）⇒ ⇒ 不静默。
+ *
+ * @param {File|Blob} file
+ * @returns {Promise<void>}
+ */
+async function loadImageFileIntoPending(file) {
+    try {
+        const bytes = await readImageFile(file);
+        const name = String(file?.name ?? "image.bin");
+        setImageLoadState({
+            status: "idle",
+            name,
+            byteLength: bytes.length,
+            error: null,
+            pending: { bytes, name, kind: imageKindForName(name) },
+        });
+        publishProductState();
+    } catch (err) {
+        setImageLoadState({
+            status: "error",
+            error: `读取文件失败：${err?.message ?? err}`,
+            pending: null,
+        });
+        publishProductState();
+    }
+}
 
 function renderTree(node) {
     if (!node) return "";

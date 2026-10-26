@@ -82,13 +82,18 @@
 //         *not* a verification failure
 
 import { spawn, spawnSync } from "node:child_process";
-import { createReadStream, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { createReadStream, existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadElf, findFirstSymbol } from "./elf-symtab.mjs";
+import {
+    UI_IMAGE_ELF_MARKER,
+    buildUiImageElf,
+    checkEncoderAgainstDemoFirmware,
+} from "./ui-image-fixture.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
@@ -138,6 +143,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "kernelExec",
     "source",
     "waveform",
+    "loadImage",
     "osz",
     "memoryMap",
     "boardArchive",
@@ -2594,6 +2600,370 @@ async function runBoardOrderingSection(cdp, opts) {
     return { skipped: false, checks };
 }
 
+// ---------------------------------------------------------------------------
+// STAGE-32 · v0.47 · 固件加载 UI（真机 B 组）
+// ---------------------------------------------------------------------------
+
+/**
+ * 用 CDP 的 `DOM.setFileInputFiles` **真**给一个 `<input type="file">` 选文件。
+ *
+ * ⚠️ **这是 B-1 的判别力来源**：真机门禁**不许**用脚本口
+ * （`window.riscv_image.loadFromUrl`）代替界面路径 ⇒ ⇒ 否则那条判据恒绿
+ * ⇒ ⇒ 这里走的是**浏览器自己的文件选择器**（CDP 驱动）⇒ ⇒ 走的是
+ * `change` 事件 ⇒ ⇒ 与用户点出来的**完全同一条路**。
+ *
+ * @param {object} cdp
+ * @param {string} selector — 文件输入框的选择器
+ * @param {string} filePath — **绝对**路径
+ * @returns {Promise<void>}
+ */
+async function selectFileForInput(cdp, selector, filePath) {
+    await cdp.send("DOM.enable");
+    const doc = await cdp.send("DOM.getDocument", { depth: -1, pierce: true });
+    const rootId = doc?.root?.nodeId;
+    if (!rootId) throw new Error("拿不到 DOM 根节点");
+    const found = await cdp.send("DOM.querySelector", { nodeId: rootId, selector });
+    if (!found?.nodeId) throw new Error(`页面里找不到文件输入框：${selector}`);
+    await cdp.send("DOM.setFileInputFiles", { files: [filePath], nodeId: found.nodeId });
+}
+
+/** 加载器面板的探针（DOM 现状）。 */
+const IMAGE_LOADER_PROBE = `(() => {
+  const status = document.querySelector("[data-image-load-status]");
+  const err = document.querySelector("[data-image-load-error]");
+  const input = document.querySelector("[data-image-input]");
+  const btn = document.querySelector('[data-action="load-image"]');
+  // ⚠️ **文件输入框里真的躺着那个文件吗** —— 这是 B-1 的**正向**判据：
+  // 只断言「CDP 调用没报错」是**弱**的 ⇒ ⇒ 换成「浏览器的文件输入框里
+  // **真的有**那个文件（名字 + 大小）」⇒ ⇒ 走脚本口代替界面路径时
+  // **这里必然是空** ⇒ ⇒ 那条判据才不是恒绿。
+  const files = input && input.files
+    ? Array.from(input.files).map((f) => ({
+        name: String(f.name ?? ""),
+        size: Number(f.size ?? 0),
+      }))
+    : [];
+  return {
+    status: status ? String(status.getAttribute("data-image-load-status") || "") : null,
+    text: status ? String(status.textContent || "").trim() : "",
+    error: err ? String(err.textContent || "").trim() : null,
+    hasInput: !!input,
+    inputType: input ? String(input.getAttribute("type") || "") : null,
+    accept: input ? String(input.getAttribute("accept") || "") : null,
+    hasButton: !!btn,
+    files,
+  };
+})()`;
+
+/** 寄存器 / PC 的探针（regmem 视图）。 */
+const UI_IMAGE_REG_PROBE = `(() => {
+  const cells = Array.from(document.querySelectorAll('[data-view-body="regmem"] .reg-grid > div'));
+  const val = (i) => {
+    const code = cells[i] ? cells[i].querySelector("code") : null;
+    return code ? String(code.textContent || "").trim() : "";
+  };
+  const pc = document.querySelector('[data-view-body="regmem"] code.pc');
+  return {
+    count: cells.length,
+    x1: val(1),
+    x3: val(3),
+    pc: pc ? String(pc.textContent || "").trim() : "",
+  };
+})()`;
+
+/** 终端输出 + 波形通道列表的探针。 */
+const UI_IMAGE_TERM_WAVE_PROBE = `(() => {
+  const term = document.querySelector("[data-terminal-out]");
+  const items = Array.from(document.querySelectorAll('[data-view-body="waveform"] .channel-list > li'));
+  return {
+    terminal: term ? String(term.textContent || "") : "",
+    channels: items.map((li) => String(li.textContent || "").trim()),
+  };
+})()`;
+
+/**
+ * 等加载器面板进入某个状态。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @param {(state: object) => boolean} predicate
+ * @returns {Promise<object|null>} 最后一个看到的状态（等不到就是最后一个）
+ */
+async function waitForImageState(cdp, opts, predicate) {
+    const deadline = Date.now() + opts.timeoutMs;
+    let last = null;
+    while (Date.now() < deadline) {
+        last = await awaitEval(cdp, IMAGE_LOADER_PROBE);
+        if (last && predicate(last)) return last;
+        await sleep(200);
+    }
+    return last;
+}
+
+/**
+ * 从波形通道列表里取 `GPIO0.OUT` 的**边沿数**。
+ *
+ * ⚠️ **找不到就返回 -1**（不是 0）⇒ ⇒ 「通道根本不在列表里」与「通道在
+ * 但没有边沿」**分得开**⇒ ⇒ 否则 B-4 会在「波形视图整个空了」时**假绿**。
+ *
+ * @param {string[]} channels
+ * @returns {number}
+ */
+function gpioOutEdges(channels) {
+    const list = Array.isArray(channels) ? channels : [];
+    for (const item of list) {
+        const text = String(item);
+        if (!text.includes("GPIO0.OUT")) continue;
+        const m = text.match(/(\d+)\s+edges/);
+        return m ? Number(m[1]) : -1;
+    }
+    return -1;
+}
+
+/**
+ * 「文件真的被选进输入框了」的**留痕**探针。
+ *
+ * ⚠️ **为什么不能直接读 `input.files`**：视图每次重渲染都把
+ * `body.innerHTML` 整个换掉 ⇒ ⇒ **input 元素被重建** ⇒ ⇒ 新元素的
+ * `files` **是空的** ⇒ ⇒ 读它必然得到 `[]` ⇒ ⇒ 那条判据**恒红**（实测
+ * 踩过）⇒ ⇒ 改成在 **`change` 事件里**留痕（那时文件**还在**）⇒ ⇒ 留痕
+ * 挂在 `document` 上 ⇒ ⇒ 元素被重建也不影响它。
+ */
+const BV_IMAGE_PICK_PROBE = `(() => {
+  const rec = window.__bv_image_pick ?? null;
+  if (!rec) return null;
+  return { name: String(rec.name ?? ""), size: Number(rec.size ?? 0) };
+})()`;
+
+/**
+ * 在页面里装一个 **`change` 事件的捕获监听器**（把选中的文件留痕）。
+ *
+ * ⚠️ **用捕获阶段**（`capture: true`）⇒ ⇒ 它在视图层那个监听器**之前**跑
+ * ⇒ ⇒ 留痕的是「浏览器真的把文件交给了 `change`」这件事 ⇒ ⇒ 走脚本口
+ * 代替界面路径时**根本不会有 `change`** ⇒ ⇒ 留痕恒为空 ⇒ ⇒ 那条判据
+ * 才不是恒绿。
+ *
+ * @param {object} cdp
+ * @returns {Promise<void>}
+ */
+async function installImagePickRecorder(cdp) {
+    await runEffect(cdp, [
+        'window.__bv_image_pick = null;',
+        'document.addEventListener("change", (ev) => {',
+        '  const t = ev.target;',
+        '  const f = t && t.files ? t.files[0] : null;',
+        '  if (f) window.__bv_image_pick = { name: String(f.name || ""), size: Number(f.size || 0) };',
+        '}, true);',
+    ].join("\n"));
+}
+
+/**
+ * 固件加载 UI 那一段（STAGE-32 · B 组）：**真**在界面上选文件 → 装载 →
+ * 跑起来 → 内核真的换了镜像。
+ *
+ * ⚠️ **必须排在 osz 段之前**：这一段把当前镜像换成夹具 ⇒ ⇒ 放在 osz 段
+ * 后面会让 osz 段看到的是夹具而不是它自己装的那张板。
+ *
+ * ⚠️ **判据不许用脚本口代替界面路径**（规格 §6 判别力清单第 6 条）⇒ ⇒
+ * 选文件走 CDP 的 `DOM.setFileInputFiles`（浏览器的**真**文件选择器）⇒ ⇒
+ * 走的是 `change` 事件 ⇒ ⇒ 与用户点出来的完全同一条路。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
+ */
+async function runLoadImageSection(cdp, opts) {
+    const checks = [];
+    const tmpDir = mkdtempSync(join(tmpdir(), "riscv-ui-image-"));
+    try {
+        // -- 编码器自检（先钉住「夹具本身是对的」）------------------------
+        // ⚠️ 编码器写错时**不报错** ⇒ ⇒ 夹具会「跑得好好的，只是没做它该做
+        // 的事」⇒ ⇒ 这里拿仓内那份**已被内核执行过**的 demo 固件当标尺。
+        const encoder = checkEncoderAgainstDemoFirmware();
+        checks.push({
+            name: "夹具自检 · 编码器逐字节复现 demo 固件（U/I/S/J/R 五种形式）",
+            ok: encoder.ok,
+            detail: encoder.detail,
+        });
+        if (!encoder.ok) return { skipped: false, checks };
+
+        const elfBytes = buildUiImageElf();
+        const elfPath = join(tmpDir, "ui-image.elf");
+        writeFileSync(elfPath, elfBytes);
+        // 一个**故意坏掉**的 ELF（magic 不对）⇒ ⇒ 内核必须拒它（B-5）。
+        const badPath = join(tmpDir, "broken.elf");
+        writeFileSync(badPath, Buffer.from("this file is definitely not an ELF image\n"));
+
+        // -- 「装载前」的波形基线（demo 固件的那条边沿还在）-----------------
+        // ⚠️ **必须先取基线**：B-4 的判据是「**前后对照**」⇒ ⇒ 只看装载后
+        // 的边沿数是 0 **不够**（万一它**一直是** 0 呢）⇒ ⇒ 必须同时证明
+        // 「装载前 ≥ 1」。
+        await runEffect(cdp, 'location.hash = "#/waveform";');
+        await sleep(500);
+        const waveBefore = await awaitEval(cdp, UI_IMAGE_TERM_WAVE_PROBE);
+        const edgesBefore = gpioOutEdges(waveBefore?.channels);
+
+        // -- 装载器在产品视图里 ⇒ 先切过去 ------------------------------
+        await runEffect(cdp, 'location.hash = "#/product";');
+        await sleep(500);
+
+        // -- B-1 · **真**用界面的文件选择器选文件 -------------------------
+        // ⚠️ **留痕监听器必须先装**（否则 `change` 里看到的东西就没了）。
+        await installImagePickRecorder(cdp);
+        let pickerError = null;
+        try {
+            await selectFileForInput(cdp, "[data-image-input]", elfPath);
+        } catch (err) {
+            pickerError = String(err?.message ?? err).slice(0, 300);
+        }
+        checks.push({
+            name: "B-1 · 界面上真选了文件（CDP DOM.setFileInputFiles ⇒ 走 change 事件）",
+            ok: pickerError === null,
+            detail: pickerError ?? `已选入 ${basename(elfPath)}（${elfBytes.length} 字节）`,
+        });
+        if (pickerError) return { skipped: false, checks };
+
+        // -- B-1a · **正向**判据：`change` 事件里**真的有**那个文件 -------
+        // ⚠️ **这一条才是 B-1 的判别力来源**：上面那条只断言「CDP 调用没
+        // 报错」（**弱**）⇒ ⇒ 换成「浏览器把那个文件交给了 `change` 事件」
+        // ⇒ ⇒ **走脚本口**代替界面路径时**根本没有 `change`** ⇒ ⇒ 判据不是
+        // 恒绿。
+        let pickedFile = null;
+        const pickDeadline = Date.now() + opts.timeoutMs;
+        while (Date.now() < pickDeadline) {
+            pickedFile = await awaitEval(cdp, BV_IMAGE_PICK_PROBE);
+            if (pickedFile) break;
+            await sleep(200);
+        }
+        checks.push({
+            name: "B-1a · **`change` 事件里真的有那个文件**（名字 + 大小 ⇒ ⇒ 走的是界面路径）",
+            ok: pickedFile?.name === basename(elfPath) && pickedFile?.size === elfBytes.length,
+            detail: `change 事件留痕：${JSON.stringify(pickedFile)}`,
+        });
+
+        // -- 面板必须显示「已选择」+ 字节数（字节真的读到了）--------------
+        const picked = await waitForImageState(cdp, opts,
+            (s) => s.status === "error" || s.text.includes("ui-image.elf"));
+        checks.push({
+            name: "B-1b · 面板显示已选文件与**真实字节数**（字节数 == 文件大小）",
+            ok: picked?.status === "idle"
+                && picked?.text.includes("ui-image.elf")
+                && picked?.text.includes(String(elfBytes.length)),
+            detail: picked?.status === "error"
+                ? `读文件就失败了：${picked.error ?? ""}`
+                : `面板：${JSON.stringify(picked?.text ?? "")}（文件 ${elfBytes.length} 字节）`,
+        });
+
+        // -- 点「加载」----------------------------------------------------
+        await runEffect(cdp,
+            'document.querySelector(\'[data-action="load-image"]\').click();');
+        const loaded = await waitForImageState(cdp, opts,
+            (s) => s.status === "ok" || s.status === "error");
+        checks.push({
+            name: "B-1c · 装载成功（面板状态 = ok，且显示文件名与字节数）",
+            ok: loaded?.status === "ok"
+                && loaded?.text.includes("ui-image.elf")
+                && loaded?.text.includes(String(elfBytes.length)),
+            detail: `面板状态 ${JSON.stringify(loaded?.status ?? null)}：${JSON.stringify(loaded?.text ?? "")}`,
+        });
+        if (loaded?.status !== "ok") return { skipped: false, checks };
+
+        // -- B-3 · 终端面板必须**先挂上**，console 字节才进得了 DOM ---------
+        // ⚠️ console 字节是**流**：内核推 → 前端 `onDelta` 写进 store **并**
+        // 直接写 `[data-terminal-out]` ⇒ ⇒ 面板**没挂上**时那一步会跳过
+        // ⇒ ⇒ 与 osz 段同一条规矩：**先切到终端视图再跑**。
+        await runEffect(cdp, 'location.hash = "#/terminal";');
+        await sleep(500);
+
+        // -- 跑起来（「装完就停」是用户的定案 ⇒ ⇒ 这里**自己**发步进）-----
+        // ⚠️ 装完那一步**没有**自动跑（那是 A-8 的判据）⇒ ⇒ 这里发的是
+        // 「用户点继续/单步」的动作。
+        await runEffect(cdp,
+            'window.dispatchEvent(new CustomEvent("riscv:command", { detail: { action: "step10" } }));');
+        await sleep(600);
+        await runEffect(cdp,
+            'window.dispatchEvent(new CustomEvent("riscv:command", { detail: { action: "step10" } }));');
+
+        let term = null;
+        const termDeadline = Date.now() + opts.timeoutMs;
+        while (Date.now() < termDeadline) {
+            term = await awaitEval(cdp, UI_IMAGE_TERM_WAVE_PROBE);
+            if (String(term?.terminal ?? "").includes(UI_IMAGE_ELF_MARKER)) break;
+            await sleep(250);
+        }
+        checks.push({
+            name: `B-3 · 终端跑出固件自己的输出（判据字面量 ${JSON.stringify(UI_IMAGE_ELF_MARKER)}）`,
+            ok: String(term?.terminal ?? "").includes(UI_IMAGE_ELF_MARKER),
+            detail: `终端：${JSON.stringify(String(term?.terminal ?? "").slice(0, 200))}`,
+        });
+
+        // -- B-2 · 内核真的换了镜像 ---------------------------------------
+        await runEffect(cdp, 'location.hash = "#/regmem";');
+        await sleep(500);
+        let regs = null;
+        const regDeadline = Date.now() + opts.timeoutMs;
+        while (Date.now() < regDeadline) {
+            regs = await awaitEval(cdp, UI_IMAGE_REG_PROBE);
+            if (regs && regs.x3 === "00000123") break;
+            await sleep(250);
+        }
+        checks.push({
+            name: "B-2 · 内核真的换了镜像（x3 = 夹具的特征值，不是 demo 的 0x2a）",
+            ok: regs?.x3 === "00000123" && regs?.x1 !== "0000002a",
+            detail: `x1=${JSON.stringify(regs?.x1 ?? "")} x3=${JSON.stringify(regs?.x3 ?? "")} pc=${JSON.stringify(regs?.pc ?? "")}`,
+        });
+
+        // -- B-4 · 波形上 demo 固件的那条边沿**没了** ----------------------
+        // ⚠️ **判据是「边沿数」，不是「通道在不在」**：通道是**板子上的器件**
+        // （qemu-virt 也有 GPIO0）⇒ ⇒ 「通道列表里没有 GPIO0.OUT」这条判据
+        // 在换档之后**必然为真**⇒ ⇒ 是**假绿**⇒ ⇒ 真正的判据是
+        // 「**边沿**没了」⇒ ⇒ demo 固件那条边沿是装载**前**产生的 ⇒ ⇒
+        // 装载后必须为 0。
+        await runEffect(cdp, 'location.hash = "#/waveform";');
+        await sleep(500);
+        const waveAfter = await awaitEval(cdp, UI_IMAGE_TERM_WAVE_PROBE);
+        const edgesAfter = gpioOutEdges(waveAfter?.channels);
+        checks.push({
+            name: "B-4 · 波形上 demo 固件的 GPIO0.OUT **边沿**没了（装载前 ≥ 1 ⇒ 装载后 = 0）",
+            ok: edgesBefore >= 1 && edgesAfter === 0,
+            detail: `GPIO0.OUT 边沿数：装载前 ${edgesBefore} ⇒ 装载后 ${edgesAfter}；`
+                + `通道列表：${JSON.stringify(waveAfter?.channels ?? [])}`,
+        });
+
+        // -- B-5 · 装载失败时界面显示内核的错误码 --------------------------
+        await runEffect(cdp, 'location.hash = "#/product";');
+        await sleep(400);
+        let badPickError = null;
+        try {
+            await selectFileForInput(cdp, "[data-image-input]", badPath);
+        } catch (err) {
+            badPickError = String(err?.message ?? err).slice(0, 300);
+        }
+        if (badPickError) {
+            checks.push({
+                name: "B-5 · 装载失败时界面显示内核的错误码",
+                ok: false,
+                detail: `第二个文件选不进去：${badPickError}`,
+            });
+            return { skipped: false, checks };
+        }
+        await waitForImageState(cdp, opts, (s) => s.status === "error" || s.text.includes("broken.elf"));
+        await runEffect(cdp,
+            'document.querySelector(\'[data-action="load-image"]\').click();');
+        const failed = await waitForImageState(cdp, opts, (s) => s.status === "error");
+        const failText = `${failed?.text ?? ""} ${failed?.error ?? ""}`;
+        checks.push({
+            name: "B-5 · 装载失败时界面显示**内核原文**（含错误码 E_LDR-01）",
+            ok: failed?.status === "error" && /E_LDR-\d{2}/.test(failText),
+            detail: `面板状态 ${JSON.stringify(failed?.status ?? null)}：${JSON.stringify(failText.slice(0, 300))}`,
+        });
+
+        return { skipped: false, checks };
+    } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+    }
+}
+
 /**
  * 真实 RTOS 那一段：装载仓外的 ELF → 跑起来 → 终端里看得见 console。
  *
@@ -3227,6 +3597,17 @@ async function main() {
             await sleep(250);
         }
         registerSection("waveform", waveform, { title: "探针流检查（切到 #/waveform）" });
+
+        // -- 固件加载 UI（STAGE-32 · v0.47 · B 组）------------------------
+        // ⚠️ **必须排在 osz 段之前**：这一段把当前镜像换成夹具 ⇒ ⇒ 放在
+        // osz 后面，osz 段会看到的是夹具而不是它自己装的那张板。
+        //
+        // ⚠️ **必须排在波形段之后**：波形段断言的是 **demo 固件**的
+        // `GPIO0.OUT` 边沿 ⇒ ⇒ 这一段把镜像换掉之后，那条边沿就没了。
+        const loadImage = await runSection("loadImage", () => runLoadImageSection(cdp, opts));
+        registerSection("loadImage", loadImage.checks, {
+            title: "固件加载 UI 检查（界面上真选文件 → 装载 → 跑起来 → 内核真的换了镜像）",
+        });
 
         // -- the REAL RTOS (osz): load the out-of-repo ELF and SEE its console -
         // ⚠️ 这一段在**没有 osz ELF** 的机器上必须**跳过**（不是判负）——
