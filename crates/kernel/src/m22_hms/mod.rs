@@ -14,10 +14,16 @@
 //! [`DispatchResult::Notice`] 只有**脱敏提示**（级别 + 错误码 + 上下文）；
 //! 管理员拿到的 [`DispatchResult::Admin`] 才有诊断详情（双时间戳）与日志关联。
 //!
-//! **降级动作本批只实现 `Terminate`**（冻结规格 §0.4 ⑦ / §2.9 · 裁决 H）：
-//! 其余动作（`SnapshotRestore` / `Pause` / `Disconnect` / `TraceDown`）**声明但
-//! `Unsupported`** —— `Unsupported` **不是失败**：不重试、**不**报 `E_HMS-01`。
-//! 恢复（回退检查点 + 输入重放）本批**不做**（要 M-20）。
+//! **降级动作能不能做由「执行器」表态**（v0.46 批 · 规格 §3.2）：执行器接口是
+//! **三态**（[`DegradeAttempt`]）—— `Done`（执行成功）/ `Unsupported`
+//! （**这套装配做不了** ⇒ **不是失败**：不重试、**不**报 `E_HMS-01`）/
+//! `Failed`（失败 ⇒ 重试至多 [`DEGRADE_MAX_TRIES`] 次 ⇒ 终态**恰好一次**
+//! `E_HMS-01`）。
+//! ⇒ ⇒ 「未实现」**不再**由 M-22 硬编码 ⇒ ⇒ 注入式执行器**名实相符**。
+//! ⚠️ **只有 `Terminate` 会置 `terminated`** ⇒ ⇒ 终态与可恢复**在数据上分得开**。
+//! ⚠️ [`DegradeAction::None`] = **不做降级** ⇒ ⇒ 结果是
+//! [`DegradeOutcome::Skipped`] ⇒ ⇒ **不**复用 `Unsupported`
+//! ⇒ ⇒ 「不需要做」与「做不了」**两个意思两个名字**。
 //!
 //! ⚠️ **旧命名已作废**（冻结规格 §2.1 · 裁决 A）：LLD 与台账里那个「致命常量」的
 //! 旧写法（`HMS_` 前缀 + `FATAL`）**不是任何符号**，本模块**不提供**它。
@@ -201,17 +207,17 @@ pub enum Role {
 /// 降级动作（LLD M-22 §3.4）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DegradeAction {
-    /// 不做降级。
+    /// 不做降级（⇒ 结果是 [`DegradeOutcome::Skipped`] ⇒ ⇒ **不**问执行器）。
     None,
-    /// 回退崩溃前最近检查点 + 输入重放（要 M-20 —— 本批**未实现**）。
+    /// 回退崩溃前最近检查点 + 输入重放（要 M-20 ⇒ 能不能做由**执行器**表态）。
     SnapshotRestore,
-    /// 暂停会话（要 M-04 —— 本批**未实现**）。
+    /// 暂停会话（要 M-04 ⇒ 能不能做由**执行器**表态）。
     Pause,
-    /// 断开外设（要 M-07 —— 本批**未实现**）。
+    /// 断开外设（要 M-07 ⇒ 能不能做由**执行器**表态）。
     Disconnect,
-    /// 关闭 trace 降载（要 M-12 / M-19 —— 本批**未实现**）。
+    /// 关闭 trace 降载（要 M-12 / M-19 ⇒ 能不能做由**执行器**表态）。
     TraceDown,
-    /// 终止失控内核（**本批唯一有实现的动作**）。
+    /// 终止失控内核（**终态**：只有它会置 `terminated`）。
     Terminate,
 }
 
@@ -225,8 +231,15 @@ pub enum DegradeOutcome {
         /// 成功的尝试次数（1 = 一次就成了）。
         tries: u32,
     },
-    /// 动作**未实现**（本批只有 `Terminate` 有实现）—— **不是失败**（裁决 H）。
+    /// 动作**做不了**（**执行器**表态 `Unsupported`）—— **不是失败**
+    /// ⇒ ⇒ **不重试**、**不**报 `E_HMS-01`（裁决 C / 陷阱①）。
     Unsupported {
+        /// 动作。
+        action: DegradeAction,
+    },
+    /// **不做降级**（[`DegradeAction::None`]）—— 与 `Unsupported` **两个意思
+    /// 两个名字**（裁决 E）⇒ ⇒ 执行器**一次都没被问到**。
+    Skipped {
         /// 动作。
         action: DegradeAction,
     },
@@ -362,13 +375,25 @@ pub enum DispatchResult {
     Admin(AdminDiagnosis),
 }
 
+/// 降级动作执行器的**一次尝试**结果（**三态**）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DegradeAttempt {
+    /// 动作**执行成功**。
+    Done,
+    /// 动作**未实现**（这套装配做不了）⇒ ⇒ **不是失败**：不重试、**不**报 `E_HMS-01`。
+    Unsupported,
+    /// 动作**失败**（带明细）⇒ ⇒ 上层**重试**（至多 3 次）。
+    Failed(PlatformError),
+}
+
 /// 降级动作执行器（**可注入**，宿主装配）。
 ///
 /// ⚠️ 注入的是**宿主**的执行器 ⇒ M-22 不自己实现「暂停 / 断连 / 关 trace」
-/// 这些跨模块副作用（裁决 H：本批只落 `Terminate`）。
+/// 这些跨模块副作用 ⇒ ⇒ 「能不能做」由**执行器**表态（[`DegradeAttempt`]）
+/// ⇒ ⇒ M-22 **不再**硬编码哪一档动作有实现。
 pub trait DegradeExecutor {
-    /// 执行一次降级动作。返回 `Err` ⇒ 动作失败 ⇒ 上层**重试**（至多 3 次）。
-    fn try_degrade(&mut self, action: DegradeAction) -> Result<(), PlatformError>;
+    /// 执行一次降级动作。
+    fn try_degrade(&mut self, action: DegradeAction) -> DegradeAttempt;
 }
 
 /// HMS。
@@ -888,60 +913,76 @@ impl Hms {
         }
     }
 
-    /// 执行降级（重试 ≤3 次；未实现动作 ⇒ `Unsupported`）。
+    /// 执行降级（**通用路径** · 规格 §3.2.2）。
     ///
-    /// - **只有 `Terminate` 有实现**（裁决 H）：没有执行器时走**内置实现**
-    ///   （置 `terminated`）；宿主注入了执行器时交给执行器，失败**重试至多 3 次**。
-    /// - 其余动作 ⇒ [`DegradeOutcome::Unsupported`]：**不重试**、**不**报 `E_HMS-01`。
-    /// - 重试用尽 ⇒ [`DegradeOutcome::Failed`] ⇒ **终态上报 `E_HMS-01`**
-    ///   （**一次运行只上报一次**）。
+    /// - [`DegradeAction::None`] ⇒ [`DegradeOutcome::Skipped`] ⇒ ⇒ **不做降级**
+    ///   ⇒ ⇒ **不**问执行器（裁决 E）。
+    /// - [`DegradeAction::Terminate`] 且**没有**执行器 ⇒ **内置实现**
+    ///   （置 `terminated`）⇒ ⇒ [`DegradeOutcome::Ok`]（`tries = 1`）。
+    /// - 其余动作、或**有**执行器时 ⇒ ⇒ **问执行器**（至多
+    ///   [`DEGRADE_MAX_TRIES`] 次）：
+    ///   - `Done` ⇒ [`DegradeOutcome::Ok`] ⇒ ⇒ **只有 `Terminate`** 才置
+    ///     `terminated`（裁决 F / 陷阱②）。
+    ///   - `Unsupported` ⇒ [`DegradeOutcome::Unsupported`] ⇒ ⇒ **不重试**、
+    ///     **不**报 `E_HMS-01`（裁决 C / 陷阱①）。
+    ///   - `Failed` ⇒ **重试**；用尽 ⇒ [`DegradeOutcome::Failed`] ⇒ ⇒
+    ///     **恰好一次** `E_HMS-01`（消息里的动作名是**实际动作**，裁决 D）。
     pub fn degrade(&mut self, action: DegradeAction) -> DegradeOutcome {
         match action {
-            DegradeAction::Terminate => self.degrade_terminate(),
-            // ⚠️ 裁决 H：未实现的动作**不是失败** —— 不重试、不报码。
-            other => DegradeOutcome::Unsupported { action: other },
+            // 「不需要做」与「做不了」**两个意思两个名字**（裁决 E）。
+            DegradeAction::None => DegradeOutcome::Skipped { action },
+            // 没有执行器 ⇒ 只有 `Terminate` 走**内置实现**（置 `terminated`）。
+            DegradeAction::Terminate if self.executor.is_none() => {
+                self.terminated = true;
+                DegradeOutcome::Ok { action, tries: 1 }
+            }
+            // 其余动作 ⇒ 走**派发路径**（问执行器）。
+            other => self.degrade_via_executor(other),
         }
     }
 
-    /// `Terminate` 的降级路径（唯一有实现的动作）。
-    fn degrade_terminate(&mut self) -> DegradeOutcome {
+    /// 派发路径：问执行器（至多 [`DEGRADE_MAX_TRIES`] 次）。
+    ///
+    /// ⚠️ **重试与终态记账都不写死动作**（裁决 D）⇒ ⇒ 消息里的动作名是
+    /// **实际动作** ⇒ ⇒ 换动作时**不必**再改记账。
+    fn degrade_via_executor(&mut self, action: DegradeAction) -> DegradeOutcome {
         let Some(executor) = self.executor.as_mut() else {
-            // 内置实现：置 `terminated`（宿主据此停止接受新动作）。
-            self.terminated = true;
-            return DegradeOutcome::Ok {
-                action: DegradeAction::Terminate,
-                tries: 1,
-            };
+            // 没有执行器 ⇒ 这套装配**做不了**这个动作 ⇒ **不是失败**
+            // ⇒ ⇒ 不重试、不报 `E_HMS-01`。
+            return DegradeOutcome::Unsupported { action };
         };
 
         let mut tries: u32 = 0;
         let mut last_err: Option<PlatformError> = None;
         while tries < DEGRADE_MAX_TRIES {
             tries += 1;
-            match executor.try_degrade(DegradeAction::Terminate) {
-                Ok(()) => {
-                    self.terminated = true;
-                    return DegradeOutcome::Ok {
-                        action: DegradeAction::Terminate,
-                        tries,
-                    };
+            match executor.try_degrade(action) {
+                DegradeAttempt::Done => {
+                    // ⚠️ **只有 `Terminate` 是终态** ⇒ ⇒ 其它动作**不**置。
+                    if action == DegradeAction::Terminate {
+                        self.terminated = true;
+                    }
+                    return DegradeOutcome::Ok { action, tries };
                 }
-                Err(e) => last_err = Some(e),
+                // ⚠️ `Unsupported` **不是失败** ⇒ ⇒ 不重试、不报码（裁决 C）。
+                DegradeAttempt::Unsupported => {
+                    return DegradeOutcome::Unsupported { action };
+                }
+                DegradeAttempt::Failed(e) => last_err = Some(e),
             }
         }
-        // 终态：上报 E_HMS-01（一次运行只上报一次）。
+        // 终态：上报 `E_HMS-01`（一次运行只上报一次）。
         let detail = last_err
             .map(|e| e.to_string())
             .unwrap_or_else(|| "无明细".to_string());
-        self.report_degrade_failure(tries, detail);
-        DegradeOutcome::Failed {
-            action: DegradeAction::Terminate,
-            tries,
-        }
+        self.report_degrade_failure(action, tries, detail);
+        DegradeOutcome::Failed { action, tries }
     }
 
     /// 终态上报 `E_HMS-01`（**一次运行只上报一次**）。
-    fn report_degrade_failure(&mut self, tries: u32, detail: String) {
+    ///
+    /// ⚠️ 消息里的动作名是**实际动作**（裁决 D）⇒ ⇒ 不是写死的 `Terminate`。
+    fn report_degrade_failure(&mut self, action: DegradeAction, tries: u32, detail: String) {
         if !self.degrade_failures.is_empty() {
             // 已经报过了 —— 一次运行只上报一次。
             return;
@@ -949,7 +990,7 @@ impl Hms {
         self.degrade_failures.push(PlatformError::new(
             ErrorFamily::Health,
             E_HMS_01_DEGRADE_FAILED,
-            format!("降级动作 Terminate 重试 {tries} 次仍失败：{detail}"),
+            format!("降级动作 {action:?} 重试 {tries} 次仍失败：{detail}"),
         ));
     }
 
@@ -1114,33 +1155,86 @@ mod tests {
         }
     }
 
-    /// 计数执行器（记录被调了几次；可选失败）。
-    struct CountingExecutor {
+    /// 执行器探针（共享句柄 ⇒ 测试侧读得到「被问了几次 / 被问了哪些动作」）。
+    #[derive(Clone)]
+    struct ExecSpy {
+        /// 被调用的总次数。
         calls: Rc<Cell<u32>>,
-        fail: bool,
+        /// 每次被问到的动作（按调用顺序）。
+        asked: Rc<RefCell<Vec<DegradeAction>>>,
+    }
+
+    impl ExecSpy {
+        fn new() -> Self {
+            Self {
+                calls: Rc::new(Cell::new(0u32)),
+                asked: Rc::new(RefCell::new(Vec::new())),
+            }
+        }
+
+        /// 被调用的总次数。
+        fn calls(&self) -> u32 {
+            self.calls.get()
+        }
+
+        /// 每次被问到的动作（按调用顺序）。
+        fn asked(&self) -> Vec<DegradeAction> {
+            self.asked.borrow().clone()
+        }
+    }
+
+    /// 计数执行器的**表态**（三态）。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ExecMode {
+        /// 执行成功。
+        Done,
+        /// 失败（⇒ 上层重试）。
+        Fail,
+        /// 表态「未实现」（⇒ 不重试、不报码）。
+        Unsupported,
+    }
+
+    /// 计数执行器（记录被调了几次、被问了哪些动作；表态可切换）。
+    struct CountingExecutor {
+        spy: ExecSpy,
+        mode: ExecMode,
     }
 
     impl CountingExecutor {
-        fn new(calls: Rc<Cell<u32>>) -> Self {
-            Self { calls, fail: false }
+        fn new(spy: ExecSpy) -> Self {
+            Self {
+                spy,
+                mode: ExecMode::Done,
+            }
         }
 
-        fn failing(calls: Rc<Cell<u32>>) -> Self {
-            Self { calls, fail: true }
+        fn failing(spy: ExecSpy) -> Self {
+            Self {
+                spy,
+                mode: ExecMode::Fail,
+            }
+        }
+
+        fn unsupported(spy: ExecSpy) -> Self {
+            Self {
+                spy,
+                mode: ExecMode::Unsupported,
+            }
         }
     }
 
     impl DegradeExecutor for CountingExecutor {
-        fn try_degrade(&mut self, _action: DegradeAction) -> Result<(), PlatformError> {
-            self.calls.set(self.calls.get() + 1);
-            if self.fail {
-                Err(PlatformError::new(
+        fn try_degrade(&mut self, action: DegradeAction) -> DegradeAttempt {
+            self.spy.calls.set(self.spy.calls.get() + 1);
+            self.spy.asked.borrow_mut().push(action);
+            match self.mode {
+                ExecMode::Done => DegradeAttempt::Done,
+                ExecMode::Unsupported => DegradeAttempt::Unsupported,
+                ExecMode::Fail => DegradeAttempt::Failed(PlatformError::new(
                     ErrorFamily::Engine,
                     E_ENG_03_NO_PROGRESS,
                     "测试执行器：故意失败",
-                ))
-            } else {
-                Ok(())
+                )),
             }
         }
     }
@@ -1347,15 +1441,15 @@ mod tests {
     /// C-8 · **幂等**：`watchdog_fired` 为真 ⇒ 重复 `report` **不重复触发降级**。
     #[test]
     fn c8_watchdog_fired_stops_repeated_degrade() {
-        let calls = Rc::new(Cell::new(0u32));
+        let spy = ExecSpy::new();
         let mut hms = Hms::new();
-        hms.install_executor(Box::new(CountingExecutor::new(calls.clone())));
+        hms.install_executor(Box::new(CountingExecutor::new(spy.clone())));
         hms.set_degrade_policy(Severity::Fatal, DegradeAction::Terminate);
 
         // 第一次 report ⇒ 触发降级（执行器被调一次）。
         let sev = hms.report(watchdog_signal());
         assert_eq!(sev, Severity::Fatal);
-        assert_eq!(calls.get(), 1, "首次 report 应当触发一次降级");
+        assert_eq!(spy.calls(), 1, "首次 report 应当触发一次降级");
         assert!(hms.terminated());
 
         // 幂等标志置位后再报 ⇒ **不再触发**降级。
@@ -1363,7 +1457,7 @@ mod tests {
         assert!(hms.watchdog_fired());
         let sev = hms.report(watchdog_signal());
         assert_eq!(sev, Severity::Fatal);
-        assert_eq!(calls.get(), 1, "幂等标志为真 ⇒ 不得重复触发降级");
+        assert_eq!(spy.calls(), 1, "幂等标志为真 ⇒ 不得重复触发降级");
         assert_eq!(hms.degrade_failures().len(), 0);
     }
 
@@ -1582,17 +1676,21 @@ mod tests {
         }
     }
 
-    // ------------------------------------------- C-10 · 未实现动作 ⇒ Unsupported
+    // ------------------------------------ C-10 · 执行器表态未实现 ⇒ Unsupported
 
-    /// C-10 · 降级：未实现动作 ⇒ `Unsupported`（**不重试**、**不**报 `E_HMS-01`）。
+    /// C-10 · 降级：执行器**表态未实现** ⇒ `Unsupported`（**不重试**、**不**报
+    /// `E_HMS-01`、**不**置 `terminated`）。
+    ///
+    /// ⚠️ **新语义**（规格 §3.2.2 / B-2 / B-3）：「未实现」由**执行器**表态
+    /// ⇒ ⇒ 执行器**被问到一次**（**不是**「根本没被问到」）⇒ ⇒ 断言落在
+    /// 「被问到**哪个**动作」上。
     #[test]
     fn c10_unimplemented_action_is_unsupported_and_never_retried() {
-        let calls = Rc::new(Cell::new(0u32));
+        let spy = ExecSpy::new();
         let mut hms = Hms::new();
-        hms.install_executor(Box::new(CountingExecutor::failing(calls.clone())));
+        hms.install_executor(Box::new(CountingExecutor::unsupported(spy.clone())));
 
         for action in [
-            DegradeAction::None,
             DegradeAction::SnapshotRestore,
             DegradeAction::Pause,
             DegradeAction::Disconnect,
@@ -1601,7 +1699,18 @@ mod tests {
             let outcome = hms.degrade(action);
             assert_eq!(outcome, DegradeOutcome::Unsupported { action });
         }
-        assert_eq!(calls.get(), 0, "未实现的动作不得走重试路径");
+        // 每个动作**只被问一次** ⇒ ⇒ 合计 4 次 ⇒ ⇒ 没走重试路径。
+        assert_eq!(spy.calls(), 4, "Unsupported 不是失败 ⇒ 不得重试");
+        assert_eq!(
+            spy.asked(),
+            vec![
+                DegradeAction::SnapshotRestore,
+                DegradeAction::Pause,
+                DegradeAction::Disconnect,
+                DegradeAction::TraceDown,
+            ],
+            "每个动作都必须被问到执行器（B-2：不是硬编码 Unsupported）"
+        );
         assert_eq!(
             hms.degrade_failures().len(),
             0,
@@ -1616,9 +1725,9 @@ mod tests {
     /// **恰好一次** `E_HMS-01`。
     #[test]
     fn c11_failing_executor_is_retried_three_times_and_reports_once() {
-        let calls = Rc::new(Cell::new(0u32));
+        let spy = ExecSpy::new();
         let mut hms = Hms::new();
-        hms.install_executor(Box::new(CountingExecutor::failing(calls.clone())));
+        hms.install_executor(Box::new(CountingExecutor::failing(spy.clone())));
 
         let outcome = hms.degrade(DegradeAction::Terminate);
         assert_eq!(
@@ -1628,7 +1737,12 @@ mod tests {
                 tries: 3
             }
         );
-        assert_eq!(calls.get(), 3, "重试至多 3 次");
+        assert_eq!(spy.calls(), 3, "重试至多 3 次");
+        assert_eq!(
+            spy.asked(),
+            vec![DegradeAction::Terminate; 3],
+            "三次尝试问的都是**同一个**动作"
+        );
         assert!(!hms.terminated(), "动作没成功 ⇒ 不得置 terminated");
 
         // **恰好一次** `E_HMS-01`。
@@ -1648,8 +1762,135 @@ mod tests {
                 tries: 3
             }
         );
-        assert_eq!(calls.get(), 6, "每次调用各自重试 3 次");
+        assert_eq!(spy.calls(), 6, "每次调用各自重试 3 次");
         assert_eq!(hms.degrade_failures().len(), 1, "一次运行只上报一次");
+    }
+
+    // ---------------------------------------------------- C-13 · None ⇒ Skipped
+
+    /// C-13 · 降级：`DegradeAction::None` ⇒ `Skipped` ⇒ ⇒ **不**问执行器
+    /// ⇒ ⇒ **不是** `Unsupported`（裁决 E / B-5）。
+    ///
+    /// ⚠️ **判别力**：把 `Skipped` 改回 `Unsupported` ⇒ 本条变红（结果形状
+    /// 不同）；把 `None` 也去问执行器 ⇒ 也变红（调用次数不同）。
+    #[test]
+    fn c13_none_action_is_skipped_and_never_asks_the_executor() {
+        let spy = ExecSpy::new();
+        let mut hms = Hms::new();
+        hms.install_executor(Box::new(CountingExecutor::new(spy.clone())));
+
+        let outcome = hms.degrade(DegradeAction::None);
+        assert_eq!(
+            outcome,
+            DegradeOutcome::Skipped {
+                action: DegradeAction::None
+            },
+            "「不做降级」与「做不了」必须是**两个**结果"
+        );
+        assert_eq!(spy.calls(), 0, "None 是「不做降级」⇒ 不得问执行器");
+        assert!(spy.asked().is_empty());
+        assert_eq!(hms.degrade_failures().len(), 0);
+        assert!(!hms.terminated());
+    }
+
+    // ------------------------------------ C-14 · 只有 Terminate 才置 terminated
+
+    /// C-14 · 降级：非 `Terminate` 动作执行**成功** ⇒ ⇒ **不**置 `terminated`
+    /// （裁决 F / B-6 / 陷阱②：终态与可恢复**在数据上分得开**）。
+    ///
+    /// ⚠️ **判别力**：把「只有 `Terminate` 才置」改成「一律置」⇒ 本条变红。
+    #[test]
+    fn c14_only_terminate_sets_the_terminated_flag() {
+        let spy = ExecSpy::new();
+        let mut hms = Hms::new();
+        hms.install_executor(Box::new(CountingExecutor::new(spy.clone())));
+
+        // 可恢复的动作成功 ⇒ **不**置 `terminated`。
+        let outcome = hms.degrade(DegradeAction::TraceDown);
+        assert_eq!(
+            outcome,
+            DegradeOutcome::Ok {
+                action: DegradeAction::TraceDown,
+                tries: 1
+            }
+        );
+        assert_eq!(spy.calls(), 1);
+        assert!(!hms.terminated(), "可恢复的动作不得置 terminated");
+
+        // 对照：`Terminate` 成功 ⇒ 置 `terminated`（终态）。
+        let outcome = hms.degrade(DegradeAction::Terminate);
+        assert_eq!(
+            outcome,
+            DegradeOutcome::Ok {
+                action: DegradeAction::Terminate,
+                tries: 1
+            }
+        );
+        assert!(hms.terminated(), "Terminate 是终态 ⇒ 必须置 terminated");
+    }
+
+    // ---------------------------------- C-15 · E_HMS-01 的消息带**实际**动作名
+
+    /// C-15 · 降级：动作失败 ⇒ 终态 `E_HMS-01` 的消息里写的是**实际动作**
+    /// （裁决 D / B-4）⇒ ⇒ **不是**写死的 `Terminate`。
+    ///
+    /// ⚠️ **判别力**：把消息里的动作名改回写死的 `Terminate` ⇒ 本条变红。
+    #[test]
+    fn c15_degrade_failure_message_names_the_actual_action() {
+        let spy = ExecSpy::new();
+        let mut hms = Hms::new();
+        hms.install_executor(Box::new(CountingExecutor::failing(spy.clone())));
+
+        let outcome = hms.degrade(DegradeAction::Pause);
+        assert_eq!(
+            outcome,
+            DegradeOutcome::Failed {
+                action: DegradeAction::Pause,
+                tries: 3
+            }
+        );
+        assert_eq!(spy.calls(), 3, "重试至多 3 次");
+        let failures = hms.degrade_failures();
+        assert_eq!(failures.len(), 1, "终态只上报一次");
+        let text = failures[0].to_string();
+        assert!(text.contains("Pause"), "消息里必须有**实际**动作名：{text}");
+        assert!(
+            !text.contains("Terminate"),
+            "消息里不许出现写死的 Terminate：{text}"
+        );
+    }
+
+    // --------------------------- C-16 · 没有执行器时的两条路（内置 vs 做不了）
+
+    /// C-16 · 降级：**没有执行器**时 ⇒ ⇒ `Terminate` 走**内置实现**
+    /// （置 `terminated` ⇒ `Ok { tries: 1 }`）⇒ ⇒ 其它动作**做不了**
+    /// ⇒ ⇒ `Unsupported`（**不是失败**：不重试、不报 `E_HMS-01`）。
+    ///
+    /// ⚠️ **判别力**：把「没有执行器 + 其它动作」改成 `Failed` ⇒ 本条变红。
+    #[test]
+    fn c16_without_an_executor_only_terminate_has_a_built_in_path() {
+        let mut hms = Hms::new(); // **不**装执行器。
+
+        // 内置实现（既有行为一字不变）。
+        let outcome = hms.degrade(DegradeAction::Terminate);
+        assert_eq!(
+            outcome,
+            DegradeOutcome::Ok {
+                action: DegradeAction::Terminate,
+                tries: 1
+            }
+        );
+        assert!(hms.terminated(), "内置实现要置 terminated");
+
+        // 其它动作：没有执行器 ⇒ 做不了 ⇒ **不是失败**。
+        let outcome = hms.degrade(DegradeAction::TraceDown);
+        assert_eq!(
+            outcome,
+            DegradeOutcome::Unsupported {
+                action: DegradeAction::TraceDown
+            }
+        );
+        assert_eq!(hms.degrade_failures().len(), 0, "Unsupported 不是失败");
     }
 
     // ------------------------------------------ C-12 · 诊断包不含日志 + 可归档
@@ -1928,14 +2169,14 @@ mod tests {
     /// 附加 · `InfoNoDegrade` **不降级**（guest trap 与分级表未命中的兜底）。
     #[test]
     fn info_no_degrade_never_degrades() {
-        let calls = Rc::new(Cell::new(0u32));
+        let spy = ExecSpy::new();
         let mut hms = Hms::new();
-        hms.install_executor(Box::new(CountingExecutor::new(calls.clone())));
+        hms.install_executor(Box::new(CountingExecutor::new(spy.clone())));
         hms.set_degrade_policy(Severity::InfoNoDegrade, DegradeAction::Terminate);
 
         let sev = hms.report(trap_signal());
         assert_eq!(sev, Severity::InfoNoDegrade);
-        assert_eq!(calls.get(), 0, "InfoNoDegrade 不得触发降级");
+        assert_eq!(spy.calls(), 0, "InfoNoDegrade 不得触发降级");
         assert!(!hms.terminated());
     }
 
@@ -1943,16 +2184,16 @@ mod tests {
     /// 即使**命中降级策略**也**只记录不降级**（不许越权触发降级动作）。
     #[test]
     fn warning_never_degrades_even_with_a_matching_policy() {
-        let calls = Rc::new(Cell::new(0u32));
+        let spy = ExecSpy::new();
         let mut hms = Hms::new();
-        hms.install_executor(Box::new(CountingExecutor::new(calls.clone())));
+        hms.install_executor(Box::new(CountingExecutor::new(spy.clone())));
         // 分级表把这条判成 Warning，且策略里**明确**配了 terminate。
         hms.set_severity(SignalSrc::Command, "E_CTX-06", Severity::Warning);
         hms.set_degrade_policy(Severity::Warning, DegradeAction::Terminate);
 
         let sev = hms.report(heartbeat_signal("E_CTX-06"));
         assert_eq!(sev, Severity::Warning);
-        assert_eq!(calls.get(), 0, "Warning 越权降级 ⇒ 执行器不得被调用");
+        assert_eq!(spy.calls(), 0, "Warning 越权降级 ⇒ 执行器不得被调用");
         assert!(!hms.terminated());
         assert_eq!(hms.degrade_failures().len(), 0);
         // 但状态**仍然**派生为 Degraded（记录 ≠ 不降级）。
