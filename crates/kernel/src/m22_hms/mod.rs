@@ -526,6 +526,19 @@ impl Hms {
         self.role
     }
 
+    /// 写入口：改角色（与 [`Hms::with_role`] / [`Hms::role`] 构成**一组三个**：
+    /// 构造 / 写 / 读）。
+    ///
+    /// ⚠️ **宿主是唯一的写入口** —— 角色的**唯一存储**就是本结构体里那个
+    ///   `role` 字段 ⇒ ⇒ **宿主不另存一份** ⇒ ⇒ **不存在**「宿主与 `Hms`
+    ///   角色不一致」那种状态（规格 §7 裁决 B · 「一个约束一个落点」）。
+    ///
+    /// ⚠️ **不触发任何副作用**（不重算、不清缓存、不发信号）⇒ ⇒ 角色切换后
+    ///   **下一次** [`Hms::dispatch`] 自然按新角色走。
+    pub fn set_role(&mut self, role: Role) {
+        self.role = role;
+    }
+
     /// 上报：**先分级再入流** → 分角色分发 → 查降级策略 → 降级（LLD §3.1）。
     ///
     /// 返回**分级后的**严重度。
@@ -1472,6 +1485,99 @@ mod tests {
             assert!(
                 !text.contains(forbidden),
                 "Product 的分发结果里搜到了日志文本 {forbidden:?}：{text}"
+            );
+        }
+    }
+
+    // ------------------------------ B-7 · 角色写入口（构造 / 写 / 读 · 一组三个）
+
+    /// B-7 · `Hms::set_role` 存在，且与 `with_role` / `role()` 构成**一组三个**
+    /// （构造 / 写 / 读）⇒ ⇒ 写完之后 `role()` **读得到**新角色。
+    #[test]
+    fn b7_set_role_is_the_write_entry_of_the_role_triad() {
+        // 构造：`with_role` 定的角色。
+        let mut hms = Hms::with_role(Role::Product);
+        assert_eq!(hms.role(), Role::Product);
+
+        // 写：`set_role` 改角色 ⇒ 读得到。
+        hms.set_role(Role::Admin);
+        assert_eq!(hms.role(), Role::Admin);
+
+        // 再写回去 ⇒ 读得到（写入口**双向**可用）。
+        hms.set_role(Role::Product);
+        assert_eq!(hms.role(), Role::Product);
+    }
+
+    /// B-7 · `set_role` 之后 `dispatch` **按新角色分派**（不是只改字段）。
+    #[test]
+    fn b7_set_role_changes_how_dispatch_routes() {
+        let mut hms = Hms::with_role(Role::Product);
+        hms.install_log_source(log_source_with_entries(10));
+
+        // 起点：Product ⇒ 脱敏提示。
+        let product = hms.dispatch(&watchdog_signal(), Severity::Fatal);
+        assert!(
+            matches!(product, DispatchResult::Notice(_)),
+            "Product 角色的分发结果必须是脱敏提示：{product:?}"
+        );
+
+        // 切成 Admin ⇒ **立刻**按管理员分派，日志关联**带上**注入日志源里的条目。
+        hms.set_role(Role::Admin);
+        assert_eq!(hms.role(), Role::Admin);
+        let admin = hms.dispatch(&watchdog_signal(), Severity::Fatal);
+        let diag = match &admin {
+            DispatchResult::Admin(d) => d,
+            other => panic!("切成 Admin 后的分发结果必须是诊断详情：{other:?}"),
+        };
+        assert_eq!(diag.log_ref.len(), 8, "日志关联取最后 8 条");
+        assert_eq!(diag.log_ref[0].msg, "日志条目 2");
+        assert_eq!(diag.log_ref[7].msg, "日志条目 9");
+
+        // 切回 Product ⇒ **立刻**按脱敏提示分派。
+        hms.set_role(Role::Product);
+        let product = hms.dispatch(&watchdog_signal(), Severity::Fatal);
+        assert!(
+            matches!(product, DispatchResult::Notice(_)),
+            "切回 Product 后的分发结果必须是脱敏提示：{product:?}"
+        );
+    }
+
+    /// B-7 的**反方向**（最有判别力）：`Admin` 切回 `Product` 后，分发结果里
+    /// **搜不到任何日志文本**（真的去搜，不只是看结构）。
+    ///
+    /// ⚠️ 先确认 Admin 侧**有**日志文本 ⇒ 否则下面那条搜索是**空断言**
+    ///   （搜不到是因为本来就没有 ⇒ 零判别力）。
+    #[test]
+    fn b7_set_role_back_to_product_drops_every_log_text() {
+        let mut hms = Hms::with_role(Role::Admin);
+        hms.install_log_source(log_source_with_entries(10));
+
+        let admin = hms.dispatch(&watchdog_signal(), Severity::Fatal);
+        let admin_text = format!("{admin:?}");
+        assert!(
+            admin_text.contains("日志条目"),
+            "Admin 侧应当带日志文本（否则下面的搜索没有判别力）：{admin_text}"
+        );
+
+        // 切回 Product ⇒ 注入的日志源里的内容一条都不许漏过来。
+        hms.set_role(Role::Product);
+        let product = hms.dispatch(&watchdog_signal(), Severity::Fatal);
+        let text = format!("{product:?}");
+        for forbidden in [
+            "LogEntry",
+            "log_ref",
+            "log",
+            "msg",
+            "truncated",
+            "time_virt",
+            "time_host",
+            "日志条目",
+            "M22",
+            "E_HMS-01",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "切回 Product 后的分发结果里搜到了日志文本 {forbidden:?}：{text}"
             );
         }
     }
