@@ -113,10 +113,10 @@
 
 | 项 | 数字 |
 | --- | --- |
-| 契约层 | **15 310** 行（**11** 个 `.rs`） |
-| 仿真内核 | **71 733** 行（含 17 个子模块 + 内核宿主装配层，**86** 个 `.rs`） |
+| 契约层 | **15 418** 行（**11** 个 `.rs`） |
+| 仿真内核 | **72 945** 行（含 17 个子模块 + 内核宿主装配层，**88** 个 `.rs`） |
 | 前端 | **23 201** 行（`front/` 下**git 跟踪**的源码，含 `front/tests/`；⚠️ **不含** `front/assets/` —— 那是 wasm-pack 的**构建产物**且被 git 忽略，计进去会让这个数**随「跑没跑过 wasm 构建」变** ⇒ 不可复现；⚠️ 这个数由仓内 `tools/count_scale.py` **从当前树重算** ⇒ 规模数字只有**一份**算法） |
-| 设计文档 | **66 篇**（26 篇 HTML + 40 篇 Markdown） |
+| 设计文档 | **69 篇**（26 篇 HTML + 43 篇 Markdown） |
 | 测试 | **1 759** 条 Rust（契约 lib 284 + 内核 lib 1 311 + 集成与 runner 164）+ **488** 条前端（86 suite） |
 
 ---
@@ -144,7 +144,7 @@ node --version
 
 ```bash
 cargo build                                    # native
-cargo test --workspace --no-fail-fast --lib --tests   # 1 715 条
+cargo test --workspace --no-fail-fast --lib --tests   # 1 759 条
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
@@ -154,7 +154,7 @@ cargo fmt --all -- --check
 ### 前端门禁
 
 ```bash
-tools/check-front.sh        # node:test 冒烟门禁 —— 466 用例 / 81 suite
+tools/check-front.sh        # node:test 冒烟门禁 —— 488 用例 / 86 suite
 ```
 
 ### 构建浏览器内核（WASM）
@@ -174,6 +174,8 @@ python3 -m http.server 8080 --directory front
 ```
 
 > ⚠️ **必须走 HTTP(S)**：前端用 **Worker + ES module**，两者都要求同源 ⇒ `file://` 直开会被浏览器拦截。
+
+> 📖 **第一次用这个平台 ⇒ 看 [`docs/USER_GUIDE.md`](./docs/USER_GUIDE.md)**（怎么用每个视图 · 怎么换一块板 · 命令行怎么跑 · 报错了怎么查）。
 
 ### 跑一个真实 RTOS（osz）并与 Spike 对拍
 
@@ -457,7 +459,7 @@ riscv_sim/
 │   └── dev/               # mock 内核 + demo 数据（仅开发期）
 ├── tools/                 # 构建与门禁脚本（wasm-pack 包装 / 对拍 / 真机复验）
 ├── tests/golden/          # 黄金对拍 harness（零 CSR 最小 env + 变异金丝雀 + 语料）
-└── docs/                  # 设计文档（架构 / 需求 / 模块规格 / 23 模块详设 / 30 份冻结规格 / 台账）
+└── docs/                  # 设计文档（架构 / 需求 / 模块规格 / 23 模块详设 / 30 份冻结规格 / 台账 / **用户指南**）
 ```
 
 ---
@@ -466,6 +468,7 @@ riscv_sim/
 
 | 文档 | 内容 |
 | --- | --- |
+| [`docs/USER_GUIDE.md`](./docs/USER_GUIDE.md) | **平台用户指南**（怎么用：起前端 · 七个视图 · 换板 · 命令行 · 排错 · 已知限制） |
 | [`docs/architecture/RISC-V_Architecture_Design.html`](./docs/architecture/RISC-V_Architecture_Design.html) | 4+1 视图 + ADR |
 | [`docs/requirements/RISC-V_Requirements_v1.4.html`](./docs/requirements/RISC-V_Requirements_v1.4.html) | 13 条 P0 需求 + 6 层概念空间 |
 | [`docs/module-design-spec/RISC-V_Module_Design_Specification.html`](./docs/module-design-spec/RISC-V_Module_Design_Specification.html) | 23 个模块的 LLD |

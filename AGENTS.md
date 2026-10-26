@@ -147,7 +147,7 @@ riscv_sim/
 │       ├── canary/           # 变异金丝雀（两侧都必须报 FAIL 3）
 │       ├── corpus.txt        # 77 例语料清单（march + status + env 变体）
 │       └── README.md         # 协议、语料边界、Zicclsm 口径
-└── docs/                     # 68 篇设计文档（26 篇 HTML + 42 篇 Markdown，含 STAGE-1 ~ STAGE-31 三十份规格）+ reviews/（1 入口 + 9 份模块报告 + 1 份勘察报告 `V035_D94_Survey.md`）
+└── docs/                     # 69 篇设计文档（26 篇 HTML + 43 篇 Markdown，含 STAGE-1 ~ STAGE-31 三十份规格 + **USER_GUIDE.md 用户指南**）+ reviews/（1 入口 + 9 份模块报告 + 1 份勘察报告 `V035_D94_Survey.md`）
 ```
 
 ## Project layout
