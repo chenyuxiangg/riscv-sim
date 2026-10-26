@@ -45,6 +45,16 @@ export const UI_IMAGE_ELF_MARKER = "UIL";
 export const UI_IMAGE_ELF_X3 = 0x00000123;
 
 /**
+ * **第二份**夹具的特征（STAGE-33 · v0.48 批）—— 给「**页头**那条装载路径」用。
+ *
+ * ⚠️ **为什么必须有两份**：真机门禁现在有**两条**装载路径 ⇒ ⇒ 若两条装
+ * **同一个**固件 ⇒ ⇒ 第二条是「装同一个东西」⇒ ⇒ **恒等变换** ⇒ ⇒ 它的
+ * 判据**恒绿**（零判别力）⇒ ⇒ ⇒ 所以第二条必须装**能区分**的那份。
+ */
+export const UI_IMAGE_ELF_MARKER_B = "UIB";
+export const UI_IMAGE_ELF_X3_B = 0x00000456;
+
+/**
  * U 型编码（`LUI` / `AUIPC`）。
  *
  * @param {number} opcode
@@ -183,20 +193,34 @@ export function checkEncoderAgainstDemoFirmware() {
 /**
  * 造夹具镜像的**机器码**（11 条指令）。
  *
+ * ⚠️ **可参数化**（STAGE-33 · v0.48 批）：真机门禁现在有**两条**装载路径
+ * （产品视图那条 + 页头那条）⇒ ⇒ 两条路径必须装**不同的**固件 ⇒ ⇒ 否则
+ * 第二条路径是「装同一个东西」⇒ ⇒ 那是**恒等变换** ⇒ ⇒ 它的判据**恒绿**
+ * ⇒ ⇒ ⇒ **一个判别力来源是「被观测的量真的变了」**。
+ *
+ * ⚠️ **默认值逐字不变**（`x3 = 0x123`、标记 `"UIL"`）⇒ ⇒ STAGE-32 那一批
+ * 的夹具字节**一个字节都不变** ⇒ ⇒ 上一批的门禁结论仍然成立。
+ *
+ * @param {{x3Value?: number, marker?: string}} [options]
  * @returns {number[]}
  */
-export function buildUiImageWords() {
+export function buildUiImageWords(options = {}) {
+    const x3Value = options.x3Value ?? UI_IMAGE_ELF_X3;
+    const marker = String(options.marker ?? UI_IMAGE_ELF_MARKER);
+    if (marker.length !== 3) {
+        throw new Error(`标记必须是三个字符：${marker}`);
+    }
     return [
         uType(0x37, 1, 0x84000),   // lui  x1, 0x84000   ; x1 = 0x8400_0000（固件自己的 RAM）
         uType(0x37, 2, 0x10000),   // lui  x2, 0x10000   ; x2 = 0x1000_0000（UART0 基址）
-        iType(0x13, 3, 0, 0x123),  // addi x3, x0, 0x123 ; x3 = 0x123（特征值）
-        iType(0x13, 4, 0, 85),     // addi x4, x0, 85    ; 'U'
-        sType(0x23, 0, 2, 4, 0),   // sb   x4, 0(x2)     ; UART0.THR = 'U'
-        iType(0x13, 4, 0, 73),     // addi x4, x0, 73    ; 'I'
-        sType(0x23, 0, 2, 4, 0),   // sb   x4, 0(x2)     ; UART0.THR = 'I'
-        iType(0x13, 4, 0, 76),     // addi x4, x0, 76    ; 'L'
-        sType(0x23, 0, 2, 4, 0),   // sb   x4, 0(x2)     ; UART0.THR = 'L'
-        sType(0x23, 2, 1, 3, 0),   // sw   x3, 0(x1)     ; 把 0x123 写进固件自己的 RAM
+        iType(0x13, 3, 0, x3Value), // addi x3, x0, 0x123 ; x3 = 特征值
+        iType(0x13, 4, 0, marker.charCodeAt(0)),   // addi x4, x0, 'U'
+        sType(0x23, 0, 2, 4, 0),   // sb   x4, 0(x2)     ; UART0.THR = 第 1 个字节
+        iType(0x13, 4, 0, marker.charCodeAt(1)),   // addi x4, x0, 'I'
+        sType(0x23, 0, 2, 4, 0),   // sb   x4, 0(x2)     ; UART0.THR = 第 2 个字节
+        iType(0x13, 4, 0, marker.charCodeAt(2)),   // addi x4, x0, 'L'
+        sType(0x23, 0, 2, 4, 0),   // sb   x4, 0(x2)     ; UART0.THR = 第 3 个字节
+        sType(0x23, 2, 1, 3, 0),   // sw   x3, 0(x1)     ; 把特征值写进固件自己的 RAM
         jType(0x6f, 0, 0),         // jal  x0, 0         ; 自环
     ];
 }
@@ -209,12 +233,13 @@ export function buildUiImageWords() {
  * `minimal_elf`）⇒ ⇒ M-06 一定认得它 ⇒ ⇒ 真机门禁测的是**界面那条装载
  * 路**，不是「这个 ELF 能不能被解析」。
  *
+ * @param {{x3Value?: number, marker?: string}} [options]
  * @returns {Buffer}
  */
-export function buildUiImageElf() {
+export function buildUiImageElf(options = {}) {
     const EHDR = 52;
     const PHDR = 32;
-    const words = buildUiImageWords();
+    const words = buildUiImageWords(options);
     const text = Buffer.alloc(words.length * 4);
     words.forEach((w, i) => text.writeUInt32LE(w >>> 0, i * 4));
 

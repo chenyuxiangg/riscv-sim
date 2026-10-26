@@ -9,6 +9,23 @@
 <body>
   <header class="topbar">
     <span class="brand">RISC-V Sim</span>
+    <!--
+      ⚠️ **页头的「加载固件」入口**（STAGE-33 · v0.48 批）。
+
+      控件本体由 `views/components/image-loader.js` 的
+      `renderImageLoaderControl()` 渲染（app 层挂进来）⇒ ⇒ `accept` 列表与
+      按钮文案**只有一处**⇒ ⇒ **不写第二套**。
+
+      ⚠️ **为什么放在页头、且在品牌名右边**：默认落地视图是 `embedded`（不是
+      `product`）⇒ ⇒ 放在产品视图里用户**根本找不到** ⇒ ⇒ 页头是**任何视图
+      都在**的地方；而放在品牌名右边 ⇒ ⇒ **第一行最显眼处** ⇒ ⇒ 标签页
+      换行也不会把它挤下去。
+
+      ⚠️ **它在 DOM 里排在视图面板之前** ⇒ ⇒ 真机门禁按
+      `document.querySelector("[data-image-input]")` 取元素会**命中页头那个**
+      ⇒ ⇒ 所以每个入口都带 `data-image-load-from` 按位置区分。
+    -->
+    <span class="image-loader-slot" data-image-load-slot></span>
     <nav id="workbench-tabs" class="tabs">
       <a href="#/product"  class="tab" data-view-tab="product">产品</a>
       <a href="#/embedded" class="tab" data-view-tab="embedded">嵌入式</a>

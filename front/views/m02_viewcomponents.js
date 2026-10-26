@@ -42,9 +42,9 @@ import {
     setDeviceKind,
 } from "./components/memory-map.js";
 import {
-    imageKindFor as imageKindForName,
+    loadImageFileIntoPending,
+    pendingImage,
     publishProductState,
-    readImageFile,
     renderImageLoader,
     setImageLoadState,
 } from "./components/image-loader.js";
@@ -244,62 +244,15 @@ const productTreeView = register({
 // 固件加载（STAGE-32 · v0.47 批）—— 视图层这一侧
 // ---------------------------------------------------------------------------
 
-/**
- * **待加载的镜像**（字节 + 文件名 + 类型）。
- *
- * ⚠️ **住在视图状态里**（`product` 视图的 `imageLoad.pending`）⇒ ⇒
- * **单一真相** ⇒ ⇒ 视图状态一重置（`m03.reset()` / 换工作台）它就没了
- * ⇒ ⇒ **不会**出现「上一个会话的字节还挂着」那种状态。
- *
- * ⚠️ **为什么必须先存**：视图层只能发信号（`emitCommand`），而命令的载荷
- * **在信号里**⇒ ⇒ 字节必须先**存**在某处才能在点击「加载」时取到。
- *
- * ⚠️ **为什么不是「点击时读文件」**：点击时 `input.files` 已经是空的了
- * （浏览器把文件交给 `change` 事件后就清掉了）⇒ ⇒ 必须在 `change` 里
- * 读。
- *
- * @returns {{bytes: number[], name: string, kind: string}|null}
- */
-function pendingImage() {
-    return viewStore.getState("product")?.imageLoad?.pending ?? null;
-}
-
-/**
- * 写「镜像加载」这块视图状态。
- *
- * ⚠️ **实现在 `components/image-loader.js`**（视图层与 app 层**共用**
- * ⇒ ⇒ 住在一处 ⇒ ⇒ **不写第二份**）。
- */
-
-/**
- * 读用户选的文件 ⇒ 存成「待加载的镜像」。
- *
- * ⚠️ **读失败如实显示**（规格 §3 裁决 J）⇒ ⇒ 不静默。
- *
- * @param {File|Blob} file
- * @returns {Promise<void>}
- */
-async function loadImageFileIntoPending(file) {
-    try {
-        const bytes = await readImageFile(file);
-        const name = String(file?.name ?? "image.bin");
-        setImageLoadState({
-            status: "idle",
-            name,
-            byteLength: bytes.length,
-            error: null,
-            pending: { bytes, name, kind: imageKindForName(name) },
-        });
-        publishProductState();
-    } catch (err) {
-        setImageLoadState({
-            status: "error",
-            error: `读取文件失败：${err?.message ?? err}`,
-            pending: null,
-        });
-        publishProductState();
-    }
-}
+// ⚠️ **`pendingImage()` 与 `loadImageFileIntoPending()` 已经搬走**
+// （STAGE-33 · v0.48 批）⇒ ⇒ 它们现在住在
+// `components/image-loader.js` ⇒ ⇒ **页头那个入口也共用同一段**（页头在
+// **app 层** ⇒ ⇒ 视图层够不着 ⇒ ⇒ 要共用就只能**提到共享组件**）⇒ ⇒
+// **不写第二套**（规格 §3 裁决 D）。
+//
+// ⚠️ 视图层这边**只**剩「点按钮 ⇒ 发信号」那一步（`onCommand` 的
+// `load-image` 分支）⇒ ⇒ 载荷（字节 / 文件名 / 类型）从共享组件那份
+// pending 里取。
 
 function renderTree(node) {
     if (!node) return "";

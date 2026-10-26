@@ -160,7 +160,10 @@ for sec in range(0, 11):
 # --- 6. 验收编号交叉引用 ---------------------------------------------------
 EXPECT_ACCEPT = {
     "A": list(range(1, 11)),   # A-1 ~ A-10
-    "B": list(range(1, 7)),    # B-1 ~ B-6
+    # ⚠️ **B 从 6 起**：STAGE-32 那一批在**同一个 `loadImage` 段**里已经用了
+    #    B-1 ~ B-5 ⇒ ⇒ 编号空间是**跨批次共享**的 ⇒ ⇒ 新批次**不能**从 1
+    #    重新起（否则同一个门禁输出里会出现**同号不同义**的断言）。
+    "B": list(range(6, 12)),   # B-6 ~ B-11
     "C": list(range(1, 7)),    # C-1 ~ C-6
 }
 for group, nums in EXPECT_ACCEPT.items():
@@ -168,8 +171,14 @@ for group, nums in EXPECT_ACCEPT.items():
         if not re.search(rf"^\|\s*{group}-{n}\s*\|", text, re.M):
             err(f"[验收] §4 缺 {group}-{n}")
 # 反向：正文引用了未定义的验收编号
+#
+# ⚠️ **必须排除 §8**（施工期订正那一节）：它**逐字引用旧编号**（「规格原文」
+#    那一段）⇒ ⇒ 那是「**记做过什么**」⇒ ⇒ 不是「**规格现在说什么**」⇒ ⇒
+#    扫它 ⇒ ⇒ **门禁被文档自己触发** ⇒ ⇒ **零判别力**。
+sec8_at = re.search(r"^## §8\b", text, re.M)
+live_text = text[: sec8_at.start()] if sec8_at else text
 for group, nums in EXPECT_ACCEPT.items():
-    for m in re.finditer(rf"\b({group}-\d+)\b", text):
+    for m in re.finditer(rf"\b({group}-\d+)\b", live_text):
         tag = m.group(1)
         num = int(tag.split("-")[1])
         if num not in nums:
