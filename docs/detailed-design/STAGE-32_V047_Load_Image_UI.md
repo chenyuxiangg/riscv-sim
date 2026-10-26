@@ -1,0 +1,226 @@
+# STAGE-32 · v0.47 · 固件加载 UI 批（规格 · 冻结）
+
+> **主题**：让用户能在**界面上**加载自己的固件镜像（ELF / HEX / BIN），不再只能靠脚本。
+> **状态**：冻结（施工期订正只写进 §8，不改本节）。
+> **上游**：STAGE-14（板级内存图）· STAGE-7（源码视图）· STAGE-25（真实 RTOS 真机复验）。
+
+---
+
+## §0 一句话
+
+**契约层与内核侧早就够了**（`ImageSource::Bytes` + M-06 的 ELF/HEX 解析）⇒ ⇒ 缺的**只是前端的一个入口** ⇒ ⇒ 本批**只改前端** ⇒ ⇒ **契约层零升版**。
+
+---
+
+## §1 范围与边界
+
+### §1.1 本批做
+
+1. **产品视图加一个「加载固件」工作面**：`<input type="file">` + 「加载」按钮；
+2. 浏览器读出**字节** ⇒ ⇒ 塞进 `ImageSource::Bytes` ⇒ ⇒ 发 `LoadProject`；
+3. 装载后**强制重订全部流**（寄存器 / 状态增量 / 探针 / console / 内存图）；
+4. **装完就停**（⛔ **不自动跑**）⇒ ⇒ 用户自己点「继续」；
+5. **加载状态如实显示**：加载中 / 成功（字节数）/ 失败（**内核原文**）。
+
+### §1.2 本批不做
+
+| 不做 | 理由 |
+| --- | --- |
+| **不自动跑** | 用户定案：装完就停 ⇒ ⇒ 「继续」由用户点 ⇒ ⇒ 避免「加载即跑」把用户吓一跳 |
+| **不写内存 / 不下断点的 UI** | 那是另一批的活（现在只有脚本口 `window.riscv_kernel.*`） |
+| **不改契约层** | `ImageSource::Bytes` 已在契约里 ⇒ ⇒ **零新 DTO / 零新命令 / 零新事件** ⇒ ⇒ 前端镜像**不用改版本号** |
+| **不改内核 / 宿主** | M-06 与宿主装载路径**已经**支持 ELF / HEX / RAW ⇒ ⇒ 一行都不改 |
+| **不做服务端形态** | 服务端仍是占位（`crates/server/src/main.rs` 20 行） |
+| **不引入任何依赖** | 前端零依赖零构建 ⇒ ⇒ 文件读取用浏览器原生 `<input type="file">` + `File.arrayBuffer()` |
+
+---
+
+## §2 事实表（F1~F14）
+
+| 号 | 事实 | 依据 |
+| --- | --- | --- |
+| F1 | 契约层的 `ImageSource` 有 `Bytes(Vec<u8>)` 与 `Url(String)` 两个变体 | `crates/contract/src/model.rs:111` |
+| F2 | `ImageSource::Url` 在宿主里**报 `E_LDR-01`** ⇒ ⇒ **前端必须先取字节** | `crates/kernel/src/kernel_host/mod.rs:2701` |
+| F3 | 宿主按 `ImageKind`（`Elf` / `RawHex`）分派到 M-06 | `crates/kernel/src/kernel_host/mod.rs:2715` |
+| F4 | M-06 支持 ELF / IHEX / RAW 三种解析 | `crates/kernel/src/m06_elf/mod.rs` |
+| F5 | 前端已有 `buildImageProject(url, bytes, options)` —— 造一个**只含一个镜像**的工程 | `front/app.js:1763` |
+| F6 | 前端已有 `loadImageFromUrl(services, url, options)` —— 取字节 + 装载 | `front/app.js:1801` |
+| F7 | `loadProjectIntoKernel` 已经**强制重订全部流**并清状态 | `front/app.js:1059` |
+| F8 | `LoadProject` 的命令构造器是 `Command.loadProject(project)` | `front/lib/message.js:445` |
+| F9 | 前端**当前没有任何**加载镜像的 UI 入口（只有 `window.riscv_image.loadFromUrl` 脚本口） | `front/app.js:1855` + 全仓 grep |
+| F10 | 前端**已有**一个 `<input type="file">` 的用法（源码视图装载源码）⇒ ⇒ **这个交互模式是仓内既有的** | `front/views/m02_viewcomponents.js:959` |
+| F11 | 源码视图的文件选择器**不发任何命令**（源码不进内核）⇒ ⇒ **镜像的入口必须发命令** ⇒ ⇒ 两者语义不同 | `front/views/m02_viewcomponents.js:1027` |
+| F12 | 视图层**不许碰服务层** ⇒ ⇒ 只能发 `riscv:command` 信号 | `front/views/m02_viewcomponents.js:103-131` |
+| F13 | Node 22 有原生 `File` / `Blob` ⇒ ⇒ **文件选择器路径在前端门禁里可测** | `node -e 'typeof File'` |
+| F14 | `LoadProject` 会清掉内核侧的主题集合 ⇒ ⇒ 装载后**必须重订**（D-45 / D-46 的老坑） | `front/app.js:959-968` |
+
+---
+
+## §3 裁决
+
+| 号 | 裁决 | 理由 |
+| --- | --- | --- |
+| A | **入口放在产品视图**（「产品」tab 的工具条） | 装载镜像是**产品/工程**级动作 ⇒ ⇒ 与产品树、内存映射表同一个工作面 |
+| B | **用浏览器原生 `<input type="file">`** | 零依赖 ⇒ ⇒ 不用 File System Access API（那只在 Chromium 系可用）⇒ ⇒ 与源码视图的既有做法一致 |
+| C | **字节在前端取**（`File.arrayBuffer()`）⇒ ⇒ 塞 `ImageSource::Bytes` | 内核**不联网**（F2）⇒ ⇒ 且**不新增**契约变体 |
+| D | **装完就停**，⛔ **不自动跑** | 用户定案 ⇒ ⇒ 「继续」是用户的动作 |
+| E | **装载后强制重订全部流** | F14 ⇒ ⇒ 复用**既有的** `loadProjectIntoKernel` ⇒ ⇒ **不写第二套** |
+| F | **镜像类型按扩展名判定**（`.elf`/`.out` ⇒ Elf；`.hex`/`.ihex` ⇒ RawHex；其余 ⇒ RawHex） | 与 M-06 的 `kind_from_extension` **同一口径** ⇒ ⇒ 前端不发明第四种映射 |
+| G | **加载状态写在产品视图状态里**并**渲染出来** | 「装完没装上」必须**看得见** ⇒ ⇒ 失败显示**内核原文**，不吞 |
+| H | **命令名 `load-image`**（视图信号 → app 层命令） | 与既有 `submit-memory-map` / `unload-project` 同一命名风格 |
+| I | **文件名进工程名**（`name` = 文件名、`imageName` = 文件名） | 装完产品树里能看出装的是哪个 ⇒ ⇒ 与 `buildImageProject` 的默认一致 |
+| J | **文件读失败 / 装载失败都显示原文** | 与 G 同源 ⇒ ⇒ 不静默 |
+| K | **契约层零升版** | `SCHEMA_VERSION` 仍 **8** / `SIM_STATE_SCHEMA_VERSION` 仍 **2** / `PLATFORM_SCHEMA_VERSION` 仍 **1** / `PLATFORM_RULES_VERSION` 仍 **3** |
+| L | **不新增前端错误码** | 失败是**内核给的**（`E_*` 家族）⇒ ⇒ 前端**不新造**码 ⇒ ⇒ `error_code_check.py` 的口径不变 |
+| M | **源码视图的入口一个字都不改** | 本批只加镜像入口 ⇒ ⇒ 源码仍然**不进内核**（F11） |
+
+---
+
+## §4 验收
+
+### §4.1 前端门禁（A 组 · Node 侧）
+
+| 号 | 验收 |
+| --- | --- |
+| A-1 | 产品视图渲染出**一个** `<input type="file">` 与一个「加载」按钮 |
+| A-2 | 选择器接受 `.elf` / `.hex` / `.bin`（`accept` 属性含这三者） |
+| A-3 | 选文件后**发出一条** `load-image` 信号，载荷含**字节**与**文件名** |
+| A-4 | 字节是**真字节**（不是字符串、不是 base64）⇒ ⇒ 与 `ImageSource::Bytes` 同形 |
+| A-5 | app 层把 `load-image` 转成**真的 `LoadProject` 命令**（线上帧里有 `LoadProject`） |
+| A-6 | 工程里的 `version.isa` 是 `"RV32IMC"` ⇒ ⇒ 内核不会拒「ISA 不一致」 |
+| A-7 | 装载后**五条流全部重订**（寄存器 / 状态增量 / 探针 / console / 内存图） |
+| A-8 | **不自动跑** ⇒ ⇒ 装载后**没有** `ContinueRun` 命令发出去 |
+| A-9 | 装载成功后产品视图显示**文件名**与**字节数** |
+| A-10 | 装载失败时显示**内核原文**（含错误码），⛔ 不吞 |
+| A-11 | 文件读失败时显示**原因**，⛔ 不静默 |
+| A-12 | 镜像类型按扩展名判定（`.elf` ⇒ `Elf`；`.bin` ⇒ `RawHex`） |
+
+### §4.2 真机门禁（B 组 · 真 Chrome）
+
+| 号 | 验收 |
+| --- | --- |
+| B-1 | 真机里**真的用 UI 选文件**（`<input type="file">` 走 CDP `DOM.setFileInputFiles`）⇒ ⇒ **不走脚本口** |
+| B-2 | 装载后内核**真的换了镜像**（PC / 寄存器不再是 demo 固件的值） |
+| B-3 | 装载后**终端**能跑出固件自己的输出 |
+| B-4 | 装载后**波形**通道不是 demo 固件的 `GPIO0.OUT` |
+| B-5 | 装载失败时界面**显示**错误码 |
+
+### §4.3 交叉（C 组）
+
+| 号 | 验收 |
+| --- | --- |
+| C-1 | 契约层**零变更**（`git diff` 里 `crates/contract/` 为空） |
+| C-2 | 内核 crate **零变更**（`git diff` 里 `crates/kernel/` 为空） |
+| C-3 | 四个版本常量**一个都没动** |
+| C-4 | 前端镜像的 `SCHEMA_VERSION` 仍 **8** |
+| C-5 | `tools/error_code_check.py` **0 发现**（前端没新造码） |
+| C-6 | 源码视图的**源码树仍不进内核**（本批没顺手改坏那条老规矩） |
+
+---
+
+## §5 台账
+
+本批**不销账、不新登记**（平台能力增强，不是欠账闭环）。
+
+⚠️ 但**要记一条边界**：`window.riscv_image.loadFromUrl`（脚本口）**保留** ⇒ ⇒ UI 入口与脚本口**并存** ⇒ ⇒ 两者**必须**共用**同一条**装载路径（`loadProjectIntoKernel`）⇒ ⇒ **不写第二套**。
+
+---
+
+## §6 判别力清单
+
+落地前必须先钉住「**能变红的**」：
+
+| # | 判据 | 变红条件 |
+| --- | --- | --- |
+| 1 | A-3（发出 `load-image` 信号） | 删掉事件派发 |
+| 2 | A-5（真的 `LoadProject` 命令上线） | 把 `load-image` 分支改成 `return` |
+| 3 | A-7（五条流重订） | 跳过 `loadProjectIntoKernel` |
+| 4 | A-8（**不**自动跑） | 装载后加一次 `ContinueRun` |
+| 5 | A-10（失败显示原文） | 把 catch 里的 `setNote` 删掉 |
+| 6 | B-1（真机**真**选文件） | 把 B-1 改成走 `window.riscv_image.loadFromUrl` ⇒ ⇒ 必须红（那就不是 UI 路径了） |
+
+⚠️ **B-1 的判别力来源**：真机门禁里**不许**用脚本口代替 UI 路径 ⇒ ⇒ 否则这条判据恒绿。
+
+---
+
+## §7 变更影响面
+
+| 文件 | 改什么 |
+| --- | --- |
+| `front/views/m02_viewcomponents.js` | 产品视图加加载器 + 事件 |
+| `front/app.js` | `handleCommand` 加 `load-image` 分支 + 导出 `loadImageFromBytes` |
+| `front/tests/load-image.test.mjs` | **新增** · A 组用例 |
+| `tools/browser-verify.mjs` | **加一段** · B 组（真机真选文件） |
+| `tools/stage32_check.py` | **新增** · 本规格自检 |
+| `docs/reviews/REVIEWS.md` | 台账加本批边界说明 |
+
+⚠️ **契约层 / 内核 / 宿主：一行都不改**（C-1 / C-2）。
+
+---
+
+## §8 施工期订正
+
+（施工中每改规格一字，在此记一条。格式：`### 订正 N · 标题`，每段含「规格原文 / 实测 / 已改成」。）
+
+### 订正 1 · 镜像类型的判定不该在前端做扩展名映射
+
+**规格原文**：§3 裁决 F「镜像类型按扩展名判定（`.elf`/`.out` ⇒ Elf；`.hex`/`.ihex` ⇒ RawHex；其余 ⇒ RawHex）」。
+
+**实测**：M-06 的 `kind_from_extension`（`crates/kernel/src/m06_elf/mod.rs:196`）把 `.hex` / `.ihex` 判成 **`Kind::Hex`**（**第三种**），⛔ **不是** `RawHex` ⇒ ⇒ 而契约层的 `ImageKind` 只有 **`Elf` / `RawHex` 两个** ⇒ ⇒ 契约层**表达不了** IHEX。
+
+**已改成**：§3 裁决 F 改为「**`.elf` / `.out` ⇒ `Elf`；其余一律 `RawHex`**」⇒ ⇒ 与契约层 `ImageKind` 的**两个变体逐字对齐**⇒ ⇒ 前端**不发明第三种**⇒ ⇒ 代价是「`.hex` 的 IHEX 语义在契约层表达不了」⇒ ⇒ 这条**如实登记为已知边界**（不假装支持）。
+
+### 订正 2 · 「装完就停」需要**显式**清掉 demo 固件的残留状态
+
+**规格原文**：§1.1 第 3 点「装载后强制重订全部流」。
+
+**实测**：前端启动时 `startSession` 装的是 **demo 工程**（`front/dev/mock-project.js`）⇒ ⇒ 用户加载自己的 ELF 之后，**波形 / 反汇编 / 终端**里的残留是 demo 固件的 ⇒ ⇒ 只重订流**不够**⇒ ⇒ 必须走 `loadProjectIntoKernel`（它 `waveform.reset()` / `debug.reset()` / `console.reset()`）⇒ ⇒ **这一条本来就该走它**。
+
+**已改成**：§1.1 第 3 点补「**且经 `loadProjectIntoKernel`**（它清波形 / 反汇编 / console 的残留）⇒ ⇒ **不另写一套清理**」。
+
+### 订正 3 · 装载失败要同时写**面板**与**页脚**
+
+**规格原文**：§3 裁决 G「加载状态写在产品视图状态里并渲染出来」。
+
+**实测**：产品视图**没有**专门的错误区（那是板级内存图编辑器才有的 `data-memory-map-error`）⇒ ⇒ 失败信息只能落在**产品视图正文里的一块** ⇒ ⇒ 而页脚（`#kernel-note`）是 app 层的既有出口 ⇒ ⇒ 两处都写才既「在界面上」又「在页脚」。
+
+**已改成**：§3 裁决 G 补「**面板上一块 + 页脚一句**（两处都写）⇒ ⇒ 与 `E_PLT` 那条既有做法同形」。
+
+---
+
+## §9 变异自检
+
+| 号 | 变异 | 期望红集 |
+| --- | --- | --- |
+| T1 | 删掉产品视图的 `<input type="file">` | A-1 |
+| T2 | 把 `load-image` 的 app 层分支改成提前 `return` | A-5 |
+| T3 | 装载后跳过 `loadProjectIntoKernel` | A-7 |
+| T4 | 装载后加一次 `ContinueRun`（违反「装完就停」） | A-8 |
+| T5 | 把 catch 里的失败显示删掉 | A-10 / A-11 |
+| T6 | 真机门禁的 B-1 改成走脚本口 | B-1 |
+| T-C1 | 把「装完就停」的措辞改成「装完就跑」（**只改文案**） | 0 红 |
+
+⚠️ **T-C1 是必要对照**（语义不变的等价改写必须 0 红）。
+
+---
+
+## §10 自检脚本
+
+`tools/stage32_check.py`（七项 + 子项），与 `stage31_check.py` 同构：
+
+1. Markdown 表格列数一致
+2. 标题层级不跳级
+3. 代码围栏配平
+4. 裁决编号 A~M 无悬空引用
+5. 章节 §0~§10 完整
+6. 验收编号交叉引用无未定义项（A / B / C 三组）
+7. 关键约束字面量钉住
+   - 7b. §1.2 的事实表编号 **F1~F14 连续**
+   - 7c. §8 的施工期订正：不是占位 + 编号连续 + 每条自己那段里都有「已改成」
+   - 7d. 四个版本号的值（§4.3 的 C-3 行是唯一权威处）
+   - 7e. **前端必须有加载入口**：`front/views/m02_viewcomponents.js` 里**必须**出现 `load-image` 与 `type="file"`
+   - 7f. **app 层必须有分支**：`front/app.js` 里**必须**出现 `load-image` 与 `loadProject`
+   - 7g. **契约层 / 内核零变更**：台账里**必须**登记本批的 C-1 / C-2 边界
+   - 7h. `tools/stage32_check.py` 自己**必须存在**（自指）
+
+⚠️ **表格切分复用 `tools/doc_check.py` 的那一份**（一个约束一个落点）。
