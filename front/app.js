@@ -33,6 +33,12 @@ import {
     planMemoryMapUpdate,
     splitErrorCode,
 } from "./views/components/memory-map.js";
+// ⚠️ **镜像加载的状态写入**（STAGE-32 · v0.47 批）⇒ ⇒ 与视图层**共用**
+// ⇒ ⇒ 住在一处 ⇒ ⇒ **不写第二份**。
+import {
+    publishProductState,
+    setImageLoadState,
+} from "./views/components/image-loader.js";
 import { buildMockProject } from "./dev/mock-project.js";
 import { buildDemoStoreState, seedDemoState } from "./dev/demo-state.js";
 
@@ -921,6 +927,69 @@ export async function handleCommand(detail, services) {
                 // 「删除」⇒ 从档案里删一块（**不改内核状态**）。
                 await deleteBoard(services, detail?.params?.id);
                 return;
+            case "load-image":
+                // 「加载固件」⇒ 用户在**文件选择器**里选了镜像 ⇒ ⇒ 视图层
+                // 把**字节**放进信号 ⇒ ⇒ 这里把字节变成工程并装载。
+                //
+                // ⚠️ **与脚本口共用同一条装载路径**（`loadImageFromBytes`
+                // → `loadProjectIntoKernel`）⇒ ⇒ 重订流与清残留**只有一处**
+                // （规格 §5 的台账边界）。
+                //
+                // ⚠️ **装完就停**（规格 §3 裁决 D）⇒ ⇒ 这里⛔ **不**发
+                // `ContinueRun` ⇒ ⇒ 用户自己点「继续」。
+                {
+                    const bytes = detail?.params?.bytes;
+                    if (!Array.isArray(bytes) || bytes.length === 0) {
+                        setImageLoadState({
+                            status: "error",
+                            error: "没有镜像字节 —— 请先用文件选择器选一个固件",
+                            pending: null,
+                        });
+                        publishProductState();
+                        setNote("加载固件失败：没有镜像字节");
+                        return;
+                    }
+                    try {
+                        const result = await loadImageFromBytes(services, bytes, {
+                            name: detail?.params?.name,
+                            kind: detail?.params?.kind,
+                        });
+                        // ⚠️ **产品树**也要换成新工程的（否则还显示 demo 的树）。
+                        viewStore.setState("product", (prev) => ({
+                            ...prev,
+                            tree: result.project.tree,
+                        }));
+                        setImageLoadState({
+                            status: "ok",
+                            name: detail?.params?.name ?? "image.bin",
+                            byteLength: result.byteLength,
+                            error: null,
+                            // ⚠️ **装完就把 pending 清掉** ⇒ ⇒ 再点一次「加载」
+                            // 会报「没有待加载的文件」⇒ ⇒ **不会**把上一份
+                            // 字节又发一遍。
+                            pending: null,
+                        });
+                        publishProductState();
+                        const streamErrors = [
+                            result.probeError ? `探针流 ${result.probeError.message}` : null,
+                            result.consoleError ? `console 流 ${result.consoleError.message}` : null,
+                            result.memoryMapError ? `内存图流 ${result.memoryMapError.message}` : null,
+                        ].filter(Boolean);
+                        setNote(streamErrors.length > 0
+                            ? `已加载固件「${detail?.params?.name ?? "image.bin"}」，但流订阅不可用：${streamErrors.join("；")}`
+                            : `已加载固件「${detail?.params?.name ?? "image.bin"}」（${result.byteLength} 字节）—— 点「继续」开始运行`);
+                    } catch (err) {
+                        // ⚠️ **失败显示内核原文**（规格 §3 裁决 J）⇒ ⇒ 不吞。
+                        setImageLoadState({
+                            status: "error",
+                            error: err?.message ?? String(err),
+                            pending: null,
+                        });
+                        publishProductState();
+                        setNote(`加载固件失败：${err?.message ?? err}`);
+                    }
+                }
+                return;
             default:
                 return;
         }
@@ -1803,6 +1872,46 @@ export async function loadImageFromUrl(services, url, options = {}) {
     const project = buildImageProject(url, bytes, options);
     const result = await loadProjectIntoKernel(services, project);
     return { ...result, byteLength: bytes.length, project };
+}
+
+/**
+ * 「按**已在手上**的字节 → 发 `LoadProject`」的入口（STAGE-32 · v0.47 批）。
+ *
+ * ⚠️ **这是 UI 那条路的落点**：用户在**文件选择器**里选了固件 ⇒ ⇒ 浏览器
+ * 把字节读出来 ⇒ ⇒ 视图层把它们放进 `riscv:command` 信号 ⇒ ⇒ app 层
+ * （**这里**）把字节变成工程并装载。
+ *
+ * ⚠️ **与 `loadImageFromUrl` 共用同一条装载路径**（`loadProjectIntoKernel`）
+ * ⇒ ⇒ **不写第二套**（规格 §5 的台账边界）⇒ ⇒ 重订流、清残留这些语义
+ * **只有一处**。
+ *
+ * ⚠️ **装完就停**（规格 §3 裁决 D）⇒ ⇒ 这里⛔ **不**发 `ContinueRun`
+ * ⇒ ⇒ 跑不跑由用户自己点「继续」。
+ *
+ * ⚠️ **内核不联网**（`ImageSource::Url` 在宿主里报 `E_LDR-01`）⇒ ⇒ 字节
+ * 必须是**真的字节**（不是 base64、不是字符串）⇒ ⇒ 契约层要的形状是
+ * `{"Bytes":[...]}`。
+ *
+ * @param {{commandRouter: object, registerMemory: object, waveform: object, debug?: object, console: object, memoryMap?: object}} services
+ * @param {number[]|Uint8Array} bytes — 镜像字节
+ * @param {{name?: string, kind?: string, id?: string, projectName?: string, boardName?: string}} [options]
+ * @returns {Promise<{probeError: Error|null, consoleError: Error|null, memoryMapError: Error|null, byteLength: number, project: object}>}
+ */
+export async function loadImageFromBytes(services, bytes, options = {}) {
+    const project = buildImageProject(
+        options.name ? `/local/${options.name}` : "/local/image.bin",
+        bytes,
+        {
+            imageName: options.name ?? "image.bin",
+            kind: options.kind ?? "Elf",
+            id: options.id ?? "proj-user-image",
+            name: options.projectName ?? options.name ?? "image.bin",
+            boardName: options.boardName ?? "MainBoard",
+            toolchain: "user file (browser)",
+        },
+    );
+    const result = await loadProjectIntoKernel(services, project);
+    return { ...result, byteLength: Array.from(bytes ?? []).length, project };
 }
 
 /**
