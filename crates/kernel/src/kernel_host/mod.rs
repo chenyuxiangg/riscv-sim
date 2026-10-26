@@ -200,7 +200,8 @@ use crate::m19_waveform::{ChannelMeta, ExportFilter, SharedPipeline, WaveformPip
 use crate::m20_snapshot::SnapshotManager;
 use crate::m21_logging::{LogBuffer, LogEntry, LogLevel, LogQuery};
 use crate::m22_hms::{
-    DegradeAction, DiagnosticKit, Health, HealthSignal, Hms, Role, SignalCtx, SignalKind, SignalSrc,
+    DegradeAction, DiagnosticKit, Health, HealthSignal, Hms, Role, Severity, SignalCtx, SignalKind,
+    SignalSrc,
 };
 
 /// GPIO 外设的基址（PL061 惯例）。
@@ -888,6 +889,16 @@ pub struct KernelHost {
     /// `Rc`、把它**克隆**给 HMS ⇒ 管理员通道看到的日志关联与宿主记的日志
     /// 是**同一条**。存两份 `LogBuffer` 就是两个真相。
     log_buffer: Rc<RefCell<LogBuffer>>,
+    /// 降级派发记录 —— 与降级执行器**共享同一份**（v0.46 · STAGE-31 · 裁决 **I**）。
+    ///
+    /// ⚠️ **一个真相**：宿主与 [`degrade::HostDegradeExecutor`] 拿的是**同一个**
+    /// `Rc` ⇒ ⇒ 「执行器被问过几次」这件事**只有一份**记录 ⇒ ⇒ 宿主不需要
+    /// 另存一份（另存就是两个真相）。
+    ///
+    /// ⚠️ **它只记数 + 记最后一次动作** ⇒ ⇒ **不记内容** ⇒ ⇒ 「派发路径真的
+    /// 走过」这件事在宿主层**看得见**（[`KernelHost::degrade_dispatch_total`] /
+    /// [`KernelHost::degrade_dispatch_last`]）。
+    degrade_dispatch: Rc<RefCell<degrade::DegradeDispatch>>,
     /// 宿主看门狗（v0.28 · **D-115**）—— 两条驱动路径（`StepN` / `Continue`）
     /// 共用**同一个**状态（连续性是它存在的意义）。
     watchdog: HostWatchdog,
@@ -967,6 +978,14 @@ impl KernelHost {
         let log_buffer = Rc::new(RefCell::new(LogBuffer::new(HOST_SESSION_ID)));
         let mut hms = Hms::new();
         hms.install_log_source(Rc::clone(&log_buffer));
+        // ⚠️ v0.46 · STAGE-31（裁决 **H**）：**默认降级策略** = `Fatal →
+        // Terminate` ⇒ ⇒ **默认行为一字不变**（验收 **C-6**）⇒ ⇒ 「默认」由
+        // **策略表**承载 ⇒ ⇒ **不是**「宿主直接调 `degrade`」。
+        //
+        // ⚠️ 宿主里**只有** `hms.report(...)` 这一处会报出 `Fatal`（看门狗
+        // 处置）⇒ ⇒ 这条策略**只在**看门狗触发时生效 ⇒ ⇒ 别的路径**不受
+        // 影响**。
+        hms.set_degrade_policy(Severity::Fatal, DegradeAction::Terminate);
         let mut host = Self {
             backend: SelfIssBackend::new(sinks.clone(), sinks.clone()),
             sinks,
@@ -1015,6 +1034,9 @@ impl KernelHost {
             console_backlog: Vec::new(),
             hms,
             log_buffer,
+            // ⚠️ v0.46 · STAGE-31：派发记录**只有一份** ⇒ ⇒ 宿主与执行器
+            // 共享它（一个真相）。
+            degrade_dispatch: Rc::new(RefCell::new(degrade::DegradeDispatch::default())),
             watchdog: HostWatchdog::new(),
             started_at: HostClock::new(),
             // ⚠️ 管理通道**默认关**（裁决 E）⇒ 宿主对 `Admin` 命令的**默认**
@@ -1643,8 +1665,23 @@ impl KernelHost {
             .bus_mut()
             .add_hook(ProbeRegistry::make_bus_hook(Rc::clone(&registry)));
 
-        self.probes = Some(registry);
-        self.waveform = Some(shared);
+        self.probes = Some(Rc::clone(&registry));
+        self.waveform = Some(shared.clone());
+
+        // ⚠️ v0.46 · STAGE-31（裁决 **I**）：降级执行器**随句柄一起装** ⇒ ⇒
+        // 句柄换新时执行器**一起换** ⇒ ⇒ **结构上不可能**持有过期句柄。
+        //
+        // ⚠️ **装在这一段的末尾**：句柄（`registry` / `shared`）**已经**是
+        // 最终的那一份 ⇒ ⇒ 执行器拿到的与宿主**永远是同一份**（一个真相）。
+        //
+        // ⚠️ 这一行是「降级**走派发路径**」的**唯一**前提：没有它 ⇒ ⇒
+        // M-22 只会走自己的内置实现 ⇒ ⇒ `degrade_dispatch_last()` 恒空。
+        self.hms
+            .install_executor(Box::new(degrade::HostDegradeExecutor::new(
+                Rc::clone(&registry),
+                shared,
+                Rc::clone(&self.degrade_dispatch),
+            )));
     }
 
     /// 给已映射的外设装上探针回调（M-18 `attach_signal`）。
@@ -2932,7 +2969,18 @@ impl KernelHost {
     ///    `Health::Critical`；
     /// 2. 记**一条** M-21 日志（`ctx = "ENG-WATCHDOG"`）；
     /// 3. 置幂等标志（`mark_watchdog_fired`）；
-    /// 4. 降级：`DegradeAction::Terminate` ⇒ 终止内核。
+    /// 4. 上报终止错误。
+    ///
+    /// ⚠️ **降级由 M-22 的策略分支触发（宿主不自己调）** —— v0.46 · STAGE-31
+    /// 裁决 **G**：① 上报健康信号那一步里，M-22 查 `degrade_policy` ⇒ ⇒
+    /// 命中 `Fatal → Terminate` ⇒ ⇒ M-22 **问**宿主装的降级执行器 ⇒ ⇒ 执行器
+    /// 表态 `Done` ⇒ ⇒ M-22 置 `terminated`。
+    ///
+    /// ⚠️ **为什么宿主不再自己调 `degrade`**：「策略分支 ＋ 宿主直做」并存 ⇒ ⇒
+    /// **重复降级** ⇒ ⇒ 降级在宿主里**只有一个入口**（M-22 的策略分支）。
+    ///
+    /// ⚠️ **顺序要点**：降级发生在**幂等标志置位之前** ⇒ ⇒ `report` 里的降级
+    /// 闸门（`!watchdog_fired`）才**开着** ⇒ ⇒ 策略分支**能**生效。
     ///
     /// ⚠️ **场景码分工**（规格 §8.1）：`E_HMS_01_DEGRADE_FAILED` 由 **M-22**
     /// 上报；**`E_HMS_02_FATAL_TERMINATED` 由宿主（这里）上报** ⇒ 前端据此
@@ -2944,6 +2992,8 @@ impl KernelHost {
         // ① 健康信号（**先分级再入流** ⇒ 流里存的是 `Severity::Fatal`）。
         //    ⚠️ `err_code` 用**引擎侧**的停滞码（`E_ENG-03`）—— 那是让宿主
         //    判定「停滞」的那个码；HMS 自己的终止码是 `E_HMS-02`（下面报）。
+        //    ⚠️ **降级就在这一步发生**（M-22 查策略 ⇒ 问执行器）⇒ ⇒ 宿主
+        //    **不再**自己调 `degrade`（裁决 G）。
         self.hms.report(HealthSignal {
             src: SignalSrc::Engine,
             kind: SignalKind::Watchdog,
@@ -2965,9 +3015,7 @@ impl KernelHost {
         );
         // ③ 幂等标志（一次运行只处置一次）。
         self.hms.mark_watchdog_fired();
-        // ④ 降级：终止内核（M-22 置 `terminated` ⇒ 宿主据此停止接受新动作）。
-        let _outcome = self.hms.degrade(DegradeAction::Terminate);
-        // ⑤ 上报终止错误（由**宿主**上报 —— 见上面的场景码分工）。
+        // ④ 上报终止错误（由**宿主**上报 —— 见上面的场景码分工）。
         let detail = if stalled {
             format!("{msg}（停滞场景码 {WATCHDOG_ERR_CODE}）")
         } else {
@@ -3620,6 +3668,34 @@ impl KernelHost {
         self.hms.watchdog_fired()
     }
 
+    /// 降级执行器被问过的**总次数**（v0.46 · STAGE-31 · 验收 **C-1 / C-3**）。
+    ///
+    /// ⚠️ **零** = 降级**没有**走派发路径（M-22 走了自己的内置实现，或者宿主
+    /// **没装**执行器）⇒ ⇒ 这个数是「降级真的问过执行器」的**唯一**证据。
+    ///
+    /// ⚠️ **它数的是「被问了几次」** ⇒ ⇒ 失败会**重试** ⇒ ⇒ 一次失败的降级
+    /// 会让这个数**大于 1** ⇒ ⇒ 「不重试」那条判据就是断言它**恰好 1**。
+    pub fn degrade_dispatch_total(&self) -> u32 {
+        self.degrade_dispatch.borrow().total
+    }
+
+    /// 最后一次被问到的**降级动作**（v0.46 · STAGE-31 · 验收 **C-1 / C-3**）。
+    ///
+    /// ⚠️ `None` = 执行器**一次都没被问过** ⇒ ⇒ 降级**没有**走派发路径。
+    pub fn degrade_dispatch_last(&self) -> Option<DegradeAction> {
+        self.degrade_dispatch.borrow().last
+    }
+
+    /// M-22 的**降级失败**记录（`E_HMS-01` 那一族 · v0.46 · STAGE-31 · 验收 **C-3**）。
+    ///
+    /// ⚠️ **一次运行只报一次** ⇒ ⇒ 空 ⇒ ⇒ 「降级**没有**失败」⇒ ⇒
+    /// `Unsupported`（做不了）**不是**失败 ⇒ ⇒ 它**不会**出现在这里。
+    ///
+    /// ⚠️ 这条让「降级失败」这件事**在宿主层看得见**（不是只活在 M-22 内部）。
+    pub fn degrade_failures(&self) -> &[PlatformError] {
+        self.hms.degrade_failures()
+    }
+
     /// M-21 日志环的快照（管理员通道的读出口 · v0.28 · D-115）。
     ///
     /// ⚠️ **纯读**：不改缓冲、不动计数。
@@ -4221,6 +4297,20 @@ pub mod clock;
 
 #[cfg(test)]
 mod tests_watchdog;
+
+/// 宿主侧**降级执行器**（v0.46 批 · STAGE-31 · 台账 **D-130** · 裁决 **J / M**）。
+///
+/// ⚠️ 它**不是**公开的：它是宿主的**内部装配件**（宿主把 M-18 / M-19 的句柄
+/// 交给它 ⇒ ⇒ 它与宿主**同一份**）⇒ ⇒ 外部**不需要**看见它。
+mod degrade;
+
+/// 宿主层**降级**的判别力用例（v0.46 批 · STAGE-31 · 验收 **C-1 ~ C-6**）。
+///
+/// ⚠️ 它盯的是「降级**走派发路径**」这件事：M-22 **问**执行器（而不是自己
+/// 硬编码）⇒ ⇒ 执行器**够得到**的那一档（`TraceDown`）**真的**动了 M-18 的
+/// 采样与 M-19 的溢出策略。
+#[cfg(test)]
+mod tests_degrade;
 
 /// 平台描述的加载 · 器件工厂 · 建图（v0.27 · D-123-B）。
 ///
