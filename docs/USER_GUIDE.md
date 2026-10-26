@@ -78,6 +78,11 @@ python3 -m http.server 8080 --directory front
 - **产品树**：当前装载的工程结构（板 → 芯片 → 外设）。
 - **内存映射 (M-14)** 表：**当前生效**的板级内存图（来自内核 `memory.map` 事件，不是假数据）。没有数据时如实显示空态。
 - 按钮「**编辑板级内存图**」⇒ 跳到编辑器；「**重新 seed demo 状态**」是 dev-only。
+- **加载固件**（v0.47 批）：一个原生**文件选择器**（`.elf` / `.out` / `.hex` / `.bin` / `.raw`）+ 一个「**加载**」按钮。
+  - 选完文件，面板会显示「**已选择**〈文件名〉（N 字节）」⇒ ⇒ 你能看见自己选了什么、文件读没读成功；
+  - 点「加载」⇒ ⇒ 字节交给内核 ⇒ ⇒ 装载**成功**后面板显示「**已装载**〈文件名〉（N 字节）」；
+  - ⚠️ **装完就停**：平台**不会**替你自动跑 ⇒ ⇒ 想跑自己去调试视图点「**继续**」；
+  - ⚠️ **装载失败会把内核的原话显示出来**（含错误码，如 `E_LDR-01`），**面板与页脚两处**都写 ⇒ ⇒ 不吞。
 
 ### 3.2 嵌入式（`#/embedded`）
 
@@ -237,6 +242,49 @@ tools/boot-osz.sh --elf <path/to/osz.elf>   # 真实 RTOS 与 Spike 逐字节比
 ⚠️ 这两个脚本**不进默认门禁**（需要仓外的镜像与本机的 Spike）。
 ⚠️ osz 的产物**在仓外**（默认读 `$OSZ_ELF`，其次 `/tmp/osz-artifacts/osz.elf`）。
 
+### 5.4 在浏览器里加载自己的固件
+
+#### 路 A：界面上点一下（**推荐**，v0.47 批起有）
+
+1. 打开页面 ⇒ ⇒ 进「**产品**」视图（`#/product`）；
+2. 在「**加载固件**」那块选一个文件（`.elf` / `.out` 按 ELF 解析，其余按原始字节）；
+3. 面板显示「已选择〈文件名〉（N 字节）」⇒ ⇒ 点「**加载**」；
+4. 面板变成「已装载」⇒ ⇒ 回调试视图点「**继续**」开始跑。
+
+⚠️ **不需要**任何 HTTP 服务、**不需要** CORS、**不需要**起后端 ⇒ ⇒ 文件在**浏览器里**读成字节再交给内核（内核**不联网**）。
+⚠️ **装完就停** ⇒ ⇒ 第 4 步的「继续」是**你的**动作。
+⚠️ `.hex`（Intel HEX）**按原始字节**处理 ⇒ ⇒ 契约层只有 `Elf` / `RawHex` 两种镜像类型，**表达不了** IHEX 语义。
+
+#### 路 B：脚本驱动（自动化 / 真机门禁用）
+
+页面暴露了一个脚本口（`window.riscv_image`）：
+
+```js
+// 装载（按 URL 取字节 ⇒ ⇒ 内核不联网，字节是前端 fetch 来的）
+await window.riscv_image.loadFromUrl("http://127.0.0.1:8081/osz.elf");
+
+// 反复发 Continue，直到 console 里出现某段字面量
+await window.riscv_image.runUntilConsole("OSZ$ ", { timeoutMs: 60000 });
+```
+
+⚠️ **路 B 与路 A 共用同一条装载路径**（`loadProjectIntoKernel`）⇒ ⇒ 重订流、清残留这些语义**只有一处**。
+⚠️ **文件在仓外 / 另一个端口**时，浏览器要能 `fetch` 到它 ⇒ ⇒ 那台服务**必须带 CORS 头**（前端的 HTTP 服务只服务 `front/`，不带跨域头）⇒ ⇒ 例如：
+
+```bash
+# 一个带 CORS 头的临时服务（仓外镜像用）
+python3 - <<'PY'
+import http.server, functools
+class H(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        super().end_headers()
+http.server.HTTPServer(("127.0.0.1", 8081),
+    functools.partial(H, directory="/tmp/osz-artifacts")).serve_forever()
+PY
+```
+
+⚠️ **界面上那个文件选择器**（路 A）**不需要**这一步 ⇒ ⇒ 日常用路 A 就够。
+
 ---
 
 ## 6. 常见问题
@@ -282,7 +330,7 @@ node tools/browser-verify.mjs        # 需要本机 Chrome
 ```
 
 ⚠️ 判「全绿」看**退出码**，别只看汇总行。
-⚠️ `tools/browser-verify.mjs` 在**真 Chrome** 里跑真内核：它验的不只是「页面没白屏」，还包括「单步之后 `x1 = 0x2a`」「波形视图列出了 `GPIO0.OUT` 通道」「源码视图的按钮带着**当前 PC** 而不是 0」。
+⚠️ `tools/browser-verify.mjs` 在**真 Chrome** 里跑真内核：它验的不只是「页面没白屏」，还包括「单步之后 `x1 = 0x2a`」「波形视图列出了 `GPIO0.OUT` 通道」「源码视图的按钮带着**当前 PC** 而不是 0」「**界面上真选了一个文件**并真的换了镜像（`loadImage` 段：CDP 真选文件 ⇒ ⇒ 走 `change` 事件 ⇒ ⇒ 终端里出现夹具自己的输出）」。
 
 ---
 
@@ -297,6 +345,7 @@ node tools/browser-verify.mjs        # 需要本机 Chrome
 | **降级只落地两档** | `Terminate` 与 `TraceDown` 有实现；`SnapshotRestore` / `Pause` / `Disconnect` 还够不着（要跨进程 ⇒ 得升契约版本） |
 | **前端没有断点 UI** | 断点/写内存只有脚本接口（`window.riscv_kernel.*`），页面上没有对应按钮 |
 | **`time` 与参考侧不再可比** | 计数器那批把 `time` 接上了 CLINT ⇒ 有意为之的明示取舍 |
+| **`.hex` 不按 Intel HEX 解析** | 契约层的镜像类型只有 `Elf` / `RawHex` 两种 ⇒ ⇒ `.hex` 按**原始字节**走；IHEX 语义在契约层**表达不了** |
 
 ⚠️ **完整的欠账清单**（每一条的实证依据、阻塞关系、闭环方式）在 [`docs/reviews/REVIEWS.md`](./reviews/REVIEWS.md) ⇒ ⇒ **不要**以「文档没说」当成「没这回事」。
 
@@ -309,7 +358,7 @@ node tools/browser-verify.mjs        # 需要本机 Chrome
 | 搞懂架构 | [`docs/architecture/RISC-V_Architecture_Design.html`](./architecture/RISC-V_Architecture_Design.html)（4+1 视图 + ADR） |
 | 看需求 | [`docs/requirements/RISC-V_Requirements_v1.4.html`](./requirements/RISC-V_Requirements_v1.4.html) |
 | 看某个模块怎么设计 | [`docs/module-design-spec/RISC-V_Module_Design_Specification.html`](./module-design-spec/RISC-V_Module_Design_Specification.html)（23 模块 LLD）+ [`docs/detailed-design/M-01..M-23_*.html`](./detailed-design/) |
-| 看某一批的规格与裁决 | [`docs/detailed-design/STAGE-1..STAGE-31_*.md`](./detailed-design/)（30 份冻结规格） |
+| 看某一批的规格与裁决 | [`docs/detailed-design/STAGE-1..STAGE-32_*.md`](./detailed-design/)（31 份冻结规格） |
 | 看改动的完整叙事 | [`docs/progress/PROGRESS.md`](./progress/PROGRESS.md) |
 | 看欠账与已知缺口 | [`docs/reviews/REVIEWS.md`](./reviews/REVIEWS.md) |
 | 参与开发 | [`CONTRIBUTING.md`](../CONTRIBUTING.md) + [`AGENTS.md`](../AGENTS.md) |
