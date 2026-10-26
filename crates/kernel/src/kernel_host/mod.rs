@@ -200,7 +200,7 @@ use crate::m19_waveform::{ChannelMeta, ExportFilter, SharedPipeline, WaveformPip
 use crate::m20_snapshot::SnapshotManager;
 use crate::m21_logging::{LogBuffer, LogEntry, LogLevel, LogQuery};
 use crate::m22_hms::{
-    DegradeAction, DiagnosticKit, Health, HealthSignal, Hms, SignalCtx, SignalKind, SignalSrc,
+    DegradeAction, DiagnosticKit, Health, HealthSignal, Hms, Role, SignalCtx, SignalKind, SignalSrc,
 };
 
 /// GPIO 外设的基址（PL061 惯例）。
@@ -876,6 +876,10 @@ pub struct KernelHost {
     ///
     /// ⚠️ **不提供 `Clone`**（M-22 持有 trait object 字段）⇒ 宿主**持有**
     /// 它，不复制它。
+    ///
+    /// ⚠️ **角色也住在这里**（v0.45 · STAGE-30 · 裁决 B）：角色的**唯一存储**
+    /// 是 M-22 那个 `role` 字段 ⇒ ⇒ 宿主**不另存一份** ⇒ ⇒ **零状态新增**
+    /// ⇒ ⇒ **不存在**「宿主与 `Hms` 角色不一致」那种状态。
     hms: Hms,
     /// M-21 日志缓冲 —— 与 [`KernelHost::hms`] **共享同一份**。
     ///
@@ -889,14 +893,6 @@ pub struct KernelHost {
     watchdog: HostWatchdog,
     /// 会话起点（宿主单调时钟的零点）—— M-21 / M-22 的 `time_host_ms` 口径。
     started_at: HostClock,
-    /// 管理通道**是否启用**（裁决 G · v0.44 · STAGE-29）。
-    ///
-    /// ⚠️ **默认关** ⇒ 宿主对 `Admin` 命令的**默认**回应**仍然**是 `E_CTX-05`
-    /// ⇒ **默认行为一字不变** ⇒ 零回归风险。
-    ///
-    /// ⚠️ **「谁有资格开」没做**（台账 **D-131**）⇒ 这里只有**一个布尔开关**
-    /// ⇒ 开关本身**没有**鉴权含义。
-    admin_enabled: bool,
     /// 管理员通道的日志导出**被上界截掉**的条数（累计 · B-6）。
     ///
     /// ⚠️ **可见的丢弃**（不静默）：截断发生时除了在 M-21 的环里写一条
@@ -1021,9 +1017,12 @@ impl KernelHost {
             log_buffer,
             watchdog: HostWatchdog::new(),
             started_at: HostClock::new(),
-            // ⚠️ 管理通道**默认关**（裁决 G）⇒ 宿主对 `Admin` 命令的**默认**
+            // ⚠️ 管理通道**默认关**（裁决 E）⇒ 宿主对 `Admin` 命令的**默认**
             // 回应**一字不变**（仍是 `E_CTX-05`）。
-            admin_enabled: false,
+            //
+            // ⚠️ 角色的**唯一存储**在 `Hms` 里（裁决 B）⇒ ⇒ 这里**不再**有
+            // 一个独立布尔旋钮 ⇒ ⇒ 默认角色是 `Product`（`Hms::new()` 就是
+            // `with_role(Role::Product)`）⇒ ⇒ 准入判据天然为「关」。
             admin_drain_truncated: 0,
         };
         // The default memory map cannot fail on a fresh bus (the regions do
@@ -1076,25 +1075,61 @@ impl KernelHost {
         Ok(Self::with_description(description))
     }
 
-    /// **打开 / 关闭**管理通道（裁决 G · v0.44 · STAGE-29）。
+    /// 按**角色**造一个会话（角色 = 管理通道的**唯一**准入判据 · v0.45 ·
+    /// STAGE-30 · 裁决 C / D / E）。
     ///
-    /// ⚠️ **默认关** ⇒ 宿主对 `Admin` 命令的**默认**回应**仍然**是
-    /// `E_CTX-05` ⇒ **默认行为一字不变** ⇒ 零回归风险。
+    /// ⚠️ **默认角色 `Product`** ⇒ ⇒ 宿主对 `Admin` 命令的**默认**回应**仍然**
+    /// 是 `E_CTX-05` ⇒ ⇒ **默认行为一字不变**（裁决 E）⇒ ⇒ 零回归风险。
     ///
-    /// ⚠️ **「谁有资格开」没做**（台账 **D-131**）⇒ 这个开关**没有**鉴权
-    /// 含义 ⇒ ⇒ 它只是「这条能力面开不开」的**显式开关**。
+    /// ⚠️ **角色取代布尔开关**（裁决 D）：`Role::Admin` ⇒ 管理通道开；
+    /// `Role::Product` ⇒ 关 ⇒ ⇒ **独立布尔旋钮已消失** ⇒ ⇒ 「角色」与
+    /// 「开关」两个状态**再也打不了架**（D-131 陷阱①的结构性风险消除）。
     ///
-    /// ⚠️ **本批只兑现两个 op**（裁决 H）：`DrainLogs` 与
+    /// ⚠️ **走唯一写入口**（[`KernelHost::set_role`]）⇒ ⇒ 宿主**不另存**一份
+    /// 角色 ⇒ ⇒ 角色的**唯一存储**是 `Hms.role`（裁决 B）。
+    ///
+    /// ⚠️ **本批只兑现两个 op**（v0.44 · STAGE-29 裁决 H）：`DrainLogs` 与
     /// `Custom("diag")` ⇒ ⇒ `KillGuest` / `PersistProject` **仍**回
     /// `E_CTX-05`（**不假装实现了** · X-4）。
-    pub fn with_admin_channel(mut self, enabled: bool) -> Self {
-        self.admin_enabled = enabled;
+    pub fn with_role(mut self, role: Role) -> Self {
+        self.set_role(role);
         self
     }
 
+    /// 当前角色（**派生只读量** · 裁决 B）。
+    ///
+    /// ⚠️ 角色的**唯一存储**在 `Hms.role` 里 ⇒ ⇒ 这里**只是读它** ⇒ ⇒ 宿主
+    /// **不另存一份** ⇒ ⇒ **零状态新增** ⇒ ⇒ **不存在**「宿主与 `Hms` 角色
+    /// 不一致」那种状态。
+    pub fn role(&self) -> Role {
+        self.hms.role()
+    }
+
+    /// 写入口：改角色（运行时 · v0.45 · STAGE-30 · 裁决 B / F）。
+    ///
+    /// ⚠️ **宿主是唯一的写入口** ⇒ ⇒ 它**同时**改 `Hms` 的角色 ⇒ ⇒ 改完之后
+    ///   宿主的诊断分派**立刻**按新角色走（B-3）。
+    ///
+    /// ⚠️ **不触发任何副作用**（不重算、不清缓存、不发信号）⇒ ⇒ 角色切换后
+    ///   **下一次**分派自然按新角色走。
+    ///
+    /// ⚠️ **MVP 下这个入口没有认证门槛**（X-1）⇒ ⇒ 任何能调到它的调用方都能
+    ///   把自己升成 `Admin` ⇒ ⇒ 这正是 D-131 做法 B（令牌 → 角色）没做的
+    ///   直接后果 ⇒ ⇒ **D-131 不销账**。
+    pub fn set_role(&mut self, role: Role) {
+        self.hms.set_role(role);
+    }
+
     /// 管理通道**是否启用**（读出口）。
+    ///
+    /// ⚠️ **派生只读量**（裁决 C）：它的值 = 「**当前角色是不是 `Admin`**」
+    /// ⇒ ⇒ **语义从「存储」变成「派生」** ⇒ ⇒ 上一批的公开 API **不破**
+    /// （调用点继续能编译）⇒ ⇒ 但它**不再**是一个独立的布尔旋钮。
+    ///
+    /// ⚠️ **判据与准入同一个来源**（裁决 K）：读的是 [`KernelHost::role`]
+    /// （= `Hms.role`）⇒ ⇒ 角色与开关**不可能**打架。
     pub fn admin_enabled(&self) -> bool {
-        self.admin_enabled
+        self.role() == Role::Admin
     }
 
     /// 管理员通道的日志导出**累计被上界截掉**的条数（B-6 · 可见的丢弃）。
@@ -2114,10 +2149,14 @@ impl KernelHost {
         ))
     }
 
-    /// 管理员通道（v0.44 · STAGE-29 · 裁决 G / H / I）。
+    /// 管理员通道（v0.44 · STAGE-29 · 裁决 G / H / I；v0.45 · STAGE-30 · 裁决 C / K）。
     ///
-    /// ⚠️ **默认关**（[`KernelHost::admin_enabled`] 的**默认**是 `false`）⇒
-    /// 默认回应**一字不变**（`E_CTX-05` · B-1 / X-3）。
+    /// ⚠️ **准入判据 = 角色**（裁决 C）：`Role::Admin` ⇒ 进来；`Role::Product`
+    /// ⇒ ⇒ 回 `E_CTX-05` ⇒ ⇒ 默认角色是 `Product` ⇒ ⇒ 默认回应**一字不变**
+    /// （`E_CTX-05` · B-1 / X-3）。
+    ///
+    /// ⚠️ **角色来源 = `Hms.role`**（裁决 K）⇒ ⇒ 准入判据与诊断分派**同一个
+    /// 来源** ⇒ ⇒ 不是两个真相。
     ///
     /// ⚠️ **本批只兑现两个 op**（裁决 H）：
     ///
@@ -2131,9 +2170,14 @@ impl KernelHost {
     /// 没有实现** ⇒ ⇒ 回**同一个** `E_CTX-05` ⇒ ⇒ 不给这个码**换第二个含义**
     /// （**一个码一个含义**）。
     fn on_admin(&mut self, op: AdminOp) -> Vec<EventPayload> {
-        // ⚠️ **默认关** ⇒ 默认回应**一字不变**（X-3）⇒ ⇒ 这一句在**最前面**
-        // （默认路径**不碰**任何其它逻辑 ⇒ ⇒ 默认行为**零副作用**）。
-        if !self.admin_enabled {
+        // ⚠️ **准入判据 = 角色**（裁决 C / K）⇒ ⇒ 角色来源 = `Hms.role`
+        // （**同一个来源** ⇒ ⇒ 不是第二个真相）⇒ ⇒ 「`role=Product` +
+        // 通道已开」那种组合**再也表达不出来**。
+        //
+        // ⚠️ **默认关**（默认角色 `Product`）⇒ ⇒ 默认回应**一字不变**（X-3）
+        // ⇒ ⇒ 这一句在**最前面**（默认路径**不碰**任何其它逻辑 ⇒ ⇒ 默认
+        // 行为**零副作用**）。
+        if self.hms.role() != Role::Admin {
             return vec![self.admin_channel_disabled_error()];
         }
         match op {
