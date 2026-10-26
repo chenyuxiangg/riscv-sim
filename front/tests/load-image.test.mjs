@@ -116,7 +116,7 @@ async function setup() {
  * @param {number[]} bytes — 文件字节
  */
 async function selectFile(name, bytes) {
-    const input = dom.document.querySelector("[data-image-input]");
+    const input = dom.document.querySelector('input[data-image-load-from="product"]');
     assert.ok(input, "产品视图没有渲染文件选择器");
     const file = new File([new Uint8Array(bytes)], name);
     // ⚠️ **stub 的 `files`**：DOM 替身没有真的文件列表 ⇒ ⇒ 手工塞上
@@ -140,7 +140,7 @@ async function selectFile(name, bytes) {
  * @param {string} [name]
  */
 async function selectUnreadableFile(name = "unreadable.elf") {
-    const input = dom.document.querySelector("[data-image-input]");
+    const input = dom.document.querySelector('input[data-image-load-from="product"]');
     assert.ok(input, "产品视图没有渲染文件选择器");
     input.files = [{
         name,
@@ -155,7 +155,7 @@ async function selectUnreadableFile(name = "unreadable.elf") {
  * 点「加载」按钮 —— 走**真实**的 `click` 事件路径。
  */
 function clickLoad() {
-    const btn = dom.document.querySelector("[data-action='load-image']");
+    const btn = dom.document.querySelector('[data-action="load-image"][data-image-load-from="product"]');
     assert.ok(btn, "产品视图没有渲染「加载」按钮");
     btn.dispatchEvent(new Event("click"));
 }
@@ -201,15 +201,15 @@ describe("固件加载器 · 纯逻辑", () => {
 describe("产品视图 · 加载固件的 UI 入口", () => {
     test("产品视图渲染出**一个**文件选择器与一个「加载」按钮", async () => {
         await setup();
-        const inputs = dom.document.querySelectorAll("[data-image-input]");
-        assert.equal(inputs.length, 1, `文件选择器应恰好一个，实测 ${inputs.length}`);
-        const btns = dom.document.querySelectorAll("[data-action='load-image']");
-        assert.equal(btns.length, 1, `「加载」按钮应恰好一个，实测 ${btns.length}`);
+        const inputs = dom.document.querySelectorAll('input[data-image-load-from="product"]');
+        assert.equal(inputs.length, 1, `产品视图的文件选择器应恰好一个，实测 ${inputs.length}`);
+        const btns = dom.document.querySelectorAll('[data-action="load-image"][data-image-load-from="product"]');
+        assert.equal(btns.length, 1, `产品视图的「加载」按钮应恰好一个，实测 ${btns.length}`);
     });
 
     test("选择器接受 `.elf` / `.hex` / `.bin`", async () => {
         await setup();
-        const input = dom.document.querySelector("[data-image-input]");
+        const input = dom.document.querySelector('input[data-image-load-from="product"]');
         const accept = String(input.getAttribute("accept") ?? "");
         for (const ext of [".elf", ".hex", ".bin"]) {
             assert.ok(
@@ -531,3 +531,245 @@ function makeMemoryMap(topics = []) {
         async subscribeMemoryMapStream() { topics.push("memory.map"); },
     };
 }
+
+// ---------------------------------------------------------------------------
+// STAGE-33 · v0.48 批 —— 页头那个「加载固件」入口
+// ---------------------------------------------------------------------------
+//
+// ⚠️ **这一段盯的是「用户找不找得到」**，不是「功能有没有做」——STAGE-32 把
+// 功能做出来了，但做在**第二个标签页的最下面** ⇒ ⇒ 用户打开页面**根本看不到**
+// ⇒ ⇒ 这一段盯的是：**页头常驻** ⇒ ⇒ **默认落地页上就有那个按钮**。
+//
+// ⚠️ **两个入口共用同一条装载路径** ⇒ ⇒ 这一段还要证明「**不是两条路**」。
+
+/**
+ * 把**页头**那个控件挂上去（app 层那件事：`wireTopbarImageLoader`）。
+ *
+ * ⚠️ **不启动整个 bootstrap**：app.js 的自启动在测试里是关的 ⇒ ⇒ 这里只调
+ * 挂载那一个函数 ⇒ ⇒ 「页头有没有入口」这件事**可以单独**被断言。
+ *
+ * @param {object} services
+ */
+function mountTopbar(services) {
+    app.wireTopbarImageLoader(services);
+}
+
+/**
+ * 造一套 app 层要用的服务替身。
+ *
+ * @param {object} router
+ * @param {string[]} [topics]
+ * @returns {object}
+ */
+function makeServices(router, topics = []) {
+    return {
+        commandRouter: router,
+        registerMemory: makeRegisterMemory(router, topics),
+        waveform: makeWaveform(topics),
+        debug: makeDebug(),
+        console: makeConsole(topics),
+        memoryMap: makeMemoryMap(topics),
+    };
+}
+
+/**
+ * 等一个条件成立（轮询）。
+ *
+ * ⚠️ **必须等**：装载那条路是 **async**（要 await 内核回包）⇒ ⇒ 点击之后
+ * 立刻断言会看到「还没发生」。
+ *
+ * @param {() => boolean} predicate
+ * @param {number} [timeoutMs]
+ * @returns {Promise<boolean>}
+ */
+async function waitFor(predicate, timeoutMs = 3000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        if (predicate()) return true;
+        await new Promise((r) => setTimeout(r, 10));
+    }
+    return predicate();
+}
+
+/**
+ * 取线上帧里的 `LoadProject` 载荷。
+ *
+ * ⚠️ **线上形状** = `payload: { Command: { LoadProject: … } }` ⇒ ⇒ 断言必须
+ * 按**这一层**找 ⇒ ⇒ 找错层 ⇒ ⇒ 断言恒 0 条 ⇒ ⇒ 假红。
+ *
+ * @param {{sent: any[]}} transport
+ * @returns {object|null}
+ */
+function loadProjectPayload(transport) {
+    const frame = transport.sent.find(
+        (s) => s.message?.payload?.Command && "LoadProject" in s.message.payload.Command,
+    );
+    return frame ? frame.message.payload.Command.LoadProject : null;
+}
+
+/**
+ * 走**页头**那条路：选文件 ⇒ ⇒ 点「加载固件」。
+ *
+ * @param {object} dom
+ * @param {string} name
+ * @param {number[]} bytes
+ */
+async function selectFileInTopbar(name, bytes) {
+    const input = dom.document.querySelector('input[data-image-load-from="topbar"]');
+    assert.ok(input, "页头没有渲染文件选择器");
+    input.files = [new File([new Uint8Array(bytes)], name)];
+    input.dispatchEvent(new Event("change"));
+    // ⚠️ **等一拍**：`change` 的处理器是 `async`（要 `await` 读字节）。
+    await new Promise((r) => setTimeout(r, 0));
+}
+
+/**
+ * 点**页头**那个「加载固件」按钮。
+ */
+function clickTopbarLoad() {
+    const btn = dom.document.querySelector('[data-action="load-image"][data-image-load-from="topbar"]');
+    assert.ok(btn, "页头没有渲染「加载固件」按钮");
+    btn.dispatchEvent(new Event("click"));
+}
+
+describe("页头 · 「加载固件」入口（STAGE-33）", () => {
+    test("页头渲染出**一个**文件选择器与一个**「加载固件」**按钮", async () => {
+        await setup();
+        mountTopbar(makeServices({}));
+        const input = dom.document.querySelector('input[data-image-load-from="topbar"]');
+        assert.ok(input, "页头没有渲染文件选择器");
+        assert.equal(String(input.getAttribute("type") ?? ""), "file");
+        const btn = dom.document.querySelector('[data-action="load-image"][data-image-load-from="topbar"]');
+        assert.ok(btn, "页头没有渲染「加载固件」按钮");
+        assert.equal(String(btn.textContent ?? "").trim(), "加载固件");
+    });
+
+    test("两个入口的 `data-image-load-from` **互不相同**（门禁的选择器才无歧义）", async () => {
+        await setup();
+        mountTopbar(makeServices({}));
+        const top = dom.document.querySelector('input[data-image-load-from="topbar"]');
+        const prod = dom.document.querySelector('input[data-image-load-from="product"]');
+        assert.ok(top, "页头没有文件选择器");
+        assert.ok(prod, "产品视图没有文件选择器");
+        assert.notEqual(
+            top.getAttribute("data-image-load-from"),
+            prod.getAttribute("data-image-load-from"),
+            "两个入口的位置取值必须不同，否则真机门禁会选错输入框",
+        );
+    });
+
+    test("页头选文件 ⇒ ⇒ 状态条显示**文件名与字节数**（与产品视图那份**同源**）", async () => {
+        await setup();
+        mountTopbar(makeServices({}));
+        await selectFileInTopbar(ELF_NAME, ELF_BYTES);
+        const brief = dom.document.querySelector("[data-image-brief]");
+        assert.ok(brief, "页头没有渲染那条短状态");
+        assert.equal(brief.getAttribute("data-image-brief-status"), "idle");
+        const text = String(brief.textContent ?? "");
+        assert.ok(text.includes(ELF_NAME), `页头状态条没有文件名：${text}`);
+        assert.ok(text.includes(String(ELF_BYTE_LENGTH)), `页头状态条没有字节数：${text}`);
+        // ⚠️ **同源**：产品视图那块状态条显示的是**同一个**文件名。
+        const status = dom.document.querySelector("[data-image-load-status]");
+        assert.ok(
+            String(status.textContent ?? "").includes(ELF_NAME),
+            "产品视图的状态条与页头不是同一份状态",
+        );
+    });
+
+    test("页头点「加载固件」⇒ ⇒ **真的** `LoadProject` 上线（⛔ 不是假按钮）", async () => {
+        const { transport } = await setup();
+        const router = await makeRouter(transport);
+        mountTopbar(makeServices(router));
+        await selectFileInTopbar(ELF_NAME, ELF_BYTES);
+        clickTopbarLoad();
+        const got = await waitFor(() => loadProjectPayload(transport) !== null);
+        assert.ok(got, `页头那条路没有发出 LoadProject（线上帧：${JSON.stringify(transport.sent)}）`);
+        const project = loadProjectPayload(transport);
+        assert.equal(project.version.isa, "RV32IMC");
+        assert.deepEqual(project.images[0].source.Bytes, [...ELF_BYTES]);
+        assert.equal(project.images[0].name, ELF_NAME);
+        // ⚠️ **必须等「最终状态」**：`LoadProject` 帧是**中途**发出去的 ⇒ ⇒
+        // 状态更新（`setImageLoadState` + `publishProductState`）在它**之后**
+        // ⇒ ⇒ 只等帧就断言 ⇒ ⇒ 会**竞态**（实测踩过：断言时状态还是 `idle`）。
+        const brief = dom.document.querySelector("[data-image-brief]");
+        const settled = await waitFor(
+            () => brief.getAttribute("data-image-brief-status") === "ok",
+        );
+        assert.ok(
+            settled,
+            `页头状态条没有变成 ok（文案：${String(brief.textContent ?? "")}）`,
+        );
+    });
+
+    test("两个入口装的是**同一个工程**（⇒ ⇒ 走的是**同一条**装载路径）", async () => {
+        // -- 产品视图那条 ------------------------------------------------
+        const a = await setup();
+        const routerA = await makeRouter(a.transport);
+        const servicesA = makeServices(routerA);
+        const { signals, stop } = captureCommands();
+        await selectFile(ELF_NAME, ELF_BYTES);
+        clickLoad();
+        stop();
+        await app.handleCommand(signals[0], servicesA);
+        const viaView = loadProjectPayload(a.transport);
+        assert.ok(viaView, "产品视图那条路没有发出 LoadProject");
+
+        // -- 页头那条 ------------------------------------------------------
+        const b = await setup();
+        const routerB = await makeRouter(b.transport);
+        mountTopbar(makeServices(routerB));
+        await selectFileInTopbar(ELF_NAME, ELF_BYTES);
+        clickTopbarLoad();
+        await waitFor(() => loadProjectPayload(b.transport) !== null);
+        const viaTopbar = loadProjectPayload(b.transport);
+        assert.ok(viaTopbar, "页头那条路没有发出 LoadProject");
+
+        // ⇒ ⇒ **逐字段相同** ⇒ ⇒ 两条入口落到**同一条**装载路径上。
+        assert.deepEqual(viaTopbar, viaView);
+    });
+
+    test("「读字节 + 存 pending」**只有一处实现**（⛔ 视图层不许有第二份）", async () => {
+        const src = readFileSync(resolve(frontDir, "views/m02_viewcomponents.js"), "utf8");
+        assert.ok(
+            !/function\s+pendingImage\s*\(/.test(src),
+            "视图层自己又写了一份 pendingImage（⇒ ⇒ 两份实现会漂移）",
+        );
+        assert.ok(
+            !/function\s+loadImageFileIntoPending\s*\(/.test(src),
+            "视图层自己又写了一份 loadImageFileIntoPending（⇒ ⇒ 两份实现会漂移）",
+        );
+        assert.equal(typeof loader.pendingImage, "function");
+        assert.equal(typeof loader.loadImageFileIntoPending, "function");
+    });
+
+    test("装载命令的处理函数**只有一处**，且页头那条路**必须**走它", async () => {
+        const src = readFileSync(resolve(frontDir, "app.js"), "utf8");
+        const defs = src.match(/function\s+handleLoadImageCommand\s*\(/g) ?? [];
+        assert.equal(defs.length, 1, `handleLoadImageCommand 应恰好定义一次，实测 ${defs.length}`);
+        assert.ok(src.includes('case "load-image"'), "命令 switch 里没有 load-image 分支");
+        // ⚠️ **页头那条路必须调它** ⇒ ⇒ 否则就是**两条**装载路径 ⇒ ⇒ 之后
+        // 「重订流 / 清残留」会分叉。
+        const start = src.indexOf("export function wireTopbarImageLoader");
+        assert.ok(start > 0, "app.js 里没有 wireTopbarImageLoader");
+        const body = src.slice(start, src.indexOf("\n}\n", start));
+        assert.ok(
+            body.includes("handleLoadImageCommand"),
+            "页头那条路没有走 handleLoadImageCommand（⇒ ⇒ 两条装载路径）",
+        );
+    });
+
+    test("页头点「加载固件」但**没选文件** ⇒ ⇒ 如实显示原因（⛔ 不静默）", async () => {
+        await setup();
+        mountTopbar(makeServices({}));
+        clickTopbarLoad();
+        await new Promise((r) => setTimeout(r, 0));
+        const brief = dom.document.querySelector("[data-image-brief]");
+        assert.equal(
+            brief.getAttribute("data-image-brief-status"),
+            "error",
+            "没选文件时状态应是 error",
+        );
+        const text = String(brief.textContent ?? "");
+        assert.ok(text.includes("没有待加载的文件"), `页头状态条没显示原因：${text}`);
+    });
+});

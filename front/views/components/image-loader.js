@@ -8,8 +8,13 @@
 // ⚠️ **本模块是纯逻辑**（`front/views/components/` 的一贯做法）：
 //   - `imageKindFor(name)` —— 扩展名 ⇒ 契约层的 `ImageKind`（两个变体）
 //   - `buildImageProjectFromBytes(bytes, name, options)` —— 造工程
-//   - `renderImageLoader(state)` —— 渲染加载器面板
+//   - `renderImageLoader(state)` —— 渲染加载器面板（产品视图用）
+//   - `renderImageLoaderControl(options)` —— 渲染**控件本体**（页头与产品
+//     视图**共用** ⇒ ⇒ `accept` 列表与按钮语义**只有一处**）
 //   - `readImageFile(file)` —— 读字节（浏览器原生 `File.arrayBuffer()`）
+//   - `pendingImage()` / `loadImageFileIntoPending(file)` —— 待加载镜像
+//     （**STAGE-33 从视图层搬到这里** ⇒ ⇒ 页头那个入口也共用这一段）
+//   - `describeImageLoadShort(state)` —— 短版状态说明（页头那条窄状态条）
 //
 // ⚠️ **「装完就停」是用户的定案**（规格 §3 裁决 D）⇒ ⇒ 本模块**不**发任何
 // 「继续」命令⇒ ⇒ 跑不跑由用户自己点。
@@ -32,6 +37,22 @@ import * as viewStore from "../m03_viewstore.js";
 export const IMAGE_KINDS = Object.freeze({
     Elf: "Elf",
     RawHex: "RawHex",
+});
+
+/**
+ * 加载入口的**位置**（STAGE-33 · v0.48 批）。
+ *
+ * ⚠️ **为什么要有它**：页头（`topbar`）与产品视图（`product`）**各有一个**
+ * 文件输入框 ⇒ ⇒ 真机门禁按 `document.querySelector("[data-image-input]")`
+ * 取元素时，**页头在 DOM 里排在 `main` 之前** ⇒ ⇒ 那样取到的是**页头那个**
+ * ⇒ ⇒ **判据的口径会悄悄变**（规格 §2 的 F7）⇒ ⇒ 所以每个入口都带一个
+ * `data-image-load-from`，取值**定义在**这一处。
+ *
+ * @type {Readonly<{topbar: string, product: string}>}
+ */
+export const IMAGE_ENTRY_PLACEMENT = Object.freeze({
+    topbar: "topbar",
+    product: "product",
 });
 
 /**
@@ -190,6 +211,116 @@ export function publishProductState() {
 }
 
 /**
+ * **待加载的镜像**（字节 + 文件名 + 类型）。
+ *
+ * ⚠️ **住在视图状态里**（`product` 视图的 `imageLoad.pending`）⇒ ⇒
+ * **单一真相** ⇒ ⇒ 视图状态一重置（`m03.reset()` / 换工作台）它就没了
+ * ⇒ ⇒ **不会**出现「上一个会话的字节还挂着」那种状态。
+ *
+ * ⚠️ **为什么必须先存**：视图层只能发信号（`emitCommand`），而命令的载荷
+ * **在信号里**⇒ ⇒ 字节必须先**存**在某处才能在点击「加载」时取到。
+ *
+ * ⚠️ **为什么不是「点击时读文件」**：点击时 `input.files` 已经是空的了
+ * （浏览器把文件交给 `change` 事件后就清掉了）⇒ ⇒ 必须在 `change` 里
+ * 读。
+ *
+ * ⚠️ **STAGE-33：这段从视图层搬到了这里**——页头那个入口在 **app 层**
+ * （页头不属于任何视图面板 ⇒ ⇒ 视图层管不到）⇒ ⇒ 两边共用**同一段**实现
+ * ⇒ ⇒ **不写第二套**（规格 §3 裁决 D）。
+ *
+ * @returns {{bytes: number[], name: string, kind: string}|null}
+ */
+export function pendingImage() {
+    return viewStore.getState("product")?.imageLoad?.pending ?? null;
+}
+
+/**
+ * 读用户选的文件 ⇒ 存成「待加载的镜像」。
+ *
+ * ⚠️ **读失败如实显示**（规格 §3 裁决 J）⇒ ⇒ 不静默。
+ *
+ * ⚠️ **两个入口共用这一段**（页头那个入口与产品视图那个入口）⇒ ⇒ 读字节
+ * 与存 pending 的行为**必然一致**。
+ *
+ * @param {File|Blob} file
+ * @returns {Promise<void>}
+ */
+export async function loadImageFileIntoPending(file) {
+    try {
+        const bytes = await readImageFile(file);
+        const name = String(file?.name ?? "image.bin");
+        setImageLoadState({
+            status: "idle",
+            name,
+            byteLength: bytes.length,
+            error: null,
+            pending: { bytes, name, kind: imageKindFor(name) },
+        });
+        publishProductState();
+    } catch (err) {
+        setImageLoadState({
+            status: "error",
+            error: `读取文件失败：${err?.message ?? err}`,
+            pending: null,
+        });
+        publishProductState();
+    }
+}
+
+/**
+ * 加载状态的**一句话说明**（短版 · 给页头那条窄状态条用）。
+ *
+ * ⚠️ **与 `describeImageLoad` 同源**（都读同一份 `state`）⇒ ⇒ 不是第二个
+ * 真相 ⇒ ⇒ 只是**长短**不同。
+ *
+ * @param {{status?: string, name?: string|null, byteLength?: number|null, error?: string|null}} [state]
+ * @returns {string}
+ */
+export function describeImageLoadShort(state) {
+    const status = String(state?.status ?? "idle");
+    if (status === "loading") return "装载中…";
+    if (status === "error") return `装载失败：${String(state?.error ?? "未知原因")}`;
+    if (status === "ok") return `已装载「${String(state?.name ?? "固件")}」`;
+    if (state?.name) {
+        return `已选「${String(state.name)}」（${Number(state.byteLength ?? 0)} 字节）`;
+    }
+    return "未选固件";
+}
+
+/**
+ * 渲染加载入口的**控件本体**（文件选择器 + 按钮 [+ 一条短状态]）。
+ *
+ * ⚠️ **页头与产品视图共用这一段**（STAGE-33）⇒ ⇒ `accept` 列表、按钮
+ * 语义、`data-image-load-from` 的取值**都只有一处**⇒ ⇒ **不写第二套**。
+ *
+ * ⚠️ **按钮文案**：页头那个是 **「加载固件」**（与用户要找的字逐字一致），
+ * 产品视图那个保持 **「加载」**（v0.47 的真机判据一个字不动）。
+ *
+ * @param {{placement?: string, label?: string, buttonText?: string, withBrief?: boolean}} [options]
+ * @returns {string}
+ */
+export function renderImageLoaderControl(options = {}) {
+    const placement = options.placement ?? IMAGE_ENTRY_PLACEMENT.product;
+    const label = options.label ?? "选择固件镜像";
+    const buttonText = options.buttonText ?? "加载";
+    const brief = options.withBrief
+        ? `<span class="muted image-loader-brief" data-image-brief data-image-brief-status="idle">未选固件</span>`
+        : "";
+    return `
+        <span class="image-loader-control">
+            <label class="source-input">
+                ${escapeHtml(label)}
+                <input type="file" accept=".elf,.out,.hex,.ihex,.bin,.raw"
+                       data-image-input data-image-load-from="${escapeHtml(placement)}">
+            </label>
+            <button type="button" data-action="load-image"
+                    data-image-load-from="${escapeHtml(placement)}">${escapeHtml(buttonText)}</button>
+            ${brief}
+        </span>
+    `;
+}
+
+/**
  * 渲染加载器面板。
  *
  * ⚠️ **状态写在面板上**（不只在页脚）——规格 §8 订正 3：失败必须**在界面
@@ -209,13 +340,7 @@ export function renderImageLoader(state) {
     return `
         <section class="image-loader">
             <h3>加载固件</h3>
-            <div class="debug-toolbar">
-                <label class="source-input">
-                    选择固件镜像
-                    <input type="file" accept=".elf,.out,.hex,.ihex,.bin,.raw" data-image-input>
-                </label>
-                <button type="button" data-action="load-image">加载</button>
-            </div>
+            ${renderImageLoaderControl({ placement: IMAGE_ENTRY_PLACEMENT.product })}
             <p class="muted" data-image-load-status="${escapeHtml(status)}">${escapeHtml(text)}</p>
             ${errorBlock}
             <p class="muted">

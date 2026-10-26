@@ -91,6 +91,8 @@ import { fileURLToPath } from "node:url";
 import { loadElf, findFirstSymbol } from "./elf-symtab.mjs";
 import {
     UI_IMAGE_ELF_MARKER,
+    UI_IMAGE_ELF_MARKER_B,
+    UI_IMAGE_ELF_X3_B,
     buildUiImageElf,
     checkEncoderAgainstDemoFirmware,
 } from "./ui-image-fixture.mjs";
@@ -2627,12 +2629,22 @@ async function selectFileForInput(cdp, selector, filePath) {
     await cdp.send("DOM.setFileInputFiles", { files: [filePath], nodeId: found.nodeId });
 }
 
-/** 加载器面板的探针（DOM 现状）。 */
+/**
+ * 加载器面板的探针（DOM 现状）。
+ *
+ * ⚠️ **必须按位置取值**（STAGE-33 · v0.48 批）：页头现在**也有**一个加载
+ * 入口 ⇒ ⇒ 而**页头在 DOM 里排在视图面板之前** ⇒ ⇒ 用
+ * `document.querySelector("[data-image-input]")` 会**命中页头那个** ⇒ ⇒
+ * 断言还在跑、但断的**不是它以为的那个东西** ⇒ ⇒ ⇒ 所以这里一律**按
+ * `data-image-load-from="product"` 限定**。
+ */
 const IMAGE_LOADER_PROBE = `(() => {
-  const status = document.querySelector("[data-image-load-status]");
-  const err = document.querySelector("[data-image-load-error]");
-  const input = document.querySelector("[data-image-input]");
-  const btn = document.querySelector('[data-action="load-image"]');
+  const panel = document.querySelector('[data-view-body="product"]');
+  const root = panel ?? document;
+  const status = root.querySelector("[data-image-load-status]");
+  const err = root.querySelector("[data-image-load-error]");
+  const input = root.querySelector('input[data-image-load-from="product"]');
+  const btn = root.querySelector('[data-action="load-image"][data-image-load-from="product"]');
   // ⚠️ **文件输入框里真的躺着那个文件吗** —— 这是 B-1 的**正向**判据：
   // 只断言「CDP 调用没报错」是**弱**的 ⇒ ⇒ 换成「浏览器的文件输入框里
   // **真的有**那个文件（名字 + 大小）」⇒ ⇒ 走脚本口代替界面路径时
@@ -2651,6 +2663,40 @@ const IMAGE_LOADER_PROBE = `(() => {
     inputType: input ? String(input.getAttribute("type") || "") : null,
     accept: input ? String(input.getAttribute("accept") || "") : null,
     hasButton: !!btn,
+    files,
+  };
+})()`;
+
+/**
+ * **页头**那个加载入口的探针（STAGE-33 · v0.48 批 · B-6 ~ B-11）。
+ *
+ * ⚠️ **只查页头**（`header.topbar` 内部）⇒ ⇒ 产品视图里那个入口**不算**
+ * ⇒ ⇒ 「默认落地页上有没有入口」这条判据才不是恒绿。
+ *
+ * ⚠️ **要判「可见」**：在 DOM 里 ≠ 用户看得见 ⇒ ⇒ 用
+ * `getBoundingClientRect()` 的宽高（> 0 ⇒ 真的占地方）。
+ */
+const UI_IMAGE_TOPBAR_PROBE = `(() => {
+  const topbar = document.querySelector("header.topbar");
+  const input = topbar ? topbar.querySelector('input[data-image-load-from="topbar"]') : null;
+  const btn = topbar ? topbar.querySelector('button[data-action="load-image"][data-image-load-from="topbar"]') : null;
+  const brief = topbar ? topbar.querySelector("[data-image-brief]") : null;
+  const rect = btn ? btn.getBoundingClientRect() : null;
+  const files = input && input.files
+    ? Array.from(input.files).map((f) => ({
+        name: String(f.name ?? ""),
+        size: Number(f.size ?? 0),
+      }))
+    : [];
+  return {
+    hash: String(location.hash || ""),
+    hasTopbar: !!topbar,
+    hasInput: !!input,
+    hasButton: !!btn,
+    buttonText: btn ? String(btn.textContent || "").trim() : "",
+    briefText: brief ? String(brief.textContent || "").trim() : "",
+    briefStatus: brief ? String(brief.getAttribute("data-image-brief-status") || "") : null,
+    visible: !!(rect && rect.width > 0 && rect.height > 0),
     files,
   };
 })()`;
@@ -2736,6 +2782,24 @@ const BV_IMAGE_PICK_PROBE = `(() => {
 })()`;
 
 /**
+ * **按位置**留痕的 `change` 事件清单（STAGE-33 · v0.48 批 · B-11）。
+ *
+ * ⚠️ **为什么要按位置**：页头与产品视图**各有一个**输入框 ⇒ ⇒ 只记「有没
+ * 有 `change`」分不清是**哪一个**入口 ⇒ ⇒ 记下 `data-image-load-from` ⇒ ⇒
+ * 才能断言「**页头那条路**真的走的是界面路径」。
+ *
+ * @returns {{from: string, name: string, size: number}[]}
+ */
+const BV_IMAGE_PICKS_PROBE = `(() => {
+  const list = window.__bv_image_picks ?? [];
+  return list.map((p) => ({
+    from: String(p.from ?? ""),
+    name: String(p.name ?? ""),
+    size: Number(p.size ?? 0),
+  }));
+})()`;
+
+/**
  * 在页面里装一个 **`change` 事件的捕获监听器**（把选中的文件留痕）。
  *
  * ⚠️ **用捕获阶段**（`capture: true`）⇒ ⇒ 它在视图层那个监听器**之前**跑
@@ -2749,10 +2813,14 @@ const BV_IMAGE_PICK_PROBE = `(() => {
 async function installImagePickRecorder(cdp) {
     await runEffect(cdp, [
         'window.__bv_image_pick = null;',
+        'window.__bv_image_picks = [];',
         'document.addEventListener("change", (ev) => {',
         '  const t = ev.target;',
         '  const f = t && t.files ? t.files[0] : null;',
-        '  if (f) window.__bv_image_pick = { name: String(f.name || ""), size: Number(f.size || 0) };',
+        '  if (!f) return;',
+        '  const from = (t.getAttribute && t.getAttribute("data-image-load-from")) || "";',
+        '  window.__bv_image_pick = { name: String(f.name || ""), size: Number(f.size || 0) };',
+        '  window.__bv_image_picks.push({ from, name: String(f.name || ""), size: Number(f.size || 0) });',
         '}, true);',
     ].join("\n"));
 }
@@ -2812,7 +2880,7 @@ async function runLoadImageSection(cdp, opts) {
         await installImagePickRecorder(cdp);
         let pickerError = null;
         try {
-            await selectFileForInput(cdp, "[data-image-input]", elfPath);
+            await selectFileForInput(cdp, 'input[data-image-load-from="product"]', elfPath);
         } catch (err) {
             pickerError = String(err?.message ?? err).slice(0, 300);
         }
@@ -2856,7 +2924,7 @@ async function runLoadImageSection(cdp, opts) {
 
         // -- 点「加载」----------------------------------------------------
         await runEffect(cdp,
-            'document.querySelector(\'[data-action="load-image"]\').click();');
+            'document.querySelector(\'[data-action="load-image"][data-image-load-from="product"]\').click();');
         const loaded = await waitForImageState(cdp, opts,
             (s) => s.status === "ok" || s.status === "error");
         checks.push({
@@ -2935,7 +3003,7 @@ async function runLoadImageSection(cdp, opts) {
         await sleep(400);
         let badPickError = null;
         try {
-            await selectFileForInput(cdp, "[data-image-input]", badPath);
+            await selectFileForInput(cdp, 'input[data-image-load-from="product"]', badPath);
         } catch (err) {
             badPickError = String(err?.message ?? err).slice(0, 300);
         }
@@ -2949,13 +3017,169 @@ async function runLoadImageSection(cdp, opts) {
         }
         await waitForImageState(cdp, opts, (s) => s.status === "error" || s.text.includes("broken.elf"));
         await runEffect(cdp,
-            'document.querySelector(\'[data-action="load-image"]\').click();');
+            'document.querySelector(\'[data-action="load-image"][data-image-load-from="product"]\').click();');
         const failed = await waitForImageState(cdp, opts, (s) => s.status === "error");
         const failText = `${failed?.text ?? ""} ${failed?.error ?? ""}`;
         checks.push({
             name: "B-5 · 装载失败时界面显示**内核原文**（含错误码 E_LDR-01）",
             ok: failed?.status === "error" && /E_LDR-\d{2}/.test(failText),
             detail: `面板状态 ${JSON.stringify(failed?.status ?? null)}：${JSON.stringify(failText.slice(0, 300))}`,
+        });
+
+        // ==================================================================
+        // STAGE-33 · v0.48 批 —— **页头**那条装载路径（B-6 ~ B-11）
+        // ==================================================================
+        //
+        // ⚠️ **为什么另装一份固件**：产品视图那条路已经装过夹具 A 了 ⇒ ⇒
+        // 页头这条若也装 A ⇒ ⇒ 那是「装同一个东西」⇒ ⇒ **恒等变换**⇒ ⇒
+        // 判据**恒绿**⇒ ⇒ ⇒ 所以这里装**夹具 B**（标记 `UIB`、特征值
+        // `0x456`）⇒ ⇒ 「内核换镜像了」这件事**真的能被观测到**。
+        const elfBytesB = buildUiImageElf({ marker: UI_IMAGE_ELF_MARKER_B, x3Value: UI_IMAGE_ELF_X3_B });
+        const elfPathB = join(tmpDir, "ui-image-b.elf");
+        writeFileSync(elfPathB, elfBytesB);
+
+        // -- 回到**默认落地页**（⛔ 不是 `#/product`）------------------------
+        // ⚠️ **空 hash ⇒ 路由回落到当前角色的默认视图**（`m01_workbench.js`
+        // 的 `route()`：`ROLE_DEFAULT_VIEW.get(currentRole)` ⇒ ⇒ 嵌入式工作台）
+        // ⇒ ⇒ 这才是「用户打开页面看到的那一屏」。
+        await runEffect(cdp, 'location.hash = "";');
+        await sleep(600);
+
+        // -- B-6 · 默认落地页上就有「加载固件」入口 -------------------------
+        const topbar0 = await awaitEval(cdp, UI_IMAGE_TOPBAR_PROBE);
+        checks.push({
+            name: "B-6 · **默认落地页上就有「加载固件」入口**（⛔ 不在产品视图里 ⇒ ⇒ 这一条正是用户这次的判据）",
+            ok: !!(topbar0?.hasButton && topbar0?.visible && !String(topbar0?.hash ?? "").startsWith("#/product")),
+            detail: `hash=${JSON.stringify(topbar0?.hash ?? "")} `
+                + `按钮文案=${JSON.stringify(topbar0?.buttonText ?? "")} 可见=${topbar0?.visible}`,
+        });
+
+        // -- B-7 · 按钮文案逐字是「加载固件」 ------------------------------
+        checks.push({
+            name: "B-7 · 页头按钮的文案**逐字**是「加载固件」",
+            ok: topbar0?.buttonText === "加载固件",
+            detail: `实测 ${JSON.stringify(topbar0?.buttonText ?? "")}`,
+        });
+
+        // -- B-8 · **在页头**真选文件 ⇒ ⇒ 状态条显示文件名与字节数 ----------
+        // ⚠️ **页头的输入框不在视图面板里** ⇒ ⇒ 视图重渲染**碰不到它** ⇒ ⇒
+        // 所以「输入框里真的有那个文件」这条**正向**判据在这里**能成立**
+        // （产品视图那个输入框做不到 —— 它每次重渲染都被重建）。
+        //
+        // ⚠️ **不许提前 return**：STAGE-33 这一段里的断言**每一条都要跑完**
+        // ⇒ ⇒ 否则「页头控件整个没了」时，后面的断言**根本没被评估** ⇒ ⇒
+        // 门禁只会报 3 条红 ⇒ ⇒ **掩盖了**哪些断言也没跑 ⇒ ⇒ ⇒ 每步自己
+        // 产出断言，失败**不短路**。
+        let topbarPickError = null;
+        try {
+            await selectFileForInput(cdp, 'input[data-image-load-from="topbar"]', elfPathB);
+        } catch (err) {
+            topbarPickError = String(err?.message ?? err).slice(0, 300);
+        }
+        let topbarBrief = null;
+        if (!topbarPickError) {
+            const briefDeadline = Date.now() + opts.timeoutMs;
+            while (Date.now() < briefDeadline) {
+                topbarBrief = await awaitEval(cdp, UI_IMAGE_TOPBAR_PROBE);
+                if (String(topbarBrief?.briefText ?? "").includes("ui-image-b.elf")) break;
+                await sleep(200);
+            }
+        }
+        const topbarFile = (topbarBrief?.files ?? [])[0] ?? null;
+        checks.push({
+            name: "B-8 · **在页头**真选文件 ⇒ ⇒ 页头状态条显示**文件名与字节数**（且输入框里真的有那个文件）",
+            ok: topbarPickError === null
+                && String(topbarBrief?.briefText ?? "").includes("ui-image-b.elf")
+                && String(topbarBrief?.briefText ?? "").includes(String(elfBytesB.length))
+                && topbarFile?.name === "ui-image-b.elf"
+                && topbarFile?.size === elfBytesB.length,
+            detail: topbarPickError
+                ? `第二个文件选不进去：${topbarPickError}`
+                : `状态条=${JSON.stringify(topbarBrief?.briefText ?? "")} `
+                    + `输入框里的文件=${JSON.stringify(topbarFile)}（文件 ${elfBytesB.length} 字节）`,
+        });
+
+        // -- 点页头的「加载固件」⇒ ⇒ 真装载 -------------------------------
+        let topbarClickError = null;
+        try {
+            await runEffect(cdp,
+                'document.querySelector(\'[data-action="load-image"][data-image-load-from="topbar"]\').click();');
+        } catch (err) {
+            topbarClickError = String(err?.message ?? err).slice(0, 300);
+        }
+        let topbarLoaded = null;
+        if (!topbarClickError) {
+            const topbarLoadDeadline = Date.now() + opts.timeoutMs;
+            while (Date.now() < topbarLoadDeadline) {
+                topbarLoaded = await awaitEval(cdp, UI_IMAGE_TOPBAR_PROBE);
+                if (topbarLoaded?.briefStatus === "ok" || topbarLoaded?.briefStatus === "error") break;
+                await sleep(200);
+            }
+        }
+        checks.push({
+            name: "B-9a · 点页头的「加载固件」⇒ ⇒ **内核真的接了这个工程**（页头状态条 = ok）",
+            ok: topbarLoaded?.briefStatus === "ok",
+            detail: topbarClickError
+                ? `点不动页头那个按钮：${topbarClickError}`
+                : `页头状态条状态=${JSON.stringify(topbarLoaded?.briefStatus ?? null)} `
+                    + `文案=${JSON.stringify(topbarLoaded?.briefText ?? "")}`,
+        });
+
+        // -- B-10 · 装载后**不自动跑** -------------------------------------
+        // ⚠️ **必须先切到终端视图**（console 字节是**流** ⇒ ⇒ 面板没挂上时
+        // 那一步会跳过）⇒ ⇒ 而且切换会**重渲染** ⇒ ⇒ 读到的是**装载后**的
+        // 终端 ⇒ ⇒ 「夹具 B 的标记还没出现」才说明**没有自动跑**。
+        await runEffect(cdp, 'location.hash = "#/terminal";');
+        await sleep(600);
+        const termAfterLoad = await awaitEval(cdp, UI_IMAGE_TERM_WAVE_PROBE);
+        checks.push({
+            name: "B-10 · 装载后**不自动跑**（⛔ 没有 ContinueRun ⇒ ⇒ 夹具 B 的输出还没出现）",
+            ok: !String(termAfterLoad?.terminal ?? "").includes(UI_IMAGE_ELF_MARKER_B),
+            detail: `装载后（未步进）终端：${JSON.stringify(String(termAfterLoad?.terminal ?? "").slice(0, 200))}`,
+        });
+
+        // -- 自己发步进 ⇒ ⇒ 夹具 B 的输出出现 + 特征值变了 -----------------
+        await runEffect(cdp,
+            'window.dispatchEvent(new CustomEvent("riscv:command", { detail: { action: "step10" } }));');
+        await sleep(600);
+        await runEffect(cdp,
+            'window.dispatchEvent(new CustomEvent("riscv:command", { detail: { action: "step10" } }));');
+        let termB = null;
+        const termBDeadline = Date.now() + opts.timeoutMs;
+        while (Date.now() < termBDeadline) {
+            termB = await awaitEval(cdp, UI_IMAGE_TERM_WAVE_PROBE);
+            if (String(termB?.terminal ?? "").includes(UI_IMAGE_ELF_MARKER_B)) break;
+            await sleep(250);
+        }
+        await runEffect(cdp, 'location.hash = "#/regmem";');
+        await sleep(600);
+        let regsB = null;
+        const regBDeadline = Date.now() + opts.timeoutMs;
+        while (Date.now() < regBDeadline) {
+            regsB = await awaitEval(cdp, UI_IMAGE_REG_PROBE);
+            if (regsB && regsB.x3 === "00000456") break;
+            await sleep(250);
+        }
+        checks.push({
+            name: "B-9b · 页头那条路径**真装载**了**另一个**固件（x3 = 0x456 而不是夹具 A 的 0x123；终端出现 "
+                + JSON.stringify(UI_IMAGE_ELF_MARKER_B) + "）",
+            ok: regsB?.x3 === "00000456"
+                && regsB?.x3 !== "00000123"
+                && String(termB?.terminal ?? "").includes(UI_IMAGE_ELF_MARKER_B),
+            detail: `x1=${JSON.stringify(regsB?.x1 ?? "")} x3=${JSON.stringify(regsB?.x3 ?? "")} `
+                + `终端=${JSON.stringify(String(termB?.terminal ?? "").slice(0, 200))}`,
+        });
+
+        // -- B-11 · 页头那条路**没有**绕过界面 ----------------------------
+        // ⚠️ **判别力来源**：`change` 事件是**界面路径**独有的 ⇒ ⇒ 走脚本口
+        // 代替时**根本没有 `change`** ⇒ ⇒ 这条判据不是恒绿。
+        const picks = await awaitEval(cdp, BV_IMAGE_PICKS_PROBE);
+        const topbarPicks = (Array.isArray(picks) ? picks : [])
+            .filter((p) => p.from === "topbar");
+        checks.push({
+            name: "B-11 · 页头那条路径**没有**绕过界面（`change` 事件留痕里**有**一条 `from = topbar`）",
+            ok: topbarPicks.some((p) => p.name === "ui-image-b.elf" && p.size === elfBytesB.length),
+            detail: `change 留痕（按位置）：${JSON.stringify(picks ?? [])}`,
         });
 
         return { skipped: false, checks };

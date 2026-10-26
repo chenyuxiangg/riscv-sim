@@ -35,8 +35,18 @@ import {
 } from "./views/components/memory-map.js";
 // ⚠️ **镜像加载的状态写入**（STAGE-32 · v0.47 批）⇒ ⇒ 与视图层**共用**
 // ⇒ ⇒ 住在一处 ⇒ ⇒ **不写第二份**。
+//
+// ⚠️ **STAGE-33 · v0.48 批**：页头那个「加载固件」入口**也**要用同一套
+// ⇒ ⇒ 于是「读字节 + 存 pending」那段**从视图层搬到了共享组件**
+// ⇒ ⇒ 这里 import 的东西变多了 ⇒ ⇒ 但**状态仍然只有一份**
+// （`product.imageLoad`）。
 import {
+    describeImageLoadShort,
+    IMAGE_ENTRY_PLACEMENT,
+    loadImageFileIntoPending,
+    pendingImage,
     publishProductState,
+    renderImageLoaderControl,
     setImageLoadState,
 } from "./views/components/image-loader.js";
 import { buildMockProject } from "./dev/mock-project.js";
@@ -84,6 +94,95 @@ function wireDevSeeding() {
     window.addEventListener("riscv:seed", (ev) => {
         seedDemoState(ev.detail?.viewId ?? "product");
     });
+}
+
+/**
+ * 页头那条短状态条**只订阅一次**（`riscv:render` 是**窗口级**事件）。
+ *
+ * ⚠️ **为什么要这个标志**：这个函数可能被多次调用（测试里每次 `setup()` 都
+ * 调）⇒ ⇒ 每次都 `addEventListener` ⇒ ⇒ 监听器会**堆积** ⇒ ⇒ 一次状态
+ * 变化触发 N 次同步 ⇒ ⇒ 白费。⇒ ⇒ 标志只管**这一个**监听器（控件本体
+ * 每次都重挂 ⇒ ⇒ 按钮的监听器总是跟着新元素走 ⇒ ⇒ 不会指向旧元素）。
+ */
+let topbarBriefWired = false;
+
+/**
+ * Wire the **top-bar** firmware loader (STAGE-33 · v0.48 批).
+ *
+ * ⚠️ **为什么在 app 层**：页头**不属于任何视图面板** ⇒ ⇒ 视图层**管不到**
+ * 它 ⇒ ⇒ 事件只能挂在这里（而 app 层**已经**在管页头 —— 见 `wireDevSeeding`）。
+ *
+ * ⚠️ **控件本体由共享组件渲染**（`renderImageLoaderControl`）⇒ ⇒ `accept`
+ * 列表与按钮文案**只有一处** ⇒ ⇒ **不写第二套**。
+ *
+ * ⚠️ **状态同源**：页头那条短状态条**只读** `product.imageLoad` ⇒ ⇒ 不是
+ * 第二个真相 ⇒ ⇒ 同步挂在 **`riscv:render` 事件**上（**不**挂
+ * `viewStore.subscribe` ⇒ ⇒ `reset()` 会清空订阅者 ⇒ ⇒ 会永久失联）。
+ *
+ * ⚠️ **页头的输入框不在视图面板里** ⇒ ⇒ 视图重渲染（`body.innerHTML` 被
+ * 换掉）**碰不到它** ⇒ ⇒ 用户选完文件后，页头那个输入框**仍然留着那个
+ * 文件** ⇒ ⇒ 真机门禁因此能拿到一条**正向**判据（「输入框里真的有那个
+ * 文件」）⇒ ⇒ 而产品视图那个输入框**做不到**（重渲染就被换掉了）。
+ *
+ * ⚠️ **导出是为了让它可测**（同 `handleCommand` 的理由）：真机门禁要断言
+ * 「默认落地页上就有这个入口」⇒ ⇒ 那条断言必须能在**不启动整个 app** 的
+ * 情况下把控件挂上去。
+ *
+ * @param {object} services
+ */
+export function wireTopbarImageLoader(services) {
+    const slot = document.querySelector("[data-image-load-slot]");
+    if (!slot) return;
+    slot.innerHTML = renderImageLoaderControl({
+        placement: IMAGE_ENTRY_PLACEMENT.topbar,
+        label: "固件镜像",
+        buttonText: "加载固件",
+        withBrief: true,
+    });
+    // ⚠️ **读字节必须在 `change` 里**（浏览器把文件**只**交给这个事件；
+    // 点击时 `input.files` 已经是空的了）⇒ ⇒ 与产品视图那条**同一段**
+    // 实现（`loadImageFileIntoPending` 住在共享组件里）。
+    slot.querySelector('[data-image-input][data-image-load-from="topbar"]')
+        ?.addEventListener("change", (ev) => {
+            const file = ev.target?.files?.[0] ?? null;
+            if (!file) return;
+            void loadImageFileIntoPending(file);
+        });
+    // ⚠️ **「装载」⇒ 走同一条命令处理路径**（产品视图那个入口也是它）⇒ ⇒
+    // 一条装载路径（规格 §3 裁决 G）。
+    slot.querySelector('[data-action="load-image"][data-image-load-from="topbar"]')
+        ?.addEventListener("click", () => {
+            const pending = pendingImage();
+            if (!pending) {
+                setImageLoadState({
+                    status: "error",
+                    error: "没有待加载的文件 —— 请先用文件选择器选一个固件镜像",
+                    pending: null,
+                });
+                publishProductState();
+                return;
+            }
+            void handleLoadImageCommand({ params: pending }, services);
+        });
+    if (!topbarBriefWired) {
+        topbarBriefWired = true;
+        window.addEventListener("riscv:render", syncTopbarImageBrief);
+    }
+    syncTopbarImageBrief();
+}
+
+/**
+ * 把 `product.imageLoad` **同步**到页头那条短状态条。
+ *
+ * ⚠️ **只读**（不写）⇒ ⇒ 页头**不持有**第二份状态 ⇒ ⇒ 唯一真相仍是
+ * `product.imageLoad`。
+ */
+function syncTopbarImageBrief() {
+    const brief = document.querySelector("[data-image-brief]");
+    if (!brief) return;
+    const state = viewStore.getState("product")?.imageLoad ?? null;
+    brief.textContent = describeImageLoadShort(state);
+    brief.setAttribute("data-image-brief-status", String(state?.status ?? "idle"));
 }
 
 /** Ask for a demo re-seed and report it in the status bar. */
@@ -653,6 +752,77 @@ export function toByteArray(raw) {
 }
 
 /**
+ * 「加载固件」这条命令的**唯一**处理函数（STAGE-33 · v0.48 批）。
+ *
+ * ⚠️ **为什么抽出来**：现在有**两个**入口——产品视图里那块面板（视图层，
+ * 走 `riscv:command` 信号）与**页头**那个入口（app 层）⇒ ⇒ 两者必须
+ * **共用这一个函数**⇒ ⇒ **一条装载路径**（`loadProjectIntoKernel`）⇒ ⇒
+ * 重订流与清残留**只有一处**（规格 §3 裁决 G）。
+ *
+ * ⚠️ **与脚本口也共用**：`window.riscv_image.loadFromUrl` 最终走的也是
+ * `loadImageFromBytes` ⇒ ⇒ **不写第二套**。
+ *
+ * ⚠️ **装完就停**（STAGE-32 裁决 D）⇒ ⇒ 这里⛔ **不**发 `ContinueRun`
+ * ⇒ ⇒ 用户自己点「继续」。
+ *
+ * @param {{params?: {bytes?: number[], name?: string, kind?: string}}} detail
+ * @param {object} services
+ * @returns {Promise<void>}
+ */
+export async function handleLoadImageCommand(detail, services) {
+    const bytes = detail?.params?.bytes;
+    if (!Array.isArray(bytes) || bytes.length === 0) {
+        setImageLoadState({
+            status: "error",
+            error: "没有镜像字节 —— 请先用文件选择器选一个固件",
+            pending: null,
+        });
+        publishProductState();
+        setNote("加载固件失败：没有镜像字节");
+        return;
+    }
+    try {
+        const result = await loadImageFromBytes(services, bytes, {
+            name: detail?.params?.name,
+            kind: detail?.params?.kind,
+        });
+        // ⚠️ **产品树**也要换成新工程的（否则还显示 demo 的树）。
+        viewStore.setState("product", (prev) => ({
+            ...prev,
+            tree: result.project.tree,
+        }));
+        setImageLoadState({
+            status: "ok",
+            name: detail?.params?.name ?? "image.bin",
+            byteLength: result.byteLength,
+            error: null,
+            // ⚠️ **装完就把 pending 清掉** ⇒ ⇒ 再点一次「加载」
+            // 会报「没有待加载的文件」⇒ ⇒ **不会**把上一份
+            // 字节又发一遍。
+            pending: null,
+        });
+        publishProductState();
+        const streamErrors = [
+            result.probeError ? `探针流 ${result.probeError.message}` : null,
+            result.consoleError ? `console 流 ${result.consoleError.message}` : null,
+            result.memoryMapError ? `内存图流 ${result.memoryMapError.message}` : null,
+        ].filter(Boolean);
+        setNote(streamErrors.length > 0
+            ? `已加载固件「${detail?.params?.name ?? "image.bin"}」，但流订阅不可用：${streamErrors.join("；")}`
+            : `已加载固件「${detail?.params?.name ?? "image.bin"}」（${result.byteLength} 字节）—— 点「继续」开始运行`);
+    } catch (err) {
+        // ⚠️ **失败显示内核原文**（STAGE-32 裁决 J）⇒ ⇒ 不吞。
+        setImageLoadState({
+            status: "error",
+            error: err?.message ?? String(err),
+            pending: null,
+        });
+        publishProductState();
+        setNote(`加载固件失败：${err?.message ?? err}`);
+    }
+}
+
+/**
  * Translate a view-layer `riscv:command` signal into an M-05 command.
  *
  * The view layer does not know the service layer — it only emits the
@@ -931,64 +1101,10 @@ export async function handleCommand(detail, services) {
                 // 「加载固件」⇒ 用户在**文件选择器**里选了镜像 ⇒ ⇒ 视图层
                 // 把**字节**放进信号 ⇒ ⇒ 这里把字节变成工程并装载。
                 //
-                // ⚠️ **与脚本口共用同一条装载路径**（`loadImageFromBytes`
-                // → `loadProjectIntoKernel`）⇒ ⇒ 重订流与清残留**只有一处**
-                // （规格 §5 的台账边界）。
-                //
-                // ⚠️ **装完就停**（规格 §3 裁决 D）⇒ ⇒ 这里⛔ **不**发
-                // `ContinueRun` ⇒ ⇒ 用户自己点「继续」。
-                {
-                    const bytes = detail?.params?.bytes;
-                    if (!Array.isArray(bytes) || bytes.length === 0) {
-                        setImageLoadState({
-                            status: "error",
-                            error: "没有镜像字节 —— 请先用文件选择器选一个固件",
-                            pending: null,
-                        });
-                        publishProductState();
-                        setNote("加载固件失败：没有镜像字节");
-                        return;
-                    }
-                    try {
-                        const result = await loadImageFromBytes(services, bytes, {
-                            name: detail?.params?.name,
-                            kind: detail?.params?.kind,
-                        });
-                        // ⚠️ **产品树**也要换成新工程的（否则还显示 demo 的树）。
-                        viewStore.setState("product", (prev) => ({
-                            ...prev,
-                            tree: result.project.tree,
-                        }));
-                        setImageLoadState({
-                            status: "ok",
-                            name: detail?.params?.name ?? "image.bin",
-                            byteLength: result.byteLength,
-                            error: null,
-                            // ⚠️ **装完就把 pending 清掉** ⇒ ⇒ 再点一次「加载」
-                            // 会报「没有待加载的文件」⇒ ⇒ **不会**把上一份
-                            // 字节又发一遍。
-                            pending: null,
-                        });
-                        publishProductState();
-                        const streamErrors = [
-                            result.probeError ? `探针流 ${result.probeError.message}` : null,
-                            result.consoleError ? `console 流 ${result.consoleError.message}` : null,
-                            result.memoryMapError ? `内存图流 ${result.memoryMapError.message}` : null,
-                        ].filter(Boolean);
-                        setNote(streamErrors.length > 0
-                            ? `已加载固件「${detail?.params?.name ?? "image.bin"}」，但流订阅不可用：${streamErrors.join("；")}`
-                            : `已加载固件「${detail?.params?.name ?? "image.bin"}」（${result.byteLength} 字节）—— 点「继续」开始运行`);
-                    } catch (err) {
-                        // ⚠️ **失败显示内核原文**（规格 §3 裁决 J）⇒ ⇒ 不吞。
-                        setImageLoadState({
-                            status: "error",
-                            error: err?.message ?? String(err),
-                            pending: null,
-                        });
-                        publishProductState();
-                        setNote(`加载固件失败：${err?.message ?? err}`);
-                    }
-                }
+                // ⚠️ **STAGE-33**：这一段**抽成了 `handleLoadImageCommand`**
+                // ⇒ ⇒ 页头那个入口**直接调同一个函数**⇒ ⇒ **一条装载路径**
+                // （规格 §3 裁决 G）⇒ ⇒ 不写第二套。
+                await handleLoadImageCommand(detail, services);
                 return;
             default:
                 return;
@@ -2085,6 +2201,10 @@ async function bootstrap() {
         boardStore: board.store,
     };
     exposeImageLoader(services);
+    // ⚠️ **页头的「加载固件」入口**（STAGE-33）⇒ ⇒ 必须在这里挂（`services`
+    // 要用）⇒ ⇒ 它的按钮走**同一个** `handleLoadImageCommand` ⇒ ⇒ 一条
+    // 装载路径。
+    wireTopbarImageLoader(services);
     // ⚠️ 脚本用的**命令门**（真机段要「下断点」/「读 UART 寄存器」——
     // 前端 UI 里没有这两个入口）。
     exposeScriptCommands(commandRouter);
