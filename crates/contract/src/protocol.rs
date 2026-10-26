@@ -443,11 +443,19 @@ impl From<CommandPayload> for Payload {
 /// channel answers at all ⇒ ⇒ **who** is allowed to *hold* that role is a
 /// **separate** ledger item (**D-131**) ⇒ ⇒ **not** implemented here.
 ///
-/// ⚠️ **v0.44** (STAGE-29 · 裁决 L) rewrote this paragraph ⇒ ⇒ the
-/// previous wording promised a check that **does not exist** anywhere
-/// in the platform ⇒ ⇒ **the behaviour never changed** (only the prose)
-/// ⇒ ⇒ and the previous sentence is **gone** (⛔ it is **not** quoted
-/// here either ⇒ ⇒ so that this file cannot reintroduce it by accident).
+/// ⚠️ **v0.44** (STAGE-29 · 裁决 L) rewrote this paragraph ⇒ ⇒ at that
+/// time the platform had **no role concept at all** ⇒ ⇒ the old wording
+/// promised an admin-role gate that **did not exist** anywhere ⇒ ⇒ **the
+/// behaviour never changed** (only the prose) ⇒ ⇒ and the previous
+/// sentence is **gone** (⛔ it is **not** quoted here either ⇒ ⇒ so that
+/// this file cannot reintroduce it by accident).
+///
+/// ⚠️ **v0.45** (STAGE-30 · 裁决 C) landed the **role gate** ⇒ ⇒ the
+/// role check **does exist now** ⇒ ⇒ so this block must **not** keep
+/// claiming otherwise ⇒ ⇒ ⚠️ **but the platform still authenticates
+/// nobody** ⇒ ⇒ this block must **not** promise that it does ⇒ ⇒
+/// **who** may hold `Admin` is still **D-131**) ⇒ ⇒ **not** implemented
+/// here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdminOp {
     /// Dump the kernel log buffer (M-21).
@@ -767,20 +775,25 @@ mod tests {
         assert_eq!(crate::SCHEMA_VERSION, 8);
     }
 
-    /// `AdminOp`'s **doc** must not promise a check the platform does
-    /// not have.
+    /// `AdminOp`'s **doc** must state the gate the platform **really**
+    /// has — and must **not** promise one it does not.
     ///
-    /// ⚠️ The old wording promised an admin-role gate on the receiving
-    /// side ⇒ ⇒ but the platform has **no role concept at all** (the
-    /// ledger's **D-131** is still open) ⇒ ⇒ the gate is the **host's
-    /// own switch** ⇒ ⇒ the prose had to change ⇒ ⇒ **the behaviour
-    /// never changed** (only the prose).
+    /// ⚠️ **v0.45** (STAGE-30 · 裁决 C) landed the **role gate** ⇒ ⇒ the
+    /// gate is now the host's own **role** ⇒ ⇒ the doc says so ⇒ ⇒ and
+    /// the ledger's **D-131** (who may *hold* that role) is still open ⇒ ⇒
+    /// the doc points at it.
+    ///
+    /// ⚠️ **v0.44 的旧版断言已经过期**（STAGE-30 §8 订正 5）：那时平台**没有**
+    ///   角色概念 ⇒ ⇒ 那条用例断言「文档**不许**承诺角色检查」+「文档**必须**
+    ///   写开关**」⇒ ⇒ v0.45 落地之后 ⇒ ⇒ 「角色检查**真的存在**了」⇒ ⇒
+    ///   「不许承诺角色检查」**不再是不变式** ⇒ ⇒ 换成「**不许**承诺**认证**
+    ///   检查」（平台**确实没有**认证 ⇒ ⇒ 那正是 D-131 还没做的那一段）。
     ///
     /// ⚠️ The check is scoped to **the enum's own doc block** ⇒ ⇒ a
     /// whole-file scan would hit **this test's own source** ⇒ ⇒ and a
     /// test that can only fail is not a test.
     #[test]
-    fn the_admin_op_documentation_does_not_promise_a_role_check() {
+    fn the_admin_op_documentation_states_the_role_gate_and_not_an_authentication_one() {
         let source = include_str!("protocol.rs");
         let (before_enum, _) = source
             .split_once("pub enum AdminOp")
@@ -788,7 +801,11 @@ mod tests {
         let mut doc_lines: Vec<&str> = Vec::new();
         for line in before_enum.lines().rev() {
             if line.trim_start().starts_with("///") {
-                doc_lines.push(line);
+                // ⚠️ **剥掉文档标记前缀** ⇒ ⇒ 否则归一化之后行与行之间会留下
+                //   `///` ⇒ ⇒ 一条跨行的判据就失活了。
+                let text = line.trim_start();
+                let text = text.strip_prefix("///").unwrap_or(text);
+                doc_lines.push(text.trim());
             } else if line.trim_start().starts_with("#[") {
                 // An attribute (`#[derive(...)]`) may sit between the doc
                 // block and the item ⇒ ⇒ skip it, do not stop there.
@@ -800,17 +817,43 @@ mod tests {
         doc_lines.reverse();
         let doc = doc_lines.join("\n");
         assert!(!doc.is_empty(), "AdminOp must keep a doc block of its own");
+        // ⚠️ **归一化空白** ⇒ ⇒ 行折叠不该让一条判据失活。
+        let flat = doc.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            !doc.contains("role check"),
-            "AdminOp's documentation still promises a role check that does not exist"
+            flat.contains("the receiving side's own role"),
+            "AdminOp's documentation must state that the receiving side's own role gates the channel"
         );
         assert!(
-            doc.contains("the receiving side's own switch"),
-            "AdminOp's documentation must state that the host's own switch gates the channel"
+            flat.contains("`Admin` / `Product`, default `Product`"),
+            "AdminOp's documentation must name both role values and the default role"
         );
         assert!(
-            doc.contains("D-131"),
-            "AdminOp's documentation must point at the open ledger item for the missing role check"
+            flat.contains("D-131"),
+            "AdminOp's documentation must point at the open ledger item for who may hold the role"
+        );
+        // ⚠️⚠️ **逐处那条**（STAGE-30 §8 订正 5 的配套）：文档里 **D-131**
+        //   **出现两次** ⇒ ⇒ 「文档提到 D-131」那条**全局**判据**改一处抓不到**
+        //   ⇒ ⇒ ⇒ 必须另加**逐处**判据 ⇒ ⇒ 钉的是「**提到的那处**必须在说
+        //   『谁可以持有那个角色』」⇒ ⇒ **不许**只把 D-131 留在别的句子里。
+        let d131 = flat
+            .find("D-131")
+            .expect("AdminOp's documentation must mention D-131");
+        let window = &flat[d131.saturating_sub(120)..(d131 + 4).min(flat.len())];
+        assert!(
+            window.contains("hold"),
+            "AdminOp's documentation must point at D-131 where it says who may hold the role"
+        );
+        // ⚠️ **反向那条**：文档**自称**旧句原文没有被引回来 ⇒ ⇒ 这条断言钉的
+        //   就是**文档自己的那个说法** ⇒ ⇒ 不是一条空护栏。
+        assert!(
+            !flat.contains("Always gated by an admin role check"),
+            "AdminOp's documentation must not bring the old sentence back"
+        );
+        // ⚠️ **不许承诺认证检查**（平台**确实没有**认证 ⇒ ⇒ 那正是 D-131）。
+        assert!(
+            !flat.contains("authenticates the caller")
+                && !flat.contains("gated by an authenticated"),
+            "AdminOp's documentation must not promise an authentication check that does not exist"
         );
     }
 

@@ -120,6 +120,70 @@ mod tests {
     use super::{AdminDiagDto, LogEntryDto};
     use crate::protocol::EventPayload;
 
+    /// The module doc must state the **role gate** that v0.45
+    /// (STAGE-30) landed — and must point at the ledger item that is
+    /// still open for **who may hold** that role.
+    ///
+    /// ⚠️ **Why this test exists** (STAGE-30 §8 订正 5): the sibling
+    ///   assertion in `protocol.rs` used to pin the **v0.44** wording
+    ///   ⇒ ⇒ v0.45 changed the wording ⇒ ⇒ that assertion **had to be
+    ///   rewritten** ⇒ ⇒ ⇒ nothing would have caught it if the wording
+    ///   had drifted **here** ⇒ ⇒ ⇒ **asymmetry** ⇒ ⇒ ⇒ **this module's
+    ///   doc gets its own pin**.
+    ///
+    /// ⚠️ The scan is scoped to **the module's own leading `//!` block**
+    ///   ⇒ ⇒ a whole-file scan would hit **this test's own source**
+    ///   ⇒ ⇒ and a test that can only fail is not a test.
+    #[test]
+    fn the_admin_module_documentation_states_the_role_gate_and_points_at_d131() {
+        let source = include_str!("admin.rs");
+        let mut doc_lines: Vec<&str> = Vec::new();
+        for line in source.lines() {
+            if line.trim_start().starts_with("//!") {
+                // ⚠️ **剥掉文档标记前缀** ⇒ ⇒ 否则归一化之后行与行之间会留下
+                //   `//!` ⇒ ⇒ 一条跨行的判据就失活了。
+                let text = line.trim_start();
+                let text = text.strip_prefix("//!").unwrap_or(text);
+                doc_lines.push(text.trim());
+            } else {
+                break;
+            }
+        }
+        assert!(
+            !doc_lines.is_empty(),
+            "admin.rs must keep a module doc block of its own"
+        );
+        // ⚠️ **归一化空白** ⇒ ⇒ 行折叠不该让一条判据失活。
+        let flat = doc_lines
+            .join("\n")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            flat.contains("its **role**: `Admin` vs `Product`, default `Product`"),
+            "admin.rs's module doc must state the host's role values and the default role"
+        );
+        assert!(
+            flat.contains("D-131"),
+            "admin.rs's module doc must point at the open ledger item for who may hold the role"
+        );
+        // ⚠️ **逐处那条**：文档里 **D-131** 只出现一次 ⇒ ⇒ 但仍要钉住「**提到
+        //   的那处**必须在说『谁可以持有那个角色』」⇒ ⇒ 免得有人把台账号换掉
+        //   却留下一句「谁持有那个角色仍是别的台账项」这种含糊话。
+        let d131 = flat
+            .find("D-131")
+            .expect("admin.rs's module doc must mention D-131");
+        let window = &flat[d131.saturating_sub(120)..(d131 + 4).min(flat.len())];
+        assert!(
+            window.contains("hold that"),
+            "admin.rs's module doc must point at D-131 where it says who may hold the role"
+        );
+        assert!(
+            flat.contains("no role concept is introduced here"),
+            "admin.rs's module doc must state that the contract layer itself introduces no role concept"
+        );
+    }
+
     /// The canonical shape — **one** file, **two** consumers.
     const FIXTURE: &str = include_str!("../fixtures/admin-dto.json");
 
