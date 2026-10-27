@@ -8,7 +8,30 @@
 </head>
 <body>
   <header class="topbar">
-    <span class="brand">RISC-V Sim</span>
+    <!--
+      ⚠️ **窄屏抽屉的开关**（STAGE-34 · v0.49 批）：宽屏侧边栏**常驻**，
+      窄屏（< 720px）侧边栏变抽屉 ⇒ ⇒ 这个按钮**窄屏才出现**。
+    -->
+    <button class="burger" data-sidebar-toggle type="button" aria-label="打开导航">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+    </button>
+
+    <div class="brand">RISC-V Sim</div>
+
+    <!--
+      ⚠️ **连接状态胶囊**（STAGE-34 · v0.49 批）。
+
+      ⚠️ **它里面装的就是 `#status` 那个元素** ⇒ ⇒ 连接状态**只有一处文案**
+      （`app.js` 的 `describeTransport()`）⇒ ⇒ **不是第二个真相**。
+      ⚠️ 那个 `.dot` 的颜色由 `app.js` 按 `transport.connected` 切
+      （`.conn` / `.conn.is-offline`）⇒ ⇒ 状态**看得见**，不是只读一行字。
+    -->
+    <div class="conn" data-kernel-conn>
+      <span class="dot"></span>
+      <span class="status" id="status">未连接</span>
+    </div>
+
     <!--
       ⚠️ **页头的「加载固件」入口**（STAGE-33 · v0.48 批）。
 
@@ -24,22 +47,42 @@
       ⚠️ **它在 DOM 里排在视图面板之前** ⇒ ⇒ 真机门禁按
       `document.querySelector("[data-image-input]")` 取元素会**命中页头那个**
       ⇒ ⇒ 所以每个入口都带 `data-image-load-from` 按位置区分。
+
+      ⚠️ **STAGE-34 批不动它的形态**（裁决 F）⇒ ⇒ STAGE-33 的
+      B-6 ~ B-11 **一字不改**仍然成立。
     -->
     <span class="image-loader-slot" data-image-load-slot></span>
-    <nav id="workbench-tabs" class="tabs">
-      <a href="#/product"  class="tab" data-view-tab="product">产品</a>
-      <a href="#/embedded" class="tab" data-view-tab="embedded">嵌入式</a>
-      <a href="#/debug"    class="tab" data-view-tab="debug">调试</a>
-      <a href="#/waveform" class="tab" data-view-tab="waveform">波形</a>
-      <a href="#/terminal" class="tab" data-view-tab="terminal">终端</a>
-      <a href="#/regmem"   class="tab" data-view-tab="regmem">寄存器/内存</a>
-      <a href="#/source"   class="tab" data-view-tab="source">源码</a>
-    </nav>
+
+    <!--
+      ⚠️ **全局运行条**（STAGE-34 · v0.49 批）：PC + 虚拟时间 + 运行 / 单步 / 复位。
+      ⇒ ⇒ 按钮**由 app 层接线**（`wireTopbarRunbar`）⇒ ⇒ 它们**直接调
+      `handleCommand`** ⇒ ⇒ 与调试视图那份**共用同一条命令路径**。
+    -->
+    <div class="runbar" data-topbar-runbar>
+      <span class="stat" data-topbar-pc>PC <b class="mono" data-topbar-pc-value>—</b></span>
+      <span class="stat hide-m" data-topbar-time>虚拟时间 <b class="mono" data-topbar-time-value>—</b></span>
+      <button class="btn run" data-topbar-action="run" type="button">运行</button>
+      <button class="btn" data-topbar-action="step" type="button">单步</button>
+      <button class="btn" data-topbar-action="reset" type="button">复位</button>
+    </div>
+
     <button id="seed-demo" class="seed-btn" type="button" title="MVP dev-only">seed demo 映射</button>
-    <span class="status" id="status">未连接</span>
   </header>
 
-  <main id="app"></main>
+  <div class="shell">
+    <!--
+      ⚠️ **左侧分组导航**（STAGE-34 · v0.49 批）。
+
+      ⚠️ **导航项由 `views/m01_workbench.js` 按 `VIEW_REGISTRY` 的 `group`
+      元数据渲染**（裁决 C ⇒ ⇒ 分组**只有一个落点**）⇒ ⇒ 这里**只放空容器**
+      ⇒ ⇒ 视图表改了侧边栏自动跟着改。
+      ⚠️ 渲染出来的项**保留 `data-view-tab` 属性**（裁决 B）⇒ ⇒
+      「当前项」仍由 `aria-current="page"` 标记 ⇒ ⇒ 旧标签页那套语义不变。
+    -->
+    <aside class="sidebar" data-sidebar aria-label="视图导航"></aside>
+
+    <main class="main" id="app"></main>
+  </div>
 
   <footer class="footer">
     RISC-V 仿真 / 调试工作台 · 零构建前端（原生 ES modules，无打包步骤）。

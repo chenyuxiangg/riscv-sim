@@ -2,18 +2,47 @@
  *
  * Vanilla CSS, no preprocessor. Styles are scoped to the workbench
  * skeleton (M-01) and the MVP view components (M-02).
+ *
+ * ⚠️ **STAGE-34 · v0.49 批：设计令牌一次性换掉**（原型《riscv-sim-UI 建议原型》）。
+ * ⚠️ **旧令牌（`--ink` / `--ink2` / `--teal` / `--bg3`）零残留** ⇒ ⇒ 换名不换值
+ *    会**留两套命名** ⇒ ⇒ 那会是**第二个真相** ⇒ ⇒ 本文件里**只此一套**。
  */
 
+/* ---------------------------------------------------------------------------
+ * §1 设计令牌（STAGE-34 裁决 D —— **只有这一处**）
+ * ------------------------------------------------------------------------- */
 :root {
-    --bg:   #0b0f14;
-    --bg2:  #10161d;
-    --bg3:  #161e27;
-    --ink:  #e4e9f0;
-    --ink2: #9aa8b6;
-    --amber:#e6a23c;
-    --teal: #3ec6a0;
-    --line: #24303b;
-    --err:  #f87171;
+    /* 底色三层：页面 / 侧边栏 / 卡片 / 卡片内嵌块 */
+    --bg:     #0b1020;
+    --bg2:    #0e1628;
+    --panel:  #111a30;
+    --panel2: #0d1526;
+    /* 边框两级 */
+    --line:  #232f4d;
+    --line2: #1a2340;
+    /* 文字三级 */
+    --tx:  #e6edf7;
+    --tx2: #a8b4cc;
+    --tx3: #6b7a99;
+    /* 语义色 */
+    --accent: #22d3ee;
+    --amber:  #f5a524;
+    --red:    #f87171;
+    --green:  #34d399;
+    /* 派生色（STAGE-34 §8 订正 5）：原先这 6 个颜色散落在组件里逐字写死，
+       ⇒ ⇒ 换主题时它们会**漏掉** ⇒ ⇒ 收进 `:root` 才有唯一落点。 */
+    --on-accent: #04121a;   /* 主按钮上的文字 */
+    --on-green:  #04120a;   /* 运行按钮上的文字 */
+    --red-soft:  #ff9a95;   /* 报错提示的浅红文字 */
+    --amber-soft:#ffcf9a;   /* 溢出提示的浅琥珀文字 */
+    --term-bg:   #050a14;   /* 终端 / 追踪块底色 */
+    --term-fg:   #b6f0c4;   /* 终端 / 追踪块前景 */
+    /* 形状 */
+    --r: 10px;
+    /* 字体：数值一律等宽，正文用系统 sans */
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei",
+            "Segoe UI", sans-serif;
 }
 
 * { box-sizing: border-box; }
@@ -22,58 +51,323 @@ html, body {
     margin: 0;
     padding: 0;
     background: var(--bg);
-    color: var(--ink);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: var(--tx);
+    font-family: var(--sans);
     font-size: 14px;
-    line-height: 1.55;
+    line-height: 1.6;
 }
 
 .hidden { display: none !important; }
-.muted  { color: var(--ink2); }
+.muted  { color: var(--tx3); }
 
 a { color: inherit; text-decoration: none; }
 
-/* ----- top bar (M-01 §3.1) ----- */
+/* ---------------------------------------------------------------------------
+ * §2 顶栏（品牌 + 连接状态 + **全局运行条**）
+ * ------------------------------------------------------------------------- */
 .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 50;
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 8px 16px;
-    background: var(--bg2);
+    gap: 10px;
+    padding: 8px 12px;
+    background: rgba(11, 16, 32, .92);
+    backdrop-filter: blur(8px);
     border-bottom: 1px solid var(--line);
     flex-wrap: wrap;
 }
-.brand { font-weight: 700; color: var(--amber); }
-.tabs  { display: flex; gap: 4px; flex: 1; flex-wrap: wrap; }
-.tab {
-    background: transparent;
-    color: var(--ink2);
-    border: 1px solid transparent;
-    border-radius: 6px;
-    padding: 4px 12px;
-    cursor: pointer;
-    font-size: 13px;
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 700;
+    font-size: 14px;
+    white-space: nowrap;
+    color: var(--tx);
 }
-.tab:hover { color: var(--ink); }
-.tab[aria-current="page"] { color: var(--amber); border-color: rgba(230, 162, 60, .45); }
-.tab:disabled { opacity: .4; cursor: not-allowed; }
-.seed-btn {
-    background: var(--bg3);
-    color: var(--teal);
+
+/* 连接状态胶囊 —— 「kernel 已连接 · rv32imc」。 */
+.conn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--tx2);
     border: 1px solid var(--line);
-    border-radius: 6px;
+    border-radius: 999px;
+    padding: 2px 10px;
+    white-space: nowrap;
+}
+.conn .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+}
+/* 未连接时那个点**变红** ⇒ ⇒ 状态**看得见**，不是只读文本。 */
+.conn.is-offline .dot { background: var(--red); box-shadow: 0 0 6px var(--red); }
+
+/* 全局运行条：靠右，容纳 PC / 虚拟时间 / 运行 / 单步 / 复位。 */
+.runbar {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+.stat {
+    font-size: 12px;
+    color: var(--tx2);
+    white-space: nowrap;
+}
+.stat b { color: var(--tx); font-weight: 600; }
+.stat .mono { color: var(--accent); font-family: var(--mono); }
+
+/* 通用按钮 —— 顶栏、侧边栏、卡片里共用同一套外观。 */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 8px;
+    padding: 6px 12px;
+    border: 1px solid var(--line);
+    background: var(--panel2);
+    color: var(--tx2);
+    font-size: 13px;
+    cursor: pointer;
+    transition: border-color .15s, color .15s, background .15s;
+}
+.btn:hover { border-color: var(--accent); color: var(--tx); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent);
+    font-weight: 600;
+}
+.btn.primary:hover { filter: brightness(1.1); color: var(--on-accent); }
+.btn.run {
+    background: var(--green);
+    border-color: var(--green);
+    color: var(--on-green);
+    font-weight: 600;
+}
+/* 运行中：按钮变成**暂停**的样子（琥珀 + 呼吸）⇒ ⇒ 状态看得见。 */
+.btn.run.running {
+    background: transparent;
+    color: var(--amber);
+    border-color: var(--amber);
+    animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(245, 165, 36, .35); }
+    50%      { box-shadow: 0 0 0 5px rgba(245, 165, 36, 0); }
+}
+.btn.ghost {
+    border-color: transparent;
+    background: transparent;
+    color: var(--tx3);
+}
+.btn.ghost:hover { color: var(--tx); }
+
+.seed-btn {
+    background: var(--panel2);
+    color: var(--green);
+    border: 1px solid var(--line);
+    border-radius: 8px;
     padding: 4px 10px;
     cursor: pointer;
     font-size: 12px;
 }
-.seed-btn:hover { border-color: var(--teal); }
-.status { color: var(--teal); font-variant-numeric: tabular-nums; }
+.seed-btn:hover { border-color: var(--green); }
+.status { color: var(--green); font-variant-numeric: tabular-nums; }
 
-/* ----- 固件加载入口（STAGE-33 · v0.48 批）-----
+/* ---------------------------------------------------------------------------
+ * §3 布局：侧边栏 + 主区
+ * ------------------------------------------------------------------------- */
+.shell {
+    display: flex;
+    min-height: calc(100vh - 49px);
+}
+.sidebar {
+    width: 196px;
+    flex: none;
+    background: var(--bg2);
+    border-right: 1px solid var(--line);
+    padding: 14px 10px 24px;
+    position: sticky;
+    top: 49px;
+    height: calc(100vh - 49px);
+    overflow: auto;
+}
+.nav-group { margin-bottom: 16px; }
+.nav-label {
+    font-size: 11px;
+    letter-spacing: .12em;
+    color: var(--tx3);
+    padding: 4px 10px;
+    margin-bottom: 4px;
+}
+/* 导航项：与原型的 `.nav-item` 同形（图标 + 文字 + 左侧高亮条）。 */
+.nav-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    text-align: left;
+    padding: 7px 10px;
+    border-radius: 8px;
+    border: none;
+    background: transparent;
+    color: var(--tx2);
+    font-size: 13px;
+    margin-bottom: 2px;
+    cursor: pointer;
+}
+.nav-item:hover { background: var(--panel); color: var(--tx); }
+/* 当前视图 ⇒ ⇒ 高亮。判据是 **`aria-current="page"`**（与旧标签页同一条语义）。 */
+.nav-item[aria-current="page"] {
+    background: var(--panel);
+    color: var(--accent);
+    box-shadow: inset 2px 0 0 var(--accent);
+}
+.nav-item svg { flex: none; opacity: .8; }
+.nav-ic { display: inline-flex; flex: none; opacity: .8; }
+.nav-item[aria-current="page"] .nav-ic { opacity: 1; }
+
+/* 汉堡按钮：窄屏才出现（宽屏 `display: none`）。 */
+.burger {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 28px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--panel2);
+    color: var(--tx2);
+    cursor: pointer;
+}
+.burger:hover { border-color: var(--accent); color: var(--tx); }
+
+.main {
+    flex: 1;
+    min-width: 0;
+    padding: 18px 20px 40px;
+}
+
+/* ---------------------------------------------------------------------------
+ * §4 视图外框：`.vhead`（标题 + 提示）＋ `.card`（内容容器）
+ * ------------------------------------------------------------------------- */
+.vhead {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+}
+.vhead h2 { font-size: 18px; margin: 0; }
+.vhead .hint { font-size: 12px; color: var(--tx3); }
+
+.card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    padding: 14px;
+}
+.card h3 {
+    font-size: 13px;
+    color: var(--tx2);
+    font-weight: 600;
+    margin: 0 0 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.card h3 .tag { margin-left: auto; font-size: 11px; color: var(--tx3); font-weight: 400; }
+
+/* 提示条（琥珀）—— 用来放「这一屏要注意什么」。 */
+.banner {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    background: rgba(245, 165, 36, .08);
+    border: 1px solid rgba(245, 165, 36, .35);
+    border-radius: var(--r);
+    padding: 10px 14px;
+    margin-bottom: 16px;
+    font-size: 12.5px;
+    color: var(--amber);
+}
+.banner code {
+    background: var(--panel2);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+}
+
+/* 空态 —— 没有数据时**如实**说「没有」，不放假数据。 */
+.empty {
+    border: 1px dashed var(--line);
+    border-radius: var(--r);
+    padding: 28px 18px;
+    text-align: center;
+    color: var(--tx3);
+}
+.empty p { margin: 0 0 12px; font-size: 13px; }
+
+/* 卡片网格（工作台那三张卡）。 */
+.cards { display: grid; gap: 12px; grid-template-columns: 1fr; }
+
+/* KPI —— 「标签 + 数值」两行。 */
+.kpi { display: flex; flex-direction: column; gap: 2px; }
+.kpi .k { font-size: 11px; color: var(--tx3); }
+.kpi .v { font-family: var(--mono); font-size: 16px; color: var(--tx); }
+.kpi .v.up { color: var(--green); }
+.kpi .v.down { color: var(--red); }
+
+/* 器件 chip —— 「图标 + 名字 + 副标题 + 实时数值」。 */
+.chip {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    background: var(--panel2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+}
+.chip .ic {
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    background: rgba(34, 211, 238, .12);
+    border: 1px solid rgba(34, 211, 238, .35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent);
+}
+.chip .name { font-size: 13px; font-weight: 600; }
+.chip .sub { font-size: 11px; color: var(--tx3); }
+.chip .vals {
+    margin-left: auto;
+    text-align: right;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--tx2);
+    white-space: pre-line;
+}
+
+/* ---------------------------------------------------------------------------
+ * §5 固件加载入口（STAGE-33 · v0.48 批）
  *
  * ⚠️ **页头那个控件与产品视图那块面板共用同一段 HTML**
  * （`renderImageLoaderControl`）⇒ ⇒ 样式也**只有这一处**。
- */
+ * ------------------------------------------------------------------------- */
 .image-loader-slot { display: flex; align-items: center; min-width: 0; }
 .image-loader-control {
     display: inline-flex;
@@ -86,25 +380,25 @@ a { color: inherit; text-decoration: none; }
     align-items: center;
     gap: 4px;
     font-size: 12px;
-    color: var(--ink2);
+    color: var(--tx2);
     white-space: nowrap;
 }
 .image-loader-control input[type="file"] {
     font-size: 12px;
-    color: var(--ink2);
+    color: var(--tx2);
     max-width: 15em;
 }
 .image-loader-control button {
-    background: var(--bg3);
-    color: var(--amber);
+    background: var(--panel2);
+    color: var(--accent);
     border: 1px solid var(--line);
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 4px 10px;
     cursor: pointer;
     font-size: 12px;
     white-space: nowrap;
 }
-.image-loader-control button:hover { border-color: var(--amber); }
+.image-loader-control button:hover { border-color: var(--accent); }
 .image-loader-brief {
     font-size: 12px;
     max-width: 20em;
@@ -114,37 +408,39 @@ a { color: inherit; text-decoration: none; }
 }
 .image-loader { margin-top: 16px; }
 
-/* ----- main + view panels ----- */
-main { padding: 24px; max-width: 1280px; margin: 0 auto; }
-
+/* ---------------------------------------------------------------------------
+ * §6 视图面板（旧 `.view` / `.view-body` —— M-01 造的面板骨架）
+ * ------------------------------------------------------------------------- */
 .view {
-    background: var(--bg2);
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    padding: 20px;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
     margin-bottom: 24px;
 }
 .view h2 {
     margin: 0 0 12px;
-    color: var(--teal);
-    font-size: 16px;
+    color: var(--tx);
+    font-size: 18px;
 }
 .view-body { min-height: 200px; }
 .view-error {
-    border-left: 4px solid var(--err);
+    border-left: 4px solid var(--red);
     background: rgba(248, 113, 113, 0.08);
     padding: 8px 12px;
     border-radius: 4px;
-    color: var(--err);
+    color: var(--red);
 }
 
-/* ----- productTreeView ----- */
+/* ---------------------------------------------------------------------------
+ * §7 productTreeView
+ * ------------------------------------------------------------------------- */
 .product-grid {
     display: grid;
     grid-template-columns: minmax(220px, 1fr) 2fr;
     gap: 16px;
 }
-.product-tree, .memory-map { background: var(--bg3); border-radius: 8px; padding: 12px; }
+.product-tree, .memory-map { background: var(--panel2); border-radius: 8px; padding: 12px; }
 .product-tree ul { list-style: none; padding-left: 1em; border-left: 1px dashed var(--line); }
 .product-tree li { padding: 2px 0; }
 
@@ -159,28 +455,30 @@ main { padding: 24px; max-width: 1280px; margin: 0 auto; }
     padding: 4px 8px;
     text-align: left;
 }
-.map-table th { background: rgba(255, 255, 255, 0.03); color: var(--ink2); }
-.map-table code { color: var(--amber); }
+.map-table th { background: rgba(255, 255, 255, .03); color: var(--tx2); }
+.map-table code { color: var(--accent); }
 .map-table pre { margin: 0; font-size: 11.5px; white-space: pre-wrap; }
 
-/* ----- debugView ----- */
+/* ---------------------------------------------------------------------------
+ * §8 debugView
+ * ------------------------------------------------------------------------- */
 .debug-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 16px;
 }
-.disasm, .regmem, .trace-export { background: var(--bg3); border-radius: 8px; padding: 12px; }
+.disasm, .regmem, .trace-export { background: var(--panel2); border-radius: 8px; padding: 12px; }
 .disasm-table, .reg-grid {
     width: 100%;
     font-size: 12px;
     border-collapse: collapse;
 }
-.disasm-table th, .disasm-table td { padding: 4px 6px; border-bottom: 1px solid var(--line); }
-.disasm-table th { color: var(--ink2); text-align: left; }
-.disasm-table code { font-family: ui-monospace, monospace; }
+.disasm-table th, .disasm-table td { padding: 4px 6px; border-bottom: 1px solid var(--line2); }
+.disasm-table th { color: var(--tx2); text-align: left; }
+.disasm-table code { font-family: var(--mono); }
 /* The row the PC points at (V-12). */
-.disasm-row.is-pc { background: rgba(255, 193, 7, 0.14); }
-.disasm-row.is-pc td:first-child { box-shadow: inset 3px 0 0 var(--amber); }
+.disasm-row.is-pc { background: rgba(34, 211, 238, .12); }
+.disasm-row.is-pc td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 /* The trace slowdown notice (R9) + the kernel's error reply. */
 .trace-notice {
     margin: 8px 0 0;
@@ -194,8 +492,8 @@ main { padding: 24px; max-width: 1280px; margin: 0 auto; }
     margin: 8px 0 0;
     padding: 6px 10px;
     border-radius: 6px;
-    border: 1px solid #d9534f;
-    color: #ff9a95;
+    border: 1px solid var(--red);
+    color: var(--red-soft);
     font-size: 12px;
 }
 /* The export window is NOT the complete history (the source ring
@@ -205,14 +503,14 @@ main { padding: 24px; max-width: 1280px; margin: 0 auto; }
     margin: 8px 0 0;
     padding: 6px 10px;
     border-radius: 6px;
-    border: 1px solid #d9534f;
-    color: #ffcf9a;
+    border: 1px solid var(--red);
+    color: var(--amber-soft);
     font-size: 12px;
 }
 .trace-chunk {
-    background: #000;
-    color: #b6f0c4;
-    font-family: ui-monospace, monospace;
+    background: var(--term-bg);
+    color: var(--term-fg);
+    font-family: var(--mono);
     font-size: 12px;
     padding: 8px;
     min-height: 80px;
@@ -226,15 +524,17 @@ main { padding: 24px; max-width: 1280px; margin: 0 auto; }
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     gap: 4px;
-    font-family: ui-monospace, monospace;
+    font-family: var(--mono);
 }
-.reg-grid > div { background: rgba(255, 255, 255, 0.02); border-radius: 4px; padding: 4px 6px; }
-.reg-grid span { color: var(--ink2); margin-right: 6px; }
+.reg-grid > div { background: rgba(255, 255, 255, .02); border-radius: 4px; padding: 4px 6px; }
+.reg-grid span { color: var(--tx2); margin-right: 6px; }
 .grid-2 { display: grid; grid-template-columns: 1fr; gap: 8px; }
-.pc, .timeVirt { font-family: ui-monospace, monospace; }
+.pc, .timeVirt { font-family: var(--mono); }
 
-/* ----- embeddedView（落地视图 · D-33）----- */
-.embedded-view { background: var(--bg3); border-radius: 8px; padding: 12px; }
+/* ---------------------------------------------------------------------------
+ * §9 embeddedView（落地视图 · D-33）
+ * ------------------------------------------------------------------------- */
+.embedded-view { background: var(--panel2); border-radius: 8px; padding: 12px; }
 .link-status { margin: 8px 0; }
 /* 四个子视图入口：排成一行，窄屏折行（NFR-05 的 375px 也要读得下）。 */
 .embedded-entries {
@@ -254,20 +554,24 @@ main { padding: 24px; max-width: 1280px; margin: 0 auto; }
     margin-top: 8px;
 }
 
-/* ----- waveformView ----- */
-.waveform { background: var(--bg3); border-radius: 8px; padding: 12px; }
+/* ---------------------------------------------------------------------------
+ * §10 waveformView
+ * ------------------------------------------------------------------------- */
+.waveform { background: var(--panel2); border-radius: 8px; padding: 12px; }
 .channel-list { list-style: none; padding: 0; margin: 0; }
 .channel-list li {
     display: flex; justify-content: space-between;
-    padding: 6px 8px; border-bottom: 1px dashed var(--line);
+    padding: 6px 8px; border-bottom: 1px dashed var(--line2);
 }
 
-/* ----- terminalView ----- */
-.terminal { background: var(--bg3); border-radius: 8px; padding: 12px; }
+/* ---------------------------------------------------------------------------
+ * §11 terminalView
+ * ------------------------------------------------------------------------- */
+.terminal { background: var(--panel2); border-radius: 8px; padding: 12px; }
 .terminal-out {
-    background: #000;
-    color: #b6f0c4;
-    font-family: ui-monospace, monospace;
+    background: var(--term-bg);
+    color: var(--term-fg);
+    font-family: var(--mono);
     font-size: 12px;
     padding: 8px;
     min-height: 160px;
@@ -288,44 +592,73 @@ main { padding: 24px; max-width: 1280px; margin: 0 auto; }
 .terminal-input {
     flex: 1 1 auto;
     min-width: 0;
-    background: #000;
-    color: #b6f0c4;
-    font-family: ui-monospace, monospace;
+    background: var(--term-bg);
+    color: var(--term-fg);
+    font-family: var(--mono);
     font-size: 12px;
     padding: 6px 8px;
-    border: 1px solid #2a3a2e;
+    border: 1px solid var(--line2);
     border-radius: 6px;
 }
 .terminal-input:focus {
     outline: none;
-    border-color: #4a7a5a;
+    border-color: var(--accent);
 }
 .terminal-send {
     flex: 0 0 auto;
-    background: #1c2a20;
-    color: #b6f0c4;
+    background: var(--panel2);
+    color: var(--accent);
     font-size: 12px;
     padding: 6px 14px;
-    border: 1px solid #2a3a2e;
+    border: 1px solid var(--line);
     border-radius: 6px;
     cursor: pointer;
 }
-.terminal-send:hover {
-    background: #243a2c;
-}
+.terminal-send:hover { border-color: var(--accent); }
 
-/* ----- footer ----- */
+/* ---------------------------------------------------------------------------
+ * §12 footer
+ * ------------------------------------------------------------------------- */
 .footer {
     padding: 12px 16px;
-    color: var(--ink2);
+    color: var(--tx3);
     border-top: 1px solid var(--line);
     font-size: 12px;
 }
-.footer code { color: var(--amber); }
+.footer code { color: var(--accent); }
 
-/* ----- small-screen (NFR-05 mobile 375px) ----- */
-@media (max-width: 767px) {
+/* ---------------------------------------------------------------------------
+ * §13 响应式
+ * ------------------------------------------------------------------------- */
+
+/* 宽屏：三列卡片 + 四列寄存器。 */
+@media (min-width: 1080px) {
+    .cards { grid-template-columns: repeat(3, 1fr); }
+}
+
+/* 中屏：两列卡片 + 侧边栏仍是常驻的。 */
+@media (min-width: 720px) {
+    .cards { grid-template-columns: repeat(2, 1fr); }
+    .reg-grid { grid-template-columns: repeat(4, 1fr); }
+    .vhead h2 { font-size: 20px; }
+}
+
+/* 窄屏：侧边栏变**抽屉**（汉堡开合），主区不被遮挡。 */
+@media (max-width: 719px) {
+    .sidebar {
+        position: fixed;
+        left: 0;
+        top: 49px;
+        bottom: 0;
+        z-index: 60;
+        transform: translateX(-100%);
+        transition: transform .22s ease;
+        box-shadow: 8px 0 30px rgba(0, 0, 0, .4);
+    }
+    .sidebar.open { transform: translateX(0); }
+    .burger { display: inline-flex; }
+    .stat.hide-m { display: none; }
     .product-grid, .debug-grid { grid-template-columns: 1fr; }
+    .main { padding: 12px; }
     .topbar { padding: 8px 12px; }
-    main { padding: 12px; }
 }

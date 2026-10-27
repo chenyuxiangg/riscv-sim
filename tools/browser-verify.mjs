@@ -151,6 +151,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "boardArchive",
     "boardDelta",
     "boardOrdering",
+    "uiLayout",
 ]);
 
 /**
@@ -1925,6 +1926,74 @@ const BV_LAST_MEMORY_MAP_EXPRESSION = `(() => {
 })()`;
 
 /**
+ * **侧边栏**探针（STAGE-34 · v0.49 批）。
+ *
+ * ⚠️ **按位置取值**：侧边栏项用 `data-view-tab` ⇒ ⇒ 与旧标签页那套语义
+ * **同一个属性** ⇒ ⇒ 真机门禁**不会**因为「多了个侧边栏」而选错元素。
+ */
+const BV_SIDEBAR_PROBE = `(() => {
+  const host = document.querySelector("[data-sidebar]");
+  const items = Array.from(document.querySelectorAll("[data-sidebar] [data-view-tab]"));
+  const current = items.filter((el) => el.getAttribute("aria-current") === "page");
+  const main = document.querySelector("main#app");
+  const burger = document.querySelector("[data-sidebar-toggle]");
+  const rect = (el) => (el ? el.getBoundingClientRect() : null);
+  const sb = rect(host);
+  const mn = rect(main);
+  const bs = burger ? getComputedStyle(burger) : null;
+  return {
+    hasHost: !!host,
+    hostVisible: !!host && !!sb && sb.width > 0 && sb.height > 0,
+    itemCount: items.length,
+    groupCount: document.querySelectorAll("[data-sidebar] .nav-group").length,
+    groups: Array.from(document.querySelectorAll("[data-sidebar] .nav-group")).map((g) => ({
+      label: String((g.querySelector(".nav-label") || {}).textContent || "").trim(),
+      count: g.querySelectorAll("[data-view-tab]").length,
+    })),
+    svgCount: host ? host.querySelectorAll("svg").length : 0,
+    currentCount: current.length,
+    currentHash: current.length === 1 ? current[0].getAttribute("data-view-tab") : null,
+    sidebarX: sb ? sb.x : null,
+    sidebarRight: sb ? sb.x + sb.width : null,
+    mainX: mn ? mn.x : null,
+    burgerVisible: !!burger && !!bs && bs.display !== "none",
+    open: host ? host.classList.contains("open") : false,
+    hash: location.hash,
+  };
+})()`;
+
+/** 当前**可见**的视图面板（哪一块、显不显示）。 */
+const BV_ACTIVE_PANEL_PROBE = `(() => {
+  const panels = Array.from(document.querySelectorAll("[data-view-panel]"));
+  const active = panels.find((p) => !p.classList.contains("hidden")) || null;
+  return {
+    activePanel: active ? active.getAttribute("data-view-panel") : null,
+    visible: !!active,
+  };
+})()`;
+
+/**
+ * 顶栏运行条的**统计**（PC / 虚拟时间）＋ 寄存器视图那份 PC。
+ *
+ * ⚠️ **两边都读** ⇒ ⇒ 断言「逐字相同」才能证明**同一个状态源**。
+ */
+const BV_TOPBAR_STATS_PROBE = `(() => {
+  const pc = document.querySelector("[data-topbar-pc-value]");
+  const time = document.querySelector("[data-topbar-time-value]");
+  const regPc = document.querySelector('[data-view-body="regmem"] .pc');
+  const regTime = document.querySelector('[data-view-body="regmem"] .timeVirt');
+  return {
+    pcText: pc ? String(pc.textContent || "").trim() : null,
+    timeText: time ? String(time.textContent || "").trim() : null,
+    // ⚠️ **原始 ps**（顶栏额外挂的属性）⇒ ⇒ 「同一个源」那条判据
+    // **逐字可比**（视图里那份是 "123 ps" 这种原始格式）。
+    timePs: time ? String(time.getAttribute("data-topbar-time-ps") ?? "") : null,
+    regPcText: regPc ? String(regPc.textContent || "").trim() : null,
+    regTimeText: regTime ? String(regTime.textContent || "").trim() : null,
+  };
+})()`;
+
+/**
  * 读**最后一条**内核推回来的**错误**事件（内核拒了什么）。
  *
  * ⚠️ **读的是内核的码**（`E_PLT-13` / `E_PLT-07` …）⇒ ⇒ 不靠文案匹配。
@@ -3189,6 +3258,174 @@ async function runLoadImageSection(cdp, opts) {
 }
 
 /**
+ * **UI 布局**那一段（STAGE-34 · v0.49 批 —— 侧边栏 + 顶栏运行条）。
+ *
+ * ⚠️ **必须排在最后**：它会切到 `#/regmem` / `#/waveform` ⇒ ⇒ 放在前面会
+ * 污染后面那些段看到的初始状态。
+ *
+ * ⚠️ **判据要问用户真正会问的那个问题**（STAGE-33 §5 记的那条教训）：
+ * 「侧边栏**在不在**」不是用户的问题 ⇒ ⇒ 用户的问题是「**打开页面第一眼
+ * 能不能看见导航、能不能立刻开始跑**」⇒ ⇒ B-12 站在**默认落地页**上验。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
+ */
+async function runUiLayoutSection(cdp, opts) {
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
+
+    // -- B-12 · 默认落地页上侧边栏就在 ------------------------------------
+    // ⚠️ **回到默认落地页**（空 hash ⇒ ⇒ 路由回落到当前角色的默认视图
+    // ⇒ ⇒ 嵌入式工作台）⇒ ⇒ 这才是「用户打开页面看到的那一屏」。
+    await runEffect(cdp, 'location.hash = "";');
+    await sleep(600);
+    let sb = await awaitEval(cdp, BV_SIDEBAR_PROBE);
+    add(
+        "B-12 · **默认落地页上就有左侧导航**（⛔ 不是某个视图里才有 ⇒ ⇒ 这正是用户的判据）",
+        !!(sb?.hasHost && sb?.hostVisible && sb?.itemCount >= 8 && sb?.groupCount === 2),
+        `hash=${JSON.stringify(sb?.hash ?? "")} 导航项=${sb?.itemCount ?? 0} 组=${sb?.groupCount ?? 0}`
+        + ` 图标=${sb?.svgCount ?? 0} 可见=${sb?.hostVisible}`,
+    );
+    add(
+        "B-12b · 侧边栏**按分组**排（运行与调试 5 项 / 平台 3 项）且每项都带内联 SVG 图标",
+        !!sb && Array.isArray(sb?.groups) && sb.groups.length === 2
+            && sb.groups[0].count === 5 && sb.groups[1].count === 3
+            && sb.svgCount === sb.itemCount,
+        `分组=${JSON.stringify(sb?.groups ?? [])} 图标数=${sb?.svgCount ?? 0} / 导航项=${sb?.itemCount ?? 0}`,
+    );
+
+    // -- B-13 · 真点侧边栏上的「波形」项 ⇒ ⇒ 视图真的切了 ----------------
+    await runEffect(cdp, `(() => {
+        const item = document.querySelector('[data-sidebar] [data-view-tab="waveform"]');
+        if (!item) return "no-item";
+        item.click();
+        return "clicked";
+    })()`);
+    await sleep(700);
+    sb = await awaitEval(cdp, BV_SIDEBAR_PROBE);
+    const wavePanel = await awaitEval(cdp, BV_ACTIVE_PANEL_PROBE);
+    add(
+        "B-13 · 真点侧边栏上的「波形」项 ⇒ ⇒ **视图真的切了**（hash + 面板都跟上）",
+        sb?.hash === "#/waveform" && wavePanel?.activePanel === "waveform"
+            && wavePanel?.visible === true,
+        `hash=${JSON.stringify(sb?.hash ?? "")} 面板=${JSON.stringify(wavePanel?.activePanel ?? "")}`
+        + ` 可见=${wavePanel?.visible}`,
+    );
+
+    // -- B-14 · 当前项高亮，且**只有一个** -------------------------------
+    add(
+        "B-14 · 当前视图对应的侧边栏项**高亮**（`aria-current=\"page\"`）且**只有一个**",
+        sb?.currentCount === 1 && sb?.currentHash === "waveform",
+        `高亮项数=${sb?.currentCount ?? 0} 高亮的是=${JSON.stringify(sb?.currentHash ?? "")}`,
+    );
+
+    // -- B-15 · 顶栏运行条与寄存器视图**同源** -----------------------------
+    // ⚠️ **先切到 regmem**（那儿有 PC 的另一份显示）⇒ ⇒ 两边要能对上。
+    await runEffect(cdp, 'location.hash = "#/regmem";');
+    await sleep(800);
+    const stats = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+    add(
+        "B-15 · 顶栏运行条显示的 PC 与**寄存器视图那份逐字相同**（⇒ ⇒ 同一个状态源 ⇒ ⇒ 不是第二个真相）",
+        !!stats?.pcText && stats.pcText === stats.regPcText && /^0x[0-9a-f]{8}$/.test(stats.pcText),
+        `顶栏 PC=${JSON.stringify(stats?.pcText ?? "")} 寄存器视图 PC=${JSON.stringify(stats?.regPcText ?? "")}`
+        + ` 虚拟时间=${JSON.stringify(stats?.timeText ?? "")}`,
+    );
+    add(
+        "B-15b · 顶栏的**虚拟时间**与寄存器视图那份**逐字同源**（原始 ps ⇒ ⇒ 不是写死的）",
+        !!stats?.timePs && !!stats?.regTimeText
+            && String(stats.timePs) === String(stats.regTimeText).replace(/\s*ps\s*$/, "")
+            && /\d/.test(stats.timeText ?? ""),
+        `顶栏原始 ps=${JSON.stringify(stats?.timePs ?? "")} 显示=${JSON.stringify(stats?.timeText ?? "")}`
+        + ` 寄存器视图=${JSON.stringify(stats?.regTimeText ?? "")}`,
+    );
+
+    // -- B-16 · 真点顶栏「单步」⇒ ⇒ 线上帧看得见 + PC 真的动了 ----------
+    const pcBefore = stats?.pcText ?? null;
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-topbar-action="step"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    let stepSeen = false;
+    const stepDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < stepDeadline) {
+        const probe = await awaitEval(cdp, BV_DELTA_PROBE);
+        if (probe && bvWireHas(probe.wire, "StepN")) {
+            stepSeen = true;
+            break;
+        }
+        await sleep(200);
+    }
+    await sleep(600);
+    const statsAfter = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+    add(
+        "B-16 · 真点顶栏「单步」⇒ ⇒ **线上帧里看得见**步进命令 ⇒ ⇒ **内核真的走了**（PC 变了）",
+        stepSeen && !!pcBefore && statsAfter?.pcText !== null && statsAfter.pcText !== pcBefore,
+        `线上帧里有 StepN=${stepSeen}；PC ${JSON.stringify(pcBefore)} ⇒ ${JSON.stringify(statsAfter?.pcText ?? "")}`,
+    );
+
+    // -- B-17 · 窄屏（375 × 667）⇒ ⇒ 侧边栏变抽屉 -----------------------
+    // ⚠️ **改视口**（`Emulation.setDeviceMetricsOverride`）⇒ ⇒ 媒体查询重新
+    // 评估 ⇒ ⇒ 侧边栏应当**移出屏幕**（`translateX(-100%)`）⇒ ⇒ 主区
+    // 从 x=0 开始（**不被遮挡**）。
+    await cdp.send("Emulation.setDeviceMetricsOverride", {
+        width: 375, height: 667, deviceScaleFactor: 1, mobile: false,
+    });
+    await sleep(600);
+    const narrow = await awaitEval(cdp, BV_SIDEBAR_PROBE);
+    add(
+        "B-17 · 窄屏（375）⇒ ⇒ 侧边栏**收起**（不占宽度）⇒ ⇒ 主区不被遮挡",
+        narrow?.mainX !== undefined && narrow.mainX <= 1 && narrow.sidebarRight <= 1,
+        `主区 x=${JSON.stringify(narrow?.mainX ?? "")} 侧边栏右缘=${JSON.stringify(narrow?.sidebarRight ?? "")}`,
+    );
+    // ⚠️ **点击无条件执行**（不藏在某个断言的短路条件里）⇒ ⇒ 否则「汉堡
+    // 不可见」时点击**根本不发生** ⇒ ⇒ B-17c 变成**测另一个东西** ⇒ ⇒
+    // 断言**不许短路**（STAGE-33 订正里那条纪律的同一条）。
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector("[data-sidebar-toggle]");
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    add(
+        "B-17b · 窄屏⇒ ⇒ 汉堡按钮**可见**",
+        !!narrow?.burgerVisible,
+        `汉堡可见=${narrow?.burgerVisible}`,
+    );
+    await sleep(400);
+    const opened = await awaitEval(cdp, BV_SIDEBAR_PROBE);
+    add(
+        "B-17c · 点汉堡 ⇒ ⇒ 侧边栏**真的进屏了**（不再是抽屉外面）",
+        opened?.open === true && opened?.sidebarX !== undefined && opened.sidebarX >= -1,
+        `open=${opened?.open} 侧边栏 x=${JSON.stringify(opened?.sidebarX ?? "")}`,
+    );
+    // ⚠️ **恢复视口** ⇒ ⇒ 后面那些段（以及下一轮跑）看到的还是宽屏。
+    await cdp.send("Emulation.clearDeviceMetricsOverride");
+    await sleep(400);
+
+    // -- B-18 · 宽屏（1280）⇒ ⇒ 侧边栏在主区左边、不遮挡 -----------------
+    await cdp.send("Emulation.setDeviceMetricsOverride", {
+        width: 1280, height: 900, deviceScaleFactor: 1, mobile: false,
+    });
+    await sleep(600);
+    const wide = await awaitEval(cdp, BV_SIDEBAR_PROBE);
+    add(
+        "B-18 · 宽屏（1280）⇒ ⇒ 侧边栏**在主区左边**且**不遮挡**主内容",
+        wide?.mainX !== undefined && wide.mainX >= 190
+            && wide?.sidebarX !== undefined && wide.sidebarX <= 1
+            && wide?.sidebarRight !== undefined && wide.sidebarRight <= wide.mainX + 1,
+        `侧边栏 x=${JSON.stringify(wide?.sidebarX ?? "")} 右缘=${JSON.stringify(wide?.sidebarRight ?? "")}`
+        + ` 主区 x=${JSON.stringify(wide?.mainX ?? "")}`,
+    );
+    await cdp.send("Emulation.clearDeviceMetricsOverride");
+    await sleep(300);
+
+    return { skipped: false, checks };
+}
+
+/**
  * 真实 RTOS 那一段：装载仓外的 ELF → 跑起来 → 终端里看得见 console。
  *
  * ⚠️ **ELF 不在就跳过，不是判负**：osz 的产物**在仓外**（不进仓库）⇒
@@ -3875,6 +4112,14 @@ async function main() {
         const boardOrdering = await runSection("boardOrdering", () => runBoardOrderingSection(cdp, opts));
         registerSection("boardOrdering", boardOrdering.checks, {
             title: "乱序到达检查（注入更旧的 memory.map 事件 → 真提交 → 真内核接受）",
+        });
+
+        // -- the UI LAYOUT (STAGE-34 · v0.49 批) ------------------------------
+        // ⚠️ **必须排在最后**：它会切到 `#/regmem` / `#/waveform` ⇒ ⇒ 放在
+        // 前面会污染后面那些段看到的初始状态。
+        const uiLayout = await runSection("uiLayout", () => runUiLayoutSection(cdp, opts));
+        registerSection("uiLayout", uiLayout.checks, {
+            title: "UI 布局检查（左侧分组导航 · 顶栏全局运行条 · 窄屏抽屉）",
         });
 
         // -- report ------------------------------------------------------------

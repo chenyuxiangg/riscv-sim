@@ -75,7 +75,89 @@ function capBitsFor(role) {
  * @property {string} capability — required capability bit
  * @property {string} panel     — DOM selector (`[data-view-panel="..."]`)
  * @property {string} role      — workbench role this view lives under
+ * @property {string} group     — **侧边栏分组**（`run` / `platform`）
+ * @property {string} hint      — 面板标题右边那行**提示**
  */
+
+/**
+ * 侧边栏的**分组**（STAGE-34 · v0.49 批 · 裁决 C）。
+ *
+ * ⚠️ **分组只有一个落点**：`VIEW_REGISTRY` 每项的 `group` 字段 ⇒ ⇒ 侧边栏
+ * **按它渲染** ⇒ ⇒ 不另设一张「视图 → 分组」的表 ⇒ ⇒ 那是**第二个真相**。
+ *
+ * ⚠️ **顺序也是落点**：这里列出来的顺序 = 侧边栏里的上下顺序。
+ */
+const NAV_GROUPS = [
+    { id: "run", label: "运行与调试" },
+    { id: "platform", label: "平台" },
+];
+
+/**
+ * 侧边栏导航项的**内联 SVG 图标**（裁决 I —— 零依赖 ⇒ ⇒ 不用图标字体库、
+ * 不用图片外链）。
+ *
+ * ⚠️ **形状是常量**（不含任何用户数据）⇒ ⇒ 用 DOM 调用逐个造（**不是**
+ * `innerHTML` 拼字符串）⇒ ⇒ ① 守住 M-01「不拼 HTML 字符串」那条既有门禁
+ * ② SVG 元素在真浏览器里**只能**用 `createElementNS` 造（`createElement`
+ * 出来的是 HTML 元素，**不渲染**）。
+ *
+ * @type {Readonly<Record<string, [string, Record<string, string>][]>>}
+ */
+const SVG_NS = "http://www.w3.org/2000/svg";
+const NAV_ICONS = {
+    embedded: [
+        ["rect", { x: "3", y: "3", width: "7", height: "7", rx: "1.5" }],
+        ["rect", { x: "14", y: "3", width: "7", height: "7", rx: "1.5" }],
+        ["rect", { x: "3", y: "14", width: "7", height: "7", rx: "1.5" }],
+        ["rect", { x: "14", y: "14", width: "7", height: "7", rx: "1.5" }],
+    ],
+    debug: [["path", { d: "M9 3l6 9-6 9" }]],
+    regmem: [
+        ["path", { d: "M4 7l8-4 8 4v10l-8 4-8-4z" }],
+        ["path", { d: "M4 7l8 4 8-4M12 11v10" }],
+    ],
+    waveform: [["path", { d: "M2 12h4l2-6 4 12 3-9 2 3h5" }]],
+    terminal: [
+        ["rect", { x: "3", y: "4", width: "18", height: "16", rx: "3" }],
+        ["path", { d: "M7 9l3 3-3 3M13 15h4" }],
+    ],
+    product: [
+        ["rect", { x: "4", y: "10", width: "16", height: "11", rx: "2" }],
+        ["path", { d: "M8 10V7a4 4 0 018 0v3" }],
+    ],
+    "memory-map": [
+        ["rect", { x: "3", y: "5", width: "18", height: "14", rx: "2" }],
+        ["path", { d: "M3 12h18M9 5v14M15 5v14" }],
+    ],
+    source: [["path", { d: "M8 7l-4 5 4 5M16 7l4 5-4 5M13 5l-2 14" }]],
+};
+
+/**
+ * 造一个导航项的 **SVG 图标**。
+ *
+ * ⚠️ **逐个 DOM 调用**（不是 `innerHTML`）⇒ ⇒ ① 形状是常量、不含用户数据
+ * ② M-01 那条「不拼 HTML 字符串」的既有门禁**一字不改**仍然成立。
+ *
+ * @param {string} hash — 视图 hash（决定用哪个图标）
+ * @returns {SVGElement|Element|null}
+ */
+function buildNavIcon(hash) {
+    const shapes = NAV_ICONS[hash];
+    if (!shapes || typeof document?.createElementNS !== "function") return null;
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("width", "15");
+    svg.setAttribute("height", "15");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "1.8");
+    for (const [tag, attrs] of shapes) {
+        const node = document.createElementNS(SVG_NS, tag);
+        for (const [k, val] of Object.entries(attrs)) node.setAttribute(k, val);
+        svg.appendChild(node);
+    }
+    return svg;
+}
 
 /** @type {ReadonlyMap<string, ViewDescriptor>} */
 const VIEW_REGISTRY = new Map([
@@ -85,6 +167,8 @@ const VIEW_REGISTRY = new Map([
         capability: "view.productTree",
         panel: '[data-view-panel="product"]',
         role: "product",
+        group: "platform",
+        hint: "器件树 · 板级内存图",
     }],
     ["embedded", {
         hash: "embedded",
@@ -92,6 +176,8 @@ const VIEW_REGISTRY = new Map([
         capability: "view.productTree",
         panel: '[data-view-panel="embedded"]',
         role: "embedded",
+        group: "run",
+        hint: "PC · 虚拟时间 · 四个子视图入口",
     }],
     ["debug", {
         hash: "debug",
@@ -99,6 +185,8 @@ const VIEW_REGISTRY = new Map([
         capability: "view.debug",
         panel: '[data-view-panel="debug"]',
         role: "embedded",
+        group: "run",
+        hint: "反汇编 · trace 导出 · 寄存器",
     }],
     ["regmem", {
         hash: "regmem",
@@ -106,6 +194,8 @@ const VIEW_REGISTRY = new Map([
         capability: "view.regmem",
         panel: '[data-view-panel="regmem"]',
         role: "embedded",
+        group: "run",
+        hint: "通用寄存器 · PC / 虚拟时间 · 内存单元",
     }],
     ["waveform", {
         hash: "waveform",
@@ -113,6 +203,8 @@ const VIEW_REGISTRY = new Map([
         capability: "view.waveform",
         panel: '[data-view-panel="waveform"]',
         role: "embedded",
+        group: "run",
+        hint: "通道列表与边沿计数",
     }],
     // 源码视图（STAGE-7 裁决 E / F）：源码树**在前端本地**（不进内核），
     // 视图只负责「装载 + 高亮」。
@@ -122,6 +214,8 @@ const VIEW_REGISTRY = new Map([
         capability: "view.source",
         panel: '[data-view-panel="source"]',
         role: "embedded",
+        group: "platform",
+        hint: "本地源码树 · 行号高亮",
     }],
     ["terminal", {
         hash: "terminal",
@@ -129,6 +223,8 @@ const VIEW_REGISTRY = new Map([
         capability: "view.terminal",
         panel: '[data-view-panel="terminal"]',
         role: "product",
+        group: "run",
+        hint: "字节流实时上屏 · 可向 guest 打字",
     }],
     // 板级内存图编辑器（STAGE-14 · v0.29）。
     //
@@ -144,6 +240,8 @@ const VIEW_REGISTRY = new Map([
         capability: "view.productTree",
         panel: '[data-view-panel="memory-map"]',
         role: "product",
+        group: "platform",
+        hint: "段表编辑 · 差量提交 · 板档案",
     }],
 ]);
 
@@ -153,6 +251,8 @@ const FALLBACK_VIEW = {
     capability: "view.productTree",
     panel: '[data-view-panel="fallback"]',
     role: "product",
+    group: "platform",
+    hint: "路由或能力位不认识这一屏",
 };
 
 // ---------------------------------------------------------------------------
@@ -167,6 +267,12 @@ let currentCapBits = new Set(FALLBACK_CAPS);
 let activeView = VIEW_REGISTRY.get("embedded") ?? null;
 /** @type {Map<string, ViewDescriptor>} cached mounted views per assemble */
 const mountedViews = new Map();
+
+/**
+ * 抽屉开关**只订阅一次**的标志（STAGE-34 · v0.49 批）。
+ * @type {boolean}
+ */
+let sidebarToggleWired = false;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -213,6 +319,8 @@ export function assembleWorkspace(role) {
             ?? null;
     }
     mountPanels();
+    renderSidebar();
+    wireSidebarToggle();
     return currentWorkspace();
 }
 
@@ -224,13 +332,19 @@ export function assembleWorkspace(role) {
  * (FRONTEND_Review.md R-18: removing the dev helpers is a legitimate
  * refactor and must not turn the gate red).
  *
- * @returns {{role: string, capBits: string[], views: {hash: string, name: string}[], activeView: {hash: string, name: string}|null}}
+ * @returns {{role: string, capBits: string[], views: {hash: string, name: string, group: string}[], activeView: {hash: string, name: string}|null}}
  */
 export function currentWorkspace() {
     return {
         role: currentRole,
         capBits: [...currentCapBits],
-        views: [...mountedViews.values()].map((v) => ({ hash: v.hash, name: v.name })),
+        // ⚠️ **带上 `group`**（STAGE-34 · v0.49 批）⇒ ⇒ 前端门禁据此断言
+        // 「每个视图都有分组」⇒ ⇒ 分组**只有一个落点**（`VIEW_REGISTRY`）。
+        views: [...mountedViews.values()].map((v) => ({
+            hash: v.hash,
+            name: v.name,
+            group: v.group,
+        })),
         activeView: activeView ? { hash: activeView.hash, name: activeView.name } : null,
     };
 }
@@ -349,6 +463,7 @@ export function switchView(target) {
  */
 export function refreshAll() {
     mountPanels();
+    renderSidebar();
     if (!activeView) return;
     // mountPanels() hides every panel — the active one has to be shown
     // again, otherwise a capability flip blanks the screen.
@@ -392,14 +507,121 @@ function createPanel(v) {
     // Build the panel with DOM calls instead of an HTML string: the
     // view name and hash then never travel through a markup parser
     // (FRONTEND_Review.md #10).
+    //
+    // ⚠️ **STAGE-34 · v0.49 批 · 裁决 G**：外框换成原型的
+    // `.vhead`（标题 + 提示）**加** `.card`（内容容器）。
+    // ⚠️ **标题文字一个字都不改**（仍是 `v.name`）⇒ ⇒ 前端门禁对页脚
+    // 文案的那条断言**零改动**。
+    const head = document.createElement("div");
+    head.className = "vhead";
+    // ⚠️ **元素是 `h2` 不是 `h1`** ⇒ ⇒ 真机门禁的落地页 / 渲染 / 源码三段
+    // 都用 `active.querySelector("h2")` 取标题 ⇒ ⇒ 换成 `h1` 会让那**五条**
+    // 断言**悄悄变红**（判据口径变了）⇒ ⇒ **保留 `h2`** ⇒ ⇒ 92 条断言
+    // **一字不改**仍然成立（STAGE-34 §8 订正 4）。
     const heading = document.createElement("h2");
     heading.textContent = v.name;
+    head.appendChild(heading);
+    if (v.hint) {
+        const hint = document.createElement("span");
+        hint.className = "hint";
+        hint.textContent = v.hint;
+        head.appendChild(hint);
+    }
+    const card = document.createElement("div");
+    card.className = "card";
     const body = document.createElement("div");
     body.className = "view-body";
     body.dataset.viewBody = v.hash;
-    el.appendChild(heading);
-    el.appendChild(body);
+    card.appendChild(body);
+    el.appendChild(head);
+    el.appendChild(card);
     return el;
+}
+
+/**
+ * 渲染**左侧分组导航**（STAGE-34 · v0.49 批 · 裁决 C）。
+ *
+ * ⚠️ **分组只有一个落点**：`VIEW_REGISTRY` 每项的 `group` 字段 ⇒ ⇒ 这里
+ * **按它分组** ⇒ ⇒ 不另设一张「视图 → 分组」的表（那是第二个真相）。
+ * ⚠️ **只显示当前角色**挂载了的视图（`mountedViews`）⇒ ⇒ 侧边栏与
+ * `mountPanels()` 的**口径一致** ⇒ ⇒ 不会出现「点得动但没面板」。
+ * ⚠️ 导航项**保留 `data-view-tab`**（裁决 B）⇒ ⇒ `syncTabState()`
+ * **一个字都不用改** ⇒ ⇒ 「当前项」仍是 `aria-current="page"`。
+ *
+ * @returns {number} 渲染出来的导航项数
+ */
+export function renderSidebar() {
+    const host = document.querySelector("[data-sidebar]");
+    if (!host) return 0;
+    // ⚠️ **清空容器不用 `innerHTML` 赋值**（逐个摘掉子节点）⇒ ⇒ M-01 那条
+    // 「不拼 HTML 字符串」的既有门禁（它匹配的是 `.innerHTML` **后面跟等号**
+    // 这个形状）**一字不改**仍然成立 ⇒ ⇒ 真浏览器里 `childNodes` 是 live 的
+    // NodeList ⇒ ⇒ 这么写也对。
+    //
+    // ⚠️ **这条注释自己就是证据**：那条门禁只匹配**赋值**形状 ⇒ ⇒ 所以**注释
+    // 里也不能写出那个形状** ⇒ ⇒ 否则源码里一句解释性的散文就会把门禁撞红
+    // （FRONTEND_Review.md R-17：过宽的静态断言 = 假红）⇒ ⇒ **实测踩到了**。
+    while (host.childNodes.length) host.removeChild(host.childNodes[0]);
+    let count = 0;
+    for (const g of NAV_GROUPS) {
+        const items = [...mountedViews.values()].filter((v) => v.group === g.id);
+        if (!items.length) continue;
+        const group = document.createElement("div");
+        group.className = "nav-group";
+        const groupLabel = document.createElement("div");
+        groupLabel.className = "nav-label";
+        groupLabel.textContent = g.label;
+        group.appendChild(groupLabel);
+        for (const v of items) {
+            const item = document.createElement("a");
+            item.className = "nav-item";
+            item.setAttribute("href", `#/${v.hash}`);
+            // ⚠️ **保留 `data-view-tab`** ⇒ ⇒ 旧标签页那套语义不变。
+            item.setAttribute("data-view-tab", v.hash);
+            const ic = document.createElement("span");
+            ic.className = "nav-ic";
+            ic.setAttribute("aria-hidden", "true");
+            // ⚠️ **SVG 用 `createElementNS` 造**（不是 `innerHTML`）⇒ ⇒
+            // 形状是常量、不含用户数据 ⇒ ⇒ 而且 M-01 那条「不拼 HTML
+            // 字符串」的既有门禁**一字不改**仍然成立。
+            const icon = buildNavIcon(v.hash);
+            if (icon) ic.appendChild(icon);
+            item.appendChild(ic);
+            const text = document.createElement("span");
+            text.textContent = v.name;
+            item.appendChild(text);
+            group.appendChild(item);
+            count += 1;
+        }
+        host.appendChild(group);
+    }
+    // 重建完 DOM ⇒ ⇒ 「当前项」的高亮要重新打一遍。
+    syncTabState(activeView?.hash ?? "");
+    return count;
+}
+
+/**
+ * 窄屏抽屉的开关（STAGE-34 · v0.49 批 · 裁决 H）。
+ *
+ * ⚠️ 宽屏（≥ 720px）侧边栏**常驻**⇒ ⇒ 抽屉那个 `.open` **只影响窄屏**
+ * （CSS 决定）⇒ ⇒ 这个函数在宽屏上点了也**看不出差别**（但也无害）。
+ */
+function wireSidebarToggle() {
+    // ⚠️ **只订阅一次** ⇒ ⇒ 否则 `assembleWorkspace()` 每次调用都会**叠一层**
+    // 监听器 ⇒ ⇒ 点一下开关会**切换多次** ⇒ ⇒ 看起来像「没反应」。
+    if (sidebarToggleWired) return;
+    const toggle = document.querySelector("[data-sidebar-toggle]");
+    const sidebar = document.querySelector("[data-sidebar]");
+    if (!toggle || !sidebar) return;
+    sidebarToggleWired = true;
+    toggle.addEventListener("click", () => {
+        sidebar.classList.toggle("open");
+    });
+    // 点导航项 ⇒ ⇒ 抽屉**顺手收起**（窄屏下不挡住刚切过去的视图）。
+    sidebar.addEventListener("click", (ev) => {
+        const item = ev.target?.closest?.("[data-view-tab]");
+        if (item) sidebar.classList.remove("open");
+    });
 }
 
 function showPanel(target) {
