@@ -23,6 +23,12 @@ import * as viewStore from "./m03_viewstore.js";
 // ⚠️ 这里**没有**循环依赖：M-01 只依赖 M-03（视图状态），不依赖 M-02。
 import { route } from "./m01_workbench.js";
 import { escapeHtml } from "../lib/escape.js";
+// ⚠️ **波形图的纯函数 + 片段**（STAGE-36 · v0.51 批）⇒ ⇒ option 的构造
+// **不碰 DOM** ⇒ ⇒ Node 侧零 DOM 就能测「画的是不是真数据」。
+import { buildWaveOption, canDrawChart, resolveWaveTheme, waveChartHtml } from "./components/wave-chart.js";
+// ⚠️ **波形库加载器的同步读**（STAGE-36）⇒ ⇒ 视图层**只读**已加载好的模块
+// ⇒ ⇒ **加载**由 app 层做（那是它的活）⇒ ⇒ 视图层**不发起**跨源 import。
+import { getECharts } from "../lib/echarts-loader.js";
 import {
     describeMatch,
     matchSourceFile,
@@ -1088,8 +1094,35 @@ const regmemView = register({
 const waveformView = register({
     id: "waveform",
     channels: ["wave"],
+    /**
+     * **持久图表宿主**（STAGE-36 · 裁决 L）。
+     *
+     * ⚠️ **为什么要有它**：视图每次渲染都把 `body.innerHTML` 整个换掉 ⇒ ⇒
+     * 视图里的 DOM **每次都被重建** ⇒ ⇒ echarts 实例挂在**容器元素**上 ⇒ ⇒
+     * 容器没了实例也就没了 ⇒ ⇒ 每次都重建 ⇒ ⇒ **会闪**。
+     *
+     * ⇒ ⇒ 所以这里持有**一个** `<div>`（**不是**用户状态 ⇒ ⇒ 不住视图状态），
+     * 每次渲染把它**搬**进新插槽 ⇒ ⇒ echarts 实例**始终绑在同一个元素上**
+     * ⇒ ⇒ **不重建、不闪**。
+     *
+     * @type {HTMLElement|null}
+     */
+    _chartHost: null,
+    /**
+     * **已初始化的 echarts 实例**（同一个宿主上只有一个 ⇒ ⇒ 复用，不重建）。
+     *
+     * @type {object|null}
+     */
+    _chart: null,
+    /**
+     * **上次绘制时的宿主尺寸**（`"宽x高"`）⇒ ⇒ 变了就 `resize()`。
+     *
+     * @type {string|null}
+     */
+    _chartSize: null,
     render(state) {
-        const channels = state?.wave?.channels ?? [];
+        const wave = state?.wave ?? {};
+        const channels = wave.channels ?? [];
         return `
             <section class="waveform">
                 <div class="card">
@@ -1106,10 +1139,103 @@ const waveformView = register({
                                         : `<span class="muted">· 最新值 ${escapeHtml(String(c.lastValue))}</span>`}
                                 </li>`).join("")}
                            </ul>`}
-                    <p class="muted">本批只把通道列表改成卡片形态 —— <strong>波形真图</strong>（echarts）落在 v0.51 批。</p>
+                    <p class="muted">通道列表里的边沿数是**总数**；下面的图只画每个通道最近的一段。</p>
+                </div>
+                <div class="card">
+                    <div class="row"><h3>波形图</h3><span class="tag">M-19 · 边沿回放</span></div>
+                    ${waveChartHtml({
+                        status: wave.chart?.status ?? "idle",
+                        channels,
+                    })}
                 </div>
             </section>
         `;
+    },
+    /**
+     * 渲染**之后**做的事（STAGE-36 · 裁决 M）。
+     *
+     * ⚠️ **这一步只做两件事**：把**持久宿主**搬进插槽 + （波形库就绪时）
+     * 初始化 / 更新图表 ⇒ ⇒ **不碰**任何别的视图的状态。
+     *
+     * @param {HTMLElement} body
+     * @param {object} state
+     */
+    afterRender(body, state) {
+        const slot = body?.querySelector?.("[data-wave-chart-slot]") ?? null;
+        if (!slot) return; // ⚠️ 降级态**没有**插槽 ⇒ ⇒ 什么都不用做。
+
+        // ⚠️ **搬宿主**：把上一次那个 `<div>` 搬进这次的插槽 ⇒ ⇒
+        // ⇒ 容器还是同一个 ⇒ ⇒ echarts 实例**不用重建**。
+        //
+        // ⚠️⚠️ **插槽必须留下**（STAGE-36 施工期订正）—— `front/style.css` §16
+        //   用 `.wave-chart-slot > *` 给宿主**绝对定位铺满** ⇒ ⇒ 把插槽删掉
+        //   ⇒ ⇒ 宿主既没有 `min-height` 也没有定位参照 ⇒ ⇒ **0 高**
+        //   ⇒ ⇒ 画出来是 0 高 ⇒ ⇒ **看不见** ⇒ ⇒ 正是那段 CSS 注释里说的
+        //   「静默地什么都不画」⇒ ⇒ ⇒ 所以宿主**进插槽**、插槽**留着**。
+        if (!waveformView._chartHost) {
+            waveformView._chartHost = document.createElement("div");
+            waveformView._chartHost.className = "wave-chart-host";
+            waveformView._chartHost.setAttribute("data-wave-chart-host", "");
+        }
+        slot.appendChild(waveformView._chartHost);
+
+        // ⚠️ **波形库还没好** ⇒ ⇒ 这一轮**不画** ⇒ ⇒ 等 app 层把状态写成
+        // 「ok」并重新渲染 ⇒ ⇒ 那一轮才画 ⇒ ⇒ （降级时状态是「degraded」
+        // ⇒ ⇒ 插槽压根不存在 ⇒ ⇒ 上面就 return 了）。
+        const echarts = getECharts();
+        if (!echarts) return;
+
+        const host = waveformView._chartHost;
+        const w = host.clientWidth;
+        const h = host.clientHeight;
+        // ⚠️⚠️ **量不到尺寸就不许 `init`**（STAGE-36 施工期订正）—— 面板没显示时
+        //   `.hidden { display: none }` ⇒ ⇒ `clientWidth/Height` 是 **0**
+        //   ⇒ ⇒ 此时 `echarts.init` 会量到 0 ⇒ ⇒ 画出来是 0 高 ⇒ ⇒
+        //   ⇒ **而且它绑在容器上、之后不会自己重画** ⇒ ⇒ 等用户切到波形视图
+        //   ⇒ ⇒ 图**永远是空的** ⇒ ⇒ ⇒ 所以量到 0 就**这一轮不画**
+        //   ⇒ ⇒ ⇒ 等面板显示出来（下一次渲染会再来一轮）再画。
+        //
+        // ⚠️ **判据本身是纯函数**（`canDrawChart`）⇒ ⇒ Node 侧能单独验
+        //   ⇒ ⇒ 不然这条护栏只能靠「真机恰好撞上那个时序」才有人管。
+        if (!canDrawChart(w, h)) return;
+
+        const channels = state?.wave?.channels ?? [];
+        // ⚠️ **颜色从 CSS 令牌来**（`resolveWaveTheme`）⇒ ⇒ echarts 画在
+        //   canvas 上 ⇒ ⇒ canvas 里的文字**不受 CSS 管** ⇒ ⇒ 默认的深灰字压
+        //   深底 ⇒ ⇒ 看不见 ⇒ ⇒ 必须**显式**把令牌的颜色喂给 echarts。
+        const theme = resolveWaveTheme(
+            typeof document !== "undefined" ? document.documentElement : null,
+        );
+        const option = buildWaveOption(channels, theme);
+        if (!waveformView._chart) {
+            waveformView._chart = echarts.init(host);
+        } else if (waveformView._chartSize !== `${w}x${h}`) {
+            // ⚠️ **尺寸变了要 resize** ⇒ ⇒ 否则 echarts 一直按旧尺寸画
+            // ⇒ ⇒ 窗口拉宽 / 侧栏收起 ⇒ ⇒ 图画不满。
+            waveformView._chart.resize();
+        }
+        waveformView._chartSize = `${w}x${h}`;
+        waveformView._chart.setOption(option, true);
+
+        // ⚠️ **自报**的两个属性（真机门禁读它们）⇒ ⇒ 「界面上画了几个点」是
+        // **界面自己说的** ⇒ ⇒ 真机判据还要拿它跟**视图状态里的样本数**比对
+        // ⇒ ⇒ ⇒ 「界面说的」与「数据里的」**必须一致** ⇒ ⇒ 有判别力。
+        const drawable = option.series.length;
+        const points = option.series.reduce((n, s) => n + s.data.length, 0);
+        host.setAttribute("data-wave-chart-points", String(points));
+        host.setAttribute("data-wave-chart-series", String(drawable));
+        host.setAttribute(
+            "data-wave-chart-status",
+            String(state?.wave?.chart?.status ?? "idle"),
+        );
+        // ⚠️ **自报**：真正喂给 echarts 的**文字色** ⇒ ⇒ 真机门禁拿它跟
+        //   `--tx2` 的**计算值**比对 ⇒ ⇒ 两个**独立来源**（CSS 令牌 vs 界面
+        //   自报）互相印证 ⇒ ⇒ 「令牌真的变成了图上的颜色」这件事**有人管**
+        //   ⇒ ⇒ ⇒ 少了这一步，文字色那条订正就是**没人验**的。
+        host.setAttribute(
+            "data-wave-chart-text-color",
+            String(option?.textStyle?.color ?? ""),
+        );
     },
     onCommand(_ev) {},
     onDelta(_delta) {},
@@ -1535,6 +1661,23 @@ function applyRenderEvent(detail) {
         console.warn(`[M-02 ${detail.viewId}] render error:`, err);
     }
     body.innerHTML = html;
+    // ⚠️ **可选**的渲染后钩子（STAGE-36 · 裁决 M）。
+    //
+    // ⚠️ **为什么需要它**：图表（echarts）需要一个**真实 DOM 容器**才能初始化
+    // ⇒ ⇒ 而 `body.innerHTML = html` 之后容器才存在 ⇒ ⇒ 渲染**之前**拿不到。
+    //
+    // ⚠️ **为什么它是可选的**：只有**声明了**它的视图会被调用 ⇒ ⇒ 既有视图
+    // **零改动**、零回归。
+    //
+    // ⚠️ **为什么用 try/catch**：钩子里做的事（初始化图表）失败**不许**把
+    // 整个渲染搞崩 ⇒ ⇒ 视图已经画出来了 ⇒ ⇒ 失败只该让**那一张图**没有。
+    if (typeof c.afterRender === "function") {
+        try {
+            c.afterRender(body, detail.state ?? {});
+        } catch (err) {
+            console.warn(`[M-02 ${detail.viewId}] afterRender error:`, err);
+        }
+    }
 }
 
 /**

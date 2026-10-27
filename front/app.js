@@ -51,6 +51,16 @@ import {
 } from "./views/components/image-loader.js";
 import { buildMockProject } from "./dev/mock-project.js";
 import { buildDemoStoreState, seedDemoState } from "./dev/demo-state.js";
+// ⚠️ **波形边沿的纯函数**（STAGE-36 · v0.51 批）⇒ ⇒ 累加与截断**剥成纯函数**
+// ⇒ ⇒ Node 侧零 DOM 就能测 ⇒ ⇒ 与 v0.31 批「差量合成剥成纯函数」同形。
+import { mergeEdges, WAVE_SAMPLE_LIMIT } from "./lib/wave-samples.js";
+// ⚠️ **波形库的加载器**（STAGE-36 · v0.51 批）⇒ ⇒ 本批**第一个**外部依赖
+// ⇒ ⇒ URL 是**全仓唯一落点**（住加载器里）⇒ ⇒ 加载失败**不抛** ⇒ ⇒ 界面走降级。
+import {
+    getChartSource,
+    loadECharts,
+    setChartSource,
+} from "./lib/echarts-loader.js";
 
 /** URL of the WASM kernel Worker (same-origin HTTP required). */
 const KERNEL_WORKER_URL = "./kernel-worker.js";
@@ -1522,9 +1532,58 @@ export function wireWaveform(commandRouter) {
      * 累加出来的通道表。内核每次只推**增量**，所以边沿数必须在这里
      * 累加，不能被下一批覆盖。
      *
-     * @type {Map<string, {id: string, label: string, edges: number, lastValue: number|null}>}
+     * ⚠️ **STAGE-36 · v0.51 批**：条目里**多了一个** `samples`（**能画图的
+     * 边沿**）⇒ ⇒ 此前内核推来的边沿**只**被用来累加计数与取末值、**样本本身
+     * 被丢掉** ⇒ ⇒ 「真图」缺数据源 ⇒ ⇒ 本批把**样本留住**。
+     *
+     * ⚠️ **两个数不是同一个数**（裁决 B）：
+     *   - `edges`   = **边沿总数**（内核口径，累加，**不受**保留上限影响）；
+     *   - `samples` = **保留下来能画图的边沿**（每通道最近 `WAVE_SAMPLE_LIMIT` 条）。
+     *
+     * @type {Map<string, {id: string, label: string, edges: number, samples: Array<{t:number,v:number}>, lastValue: number|null}>}
      */
     const channels = new Map();
+
+    /**
+     * 波形图的**状态**（STAGE-36 · 裁决 H）。
+     *
+     * ⚠️ 住**视图状态** `wave.chart` ⇒ ⇒ 视图层**纯渲染**（按 `status` 分支）
+     * ⇒ ⇒ app 层**写**、视图层**只读** ⇒ ⇒ 分层不破。
+     *
+     * @param {"idle"|"loading"|"ok"|"degraded"} status
+     * @param {string} [reason]
+     */
+    function setChartState(status, reason) {
+        viewStore.setState("waveform", (prev) => ({
+            ...prev,
+            wave: {
+                ...(prev.wave ?? {}),
+                chart: { status, ...(reason ? { reason } : {}) },
+            },
+        }));
+        publishViewState("waveform");
+    }
+
+    /**
+     * **懒加载**波形库（裁决 E）。
+     *
+     * ⚠️ **为什么懒**：echarts 的 ESM 产物约一兆 ⇒ ⇒ 启动就拉 ⇒ ⇒ 首屏白等
+     * ⇒ ⇒ 只在**真的有边沿可画**的时候才拉。
+     *
+     * ⚠️ **失败不抛** ⇒ ⇒ 状态落 `degraded` ⇒ ⇒ 界面显示「波形库不可用」
+     * ⇒ ⇒ **通道列表仍在**（裁决 F）⇒ ⇒ 核心调试闭环不受影响。
+     */
+    function ensureWaveChartLoaded() {
+        const status = viewStore.getState("waveform")?.wave?.chart?.status;
+        if (status === "ok" || status === "loading") return;
+        setChartState("loading");
+        loadECharts().then((mod) => {
+            setChartState(
+                mod ? "ok" : "degraded",
+                mod ? undefined : "波形库没加载到（离线或 CDN 不可达）",
+            );
+        });
+    }
 
     commandRouter.subscribe("waveform.history", (event) => {
         const streams = (event.value?.streams ?? []).filter(
@@ -1534,19 +1593,17 @@ export function wireWaveform(commandRouter) {
         for (const stream of streams) {
             const id = String(stream.id ?? "");
             if (!id) continue;
-            const edges = Array.isArray(stream.edges) ? stream.edges : [];
-            const entry = channels.get(id) ?? {
-                id,
-                label: stream.label ?? id,
-                edges: 0,
-                lastValue: null,
-            };
-            entry.label = stream.label ?? entry.label ?? id;
-            entry.edges += edges.length;
-            if (edges.length > 0) {
-                entry.lastValue = edges[edges.length - 1].value ?? entry.lastValue;
-            }
-            channels.set(id, entry);
+            const prev = channels.get(id) ?? null;
+            // ⚠️ **累加与截断是纯函数**（裁决 C）⇒ ⇒ 只读 `prev`、只写返回值
+            // ⇒ ⇒ 视图状态里那份**不被改**。
+            const merged = mergeEdges(prev, stream, WAVE_SAMPLE_LIMIT);
+            // ⚠️ **「最新值」是通道列表一直在用的字段** ⇒ ⇒ 它**不是**样本里的
+            // 东西 ⇒ ⇒ 这里单独从原始流取 ⇒ ⇒ 不动 `mergeEdges` 的契约。
+            const raw = Array.isArray(stream.edges) ? stream.edges : [];
+            merged.lastValue = raw.length > 0
+                ? (raw[raw.length - 1].value ?? prev?.lastValue ?? null)
+                : (prev?.lastValue ?? null);
+            channels.set(id, merged);
         }
         viewStore.setState("waveform", (prev) => ({
             ...prev,
@@ -1556,6 +1613,8 @@ export function wireWaveform(commandRouter) {
             },
         }));
         publishViewState("waveform");
+        // ⚠️ **有边沿了才去拉波形库**（懒加载 ⇒ ⇒ 启动不拉那一兆）。
+        ensureWaveChartLoaded();
     });
 
     return {
@@ -1578,6 +1637,51 @@ export function wireWaveform(commandRouter) {
          */
         async subscribeProbeStream() {
             return commandRouter.dispatchCommand(Command.subscribe("sim.waveform"));
+        },
+        /**
+         * 换波形库来源并**重新加载**（STAGE-36 · 裁决 G）。
+         *
+         * ⚠️ **为什么要有它**：降级路径**必须可达** ⇒ ⇒ 不能只靠「碰巧没网」
+         * ⇒ ⇒ 真机门禁**主动**触发降级 ⇒ ⇒ ⇒ **降级逻辑永远有人管**。
+         *
+         * @param {string} next —— `"off"` = 关掉；给 URL = 换源；给空 = 回到默认。
+         * @returns {string} 换之后的来源。
+         */
+        setChartSource(next) {
+            const source = setChartSource(next);
+            setChartState("loading");
+            loadECharts().then((mod) => {
+                setChartState(
+                    mod ? "ok" : "degraded",
+                    mod ? undefined : "波形库没加载到（离线或 CDN 不可达）",
+                );
+            });
+            return source;
+        },
+        /** 当前波形库来源。 */
+        chartSource() {
+            return getChartSource();
+        },
+        /**
+         * 各通道的**计数快照**（脚本口用）。
+         *
+         * ⚠️ **为什么要有它**（STAGE-36 · 判别力）：真机门禁要拿
+         *   「**图上画了几个点**」与「**视图状态里留了几条样本**」比对 ⇒ ⇒
+         *   两者必须是**两个独立来源** ⇒ ⇒ ⇒ 只给**数字**、不给样本本身 ⇒ ⇒
+         *   门禁读到的是**状态**、不是界面自己的说法。
+         *
+         * ⚠️ **`edges` 与 `samples` 是两个数**（裁决 B）⇒ ⇒ 两个都报 ⇒ ⇒
+         *   「图被截断了」这件事在真机上也看得见。
+         *
+         * @returns {Array<{id:string,label:string,edges:number,samples:number}>}
+         */
+        channelStats() {
+            return Array.from(channels.values()).map((c) => ({
+                id: c.id,
+                label: c.label,
+                edges: c.edges,
+                samples: c.samples.length,
+            }));
         },
     };
 }
@@ -2049,6 +2153,42 @@ export function exposeSourceLoader() {
 }
 
 /**
+ * 把「**波形库来源**」暴露给页面上的脚本（STAGE-36 · v0.51 批 · 裁决 G）。
+ *
+ * ⚠️ **这不是「测试后门」**，是**能力协商**：离线环境、或用户不想为一个图
+ * 拉一兆字节的时候 ⇒ ⇒ 关掉波形图 ⇒ ⇒ 界面如实显示「波形库不可用」
+ * ⇒ ⇒ **通道列表仍在** ⇒ ⇒ 核心调试闭环不受影响。
+ *
+ * ⚠️ **为什么必须有它**（判别力）：降级路径**必须可达** ⇒ ⇒ 真机门禁
+ * **主动**触发降级 ⇒ ⇒ ⇒ **降级逻辑永远有人管** ⇒ ⇒ 不能只靠「碰巧没网」。
+ *
+ * @param {{setChartSource: (next: string) => string, chartSource: () => string}} waveform
+ * @returns {void}
+ */
+export function exposeWaveChartCommands(waveform) {
+    window.riscv_waveform = {
+        /** 当前波形库来源（默认是那个 CDN URL）。 */
+        chartSource: () => waveform.chartSource(),
+        /**
+         * 换波形库来源（`"off"` = 关掉波形图；给 URL = 换源；给空 = 回到默认）。
+         *
+         * @param {string} next
+         * @returns {string} 换之后的来源。
+         */
+        setChartSource: (next) => waveform.setChartSource(next),
+        /**
+         * 各通道的**计数快照**（`edges` = 边沿总数 / `samples` = 留着的样本数）。
+         *
+         * ⚠️ **只读、只给数字** ⇒ ⇒ 门禁拿它跟「界面上画了几个点」比对 ⇒ ⇒
+         *   两个**独立来源**互相印证 ⇒ ⇒ 界面上报错了就会红。
+         *
+         * @returns {Array<{id:string,label:string,edges:number,samples:number}>}
+         */
+        channelStats: () => waveform.channelStats(),
+    };
+}
+
+/**
  * 把一组「**脚本可调用**」的命令暴露给页面上的脚本。
  *
  * ⚠️ **这不是产品 UI**：真实 RTOS 的复验脚本（`tools/browser-verify.mjs`）
@@ -2441,6 +2581,9 @@ async function bootstrap() {
     // ⚠️ 脚本用的**命令门**（真机段要「下断点」/「读 UART 寄存器」——
     // 前端 UI 里没有这两个入口）。
     exposeScriptCommands(commandRouter);
+    // ⚠️ **波形库来源**的脚本口（STAGE-36 · v0.51 批）⇒ ⇒ 真机门禁靠它
+    // **主动**触发降级 ⇒ ⇒ ⇒ 降级路径**永远**有判别力。
+    exposeWaveChartCommands(waveform);
 
     // The status bar follows the **live** transport state, not a
     // one-shot snapshot: the kernel worker connects a tick after the

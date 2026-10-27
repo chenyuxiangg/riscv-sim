@@ -1262,7 +1262,7 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
     <div class="row"><b>问题</b>：两个独立命题——「零构建」（无打包步骤）与「零依赖」（无外部网络依赖）——此前混为一谈；目录形态下 WASM 与 P1 three.js 如何承载需明确。</div>
     <div class="row"><b>选项</b>：A 原生 JS + 全部内联（零构建、零依赖、单文件）；B 构建产物单 HTML（零依赖、有构建步骤）；C 原生 JS + 关键依赖 CDN（零构建、有网络依赖）。</div>
     <div class="row"><b>权衡</b>：同源 HTTP 部署的真正约束是 ES module CORS 与外部资源不可达（与框架无关）；three.js 走 CDN 则离线失效，与「零依赖」冲突；WASM 内联 base64 会膨胀文件（内核 1–3MB → base64 增约 33%）且首屏加载变慢——故目录形态下<b>不内联</b> WASM，直接以同源静态资源加载。</div>
-    <div class="rec"><b>决策</b>：MVP = 方案 A——原生 JS 零构建 + WASM 内联 base64（<b>目录形态 + 同源 HTTP 部署为最终形态</b>（用户决策 2026-10-20；NFR-05 相应修订，单文件自包含降级为<b>可选交付形态</b>，不再作为 MVP 硬指标）；目录形态下由同源静态服务器承载：入口 index.html + 相对 import 的模块图 + wasm 文件）；P1 3D = 方案 C 的受控变体：three.js 走可信 CDN，离线环境 3D 视图降级为 2D/树形（能力协商降级，§11.2），不阻塞核心闭环。<b>「零构建」= 零安装交付属性（用户侧无需任何构建步骤），非开发期约束：内核由 C/Rust→WASM 经 emscripten/LLVM 编译，开发期构建链与测试工具链（node/jest/CI 对拍）正常存在且不受零构建约束（评审 R2/R7/R12）</b>；零依赖在 MVP 保持、P1 允许 CDN + 降级。</div>
+    <div class="rec"><b>决策</b>：MVP = 方案 A——原生 JS 零构建 + WASM 内联 base64（<b>目录形态 + 同源 HTTP 部署为最终形态</b>（用户决策 2026-10-20；NFR-05 相应修订，单文件自包含降级为<b>可选交付形态</b>，不再作为 MVP 硬指标）；目录形态下由同源静态服务器承载：入口 index.html + 相对 import 的模块图 + wasm 文件）；P1 3D = 方案 C 的受控变体：three.js 走可信 CDN，离线环境 3D 视图降级为 2D/树形（能力协商降级，§11.2），不阻塞核心闭环。<b>「零构建」= 零安装交付属性（用户侧无需任何构建步骤），非开发期约束：内核由 C/Rust→WASM 经 emscripten/LLVM 编译，开发期构建链与测试工具链（node/jest/CI 对拍）正常存在且不受零构建约束（评审 R2/R7/R12）</b>；零依赖在 MVP 保持、P1 允许 CDN + 降级；<b>波形真图（v0.51 批 · STAGE-36）= 方案 C 的又一处受控变体</b>：波形视图用 echarts 画真图，走可信 CDN（jsdelivr ESM，锁 5.5.1），<b>刻意不 vendor 进仓</b>（vendor 会让「离线不可用」这个已知缺口消失 ⇒ ⇒ 降级路径变成装饰）；离线 / CDN 不可达时波形视图降级为「波形库不可用」提示，<b>通道列表仍在</b>、核心调试闭环不受影响（能力协商降级，§11.2），零构建仍然成立（浏览器原生动态 import()）。</div>
   </div>
 
   <h3>9.7 逐模块技术选型矩阵</h3>
@@ -1445,7 +1445,7 @@ ol.qlist li b,ul.ulist li b{color:var(--ink)}
     <li><b>产品树数据底座稳定</b>：2D/3D 同源（FR-21），3D 演进不引入第二套数据模型。</li>
     <li><b>外设插件化</b>：Peripheral 注册表新增外设不改既有实例与总线映射。</li>
     <li><b>性能目标渐进</b>：MVP 解释目标 5–10 MIPS【估算】，演进解锁 JIT/QEMU 双内核，前端代码不变。</li>
-    <li><b>浏览器兼容</b>：现代浏览器 + 375px 移动端 + 同源 HTTP 部署直接打开（NFR-05，V-10），演进不引入外部依赖。</li>
+    <li><b>浏览器兼容</b>：现代浏览器 + 375px 移动端 + 同源 HTTP 部署直接打开（NFR-05，V-10），演进不引入外部依赖（<b>已登记的受控破口只有两处</b>：3D 视图的 three.js（ADR-5 / ADR-6，P1）与波形真图的 echarts（ADR-6，v0.51 批 · STAGE-36）走可信 CDN，<b>二者都在不可达时降级且不阻塞核心闭环</b> ⇒ ⇒ 「不引入外部依赖」指的是<b>不引入不可降级的外部依赖</b>）。</li>
     <li><b>Worker 兼容矩阵（评审 F）</b>：Worker 以同源 URL 创建，LLD 首周对 Chrome/Edge/Firefox/Safari 逐浏览器实测并固化兼容矩阵；任一浏览器不支持的降级路径 = §5.1 无 Worker 环境分片兜底。</li>
     <li><b>协议版本协商</b>：握手携带协议版本 + 能力位；新增字段只增不改（向前兼容），未知字段忽略（向后兼容）；不兼容 → 明确拒绝并提示升级路径，不静默错读（§7.3 数据版本）。</li>
     <li><b>持久化 schema 版本与迁移</b>：Project/SimState/DebugMeta 携带 schemaVersion；旧版快照按迁移链升级读取（向后兼容）；分享链接 hash 含版本标识；IndexedDB → 服务端迁移按版本执行。</li>

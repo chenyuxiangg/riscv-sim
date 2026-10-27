@@ -810,3 +810,85 @@ a { color: inherit; text-decoration: none; }
     .main { padding: 12px; }
     .topbar { padding: 8px 12px; }
 }
+
+/* ---------------------------------------------------------------------------
+ * §16 波形图（STAGE-36 · v0.51 批）
+ *
+ * ⚠️ **这一段是**纯新增** ⇒ ⇒ `:root` 里**一个令牌都没动** ⇒ ⇒ 颜色**全部**来自
+ *    既有令牌 ⇒ ⇒ v0.49 批那条「颜色字面量只在 `:root`」的规矩**继续成立**
+ *    ⇒ ⇒ 本段**零**裸颜色字面量（半透明写法 / 十六进制写法**一个都没有**）。
+ * ⚠️ **降级分支与正常分支是两个不同的 DOM**
+ *    （`front/views/components/wave-chart.js`）⇒ ⇒ 降级时**没有**插槽
+ *    ⇒ ⇒ 不会有「一个空白的框在那儿装样子」。
+ * ⚠️ **本段追加在 §15 响应式之后** ⇒ ⇒ 既有内容**一个字都没动**
+ *    ⇒ ⇒ 窄屏那条规则**单独开一个 media 块**，不改 §15。
+ * ------------------------------------------------------------------------- */
+
+/* 波形图卡片容器（整块）。 */
+.wave-chart {
+    background: var(--panel2);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    padding: 12px;
+}
+
+/* 图表插槽 —— echarts 的宿主节点会被搬进这里。
+   ⚠️ **必须有明确高度** ⇒ ⇒ 否则 echarts 量到的 `clientHeight` 是 0
+   ⇒ ⇒ 画出来是 0 高 ⇒ ⇒ **看不见** ⇒ ⇒ 等于「静默地什么都不画」。 */
+.wave-chart-slot {
+    position: relative;
+    width: 100%;
+    min-height: 260px;
+    background: var(--panel);
+    border: 1px solid var(--line2);
+    border-radius: 8px;
+    overflow: hidden;
+}
+/* 被搬进来的宿主节点 ⇒ ⇒ 铺满插槽。
+   ⚠️ **用绝对定位而不是 `height: 100%`** ⇒ ⇒ 插槽只有 `min-height`（高度**不确定**）
+   ⇒ ⇒ 百分比高度会退化成 `auto` ⇒ ⇒ 宿主节点仍是 0 高 ⇒ ⇒ 图还是画不出来。 */
+.wave-chart-slot > * {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+}
+
+/* 降级态容器（波形库不可达）⇒ ⇒ 状态**看得见**，不是只读一行字。
+   ⚠️ 排在 `.wave-chart` **之后** ⇒ ⇒ 同特异度时**后者生效** ⇒ ⇒ 覆盖得掉。 */
+.wave-chart-degraded {
+    background: var(--amber-wash);
+    border-color: var(--amber-edge);
+}
+
+/* 降级提示那一行。 */
+.wave-degraded {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 0;
+    font-size: 12.5px;
+    color: var(--tx2);
+}
+
+/* 降级提示里的标题（「波形库不可用」）⇒ ⇒ 用警示色 ⇒ ⇒ 一眼看见。 */
+.wave-degraded-title {
+    color: var(--amber);
+    font-weight: 600;
+}
+
+/* 图表下方的说明行。
+   ⚠️ **不重复定义** `.muted`（既有类）⇒ ⇒ 这里只补**间距与字号**，
+   颜色**仍**由 `.muted` 那一条给（`var(--tx3)`）⇒ ⇒ 不是第二个真相。 */
+.wave-chart .muted {
+    margin: 8px 0 0;
+    font-size: 12px;
+}
+
+/* 窄屏：图表矮一点（但**不是 0** ⇒ ⇒ 仍然看得见一条线）。
+   ⚠️ **单独开一个 media 块** ⇒ ⇒ §15 响应式那段**一个字都不动**。 */
+@media (max-width: 719px) {
+    .wave-chart-slot { min-height: 200px; }
+}
