@@ -149,6 +149,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "kernelExec",
     "source",
     "waveform",
+    "waveChart",
     "loadImage",
     "osz",
     "memoryMap",
@@ -1869,9 +1870,19 @@ const BV_WIRE_HOOK_EXPRESSION = `(() => {
       // ⚠️ **入向的监听器是在 transport 之后注册的** ⇒ 内核的帧**先**到
       // 前端（状态推进）**再**到这里的捕获 ⇒ ⇒ 「捕获到的最后一帧」就是
       // 「前端已经处理过的最后一帧」⇒ ⇒ 两者不会错位。
+      //
+      // ⚠️⚠️ **挂监听器的条件不能是「window.__bvWorker !== this」**
+      //   （STAGE-36 实测踩到）：STAGE-36 的 Worker 捕获钩子在**构造器**那一层
+      //   就把 window.__bvWorker 设好了 ⇒ ⇒ 于是这个条件**永远不成立**
+      //   ⇒ ⇒ **入向监听器永远挂不上** ⇒ ⇒ __bvIn 永远是空 ⇒ ⇒
+      //   ⇒ 「读内核推回来的 memory.map 事件」那条判据**读不到东西**
+      //   ⇒ ⇒ ⇒ 改成**按 worker 自己**打标记（__bvInHooked）。
       try {
         if (window.__bvWorker !== this) {
           window.__bvWorker = this;
+        }
+        if (!this.__bvInHooked) {
+          this.__bvInHooked = true;
           this.addEventListener("message", (ev) => {
             try { window.__bvIn.push(JSON.stringify(ev.data)); } catch (e) {}
           });
@@ -2897,6 +2908,399 @@ async function installImagePickRecorder(cdp) {
         '  window.__bv_image_picks.push({ from, name: String(f.name || ""), size: Number(f.size || 0) });',
         '}, true);',
     ].join("\n"));
+}
+
+/**
+ * **Worker 实例捕获**钩子（STAGE-36 · v0.51 批）。
+ *
+ * ⚠️ **在 `Worker` 构造器这一层抓**，而不是在 `postMessage` 那一层 ⇒ ⇒
+ *   前端引导时创建 worker（**那一次** postMessage 未必发生）⇒ ⇒ ⇒ 在构造
+ *   那一层抓 ⇒ ⇒ **必然**抓得到。
+ *
+ * ⚠️ **必须用 `Page.addScriptToEvaluateOnNewDocument` 装**（**导航之前**）
+ *   ⇒ ⇒ 页面脚本跑之前钩子就在 ⇒ ⇒ 每次刷新都还在。
+ */
+const BV_WORKER_CAPTURE_SOURCE = `(() => {
+  if (window.__bvWorkerCaptureHooked) return "hooked";
+  window.__bvWorkerCaptureHooked = true;
+  const OrigWorker = window.Worker;
+  if (typeof OrigWorker !== "function") return "no-worker-ctor";
+  const Wrapped = function (url, opts) {
+    const w = new OrigWorker(url, opts);
+    try {
+      window.__bvWorker = w;
+      // ⚠️ **入向帧的监听器也在这里挂**（而不是等到「第一次 postMessage」）
+      //   ⇒ ⇒ 从 worker **一出生**起，入向帧就被捕获 ⇒ ⇒ 「读内核推回来的
+      //   memory.map 事件」那条判据**从头就有数据**。
+      if (!Array.isArray(window.__bvIn)) window.__bvIn = [];
+      if (!w.__bvInHooked) {
+        w.__bvInHooked = true;
+        w.addEventListener("message", (ev) => {
+          try { window.__bvIn.push(JSON.stringify(ev.data)); } catch (e) {}
+        });
+      }
+    } catch (e) {}
+    return w;
+  };
+  Wrapped.prototype = OrigWorker.prototype;
+  try { Object.setPrototypeOf(Wrapped, OrigWorker); } catch (e) {}
+  window.Worker = Wrapped;
+  return "hooked";
+})()`;
+
+/**
+ * 波形真图的**探针**（STAGE-36 · v0.51 批 · B-27 ~ B-32）。
+ *
+ * ⚠️ **两个来源**：`stats` 来自**脚本口**（app 层自己的状态）⇒ ⇒
+ *   `points` 来自**界面自报** ⇒ ⇒ 两个**独立来源**互相印证 ⇒ ⇒
+ *   界面上报错了就是红。
+ *
+ * ⚠️ **用 data-* 选择器**：不靠文案匹配去找元素。
+ */
+const BV_WAVE_CHART_PROBE = `(() => {
+  const body = document.querySelector('[data-view-body="waveform"]');
+  const card = body ? body.querySelector("[data-wave-chart]") : null;
+  const slot = body ? body.querySelector("[data-wave-chart-slot]") : null;
+  const host = body ? body.querySelector("[data-wave-chart-host]") : null;
+  const items = body ? Array.from(body.querySelectorAll(".channel-list > li")) : [];
+  const canvas = host ? host.querySelector("canvas") : null;
+  const wf = window.riscv_waveform || null;
+  let stats = [];
+  try {
+    stats = wf && typeof wf.channelStats === "function" ? wf.channelStats() : [];
+  } catch (e) {
+    stats = [];
+  }
+  return {
+    cardPresent: Boolean(card),
+    cardStatus: card ? String(card.getAttribute("data-wave-chart-status") || "") : "",
+    cardText: card ? String(card.textContent || "") : "",
+    cardInsideChannelList: card ? Boolean(card.closest(".channel-list")) : false,
+    slotPresent: Boolean(slot),
+    slotInsideChannelList: slot ? Boolean(slot.closest(".channel-list")) : false,
+    hostPresent: Boolean(host),
+    // ⚠️ **_echarts_instance_ 是 echarts 自己写的**（不是界面自报）⇒ ⇒
+    //   「echarts 真的在这个容器上初始化过」是**它自己**说的。
+    echartsInstance: host ? String(host.getAttribute("_echarts_instance_") || "") : "",
+    canvasPresent: Boolean(canvas),
+    canvasWidth: canvas ? Number(canvas.width || 0) : 0,
+    canvasHeight: canvas ? Number(canvas.height || 0) : 0,
+    points: host ? Number(host.getAttribute("data-wave-chart-points") ?? "-1") : -1,
+    series: host ? Number(host.getAttribute("data-wave-chart-series") ?? "-1") : -1,
+    // ⚠️ **自报**：真正喂给 echarts 的文字色 ⇒ ⇒ 门禁拿它跟 **CSS 令牌**的
+    //   计算值比对 ⇒ ⇒ 两个**独立来源**互相印证。
+    textColor: host ? String(host.getAttribute("data-wave-chart-text-color") ?? "") : "",
+    // ⚠️ **令牌的计算值**（独立来源：CSS 自己算的，不是界面说的）。
+    tokenTextColor: (() => {
+      try {
+        return String(
+          getComputedStyle(document.documentElement).getPropertyValue("--tx2") || "",
+        ).trim();
+      } catch (e) {
+        return "";
+      }
+    })(),
+    listCount: items.length,
+    listTexts: items.map((li) => String(li.textContent || "").trim()),
+    stats: stats,
+    source: wf && typeof wf.chartSource === "function" ? String(wf.chartSource()) : "",
+  };
+})()`;
+
+/**
+ * 注入一条**边沿很多**的合成波形事件（STAGE-36 · v0.51 批 · B 组）。
+ *
+ * ⚠️ **为什么要注入**（判别力）：
+ *   demo 固件只写一次 GPIO ⇒ ⇒ 只有 **1** 条边沿 ⇒ ⇒ 「样本数」与「边沿总数」
+ *   **相等** ⇒ ⇒ 那时「图上画了几个点」这条判据是**恒真**的 ⇒ ⇒ **零判别力**
+ *   ⇒ ⇒ ⇒ 注入 **600** 条 ⇒ ⇒ 前端每通道只留 **512** 条样本 ⇒ ⇒
+ *   ⇒⇒ **两个数不等** ⇒ ⇒ ⇒ 那条判据才真的在判「图上画的是**样本**还是**计数**」。
+ *
+ * ⚠️ **走的是真的事件帧**（`type: "event"` ⇒ ⇒ 与内核推来的一模一样）
+ *   ⇒ ⇒ 前端收到它的路径**没有**任何特殊 ⇒ ⇒ ⇒ 判的是**生产路径**。
+ *
+ * ⚠️ **只动前端的通道表**：内核那边**一个字没改** ⇒ ⇒ 后续那些段看到的
+ *   内核状态**不受影响**（demo 固件那条 GPIO0.OUT 边沿还在）。
+ */
+const BV_WAVE_CHART_INJECT_EXPRESSION = `(async () => {
+  const { encodeFrame } = await import("./lib/frame.js");
+  const { Event, eventMessage, waveform } = await import("./lib/message.js");
+  if (!window.__bvWorker) return { ok: false, why: "no-worker" };
+  const edges = [];
+  for (let i = 0; i < 600; i++) {
+    edges.push({ t_ps: 1000 + i * 10, value: i % 2 });
+  }
+  const payload = eventMessage(
+    ${BV_INJECTED_FRAME_SEQ},
+    Event.waveformHistory(waveform([
+      { id: "BV.SYN.WAVE", label: "BV.SYN.WAVE", edges: edges },
+    ])),
+  );
+  const frame = encodeFrame({
+    type: "event",
+    seq: ${BV_INJECTED_FRAME_SEQ},
+    sessionId: null,
+    role: null,
+    reqId: null,
+    payload: payload,
+  });
+  window.__bvWorker.dispatchEvent(new MessageEvent("message", { data: frame }));
+  return { ok: true, edges: edges.length };
+})()`;
+
+/**
+ * 波形真图那一段（STAGE-36 · v0.51 批 · B-27 ~ B-32）。
+ *
+ * ⚠️ **必须排在 `waveform` 段之后**：那一段跑完了 demo 固件 ⇒ ⇒ 才有
+ *   GPIO0.OUT 那条边沿 ⇒ ⇒ 才有东西可画。
+ *
+ * ⚠️ **必须排在 `loadImage` 段之前**：那一段把镜像换成夹具 ⇒ ⇒ 放在它
+ *   后面，demo 固件那条边沿就没了。
+ *
+ * ⚠️ **B-28 / B-29 / B-31 依赖网络** ⇒ ⇒ 波形库不可达时**明确 SKIP**
+ *   （不是判负）⇒ ⇒ 且要写明「本条未跑」⇒ ⇒ ⛔ **不许**静默跳过
+ *   （静默跳过 = 判别力为零且没人知道）。
+ *
+ * ⚠️ **B-30 不依赖网络** ⇒ ⇒ ⇒ 降级逻辑**永远**有人管。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
+ */
+async function runWaveChartSection(cdp, opts) {
+    /** @type {{name: string, ok: boolean, detail: string}[]} */
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({
+        name, ok: Boolean(ok), detail: String(detail),
+    });
+
+    // -- ① 切到波形视图 + 装上线上钩子（注入合成事件要用 worker 实例） ----
+    await runEffect(cdp, 'location.hash = "#/waveform";');
+    await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
+    await sleep(400);
+
+    let probe = await awaitEval(cdp, BV_WAVE_CHART_PROBE);
+
+    // -- B-27 · 波形图卡片存在，且**不在**通道列表里 ------------------------
+    add(
+        "B-27 · 波形图卡片存在，且**不在** `.channel-list` 里（真图是**另一张**卡片）",
+        probe?.cardPresent === true
+            && probe?.cardInsideChannelList === false
+            && probe?.slotInsideChannelList === false,
+        `卡片=${probe?.cardPresent} 状态="${probe?.cardStatus}"`
+        + ` 卡片在通道列表里=${probe?.cardInsideChannelList}`
+        + ` 插槽在通道列表里=${probe?.slotInsideChannelList}`,
+    );
+
+    // -- B-32 · 稳定钩子仍在（这一批一个字都没动它）------------------------
+    const listTexts = Array.isArray(probe?.listTexts) ? probe.listTexts : [];
+    const hasGpio = listTexts.some((t) => t.includes("GPIO0.OUT"));
+    const hasEdgesText = listTexts.some((t) => /\b\d+ edges\b/.test(t));
+    add(
+        "B-32 · 稳定钩子仍在（`.channel-list > li` · `GPIO0.OUT` · `N edges` 文本）",
+        Number(probe?.listCount ?? 0) >= 1 && hasGpio && hasEdgesText,
+        `通道数=${probe?.listCount} 有GPIO0.OUT=${hasGpio} 有N edges=${hasEdgesText}`,
+    );
+
+    // -- ② 注入一条**很多边沿**的合成波形事件 ⇒ ⇒ 让「样本数 ≠ 边沿总数」 --
+    //
+    // ⚠️ **为什么要注入**（判别力）：demo 固件只写一次 GPIO ⇒ ⇒ 只有 **1**
+    //   条边沿 ⇒ ⇒ 「样本数」与「边沿总数」**相等** ⇒ ⇒ 那时 B-29 是
+    //   **恒真**的 ⇒ ⇒ **零判别力** ⇒ ⇒ ⇒ 注入 **600** 条 ⇒ ⇒ 前端每通道
+    //   只留 **512** 条样本 ⇒ ⇒ ⇒ 两个数**天然不同** ⇒ ⇒ ⇒ B-29 才真的在判
+    //   「图上画的是**样本**还是**计数**」。
+    //
+    // ⚠️ **注入的是事件帧**（`type: "event"`）⇒ ⇒ 走的是**内核 → 主机**
+    //   那条路 ⇒ ⇒ 前端收到它的方式与收到内核的真事件**完全一样** ⇒ ⇒
+    //   ⇒ 判的是**生产路径**，不是测试后门。
+    //
+    // ⚠️ **要等 worker 实例**：那个钩子在**导航之前**就装好了（构造器那一层）
+    //   ⇒ ⇒ 但前端引导是异步的 ⇒ ⇒ ⇒ 等它出现再注。
+    const workerDeadline = Date.now() + opts.timeoutMs;
+    let workerReady = false;
+    while (Date.now() < workerDeadline) {
+        const w = await awaitEval(cdp, 'Boolean(window.__bvWorker)');
+        if (w === true) { workerReady = true; break; }
+        await sleep(200);
+    }
+    add(
+        "捕获到了内核 Worker 实例（注入事件帧要用它）",
+        workerReady,
+        workerReady ? "worker 在" : "等不到 worker 实例（钩子没装上？）",
+    );
+    if (!workerReady) {
+        return { skipped: false, checks };
+    }
+
+    const injected = await awaitEval(cdp, BV_WAVE_CHART_INJECT_EXPRESSION);
+    add(
+        "注入了一条 600 边沿的合成波形事件（让**样本数 ≠ 边沿总数** ⇒ ⇒ B-29 才有判别力）",
+        Boolean(injected?.ok),
+        injected?.ok
+            ? `注入了 ${injected.edges} 条边沿`
+            : `注不进去：${JSON.stringify(injected?.why ?? null)}`,
+    );
+    if (!injected?.ok) {
+        return { skipped: false, checks };
+    }
+
+    // 等前端把这条事件吃进去（状态推进 → 重新渲染 → 图重画）。
+    const injectDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < injectDeadline) {
+        await sleep(250);
+        probe = await awaitEval(cdp, BV_WAVE_CHART_PROBE);
+        const syn = (Array.isArray(probe?.stats) ? probe.stats : [])
+            .find((s) => s && s.id === "BV.SYN.WAVE");
+        if (syn && Number(syn.edges) >= 600) break;
+    }
+    const syn = (Array.isArray(probe?.stats) ? probe.stats : [])
+        .find((s) => s && s.id === "BV.SYN.WAVE");
+    add(
+        "前端真的收到了那条合成事件（边沿总数 = 600）",
+        Number(syn?.edges ?? 0) === 600,
+        `边沿总数=${syn?.edges ?? "（没收到）"} 样本数=${syn?.samples ?? "—"}`,
+    );
+
+    // -- B-28 · echarts **真的画出来了**（网络依赖 ⇒ ⇒ 不可达就 SKIP）------
+    //
+    // ⚠️ **判据是 echarts 自己写的标记**：容器上的 `_echarts_instance_`
+    //   属性 ⇒ ⇒ 不是界面自报 ⇒ ⇒ 「界面自称画了」骗不了人。
+    const drawn = probe?.hostPresent === true
+        && String(probe?.echartsInstance ?? "") !== ""
+        && probe?.canvasPresent === true
+        && Number(probe?.canvasWidth ?? 0) > 0
+        && Number(probe?.canvasHeight ?? 0) > 0;
+    if (drawn) {
+        add(
+            "B-28 · echarts **真的画出来了**（容器上有 `_echarts_instance_` + 有非零尺寸的 `<canvas>`）",
+            true,
+            `instance=${probe?.echartsInstance} canvas=${probe?.canvasWidth}x${probe?.canvasHeight}`,
+        );
+    } else {
+        add(
+            "B-28 · echarts **真的画出来了**（容器上有 `_echarts_instance_` + 有非零尺寸的 `<canvas>`）"
+                + " —— **本条未跑**（波形库不可达 ⇒ ⇒ **SKIP，不是判负**）",
+            true,
+            `instance="${probe?.echartsInstance}" canvas=${probe?.canvasWidth}x${probe?.canvasHeight}`
+            + ` 来源="${probe?.source}" ⇒ ⇒ 波形库没加载到 ⇒ ⇒ 本条未跑`,
+        );
+    }
+
+    // -- B-29 · 图上的点数 = **样本数**（⛔ 不是边沿总数）--------------------
+    //
+    // ⚠️ **两个独立来源**：界面自报的 `data-wave-chart-points`（图上画了几个点）
+    //   对 **app 层状态**的 `samples`（留了几条样本）⇒ ⇒ 若 option 传错了字段
+    //   （拿 `edges` 当点数）⇒ ⇒ 两边**不等** ⇒ ⇒ 红。
+    const uiPoints = Number(probe?.points ?? -1);
+    const allStats = Array.isArray(probe?.stats) ? probe.stats : [];
+    const totalSamples = allStats.reduce((n, s) => n + Number(s?.samples ?? 0), 0);
+    const totalEdges = allStats.reduce((n, s) => n + Number(s?.edges ?? 0), 0);
+    if (drawn) {
+        add(
+            "B-29 · 图上的点数 = **保留的样本数**（⛔ **不是**边沿总数）",
+            uiPoints > 0 && totalSamples > 0 && uiPoints === totalSamples
+                && uiPoints !== totalEdges,
+            `界面自报点数=${uiPoints} 状态里的样本数之和=${totalSamples}`
+            + ` 边沿总数之和=${totalEdges}`
+            + `（合成通道：边沿 ${syn?.edges ?? "—"} / 样本 ${syn?.samples ?? "—"}）`
+            + (uiPoints === totalEdges
+                ? " ⇒ ⇒ 两个数相等 ⇒ ⇒ **这条判据是恒真的** ⇒ ⇒ 没有判别力"
+                : " ⇒ ⇒ 两个数不等 ⇒ ⇒ 判据真的在判「样本 vs 计数」"),
+        );
+    } else {
+        add(
+            "B-29 · 图上的点数 = **保留的样本数**（⛔ **不是**边沿总数）"
+                + " —— **本条未跑**（波形库不可达 ⇒ ⇒ **SKIP，不是判负**）",
+            true,
+            `界面自报点数=${uiPoints} 状态里的样本数之和=${totalSamples}`
+            + ` 边沿总数之和=${totalEdges} ⇒ ⇒ 波形库没加载到 ⇒ ⇒ 本条未跑`,
+        );
+    }
+
+    // -- B-33 · 令牌的颜色**真的**到了图表上（端到端）----------------------
+    //
+    // ⚠️ **为什么这条重要**（STAGE-36 施工期订正 3）：echarts 画在 **canvas**
+    //   上 ⇒ ⇒ canvas 里的文字**不受 CSS 管** ⇒ ⇒ 默认的深灰字压深底
+    //   ⇒ ⇒ 坐标轴标签 / 图例**几乎看不见** ⇒ ⇒ 「图画出来了」但「读不出来」
+    //   ⇒ ⇒ ⇒ 所以颜色必须**显式**喂给它 ⇒ ⇒ ⇒ 而「喂对了没有」只有一个
+    //   ⇒ ⇒ ⇒ 端到端的验法：界面自报的颜色 == **CSS 令牌自己的计算值**
+    //   ⇒ ⇒ ⇒ 两个**独立来源**互相印证 ⇒ ⇒ ⇒ 少这一步，这条订正**没人管**。
+    const tokenColor = String(probe?.tokenTextColor ?? "");
+    const appliedColor = String(probe?.textColor ?? "");
+    if (drawn) {
+        add(
+            "B-33 · 令牌的颜色**真的**到了图表上（界面自报的颜色 == `--tx2` 的计算值）",
+            tokenColor !== "" && appliedColor !== "" && appliedColor === tokenColor,
+            `令牌计算值="${tokenColor}" 喂给 echarts 的="${appliedColor}"`
+            + (appliedColor === tokenColor
+                ? " ⇒ ⇒ 令牌**真的**变成了图上的颜色"
+                : " ⇒ ⇒ **对不上** ⇒ ⇒ 图上的文字要么是默认深灰（看不见）"
+                  + "、要么是另一份颜色（第二个真相）"),
+        );
+    } else {
+        add(
+            "B-33 · 令牌的颜色**真的**到了图表上（界面自报的颜色 == `--tx2` 的计算值）"
+                + " —— **本条未跑**（波形库不可达 ⇒ ⇒ **SKIP，不是判负**）",
+            true,
+            `令牌计算值="${tokenColor}" 喂给 echarts 的="${appliedColor}"`
+            + ` ⇒ ⇒ 波形库没加载到 ⇒ ⇒ 本条未跑`,
+        );
+    }
+
+    // -- B-30 · **降级路径**（⛔ 不依赖网络 ⇒ ⇒ **永远可跑**）----------------
+    //
+    // ⚠️ **为什么这条最重要**：降级路径若只能「碰巧没网」才走到 ⇒ ⇒
+    //   那它在 CI 上**永远跑不到** ⇒ ⇒ **零判别力** ⇒ ⇒ ⇒ 这里**主动**
+    //   把来源设成 `"off"` ⇒ ⇒ ⇒ 降级逻辑**永远**有人管。
+    await runEffect(cdp, 'window.riscv_waveform.setChartSource("off");');
+    const degradeDeadline = Date.now() + opts.timeoutMs;
+    let degraded = null;
+    while (Date.now() < degradeDeadline) {
+        await sleep(200);
+        degraded = await awaitEval(cdp, BV_WAVE_CHART_PROBE);
+        if (degraded?.cardStatus === "degraded") break;
+    }
+    const degradedText = String(degraded?.cardText ?? "").includes("波形库不可用");
+    const listStillThere = Number(degraded?.listCount ?? 0) >= 1;
+    add(
+        "B-30 · **降级路径**（脚本口把波形库来源设成 `\"off\"`）⇒ ⇒ 显示「波形库不可用」"
+            + " ⇒ ⇒ **且通道列表仍在**（不白屏）",
+        degraded?.cardStatus === "degraded" && degradedText && listStillThere,
+        `卡片状态="${degraded?.cardStatus}" 有降级文案=${degradedText}`
+        + ` 通道数=${degraded?.listCount} 来源="${degraded?.source}"`,
+    );
+
+    // -- B-31 · **降级可恢复**（网络依赖 ⇒ ⇒ 不可达就 SKIP）----------------
+    await runEffect(cdp, 'window.riscv_waveform.setChartSource("");');
+    const restoreDeadline = Date.now() + opts.timeoutMs;
+    let restored = null;
+    while (Date.now() < restoreDeadline) {
+        await sleep(250);
+        restored = await awaitEval(cdp, BV_WAVE_CHART_PROBE);
+        if (restored?.hostPresent === true
+            && String(restored?.echartsInstance ?? "") !== ""
+            && restored?.canvasPresent === true) break;
+    }
+    const restoredDrawn = restored?.hostPresent === true
+        && String(restored?.echartsInstance ?? "") !== ""
+        && restored?.canvasPresent === true;
+    if (restoredDrawn) {
+        add(
+            "B-31 · **降级可恢复**（把来源设回默认 ⇒ ⇒ 图**又**画出来了 ⇒ ⇒ 降级不是死路）",
+            true,
+            `来源="${restored?.source}" instance=${restored?.echartsInstance}`,
+        );
+    } else {
+        add(
+            "B-31 · **降级可恢复**（把来源设回默认 ⇒ ⇒ 图**又**画出来了 ⇒ ⇒ 降级不是死路）"
+                + " —— **本条未跑**（波形库不可达 ⇒ ⇒ **SKIP，不是判负**）",
+            true,
+            `来源="${restored?.source}" instance="${restored?.echartsInstance}"`
+            + ` ⇒ ⇒ 波形库没加载到 ⇒ ⇒ 本条未跑`,
+        );
+    }
+
+    return { skipped: false, checks };
 }
 
 /**
@@ -4215,6 +4619,23 @@ async function main() {
         await cdp.send("Page.enable");
         await cdp.send("Runtime.enable");
 
+        // -- 装上「**Worker 实例捕获**」钩子（**必须在导航之前**）--------------
+        //
+        // ⚠️ **为什么必须在导航之前**：前端的内核 Worker 是**页面引导时**创建的
+        //   ⇒ ⇒ 钩子晚一步 ⇒ ⇒ 就**永远抓不到**那个实例 ⇒ ⇒ 「往 worker 注入
+        //   一个事件帧」这条路直接不通（STAGE-36 实测：`no-worker`）。
+        //
+        // ⚠️ **`Page.addScriptToEvaluateOnNewDocument`** ⇒ ⇒ 每次导航（含刷新）
+        //   **先于页面脚本**执行 ⇒ ⇒ ⇒ 无论后面刷新几次都抓得到。
+        //
+        // ⚠️ **为什么抓 worker**：STAGE-16 的「注入更旧的 memory.map 事件」与
+        //   STAGE-36 的「注入一条 600 边沿的波形事件」都要**往 worker 塞一个
+        //   事件帧** ⇒ ⇒ 前端收到它的路径与收到内核的真事件**完全一样** ⇒ ⇒
+        //   ⇒ 判的是**生产路径**，不是测试后门。
+        await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+            source: BV_WORKER_CAPTURE_SOURCE,
+        });
+
         // -- navigate --------------------------------------------------------
         const loaded = new Promise((resolve) => {
             const off = cdp.on("Page.loadEventFired", () => {
@@ -4331,6 +4752,21 @@ async function main() {
             await sleep(250);
         }
         registerSection("waveform", waveform, { title: "探针流检查（切到 #/waveform）" });
+
+        // -- the WAVEFORM CHART (STAGE-36 · v0.51 批 · B-27 ~ B-32) ----------
+        // ⚠️ **必须排在 waveform 段之后**：那一段跑完了 demo 固件 ⇒ ⇒ 才有
+        //   GPIO0.OUT 那条边沿 ⇒ ⇒ 才有东西可画。
+        //
+        // ⚠️ **必须排在 loadImage 段之前**：loadImage 把镜像换成夹具 ⇒ ⇒
+        //   放在它后面，demo 固件那条边沿就没了。
+        //
+        // ⚠️ **这一段会注入一条合成的波形事件**（600 条边沿）⇒ ⇒ 那是
+        //   **前端通道表**里多出来的通道 ⇒ ⇒ 但内核**一个字没改** ⇒ ⇒
+        //   ⇒ loadImage 段读的那条 GPIO0.OUT 边沿**不受影响**。
+        const waveChart = await runSection("waveChart", () => runWaveChartSection(cdp, opts));
+        registerSection("waveChart", waveChart.checks, {
+            title: "波形真图检查（真图存在 · 画出来了 · 点数=样本数 · 降级 · 可恢复）",
+        });
 
         // -- 固件加载 UI（STAGE-32 · v0.47 · B 组）------------------------
         // ⚠️ **必须排在 osz 段之前**：这一段把当前镜像换成夹具 ⇒ ⇒ 放在

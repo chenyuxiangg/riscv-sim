@@ -164,17 +164,21 @@ for sec in range(0, 11):
 #: ⚠️ **本规格必须定义**的验收编号。
 EXPECT_ACCEPT = {
     # ⚠️ **A 是每批范围**（各自的规格文档 + 各自的 Node 套件 ⇒ ⇒ 落在不同的输出里）。
-    "A": list(range(1, 17)),   # A-1 ~ A-16
+    # ⚠️ **A-17 ~ A-20 是施工期扩的**（§8 订正 8）⇒ ⇒ 那四条各钉一条施工期
+    #    订正（宿主搬移方向 · 主题颜色 · 图例 · 0 尺寸护栏）⇒ ⇒ ⇒ 改了没人管
+    #    **就是假绿** ⇒ ⇒ ⇒ 所以扩编号、**只扩不减**。
+    "A": list(range(1, 21)),  # A-1 ~ A-20
     # ⚠️ **B 从 27 起**：**B 组落在同一个真机门禁输出里** ⇒ ⇒ **跨批次唯一**
     #    （STAGE-33 用了 B-6 ~ B-11 · STAGE-34 用了 B-12 ~ B-18 · STAGE-35 用了
     #    B-19 ~ B-26）⇒ ⇒ **不重用**。
-    "B": list(range(27, 33)),  # B-27 ~ B-32
+    # ⚠️ **B-33 是施工期扩的**（§8 订正 8）⇒ ⇒ 「令牌的颜色真的到了图上」。
+    "B": list(range(27, 34)),  # B-27 ~ B-33
     "C": list(range(1, 6)),    # C-1 ~ C-5
 }
 #: ⚠️ **反向引用允许**的编号全集 —— 比 `EXPECT_ACCEPT` 多出**前几批已定义**的那些。
 KNOWN_ACCEPT = {
     "A": set(EXPECT_ACCEPT["A"]),
-    "B": set(range(6, 33)),    # B-6 ~ B-32
+    "B": set(range(6, 34)),    # B-6 ~ B-33
     "C": set(EXPECT_ACCEPT["C"]),
 }
 for group, nums in EXPECT_ACCEPT.items():
@@ -322,11 +326,11 @@ else:
     if "STAGE-36" not in ledger_src:
         err("[台账] 台账里没有 STAGE-36 的引用")
 
-# --- 7m. §9 的变异编号 T1 ~ T7 + T-C1 齐全 -------------------------------
+# --- 7m. §9 的变异编号 T1 ~ T12 + T-C1 齐全 -------------------------------
 mut_rows = re.findall(r"^\|\s*(T\d+|T-C1)\s*\|", text, re.M)
-expect_muts = [f"T{i}" for i in range(1, 9)] + ["T-C1"]
+expect_muts = [f"T{i}" for i in range(1, 13)] + ["T-C1"]
 if mut_rows != expect_muts:
-    err(f"[变异] §9 的变异编号不是 T1~T8 + T-C1（实测 {mut_rows}）")
+    err(f"[变异] §9 的变异编号不是 T1~T12 + T-C1（实测 {mut_rows}）")
 
 # --- 7l. 自检脚本自指 ------------------------------------------------------
 self_path = REPO_ROOT / "tools/stage36_check.py"
