@@ -22,6 +22,8 @@
                 `data-bp-toggle` 与 `debug.breakpoints`
        ＋ 7h. **台账必须登记本批**：台账里**必须**出现 `v0.50` 与 `STAGE-35`
        ＋ 7i. `tools/stage35_check.py` 自己**必须存在**（自指）
+       ＋ 7j. §9 的**变异编号** `T1 ~ T8` + `T-C1` **齐全**（`stage34_check.py`
+                **没有**这一项 ⇒ ⇒ 那是它的缺口 ⇒ ⇒ **不要**照抄）
 
 ⚠️ **表格切分复用 `tools/doc_check.py` 的那一份**（**一个约束一个落点**）——
 ⚠️ **不要**在这里再写一份朴素 `split("|")` ⇒ ⇒ 本脚本自己**必须**是那个「只有一处定义」的样本。
@@ -298,6 +300,15 @@ else:
         err("[台账] 台账里没有 v0.50 的批次记录")
     if "STAGE-35" not in ledger_src:
         err("[台账] 台账里没有 STAGE-35 的引用")
+
+# --- 7j. §9 的变异编号 T1 ~ T8 + T-C1 齐全 -------------------------------
+#: ⚠️ **§10 第 7 项**要求「§9 的变异编号 `T1 ~ T8` + `T-C1` **齐全**」⇒ ⇒
+#: ⇒ 这里**补上**这一项（`stage34_check.py` **没有** ⇒ ⇒ 那是它的一个缺口，
+#: ⇒ ⇒ **不要**照抄）。
+mut_rows = re.findall(r"^\|\s*(T\d+|T-C1)\s*\|", text, re.M)
+expect_muts = [f"T{i}" for i in range(1, 9)] + ["T-C1"]
+if mut_rows != expect_muts:
+    err(f"[变异] §9 的变异编号不是 T1~T8 + T-C1（实测 {mut_rows}）")
 
 # --- 7i. 自检脚本自指 ------------------------------------------------------
 self_path = REPO_ROOT / "tools/stage35_check.py"
