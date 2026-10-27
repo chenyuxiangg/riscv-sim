@@ -9,6 +9,8 @@
 // with bubbling, `matches` / `closest` / `querySelector(All)` over
 // tag / #id / .class / [attr] / [attr="value"] selectors, and the
 // `document` / `window` / `location` / `history` globals.
+// ⚠️ **SVG**：`document.createElementNS()`（STAGE-34 · v0.49 批）⇒ ⇒ 造得出
+// SVG 元素 ⇒ ⇒ 但**它的 `tagName` 大小写不保真**（见 `installDom` 里的注释）。
 //
 // This file is a test double — it is not shipped with the front end.
 
@@ -205,6 +207,26 @@ export class StubElement extends StubEventTarget {
     /** Element children (text nodes excluded). */
     get children() {
         return this.childNodes.filter((n) => n instanceof StubElement);
+    }
+
+    // --- className ---------------------------------------------------------
+    //
+    // ⚠️ **它就是 `class` 属性的别名**（浏览器里就是这样）⇒ ⇒ 赋值**整体
+    // 替换** class 列表 ⇒ ⇒ 且 `classList` 立刻同步（它本来就基于
+    // `class` 属性）。
+    //
+    // ⚠️ **为什么补它**（STAGE-34 · v0.49 批）：这个 stub 原来**没有**
+    // `className` ⇒ ⇒ 于是 `el.className = "vhead"` 只是**挂了一个普通 JS
+    // 属性** ⇒ ⇒ **class 属性根本没变** ⇒ ⇒ `querySelector(".vhead")`
+    // 找不到 ⇒ ⇒ 前端门禁**假红**（而真浏览器里**完全正常**）⇒ ⇒
+    // ⇒ **保真度不足 ⇒ ⇒ 整套前端门禁的结论不可信**（这个 stub 自己的
+    // 文档就写着这句话）⇒ ⇒ 补上。
+    get className() {
+        return this.getAttribute("class") ?? "";
+    }
+
+    set className(value) {
+        this.setAttribute("class", String(value ?? ""));
     }
 
     // --- attributes ---------------------------------------------------------
@@ -527,6 +549,15 @@ export function installDom(html) {
     doc.querySelector = (selector) => body.querySelector(selector);
     doc.querySelectorAll = (selector) => body.querySelectorAll(selector);
     doc.createElement = (tag) => new StubElement(tag);
+    // ⚠️ **SVG 元素**（STAGE-34 · v0.49 批）：侧边栏的导航图标是**内联
+    // SVG** ⇒ ⇒ 造它需要 `createElementNS`（真浏览器里 SVG 元素**只能**
+    // 这样造 —— `createElement("svg")` 出来的是 HTML 元素，**不渲染**）。
+    //
+    // ⚠️ **不保真的地方**：真浏览器的 SVG 元素 `tagName` 是**小写**
+    // （`"svg"` / `"path"`），而 `StubElement` 一律大写 ⇒ ⇒ **本仓不按
+    // SVG 标签名做查询** ⇒ ⇒ 无影响 ⇒ ⇒ 记在这里是为了以后有人靠它
+    // 查询时知道这是个缺口。
+    doc.createElementNS = (_ns, tag) => new StubElement(tag);
     doc.dispatchEvent = (event) => {
         setEventProp(event, "target", doc);
         watchStopPropagation(event);

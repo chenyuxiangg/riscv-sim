@@ -185,6 +185,114 @@ function syncTopbarImageBrief() {
     brief.setAttribute("data-image-brief-status", String(state?.status ?? "idle"));
 }
 
+// ---------------------------------------------------------------------------
+// 顶栏那条**全局运行条**（STAGE-34 · v0.49 批）
+// ---------------------------------------------------------------------------
+
+/**
+ * 把**虚拟时间**格式化成人类可读的一串。
+ *
+ * ⚠️ **单位是皮秒**（契约层 `Tick::elapsed_ps` / `SimState::virtual_time_ps`
+ * 都是 ps）⇒ ⇒ 这里是**真实单位**、不是换算过的纳秒。
+ *
+ * @param {number|string|null|undefined} ps
+ * @returns {string}
+ */
+export function formatVirtualTime(ps) {
+    const v = Number(ps ?? 0);
+    if (!Number.isFinite(v) || v < 0) return "—";
+    if (v < 1e3) return `${v} ps`;
+    if (v < 1e6) return `${(v / 1e3).toFixed(1)} ns`;
+    if (v < 1e9) return `${(v / 1e6).toFixed(3)} μs`;
+    return `${(v / 1e9).toFixed(3)} ms`;
+}
+
+/**
+ * 把 **PC** 与**虚拟时间**同步到顶栏运行条。
+ *
+ * ⚠️ **同一个状态源**：读的是 **M-10 的快照**（`registerMemory.getSnapshot()`）
+ * ⇒ ⇒ 与寄存器视图那份**同一个源** ⇒ ⇒ **不是第二个真相**。
+ * ⚠️ **不显示指令退休计数** —— 契约层的 `SimState` **没有**那个字段 ⇒ ⇒
+ * 无数据来源 ⇒ ⇒ **不编造**（规格 §2 裁决 E）。
+ *
+ * @param {{registerMemory?: object}} services
+ * @returns {{pc: number, timeVirt: number}|null}
+ */
+export function syncTopbarStats(services) {
+    const pcEl = document.querySelector("[data-topbar-pc-value]");
+    const timeEl = document.querySelector("[data-topbar-time-value]");
+    if (!pcEl && !timeEl) return null;
+    const snap = services?.registerMemory?.getSnapshot?.() ?? null;
+    const pc = Number(snap?.pc ?? 0) >>> 0;
+    const timeVirt = Number(snap?.timeVirt ?? 0);
+    if (pcEl) pcEl.textContent = `0x${pc.toString(16).padStart(8, "0")}`;
+    if (timeEl) {
+        timeEl.textContent = formatVirtualTime(timeVirt);
+        // ⚠️ **同时挂一个原始 ps** ⇒ ⇒ 显示是**人类可读**的自适应单位，
+        // 而「同一个状态源」那条判据**逐字可比**（视图里那份是 `123 ps`
+        // 这种原始格式）⇒ ⇒ **可读性与判别力两者都要**。
+        timeEl.setAttribute("data-topbar-time-ps", String(timeVirt));
+    }
+    return { pc, timeVirt };
+}
+
+/**
+ * 顶栏运行条的**订阅退订句柄**（每次 `wireTopbarRunbar()` 先退旧的、再订新的）。
+ * @type {(() => void)|null}
+ */
+let topbarStatsUnsubscribe = null;
+
+/**
+ * 接线**顶栏那条全局运行条**（STAGE-34 · v0.49 批 · 裁决 K）。
+ *
+ * ⚠️ **三个按钮直接调 `handleCommand`** ⇒ ⇒ 与调试视图那份**共用同一条
+ * 命令处理路径** ⇒ ⇒ **不新增**命令处理分支 ⇒ ⇒ 一条路径。
+ *
+ * ⚠️ **状态订阅按 services 重新订**：每次 bootstrap 的 `services` 都是**新
+ * 对象** ⇒ ⇒ 若用「只订一次」的标志 ⇒ ⇒ 新 services **收不到**更新 ⇒ ⇒
+ * 顶栏数字会**冻住** ⇒ ⇒ 所以改成「先退订旧的、再订新的」⇒ ⇒ **恰好一个**
+ * 订阅。
+ *
+ * @param {object} services
+ */
+export function wireTopbarRunbar(services) {
+    const bar = document.querySelector("[data-topbar-runbar]");
+    if (!bar) return;
+    bar.querySelector('[data-topbar-action="run"]')
+        ?.addEventListener("click", () => {
+            void handleCommand({ action: "continue" }, services);
+        });
+    bar.querySelector('[data-topbar-action="step"]')
+        ?.addEventListener("click", () => {
+            void handleCommand({ action: "step" }, services);
+        });
+    bar.querySelector('[data-topbar-action="reset"]')
+        ?.addEventListener("click", () => {
+            void handleCommand({ action: "reset" }, services);
+        });
+    if (topbarStatsUnsubscribe) {
+        topbarStatsUnsubscribe();
+        topbarStatsUnsubscribe = null;
+    }
+    topbarStatsUnsubscribe =
+        services?.registerMemory?.subscribe?.(() => syncTopbarStats(services)) ?? null;
+    syncTopbarStats(services);
+}
+
+/**
+ * 连接状态**胶囊**的点：连上是绿的，没连上是红的。
+ *
+ * ⚠️ **胶囊里的文字就是 `#status`** ⇒ ⇒ 连接状态的**文案只有一处**
+ * （`describeTransport()`）⇒ ⇒ 这里**只切颜色**，**不写第二份文案**。
+ *
+ * @param {{connected?: boolean}|undefined} transport
+ */
+export function syncKernelConn(transport) {
+    const conn = document.querySelector("[data-kernel-conn]");
+    if (!conn) return;
+    conn.classList.toggle("is-offline", transport?.connected !== true);
+}
+
 /** Ask for a demo re-seed and report it in the status bar. */
 function requestDemoSeed(viewId = "product") {
     seedBus(viewId);
@@ -2205,6 +2313,9 @@ async function bootstrap() {
     // 要用）⇒ ⇒ 它的按钮走**同一个** `handleLoadImageCommand` ⇒ ⇒ 一条
     // 装载路径。
     wireTopbarImageLoader(services);
+    // ⚠️ **顶栏那条全局运行条**（STAGE-34 · v0.49 批）⇒ ⇒ 三个按钮直接调
+    // `handleCommand` ⇒ ⇒ 与调试视图那份**共用同一条命令路径**。
+    wireTopbarRunbar(services);
     // ⚠️ 脚本用的**命令门**（真机段要「下断点」/「读 UART 寄存器」——
     // 前端 UI 里没有这两个入口）。
     exposeScriptCommands(commandRouter);
@@ -2217,9 +2328,13 @@ async function bootstrap() {
     // 变化时**同时**推进视图状态（视图层不碰服务层 ⇒ 由这一层转递）。
     transportApi.onStatus((st) => {
         renderStatus(st);
+        // ⚠️ **连接胶囊那个点**（STAGE-34）⇒ ⇒ 颜色跟着**真实**传输状态走
+        // ⇒ ⇒ 胶囊里的**文字**仍是 `#status` 那一份 ⇒ ⇒ 文案只有一处。
+        syncKernelConn(st);
         publishLinkState(st);
     });
     renderStatus(transportApi.getTransportStatus());
+    syncKernelConn(transportApi.getTransportStatus());
     publishLinkState(transportApi.getTransportStatus());
 
     window.addEventListener("riscv:command", (ev) => {
