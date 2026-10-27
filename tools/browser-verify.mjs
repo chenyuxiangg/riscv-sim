@@ -158,6 +158,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "boardOrdering",
     "uiLayout",
     "breakpointUi",
+    "runLoop",
 ]);
 
 /**
@@ -1998,6 +1999,7 @@ const BV_TOPBAR_STATS_PROBE = `(() => {
   const time = document.querySelector("[data-topbar-time-value]");
   const regPc = document.querySelector('[data-view-body="regmem"] .pc');
   const regTime = document.querySelector('[data-view-body="regmem"] .timeVirt');
+  const runStatus = document.querySelector("[data-topbar-run-status]");
   return {
     pcText: pc ? String(pc.textContent || "").trim() : null,
     timeText: time ? String(time.textContent || "").trim() : null,
@@ -2006,6 +2008,15 @@ const BV_TOPBAR_STATS_PROBE = `(() => {
     timePs: time ? String(time.getAttribute("data-topbar-time-ps") ?? "") : null,
     regPcText: regPc ? String(regPc.textContent || "").trim() : null,
     regTimeText: regTime ? String(regTime.textContent || "").trim() : null,
+    // ⚠️ **连续运行状态位**（STAGE-37 · v0.52 批 · 裁决 G）⇒ ⇒ **原始值**
+    // ⇒ ⇒ 判据不必解析中文 ⇒ ⇒ 与「顶栏时间挂原始 ps」同一手法。
+    runMode: runStatus
+      ? String(runStatus.getAttribute("data-topbar-run-mode") ?? "")
+      : null,
+    runWindows: runStatus
+      ? String(runStatus.getAttribute("data-topbar-run-windows") ?? "")
+      : null,
+    runText: runStatus ? String(runStatus.textContent || "").trim() : null,
   };
 })()`;
 
@@ -4097,6 +4108,26 @@ async function runBreakpointUiSection(cdp, opts) {
         `撤掉后 PC=${JSON.stringify(pcAfter)}（靶点 ${target}）`,
     );
 
+    // -- B-25b · **收尾**：把「连续运行」停下来 ---------------------------
+    // ⚠️ **STAGE-37 · v0.52 批**：「继续」现在是**连续运行**⇒ ⇒ demo 固件
+    // 末尾是自环（`jal x0, 0`）⇒ ⇒ **永远跑下去**⇒ ⇒ 必须在这儿**暂停**
+    // ⇒ ⇒ 否则后面那些段全被拖死（CPU 100% + 事件洪水）。
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-topbar-action="pause"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(800);
+    const afterPause = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+    add(
+        "B-25b · **收尾**：连续运行被顶栏的「暂停」停下来"
+        + "（⇒ ⇒ demo 自环不会永远跑下去 ⇒ ⇒ 后面那些段跑得动）",
+        String(afterPause?.runMode ?? "") === "idle",
+        `runMode=${JSON.stringify(afterPause?.runMode ?? "")}`
+        + ` runText=${JSON.stringify(afterPause?.runText ?? "")}`,
+    );
+
     // -- B-26 · 稳定钩子仍在（换形态没有把判据口径换掉） ----------------
     await runEffect(cdp, 'location.hash = "#/waveform";');
     await sleep(700);
@@ -4106,6 +4137,243 @@ async function runBreakpointUiSection(cdp, opts) {
         !!probe && probe.regCells === 32 && probe.waveItems >= 1 && probe.rowCount >= 1,
         `寄存器格=${probe?.regCells ?? 0} 波形通道行=${probe?.waveItems ?? 0}`
         + ` 反汇编行=${probe?.rowCount ?? 0}`,
+    );
+
+    return { checks };
+}
+
+// ---------------------------------------------------------------------------
+
+/**
+ * 连续运行（STAGE-37 · v0.52 批 · B-34 ~ B-41）。
+ *
+ * ⚠️ **这一段是「点一次运行 ⇒ 一直跑」这件事的**端到端**判据** ⇒ ⇒ 必须
+ *   在**真 Chrome + 真 WASM 内核**上跑 ⇒ ⇒ Node 侧那套（A 组）只验纯函数
+ *   与接线，**验不到**「时间真的在涨」。
+ *
+ * ⚠️ **判据口径**：一切比的都是**顶栏那个原始 ps**（`data-topbar-time-ps`）
+ *   ⇒ ⇒ 逐字可比 ⇒ ⇒ 与「显示是自适应单位」这件事解耦。
+ *
+ * ⚠️ **一个窗口 = 10 000 条指令 = 10 µs = 10 000 000 ps**（STAGE-37 F3
+ *   实测）⇒ ⇒ 「点一次跑**多**轮」的判据必须比「**> 一个窗口**」⇒ ⇒
+ *   比「> 0」是**零判别力**（只走一轮时也成立）。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{checks: object[]}>}
+ */
+async function runRunLoopSection(cdp, opts) {
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
+
+    /** ⚠️ **一个窗口** = 10 000 条指令 × 1 ns = **10 000 000 ps**（F3 实测）。 */
+    const WINDOW_PS = 10_000_000;
+
+    /** 读顶栏的虚拟时间（**原始 ps**；读不到就是 `null`）。 */
+    const readTimePs = async () => {
+        const p = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+        const n = Number(String(p?.timePs ?? ""));
+        return Number.isFinite(n) ? n : null;
+    };
+
+    /** 点顶栏运行条上的某个按钮（`run` / `step` / `pause` / `reset`）。 */
+    const clickTopbar = async (action) => await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-topbar-action="${action}"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+
+    // -- 前置：**复位** ⇒ ⇒ 把状态清干净 -------------------------------
+    // ⚠️ **为什么用「复位」而不是「暂停」做前置清理**（本批实测踩到）：
+    //   若前置清理依赖**被测的那个按钮**（顶栏「暂停」）⇒ ⇒ 一旦那条按钮
+    //   坏了（变异 T9）⇒ ⇒ 连续运行**停不下来**⇒ ⇒ demo 自环把主线程**灌满**
+    //   ⇒ ⇒ 后面每个 CDP 调用都被拖到几秒 ⇒ ⇒ 整趟门禁**跑不完**（实测
+    //   900 s 被看门狗砍掉）⇒ ⇒ **卡死**而不是**变红** ⇒ ⇒ 零判别力。
+    // ⇒ ⇒ **清理必须走一条独立的路** ⇒ ⇒ 「复位」独立于「暂停」（裁决 H：
+    //   复位 ⇒ 退出连续模式）⇒ ⇒ 清理**永远**能停。
+    //
+    // ⚠️ **复位顺带**把 PC 拉回 0 ⇒ ⇒ 断点靶点又在前方（下面 B-40 要用）。
+    await clickTopbar("reset");
+    let pcText = "";
+    const pcDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < pcDeadline) {
+        const p = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+        pcText = String(p?.pcText ?? "").trim();
+        if (pcText === "0x00000000") break;
+        await sleep(200);
+    }
+    add(
+        "复位后 PC 回到 0x00000000（⇒ ⇒ 连续模式被清掉 ⇒ ⇒ 断点靶点又在前方）",
+        pcText === "0x00000000",
+        `pc=${JSON.stringify(pcText)}`,
+    );
+
+    // -- B-38 · **必要对照**：不点「运行」⇒ ⇒ 时间**不增长** -------------
+    // ⚠️ **这一条是 B-34 的对照** ⇒ ⇒ 没有它，「时间在涨」可能只是环境噪声
+    // ⇒ ⇒ 零判别力。
+    const t0 = await readTimePs();
+    await sleep(1200);
+    const t1 = await readTimePs();
+    add(
+        "B-38 · **必要对照**：**不点**「运行」⇒ ⇒ 虚拟时间**不增长**"
+        + "（⇒ ⇒ 「时间在涨」不是环境噪声）",
+        t0 !== null && t1 !== null && t0 === t1,
+        `t0=${JSON.stringify(t0)} ps  t1=${JSON.stringify(t1)} ps`,
+    );
+
+    // -- B-34 · 点「运行」⇒ ⇒ 时间**开始增长** ----------------------------
+    await clickTopbar("run");
+    let t2 = await readTimePs();
+    const growDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < growDeadline) {
+        t2 = await readTimePs();
+        if (t2 !== null && t0 !== null && t2 > t0) break;
+        await sleep(200);
+    }
+    add(
+        "B-34 · 点顶栏「运行」⇒ ⇒ 虚拟时间**开始增长**（前后两次采样不同）",
+        t2 !== null && t0 !== null && t2 > t0,
+        `点之前=${JSON.stringify(t0)} ps  点之后=${JSON.stringify(t2)} ps`,
+    );
+
+    // -- B-36 · 连续运行中 ⇒ ⇒ 顶栏**显示**「在跑」 ------------------------
+    const running = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+    add(
+        "B-36 · 连续运行中 ⇒ ⇒ 顶栏**显示**「在跑」"
+        + "（⇒ ⇒ 用户第一眼就知道它在跑 ⇒ ⇒ 不是一个看不见的黑盒）",
+        String(running?.runMode ?? "") === "running"
+            && String(running?.runText ?? "").includes("运行中"),
+        `runMode=${JSON.stringify(running?.runMode ?? "")}`
+        + ` runText=${JSON.stringify(running?.runText ?? "")}`,
+    );
+
+    // -- B-35 · 点**一次**「运行」推进的虚拟时间 **> 一个窗口** ------------
+    // ⚠️ **判据是「> 一个窗口」不是「> 0」** ⇒ ⇒ 后者在「只走一轮」时**也**
+    // 成立 ⇒ ⇒ 零判别力。
+    let t3 = await readTimePs();
+    const windowDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < windowDeadline) {
+        t3 = await readTimePs();
+        if (t3 !== null && t0 !== null && t3 - t0 > WINDOW_PS) break;
+        await sleep(200);
+    }
+    // ⚠️ **多跑一会儿** ⇒ ⇒ 让「> 一个窗口」有余量（否则刚好卡在边界上）。
+    await sleep(400);
+    const t4 = await readTimePs();
+    add(
+        "B-35 · 点**一次**「运行」推进的虚拟时间 **> 一个窗口（10 µs）**"
+        + "（⇒ ⇒ 点一次跑的是**多轮**，不是一轮）",
+        t4 !== null && t0 !== null && (t4 - t0) > WINDOW_PS,
+        `Δ=${JSON.stringify(t4 !== null && t0 !== null ? t4 - t0 : null)} ps`
+        + `（一个窗口 = ${WINDOW_PS} ps）`,
+    );
+    // ⚠️ **这里不许暂停** ⇒ ⇒ 「暂停」是 B-37 的被测动作 ⇒ ⇒ 若在这里就
+    //   暂停 ⇒ ⇒ B-37 的正向对照（「点之前时间在涨」）就**永远不成立**
+    //   ⇒ ⇒ B-37 变成**恒红**（本批实测踩到）。
+    // ⇒ ⇒ 暂停**只**发生在 B-37 里。
+
+    // -- B-37 · 点「暂停」⇒ ⇒ 时间**停止增长** ----------------------------
+    // ⚠️ **这一条必须自带正向对照**（本批变异自检实测抓到的**判别力缺口**）：
+    //   只判「点完暂停后时间没涨」⇒ ⇒ 若**点之前**本来就没在跑、或者那个
+    //   按钮**根本不存在**⇒ ⇒ 那条判据**恒真**⇒ ⇒ **空转通过也是假绿的一种**。
+    // ⇒ ⇒ 所以先验「点之前时间**在涨**」⇒ ⇒ 再验「点之后时间**停涨**」。
+    const tA = await readTimePs();
+    await sleep(700);
+    const tB = await readTimePs();
+    const wasGrowing = tA !== null && tB !== null && tB > tA;
+    await clickTopbar("pause");
+    await sleep(900);
+    const t5 = await readTimePs();
+    await sleep(1200);
+    const t6 = await readTimePs();
+    add(
+        "B-37 · 点「暂停」⇒ ⇒ 虚拟时间**停止增长**"
+        + "（⇒ ⇒ 前置正向对照：点之前时间**在涨** ⇒ ⇒ 这一条**不是空转**）",
+        wasGrowing && t5 !== null && t6 !== null && t5 === t6,
+        `点之前 tA=${JSON.stringify(tA)} ps → tB=${JSON.stringify(tB)} ps（在涨=${wasGrowing}）`
+        + `  点之后 t5=${JSON.stringify(t5)} ps → t6=${JSON.stringify(t6)} ps`,
+    );
+
+    // -- B-39 · 暂停后**再**点「运行」⇒ ⇒ 时间**又增长** -------------------
+    // ⚠️ **这一条是 F6 残留的直接判据**：界面的「暂停」**不发** `Pause`
+    // 命令 ⇒ ⇒ 内核里**不留** pending 暂停 ⇒ ⇒ 下一次运行**不会被吃掉**
+    // 一整轮 ⇒ ⇒ 这一条一红，F6 就被钉住了。
+    await clickTopbar("run");
+    let t7 = await readTimePs();
+    const againDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < againDeadline) {
+        t7 = await readTimePs();
+        // ⚠️ **判据是「> 一个窗口」不是「> 0」** ⇒ ⇒ 「残留」的表现是
+        // **跑了一轮零指令的窗口**（时间不动）⇒ ⇒ 若只判「> 0」⇒ ⇒
+        // 后面那一轮正常窗口会让它**蒙混过关**⇒ ⇒ 零判别力。
+        if (t7 !== null && t6 !== null && t7 - t6 > WINDOW_PS) break;
+        await sleep(200);
+    }
+    add(
+        "B-39 · 暂停后**再**点「运行」⇒ ⇒ 虚拟时间**又增长**"
+        + "（⇒ ⇒ 「暂停没有把下一次运行吃掉」—— 那是 F6 实测到的残留）",
+        t7 !== null && t6 !== null && t7 - t6 > WINDOW_PS,
+        `暂停时=${JSON.stringify(t6)} ps  再点运行后=${JSON.stringify(t7)} ps`
+        + ` Δ=${JSON.stringify(t7 !== null && t6 !== null ? t7 - t6 : null)} ps`
+        + `（一个窗口 = ${WINDOW_PS} ps）`,
+    );
+
+    // -- 复位 + 下断点 ⇒ ⇒ B-40 / B-41 ----------------------------------
+    // ⚠️ **必须复位**：B-39 那一趟把 PC 推过了断点靶点 ⇒ ⇒ 不复位就永远
+    // 命不中 ⇒ ⇒ 复位把 PC 拉回 0。
+    //
+    // ⚠️ **这一次的「复位」是清理的关键**（见上面那条）⇒ ⇒ 它独立于
+    // 「暂停」⇒ ⇒ 「暂停坏了」时门禁**变红**而不是**卡死**。
+    await clickTopbar("reset");
+    let pcText2 = "";
+    const pcDeadline2 = Date.now() + opts.timeoutMs;
+    while (Date.now() < pcDeadline2) {
+        const p = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+        pcText2 = String(p?.pcText ?? "").trim();
+        if (pcText2 === "0x00000000") break;
+        await sleep(200);
+    }
+    add(
+        "复位后 PC 回到 0x00000000（⇒ ⇒ 断点靶点又在前方 ⇒ ⇒ 命得中）",
+        pcText2 === "0x00000000",
+        `pc=${JSON.stringify(pcText2)}`,
+    );
+
+    const bpAddr = DEMO_FIRMWARE_BREAKPOINT_ADDR >>> 0;
+    await awaitEval(cdp, `window.riscv_kernel.setBreakpoint(${bpAddr}, 1)`);
+    await clickTopbar("run");
+    let halt = null;
+    /** ⚠️ 跑过的**最大**虚拟时间 ⇒ ⇒ 用来证明「停之前**确实在跑**」（B-41 的正向对照）。 */
+    let maxTime = 0;
+    const haltDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < haltDeadline) {
+        halt = await awaitEval(cdp, "window.riscv_kernel.lastHalt()");
+        const now = await readTimePs();
+        if (now !== null && now > maxTime) maxTime = now;
+        if (halt && halt.reason === "Breakpoint") break;
+        await sleep(200);
+    }
+    add(
+        "B-40 · 设一个断点 ⇒ ⇒ 点「运行」⇒ ⇒ 内核**真的**在那个地址停"
+        + "，且 `reason === \"Breakpoint\"`",
+        !!halt && halt.reason === "Breakpoint" && Number(halt.pc) === bpAddr,
+        `halt=${JSON.stringify(halt)} 期望 pc=${bpAddr}`,
+    );
+
+    // -- B-41 · 断点停下后 ⇒ ⇒ 时间**停止增长** ---------------------------
+    // ⚠️ **这一条也必须自带正向对照**（同 B-37）⇒ ⇒ 「停之前**确实在跑**」
+    //   由 `maxTime > 0` 证明 ⇒ ⇒ 「停涨」才不是空转。
+    const t8 = await readTimePs();
+    await sleep(1200);
+    const t9 = await readTimePs();
+    add(
+        "B-41 · 断点停下后 ⇒ ⇒ 虚拟时间**停止增长**"
+        + "（⇒ ⇒ `stop` 语义生效 ⇒ ⇒ 连续模式**不会**在断点后继续跑）"
+        + "（⇒ ⇒ 前置正向对照：停之前**确实在跑** ⇒ ⇒ 这一条**不是空转**）",
+        t8 !== null && t9 !== null && t8 === t9 && maxTime > 0,
+        `停下时=${JSON.stringify(t8)} ps  再等一会儿=${JSON.stringify(t9)} ps`
+        + `  跑过的最大虚拟时间=${JSON.stringify(maxTime)} ps`,
     );
 
     return { checks };
@@ -4792,6 +5060,18 @@ async function main() {
         const breakpointUi = await runSection("breakpointUi", () => runBreakpointUiSection(cdp, opts));
         registerSection("breakpointUi", breakpointUi.checks, {
             title: "断点 UI 检查（界面上加断点 → 内核真停 → 撤掉 → 不再停）",
+        });
+
+        // -- the CONTINUOUS RUN (STAGE-37 · v0.52 批 · B-34 ~ B-41) ----------
+        // ⚠️ **必须排在 breakpointUi 之后**：那一段把镜像**复位**成 demo 固件
+        // ⇒ ⇒ 放在它前面，本段看到的可能是 loadImage 段的夹具 ⇒ ⇒ 断点靶点
+        // 就不在那儿。
+        //
+        // ⚠️ **必须排在 osz 之前**：osz 段把镜像换成仓外的真 RTOS ⇒ ⇒ 放在
+        // 它后面，本段就看不到 demo 固件那个自环了。
+        const runLoop = await runSection("runLoop", () => runRunLoopSection(cdp, opts));
+        registerSection("runLoop", runLoop.checks, {
+            title: "连续运行检查（点一次运行 ⇒ 一直跑 ⇒ 暂停能停 ⇒ 断点能停）",
         });
 
         // -- the REAL RTOS (osz): load the out-of-repo ELF and SEE its console -
