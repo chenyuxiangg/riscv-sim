@@ -96,6 +96,10 @@ import {
     buildUiImageElf,
     checkEncoderAgainstDemoFirmware,
 } from "./ui-image-fixture.mjs";
+// ⚠️ **断点靶点不是写死的**（STAGE-35 · v0.50 批 · B 组）⇒ ⇒ 从仓内那份
+// demo 固件的定义里**导入** ⇒ ⇒ 固件改了地址，这里自动跟着改 ⇒ ⇒ 断言不会
+// 因为「地址碰巧对上了」而恒绿。
+import { DEMO_FIRMWARE_BREAKPOINT_ADDR } from "../front/dev/demo-firmware.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
@@ -152,6 +156,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "boardDelta",
     "boardOrdering",
     "uiLayout",
+    "breakpointUi",
 ]);
 
 /**
@@ -3451,6 +3456,259 @@ async function runUiLayoutSection(cdp, opts) {
  * @param {{timeoutMs: number}} opts
  * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
  */
+// ---------------------------------------------------------------------------
+// STAGE-35 · v0.50 批 —— **断点 UI**（B-19 ~ B-26）
+// ---------------------------------------------------------------------------
+
+/**
+ * demo 固件里那个**断点靶点**的十六进制写法（`0x00000020`）。
+ *
+ * ⚠️ **地址来自仓内那份固件的定义**（`DEMO_FIRMWARE_BREAKPOINT_ADDR`）⇒ ⇒
+ * 不是写死的 ⇒ ⇒ 固件改了这里自动跟着改。
+ */
+const BV_BREAKPOINT_TARGET_HEX =
+    `0x${(DEMO_FIRMWARE_BREAKPOINT_ADDR >>> 0).toString(16).padStart(8, "0")}`;
+
+/**
+ * 断点 UI 的**页面快照**（一次拿全，避免反复求值）。
+ *
+ * ⚠️ **全部用 `data-*` 选择器取** ⇒ ⇒ 不靠文案匹配找元素。
+ */
+const BV_BREAKPOINT_UI_PROBE = `(() => {
+  const debugBody = document.querySelector('[data-view-body="debug"]');
+  const rows = Array.from(document.querySelectorAll('[data-view-body="debug"] tr.disasm-row'));
+  const target = ${JSON.stringify(BV_BREAKPOINT_TARGET_HEX)};
+  const targetToggle = document.querySelector('[data-bp-toggle="' + target + '"]');
+  const bpRows = Array.from(document.querySelectorAll('[data-view-body="debug"] [data-bp-row]'));
+  const hit = document.querySelector('[data-bp-hit]');
+  const err = document.querySelector('[data-debug-error]');
+  const disasmBtn = document.querySelector('[data-view-body="debug"] [data-action="disasm"]');
+  const clearBtns = Array.from(document.querySelectorAll('[data-view-body="debug"] [data-action="clear-breakpoint"]'));
+  return {
+    hasDebugBody: !!debugBody,
+    rowCount: rows.length,
+    rowAddrs: rows.map((r) => String(r.getAttribute("data-disasm-addr") || "")),
+    rowsWithToggle: rows.filter((r) => r.querySelectorAll("[data-bp-toggle]").length === 1).length,
+    targetExists: !!targetToggle,
+    targetToggleText: targetToggle ? String(targetToggle.textContent || "").trim() : "",
+    targetToggleOn: targetToggle ? targetToggle.classList.contains("on") : false,
+    bpList: bpRows.map((r) => String(r.getAttribute("data-bp-addr") || "")),
+    hitExists: !!hit,
+    hitText: hit ? String(hit.textContent || "").trim() : "",
+    debugError: err ? String(err.textContent || "").trim() : "",
+    disasmAddr: disasmBtn ? String(disasmBtn.getAttribute("data-addr") || "").trim() : "",
+    clearBtnCount: clearBtns.length,
+    regCells: document.querySelectorAll('[data-view-body="regmem"] .reg-grid > div').length,
+    waveItems: document.querySelectorAll('[data-view-body="waveform"] .channel-list > li').length,
+    pc: String((document.querySelector('[data-view-body="regmem"] .pc') || {}).textContent || "").trim(),
+  };
+})()`;
+
+/**
+ * STAGE-35 · v0.50 批 —— **断点 UI**的真机段（B-19 ~ B-26）。
+ *
+ * ⚠️ **端到端**：复位（demo 固件重新装上、PC 回到 0）⇒ 调试视图反汇编 ⇒ 在
+ * demo 固件的**断点靶点**那一行点「加断点」⇒ 点「继续」⇒ ⇒ **内核真的在
+ * 那个地址停下**（停下原因是「断点」）⇒ ⇒ 撤掉 ⇒ ⇒ **不再**在那个地址停。
+ *
+ * ⚠️ **为什么用 demo 固件而不是仓外的 osz ELF**：osz 的产物**不在仓里**
+ * ⇒ ⇒ 真机门禁在没有它的机器上会**跳过** ⇒ ⇒ 断点这一段就**整段没跑**
+ * ⇒ ⇒ demo 固件是**仓内**的 ⇒ ⇒ 断点段**永远**跑得到。
+ *
+ * ⚠️ **B-25 是本段最锋利的一条**：只验「按钮变了」是**界面自说自话**
+ * ⇒ ⇒ 必须验「**内核不再在那儿停**」⇒ ⇒ 那才是**真撤掉**。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{checks: object[]}>}
+ */
+async function runBreakpointUiSection(cdp, opts) {
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
+    const target = BV_BREAKPOINT_TARGET_HEX;
+
+    // -- 复位 ⇒ demo 固件重新装上、PC 回到 0 -----------------------------
+    // ⚠️ **必须复位**：固件是「跑过」的（前面的段已经步进过）⇒ ⇒ PC 早就越
+    // 过靶点 ⇒ ⇒ 断点就永远命中不了 ⇒ ⇒ 复位把 PC 拉回 0 ⇒ ⇒ 靶点重新
+    // 在「前方」。
+    await runEffect(cdp, 'location.hash = "#/debug";');
+    await sleep(700);
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-view-body="debug"] [data-action="reset"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    let pcText = "";
+    const pcDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < pcDeadline) {
+        const probe = await pageProbe(cdp);
+        pcText = String(probe?.pc ?? "").trim();
+        if (pcText === "0x00000000") break;
+        await sleep(200);
+    }
+    add(
+        "复位后 demo 固件重新装上（PC 回到 0x00000000 ⇒ ⇒ 断点靶点 0x20 在前方）",
+        pcText === "0x00000000",
+        `pc=${JSON.stringify(pcText)}`,
+    );
+
+    // -- 反汇编 ⇒ 找到靶点那一行 ---------------------------------------
+    // ⚠️ **等「反汇编」按钮上的地址变成 0** 再点 ⇒ ⇒ 否则点的是**旧地址**
+    // （按钮的 `data-addr` 来自视图状态里的 PC）⇒ ⇒ 拿到的反汇编里没有
+    // 靶点那一行 ⇒ ⇒ 后面全错。
+    let probe = null;
+    const btnDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < btnDeadline) {
+        probe = await awaitEval(cdp, BV_BREAKPOINT_UI_PROBE);
+        if (probe && String(probe.disasmAddr) === "0") break;
+        await sleep(200);
+    }
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-view-body="debug"] [data-action="disasm"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    const disasmDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < disasmDeadline) {
+        probe = await awaitEval(cdp, BV_BREAKPOINT_UI_PROBE);
+        if (probe && probe.rowCount > 0 && probe.targetExists) break;
+        await sleep(200);
+    }
+    add(
+        "反汇编里能看到 demo 固件的**断点靶点**那一行",
+        !!probe && probe.targetExists === true,
+        `靶点=${target} 反汇编行数=${probe?.rowCount ?? 0}`
+        + ` 行地址=${JSON.stringify(probe?.rowAddrs ?? [])}`,
+    );
+
+    // -- B-19 · 真点「加断点」⇒ ⇒ 点了没报错 ---------------------------
+    const before = probe;
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-bp-toggle="${target}"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(500);
+    probe = await awaitEval(cdp, BV_BREAKPOINT_UI_PROBE);
+    add(
+        "B-19 · 真点到调试视图反汇编表里的「加断点」按钮 ⇒ ⇒ **点了没报错**",
+        // ⚠️ **判据是「错误**没有变新**」而不是「错误区是空的」** ⇒ ⇒ 上一段
+        // （loadImage 的 B-5）故意喂了一个坏 ELF ⇒ ⇒ 错误区里**本来就**留着
+        // 那条内核原文（它是内核的最后一次报告，**故意**不清）⇒ ⇒ 只判
+        // 「空」会**恒红**。
+        // ⇒ ⇒ 判据 = **点了之后错误区与点之前逐字相同** ⇒ ⇒ 点了没产生
+        // **新的**错误。
+        !!probe && probe.debugError === (before?.debugError ?? "")
+            && probe.targetToggleText !== before?.targetToggleText,
+        `点前错误=${JSON.stringify(before?.debugError ?? "")}`
+        + ` 点后错误=${JSON.stringify(probe?.debugError ?? "")}`
+        + ` 按钮文案 ${JSON.stringify(before?.targetToggleText ?? "")}`
+        + ` ⇒ ${JSON.stringify(probe?.targetToggleText ?? "")}`,
+    );
+
+    // -- B-20 · 按钮变「断点 ●」**且**断点列表里出现那个地址 -------------
+    add(
+        "B-20 · 点完之后按钮变「断点 ●」**且**断点列表里出现那个地址",
+        !!probe && probe.targetToggleText.includes("断点")
+            && probe.targetToggleOn === true
+            && Array.isArray(probe.bpList) && probe.bpList.includes(target),
+        `按钮=${JSON.stringify(probe?.targetToggleText ?? "")} 高亮=${probe?.targetToggleOn}`
+        + ` 列表=${JSON.stringify(probe?.bpList ?? [])}`,
+    );
+
+    // -- B-21 / B-22 · 「继续」⇒ ⇒ 内核真的在那个地址停下 -----------------
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-view-body="debug"] [data-action="continue"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    let halt = null;
+    const haltDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < haltDeadline) {
+        halt = await awaitEval(cdp, "window.riscv_kernel.lastHalt()");
+        if (halt && String(halt.pc ?? "") === String(Number(DEMO_FIRMWARE_BREAKPOINT_ADDR >>> 0))) break;
+        await sleep(250);
+    }
+    add(
+        "B-21 · 该断点**真的进了内核** ⇒ ⇒ 「继续」之后**内核在那个地址停下**",
+        !!halt && Number(halt.pc) === (DEMO_FIRMWARE_BREAKPOINT_ADDR >>> 0),
+        `halt=${JSON.stringify(halt)} 期望 pc=${target}`,
+    );
+    add(
+        "B-22 · 停下原因是「**断点**」（不是陷阱 / 不是跑完 / 不是看门狗）",
+        !!halt && halt.reason === "Breakpoint",
+        `reason=${JSON.stringify(halt?.reason ?? null)}`,
+    );
+
+    // -- B-23 · 页面显示「命中断点 @ 0x…」 ------------------------------
+    // ⚠️ **这句话只在内核这么说的时候出现**（裁决 M）⇒ ⇒ 判据是**内核报告**
+    // 与**页面显示**两边对上 ⇒ ⇒ 前端不自己判断「跑没跑到那个地址」。
+    probe = await awaitEval(cdp, BV_BREAKPOINT_UI_PROBE);
+    add(
+        "B-23 · 页面显示「命中断点 @ 0x…」（裁决 M：只在内核这么说的时候出现）",
+        !!probe && probe.hitExists === true
+            && probe.hitText.includes("命中断点") && probe.hitText.includes(target),
+        `命中提示=${JSON.stringify(probe?.hitText ?? "")}`,
+    );
+
+    // -- B-24 · 撤掉断点 ⇒ ⇒ 列表**空** ---------------------------------
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-view-body="debug"] [data-bp-row] [data-action="clear-breakpoint"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(500);
+    probe = await awaitEval(cdp, BV_BREAKPOINT_UI_PROBE);
+    add(
+        "B-24 · 撤掉断点 ⇒ ⇒ 列表**空**",
+        !!probe && Array.isArray(probe.bpList) && probe.bpList.length === 0,
+        `列表=${JSON.stringify(probe?.bpList ?? [])}`,
+    );
+
+    // -- B-25 · 撤掉之后「继续」⇒ ⇒ **不再**在那个地址停 ------------------
+    // ⚠️ **本段最锋利的一条**：只验「按钮变了」是**界面自说自话** ⇒ ⇒ 必须
+    // 验「**内核不再在那儿停**」⇒ ⇒ 那才是**真撤掉**。
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-view-body="debug"] [data-action="continue"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    let pcAfter = "";
+    const afterDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < afterDeadline) {
+        const p = await pageProbe(cdp);
+        pcAfter = String(p?.pc ?? "").trim();
+        if (pcAfter && pcAfter !== target) break;
+        await sleep(250);
+    }
+    add(
+        "B-25 · 撤掉之后「继续」⇒ ⇒ **不再**在那个地址停（⇒ ⇒ 撤掉是真的撤掉了，不只是界面变了）",
+        !!pcAfter && pcAfter !== target,
+        `撤掉后 PC=${JSON.stringify(pcAfter)}（靶点 ${target}）`,
+    );
+
+    // -- B-26 · 稳定钩子仍在（换形态没有把判据口径换掉） ----------------
+    await runEffect(cdp, 'location.hash = "#/waveform";');
+    await sleep(700);
+    probe = await awaitEval(cdp, BV_BREAKPOINT_UI_PROBE);
+    add(
+        "B-26 · **稳定钩子仍在**（`.reg-grid > div` 32 个 · `.channel-list > li` 在 · `tr.disasm-row` 在）",
+        !!probe && probe.regCells === 32 && probe.waveItems >= 1 && probe.rowCount >= 1,
+        `寄存器格=${probe?.regCells ?? 0} 波形通道行=${probe?.waveItems ?? 0}`
+        + ` 反汇编行=${probe?.rowCount ?? 0}`,
+    );
+
+    return { checks };
+}
+
+// ---------------------------------------------------------------------------
+
 async function runOszSection(cdp, opts) {
     const elfPath = process.env.OSZ_ELF || OSZ_ELF_DEFAULT;
     if (!existsSync(elfPath)) {
@@ -4083,6 +4341,21 @@ async function main() {
         const loadImage = await runSection("loadImage", () => runLoadImageSection(cdp, opts));
         registerSection("loadImage", loadImage.checks, {
             title: "固件加载 UI 检查（界面上真选文件 → 装载 → 跑起来 → 内核真的换了镜像）",
+        });
+
+        // -- the BREAKPOINT UI (STAGE-35 · v0.50 批 · B-19 ~ B-26) --------
+        // ⚠️ **必须排在 loadImage 之后**：loadImage 段把镜像换成了夹具 ⇒ ⇒
+        // 放在它前面，它看到的还是 demo 固件（夹具不在靶点地址上）。
+        //
+        // ⚠️ **必须排在 osz 之前**：这一段会**复位**（重新装 demo 固件）⇒ ⇒
+        // 放在 osz 后面会把 osz 刚装好的镜像顶掉。
+        //
+        // ⚠️ **这一段会复位 ⇒ ⇒ 波形通道会清一次** ⇒ ⇒ 但 demo 固件重新跑
+        // 起来时又写一次 GPIO ⇒ ⇒ 通道会回来（loadImage 段的「装载前 ≥ 1
+        // 条边沿」那条基线是在**它自己那段里**取的 ⇒ ⇒ 不受影响）。
+        const breakpointUi = await runSection("breakpointUi", () => runBreakpointUiSection(cdp, opts));
+        registerSection("breakpointUi", breakpointUi.checks, {
+            title: "断点 UI 检查（界面上加断点 → 内核真停 → 撤掉 → 不再停）",
         });
 
         // -- the REAL RTOS (osz): load the out-of-repo ELF and SEE its console -

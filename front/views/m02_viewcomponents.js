@@ -26,7 +26,7 @@ import { escapeHtml } from "../lib/escape.js";
 import {
     describeMatch,
     matchSourceFile,
-    renderSourceText,
+    renderSourceColumns,
 } from "./components/source-view.js";
 import {
     addRegion,
@@ -154,14 +154,17 @@ const productTreeView = register({
         // 「尚无内存图数据」；收到了但 0 段 ⇒ 「当前生效的内存图为空」。
         const memoryMap = state?.memoryMap ?? null;
         const tree = state?.tree ?? { root: { name: "未加载", children: [] } };
+        // ⚠️ **折叠状态住视图状态**（裁决 C）⇒ ⇒ 这里**只读** ⇒ ⇒ 视图层
+        // 不持有第二份（与断点列表同一条规矩）。
+        const collapsed = new Set(Array.isArray(state?.collapsed) ? state.collapsed : []);
         return `
-            <div class="product-grid">
-                <section class="product-tree">
-                    <h3>产品树</h3>
-                    ${renderTree(tree.root)}
+            <div class="cards">
+                <section class="card">
+                    <div class="row"><h3>产品树</h3><span class="tag">点 ▸ / ▼ 折叠 · 展开</span></div>
+                    <div class="tree" data-product-tree>${renderTree(tree.root, collapsed, [], 0)}</div>
                 </section>
-                <section class="memory-map">
-                    <h3>内存映射 (M-14)</h3>
+                <section class="card">
+                    <div class="row"><h3>内存映射 (M-14)</h3><span class="tag">当前生效</span></div>
                     ${renderMemoryMapTable(memoryMap)}
                     <div class="debug-toolbar">
                         <button type="button" data-action="go-memory-map">编辑板级内存图</button>
@@ -192,6 +195,20 @@ const productTreeView = register({
         if (el?.dataset?.action === "go-memory-map") {
             route("#/memory-map");
             return "cmd-go-memory-map";
+        }
+        // 折叠 / 展开产品树的一个节点（STAGE-35 · v0.50 批 · 裁决 C）。
+        //
+        // ⚠️ **折叠状态住视图状态** ⇒ ⇒ 这里写的是 `product.collapsed`
+        // ⇒ ⇒ 切走视图再切回来**折叠还在** ⇒ ⇒ ⛔ 不在 DOM 上私藏。
+        if (el?.dataset?.action === "toggle-tree") {
+            const key = String(el.dataset.treeKey ?? "");
+            if (!key) return undefined;
+            const prev = viewStore.getState("product")?.collapsed ?? [];
+            const set = new Set(Array.isArray(prev) ? prev : []);
+            if (set.has(key)) set.delete(key); else set.add(key);
+            viewStore.setState("product", (state) => ({ ...state, collapsed: [...set] }));
+            publishProductState();
+            return "cmd-toggle-tree";
         }
         // 「加载」⇒ **读用户选的文件** ⇒ ⇒ 发一条 `load-image` 信号。
         //
@@ -254,15 +271,64 @@ const productTreeView = register({
 // `load-image` 分支）⇒ ⇒ 载荷（字节 / 文件名 / 类型）从共享组件那份
 // pending 里取。
 
-function renderTree(node) {
+/**
+ * 产品树节点的**稳定键**（折叠状态的元素）。
+ *
+ * ⚠️ **键 = 路径**（每一段是「组件 id，没有就退回名字」）⇒ ⇒ 同一个键
+ * 在**重渲染之间不变** ⇒ ⇒ 折叠状态住在视图状态里才找得回来。
+ *
+ * ⚠️ **同名兄弟不串**：键里带上**序号** ⇒ ⇒ 两个都叫 `UART0` 的节点
+ * 是**两个不同的键** ⇒ ⇒ 折叠其中一个不会连带另一个。
+ *
+ * @param {string[]} path — 祖先的键（从根算起）
+ * @param {object|null|undefined} node
+ * @param {number} index — 在同一层里的序号
+ * @returns {string}
+ */
+function treeNodeKey(path, node, index) {
+    const label = node?.component_id
+        ? String(node.component_id)
+        : String(node?.name ?? "");
+    return [...path, `${label}#${index}`].join("›");
+}
+
+/**
+ * 渲染**可折叠**的产品树。
+ *
+ * ⚠️ **折叠状态住视图状态**（STAGE-35 · v0.50 批 · 裁决 C）⇒ ⇒ **不是**
+ * DOM 私藏 ⇒ ⇒ 切走视图再切回来**折叠还在** ⇒ ⇒ ⛔ 不用 `hidden` class
+ * 私藏（那样状态就只存在于 DOM 里 ⇒ ⇒ 重渲染即丢）。
+ *
+ * @param {object|null|undefined} node
+ * @param {Set<string>} collapsed — 已折叠节点的键集合
+ * @param {string[]} path — 祖先的键
+ * @param {number} index — 在同一层里的序号
+ * @returns {string} HTML 片段
+ */
+function renderTree(node, collapsed, path = [], index = 0) {
     if (!node) return "";
-    const children = (node.children ?? [])
-        .map(renderTree)
-        .join("");
-    const id = node.component_id
-        ? `<span class="muted">(${escapeHtml(node.component_id)})</span>`
+    const key = treeNodeKey(path, node, index);
+    const children = Array.isArray(node.children) ? node.children : [];
+    const hasKids = children.length > 0;
+    const isCollapsed = collapsed.has(key);
+    const kids = hasKids && !isCollapsed
+        ? `<div class="kids">${children
+            .map((child, i) => renderTree(child, collapsed, [...path, key], i))
+            .join("")}</div>`
         : "";
-    return `<li>${escapeHtml(node.name)} ${id}${children ? `<ul>${children}</ul>` : ""}</li>`;
+    const id = node.component_id
+        ? `<span class="sub">(${escapeHtml(node.component_id)})</span>`
+        : "";
+    return `
+        <div class="node">
+            <span class="caret${hasKids ? "" : " leaf"}" data-action="toggle-tree" data-tree-key="${escapeHtml(key)}"
+                role="button" tabindex="0" aria-expanded="${hasKids ? (isCollapsed ? "false" : "true") : "false"}"
+                title="${hasKids ? (isCollapsed ? "展开" : "折叠") : "（叶子节点）"}">${isCollapsed ? "▶" : "▼"}</span>
+            <span class="name">${escapeHtml(node.name ?? "")}</span>
+            ${id}
+        </div>
+        ${kids}
+    `;
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +503,21 @@ const memoryMapView = register({
                 publishMemoryMapState();
                 return "cmd-new-memory-map";
             }
+            case "focus-region": {
+                // 点比例条上的**一段** ⇒ 焦点跳到下面段表的**那一行**
+                // （STAGE-35 · v0.50 批）—— 横幅上写着的「点击任一分段即可在
+                // 下方编辑」**必须是真的**（通用判据：界面文案是能力声明 ⇒ ⇒
+                // 声明的必须是现在真有的）。
+                //
+                // ⚠️ **只挪焦点，不改草稿** ⇒ ⇒ 用户的输入不会被这次点击冲掉。
+                const row = root?.querySelector?.(`[data-mmap-row="${index}"]`) ?? null;
+                const field = row?.querySelector?.("input, select") ?? null;
+                if (field && typeof field.focus === "function") {
+                    field.focus();
+                    row?.scrollIntoView?.({ block: "nearest" });
+                }
+                return "cmd-focus-region";
+            }
             default:
                 return undefined;
         }
@@ -506,23 +587,29 @@ const embeddedView = register({
                         ? ""
                         : `<span class="muted">（${escapeHtml(String(link.lastError ?? "内核传输层未就绪"))}）</span>`}
                 </p>
-                <div class="grid-2">
-                    <div>
-                        <h4>当前 PC</h4>
-                        <code class="pc" data-embedded-pc>0x${pc.toString(16).padStart(8, "0")}</code>
+                <div class="cards">
+                    <div class="card kpi">
+                        <span class="k">当前 PC</span>
+                        <code class="v pc" data-embedded-pc>0x${pc.toString(16).padStart(8, "0")}</code>
                     </div>
-                    <div>
-                        <h4>虚拟时间</h4>
-                        <code class="timeVirt" data-embedded-time>${escapeHtml(String(timeVirt))} ps</code>
+                    <div class="card kpi">
+                        <span class="k">虚拟时间</span>
+                        <code class="v timeVirt" data-embedded-time>${escapeHtml(String(timeVirt))} ps</code>
+                    </div>
+                    <div class="card kpi">
+                        <span class="k">内核连接</span>
+                        <span class="v">${connected ? "已连接" : "未连接"}</span>
                     </div>
                 </div>
-                <h4>子视图</h4>
-                <ul class="embedded-entries">
-                    ${EMBEDDED_VIEW_ENTRIES.map((entry) => `
-                        <li>
-                            <button type="button" data-action="go-view" data-embedded-entry="${escapeHtml(entry.view)}" data-view-target="${escapeHtml(entry.view)}">${escapeHtml(entry.label)}</button>
-                        </li>`).join("")}
-                </ul>
+                <section class="card">
+                    <div class="row"><h3>子视图</h3><span class="tag">${EMBEDDED_VIEW_ENTRIES.length} 个入口</span></div>
+                    <ul class="embedded-entries">
+                        ${EMBEDDED_VIEW_ENTRIES.map((entry) => `
+                            <li>
+                                <button type="button" data-action="go-view" data-embedded-entry="${escapeHtml(entry.view)}" data-view-target="${escapeHtml(entry.view)}">${escapeHtml(entry.label)}</button>
+                            </li>`).join("")}
+                    </ul>
+                </section>
             </section>
         `;
     },
@@ -665,6 +752,11 @@ const debugView = register({
         const exportState = debug.export ?? null;
         const traceState = debug.trace ?? null;
         const error = debug.error ?? null;
+        // ⚠️ **断点列表只有一个落点**（STAGE-35 · v0.50 批 · 裁决 K）⇒ ⇒
+        // 这里**只读**视图状态 ⇒ ⇒ 视图层**不持有**第二份列表。
+        const breakpoints = Array.isArray(debug.breakpoints) ? debug.breakpoints : [];
+        // ⚠️ **「停下」也只有一个落点**（裁决 L）⇒ ⇒ 这里读 `debug.halt`。
+        const halt = debug.halt ?? null;
         // The continuation is offered only while there is **more** to
         // fetch (`next_offset < total`); the offset unit is the **entry
         // count** (STAGE-5 §3.1).
@@ -686,6 +778,12 @@ const debugView = register({
                 <button type="button" data-action="trace-enable">开启 trace 记录</button>
                 <button type="button" data-action="trace-disable">关闭 trace 记录</button>
             </div>
+            ${halt?.reason === "Breakpoint"
+                // ⚠️ **这句话只在内核这么说的时候出现**（裁决 M）⇒ ⇒ 前端
+                // **不自己判断**「跑没跑到那个地址」⇒ ⇒ 判据 = 内核的
+                // `Halted.reason`。
+                ? `<p class="bp-hit" data-bp-hit>命中断点 @ <code>0x${(Number(halt.pc ?? 0) >>> 0).toString(16).padStart(8, "0")}</code></p>`
+                : ""}
             ${traceState?.enabled === true
                 ? `<p class="trace-notice" data-trace-notice>trace 记录已开启 —— 仿真会明显降速（每条指令与访存都要记录）。</p>`
                 : ""}
@@ -693,19 +791,35 @@ const debugView = register({
                 ? `<p class="debug-error" data-debug-error>${escapeHtml(String(error.code))}：${escapeHtml(String(error.message))}</p>`
                 : ""}
             <div class="debug-grid">
-                <section class="disasm">
-                    <h3>反汇编 (M-11)</h3>
+                <section class="card disasm">
+                    <div class="row"><h3>反汇编 (M-11)</h3><span class="tag">在「断点」列点一下即可下断点</span></div>
                     <p class="muted">助记符是 <strong>ISA 助记符</strong>：压缩指令保留 <code>c.</code> 前缀，不做伪指令别名改写（裁决 C）。</p>
                     <table class="disasm-table">
-                        <thead><tr><th>地址</th><th>机器码</th><th>助记符</th><th>宽度</th><th>源码</th></tr></thead>
+                        <thead><tr><th>地址</th><th>机器码</th><th>助记符</th><th>宽度</th><th>源码</th><th>断点</th></tr></thead>
                         <tbody>
-                            ${entries.map((entry) => renderDisasmRow(entry, pc)).join("")
-                                || `<tr><td colspan="5" class="muted">尚无反汇编 — 点击「反汇编」向内核请求一段（M-11）。</td></tr>`}
+                            ${entries.map((entry) => renderDisasmRow(entry, pc, breakpoints)).join("")
+                                || `<tr><td colspan="6" class="muted">尚无反汇编 — 点击「反汇编」向内核请求一段（M-11）。</td></tr>`}
                         </tbody>
                     </table>
                 </section>
-                <section class="trace-export">
-                    <h3>trace 导出 (M-11 / M-19)</h3>
+                <section class="card breakpoint-card">
+                    <div class="row"><h3>断点</h3><span class="tag">${breakpoints.length} 个</span></div>
+                    ${breakpoints.length === 0
+                        ? `<p class="muted">尚无断点 — 在左边反汇编表的「断点」列点「加断点」。</p>`
+                        : `<div class="bp-list" data-bp-list>${breakpoints.map((raw) => {
+                            const addr = Number(raw ?? 0) >>> 0;
+                            const addrText = `0x${addr.toString(16).padStart(8, "0")}`;
+                            return `
+                                <div class="bp-row" data-bp-row data-bp-addr="${addrText}">
+                                    <code class="addr">${addrText}</code>
+                                    <span class="note">断点 id = 地址</span>
+                                    <button type="button" data-action="clear-breakpoint" data-addr="${addrText}">撤掉</button>
+                                </div>`;
+                        }).join("")}</div>`}
+                    <p class="muted">这里列的是<strong>本会话由界面请求过的断点</strong>（界面回显）—— 内核没有「列出断点」的事件，所以它<strong>不是</strong>内核断点集的镜像；用脚本口设的断点在这里看不到。</p>
+                </section>
+                <section class="card trace-export">
+                    <div class="row"><h3>trace 导出 (M-11 / M-19)</h3></div>
                     ${exportState
                         ? `<p class="muted" data-trace-progress>${escapeHtml(String(exportState.source))} / ${escapeHtml(String(exportState.format))} · 条目 ${Number(exportState.offset)} → ${Number(exportState.next_offset)} / ${Number(exportState.total)}</p>`
                         : `<p class="muted">尚未导出 — 选一个数据源与格式发起导出。</p>`}
@@ -720,16 +834,12 @@ const debugView = register({
                         </div>`
                         : ""}
                 </section>
-                <section class="regmem">
-                    <h3>寄存器 / 内存</h3>
+                <section class="card regmem">
+                    <div class="row"><h3>寄存器 / 内存</h3></div>
                     <div class="grid-2">
                         <div>
                             <h4>寄存器</h4>
-                            <div class="reg-grid">${
-                                (sim.gpr ?? Array(32).fill(0)).map((v, i) =>
-                                    `<div><span class="muted">x${i}</span><code>${(v >>> 0).toString(16).padStart(8, "0")}</code></div>`
-                                ).join("")
-                            }</div>
+                            <div class="reg-grid">${renderRegGrid(sim.gpr ?? Array(32).fill(0), previousGprSnapshot())}</div>
                         </div>
                         <div>
                             <h4>PC</h4>
@@ -832,9 +942,10 @@ export function formatSourceLocation(entry) {
  *
  * @param {{addr?: number, code?: number, mnemonic?: string, width?: number, file?: string|null, line?: number|null}} entry
  * @param {number} pc
+ * @param {number[]} breakpoints — **本会话由界面请求过的**断点地址（只读）
  * @returns {string}
  */
-function renderDisasmRow(entry, pc) {
+function renderDisasmRow(entry, pc, breakpoints = []) {
     const addr = Number(entry?.addr ?? 0) >>> 0;
     const width = Number(entry?.width ?? 4);
     const code = Number(entry?.code ?? 0) >>> 0;
@@ -847,6 +958,14 @@ function renderDisasmRow(entry, pc) {
     // ⚠️ **机器可读**的两个 `data-*`：真机段要断言「`file` 是个真源码
     // 路径」「`line` 大于 0」⇒ 从渲染出来的**文本**里猜是不行的。
     const { file, line } = sourceLocationParts(entry);
+    // ⚠️ **断点列**（STAGE-35 · v0.50 批）：按钮文案随「这个地址**是不是**
+    //   已有断点」变 ⇒ ⇒ **按钮自己**就说清了当前状态 ⇒ ⇒ 真机门禁
+    //   **不用**去猜「有没有断点」。
+    const on = breakpoints.some((a) => (Number(a ?? 0) >>> 0) === addr);
+    const bpButton = `
+        <button type="button" class="bp-toggle${on ? " on" : ""}" data-bp-toggle="${addrText}"
+            data-action="${on ? "clear-breakpoint" : "set-breakpoint"}" data-addr="${addrText}"
+            title="${on ? "撤掉这个断点" : "在这个地址下断点"}">${on ? "断点 ●" : "加断点"}</button>`;
     return `
         <tr class="disasm-row${isPc ? " is-pc" : ""}" data-disasm-addr="${addrText}"${isPc ? ' data-pc="1"' : ""}>
             <td><code>${addrText}</code></td>
@@ -854,6 +973,7 @@ function renderDisasmRow(entry, pc) {
             <td class="disasm-mnemonic">${escapeHtml(entry?.mnemonic ?? "")}</td>
             <td>${width}</td>
             <td class="disasm-source" data-disasm-file="${escapeHtml(file)}" data-disasm-line="${line === null ? "" : String(line)}">${escapeHtml(sourceText)}</td>
+            <td class="disasm-bp">${bpButton}</td>
         </tr>
     `;
 }
@@ -866,6 +986,49 @@ function renderDisasmRow(entry, pc) {
 // M-10 now feeds the store, so the view has something to show.
 // ---------------------------------------------------------------------------
 
+/**
+ * 渲染**寄存器格**（`.reg-grid` 里的 32 个格子）。
+ *
+ * ⚠️ **稳定钩子**（裁决 A）：`.reg-grid > div` **仍是 32 个** ⇒ ⇒ 真机门禁
+ * 与前端用例的取法**一字不改**。
+ *
+ * ⚠️ **变化高亮**（STAGE-35 · v0.50 批 · 裁决 F）：与**上一次读回**的 GPR
+ * 快照比 ⇒ ⇒ 变大加 `.up` · 变小加 `.down` · 没变**不加类**。
+ *
+ * ⚠️ **没有上一次快照** ⇒ ⇒ **一律不加类**（⛔ 不猜「那一定是 0」）
+ * ⇒ ⇒ 第一次读回时**不**满屏绿红。
+ *
+ * @param {number[]|undefined|null} gpr — 当前读回的 32 个 GPR
+ * @param {number[]|undefined|null} prevGpr — **上一次**读回的快照
+ * @returns {string} HTML 片段
+ */
+export function renderRegGrid(gpr, prevGpr) {
+    const values = Array.isArray(gpr) ? gpr : Array(32).fill(0);
+    const prev = Array.isArray(prevGpr) ? prevGpr : null;
+    return values.map((v, i) => {
+        const cur = Number(v ?? 0) >>> 0;
+        let cls = "";
+        if (prev && prev.length === values.length) {
+            const old = Number(prev[i] ?? 0) >>> 0;
+            if (cur !== old) cls = cur > old ? "up" : "down";
+        }
+        const clsAttr = cls ? ` class="${cls}"` : "";
+        return `<div><span class="muted">x${i}</span><code${clsAttr}>${cur.toString(16).padStart(8, "0")}</code></div>`;
+    }).join("");
+}
+
+/**
+ * **上一次读回的 GPR 快照**（视图层**只读** · 裁决 F）。
+ *
+ * ⚠️ **落点在 `regmem` 视图状态里** ⇒ ⇒ app 层在 `read-regs` **之前**存
+ * ⇒ ⇒ 视图层**不自己存**（否则又是第二份）。
+ *
+ * @returns {number[]|null}
+ */
+function previousGprSnapshot() {
+    return viewStore.getState("regmem")?.regmem?.prevGpr ?? null;
+}
+
 const regmemView = register({
     id: "regmem",
     channels: ["sim"],
@@ -876,34 +1039,32 @@ const regmemView = register({
         const cells = Object.entries(mem);
         return `
             <section class="regmem-view">
-                <h3>寄存器 / 内存 (M-10)</h3>
-                <div class="debug-toolbar">
-                    <button type="button" data-action="read-regs">读寄存器</button>
-                    <button type="button" data-action="read-mem">读内存 @0x100</button>
-                </div>
-                <div class="grid-2">
-                    <div>
-                        <h4>通用寄存器</h4>
-                        <div class="reg-grid">${
-                            gpr.map((v, i) =>
-                                `<div><span class="muted">x${i}</span><code>${(v >>> 0).toString(16).padStart(8, "0")}</code></div>`
-                            ).join("")
-                        }</div>
+                <div class="card">
+                    <div class="row"><h3>寄存器 / 内存 (M-10)</h3><span class="tag">变化高亮 = 与上一次读回相比</span></div>
+                    <div class="debug-toolbar">
+                        <button type="button" data-action="read-regs">读寄存器</button>
+                        <button type="button" data-action="read-mem">读内存 @0x100</button>
                     </div>
-                    <div>
-                        <h4>PC / 虚拟时间</h4>
-                        <code class="pc">0x${(sim.pc ?? 0).toString(16).padStart(8, "0")}</code>
-                        <code class="timeVirt">${state?.timeVirt ?? 0} ps</code>
-                        <h4>内存单元</h4>
-                        ${cells.length === 0
-                            ? `<p class="muted">尚无读回的内存单元 — 点击「读内存 @0x100」。</p>`
-                            : `<table class="map-table">
-                                <thead><tr><th>地址</th><th>值</th></tr></thead>
-                                <tbody>${cells.map(([addr, value]) => `
-                                    <tr><td><code>${escapeHtml(addr)}</code></td>
-                                    <td><code>0x${(value >>> 0).toString(16).padStart(8, "0")}</code></td></tr>
-                                `).join("")}</tbody>
-                            </table>`}
+                    <div class="grid-2">
+                        <div>
+                            <h4>通用寄存器</h4>
+                            <div class="reg-grid">${renderRegGrid(gpr, previousGprSnapshot())}</div>
+                        </div>
+                        <div>
+                            <h4>PC / 虚拟时间</h4>
+                            <code class="pc">0x${(sim.pc ?? 0).toString(16).padStart(8, "0")}</code>
+                            <code class="timeVirt">${state?.timeVirt ?? 0} ps</code>
+                            <h4>内存单元</h4>
+                            ${cells.length === 0
+                                ? `<p class="muted">尚无读回的内存单元 — 点击「读内存 @0x100」。</p>`
+                                : `<table class="map-table">
+                                    <thead><tr><th>地址</th><th>值</th></tr></thead>
+                                    <tbody>${cells.map(([addr, value]) => `
+                                        <tr><td><code>${escapeHtml(addr)}</code></td>
+                                        <td><code>0x${(value >>> 0).toString(16).padStart(8, "0")}</code></td></tr>
+                                    `).join("")}</tbody>
+                                </table>`}
+                        </div>
                     </div>
                 </div>
             </section>
@@ -931,19 +1092,22 @@ const waveformView = register({
         const channels = state?.wave?.channels ?? [];
         return `
             <section class="waveform">
-                <h3>波形 (M-19)</h3>
-                ${channels.length === 0
-                    ? `<p class="muted">尚无探针信号 — 固件驱动外设后（M-15 + M-18 管道已接通）会列出通道。</p>`
-                    : `<ul class="channel-list">
-                        ${channels.map((c) => `
-                            <li>
-                                <span class="channel-label">${escapeHtml(c.label || c.id)}</span>
-                                <span class="muted">${c.edges ?? 0} edges</span>
-                                ${c.lastValue === null || c.lastValue === undefined
-                                    ? ""
-                                    : `<span class="muted">· 最新值 ${escapeHtml(String(c.lastValue))}</span>`}
-                            </li>`).join("")}
-                       </ul>`}
+                <div class="card">
+                    <div class="row"><h3>波形 (M-19)</h3><span class="tag">${channels.length} 个通道</span></div>
+                    ${channels.length === 0
+                        ? `<p class="muted">尚无探针信号 — 固件驱动外设后（M-15 + M-18 管道已接通）会列出通道。</p>`
+                        : `<ul class="channel-list">
+                            ${channels.map((c) => `
+                                <li>
+                                    <span class="channel-label">${escapeHtml(c.label || c.id)}</span>
+                                    <span class="muted">${c.edges ?? 0} edges</span>
+                                    ${c.lastValue === null || c.lastValue === undefined
+                                        ? ""
+                                        : `<span class="muted">· 最新值 ${escapeHtml(String(c.lastValue))}</span>`}
+                                </li>`).join("")}
+                           </ul>`}
+                    <p class="muted">本批只把通道列表改成卡片形态 —— <strong>波形真图</strong>（echarts）落在 v0.51 批。</p>
+                </div>
             </section>
         `;
     },
@@ -1006,42 +1170,42 @@ const sourceView = register({
                         ? "该地址不在 DWARF 行表内 — 换一个地址试试。"
                         : "尚未解析 — 点击「解析当前 PC 的源码行」。")));
         const activeKey = selected ?? (match?.kind === "unique" ? match.key : null);
-        const text = activeKey ? (tree[activeKey] ?? "") : "";
         const line = Number(location?.line ?? 0);
 
         return `
             <section class="source-view">
-                <h3>源码 (M-11 · DWARF 行号)</h3>
-                <div class="debug-toolbar">
-                    <label class="source-input">
-                        装载目录
-                        <input type="file" webkitdirectory multiple data-source-input="dir">
-                    </label>
-                    <label class="source-input">
-                        装载文件
-                        <input type="file" multiple data-source-input="files">
-                    </label>
-                    <button type="button" data-action="resolve-line" data-addr="${pc}">解析当前 PC 的源码行</button>
+                <div class="card">
+                    <div class="row"><h3>源码 (M-11 · DWARF 行号)</h3><span class="tag">左列文件 · 右列代码</span></div>
+                    <div class="debug-toolbar">
+                        <label class="source-input">
+                            装载目录
+                            <input type="file" webkitdirectory multiple data-source-input="dir">
+                        </label>
+                        <label class="source-input">
+                            装载文件
+                            <input type="file" multiple data-source-input="files">
+                        </label>
+                        <button type="button" data-action="resolve-line" data-addr="${pc}">解析当前 PC 的源码行</button>
+                    </div>
+                    <p class="muted" data-source-summary>
+                        源码树：${keys.length} 个文件${keys.length > 0 ? `（${escapeHtml(keys.slice(0, 3).join("、"))}${keys.length > 3 ? " …" : ""}）` : ""}
+                    </p>
+                    <p class="source-status" data-source-status>${escapeHtml(statusText)}</p>
+                    ${location
+                        ? (location.file
+                            ? `<p class="source-location" data-source-location>${escapeHtml(String(location.file))}:${Number(location.line ?? 0)}（地址 0x${(Number(location.addr ?? 0) >>> 0).toString(16).padStart(8, "0")}）</p>`
+                            // ⚠️ 内核**回答了**但没有文件名 ⇒ **不**显示
+                            // `:4294967295` 这种无意义行号（V-B 检视 VB-5）。
+                            : `<p class="source-location" data-source-location>（地址 0x${(Number(location.addr ?? 0) >>> 0).toString(16).padStart(8, "0")} — 内核没有给出文件名）</p>`)
+                        : `<p class="muted" data-source-location>尚未解析 — 点击「解析当前 PC 的源码行」。</p>`}
+                    ${match?.kind === "ambiguous"
+                        ? `<ul class="source-candidates" data-source-candidates>${match.candidates.map((key) => `
+                            <li><button type="button" data-action="pick-candidate" data-key="${escapeHtml(key)}">${escapeHtml(key)}</button></li>
+                        `).join("")}</ul>`
+                        : ""}
+                    ${renderSourceColumns({ tree, activeKey, currentLine: line })}
+                    <p class="muted">源码<strong>不进内核</strong>（裁判 E）：文件由浏览器读成文本 ⇒ 存进视图状态 ⇒ <strong>不发</strong>任何命令。本视图里唯一离开前端的命令是「解析当前 PC 的源码行」。</p>
                 </div>
-                <p class="muted" data-source-summary>
-                    源码树：${keys.length} 个文件${keys.length > 0 ? `（${escapeHtml(keys.slice(0, 3).join("、"))}${keys.length > 3 ? " …" : ""}）` : ""}
-                </p>
-                <p class="source-status" data-source-status>${escapeHtml(statusText)}</p>
-                ${location
-                    ? (location.file
-                        ? `<p class="source-location" data-source-location>${escapeHtml(String(location.file))}:${Number(location.line ?? 0)}（地址 0x${(Number(location.addr ?? 0) >>> 0).toString(16).padStart(8, "0")}）</p>`
-                        // ⚠️ 内核**回答了**但没有文件名 ⇒ **不**显示
-                        // `:4294967295` 这种无意义行号（V-B 检视 VB-5）。
-                        : `<p class="source-location" data-source-location>（地址 0x${(Number(location.addr ?? 0) >>> 0).toString(16).padStart(8, "0")} — 内核没有给出文件名）</p>`)
-                    : `<p class="muted" data-source-location>尚未解析 — 点击「解析当前 PC 的源码行」。</p>`}
-                ${match?.kind === "ambiguous"
-                    ? `<ul class="source-candidates" data-source-candidates>${match.candidates.map((key) => `
-                        <li><button type="button" data-action="pick-candidate" data-key="${escapeHtml(key)}">${escapeHtml(key)}</button></li>
-                    `).join("")}</ul>`
-                    : ""}
-                ${activeKey
-                    ? `<pre class="source-code" data-source-code>${renderSourceText(text, line)}</pre>`
-                    : `<pre class="source-code muted" data-source-code>选中一个源码文件后显示内容。</pre>`}
             </section>
         `;
     },
@@ -1161,6 +1325,24 @@ export function decodeConsoleBytes(bytes) {
     return parts.join("");
 }
 
+/**
+ * console 字节流的**字节数**。
+ *
+ * ⚠️ **按字节数，不按字符数**（STAGE-35 · v0.50 批 · 裁决 G）：guest 可能吐出
+ * 任意字节 ⇒ 字符数 ≠ 字节数 ⇒ ⇒ 计数必须是**字节数**。
+ *
+ * ⚠️ **字节数组**（契约 v4 的 `Console` 载荷）⇒ 直接取长度；**字符串**
+ * （既有的 `termDelta` 旧路径）⇒ 按 UTF-8 编码后取长度。
+ *
+ * @param {unknown} raw — 字节数组或字符串
+ * @returns {number}
+ */
+export function consoleByteCount(raw) {
+    if (Array.isArray(raw)) return raw.length;
+    if (typeof raw === "string") return new TextEncoder().encode(raw).length;
+    return 0;
+}
+
 const terminalView = register({
     id: "terminal",
     channels: ["term"],
@@ -1170,15 +1352,27 @@ const terminalView = register({
         // `body.innerHTML = html` ⇒ **输入框元素被重建** ⇒ 只存在 DOM 里
         // 的草稿会**每来一个 console 字节就清一次** ⇒ 根本没法打字。
         const draft = state?.term?.draft ?? "";
+        // ⚠️ **TX / RX 是两个不同的源**（STAGE-35 · v0.50 批 · 裁决 G）⇒ ⇒
+        // **分别标注方向** ⇒ ⇒ 不许把两个数混成一个。
+        const txBytes = Number(state?.term?.txBytes ?? 0);
+        const rxBytes = Number(state?.term?.rxBytes ?? 0);
         return `
             <section class="terminal">
-                <h3>串口终端 (M-15 UART)</h3>
-                <pre class="terminal-out" data-terminal-out>${escapeHtml(buf)}</pre>
-                <div class="terminal-input-row">
-                    <input type="text" class="terminal-input" data-terminal-input value="${escapeHtml(draft)}" placeholder="输入后按「发送」——字节会进 guest 的 UART0">
-                    <button type="button" class="terminal-send" data-action="console-send">发送</button>
+                <div class="card">
+                    <div class="row"><h3>串口终端 (M-15 UART)</h3><span class="tag">收发字节分别计数</span></div>
+                    <div class="term-scroll">
+                        <pre class="terminal-out" data-terminal-out>${escapeHtml(buf)}</pre>
+                    </div>
+                    <div class="term-meta">
+                        <span class="dir">TX（guest → 终端，内核 console 事件累计）</span><span class="n" data-term-tx>${txBytes}</span>
+                        <span class="dir">RX（终端 → guest，前端发出累计）</span><span class="n" data-term-rx>${rxBytes}</span>
+                    </div>
+                    <div class="terminal-input-row">
+                        <input type="text" class="terminal-input" data-terminal-input value="${escapeHtml(draft)}" placeholder="输入后按「发送」——字节会进 guest 的 UART0">
+                        <button type="button" class="terminal-send" data-action="console-send">发送</button>
+                    </div>
+                    <p class="muted">输入框里的文本<strong>按 UTF-8 编码</strong>成字节，发给 guest 的 UART0（契约 v5 的 <code>WriteConsole</code>）；<strong>回显来自 guest</strong>，平台不做本地回显。本批只送原始字节，不模拟终端控制序列。</p>
                 </div>
-                <p class="muted">输入框里的文本<strong>按 UTF-8 编码</strong>成字节，发给 guest 的 UART0（契约 v5 的 <code>WriteConsole</code>）；<strong>回显来自 guest</strong>，平台不做本地回显。本批只送原始字节，不模拟终端控制序列。</p>
             </section>
         `;
     },
@@ -1198,6 +1392,9 @@ const terminalView = register({
         // ⚠️ 解码是**分块**的（`decodeConsoleBytes`）：不分块的话几万个字节
         // 会爆调用栈。
         const bytes = decodeConsoleBytes(delta.termDelta.bytes ?? "");
+        // ⚠️ **TX 计数**（STAGE-35 · v0.50 批 · 裁决 G）：这是**内核 console
+        // 事件**累计的字节数 ⇒ ⇒ 与 RX **不是同一个源** ⇒ ⇒ 分别标注。
+        const txDelta = consoleByteCount(delta.termDelta.bytes ?? "");
         // The store is the single source of truth: the DOM is rewritten
         // from the accumulated value instead of appending to whatever the
         // DOM currently holds. Appending to the DOM would duplicate the
@@ -1209,9 +1406,16 @@ const terminalView = register({
             term: {
                 ...(prev.term ?? {}),
                 bytes: next,
+                txBytes: Number(prev.term?.txBytes ?? 0) + txDelta,
             },
         }));
         const out = document.querySelector("[data-terminal-out]");
+        // ⚠️ **计数也要就地更新**：这条路径**不重渲染**（只写 `textContent`）
+        // ⇒ ⇒ 不改计数的话 TX 会**一直停在旧值**。
+        const txEl = document.querySelector("[data-term-tx]");
+        if (txEl) {
+            txEl.textContent = String(Number(viewStore.getState("terminal")?.term?.txBytes ?? 0));
+        }
         if (!out) return;
         // `textContent` does not parse HTML — escaping here would print a
         // literal "&lt;" (FRONTEND_Review.md #4).
@@ -1292,6 +1496,18 @@ function sendTerminalInput() {
     const input = document.querySelector("[data-terminal-input]");
     const text = String(input?.value ?? "");
     const bytes = Array.from(new TextEncoder().encode(text));
+    // ⚠️ **RX 计数**（STAGE-35 · v0.50 批 · 裁决 G）：这是**前端发出**的
+    // 字节数（TX 是内核推过来的 ⇒ ⇒ **两个不同的源** ⇒ ⇒ 分别标注）。
+    //
+    // ⚠️ **计的是「发出」不是「内核确认收到」** —— `WriteConsole` 没有回执
+    // 事件 ⇒ ⇒ 界面上就这么说，不假装知道内核收没收到。
+    viewStore.setState("terminal", (prev) => ({
+        ...prev,
+        term: {
+            ...(prev.term ?? {}),
+            rxBytes: Number(prev.term?.rxBytes ?? 0) + bytes.length,
+        },
+    }));
     const requestId = emitCommand("console-send", "terminal", { bytes });
     setTerminalDraft("");
     publishTerminalState();

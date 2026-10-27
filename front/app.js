@@ -998,9 +998,24 @@ export async function handleCommand(detail, services) {
                     resetMemoryMapError = result.memoryMapError;
                 }
                 break;
-            case "read-regs":
+            case "read-regs": {
+                // ⚠️ **上一次读回的 GPR 快照**（STAGE-35 · v0.50 批 · 裁决 F）
+                // ⇒ ⇒ **在读之前**存 ⇒ ⇒ 视图层可以拿「这次的值」和「上一次
+                // 的值」比 ⇒ ⇒ 高亮变化。
+                //
+                // ⚠️ **落点在 `regmem` 视图状态里** ⇒ ⇒ **只有一份** ⇒ ⇒
+                // 视图层**只读**（分层不破）⇒ ⇒ 不另造一个计数器状态。
+                const prevGpr = viewStore.getState("regmem")?.sim?.gpr ?? null;
+                viewStore.setState("regmem", (state) => ({
+                    ...state,
+                    regmem: {
+                        ...(state.regmem ?? {}),
+                        prevGpr: Array.isArray(prevGpr) ? prevGpr.slice() : null,
+                    },
+                }));
                 await registerMemory.readRegisters();
                 break;
+            }
             case "read-mem":
                 await registerMemory.readMemory(0x100, "Word");
                 break;
@@ -1010,6 +1025,34 @@ export async function handleCommand(detail, services) {
                 const addr = toInt(detail.params?.addr, 0);
                 const count = toInt(detail.params?.count, DEFAULT_DISASM_COUNT);
                 await commandRouter.dispatchCommand(Command.disasm(addr, count));
+                break;
+            }
+            case "set-breakpoint": {
+                // 断点（STAGE-35 · v0.50 批 · 裁决 J）。
+                //
+                // ⚠️ **id = addr** ⇒ ⇒ 「一址一断点」这条**内核语义**
+                // （M-08 的第二条规则）在 id 上就成立 ⇒ ⇒ 前端**不需要**
+                // 第二个计数器状态 ⇒ ⇒ **状态只有一份**。
+                //
+                // ⚠️ **契约层早有这两条命令**（`SetBreakpoint` /
+                // `ClearBreakpoint`）⇒ ⇒ **零新命令 / 零新 DTO / 零新事件**
+                // ⇒ ⇒ 内核行为**一字不变**（脚本口走的就是同一条路）。
+                const addr = toInt(detail.params?.addr, 0) >>> 0;
+                requestBreakpoint(addr);
+                await commandRouter.dispatchCommand(Command.setBreakpoint({
+                    id: addr,
+                    addr,
+                    source_hint: null,
+                    enabled: true,
+                }));
+                break;
+            }
+            case "clear-breakpoint": {
+                // 撤掉断点 ⇒ ⇒ id 同样**就是地址**（裁决 J）⇒ ⇒ 前端列表
+                // 只存地址就够 ⇒ ⇒ `ClearBreakpoint { id }` 传的是地址。
+                const addr = toInt(detail.params?.addr, 0) >>> 0;
+                withdrawBreakpoint(addr);
+                await commandRouter.dispatchCommand(Command.clearBreakpoint(addr));
                 break;
             }
             case "resolve-line": {
@@ -1738,6 +1781,59 @@ export function wireMemoryMap(commandRouter) {
  * @param {object} commandRouter
  * @returns {{reset: () => void}}
  */
+/**
+ * 断点列表的**唯一落点**（STAGE-35 · v0.50 批 · 裁决 K）。
+ *
+ * ⚠️ **视图层只读 + 发命令** ⇒ ⇒ 它**不碰**服务层、**不持有**第二份列表
+ * ⇒ ⇒ 「一个约束一个落点」。
+ *
+ * ⚠️ **元素是地址数组**（不是 `{id, addr}`）⇒ ⇒ 因为**断点 id 就等于地址**
+ * （裁决 J）⇒ ⇒ id **可推导** ⇒ ⇒ **不需要第二个计数器状态**。
+ *
+ * ⚠️ **它是「本会话由界面请求过的断点」**，**不是**内核断点集的镜像
+ * （裁决 O）—— 内核**没有**「列出断点」的事件（`DebugMeta` 是死 DTO）
+ * ⇒ ⇒ 所以界面上**如实标注**这一点。
+ *
+ * @param {(prev: number[]) => number[]} mutator
+ * @returns {number[]} 写进去的列表
+ */
+function updateBreakpoints(mutator) {
+    const next = viewStore.setState("debug", (prev) => {
+        const list = Array.isArray(prev?.debug?.breakpoints) ? prev.debug.breakpoints : [];
+        return {
+            ...prev,
+            debug: { ...(prev.debug ?? {}), breakpoints: mutator(list) },
+        };
+    });
+    publishViewState("debug");
+    return next?.debug?.breakpoints ?? [];
+}
+
+/**
+ * 记一个「界面请求过的断点」。
+ *
+ * ⚠️ **已经在列表里就不重复记** ⇒ ⇒ 内核会拒「该地址已存在」（M-08 的
+ * 第二条规则）⇒ ⇒ 前端**不该**去触发那个错误。
+ *
+ * @param {number} addr
+ * @returns {number[]} 写进去的列表
+ */
+export function requestBreakpoint(addr) {
+    return updateBreakpoints((list) => (
+        list.includes(addr) ? list : [...list, addr]
+    ));
+}
+
+/**
+ * 撤掉一个「界面请求过的断点」。
+ *
+ * @param {number} addr
+ * @returns {number[]} 写进去的列表
+ */
+export function withdrawBreakpoint(addr) {
+    return updateBreakpoints((list) => list.filter((a) => a !== addr));
+}
+
 export function wireDebug(commandRouter) {
     /** Push the disassembly entries into the debug view's state. */
     commandRouter.subscribe("debug.disasm", (event) => {
@@ -1789,6 +1885,33 @@ export function wireDebug(commandRouter) {
             },
         }));
         publishViewState("source");
+    });
+
+    /**
+     * The kernel's **halt report** (the `Halted` event).
+     *
+     * ⚠️ **这是「停下」的**唯一落点**（STAGE-35 · v0.50 批 · 裁决 L）——
+     * 脚本口 `window.riscv_kernel.lastHalt()` 与调试视图的「命中断点」提示
+     * **读同一份** ⇒ ⇒ **不订阅两次**（那会是两份状态 ⇒ ⇒ 第二个真相）。
+     *
+     * ⚠️ **`reason === "Breakpoint"`** 是「命中断点」的唯一依据（裁决 M）
+     * ⇒ ⇒ 前端**不自己判断**「跑没跑到那个地址」。
+     *
+     * ⚠️ **复位时保留**（与 `debug.trace` / `debug.error` 同一条规矩）：
+     * 它是**内核最后一次的报告**，不是程序数据 ⇒ ⇒ 跨复位保留。
+     */
+    commandRouter.subscribe("halted", (event) => {
+        viewStore.setState("debug", (prev) => ({
+            ...prev,
+            debug: {
+                ...(prev.debug ?? {}),
+                halt: {
+                    reason: event.value?.reason ?? null,
+                    pc: Number(event.value?.pc ?? 0) >>> 0,
+                },
+            },
+        }));
+        publishViewState("debug");
     });
 
     /**
@@ -1959,22 +2082,21 @@ export function exposeScriptCommands(commandRouter) {
      *
      * ⚠️ **为什么要有它**：命令的**回复**是「带同一个 reqId 的第一个
      * 事件」——那可能是 `Tick`、也可能是 `Console` ⇒ 从回复里**读不出**
-     * 「为什么停、停在哪儿」。⇒ 这里另外订阅 `halted` 主题，把
-     * `Halted { reason, pc }` **如实**记下来。
+     * 「为什么停、停在哪儿」。⇒ `Halted { reason, pc }` 由 `wireDebug`
+     * 记进**视图状态** `debug.halt`（STAGE-35 · v0.50 批 · 裁决 L）。
      *
-     * @type {{reason: string|null, pc: number}|null}
+     * ⚠️ **这里只读，不再订阅一次** ⇒ ⇒ 脚本口与调试视图**读同一份**
+     * ⇒ ⇒ 「停下」**只有一个真相**（两份状态 = 第二个真相 ⇒ 会漂）。
+     *
+     * @returns {{reason: string|null, pc: number}|null}
      */
-    let lastHalt = null;
-    commandRouter.subscribe("halted", (event) => {
-        lastHalt = {
-            reason: event.value?.reason ?? null,
-            pc: Number(event.value?.pc ?? 0) >>> 0,
-        };
-    });
+    function lastHalt() {
+        return viewStore.getState("debug")?.debug?.halt ?? null;
+    }
 
     window.riscv_kernel = {
         /** 最近一次「停下」的原因与 PC（`Halted` 事件）；还没有就是 `null`。 */
-        lastHalt: () => lastHalt,
+        lastHalt,
         /**
          * 在 `addr` 下断点（`id` 是 M-08 的断点号）。
          *
