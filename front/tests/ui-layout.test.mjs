@@ -172,15 +172,23 @@ describe("STAGE-34 · 顶栏全局运行条", () => {
         );
     });
 
-    test("A-7 · 三个按钮的 action 取值与 app.js 的命令分支**逐字对应**", () => {
-        for (const action of ["run", "step", "reset"]) {
+    test("A-7 · 四个按钮的 action 取值与 app.js 的命令分支**逐字对应**", () => {
+        // ⚠️ **「暂停」是第四个按钮**（STAGE-37 · v0.52 批 · 裁决 G）⇒ ⇒
+        // 「运行」变成连续运行之后**必须**有一个真实出口 ⇒ ⇒ 加按钮就得
+        // 同步扩这条判据（否则新按钮**零覆盖**）。
+        for (const action of ["run", "step", "pause", "reset"]) {
             const btn = $(`[data-topbar-action="${action}"]`);
             assert.ok(btn, `运行条上缺 ${action} 按钮`);
         }
         // ⚠️ **逐字对应**：按钮的 `data-topbar-action` 与 app.js 里
         // `handleCommand` 的 `case` 分支**必须是同一个词** ⇒ ⇒ 顶栏点一下
         // 才会发出**对**的命令。
-        const actionMap = { run: "continue", step: "step", reset: "reset" };
+        const actionMap = {
+            run: "continue",
+            step: "step",
+            pause: "pause",
+            reset: "reset",
+        };
         for (const [attr, cmd] of Object.entries(actionMap)) {
             assert.ok(
                 appSrc.includes(`{ action: "${cmd}" }`),
@@ -197,7 +205,7 @@ describe("STAGE-34 · 顶栏全局运行条", () => {
         // ⚠️ **不许自己写一套** ⇒ ⇒ 顶栏必须调**那个**函数 ⇒ ⇒
         // 「一个约束一个落点」。
         assert.ok(
-            /handleCommand\(\{\s*action:\s*"(continue|step|reset)"\s*\}/.test(appSrc),
+            /handleCommand\(\{\s*action:\s*"(continue|step|pause|reset)"\s*\}/.test(appSrc),
             "顶栏按钮没有直接调 handleCommand ⇒ ⇒ 那是另写了一套路径",
         );
     });

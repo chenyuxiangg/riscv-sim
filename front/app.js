@@ -61,6 +61,19 @@ import {
     loadECharts,
     setChartSource,
 } from "./lib/echarts-loader.js";
+// ⚠️ **连续运行的纯函数**（STAGE-37 · v0.52 批）⇒ ⇒ 「该不该续发」**剥成纯函数**
+// ⇒ ⇒ Node 侧零 DOM 就能测 ⇒ ⇒ 与 STAGE-36 的「边沿合并剥成纯函数」同形。
+import {
+    RUN_MODE_IDLE,
+    RUN_MODE_RUNNING,
+    RUN_ACTION_CONTINUE,
+    RUN_ACTION_STOP,
+    initialRunState,
+    nextRunAction,
+    runStateAfter,
+    startRunState,
+    stopRunState,
+} from "./lib/run-loop.js";
 
 /** URL of the WASM kernel Worker (same-origin HTTP required). */
 const KERNEL_WORKER_URL = "./kernel-worker.js";
@@ -217,6 +230,80 @@ export function formatVirtualTime(ps) {
     return `${(v / 1e9).toFixed(3)} ms`;
 }
 
+// ---------------------------------------------------------------------------
+// 连续运行（STAGE-37 · v0.52 批）
+// ---------------------------------------------------------------------------
+
+/**
+ * **连续运行状态**（STAGE-37 · v0.52 批 · 裁决 F）。
+ *
+ * ⚠️ **住视图状态 `debug.run`**（即 `debug` 视图状态里的 `run` 那一格）⇒ ⇒
+ * 与 `debug.halt`（内核的停下报告）**分开**⇒ ⇒ 两个不同的真相、两个落点
+ * ⇒ ⇒ 「内核说它停了」与「前端还想跑」**不混在一处**⇒ ⇒ 视图层读哪个
+ * 都说得清。
+ *
+ * ⚠️ **读的时候补默认值** ⇒ ⇒ 视图状态没写过（第一次进页面）时读到的
+ * 也是一份**合法**的状态 ⇒ ⇒ 调用方不必到处判空。
+ *
+ * @returns {{mode: string, windows: number}}
+ */
+export function getRunState() {
+    const run = viewStore.getState("debug")?.debug?.run;
+    return {
+        mode: run?.mode === RUN_MODE_RUNNING ? RUN_MODE_RUNNING : RUN_MODE_IDLE,
+        windows: Number.isFinite(run?.windows) ? Number(run.windows) : 0,
+    };
+}
+
+/**
+ * 写**连续运行状态**（STAGE-37 · v0.52 批 · 裁决 F）。
+ *
+ * ⚠️ **写完就同步顶栏那个状态位** ⇒ ⇒ 「在跑」**看得见**（裁决 G）⇒ ⇒
+ * 状态位**不另订阅** ⇒ ⇒ 少一条同步路径 ⇒ ⇒ 少一处可能不同步的地方。
+ *
+ * @param {{mode?: string, windows?: number}} next
+ * @returns {{mode: string, windows: number}} 写进去的那一份
+ */
+export function setRunState(next) {
+    const mode = next?.mode === RUN_MODE_RUNNING ? RUN_MODE_RUNNING : RUN_MODE_IDLE;
+    const windows = Number.isFinite(next?.windows) ? Number(next.windows) : 0;
+    viewStore.setState("debug", (prev) => ({
+        ...prev,
+        debug: {
+            ...(prev.debug ?? {}),
+            run: { mode, windows },
+        },
+    }));
+    publishViewState("debug");
+    syncTopbarRunStatus();
+    return { mode, windows };
+}
+
+/**
+ * 把**连续运行状态**同步到顶栏那个状态位（STAGE-37 · v0.52 批 · 裁决 G）。
+ *
+ * ⚠️ **文案只有这一处** ⇒ ⇒ 真机门禁读它、前端用例读它 ⇒ ⇒ 同一个词
+ * ⇒ ⇒ 「界面上显示的」与「判据说看到的」**天然对得上**。
+ *
+ * ⚠️ **同时挂两个原始属性**（`data-topbar-run-mode` /
+ * `data-topbar-run-windows`）⇒ ⇒ 判据可以读**原始值**而不是解析中文
+ * ⇒ ⇒ 与 `data-topbar-time-ps` 同一手法。
+ *
+ * @returns {{mode: string, windows: number, text: string}|null}
+ */
+export function syncTopbarRunStatus() {
+    const el = document.querySelector("[data-topbar-run-status]");
+    if (!el) return null;
+    const run = getRunState();
+    const text = run.mode === RUN_MODE_RUNNING
+        ? `连续运行中 · 已跑 ${run.windows} 轮`
+        : `已停止 · 跑了 ${run.windows} 轮`;
+    el.textContent = text;
+    el.setAttribute("data-topbar-run-mode", run.mode);
+    el.setAttribute("data-topbar-run-windows", String(run.windows));
+    return { mode: run.mode, windows: run.windows, text };
+}
+
 /**
  * 把 **PC** 与**虚拟时间**同步到顶栏运行条。
  *
@@ -280,6 +367,12 @@ export function wireTopbarRunbar(services) {
         ?.addEventListener("click", () => {
             void handleCommand({ action: "reset" }, services);
         });
+    // ⚠️ **「暂停」按钮**（STAGE-37 · v0.52 批 · 裁决 G）⇒ ⇒ 与调试视图
+    // 那份**共用同一个 action** ⇒ ⇒ **一条路径** ⇒ ⇒ 不写第二套。
+    bar.querySelector('[data-topbar-action="pause"]')
+        ?.addEventListener("click", () => {
+            void handleCommand({ action: "pause" }, services);
+        });
     if (topbarStatsUnsubscribe) {
         topbarStatsUnsubscribe();
         topbarStatsUnsubscribe = null;
@@ -287,6 +380,9 @@ export function wireTopbarRunbar(services) {
     topbarStatsUnsubscribe =
         services?.registerMemory?.subscribe?.(() => syncTopbarStats(services)) ?? null;
     syncTopbarStats(services);
+    // ⚠️ **状态位也要在接线时同步一次** ⇒ ⇒ 页面刚打开就该显示「已停止」
+    // ⇒ ⇒ 不是等用户第一次点「运行」才有内容。
+    syncTopbarRunStatus();
 }
 
 /**
@@ -973,18 +1069,46 @@ export async function handleCommand(detail, services) {
     try {
         switch (action) {
             case "step":
+                // ⚠️ **先退出连续模式**（裁决 O）⇒ ⇒ 否则下一轮 `Continue`
+                // 立刻把这一步盖掉 ⇒ ⇒ 「单步」在连续模式下**不可用**。
+                setRunState(stopRunState(getRunState()));
                 await commandRouter.dispatchCommand(Command.stepN(1));
                 break;
             case "step10":
+                // ⚠️ **与「单步」同一条路**（同裁决 O）⇒ ⇒ 10 条也是「走一段
+                // 然后停」⇒ ⇒ 连续模式必须让位。
+                setRunState(stopRunState(getRunState()));
                 await commandRouter.dispatchCommand(Command.stepN(10));
                 break;
             case "continue":
-                await commandRouter.dispatchCommand(Command.continueRun());
+                // ⚠️ **「运行」= 连续运行**（裁决 A）⇒ ⇒ 进连续模式 ⇒ 发
+                // `Continue`（内核那边仍然是「跑一个窗口」）⇒ ⇒ **前端**在
+                // `halted` 订阅里**接着发下一条**（裁决 C）。
+                //
+                // ⚠️ **幂等**（裁决 I）：已经在连续模式 ⇒ ⇒ **不重发** ⇒ ⇒
+                // 连点两下不会变成两个并行窗口。
+                if (getRunState().mode === RUN_MODE_RUNNING) break;
+                setRunState(startRunState());
+                try {
+                    await commandRouter.dispatchCommand(Command.continueRun());
+                } catch (err) {
+                    // ⚠️ **发不出去 ⇒ 退出连续模式** ⇒ ⇒ 否则界面显示
+                    // 「在跑」而内核**根本没跑** ⇒ ⇒ 那是界面在骗人。
+                    setRunState(stopRunState(getRunState()));
+                    throw err;
+                }
                 break;
             case "pause":
-                await commandRouter.dispatchCommand(Command.pause());
+                // ⚠️ **不发 `Pause` 命令**（裁决 E）—— `Pause` 会把
+                // `pause_requested` **留在内核里**（取走即消失）⇒ ⇒ 下一次
+                // 运行会在第一条指令边界就停（F6）⇒ ⇒ **吃掉一整轮**。
+                // ⇒ ⇒ 这里只**停续发**（前端状态）⇒ ⇒ 正在跑的那一个窗口
+                // 跑完才停（10 µs 虚拟时间，用户感知不到）。
+                setRunState(stopRunState(getRunState()));
                 break;
             case "reset":
+                // ⚠️ **复位 ⇒ 退出连续模式**（裁决 H）⇒ ⇒ 否则复位后还在跑。
+                setRunState(initialRunState());
                 // 装载工程**并且**把三条内核侧订阅都强制重订
                 // （内核侧的订阅随工程一起失效了 —— 新工程 = 新会话，
                 // FR-13）。这几步绑在一个函数里，调用点不会漏掉后两步。
@@ -2005,6 +2129,7 @@ export function wireDebug(commandRouter) {
      * 它是**内核最后一次的报告**，不是程序数据 ⇒ ⇒ 跨复位保留。
      */
     commandRouter.subscribe("halted", (event) => {
+        const reason = event.value?.reason ?? null;
         viewStore.setState("debug", (prev) => ({
             ...prev,
             debug: {
@@ -2015,6 +2140,34 @@ export function wireDebug(commandRouter) {
                 },
             },
         }));
+        // ⚠️ **连续运行的续发落点**（STAGE-37 · v0.52 批 · 裁决 C）。
+        //
+        // ⚠️ **落在** `halted` **这一个订阅上** ⇒ ⇒ 不新订阅一次 ⇒ ⇒
+        // 「内核的停下报告」**仍然只有一份** ⇒ ⇒ 不是第二个真相。
+        //
+        // ⚠️ **必须由订阅驱动**（不能写成 `await` 循环）—— 命令的 promise
+        // 只 resolve **第一个**带 reqId 的事件（那是 `Tick`）⇒ ⇒ `Halted`
+        // **只能**从订阅拿到（F8）。
+        //
+        // ⚠️ **判据在纯函数里**（`nextRunAction`）⇒ ⇒ 「该不该续」这件事
+        // Node 侧**零 DOM** 就能验 ⇒ ⇒ 这里只是一次**调用**。
+        const run = getRunState();
+        const action = nextRunAction({ mode: run.mode, reason });
+        if (action === RUN_ACTION_CONTINUE) {
+            setRunState(runStateAfter(run, reason));
+            // ⚠️ **不 await** ⇒ ⇒ 这个订阅回调**不等**内核 ⇒ ⇒ 事件处理
+            // 不会卡住 ⇒ ⇒ 错误也不往这里抛（抛了就是**未处理的拒绝**）。
+            void Promise.resolve(commandRouter.dispatchCommand(Command.continueRun()))
+                .catch(() => {
+                    // ⚠️ **续发失败 ⇒ 退出连续模式** ⇒ ⇒ 界面不再显示
+                    // 「在跑」⇒ ⇒ 状态位不会骗人。
+                    setRunState(stopRunState(getRunState()));
+                });
+        } else if (action === RUN_ACTION_STOP) {
+            // ⚠️ **真停**（断点 / 观察点 / 陷阱 / 用户暂停）⇒ ⇒ 退出连续模式
+            // ⇒ ⇒ **不续发** ⇒ ⇒ 连续模式在断点后**不会**继续跑。
+            setRunState(runStateAfter(run, reason));
+        }
         publishViewState("debug");
     });
 

@@ -57,12 +57,19 @@
       ⚠️ **全局运行条**（STAGE-34 · v0.49 批）：PC + 虚拟时间 + 运行 / 单步 / 复位。
       ⇒ ⇒ 按钮**由 app 层接线**（`wireTopbarRunbar`）⇒ ⇒ 它们**直接调
       `handleCommand`** ⇒ ⇒ 与调试视图那份**共用同一条命令路径**。
+
+      ⚠️ **「暂停」按钮**（STAGE-37 · v0.52 批 · 裁决 G）：「运行」是**连续
+      运行**⇒ ⇒ 必须有一个**真实出口**⇒ ⇒ 顶栏加这个按钮。
+      ⚠️ **状态位**（`data-topbar-run-status`）：让「在跑」**看得见**⇒ ⇒
+      文案**只有 app 层一处**⇒ ⇒ 界面上显示的与判据说看到的是同一个词。
     -->
     <div class="runbar" data-topbar-runbar>
       <span class="stat" data-topbar-pc>PC <b class="mono" data-topbar-pc-value>—</b></span>
       <span class="stat hide-m" data-topbar-time>虚拟时间 <b class="mono" data-topbar-time-value>—</b></span>
+      <span class="stat hide-m" data-topbar-run-status>已停止</span>
       <button class="btn run" data-topbar-action="run" type="button">运行</button>
       <button class="btn" data-topbar-action="step" type="button">单步</button>
+      <button class="btn" data-topbar-action="pause" type="button">暂停</button>
       <button class="btn" data-topbar-action="reset" type="button">复位</button>
     </div>
 
