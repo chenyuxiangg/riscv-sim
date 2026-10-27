@@ -95,6 +95,10 @@ describe("STAGE-34 · 左侧分组导航（侧边栏）", () => {
 
     test("A-4 · 导航项带正确的 href ⇒ ⇒ 真浏览器点它就会切路由", () => {
         const items = sidebarItems();
+        // ⚠️ **先钉住件数** ⇒ ⇒ 否则「侧边栏一个项都没有」时这个 `for`
+        // **一次都不执行** ⇒ ⇒ 用例**空转通过** ⇒ ⇒ **假绿**
+        // （STAGE-34 §8 订正 6：变异自检 T1 实测到的就是这个）。
+        assert.equal(items.length, 8, `侧边栏应当有 8 个导航项，实际 ${items.length}`);
         for (const el of items) {
             const hash = el.getAttribute("data-view-tab");
             assert.equal(
@@ -139,6 +143,33 @@ describe("STAGE-34 · 顶栏全局运行条", () => {
         // 无数据来源 ⇒ ⇒ 不编造）⇒ ⇒ 界面上不许出现那种数字。
         const text = String(bar.textContent);
         assert.ok(!/inst|指令/i.test(text), `运行条上出现了「指令计数」⇒ ⇒ 那是没有数据来源的编造：${text}`);
+    });
+
+    test("A-6b · 顶栏 PC / 虚拟时间**来自 M-10 快照**（⇒ ⇒ 不是写死的常量）", () => {
+        // ⚠️ **判据要问用户真正会问的那个问题**：顶栏那个数字**是不是真的**
+        // ⇒ ⇒ 喂一份**已知的**快照进去 ⇒ ⇒ 界面必须**逐字复现**它。
+        // ⇒ ⇒ 若有人把 PC 写死成常量 ⇒ ⇒ 这里立刻红。
+        const snap = { pc: 0x1234abcd, timeVirt: 123456 };
+        const fake = {
+            registerMemory: {
+                getSnapshot: () => snap,
+                subscribe: () => () => {},
+            },
+        };
+        const out = app.syncTopbarStats(fake);
+        assert.ok(out, "syncTopbarStats 没有返回读到的状态");
+        assert.equal(out.pc, 0x1234abcd, "读到的 PC 与快照不一致");
+        assert.equal(out.timeVirt, 123456, "读到的虚拟时间与快照不一致");
+        assert.equal(
+            String($("[data-topbar-pc-value]").textContent),
+            "0x1234abcd",
+            "顶栏显示的 PC 与快照不一致",
+        );
+        assert.equal(
+            $("[data-topbar-time-value]").getAttribute("data-topbar-time-ps"),
+            "123456",
+            "顶栏挂的原始 ps 与快照不一致",
+        );
     });
 
     test("A-7 · 三个按钮的 action 取值与 app.js 的命令分支**逐字对应**", () => {

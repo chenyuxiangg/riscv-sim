@@ -3377,8 +3377,12 @@ async function runUiLayoutSection(cdp, opts) {
     const narrow = await awaitEval(cdp, BV_SIDEBAR_PROBE);
     add(
         "B-17 · 窄屏（375）⇒ ⇒ 侧边栏**收起**（不占宽度）⇒ ⇒ 主区不被遮挡",
-        narrow?.mainX !== undefined && narrow.mainX <= 1 && narrow.sidebarRight <= 1,
-        `主区 x=${JSON.stringify(narrow?.mainX ?? "")} 侧边栏右缘=${JSON.stringify(narrow?.sidebarRight ?? "")}`,
+        // ⚠️ **必须先确认侧边栏存在** ⇒ ⇒ 否则「侧边栏整个没了」时
+        // 「右缘 = 0」**恒真** ⇒ ⇒ 断言**空转通过** ⇒ ⇒ **假绿**
+        // （STAGE-34 §8 订正 6：变异自检 T1 实测到的就是这个）。
+        narrow?.hasHost === true
+            && narrow.mainX !== undefined && narrow.mainX <= 1 && narrow.sidebarRight <= 1,
+        `侧边栏存在=${narrow?.hasHost} 主区 x=${JSON.stringify(narrow?.mainX ?? "")} 侧边栏右缘=${JSON.stringify(narrow?.sidebarRight ?? "")}`,
     );
     // ⚠️ **点击无条件执行**（不藏在某个断言的短路条件里）⇒ ⇒ 否则「汉堡
     // 不可见」时点击**根本不发生** ⇒ ⇒ B-17c 变成**测另一个东西** ⇒ ⇒
@@ -3418,6 +3422,17 @@ async function runUiLayoutSection(cdp, opts) {
             && wide?.sidebarRight !== undefined && wide.sidebarRight <= wide.mainX + 1,
         `侧边栏 x=${JSON.stringify(wide?.sidebarX ?? "")} 右缘=${JSON.stringify(wide?.sidebarRight ?? "")}`
         + ` 主区 x=${JSON.stringify(wide?.mainX ?? "")}`,
+    );
+
+    // -- B-18b · 设计令牌**真的进了浏览器**（不是只写在文件里） ---------------
+    const accent = await awaitEval(cdp, `(() => {
+        const v = getComputedStyle(document.documentElement).getPropertyValue("--accent");
+        return typeof v === "string" ? v.trim() : "";
+    })()`);
+    add(
+        "B-18b · 设计令牌 `--accent` 的**真实计算值** = #22d3ee（⇒ ⇒ 令牌**真的进了浏览器**）",
+        accent === "#22d3ee",
+        `--accent 计算值=${JSON.stringify(accent ?? "")}`,
     );
     await cdp.send("Emulation.clearDeviceMetricsOverride");
     await sleep(300);
