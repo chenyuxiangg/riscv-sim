@@ -71,7 +71,11 @@ python3 -m http.server 8080 --directory front
 
 ## 3. 界面导览
 
-顶栏七个 tab 对应七个视图；另有一个**独立工作面**「板级内存图」不在 tab 条上（在「产品」视图里点「编辑板级内存图」进去）。
+**左侧是分组导航**（v0.49 起）：两个分组——「**运行与调试**」（嵌入式 / 调试 / 寄存器·内存 / 波形 / 终端）与「**平台**」（产品 / 板级内存图 / 源码）⇒ ⇒ 共 **8** 个视图 ⇒ ⇒ 当前视图那项会**高亮**（点它就切路由，URL 里的 `#/xxx` 照旧可用）⇒ ⇒ **窄屏（< 720px）时侧边栏变抽屉**，点左上角**汉堡按钮**拉开。
+
+**顶栏右侧是全局运行条**：**PC** 与**虚拟时间**（跟「寄存器 / 内存」那一屏**同一个数据源**）＋ **运行** / **单步** / **复位** 三个按钮 ⇒ ⇒ 三个按钮走的是**调试视图那条命令路径**（不是另写的一套）⇒ ⇒ 任何视图下都能单步。
+
+⚠️ **本批（v0.49）只改骨架与视觉** ⇒ ⇒ **视图内容形态 + 断点 UI** 在 **v0.50 批**、**波形真图**在 **v0.51 批**。
 
 ### 3.1 产品（`#/product`）
 
@@ -133,6 +137,15 @@ python3 -m http.server 8080 --directory front
 - **解析当前 PC 的源码行**：问内核「这个地址对应哪一行」（DWARF 行表）。
 - ⚠️ **三种「没有答案」分得很清楚**：没问过 / 镜像没有 DWARF 行表（要 `-g` 重编译）/ 地址不在行表内。
 - ⚠️ 匹配到**多个**候选文件时，界面**列出候选让你选**，不静默挑第一个。
+
+---
+
+### 3.8 顶栏全局运行条（全局 · v0.49 起）
+
+- **PC**：8 位十六进制 ⇒ ⇒ 与「寄存器 / 内存」那一屏**逐字相同**（**同一个状态源**，不是第二份数据）。
+- **虚拟时间**：皮秒 / 纳秒 / 微秒 / 毫秒**自适应**显示 ⇒ ⇒ 同时在元素上挂一份**原始皮秒**供脚本读。
+- ⛔ **没有「指令退休计数」** ⇒ ⇒ 契约层的 `SimState` **没有**那个字段 ⇒ ⇒ **没有数据源 ⇒ ⇒ 不编造**。
+- **运行 / 单步 / 复位** 三个**独立**按钮 ⇒ ⇒ ⛔ **不是**「运行 / 暂停」切换（那需要前端自己维护一个「是否在运行」的布尔量 ⇒ ⇒ **那是第二个真相**）⇒ ⇒ 三个按钮都**直接调 `handleCommand`** ⇒ ⇒ 与调试视图**共用同一条命令路径**。
 
 ---
 
@@ -353,6 +366,7 @@ node tools/browser-verify.mjs        # 需要本机 Chrome
 | **前端没有断点 UI** | 断点/写内存只有脚本接口（`window.riscv_kernel.*`），页面上没有对应按钮 |
 | **`time` 与参考侧不再可比** | 计数器那批把 `time` 接上了 CLINT ⇒ 有意为之的明示取舍 |
 | **`.hex` 不按 Intel HEX 解析** | 契约层的镜像类型只有 `Elf` / `RawHex` 两种 ⇒ ⇒ `.hex` 按**原始字节**走；IHEX 语义在契约层**表达不了** |
+| **波形真图会引入一个外部依赖** | **v0.51 批**的波形真图要用 **echarts** ⇒ ⇒ **破「零依赖」**（**「零构建」仍然成立**）⇒ ⇒ 这是**用户拍板**的取舍 ⇒ ⇒ **离线 / CDN 不可达时波形区优雅降级**（显示「波形库不可用」而不是白屏）⇒ ⇒ **v0.49 批只做骨架与视觉、不碰 echarts** |
 
 ⚠️ **完整的欠账清单**（每一条的实证依据、阻塞关系、闭环方式）在 [`docs/reviews/REVIEWS.md`](./reviews/REVIEWS.md) ⇒ ⇒ **不要**以「文档没说」当成「没这回事」。
 
@@ -365,7 +379,7 @@ node tools/browser-verify.mjs        # 需要本机 Chrome
 | 搞懂架构 | [`docs/architecture/RISC-V_Architecture_Design.html`](./architecture/RISC-V_Architecture_Design.html)（4+1 视图 + ADR） |
 | 看需求 | [`docs/requirements/RISC-V_Requirements_v1.4.html`](./requirements/RISC-V_Requirements_v1.4.html) |
 | 看某个模块怎么设计 | [`docs/module-design-spec/RISC-V_Module_Design_Specification.html`](./module-design-spec/RISC-V_Module_Design_Specification.html)（23 模块 LLD）+ [`docs/detailed-design/M-01..M-23_*.html`](./detailed-design/) |
-| 看某一批的规格与裁决 | [`docs/detailed-design/STAGE-1..STAGE-33_*.md`](./detailed-design/)（32 份冻结规格） |
+| 看某一批的规格与裁决 | [`docs/detailed-design/STAGE-1..STAGE-34_*.md`](./detailed-design/)（33 份冻结规格） |
 | 看改动的完整叙事 | [`docs/progress/PROGRESS.md`](./progress/PROGRESS.md) |
 | 看欠账与已知缺口 | [`docs/reviews/REVIEWS.md`](./reviews/REVIEWS.md) |
 | 参与开发 | [`CONTRIBUTING.md`](../CONTRIBUTING.md) + [`AGENTS.md`](../AGENTS.md) |
