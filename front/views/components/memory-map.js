@@ -74,6 +74,21 @@
 // 没有 `wiring` 的板往返后**仍然**没有 `wiring`（不给所有板都塞一个空数组）
 // ⇒ 内核回传的那份与前端提交的那份**逐字段相同** ⇒ 「已被内核接受」这个
 // 推导量**不会**因为多一个 `wiring: null` 而永远为假。
+//
+//
+// # 地址比例条（STAGE-35 · v0.50 批 · 裁决 D）
+//
+// 视图正文改成**卡片形态**（`.cards` / `.card` / `.banner` / `.empty` /
+// `.kpi` / `.chip` / `.legend` —— 全部**复用** `front/style.css` 里已有的类，
+// **不新造类名**）⇒ ⇒ 段表上方多一条**地址比例条**。
+//
+// ⚠️ **每段的宽度按它的真实地址区间算**（`size / 整图跨度`）⇒ ⇒ 那是**真数据**
+// 的投影 ⇒ ⇒ ⛔ **不用固定百分比** ⇒ ⇒ 比例写进 `style="flex: <比例>"`（那是
+// `flex-grow` ⇒ ⇒ 各段的**相对宽度**正好是地址长度之比）。
+//
+// ⚠️ **稳定钩子一个字符都不动**（裁决 A）⇒ ⇒ `data-mmap-*` / `data-action` /
+// 段表的**行结构**与**字段名**全部原样 ⇒ ⇒ 真机门禁与前端用例的**取法**
+// 不变。
 
 import { escapeHtml } from "../../lib/escape.js";
 import { PLATFORM_SCHEMA_VERSION } from "../../lib/message.js";
@@ -115,6 +130,20 @@ export const DEVICE_KINDS = Object.freeze(["gpio", "uart16550", "clint", "plic"]
 
 /** 区域类型（`RegionSpec` 的三个变体，snake_case 线上名）。 */
 export const REGION_KINDS = Object.freeze(["ram", "rom", "peripheral"]);
+
+/**
+ * 外设窗口的**摆放长度**（4 KiB）—— 摆放与比例条折算用**同一个**值。
+ *
+ * ⚠️ **描述里没有外设窗口的 `size`**（`RegionSpec::Peripheral` **故意**没有那个
+ * 字段 ⇒ 窗口大小由器件自报）⇒ ⇒ 但比例条**必须**给外设段一个长度
+ * （给它 0 ⇒ 那一段在条上**看不见** ⇒ 图例里的「外设」永远不出现）⇒ ⇒
+ * 折算成**本模块摆放外设窗口时用的那个窗口**（`nextFreeBase` 里的同一个常量）
+ * ⇒ ⇒ **一个落点**。
+ *
+ * ⚠️ **它不是器件自报的真窗口**（那条**没有数据源**）⇒ ⇒ 界面上**不显示**这个
+ * 数字（那会是第二个真相）⇒ ⇒ 它只当**折算用**。
+ */
+export const PERIPHERAL_WINDOW_BYTES = 0x1000;
 
 /**
  * 每种器件的**默认参数**（新增一个外设窗口时的初值）。
@@ -478,7 +507,7 @@ export function nextFreeBase(draft, kind) {
         const base = parseNumber(region?.base) ?? 0;
         const size = parseNumber(region?.size) ?? 0;
         const end = String(region?.kind) === "peripheral"
-            ? (base + 0x1000) >>> 0
+            ? (base + PERIPHERAL_WINDOW_BYTES) >>> 0
             : (base + size) >>> 0;
         if (end > top) top = end;
     }
@@ -1038,6 +1067,9 @@ export function renderArchiveRow(entry, selectedId) {
  * ⚠️ **前端不显示参数区间常量**（那会是第二份真相）⇒ 只在器件参数旁写
  * 一句「区间由内核校验（`E_PLT-12`）」。
  *
+ * ⚠️ **它自己就是一张卡**（STAGE-35 · 裁决 B ⇒ 复用 `.card`）⇒ ⇒ 面板那边
+ * 直接把它放进卡片流里（**不再**套一层）。
+ *
  * @param {object} state — 「memory-map」视图状态
  * @returns {string}
  */
@@ -1055,8 +1087,8 @@ export function renderArchivePanel(state) {
     const disabled = accepted ? "" : " disabled";
 
     return `
-        <section class="memory-map-archive">
-            <h4>板档案</h4>
+        <section class="card memory-map-archive">
+            <h3>板档案<span class="tag">本机浏览器</span></h3>
             <p class="muted" data-mmap-archive-status="${escapeHtml(status)}">${escapeHtml(archiveStatusText(status))}</p>
             <p class="muted" data-mmap-validated="${accepted ? "1" : "0"}">${accepted
                 ? "当前草稿已被内核接受（校验通过）—— 可以保存进板档案。"
@@ -1065,10 +1097,10 @@ export function renderArchivePanel(state) {
                 <thead><tr><th>板名</th><th>id</th><th></th><th></th></tr></thead>
                 <tbody>${table}</tbody>
             </table>
-            <div class="debug-toolbar">
-                <button type="button" data-action="save-memory-map"${disabled}>保存当前板</button>
-                <button type="button" data-action="save-memory-map-as"${disabled}>另存为板</button>
-                <button type="button" data-action="new-memory-map">新板</button>
+            <div class="row">
+                <button type="button" class="btn" data-action="save-memory-map"${disabled}>保存当前板</button>
+                <button type="button" class="btn" data-action="save-memory-map-as"${disabled}>另存为板</button>
+                <button type="button" class="btn ghost" data-action="new-memory-map">新板</button>
             </div>
             <div class="grid-2">
                 <label class="mmap-field"><span>新板 id</span>
@@ -1197,11 +1229,254 @@ export function countInvalidFields(root) {
 }
 
 // ---------------------------------------------------------------------------
+// 地址比例条（STAGE-35 · v0.50 批 · 裁决 D）
+//
+// ⚠️ **每段的宽度按它的真实地址区间算** ⇒ ⇒ 那是**真数据**的投影 ⇒ ⇒
+// ⛔ **不用固定百分比**。
+//
+// ⚠️ **比例写进 `flex`**（`style="flex: <比例>"`）⇒ ⇒ `flex` 的 `flex-basis`
+// 是 `0%` ⇒ ⇒ 浏览器按 `flex-grow` 的**比值**分配整条 ⇒ ⇒ 各段的**相对宽度**
+// 正好是「这段的地址长度 : 那段的地址长度」⇒ ⇒ 比例之和**不必**是 1。
+//
+// ⚠️ **整图跨度** = 所有段的 `base + size` 的最大值 **减** 最小的 `base`
+// ⇒ ⇒ 段**之间**的空洞（地址空间里没人用的那部分）**不占**宽度 ⇒ ⇒ 那是对的：
+// 条画的是**段**，不是**地址空间**。
+// ---------------------------------------------------------------------------
+
+/**
+ * 段类型 → 比例条上的**类**（裁决 B：**不新造类名** ⇒ 只用 `.seg` 那四个）。
+ *
+ * ⚠️ **「保留」不是契约层的一种段**（`RegionSpec` 只有 `ram` / `rom` /
+ * `peripheral`）⇒ ⇒ 它是**兜底**：任何不认识（或将来的）类型都落到它 ⇒ ⇒
+ * 图例上的四色与这条映射**一一对应**。
+ *
+ * @param {unknown} kind
+ * @returns {"ram"|"rom"|"per"|"reserved"}
+ */
+export function segmentClass(kind) {
+    const k = String(kind ?? "");
+    if (k === "ram") return "ram";
+    if (k === "rom") return "rom";
+    if (k === "peripheral") return "per";
+    return "reserved";
+}
+
+/**
+ * 比例条的**图例项**（四种颜色各一项 —— 顺序固定）。
+ *
+ * ⚠️ **四种都在**（哪怕当前图里只用得上两种）⇒ ⇒ 用户看得见「这一条还有
+ * 两种颜色没出现」⇒ ⇒ 不会以为「没出现 = 不支持」。
+ */
+export const SEGMENT_LEGEND = Object.freeze([
+    Object.freeze({ cls: "ram", label: "RAM" }),
+    Object.freeze({ cls: "rom", label: "ROM" }),
+    Object.freeze({ cls: "per", label: "外设窗口" }),
+    Object.freeze({ cls: "reserved", label: "保留" }),
+]);
+
+/**
+ * 比例条上面那句提示（**原型原文**）。
+ *
+ * ⚠️ **只在真的有分段时出现** ⇒ ⇒ 没有段时那句话是**假的**（没东西可点）⇒ ⇒
+ * 那时给的是 `.empty` 空态。
+ */
+export const SEGMENT_BAR_HINT = "内存布局做成横向条，按地址比例着色；点击任一分段即可在下方编辑。";
+
+/**
+ * 一段在比例条上显示的**名字**。
+ *
+ * ⚠️ **描述里没有段的名字**（`RegionSpec` 只有 `kind` / `base` / `size` /
+ * `device`）⇒ ⇒ 名字**由已有的字段推**：外设段用**器件 id**（那是它唯一的
+ * 身份），RAM / ROM 段用**类型名** ⇒ ⇒ **不编**一个描述里没有的名字。
+ *
+ * @param {object} region — 段（草稿形状）
+ * @param {string} kind — 段的类型
+ * @returns {string}
+ */
+function segmentLabel(region, kind) {
+    if (kind === "peripheral") {
+        const id = String(region?.device?.id ?? "");
+        if (id !== "") return id;
+        const devKind = String(region?.device?.device ?? "");
+        return devKind !== "" ? devKind.toUpperCase() : "外设";
+    }
+    if (kind === "rom") return "ROM";
+    if (kind === "ram") return "RAM";
+    return "保留";
+}
+
+/**
+ * 草稿 → 比例条的**布局**（分段 + 整图跨度）。
+ *
+ * ⚠️ **一段 ↔ 一行**（验收 A-11）：下标 `index` 就是 `data-mmap-row` 用的那个
+ * 下标 ⇒ ⇒ 比例条上的第 i 段**就是**段表里的第 i 行 ⇒ ⇒ 谁对谁都不会错位。
+ *
+ * ⚠️ **总跨度为 0**（全挤在同一个基址、且都没有大小）⇒ ⇒ **等分**（退化成
+ * 一条均匀的条）⇒ ⇒ 不是「宽度全 0」那种看不见的条。
+ *
+ * @param {object} draft — 草稿
+ * @returns {{span: number, segments: Array<{index:number,kind:string,cls:string,label:string,base:number,size:number,end:number,ratio:number,title:string}>}}
+ */
+export function memoryMapLayout(draft) {
+    const regions = Array.isArray(draft?.regions) ? draft.regions : [];
+
+    /** @type {Array<{kind: string, base: number, size: number}>} */
+    const intervals = regions.map((region) => {
+        const kind = String(region?.kind ?? "ram");
+        const base = parseNumber(region?.base) ?? 0;
+        // ⚠️ **外设段没有 `size`** ⇒ 用**摆放窗口**折算（见
+        // `PERIPHERAL_WINDOW_BYTES` 的注释）。
+        const size = kind === "peripheral"
+            ? PERIPHERAL_WINDOW_BYTES
+            : (parseNumber(region?.size) ?? 0);
+        return { kind, base, size };
+    });
+
+    // ⚠️ **整图跨度** = max(base + size) − min(base)。
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const it of intervals) {
+        if (it.base < lo) lo = it.base;
+        const end = it.base + it.size;
+        if (end > hi) hi = end;
+    }
+    const span = intervals.length === 0 ? 0 : Math.max(0, hi - lo);
+    const equalShare = intervals.length > 0 ? 1 / intervals.length : 0;
+
+    const segments = intervals.map((it, index) => {
+        const end = it.base + it.size;
+        const label = segmentLabel(regions[index], it.kind);
+        // ⚠️ **外设段不显示字节数**（窗口大小**由器件自报** ⇒ 描述里没有 ⇒
+        // 报一个数就是编数据）。
+        const title = it.kind === "peripheral"
+            ? `${label} · 外设窗口 · ${hex32(it.base)} 起（窗口大小由器件自报）`
+            : `${label} · ${hex32(it.base)} – ${hex32(end >>> 0)} · ${it.size} 字节`;
+        return {
+            index,
+            kind: it.kind,
+            cls: segmentClass(it.kind),
+            label,
+            base: it.base,
+            size: it.size,
+            end,
+            ratio: span > 0 ? it.size / span : equalShare,
+            title,
+        };
+    });
+
+    return { span, segments };
+}
+
+/**
+ * 一个比例 → **`flex` 里那一个数**（十进制，**不带科学计数法**）。
+ *
+ * ⚠️ **为什么不用 `toFixed(2)`**：那会把很小的比例**抹成 0** ⇒ 那一段在条上
+ * **消失** ⇒ ⇒ 留 12 位有效数字，必要时把指数写法展开。
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+function formatFlexRatio(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return "0";
+    let text = String(Number(n.toPrecision(12)));
+    if (text.includes("e") || text.includes("E")) {
+        text = n.toFixed(24).replace(/0+$/, "").replace(/\.$/, "");
+    }
+    return text;
+}
+
+/**
+ * 比例条上的**一段**。
+ *
+ * ⚠️ **`data-mmap-seg` 的下标与 `data-mmap-row` 的下标一一对应** ⇒ ⇒ 段表里
+ * 的第 i 行就是条上的第 i 段 ⇒ ⇒ 将来接「点分段 → 选中下面那一行」时**不用
+ * 再算一遍映射**。
+ *
+ * @param {object} segment
+ * @returns {string}
+ */
+function renderSegment(segment) {
+    return (
+        `<div class="seg ${segment.cls}" style="flex: ${formatFlexRatio(segment.ratio)}" ` +
+        `data-mmap-seg="${segment.index}" data-mmap-seg-base="${segment.base}" ` +
+        `data-mmap-index="${segment.index}" data-action="focus-region" ` +
+        `role="button" tabindex="0" ` +
+        `title="${escapeHtml(segment.title)}">${escapeHtml(segment.label)}</div>`
+    );
+}
+
+/**
+ * **地址比例条**（裁决 D）。
+ *
+ * ⚠️ **没有段 ⇒ 空态**（`.empty`）⇒ ⇒ 不是一条空的条（那看着像坏了）。
+ *
+ * @param {Array<object>} segments
+ * @returns {string}
+ */
+export function renderSegmentBar(segments) {
+    const list = Array.isArray(segments) ? segments : [];
+    if (list.length === 0) {
+        return (
+            `<div class="empty" data-mmap-segbar="empty">` +
+            `<p>还没有分段 —— 先加一段 RAM / ROM 或一个外设窗口；有了之后这里会按` +
+            `**真实地址区间**画成横向比例条。</p>` +
+            `</div>`
+        );
+    }
+    return (
+        `<div class="segbar" data-mmap-segbar="1">` +
+        list.map(renderSegment).join("") +
+        `</div>`
+    );
+}
+
+/**
+ * 比例条的**图例**（四种颜色各一项）。
+ *
+ * ⚠️ **`data-mmap-legend-item` 挂在每一项上** ⇒ ⇒ 「四种都在」这条判据
+ * **不靠文案**（也不靠后代选择器 ⇒ ⇒ 前端用例的 DOM 替身**支持**它）。
+ *
+ * @returns {string}
+ */
+export function renderSegmentLegend() {
+    const items = SEGMENT_LEGEND.map((item) => (
+        `<span class="li" data-mmap-legend-item="${escapeHtml(item.cls)}">` +
+        `<span class="sw ${item.cls}"></span>${escapeHtml(item.label)}</span>`
+    )).join("");
+    return `<div class="legend" data-mmap-legend="1">${items}</div>`;
+}
+
+/**
+ * 比例条那一片 **chip**：**整图跨度**（比例条的那把尺子）。
+ *
+ * ⚠️ **显示它** ⇒ ⇒ 用户看得见「宽度是按多长的地址区间算的」⇒ ⇒ 比例条
+ * **不是**一张没有依据的画。
+ *
+ * @param {number} span — 整图跨度（字节）
+ * @returns {string}
+ */
+export function renderSpanChip(span) {
+    return (
+        `<div class="chip">` +
+        `<span class="ic">址</span>` +
+        `<span class="name">整图跨度</span>` +
+        `<span class="sub">最小 base → 最大 base+size</span>` +
+        `<span class="vals">${escapeHtml(hex32(span))}</span>` +
+        `</div>`
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 渲染：编辑器面板
 // ---------------------------------------------------------------------------
 
 /**
  * 一个顶层的文本 / 数值输入框。
+ *
+ * ⚠️ **`row` 是复用**（裁决 B：不新造类名 ⇒ 用 `front/style.css` 里已有的
+ * `.card .row`）⇒ ⇒ 标签与输入框**同一行**、中间有间隙（`.mmap-field` 在
+ * 现在的样式表里**没有**规则 ⇒ 不给它加类名就只是行内文字）。
  *
  * @param {object} options
  * @returns {string}
@@ -1211,7 +1486,7 @@ function field({ field: name, value, label, hex = null, extra = "" }) {
         ? ""
         : ` <span class="muted" data-mm-hex-hint>≈ ${escapeHtml(hex)}</span>`;
     return (
-        `<label class="mmap-field"><span>${escapeHtml(label)}</span>` +
+        `<label class="mmap-field row"><span>${escapeHtml(label)}</span>` +
         `<input type="text" inputmode="numeric" data-mmap-field="${escapeHtml(name)}" ` +
         `${extra} value="${escapeHtml(String(value))}">${hint}</label>`
     );
@@ -1288,7 +1563,7 @@ function renderPeripheralRow(region, index) {
                 ${deviceField({ index, name: "id", label: "器件 id", value: device.id ?? "" })}
                 ${paramFields}
             </td>
-            <td><button type="button" data-action="remove-region" data-mmap-index="${index}">删除</button></td>
+            <td><button type="button" class="btn ghost" data-action="remove-region" data-mmap-index="${index}">删除</button></td>
         </tr>
     `;
 }
@@ -1307,7 +1582,7 @@ function renderMemoryRow(region, index) {
             <td>${label}</td>
             <td>${regionField({ index, name: "base", label: "基址 base", value: region.base ?? "0", extra: "data-mm-base" })}</td>
             <td>${regionField({ index, name: "size", label: "大小 size", value: region.size ?? "0", extra: "data-mm-size" })}</td>
-            <td><button type="button" data-action="remove-region" data-mmap-index="${index}">删除</button></td>
+            <td><button type="button" class="btn ghost" data-action="remove-region" data-mmap-index="${index}">删除</button></td>
         </tr>
     `;
 }
@@ -1336,8 +1611,10 @@ export function renderMemoryMapPanel(state) {
             `${escapeHtml(parsed.code)}：${escapeHtml(String(error.message ?? ""))}</p>`;
     }
 
+    // ⚠️ **「待生效」是横幅**（原型与真机门禁都叫它「横幅」⇒ ⇒ 复用
+    // `.banner`，不新造类名）。
     const pendingBox = pending
-        ? `<p class="mmap-pending" data-memory-map-pending="1">` +
+        ? `<p class="banner mmap-pending" data-memory-map-pending="1">` +
           `待生效 —— 重新装载工程后应用（板级配置已存下，但当前会话的镜像还在跑：` +
           `改板只换总线、不动固件）。</p>`
         : "";
@@ -1363,6 +1640,19 @@ export function renderMemoryMapPanel(state) {
         else memoryRows.push(renderMemoryRow(region, index));
     });
 
+    // ⚠️ **比例条的分段**（STAGE-35 · 裁决 D）：**按真地址区间**算，不是
+    // 写死的百分比 ⇒ ⇒ 分段数 == 段表行数（验收 A-11）。
+    const layout = memoryMapLayout(draft);
+    const segments = layout.segments;
+    const memoryCount = segments.filter((seg) => seg.kind !== "peripheral").length;
+    const peripheralCount = segments.length - memoryCount;
+
+    // ⚠️ **提示条只在真的有分段时出现** ⇒ ⇒ 没有段时那句话是**假的**（没东西
+    // 可点）⇒ ⇒ 那时给的是 `.empty` 空态。
+    const hintBox = segments.length > 0
+        ? `<p class="banner" data-mmap-seg-hint="1">${escapeHtml(SEGMENT_BAR_HINT)}</p>`
+        : "";
+
     // ⚠️ **已有板的 id 只读**（STAGE-15 裁决 E）：主键 = 描述的 `id`
     // ⇒ 改 id 就是「另一块板」⇒ **改 id 的入口不存在**（`selectedId` 为空
     // = 正在起一块**新**板 ⇒ 那时 id 才可编辑）。
@@ -1371,65 +1661,96 @@ export function renderMemoryMapPanel(state) {
 
     return `
         <section class="memory-map-editor">
-            <h3>板级内存图（M-14 · 板级配置）</h3>
-            ${pendingBox}
-            ${errorBox}
-            ${revisionBox}
-            <p class="muted">
-                描述格式版本固定为 <code>${PLATFORM_SCHEMA_VERSION}</code>
-                （<code>PLATFORM_SCHEMA_VERSION</code>）——它与契约信封的
-                <code>schema_version</code>（${CONTRACT_SCHEMA_VERSION}）是**两件事**，不要混。
-                <code>auto_selectable</code> 固定为 <code>false</code>（用户配的板不参与自动选档）。
-            </p>
-            <div class="grid-2">
-                ${field({ field: "id", label: "板 id", value: draft.id ?? "", extra: idExtra })}
-                ${field({ field: "name", label: "板名", value: draft.name ?? "" })}
-                ${field({ field: "priority", label: "优先级 priority", value: draft.priority ?? "0" })}
-                ${field({
-                    field: "region_budget_bytes",
-                    label: "每段的声明大小上限（region_budget_bytes，字节）",
-                    value: draft.region_budget_bytes ?? "0",
-                    hex: hex32(parseNumber(draft.region_budget_bytes) ?? 0),
-                    extra: "data-mm-budget",
-                })}
+            <div class="cards" style="grid-template-columns: 1fr;">
+                <div class="card">
+                    <h3>板级内存图<span class="tag">M-14 · 板级配置</span></h3>
+                    ${pendingBox}
+                    ${errorBox}
+                    <div class="row">
+                        <div class="kpi"><span class="k">分段数</span><span class="v">${segments.length}</span></div>
+                        <div class="kpi"><span class="k">RAM / ROM 段</span><span class="v">${memoryCount}</span></div>
+                        <div class="kpi"><span class="k">外设窗口</span><span class="v">${peripheralCount}</span></div>
+                    </div>
+                    ${revisionBox}
+                    <p class="muted">
+                        描述格式版本固定为 <code>${PLATFORM_SCHEMA_VERSION}</code>
+                        （<code>PLATFORM_SCHEMA_VERSION</code>）——它与契约信封的
+                        <code>schema_version</code>（${CONTRACT_SCHEMA_VERSION}）是**两件事**，不要混。
+                        <code>auto_selectable</code> 固定为 <code>false</code>（用户配的板不参与自动选档）。
+                    </p>
+                    <div class="grid-2">
+                        ${field({ field: "id", label: "板 id", value: draft.id ?? "", extra: idExtra })}
+                        ${field({ field: "name", label: "板名", value: draft.name ?? "" })}
+                        ${field({ field: "priority", label: "优先级 priority", value: draft.priority ?? "0" })}
+                        ${field({
+                            field: "region_budget_bytes",
+                            label: "每段的声明大小上限（region_budget_bytes，字节）",
+                            value: draft.region_budget_bytes ?? "0",
+                            hex: hex32(parseNumber(draft.region_budget_bytes) ?? 0),
+                            extra: "data-mm-budget",
+                        })}
+                    </div>
+                    <p class="muted" data-mmap-budget-note>
+                        ⚠️ <strong>V-7</strong>：任一 RAM / ROM 段的<strong>声明</strong> size
+                        不得超过 <code>region_budget_bytes</code>（超出 ⇒ 内核报 <code>E_PLT-07</code>）——
+                        它是<strong>每段的声明大小上限</strong>；运行期的占用上限由内核
+                        按各段的声明值另算，<strong>界面只提供这一个旋钮</strong>。
+                    </p>
+                </div>
+
+                <div class="card">
+                    <h3>地址布局<span class="tag">按真实地址区间着色</span></h3>
+                    ${hintBox}
+                    ${renderSegmentBar(segments)}
+                    ${renderSegmentLegend()}
+                    ${renderSpanChip(layout.span)}
+                </div>
+
+                <div class="card">
+                    <h3>RAM / ROM 段<span class="tag">${memoryCount} 段</span></h3>
+                    <table class="map-table" data-mmap-memory-rows>
+                        <thead><tr><th>类型</th><th>基址</th><th>大小</th><th></th></tr></thead>
+                        <tbody>${memoryRows.join("") || `<tr><td colspan="4" class="muted">还没有 RAM / ROM 段。</td></tr>`}</tbody>
+                    </table>
+                    <div class="row">
+                        <button type="button" class="btn" data-action="add-ram">+ RAM 段</button>
+                        <button type="button" class="btn" data-action="add-rom">+ ROM 段</button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3>外设窗口<span class="tag">${peripheralCount} 个</span></h3>
+                    <p class="muted" data-mmap-device-range-note>
+                        器件参数的合法区间**由内核校验**（越界 ⇒ <code>E_PLT-12</code>）——
+                        前端**不写第二份区间表**（那会是第二个真相）⇒ 区间值只在内核的消息里给出。
+                    </p>
+                    <table class="map-table" data-mmap-peripheral-rows>
+                        <thead><tr><th>基址</th><th>器件类型</th><th>器件参数</th><th></th></tr></thead>
+                        <tbody>${peripheralRows.join("") || `<tr><td colspan="4" class="muted">还没有外设窗口。</td></tr>`}</tbody>
+                    </table>
+                    <div class="row">
+                        <button type="button" class="btn" data-action="add-peripheral">+ 外设窗口</button>
+                    </div>
+                </div>
+
+                ${renderArchivePanel(state)}
+
+                <div class="card">
+                    <h3>提交与工程</h3>
+                    <div class="row">
+                        <button type="button" class="btn primary" data-action="submit-memory-map">提交板级内存图（整份替换 / 差量）</button>
+                        <button type="button" class="btn" data-action="unload-project">卸载工程</button>
+                        <button type="button" class="btn" data-action="reload-project">重新装载工程</button>
+                        <button type="button" class="btn" data-action="load-current">从当前生效的图载入</button>
+                        <button type="button" class="btn ghost" data-action="new-draft">重建草稿</button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3>当前生效的内存图</h3>
+                    ${renderEffectiveSummary(memoryMap)}
+                </div>
             </div>
-            <p class="muted" data-mmap-budget-note>
-                ⚠️ <strong>V-7</strong>：任一 RAM / ROM 段的<strong>声明</strong> size
-                不得超过 <code>region_budget_bytes</code>（超出 ⇒ 内核报 <code>E_PLT-07</code>）——
-                它是<strong>每段的声明大小上限</strong>；运行期的占用上限由内核
-                按各段的声明值另算，<strong>界面只提供这一个旋钮</strong>。
-            </p>
-            <h4>RAM / ROM 段</h4>
-            <table class="map-table" data-mmap-memory-rows>
-                <thead><tr><th>类型</th><th>基址</th><th>大小</th><th></th></tr></thead>
-                <tbody>${memoryRows.join("") || `<tr><td colspan="4" class="muted">还没有 RAM / ROM 段。</td></tr>`}</tbody>
-            </table>
-            <div class="debug-toolbar">
-                <button type="button" data-action="add-ram">+ RAM 段</button>
-                <button type="button" data-action="add-rom">+ ROM 段</button>
-            </div>
-            <h4>外设窗口</h4>
-            <p class="muted" data-mmap-device-range-note>
-                器件参数的合法区间**由内核校验**（越界 ⇒ <code>E_PLT-12</code>）——
-                前端**不写第二份区间表**（那会是第二个真相）⇒ 区间值只在内核的消息里给出。
-            </p>
-            <table class="map-table" data-mmap-peripheral-rows>
-                <thead><tr><th>基址</th><th>器件类型</th><th>器件参数</th><th></th></tr></thead>
-                <tbody>${peripheralRows.join("") || `<tr><td colspan="4" class="muted">还没有外设窗口。</td></tr>`}</tbody>
-            </table>
-            <div class="debug-toolbar">
-                <button type="button" data-action="add-peripheral">+ 外设窗口</button>
-            </div>
-            <div class="debug-toolbar">
-                <button type="button" data-action="submit-memory-map">提交板级内存图（整份替换 / 差量）</button>
-                <button type="button" data-action="unload-project">卸载工程</button>
-                <button type="button" data-action="reload-project">重新装载工程</button>
-                <button type="button" data-action="load-current">从当前生效的图载入</button>
-                <button type="button" data-action="new-draft">重建草稿</button>
-            </div>
-            ${renderArchivePanel(state)}
-            <h4>当前生效的内存图</h4>
-            ${renderEffectiveSummary(memoryMap)}
         </section>
     `;
 }
