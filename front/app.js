@@ -21,7 +21,7 @@ import { mountSession } from "./services/m04_session.js";
 import { mountCommandRouter } from "./services/m05_commandrouter.js";
 import * as transportApi from "./services/m07_transport.js";
 import { mountRegisterMemory } from "./services/m10_registermemory.js";
-import { Command, TRACE_FORMAT, TRACE_SOURCE } from "./lib/message.js";
+import { Command, TRACE_FORMAT, TRACE_SOURCE, WRITE_SIZE } from "./lib/message.js";
 // ⚠️ 只导入**纯函数**（错误码拆分、草稿转换、「已被内核接受」推导量）⇒
 // 不引入服务层依赖，也不构成循环依赖。
 import {
@@ -1241,7 +1241,7 @@ export async function handleCommand(detail, services) {
                 await registerMemory.readRegisters();
                 break;
             }
-            case "read-mem":
+            case "read-mem": {
                 // ⚠️ **运行中不许读内存**（STAGE-38 · v0.53 批 · 裁决 F）
                 // ⇒ ⇒ **拒绝执行** + **弹窗** ⇒ ⇒ 「请先暂停再读」。
                 //
@@ -1250,12 +1250,22 @@ export async function handleCommand(detail, services) {
                 //
                 // ⚠️ **判据是「内核真的在执行」**（`isRunning()`）⇒ ⇒ 连续
                 // 模式**或**脚本口跑的那一个窗口都算 ⇒ ⇒ 一个判据。
+                //
+                // ⚠️ **地址与宽度都从界面来**（STAGE-39 · v0.54 批 · 裁决 D）
+                // ⇒ ⇒ 契约层**零变更**（命令的名字与形状一个字没改）⇒ ⇒
+                // 只把**参数来源**从写死改成 `params`。
                 if (isRunning()) {
                     showAlert(READ_MEMORY_BLOCKED_MESSAGE);
                     break;
                 }
-                await registerMemory.readMemory(0x100, "Word");
+                const readAddr = toInt(detail.params?.addr, 0) >>> 0;
+                const rawSize = detail.params?.size;
+                const readSize = Object.prototype.hasOwnProperty.call(WRITE_SIZE, rawSize)
+                    ? rawSize
+                    : WRITE_SIZE.Word;
+                await registerMemory.readMemory(readAddr, readSize);
                 break;
+            }
             case "disasm": {
                 // The disassembly request (M-11): the panel asks for a
                 // bounded window starting at the current PC.

@@ -23,6 +23,9 @@ import * as viewStore from "./m03_viewstore.js";
 // ⚠️ 这里**没有**循环依赖：M-01 只依赖 M-03（视图状态），不依赖 M-02。
 import { route } from "./m01_workbench.js";
 import { escapeHtml } from "../lib/escape.js";
+// ⚠️ **宽度三档只用契约镜像的那一份**（STAGE-39 · v0.54 批 · 裁决 D）⇒ ⇒
+// `Byte` / `Half` / `Word` **不新造**枚举 ⇒ ⇒ 前端与内核说的是同一组词。
+import { WRITE_SIZE } from "../lib/message.js";
 // ⚠️ **「运行中」的判据与活值的隐藏口径**（STAGE-38 · v0.53 批）⇒ ⇒
 // 「内核真的在执行吗」与「运行中显示什么」**各只有一处** ⇒ ⇒ 顶栏 /
 // 调试视图 / 寄存器视图**共用**同一套口径 ⇒ ⇒ 不会一个藏了一个没藏。
@@ -744,9 +747,232 @@ export function downloadExportChunk(exportState, deps = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// debugView — 反汇编面板 (M-11) + 寄存器/内存 (FR-05/08/09)
+// 任意地址输入 — 断点 / 读内存 (STAGE-39 · v0.54 批)
+//
+// ⚠️ **一条约束一个落点**（裁决 E）：「把用户输入的文本解析成一个地址」
+// **只允许有一处实现** ⇒ ⇒ 断点入口与读内存入口**共用**它 ⇒ ⇒ 前端
+// **不写第二份校验器**。
+//
+// ⚠️ **前端只挡「压根不是一个数」**（裁决 E）：**不**预校验对齐、**不**查
+// 地址是否已映射、**不**查那个地址上有没有断点 ⇒ ⇒ 那些都是**内核的判据**
+// ⇒ ⇒ 奇数地址**照发** ⇒ ⇒ 由内核回错误。
+//
+// ⚠️ **契约与内核早就够用了**（F1 / F2 / F4）：`Breakpoint.addr` 与
+// `ReadMemory.addr` **早有** ⇒ ⇒ 本节**零契约变更**（裁决 L）。
 // ---------------------------------------------------------------------------
 
+/**
+ * 地址输入的**唯一提示文案**（STAGE-39 · v0.54 批）。
+ *
+ * ⚠️ **一处定义** ⇒ ⇒ 两个入口**说同一句话** ⇒ ⇒ 用户不用学两套。
+ *
+ * @type {string}
+ */
+export const ADDR_INPUT_ERROR = "地址格式不对：请填十六进制（最多 8 位，可带 0x 前缀）。";
+
+/**
+ * 把用户输入的文本解析成一个地址（**唯一落点** · 裁决 E）。
+ *
+ * ⚠️ **只挡「压根不是一个数」**：最多 8 位十六进制、可带 `0x` 前缀 ⇒ ⇒
+ * 解析不出来 ⇒ ⇒ **格式不对**；其余（对齐 / 是否已映射 / 是否已有断点）
+ * **一律放行**给内核 ⇒ ⇒ 前端**不写第二份校验器**。
+ *
+ * ⚠️ **按十六进制解析**（裁决 A）：界面上所有地址都是 `0x…` 的写法 ⇒ ⇒
+ * 裸数字也按十六进制读 ⇒ ⇒ 与显示口径一致。
+ *
+ * @param {unknown} text
+ * @returns {{ok: true, value: number}|{ok: false, error: string}}
+ */
+export function parseAddrInput(text) {
+    const raw = String(text ?? "").trim();
+    const body = /^0[xX]/.test(raw) ? raw.slice(2) : raw;
+    if (!/^[0-9a-fA-F]{1,8}$/.test(body)) {
+        return { ok: false, error: ADDR_INPUT_ERROR };
+    }
+    return { ok: true, value: Number.parseInt(body, 16) >>> 0 };
+}
+
+/**
+ * **断点地址**输入行（共享片段 · 裁决 K）。
+ *
+ * ⚠️ **一个片段两处用**：调试视图的「断点」卡 ⇒ ⇒ 片段**只有一份**
+ * ⇒ ⇒ 改一次两处都改。
+ *
+ * @param {{draft?: string, error?: string}} [opts]
+ * @returns {string}
+ */
+export function renderBreakpointAddrRow({ draft = "", error = "" } = {}) {
+    return `
+        <div class="addr-input" data-addr-input="breakpoint">
+            <input type="text" class="addr-field" data-bp-addr-input value="${escapeHtml(draft)}"
+                placeholder="断点地址（十六进制）" spellcheck="false" autocomplete="off">
+            <button type="button" data-action="set-breakpoint">加断点</button>
+            <span class="addr-error" data-bp-addr-error>${escapeHtml(error)}</span>
+        </div>`;
+}
+
+/**
+ * **读内存**的地址 + 宽度输入行（共享片段 · 裁决 D / K）。
+ *
+ * ⚠️ **宽度只用契约的 `WRITE_SIZE`**（三档）⇒ ⇒ 不新造枚举 ⇒ ⇒ 前端与
+ * 内核说的是同一组词。
+ *
+ * @param {{draft?: string, size?: string, error?: string}} [opts]
+ * @returns {string}
+ */
+export function renderMemoryReadRow({ draft = "", size = WRITE_SIZE.Word, error = "" } = {}) {
+    const sizes = [WRITE_SIZE.Byte, WRITE_SIZE.Half, WRITE_SIZE.Word];
+    const current = Object.prototype.hasOwnProperty.call(WRITE_SIZE, size) ? size : WRITE_SIZE.Word;
+    return `
+        <div class="addr-input" data-addr-input="memory">
+            <input type="text" class="addr-field" data-mem-addr-input value="${escapeHtml(draft)}"
+                placeholder="内存地址（十六进制）" spellcheck="false" autocomplete="off">
+            <select class="addr-field" data-mem-size>
+                ${sizes.map((s) => `<option value="${s}"${s === current ? " selected" : ""}>${s}</option>`).join("")}
+            </select>
+            <button type="button" data-action="read-mem">读内存</button>
+            <span class="addr-error" data-mem-addr-error>${escapeHtml(error)}</span>
+        </div>`;
+}
+
+/**
+ * ⚠️ **草稿的共享命名空间**（STAGE-39 · v0.54 批 · 裁决 G）。
+ *
+ * ⚠️ **为什么不是某个视图自己的状态**：断点入口在**调试视图**、读内存
+ * 入口在**调试视图与寄存器视图两处** ⇒ ⇒ 两处**必须**看到同一份草稿
+ * ⇒ ⇒ 放在一个**共享**的命名空间里 ⇒ ⇒ **一个真相**。
+ *
+ * ⚠️ **`setState` 不校验 viewId** ⇒ ⇒ 这个键**不是**一个视图 ⇒ ⇒ 不会
+ * 被工作台派发渲染 ⇒ ⇒ 写草稿**不触发重渲染** ⇒ ⇒ 输入框不被重建 ⇒ ⇒
+ * 焦点不丢。
+ *
+ * @type {string}
+ */
+export const DEBUGGER_STATE_KEY = "debugger";
+
+/**
+ * 读**当前草稿**（断点地址 / 读内存地址 / 宽度）。
+ *
+ * @returns {{bpAddr: string, memAddr: string, memSize: string}}
+ */
+export function debuggerDraft() {
+    const s = viewStore.getState(DEBUGGER_STATE_KEY) ?? {};
+    const size = String(s.memSize ?? WRITE_SIZE.Word);
+    return {
+        bpAddr: String(s.bpAddr ?? ""),
+        memAddr: String(s.memAddr ?? ""),
+        memSize: Object.prototype.hasOwnProperty.call(WRITE_SIZE, size) ? size : WRITE_SIZE.Word,
+    };
+}
+
+/**
+ * 写**草稿**（**不重渲染** · 裁决 G）。
+ *
+ * ⚠️ **不在这里重渲染**：每敲一个键就重渲染 ⇒ ⇒ 输入框被重建 ⇒ ⇒ 焦点
+ * 没了 ⇒ ⇒ 没法连续打字（terminal 的 `term.draft` 同一惯例 · F10）。
+ *
+ * @param {{bpAddr?: string, memAddr?: string, memSize?: string}} patch
+ */
+function setDebuggerDraft(patch) {
+    viewStore.setState(DEBUGGER_STATE_KEY, (prev) => ({ ...prev, ...patch }));
+}
+
+/**
+ * 就地写**错误提示**（**不重渲染** · 裁决 F）。
+ *
+ * ⚠️ **提示必须看得见**：「点了没反应」是最差的 UX ⇒ ⇒ 解析不出来就在
+ * 那个输入框**旁边**写一行字 ⇒ ⇒ 不重渲染 ⇒ ⇒ 输入框不被重建 ⇒ ⇒ 焦点
+ * 也不丢。
+ *
+ * @param {Element|null} box — 输入框所在的容器
+ * @param {string} selector — 错误位的选择器
+ * @param {string} message — 空串 = 清掉
+ */
+function setAddrError(box, selector, message) {
+    const el = box?.querySelector?.(selector);
+    if (!el) return;
+    el.textContent = message ?? "";
+}
+
+/**
+ * 把「点一下」翻译成「一条命令的地址参数」（**两个来源** · 裁决 B）。
+ *
+ * 1. **按钮自带 `data-addr`** —— 反汇编行 / 断点列表的**旧**按钮 ⇒ ⇒
+ *    **原样传** ⇒ ⇒ 那条路的**行为一个字不变**；
+ * 2. **按钮旁边有地址输入框** —— 本批新增的入口 ⇒ ⇒ 读那个输入框 ⇒ ⇒
+ *    **用户给什么地址就下在什么地址**。
+ *
+ * ⚠️ **解析不出来 ⇒ ⇒ 不发命令**（裁决 F）⇒ ⇒ 返回 `{invalid: true}`
+ * ⇒ ⇒ 调用方**直接返回** ⇒ ⇒ **一条命令都不发**。
+ *
+ * @param {string} action
+ * @param {Element|null} el — 被点的那个按钮
+ * @returns {{addr?: number|string, size?: string, invalid?: boolean}|null}
+ */
+function resolveAddrParams(action, el) {
+    if (action !== "set-breakpoint" && action !== "read-mem") return null;
+    // --- 来源 1：按钮自带地址（旧按钮的路，一字不变）----------------------
+    if (el?.dataset?.addr) return { addr: el.dataset.addr };
+    // --- 来源 2：同屏的地址输入框 ----------------------------------------
+    const box = el?.closest?.("[data-addr-input]");
+    if (!box) return null;
+    if (action === "set-breakpoint") {
+        const parsed = parseAddrInput(box.querySelector("[data-bp-addr-input]")?.value ?? "");
+        if (!parsed.ok) {
+            setAddrError(box, "[data-bp-addr-error]", parsed.error);
+            return { invalid: true };
+        }
+        setAddrError(box, "[data-bp-addr-error]", "");
+        return { addr: parsed.value };
+    }
+    const parsed = parseAddrInput(box.querySelector("[data-mem-addr-input]")?.value ?? "");
+    if (!parsed.ok) {
+        setAddrError(box, "[data-mem-addr-error]", parsed.error);
+        return { invalid: true };
+    }
+    setAddrError(box, "[data-mem-addr-error]", "");
+    const rawSize = box.querySelector("[data-mem-size]")?.value ?? WRITE_SIZE.Word;
+    const size = Object.prototype.hasOwnProperty.call(WRITE_SIZE, rawSize)
+        ? rawSize
+        : WRITE_SIZE.Word;
+    return { addr: parsed.value, size };
+}
+
+/**
+ * 把**输入事件**接上（**事件委托** · 裁决 G / F11）。
+ *
+ * ⚠️ **监听器绑在容器上，不绑在输入框上** —— 输入框元素每次重渲染都会
+ * 被重建 ⇒ ⇒ 绑在它身上的监听器**会丢**（点第二次就没反应了）。
+ *
+ * ⚠️ **写草稿不重渲染** ⇒ ⇒ 输入框不被重建 ⇒ ⇒ 焦点不丢。
+ *
+ * ⚠️ **重新输入 ⇒ ⇒ 旧提示立刻作废** ⇒ ⇒ 提示不会一直挂着吓人。
+ *
+ * @param {HTMLElement} el — 视图的挂载容器
+ */
+function mountAddrInputListeners(el) {
+    el.addEventListener("input", (ev) => {
+        const target = ev.target;
+        if (target?.closest?.("[data-bp-addr-input]")) {
+            setDebuggerDraft({ bpAddr: target.value ?? "" });
+            setAddrError(target.closest("[data-addr-input]"), "[data-bp-addr-error]", "");
+            return;
+        }
+        if (target?.closest?.("[data-mem-addr-input]")) {
+            setDebuggerDraft({ memAddr: target.value ?? "" });
+            setAddrError(target.closest("[data-addr-input]"), "[data-mem-addr-error]", "");
+        }
+    });
+    el.addEventListener("change", (ev) => {
+        const target = ev.target?.closest?.("[data-mem-size]");
+        if (!target) return;
+        setDebuggerDraft({ memSize: target.value ?? WRITE_SIZE.Word });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// debugView — 反汇编面板 (M-11) + 寄存器/内存 (FR-05/08/09)
+// ---------------------------------------------------------------------------
 const debugView = register({
     id: "debug",
     channels: ["sim"],
@@ -757,6 +983,9 @@ const debugView = register({
         // ⇒ ⇒ 寄存器 / PC / 虚拟时间一律显示**固定符号 `-`** ⇒ ⇒ 界面
         // **不闪**（那些数字每秒要跳 5 次 · F6）⇒ ⇒ 停止后**自动**恢复。
         const running = kernelIsRunning();
+        // ⚠️ **草稿住共享命名空间**（STAGE-39 · v0.54 批 · 裁决 G）⇒ ⇒
+        // 输入框里的内容**重渲染不丢** ⇒ ⇒ 焦点也不丢（不重建 ⇒ 不丢）。
+        const draft = debuggerDraft();
         // The disassembly entries come from the kernel's `Disasm` event.
         const entries = Array.isArray(sim.disasm) ? sim.disasm : [];
         // The PC comes from the **existing** state source (M-10 pushes
@@ -784,7 +1013,6 @@ const debugView = register({
                 <button type="button" data-action="pause">暂停</button>
                 <button type="button" data-action="reset">复位</button>
                 <button type="button" data-action="read-regs">读寄存器</button>
-                <button type="button" data-action="read-mem">读内存 @0x100</button>
                 <button type="button" data-action="disasm" data-addr="${pc}" data-count="16">反汇编</button>
                 <button type="button" data-action="export-trace" data-source="Execution" data-format="Csv" data-offset="0" data-limit="0">导出执行轨迹 (CSV)</button>
                 <button type="button" data-action="export-trace" data-source="Waveform" data-format="Vcd" data-offset="0" data-limit="0">导出波形 (VCD)</button>
@@ -818,8 +1046,9 @@ const debugView = register({
                 </section>
                 <section class="card breakpoint-card">
                     <div class="row"><h3>断点</h3><span class="tag">${breakpoints.length} 个</span></div>
+                    ${renderBreakpointAddrRow({ draft: draft.bpAddr })}
                     ${breakpoints.length === 0
-                        ? `<p class="muted">尚无断点 — 在左边反汇编表的「断点」列点「加断点」。</p>`
+                        ? `<p class="muted">尚无断点 — 在左边反汇编表的「断点」列点「加断点」，或在上面直接填地址。</p>`
                         : `<div class="bp-list" data-bp-list>${breakpoints.map((raw) => {
                             const addr = Number(raw ?? 0) >>> 0;
                             const addrText = `0x${addr.toString(16).padStart(8, "0")}`;
@@ -850,6 +1079,7 @@ const debugView = register({
                 </section>
                 <section class="card regmem">
                     <div class="row"><h3>寄存器 / 内存</h3></div>
+                    ${renderMemoryReadRow({ draft: draft.memAddr, size: draft.memSize })}
                     <div class="grid-2">
                         <div>
                             <h4>寄存器</h4>
@@ -877,10 +1107,18 @@ const debugView = register({
             const result = downloadExportChunk(exportState);
             return result ? `cmd-download-trace-${result.filename}` : undefined;
         }
+        // ⚠️ **任意地址**（STAGE-39 · v0.54 批 · 裁决 B）⇒ ⇒ 地址有两个
+        // 来源：按钮**自带** `data-addr`（反汇编行的旧按钮 ⇒ ⇒ **一字不变**）
+        // 或**同屏**的地址输入框 ⇒ ⇒ 用户给什么地址就下在什么地址。
+        const addrParams = resolveAddrParams(action, el);
+        // ⚠️ **解析不出来 ⇒ ⇒ 不发命令**（裁决 F）⇒ ⇒ 「点了没反应」是最差
+        // 的 UX ⇒ ⇒ 输入框旁边**就地**有提示 ⇒ ⇒ 这里**直接返回**。
+        if (addrParams?.invalid === true) return undefined;
         // The command's parameters travel **with the signal** — the
         // bootstrap's listener runs on `window` and cannot see the button.
         return emitCommand(action, "debug", {
-            addr: el.dataset.addr,
+            ...(addrParams ?? {}),
+            addr: addrParams?.addr ?? el.dataset.addr,
             count: el.dataset.count,
             source: el.dataset.source,
             format: el.dataset.format,
@@ -891,6 +1129,7 @@ const debugView = register({
     onDelta(_delta) {},
     mountFor(el) {
         el.addEventListener("click", (ev) => debugView.onCommand(ev));
+        mountAddrInputListeners(el);
     },
 });
 
@@ -1079,13 +1318,16 @@ const regmemView = register({
         // ⇒ ⇒ 与**调试视图那份**是**同一个口径**（同一个函数）⇒ ⇒ 不会
         // 一个藏了一个没藏。
         const running = kernelIsRunning();
+        // ⚠️ **草稿住共享命名空间**（STAGE-39 · v0.54 批 · 裁决 G）⇒ ⇒ 与
+        // 调试视图**同一份** ⇒ ⇒ 两个入口**一个真相**。
+        const draft = debuggerDraft();
         return `
             <section class="regmem-view">
                 <div class="card">
                     <div class="row"><h3>寄存器 / 内存 (M-10)</h3><span class="tag">变化高亮 = 与上一次读回相比</span></div>
+                    ${renderMemoryReadRow({ draft: draft.memAddr, size: draft.memSize })}
                     <div class="debug-toolbar">
                         <button type="button" data-action="read-regs">读寄存器</button>
-                        <button type="button" data-action="read-mem">读内存 @0x100</button>
                     </div>
                     <div class="grid-2">
                         <div>
@@ -1098,7 +1340,7 @@ const regmemView = register({
                             <code class="timeVirt">${liveValue(running, `${state?.timeVirt ?? 0} ps`)}</code>
                             <h4>内存单元</h4>
                             ${cells.length === 0
-                                ? `<p class="muted">尚无读回的内存单元 — 点击「读内存 @0x100」。</p>`
+                                ? `<p class="muted">尚无读回的内存单元 — 在上面填一个地址，点「读内存」。</p>`
                                 : `<table class="map-table">
                                     <thead><tr><th>地址</th><th>值</th></tr></thead>
                                     <tbody>${cells.map(([addr, value]) => `
@@ -1113,13 +1355,19 @@ const regmemView = register({
         `;
     },
     onCommand(ev) {
-        const action = ev.target?.closest?.("[data-action]")?.dataset?.action;
+        const el = ev.target?.closest?.("[data-action]");
+        const action = el?.dataset?.action;
         if (!action) return undefined;
-        return emitCommand(action, "regmem");
+        // ⚠️ **任意地址**（STAGE-39 · v0.54 批 · 裁决 B）⇒ ⇒ 地址与宽度都
+        // 从**同屏**的输入框来 ⇒ ⇒ 参数**随信号走**（视图层不碰服务层）。
+        const addrParams = resolveAddrParams(action, el);
+        if (addrParams?.invalid === true) return undefined;
+        return emitCommand(action, "regmem", { ...(addrParams ?? {}) });
     },
     onDelta(_delta) {},
     mountFor(el) {
         el.addEventListener("click", (ev) => regmemView.onCommand(ev));
+        mountAddrInputListeners(el);
     },
 });
 

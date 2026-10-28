@@ -956,3 +956,55 @@ a { color: inherit; text-decoration: none; }
 .alert-dismiss {
     margin-left: auto;
 }
+
+/* ---------------------------------------------------------------------------
+ * §18 任意地址输入行（STAGE-39 · v0.54 批 · 裁决 D / F / K）
+ *
+ * ⚠️ **本段追加在 §17 告警弹窗之后** ⇒ ⇒ 既有内容**一个字都没动**。
+ *
+ * ⚠️ **两个入口共用同一组类名**（`.addr-input` / `.addr-field` /
+ *   `.addr-error`）⇒ ⇒ 断点与读内存**长得一样** ⇒ ⇒ 用户不用学两套。
+ *
+ * ⚠️ **错误位用属性表达**（`data-bp-addr-error` / `data-mem-addr-error`）
+ *   ⇒ ⇒ 空的时候**不占位** ⇒ ⇒ 没出错时那一行是干净的。
+ * ------------------------------------------------------------------------- */
+
+.addr-input {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0 12px;
+}
+
+.addr-field {
+    min-width: 160px;
+    padding: 6px 10px;
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    background: var(--panel2);
+    color: var(--tx);
+    font-family: var(--mono);
+    font-size: 13px;
+}
+
+.addr-field:focus {
+    outline: 2px solid var(--accent-edge);
+    outline-offset: 1px;
+}
+
+select.addr-field {
+    min-width: 96px;
+    font-family: var(--sans);
+}
+
+/* ⚠️ **错误位默认为空**（`display: none`）⇒ ⇒ 没有错误时那一行不占地方。 */
+.addr-error {
+    display: none;
+    color: var(--red-soft);
+    font-size: 12px;
+}
+
+.addr-error:not(:empty) {
+    display: inline;
+}
