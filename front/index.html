@@ -76,6 +76,28 @@
     <button id="seed-demo" class="seed-btn" type="button" title="MVP dev-only">seed demo 映射</button>
   </header>
 
+  <!--
+    ⚠️ **告警弹窗**（STAGE-38 · v0.53 批 · 裁决 J）。
+
+    ⚠️ **骨架住在顶层**（不在 `<main id="app">` 里面）⇒ ⇒ 视图每次重渲染
+    都是 `body.innerHTML = html`（整块重建）⇒ ⇒ 弹窗放在视图正文里会被
+    **销毁** ⇒ ⇒ 放在这里就**活下来**（F12）。
+
+    ⚠️ **状态用属性表达**（`data-alert-state`：`open` / `fading` / 空）⇒ ⇒
+    不依赖 `style` / `hidden` ⇒ ⇒ `front/tests/dom-stub.mjs` 测得到 ⇒ ⇒
+    Node 侧零浏览器就能验「5 秒后渐隐」「知道了立即关闭」。
+
+    ⚠️ **文案只有一处**：`front/lib/alert.js` 填它 ⇒ ⇒ 界面上显示的与
+    判据说看到的是**同一个词**。
+  -->
+  <div class="alert-overlay" data-alert-overlay data-alert-state="">
+    <div class="alert-box" role="alertdialog" aria-modal="true" aria-labelledby="alert-title">
+      <h3 class="alert-title" id="alert-title" data-alert-title>提示</h3>
+      <p class="alert-text" data-alert-text></p>
+      <button type="button" class="btn alert-dismiss" data-alert-dismiss>知道了</button>
+    </div>
+  </div>
+
   <div class="shell">
     <!--
       ⚠️ **左侧分组导航**（STAGE-34 · v0.49 批）。

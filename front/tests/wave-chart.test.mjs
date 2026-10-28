@@ -51,6 +51,31 @@ const frontDir = resolve(here, "..");
 const dom = installDom(readFileSync(resolve(frontDir, "index.html"), "utf8"));
 
 // ---------------------------------------------------------------------------
+// 「有没有真的去 import」的**可观测探针**（A-13 用 · v0.53 批）
+// ---------------------------------------------------------------------------
+
+/**
+ * 全局计数器的名字。
+ *
+ * ⚠️ **为什么需要它**：加载器的「关掉」这条路上**不发请求**这件事，
+ *   在外面**看不到** ⇒ ⇒ 以前只能靠「再要一次还是同一个 promise」间接推断
+ *   ⇒ ⇒ 那是**实现细节** ⇒ ⇒ 判据会随实现重构而误红 ⇒ ⇒ 换个**直接**的量：
+ *   被 import 的模块**自己**把计数器加一 ⇒ ⇒ 计数器不动就是「没 import 过」。
+ */
+const IMPORT_COUNTER = "__v053ChartImportCount";
+
+/**
+ * 一个**能加载成功**、且在被 import 的那一刻**自增计数器**的来源。
+ *
+ * ⚠️ 用 `data:` URL ⇒ ⇒ 零网络、零夹具文件、零第三方依赖。
+ * ⚠️ Node 的 ESM 加载器支持 `data:` URL ⇒ ⇒ 动态 `import()` 能真的加载它。
+ */
+const COUNTING_SOURCE =
+    `data:text/javascript,globalThis.${IMPORT_COUNTER}`
+    + "=(globalThis." + IMPORT_COUNTER + "||0)+1;"
+    + "export default { init: () => {} };";
+
+// ---------------------------------------------------------------------------
 // 小工具
 // ---------------------------------------------------------------------------
 
@@ -387,21 +412,40 @@ describe("波形库加载器 · 加载失败与来源切换（A-11 ~ A-13）", (
     });
 
     test("A-13 · setChartSource(\"off\") ⇒ 不发请求（返回 null）、来源回读是 off、且能改回默认", async () => {
+        // ⚠️ **「不发网络请求」怎么才能被观测到**（STAGE-38 · v0.53 批 · 施工期订正 7）：
+        //   以前这条判据写的是「再要一次还是**同一个** promise」⇒ ⇒ 那钉的是
+        //   **实现细节**（旧实现在「关掉」这条路上把 `pending` 留住 ⇒ ⇒ 复用它）
+        //   ⇒ ⇒ 而 v0.53 批把「关掉」**提到最前**（修真缺陷：在途的旧加载会复活
+        //   已关掉的库）⇒ ⇒ 那个实现细节**必然**被打破 ⇒ ⇒ 判据会红。
+        //   ⇒ ⇒ **换成直接可观测的量**：一个 `data:` 模块在被 import 的那一刻
+        //   把全局计数器加一 ⇒ ⇒ 计数器不动 ⇒ ⇒ 就是「一次都没 import 过」。
+        //   ⇒ ⇒ **这条判据比原来那条强**：原来那条钉的是「槽位被留住」，
+        //   现在这条钉的是「**真的没发请求**」—— 正是用例名里承诺的那件事。
+        globalThis[IMPORT_COUNTER] = 0;
+
+        // ⚠️ **先让一个「真能加载」的源加载成功** ⇒ ⇒ 计数 = 1 ⇒ ⇒
+        //   「没有 import」这条判据才有**基线**（否则 0 也可能是「压根没触发」）。
+        setChartSource(COUNTING_SOURCE);
+        assert.ok(
+            await loadECharts(),
+            "对照：一个可加载的来源必须真的加载到东西",
+        );
+        assert.equal(
+            globalThis[IMPORT_COUNTER],
+            1,
+            "对照：这一次加载确实 import 了一次（计数 = 1）",
+        );
+
+        // ⚠️ **关掉**
         setChartSource(ECHARTS_SOURCE_OFF);
         assert.equal(getChartSource(), "off", "来源回读必须是 off");
 
         const first = loadECharts();
         assert.equal(await first, null, "关掉 ⇒ 不加载（返回 null）");
         assert.equal(getECharts(), null, "关掉 ⇒ 什么都没加载");
-
-        // ⚠️ **「不发网络请求」的可观测形式**：加载器在「关掉」这条路上**没有**
-        //   去 import ⇒ ⇒ 那次加载的 promise 还挂在「正在进行」那个槽位上 ⇒ ⇒
-        //   再要一次还是**同一个** promise。
-        //   （若「off」分支被删掉而照常去 import ⇒ ⇒ 那次 import 会失败 ⇒ ⇒
-        //   槽位被清掉 ⇒ ⇒ 再要一次是**新的** promise ⇒ ⇒ 这里会红。）
         assert.equal(
-            loadECharts(),
-            first,
+            globalThis[IMPORT_COUNTER],
+            1,
             "关掉之后不许再去 import（否则就是「关了没关」）",
         );
 

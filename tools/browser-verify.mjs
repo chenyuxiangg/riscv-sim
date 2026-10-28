@@ -158,6 +158,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "boardOrdering",
     "uiLayout",
     "breakpointUi",
+    "liveReadout",
     "runLoop",
 ]);
 
@@ -4162,6 +4163,25 @@ async function runBreakpointUiSection(cdp, opts) {
  * @param {{timeoutMs: number}} opts
  * @returns {Promise<{checks: object[]}>}
  */
+/**
+ * 点顶栏运行条上的某个按钮（`run` / `step` / `pause` / `reset`）。
+ *
+ * ⚠️ **模块级**（STAGE-38 · v0.53 批）⇒ ⇒ `runLoop` 段与 `liveReadout` 段
+ * **共用**这一条 ⇒ ⇒ 不写第二份。
+ *
+ * @param {object} cdp
+ * @param {string} action
+ * @returns {Promise<void>}
+ */
+async function clickTopbarAction(cdp, action) {
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-topbar-action="${action}"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+}
+
 async function runRunLoopSection(cdp, opts) {
     const checks = [];
     const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
@@ -4176,13 +4196,8 @@ async function runRunLoopSection(cdp, opts) {
         return Number.isFinite(n) ? n : null;
     };
 
-    /** 点顶栏运行条上的某个按钮（`run` / `step` / `pause` / `reset`）。 */
-    const clickTopbar = async (action) => await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-topbar-action="${action}"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
+    /** 点顶栏运行条上的某个按钮。 */
+    const clickTopbar = async (action) => await clickTopbarAction(cdp, action);
 
     // -- 前置：**复位** ⇒ ⇒ 把状态清干净 -------------------------------
     // ⚠️ **为什么用「复位」而不是「暂停」做前置清理**（本批实测踩到）：
@@ -4374,6 +4389,301 @@ async function runRunLoopSection(cdp, opts) {
         t8 !== null && t9 !== null && t8 === t9 && maxTime > 0,
         `停下时=${JSON.stringify(t8)} ps  再等一会儿=${JSON.stringify(t9)} ps`
         + `  跑过的最大虚拟时间=${JSON.stringify(maxTime)} ps`,
+    );
+
+    return { checks };
+}
+
+// ---------------------------------------------------------------------------
+// STAGE-38 · v0.53 批 · 运行中隐藏活值 + 内存查看告警（B-42 ~ B-53）
+// ---------------------------------------------------------------------------
+
+/**
+ * 读「运行中」那一组探针（顶栏 + 调试视图 + 寄存器视图 + 告警弹窗）。
+ *
+ * ⚠️ **一次读完** ⇒ ⇒ 采样是**同一个瞬间**的 ⇒ ⇒ 「顶栏是 `-` 而视图不是」
+ *    这种**采样错位**不会发生 ⇒ ⇒ 判据可信。
+ *
+ * ⚠️ **读原始属性而不是解析中文** ⇒ ⇒ 与 `data-topbar-time-ps` 同一手法。
+ */
+const BV_LIVE_READOUT_PROBE = `(() => {
+  const topPc = document.querySelector("[data-topbar-pc-value]");
+  const topTime = document.querySelector("[data-topbar-time-value]");
+  const dbgPc = document.querySelector('[data-view-body="debug"] .pc');
+  const dbgTime = document.querySelector('[data-view-body="debug"] .timeVirt');
+  const rmPc = document.querySelector('[data-view-body="regmem"] .pc');
+  const rmTime = document.querySelector('[data-view-body="regmem"] .timeVirt');
+  const regCells = (scope) => [...document.querySelectorAll(scope + " .reg-grid > div > code")]
+      .map((el) => String(el.textContent || "").trim());
+  const overlay = document.querySelector("[data-alert-overlay]");
+  const alertText = document.querySelector("[data-alert-text]");
+  return {
+    topPc: topPc ? String(topPc.textContent || "").trim() : null,
+    topTime: topTime ? String(topTime.textContent || "").trim() : null,
+    topTimePs: topTime ? String(topTime.getAttribute("data-topbar-time-ps") ?? "") : null,
+    dbgPc: dbgPc ? String(dbgPc.textContent || "").trim() : null,
+    dbgTime: dbgTime ? String(dbgTime.textContent || "").trim() : null,
+    dbgRegs: regCells('[data-view-body="debug"]'),
+    rmPc: rmPc ? String(rmPc.textContent || "").trim() : null,
+    rmTime: rmTime ? String(rmTime.textContent || "").trim() : null,
+    rmRegs: regCells('[data-view-body="regmem"]'),
+    memRows: [...document.querySelectorAll('[data-view-body="regmem"] .map-table tbody tr')]
+      .map((tr) => {
+        const cells = [...tr.querySelectorAll("td code")].map((c) => String(c.textContent || "").trim());
+        return { addr: cells[0] ?? "", value: cells[1] ?? "" };
+      }),
+    alertState: overlay ? String(overlay.getAttribute("data-alert-state") ?? "") : null,
+    alertText: alertText ? String(alertText.textContent || "").trim() : null,
+  };
+})()`;
+
+/**
+ * 点某个视图里的「读内存 @0x100」按钮。
+ *
+ * ⚠️ **按位置限定**（`[data-view-body="..."]`）⇒ ⇒ 调试视图与寄存器视图
+ * **各有一个**同名按钮（事实 F13）⇒ ⇒ 不限定的话 `querySelector` 会命中
+ * **前一个** ⇒ ⇒ 断言还在跑、断的却不是它以为的那个东西。
+ *
+ * @param {object} cdp
+ * @param {string} viewId — `"debug"` 或 `"regmem"`
+ * @returns {Promise<void>}
+ */
+async function clickReadMemoryButton(cdp, viewId) {
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-view-body="${viewId}"] [data-action="read-mem"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+}
+
+/**
+ * STAGE-38 · v0.53 批的真机段：运行中隐藏活值 + 内存查看告警。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{checks: {name: string, ok: boolean, detail: string}[]}>}
+ */
+async function runLiveReadoutSection(cdp, opts) {
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
+
+    const readProbe = async () => await awaitEval(cdp, BV_LIVE_READOUT_PROBE);
+
+    // -- 前置：**复位** ⇒ ⇒ 把状态清干净 -------------------------------
+    // ⚠️ **为什么用「复位」而不是「暂停」做前置清理**（同 `runLoop` 段）：
+    //   若前置清理依赖**被测的那个按钮** ⇒ ⇒ 一旦那条按钮坏了（变异）
+    //   ⇒ ⇒ 连续运行**停不下来**⇒ ⇒ demo 自环把主线程**灌满**
+    //   ⇒ ⇒ 整趟门禁**跑不完**⇒ ⇒ **卡死**而不是**变红**⇒ ⇒ 零判别力。
+    await clickTopbarAction(cdp, "reset");
+    await sleep(800);
+
+    // -- 记录**内存表在本段之前**的样子 --------------------------------
+    // ⚠️ **前置采样**⇒ ⇒ 「读完内存之后表里多了一行」这件事**才有对比**。
+    const before = await readProbe();
+    add(
+        "前置：内存单元表在本段开始时**没有** `0x00000100` 那一行"
+        + "（⇒ ⇒ 后面「读内存被拒绝」才有对比 ⇒ ⇒ 不空转）",
+        !(before?.memRows ?? []).some((r) => r.addr === "0x00000100"),
+        `memRows=${JSON.stringify(before?.memRows ?? [])}`,
+    );
+
+    // -- 点「运行」⇒ ⇒ 进入连续模式 --------------------------------------
+    await clickTopbarAction(cdp, "run");
+
+    // ⚠️ **等它真的跑起来** ⇒ ⇒ 不等的话可能在「连续模式」写进去之前就采样
+    // ⇒ ⇒ 看到的是**停止态**⇒ ⇒ 整段**空转**⇒ ⇒ 零判别力。
+    let running = null;
+    const runDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < runDeadline) {
+        running = await readProbe();
+        if (running?.topPc === "-") break;
+        await sleep(150);
+    }
+
+    // -- B-54 · **实测续跑速率** + 主线程**没**被占满 ---------------------
+    // ⚠️ **为什么要有这一条**：v0.52 批在台账里登记的「连续模式全速跑会占满
+    //   浏览器主线程（demo 自环实测约 **1 170 轮/秒**）」**那个数是错的**
+    //   ⇒ ⇒ 本批在 **v0.52 的基线树**上建临时 worktree **实测**过
+    //   ⇒ ⇒ 两棵树都是**每秒十几轮**（基线 **15.0** / 本批 **15.5 ~ 18.0**）
+    //   ⇒ ⇒ 「1 170」差了**近两个数量级** ⇒ ⇒ 必须**订正**。
+    //
+    // ⚠️ **判据有两个**：① 速率**不**塌到数量级之外（**下限**取实测值的
+    //   **五分之一**，留够余量 ⇒ ⇒ 不许因机器忙而**假红**）；
+    //   ② 运行中一次 CDP 求值的**延迟** ⇒ ⇒ 直接量「主线程**还**能不能被
+    //   立刻唤醒」⇒ ⇒ 这才是「占满主线程」那条边界的**可测**版本。
+    {
+        const readWindows = async () => {
+            const p = await awaitEval(cdp, `(() => {
+                const el = document.querySelector("[data-topbar-run-status]");
+                return el ? String(el.getAttribute("data-topbar-run-windows") ?? "") : "";
+            })()`);
+            const n = Number(String(p ?? ""));
+            return Number.isFinite(n) ? n : null;
+        };
+        const lat0 = Date.now();
+        await awaitEval(cdp, "1+1");
+        const lat = Date.now() - lat0;
+        const w1 = await readWindows();
+        const t1 = Date.now();
+        await sleep(2000);
+        const w2 = await readWindows();
+        const dt = (Date.now() - t1) / 1000;
+        const rate = w1 !== null && w2 !== null && dt > 0 ? (w2 - w1) / dt : null;
+        add(
+            "B-54 · **实测续跑速率**不低于数量级之外，**且**运行中一次 CDP 求值"
+            + "**没有被拖到秒级**（⇒ ⇒ 主线程**没有**被占满）",
+            rate !== null && rate >= 3 && lat <= 1000,
+            `续跑速率=${rate === null ? "?" : rate.toFixed(1)} 轮/秒`
+            + `（实测基线 v0.52 树 **15.0** · 本批 **15.5 ~ 18.0**）`
+            + `；运行中一次 CDP 求值延迟 ${lat} ms`,
+        );
+    }
+
+    // -- 正向对照：原始 ps **在增长** ⇒ ⇒ 内核**真的**在跑 --------------
+    // ⚠️ **这一条是 B-42 ~ B-45 的对照** ⇒ ⇒ 没有它，「显示 `-`」可能只是
+    // 界面**瞎显示**（程序根本没跑）⇒ ⇒ 零判别力。
+    const ps1 = Number(String(running?.topTimePs ?? ""));
+    await sleep(800);
+    const running2 = await readProbe();
+    const ps2 = Number(String(running2?.topTimePs ?? ""));
+    const growing = Number.isFinite(ps1) && Number.isFinite(ps2) && ps2 > ps1;
+
+    add(
+        "B-42 · 运行中 ⇒ ⇒ 顶栏 PC 显示**固定符号 `-`**"
+        + "（⇒ ⇒ 前置正向对照：原始 ps **在增长** ⇒ ⇒ 内核**真的**在跑 ⇒ ⇒ 不是界面瞎显示）",
+        running?.topPc === "-" && growing,
+        `topPc=${JSON.stringify(running?.topPc ?? "")} ps ${JSON.stringify(ps1)} → ${JSON.stringify(ps2)}（在涨=${growing}）`,
+    );
+
+    add(
+        "B-43 · 运行中 ⇒ ⇒ 顶栏虚拟时间显示**固定符号 `-`**"
+        + "（⇒ ⇒ **但**原始 ps 属性**仍在增长** ⇒ ⇒ 隐藏的是**显示**、不是**测量通道**）",
+        running2?.topTime === "-" && growing,
+        `topTime=${JSON.stringify(running2?.topTime ?? "")} ps ${JSON.stringify(ps1)} → ${JSON.stringify(ps2)}（在涨=${growing}）`,
+    );
+
+    const dbgRegs = running2?.dbgRegs ?? [];
+    add(
+        "B-44 · 运行中 ⇒ ⇒ 调试视图「寄存器 / 内存」那张卡：寄存器格 / PC / 虚拟时间**全是 `-`**"
+        + "（⇒ ⇒ 界面**不闪** ⇒ ⇒ 那些数字不再每秒跳 5 次）",
+        dbgRegs.length === 32
+            && dbgRegs.every((c) => c === "-")
+            && running2?.dbgPc === "-"
+            && running2?.dbgTime === "-",
+        `寄存器格 ${dbgRegs.length} 个，其中非「-」的 ${dbgRegs.filter((c) => c !== "-").length} 个`
+        + ` PC=${JSON.stringify(running2?.dbgPc ?? "")} 时间=${JSON.stringify(running2?.dbgTime ?? "")}`,
+    );
+
+    const rmRegs = running2?.rmRegs ?? [];
+    add(
+        "B-45 · 运行中 ⇒ ⇒ 寄存器视图：寄存器格 / PC / 虚拟时间**全是 `-`**"
+        + "（⇒ ⇒ 与调试视图**同一个口径** ⇒ ⇒ 不会一个藏了一个没藏）",
+        rmRegs.length === 32
+            && rmRegs.every((c) => c === "-")
+            && running2?.rmPc === "-"
+            && running2?.rmTime === "-",
+        `寄存器格 ${rmRegs.length} 个，其中非「-」的 ${rmRegs.filter((c) => c !== "-").length} 个`
+        + ` PC=${JSON.stringify(running2?.rmPc ?? "")} 时间=${JSON.stringify(running2?.rmTime ?? "")}`,
+    );
+
+    // -- B-46 · 调试视图那个「读内存 @0x100」⇒ ⇒ 弹窗 ------------------
+    await clickReadMemoryButton(cdp, "debug");
+    await sleep(400);
+    const afterDebugClick = await readProbe();
+    add(
+        "B-46 · 运行中点**调试视图**那个「读内存 @0x100」⇒ ⇒ 弹窗出现"
+        + "，且文案里**有**「请先暂停再读」",
+        afterDebugClick?.alertState === "open"
+            && String(afterDebugClick?.alertText ?? "").includes("请先暂停再读"),
+        `alertState=${JSON.stringify(afterDebugClick?.alertState ?? "")}`
+        + ` 文案=${JSON.stringify(afterDebugClick?.alertText ?? "")}`,
+    );
+
+    // -- B-47 · 寄存器视图那个「读内存 @0x100」⇒ ⇒ **也**弹窗 -----------
+    await clickReadMemoryButton(cdp, "regmem");
+    await sleep(400);
+    const afterRegmemClick = await readProbe();
+    add(
+        "B-47 · 运行中点**寄存器视图**那个「读内存 @0x100」⇒ ⇒ **也**弹窗"
+        + "（⇒ ⇒ 两个按钮**共用**一条拒绝路径 ⇒ ⇒ 不会只挡住一个）",
+        afterRegmemClick?.alertState === "open",
+        `alertState=${JSON.stringify(afterRegmemClick?.alertState ?? "")}`,
+    );
+
+    // -- B-48 · **没有**新的内存单元被读回来（拒绝的是**执行**）----------
+    await sleep(600);
+    const afterReads = await readProbe();
+    const rows = afterReads?.memRows ?? [];
+    add(
+        "B-48 · 运行中点过「读内存」⇒ ⇒ 内存单元表里**仍然没有** `0x00000100` 那一行"
+        + "（⇒ ⇒ 那条命令**根本没发出去** ⇒ ⇒ 拒绝的是**执行**、不是「读了但不给看」）",
+        !rows.some((r) => r.addr === "0x00000100"),
+        `memRows=${JSON.stringify(rows)}`,
+    );
+
+    // -- B-51 · 点「知道了」⇒ ⇒ **立即**关闭 -----------------------------
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector("[data-alert-dismiss]");
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(250);
+    const afterDismiss = await readProbe();
+    add(
+        "B-51 · 点「知道了」⇒ ⇒ 弹窗**立即**关闭（不用再等渐隐）",
+        afterDismiss?.alertState === "",
+        `alertState=${JSON.stringify(afterDismiss?.alertState ?? "")}`,
+    );
+
+    // -- B-52 · **不点**任何按钮 ⇒ ⇒ 5 秒之后**自己**消失 -----------------
+    await clickReadMemoryButton(cdp, "debug");
+    await sleep(300);
+    const reopened = await readProbe();
+    const stateBefore = String(reopened?.alertState ?? "");
+    await sleep(5600);
+    const afterAuto = await readProbe();
+    add(
+        "B-52 · 弹窗**不点**任何按钮 ⇒ ⇒ 5 秒之后**自己**消失"
+        + "（⇒ ⇒ 「5 秒后渐隐」这条**在真机上**成立）",
+        stateBefore === "open" && String(afterAuto?.alertState ?? "") === "",
+        `刚打开时=${JSON.stringify(stateBefore)} 5.6 秒后=${JSON.stringify(afterAuto?.alertState ?? "")}`,
+    );
+
+    // -- B-53 · 脚本口 `readMemory` 在运行中 ⇒ ⇒ **不**弹窗 ---------------
+    await awaitEval(cdp, `window.riscv_kernel.readMemory(0x200, "Word")`);
+    await sleep(400);
+    const afterScript = await readProbe();
+    add(
+        "B-53 · 脚本口 `readMemory` 在运行中 ⇒ ⇒ **不**弹窗"
+        + "（⇒ ⇒ 脚本口是**脚本**的路 ⇒ ⇒ 用户拍定：只挡界面那两个按钮）",
+        String(afterScript?.alertState ?? "") === "",
+        `alertState=${JSON.stringify(afterScript?.alertState ?? "")}`,
+    );
+
+    // -- 收尾：**暂停** ⇒ ⇒ 让程序停下来 ----------------------------------
+    // ⚠️ **必须停** ⇒ ⇒ 否则连续模式会一直跑 ⇒ ⇒ 后面那一段（`runLoop`）
+    //   会被**主线程被占满**拖慢 ⇒ ⇒ 甚至**卡死**。
+    await clickTopbarAction(cdp, "pause");
+    await sleep(1200);
+
+    // -- B-49 · 停止后 ⇒ ⇒ 顶栏 PC **自动恢复** ---------------------------
+    const stopped = await readProbe();
+    add(
+        "B-49 · 停止后 ⇒ ⇒ 顶栏 PC **自动恢复**成合法十六进制（**不是** `-`）"
+        + "（⇒ ⇒ 不需要用户手动刷新 ⇒ ⇒ 「停止后自动显示最新值」）",
+        /^(0x)?[0-9a-f]{8}$/i.test(String(stopped?.topPc ?? "")),
+        `topPc=${JSON.stringify(stopped?.topPc ?? "")}`,
+    );
+
+    // -- B-50 · 停止后 ⇒ ⇒ 调试视图的寄存器格 **自动恢复** ------------------
+    const stoppedRegs = stopped?.dbgRegs ?? [];
+    add(
+        "B-50 · 停止后 ⇒ ⇒ 调试视图的寄存器格**自动恢复**成真实值（**不是** `-`）"
+        + "（⇒ ⇒ 「停止后自动显示最新值」）",
+        stoppedRegs.length === 32 && stoppedRegs.every((c) => c !== "-"),
+        `寄存器格 ${stoppedRegs.length} 个，其中还是「-」的 ${stoppedRegs.filter((c) => c === "-").length} 个`,
     );
 
     return { checks };
@@ -5060,6 +5370,23 @@ async function main() {
         const breakpointUi = await runSection("breakpointUi", () => runBreakpointUiSection(cdp, opts));
         registerSection("breakpointUi", breakpointUi.checks, {
             title: "断点 UI 检查（界面上加断点 → 内核真停 → 撤掉 → 不再停）",
+        });
+
+        // -- the LIVE READOUT (STAGE-38 · v0.53 批 · B-42 ~ B-53) ---------
+        // ⚠️ **必须排在 breakpointUi 之后**：那一段把镜像**复位**成 demo 固件
+        // ⇒ ⇒ 放在它前面，本段看到的可能是 loadImage 段的夹具。
+        //
+        // ⚠️ **必须排在 runLoop 之前**：① 本段要**连续跑**起来 ⇒ ⇒ 放在
+        // runLoop 之后，那一段留下的断点会让本段**立刻**撞上断点停下
+        // ⇒ ⇒ 活值**马上**恢复 ⇒ ⇒ 观察不到「运行中」；② 本段**读完内存**
+        // ⇒ ⇒ 「读内存被拒绝」要有「之前表里没有那一行」这个对比 ⇒ ⇒
+        // 越早跑 ⇒ ⇒ 之前读过的内存越少 ⇒ ⇒ 对比越干净。
+        //
+        // ⚠️ **必须排在 osz 之前**：osz 段把镜像换成仓外的真 RTOS ⇒ ⇒ 放在
+        // 它后面，本段就看不到 demo 固件那个自环了。
+        const liveReadout = await runSection("liveReadout", () => runLiveReadoutSection(cdp, opts));
+        registerSection("liveReadout", liveReadout.checks, {
+            title: "运行中隐藏活值检查（跑起来 ⇒ 寄存器/PC/时间都是 `-` ⇒ 读内存被拒绝并弹窗）",
         });
 
         // -- the CONTINUOUS RUN (STAGE-37 · v0.52 批 · B-34 ~ B-41) ----------

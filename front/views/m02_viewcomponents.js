@@ -23,6 +23,10 @@ import * as viewStore from "./m03_viewstore.js";
 // ⚠️ 这里**没有**循环依赖：M-01 只依赖 M-03（视图状态），不依赖 M-02。
 import { route } from "./m01_workbench.js";
 import { escapeHtml } from "../lib/escape.js";
+// ⚠️ **「运行中」的判据与活值的隐藏口径**（STAGE-38 · v0.53 批）⇒ ⇒
+// 「内核真的在执行吗」与「运行中显示什么」**各只有一处** ⇒ ⇒ 顶栏 /
+// 调试视图 / 寄存器视图**共用**同一套口径 ⇒ ⇒ 不会一个藏了一个没藏。
+import { isKernelRunning, liveValue } from "../lib/run-loop.js";
 // ⚠️ **波形图的纯函数 + 片段**（STAGE-36 · v0.51 批）⇒ ⇒ option 的构造
 // **不碰 DOM** ⇒ ⇒ Node 侧零 DOM 就能测「画的是不是真数据」。
 import { buildWaveOption, canDrawChart, resolveWaveTheme, waveChartHtml } from "./components/wave-chart.js";
@@ -749,6 +753,10 @@ const debugView = register({
     render(state) {
         const sim = state?.sim ?? {};
         const debug = state?.debug ?? {};
+        // ⚠️ **运行中 ⇒ ⇒ 活值隐藏**（STAGE-38 · v0.53 批 · 裁决 D）
+        // ⇒ ⇒ 寄存器 / PC / 虚拟时间一律显示**固定符号 `-`** ⇒ ⇒ 界面
+        // **不闪**（那些数字每秒要跳 5 次 · F6）⇒ ⇒ 停止后**自动**恢复。
+        const running = kernelIsRunning();
         // The disassembly entries come from the kernel's `Disasm` event.
         const entries = Array.isArray(sim.disasm) ? sim.disasm : [];
         // The PC comes from the **existing** state source (M-10 pushes
@@ -845,13 +853,13 @@ const debugView = register({
                     <div class="grid-2">
                         <div>
                             <h4>寄存器</h4>
-                            <div class="reg-grid">${renderRegGrid(sim.gpr ?? Array(32).fill(0), previousGprSnapshot())}</div>
+                            <div class="reg-grid">${renderRegGrid(sim.gpr ?? Array(32).fill(0), previousGprSnapshot(), running)}</div>
                         </div>
                         <div>
                             <h4>PC</h4>
-                            <code class="pc">0x${(sim.pc ?? 0).toString(16).padStart(8, "0")}</code>
+                            <code class="pc">${liveValue(running, `0x${(sim.pc ?? 0).toString(16).padStart(8, "0")}`)}</code>
                             <h4>虚拟时间</h4>
-                            <code class="timeVirt">${state?.timeVirt ?? 0} ps</code>
+                            <code class="timeVirt">${liveValue(running, `${state?.timeVirt ?? 0} ps`)}</code>
                         </div>
                     </div>
                 </section>
@@ -993,6 +1001,21 @@ function renderDisasmRow(entry, pc, breakpoints = []) {
 // ---------------------------------------------------------------------------
 
 /**
+ * 「**内核真的在执行**吗」（STAGE-38 · v0.53 批 · 裁决 A / M）。
+ *
+ * ⚠️ **只有一个落点**：视图状态 `debug.run`（app 层写）⇒ ⇒ 调试视图与
+ * 寄存器视图**读同一份** ⇒ ⇒ 不是第二个真相。
+ *
+ * ⚠️ **两个视图都走这一个函数** ⇒ ⇒ 「运行中」的口径**只有一处** ⇒ ⇒
+ * 「运行中显示 `-`」这件事**不会**只落在一个视图上。
+ *
+ * @returns {boolean}
+ */
+function kernelIsRunning() {
+    return isKernelRunning(viewStore.getState("debug")?.debug?.run);
+}
+
+/**
  * 渲染**寄存器格**（`.reg-grid` 里的 32 个格子）。
  *
  * ⚠️ **稳定钩子**（裁决 A）：`.reg-grid > div` **仍是 32 个** ⇒ ⇒ 真机门禁
@@ -1004,22 +1027,31 @@ function renderDisasmRow(entry, pc, breakpoints = []) {
  * ⚠️ **没有上一次快照** ⇒ ⇒ **一律不加类**（⛔ 不猜「那一定是 0」）
  * ⇒ ⇒ 第一次读回时**不**满屏绿红。
  *
- * @param {number[]|undefined|null} gpr — 当前读回的 32 个 GPR
- * @param {number[]|undefined|null} prevGpr — **上一次**读回的快照
- * @returns {string} HTML 片段
+ * ⚠️ **`running` = 运行中**（STAGE-38 · v0.53 批 · 裁决 D）⇒ ⇒ 运行中
+ * 每格只显示**固定符号 `-`**（不是占位文案、不是冻结旧值）⇒ ⇒ 停止后
+ * 调同一个函数就**自动**恢复最新值。
+ *
+ * ⚠️ **运行中不算变化高亮** ⇒ ⇒ 高亮说的是「这个值变了」⇒ ⇒ 值都没显示
+ * ⇒ ⇒ 高亮没有意义（而且会让那一格看起来像「有值」）。
+ *
+ * @param {number[]} gpr
+ * @param {number[]|null} prevGpr
+ * @param {boolean} [running]
+ * @returns {string}
  */
-export function renderRegGrid(gpr, prevGpr) {
+export function renderRegGrid(gpr, prevGpr, running = false) {
     const values = Array.isArray(gpr) ? gpr : Array(32).fill(0);
     const prev = Array.isArray(prevGpr) ? prevGpr : null;
     return values.map((v, i) => {
         const cur = Number(v ?? 0) >>> 0;
         let cls = "";
-        if (prev && prev.length === values.length) {
+        if (running !== true && prev && prev.length === values.length) {
             const old = Number(prev[i] ?? 0) >>> 0;
             if (cur !== old) cls = cur > old ? "up" : "down";
         }
         const clsAttr = cls ? ` class="${cls}"` : "";
-        return `<div><span class="muted">x${i}</span><code${clsAttr}>${cur.toString(16).padStart(8, "0")}</code></div>`;
+        const text = liveValue(running, cur.toString(16).padStart(8, "0"));
+        return `<div><span class="muted">x${i}</span><code${clsAttr}>${text}</code></div>`;
     }).join("");
 }
 
@@ -1043,6 +1075,10 @@ const regmemView = register({
         const gpr = sim.gpr ?? Array(32).fill(0);
         const mem = sim.mem ?? {};
         const cells = Object.entries(mem);
+        // ⚠️ **运行中 ⇒ ⇒ 活值隐藏**（STAGE-38 · v0.53 批 · 裁决 D）
+        // ⇒ ⇒ 与**调试视图那份**是**同一个口径**（同一个函数）⇒ ⇒ 不会
+        // 一个藏了一个没藏。
+        const running = kernelIsRunning();
         return `
             <section class="regmem-view">
                 <div class="card">
@@ -1054,12 +1090,12 @@ const regmemView = register({
                     <div class="grid-2">
                         <div>
                             <h4>通用寄存器</h4>
-                            <div class="reg-grid">${renderRegGrid(gpr, previousGprSnapshot())}</div>
+                            <div class="reg-grid">${renderRegGrid(gpr, previousGprSnapshot(), running)}</div>
                         </div>
                         <div>
                             <h4>PC / 虚拟时间</h4>
-                            <code class="pc">0x${(sim.pc ?? 0).toString(16).padStart(8, "0")}</code>
-                            <code class="timeVirt">${state?.timeVirt ?? 0} ps</code>
+                            <code class="pc">${liveValue(running, `0x${(sim.pc ?? 0).toString(16).padStart(8, "0")}`)}</code>
+                            <code class="timeVirt">${liveValue(running, `${state?.timeVirt ?? 0} ps`)}</code>
                             <h4>内存单元</h4>
                             ${cells.length === 0
                                 ? `<p class="muted">尚无读回的内存单元 — 点击「读内存 @0x100」。</p>`
@@ -1067,7 +1103,7 @@ const regmemView = register({
                                     <thead><tr><th>地址</th><th>值</th></tr></thead>
                                     <tbody>${cells.map(([addr, value]) => `
                                         <tr><td><code>${escapeHtml(addr)}</code></td>
-                                        <td><code>0x${(value >>> 0).toString(16).padStart(8, "0")}</code></td></tr>
+                                        <td><code>${liveValue(running, `0x${(value >>> 0).toString(16).padStart(8, "0")}`)}</code></td></tr>
                                     `).join("")}</tbody>
                                 </table>`}
                         </div>
@@ -1645,6 +1681,17 @@ function sendTerminalInput() {
 // ---------------------------------------------------------------------------
 
 /**
+ * 上一次**写进 DOM 的 HTML**（STAGE-38 · v0.53 批 · 裁决 K）。
+ *
+ * ⚠️ **按 DOM 容器本身做键**（`WeakMap`）⇒ ⇒ 容器被换掉（视图被重新挂载）
+ * ⇒ ⇒ 查不到旧值 ⇒ ⇒ **第一轮一定重建** ⇒ ⇒ 不会出现「容器是空的却
+ * 因为「内容一样」而跳过渲染」这种**空面板**。
+ *
+ * @type {WeakMap<object, string>}
+ */
+const lastRenderedHtml = new WeakMap();
+
+/**
  * @param {{ viewId: string, type: string, state: object }} detail
  */
 function applyRenderEvent(detail) {
@@ -1660,7 +1707,18 @@ function applyRenderEvent(detail) {
         html = `<div class="view-error">渲染失败：${escapeHtml(err?.message ?? String(err))}</div>`;
         console.warn(`[M-02 ${detail.viewId}] render error:`, err);
     }
-    body.innerHTML = html;
+    // ⚠️ **同内容不重建**（STAGE-38 · v0.53 批 · 裁决 K）
+    // ⇒ ⇒ 连续运行每一轮都 `publishViewState("debug")`（F7）⇒ ⇒ 而运行中
+    // 活值**全被隐藏** ⇒ ⇒ 渲染结果**逐字相同**（F8）⇒ ⇒ 这一次**不必**
+    // 把整个视图正文换掉 ⇒ ⇒ 主线程**不再**被占满 ⇒ ⇒ 界面**不闪**。
+    //
+    // ⚠️ **`afterRender` 照旧调用**（裁决 L）⇒ ⇒ 波形图那一张图**不受**
+    // 去重影响 ⇒ ⇒ 图**照样**跟着数据更新。
+    const unchanged = lastRenderedHtml.get(body) === html;
+    if (!unchanged) {
+        lastRenderedHtml.set(body, html);
+        body.innerHTML = html;
+    }
     // ⚠️ **可选**的渲染后钩子（STAGE-36 · 裁决 M）。
     //
     // ⚠️ **为什么需要它**：图表（echarts）需要一个**真实 DOM 容器**才能初始化
