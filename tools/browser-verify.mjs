@@ -160,6 +160,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "breakpointUi",
     "liveReadout",
     "runLoop",
+    "addrInput",
 ]);
 
 /**
@@ -673,6 +674,30 @@ async function launchChrome(chromePath, port, userDataDir) {
     throw new Error(
         `Chrome 起不来（${chromePath}）。最后一段 stderr：\n${stderr.trim().slice(-800)}`,
     );
+}
+
+/**
+ * 那个 CDP 端口上**已经有东西在听**吗？
+ *
+ * ⚠️ **为什么要单独查**（STAGE-39 · v0.54 批 · 施工期订正）：门禁用的是
+ * **固定端口**（默认 9222）⇒ ⇒ 上一次**被中断**的运行留下的 headless
+ * Chrome **还活着** ⇒ ⇒ `waitForDevTools` 会**连到那个旧的** ⇒ ⇒ 页面
+ * 状态是**上一次那次的** ⇒ ⇒ 断言读到**脏状态** ⇒ ⇒ 报出**莫名其妙的红**。
+ *
+ * ⇒ ⇒ 这里**只问「有没有人在听」** ⇒ ⇒ 有就**报出来**，不去连它。
+ *
+ * @param {number} port
+ * @returns {Promise<boolean>}
+ */
+async function devToolsPortBusy(port) {
+    try {
+        const res = await fetch(`http://127.0.0.1:${port}/json/version`, {
+            signal: AbortSignal.timeout(1500),
+        });
+        return res.ok;
+    } catch {
+        return false;
+    }
 }
 
 /**
@@ -4089,24 +4114,46 @@ async function runBreakpointUiSection(cdp, opts) {
     // -- B-25 · 撤掉之后「继续」⇒ ⇒ **不再**在那个地址停 ------------------
     // ⚠️ **本段最锋利的一条**：只验「按钮变了」是**界面自说自话** ⇒ ⇒ 必须
     // 验「**内核不再在那儿停**」⇒ ⇒ 那才是**真撤掉**。
+    //
+    // ⚠️ **判据是「内核还在跑」，不是「显示的 PC 不等于靶点」**
+    //   （STAGE-39 · v0.54 批 · 施工期订正）：v0.53 批起**运行中活值隐藏**
+    //   ⇒ ⇒ 寄存器视图那个 `.pc` 在运行中是 `-` ⇒ ⇒ 「显示的 PC ≠ 靶点」
+    //   **恒真** ⇒ ⇒ 那条判据**恒绿**（零判别力）⇒ ⇒ 必须改用**运行态**
+    //   （`data-topbar-run-mode`）⇒ ⇒ 「内核停下来了」才说明断点还在。
     await runEffect(cdp, `(() => {
         const btn = document.querySelector('[data-view-body="debug"] [data-action="continue"]');
         if (!btn) return "no-button";
         btn.click();
         return "clicked";
     })()`);
-    let pcAfter = "";
-    const afterDeadline = Date.now() + opts.timeoutMs;
-    while (Date.now() < afterDeadline) {
-        const p = await pageProbe(cdp);
-        pcAfter = String(p?.pc ?? "").trim();
-        if (pcAfter && pcAfter !== target) break;
-        await sleep(250);
+    // -- 正向对照：先确认它**真的跑起来了** ------------------------------
+    let started = false;
+    const startDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < startDeadline) {
+        const s = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+        if (String(s?.runMode ?? "") === "running") {
+            started = true;
+            break;
+        }
+        await sleep(150);
+    }
+    // -- 再盯 1.2 秒 ⇒ ⇒ **不许**变回「已停止」（变回去 = 内核在靶点停了）
+    let stopped = false;
+    let modeSeen = "";
+    const watchDeadline = Date.now() + 1200;
+    while (Date.now() < watchDeadline) {
+        const s = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+        modeSeen = String(s?.runMode ?? "");
+        if (modeSeen !== "running") {
+            stopped = true;
+            break;
+        }
+        await sleep(200);
     }
     add(
         "B-25 · 撤掉之后「继续」⇒ ⇒ **不再**在那个地址停（⇒ ⇒ 撤掉是真的撤掉了，不只是界面变了）",
-        !!pcAfter && pcAfter !== target,
-        `撤掉后 PC=${JSON.stringify(pcAfter)}（靶点 ${target}）`,
+        started && !stopped,
+        `跑起来了=${started} 之后变回停止=${stopped} 运行态=${JSON.stringify(modeSeen)}（靶点 ${target}）`,
     );
 
     // -- B-25b · **收尾**：把「连续运行」停下来 ---------------------------
@@ -4438,19 +4485,33 @@ const BV_LIVE_READOUT_PROBE = `(() => {
 })()`;
 
 /**
- * 点某个视图里的「读内存 @0x100」按钮。
+ * 点某个视图里的「读内存」按钮。
  *
  * ⚠️ **按位置限定**（`[data-view-body="..."]`）⇒ ⇒ 调试视图与寄存器视图
  * **各有一个**同名按钮（事实 F13）⇒ ⇒ 不限定的话 `querySelector` 会命中
  * **前一个** ⇒ ⇒ 断言还在跑、断的却不是它以为的那个东西。
  *
+ * ⚠️ **必须先填地址**（STAGE-39 · v0.54 批）：读内存的地址**不再写死**
+ *   ⇒ ⇒ 界面改成「一个地址输入框 + 一个宽度选择」⇒ ⇒ 点按钮之前**先往
+ *   输入框里填地址**⇒ ⇒ 否则视图**解析不出来 ⇒ ⇒ 不发命令**⇒ ⇒ 弹窗
+ *   也不会出现（那几条断言会**假红**，而不是「真的被拒」）。
+ *
  * @param {object} cdp
  * @param {string} viewId — `"debug"` 或 `"regmem"`
+ * @param {string} [addr] — 要读的地址（默认那个历史上的 `0x00000100`）
  * @returns {Promise<void>}
  */
-async function clickReadMemoryButton(cdp, viewId) {
+async function clickReadMemoryButton(cdp, viewId, addr = "0x00000100") {
     await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-view-body="${viewId}"] [data-action="read-mem"]');
+        const scope = document.querySelector('[data-view-body="${viewId}"]');
+        if (!scope) return "no-view";
+        const box = scope.querySelector('[data-addr-input="memory"]');
+        const input = box ? box.querySelector("[data-mem-addr-input]") : null;
+        if (input) {
+            input.value = ${JSON.stringify(addr)};
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        const btn = scope.querySelector('[data-action="read-mem"]');
         if (!btn) return "no-button";
         btn.click();
         return "clicked";
@@ -4638,17 +4699,22 @@ async function runLiveReadoutSection(cdp, opts) {
     );
 
     // -- B-52 · **不点**任何按钮 ⇒ ⇒ 5 秒之后**自己**消失 -----------------
+    // ⚠️ **等待余量必须够**（STAGE-39 · v0.54 批 · 施工期订正）：弹窗的
+    //   「保持 5 秒 + 渐隐 400 ms」= **5 400 ms** ⇒ ⇒ 原来只等 **5 600 ms**
+    //   ⇒ ⇒ **余量只有 200 ms** ⇒ ⇒ 机器有负载时**页面里的定时器会晚到**
+    //   ⇒ ⇒ 判据会**假红**（本批实测到过一次：对照跑里它红了）。
+    //   ⇒ ⇒ 这里等到 **7 000 ms** ⇒ ⇒ 余量 1.6 s ⇒ ⇒ 判稳。
     await clickReadMemoryButton(cdp, "debug");
     await sleep(300);
     const reopened = await readProbe();
     const stateBefore = String(reopened?.alertState ?? "");
-    await sleep(5600);
+    await sleep(7000);
     const afterAuto = await readProbe();
     add(
         "B-52 · 弹窗**不点**任何按钮 ⇒ ⇒ 5 秒之后**自己**消失"
         + "（⇒ ⇒ 「5 秒后渐隐」这条**在真机上**成立）",
         stateBefore === "open" && String(afterAuto?.alertState ?? "") === "",
-        `刚打开时=${JSON.stringify(stateBefore)} 5.6 秒后=${JSON.stringify(afterAuto?.alertState ?? "")}`,
+        `刚打开时=${JSON.stringify(stateBefore)} 7 秒后=${JSON.stringify(afterAuto?.alertState ?? "")}`,
     );
 
     // -- B-53 · 脚本口 `readMemory` 在运行中 ⇒ ⇒ **不**弹窗 ---------------
@@ -4685,6 +4751,300 @@ async function runLiveReadoutSection(cdp, opts) {
         stoppedRegs.length === 32 && stoppedRegs.every((c) => c !== "-"),
         `寄存器格 ${stoppedRegs.length} 个，其中还是「-」的 ${stoppedRegs.filter((c) => c === "-").length} 个`,
     );
+
+    return { checks };
+}
+
+// ---------------------------------------------------------------------------
+// STAGE-39 · v0.54 批 · 任意地址断点 + 任意地址读内存（B-55 ~ B-60）
+// ---------------------------------------------------------------------------
+
+/**
+ * ⚠️ **断点靶点 = demo 固件的自环那条 `jal`**（`0x24`）。
+ *
+ * ⚠️ **为什么不是 `0x20`**（demo 固件自己标注的那个「断点靶点」）：`0x20`
+ *   已经被 `breakpointUi` 段用过了 ⇒ ⇒ 用它做新段的靶点 ⇒ ⇒ 新段其实
+ *   **没证明**「任意地址」⇒ ⇒ `0x24` 是固件**真的**会执行到、但**不是**
+ *   那个约定靶点**的一条指令 ⇒ ⇒ 更接近「用户自己填的地址」。
+ */
+const BV_ADDR_INPUT_TARGET = 0x24;
+const BV_ADDR_INPUT_TARGET_HEX =
+    `0x${(BV_ADDR_INPUT_TARGET >>> 0).toString(16).padStart(8, "0")}`;
+
+/**
+ * 读「任意地址」那一组探针。
+ *
+ * ⚠️ **一次读完** ⇒ ⇒ 采样是**同一个瞬间**的 ⇒ ⇒ 「断点输入框在调试视图
+ *   而内存输入框在寄存器视图」这种**采样错位**不会发生。
+ *
+ * ⚠️ **读原始属性**（`data-bp-addr` / `data-disasm-addr` / `data-mem-size`）
+ *   ⇒ ⇒ 判据不必解析中文。
+ */
+const BV_ADDR_INPUT_PROBE = `(() => {
+  const debugBody = document.querySelector('[data-view-body="debug"]');
+  const regmemBody = document.querySelector('[data-view-body="regmem"]');
+  const bpBox = debugBody ? debugBody.querySelector('[data-addr-input="breakpoint"]') : null;
+  const memBox = regmemBody ? regmemBody.querySelector('[data-addr-input="memory"]') : null;
+  const memInput = memBox ? memBox.querySelector("[data-mem-addr-input]") : null;
+  const sizeSel = memBox ? memBox.querySelector("[data-mem-size]") : null;
+  const bpErr = bpBox ? bpBox.querySelector("[data-bp-addr-error]") : null;
+  const memErr = memBox ? memBox.querySelector("[data-mem-addr-error]") : null;
+  return {
+    hasDebugBody: !!debugBody,
+    hasRegmemBody: !!regmemBody,
+    hasBpInput: !!(bpBox && bpBox.querySelector("[data-bp-addr-input]")),
+    bpInputInRegmem: !!(regmemBody && regmemBody.querySelector("[data-bp-addr-input]")),
+    hasMemInput: !!(memBox && memInput),
+    memSizeValue: sizeSel ? String(sizeSel.value || "") : "",
+    bpErrorText: bpErr ? String(bpErr.textContent || "").trim() : "",
+    memErrorText: memErr ? String(memErr.textContent || "").trim() : "",
+    disasmAddrs: Array.from(document.querySelectorAll('[data-view-body="debug"] tr.disasm-row'))
+      .map((r) => String(r.getAttribute("data-disasm-addr") || "")),
+    bpList: Array.from(document.querySelectorAll('[data-view-body="debug"] [data-bp-row]'))
+      .map((r) => String(r.getAttribute("data-bp-addr") || "")),
+    memRows: Array.from(document.querySelectorAll('[data-view-body="regmem"] .map-table tbody tr'))
+      .map((tr) => {
+        const cells = Array.from(tr.querySelectorAll("td code")).map((c) => String(c.textContent || "").trim());
+        return { addr: cells[0] || "", value: cells[1] || "" };
+      }),
+    overlayState: (() => {
+      const o = document.querySelector("[data-alert-overlay]");
+      return o ? String(o.getAttribute("data-alert-state") ?? "") : null;
+    })(),
+  };
+})()`;
+
+/**
+ * STAGE-39 · v0.54 批的真机段：任意地址断点 + 任意地址读内存。
+ *
+ * ⚠️ **必须排在 `liveReadout` 之后**：那一段断言「内存表在本段开始时**没有**
+ *   `0x00000100` 那一行」⇒ ⇒ 本段读了 `0x00000100` ⇒ ⇒ 放在它前面会
+ *   把那条断言**弄红**。
+ *
+ * ⚠️ **必须排在 `osz` 之前**：osz 段把镜像换成仓外的真 RTOS ⇒ ⇒ 放在它
+ *   后面，本段看到的就不是 demo 固件了。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{checks: {name: string, ok: boolean, detail: string}[]}>}
+ */
+async function runAddrInputSection(cdp, opts) {
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
+    const probe = async () => await awaitEval(cdp, BV_ADDR_INPUT_PROBE);
+    const topbar = async () => await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+
+    // -- 前置：**复位** ⇒ ⇒ demo 固件重新装上、PC 回到 0 ------------------
+    // ⚠️ **用「复位」做前置清理**（与 `runLoop` 段同一条理由）：清理**不许**
+    //   依赖**被测的那个按钮** ⇒ ⇒ 被测物坏了时门禁**卡死**而不是**变红**。
+    await clickTopbarAction(cdp, "reset");
+    await sleep(900);
+    await runEffect(cdp, 'location.hash = "#/debug";');
+    await sleep(700);
+
+    // -- B-60 · 断点输入框**在调试视图里** --------------------------------
+    let p = await probe();
+    add(
+        "B-60 · 断点卡上的地址输入框**在调试视图里**（用户实际会去的那一屏）"
+        + "⇒ ⇒ 不是「某个藏起来的视图里」",
+        p?.hasBpInput === true && p?.bpInputInRegmem === false,
+        `调试视图里有=${p?.hasBpInput} 寄存器视图里有=${p?.bpInputInRegmem}`,
+    );
+
+    // -- 前置：把反汇编窗口**收窄** ⇒ ⇒ 靶点不在窗口里 --------------------
+    // ⚠️ **为什么必须收窄**：demo 固件只有 `0x00..0x24` 十条 ⇒ ⇒ 默认窗口
+    //   （16 条）**盖住整个固件** ⇒ ⇒ 「靶点不在窗口内」这条前置**永远**
+    //   不成立 ⇒ ⇒ 判据会**空转**（什么都能过）。
+    //   ⇒ ⇒ 把条数改成 1 ⇒ ⇒ 窗口里只剩 PC 那一条 ⇒ ⇒ 靶点 `0x24` 一定
+    //   不在窗口里 ⇒ ⇒ 「旧界面根本下不了这个断点」这件事**成立**。
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-view-body="debug"] [data-action="disasm"]');
+        if (!btn) return "no-button";
+        btn.setAttribute("data-count", "1");
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(700);
+    p = await probe();
+    add(
+        "前置：断点靶点**不在**当前反汇编窗口里"
+        + "（⇒ ⇒ 旧界面只能从反汇编行加断点 ⇒ ⇒ 那个地址它根本下不了）",
+        Array.isArray(p?.disasmAddrs) && p.disasmAddrs.length > 0
+            && !p.disasmAddrs.includes(BV_ADDR_INPUT_TARGET_HEX),
+        `反汇编行地址=${JSON.stringify(p?.disasmAddrs ?? [])} 靶点=${BV_ADDR_INPUT_TARGET_HEX}`,
+    );
+
+    // -- 在**输入框**里填地址 ⇒ ⇒ 点「加断点」 ----------------------------
+    await runEffect(cdp, `(() => {
+        const box = document.querySelector('[data-view-body="debug"] [data-addr-input="breakpoint"]');
+        const input = box ? box.querySelector("[data-bp-addr-input]") : null;
+        if (!input) return "no-input";
+        input.value = ${JSON.stringify(BV_ADDR_INPUT_TARGET_HEX)};
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        const btn = box.querySelector('[data-action="set-breakpoint"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(700);
+    p = await probe();
+    add(
+        "在调试视图的地址输入框里填地址 ⇒ ⇒ 断点列表里出现**那个地址**"
+        + "（⇒ ⇒ 界面**给得出**那个地址 ⇒ ⇒ 不是只写死一个）",
+        Array.isArray(p?.bpList) && p.bpList.includes(BV_ADDR_INPUT_TARGET_HEX),
+        `断点列表=${JSON.stringify(p?.bpList ?? [])}`,
+    );
+
+    // -- B-55 · 「继续」⇒ ⇒ 内核**真的在那个地址停** ----------------------
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-view-body="debug"] [data-action="continue"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    let halt = null;
+    const haltDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < haltDeadline) {
+        halt = await awaitEval(cdp, "window.riscv_kernel.lastHalt()");
+        if (halt && Number(halt.pc) === BV_ADDR_INPUT_TARGET) break;
+        await sleep(250);
+    }
+    add(
+        "B-55 · 在**输入框**里下的那个地址 ⇒ ⇒ 内核**真的在那个地址停**"
+        + "（⇒ ⇒ 断点**真的进了内核**，不是界面自己画的一行）",
+        !!halt && Number(halt.pc) === BV_ADDR_INPUT_TARGET && halt.reason === "Breakpoint",
+        `halt=${JSON.stringify(halt)} 期望 pc=${BV_ADDR_INPUT_TARGET_HEX}`,
+    );
+
+    // -- B-57 · 在**任意地址**读内存 ⇒ ⇒ 内存表里**出现那一行** ------------
+    // ⚠️ **读的不是 `0x100`** ⇒ ⇒ 这条才是锋利的那条：「把 `0x100` 换个地方
+    //   写死」的实现会在这一条**露馅**（表里出现的是 `0x00000100`）。
+    await runEffect(cdp, 'location.hash = "#/regmem";');
+    await sleep(700);
+    await runEffect(cdp, `(() => {
+        const box = document.querySelector('[data-view-body="regmem"] [data-addr-input="memory"]');
+        const input = box ? box.querySelector("[data-mem-addr-input]") : null;
+        if (!input) return "no-input";
+        input.value = "0x00000104";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        const btn = box.querySelector('[data-action="read-mem"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(900);
+    p = await probe();
+    add(
+        "B-57 · 在**任意地址**读内存 ⇒ ⇒ 内存单元表里**出现那一行**"
+        + "（地址 = 输入的那个 ⇒ ⇒ 不是写死的 `0x00000100`）",
+        (p?.memRows ?? []).some((r) => r.addr === "0x00000104"),
+        `内存表=${JSON.stringify(p?.memRows ?? [])}`,
+    );
+
+    // -- B-58 · **对照**：读 `0x100` **仍然**能读 ---------------------------
+    await runEffect(cdp, `(() => {
+        const box = document.querySelector('[data-view-body="regmem"] [data-addr-input="memory"]');
+        const input = box ? box.querySelector("[data-mem-addr-input]") : null;
+        if (!input) return "no-input";
+        input.value = "0x00000100";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        const btn = box.querySelector('[data-action="read-mem"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(900);
+    p = await probe();
+    const row100 = (p?.memRows ?? []).find((r) => r.addr === "0x00000100");
+    add(
+        "B-58 · **对照**：读 `0x100` **仍然**能读 ⇒ ⇒ 不是「把 `0x100` 换个"
+        + "地方写死」",
+        !!row100,
+        `内存表=${JSON.stringify(p?.memRows ?? [])}`,
+    );
+    // ⚠️ **值也要对**：demo 固件在 `0x0c` 处 `sw x3, 0x100(x0)` ⇒ ⇒ 跑到
+    //   `0x24` 停下时 `0x100` 里已经是 x3 的值（49）⇒ ⇒ 值对 ⇒ ⇒ 说明
+    //   **真的读到了内核的内存**，不是界面自己画的一行。
+    add(
+        "B-58b · 读回来的**值**就是内核内存里的那个值"
+        + "（⇒ ⇒ 那条命令**真的到了内核**，不是界面自己画的）",
+        !!row100 && String(row100.value).toLowerCase() === "0x00000031",
+        `0x00000100 的值=${JSON.stringify(row100?.value ?? null)}（期望 0x00000031 = 49）`,
+    );
+
+    // -- B-56 · 撤掉那个断点 ⇒ ⇒ 再跑到那里**不再停** --------------------
+    // ⚠️ **判据是「内核还在跑」** ⇒ ⇒ 「内核停下来了」才说明断点还在。
+    //   ⇒ ⇒ 光看「显示的 PC」**不行**：v0.53 批起**运行中活值隐藏** ⇒ ⇒
+    //   运行中那个 PC 是 `-` ⇒ ⇒ 「PC ≠ 靶点」**恒真**（零判别力）。
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-view-body="debug"] [data-bp-row] [data-action="clear-breakpoint"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(500);
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-view-body="debug"] [data-action="continue"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    // -- 正向对照：先确认它**真的跑起来了** ------------------------------
+    let started = false;
+    const startDeadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < startDeadline) {
+        const s = await topbar();
+        if (String(s?.runMode ?? "") === "running") {
+            started = true;
+            break;
+        }
+        await sleep(150);
+    }
+    // -- 再盯 1.2 秒 ⇒ ⇒ **不许**变回「已停止」（变回去 = 在靶点停下了）--
+    let stopped = false;
+    let modeSeen = "";
+    const watchDeadline = Date.now() + 1200;
+    while (Date.now() < watchDeadline) {
+        const s = await topbar();
+        modeSeen = String(s?.runMode ?? "");
+        if (modeSeen !== "running") {
+            stopped = true;
+            break;
+        }
+        await sleep(200);
+    }
+    add(
+        "B-56 · 撤掉那个断点 ⇒ ⇒ 再跑到那里**不再停**"
+        + "（⇒ ⇒ 撤掉是真的撤掉了，不只是界面变了）",
+        started && !stopped,
+        `跑起来了=${started} 之后变回停止=${stopped} 运行态=${JSON.stringify(modeSeen)}（靶点 ${BV_ADDR_INPUT_TARGET_HEX}）`,
+    );
+
+    // -- B-59 · ⚠️ **回归**：运行中点「读内存」⇒ ⇒ 弹窗且**不发**命令 ------
+    // ⚠️ **必须先跑起来** ⇒ ⇒ 否则这条断言会**空转**（「根本没运行」也
+    //   会「没有新的一行」⇒ ⇒ 那种绿是**假的**）。
+    const runningState = await topbar();
+    const rowsBefore = (await probe()).memRows ?? [];
+    await clickReadMemoryButton(cdp, "regmem", "0x00000108");
+    await sleep(700);
+    p = await probe();
+    const rowsAfter = p?.memRows ?? [];
+    add(
+        "B-59 · ⚠️ **回归**：**运行中**点「读内存」⇒ ⇒ **弹窗**且**不发**命令"
+        + "（⇒ ⇒ v0.53 批那条语义在真机上**仍然**成立）",
+        runningState?.runMode === "running"
+            && p?.overlayState === "open"
+            && !rowsAfter.some((r) => r.addr === "0x00000108"),
+        `运行态=${JSON.stringify(runningState?.runMode ?? "")}`
+        + ` 弹窗=${JSON.stringify(p?.overlayState ?? "")}`
+        + ` 之前=${JSON.stringify(rowsBefore)} 之后=${JSON.stringify(rowsAfter)}`,
+    );
+
+    // -- 收尾：**复位** ⇒ ⇒ 把状态清干净 ----------------------------------
+    await clickTopbarAction(cdp, "reset");
+    await sleep(900);
+    await runEffect(cdp, 'location.hash = "#/debug";');
+    await sleep(500);
 
     return { checks };
 }
@@ -5157,6 +5517,25 @@ async function main() {
 
     const { child: server } = await ensureServer(opts);
 
+    // ⚠️ **前置：CDP 端口必须空着**（STAGE-39 · v0.54 批 · 施工期订正）
+    //   ⇒ ⇒ **上一次被中断的运行会留下一个还活着的 headless Chrome**
+    //   ⇒ ⇒ 它**占着那个端口** ⇒ ⇒ 这一次 `waitForDevTools` 会**连到它**
+    //   ⇒ ⇒ **页面状态是上一次那次的** ⇒ ⇒ 断言会读到**脏状态** ⇒ ⇒
+    //   ⇒ ⇒ 报出**莫名其妙的红**（本批实测：内存表里出现了上一次读过的行）。
+    //   ⇒ ⇒ 所以这里**先查**：占着就**直接报**（不是连上去）。
+    const busy = await devToolsPortBusy(opts.cdpPort);
+    if (busy) {
+        console.error(
+            `error: CDP 端口 ${opts.cdpPort} **已经被占用** ⇒ ⇒ 很可能有一次被中断的`
+            + " browser-verify 还留着它的 headless Chrome。",
+        );
+        console.error(
+            "       ⇒ ⇒ 请先杀掉它（ps aux | grep 'riscv-browser-verify'）再跑，"
+            + "否则这一趟会**连到那个旧浏览器**、读到上一次的脏状态。",
+        );
+        return EXIT_FAILED;
+    }
+
     const userDataDir = mkdtempSync(join(tmpdir(), "riscv-browser-verify-"));
     let chrome = null;
     let cdp = null;
@@ -5399,6 +5778,18 @@ async function main() {
         const runLoop = await runSection("runLoop", () => runRunLoopSection(cdp, opts));
         registerSection("runLoop", runLoop.checks, {
             title: "连续运行检查（点一次运行 ⇒ 一直跑 ⇒ 暂停能停 ⇒ 断点能停）",
+        });
+
+        // -- the ARBITRARY ADDRESS (STAGE-39 · v0.54 批 · B-55 ~ B-60) -------
+        // ⚠️ **必须排在 liveReadout 之后**：那一段断言「内存表在本段开始时
+        // **没有** `0x00000100` 那一行」⇒ ⇒ 本段读了 `0x00000100` ⇒ ⇒
+        // 放在它前面会把那条断言**弄红**。
+        //
+        // ⚠️ **必须排在 osz 之前**：osz 段把镜像换成仓外的真 RTOS ⇒ ⇒ 放在
+        // 它后面，本段看到的就不是 demo 固件了（靶点 `0x24` 也不在了）。
+        const addrInput = await runSection("addrInput", () => runAddrInputSection(cdp, opts));
+        registerSection("addrInput", addrInput.checks, {
+            title: "任意地址检查（输入框下断点 ⇒ 内核真停 · 输入框读内存 ⇒ 表里真出现那一行）",
         });
 
         // -- the REAL RTOS (osz): load the out-of-repo ELF and SEE its console -

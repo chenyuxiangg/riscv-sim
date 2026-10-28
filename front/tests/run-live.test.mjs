@@ -285,7 +285,7 @@ describe("运行中隐藏活值 + 读内存拒绝（app 层）", () => {
         await app.handleCommand({ action: "continue" }, { commandRouter: router });
 
         await app.handleCommand(
-            { action: "read-mem" },
+            { action: "read-mem", params: { addr: 0x100, size: "Word" } },
             { commandRouter: router, registerMemory: regmem },
         );
 
@@ -308,7 +308,7 @@ describe("运行中隐藏活值 + 读内存拒绝（app 层）", () => {
         const regmem = fakeRegisterMemory();
 
         await app.handleCommand(
-            { action: "read-mem" },
+            { action: "read-mem", params: { addr: 0x100, size: "Word" } },
             { commandRouter: router, registerMemory: regmem },
         );
 
@@ -316,7 +316,7 @@ describe("运行中隐藏活值 + 读内存拒绝（app 层）", () => {
         assert.deepEqual(
             regmem.calls[0],
             [0x100, "Word"],
-            "读的地址与宽度**逐字**不变",
+            "读的地址与宽度**逐字**不变（⚠️ v0.54 批起，地址**来自界面**）",
         );
         assert.equal(alert.alertState(), "", "停止时读内存不许弹窗");
     });
