@@ -22,6 +22,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# ⚠️ **前端分桶规则只有一处定义** ⇒ ⇒ 复用 `tools/front_test_attrib.py` 的
+#    `bucket_of`（那是「用例归属」用的**同一套**目录桶）⇒ ⇒ **不写第二份**
+#    ⇒ ⇒ 「一个约束一个落点」。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from front_test_attrib import bucket_of  # noqa: E402  (必须在 sys.path 调整之后)
+
 
 def run(cmd):
     return subprocess.run(cmd, cwd=ROOT, check=True, capture_output=True, text=True).stdout
@@ -43,6 +49,26 @@ def count_lines(paths):
 
 def rust_files(under):
     return [str(p.relative_to(ROOT)) for p in sorted((ROOT / under).rglob("*.rs"))]
+
+
+def front_code_by_bucket(front_src):
+    """前端**源码**按目录桶分列行数（台账 §0.1 前端两行的「代码」列）。
+
+    ⚠️ **口径**（台账 §0.1 的口径说明段，v0.53 批起**由本函数跑出来**）：
+      * **不含** `front/tests/`（那是**测试**不是源码）
+      * **只数** `.js` / `.mjs` / `.html` / `.css`（⇒ ⇒ `front/package.json` 不算）
+      * **桶**与 `tools/front_test_attrib.py` 的用例归属**同一套**
+        （A = `app.js` / `index.html` / `style.css` / `views/`；B = 其余）
+    """
+    a_files, b_files = [], []
+    for rel in front_src:
+        if rel.startswith("front/tests/"):
+            continue
+        rel_in_front = rel[len("front/"):]
+        (a_files if bucket_of(rel_in_front) == "A" else b_files).append(rel)
+    a_lines, a_n = count_lines(a_files)
+    b_lines, b_n = count_lines(b_files)
+    return a_lines, a_n, b_lines, b_n
 
 
 def main():
@@ -67,6 +93,9 @@ def main():
     print(f"  仿真内核      {k_lines:>7,} 行  （{k_files} 个 .rs，含内核宿主装配层）")
     print(f"  └ 内核宿主    {h_lines:>7,} 行  （{h_files} 个 .rs，是上面的**子集**）")
     print(f"  前端          {f_lines:>7,} 行  （{f_files} 个 git 跟踪的 .js/.mjs/.html/.css）")
+    a_lines, a_n, b_lines, b_n = front_code_by_bucket(front)
+    print(f"  └ {'M-01/02/03':<14}{a_lines:>7,} 行  （{a_n} 个文件 · 台账 §0.1「代码」列）")
+    print(f"  └ {'M-04/05/07/10':<14}{b_lines:>7,} 行  （{b_n} 个文件 · 台账 §0.1「代码」列）")
     print(f"  文档          {len(html) + len(md):>7,} 篇  （HTML {len(html)} + MD {len(md)}）")
     print(f"  └ 冻结规格    {len(stage):>7,} 份  （STAGE-*）")
     return 0

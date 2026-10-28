@@ -86,19 +86,37 @@ export function getECharts() {
  *   （`ERR_UNSUPPORTED_ESM_URL_SCHEME`）⇒ ⇒ 包一层 then ⇒ ⇒ 那个同步抛
  *   也变成**拒绝** ⇒ ⇒ 被后面的 `.catch` 接住 ⇒ ⇒ 一条路都不漏。
  *
+ * ⚠️ **「关掉」优先于缓存**（STAGE-38 · v0.53 批 · 施工期订正 4）：以前
+ *   `if (instance) return Promise.resolve(instance)` **排在**「源是 off」
+ *   的判断**前面** ⇒ ⇒ 一个**在途的旧加载**在「关掉」之后 resolve 时会把
+ *   `instance` 又装回去 ⇒ ⇒ 下一次 `loadECharts()` 就把**已经关掉**的库
+ *   返回出去 ⇒ ⇒ 界面从「波形库不可用」**变回**「能画」⇒ ⇒ 真机门禁的
+ *   降级路径**偶发**红 ⇒ ⇒ 「关掉」这件事**不生效** ⇒ ⇒ **一个真缺陷**。
+ *
  * @returns {Promise<object|null>}
  */
 export function loadECharts() {
+    // ⚠️ **先看「是不是关掉了」** ⇒ ⇒ 哪怕之前加载成功过，也**不**返回它
+    // ⇒ ⇒ 「关掉」是真的关掉（STAGE-36 验收 A-13）。
+    if (source === ECHARTS_SOURCE_OFF) {
+        instance = null;
+        pending = null;
+        return Promise.resolve(null);
+    }
     if (instance) return Promise.resolve(instance);
     if (pending) return pending;
-    if (source === ECHARTS_SOURCE_OFF) {
-        // ⚠️ **不发网络请求**（STAGE-36 验收 A-13）⇒ ⇒ 「关掉」是真的关掉。
-        pending = Promise.resolve(null);
-        return pending;
-    }
+    // ⚠️ **记下这次请求的来源** ⇒ ⇒ 换源之后这一份结果**作废**
+    // ⇒ ⇒ 否则「在途的旧加载」会**复活**已经换掉的源。
+    const requested = source;
     pending = Promise.resolve()
-        .then(() => import(/* @vite-ignore */ source))
+        .then(() => import(/* @vite-ignore */ requested))
         .then((mod) => {
+            if (source !== requested) {
+                // ⚠️ **换过源了** ⇒ ⇒ 这一份是**上一个源**的结果 ⇒ ⇒ 作废
+                // （不装进 `instance` ⇒ ⇒ 「关掉」不会被它复活）。
+                pending = null;
+                return null;
+            }
             // ⚠️ echarts 的 **ESM** 产物是**具名导出**（`init` / `use` / `version` …）
             // ⇒ ⇒ **没有** default ⇒ ⇒ 用**命名空间对象**本身。
             instance = mod?.default ?? mod ?? null;

@@ -68,12 +68,18 @@ import {
     RUN_MODE_RUNNING,
     RUN_ACTION_CONTINUE,
     RUN_ACTION_STOP,
+    bumpBusy,
     initialRunState,
+    isKernelRunning,
+    liveValue,
     nextRunAction,
     runStateAfter,
     startRunState,
     stopRunState,
 } from "./lib/run-loop.js";
+// ⚠️ **告警弹窗**（STAGE-38 · v0.53 批）⇒ ⇒ 运行中点「读内存」= 拒绝 + 弹窗。
+// ⇒ ⇒ 本仓**第一个**碰 DOM 的 lib 模块（弹窗是**全局**的，不属于任何一个视图）。
+import { showAlert } from "./lib/alert.js";
 
 /** URL of the WASM kernel Worker (same-origin HTTP required). */
 const KERNEL_WORKER_URL = "./kernel-worker.js";
@@ -235,6 +241,19 @@ export function formatVirtualTime(ps) {
 // ---------------------------------------------------------------------------
 
 /**
+ * 「运行中点读内存」的告警文案（STAGE-38 · v0.53 批 · 裁决 F）。
+ *
+ * ⚠️ **文案只有这一处** ⇒ ⇒ 真机门禁读它、界面上显示它 ⇒ ⇒ 同一个词
+ * ⇒ ⇒ 「界面上显示的」与「判据说看到的」**天然对得上**。
+ *
+ * ⚠️ **说清楚下一步该做什么**（「请先暂停再读」）⇒ ⇒ 用户看完知道怎么办
+ * ⇒ ⇒ 不是只说一句「不行」。
+ *
+ * @type {string}
+ */
+export const READ_MEMORY_BLOCKED_MESSAGE = "程序正在运行，暂时不能读内存 —— 请先暂停再读。";
+
+/**
  * **连续运行状态**（STAGE-37 · v0.52 批 · 裁决 F）。
  *
  * ⚠️ **住视图状态 `debug.run`**（即 `debug` 视图状态里的 `run` 那一格）⇒ ⇒
@@ -245,13 +264,19 @@ export function formatVirtualTime(ps) {
  * ⚠️ **读的时候补默认值** ⇒ ⇒ 视图状态没写过（第一次进页面）时读到的
  * 也是一份**合法**的状态 ⇒ ⇒ 调用方不必到处判空。
  *
- * @returns {{mode: string, windows: number}}
+ * ⚠️ **`busy` = 在途的 `Continue` 计数**（STAGE-38 · v0.53 批 · 裁决 B）
+ * ⇒ ⇒ 它与 `mode` 是**两件事**：`mode` 说「前端还想连续跑」，`busy` 说
+ * 「内核手上**真的**有一个窗口在跑」⇒ ⇒ 脚本口跑的那**一个**窗口靠
+ * `busy` 盖住（F9 / F10）。
+ *
+ * @returns {{mode: string, windows: number, busy: number}}
  */
 export function getRunState() {
     const run = viewStore.getState("debug")?.debug?.run;
     return {
         mode: run?.mode === RUN_MODE_RUNNING ? RUN_MODE_RUNNING : RUN_MODE_IDLE,
         windows: Number.isFinite(run?.windows) ? Number(run.windows) : 0,
+        busy: Number.isFinite(run?.busy) ? Math.max(0, Number(run.busy)) : 0,
     };
 }
 
@@ -261,22 +286,58 @@ export function getRunState() {
  * ⚠️ **写完就同步顶栏那个状态位** ⇒ ⇒ 「在跑」**看得见**（裁决 G）⇒ ⇒
  * 状态位**不另订阅** ⇒ ⇒ 少一条同步路径 ⇒ ⇒ 少一处可能不同步的地方。
  *
- * @param {{mode?: string, windows?: number}} next
- * @returns {{mode: string, windows: number}} 写进去的那一份
+ * ⚠️ **两个视图都发布**（STAGE-38 · v0.53 批 · 裁决 M）⇒ ⇒ 寄存器视图
+ * 也要跟着隐藏活值 ⇒ ⇒ 不发布它的话它会**等到下一次 M-10 刷新**才变
+ * ⇒ ⇒ 「停止后自动恢复最新值」会**慢一拍**。
+ *
+ * @param {{mode?: string, windows?: number, busy?: number}} next
+ * @returns {{mode: string, windows: number, busy: number}} 写进去的那一份
  */
 export function setRunState(next) {
     const mode = next?.mode === RUN_MODE_RUNNING ? RUN_MODE_RUNNING : RUN_MODE_IDLE;
     const windows = Number.isFinite(next?.windows) ? Number(next.windows) : 0;
+    const busy = Number.isFinite(next?.busy) ? Math.max(0, Number(next.busy)) : 0;
     viewStore.setState("debug", (prev) => ({
         ...prev,
         debug: {
             ...(prev.debug ?? {}),
-            run: { mode, windows },
+            run: { mode, windows, busy },
         },
     }));
     publishViewState("debug");
+    // ⚠️ **寄存器视图也要跟着变**（裁决 M）⇒ ⇒ 它读的是**同一份** `debug.run`
+    // ⇒ ⇒ 不是第二个真相。
+    publishViewState("regmem");
     syncTopbarRunStatus();
-    return { mode, windows };
+    // ⚠️ **顶栏那一份活值也要跟着隐藏 / 恢复** ⇒ ⇒ 与视图**同拍** ⇒ ⇒
+    // 不等下一次 M-10 刷新（那最多差 200 ms）。
+    syncTopbarStats(topbarServices);
+    return { mode, windows, busy };
+}
+
+/**
+ * 「**内核真的在执行**吗」（STAGE-38 · v0.53 批 · 裁决 A）。
+ *
+ * ⚠️ **这是全前端唯一的「运行中」判据** ⇒ ⇒ 顶栏 / 调试视图 / 寄存器
+ * 视图 / 「读内存」的拒绝**全都问它** ⇒ ⇒ 一处口径 ⇒ ⇒ 不会各自漂。
+ *
+ * @returns {boolean}
+ */
+export function isRunning() {
+    return isKernelRunning(getRunState());
+}
+
+/**
+ * 在途计数 ±1（STAGE-38 · v0.53 批 · 裁决 B）。
+ *
+ * ⚠️ **只数 `Continue`**（F2：`StepN` 通常**不**产 `Halted` ⇒ ⇒ 数它就得
+ * 再要一条退休路径 ⇒ ⇒ 两个真相）⇒ ⇒ 退休点**只有一处**（`halted` 订阅）。
+ *
+ * @param {number} delta — `+1` / `-1`
+ * @returns {{mode: string, windows: number, busy: number}}
+ */
+function bumpRunBusy(delta) {
+    return setRunState(bumpBusy(getRunState(), delta));
 }
 
 /**
@@ -312,8 +373,12 @@ export function syncTopbarRunStatus() {
  * ⚠️ **不显示指令退休计数** —— 契约层的 `SimState` **没有**那个字段 ⇒ ⇒
  * 无数据来源 ⇒ ⇒ **不编造**（规格 §2 裁决 E）。
  *
+ * ⚠️ **运行中显示固定符号 `-`**（STAGE-38 · v0.53 批 · 裁决 D / E）
+ * ⇒ ⇒ 显示的那一份**隐藏**、原始 ps 属性**保留真实值**（那是真机门禁
+ * **测量**虚拟时间增长的通道 ⇒ ⇒ 隐藏它就等于把门禁的尺子藏起来）。
+ *
  * @param {{registerMemory?: object}} services
- * @returns {{pc: number, timeVirt: number}|null}
+ * @returns {{pc: number, timeVirt: number, hidden: boolean}|null}
  */
 export function syncTopbarStats(services) {
     const pcEl = document.querySelector("[data-topbar-pc-value]");
@@ -322,15 +387,19 @@ export function syncTopbarStats(services) {
     const snap = services?.registerMemory?.getSnapshot?.() ?? null;
     const pc = Number(snap?.pc ?? 0) >>> 0;
     const timeVirt = Number(snap?.timeVirt ?? 0);
-    if (pcEl) pcEl.textContent = `0x${pc.toString(16).padStart(8, "0")}`;
+    const running = isRunning();
+    if (pcEl) pcEl.textContent = liveValue(running, `0x${pc.toString(16).padStart(8, "0")}`);
     if (timeEl) {
-        timeEl.textContent = formatVirtualTime(timeVirt);
+        timeEl.textContent = liveValue(running, formatVirtualTime(timeVirt));
         // ⚠️ **同时挂一个原始 ps** ⇒ ⇒ 显示是**人类可读**的自适应单位，
         // 而「同一个状态源」那条判据**逐字可比**（视图里那份是 `123 ps`
         // 这种原始格式）⇒ ⇒ **可读性与判别力两者都要**。
+        //
+        // ⚠️ **运行中这个属性仍然是真实值**（裁决 E）⇒ ⇒ 那是**测量通道**，
+        // 不是显示 ⇒ ⇒ 隐藏它等于把真机门禁的尺子藏起来。
         timeEl.setAttribute("data-topbar-time-ps", String(timeVirt));
     }
-    return { pc, timeVirt };
+    return { pc, timeVirt, hidden: running };
 }
 
 /**
@@ -338,6 +407,18 @@ export function syncTopbarStats(services) {
  * @type {(() => void)|null}
  */
 let topbarStatsUnsubscribe = null;
+
+/**
+ * 顶栏那条运行条**当前挂着的 services**（STAGE-38 · v0.53 批）。
+ *
+ * ⚠️ **为什么需要它**：运行状态一变（开始 / 停止）顶栏那一份活值就要
+ * 跟着**隐藏 / 恢复**⇒ ⇒ 而 `setRunState()` 手上**没有** services ⇒ ⇒
+ * 这里留一份**引用**（**不是**状态的第二份拷贝 —— 状态仍然只有 M-10 的
+ * 快照那一份）⇒ ⇒ 顶栏与视图**同拍**。
+ *
+ * @type {object|null}
+ */
+let topbarServices = null;
 
 /**
  * 接线**顶栏那条全局运行条**（STAGE-34 · v0.49 批 · 裁决 K）。
@@ -355,6 +436,9 @@ let topbarStatsUnsubscribe = null;
 export function wireTopbarRunbar(services) {
     const bar = document.querySelector("[data-topbar-runbar]");
     if (!bar) return;
+    // ⚠️ **记住 services**（STAGE-38 · v0.53 批）⇒ ⇒ 运行状态一变就能
+    // 立刻把顶栏那一份活值**隐藏 / 恢复**⇒ ⇒ 不等下一次 M-10 刷新。
+    topbarServices = services ?? null;
     bar.querySelector('[data-topbar-action="run"]')
         ?.addEventListener("click", () => {
             void handleCommand({ action: "continue" }, services);
@@ -1089,11 +1173,18 @@ export async function handleCommand(detail, services) {
                 // 连点两下不会变成两个并行窗口。
                 if (getRunState().mode === RUN_MODE_RUNNING) break;
                 setRunState(startRunState());
+                // ⚠️ **在途计数 +1**（STAGE-38 · v0.53 批 · 裁决 B）⇒ ⇒
+                // 「内核手上真的有一个窗口在跑」⇒ ⇒ 活值**立刻**隐藏。
+                bumpRunBusy(+1);
                 try {
                     await commandRouter.dispatchCommand(Command.continueRun());
                 } catch (err) {
                     // ⚠️ **发不出去 ⇒ 退出连续模式** ⇒ ⇒ 否则界面显示
                     // 「在跑」而内核**根本没跑** ⇒ ⇒ 那是界面在骗人。
+                    //
+                    // ⚠️ **计数也要退回来**（裁决 B）⇒ ⇒ 否则内核**根本没跑**
+                    // 而计数说「在跑」⇒ ⇒ 活值会**永远**藏着 ⇒ ⇒ 界面在骗人。
+                    bumpRunBusy(-1);
                     setRunState(stopRunState(getRunState()));
                     throw err;
                 }
@@ -1151,6 +1242,18 @@ export async function handleCommand(detail, services) {
                 break;
             }
             case "read-mem":
+                // ⚠️ **运行中不许读内存**（STAGE-38 · v0.53 批 · 裁决 F）
+                // ⇒ ⇒ **拒绝执行** + **弹窗** ⇒ ⇒ 「请先暂停再读」。
+                //
+                // ⚠️ **拒绝的是「执行」不是「显示」** ⇒ ⇒ `ReadMemory`
+                // **根本不发出去** ⇒ ⇒ 不是「读了但不给看」。
+                //
+                // ⚠️ **判据是「内核真的在执行」**（`isRunning()`）⇒ ⇒ 连续
+                // 模式**或**脚本口跑的那一个窗口都算 ⇒ ⇒ 一个判据。
+                if (isRunning()) {
+                    showAlert(READ_MEMORY_BLOCKED_MESSAGE);
+                    break;
+                }
                 await registerMemory.readMemory(0x100, "Word");
                 break;
             case "disasm": {
@@ -2153,20 +2256,33 @@ export function wireDebug(commandRouter) {
         // Node 侧**零 DOM** 就能验 ⇒ ⇒ 这里只是一次**调用**。
         const run = getRunState();
         const action = nextRunAction({ mode: run.mode, reason });
+        // ⚠️ **在途计数 −1**（STAGE-38 · v0.53 批 · 裁决 B）⇒ ⇒ 一次执行
+        // ⇒ ⇒ 一次停下报告 ⇒ ⇒ 这里**就是**那个退休点（**只有一处** ⇒ ⇒
+        // 不是第二个真相）。
+        const next = runStateAfter(run, reason);
+        const busy = Math.max(0, next.busy - 1);
         if (action === RUN_ACTION_CONTINUE) {
-            setRunState(runStateAfter(run, reason));
+            // ⚠️ ⚠️ **先减后加在同一个值里算完**（裁决 C · 施工期订正 2）
+            // ⇒ ⇒ 「内核让出控制权」的那一瞬间计数**不**会掉到 0 ⇒ ⇒
+            // 界面**不会**把活值闪出来一下 ⇒ ⇒ **顺序是硬约束**。
+            setRunState({ ...next, busy: busy + 1 });
             // ⚠️ **不 await** ⇒ ⇒ 这个订阅回调**不等**内核 ⇒ ⇒ 事件处理
             // 不会卡住 ⇒ ⇒ 错误也不往这里抛（抛了就是**未处理的拒绝**）。
             void Promise.resolve(commandRouter.dispatchCommand(Command.continueRun()))
                 .catch(() => {
                     // ⚠️ **续发失败 ⇒ 退出连续模式** ⇒ ⇒ 界面不再显示
                     // 「在跑」⇒ ⇒ 状态位不会骗人。
+                    //
+                    // ⚠️ **计数也要退回来**⇒ ⇒ 否则内核**根本没跑**而计数说
+                    // 「在跑」⇒ ⇒ 活值会**永远**藏着 ⇒ ⇒ 界面在骗人。
+                    bumpRunBusy(-1);
                     setRunState(stopRunState(getRunState()));
                 });
-        } else if (action === RUN_ACTION_STOP) {
+        } else {
             // ⚠️ **真停**（断点 / 观察点 / 陷阱 / 用户暂停）⇒ ⇒ 退出连续模式
-            // ⇒ ⇒ **不续发** ⇒ ⇒ 连续模式在断点后**不会**继续跑。
-            setRunState(runStateAfter(run, reason));
+            // ⇒ ⇒ **不续发** ⇒ ⇒ 连续模式在断点后**不会**继续跑
+            // ⇒ ⇒ 活值**恢复显示**（`isRunning()` 变成假）。
+            setRunState({ ...next, busy });
         }
         publishViewState("debug");
     });
@@ -2424,8 +2540,23 @@ export function exposeScriptCommands(commandRouter) {
          * ⚠️ **超时放宽到 30 s**：M-05 的默认超时是 500 ms，而真实 RTOS
          * 跑一批（到下一个事件 / 断点）常常超过它 ⇒ 默认值会让这条命令
          * **假超时**（内核还在跑，前端却报了 `E_CTX-06`）。
+         *
+         * ⚠️ **在途计数 +1**（STAGE-38 · v0.53 批 · F9 / F10）⇒ ⇒ 脚本口
+         * 跑的那**一个**窗口也算「运行中」⇒ ⇒ 活值**也**隐藏 ⇒ ⇒ 否则
+         * 「运行中」只看 `debug.run.mode` 就会漏掉这一种。
+         *
+         * ⚠️ **退休点在 `halted` 订阅**（裁决 B）⇒ ⇒ 这里**只**加不减 ⇒ ⇒
+         * 减的地方**只有一处** ⇒ ⇒ 不是第二个真相。
          */
-        continueRun: () => dispatch(Command.continueRun(), 30000),
+        continueRun: () => {
+            bumpRunBusy(+1);
+            return dispatch(Command.continueRun(), 30000).catch((err) => {
+                // ⚠️ **发不出去 ⇒ 计数退回来**⇒ ⇒ 否则内核**根本没跑**而
+                // 计数说「在跑」⇒ ⇒ 活值会**永远**藏着 ⇒ ⇒ 界面在骗人。
+                bumpRunBusy(-1);
+                throw err;
+            });
+        },
     };
 }
 

@@ -1,4 +1,5 @@
 // STAGE-37 · v0.52 批 —— **连续运行**的纯函数。
+// STAGE-38 · v0.53 批 —— **「运行中」的判据**与**活值的隐藏口径**（同一模块）。
 //
 // ## 为什么要有这个模块
 //
@@ -12,6 +13,13 @@
 // ⚠️ **为什么不写在 app 层直接判**：那样判据就得靠「整条链路跑一遍」才测得到
 // ⇒ ⇒ 一旦中间某个环节坏了，判据**分不清**是哪一环坏的 ⇒ ⇒ 本模块让
 // **四种停下原因 × 两种模式**的组合**逐一**可验。
+//
+// ## v0.53 批加的两件事（同一个模块，同一条理由）
+//
+// - **「运行中」的判据**（`isKernelRunning`）：连续模式**或**有在途的
+//   `Continue` ⇒ ⇒ 脚本口跑的那**一个**窗口也盖得住（F9 / F10）。
+// - **活值的隐藏口径**（`liveValue`）：运行中一律显示**固定符号 `-`**
+//   ⇒ ⇒ 三处（调试视图 / 寄存器视图 / 顶栏）用**同一个词** ⇒ ⇒ 不是三份实现。
 //
 // ## 两个数不是同一个数（裁决 B / F5 同形）
 //
@@ -116,10 +124,96 @@ const STOP_REASONS = Object.freeze(new Set([
 /**
  * 初始的运行状态。
  *
- * @returns {{mode: string, windows: number}}
+ * ⚠️ **`busy` = 在途的 `Continue` 计数**（STAGE-38 · v0.53 批 · 裁决 B）
+ * ⇒ ⇒ 初值是 0（没有在途的执行）。
+ *
+ * @returns {{mode: string, windows: number, busy: number}}
  */
 export function initialRunState() {
-    return { mode: RUN_MODE_IDLE, windows: 0 };
+    return { mode: RUN_MODE_IDLE, windows: 0, busy: 0 };
+}
+
+/**
+ * 在途计数（**只读**· 读的时候补默认值）。
+ *
+ * ⚠️ **不是布尔**：它是**个数** ⇒ ⇒ 两个 `Continue` 同时在途就是 2
+ * ⇒ ⇒ 一次 `Halted` 只抵一个 ⇒ ⇒ 计数**不会**被提前抵消。
+ *
+ * @param {{busy?: number}|undefined} state
+ * @returns {number}
+ */
+export function busyOf(state) {
+    const raw = state?.busy;
+    return Number.isFinite(raw) ? Math.max(0, Number(raw)) : 0;
+}
+
+/**
+ * 「**内核真的在执行**吗」（STAGE-38 · v0.53 批 · 裁决 A）。
+ *
+ * ⚠️ **两个来源、但只有一个判据**：
+ *
+ * - `mode === "running"` ⇒ ⇒ 连续模式**正在跑**（哪怕此刻内核刚好让出
+ *   控制权、在两个窗口之间 ⇒ ⇒ 界面**不该**把活值闪出来一下 ⇒ ⇒ 裁决 C）；
+ * - `busy > 0` ⇒ ⇒ 有在途的 `Continue`（脚本口 `window.riscv_kernel
+ *   .continueRun()` 跑的那**一个**窗口就是这种 ⇒ ⇒ F9 / F10）。
+ *
+ * ⚠️ **为什么不能只看 `mode`**：脚本口那个窗口**不是**连续模式 ⇒ ⇒
+ * 只看 `mode` 的话，脚本跑的时候界面照样闪 ⇒ ⇒ 零判别力。
+ *
+ * @param {{mode?: string, busy?: number}|undefined} state
+ * @returns {boolean}
+ */
+export function isKernelRunning(state) {
+    const mode = state?.mode === RUN_MODE_RUNNING ? RUN_MODE_RUNNING : RUN_MODE_IDLE;
+    return mode === RUN_MODE_RUNNING || busyOf(state) > 0;
+}
+
+/**
+ * 在途计数 ±1（STAGE-38 · v0.53 批 · 裁决 B）。
+ *
+ * ⚠️ **永远不小于 0** ⇒ ⇒ 「多来一次 `Halted`」不会把计数推成负数
+ * ⇒ ⇒ 负数会让 `busy > 0` 这个判据**假假**。
+ *
+ * ⚠️ **只改 `busy`** ⇒ ⇒ 模式与轮数**逐字不动** ⇒ ⇒ 这条函数**不碰**
+ * 连续运行的语义。
+ *
+ * @param {{mode?: string, windows?: number, busy?: number}|undefined} state
+ * @param {number} delta — 通常是 `+1` 或 `-1`
+ * @returns {{mode: string, windows: number, busy: number}}
+ */
+export function bumpBusy(state, delta) {
+    const prev = state && typeof state === "object" ? state : initialRunState();
+    const mode = prev.mode === RUN_MODE_RUNNING ? RUN_MODE_RUNNING : RUN_MODE_IDLE;
+    const windows = Number.isFinite(prev.windows) ? Number(prev.windows) : 0;
+    const step = Number.isFinite(delta) ? Number(delta) : 0;
+    return { mode, windows, busy: Math.max(0, busyOf(prev) + step) };
+}
+
+/**
+ * 活值被隐藏时的**固定符号**（STAGE-38 · v0.53 批 · 裁决 D）。
+ *
+ * ⚠️ **是符号不是文案** ⇒ ⇒ 用户一眼就知道「这里没有值」⇒ ⇒
+ * 不是「暂无数据」那种**占位文案**（用户拍定的形态）。
+ *
+ * @type {string}
+ */
+export const LIVE_HIDDEN_SYMBOL = "-";
+
+/**
+ * 活值的显示口径（STAGE-38 · v0.53 批 · 裁决 D）。
+ *
+ * ⚠️ **三处（调试视图 / 寄存器视图 / 顶栏）共用这一个函数** ⇒ ⇒
+ * 「界面上显示的」与「判据说看到的」**天然对得上** ⇒ ⇒ 不是三份实现。
+ *
+ * ⚠️ **不是冻结旧值**：运行中返回 `-`（**没有**旧值）⇒ ⇒ 停止后
+ * 调同一个函数就**自动**恢复最新值 ⇒ ⇒ 不需要「恢复」这一步。
+ *
+ * @param {boolean} running — 「内核真的在执行」吗
+ * @param {unknown} text — 不运行时要显示的那一份
+ * @returns {string}
+ */
+export function liveValue(running, text) {
+    return running === true ? LIVE_HIDDEN_SYMBOL : String(text);
 }
 
 /**
@@ -165,22 +259,26 @@ export function nextRunAction(input) {
  * ⚠️ **`none` 时整个状态原样返回** ⇒ ⇒ 「不认识就不动」在状态上也是
  * **真的不动**（不是「动了但看起来一样」）。
  *
- * @param {{mode?: string, windows?: number}} state
+ * ⚠️ **`busy` 一律保留**（STAGE-38 · v0.53 批 · 裁决 B）⇒ ⇒ 在途计数
+ * **不由**这条函数管（它由「在途 `Continue`」那条线管）⇒ ⇒ 这里**只**搬它。
+ *
+ * @param {{mode?: string, windows?: number, busy?: number}} state
  * @param {string|null} reason
- * @returns {{mode: string, windows: number}}
+ * @returns {{mode: string, windows: number, busy: number}}
  */
 export function runStateAfter(state, reason) {
     const prev = state && typeof state === "object" ? state : initialRunState();
     const mode = prev.mode === RUN_MODE_RUNNING ? RUN_MODE_RUNNING : RUN_MODE_IDLE;
     const windows = Number.isFinite(prev.windows) ? Number(prev.windows) : 0;
+    const busy = busyOf(prev);
     const action = nextRunAction({ mode, reason });
     if (action === RUN_ACTION_CONTINUE) {
-        return { mode: RUN_MODE_RUNNING, windows: windows + 1 };
+        return { mode: RUN_MODE_RUNNING, windows: windows + 1, busy };
     }
     if (action === RUN_ACTION_STOP) {
-        return { mode: RUN_MODE_IDLE, windows };
+        return { mode: RUN_MODE_IDLE, windows, busy };
     }
-    return { mode, windows };
+    return { mode, windows, busy };
 }
 
 /**
@@ -189,20 +287,27 @@ export function runStateAfter(state, reason) {
  * ⚠️ **windows 归零**：这是一趟**新的**连续运行 ⇒ ⇒ 上一趟跑了多少轮
  * 与这一趟无关 ⇒ ⇒ 归零。
  *
- * @returns {{mode: string, windows: number}}
+ * ⚠️ **busy 也归零**（STAGE-38 · v0.53 批）⇒ ⇒ 新的连续运行**接管**了
+ * 在途计数 ⇒ ⇒ 上一趟残留的在途数**不作数**。
+ *
+ * @returns {{mode: string, windows: number, busy: number}}
  */
 export function startRunState() {
-    return { mode: RUN_MODE_RUNNING, windows: 0 };
+    return { mode: RUN_MODE_RUNNING, windows: 0, busy: 0 };
 }
 
 /**
- * 退出连续运行模式（**保留** `windows`）。
+ * 退出连续运行模式（**保留** `windows` 与 `busy`）。
  *
- * @param {{mode?: string, windows?: number}} [state]
- * @returns {{mode: string, windows: number}}
+ * ⚠️ **`busy` 也保留**（STAGE-38 · v0.53 批 · 裁决 A）⇒ ⇒ 「暂停」只是
+ * **停续发**⇒ ⇒ 正在跑的那**一个**窗口还在跑 ⇒ ⇒ 那段时间**仍然**算
+ * 「运行中」⇒ ⇒ 活值**不**会提前闪出来。
+ *
+ * @param {{mode?: string, windows?: number, busy?: number}} [state]
+ * @returns {{mode: string, windows: number, busy: number}}
  */
 export function stopRunState(state) {
     const prev = state && typeof state === "object" ? state : initialRunState();
     const windows = Number.isFinite(prev.windows) ? Number(prev.windows) : 0;
-    return { mode: RUN_MODE_IDLE, windows };
+    return { mode: RUN_MODE_IDLE, windows, busy: busyOf(prev) };
 }
