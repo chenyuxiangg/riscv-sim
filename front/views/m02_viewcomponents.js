@@ -25,7 +25,10 @@ import { route } from "./m01_workbench.js";
 import { escapeHtml } from "../lib/escape.js";
 // ⚠️ **宽度三档只用契约镜像的那一份**（STAGE-39 · v0.54 批 · 裁决 D）⇒ ⇒
 // `Byte` / `Half` / `Word` **不新造**枚举 ⇒ ⇒ 前端与内核说的是同一组词。
-import { WRITE_SIZE } from "../lib/message.js";
+//
+// ⚠️ **转储长度上限也只用契约镜像的那一份**（契约 v9 · 裁决 K）⇒ ⇒ 界面上的
+// 「≤ 4096」不是**抄**出来的字面量 ⇒ ⇒ 它跟着镜像走 ⇒ ⇒ 夹具一改就红。
+import { DUMP_MAX_BYTES, WRITE_SIZE } from "../lib/message.js";
 // ⚠️ **「运行中」的判据与活值的隐藏口径**（STAGE-38 · v0.53 批）⇒ ⇒
 // 「内核真的在执行吗」与「运行中显示什么」**各只有一处** ⇒ ⇒ 顶栏 /
 // 调试视图 / 寄存器视图**共用**同一套口径 ⇒ ⇒ 不会一个藏了一个没藏。
@@ -840,6 +843,189 @@ export function renderMemoryReadRow({ draft = "", size = WRITE_SIZE.Word, error 
         </div>`;
 }
 
+// ---------------------------------------------------------------------------
+// 契约 v9 · 调试器增强批（符号查询 + 条件断点 + 整段转储）
+//
+// ⚠️ **DOM 契约逐字照规格 §5.1 / §5.2** ⇒ ⇒ `data-cond-input` /
+//   `data-bp-cond-input` / `data-bp-cond-error` / `data-symbol-input` /
+//   `data-bp-symbol-input` / `data-action="lookup-symbol"` /
+//   `data-bp-symbol-error` / `data-bp-symbol-candidates` /
+//   `data-dump-input` / `data-dump-addr-input` / `data-dump-len-input` /
+//   `data-action="dump-memory"` / `data-dump-error` / `data-mem-dump`。
+//
+// ⚠️ **视图层是纯渲染**：不碰命令、不发请求、不解析条件表达式 ⇒ ⇒
+//   条件**是不是合法**由**内核**说（前端只显示它的原文）。
+// ---------------------------------------------------------------------------
+
+/**
+ * **条件表达式**输入行（共享片段 · 契约 v9 §5.1 · 裁决 O）。
+ *
+ * ⚠️ **一个条件框，地址断点与符号断点共用** ⇒ ⇒ 不为符号断点单开一个。
+ *
+ * ⚠️ **前端不解析条件** ⇒ ⇒ 这里**只**是一个文本框 ⇒ ⇒ 合法性由内核判
+ *   （`E_DBG-02`）⇒ ⇒ 前端显示内核原文。
+ *
+ * @param {{draft?: string, error?: string}} [opts]
+ * @returns {string}
+ */
+export function renderBreakpointCondRow({ draft = "", error = "" } = {}) {
+    return `
+        <div class="cond-input" data-cond-input="breakpoint">
+            <input type="text" class="addr-field" data-bp-cond-input value="${escapeHtml(draft)}"
+                placeholder="条件（可选），例如 x1 == 5" spellcheck="false" autocomplete="off">
+            <span class="addr-error" data-bp-cond-error>${escapeHtml(error)}</span>
+        </div>`;
+}
+
+/**
+ * 一条符号候选的**可点按钮**（契约 v9 §5.1 · 裁决 N）。
+ *
+ * ⚠️ **点一下直接下断点** ⇒ ⇒ `<select>` 的「先选中、再点按钮」那**两步**
+ *   被省掉 ⇒ ⇒ 多一步零收益。
+ *
+ * ⚠️ **形状钉死**（真机门禁按**具体值**断言）：`class="symbol-candidate"` ·
+ *   `data-addr` = `0x` + **8 位小写**十六进制 · `data-symbol` = 符号名 ·
+ *   按钮文本 = `<名字> @ <地址>`。
+ *
+ * ⚠️ **没有地址的符号**（`addr === null`）**不能**下断点 ⇒ ⇒ 如实显示成
+ *   一行字（**不编**一个地址出来）⇒ ⇒ 它的 class **不是**
+ *   `symbol-candidate` ⇒ ⇒ 「可点的候选个数」不被它污染。
+ *
+ * @param {{name?: string, addr?: number|null, size?: number|null}} symbol
+ * @returns {string}
+ */
+export function renderSymbolCandidate(symbol) {
+    const name = String(symbol?.name ?? "");
+    const addr = symbol?.addr;
+    if (typeof addr !== "number" || !Number.isFinite(addr)) {
+        return `<span class="muted symbol-candidate-na" data-bp-symbol-name="${escapeHtml(name)}">${escapeHtml(name)}（无地址，不能下断点）</span>`;
+    }
+    const addrText = `0x${(addr >>> 0).toString(16).padStart(8, "0")}`;
+    return `<button type="button" class="symbol-candidate" data-action="set-symbol-breakpoint"
+        data-addr="${addrText}" data-symbol="${escapeHtml(name)}">${escapeHtml(name)} @ ${addrText}</button>`;
+}
+
+/**
+ * 候选区（契约 v9 §5.1）。
+ *
+ * ⚠️ **精确命中也在列表里，且排第一** ⇒ ⇒ 用户填了全名 ⇒ ⇒ 列表里就是
+ *   那一条 ⇒ ⇒ 点它。
+ *
+ * ⚠️ **「没有这个符号」有两态**（C-6）：`total == 0` ⇒ ⇒ 这个镜像**没有
+ *   符号表**（可能被 strip 了）；`total > 0` ⇒ ⇒ 这个镜像**共有 N 个符号**
+ *   ⇒ ⇒ 两态**必须能区分**（否则用户分不清「镜像没符号」与「名字写错了」）。
+ *
+ * @param {{name?: string, symbol?: object|null, candidates?: object[], total?: number}|null} result
+ * @returns {string}
+ */
+export function renderSymbolCandidates(result) {
+    if (!result) return "";
+    const exact = result.symbol ?? null;
+    const candidates = Array.isArray(result.candidates) ? result.candidates : [];
+    const total = Number(result.total ?? 0);
+    if (!exact && candidates.length === 0) {
+        const why = total === 0
+            ? "这个镜像没有符号表（可能被 strip 了）"
+            : `这个镜像共有 ${total} 个符号`;
+        return `<p class="muted" data-bp-symbol-empty>没有这个符号 —— ${escapeHtml(why)}</p>`;
+    }
+    const items = [];
+    if (exact) items.push(exact);
+    for (const c of candidates) items.push(c);
+    return items.map((s) => renderSymbolCandidate(s)).join("");
+}
+
+/**
+ * **符号查询**入口（共享片段 · 契约 v9 §5.1 · 裁决 L / M / N）。
+ *
+ * ⚠️ **与地址框分开的另一个入口**（裁决 L）⇒ ⇒ 「符号」框**只**收符号名、
+ *   「地址」框**只**收十六进制地址 ⇒ ⇒ 不做「一个框自动分流」。
+ *
+ * ⚠️ **查询按显式动作触发**（裁决 M：「查找」按钮 / 回车）⇒ ⇒ 一次输入 =
+ *   一次查询 ⇒ ⇒ 没有「边打字边查」的乱序问题。
+ *
+ * @param {{draft?: string, error?: string, result?: object|null}} [opts]
+ * @returns {string}
+ */
+export function renderSymbolLookupRow({ draft = "", error = "", result = null } = {}) {
+    const query = result ? String(result.name ?? "") : "";
+    return `
+        <div class="symbol-input" data-symbol-input="breakpoint">
+            <input type="text" class="addr-field" data-bp-symbol-input value="${escapeHtml(draft)}"
+                placeholder="符号名（例如 main）" spellcheck="false" autocomplete="off">
+            <button type="button" data-action="lookup-symbol">查找</button>
+            <span class="addr-error" data-bp-symbol-error>${escapeHtml(error)}</span>
+            <div class="symbol-candidates" data-bp-symbol-candidates${query ? ` data-bp-symbol-query="${escapeHtml(query)}"` : ""}>${renderSymbolCandidates(result)}</div>
+        </div>`;
+}
+
+/**
+ * **整段转储**的输入行（共享片段 · 契约 v9 §5.2 · 裁决 D / P）。
+ *
+ * ⚠️ **上限的字面量来自契约镜像**（`DUMP_MAX_BYTES`）⇒ ⇒ 界面上的
+ *   「≤ 4096」不是抄的 ⇒ ⇒ 夹具一改，界面跟着改。
+ *
+ * @param {{addrDraft?: string, lenDraft?: string, error?: string}} [opts]
+ * @returns {string}
+ */
+export function renderMemoryDumpRow({ addrDraft = "", lenDraft = "256", error = "" } = {}) {
+    return `
+        <div class="dump-input" data-dump-input="memory">
+            <input type="text" class="addr-field" data-dump-addr-input value="${escapeHtml(addrDraft)}"
+                placeholder="转储起始地址（十六进制）" spellcheck="false" autocomplete="off">
+            <input type="text" class="addr-field" data-dump-len-input value="${escapeHtml(lenDraft)}"
+                placeholder="字节数（≤ ${DUMP_MAX_BYTES}）" spellcheck="false" autocomplete="off">
+            <button type="button" data-action="dump-memory">转储</button>
+            <span class="addr-error" data-dump-error>${escapeHtml(error)}</span>
+        </div>`;
+}
+
+/**
+ * 转储结果（**偏移 | 十六进制 | ASCII** 三列 · 契约 v9 §5.2）。
+ *
+ * ⚠️ **形状钉死**（真机门禁按**具体值**断言）：
+ *   - 外层是 `<div class="mem-dump" data-mem-dump>` ⇒ ⇒ 里面是
+ *     `<table class="dump-table">`；
+ *   - **偏移列**：**8 位小写十六进制**、**不带** `0x` 前缀（相对转储起点）；
+ *   - **十六进制列**：每字节 **2 位小写**十六进制、**空格分隔**、**每行 16
+ *     字节**（最后一行可以不足 16 个）；
+ *   - **ASCII 列**：`0x20`..`0x7e` **原样**，其余一律 `.`；
+ *   - ⚠️ **字节序按地址递增**（低地址在前）。
+ *
+ * ⚠️ **两个计数写进容器**（`data-mem-dump-rows` / `data-mem-dump-bytes`）
+ *   ⇒ ⇒ 判据能断言**具体数字**（不是「非空」）。
+ *
+ * @param {{addr?: number, bytes?: number[]}|null} dump
+ * @returns {string}
+ */
+export function renderMemoryDump(dump) {
+    const bytes = dump && Array.isArray(dump.bytes) ? dump.bytes : [];
+    const rows = [];
+    for (let i = 0; i < bytes.length; i += 16) {
+        const chunk = bytes.slice(i, i + 16);
+        const hex = chunk.map((b) => (Number(b) & 0xff).toString(16).padStart(2, "0")).join(" ");
+        const ascii = chunk
+            .map((b) => {
+                const v = Number(b) & 0xff;
+                return v >= 0x20 && v <= 0x7e ? String.fromCharCode(v) : ".";
+            })
+            .join("");
+        const off = i.toString(16).padStart(8, "0");
+        rows.push(`<tr class="dump-row" data-dump-off="${off}">
+            <td class="dump-off">${off}</td>
+            <td class="dump-hex">${escapeHtml(hex)}</td>
+            <td class="dump-ascii">${escapeHtml(ascii)}</td>
+        </tr>`);
+    }
+    const body = rows.length === 0
+        ? `<p class="muted" data-mem-dump-empty>尚无转储 — 在上面填起始地址与字节数，点「转储」。</p>`
+        : `<table class="dump-table">
+            <thead><tr><th>偏移</th><th>十六进制</th><th>ASCII</th></tr></thead>
+            <tbody>${rows.join("")}</tbody>
+        </table>`;
+    return `<div class="mem-dump" data-mem-dump data-mem-dump-rows="${rows.length}" data-mem-dump-bytes="${bytes.length}">${body}</div>`;
+}
+
 /**
  * ⚠️ **草稿的共享命名空间**（STAGE-39 · v0.54 批 · 裁决 G）。
  *
@@ -856,19 +1042,37 @@ export function renderMemoryReadRow({ draft = "", size = WRITE_SIZE.Word, error 
 export const DEBUGGER_STATE_KEY = "debugger";
 
 /**
- * 读**当前草稿**（断点地址 / 读内存地址 / 宽度）。
+ * 读**当前草稿**（断点地址 / 读内存地址 / 宽度 / 条件 / 符号 / 转储）。
  *
- * @returns {{bpAddr: string, memAddr: string, memSize: string}}
+ * ⚠️ **条件、符号、转储的草稿也住这里**（契约 v9）⇒ ⇒ 渲染会重建 DOM ⇒ ⇒
+ *   草稿住在 DOM 里会被清空（本仓踩过这个坑，D-119）⇒ ⇒ 草稿**必须**在
+ *   视图状态里。
+ *
+ * @returns {{bpAddr: string, bpCond: string, bpSymbol: string, memAddr: string, memSize: string, dumpAddr: string, dumpLen: string}}
  */
 export function debuggerDraft() {
     const s = viewStore.getState(DEBUGGER_STATE_KEY) ?? {};
     const size = String(s.memSize ?? WRITE_SIZE.Word);
     return {
         bpAddr: String(s.bpAddr ?? ""),
+        bpCond: String(s.bpCond ?? ""),
+        bpSymbol: String(s.bpSymbol ?? ""),
         memAddr: String(s.memAddr ?? ""),
         memSize: Object.prototype.hasOwnProperty.call(WRITE_SIZE, size) ? size : WRITE_SIZE.Word,
+        dumpAddr: String(s.dumpAddr ?? ""),
+        dumpLen: String(s.dumpLen ?? DEFAULT_DUMP_LEN),
     };
 }
+
+/**
+ * 转储长度的**默认草稿**（字节）。
+ *
+ * ⚠️ **只在这里写一次** ⇒ ⇒ 界面上的默认值与门禁里的默认值是**同一个数**
+ * ⇒ ⇒ 不是两个真相。
+ *
+ * @type {string}
+ */
+export const DEFAULT_DUMP_LEN = "256";
 
 /**
  * 写**草稿**（**不重渲染** · 裁决 G）。
@@ -910,11 +1114,57 @@ function setAddrError(box, selector, message) {
  * ⚠️ **解析不出来 ⇒ ⇒ 不发命令**（裁决 F）⇒ ⇒ 返回 `{invalid: true}`
  * ⇒ ⇒ 调用方**直接返回** ⇒ ⇒ **一条命令都不发**。
  *
+ * ⚠️ **契约 v9 增加了三条动作**（`lookup-symbol` / `set-symbol-breakpoint` /
+ *   `dump-memory`）⇒ ⇒ 它们的参数**也从界面来** ⇒ ⇒ 同一条路。
+ *
  * @param {string} action
  * @param {Element|null} el — 被点的那个按钮
- * @returns {{addr?: number|string, size?: string, invalid?: boolean}|null}
+ * @returns {{addr?: number|string, size?: string, name?: string, symbol?: string|null, condition?: string|null, len?: number, invalid?: boolean}|null}
  */
 function resolveAddrParams(action, el) {
+    // --- 契约 v9 的三条新动作（各有各的界面来源）--------------------------
+    if (action === "set-symbol-breakpoint") {
+        // ⚠️ 候选按钮自带 `data-addr` + `data-symbol` ⇒ ⇒ **原样带上去**
+        // ⇒ ⇒ 条件**另外**从「断点」卡那个条件框里取（裁决 O：两个入口
+        // 共用同一套条件输入）。
+        return {
+            addr: el?.dataset?.addr,
+            symbol: el?.dataset?.symbol ? String(el.dataset.symbol) : null,
+            condition: readBreakpointCondition(el),
+        };
+    }
+    if (action === "lookup-symbol") {
+        // ⚠️ **符号框只收符号名**（裁决 L）⇒ ⇒ 不做「一个框自动分流」。
+        const box = el?.closest?.("[data-symbol-input]");
+        const name = String(box?.querySelector?.("[data-bp-symbol-input]")?.value ?? "");
+        return { name };
+    }
+    if (action === "dump-memory") {
+        const box = el?.closest?.("[data-dump-input]");
+        if (!box) return null;
+        const parsed = parseAddrInput(box.querySelector("[data-dump-addr-input]")?.value ?? "");
+        if (!parsed.ok) {
+            setAddrError(box, "[data-dump-error]", parsed.error);
+            return { invalid: true };
+        }
+        // ⚠️ **前端不判长度上限**（统筹方裁定 · 2026-10-30）⇒ ⇒ **一律发
+        //   命令** ⇒ ⇒ 让**内核**拒（`E_DBG-03`）⇒ ⇒ 前端把**内核原文**
+        //   显示在 `[data-dump-error]` 上。
+        //
+        // ⚠️ **为什么**：内核是唯一真相 ⇒ ⇒ 前端不写第二份校验器 ⇒ ⇒ 前端
+        //   预校验会让「内核那条上限路径」**永远走不到** ⇒ ⇒ 真机门禁那条
+        //   断言（越界 ⇒ ⇒ `E_DBG-03` 原文上屏）就**永远红不了** ⇒ ⇒ 那是
+        //   **假绿**。
+        //
+        // ⚠️ 这里**只做「类型归一」**（线上字段是 `u32` ⇒ ⇒ 非数与负数一律
+        //   归成 `0`）⇒ ⇒ 那是**域**的归一，不是**上限**的校验 ⇒ ⇒ `0` 照样
+        //   由内核拒（`len == 0` ⇒ `E_DBG-03`）⇒ ⇒ 错误路径**可达**。
+        const rawLen = String(box.querySelector("[data-dump-len-input]")?.value ?? "").trim();
+        const parsedLen = Number(rawLen);
+        const len = Number.isFinite(parsedLen) ? Math.max(0, Math.trunc(parsedLen)) : 0;
+        setAddrError(box, "[data-dump-error]", "");
+        return { addr: parsed.value, len };
+    }
     if (action !== "set-breakpoint" && action !== "read-mem") return null;
     // --- 来源 1：按钮自带地址（旧按钮的路，一字不变）----------------------
     if (el?.dataset?.addr) return { addr: el.dataset.addr };
@@ -928,7 +1178,9 @@ function resolveAddrParams(action, el) {
             return { invalid: true };
         }
         setAddrError(box, "[data-bp-addr-error]", "");
-        return { addr: parsed.value };
+        // ⚠️ **条件框对地址断点也通用**（裁决 O）⇒ ⇒ 地址入口与符号入口
+        // 共用「断点」卡里那**一个**条件框。
+        return { addr: parsed.value, condition: readBreakpointCondition(el) };
     }
     const parsed = parseAddrInput(box.querySelector("[data-mem-addr-input]")?.value ?? "");
     if (!parsed.ok) {
@@ -941,6 +1193,30 @@ function resolveAddrParams(action, el) {
         ? rawSize
         : WRITE_SIZE.Word;
     return { addr: parsed.value, size };
+}
+
+/**
+ * 读**「断点」卡里那个条件框**的内容（契约 v9 · 裁决 O）。
+ *
+ * ⚠️ **只认「断点」卡里的那一个条件框** ⇒ ⇒ 地址入口与符号入口共用它
+ *   ⇒ ⇒ 不是两个条件框、不是两个真相。
+ *
+ * ⚠️ **反汇编行那个「加断点」按钮不在断点卡里** ⇒ ⇒ 它拿不到条件 ⇒ ⇒
+ *   发出去的是**无条件**断点（那条入口是「点一下就下断点」的快捷方式，
+ *   不是规格说的那两个入口之一）。
+ *
+ * ⚠️ **空串 ⇒ `null`**（C-9：不是空串）⇒ ⇒ 「无条件」在线上是 `null`。
+ *   ⚠️ **纯空格的串照发** ⇒ ⇒ 前端**不解析**条件表达式（那是内核的判据）
+ *   ⇒ ⇒ 内核回 `E_DBG-02` ⇒ ⇒ 前端显示它的原文。
+ *
+ * @param {Element|null} el — 被点的那个按钮
+ * @returns {string|null}
+ */
+function readBreakpointCondition(el) {
+    const card = el?.closest?.(".breakpoint-card");
+    const input = card?.querySelector?.("[data-bp-cond-input]");
+    const raw = String(input?.value ?? "");
+    return raw === "" ? null : raw;
 }
 
 /**
@@ -963,6 +1239,30 @@ function mountAddrInputListeners(el) {
             setAddrError(target.closest("[data-addr-input]"), "[data-bp-addr-error]", "");
             return;
         }
+        // ⚠️ **条件框的草稿也住视图状态**（契约 v9 · D-119）⇒ ⇒ 渲染重建
+        // DOM 时草稿不丢。
+        if (target?.closest?.("[data-bp-cond-input]")) {
+            setDebuggerDraft({ bpCond: target.value ?? "" });
+            setAddrError(target.closest("[data-cond-input]"), "[data-bp-cond-error]", "");
+            return;
+        }
+        // ⚠️ **符号框同理** ⇒ ⇒ 一次输入 = 一次查询（裁决 M）⇒ ⇒ 草稿住
+        // 状态、查询由**显式动作**触发。
+        if (target?.closest?.("[data-bp-symbol-input]")) {
+            setDebuggerDraft({ bpSymbol: target.value ?? "" });
+            setAddrError(target.closest("[data-symbol-input]"), "[data-bp-symbol-error]", "");
+            return;
+        }
+        if (target?.closest?.("[data-dump-addr-input]")) {
+            setDebuggerDraft({ dumpAddr: target.value ?? "" });
+            setAddrError(target.closest("[data-dump-input]"), "[data-dump-error]", "");
+            return;
+        }
+        if (target?.closest?.("[data-dump-len-input]")) {
+            setDebuggerDraft({ dumpLen: target.value ?? "" });
+            setAddrError(target.closest("[data-dump-input]"), "[data-dump-error]", "");
+            return;
+        }
         if (target?.closest?.("[data-mem-addr-input]")) {
             setDebuggerDraft({ memAddr: target.value ?? "" });
             setAddrError(target.closest("[data-addr-input]"), "[data-mem-addr-error]", "");
@@ -972,6 +1272,17 @@ function mountAddrInputListeners(el) {
         const target = ev.target?.closest?.("[data-mem-size]");
         if (!target) return;
         setDebuggerDraft({ memSize: target.value ?? WRITE_SIZE.Word });
+    });
+    // ⚠️ **回车 = 「查找」**（契约 v9 · 裁决 M：查询按**显式动作**触发 ⇒ ⇒
+    //   「查找」按钮 / 回车 ⇒ ⇒ 一次输入 = 一次查询 ⇒ ⇒ 没有「边打字边查」
+    //   的乱序问题）。
+    el.addEventListener("keydown", (ev) => {
+        if (ev?.key !== "Enter") return;
+        const target = ev.target?.closest?.("[data-bp-symbol-input]");
+        if (!target) return;
+        ev.preventDefault?.();
+        const params = resolveAddrParams("lookup-symbol", target) ?? {};
+        emitCommand("lookup-symbol", "debug", { name: params.name ?? "" });
     });
 }
 
@@ -1003,6 +1314,19 @@ const debugView = register({
         // ⚠️ **断点列表只有一个落点**（STAGE-35 · v0.50 批 · 裁决 K）⇒ ⇒
         // 这里**只读**视图状态 ⇒ ⇒ 视图层**不持有**第二份列表。
         const breakpoints = Array.isArray(debug.breakpoints) ? debug.breakpoints : [];
+        // ⚠️ **符号名标签**（契约 v9 §5.3）⇒ ⇒ 只是一个「地址 → 名字」的
+        //   **附注** ⇒ ⇒ 「有哪些断点」这件事**仍然只有** `breakpoints`
+        //   这**一个**落点（既有判据 A-7 不许被改软）。
+        const bpSymbols = debug.bpSymbols && typeof debug.bpSymbols === "object"
+            ? debug.bpSymbols
+            : {};
+        // ⚠️ **符号查询的答复**（一次查询的答复 ⇒ ⇒ 推导量 ⇒ ⇒ 只住视图
+        //   状态、**不持久化**）。
+        const symbolResult = debug.symbol ?? null;
+        // ⚠️ **内核原文**（不吞、不改写）⇒ ⇒ 这两位显示的是内核给的
+        //   **原文消息**（不是前端改写过的措辞）。
+        const condError = String(debug.condError ?? "");
+        const symbolError = String(debug.symbolError ?? "");
         // ⚠️ **「停下」也只有一个落点**（裁决 L）⇒ ⇒ 这里读 `debug.halt`。
         const halt = debug.halt ?? null;
         // The continuation is offered only while there is **more** to
@@ -1052,14 +1376,21 @@ const debugView = register({
                 <section class="card breakpoint-card">
                     <div class="row"><h3>断点</h3><span class="tag">${breakpoints.length} 个</span></div>
                     ${renderBreakpointAddrRow({ draft: draft.bpAddr })}
+                    ${renderBreakpointCondRow({ draft: draft.bpCond, error: condError })}
+                    ${renderSymbolLookupRow({ draft: draft.bpSymbol, error: symbolError, result: symbolResult })}
                     ${breakpoints.length === 0
                         ? `<p class="muted">尚无断点 — 在左边反汇编表的「断点」列点「加断点」，或在上面直接填地址。</p>`
                         : `<div class="bp-list" data-bp-list>${breakpoints.map((raw) => {
                             const addr = Number(raw ?? 0) >>> 0;
                             const addrText = `0x${addr.toString(16).padStart(8, "0")}`;
+                            // ⚠️ **符号名标签另起一个 `.note`**（形状钉死）⇒ ⇒
+                            // 既有那行「断点 id = 地址」**保持不变** ⇒ ⇒ 两个
+                            // `.note` 并列。
+                            const symbol = bpSymbols[String(addr)] ?? null;
                             return `
                                 <div class="bp-row" data-bp-row data-bp-addr="${addrText}">
                                     <code class="addr">${addrText}</code>
+                                    ${symbol ? `<span class="note">${escapeHtml(String(symbol))}</span>` : ""}
                                     <span class="note">断点 id = 地址</span>
                                     <button type="button" data-action="clear-breakpoint" data-addr="${addrText}">撤掉</button>
                                 </div>`;
@@ -1119,6 +1450,11 @@ const debugView = register({
         // ⚠️ **解析不出来 ⇒ ⇒ 不发命令**（裁决 F）⇒ ⇒ 「点了没反应」是最差
         // 的 UX ⇒ ⇒ 输入框旁边**就地**有提示 ⇒ ⇒ 这里**直接返回**。
         if (addrParams?.invalid === true) return undefined;
+        // ⚠️ **符号查询**（契约 v9）⇒ ⇒ 参数只有「名字」⇒ ⇒ **不**带地址
+        //   ⇒ ⇒ 一次输入 = 一次查询（裁决 M）。
+        if (action === "lookup-symbol") {
+            return emitCommand("lookup-symbol", "debug", { name: addrParams?.name ?? "" });
+        }
         // The command's parameters travel **with the signal** — the
         // bootstrap's listener runs on `window` and cannot see the button.
         return emitCommand(action, "debug", {
@@ -1326,11 +1662,17 @@ const regmemView = register({
         // ⚠️ **草稿住共享命名空间**（STAGE-39 · v0.54 批 · 裁决 G）⇒ ⇒ 与
         // 调试视图**同一份** ⇒ ⇒ 两个入口**一个真相**。
         const draft = debuggerDraft();
+        // ⚠️ **转储结果住在 M-03 视图状态**（契约 v9 §5.2）⇒ ⇒ `regmem.dump`
+        //   ⇒ ⇒ **不**另存一份。
+        const dump = viewStore.getState("regmem")?.regmem?.dump ?? null;
+        const dumpError = String(viewStore.getState("regmem")?.regmem?.dumpError ?? "");
         return `
             <section class="regmem-view">
                 <div class="card">
                     <div class="row"><h3>寄存器 / 内存 (M-10)</h3><span class="tag">变化高亮 = 与上一次读回相比</span></div>
                     ${renderMemoryReadRow({ draft: draft.memAddr, size: draft.memSize })}
+                    ${renderMemoryDumpRow({ addrDraft: draft.dumpAddr, lenDraft: draft.dumpLen, error: dumpError })}
+                    ${renderMemoryDump(dump)}
                     <div class="debug-toolbar">
                         <button type="button" data-action="read-regs">读寄存器</button>
                     </div>

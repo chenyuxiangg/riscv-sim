@@ -4,6 +4,11 @@
 //   与内核 `hit_check` 的签名**一个字没改** ⇒ ⇒ 「界面没把它们露出来」
 //   这个根因（§1.3）落地了 ⇒ ⇒ 不是「偷偷升了契约」换来的。
 //
+//   ⚠️ **v0.57 批（契约 v9）例外**：契约层**真的**升版了（8 → 9，符号查询
+//   + 条件断点 + 整段转储）⇒ ⇒ A-16 的版本字面量随之更新、判据**改名**
+//   （原名「逐字未改」已不成立）⇒ ⇒ **断言一条都没删** ⇒ ⇒ M-08 的
+//   `hit_check` 签名那条**继续**有效。
+//
 // ⚠️ **第二约束是「前端只挡『压根不是一个数』」**（裁决 E）⇒ ⇒ A-5 钉住
 //   「奇数地址**照样发**」⇒ ⇒ 前端**不许**抢内核的判据（对齐 / 是否已映射
 //   都由内核说）⇒ ⇒ **不写第二份校验器**。
@@ -486,7 +491,7 @@ describe("回显、回归与委托", () => {
 // A-15 ~ A-16：一个落点 / 零契约变更
 // ---------------------------------------------------------------------------
 
-describe("一个落点与零契约变更", () => {
+describe("一个落点与契约版本", () => {
     test("A-15 · 「解析地址」这件事**只有一处**落点", () => {
         const files = [
             ...jsFiles(resolve(frontDir, "views")),
@@ -508,16 +513,22 @@ describe("一个落点与零契约变更", () => {
         assert.equal(typeof m02.parseAddrInput, "function", "那个落点必须是导出的纯函数");
     });
 
-    test("A-16 · 契约层与内核**逐字未改**", () => {
+    test("A-16 · 契约层与内核：版本随契约 v9 升版，M-08 的 `hit_check` **一字不变**", () => {
+        // ⚠️ **原名是「契约层与内核逐字未改」** ⇒ ⇒ 那是 **v0.54 批**的
+        //   批次约束（本批零契约变更）⇒ ⇒ 契约 v9 **改了**契约层 ⇒ ⇒ 那句
+        //   话已不成立 ⇒ ⇒ 按本仓先例**收窄 + 改名**（断言一条都不删）。
+        //
+        // ⚠️ **M-08 的 `hit_check` 签名那条断言**（本批**真的**没动它 ⇒ ⇒
+        //   它**继续**有效）⇒ ⇒ 逐字保留。
         const contract = readFileSync(resolve(repoRoot, "crates/contract/src/lib.rs"), "utf8");
         assert.ok(
-            contract.includes("pub const SCHEMA_VERSION: u32 = 8;"),
-            "契约的 `SCHEMA_VERSION` 必须**仍是 8**（本批零升版）",
+            contract.includes("pub const SCHEMA_VERSION: u32 = 9;"),
+            "契约的 `SCHEMA_VERSION` 必须**是 9**（契约 v9：符号查询 + 整段转储）",
         );
         const mirror = readFileSync(resolve(frontDir, "lib/message.js"), "utf8");
         assert.ok(
-            mirror.includes("SCHEMA_VERSION = 8"),
-            "前端镜像的 `SCHEMA_VERSION` 必须**仍是 8**（前端镜像零改动）",
+            mirror.includes("SCHEMA_VERSION = 9"),
+            "前端镜像的 `SCHEMA_VERSION` 必须**是 9**（与契约层同批升版）",
         );
         const kernel = readFileSync(
             resolve(repoRoot, "crates/kernel/src/m08_breakpoint/mod.rs"),

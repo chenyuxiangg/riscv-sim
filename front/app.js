@@ -1284,14 +1284,71 @@ export async function handleCommand(detail, services) {
                 // ⚠️ **契约层早有这两条命令**（`SetBreakpoint` /
                 // `ClearBreakpoint`）⇒ ⇒ **零新命令 / 零新 DTO / 零新事件**
                 // ⇒ ⇒ 内核行为**一字不变**（脚本口走的就是同一条路）。
+                //
+                // ⚠️ **条件（契约 v9 · 裁决 O）**：条件框对**地址断点**与
+                // **符号断点**通用 ⇒ ⇒ 这里**显式**带上 ⇒ ⇒ **空 ⇒
+                // `null`**（C-9，不是空串）⇒ ⇒ 无条件断点的语义**一字不变**。
                 const addr = toInt(detail.params?.addr, 0) >>> 0;
+                const condition = normalizeCondition(detail.params?.condition);
                 requestBreakpoint(addr);
+                // ⚠️ **内核错误落在「条件」那一位** ⇒ ⇒ 先记目标位、再发命令。
+                pendingErrorSlot = "cond";
+                writeErrorSlot("cond", "");
                 await commandRouter.dispatchCommand(Command.setBreakpoint({
                     id: addr,
                     addr,
                     source_hint: null,
                     enabled: true,
+                    condition,
                 }));
+                break;
+            }
+            case "set-symbol-breakpoint": {
+                // 从**符号候选**下断点（契约 v9 · 裁决 N）。
+                //
+                // ⚠️ **id 仍然是地址**（既有「断点 id = 地址」这条内核语义
+                //   **不变**）⇒ ⇒ 前端**不需要**第二个计数器状态。
+                // ⚠️ **`source_hint` = 候选符号名** ⇒ ⇒ 列表里能显示它
+                //   （C-10）⇒ ⇒ 名字**不是**另存的一份状态 ⇒ ⇒ 它随命令走。
+                const addr = toInt(detail.params?.addr, 0) >>> 0;
+                const symbol = detail.params?.symbol ? String(detail.params.symbol) : null;
+                const condition = normalizeCondition(detail.params?.condition);
+                requestBreakpoint(addr);
+                if (symbol) labelBreakpointSymbol(addr, symbol);
+                pendingErrorSlot = "cond";
+                writeErrorSlot("cond", "");
+                await commandRouter.dispatchCommand(Command.setBreakpoint({
+                    id: addr,
+                    addr,
+                    source_hint: symbol,
+                    enabled: true,
+                    condition,
+                }));
+                break;
+            }
+            case "lookup-symbol": {
+                // 符号查询（契约 v9 · `ResolveSymbol`）。
+                //
+                // ⚠️ **一次输入 = 一次查询**（裁决 M）⇒ ⇒ 查询按**显式动作**
+                //   触发 ⇒ ⇒ 没有「边打字边查」的乱序问题。
+                // ⚠️ **空名字也照发** ⇒ ⇒ 内核拒（`E_DBG-02`）⇒ ⇒ 前端
+                //   显示**内核原文**（前端**不**写第二套校验器）。
+                const name = String(detail.params?.name ?? "");
+                pendingErrorSlot = "symbol";
+                writeErrorSlot("symbol", "");
+                await commandRouter.dispatchCommand(Command.resolveSymbol(name));
+                break;
+            }
+            case "dump-memory": {
+                // 整段转储（契约 v9 · `DumpMemory`）。
+                //
+                // ⚠️ **前端不判上限** ⇒ ⇒ **一律发命令** ⇒ ⇒ 让**内核**拒
+                //   （`E_DBG-03`）⇒ ⇒ 前端把**内核原文**显示在转储那一位。
+                const addr = toInt(detail.params?.addr, 0) >>> 0;
+                const len = toInt(detail.params?.len, 0);
+                pendingErrorSlot = "dump";
+                writeErrorSlot("dump", "");
+                await commandRouter.dispatchCommand(Command.dumpMemory(addr, len));
                 break;
             }
             case "clear-breakpoint": {
@@ -2143,15 +2200,30 @@ export function wireMemoryMap(commandRouter) {
  * @returns {number[]} 写进去的列表
  */
 function updateBreakpoints(mutator) {
-    const next = viewStore.setState("debug", (prev) => {
+    const next = updateDebugState((prev) => {
         const list = Array.isArray(prev?.debug?.breakpoints) ? prev.debug.breakpoints : [];
         return {
             ...prev,
             debug: { ...(prev.debug ?? {}), breakpoints: mutator(list) },
         };
     });
+    return next?.breakpoints ?? [];
+}
+
+/**
+ * 改**调试视图状态**并重渲染（契约 v9 · 符号标签的落点）。
+ *
+ * ⚠️ **「有哪些断点」只有一个落点**（`debug.breakpoints`，既有判据 A-7）
+ *   ⇒ ⇒ 符号名**只是附注**（`debug.bpSymbols`：地址 → 名字）⇒ ⇒ 列表的
+ *   **成员**仍由 `breakpoints` 决定 ⇒ ⇒ 不是第二个真相。
+ *
+ * @param {(prev: object) => object} mutator
+ * @returns {object} 写进去的 `debug` 子树
+ */
+function updateDebugState(mutator) {
+    const next = viewStore.setState("debug", (prev) => mutator(prev));
     publishViewState("debug");
-    return next?.debug?.breakpoints ?? [];
+    return next?.debug ?? {};
 }
 
 /**
@@ -2172,11 +2244,110 @@ export function requestBreakpoint(addr) {
 /**
  * 撤掉一个「界面请求过的断点」。
  *
+ * ⚠️ **符号标签一起撤掉** ⇒ ⇒ 列表里不会留下一个**已经没有断点**的名字
+ *   ⇒ ⇒ 标签与列表**始终一致**。
+ *
  * @param {number} addr
  * @returns {number[]} 写进去的列表
  */
 export function withdrawBreakpoint(addr) {
+    updateDebugState((prev) => {
+        const symbols = { ...(prev?.debug?.bpSymbols ?? {}) };
+        delete symbols[String(Number(addr ?? 0) >>> 0)];
+        return {
+            ...prev,
+            debug: { ...(prev.debug ?? {}), bpSymbols: symbols },
+        };
+    });
     return updateBreakpoints((list) => list.filter((a) => a !== addr));
+}
+
+/**
+ * 给一个断点**贴符号名标签**（契约 v9 §5.3 · C-10）。
+ *
+ * ⚠️ **标签是附注** ⇒ ⇒ 「有哪些断点」仍由 `debug.breakpoints` 决定
+ *   ⇒ ⇒ 既有判据（断点列表是**地址数组**）**一个字不用改**。
+ *
+ * @param {number} addr
+ * @param {string} symbol
+ */
+export function labelBreakpointSymbol(addr, symbol) {
+    updateDebugState((prev) => ({
+        ...prev,
+        debug: {
+            ...(prev.debug ?? {}),
+            bpSymbols: {
+                ...(prev.debug?.bpSymbols ?? {}),
+                [String(Number(addr ?? 0) >>> 0)]: String(symbol),
+            },
+        },
+    }));
+}
+
+/**
+ * 条件表达式的**线上形态**（契约 v9 · C-9）。
+ *
+ * ⚠️ **空 ⇒ `null`**（**不是**空串）⇒ ⇒ 「无条件断点」在线上是
+ *   `condition: null` ⇒ ⇒ 内核那边就是 `Option::None` ⇒ ⇒ 既有断点语义
+ *   一字不变。
+ *
+ * ⚠️ **非空 ⇒ 原样发出去** ⇒ ⇒ 前端**不解析**条件表达式（那是内核的
+ *   判据 ⇒ ⇒ `E_DBG-02`）⇒ ⇒ 前端只显示它的原文。
+ *
+ * @param {unknown} raw
+ * @returns {string|null}
+ */
+export function normalizeCondition(raw) {
+    if (raw === null || raw === undefined) return null;
+    const text = String(raw);
+    return text === "" ? null : text;
+}
+
+/**
+ * 「**下一次**内核错误显示在哪**一位**」（契约 v9）。
+ *
+ * ⚠️ **为什么需要它**：`E_DBG-02` 有**两个**来源（条件表达式非法 / 符号名
+ *   为空）⇒ ⇒ 只看码**分不开**⇒ ⇒ 发命令时**先记下目标位** ⇒ ⇒ 错误到达
+ *   时**按位显示**（内核原文，不吞、不改写）。
+ *
+ * ⚠️ **它是「下一次」** ⇒ ⇒ 一次错误消费掉 ⇒ ⇒ 不会串位。
+ *
+ * @type {"cond"|"symbol"|"dump"|null}
+ */
+let pendingErrorSlot = null;
+
+/**
+ * 把**内核原文**写进**某一位**（契约 v9 · C-13）。
+ *
+ * ⚠️ **写的是内核给的原文**（`event.value.message`）⇒ ⇒ **不吞、不改写**
+ *   ⇒ ⇒ 真机断言能逐字看到内核说了什么。
+ *
+ * ⚠️ **空串 = 清掉那一位** ⇒ ⇒ 重试之前先清 ⇒ ⇒ 旧提示不挂着吓人。
+ *
+ * @param {"cond"|"symbol"|"dump"|null} slot
+ * @param {string} message
+ */
+function writeErrorSlot(slot, message) {
+    const text = String(message ?? "");
+    if (slot === "cond") {
+        viewStore.setState("debug", (prev) => ({
+            ...prev,
+            debug: { ...(prev.debug ?? {}), condError: text },
+        }));
+        publishViewState("debug");
+    } else if (slot === "symbol") {
+        viewStore.setState("debug", (prev) => ({
+            ...prev,
+            debug: { ...(prev.debug ?? {}), symbolError: text },
+        }));
+        publishViewState("debug");
+    } else if (slot === "dump") {
+        viewStore.setState("regmem", (prev) => ({
+            ...prev,
+            regmem: { ...(prev.regmem ?? {}), dumpError: text },
+        }));
+        publishViewState("regmem");
+    }
 }
 
 export function wireDebug(commandRouter) {
@@ -2306,19 +2477,71 @@ export function wireDebug(commandRouter) {
      * is published to the `error` topic **and** rejects the pending
      * command). The debug view shows the last one; there is no second
      * error channel.
+     *
+     * ⚠️ **契约 v9**：内核的错误**还要**按位显示（`E_DBG-02` ⇒ 条件那一位 /
+     * 符号那一位；`E_DBG-03` ⇒ 转储那一位）⇒ ⇒ **写的是内核原文**
+     * （`event.value.message`）⇒ ⇒ **不吞、不改写**。
      */
     commandRouter.subscribe("error", (event) => {
+        const code = event.value?.code ?? "E_PROTO-08";
+        const message = event.value?.message ?? "";
         viewStore.setState("debug", (prev) => ({
             ...prev,
             debug: {
                 ...(prev.debug ?? {}),
                 error: {
-                    code: event.value?.code ?? "E_PROTO-08",
-                    message: event.value?.message ?? "",
+                    code,
+                    message,
                 },
             },
         }));
+        // ⚠️ **按位显示**：谁发的命令 ⇒ 错误落在谁那一位 ⇒ ⇒ 一次错误
+        //   **消费掉**这个标记 ⇒ ⇒ 不会串位。
+        const slot = pendingErrorSlot;
+        pendingErrorSlot = null;
+        if (slot) writeErrorSlot(slot, message);
         publishViewState("debug");
+    });
+
+    /**
+     * 符号查询的**答复**（契约 v9 · `debug.symbol`）。
+     *
+     * ⚠️ **状态写入必须在订阅回调里** ⇒ ⇒ **不是**在 `await
+     *   dispatchCommand(...)` 之后 ⇒ ⇒ M-05 的 `handleFrame` 是**先
+     *   resolve 命令的 promise、再 publish 事件** ⇒ ⇒ 「await 回来」比
+     *   「订阅回调」**更晚** ⇒ ⇒ 写在 await 之后会落在错的那一格上
+     *   （既有 `case "disasm"` 就是这个模式）。
+     *
+     * ⚠️ **这是一次查询的答复**（推导量）⇒ ⇒ 住视图状态、**不持久化**
+     *   ⇒ ⇒ 不是内核状态的第二份副本。
+     */
+    commandRouter.subscribe("debug.symbol", (event) => {
+        viewStore.setState("debug", (prev) => ({
+            ...prev,
+            debug: { ...(prev.debug ?? {}), symbol: event.value ?? null },
+        }));
+        publishViewState("debug");
+    });
+
+    /**
+     * 整段转储的**答复**（契约 v9 · `debug.dump`）。
+     *
+     * ⚠️ **落点在 `regmem` 视图状态**（规格 §5.2：`regmem.dump`）⇒ ⇒
+     *   **不**另存一份 ⇒ ⇒ 「寄存器 / 内存」视图显示的**就是**这一份。
+     *
+     * ⚠️ **同样在订阅回调里写**（理由同 `debug.symbol`）。
+     */
+    commandRouter.subscribe("debug.dump", (event) => {
+        const addr = Number(event.value?.addr ?? 0) >>> 0;
+        const bytes = Array.isArray(event.value?.bytes) ? event.value.bytes : [];
+        viewStore.setState("regmem", (prev) => ({
+            ...prev,
+            regmem: {
+                ...(prev.regmem ?? {}),
+                dump: { addr, bytes: bytes.map((b) => Number(b) & 0xff) },
+            },
+        }));
+        publishViewState("regmem");
     });
 
     return {
@@ -2334,9 +2557,17 @@ export function wireDebug(commandRouter) {
             viewStore.setState("debug", (prev) => ({
                 ...prev,
                 sim: { ...(prev.sim ?? {}), disasm: [] },
-                debug: { ...(prev.debug ?? {}), export: null },
+                // ⚠️ **符号查询的答复也清掉**（契约 v9）⇒ ⇒ 它是**上一个程序**
+                //   的符号 ⇒ ⇒ 留着就是一份**错**的答案。
+                debug: { ...(prev.debug ?? {}), export: null, symbol: null },
             }));
             publishViewState("debug");
+            // ⚠️ **转储结果也清掉**（同一个道理 ⇒ ⇒ 它是**上一个程序**的内存）。
+            viewStore.setState("regmem", (prev) => ({
+                ...prev,
+                regmem: { ...(prev.regmem ?? {}), dump: null },
+            }));
+            publishViewState("regmem");
             // ⚠️ **源码树留着**，但**行号**要清掉：行号是**上一个程序**的
             // 数据（新工程 = 新程序 ⇒ 旧行号是错的）。源码树是**用户装的
             // 资产**，与程序无关 ⇒ 不能跟着新工程一起没掉（STAGE-7 验收

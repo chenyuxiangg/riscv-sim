@@ -1050,3 +1050,78 @@ select.addr-field {
     background: var(--panel);
     box-shadow: inset 0 0 0 1px var(--accent-edge);
 }
+
+/* ---------------------------------------------------------------------------
+ * §20 调试器增强批的三个新入口（STAGE-42 · v0.57 · 契约 v9）
+ * ------------------------------------------------------------------------- */
+
+/*
+ * ⚠️ **三个新入口与既有两个入口共用同一组类名**（`.addr-field` /
+ *   `.addr-error`）⇒ ⇒ 用户不用学两套。
+ *
+ * ⚠️ **容器也共用 `.addr-input` 的排版**（flex + wrap）⇒ ⇒ 条件框 / 符号框
+ *   / 转储框与地址框**长得一样** ⇒ ⇒ 失败模式在视觉上也分得清。
+ */
+.cond-input,
+.symbol-input,
+.dump-input {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0 12px;
+}
+
+/* ⚠️ **符号候选是「可点的列表」**（裁决 N）⇒ ⇒ 点一下直接下断点。 */
+.symbol-candidates {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    width: 100%;
+}
+
+.symbol-candidates .symbol-candidate {
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 4px 8px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel2);
+    color: var(--tx);
+    cursor: pointer;
+}
+
+.symbol-candidates .symbol-candidate:hover {
+    border-color: var(--accent-edge);
+    color: var(--accent);
+}
+
+/* ⚠️ **转储表是等宽的** ⇒ ⇒ 十六进制列**对得齐** ⇒ ⇒ 眼睛能一行行扫。 */
+.mem-dump {
+    margin: 8px 0 12px;
+    overflow-x: auto;
+}
+
+.dump-table {
+    border-collapse: collapse;
+    font-family: var(--mono);
+    font-size: 12px;
+}
+
+.dump-table th,
+.dump-table td {
+    padding: 3px 10px;
+    text-align: left;
+    white-space: pre;
+    border-bottom: 1px solid var(--line);
+}
+
+.dump-table th {
+    color: var(--tx3);
+    font-weight: 500;
+    font-size: 11px;
+}
+
+.dump-row .dump-off {
+    color: var(--tx3);
+}
