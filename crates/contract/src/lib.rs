@@ -221,4 +221,109 @@ pub mod snapshot;
 /// - ⚠️ **no other shape changed** in v8: no command was added (the
 ///   `Admin` command already existed), no error family was added
 ///   (`CTX` was already declared), no snapshot segment moved.
-pub const SCHEMA_VERSION: u32 = 8;
+///
+/// **v9** (contract v9 — the **debugger enhancements** batch, v0.57 ·
+/// STAGE-42):
+/// - new commands `CommandPayload::ResolveSymbol { name }` (ask the
+///   kernel **by name**) and `CommandPayload::DumpMemory { addr, len }`
+///   (read a **run of bytes** — the old `ReadMemory` can only read
+///   1 / 2 / 4 bytes at a time);
+/// - new events `EventPayload::SymbolResolved { name, symbol,
+///   candidates, total }` and `EventPayload::MemoryDump { addr, bytes }`;
+/// - `model::Breakpoint` gains the **optional** `condition` field ⇒ ⇒
+///   **conditional breakpoints** (the expression grammar is frozen in
+///   STAGE-42 §4). ⚠️ `#[serde(default)]` ⇒ ⇒ **old payloads still
+///   parse** ⇒ ⇒ **not** a breaking format change ⇒ ⇒
+///   `SIM_STATE_SCHEMA_VERSION` stays `2`;
+/// - new codes [`error::E_DBG_02_CONDITION_INVALID`] and
+///   [`error::E_DBG_03_DUMP_TOO_LARGE`] — the `Debug` family was
+///   already declared ⇒ ⇒ **no new error family**;
+/// - new constants [`DUMP_MAX_BYTES`] and [`SYMBOL_CANDIDATE_LIMIT`] —
+///   ⚠️ **cross-layer** ⇒ ⇒ pinned by the shared fixture
+///   `fixtures/debug-limits.json` (裁决 K);
+/// - ⚠️ **the other three version numbers do not move**:
+///   `SIM_STATE_SCHEMA_VERSION` stays `2`, `PLATFORM_SCHEMA_VERSION`
+///   stays `1`, `PLATFORM_RULES_VERSION` stays `3`.
+pub const SCHEMA_VERSION: u32 = 9;
+
+/// 转储长度上限（字节）—— v0.57 批（STAGE-42 §2.5 · 裁决 D）。
+///
+/// ⚠️ **原样拒，不静默截断**：`len == 0` 或 `len > DUMP_MAX_BYTES` ⇒ ⇒
+/// [`error::E_DBG_03_DUMP_TOO_LARGE`] ⇒ ⇒ 宿主**不发**转储事件。
+///
+/// ⚠️ **上限是跨层的** ⇒ ⇒ 前端镜像里也要有一份 ⇒ ⇒ 两份字面量 = 两个
+/// 真相 ⇒ ⇒ 用**跨层夹具**钉住（裁决 K）：`fixtures/debug-limits.json`
+/// ⇒ ⇒ **Rust 侧**断言常量 == 夹具、**前端用例**读**同一个文件**断言镜像
+/// 常量 == 夹具。
+pub const DUMP_MAX_BYTES: u32 = 4096;
+
+/// 符号候选条数上限 —— v0.57 批（STAGE-42 §2.5 · 裁决 B）。
+///
+/// ⚠️ **同 [`DUMP_MAX_BYTES`]**：跨层夹具 `fixtures/debug-limits.json`
+/// 是这两个上限的**唯一**真相 ⇒ ⇒ 两条断言都在契约层。
+pub const SYMBOL_CANDIDATE_LIMIT: u32 = 16;
+
+#[cfg(test)]
+mod tests {
+    //! 契约层的**版本与上限**判据（STAGE-42 §6.1 的 A-6 / A-7 / A-8）。
+    //!
+    //! ⚠️ **A-1**（`SCHEMA_VERSION == 9`）住在 `protocol.rs` 的测试里 ——
+    //! 那里本来就有钉版本号的那条 ⇒ ⇒ 不在这里写第二份。
+
+    use super::{
+        platform::{PLATFORM_RULES_VERSION, PLATFORM_SCHEMA_VERSION},
+        DUMP_MAX_BYTES, SYMBOL_CANDIDATE_LIMIT,
+    };
+    use crate::model::SIM_STATE_SCHEMA_VERSION;
+
+    /// 跨层夹具（裁决 K）—— 它的**唯一**内容。
+    ///
+    /// ⚠️ **前端用例读的是同一个文件** ⇒ ⇒ 「两个真相」结构上不可能。
+    const LIMITS_FIXTURE: &str = include_str!("../fixtures/debug-limits.json");
+
+    /// 夹具的形状（只取这两个字段 ⇒ 夹具里加别的字段不算破坏）。
+    #[derive(serde::Deserialize)]
+    struct DebugLimits {
+        dump_max_bytes: u32,
+        symbol_candidate_limit: u32,
+    }
+
+    /// **A-8**：另外三个版本号**一个都不升**。
+    #[test]
+    fn a8_the_other_three_version_numbers_do_not_move() {
+        assert_eq!(SIM_STATE_SCHEMA_VERSION, 2);
+        assert_eq!(PLATFORM_SCHEMA_VERSION, 1);
+        assert_eq!(PLATFORM_RULES_VERSION, 3);
+    }
+
+    /// **A-6**：两个新错误码的**值与名相符**，且族已声明。
+    #[test]
+    fn a6_the_two_new_error_codes_carry_their_own_scenario_numbers() {
+        use crate::error::{
+            ErrorFamily, ALL_FAMILIES, E_DBG_02_CONDITION_INVALID, E_DBG_03_DUMP_TOO_LARGE,
+        };
+        assert_eq!(E_DBG_02_CONDITION_INVALID, 2);
+        assert_eq!(E_DBG_03_DUMP_TOO_LARGE, 3);
+        // 族已声明 ⇒ ⇒ 「加码不加族」这条不变式守住。
+        assert!(
+            ALL_FAMILIES.contains(&ErrorFamily::Debug),
+            "Debug 族必须已声明"
+        );
+    }
+
+    /// **A-7**：两个上限常量 == `fixtures/debug-limits.json` 的值。
+    ///
+    /// ⚠️ **夹具用 `include_str!`** ⇒ ⇒ 夹具一改，编译期就会重编 ⇒ ⇒
+    /// 断言不可能「读到旧值还绿」。
+    #[test]
+    fn a7_the_two_limits_match_the_cross_layer_fixture() {
+        let limits: DebugLimits = serde_json::from_str(LIMITS_FIXTURE)
+            .unwrap_or_else(|e| panic!("跨层夹具不是合法 JSON：{e}"));
+        assert_eq!(limits.dump_max_bytes, DUMP_MAX_BYTES);
+        assert_eq!(limits.symbol_candidate_limit, SYMBOL_CANDIDATE_LIMIT);
+        // ⚠️ 再钉一层**字面量**：夹具与常量同时被改坏时，上面那条断言
+        // 仍然是绿的 ⇒ ⇒ 这里给出「这一批承诺的数」。
+        assert_eq!(limits.dump_max_bytes, 4096);
+        assert_eq!(limits.symbol_candidate_limit, 16);
+    }
+}

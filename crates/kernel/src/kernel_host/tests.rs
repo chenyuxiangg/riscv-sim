@@ -298,6 +298,7 @@ fn breakpoint_halts_execution_at_its_address() {
             addr: DEMO_BREAKPOINT_ADDR,
             source_hint: None,
             enabled: true,
+            condition: None,
         }),
     );
     first_tick(&events);
@@ -319,6 +320,7 @@ fn breakpoint_does_not_modify_the_machine_state() {
             addr: DEMO_BREAKPOINT_ADDR,
             source_hint: None,
             enabled: true,
+            condition: None,
         }),
     );
     // 跑到断点前（5 条指令：0x00..0x10）。
@@ -339,6 +341,7 @@ fn misaligned_breakpoint_is_rejected() {
             addr: 0x21,
             source_hint: None,
             enabled: true,
+            condition: None,
         }),
     );
     let (code, _) = first_error(&events);
@@ -353,6 +356,7 @@ fn duplicate_breakpoint_is_rejected() {
         addr: DEMO_BREAKPOINT_ADDR,
         source_hint: None,
         enabled: true,
+        condition: None,
     };
     dispatch(&mut host, CommandPayload::SetBreakpoint(bp.clone()));
     let events = dispatch(&mut host, CommandPayload::SetBreakpoint(bp));
@@ -379,6 +383,7 @@ fn cleared_breakpoint_no_longer_halts() {
             addr: DEMO_BREAKPOINT_ADDR,
             source_hint: None,
             enabled: true,
+            condition: None,
         }),
     );
     dispatch(&mut host, CommandPayload::ClearBreakpoint { id: 7 });
@@ -667,6 +672,7 @@ fn a_breakpoint_run_emits_tick_then_waveform_then_halted() {
             addr: DEMO_BREAKPOINT_ADDR,
             source_hint: None,
             enabled: true,
+            condition: None,
         }),
     );
     let events = dispatch(&mut host, CommandPayload::Continue);

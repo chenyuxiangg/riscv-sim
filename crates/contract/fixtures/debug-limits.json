@@ -1,0 +1,4 @@
+{
+  "dump_max_bytes": 4096,
+  "symbol_candidate_limit": 16
+}

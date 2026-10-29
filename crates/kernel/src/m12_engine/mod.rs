@@ -425,6 +425,19 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
         self.state.pc
     }
 
+    /// Borrow the platform state **immutably**.
+    ///
+    /// ⚠️ **为什么需要它**（v0.57 批 · STAGE-42）：断点的**条件判定**
+    /// 要在**取指之前**读**寄存器文件**（`SimState::gpr`）⇒ ⇒ 后端在
+    /// 指令边界上问「这里要不要停」时需要一份**只读**的状态 ⇒ ⇒ 只给
+    /// `pc` 不够（`Engine::pc` 拿不到寄存器）。
+    ///
+    /// ⚠️ 与 [`Self::state_mut`] 是**同一个**状态（引擎是**唯一**的所有
+    /// 者）⇒ ⇒ 不存在第二份副本。
+    pub fn state(&self) -> &SimState {
+        &self.state
+    }
+
     /// Borrow the platform state **mutably**.
     ///
     /// The engine is the **single owner** of the platform state (the
