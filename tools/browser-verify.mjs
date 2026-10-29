@@ -152,6 +152,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "waveChart",
     "loadImage",
     "osz",
+    "terminalScreen",
     "memoryMap",
     "boardArchive",
     "boardDelta",
@@ -1261,11 +1262,169 @@ function oszConsoleChecks(probe) {
             detail: `termText=${shown}`,
         },
         {
-            name: "console 的 ANSI 转义原样显示（\\x1b[2K 没被过滤）",
-            ok: text.includes("\x1b[2K"),
+            // ⚠️ **STAGE-41 · v0.56 批**：这一条以前断言的是「`\x1b[2K`
+            //   **原样显示**」⇒ ⇒ 那正是**用户反馈的那个缺陷**本身（guest
+            //   的 shell 每敲一个键就用 `ESC[2K` + `CR` 重画整行 ⇒ ⇒ 原样
+            //   显示 ⇒ ⇒ `\r` 变成换行 ⇒ ⇒ 重画堆成好几行）⇒ ⇒ 现在断言
+            //   的是**反过来**的那件事：**屏幕上不许出现转义的字面量**。
+            //   ⚠️ **字节流一个字都没丢**（`\x1b[2K` 与 `\r` 仍在字节流里）
+            //   ⇒ ⇒ 那条由 Node 门禁与下面的「原始字节」档盯。
+            name: "终端视图按**终端语义**显示（屏幕上没有 `[2K` 这种字面量）",
+            ok: !text.includes("[2K") && !text.includes("\r"),
             detail: `termText=${shown}`,
         },
     ];
+}
+
+/**
+ * **终端屏幕**的探针表达式（STAGE-41 · v0.56 批）。
+ *
+ * ⚠️ **读的是 `textContent`** ⇒ ⇒ 屏幕上的**行**就是 `\n` 分开的那些 ⇒ ⇒
+ *   「敲三个键 ⇒ 屏幕上到底几行」这条判据才有意义。
+ *
+ * ⚠️ **按位置限定**（`[data-view-body="terminal"]` 在前）：同一个 DOM 里
+ *   一旦出现两个终端面板，无位置限定的选择器会命中**排在前面的那个**
+ *   ⇒ ⇒ 断言还在跑、断的却不是它以为的那个东西。
+ */
+const TERMINAL_SCREEN_EXPRESSION = `(() => {
+  const out = document.querySelector('[data-view-body="terminal"] [data-terminal-out]')
+    || document.querySelector("[data-terminal-out]");
+  const text = out ? String(out.textContent || "") : "";
+  const lines = text.split("\\n");
+  const toggle = document.querySelector('[data-view-body="terminal"] [data-action="console-raw-toggle"]')
+    || document.querySelector('[data-action="console-raw-toggle"]');
+  return {
+    text: text.slice(0, 600),
+    lines: lines.slice(0, 40),
+    lineCount: lines.length,
+    hasEscapeLiteral: text.includes("[2K"),
+    hasRawCR: text.includes("\\r"),
+    rawSelected: toggle ? String(toggle.getAttribute("data-raw-selected") || "") : "",
+  };
+})()`;
+
+/** 点一下「原始字节」开关（切显示口径 ⇒ **不发**契约命令）。 */
+function clickRawToggleExpression() {
+    return `(() => {
+  const btn = document.querySelector('[data-view-body="terminal"] [data-action="console-raw-toggle"]')
+    || document.querySelector('[data-action="console-raw-toggle"]');
+  if (!btn) return { ok: false, reason: "「原始字节」按钮不在" };
+  btn.click();
+  return { ok: true, selected: String(btn.getAttribute("data-raw-selected") || "") };
+})()`;
+}
+
+/**
+ * **终端屏幕**的检查（STAGE-41 · v0.56 批 · B-67 ~ B-73）。
+ *
+ * ⚠️ **这一段是用户那条反馈的原样复现**：「往串口界面输入 `cyx` ⇒ ⇒
+ *   屏幕上应该是**一行** `OSZ$ cyx`」⇒ ⇒ guest 的 shell 每敲一个键就用
+ *   `ESC[2K` + `CR` **重画整行** ⇒ ⇒ 字节流里提示符出现三次是**对的**
+ *   ⇒ ⇒ 真实终端**覆盖**成一行 ⇒ ⇒ 屏幕上必须也是一行。
+ *
+ * ⚠️ **必须排在 osz 之后、uartEcho 之前**：① 要**真 osz**（仓外 ELF）；
+ *   ② 必须在 uartEcho **之前**⇒ ⇒ 那段往 guest 的行缓冲里留了 `E`
+ *   （「不加」档 ⇒ 没执行 ⇒ 缓冲没清）⇒ ⇒ 放在它后面 ⇒ ⇒ 本段敲的
+ *   `cyx` 会变成 `Ecyx` ⇒ ⇒ 断言会**假红**。
+ *
+ * @param {object} cdp
+ * @param {object} opts
+ * @returns {Promise<{checks: object[]}>}
+ */
+async function runTerminalScreenProbe(cdp, opts) {
+    /** @type {object[]} */
+    const checks = [];
+
+    // -- 切到终端视图 ---------------------------------------------------
+    await runEffect(cdp, 'location.hash = "#/terminal";');
+    await sleep(300);
+
+    // -- B-67a · 敲三个字符并点「发送」---------------------------------
+    const sent = await awaitEval(cdp, sendTerminalTextExpression("cyx"));
+    checks.push({
+        name: "B-67 · 在终端输入框敲「cyx」并点「发送」",
+        ok: Boolean(sent?.ok),
+        detail: JSON.stringify(sent),
+    });
+
+    // -- B-67b · 等 guest 回显（**字节流**里有「OSZ$ cyx」）------------
+    const echo = await awaitEval(cdp,
+        `window.riscv_image.runUntilConsole("OSZ$ cyx", { timeoutMs: ${UART_ECHO_TIMEOUT_MS} })`,
+        UART_ECHO_TIMEOUT_MS + 30000);
+    checks.push({
+        name: "B-68 · guest 回显了「OSZ$ cyx」（**字节流**里有）",
+        ok: echo?.matched === true,
+        detail: `matched=${echo?.matched} batches=${echo?.batches}`,
+    });
+
+    // -- B-69 · 整行**被执行了** --------------------------------------
+    //
+    // ⚠️ **为什么不是「console 里出现命令结果」**：用户那份 osz 固件**注册了
+    //   一个叫 `cyx` 的命令**（`targets/qemu_virt/src/main.c` 的
+    //   `.cmd_name = "cyx"`）⇒ ⇒ 它**不是**「查无此命令」⇒ ⇒ 不会打
+    //   `cyx: No such command.` ⇒ ⇒ 那条断言是**假红**。
+    // ⚠️ **真正可观察的「执行了」是什么**：执行完 ⇒ ⇒ **行缓冲被清空** ⇒ ⇒
+    //   屏幕上回显行的**下一行**是一个**空的提示符**（`OSZ$`）。
+    const execScreen = await awaitEval(cdp, TERMINAL_SCREEN_EXPRESSION);
+    const execLines = Array.isArray(execScreen?.lines) ? execScreen.lines : [];
+    const echoIdx = execLines.findIndex((l) => String(l).trim() === "OSZ$ cyx");
+    const afterEcho = echoIdx >= 0 ? String(execLines[echoIdx + 1] ?? "").trim() : "";
+    checks.push({
+        name: "B-69 · 整行**被执行了**（回显行的下一行是**空的新提示符** ⇒ 行缓冲被清空）",
+        ok: echoIdx >= 0 && afterEcho === "OSZ$",
+        detail: JSON.stringify({ echoIdx, afterEcho, lines: execLines }),
+    });
+
+    // -- B-69 ~ B-72 · **屏幕上**必须是一行 ----------------------------
+    const screen = await awaitEval(cdp, TERMINAL_SCREEN_EXPRESSION);
+    const lines = Array.isArray(screen?.lines) ? screen.lines : [];
+    const cmdLines = lines.filter((l) => String(l).includes("OSZ$ cyx"));
+    const partialLines = lines.filter((l) => /OSZ\$ c(y)?$/.test(String(l).trim()));
+
+    checks.push({
+        name: "B-70 · 屏幕上**没有**转义的字面量（`[2K` 不许出现）",
+        ok: screen?.hasEscapeLiteral === false,
+        detail: JSON.stringify({ hasEscapeLiteral: screen?.hasEscapeLiteral }),
+    });
+    checks.push({
+        name: "B-71 · 屏幕上**没有**裸的 `\\r`",
+        ok: screen?.hasRawCR === false,
+        detail: JSON.stringify({ hasRawCR: screen?.hasRawCR }),
+    });
+    checks.push({
+        name: "B-72 · 屏幕上「OSZ$ cyx」**只有一行**（重画是覆盖，不是堆行）",
+        ok: cmdLines.length === 1,
+        detail: JSON.stringify({ cmdLineCount: cmdLines.length, lines }),
+    });
+    checks.push({
+        name: "B-73 · 屏幕上**没有**中间态的行（「OSZ$ c」/「OSZ$ cy」不许独占一行）",
+        ok: partialLines.length === 0,
+        detail: JSON.stringify({ partialLines, lines }),
+    });
+
+    // -- B-73 · 「原始字节」档：字节流一个字都没丢 ---------------------
+    const toggled = await awaitEval(cdp, clickRawToggleExpression());
+    checks.push({
+        name: "B-74 · 点「原始字节」切显示口径",
+        ok: Boolean(toggled?.ok),
+        detail: JSON.stringify(toggled),
+    });
+    const rawView = await awaitEval(cdp, TERMINAL_SCREEN_EXPRESSION);
+    checks.push({
+        name: "B-75 · 「原始字节」档里能看到**未经解释**的字节流（`[2K` 在）",
+        ok: rawView?.hasEscapeLiteral === true,
+        detail: JSON.stringify({ hasEscapeLiteral: rawView?.hasEscapeLiteral }),
+    });
+    await awaitEval(cdp, clickRawToggleExpression());
+    const backToScreen = await awaitEval(cdp, TERMINAL_SCREEN_EXPRESSION);
+    checks.push({
+        name: "B-76 · 切回「终端屏幕」⇒ 又是一行（不是两行）",
+        ok: backToScreen?.hasEscapeLiteral === false
+            && (Array.isArray(backToScreen?.lines) ? backToScreen.lines : []).filter((l) => String(l).includes("OSZ$ cyx")).length === 1,
+        detail: JSON.stringify({ lines: backToScreen?.lines }),
+    });
+
+    return { checks };
 }
 
 // ---------------------------------------------------------------------------
@@ -5977,6 +6136,23 @@ async function main() {
         registerSection("osz", osz.checks, {
             title: "真实 RTOS 检查（osz：装载仓外 ELF → 跑 → 终端里的 console）",
             skippedTitle: "真实 RTOS 检查（osz）",
+            skipped: osz.skipped,
+            reason: osz.reason,
+        });
+
+        // -- the TERMINAL SCREEN (STAGE-41 · v0.56 批 · B-67 ~ B-73) -------
+        // ⚠️ **必须排在 osz 之后**：这一段要的是**真 osz**（仓外 ELF）⇒ ⇒
+        //    装载、跑到提示符那些活儿都由 osz 段做完 ⇒ ⇒ 本段只管
+        //    「敲三个键 ⇒ 屏幕上是不是**一行**」。
+        // ⚠️ **必须排在 uartEcho 之前**：uartEcho 那一段用「不加」档送了
+        //    一个 `E` ⇒ ⇒ guest 的**行缓冲**里还留着它 ⇒ ⇒ 本段再敲 `cyx`
+        //    会变成 `Ecyx` ⇒ ⇒ 断言**假红**。
+        // ⚠️ **没有 osz ELF 时必须一起跳过**（不是判负）—— 缺仓外产物不是
+        //    平台的缺陷（与 uartEcho 段同一条口径）。
+        const terminalScreen = await runSection("terminalScreen", () => runTerminalScreenProbe(cdp, opts));
+        registerSection("terminalScreen", terminalScreen.checks, {
+            title: "终端屏幕检查（敲三个键 ⇒ 屏幕上是一行，不是重画堆出来的几行）",
+            skippedTitle: "终端屏幕检查（terminalScreen）",
             skipped: osz.skipped,
             reason: osz.reason,
         });
