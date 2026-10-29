@@ -15,7 +15,7 @@
 // transport that does not exist yet.
 
 import { mountWorkbench } from "./views/m01_workbench.js";
-import { mountViewComponents, seedBus, get as getViewComponent } from "./views/m02_viewcomponents.js";
+import { mountViewComponents, seedBus, get as getViewComponent, resetTerminalScreen } from "./views/m02_viewcomponents.js";
 import * as viewStore from "./views/m03_viewstore.js";
 import { mountSession } from "./services/m04_session.js";
 import { mountCommandRouter } from "./services/m05_commandrouter.js";
@@ -1962,6 +1962,10 @@ export function wireConsole(commandRouter) {
                 ...prev,
                 term: { ...(prev.term ?? {}), bytes: "" },
             }));
+            // ⚠️ **屏幕缓存也要一起清**（STAGE-41 · v0.56）：终端视图那边
+            //   有一份**增量**的屏幕实例 ⇒ ⇒ 字节流清了而它没清 ⇒ ⇒
+            //   下一个程序的字节会被**接在上一段工程的屏幕后面**⇒ ⇒ 显示错乱。
+            resetTerminalScreen();
             publishViewState("terminal");
         },
         /**

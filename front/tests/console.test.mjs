@@ -140,6 +140,10 @@ async function setup() {
     m01.assembleWorkspace("embedded");
     m01.route("#/terminal");
     m03.setState("terminal", { term: { bytes: "" } });
+    // ⚠️ **增量屏幕也要一起重置**（STAGE-41 · v0.56）：终端视图那边有一份
+    //   **增量**的屏幕实例 ⇒ ⇒ 只清 store 的话，它还拿着上一个用例的屏幕
+    //   ⇒ ⇒ 用例之间互相污染 ⇒ ⇒ 判据口径会悄悄变。
+    m02.resetTerminalScreen();
     const router = fakeKernel();
     const consoleWiring = app.wireConsole(router);
     await consoleWiring.subscribeConsoleStream();
@@ -182,7 +186,7 @@ function terminalText() {
 // ---------------------------------------------------------------------------
 
 describe("console 事件 · 落进终端视图", () => {
-    test("`Console` 事件的字节数组被**完整**解码进终端（`==== Enter Main ====`）", async () => {
+    test("N-17：`Console` 事件的字节数组被**完整**解码进终端（`==== Enter Main ====`）", async () => {
         const { router } = await setup();
         assert.equal(router.emitConsole(OSZ_CONSOLE_BYTES), true, "内核该推这个事件");
         assert.equal(
@@ -190,20 +194,31 @@ describe("console 事件 · 落进终端视图", () => {
             OSZ_CONSOLE_TEXT,
             "终端缓冲必须是那 31 个字节解出来的**原文**",
         );
+        // ⚠️ **显示的是「屏幕」**（STAGE-41 · v0.56）：guest 的 shell 用
+        //   `ESC[2K` + `CR` 重画提示符 ⇒ ⇒ **真实终端**显示成一行 ⇒ ⇒
+        //   屏幕上就是「启动横幅 + 一行提示符」⇒ ⇒ 而**不是**把转义当字面量。
         assert.equal(
             terminalText(),
-            OSZ_CONSOLE_TEXT,
-            "终端视图上显示的必须是同一串原文",
+            "==== Enter Main ====\nOSZ$",
+            "终端视图上显示的必须是**按终端语义解释过**的那一屏",
         );
     });
 
-    test("ANSI 转义与回车**原样**显示（不过滤）", async () => {
+    test("N-18：ANSI 转义与回车被**终端语义解释**（不再是字面量），但**字节流一个字都没丢**", async () => {
         const { router } = await setup();
         router.emitConsole(OSZ_CONSOLE_BYTES);
         const text = terminalText();
-        assert.ok(text.includes("\x1b[2K"), `ANSI 转义被过滤了：${JSON.stringify(text)}`);
-        assert.ok(text.includes("\r"), `回车被过滤了：${JSON.stringify(text)}`);
-        assert.ok(text.endsWith("OSZ$ "), `提示符不见了：${JSON.stringify(text)}`);
+        // ⚠️ **屏幕侧**：转义与回车**被解释掉了**⇒ ⇒ 屏幕上不该出现
+        //   `[2K` 这种字面量，也不该出现裸的 `\r`。
+        assert.ok(!text.includes("\x1b[2K"), `转义的字面量漏进了屏幕：${JSON.stringify(text)}`);
+        assert.ok(!text.includes("\r"), `回车漏进了屏幕：${JSON.stringify(text)}`);
+        assert.ok(text.endsWith("OSZ$"), `提示符不见了：${JSON.stringify(text)}`);
+        // ⚠️ **字节流侧**：**一个字都没丢**（真相仍是原文）⇒ ⇒ 这才是
+        //   「不许过滤」那条判据**真正要守的东西**。
+        const raw = m03.getState("terminal")?.term?.bytes ?? "";
+        assert.equal(raw, OSZ_CONSOLE_TEXT, "字节流必须逐字不变");
+        assert.ok(raw.includes("\x1b[2K"), `字节流里的 ANSI 转义被过滤了：${JSON.stringify(raw)}`);
+        assert.ok(raw.includes("\r"), `字节流里的回车被过滤了：${JSON.stringify(raw)}`);
     });
 
     test("终端用 `textContent` 写（HTML **不被解析**）", async () => {
@@ -422,7 +437,7 @@ describe("装载仓外镜像 · 按 URL 取字节", () => {
 // ---------------------------------------------------------------------------
 
 describe("端到端 · 装载 → 跑 → 终端里看得见 console", () => {
-    test("整条链走通：按 URL 取字节 → LoadProject → 跑到提示符 → 终端显示", async () => {
+    test("N-19：整条链走通：按 URL 取字节 → LoadProject → 跑到提示符 → 终端显示", async () => {
         // ⚠️ 这一条把三段接在一起（装载入口 / 强制重订 / 跑到前缀）——单段
         // 的用例各自绿，但**接起来断掉**的情况它们抓不到。
         const router = fakeKernel();
@@ -472,7 +487,9 @@ describe("端到端 · 装载 → 跑 → 终端里看得见 console", () => {
             OSZ_CONSOLE_TEXT,
             "视图状态里的终端缓冲也必须一致",
         );
-        assert.equal(terminalText(), OSZ_CONSOLE_TEXT, "终端视图上显示的必须一致");
+        // ⚠️ **屏幕上**是那一屏（STAGE-41 · v0.56）：转义与回车被解释掉 ⇒ ⇒
+        //   「启动横幅 + 一行提示符」⇒ ⇒ 而字节流侧仍是那 31 个字节。
+        assert.equal(terminalText(), "==== Enter Main ====\nOSZ$", "终端视图上显示的必须是那一屏");
     });
 });
 

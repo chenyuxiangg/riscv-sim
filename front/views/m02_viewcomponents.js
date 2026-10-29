@@ -33,6 +33,11 @@ import { isKernelRunning, liveValue } from "../lib/run-loop.js";
 // ⚠️ **波形图的纯函数 + 片段**（STAGE-36 · v0.51 批）⇒ ⇒ option 的构造
 // **不碰 DOM** ⇒ ⇒ Node 侧零 DOM 就能测「画的是不是真数据」。
 import { buildWaveOption, canDrawChart, resolveWaveTheme, waveChartHtml } from "./components/wave-chart.js";
+// ⚠️ **终端屏幕仿真**（STAGE-41 · v0.56）：guest 的 shell 是**行编辑器**
+// （每敲一个键就把整行重画一遍）⇒ ⇒ 字节流里同一个提示符出现 N 次 ⇒ ⇒
+// **真实终端**只显示一行 ⇒ ⇒ 本平台此前把字节流**原样**塞进 `<pre>`
+// ⇒ ⇒ `\r` 被渲染成换行 ⇒ ⇒ 用户看到一堆重画叠出来的乱码。
+import { createTerminalScreen, renderTerminalScreen } from "./components/terminal-screen.js";
 // ⚠️ **波形库加载器的同步读**（STAGE-36）⇒ ⇒ 视图层**只读**已加载好的模块
 // ⇒ ⇒ **加载**由 app 层做（那是它的活）⇒ ⇒ 视图层**不发起**跨源 import。
 import { getECharts } from "../lib/echarts-loader.js";
@@ -1844,6 +1849,97 @@ function setTerminalEol(eol) {
     return next;
 }
 
+// ---------------------------------------------------------------------------
+// 终端屏幕（STAGE-41 · v0.56 · 裁决 D ~ F）
+// ---------------------------------------------------------------------------
+
+/**
+ * 增量喂字节的**屏幕实例**（模块级单例）。
+ *
+ * ⚠️ **为什么要增量**：长会话里 console 事件可能来很多次 ⇒ ⇒ 每来一次就
+ *   **从零重扫**整条历史是 O(n²) ⇒ ⇒ 这里只处理**新到的那些字节**。
+ *   ⚠️ **它不是真相**：真相是 store 里的 `term.bytes` ⇒ ⇒ 本实例只是
+ *   「快速路径」的缓存 ⇒ ⇒ 任何时候都能从真相**重建**（裁决 E）。
+ */
+let terminalScreen = createTerminalScreen();
+
+/**
+ * 增量实例**已经吃掉的**原始字节流（用来核对「真的是追加」）。
+ *
+ * @type {string}
+ */
+let terminalScreenRaw = "";
+
+/**
+ * 把终端屏幕**重置**（换工程 / 清会话时用）。
+ *
+ * ⚠️ **必须与 store 的 `term.bytes` 清空**成对发生 ⇒ ⇒ 否则增量实例还拿着
+ *   上一段工程的屏幕 ⇒ ⇒ 显示错乱。
+ */
+export function resetTerminalScreen() {
+    terminalScreen = createTerminalScreen();
+    terminalScreenRaw = "";
+}
+
+/**
+ * 终端**显示什么**。
+ *
+ * ⚠️ **默认是「屏幕」**（把字节流按终端语义解释过的结果）⇒ ⇒ 切到
+ *   「原始字节」档才是字节流本身 ⇒ ⇒ 两条路都留着。
+ *
+ * @param {string} raw 原始字节流
+ * @param {boolean} rawMode 是否「原始字节」档
+ * @returns {string}
+ */
+function terminalDisplayText(raw, rawMode) {
+    return rawMode ? String(raw ?? "") : renderTerminalScreen(raw);
+}
+
+/**
+ * 现在是不是「原始字节」档（**读视图状态** ⇒ ⇒ 重渲染不丢）。
+ *
+ * @returns {boolean}
+ */
+function isRawMode() {
+    return viewStore.getState("terminal")?.term?.raw === true;
+}
+
+/**
+ * 屏幕文本（**增量**那条路 —— 判据 T-11 盯它与「从零重建」的一致性）。
+ *
+ * ⚠️ **只处理新到的字节** ⇒ ⇒ 长会话里不是 O(n²) ⇒ ⇒ 但**必须**核对
+ *   「store 里的字节流确实是**追加**的」⇒ ⇒ 不是就**从零重建**（裁决 E）
+ *   ⇒ ⇒ 增量实例与真相**不会**悄悄分叉。
+ *
+ * @param {string} nextRaw store 里的**全部**字节流
+ * @returns {string}
+ */
+function terminalScreenText(nextRaw) {
+    const raw = String(nextRaw ?? "");
+    if (!raw.startsWith(terminalScreenRaw)) {
+        // 不是追加 ⇒ ⇒ 从零重建（**真相是 store 的字节流**，不是这个缓存）。
+        resetTerminalScreen();
+    }
+    terminalScreen.write(raw.slice(terminalScreenRaw.length));
+    terminalScreenRaw = raw;
+    return terminalScreen.text();
+}
+
+/**
+ * 切「原始字节 / 终端屏幕」两档（**不发契约命令**）。
+ *
+ * @returns {boolean} 切完之后是不是「原始字节」档
+ */
+function toggleTerminalRaw() {
+    const next = !(viewStore.getState("terminal")?.term?.raw === true);
+    viewStore.setState("terminal", (prev) => ({
+        ...prev,
+        term: { ...(prev.term ?? {}), raw: next },
+    }));
+    publishTerminalState();
+    return next;
+}
+
 const terminalView = register({
     id: "terminal",
     channels: ["term"],
@@ -1856,6 +1952,10 @@ const terminalView = register({
         // ⚠️ **行结束符的选择也住在视图状态里**（STAGE-40 · v0.55 · 裁决 I）
         // ⇒ ⇒ 与草稿同一个真相 ⇒ ⇒ 重渲染不丢。
         const eol = currentTerminalEol(state);
+        // ⚠️ **原始字节档**（STAGE-41 · v0.56 · 裁决 F）：默认显示**屏幕**
+        //   （仿真后的）⇒ ⇒ 切到「原始字节」才看未经解释的字节流 ⇒ ⇒
+        //   「字节流才是真相」这条**没有丢**，只是换了个入口。
+        const rawMode = state?.term?.raw === true;
         // ⚠️ **TX / RX 是两个不同的源**（STAGE-35 · v0.50 批 · 裁决 G）⇒ ⇒
         // **分别标注方向** ⇒ ⇒ 不许把两个数混成一个。
         const txBytes = Number(state?.term?.txBytes ?? 0);
@@ -1865,7 +1965,7 @@ const terminalView = register({
                 <div class="card">
                     <div class="row"><h3>串口终端 (M-15 UART)</h3><span class="tag">收发字节分别计数</span></div>
                     <div class="term-scroll">
-                        <pre class="terminal-out" data-terminal-out>${escapeHtml(buf)}</pre>
+                        <pre class="terminal-out" data-terminal-out>${escapeHtml(terminalDisplayText(buf, rawMode))}</pre>
                     </div>
                     <div class="term-meta">
                         <span class="dir">TX（guest → 终端，内核 console 事件累计）</span><span class="n" data-term-tx>${txBytes}</span>
@@ -1874,6 +1974,7 @@ const terminalView = register({
                     <div class="terminal-input-row">
                         <input type="text" class="terminal-input" data-terminal-input value="${escapeHtml(draft)}" placeholder="输入后按「发送」——字节会进 guest 的 UART0">
                         <div class="terminal-eol" role="group" aria-label="行结束符">${renderTerminalEolButtons(eol)}</div>
+                        <button type="button" class="terminal-raw-btn${rawMode ? " is-selected" : ""}" data-action="console-raw-toggle" data-raw-selected="${rawMode ? "true" : "false"}" title="切换「原始字节」与「终端屏幕」两种显示">原始字节</button>
                         <button type="button" class="terminal-send" data-action="console-send">发送</button>
                     </div>
                     <p class="muted">输入框里的文本<strong>按 UTF-8 编码</strong>成字节，发给 guest 的 UART0（契约 v5 的 <code>WriteConsole</code>）；<strong>回显来自 guest</strong>，平台不做本地回显。<strong>发送时会追加一个行结束符</strong>（默认 <code>CR</code> = 0x0D —— 真实串口终端按回车发的就是它；osz 这类固件的 shell 也只认它）；选「不加」则只送原始字节。</p>
@@ -1885,6 +1986,10 @@ const terminalView = register({
         const actionEl = ev.target?.closest?.("[data-action]");
         const action = actionEl?.dataset?.action;
         if (action === "console-send") return sendTerminalInput();
+        // ⚠️ **原始字节档**（STAGE-41 · v0.56）：切显示口径 ⇒ ⇒ **不发**任何
+        //   契约命令 ⇒ ⇒ 与板档案那套按钮同一个口径（界面上的显示开关
+        //   一律不发命令）。
+        if (action === "console-raw-toggle") return toggleTerminalRaw();
         // ⚠️ **行结束符按钮**（STAGE-40 · v0.55）：它**没有** `data-action`
         // ⇒ ⇒ 不与上面的分支抢同一个动作名 ⇒ ⇒ 两套按钮可以并存。
         const eolEl = ev.target?.closest?.("[data-eol]");
@@ -1919,6 +2024,9 @@ const terminalView = register({
             },
         }));
         const out = document.querySelector("[data-terminal-out]");
+        // ⚠️ **显示口径**（STAGE-41 · v0.56）：默认「终端屏幕」，切到
+        //   「原始字节」档才显示未经解释的字节流。
+        const rawMode = isRawMode();
         // ⚠️ **计数也要就地更新**：这条路径**不重渲染**（只写 `textContent`）
         // ⇒ ⇒ 不改计数的话 TX 会**一直停在旧值**。
         const txEl = document.querySelector("[data-term-tx]");
@@ -1928,7 +2036,13 @@ const terminalView = register({
         if (!out) return;
         // `textContent` does not parse HTML — escaping here would print a
         // literal "&lt;" (FRONTEND_Review.md #4).
-        out.textContent = next;
+        //
+        // ⚠️ **显示的是「屏幕」，不是字节流**（STAGE-41 · v0.56 · 裁决 A）：
+        //   guest 的 shell 每敲一个键就把整行重画一遍 ⇒ ⇒ 字节流里同一个
+        //   提示符出现 N 次 ⇒ ⇒ **原样显示**会把 N 次重画**堆成 N 行**
+        //   （`\r` 被渲染成换行 + `ESC[2K` 的 `[2K` 变成字面量）⇒ ⇒ 用户
+        //   看到的是乱码而不是那一行命令。
+        out.textContent = rawMode ? next : terminalScreenText(next);
         out.scrollTop = out.scrollHeight;
     },
     mountFor(el) {
