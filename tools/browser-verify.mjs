@@ -161,6 +161,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "liveReadout",
     "runLoop",
     "addrInput",
+    "uartEcho",
 ]);
 
 /**
@@ -871,8 +872,14 @@ const DISASM_ROWS_EXPRESSION = `(() => {
  */
 function sendTerminalTextExpression(text) {
     return `(() => {
-  const input = document.querySelector("[data-terminal-input]");
-  const btn = document.querySelector('[data-action="console-send"]');
+  // ⚠️ **按位置限定优先**：同一个 DOM 里一旦出现**两个**同类控件（顶栏 +
+  //    视图面板），无位置限定的 querySelector 会命中**排在前面的那个**
+  //    ⇒ ⇒ 断言还在跑、断的却不是它以为的那个东西 ⇒ ⇒ 判据口径悄悄变了。
+  //    兜底保留 ⇒ ⇒ 万一视图面板的结构变了，**旧的那条探针**不至于直接失效。
+  const input = document.querySelector('[data-view-body="terminal"] [data-terminal-input]')
+    || document.querySelector("[data-terminal-input]");
+  const btn = document.querySelector('[data-view-body="terminal"] [data-action="console-send"]')
+    || document.querySelector('[data-action="console-send"]');
   if (!input || !btn) return { ok: false, reason: "输入框或发送按钮不在" };
   input.value = ${JSON.stringify(text)};
   input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -1165,6 +1172,13 @@ const LSR_RX_VALID = 0x1;
  * 否则浏览器测试会永远挂着。
  */
 const OSZ_RUN_TIMEOUT_MS = 60000;
+
+// ⚠️ **真机层等 guest 的超时**（STAGE-40 · v0.55 批 · B-61 ~ B-66）。
+//: ⚠️ **比 `OSZ_RUN_TIMEOUT_MS` 短**：这一段等的是「一行命令被 guest 执行
+//: 完」，不是「跑到提示符」⇒ ⇒ 整机已经跑起来了 ⇒ ⇒ 几秒就够。
+const UART_ECHO_TIMEOUT_MS = 30000;
+//: ⚠️ **「不该出现」那条要等够久** ⇒ ⇒ 否则「没等到」会被读成「还没发生」。
+const UART_ECHO_NOEXEC_TIMEOUT_MS = 8000;
 
 /** 断点命中后，等 DOM 里的 PC 更新上来的**上限**（毫秒）。 */
 const PC_SETTLE_TIMEOUT_MS = 5000;
@@ -5469,6 +5483,170 @@ async function runUartRxProbe(cdp, opts) {
 }
 
 // ---------------------------------------------------------------------------
+// STAGE-40 · v0.55 批 · B-61 ~ B-66 · UART RX 的**回显**与**执行整行**
+// ---------------------------------------------------------------------------
+
+/**
+ * 终端视图里那组**行结束符**按钮的现状（按 `data-eol` 取，**不靠文案**）。
+ *
+ * ⚠️ 按钮的标签是给人看的（中文 / 英文都可能改）⇒ ⇒ `data-eol` 才是契约。
+ */
+const EOL_UI_EXPRESSION = `(() => {
+  const buttons = Array.from(document.querySelectorAll('[data-view-body="terminal"] [data-eol]'));
+  const selected = buttons.find((b) => b.getAttribute("data-eol-selected") === "true");
+  return {
+    count: buttons.length,
+    ids: buttons.map((b) => String(b.getAttribute("data-eol") || "")),
+    selected: selected ? String(selected.getAttribute("data-eol") || "") : "",
+    visible: buttons.length > 0 && buttons.every((b) => {
+      const r = b.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    }),
+  };
+})()`;
+
+/**
+ * 点一下某个**行结束符**按钮（`cr` / `lf` / `crlf` / `none`）。
+ *
+ * @param {string} id
+ * @returns {string} the expression to evaluate in the page
+ */
+function clickEolExpression(id) {
+    return `(() => {
+  const btn = document.querySelector('[data-view-body="terminal"] [data-eol="${id}"]');
+  if (!btn) return { ok: false, reason: "没有那个行结束符按钮" };
+  btn.click();
+  return { ok: true };
+})()`;
+}
+
+/**
+ * STAGE-40 · v0.55 批 · B-61 ~ B-66 · UART RX 的回显与执行整行。
+ *
+ * ⚠️ **这一段必须排在 osz 段之后**：它要的是**真 osz**（仓外 ELF）⇒ ⇒
+ *    自写固件**测不到**「真固件的 complete 写值是**非法源号**」那一支
+ *    （规格 F11）⇒ ⇒ 真机层**不可省**（规格裁决 R）。
+ *
+ * ⚠️ **判据落在 console 的字节上**（`runUntilConsole` 读的是 M-03 的
+ *    `term.bytes`，**不是** DOM 的渲染文本）⇒ ⇒ 判的是 guest **真的**吐出
+ *    了那些字节 ⇒ ⇒ 「回显」与「执行整行」是**两个**命题（规格订正 5）。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{checks: object[]}>}
+ */
+async function runUartEchoProbe(cdp, opts) {
+    /** @type {object[]} */
+    const checks = [];
+
+    // -- **先切到终端视图** ----------------------------------------------
+    // ⚠️ **必须切**：osz 段里的反汇编探针把视图切到了 `#/source` ⇒ ⇒ 终端
+    //    面板**处于隐藏态** ⇒ ⇒ 按钮在 DOM 里但 `getBoundingClientRect()`
+    //    是 0 ⇒ ⇒ B-61 会**假红**（不是「按钮看不见」，是「**没站在那一屏**」）。
+    await runEffect(cdp, 'location.hash = "#/terminal";');
+    await sleep(300);
+
+    // -- B-61 · 行结束符按钮组**看得见** --------------------------------
+    const ui = await awaitEval(cdp, EOL_UI_EXPRESSION);
+    checks.push({
+        name: "B-61 · 终端视图里看得见行结束符的按钮组（用户第一眼能找到）",
+        ok: Number(ui?.count ?? 0) >= 4 && ui?.visible === true,
+        detail: JSON.stringify(ui),
+    });
+
+    // -- B-62 · 默认档 = CR --------------------------------------------
+    checks.push({
+        name: "B-62 · 默认档是 **CR**（当前档带 data-eol-selected）",
+        ok: ui?.selected === "cr",
+        detail: "selected=" + JSON.stringify(ui?.selected ?? ""),
+    });
+
+    // -- 送第一行 "Q"（默认档 ⇒ 发出 "Q" + CR）--------------------------
+    const sent1 = await awaitEval(cdp, sendTerminalTextExpression("Q"));
+    checks.push({
+        name: "B-63a · 在终端输入框敲一行并点「发送」",
+        ok: Boolean(sent1?.ok),
+        detail: JSON.stringify(sent1),
+    });
+
+    // -- 等 guest 回显（UART RX 中断真的被交付了）----------------------
+    const echo = await awaitEval(cdp,
+        `window.riscv_image.runUntilConsole("OSZ$ Q", { timeoutMs: ${UART_ECHO_TIMEOUT_MS} })`,
+        UART_ECHO_TIMEOUT_MS + 30000);
+    checks.push({
+        name: "B-63 · guest 的 console 出现**回显**（UART RX 中断真的被交付了）",
+        ok: echo?.matched === true,
+        detail: `matched=${echo?.matched} batches=${echo?.batches}`,
+    });
+
+    // -- 等 guest **执行整行**（不是只回显）-----------------------------
+    const exec = await awaitEval(cdp,
+        `window.riscv_image.runUntilConsole("Q: No such command.", { timeoutMs: ${UART_ECHO_TIMEOUT_MS} })`,
+        UART_ECHO_TIMEOUT_MS + 30000);
+    checks.push({
+        name: "B-64 · guest **执行了整行**（console 里出现命令结果，不是只有回显）",
+        ok: exec?.matched === true,
+        detail: `matched=${exec?.matched} batches=${exec?.batches}`,
+    });
+
+    // -- 再送第二行 "W" ⇒ 第二次不被堵死 ------------------------------
+    const sent2 = await awaitEval(cdp, sendTerminalTextExpression("W"));
+    checks.push({
+        name: "B-65a · 再送第二行",
+        ok: Boolean(sent2?.ok),
+        detail: JSON.stringify(sent2),
+    });
+    const second = await awaitEval(cdp,
+        `window.riscv_image.runUntilConsole("W: No such command.", { timeoutMs: ${UART_ECHO_TIMEOUT_MS} })`,
+        UART_ECHO_TIMEOUT_MS + 30000);
+    checks.push({
+        name: "B-65 · 第二行**也**被 guest 执行了（第二次交付没被堵死）",
+        ok: second?.matched === true,
+        detail: `matched=${second?.matched} batches=${second?.batches}`,
+    });
+
+    // -- 切到「不加」档 ⇒ 只有回显、没有命令结果 ------------------------
+    const clicked = await awaitEval(cdp, clickEolExpression("none"));
+    checks.push({
+        name: "B-66a · 把行结束符切到「不加」",
+        ok: Boolean(clicked?.ok),
+        detail: JSON.stringify(clicked),
+    });
+
+    const sent3 = await awaitEval(cdp, sendTerminalTextExpression("E"));
+    checks.push({
+        name: "B-66b · 用「不加」档再送一行",
+        ok: Boolean(sent3?.ok),
+        detail: JSON.stringify(sent3),
+    });
+
+    // ⚠️ **正向对照**：那个字节**真的**到了 guest（回显出现）⇒ ⇒ 下面
+    //    「没有命令结果」才是**行结束符**的功劳 ⇒ ⇒ 不是「guest 压根没收到」。
+    const echoNone = await awaitEval(cdp,
+        `window.riscv_image.runUntilConsole("OSZ$ E", { timeoutMs: ${UART_ECHO_TIMEOUT_MS} })`,
+        UART_ECHO_TIMEOUT_MS + 30000);
+    checks.push({
+        name: "B-66c · **正向对照**：那个字节**真的**到了 guest（回显出现）",
+        ok: echoNone?.matched === true,
+        detail: `matched=${echoNone?.matched} batches=${echoNone?.batches}`,
+    });
+
+    const noExec = await awaitEval(cdp,
+        `window.riscv_image.runUntilConsole("E: No such command.", { timeoutMs: ${UART_ECHO_NOEXEC_TIMEOUT_MS} })`,
+        UART_ECHO_NOEXEC_TIMEOUT_MS + 30000);
+    checks.push({
+        name: "B-66d · 「不加」档 ⇒ **没有**命令结果（行结束符真的被送到了 guest）",
+        ok: noExec?.matched === false,
+        detail: `matched=${noExec?.matched}（期望 false）`,
+    });
+
+    // -- 收尾：把档位**切回 CR**（后面的段还要用终端）------------------
+    await awaitEval(cdp, clickEolExpression("cr"));
+
+    return { checks };
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -5799,6 +5977,20 @@ async function main() {
         registerSection("osz", osz.checks, {
             title: "真实 RTOS 检查（osz：装载仓外 ELF → 跑 → 终端里的 console）",
             skippedTitle: "真实 RTOS 检查（osz）",
+            skipped: osz.skipped,
+            reason: osz.reason,
+        });
+
+        // -- the UART RX ECHO + EXECUTE (STAGE-40 · v0.55 批 · B-61 ~ B-66) --
+        // ⚠️ **必须排在 osz 之后**：这一段要的是**真 osz**（仓外 ELF）⇒ ⇒
+        //    装载、跑到提示符那些活儿都由 osz 段做完 ⇒ ⇒ 这一段只管
+        //    「往串口 RX 送一行 ⇒ guest 回显 ⇒ guest 执行整行」。
+        // ⚠️ **没有 osz ELF 时必须一起跳过**（不是判负）—— osz 的产物在
+        //    **仓外**（不进仓库）⇒ ⇒ 缺它不是平台的缺陷。
+        const uartEcho = await runSection("uartEcho", () => runUartEchoProbe(cdp, opts));
+        registerSection("uartEcho", uartEcho.checks, {
+            title: "串口 RX 检查（送一行 ⇒ guest 回显 ⇒ guest 执行整行 ⇒ 第二行也不被堵死）",
+            skippedTitle: "串口 RX 检查（uartEcho）",
             skipped: osz.skipped,
             reason: osz.reason,
         });

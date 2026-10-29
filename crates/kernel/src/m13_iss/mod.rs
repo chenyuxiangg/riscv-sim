@@ -107,6 +107,15 @@ pub struct Iss {
     /// 丢弃** —— 那是 v0.19 检视轮查出的 **F-1**（第二次 `irq_clear`
     /// 被跳过 ⇒ `active_irq` 永不复位 ⇒ 那条线被单级防护**永久堵死**）。
     last_csr_written: Option<u16>,
+    /// 上一条指令**是否从陷阱返回**（`mret` / `sret`）。
+    ///
+    /// ⚠️ **这是给平台层看的回报**，不是 ISS 自己的副作用。
+    ///
+    /// ⚠️ **它说的是「服务结束」**，**不是「清 pending」**：架构的
+    /// `mip` 挂起位**不受影响**（用户明确纠正：`mret` 只做 trap 返回、
+    /// 恢复特权模式与中断使能）。它只是告诉 M-16：「**这条线的
+    /// 服务结束了**」。
+    last_trap_return: bool,
     /// 平台时钟的**只读**端口（`None` = 没有时钟 ⇒ ⇒ `time` 报 0）。
     ///
     /// ⚠️ **真值源 = M-15 的 CLINT**（D-151 · 冻结规格 STAGE-26 §3.2 /
@@ -144,6 +153,7 @@ impl Iss {
             decoder: Decoder::default(),
             misaligned: MisalignedPolicy::default(),
             last_csr_written: None,
+            last_trap_return: false,
             time_source: None,
         }
     }
@@ -194,6 +204,18 @@ impl Iss {
         self.last_csr_written.take()
     }
 
+    /// 取走「上一条指令是否从陷阱返回」（**取走即消失**）。
+    ///
+    /// ⚠️ **一次只对应一条指令**：每执行一条指令，这个值就被
+    /// **重置**——所以平台层必须**紧接着**那一步取走它。
+    ///
+    /// ⚠️ **用途**：M-17 据此把 M-16 的「**服务中**」标记释放掉
+    ///（单级嵌套护栏的「服务中」状态）——它只是**平台内部**
+    /// 的书记，**不是**架构的 `mip`。
+    pub fn take_last_trap_return(&mut self) -> bool {
+        self.last_trap_return
+    }
+
     /// Select the policy for misaligned data accesses.
     ///
     /// Defaults to [`MisalignedPolicy::Allow`] — LLD §3.6(2) / §5.2.1
@@ -222,6 +244,7 @@ impl Iss {
         // ⚠️ **先清零**（与 [`Iss::step_one_via_bus`] 同口径）：每条指令只
         //    对应**一次**回报。
         self.last_csr_written = None;
+        self.last_trap_return = false;
         if state.pc & 0x1 != 0 {
             // Misaligned instruction address: the alignment check
             // precedes the fetch itself (LLD §3.1, 评审 13-3).
@@ -260,12 +283,19 @@ impl Iss {
         let decoded = self.decoder.decode(raw, state.pc);
         let mut exec = Executor::new(read_mem, write_mem).with_misaligned_policy(self.misaligned);
         let mut wrote_csr = None;
+        let mut returned_from_trap = false;
         // ⚠️ **闭包口也传时钟**（D-151 · STAGE-26 §3.2）⇒ ⇒ 与总线口
         //    ([`Iss::step_one_via_bus`]) **同一个源** ⇒ ⇒ 两条派发路径
         //    **同口径**（D-11 的延续）。
-        let outcome =
-            exec.execute_with_report(state, &decoded, &mut wrote_csr, self.time_source.as_deref());
+        let outcome = exec.execute_with_report(
+            state,
+            &decoded,
+            &mut wrote_csr,
+            &mut returned_from_trap,
+            self.time_source.as_deref(),
+        );
         self.last_csr_written = wrote_csr;
+        self.last_trap_return = returned_from_trap;
         outcome
     }
     /// Run a single instruction with all memory traffic routed through
@@ -301,6 +331,7 @@ impl Iss {
         // ⚠️ **先清零**：每条指令只对应**一次**回报 —— 平台层必须**紧接着**
         //    那一步取走它（[`Iss::take_last_csr_written`]）。
         self.last_csr_written = None;
+        self.last_trap_return = false;
         if state.pc & 0x1 != 0 {
             // Misaligned instruction address: the alignment check
             // precedes the fetch itself (LLD §3.1, 评审 13-3).
@@ -368,18 +399,21 @@ impl Iss {
         let decoded = self.decoder.decode(raw, state.pc);
         let mut mem = BusMemory::new(bus);
         let mut wrote_csr = None;
+        let mut returned_from_trap = false;
         // ⚠️ **总线口也传时钟**（D-151 · STAGE-26 §3.2）⇒ ⇒ 与闭包口
         //    ([`Iss::step_one`]) **同一个源** ⇒ ⇒ 两条派发路径**同口径**
-        //    （D-11 的延续）⇒ ⇒ 不会出现「一条路有、一条路没有」。
+        //    （D-11 的延续）⇒ ⇒ 不会出现「一条路有、另一条路没有」。
         let outcome = execute_one(
             &mut mem,
             state,
             &decoded,
             self.misaligned,
             &mut wrote_csr,
+            &mut returned_from_trap,
             self.time_source.as_deref(),
         );
         self.last_csr_written = wrote_csr;
+        self.last_trap_return = returned_from_trap;
         outcome
     }
 }

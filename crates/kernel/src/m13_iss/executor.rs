@@ -291,7 +291,16 @@ where
     ) -> Result<StepOutcome, PlatformError> {
         let misaligned = self.misaligned;
         let mut wrote_csr = None;
-        execute_one(self, state, d, misaligned, &mut wrote_csr, time)
+        let mut returned_from_trap = false;
+        execute_one(
+            self,
+            state,
+            d,
+            misaligned,
+            &mut wrote_csr,
+            &mut returned_from_trap,
+            time,
+        )
     }
 
     /// Execute one decoded instruction **and report** which CSR it
@@ -307,10 +316,19 @@ where
         state: &mut SimState,
         d: &Decoded,
         wrote_csr: &mut Option<u16>,
+        returned_from_trap: &mut bool,
         time: Option<&dyn riscv_sim_contract::port::TimeSource>,
     ) -> Result<StepOutcome, PlatformError> {
         let misaligned = self.misaligned;
-        execute_one(self, state, d, misaligned, wrote_csr, time)
+        execute_one(
+            self,
+            state,
+            d,
+            misaligned,
+            wrote_csr,
+            returned_from_trap,
+            time,
+        )
     }
 }
 
@@ -882,6 +900,7 @@ pub fn execute_one<M: MemoryAccess>(
     d: &Decoded,
     misaligned: MisalignedPolicy,
     wrote_csr: &mut Option<u16>,
+    returned_from_trap: &mut bool,
     time: Option<&dyn riscv_sim_contract::port::TimeSource>,
 ) -> Result<StepOutcome, PlatformError> {
     let op = match classify(d) {
@@ -1406,6 +1425,11 @@ pub fn execute_one<M: MemoryAccess>(
                 _ => PRIV_U,
             };
             csr::priv_set(state, level);
+            // ⚠️ **「从陷阱返回」的报告**（STAGE-40 · v0.55）——
+            // ⚠️ **这不是「清 pending」**：`mret` **不碰**架构的 `mip`
+            //    挂起位（用户明确纠正）——⚠️ 它只是「**服务中**」
+            //    这个**平台内部**标记用完了。
+            *returned_from_trap = true;
             target
         }
         Op::Sret => {
@@ -1436,6 +1460,9 @@ pub fn execute_one<M: MemoryAccess>(
             // **不受客体的 `0x22` 掩码约束** ⇒ ⇒ `SPP` 清得掉。
             csr::mstatus_bits(state, sie | spie | spp, restored | spie);
             csr::priv_set(state, if previous { PRIV_S } else { PRIV_U });
+            // ⚠️ **与 `mret` 同口径**（STAGE-40 · v0.55）：也只是「服务结束」
+            //    的报告，**不是**「清 pending」。
+            *returned_from_trap = true;
             target
         }
     };

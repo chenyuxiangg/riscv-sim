@@ -1008,3 +1008,45 @@ select.addr-field {
 .addr-error:not(:empty) {
     display: inline;
 }
+
+/* ---------------------------------------------------------------------------
+ * §19 终端的行结束符按钮组（STAGE-40 · v0.55）
+ * ------------------------------------------------------------------------- */
+
+/*
+ * ⚠️ **行结束符是 guest 的属性**（实测：osz 只认 CR，POSIX shell 认 LF）
+ * ⇒ ⇒ 平台不猜 ⇒ ⇒ 做成**用户可选的按钮组**。
+ *
+ * ⚠️ **用按钮不用 `<select>`**：Node 门禁的 `dom-stub` 里
+ * `<select>.value` 读的是元素自己的 `value` 属性（不是选中项）⇒ ⇒
+ * `<select>` 的「非默认项」测不到 ⇒ ⇒ 按钮组（`data-eol`）两层都可测。
+ */
+.terminal-eol {
+    display: inline-flex;
+    flex: 0 0 auto;
+    gap: 2px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.terminal-eol-btn {
+    background: var(--panel2);
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 5px 7px;
+    border: 0;
+    cursor: pointer;
+}
+
+.terminal-eol-btn:hover {
+    color: var(--accent);
+}
+
+/* ⚠️ **当前档**用 accent 边线标出来（不是只靠颜色区分 ⇒ ⇒ 也不只靠文案）。 */
+.terminal-eol-btn.is-selected {
+    color: var(--accent);
+    background: var(--panel);
+    box-shadow: inset 0 0 0 1px var(--accent-edge);
+}

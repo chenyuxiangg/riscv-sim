@@ -870,3 +870,136 @@ fn the_trigger_mode_constants_match_the_frozen_spec() {
     assert_eq!(TRIGGER_LEVEL, 0, "电平 = 0（契约层字段语义）");
     assert_eq!(TRIGGER_EDGE, 1, "边沿 = 1（契约层字段语义）");
 }
+
+// ---------------------------------------------------------------------------
+// 定时器条件的「由真变假」⇒ 撤线（STAGE-40 · v0.55 · D-158）
+// ---------------------------------------------------------------------------
+
+/// 把控制器武装成「定时器已到期且已交付」的状态。
+///
+/// ⚠️ **为什么必须先交付**：撤线的效果里有一条是「复位 `active_irq`」⇒ ⇒
+/// 只有**交付过**的线才有 `active_irq` 可复位 ⇒ ⇒ 「武装」而不交付的话，
+/// 那条断言是**真空**的。
+fn arm_and_deliver_the_timer(intc: &mut InterruptController) {
+    intc.set_timer_compare(100);
+    intc.poll(200, MIE_TIMER, MSTATUS_ON)
+        .expect("poll")
+        .expect("定时器到期 ⇒ 应当交付一条");
+    assert_eq!(
+        intc.active_irq(),
+        IRQ_TIMER_COMPARE,
+        "前置：定时器线必须真的被交付过"
+    );
+}
+
+/// **A-1**：定时器条件**由真变假** ⇒ ⇒ **撤掉定时器线**。
+///
+/// ⚠️ 判别式落在**控制器的输出状态**上（`raised` / `pending` / `active_irq`）
+/// —— 不是「不抛错」、不是「调用了某个函数」。
+#[test]
+fn a_timer_condition_that_turns_false_releases_the_timer_line() {
+    let mut intc = InterruptController::new();
+    arm_and_deliver_the_timer(&mut intc);
+
+    // 条件由真变假：比较值被推到「当前时间之后」。
+    intc.set_timer_compare(1_000);
+
+    assert!(
+        !intc.raised_lines().contains(&IRQ_TIMER_COMPARE),
+        "条件已经为假 ⇒ `raised` 里不许还有定时器线 {:?}",
+        intc.raised_lines()
+    );
+    assert!(
+        intc.pending_lines().is_empty(),
+        "条件已经为假 ⇒ 挂起队列里不许还有定时器线 {:?}",
+        intc.pending_lines()
+    );
+    assert_eq!(
+        intc.active_irq(),
+        NO_ACTIVE_IRQ,
+        "条件已经为假 ⇒ `active_irq` 必须复位（否则这条线被单级防护永久堵死）"
+    );
+}
+
+/// **A-2**：条件**仍然成立**时（新的比较值**仍然落在过去**）⇒ ⇒ **不许**撤线。
+///
+/// ⚠️ **这条是「撤线判据」的那道防线**：判据必须是「条件由真变假」⇒ ⇒
+/// 「新值 ≠ 旧值」**不够** —— 新值仍然落在过去 ⇒ ⇒ 条件**仍然成立** ⇒ ⇒
+/// 挂起项必须**留着**（它还要被交付）。
+#[test]
+fn a_timer_condition_that_stays_true_keeps_the_timer_line() {
+    let mut intc = InterruptController::new();
+    arm_and_deliver_the_timer(&mut intc);
+
+    // 条件**仍然成立**：新的比较值（150）仍然落在当前时间（200）之前。
+    intc.set_timer_compare(150);
+
+    assert!(
+        intc.raised_lines().contains(&IRQ_TIMER_COMPARE),
+        "条件仍然成立 ⇒ `raised` 里必须还有定时器线 {:?}",
+        intc.raised_lines()
+    );
+    assert!(
+        intc.pending_lines().contains(&IRQ_TIMER_COMPARE),
+        "条件仍然成立 ⇒ 挂起队列里必须还有定时器线 {:?}",
+        intc.pending_lines()
+    );
+    assert_eq!(
+        intc.active_irq(),
+        IRQ_TIMER_COMPARE,
+        "条件仍然成立 ⇒ `active_irq` 不许复位（这条线还没被解除）"
+    );
+}
+
+/// **A-3**：`set_timer_compare(0)`（**关定时器**）⇒ ⇒ **也**撤线。
+///
+/// ⚠️ `0` 在 CLINT 与 M-16 两边**同义**地表示「定时器关闭」⇒ ⇒ 条件
+/// 同样不成立 ⇒ ⇒ 同样必须撤线。
+#[test]
+fn disabling_the_timer_releases_the_timer_line() {
+    let mut intc = InterruptController::new();
+    arm_and_deliver_the_timer(&mut intc);
+
+    intc.set_timer_compare(0);
+
+    assert!(
+        !intc.raised_lines().contains(&IRQ_TIMER_COMPARE),
+        "定时器被关掉 ⇒ `raised` 里不许还有定时器线 {:?}",
+        intc.raised_lines()
+    );
+    assert!(
+        intc.pending_lines().is_empty(),
+        "定时器被关掉 ⇒ 挂起队列里不许还有定时器线 {:?}",
+        intc.pending_lines()
+    );
+    assert_eq!(
+        intc.active_irq(),
+        NO_ACTIVE_IRQ,
+        "定时器被关掉 ⇒ `active_irq` 必须复位"
+    );
+}
+
+/// **A-4**：撤线**只**动定时器线 ⇒ ⇒ **别的线不受影响**。
+///
+/// ⚠️ **这条是「撤线的范围」那道防线**：判据落在**别的线还在**上 ⇒ ⇒
+/// 「把整条队列都清了」这种实现**必须**红。
+#[test]
+fn releasing_the_timer_line_leaves_the_other_lines_alone() {
+    let mut intc = InterruptController::new();
+    arm_and_deliver_the_timer(&mut intc);
+    intc.request(IRQ_UART_RX_READY, 300, "uart", EDGE)
+        .expect("request");
+
+    intc.set_timer_compare(1_000);
+
+    assert!(
+        intc.raised_lines().contains(&IRQ_UART_RX_READY),
+        "撤定时器线不许连别的线一起撤 {:?}",
+        intc.raised_lines()
+    );
+    assert!(
+        intc.pending_lines().contains(&IRQ_UART_RX_READY),
+        "撤定时器线不许连别的线的挂起项一起清 {:?}",
+        intc.pending_lines()
+    );
+}
