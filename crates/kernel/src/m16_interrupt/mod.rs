@@ -174,6 +174,15 @@ pub trait InterruptPort {
         mie: u32,
         mstatus: u32,
     ) -> Result<Option<PendingIntr>, PlatformError>;
+    /// **释放「服务中」标记**（默认：什么都不做）。
+    ///
+    /// ⚠️ **语义**：提示“刚刚服务完了”⇒ ⇒ 接下来可以再交付一条。
+    /// 它**不是**「清 pending」。
+    ///
+    /// ⚠️ 它的唯一调用点是 **M-17 在 guest 执行了 `mret` / `sret` 之后**
+    ///（STAGE-40 · v0.55 · 裁决 C）。
+    fn release_active_line(&mut self) {}
+
     /// 当前**挂起**的中断线（**电平**语义：保持到 [`Self::clear`]）。
     ///
     /// ⚠️ 这是 CSR `mip` 的**唯一来源**（D-84）：`mip` = 这些线的
@@ -351,6 +360,26 @@ impl InterruptController {
         if self.pending_delivery.map(|d| d.line) == Some(line) {
             self.pending_delivery = None;
         }
+    }
+
+    /// **释放「服务中」标记**（STAGE-40 · v0.55 · 裁决 C）。
+    ///
+    /// ⚠️ **这不是「清 pending」**：它**不碰**挂起队列、**不碰**线电平、
+    /// **不碰**架构的 `mip`。它只把 `active_irq` 拉回 `NO_ACTIVE_IRQ`。
+    ///
+    /// ⚠️ **为什么需要它**：`active_irq` 是平台的「**正在服务**」记忆
+    /// （它对应参考侧 PLIC 的 `claimed` 位）——单级嵌套护栏用它阻止
+    /// 「服务中又来一条」。若它永远不释放，则第一次中断之后
+    /// **所有**中断都进来不了（D-158 的根因）。
+    ///
+    /// ⚠️ **为什么在 `mret` 释放**（而不是在「清线」时）：
+    /// - **它是「服务结束」的准确时刻**（架构规范：`mret` = trap 返回）；
+    /// - **它不会提前释放**（地均不清了来的中断不会被提前交付）；
+    /// - **嵌套仍然被防住**：架构的 `mstatus.MIE` 在陷阱入口被清零 ⇒ ⇒
+    ///   **只有平台自己的 `active_irq` 是第二道门** ⇒ ⇒ 释放它**不会**导致
+    ///   嵌套（便是消费者在 ISR 里开了中断，那是 guest **自己**的选择）。
+    pub fn release_active_line(&mut self) {
+        self.active_irq = NO_ACTIVE_IRQ;
     }
 
     // ------------------------------------------------------------------
@@ -540,8 +569,46 @@ impl InterruptController {
     ///
     /// ⚠️ `0` 表示**定时器关闭** —— 否则 `mtime >= 0` 恒成立，定时器会
     /// 变成一条永不消失的中断。
+    ///
+    /// # ⚠️ 条件**由真变假** ⇒ ⇒ **撤掉定时器线**（STAGE-40 · v0.55 · 裁决 B1）
+    ///
+    /// 定时器是**电平**语义 ⇒ ⇒ 「`mtime >= mtimecmp` 这个**条件**」才是
+    /// 中断的来源 ⇒ ⇒ **条件消失时，挂起项必须跟着消失** ⇒ ⇒ 否则那条线
+    /// 会**永远**留在挂起队列里、`active_irq` **永远**不复位 ⇒ ⇒
+    /// 单级嵌套护栏（[`InterruptController::poll`] 的第 ③ 步）会把**之后
+    /// 所有中断**永久堵死。
+    ///
+    /// ⚠️ **这是 D-158 的根因的一半**：解除一条线的**唯一**入口是
+    /// [`InterruptController::clear`]，而它原先**只**由 guest 写平台私有
+    /// CSR `0x7C0` 触发 ⇒ ⇒ **标准固件根本不认识那个 CSR** ⇒ ⇒ 标准固件
+    /// 重编程 `mtimecmp` 之后**永远解不开**第一次定时器中断。
+    ///
+    /// ⚠️ **判据是「由真变假」而不是「无条件撤」**（裁决 N）：
+    ///
+    /// - 「旧条件成立」= `旧值 != 0 ∧ mtime_ps >= 旧值`；
+    /// - 「新条件不成立」= `新值 == 0 ∨ mtime_ps < 新值`；
+    /// - ⇒ ⇒ **定时器从未被武装过**时**不**撤（撤一个不存在的线是空操作，
+    ///   但判据必须落在**状态**上，不能靠「反正没关系」蒙过去）。
+    ///
+    /// ⚠️ **不替 guest 掩盖**（裁决 E）：guest **没有**解除源（既没写
+    /// `mtimecmp` 也没写私有 CSR）⇒ ⇒ 条件仍然成立 ⇒ ⇒ 平台**继续**请求
+    /// ⇒ ⇒ guest 立刻再次陷入（死循环）⇒ ⇒ 那是 **guest 的 bug**，平台
+    /// **不**替它擦。
+    ///
+    /// ⚠️ **`mret` 不参与这件事**（裁决 C）：`mret` 只做 trap 返回、恢复
+    /// 特权模式与中断使能 ⇒ ⇒ 它**完全不碰** `mip` / `mie` / `mcause` ⇒ ⇒
+    /// 「解除 pending」是**软件写源**的动作 ⇒ ⇒ 平台只负责「源的状态变了
+    /// ⇒ 挂起跟着变」。
     pub fn set_timer_compare(&mut self, mtimecmp_ps: u64) {
+        // 旧条件成立？（`mtimecmp_ps == 0` = 定时器关闭 ⇒ 从来没成立过）
+        let was_armed = self.mtimecmp_ps != 0 && self.mtime_ps >= self.mtimecmp_ps;
         self.mtimecmp_ps = mtimecmp_ps;
+        // 新条件不成立？（`0` = 定时器关闭 ⇒ 条件不成立）
+        let now_false = mtimecmp_ps == 0 || self.mtime_ps < mtimecmp_ps;
+        if was_armed && now_false {
+            // 撤线：移除挂起项 + 撤销线电平 + 复位 `active_irq`。
+            self.clear(IRQ_TIMER_COMPARE);
+        }
     }
 
     /// 定时器比较值。
@@ -685,6 +752,10 @@ impl InterruptPort for InterruptController {
 
     fn clear(&mut self, line: u16) {
         InterruptController::clear(self, line);
+    }
+
+    fn release_active_line(&mut self) {
+        InterruptController::release_active_line(self);
     }
 
     fn poll(

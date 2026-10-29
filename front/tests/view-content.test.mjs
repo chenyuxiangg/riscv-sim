@@ -479,8 +479,8 @@ describe("STAGE-35 · 产品树折叠 / 内存图比例条 / 终端收发计数"
         captureCommands(() => send.click());
         assert.equal(
             Number(dom.document.querySelector("[data-term-rx]").textContent),
-            2,
-            "前端发出 2 个字节，RX 应当是 2",
+            3,
+            "前端发出 3 个字节（\"hi\" 两个 **+** 默认档的行结束符 CR 一个），RX 应当是 3",
         );
         assert.equal(
             Number(dom.document.querySelector("[data-term-tx]").textContent),

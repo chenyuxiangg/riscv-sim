@@ -1304,6 +1304,27 @@ impl KernelHost {
         self.intc.controller.borrow_mut().set_timer_compare(cmp_ps);
 
         // ---- 2) UART 的 RX 就绪 → PLIC 的源（**按连线表**）----
+        //
+        // ⚠️ **电平语义**（STAGE-40 · v0.55 · 裁决 A）：PLIC 的**源挂起位**
+        // 必须跟着**设备的中断线电平**走 —— 设备还「有话说」就挂着，没话说
+        // 就撤销 ⇒ ⇒ **不是**一次性的锁存。
+        //
+        // ⚠️ **参考侧口径**（Spike 的 `riscv/plic.cc` · `set_interrupt_level`）：
+        //     `if (lvl) { pending |= mask; } else { pending &= ~mask; claimed &= ~mask; }`
+        // ⇒ ⇒ **源被撤销时，挂起位**与**已认领位**一起清掉 ⇒ ⇒ 同一个源
+        // **可以再来一次** ⇒ ⇒ 这正是「第二个字节能被交付」的前提。
+        //
+        // ⚠️ **为什么这条是必须的**（D-158 的另一半）：`rx_ready` 这一句
+        // **就是** ns16550 的中断线电平（LSR bit0 ∧ IER bit0）⇒ ⇒ guest
+        // 把 RX FIFO 排空 ⇒ ⇒ 电平落 ⇒ ⇒ 源被撤销 ⇒ ⇒ 平台才可能把外部
+        // 线撤掉（D-158 的第一个坑）⇒ ⇒ **下一个字节才有机会被交付**。
+        //
+        // ⚠️ **原来的写法只 `request` 从不撤销** ⇒ ⇒ 源被**永久锁存** ⇒ ⇒
+        // `plic.claim()` **永远**返回 `Some` ⇒ ⇒ 外部线**永远**撤不掉 ⇒ ⇒
+        // guest 收完第一个字节之后，**第二个字节永远进不来** ⇒ ⇒ 而标准
+        // 固件（osz）写回 Claim 时用的是 `claim − 16`（legacy PLIC 约定）
+        // ⇒ ⇒ 那个写值在平台（与参考侧）都是**非法源号** ⇒ ⇒ **被忽略**
+        // ⇒ ⇒ 平台**不能**指望 guest 的 complete 来清挂起位。
         if let Some(uart) = self.uart0.clone() {
             let rx_ready = match uart.try_borrow() {
                 Ok(u) => {
@@ -1312,17 +1333,21 @@ impl KernelHost {
                 }
                 Err(_) => return,
             };
-            if rx_ready {
-                if let Ok(mut p) = plic.try_borrow_mut() {
-                    // ⚠️ **源号来自连线表**（v0.34 · D-125）⇒ ⇒ 表里是
-                    // 「这个事件接到哪个源」⇒ ⇒ 换板改连线不用改宿主。
-                    for wire in self.wiring.iter() {
-                        // ⚠️ **事件名用契约层那个常量**（不写字面量）⇒ ⇒
-                        // 事件名只有一处定义。
-                        if wire.event != WIRING_EVENT_RX_READY {
-                            continue;
-                        }
+            if let Ok(mut p) = plic.try_borrow_mut() {
+                // ⚠️ **源号来自连线表**（v0.34 · D-125）⇒ ⇒ 表里是
+                // 「这个事件接到哪个源」⇒ ⇒ 换板改连线不用改宿主。
+                for wire in self.wiring.iter() {
+                    // ⚠️ **事件名用契约层那个常量**（不写字面量）⇒ ⇒
+                    // 事件名只有一处定义。
+                    if wire.event != WIRING_EVENT_RX_READY {
+                        continue;
+                    }
+                    if rx_ready {
                         p.request(wire.source);
+                    } else {
+                        // ⚠️ **撤销挂起** = 设备把中断线放下来了 ⇒ ⇒
+                        // 源不再「有话说」⇒ ⇒ 不再占着 PLIC 的名额。
+                        p.set_pending(wire.source, false);
                     }
                 }
             }
@@ -1337,13 +1362,38 @@ impl KernelHost {
             Ok(mut p) => p.claim(PLIC_CONTEXT_MACHINE),
             Err(_) => return,
         };
-        if let Some(_source) = claimed {
-            let _ = self.intc.controller.borrow_mut().request(
-                IRQ_UART_RX_READY,
-                now_ps,
-                "plic",
-                crate::m16_interrupt::TRIGGER_LEVEL,
-            );
+        match claimed {
+            Some(_source) => {
+                let _ = self.intc.controller.borrow_mut().request(
+                    IRQ_UART_RX_READY,
+                    now_ps,
+                    "plic",
+                    crate::m16_interrupt::TRIGGER_LEVEL,
+                );
+            }
+            // ⚠️ **PLIC 侧没有可交付的源 ⇒ 撤掉外部线**（STAGE-40 · v0.55 ·
+            // 裁决 B2）。
+            //
+            // ⚠️ **这一支原先是空的** —— ⇒ ⇒ 平台**只加不减** ⇒ ⇒ 外部线
+            // 的挂起项**永远**留在队列里、`active_irq` **永远**不复位 ⇒ ⇒
+            // 单级嵌套护栏把**之后所有中断**永久堵死（D-158 的另一半根因）。
+            //
+            // ⚠️ **判据就是 PLIC 自己的「当前应该交付哪个源」**
+            // （`Plic::best_source`：已挂起 ∧ 已使能 ∧ 优先级**严格大于**
+            // 门限）⇒ ⇒ 「源被 guest 解除」/「源被门限挡住」/「源被禁用」
+            // 三种情况都会让 `claim()` 返回 `None` ⇒ ⇒ **撤线是对的** ⇒ ⇒
+            // **一条判据管三件事**。
+            //
+            // ⚠️ **与上面的 `Some` 分支完全对称** ⇒ ⇒ 「有源就抬线、无源就
+            // 撤线」⇒ ⇒ 外部线也是**电平**语义。
+            //
+            // ⚠️ **不替 guest 掩盖**（裁决 E）：guest **没有**解除源 ⇒ ⇒
+            // PLIC 的挂起位仍在 ⇒ ⇒ `claim()` 仍返回 `Some` ⇒ ⇒ 平台
+            // **继续**请求 ⇒ ⇒ guest 立刻再次陷入（死循环）⇒ ⇒ 那是
+            // **guest 的 bug**，平台**不**替它擦。
+            None => {
+                self.intc.controller.borrow_mut().clear(IRQ_UART_RX_READY);
+            }
         }
     }
 

@@ -1753,6 +1753,97 @@ export function consoleByteCount(raw) {
     return 0;
 }
 
+/**
+ * 终端的**行结束符**四档（STAGE-40 · v0.55 · 裁决 G）。
+ *
+ * ⚠️ **行结束符是 guest 的属性，不是平台的属性** —— 实测：osz 的
+ * `inner_shell_char_is_special` 逐条比对 `127 / 9 / 13 / 27 / 91`
+ * ⇒ ⇒ **只认 CR（13）判行结束**，**不认 LF（10）**；而多数 POSIX shell
+ * 认 LF（也认 CR）⇒ ⇒ 平台**不猜** ⇒ ⇒ 做成**用户可选**。
+ *
+ * ⚠️ **默认是 CR**：真实串口终端按回车发的就是 **CR**（0x0D）⇒ ⇒ 默认档
+ * 与「真实终端」一致 ⇒ ⇒ 也与 osz 一致。
+ *
+ * ⚠️ **四档都是「追加的字节」**（`none` 是空数组）⇒ ⇒ 「不追加」这个
+ * 选项**保留**了 v0.5x 批之前的行为（K-1 §7 的「只送原始字节」）。
+ *
+ * @type {Readonly<Record<string, number[]>>}
+ */
+export const TERMINAL_EOL = Object.freeze({
+    cr: [13],
+    lf: [10],
+    crlf: [13, 10],
+    none: [],
+});
+
+/** 行结束符的**默认档**（= CR）。 */
+export const TERMINAL_EOL_DEFAULT = "cr";
+
+/**
+ * 行结束符按钮的**四档**（渲染与文案都用它 ⇒ ⇒ **一处定义**）。
+ *
+ * ⚠️ **不用 `<select>`**：`front/tests/dom-stub.mjs` 的 `<select>.value`
+ * 读的是**元素自己的 `value` 属性**（不是选中项）⇒ ⇒ `<select>` 的
+ * 「非默认项」在 Node 门禁里**测不到** ⇒ ⇒ 用**按钮组**（`data-eol`）⇒ ⇒
+ * 两层都可测。
+ *
+ * @type {ReadonlyArray<{id: string, label: string, title: string}>}
+ */
+export const TERMINAL_EOL_OPTIONS = Object.freeze([
+    Object.freeze({ id: "cr", label: "CR", title: "0x0D —— 真实串口终端按回车发的就是这个；osz 只认它" }),
+    Object.freeze({ id: "lf", label: "LF", title: "0x0A —— 多数 POSIX shell 认它" }),
+    Object.freeze({ id: "crlf", label: "CRLF", title: "0x0D 0x0A —— Windows 风格" }),
+    Object.freeze({ id: "none", label: "不加", title: "只送原始字节（不追加行结束符）" }),
+]);
+
+/**
+ * 从视图状态里读**当前的行结束符**（读不到 ⇒ 默认档）。
+ *
+ * ⚠️ **判据用 `hasOwnProperty` 而不是 `TERMINAL_EOL[x]`** —— 后者会把
+ * `"constructor"` 之类当成合法取值。
+ *
+ * @param {object} [state]
+ * @returns {string}
+ */
+function currentTerminalEol(state) {
+    const raw = state?.term?.eol ?? viewStore.getState("terminal")?.term?.eol;
+    return Object.prototype.hasOwnProperty.call(TERMINAL_EOL, raw) ? raw : TERMINAL_EOL_DEFAULT;
+}
+
+/**
+ * 渲染行结束符的**按钮组**。
+ *
+ * ⚠️ **当前档带 `data-eol-selected="true"`** ⇒ ⇒ 判据可以按属性读
+ * （不用读文案 ⇒ ⇒ 改文案不会让判据变红）。
+ *
+ * @param {string} eol
+ * @returns {string}
+ */
+function renderTerminalEolButtons(eol) {
+    return TERMINAL_EOL_OPTIONS.map((opt) => {
+        const selected = opt.id === eol;
+        return `<button type="button" class="terminal-eol-btn${selected ? " is-selected" : ""}" data-eol="${opt.id}"${selected ? ' data-eol-selected="true"' : ""} title="${escapeHtml(opt.title)}">${opt.label}</button>`;
+    }).join("");
+}
+
+/**
+ * 切换行结束符（**住在视图状态里** ⇒ ⇒ 重渲染不丢）。
+ *
+ * @param {unknown} eol
+ * @returns {string} the selected id
+ */
+function setTerminalEol(eol) {
+    const next = Object.prototype.hasOwnProperty.call(TERMINAL_EOL, eol)
+        ? eol
+        : TERMINAL_EOL_DEFAULT;
+    viewStore.setState("terminal", (prev) => ({
+        ...prev,
+        term: { ...(prev.term ?? {}), eol: next },
+    }));
+    publishTerminalState();
+    return next;
+}
+
 const terminalView = register({
     id: "terminal",
     channels: ["term"],
@@ -1762,6 +1853,9 @@ const terminalView = register({
         // `body.innerHTML = html` ⇒ **输入框元素被重建** ⇒ 只存在 DOM 里
         // 的草稿会**每来一个 console 字节就清一次** ⇒ 根本没法打字。
         const draft = state?.term?.draft ?? "";
+        // ⚠️ **行结束符的选择也住在视图状态里**（STAGE-40 · v0.55 · 裁决 I）
+        // ⇒ ⇒ 与草稿同一个真相 ⇒ ⇒ 重渲染不丢。
+        const eol = currentTerminalEol(state);
         // ⚠️ **TX / RX 是两个不同的源**（STAGE-35 · v0.50 批 · 裁决 G）⇒ ⇒
         // **分别标注方向** ⇒ ⇒ 不许把两个数混成一个。
         const txBytes = Number(state?.term?.txBytes ?? 0);
@@ -1779,18 +1873,23 @@ const terminalView = register({
                     </div>
                     <div class="terminal-input-row">
                         <input type="text" class="terminal-input" data-terminal-input value="${escapeHtml(draft)}" placeholder="输入后按「发送」——字节会进 guest 的 UART0">
+                        <div class="terminal-eol" role="group" aria-label="行结束符">${renderTerminalEolButtons(eol)}</div>
                         <button type="button" class="terminal-send" data-action="console-send">发送</button>
                     </div>
-                    <p class="muted">输入框里的文本<strong>按 UTF-8 编码</strong>成字节，发给 guest 的 UART0（契约 v5 的 <code>WriteConsole</code>）；<strong>回显来自 guest</strong>，平台不做本地回显。本批只送原始字节，不模拟终端控制序列。</p>
+                    <p class="muted">输入框里的文本<strong>按 UTF-8 编码</strong>成字节，发给 guest 的 UART0（契约 v5 的 <code>WriteConsole</code>）；<strong>回显来自 guest</strong>，平台不做本地回显。<strong>发送时会追加一个行结束符</strong>（默认 <code>CR</code> = 0x0D —— 真实串口终端按回车发的就是它；osz 这类固件的 shell 也只认它）；选「不加」则只送原始字节。</p>
                 </div>
             </section>
         `;
     },
     onCommand(ev) {
-        const el = ev.target?.closest?.("[data-action]");
-        const action = el?.dataset?.action;
-        if (action !== "console-send") return undefined;
-        return sendTerminalInput();
+        const actionEl = ev.target?.closest?.("[data-action]");
+        const action = actionEl?.dataset?.action;
+        if (action === "console-send") return sendTerminalInput();
+        // ⚠️ **行结束符按钮**（STAGE-40 · v0.55）：它**没有** `data-action`
+        // ⇒ ⇒ 不与上面的分支抢同一个动作名 ⇒ ⇒ 两套按钮可以并存。
+        const eolEl = ev.target?.closest?.("[data-eol]");
+        if (eolEl) return setTerminalEol(eolEl.dataset.eol);
+        return undefined;
     },
     /** Append new bytes to the terminal buffer in-place (T1 fast path). */
     onDelta(delta) {
@@ -1887,13 +1986,21 @@ function publishTerminalState() {
 }
 
 /**
- * 把输入框里的文本**按 UTF-8 编码**成字节 ⇒ 发 `console-send` 信号
- * ⇒ 清空输入框。
+ * 把输入框里的文本**按 UTF-8 编码**成字节 ⇒ 追加**行结束符** ⇒ 发
+ * `console-send` 信号 ⇒ 清空输入框。
  *
  * ⚠️ **字节，不是字符**（K-1）：guest 的 UART 收的是**字节**（契约 v5 的
  * `WriteConsole { bytes: Vec<u8> }`）⇒ 这里用 `TextEncoder` 做 UTF-8 编码
  * （`"A"` ⇒ `[65]`、`"你"` ⇒ `[228, 189, 160]`），**不**送字符串（内核会
  * 按 `E_PROTO-08` 拒掉）。
+ *
+ * ⚠️ **追加的行结束符**（STAGE-40 · v0.55 · 裁决 G）：默认为 **CR
+ * （0x0D）**⇒ ⇒ 真实串口终端按回车发的就是它 ⇒ ⇒ osz 这类只认 CR 的
+ * shell 才能把命令**执行**掉（只送原始字节 ⇒ ⇒ 命令永远停在缓冲区里
+ * ⇒ ⇒ 用户看不到任何输出）。
+ *
+ * ⚠️ **RX 计数含追加的行结束符**（裁决 J）：RX 的口径是「**前端发出**的
+ * 字节数」⇒ ⇒ 追加的 CR **确实发出去了** ⇒ ⇒ 计入。
  *
  * ⚠️ **先发命令，再清草稿**：清早了就把要发的内容一起清掉了。
  *
@@ -1905,7 +2012,10 @@ function publishTerminalState() {
 function sendTerminalInput() {
     const input = document.querySelector("[data-terminal-input]");
     const text = String(input?.value ?? "");
-    const bytes = Array.from(new TextEncoder().encode(text));
+    const payload = Array.from(new TextEncoder().encode(text));
+    // ⚠️ **行结束符取自视图状态**（不是 DOM）⇒ ⇒ **一个真相**。
+    const eol = currentTerminalEol();
+    const bytes = payload.concat(TERMINAL_EOL[eol]);
     // ⚠️ **RX 计数**（STAGE-35 · v0.50 批 · 裁决 G）：这是**前端发出**的
     // 字节数（TX 是内核推过来的 ⇒ ⇒ **两个不同的源** ⇒ ⇒ 分别标注）。
     //

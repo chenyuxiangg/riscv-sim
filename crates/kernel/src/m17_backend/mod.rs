@@ -193,6 +193,13 @@ impl<T: InterruptPort + 'static> InterruptPort for SharedInterruptPort<T> {
         }
     }
 
+    fn release_active_line(&mut self) {
+        // ⚠️ **借不到就不做**（与 `clear` 同口径）——没有错误通道。
+        if let Ok(mut controller) = self.inner.try_borrow_mut() {
+            controller.release_active_line();
+        }
+    }
+
     fn poll(
         &mut self,
         now_ps: u64,
@@ -235,6 +242,8 @@ impl InterruptPort for NullInterruptPort {
         None
     }
     fn clear(&mut self, _line: u16) {}
+
+    fn release_active_line(&mut self) {}
     fn poll(
         &mut self,
         _now_ps: u64,
@@ -486,6 +495,17 @@ impl InstructionExecutor for IssExecutor<'_> {
             // ⚠️ **刷新点 ②**（STAGE-6 裁决 B）：清线的副作用之后，
             //     重新投影 `mip` ⇒ guest 清掉的线**立刻**从 `mip` 消失。
             self.project_mip(state);
+        }
+        // ⚠️ **「服务结束」的接线**（STAGE-40 · v0.55 · 裁决 C）。
+        //
+        // ⚠️ **这不是「清 pending」**：它**不碰**架构的 `mip`（`mret` 不清
+        //    `mip` 的挂起位，那是用户明确纠正的架构语义）。它只是把 M-16
+        //    的「**正在服务**」记忆释放掉——下一条中断才能再交付。
+        //
+        // ⚠️ **为什么必须在这里**（而不是在 M-13 里）：M-13 **不知道**
+        //    M-16 的存在（契约层的接线在 M-16 / M-17 之间）⇒ ⇒ 这里才是接线点。
+        if self.iss.take_last_trap_return() {
+            self.intc.release_active_line();
         }
         // ⚠️ 这个 `match` **穷举** `StepOutcome` 的全部变体，**没有**兜底臂 ——
         //    M-13 以后再加变体，M-17 会**编译不过**（而不是静默走兜底）。

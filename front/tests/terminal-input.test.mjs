@@ -14,6 +14,22 @@
 //      （不是被 HTML 转义后的东西）；
 //   7. （加分项）Enter 键也能发送。
 //
+// ⚠️ **v0.55 批（STAGE-40）把第 2 条改了**：发送时**追加一个行结束符**
+// （默认 **CR = 0x0D**）⇒ ⇒ 真实串口终端按回车发的就是它 ⇒ ⇒ osz 这类
+// **只认 CR** 的 shell 才能把命令**执行**掉（只送原始字节 ⇒ ⇒ 命令永远
+// 停在缓冲区里 ⇒ ⇒ 用户看不到任何输出）。
+//
+// ⇒ ⇒ 于是本文件多盯八条（**N-1 ~ N-8**）：
+//
+//   8.  默认档追加 **CR**（0x0D）；
+//   9.  选 **LF** ⇒ 追加 LF（0x0A）；
+//  10.  选 **CRLF** ⇒ 追加两个字节（0x0D 0x0A）；
+//  11.  选 **「不加」** ⇒ **只有原始字节**（**v0.5x 批之前的行为**保留）；
+//  12.  RX 计数**含**追加的行结束符；
+//  13.  行结束符的选择**重渲染不丢**（它住在 M-03 的视图状态里）；
+//  14.  四档按钮都渲染出来，当前档带 `data-eol-selected`；
+//  15.  追加的是**字节**不是字符串（多字节字符照样按 UTF-8 编码）。
+//
 // ⚠️ **断言值是写死的字面量**，不从被测实现反推。
 //
 // ⚠️ **为什么第 4 / 5 条是这套件的核心**：`applyRenderEvent` 每次都
@@ -61,6 +77,24 @@ const BYTES_A = [65];
 const BYTES_NI = [228, 189, 160];
 /** `"<&\""` 的 UTF-8 字节（`<` = 60、`&` = 38、`"` = 34）。 */
 const BYTES_SPECIAL = [60, 38, 34];
+/** 默认档追加的那**一个**字节（CR = 0x0D）。 */
+const BYTES_CR = [13];
+/** LF = 0x0A。 */
+const BYTES_LF = [10];
+/** CRLF = 0x0D 0x0A。 */
+const BYTES_CRLF = [13, 10];
+
+/**
+ * 「文本的 UTF-8 字节 **+ 默认档的行结束符**」。
+ *
+ * ⚠️ **这是 v0.55 批之后「发送」真正发出去的字节**（默认追加 CR）。
+ *
+ * @param {number[]} bytes
+ * @returns {number[]}
+ */
+function withCr(bytes) {
+    return bytes.concat(BYTES_CR);
+}
 
 // ---------------------------------------------------------------------------
 // 传输替身
@@ -154,6 +188,27 @@ function sendButton() {
 }
 
 /**
+ * 终端视图当前的**行结束符按钮**（每次重渲染都是**新**元素 ⇒ 每次重新取）。
+ *
+ * @param {string} id
+ * @returns {object}
+ */
+function eolButton(id) {
+    const el = dom.document.querySelector(`[data-eol="${id}"]`);
+    assert.ok(el, `终端视图没有渲染出行结束符按钮 ${id}`);
+    return el;
+}
+
+/**
+ * 点一个**行结束符按钮**（切档）。
+ *
+ * @param {string} id
+ */
+function clickEol(id) {
+    eolButton(id).dispatchEvent(new Event("click"));
+}
+
+/**
  * 在输入框里「敲」一段文本（模拟用户输入）。
  *
  * ⚠️ 必须**派发 `input` 事件**：草稿是靠 `input` 事件进视图状态的
@@ -190,14 +245,18 @@ describe("终端视图 · 输入框与发送按钮（K-1）", () => {
         // -- 视图层只发**信号**（不直接调服务层）--------------------------
         assert.equal(signals.length, 1, "点击没有发出 riscv:command 信号");
         assert.equal(signals[0].action, "console-send");
-        assert.deepEqual(signals[0].params.bytes, BYTES_A, "信号里带的字节不对");
+        assert.deepEqual(
+            signals[0].params.bytes,
+            withCr(BYTES_A),
+            "信号里带的字节不对（**含默认档的行结束符 CR**）",
+        );
 
         // -- 真的落到了线上 ------------------------------------------------
         assert.equal(transport.sent.length, 1, "命令没有发到 M-05");
         assert.deepEqual(
             transport.sent[0].message.payload.Command,
-            { WriteConsole: { bytes: BYTES_A } },
-            "线上形态必须是 WriteConsole { bytes: [...] }",
+            { WriteConsole: { bytes: withCr(BYTES_A) } },
+            "线上形态必须是 WriteConsole { bytes: [...] }（**含默认档的 CR**）",
         );
     });
 
@@ -207,7 +266,7 @@ describe("终端视图 · 输入框与发送按钮（K-1）", () => {
         sendButton().dispatchEvent(new Event("click"));
         assert.deepEqual(
             transport.sent[0].message.payload.Command,
-            { WriteConsole: { bytes: BYTES_NI } },
+            { WriteConsole: { bytes: withCr(BYTES_NI) } },
         );
     });
 
@@ -251,7 +310,7 @@ describe("终端视图 · 输入框与发送按钮（K-1）", () => {
         assert.equal(transport.sent.length, 1, "重渲染之后点发送没有发出命令");
         assert.deepEqual(
             transport.sent[0].message.payload.Command,
-            { WriteConsole: { bytes: BYTES_A } },
+            { WriteConsole: { bytes: withCr(BYTES_A) } },
             "重渲染之后发出的字节不对",
         );
     });
@@ -262,7 +321,7 @@ describe("终端视图 · 输入框与发送按钮（K-1）", () => {
         sendButton().dispatchEvent(new Event("click"));
         assert.deepEqual(
             transport.sent[0].message.payload.Command,
-            { WriteConsole: { bytes: BYTES_SPECIAL } },
+            { WriteConsole: { bytes: withCr(BYTES_SPECIAL) } },
             "特殊字符被转义了（或被吃掉了）",
         );
     });
@@ -277,7 +336,7 @@ describe("终端视图 · 输入框与发送按钮（K-1）", () => {
         assert.equal(transport.sent.length, 1, "Enter 没有发出命令");
         assert.deepEqual(
             transport.sent[0].message.payload.Command,
-            { WriteConsole: { bytes: BYTES_A } },
+            { WriteConsole: { bytes: withCr(BYTES_A) } },
         );
     });
 
@@ -291,6 +350,129 @@ describe("终端视图 · 输入框与发送按钮（K-1）", () => {
             transport.sent.filter((s) => s.message.payload.Command.Nop !== undefined).length,
             0,
             "不该有 Nop 之类的多余命令",
+        );
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 行结束符（STAGE-40 · v0.55 · 裁决 G ~ J）
+// ---------------------------------------------------------------------------
+
+describe("终端视图 · 行结束符（STAGE-40 · v0.55）", () => {
+    test("**N-1** 「发送」默认追加 **CR**（0x0D）", async () => {
+        const { transport } = await setup();
+        typeIntoInput("A");
+        sendButton().dispatchEvent(new Event("click"));
+        assert.deepEqual(
+            transport.sent[0].message.payload.Command,
+            { WriteConsole: { bytes: [65, 13] } },
+            "默认必须追加 CR（0x0D）—— 真实串口终端按回车发的就是它，\
+             osz 这类只认 CR 的 shell 才能把命令执行掉",
+        );
+    });
+
+    test("**N-2** 选 **LF** ⇒ 追加 LF（0x0A）", async () => {
+        const { transport } = await setup();
+        clickEol("lf");
+        typeIntoInput("A");
+        sendButton().dispatchEvent(new Event("click"));
+        assert.deepEqual(
+            transport.sent[0].message.payload.Command,
+            { WriteConsole: { bytes: [65, 10] } },
+            "选 LF 必须追加 LF（0x0A）",
+        );
+    });
+
+    test("**N-3** 选 **CRLF** ⇒ 追加两个字节（0x0D 0x0A）", async () => {
+        const { transport } = await setup();
+        clickEol("crlf");
+        typeIntoInput("A");
+        sendButton().dispatchEvent(new Event("click"));
+        assert.deepEqual(
+            transport.sent[0].message.payload.Command,
+            { WriteConsole: { bytes: [65, 13, 10] } },
+            "选 CRLF 必须追加 0x0D 0x0A（**顺序**也不能反）",
+        );
+    });
+
+    test("**N-4** 选 **「不加」** ⇒ **只有原始字节**（v0.5x 批之前的行为保留）", async () => {
+        const { transport } = await setup();
+        clickEol("none");
+        typeIntoInput("A");
+        sendButton().dispatchEvent(new Event("click"));
+        assert.deepEqual(
+            transport.sent[0].message.payload.Command,
+            { WriteConsole: { bytes: [65] } },
+            "选「不加」必须**只**送原始字节",
+        );
+    });
+
+    test("**N-5** RX 计数**含**追加的行结束符", async () => {
+        await setup();
+        typeIntoInput("A");
+        sendButton().dispatchEvent(new Event("click"));
+        assert.equal(
+            m03.getState("terminal")?.term?.rxBytes,
+            2,
+            "RX 计数必须**含**追加的那一个字节（它确实发出去了）",
+        );
+        // 「不加」那一档 ⇒ 只算原始字节。
+        clickEol("none");
+        typeIntoInput("B");
+        sendButton().dispatchEvent(new Event("click"));
+        assert.equal(
+            m03.getState("terminal")?.term?.rxBytes,
+            3,
+            "「不加」那一档只算原始字节 ⇒ 计数必须是 2 + 1",
+        );
+    });
+
+    test("**N-6** 行结束符的选择**重渲染不丢**（它住在 M-03 的视图状态里）", async () => {
+        await setup();
+        clickEol("lf");
+        publishTerminal();
+        const el = eolButton("lf");
+        assert.equal(
+            el.getAttribute("data-eol-selected"),
+            "true",
+            "重渲染之后当前档必须还是 LF —— 选择必须住在视图状态里，不在 DOM 里",
+        );
+        // 且重渲染之后发送用的**还是**新档。
+        typeIntoInput("A");
+        sendButton().dispatchEvent(new Event("click"));
+        assert.deepEqual(
+            m03.getState("terminal")?.term?.rxBytes,
+            2,
+            "重渲染之后发送仍然必须按当前档（LF）算 RX 计数",
+        );
+    });
+
+    test("**N-7** 四档按钮都渲染出来，当前档带 `data-eol-selected`", async () => {
+        await setup();
+        for (const id of ["cr", "lf", "crlf", "none"]) {
+            const el = eolButton(id);
+            assert.equal(el.tagName, "BUTTON", `行结束符 ${id} 必须是按钮`);
+        }
+        assert.equal(
+            eolButton("cr").getAttribute("data-eol-selected"),
+            "true",
+            "默认档必须是 CR",
+        );
+        assert.equal(
+            eolButton("lf").getAttribute("data-eol-selected"),
+            null,
+            "非当前档不许带 `data-eol-selected`",
+        );
+    });
+
+    test("**N-8** 追加的是**字节**不是字符串（多字节字符照样按 UTF-8 编码）", async () => {
+        const { transport } = await setup();
+        typeIntoInput("你");
+        sendButton().dispatchEvent(new Event("click"));
+        assert.deepEqual(
+            transport.sent[0].message.payload.Command,
+            { WriteConsole: { bytes: [228, 189, 160, 13] } },
+            "\"你\" 必须是三个 UTF-8 字节 **+** 一个 CR",
         );
     });
 });
