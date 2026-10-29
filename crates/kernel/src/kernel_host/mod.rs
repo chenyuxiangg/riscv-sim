@@ -87,6 +87,16 @@
 //! | `ExportTrace{source,format,offset,limit}` | **宿主路由**：`Waveform` ⇒ M-19 的环；`Execution` ⇒ M-11 的轨迹环 | `TraceExport{..}` |
 //! | `SetTraceEnabled{enabled}` | M-11 的轨迹环开关（裁决 H） | `TraceState{enabled,len,dropped}` |
 //!
+//! ⚠️ **v0.57 批（STAGE-42）** 在这张表**之外**又加了两条命令：
+//!
+//! | 命令 | 内核行为 | 回复事件 |
+//! | --- | --- | --- |
+//! | `ResolveSymbol{name}` | M-11 的 `SymbolTable`（精确命中 + 前缀候选） | `SymbolResolved{name,symbol,candidates,total}` |
+//! | `DumpMemory{addr,len}` | M-14 的 `read_only`（**逐字节** · **调试视角**） | `MemoryDump{addr,bytes}` |
+//!
+//! ⚠️ **这两条也是「回复事件」，不经 topic 过滤**（同 STAGE-5 §9.1）⇒ ⇒
+//! 前端靠传输帧的 `reqId` 关联 ⇒ ⇒ **不需要先订阅**。
+//!
 //! ⚠️ **这四个事件是「回复事件」，不经 topic 过滤**（STAGE-5 §9.1）：
 //! 前端靠传输帧的 `reqId` 关联「命令 → 回复」⇒ **不需要先订阅**。
 //! [`TOPIC_DISASM`] 等四个常量是**登记用**的（与前端 `EVENT_TOPIC`
@@ -163,9 +173,9 @@ use std::rc::Rc;
 use riscv_sim_contract::admin::LogEntryDto;
 use riscv_sim_contract::csr::IRQ_UART_RX_READY;
 use riscv_sim_contract::error::{
-    ErrorFamily, PlatformError, E_ENG_03_NO_PROGRESS, E_HMS_02_FATAL_TERMINATED,
-    E_PLT_13_REVISION_CONFLICT, E_PLT_14_REGION_NOT_FOUND, E_PROTO_01_VERSION_MISMATCH,
-    PLATFORM_FAMILY, PROTO_FAMILY,
+    ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_02_CONDITION_INVALID, E_DBG_03_DUMP_TOO_LARGE,
+    E_ENG_03_NO_PROGRESS, E_HMS_02_FATAL_TERMINATED, E_PLT_13_REVISION_CONFLICT,
+    E_PLT_14_REGION_NOT_FOUND, E_PROTO_01_VERSION_MISMATCH, PLATFORM_FAMILY, PROTO_FAMILY,
 };
 use riscv_sim_contract::model::{
     Edge, ImageKind, ImageRef, ImageSource, Project, TraceEvent, TraceFormat, TraceSource,
@@ -180,7 +190,7 @@ use riscv_sim_contract::session::{
     CheckpointMetaDto, M13StateDto, M14MapDto, M15PeriphDto, M16IntcDto, SessionSnapshotDto,
 };
 use riscv_sim_contract::snapshot::{EngineSnapshotDto, DEFAULT_INSTRUCTION_BUDGET};
-use riscv_sim_contract::SCHEMA_VERSION;
+use riscv_sim_contract::{DUMP_MAX_BYTES, SCHEMA_VERSION, SYMBOL_CANDIDATE_LIMIT};
 
 use crate::m06_elf::{DefaultLoader, Kind as LoadKind, ParseLimits};
 use crate::m11_symbol::disasm::fetch_instruction_code as m11_fetch_instruction_code;
@@ -353,6 +363,21 @@ pub const TOPIC_EXPORT: &str = "debug.export";
 
 /// 主题：轨迹记录状态（`EventPayload::TraceState` 的回复）。
 pub const TOPIC_TRACE: &str = "debug.trace";
+
+/// 主题：符号查询的回复（`EventPayload::SymbolResolved` 的回复）。
+///
+/// ⚠️ **登记用，不是订阅开关**（与上面四个常量同口径）⇒ ⇒ 前端靠传输帧的
+/// `reqId` 关联「命令 → 回复」⇒ ⇒ **不需要先订阅**。
+///
+/// ⚠️ 与前端 `EVENT_TOPIC` 里的 `SymbolResolved` **逐字相同**（STAGE-42
+/// §2.7）⇒ ⇒ 两侧的一致性由 `crates/kernel/tests/m11_host_wiring.rs` 里
+/// 那条用例钉住。
+pub const TOPIC_SYMBOL: &str = "debug.symbol";
+
+/// 主题：整段转储的回复（`EventPayload::MemoryDump` 的回复）。
+///
+/// ⚠️ **登记用，不是订阅开关**（与上面四个常量同口径）。
+pub const TOPIC_DUMP: &str = "debug.dump";
 
 /// console 输出的 topic（与前端 `EVENT_TOPIC.Console` **逐字一致**）。
 pub const TOPIC_CONSOLE: &str = "sim.console";
@@ -1934,6 +1959,19 @@ impl KernelHost {
         self.index.dwarf_status()
     }
 
+    /// 按**名字前缀**查符号（v0.57 批 · STAGE-42）。
+    ///
+    /// ⚠️ **走 M-11 的端口**（[`SymbolService::lookup_prefix`]）⇒ ⇒ 与
+    /// [`Self::lookup_symbol`] 走**同一条**路 ⇒ ⇒ 「按名字查」与「按前缀
+    /// 查」**不会**给出两套不同的答案。
+    pub fn lookup_symbol_prefix(
+        &self,
+        prefix: &str,
+        limit: usize,
+    ) -> Vec<riscv_sim_contract::model::Symbol> {
+        self.index.lookup_prefix(prefix, limit).unwrap_or_default()
+    }
+
     /// M-11 的执行轨迹环里有多少条目。
     pub fn trace_len(&self) -> usize {
         self.trace.len()
@@ -2205,6 +2243,12 @@ impl KernelHost {
                 limit,
             } => self.on_export_trace(source, format, offset, limit),
             CommandPayload::SetTraceEnabled { enabled } => self.on_set_trace_enabled(enabled),
+            // ⚠️ **契约 v9 的两条新命令**（STAGE-42 · v0.57 批）。
+            //
+            // ⚠️ **符号查询与整段转储**—— 前端**零** ELF 解析代码 ⇒ ⇒
+            // 解析住在内核（M-11），转储走调试视角（M-14 的 `read_only`）。
+            CommandPayload::ResolveSymbol { name } => self.on_resolve_symbol(name),
+            CommandPayload::DumpMemory { addr, len } => self.on_dump_memory(addr, len),
             // ⚠️ 契约 v5 的 console **输入**方向（STAGE-9 裁决 A）。
             //
             // ⚠️ **不复用 `WriteMemory`**：写 UART 的寄存器地址在技术上
@@ -3316,6 +3360,79 @@ impl KernelHost {
         vec![source_location_event(addr, lookup)]
     }
 
+    // -- 契约 v9 的调试面（STAGE-42 · v0.57 批） ------------------------------
+
+    /// 按**名字**查符号（契约 v9 · `ResolveSymbol`）。
+    ///
+    /// ## 三种结果
+    ///
+    /// | 情况 | `symbol` | `candidates` | `total` |
+    /// | --- | --- | --- | --- |
+    /// | **精确命中** | `Some(..)` | **不含**它 | 该镜像符号总数 |
+    /// | **只有前缀命中** | `None` | 有值 | 该镜像符号总数 |
+    /// | **什么都没有** | `None` | 空 | `0` ⇒ 这个镜像**没有符号表** |
+    ///
+    /// ⚠️ **空名字 / 纯空白 ⇒ 拒绝**（`E_DBG_02`）⇒ ⇒ **不发**
+    /// `SymbolResolved`（K-4）⇒ ⇒ 前端能分清「我没发对」与「这个镜像没有
+    /// 符号」。
+    ///
+    /// ⚠️ **符号表是装载镜像时由 M-06 的 `.symtab` 建出来的**⇒ ⇒ 没装载
+    /// 镜像 / 镜像被 strip ⇒ `total == 0` ⇒ ⇒ 这两态**可区分**（靠
+    /// `total`）。
+    ///
+    /// ⚠️ **回显的是请求里的名字**（前端按它对上号）⇒ ⇒ 原样回显，不改写。
+    fn on_resolve_symbol(&mut self, name: String) -> Vec<EventPayload> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            // ⚠️ **不发** `SymbolResolved` ⇒ ⇒ 前端只会看到一条 `Error`。
+            return vec![self.error_from(&PlatformError::new(
+                DEBUG_FAMILY,
+                E_DBG_02_CONDITION_INVALID,
+                "符号名为空：无法查询符号（请给出符号名）",
+            ))];
+        }
+        // ⚠️ **精确命中**（走端口 · 与 `lookup_symbol` 同一条路）。
+        let exact = self.lookup_symbol(trimmed);
+        let limit = SYMBOL_CANDIDATE_LIMIT as usize;
+        // ⚠️ **多要一条** ⇒ ⇒ 精确命中被剔掉之后**仍然**能给出满
+        //    `SYMBOL_CANDIDATE_LIMIT` 条候选（而不是少一条）。
+        let mut candidates = self.lookup_symbol_prefix(trimmed, limit + 1);
+        if let Some(exact) = &exact {
+            candidates.retain(|candidate| candidate.name != exact.name);
+        }
+        candidates.truncate(limit);
+        vec![EventPayload::SymbolResolved {
+            name,
+            symbol: exact,
+            candidates,
+            total: self.index.symbol_count() as u32,
+        }]
+    }
+
+    /// 转储一段内存（契约 v9 · `DumpMemory`）。
+    ///
+    /// ⚠️ **原样拒，不静默截断**（裁决 D）：`len == 0` 或
+    /// `len > DUMP_MAX_BYTES` ⇒ ⇒ `E_DBG_03` ⇒ ⇒ **不发** `MemoryDump`。
+    ///
+    /// ⚠️ **走调试视角**（`Bus::read_only`）⇒ ⇒ **不计**总线统计、**不**
+    /// 触发探针、**不**匹配观察点（裁决 E）。
+    ///
+    /// ⚠️ **未映射 ⇒ 总线的错误原样透出**（不吞、不改写）⇒ ⇒ 前端看到
+    /// 的是 `E_BUS-01` 与总线的原话。
+    fn on_dump_memory(&mut self, addr: u32, len: u32) -> Vec<EventPayload> {
+        if len == 0 || len > DUMP_MAX_BYTES {
+            return vec![self.error_from(&PlatformError::new(
+                DEBUG_FAMILY,
+                E_DBG_03_DUMP_TOO_LARGE,
+                format!("转储长度越界：{len}（允许 1..={DUMP_MAX_BYTES} 字节）"),
+            ))];
+        }
+        match self.backend.read_memory_bytes(addr, len) {
+            Ok(bytes) => vec![EventPayload::MemoryDump { addr, bytes }],
+            Err(err) => vec![self.error_from(&err)],
+        }
+    }
+
     /// 导出（契约 v3 · `ExportTrace`）—— **宿主路由**（STAGE-5 裁决 D）。
     ///
     /// | `source` | `format` | 数据源 |
@@ -4361,6 +4478,13 @@ mod degrade;
 /// 采样与 M-19 的溢出策略。
 #[cfg(test)]
 mod tests_degrade;
+
+/// v0.57 批（STAGE-42）的**内核侧**判别力用例 —— 验收 **B-1 ~ B-15**。
+///
+/// ⚠️ 它盯的是「宿主这条路**真的接上了**」⇒ ⇒ 符号查询、整段转储、条件
+/// 断点三件事**各**有宿主层的用例（不是只有单元层的）。
+#[cfg(test)]
+mod tests_v057_debug;
 
 /// 平台描述的加载 · 器件工厂 · 建图（v0.27 · D-123-B）。
 ///

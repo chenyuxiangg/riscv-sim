@@ -307,6 +307,26 @@ pub const E_PROTO_08_BAD_MESSAGE: u16 = 8;
 /// M-10); M-09 already declares it as its family.
 pub const E_DBG_01_INVALID_REGISTER_INDEX: u16 = 1;
 
+/// Scenario code: the **condition expression** of a breakpoint could not
+/// be parsed (syntax error / unknown register name / empty expression).
+///
+/// ⚠️ **Registered in contract v9** (v0.57 · STAGE-42 §2.6) ⇒ ⇒ 它住在
+/// **契约层**，因为前端要**按码分派**（把内核原文显示在条件输入框旁边）
+/// ⇒ ⇒ 「一场景一码」⇒ ⇒ 既有 `E_CTX-07`（M-08 LLD §6.1 的地址校验）
+/// **不动** ⇒ ⇒ 两个码**并存但族不同**（**有意偏差**，已如实登记）。
+///
+/// ⚠️ **消息里必须带「哪一段不对」的线索**（STAGE-42 §4.4）⇒ ⇒ 例如
+/// `条件表达式无效：未知寄存器名 "foo"` ⇒ ⇒ 前端**原样透传**，**不吞**。
+pub const E_DBG_02_CONDITION_INVALID: u16 = 2;
+
+/// Scenario code: the **dump length** is out of range (`len == 0` or
+/// `len > DUMP_MAX_BYTES`).
+///
+/// ⚠️ **Registered in contract v9** (v0.57 · STAGE-42 §2.6) ⇒ ⇒ 属
+/// `Debug` 族（契约层对 `Debug` 族的定义逐字含「register/memory」）⇒ ⇒
+/// **原样拒，不静默截断**（裁决 D）。
+pub const E_DBG_03_DUMP_TOO_LARGE: u16 = 3;
+
 // ---------------------------------------------------------------------------
 // Engine family — `E_ENG-01`..`E_ENG-03`
 // ---------------------------------------------------------------------------

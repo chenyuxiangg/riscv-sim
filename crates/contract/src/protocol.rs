@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    Breakpoint, DeltaRegister, DisasmEntryDto, Project, SimState, TraceFormat, TraceSource,
+    Breakpoint, DeltaRegister, DisasmEntryDto, Project, SimState, Symbol, TraceFormat, TraceSource,
     Watchpoint, WaveformHistory, WriteSize,
 };
 use crate::platform::{PlatformDescription, RegionSpec};
@@ -363,6 +363,36 @@ pub enum CommandPayload {
         #[serde(default)]
         expected_revision: Option<u64>,
     },
+    /// 按**名字**查符号（M-11 · v0.57 批）。
+    ///
+    /// ⚠️ **一条命令同时服务两种用法**（裁决 B）：
+    /// - **精确命中** ⇒ [`EventPayload::SymbolResolved`] 的 `symbol` 里有它；
+    /// - **只给前缀** ⇒ `candidates` 里有候选。
+    ///
+    /// ⚠️ **不**另开「列出全部符号」的命令（osz 的符号表有几千条 ⇒ 全量
+    /// 回传会撑爆事件）。
+    ///
+    /// Added in contract v9 (STAGE-42 §2.2).
+    ResolveSymbol {
+        /// 符号名。**空字符串或纯空白 ⇒ 拒绝**（`E_DBG-02`）。
+        name: String,
+    },
+    /// 转储一段内存（M-10 · v0.57 批）。
+    ///
+    /// ⚠️ **原样拒，不静默截断**（裁决 D）：`len == 0` 或 `len > DUMP_MAX_BYTES`
+    /// ⇒ ⇒ `E_DBG_03`。
+    ///
+    /// ⚠️ **与 [`CommandPayload::ReadMemory`] 的分工**：那条命令的 `size` 是
+    /// `WriteSize`（**1 / 2 / 4 字节**三档）⇒ ⇒ 一次最多看 **4 字节** ⇒ ⇒
+    /// 要看**一段**就得有这条新命令（STAGE-42 §1.1）。
+    ///
+    /// Added in contract v9 (STAGE-42 §2.2).
+    DumpMemory {
+        /// 起始**物理**地址。
+        addr: u32,
+        /// 字节数（`1..=DUMP_MAX_BYTES`）。
+        len: u32,
+    },
 }
 
 /// 一条**差量操作** —— 板级内存图的增量（D-137 · v0.31）。
@@ -705,6 +735,33 @@ pub enum EventPayload {
         /// The diagnostic kit.
         diag: crate::admin::AdminDiagDto,
     },
+    /// 符号查询的回复（M-11 · v0.57 批）。
+    ///
+    /// ⚠️ **零新 DTO**：载荷里的符号用的是契约层**已有**的
+    /// [`crate::model::Symbol`]（STAGE-42 §2.1）。
+    ///
+    /// Added in contract v9 (STAGE-42 §2.3).
+    SymbolResolved {
+        /// **回显**请求里的名字（前端按它对上号）。
+        name: String,
+        /// **精确命中**的那一条（**没有 ⇒ `None`**；⚠️ 「没有」**不是**错误）。
+        symbol: Option<Symbol>,
+        /// **前缀候选**（名字以请求名**开头**的那些，按名字**升序**；
+        /// **不含**精确命中那条；条数 ≤ `SYMBOL_CANDIDATE_LIMIT`）。
+        candidates: Vec<Symbol>,
+        /// 该镜像的**符号总数**（`0` ⇒ 这个镜像**没有符号表**）。
+        total: u32,
+    },
+    /// 一段内存的**字节**（M-10 · v0.57 批）。
+    ///
+    /// Added in contract v9 (STAGE-42 §2.3).
+    MemoryDump {
+        /// **回显**起始地址。
+        addr: u32,
+        /// 读到的字节（长度 == 请求的 `len`；⚠️ 线上是 **JSON 数组**，
+        /// **不是** base64、**不是**字符串 —— 与 `Console` 事件同口径）。
+        bytes: Vec<u8>,
+    },
 }
 
 impl Default for EventPayload {
@@ -770,9 +827,16 @@ mod tests {
     /// `admin::LogEntryDto` / `admin::AdminDiagDto` DTOs) and the one
     /// cross-boundary scenario code `E_CTX-05`
     /// (STAGE-29 §2.1..§2.3).
+    ///
+    /// **v9** adds the **debugger enhancements** batch
+    /// (`ResolveSymbol` + `DumpMemory` + `SymbolResolved` + `MemoryDump`
+    /// + the optional `Breakpoint::condition`) — STAGE-42 §2.
+    ///
+    /// ⚠️ **A-1**（STAGE-42 §6.1）：断言写**字面量** ⇒ ⇒ 升版 / 漏升版
+    /// 都会当场变红。
     #[test]
-    fn the_schema_version_is_eight() {
-        assert_eq!(crate::SCHEMA_VERSION, 8);
+    fn the_schema_version_is_nine() {
+        assert_eq!(crate::SCHEMA_VERSION, 9);
     }
 
     /// `AdminOp`'s **doc** must state the gate the platform **really**
@@ -987,7 +1051,7 @@ mod tests {
         let msg = Message::command(8, CommandPayload::Nop);
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
-        assert_eq!(json["schema_version"], 8);
+        assert_eq!(json["schema_version"], 9);
     }
 
     // -----------------------------------------------------------------
@@ -1801,5 +1865,139 @@ mod tests {
             js_tokens.iter().any(|t| t == "\"UnloadProject\""),
             "JS 镜像里必须**字面**出现字符串 `\"UnloadProject\"`（unit 变体的线上形态）"
         );
+    }
+
+    // -- STAGE-42 §6.1 · A-2 ~ A-5（v0.57 批的契约层判据） -------------------
+
+    /// **A-2**：两条新命令的**线上形状**逐字钉住。
+    ///
+    /// ⚠️ 判据不许是空的 ⇒ ⇒ 这里断言的是**完整的 JSON 值**（不是「有
+    /// 这个键」）⇒ ⇒ 键名改一个字就红。
+    #[test]
+    fn a2_the_two_new_commands_have_their_wire_shapes_pinned() {
+        assert_eq!(
+            serde_json::to_value(CommandPayload::ResolveSymbol {
+                name: "main".to_string()
+            })
+            .expect("json"),
+            serde_json::json!({"ResolveSymbol": {"name": "main"}}),
+        );
+        assert_eq!(
+            serde_json::to_value(CommandPayload::DumpMemory { addr: 0, len: 16 }).expect("json"),
+            serde_json::json!({"DumpMemory": {"addr": 0, "len": 16}}),
+        );
+        // ⚠️ 反向也要钉住：线上那串 JSON 必须能**解析回**同一个变体。
+        let back: CommandPayload =
+            serde_json::from_value(serde_json::json!({"ResolveSymbol": {"name": "main"}}))
+                .expect("parse");
+        assert_eq!(
+            back,
+            CommandPayload::ResolveSymbol {
+                name: "main".to_string()
+            }
+        );
+        let back: CommandPayload =
+            serde_json::from_value(serde_json::json!({"DumpMemory": {"addr": 0, "len": 16}}))
+                .expect("parse");
+        assert_eq!(back, CommandPayload::DumpMemory { addr: 0, len: 16 });
+    }
+
+    /// **A-3**：两条新事件的**线上形状**逐字钉住。
+    ///
+    /// ⚠️ `MemoryDump.bytes` 是 **JSON 数组**（`[104,105]`）⇒ ⇒ **不是**
+    /// base64、**不是**字符串（与 `Console` 事件同口径 · F-11）。
+    #[test]
+    fn a3_the_two_new_events_have_their_wire_shapes_pinned() {
+        assert_eq!(
+            serde_json::to_value(EventPayload::SymbolResolved {
+                name: "main".to_string(),
+                symbol: None,
+                candidates: Vec::new(),
+                total: 0,
+            })
+            .expect("json"),
+            serde_json::json!({
+                "SymbolResolved": {
+                    "name": "main",
+                    "symbol": null,
+                    "candidates": [],
+                    "total": 0
+                }
+            }),
+        );
+        assert_eq!(
+            serde_json::to_value(EventPayload::MemoryDump {
+                addr: 0,
+                bytes: vec![104, 105],
+            })
+            .expect("json"),
+            serde_json::json!({"MemoryDump": {"addr": 0, "bytes": [104, 105]}}),
+        );
+    }
+
+    /// **A-4**：`Breakpoint.condition` 的线上形态。
+    ///
+    /// * `None` ⇒ 线上**没有**这个键；
+    /// * `Some("x1 == 5")` ⇒ 线上是**字符串**。
+    #[test]
+    fn a4_the_breakpoint_condition_field_is_optional_on_the_wire() {
+        let without = serde_json::to_value(Breakpoint {
+            id: 1,
+            addr: 0x8000_0000,
+            source_hint: None,
+            enabled: true,
+            condition: None,
+        })
+        .expect("json");
+        assert!(
+            without.get("condition").is_none(),
+            "`condition == None` ⇒ 线上**没有**这个键：{without:?}"
+        );
+
+        let with = serde_json::to_value(Breakpoint {
+            id: 1,
+            addr: 0x8000_0000,
+            source_hint: None,
+            enabled: true,
+            condition: Some("x1 == 5".to_string()),
+        })
+        .expect("json");
+        assert_eq!(
+            with.get("condition"),
+            Some(&serde_json::Value::String("x1 == 5".to_string())),
+            "`Some(..)` ⇒ 线上是**字符串**"
+        );
+    }
+
+    /// **A-5**：**旧载荷仍能解析** ⇒ ⇒ 证明 `#[serde(default)]` 生效 ⇒ ⇒
+    /// **不是**破坏性格式变更（裁决 A）。
+    #[test]
+    fn a5_an_old_breakpoint_payload_without_the_condition_still_parses() {
+        let old = serde_json::json!({
+            "id": 7,
+            "addr": 2147483648u64,
+            "source_hint": null,
+            "enabled": true
+        });
+        let bp: Breakpoint = serde_json::from_value(old).expect("旧载荷必须仍能解析");
+        assert_eq!(bp.id, 7);
+        assert_eq!(bp.addr, 0x8000_0000);
+        assert!(bp.enabled);
+        assert_eq!(bp.condition, None, "缺这个字段 ⇒ `condition == None`");
+
+        // ⚠️ 同一条判据的**命令侧**：旧的 `SetBreakpoint` 载荷也能解析。
+        let old_cmd = serde_json::json!({
+            "SetBreakpoint": {
+                "id": 7,
+                "addr": 2147483648u64,
+                "source_hint": null,
+                "enabled": true
+            }
+        });
+        let cmd: CommandPayload = serde_json::from_value(old_cmd).expect("旧命令载荷必须仍能解析");
+        match cmd {
+            CommandPayload::SetBreakpoint(bp) => assert_eq!(bp.condition, None),
+            other => panic!("必须仍是 SetBreakpoint，实际 {other:?}"),
+        }
     }
 }

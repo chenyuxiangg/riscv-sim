@@ -333,6 +333,22 @@ pub struct Breakpoint {
     pub source_hint: Option<String>,
     /// Whether the breakpoint is currently enabled.
     pub enabled: bool,
+    /// **条件表达式**（v0.57 批新增 · 裁决 F）。
+    ///
+    /// ⚠️ `None` ⇒ **无条件断点** ⇒ ⇒ **既有行为一字不变**。
+    /// ⚠️ `Some(expr)` ⇒ 命中该地址时**还要**满足 `expr` 才停（裁决 H）。
+    /// ⚠️ **表达式非法 ⇒ `SetBreakpoint` 被拒**（`E_DBG-02`），断点表**不变**
+    ///   （裁决 I）。
+    ///
+    /// ⚠️ **`#[serde(default)]` ⇒ 旧载荷仍能解析** ⇒ ⇒ **不是**破坏性格式
+    /// 变更 ⇒ ⇒ `SIM_STATE_SCHEMA_VERSION` **不升**（裁决 A）。
+    ///
+    /// ⚠️ **`skip_serializing_if`**：判据 A-4 逐字要求「`None` ⇒ 线上
+    /// **没有**这个键」⇒ ⇒ 只写 `#[serde(default)]` 的话线上会是
+    /// `"condition": null`（键**在**）⇒ ⇒ 这里补上它 ⇒ ⇒ 两条要求同时
+    /// 满足（解析端容忍缺键，序列化端不吐空键）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
 }
 
 impl Default for Breakpoint {
@@ -342,6 +358,7 @@ impl Default for Breakpoint {
             addr: 0,
             source_hint: None,
             enabled: true,
+            condition: None,
         }
     }
 }

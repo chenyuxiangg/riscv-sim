@@ -2512,9 +2512,12 @@ mod tests {
     /// ⚠️ **v0.44** (STAGE-29 · 裁决 A) moved the envelope version
     /// **7 → 8** ⇒ ⇒ the literal follows ⇒ ⇒ the *name* follows too
     /// ⇒ ⇒ a name that still said "seven" would be a lie.
+    ///
+    /// ⚠️ **v0.57** (STAGE-42) moved it **8 → 9**（符号查询 + 整段转储 +
+    /// 条件断点表达式）⇒ ⇒ 同理：literal 与 name 一起跟。
     #[test]
-    fn s16_a1_the_contract_schema_version_is_eight() {
-        assert_eq!(crate::SCHEMA_VERSION, 8);
+    fn s16_a1_the_contract_schema_version_is_nine() {
+        assert_eq!(crate::SCHEMA_VERSION, 9);
     }
 
     /// **STAGE-16 A-2** — the **description format**'s version is still

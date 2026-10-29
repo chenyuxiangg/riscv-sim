@@ -72,6 +72,15 @@ pub trait SymbolService {
     fn lookup_symbol(&self, name: &str) -> Result<Option<Symbol>, PlatformError>;
     /// Look up a symbol by address.
     fn symbol_at(&self, addr: u32) -> Result<Option<Symbol>, PlatformError>;
+    /// Look up symbols by **name prefix** (v0.57 批 · STAGE-42 §6.2).
+    ///
+    /// * **前缀**匹配（**不是**子串匹配）；
+    /// * 结果按**名字升序**；
+    /// * 条数 **≤ `limit`**。
+    ///
+    /// ⚠️ **精确命中也会在结果里** ⇒ ⇒ 「候选里**不含**精确命中那条」是
+    /// **调用方**（宿主）的事。
+    fn lookup_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<Symbol>, PlatformError>;
 }
 
 /// Family used by errors raised from this module.
@@ -182,6 +191,12 @@ impl SymbolService for SymbolIndex {
     fn symbol_at(&self, addr: u32) -> Result<Option<Symbol>, PlatformError> {
         // ⚠️ 命中「起始地址 ≤ `addr` 且最近的那个」；比所有符号都小 ⇒ `None`。
         Ok(self.symbols.at(addr).cloned())
+    }
+
+    fn lookup_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<Symbol>, PlatformError> {
+        // ⚠️ 符号表解析失败**不在这里**发生（表已经建好了）⇒ ⇒ 这一条
+        //   **不会**出错 ⇒ ⇒ 端口仍然返回 `Result`（与另外两条同形）。
+        Ok(self.symbols.lookup_prefix(prefix, limit))
     }
 }
 

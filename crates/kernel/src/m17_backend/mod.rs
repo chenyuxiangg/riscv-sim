@@ -48,7 +48,7 @@ use crate::m12_engine::{
 };
 use crate::m13_iss::csr::{csr_read, csr_read_with_time, csr_write};
 use crate::m13_iss::{enter_trap, write_gpr, Iss, StepOutcome};
-use crate::m14_bus::{AccessDir, Bus, BusWidth};
+use crate::m14_bus::{AccessDir, Bus, BusWidth, BUS_FAMILY};
 use crate::m16_interrupt::{InterruptPort, PendingIntr};
 
 /// 「中断控制器正被占用」的场景码（`INT` 族）。
@@ -326,8 +326,17 @@ impl<'a> IssExecutor<'a> {
     /// 单独暴露出来，是为了让调用方能在**推进别的状态之前**先问一句
     /// ——`step_n` 必须在同步外设时钟**之前**问（V-A 检视 · F3）：一条
     /// **没有执行**的指令不该让外设的时钟也走一格。
-    pub fn breakpoint_at(&self, pc: u32) -> bool {
-        self.breakpoints.hit_check(pc).is_some()
+    ///
+    /// ⚠️ **参数是整份状态而不是光一个 `pc`**（v0.57 批 · STAGE-42）：带
+    /// **条件**的断点要在**取指之前**求值 ⇒ ⇒ 求值需要**寄存器**⇒ ⇒
+    /// 只给 `pc` 不够。
+    ///
+    /// ⚠️ **状态是「该指令执行前」的** ⇒ ⇒ 条件里看到的寄存器值 =
+    /// **断点地址那条指令执行前**的值（裁决 H）。
+    pub fn breakpoint_at(&self, state: &SimState) -> bool {
+        self.breakpoints
+            .hit_check_cond(state.pc, &state.gpr)
+            .is_some()
     }
 
     /// **取走**一次宿主暂停请求（取走即消失）。
@@ -419,7 +428,10 @@ impl InstructionExecutor for IssExecutor<'_> {
 
         // (1) 断点命中检测 —— 挂在**取指之前**（M-08 LLD §3.2）。
         //     命中时该条指令尚未执行，状态零副作用。
-        if self.breakpoint_at(state.pc) {
+        //
+        //     ⚠️ **v0.57 批**：`breakpoint_at` 现在带**条件**判定 ⇒ ⇒
+        //     条件为**假** ⇒ ⇒ **不停**（继续执行下一条）。
+        if self.breakpoint_at(state) {
             return Ok(ExecOutcome::Stop {
                 reason: HaltReason::Breakpoint,
                 consumed: false,
@@ -1062,7 +1074,11 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             //     命中时该条指令尚未执行，状态零副作用——**外设时钟也不
             //     推进**（V-A 检视 · F3：一条没执行的指令不该让外设的
             //     时钟也走一格）。
-            if executor.breakpoint_at(engine.pc()) {
+            //
+            //     ⚠️ **v0.57 批**：条件断点在**这条**路径上**同样**生效
+            //     ⇒ ⇒ 两条路径都要判（F-6）⇒ ⇒ 漏一条 ⇒ ⇒ 那条路径上的
+            //     条件断点**永远不生效**。
+            if executor.breakpoint_at(engine.state()) {
                 *last_stop = Some(HaltReason::Breakpoint);
                 break;
             }
@@ -1327,6 +1343,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             addr,
             source_hint: None,
             enabled,
+            condition: None,
         })
     }
 
@@ -1382,6 +1399,34 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
 }
 
 impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
+    /// **调试视角**的批量读 —— 读 `len` 个**字节**（v0.57 批 · STAGE-42）。
+    ///
+    /// ⚠️ **逐字节读、宽度恒为 1** ⇒ ⇒ 走的是 [`Bus::read_only`] ⇒ ⇒
+    /// **不计**总线统计、**不**触发探针、**不**匹配观察点（裁决 E）⇒ ⇒
+    /// 调试器的窥视**不污染** guest 的可观测性。
+    ///
+    /// ⚠️ **逐字节**（而不是一次读一个字再拆）是有意的：读一个 `u32` 会
+    /// 在**跨区**时把四个字节拼起来 ⇒ ⇒ 「转储」要的是**原样**的字节
+    /// 序列 ⇒ ⇒ 一个字节一个字节地读。
+    ///
+    /// ⚠️ **未映射 ⇒ 总线的错误原样透出**（不吞、不改写）⇒ ⇒ 调用方看到
+    /// 的是 `E_BUS-01` 与总线的原话。
+    pub fn read_memory_bytes(&self, addr: u32, len: u32) -> Result<Vec<u8>, PlatformError> {
+        let mut out: Vec<u8> = Vec::with_capacity(len as usize);
+        for offset in 0..len {
+            let byte_addr = addr.checked_add(offset).ok_or_else(|| {
+                PlatformError::new(
+                    BUS_FAMILY,
+                    1,
+                    format!("dump address overflow at 0x{addr:08x} (len {len})"),
+                )
+            })?;
+            let value = self.bus.read_only(byte_addr, BusWidth::Byte)?;
+            out.push(value as u8);
+        }
+        Ok(out)
+    }
+
     /// Next free breakpoint id for the port-level (address-toggle) path.
     fn next_free_breakpoint_id(&self) -> u32 {
         let mut id = 1u32;
@@ -1682,6 +1727,7 @@ mod tests {
                 addr: 0x20,
                 source_hint: None,
                 enabled: true,
+                condition: None,
             })
             .expect("set breakpoint");
         let executed = backend.step_n(100).expect("step");
@@ -1699,6 +1745,7 @@ mod tests {
                 addr: 0x20,
                 source_hint: None,
                 enabled: false,
+                condition: None,
             })
             .expect("set breakpoint");
         backend.step_n(6).expect("step");
@@ -1831,6 +1878,7 @@ mod tests {
                 addr: 0x20,
                 source_hint: None,
                 enabled: true,
+                condition: None,
             })
             .expect("set");
         assert_eq!(
@@ -1893,6 +1941,7 @@ mod tests {
                 addr: 0x20,
                 source_hint: None,
                 enabled: true,
+                condition: None,
             })
             .expect("set");
         backend.step_n(1).expect("step");
@@ -1911,6 +1960,7 @@ mod tests {
                 addr: 0x20,
                 source_hint: None,
                 enabled: true,
+                condition: None,
             })
             .expect("set");
         backend.clear_debug_state();
@@ -2118,6 +2168,7 @@ mod tests {
                 addr: 0,
                 source_hint: None,
                 enabled: true,
+                condition: None,
             })
             .expect("set breakpoint");
 

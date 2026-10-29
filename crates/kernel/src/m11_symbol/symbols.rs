@@ -201,6 +201,39 @@ impl SymbolTable {
         self.by_name.get(name)
     }
 
+    /// 按**前缀**查符号（v0.57 批 · STAGE-42 §6.2 · K-1 / K-2）。
+    ///
+    /// * **前缀**匹配（**不是**子串匹配）⇒ ⇒ `lookup_prefix("ma")` **不会**
+    ///   命中 `domain`（`domain` 里含 `ma`，但**不以** `ma` 开头）；
+    /// * 结果按**名字升序**；
+    /// * 条数 **≤ `limit`**（超出部分**不**给 ⇒ ⇒ 前端拿到的候选列表
+    ///   永远有界）。
+    ///
+    /// ⚠️ **精确命中也会出现在结果里**（`"main"` 以 `"ma"` 开头 ⇒ 它是
+    /// `"ma"` 的前缀命中）⇒ ⇒ 「候选里**不含**精确命中那条」是**调用方
+    /// （宿主）**的事（契约 §2.3 的 `candidates` 字段的定义）⇒ ⇒ 本方法
+    /// 只负责「按前缀找出这些符号」。
+    ///
+    /// ⚠️ **空前缀** ⇒ ⇒ 命中**全部**符号（但仍受 `limit` 约束）⇒ ⇒
+    /// 调用方（宿主）**先拒**空名字（`E_DBG-02`）⇒ ⇒ 这条路**不会被**
+    /// 走到。
+    pub fn lookup_prefix(&self, prefix: &str, limit: usize) -> Vec<Symbol> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut hits: Vec<Symbol> = self
+            .by_name
+            .values()
+            .filter(|symbol| symbol.name.starts_with(prefix))
+            .cloned()
+            .collect();
+        // ⚠️ **按名字升序**（K-1）⇒ ⇒ 候选列表的顺序是**确定的** ⇒ ⇒
+        //    前端的候选下拉**每次渲染都一样**。
+        hits.sort_by(|left, right| left.name.cmp(&right.name));
+        hits.truncate(limit);
+        hits
+    }
+
     /// 按**地址**查符号：命中「起始地址 ≤ `addr` 且**最近**的那个」。
     ///
     /// 比所有符号的起始地址都小 ⇒ `None`。
@@ -432,6 +465,71 @@ mod tests {
         let table = SymbolTable::from_sections_with_limits(&sections, 6).expect("parse");
         assert_eq!(table.len(), 5);
         assert!(table.lookup("alias").is_some());
+    }
+
+    // -- 前缀查询（v0.57 批 · STAGE-42 §6.2 · K-1 / K-2） --------------------
+
+    /// **K-1**：`lookup_prefix` 返回**名字以 `ma` 开头**的符号、**按名字
+    /// 升序**、条数 ≤ 上限。
+    #[test]
+    fn k1_lookup_prefix_matches_the_prefix_and_sorts_by_name() {
+        let table = SymbolTable::from_sections(&sample_sections()).expect("parse");
+        // 样例符号表里有 `main` / `helper` / `data` / `ext` / `alias`。
+        let hits = table.lookup_prefix("ma", 16);
+        let names: Vec<&str> = hits.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["main"], "只该给前缀命中的");
+    }
+
+    /// **K-2**：`lookup_prefix` 是**前缀**匹配 ⇒ ⇒ **不是**子串匹配。
+    #[test]
+    fn k2_lookup_prefix_is_not_a_substring_match() {
+        // 造一张含 `domain` 的表：`domain` **含** `ma` 但**不以** `ma` 开头。
+        let strings = strtab(&["main", "domain"]);
+        let mut symtab = Vec::new();
+        symtab.extend_from_slice(&sym_entry(0, 0, 0, STT_NOTYPE, 0));
+        symtab.extend_from_slice(&sym_entry(1, 0x1000, 16, STT_FUNC, 1)); // main
+        symtab.extend_from_slice(&sym_entry(6, 0x1010, 16, STT_FUNC, 1)); // domain
+        let table = SymbolTable::from_sections(&[
+            (".symtab".to_string(), symtab),
+            (".strtab".to_string(), strings),
+        ])
+        .expect("parse");
+        let names: Vec<String> = table
+            .lookup_prefix("ma", 16)
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(names, vec!["main".to_string()]);
+        assert!(
+            !names.iter().any(|n| n == "domain"),
+            "`domain` 含 `ma` 但不以 `ma` 开头 ⇒ ⇒ 不该被前缀命中"
+        );
+    }
+
+    /// **K-1 的上限那一半**：条数 ≤ 上限（超出部分**不**给）。
+    #[test]
+    fn k1_lookup_prefix_respects_the_limit() {
+        let strings = strtab(&["ma1", "ma2", "ma3", "ma4"]);
+        let mut symtab = Vec::new();
+        symtab.extend_from_slice(&sym_entry(0, 0, 0, STT_NOTYPE, 0));
+        for (index, offset) in [1u32, 5, 9, 13].iter().enumerate() {
+            symtab.extend_from_slice(&sym_entry(
+                *offset,
+                0x1000 + index as u32 * 4,
+                4,
+                STT_FUNC,
+                1,
+            ));
+        }
+        let table = SymbolTable::from_sections(&[
+            (".symtab".to_string(), symtab),
+            (".strtab".to_string(), strings),
+        ])
+        .expect("parse");
+        let hits = table.lookup_prefix("ma", 2);
+        assert_eq!(hits.len(), 2, "超出上限的部分**不**给");
+        assert_eq!(hits[0].name, "ma1");
+        assert_eq!(hits[1].name, "ma2");
     }
 
     #[test]

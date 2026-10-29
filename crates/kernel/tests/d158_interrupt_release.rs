@@ -1111,16 +1111,19 @@ fn the_external_interrupt_is_delivered_after_the_timer_line_was_released() {
 // 用例：契约层零升版
 // ---------------------------------------------------------------------------
 
-/// **A-10**：契约层的四个版本常量**一个都不许动**。
+/// **A-10**：契约层的四个版本常量 —— **本批（v0.57 · STAGE-42）** 的口径。
 ///
-/// ⚠️ 本批是**平台内部**的语义修正 ⇒ ⇒ **零新 DTO / 零新命令 / 零新
-/// 事件** ⇒ ⇒ 不制造 D-143 的存量问题。
+/// ⚠️ **D-158 批（v0.55）** 的那一条是「四个版本号**一个都不许动**」⇒ ⇒ 当时 `SCHEMA_VERSION` 是 **8**。
+///
+/// ⚠️ **v0.57 批（STAGE-42）** 是**契约升版**的那一批（符号查询 + 整段转储 + 条件断点表达式 ⇒ ⇒ 两条新命令 + 两条新事件）⇒ ⇒ **信封版本号从 8 升到 9** ⇒ ⇒ **literal 跟着走**（同 `crates/contract/src/platform.rs` 里那条 `s16_a1`）。
+///
+/// ⚠️ **另外三个版本号仍然一个都不动**（STAGE-42 §2.8）⇒ ⇒ 那三条断言**一字未改** ⇒ ⇒ 快照 / 板级描述 / 板级规则集**没有**因为这一批变形。
 #[test]
 fn the_contract_layer_version_numbers_are_untouched() {
     assert_eq!(
         riscv_sim_contract::SCHEMA_VERSION,
-        8,
-        "契约层版本号不许动（本批零新 DTO / 零新命令 / 零新事件）"
+        9,
+        "契约层的信封版本号（v0.57 批升到 9：新命令 + 新事件）"
     );
     assert_eq!(
         riscv_sim_contract::model::SIM_STATE_SCHEMA_VERSION,
