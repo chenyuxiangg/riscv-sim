@@ -252,13 +252,17 @@ export const MIRRORED_ERROR_CODES = Object.freeze({
  */
 export const RUST_ERROR_CODE_REFS = Object.freeze({
     "E_DBG-01": "E_DBG-01",
-    // ⚠️ 契约 v9 新增的两个码（`crates/contract/src/error.rs`）：
-    //   `E_DBG-02` = 条件表达式解析失败 / 符号名为空；
-    //   `E_DBG-03` = 转储长度越界。
-    // ⇒ ⇒ 前端**按码分派**（把内核原文显示到对应的那一位）⇒ ⇒ 这两个码
+    // ⚠️ 契约 v9 新增的三个码（`crates/contract/src/error.rs`）：
+    //   `E_DBG-02` = 条件表达式解析失败；
+    //   `E_DBG-03` = 转储长度越界；
+    //   `E_DBG-04` = 符号名为空（⚠️ **整合批拆出**：规格原文让「符号名为
+    //   空」也用 `E_DBG-02` ⇒ ⇒ 那是**一码两义** ⇒ ⇒ 「一场景一码」⇒ ⇒
+    //   ⇒ 拆成独立的一个码）。
+    // ⇒ ⇒ 前端**按码分派**（把内核原文显示到对应的那一位）⇒ ⇒ 这三个码
     // **前端要用到** ⇒ ⇒ 落在「引用用的名字」这张表里（不是定义处）。
     "E_DBG-02": "E_DBG-02",
     "E_DBG-03": "E_DBG-03",
+    "E_DBG-04": "E_DBG-04",
     "E_PLT-13": "E_PLT-13",
     "E_PROTO-01": "E_PROTO-01",
     "E_PROTO-02": "E_PROTO-02",
@@ -713,7 +717,7 @@ export const Command = Object.freeze({
      *
      * ⚠️ **键名逐字对齐 Rust**（`name`）⇒ ⇒ 跨层门禁会比。
      *
-     * @param {string} name — 符号名（**空** ⇒ 内核拒 `E_DBG-02`）
+     * @param {string} name — 符号名（**空** ⇒ 内核拒 `E_DBG-04`）
      * @returns {{ResolveSymbol: {name: string}}}
      */
     resolveSymbol: (name) => ({ ResolveSymbol: { name: String(name) } }),

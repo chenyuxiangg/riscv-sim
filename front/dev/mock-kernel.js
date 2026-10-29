@@ -740,12 +740,12 @@ export function createMockKernel(options = {}) {
             // -- 契约 v9 · 调试器增强批 ---------------------------------------
 
             case "ResolveSymbol": {
-                // ⚠️ **空名字 ⇒ 拒绝**（契约 v9 §2.2：`E_DBG-02`）⇒ ⇒
+                // ⚠️ **空名字 ⇒ 拒绝**（契约 v9 §2.2：`E_DBG-04`）⇒ ⇒
                 //   **不发** `SymbolResolved` ⇒ ⇒ 前端会显示内核原文。
                 const name = String(value.name ?? "");
                 if (name.trim() === "") {
                     frames.push(makeFrame(reqId, Event.error(
-                        "E_DBG-02",
+                        "E_DBG-04",
                         "符号名不能为空",
                     )));
                     break;

@@ -409,6 +409,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             // 契约 v7 新增：卸载工程（unit 变体）+ 差量更新。
             variantOf(Command.unloadProject()),
             variantOf(Command.patchMemoryMap([], null)),
+            // 契约 v9 新增：按名字查符号 + 转储一段内存（调试器增强批）。
+            variantOf(Command.resolveSymbol("main")),
+            variantOf(Command.dumpMemory(0, 16)),
         ].sort();
         assert.deepEqual(js, rust, "JS 命令变体与 Rust CommandPayload 不一致");
     });
@@ -440,6 +443,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             // 契约 v8 新增：管理员通道的**回复侧**（D-129）。
             variantOf(Event.adminLogs([])),
             variantOf(Event.adminDiag({})),
+            // 契约 v9 新增：符号查询的回复 + 一段内存的字节（调试器增强批）。
+            variantOf(Event.symbolResolved("main", null, [], 0)),
+            variantOf(Event.memoryDump(0, [])),
         ].sort();
         assert.deepEqual(js, rust, "JS 事件变体与 Rust EventPayload 不一致");
     });

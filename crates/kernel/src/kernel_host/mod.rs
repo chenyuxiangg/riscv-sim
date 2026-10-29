@@ -173,7 +173,7 @@ use std::rc::Rc;
 use riscv_sim_contract::admin::LogEntryDto;
 use riscv_sim_contract::csr::IRQ_UART_RX_READY;
 use riscv_sim_contract::error::{
-    ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_02_CONDITION_INVALID, E_DBG_03_DUMP_TOO_LARGE,
+    ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_03_DUMP_TOO_LARGE, E_DBG_04_SYMBOL_NAME_EMPTY,
     E_ENG_03_NO_PROGRESS, E_HMS_02_FATAL_TERMINATED, E_PLT_13_REVISION_CONFLICT,
     E_PLT_14_REGION_NOT_FOUND, E_PROTO_01_VERSION_MISMATCH, PLATFORM_FAMILY, PROTO_FAMILY,
 };
@@ -3387,7 +3387,7 @@ impl KernelHost {
             // ⚠️ **不发** `SymbolResolved` ⇒ ⇒ 前端只会看到一条 `Error`。
             return vec![self.error_from(&PlatformError::new(
                 DEBUG_FAMILY,
-                E_DBG_02_CONDITION_INVALID,
+                E_DBG_04_SYMBOL_NAME_EMPTY,
                 "符号名为空：无法查询符号（请给出符号名）",
             ))];
         }

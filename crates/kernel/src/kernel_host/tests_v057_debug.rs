@@ -334,7 +334,9 @@ fn k3_a_prefix_only_hit_reports_no_exact_symbol_but_candidates() {
     assert_eq!(total, 2);
 }
 
-/// **K-4**：**空名字** ⇒ `E_DBG_02`，**不发** `SymbolResolved`。
+/// **K-4**：**空名字** ⇒ `E_DBG_04`（**整合批拆出的独立码** —— 规格原文
+/// 写的是 `E_DBG-02`，但那是**一码两义** ⇒ ⇒ 「一场景一码」⇒ ⇒ 拆开），
+/// **不发** `SymbolResolved`。
 #[test]
 fn k4_an_empty_symbol_name_is_rejected_and_no_event_is_sent() {
     let mut host = KernelHost::new();
@@ -351,7 +353,7 @@ fn k4_an_empty_symbol_name_is_rejected_and_no_event_is_sent() {
             },
         );
         let (code, message) = first_error(&events);
-        assert_eq!(code, "E_DBG-02", "空名字必须被拒（名字 {name:?}）");
+        assert_eq!(code, "E_DBG-04", "空名字必须被拒（名字 {name:?}）");
         assert!(
             !events
                 .iter()
@@ -451,7 +453,12 @@ fn k7_a_dump_does_not_count_as_a_bus_access() {
     assert_eq!(bytes.len(), 16, "转储必须真的读到 16 个字节");
 }
 
-/// **K-8**：转储**不**触发读观察点 ⇒ ⇒ 下一条 guest 指令不得误报命中。
+/// **K-8**：**转储不得**在 guest 自己的可观测性上留痕 —— ① **访存 trace**
+/// （M-18）**长度不变**；② **下一条** guest 指令**不得**误报观察点。
+///
+/// ⚠️ **②那一半守的是「命中槽在批次起点被清空」** ⇒ ⇒ 它与①**不是**同一件事
+/// ⇒ ⇒ ①**才是**「读路径不触发总线 hook」那件事的可证伪判据（否则这条
+/// 判据**两半都不可证伪** ⇒ ⇒ 零判别力 ⇒ ⇒ 见规格 §8 订正 3）。
 #[test]
 fn k8_a_dump_does_not_fire_a_read_watchpoint() {
     let mut host = KernelHost::new();
@@ -465,6 +472,10 @@ fn k8_a_dump_does_not_fire_a_read_watchpoint() {
             access: riscv_sim_contract::model::WatchAccess::Read,
         }),
     );
+    // ⚠️ **①访存 trace 长度不变** ⇒ ⇒ 调试器的窥视**不进** guest 的
+    //   可观测性 ⇒ ⇒ 这一半**可证伪**（读路径若改成有副作用的那条 ⇒ ⇒
+    //   总线 hook 会把这次访存记进 trace ⇒ ⇒ 长度会涨 ⇒ ⇒ 这里会红）。
+    let trace_before = host.probe_trace_len();
     dispatch(
         &mut host,
         CommandPayload::DumpMemory {
@@ -472,6 +483,13 @@ fn k8_a_dump_does_not_fire_a_read_watchpoint() {
             len: 4,
         },
     );
+    assert_eq!(
+        host.probe_trace_len(),
+        trace_before,
+        "调试转储**不得**在 M-18 的访存 trace 里留下那次访存"
+    );
+    // ⚠️ **②下一条 guest 指令不得误报观察点** ⇒ ⇒ 这一半守的是
+    //   「命中槽在**批次起点**被清空」⇒ ⇒ 与①**不是**同一件事。
     let events = dispatch(&mut host, CommandPayload::StepN { n: 1 });
     assert!(
         !events.iter().any(|e| matches!(

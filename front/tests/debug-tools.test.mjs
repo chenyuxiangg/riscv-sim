@@ -635,14 +635,14 @@ describe("内核原文上屏（视图层 · C-13）", () => {
         );
     });
 
-    test("C-13 · `E_DBG-02`（符号名为空）⇒ ⇒ 原文落在符号那一位", async () => {
+    test("C-13 · `E_DBG-04`（符号名为空）⇒ ⇒ 原文落在符号那一位", async () => {
         await app.handleCommand(
             { action: "lookup-symbol", params: { name: "" } },
             { commandRouter: router },
         );
         stop();
         const raw = "符号名不能为空";
-        router.emit("error", { code: "E_DBG-02", message: raw });
+        router.emit("error", { code: "E_DBG-04", message: raw });
 
         const after = show("debug");
         const slot = after.querySelector("[data-bp-symbol-error]");

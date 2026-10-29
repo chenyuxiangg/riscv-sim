@@ -424,11 +424,11 @@ describe("mock 内核 · 调试器增强批（契约 v9）", () => {
         );
     });
 
-    test("`ResolveSymbol` 名字为空 ⇒ ⇒ `E_DBG-02`，**不发** `SymbolResolved`", () => {
+    test("`ResolveSymbol` 名字为空 ⇒ ⇒ `E_DBG-04`，**不发** `SymbolResolved`", () => {
         const kernel = createMockKernel();
         const frames = kernel.handle(commandFrame(Command.resolveSymbol("   ")));
         assert.equal(frames.length, 1, "只回一条（错误）");
-        assert.equal(frames[0].payload.payload.Event.Error.code, "E_DBG-02");
+        assert.equal(frames[0].payload.payload.Event.Error.code, "E_DBG-04");
         assert.equal(
             frames[0].payload.payload.Event.SymbolResolved,
             undefined,

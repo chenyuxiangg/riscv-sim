@@ -5256,6 +5256,12 @@ const BV_DEBUGGER_PROBE = `(() => {
     hasDumpBox: !!(dumpBox && dumpBox.querySelector("[data-dump-addr-input]")
         && dumpBox.querySelector("[data-dump-len-input]")),
     symbolErrorText: symErr ? String(symErr.textContent || "").trim() : "",
+    // ⚠️ **「没有这个符号」不在错误位里** ⇒ ⇒ 它是候选区旁边**另一行**
+    //   （data-bp-symbol-empty）⇒ ⇒ 读错位置 ⇒ ⇒ 断言会**假红**。
+    symbolEmptyText: (() => {
+        const el = symBox ? symBox.querySelector("[data-bp-symbol-empty]") : null;
+        return el ? String(el.textContent || "").trim() : "";
+    })(),
     condErrorText: condErr ? String(condErr.textContent || "").trim() : "",
     dumpErrorText: dumpErr ? String(dumpErr.textContent || "").trim() : "",
     debugErrorText: dbgErr ? String(dbgErr.textContent || "").trim() : "",
@@ -5346,8 +5352,8 @@ async function runSymbolUiSection(cdp, opts) {
     add(
         "B-78 · 在**没有符号表**的镜像上查符号 ⇒ ⇒ 界面说清「这个镜像没有符号表」"
         + "（⇒ ⇒ 与「有符号表但没这个符号」是**两件事** ⇒ ⇒ 两态可区分）",
-        /符号表/.test(String(p?.symbolErrorText ?? "")),
-        `符号位文案=${JSON.stringify(p?.symbolErrorText ?? "")}`,
+        /符号表/.test(String(p?.symbolEmptyText ?? "")),
+        `没有符号那一行=${JSON.stringify(p?.symbolEmptyText ?? "")}`
     );
 
     // -- B-79 · **非法条件** ⇒ ⇒ **内核拒** ⇒ ⇒ **内核原文**上屏 -------------
@@ -5372,10 +5378,14 @@ async function runSymbolUiSection(cdp, opts) {
     })()`);
     await sleep(900);
     p = await probe();
+    // ⚠️ **只判「条件那一位」**：调试面板那一处显示的是**最后一次**错误 ⇒ ⇒
+    //   上一段（loadImage 的畸形 ELF）留下的 `E_LDR-01` 会**串进来**⇒ ⇒
+    //   判据**被别的段污染** ⇒ ⇒ 那是**假红**的温床 ⇒ ⇒ 「码」那一半
+    //   放在**前端 Node 门禁**里判（C-13）⇒ ⇒ 这里判**内核原话**。
     add(
         "B-79 · **非法条件** ⇒ ⇒ **内核拒**（E_DBG-02）⇒ ⇒ **内核原文**上屏"
         + "（⇒ ⇒ 条件这条路真的接到了内核 ⇒ ⇒ 不是前端自己判的）",
-        /E_DBG-02/.test(`${p?.condErrorText ?? ""} ${p?.debugErrorText ?? ""}`),
+        /条件表达式无效/.test(String(p?.condErrorText ?? "")),
         `条件位=${JSON.stringify(p?.condErrorText ?? "")}`
         + ` 面板=${JSON.stringify(p?.debugErrorText ?? "")}`,
     );
@@ -5462,7 +5472,10 @@ async function runMemDumpSection(cdp, opts) {
     add(
         "B-83 · 转储长度越界 ⇒ ⇒ **内核拒**（E_DBG-03）⇒ ⇒ **内核原文**上屏"
         + "（⇒ ⇒ 上限是**内核**判的 ⇒ ⇒ 前端没写第二份校验器）",
-        /E_DBG-03/.test(String(p?.dumpErrorText ?? "")),
+        // ⚠️ **判「内核原话」而不是「码」**：这一位显示的是内核的**消息**
+        //   （码在调试面板那一处 ⇒ ⇒ B-79 那条判的是那里）⇒ ⇒ 前端**没有**
+        //   这套措辞 ⇒ ⇒ 只能是内核说的 ⇒ ⇒ 这就是「不吞」的证据。
+        /转储长度越界/.test(String(p?.dumpErrorText ?? "")),
         `错误位=${JSON.stringify(p?.dumpErrorText ?? "")}`,
     );
 
