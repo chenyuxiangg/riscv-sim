@@ -22,7 +22,7 @@ use riscv_sim_contract::model::{
 };
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload, Message, Payload};
 use riscv_sim_kernel::kernel_host::{
-    KernelHost, TOPIC_DISASM, TOPIC_EXPORT, TOPIC_SOURCE, TOPIC_TRACE,
+    KernelHost, TOPIC_DISASM, TOPIC_DUMP, TOPIC_EXPORT, TOPIC_SOURCE, TOPIC_SYMBOL, TOPIC_TRACE,
 };
 
 /// demo 固件 —— **引用共享常量**，不抄一份。
@@ -214,6 +214,11 @@ fn the_rust_topic_constants_match_the_frontend_topic_table() {
         (TOPIC_SOURCE, "SourceLocation"),
         (TOPIC_EXPORT, "TraceExport"),
         (TOPIC_TRACE, "TraceState"),
+        // ⚠️ **v0.57 批（STAGE-42 §2.7）**：两条新回复事件的 topic 与既有
+        //   四个**同族**（`debug.*`）⇒ ⇒ 前端镜像的 `EVENT_TOPIC` 表**加两
+        //   行** ⇒ ⇒ 两侧逐字相同这条纪律**一样**要守住。
+        (TOPIC_SYMBOL, "SymbolResolved"),
+        (TOPIC_DUMP, "MemoryDump"),
     ] {
         let needle = format!("{variant}: \"{rust_topic}\"");
         assert!(

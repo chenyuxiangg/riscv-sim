@@ -87,6 +87,16 @@
 //! | `ExportTrace{source,format,offset,limit}` | **宿主路由**：`Waveform` ⇒ M-19 的环；`Execution` ⇒ M-11 的轨迹环 | `TraceExport{..}` |
 //! | `SetTraceEnabled{enabled}` | M-11 的轨迹环开关（裁决 H） | `TraceState{enabled,len,dropped}` |
 //!
+//! ⚠️ **v0.57 批（STAGE-42）** 在这张表**之外**又加了两条命令：
+//!
+//! | 命令 | 内核行为 | 回复事件 |
+//! | --- | --- | --- |
+//! | `ResolveSymbol{name}` | M-11 的 `SymbolTable`（精确命中 + 前缀候选） | `SymbolResolved{name,symbol,candidates,total}` |
+//! | `DumpMemory{addr,len}` | M-14 的 `read_only`（**逐字节** · **调试视角**） | `MemoryDump{addr,bytes}` |
+//!
+//! ⚠️ **这两条也是「回复事件」，不经 topic 过滤**（同 STAGE-5 §9.1）⇒ ⇒
+//! 前端靠传输帧的 `reqId` 关联 ⇒ ⇒ **不需要先订阅**。
+//!
 //! ⚠️ **这四个事件是「回复事件」，不经 topic 过滤**（STAGE-5 §9.1）：
 //! 前端靠传输帧的 `reqId` 关联「命令 → 回复」⇒ **不需要先订阅**。
 //! [`TOPIC_DISASM`] 等四个常量是**登记用**的（与前端 `EVENT_TOPIC`
@@ -353,6 +363,21 @@ pub const TOPIC_EXPORT: &str = "debug.export";
 
 /// 主题：轨迹记录状态（`EventPayload::TraceState` 的回复）。
 pub const TOPIC_TRACE: &str = "debug.trace";
+
+/// 主题：符号查询的回复（`EventPayload::SymbolResolved` 的回复）。
+///
+/// ⚠️ **登记用，不是订阅开关**（与上面四个常量同口径）⇒ ⇒ 前端靠传输帧的
+/// `reqId` 关联「命令 → 回复」⇒ ⇒ **不需要先订阅**。
+///
+/// ⚠️ 与前端 `EVENT_TOPIC` 里的 `SymbolResolved` **逐字相同**（STAGE-42
+/// §2.7）⇒ ⇒ 两侧的一致性由 `crates/kernel/tests/m11_host_wiring.rs` 里
+/// 那条用例钉住。
+pub const TOPIC_SYMBOL: &str = "debug.symbol";
+
+/// 主题：整段转储的回复（`EventPayload::MemoryDump` 的回复）。
+///
+/// ⚠️ **登记用，不是订阅开关**（与上面四个常量同口径）。
+pub const TOPIC_DUMP: &str = "debug.dump";
 
 /// console 输出的 topic（与前端 `EVENT_TOPIC.Console` **逐字一致**）。
 pub const TOPIC_CONSOLE: &str = "sim.console";
