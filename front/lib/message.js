@@ -87,6 +87,29 @@
 //     own codes finally have a **definition site** ⇒ ⇒ the "unique
 //     definition" invariant can bite them too (STAGE-29 裁决 E / F).
 //
+// Contract v9 (`schema_version = 9`) adds:
+//   - one new command: `ResolveSymbol { name }` — ask the kernel (M-11) for
+//     a symbol **by name** (contract v9 §2.2). One command serves **both**
+//     usages: an **exact** hit arrives in `SymbolResolved.symbol`, a
+//     **prefix** hit arrives in `SymbolResolved.candidates`;
+//   - one new command: `DumpMemory { addr, len }` — read a **run** of bytes
+//     (contract v9 §2.2). The old `ReadMemory` can only read 1/2/4 bytes;
+//   - two new reply events: `SymbolResolved { name, symbol, candidates,
+//     total }` and `MemoryDump { addr, bytes }` (the bytes travel as a
+//     **JSON array of numbers**, the same convention as `Console`);
+//   - two **mirrored limits** (`DUMP_MAX_BYTES` / `SYMBOL_CANDIDATE_LIMIT`)
+//     — they are **cross-layer** numbers ⇒ ⇒ the only truth is
+//     `crates/contract/fixtures/debug-limits.json` ⇒ ⇒ the Rust side
+//     asserts its constants against that file and the front side reads the
+//     same file ⇒ ⇒ **two truths** are structurally impossible;
+//   - ⚠️ `Breakpoint` gained **one optional field** (`condition`) on the
+//     Rust side ⇒ ⇒ `Command.setBreakpoint` stays a **pass-through**
+//     (it never rewrites the DTO) ⇒ ⇒ the caller is the one that must
+//     put `condition` on the wire (and `null` means "no condition", **not**
+//     the empty string).
+//   - ⚠️ `SIM_STATE_SCHEMA_VERSION` / `PLATFORM_SCHEMA_VERSION` /
+//     `PLATFORM_RULES_VERSION` are **unchanged** (still 2 / 1 / 3).
+//
 // ⚠️ The two admin DTOs (`LogEntryDto` / `AdminDiagDto`) have **one**
 //   truth: `crates/contract/fixtures/admin-dto.json` ⇒ ⇒ the Rust side
 //   asserts its serialisation against that file and the front side reads
@@ -94,7 +117,28 @@
 //   on either side turns the other side red.
 
 /** Protocol schema version — mirrors `riscv_sim_contract::SCHEMA_VERSION`. */
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
+
+/**
+ * 转储长度上限（字节）—— mirrors `riscv_sim_contract::DUMP_MAX_BYTES`.
+ *
+ * ⚠️ **跨层的数** ⇒ ⇒ 它的**唯一真相**是
+ *   `crates/contract/fixtures/debug-limits.json` ⇒ ⇒ 前端用例读**那一个
+ *   文件**来断言本常量（契约 v9 §2.5 · 裁决 K）⇒ ⇒ 「两个真相」结构上
+ *   不可能（前端抄一份字面量 ⇒ ⇒ 夹具断言当场红）。
+ *
+ * ⚠️ **前端拿它做预校验**（不发超限请求）⇒ ⇒ 但**内核仍然会拒**
+ *   （`E_DBG-03`）⇒ ⇒ 前端**照样要把内核原文显示出来**（不吞、不改写）。
+ */
+export const DUMP_MAX_BYTES = 4096;
+
+/**
+ * 符号候选条数上限 —— mirrors `riscv_sim_contract::SYMBOL_CANDIDATE_LIMIT`.
+ *
+ * ⚠️ 同上：**跨层的数** ⇒ ⇒ 真相在
+ *   `crates/contract/fixtures/debug-limits.json`（契约 v9 §2.5 · 裁决 K）。
+ */
+export const SYMBOL_CANDIDATE_LIMIT = 16;
 
 /**
  * 描述格式版本 — mirrors `riscv_sim_contract::platform::PLATFORM_SCHEMA_VERSION`.
@@ -208,6 +252,13 @@ export const MIRRORED_ERROR_CODES = Object.freeze({
  */
 export const RUST_ERROR_CODE_REFS = Object.freeze({
     "E_DBG-01": "E_DBG-01",
+    // ⚠️ 契约 v9 新增的两个码（`crates/contract/src/error.rs`）：
+    //   `E_DBG-02` = 条件表达式解析失败 / 符号名为空；
+    //   `E_DBG-03` = 转储长度越界。
+    // ⇒ ⇒ 前端**按码分派**（把内核原文显示到对应的那一位）⇒ ⇒ 这两个码
+    // **前端要用到** ⇒ ⇒ 落在「引用用的名字」这张表里（不是定义处）。
+    "E_DBG-02": "E_DBG-02",
+    "E_DBG-03": "E_DBG-03",
     "E_PLT-13": "E_PLT-13",
     "E_PROTO-01": "E_PROTO-01",
     "E_PROTO-02": "E_PROTO-02",
@@ -315,6 +366,9 @@ export const EVENT_TOPIC = Object.freeze({
     // 契约 v8 新增：管理员通道的**回复侧**（D-129）。
     AdminLogs: "admin.logs",
     AdminDiag: "admin.diag",
+    // 契约 v9 新增：调试器增强批（符号查询 + 整段转储）。
+    SymbolResolved: "debug.symbol",
+    MemoryDump: "debug.dump",
 });
 
 /**
@@ -650,6 +704,31 @@ export const Command = Object.freeze({
      * @returns {"UnloadProject"}
      */
     unloadProject: () => "UnloadProject",
+    /**
+     * `CommandPayload::ResolveSymbol { name }` — 按**名字**查符号（契约 v9）。
+     *
+     * ⚠️ **一条命令服务两种用法**（契约 v9 §3 裁决 B）：
+     *   - **精确命中** ⇒ 回复的 `SymbolResolved.symbol` 里有它；
+     *   - **只给前缀** ⇒ 回复的 `SymbolResolved.candidates` 里有候选。
+     *
+     * ⚠️ **键名逐字对齐 Rust**（`name`）⇒ ⇒ 跨层门禁会比。
+     *
+     * @param {string} name — 符号名（**空** ⇒ 内核拒 `E_DBG-02`）
+     * @returns {{ResolveSymbol: {name: string}}}
+     */
+    resolveSymbol: (name) => ({ ResolveSymbol: { name: String(name) } }),
+    /**
+     * `CommandPayload::DumpMemory { addr, len }` — 转储一段内存（契约 v9）。
+     *
+     * ⚠️ **原样拒，不静默截断**（契约 v9 §3 裁决 D）：`len == 0` 或
+     *   `len > DUMP_MAX_BYTES` ⇒ ⇒ 内核回 `E_DBG-03` ⇒ ⇒ 前端**照样要把
+     *   内核原文显示出来**（不吞、不改写）。
+     *
+     * @param {number} addr — 起始**物理**地址
+     * @param {number} len — 字节数（`1..=DUMP_MAX_BYTES`）
+     * @returns {{DumpMemory: {addr: number, len: number}}}
+     */
+    dumpMemory: (addr, len) => ({ DumpMemory: { addr: Number(addr), len: Number(len) } }),
 });
 
 // ---------------------------------------------------------------------------
@@ -885,6 +964,51 @@ export const Event = Object.freeze({
      * @returns {{AdminDiag: {diag: object}}}
      */
     adminDiag: (diag) => ({ AdminDiag: { diag } }),
+    /**
+     * `EventPayload::SymbolResolved { name, symbol, candidates, total }` —
+     * 符号查询的**答复**（契约 v9）。
+     *
+     * ⚠️ **这是一次查询的答复，不是内核的持久状态** ⇒ ⇒ 前端把它存进
+     *   **视图状态**即可 ⇒ ⇒ **不持久化**（否则就成了第二份真相）。
+     *
+     * ⚠️ **`symbol` 缺席 ≠ 错误**：`null` 的意思是「**没有精确命中**」
+     *   （契约 v9 §2.3）⇒ ⇒ 界面要说「没有这个符号」，不是「出错」。
+     *
+     * ⚠️ **`total == 0`** ⇒ ⇒ 这个镜像**没有符号表**（可能被 strip 了）
+     *   ⇒ ⇒ 与「有符号表但没匹配上」**必须能区分**（两态）。
+     *
+     * @param {string} name — 回显请求里的名字（前端按它对上号）
+     * @param {object|null} symbol — 精确命中的那一条（`model::Symbol`）
+     * @param {object[]} candidates — 前缀候选（`model::Symbol` 列表）
+     * @param {number} total — 该镜像的符号总数
+     * @returns {{SymbolResolved: {name: string, symbol: object|null, candidates: object[], total: number}}}
+     */
+    symbolResolved: (name, symbol, candidates, total) => ({
+        SymbolResolved: {
+            name: String(name ?? ""),
+            symbol: symbol ?? null,
+            candidates: candidates ?? [],
+            total: Number(total ?? 0),
+        },
+    }),
+    /**
+     * `EventPayload::MemoryDump { addr, bytes }` — 一段内存的**字节**
+     * （契约 v9）。
+     *
+     * ⚠️ **字节，不是字符串**：serde 把 `Vec<u8>` 默认序列化成 **JSON 数组**
+     *   （`[104, 105]`）——**不是** base64、**不是**字符串 ⇒ ⇒ 与 `Console`
+     *   事件**同一个口径**。
+     *
+     * @param {number} addr — 回显起始地址
+     * @param {number[]} bytes — 读到的字节（长度 == 请求的 `len`）
+     * @returns {{MemoryDump: {addr: number, bytes: number[]}}}
+     */
+    memoryDump: (addr, bytes) => ({
+        MemoryDump: {
+            addr: Number(addr),
+            bytes: (bytes ?? []).map((b) => Number(b) & 0xff),
+        },
+    }),
 });
 
 // ---------------------------------------------------------------------------

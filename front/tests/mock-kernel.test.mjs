@@ -376,3 +376,97 @@ describe("端到端：M-07 → 真实 worker 文件 → mock kernel → M-05", (
         router.close();
     });
 });
+
+// ---------------------------------------------------------------------------
+// 契约 v9 · 调试器增强批（mock 内核）
+//
+// ⚠️ **mock 的数据是假的**（台账 D-55）⇒ ⇒ 这里验的是「**形状对不对**」与
+//   「**契约语义对不对**」（精确命中 vs 前缀候选 · 原样拒不静默截断）⇒ ⇒
+//   **不是**真内核的符号表。
+//
+// ⚠️ **两个上限取自契约镜像** ⇒ ⇒ 与契约层同源 ⇒ ⇒ 夹具一改就红。
+// ---------------------------------------------------------------------------
+
+describe("mock 内核 · 调试器增强批（契约 v9）", () => {
+    test("`ResolveSymbol` 精确命中 ⇒ ⇒ `symbol` 有值、候选里**不含**它", () => {
+        const kernel = createMockKernel();
+        const frames = kernel.handle(commandFrame(Command.resolveSymbol("main")));
+        const evt = frames[0].payload.payload.Event.SymbolResolved;
+        assert.ok(evt, "没有 SymbolResolved 事件");
+        assert.equal(evt.name, "main", "必须**回显**请求里的名字");
+        assert.ok(evt.symbol, "精确命中时 `symbol` 必须有值");
+        assert.equal(evt.symbol.name, "main");
+        assert.equal(typeof evt.symbol.addr, "number", "假符号也得带一个假地址");
+        // ⚠️ **精确命中那条**不在候选里（裁决 B）⇒ ⇒ 但**前缀**命中的那些
+        //   仍在（`main` 是 `main_loop` 的前缀 ⇒ ⇒ 它**是**一个候选）。
+        assert.deepEqual(
+            evt.candidates.map((c) => c.name),
+            ["main_loop"],
+            "候选必须**不含**精确命中那条",
+        );
+        assert.equal(evt.total, 3, "`total` 是这张假符号表的条数");
+    });
+
+    test("`ResolveSymbol` 只给前缀 ⇒ ⇒ `symbol` 为 null、候选按名字升序", () => {
+        const kernel = createMockKernel();
+        const frames = kernel.handle(commandFrame(Command.resolveSymbol("ma")));
+        const evt = frames[0].payload.payload.Event.SymbolResolved;
+        assert.equal(evt.symbol, null, "只有前缀命中时 `symbol` 必须是 null");
+        assert.deepEqual(
+            evt.candidates.map((c) => c.name),
+            ["main", "main_loop"],
+            "前缀候选必须**只**含前缀命中的那些，且按**名字升序**",
+        );
+        assert.equal(
+            evt.candidates.some((c) => c.name === "helper"),
+            false,
+            "不是前缀的符号**不许**进候选",
+        );
+    });
+
+    test("`ResolveSymbol` 名字为空 ⇒ ⇒ `E_DBG-02`，**不发** `SymbolResolved`", () => {
+        const kernel = createMockKernel();
+        const frames = kernel.handle(commandFrame(Command.resolveSymbol("   ")));
+        assert.equal(frames.length, 1, "只回一条（错误）");
+        assert.equal(frames[0].payload.payload.Event.Error.code, "E_DBG-02");
+        assert.equal(
+            frames[0].payload.payload.Event.SymbolResolved,
+            undefined,
+            "被拒时**不许**发 SymbolResolved",
+        );
+    });
+
+    test("`DumpMemory` ⇒ ⇒ 回的字节数 == 请求的 `len`", () => {
+        const kernel = createMockKernel();
+        const frames = kernel.handle(commandFrame(Command.dumpMemory(0x1000, 40)));
+        const evt = frames[0].payload.payload.Event.MemoryDump;
+        assert.ok(evt, "没有 MemoryDump 事件");
+        assert.equal(evt.addr, 0x1000, "必须**回显**起始地址");
+        assert.equal(evt.bytes.length, 40, "字节数必须 == 请求的 `len`");
+        for (const b of evt.bytes) {
+            assert.ok(Number.isInteger(b) && b >= 0 && b <= 255, "字节必须在 0..255");
+        }
+    });
+
+    test("`DumpMemory` 长度越界 ⇒ ⇒ `E_DBG-03`（原样拒，不静默截断）", () => {
+        const kernel = createMockKernel();
+        for (const len of [0, 4097]) {
+            const frames = kernel.handle(commandFrame(Command.dumpMemory(0x1000, len)));
+            assert.equal(frames.length, 1, "只回一条（错误）");
+            assert.equal(frames[0].payload.payload.Event.Error.code, "E_DBG-03");
+            assert.equal(
+                frames[0].payload.payload.Event.MemoryDump,
+                undefined,
+                "被拒时**不许**发 MemoryDump（不许静默截断）",
+            );
+        }
+    });
+
+    test("`DumpMemory` 正好在上限上 ⇒ ⇒ **放行**（4096 是合法长度）", () => {
+        const kernel = createMockKernel();
+        const frames = kernel.handle(commandFrame(Command.dumpMemory(0, 4096)));
+        const evt = frames[0].payload.payload.Event.MemoryDump;
+        assert.ok(evt, "上限本身必须放行");
+        assert.equal(evt.bytes.length, 4096);
+    });
+});

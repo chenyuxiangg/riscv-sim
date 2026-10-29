@@ -33,6 +33,8 @@ import {
     HALT_REASON,
     WRITE_SIZE,
     SCHEMA_VERSION,
+    DUMP_MAX_BYTES,
+    SYMBOL_CANDIDATE_LIMIT,
 } from "../lib/message.js";
 import { decodeFrame, encodeFrame, FRAME_TYPE } from "../lib/frame.js";
 
@@ -139,6 +141,39 @@ const MOCK_EXPORT_LINES = Object.freeze({
  * the continuation path (`next_offset < total`) reachable at all.
  */
 const MOCK_EXPORT_BLOCK = 2;
+
+/**
+ * The mock's **fake** symbol table (contract v9 · `ResolveSymbol`).
+ *
+ * ⚠️ **这些是假数据**：地址是**编的**，**不对应**任何真实 ELF 的符号表
+ *   ⇒ ⇒ mock ≠ 真内核（台账 D-55）⇒ ⇒ 它只保证「形状正确」，让前端那条
+ *   链（查符号 ⇒ 出候选 ⇒ 点候选下断点）能被**端到端**跑一遍。
+ *
+ * ⚠️ **契约语义照做**（不是编的）：**精确命中**与**前缀候选**分开
+ *   （精确命中**不**在候选里）⇒ ⇒ 候选按**名字升序** ⇒ ⇒ 条数 ≤
+ *   `SYMBOL_CANDIDATE_LIMIT` ⇒ ⇒ `total` = 这张表的条数。
+ */
+const MOCK_SYMBOLS = Object.freeze([
+    { name: "main", addr: 0x0000_1000, size: 64 },
+    { name: "main_loop", addr: 0x0000_1040, size: 32 },
+    { name: "helper", addr: 0x0000_1080, size: 16 },
+]);
+
+/**
+ * 假字节（契约 v9 · `DumpMemory`）。
+ *
+ * ⚠️ **这是假数据**：内容是 `addr + i` 的低字节 ⇒ ⇒ **不对应**任何真实
+ *   内存 ⇒ ⇒ 只保证「长度 == 请求的 `len`」与「字节在 0..255」。
+ *
+ * @param {number} addr
+ * @param {number} len
+ * @returns {number[]}
+ */
+function mockDumpBytes(addr, len) {
+    const out = [];
+    for (let i = 0; i < len; i += 1) out.push((addr + i) & 0xff);
+    return out;
+}
 
 /**
  * A non-negative integer from a command field.
@@ -698,6 +733,55 @@ export function createMockKernel(options = {}) {
                 // ring keeps what it already holds.
                 frames.push(makeFrame(reqId, Event.traceState(
                     enabled, state.traceLen, state.traceDropped,
+                )));
+                break;
+            }
+
+            // -- 契约 v9 · 调试器增强批 ---------------------------------------
+
+            case "ResolveSymbol": {
+                // ⚠️ **空名字 ⇒ 拒绝**（契约 v9 §2.2：`E_DBG-02`）⇒ ⇒
+                //   **不发** `SymbolResolved` ⇒ ⇒ 前端会显示内核原文。
+                const name = String(value.name ?? "");
+                if (name.trim() === "") {
+                    frames.push(makeFrame(reqId, Event.error(
+                        "E_DBG-02",
+                        "符号名不能为空",
+                    )));
+                    break;
+                }
+                const exact = MOCK_SYMBOLS.find((s) => s.name === name) ?? null;
+                // ⚠️ **前缀候选不含精确命中那条**，按**名字升序**，条数 ≤ 上限。
+                const candidates = MOCK_SYMBOLS
+                    .filter((s) => s.name.startsWith(name) && s.name !== name)
+                    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+                    .slice(0, SYMBOL_CANDIDATE_LIMIT)
+                    .map((s) => ({ ...s }));
+                frames.push(makeFrame(reqId, Event.symbolResolved(
+                    name,
+                    exact ? { ...exact } : null,
+                    candidates,
+                    MOCK_SYMBOLS.length,
+                )));
+                break;
+            }
+
+            case "DumpMemory": {
+                // ⚠️ **原样拒，不静默截断**（契约 v9 §3 裁决 D）⇒ ⇒
+                //   `len == 0` 或超上限 ⇒ ⇒ `E_DBG-03` ⇒ ⇒ **不发**
+                //   `MemoryDump`。
+                const addr = Number(value.addr ?? 0) >>> 0;
+                const len = Number(value.len ?? 0);
+                if (!Number.isInteger(len) || len <= 0 || len > DUMP_MAX_BYTES) {
+                    frames.push(makeFrame(reqId, Event.error(
+                        "E_DBG-03",
+                        `转储长度越界：${String(value.len)}（必须是 1 .. ${DUMP_MAX_BYTES}）`,
+                    )));
+                    break;
+                }
+                frames.push(makeFrame(reqId, Event.memoryDump(
+                    addr,
+                    mockDumpBytes(addr, len),
                 )));
                 break;
             }

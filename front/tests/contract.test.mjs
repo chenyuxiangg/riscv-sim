@@ -542,6 +542,12 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 // 契约 v7：卸载工程（unit 变体）+ 差量更新。
                 UnloadProject: Command.unloadProject(),
                 PatchMemoryMap: Command.patchMemoryMap([], null),
+                // ⚠️ **契约 v9**（STAGE-42 · 调试器增强批）⇒ ⇒ 这两个
+                //   构造器**必须**在这儿登记 ⇒ ⇒ 否则 Rust 侧一加变体，
+                //   跨层门禁**看不见**它们的字段名 ⇒ ⇒ Rust 改了键名而 JS
+                //   没改 ⇒ ⇒ **静默**（F-13）。
+                ResolveSymbol: Command.resolveSymbol("main"),
+                DumpMemory: Command.dumpMemory(0, 16),
             },
             EventPayload: {
                 Tick: Event.tick(0, 0),
@@ -567,6 +573,11 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 // 契约 v8：管理员通道的**回复侧**（D-129）。
                 AdminLogs: Event.adminLogs([]),
                 AdminDiag: Event.adminDiag({}),
+                // ⚠️ **契约 v9**（STAGE-42 · 调试器增强批）⇒ ⇒ 同上：这两
+                //   个事件构造器**必须**在这儿登记 ⇒ ⇒ Rust 侧一加变体，
+                //   字段名就被**逐字**比上。
+                SymbolResolved: Event.symbolResolved("main", null, [], 0),
+                MemoryDump: Event.memoryDump(0, [0]),
             },
         };
 

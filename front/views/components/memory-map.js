@@ -122,8 +122,11 @@ export { PLATFORM_SCHEMA_VERSION };
  *
  * ⚠️ **v0.44（契约 v8）**：管理员通道的**回复侧**（`AdminLogs` /
  * `AdminDiag`）⇒ ⇒ 信封版本 **7 → 8** ⇒ ⇒ 文案跟着改。
+ *
+ * ⚠️ **v0.57（契约 v9）**：调试器增强批（符号查询 + 条件断点 + 整段转储）
+ *   ⇒ ⇒ 信封版本 **8 → 9** ⇒ ⇒ 文案跟着改。
  */
-export const CONTRACT_SCHEMA_VERSION = 8;
+export const CONTRACT_SCHEMA_VERSION = 9;
 
 /** 器件类型（`DeviceSpec` 的四个变体，snake_case 线上名）。 */
 export const DEVICE_KINDS = Object.freeze(["gpio", "uart16550", "clint", "plic"]);
