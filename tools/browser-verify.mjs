@@ -99,7 +99,7 @@ import {
 // ⚠️ **断点靶点不是写死的**（STAGE-35 · v0.50 批 · B 组）⇒ ⇒ 从仓内那份
 // demo 固件的定义里**导入** ⇒ ⇒ 固件改了地址，这里自动跟着改 ⇒ ⇒ 断言不会
 // 因为「地址碰巧对上了」而恒绿。
-import { DEMO_FIRMWARE_BREAKPOINT_ADDR } from "../front/dev/demo-firmware.js";
+import { DEMO_FIRMWARE_BREAKPOINT_ADDR, DEMO_FIRMWARE_BYTES } from "../front/dev/demo-firmware.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
@@ -162,6 +162,9 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "liveReadout",
     "runLoop",
     "addrInput",
+    "symbolUi",
+    "memDump",
+    "symbolBreakpoint",
     "uartEcho",
 ]);
 
@@ -5223,6 +5226,424 @@ async function runAddrInputSection(cdp, opts) {
 }
 
 // ---------------------------------------------------------------------------
+// STAGE-42 · v0.57 批 · 调试器增强（符号查询 + 条件断点 + 整段转储）
+// ---------------------------------------------------------------------------
+
+/**
+ * 调试器增强那一组的 DOM 探针（**一次读完** ⇒ ⇒ 采样是**同一个瞬间**的 ⇒ ⇒
+ * 「符号框在调试视图、转储框在寄存器视图」这种**采样错位**不会发生）。
+ *
+ * ⚠️ **读原始属性**（`data-addr` / `data-symbol` / `data-bp-addr` /
+ *   `data-dump-off`）⇒ ⇒ 判据不必解析中文。
+ */
+const BV_DEBUGGER_PROBE = `(() => {
+  const debugBody = document.querySelector('[data-view-body="debug"]');
+  const regmemBody = document.querySelector('[data-view-body="regmem"]');
+  const symBox = debugBody ? debugBody.querySelector('[data-symbol-input="breakpoint"]') : null;
+  const condBox = debugBody ? debugBody.querySelector('[data-cond-input="breakpoint"]') : null;
+  const dumpBox = regmemBody ? regmemBody.querySelector('[data-dump-input="memory"]') : null;
+  const dumpOut = regmemBody ? regmemBody.querySelector("[data-mem-dump]") : null;
+  const symErr = symBox ? symBox.querySelector("[data-bp-symbol-error]") : null;
+  const condErr = condBox ? condBox.querySelector("[data-bp-cond-error]") : null;
+  const dumpErr = dumpBox ? dumpBox.querySelector("[data-dump-error]") : null;
+  const dbgErr = debugBody ? debugBody.querySelector("[data-debug-error]") : null;
+  const candBox = symBox ? symBox.querySelector("[data-bp-symbol-candidates]") : null;
+  return {
+    hasDebugBody: !!debugBody,
+    hasRegmemBody: !!regmemBody,
+    hasSymbolBox: !!(symBox && symBox.querySelector("[data-bp-symbol-input]")),
+    hasCondBox: !!(condBox && condBox.querySelector("[data-bp-cond-input]")),
+    hasDumpBox: !!(dumpBox && dumpBox.querySelector("[data-dump-addr-input]")
+        && dumpBox.querySelector("[data-dump-len-input]")),
+    symbolErrorText: symErr ? String(symErr.textContent || "").trim() : "",
+    condErrorText: condErr ? String(condErr.textContent || "").trim() : "",
+    dumpErrorText: dumpErr ? String(dumpErr.textContent || "").trim() : "",
+    debugErrorText: dbgErr ? String(dbgErr.textContent || "").trim() : "",
+    candidates: Array.from(
+        candBox ? candBox.querySelectorAll("[data-action='set-symbol-breakpoint']") : []
+    ).map((b) => ({
+        name: String(b.getAttribute("data-symbol") || ""),
+        addr: String(b.getAttribute("data-addr") || ""),
+    })),
+    bpRows: Array.from(document.querySelectorAll('[data-view-body="debug"] [data-bp-row]'))
+      .map((r) => ({
+        addr: String(r.getAttribute("data-bp-addr") || ""),
+        notes: Array.from(r.querySelectorAll(".note"))
+          .map((n) => String(n.textContent || "").trim()),
+      })),
+    dumpRows: Array.from(dumpOut ? dumpOut.querySelectorAll("tr.dump-row") : [])
+      .map((tr) => {
+        const hex = tr.querySelector(".dump-hex");
+        const ascii = tr.querySelector(".dump-ascii");
+        return {
+          off: String(tr.getAttribute("data-dump-off") || ""),
+          hex: hex ? String(hex.textContent || "").trim() : "",
+          ascii: ascii ? String(ascii.textContent || "").trim() : "",
+        };
+      }),
+  };
+})()`;
+
+/**
+ * demo 固件头 16 字节的**期望十六进制**（**独立参照物**）。
+ *
+ * ⚠️ **不许写死那一串十六进制**：写死就成了「恒绿」的断言——换一版 demo
+ * 固件就判错，而且它证明不了「转储读的是**真的内存**」。
+ * ⇒ ⇒ 这里从 demo 固件模块**算**出来（`DEMO_FIRMWARE_BYTES`）。
+ */
+const BV_DEMO_DUMP_HEX = (() => {
+    const bytes = (DEMO_FIRMWARE_BYTES ?? []).slice(0, 16);
+    return bytes.map((b) => Number(b).toString(16).padStart(2, "0")).join(" ");
+})();
+
+/**
+ * STAGE-42 · v0.57 批的真机段：**符号入口**（在 **demo 固件**上 ⇒ ⇒ 没有
+ * 符号表 ⇒ ⇒ 专打「没有符号表」那一态）。
+ *
+ * ⚠️ **必须排在 osz 之前**：osz 段把镜像换成仓外的真 RTOS ⇒ ⇒ 放在它后面，
+ * 本段看到的镜像**有**符号表 ⇒ ⇒ 「没有符号表」那一态就**测不到**了。
+ *
+ * ⚠️ **必须排在 addrInput 之后**：那一段结束时已经**复位**过 ⇒ ⇒ 本段
+ * 看到的是干净的 demo 固件。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{checks: object[]}>}
+ */
+async function runSymbolUiSection(cdp, opts) {
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
+    const probe = async () => await awaitEval(cdp, BV_DEBUGGER_PROBE);
+
+    // -- 前置：**复位** ⇒ ⇒ demo 固件重新装上（它**没有**符号表）----------
+    await clickTopbarAction(cdp, "reset");
+    await sleep(900);
+    await runEffect(cdp, 'location.hash = "#/debug";');
+    await sleep(700);
+
+    let p = await probe();
+    add(
+        "B-77 · 调试视图里**同时有**「符号」框与「条件」框"
+        + "（⇒ ⇒ 用户实际会去的那一屏 ⇒ ⇒ 不是「某个藏起来的视图里」）",
+        p?.hasSymbolBox === true && p?.hasCondBox === true,
+        `符号框=${p?.hasSymbolBox} 条件框=${p?.hasCondBox}`,
+    );
+
+    // -- B-78 · 在**没有符号表**的镜像上查符号 ⇒ ⇒ 界面说清「没有符号表」 --
+    await runEffect(cdp, `(() => {
+        const box = document.querySelector('[data-view-body="debug"] [data-symbol-input="breakpoint"]');
+        const input = box ? box.querySelector("[data-bp-symbol-input]") : null;
+        if (!input) return "no-input";
+        input.value = "main";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        const btn = box.querySelector('[data-action="lookup-symbol"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(900);
+    p = await probe();
+    add(
+        "B-78 · 在**没有符号表**的镜像上查符号 ⇒ ⇒ 界面说清「这个镜像没有符号表」"
+        + "（⇒ ⇒ 与「有符号表但没这个符号」是**两件事** ⇒ ⇒ 两态可区分）",
+        /符号表/.test(String(p?.symbolErrorText ?? "")),
+        `符号位文案=${JSON.stringify(p?.symbolErrorText ?? "")}`,
+    );
+
+    // -- B-79 · **非法条件** ⇒ ⇒ **内核拒** ⇒ ⇒ **内核原文**上屏 -------------
+    // ⚠️ **不许在前端判条件的合法性**（裁决 Q）⇒ ⇒ 这条断言盯的就是
+    //   「条件这条路真的接到了内核」⇒ ⇒ 前端自己判的话**这里永远不会红**。
+    await runEffect(cdp, `(() => {
+        const dbg = document.querySelector('[data-view-body="debug"]');
+        const addrBox = dbg ? dbg.querySelector('[data-addr-input="breakpoint"]') : null;
+        const addrInput = addrBox ? addrBox.querySelector("[data-bp-addr-input]") : null;
+        if (!addrInput) return "no-addr";
+        addrInput.value = "0x00000020";
+        addrInput.dispatchEvent(new Event("input", { bubbles: true }));
+        const condBox = dbg ? dbg.querySelector('[data-cond-input="breakpoint"]') : null;
+        const condInput = condBox ? condBox.querySelector("[data-bp-cond-input]") : null;
+        if (!condInput) return "no-cond";
+        condInput.value = "x1 ==";
+        condInput.dispatchEvent(new Event("input", { bubbles: true }));
+        const btn = addrBox.querySelector('[data-action="set-breakpoint"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(900);
+    p = await probe();
+    add(
+        "B-79 · **非法条件** ⇒ ⇒ **内核拒**（E_DBG-02）⇒ ⇒ **内核原文**上屏"
+        + "（⇒ ⇒ 条件这条路真的接到了内核 ⇒ ⇒ 不是前端自己判的）",
+        /E_DBG-02/.test(`${p?.condErrorText ?? ""} ${p?.debugErrorText ?? ""}`),
+        `条件位=${JSON.stringify(p?.condErrorText ?? "")}`
+        + ` 面板=${JSON.stringify(p?.debugErrorText ?? "")}`,
+    );
+
+    // -- 收尾：**复位** ⇒ ⇒ 把状态清干净 ----------------------------------
+    await clickTopbarAction(cdp, "reset");
+    await sleep(900);
+
+    return { checks };
+}
+
+/**
+ * STAGE-42 · v0.57 批的真机段：**整段转储**。
+ *
+ * ⚠️ **必须排在 osz 之前**：osz 段把镜像换成仓外的真 RTOS ⇒ ⇒ 放在它后面，
+ * 本段转储的就不是 demo 固件的头 16 字节了（期望值会变）。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{checks: object[]}>}
+ */
+async function runMemDumpSection(cdp, opts) {
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
+    const probe = async () => await awaitEval(cdp, BV_DEBUGGER_PROBE);
+
+    await runEffect(cdp, 'location.hash = "#/regmem";');
+    await sleep(700);
+
+    let p = await probe();
+    add(
+        "B-80 · 寄存器/内存视图里**有**「转储」入口（地址 + 字节数 + 按钮）",
+        p?.hasDumpBox === true,
+        `转储框=${p?.hasDumpBox}`,
+    );
+
+    // -- B-81 · 转储 `0x0` 起 16 字节 ⇒ ⇒ 那 16 个字节**逐字**对得上 --------
+    await runEffect(cdp, `(() => {
+        const box = document.querySelector('[data-view-body="regmem"] [data-dump-input="memory"]');
+        if (!box) return "no-box";
+        const a = box.querySelector("[data-dump-addr-input]");
+        const l = box.querySelector("[data-dump-len-input]");
+        if (!a || !l) return "no-input";
+        a.value = "0x00000000";
+        a.dispatchEvent(new Event("input", { bubbles: true }));
+        l.value = "16";
+        l.dispatchEvent(new Event("input", { bubbles: true }));
+        const btn = box.querySelector('[data-action="dump-memory"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(900);
+    p = await probe();
+    const rows = Array.isArray(p?.dumpRows) ? p.dumpRows : [];
+    add(
+        "B-81 · 转储 `0x0` 起 16 字节 ⇒ ⇒ 第一行的十六进制**逐字**等于 demo 固件的头 16 字节"
+        + "（⇒ ⇒ 读的是**真的内存** ⇒ ⇒ 不是写死的假数据）",
+        rows.length > 0 && rows[0].hex === BV_DEMO_DUMP_HEX,
+        `第一行=${JSON.stringify(rows[0] ?? null)} 期望=${BV_DEMO_DUMP_HEX}`,
+    );
+    add(
+        "B-82 · 转储结果的**行数与偏移列**对得上（16 字节 = 1 行，偏移 `00000000`）",
+        rows.length === 1 && rows[0]?.off === "00000000",
+        `行=${JSON.stringify(rows)}`,
+    );
+
+    // -- B-83 · 长度越界 ⇒ ⇒ **内核拒** ⇒ ⇒ **内核原文**上屏 -----------------
+    // ⚠️ **前端不预校验**（裁决 Q）⇒ ⇒ 这一条才可能红 ⇒ ⇒ 它红 ⇒ ⇒ 就是
+    //   「内核那条上限路径没走到」。
+    await runEffect(cdp, `(() => {
+        const box = document.querySelector('[data-view-body="regmem"] [data-dump-input="memory"]');
+        const l = box ? box.querySelector("[data-dump-len-input]") : null;
+        if (!l) return "no-input";
+        l.value = "99999";
+        l.dispatchEvent(new Event("input", { bubbles: true }));
+        const btn = box.querySelector('[data-action="dump-memory"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(900);
+    p = await probe();
+    add(
+        "B-83 · 转储长度越界 ⇒ ⇒ **内核拒**（E_DBG-03）⇒ ⇒ **内核原文**上屏"
+        + "（⇒ ⇒ 上限是**内核**判的 ⇒ ⇒ 前端没写第二份校验器）",
+        /E_DBG-03/.test(String(p?.dumpErrorText ?? "")),
+        `错误位=${JSON.stringify(p?.dumpErrorText ?? "")}`,
+    );
+
+    return { checks };
+}
+
+/**
+ * STAGE-42 · v0.57 批的真机段：**按符号下断点**（在**真 osz 固件**上 ⇒ ⇒
+ * 那个镜像**有**符号表）。
+ *
+ * ⚠️ **必须排在 osz 之后**：本段要的是**真 osz**（仓外 ELF ⇒ ⇒ 它有
+ * `.symtab`）⇒ ⇒ 装载那些活儿由 osz 段做完。
+ *
+ * ⚠️ **地址不许写死**：本段用仓内的零依赖 ELF32 解析器（`tools/elf-symtab.mjs`）
+ *   **按名字**查出地址 ⇒ ⇒ 再断言**内核按同一个名字**解析出的地址**逐字相同**
+ *   ⇒ ⇒ 这才是「平台真的按名字找对了符号」。
+ *
+ * ⚠️ **本段不跑 guest**：它只下断点、验地址、然后**撤掉**⇒ ⇒ 不会在后面
+ *   的段里留下一个会误停的断点。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{checks: object[]}>}
+ */
+async function runSymbolBreakpointSection(cdp, opts) {
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
+    const probe = async () => await awaitEval(cdp, BV_DEBUGGER_PROBE);
+
+    const elfPath = process.env.OSZ_ELF || OSZ_ELF_DEFAULT;
+    if (!existsSync(elfPath)) {
+        return {
+            skipped: true,
+            reason: `没有 osz ELF（${elfPath}；可用 $OSZ_ELF 指定）`,
+            checks: [],
+        };
+    }
+
+    // -- 挑一个**能下断点**的符号（有地址 · 2 字节对齐 · 不是调度器那个）----
+    let target = null;
+    try {
+        const elf = loadElf(elfPath);
+        target = pickBreakableSymbol(elf);
+    } catch (err) {
+        return {
+            skipped: false,
+            checks: [{
+                name: "解析 osz 的符号表（零依赖 ELF32 解析器）",
+                ok: false,
+                detail: String(err?.message ?? err).slice(0, 300),
+            }],
+        };
+    }
+    if (!target) {
+        return {
+            skipped: false,
+            checks: [{
+                name: "在 osz 的符号表里挑一个能下断点的符号",
+                ok: false,
+                detail: "一个都没有（有地址 · 2 字节对齐 · 名字唯一）",
+            }],
+        };
+    }
+    const targetHex = `0x${(target.value >>> 0).toString(16).padStart(8, "0")}`;
+    console.log(`· 符号断点靶点：${target.name} = ${targetHex}`);
+
+    await runEffect(cdp, 'location.hash = "#/debug";');
+    await sleep(700);
+
+    // -- 输入**名字的前缀** ⇒ ⇒ 候选下拉 ------------------------------------
+    const prefix = target.name.slice(0, Math.min(4, target.name.length));
+    await runEffect(cdp, `(() => {
+        const box = document.querySelector('[data-view-body="debug"] [data-symbol-input="breakpoint"]');
+        const input = box ? box.querySelector("[data-bp-symbol-input]") : null;
+        if (!input) return "no-input";
+        input.value = ${JSON.stringify(prefix)};
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        const btn = box.querySelector('[data-action="lookup-symbol"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(900);
+    let p = await probe();
+    const candidates = Array.isArray(p?.candidates) ? p.candidates : [];
+    add(
+        "B-84 · 在界面里按**名字的前缀**查符号 ⇒ ⇒ 候选下拉里**出现**那个符号"
+        + "（⇒ ⇒ 前缀查询这条路真的接到了内核的符号表）",
+        candidates.length > 0
+            && candidates.some((c) => c.name === target.name),
+        `前缀=${JSON.stringify(prefix)} 候选=${JSON.stringify(candidates)}`,
+    );
+    add(
+        "B-85 · 候选上的地址与**独立参照物**（仓内 ELF 解析器按名字查的）**逐字相同**"
+        + "（⇒ ⇒ 内核的符号表与独立解析器**一致** ⇒ ⇒ 不是写死的地址）",
+        candidates.some((c) => c.name === target.name && c.addr === targetHex),
+        `期望=${targetHex} 候选=${JSON.stringify(candidates)}`,
+    );
+
+    // -- 点候选 ⇒ ⇒ **真的下了断点** ⇒ ⇒ 列表里出现符号名与那个地址 --------
+    await runEffect(cdp, `(() => {
+        const box = document.querySelector('[data-view-body="debug"] [data-symbol-input="breakpoint"]');
+        const btn = box
+            ? box.querySelector('[data-action="set-symbol-breakpoint"][data-symbol="' + ${JSON.stringify(target.name)} + '"]')
+            : null;
+        if (!btn) return "no-candidate";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(900);
+    p = await probe();
+    const rows = Array.isArray(p?.bpRows) ? p.bpRows : [];
+    const row = rows.find((r) => r.addr === targetHex);
+    add(
+        "B-86 · 点候选 ⇒ ⇒ 断点列表里出现**那个地址**，且那一行**写着符号名**"
+        + "（⇒ ⇒ 符号断点这条路从界面一路通到内核）",
+        !!row && row.notes.some((n) => n.includes(target.name)),
+        `断点行=${JSON.stringify(rows)} 期望名字=${target.name}`,
+    );
+
+    // -- 收尾：**撤掉**那个断点 ⇒ ⇒ 不给后面的段留一个会误停的断点 ---------
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-view-body="debug"] [data-bp-row][data-bp-addr="' + ${JSON.stringify(targetHex)} + '"] [data-action="clear-breakpoint"]');
+        if (!btn) return "no-clear";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(900);
+    p = await probe();
+    add(
+        "B-87 · 撤掉之后 ⇒ ⇒ 断点列表里**没有**那个地址了"
+        + "（⇒ ⇒ 撤断点这条路也通 ⇒ ⇒ 不给后面的段留尾巴）",
+        !(Array.isArray(p?.bpRows) ? p.bpRows : []).some((r) => r.addr === targetHex),
+        `断点行=${JSON.stringify(p?.bpRows ?? [])}`,
+    );
+
+    return { checks };
+}
+
+/**
+ * 从一份 ELF 的符号表里挑一个**能下断点**的符号。
+ *
+ * ⚠️ **三条硬条件**：
+ * 1. **有地址**（`shndx != SHN_UNDEF`）—— 未定义符号的地址是 0 ⇒ ⇒ 拿它
+ *    下断点会断在地址 0。
+ * 2. **2 字节对齐**—— RV32IMC 的压缩指令只要求半字对齐，**奇地址**会被内核
+ *    以 `E_CTX-07` 拒掉。
+ * 3. **不是调度器那个符号**—— osz 段（E-7）**已经**在它上面下过断点 ⇒ ⇒
+ *    再下一个就是**同址重复** ⇒ ⇒ 内核会拒（`E_CTX-07`）⇒ ⇒ 那条断言就
+ *    变成「内核的重复校验」而不是「按符号下断点」。
+ *
+ * ⚠️ **名字取前 4 个字符当前缀**⇒ ⇒ 候选不会多到把目标挤出去 ⇒ ⇒ 又
+ * **不**写死整名 ⇒ ⇒ 候选下拉那条路（**前缀查询**）也被真的走了一遍。
+ *
+ * @param {{symbols: object[]}} elf
+ * @returns {{name: string, value: number}|null}
+ */
+function pickBreakableSymbol(elf) {
+    const schedulerNames = new Set(SCHEDULER_SYMBOL_CANDIDATES ?? []);
+    const usable = (elf?.symbols ?? []).filter(
+        (s) => s.shndx !== 0
+            && Number.isFinite(s.value)
+            && s.value !== 0
+            && s.value % 2 === 0
+            && !schedulerNames.has(s.name),
+    );
+    // 按名字排序 ⇒ ⇒ 挑法**确定**（同一份 ELF 每次都挑同一个）。
+    usable.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const s of usable) {
+        const prefix = s.name.slice(0, 4);
+        const samePrefix = usable.filter((x) => x.name.startsWith(prefix));
+        // ⚠️ 前缀命中太多 ⇒ ⇒ 目标可能**被上限挤出去** ⇒ ⇒ 换一个。
+        if (samePrefix.length > 16) continue;
+        if (samePrefix.some((x) => x.name === s.name)) {
+            return { name: s.name, value: s.value >>> 0 };
+        }
+    }
+    return null;
+}
+
+// ---------------------------------------------------------------------------
 
 async function runOszSection(cdp, opts) {
     const elfPath = process.env.OSZ_ELF || OSZ_ELF_DEFAULT;
@@ -6129,6 +6550,23 @@ async function main() {
             title: "任意地址检查（输入框下断点 ⇒ 内核真停 · 输入框读内存 ⇒ 表里真出现那一行）",
         });
 
+        // -- the SYMBOL ENTRY (STAGE-42 · v0.57 批 · B-77 ~ B-79) -----------
+        // ⚠️ **必须排在 osz 之前**：osz 段把镜像换成仓外的真 RTOS ⇒ ⇒ 那个
+        //    镜像**有**符号表 ⇒ ⇒ 放在它后面，本段要打的那一态（「这个镜像
+        //    没有符号表」）就**永远测不到**了。
+        const symbolUi = await runSection("symbolUi", () => runSymbolUiSection(cdp, opts));
+        registerSection("symbolUi", symbolUi.checks, {
+            title: "符号入口检查（符号框 + 条件框在同一屏 · 没有符号表时说清楚 · 非法条件由内核拒）",
+        });
+
+        // -- the MEMORY DUMP (STAGE-42 · v0.57 批 · B-80 ~ B-83) -------------
+        // ⚠️ **必须排在 osz 之前**：本段转储的是 **demo 固件的头 16 字节**
+        //    ⇒ ⇒ 放在 osz 后面期望值就变了。
+        const memDump = await runSection("memDump", () => runMemDumpSection(cdp, opts));
+        registerSection("memDump", memDump.checks, {
+            title: "整段转储检查（转储 16 字节 ⇒ 逐字等于 demo 固件的头 16 字节 · 越界由内核拒）",
+        });
+
         // -- the REAL RTOS (osz): load the out-of-repo ELF and SEE its console -
         // ⚠️ 这一段在**没有 osz ELF** 的机器上必须**跳过**（不是判负）——
         // osz 的产物在**仓外**（不进仓库）。
@@ -6136,6 +6574,22 @@ async function main() {
         registerSection("osz", osz.checks, {
             title: "真实 RTOS 检查（osz：装载仓外 ELF → 跑 → 终端里的 console）",
             skippedTitle: "真实 RTOS 检查（osz）",
+            skipped: osz.skipped,
+            reason: osz.reason,
+        });
+
+        // -- the SYMBOL BREAKPOINT (STAGE-42 · v0.57 批 · B-84 ~ B-87) --------
+        // ⚠️ **必须排在 osz 之后**：本段要的是**真 osz**（仓外 ELF ⇒ ⇒ 它有
+        //    `.symtab`）⇒ ⇒ 装载那些活儿由 osz 段做完。
+        // ⚠️ **没有 osz ELF 时必须一起跳过**（不是判负）—— 缺仓外产物不是
+        //    平台的缺陷（与 terminalScreen / uartEcho 段同一条口径）。
+        const symbolBreakpoint = await runSection(
+            "symbolBreakpoint",
+            () => runSymbolBreakpointSection(cdp, opts),
+        );
+        registerSection("symbolBreakpoint", symbolBreakpoint.checks, {
+            title: "按符号下断点检查（界面查名字 ⇒ 候选 ⇒ 点一下 ⇒ 断点落在那个符号的地址上）",
+            skippedTitle: "按符号下断点检查（symbolBreakpoint）",
             skipped: osz.skipped,
             reason: osz.reason,
         });
