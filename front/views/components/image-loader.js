@@ -161,6 +161,7 @@ export function buildImageProjectFromBytes(bytes, name, options = {}) {
  */
 export function describeImageLoad(state) {
     const status = String(state?.status ?? "idle");
+    if (status === "reading") return "正在读取固件……（读完才能点「加载固件」）";
     if (status === "loading") return "正在读取并装载固件…";
     if (status === "error") {
         const msg = String(state?.error ?? "未知原因");
@@ -254,6 +255,30 @@ export function pendingImage() {
  * @returns {Promise<void>}
  */
 export async function loadImageFileIntoPending(file) {
+    // ⚠️⚠️ **先写「读取中」**（v0.59 批 · 施工期实测撞到）⇒ ⇒ **这是竞态，
+    // 必须在**第一个 `await` **之前**写。
+    //
+    // ⚠️ **竞态的机制**：读字节是**异步**的（`await file.arrayBuffer()`）⇒ ⇒
+    // 在字节到手之前，状态里**还留着上一次**的值（`status` 仍是 `"ok"`）⇒ ⇒
+    // 用户在这期间点「加载固件」⇒ ⇒ `imageLoadDecision` 判成「**已装载**」⇒ ⇒
+    // **这一下被吞掉**（界面还如实说「已装载，无需重复加载」）⇒ ⇒ **界面在
+    // 骗人**（用户明明刚选了新文件，界面说不用装）。
+    //
+    // ⚠️ **门禁实测复现**：真机门禁「选文件 ⇒ 立刻点加载」⇒ ⇒ 偶发「装载没
+    // 发生」（PC 没回去）⇒ ⇒ 根因就是这个竞态 ⇒ ⇒ **不是门禁的时序问题，是
+    // 产品缺陷** ⇒ ⇒ 所以**产品侧要修**（⛔ 不许只在门禁侧绕过去 ⇒ ⇒ 那是
+    // 把缺陷原样留给用户）。
+    //
+    // ⚠️ **为什么名字与字节数也可以先写**：这两个是**同步**就知道的（`File`
+    // 的 `name` / `size`）⇒ ⇒ 先写出来只是让界面**早一点**显示「在读哪个」
+    // ⇒ ⇒ `pending`（真字节）仍然要等读完了才有。
+    setImageLoadState({
+        status: "reading",
+        name: String(file?.name ?? "image.bin"),
+        byteLength: Number(file?.size ?? 0),
+        error: null,
+    });
+    publishProductState();
     try {
         const bytes = await readImageFile(file);
         const name = String(file?.name ?? "image.bin");
@@ -286,6 +311,7 @@ export async function loadImageFileIntoPending(file) {
  */
 export function describeImageLoadShort(state) {
     const status = String(state?.status ?? "idle");
+    if (status === "reading") return "正在读取固件…";
     if (status === "loading") return "装载中…";
     if (status === "error") return `装载失败：${String(state?.error ?? "未知原因")}`;
     if (status === "ok") return `已装载「${String(state?.name ?? "固件")}」`;
@@ -321,6 +347,13 @@ export function describeImageLoadShort(state) {
 export function imageLoadDecision(state) {
     const status = String(state?.status ?? "idle");
     if (status === "loading") return { kind: "loading" };
+    // ⚠️ **读取中**（v0.59 批）⇒ ⇒ 字节**还在读**⇒ ⇒ ⛔ **不许**把它判成
+    // 「已装载」⇒ ⇒ 否则用户刚选的新文件那一下**被吞掉**⇒ ⇒ 界面在骗人。
+    //
+    // ⚠️ **必须排在 `pending` 那一格**之前：上一次装载**失败**时 `pending`
+    // 是**保留**的（用户点一下就能重试）⇒ ⇒ 读取期间它还是**旧的**那份 ⇒ ⇒
+    // 先判 `pending` 就会拿**旧字节**去装。
+    if (status === "reading") return { kind: "reading" };
     const pending = state?.pending ?? null;
     if (pending) return { kind: "load", pending };
     if (status === "ok") {
