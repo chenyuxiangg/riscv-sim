@@ -706,6 +706,42 @@ impl Hms {
         self.terminated
     }
 
+    /// **新会话 ⇒ 健康状态从头开始**（会话边界 = **装载新工程**）。
+    ///
+    /// ⚠️ **为什么需要这条**（v0.59 批 · 用户报的现象「复位后无法再运行」）：
+    /// 看门狗触发 ⇒ ⇒ 内核被终止 ⇒ ⇒ 而**装载新工程**（= 复位）**不重置**那两个
+    /// 标志 ⇒ ⇒ 内核**再也跑不起来** ⇒ ⇒ 「复位」救不回一个被看门狗杀死的会话
+    /// ⇒ ⇒ 「复位回到初始态」（FR-06 验收）**做不到**。
+    ///
+    /// ⚠️ **清什么 / 不清什么**——**配置**不是会话状态 ⇒ ⇒ **不清**：
+    /// - **清**：信号流 / 分级流 / 保留带 / 保留计数 / 折叠标志 / 最近一条带码 /
+    ///   崩溃冻结 / 指标环 / `watchdog_fired` / `terminated` / 最近一次升级 /
+    ///   降级失败记账 / **粘性最大级别** ⇒ ⇒ 「本会话的健康状态」**从头开始**
+    ///   （⇒ ⇒ [`Hms::state`] 回到 `Ok` ⇒ ⇒ **不是**「内核活着但健康状态说它
+    ///   死了」那个两个真相 ⇒ ⇒ 粘性最大级别**必须**清 —— 只降不升是**会话内**
+    ///   的性质）。
+    /// - **不清**：角色 / 分级表 / 降级策略 / 降级执行器 / 归档后端 / 日志源
+    ///   ⇒ ⇒ 那些是**配置** ⇒ ⇒ 换会话**不换配置**。
+    ///
+    /// ⚠️ **取证记录不丢**：M-21 的日志环**不在**这里 ⇒ ⇒ 「上一个会话为什么死
+    /// 的」**仍然查得到**（日志环归 M-21，宿主**不**在装载时清它）⇒ ⇒ 本方法
+    /// **只**清**健康状态**，**不**清**日志**。
+    pub fn reset_session(&mut self) {
+        self.signals.clear();
+        self.severities.clear();
+        self.retained.clear();
+        self.retained_total = 0;
+        self.retained_collapsed = false;
+        self.retained_last_code = None;
+        self.frozen = false;
+        self.metrics.clear();
+        self.watchdog_fired = false;
+        self.terminated = false;
+        self.last_escalation = None;
+        self.worst_severity = Severity::InfoNoDegrade;
+        self.degrade_failures.clear();
+    }
+
     /// 信号流（只读快照）。
     pub fn signals(&self) -> Vec<HealthSignal> {
         self.signals.iter().cloned().collect()

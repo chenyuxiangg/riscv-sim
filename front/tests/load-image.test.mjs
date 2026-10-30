@@ -416,6 +416,75 @@ describe("点「加载固件」· **四格判定**（v0.58 批）", () => {
     });
 });
 
+describe("点「加载固件」· **「读取中」那一格**（v0.59 批 · 竞态）", () => {
+    test("正在读那个文件 ⇒ ⇒ 判成「读取中」（⛔ **不是**「已装载」）", () => {
+        // ⚠️ **这一格就是 v0.59 批实测撞到的那个竞态**：读字节是**异步**的 ⇒ ⇒
+        // 读取期间状态里**还留着上一次的** `"ok"` ⇒ ⇒ 若不先判「读取中」⇒ ⇒
+        // 用户刚选的新文件那一下**会被吞掉**（界面说「已装载，无需重复加载」，
+        // 而固件**根本没装**⇒ ⇒ 真机门禁实测偶发「PC 没回去」）。
+        const decision = loader.imageLoadDecision({
+            status: "reading",
+            name: ELF_NAME,
+            byteLength: ELF_BYTE_LENGTH,
+            pending: null,
+        });
+        assert.equal(decision.kind, "reading");
+    });
+
+    test("⛔ **读取中** ⇒ ⇒ 即便还留着**旧的** `pending`，也**不**判成「装它」", () => {
+        // ⚠️ 上一次装载**失败**时 `pending` 是**保留**的（用户点一下就能重试）
+        // ⇒ ⇒ 读取期间它还是**旧的**那份 ⇒ ⇒ 先判 `pending` 就会拿**旧字节**
+        // 去装 ⇒ ⇒ 那是另一个更隐蔽的错。
+        const decision = loader.imageLoadDecision({
+            status: "reading",
+            pending: { bytes: [...ELF_BYTES], name: ELF_NAME, kind: "Elf" },
+        });
+        assert.equal(decision.kind, "reading");
+    });
+
+    test("状态条在读取期间说「正在读取固件…」（⛔ **不说**「已装载」）", () => {
+        const short = loader.describeImageLoadShort({ status: "reading" });
+        assert.equal(short, "正在读取固件…");
+        assert.ok(!short.includes("已装载"), `读取期间状态条不该说「已装载」：${short}`);
+        const long = loader.describeImageLoad({ status: "reading" });
+        assert.ok(long.includes("正在读取"), `长版状态说明没有「正在读取」：${long}`);
+    });
+
+    test("⛔ **「读取中」必须在字节到手之前写进状态**（否则那一格永远不出现）", async () => {
+        await setup();
+        // ⚠️ 一个**慢**读取的文件：`arrayBuffer()` 何时 resolve 由**我们**决定
+        // ⇒ ⇒ 于是能在「字节还没到」的那一刻检查状态。
+        let release = null;
+        const slowFile = {
+            name: ELF_NAME,
+            size: ELF_BYTE_LENGTH,
+            arrayBuffer: () => new Promise((res) => {
+                release = () => res(new Uint8Array(ELF_BYTES).buffer);
+            }),
+        };
+        const pending = loader.loadImageFileIntoPending(slowFile);
+        // ⚠️ **此刻字节还没到** ⇒ ⇒ 状态必须已经是「读取中」。
+        const during = m03.getState("product")?.imageLoad;
+        assert.equal(
+            during?.status,
+            "reading",
+            `读取期间状态应是 reading，实测 ${JSON.stringify(during)}`,
+        );
+        assert.ok(
+            !loader.describeImageLoadShort(during).includes("已装载"),
+            "读取期间状态条不该说「已装载」",
+        );
+        // ⚠️ **读完之后** ⇒ ⇒ 状态回到 `idle` 且 `pending` 就绪 ⇒ ⇒ 那才是
+        // 「可以点加载」的那一刻。
+        release();
+        await pending;
+        const after = m03.getState("product")?.imageLoad;
+        assert.equal(after?.status, "idle", `读完之后状态应是 idle，实测 ${JSON.stringify(after)}`);
+        assert.ok(after?.pending, "读完之后 pending 应当就绪");
+        assert.equal(loader.imageLoadDecision(after).kind, "load");
+    });
+});
+
 describe("加载入口 · **只有一个**（v0.58 批）", () => {
     test("页头渲染出**一个**文件选择器与一个**「加载固件」**按钮", async () => {
         await setup();

@@ -92,6 +92,7 @@ import { loadElf, findFirstSymbol } from "./elf-symtab.mjs";
 import {
     UI_IMAGE_ELF_MARKER,
     UI_IMAGE_ELF_MARKER_B,
+    UI_IMAGE_ELF_PADDR,
     UI_IMAGE_ELF_X3_B,
     buildUiImageElf,
     checkEncoderAgainstDemoFirmware,
@@ -101,9 +102,32 @@ import {
 // 因为「地址碰巧对上了」而恒绿。
 import { DEMO_FIRMWARE_BREAKPOINT_ADDR, DEMO_FIRMWARE_BYTES } from "../front/dev/demo-firmware.js";
 
+/**
+ * 夹具 ELF 的入口地址（**显示形态**：`0x84000000`）。
+ *
+ * ⚠️ **从夹具常量算出来**（`UI_IMAGE_ELF_PADDR`）⇒ ⇒ ⛔ 不写死字面量 ⇒ ⇒
+ * 夹具换了落址 ⇒ ⇒ 这里自动跟着改 ⇒ ⇒ 断言不会因为「地址碰巧对上了」而恒绿。
+ */
+const UI_IMAGE_ENTRY_TEXT = `0x${UI_IMAGE_ELF_PADDR.toString(16).padStart(8, "0")}`;
+
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
 const frontDir = join(repoRoot, "front");
+
+/**
+ * demo 固件的**临时文件**（v0.59 批）—— 门禁里**显式**装 demo 固件时用。
+ *
+ * ⚠️ **为什么需要它**：v0.59 批把「复位」改成「重新装载**当前工程**」⇒ ⇒ 门禁
+ * 里那些**想用 demo 固件**的段**不许**再拿「复位」当「装 demo」用 ⇒ ⇒ 必须
+ * **显式**装 ⇒ ⇒ 而「显式装」要走**真的界面路径**（文件选择器）⇒ ⇒ 需要一个
+ * **真的文件** ⇒ ⇒ 这里把仓内那份共享常量**落成磁盘上的一个文件**。
+ *
+ * ⚠️ **字节引用仓内那份共享常量**（`front/dev/demo-firmware.js`）⇒ ⇒ 不抄第二份
+ * ⇒ ⇒ 门禁里跑的**就是**平台启动时装的那份字节。
+ */
+const DEMO_FIRMWARE_TMP_DIR = mkdtempSync(join(tmpdir(), "riscv-bv-demo-"));
+const DEMO_FIRMWARE_PATH = join(DEMO_FIRMWARE_TMP_DIR, "demo-firmware.bin");
+writeFileSync(DEMO_FIRMWARE_PATH, Buffer.from(DEMO_FIRMWARE_BYTES));
 
 /** A missing precondition (no Chrome / no python3) — not a test failure. */
 const EXIT_PRECONDITION = 127;
@@ -1180,9 +1204,27 @@ const OSZ_RUN_TIMEOUT_MS = 60000;
 // ⚠️ **真机层等 guest 的超时**（STAGE-40 · v0.55 批 · B-61 ~ B-66）。
 //: ⚠️ **比 `OSZ_RUN_TIMEOUT_MS` 短**：这一段等的是「一行命令被 guest 执行
 //: 完」，不是「跑到提示符」⇒ ⇒ 整机已经跑起来了 ⇒ ⇒ 几秒就够。
-const UART_ECHO_TIMEOUT_MS = 30000;
+//:
+//: ⚠️⚠️ **v0.59 批：从 30 s 放宽到 90 s**（**实测订正**）。
+//:
+//: ⚠️ **为什么**：guest 把一个字节从「进 RX FIFO」变成「回显出来」要过
+//: **虚拟时间 ~3 ms**（实测 304 批 `Continue` ≈ 3.04 ms）⇒ ⇒ 而**一批
+//: `Continue` 的墙钟代价 ≈ 100 ~ 115 ms**（机器忙时更慢）⇒ ⇒ 于是「回显要
+//: 等多久」**取决于机器有多慢**⇒ ⇒ 30 s 只够 **260 ~ 300 批** ⇒ ⇒ **正好
+//: 压在临界上**。
+//:
+//: ⚠️ **实测证据**：基线树（`4674be2`）跑同一段 ⇒ ⇒ `batches=304` **刚好**
+//: 在 30 s 内命中 ⇒ ⇒ **基线也是压线过的** ⇒ ⇒ 这是**预存的紧**（不是本批
+//: 引入）⇒ ⇒ 本批把它**放宽**（不是改产品行为）。
+//:
+//: ⚠️ **为什么不改产品的运行速度**：guest 的回显延迟是 **guest 自己**的
+//: 行为（本平台的 ISS 逐条执行）⇒ ⇒ 改它就等于**篡改被测对象**⇒ ⇒ 那是
+//: 「为了绿而改被测对象」⇒ ⇒ ⛔ 不做。
+const UART_ECHO_TIMEOUT_MS = 90000;
 //: ⚠️ **「不该出现」那条要等够久** ⇒ ⇒ 否则「没等到」会被读成「还没发生」。
-const UART_ECHO_NOEXEC_TIMEOUT_MS = 8000;
+//: ⚠️ **v0.59 批：8 s → 20 s**（同一个理由：机器慢的时候 8 s 不够 guest
+//: 把整行执行完 ⇒ ⇒ 「没有命令结果」就成了「还没执行」⇒ ⇒ 判据空转）。
+const UART_ECHO_NOEXEC_TIMEOUT_MS = 20000;
 
 /** 断点命中后，等 DOM 里的 PC 更新上来的**上限**（毫秒）。 */
 const PC_SETTLE_TIMEOUT_MS = 5000;
@@ -1641,11 +1683,22 @@ async function runMemoryMapSection(cdp, opts) {
 
     // -- ④ 重新装载工程 ⇒ 用户的板**跨装载保持** ⇒ 新图生效 ----------------
     //
-    // ⚠️ 用 **demo 工程**重载（不是 osz 那个）：osz 的镜像装不进这张板 ⇒
-    // 装它会失败 ⇒ 用户的板就永远生效不了。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: { action: "reset", requestId: "bv-mm-reset", viewId: "memory-map", params: null },
-    }))`);
+    // ⚠️ 装 **demo 固件**（不是 osz 那个）：osz 的镜像装不进这张板 ⇒ 装它会
+    // 失败 ⇒ 用户的板就永远生效不了。
+    //
+    // ⚠️ **v0.59 批**：这里**不再**用「复位」⇒ ⇒ 「复位」的语义是「**重新装载
+    // 当前工程**」（用户指南 §3.8）⇒ ⇒ 此刻「当前工程」是 osz 那个 ⇒ ⇒ 复位
+    // **不会**把 demo 装回来 ⇒ ⇒ 必须**显式**装 demo 固件（走**真的**界面
+    // 路径 ⇒ ⇒ 与用户点出来的同一条路）。
+    const demoLoaded = await loadDemoFirmware(cdp, opts);
+    if (!demoLoaded) {
+        checks.push({
+            name: "④ 重新装载工程 ⇒ 用户的板跨装载保持（demo 固件**装上了**）",
+            ok: false,
+            detail: "demo 固件没装上（PC 没回到 0x00000000）⇒ ⇒ 后面那些判据没有意义",
+        });
+        return { skipped: false, checks };
+    }
 
     // -- ⑤ 等产品视图的内存映射表变成新图 ----------------------------------
     //
@@ -2928,6 +2981,144 @@ async function selectFileForInput(cdp, selector, filePath) {
 }
 
 /**
+ * **显式装 demo 固件**（v0.59 批 · 复位语义回归批）。
+ *
+ * ⚠️ **为什么要有它**：v0.59 批把「复位」的语义**改回**文档写的那条 ——
+ * 「**复位 = 重新装载当前工程**」（用户指南 §3.8 + 需求 FR-06 验收「复位回到
+ * 初始态」）⇒ ⇒ 「复位」**不再**是「重装内置 demo 工程」⇒ ⇒
+ * ⇒ ⇒ 门禁里那些**想用 demo 固件**的段（断点靶点 / 波形边沿 / 符号表…）
+ * **不许**再拿「复位」当「装 demo」用 ⇒ ⇒ 必须**显式**装它。
+ *
+ * ⚠️ **走的是**真**的界面路径**（页头那个文件选择器 + 「加载固件」按钮）⇒ ⇒
+ * 与用户点出来的**完全同一条路**（⛔ 不许用脚本口代替 ⇒ ⇒ 否则那条判据恒绿）。
+ *
+ * ⚠️ **固件字节引用仓内那份共享常量**（`front/dev/demo-firmware.js`）⇒ ⇒ 不抄
+ * 第二份 ⇒ ⇒ 门禁里跑的**就是**平台启动时装的那份字节（⇒ ⇒ 内核里的内存
+ * 内容与启动时**逐字节相同**⇒ ⇒ 断点靶点 / GPIO 写 / 内存单元那些判据的
+ * 期望值**一个字都不用改**）。
+ *
+ * ⚠️ **本函数只管「装 demo」** ⇒ ⇒ **不含**「退出连续模式」⇒ ⇒ 那些**同时**
+ * 需要清理的段必须用 [`resetAndLoadDemoFirmware`]（⛔ 混用 ⇒ ⇒ 运行中 PC 被
+ * 隐藏成 `-` ⇒ ⇒ 等「PC 回到 0」必然超时 ⇒ ⇒ **假红**）。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<boolean>} — demo 固件**真的**装上了（PC 回到 0）
+ */
+async function loadDemoFirmware(cdp, opts) {
+    // ⚠️ **先点一下选择器**（用户点开文件选择器的那一下）⇒ ⇒ 页面里那个
+    // 「点开之前先清空当前选择」的逻辑会把 `value` 清掉 ⇒ ⇒ 于是「选回**同一个**
+    // 文件」在浏览器看来**也是变了**⇒ ⇒ `change` 照常触发（⛔ 不许「选不动」
+    // —— Chrome 的行为是「**值没变 ⇒ 不触发** `change`」）。
+    await runEffect(cdp, `(() => {
+        const input = document.querySelector('input[data-image-load-from="topbar"]');
+        if (!input) return "no-input";
+        input.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        return "clicked";
+    })()`);
+    await selectFileForInput(cdp, 'input[data-image-load-from="topbar"]', DEMO_FIRMWARE_PATH);
+    // ⚠️⚠️ **必须等「待加载的字节真的读到了」再点「加载固件」**（v0.59 批 ·
+    // 施工期实测撞到 ⇒ ⇒ **竞态** ⇒ ⇒ 偶发「装载没发生」）。
+    //
+    // ⚠️ **竞态的机制**：读文件是**异步**的（`await file.arrayBuffer()`）⇒ ⇒
+    // `change` 事件回来时字节**还没到** ⇒ ⇒ 这时候 `product.imageLoad` 里**还
+    // 留着上一次**的状态（`status` 仍是 `"ok"`）⇒ ⇒ 于是点「加载固件」⇒ ⇒
+    // `imageLoadDecision` 判成「**已装载**」⇒ ⇒ **这一下被吞掉**（界面还如实
+    // 说「已装载，无需重复加载」）⇒ ⇒ **一条 `LoadProject` 都没发** ⇒ ⇒ PC
+    // 永远不回去。
+    //
+    // ⚠️ **产品侧已修**（`front/views/components/image-loader.js` 加了
+    // `"reading"` 阶段 ⇒ ⇒ 读取期间**不会**再说「已装载」）⇒ ⇒ 但门禁这边
+    // 仍然要**等**：等的是「页头那条短状态条从「正在读取固件…」变成
+    // 「已选「…」（N 字节）」」⇒ ⇒ **那一刻 `pending` 一定已就绪**（名字与
+    // `pending` 是**同一次**状态写入 ⇒ ⇒ 不会出现「有名字、没字节」）。
+    //
+    // ⚠️ **为什么不能只看「PC 回到 0」**：复位之后当前工程可能**本来就是**
+    // demo（入口 0）⇒ ⇒ PC 早就是 `0x00000000` ⇒ ⇒ 只看 PC 会**秒回真**
+    // ⇒ ⇒ 判据会**空转**（假绿）。⇒ ⇒ **必须先握手、再点、再看「已装载」**。
+    const pendingReady = await waitForImagePendingReady(cdp, opts.timeoutMs);
+    if (!pendingReady.ready) {
+        return false;
+    }
+    await runEffect(cdp,
+        'document.querySelector(\'[data-action="load-image"][data-image-load-from="topbar"]\').click();');
+    // ⚠️ **等「装载真的完成」**（**字节流侧**的证据）⇒ ⇒ 页头状态条从「已选
+    // 「…」」变成「**已装载「…」**」⇒ ⇒ 那一句**只有** `handleLoadImageCommand`
+    // 成功之后才会写 ⇒ ⇒ 于是它是「内核真的接了这份工程」的**正向**证据。
+    //
+    // ⚠️ **为什么还要看 PC**：PC 是「内核那边」的说法 ⇒ ⇒ 两个口径都绿才算
+    // 真装上了（⛔ 任何一个单独绿都可能空转）。
+    const deadline = Date.now() + opts.timeoutMs;
+    let briefOk = false;
+    let pcText = "";
+    while (Date.now() < deadline) {
+        const brief = await awaitEval(cdp, UI_IMAGE_TOPBAR_PROBE);
+        briefOk = String(brief?.briefStatus ?? "") === "ok";
+        const p = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+        pcText = String(p?.pcText ?? "").trim();
+        // ⚠️ **PC 被隐藏成 `-`**（连续运行中）也算过 ⇒ ⇒ 那不是「没装上」。
+        if (briefOk && (pcText === "0x00000000" || pcText === "-")) return true;
+        await sleep(200);
+    }
+    return false;
+}
+
+/**
+ * 等「用户选的那个文件的字节**真的读到了**」⇒ ⇒ 返回「页头短状态条已变成
+ * 「已选「…」（N 字节）」」那一刻。
+ *
+ * ⚠️ **判据钉在「状态条」上**（不是内部状态）⇒ ⇒ 与用户看到的东西同一个
+ * 真相 ⇒ ⇒ 不许改成读内部变量（⛔ 那样门禁就看不见产品真错了）。
+ *
+ * @param {object} cdp
+ * @param {number} timeoutMs
+ * @returns {Promise<{ready: boolean, briefText?: string, briefStatus?: string}>}
+ */
+async function waitForImagePendingReady(cdp, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    let last = null;
+    while (Date.now() < deadline) {
+        const brief = await awaitEval(cdp, UI_IMAGE_TOPBAR_PROBE);
+        last = brief;
+        const status = String(brief?.briefStatus ?? "");
+        const text = String(brief?.briefText ?? "");
+        // ⚠️ **「已选「…」」这一格** ⇒ ⇒ 名字与 `pending` 是同一次写入 ⇒ ⇒
+        // ⇒ 「有名字」就一定「有字节」⇒ ⇒ 这一格就是「pending 已就绪」。
+        if (status === "idle" && text.startsWith("已选「")) {
+            return { ready: true, briefText: text, briefStatus: status };
+        }
+        await sleep(100);
+    }
+    return { ready: false, briefText: String(last?.briefText ?? ""), briefStatus: String(last?.briefStatus ?? "") };
+}
+
+/**
+ * **先复位（清状态 + 退出连续模式）⇒ 再显式装 demo 固件**。
+ *
+ * ⚠️ **为什么两步都要**（v0.59 批 · 施工期实测撞到）：「复位」在门禁里一直
+ * 兼着**两个**职责 —— ① **退出连续模式**（⇒ ⇒ 顶栏的 PC 从被隐藏的 `-` 变回
+ * 真值）② **把状态清干净**。⇒ ⇒ v0.59 批把「复位」改成「重新装载**当前
+ * 工程**」之后 ⇒ ⇒ 只做①的「显式装 demo」**不**退出连续模式 ⇒ ⇒ **PC 一直
+ * 是 `-`** ⇒ ⇒ 等「PC 回到 0」**必然超时**⇒ ⇒ **假红**。
+ *
+ * ⚠️ ⇒ ⇒ **这两步绑在一个函数里** ⇒ ⇒ 调用点**不会漏掉**其中一步（⛔ 漏掉
+ * 哪一步都**当场变红**⇒ ⇒ 不会悄悄退化）。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<boolean>}
+ */
+async function resetAndLoadDemoFirmware(cdp, opts) {
+    // ① **复位** ⇒ ⇒ 退出连续模式 ＋ 清状态（⛔ 这一步**不能省**）。
+    await clickTopbarAction(cdp, "reset");
+    await sleep(500);
+    // ② **显式装 demo 固件** ⇒ ⇒ 当前工程**就是** demo（⇒ ⇒ 与「复位」的
+    //    新语义**不冲突**：复位装的是「当前工程」，这里**明确**把「当前工程」
+    //    换成 demo）。
+    return await loadDemoFirmware(cdp, opts);
+}
+
+/**
  * **当前固件状态块**的探针（产品视图里那块）。
  *
  * ⚠️ **v0.58 批**：产品视图里那块面板**不再有入口**（入口**只有页头那一
@@ -3666,6 +3857,119 @@ async function runLoadImageSection(cdp, opts) {
                 + ` 页头文案 ${JSON.stringify(briefAfterSecond?.briefText ?? "")}`,
         });
 
+        // -- B-1e · **复位** ⇒ ⇒ 装的是**当前工程**（⛔ 不是内置 demo 工程）---
+        //
+        // ⚠️ **这一条是用户直接报的现象**：「UI 上点复位之后**再也跑不起来**」
+        // ⇒ ⇒ 根因：复位**重装的是内置 demo 工程**⇒ ⇒ 用户刚装进去的固件被
+        // **顶掉**⇒ ⇒ 界面还停在「已装载」⇒ ⇒ 再点「加载固件」落进
+        // `already-loaded` 那一格 ⇒ ⇒ **不重装**⇒ ⇒ 用户的固件再也跑不起来。
+        //
+        // ⚠️ **判据钉的是「PC 回到**当前工程**的入口」**：夹具 ELF 落在
+        // `0x8400_0000` ⇒ ⇒ 复位后 PC **必须**是 `0x84000000` ⇒ ⇒ **不是**
+        // `0x00000000`（demo 的入口）⇒ ⇒ 装 demo 那条路**当场变红**。
+        await clickTopbarAction(cdp, "reset");
+        let pcAfterReset = "";
+        const resetDeadline = Date.now() + opts.timeoutMs;
+        while (Date.now() < resetDeadline) {
+            const p = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+            pcAfterReset = String(p?.pcText ?? "").trim();
+            if (pcAfterReset !== "") break;
+            await sleep(200);
+        }
+        checks.push({
+            name: "B-1e · **复位 ⇒ ⇒ 装的是「当前工程」**（PC 回到夹具入口 ${UI_IMAGE_ENTRY_TEXT}"
+                + " ⇒ ⇒ ⛔ 不是内置 demo 的 0x00000000）",
+            ok: pcAfterReset === UI_IMAGE_ENTRY_TEXT,
+            detail: `复位后 PC=${JSON.stringify(pcAfterReset)}`
+                + `（期望 0x84000000 ⇒ ⇒ 夹具 ELF 的落址）`,
+        });
+
+        // -- B-1f · 复位之后 ⇒ ⇒ **还能再跑**（⛔ 不是内核死了）--------------
+        //
+        // ⚠️ **判据钉的是「虚拟时间**推进**」**：内核被看门狗终止之后 ⇒ ⇒ 每次
+        // `Continue` 都返回「内核已被看门狗终止」⇒ ⇒ 时间**不动**⇒ ⇒ 这条
+        // 抓的就是那条「真·再也跑不起来」。
+        const tBefore = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+        await clickTopbarAction(cdp, "run");
+        await sleep(1200);
+        const tAfter = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+        const tBeforePs = Number(String(tBefore?.timePs ?? ""));
+        const tAfterPs = Number(String(tAfter?.timePs ?? ""));
+        checks.push({
+            name: "B-1f · 复位之后 ⇒ ⇒ **还能再跑**（虚拟时间**推进** ⇒ ⇒ 内核没死）",
+            ok: Number.isFinite(tBeforePs) && Number.isFinite(tAfterPs) && tAfterPs > tBeforePs,
+            detail: `复位后时间 ${JSON.stringify(tBefore?.timePs ?? null)} ps`
+                + ` ⇒ 再点运行 ${JSON.stringify(tAfter?.timePs ?? null)} ps`,
+        });
+        // ⚠️ **收掉连续模式**（下面那些段要一个**干净**的状态）⇒ ⇒ 走「暂停」
+        // 那条路（⛔ 不是「复位」—— 复位会把 PC 拉回入口，而 B-3 要从入口跑）。
+        await clickTopbarAction(cdp, "pause");
+        await sleep(400);
+
+        // -- B-1g · 复位后**重选同一个文件** ⇒ ⇒ `change` **又**触发 ----------
+        //
+        // ⚠️ **Chrome 的行为**：`<input type="file">` 的**值没变** ⇒ ⇒ **不触发**
+        // `change` ⇒ ⇒ 用户「装一次 ⇒ 复位 ⇒ **再选同一个固件**」时**选不动**
+        // ⇒ ⇒ 固件回不来 ⇒ ⇒ 界面看起来「点了没反应」。
+        //
+        // ⚠️ **判据钉的是「`change` 事件**又**来了一次」**（留痕数组的长度 + 最后
+        // 一条的名字与大小）⇒ ⇒ ⛔ 不许用「按钮没报错」那种弱判据。
+        const picksBefore = await awaitEval(cdp, BV_IMAGE_PICKS_PROBE);
+        const picksBeforeLen = Array.isArray(picksBefore) ? picksBefore.length : 0;
+        // ⚠️ **先点一下选择器**（用户点开文件选择器的那一下）⇒ ⇒ 页面里那个
+        // 「点开之前先清空当前选择」的逻辑会把 `value` 清掉 ⇒ ⇒ 于是「选回
+        // **同一个**文件」在浏览器看来**也是变了**⇒ ⇒ `change` 照常触发。
+        await runEffect(cdp, `(() => {
+            const input = document.querySelector('input[data-image-load-from="topbar"]');
+            if (!input) return "no-input";
+            input.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+            return "clicked";
+        })()`);
+        await selectFileForInput(cdp, 'input[data-image-load-from="topbar"]', elfPath);
+        let picksAfter = null;
+        const repickDeadline = Date.now() + opts.timeoutMs;
+        while (Date.now() < repickDeadline) {
+            picksAfter = await awaitEval(cdp, BV_IMAGE_PICKS_PROBE);
+            const arr = Array.isArray(picksAfter) ? picksAfter : [];
+            if (arr.length > picksBeforeLen) break;
+            await sleep(200);
+        }
+        const picksAfterArr = Array.isArray(picksAfter) ? picksAfter : [];
+        const lastPick = picksAfterArr[picksAfterArr.length - 1] ?? null;
+        checks.push({
+            name: "B-1g · 复位后**重选同一个文件** ⇒ ⇒ `change` **又**触发了一次"
+                + "（⇒ ⇒ 「重装同一个固件」这条路重新通上了）",
+            ok: picksAfterArr.length > picksBeforeLen
+                && lastPick?.name === basename(elfPath)
+                && lastPick?.size === elfBytes.length,
+            detail: `change 留痕：${picksBeforeLen} 条 ⇒ ${picksAfterArr.length} 条`
+                + `；最后一条 ${JSON.stringify(lastPick)}`,
+        });
+
+        // -- B-1h · 重选之后点「加载固件」⇒ ⇒ **真的**重装了 ------------------
+        //
+        // ⚠️ **这一条钉的是「用户的固件回得来」**：B-1g 只证明 `change` 又触发
+        // 了（文件回来了）⇒ ⇒ 但**装不装得回去**是另一件事 ⇒ ⇒ 「点一下
+        // 「加载固件」⇒ ⇒ 状态仍是 ok **且** PC 回到夹具入口」才叫**回得来**。
+        await runEffect(cdp,
+            'document.querySelector(\'[data-action="load-image"][data-image-load-from="topbar"]\').click();');
+        let pcAfterReload = "";
+        const reloadDeadline = Date.now() + opts.timeoutMs;
+        while (Date.now() < reloadDeadline) {
+            const p = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+            pcAfterReload = String(p?.pcText ?? "").trim();
+            if (pcAfterReload === UI_IMAGE_ENTRY_TEXT) break;
+            await sleep(200);
+        }
+        const briefAfterReload = await awaitEval(cdp, UI_IMAGE_TOPBAR_PROBE);
+        checks.push({
+            name: "B-1h · 重选之后点「加载固件」⇒ ⇒ **真的重装了**（PC 又回到 ${UI_IMAGE_ENTRY_TEXT}"
+                + " ⇒ ⇒ 用户的固件**回得来**）",
+            ok: pcAfterReload === UI_IMAGE_ENTRY_TEXT && briefAfterReload?.briefStatus === "ok",
+            detail: `重装后 PC=${JSON.stringify(pcAfterReload)}`
+                + ` 页头状态=${JSON.stringify(briefAfterReload?.briefStatus ?? null)}`,
+        });
+
         // -- B-3 · 终端面板必须**先挂上**，console 字节才进得了 DOM ---------
         // ⚠️ console 字节是**流**：内核推 → 前端 `onDelta` 写进 store **并**
         // 直接写 `[data-terminal-out]` ⇒ ⇒ 面板**没挂上**时那一步会跳过
@@ -4187,18 +4491,17 @@ async function runBreakpointUiSection(cdp, opts) {
     const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
     const target = BV_BREAKPOINT_TARGET_HEX;
 
-    // -- 复位 ⇒ demo 固件重新装上、PC 回到 0 -----------------------------
-    // ⚠️ **必须复位**：固件是「跑过」的（前面的段已经步进过）⇒ ⇒ PC 早就越
-    // 过靶点 ⇒ ⇒ 断点就永远命中不了 ⇒ ⇒ 复位把 PC 拉回 0 ⇒ ⇒ 靶点重新
-    // 在「前方」。
+    // -- **显式装 demo 固件** ⇒ PC 回到 0 ------------------------------
+    // ⚠️ **必须回到 demo 固件的起点**：固件是「跑过」的（前面的段已经步进过）⇒ ⇒
+    // PC 早就越过靶点 ⇒ ⇒ 断点就永远命中不了 ⇒ ⇒ 装回 demo ⇒ ⇒ PC 拉回 0 ⇒ ⇒
+    // 靶点重新在「前方」。
+    //
+    // ⚠️ **v0.59 批**：这里**不再**用「复位」⇒ ⇒ 「复位」的语义是「**重新装载
+    // 当前工程**」（用户指南 §3.8）⇒ ⇒ 此刻「当前工程」是上一段装的那个镜像 ⇒ ⇒
+    // 复位**不会**把 demo 装回来 ⇒ ⇒ 必须**显式**装它（走**真的**界面路径）。
     await runEffect(cdp, 'location.hash = "#/debug";');
     await sleep(700);
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-view-body="debug"] [data-action="reset"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
+    const demoLoaded = await resetAndLoadDemoFirmware(cdp, opts);
     let pcText = "";
     const pcDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < pcDeadline) {
@@ -4208,9 +4511,9 @@ async function runBreakpointUiSection(cdp, opts) {
         await sleep(200);
     }
     add(
-        "复位后 demo 固件重新装上（PC 回到 0x00000000 ⇒ ⇒ 断点靶点 0x20 在前方）",
-        pcText === "0x00000000",
-        `pc=${JSON.stringify(pcText)}`,
+        "demo 固件重新装上（PC 回到 0x00000000 ⇒ ⇒ 断点靶点 0x20 在前方）",
+        demoLoaded && pcText === "0x00000000",
+        `装上了=${demoLoaded} pc=${JSON.stringify(pcText)}`,
     );
 
     // -- 反汇编 ⇒ 找到靶点那一行 ---------------------------------------
@@ -4465,17 +4768,20 @@ async function runRunLoopSection(cdp, opts) {
     /** 点顶栏运行条上的某个按钮。 */
     const clickTopbar = async (action) => await clickTopbarAction(cdp, action);
 
-    // -- 前置：**复位** ⇒ ⇒ 把状态清干净 -------------------------------
-    // ⚠️ **为什么用「复位」而不是「暂停」做前置清理**（本批实测踩到）：
+    // -- 前置：**显式装 demo 固件** ⇒ ⇒ 把状态清干净 ----------------------
+    // ⚠️ **为什么不用「暂停」做前置清理**（本批实测踩到）：
     //   若前置清理依赖**被测的那个按钮**（顶栏「暂停」）⇒ ⇒ 一旦那条按钮
     //   坏了（变异 T9）⇒ ⇒ 连续运行**停不下来**⇒ ⇒ demo 自环把主线程**灌满**
     //   ⇒ ⇒ 后面每个 CDP 调用都被拖到几秒 ⇒ ⇒ 整趟门禁**跑不完**（实测
     //   900 s 被看门狗砍掉）⇒ ⇒ **卡死**而不是**变红** ⇒ ⇒ 零判别力。
-    // ⇒ ⇒ **清理必须走一条独立的路** ⇒ ⇒ 「复位」独立于「暂停」（裁决 H：
-    //   复位 ⇒ 退出连续模式）⇒ ⇒ 清理**永远**能停。
+    // ⇒ ⇒ **清理必须走一条独立的路** ⇒ ⇒ 「装 demo 固件」独立于「暂停」⇒ ⇒
+    //   清理**永远**能停（⇒ ⇒ 而且它**顺带**把 PC 拉回 0 ⇒ ⇒ 断点靶点又在
+    //   前方（下面 B-40 要用））。
     //
-    // ⚠️ **复位顺带**把 PC 拉回 0 ⇒ ⇒ 断点靶点又在前方（下面 B-40 要用）。
-    await clickTopbar("reset");
+    // ⚠️ **v0.59 批**：这里**不再**用「复位」⇒ ⇒ 「复位」的语义是「**重新装载
+    // 当前工程**」（用户指南 §3.8）⇒ ⇒ 此刻「当前工程」不是 demo ⇒ ⇒ 复位
+    // **不会**把 demo 装回来 ⇒ ⇒ 必须**显式**装它（走**真的**界面路径）。
+    await resetAndLoadDemoFirmware(cdp, opts);
     let pcText = "";
     const pcDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < pcDeadline) {
@@ -4485,7 +4791,7 @@ async function runRunLoopSection(cdp, opts) {
         await sleep(200);
     }
     add(
-        "复位后 PC 回到 0x00000000（⇒ ⇒ 连续模式被清掉 ⇒ ⇒ 断点靶点又在前方）",
+        "装 demo 固件后 PC 回到 0x00000000（⇒ ⇒ 连续模式被清掉 ⇒ ⇒ 断点靶点又在前方）",
         pcText === "0x00000000",
         `pc=${JSON.stringify(pcText)}`,
     );
@@ -4600,13 +4906,16 @@ async function runRunLoopSection(cdp, opts) {
         + `（一个窗口 = ${WINDOW_PS} ps）`,
     );
 
-    // -- 复位 + 下断点 ⇒ ⇒ B-40 / B-41 ----------------------------------
-    // ⚠️ **必须复位**：B-39 那一趟把 PC 推过了断点靶点 ⇒ ⇒ 不复位就永远
-    // 命不中 ⇒ ⇒ 复位把 PC 拉回 0。
+    // -- **显式装 demo 固件** + 下断点 ⇒ ⇒ B-40 / B-41 -------------------
+    // ⚠️ **必须回到 demo 固件的起点**：B-39 那一趟把 PC 推过了断点靶点 ⇒ ⇒
+    // 不回到起点就永远命不中 ⇒ ⇒ 装回 demo ⇒ ⇒ PC 拉回 0。
     //
-    // ⚠️ **这一次的「复位」是清理的关键**（见上面那条）⇒ ⇒ 它独立于
-    // 「暂停」⇒ ⇒ 「暂停坏了」时门禁**变红**而不是**卡死**。
-    await clickTopbar("reset");
+    // ⚠️ **这一次的清理是清理的关键**（见上面那条）⇒ ⇒ 它独立于「暂停」⇒ ⇒
+    // 「暂停坏了」时门禁**变红**而不是**卡死**。
+    //
+    // ⚠️ **v0.59 批**：这里**不再**用「复位」⇒ ⇒ 「复位」= 重新装载**当前工程**
+    // ⇒ ⇒ 装 demo 必须**显式**做（走**真的**界面路径）。
+    await resetAndLoadDemoFirmware(cdp, opts);
     let pcText2 = "";
     const pcDeadline2 = Date.now() + opts.timeoutMs;
     while (Date.now() < pcDeadline2) {
@@ -4616,7 +4925,7 @@ async function runRunLoopSection(cdp, opts) {
         await sleep(200);
     }
     add(
-        "复位后 PC 回到 0x00000000（⇒ ⇒ 断点靶点又在前方 ⇒ ⇒ 命得中）",
+        "装 demo 固件后 PC 回到 0x00000000（⇒ ⇒ 断点靶点又在前方 ⇒ ⇒ 命得中）",
         pcText2 === "0x00000000",
         `pc=${JSON.stringify(pcText2)}`,
     );
@@ -4750,12 +5059,17 @@ async function runLiveReadoutSection(cdp, opts) {
 
     const readProbe = async () => await awaitEval(cdp, BV_LIVE_READOUT_PROBE);
 
-    // -- 前置：**复位** ⇒ ⇒ 把状态清干净 -------------------------------
-    // ⚠️ **为什么用「复位」而不是「暂停」做前置清理**（同 `runLoop` 段）：
+    // -- 前置：**显式装 demo 固件** ⇒ ⇒ 把状态清干净 ----------------------
+    // ⚠️ **为什么不用「暂停」做前置清理**（同 `runLoop` 段）：
     //   若前置清理依赖**被测的那个按钮** ⇒ ⇒ 一旦那条按钮坏了（变异）
     //   ⇒ ⇒ 连续运行**停不下来**⇒ ⇒ demo 自环把主线程**灌满**
     //   ⇒ ⇒ 整趟门禁**跑不完**⇒ ⇒ **卡死**而不是**变红**⇒ ⇒ 零判别力。
-    await clickTopbarAction(cdp, "reset");
+    // ⇒ ⇒ 清理走一条**独立**的路 ⇒ ⇒ 「装 demo 固件」独立于「暂停」⇒ ⇒ 清理
+    // **永远**能停。
+    //
+    // ⚠️ **v0.59 批**：这里**不再**用「复位」⇒ ⇒ 「复位」= 重新装载**当前工程**
+    // ⇒ ⇒ 此刻「当前工程」不是 demo ⇒ ⇒ 必须**显式**装它。
+    await resetAndLoadDemoFirmware(cdp, opts);
     await sleep(800);
 
     // -- 记录**内存表在本段之前**的样子 --------------------------------
@@ -5053,10 +5367,13 @@ async function runAddrInputSection(cdp, opts) {
     const probe = async () => await awaitEval(cdp, BV_ADDR_INPUT_PROBE);
     const topbar = async () => await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
 
-    // -- 前置：**复位** ⇒ ⇒ demo 固件重新装上、PC 回到 0 ------------------
-    // ⚠️ **用「复位」做前置清理**（与 `runLoop` 段同一条理由）：清理**不许**
+    // -- 前置：**显式装 demo 固件** ⇒ ⇒ PC 回到 0 ------------------------
+    // ⚠️ **清理不许依赖被测的那个按钮**（与 `runLoop` 段同一条理由）：清理**不许**
     //   依赖**被测的那个按钮** ⇒ ⇒ 被测物坏了时门禁**卡死**而不是**变红**。
-    await clickTopbarAction(cdp, "reset");
+    //
+    // ⚠️ **v0.59 批**：这里**不再**用「复位」⇒ ⇒ 「复位」= 重新装载**当前工程**
+    // ⇒ ⇒ 此刻「当前工程」不是 demo ⇒ ⇒ 必须**显式**装它。
+    await resetAndLoadDemoFirmware(cdp, opts);
     await sleep(900);
     await runEffect(cdp, 'location.hash = "#/debug";');
     await sleep(700);
@@ -5259,8 +5576,8 @@ async function runAddrInputSection(cdp, opts) {
         + ` 之前=${JSON.stringify(rowsBefore)} 之后=${JSON.stringify(rowsAfter)}`,
     );
 
-    // -- 收尾：**复位** ⇒ ⇒ 把状态清干净 ----------------------------------
-    await clickTopbarAction(cdp, "reset");
+    // -- 收尾：**显式装 demo 固件** ⇒ ⇒ 把状态清干净 ----------------------
+    await resetAndLoadDemoFirmware(cdp, opts);
     await sleep(900);
     await runEffect(cdp, 'location.hash = "#/debug";');
     await sleep(500);
@@ -5364,8 +5681,10 @@ async function runSymbolUiSection(cdp, opts) {
     const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
     const probe = async () => await awaitEval(cdp, BV_DEBUGGER_PROBE);
 
-    // -- 前置：**复位** ⇒ ⇒ demo 固件重新装上（它**没有**符号表）----------
-    await clickTopbarAction(cdp, "reset");
+    // -- 前置：**显式装 demo 固件**（它**没有**符号表）--------------------
+    // ⚠️ **v0.59 批**：这里**不再**用「复位」⇒ ⇒ 「复位」= 重新装载**当前工程**
+    // ⇒ ⇒ 此刻「当前工程」不是 demo ⇒ ⇒ 必须**显式**装它。
+    await resetAndLoadDemoFirmware(cdp, opts);
     await sleep(900);
     await runEffect(cdp, 'location.hash = "#/debug";');
     await sleep(700);
@@ -5433,8 +5752,8 @@ async function runSymbolUiSection(cdp, opts) {
         + ` 面板=${JSON.stringify(p?.debugErrorText ?? "")}`,
     );
 
-    // -- 收尾：**复位** ⇒ ⇒ 把状态清干净 ----------------------------------
-    await clickTopbarAction(cdp, "reset");
+    // -- 收尾：**显式装 demo 固件** ⇒ ⇒ 把状态清干净 ----------------------
+    await resetAndLoadDemoFirmware(cdp, opts);
     await sleep(900);
 
     return { checks };
