@@ -63,11 +63,8 @@ import {
     setDeviceKind,
 } from "./components/memory-map.js";
 import {
-    loadImageFileIntoPending,
-    pendingImage,
     publishProductState,
-    renderImageLoader,
-    setImageLoadState,
+    renderImageLoadStatus,
 } from "./components/image-loader.js";
 
 // ---------------------------------------------------------------------------
@@ -193,7 +190,7 @@ const productTreeView = register({
                     </div>
                 </section>
             </div>
-            ${renderImageLoader(state?.imageLoad)}
+            ${renderImageLoadStatus(state?.imageLoad)}
             <p class="muted">
                 内存映射表显示的是内核 <code>memory.map</code> 事件里的
                 <strong>当前生效</strong>的板级内存图；没有数据时如实显示空态，不显示假数据。
@@ -231,34 +228,9 @@ const productTreeView = register({
             publishProductState();
             return "cmd-toggle-tree";
         }
-        // 「加载」⇒ **读用户选的文件** ⇒ ⇒ 发一条 `load-image` 信号。
-        //
-        // ⚠️ **视图层不碰服务层**（本模块的既有规矩）⇒ ⇒ 这里只发信号，
-        // 真正发命令的是 app 层（它持有服务接线）。
-        //
-        // ⚠️ **字节在信号里**：文件选择器的 `files` 拿不到（点击时它是
-        // 空的——浏览器只把文件交给 `change` 事件）⇒ ⇒ 必须在 `change`
-        // 里**先把字节读出来**再存下来（见 `mountFor`）⇒ ⇒ 这里读的是
-        // 那份**已读好的字节**。
-        if (el?.dataset?.action === "load-image") {
-            const pending = pendingImage();
-            if (!pending) {
-                setImageLoadState({
-                    status: "error",
-                    error: "没有待加载的文件 —— 请先用上面的选择器选一个固件镜像",
-                    pending: null,
-                });
-                publishProductState();
-                return "cmd-load-image-no-file";
-            }
-            setImageLoadState({ status: "loading", error: null });
-            publishProductState();
-            return emitCommand("load-image", "product", {
-                bytes: pending.bytes,
-                name: pending.name,
-                kind: pending.kind,
-            });
-        }
+        // ⚠️ **v0.58 批：这里**没有** `load-image` 分支了** ⇒ ⇒ 产品视图里
+        // **不再有**加载入口 ⇒ ⇒ 装载入口**只有页头那一处**（用户定案
+        // 「只应该有一个入口」）⇒ ⇒ 视图层**不再**发 `load-image` 信号。
         return undefined;
     },
     onDelta(_delta) {
@@ -266,20 +238,14 @@ const productTreeView = register({
     },
     mountFor(el) {
         el.addEventListener("click", (ev) => productTreeView.onCommand(ev));
-        // ⚠️ **文件选择器的 `change`**：浏览器把选中的文件**只**交给这个
-        // 事件（点击时 `input.files` 是空的）⇒ ⇒ 必须在这里读字节。
-        el.addEventListener("change", (ev) => {
-            const input = ev.target?.closest?.("[data-image-input]");
-            if (!input) return;
-            const file = input.files?.[0] ?? null;
-            if (!file) return;
-            void loadImageFileIntoPending(file);
-        });
+        // ⚠️ **v0.58 批：这里**不再**挂文件选择器的 `change`** ⇒ ⇒ 产品视图
+        // 里**没有** `<input type="file">` 了 ⇒ ⇒ 「读字节 + 存 pending」
+        // **只有页头那一个入口**会触发 ⇒ ⇒ **不写第二套**。
     },
 });
 
 // ---------------------------------------------------------------------------
-// 固件加载（STAGE-32 · v0.47 批）—— 视图层这一侧
+// 固件加载（STAGE-32 · v0.47 批 → **v0.58 批：入口收敛成一个**）—— 视图层这一侧
 // ---------------------------------------------------------------------------
 
 // ⚠️ **`pendingImage()` 与 `loadImageFileIntoPending()` 已经搬走**
@@ -288,9 +254,15 @@ const productTreeView = register({
 // **app 层** ⇒ ⇒ 视图层够不着 ⇒ ⇒ 要共用就只能**提到共享组件**）⇒ ⇒
 // **不写第二套**（规格 §3 裁决 D）。
 //
-// ⚠️ 视图层这边**只**剩「点按钮 ⇒ 发信号」那一步（`onCommand` 的
-// `load-image` 分支）⇒ ⇒ 载荷（字节 / 文件名 / 类型）从共享组件那份
-// pending 里取。
+// ⚠️ **v0.58 批**：视图层这边**连入口也没有了**⇒ ⇒ 产品视图里那块面板
+// 降级成**纯状态显示**（`renderImageLoadStatus`）⇒ ⇒ 装载入口**只有页头
+// 那一处**（用户定案「只应该有一个入口」）⇒ ⇒ 视图层**不再**发
+// `load-image` 信号 ⇒ ⇒ `onCommand` 里**没有**那个分支了。
+//
+// ⚠️ **为什么两个入口会咬人**（根因，值得记着）：两个入口共用**同一份**
+// `pending` ⇒ ⇒ 用户在**一处**装完（成功 ⇒ ⇒ `pending` 被清掉）⇒ ⇒ 到
+// **另一处**再点 ⇒ ⇒ 撞上「没有待加载的文件」⇒ ⇒ 而那次装载**其实成功
+// 了**⇒ ⇒ 界面在骗人。⇒ ⇒ 一个功能**只留一个入口**，状态就不会有两套。
 
 /**
  * 产品树节点的**稳定键**（折叠状态的元素）。

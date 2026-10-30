@@ -8,13 +8,21 @@
 // ⚠️ **本模块是纯逻辑**（`front/views/components/` 的一贯做法）：
 //   - `imageKindFor(name)` —— 扩展名 ⇒ 契约层的 `ImageKind`（两个变体）
 //   - `buildImageProjectFromBytes(bytes, name, options)` —— 造工程
-//   - `renderImageLoader(state)` —— 渲染加载器面板（产品视图用）
-//   - `renderImageLoaderControl(options)` —— 渲染**控件本体**（页头与产品
-//     视图**共用** ⇒ ⇒ `accept` 列表与按钮语义**只有一处**）
+//   - `renderImageLoadStatus(state)` —— 渲染**当前固件的状态块**（产品视图
+//     用；⛔ **不含入口** ⇒ ⇒ 入口只有页头那一处）
+//   - `renderImageLoaderControl(options)` —— 渲染**控件本体**（**唯一入口**
+//     在页头 ⇒ ⇒ `accept` 列表与按钮语义**只有一处**）
 //   - `readImageFile(file)` —— 读字节（浏览器原生 `File.arrayBuffer()`）
 //   - `pendingImage()` / `loadImageFileIntoPending(file)` —— 待加载镜像
-//     （**STAGE-33 从视图层搬到这里** ⇒ ⇒ 页头那个入口也共用这一段）
+//   - `imageLoadDecision(state)` —— **点「加载固件」时该怎么办**的纯判定
 //   - `describeImageLoadShort(state)` —— 短版状态说明（页头那条窄状态条）
+//
+// ⚠️ **v0.58 批：入口收敛成**一个**（用户定案「只应该有一个入口」）**
+// ⇒ ⇒ 原来有两个（页头「加载固件」+ 产品视图面板里的「加载」）⇒ ⇒ 两个入口
+// 共用**同一份** `pending` ⇒ ⇒ 用户在**一处**装完、到**另一处**再点 ⇒ ⇒
+// 「没有待加载的文件」⇒ ⇒ 而那次装载**其实成功了** ⇒ ⇒ 界面在骗人。
+// ⇒ ⇒ 现在：**产品视图那块面板降级成纯状态显示**（不再有入口）⇒ ⇒
+// **入口只有页头那一个**。
 //
 // ⚠️ **「装完就停」是用户的定案**（规格 §3 裁决 D）⇒ ⇒ 本模块**不**发任何
 // 「继续」命令⇒ ⇒ 跑不跑由用户自己点。
@@ -40,20 +48,20 @@ export const IMAGE_KINDS = Object.freeze({
 });
 
 /**
- * 加载入口的**位置**（STAGE-33 · v0.48 批）。
+ * 加载入口的**位置标记**（v0.58 批起**只有一个入口** ⇒ ⇒ 只剩页头这一处）。
  *
- * ⚠️ **为什么要有它**：页头（`topbar`）与产品视图（`product`）**各有一个**
- * 文件输入框 ⇒ ⇒ 真机门禁按 `document.querySelector("[data-image-input]")`
- * 取元素时，**页头在 DOM 里排在 `main` 之前** ⇒ ⇒ 那样取到的是**页头那个**
- * ⇒ ⇒ **判据的口径会悄悄变**（规格 §2 的 F7）⇒ ⇒ 所以每个入口都带一个
- * `data-image-load-from`，取值**定义在**这一处。
+ * ⚠️ **为什么还留着这个标记**：真机门禁按**位置**取元素 ⇒ ⇒ 标记是门禁
+ * 选择器的**锚点**⇒ ⇒ 它必须**只写在一处**⇒ ⇒ 这里就是那一处。
  *
- * @type {Readonly<{topbar: string, product: string}>}
+ * ⚠️ **v0.58 批之前**这里有**两个**取值（`topbar` / `product`）⇒ ⇒ 两个
+ * 入口**各有一个** `<input type="file">` ⇒ ⇒ 门禁用不带位置限定的选择器会
+ * **命中页头那个**⇒ ⇒ 断言还在跑、断的却不是它以为的那个东西 ⇒ ⇒ 现在
+ * **只有一个**入口 ⇒ ⇒ 「按位置取」这条规矩**仍然留着**（不是历史包袱：
+ * 它让门禁的选择器**无歧义**）。
+ *
+ * @type {string}
  */
-export const IMAGE_ENTRY_PLACEMENT = Object.freeze({
-    topbar: "topbar",
-    product: "product",
-});
+export const IMAGE_ENTRY_FROM = "topbar";
 
 /**
  * 文件扩展名 ⇒ 契约层的 `ImageKind`。
@@ -170,7 +178,7 @@ export function describeImageLoad(state) {
     if (state?.name) {
         const name = String(state.name);
         const bytes = Number(state.byteLength ?? 0);
-        return `已选择「${name}」（${bytes} 字节）—— 点「加载」装进内核。`;
+        return `已选择「${name}」（${bytes} 字节）—— 点「加载固件」装进内核。`;
     }
     return "尚未装载自己的固件——启动时装的是内建 demo 固件（40 字节）。";
 }
@@ -288,21 +296,54 @@ export function describeImageLoadShort(state) {
 }
 
 /**
+ * 点「加载固件」时**该怎么办**的**纯判定**（v0.58 批）。
+ *
+ * ⚠️ **为什么要有它**：这一段是**用户报的缺陷**的落点——装完一次之后再点
+ * 一次，界面报「装载失败：没有待加载的文件」⇒ ⇒ 而**上一次其实成功
+ * 了**⇒ ⇒ 界面在骗人 ⇒ ⇒ 根因是「装完就把 `pending` 清掉」+「按钮一直
+ * 可点」⇒ ⇒ 于是**第二次点击**落进了「没有文件」那一格。
+ *
+ * ⚠️ **四格必须分得开**（每格一个**不同的**后果）：
+ *   - `loading` —— **正在装** ⇒ ⇒ **忽略**这次点击（幂等 ⇒ ⇒ 连点两下
+ *     **不会**发两条 `LoadProject`）
+ *   - `load` —— 有待加载的文件 ⇒ ⇒ 装它
+ *   - `already-loaded` —— **上次装成功了** ⇒ ⇒ **不报失败**（如实说
+ *     「已装载，无需重复加载」）⇒ ⇒ ⛔ **不许**把它当成「没有文件」
+ *   - `no-file` —— **真的**没选过文件 ⇒ ⇒ 报错（⛔ 不静默）
+ *
+ * ⚠️ **判定顺序是硬约束**：`loading` **先**判 ⇒ ⇒ 否则连点两下时第二下会
+ * 看到「还有 `pending`」（成功前它一直在）⇒ ⇒ 于是**发第二条**
+ * `LoadProject` ⇒ ⇒ 内核被连着换两次工程。
+ *
+ * @param {{status?: string, name?: string|null, pending?: object|null}} [state]
+ * @returns {{kind: "loading"|"load"|"already-loaded"|"no-file", pending?: object, name?: string}}
+ */
+export function imageLoadDecision(state) {
+    const status = String(state?.status ?? "idle");
+    if (status === "loading") return { kind: "loading" };
+    const pending = state?.pending ?? null;
+    if (pending) return { kind: "load", pending };
+    if (status === "ok") {
+        return { kind: "already-loaded", name: String(state?.name ?? "固件") };
+    }
+    return { kind: "no-file" };
+}
+
+/**
  * 渲染加载入口的**控件本体**（文件选择器 + 按钮 [+ 一条短状态]）。
  *
- * ⚠️ **页头与产品视图共用这一段**（STAGE-33）⇒ ⇒ `accept` 列表、按钮
+ * ⚠️ **v0.58 批：这是**唯一**那个入口**（页头）⇒ ⇒ `accept` 列表、按钮
  * 语义、`data-image-load-from` 的取值**都只有一处**⇒ ⇒ **不写第二套**。
  *
- * ⚠️ **按钮文案**：页头那个是 **「加载固件」**（与用户要找的字逐字一致），
- * 产品视图那个保持 **「加载」**（v0.47 的真机判据一个字不动）。
+ * ⚠️ **按钮文案**：**「加载固件」**（与用户要找的字逐字一致）⇒ ⇒ 页头那条
+ * 状态条紧挨着它 ⇒ ⇒ 装载结果**就在按钮旁边**看得见。
  *
- * @param {{placement?: string, label?: string, buttonText?: string, withBrief?: boolean}} [options]
+ * @param {{label?: string, buttonText?: string, withBrief?: boolean}} [options]
  * @returns {string}
  */
 export function renderImageLoaderControl(options = {}) {
-    const placement = options.placement ?? IMAGE_ENTRY_PLACEMENT.product;
     const label = options.label ?? "选择固件镜像";
-    const buttonText = options.buttonText ?? "加载";
+    const buttonText = options.buttonText ?? "加载固件";
     const brief = options.withBrief
         ? `<span class="muted image-loader-brief" data-image-brief data-image-brief-status="idle">未选固件</span>`
         : "";
@@ -311,17 +352,21 @@ export function renderImageLoaderControl(options = {}) {
             <label class="source-input">
                 ${escapeHtml(label)}
                 <input type="file" accept=".elf,.out,.hex,.ihex,.bin,.raw"
-                       data-image-input data-image-load-from="${escapeHtml(placement)}">
+                       data-image-input data-image-load-from="${escapeHtml(IMAGE_ENTRY_FROM)}">
             </label>
             <button type="button" data-action="load-image"
-                    data-image-load-from="${escapeHtml(placement)}">${escapeHtml(buttonText)}</button>
+                    data-image-load-from="${escapeHtml(IMAGE_ENTRY_FROM)}">${escapeHtml(buttonText)}</button>
             ${brief}
         </span>
     `;
 }
 
 /**
- * 渲染加载器面板。
+ * 渲染**当前固件的状态块**（产品视图用）。
+ *
+ * ⚠️ **v0.58 批：这里**不再有入口**⇒ ⇒ 只剩「现在装的是哪个固件」这个
+ * **状态**⇒ ⇒ 入口**只有页头那一个**⇒ ⇒ 用户在产品视图里看到的是
+ * 「当前固件是什么 / 上次装载成没成」，**不是**第二个加载按钮。
  *
  * ⚠️ **状态写在面板上**（不只在页脚）——规格 §8 订正 3：失败必须**在界面
  * 上看得见**⇒ ⇒ 这里有一块带 `data-image-load-status` 的区域。
@@ -331,7 +376,7 @@ export function renderImageLoaderControl(options = {}) {
  * @param {{status?: string, name?: string|null, byteLength?: number|null, error?: string|null}} [state]
  * @returns {string}
  */
-export function renderImageLoader(state) {
+export function renderImageLoadStatus(state) {
     const status = String(state?.status ?? "idle");
     const text = describeImageLoad(state);
     const errorBlock = status === "error"
@@ -339,15 +384,16 @@ export function renderImageLoader(state) {
         : "";
     return `
         <section class="image-loader">
-            <h3>加载固件</h3>
-            ${renderImageLoaderControl({ placement: IMAGE_ENTRY_PLACEMENT.product })}
+            <h3>当前固件</h3>
             <p class="muted" data-image-load-status="${escapeHtml(status)}">${escapeHtml(text)}</p>
             ${errorBlock}
             <p class="muted">
-                支持 <code>.elf</code> / <code>.out</code>（按 ELF 解析）与
-                <code>.hex</code> / <code>.bin</code> / <code>.raw</code>（按原始字节解析）。
-                ⚠️ 文件在**浏览器里**读成字节后交给内核⇒ ⇒ **不需要**任何
-                HTTP 服务；⚠️ 装完**不自动跑**⇒ ⇒ 请自己点「继续」。
+                ⚠️ **加载入口只有页头那一个**（「加载固件」）⇒ ⇒ 在**任何视图**
+                都能装载；支持 <code>.elf</code> / <code>.out</code>（按 ELF 解析）
+                与 <code>.hex</code> / <code>.bin</code> / <code>.raw</code>
+                （按原始字节解析）⇒ ⇒ 文件在**浏览器里**读成字节后交给内核
+                ⇒ ⇒ **不需要**任何 HTTP 服务；⚠️ 装完**不自动跑**⇒ ⇒ 请自己
+                点「继续」。
             </p>
         </section>
     `;

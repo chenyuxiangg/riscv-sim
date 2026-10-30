@@ -40,11 +40,15 @@ import {
 // ⇒ ⇒ 于是「读字节 + 存 pending」那段**从视图层搬到了共享组件**
 // ⇒ ⇒ 这里 import 的东西变多了 ⇒ ⇒ 但**状态仍然只有一份**
 // （`product.imageLoad`）。
+//
+// ⚠️ **v0.58 批**：入口**收敛成一个**（页头那个）⇒ ⇒ 产品视图里那块重复的
+// 面板降级成**纯状态显示**⇒ ⇒ `imageLoadDecision` 是「点一下该怎么办」的
+// **唯一**判定 ⇒ ⇒ 「连点两次」的第二下**不再报假失败**。
 import {
     describeImageLoadShort,
-    IMAGE_ENTRY_PLACEMENT,
+    IMAGE_ENTRY_FROM,
+    imageLoadDecision,
     loadImageFileIntoPending,
-    pendingImage,
     publishProductState,
     renderImageLoaderControl,
     setImageLoadState,
@@ -153,6 +157,11 @@ let topbarBriefWired = false;
  * 文件** ⇒ ⇒ 真机门禁因此能拿到一条**正向**判据（「输入框里真的有那个
  * 文件」）⇒ ⇒ 而产品视图那个输入框**做不到**（重渲染就被换掉了）。
  *
+ * ⚠️ **v0.58 批：这是**唯一**那个加载入口**（产品视图里那个重复的入口
+ * 撤掉了）⇒ ⇒ 「点一下该怎么办」由 `imageLoadDecision` **一处**判定 ⇒ ⇒
+ * 四格：`loading`（幂等忽略）/ `load`（装）/ `already-loaded`（**不报失败**）
+ * / `no-file`（**真的**没选过文件才报错）。
+ *
  * ⚠️ **导出是为了让它可测**（同 `handleCommand` 的理由）：真机门禁要断言
  * 「默认落地页上就有这个入口」⇒ ⇒ 那条断言必须能在**不启动整个 app** 的
  * 情况下把控件挂上去。
@@ -163,35 +172,48 @@ export function wireTopbarImageLoader(services) {
     const slot = document.querySelector("[data-image-load-slot]");
     if (!slot) return;
     slot.innerHTML = renderImageLoaderControl({
-        placement: IMAGE_ENTRY_PLACEMENT.topbar,
         label: "固件镜像",
         buttonText: "加载固件",
         withBrief: true,
     });
     // ⚠️ **读字节必须在 `change` 里**（浏览器把文件**只**交给这个事件；
-    // 点击时 `input.files` 已经是空的了）⇒ ⇒ 与产品视图那条**同一段**
-    // 实现（`loadImageFileIntoPending` 住在共享组件里）。
-    slot.querySelector('[data-image-input][data-image-load-from="topbar"]')
+    // 点击时 `input.files` 已经是空的了）⇒ ⇒ 「读字节 + 存 pending」那段
+    // **住在共享组件里**（`loadImageFileIntoPending`）⇒ ⇒ **不写第二套**。
+    slot.querySelector(`[data-image-input][data-image-load-from="${IMAGE_ENTRY_FROM}"]`)
         ?.addEventListener("change", (ev) => {
             const file = ev.target?.files?.[0] ?? null;
             if (!file) return;
             void loadImageFileIntoPending(file);
         });
-    // ⚠️ **「装载」⇒ 走同一条命令处理路径**（产品视图那个入口也是它）⇒ ⇒
-    // 一条装载路径（规格 §3 裁决 G）。
-    slot.querySelector('[data-action="load-image"][data-image-load-from="topbar"]')
+    // ⚠️ **「装载」⇒ 走那**一条**装载路径**（`handleLoadImageCommand`）
+    // ⇒ ⇒ 「重订流 / 清残留」只有一处。
+    slot.querySelector(`[data-action="load-image"][data-image-load-from="${IMAGE_ENTRY_FROM}"]`)
         ?.addEventListener("click", () => {
-            const pending = pendingImage();
-            if (!pending) {
+            // ⚠️ **判定只有一处**（`imageLoadDecision`）⇒ ⇒ 四格的后果
+            // 各不相同 ⇒ ⇒ 尤其「上次装成功了」那一格 **⛔ 不报失败**。
+            const decision = imageLoadDecision(viewStore.getState("product")?.imageLoad);
+            if (decision.kind === "loading") {
+                // ⚠️ **幂等**：正在装 ⇒ ⇒ 这一下**忽略** ⇒ ⇒ 连点两下
+                // **不会**发第二条 `LoadProject`（内核被连着换两次工程）。
+                return;
+            }
+            if (decision.kind === "already-loaded") {
+                // ⚠️ **用户报的缺陷**：装完再点一下 ⇒ ⇒ 上次**成功**了 ⇒ ⇒
+                // ⛔ **不许**报「装载失败」⇒ ⇒ 如实说「已装载，无需重复加载」。
+                setNote(`固件「${decision.name}」已装载 —— 无需重复加载（要换固件请重新选文件）`);
+                return;
+            }
+            if (decision.kind === "no-file") {
                 setImageLoadState({
                     status: "error",
                     error: "没有待加载的文件 —— 请先用文件选择器选一个固件镜像",
                     pending: null,
                 });
                 publishProductState();
+                setNote("加载固件失败：没有待加载的文件 —— 请先用文件选择器选一个固件镜像");
                 return;
             }
-            void handleLoadImageCommand({ params: pending }, services);
+            void handleLoadImageCommand({ params: decision.pending }, services);
         });
     if (!topbarBriefWired) {
         topbarBriefWired = true;
@@ -1052,10 +1074,14 @@ export function toByteArray(raw) {
 /**
  * 「加载固件」这条命令的**唯一**处理函数（STAGE-33 · v0.48 批）。
  *
- * ⚠️ **为什么抽出来**：现在有**两个**入口——产品视图里那块面板（视图层，
+ * ⚠️ **为什么抽出来**：曾经有**两个**入口——产品视图里那块面板（视图层，
  * 走 `riscv:command` 信号）与**页头**那个入口（app 层）⇒ ⇒ 两者必须
  * **共用这一个函数**⇒ ⇒ **一条装载路径**（`loadProjectIntoKernel`）⇒ ⇒
  * 重订流与清残留**只有一处**（规格 §3 裁决 G）。
+ *
+ * ⚠️ **v0.58 批**：入口**收敛成一个**（页头那个）⇒ ⇒ 这个函数是**唯一**
+ * 的装载实现（脚本口 `loadFromUrl` 也走它）⇒ ⇒ **一条装载路径**这条规矩
+ * **更严**了（不是两条入口凑成一条，而是**只剩一条**）。
  *
  * ⚠️ **与脚本口也共用**：`window.riscv_image.loadFromUrl` 最终走的也是
  * `loadImageFromBytes` ⇒ ⇒ **不写第二套**。
@@ -1079,6 +1105,12 @@ export async function handleLoadImageCommand(detail, services) {
         setNote("加载固件失败：没有镜像字节");
         return;
     }
+    // ⚠️ **先写「装载中」再发命令**（v0.58 批 · 幂等的关键）：
+    // 这一段是**同步**的（async 函数体在第一个 `await` 之前同步执行）⇒ ⇒
+    // 连点两下时，第二下看到的 `status` 已经是 `loading` ⇒ ⇒ `imageLoadDecision`
+    // 判成「忽略」⇒ ⇒ **不会**发第二条 `LoadProject`（内核被连着换两次工程）。
+    setImageLoadState({ status: "loading", error: null });
+    publishProductState();
     try {
         const result = await loadImageFromBytes(services, bytes, {
             name: detail?.params?.name,
@@ -1094,9 +1126,10 @@ export async function handleLoadImageCommand(detail, services) {
             name: detail?.params?.name ?? "image.bin",
             byteLength: result.byteLength,
             error: null,
-            // ⚠️ **装完就把 pending 清掉** ⇒ ⇒ 再点一次「加载」
-            // 会报「没有待加载的文件」⇒ ⇒ **不会**把上一份
-            // 字节又发一遍。
+            // ⚠️ **装完就把 pending 清掉** ⇒ ⇒ 那份字节**不会**被又发一遍。
+            // ⚠️ **但「再点一次」不再报失败**（v0.58 批）：`pending` 没有了
+            // ⇒ ⇒ 判定落到「已装载」那一格 ⇒ ⇒ 如实说「已装载，无需重复
+            // 加载」⇒ ⇒ ⛔ **不再**报「装载失败：没有待加载的文件」。
             pending: null,
         });
         publishProductState();
@@ -1110,10 +1143,15 @@ export async function handleLoadImageCommand(detail, services) {
             : `已加载固件「${detail?.params?.name ?? "image.bin"}」（${result.byteLength} 字节）—— 点「继续」开始运行`);
     } catch (err) {
         // ⚠️ **失败显示内核原文**（STAGE-32 裁决 J）⇒ ⇒ 不吞。
+        //
+        // ⚠️ **失败时 pending 保留**（v0.58 批）⇒ ⇒ 用户点一下就能**重试**
+        // 同一份文件 ⇒ ⇒ 而不是「再点一次 ⇒ 没有待加载的文件」。
+        //
+        // ⚠️ **⛔ 这里刻意**不写** `pending: null`：`setImageLoadState` 是
+        // **合并**语义 ⇒ ⇒ 不写 ⇒ ⇒ 那份 `pending` **原样留着**。
         setImageLoadState({
             status: "error",
             error: err?.message ?? String(err),
-            pending: null,
         });
         publishProductState();
         setNote(`加载固件失败：${err?.message ?? err}`);
@@ -1552,15 +1590,9 @@ export async function handleCommand(detail, services) {
                 // 「删除」⇒ 从档案里删一块（**不改内核状态**）。
                 await deleteBoard(services, detail?.params?.id);
                 return;
-            case "load-image":
-                // 「加载固件」⇒ 用户在**文件选择器**里选了镜像 ⇒ ⇒ 视图层
-                // 把**字节**放进信号 ⇒ ⇒ 这里把字节变成工程并装载。
-                //
-                // ⚠️ **STAGE-33**：这一段**抽成了 `handleLoadImageCommand`**
-                // ⇒ ⇒ 页头那个入口**直接调同一个函数**⇒ ⇒ **一条装载路径**
-                // （规格 §3 裁决 G）⇒ ⇒ 不写第二套。
-                await handleLoadImageCommand(detail, services);
-                return;
+            // ⚠️ **v0.58 批：这里**没有** `load-image` 分支了** ⇒ ⇒ 装载入口
+            // **只有页头那一个** ⇒ ⇒ 视图层**不再**发这条信号 ⇒ ⇒ 这个分支
+            // 已是**死代码**⇒ ⇒ 删掉（⛔ 不留不再被用的分支）。
             default:
                 return;
         }

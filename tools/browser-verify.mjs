@@ -2928,51 +2928,41 @@ async function selectFileForInput(cdp, selector, filePath) {
 }
 
 /**
- * 加载器面板的探针（DOM 现状）。
+ * **当前固件状态块**的探针（产品视图里那块）。
  *
- * ⚠️ **必须按位置取值**（STAGE-33 · v0.48 批）：页头现在**也有**一个加载
- * 入口 ⇒ ⇒ 而**页头在 DOM 里排在视图面板之前** ⇒ ⇒ 用
- * `document.querySelector("[data-image-input]")` 会**命中页头那个** ⇒ ⇒
- * 断言还在跑、但断的**不是它以为的那个东西** ⇒ ⇒ ⇒ 所以这里一律**按
- * `data-image-load-from="product"` 限定**。
+ * ⚠️ **v0.58 批**：产品视图里那块面板**不再有入口**（入口**只有页头那一
+ * 个**）⇒ ⇒ 这里只读**状态**（`data-image-load-status` / `data-image-load-
+ * error`）⇒ ⇒ **入口**在页头 ⇒ ⇒ 入口相关的探针在 `UI_IMAGE_TOPBAR_PROBE`
+ * 里。
+ *
+ * ⚠️ **为什么还要按视图限定**：这块状态块**住在产品视图里**⇒ ⇒ 不在那个
+ * 视图时它**根本不在 DOM 里**⇒ ⇒ 探针读到 `null` ⇒ ⇒ 「状态是空的」与
+ * 「状态块没渲染」必须**分得开**。
  */
 const IMAGE_LOADER_PROBE = `(() => {
   const panel = document.querySelector('[data-view-body="product"]');
-  const root = panel ?? document;
-  const status = root.querySelector("[data-image-load-status]");
-  const err = root.querySelector("[data-image-load-error]");
-  const input = root.querySelector('input[data-image-load-from="product"]');
-  const btn = root.querySelector('[data-action="load-image"][data-image-load-from="product"]');
-  // ⚠️ **文件输入框里真的躺着那个文件吗** —— 这是 B-1 的**正向**判据：
-  // 只断言「CDP 调用没报错」是**弱**的 ⇒ ⇒ 换成「浏览器的文件输入框里
-  // **真的有**那个文件（名字 + 大小）」⇒ ⇒ 走脚本口代替界面路径时
-  // **这里必然是空** ⇒ ⇒ 那条判据才不是恒绿。
-  const files = input && input.files
-    ? Array.from(input.files).map((f) => ({
-        name: String(f.name ?? ""),
-        size: Number(f.size ?? 0),
-      }))
-    : [];
+  const status = panel ? panel.querySelector("[data-image-load-status]") : null;
+  const err = panel ? panel.querySelector("[data-image-load-error]") : null;
   return {
+    hasPanel: !!panel,
     status: status ? String(status.getAttribute("data-image-load-status") || "") : null,
     text: status ? String(status.textContent || "").trim() : "",
     error: err ? String(err.textContent || "").trim() : null,
-    hasInput: !!input,
-    inputType: input ? String(input.getAttribute("type") || "") : null,
-    accept: input ? String(input.getAttribute("accept") || "") : null,
-    hasButton: !!btn,
-    files,
   };
 })()`;
 
 /**
  * **页头**那个加载入口的探针（STAGE-33 · v0.48 批 · B-6 ~ B-11）。
  *
- * ⚠️ **只查页头**（`header.topbar` 内部）⇒ ⇒ 产品视图里那个入口**不算**
- * ⇒ ⇒ 「默认落地页上有没有入口」这条判据才不是恒绿。
+ * ⚠️ **只查页头**（`header.topbar` 内部）⇒ ⇒ 「默认落地页上有没有入口」这条
+ * 判据才不是恒绿。
  *
  * ⚠️ **要判「可见」**：在 DOM 里 ≠ 用户看得见 ⇒ ⇒ 用
  * `getBoundingClientRect()` 的宽高（> 0 ⇒ 真的占地方）。
+ *
+ * ⚠️ **v0.58 批新增 `entryCount` / `inputCount`**：全页面**有几个人工加载
+ * 入口** ⇒ ⇒ 用户定案「只应该有一个入口」⇒ ⇒ 这两个数必须是 **1** ⇒ ⇒
+ * 将来谁再加一个入口 ⇒ ⇒ 门禁**当场变红**。
  */
 const UI_IMAGE_TOPBAR_PROBE = `(() => {
   const topbar = document.querySelector("header.topbar");
@@ -2996,6 +2986,8 @@ const UI_IMAGE_TOPBAR_PROBE = `(() => {
     briefStatus: brief ? String(brief.getAttribute("data-image-brief-status") || "") : null,
     visible: !!(rect && rect.width > 0 && rect.height > 0),
     files,
+    entryCount: document.querySelectorAll('[data-action="load-image"]').length,
+    inputCount: document.querySelectorAll("[data-image-input]").length,
   };
 })()`;
 
@@ -3082,9 +3074,9 @@ const BV_IMAGE_PICK_PROBE = `(() => {
 /**
  * **按位置**留痕的 `change` 事件清单（STAGE-33 · v0.48 批 · B-11）。
  *
- * ⚠️ **为什么要按位置**：页头与产品视图**各有一个**输入框 ⇒ ⇒ 只记「有没
- * 有 `change`」分不清是**哪一个**入口 ⇒ ⇒ 记下 `data-image-load-from` ⇒ ⇒
- * 才能断言「**页头那条路**真的走的是界面路径」。
+ * ⚠️ **为什么要按位置**：记下 `data-image-load-from` ⇒ ⇒ 断言「**页头那条
+ * 路**真的走的是界面路径」⇒ ⇒ （v0.58 批起入口**只有一个**，但这个标记
+ * **留着** ⇒ ⇒ 它让门禁的选择器**无歧义**）。
  *
  * @returns {{from: string, name: string, size: number}[]}
  */
@@ -3553,6 +3545,26 @@ async function runLoadImageSection(cdp, opts) {
         const badPath = join(tmpDir, "broken.elf");
         writeFileSync(badPath, Buffer.from("this file is definitely not an ELF image\n"));
 
+        // -- B-0 · **全页面只有一个人工加载入口**（v0.58 批）---------------
+        // ⚠️ **用户定案「只应该有一个入口」** ⇒ ⇒ 曾经有**两个**（页头 +
+        // 产品视图那块面板）⇒ ⇒ 两个入口共用**同一份** `pending` ⇒ ⇒ 用户在
+        // **一处**装完、到**另一处**再点 ⇒ ⇒ 撞上「没有待加载的文件」⇒ ⇒
+        // 而那次装载**其实成功了**⇒ ⇒ 界面在骗人。
+        //
+        // ⚠️ **判据站在默认落地页上**（空 hash ⇒ ⇒ 路由回落到角色默认视图）
+        // ⇒ ⇒ 断言的是「**用户打开页面第一眼看到的东西**」⇒ ⇒ 而不是某个
+        // 视图里的控件数。
+        await runEffect(cdp, 'location.hash = "";');
+        await sleep(500);
+        const entryProbe = await awaitEval(cdp, UI_IMAGE_TOPBAR_PROBE);
+        checks.push({
+            name: "B-0 · **全页面只有一个人工加载入口**（⛔ 曾经有两个 ⇒ ⇒ 装完再点会报假失败）",
+            ok: entryProbe?.entryCount === 1 && entryProbe?.inputCount === 1,
+            detail: `加载按钮 ${JSON.stringify(entryProbe?.entryCount ?? null)} 个`
+                + ` · 文件选择器 ${JSON.stringify(entryProbe?.inputCount ?? null)} 个`
+                + ` · hash=${JSON.stringify(entryProbe?.hash ?? "")}`,
+        });
+
         // -- 「装载前」的波形基线（demo 固件的那条边沿还在）-----------------
         // ⚠️ **必须先取基线**：B-4 的判据是「**前后对照**」⇒ ⇒ 只看装载后
         // 的边沿数是 0 **不够**（万一它**一直是** 0 呢）⇒ ⇒ 必须同时证明
@@ -3563,6 +3575,8 @@ async function runLoadImageSection(cdp, opts) {
         const edgesBefore = gpioOutEdges(waveBefore?.channels);
 
         // -- 装载器在产品视图里 ⇒ 先切过去 ------------------------------
+        // ⚠️ **入口在页头**（任何视图都在）⇒ ⇒ 这一步是为了让**状态块**
+        // （`data-image-load-status`）**在 DOM 里**⇒ ⇒ 状态类判据才读得到。
         await runEffect(cdp, 'location.hash = "#/product";');
         await sleep(500);
 
@@ -3571,7 +3585,7 @@ async function runLoadImageSection(cdp, opts) {
         await installImagePickRecorder(cdp);
         let pickerError = null;
         try {
-            await selectFileForInput(cdp, 'input[data-image-load-from="product"]', elfPath);
+            await selectFileForInput(cdp, 'input[data-image-load-from="topbar"]', elfPath);
         } catch (err) {
             pickerError = String(err?.message ?? err).slice(0, 300);
         }
@@ -3613,9 +3627,9 @@ async function runLoadImageSection(cdp, opts) {
                 : `面板：${JSON.stringify(picked?.text ?? "")}（文件 ${elfBytes.length} 字节）`,
         });
 
-        // -- 点「加载」----------------------------------------------------
+        // -- 点「加载固件」（**页头那一个**入口）--------------------------
         await runEffect(cdp,
-            'document.querySelector(\'[data-action="load-image"][data-image-load-from="product"]\').click();');
+            'document.querySelector(\'[data-action="load-image"][data-image-load-from="topbar"]\').click();');
         const loaded = await waitForImageState(cdp, opts,
             (s) => s.status === "ok" || s.status === "error");
         checks.push({
@@ -3626,6 +3640,31 @@ async function runLoadImageSection(cdp, opts) {
             detail: `面板状态 ${JSON.stringify(loaded?.status ?? null)}：${JSON.stringify(loaded?.text ?? "")}`,
         });
         if (loaded?.status !== "ok") return { skipped: false, checks };
+
+        // -- B-1d · **再点一次** ⇒ ⇒ **不许**报「装载失败」------------------
+        // ⚠️ **这一条是用户直接报的缺陷**：装完再点一下 ⇒ ⇒ 曾经报「装载
+        // 失败：没有待加载的文件」⇒ ⇒ 而那次装载**其实成功了**⇒ ⇒ 界面在
+        // 骗人。
+        //
+        // ⚠️ **判据钉的是「状态**没变**」而不是「某句话出现了」**⇒ ⇒ 换一
+        // 种措辞不会让判据变红 ⇒ ⇒ 但「不许出现失败字样」那半句**也要**
+        // ⇒ ⇒ 两半合起来才既**不钉文案**又**钉住语义**。
+        await runEffect(cdp,
+            'document.querySelector(\'[data-action="load-image"][data-image-load-from="topbar"]\').click();');
+        await sleep(600);
+        const afterSecond = await awaitEval(cdp, IMAGE_LOADER_PROBE);
+        const briefAfterSecond = await awaitEval(cdp, UI_IMAGE_TOPBAR_PROBE);
+        checks.push({
+            name: "B-1d · **再点一次「加载固件」⇒ ⇒ 不报失败**（⛔ 状态仍是 ok ⇒ ⇒ 界面不骗人）",
+            ok: afterSecond?.status === "ok"
+                && briefAfterSecond?.briefStatus === "ok"
+                && !/装载失败|没有待加载的文件/.test(String(afterSecond?.text ?? ""))
+                && !/装载失败|没有待加载的文件/.test(String(briefAfterSecond?.briefText ?? "")),
+            detail: `面板状态 ${JSON.stringify(afterSecond?.status ?? null)}`
+                + ` 面板文案 ${JSON.stringify(afterSecond?.text ?? "")}`
+                + ` 页头状态 ${JSON.stringify(briefAfterSecond?.briefStatus ?? null)}`
+                + ` 页头文案 ${JSON.stringify(briefAfterSecond?.briefText ?? "")}`,
+        });
 
         // -- B-3 · 终端面板必须**先挂上**，console 字节才进得了 DOM ---------
         // ⚠️ console 字节是**流**：内核推 → 前端 `onDelta` 写进 store **并**
@@ -3694,7 +3733,7 @@ async function runLoadImageSection(cdp, opts) {
         await sleep(400);
         let badPickError = null;
         try {
-            await selectFileForInput(cdp, 'input[data-image-load-from="product"]', badPath);
+            await selectFileForInput(cdp, 'input[data-image-load-from="topbar"]', badPath);
         } catch (err) {
             badPickError = String(err?.message ?? err).slice(0, 300);
         }
@@ -3708,7 +3747,7 @@ async function runLoadImageSection(cdp, opts) {
         }
         await waitForImageState(cdp, opts, (s) => s.status === "error" || s.text.includes("broken.elf"));
         await runEffect(cdp,
-            'document.querySelector(\'[data-action="load-image"][data-image-load-from="product"]\').click();');
+            'document.querySelector(\'[data-action="load-image"][data-image-load-from="topbar"]\').click();');
         const failed = await waitForImageState(cdp, opts, (s) => s.status === "error");
         const failText = `${failed?.text ?? ""} ${failed?.error ?? ""}`;
         checks.push({
@@ -3721,10 +3760,14 @@ async function runLoadImageSection(cdp, opts) {
         // STAGE-33 · v0.48 批 —— **页头**那条装载路径（B-6 ~ B-11）
         // ==================================================================
         //
-        // ⚠️ **为什么另装一份固件**：产品视图那条路已经装过夹具 A 了 ⇒ ⇒
-        // 页头这条若也装 A ⇒ ⇒ 那是「装同一个东西」⇒ ⇒ **恒等变换**⇒ ⇒
-        // 判据**恒绿**⇒ ⇒ ⇒ 所以这里装**夹具 B**（标记 `UIB`、特征值
-        // `0x456`）⇒ ⇒ 「内核换镜像了」这件事**真的能被观测到**。
+        // ⚠️ **v0.58 批**：入口**只有一个**了 ⇒ ⇒ 这一段与上面那段走的是
+        // **同一个入口**（页头）⇒ ⇒ 但**判据一点没弱**：下面装的是**另一份**
+        // 固件（夹具 B）⇒ ⇒ 「内核换镜像了」这件事**真的能被观测到**。
+        //
+        // ⚠️ **为什么另装一份固件**：上面已经装过夹具 A 了 ⇒ ⇒ 这里若也装 A
+        // ⇒ ⇒ 那是「装同一个东西」⇒ ⇒ **恒等变换**⇒ ⇒ 判据**恒绿**⇒ ⇒ ⇒
+        // 所以这里装**夹具 B**（标记 `UIB`、特征值 `0x456`）⇒ ⇒ 「内核换
+        // 镜像了」这件事**真的能被观测到**。
         const elfBytesB = buildUiImageElf({ marker: UI_IMAGE_ELF_MARKER_B, x3Value: UI_IMAGE_ELF_X3_B });
         const elfPathB = join(tmpDir, "ui-image-b.elf");
         writeFileSync(elfPathB, elfBytesB);
