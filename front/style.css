@@ -478,6 +478,34 @@ a { color: inherit; text-decoration: none; }
     grid-template-columns: 1fr 1fr;
     gap: 16px;
 }
+
+/*
+ * 卡片里那一行按钮（v0.63 批 · 调试视图**去重**批）。
+ *
+ * ⚠️ **为什么有这一行**：调试视图那个**全局工具条**撤掉了 ⇒ ⇒ 每个动作回到
+ *   **自己的卡片**里 ⇒ ⇒ 那一行按钮住在卡片**内部** ⇒ ⇒ 需要一个**卡片内**
+ *   的排版类名（`.card-actions`）⇒ ⇒ 不复用旧工具条的 `.debug-toolbar`
+ *   （那个类名现在**只**表示「被撤掉的那一块」⇒ ⇒ 判据靠它）。
+ */
+.card-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 8px 0;
+}
+.card-actions .step-count {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--tx2);
+    white-space: nowrap;
+}
+.card-actions input[type="number"] {
+    width: 7em;
+    font-size: 12px;
+}
 .disasm, .regmem, .trace-export { background: var(--panel2); border-radius: 8px; padding: 12px; }
 .disasm-table, .reg-grid {
     width: 100%;
@@ -580,13 +608,6 @@ a { color: inherit; text-decoration: none; }
 }
 
 /* 导出面板里的**下载**动作（D-88）。 */
-.trace-download-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-top: 8px;
-}
-
 /* ---------------------------------------------------------------------------
  * §10 waveformView
  * ------------------------------------------------------------------------- */

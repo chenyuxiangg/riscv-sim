@@ -192,6 +192,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "uartEcho",
     "traceSwitch",
     "traceExport",
+    "debugDedup",
 ]);
 
 /**
@@ -4585,12 +4586,10 @@ async function runBreakpointUiSection(cdp, opts) {
     );
 
     // -- B-21 / B-22 · 「继续」⇒ ⇒ 内核真的在那个地址停下 -----------------
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-view-body="debug"] [data-action="continue"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
+    // ⚠️ **v0.63 批**：调试视图里那个「继续」按钮**撤掉**了 ⇒ ⇒ 「跑起来」的
+    //   入口只剩**顶栏**那个运行按钮 ⇒ ⇒ 这里点**顶栏**⇒ ⇒ 与用户看到的那
+    //   一份界面**一致**（否则门禁点的是一个**界面上没有**的按钮 ⇒ ⇒ 断了）。
+    await clickTopbarAction(cdp, "run");
     let halt = null;
     const haltDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < haltDeadline) {
@@ -4644,12 +4643,10 @@ async function runBreakpointUiSection(cdp, opts) {
     //   ⇒ ⇒ 寄存器视图那个 `.pc` 在运行中是 `-` ⇒ ⇒ 「显示的 PC ≠ 靶点」
     //   **恒真** ⇒ ⇒ 那条判据**恒绿**（零判别力）⇒ ⇒ 必须改用**运行态**
     //   （`data-topbar-run-mode`）⇒ ⇒ 「内核停下来了」才说明断点还在。
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-view-body="debug"] [data-action="continue"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
+    // ⚠️ **v0.63 批**：调试视图里那个「继续」按钮**撤掉**了 ⇒ ⇒ 「跑起来」的
+    //   入口只剩**顶栏**那个运行按钮 ⇒ ⇒ 这里点**顶栏**⇒ ⇒ 与用户看到的那
+    //   一份界面**一致**（否则门禁点的是一个**界面上没有**的按钮 ⇒ ⇒ 断了）。
+    await clickTopbarAction(cdp, "run");
     // -- 正向对照：先确认它**真的跑起来了** ------------------------------
     let started = false;
     const startDeadline = Date.now() + opts.timeoutMs;
@@ -5434,12 +5431,10 @@ async function runAddrInputSection(cdp, opts) {
     );
 
     // -- B-55 · 「继续」⇒ ⇒ 内核**真的在那个地址停** ----------------------
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-view-body="debug"] [data-action="continue"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
+    // ⚠️ **v0.63 批**：调试视图里那个「继续」按钮**撤掉**了 ⇒ ⇒ 「跑起来」的
+    //   入口只剩**顶栏**那个运行按钮 ⇒ ⇒ 这里点**顶栏**⇒ ⇒ 与用户看到的那
+    //   一份界面**一致**（否则门禁点的是一个**界面上没有**的按钮 ⇒ ⇒ 断了）。
+    await clickTopbarAction(cdp, "run");
     let halt = null;
     const haltDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < haltDeadline) {
@@ -5521,12 +5516,10 @@ async function runAddrInputSection(cdp, opts) {
         return "clicked";
     })()`);
     await sleep(500);
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-view-body="debug"] [data-action="continue"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
+    // ⚠️ **v0.63 批**：调试视图里那个「继续」按钮**撤掉**了 ⇒ ⇒ 「跑起来」的
+    //   入口只剩**顶栏**那个运行按钮 ⇒ ⇒ 这里点**顶栏**⇒ ⇒ 与用户看到的那
+    //   一份界面**一致**（否则门禁点的是一个**界面上没有**的按钮 ⇒ ⇒ 断了）。
+    await clickTopbarAction(cdp, "run");
     // -- 正向对照：先确认它**真的跑起来了** ------------------------------
     let started = false;
     const startDeadline = Date.now() + opts.timeoutMs;
@@ -5698,6 +5691,43 @@ const BV_TRACE_EXPORT_PROBE = `(() => {
   };
 })()`;
 
+/**
+ * v0.63 批的真机段：**调试视图去重**（重复按钮撤掉 · 各自归位 · 「运行 /
+ * 继续」文案切换）。
+ *
+ * ⚠️ **判据抓的是「界面上的分布」**：同一个动作在**两处**出现 ⇒ ⇒ 用户得猜
+ *   「哪个才是真的」⇒ ⇒ 这里断言的是「**那边没有**」＋「**这边有**」两半 ⇒ ⇒
+ *   只钉一半的话「按钮整个不见了」也会绿。
+ */
+const BV_DEBUG_DEDUP_PROBE = `(() => {
+  const body = document.querySelector('[data-view-body="debug"]');
+  const wave = document.querySelector('[data-view-body="waveform"]');
+  const runBtn = document.querySelector('[data-topbar-action="run"]');
+  const count = (root, sel) => (root ? root.querySelectorAll(sel).length : -1);
+  return {
+    hasBody: !!body,
+    dupCounts: body ? {
+      step: count(body, '[data-action="step"]'),
+      step10: count(body, '[data-action="step10"]'),
+      cont: count(body, '[data-action="continue"]'),
+      pause: count(body, '[data-action="pause"]'),
+      reset: count(body, '[data-action="reset"]'),
+      readRegs: count(body, '[data-action="read-regs"]'),
+    } : null,
+    toolbarCount: count(body, ".debug-toolbar"),
+    disasmBtnCount: count(body, '[data-action="disasm"]'),
+    stepNCount: count(body, '[data-action="step-n"]'),
+    stepInputCount: count(body, "[data-step-count-input]"),
+    traceToggleCount: count(body, '[data-action="trace-toggle"]'),
+    downloadLocalCount: count(body, '[data-action="download-trace-local"]'),
+    downloadChunkCount: count(body, '[data-action="download-trace"]'),
+    exportWaveInDebug: count(body, '[data-action="export-trace"][data-source="Waveform"]'),
+    exportWaveInWave: count(wave, '[data-action="export-trace"][data-source="Waveform"]'),
+    runLabel: runBtn ? String(runBtn.textContent || "").trim() : null,
+    runLabelAttr: runBtn ? String(runBtn.getAttribute("data-topbar-run-label") ?? "") : null,
+  };
+})()`;
+
 const BV_TRACE_SWITCH_PROBE = `(() => {
   const body = document.querySelector('[data-view-body="debug"]');
   const btn = body ? body.querySelector('[data-action="trace-toggle"]') : null;
@@ -5854,7 +5884,7 @@ async function runTraceExportSection(cdp, opts) {
     // -- B-94 · 按钮的**语意**换成了「下载轨迹到本地」 ---------------------
     let p = await probe();
     add(
-        "B-94 · 工具条里是「下载轨迹到本地」且旧的「导出执行轨迹」按钮**不在**了"
+        "B-94 · trace 卡片里是「下载轨迹到本地」且旧的「导出执行轨迹」按钮**不在**了"
         + "（⇒ ⇒ 按钮的语意 = 落盘到本地）",
         p?.hasDownloadButton === true
             && /下载轨迹到本地/.test(String(p?.downloadButtonText ?? ""))
@@ -5867,12 +5897,10 @@ async function runTraceExportSection(cdp, opts) {
     await sleep(1200);
 
     // -- B-95 · 点「暂停」⇒ ⇒ 面板**自动**出现 ------------------------------
-    await runEffect(cdp, `(() => {
-        const b = document.querySelector('[data-view-body="debug"] [data-action="pause"]');
-        if (!b) return "no-button";
-        b.click();
-        return "clicked";
-    })()`);
+    // ⚠️ **v0.63 批**：调试视图里那个「暂停」按钮**撤掉**了 ⇒ ⇒ 暂停的**唯一**
+    //   入口是**顶栏** ⇒ ⇒ 这里点的就是**顶栏**那个 ⇒ ⇒ 「两个暂停入口同一条
+    //   路」那条现在**天然**成立（界面上**只有一个**入口了）。
+    await clickTopbarAction(cdp, "pause");
     await sleep(1200);
     p = await probe();
     const prog1 = parseProgress(p?.progressText);
@@ -5905,7 +5933,7 @@ async function runTraceExportSection(cdp, opts) {
         `下载后进度=${JSON.stringify(prog2)}`,
     );
 
-    // -- B-98 · **顶栏**的「暂停」也自动导出（两个入口**同一条路**）-----------
+    // -- B-98 · **顶栏**的「暂停」自动导出（它现在是**唯一**的暂停入口）-------
     await runEffect(cdp, `(() => {
         const b = document.querySelector('[data-topbar-action="pause"]');
         if (!b) return "no-button";
@@ -5916,10 +5944,23 @@ async function runTraceExportSection(cdp, opts) {
     p = await probe();
     const prog3 = parseProgress(p?.progressText);
     add(
-        "B-98 · **顶栏**的「暂停」也自动导出（⇒ ⇒ 两个暂停入口**同一条路**"
+        "B-98 · **顶栏**的「暂停」自动导出（⇒ ⇒ 它现在是**唯一**的暂停入口"
         + "⇒ ⇒ 进度回到第一块）",
         prog3 !== null && prog3[0] === 0,
         `顶栏暂停后进度=${JSON.stringify(prog3)}`,
+    );
+
+    // ⚠️ **v0.63 批**：调试视图里那个重复的「暂停」按钮**撤掉**了 ⇒ ⇒ 界面
+    //   **不再有**同一个动作的第二个入口 ⇒ ⇒ 单独钉一条（否则「撤掉了」这件事
+    //   **没人管** ⇒ ⇒ 哪天它又冒出来也没人知道）。
+    const dupPause = await awaitEval(cdp, `(() => {
+        const body = document.querySelector('[data-view-body="debug"]');
+        return body ? body.querySelectorAll('[data-action="pause"]').length : -1;
+    })()`);
+    add(
+        "B-98b · 调试视图里**没有**那个重复的「暂停」按钮（⇒ ⇒ 暂停只剩顶栏那一个）",
+        dupPause === 0,
+        `调试视图里的暂停按钮个数=${dupPause}`,
     );
 
     // -- B-99 · **必要对照**：trace **明确关着** ⇒ ⇒ 暂停**不**自动刷新 ------
@@ -5931,12 +5972,7 @@ async function runTraceExportSection(cdp, opts) {
         return "clicked";
     })()`);
     await sleep(900);
-    await runEffect(cdp, `(() => {
-        const b = document.querySelector('[data-view-body="debug"] [data-action="pause"]');
-        if (!b) return "no-button";
-        b.click();
-        return "clicked";
-    })()`);
+    await clickTopbarAction(cdp, "pause");
     await sleep(1200);
     p = await probe();
     const prog4 = parseProgress(p?.progressText);
@@ -5945,6 +5981,114 @@ async function runTraceExportSection(cdp, opts) {
         + "（⇒ ⇒ 「暂停就导出」不是无脑行为）",
         prog4 !== null && before !== null && prog4[0] === before[0] && prog4[1] === before[1],
         `关掉前=${JSON.stringify(before)} 关掉后=${JSON.stringify(prog4)}`,
+    );
+
+    return { checks };
+}
+
+/**
+ * v0.63 批的真机段：**调试视图去重**。
+ *
+ * ⚠️ **为什么要有这一段**：调试视图那个工具条把**顶栏已有的动作**又摆了一遍
+ *   ⇒ ⇒ 用户点「暂停」有**两个**地方可点 ⇒ ⇒ 「我点的那个到底生效没有」⇒ ⇒
+ *   这类重复**没有真机断言**⇒ ⇒ 没人管 ⇒ ⇒ 本段补上。
+ *
+ * ⚠️ **判据是「分布」不是「某个按钮」**：① 重复的六个按钮**一个都不在**调试
+ *   视图里；② 工具条整块**不在**；③ 各自的落点**都在**（反汇编卡片 / trace
+ *   卡片 / 波形视图）；④ 顶栏那个按钮的**文案**随「跑过没有」切换。
+ *
+ * ⚠️ **要 demo 固件**：④ 的 PC 判据要一条**已知长度**的指令流 ⇒ ⇒ demo 固件
+ *   每条 4 字节 ⇒ ⇒ 走 3 条 ⇒ ⇒ PC 从 0x00 走到 0x0c。
+ */
+async function runDebugDedupSection(cdp, opts) {
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
+    const probe = async () => await awaitEval(cdp, BV_DEBUG_DEDUP_PROBE);
+
+    await resetAndLoadDemoFirmware(cdp, opts);
+    await runEffect(cdp, 'location.hash = "#/debug";');
+    await sleep(700);
+
+    // -- B-100 · 六个重复按钮**都不在**调试视图里 ---------------------------
+    let p = await probe();
+    const dup = p?.dupCounts ?? {};
+    add(
+        "B-100 · 调试视图里**没有**那些与顶栏 / 寄存器窗口重复的按钮"
+        + "（单步 / 单步×10 / 继续 / 暂停 / 复位 / 读寄存器）",
+        Object.values(dup).length > 0 && Object.values(dup).every((n) => n === 0),
+        `各按钮个数=${JSON.stringify(dup)}`,
+    );
+
+    // -- B-101 · 工具条整块撤掉 ---------------------------------------------
+    add(
+        "B-101 · 调试视图**没有**工具条了（那一整块撤掉 ⇒ ⇒ 按钮各归其位）",
+        p?.toolbarCount === 0,
+        `工具条个数=${p?.toolbarCount}`,
+    );
+
+    // -- B-102 · 反汇编卡片：反汇编 + 步数输入 + 按步数单步 -------------------
+    add(
+        "B-102 · 反汇编卡片里有「反汇编」+「步数输入框」+「按步数单步」"
+        + "（⇒ ⇒ 「单步×10」那条能力**没有**消失，只是换了个能填步数的地方）",
+        p?.disasmBtnCount === 1 && p?.stepInputCount === 1 && p?.stepNCount === 1,
+        `反汇编=${p?.disasmBtnCount} 输入框=${p?.stepInputCount} 单步=${p?.stepNCount}`,
+    );
+
+    // -- B-103 · trace 卡片：开关 + 整份下载；「下载这一块」不在 --------------
+    add(
+        "B-103 · trace 卡片里**只有**「开关 + 整份下载」，「下载这一块」**不在**了",
+        p?.traceToggleCount === 1 && p?.downloadLocalCount === 1 && p?.downloadChunkCount === 0,
+        `开关=${p?.traceToggleCount} 整份下载=${p?.downloadLocalCount} 这一块=${p?.downloadChunkCount}`,
+    );
+
+    // -- B-104 · 导出波形**只在波形视图**里 ---------------------------------
+    add(
+        "B-104 · 「导出波形 (VCD)」**只在波形视图**里（调试视图里那个撤掉了）",
+        p?.exportWaveInWave === 1 && p?.exportWaveInDebug === 0,
+        `波形视图=${p?.exportWaveInWave} 调试视图=${p?.exportWaveInDebug}`,
+    );
+
+    // -- B-105 · **装载之后**顶栏那个按钮显示「运行」 ------------------------
+    add(
+        "B-105 · 顶栏那个按钮**装载之后**显示「运行」",
+        p?.runLabel === "运行" && p?.runLabelAttr === "运行",
+        `文案=${JSON.stringify(p?.runLabel)} 属性=${JSON.stringify(p?.runLabelAttr)}`,
+    );
+
+    // -- B-106 · 跑一段再暂停 ⇒ ⇒ 按钮切成「继续」 ---------------------------
+    await clickTopbarAction(cdp, "run");
+    await sleep(1200);
+    await clickTopbarAction(cdp, "pause");
+    await sleep(800);
+    p = await probe();
+    add(
+        "B-106 · 跑一段再点「暂停」⇒ ⇒ 顶栏那个按钮**切成「继续」**"
+        + "（⇒ ⇒ 用户点之前就知道自己点了会得到什么）",
+        p?.runLabel === "继续" && p?.runLabelAttr === "继续",
+        `文案=${JSON.stringify(p?.runLabel)} 属性=${JSON.stringify(p?.runLabelAttr)}`,
+    );
+
+    // -- B-107 · 「按步数单步」⇒ ⇒ 真内核真的走了 N 步 ----------------------
+    await clickTopbarAction(cdp, "reset");
+    await sleep(900);
+    await runEffect(cdp, `(() => {
+        const input = document.querySelector('[data-view-body="debug"] [data-step-count-input]');
+        if (!input) return "no-input";
+        input.value = "3";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        const btn = document.querySelector('[data-view-body="debug"] [data-action="step-n"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(1200);
+    const stats = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+    const pcText = String(stats?.pcText ?? "");
+    add(
+        "B-107 · 点「按步数单步」（3 步）⇒ ⇒ 真内核的 PC 真的前进了 3 条指令"
+        + "（demo 固件每条 4 字节 ⇒ ⇒ 0x00 → 0x0c）",
+        /^0x0000000c$/i.test(pcText),
+        `PC=${JSON.stringify(pcText)}`,
     );
 
     return { checks };
@@ -7240,6 +7384,14 @@ async function main() {
 
         // -- the TRACE EXPORT (v0.62 · B-94 ~ B-99) --------------------------
         // ⚠️ **必须排在 osz 之前**：本段要的是 **demo 固件**（它自己装一次）。
+        // -- the DEBUG DEDUP (v0.63 · B-100 ~ B-107) -------------------------
+        // ⚠️ **必须排在 osz 之前**：本段要的是 **demo 固件**（它的指令长度
+        //   已知 ⇒ ⇒ 「走 3 步」的 PC 判据才成立）。
+        const debugDedup = await runSection("debugDedup", () => runDebugDedupSection(cdp, opts));
+        registerSection("debugDedup", debugDedup.checks, {
+            title: "调试视图去重检查（重复按钮撤掉 · 各自归位 · 「运行 / 继续」文案切换）",
+        });
+
         const traceExport = await runSection("traceExport", () => runTraceExportSection(cdp, opts));
         registerSection("traceExport", traceExport.checks, {
             title: "trace 导出检查（暂停 ⇒ ⇒ 面板自动出现 · 下载 ⇒ ⇒ 翻到末尾落全量）",

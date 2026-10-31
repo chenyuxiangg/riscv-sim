@@ -28,7 +28,7 @@ import { escapeHtml } from "../lib/escape.js";
 //
 // ⚠️ **转储长度上限也只用契约镜像的那一份**（契约 v9 · 裁决 K）⇒ ⇒ 界面上的
 // 「≤ 4096」不是**抄**出来的字面量 ⇒ ⇒ 它跟着镜像走 ⇒ ⇒ 夹具一改就红。
-import { DUMP_MAX_BYTES, WRITE_SIZE } from "../lib/message.js";
+import { DUMP_MAX_BYTES, TRACE_FORMAT, TRACE_SOURCE, WRITE_SIZE } from "../lib/message.js";
 // ⚠️ **「运行中」的判据与活值的隐藏口径**（STAGE-38 · v0.53 批）⇒ ⇒
 // 「内核真的在执行吗」与「运行中显示什么」**各只有一处** ⇒ ⇒ 顶栏 /
 // 调试视图 / 寄存器视图**共用**同一套口径 ⇒ ⇒ 不会一个藏了一个没藏。
@@ -661,6 +661,30 @@ function sanitizeFileNamePart(text) {
 }
 
 /**
+ * trace 卡片那个下载按钮的**文案**（**跟着当前这份导出走**）。
+ *
+ * ⚠️ **为什么文案要跟着变**：v0.63 批把「导出波形 (VCD)」搬到了**波形视图**⇒ ⇒
+ *   用户在那边导出的波形**也要能落盘**⇒ ⇒ 下载按钮**不能**写死「轨迹 CSV」⇒ ⇒
+ *   它**跟着当前这份导出的源 / 格式走**（默认 = 执行轨迹 CSV）⇒ ⇒ 「导出波形」
+ *   之后点它 ⇒ ⇒ 下的是**整份波形**（不是「只能下载轨迹」）。
+ *
+ * ⚠️ **默认值与 app 层逐字一致**（`Execution` / `Csv`）⇒ ⇒ 按钮上写的与
+ *   实际下的**不可能**对不上。
+ *
+ * @param {unknown} source — 导出源（契约的 `TraceSource`）
+ * @param {unknown} format — 导出格式（契约的 `TraceFormat`）
+ * @returns {string}
+ */
+export function exportDownloadLabel(source, format) {
+    const src = String(source ?? "").trim() || TRACE_SOURCE.Execution;
+    const fmt = String(format ?? "").trim() || TRACE_FORMAT.Csv;
+    const label = src === TRACE_SOURCE.Waveform
+        ? "波形"
+        : (src === TRACE_SOURCE.Execution ? "轨迹" : "导出内容");
+    return `下载${label}到本地 (${fmt.toUpperCase()})`;
+}
+
+/**
  * 从导出状态派生**文件名**（源 + 格式）。
  *
  * ⚠️ 这是**纯函数** ⇒ 门禁可以直接断言「文件名由内容派生」，不需要真的
@@ -1021,7 +1045,18 @@ export function renderMemoryDump(dump) {
 export const DEBUGGER_STATE_KEY = "debugger";
 
 /**
- * 读**当前草稿**（断点地址 / 读内存地址 / 宽度 / 条件 / 符号 / 转储）。
+ * 「**按步数单步**」那个输入框的**默认步数**（v0.63 批）。
+ *
+ * ⚠️ **默认 10**：用户拍板「在反汇编窗口中增加一个输入框和一个按钮，用于支持
+ *   用户指定执行多少步」⇒ ⇒ 这条路**取代**了原先那个写死的「单步 ×10」⇒ ⇒
+ *   默认值取它 ⇒ ⇒ 习惯不变。
+ *
+ * @type {string}
+ */
+export const DEFAULT_STEP_COUNT = "10";
+
+/**
+ * 读**当前草稿**（断点地址 / 读内存地址 / 宽度 / 条件 / 符号 / 转储 / 步数）。
  *
  * ⚠️ **条件、符号、转储的草稿也住这里**（契约 v9）⇒ ⇒ 渲染会重建 DOM ⇒ ⇒
  *   草稿住在 DOM 里会被清空（本仓踩过这个坑，D-119）⇒ ⇒ 草稿**必须**在
@@ -1040,6 +1075,9 @@ export function debuggerDraft() {
         memSize: Object.prototype.hasOwnProperty.call(WRITE_SIZE, size) ? size : WRITE_SIZE.Word,
         dumpAddr: String(s.dumpAddr ?? ""),
         dumpLen: String(s.dumpLen ?? DEFAULT_DUMP_LEN),
+        // ⚠️ **步数草稿也住这里**（v0.63 批）⇒ ⇒ 渲染会重建 DOM ⇒ ⇒ 草稿住在
+        //   DOM 里会被清空 ⇒ ⇒ 用户填的步数**必须**在视图状态里。
+        stepCount: String(s.stepCount ?? DEFAULT_STEP_COUNT),
     };
 }
 
@@ -1245,6 +1283,12 @@ function mountAddrInputListeners(el) {
         if (target?.closest?.("[data-mem-addr-input]")) {
             setDebuggerDraft({ memAddr: target.value ?? "" });
             setAddrError(target.closest("[data-addr-input]"), "[data-mem-addr-error]", "");
+            return;
+        }
+        // ⚠️ **步数框的草稿也住视图状态**（v0.63 批）⇒ ⇒ 与其它输入框同一
+        //   规矩 ⇒ ⇒ 重渲染不丢 ⇒ ⇒ 用户填的步数还在。
+        if (target?.closest?.("[data-step-count-input]")) {
+            setDebuggerDraft({ stepCount: target.value ?? "" });
         }
     });
     el.addEventListener("change", (ev) => {
@@ -1358,38 +1402,37 @@ const debugView = register({
         const symbolError = String(debug.symbolError ?? "");
         // ⚠️ **「停下」也只有一个落点**（裁决 L）⇒ ⇒ 这里读 `debug.halt`。
         const halt = debug.halt ?? null;
-        // The continuation is offered only while there is **more** to
-        // fetch (`next_offset < total`); the offset unit is the **entry
-        // count** (STAGE-5 §3.1).
-        const canContinue = exportState !== null
-            && Number(exportState.next_offset ?? 0) < Number(exportState.total ?? 0);
+        // ⚠️ **调试视图的工具条整块撤掉**（v0.63 批 · 用户拍板）⇒ ⇒ 那十一个
+        //   按钮**每一个**都有别的落点 ⇒ ⇒ 同一个动作在两处出现 ⇒ ⇒ 用户得
+        //   猜「哪个才是真的」⇒ ⇒ 落点分别是：「单步 / 继续 / 暂停 / 复位」在
+        //   **顶栏**（全局运行条）·「读寄存器」在**寄存器/内存视图** ·「反汇编」
+        //   在**反汇编卡片** ·「导出波形」在**波形视图** ·「trace 记录」与
+        //   「下载轨迹」在**trace 卡片** ⇒ ⇒ 这里**不再有**工具条。
         return `
-            <div class="debug-toolbar">
-                <button type="button" data-action="step">单步</button>
-                <button type="button" data-action="step10">单步 ×10</button>
-                <button type="button" data-action="continue">继续</button>
-                <button type="button" data-action="pause">暂停</button>
-                <button type="button" data-action="reset">复位</button>
-                <button type="button" data-action="read-regs">读寄存器</button>
-                <button type="button" data-action="disasm" data-addr="${pc}" data-count="16">反汇编</button>
-                <button type="button" data-action="download-trace-local" title="把**整条**执行轨迹翻完并落盘（不是第一块）">下载轨迹到本地 (CSV)</button>
-                <button type="button" data-action="export-trace" data-source="Waveform" data-format="Vcd" data-offset="0" data-limit="0">导出波形 (VCD)</button>
-                ${canContinue ? `<button type="button" data-action="export-trace" data-source="${escapeHtml(String(exportState.source))}" data-format="${escapeHtml(String(exportState.format))}" data-offset="${Number(exportState.next_offset)}" data-limit="0" data-continue="1">继续导出</button>` : ""}
-                <button type="button" data-action="trace-toggle" data-trace-switch="${traceSwitch.state}" aria-pressed="${traceSwitch.state === TRACE_SWITCH_ON ? "true" : "false"}">${escapeHtml(traceToggleLabel(traceSwitch))}</button>
-            </div>
             ${halt?.reason === "Breakpoint"
                 // ⚠️ **这句话只在内核这么说的时候出现**（裁决 M）⇒ ⇒ 前端
                 // **不自己判断**「跑没跑到那个地址」⇒ ⇒ 判据 = 内核的
                 // `Halted.reason`。
                 ? `<p class="bp-hit" data-bp-hit>命中断点 @ <code>0x${(Number(halt.pc ?? 0) >>> 0).toString(16).padStart(8, "0")}</code></p>`
                 : ""}
-            <p class="trace-state" data-trace-state data-trace-switch="${traceSwitch.state}"${traceSwitch.state === TRACE_SWITCH_ON ? " data-trace-notice" : ""}>${renderTraceStatus(traceSwitch)}</p>
             ${error
                 ? `<p class="debug-error" data-debug-error>${escapeHtml(String(error.code))}：${escapeHtml(String(error.message))}</p>`
                 : ""}
             <div class="debug-grid">
                 <section class="card disasm">
-                    <div class="row"><h3>反汇编 (M-11)</h3><span class="tag">在「断点」列点一下即可下断点</span></div>
+                    <div class="row">
+                        <h3>反汇编 (M-11)</h3>
+                        <span class="tag">在「断点」列点一下即可下断点</span>
+                        <button type="button" data-action="disasm" data-addr="${pc}" data-count="16">反汇编</button>
+                    </div>
+                    <div class="card-actions" data-step-count-box>
+                        <label class="step-count">
+                            步数
+                            <input type="number" min="1" step="1" value="${escapeHtml(draft.stepCount)}" data-step-count-input>
+                        </label>
+                        <button type="button" data-action="step-n">按步数单步</button>
+                        <span class="muted">从当前 PC 起走这么多条指令（顶栏「单步」走一条）。</span>
+                    </div>
                     <p class="muted">助记符是 <strong>ISA 助记符</strong>：压缩指令保留 <code>c.</code> 前缀，不做伪指令别名改写（裁决 C）。</p>
                     <table class="disasm-table">
                         <thead><tr><th>地址</th><th>机器码</th><th>助记符</th><th>宽度</th><th>源码</th><th>断点</th></tr></thead>
@@ -1424,7 +1467,12 @@ const debugView = register({
                     <p class="muted">这里列的是<strong>本会话由界面请求过的断点</strong>（界面回显）—— 内核没有「列出断点」的事件，所以它<strong>不是</strong>内核断点集的镜像；用脚本口设的断点在这里看不到。</p>
                 </section>
                 <section class="card trace-export">
-                    <div class="row"><h3>trace 导出 (M-11 / M-19)</h3></div>
+                    <div class="row"><h3>trace 记录 / 导出 (M-11 / M-19)</h3></div>
+                    <div class="card-actions">
+                        <button type="button" data-action="trace-toggle" data-trace-switch="${traceSwitch.state}" aria-pressed="${traceSwitch.state === TRACE_SWITCH_ON ? "true" : "false"}">${escapeHtml(traceToggleLabel(traceSwitch))}</button>
+                        <button type="button" data-action="download-trace-local" data-trace-download-button title="把**整份**导出翻完并落盘（不是第一块）">${escapeHtml(exportDownloadLabel(exportState?.source, exportState?.format))}</button>
+                    </div>
+                    <p class="trace-state" data-trace-state data-trace-switch="${traceSwitch.state}"${traceSwitch.state === TRACE_SWITCH_ON ? " data-trace-notice" : ""}>${renderTraceStatus(traceSwitch)}</p>
                     ${exportState
                         ? `<p class="muted" data-trace-progress>${escapeHtml(String(exportState.source))} / ${escapeHtml(String(exportState.format))} · 条目 ${Number(exportState.offset)} → ${Number(exportState.next_offset)} / ${Number(exportState.total)}</p>`
                         : `<p class="muted">尚未导出 — 选一个数据源与格式发起导出。</p>`}
@@ -1432,12 +1480,6 @@ const debugView = register({
                         ? `<p class="trace-overflow" data-trace-overflow>⚠️ 导出窗口<strong>不是完整历史</strong> —— 源环溢出过、丢过最旧条目（本次导出从第 ${Number(exportState.offset)} 条开始，更早的内容已不在环里）。</p>`
                         : ""}
                     <pre class="trace-chunk" data-trace-chunk>${escapeHtml(String(exportState?.chunk ?? ""))}</pre>
-                    ${exportState
-                        ? `<div class="trace-download-row">
-                            <button type="button" data-action="download-trace" data-trace-download-button>下载这一块（${escapeHtml(exportFileName(exportState.source, exportState.format))}）</button>
-                            <span class="muted" data-trace-download-name>${escapeHtml(exportFileName(exportState.source, exportState.format))}</span>
-                        </div>`
-                        : ""}
                 </section>
                 <section class="card regmem">
                     <div class="row"><h3>寄存器 / 内存</h3></div>
@@ -1462,12 +1504,16 @@ const debugView = register({
         const el = ev.target?.closest?.("[data-action]");
         const action = el?.dataset?.action;
         if (!action) return undefined;
-        // ⚠️ **下载**（D-88）：纯浏览器动作 ⇒ **不发**契约命令。
-        // 导出块取自**视图状态**（唯一真相）⇒ 与面板上显示的是同一块内容。
-        if (action === "download-trace") {
-            const exportState = viewStore.getState("debug")?.debug?.export ?? null;
-            const result = downloadExportChunk(exportState);
-            return result ? `cmd-download-trace-${result.filename}` : undefined;
+        // ⚠️ **按步数单步**（v0.63 批 · 用户拍板「在反汇编窗口中增加一个输入框
+        //   和一个按钮，用于支持用户指定执行多少步」）⇒ ⇒ 步数**从界面来**
+        //   ⇒ ⇒ 与地址那条路**同一手法**（参数随信号走 ⇒ ⇒ 视图层不碰服务层）。
+        //
+        // ⚠️ **归一在 app 层**（`normalizeStepCount`）⇒ ⇒ 视图层**不写第二份
+        //   校验器** ⇒ ⇒ 输入框里是什么就发什么。
+        if (action === "step-n") {
+            const box = el?.closest?.("[data-step-count-box]");
+            const raw = String(box?.querySelector?.("[data-step-count-input]")?.value ?? "");
+            return emitCommand("step-n", "debug", { steps: raw });
         }
         // ⚠️ **任意地址**（STAGE-39 · v0.54 批 · 裁决 B）⇒ ⇒ 地址有两个
         // 来源：按钮**自带** `data-addr`（反汇编行的旧按钮 ⇒ ⇒ **一字不变**）
@@ -1783,7 +1829,11 @@ const waveformView = register({
         return `
             <section class="waveform">
                 <div class="card">
-                    <div class="row"><h3>波形 (M-19)</h3><span class="tag">${channels.length} 个通道</span></div>
+                    <div class="row">
+                        <h3>波形 (M-19)</h3>
+                        <span class="tag">${channels.length} 个通道</span>
+                        <button type="button" data-action="export-trace" data-source="Waveform" data-format="Vcd" data-offset="0" data-limit="0">导出波形 (VCD)</button>
+                    </div>
                     ${channels.length === 0
                         ? `<p class="muted">尚无探针信号 — 固件驱动外设后（M-15 + M-18 管道已接通）会列出通道。</p>`
                         : `<ul class="channel-list">
@@ -1797,6 +1847,7 @@ const waveformView = register({
                                 </li>`).join("")}
                            </ul>`}
                     <p class="muted">通道列表里的边沿数是**总数**；下面的图只画每个通道最近的一段。</p>
+                    <p class="muted">导出的波形内容显示在「<strong>调试视图 → trace 记录 / 导出</strong>」卡片里（下载也在那儿）。</p>
                 </div>
                 <div class="card">
                     <div class="row"><h3>波形图</h3><span class="tag">M-19 · 边沿回放</span></div>
@@ -1894,9 +1945,29 @@ const waveformView = register({
             String(option?.textStyle?.color ?? ""),
         );
     },
-    onCommand(_ev) {},
+    onCommand(ev) {
+        const el = ev.target?.closest?.("[data-action]");
+        const action = el?.dataset?.action;
+        if (!action) return undefined;
+        // ⚠️ **导出波形**（v0.63 批 · 用户拍板「导出波形按钮可以放到波形视图」）
+        //   ⇒ ⇒ 参数**随信号走**（与调试视图那条路同一手法）⇒ ⇒ 视图层**不碰**
+        //   服务层 ⇒ ⇒ 导出结果落在**调试视图的 trace 卡片**里（那里是导出内容
+        //   的**唯一**落点 ⇒ ⇒ 不是第二个真相）。
+        if (action === "export-trace") {
+            return emitCommand("export-trace", "waveform", {
+                source: el.dataset.source,
+                format: el.dataset.format,
+                offset: el.dataset.offset,
+                limit: el.dataset.limit,
+            });
+        }
+        return undefined;
+    },
     onDelta(_delta) {},
-    mountFor(_el) {},
+    mountFor(el) {
+        // ⚠️ **监听器绑在容器上**（事件委托）⇒ ⇒ 每次渲染重建 DOM 也不会丢。
+        el.addEventListener("click", (ev) => waveformView.onCommand(ev));
+    },
 });
 
 // ---------------------------------------------------------------------------
