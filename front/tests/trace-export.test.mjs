@@ -102,6 +102,12 @@ async function setup() {
     const transport = inProcessTransport(kernel);
     const router = await m05.mountCommandRouter({ transport });
     app.wireDebug(router);
+    // ⚠️ **顶栏也接线**（v0.63 批）⇒ ⇒ 调试视图里那个「暂停」按钮**撤掉**了 ⇒ ⇒
+    //   暂停的**唯一**入口在顶栏 ⇒ ⇒ 用例要点的就是**那个**按钮。
+    //
+    // ⚠️ `wireTopbarRunbar` **先退旧的监听器、再挂新的**⇒ ⇒ 每个用例各接一次
+    //   **不会**让同一个按钮挂上两个监听器 ⇒ ⇒ 点一下**只**触发一次。
+    app.wireTopbarRunbar({ commandRouter: router });
     m01.assembleWorkspace("embedded");
     m01.route("#/debug");
     return { kernel, transport, router };
@@ -124,6 +130,35 @@ async function clickAndDispatch(router, button) {
     button.dispatchEvent(new Event("click"));
     dom.window.removeEventListener("riscv:command", listener);
     await Promise.all(pending);
+}
+
+/**
+ * 点**顶栏**那个「暂停」按钮，并**等它真的跑完**。
+ *
+ * ⚠️ **为什么要等**：顶栏那个按钮是「点一下就走」的（`void handleCommand(...)`）
+ *   ⇒ ⇒ 用例若不等 ⇒ ⇒ 断言会落在「状态还没回来」那一格上（**竞态**）⇒ ⇒
+ *   这里**轮询到导出命令真的发出去了**为止 ⇒ ⇒ 断言落在一个确定的格上。
+ *
+ * @param {object} transport
+ * @param {number} before — 点击**前**已经发出几条导出命令
+ * @returns {Promise<void>}
+ */
+async function clickTopbarPause(transport, before, expectExport = true) {
+    const btn = dom.document.querySelector('[data-topbar-action="pause"]');
+    assert.ok(btn, "顶栏没有「暂停」按钮");
+    btn.dispatchEvent(new Event("click"));
+    if (!expectExport) {
+        // ⚠️ **反向对照**：这条**期望没有导出**⇒ ⇒ 不能等「导出出现了」⇒ ⇒
+        //   等一个**固定**的往返时间（够一次命令往返）再断言 ⇒ ⇒ 断言落在
+        //   「该来的没来」这一格上 ⇒ ⇒ 不是「还没来就断言了」。
+        await new Promise((r) => setTimeout(r, 200));
+        return;
+    }
+    for (let i = 0; i < 100; i += 1) {
+        if (exportCommands(transport).length > before) return;
+        await new Promise((r) => setTimeout(r, 5));
+    }
+    throw new Error("点顶栏「暂停」之后没有自动导出（超时）");
 }
 
 /** The debug view's body element. */
@@ -200,7 +235,7 @@ describe("trace 导出 · 暂停 ⇒ ⇒ 自动渲染", () => {
         await router.dispatchCommand(Command.setTraceEnabled(true));
         const before = exportCommands(transport).length;
 
-        await clickAndDispatch(router, dom.document.querySelector('[data-action="pause"]'));
+        await clickTopbarPause(transport, before);
 
         const exports = exportCommands(transport);
         assert.equal(exports.length, before + 1, "点暂停没有自动导出");
@@ -222,7 +257,7 @@ describe("trace 导出 · 暂停 ⇒ ⇒ 自动渲染", () => {
         await router.dispatchCommand(Command.setTraceEnabled(false));
         const before = exportCommands(transport).length;
 
-        await clickAndDispatch(router, dom.document.querySelector('[data-action="pause"]'));
+        await clickTopbarPause(transport, before, false);
 
         assert.equal(
             exportCommands(transport).length,
@@ -236,7 +271,7 @@ describe("trace 导出 · 暂停 ⇒ ⇒ 自动渲染", () => {
         const { router, transport } = await setup();
         const before = exportCommands(transport).length;
 
-        await clickAndDispatch(router, dom.document.querySelector('[data-action="pause"]'));
+        await clickTopbarPause(transport, before);
 
         assert.equal(
             exportCommands(transport).length,
@@ -246,16 +281,15 @@ describe("trace 导出 · 暂停 ⇒ ⇒ 自动渲染", () => {
         router.close();
     });
 
-    test("两个暂停入口共用**同一条**路 ⇒ ⇒ 走 app 层就自动导出", async () => {
+    test("暂停**只有顶栏那一个**入口 ⇒ ⇒ 走 app 层就自动导出", async () => {
         const { router, transport } = await setup();
         await router.dispatchCommand(Command.setTraceEnabled(true));
         const before = exportCommands(transport).length;
 
-        // ⚠️ **顶栏的「暂停」与工具条的「暂停」都汇到 `handleCommand({action:"pause"})`**
-        //   ⇒ ⇒ 这里直接走那**一条路** ⇒ ⇒ 「一条路」的判据就在这里。
-        //   ⇒ ⇒ **顶栏那个按钮本身**的点击（它由 `bootstrap()` 挂监听器 ⇒ ⇒
-        //   本套件**关掉了** bootstrap ⇒ ⇒ 那个监听器不存在）⇒ ⇒ **真机门禁**
-        //   才验它（那儿 bootstrap 是真的在跑）。
+        // ⚠️ **v0.63 批**：调试视图里那个「暂停」按钮**撤掉**了 ⇒ ⇒ 暂停的**唯一**
+        //   入口是顶栏 ⇒ ⇒ 界面**不再有**同一个动作的第二个入口 ⇒ ⇒ 「一条路」
+        //   的判据就在这里（顶栏那个按钮**直接调** `handleCommand` ⇒ ⇒ 见
+        //   `front/tests/run-loop.test.mjs` 的 A-12 与 `tools/browser-verify.mjs`）。
         await app.handleCommand({ action: "pause" }, { commandRouter: router });
 
         assert.equal(
@@ -268,7 +302,7 @@ describe("trace 导出 · 暂停 ⇒ ⇒ 自动渲染", () => {
 });
 
 describe("trace 导出 · 「下载轨迹到本地」", () => {
-    test("工具条里**没有**旧的「导出执行轨迹」按钮，新按钮写着「下载轨迹到本地」", async () => {
+    test("调试视图里**没有**旧的「导出执行轨迹」按钮，新按钮写着「下载轨迹到本地」", async () => {
         const { router } = await setup();
         assert.equal(
             debugBody().querySelector('[data-action="export-trace"][data-source="Execution"]'),
@@ -278,6 +312,12 @@ describe("trace 导出 · 「下载轨迹到本地」", () => {
         const btn = debugBody().querySelector('[data-action="download-trace-local"]');
         assert.ok(btn, "没有「下载轨迹到本地」按钮");
         assert.match(btn.textContent, /下载轨迹到本地/);
+        // ⚠️ **它住在 trace 卡片里**（v0.63 批：工具条整块撤掉了）⇒ ⇒ trace
+        //   的东西**只有那一个落点**。
+        assert.ok(
+            debugBody().querySelector("[data-trace-state]"),
+            "trace 卡片不在（下载按钮跑到别处去了）",
+        );
         router.close();
     });
 

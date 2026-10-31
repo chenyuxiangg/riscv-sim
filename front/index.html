@@ -72,7 +72,16 @@
       <span class="stat" data-topbar-pc>PC <b class="mono" data-topbar-pc-value>—</b></span>
       <span class="stat hide-m" data-topbar-time>虚拟时间 <b class="mono" data-topbar-time-value>—</b></span>
       <span class="stat hide-m" data-topbar-run-status>已停止</span>
-      <button class="btn run" data-topbar-action="run" type="button">运行</button>
+      <!--
+        ⚠️ **「运行 / 继续」是同一个动作的两种说法**（v0.63 批 · 用户拍板
+        「当加载之后顶栏的运行应该显示运行，点击停之后需要切换为继续」）。
+        ⇒ ⇒ 按钮的**文案由 app 层同步**（`syncTopbarRunButton` ⇒ ⇒ 判据是
+        `front/lib/run-loop.js` 那个**纯函数** `runActionLabel`）⇒ ⇒ 这里的
+        「运行」只是**首屏那一帧**的初值 ⇒ ⇒ 真值在 app 层那一份。
+        ⇒ ⇒ **原始属性** `data-topbar-run-label` 也在 ⇒ ⇒ 门禁读它而不是
+        解析中文。
+      -->
+      <button class="btn run" data-topbar-action="run" data-topbar-run-label="运行" type="button">运行</button>
       <button class="btn" data-topbar-action="step" type="button">单步</button>
       <button class="btn" data-topbar-action="pause" type="button">暂停</button>
       <button class="btn" data-topbar-action="reset" type="button">复位</button>

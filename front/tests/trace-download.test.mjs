@@ -12,6 +12,14 @@
 //   4. NFR-04：文件名经得起消毒（源 / 格式来自内核 ⇒ 不可信）。
 //
 // ⚠️ **断言的是具体值**，不是「有个 `<a download>` 就算数」。
+//
+// ⚠️ **v0.63 批的口径**：界面上的「**下载这一块**」那个按钮**撤掉**了 ⇒ ⇒ 唯一
+//   的下载入口是 trace 卡片里那个「**下载轨迹到本地**」（整份翻完）⇒ ⇒ 本套件
+//   因此分成两半：① **DOM 那半**（卡片里**有**下载动作、**只有**一个、文案跟着
+//   源 / 格式走）② **纯函数那半**（`downloadExportChunk` 造 `<a download>`、
+//   释放 object URL —— 它仍是 app 层「下载整份」的实现 ⇒ ⇒ **一个落点**）。
+//   ⇒ ⇒ 「点按钮 → 落盘」那条**点击路径**由 `trace-export.test.mjs` 走
+//   **真实信号路径**（视图 → 信号 → app → 命令 → 内核 → 落盘）验。
 
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -114,12 +122,18 @@ function observeBrowserCalls() {
     return calls;
 }
 
-/** 点击导出面板里的下载按钮。 */
-function clickDownload() {
-    const button = debugBody().querySelector("[data-trace-download-button]");
-    assert.ok(button, "导出面板里没有下载按钮");
-    button.dispatchEvent(new Event("click"));
-    return button;
+/**
+ * 调**生产代码**那个下载助手（app 层「下载整份」用的**同一个**函数）。
+ *
+ * ⚠️ **为什么不再点按钮**：v0.63 批把「下载这一块」那个按钮撤掉了 ⇒ ⇒ 界面上
+ *   唯一的下载入口是 app 层的「下载轨迹到本地」（它要**翻页**⇒ ⇒ 归 app 层）
+ *   ⇒ ⇒ 这个套件验的是**那个函数**的行为（它仍是唯一的落盘实现）。
+ *
+ * @param {object} state — 导出块
+ * @returns {object|null} `downloadExportChunk` 的返回
+ */
+function clickDownload(state) {
+    return m02.downloadExportChunk(state);
 }
 
 beforeEach(() => {
@@ -160,27 +174,46 @@ describe("导出下载 · 文件名由内容派生", () => {
 });
 
 describe("导出下载 · B-3 下载动作", () => {
-    test("导出面板里有下载按钮（不是一个只能手动复制的 <pre>）", () => {
+    test("trace 卡片里有下载动作（不是一个只能手动复制的 <pre>）", () => {
         publishExport(exportState());
         const button = debugBody().querySelector("[data-trace-download-button]");
-        assert.ok(button, "导出面板里没有下载动作");
-        assert.match(button.textContent, /trace-execution\.csv/);
+        assert.ok(button, "trace 卡片里没有下载动作");
+        assert.match(button.textContent, /下载轨迹到本地/);
     });
 
-    test("没有导出时没有下载按钮（不下载空文件）", () => {
-        publishExport(null);
+    test("下载入口**只有一个**（「下载这一块」那个按钮撤掉了）", () => {
+        publishExport(exportState());
+        const body = debugBody();
         assert.equal(
-            debugBody().querySelector("[data-trace-download-button]"),
-            null,
-            "没有导出内容时也渲染出了下载按钮",
+            body.querySelectorAll("[data-trace-download-button]").length,
+            1,
+            "下载入口不是一个（用户会不知道该点哪个）",
+        );
+        assert.equal(
+            body.querySelectorAll('[data-action="download-trace"]').length,
+            0,
+            "「下载这一块」那个按钮还在（用户拍板：只留整份下载）",
         );
     });
 
-    test("点下载 ⇒ 造出 <a download>：href 是 blob:、download 非空且由内容派生", () => {
-        publishExport(exportState());
+    test("下载按钮的文案**跟着当前这份导出走**（导出波形 ⇒ 下的是波形）", () => {
+        publishExport(exportState({ source: "Waveform", format: "Vcd" }));
+        const button = debugBody().querySelector("[data-trace-download-button]");
+        assert.ok(button, "trace 卡片里没有下载动作");
+        assert.match(button.textContent, /下载波形到本地 \(VCD\)/);
+    });
+
+    test("没有导出过时文案是**执行轨迹 CSV**（默认口径）", () => {
+        publishExport(null);
+        const button = debugBody().querySelector("[data-trace-download-button]");
+        assert.ok(button, "trace 卡片里没有下载动作");
+        assert.match(button.textContent, /下载轨迹到本地 \(CSV\)/);
+    });
+
+    test("落盘 ⇒ 造出 <a download>：href 是 blob:、download 非空且由内容派生", () => {
         const calls = observeBrowserCalls();
         try {
-            clickDownload();
+            clickDownload(exportState());
             assert.equal(calls.anchors.length, 1, "没有造出下载用的 <a>");
             const anchor = calls.anchors[0];
             const href = anchor.getAttribute("href");
@@ -194,11 +227,10 @@ describe("导出下载 · B-3 下载动作", () => {
         }
     });
 
-    test("波形导出 ⇒ 下载的是 trace-waveform.vcd（文件名跟着内容走）", () => {
-        publishExport(exportState({ source: "Waveform", format: "Vcd", chunk: "$var x $end\n" }));
+    test("波形导出 ⇒ 落盘的是 trace-waveform.vcd（文件名跟着内容走）", () => {
         const calls = observeBrowserCalls();
         try {
-            clickDownload();
+            clickDownload(exportState({ source: "Waveform", format: "Vcd", chunk: "$var x $end\n" }));
             assert.equal(calls.anchors.length, 1);
             assert.equal(calls.anchors[0].getAttribute("download"), "trace-waveform.vcd");
         } finally {
@@ -206,11 +238,10 @@ describe("导出下载 · B-3 下载动作", () => {
         }
     });
 
-    test("下载的内容就是导出块本身", () => {
-        publishExport(exportState({ chunk: "pc,insn\n0x0,lui\n" }));
+    test("落盘的内容就是导出块本身", () => {
         const calls = observeBrowserCalls();
         try {
-            clickDownload();
+            clickDownload(exportState({ chunk: "pc,insn\n0x0,lui\n" }));
             assert.equal(calls.createdUrls.length, 1, "没有创建 object URL");
             assert.ok(calls.createdUrls[0].startsWith("blob:"));
         } finally {
@@ -218,11 +249,10 @@ describe("导出下载 · B-3 下载动作", () => {
         }
     });
 
-    test("下载**真的发生**：那个 <a> 被点了（不是只造出来）", () => {
-        publishExport(exportState());
+    test("落盘**真的发生**：那个 <a> 被点了（不是只造出来）", () => {
         const calls = observeBrowserCalls();
         try {
-            clickDownload();
+            clickDownload(exportState());
             assert.equal(calls.clickedAnchors.length, 1, "下载链接没有被点击");
             assert.equal(calls.clickedAnchors[0], calls.anchors[0]);
         } finally {
@@ -232,7 +262,7 @@ describe("导出下载 · B-3 下载动作", () => {
 });
 
 describe("导出下载 · B-4 释放 object URL", () => {
-    test("下载之后 URL.revokeObjectURL 被调用（不泄漏）", async () => {
+    test("落盘之后 URL.revokeObjectURL 被调用（不泄漏）", async () => {
         publishExport(exportState());
         // ⚠️ **先让别的用例遗留的释放定时器落下来**：释放是「点击之后」做的
         // （`setTimeout(..., 0)`）⇒ 上一个用例排的定时器会在**本用例**的
@@ -240,7 +270,7 @@ describe("导出下载 · B-4 释放 object URL", () => {
         await new Promise((r) => setTimeout(r, 0));
         const calls = observeBrowserCalls();
         try {
-            clickDownload();
+            clickDownload(exportState());
             assert.equal(calls.createdUrls.length, 1, "本次下载没有创建 object URL");
             // ⚠️ 释放是「点击**之后**」做的（`setTimeout(..., 0)`）—— 同步释放
             // 会把还没开始的下载打断 ⇒ 断言必须等一个宏任务。
@@ -256,7 +286,7 @@ describe("导出下载 · B-4 释放 object URL", () => {
         }
     });
 
-    test("没有导出时点下载不会凭空造 URL（也不泄漏）", async () => {
+    test("没有导出时落盘不会凭空造 URL（也不泄漏）", async () => {
         publishExport(null);
         // 同上：先冲掉别的用例遗留的释放定时器。
         await new Promise((r) => setTimeout(r, 0));

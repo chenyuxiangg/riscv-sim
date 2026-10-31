@@ -82,7 +82,10 @@ import {
     initialRunState,
     isKernelRunning,
     liveValue,
+    markStarted,
     nextRunAction,
+    normalizeStepCount,
+    runActionLabel,
     runStateAfter,
     startRunState,
     stopRunState,
@@ -344,6 +347,7 @@ export function getRunState() {
         mode: run?.mode === RUN_MODE_RUNNING ? RUN_MODE_RUNNING : RUN_MODE_IDLE,
         windows: Number.isFinite(run?.windows) ? Number(run.windows) : 0,
         busy: Number.isFinite(run?.busy) ? Math.max(0, Number(run.busy)) : 0,
+        started: run?.started === true,
     };
 }
 
@@ -364,11 +368,12 @@ export function setRunState(next) {
     const mode = next?.mode === RUN_MODE_RUNNING ? RUN_MODE_RUNNING : RUN_MODE_IDLE;
     const windows = Number.isFinite(next?.windows) ? Number(next.windows) : 0;
     const busy = Number.isFinite(next?.busy) ? Math.max(0, Number(next.busy)) : 0;
+    const started = next?.started === true;
     viewStore.setState("debug", (prev) => ({
         ...prev,
         debug: {
             ...(prev.debug ?? {}),
-            run: { mode, windows, busy },
+            run: { mode, windows, busy, started },
         },
     }));
     publishViewState("debug");
@@ -379,7 +384,7 @@ export function setRunState(next) {
     // ⚠️ **顶栏那一份活值也要跟着隐藏 / 恢复** ⇒ ⇒ 与视图**同拍** ⇒ ⇒
     // 不等下一次 M-10 刷新（那最多差 200 ms）。
     syncTopbarStats(topbarServices);
-    return { mode, windows, busy };
+    return { mode, windows, busy, started };
 }
 
 /**
@@ -408,6 +413,33 @@ function bumpRunBusy(delta) {
 }
 
 /**
+ * 把顶栏那个**运行按钮**的文案同步过来（**运行 / 继续**）。
+ *
+ * ⚠️ **为什么要有两句话**：用户拍板「**当加载之后顶栏的运行应该显示运行，点击停
+ *   之后需要切换为继续（文本切换）**」⇒ ⇒ 那条按钮**同一个动作**（继续往下跑）
+ *   但**两种语义**（「从头跑」/「接着跑」）⇒ ⇒ 按钮上必须**说出当下是哪种**⇒ ⇒
+ *   用户点之前就知道自己点了会得到什么。
+ *
+ * ⚠️ **判据只有一处**（`runActionLabel` ⇒ ⇒ 纯函数住在
+ *   `front/lib/run-loop.js`）⇒ ⇒ 界面上显示的与判据说看到的**天然对得上**⇒ ⇒
+ *   不是两处各写一遍。
+ *
+ * ⚠️ **同时挂一个原始属性**（`data-topbar-run-label`）⇒ ⇒ 判据可以读**原始
+ *   值**而不是解析中文 ⇒ ⇒ 与 `data-topbar-run-mode` 同一手法。
+ *
+ * @returns {{label: string, started: boolean}|null}
+ */
+export function syncTopbarRunButton() {
+    const btn = document.querySelector('[data-topbar-action="run"]');
+    if (!btn) return null;
+    const run = getRunState();
+    const label = runActionLabel(run);
+    btn.textContent = label;
+    btn.setAttribute("data-topbar-run-label", label);
+    return { label, started: run.started === true };
+}
+
+/**
  * 把**连续运行状态**同步到顶栏那个状态位（STAGE-37 · v0.52 批 · 裁决 G）。
  *
  * ⚠️ **文案只有这一处** ⇒ ⇒ 真机门禁读它、前端用例读它 ⇒ ⇒ 同一个词
@@ -420,6 +452,9 @@ function bumpRunBusy(delta) {
  * @returns {{mode: string, windows: number, text: string}|null}
  */
 export function syncTopbarRunStatus() {
+    // ⚠️ **按钮那一句也要跟着变**（v0.63 批）⇒ ⇒ 「运行 / 继续」与状态位
+    //   **同拍** ⇒ ⇒ 不是两处各写一遍 ⇒ ⇒ 少一处可能不同步的地方。
+    syncTopbarRunButton();
     const el = document.querySelector("[data-topbar-run-status]");
     if (!el) return null;
     const run = getRunState();
@@ -476,6 +511,21 @@ export function syncTopbarStats(services) {
 let topbarStatsUnsubscribe = null;
 
 /**
+ * 顶栏那几个按钮的**点击监听器退订句柄**（v0.63 批）。
+ *
+ * ⚠️ **为什么也要退旧的**：统计订阅早就退了旧的（上面那个句柄）⇒ ⇒ 但**点击**
+ *   监听器是直接 `addEventListener` 的 ⇒ ⇒ 接线两次 ⇒ ⇒ **同一个按钮上挂着两个
+ *   监听器** ⇒ ⇒ 点一下**触发两次** ⇒ ⇒ 前端门禁里「点一次 ⇒ ⇒ 恰好一条命令」
+ *   那类判据会被**重复触发**带偏 ⇒ ⇒ ��是**先退旧的、再挂新的** ⇒ ⇒ 恰好一个。
+ *
+ * ⚠️ **它不是「状态的第二份」**：退订句柄只存**函数引用** ⇒ ⇒ 状态仍然只有
+ *   `debug.run` 那一份。
+ *
+ * @type {Array<() => void>}
+ */
+const topbarButtonUnsubscribes = [];
+
+/**
  * 顶栏那条运行条**当前挂着的 services**（STAGE-38 · v0.53 批）。
  *
  * ⚠️ **为什么需要它**：运行状态一变（开始 / 停止）顶栏那一份活值就要
@@ -506,24 +556,35 @@ export function wireTopbarRunbar(services) {
     // ⚠️ **记住 services**（STAGE-38 · v0.53 批）⇒ ⇒ 运行状态一变就能
     // 立刻把顶栏那一份活值**隐藏 / 恢复**⇒ ⇒ 不等下一次 M-10 刷新。
     topbarServices = services ?? null;
-    bar.querySelector('[data-topbar-action="run"]')
-        ?.addEventListener("click", () => {
-            void handleCommand({ action: "continue" }, services);
-        });
-    bar.querySelector('[data-topbar-action="step"]')
-        ?.addEventListener("click", () => {
-            void handleCommand({ action: "step" }, services);
-        });
-    bar.querySelector('[data-topbar-action="reset"]')
-        ?.addEventListener("click", () => {
-            void handleCommand({ action: "reset" }, services);
-        });
+    // ⚠️ **先退旧的点击监听器**（v0.63 批）⇒ ⇒ 接线两次**不会**让同一个按钮
+    // 挂上两个监听器 ⇒ ⇒ 点一下**只**触发一次 ⇒ ⇒ 「恰好一条命令」那条判据
+    // 才站得住。
+    while (topbarButtonUnsubscribes.length > 0) {
+        topbarButtonUnsubscribes.pop()?.();
+    }
+    const bind = (selector, onClick) => {
+        const btn = bar.querySelector(selector);
+        if (!btn) return;
+        btn.addEventListener("click", onClick);
+        topbarButtonUnsubscribes.push(() => btn.removeEventListener("click", onClick));
+    };
+    bind('[data-topbar-action="run"]', () => {
+        void handleCommand({ action: "continue" }, services);
+    });
+    bind('[data-topbar-action="step"]', () => {
+        void handleCommand({ action: "step" }, services);
+    });
+    bind('[data-topbar-action="reset"]', () => {
+        void handleCommand({ action: "reset" }, services);
+    });
     // ⚠️ **「暂停」按钮**（STAGE-37 · v0.52 批 · 裁决 G）⇒ ⇒ 与调试视图
     // 那份**共用同一个 action** ⇒ ⇒ **一条路径** ⇒ ⇒ 不写第二套。
-    bar.querySelector('[data-topbar-action="pause"]')
-        ?.addEventListener("click", () => {
-            void handleCommand({ action: "pause" }, services);
-        });
+    //
+    // ⚠️ **v0.63 批**：调试视图里那份**撤掉**了 ⇒ ⇒ 暂停的**唯一**入口是这里
+    //   ⇒ ⇒ 界面**不再有**同一个动作的第二个入口。
+    bind('[data-topbar-action="pause"]', () => {
+        void handleCommand({ action: "pause" }, services);
+    });
     if (topbarStatsUnsubscribe) {
         topbarStatsUnsubscribe();
         topbarStatsUnsubscribe = null;
@@ -1278,21 +1339,21 @@ async function autoRenderTraceOnPause(services) {
  * @param {{commandRouter?: object}} services
  * @returns {Promise<object|null>}
  */
-async function downloadWholeTrace(services) {
+async function downloadWholeTrace(services, options = {}) {
     const router = services?.commandRouter;
     if (!router) return null;
+    // ⚠️ **源 / 格式可指派**（v0.63 批）⇒ ⇒ 「导出波形 (VCD)」之后点下载 ⇒ ⇒
+    //   下的是**整份波形**⇒ ⇒ 波形那条路**没有**被这次去重**砍掉**。
+    const source = String(options.source ?? TRACE_SOURCE.Execution);
+    const format = String(options.format ?? TRACE_FORMAT.Csv);
     const result = await collectTraceChunks(async (offset) => {
         const ev = await router.dispatchCommand(
-            Command.exportTrace(TRACE_SOURCE.Execution, TRACE_FORMAT.Csv, offset, 0),
+            Command.exportTrace(source, format, offset, 0),
         );
         return ev?.value ?? {};
     });
     if (!result.content) return null;
-    return downloadExportChunk({
-        source: TRACE_SOURCE.Execution,
-        format: TRACE_FORMAT.Csv,
-        chunk: result.content,
-    });
+    return downloadExportChunk({ source, format, chunk: result.content });
 }
 
 export async function handleCommand(detail, services) {
@@ -1316,9 +1377,25 @@ export async function handleCommand(detail, services) {
             case "step":
                 // ⚠️ **先退出连续模式**（裁决 O）⇒ ⇒ 否则下一轮 `Continue`
                 // 立刻把这一步盖掉 ⇒ ⇒ 「单步」在连续模式下**不可用**。
-                setRunState(stopRunState(getRunState()));
+                //
+                // ⚠️ **顺带记下「跑过」**（v0.63 批）⇒ ⇒ 程序离开过起点 ⇒ ⇒
+                //   顶栏那个按钮从「运行」切成「继续」。
+                setRunState(markStarted(stopRunState(getRunState())));
                 await commandRouter.dispatchCommand(Command.stepN(1));
                 break;
+            case "step-n": {
+                // ⚠️ **按步数单步**（v0.63 批 · 用户拍板「在反汇编窗口中增加一个
+                //   输入框和一个按钮，用于支持用户指定执行多少步」）⇒ ⇒ 契约层
+                //   **零变更**（`StepN { n }` 早就有）⇒ ⇒ 只是把 `n` 从界面拿。
+                //
+                // ⚠️ **归一在纯函数里**（`normalizeStepCount`）⇒ ⇒ 前端**不写**
+                //   第二份校验器 ⇒ ⇒ 非数 / 负数 / 0 归成 1（走 0 条 = 点了没
+                //   反应）⇒ ⇒ 太大归到 `u32` 上界（那是**域**，不是业务上限）。
+                const steps = normalizeStepCount(detail.params?.steps);
+                setRunState(markStarted(stopRunState(getRunState())));
+                await commandRouter.dispatchCommand(Command.stepN(steps));
+                break;
+            }
             case "step10":
                 // ⚠️ **与「单步」同一条路**（同裁决 O）⇒ ⇒ 10 条也是「走一段
                 // 然后停」⇒ ⇒ 连续模式必须让位。
@@ -1581,12 +1658,20 @@ export async function handleCommand(detail, services) {
                 break;
             }
             case "download-trace-local": {
-                // ⚠️ **「下载轨迹到本地」**（v0.62 批）⇒ ⇒ 把**整条**轨迹翻完
-                //   再落盘（不是第一块！）⇒ ⇒ 见 {@link downloadWholeTrace}。
+                // ⚠️ **「下载当前这份导出的全部内容」**（v0.63 批）⇒ ⇒ 源 / 格式
+                //   **跟着当前导出状态走**（默认 = 执行轨迹 CSV）⇒ ⇒ 「导出波形
+                //   (VCD)」之后点它 ⇒ ⇒ 下的是**整份波形**⇒ ⇒ 波形那条路**没有**
+                //   被这次去重**砍掉**。
+                //
+                // ⚠️ **默认值与视图层那个按钮的文案逐字一致**（`Execution` /
+                //   `Csv`）⇒ ⇒ 按钮上写的与实际下的**不可能**对不上。
+                const current = viewStore.getState("debug")?.debug?.export ?? null;
+                const source = String(current?.source ?? TRACE_SOURCE.Execution);
+                const format = String(current?.format ?? TRACE_FORMAT.Csv);
                 try {
-                    const result = await downloadWholeTrace(services);
+                    const result = await downloadWholeTrace(services, { source, format });
                     if (result) {
-                        setNote(`已下载 ${result.filename}（内核报告 ${result.total ?? "?"} 条轨迹）`);
+                        setNote(`已下载 ${result.filename}（内核报告 ${result.total ?? "?"} 条）`);
                     }
                 } catch (err) {
                     updateDebugState((prev) => ({
@@ -1938,6 +2023,10 @@ export async function loadProjectIntoKernel(services, project) {
     // ⚠️ **记下当前工程** ⇒ 「重新装载工程」按钮能再发一次同一个工程
     // （板级配置是**待生效**的 ⇒ 宿主在下一次 `LoadProject` 时才应用）。
     loadedProject = project;
+    // ⚠️ **新工程 = 新程序 ⇒ 运行态归零**（v0.63 批）⇒ ⇒ 顶栏那个按钮回到
+    //   「运行」（用户拍板的那条语义：「**当加载之后顶栏的运行应该显示运行**」）
+    //   ⇒ ⇒ 「跑过没有」这一格也归零 ⇒ ⇒ 不是上一段程序的历史。
+    setRunState(initialRunState());
     waveform.reset();
     // ⚠️ 新工程 = 新程序 ⇒ **上一个程序的反汇编**留在面板上就是错的
     // （同一个 D-45 的坑：状态必须跟着工程一起重建）。

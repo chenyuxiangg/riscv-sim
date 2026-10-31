@@ -472,56 +472,54 @@ describe("trace 导出入口", () => {
         router.close();
     });
 
-    test("next_offset < total 时有「继续导出」按钮", async () => {
+    // ⚠️ **v0.63 批**：「继续导出」那个按钮**撤掉**了 ⇒ ⇒ 它的作用（把分块
+    //   导出**往后翻**）被「下载轨迹到本地」**整份翻页**覆盖 ⇒ ⇒ 界面上**不再**
+    //   有第二个「导出」入口 ⇒ ⇒ 用户不会对着两个按钮猜。
+    test("「继续导出」按钮**不在**了（分页由「下载轨迹到本地」整份翻完）", async () => {
         const { router } = await setup();
         await router.dispatchCommand(
             Command.exportTrace(TRACE_SOURCE.Execution, TRACE_FORMAT.Csv, 0, 0),
-        );
-        const button = dom.document.querySelector('[data-action="export-trace"][data-continue="1"]');
-        assert.ok(button, "没有「继续导出」按钮");
-        const nextOffset = Number(button.dataset.offset);
-        const total = Number(
-            dom.document.querySelector("[data-trace-progress]").textContent.match(/\/\s*(\d+)/)[1],
-        );
-        assert.ok(nextOffset > 0 && nextOffset < total, "续导偏移不自洽");
-        router.close();
-    });
-
-    test("点「继续导出」发出的命令的 offset 等于上一次的 next_offset", async () => {
-        const { router, transport } = await setup();
-        const first = await router.dispatchCommand(
-            Command.exportTrace(TRACE_SOURCE.Execution, TRACE_FORMAT.Csv, 0, 0),
-        );
-        const nextOffset = first.value.next_offset;
-        assert.ok(nextOffset < first.value.total, "这个用例需要一个可续导的回复");
-
-        const button = dom.document.querySelector('[data-action="export-trace"][data-continue="1"]');
-        assert.ok(button, "没有「继续导出」按钮");
-        clickAndDispatch(router, button);
-
-        assert.equal(transport.sent.length, 2, "续导命令没有发出去");
-        const payload = transport.sent[1].message.payload.Command;
-        assert.equal(payload.ExportTrace.offset, nextOffset, "续导的 offset 不是上一次的 next_offset");
-        assert.equal(payload.ExportTrace.source, TRACE_SOURCE.Execution);
-        assert.equal(payload.ExportTrace.format, TRACE_FORMAT.Csv);
-        router.close();
-    });
-
-    test("导出到末尾后不再有「继续导出」按钮", async () => {
-        const { router } = await setup();
-        await router.dispatchCommand(
-            Command.exportTrace(TRACE_SOURCE.Execution, TRACE_FORMAT.Csv, 0, 0),
-        );
-        const button = dom.document.querySelector('[data-action="export-trace"][data-continue="1"]');
-        assert.ok(button);
-        const nextOffset = Number(button.dataset.offset);
-        await router.dispatchCommand(
-            Command.exportTrace(TRACE_SOURCE.Execution, TRACE_FORMAT.Csv, nextOffset, 0),
         );
         assert.equal(
             dom.document.querySelector('[data-action="export-trace"][data-continue="1"]'),
             null,
-            "已经导完了还提示可以继续",
+            "「继续导出」按钮还在（应当由整份下载覆盖）",
+        );
+        router.close();
+    });
+
+    test("导出到末尾后**仍然没有**「继续导出」按钮（那个按钮整个不存在）", async () => {
+        const { router } = await setup();
+        await router.dispatchCommand(
+            Command.exportTrace(TRACE_SOURCE.Execution, TRACE_FORMAT.Csv, 0, 0),
+        );
+        await router.dispatchCommand(
+            Command.exportTrace(TRACE_SOURCE.Execution, TRACE_FORMAT.Csv, 0, 0),
+        );
+        assert.equal(
+            dom.document.querySelector('[data-action="export-trace"][data-continue="1"]'),
+            null,
+            "界面上又冒出「继续导出」了",
+        );
+        router.close();
+    });
+
+    test("「下载轨迹到本地」**一个**按钮就够（界面上没有第二个下载入口）", async () => {
+        const { router } = await setup();
+        await router.dispatchCommand(
+            Command.exportTrace(TRACE_SOURCE.Execution, TRACE_FORMAT.Csv, 0, 0),
+        );
+        const body = dom.document.querySelector('[data-view-body="debug"]');
+        assert.ok(body, "调试视图体未挂载");
+        assert.equal(
+            body.querySelectorAll('[data-action="download-trace-local"]').length,
+            1,
+            "整份下载的入口**必须只有一个**（否则用户不知道该点哪个）",
+        );
+        assert.equal(
+            body.querySelectorAll('[data-action="download-trace"]').length,
+            0,
+            "「下载这一块」那个按钮**应当撤掉**（用户拍板：只留整份下载）",
         );
         router.close();
     });
