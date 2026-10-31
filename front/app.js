@@ -1954,7 +1954,13 @@ export async function handleCommand(detail, services) {
                 const expectedRevision = state.memoryMap
                     ? Number(state.memoryMap.revision ?? 0)
                     : null;
-                const plan = planMemoryMapUpdate(base, description);
+                // ⚠️ **用户的板还挂着 ⇒ ⇒ 一律整份**（STAGE-44 施工期实测）：
+                // 差量的基底是**生效图**，而正在被改的是**用户的板** ⇒ ⇒
+                // 「改回生效图那样」会被算成「没有改动」⇒ ⇒ 命令不发 ⇒ ⇒
+                // **用户的板永远停在旧的那份**。
+                const plan = planMemoryMapUpdate(base, description, {
+                    pending: state.memoryMap?.pending === true,
+                });
                 if (plan.mode === "none") {
                     // ⚠️ **什么都没改 ⇒ 不发命令**（免得白涨一次修订号）。
                     setNote("板级内存图没有改动 —— 不用提交");

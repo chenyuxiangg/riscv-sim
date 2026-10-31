@@ -162,7 +162,7 @@ const DEVICE_DEFAULTS = Object.freeze({
 });
 
 /** 器件类型 → 显示名。 */
-const DEVICE_LABELS = Object.freeze({
+export const DEVICE_LABELS = Object.freeze({
     gpio: "GPIO",
     uart16550: "UART16550",
     clint: "CLINT",
@@ -521,6 +521,35 @@ export function nextFreeBase(draft, kind) {
 }
 
 /**
+ * 一个**还没被用过**的器件 id（STAGE-44 · 修「连点两次 + 器件 ⇒ 两个同 id」）。
+ *
+ * ⚠️ **为什么需要**：器件 id **必须唯一**（契约层 V-9 ⇒ 撞了内核报
+ * `E_PLT_08`）⇒ ⇒ 而 `newDevice("gpio")` 的默认 id 恒是 `GPIO0` ⇒ ⇒
+ * 在**已经有**一个 GPIO0 的板上再点一次「+ 器件」⇒ ⇒ **两个 GPIO0**
+ * ⇒ ⇒ 那块板**永远装不上**（提交必被内核拒）⇒ ⇒ 用户**看不出**是哪错了。
+ *
+ * ⚠️ **判据 = 前缀 + 最小未用序号**（`GPIO0` → `GPIO1` → …）⇒ ⇒ 可预期。
+ *
+ * @param {object} draft
+ * @param {string} kind
+ * @returns {string}
+ */
+export function uniqueDeviceId(draft, kind) {
+    const regions = Array.isArray(draft?.regions) ? draft.regions : [];
+    const used = new Set(
+        regions
+            .map((region) => String(region?.device?.id ?? ""))
+            .filter((id) => id.length > 0),
+    );
+    const fallback = String(DEVICE_DEFAULTS[kind]?.id ?? "DEV0");
+    const prefix = fallback.replace(/\d+$/, "") || "DEV";
+    for (let i = 0; ; i += 1) {
+        const candidate = `${prefix}${i}`;
+        if (!used.has(candidate)) return candidate;
+    }
+}
+
+/**
  * 草稿 + 一个新段 → **新草稿**（不修改原草稿）。
  *
  * @param {object} draft
@@ -531,7 +560,11 @@ export function addRegion(draft, kind) {
     const next = cloneDraft(draft ?? defaultDraft());
     const base = nextFreeBase(next, kind);
     if (kind === "peripheral") {
-        next.regions.push({ kind: "peripheral", base, device: newDevice("gpio") });
+        const device = newDevice("gpio");
+        // ⚠️ **id 必须不重**（V-9）⇒ ⇒ 否则内核报 `E_PLT_08` ⇒ ⇒ 那块板
+        // **永远装不上**（STAGE-44 施工期实测撞见）。
+        device.id = uniqueDeviceId(next, "gpio");
+        next.regions.push({ kind: "peripheral", base, device });
         return next;
     }
     const size = kind === "rom" ? "1048576" : "8388608";
@@ -835,8 +868,19 @@ export function diffMemoryMapOps(baseDescription, draftDescription) {
  * @param {object|null|undefined} draftDescription — 草稿转成的线上描述
  * @returns {{mode: "replace"|"patch"|"none", ops: Array<object>}}
  */
-export function planMemoryMapUpdate(baseDescription, draftDescription) {
+export function planMemoryMapUpdate(baseDescription, draftDescription, options = {}) {
     if (!baseDescription) return { mode: "replace", ops: [] };
+    // ⚠️ **用户的板还挂着（待生效）⇒ ⇒ 一律走整份**（STAGE-44 施工期实测）。
+    //
+    // ⚠️ **为什么**：差量的**基底 = 当前生效的图**（内核那边也是这个基底）
+    // ⇒ ⇒ 而**正在被改的那份**是**用户的板**（它 ≠ 生效图）⇒ ⇒ 于是
+    // 「把草稿改回生效图那样」这件事 ⇒ ⇒ 差量算出来是「**没有改动**」
+    // ⇒ ⇒ 命令**根本不发** ⇒ ⇒ **用户的板永远停在旧的那份** ⇒ ⇒
+    // 「删掉一个还没生效的器件」这种操作**静默丢失**。
+    //
+    // ⚠️ **判据来自内核**（`memory.map` 事件的 `pending` 标志）⇒ ⇒ 前端
+    // **不**自己猜「有没有挂着」。
+    if (options.pending === true) return { mode: "replace", ops: [] };
     if (!sameMemoryMapMetadata(baseDescription, draftDescription)) {
         return { mode: "replace", ops: [] };
     }
@@ -1501,7 +1545,7 @@ function field({ field: name, value, label, hex = null, extra = "" }) {
  * @param {object} options
  * @returns {string}
  */
-function regionField({ index, name, label, value, extra = "" }) {
+export function regionField({ index, name, label, value, extra = "" }) {
     return (
         `<label class="mmap-field"><span>${escapeHtml(label)}</span>` +
         `<input type="text" inputmode="numeric" data-mmap-region-field="${escapeHtml(name)}" ` +
@@ -1515,7 +1559,7 @@ function regionField({ index, name, label, value, extra = "" }) {
  * @param {object} options
  * @returns {string}
  */
-function deviceField({ index, name, label, value }) {
+export function deviceField({ index, name, label, value }) {
     return (
         `<label class="mmap-field"><span>${escapeHtml(label)}</span>` +
         `<input type="text" inputmode="numeric" data-mmap-device-field="${escapeHtml(name)}" ` +
@@ -1526,12 +1570,17 @@ function deviceField({ index, name, label, value }) {
 /**
  * 器件类型的下拉框。
  *
+ * ⚠️ **`kinds` 是「可选的类型名」**（裁决 H ⇒ ⇒ 来自
+ * [`availableDeviceKinds`]：前端可实例化集合 ∩ 内核已实现集合）
+ * ⇒ ⇒ **不给**就退回前端那份（兜底）。
+ *
  * @param {number} index
  * @param {string} current
+ * @param {string[]} [kinds]
  * @returns {string}
  */
-function deviceKindSelect(index, current) {
-    const options = DEVICE_KINDS.map((kind) => {
+export function deviceKindSelect(index, current, kinds = DEVICE_KINDS) {
+    const options = kinds.map((kind) => {
         const selected = kind === current ? " selected" : "";
         return `<option value="${escapeHtml(kind)}"${selected}>${escapeHtml(DEVICE_LABELS[kind] ?? kind)}</option>`;
     }).join("");
@@ -1543,13 +1592,36 @@ function deviceKindSelect(index, current) {
 }
 
 /**
+ * **可实例化的器件类型**（STAGE-44 · 裁决 H）。
+ *
+ * ⚠️ **判据 = 「前端可实例化集合」∩「内核已实现集合」** ⇒ ⇒ 前端**不再
+ * 自说自话** ⇒ ⇒ 界面上**不可能**出现「内核造不出来的那种器件」。
+ *
+ * ⚠️ **内核的类型表还没到 ⇒ 退回前端那份**（兜底）⇒ ⇒ 那是**临时**状态
+ * ⇒ ⇒ 一旦内核那张表到了，这个集合**自动**收窄。
+ *
+ * @param {Array<object>|null|undefined} kernelTypes — `DeviceTypeInfo` 列表
+ * @returns {string[]} 可选的类型名
+ */
+export function availableDeviceKinds(kernelTypes) {
+    const list = Array.isArray(kernelTypes) ? kernelTypes : null;
+    if (list === null) {
+        // ⚠️ **还没收到内核的类型表** ⇒ ⇒ 退回前端那份（兜底）。
+        return [...DEVICE_KINDS];
+    }
+    const implemented = new Set(list.map((t) => String(t?.kind ?? "")));
+    return DEVICE_KINDS.filter((kind) => implemented.has(kind));
+}
+
+/**
  * 一个外设窗口的行。
  *
  * @param {object} region
  * @param {number} index
+ * @param {string[]} [kinds] — 可选的类型名（裁决 H · 默认退回前端那份）
  * @returns {string}
  */
-function renderPeripheralRow(region, index) {
+function renderPeripheralRow(region, index, kinds = DEVICE_KINDS) {
     const device = region?.device ?? {};
     const kindName = String(device.device ?? "gpio");
     const paramFields = deviceParams(kindName).map((p) => deviceField({
@@ -1561,7 +1633,7 @@ function renderPeripheralRow(region, index) {
     return `
         <tr data-mmap-row="${index}" data-mmap-row-kind="peripheral">
             <td>${regionField({ index, name: "base", label: "基址 base", value: region.base ?? "0", extra: "data-mm-base" })}</td>
-            <td>${deviceKindSelect(index, kindName)}</td>
+            <td>${deviceKindSelect(index, kindName, kinds)}</td>
             <td>
                 ${deviceField({ index, name: "id", label: "器件 id", value: device.id ?? "" })}
                 ${paramFields}
@@ -1636,10 +1708,13 @@ export function renderMemoryMapPanel(state) {
         `</p>`;
 
     const regions = Array.isArray(draft.regions) ? draft.regions : [];
+    // ⚠️ **类型下拉的选项** = 「前端可实例化」∩「内核已实现」（裁决 H）
+    // ⇒ ⇒ 前端**不再**自说自话 ⇒ ⇒ 内核没有的类型**选不出来**。
+    const kinds = availableDeviceKinds(state?.deviceTypes);
     const memoryRows = [];
     const peripheralRows = [];
     regions.forEach((region, index) => {
-        if (String(region?.kind) === "peripheral") peripheralRows.push(renderPeripheralRow(region, index));
+        if (String(region?.kind) === "peripheral") peripheralRows.push(renderPeripheralRow(region, index, kinds));
         else memoryRows.push(renderMemoryRow(region, index));
     });
 

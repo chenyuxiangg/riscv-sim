@@ -194,6 +194,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "traceExport",
     "debugDedup",
     "deviceRegistry",
+    "boardTree",
     "readback",
 ]);
 
@@ -1546,6 +1547,50 @@ const BV_MEMORY_MAP_PROBE = `(() => {
 })()`;
 
 /**
+/**
+ * 产品树 = 板的编辑面（STAGE-44 · v0.68 · B-122 ~ B-129）。
+ *
+ * ⚠️ **两个探针**（**两个视图**）：树在**产品视图**、草稿的表在**编辑器
+ * 视图** ⇒ ⇒ 判据要**跨视图**读 ⇒ ⇒ 分开探。
+ */
+const BV_BOARD_TREE_PROBE = `(() => {
+  const body = document.querySelector('[data-view-body="product"]');
+  if (!body) return null;
+  const nodes = Array.from(body.querySelectorAll("[data-device-node]")).map((el) => ({
+    id: String(el.getAttribute("data-device-node") || ""),
+    kind: String(el.getAttribute("data-device-node-kind") || ""),
+    pending: el.getAttribute("data-device-node-pending") || "",
+  }));
+  const instances = Array.from(body.querySelectorAll("[data-device-instance]")).map((el) => ({
+    id: String(el.getAttribute("data-device-instance") || ""),
+    base: el.getAttribute("data-device-instance-base") || "",
+  }));
+  return {
+    treePresent: Boolean(body.querySelector("[data-board-tree]")),
+    nodes,
+    instances,
+    addPresent: Boolean(body.querySelector('[data-action="add-device"]')),
+    submitPresent: Boolean(body.querySelector('[data-action="submit-board"]')),
+    removeCount: body.querySelectorAll('[data-action="remove-device"]').length,
+  };
+})()`;
+
+/** 编辑器（`#/memory-map`）里那张「外设窗口」表 —— **草稿**。 */
+const BV_BOARD_EDITOR_PROBE = `(() => {
+  const body = document.querySelector('[data-view-body="memory-map"]');
+  if (!body) return null;
+  const rows = Array.from(body.querySelectorAll('[data-mmap-row-kind="peripheral"]'));
+  return {
+    rows: rows.length,
+    ids: rows.map((el) => {
+      const input = el.querySelector('[data-mmap-device-field="id"]');
+      return input ? String(input.getAttribute("value") || "") : "";
+    }),
+    submitPresent: Boolean(body.querySelector('[data-action="submit-memory-map"]')),
+  };
+})()`;
+
+/**
  * 器件类型注册表 + 逐实例状态（STAGE-43 · v0.66 · B-115 ~ B-117）。
  *
  * ⚠️ **读的是产品视图那两张卡** ⇒ ⇒ 断的是「内核 ⇒ 事件 ⇒ 视图状态 ⇒
@@ -1927,6 +1972,158 @@ async function runDeviceRegistrySection(cdp, opts) {
 }
 
 /**
+ * 产品树 = 板的编辑面（STAGE-44 · v0.68 · B-122 ~ B-129）。
+ *
+ * ⚠️ **跨两个视图**：树在**产品视图**、草稿的表在**编辑器视图** ⇒ ⇒
+ * 判据要**来回切** ⇒ ⇒ 这正是「同一份草稿」的证据。
+ *
+ * ⚠️ **全部走真 UI 动作**（裁决 M）⇒ ⇒ ⛔ **不走脚本口**。
+ */
+async function runBoardTreeSection(cdp, opts) {
+    /** @type {{name: string, ok: boolean, detail: string}[]} */
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+
+    /** 等一个条件成立（轮询探针）。 */
+    async function waitFor(fn, timeoutMs) {
+        const deadline = Date.now() + timeoutMs;
+        let last = null;
+        while (Date.now() < deadline) {
+            last = await fn();
+            if (last) return last;
+            await sleep(250);
+        }
+        return last;
+    }
+
+    // -- ① 切到产品视图，等那棵树挂上 ----------------------------------------
+    await runEffect(cdp, 'location.hash = "#/product";');
+    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
+    let tree = await waitFor(async () => {
+        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
+        return value?.treePresent ? value : null;
+    }, opts.timeoutMs);
+    if (!tree?.treePresent) {
+        return {
+            skipped: false,
+            checks: [{
+                name: "产品视图挂上了「产品树」（= 草稿的派生视图）",
+                ok: false,
+                detail: "等不到那棵树（前端没渲染？）",
+            }],
+        };
+    }
+    add("产品视图挂上了「产品树」（= 草稿的派生视图）", true,
+        `树里 ${tree.nodes.length} 个器件节点`);
+
+    // -- ② 真点「+ 器件」⇒ 树上多一个节点 ------------------------------------
+    const nodesBefore = tree.nodes.length;
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-view-body="product"] [data-action="add-device"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    tree = await waitFor(async () => {
+        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
+        return value && value.nodes.length > nodesBefore ? value : null;
+    }, opts.timeoutMs);
+    add(
+        "B-123 · 树上**真点**「+ 器件」⇒ ⇒ 树上多了一个器件节点",
+        tree?.nodes.length === nodesBefore + 1,
+        `点之前 ${nodesBefore} 个 ⇒ 点之后 ${tree?.nodes.length ?? "?"} 个`,
+    );
+
+    // -- ③ 切到编辑器 ⇒ 那张「外设窗口」表**同步**多一行 ----------------------
+    //
+    // ⚠️ **同一份草稿** ⇒ ⇒ 树上加的 ⇒ ⇒ 编辑器那张表**立刻**就有。
+    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    let editor = await waitFor(async () => {
+        const value = await awaitEval(cdp, BV_BOARD_EDITOR_PROBE);
+        return value && value.rows > 0 ? value : null;
+    }, opts.timeoutMs);
+    const rowsBefore = editor?.rows ?? 0;
+    add(
+        "B-124 · 树上加的器件 ⇒ **编辑器那张「外设窗口」表同步多一行**（同一份草稿）",
+        rowsBefore === nodesBefore + 1,
+        `树上有 ${nodesBefore + 1} 个器件 ⇒ 编辑器那张表 ${rowsBefore} 行`,
+    );
+
+    // -- ④ 真点「提交」⇒ ⇒ 真内核接受 ⇒ ⇒ 逐实例清单多一行 -------------------
+    const instancesBefore = tree.instances.length;
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-view-body="memory-map"] [data-action="submit-memory-map"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(800);
+    await runEffect(cdp, 'location.hash = "#/product";');
+    tree = await waitFor(async () => {
+        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
+        return value && value.instances.length > instancesBefore ? value : null;
+    }, opts.timeoutMs);
+    add(
+        "B-125 · 提交 ⇒ ⇒ **真内核接受** ⇒ ⇒ 逐实例清单多了一条",
+        tree?.instances.length === instancesBefore + 1,
+        `提交前 ${instancesBefore} 条 ⇒ 提交后 ${tree?.instances.length ?? "?"} 条`
+        + `（新那条：${JSON.stringify(tree?.instances?.[tree.instances.length - 1] ?? null)}）`,
+    );
+    add(
+        "B-126 · 新加的器件**标着「待生效」**（还没进内核当前生效的图）",
+        tree?.nodes.some((n) => n.pending === "1") === true,
+        `树的节点：${JSON.stringify(tree?.nodes ?? [])}`,
+    );
+
+    // -- ⑤ 真点「删除」⇒ ⇒ 两处同步少一行 ⇒ ⇒ 提交 ⇒ ⇒ 逐实例清单少一条 ------
+    await runEffect(cdp, `(() => {
+        const buttons = document.querySelectorAll('[data-view-body="product"] [data-action="remove-device"]');
+        const last = buttons[buttons.length - 1];
+        if (!last) return "no-button";
+        last.click();
+        return "clicked";
+    })()`);
+    tree = await waitFor(async () => {
+        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
+        return value && value.nodes.length === nodesBefore ? value : null;
+    }, opts.timeoutMs);
+    add(
+        "B-127 · 树上**真点**「删除」⇒ ⇒ 树上少了一个器件节点",
+        tree?.nodes.length === nodesBefore,
+        `删完 ${tree?.nodes.length ?? "?"} 个节点（原来 ${nodesBefore} 个）`,
+    );
+    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    editor = await waitFor(async () => {
+        const value = await awaitEval(cdp, BV_BOARD_EDITOR_PROBE);
+        return value && value.rows === nodesBefore ? value : null;
+    }, opts.timeoutMs);
+    add(
+        "B-128 · 删完 ⇒ ⇒ **编辑器那张表同步少一行**（同一份草稿）",
+        editor?.rows === nodesBefore,
+        `编辑器那张表 ${editor?.rows ?? "?"} 行（原来 ${rowsBefore} 行）`,
+    );
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-view-body="memory-map"] [data-action="submit-memory-map"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(800);
+    await runEffect(cdp, 'location.hash = "#/product";');
+    tree = await waitFor(async () => {
+        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
+        return value && value.instances.length === nodesBefore ? value : null;
+    }, opts.timeoutMs);
+    add(
+        "B-129 · 提交 ⇒ ⇒ 逐实例清单少了一条（真内核删掉了那个实例）",
+        tree?.instances.length === nodesBefore,
+        `删前 ${nodesBefore} 条 ⇒ 删后 ${tree?.instances.length ?? "?"} 条`,
+    );
+
+    return { skipped: false, checks };
+}
+
+/**
  * 板档案（STAGE-15 · 验收 **T-3**）的探针：**只读数据属性**，不靠文案。
  *
  * ⚠️ 持久化状态从 `data-mmap-archive-status` 读 ⇒ 前端若把它写成
@@ -2081,7 +2278,10 @@ async function runBoardArchiveSection(cdp, opts) {
     // -- ③ 点「保存当前板」⇒ 档案里多一块 ----------------------------------
     const submittedCanonical = String(await awaitEval(cdp, `(() => {
         const cmds = Array.isArray(window.__bvCmds) ? window.__bvCmds : [];
-        const cmd = cmds.find((c) => String(c.action || "") === "submit-memory-map");
+        // ⚠️ **抓最后一条**（不是第一条）：前面可能还有别的段也发过同名命令
+        // （STAGE-44 的 boardTree 段就发 ⇒ ⇒ 第一条是**那一段**的 ⇒ ⇒
+        // 拿它去跟这一段的存档比 ⇒ ⇒ **比的不是同一份** ⇒ ⇒ 假红）。
+        const cmd = cmds.filter((c) => String(c.action || "") === "submit-memory-map").pop();
         if (!cmd) return "";
         const canon = ${BV_CANONICAL_JSON};
         return canon(cmd.params && cmd.params.description ? cmd.params.description : null);
@@ -7764,6 +7964,16 @@ async function main() {
         const deviceRegistry = await runSection("deviceRegistry", () => runDeviceRegistrySection(cdp, opts));
         registerSection("deviceRegistry", deviceRegistry.checks, {
             title: "器件中间层检查（类型表非空 · 逐实例表非空 · 基址与内存映射表对得上）",
+        });
+
+        // -- the PRODUCT TREE as the board editor (STAGE-44 · v0.68) ----------
+        // ⚠️ **必须排在「换一张只有 RAM 的板」那段之前** ⇒ ⇒ 那段会把板上
+        //    **没有外设** ⇒ ⇒ 本段要验的「加一个器件」就**无从谈起**。
+        // ⚠️ **排在 `deviceRegistry` 之后** ⇒ ⇒ 那段验的是**原封不动**的
+        //    逐实例清单 ⇒ ⇒ 本段改了板**不该**影响它。
+        const boardTree = await runSection("boardTree", () => runBoardTreeSection(cdp, opts));
+        registerSection("boardTree", boardTree.checks, {
+            title: "产品树编辑面检查（树上加 / 删器件 ⇒ 编辑器那张表同步 ⇒ 真内核接受 ⇒ 逐实例清单跟着变）",
         });
 
         // -- the BREAKPOINT UI (STAGE-35 · v0.50 批 · B-19 ~ B-26) --------

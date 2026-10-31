@@ -82,6 +82,8 @@ import {
     renderDeviceInstanceCard,
     renderDeviceTypeCard,
 } from "./components/device-registry.js";
+// ⚠️ **产品树 = 草稿的派生视图**（STAGE-44 · v0.68 · 裁决 A）⇒ ⇒ 树与板**同源**。
+import { renderBoardTree } from "./components/board-tree.js";
 
 // ---------------------------------------------------------------------------
 // ViewComponent shape (LLD §2.1.1)
@@ -175,6 +177,33 @@ function emitCommand(action, viewId, params = null) {
 // productTreeView — shows the M-14 mapping table (FR-01/02/03)
 // ---------------------------------------------------------------------------
 
+/**
+ * 产品视图的面板（挂载时记下 ⇒ ⇒ 采集与渲染看的是**同一份**东西）。
+ *
+ * ⚠️ **为什么需要它**：树上的参数输入框用的是**编辑器那套钩子**
+ * （`data-mmap-device-field` / `data-mmap-index`）⇒ ⇒ 采集器
+ * （`collectDraft`）要拿到**它们的根** ⇒ ⇒ 就是这块面板。
+ */
+let productPanel = null;
+
+/**
+ * 草稿改了 ⇒ ⇒ **两个视图一起重渲染**（STAGE-44 · 裁决 C）。
+ *
+ * ⚠️ **为什么两个都要**：树与内存映射表**共用同一份草稿** ⇒ ⇒ 改一边 ⇒ ⇒
+ * 另一边**必须**跟着变 ⇒ ⇒ 否则同一个量**显示两处**且**可能不同步** ⇒ ⇒
+ * 那正是 D-173 那一族问题。
+ */
+function publishBoardAndMemoryMap() {
+    window.dispatchEvent(new CustomEvent("riscv:render", {
+        detail: {
+            viewId: "product",
+            type: "update",
+            state: viewStore.getState("product"),
+        },
+    }));
+    publishMemoryMapState();
+}
+
 const productTreeView = register({
     id: "product",
     channels: ["sim"],
@@ -187,16 +216,23 @@ const productTreeView = register({
         // ⚠️ **「没有数据」与「数据是空的」必须分得开**：没收到事件 ⇒
         // 「尚无内存图数据」；收到了但 0 段 ⇒ 「当前生效的内存图为空」。
         const memoryMap = state?.memoryMap ?? null;
-        const tree = state?.tree ?? { root: { name: "未加载", children: [] } };
+        // ⚠️ **树 = 草稿的派生视图**（STAGE-44 · 裁决 A）⇒ ⇒ **不再读**
+        // `state.tree`（那是 `Project.tree` ⇒ ⇒ 前端造、内核不造的那份）
+        // ⇒ ⇒ 树与板**同源**。
+        const boardState = viewStore.getState("memory-map") ?? {};
+        const draft = currentDraft(boardState);
         // ⚠️ **折叠状态住视图状态**（裁决 C）⇒ ⇒ 这里**只读** ⇒ ⇒ 视图层
         // 不持有第二份（与断点列表同一条规矩）。
         const collapsed = new Set(Array.isArray(state?.collapsed) ? state.collapsed : []);
+        const tree = renderBoardTree({
+            draft,
+            deviceTypes: state?.deviceTypes ?? boardState.deviceTypes ?? null,
+            instances: state?.deviceInstances ?? boardState.deviceInstances ?? null,
+            collapsed,
+        });
         return `
             <div class="cards">
-                <section class="card">
-                    <div class="row"><h3>产品树</h3><span class="tag">点 ▸ / ▼ 折叠 · 展开</span></div>
-                    <div class="tree" data-product-tree>${renderTree(tree.root, collapsed, [], 0)}</div>
-                </section>
+                ${tree}
                 <section class="card">
                     <div class="row"><h3>内存映射 (M-14)</h3><span class="tag">当前生效</span></div>
                     ${renderMemoryMapTable(memoryMap)}
@@ -228,7 +264,9 @@ const productTreeView = register({
         }
         // 「编辑板级内存图」⇒ 跳到板级内存图编辑器（独立工作面）。
         const el = ev.target?.closest?.("[data-action]");
-        if (el?.dataset?.action === "go-memory-map") {
+        const action = el?.dataset?.action ?? "";
+        const index = Number(el?.dataset?.mmapIndex ?? -1);
+        if (action === "go-memory-map") {
             route("#/memory-map");
             return "cmd-go-memory-map";
         }
@@ -236,7 +274,7 @@ const productTreeView = register({
         //
         // ⚠️ **折叠状态住视图状态** ⇒ ⇒ 这里写的是 `product.collapsed`
         // ⇒ ⇒ 切走视图再切回来**折叠还在** ⇒ ⇒ ⛔ 不在 DOM 上私藏。
-        if (el?.dataset?.action === "toggle-tree") {
+        if (action === "toggle-tree") {
             const key = String(el.dataset.treeKey ?? "");
             if (!key) return undefined;
             const prev = viewStore.getState("product")?.collapsed ?? [];
@@ -245,6 +283,33 @@ const productTreeView = register({
             viewStore.setState("product", (state) => ({ ...state, collapsed: [...set] }));
             publishProductState();
             return "cmd-toggle-tree";
+        }
+        // ⚠️ **STAGE-44 · 裁决 D / E**：树上的**加 / 删**与编辑器**共用那套
+        // 纯函数** ⇒ ⇒ **不写第二套** ⇒ ⇒ 字段名与钩子**逐字同形**。
+        const boardState = viewStore.getState("memory-map") ?? {};
+        const boardRoot = productPanel;
+        if (action === "add-device") {
+            // ⚠️ 先采集再改：用户正在敲的数**不许**被这次点击冲掉。
+            const base = boardRoot ? collectDraft(boardRoot, currentDraft(boardState)) : currentDraft(boardState);
+            const draft = addRegion(base, "peripheral");
+            viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
+            publishBoardAndMemoryMap();
+            return "cmd-add-device";
+        }
+        if (action === "remove-device") {
+            const base = boardRoot ? collectDraft(boardRoot, currentDraft(boardState)) : currentDraft(boardState);
+            const draft = removeRegion(base, index);
+            viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
+            publishBoardAndMemoryMap();
+            return "cmd-remove-device";
+        }
+        if (action === "submit-board") {
+            // ⚠️ **同一个**提交路径（裁决 E）⇒ ⇒ 视图层只发信号 ⇒ ⇒ app 层
+            // 那条 `submit-memory-map` 分支**一个字不改**。
+            const draft = boardRoot ? collectDraft(boardRoot, currentDraft(boardState)) : currentDraft(boardState);
+            return emitCommand("submit-memory-map", "product", {
+                description: draftToDescription(draft),
+            });
         }
         // ⚠️ **v0.58 批：这里**没有** `load-image` 分支了** ⇒ ⇒ 产品视图里
         // **不再有**加载入口 ⇒ ⇒ 装载入口**只有页头那一处**（用户定案
@@ -255,6 +320,9 @@ const productTreeView = register({
         // No-op until M-18 hooks land.
     },
     mountFor(el) {
+        // ⚠️ 记下这块面板 ⇒ ⇒ 树上的参数输入框能被**同一个**采集器读到
+        // （STAGE-44 · 裁决 D）。
+        productPanel = el;
         el.addEventListener("click", (ev) => productTreeView.onCommand(ev));
         // ⚠️ **v0.58 批：这里**不再**挂文件选择器的 `change`** ⇒ ⇒ 产品视图
         // 里**没有** `<input type="file">` 了 ⇒ ⇒ 「读字节 + 存 pending」
@@ -281,66 +349,6 @@ const productTreeView = register({
 // `pending` ⇒ ⇒ 用户在**一处**装完（成功 ⇒ ⇒ `pending` 被清掉）⇒ ⇒ 到
 // **另一处**再点 ⇒ ⇒ 撞上「没有待加载的文件」⇒ ⇒ 而那次装载**其实成功
 // 了**⇒ ⇒ 界面在骗人。⇒ ⇒ 一个功能**只留一个入口**，状态就不会有两套。
-
-/**
- * 产品树节点的**稳定键**（折叠状态的元素）。
- *
- * ⚠️ **键 = 路径**（每一段是「组件 id，没有就退回名字」）⇒ ⇒ 同一个键
- * 在**重渲染之间不变** ⇒ ⇒ 折叠状态住在视图状态里才找得回来。
- *
- * ⚠️ **同名兄弟不串**：键里带上**序号** ⇒ ⇒ 两个都叫 `UART0` 的节点
- * 是**两个不同的键** ⇒ ⇒ 折叠其中一个不会连带另一个。
- *
- * @param {string[]} path — 祖先的键（从根算起）
- * @param {object|null|undefined} node
- * @param {number} index — 在同一层里的序号
- * @returns {string}
- */
-function treeNodeKey(path, node, index) {
-    const label = node?.component_id
-        ? String(node.component_id)
-        : String(node?.name ?? "");
-    return [...path, `${label}#${index}`].join("›");
-}
-
-/**
- * 渲染**可折叠**的产品树。
- *
- * ⚠️ **折叠状态住视图状态**（STAGE-35 · v0.50 批 · 裁决 C）⇒ ⇒ **不是**
- * DOM 私藏 ⇒ ⇒ 切走视图再切回来**折叠还在** ⇒ ⇒ ⛔ 不用 `hidden` class
- * 私藏（那样状态就只存在于 DOM 里 ⇒ ⇒ 重渲染即丢）。
- *
- * @param {object|null|undefined} node
- * @param {Set<string>} collapsed — 已折叠节点的键集合
- * @param {string[]} path — 祖先的键
- * @param {number} index — 在同一层里的序号
- * @returns {string} HTML 片段
- */
-function renderTree(node, collapsed, path = [], index = 0) {
-    if (!node) return "";
-    const key = treeNodeKey(path, node, index);
-    const children = Array.isArray(node.children) ? node.children : [];
-    const hasKids = children.length > 0;
-    const isCollapsed = collapsed.has(key);
-    const kids = hasKids && !isCollapsed
-        ? `<div class="kids">${children
-            .map((child, i) => renderTree(child, collapsed, [...path, key], i))
-            .join("")}</div>`
-        : "";
-    const id = node.component_id
-        ? `<span class="sub">(${escapeHtml(node.component_id)})</span>`
-        : "";
-    return `
-        <div class="node">
-            <span class="caret${hasKids ? "" : " leaf"}" data-action="toggle-tree" data-tree-key="${escapeHtml(key)}"
-                role="button" tabindex="0" aria-expanded="${hasKids ? (isCollapsed ? "false" : "true") : "false"}"
-                title="${hasKids ? (isCollapsed ? "展开" : "折叠") : "（叶子节点）"}">${isCollapsed ? "▶" : "▼"}</span>
-            <span class="name">${escapeHtml(node.name ?? "")}</span>
-            ${id}
-        </div>
-        ${kids}
-    `;
-}
 
 // ---------------------------------------------------------------------------
 // memoryMapView — 板级内存图编辑器（STAGE-14 · v0.29）。

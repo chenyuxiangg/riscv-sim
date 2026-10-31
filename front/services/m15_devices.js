@@ -66,7 +66,15 @@ export function wireDevices(commandRouter) {
      * ⇒ ⇒ 不会出现两份拷贝不同步。
      */
     function publish() {
+        // ⚠️ **两个视图写的是同一个引用**（与 `wireMemoryMap` 那份**同款**）
+        // ⇒ ⇒ 「器件类型清单」与「逐实例状态」**各只有一份** ⇒ ⇒ 产品视图的
+        // 树与板级内存图编辑器**看到的是同一批事实**（STAGE-44 裁决 H / F）。
         viewStore.setState("product", (prev) => ({
+            ...prev,
+            deviceTypes: types,
+            deviceInstances: instances,
+        }));
+        viewStore.setState("memory-map", (prev) => ({
             ...prev,
             deviceTypes: types,
             deviceInstances: instances,
@@ -76,6 +84,13 @@ export function wireDevices(commandRouter) {
                 viewId: "product",
                 type: "update",
                 state: viewStore.getState("product"),
+            },
+        }));
+        window.dispatchEvent(new CustomEvent("riscv:render", {
+            detail: {
+                viewId: "memory-map",
+                type: "update",
+                state: viewStore.getState("memory-map"),
             },
         }));
     }
