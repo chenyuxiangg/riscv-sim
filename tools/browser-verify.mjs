@@ -5603,8 +5603,20 @@ const BV_DEBUGGER_PROBE = `(() => {
   const dumpErr = dumpBox ? dumpBox.querySelector("[data-dump-error]") : null;
   const dbgErr = debugBody ? debugBody.querySelector("[data-debug-error]") : null;
   const candBox = symBox ? symBox.querySelector("[data-bp-symbol-candidates]") : null;
+  // ⚠️ **「读内存」那一行**（v0.64 批）⇒ ⇒ 提示位**独占一行**才看得见 ⇒ ⇒
+  //   断言得看**位置**（不是只看文案在不在）。
+  const memReadBox = regmemBody ? regmemBody.querySelector('[data-addr-input="memory"]') : null;
+  const memReadErr = memReadBox ? memReadBox.querySelector("[data-mem-addr-error]") : null;
+  const memReadBtn = memReadBox ? memReadBox.querySelector('[data-action="read-mem"]') : null;
+  const memReadHint = regmemBody ? regmemBody.querySelector("[data-mem-read-hint]") : null;
+  const dumpBtn = dumpBox ? dumpBox.querySelector('[data-action="dump-memory"]') : null;
   return {
     hasDebugBody: !!debugBody,
+    memReadErrorText: memReadErr ? String(memReadErr.textContent || "").trim() : "",
+    memReadErrorTop: memReadErr ? memReadErr.getBoundingClientRect().top : null,
+    memReadButtonBottom: memReadBtn ? memReadBtn.getBoundingClientRect().bottom : null,
+    memReadHintText: memReadHint ? String(memReadHint.textContent || "").trim() : "",
+    dumpButtonText: dumpBtn ? String(dumpBtn.textContent || "").trim() : "",
     hasRegmemBody: !!regmemBody,
     hasSymbolBox: !!(symBox && symBox.querySelector("[data-bp-symbol-input]")),
     hasCondBox: !!(condBox && condBox.querySelector("[data-bp-cond-input]")),
@@ -6211,9 +6223,51 @@ async function runMemDumpSection(cdp, opts) {
 
     let p = await probe();
     add(
-        "B-80 · 寄存器/内存视图里**有**「转储」入口（地址 + 字节数 + 按钮）",
+        "B-80 · 寄存器/内存视图里**有**「读这一段」入口（地址 + 字节数 + 按钮）",
         p?.hasDumpBox === true,
-        `转储框=${p?.hasDumpBox}`,
+        `读这一段框=${p?.hasDumpBox}`,
+    );
+
+    // -- B-108 · 「读内存」地址**没填**时 ⇒ ⇒ 提示**独占一行**（看得见）------
+    // ⚠️ **用户报的现象**：「读内存按钮点击后没有反应」⇒ ⇒ 真机实测：地址框
+    //   默认**空** ⇒ ⇒ 第一次点**一条命令都不发** ⇒ ⇒ 而提示此前贴在按钮
+    //   **右边**（12px 小字）⇒ ⇒ 看着就是「没反应」⇒ ⇒ ⇒ 判据抓**位置**：
+    //   提示的**上沿**必须在按钮的**下沿之下** ⇒ ⇒ 它**独占一行**。
+    await runEffect(cdp, `(() => {
+        const box = document.querySelector('[data-view-body="regmem"] [data-addr-input="memory"]');
+        if (!box) return "no-box";
+        const input = box.querySelector("[data-mem-addr-input]");
+        if (input) {
+            input.value = "";
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        const btn = box.querySelector('[data-action="read-mem"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(500);
+    p = await probe();
+    add(
+        "B-108 · 地址**没填**时点「读内存」⇒ ⇒ 提示**独占一行**、**看得见**"
+        + "（⇒ ⇒ 不再是『点了没反应』）",
+        String(p?.memReadErrorText ?? "").length > 0
+            && p?.memReadErrorTop !== null
+            && p?.memReadButtonBottom !== null
+            && p.memReadErrorTop >= p.memReadButtonBottom,
+        `提示=${JSON.stringify(p?.memReadErrorText ?? "")}`
+        + ` 提示上沿=${p?.memReadErrorTop} 按钮下沿=${p?.memReadButtonBottom}`,
+    );
+
+    // -- B-109 · 「读指定数量」这条路**看得见** ------------------------------
+    add(
+        "B-109 · 界面上有「**读这一段**」按钮 + 两个读法**差在哪**的说明"
+        + "（⇒ ⇒ 「读指定数量」这条路**看得见**）",
+        /读这一段/.test(String(p?.dumpButtonText ?? ""))
+            && /读内存/.test(String(p?.memReadHintText ?? ""))
+            && /字节数/.test(String(p?.memReadHintText ?? "")),
+        `按钮=${JSON.stringify(p?.dumpButtonText ?? "")}`
+        + ` 说明=${JSON.stringify(p?.memReadHintText ?? "").slice(0, 120)}`,
     );
 
     // -- B-81 · 转储 `0x0` 起 16 字节 ⇒ ⇒ 那 16 个字节**逐字**对得上 --------

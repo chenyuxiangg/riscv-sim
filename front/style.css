@@ -1020,6 +1020,12 @@ a { color: inherit; text-decoration: none; }
     margin: 8px 0 12px;
 }
 
+/* 两个读内存入口的差别说明（v0.64 批）。 */
+.mem-read-hint {
+    margin: 0 0 10px;
+    font-size: 12px;
+}
+
 .addr-field {
     min-width: 160px;
     padding: 6px 10px;
@@ -1050,6 +1056,12 @@ select.addr-field {
 
 .addr-error:not(:empty) {
     display: inline;
+    /* ⚠️ **独占一行**（v0.64 批）⇒ ⇒ 宽屏也看得见 ⇒ ⇒ 「点了没反应」不成立
+     *   ⇒ ⇒ 此前它贴在按钮**右边**（12px 小字）⇒ ⇒ 用户**看不到** ⇒ ⇒
+     *   「读内存」第一次点（地址框默认空）**看起来**像坏了。 */
+    flex-basis: 100%;
+    font-size: 12.5px;
+    margin-top: -2px;
 }
 
 /* ---------------------------------------------------------------------------

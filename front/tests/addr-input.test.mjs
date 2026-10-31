@@ -282,6 +282,105 @@ describe("任意地址断点", () => {
 });
 
 // ---------------------------------------------------------------------------
+// v0.64 批：读内存入口的**反馈**与「**读指定数量**」
+// ---------------------------------------------------------------------------
+
+describe("读内存入口 · 反馈与「读指定数量」", () => {
+    beforeEach(() => {
+        m03.reset();
+    });
+
+    test("V-1 · 地址**没填**时点「读内存」⇒ ⇒ **一条命令都不发**、但**提示位有内容**", () => {
+        const body = mountView("#/regmem");
+        const box = body.querySelector("[data-addr-input=\"memory\"]");
+        assert.ok(box, "内存视图必须有地址输入的容器");
+        // ⚠️ **地址框默认是空的**（STAGE-39 订正 4 · A-8 ⇒ ⇒ 视图层**零命中**
+        //   写死的地址）⇒ ⇒ 这正是用户报的那次「点了没反应」。
+        const input = box.querySelector("[data-mem-addr-input]");
+        assert.equal(String(input.value ?? ""), "", "地址框的初值应当是空的");
+
+        const { signals, stop } = collectSignals();
+        box.querySelector("[data-action=\"read-mem\"]").click();
+        stop();
+
+        assert.equal(signals.length, 0, "地址没填 ⇒ ⇒ **一条命令都不发**");
+        const err = box.querySelector("[data-mem-addr-error]");
+        assert.ok(err, "必须有提示位");
+        assert.ok(
+            String(err.textContent ?? "").length > 0,
+            "地址没填 ⇒ ⇒ 提示位**必须有内容**（否则用户看到的就是『点了没反应』）",
+        );
+        assert.match(
+            String(err.textContent ?? ""),
+            /请先填/,
+            "提示要说清**下一步该做什么**（不是只说『格式不对』）",
+        );
+    });
+
+    test("V-2 · 「读这一段」入口在界面上（地址 + 字节数 + 按钮）⇒ ⇒ 读**指定数量**", () => {
+        const body = mountView("#/regmem");
+        const box = body.querySelector("[data-dump-input=\"memory\"]");
+        assert.ok(box, "寄存器/内存视图必须有『读这一段』的容器");
+        assert.ok(box.querySelector("[data-dump-addr-input]"), "必须有起始地址输入框");
+        const len = box.querySelector("[data-dump-len-input]");
+        assert.ok(len, "必须有**字节数**输入框（读指定数量靠它）");
+        const btn = box.querySelector("[data-action=\"dump-memory\"]");
+        assert.ok(btn, "必须有按钮");
+        assert.match(
+            String(btn.textContent ?? ""),
+            /读这一段/,
+            "按钮要说清**它读的是一段**（契约里叫 DumpMemory，界面上说用户的意图）",
+        );
+    });
+
+    test("V-3 · 点「读这一段」⇒ ⇒ 发出的是 **DumpMemory{addr, len}**（真的按指定数量读）", () => {
+        const body = mountView("#/regmem");
+        const box = body.querySelector("[data-dump-input=\"memory\"]");
+        const addr = box.querySelector("[data-dump-addr-input]");
+        const len = box.querySelector("[data-dump-len-input]");
+        addr.value = "0x00000120";
+        len.value = "64";
+
+        const { signals, stop } = collectSignals();
+        box.querySelector("[data-action=\"dump-memory\"]").click();
+        stop();
+
+        assert.equal(signals.length, 1, "点「读这一段」必须发出**一条**命令");
+        assert.equal(signals[0].action, "dump-memory", "动作名必须是 dump-memory");
+        assert.equal(signals[0].params.addr, 0x120, "地址必须是用户输入的那个");
+        assert.equal(signals[0].params.len, 64, "**字节数**必须是用户输入的那个");
+    });
+
+    test("V-4 · 两个入口的**差别**在界面上**写出来了**（不是让用户猜）", () => {
+        const body = mountView("#/regmem");
+        const hint = body.querySelector("[data-mem-read-hint]");
+        assert.ok(hint, "必须有那句差别说明");
+        const text = String(hint.textContent ?? "");
+        assert.match(text, /读内存/, "说明里要点名「读内存」");
+        assert.match(text, /读这一段/, "说明里要点名「读这一段」");
+        assert.match(text, /字节数/, "说明里要说清「读这一段」按**字节数**来");
+    });
+
+    test("V-5 · **地址框会记住你上次填的那个**（草稿住视图状态 ⇒ ⇒ 只有第一次要填）", () => {
+        const body = mountView("#/regmem");
+        const box = body.querySelector("[data-addr-input=\"memory\"]");
+        const input = box.querySelector("[data-mem-addr-input]");
+        input.value = "0x00000200";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+
+        // ⚠️ **重渲染**（草稿住视图状态 ⇒ ⇒ 值不该丢）⇒ ⇒ 再挂一次视图。
+        const again = mountView("#/regmem");
+        // ⚠️ **不许用后代组合器**（dom-stub 的选择器引擎只支持简单复合选择器）。
+        const againInput = boxInput(again, "[data-addr-input=\"memory\"]", "[data-mem-addr-input]");
+        assert.equal(
+            String(againInput.value ?? ""),
+            "0x00000200",
+            "地址框应当**记住**上次填的那个（否则每次都要重填 ⇒ ⇒ 像坏了）",
+        );
+    });
+});
+
+// ---------------------------------------------------------------------------
 // A-6 ~ A-10：读内存入口
 // ---------------------------------------------------------------------------
 

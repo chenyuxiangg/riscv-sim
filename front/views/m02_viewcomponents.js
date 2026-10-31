@@ -779,7 +779,50 @@ export function downloadExportChunk(exportState, deps = {}) {
  *
  * @type {string}
  */
-export const ADDR_INPUT_ERROR = "地址格式不对：请填十六进制（最多 8 位，可带 0x 前缀）。";
+export const ADDR_INPUT_ERROR = "请先填十六进制地址（最多 8 位，可带 0x 前缀）。";
+
+/**
+ * 「**读内存**」与「**读这一段**」这两个入口的**差别说明**（v0.64 批）。
+ *
+ * ⚠️ **为什么要有这句**：用户反馈「**读内存按钮点击后没有反应，我希望可以读取
+ *   指定数量的内存**」⇒ ⇒ 真机实测发现两件事：① 「读内存」**填了地址就真的能
+ *   读出来**（不是坏了）⇒ ⇒ 问题是**第一次点**（地址框默认空 ⇒ ⇒ 静默失败 ⇒ ⇒
+ *   只留一行**贴在按钮右边的小字** ⇒ ⇒ 看着就是「没反应」）；② 「读**指定数量**」
+ *   那条路**早就存在**（契约的 `DumpMemory`，≤ 4096 字节）⇒ ⇒ 只是**没人知道
+ *   那个叫「转储」的入口就是它** ⇒ ⇒ ⇒ 所以这句把**两个入口的差别**讲明白。
+ *
+ * ⚠️ **两种读法**语义**真的不同**，不是同一个动作的两种叫法：
+ *   - **读内存** = 读**一个字**（1 / 2 / 4 字节）⇒ ⇒ **走总线** ⇒ ⇒ 探针会动
+ *     ⇒ ⇒ 结果进「内存单元」表；
+ *   - **读这一段** = 读**你指定的字节数**（≤ 4096）⇒ ⇒ **调试视角**（不计总线
+ *     统计、不触发探针）⇒ ⇒ 结果是十六进制 + ASCII 表。
+ *
+ * ⚠️ **不许出现写死的地址字面量**（STAGE-39 订正 4 · A-8）⇒ ⇒ 这句里**没有**
+ *   任何具体地址 ⇒ ⇒ 「默认空」那个决定**不变**（读内存是**真的任意地址入口**，
+ *   不是一条写死的快捷方式）⇒ ⇒ 而**地址框会记住你上次读的那个**（草稿住
+ *   视图状态）⇒ ⇒ 只有**第一次**需要填。
+ *
+ * ⚠️ **这是 HTML 片段**（不是纯文本）⇒ ⇒ 渲染时**不许**再 `escapeHtml`
+ *   ⇒ ⇒ 否则 `**…**` 会**原样显示**（界面上出现一串 markdown 记号）⇒ ⇒ 要强调
+ *   的地方用 `<strong>`。⚠️ **里面没有任何用户数据** ⇒ ⇒ 不转义是安全的。
+ *
+ * @type {string}
+ */
+export const MEMORY_READ_HINT = "<strong>读内存</strong> 读<strong>一个字</strong>"
+    + "（走总线 ⇒ ⇒ 探针会动）；"
+    + `<strong>读这一段</strong> 读<strong>你指定的字节数</strong>（≤ ${DUMP_MAX_BYTES} 字节，调试视角 ⇒ ⇒ 不动总线）。`
+    + "地址框会<strong>记住你上次填的那个</strong> ⇒ ⇒ 只有第一次要填。";
+
+/**
+ * 「读**这一段**」那个按钮的**文案**（v0.64 批）。
+ *
+ * ⚠️ **为什么不再叫「转储」**：`DumpMemory` 是契约里的词 ⇒ ⇒ 但用户看到的是
+ *   「**我要读指定数量的内存**」⇒ ⇒ 「读这一段」说的是**他要做的事**⇒ ⇒ 而
+ *   「转储」说的是**实现**⇒ ⇒ 界面上说**目的**、文档里说**实现**。
+ *
+ * @type {string}
+ */
+export const MEMORY_DUMP_BUTTON_LABEL = "读这一段";
 
 /**
  * 把用户输入的文本解析成一个地址（**唯一落点** · 裁决 E）。
@@ -978,9 +1021,10 @@ export function renderMemoryDumpRow({ addrDraft = "", lenDraft = "256", error = 
                 placeholder="转储起始地址（十六进制）" spellcheck="false" autocomplete="off">
             <input type="text" class="addr-field" data-dump-len-input value="${escapeHtml(lenDraft)}"
                 placeholder="字节数（≤ ${DUMP_MAX_BYTES}）" spellcheck="false" autocomplete="off">
-            <button type="button" data-action="dump-memory">转储</button>
+            <button type="button" data-action="dump-memory">${escapeHtml(MEMORY_DUMP_BUTTON_LABEL)}</button>
             <span class="addr-error" data-dump-error>${escapeHtml(error)}</span>
-        </div>`;
+        </div>
+        <p class="muted mem-read-hint" data-mem-read-hint>${MEMORY_READ_HINT}</p>`;
 }
 
 /**
@@ -1021,7 +1065,7 @@ export function renderMemoryDump(dump) {
         </tr>`);
     }
     const body = rows.length === 0
-        ? `<p class="muted" data-mem-dump-empty>尚无转储 — 在上面填起始地址与字节数，点「转储」。</p>`
+        ? `<p class="muted" data-mem-dump-empty>尚无转储 — 在上面填起始地址与字节数，点「${escapeHtml(MEMORY_DUMP_BUTTON_LABEL)}」。</p>`
         : `<table class="dump-table">
             <thead><tr><th>偏移</th><th>十六进制</th><th>ASCII</th></tr></thead>
             <tbody>${rows.join("")}</tbody>
