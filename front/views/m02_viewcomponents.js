@@ -33,6 +33,13 @@ import { DUMP_MAX_BYTES, WRITE_SIZE } from "../lib/message.js";
 // 「内核真的在执行吗」与「运行中显示什么」**各只有一处** ⇒ ⇒ 顶栏 /
 // 调试视图 / 寄存器视图**共用**同一套口径 ⇒ ⇒ 不会一个藏了一个没藏。
 import { isKernelRunning, liveValue } from "../lib/run-loop.js";
+// ⚠️ **trace 记录开关的判定**（纯函数）⇒ ⇒ 视图层渲染按钮/状态行与 app 层
+// 发命令**引同一处** ⇒ ⇒ 「按钮写关闭、命令发开启」这种漂移**结构上不可能**。
+import {
+    TRACE_SWITCH_OFF,
+    TRACE_SWITCH_ON,
+    traceSwitchState,
+} from "../lib/trace-switch.js";
 // ⚠️ **波形图的纯函数 + 片段**（STAGE-36 · v0.51 批）⇒ ⇒ option 的构造
 // **不碰 DOM** ⇒ ⇒ Node 侧零 DOM 就能测「画的是不是真数据」。
 import { buildWaveOption, canDrawChart, resolveWaveTheme, waveChartHtml } from "./components/wave-chart.js";
@@ -1261,6 +1268,53 @@ function mountAddrInputListeners(el) {
 // ---------------------------------------------------------------------------
 // debugView — 反汇编面板 (M-11) + 寄存器/内存 (FR-05/08/09)
 // ---------------------------------------------------------------------------
+
+/**
+ * trace 开关按钮上的**标签**（**状态 + 点了会发生什么**）。
+ *
+ * ⚠️ **两者都写**：只写状态 ⇒ 用户不知道点下去会发生什么（那正是「点了没
+ *   反应」那种体验的来源）；只写动作 ⇒ 用户不知道现在是什么状态 ⇒ ⇒
+ *   **两个都写在按钮上** ⇒ ⇒ 用户不用猜。
+ *
+ * @param {{state: string}} sw — {@link traceSwitchState} 的结果
+ * @returns {string}
+ */
+function traceToggleLabel(sw) {
+    if (sw.state === TRACE_SWITCH_ON) return "trace 记录：已开启（点击关闭）";
+    if (sw.state === TRACE_SWITCH_OFF) return "trace 记录：已关闭（点击开启）";
+    return "trace 记录：状态未查询（点击开启）";
+}
+
+/**
+ * trace 开关的**状态行**（**常驻** —— 开与关都在）。
+ *
+ * ⚠️ **为什么常驻**：此前只有「开着」才有那行降速提示 ⇒ ⇒ 「关着」与
+ *   「从没点过」在界面上**一模一样** ⇒ ⇒ 用户没法判断自己到底开没开 ⇒ ⇒
+ *   「点了没反应」。⇒ ⇒ 三种状态（未查询 / 已开启 / 已关闭）**都**显示。
+ *
+ * ⚠️ **条数只能当「快照」说**：`TraceState.len` 是内核**回复那一刻**的环大小
+ *   ⇒ ⇒ 之后仿真继续跑、环继续涨 ⇒ ⇒ 界面上的那个数**不会自己更新**⇒ ⇒
+ *   说成「已记录 N 条」就是**误导**（用户会以为没在录）⇒ ⇒ 如实说「内核上次
+ *   回报时环里 N 条」⇒ ⇒ **实时**总数在「导出执行轨迹」的进度行里（那里是活值）。
+ *
+ * @param {{state: string, on: boolean, len: number, dropped: number}} sw
+ * @returns {string}
+ */
+function renderTraceStatus(sw) {
+    const len = String(sw.len);
+    const dropped = String(sw.dropped);
+    if (sw.state === TRACE_SWITCH_ON) {
+        return `<span class="trace-state-main">trace 记录：<strong>已开启</strong> · 仿真会明显降速（每条指令与访存都要记录）。</span>`
+            + `<span class="muted trace-state-hint">点上面的开关可<strong>关闭</strong>（关闭后内核零开销）。内核上次回报时环里 <strong>${escapeHtml(len)}</strong> 条 · 溢出丢弃 <strong>${escapeHtml(dropped)}</strong> 条 ⇒ 条数随仿真增长，「导出执行轨迹」里看最新总数。</span>`;
+    }
+    if (sw.state === TRACE_SWITCH_OFF) {
+        return `<span class="trace-state-main">trace 记录：<strong>已关闭</strong> · 内核不记录任何指令与访存（零开销）。</span>`
+            + `<span class="muted trace-state-hint">点上面的开关可<strong>开启</strong>（每条指令与访存都要记录 ⇒ 仿真会明显降速）。内核上次回报时环里 <strong>${escapeHtml(len)}</strong> 条 · 溢出丢弃 <strong>${escapeHtml(dropped)}</strong> 条 ⇒ 这 ${escapeHtml(len)} 条仍可导出。</span>`;
+    }
+    return `<span class="trace-state-main">trace 记录：<strong>状态未查询</strong></span>`
+        + `<span class="muted trace-state-hint">点上面的开关：向内核确认当前状态，并<strong>开启</strong>记录（每条指令与访存都要记录 ⇒ 仿真会明显降速）。</span>`;
+}
+
 const debugView = register({
     id: "debug",
     channels: ["sim"],
@@ -1281,7 +1335,10 @@ const debugView = register({
         // must not invent a second one.
         const pc = Number(sim.pc ?? 0) >>> 0;
         const exportState = debug.export ?? null;
-        const traceState = debug.trace ?? null;
+        // ⚠️ **开关状态是推导量**（`front/lib/trace-switch.js`）⇒ ⇒ 视图层
+        // （按钮 + 状态行）与 app 层（发什么命令）**引同一处** ⇒ ⇒ 两者
+        // **不可能**对不上。
+        const traceSwitch = traceSwitchState(debug.trace ?? null);
         const error = debug.error ?? null;
         // ⚠️ **断点列表只有一个落点**（STAGE-35 · v0.50 批 · 裁决 K）⇒ ⇒
         // 这里**只读**视图状态 ⇒ ⇒ 视图层**不持有**第二份列表。
@@ -1318,8 +1375,7 @@ const debugView = register({
                 <button type="button" data-action="export-trace" data-source="Execution" data-format="Csv" data-offset="0" data-limit="0">导出执行轨迹 (CSV)</button>
                 <button type="button" data-action="export-trace" data-source="Waveform" data-format="Vcd" data-offset="0" data-limit="0">导出波形 (VCD)</button>
                 ${canContinue ? `<button type="button" data-action="export-trace" data-source="${escapeHtml(String(exportState.source))}" data-format="${escapeHtml(String(exportState.format))}" data-offset="${Number(exportState.next_offset)}" data-limit="0" data-continue="1">继续导出</button>` : ""}
-                <button type="button" data-action="trace-enable">开启 trace 记录</button>
-                <button type="button" data-action="trace-disable">关闭 trace 记录</button>
+                <button type="button" data-action="trace-toggle" data-trace-switch="${traceSwitch.state}" aria-pressed="${traceSwitch.state === TRACE_SWITCH_ON ? "true" : "false"}">${escapeHtml(traceToggleLabel(traceSwitch))}</button>
             </div>
             ${halt?.reason === "Breakpoint"
                 // ⚠️ **这句话只在内核这么说的时候出现**（裁决 M）⇒ ⇒ 前端
@@ -1327,9 +1383,7 @@ const debugView = register({
                 // `Halted.reason`。
                 ? `<p class="bp-hit" data-bp-hit>命中断点 @ <code>0x${(Number(halt.pc ?? 0) >>> 0).toString(16).padStart(8, "0")}</code></p>`
                 : ""}
-            ${traceState?.enabled === true
-                ? `<p class="trace-notice" data-trace-notice>trace 记录已开启 —— 仿真会明显降速（每条指令与访存都要记录）。</p>`
-                : ""}
+            <p class="trace-state" data-trace-state data-trace-switch="${traceSwitch.state}"${traceSwitch.state === TRACE_SWITCH_ON ? " data-trace-notice" : ""}>${renderTraceStatus(traceSwitch)}</p>
             ${error
                 ? `<p class="debug-error" data-debug-error>${escapeHtml(String(error.code))}：${escapeHtml(String(error.message))}</p>`
                 : ""}

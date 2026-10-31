@@ -190,6 +190,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "memDump",
     "symbolBreakpoint",
     "uartEcho",
+    "traceSwitch",
 ]);
 
 /**
@@ -5663,6 +5664,143 @@ const BV_DEMO_DUMP_HEX = (() => {
 })();
 
 /**
+ * **trace 记录开关**的探针（调试视图里那个开关与它的状态行）。
+ *
+ * ⚠️ **按视图限定**：`[data-view-body="debug"]` ⇒ ⇒ 别的视图里的同名元素
+ *   不会混进来 ⇒ ⇒ 探针测的就是**调试视图那一处**。
+ *
+ * ⚠️ **主句与提示句分开取**：状态行的**主句**说「现在是什么状态」，**提示句**
+ *   说「点了会发生什么」⇒ ⇒ 提示句里会出现「开启 / 关闭 / 降速」这些词 ⇒ ⇒
+ *   判「状态是什么」**只能看主句** ⇒ ⇒ 否则**假红**（读错位置与功能没做在
+ *   输出上长得一样）。
+ */
+const BV_TRACE_SWITCH_PROBE = `(() => {
+  const body = document.querySelector('[data-view-body="debug"]');
+  const btn = body ? body.querySelector('[data-action="trace-toggle"]') : null;
+  const line = body ? body.querySelector("[data-trace-state]") : null;
+  const main = line ? line.querySelector(".trace-state-main") : null;
+  return {
+    hasBody: !!body,
+    buttonCount: body ? body.querySelectorAll('[data-action="trace-toggle"]').length : 0,
+    legacyButtonCount: body
+      ? body.querySelectorAll('[data-action="trace-enable"], [data-action="trace-disable"]').length
+      : 0,
+    buttonText: btn ? String(btn.textContent || "").trim() : "",
+    buttonState: btn ? String(btn.getAttribute("data-trace-switch") || "") : "",
+    hasLine: !!line,
+    lineState: line ? String(line.getAttribute("data-trace-switch") || "") : "",
+    mainText: main ? String(main.textContent || "").trim() : "",
+    lineText: line ? String(line.textContent || "").trim() : "",
+  };
+})()`;
+
+/**
+ * 真机段：**trace 记录开关**（用户点它 ⇒ ⇒ 界面**看得见**发生了什么）。
+ *
+ * ⚠️ **这一段为什么存在**：此前 `tools/browser-verify.mjs` 里**一条 trace
+ *   断言都没有** ⇒ ⇒ 「按钮点了没反应」这类缺陷**真机门禁看不见** ⇒ ⇒
+ *   前端门禁也只在**服务层**测（从不点按钮）⇒ ⇒ 这条路**零覆盖** ⇒ ⇒
+ *   本段把它**补上**（真浏览器 + 真 WASM 内核 + **真的点那个按钮**）。
+ *
+ * ⚠️ **判据抓的是「用户看得见的那件事」**：
+ *   ① 开关**只有一个**入口（不是两个按钮）；
+ *   ② 状态行**常驻**（开与关都在）⇒ ⇒ 「关着」与「从没点过」不再一样；
+ *   ③ **按钮上写着状态与「点了会发生什么」** ⇒ ⇒ 用户不用猜；
+ *   ④ **必要对照**：不点 ⇒ 状态不变 ⇒ ⇒ 「变成已开启」是**点出来的**。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{checks: object[]}>}
+ */
+async function runTraceSwitchSection(cdp, opts) {
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
+    const probe = async () => await awaitEval(cdp, BV_TRACE_SWITCH_PROBE);
+
+    // ⚠️ **前置**：显式装 demo 固件 ⇒ ⇒ 把状态清干净（也顺带停掉可能还在跑的
+    //   连续模式）⇒ ⇒ 本段测的是**开关**，不是别的。
+    await resetAndLoadDemoFirmware(cdp, opts);
+    await runEffect(cdp, 'location.hash = "#/debug";');
+    await sleep(700);
+
+    // -- B-88 · **只有一个** trace 开关入口 -------------------------------
+    let p = await probe();
+    add(
+        "B-88 · 调试视图里**只有一个** trace 开关入口（旧的「开启 / 关闭」两个按钮**不在**了）",
+        p?.buttonCount === 1 && p?.legacyButtonCount === 0,
+        `新开关=${p?.buttonCount} 旧按钮=${p?.legacyButtonCount}`,
+    );
+
+    // -- B-89 · 状态行**常驻** + 初始**如实说不知道** ----------------------
+    add(
+        "B-89 · 状态行**常驻**（不是「开着才有」）且初始**如实说「状态未查询」**"
+        + "（⇒ ⇒ 内核没报告过 ⇒ ⇒ 前端不猜）",
+        p?.hasLine === true && p?.lineState === "unknown" && /状态未查询/.test(String(p?.mainText ?? "")),
+        `状态行=${p?.hasLine} 状态=${JSON.stringify(p?.lineState)} 主句=${JSON.stringify(p?.mainText ?? "")}`,
+    );
+
+    // -- B-90 · 点一下 ⇒ ⇒ **已开启** + 按钮说「点击关闭」 -----------------
+    await runEffect(cdp, `(() => {
+        const b = document.querySelector('[data-view-body="debug"] [data-action="trace-toggle"]');
+        if (!b) return "no-button";
+        b.click();
+        return "clicked";
+    })()`);
+    await sleep(700);
+    p = await probe();
+    add(
+        "B-90 · 点开关 ⇒ ⇒ 状态变成「已开启」且**按钮上写着「点击关闭」**"
+        + "（⇒ ⇒ 用户看得见自己开了、也看得见再点会发生什么）",
+        p?.lineState === "on"
+            && /已开启/.test(String(p?.mainText ?? ""))
+            && /已开启/.test(String(p?.buttonText ?? ""))
+            && /点击关闭/.test(String(p?.buttonText ?? "")),
+        `状态=${JSON.stringify(p?.lineState)} 主句=${JSON.stringify(p?.mainText ?? "")} 按钮=${JSON.stringify(p?.buttonText ?? "")}`,
+    );
+    add(
+        "B-91 · 开着的时候状态行**说明会降速**（评审 R9 的那句话说清楚）",
+        /降速/.test(String(p?.mainText ?? "")),
+        `主句=${JSON.stringify(p?.mainText ?? "")}`,
+    );
+
+    // -- B-92 · 再点一下 ⇒ ⇒ **已关闭**（反向对照：点一下就是反着来） -------
+    await runEffect(cdp, `(() => {
+        const b = document.querySelector('[data-view-body="debug"] [data-action="trace-toggle"]');
+        if (!b) return "no-button";
+        b.click();
+        return "clicked";
+    })()`);
+    await sleep(700);
+    p = await probe();
+    add(
+        "B-92 · 再点一下 ⇒ ⇒ 状态变成「已关闭」且**按钮上写着「点击开启」**"
+        + "（⇒ ⇒ 关闭时**也**看得见 ⇒ ⇒ 不再出现「关着与从没点过一模一样」）",
+        p?.lineState === "off"
+            && /已关闭/.test(String(p?.mainText ?? ""))
+            && /已关闭/.test(String(p?.buttonText ?? ""))
+            && /点击开启/.test(String(p?.buttonText ?? "")),
+        `状态=${JSON.stringify(p?.lineState)} 主句=${JSON.stringify(p?.mainText ?? "")} 按钮=${JSON.stringify(p?.buttonText ?? "")}`,
+    );
+
+    // -- B-93 · 再点一下 ⇒ ⇒ 又回到「已开启」（它真的是个**开关**） --------
+    await runEffect(cdp, `(() => {
+        const b = document.querySelector('[data-view-body="debug"] [data-action="trace-toggle"]');
+        if (!b) return "no-button";
+        b.click();
+        return "clicked";
+    })()`);
+    await sleep(700);
+    p = await probe();
+    add(
+        "B-93 · 第三次点 ⇒ ⇒ 回到「已开启」（⇒ ⇒ 它真的是个**开关**，不是一次性按钮）",
+        p?.lineState === "on" && /已开启/.test(String(p?.mainText ?? "")),
+        `状态=${JSON.stringify(p?.lineState)} 主句=${JSON.stringify(p?.mainText ?? "")}`,
+    );
+
+    return { checks };
+}
+
+/**
  * STAGE-42 · v0.57 批的真机段：**符号入口**（在 **demo 固件**上 ⇒ ⇒ 没有
  * 符号表 ⇒ ⇒ 专打「没有符号表」那一态）。
  *
@@ -6940,6 +7078,14 @@ async function main() {
         const memDump = await runSection("memDump", () => runMemDumpSection(cdp, opts));
         registerSection("memDump", memDump.checks, {
             title: "整段转储检查（转储 16 字节 ⇒ 逐字等于 demo 固件的头 16 字节 · 越界由内核拒）",
+        });
+
+        // -- the TRACE SWITCH (B-88 ~ B-93) --------------------------------
+        // ⚠️ **必须排在 osz 之前**：本段要的是 **demo 固件**（它自己装一次）⇒ ⇒
+        //    放在 osz 后面期望值就变了。
+        const traceSwitch = await runSection("traceSwitch", () => runTraceSwitchSection(cdp, opts));
+        registerSection("traceSwitch", traceSwitch.checks, {
+            title: "trace 记录开关检查（一个开关 · 状态常驻 · 按钮上写着状态与「点了会发生什么」）",
         });
 
         // -- the REAL RTOS (osz): load the out-of-repo ELF and SEE its console -

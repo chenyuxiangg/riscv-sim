@@ -499,6 +499,28 @@ a { color: inherit; text-decoration: none; }
     color: var(--amber);
     font-size: 12px;
 }
+/* ⚠️ **trace 记录开关的常驻状态行**（三态都在：未查询 / 已开启 / 已关闭）。
+   ⚠️ 此前只有「开着」才有那行提示 ⇒ ⇒ 「关着」与「从没点过」在界面上**一模一样**
+   ⇒ ⇒ 用户判断不了自己到底开没开 ⇒ ⇒ 「点了没反应」。⇒ ⇒ **关着也在**。 */
+.trace-state {
+    margin: 8px 0 0;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--line2);
+    background: var(--panel2);
+    color: var(--tx2);
+    font-size: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+/* 「开着」= 降速警告 ⇒ ⇒ 沿用**琥珀色**（与旧的降速提示同一视觉语言）。 */
+.trace-state[data-trace-switch="on"] {
+    border-color: var(--amber);
+    color: var(--amber);
+}
+.trace-state .trace-state-hint { color: var(--tx3); }
+.trace-state[data-trace-switch="on"] .trace-state-hint { color: var(--tx2); }
 .debug-error {
     margin: 8px 0 0;
     padding: 6px 10px;
