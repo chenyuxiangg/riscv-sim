@@ -78,7 +78,7 @@ pub const SIGNAL_MSIP: &str = "MSIP";
 pub const SIGNAL_MTIMECMP: &str = "MTIMECMP";
 
 /// 寄存器偏移（**相对基址**）。
-mod reg {
+pub mod reg {
     /// `msip` 数组基址：`0x0` + 4×hart（⇒ 数组起点就是 0，用不着单独
     /// 一个常量；下面的 `MSIP_STRIDE` 才是它的间距）。
     pub const MSIP_STRIDE: u32 = 4;

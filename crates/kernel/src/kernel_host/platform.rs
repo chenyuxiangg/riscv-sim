@@ -316,6 +316,12 @@ pub struct MappedDevices {
     pub clint: Option<Rc<RefCell<Clint>>>,
     /// 第一个 PLIC。
     pub plic: Option<Rc<RefCell<Plic>>>,
+    /// **逐实例**清单（STAGE-43 · v0.66 · D-175）—— 谁、什么类型、绑到
+    /// 哪个基址、窗口多大。
+    ///
+    /// ⚠️ **它与建图结果同源**（在**同一次**遍历里产出）⇒ ⇒ 不是「另算
+    /// 一遍」⇒ ⇒ 不可能与总线上的实际布局对不上。
+    pub instances: Vec<riscv_sim_contract::model::DeviceInstanceInfo>,
 }
 
 /// 按描述**建图**。
@@ -378,6 +384,16 @@ pub fn map_platform(
                 // ⚠️ 窗口大小**由器件自己报**（裁决 D）。
                 let window = peripheral.borrow().size();
                 bus.map_peripheral_instance(*base, window, peripheral)?;
+                // ⚠️ **逐实例**清单（STAGE-43 · 裁决 K / L）—— 与建图**同源**
+                // ⇒ ⇒ 「谁绑在哪儿」**不需要**另算一遍。
+                devices
+                    .instances
+                    .push(riscv_sim_contract::model::DeviceInstanceInfo {
+                        id: device.id().to_string(),
+                        kind: device.kind().to_string(),
+                        base: Some(*base),
+                        window_bytes: window,
+                    });
                 // ⚠️ **第一个**同种器件被宿主认领（描述里没有第二个
                 // UART 的语义；今天的宿主也只有一路 console）。
                 if devices.uart0.is_none() {

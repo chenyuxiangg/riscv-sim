@@ -395,6 +395,21 @@ pub const TOPIC_CONSOLE: &str = "sim.console";
 /// 的既有命名法（STAGE-14 §1.8），不是 `sim.*`。
 pub const TOPIC_MEMORY_MAP: &str = "memory.map";
 
+/// 主题：器件类型注册表（`EventPayload::DeviceTypes` · STAGE-43 · v0.66）。
+///
+/// ⚠️ **值必须与前端 `front/lib/message.js` 的 `EVENT_TOPIC.DeviceTypes`
+/// 逐字相同**（= `"device.types"`）⇒ 前端订阅它才收得到那张表。
+///
+/// ⚠️ 它归 **`device.*` 族** —— 这是**器件**这一族自己的命名法，与
+/// `sim.*` / `memory.*` / `debug.*` **平级**（不是它们的一部分）。
+pub const TOPIC_DEVICE_TYPES: &str = "device.types";
+
+/// 主题：逐实例状态（`EventPayload::DeviceInstances` · STAGE-43 · v0.66）。
+///
+/// ⚠️ **值必须与前端 `front/lib/message.js` 的
+/// `EVENT_TOPIC.DeviceInstances` 逐字相同**（= `"device.instances"`）。
+pub const TOPIC_DEVICE_INSTANCES: &str = "device.instances";
+
 /// 宿主侧保留的 console 字节上限（**还没推给前端**的那些）。
 ///
 /// ⚠️ **为什么要有上限**：UART 的捕获环是 4 KiB，满了会**丢最新**的
@@ -858,6 +873,18 @@ pub struct KernelHost {
     /// 生效**（D-139）⇒ 这个字段不再锁死「改板只能重新装载才生效」。
     image_loaded: bool,
 
+    /// **逐实例**清单（STAGE-43 · v0.66 · D-175）—— **当前生效的图**里的
+    /// 每个器件实例：谁、什么类型、绑在哪个基址、窗口多大。
+    ///
+    /// ⚠️ **建图时顺带产出** ⇒ ⇒ 与总线上的实际布局**同源** ⇒ ⇒ 不另算
+    /// 一遍（裁决 K）。
+    ///
+    /// ⚠️ **它是「生效的」那一份** ⇒ ⇒ 用户配的那块板（`user_board`）里
+    /// **还没生效**的实例，由 [`KernelHost::device_instances_event`] 按
+    /// 「与生效图逐字段比对」**推导**出来（`base = None` ⇒ 待生效）⇒ ⇒
+    /// **不另存**第二份清单（少一个状态就少一处可能不同步的地方）。
+    device_instances: Vec<riscv_sim_contract::model::DeviceInstanceInfo>,
+
     /// 板级内存图的**修订号**（v0.31 · STAGE-16 裁决 A）—— 宿主内存图
     /// 状态的**单调递增计数器**（初值 0）。
     ///
@@ -1046,6 +1073,8 @@ impl KernelHost {
             user_board: None,
             // STAGE-14 §2.3 裁决 C：新会话**还没装载过**镜像。
             image_loaded: false,
+            // STAGE-43 · D-175：逐实例清单由**建图**产出 ⇒ 新会话先空着。
+            device_instances: Vec::new(),
             // STAGE-16 裁决 A：修订号**从 0 起**。
             map_revision: 0,
             // STAGE-16 裁决 C 第 ④ 步：新会话**还没有**装载过的工程。
@@ -1250,6 +1279,9 @@ impl KernelHost {
         self.uart0 = devices.uart0;
         self.clint = devices.clint;
         self.plic = devices.plic;
+        // ⚠️ **逐实例**清单（STAGE-43 · v0.66 · D-175）—— **建图时**顺带
+        // 产出 ⇒ ⇒ 与总线上的实际布局**同源** ⇒ ⇒ 不另算一遍。
+        self.device_instances = devices.instances;
         // ⚠️ **D-151**：把**同一个** CLINT 适配成**只读**时钟端口，装进后端
         // ⇒ ⇒ guest 读 `time` 与宿主调试读 `time` **同源**（STAGE-26 验收
         // B-9）⇒ ⇒ 平台时钟的真相**只有一份**（CLINT 自己那份）。
@@ -2195,6 +2227,14 @@ impl KernelHost {
                 expected_revision,
             } => self.on_patch_memory_map(ops, expected_revision),
             CommandPayload::UnloadProject => self.on_unload_project(),
+            // ⚠️ STAGE-43 · v0.66 · D-175 —— **内核侧中间层**的两条**只读**
+            // 通道：器件类型注册表 + 逐实例状态。
+            //
+            // ⚠️ **只读** ⇒ ⇒ 不判错 ⇒ ⇒ 零新场景码。
+            CommandPayload::ListDeviceTypes => vec![EventPayload::DeviceTypes {
+                types: crate::m15_peripheral::types::device_type_infos(),
+            }],
+            CommandPayload::ListDeviceInstances => vec![self.device_instances_event()],
             CommandPayload::Unsubscribe { topic } => {
                 self.topics.remove(&topic);
                 vec![self.tick()]
@@ -2646,7 +2686,9 @@ impl KernelHost {
         self.map_revision += 1;
 
         // ---- ⑥ 回「当前生效的图」+「用户的板有没有生效」（裁决 D / M）----
-        vec![self.memory_map_event()]
+        // ⚠️ **顺带回逐实例状态**（STAGE-43 · 裁决 G）：图**变了** ⇒ 实例
+        // 的绑定**也可能变了** ⇒ ⇒ 同一个时机推 ⇒ 前端不必轮询。
+        vec![self.memory_map_event(), self.device_instances_event()]
     }
 
     /// **差量更新**板级内存图（v0.31 · STAGE-16 §3.2 · D-137）。
@@ -2730,7 +2772,8 @@ impl KernelHost {
         self.map_revision += 1;
 
         // ---- ⑦ 回事件（裁决 D / M）----
-        vec![self.memory_map_event()]
+        // ⚠️ **顺带回逐实例状态**（STAGE-43 · 裁决 G）—— 与整份替换**同形**。
+        vec![self.memory_map_event(), self.device_instances_event()]
     }
 
     /// **卸载工程**（v0.31 · STAGE-16 §3.3 · D-139 · 裁决 C）。
@@ -2805,6 +2848,65 @@ impl KernelHost {
             loaded: self.image_loaded,
             revision: self.map_revision,
         }
+    }
+
+    /// 一条 `DeviceInstances` 事件 —— **逐实例状态**（STAGE-43 · v0.66）。
+    ///
+    /// ⚠️ **逐实例**（裁决 B）—— 不是板级：板级的那一份已经有
+    /// [`Self::memory_map_event`] 了 ⇒ ⇒ 这一条说的是「**每个实例**」。
+    fn device_instances_event(&self) -> EventPayload {
+        EventPayload::DeviceInstances {
+            instances: self.reported_device_instances(),
+        }
+    }
+
+    /// **报出去**的逐实例清单（STAGE-43 · 裁决 K / L）。
+    ///
+    /// ⚠️ **用户的板优先**（裁决 K）：前端定义的那块板才是主角 ⇒ ⇒ 报的是
+    /// **它**的实例；**没有**用户板时才报生效图的。
+    ///
+    /// ⚠️ **「已绑定」只有一个判据**（裁决 L）：该实例（**id + 类型 +
+    /// 基址**）在**生效图**里**逐字段相同** ⇒ ⇒ `base = Some(...)`；
+    /// 否则 ⇒ `None`（**待生效**）⇒ ⇒ 「已绑定 / 待生效」由**一个字段**
+    /// 表达 ⇒ ⇒ 不用两个字段互相推导。
+    ///
+    /// ⚠️ **窗口大小来自类型注册表**（M-15）⇒ ⇒ 「每个类型多大」**只写
+    /// 一处** ⇒ ⇒ 这里**不**从总线反推。
+    ///
+    /// @returns {Array<object>} — `DeviceInstanceInfo` values
+    fn reported_device_instances(&self) -> Vec<riscv_sim_contract::model::DeviceInstanceInfo> {
+        let Some(board) = self.user_board.as_ref() else {
+            // ⚠️ 没有用户板 ⇒ 报**生效图**的那些（全部已绑定）。
+            let mut out = self.device_instances.clone();
+            out.sort_by(|a, b| a.id.cmp(&b.id));
+            return out;
+        };
+        let mut out = Vec::new();
+        for region in board.regions.iter() {
+            let riscv_sim_contract::platform::RegionSpec::Peripheral { base, device } = region
+            else {
+                continue;
+            };
+            let id = device.id().to_string();
+            let kind = device.kind().to_string();
+            // ⚠️ **窗口大小来自类型注册表** ⇒ 「类型多大」只有一处真相。
+            let window_bytes = crate::m15_peripheral::types::window_bytes(&kind).unwrap_or(0);
+            // ⚠️ **唯一判据**：生效图里有**同一个 id + 同一个类型 + 同一个
+            // 基址** ⇒ ⇒ 已绑定；否则 ⇒ 待生效。
+            let bound = self
+                .device_instances
+                .iter()
+                .find(|inst| inst.id == id && inst.kind == kind && inst.base == Some(*base))
+                .and_then(|inst| inst.base);
+            out.push(riscv_sim_contract::model::DeviceInstanceInfo {
+                id,
+                kind,
+                base: bound,
+                window_bytes,
+            });
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out
     }
 
     /// **解析**一个镜像（**不写总线**），返回入口地址、段内容与调试节区。
@@ -3721,6 +3823,8 @@ impl KernelHost {
         let want_waveform = topic == TOPIC_WAVEFORM;
         let want_console = topic == TOPIC_CONSOLE;
         let want_memory_map = topic == TOPIC_MEMORY_MAP;
+        let want_device_types = topic == TOPIC_DEVICE_TYPES;
+        let want_device_instances = topic == TOPIC_DEVICE_INSTANCES;
         self.topics.insert(topic);
         let mut events = vec![self.tick()];
         if want_registers {
@@ -3764,6 +3868,18 @@ impl KernelHost {
             // **同形** ⇒ **带 `loaded` 与 `revision`** ⇒ 前端**重订之后**
             // 修订号自动刷新 ⇒ **不会误报冲突**。
             events.push(self.memory_map_event());
+        }
+        // ⚠️ STAGE-43 · v0.66 · D-175 —— 「订阅即强制推一条」**同一个套路**
+        // ⇒ ⇒ 前端不必等下一次建图才拿到实例状态。
+        if want_device_types {
+            // ⚠️ **类型注册表是静态的** ⇒ ⇒ 推一次就够（但**每次订阅**都推
+            // ⇒ ⇒ 重订后前端手里那份**一定**是当前内核的）。
+            events.push(EventPayload::DeviceTypes {
+                types: crate::m15_peripheral::types::device_type_infos(),
+            });
+        }
+        if want_device_instances {
+            events.push(self.device_instances_event());
         }
         events
     }
@@ -4522,6 +4638,13 @@ mod tests_v057_debug;
 /// `loadImage` 段 ⇒ ⇒ 三段**分层**钉。
 #[cfg(test)]
 mod tests_v059_reset;
+
+/// STAGE-43 · v0.66 批 —— **内核侧中间层**的宿主侧门禁（K 组）。
+///
+/// ⚠️ 盯的是「内核怎么算」：器件类型注册表的内容 + 逐实例状态的**推导**
+/// （已绑定 / 待生效）⇒ ⇒ 断言全部落在**命令回的事件**上。
+#[cfg(test)]
+mod tests_v066_devices;
 
 /// 平台描述的加载 · 器件工厂 · 建图（v0.27 · D-123-B）。
 ///

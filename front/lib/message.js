@@ -110,6 +110,19 @@
 //   - ⚠️ `SIM_STATE_SCHEMA_VERSION` / `PLATFORM_SCHEMA_VERSION` /
 //     `PLATFORM_RULES_VERSION` are **unchanged** (still 2 / 1 / 3).
 //
+// Contract **v10** adds the **kernel-side middle layer**'s **read-only**
+// surface (STAGE-43 · v0.66 · debt ledger D-175):
+//
+//   - two new commands: `ListDeviceTypes` / `ListDeviceInstances` — both
+//     **read-only** ⇒ ⇒ they judge nothing ⇒ ⇒ **no new scenario code**;
+//   - two new events: `DeviceTypes { types }` — the **device type registry**
+//     (what the kernel implements: window size + register **offsets** +
+//     parameter domains) and `DeviceInstances { instances }` — the
+//     **per-instance state** (which base address each instance is bound to;
+//     `base: null` ⇒ **not in effect yet**);
+//   - ⚠️ the **platform description format did not change** ⇒ ⇒ the stored
+//     board archives are unaffected (PLATFORM_SCHEMA_VERSION stays 1).
+//
 // ⚠️ The two admin DTOs (`LogEntryDto` / `AdminDiagDto`) have **one**
 //   truth: `crates/contract/fixtures/admin-dto.json` ⇒ ⇒ the Rust side
 //   asserts its serialisation against that file and the front side reads
@@ -117,7 +130,7 @@
 //   on either side turns the other side red.
 
 /** Protocol schema version — mirrors `riscv_sim_contract::SCHEMA_VERSION`. */
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 /**
  * 转储长度上限（字节）—— mirrors `riscv_sim_contract::DUMP_MAX_BYTES`.
@@ -373,6 +386,11 @@ export const EVENT_TOPIC = Object.freeze({
     // 契约 v9 新增：调试器增强批（符号查询 + 整段转储）。
     SymbolResolved: "debug.symbol",
     MemoryDump: "debug.dump",
+    // 契约 v10 新增：内核侧中间层的两条**只读**通道（STAGE-43 · D-175）。
+    // ⚠️ **器件类型**是**静态**的（由内核代码决定）⇒ ⇒ 订阅后推一次；
+    // ⚠️ **器件实例**是**动态**的（随建图变化）⇒ ⇒ **每次建图后**推。
+    DeviceTypes: "device.types",
+    DeviceInstances: "device.instances",
 });
 
 /**
@@ -709,6 +727,28 @@ export const Command = Object.freeze({
      */
     unloadProject: () => "UnloadProject",
     /**
+     * `CommandPayload::ListDeviceTypes` — 列出**内核支持的器件类型**
+     * （契约 v10 · STAGE-43 · D-175）。
+     *
+     * ⚠️ **只读** ⇒ ⇒ 不判错 ⇒ ⇒ 零新场景码。
+     *
+     * ⚠️ **unit 变体** ⇒ 线上形态是**裸字符串** `"ListDeviceTypes"`。
+     *
+     * @returns {"ListDeviceTypes"}
+     */
+    listDeviceTypes: () => "ListDeviceTypes",
+    /**
+     * `CommandPayload::ListDeviceInstances` — 列出**逐实例状态**
+     * （契约 v10 · STAGE-43 · D-175）。
+     *
+     * ⚠️ **逐实例**：每个实例绑到了哪个基址（`base: null` ⇒ **尚未生效**）。
+     *
+     * ⚠️ **unit 变体** ⇒ 线上形态是**裸字符串** `"ListDeviceInstances"`。
+     *
+     * @returns {"ListDeviceInstances"}
+     */
+    listDeviceInstances: () => "ListDeviceInstances",
+    /**
      * `CommandPayload::ResolveSymbol { name }` — 按**名字**查符号（契约 v9）。
      *
      * ⚠️ **一条命令服务两种用法**（契约 v9 §3 裁决 B）：
@@ -939,6 +979,40 @@ export const Event = Object.freeze({
             loaded: Boolean(loaded),
             revision: Number(revision ?? 0),
         },
+    }),
+    /**
+     * `EventPayload::DeviceTypes { types }` — **器件类型注册表**
+     * （契约 v10 · STAGE-43 · D-175）。
+     *
+     * ⚠️ **每个类型自带**：窗口大小 · **寄存器偏移表**（**只定义偏移**，
+     * 不含基址）· 实例参数的合法区间。
+     *
+     * ⚠️ **它是「内核支持什么」的那一份真相** ⇒ ⇒ 前端**不**再自己抄一份
+     * 类型清单（抄的那份是第二个真相源）。
+     *
+     * ⚠️ **条目原样透传** ⇒ ⇒ 前端**不复制**契约层的 DTO 形状。
+     *
+     * @param {Array<object>} types — `DeviceTypeInfo` 列表
+     * @returns {{DeviceTypes: {types: Array<object>}}}
+     */
+    deviceTypes: (types) => ({
+        DeviceTypes: { types: types ?? [] },
+    }),
+    /**
+     * `EventPayload::DeviceInstances { instances }` — **逐实例状态**
+     * （契约 v10 · STAGE-43 · D-175）。
+     *
+     * ⚠️ **逐实例**：每个实例的 `base` 是**绑定的绝对基址** ⇒ ⇒
+     * `null` ⇒ 该实例在用户的板里但**尚未生效**（待生效）⇒ ⇒
+     * 前端**显式**标出来（不是空着）。
+     *
+     * ⚠️ **条目原样透传** ⇒ ⇒ 前端**不复制**契约层的 DTO 形状。
+     *
+     * @param {Array<object>} instances — `DeviceInstanceInfo` 列表
+     * @returns {{DeviceInstances: {instances: Array<object>}}}
+     */
+    deviceInstances: (instances) => ({
+        DeviceInstances: { instances: instances ?? [] },
     }),
     /**
      * `EventPayload::AdminLogs { entries }` — 管理员通道导出的**日志条目**

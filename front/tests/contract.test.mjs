@@ -412,6 +412,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             // 契约 v9 新增：按名字查符号 + 转储一段内存（调试器增强批）。
             variantOf(Command.resolveSymbol("main")),
             variantOf(Command.dumpMemory(0, 16)),
+            // 契约 v10 新增：内核侧中间层的两条**只读**命令（STAGE-43）。
+            variantOf(Command.listDeviceTypes()),
+            variantOf(Command.listDeviceInstances()),
         ].sort();
         assert.deepEqual(js, rust, "JS 命令变体与 Rust CommandPayload 不一致");
     });
@@ -446,6 +449,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             // 契约 v9 新增：符号查询的回复 + 一段内存的字节（调试器增强批）。
             variantOf(Event.symbolResolved("main", null, [], 0)),
             variantOf(Event.memoryDump(0, [])),
+            // 契约 v10 新增：器件类型注册表 + 逐实例状态（STAGE-43）。
+            variantOf(Event.deviceTypes([])),
+            variantOf(Event.deviceInstances([])),
         ].sort();
         assert.deepEqual(js, rust, "JS 事件变体与 Rust EventPayload 不一致");
     });
@@ -554,6 +560,11 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 //   没改 ⇒ ⇒ **静默**（F-13）。
                 ResolveSymbol: Command.resolveSymbol("main"),
                 DumpMemory: Command.dumpMemory(0, 16),
+                // ⚠️ **契约 v10**（STAGE-43 · 内核侧中间层批）⇒ ⇒ 这两个
+                //   构造器**必须**在这儿登记 ⇒ ⇒ 否则 Rust 侧一加变体，
+                //   跨层门禁**看不见**它们的字段名。
+                ListDeviceTypes: Command.listDeviceTypes(),
+                ListDeviceInstances: Command.listDeviceInstances(),
             },
             EventPayload: {
                 Tick: Event.tick(0, 0),
@@ -584,6 +595,10 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 //   字段名就被**逐字**比上。
                 SymbolResolved: Event.symbolResolved("main", null, [], 0),
                 MemoryDump: Event.memoryDump(0, [0]),
+                // ⚠️ **契约 v10**（STAGE-43 · 内核侧中间层批）⇒ ⇒ 字段名
+                //   逐字比对的**登记处**（`types` / `instances`）。
+                DeviceTypes: Event.deviceTypes([]),
+                DeviceInstances: Event.deviceInstances([]),
             },
         };
 

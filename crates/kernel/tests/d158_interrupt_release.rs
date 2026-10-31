@@ -1122,8 +1122,8 @@ fn the_external_interrupt_is_delivered_after_the_timer_line_was_released() {
 fn the_contract_layer_version_numbers_are_untouched() {
     assert_eq!(
         riscv_sim_contract::SCHEMA_VERSION,
-        9,
-        "契约层的信封版本号（v0.57 批升到 9：新命令 + 新事件）"
+        10,
+        "契约层的信封版本号（v0.66 批升到 10：器件类型注册表 + 逐实例状态两条只读通道）"
     );
     assert_eq!(
         riscv_sim_contract::model::SIM_STATE_SCHEMA_VERSION,

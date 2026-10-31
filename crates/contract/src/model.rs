@@ -68,6 +68,83 @@ impl Default for TreeNode {
     }
 }
 
+/// One **device type** the kernel implements (STAGE-43 · v0.66 · D-175).
+///
+/// ⚠️ **这是「内核支持什么」的那一份真相**（裁决 H）⇒ ⇒ 落在 **M-15** 的
+/// 器件类型注册表里 ⇒ ⇒ 契约层只**转述**它（这个 DTO 是**载体**）。
+///
+/// ⚠️ **它与 [`crate::platform::DeviceSpec`] 是两个东西**：
+/// - 本 DTO = **内核实现了哪些类型**（今天 **5** 种，含 `timer_riscv`）；
+/// - `DeviceSpec` = **平台描述格式能写出哪些类型**（今天 **4** 种）。
+///
+/// ⇒ ⇒ 两者**必须**满足「可实例化 ⊆ 已实现」（裁决 H 的硬约束）⇒ ⇒
+/// 「内核实现了、但描述还写不出来」的那一条（`timer_riscv`）**如实报出来**
+/// （裁决 J）⇒ ⇒ **不假装**内核没有它。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceTypeInfo {
+    /// The type name — byte-identical to the [`crate::platform::DeviceSpec`]
+    /// tag it can be written as (e.g. `"uart16550"`).
+    pub kind: String,
+    /// The register window size in bytes — **reported by the type**
+    /// (裁决 C ⇒ 抄器件模型那一份常量，不新造).
+    pub window_bytes: u32,
+    /// The register map — **offsets only, no base address** (裁决 D).
+    ///
+    /// ⚠️ 集成时绑定到任意基址 ⇒ ⇒ **偏移**是类型的事、**基址**是装配期
+    /// 的事 ⇒ ⇒ 这张表里**不许**出现基址。
+    pub registers: Vec<DeviceRegisterInfo>,
+    /// The instance parameters and their legal value domain (裁决 E).
+    pub params: Vec<DeviceParamInfo>,
+}
+
+/// One register of a device type — **an offset, not an address**.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRegisterInfo {
+    /// Register name (e.g. `"THR"`, `"OUT"`).
+    pub name: String,
+    /// Byte offset **within the window** (never an absolute address).
+    pub offset: u32,
+    /// Width in bits (32 today).
+    pub width_bits: u32,
+}
+
+/// One instance parameter of a device type + its legal value domain.
+///
+/// ⚠️ **区间只写一份**（裁决 E）⇒ ⇒ 那份在**契约层**
+/// （`MAX_PLIC_SOURCES` / `MAX_PLIC_CONTEXTS` / `MAX_CLINT_HARTS` /
+/// `MAX_CLINT_FREQ_HZ`）⇒ ⇒ 这里**引用**它 ⇒ ⇒ 前端**不**再抄一份。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceParamInfo {
+    /// Parameter name (e.g. `"irq_line"`, `"sources"`).
+    pub name: String,
+    /// Lower bound (`None` ⇒ no lower bound).
+    pub min: Option<u64>,
+    /// Upper bound (`None` ⇒ no upper bound).
+    pub max: Option<u64>,
+}
+
+/// One **device instance**'s state association (STAGE-43 · v0.66 · D-175).
+///
+/// ⚠️ **逐实例**（裁决 B）—— 不是板级：板级的那一份已经有 `memory.map`
+/// 事件了 ⇒ ⇒ 这一个说的是「**每个实例**绑到哪儿了」。
+///
+/// ⚠️ **状态只有两种，由 [`Self::base`] 的有无唯一决定**（裁决 F / L）：
+/// - `Some(base)` ⇒ 该实例**已在当前生效的图里**，基址就是 `base`；
+/// - `None` ⇒ 该实例在**用户的板**里但**尚未生效**（待生效）。
+///
+/// ⇒ ⇒ **不另设状态字段** ⇒ ⇒ 两个字段不会互相矛盾（不是第二个真相）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceInstanceInfo {
+    /// The instance id — the device `id` in the description.
+    pub id: String,
+    /// The device type (see [`DeviceTypeInfo::kind`]).
+    pub kind: String,
+    /// The bound absolute base address — `None` ⇒ **not in effect yet**.
+    pub base: Option<u32>,
+    /// The register window size in bytes (reported by the type).
+    pub window_bytes: u32,
+}
+
 /// Reference to a loadable image. The kernel will hand this to M-06
 /// (ELF/Raw-HEX parser) to obtain a binary blob to load.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

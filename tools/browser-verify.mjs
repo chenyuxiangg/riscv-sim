@@ -193,6 +193,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "traceSwitch",
     "traceExport",
     "debugDedup",
+    "deviceRegistry",
 ]);
 
 /**
@@ -1544,6 +1545,39 @@ const BV_MEMORY_MAP_PROBE = `(() => {
 })()`;
 
 /**
+ * 器件类型注册表 + 逐实例状态（STAGE-43 · v0.66 · B-115 ~ B-117）。
+ *
+ * ⚠️ **读的是产品视图那两张卡** ⇒ ⇒ 断的是「内核 ⇒ 事件 ⇒ 视图状态 ⇒
+ * DOM」**整条链** ⇒ ⇒ 前端拿 mock 数据糊弄不过去。
+ */
+const BV_DEVICE_REGISTRY_PROBE = `(() => {
+  const body = document.querySelector('[data-view-body="product"]');
+  if (!body) return null;
+  const types = Array.from(body.querySelectorAll("[data-device-type]")).map((el) => ({
+    kind: String(el.getAttribute("data-device-type") || ""),
+    window: String(el.getAttribute("data-device-window") || ""),
+  }));
+  const instances = Array.from(body.querySelectorAll("[data-device-instance]")).map((el) => ({
+    id: String(el.getAttribute("data-device-instance") || ""),
+    kind: String(el.getAttribute("data-device-instance-kind") || ""),
+    base: el.getAttribute("data-device-instance-base") || null,
+    pending: el.getAttribute("data-device-instance-pending") || "",
+    window: String(el.getAttribute("data-device-window") || ""),
+  }));
+  const mapRows = Array.from(body.querySelectorAll("[data-region-base]")).map((el) => ({
+    base: String(el.getAttribute("data-region-base") || ""),
+    kind: String(el.getAttribute("data-region-kind") || ""),
+  }));
+  return {
+    typesPresent: Boolean(body.querySelector('[data-device-types="rows"]')),
+    instancesPresent: Boolean(body.querySelector('[data-device-instances="rows"]')),
+    types,
+    instances,
+    mapRows,
+  };
+})()`;
+
+/**
  * 在页面里挂一个**命令捕获器**：记录每一条 `riscv:command` 信号。
  *
  * ⚠️ 与 `CAPTURE_RESOLVE_LINE_EXPRESSION` 同一套路 —— 只是**运行时插桩**，
@@ -1797,6 +1831,95 @@ async function runMemoryMapSection(cdp, opts) {
         beyondFailed
             ? `写 0x${beyond.toString(16)}（超出段尾）被拒`
             : `写 0x${beyond.toString(16)} 居然成功了 ⇒ size 没生效`,
+    );
+
+    return { skipped: false, checks };
+}
+
+/**
+ * 器件类型注册表 + 逐实例状态（STAGE-43 · v0.66 · B-115 ~ B-117）。
+ *
+ * ⚠️ **要真内核的数据** ⇒ ⇒ 断的是「真 WASM 内核 ⇒ `device.types` /
+ *   `device.instances` 事件 ⇒ 视图状态 ⇒ DOM」**整条链** ⇒ ⇒ 前端塞 mock
+ *   数据糊弄不过去（mock 那条路**根本不发**这两个事件）。
+ *
+ * ⚠️ **必须排在 osz 之后**：装 osz 那次装载会重建板 ⇒ ⇒ 器件实例表随之
+ *   更新 ⇒ ⇒ 放在 osz 前面拿到的是**启动那张 demo 板**的实例。
+ */
+async function runDeviceRegistrySection(cdp, opts) {
+    /** @type {{name: string, ok: boolean, detail: string}[]} */
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+
+    // -- ① 切到产品视图，等那两张卡挂上 --------------------------------------
+    await runEffect(cdp, 'location.hash = "#/product";');
+    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
+
+    let probe = null;
+    const deadline = Date.now() + opts.timeoutMs;
+    while (Date.now() < deadline) {
+        const value = await awaitEval(cdp, BV_DEVICE_REGISTRY_PROBE);
+        probe = value ?? null;
+        if (probe?.instancesPresent && probe?.typesPresent) break;
+        await sleep(250);
+    }
+    if (!probe?.instancesPresent || !probe?.typesPresent) {
+        return {
+            skipped: false,
+            checks: [{
+                name: "产品视图挂上了「器件类型」「器件实例」两张卡",
+                ok: false,
+                detail: "等不到那两张卡（内核没推事件？还是前端没接？）",
+            }],
+        };
+    }
+    add("产品视图挂上了「器件类型」「器件实例」两张卡", true,
+        `类型 ${probe.types.length} 种 · 实例 ${probe.instances.length} 个`);
+
+    // -- ② 类型表**非空**（真内核报了它支持哪些类型） ------------------------
+    const kinds = probe.types.map((t) => t.kind);
+    add(
+        "器件类型表**非空**（内核报了它支持哪些类型）",
+        probe.types.length > 0,
+        `类型：${kinds.join("、") || "（空）"}`,
+    );
+
+    // -- ③ 逐实例表**非空**（真数据，不是 mock） ----------------------------
+    add(
+        "器件实例表**非空**（逐实例：真内核把每个实例绑到了哪个基址）",
+        probe.instances.length > 0,
+        `实例：${probe.instances.map((i) => i.id).join("、") || "（空）"}`,
+    );
+
+    // -- ④ 实例的基址**与内存映射表里的行对得上** ----------------------------
+    //
+    // ⚠️ **判据**：每一个 `base` 非空的实例 ⇒ ⇒ 内存映射表里**有一行**的
+    // 基址与它**逐字相同** ⇒ ⇒ 「表与实例说的是同一张图」。
+    const mapBases = new Set(probe.mapRows.map((row) => row.base));
+    const bound = probe.instances.filter((i) => i.base !== null && i.base !== "");
+    const matched = bound.filter((i) => mapBases.has(String(i.base)));
+    add(
+        "实例的基址**与内存映射表里的行对得上**（表与实例说的是同一张图）",
+        bound.length > 0 && matched.length === bound.length,
+        `已绑定实例 ${bound.length} 个 · 与表对得上 ${matched.length} 个`
+        + `（表里 ${probe.mapRows.length} 行）`,
+    );
+
+    // -- ⑤ 类型卡的窗口大小 == 实例卡的窗口大小（同一份注册表） --------------
+    //
+    // ⚠️ **判据**：每个实例的 `kind` 在类型表里 ⇒ ⇒ 且两处的**窗口大小**
+    //   **逐字相同** ⇒ ⇒ 证明「实例的窗口来自那一份类型注册表」。
+    const typeWindow = new Map(probe.types.map((t) => [t.kind, t.window]));
+    const sameWindow = probe.instances.every((i) => {
+        const w = typeWindow.get(i.kind);
+        return w !== undefined && w === i.window;
+    });
+    add(
+        "类型卡的窗口大小 == 实例卡的窗口大小（同一份注册表）",
+        probe.instances.length > 0 && sameWindow,
+        probe.instances
+            .map((i) => `${i.kind}: 实例 ${i.window} / 类型 ${typeWindow.get(i.kind) ?? "无"}`)
+            .join(" · "),
     );
 
     return { skipped: false, checks };
@@ -7456,6 +7579,19 @@ async function main() {
         const loadImage = await runSection("loadImage", () => runLoadImageSection(cdp, opts));
         registerSection("loadImage", loadImage.checks, {
             title: "固件加载 UI 检查（界面上真选文件 → 装载 → 跑起来 → 内核真的换了镜像）",
+        });
+
+        // -- the device type registry + per-instance state (STAGE-43 · v0.66) --
+        // ⚠️ **必须排在板级内存图段之前**：那一段会**换一张只有 RAM 的板**
+        //    ⇒ ⇒ 板上**没有外设** ⇒ ⇒ 逐实例清单**理应为空** ⇒ ⇒ 放在它
+        //    后面就看不到「实例」这件事了（⚠️ 第一版就踩了这个坑 ⇒ ⇒ 真机
+        //    门禁当场报「等不到那两张卡」⇒ ⇒ 症状像「内核没推事件」，真因是
+        //    **板里没有器件**）。
+        // ⚠️ 排在这里时生效的板是启动那张（`default` ⇒ 有一个 GPIO0）⇒ ⇒
+        //    实例表**非空** ⇒ ⇒ 断言「非空」才有意义。
+        const deviceRegistry = await runSection("deviceRegistry", () => runDeviceRegistrySection(cdp, opts));
+        registerSection("deviceRegistry", deviceRegistry.checks, {
+            title: "器件中间层检查（类型表非空 · 逐实例表非空 · 基址与内存映射表对得上）",
         });
 
         // -- the BREAKPOINT UI (STAGE-35 · v0.50 批 · B-19 ~ B-26) --------

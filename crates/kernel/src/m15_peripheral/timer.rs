@@ -37,7 +37,7 @@ pub const TIMER_WINDOW: u32 = 0x10;
 /// should be a **pulse** channel (M-18 `ChannelKind::Pulse`).
 pub const SIGNAL_CMP: &str = "CMP";
 
-mod reg {
+pub mod reg {
     pub const MTIME_LO: u32 = 0x0;
     pub const MTIME_HI: u32 = 0x4;
     pub const MTIMECMP_LO: u32 = 0x8;

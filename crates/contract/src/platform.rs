@@ -415,6 +415,25 @@ pub enum DeviceSpec {
     },
 }
 
+impl DeviceSpec {
+    /// **Every kind a platform description can express** — the *instantiable*
+    /// set (STAGE-43 · v0.66 · D-175 · 裁决 H / I).
+    ///
+    /// ⚠️ **This is NOT the same thing as "what the kernel implements"**:
+    /// - **this** = what the *description format* can write (today **4**);
+    /// - the kernel's *device type registry* (M-15) = what the kernel
+    ///   implements (today **5** — it also has a timer).
+    ///
+    /// ⇒ ⇒ The invariant is **"instantiable ⊆ implemented"** ⇒ ⇒ the
+    /// reverse direction is **not** required (the timer is implemented but
+    /// not writable yet — 裁决 J ⇒ 登记为 D-175 的子项).
+    ///
+    /// ⚠️ **One landing spot** (裁决 I) ⇒ ⇒ the front end's `DEVICE_KINDS`
+    /// is checked against **this** list by a cross-layer gate ⇒ ⇒ a new
+    /// variant here turns the front end **red** instead of drifting.
+    pub const KINDS: [&'static str; 4] = ["gpio", "uart16550", "clint", "plic"];
+}
+
 impl PlatformDescription {
     /// Validate this description against the frozen rules.
     ///
@@ -1035,37 +1054,78 @@ impl DeviceSpec {
     ///
     /// ⚠️ The bounds live in **this** module ([`MAX_CLINT_FREQ_HZ`] and
     /// friends) ⇒ one definition, everybody else references them.
+    ///
+    /// ⚠️ **The bounds are looked up in [`Self::parameter_domain`]** (the
+    /// **one** landing spot) ⇒ ⇒ the judge (V-13 / V-14) and the kernel's
+    /// device type registry (STAGE-43 · 裁决 E) read the **same** place ⇒
+    /// ⇒ the two can never drift.
     fn numeric_parameters(&self) -> Vec<(&'static str, u64, u64, Option<u64>)> {
+        let domain = Self::parameter_domain(self.kind());
+        self.numeric_values()
+            .into_iter()
+            .filter_map(|(name, value)| {
+                domain
+                    .iter()
+                    .find(|(n, _, _)| *n == name)
+                    .map(|(_, lower, upper)| (name, value, *lower, *upper))
+            })
+            .collect()
+    }
+
+    /// The **numeric values** of this instance's parameters — the value
+    /// half of [`Self::numeric_parameters`].
+    ///
+    /// ⚠️ **`irq_line` is deliberately absent**: it is judged by the
+    /// **cross-field** rule V-15 (it must be a valid PLIC source id) ⇒ ⇒
+    /// it has **no** static domain ⇒ ⇒ it is not part of the domain table.
+    fn numeric_values(&self) -> Vec<(&'static str, u64)> {
         match self {
             DeviceSpec::Gpio { .. } => Vec::new(),
             DeviceSpec::Uart16550 { baud_rate, .. } => {
-                vec![("baud_rate", u64::from(*baud_rate), 1, None)]
+                vec![("baud_rate", u64::from(*baud_rate))]
             }
-            DeviceSpec::Clint { freq_hz, harts, .. } => vec![
-                ("freq_hz", *freq_hz, 1, Some(MAX_CLINT_FREQ_HZ)),
-                (
-                    "harts",
-                    u64::from(*harts),
-                    1,
-                    Some(u64::from(MAX_CLINT_HARTS)),
-                ),
-            ],
+            DeviceSpec::Clint { freq_hz, harts, .. } => {
+                vec![("freq_hz", *freq_hz), ("harts", u64::from(*harts))]
+            }
             DeviceSpec::Plic {
                 sources, contexts, ..
             } => vec![
-                (
-                    "sources",
-                    u64::from(*sources),
-                    1,
-                    Some(u64::from(MAX_PLIC_SOURCES)),
-                ),
-                (
-                    "contexts",
-                    u64::from(*contexts),
-                    1,
-                    Some(u64::from(MAX_PLIC_CONTEXTS)),
-                ),
+                ("sources", u64::from(*sources)),
+                ("contexts", u64::from(*contexts)),
             ],
+        }
+    }
+
+    /// The **legal value domain** of one device kind — `(name, lower,
+    /// upper)` per numeric parameter.
+    ///
+    /// ⚠️ **This is the one landing spot of the bounds** (STAGE-43 · v0.66 ·
+    /// 裁决 E) ⇒ ⇒ **both** readers come here:
+    /// - the judge (V-13 / V-14) — via [`Self::numeric_parameters`];
+    /// - the kernel's **device type registry** (M-15) — which reports the
+    ///   domain to the front end ⇒ ⇒ the front end **never** writes a
+    ///   second interval table.
+    ///
+    /// ⚠️ **An unknown kind yields an empty domain** — that is the honest
+    /// answer for a type the description format cannot express (today:
+    /// `timer_riscv`, which the kernel implements but the format cannot
+    /// write yet — 裁决 J).
+    ///
+    /// @param {string} kind — the device kind tag (e.g. `"uart16550"`)
+    /// @returns {Array<[string, number, number|null]>}
+    pub fn parameter_domain(kind: &str) -> Vec<(&'static str, u64, Option<u64>)> {
+        match kind {
+            "gpio" => Vec::new(),
+            "uart16550" => vec![("baud_rate", 1, None)],
+            "clint" => vec![
+                ("freq_hz", 1, Some(MAX_CLINT_FREQ_HZ)),
+                ("harts", 1, Some(u64::from(MAX_CLINT_HARTS))),
+            ],
+            "plic" => vec![
+                ("sources", 1, Some(u64::from(MAX_PLIC_SOURCES))),
+                ("contexts", 1, Some(u64::from(MAX_PLIC_CONTEXTS))),
+            ],
+            _ => Vec::new(),
         }
     }
 }
@@ -2517,7 +2577,7 @@ mod tests {
     /// 条件断点表达式）⇒ ⇒ 同理：literal 与 name 一起跟。
     #[test]
     fn s16_a1_the_contract_schema_version_is_nine() {
-        assert_eq!(crate::SCHEMA_VERSION, 9);
+        assert_eq!(crate::SCHEMA_VERSION, 10);
     }
 
     /// **STAGE-16 A-2** — the **description format**'s version is still

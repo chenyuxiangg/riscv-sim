@@ -73,6 +73,12 @@ import {
     publishProductState,
     renderImageLoadStatus,
 } from "./components/image-loader.js";
+// ⚠️ **器件类型注册表 + 逐实例状态**的渲染（STAGE-43 · v0.66 · D-175）⇒ ⇒
+// 两张卡的数据**只**来自内核（前端不抄第二份类型清单、不写第二份区间表）。
+import {
+    renderDeviceInstanceCard,
+    renderDeviceTypeCard,
+} from "./components/device-registry.js";
 
 // ---------------------------------------------------------------------------
 // ViewComponent shape (LLD §2.1.1)
@@ -198,6 +204,8 @@ const productTreeView = register({
                 </section>
             </div>
             ${renderImageLoadStatus(state?.imageLoad)}
+            ${renderDeviceTypeCard(state?.deviceTypes ?? null)}
+            ${renderDeviceInstanceCard(state?.deviceInstances ?? null)}
             <p class="muted">
                 内存映射表显示的是内核 <code>memory.map</code> 事件里的
                 <strong>当前生效</strong>的板级内存图；没有数据时如实显示空态，不显示假数据。

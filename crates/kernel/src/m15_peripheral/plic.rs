@@ -86,7 +86,7 @@ pub const DEFAULT_CONTEXT_COUNT: u32 = 16;
 pub const SIGNAL_PENDING: &str = "PENDING";
 
 /// 寄存器偏移（**相对基址**）。
-mod reg {
+pub mod reg {
     /// Pending 区基址：`0x1000` + 4×(source/32)。
     pub const PENDING: u32 = 0x1000;
     /// Enable 区基址：`0x2000` + 0x80×context + 4×(source/32)。

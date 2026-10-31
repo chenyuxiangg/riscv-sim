@@ -59,7 +59,7 @@ const PIN_COUNT: u32 = GPIO_PIN_COUNT as u32;
 /// (P1 evolution 评审 R5).
 const PIN_COUNT_MASK: u32 = u32::MAX;
 
-mod reg {
+pub mod reg {
     pub const DIR: u32 = 0x0;
     pub const OUT: u32 = 0x4;
     pub const IN: u32 = 0x8;

@@ -244,7 +244,25 @@ pub mod snapshot;
 /// - ⚠️ **the other three version numbers do not move**:
 ///   `SIM_STATE_SCHEMA_VERSION` stays `2`, `PLATFORM_SCHEMA_VERSION`
 ///   stays `1`, `PLATFORM_RULES_VERSION` stays `3`.
-pub const SCHEMA_VERSION: u32 = 9;
+///
+/// Contract **v10** adds the **kernel-side middle layer**'s **read-only**
+/// surface (STAGE-43 · v0.66 · debt ledger **D-175**):
+///
+/// - new commands `CommandPayload::ListDeviceTypes` and
+///   `CommandPayload::ListDeviceInstances` — both **read-only** ⇒ ⇒ they
+///   judge nothing ⇒ ⇒ **no new scenario code**;
+/// - new events `EventPayload::DeviceTypes { types }` and
+///   `EventPayload::DeviceInstances { instances }` — the **device type
+///   registry** (what the kernel implements) and the **per-instance state**
+///   (which base address each instance is bound to);
+/// - new DTOs `model::DeviceTypeInfo` / `model::DeviceRegisterInfo` /
+///   `model::DeviceParamInfo` / `model::DeviceInstanceInfo`;
+/// - ⚠️ **the platform description format did not change** ⇒ ⇒
+///   `PLATFORM_SCHEMA_VERSION` stays `1` and `PLATFORM_RULES_VERSION`
+///   stays `3` ⇒ ⇒ **the stored board archives are unaffected**;
+/// - ⚠️ `SIM_STATE_SCHEMA_VERSION` stays `2` (the snapshot payload did not
+///   change either).
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// 转储长度上限（字节）—— v0.57 批（STAGE-42 §2.5 · 裁决 D）。
 ///

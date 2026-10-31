@@ -36,6 +36,7 @@ pub mod gpio;
 pub mod plic;
 pub mod reg;
 pub mod timer;
+pub mod types;
 pub mod uart;
 
 pub use clint::Clint;

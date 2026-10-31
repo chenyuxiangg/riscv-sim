@@ -363,7 +363,27 @@ pub enum CommandPayload {
         #[serde(default)]
         expected_revision: Option<u64>,
     },
-    /// 按**名字**查符号（M-11 · v0.57 批）。
+    /// **列出内核支持的器件类型**（M-15 的器件类型注册表 · STAGE-43 · v0.66）。
+    ///
+    /// ⚠️ **无载荷**：这是一条**只读**查询 ⇒ ⇒ 不判错 ⇒ ⇒ 零新场景码。
+    ///
+    /// ⚠️ **它是「内核支持什么」的那一份真相**（裁决 H）⇒ ⇒ 前端**查**它
+    /// ⇒ ⇒ 不再自己抄一份类型清单（抄的那份是第二个真相源）。
+    ///
+    /// The reply is [`EventPayload::DeviceTypes`].
+    ///
+    /// Added in contract v10.
+    ListDeviceTypes,
+    /// **列出逐实例状态**（每个器件实例绑到了哪个基址 · STAGE-43 · v0.66）。
+    ///
+    /// ⚠️ **逐实例**（裁决 B）—— 不是板级：板级的那一份已经有
+    /// [`EventPayload::MemoryMap`] 了 ⇒ ⇒ 这一条说的是「**每个实例**」。
+    ///
+    /// The reply is [`EventPayload::DeviceInstances`].
+    ///
+    /// Added in contract v10.
+    ListDeviceInstances,
+
     ///
     /// ⚠️ **一条命令同时服务两种用法**（裁决 B）：
     /// - **精确命中** ⇒ [`EventPayload::SymbolResolved`] 的 `symbol` 里有它；
@@ -709,6 +729,35 @@ pub enum EventPayload {
         /// 丢更新**看得见**（`E_PLT_13`）。
         revision: u64,
     },
+    /// **器件类型注册表**（内核支持什么 · M-15 · STAGE-43 · v0.66）。
+    ///
+    /// ⚠️ 回复 [`CommandPayload::ListDeviceTypes`]。
+    ///
+    /// ⚠️ **这是「内核实现了哪些器件类型」的那一份真相**（裁决 H）⇒ ⇒
+    /// 每个类型自带**窗口大小**、**寄存器偏移表**（**只定义偏移**，不含
+    /// 基址 —— 裁决 D）与**实例参数的合法区间**（裁决 E）。
+    ///
+    /// ⚠️ **它与「描述格式能写哪些类型」是两个集合** ⇒ ⇒ 「内核实现了、
+    /// 但描述还写不出来」的那一条**如实报出来**（裁决 J）⇒ ⇒ 不假装。
+    ///
+    /// Added in contract v10.
+    DeviceTypes {
+        /// 每个器件类型一条（顺序**按类型名升序** ⇒ 确定性）。
+        types: Vec<crate::model::DeviceTypeInfo>,
+    },
+    /// **逐实例状态**（每个器件实例绑到了哪个基址 · STAGE-43 · v0.66）。
+    ///
+    /// ⚠️ 回复 [`CommandPayload::ListDeviceInstances`]，**也在每次建图后**
+    /// 主动推一次（裁决 G —— 与 `memory.map` 同一时机）⇒ ⇒ 前端**不轮询**。
+    ///
+    /// ⚠️ **状态只有两种，由 `base` 的有无决定**（裁决 F / L）⇒ ⇒
+    /// `Some(base)` = 已在生效的图里；`None` = 在用户的板里但**尚未生效**。
+    ///
+    /// Added in contract v10.
+    DeviceInstances {
+        /// 每个器件实例一条（顺序**按实例 id 升序** ⇒ 确定性）。
+        instances: Vec<crate::model::DeviceInstanceInfo>,
+    },
     /// 管理通道：导出的**日志条目**（回复 `CommandPayload::Admin { op:
     /// AdminOp::DrainLogs }`）。
     ///
@@ -836,7 +885,7 @@ mod tests {
     /// 都会当场变红。
     #[test]
     fn the_schema_version_is_nine() {
-        assert_eq!(crate::SCHEMA_VERSION, 9);
+        assert_eq!(crate::SCHEMA_VERSION, 10);
     }
 
     /// `AdminOp`'s **doc** must state the gate the platform **really**
@@ -1051,7 +1100,7 @@ mod tests {
         let msg = Message::command(8, CommandPayload::Nop);
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
-        assert_eq!(json["schema_version"], 9);
+        assert_eq!(json["schema_version"], 10);
     }
 
     // -----------------------------------------------------------------

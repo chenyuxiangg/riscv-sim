@@ -27,6 +27,9 @@ import { mountSession } from "./services/m04_session.js";
 import { mountCommandRouter } from "./services/m05_commandrouter.js";
 import * as transportApi from "./services/m07_transport.js";
 import { mountRegisterMemory } from "./services/m10_registermemory.js";
+// ⚠️ M-15 器件中间层的前端接线（STAGE-43 · v0.66 · D-175）⇒ ⇒ 器件类型
+// 注册表与逐实例状态**只**从内核来（前端不抄第二份）。
+import { wireDevices } from "./services/m15_devices.js";
 import { Command, TRACE_FORMAT, TRACE_SOURCE, WRITE_SIZE } from "./lib/message.js";
 // ⚠️ 只导入**纯函数**（错误码拆分、草稿转换、「已被内核接受」推导量）⇒
 // 不引入服务层依赖，也不构成循环依赖。
@@ -1505,6 +1508,9 @@ export async function handleCommand(detail, services) {
                             debug,
                             console: consoleWiring,
                             memoryMap: memoryMapWiring,
+                            // ⚠️ 器件中间层（STAGE-43 · v0.66）—— 复位也**要**
+                            // 重订那两条流（`LoadProject` 清了内核的主题集合）。
+                            devices: services.devices,
                         },
                         loadedProject ?? buildMockProject(),
                     );
@@ -1875,6 +1881,8 @@ export async function handleCommand(detail, services) {
                         debug,
                         console: consoleWiring,
                         memoryMap: memoryMapWiring,
+                        // ⚠️ 器件中间层（STAGE-43 · v0.66）—— 同上。
+                        devices: services.devices,
                     },
                     project,
                 );
@@ -1955,6 +1963,11 @@ async function startSession(services) {
                 debug,
                 console: services.console,
                 memoryMap: services.memoryMap,
+                // ⚠️ **器件中间层**（STAGE-43 · v0.66）⇒ ⇒ **必须**在这儿
+                // 一起交进去 ⇒ ⇒ 否则 `resubscribeAllStreams` **看不到**它
+                // ⇒ ⇒ 那两条流**永远不订阅** ⇒ ⇒ 产品视图那两张卡**永远是
+                // 空态**（⚠️ 这正是真机门禁第一次跑就抓到的那个坑）。
+                devices: services.devices,
             },
             project,
         );
@@ -2061,6 +2074,9 @@ export async function loadProjectIntoKernel(services, project) {
     debug?.reset?.();
     // ⚠️ 新程序 ⇒ 上一个程序的 console 字节不算数（同一个坑）。
     consoleWiring.reset();
+    // ⚠️ 器件实例状态**跟着工程重建**（STAGE-43 · v0.66 · 同一个坑）⇒ ⇒
+    // 上一块板的实例清单不算数。
+    services.devices?.reset?.();
     await registerMemory.loadProject(project);
     // ⚠️ **重订部分抽成助手**（裁决 F · v0.31）⇒ 装载与卸载**共用**同一套
     // ⇒ **不写第二套**。
@@ -2072,6 +2088,8 @@ export async function loadProjectIntoKernel(services, project) {
         probeError: errors.probeError,
         consoleError: errors.consoleError,
         memoryMapError: errors.memoryMapError,
+        // ⚠️ 器件中间层（STAGE-43 · v0.66）—— 与其它流**同形**地报出来。
+        deviceError: errors.deviceError,
     };
 }
 
@@ -2104,12 +2122,14 @@ export async function loadProjectIntoKernel(services, project) {
  */
 export async function resubscribeAllStreams(services, options = {}) {
     const { skipRegisters = false } = options;
-    /** @type {{registerError: Error|null, probeError: Error|null, consoleError: Error|null, memoryMapError: Error|null}} */
+    /** @type {{registerError: Error|null, probeError: Error|null, consoleError: Error|null, memoryMapError: Error|null, deviceError: Error|null}} */
     const errors = {
         registerError: null,
         probeError: null,
         consoleError: null,
         memoryMapError: null,
+        // ⚠️ 器件中间层的两条流（STAGE-43 · v0.66）⇒ ⇒ **各自兜住**（不牵连别的流）。
+        deviceError: null,
     };
     if (!skipRegisters) {
         try {
@@ -2134,6 +2154,13 @@ export async function resubscribeAllStreams(services, options = {}) {
         await services.memoryMap?.subscribeMemoryMapStream?.();
     } catch (err) {
         errors.memoryMapError = err;
+    }
+    // ⚠️ **器件中间层**（STAGE-43 · v0.66）—— 与内存图流**同形**：装载 /
+    // 卸载都会清掉内核的主题集合 ⇒ ⇒ 不重订就**静默**停在旧数据上。
+    try {
+        await services.devices?.subscribeDeviceStreams?.();
+    } catch (err) {
+        errors.deviceError = err;
     }
     return errors;
 }
@@ -3395,6 +3422,10 @@ async function bootstrap() {
     // 挂好：内核侧**订阅了** `memory.map` 才会推那张图（裁决 J：订阅即强制
     // 推一条当前生效的图）⇒ 不先挂好，第一批图就丢了。
     const memoryMapWiring = wireMemoryMap(commandRouter);
+    // 器件中间层的两张表（STAGE-43 · v0.66）同样必须**在任何**装载之前挂好：
+    // 内核侧**订阅了** `device.types` / `device.instances` 才会推 ⇒ ⇒ 不先挂好，
+    // 第一批就丢了（与 `memory.map` 同一个坑）。
+    const devicesWiring = wireDevices(commandRouter);
     // 板档案（STAGE-15 · v0.30）：建存储实例 + **恢复档案列表**。
     //
     // ⚠️ **不自动重新提交**（裁决 D）：刷新后板**还在**，但**要重新提交**才
@@ -3452,6 +3483,8 @@ async function bootstrap() {
         debug,
         console: consoleWiring,
         memoryMap: memoryMapWiring,
+        // ⚠️ 器件中间层（STAGE-43 · v0.66）⇒ ⇒ 装载时要跟着重订两条流。
+        devices: devicesWiring,
         // ⚠️ 板档案的**存储实例**（可能是 `null` ⇒ 「只存在于本会话」）。
         boardStore: board.store,
     };
