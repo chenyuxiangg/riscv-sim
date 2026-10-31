@@ -64,3 +64,27 @@ else
     echo
     echo "==> SKIP: ledger front-end attribution (python3 not found)"
 fi
+
+# ---------------------------------------------------------------------------
+# The dev server's cache headers (v0.61 · `tools/serve-front.py`)
+# ---------------------------------------------------------------------------
+#
+# ⚠️ **Why this is in the default gate**: `python3 -m http.server` sends
+#   `Last-Modified` but **no `Cache-Control`** ⇒ ⇒ the browser applies
+#   *heuristic freshness* to the ES modules ⇒ ⇒ "I changed the code but the
+#   page looks the same" ⇒ ⇒ that reads like "the code is wrong" ⇒ ⇒ it
+#   cost a real debugging cycle (2026-10-31 · v0.60 batch).
+#
+# ⇒ ⇒ `tools/serve-front.py` is the repo's **one** way to serve the front end
+#   ⇒ ⇒ it must send `Cache-Control: no-store` ⇒ ⇒ **that header is the
+#   invariant**, ⇒ ⇒ and an invariant nobody checks rots.
+#
+# ⚠️ `python3` may be absent ⇒ ⇒ **skipped with a notice** (not a silent pass).
+if command -v python3 >/dev/null 2>&1; then
+    echo
+    echo "==> dev server cache headers (tools/serve-front.py --self-check)"
+    python3 tools/serve-front.py --self-check || exit 1
+else
+    echo
+    echo "==> SKIP: dev server cache headers (python3 not found)"
+fi
