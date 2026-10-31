@@ -39,6 +39,7 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 - `docs/module-design-spec/RISC-V_Module_Design_Specification.html` — 23 模块 LLD
 - `docs/detailed-design/M-01..M-23_*.html` — 23 篇模块详细设计
 - `docs/reviews/REVIEWS.md` — **检视与欠账的单一入口**（欠账总表 + §3 两轮检视归档 + §4 模块报告索引 + §5 变更索引）
+- `docs/plans/PRODUCT_BOARD_PLAN.md` — **产品 · 开发板架构的落地计划**（用户 2026-10-31 定的目标：产品树用来**创建自己的产品** ⇒ ⇒ 自定义开发板（增加 mcu / 外设 / 引脚连线与管理）⇒ ⇒ 给定义的板**映射内存** ⇒ ⇒ **两步之后**加载的固件才能跑、否则提示「**未知系统**」）⇒ ⇒ 该计划把台账 **D-175** 的八条候选做法排成 **第 52 ~ 58 批**（v0.68 ~ v0.74）⇒ ⇒ **第 52 批（A + H：产品树改成「板定义的编辑面」+ 前端类型清单只查内核）无论走路线 α 还是 β 都要做** ⇒ ⇒ **无悔的一步** ⇒ ⇒ ⚠️ **计划只管顺序与验收**；**欠账的真相仍在台账**、**每批的规格仍单独冻结**
 - `docs/reviews/M-*_Review.md` / `FRONTEND_*_Review.md` — 9 份模块详细检视报告
 - `docs/detailed-design/STAGE-1_Wasm_Bridge.md` — **第 1 阶段 WASM 桥接口规格（冻结）**：契约命令 ↔ 事件的规范映射表（**线格式以 STAGE-2 为准**）
 - `docs/detailed-design/STAGE-2_Contract_V2.md` — **契约层 v2 规格（冻结，`schema_version = 2`）**：数值策略 / 命令与事件新增 / 命名歧义处置 / 错误族与传输帧 `crc` / 快照 DTO 小修 / 端口文档订正
