@@ -191,6 +191,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "symbolBreakpoint",
     "uartEcho",
     "traceSwitch",
+    "traceExport",
 ]);
 
 /**
@@ -5674,6 +5675,29 @@ const BV_DEMO_DUMP_HEX = (() => {
  *   判「状态是什么」**只能看主句** ⇒ ⇒ 否则**假红**（读错位置与功能没做在
  *   输出上长得一样）。
  */
+/**
+ * 「trace 导出」面板的探针（进度行 / 内容块 / 下载按钮）。
+ *
+ * ⚠️ **按视图限定**：`[data-view-body="debug"]` ⇒ ⇒ 别处的同名元素不混进来。
+ */
+const BV_TRACE_EXPORT_PROBE = `(() => {
+  const body = document.querySelector('[data-view-body="debug"]');
+  const line = body ? body.querySelector("[data-trace-progress]") : null;
+  const chunk = body ? body.querySelector("[data-trace-chunk]") : null;
+  const btn = body ? body.querySelector('[data-action="download-trace-local"]') : null;
+  const legacy = body ? body.querySelector('[data-action="export-trace"][data-source="Execution"]') : null;
+  return {
+    hasBody: !!body,
+    hasProgress: !!line,
+    progressText: line ? String(line.textContent || "").trim() : "",
+    chunkLength: chunk ? String(chunk.textContent || "").length : 0,
+    chunkHead: chunk ? String(chunk.textContent || "").slice(0, 120) : "",
+    hasDownloadButton: !!btn,
+    downloadButtonText: btn ? String(btn.textContent || "").trim() : "",
+    hasLegacyButton: !!legacy,
+  };
+})()`;
+
 const BV_TRACE_SWITCH_PROBE = `(() => {
   const body = document.querySelector('[data-view-body="debug"]');
   const btn = body ? body.querySelector('[data-action="trace-toggle"]') : null;
@@ -5795,6 +5819,132 @@ async function runTraceSwitchSection(cdp, opts) {
         "B-93 · 第三次点 ⇒ ⇒ 回到「已开启」（⇒ ⇒ 它真的是个**开关**，不是一次性按钮）",
         p?.lineState === "on" && /已开启/.test(String(p?.mainText ?? "")),
         `状态=${JSON.stringify(p?.lineState)} 主句=${JSON.stringify(p?.mainText ?? "")}`,
+    );
+
+    return { checks };
+}
+
+/**
+ * v0.62 批的真机段：**trace 导出**（暂停 ⇒ ⇒ 自动渲染；下载 ⇒ ⇒ 整条落盘）。
+ *
+ * ⚠️ **为什么要有这一段**：此前真机门禁里**一条 trace 断言都没有** ⇒ ⇒ 「暂停
+ *   之后自动出内容」「下载拿到的是不是全量」这两件事**没人验** ⇒ ⇒ 本段补上。
+ *
+ * ⚠️ **判据抓的是「用户看得见的那件事」**：① 面板**自动**出现（不是用户再点
+ *   一次导出才有）② 面板里的**条数大于零**（真的录到了东西 ⇒ ⇒ 不是空导出）
+ *   ③ 下载**翻到了末尾**（`next_offset == total` ⇒ ⇒ 全量都拿到了）
+ *   ④ **必要对照**：trace **明确关着**时点暂停 ⇒ ⇒ 面板**不**被自动刷新。
+ */
+async function runTraceExportSection(cdp, opts) {
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
+    const probe = async () => await awaitEval(cdp, BV_TRACE_EXPORT_PROBE);
+
+    /** 从进度行解析「条目 a → b / total」⇒ ⇒ [a, b, total]（解析不了就是 null）。 */
+    const parseProgress = (text) => {
+        const m = /条目\s*(\d+)\s*→\s*(\d+)\s*\/\s*(\d+)/.exec(String(text ?? ""));
+        if (!m) return null;
+        return [Number(m[1]), Number(m[2]), Number(m[3])];
+    };
+
+    await resetAndLoadDemoFirmware(cdp, opts);
+    await runEffect(cdp, 'location.hash = "#/debug";');
+    await sleep(700);
+
+    // -- B-94 · 按钮的**语意**换成了「下载轨迹到本地」 ---------------------
+    let p = await probe();
+    add(
+        "B-94 · 工具条里是「下载轨迹到本地」且旧的「导出执行轨迹」按钮**不在**了"
+        + "（⇒ ⇒ 按钮的语意 = 落盘到本地）",
+        p?.hasDownloadButton === true
+            && /下载轨迹到本地/.test(String(p?.downloadButtonText ?? ""))
+            && p?.hasLegacyButton === false,
+        `新按钮=${JSON.stringify(p?.downloadButtonText ?? "")} 旧按钮还在=${p?.hasLegacyButton}`,
+    );
+
+    // -- 跑一段 ⇒ ⇒ 让轨迹里真的有东西 ---------------------------------------
+    await clickTopbarAction(cdp, "run");
+    await sleep(1200);
+
+    // -- B-95 · 点「暂停」⇒ ⇒ 面板**自动**出现 ------------------------------
+    await runEffect(cdp, `(() => {
+        const b = document.querySelector('[data-view-body="debug"] [data-action="pause"]');
+        if (!b) return "no-button";
+        b.click();
+        return "clicked";
+    })()`);
+    await sleep(1200);
+    p = await probe();
+    const prog1 = parseProgress(p?.progressText);
+    add(
+        "B-95 · 跑一段后点「暂停」⇒ ⇒ 「trace 导出」面板**自动**出现"
+        + "（⇒ ⇒ 不用再点一次「导出」才看得到）",
+        p?.hasProgress === true && p?.chunkLength > 0 && prog1 !== null,
+        `进度行=${JSON.stringify(p?.progressText ?? "")} 内容长度=${p?.chunkLength}`,
+    );
+    add(
+        "B-96 · 面板里的**总条数大于零**（⇒ ⇒ 真的录到了东西 ⇒ ⇒ 不是空导出）",
+        prog1 !== null && prog1[2] > 0,
+        `解析=${JSON.stringify(prog1)}`,
+    );
+
+    // -- B-97 · 点「下载轨迹到本地」⇒ ⇒ **翻到末尾** ------------------------
+    await runEffect(cdp, `(() => {
+        const b = document.querySelector('[data-view-body="debug"] [data-action="download-trace-local"]');
+        if (!b) return "no-button";
+        b.click();
+        return "clicked";
+    })()`);
+    await sleep(2500);
+    p = await probe();
+    const prog2 = parseProgress(p?.progressText);
+    add(
+        "B-97 · 点「下载轨迹到本地」⇒ ⇒ 进度走到**末尾**（`next_offset == total`）"
+        + "（⇒ ⇒ 整条轨迹都翻完了 ⇒ ⇒ 落盘的是**全量**）",
+        prog2 !== null && prog2[1] === prog2[2] && prog2[2] > 0,
+        `下载后进度=${JSON.stringify(prog2)}`,
+    );
+
+    // -- B-98 · **顶栏**的「暂停」也自动导出（两个入口**同一条路**）-----------
+    await runEffect(cdp, `(() => {
+        const b = document.querySelector('[data-topbar-action="pause"]');
+        if (!b) return "no-button";
+        b.click();
+        return "clicked";
+    })()`);
+    await sleep(1200);
+    p = await probe();
+    const prog3 = parseProgress(p?.progressText);
+    add(
+        "B-98 · **顶栏**的「暂停」也自动导出（⇒ ⇒ 两个暂停入口**同一条路**"
+        + "⇒ ⇒ 进度回到第一块）",
+        prog3 !== null && prog3[0] === 0,
+        `顶栏暂停后进度=${JSON.stringify(prog3)}`,
+    );
+
+    // -- B-99 · **必要对照**：trace **明确关着** ⇒ ⇒ 暂停**不**自动刷新 ------
+    const before = parseProgress(p?.progressText);
+    await runEffect(cdp, `(() => {
+        const b = document.querySelector('[data-view-body="debug"] [data-action="trace-toggle"]');
+        if (!b) return "no-button";
+        b.click();
+        return "clicked";
+    })()`);
+    await sleep(900);
+    await runEffect(cdp, `(() => {
+        const b = document.querySelector('[data-view-body="debug"] [data-action="pause"]');
+        if (!b) return "no-button";
+        b.click();
+        return "clicked";
+    })()`);
+    await sleep(1200);
+    p = await probe();
+    const prog4 = parseProgress(p?.progressText);
+    add(
+        "B-99 · **必要对照**：trace **明确关着**时点暂停 ⇒ ⇒ 面板**不**被自动刷新"
+        + "（⇒ ⇒ 「暂停就导出」不是无脑行为）",
+        prog4 !== null && before !== null && prog4[0] === before[0] && prog4[1] === before[1],
+        `关掉前=${JSON.stringify(before)} 关掉后=${JSON.stringify(prog4)}`,
     );
 
     return { checks };
@@ -7086,6 +7236,13 @@ async function main() {
         const traceSwitch = await runSection("traceSwitch", () => runTraceSwitchSection(cdp, opts));
         registerSection("traceSwitch", traceSwitch.checks, {
             title: "trace 记录开关检查（一个开关 · 状态常驻 · 按钮上写着状态与「点了会发生什么」）",
+        });
+
+        // -- the TRACE EXPORT (v0.62 · B-94 ~ B-99) --------------------------
+        // ⚠️ **必须排在 osz 之前**：本段要的是 **demo 固件**（它自己装一次）。
+        const traceExport = await runSection("traceExport", () => runTraceExportSection(cdp, opts));
+        registerSection("traceExport", traceExport.checks, {
+            title: "trace 导出检查（暂停 ⇒ ⇒ 面板自动出现 · 下载 ⇒ ⇒ 翻到末尾落全量）",
         });
 
         // -- the REAL RTOS (osz): load the out-of-repo ELF and SEE its console -
