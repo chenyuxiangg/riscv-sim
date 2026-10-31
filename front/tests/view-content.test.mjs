@@ -518,20 +518,30 @@ describe("STAGE-35 · 产品树折叠 / 内存图比例条 / 终端收发计数"
         }
     });
 
-    test("A-16 · 寄存器变化高亮：快照住 `debug.prevGpr`（app 层在 `read-regs` **之前**存）", async () => {
+    test("A-16 · 寄存器变化高亮：基准住 `debug.readback.baseline`，捕获时机 = **运行 / 单步开始前**（v0.67 批 · 口径变更）", async () => {
+        // ⚠️⚠️ **口径变更**（v0.67 批）—— 原 A-16 钉的是「快照住
+        //   `debug.prevGpr`（app 层在 `read-regs` **之前**存）」⇒ ⇒ 那一次
+        //   「读回」取自 `sim.gpr` —— 而 `sim.gpr` 是 M-10 **被内核持续推送
+        //   改写**的**活值** ⇒ ⇒ 基准与显示值**同源** ⇒ ⇒ 高亮几乎永不出现，
+        //   且时机取决于内核的推送节奏 ⇒ ⇒ **用户「不知道什么时候会高亮」**
+        //   （用户原话）⇒ ⇒ **口径必须换**，否则这条缺陷**修不掉**。
+        //   ⇒ ⇒ **新口径** = 基准 = **本次运行 / 单步开始前**那份值，住
+        //   `debug.readback.baseline` ⇒ ⇒ 捕获时机**唯一**、规则**可预期**。
         const before = Array.from({ length: 32 }, (_, i) => i + 1);
         const after = before.slice();
         after[1] = 0; // x1 变小 ⇒ `.down`
         after[2] = 999; // x2 变大 ⇒ `.up`
-        // ⚠️ **v0.65 批**：落点从 `regmem` 视图状态并到 `debug` 视图状态 ⇒ ⇒
-        //   快照跟着**内容**一起走 ⇒ ⇒ 「同一个量只有一处落点」这条不破。
         m03.setState("debug", (prev) => ({
             ...prev,
             sim: { ...(prev.sim ?? {}), gpr: before.slice() },
-            debug: { ...(prev.debug ?? {}), prevGpr: null },
+            debug: { ...(prev.debug ?? {}), readback: null },
         }));
         const { services } = fakeServices({
             registerMemory: {
+                // ⚠️ **M-10 那份缓存**（app 层抓基准时读的是它、不是视图状态
+                //   ——视图状态那份是**节流 200 ms** 推的，跑完那一下读它会拿到
+                //   **旧值** ⇒ ⇒ 基准会**错**）。
+                getSnapshot: () => ({ gpr: before.slice(), memoryReads: [] }),
                 readRegisters: async () => {
                     m03.setState("debug", (prev) => ({
                         ...prev,
@@ -540,23 +550,52 @@ describe("STAGE-35 · 产品树折叠 / 内存图比例条 / 终端收发计数"
                 },
             },
         });
-        await app.handleCommand({ action: "read-regs" }, services);
-        // ⚠️ **快照是「读之前」的那一份** ⇒ ⇒ 不是读之后那份。
+        // ① **基准在「这一趟开始前」抓** ⇒ ⇒ 跑之前那份就是基准。
+        //    ⚠️ **用「单步」而不是「运行」** —— 「运行」进的是**连续模式**⇒ ⇒
+        //    运行中**按规矩不高亮**（v0.53 裁决 D：值都被 `-` 遮住了）⇒ ⇒
+        //    那样断言高亮是**空转**。
+        await app.handleCommand({ action: "step" }, services);
         assert.deepEqual(
-            m03.getState("debug")?.debug?.prevGpr,
+            m03.getState("debug")?.debug?.readback?.baseline,
             before,
-            "prevGpr 不是读之前的那份 GPR 快照",
+            "基准不是「这一趟开始前」那份 GPR",
         );
+        // ② **「读寄存器」不重取基准** ⇒ ⇒ 用户点它**不会**把正在查看的那趟
+        //    对比抹掉 ⇒ ⇒ 基准**还在**。
+        await app.handleCommand({ action: "read-regs" }, services);
+        assert.deepEqual(
+            m03.getState("debug")?.debug?.readback?.baseline,
+            before,
+            "「读寄存器」把基准冲掉了（读回 ≠ 重新取基准）",
+        );
+        // ③ 高亮相对**基准**算 ⇒ ⇒ 变了的格子带类、没变的不带。
         const el = show("debug");
-        const codes = el.querySelectorAll("code");
         const cellOf = (i) => {
             const div = el.querySelector(".reg-grid").querySelectorAll("div")[i];
             return div.querySelector("code");
         };
         assert.ok(cellOf(0), "寄存器格子里没有 code");
-        assert.equal(cellOf(0).getAttribute("class") ?? "", "", "x1 没变却带上了高亮类");
+        assert.equal(cellOf(0).getAttribute("class") ?? "", "", "x0 没变却带上了高亮类");
         assert.equal(cellOf(1).getAttribute("class"), "down", "x1 变小了却没有 .down");
         assert.equal(cellOf(2).getAttribute("class"), "up", "x2 变大了却没有 .up");
-        assert.ok(codes.length >= 32, "寄存器格子数量不对");
+        // ④ ⚠️ **界面必须说清「什么时候会高亮」** ⇒ ⇒ 这是用户报的那条缺陷的
+        //    **正面回答** ⇒ ⇒ 标签里不许再写「与上一次读回相比」。
+        //    ⚠️ **不许用后代组合器**（dom-stub 的选择器引擎只支持简单复合选择器）
+        //    ⇒ ⇒ 一律用**元素作用域**的 `querySelector`。
+        const regCard = el.querySelector(".regmem-registers");
+        assert.ok(regCard, "调试视图里没有寄存器窗口那张卡");
+        const tag = regCard.querySelector(".tag")?.textContent ?? "";
+        assert.ok(
+            tag.includes("本次运行"),
+            `寄存器窗口的标签没说清高亮的基准（当前是「${tag}」）`,
+        );
+        assert.ok(
+            !tag.includes("上一次读回"),
+            "标签还写着「与上一次读回相比」⇒ ⇒ 用户还是不知道什么时候会高亮",
+        );
+        assert.ok(
+            el.querySelector("[data-readback-state]"),
+            "寄存器窗口里没有「读回状态」那一行 ⇒ ⇒ 用户还是不知道什么时候会高亮",
+        );
     });
 });

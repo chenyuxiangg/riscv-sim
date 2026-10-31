@@ -77,6 +77,7 @@ import {
 // ⚠️ **连续运行的纯函数**（STAGE-37 · v0.52 批）⇒ ⇒ 「该不该续发」**剥成纯函数**
 // ⇒ ⇒ Node 侧零 DOM 就能测 ⇒ ⇒ 与 STAGE-36 的「边沿合并剥成纯函数」同形。
 import {
+    HALT_REASON_END_OF_EXECUTION,
     RUN_MODE_IDLE,
     RUN_MODE_RUNNING,
     RUN_ACTION_CONTINUE,
@@ -96,6 +97,16 @@ import {
 // （降级）⇒ ⇒ **不会白屏**（ES module 的链接期是**全有或全无**的 ⇒ ⇒ 旧
 // 文件少一个导出 ⇒ ⇒ **整个 app.js 都不执行** ⇒ ⇒ 页面只剩静态 HTML）。
 import { markStarted, normalizeStepCount, runActionLabel } from "./lib/run-action.js";
+// ⚠️ **「读回」的纯函数**（v0.67 批）⇒ ⇒ 「基准怎么抓」「什么时候该读回」
+// **剥成纯函数** ⇒ ⇒ Node 侧**零 DOM** 就能验 ⇒ ⇒ 与 v0.52 批的 run-loop
+// 同形 ⇒ ⇒ 「该不该读回」不必拖一整条链路才测得到。
+import {
+    READBACK_REASON,
+    captureBaseline,
+    mergeReadbackState,
+    readbackReasonOf,
+    shouldAutoReadback,
+} from "./lib/readback.js";
 // ⚠️ **trace 记录开关的判定**（纯函数）⇒ ⇒ 「点一下该发什么」只有一处说了算
 // ⇒ ⇒ 视图层渲染的按钮标签与这里发出的命令**引同一处** ⇒ ⇒ 不会对不上。
 import { nextTraceEnabled, traceSwitchState, TRACE_SWITCH_OFF } from "./lib/trace-switch.js";
@@ -332,6 +343,147 @@ export function formatVirtualTime(ps) {
  * @type {string}
  */
 export const READ_MEMORY_BLOCKED_MESSAGE = "程序正在运行，暂时不能读内存 —— 请先暂停再读。";
+
+/**
+ * 「**用户点了暂停、正在跑的那一个窗口还没结束**」这个**过路状态**
+ * （v0.67 批）。
+ *
+ * ⚠️ **为什么需要它**：界面上的「暂停」**不发** `Pause` 命令（裁决 E）⇒ ⇒ 它
+ *   只是**停续发**⇒ ⇒ 正在跑的那**一个**窗口**跑完**才停 ⇒ ⇒ 那次停下**就是**
+ *   用户要的那次停 ⇒ ⇒ 但从外面看，「用户点过暂停」这件事**只存在于这一小段
+ *   窗口里** ⇒ ⇒ 不记它 ⇒ ⇒ 就分不出「这次 `EndOfExecution` 是用户要的那次停」
+ *   与「连续运行里每个窗口都会来的那次」⇒ ⇒ **两者长得一模一样**。
+ *
+ * ⚠️ **只在两个时刻之间为真**：点「暂停」时**置真**、下一次「停下报告」时
+ *   **消费掉** ⇒ ⇒ 不会一直挂着 ⇒ ⇒ 不会把**后面**某次停下也当成用户要的。
+ *
+ * ⚠️ **不是用户状态** ⇒ ⇒ 不进视图状态 ⇒ ⇒ 只活在这两个时刻之间。
+ *
+ * @type {boolean}
+ */
+let pausePending = false;
+
+/**
+ * **消费**一次「用户要的那次停」（v0.67 批）。
+ *
+ * ⚠️ **消费即清零** ⇒ ⇒ 只可能触发**一次**读回 ⇒ ⇒ 不会连着两次停下都当成
+ *   「用户要的那次」⇒ ⇒ 不会连着读回两次。
+ *
+ * @returns {boolean} 刚才是不是真的在等
+ */
+function consumePausePending() {
+    if (!pausePending) return false;
+    pausePending = false;
+    return true;
+}
+
+/**
+ * 记下「**本次运行 / 单步开始前**」的寄存器基准（v0.67 批）。
+ *
+ * ⚠️ **基准 = 跑之前那一份** ⇒ ⇒ 「什么时候会高亮」这个问题**有答案了**：
+ *   运行 / 单步**开始前**记下基准 ⇒ ⇒ 跑完 / 步完停下 ⇒ ⇒ 亮出这一趟改动的
+ *   寄存器 ⇒ ⇒ **时机唯一、规则可预测**。
+ *
+ * ⚠️ **取自 M-10 的缓存**（不是视图状态）⇒ ⇒ 视图状态那份是**节流 200 ms**
+ *   推的 ⇒ ⇒ 刚跑完那一下读它会拿到**旧值** ⇒ ⇒ 基准会**错**。
+ *
+ * ⚠️ **拷贝**（`captureBaseline` 里 `slice`）⇒ ⇒ 基准**不引用**活值 ⇒ ⇒
+ *   跑完之后基准**不会**跟着变 ⇒ ⇒ 高亮**不会**恒空（那正是旧缺陷的形态）。
+ *
+ * @param {{registerMemory?: object|null}} services
+ * @returns {number[]|null} 记下的基准
+ */
+function captureGprBaseline(services) {
+    const snapshot = services?.registerMemory?.getSnapshot?.() ?? null;
+    const baseline = captureBaseline(snapshot?.gpr ?? null);
+    viewStore.setState("debug", (prev) => ({
+        ...prev,
+        debug: {
+            ...(prev.debug ?? {}),
+            readback: mergeReadbackState(prev.debug?.readback, {
+                baseline,
+                baselineAt: Date.now(),
+            }),
+        },
+    }));
+    return baseline;
+}
+
+/**
+ * **读回** —— 把用户正在看的那几样东西**重新从内核取回来**（v0.67 批）。
+ *
+ * ⚠️ **取三样**：① **寄存器**（32 个 GPR）② **内存单元**（用户读过的那些，
+ *   按**同一宽度**重读）③ **「读这一段」的转储结果**（`debug.dump` 那份）⇒ ⇒
+ *   「运行 → 暂停」之后，内存单元表**跟着刷新**（用户报的那个现象）。
+ *
+ * ⚠️ **基准不动** ⇒ ⇒ 「读回」**不是**「重新取基准」⇒ ⇒ 用户点「读寄存器」
+ *   **不会**把正在查看的那趟对比抹掉。
+ *
+ * ⚠️ **失败不吞**：错误**写进 `debug.readback.error`** ⇒ ⇒ 界面**看得见**
+ *   ⇒ ⇒ 而不是「静默地没刷新」。
+ *
+ * @param {object} services — `{ registerMemory, commandRouter }`
+ * @param {string} reason — `READBACK_REASON` 里的一个
+ * @param {{auto?: boolean}} [options] — `auto` = 是不是自动触发的
+ * @returns {Promise<void>}
+ */
+async function performReadback(services, reason, options = {}) {
+    const registerMemory = services?.registerMemory ?? null;
+    const commandRouter = services?.commandRouter ?? null;
+    const errors = [];
+    // ① 寄存器
+    try {
+        await registerMemory?.readRegisters?.();
+    } catch (err) {
+        errors.push(err?.message ?? String(err));
+    }
+    // ② 内存单元（**用户读过的那些** ⇒ ⇒ 地址与宽度都从 M-10 那份来）
+    //
+    // ⚠️ **宽度必须按原来那份** ⇒ ⇒ 同一个地址按 `Byte` 读与按 `Word` 读是
+    //   **两个不同的值** ⇒ ⇒ 按错宽度重读 = 报一个**错的值**。
+    const reads = registerMemory?.getSnapshot?.()?.memoryReads ?? [];
+    for (const item of reads) {
+        try {
+            await registerMemory?.readMemory?.(item.addr, item.size);
+        } catch (err) {
+            errors.push(err?.message ?? String(err));
+        }
+    }
+    // ③ 「读这一段」的转储结果（长度 = 已转储的字节数 ⇒ ⇒ 不用另存一份长度）
+    const dump = viewStore.getState("debug")?.debug?.dump ?? null;
+    if (
+        commandRouter
+        && dump
+        && Number.isFinite(Number(dump.addr))
+        && Array.isArray(dump.bytes)
+        && dump.bytes.length > 0
+    ) {
+        try {
+            await commandRouter.dispatchCommand(
+                Command.dumpMemory(Number(dump.addr) >>> 0, dump.bytes.length),
+            );
+        } catch (err) {
+            errors.push(err?.message ?? String(err));
+        }
+    }
+    // ④ 写状态（**基准那一格不动** ⇒ ⇒ `mergeReadbackState` 只并 patch）
+    updateDebugState((prev) => ({
+        ...prev,
+        debug: {
+            ...(prev.debug ?? {}),
+            readback: mergeReadbackState(prev.debug?.readback, {
+                reason,
+                auto: options.auto === true,
+                at: Date.now(),
+                error: errors.length > 0 ? errors[0] : null,
+            }),
+        },
+    }));
+    // ⚠️ **立刻推一次** ⇒ ⇒ M-10 的推送是**节流 200 ms** 的 ⇒ ⇒ 不推的话，
+    //   界面会先显示「旧值 + 新基准」再显示「新值」⇒ ⇒ 那一下的对比是**错的**
+    //   ⇒ ⇒ 用户会看到一帧**假高亮**。
+    registerMemory?.flushRender?.();
+}
 
 /**
  * **连续运行状态**（STAGE-37 · v0.52 批 · 裁决 F）。
@@ -1405,7 +1557,13 @@ export async function handleCommand(detail, services) {
                 // ⚠️ **顺带记下「跑过」**（v0.63 批）⇒ ⇒ 程序离开过起点 ⇒ ⇒
                 //   顶栏那个按钮从「运行」切成「继续」。
                 setRunState(markStarted(stopRunState(getRunState())));
+                // ⚠️ **基准 = 这一步开始前**（v0.67 批）⇒ ⇒ 走完这一步之后，
+                //   高亮说的就是「**这一步改了哪些寄存器**」⇒ ⇒ 时机可预期。
+                captureGprBaseline(services);
                 await commandRouter.dispatchCommand(Command.stepN(1));
+                // ⚠️ **单步走完 ⇒ ⇒ 读回**（v0.67 批）⇒ ⇒ 内核此刻**静止**
+                // ⇒ ⇒ 取回来的就是**走完那一步之后**的值。
+                await performReadback(services, READBACK_REASON.STEP, { auto: true });
                 break;
             case "step-n": {
                 // ⚠️ **按步数单步**（v0.63 批 · 用户拍板「在反汇编窗口中增加一个
@@ -1417,14 +1575,18 @@ export async function handleCommand(detail, services) {
                 //   反应）⇒ ⇒ 太大归到 `u32` 上界（那是**域**，不是业务上限）。
                 const steps = normalizeStepCount(detail.params?.steps);
                 setRunState(markStarted(stopRunState(getRunState())));
+                captureGprBaseline(services);
                 await commandRouter.dispatchCommand(Command.stepN(steps));
+                await performReadback(services, READBACK_REASON.STEP, { auto: true });
                 break;
             }
             case "step10":
                 // ⚠️ **与「单步」同一条路**（同裁决 O）⇒ ⇒ 10 条也是「走一段
                 // 然后停」⇒ ⇒ 连续模式必须让位。
                 transitionRunState(stopRunState(getRunState()));
+                captureGprBaseline(services);
                 await commandRouter.dispatchCommand(Command.stepN(10));
+                await performReadback(services, READBACK_REASON.STEP, { auto: true });
                 break;
             case "continue":
                 // ⚠️ **「运行」= 连续运行**（裁决 A）⇒ ⇒ 进连续模式 ⇒ 发
@@ -1434,8 +1596,16 @@ export async function handleCommand(detail, services) {
                 // ⚠️ **幂等**（裁决 I）：已经在连续模式 ⇒ ⇒ **不重发** ⇒ ⇒
                 // 连点两下不会变成两个并行窗口。
                 if (getRunState().mode === RUN_MODE_RUNNING) break;
+                // ⚠️ **「用户要的那次停」作废**（v0.67 批）⇒ ⇒ 用户点过暂停**又**
+                //   点了运行 ⇒ ⇒ 那个「等一次停」的意图**已经被覆盖**⇒ ⇒ 不能
+                //   留着去匹配**后面**某次停下。
+                pausePending = false;
+
                 // ⚠️ **连续运行 ⇒ ⇒ 程序离开过起点** ⇒ ⇒ 「跑过没有」置真。
                 setRunState({ ...startRunState(), started: true });
+                // ⚠️ **基准 = 这一趟开始前**（v0.67 批）⇒ ⇒ 跑完停下之后，高亮
+                //   说的就是「**这一趟改了哪些寄存器**」⇒ ⇒ 时机可预期。
+                captureGprBaseline(services);
                 // ⚠️ **在途计数 +1**（STAGE-38 · v0.53 批 · 裁决 B）⇒ ⇒
                 // 「内核手上真的有一个窗口在跑」⇒ ⇒ 活值**立刻**隐藏。
                 bumpRunBusy(+1);
@@ -1462,6 +1632,14 @@ export async function handleCommand(detail, services) {
                 // ⚠️ **「跑过没有」那一格保留** ⇒ ⇒ 暂停之后顶栏那个按钮显示
                 //   「继续」⇒ ⇒ **继续**这个词才说得通。
                 transitionRunState(stopRunState(getRunState()));
+                // ⚠️ **记一笔「用户要的那次停」**（v0.67 批）⇒ ⇒ 正在跑的那
+                //   **一个**窗口跑完才停 ⇒ ⇒ 那次停下**就是**用户要的那次停 ⇒ ⇒
+                //   到了就**自动读回**（寄存器 + 内存单元 + 转储）⇒ ⇒ 内存单元
+                //   表**跟着刷新**。
+                //
+                // ⚠️ **只在「内核真的在执行」时记** ⇒ ⇒ 什么都没跑的时候点暂停
+                //   ⇒ ⇒ 不会有任何东西变 ⇒ ⇒ 不该有一次读回。
+                if (isRunning()) pausePending = true;
                 // ⚠️ **v0.62 批**：暂停 ⇒ ⇒ **自动把 trace 渲染出来**（trace
                 //   开着 / 状态未知时）⇒ ⇒ 用户**点一下暂停**就能看到刚才录到的
                 //   东西 ⇒ ⇒ 不用再点一次「导出」。
@@ -1520,22 +1698,21 @@ export async function handleCommand(detail, services) {
                 }
                 break;
             case "read-regs": {
-                // ⚠️ **上一次读回的 GPR 快照**（STAGE-35 · v0.50 批 · 裁决 F）
-                // ⇒ ⇒ **在读之前**存 ⇒ ⇒ 视图层可以拿「这次的值」和「上一次
-                // 的值」比 ⇒ ⇒ 高亮变化。
+                // ⚠️ **手动读回**（v0.67 批）⇒ ⇒ 立即把**当前**的寄存器值取回来
+                // ⇒ ⇒ 界面显示的是**内核此刻**的值，不是缓存里那份旧的。
                 //
-                // ⚠️ **落点在 `debug` 视图状态里**（v0.65 批：内容都在调试
-                // 视图里 ⇒ ⇒ 快照跟着内容住）⇒ ⇒ **只有一份** ⇒ ⇒ 视图层
-                // **只读**（分层不破）⇒ ⇒ 不另造一个计数器状态。
-                const prevGpr = viewStore.getState("debug")?.sim?.gpr ?? null;
-                viewStore.setState("debug", (state) => ({
-                    ...state,
-                    debug: {
-                        ...(state.debug ?? {}),
-                        prevGpr: Array.isArray(prevGpr) ? prevGpr.slice() : null,
-                    },
-                }));
-                await registerMemory.readRegisters();
+                // ⚠️ **不动基准** ⇒ ⇒ 「读回」**不是**「重新取基准」⇒ ⇒ 用户
+                //   点这个按钮**不会**把正在查看的那趟对比抹掉⇒ ⇒ 高亮还在。
+                //
+                // ⚠️ **基准的落点从 `debug.prevGpr` 搬到了 `debug.readback.baseline`**
+                //   （v0.67 批 · **口径变更**）⇒ ⇒ 原因见下：
+                //     **旧口径** = 「与上一次读回相比」，而那一次「读回」取自 `sim.gpr`
+                //     —— 而 `sim.gpr` 是 M-10 **被内核持续推送改写**的**活值**⇒ ⇒
+                //     基准与显示值**同源**⇒ ⇒ 高亮几乎永不出现，且时机取决于内核
+                //     的推送节奏 ⇒ ⇒ **用户「不知道什么时候会高亮」**（用户原话）。
+                //     **新口径** = 「**与本次运行 / 单步开始前相比**」⇒ ⇒ 捕获
+                //     时机**唯一**⇒ ⇒ 规则可预测。
+                await performReadback(services, READBACK_REASON.MANUAL, { auto: false });
                 break;
             }
             case "read-mem": {
@@ -2727,7 +2904,17 @@ function writeErrorSlot(slot, message) {
     }
 }
 
-export function wireDebug(commandRouter) {
+/**
+ * M-11 调试面的接线（反汇编 / trace 导出 / trace 开关 / 停下后的**自动读回**）。
+ *
+ * ⚠️ **`services` 是可选的**（v0.67 批）⇒ ⇒ 旧调用点（只传 `commandRouter`）
+ *   **照样能链接**⇒ ⇒ 最坏是「**没有自动读回**」（降级）⇒ ⇒ **不会白屏**。
+ *
+ * @param {object} commandRouter — M-05
+ * @param {{registerMemory?: object|null}} [services]
+ * @returns {object}
+ */
+export function wireDebug(commandRouter, services = {}) {
     /** Push the disassembly entries into the debug view's state. */
     commandRouter.subscribe("debug.disasm", (event) => {
         const entries = Array.isArray(event.value?.entries) ? event.value.entries : [];
@@ -2829,6 +3016,10 @@ export function wireDebug(commandRouter) {
             // 界面**不会**把活值闪出来一下 ⇒ ⇒ **顺序是硬约束**。
             // ⚠️ **「跑过没有」那一格带上**（`run-loop.js` 只搬三格）。
             setRunState({ ...next, busy: busy + 1, started: run.started === true });
+            // ⚠️ **「用户要的那次停」作废**（v0.67 批）⇒ ⇒ 用户点过暂停**又**
+            //   点了运行 ⇒ ⇒ 那个「等一次停」的意图**已经被覆盖**⇒ ⇒ 不能留着
+            //   去匹配**后面**某次停下 ⇒ ⇒ 否则会冒出来一次**没人要**的读回。
+            pausePending = false;
             // ⚠️ **不 await** ⇒ ⇒ 这个订阅回调**不等**内核 ⇒ ⇒ 事件处理
             // 不会卡住 ⇒ ⇒ 错误也不往这里抛（抛了就是**未处理的拒绝**）。
             void Promise.resolve(commandRouter.dispatchCommand(Command.continueRun()))
@@ -2847,6 +3038,37 @@ export function wireDebug(commandRouter) {
             // ⇒ ⇒ 活值**恢复显示**（`isRunning()` 变成假）。
             // ⚠️ **「跑过没有」那一格带上**（`run-loop.js` 只搬三格）。
             setRunState({ ...next, busy, started: run.started === true });
+            // ⚠️ ⚠️ **自动读回**（v0.67 批）⇒ ⇒ 程序**真停**在这儿 ⇒ ⇒ 把
+            //   用户正在看的那几样东西**重新取回来**（寄存器 + 内存单元 +
+            //   转储）⇒ ⇒ **内存单元表跟着刷新**（用户报的那个现象）。
+            //
+            // ⚠️ **只在「真停」这一支里做** ⇒ ⇒ 连续运行里**每个窗口**都会来的
+            //   那次 `EndOfExecution` **不会**触发 ⇒ ⇒ 真机门禁的脚本口**不会**
+            //   因为每个批次多发两条命令而**慢到不可用**。
+            //
+            // ⚠️ **判据在纯函数里**（`shouldAutoReadback`）⇒ ⇒ Node 侧**零
+            //   DOM** 就能验 ⇒ ⇒ 这里只是一次**调用**。
+            const stopReason = readbackReasonOf(reason);
+            // ⚠️ **用户点过暂停** ⇒ ⇒ 这次 `EndOfExecution` **就是**用户要的
+            //   那次停（暂停**只停续发**，正在跑的那一个窗口跑完才停）⇒ ⇒ 也
+            //   该读回。
+            const pauseHit = reason === HALT_REASON_END_OF_EXECUTION && consumePausePending();
+            if (stopReason !== null || pauseHit) {
+                // ⚠️ **不 await** ⇒ ⇒ 这个订阅回调**不等**内核 ⇒ ⇒ 事件处理
+                // 不会卡住 ⇒ ⇒ 错误也不往这里抛（抛了就是**未处理的拒绝**）。
+                void performReadback(
+                    // ⚠️ **带上 `commandRouter`** ⇒ ⇒ 「读这一段」的转储结果要
+                    //   **重发一条** `DumpMemory` ⇒ ⇒ 而那条命令**只能**从这里
+                    //   发 ⇒ ⇒ `wireDebug` 自己手里就有它 ⇒ ⇒ 不必让调用方
+                    //   多传一份。
+                    { ...services, commandRouter },
+                    stopReason ?? READBACK_REASON.USER_PAUSE,
+                    { auto: true },
+                ).catch(() => {
+                    // ⚠️ 读回失败**已经写进** `debug.readback.error` ⇒ ⇒ 这里
+                    // 只是**不让它变成未处理的拒绝** ⇒ ⇒ 不吞（界面看得见）。
+                });
+            }
         }
         publishViewState("debug");
     });
@@ -2948,9 +3170,17 @@ export function wireDebug(commandRouter) {
                     export: null,
                     symbol: null,
                     dump: null,
+                    // ⚠️ **读回的那一份也清掉**（v0.67 批）⇒ ⇒ 基准与「上次
+                    //   读回」说的都是**上一个程序**⇒ ⇒ 留着就是一份**不存在的**
+                    //   对比⇒ ⇒ 用户会看到**上一趟**的高亮。
+                    readback: null,
                 },
             }));
             publishViewState("debug");
+            // ⚠️ **「用户要的那次停」也作废**（v0.67 批）⇒ ⇒ 复位之后正在跑的
+            //   那个窗口**不算**用户要的那次停⇒ ⇒ 否则复位之后会冒出来一次
+            //   **没人要**的读回。
+            pausePending = false;
             // ⚠️ **源码树留着**，但**行号**要清掉：行号是**上一个程序**的
             // 数据（新工程 = 新程序 ⇒ 旧行号是错的）。源码树是**用户装的
             // 资产**，与程序无关 ⇒ 不能跟着新工程一起没掉（STAGE-7 验收
@@ -3414,7 +3644,11 @@ async function bootstrap() {
     // M-11 调试面（反汇编 / trace 导出 / trace 开关）同样必须在**任何**
     // 可能产生这些回复的命令之前挂好——回复事件虽然不订阅，但路由器会
     // 把每个事件发布给 topic 订阅者，订阅晚了这一批就丢了。
-    const debug = wireDebug(commandRouter);
+    const debug = wireDebug(commandRouter, {
+        // ⚠️ **自动读回要 M-10**（v0.67 批）⇒ ⇒ 停下之后把寄存器与内存单元
+        //   **重新取回来**⇒ ⇒ 内存单元表跟着刷新。
+        registerMemory,
+    });
     // console 流（契约 v4 的 `Console` 事件）同样必须**在任何**装载之前
     // 挂好：内核侧**订阅了** `sim.console` 才会推字节流。
     const consoleWiring = wireConsole(commandRouter);

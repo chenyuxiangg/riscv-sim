@@ -79,6 +79,24 @@ export async function mountRegisterMemory(options = {}) {
     let timeVirt = 0;
     /** @type {Record<string, number>} */
     const memory = {};
+    /**
+     * 用户**读过**的内存单元（地址 + 宽度）。
+     *
+     * ⚠️ **为什么要有它**（v0.67 批）：内核**没有**「内存变化」推送 topic ⇒ ⇒
+     *   内存单元表**只**在用户点「读内存」时更新 ⇒ ⇒ 程序跑过之后它停在**旧值**
+     *   上 ⇒ ⇒ 「运行 → 暂停」之后不联动刷新。
+     *   ⇒ ⇒ 自动读回要按**同一宽度**重读 ⇒ ⇒ **宽度必须记住**（同一个地址按
+     *   `Byte` 读与按 `Word` 读是**两个不同的值** ⇒ ⇒ 记不住宽度就等于报错的值）。
+     *
+     * ⚠️ **落点只有这一处** —— 缓存与「读过哪些」都住本服务 ⇒ ⇒ 「内存单元表
+     *   显示的是哪些」与「自动读回要重读哪些」**天然同源** ⇒ ⇒ 不是两份真相。
+     *
+     * ⚠️ **只在读成功之后记** ⇒ ⇒ 内核拒掉的那次（`E_DBG-*`）**不进表** ⇒ ⇒
+     *   表里那份就是**用户真正看到的那些单元**。
+     *
+     * @type {{addr: number, size: string}[]}
+     */
+    const memoryReads = [];
     let lastError = null;
     let subscribed = false;
 
@@ -93,7 +111,10 @@ export async function mountRegisterMemory(options = {}) {
     /**
      * The current target-state snapshot.
      *
-     * @returns {{gpr: number[], pc: number, timeVirt: number, memory: Record<string, number>, lastError: string|null}}
+     * ⚠️ **`memoryReads`**（v0.67 批）：用户**读过**的那些内存单元（地址 +
+     *   宽度）⇒ ⇒ 自动读回按**同一宽度**重读 ⇒ ⇒ **宽度**必须跟着地址走。
+     *
+     * @returns {{gpr: number[], pc: number, timeVirt: number, memory: Record<string, number>, memoryReads: {addr: number, size: string}[], lastError: string|null}}
      */
     function getSnapshot() {
         return {
@@ -101,6 +122,7 @@ export async function mountRegisterMemory(options = {}) {
             pc,
             timeVirt,
             memory: { ...memory },
+            memoryReads: memoryReads.map((item) => ({ ...item })),
             lastError,
         };
     }
@@ -298,6 +320,28 @@ export async function mountRegisterMemory(options = {}) {
     }
 
     /**
+     * 记住一个**读过**的内存单元（地址 + 宽度）。
+     *
+     * ⚠️ **去重** —— 同一个（地址, 宽度）只记**一次** ⇒ ⇒ 自动读回不会对同一个
+     *   单元反复发命令 ⇒ ⇒ 读回的开销与「用户读过的**不同**单元数」成正比。
+     *
+     * ⚠️ **同一地址不同宽度**算**两个** ⇒ ⇒ 用户先按 `Byte` 读、再按 `Word` 读
+     *   同一地址 ⇒ ⇒ 两次都记 ⇒ ⇒ 自动读回会把**两种宽度**都取回来 ⇒ ⇒ 缓存
+     *   里那个键（按地址）最后一次说了算 ⇒ ⇒ 与用户手动读的行为**一致**。
+     *
+     * @param {number} addr
+     * @param {string} size
+     * @returns {void}
+     */
+    function rememberMemoryRead(addr, size) {
+        const key = Number(addr ?? 0) >>> 0;
+        const width = String(size ?? WRITE_SIZE.Word);
+        const hit = memoryReads.some((item) => item.addr === key && item.size === width);
+        if (hit) return;
+        memoryReads.push({ addr: key, size: width });
+    }
+
+    /**
      * Ask the kernel for a fresh register snapshot.
      *
      * Contract v2 has a **first-class** read command, so this no longer
@@ -362,6 +406,9 @@ export async function mountRegisterMemory(options = {}) {
     /**
      * Read one memory cell.
      *
+     * ⚠️ **成功后记一笔**（v0.67 批）⇒ ⇒ 自动读回按**同一宽度**重读 ⇒ ⇒
+     *   宽度必须记住（同一个地址按 `Byte` 读与按 `Word` 读是**两个不同的值**）。
+     *
      * @param {number} addr
      * @param {"Byte"|"Half"|"Word"} [size]
      * @returns {Promise<{addr: number, size: string, value: number}>}
@@ -369,6 +416,7 @@ export async function mountRegisterMemory(options = {}) {
     async function readMemory(addr, size = WRITE_SIZE.Word) {
         if (!router) throw new Error(`${FRONT_ERROR_CODES["E_TRX-01"]}: 未挂载命令路由器（M-05）`);
         const event = await router.dispatchCommand(Command.readMemory(addr, size));
+        rememberMemoryRead(addr, size);
         return event.value;
     }
 
@@ -486,6 +534,10 @@ export async function mountRegisterMemory(options = {}) {
         pc = 0;
         timeVirt = 0;
         for (const key of Object.keys(memory)) delete memory[key];
+        // ⚠️ **「读过哪些」也清掉**（v0.67 批）⇒ ⇒ 那些单元属于**上一个程序**
+        // ⇒ ⇒ 留着就是一份**不存在的**记忆 ⇒ ⇒ 自动读回会去读**新程序**的
+        // 同一批地址 ⇒ ⇒ 那是**另一份**语义。
+        memoryReads.length = 0;
         notify();
         flushRender();
     }
