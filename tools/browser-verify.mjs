@@ -194,6 +194,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "traceExport",
     "debugDedup",
     "deviceRegistry",
+    "readback",
 ]);
 
 /**
@@ -6332,6 +6333,177 @@ async function runDebugDedupSection(cdp, opts) {
 }
 
 /**
+ * **「读回」**的探针（v0.67 批 · B-118 ~ B-121）。
+ *
+ * ⚠️ **按位置取值**（与既有探针同一条纪律）⇒ ⇒ 同一个 DOM 里出现两个同类
+ *   控件时，无位置限定的选择器**会命中排在前面的那个**⇒ ⇒ 判据口径会悄悄变。
+ */
+const BV_READBACK_PROBE = `(() => {
+  const body = document.querySelector('[data-view-body="debug"]');
+  const regWin = body ? body.querySelector('[data-window="registers"]') : null;
+  const memWin = body ? body.querySelector('[data-window="memory"]') : null;
+  const tag = regWin ? regWin.querySelector('.tag') : null;
+  const state = body ? body.querySelector('[data-readback-state]') : null;
+  const cnt = state ? state.querySelector('[data-readback-changed-count]') : null;
+  const cells = regWin ? regWin.querySelectorAll('.reg-grid > div') : [];
+  let up = 0;
+  let down = 0;
+  const highlighted = [];
+  for (const cell of cells) {
+    const code = cell.querySelector('code');
+    const cls = code ? String(code.getAttribute('class') || '') : '';
+    if (cls.indexOf('up') >= 0) up += 1;
+    if (cls.indexOf('down') >= 0) down += 1;
+    if (cls.indexOf('up') >= 0 || cls.indexOf('down') >= 0) {
+      const label = cell.querySelector('.muted');
+      highlighted.push(label ? String(label.textContent || '').trim() : '');
+    }
+  }
+  const table = memWin ? memWin.querySelector('[data-mem-cells]') : null;
+  const rows = table
+    ? Array.from(table.querySelectorAll('tbody tr')).map((tr) => {
+        const tds = tr.querySelectorAll('td');
+        return {
+          addr: tds[0] ? String(tds[0].textContent || '').trim() : '',
+          value: tds[1] ? String(tds[1].textContent || '').trim() : '',
+        };
+    })
+    : [];
+  return {
+    hasBody: !!body,
+    hasRegWindow: !!regWin,
+    hasMemWindow: !!memWin,
+    tagText: tag ? String(tag.textContent || '').trim() : '',
+    hasReadbackLine: !!state,
+    stateText: state ? String(state.textContent || '').trim() : '',
+    changedCount: cnt ? Number(String(cnt.textContent || '0').trim()) : null,
+    up,
+    down,
+    highlighted,
+    memRows: rows,
+  };
+})()`;
+
+/**
+ * v0.67 批的真机段：**「读回」**（用户报的两个现象的正面验收）。
+ *
+ * ⚠️ **用户报的现象①**：「寄存器窗口声明『变化高亮 = 与上一次读回相比』，但是
+ *   **不知道什么时候会高亮**」⇒ ⇒ 本段要断言的是「**界面上说清了**」+「**真的
+ *   亮了**」⇒ ⇒ 两者缺一不可：只说清不亮 ⇒ ⇒ 还是没修好；只亮不说清 ⇒ ⇒
+ *   用户还是不知道规则。
+ *
+ * ⚠️ **用户报的现象②**：「设置读取的内存地址并读取，运行后再暂停，读取的内存
+ *   **没有联动刷新**」⇒ ⇒ 本段用 **demo 固件的 `sw x3, 0x100(x0)`**（它在
+ *   `0x0c` 把 **49** 写进 `0x100`）⇒ ⇒ 读 `0x100` ⇒ ⇒ 跑一段 ⇒ ⇒ 暂停 ⇒ ⇒
+ *   那一格**必须**变成 `0x00000031` ⇒ ⇒ 否则就是「停在运行前的旧值」。
+ *
+ * ⚠️ **必须排在 osz 之前**：osz 段把镜像换成仓外的真 RTOS ⇒ ⇒ 放在它后面，
+ *   `0x100` 的期望值就不成立了。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{checks: object[]}>}
+ */
+async function runReadbackSection(cdp, opts) {
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
+    const probe = async () => await awaitEval(cdp, BV_READBACK_PROBE);
+
+    // -- 前置：**显式装 demo 固件** ⇒ ⇒ 期望值（`0x100` ← 49）才成立 -------
+    await resetAndLoadDemoFirmware(cdp, opts);
+    await sleep(900);
+    await runEffect(cdp, 'location.hash = "#/debug";');
+    await sleep(700);
+
+    // -- B-118 · 界面**说清**了高亮的基准是什么 ------------------------------
+    let p = await probe();
+    add(
+        "B-118 · 寄存器窗口**说清**了「变化高亮」的基准"
+        + "（标签写着「与本次运行 / 单步开始前相比」⇒ ⇒ 用户**知道什么时候会高亮**）",
+        p?.hasRegWindow === true
+            && String(p?.tagText ?? "").indexOf("本次运行") >= 0
+            && String(p?.tagText ?? "").indexOf("上一次读回") < 0,
+        `标签=${JSON.stringify(p?.tagText)} 有读回状态行=${p?.hasReadbackLine}`,
+    );
+
+    // -- 前置：读 `0x100` ⇒ ⇒ 此刻它还是**初始值** --------------------------
+    await runEffect(cdp, `(() => {
+        const box = document.querySelector('[data-view-body="debug"] [data-addr-input="memory"]');
+        const input = box ? box.querySelector("[data-mem-addr-input]") : null;
+        if (!input) return "no-input";
+        input.value = "0x00000100";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        const btn = box.querySelector('[data-action="read-mem"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(900);
+    p = await probe();
+    const rowOf = (rows, addr) => (rows ?? []).find((r) => r.addr === addr) ?? null;
+    const before = rowOf(p?.memRows, "0x00000100");
+    add(
+        "前置：读 `0x100` ⇒ ⇒ 内存单元表里**有**那一行，且此刻是**初始值**"
+        + "（⇒ ⇒ 后面那个「变了」的判据才有意义）",
+        !!before && before.value === "0x00000000",
+        `0x100 的那一行=${JSON.stringify(before)} 全部=${JSON.stringify(p?.memRows ?? [])}`,
+    );
+
+    // -- 跑一段 ⇒ ⇒ 暂停 ⇒ ⇒ 那一格**必须**跟着刷新 ------------------------
+    await clickTopbarAction(cdp, "run");
+    await sleep(1200);
+    await clickTopbarAction(cdp, "pause");
+    // ⚠️ **等读回落地**：停下之后有一次**自动读回**（寄存器 + 内存单元 +
+    //   转储）⇒ ⇒ 那是一次**内核往返**⇒ ⇒ 得给它时间。
+    await sleep(1500);
+    p = await probe();
+    const after = rowOf(p?.memRows, "0x00000100");
+
+    // -- B-119 · 内存单元**联动刷新**了（用户报的现象②）---------------------
+    add(
+        "B-119 · 跑一段再点「暂停」⇒ ⇒ **读过的那个内存单元联动刷新**"
+        + "（demo 固件在 `0x0c` 把 49 写进 `0x100` ⇒ ⇒ 那一格必须变成 `0x00000031`）"
+        + "（⇒ ⇒ 这就是用户报的那个「运行后再暂停，读取的内存没有联动刷新」）",
+        !!after && after.value === "0x00000031",
+        `刷新前=${JSON.stringify(before)} 刷新后=${JSON.stringify(after)}`,
+    );
+
+    // -- B-120 · 寄存器**真的亮了**，且亮的是「这一趟改了」的那些 ------------
+    add(
+        "B-120 · 跑完停下之后，**真的**有寄存器格子带变化高亮"
+        + "（⇒ ⇒ 高亮不是一句空话 ⇒ ⇒ demo 固件把 x1 / x2 / x3 都改了）",
+        Number(p?.up ?? 0) + Number(p?.down ?? 0) > 0
+            && Array.isArray(p?.highlighted)
+            && p.highlighted.some((h) => h === "x1" || h === "x2" || h === "x3"),
+        `up=${p?.up} down=${p?.down} 高亮的格子=${JSON.stringify(p?.highlighted ?? [])}`,
+    );
+
+    // -- B-121 · 「变了几个」那个数与**实际亮着的格子数**一致 ---------------
+    // ⚠️ **这条是「界面不自相矛盾」的判据** ⇒ ⇒ 若那个数是写死的、或与高亮
+    //   用的不是同一组数 ⇒ ⇒ 两条里**至少**有一条会红。
+    add(
+        "B-121 · 「这一趟变了 N 个寄存器」那个 N 与**实际亮着的格子数**一致"
+        + "（⇒ ⇒ 界面**不自相矛盾** ⇒ ⇒ 那个数是**现算**的）",
+        Number.isFinite(Number(p?.changedCount))
+            && Number(p.changedCount) === Number(p?.up ?? 0) + Number(p?.down ?? 0)
+            && Number(p.changedCount) > 0,
+        `报出来的数=${p?.changedCount} 实际亮的=${Number(p?.up ?? 0) + Number(p?.down ?? 0)}`
+        + ` 状态行=${JSON.stringify(p?.stateText)}`,
+    );
+
+    // -- 附：状态行**说清了**上次读回是因为什么 ------------------------------
+    add(
+        "「读回状态」那一行说清了**上次读回是因为什么**"
+        + "（⇒ ⇒ 用户不必猜「这一趟是从哪儿开始比的」）",
+        String(p?.stateText ?? "").indexOf("读回") >= 0
+            && String(p?.stateText ?? "").indexOf("暂停") >= 0,
+        `状态行=${JSON.stringify(p?.stateText)}`,
+    );
+
+    return { checks };
+}
+
+/**
  * STAGE-42 · v0.57 批的真机段：**符号入口**（在 **demo 固件**上 ⇒ ⇒ 没有
  * 符号表 ⇒ ⇒ 专打「没有符号表」那一态）。
  *
@@ -7688,6 +7860,14 @@ async function main() {
         const traceExport = await runSection("traceExport", () => runTraceExportSection(cdp, opts));
         registerSection("traceExport", traceExport.checks, {
             title: "trace 导出检查（暂停 ⇒ ⇒ 面板自动出现 · 下载 ⇒ ⇒ 翻到末尾落全量）",
+        });
+
+        // -- the READ-BACK (v0.67 · B-118 ~ B-121) ---------------------------
+        // ⚠️ **必须排在 osz 之前**：osz 段把镜像换成仓外的真 RTOS ⇒ ⇒
+        //    放在它后面，`0x100` 的期望值（demo 固件写的 49）就不成立了。
+        const readback = await runSection("readback", () => runReadbackSection(cdp, opts));
+        registerSection("readback", readback.checks, {
+            title: "读回检查（高亮基准说清 · 跑完停下真的亮 · 读过的内存单元联动刷新）",
         });
 
         // -- the REAL RTOS (osz): load the out-of-repo ELF and SEE its console -

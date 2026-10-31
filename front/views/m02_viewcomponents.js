@@ -33,6 +33,9 @@ import { DUMP_MAX_BYTES, TRACE_FORMAT, TRACE_SOURCE, WRITE_SIZE } from "../lib/m
 // 「内核真的在执行吗」与「运行中显示什么」**各只有一处** ⇒ ⇒ 顶栏 /
 // 调试视图 / 寄存器视图**共用**同一套口径 ⇒ ⇒ 不会一个藏了一个没藏。
 import { isKernelRunning, liveValue } from "../lib/run-loop.js";
+// ⚠️ **「读回」的纯函数**（v0.67 批）⇒ ⇒ 「变了几个」**现算**⇒ ⇒ 状态与显示
+// **不可能**对不上 ⇒ ⇒ 视图层**不存**第二份。
+import { READBACK_REASON_LABEL, diffRegisters } from "../lib/readback.js";
 // ⚠️ **trace 记录开关的判定**（纯函数）⇒ ⇒ 视图层渲染按钮/状态行与 app 层
 // 发命令**引同一处** ⇒ ⇒ 「按钮写关闭、命令发开启」这种漂移**结构上不可能**。
 import {
@@ -1468,6 +1471,15 @@ const debugView = register({
         const symbolError = String(debug.symbolError ?? "");
         // ⚠️ **「停下」也只有一个落点**（裁决 L）⇒ ⇒ 这里读 `debug.halt`。
         const halt = debug.halt ?? null;
+        // ⚠️ **「读回」也只有一个落点**（v0.67 批）⇒ ⇒ 基准住
+        //   `debug.readback.baseline` ⇒ ⇒ app 层在**运行 / 单步开始前**存
+        //   ⇒ ⇒ 视图层**只读**（分层不破）⇒ ⇒ 「什么时候会高亮」有了一个
+        //   **能写在界面上**的答案。
+        const readback = debug.readback ?? null;
+        const regBaseline = readback?.baseline ?? null;
+        // ⚠️ **变了几个 = 现算**⇒ ⇒ 不另存一份 ⇒ ⇒ 数字与格子里那些高亮
+        //   **必然**来自同一组数⇒ ⇒ 界面不会自相矛盾。
+        const regChanged = diffRegisters(regBaseline, sim.gpr ?? []).length;
         // ⚠️ **调试视图的工具条整块撤掉**（v0.63 批 · 用户拍板）⇒ ⇒ 那十一个
         //   按钮**每一个**都有别的落点 ⇒ ⇒ 同一个动作在两处出现 ⇒ ⇒ 用户得
         //   猜「哪个才是真的」⇒ ⇒ 落点分别是：「单步 / 继续 / 暂停 / 复位」在
@@ -1552,22 +1564,24 @@ const debugView = register({
                 <section class="card regmem-registers" data-window="registers">
                     <div class="row">
                         <h3>寄存器窗口</h3>
-                        <span class="tag">变化高亮 = 与上一次读回相比</span>
+                        <span class="tag">变化高亮 = 与本次运行 / 单步开始前相比</span>
                         <button type="button" data-action="read-regs">读寄存器</button>
                     </div>
-                    <div class="reg-grid">${renderRegGrid(sim.gpr ?? Array(32).fill(0), previousGprSnapshot(), running)}</div>
+                    <div class="reg-grid">${renderRegGrid(sim.gpr ?? Array(32).fill(0), regBaseline, running)}</div>
+                    <p class="muted" data-readback-state>${renderReadbackState(readback, regChanged)}</p>
                     <h4>PC</h4>
                     <code class="pc">${liveValue(running, `0x${(sim.pc ?? 0).toString(16).padStart(8, "0")}`)}</code>
                 </section>
                 <section class="card regmem-memory" data-window="memory">
                     <div class="row"><h3>内存窗口</h3><span class="tag">读回的字列在下面</span></div>
+                    <p class="muted" data-memory-readback-note>程序<strong>停下</strong>时（断点 / 观察点 / 陷阱 / 暂停 / 单步走完）这里会<strong>自动重读</strong>下面这些单元。</p>
                     ${renderMemoryReadRow({ draft: draft.memAddr, size: draft.memSize })}
                     ${renderMemoryDumpRow({ addrDraft: draft.dumpAddr, lenDraft: draft.dumpLen, error: dumpError })}
                     ${renderMemoryDump(dump)}
                     <h4>内存单元</h4>
                     ${cells.length === 0
                         ? `<p class="muted">尚无读回的内存单元 — 在上面填一个地址，点「读内存」。</p>`
-                        : `<table class="map-table">
+                        : `<table class="map-table" data-mem-cells>
                             <thead><tr><th>地址</th><th>值</th></tr></thead>
                             <tbody>${cells.map(([addr, value]) => `
                                 <tr><td><code>${escapeHtml(addr)}</code></td>
@@ -1753,10 +1767,16 @@ function kernelIsRunning() {
  * ⚠️ **稳定钩子**（裁决 A）：`.reg-grid > div` **仍是 32 个** ⇒ ⇒ 真机门禁
  * 与前端用例的取法**一字不改**。
  *
- * ⚠️ **变化高亮**（STAGE-35 · v0.50 批 · 裁决 F）：与**上一次读回**的 GPR
- * 快照比 ⇒ ⇒ 变大加 `.up` · 变小加 `.down` · 没变**不加类**。
+ * ⚠️ **变化高亮**（v0.67 批 · **口径变更**）：与**本次运行 / 单步开始前**的
+ * GPR 快照比 ⇒ ⇒ 变大加 `.up` · 变小加 `.down` · 没变**不加类**。
  *
- * ⚠️ **没有上一次快照** ⇒ ⇒ **一律不加类**（⛔ 不猜「那一定是 0」）
+ * ⚠️ **口径为什么变**（v0.67 批）：原先比的是「**上一次读回**」⇒ ⇒ 那一次
+ *   「读回」取自 `sim.gpr` —— 而 `sim.gpr` 是 M-10 **被内核持续推送改写**的
+ *   **活值**⇒ ⇒ 基准与显示值**同源**⇒ ⇒ 高亮几乎永不出现，且时机取决于内核
+ *   的推送节奏 ⇒ ⇒ **用户「不知道什么时候会高亮」**（用户原话）。
+ *   ⇒ ⇒ 新口径 = 「**与本次运行 / 单步开始前相比**」⇒ ⇒ 捕获时机**唯一**。
+ *
+ * ⚠️ **没有基准** ⇒ ⇒ **一律不加类**（⛔ 不猜「那一定是 0」）
  * ⇒ ⇒ 第一次读回时**不**满屏绿红。
  *
  * ⚠️ **`running` = 运行中**（STAGE-38 · v0.53 批 · 裁决 D）⇒ ⇒ 运行中
@@ -1766,8 +1786,11 @@ function kernelIsRunning() {
  * ⚠️ **运行中不算变化高亮** ⇒ ⇒ 高亮说的是「这个值变了」⇒ ⇒ 值都没显示
  * ⇒ ⇒ 高亮没有意义（而且会让那一格看起来像「有值」）。
  *
+ * ⚠️ **长度不齐也照样比**（缺的那位按 0 参与）⇒ ⇒ 与 `diffRegisters`
+ * **同一个口径** ⇒ ⇒ 「变了几个」那个数与格子里那些高亮**必然**一致。
+ *
  * @param {number[]} gpr
- * @param {number[]|null} prevGpr
+ * @param {number[]|null} prevGpr — 基准（**本次运行 / 单步开始前**那一份）
  * @param {boolean} [running]
  * @returns {string}
  */
@@ -1777,7 +1800,7 @@ export function renderRegGrid(gpr, prevGpr, running = false) {
     return values.map((v, i) => {
         const cur = Number(v ?? 0) >>> 0;
         let cls = "";
-        if (running !== true && prev && prev.length === values.length) {
+        if (running !== true && prev && prev.length > 0) {
             const old = Number(prev[i] ?? 0) >>> 0;
             if (cur !== old) cls = cur > old ? "up" : "down";
         }
@@ -1788,19 +1811,32 @@ export function renderRegGrid(gpr, prevGpr, running = false) {
 }
 
 /**
- * **上一次读回的 GPR 快照**（视图层**只读** · 裁决 F）。
+ * 「**读回**」状态那一行（v0.67 批）。
  *
- * ⚠️ **落点在 `debug` 视图状态里** ⇒ ⇒ app 层在 `read-regs` **之前**存
- * ⇒ ⇒ 视图层**不自己存**（否则又是第二份）。
+ * ⚠️ **回答的是用户真正会问的那个问题**：「**什么时候会高亮**？」⇒ ⇒ 这一行
+ *   **必须**把「高亮的基准是什么」与「上次什么时候读过」**都**说出来 ⇒ ⇒ 用户
+ *   不必猜。
  *
- * ⚠️ **为什么落在 `debug`**（v0.65 批）：「寄存器 / 内存」那个**独立视图**
- *   没有了 ⇒ ⇒ 内容都在调试视图里 ⇒ ⇒ 快照跟着内容一起住在 `debug` ⇒ ⇒
- *   **没有第二个真相**，也没有一个**没人渲染**的孤儿状态。
+ * ⚠️ **三种状态分得开**：① **还没跑过**（没有基准）⇒ ⇒ 说清「跑一次就有了」；
+ *   ② **基准已记下、还没读回**（刚点完运行）⇒ ⇒ 说清「停下就会读回」；
+ *   ③ **读回过了** ⇒ ⇒ 说清「**上次**是**什么时候**因为**什么**读回的」+ 变了几个。
  *
- * @returns {number[]|null}
+ * @param {object|null|undefined} readback — `debug.readback` 那一份
+ * @param {number} changedCount — 这一趟变了几个（**现算**的）
+ * @returns {string}
  */
-function previousGprSnapshot() {
-    return viewStore.getState("debug")?.debug?.prevGpr ?? null;
+export function renderReadbackState(readback, changedCount = 0) {
+    const count = Number.isFinite(Number(changedCount)) ? Math.max(0, Number(changedCount)) : 0;
+    if (!readback || !Array.isArray(readback.baseline)) {
+        return "尚未运行 —— 点「运行」或「单步」时会记下基准，停下后自动读回并标出这一趟变了的寄存器。";
+    }
+    if (readback.reason === null || readback.reason === undefined) {
+        return "基准已记下（本次运行 / 单步开始前）—— 停下之后会自动读回，并标出这一趟变了的寄存器。";
+    }
+    const label = READBACK_REASON_LABEL[readback.reason] ?? "读回";
+    const how = readback.auto === true ? "自动读回" : "手动读回";
+    const failed = readback.error ? " · ⚠️ 上次读回有失败" : "";
+    return `上次${how}：${label} · 这一趟变了 <strong data-readback-changed-count>${count}</strong> 个寄存器${failed}`;
 }
 
 // ---------------------------------------------------------------------------
