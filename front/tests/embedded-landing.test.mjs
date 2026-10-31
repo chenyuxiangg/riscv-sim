@@ -139,14 +139,23 @@ describe("落地视图（embedded）· 正文不是空面板", () => {
         assert.match(body.querySelector("[data-embedded-time]").textContent, /99 ps/);
     });
 
-    test("四个子视图入口都在，且带可被脚本取到的 data-* 标记", () => {
+    test("三个子视图入口都在，且带可被脚本取到的 data-* 标记", () => {
         const body = landEmbedded({});
         const entries = [...body.querySelectorAll("[data-embedded-entry]")];
         const targets = entries.map((el) => el.getAttribute("data-embedded-entry"));
+        // ⚠️ **v0.65 批**：「寄存器 / 内存」那个独立视图撤销了 ⇒ ⇒ 入口从
+        //   **四个**变**三个** ⇒ ⇒ 那些内容在**调试视图**里 ⇒ ⇒ 不是功能
+        //   少了，只是**少一个重复的入口**。
         assert.deepEqual(
             targets.sort(),
-            ["debug", "regmem", "source", "waveform"],
-            "四个子视图入口不全（或标记不对）",
+            ["debug", "source", "waveform"],
+            "三个子视图入口不全（或标记不对）",
+        );
+        // ⚠️ **不许留着指向已撤销视图的死入口** ⇒ ⇒ 那会让用户点到一个
+        //   落到兜底页的死按钮。
+        assert.ok(
+            !targets.includes("regmem"),
+            "还有指向已撤销的「寄存器 / 内存」视图的死入口",
         );
         for (const el of entries) {
             assert.equal(
@@ -171,8 +180,8 @@ describe("落地视图（embedded）· 子视图入口能跳", () => {
         assert.equal(activePanel(), "debug", "点击入口后没有跳到调试视图");
     });
 
-    test("四个入口逐个都能跳（不是一个死按钮）", () => {
-        for (const target of ["debug", "regmem", "waveform", "source"]) {
+    test("三个入口逐个都能跳（不是一个死按钮）", () => {
+        for (const target of ["debug", "waveform", "source"]) {
             const body = landEmbedded({});
             const button = body.querySelector(`[data-embedded-entry="${target}"]`);
             assert.ok(button, `找不到 ${target} 入口`);

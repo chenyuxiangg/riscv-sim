@@ -102,9 +102,16 @@ describe("bootstrap", () => {
 
     test("七个视图面板全部挂载，状态栏不再是初始文案", () => {
         const panels = $$("[data-view-panel]").map((p) => p.getAttribute("data-view-panel"));
-        for (const hash of ["product", "embedded", "debug", "regmem", "waveform", "terminal", "fallback"]) {
+        // ⚠️ **v0.65 批**：「寄存器 / 内存」那个独立视图撤销了 ⇒ ⇒ 面板从
+        //   **八个**变**七个** ⇒ ⇒ `regmem` 不该再出现 ⇒ ⇒ 那条断言**也**
+        //   是判据的一部分（面板撤了 ⇒ ⇒ 面板也不能留）。
+        for (const hash of ["product", "embedded", "debug", "waveform", "terminal", "fallback"]) {
             assert.ok(panels.includes(hash), `缺少面板 ${hash}`);
         }
+        assert.ok(
+            !panels.includes("regmem"),
+            "「寄存器 / 内存」视图已撤销，面板不该还留着（那是死面板）",
+        );
         assert.notEqual(dom.document.getElementById("status").textContent, "未连接");
     });
 

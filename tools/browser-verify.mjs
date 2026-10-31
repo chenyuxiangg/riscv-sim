@@ -780,7 +780,7 @@ const PROBE_EXPRESSION = `(() => {
   const active = panels.find((p) => !p.classList.contains("hidden")) || null;
   const heading = active ? active.querySelector("h2") : null;
   const body = active ? active.querySelector("[data-view-body]") : null;
-  const regCells = Array.from(document.querySelectorAll('[data-view-body="regmem"] .reg-grid > div'));
+  const regCells = Array.from(document.querySelectorAll('[data-view-body="debug"] .reg-grid > div'));
   const cellText = (i) => {
     const code = regCells[i] ? regCells[i].querySelector("code") : null;
     return code ? String(code.textContent || "").trim() : "";
@@ -821,7 +821,7 @@ const PROBE_EXPRESSION = `(() => {
     regCells: regCells.length,
     regX1: cellText(1),
     regX2: cellText(2),
-    pc: String((document.querySelector('[data-view-body="regmem"] .pc') || {}).textContent || "").trim(),
+    pc: String((document.querySelector('[data-view-body="debug"] .pc') || {}).textContent || "").trim(),
     waveChannels: waveItems.length,
     waveLabel0: waveItems[0]
       ? String((waveItems[0].querySelector(".channel-label") || {}).textContent || "").trim()
@@ -971,10 +971,10 @@ function landingChecks(probe) {
             detail: `embeddedBodyChars=${probe.embeddedBodyChars}`,
         },
         {
-            name: "落地视图正文有实质内容（PC 十六进制 + 四个子视图入口）",
+            name: "落地视图正文有实质内容（PC 十六进制 + 三个子视图入口）",
             ok: /^0x[0-9a-fA-F]{8}$/.test(String(probe.embeddedPcText ?? "").trim())
-                && Number(probe.embeddedEntryCount ?? 0) >= 4
-                && ["debug", "regmem", "waveform", "source"].every((t) => entryTargets.includes(t)),
+                && Number(probe.embeddedEntryCount ?? 0) >= 3
+                && ["debug", "waveform", "source"].every((t) => entryTargets.includes(t)),
             detail: `pc="${probe.embeddedPcText}" entries=${probe.embeddedEntryCount} targets=[${entryTargets.join(",")}]`,
         },
         {
@@ -1025,7 +1025,11 @@ function kernelExecChecks(probe) {
  *
  * ⚠️ **「落地视图正文非空」这一条住在 `landingChecks`**（D-33 · 裁决 C）：
  * 它查的是**落地视图**（`embedded`）的正文 ⇒ 断言落点跟着落地视图走，
- * 不再挂在 `regmem` 上（`regmem` 的正文由「32 个寄存器格」那条覆盖）。
+ * 不再挂在调试视图上（调试视图的正文由「32 个寄存器格」那条覆盖）。
+ *
+ * ⚠️ **v0.65 批**：「寄存器 / 内存」那个独立视图撤销了 ⇒ ⇒ 渲染路径这一段
+ *   切到**调试视图** ⇒ ⇒ 它的正文里**同时**有寄存器格与两个窗口 ⇒ ⇒
+ *   「渲染路径没坏」这条判据**不弱于**从前。
  *
  * @param {object} probe
  * @returns {{name: string, ok: boolean, detail: string}[]}
@@ -1033,8 +1037,8 @@ function kernelExecChecks(probe) {
 function renderChecks(probe) {
     return [
         {
-            name: "路由切到了有组件的视图（regmem）",
-            ok: probe.activePanel === "regmem",
+            name: "路由切到了有组件的视图（debug）",
+            ok: probe.activePanel === "debug",
             detail: `active=${probe.activePanel}`,
         },
         {
@@ -1043,7 +1047,7 @@ function renderChecks(probe) {
             detail: `title="${probe.title}"`,
         },
         {
-            name: "寄存器视图渲染出 32 个寄存器格",
+            name: "调试视图的寄存器窗口渲染出 32 个寄存器格",
             ok: probe.regCells === 32,
             detail: `regCells=${probe.regCells}`,
         },
@@ -2220,6 +2224,9 @@ const BV_SIDEBAR_PROBE = `(() => {
     hasHost: !!host,
     hostVisible: !!host && !!sb && sb.width > 0 && sb.height > 0,
     itemCount: items.length,
+    // ⚠️ **逐项点名**（v0.65 批）⇒ ⇒ 「某个视图被撤销了」这条判据要能看见
+    //   **是哪几个** ⇒ ⇒ 只判个数 ⇒ ⇒ 「换一个视图但个数不变」会**假绿**。
+    hashes: items.map((el) => String(el.getAttribute("data-view-tab") || "")),
     groupCount: document.querySelectorAll("[data-sidebar] .nav-group").length,
     groups: Array.from(document.querySelectorAll("[data-sidebar] .nav-group")).map((g) => ({
       label: String((g.querySelector(".nav-label") || {}).textContent || "").trim(),
@@ -2248,15 +2255,18 @@ const BV_ACTIVE_PANEL_PROBE = `(() => {
 })()`;
 
 /**
- * 顶栏运行条的**统计**（PC / 虚拟时间）＋ 寄存器视图那份 PC。
+ * 顶栏运行条的**统计**（PC / 虚拟时间）＋ 调试视图「寄存器窗口」那份 PC。
  *
  * ⚠️ **两边都读** ⇒ ⇒ 断言「逐字相同」才能证明**同一个状态源**。
+ *
+ * ⚠️ **虚拟时间只有顶栏那一份**（v0.65 批）⇒ ⇒ `regTimeText` 应当是
+ *   **`null`**（调试视图里**没有**那个元素）⇒ ⇒ B-15b 改成钉「**只有一份**」。
  */
 const BV_TOPBAR_STATS_PROBE = `(() => {
   const pc = document.querySelector("[data-topbar-pc-value]");
   const time = document.querySelector("[data-topbar-time-value]");
-  const regPc = document.querySelector('[data-view-body="regmem"] .pc');
-  const regTime = document.querySelector('[data-view-body="regmem"] .timeVirt');
+  const regPc = document.querySelector('[data-view-body="debug"] .pc');
+  const regTime = document.querySelector('[data-view-body="debug"] .timeVirt');
   const runStatus = document.querySelector("[data-topbar-run-status]");
   return {
     pcText: pc ? String(pc.textContent || "").trim() : null,
@@ -3185,14 +3195,14 @@ const UI_IMAGE_TOPBAR_PROBE = `(() => {
   };
 })()`;
 
-/** 寄存器 / PC 的探针（regmem 视图）。 */
+/** 寄存器 / PC 的探针（调试视图的「寄存器窗口」· v0.65 批）。 */
 const UI_IMAGE_REG_PROBE = `(() => {
-  const cells = Array.from(document.querySelectorAll('[data-view-body="regmem"] .reg-grid > div'));
+  const cells = Array.from(document.querySelectorAll('[data-view-body="debug"] .reg-grid > div'));
   const val = (i) => {
     const code = cells[i] ? cells[i].querySelector("code") : null;
     return code ? String(code.textContent || "").trim() : "";
   };
-  const pc = document.querySelector('[data-view-body="regmem"] code.pc');
+  const pc = document.querySelector('[data-view-body="debug"] code.pc');
   return {
     count: cells.length,
     x1: val(1),
@@ -4003,7 +4013,7 @@ async function runLoadImageSection(cdp, opts) {
         });
 
         // -- B-2 · 内核真的换了镜像 ---------------------------------------
-        await runEffect(cdp, 'location.hash = "#/regmem";');
+        await runEffect(cdp, 'location.hash = "#/debug";');
         await sleep(500);
         let regs = null;
         const regDeadline = Date.now() + opts.timeoutMs;
@@ -4192,7 +4202,7 @@ async function runLoadImageSection(cdp, opts) {
             if (String(termB?.terminal ?? "").includes(UI_IMAGE_ELF_MARKER_B)) break;
             await sleep(250);
         }
-        await runEffect(cdp, 'location.hash = "#/regmem";');
+        await runEffect(cdp, 'location.hash = "#/debug";');
         await sleep(600);
         let regsB = null;
         const regBDeadline = Date.now() + opts.timeoutMs;
@@ -4232,7 +4242,7 @@ async function runLoadImageSection(cdp, opts) {
 /**
  * **UI 布局**那一段（STAGE-34 · v0.49 批 —— 侧边栏 + 顶栏运行条）。
  *
- * ⚠️ **必须排在最后**：它会切到 `#/regmem` / `#/waveform` ⇒ ⇒ 放在前面会
+ * ⚠️ **必须排在最后**：它会切到 `#/debug` / `#/waveform` ⇒ ⇒ 放在前面会
  * 污染后面那些段看到的初始状态。
  *
  * ⚠️ **判据要问用户真正会问的那个问题**（STAGE-33 §5 记的那条教训）：
@@ -4255,16 +4265,26 @@ async function runUiLayoutSection(cdp, opts) {
     let sb = await awaitEval(cdp, BV_SIDEBAR_PROBE);
     add(
         "B-12 · **默认落地页上就有左侧导航**（⛔ 不是某个视图里才有 ⇒ ⇒ 这正是用户的判据）",
-        !!(sb?.hasHost && sb?.hostVisible && sb?.itemCount >= 8 && sb?.groupCount === 2),
+        // ⚠️ **v0.65 批**：「寄存器 / 内存」那个独立视图撤销了 ⇒ ⇒ 导航项
+        //   从 **8 项**变 **7 项** ⇒ ⇒ 门槛跟着降一格（不是功能少了 ⇒ ⇒
+        //   是**少了一个重复入口**⇒ ⇒ 内容搬进了调试视图）。
+        !!(sb?.hasHost && sb?.hostVisible && sb?.itemCount >= 7 && sb?.groupCount === 2),
         `hash=${JSON.stringify(sb?.hash ?? "")} 导航项=${sb?.itemCount ?? 0} 组=${sb?.groupCount ?? 0}`
         + ` 图标=${sb?.svgCount ?? 0} 可见=${sb?.hostVisible}`,
     );
     add(
-        "B-12b · 侧边栏**按分组**排（运行与调试 5 项 / 平台 3 项）且每项都带内联 SVG 图标",
+        "B-12b · 侧边栏**按分组**排（运行与调试 4 项 / 平台 3 项）且每项都带内联 SVG 图标",
+        // ⚠️ **件数跟着 v0.65 批降一格**（运行与调试 5 → 4）⇒ ⇒ 平台那组
+        //   **不变**（3 项）⇒ ⇒ 少的那一项**确实**在「运行与调试」这一组里。
         !!sb && Array.isArray(sb?.groups) && sb.groups.length === 2
-            && sb.groups[0].count === 5 && sb.groups[1].count === 3
+            && sb.groups[0].count === 4 && sb.groups[1].count === 3
             && sb.svgCount === sb.itemCount,
         `分组=${JSON.stringify(sb?.groups ?? [])} 图标数=${sb?.svgCount ?? 0} / 导航项=${sb?.itemCount ?? 0}`,
+    );
+    add(
+        "B-12c · 侧边栏**没有**「寄存器 / 内存」那个入口了（v0.65 批 ⇒ ⇒ 内容只有一个去处）",
+        Array.isArray(sb?.hashes) && sb.hashes.length >= 7 && !sb.hashes.includes("regmem"),
+        `侧边栏项=${JSON.stringify(sb?.hashes ?? [])}`,
     );
 
     // -- B-13 · 真点侧边栏上的「波形」项 ⇒ ⇒ 视图真的切了 ----------------
@@ -4292,24 +4312,24 @@ async function runUiLayoutSection(cdp, opts) {
         `高亮项数=${sb?.currentCount ?? 0} 高亮的是=${JSON.stringify(sb?.currentHash ?? "")}`,
     );
 
-    // -- B-15 · 顶栏运行条与寄存器视图**同源** -----------------------------
-    // ⚠️ **先切到 regmem**（那儿有 PC 的另一份显示）⇒ ⇒ 两边要能对上。
-    await runEffect(cdp, 'location.hash = "#/regmem";');
+    // -- B-15 · 顶栏运行条与**寄存器窗口**同源 ----------------------------
+    // ⚠️ **先切到 debug**（那儿有 PC 的另一份显示）⇒ ⇒ 两边要能对上。
+    await runEffect(cdp, 'location.hash = "#/debug";');
     await sleep(800);
     const stats = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
     add(
-        "B-15 · 顶栏运行条显示的 PC 与**寄存器视图那份逐字相同**（⇒ ⇒ 同一个状态源 ⇒ ⇒ 不是第二个真相）",
+        "B-15 · 顶栏运行条显示的 PC 与**寄存器窗口那份逐字相同**（⇒ ⇒ 同一个状态源 ⇒ ⇒ 不是第二个真相）",
         !!stats?.pcText && stats.pcText === stats.regPcText && /^0x[0-9a-f]{8}$/.test(stats.pcText),
-        `顶栏 PC=${JSON.stringify(stats?.pcText ?? "")} 寄存器视图 PC=${JSON.stringify(stats?.regPcText ?? "")}`
+        `顶栏 PC=${JSON.stringify(stats?.pcText ?? "")} 寄存器窗口 PC=${JSON.stringify(stats?.regPcText ?? "")}`
         + ` 虚拟时间=${JSON.stringify(stats?.timeText ?? "")}`,
     );
     add(
-        "B-15b · 顶栏的**虚拟时间**与寄存器视图那份**逐字同源**（原始 ps ⇒ ⇒ 不是写死的）",
-        !!stats?.timePs && !!stats?.regTimeText
-            && String(stats.timePs) === String(stats.regTimeText).replace(/\s*ps\s*$/, "")
+        "B-15b · 虚拟时间**只有顶栏那一份**：顶栏是**真实 ps**，而调试视图里**没有**第二份（v0.65 批）",
+        !!stats?.timePs && /^\d+$/.test(String(stats.timePs))
+            && stats?.regTimeText === null
             && /\d/.test(stats.timeText ?? ""),
         `顶栏原始 ps=${JSON.stringify(stats?.timePs ?? "")} 显示=${JSON.stringify(stats?.timeText ?? "")}`
-        + ` 寄存器视图=${JSON.stringify(stats?.regTimeText ?? "")}`,
+        + ` 调试视图里的虚拟时间=${JSON.stringify(stats?.regTimeText ?? "")}`,
     );
 
     // -- B-16 · 真点顶栏「单步」⇒ ⇒ 线上帧看得见 + PC 真的动了 ----------
@@ -4465,9 +4485,9 @@ const BV_BREAKPOINT_UI_PROBE = `(() => {
     debugError: err ? String(err.textContent || "").trim() : "",
     disasmAddr: disasmBtn ? String(disasmBtn.getAttribute("data-addr") || "").trim() : "",
     clearBtnCount: clearBtns.length,
-    regCells: document.querySelectorAll('[data-view-body="regmem"] .reg-grid > div').length,
+    regCells: document.querySelectorAll('[data-view-body="debug"] .reg-grid > div').length,
     waveItems: document.querySelectorAll('[data-view-body="waveform"] .channel-list > li').length,
-    pc: String((document.querySelector('[data-view-body="regmem"] .pc') || {}).textContent || "").trim(),
+    pc: String((document.querySelector('[data-view-body="debug"] .pc') || {}).textContent || "").trim(),
   };
 })()`;
 
@@ -4973,20 +4993,25 @@ async function runRunLoopSection(cdp, opts) {
 // ---------------------------------------------------------------------------
 
 /**
- * 读「运行中」那一组探针（顶栏 + 调试视图 + 寄存器视图 + 告警弹窗）。
+ * 读「运行中」那一组探针（顶栏 + 调试视图的两个窗口 + 告警弹窗）。
  *
  * ⚠️ **一次读完** ⇒ ⇒ 采样是**同一个瞬间**的 ⇒ ⇒ 「顶栏是 `-` 而视图不是」
  *    这种**采样错位**不会发生 ⇒ ⇒ 判据可信。
  *
  * ⚠️ **读原始属性而不是解析中文** ⇒ ⇒ 与 `data-topbar-time-ps` 同一手法。
+ *
+ * ⚠️ **v0.65 批**：「寄存器 / 内存」那个独立视图**撤销了** ⇒ ⇒ 只剩调试
+ *    视图 ⇒ ⇒ 探针**只读一处** ⇒ ⇒ `dbgTime` 恒为 `null`（那个视图里
+ *    **没有**虚拟时间 ⇒ ⇒ 顶栏那一份是**唯一**那一份）。
  */
 const BV_LIVE_READOUT_PROBE = `(() => {
   const topPc = document.querySelector("[data-topbar-pc-value]");
   const topTime = document.querySelector("[data-topbar-time-value]");
-  const dbgPc = document.querySelector('[data-view-body="debug"] .pc');
-  const dbgTime = document.querySelector('[data-view-body="debug"] .timeVirt');
-  const rmPc = document.querySelector('[data-view-body="regmem"] .pc');
-  const rmTime = document.querySelector('[data-view-body="regmem"] .timeVirt');
+  const dbgBody = document.querySelector('[data-view-body="debug"]');
+  const regWin = dbgBody ? dbgBody.querySelector('[data-window="registers"]') : null;
+  const memWin = dbgBody ? dbgBody.querySelector('[data-window="memory"]') : null;
+  const dbgPc = regWin ? regWin.querySelector(".pc") : null;
+  const dbgTime = dbgBody ? dbgBody.querySelector(".timeVirt") : null;
   const regCells = (scope) => [...document.querySelectorAll(scope + " .reg-grid > div > code")]
       .map((el) => String(el.textContent || "").trim());
   const overlay = document.querySelector("[data-alert-overlay]");
@@ -4998,10 +5023,8 @@ const BV_LIVE_READOUT_PROBE = `(() => {
     dbgPc: dbgPc ? String(dbgPc.textContent || "").trim() : null,
     dbgTime: dbgTime ? String(dbgTime.textContent || "").trim() : null,
     dbgRegs: regCells('[data-view-body="debug"]'),
-    rmPc: rmPc ? String(rmPc.textContent || "").trim() : null,
-    rmTime: rmTime ? String(rmTime.textContent || "").trim() : null,
-    rmRegs: regCells('[data-view-body="regmem"]'),
-    memRows: [...document.querySelectorAll('[data-view-body="regmem"] .map-table tbody tr')]
+    // ⚠️ **内存单元表住在「内存窗口」里**（v0.65 批）⇒ ⇒ 按**位置**取值。
+    memRows: [...(memWin ? memWin.querySelectorAll(".map-table tbody tr") : [])]
       .map((tr) => {
         const cells = [...tr.querySelectorAll("td code")].map((c) => String(c.textContent || "").trim());
         return { addr: cells[0] ?? "", value: cells[1] ?? "" };
@@ -5014,9 +5037,8 @@ const BV_LIVE_READOUT_PROBE = `(() => {
 /**
  * 点某个视图里的「读内存」按钮。
  *
- * ⚠️ **按位置限定**（`[data-view-body="..."]`）⇒ ⇒ 调试视图与寄存器视图
- * **各有一个**同名按钮（事实 F13）⇒ ⇒ 不限定的话 `querySelector` 会命中
- * **前一个** ⇒ ⇒ 断言还在跑、断的却不是它以为的那个东西。
+ * ⚠️ **按位置限定**（`[data-view-body="..."]`）⇒ ⇒ 不限定的话 `querySelector`
+ *   会命中**前一个**同名按钮 ⇒ ⇒ 断言还在跑、断的却不是它以为的那个东西。
  *
  * ⚠️ **必须先填地址**（STAGE-39 · v0.54 批）：读内存的地址**不再写死**
  *   ⇒ ⇒ 界面改成「一个地址输入框 + 一个宽度选择」⇒ ⇒ 点按钮之前**先往
@@ -5024,7 +5046,7 @@ const BV_LIVE_READOUT_PROBE = `(() => {
  *   也不会出现（那几条断言会**假红**，而不是「真的被拒」）。
  *
  * @param {object} cdp
- * @param {string} viewId — `"debug"` 或 `"regmem"`
+ * @param {string} viewId — 视图 id（v0.65 批之后只有 `"debug"` 一处了）
  * @param {string} [addr] — 要读的地址（默认那个历史上的 `0x00000100`）
  * @returns {Promise<void>}
  */
@@ -5158,34 +5180,31 @@ async function runLiveReadoutSection(cdp, opts) {
 
     const dbgRegs = running2?.dbgRegs ?? [];
     add(
-        "B-44 · 运行中 ⇒ ⇒ 调试视图「寄存器 / 内存」那张卡：寄存器格 / PC / 虚拟时间**全是 `-`**"
+        "B-44 · 运行中 ⇒ ⇒ 调试视图「**寄存器窗口**」：寄存器格 / PC **全是 `-`**"
         + "（⇒ ⇒ 界面**不闪** ⇒ ⇒ 那些数字不再每秒跳 5 次）",
         dbgRegs.length === 32
             && dbgRegs.every((c) => c === "-")
-            && running2?.dbgPc === "-"
-            && running2?.dbgTime === "-",
+            && running2?.dbgPc === "-",
         `寄存器格 ${dbgRegs.length} 个，其中非「-」的 ${dbgRegs.filter((c) => c !== "-").length} 个`
-        + ` PC=${JSON.stringify(running2?.dbgPc ?? "")} 时间=${JSON.stringify(running2?.dbgTime ?? "")}`,
+        + ` PC=${JSON.stringify(running2?.dbgPc ?? "")}`,
     );
 
-    const rmRegs = running2?.rmRegs ?? [];
+    const liveRows = running2?.memRows ?? [];
     add(
-        "B-45 · 运行中 ⇒ ⇒ 寄存器视图：寄存器格 / PC / 虚拟时间**全是 `-`**"
-        + "（⇒ ⇒ 与调试视图**同一个口径** ⇒ ⇒ 不会一个藏了一个没藏）",
-        rmRegs.length === 32
-            && rmRegs.every((c) => c === "-")
-            && running2?.rmPc === "-"
-            && running2?.rmTime === "-",
-        `寄存器格 ${rmRegs.length} 个，其中非「-」的 ${rmRegs.filter((c) => c !== "-").length} 个`
-        + ` PC=${JSON.stringify(running2?.rmPc ?? "")} 时间=${JSON.stringify(running2?.rmTime ?? "")}`,
+        "B-45 · 运行中 ⇒ ⇒ 调试视图「**内存窗口**」：内存单元的值**也是 `-`**"
+        + "，且**虚拟时间根本不在这张视图里**（v0.65 批：顶栏那一份是**唯一**那一份）",
+        liveRows.every((r) => r.value === "-")
+            && running2?.dbgTime === null,
+        `内存单元 ${liveRows.length} 行，其中值不是「-」的 ${liveRows.filter((r) => r.value !== "-").length} 行`
+        + ` 调试视图里的虚拟时间=${JSON.stringify(running2?.dbgTime ?? "")}`,
     );
 
-    // -- B-46 · 调试视图那个「读内存 @0x100」⇒ ⇒ 弹窗 ------------------
+    // -- B-46 · 调试视图「内存窗口」那个「读内存」⇒ ⇒ 弹窗 ----------------
     await clickReadMemoryButton(cdp, "debug");
     await sleep(400);
     const afterDebugClick = await readProbe();
     add(
-        "B-46 · 运行中点**调试视图**那个「读内存 @0x100」⇒ ⇒ 弹窗出现"
+        "B-46 · 运行中点**调试视图「内存窗口」**那个「读内存 @0x100」⇒ ⇒ 弹窗出现"
         + "，且文案里**有**「请先暂停再读」",
         afterDebugClick?.alertState === "open"
             && String(afterDebugClick?.alertText ?? "").includes("请先暂停再读"),
@@ -5193,15 +5212,23 @@ async function runLiveReadoutSection(cdp, opts) {
         + ` 文案=${JSON.stringify(afterDebugClick?.alertText ?? "")}`,
     );
 
-    // -- B-47 · 寄存器视图那个「读内存 @0x100」⇒ ⇒ **也**弹窗 -----------
-    await clickReadMemoryButton(cdp, "regmem");
-    await sleep(400);
-    const afterRegmemClick = await readProbe();
+    // -- B-47 · 「读内存」按钮**整个界面上只有一个**，且在**内存窗口**里 ----
+    // ⚠️ **v0.65 批**：「寄存器 / 内存」那个独立视图撤销了 ⇒ ⇒ 同一个动作
+    //   **只在一处**⇒ ⇒ 这条钉的就是「**只有一处**」⇒ ⇒ 哪天它又被复制到
+    //   第二个视图里，这条立刻红。
+    const readMemButtons = await awaitEval(cdp, `(() => {
+        const all = Array.from(document.querySelectorAll('[data-action="read-mem"]'));
+        const inReg = all.filter((b) => b.closest('[data-window="registers"]')).length;
+        const inMem = all.filter((b) => b.closest('[data-window="memory"]')).length;
+        return { total: all.length, inReg, inMem };
+    })()`);
     add(
-        "B-47 · 运行中点**寄存器视图**那个「读内存 @0x100」⇒ ⇒ **也**弹窗"
-        + "（⇒ ⇒ 两个按钮**共用**一条拒绝路径 ⇒ ⇒ 不会只挡住一个）",
-        afterRegmemClick?.alertState === "open",
-        `alertState=${JSON.stringify(afterRegmemClick?.alertState ?? "")}`,
+        "B-47 · 「读内存」按钮**整个界面上只有一个**，且它在**内存窗口**里"
+        + "（⇒ ⇒ 同一个动作只在一处 ⇒ ⇒ 用户不用猜「哪个才是真的」）",
+        readMemButtons?.total === 1
+            && readMemButtons?.inMem === 1
+            && readMemButtons?.inReg === 0,
+        `共 ${readMemButtons?.total ?? 0} 个（内存窗口 ${readMemButtons?.inMem ?? 0} 个 / 寄存器窗口 ${readMemButtons?.inReg ?? 0} 个）`,
     );
 
     // -- B-48 · **没有**新的内存单元被读回来（拒绝的是**执行**）----------
@@ -5314,18 +5341,19 @@ const BV_ADDR_INPUT_TARGET_HEX =
  */
 const BV_ADDR_INPUT_PROBE = `(() => {
   const debugBody = document.querySelector('[data-view-body="debug"]');
-  const regmemBody = document.querySelector('[data-view-body="regmem"]');
+  // ⚠️ **v0.65 批**：读内存那一行住在调试视图的「**内存窗口**」里 ⇒ ⇒ 按
+  //   **位置**取值 ⇒ ⇒ 不会命中别的同名元素。
+  const memWin = debugBody ? debugBody.querySelector('[data-window="memory"]') : null;
   const bpBox = debugBody ? debugBody.querySelector('[data-addr-input="breakpoint"]') : null;
-  const memBox = regmemBody ? regmemBody.querySelector('[data-addr-input="memory"]') : null;
+  const memBox = debugBody ? debugBody.querySelector('[data-addr-input="memory"]') : null;
   const memInput = memBox ? memBox.querySelector("[data-mem-addr-input]") : null;
   const sizeSel = memBox ? memBox.querySelector("[data-mem-size]") : null;
   const bpErr = bpBox ? bpBox.querySelector("[data-bp-addr-error]") : null;
   const memErr = memBox ? memBox.querySelector("[data-mem-addr-error]") : null;
   return {
     hasDebugBody: !!debugBody,
-    hasRegmemBody: !!regmemBody,
+    hasMemWindow: !!memWin,
     hasBpInput: !!(bpBox && bpBox.querySelector("[data-bp-addr-input]")),
-    bpInputInRegmem: !!(regmemBody && regmemBody.querySelector("[data-bp-addr-input]")),
     hasMemInput: !!(memBox && memInput),
     memSizeValue: sizeSel ? String(sizeSel.value || "") : "",
     bpErrorText: bpErr ? String(bpErr.textContent || "").trim() : "",
@@ -5334,7 +5362,9 @@ const BV_ADDR_INPUT_PROBE = `(() => {
       .map((r) => String(r.getAttribute("data-disasm-addr") || "")),
     bpList: Array.from(document.querySelectorAll('[data-view-body="debug"] [data-bp-row]'))
       .map((r) => String(r.getAttribute("data-bp-addr") || "")),
-    memRows: Array.from(document.querySelectorAll('[data-view-body="regmem"] .map-table tbody tr'))
+    memRows: Array.from(
+      memWin ? memWin.querySelectorAll(".map-table tbody tr") : [],
+    )
       .map((tr) => {
         const cells = Array.from(tr.querySelectorAll("td code")).map((c) => String(c.textContent || "").trim());
         return { addr: cells[0] || "", value: cells[1] || "" };
@@ -5377,13 +5407,15 @@ async function runAddrInputSection(cdp, opts) {
     await runEffect(cdp, 'location.hash = "#/debug";');
     await sleep(700);
 
-    // -- B-60 · 断点输入框**在调试视图里** --------------------------------
+    // -- B-60 · 断点输入框与**读内存**输入框**同在调试视图这一屏** ----------
+    // ⚠️ **v0.65 批**：「寄存器 / 内存」那个独立视图撤销了 ⇒ ⇒ 读内存那一行
+    //   搬进了调试视图 ⇒ ⇒ **两个入口同屏** ⇒ ⇒ 用户不用去别的视图找。
     let p = await probe();
     add(
-        "B-60 · 断点卡上的地址输入框**在调试视图里**（用户实际会去的那一屏）"
-        + "⇒ ⇒ 不是「某个藏起来的视图里」",
-        p?.hasBpInput === true && p?.bpInputInRegmem === false,
-        `调试视图里有=${p?.hasBpInput} 寄存器视图里有=${p?.bpInputInRegmem}`,
+        "B-60 · 断点地址输入框与**读内存**地址输入框**同在调试视图这一屏**"
+        + "（⇒ ⇒ 用户实际会去的那一屏 ⇒ ⇒ 不是「某个藏起来的视图里」）",
+        p?.hasBpInput === true && p?.hasMemInput === true && p?.hasMemWindow === true,
+        `调试视图里有断点框=${p?.hasBpInput} 读内存框=${p?.hasMemInput} 内存窗口=${p?.hasMemWindow}`,
     );
 
     // -- 前置：把反汇编窗口**收窄** ⇒ ⇒ 靶点不在窗口里 --------------------
@@ -5452,10 +5484,10 @@ async function runAddrInputSection(cdp, opts) {
     // -- B-57 · 在**任意地址**读内存 ⇒ ⇒ 内存表里**出现那一行** ------------
     // ⚠️ **读的不是 `0x100`** ⇒ ⇒ 这条才是锋利的那条：「把 `0x100` 换个地方
     //   写死」的实现会在这一条**露馅**（表里出现的是 `0x00000100`）。
-    await runEffect(cdp, 'location.hash = "#/regmem";');
+    await runEffect(cdp, 'location.hash = "#/debug";');
     await sleep(700);
     await runEffect(cdp, `(() => {
-        const box = document.querySelector('[data-view-body="regmem"] [data-addr-input="memory"]');
+        const box = document.querySelector('[data-view-body="debug"] [data-addr-input="memory"]');
         const input = box ? box.querySelector("[data-mem-addr-input]") : null;
         if (!input) return "no-input";
         input.value = "0x00000104";
@@ -5476,7 +5508,7 @@ async function runAddrInputSection(cdp, opts) {
 
     // -- B-58 · **对照**：读 `0x100` **仍然**能读 ---------------------------
     await runEffect(cdp, `(() => {
-        const box = document.querySelector('[data-view-body="regmem"] [data-addr-input="memory"]');
+        const box = document.querySelector('[data-view-body="debug"] [data-addr-input="memory"]');
         const input = box ? box.querySelector("[data-mem-addr-input]") : null;
         if (!input) return "no-input";
         input.value = "0x00000100";
@@ -5556,7 +5588,7 @@ async function runAddrInputSection(cdp, opts) {
     //   会「没有新的一行」⇒ ⇒ 那种绿是**假的**）。
     const runningState = await topbar();
     const rowsBefore = (await probe()).memRows ?? [];
-    await clickReadMemoryButton(cdp, "regmem", "0x00000108");
+    await clickReadMemoryButton(cdp, "debug", "0x00000108");
     await sleep(700);
     p = await probe();
     const rowsAfter = p?.memRows ?? [];
@@ -5586,18 +5618,21 @@ async function runAddrInputSection(cdp, opts) {
 
 /**
  * 调试器增强那一组的 DOM 探针（**一次读完** ⇒ ⇒ 采样是**同一个瞬间**的 ⇒ ⇒
- * 「符号框在调试视图、转储框在寄存器视图」这种**采样错位**不会发生）。
+ * 「符号框与转储框在**同一屏**」这种**采样错位**不会发生）。
  *
  * ⚠️ **读原始属性**（`data-addr` / `data-symbol` / `data-bp-addr` /
  *   `data-dump-off`）⇒ ⇒ 判据不必解析中文。
+ *
+ * ⚠️ **v0.65 批**：「寄存器 / 内存」那个独立视图撤销了 ⇒ ⇒ 转储框与「读
+ *   内存」那一行都搬进了**调试视图的「内存窗口」**⇒ ⇒ 探针**只读一处**。
  */
 const BV_DEBUGGER_PROBE = `(() => {
   const debugBody = document.querySelector('[data-view-body="debug"]');
-  const regmemBody = document.querySelector('[data-view-body="regmem"]');
+  const memWin = debugBody ? debugBody.querySelector('[data-window="memory"]') : null;
   const symBox = debugBody ? debugBody.querySelector('[data-symbol-input="breakpoint"]') : null;
   const condBox = debugBody ? debugBody.querySelector('[data-cond-input="breakpoint"]') : null;
-  const dumpBox = regmemBody ? regmemBody.querySelector('[data-dump-input="memory"]') : null;
-  const dumpOut = regmemBody ? regmemBody.querySelector("[data-mem-dump]") : null;
+  const dumpBox = memWin ? memWin.querySelector('[data-dump-input="memory"]') : null;
+  const dumpOut = memWin ? memWin.querySelector("[data-mem-dump]") : null;
   const symErr = symBox ? symBox.querySelector("[data-bp-symbol-error]") : null;
   const condErr = condBox ? condBox.querySelector("[data-bp-cond-error]") : null;
   const dumpErr = dumpBox ? dumpBox.querySelector("[data-dump-error]") : null;
@@ -5605,10 +5640,10 @@ const BV_DEBUGGER_PROBE = `(() => {
   const candBox = symBox ? symBox.querySelector("[data-bp-symbol-candidates]") : null;
   // ⚠️ **「读内存」那一行**（v0.64 批）⇒ ⇒ 提示位**独占一行**才看得见 ⇒ ⇒
   //   断言得看**位置**（不是只看文案在不在）。
-  const memReadBox = regmemBody ? regmemBody.querySelector('[data-addr-input="memory"]') : null;
+  const memReadBox = memWin ? memWin.querySelector('[data-addr-input="memory"]') : null;
   const memReadErr = memReadBox ? memReadBox.querySelector("[data-mem-addr-error]") : null;
   const memReadBtn = memReadBox ? memReadBox.querySelector('[data-action="read-mem"]') : null;
-  const memReadHint = regmemBody ? regmemBody.querySelector("[data-mem-read-hint]") : null;
+  const memReadHint = memWin ? memWin.querySelector("[data-mem-read-hint]") : null;
   const dumpBtn = dumpBox ? dumpBox.querySelector('[data-action="dump-memory"]') : null;
   return {
     hasDebugBody: !!debugBody,
@@ -5617,7 +5652,7 @@ const BV_DEBUGGER_PROBE = `(() => {
     memReadButtonBottom: memReadBtn ? memReadBtn.getBoundingClientRect().bottom : null,
     memReadHintText: memReadHint ? String(memReadHint.textContent || "").trim() : "",
     dumpButtonText: dumpBtn ? String(dumpBtn.textContent || "").trim() : "",
-    hasRegmemBody: !!regmemBody,
+    hasMemWindow: !!memWin,
     hasSymbolBox: !!(symBox && symBox.querySelector("[data-bp-symbol-input]")),
     hasCondBox: !!(condBox && condBox.querySelector("[data-bp-cond-input]")),
     hasDumpBox: !!(dumpBox && dumpBox.querySelector("[data-dump-addr-input]")
@@ -5715,6 +5750,10 @@ const BV_DEBUG_DEDUP_PROBE = `(() => {
   const body = document.querySelector('[data-view-body="debug"]');
   const wave = document.querySelector('[data-view-body="waveform"]');
   const runBtn = document.querySelector('[data-topbar-action="run"]');
+  // ⚠️ **v0.65 批**：「寄存器 / 内存」那个独立视图撤销了 ⇒ ⇒ 内容拆进调试
+  //   视图的**两张卡**（「寄存器窗口」/「内存窗口」）⇒ ⇒ 探针**按位置**取值。
+  const regWin = body ? body.querySelector('[data-window="registers"]') : null;
+  const memWin = body ? body.querySelector('[data-window="memory"]') : null;
   const count = (root, sel) => (root ? root.querySelectorAll(sel).length : -1);
   return {
     hasBody: !!body,
@@ -5724,8 +5763,21 @@ const BV_DEBUG_DEDUP_PROBE = `(() => {
       cont: count(body, '[data-action="continue"]'),
       pause: count(body, '[data-action="pause"]'),
       reset: count(body, '[data-action="reset"]'),
-      readRegs: count(body, '[data-action="read-regs"]'),
     } : null,
+    // ⚠️ **「读寄存器」现在落在调试视图里**（v0.65 批）⇒ ⇒ 它**不是**重复项
+    //   ⇒ ⇒ 判据改成「**恰好一个**，且在**寄存器窗口**里」。
+    readRegsInDebug: count(body, '[data-action="read-regs"]'),
+    readRegsInRegWin: count(regWin, '[data-action="read-regs"]'),
+    readRegsInMemWin: count(memWin, '[data-action="read-regs"]'),
+    readMemInDebug: count(body, '[data-action="read-mem"]'),
+    readMemInMemWin: count(memWin, '[data-action="read-mem"]'),
+    readMemInRegWin: count(regWin, '[data-action="read-mem"]'),
+    dumpInMemWin: count(memWin, '[data-action="dump-memory"]'),
+    regWindowCount: count(body, '[data-window="registers"]'),
+    memWindowCount: count(body, '[data-window="memory"]'),
+    regCells: count(body, ".reg-grid > div"),
+    // ⚠️ **虚拟时间只在顶栏**（v0.65 批）⇒ ⇒ 调试视图里**没有**它。
+    timeVirtInDebug: count(body, ".timeVirt"),
     toolbarCount: count(body, ".debug-toolbar"),
     disasmBtnCount: count(body, '[data-action="disasm"]'),
     stepNCount: count(body, '[data-action="step-n"]'),
@@ -5999,15 +6051,22 @@ async function runTraceExportSection(cdp, opts) {
 }
 
 /**
- * v0.63 批的真机段：**调试视图去重**。
+ * v0.63 / v0.65 批的真机段：**调试视图去重**（重复按钮撤掉 · 各自归位 · 「运行 /
+ * 继续」文案切换 · 「寄存器 / 内存」并进调试视图）。
  *
  * ⚠️ **为什么要有这一段**：调试视图那个工具条把**顶栏已有的动作**又摆了一遍
  *   ⇒ ⇒ 用户点「暂停」有**两个**地方可点 ⇒ ⇒ 「我点的那个到底生效没有」⇒ ⇒
  *   这类重复**没有真机断言**⇒ ⇒ 没人管 ⇒ ⇒ 本段补上。
  *
- * ⚠️ **判据是「分布」不是「某个按钮」**：① 重复的六个按钮**一个都不在**调试
+ * ⚠️ **判据是「分布」不是「某个按钮」**：① 重复的按钮**一个都不在**调试
  *   视图里；② 工具条整块**不在**；③ 各自的落点**都在**（反汇编卡片 / trace
  *   卡片 / 波形视图）；④ 顶栏那个按钮的**文案**随「跑过没有」切换。
+ *
+ * ⚠️ **v0.65 批追加的那几条**：⑤ 调试视图里有「寄存器窗口」与「内存窗口」
+ *   **两张卡**；⑥「读寄存器」**恰好一个**且在**寄存器窗口**里；⑦「读内存」与
+ *   「读这一段」在**内存窗口**里（⇒ ⇒ 迁过来的能力**一件没少**）；⑧ 调试视图里
+ *   **没有**虚拟时间（顶栏那一份是**唯一**那一份）；⑨ 侧边栏**没有**那个
+ *   「寄存器 / 内存」入口 ⇒ ⇒ 内容**只有一个去处**。
  *
  * ⚠️ **要 demo 固件**：④ 的 PC 判据要一条**已知长度**的指令流 ⇒ ⇒ demo 固件
  *   每条 4 字节 ⇒ ⇒ 走 3 条 ⇒ ⇒ PC 从 0x00 走到 0x0c。
@@ -6021,14 +6080,57 @@ async function runDebugDedupSection(cdp, opts) {
     await runEffect(cdp, 'location.hash = "#/debug";');
     await sleep(700);
 
-    // -- B-100 · 六个重复按钮**都不在**调试视图里 ---------------------------
+    // -- B-100 · 五个重复按钮**都不在**调试视图里 ---------------------------
     let p = await probe();
     const dup = p?.dupCounts ?? {};
     add(
-        "B-100 · 调试视图里**没有**那些与顶栏 / 寄存器窗口重复的按钮"
-        + "（单步 / 单步×10 / 继续 / 暂停 / 复位 / 读寄存器）",
+        "B-100 · 调试视图里**没有**那些与顶栏重复的按钮"
+        + "（单步 / 单步×10 / 继续 / 暂停 / 复位）"
+        + "（⇒ ⇒ 「读寄存器」**不在**这份清单里 —— v0.65 批它搬进了调试视图的寄存器窗口）",
         Object.values(dup).length > 0 && Object.values(dup).every((n) => n === 0),
         `各按钮个数=${JSON.stringify(dup)}`,
+    );
+
+    // -- B-110 · 调试视图里有**两张窗口卡**，各一个 --------------------------
+    add(
+        "B-110 · 调试视图里有「**寄存器窗口**」与「**内存窗口**」两张卡，各一个"
+        + "（⇒ ⇒ 「寄存器 / 内存」那个**独立视图**的内容**搬进来了**）",
+        p?.regWindowCount === 1 && p?.memWindowCount === 1 && p?.regCells === 32,
+        `寄存器窗口=${p?.regWindowCount} 内存窗口=${p?.memWindowCount} 寄存器格=${p?.regCells}`,
+    );
+
+    // -- B-111 · 「读寄存器」在**寄存器窗口**里，内存窗口里没有 ---------------
+    add(
+        "B-111 · 「读寄存器」**恰好一个**，且它在「**寄存器窗口**」里"
+        + "（⇒ ⇒ 同一个动作只在一处 ⇒ ⇒ 用户不用猜「哪个才是真的」）",
+        p?.readRegsInDebug === 1 && p?.readRegsInRegWin === 1 && p?.readRegsInMemWin === 0,
+        `调试视图里=${p?.readRegsInDebug} 寄存器窗口=${p?.readRegsInRegWin} 内存窗口=${p?.readRegsInMemWin}`,
+    );
+
+    // -- B-112 · 「读内存」与「读这一段」在**内存窗口**里 ---------------------
+    add(
+        "B-112 · 「读内存」「读这一段」都落在「**内存窗口**」里，寄存器窗口里**没有**"
+        + "（⇒ ⇒ 迁过来的能力**一件没少**）",
+        p?.readMemInDebug === 1 && p?.readMemInMemWin === 1 && p?.readMemInRegWin === 0
+            && p?.dumpInMemWin === 1,
+        `读内存 调试视图=${p?.readMemInDebug} 内存窗口=${p?.readMemInMemWin} 寄存器窗口=${p?.readMemInRegWin}`
+        + ` 读这一段=${p?.dumpInMemWin}`,
+    );
+
+    // -- B-113 · 调试视图里**没有**虚拟时间（顶栏那一份是唯一的） -------------
+    add(
+        "B-113 · 调试视图里**没有**虚拟时间了（顶栏有 ⇒ ⇒ 同一个量只显示一处）",
+        p?.timeVirtInDebug === 0,
+        `调试视图里的 .timeVirt 个数=${p?.timeVirtInDebug}`,
+    );
+
+    // -- B-114 · 侧边栏**没有**「寄存器 / 内存」那个入口了 --------------------
+    const sb = await awaitEval(cdp, BV_SIDEBAR_PROBE);
+    const sbHashes = Array.isArray(sb?.hashes) ? sb.hashes : [];
+    add(
+        "B-114 · 侧边栏**没有**「寄存器 / 内存」那个入口（⇒ ⇒ 内容只有一个去处）",
+        sbHashes.length >= 7 && !sbHashes.includes("regmem"),
+        `侧边栏项=${JSON.stringify(sbHashes)}`,
     );
 
     // -- B-101 · 工具条整块撤掉 ---------------------------------------------
@@ -6218,14 +6320,15 @@ async function runMemDumpSection(cdp, opts) {
     const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
     const probe = async () => await awaitEval(cdp, BV_DEBUGGER_PROBE);
 
-    await runEffect(cdp, 'location.hash = "#/regmem";');
+    await runEffect(cdp, 'location.hash = "#/debug";');
     await sleep(700);
 
     let p = await probe();
     add(
-        "B-80 · 寄存器/内存视图里**有**「读这一段」入口（地址 + 字节数 + 按钮）",
-        p?.hasDumpBox === true,
-        `读这一段框=${p?.hasDumpBox}`,
+        "B-80 · 调试视图的「**内存窗口**」里**有**「读这一段」入口（地址 + 字节数 + 按钮）"
+        + "（⇒ ⇒ 迁移之后这条**用户看得见**的路**没有丢**）",
+        p?.hasDumpBox === true && p?.hasMemWindow === true,
+        `内存窗口=${p?.hasMemWindow} 读这一段框=${p?.hasDumpBox}`,
     );
 
     // -- B-108 · 「读内存」地址**没填**时 ⇒ ⇒ 提示**独占一行**（看得见）------
@@ -6234,7 +6337,7 @@ async function runMemDumpSection(cdp, opts) {
     //   **右边**（12px 小字）⇒ ⇒ 看着就是「没反应」⇒ ⇒ ⇒ 判据抓**位置**：
     //   提示的**上沿**必须在按钮的**下沿之下** ⇒ ⇒ 它**独占一行**。
     await runEffect(cdp, `(() => {
-        const box = document.querySelector('[data-view-body="regmem"] [data-addr-input="memory"]');
+        const box = document.querySelector('[data-view-body="debug"] [data-addr-input="memory"]');
         if (!box) return "no-box";
         const input = box.querySelector("[data-mem-addr-input]");
         if (input) {
@@ -6272,7 +6375,7 @@ async function runMemDumpSection(cdp, opts) {
 
     // -- B-81 · 转储 `0x0` 起 16 字节 ⇒ ⇒ 那 16 个字节**逐字**对得上 --------
     await runEffect(cdp, `(() => {
-        const box = document.querySelector('[data-view-body="regmem"] [data-dump-input="memory"]');
+        const box = document.querySelector('[data-view-body="debug"] [data-dump-input="memory"]');
         if (!box) return "no-box";
         const a = box.querySelector("[data-dump-addr-input]");
         const l = box.querySelector("[data-dump-len-input]");
@@ -6305,7 +6408,7 @@ async function runMemDumpSection(cdp, opts) {
     // ⚠️ **前端不预校验**（裁决 Q）⇒ ⇒ 这一条才可能红 ⇒ ⇒ 它红 ⇒ ⇒ 就是
     //   「内核那条上限路径没走到」。
     await runEffect(cdp, `(() => {
-        const box = document.querySelector('[data-view-body="regmem"] [data-dump-input="memory"]');
+        const box = document.querySelector('[data-view-body="debug"] [data-dump-input="memory"]');
         const l = box ? box.querySelector("[data-dump-len-input]") : null;
         if (!l) return "no-input";
         l.value = "99999";
@@ -7240,9 +7343,9 @@ async function main() {
         // -- switch to a view that has a component and check the render path --
         // ⚠️ **落地视图（`embedded`）的正文检查在 `landingChecks` 里**（D-33 ·
         // 裁决 C：落地视图现在**有** M-02 组件了 ⇒ 它的正文必须非空且有实质
-        // 内容）。这里切到 `regmem` 是为了**渲染路径**本身（白屏回归守卫，
+        // 内容）。这里切到 `debug` 是为了**渲染路径**本身（白屏回归守卫，
         // FRONTEND_Review.md #20）⇒ 后续那些需要切视图的步骤**不动**。
-        await runEffect(cdp, 'location.hash = "#/regmem";');
+        await runEffect(cdp, 'location.hash = "#/debug";');
         let render = [];
         const renderDeadline = Date.now() + opts.timeoutMs;
         while (Date.now() < renderDeadline) {
@@ -7252,7 +7355,7 @@ async function main() {
             if (render.length > 0 && render.every((c) => c.ok)) break;
             await sleep(250);
         }
-        registerSection("render", render, { title: "渲染路径检查（切到 #/regmem）" });
+        registerSection("render", render, { title: "渲染路径检查（切到 #/debug）" });
 
         // -- drive the REAL kernel -------------------------------------------
         //  Send a `step` command through the view layer's signal and check
@@ -7443,7 +7546,7 @@ async function main() {
         //   已知 ⇒ ⇒ 「走 3 步」的 PC 判据才成立）。
         const debugDedup = await runSection("debugDedup", () => runDebugDedupSection(cdp, opts));
         registerSection("debugDedup", debugDedup.checks, {
-            title: "调试视图去重检查（重复按钮撤掉 · 各自归位 · 「运行 / 继续」文案切换）",
+            title: "调试视图去重检查（重复按钮撤掉 · 各自归位 · 「运行 / 继续」文案切换 · 寄存器/内存并进调试视图）",
         });
 
         const traceExport = await runSection("traceExport", () => runTraceExportSection(cdp, opts));
@@ -7543,7 +7646,7 @@ async function main() {
         });
 
         // -- the UI LAYOUT (STAGE-34 · v0.49 批) ------------------------------
-        // ⚠️ **必须排在最后**：它会切到 `#/regmem` / `#/waveform` ⇒ ⇒ 放在
+        // ⚠️ **必须排在最后**：它会切到 `#/debug` / `#/waveform` ⇒ ⇒ 放在
         // 前面会污染后面那些段看到的初始状态。
         const uiLayout = await runSection("uiLayout", () => runUiLayoutSection(cdp, opts));
         registerSection("uiLayout", uiLayout.checks, {

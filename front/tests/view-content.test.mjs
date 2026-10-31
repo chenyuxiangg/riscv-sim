@@ -61,9 +61,14 @@ function show(viewId) {
     return body(viewId);
 }
 
-/** 八个视图（F14 ⇒ 不增视图、不删视图）。 */
+/**
+ * 七个视图（v0.65 批：**「寄存器 / 内存」那个独立视图撤销了** ⇒ ⇒ 8 变 7）。
+ *
+ * ⚠️ **不是「删一个功能」**：那些内容**搬进了调试视图**（拆成「寄存器窗口」
+ *   与「内存窗口」两张卡）⇒ ⇒ 功能一件没少 ⇒ ⇒ 只是**不再有第二个入口**。
+ */
 const VIEW_IDS = [
-    "debug", "embedded", "regmem", "terminal",
+    "debug", "embedded", "terminal",
     "waveform", "memory-map", "product", "source",
 ];
 
@@ -121,10 +126,10 @@ function fakeServices(extra = {}) {
 // ---------------------------------------------------------------------------
 
 describe("STAGE-35 · 视图内容形态（卡片化）", () => {
-    test("A-1 · 八个视图的正文**都非空**（8 / 8）", () => {
+    test("A-1 · 七个视图的正文**都非空**（7 / 7）", () => {
         // ⚠️ **先钉住件数** ⇒ ⇒ 否则「视图一个都没挂上」时这个 `for`
         // **一次都不执行** ⇒ ⇒ 用例**空转通过** ⇒ ⇒ **假绿**。
-        assert.equal(VIEW_IDS.length, 8, "本批的视图清单必须是 8 个");
+        assert.equal(VIEW_IDS.length, 7, "本批的视图清单必须是 7 个");
         for (const id of VIEW_IDS) {
             const el = show(id);
             assert.ok(
@@ -164,10 +169,13 @@ describe("STAGE-35 · 视图内容形态（卡片化）", () => {
         );
     });
 
-    test("A-4 · 寄存器视图的 `.reg-grid > div` **仍是 32 个**（稳定钩子 · 裁决 A）", () => {
-        const el = show("regmem");
+    test("A-4 · 调试视图「寄存器窗口」的 `.reg-grid > div` **仍是 32 个**（稳定钩子 · 裁决 A · v0.65 批换落点）", () => {
+        // ⚠️ **落点从「寄存器 / 内存视图」搬到了「调试视图 → 寄存器窗口」**
+        //   （v0.65 批）⇒ ⇒ **取法一字不改**，只是 `show` 的视图 id 变了 ⇒ ⇒
+        //   32 这个**数字**仍然是判据。
+        const el = show("debug");
         const grid = el.querySelector(".reg-grid");
-        assert.ok(grid, "寄存器视图里没有 .reg-grid");
+        assert.ok(grid, "调试视图的寄存器窗口里没有 .reg-grid");
         const cells = grid.querySelectorAll("div");
         assert.equal(cells.length, 32, `.reg-grid 里的格子应当是 32 个，实际 ${cells.length}`);
     });
@@ -490,7 +498,9 @@ describe("STAGE-35 · 产品树折叠 / 内存图比例条 / 终端收发计数"
     });
 
     test("A-13 · **ABI 名零出现**（界面里没有 `sp` / `ra` / `gp` 之类别名 · 裁决 E）", () => {
-        const el = show("regmem");
+        // ⚠️ **v0.65 批**：落点从「寄存器 / 内存视图」搬到了**调试视图的寄存器
+        //   窗口** ⇒ ⇒ 取法跟着换、**判据一字不改**。
+        const el = show("debug");
         const text = String(el.textContent);
         // ⚠️ **完整的 ABI 别名表** ⇒ ⇒ 只查 `sp` / `ra` 两个是**半截**判据。
         const abi = [
@@ -502,26 +512,28 @@ describe("STAGE-35 · 产品树折叠 / 内存图比例条 / 终端收发计数"
         for (const name of abi) {
             assert.ok(
                 !new RegExp(`\\b${name}\\b`).test(text),
-                `寄存器视图里出现了 ABI 别名「${name}」`
+                `寄存器窗口里出现了 ABI 别名「${name}」`
                 + "⇒ ⇒ 契约层没有那个字段（无数据源）⇒ ⇒ 那是编造",
             );
         }
     });
 
-    test("A-16 · 寄存器变化高亮：快照住 `regmem.prevGpr`（app 层在 `read-regs` **之前**存）", async () => {
+    test("A-16 · 寄存器变化高亮：快照住 `debug.prevGpr`（app 层在 `read-regs` **之前**存）", async () => {
         const before = Array.from({ length: 32 }, (_, i) => i + 1);
         const after = before.slice();
         after[1] = 0; // x1 变小 ⇒ `.down`
         after[2] = 999; // x2 变大 ⇒ `.up`
-        m03.setState("regmem", (prev) => ({
+        // ⚠️ **v0.65 批**：落点从 `regmem` 视图状态并到 `debug` 视图状态 ⇒ ⇒
+        //   快照跟着**内容**一起走 ⇒ ⇒ 「同一个量只有一处落点」这条不破。
+        m03.setState("debug", (prev) => ({
             ...prev,
             sim: { ...(prev.sim ?? {}), gpr: before.slice() },
-            regmem: { ...(prev.regmem ?? {}), prevGpr: null },
+            debug: { ...(prev.debug ?? {}), prevGpr: null },
         }));
         const { services } = fakeServices({
             registerMemory: {
                 readRegisters: async () => {
-                    m03.setState("regmem", (prev) => ({
+                    m03.setState("debug", (prev) => ({
                         ...prev,
                         sim: { ...(prev.sim ?? {}), gpr: after.slice() },
                     }));
@@ -531,11 +543,11 @@ describe("STAGE-35 · 产品树折叠 / 内存图比例条 / 终端收发计数"
         await app.handleCommand({ action: "read-regs" }, services);
         // ⚠️ **快照是「读之前」的那一份** ⇒ ⇒ 不是读之后那份。
         assert.deepEqual(
-            m03.getState("regmem")?.regmem?.prevGpr,
+            m03.getState("debug")?.debug?.prevGpr,
             before,
             "prevGpr 不是读之前的那份 GPR 快照",
         );
-        const el = show("regmem");
+        const el = show("debug");
         const codes = el.querySelectorAll("code");
         const cellOf = (i) => {
             const div = el.querySelector(".reg-grid").querySelectorAll("div")[i];

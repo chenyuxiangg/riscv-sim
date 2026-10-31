@@ -291,9 +291,9 @@ describe("读内存入口 · 反馈与「读指定数量」", () => {
     });
 
     test("V-1 · 地址**没填**时点「读内存」⇒ ⇒ **一条命令都不发**、但**提示位有内容**", () => {
-        const body = mountView("#/regmem");
+        const body = mountView("#/debug");
         const box = body.querySelector("[data-addr-input=\"memory\"]");
-        assert.ok(box, "内存视图必须有地址输入的容器");
+        assert.ok(box, "调试视图的内存窗口必须有地址输入的容器");
         // ⚠️ **地址框默认是空的**（STAGE-39 订正 4 · A-8 ⇒ ⇒ 视图层**零命中**
         //   写死的地址）⇒ ⇒ 这正是用户报的那次「点了没反应」。
         const input = box.querySelector("[data-mem-addr-input]");
@@ -318,9 +318,9 @@ describe("读内存入口 · 反馈与「读指定数量」", () => {
     });
 
     test("V-2 · 「读这一段」入口在界面上（地址 + 字节数 + 按钮）⇒ ⇒ 读**指定数量**", () => {
-        const body = mountView("#/regmem");
+        const body = mountView("#/debug");
         const box = body.querySelector("[data-dump-input=\"memory\"]");
-        assert.ok(box, "寄存器/内存视图必须有『读这一段』的容器");
+        assert.ok(box, "调试视图的内存窗口必须有『读这一段』的容器");
         assert.ok(box.querySelector("[data-dump-addr-input]"), "必须有起始地址输入框");
         const len = box.querySelector("[data-dump-len-input]");
         assert.ok(len, "必须有**字节数**输入框（读指定数量靠它）");
@@ -334,7 +334,7 @@ describe("读内存入口 · 反馈与「读指定数量」", () => {
     });
 
     test("V-3 · 点「读这一段」⇒ ⇒ 发出的是 **DumpMemory{addr, len}**（真的按指定数量读）", () => {
-        const body = mountView("#/regmem");
+        const body = mountView("#/debug");
         const box = body.querySelector("[data-dump-input=\"memory\"]");
         const addr = box.querySelector("[data-dump-addr-input]");
         const len = box.querySelector("[data-dump-len-input]");
@@ -352,7 +352,7 @@ describe("读内存入口 · 反馈与「读指定数量」", () => {
     });
 
     test("V-4 · 两个入口的**差别**在界面上**写出来了**（不是让用户猜）", () => {
-        const body = mountView("#/regmem");
+        const body = mountView("#/debug");
         const hint = body.querySelector("[data-mem-read-hint]");
         assert.ok(hint, "必须有那句差别说明");
         const text = String(hint.textContent ?? "");
@@ -362,14 +362,14 @@ describe("读内存入口 · 反馈与「读指定数量」", () => {
     });
 
     test("V-5 · **地址框会记住你上次填的那个**（草稿住视图状态 ⇒ ⇒ 只有第一次要填）", () => {
-        const body = mountView("#/regmem");
+        const body = mountView("#/debug");
         const box = body.querySelector("[data-addr-input=\"memory\"]");
         const input = box.querySelector("[data-mem-addr-input]");
         input.value = "0x00000200";
         input.dispatchEvent(new Event("input", { bubbles: true }));
 
         // ⚠️ **重渲染**（草稿住视图状态 ⇒ ⇒ 值不该丢）⇒ ⇒ 再挂一次视图。
-        const again = mountView("#/regmem");
+        const again = mountView("#/debug");
         // ⚠️ **不许用后代组合器**（dom-stub 的选择器引擎只支持简单复合选择器）。
         const againInput = boxInput(again, "[data-addr-input=\"memory\"]", "[data-mem-addr-input]");
         assert.equal(
@@ -389,10 +389,10 @@ describe("任意地址读内存", () => {
         m03.reset();
     });
 
-    test("A-6 · 内存视图**有**地址输入框与宽度选择（三档齐全）", () => {
-        const body = mountView("#/regmem");
+    test("A-6 · 内存窗口**有**地址输入框与宽度选择（三档齐全）", () => {
+        const body = mountView("#/debug");
         const box = body.querySelector("[data-addr-input=\"memory\"]");
-        assert.ok(box, "内存视图必须有地址输入的容器");
+        assert.ok(box, "调试视图的内存窗口必须有地址输入的容器");
         assert.ok(box.querySelector("[data-mem-addr-input]"), "必须有地址输入框");
         const select = box.querySelector("[data-mem-size]");
         assert.ok(select, "必须有宽度选择（data-mem-size）");
@@ -406,7 +406,7 @@ describe("任意地址读内存", () => {
     });
 
     test("A-7 · 点「读内存」⇒ ⇒ `params.addr` + `params.size` 都是界面给的", async () => {
-        const body = mountView("#/regmem");
+        const body = mountView("#/debug");
         const box = body.querySelector("[data-addr-input=\"memory\"]");
         box.querySelector("[data-mem-addr-input]").value = "0x3000";
         box.querySelector("[data-mem-size]").value = WRITE_SIZE.Half;
@@ -462,7 +462,7 @@ describe("任意地址读内存", () => {
     });
 
     test("A-10 · 输入**解析不出来** ⇒ ⇒ **不发**命令 **且** 有提示", () => {
-        const body = mountView("#/regmem");
+        const body = mountView("#/debug");
         const box = body.querySelector("[data-addr-input=\"memory\"]");
         box.querySelector("[data-mem-addr-input]").value = "nope";
 

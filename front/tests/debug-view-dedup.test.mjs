@@ -165,10 +165,13 @@ function exportCommands(transport) {
 // ---------------------------------------------------------------------------
 
 describe("调试视图 · 重复按钮**撤掉**了", () => {
-    test("调试视图里**没有**那六个与别处重复的按钮", async () => {
+    test("调试视图里**没有**那五个与别处重复的按钮", async () => {
         const { router } = await setup();
         const body = debugBody();
-        for (const action of ["step", "step10", "continue", "pause", "reset", "read-regs"]) {
+        // ⚠️ **「read-regs」从这份清单里移走了**（v0.65 批）⇒ ⇒ 它的落点
+        //   **搬进了调试视图**（寄存器窗口）⇒ ⇒ 「它不在调试视图里」这条
+        //   断言**已经不成立** ⇒ ⇒ 由下面那条「它在寄存器窗口里」接着管。
+        for (const action of ["step", "step10", "continue", "pause", "reset"]) {
             assert.equal(
                 body.querySelectorAll(`[data-action="${action}"]`).length,
                 0,
@@ -199,15 +202,33 @@ describe("调试视图 · 重复按钮**撤掉**了", () => {
         router.close();
     });
 
-    test("「读寄存器」在**寄存器/内存视图**里（那儿才是它的落点）", async () => {
+    test("「读寄存器」在**调试视图的寄存器窗口**里（那儿才是它的落点 · v0.65 批）", async () => {
         const { router } = await setup();
-        m01.route("#/regmem");
-        const body = dom.document.querySelector('[data-view-body="regmem"]');
-        assert.ok(body, "寄存器/内存视图体未挂载");
+        m01.route("#/debug");
+        const body = dom.document.querySelector('[data-view-body="debug"]');
+        assert.ok(body, "调试视图体未挂载");
+        // ⚠️ **落点从「寄存器 / 内存视图」搬到了调试视图**（v0.65 批）⇒ ⇒
+        //   「同一个动作只出现在一处」这条规矩**继续成立** ⇒ ⇒ 调试视图里
+        //   **恰好一个**「读寄存器」按钮。
         assert.equal(
             body.querySelectorAll('[data-action="read-regs"]').length,
             1,
-            "寄存器/内存视图里没有「读寄存器」按钮",
+            "调试视图的寄存器窗口里没有「读寄存器」按钮（或出现了不止一个）",
+        );
+        // ⚠️ **它必须落在「寄存器窗口」那张卡里**（不是内存窗口）⇒ ⇒ 判据
+        //   抓**位置**，不抓「页面上有没有」。
+        const win = body.querySelector('[data-window="registers"]');
+        assert.ok(win, "调试视图里没有「寄存器窗口」");
+        assert.equal(
+            win.querySelectorAll('[data-action="read-regs"]').length,
+            1,
+            "「读寄存器」不在「寄存器窗口」里",
+        );
+        assert.equal(
+            body.querySelector('[data-window="memory"]')
+                ?.querySelectorAll('[data-action="read-regs"]').length ?? 0,
+            0,
+            "「读寄存器」跑进「内存窗口」里去了",
         );
         router.close();
     });

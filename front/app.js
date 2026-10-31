@@ -117,7 +117,7 @@ const DEFAULT_DISASM_COUNT = 16;
  * `source`，它**永远拿不到 PC** ⇒ 按钮恒问地址 **0**。
  *
  * ⚠️ 这条是 **V-B 检视（VB-1）查出的生产路径断裂**：M-10 的
- * `viewIds` 默认值是 `["debug", "regmem"]`，而 `app.js` 调
+ * `viewIds` 默认值里**没有** `source`，而 `app.js` 调
  * `mountRegisterMemory` 时**没传** ⇒ 走默认值 ⇒ `source` 收不到
  * `sim.pc`。**用例当时是绿的**，因为它**手工**往 source 视图状态里塞了
  * `sim.pc` ⇒ 断言的是一个**测试自己造出来的**状态，不是生产状态。
@@ -127,8 +127,12 @@ const DEFAULT_DISASM_COUNT = 16;
  * ⚠️ **「embedded」也必须在里面**（D-33 · STAGE-10 裁决 C）：落地视图要显示
  * **当前 PC** 与**虚拟时间** ⇒ 它得跟调试视图一样收到 M-10 推进的那份
  * `sim.pc` / `timeVirt` ⇒ 前端**不造**第二个 PC 来源。
+ *
+ * ⚠️ **「regmem」不在里面了**（v0.65 批）：那个**独立视图**已撤销 ⇒ ⇒
+ * 寄存器与内存的明细都在**调试视图**里 ⇒ ⇒ 它已经在列表里 ⇒ ⇒ 列表里
+ * **不再有**第二个渲染同样内容的视图 ⇒ ⇒ 「同一个量只显示一处」。
  */
-export const REGISTER_MEMORY_VIEW_IDS = ["debug", "regmem", "source", "embedded"];
+export const REGISTER_MEMORY_VIEW_IDS = ["debug", "source", "embedded"];
 
 const status = document.getElementById("status");
 
@@ -380,9 +384,6 @@ export function setRunState(next) {
         },
     }));
     publishViewState("debug");
-    // ⚠️ **寄存器视图也要跟着变**（裁决 M）⇒ ⇒ 它读的是**同一份** `debug.run`
-    // ⇒ ⇒ 不是第二个真相。
-    publishViewState("regmem");
     syncTopbarRunStatus();
     // ⚠️ **顶栏那一份活值也要跟着隐藏 / 恢复** ⇒ ⇒ 与视图**同拍** ⇒ ⇒
     // 不等下一次 M-10 刷新（那最多差 200 ms）。
@@ -1517,13 +1518,14 @@ export async function handleCommand(detail, services) {
                 // ⇒ ⇒ **在读之前**存 ⇒ ⇒ 视图层可以拿「这次的值」和「上一次
                 // 的值」比 ⇒ ⇒ 高亮变化。
                 //
-                // ⚠️ **落点在 `regmem` 视图状态里** ⇒ ⇒ **只有一份** ⇒ ⇒
-                // 视图层**只读**（分层不破）⇒ ⇒ 不另造一个计数器状态。
-                const prevGpr = viewStore.getState("regmem")?.sim?.gpr ?? null;
-                viewStore.setState("regmem", (state) => ({
+                // ⚠️ **落点在 `debug` 视图状态里**（v0.65 批：内容都在调试
+                // 视图里 ⇒ ⇒ 快照跟着内容住）⇒ ⇒ **只有一份** ⇒ ⇒ 视图层
+                // **只读**（分层不破）⇒ ⇒ 不另造一个计数器状态。
+                const prevGpr = viewStore.getState("debug")?.sim?.gpr ?? null;
+                viewStore.setState("debug", (state) => ({
                     ...state,
-                    regmem: {
-                        ...(state.regmem ?? {}),
+                    debug: {
+                        ...(state.debug ?? {}),
                         prevGpr: Array.isArray(prevGpr) ? prevGpr.slice() : null,
                     },
                 }));
@@ -2690,11 +2692,11 @@ function writeErrorSlot(slot, message) {
         }));
         publishViewState("debug");
     } else if (slot === "dump") {
-        viewStore.setState("regmem", (prev) => ({
+        viewStore.setState("debug", (prev) => ({
             ...prev,
-            regmem: { ...(prev.regmem ?? {}), dumpError: text },
+            debug: { ...(prev.debug ?? {}), dumpError: text },
         }));
-        publishViewState("regmem");
+        publishViewState("debug");
     }
 }
 
@@ -2876,22 +2878,23 @@ export function wireDebug(commandRouter) {
     /**
      * 整段转储的**答复**（契约 v9 · `debug.dump`）。
      *
-     * ⚠️ **落点在 `regmem` 视图状态**（规格 §5.2：`regmem.dump`）⇒ ⇒
-     *   **不**另存一份 ⇒ ⇒ 「寄存器 / 内存」视图显示的**就是**这一份。
+     * ⚠️ **落点在 `debug` 视图状态**（规格 §5.2：`debug.dump` · v0.65 批随
+     *   「寄存器 / 内存」视图并进调试视图而改落点）⇒ ⇒ **不**另存一份 ⇒ ⇒
+     *   调试视图「内存窗口」显示的**就是**这一份。
      *
      * ⚠️ **同样在订阅回调里写**（理由同 `debug.symbol`）。
      */
     commandRouter.subscribe("debug.dump", (event) => {
         const addr = Number(event.value?.addr ?? 0) >>> 0;
         const bytes = Array.isArray(event.value?.bytes) ? event.value.bytes : [];
-        viewStore.setState("regmem", (prev) => ({
+        viewStore.setState("debug", (prev) => ({
             ...prev,
-            regmem: {
-                ...(prev.regmem ?? {}),
+            debug: {
+                ...(prev.debug ?? {}),
                 dump: { addr, bytes: bytes.map((b) => Number(b) & 0xff) },
             },
         }));
-        publishViewState("regmem");
+        publishViewState("debug");
     });
 
     return {
@@ -2909,15 +2912,18 @@ export function wireDebug(commandRouter) {
                 sim: { ...(prev.sim ?? {}), disasm: [] },
                 // ⚠️ **符号查询的答复也清掉**（契约 v9）⇒ ⇒ 它是**上一个程序**
                 //   的符号 ⇒ ⇒ 留着就是一份**错**的答案。
-                debug: { ...(prev.debug ?? {}), export: null, symbol: null },
+                //
+                // ⚠️ **转储结果也清掉**（同一个道理 ⇒ ⇒ 它是**上一个程序**的
+                //   内存）⇒ ⇒ 与符号**同一笔**写、**同一拍**发布 ⇒ ⇒ 视图
+                //   **不会**看见「一半清了、一半没清」的中间态。
+                debug: {
+                    ...(prev.debug ?? {}),
+                    export: null,
+                    symbol: null,
+                    dump: null,
+                },
             }));
             publishViewState("debug");
-            // ⚠️ **转储结果也清掉**（同一个道理 ⇒ ⇒ 它是**上一个程序**的内存）。
-            viewStore.setState("regmem", (prev) => ({
-                ...prev,
-                regmem: { ...(prev.regmem ?? {}), dump: null },
-            }));
-            publishViewState("regmem");
             // ⚠️ **源码树留着**，但**行号**要清掉：行号是**上一个程序**的
             // 数据（新工程 = 新程序 ⇒ 旧行号是错的）。源码树是**用户装的
             // 资产**，与程序无关 ⇒ 不能跟着新工程一起没掉（STAGE-7 验收

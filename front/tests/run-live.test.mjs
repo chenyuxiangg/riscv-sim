@@ -421,9 +421,11 @@ describe("运行中隐藏活值（视图层）", () => {
             idle.includes('<code class="pc">0x00000020</code>'),
             "不运行时 PC 必须显示真实值（正向对照）",
         );
+        // ⚠️ **v0.65 批**：虚拟时间**在顶栏**⇒ ⇒ 调试视图里**不再显示**
+        //   第二份 ⇒ ⇒ 这条判据现在钉的是「**这里没有**」。
         assert.ok(
-            idle.includes('<code class="timeVirt">123 ps</code>'),
-            "不运行时虚拟时间必须显示真实值（正向对照）",
+            !idle.includes("timeVirt"),
+            "调试视图里不该再显示虚拟时间（顶栏有 ⇒ ⇒ 同一个量只显示一处）",
         );
 
         // -- 运行中 ⇒ ⇒ 全部 `-` ---------------------------------------
@@ -442,14 +444,22 @@ describe("运行中隐藏活值（视图层）", () => {
             "运行中 PC 必须显示固定符号 `-`",
         );
         assert.ok(
-            busy.includes('<code class="timeVirt">-</code>'),
-            "运行中虚拟时间必须显示固定符号 `-`",
+            !busy.includes("timeVirt"),
+            "运行中也不该出现虚拟时间（它根本不在这个视图里）",
         );
     });
 
-    test("A-15 · 寄存器视图：运行中 ⇒ ⇒ `-`；不运行 ⇒ ⇒ 真实值（正向对照）", () => {
-        const view = m02.get("regmem");
-        assert.ok(view, "寄存器视图必须注册着");
+    test("A-15 · 调试视图的**内存窗口**：运行中 ⇒ ⇒ `-`；不运行 ⇒ ⇒ 真实值（正向对照）", () => {
+        // ⚠️ **v0.65 批**：那个**独立视图**撤销了 ⇒ ⇒ 「寄存器 / 内存」的内容
+        //   都在**调试视图**里 ⇒ ⇒ 这条判据的**对象**换成调试视图的内存窗口
+        //   ⇒ ⇒ **判据本身一个字没改**（真值仍是「运行中隐藏活值」）。
+        const view = m02.get("debug");
+        assert.ok(view, "调试视图必须注册着");
+        assert.equal(
+            m02.get("regmem"),
+            undefined,
+            "「寄存器 / 内存」那个独立视图应当**已经撤销**（否则又是两处）",
+        );
 
         const state = {
             sim: { gpr: GPR, pc: 0x20, mem: { "0x00000100": 0x1234 } },
@@ -471,7 +481,6 @@ describe("运行中隐藏活值（视图层）", () => {
             "不运行时寄存器格必须显示**真实值**（正向对照）",
         );
         assert.ok(idle.includes('<code class="pc">0x00000020</code>'), "不运行时 PC 是真实值");
-        assert.ok(idle.includes('<code class="timeVirt">123 ps</code>'), "不运行时间是真实值");
         const idleRows = memRows(idle);
         assert.equal(idleRows.length, 1, "内存单元必须**仍是一行**（稳定钩子）");
         assert.equal(idleRows[0].value, "0x00001234", "不运行时内存值是真实值（正向对照）");
@@ -488,7 +497,6 @@ describe("运行中隐藏活值（视图层）", () => {
             "运行中寄存器格必须显示固定符号 `-`",
         );
         assert.ok(busy.includes('<code class="pc">-</code>'), "运行中 PC 是 `-`");
-        assert.ok(busy.includes('<code class="timeVirt">-</code>'), "运行中时间是 `-`");
         const busyRows = memRows(busy);
         assert.equal(busyRows.length, 1, "内存单元必须**仍是一行**（稳定钩子）");
         assert.equal(busyRows[0].value, "-", "运行中内存值必须显示固定符号 `-`");
