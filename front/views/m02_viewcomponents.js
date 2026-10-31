@@ -1372,7 +1372,7 @@ const debugView = register({
                 <button type="button" data-action="reset">复位</button>
                 <button type="button" data-action="read-regs">读寄存器</button>
                 <button type="button" data-action="disasm" data-addr="${pc}" data-count="16">反汇编</button>
-                <button type="button" data-action="export-trace" data-source="Execution" data-format="Csv" data-offset="0" data-limit="0">导出执行轨迹 (CSV)</button>
+                <button type="button" data-action="download-trace-local" title="把**整条**执行轨迹翻完并落盘（不是第一块）">下载轨迹到本地 (CSV)</button>
                 <button type="button" data-action="export-trace" data-source="Waveform" data-format="Vcd" data-offset="0" data-limit="0">导出波形 (VCD)</button>
                 ${canContinue ? `<button type="button" data-action="export-trace" data-source="${escapeHtml(String(exportState.source))}" data-format="${escapeHtml(String(exportState.format))}" data-offset="${Number(exportState.next_offset)}" data-limit="0" data-continue="1">继续导出</button>` : ""}
                 <button type="button" data-action="trace-toggle" data-trace-switch="${traceSwitch.state}" aria-pressed="${traceSwitch.state === TRACE_SWITCH_ON ? "true" : "false"}">${escapeHtml(traceToggleLabel(traceSwitch))}</button>
@@ -1434,7 +1434,7 @@ const debugView = register({
                     <pre class="trace-chunk" data-trace-chunk>${escapeHtml(String(exportState?.chunk ?? ""))}</pre>
                     ${exportState
                         ? `<div class="trace-download-row">
-                            <button type="button" data-action="download-trace" data-trace-download-button>下载 ${escapeHtml(exportFileName(exportState.source, exportState.format))}</button>
+                            <button type="button" data-action="download-trace" data-trace-download-button>下载这一块（${escapeHtml(exportFileName(exportState.source, exportState.format))}）</button>
                             <span class="muted" data-trace-download-name>${escapeHtml(exportFileName(exportState.source, exportState.format))}</span>
                         </div>`
                         : ""}

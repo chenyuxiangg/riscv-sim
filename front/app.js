@@ -15,7 +15,13 @@
 // transport that does not exist yet.
 
 import { mountWorkbench } from "./views/m01_workbench.js";
-import { mountViewComponents, seedBus, get as getViewComponent, resetTerminalScreen } from "./views/m02_viewcomponents.js";
+import {
+    downloadExportChunk,
+    mountViewComponents,
+    resetTerminalScreen,
+    seedBus,
+    get as getViewComponent,
+} from "./views/m02_viewcomponents.js";
 import * as viewStore from "./views/m03_viewstore.js";
 import { mountSession } from "./services/m04_session.js";
 import { mountCommandRouter } from "./services/m05_commandrouter.js";
@@ -83,7 +89,10 @@ import {
 } from "./lib/run-loop.js";
 // ⚠️ **trace 记录开关的判定**（纯函数）⇒ ⇒ 「点一下该发什么」只有一处说了算
 // ⇒ ⇒ 视图层渲染的按钮标签与这里发出的命令**引同一处** ⇒ ⇒ 不会对不上。
-import { nextTraceEnabled } from "./lib/trace-switch.js";
+import { nextTraceEnabled, traceSwitchState, TRACE_SWITCH_OFF } from "./lib/trace-switch.js";
+// ⚠️ **「把整条轨迹翻完」的分页收集**（纯逻辑）⇒ ⇒ 「下载轨迹到本地」
+//   顺着 `next_offset` 一块一块翻 ⇒ ⇒ 翻完才是**完整**的一份。
+import { collectTraceChunks } from "./lib/trace-export.js";
 // ⚠️ **告警弹窗**（STAGE-38 · v0.53 批）⇒ ⇒ 运行中点「读内存」= 拒绝 + 弹窗。
 // ⇒ ⇒ 本仓**第一个**碰 DOM 的 lib 模块（弹窗是**全局**的，不属于任何一个视图）。
 import { showAlert } from "./lib/alert.js";
@@ -1208,6 +1217,84 @@ export async function handleLoadImageCommand(detail, services) {
  * @param {{action?: string, viewId?: string, params?: object|null}} detail
  * @param {{commandRouter: object, registerMemory: object, waveform: object}} services
  */
+/**
+ * 「**暂停 ⇒ ⇒ 自动把 trace 渲染出来**」（v0.62 批）。
+ *
+ * ⚠️ **为什么**：trace 开着的时候，用户跑完一段、点暂停 ⇒ ⇒ 他**想看的就是
+ *   「刚才录到的东西」** ⇒ ⇒ 而此前**必须再点一次「导出执行轨迹」**才看得到
+ *   ⇒ ⇒ 多出来的那一下让「开了 trace ⇒ ⇒ 暂停就有东西看」这条链断了一截。
+ *
+ * ⚠️ **触发点只有一处**：工具条的「暂停」与顶栏的「暂停」**都**走
+ *   `handleCommand({ action: "pause" })` ⇒ ⇒ 助手挂在这里 ⇒ ⇒ 两个按钮
+ *   **自动**都有 ⇒ ⇒ **不写第二处**。
+ *
+ * ⚠️ **什么时候不导出**：**明确关掉了**（用户说了不要记录）⇒ ⇒ 不导出；
+ *   **状态未知** ⇒ ⇒ 照样导出（内核**默认就在录** ⇒ ⇒ 面板自己会说出真相 ——
+ *   「条目 0 → 10000 / 0」就是「一条都没录到」的真话）。
+ *
+ * @param {{commandRouter?: object}} services
+ * @returns {Promise<object|null>}
+ */
+async function autoRenderTraceOnPause(services) {
+    const router = services?.commandRouter;
+    if (!router) return null;
+    const sw = traceSwitchState(viewStore.getState("debug")?.debug?.trace ?? null);
+    if (sw.state === TRACE_SWITCH_OFF) return null;
+    try {
+        return await router.dispatchCommand(
+            Command.exportTrace(TRACE_SOURCE.Execution, TRACE_FORMAT.Csv, 0, 0),
+        );
+    } catch (err) {
+        // ⚠️ **失败必须让用户看见**：页脚那行提示在**页面最底下**（调试视图比
+        //   视口高 ⇒ ⇒ 不滚动看不见）⇒ ⇒ 失败写进**调试面板**的错误位。
+        updateDebugState((prev) => ({
+            ...prev,
+            debug: {
+                ...(prev.debug ?? {}),
+                error: {
+                    code: err?.code ?? "E_CTX-06",
+                    message: `自动导出 trace 失败：${err?.message ?? String(err)}`,
+                },
+            },
+        }));
+        return null;
+    }
+}
+
+/**
+ * 「**下载轨迹到本地**」—— 把**整条**轨迹翻完并落盘（v0.62 批）。
+ *
+ * ⚠️ **为什么要翻完**：内核的导出是**分块**的（一块 10 000 条）⇒ ⇒ 只发一条
+ *   命令拿到的是**第一块** ⇒ ⇒ 把它叫「下载轨迹」是**误导** ⇒ ⇒ 所以这里顺着
+ *   `next_offset` **一直翻到末尾**（`collectTraceChunks`）⇒ ⇒ 落盘的才是**完整
+ *   的一份**。
+ *
+ * ⚠️ **每一块的回包都会更新面板**（走 M-05 的 `debug.export` 事件）⇒ ⇒ 用户
+ *   看得见「翻到哪儿了」，不用等下载完才有反馈。
+ *
+ * ⚠️ **下载动作本身复用视图层那一个**（`downloadExportChunk`）⇒ ⇒ 文件名、
+ *   MIME、`<a download>` 的造法**只有一处** ⇒ ⇒ 不会两个入口各造一次。
+ *
+ * @param {{commandRouter?: object}} services
+ * @returns {Promise<object|null>}
+ */
+async function downloadWholeTrace(services) {
+    const router = services?.commandRouter;
+    if (!router) return null;
+    const result = await collectTraceChunks(async (offset) => {
+        const ev = await router.dispatchCommand(
+            Command.exportTrace(TRACE_SOURCE.Execution, TRACE_FORMAT.Csv, offset, 0),
+        );
+        return ev?.value ?? {};
+    });
+    if (!result.content) return null;
+    return downloadExportChunk({
+        source: TRACE_SOURCE.Execution,
+        format: TRACE_FORMAT.Csv,
+        chunk: result.content,
+    });
+}
+
 export async function handleCommand(detail, services) {
     const {
         commandRouter,
@@ -1270,6 +1357,10 @@ export async function handleCommand(detail, services) {
                 // ⇒ ⇒ 这里只**停续发**（前端状态）⇒ ⇒ 正在跑的那一个窗口
                 // 跑完才停（10 µs 虚拟时间，用户感知不到）。
                 setRunState(stopRunState(getRunState()));
+                // ⚠️ **v0.62 批**：暂停 ⇒ ⇒ **自动把 trace 渲染出来**（trace
+                //   开着 / 状态未知时）⇒ ⇒ 用户**点一下暂停**就能看到刚才录到的
+                //   东西 ⇒ ⇒ 不用再点一次「导出」。
+                await autoRenderTraceOnPause(services);
                 break;
             case "reset":
                 // ⚠️ **复位 ⇒ 退出连续模式**（裁决 H）⇒ ⇒ 否则复位后还在跑。
@@ -1487,6 +1578,29 @@ export async function handleCommand(detail, services) {
                 await commandRouter.dispatchCommand(
                     Command.exportTrace(source, format, offset, limit),
                 );
+                break;
+            }
+            case "download-trace-local": {
+                // ⚠️ **「下载轨迹到本地」**（v0.62 批）⇒ ⇒ 把**整条**轨迹翻完
+                //   再落盘（不是第一块！）⇒ ⇒ 见 {@link downloadWholeTrace}。
+                try {
+                    const result = await downloadWholeTrace(services);
+                    if (result) {
+                        setNote(`已下载 ${result.filename}（内核报告 ${result.total ?? "?"} 条轨迹）`);
+                    }
+                } catch (err) {
+                    updateDebugState((prev) => ({
+                        ...prev,
+                        debug: {
+                            ...(prev.debug ?? {}),
+                            error: {
+                                code: err?.code ?? "E_CTX-06",
+                                message: `下载轨迹失败：${err?.message ?? String(err)}`,
+                            },
+                        },
+                    }));
+                    return;
+                }
                 break;
             }
             case "trace-toggle": {

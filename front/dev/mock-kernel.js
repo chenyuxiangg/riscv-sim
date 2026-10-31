@@ -709,7 +709,18 @@ export function createMockKernel(options = {}) {
                 const limit = wanted > 0 ? wanted : MOCK_EXPORT_BLOCK;
                 const start = Math.min(offset, total);
                 const end = Math.min(start + limit, total);
-                const chunk = lines.slice(start, end).join("\n");
+                // ⚠️ **每块必须以换行结尾**（**与真内核逐字一致** · v0.62 批）：
+                //   真内核的 `render_csv` 逐行 `push('\n')` ⇒ ⇒ 块与块
+                //   **直接拼接**就是完整的一份 ⇒ ⇒ 「下载轨迹到本地」那个
+                //   「翻完所有块再拼起来」的做法才成立。
+                //   ⚠️ 此前这里用 `join("\n")`（**末尾无换行**）⇒ ⇒ 拼起来会
+                //   **粘行**（上一块最后一行与下一块第一行连在一起）⇒ ⇒ 前端
+                //   门禁因此变红 ⇒ ⇒ **这是替身不保真**（同一族：STAGE-34 批给
+                //   dom-stub 补 `className` —— 「保真度不足 ⇒ ⇒ 整套前端门禁的
+                //   结论不可信」）。
+                // ⚠️ **空块必须真的是空**（末尾不能多一个换行）⇒ ⇒ 判空在前。
+                const slice = lines.slice(start, end);
+                const chunk = slice.length > 0 ? slice.join("\n") + "\n" : "";
                 // `next_offset` is the **next** block's start (= this
                 // block's end); at the end of the buffer it equals
                 // `total` (STAGE-5 §3.2).
