@@ -60,9 +60,11 @@ await waitForMount();
 // ---------------------------------------------------------------------------
 
 describe("STAGE-34 · 左侧分组导航（侧边栏）", () => {
-    test("A-1 · 每个已挂载的视图**都有分组**（8 个一个不缺）", () => {
+    test("A-1 · 每个已挂载的视图**都有分组**（7 个一个不缺）", () => {
         const ws = m01.currentWorkspace();
-        assert.ok(ws.views.length >= 8, `应当至少挂载 8 个视图，实际 ${ws.views.length}`);
+        // ⚠️ **v0.65 批**：「寄存器 / 内存」那个独立视图撤销了 ⇒ ⇒ 侧边栏
+        //   从 **8 项**变 **7 项** ⇒ ⇒ 不是「少一个功能」，是「少一个重复入口」。
+        assert.ok(ws.views.length >= 7, `应当至少挂载 7 个视图，实际 ${ws.views.length}`);
         for (const v of ws.views) {
             assert.ok(
                 v.group === "run" || v.group === "platform",
@@ -71,20 +73,20 @@ describe("STAGE-34 · 左侧分组导航（侧边栏）", () => {
         }
     });
 
-    test("A-2 · 分组计数正确：运行与调试 5 项 / 平台 3 项", () => {
+    test("A-2 · 分组计数正确：运行与调试 4 项 / 平台 3 项", () => {
         const ws = m01.currentWorkspace();
         const run = ws.views.filter((v) => v.group === "run").map((v) => v.hash);
         const platform = ws.views.filter((v) => v.group === "platform").map((v) => v.hash);
-        assert.equal(run.length, 5, `run 组应当 5 项，实际 ${run.length}（${run.join(",")}）`);
+        assert.equal(run.length, 4, `run 组应当 4 项，实际 ${run.length}（${run.join(",")}）`);
         assert.equal(platform.length, 3, `platform 组应当 3 项，实际 ${platform.length}（${platform.join(",")}）`);
         // ⚠️ **逐项点名**：只判个数 ⇒ ⇒ 「换了两个视图但个数不变」会**假绿**。
-        assert.deepEqual([...run].sort(), ["debug", "embedded", "regmem", "terminal", "waveform"]);
+        assert.deepEqual([...run].sort(), ["debug", "embedded", "terminal", "waveform"]);
         assert.deepEqual([...platform].sort(), ["memory-map", "product", "source"]);
     });
 
-    test("A-3 · 侧边栏渲染出 8 个导航项，每项带 data-view-tab 与**内联 SVG 图标**", () => {
+    test("A-3 · 侧边栏渲染出 7 个导航项，每项带 data-view-tab 与**内联 SVG 图标**", () => {
         const items = sidebarItems();
-        assert.equal(items.length, 8, `侧边栏应当有 8 个导航项，实际 ${items.length}`);
+        assert.equal(items.length, 7, `侧边栏应当有 7 个导航项，实际 ${items.length}`);
         const withIcon = [...items].filter((el) => el.querySelector("svg"));
         assert.equal(withIcon.length, items.length, "每个导航项都应当带一个内联 SVG 图标");
         // ⚠️ **图标是真 SVG 元素**（`createElementNS` 造的）⇒ ⇒ 它的
@@ -98,7 +100,7 @@ describe("STAGE-34 · 左侧分组导航（侧边栏）", () => {
         // ⚠️ **先钉住件数** ⇒ ⇒ 否则「侧边栏一个项都没有」时这个 `for`
         // **一次都不执行** ⇒ ⇒ 用例**空转通过** ⇒ ⇒ **假绿**
         // （STAGE-34 §8 订正 6：变异自检 T1 实测到的就是这个）。
-        assert.equal(items.length, 8, `侧边栏应当有 8 个导航项，实际 ${items.length}`);
+        assert.equal(items.length, 7, `侧边栏应当有 7 个导航项，实际 ${items.length}`);
         for (const el of items) {
             const hash = el.getAttribute("data-view-tab");
             assert.equal(

@@ -485,7 +485,7 @@ describe("整段转储（视图层 · C-11 ~ C-12）", () => {
     });
 
     test("C-11 · 填地址 + 长度 + 点「转储」⇒ ⇒ 发出 `DumpMemory`，参数逐字一致", () => {
-        const body = show("regmem");
+        const body = show("debug");
         const box = body.querySelector("[data-dump-input=\"memory\"]");
         assert.ok(box, "必须**有**转储输入的容器");
         assert.ok(box.querySelector("[data-dump-addr-input]"), "必须**有**起始地址输入框");
@@ -505,7 +505,7 @@ describe("整段转储（视图层 · C-11 ~ C-12）", () => {
     });
 
     test("C-11 · 长度**超上限也照发**（前端不预校验 ⇒ ⇒ 内核那条路必须可达）", () => {
-        const body = show("regmem");
+        const body = show("debug");
         type(body, "[data-dump-addr-input]", "0x1000");
         type(body, "[data-dump-len-input]", "99999");
         body.querySelector("[data-dump-input=\"memory\"]")
@@ -519,11 +519,11 @@ describe("整段转储（视图层 · C-11 ~ C-12）", () => {
     });
 
     test("C-12 · 收到 `MemoryDump` ⇒ ⇒ 转储区渲染出**行数与字节数**", () => {
-        show("regmem");
+        show("debug");
         const bytes = Array.from({ length: 40 }, (_, i) => 0x41 + i);
         router.emit("debug.dump", { addr: 0x1000, bytes });
 
-        const after = show("regmem");
+        const after = show("debug");
         const box = after.querySelector("[data-mem-dump]");
         assert.ok(box, "必须**有**转储结果的容器");
         assert.equal(
@@ -564,9 +564,9 @@ describe("整段转储（视图层 · C-11 ~ C-12）", () => {
     });
 
     test("C-12 · 非可打印字节在 ASCII 列里是 `.`", () => {
-        show("regmem");
+        show("debug");
         router.emit("debug.dump", { addr: 0, bytes: [0x00, 0x1f, 0x20, 0x41, 0x7e, 0x7f, 0xff] });
-        const row = show("regmem").querySelector("[data-mem-dump]").querySelector(".dump-row");
+        const row = show("debug").querySelector("[data-mem-dump]").querySelector(".dump-row");
         assert.equal(
             row.querySelector(".dump-ascii").textContent,
             ".. A~..",
@@ -599,7 +599,7 @@ describe("内核原文上屏（视图层 · C-13）", () => {
         const raw = "转储长度越界：99999（必须是 1 .. 4096）";
         router.emit("error", { code: "E_DBG-03", message: raw });
 
-        const after = show("regmem");
+        const after = show("debug");
         const slot = after.querySelector("[data-dump-error]");
         assert.ok(slot, "必须**有**转储的错误位");
         assert.equal(

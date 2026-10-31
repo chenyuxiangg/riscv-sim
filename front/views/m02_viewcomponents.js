@@ -549,11 +549,13 @@ const memoryMapView = register({
 // （STAGE-10 §1 裁决 C）。
 //
 // ⚠️ **它不是第二个寄存器表**：这里是**概览 + 入口** —— 连接状态、当前 PC、
-// 虚拟时间，加上四个子视图的入口。寄存器明细仍然只在 `regmem` 视图里。
+// 虚拟时间，加上**三个**子视图的入口。寄存器与内存的明细在**调试视图**的
+// 「寄存器窗口」与「内存窗口」里（v0.65 批 · 「寄存器 / 内存」那个独立
+// 视图已撤销 ⇒ ⇒ 入口也少一个）。
 // ---------------------------------------------------------------------------
 
 /**
- * 落地视图的**四个子视图入口**（裁决 C 的最小内容之一）。
+ * 落地视图的**三个子视图入口**（裁决 C 的最小内容之一 · v0.65 批减一个）。
  *
  * ⚠️ **这里只列入口**：某个入口当前**不可达**（能力位不满足）时，由 M-01 的
  * 兜底页处理（E_CTX-05）⇒ 前端不再另造一份「可达性」真相。
@@ -562,7 +564,6 @@ const memoryMapView = register({
  */
 export const EMBEDDED_VIEW_ENTRIES = [
     { view: "debug", label: "调试视图" },
-    { view: "regmem", label: "寄存器 / 内存" },
     { view: "waveform", label: "波形视图" },
     { view: "source", label: "源码视图" },
 ];
@@ -1354,7 +1355,11 @@ function mountAddrInputListeners(el) {
 }
 
 // ---------------------------------------------------------------------------
-// debugView — 反汇编面板 (M-11) + 寄存器/内存 (FR-05/08/09)
+// debugView — 反汇编面板 (M-11) + 断点 + trace + 寄存器窗口 / 内存窗口
+//
+// ⚠️ **「寄存器 / 内存」不再是独立视图**（v0.65 批）⇒ ⇒ 它原本那张卡
+//   **拆成两张**：**寄存器窗口**（寄存器格 + PC）与**内存窗口**（读内存 +
+//   读这一段 + 内存单元）⇒ ⇒ 同一个动作**只出现在一处**。
 // ---------------------------------------------------------------------------
 
 /**
@@ -1410,8 +1415,10 @@ const debugView = register({
         const sim = state?.sim ?? {};
         const debug = state?.debug ?? {};
         // ⚠️ **运行中 ⇒ ⇒ 活值隐藏**（STAGE-38 · v0.53 批 · 裁决 D）
-        // ⇒ ⇒ 寄存器 / PC / 虚拟时间一律显示**固定符号 `-`** ⇒ ⇒ 界面
+        // ⇒ ⇒ 寄存器 / PC 一律显示**固定符号 `-`** ⇒ ⇒ 界面
         // **不闪**（那些数字每秒要跳 5 次 · F6）⇒ ⇒ 停止后**自动**恢复。
+        // ⚠️ **虚拟时间不在这里**（v0.65 批）⇒ ⇒ 它在**顶栏**⇒ ⇒ 这里
+        //   不再显示第二份 ⇒ ⇒ 「同一个量只显示一处」这条规矩不破。
         const running = kernelIsRunning();
         // ⚠️ **草稿住共享命名空间**（STAGE-39 · v0.54 批 · 裁决 G）⇒ ⇒
         // 输入框里的内容**重渲染不丢** ⇒ ⇒ 焦点也不丢（不重建 ⇒ 不丢）。
@@ -1422,6 +1429,13 @@ const debugView = register({
         // `sim.pc` from `sim.registers` / `sim.state.delta`) — the panel
         // must not invent a second one.
         const pc = Number(sim.pc ?? 0) >>> 0;
+        // ⚠️ **内存单元是 M-10 推的那份**（`sim.mem`）⇒ ⇒ 与读内存那条路
+        //   落的是**同一个缓存** ⇒ ⇒ 不是第二份。
+        const cells = Object.entries(sim.mem ?? {});
+        // ⚠️ **转储结果住在 M-03 视图状态**（契约 v9 §5.2）⇒ ⇒ `debug.dump`
+        //   ⇒ ⇒ **不**另存一份 ⇒ ⇒ 这里是**唯一**一个显示它的地方。
+        const dump = debug.dump ?? null;
+        const dumpError = String(debug.dumpError ?? "");
         const exportState = debug.export ?? null;
         // ⚠️ **开关状态是推导量**（`front/lib/trace-switch.js`）⇒ ⇒ 视图层
         // （按钮 + 状态行）与 app 层（发什么命令）**引同一处** ⇒ ⇒ 两者
@@ -1449,9 +1463,11 @@ const debugView = register({
         // ⚠️ **调试视图的工具条整块撤掉**（v0.63 批 · 用户拍板）⇒ ⇒ 那十一个
         //   按钮**每一个**都有别的落点 ⇒ ⇒ 同一个动作在两处出现 ⇒ ⇒ 用户得
         //   猜「哪个才是真的」⇒ ⇒ 落点分别是：「单步 / 继续 / 暂停 / 复位」在
-        //   **顶栏**（全局运行条）·「读寄存器」在**寄存器/内存视图** ·「反汇编」
-        //   在**反汇编卡片** ·「导出波形」在**波形视图** ·「trace 记录」与
-        //   「下载轨迹」在**trace 卡片** ⇒ ⇒ 这里**不再有**工具条。
+        //   **顶栏**（全局运行条）·「读寄存器」在**寄存器窗口**（v0.65 批：
+        //   「寄存器 / 内存视图」这个独立视图没了 ⇒ ⇒ 它并进了调试视图）
+        //   ·「反汇编」在**反汇编卡片** ·「导出波形」在**波形视图**
+        //   ·「trace 记录」与「下载轨迹」在**trace 卡片** ⇒ ⇒ 这里**不再有**
+        //   工具条。
         return `
             ${halt?.reason === "Breakpoint"
                 // ⚠️ **这句话只在内核这么说的时候出现**（裁决 M）⇒ ⇒ 前端
@@ -1525,21 +1541,31 @@ const debugView = register({
                         : ""}
                     <pre class="trace-chunk" data-trace-chunk>${escapeHtml(String(exportState?.chunk ?? ""))}</pre>
                 </section>
-                <section class="card regmem">
-                    <div class="row"><h3>寄存器 / 内存</h3></div>
-                    ${renderMemoryReadRow({ draft: draft.memAddr, size: draft.memSize })}
-                    <div class="grid-2">
-                        <div>
-                            <h4>寄存器</h4>
-                            <div class="reg-grid">${renderRegGrid(sim.gpr ?? Array(32).fill(0), previousGprSnapshot(), running)}</div>
-                        </div>
-                        <div>
-                            <h4>PC</h4>
-                            <code class="pc">${liveValue(running, `0x${(sim.pc ?? 0).toString(16).padStart(8, "0")}`)}</code>
-                            <h4>虚拟时间</h4>
-                            <code class="timeVirt">${liveValue(running, `${state?.timeVirt ?? 0} ps`)}</code>
-                        </div>
+                <section class="card regmem-registers" data-window="registers">
+                    <div class="row">
+                        <h3>寄存器窗口</h3>
+                        <span class="tag">变化高亮 = 与上一次读回相比</span>
+                        <button type="button" data-action="read-regs">读寄存器</button>
                     </div>
+                    <div class="reg-grid">${renderRegGrid(sim.gpr ?? Array(32).fill(0), previousGprSnapshot(), running)}</div>
+                    <h4>PC</h4>
+                    <code class="pc">${liveValue(running, `0x${(sim.pc ?? 0).toString(16).padStart(8, "0")}`)}</code>
+                </section>
+                <section class="card regmem-memory" data-window="memory">
+                    <div class="row"><h3>内存窗口</h3><span class="tag">读回的字列在下面</span></div>
+                    ${renderMemoryReadRow({ draft: draft.memAddr, size: draft.memSize })}
+                    ${renderMemoryDumpRow({ addrDraft: draft.dumpAddr, lenDraft: draft.dumpLen, error: dumpError })}
+                    ${renderMemoryDump(dump)}
+                    <h4>内存单元</h4>
+                    ${cells.length === 0
+                        ? `<p class="muted">尚无读回的内存单元 — 在上面填一个地址，点「读内存」。</p>`
+                        : `<table class="map-table">
+                            <thead><tr><th>地址</th><th>值</th></tr></thead>
+                            <tbody>${cells.map(([addr, value]) => `
+                                <tr><td><code>${escapeHtml(addr)}</code></td>
+                                <td><code>${liveValue(running, `0x${(value >>> 0).toString(16).padStart(8, "0")}`)}</code></td></tr>
+                            `).join("")}</tbody>
+                        </table>`}
                 </section>
             </div>
         `;
@@ -1689,21 +1715,23 @@ function renderDisasmRow(entry, pc, breakpoints = []) {
 }
 
 // ---------------------------------------------------------------------------
-// regmemView — the "寄存器/内存" view (M-10 data).
+// 寄存器 / 内存 —— **共享片段**（v0.65 批）。
 //
-// The panel existed in M-01's view registry from the start, but no
-// component was registered for it — the tab rendered an empty body.
-// M-10 now feeds the store, so the view has something to show.
+// ⚠️ **为什么不是两个视图**：此前「寄存器 / 内存」是一个**独立视图**，而
+//   「调试视图」里又有一张**同名**的卡片 ⇒ ⇒ 同一件事在**两处**⇒ ⇒ 用户
+//   得猜「哪个才是真的」⇒ ⇒ 那是 v0.63 批「调试视图去重」那一族问题的
+//   最后一个残留 ⇒ ⇒ 现在**只有一个视图**（调试视图），它里面的
+//   **寄存器窗口**与**内存窗口**是**两张卡**。
 // ---------------------------------------------------------------------------
 
 /**
  * 「**内核真的在执行**吗」（STAGE-38 · v0.53 批 · 裁决 A / M）。
  *
- * ⚠️ **只有一个落点**：视图状态 `debug.run`（app 层写）⇒ ⇒ 调试视图与
- * 寄存器视图**读同一份** ⇒ ⇒ 不是第二个真相。
+ * ⚠️ **只有一个落点**：视图状态 `debug.run`（app 层写）⇒ ⇒ 调试视图的
+ * **寄存器窗口**与**内存窗口**读**同一份** ⇒ ⇒ 不是第二个真相。
  *
- * ⚠️ **两个视图都走这一个函数** ⇒ ⇒ 「运行中」的口径**只有一处** ⇒ ⇒
- * 「运行中显示 `-`」这件事**不会**只落在一个视图上。
+ * ⚠️ **两个窗口都走这一个函数** ⇒ ⇒ 「运行中」的口径**只有一处** ⇒ ⇒
+ * 「运行中显示 `-`」这件事**不会**只落在一个窗口上。
  *
  * @returns {boolean}
  */
@@ -1754,85 +1782,18 @@ export function renderRegGrid(gpr, prevGpr, running = false) {
 /**
  * **上一次读回的 GPR 快照**（视图层**只读** · 裁决 F）。
  *
- * ⚠️ **落点在 `regmem` 视图状态里** ⇒ ⇒ app 层在 `read-regs` **之前**存
+ * ⚠️ **落点在 `debug` 视图状态里** ⇒ ⇒ app 层在 `read-regs` **之前**存
  * ⇒ ⇒ 视图层**不自己存**（否则又是第二份）。
+ *
+ * ⚠️ **为什么落在 `debug`**（v0.65 批）：「寄存器 / 内存」那个**独立视图**
+ *   没有了 ⇒ ⇒ 内容都在调试视图里 ⇒ ⇒ 快照跟着内容一起住在 `debug` ⇒ ⇒
+ *   **没有第二个真相**，也没有一个**没人渲染**的孤儿状态。
  *
  * @returns {number[]|null}
  */
 function previousGprSnapshot() {
-    return viewStore.getState("regmem")?.regmem?.prevGpr ?? null;
+    return viewStore.getState("debug")?.debug?.prevGpr ?? null;
 }
-
-const regmemView = register({
-    id: "regmem",
-    channels: ["sim"],
-    render(state) {
-        const sim = state?.sim ?? {};
-        const gpr = sim.gpr ?? Array(32).fill(0);
-        const mem = sim.mem ?? {};
-        const cells = Object.entries(mem);
-        // ⚠️ **运行中 ⇒ ⇒ 活值隐藏**（STAGE-38 · v0.53 批 · 裁决 D）
-        // ⇒ ⇒ 与**调试视图那份**是**同一个口径**（同一个函数）⇒ ⇒ 不会
-        // 一个藏了一个没藏。
-        const running = kernelIsRunning();
-        // ⚠️ **草稿住共享命名空间**（STAGE-39 · v0.54 批 · 裁决 G）⇒ ⇒ 与
-        // 调试视图**同一份** ⇒ ⇒ 两个入口**一个真相**。
-        const draft = debuggerDraft();
-        // ⚠️ **转储结果住在 M-03 视图状态**（契约 v9 §5.2）⇒ ⇒ `regmem.dump`
-        //   ⇒ ⇒ **不**另存一份。
-        const dump = viewStore.getState("regmem")?.regmem?.dump ?? null;
-        const dumpError = String(viewStore.getState("regmem")?.regmem?.dumpError ?? "");
-        return `
-            <section class="regmem-view">
-                <div class="card">
-                    <div class="row"><h3>寄存器 / 内存 (M-10)</h3><span class="tag">变化高亮 = 与上一次读回相比</span></div>
-                    ${renderMemoryReadRow({ draft: draft.memAddr, size: draft.memSize })}
-                    ${renderMemoryDumpRow({ addrDraft: draft.dumpAddr, lenDraft: draft.dumpLen, error: dumpError })}
-                    ${renderMemoryDump(dump)}
-                    <div class="debug-toolbar">
-                        <button type="button" data-action="read-regs">读寄存器</button>
-                    </div>
-                    <div class="grid-2">
-                        <div>
-                            <h4>通用寄存器</h4>
-                            <div class="reg-grid">${renderRegGrid(gpr, previousGprSnapshot(), running)}</div>
-                        </div>
-                        <div>
-                            <h4>PC / 虚拟时间</h4>
-                            <code class="pc">${liveValue(running, `0x${(sim.pc ?? 0).toString(16).padStart(8, "0")}`)}</code>
-                            <code class="timeVirt">${liveValue(running, `${state?.timeVirt ?? 0} ps`)}</code>
-                            <h4>内存单元</h4>
-                            ${cells.length === 0
-                                ? `<p class="muted">尚无读回的内存单元 — 在上面填一个地址，点「读内存」。</p>`
-                                : `<table class="map-table">
-                                    <thead><tr><th>地址</th><th>值</th></tr></thead>
-                                    <tbody>${cells.map(([addr, value]) => `
-                                        <tr><td><code>${escapeHtml(addr)}</code></td>
-                                        <td><code>${liveValue(running, `0x${(value >>> 0).toString(16).padStart(8, "0")}`)}</code></td></tr>
-                                    `).join("")}</tbody>
-                                </table>`}
-                        </div>
-                    </div>
-                </div>
-            </section>
-        `;
-    },
-    onCommand(ev) {
-        const el = ev.target?.closest?.("[data-action]");
-        const action = el?.dataset?.action;
-        if (!action) return undefined;
-        // ⚠️ **任意地址**（STAGE-39 · v0.54 批 · 裁决 B）⇒ ⇒ 地址与宽度都
-        // 从**同屏**的输入框来 ⇒ ⇒ 参数**随信号走**（视图层不碰服务层）。
-        const addrParams = resolveAddrParams(action, el);
-        if (addrParams?.invalid === true) return undefined;
-        return emitCommand(action, "regmem", { ...(addrParams ?? {}) });
-    },
-    onDelta(_delta) {},
-    mountFor(el) {
-        el.addEventListener("click", (ev) => regmemView.onCommand(ev));
-        mountAddrInputListeners(el);
-    },
-});
 
 // ---------------------------------------------------------------------------
 // waveformView — 探针通道列表 (D-46).

@@ -506,7 +506,7 @@ a { color: inherit; text-decoration: none; }
     width: 7em;
     font-size: 12px;
 }
-.disasm, .regmem, .trace-export { background: var(--panel2); border-radius: 8px; padding: 12px; }
+.disasm, .regmem-registers, .regmem-memory, .trace-export { background: var(--panel2); border-radius: 8px; padding: 12px; }
 .disasm-table, .reg-grid {
     width: 100%;
     font-size: 12px;
@@ -597,7 +597,7 @@ a { color: inherit; text-decoration: none; }
  * ------------------------------------------------------------------------- */
 .embedded-view { background: var(--panel2); border-radius: 8px; padding: 12px; }
 .link-status { margin: 8px 0; }
-/* 四个子视图入口：排成一行，窄屏折行（NFR-05 的 375px 也要读得下）。 */
+/* 三个子视图入口：排成一行，窄屏折行（NFR-05 的 375px 也要读得下）。 */
 .embedded-entries {
     list-style: none;
     padding: 0;

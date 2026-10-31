@@ -297,7 +297,13 @@ describe("M-10 寄存器内存服务", () => {
         assert.equal(state.sim.pc, 0x10);
         assert.equal(state.timeVirt, 5000);
         assert.ok(renders.includes("debug"), "没有触发 debug 视图的重渲染");
-        assert.ok(renders.includes("regmem"), "没有触发 regmem 视图的重渲染");
+        // ⚠️ **v0.65 批**：「寄存器 / 内存」那个**独立视图**撤销了 ⇒ ⇒ 默认
+        //   `viewIds` 里**不再有**它 ⇒ ⇒ 快照**只**往调试视图推 ⇒ ⇒
+        //   「同一个量只显示一处」在**服务层**也成立（不是只靠视图层自律）。
+        assert.ok(
+            !renders.includes("regmem"),
+            "快照还在往已撤销的「寄存器 / 内存」视图推（那儿已经没人渲染了）",
+        );
         router.close();
         service.close();
     });

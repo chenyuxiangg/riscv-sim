@@ -30,7 +30,6 @@ const ROLE_CAPABILITIES = new Map([
         "view.debug",
         "view.waveform",
         "view.terminal",
-        "view.regmem",
         "view.source",
     ])],
 ]);
@@ -112,10 +111,6 @@ const NAV_ICONS = {
         ["rect", { x: "14", y: "14", width: "7", height: "7", rx: "1.5" }],
     ],
     debug: [["path", { d: "M9 3l6 9-6 9" }]],
-    regmem: [
-        ["path", { d: "M4 7l8-4 8 4v10l-8 4-8-4z" }],
-        ["path", { d: "M4 7l8 4 8-4M12 11v10" }],
-    ],
     waveform: [["path", { d: "M2 12h4l2-6 4 12 3-9 2 3h5" }]],
     terminal: [
         ["rect", { x: "3", y: "4", width: "18", height: "16", rx: "3" }],
@@ -177,7 +172,7 @@ const VIEW_REGISTRY = new Map([
         panel: '[data-view-panel="embedded"]',
         role: "embedded",
         group: "run",
-        hint: "PC · 虚拟时间 · 四个子视图入口",
+        hint: "PC · 虚拟时间 · 三个子视图入口",
     }],
     ["debug", {
         hash: "debug",
@@ -186,16 +181,7 @@ const VIEW_REGISTRY = new Map([
         panel: '[data-view-panel="debug"]',
         role: "embedded",
         group: "run",
-        hint: "反汇编 · trace 导出 · 寄存器",
-    }],
-    ["regmem", {
-        hash: "regmem",
-        name: "寄存器/内存",
-        capability: "view.regmem",
-        panel: '[data-view-panel="regmem"]',
-        role: "embedded",
-        group: "run",
-        hint: "通用寄存器 · PC / 虚拟时间 · 内存单元",
+        hint: "反汇编 · 断点 · trace · 寄存器 / 内存",
     }],
     ["waveform", {
         hash: "waveform",

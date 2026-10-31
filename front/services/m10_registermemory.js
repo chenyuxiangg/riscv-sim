@@ -57,13 +57,21 @@ const PC_STREAM = "cpu.pc";
 /**
  * Mount the register & memory service.
  *
+ * ⚠️ **默认 `viewIds` 只有 `debug`**（v0.65 批）⇒ ⇒ 「寄存器 / 内存」那个
+ *   **独立视图**撤销了 ⇒ ⇒ 快照只往**调试视图**推 ⇒ ⇒ 「同一个量只显示
+ *   一处」这条规矩在**服务层**也成立（不是只靠视图层自律）。
+ *
+ * ⚠️ **生产调用必须显式传 `viewIds`**（VB-1）：`source` 与 `embedded` 也要
+ *   拿 `sim.pc` ⇒ ⇒ 那个列表的唯一真相在 `app.js`
+ *   （`REGISTER_MEMORY_VIEW_IDS`）⇒ ⇒ 这里**不**写第二份。
+ *
  * @param {{commandRouter?: object|null, transport?: object|null, viewStore?: object|null, viewIds?: string[]}} [options]
  */
 export async function mountRegisterMemory(options = {}) {
     const router = options.commandRouter ?? null;
     const transport = options.transport ?? null;
     const viewStore = options.viewStore ?? null;
-    const viewIds = options.viewIds ?? ["debug", "regmem"];
+    const viewIds = options.viewIds ?? ["debug"];
 
     /** @type {number[]} */
     const gpr = new Array(32).fill(0);
