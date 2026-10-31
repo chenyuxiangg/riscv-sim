@@ -82,7 +82,7 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 - Dev (起前端):    `python3 tools/serve-front.py`（**唯一落点** · 零依赖 · 只服务 `front/`）⇒ ⇒ 响应带 `Cache-Control: no-store` ⇒ ⇒ **浏览器不吃缓存** ⇒ ⇒ 改完前端**刷新即可**看到（⚠️ `python3 -m http.server` 只发 `Last-Modified` ⇒ ⇒ 浏览器按启发式新鲜度缓存 ES module ⇒ ⇒ 「改了没生效」会被误判成「代码写错了」）⇒ ⇒ `--self-check` 自检响应头
 - Build (WASM):    `tools/build-wasm.sh` 或 `tools/build-wasm.sh --release`
 - Test:            `cargo test --workspace --no-fail-fast --lib --tests`（单元 + 集成 + 黄金对拍；⚠️ **不带 `--lib --tests` 会因 doc-test 假 HANG**）· ⚠️ **判「全绿」必须看退出码 + `grep -cE "^test result: FAILED"` 为 0**；汇总的失败数在 `awk -F'[ ;]'` 的 **`$7`**（**不是 `$6`** —— 连续分隔符会产生空字段 ⇒ `$6` 永远算出 0 = **假的**）
-- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，**719 用例 / 141 suite**；Node ≥ 22）⚠️ **v0.35 批起末尾追加**「台账前端两行的**归属口径** + **历史回归**」（`tools/front_test_attrib.py`）⇒ ⇒ 那两个数**由机器从当前树重算**、**不再人工累加** ⇒ ⇒ ⚠️ **python3 缺失时明确 SKIP**（**不静默通过**）
+- Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，**726 用例 / 143 suite**；Node ≥ 22）⚠️ **v0.35 批起末尾追加**「台账前端两行的**归属口径** + **历史回归**」（`tools/front_test_attrib.py`）⇒ ⇒ 那两个数**由机器从当前树重算**、**不再人工累加** ⇒ ⇒ ⚠️ **python3 缺失时明确 SKIP**（**不静默通过**）
 - Test (WASM 桥): `node tools/wasm-smoke.mjs`（需先 `tools/build-wasm.sh`；在 Node 里驱动真 wasm 产物跑完整桥，产物不在则跳过）
 - Test (浏览器真机): `tools/browser-verify.mjs`（零依赖 CDP 脚本，需本机 Chrome + 已构建的 WASM 产物 + `python3 tools/serve-front.py`（**不发缓存** ⇒ ⇒ 改完前端刷新即可看到）；**不进默认门禁**，按需运行）
   - ⚠️ **跑之前先确认 8080 是空的**：`lsof -nP -iTCP:8080 -sTCP:LISTEN`。**上一批遗留的孤儿 `http.server`**（它的工作目录是**已被删掉的** worktree ⇒ 任何路径都返回 **404**）会让脚本的探针判定「没在跑」⇒ 脚本**自起**一个 ⇒ **端口冲突** ⇒ `code=1` 退出 ⇒ 症状看着像「浏览器门禁坏了」，其实只是**端口被占**。⇒ 先 `kill` 掉那个孤儿再跑。
