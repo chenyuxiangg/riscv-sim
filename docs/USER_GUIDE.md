@@ -49,9 +49,13 @@ tools/build-wasm.sh         # 浏览器内核（调试版）；--release 出发�
 ### 2.3 起前端
 
 ```bash
-python3 -m http.server 8080 --directory front
-# 浏览器打开 http://localhost:8080
+python3 tools/serve-front.py
+# 浏览器打开 http://127.0.0.1:8080
 ```
+
+> ⚠️ **用这个脚本，别用 `python3 -m http.server`**：后者不发 `Cache-Control` ⇒ ⇒ 浏览器会缓存 ES module ⇒ ⇒ **改了代码但界面还是旧的**（症状像「改了没生效」）⇒ ⇒ 本脚本给每个响应加 `Cache-Control: no-store` ⇒ ⇒ 改完**刷新即可**看到。
+>
+> ⚠️ **万一还拿着旧副本**：**换个端口**打开一次（新 origin = 新缓存键）—— 只给入口 URL 加 `?v=2` **没用**（相对路径 `import` 的子模块 URL 不变 ⇒ 照旧吃缓存）。
 
 > ⚠️ **必须走 HTTP(S)**：前端用 **Worker + ES module**，两者都要求同源 ⇒ `file://` 直开被浏览器拦（页面顶栏会明写「请通过 HTTP 打开」）。
 
@@ -451,7 +455,8 @@ PY
 
 | 症状 | 多半是 | 怎么办 |
 | --- | --- | --- |
-| 页面全白 / 顶栏写「请通过 HTTP 打开」 | 用 `file://` 打开了 | `python3 -m http.server 8080 --directory front` |
+| 页面全白 / 顶栏写「请通过 HTTP 打开」 | 用 `file://` 打开了 | `python3 tools/serve-front.py` |
+| **改了前端代码，界面还是旧的** | **浏览器缓存**（`http.server` 不发 `Cache-Control` ⇒ ⇒ 浏览器按启发式新鲜度缓存 ES module）⇒ ⇒ **不是**代码没改 | `python3 tools/serve-front.py`（**不发缓存**）⇒ ⇒ 或**换个端口**打开一次 |
 | 顶栏「kernel transport 未连接」 | 没构建 WASM | `tools/build-wasm.sh` |
 | 页脚「内核未就绪：…」 | 内核侧真报错 | 把整句抄下来查（码是 `E_*` 家族） |
 | 波形视图一直空 | 固件没驱动外设引脚 | 确认固件真的写了 GPIO/UART |

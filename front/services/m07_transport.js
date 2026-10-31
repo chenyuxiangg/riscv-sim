@@ -16,7 +16,9 @@
 // Hard constraint (AGENTS.md): ES modules *and* Web Workers require a
 // same-origin HTTP(S) origin. Opening `front/index.html` via `file://`
 // is blocked by the browser — serve it with
-// `python3 -m http.server 8080 --directory front`.
+// `python3 tools/serve-front.py` (the repo's one landing point; it also
+// sends `Cache-Control: no-store` ⇒ ⇒ the browser never serves a stale
+// module ⇒ ⇒ "I changed it but the page looks the same" cannot happen).
 //
 // The status is **live**: `getTransportStatus()` returns the current
 // snapshot, and `onStatus()` delivers every change to subscribers (a

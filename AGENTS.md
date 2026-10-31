@@ -79,11 +79,12 @@ RISC-V 仿真/调试平台 — 多模块协作的端到端工程，详细设计�
 
 - Install deps:    `rustup target add wasm32-unknown-unknown && cargo install wasm-pack`
 - Build (native):  `cargo build`（开发）/ `cargo build --release`（发布）
+- Dev (起前端):    `python3 tools/serve-front.py`（**唯一落点** · 零依赖 · 只服务 `front/`）⇒ ⇒ 响应带 `Cache-Control: no-store` ⇒ ⇒ **浏览器不吃缓存** ⇒ ⇒ 改完前端**刷新即可**看到（⚠️ `python3 -m http.server` 只发 `Last-Modified` ⇒ ⇒ 浏览器按启发式新鲜度缓存 ES module ⇒ ⇒ 「改了没生效」会被误判成「代码写错了」）⇒ ⇒ `--self-check` 自检响应头
 - Build (WASM):    `tools/build-wasm.sh` 或 `tools/build-wasm.sh --release`
 - Test:            `cargo test --workspace --no-fail-fast --lib --tests`（单元 + 集成 + 黄金对拍；⚠️ **不带 `--lib --tests` 会因 doc-test 假 HANG**）· ⚠️ **判「全绿」必须看退出码 + `grep -cE "^test result: FAILED"` 为 0**；汇总的失败数在 `awk -F'[ ;]'` 的 **`$7`**（**不是 `$6`** —— 连续分隔符会产生空字段 ⇒ `$6` 永远算出 0 = **假的**）
 - Test (前端):    `tools/check-front.sh`（node:test 冒烟门禁，**687 用例 / 133 suite**；Node ≥ 22）⚠️ **v0.35 批起末尾追加**「台账前端两行的**归属口径** + **历史回归**」（`tools/front_test_attrib.py`）⇒ ⇒ 那两个数**由机器从当前树重算**、**不再人工累加** ⇒ ⇒ ⚠️ **python3 缺失时明确 SKIP**（**不静默通过**）
 - Test (WASM 桥): `node tools/wasm-smoke.mjs`（需先 `tools/build-wasm.sh`；在 Node 里驱动真 wasm 产物跑完整桥，产物不在则跳过）
-- Test (浏览器真机): `tools/browser-verify.mjs`（零依赖 CDP 脚本，需本机 Chrome + 已构建的 WASM 产物 + `python3 -m http.server 8080 --directory front`；**不进默认门禁**，按需运行）
+- Test (浏览器真机): `tools/browser-verify.mjs`（零依赖 CDP 脚本，需本机 Chrome + 已构建的 WASM 产物 + `python3 tools/serve-front.py`（**不发缓存** ⇒ ⇒ 改完前端刷新即可看到）；**不进默认门禁**，按需运行）
   - ⚠️ **跑之前先确认 8080 是空的**：`lsof -nP -iTCP:8080 -sTCP:LISTEN`。**上一批遗留的孤儿 `http.server`**（它的工作目录是**已被删掉的** worktree ⇒ 任何路径都返回 **404**）会让脚本的探针判定「没在跑」⇒ 脚本**自起**一个 ⇒ **端口冲突** ⇒ `code=1` 退出 ⇒ 症状看着像「浏览器门禁坏了」，其实只是**端口被占**。⇒ 先 `kill` 掉那个孤儿再跑。
 - Test (黄金对拍): `tools/fetch-golden-deps.sh`（拉 riscv-tests + 交叉工具链到**仓库外**）→ `tools/golden-run.sh --self-check`（变异金丝雀）→ `tools/golden-run.sh --keep-going`（全量）⚠️ **v0.35 批起多一个开关**：`--check-mem` 把「参考侧喂给 Spike 的 RAM 窗口」做成**门禁显式项**（打印两侧并断言**逐字相同**）⇒ ⇒ **D-150 闭环**（⚠️ **价值边界如实记**：两侧**构造上同源** ⇒ ⇒ 正常时**必然绿** ⇒ ⇒ 抓的是「**构造被破坏**」⇒ ⇒ 治根仍需**做法 B**）⇒ ⇒ 另新增 `GOLDEN_MANIFEST` **覆盖口**（局部复跑用；⚠️ **门禁自身从不设置它**）
 - Test (真实 RTOS 对拍): `tools/boot-osz.sh`（**不进默认门禁**：需要**仓外**的 osz ELF 与本机的 Spike；ELF 路径取 `$OSZ_ELF`，默认 `/tmp/osz-artifacts/osz.elf`）⇒ 判决口径是「**两侧 UART TX 字节流逐字节相同**」⇒ 输出 `VERDICT MATCH / MISMATCH / NO-VERDICT`
@@ -120,6 +121,7 @@ riscv_sim/
 ├── tools/
 │   ├── build-wasm.sh         # wasm-pack 包装（`--target web`，输出带命名导出的原生 ESM）
 │   ├── check-front.sh        # 前端门禁（node:test）+ 末尾追加「台账前端两行的归属口径 + 历史回归」
+│   ├── serve-front.py        # **起前端的唯一落点**（零依赖 · 只服务 `front/`）⇒ ⇒ 每个响应带 `Cache-Control: no-store` ⇒ ⇒ 浏览器**不吃缓存** ⇒ ⇒ 「改了代码界面还是旧的」这件事**在开发期结构上不可能**（⚠️ `python3 -m http.server` 只发 `Last-Modified` ⇒ ⇒ 浏览器按启发式新鲜度缓存 ES module ⇒ ⇒ 症状像「代码写错了」）⇒ ⇒ `--self-check` 自检响应头
 │   ├── stage13_check.py      # STAGE-13 冻结规格的 7 项自检（表格列数 / 标题层级 / 代码围栏 / 裁决引用 / 章节完整 / 验收交叉引用 / 关键约束字面量）
 │   ├── stage14_check.py      # STAGE-14 冻结规格的 7 项自检（同上七项 + 额外「已废止字面量禁列」）
 │   ├── stage15_check.py      # STAGE-15 冻结规格的 7 项自检（同构；禁列 `ValidateMemoryMap` / `SCHEMA_VERSION = 7` / `BOARD_DESCRIPTION_SCHEMA_VERSION`）
@@ -489,9 +491,9 @@ riscv_sim/
 
 - 单元测试：`cargo test --workspace`（含各模块 `#[cfg(test)] mod tests`）
 - **前端门禁**：`tools/check-front.sh`（`node --test`，含最小 DOM stub；见 `front/tests/`）——**ESM 链接期错误只有这条门禁能抓住**，Rust 测试全都覆盖不到
-- **前端改动后必须真机复验**：`tools/check-front.sh` 的 DOM stub 覆盖**状态与行为**，覆盖不了**挂载时序**——「首次事件派发早于订阅」这类缺陷对 stub 完全隐形（2026-10-20 的 #20：修完白屏后视图体仍全空，只有真实浏览器能暴露）。改前端挂载顺序 / 事件订阅关系后，必须起 `python3 -m http.server 8080 --directory front` 用浏览器实跑一遍
+- **前端改动后必须真机复验**：`tools/check-front.sh` 的 DOM stub 覆盖**状态与行为**，覆盖不了**挂载时序**——「首次事件派发早于订阅」这类缺陷对 stub 完全隐形（2026-10-20 的 #20：修完白屏后视图体仍全空，只有真实浏览器能暴露）。改前端挂载顺序 / 事件订阅关系后，必须起 `python3 tools/serve-front.py` 用浏览器实跑一遍（⚠️ **别用 `python3 -m http.server`** ⇒ ⇒ 它不发 `Cache-Control` ⇒ ⇒ 浏览器吃缓存 ⇒ ⇒ 「改了没生效」会被误判成「代码写错了」）
 - **WASM 桥冒烟**：`tools/build-wasm.sh` 后跑 `node tools/wasm-smoke.mjs`——在 Node 里驱动**真** wasm 产物跑完整桥（产物不在时**跳过**并退出 0，不进默认门禁）
-- WASM 端到端：`tools/build-wasm.sh` 后用 `python3 -m http.server 8080 --directory front` 起 HTTP 服务，浏览器访问 `http://localhost:8080/`（**不能 `file://` 直开**：ES module 与 Worker 均要求同源）
+- WASM 端到端：`tools/build-wasm.sh` 后用 `python3 tools/serve-front.py` 起 HTTP 服务，浏览器访问 `http://localhost:8080/`（**不能 `file://` 直开**：ES module 与 Worker 均要求同源）
 - **真机复验**：`tools/browser-verify.mjs`——真 Chrome + 真 WASM 内核，**断言值**（`x1 == 0x0000002a`）。**需要先 `tools/build-wasm.sh`**（产物缺失 → 退出 127 = 前置条件缺失，不是验证失败）
 - 黄金对拍：`tools/golden-run.sh` 用 Spike 作为外部 oracle（参考侧 ISA 必须是 **`rv32imc_zicsr_zicclsm_zifencei_zicntr`**——`zicclsm` 决定 Spike 是否执行非对齐访问，stock `--isa=rv32imc` 是抛陷阱的，见台账 D-42；`zicntr` 决定 standard 影子 CSR 可读，见 STAGE-20 §4.1）。两侧跑**同一个 ELF**，判决与失败用例号都要一致
 - 测试位置约定：
