@@ -122,86 +122,15 @@ const STOP_REASONS = Object.freeze(new Set([
 ]));
 
 /**
- * 顶栏那个运行按钮的**两种文案**。
- *
- * ⚠️ **为什么要有两种**：用户拍板「**当加载之后顶栏的运行应该显示运行，点击停
- *   之后需要切换为继续（文本切换）**」⇒ ⇒ 那条按钮**同一个动作**（继续往下跑）
- *   但**两种语义**（「从头跑」/「接着跑」）⇒ ⇒ 按钮上必须**说出当下是哪种**⇒ ⇒
- *   用户点之前就知道自己点了会得到什么。
- *
- * ⚠️ **文案只有这一处** ⇒ ⇒ 顶栏按钮上显示的与判据说看到的**天然对得上**⇒ ⇒
- *   不是两处各写一遍。
- *
- * @type {string}
- */
-export const RUN_LABEL_RUN = "运行";
-
-/**
- * 顶栏那个运行按钮的**第二种文案**（接着跑）。
- *
- * @type {string}
- */
-export const RUN_LABEL_CONTINUE = "继续";
-
-/**
- * 「**这个程序已经跑起来过**吗」（`started`）。
- *
- * ⚠️ **它与 `mode` 是两件事**：`mode` 说「**此刻**前端还想连续跑吗」⇒ ⇒
- *   暂停之后 `mode` 变回 `idle`；而 `started` 说「**这个程序离开过起点吗**」⇒ ⇒
- *   暂停之后它**仍然是真**⇒ ⇒ 顶栏那个按钮因此从「运行」切成「继续」。
- *
- * ⚠️ **它不是「跑了几轮」**（那是 `windows`）⇒ ⇒ 也不说「跑到哪儿了」（那是
- *   PC）⇒ ⇒ 它只回答**「接着跑」还是「从头跑」**这一个问题。
- *
- * @param {{started?: boolean}|undefined} state
- * @returns {boolean}
- */
-export function startedOf(state) {
-    return state?.started === true;
-}
-
-/**
- * 顶栏那个运行按钮**此刻该显示哪句话**（纯函数 ⇒ ⇒ Node 侧零 DOM 就能测）。
- *
- * ⚠️ **判据只有一个**：`started` ⇒ ⇒ 「跑过 ⇒ ⇒ 继续；没跑过 ⇒ ⇒ 运行」⇒ ⇒
- *   与「此刻在不在跑」**无关**（在跑的时候按钮被禁用/不可点 ⇒ ⇒ 不影响）。
- *
- * @param {{started?: boolean}|undefined} state
- * @returns {string} `运行` 或 `继续`
- */
-export function runActionLabel(state) {
-    return startedOf(state) ? RUN_LABEL_CONTINUE : RUN_LABEL_RUN;
-}
-
-/**
  * 初始的运行状态。
  *
  * ⚠️ **`busy` = 在途的 `Continue` 计数**（STAGE-38 · v0.53 批 · 裁决 B）
  * ⇒ ⇒ 初值是 0（没有在途的执行）。
  *
- * ⚠️ **`started` = 还没跑起来过**（新工程 / 复位之后）⇒ ⇒ 顶栏那个按钮显示
- *   「运行」（用户拍板的那条语义）。
- *
- * @returns {{mode: string, windows: number, busy: number, started: boolean}}
+ * @returns {{mode: string, windows: number, busy: number}}
  */
 export function initialRunState() {
-    return { mode: RUN_MODE_IDLE, windows: 0, busy: 0, started: false };
-}
-
-/**
- * 记下「**这个程序跑起来过了**」（单步 / 按步数单步 / 连续运行都用它）。
- *
- * ⚠️ **只改 `started`** ⇒ ⇒ 模式、轮数、在途计数**逐字不动** ⇒ ⇒ 这条函数
- *   **不碰**连续运行的语义 ⇒ ⇒ 与 `bumpBusy` 同一手法。
- *
- * @param {{mode?: string, windows?: number, busy?: number, started?: boolean}} [state]
- * @returns {{mode: string, windows: number, busy: number, started: boolean}}
- */
-export function markStarted(state) {
-    const prev = state && typeof state === "object" ? state : initialRunState();
-    const mode = prev.mode === RUN_MODE_RUNNING ? RUN_MODE_RUNNING : RUN_MODE_IDLE;
-    const windows = Number.isFinite(prev.windows) ? Number(prev.windows) : 0;
-    return { mode, windows, busy: busyOf(prev), started: true };
+    return { mode: RUN_MODE_IDLE, windows: 0, busy: 0 };
 }
 
 /**
@@ -248,24 +177,16 @@ export function isKernelRunning(state) {
  * ⚠️ **只改 `busy`** ⇒ ⇒ 模式与轮数**逐字不动** ⇒ ⇒ 这条函数**不碰**
  * 连续运行的语义。
  *
- * ⚠️ **`started` 也逐字搬过去** ⇒ ⇒ 「跑过没有」与「在途计数」**互不相干**
- * ⇒ ⇒ 两条护栏各自独立。
- *
- * @param {{mode?: string, windows?: number, busy?: number, started?: boolean}|undefined} state
+ * @param {{mode?: string, windows?: number, busy?: number}|undefined} state
  * @param {number} delta — 通常是 `+1` 或 `-1`
- * @returns {{mode: string, windows: number, busy: number, started: boolean}}
+ * @returns {{mode: string, windows: number, busy: number}}
  */
 export function bumpBusy(state, delta) {
     const prev = state && typeof state === "object" ? state : initialRunState();
     const mode = prev.mode === RUN_MODE_RUNNING ? RUN_MODE_RUNNING : RUN_MODE_IDLE;
     const windows = Number.isFinite(prev.windows) ? Number(prev.windows) : 0;
     const step = Number.isFinite(delta) ? Number(delta) : 0;
-    return {
-        mode,
-        windows,
-        busy: Math.max(0, busyOf(prev) + step),
-        started: startedOf(prev),
-    };
+    return { mode, windows, busy: Math.max(0, busyOf(prev) + step) };
 }
 
 /**
@@ -341,24 +262,23 @@ export function nextRunAction(input) {
  * ⚠️ **`busy` 一律保留**（STAGE-38 · v0.53 批 · 裁决 B）⇒ ⇒ 在途计数
  * **不由**这条函数管（它由「在途 `Continue`」那条线管）⇒ ⇒ 这里**只**搬它。
  *
- * @param {{mode?: string, windows?: number, busy?: number, started?: boolean}} state
+ * @param {{mode?: string, windows?: number, busy?: number}} state
  * @param {string|null} reason
- * @returns {{mode: string, windows: number, busy: number, started: boolean}}
+ * @returns {{mode: string, windows: number, busy: number}}
  */
 export function runStateAfter(state, reason) {
     const prev = state && typeof state === "object" ? state : initialRunState();
     const mode = prev.mode === RUN_MODE_RUNNING ? RUN_MODE_RUNNING : RUN_MODE_IDLE;
     const windows = Number.isFinite(prev.windows) ? Number(prev.windows) : 0;
     const busy = busyOf(prev);
-    const started = startedOf(prev);
     const action = nextRunAction({ mode, reason });
     if (action === RUN_ACTION_CONTINUE) {
-        return { mode: RUN_MODE_RUNNING, windows: windows + 1, busy, started };
+        return { mode: RUN_MODE_RUNNING, windows: windows + 1, busy };
     }
     if (action === RUN_ACTION_STOP) {
-        return { mode: RUN_MODE_IDLE, windows, busy, started };
+        return { mode: RUN_MODE_IDLE, windows, busy };
     }
-    return { mode, windows, busy, started };
+    return { mode, windows, busy };
 }
 
 /**
@@ -370,10 +290,10 @@ export function runStateAfter(state, reason) {
  * ⚠️ **busy 也归零**（STAGE-38 · v0.53 批）⇒ ⇒ 新的连续运行**接管**了
  * 在途计数 ⇒ ⇒ 上一趟残留的在途数**不作数**。
  *
- * @returns {{mode: string, windows: number, busy: number, started: boolean}}
+ * @returns {{mode: string, windows: number, busy: number}}
  */
 export function startRunState() {
-    return { mode: RUN_MODE_RUNNING, windows: 0, busy: 0, started: true };
+    return { mode: RUN_MODE_RUNNING, windows: 0, busy: 0 };
 }
 
 /**
@@ -384,38 +304,10 @@ export function startRunState() {
  * 「运行中」⇒ ⇒ 活值**不**会提前闪出来。
  *
  * @param {{mode?: string, windows?: number, busy?: number}} [state]
- * @returns {{mode: string, windows: number, busy: number, started: boolean}}
+ * @returns {{mode: string, windows: number, busy: number}}
  */
 export function stopRunState(state) {
     const prev = state && typeof state === "object" ? state : initialRunState();
     const windows = Number.isFinite(prev.windows) ? Number(prev.windows) : 0;
-    return {
-        mode: RUN_MODE_IDLE,
-        windows,
-        busy: busyOf(prev),
-        started: startedOf(prev),
-    };
-}
-
-/**
- * 「**按步数单步**」的步数归一（纯函数 ⇒ ⇒ Node 侧零 DOM 就能测）。
- *
- * ⚠️ **只做「类型归一」，不做「业务上限校验」**：契约里 `StepN { n }` 的 `n`
- *   是 `u32` ⇒ ⇒ 前端能发的**只能**是 `0 … 4294967295` 的整数 ⇒ ⇒ 这一段是
- *   **域归一**（非数 / 负数 / 小数 ⇒ ⇒ 归成 **1**；太大 ⇒ ⇒ 归到 `u32` 上界）
- *   ⇒ ⇒ 与「前端不预校验内核的业务上限」那条规矩**不冲突**（内核那条上限是
- *   `DUMP_MAX_BYTES` 那种**业务**上限 ⇒ ⇒ 那种仍由内核拒）。
- *
- * ⚠️ **0 归成 1 而不是 0**：走 0 条指令 = **什么都不做** ⇒ ⇒ 用户点了按钮却
- *   看不到任何变化 ⇒ ⇒ 那正是「点了没反应」⇒ ⇒ 归成 1（真的走一条）。
- *
- * @param {unknown} raw — 界面输入框里的原始串
- * @returns {number} `1 … 4294967295` 的整数
- */
-export function normalizeStepCount(raw) {
-    const value = Number(String(raw ?? "").trim());
-    if (!Number.isFinite(value)) return 1;
-    const truncated = Math.trunc(value);
-    if (truncated < 1) return 1;
-    return Math.min(truncated, 0xffff_ffff);
+    return { mode: RUN_MODE_IDLE, windows, busy: busyOf(prev) };
 }

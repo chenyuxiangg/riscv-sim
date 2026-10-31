@@ -29,7 +29,14 @@
     -->
     <div class="conn" data-kernel-conn>
       <span class="dot"></span>
-      <span class="status" id="status">未连接</span>
+      <!--
+        ⚠️ **初值是「启动中…」而不是「未连接」**（v0.63 批）⇒ ⇒ 「未连接」是
+        **内核没连上**的话术 ⇒ ⇒ 而「**脚本根本没启动**」时页面也停在初值
+        ⇒ ⇒ 两者**长得一模一样** ⇒ ⇒ 用户会以为是内核的问题 ⇒ ⇒ 那个真机
+        事故（缓存导致 ES module 链接失败 ⇒ ⇒ 整个 app.js 都不执行）就是这么
+        被误读的 ⇒ ⇒ 初值改成「启动中…」⇒ ⇒ 两种情况**一眼能分开**。
+      -->
+      <span class="status" id="status">启动中…</span>
     </div>
 
     <!--
@@ -145,6 +152,29 @@
       document.getElementById("status").textContent =
         "请通过 HTTP 打开：python3 tools/serve-front.py";
     }
+
+    // ⚠️ **启动自检**（v0.63 批 · 「白屏要能自解释」）。
+    //
+    // ⚠️ **为什么要有**：ES module 的**链接期**是**全有或全无**的 ⇒ ⇒ 「新的
+    //   app.js」+「**浏览器缓存里的旧**某个模块」⇒ ⇒ 只要 app.js 从旧文件里
+    //   import 了一个**旧文件没有的名字**⇒ ⇒ **整个 app.js 都不执行**
+    //   ⇒ ⇒ 页面**只剩这一份静态 HTML** ⇒ ⇒ 侧栏空、主区空、状态停在初值
+    //   ⇒ ⇒ 用户看到的是「**一片空白 + 未连接**」，而真相是「**脚本没启动**」。
+    //
+    // ⚠️ **最常见的原因 = 浏览器缓存了旧版模块**（尤其：旧的
+    //   `python3 -m http.server` **不发 `Cache-Control`** ⇒ ⇒ 浏览器按
+    //   「启发式新鲜度」缓存 ES module ⇒ ⇒ 台账 D-169）。
+    //
+    // ⇒ ⇒ 所以这里**等一会儿**看状态位**还是不是初值** ⇒ ⇒ 是 ⇒ ⇒ 就**如实
+    //   说**「脚本没启动」并给出**能照着做的动作**（硬刷新）⇒ ⇒ 而**不是**
+    //   让用户对着一个「未连接」猜。
+    window.setTimeout(function () {
+      var el = document.getElementById("status");
+      if (!el) return;
+      if (String(el.textContent || "") !== "启动中…") return;  // 脚本跑起来了 ⇒ 不打扰
+      el.textContent =
+        "脚本没启动（多半是浏览器缓存了旧版模块）—— 请硬刷新：Cmd/Ctrl+Shift+R";
+    }, 2500);
   </script>
 
   <script type="module" src="app.js"></script>

@@ -82,14 +82,17 @@ import {
     initialRunState,
     isKernelRunning,
     liveValue,
-    markStarted,
     nextRunAction,
-    normalizeStepCount,
-    runActionLabel,
     runStateAfter,
     startRunState,
     stopRunState,
 } from "./lib/run-loop.js";
+// ⚠️ **「跑过没有」那一格与「运行 / 继续」文案住在**新模块**
+// （`front/lib/run-action.js`）⇒ ⇒ `run-loop.js` 的**导出集合一个字都不改**
+// ⇒ ⇒ 浏览器缓存里那份**旧副本照样能链接**⇒ ⇒ 最坏是「**新能力没有**」
+// （降级）⇒ ⇒ **不会白屏**（ES module 的链接期是**全有或全无**的 ⇒ ⇒ 旧
+// 文件少一个导出 ⇒ ⇒ **整个 app.js 都不执行** ⇒ ⇒ 页面只剩静态 HTML）。
+import { markStarted, normalizeStepCount, runActionLabel } from "./lib/run-action.js";
 // ⚠️ **trace 记录开关的判定**（纯函数）⇒ ⇒ 「点一下该发什么」只有一处说了算
 // ⇒ ⇒ 视图层渲染的按钮标签与这里发出的命令**引同一处** ⇒ ⇒ 不会对不上。
 import { nextTraceEnabled, traceSwitchState, TRACE_SWITCH_OFF } from "./lib/trace-switch.js";
@@ -409,7 +412,24 @@ export function isRunning() {
  * @returns {{mode: string, windows: number, busy: number}}
  */
 function bumpRunBusy(delta) {
-    return setRunState(bumpBusy(getRunState(), delta));
+    return transitionRunState(bumpBusy(getRunState(), delta));
+}
+
+/**
+ * 迁移**运行状态**，并**保住「跑过没有」那一格**。
+ *
+ * ⚠️ **为什么需要它**：`front/lib/run-loop.js` 那几个纯函数只搬 `mode` /
+ *   `windows` / `busy`（**v0.63 批起那个文件一个字未动** ⇒ ⇒ 缓存里的旧
+ *   副本**逐字可用**）⇒ ⇒ 「跑过没有」这一格**由 app 层自己搬**⇒ ⇒ 每次
+ *   迁移都得**显式**带上它 ⇒ ⇒ 否则暂停一下那一格就没了 ⇒ ⇒ 顶栏那个按钮
+ *   会**莫名其妙**切回「运行」。
+ *
+ * @param {{mode?: string, windows?: number, busy?: number}} next
+ * @param {{started?: boolean}} [prev] — 迁移**前**的状态（默认读当前）
+ * @returns {{mode: string, windows: number, busy: number, started: boolean}}
+ */
+function transitionRunState(next, prev = getRunState()) {
+    return setRunState({ ...next, started: prev?.started === true });
 }
 
 /**
@@ -1399,7 +1419,7 @@ export async function handleCommand(detail, services) {
             case "step10":
                 // ⚠️ **与「单步」同一条路**（同裁决 O）⇒ ⇒ 10 条也是「走一段
                 // 然后停」⇒ ⇒ 连续模式必须让位。
-                setRunState(stopRunState(getRunState()));
+                transitionRunState(stopRunState(getRunState()));
                 await commandRouter.dispatchCommand(Command.stepN(10));
                 break;
             case "continue":
@@ -1410,7 +1430,8 @@ export async function handleCommand(detail, services) {
                 // ⚠️ **幂等**（裁决 I）：已经在连续模式 ⇒ ⇒ **不重发** ⇒ ⇒
                 // 连点两下不会变成两个并行窗口。
                 if (getRunState().mode === RUN_MODE_RUNNING) break;
-                setRunState(startRunState());
+                // ⚠️ **连续运行 ⇒ ⇒ 程序离开过起点** ⇒ ⇒ 「跑过没有」置真。
+                setRunState({ ...startRunState(), started: true });
                 // ⚠️ **在途计数 +1**（STAGE-38 · v0.53 批 · 裁决 B）⇒ ⇒
                 // 「内核手上真的有一个窗口在跑」⇒ ⇒ 活值**立刻**隐藏。
                 bumpRunBusy(+1);
@@ -1423,7 +1444,7 @@ export async function handleCommand(detail, services) {
                     // ⚠️ **计数也要退回来**（裁决 B）⇒ ⇒ 否则内核**根本没跑**
                     // 而计数说「在跑」⇒ ⇒ 活值会**永远**藏着 ⇒ ⇒ 界面在骗人。
                     bumpRunBusy(-1);
-                    setRunState(stopRunState(getRunState()));
+                    transitionRunState(stopRunState(getRunState()));
                     throw err;
                 }
                 break;
@@ -1433,7 +1454,10 @@ export async function handleCommand(detail, services) {
                 // 运行会在第一条指令边界就停（F6）⇒ ⇒ **吃掉一整轮**。
                 // ⇒ ⇒ 这里只**停续发**（前端状态）⇒ ⇒ 正在跑的那一个窗口
                 // 跑完才停（10 µs 虚拟时间，用户感知不到）。
-                setRunState(stopRunState(getRunState()));
+                //
+                // ⚠️ **「跑过没有」那一格保留** ⇒ ⇒ 暂停之后顶栏那个按钮显示
+                //   「继续」⇒ ⇒ **继续**这个词才说得通。
+                transitionRunState(stopRunState(getRunState()));
                 // ⚠️ **v0.62 批**：暂停 ⇒ ⇒ **自动把 trace 渲染出来**（trace
                 //   开着 / 状态未知时）⇒ ⇒ 用户**点一下暂停**就能看到刚才录到的
                 //   东西 ⇒ ⇒ 不用再点一次「导出」。
@@ -1441,7 +1465,8 @@ export async function handleCommand(detail, services) {
                 break;
             case "reset":
                 // ⚠️ **复位 ⇒ 退出连续模式**（裁决 H）⇒ ⇒ 否则复位后还在跑。
-                setRunState(initialRunState());
+                // ⚠️ **「跑过没有」也归零** ⇒ ⇒ 顶栏那个按钮回到「运行」。
+                setRunState({ ...initialRunState(), started: false });
                 // 装载工程**并且**把三条内核侧订阅都强制重订
                 // （内核侧的订阅随工程一起失效了 —— 新工程 = 新会话，
                 // FR-13）。这几步绑在一个函数里，调用点不会漏掉后两步。
@@ -2026,7 +2051,7 @@ export async function loadProjectIntoKernel(services, project) {
     // ⚠️ **新工程 = 新程序 ⇒ 运行态归零**（v0.63 批）⇒ ⇒ 顶栏那个按钮回到
     //   「运行」（用户拍板的那条语义：「**当加载之后顶栏的运行应该显示运行**」）
     //   ⇒ ⇒ 「跑过没有」这一格也归零 ⇒ ⇒ 不是上一段程序的历史。
-    setRunState(initialRunState());
+    setRunState({ ...initialRunState(), started: false });
     waveform.reset();
     // ⚠️ 新工程 = 新程序 ⇒ **上一个程序的反汇编**留在面板上就是错的
     // （同一个 D-45 的坑：状态必须跟着工程一起重建）。
@@ -2773,7 +2798,8 @@ export function wireDebug(commandRouter) {
             // ⚠️ ⚠️ **先减后加在同一个值里算完**（裁决 C · 施工期订正 2）
             // ⇒ ⇒ 「内核让出控制权」的那一瞬间计数**不**会掉到 0 ⇒ ⇒
             // 界面**不会**把活值闪出来一下 ⇒ ⇒ **顺序是硬约束**。
-            setRunState({ ...next, busy: busy + 1 });
+            // ⚠️ **「跑过没有」那一格带上**（`run-loop.js` 只搬三格）。
+            setRunState({ ...next, busy: busy + 1, started: run.started === true });
             // ⚠️ **不 await** ⇒ ⇒ 这个订阅回调**不等**内核 ⇒ ⇒ 事件处理
             // 不会卡住 ⇒ ⇒ 错误也不往这里抛（抛了就是**未处理的拒绝**）。
             void Promise.resolve(commandRouter.dispatchCommand(Command.continueRun()))
@@ -2784,13 +2810,14 @@ export function wireDebug(commandRouter) {
                     // ⚠️ **计数也要退回来**⇒ ⇒ 否则内核**根本没跑**而计数说
                     // 「在跑」⇒ ⇒ 活值会**永远**藏着 ⇒ ⇒ 界面在骗人。
                     bumpRunBusy(-1);
-                    setRunState(stopRunState(getRunState()));
+                    transitionRunState(stopRunState(getRunState()));
                 });
         } else {
             // ⚠️ **真停**（断点 / 观察点 / 陷阱 / 用户暂停）⇒ ⇒ 退出连续模式
             // ⇒ ⇒ **不续发** ⇒ ⇒ 连续模式在断点后**不会**继续跑
             // ⇒ ⇒ 活值**恢复显示**（`isRunning()` 变成假）。
-            setRunState({ ...next, busy });
+            // ⚠️ **「跑过没有」那一格带上**（`run-loop.js` 只搬三格）。
+            setRunState({ ...next, busy, started: run.started === true });
         }
         publishViewState("debug");
     });

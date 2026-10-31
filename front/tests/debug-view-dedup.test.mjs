@@ -45,7 +45,7 @@ const m03 = await importFront("views/m03_viewstore.js");
 const m05 = await importFront("services/m05_commandrouter.js");
 const { Command, eventMessage } = await importFront("lib/message.js");
 const { createMockKernel } = await importFront("dev/mock-kernel.js");
-const { normalizeStepCount, runActionLabel } = await importFront("lib/run-loop.js");
+const { normalizeStepCount, runActionLabel } = await importFront("lib/run-action.js");
 
 await m02.mountViewComponents();
 
@@ -340,6 +340,161 @@ describe("波形视图 · 承担「导出波形」", () => {
             "调试视图里还有「导出波形」按钮（应当只在波形视图里）",
         );
         router.close();
+    });
+});
+
+describe("模块图 · 旧缓存**不能**把页面砸成白屏", () => {
+    /**
+     * `front/lib/run-loop.js` 的**导出集合**（**故意写死**）。
+     *
+     * ⚠️ **为什么写死**：ES module 的**链接期**是**全有或全无**的 ⇒ ⇒ 「新的
+     *   `app.js`」+「浏览器缓存里的旧 `run-loop.js`」⇒ ⇒ 只要 app.js 从旧
+     *   文件里 import 了一个**旧文件没有的名字**⇒ ⇒ **整个 app.js 都不执行**
+     *   ⇒ ⇒ 页面**只剩静态 HTML** ⇒ ⇒ 状态停在初值 ⇒ ⇒ 用户看到的是
+     *   「**一片空白 + 未连接**」⇒ ⇒ 而真相是「**脚本根本没启动**」。
+     *
+     * ⇒ ⇒ 所以这条判据钉住：**新能力一律放新模块**（`front/lib/run-action.js`）
+     *   ⇒ ⇒ 旧缓存那份**逐字可链接** ⇒ ⇒ 最坏只是「**新功能没有**」
+     *   （降级）⇒ ⇒ **不会白屏**。
+     */
+    const RUN_LOOP_EXPORTS = [
+        "HALT_REASON_BREAKPOINT",
+        "HALT_REASON_END_OF_EXECUTION",
+        "HALT_REASON_TRAP",
+        "HALT_REASON_USER_PAUSE",
+        "HALT_REASON_WATCHPOINT",
+        "LIVE_HIDDEN_SYMBOL",
+        "RUN_ACTION_CONTINUE",
+        "RUN_ACTION_NONE",
+        "RUN_ACTION_STOP",
+        "RUN_MODE_IDLE",
+        "RUN_MODE_RUNNING",
+        "bumpBusy",
+        "busyOf",
+        "initialRunState",
+        "isKernelRunning",
+        "liveValue",
+        "nextRunAction",
+        "runStateAfter",
+        "startRunState",
+        "stopRunState",
+    ];
+
+    /** 从源码文本里抽出**导出名**（`export function/const/class` 与 `export {…}`）。 */
+    function exportedNames(source) {
+        const named = [...source.matchAll(/export\s+(?:function|const|class|let)\s+([A-Za-z0-9_$]+)/g)]
+            .map((m) => m[1]);
+        const braced = [...source.matchAll(/export\s*\{([^}]*)\}/g)]
+            .flatMap((m) => m[1].split(",").map((x) => x.trim()).filter(Boolean));
+        return [...new Set([...named, ...braced])].sort();
+    }
+
+    test("`lib/run-loop.js` 的导出集合**一个字都没改**（新能力住在新模块）", async () => {
+        const source = readFileSync(resolve(frontDir, "lib/run-loop.js"), "utf8");
+        assert.deepEqual(
+            exportedNames(source),
+            [...RUN_LOOP_EXPORTS].sort(),
+            "既有模块的导出集合被改了 ⇒ ⇒ 浏览器缓存里的旧副本就链接不上 ⇒ ⇒ 白屏",
+        );
+    });
+
+    test("`app.js` 从 `lib/run-loop.js` 导入的名字**全都在导出集合里**", async () => {
+        const source = readFileSync(resolve(frontDir, "app.js"), "utf8");
+        const m = /import\s*\{([^}]*)\}\s*from\s*"\.\/lib\/run-loop\.js"/.exec(source);
+        assert.ok(m, "app.js 里没有从 ./lib/run-loop.js 的 import 语句");
+        const imported = m[1].split(",").map((x) => x.trim()).filter(Boolean);
+        assert.ok(imported.length > 0, "import 名单是空的");
+        for (const name of imported) {
+            assert.ok(
+                RUN_LOOP_EXPORTS.includes(name),
+                `app.js 从 run-loop.js 导入了 ${name}，而**旧缓存那份没有它**`
+                + " ⇒ ⇒ 链接失败 ⇒ ⇒ 整个 app.js 都不执行 ⇒ ⇒ 白屏",
+            );
+        }
+    });
+
+    test("新能力住在**新模块**里（新文件 ⇒ ⇒ 从来没被缓存过 ⇒ ⇒ 必然是新的）", async () => {
+        const source = readFileSync(resolve(frontDir, "lib/run-action.js"), "utf8");
+        for (const name of ["markStarted", "runActionLabel", "normalizeStepCount"]) {
+            assert.match(
+                source,
+                new RegExp(`export function ${name}\\b`),
+                `新模块里没有 ${name}`,
+            );
+        }
+    });
+});
+
+describe("白屏 · 要能**自解释**", () => {
+    test("状态初值是「启动中…」而不是「未连接」（两者**不是**一回事）", () => {
+        const html = readFileSync(resolve(frontDir, "index.html"), "utf8");
+        assert.match(html, /id="status"[^>]*>启动中…</, "状态初值应当是「启动中…」");
+        assert.ok(
+            !/id="status"[^>]*>未连接</.test(html),
+            "状态初值又写回「未连接」了 ⇒ ⇒ 「脚本没启动」会被误读成「内核没连上」",
+        );
+    });
+
+    /**
+     * 把 index.html 里那段**内联脚本**取出来，在 stub 的 DOM 上**真跑一遍**。
+     *
+     * ⚠️ **为什么必须「真跑」**：那段脚本是 **inline classic script** ⇒ ⇒ 它
+     *   **不能** import 任何模块 ⇒ ⇒ 它**必须自包含**（模块图整个坏掉的时候，
+     *   **只有它**还能说话）⇒ ⇒ 于是它**没法**被 Node 侧 import 来测 ⇒ ⇒
+     *   唯一的测法就是「把它的源码取出来、在 stub 的 DOM 上执行」⇒ ⇒ 判据抓的
+     *   才是**行为**（定时器有没有排上、触发后状态位变成什么）⇒ ⇒ 而**不是**
+     *   「源码里有没有那句话」（那句话可以**根本没执行** ⇒ ⇒ 零判别力）。
+     *
+     * @returns {{timers: Function[], status: Element}}
+     */
+    function runInlineBootScript() {
+        const html = readFileSync(resolve(frontDir, "index.html"), "utf8");
+        const m = /<script>\s*([\s\S]*?)<\/script>/.exec(html);
+        assert.ok(m, "index.html 里没有那段内联脚本");
+        /** @type {Function[]} */
+        const timers = [];
+        const fakeWindow = {
+            setTimeout(fn) {
+                timers.push(fn);
+                return timers.length;
+            },
+        };
+        // ⚠️ `location.protocol` 用 **http:** ⇒ ⇒ 「file:// 请通过 HTTP 打开」
+        //   那一支**不触发** ⇒ ⇒ 本用例只盯启动自检。
+        const run = new Function("window", "document", "location", m[1]);
+        run(fakeWindow, dom.document, { protocol: "http:" });
+        const status = dom.document.getElementById("status");
+        assert.ok(status, "状态位不在 DOM 里");
+        return { timers, status };
+    }
+
+    test("内联脚本**真的**排了一个启动自检（脚本没起来 ⇒ ⇒ 会说话）", () => {
+        const { timers, status } = runInlineBootScript();
+        assert.equal(timers.length, 1, "内联脚本没有排启动自检（白屏就没人说话了）");
+        assert.equal(
+            String(status.textContent ?? ""),
+            "启动中…",
+            "刚排上自检时状态位应当还是初值",
+        );
+    });
+
+    test("启动自检**触发后**给出**可执行**的提示（硬刷新）", () => {
+        const { timers, status } = runInlineBootScript();
+        timers[0]();
+        const text = String(status.textContent ?? "");
+        assert.match(text, /脚本没启动/, `状态位没有说清真相：${text}`);
+        assert.match(text, /Shift\+R/, `提示里没有硬刷新这个动作：${text}`);
+    });
+
+    test("**反向对照**：脚本**起来了**（状态位已是真实状态）⇒ ⇒ 自检**不许**打扰", () => {
+        const { timers, status } = runInlineBootScript();
+        status.textContent = "kernel 已连接 — wasm worker";
+        timers[0]();
+        assert.equal(
+            String(status.textContent ?? ""),
+            "kernel 已连接 — wasm worker",
+            "脚本明明起来了，自检却把状态位覆盖了",
+        );
     });
 });
 
