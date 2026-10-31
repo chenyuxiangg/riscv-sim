@@ -81,6 +81,9 @@ import {
     startRunState,
     stopRunState,
 } from "./lib/run-loop.js";
+// ⚠️ **trace 记录开关的判定**（纯函数）⇒ ⇒ 「点一下该发什么」只有一处说了算
+// ⇒ ⇒ 视图层渲染的按钮标签与这里发出的命令**引同一处** ⇒ ⇒ 不会对不上。
+import { nextTraceEnabled } from "./lib/trace-switch.js";
 // ⚠️ **告警弹窗**（STAGE-38 · v0.53 批）⇒ ⇒ 运行中点「读内存」= 拒绝 + 弹窗。
 // ⇒ ⇒ 本仓**第一个**碰 DOM 的 lib 模块（弹窗是**全局**的，不属于任何一个视图）。
 import { showAlert } from "./lib/alert.js";
@@ -1486,12 +1489,37 @@ export async function handleCommand(detail, services) {
                 );
                 break;
             }
-            case "trace-enable":
-                await commandRouter.dispatchCommand(Command.setTraceEnabled(true));
+            case "trace-toggle": {
+                // ⚠️ **一个开关**（此前是两个按钮）⇒ ⇒ 「下一个值」由**视图状态**
+                // 推导 ⇒ ⇒ 判定只有一处（`front/lib/trace-switch.js`）⇒ ⇒ 视图
+                // 层渲染的按钮标签与这里发出的命令**不可能**对不上。
+                //
+                // ⚠️ **状态未知 ⇒ 第一次点 = 开启**：内核只在**这条命令的回复**
+                // 里报告开关状态 ⇒ ⇒ 一次都没点过时前端**不知道** ⇒ ⇒ 第一次
+                // 点击**顺带**完成「查询」（内核的报告是唯一真相）。
+                const current = viewStore.getState("debug")?.debug?.trace ?? null;
+                const next = nextTraceEnabled(current);
+                try {
+                    await commandRouter.dispatchCommand(Command.setTraceEnabled(next));
+                } catch (err) {
+                    // ⚠️ **失败必须让用户看见**：页脚那行提示在**页面最底下**
+                    // （调试视图比视口高 ⇒ ⇒ 不滚动看不见）⇒ ⇒ 「点了没反应」
+                    // 的**第二个**来源就在这儿 ⇒ ⇒ 失败写进**调试面板**的错误位
+                    // （用户正看着的那块）。
+                    updateDebugState((prev) => ({
+                        ...prev,
+                        debug: {
+                            ...(prev.debug ?? {}),
+                            error: {
+                                code: err?.code ?? "E_CTX-06",
+                                message: `切换 trace 记录开关失败：${err?.message ?? String(err)}`,
+                            },
+                        },
+                    }));
+                    return;
+                }
                 break;
-            case "trace-disable":
-                await commandRouter.dispatchCommand(Command.setTraceEnabled(false));
-                break;
+            }
             case "submit-memory-map": {
                 // 提交板级内存图（契约 v6 的 `SetMemoryMap` / **v7 的
                 // `PatchMemoryMap`**）。

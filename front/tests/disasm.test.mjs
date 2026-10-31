@@ -529,25 +529,49 @@ describe("trace 导出入口", () => {
 
 // ---------------------------------------------------------------------------
 
-describe("trace 开关 · 降速提示与错误路径", () => {
-    test("TraceState.enabled=true 显示降速提示，false 时提示消失", async () => {
+describe("trace 开关 · 状态行与错误路径", () => {
+    test("状态行**三态都在**：未查询 / 已开启 / 已关闭（不是「开着才有」）", async () => {
         const { router } = await setup();
+        // ⚠️ **判「主句」不判整段**：提示句里会说明「点了会发生什么」（那里面
+        //   会出现「开启 / 关闭 / 降速」这些词）⇒ ⇒ 拿整段判「状态是什么」
+        //   会**假红**（读错位置与功能没做在输出上长得一样）。
+        const main = () => {
+            const line = dom.document.querySelector("[data-trace-state]");
+            assert.ok(line, "状态行不在");
+            // ⚠️ **不写后代选择器**（`[a] .b`）⇒ ⇒ dom-stub 不支持组合器
+            //   （真浏览器支持）⇒ ⇒ 先取状态行、再在它里面取主句。
+            const el = line.querySelector(".trace-state-main");
+            assert.ok(el, "状态行的主句不在");
+            return String(el.textContent || "");
+        };
+        // ⚠️ **初始 = 未查询**（内核只在命令的回复里报告状态 ⇒ 一次都没点过
+        //   ⇒ 前端**不知道** ⇒ ⇒ 如实说「未查询」，不猜）。
+        const initial = dom.document.querySelector("[data-trace-state]");
+        assert.ok(initial, "状态行不在（此前只有「开着」才有那行提示）");
         assert.equal(
-            dom.document.querySelector("[data-trace-notice]"),
-            null,
-            "初始状态不该有降速提示",
+            initial.getAttribute("data-trace-switch"),
+            "unknown",
+            "初始状态必须是「未查询」",
         );
-        await router.dispatchCommand(Command.setTraceEnabled(true));
-        const notice = dom.document.querySelector("[data-trace-notice]");
-        assert.ok(notice, "开启 trace 后没有降速提示");
-        assert.ok(notice.textContent.includes("降速"), "提示没有说明会降速");
+        assert.ok(main().includes("状态未查询"), "初始没有说「状态未查询」");
+        assert.ok(!main().includes("已开启"), "未查询时不该说「已开启」（那是猜）");
+        assert.ok(!main().includes("已关闭"), "未查询时不该说「已关闭」（那是猜）");
 
+        await router.dispatchCommand(Command.setTraceEnabled(true));
+        const on = dom.document.querySelector("[data-trace-state]");
+        assert.ok(on, "开启后状态行没了");
+        assert.equal(on.getAttribute("data-trace-switch"), "on", "开启后状态不是 on");
+        assert.ok(main().includes("已开启"), "开启后没有说「已开启」");
+        assert.ok(main().includes("降速"), "开启后没有说明会降速");
+
+        // ⚠️ **关闭时状态行**仍然在**（这是本次改动的核心）⇒ ⇒ 「关着」与
+        //   「从没点过」在界面上**不再一样** ⇒ ⇒ 用户判断得出自己开没开。
         await router.dispatchCommand(Command.setTraceEnabled(false));
-        assert.equal(
-            dom.document.querySelector("[data-trace-notice]"),
-            null,
-            "关闭 trace 后降速提示还在",
-        );
+        const off = dom.document.querySelector("[data-trace-state]");
+        assert.ok(off, "关闭后状态行没了（应当常驻）");
+        assert.equal(off.getAttribute("data-trace-switch"), "off", "关闭后状态不是 off");
+        assert.ok(main().includes("已关闭"), "关闭后没有说「已关闭」");
+        assert.ok(!main().includes("已开启"), "关闭后主句还在说「已开启」");
         router.close();
     });
 
