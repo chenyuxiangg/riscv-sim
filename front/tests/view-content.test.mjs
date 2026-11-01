@@ -154,12 +154,15 @@ describe("STAGE-35 · 视图内容形态（卡片化）", () => {
         }
     });
 
-    test("A-3 · 嵌入式总览是 `.cards` 网格，里面**至少 3 个** `.kpi`", () => {
+    test("A-3 · 嵌入式总览是 `.cards` 网格，里面**至少 2 个** `.kpi`（PC 与内核连接）", () => {
         const el = show("embedded");
         const grids = el.querySelectorAll(".cards");
         assert.ok(grids.length >= 1, "嵌入式总览里没有 .cards 网格");
         const kpis = el.querySelectorAll(".kpi");
-        assert.ok(kpis.length >= 3, `嵌入式总览的 .kpi 只有 ${kpis.length} 个（至少要 3 个）`);
+        // ⚠️ **v0.69 批（台账 D-173 做法 A）**：落地视图**删掉了**那份
+        //   **重复的**虚拟时间 KPI ⇒ ⇒ **3 个变 2 个** ⇒ ⇒ 判据跟着改
+        //   ⇒ ⇒ **不是**「KPI 卡片整体没了」⇒ ⇒ 下界是 **2**（PC + 内核连接）。
+        assert.ok(kpis.length >= 2, `嵌入式总览的 .kpi 只有 ${kpis.length} 个（至少要 2 个）`);
         // ⚠️ **KPI 必须真的在那个网格里** ⇒ ⇒ 逐个查祖先。
         const inGrid = kpis.filter((k) => k.closest(".cards"));
         assert.equal(

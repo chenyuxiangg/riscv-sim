@@ -6,12 +6,17 @@
 //
 // 这个套件盯住：
 //   1. **B-1**：组件注册表里查得到 `embedded`（不是「查得到别的六个」）；
-//   2. 落地视图正文**不是空面板**：有连接状态、当前 PC、虚拟时间；
+//   2. 落地视图正文**不是空面板**：有连接状态、当前 PC；
 //   3. **子视图入口**（调试 / 寄存器内存 / 波形 / 源码）四个都在，且
 //      `data-*` 标记可被脚本取到（真机脚本靠它断言，不靠文案匹配）；
 //   4. 入口**真的能跳**：点击后由 **M-01** 路由到目标视图；
-//   5. PC / 虚拟时间**只**来自既有状态源（M-10 推进的 `sim.pc` / `timeVirt`）
-//      ⇒ 前端不许自己造第二个 PC 来源。
+//   5. PC **只**来自既有状态源（M-10 推进的 `sim.pc`）⇒ 前端不许自己造
+//      第二个 PC 来源。
+//
+// ⚠️ **v0.69 批（台账 D-173 做法 A）**：落地视图**不再**显示虚拟时间 ⇒ ⇒
+//   那份是**重复**的（顶栏那份**全屏都在**）⇒ ⇒ 「同一个量只显示一处」这条
+//   规矩**在落地视图上终于成立**⇒ ⇒ 本文件里那两条判据**跟着改**（从
+//   「有 `[data-embedded-time]`」改成「**零个**」）。
 //
 // ⚠️ **文件名独立成文件**：M-03 的视图状态是**模块级单例**，而 `?role=` 是
 // **导入时**读的 ⇒ 需要独立进程才能拿到干净的落地视图装配。
@@ -102,7 +107,31 @@ describe("落地视图（embedded）· 组件注册", () => {
 });
 
 describe("落地视图（embedded）· 正文不是空面板", () => {
-    test("正文里有连接状态、当前 PC 与虚拟时间", () => {
+    test("N-1 · 落地视图正文里**零个**虚拟时间元素（顶栏那份是**唯一**那一份 · D-173）", () => {
+        const body = landEmbedded({
+            sim: { pc: 0x0000_1234 },
+            timeVirt: 4200,
+            link: { connected: true },
+        });
+        // ⚠️ **D-173 做法 A**（v0.69 批）⇒ ⇒ 落地视图**不再**显示第二份
+        //   虚拟时间 ⇒ ⇒ **零个** ⇒ ⇒ 顶栏那份是**唯一**那一份
+        //   （「同一个量只显示一处」这条规矩**在落地视图上终于成立**）。
+        //
+        // ⚠️ **两个钩子都查** ⇒ ⇒ 删掉元素但留下 class（或反过来）⇒ ⇒
+        //   都会被抓到。
+        assert.equal(
+            body.querySelectorAll("[data-embedded-time]").length,
+            0,
+            "落地视图**不该**再显示虚拟时间（顶栏那份才是唯一那一份）",
+        );
+        assert.equal(
+            body.querySelectorAll(".timeVirt").length,
+            0,
+            "落地视图**不该**再有 `.timeVirt`（那是虚拟时间那个 class）",
+        );
+    });
+
+    test("N-2 · 落地视图**仍然有**「当前 PC」与「内核连接」两张 KPI（**正向对照** · D-173）", () => {
         const body = landEmbedded({
             sim: { pc: 0x0000_1234 },
             timeVirt: 4200,
@@ -118,9 +147,13 @@ describe("落地视图（embedded）· 正文不是空面板", () => {
         assert.ok(pc, "落地视图正文里没有 PC 标记");
         assert.equal(pc.textContent.trim(), "0x00001234");
 
-        const time = body.querySelector("[data-embedded-time]");
-        assert.ok(time, "落地视图正文里没有虚拟时间标记");
-        assert.match(time.textContent, /4200 ps/);
+        // ⚠️ **正向对照**：删的是**那一份重复的**虚拟时间 ⇒ ⇒ **不是**把整张
+        //   概览删光 ⇒ ⇒ 这两张 KPI **必须还在**。
+        const kpis = body.querySelectorAll(".kpi");
+        assert.equal(kpis.length, 2, `落地视图的 KPI 应剩 2 张（PC + 内核连接），实得 ${kpis.length}`);
+        const labels = [...kpis].map((k) => String(k.textContent || ""));
+        assert.ok(labels.some((t) => t.includes("当前 PC")), "「当前 PC」那张 KPI 不在了");
+        assert.ok(labels.some((t) => t.includes("内核连接")), "「内核连接」那张 KPI 不在了");
     });
 
     test("未连接时如实显示「未连接」（不假装连上了）", () => {
@@ -133,10 +166,17 @@ describe("落地视图（embedded）· 正文不是空面板", () => {
         assert.match(link.textContent, /M-07 待接线/);
     });
 
-    test("PC 与虚拟时间只来自视图状态（前端不造第二个 PC 来源）", () => {
+    test("PC 只来自视图状态（前端不造第二个 PC 来源）· 虚拟时间**不在这里**（D-173）", () => {
         const body = landEmbedded({ sim: { pc: 0xdead_beef }, timeVirt: 99 });
         assert.equal(body.querySelector("[data-embedded-pc]").textContent.trim(), "0xdeadbeef");
-        assert.match(body.querySelector("[data-embedded-time]").textContent, /99 ps/);
+        // ⚠️ **D-173 做法 A**（v0.69 批）⇒ ⇒ 落地视图**不再**读 `timeVirt`
+        //   ⇒ ⇒ 那个量在界面上**只有顶栏一份** ⇒ ⇒ 「同一个量只显示一处」。
+        //   （N-1 已经钉了「零个」⇒ ⇒ 这里钉的是「PC 那一份**不受影响**」⇒ ⇒
+        //   **正向对照**。）
+        assert.ok(
+            body.querySelector("[data-embedded-pc]"),
+            "删掉虚拟时间那份**不许**把 PC 那份也删掉",
+        );
     });
 
     test("三个子视图入口都在，且带可被脚本取到的 data-* 标记", () => {

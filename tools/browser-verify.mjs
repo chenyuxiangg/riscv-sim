@@ -196,6 +196,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "deviceRegistry",
     "boardTree",
     "readback",
+    "staleSurfaces",
 ]);
 
 /**
@@ -6704,6 +6705,186 @@ async function runReadbackSection(cdp, opts) {
 }
 
 /**
+ * STAGE-45 · v0.69 批的真机探针：**陈旧面**（反汇编状态行 + 跟随开关 +
+ * 落地视图那份虚拟时间）。
+ *
+ * ⚠️ **只读 DOM** ⇒ ⇒ 判的是**界面上真的有的东西** ⇒ ⇒ 不靠文案猜测
+ *   ⇒ ⇒ 但「状态行**说清**了什么」那一条**必须**读文案（那是它的全部内容）。
+ */
+const BV_STALE_SURFACES_PROBE = `(() => {
+  const body = document.querySelector('[data-view-body="debug"]');
+  const status = body ? body.querySelector("[data-disasm-status]") : null;
+  const follow = body ? body.querySelector("[data-disasm-follow]") : null;
+  const row = body ? body.querySelector("tr.disasm-row") : null;
+  const addr = row ? row.getAttribute("data-disasm-addr") : null;
+  const topbarPc = document.querySelector("[data-topbar-pc-value]");
+  const embedded = document.querySelector('[data-view-body="embedded"]');
+  const kpis = embedded ? embedded.querySelectorAll(".kpi") : [];
+  return {
+    hasBody: !!body,
+    hasStatus: !!status,
+    statusText: status ? String(status.textContent || "").trim() : "",
+    stale: status ? String(status.getAttribute("data-disasm-stale") || "") : "",
+    hasFollow: !!follow,
+    followChecked: follow ? (follow.checked === true) : null,
+    firstAddr: addr === null || addr === undefined ? null : String(addr),
+    topbarPc: topbarPc ? String(topbarPc.textContent || "").trim() : null,
+    embeddedTimeVirtCount: embedded ? embedded.querySelectorAll(".timeVirt").length : -1,
+    embeddedKpiCount: kpis.length,
+    embeddedHasPc: embedded ? !!embedded.querySelector("[data-embedded-pc]") : false,
+    hasTopbarTime: !!document.querySelector("[data-topbar-time-value]"),
+  };
+})()`;
+
+/**
+ * STAGE-45 · v0.69 批的真机段：**陈旧面收尾**（台账 **D-176** 做法 C + B ·
+ * **D-173** 做法 A）。
+ *
+ * ⚠️ **本段盯三条**：
+ *   ① **D-173**：落地视图**不再**显示第二份虚拟时间 ⇒ ⇒ 顶栏那份是**唯一**
+ *      那一份（**正向对照**：顶栏那份**必须还在**）；
+ *   ② **D-176 做法 C**：反汇编卡**说清**了「这段是哪个 PC 时的」与「当前
+ *      PC 是多少」⇒ ⇒ **不骗人**；
+ *   ③ **D-176 做法 B**：「跟随 PC」开关 ⇒ ⇒ **关**着时停下**不顶掉**用户
+ *      手动选的那段（**必要对照**）· **开**着时停下**自动跟上**。
+ *
+ * ⚠️ **段内的顺序是硬约束**：
+ *   **B-133（关闭）必须排在 B-132（打开）之前** ⇒ ⇒ 否则「关闭」那条测的
+ *   是「开过之后又被关掉」的残留状态 ⇒ ⇒ **不是**同一件事。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{checks: object[]}>}
+ */
+async function runStaleSurfacesSection(cdp, opts) {
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
+    const probe = async () => await awaitEval(cdp, BV_STALE_SURFACES_PROBE);
+
+    // -- 前置：**显式装 demo 固件** ⇒ ⇒ 有可跑的程序 ------------------------
+    await resetAndLoadDemoFirmware(cdp, opts);
+    await sleep(900);
+    await runEffect(cdp, 'location.hash = "#/debug";');
+    await sleep(700);
+
+    // -- ① 点「反汇编」⇒ ⇒ 表里**有**一段（起点 = 当时的 PC）--------------
+    await runEffect(cdp, `(() => {
+        const b = document.querySelector('[data-view-body="debug"] [data-action="disasm"]');
+        if (!b) return "no-button";
+        b.click();
+        return "clicked";
+    })()`);
+    await sleep(800);
+    let p = await probe();
+    const baseAddr = p?.firstAddr ?? null;
+    add(
+        "前置：点「反汇编」⇒ ⇒ 表里**有**一段"
+        + "（⇒ ⇒ 后面那些判据才有意义 ⇒ ⇒ 没有它就**无从谈起**）",
+        p?.hasBody === true && typeof baseAddr === "string" && baseAddr.length > 0,
+        `第一条地址=${JSON.stringify(baseAddr)}`,
+    );
+
+    // -- ② 跑一段再暂停 ⇒ ⇒ 程序**真的**跑到别处去了 -----------------------
+    await clickTopbarAction(cdp, "run");
+    await sleep(1200);
+    await clickTopbarAction(cdp, "pause");
+    // ⚠️ **等读回落地**：停下之后有一次**自动读回**（寄存器 + 内存单元 +
+    //   转储）⇒ ⇒ 那是一次**内核往返**⇒ ⇒ 得给它时间。
+    await sleep(1500);
+    p = await probe();
+    const stoppedPc = p?.topbarPc ?? null;
+
+    // -- B-131 · 状态行**说清**了「这段是哪个 PC 时的」与「当前 PC 是多少」--
+    add(
+        "B-131 · 跑一段再停下 ⇒ ⇒ 反汇编卡的状态行**说清**了"
+        + "「这段是哪个 PC 时的」与「当前 PC 是多少」"
+        + "（⇒ ⇒ **不骗人** ⇒ ⇒ 用户看得出来它过期了）",
+        String(p?.statusText ?? "").includes(String(baseAddr ?? " "))
+            && String(p?.statusText ?? "").includes(String(stoppedPc ?? " "))
+            && String(stoppedPc ?? "") !== " ",
+        `状态行=${JSON.stringify(p?.statusText)} 这一段的起点=${JSON.stringify(baseAddr)} 停下的 PC=${JSON.stringify(stoppedPc)}`,
+    );
+
+    // -- B-133 · 「跟随 PC」**关闭** ⇒ ⇒ 停下后那段**逐字不变**（必要对照）--
+    add(
+        "B-133 · 「跟随 PC」**关闭**（默认）⇒ ⇒ 停下后表里那段**逐字不变**"
+        + "（用户点「反汇编」时那一段**不被顶掉**）"
+        + "（⇒ ⇒ **必要对照** ⇒ ⇒ 否则「跟随」那条判据恒绿）",
+        p?.followChecked === false
+            && String(p?.firstAddr ?? "") === String(baseAddr ?? "")
+            && String(p?.stale ?? "") === "1",
+        `停下后第一条=${JSON.stringify(p?.firstAddr)} 点「反汇编」时=${JSON.stringify(baseAddr)} 开关=${p?.followChecked} 陈旧标记=${JSON.stringify(p?.stale)}`,
+    );
+
+    // -- ③ 真点那个复选框 ⇒ ⇒ 勾上 ⇒ ⇒ **立刻**重取一段（当前 PC）----------
+    await runEffect(cdp, `(() => {
+        const c = document.querySelector('[data-view-body="debug"] [data-disasm-follow]');
+        if (!c) return "no-checkbox";
+        if (c.checked !== true) c.click();
+        return "clicked";
+    })()`);
+    await sleep(900);
+    p = await probe();
+    add(
+        "「跟随 PC」勾上 ⇒ ⇒ **立刻**重取了一段（起点 == 停下的那个 PC）"
+        + "（⇒ ⇒ 勾上就能看见变化 ⇒ ⇒ 不是「点了没反应」）",
+        p?.followChecked === true
+            && String(p?.firstAddr ?? "") === String(stoppedPc ?? ""),
+        `勾上后第一条=${JSON.stringify(p?.firstAddr)} 停下的 PC=${JSON.stringify(stoppedPc)} 开关=${p?.followChecked}`,
+    );
+
+    // -- ④ 再跑一段再暂停 ⇒ ⇒ **停下后**自动跟上 ---------------------------
+    await clickTopbarAction(cdp, "run");
+    await sleep(1200);
+    await clickTopbarAction(cdp, "pause");
+    await sleep(1800);
+    p = await probe();
+    const stoppedPc2 = p?.topbarPc ?? null;
+
+    // -- B-132 · 「跟随 PC」**打开** ⇒ ⇒ 停下后第一条 == 停下的 PC ---------
+    add(
+        "B-132 · 「跟随 PC」**打开** ⇒ ⇒ 停下后表里**第一条地址 == 停下的 PC**"
+        + "（⇒ ⇒ 自动跟上了 ⇒ ⇒ 不再是旧 PC 那一段）",
+        String(p?.firstAddr ?? "") === String(stoppedPc2 ?? "")
+            && String(stoppedPc2 ?? "") !== " "
+            && String(stoppedPc2 ?? "") !== String(baseAddr ?? ""),
+        `停下后第一条=${JSON.stringify(p?.firstAddr)} 停下的 PC=${JSON.stringify(stoppedPc2)} 原来的起点=${JSON.stringify(baseAddr)}`,
+    );
+
+    // -- B-134 · 跟随打开时状态行**不再**标「陈旧」--------------------------
+    add(
+        "B-134 · 「跟随 PC」**打开**时状态行**不再**标「陈旧」"
+        + "（⇒ ⇒ 跟随真的跟上了 ⇒ ⇒ 不是只把开关打开了）",
+        String(p?.stale ?? "") === "0",
+        `陈旧标记=${JSON.stringify(p?.stale)} 状态行=${JSON.stringify(p?.statusText)}`,
+    );
+
+    // -- ⑤ 切到落地视图 ⇒ ⇒ 那里**没有**第二份虚拟时间 ---------------------
+    await runEffect(cdp, 'location.hash = "#/embedded";');
+    await sleep(800);
+    p = await probe();
+
+    // -- B-130 · 落地视图**没有** `.timeVirt`；顶栏那份**仍在**（正向对照）--
+    add(
+        "B-130 · 落地视图里**没有** `.timeVirt` 元素 ⇒ ⇒ **且**顶栏那份"
+        + "（`[data-topbar-time-value]`）**仍在** ⇒ ⇒ 顶栏是**唯一**那一份"
+        + "（⇒ ⇒ **正向对照** ⇒ ⇒ 那条判据不许空转）",
+        p?.embeddedTimeVirtCount === 0 && p?.hasTopbarTime === true,
+        `落地视图的 .timeVirt 个数=${p?.embeddedTimeVirtCount} 顶栏那份在不在=${p?.hasTopbarTime}`,
+    );
+
+    // -- B-135 · 落地视图**仍然有**那两张 KPI（正向对照）--------------------
+    add(
+        "B-135 · 落地视图**仍然有**「当前 PC」与「内核连接」两张 KPI"
+        + "（⇒ ⇒ 删的是**那一份重复的**虚拟时间 ⇒ ⇒ **不是**把概览删光）",
+        Number(p?.embeddedKpiCount ?? 0) === 2 && p?.embeddedHasPc === true,
+        `落地视图的 .kpi 个数=${p?.embeddedKpiCount} 有 PC=${p?.embeddedHasPc}`,
+    );
+
+    return { checks };
+}
+
+/**
  * STAGE-42 · v0.57 批的真机段：**符号入口**（在 **demo 固件**上 ⇒ ⇒ 没有
  * 符号表 ⇒ ⇒ 专打「没有符号表」那一态）。
  *
@@ -8078,6 +8259,16 @@ async function main() {
         const readback = await runSection("readback", () => runReadbackSection(cdp, opts));
         registerSection("readback", readback.checks, {
             title: "读回检查（高亮基准说清 · 跑完停下真的亮 · 读过的内存单元联动刷新）",
+        });
+
+        // -- the STALE SURFACES (STAGE-45 · v0.69 · B-130 ~ B-135) ----------
+        // ⚠️ **必须排在 osz 之前**：osz 段把镜像换成仓外的真 RTOS ⇒ ⇒ 放在它
+        //    后面，本段要的「demo 固件跑一段」这件事就**做不了**了。
+        // ⚠️ **它自己会切视图**（结尾切到 `#/embedded`）⇒ ⇒ 排在 osz **之前**
+        //    才安全（osz 段自己会导航到 `#/terminal` / `#/debug`）。
+        const staleSurfaces = await runSection("staleSurfaces", () => runStaleSurfacesSection(cdp, opts));
+        registerSection("staleSurfaces", staleSurfaces.checks, {
+            title: "陈旧面检查（反汇编状态行说清是哪一段 · 跟随 PC 开关关着不顶掉 / 开着自动跟上 · 落地视图不重复显示虚拟时间）",
         });
 
         // -- the REAL RTOS (osz): load the out-of-repo ELF and SEE its console -

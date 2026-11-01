@@ -143,6 +143,69 @@ def count_tests(code):
     return len(re.findall(r"(^|[^\w.])test\s*\(", code))
 
 
+def detect_mask_mismatch(text, authoritative):
+    """**掩码后的用例数** vs **权威数** ⇒ ⇒ 不等就是「**静默偏小**」。
+
+    ⚠️ **这是台账 D-174 做法 B 的落点** —— 把「静默偏小」变成「**响亮的
+    失败**」⇒ ⇒ 工具**不再**悄悄给出一个偏小的数。
+
+    ⚠️ **两条独立算法**（**必须**保持独立 ⇒ ⇒ 否则交叉验证就消失了）：
+      * **静态数** = `count_tests(strip_code(text))` —— 本工具自己的算法；
+      * **权威数** = `node --test` 跑出来的 `# tests N`（`run_front_gate_counts`）
+        —— **运行时**数出来的。
+
+    ⇒ ⇒ 两边**不等** ⇒ ⇒ 掩码**抹掉了东西** ⇒ ⇒ 那就是本工具的洞
+    （`strip_code` 不认识正则字面量 ⇒ ⇒ 正则里那个 `'` 被当成字符串开头
+    ⇒ ⇒ 后面若干条用例整段被抹掉）。
+
+    ⚠️ **「权威数」缺了（`None`）⇒ ⇒ 不判** ⇒ ⇒ 「没有基准」**不是**「有洞」
+    ⇒ ⇒ 不猜。
+
+    @param {str} text — 套件文件原文
+    @param {int|None} authoritative — `node --test` 数出来的用例条数
+    @returns {dict|None} `{"static": n, "authoritative": m}` 或 `None`
+    """
+    if authoritative is None:
+        return None
+    static = count_tests(strip_code(text))
+    auth = int(authoritative)
+    if static == auth:
+        return None
+    return {"static": static, "authoritative": auth}
+
+
+def selftest_mask():
+    """**掩码检测的自检**（D-174 做法 B 的**判别力来源**）。
+
+    ⚠️ **必须有「改前红 / 改后绿」**：把 `detect_mask_mismatch` 删掉 ⇒ ⇒
+    这一项**必须红** ⇒ ⇒ 否则那条判据**恒绿** ⇒ ⇒ 零判别力。
+
+    ⚠️ **必要对照**：一个**不含**单引号正则的文件 ⇒ ⇒ **不许**报差异 ⇒ ⇒
+    否则这条自检**恒红**。
+    """
+    # -- ① 含单引号正则 ⇒ ⇒ 掩码会把**后面**的用例整段抹掉 ----------------
+    tricky = (
+        "const re = /don't/;\n"
+        'test("one", () => {});\n'
+        'test("two", () => {});\n'
+        'test("three", () => {});\n'
+    )
+    hit = detect_mask_mismatch(tricky, 3)
+    ok_tricky = hit is not None and hit["static"] < hit["authoritative"]
+    # -- ② 必要对照：**不含**单引号正则 ⇒ ⇒ 掩码数 == 权威数 ⇒ ⇒ 不报 ------
+    easy = (
+        'test("one", () => {});\n'
+        'test("two", () => {});\n'
+    )
+    ok_easy = detect_mask_mismatch(easy, 2) is None
+    print("  %-10s 含单引号正则 ⇒ %s ｜ 不含 ⇒ %s" % (
+        "掩码检测",
+        "OK（抓到了）" if ok_tricky else "★红★（没抓到 ⇒ 判据恒绿）",
+        "OK（没误报）" if ok_easy else "★红★（误报）",
+    ))
+    return ok_tricky and ok_easy
+
+
 def imports_of(text):
     """源文件 → 该文件在本套件里的**引用形态**（四种写法都认）。"""
     forms = {}
@@ -252,14 +315,24 @@ def pick_bucket(files, *selftexts):
 
 
 def attribute(repo, counts):
-    """counts = {套件文件名: 用例条数} ⇒ (A, B, TIE, rows)"""
+    """counts = {套件文件名: 用例条数} ⇒ (A, B, TIE, rows, mismatches)
+
+    ⚠️ **mismatches** = 「掩码后的用例数 ≠ 权威数」的那些文件（**D-174 做法 B**）
+    ⇒ ⇒ **静默偏小**变成**可报告的差异** ⇒ ⇒ 由 `main()` 变成**红**。
+    """
     rows = []
+    mismatches = []
     ta = tb = tt = 0
     for name in sorted(counts):
         path = os.path.join(repo, "front", "tests", name)
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
         code = strip_code(text)
+        # ⚠️ **掩码检测**（D-174 做法 B）⇒ ⇒ 与「权威数」对账 ⇒ ⇒ 不等就
+        #   **记下来** ⇒ ⇒ 由 `main()` 报错（**不再**静默偏小）。
+        mismatch = detect_mask_mismatch(text, counts.get(name))
+        if mismatch is not None:
+            mismatches.append({"file": name, **mismatch})
         forms = imports_of(text)
         helpers = local_helpers(code)
         header = "\n".join(text.splitlines()[:40])
@@ -306,7 +379,7 @@ def attribute(repo, counts):
             ta += total if pick == "A" else 0
             tb += total if pick == "B" else 0
             tt += total if pick not in ("A", "B") else 0
-    return ta, tb, tt, rows
+    return ta, tb, tt, rows, mismatches
 
 
 def run_front_gate_counts(repo):
@@ -349,8 +422,16 @@ def selftest(repo):
                                cwd=repo, check=True, capture_output=True, text=True)
                 created.append(work)
             counts = run_front_gate_counts(work)
-            a, b, t, _ = attribute(work, counts)
+            a, b, t, _, mismatches = attribute(work, counts)
             good = (a, b, sum(counts.values())) == (exp_a, exp_b, exp_total)
+            # ⚠️ **历史树上的掩码差异也要如实报**（D-174 做法 B）⇒ ⇒ 那三棵树
+            #   的**历史值**若与掩码数不符 ⇒ ⇒ **必须登记**（不许悄悄改）。
+            if mismatches:
+                good = False
+                print("  ★红★ %s 上有掩码差异：%s" % (
+                    label, ", ".join(
+                        "%s(静态 %d / 权威 %d)" % (m["file"], m["static"], m["authoritative"])
+                        for m in mismatches)))
             ok = ok and good
             print("  %-8s 期望 %d/%d（合计 %d）  实测 %d/%d（合计 %d）  %s" % (
                 label, exp_a, exp_b, exp_total, a, b, sum(counts.values()),
@@ -375,7 +456,12 @@ def main():
 
     if args.selftest:
         print("前端归属口径 · 历史回归（判别力证据）")
-        return 0 if selftest(args.repo) else 1
+        # ⚠️ **掩码检测的自检先跑**（D-174 做法 B）⇒ ⇒ 它**不**需要建
+        #   worktree ⇒ ⇒ 快 ⇒ ⇒ 失败**立刻**看得见。
+        print("前端归属口径 · 掩码检测自检（D-174 做法 B）")
+        mask_ok = selftest_mask()
+        ok = selftest(args.repo)
+        return 0 if (ok and mask_ok) else 1
 
     if args.counts:
         counts = {}
@@ -390,7 +476,19 @@ def main():
     else:
         counts = run_front_gate_counts(args.repo)
 
-    a, b, t, rows = attribute(args.repo, counts)
+    a, b, t, rows, mismatches = attribute(args.repo, counts)
+    # ⚠️ **掩码差异先报**（D-174 做法 B）⇒ ⇒ 它是**工具自己**的洞 ⇒ ⇒
+    #   比「归属数对不上」**更根本** ⇒ ⇒ 先说它。
+    if mismatches:
+        print("★红★ 掩码后的用例数与权威数不符（D-174 · 做法 B）：")
+        print("  ⇒ ⇒ 掩码（strip_code）**抹掉了东西** ⇒ ⇒ 那个数**偏小** ⇒ ⇒")
+        print("  ⇒ ⇒ 台账「测试」列**不可信** ⇒ ⇒ 请改源码里的正则字面量")
+        print("  ⇒ ⇒ （或修 `strip_code` 让它认识正则字面量 —— 那是做法 A）。")
+        for m in mismatches:
+            print("  %-34s 静态 %3d  权威 %3d  差 %+d" % (
+                m["file"], m["static"], m["authoritative"],
+                m["static"] - m["authoritative"]))
+        print()
     for r in rows:
         if r["pick"] not in ("A", "B"):
             print("TIE/未知: %-28s %-44s %3d" % (r["file"], r["group"][:44], r["tests"]))
@@ -402,7 +500,8 @@ def main():
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(rows, fh, ensure_ascii=False, indent=1)
-    return 1 if t else 0
+    # ⚠️ **掩码差异也是红**（D-174 做法 B）⇒ ⇒ 工具**不再**静默偏小。
+    return 1 if (t or mismatches) else 0
 
 
 if __name__ == "__main__":

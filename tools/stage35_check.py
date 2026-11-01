@@ -68,10 +68,15 @@ EXPECT_VERSIONS = {
 
 #: ⚠️ **稳定钩子**（7e 用）—— §5.1 的表是唯一权威处 ⇒ ⇒ 这里只钉**字面量**。
 #: ⇒ ⇒ **每一条都必须在仓内源码里出现** ⇒ ⇒ 换形态**不许**把判据的取法换掉。
+#:
+#: ⚠️ **`data-embedded-time` 已于 STAGE-45 · v0.69 批移出**（台账 **D-173**
+#:   做法 A）⇒ ⇒ 落地视图那份**重复的**虚拟时间 KPI **删掉了** ⇒ ⇒ 顶栏那份
+#:   成了**唯一**那一份 ⇒ ⇒ 这个钩子**故意**没了 ⇒ ⇒ **如实登记**
+#:   （STAGE-35 §8「订正 9」）。
+#: ⇒ ⇒ **其余钩子一个都不动**。
 EXPECT_HOOKS = (
     "data-view-body",
     "data-embedded-pc",
-    "data-embedded-time",
     "data-embedded-entry",
     "data-embedded-link",
     "reg-grid",

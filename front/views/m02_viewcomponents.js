@@ -36,6 +36,14 @@ import { isKernelRunning, liveValue } from "../lib/run-loop.js";
 // ⚠️ **「读回」的纯函数**（v0.67 批）⇒ ⇒ 「变了几个」**现算**⇒ ⇒ 状态与显示
 // **不可能**对不上 ⇒ ⇒ 视图层**不存**第二份。
 import { READBACK_REASON_LABEL, diffRegisters } from "../lib/readback.js";
+// ⚠️ **「反汇编跟随 / 陈旧标注」的纯函数**（STAGE-45 · v0.69 批 · 台账 D-176）
+// ⇒ ⇒ 「这段是哪个 PC 时的」「当前 PC 是多少」「该不该自动重取」三件事
+// **各只有一处** ⇒ ⇒ 视图层与 app 层**引同一处** ⇒ ⇒ 不会一个说陈旧、
+// 另一个说没陈旧。
+import {
+    disasmStatusText,
+    followPcLabel,
+} from "../lib/disasm-follow.js";
 // ⚠️ **trace 记录开关的判定**（纯函数）⇒ ⇒ 视图层渲染按钮/状态行与 app 层
 // 发命令**引同一处** ⇒ ⇒ 「按钮写关闭、命令发开启」这种漂移**结构上不可能**。
 import {
@@ -591,10 +599,14 @@ const embeddedView = register({
     id: "embedded",
     channels: ["sim"],
     render(state) {
-        // PC / 虚拟时间**只**来自既有状态源（M-10 推进的 `sim.pc` 与
-        // `timeVirt`）⇒ 落地视图**不造**第二个状态源（与调试视图同一条规矩）。
+        // PC **只**来自既有状态源（M-10 推进的 `sim.pc`）⇒ 落地视图**不造**
+        // 第二个状态源（与调试视图同一条规矩）。
+        //
+        // ⚠️ **虚拟时间**（`timeVirt`）**不在这里**（STAGE-45 · v0.69 批 ·
+        //   台账 **D-173** 做法 A）⇒ ⇒ 顶栏那份是**全屏都在**的那一份 ⇒ ⇒
+        //   落地视图**不再显示第二份** ⇒ ⇒ 「同一个量只显示一处」这条规矩
+        //   **在落地视图上终于成立**。
         const pc = Number(state?.sim?.pc ?? 0) >>> 0;
-        const timeVirt = state?.timeVirt ?? 0;
         // 连接状态来自 **M-07 的传输层状态**（由 `app.js` 推进视图状态）⇒
         // 视图层**不**直接摸服务层。
         const link = state?.link ?? {};
@@ -611,10 +623,6 @@ const embeddedView = register({
                     <div class="card kpi">
                         <span class="k">当前 PC</span>
                         <code class="v pc" data-embedded-pc>0x${pc.toString(16).padStart(8, "0")}</code>
-                    </div>
-                    <div class="card kpi">
-                        <span class="k">虚拟时间</span>
-                        <code class="v timeVirt" data-embedded-time>${escapeHtml(String(timeVirt))} ps</code>
                     </div>
                     <div class="card kpi">
                         <span class="k">内核连接</span>
@@ -1448,6 +1456,15 @@ const debugView = register({
         // `sim.pc` from `sim.registers` / `sim.state.delta`) — the panel
         // must not invent a second one.
         const pc = Number(sim.pc ?? 0) >>> 0;
+        // ⚠️ **「跟随 PC」是用户意图**（STAGE-45 · v0.69 批 · 台账 D-176）⇒ ⇒
+        //   它住**视图状态** `debug.followPc`（**默认关**）⇒ ⇒ 视图层**只读**
+        //   （分层不破）⇒ ⇒ app 层写、视图层渲染 ⇒ ⇒ 只有一个落点。
+        const followPc = debug.followPc === true;
+        // ⚠️ **状态行是现算的**（`front/lib/disasm-follow.js`）⇒ ⇒ 「这段是
+        //   哪个 PC 时的」由**内核给的数据**回答（段起点 = `entries[0].addr`）
+        //   ⇒ ⇒ 前端**不**记住「我请求了哪个地址」⇒ ⇒ **不会**与界面显示
+        //   的那段对不上。
+        const disasmStatus = disasmStatusText({ entries, pc, followPc });
         // ⚠️ **内存单元是 M-10 推的那份**（`sim.mem`）⇒ ⇒ 与读内存那条路
         //   落的是**同一个缓存** ⇒ ⇒ 不是第二份。
         const cells = Object.entries(sim.mem ?? {});
@@ -1513,6 +1530,13 @@ const debugView = register({
                         <span class="tag">在「断点」列点一下即可下断点</span>
                         <button type="button" data-action="disasm" data-addr="${pc}" data-count="16">反汇编</button>
                     </div>
+                    <div class="card-actions" data-disasm-follow-box>
+                        <label class="follow-pc">
+                            <input type="checkbox" data-disasm-follow${followPc ? " checked" : ""}>
+                            <span data-disasm-follow-label>${escapeHtml(followPcLabel({ followPc }))}</span>
+                        </label>
+                    </div>
+                    <p class="muted" data-disasm-status data-disasm-stale="${disasmStatus.stale ? "1" : "0"}">${escapeHtml(disasmStatus.text)}</p>
                     <div class="card-actions" data-step-count-box>
                         <label class="step-count">
                             步数
@@ -1643,6 +1667,18 @@ const debugView = register({
     mountFor(el) {
         el.addEventListener("click", (ev) => debugView.onCommand(ev));
         mountAddrInputListeners(el);
+        // ⚠️ **「跟随 PC」复选框走 `change`**（不是 `click`）⇒ ⇒ `click` 事件
+        //   触发时 `checked` **还没变** ⇒ ⇒ 读它会拿到**旧值** ⇒ ⇒ 必须用
+        //   `change`。
+        //
+        // ⚠️ **`mountFor` 只会被调一次**（`body.dataset.mounted` 守卫）⇒ ⇒
+        //   这个监听器**不会**重复挂 ⇒ ⇒ 勾一次只发一条命令。
+        el.addEventListener("change", (ev) => {
+            const box = ev.target?.closest?.("[data-disasm-follow]");
+            if (!box) return;
+            const follow = box.checked === true;
+            emitCommand("disasm-follow", "debug", { follow });
+        });
     },
 });
 

@@ -110,6 +110,11 @@ import {
 // ⚠️ **trace 记录开关的判定**（纯函数）⇒ ⇒ 「点一下该发什么」只有一处说了算
 // ⇒ ⇒ 视图层渲染的按钮标签与这里发出的命令**引同一处** ⇒ ⇒ 不会对不上。
 import { nextTraceEnabled, traceSwitchState, TRACE_SWITCH_OFF } from "./lib/trace-switch.js";
+// ⚠️ **「反汇编跟随 / 陈旧标注」的纯函数**（STAGE-45 · v0.69 批 · 台账 D-176）
+// ⇒ ⇒ 「该不该按新 PC 重取一段」**剥成纯函数** ⇒ ⇒ Node 侧**零 DOM** 就能验
+// ⇒ ⇒ 与 v0.67 批的读回**同一手法** ⇒ ⇒ 「停下后要不要跟随」不必拖一整条
+// 链路才测得到。
+import { shouldFollowDisasm } from "./lib/disasm-follow.js";
 // ⚠️ **「把整条轨迹翻完」的分页收集**（纯逻辑）⇒ ⇒ 「下载轨迹到本地」
 //   顺着 `next_offset` 一块一块翻 ⇒ ⇒ 翻完才是**完整**的一份。
 import { collectTraceChunks } from "./lib/trace-export.js";
@@ -466,7 +471,33 @@ async function performReadback(services, reason, options = {}) {
             errors.push(err?.message ?? String(err));
         }
     }
-    // ④ 写状态（**基准那一格不动** ⇒ ⇒ `mergeReadbackState` 只并 patch）
+    // ④ 「跟随 PC」的重取（STAGE-45 · v0.69 批 · 台账 D-176 做法 B）
+    //
+    // ⚠️ **落在读回这条链路上** ⇒ ⇒ 「停下」这个时机**只有一处定义**
+    //   （真停与单步**同一处**）⇒ ⇒ **不写第二张表** ⇒ ⇒ 连续运行的每个
+    //   窗口**不触发**（`EndOfExecution` 不在真停表里）。
+    //
+    // ⚠️ **判据在纯函数里**（`shouldFollowDisasm`）⇒ ⇒ Node 侧**零 DOM**
+    //   就能验 ⇒ ⇒ 这里只是一次**调用**。
+    //
+    // ⚠️ **PC 取自 M-10 的快照** ⇒ ⇒ 与顶栏那份**同一个源** ⇒ ⇒ 不是第二个
+    //   真相；⚠️ 而且它**已经是新的** —— 内核每次 `Continue` / `StepN` 结束
+    //   都推一个**带 `pc` 的 `Tick`** ⇒ ⇒ 而 M-05 的 `handleFrame` 是
+    //   「**先 resolve 命令的 promise、再 publish 事件**」⇒ ⇒ publish 是
+    //   **同步**的 ⇒ ⇒ 微任务恢复时 `Tick` **已经**被 M-10 处理过了 ⇒ ⇒
+    //   **无竞态**。
+    const followPc = viewStore.getState("debug")?.debug?.followPc === true;
+    if (commandRouter && shouldFollowDisasm({ followPc, reason })) {
+        const pc = Number(registerMemory?.getSnapshot?.()?.pc ?? 0) >>> 0;
+        try {
+            await commandRouter.dispatchCommand(
+                Command.disasm(pc, DEFAULT_DISASM_COUNT),
+            );
+        } catch (err) {
+            errors.push(err?.message ?? String(err));
+        }
+    }
+    // ⑤ 写状态（**基准那一格不动** ⇒ ⇒ `mergeReadbackState` 只并 patch）
     updateDebugState((prev) => ({
         ...prev,
         debug: {
@@ -1746,6 +1777,33 @@ export async function handleCommand(detail, services) {
                 const addr = toInt(detail.params?.addr, 0);
                 const count = toInt(detail.params?.count, DEFAULT_DISASM_COUNT);
                 await commandRouter.dispatchCommand(Command.disasm(addr, count));
+                break;
+            }
+            case "disasm-follow": {
+                // ⚠️ **「跟随 PC」开关**（STAGE-45 · v0.69 批 · 台账 D-176 做法 B）
+                // ⇒ ⇒ 它是**用户意图** ⇒ ⇒ 住**视图状态** `debug.followPc`
+                // ⇒ ⇒ **默认关** ⇒ ⇒ 用户**不主动要求**就不动他手动选的那段。
+                //
+                // ⚠️ **判据取 `=== true`** ⇒ ⇒ 视图状态**没有**这一格时
+                //   （第一次进页面）⇒ ⇒ 读到 `undefined` ⇒ ⇒ **当作关** ⇒ ⇒
+                //   「默认关」这条规矩**结构上**成立。
+                const follow = detail.params?.follow === true;
+                updateDebugState((prev) => ({
+                    ...prev,
+                    debug: { ...(prev.debug ?? {}), followPc: follow },
+                }));
+                // ⚠️ **勾上时立刻重取一次**（裁决 F）⇒ ⇒ 否则用户勾了**看不到
+                //   变化** ⇒ ⇒ 「点了没反应」是最差的 UX ⇒ ⇒ 勾上 = 「现在
+                //   就跟上」。
+                //
+                // ⚠️ **PC 取自 M-10 的快照** ⇒ ⇒ 与顶栏那份**同一个源** ⇒ ⇒
+                //   不是第二个真相。
+                if (follow) {
+                    const pc = Number(registerMemory?.getSnapshot?.()?.pc ?? 0) >>> 0;
+                    await commandRouter.dispatchCommand(
+                        Command.disasm(pc, DEFAULT_DISASM_COUNT),
+                    );
+                }
                 break;
             }
             case "set-breakpoint": {
