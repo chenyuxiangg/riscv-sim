@@ -141,11 +141,11 @@
 
 | 项 | 数字 |
 | --- | --- |
-| 契约层 | **15 979** 行（**11** 个 `.rs`） |
-| 仿真内核 | **76 510** 行（含 17 个子模块 + 内核宿主装配层，**93** 个 `.rs`） |
-| 前端 | **41 001** 行（`front/` 下**git 跟踪**的源码，含 `front/tests/`；⚠️ **不含** `front/assets/` —— 那是 wasm-pack 的**构建产物**且被 git 忽略，计进去会让这个数**随「跑没跑过 wasm 构建」变** ⇒ 不可复现；⚠️ 这个数由仓内 `tools/count_scale.py` **从当前树重算** ⇒ 规模数字只有**一份**算法） |
-| 设计文档 | **85 篇**（26 篇 HTML + 59 篇 Markdown） |
-| 测试 | **1 858** 条 Rust（契约 lib **291** + 内核 lib **1 384** + 集成与 runner **183**；⚠️ **v0.66 批 Rust 侧有改动** ⇒ ⇒ 内核 lib **+14**（M-15 器件类型注册表 **6** + 宿主逐实例状态 **8**））+ **805** 条前端（**157** suite） |
+| 契约层 | **16 000** 行（**11** 个 `.rs`） |
+| 仿真内核 | **76 873** 行（含 17 个子模块 + 内核宿主装配层，**94** 个 `.rs`） |
+| 前端 | **41 085** 行（`front/` 下**git 跟踪**的源码，含 `front/tests/`；⚠️ **不含** `front/assets/` —— 那是 wasm-pack 的**构建产物**且被 git 忽略，计进去会让这个数**随「跑没跑过 wasm 构建」变** ⇒ 不可复现；⚠️ 这个数由仓内 `tools/count_scale.py` **从当前树重算** ⇒ 规模数字只有**一份**算法） |
+| 设计文档 | **86 篇**（26 篇 HTML + 60 篇 Markdown） |
+| 测试 | **1 858** 条 Rust（契约 lib **291** + 内核 lib **1 384** + 集成与 runner **183**；⚠️ **v0.66 批 Rust 侧有改动** ⇒ ⇒ 内核 lib **+14**（M-15 器件类型注册表 **6** + 宿主逐实例状态 **8**））+ **808** 条前端（**157** suite） |
 
 ---
 
@@ -375,7 +375,7 @@ node tools/browser-verify.mjs
 | 1 | `cargo fmt --all -- --check` | 格式 |
 | 2 | `cargo clippy --workspace --all-targets -- -D warnings` | 静态检查 |
 | 3 | `cargo test --workspace --no-fail-fast --lib --tests` | **1 844** 条 Rust 用例（⚠️ **本批 Rust 侧有改动** ⇒ ⇒ 1 838 → 1 844（**+6**）；⚠️ **不带 `--lib --tests` 会因 doc-test 假 HANG**；⚠️ 判「全绿」要看**退出码** + `grep -cE "^test result: FAILED"` 为 **0** —— 汇总的失败数在 `awk -F'[ ;]'` 的 **`$7`**（**不是 `$6`**）） |
-| 4 | `tools/check-front.sh` | **805** 用例 / **157** suite（ESM 链接期错误只有它能抓）⚠️ **v0.61 批起末尾追加**「dev server 的**缓存头**自检」（`tools/serve-front.py --self-check` ⇒ ⇒ 判据 = 响应带 `Cache-Control: no-store` ⇒ ⇒ 「浏览器会不会拿到旧副本」有人管）⚠️ **v0.35 批起末尾追加**「台账前端两行的**归属口径** + **历史回归**」（`tools/front_test_attrib.py`）⇒ ⇒ 那两个数**由机器从当前树重算**、**不再人工累加** ⇒ ⇒ ⚠️ **python3 缺失时明确 SKIP**（不静默通过） |
+| 4 | `tools/check-front.sh` | **808** 用例 / **157** suite（ESM 链接期错误只有它能抓）⚠️ **v0.61 批起末尾追加**「dev server 的**缓存头**自检」（`tools/serve-front.py --self-check` ⇒ ⇒ 判据 = 响应带 `Cache-Control: no-store` ⇒ ⇒ 「浏览器会不会拿到旧副本」有人管）⚠️ **v0.35 批起末尾追加**「台账前端两行的**归属口径** + **历史回归**」（`tools/front_test_attrib.py`）⇒ ⇒ 那两个数**由机器从当前树重算**、**不再人工累加** ⇒ ⇒ ⚠️ **python3 缺失时明确 SKIP**（不静默通过） |
 | 5 | `tools/golden-run.sh --self-check` + `--keep-going` | 指令级判决（**77/77**）⚠️ **v0.35 批起多一个开关**：`--check-mem` 把「参考侧喂给 Spike 的 RAM 窗口」做成**门禁显式项**（打印两侧并断言**逐字相同**）⇒ ⇒ **D-150 闭环**（⚠️ 两侧**构造上同源** ⇒ ⇒ 正常时**必然绿** ⇒ ⇒ 抓的是「**构造被破坏**」） |
 | 6 | `tools/build-wasm.sh` + `node tools/wasm-smoke.mjs` | 真 WASM 产物的桥接冒烟（⚠️ v0.33 批起**多一段**：**真前端差量算法 + 内核合成**的等价性 ⇒ ⇒ 那是**默认门禁里**唯一一处覆盖「前端算 ops」那条路的断言） |
 | 7 | `node tools/browser-verify.mjs` | 真 Chrome 里的端到端断言（**257 ✓ / 0 ✗**，**30 段**—— ⚠️ 段名表**故意写死** ⇒ ⇒ 「加一段忘了登记」**结构上不可能**） |
