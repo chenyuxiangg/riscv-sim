@@ -82,10 +82,10 @@
 //         *not* a verification failure
 
 import { spawn, spawnSync } from "node:child_process";
-import { createReadStream, existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadElf, findFirstSymbol } from "./elf-symtab.mjs";
@@ -178,6 +178,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "osz",
     "terminalScreen",
     "memoryMap",
+    "unknownSystem",
     "boardArchive",
     "boardDelta",
     "boardOrdering",
@@ -1535,6 +1536,58 @@ const BV_NEW_RAM_SIZE = 8388608;
 /** 写进新 RAM 的那个值（0xA5A5_A5A5 ⇒ 肉眼可辨）。 */
 const BV_NEW_RAM_VALUE = 0xa5a5a5a5;
 
+// ---------------------------------------------------------------------------
+// STAGE-47 · v0.71 批的**夹具板**
+// ---------------------------------------------------------------------------
+
+/**
+ * 「**完全落不在**」的板 —— demo 固件落在基址 **0**（40 字节）⇒ ⇒ 这块板
+ * **一个字节都装不下**它 ⇒ ⇒ 内核必须报「未知系统」（`E_PLT-17`）。
+ *
+ * ⚠️ **必须真的落在外面**：这块板唯一的 RAM 在 `0x4000_0000` ⇒ ⇒ 与 demo
+ *   固件要的 `[0x0, 0x28)` **零交集** ⇒ ⇒ 判据是「**完全**落不在」
+ *   （⇒ ⇒ **中档那条判据不适用**）⇒ ⇒ ⇒ 这条夹具**专打**「完全落不在」
+ *   那一档。
+ */
+const BV_UNKNOWN_BOARD = {
+    schema_version: 1,
+    id: "bv-unknown-board",
+    name: "browser-verify 未知系统板",
+    priority: 998,
+    region_budget_bytes: 1048576,
+    regions: [
+        { kind: "ram", base: 1073741824, size: 1048576 },
+    ],
+};
+
+/**
+ * 「**部分落不在**」的板 —— demo 固件是 **40 字节**落基址 0 ⇒ ⇒ 这块板
+ * 把 `[0x0, 0x28)` 切成**两段相邻**的 RAM ⇒ ⇒ **没有任何一段**能**完整**
+ * 装下它 ⇒ ⇒ 判定是「**部分**」⇒ ⇒ 用户拍的**中档** ⇒ ⇒ **不拒**。
+ *
+ * ⚠️ **为什么切两段、而不是「一段只有 16 字节」**（STAGE-47 施工期实测撞到）：
+ *   · 一段 16 字节 ⇒ ⇒ 镜像的**后 24 字节真的在外面** ⇒ ⇒ 装载**失败**
+ *     （`E_BUS-01`）⇒ ⇒ **失败装载**会把**修订号顶上去**而前端**没被告知**
+ *     ⇒ ⇒ 下一次提交**误报 `E_PLT-13`** ⇒ ⇒ 本段**污染后面的段**；
+ *   · 两段相邻 ⇒ ⇒ 镜像要的地址**全都在**（并集覆盖 `[0x0, 0x28)`）⇒ ⇒
+ *     装载**成功** ⇒ ⇒ **不留下任何副作用** ⇒ ⇒ 本段不污染别人。
+ *   ⇒ ⇒ 两者的**判定结果完全相同**（都是「部分」）⇒ ⇒ 「中档」这一档**照样**被验到。
+ *
+ * ⚠️ **两段不许重叠**（契约 V-6）⇒ ⇒ `[0x0, 0x10)` 与 `[0x10, 0x28)` 是
+ *   **相邻**（前者的上界 == 后者的下界）⇒ ⇒ 不重叠 ⇒ ⇒ 契约层放行。
+ */
+const BV_PARTIAL_BOARD = {
+    schema_version: 1,
+    id: "bv-partial-board",
+    name: "browser-verify 部分落不在板",
+    priority: 997,
+    region_budget_bytes: 1048576,
+    regions: [
+        { kind: "ram", base: 0, size: 16 },
+        { kind: "ram", base: 16, size: 24 },
+    ],
+};
+
 /**
  * 读产品视图里那张内存映射表的**行**（按 `data-*`，**不靠文案**）。
  *
@@ -1894,6 +1947,278 @@ async function runMemoryMapSection(cdp, opts) {
         beyondFailed
             ? `写 0x${beyond.toString(16)}（超出段尾）被拒`
             : `写 0x${beyond.toString(16)} 居然成功了 ⇒ size 没生效`,
+    );
+
+    return { skipped: false, checks };
+}
+
+/**
+ * STAGE-47 · v0.71 批的真机段：**「未知系统」门禁**（B-141 ~ B-145）。
+ *
+ * ⚠️ **这段要钉的是「真内核拒了」** ⇒ ⇒ 断的是「**真 WASM 内核** ⇒ `Error`
+ *   事件 ⇒ 视图状态 ⇒ DOM」**整条链** ⇒ ⇒ 前端塞 mock 数据糊弄不过去。
+ *
+ * ⚠️ **段序**：必须排在「板级内存图」那段**之后**（那一段已经把一张板配出来
+ *   了 ⇒ ⇒ 才有「当前板的分区」可比）⇒ ⇒ 也排在它**之后**才能保证「已装载」
+ *   （⇒ ⇒ `SetMemoryMap` 是**待生效**⇒ ⇒ 「判定用的是哪一份」才**可观测**）。
+ *
+ * ⚠️ **每个判据都要自带正向对照**：
+ * - B-141（被拒）的前置是 B-143（装得上）⇒ ⇒ 「被拒」不是因为「固件坏了」；
+ * - B-142（PC 没动）的前置是「访客**真的跑过**」（PC ≠ 0）⇒ ⇒ 否则「PC 没动」
+ *   是**恒真**的 ⇒ ⇒ **零判别力**；
+ * - B-144（中档）的对照是「**不**报 `E_PLT-17`」⇒ ⇒ 撞的那部分由总线自己报。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
+ */
+async function runUnknownSystemSection(cdp, opts) {
+    /** @type {{name: string, ok: boolean, detail: string}[]} */
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+
+    // ⚠️ **先装两个钩子**：命令捕获（看前端发了什么）+ 线钩子（看**内核**回了
+    //   什么）⇒ ⇒ 「内核原文」那条判据才有数据可读。
+    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
+    await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
+
+    // ---- ① 切到编辑器视图，等它挂上 ----------------------------------------
+    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await sleep(800);
+
+    // ---- ② **前置**：当前板装得下 demo ⇒ ⇒ 装上它 ---------------------------
+    //
+    // ⚠️ 这一步是 **B-143 的正向对照** ⇒ ⇒ 也是 B-141 的**前置**（⇒ ⇒ 「被拒」
+    //   不是因为「固件压根没装上」）。
+    const loaded = await loadDemoFirmware(cdp, opts);
+    add(
+        "B-143 · **正向对照**：当前板装得下 demo 固件 ⇒ ⇒ **装上了**"
+        + "（⇒ ⇒ 后面那条「被拒」不是因为「固件坏了」）",
+        loaded === true,
+        `装上了=${loaded}`,
+    );
+    if (!loaded) {
+        return {
+            skipped: false,
+            checks,
+        };
+    }
+
+    // ---- ③ **让访客真的跑起来** ⇒ ⇒ PC ≠ 0 --------------------------------
+    //
+    // ⚠️ **必须有这一步**（STAGE-47 施工期实测撞到）：「PC 没动」那条判据在
+    //   PC 本来就是 0 时**恒真** ⇒ ⇒ **零判别力** ⇒ ⇒ ⇒ 先单步 4 步（demo
+    //   固件的 4 条指令各 4 字节 ⇒ ⇒ PC = 0x10）⇒ ⇒ PC **不是** 0 了。
+    //
+    // ⚠️ **只单步 4 步**：demo 固件第 5 条（0x10）之后会在 0x1c 写 GPIO
+    //   （0x4000_0000）⇒ ⇒ 那块板上**没有**外设 ⇒ ⇒ 会撞总线 ⇒ ⇒ PC 停在
+    //   0x1c ⇒ ⇒ 「PC 没动」那条判据就**不是**「撞出来的」⇒ ⇒ ⇒ 停在
+    //   0x10 最干净。
+    for (let i = 0; i < 4; i += 1) {
+        await runEffect(cdp, `(() => {
+            const b = document.querySelector('[data-topbar-action="step"]');
+            if (!b) return "no-button";
+            b.click();
+            return "clicked";
+        })()`);
+        await sleep(220);
+    }
+    const pcBefore = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+    const pcTextBefore = String(pcBefore?.pcText ?? "").trim();
+    add(
+        "**前置**：访客**真的跑过**（单步 4 步 ⇒ ⇒ PC ≠ 0）"
+        + "（⇒ ⇒ 「PC 没动」那条判据**不是恒真**的 ⇒ ⇒ 不是空转）",
+        /^0x[0-9a-f]{8}$/.test(pcTextBefore) && pcTextBefore !== "0x00000000",
+        `单步后 PC=${JSON.stringify(pcTextBefore)}`,
+    );
+    if (pcTextBefore === "0x00000000" || !/^0x[0-9a-f]{8}$/.test(pcTextBefore)) {
+        return { skipped: false, checks };
+    }
+
+    // ---- ④ 记下「此刻已有的错误事件条数」⇒ ⇒ 后面只认**新增**的那些 -------
+    const errorsBefore = await awaitEval(cdp, BV_ALL_ERROR_EVENTS_EXPRESSION);
+    const errCountBefore = Array.isArray(errorsBefore) ? errorsBefore.length : 0;
+
+    // ---- ⑤ 配一块「**完全落不下**」的板（⇒ ⇒ 待生效）---------------------
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "submit-memory-map",
+            requestId: "bv-unknown-board",
+            viewId: "memory-map",
+            params: { description: ${JSON.stringify(BV_UNKNOWN_BOARD)} },
+        },
+    }))`);
+    // ⚠️ **等这条命令往返一趟** ⇒ ⇒ 「待生效」横幅**出现** = 内核**收了**这张板
+    // ⇒ ⇒ 若内核拒了（校验不过）⇒ ⇒ 横幅**不会出现** ⇒ ⇒ 那时后面全错。
+    const pendingDeadline = Date.now() + opts.timeoutMs;
+    let pendingSeen = false;
+    while (Date.now() < pendingDeadline) {
+        const now = await awaitEval(cdp, `(() => {
+            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+            return Boolean(el);
+        })()`);
+        if (now === true) {
+            pendingSeen = true;
+            break;
+        }
+        await sleep(200);
+    }
+    add(
+        "**前置**：配一块「**完全落不下** demo 固件」的板 ⇒ ⇒ 内核**收了**"
+        + "（⇒ ⇒ 「待生效」横幅出现 ⇒ ⇒ 它**还没**生效 ⇒ ⇒ 下面那次装载才**会**"
+        + "走到判定那一步）",
+        pendingSeen === true,
+        `待生效横幅=${pendingSeen}`,
+    );
+    if (!pendingSeen) return { skipped: false, checks };
+
+    // ---- ⑥ 装 demo ⇒ ⇒ 必须被**拒** ----------------------------------------
+    const rejected = await attemptLoadDemoFirmware(cdp, opts);
+    add(
+        "B-141 · 装一个「要当前板没有的地址」的固件 ⇒ ⇒ **真内核拒**了"
+        + "（⇒ ⇒ 页头状态条变成「装载失败」）",
+        rejected.rejected === true,
+        `被拒=${rejected.rejected} 状态条=${JSON.stringify(rejected.briefStatus)}`
+        + ` 文案=${JSON.stringify(rejected.briefText)}`,
+    );
+
+    // ---- ⑦ **内核原文**：新增的那条错误事件的码是 `E_PLT-17` ---------------
+    //
+    // ⚠️ **只认「本次新增」的**（⇒ ⇒ 残留碰不到这条判据 ⇒ ⇒ 不是假绿）。
+    // ⚠️ **线上形态是 `E_PLT-17`**（族与场景码之间是**连字符**）⇒ ⇒ Rust 常量
+    //   名 `E_PLT_17_BOARD_MISMATCH` **不是**同一个字符串 ⇒ ⇒ 断言必须用
+    //   **线上形态** ⇒ ⇒ 否则**恒假**。
+    const errorsAfter = await awaitEval(cdp, BV_ALL_ERROR_EVENTS_EXPRESSION);
+    const fresh = Array.isArray(errorsAfter) ? errorsAfter.slice(errCountBefore) : [];
+    const unknownEvent = fresh.find((e) => String(e?.code ?? "") === "E_PLT-17");
+    add(
+        "B-141 · 内核回的**错误事件**的码是 **`E_PLT-17`**"
+        + "（⇒ ⇒ 线上形态 ⇒ ⇒ 族与场景码之间是**连字符**）",
+        Boolean(unknownEvent),
+        `新增错误事件 ${fresh.length} 条：${JSON.stringify(fresh)}`,
+    );
+
+    // ---- ⑧ **PC 没动**（⇒ ⇒ 没建图、没写总线、没复位）----------------------
+    const pcAfter = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+    const pcTextAfter = String(pcAfter?.pcText ?? "").trim();
+    add(
+        "B-142 · 拒了之后 ⇒ ⇒ **PC 没动**（⇒ ⇒ **没建图、没写总线**，"
+        + "⇒ ⇒ 正在跑的访客**不受影响**）",
+        pcTextAfter === pcTextBefore,
+        `拒之前 PC=${JSON.stringify(pcTextBefore)} 拒之后 PC=${JSON.stringify(pcTextAfter)}`,
+    );
+
+    // ---- ⑨ **只显示内核原文** ⇒ ⇒ 前端不自己编解释 -------------------------
+    //
+    // ⚠️ **判据钉在「内核给的事实」上**（板 id + 那段地址）⇒ ⇒ 前端**编不出来**
+    //   ⇒ ⇒ 界面显示的确实是内核原文 ⇒ ⇒ 前端没有第二份解释。
+    const kernelMsg = String(unknownEvent?.message ?? "");
+    const briefHasKernelFacts = String(rejected.briefText ?? "").includes(BV_UNKNOWN_BOARD.id)
+        && /0x[0-9a-f]{8}/.test(String(rejected.briefText ?? ""));
+    add(
+        "B-145 · 装不上时 ⇒ ⇒ 界面显示的是**内核原文**"
+        + "（⇒ ⇒ 含**板 id** 与**那段地址** ⇒ ⇒ 前端**编不出来** ⇒ ⇒ 没有第二份解释）",
+        Boolean(unknownEvent) && briefHasKernelFacts && kernelMsg.includes(BV_UNKNOWN_BOARD.id),
+        `界面文案=${JSON.stringify(rejected.briefText)}`
+        + ` 内核原文=${JSON.stringify(kernelMsg)}`,
+    );
+
+    // ---- ⑩ **当前生效的图没被这次装载改动** --------------------------------
+    await runEffect(cdp, 'location.hash = "#/product";');
+    await sleep(800);
+    const mapProbe = await awaitEval(cdp, BV_MEMORY_MAP_PROBE);
+    const rows = Array.isArray(mapProbe?.rows) ? mapProbe.rows : [];
+    const stillHasOldRam = rows.some(
+        (r) => String(r.base) === String(BV_NEW_RAM_BASE) && String(r.kind) === "ram",
+    );
+    const unknownRamPresent = rows.some(
+        (r) => String(r.base) === String(BV_UNKNOWN_BOARD.regions[0].base) && String(r.kind) === "ram",
+    );
+    add(
+        "**当前生效的图没被这次装载改动**（⇒ ⇒ 判定**在应用用户板之前**"
+        + "⇒ ⇒ 判不过 ⇒ ⇒ 连图都不换）",
+        stillHasOldRam === true && unknownRamPresent === false,
+        `生效图 ${rows.length} 行：${JSON.stringify(rows)}`,
+    );
+
+    // ---- ⑪ **中档**：「部分落不在」⇒ ⇒ **不拒** ----------------------------
+    //
+    // ⚠️ 这条是 B-144 ⇒ ⇒ 它验的是「**部分**」那一档 ⇒ ⇒ **必须**与 B-141
+    //   的「**完全**」那一档**分开** ⇒ ⇒ 否则「中档」就没了。
+    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await sleep(600);
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "submit-memory-map",
+            requestId: "bv-partial-board",
+            viewId: "memory-map",
+            params: { description: ${JSON.stringify(BV_PARTIAL_BOARD)} },
+        },
+    }))`);
+    const partialDeadline = Date.now() + opts.timeoutMs;
+    let partialPending = false;
+    while (Date.now() < partialDeadline) {
+        const now = await awaitEval(cdp, `(() => {
+            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+            return Boolean(el);
+        })()`);
+        if (now === true) {
+            partialPending = true;
+            break;
+        }
+        await sleep(200);
+    }
+    const errCountBeforePartial = (await awaitEval(cdp, BV_ALL_ERROR_EVENTS_EXPRESSION) ?? []).length;
+    const partialAttempt = await attemptLoadDemoFirmware(cdp, opts);
+    const errorsAfterPartial = await awaitEval(cdp, BV_ALL_ERROR_EVENTS_EXPRESSION);
+    const freshPartial = Array.isArray(errorsAfterPartial)
+        ? errorsAfterPartial.slice(errCountBeforePartial)
+        : [];
+    const partialSaidUnknown = freshPartial.some(
+        (e) => String(e?.code ?? "") === "E_PLT-17",
+    );
+    add(
+        "B-144 · 「**部分落不在**」的固件 ⇒ ⇒ **中档**：**装得上**"
+        + "（⇒ ⇒ **不**报 `E_PLT-17` ⇒ ⇒ 用户拍的**档**没被做成**严档**）",
+        partialPending === true
+            && partialSaidUnknown === false
+            && partialAttempt.briefStatus === "ok"
+            && partialAttempt.rejected === false,
+        `板收下了=${partialPending} 状态条=${JSON.stringify(partialAttempt.briefStatus)}`
+        + ` 被拒=${partialAttempt.rejected} 新增错误事件=${JSON.stringify(freshPartial)}`,
+    );
+
+    // ---- ⑫ **复原**：把能装下 demo 的板配回去 ⇒ ⇒ 装得上 ⇒ ⇒ 后面那些段
+    //       拿到的还是一张**正常**的板 ----------------------------------------
+    //
+    // ⚠️ **必须成功**（STAGE-47 施工期实测撞到）：上一次装载**失败**而**又改动
+    //   了生效图**时 ⇒ ⇒ 修订号被顶上去而前端**没被告知**（失败的装载不重订
+    //   流 ⇒ ⇒ 前端手里那份修订号**旧了**）⇒ ⇒ 下一次提交**误报 `E_PLT-13`**
+    //   ⇒ ⇒ 板换不回去 ⇒ ⇒ **污染后面的段**。
+    //   ⇒ ⇒ 所以本段的夹具**必须让每一次装载都成功**（中档那块板切两段相邻
+    //   的 RAM ⇒ ⇒ 镜像要的地址全都在 ⇒ ⇒ 装载成功 ⇒ ⇒ 不留副作用）。
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "submit-memory-map",
+            requestId: "bv-restore-board",
+            viewId: "memory-map",
+            params: { description: ${JSON.stringify(BV_BOARD)} },
+        },
+    }))`);
+    await sleep(600);
+    const restored = await loadDemoFirmware(cdp, opts);
+    const restoredBrief = await awaitEval(cdp, UI_IMAGE_TOPBAR_PROBE);
+    const restoredErrors = await awaitEval(cdp, BV_ALL_ERROR_EVENTS_EXPRESSION);
+    const restoredFresh = Array.isArray(restoredErrors)
+        ? restoredErrors.slice(errCountBeforePartial + (Array.isArray(freshPartial) ? freshPartial.length : 0))
+        : [];
+    add(
+        "**收尾**：把能装下 demo 的板配回去 ⇒ ⇒ **装得上**"
+        + "（⇒ ⇒ 后面那些段拿到的还是一张**正常**的板 ⇒ ⇒ 本段不污染别人）",
+        restored === true,
+        `装上了=${restored} 状态条=${JSON.stringify(restoredBrief?.briefStatus ?? null)}`
+        + ` 文案=${JSON.stringify(restoredBrief?.briefText ?? "")}`
+        + ` 新增错误事件=${JSON.stringify(restoredFresh)}`,
     );
 
     return { skipped: false, checks };
@@ -2652,6 +2977,32 @@ const BV_LAST_ERROR_EVENT_EXPRESSION = `(() => {
     };
   }
   return last;
+})()`;
+
+/**
+ * 内核推回来的**全部**错误事件（**按到达顺序**）。
+ *
+ * ⚠️ **为什么不是「最后一个」**（STAGE-47 施工期实测撞到）：只读最后一个
+ *   ⇒ ⇒ **残留**会把上一段的错误当成本段的 ⇒ ⇒ 那条判据**恒真**（假绿）
+ *   ⇒ ⇒ ⇒ 读**全部**、再按「本次尝试**新增**了哪几条」来判 ⇒ ⇒ ⇒
+ *   **残留碰不到本段的判据**。
+ */
+const BV_ALL_ERROR_EVENTS_EXPRESSION = `(() => {
+  const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
+  const out = [];
+  for (const raw of frames) {
+    let frame = null;
+    try { frame = JSON.parse(String(raw)); } catch (e) { continue; }
+    const msg = (frame && frame.payload) ? frame.payload : null;
+    const body = (msg && msg.payload) ? msg.payload : null;
+    const ev = (body && body.Event) ? body.Event : null;
+    if (!ev || !ev.Error) continue;
+    out.push({
+      code: String(ev.Error.code ?? ""),
+      message: String(ev.Error.message ?? ""),
+    });
+  }
+  return out;
 })()`;
 
 /**
@@ -3415,6 +3766,53 @@ async function loadDemoFirmware(cdp, opts) {
         await sleep(200);
     }
     return false;
+}
+
+/**
+ * 装 demo 固件 ⇒ ⇒ **等它被拒**（STAGE-47 · v0.71 批的真机段）。
+ *
+ * ⚠️ **为什么要有这个「反向」版本**：「未知系统」那条路的**结果就是失败**
+ *   ⇒ ⇒ 复用 [`loadDemoFirmware`]（它等的是「已装载」）⇒ ⇒ **必然超时**
+ *   ⇒ ⇒ ⇒ 那条判据会**假红**。
+ *
+ * ⚠️ **判据钉在「页头那条短状态条」上**（`data-image-brief-status`）⇒ ⇒
+ *   那是**用户看得见**的那一处 ⇒ ⇒ 与「内核回了什么」**不是同一个口径**
+ *   ⇒ ⇒ 两条都要（一条钉界面、一条钉内核）。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{rejected: boolean, briefText: string, briefStatus: string, timedOut: boolean}>}
+ */
+async function attemptLoadDemoFirmware(cdp, opts) {
+    // ⚠️ **与 [`loadDemoFirmware`] 同一段「选择 + 握手」** ⇒ ⇒ 走的是**真的**
+    //   界面路径 ⇒ ⇒ 与用户点出来的**同一条路**。
+    await runEffect(cdp, `(() => {
+        const input = document.querySelector('input[data-image-load-from="topbar"]');
+        if (!input) return "no-input";
+        input.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        return "clicked";
+    })()`);
+    await selectFileForInput(cdp, 'input[data-image-load-from="topbar"]', DEMO_FIRMWARE_PATH);
+    const pendingReady = await waitForImagePendingReady(cdp, opts.timeoutMs);
+    if (!pendingReady.ready) {
+        return { rejected: false, briefText: String(pendingReady.briefText ?? ""), briefStatus: "", timedOut: true };
+    }
+    await runEffect(cdp,
+        'document.querySelector(\'[data-action="load-image"][data-image-load-from="topbar"]\').click();');
+    const deadline = Date.now() + opts.timeoutMs;
+    let briefText = "";
+    let briefStatus = "";
+    while (Date.now() < deadline) {
+        const brief = await awaitEval(cdp, UI_IMAGE_TOPBAR_PROBE);
+        briefText = String(brief?.briefText ?? "");
+        briefStatus = String(brief?.briefStatus ?? "");
+        // ⚠️ **「装上了」也是一个答案**（⇒ ⇒ 那条判据就该红：它**没**被拒）
+        if (briefStatus === "error" || briefStatus === "ok") {
+            return { rejected: briefStatus === "error", briefText, briefStatus, timedOut: false };
+        }
+        await sleep(200);
+    }
+    return { rejected: false, briefText, briefStatus, timedOut: true };
 }
 
 /**
@@ -7060,6 +7458,7 @@ async function runBasePlannerSection(cdp, opts) {
 }
 
 
+
 /**
  * STAGE-42 · v0.57 批的真机段：**符号入口**（在 **demo 固件**上 ⇒ ⇒ 没有
  * 符号表 ⇒ ⇒ 专打「没有符号表」那一态）。
@@ -8047,6 +8446,41 @@ async function runUartEchoProbe(cdp, opts) {
 // ---------------------------------------------------------------------------
 
 /**
+ * **哪些 Rust 源文件比 WASM 产物新**（⇒ ⇒ 那一趟门禁在测**旧内核**）。
+ *
+ * ⚠️ **判据 = mtime**（产物的时间戳 vs 源码的时间戳）⇒ ⇒ **不是**「源码
+ *   有没有变」⇒ ⇒ 而是「**这份产物**是不是由**这份源码**构建的」。
+ *
+ * ⚠️ **只看 `crates/` 下的 `.rs`**（⇒ ⇒ 契约层 / 仿真内核 / 内核宿主 /
+ *   服务端）⇒ ⇒ 前端改动**不影响** WASM 产物 ⇒ ⇒ 不该让前端改动把门禁
+ *   卡住 ⇒ ⇒ ⇒ **一个参数 ⇒ ⇒ 一个落点**：判「要不要重建」只看**真正进
+ *   产物的那部分**。
+ *
+ * @param {string} wasmPath — WASM 产物的路径
+ * @returns {Array<string>} 比产物新的源文件（相对仓根）
+ */
+function staleRustSources(wasmPath) {
+    const cratesDir = join(repoRoot, "crates");
+    if (!existsSync(cratesDir) || !existsSync(wasmPath)) return [];
+    const wasmMtime = statSync(wasmPath).mtimeMs;
+    const out = [];
+    const walk = (dir) => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+            const full = join(dir, entry.name);
+            if (entry.isDirectory()) {
+                walk(full);
+            } else if (entry.isFile() && entry.name.endsWith(".rs")) {
+                if (statSync(full).mtimeMs > wasmMtime) {
+                    out.push(relative(repoRoot, full));
+                }
+            }
+        }
+    };
+    walk(cratesDir);
+    return out.sort();
+}
+
+/**
  * Run the whole verification.
  *
  * @returns {Promise<number>} the process exit code
@@ -8070,6 +8504,34 @@ async function main() {
         return EXIT_PRECONDITION;
     }
     console.log("· WASM 内核：front/assets/pkg/");
+
+    // ⚠️ **产物必须比源码新**（STAGE-47 · v0.71 批 · 施工期订正 5）。
+    //
+    // ⚠️ **为什么这条必须有**：真机门禁测的是**构建产物**，**不是**源码
+    //   ⇒ ⇒ 改了 Rust 却**没重建** ⇒ ⇒ 浏览器里跑的是**旧内核**
+    //   ⇒ ⇒ 新写的判据**一条都不会红**（因为旧内核里根本没那条逻辑）
+    //   ⇒ ⇒ ⇒ 症状是「**判定没拦住**」⇒ ⇒ **长得像产品缺陷**
+    //   ⇒ ⇒ ⇒ **会把人引到「改产品」那条错路上**。
+    //
+    // ⚠️ **本批就踩过**：真机段初版报的是 `E_BUS-01: write unmapped
+    //   addr=0x00000000` ⇒ ⇒ 看着像「判定没拦住」⇒ ⇒ 实际是**跑的是没有
+    //   判定逻辑的旧 WASM**（旧内核里没有判定 ⇒ ⇒ 直接往总线写 ⇒ ⇒ 那块
+    //   板在地址 0 没有 RAM ⇒ ⇒ 撞总线）⇒ ⇒ ⇒ **重建 WASM 后同一条断言
+    //   全绿** ⇒ ⇒ ⇒ 那不是产品缺陷，是**门禁在测旧东西**。
+    //
+    // ⚠️ **一个参数 ⇒ ⇒ 一个落点**：门禁**测的到底是哪一份代码** ⇒ ⇒
+    //   必须**由门禁自己**回答 ⇒ ⇒ 不能靠「我记得重建过」。
+    const stale = staleRustSources(wasmBin);
+    if (stale.length > 0) {
+        console.error([
+            "error: WASM 内核产物**比 Rust 源码旧** ⇒ ⇒ 这一趟测的是**旧内核**。",
+            `  产物：${wasmBin}`,
+            ...stale.slice(0, 8).map((f) => `  源码更新：${f}`),
+            stale.length > 8 ? `  …… 另有 ${stale.length - 8} 个文件` : "",
+            "  先重建：tools/build-wasm.sh（或 tools/build-wasm.sh --release）",
+        ].join("\n"));
+        return EXIT_PRECONDITION;
+    }
 
     const chromePath = resolveChrome();
     if (!chromePath) {
@@ -8513,13 +8975,23 @@ async function main() {
             title: "板级内存图检查（配一张板 → 映射表变新图 → 新 RAM 段可写可读）",
         });
 
-        // -- the BASE PLANNER (STAGE-46 · v0.70 · B-136 ~ B-140) --------------
+        // -- the UNKNOWN SYSTEM GATE (STAGE-47 · v0.71 · B-141 ~ B-145) ------
         // ⚠️ **必须排在板级内存图那段之后**：那一段已经把一张板配出来了 ⇒ ⇒
+        //    才有「当前板的分区」可比 ⇒ ⇒ 而且那时是**已装载**状态 ⇒ ⇒
+        //    「判定用的是哪一份」才**可观测**（未装载时 `SetMemoryMap` 立即
+        //    生效 ⇒ ⇒ 那两条判据会**恒真** ⇒ ⇒ 零判别力）。
+        const unknownSystem = await runSection("unknownSystem", () => runUnknownSystemSection(cdp, opts));
+        registerSection("unknownSystem", unknownSystem.checks, {
+            title: "「未知系统」门禁（真内核拒 · PC 没动 · 只显示内核原文 · 中档不拒）",
+        });
+
+        // -- the BASE PLANNER (STAGE-46 · v0.70 · B-136 ~ B-140) --------------        // ⚠️ **必须排在板级内存图那段之后**：那一段已经把一张板配出来了 ⇒ ⇒
         //    草稿里有段 ⇒ ⇒ 才算得出占用区间 ⇒ ⇒ 空隙才**不是**空的。
         const basePlanner = await runSection("basePlanner", () => runBasePlannerSection(cdp, opts));
         registerSection("basePlanner", basePlanner.checks, {
             title: "基址规划检查（面板列出空隙 · 真点「用这个」⇒ 那一行的基址真的变了 · 真内核接受那个空隙）",
         });
+
 
 
         // -- the board ARCHIVE (STAGE-15 · T-3) ------------------------------

@@ -2424,11 +2424,14 @@ impl KernelHost {
         entries.iter().map(LogEntry::to_dto).collect()
     }
 
-    /// 装载工程：复位 → 重建平台 → 加载镜像 → 换新会话（清订阅）。
+    /// 装载工程：**判定** → 复位 → 重建平台 → 加载镜像 → 换新会话（清订阅）。
+    ///
+    /// ⚠️ **复位排在判定之后**（STAGE-47 施工期订正 4）：初版把
+    ///   `backend.reset()` 放在**函数开头** ⇒ ⇒ 「未知系统」判不过时
+    ///   **机器已经被复位了**（PC 归零、寄存器清空、断点被清）⇒ ⇒ 与
+    ///   冻结规格 §4.2 **K-2**（「PC 没动」）**逐字冲突** ⇒ ⇒ ⇒ 那条判据
+    ///   在真机上**恒假**（PC 本来就是 0）⇒ ⇒ ⇒ **零判别力**。
     fn on_load_project(&mut self, project: Project) -> Vec<EventPayload> {
-        let _ = self.backend.reset();
-        self.backend.clear_debug_state();
-
         // ---- 第一步：**先解析**，不写总线 ----
         //
         // ⚠️ 顺序是刻意的：**档位要按镜像用到的地址挑** ⇒ 必须先知道
@@ -2436,6 +2439,10 @@ impl KernelHost {
         //
         // 旧顺序是「先建图、再装载」—— 那只对「所有镜像都落在同一张
         // 图里」成立，真实 RTOS（osz）不成立。
+        //
+        // ⚠️ **解析是纯计算**（M-06）⇒ ⇒ 它**不碰机器状态** ⇒ ⇒ 所以
+        //   「解析失败 ⇒ 机器复位」这条**旧行为**随复位一起挪走了 ⇒ ⇒
+        //   现在是「**装载没成功 ⇒ 机器一个字都没动**」。
         let mut parsed: Vec<ParsedImage> = Vec::new();
         for image in &project.images {
             match self.parse_image(image) {
@@ -2462,7 +2469,7 @@ impl KernelHost {
             }
         }
 
-        // ---- 第二步：挑平台描述 + 重建平台 ----
+        // ---- 第二步：挑平台描述（**判定在这之前**）----
         //
         // ⚠️ **重建平台**：**内存图 + 探针管道 + 外设探针回调**一起重来。
         //
@@ -2504,6 +2511,11 @@ impl KernelHost {
                 //
                 // ⚠️ **在应用这块板**之前判 ⇒ ⇒ 判不过 ⇒ ⇒ `self.platform`
                 //   **没被动过** ⇒ ⇒ **不建图、不写总线**（顺序是硬约束）。
+                //
+                // ⚠️ **而且机器整个没被动过**（STAGE-47 施工期订正 4）⇒ ⇒
+                //   复位排在**这一步之后** ⇒ ⇒ 判不过 ⇒ ⇒ **正在跑的访客
+                //   不受影响**（PC 不动、寄存器不动、断点不动）⇒ ⇒ ⇒ 与规格
+                //   §4.2 **K-2** 逐字对齐。
                 let board_ranges = platform::board_intervals(board);
                 let verdict = platform::compatibility(&ranges, &board_ranges);
                 // ⚠️ **中档**（用户 2026-11-01 拍板）：只有「**完全落不在**」
@@ -2550,11 +2562,26 @@ impl KernelHost {
                 Err(err) => return vec![self.error_from(&err)],
             },
         }
+        // ---- 第三步：**换工程 ⇒ 复位机器** ----
+        //
+        // ⚠️ **复位排在判定之后**（STAGE-47 施工期订正 4）⇒ ⇒ 上面那两条
+        //   「判不过」的返回路径上 ⇒ ⇒ **机器一个字都没动** ⇒ ⇒ 正在跑的
+        //   访客**不受影响**（PC 不动、寄存器不动、断点不动）⇒ ⇒ ⇒ 与规格
+        //   §4.2 **K-2**（「PC 没动」）**逐字对齐**。
+        //
+        // ⚠️ **为什么不能放回函数开头**：`backend.reset()` 把**引擎状态**
+        //   整个清掉（PC、寄存器、虚拟时钟、事件队列）⇒ ⇒ 放前面 ⇒ ⇒ 拒绝
+        //   也会把访客**悄悄抹掉** ⇒ ⇒ 用户看到的是「报了错、程序却也停了」
+        //   ⇒ ⇒ **界面在骗人**。
+        let _ = self.backend.reset();
+        self.backend.clear_debug_state();
+
+        // ---- 第四步：重建平台 ----
         if let Err(err) = self.rebuild_platform() {
             return vec![self.error_from(&err)];
         }
 
-        // ---- 第三步：把镜像**写进**总线 ----
+        // ---- 第五步：把镜像**写进**总线 ----
         for p in &parsed {
             for (addr, bytes) in &p.segments {
                 if let Err(err) = self.backend.bus_mut().load_bytes(*addr, bytes) {
