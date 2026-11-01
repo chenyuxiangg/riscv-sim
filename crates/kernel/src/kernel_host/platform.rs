@@ -598,6 +598,83 @@ fn covered_by_ram(description: &PlatformDescription, lo: u32, hi: u32) -> bool {
     })
 }
 
+// ---------------------------------------------------------------------------
+// 「未知系统」门禁（v0.71 · STAGE-47 · 台账 D-175 候选 C）
+// ---------------------------------------------------------------------------
+
+/// 镜像要的地址 ⟷ **当前板**的关系（STAGE-47 · 纯函数 · **一处落点**）。
+///
+/// ⚠️ **三个字段**是**三件不同的事** ⇒ ⇒ **不许**用同一个布尔代替它们
+/// ⇒ ⇒ 否则「部分落不在」会被误判成「完全不落不在」⇒ ⇒ ⇒ 那就把用户拍的
+/// **中档**做成了**严档** ⇒ ⇒ ⇒ **用户拍的档就没了**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BoardCompatibility {
+    /// **每个**区间都**完全落在**某个分区里 ⇒ ⇒ 这块板**完全认得**它。
+    pub fully_covered: bool,
+    /// 至少有一个区间**完全落不在**任何分区里（**一个字节都不在**）
+    /// ⇒ ⇒ ⇒ **「未知系统」** ⇒ ⇒ **拒**。
+    pub missing: bool,
+    /// 至少有一个区间**部分落在**（有交集但不完整）
+    /// ⇒ ⇒ ⇒ **中档**：**不拒** ⇒ ⇒ 撞的那部分由**总线**自己去报。
+    pub partial: bool,
+}
+
+/// 一块板**覆盖**了哪些地址区间（**只看 RAM / ROM**）。
+///
+/// ⚠️ **外设窗口不参与**（STAGE-47 裁决 E）⇒ ⇒ 窗口大小**不在描述里**
+/// （`RegionSpec::Peripheral` **故意**没有那个字段）⇒ ⇒ 要算就得引
+/// 「器件自报」那份 ⇒ ⇒ **本批不引** ⇒ ⇒ **已知边界**，如实登记。
+pub fn board_intervals(description: &PlatformDescription) -> Vec<(u32, u32)> {
+    description
+        .regions
+        .iter()
+        .filter_map(|region| match region {
+            RegionSpec::Ram { base, size } | RegionSpec::Rom { base, size } => {
+                Some((*base, base.saturating_add(*size)))
+            }
+            RegionSpec::Peripheral { .. } => None,
+        })
+        .collect()
+}
+
+/// 镜像要的地址区间 ⟷ 板的分区（STAGE-47 · **纯函数**）。
+///
+/// ⚠️ **半开区间**（`[lo, hi)`）⇒ ⇒ 与装载时算出来的 `ranges` **同一口径**。
+///
+/// ⚠️ **三个结果**（§2.2）：
+/// * **完全落不在**（`missing`）⇒ ⇒ **「未知系统」**⇒ ⇒ **拒**；
+/// * **部分落不在**（`partial`）⇒ ⇒ **中档**：**不拒** ⇒ ⇒ 撞了让总线去报；
+/// * 全都完全落在 ⇒ ⇒ **认得**。
+///
+/// @param mirror_ranges — 镜像要落的区间（`[lo, hi)`）
+/// @param board — 板覆盖的区间（`[lo, hi)`）
+pub fn compatibility(mirror_ranges: &[(u32, u32)], board: &[(u32, u32)]) -> BoardCompatibility {
+    let mut missing = false;
+    let mut partial = false;
+    for &(lo, hi) in mirror_ranges {
+        // ⚠️ **空区间不算**（镜像没有字节）⇒ ⇒ 否则「零长度」会被判成
+        //   「落不在」⇒ ⇒ ⇒ **空转的红**。
+        if hi <= lo {
+            continue;
+        }
+        let fully = board.iter().any(|&(b_lo, b_hi)| lo >= b_lo && hi <= b_hi);
+        if fully {
+            continue;
+        }
+        let overlaps = board.iter().any(|&(b_lo, b_hi)| lo < b_hi && b_lo < hi);
+        if overlaps {
+            partial = true;
+        } else {
+            missing = true;
+        }
+    }
+    BoardCompatibility {
+        fully_covered: !missing && !partial,
+        missing,
+        partial,
+    }
+}
+
 /// 按镜像**实际用到的地址**挑平台描述（裁决 E）。
 ///
 /// ## 判据（规格 §3 裁决 E 的**逐字**写法）

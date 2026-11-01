@@ -175,7 +175,8 @@ use riscv_sim_contract::csr::IRQ_UART_RX_READY;
 use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_03_DUMP_TOO_LARGE, E_DBG_04_SYMBOL_NAME_EMPTY,
     E_ENG_03_NO_PROGRESS, E_HMS_02_FATAL_TERMINATED, E_PLT_13_REVISION_CONFLICT,
-    E_PLT_14_REGION_NOT_FOUND, E_PROTO_01_VERSION_MISMATCH, PLATFORM_FAMILY, PROTO_FAMILY,
+    E_PLT_14_REGION_NOT_FOUND, E_PLT_17_BOARD_MISMATCH, E_PROTO_01_VERSION_MISMATCH,
+    PLATFORM_FAMILY, PROTO_FAMILY,
 };
 use riscv_sim_contract::model::{
     Edge, ImageKind, ImageRef, ImageSource, Project, TraceEvent, TraceFormat, TraceSource,
@@ -2492,6 +2493,51 @@ impl KernelHost {
         // 一个标志位。
         match &self.user_board {
             Some(board) => {
+                // ⚠️ **STAGE-47 · D-175 候选 C ·「未知系统」门禁** ⇒ ⇒ 判定
+                //   **只**对**用户配的板**做 ⇒ ⇒ 因为两条路各有一半：
+                //   · **用户没配板** ⇒ ⇒ 走**自动选档** ⇒ ⇒ 自动选档**就是**按
+                //     镜像的地址挑的 ⇒ ⇒ 它**必然**挑一块装得下的 ⇒ ⇒ ⇒
+                //     「未知系统」**不该**出现 ⇒ ⇒ ⇒ **存量链路零影响** ✓；
+                //   · **用户配了板** ⇒ ⇒ 用户**明确**了「我要用这块板」⇒ ⇒
+                //     固件要的地址**完全不在**它上面 ⇒ ⇒ ⇒ **「未知系统」**
+                //     ⇒ ⇒ **拒**。
+                //
+                // ⚠️ **在应用这块板**之前判 ⇒ ⇒ 判不过 ⇒ ⇒ `self.platform`
+                //   **没被动过** ⇒ ⇒ **不建图、不写总线**（顺序是硬约束）。
+                let board_ranges = platform::board_intervals(board);
+                let verdict = platform::compatibility(&ranges, &board_ranges);
+                // ⚠️ **中档**（用户 2026-11-01 拍板）：只有「**完全落不在**」
+                //   才拒 ⇒ ⇒ 「**部分落不在**」**不拒** ⇒ ⇒ 撞的那部分由**总线**
+                //   自己报（**既有**的错误码）⇒ ⇒ 本批**不新增**那一档。
+                if verdict.missing {
+                    // ⚠️ **把第一个落不在的区间说出来** ⇒ ⇒ 用户看得见**差在
+                    //   哪**⇒ ⇒ 而不是只看到一个码。
+                    let first_missing = ranges.iter().copied().find(|&(lo, hi)| {
+                        if hi <= lo {
+                            return false;
+                        }
+                        !board_ranges
+                            .iter()
+                            .any(|&(b_lo, b_hi)| lo < b_hi && b_lo < hi)
+                    });
+                    let detail = match first_missing {
+                        Some((lo, hi)) => format!(
+                            "未知系统：这个固件要用的地址 0x{lo:08x}..0x{:08x} \
+                             不在当前这块板「{}」上",
+                            hi.saturating_sub(1),
+                            board.id
+                        ),
+                        None => format!(
+                            "未知系统：这个固件要用的地址不在当前这块板「{}」上",
+                            board.id
+                        ),
+                    };
+                    return vec![self.error_from(&PlatformError::new(
+                        PLATFORM_FAMILY,
+                        E_PLT_17_BOARD_MISMATCH,
+                        detail,
+                    ))];
+                }
                 if self.platform != *board {
                     // ⚠️ **待生效**（用户的板 ≠ 当前生效的图）⇒ 它在这里
                     // **被应用** ⇒ 生效的图变了 ⇒ 修订号 +1。
@@ -4645,6 +4691,8 @@ mod tests_v059_reset;
 /// （已绑定 / 待生效）⇒ ⇒ 断言全部落在**命令回的事件**上。
 #[cfg(test)]
 mod tests_v066_devices;
+#[cfg(test)]
+mod tests_v071_unknown_system;
 
 /// 平台描述的加载 · 器件工厂 · 建图（v0.27 · D-123-B）。
 ///

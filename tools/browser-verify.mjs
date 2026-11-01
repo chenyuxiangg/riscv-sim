@@ -352,7 +352,11 @@ function parseArgs(argv) {
     };
     for (let i = 0; i < argv.length; i += 1) {
         const arg = argv[i];
-        if (arg === "--url") opts.url = argv[++i];
+        if (arg === "--url") {
+            opts.url = argv[++i];
+            // ⚠️ **钉了 `--url` ⇒ ⇒ 端口**不许**被 `--serve-port` 改掉。
+            opts.urlPinned = true;
+        }
         else if (arg === "--cdp-port") opts.cdpPort = Number(argv[++i]);
         else if (arg === "--serve-port") opts.servePort = Number(argv[++i]);
         else if (arg === "--timeout-ms") opts.timeoutMs = Number(argv[++i]);
@@ -368,6 +372,17 @@ function parseArgs(argv) {
         // The server follows the URL unless it was pinned explicitly.
         const port = new URL(opts.url).port;
         opts.servePort = port ? Number(port) : 80;
+    } else if (opts.urlPinned !== true) {
+        // ⚠️⚠️ **钉了 `--serve-port` ⇒ ⇒ URL 的端口也必须跟着换** ⇒ ⇒ 否则
+        //   **服务起在 A 端口、探测却打 B 端口** ⇒ ⇒ 「10 秒内没就绪」⇒ ⇒
+        //   ⇒ **换端口这个诊断手段直接失灵**（而「换端口」正是**避开端口
+        //   冲突**的标准做法 ⇒ ⇒ ⇒ 一撞端口就查不下去了）。
+        //
+        // ⚠️ **实测**（v0.71 批）：连续三个端口都报「HTTP 服务没能在 10s 内
+        //   就绪」⇒ ⇒ 真因就是这里 ⇒ ⇒ 而**服务其实起得好好的**。
+        const url = new URL(opts.url);
+        url.port = String(opts.servePort);
+        opts.url = url.toString();
     }
     return opts;
 }
@@ -7044,6 +7059,7 @@ async function runBasePlannerSection(cdp, opts) {
     return { checks };
 }
 
+
 /**
  * STAGE-42 · v0.57 批的真机段：**符号入口**（在 **demo 固件**上 ⇒ ⇒ 没有
  * 符号表 ⇒ ⇒ 专打「没有符号表」那一态）。
@@ -8504,6 +8520,7 @@ async function main() {
         registerSection("basePlanner", basePlanner.checks, {
             title: "基址规划检查（面板列出空隙 · 真点「用这个」⇒ 那一行的基址真的变了 · 真内核接受那个空隙）",
         });
+
 
         // -- the board ARCHIVE (STAGE-15 · T-3) ------------------------------
         // ⚠️ **必须排在板级内存图段之后**：这一段会**提交一张新板**

@@ -581,6 +581,27 @@ pub const E_PLT_15_DEVICE_EMPTY_ID: u16 = 15;
 /// different object ⇒ forbidden.
 pub const E_PLT_16_WIRING_INVALID: u16 = 16;
 
+/// Scenario code: the image wants an address range that the **board in
+/// effect** does not have at all — 「**未知系统**」.
+///
+/// ⚠️ **New in v0.71 (STAGE-47 · D-175 候选 C)**: the host now judges
+/// whether the image's **memory layout** fits the **live memory map**
+/// (the one the user's board produced) ⇒ ⇒ an image that wants an address
+/// the board does not have is **rejected at load time**, instead of being
+/// loaded and then faulting on the bus.
+///
+/// ⚠️ **It does not reuse [`E_PLT_09_UNKNOWN_PLATFORM`]**: that one means
+/// 「**按名字**找一块板而找不到」⇒ this one means 「**这块板在**，但它没有
+/// 那个地址」⇒ one code, two meanings ⇒ forbidden. It does not reuse
+/// [`E_PLT_06_OVERLAP`] either: that one judges a **declared** overlap
+/// between two regions of one description ⇒ this one judges an **image**
+/// against a **live map** ⇒ forbidden.
+///
+/// ⚠️ **No contract version bump**: adding a scenario code does not change
+/// any **shape** on the wire ⇒ ⇒ `SCHEMA_VERSION` stays **10** (the same
+/// precedent as `E_PLT_12` in v0.30).
+pub const E_PLT_17_BOARD_MISMATCH: u16 = 17;
+
 #[cfg(test)]
 mod tests {
     use super::*;
