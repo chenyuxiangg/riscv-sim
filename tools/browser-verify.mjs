@@ -197,6 +197,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "boardTree",
     "readback",
     "staleSurfaces",
+    "basePlanner",
 ]);
 
 /**
@@ -6885,6 +6886,165 @@ async function runStaleSurfacesSection(cdp, opts) {
 }
 
 /**
+ * STAGE-46 · v0.70 批的真机探针：**基址规划面板**。
+ *
+ * ⚠️ **按 `data-mmap-row` 取那一行**（不是「第几行」）⇒ ⇒ RAM / ROM 与外设
+ *   两张表**分组渲染** ⇒ ⇒ DOM 顺序 ≠ 草稿下标 ⇒ ⇒ 按位置取会**取错行**。
+ */
+const BV_BASE_PLANNER_PROBE = `(() => {
+  const view = document.querySelector('[data-view-body="memory-map"]');
+  const plan = view ? view.querySelector("[data-mmap-plan]") : null;
+  const gaps = plan ? Array.from(plan.querySelectorAll("[data-mmap-plan-gap]")) : [];
+  const first = gaps[0] ?? null;
+  const firstCells = first ? Array.from(first.querySelectorAll("td")) : [];
+  const targetSelect = plan ? plan.querySelector("[data-mmap-plan-target]") : null;
+  const targetIndex = Number(targetSelect ? targetSelect.value : 0);
+  const targetRow = view
+    ? view.querySelector('[data-mmap-row="' + String(targetIndex) + '"]')
+    : null;
+  const baseInput = targetRow ? targetRow.querySelector("[data-mm-base]") : null;
+  const product = document.querySelector('[data-view-body="product"]');
+  const err = view ? view.querySelector("[data-memory-map-error]") : null;
+  return {
+    hasPanel: !!plan,
+    gapCount: gaps.length,
+    firstGapFrom: first ? String(first.getAttribute("data-mmap-plan-gap") ?? "") : null,
+    firstGapFromText: firstCells.length > 0 ? String(firstCells[0].textContent || "").trim() : "",
+    firstGapToText: firstCells.length > 1 ? String(firstCells[1].textContent || "").trim() : "",
+    firstGapSizeText: firstCells.length > 2 ? String(firstCells[2].textContent || "").trim() : "",
+    targetIndex,
+    targetBase: baseInput ? String(baseInput.getAttribute("value") ?? "") : null,
+    productPlanCount: product ? product.querySelectorAll("[data-mmap-plan]").length : -1,
+    hasSubmit: !!document.querySelector('[data-action="submit-memory-map"]'),
+    errorCode: err ? String(err.getAttribute("data-error-code") ?? "") : "",
+    pending: !!document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]'),
+  };
+})()`;
+
+/**
+ * STAGE-46 · v0.70 批的真机段：**基址规划面板**（台账 **D-175** 候选 **B** 的第一半）。
+ *
+ * ⚠️ **本段盯三条**：① 面板**在**、**列得出**空隙；② 真点「**用这个**」⇒ ⇒
+ *   **那一行的基址真的变了**；③ 提交 ⇒ ⇒ **真内核接受**（那个空隙**不撞**）
+ *   ⇒ ⇒ 且**命令载荷**里那一段的基址 **== 面板给的那个**。
+ *
+ * ⚠️ **必须排在「板级内存图」那段之后** ⇒ ⇒ 那段已经把一张板配出来了 ⇒ ⇒
+ *   草稿里有段 ⇒ ⇒ 才算得出占用区间 ⇒ ⇒ 空隙才**不是**空的。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{checks: object[]}>}
+ */
+async function runBasePlannerSection(cdp, opts) {
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
+    const probe = async () => await awaitEval(cdp, BV_BASE_PLANNER_PROBE);
+
+    // -- 前置：切到板级内存图编辑器 -------------------------------------------
+    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
+    await sleep(900);
+
+    let p = await probe();
+
+    // -- B-136 · 面板**在** ---------------------------------------------------
+    add(
+        "B-136 · 板级内存图编辑器里有「**基址规划**」面板"
+        + "（⇒ ⇒ 用户第一眼能找到 ⇒ ⇒ 不是某个藏起来的角落）",
+        p?.hasPanel === true,
+        `面板=${p?.hasPanel}`,
+    );
+
+    // -- B-137 · 面板**列得出**空隙 -------------------------------------------
+    add(
+        "B-137 · 面板**列出了空隙**（不是空的 ⇒ ⇒ 也不是只有一句提示）"
+        + "⇒ ⇒ 每条有**起止地址 + 可用字节**",
+        Number(p?.gapCount ?? 0) > 0
+            && String(p?.firstGapFromText ?? "").length > 0
+            && String(p?.firstGapToText ?? "").length > 0
+            && String(p?.firstGapSizeText ?? "").length > 0,
+        `空隙条数=${p?.gapCount} 第一条=${JSON.stringify(p?.firstGapFromText)}`
+        + ` – ${JSON.stringify(p?.firstGapToText)}（${JSON.stringify(p?.firstGapSizeText)} 字节）`,
+    );
+
+    // -- B-138 · 真点「用这个」⇒ ⇒ **那一行的基址真的变了** -------------------
+    const baseBefore = p?.targetBase ?? null;
+    const gapFrom = p?.firstGapFrom ?? null;
+    await runEffect(cdp, `(() => {
+        const b = document.querySelector('[data-view-body="memory-map"] [data-action="use-base-gap"]');
+        if (!b) return "no-button";
+        b.click();
+        return "clicked";
+    })()`);
+    await sleep(700);
+    p = await probe();
+    add(
+        "B-138 · 真点「**用这个**」⇒ ⇒ **目标行**的基址**真的**变了"
+        + "（⇒ ⇒ 入口**不是**个摆设 ⇒ ⇒ 用户挑的那条**真的**填进去了）",
+        p?.targetBase !== baseBefore && String(p?.targetBase ?? "") === String(gapFrom ?? ""),
+        `点之前=${JSON.stringify(baseBefore)} 点之后=${JSON.stringify(p?.targetBase)}`
+        + ` 面板给的那个=${JSON.stringify(gapFrom)} 目标行=${p?.targetIndex}`,
+    );
+
+    // -- B-139 · 提交 ⇒ ⇒ **真内核接受** ⇒ ⇒ 载荷里那一段就是那个基址 --------
+    await runEffect(cdp, `(() => {
+        const b = document.querySelector('[data-action="submit-memory-map"]');
+        if (!b) return "no-button";
+        b.click();
+        return "clicked";
+    })()`);
+    // ⚠️ **等这条命令往返一趟** ⇒ ⇒ 「待生效」横幅**出现** = 内核**收了**这张板
+    // ⇒ ⇒ 若那个空隙**撞了**，内核会报 `E_PLT-06` ⇒ ⇒ 横幅**不会出现**。
+    const deadline = Date.now() + opts.timeoutMs;
+    let accepted = false;
+    while (Date.now() < deadline) {
+        const now = await awaitEval(cdp, `(() => {
+            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+            const err = document.querySelector('[data-view-body="memory-map"] [data-memory-map-error]');
+            return { pending: Boolean(el), code: err ? String(err.getAttribute("data-error-code") || "") : "" };
+        })()`);
+        if (now?.code === "E_PLT_06") break;
+        if (now?.pending === true) {
+            accepted = true;
+            break;
+        }
+        await sleep(200);
+    }
+    const cmdsText = await awaitEval(cdp, 'JSON.stringify(window.__bvCmds ?? [])');
+    let cmds = [];
+    try {
+        cmds = JSON.parse(String(cmdsText ?? "[]"));
+    } catch {
+        cmds = [];
+    }
+    const mmCmd = [...cmds].reverse().find((c) => String(c.action ?? "") === "submit-memory-map");
+    const sentRegions = Array.isArray(mmCmd?.params?.description?.regions)
+        ? mmCmd.params.description.regions
+        : [];
+    const sentHit = sentRegions.find((r) => String(r.base) === String(gapFrom ?? ""));
+    add(
+        "B-139 · 提交 ⇒ ⇒ **真内核接受**（那个空隙**不撞** ⇒ ⇒ 没有 `E_PLT-06`）"
+        + "⇒ ⇒ 且**命令载荷**里那一段的基址 **== 面板给的那个**",
+        accepted === true && Boolean(sentHit),
+        `内核接受=${accepted} 载荷里那段=${JSON.stringify(sentHit ?? null)}`
+        + ` 面板给的那个=${JSON.stringify(gapFrom)}`,
+    );
+
+    // -- B-140 · **正向对照**：规划面板**只有一处** ----------------------------
+    await runEffect(cdp, 'location.hash = "#/product";');
+    await sleep(700);
+    p = await probe();
+    add(
+        "B-140 · **正向对照**：规划面板**只有编辑器那一个落点**"
+        + "（产品视图里**零个** ⇒ ⇒ 一个动作一个落点 ⇒ ⇒ 那条断言不许空转）",
+        Number(p?.productPlanCount ?? -1) === 0 && p?.hasPanel === true,
+        `产品视图里的面板个数=${p?.productPlanCount} 编辑器里的=${p?.hasPanel ? 1 : 0}`,
+    );
+
+    return { checks };
+}
+
+/**
  * STAGE-42 · v0.57 批的真机段：**符号入口**（在 **demo 固件**上 ⇒ ⇒ 没有
  * 符号表 ⇒ ⇒ 专打「没有符号表」那一态）。
  *
@@ -8335,6 +8495,14 @@ async function main() {
         const memoryMap = await runSection("memoryMap", () => runMemoryMapSection(cdp, opts));
         registerSection("memoryMap", memoryMap.checks, {
             title: "板级内存图检查（配一张板 → 映射表变新图 → 新 RAM 段可写可读）",
+        });
+
+        // -- the BASE PLANNER (STAGE-46 · v0.70 · B-136 ~ B-140) --------------
+        // ⚠️ **必须排在板级内存图那段之后**：那一段已经把一张板配出来了 ⇒ ⇒
+        //    草稿里有段 ⇒ ⇒ 才算得出占用区间 ⇒ ⇒ 空隙才**不是**空的。
+        const basePlanner = await runSection("basePlanner", () => runBasePlannerSection(cdp, opts));
+        registerSection("basePlanner", basePlanner.checks, {
+            title: "基址规划检查（面板列出空隙 · 真点「用这个」⇒ 那一行的基址真的变了 · 真内核接受那个空隙）",
         });
 
         // -- the board ARCHIVE (STAGE-15 · T-3) ------------------------------

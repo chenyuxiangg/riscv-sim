@@ -258,9 +258,35 @@ export class StubElement extends StubEventTarget {
      * 替身里两者**共用**一个存储（`value` 属性）——这与真实浏览器的
      * 差别只出现在「用户手动改过之后」；替身里改 `el.value` 也就等于
      * 改了 `value` 属性，**读**的路径是同一个 ⇒ 断言照样抓得住。
+     *
+     * ⚠️ **`<select>` 是例外**（STAGE-46 施工期实测）：真实的 `<select>` **没有**
+     *   `value` 属性 —— 它的 `value` 是**当前选中那个 `<option>` 的值** ⇒ ⇒ 替身
+     *   若照 `<input>` 那样读 `value` 属性 ⇒ ⇒ 永远读到 `""` ⇒ ⇒ **任何读
+     *   `select.value` 的前端代码在替身里恒为「空」** ⇒ ⇒ 那条断言**恒真或恒假**
+     *   ⇒ ⇒ **判别力为零** ⇒ ⇒ 这里按**真实语义**实现它。
      */
-    get value() { return this.getAttribute("value") ?? ""; }
-    set value(v) { this.setAttribute("value", String(v)); }
+    get value() {
+        // ⚠️ `<select>` ⇒ ⇒ **选中项的值**（`selected` 属性优先，否则第一个
+        //   `<option>`）—— 与真实浏览器同形。
+        if (String(this.tagName ?? "").toLowerCase() === "select") {
+            const options = this.querySelectorAll("option");
+            const picked = options.find((o) => o.getAttribute("selected") !== null)
+                ?? options[0];
+            return picked ? String(picked.getAttribute("value") ?? "") : "";
+        }
+        return this.getAttribute("value") ?? "";
+    }
+    set value(v) {
+        if (String(this.tagName ?? "").toLowerCase() === "select") {
+            // ⚠️ 选中某个 `<option>` ⇒ ⇒ 把它其它选项的 `selected` 撤掉。
+            for (const o of this.querySelectorAll("option")) {
+                if (o.getAttribute("value") === String(v)) o.setAttribute("selected", "");
+                else o.removeAttribute("selected");
+            }
+            return;
+        }
+        this.setAttribute("value", String(v));
+    }
 
     // --- tree ---------------------------------------------------------------
 

@@ -503,14 +503,17 @@ export function draftToDescription(draft) {
  * @param {"ram"|"rom"|"peripheral"} kind
  * @returns {string}
  */
-export function nextFreeBase(draft, kind) {
+export function nextFreeBase(draft, kind, deviceTypes = null) {
     const regions = Array.isArray(draft?.regions) ? draft.regions : [];
     let top = 0;
     for (const region of regions) {
         const base = parseNumber(region?.base) ?? 0;
         const size = parseNumber(region?.size) ?? 0;
         const end = String(region?.kind) === "peripheral"
-            ? (base + PERIPHERAL_WINDOW_BYTES) >>> 0
+            // ⚠️ **外设窗口用内核类型表给的那个**（STAGE-46 · 裁决 E / I）
+            // ⇒ ⇒ 查不到才退回占位常量 ⇒ ⇒ **窗口大小只有一个真相**。
+            ? (base + (deviceWindowBytes(deviceTypes, region?.device?.device)
+                ?? PERIPHERAL_WINDOW_BYTES)) >>> 0
             : (base + size) >>> 0;
         if (end > top) top = end;
     }
@@ -518,6 +521,374 @@ export function nextFreeBase(draft, kind) {
     if (kind === "rom") return String(aligned);
     if (kind === "peripheral") return String(aligned);
     return String(Math.max(aligned, 0x8000_0000) >>> 0);
+}
+
+// ---------------------------------------------------------------------------
+// 基址规划（STAGE-46 · v0.70 批 · 台账 **D-175** 候选 **B** 的第一半）
+//
+// ⚠️ **用户自己规划，平台提供入口**（用户 2026-11-01 拍板）⇒ ⇒ 这里**不替用户
+//   决定**基址落在哪 ⇒ ⇒ 只做两件事：**算出哪里空着**（信息）＋ **给出入口**
+//   （挑一个填进去）⇒ ⇒ 真相**始终**是描述里的那个 `base`。
+//
+// ⚠️ **重叠判定仍然只由内核判**（`E_PLT_06`）⇒ ⇒ 这里算的**不是**校验器
+//   ⇒ ⇒ 与 `nextFreeBase` 同一纪律（它也只算「放哪儿顺眼」）。
+// ---------------------------------------------------------------------------
+
+/**
+ * 规划范围的**粒度**（1 MiB）。
+ *
+ * ⚠️ **为什么是 1 MiB**：外设窗口按 4 KiB 对齐、RAM 段常按 MiB 对齐 ⇒ ⇒
+ *   规划范围用 **MiB** 粒度 ⇒ ⇒ 用户挑到的起点**对两者都是合法的对齐地址**
+ *   ⇒ ⇒ 不会出现「挑了一个外设放不下」的地址。
+ */
+export const PLAN_ALIGN_BYTES = 0x0010_0000;
+
+/**
+ * 面板**最多列几条**空隙。
+ *
+ * ⚠️ **不许静默截断** ⇒ ⇒ 截断时面板**如实说**「还有 N 条」。
+ */
+export const PLAN_MAX_GAPS = 8;
+
+/**
+ * 外设窗口大小 —— **查内核类型表**（裁决 E / I）。
+ *
+ * ⚠️ **为什么现在能查了**：v0.66 批的内核器件类型表带了 `window_bytes` ⇒ ⇒
+ *   那份**前端拷贝**（`PERIPHERAL_WINDOW_BYTES`）可以退役 ⇒ ⇒ 窗口大小
+ *   **只有一个真相**（内核那份）。
+ *
+ * ⚠️ **查不到 ⇒ ⇒ 返回 `null`**（不是占位值）⇒ ⇒ 调用方**必须**自己决定
+ *   退化成什么 **并且如实标注** ⇒ ⇒ **不假装**知道窗口大小。
+ *
+ * @param {Array<{kind?: string, window_bytes?: number}>|null} deviceTypes — 内核的类型表
+ * @param {string} kind — 器件类型名
+ * @returns {number|null} 窗口字节数（或 `null` = 内核还没报）
+ */
+export function deviceWindowBytes(deviceTypes, kind) {
+    const types = Array.isArray(deviceTypes) ? deviceTypes : [];
+    const want = String(kind ?? "");
+    if (!want) return null;
+    for (const type of types) {
+        if (String(type?.kind ?? "") !== want) continue;
+        const n = Number(type?.window_bytes);
+        if (Number.isFinite(n) && n > 0) return n >>> 0;
+    }
+    return null;
+}
+
+/**
+ * 草稿 → **占用区间**（每段一条，半开区间 `[base, end)`）。
+ *
+ * ⚠️ **外设的占用长度用内核给的 `window_bytes`** ⇒ ⇒ 内核**还没报**类型表
+ *   ⇒ ⇒ 退回那份**占位常量** **且 `windowKnown = false`** ⇒ ⇒ 面板据此
+ *   **如实标注**「窗口大小未知」（⇒ ⇒ **不假装**知道 ⇒ ⇒ 用户不会被一个
+ *   编出来的空隙骗到）。
+ *
+ * ⚠️ **RAM / ROM 用描述里的 `size`** ⇒ ⇒ 那是**描述**的一部分 ⇒ ⇒ 真相在
+ *   描述里 ⇒ ⇒ 不用查任何外部数据源。
+ *
+ * @param {object} draft — 草稿
+ * @param {Array|null} [deviceTypes] — 内核的器件类型表
+ * @returns {Array<{index:number,kind:string,base:number,size:number,end:number,windowKnown:boolean}>}
+ */
+export function occupiedIntervals(draft, deviceTypes = null) {
+    const regions = Array.isArray(draft?.regions) ? draft.regions : [];
+    return regions.map((region, index) => {
+        const kind = String(region?.kind ?? "ram");
+        const base = (parseNumber(region?.base) ?? 0) >>> 0;
+        let size = 0;
+        let windowKnown = true;
+        if (kind === "peripheral") {
+            const kindName = String(region?.device?.device ?? "");
+            const window = deviceWindowBytes(deviceTypes, kindName);
+            if (window === null) {
+                size = PERIPHERAL_WINDOW_BYTES;
+                windowKnown = false;
+            } else {
+                size = window;
+            }
+        } else {
+            size = (parseNumber(region?.size) ?? 0) >>> 0;
+        }
+        return {
+            index,
+            kind,
+            base,
+            size,
+            end: (base + size) >>> 0,
+            windowKnown,
+        };
+    });
+}
+
+/**
+ * 占用区间 → **并集**（按起点排序、互相**重叠**的合并成一条）。
+ *
+ * ⚠️ **为什么要并集**：草稿里**已经有**两段重叠时（用户手填撞了）⇒ ⇒ 那个
+ *   重叠部分**只能算一次占用** ⇒ ⇒ 不合并 ⇒ ⇒ 会把「已被占」的地方**当成
+ *   空隙**列出来 ⇒ ⇒ 用户填进去**必被内核拒** ⇒ ⇒ **界面在骗人**。
+ *
+ * @param {Array<{base:number,end:number}>} intervals
+ * @returns {Array<{from:number,to:number}>} 半开区间
+ */
+export function mergeIntervals(intervals) {
+    const list = (Array.isArray(intervals) ? intervals : [])
+        .map((it) => ({ from: Number(it?.from ?? it?.base ?? 0) >>> 0, to: Number(it?.to ?? it?.end ?? 0) >>> 0 }))
+        .filter((it) => it.to > it.from)
+        .sort((a, b) => a.from - b.from);
+    const merged = [];
+    for (const it of list) {
+        const last = merged[merged.length - 1];
+        if (last && it.from <= last.to) {
+            if (it.to > last.to) last.to = it.to;
+            continue;
+        }
+        merged.push({ from: it.from, to: it.to });
+    }
+    return merged;
+}
+
+/**
+ * **默认的规划范围**（裁决 F）。
+ *
+ * ⚠️ **从当前草稿推**（不是写死）⇒ ⇒ 范围**跟着板走** ⇒ ⇒ 用户一打开就
+ *   看到「当前占用 ± 1 MiB」这一片。
+ *
+ * @param {object} draft — 草稿
+ * @param {Array|null} [deviceTypes] — 内核的器件类型表
+ * @returns {{from:number,to:number}}
+ */
+export function defaultPlanRange(draft, deviceTypes = null) {
+    const occupied = occupiedIntervals(draft, deviceTypes);
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const it of occupied) {
+        if (it.base < lo) lo = it.base;
+        if (it.end > hi) hi = it.end;
+    }
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
+        lo = 0;
+        hi = 0;
+    }
+    const from = Math.max(
+        0,
+        Math.floor(lo / PLAN_ALIGN_BYTES) * PLAN_ALIGN_BYTES - PLAN_ALIGN_BYTES,
+    ) >>> 0;
+    const to = Math.min(
+        0xffff_ffff,
+        Math.ceil(hi / PLAN_ALIGN_BYTES) * PLAN_ALIGN_BYTES + PLAN_ALIGN_BYTES,
+    ) >>> 0;
+    return { from, to };
+}
+
+/**
+ * **归一**一个规划范围（用户填的 ⇒ ⇒ 越界 / 反了就夹回来）。
+ *
+ * @param {object|null} range — `{from, to}`（可能是用户填坏的）
+ * @param {object} draft — 草稿（算默认值用）
+ * @param {Array|null} [deviceTypes] — 内核的器件类型表
+ * @returns {{from:number,to:number}}
+ */
+export function normalizePlanRange(range, draft, deviceTypes = null) {
+    const fallback = defaultPlanRange(draft, deviceTypes);
+    if (!range || typeof range !== "object") return fallback;
+    const from = Number(range.from);
+    const to = Number(range.to);
+    if (!Number.isFinite(from) || !Number.isFinite(to)) return fallback;
+    const lo = Math.max(0, Math.min(0xffff_ffff, Math.floor(from))) >>> 0;
+    const hi = Math.max(0, Math.min(0xffff_ffff, Math.floor(to))) >>> 0;
+    if (hi <= lo) return fallback;
+    return { from: lo, to: hi };
+}
+
+/**
+ * **空隙** = 规划范围 − 占用并集（半开区间）。
+ *
+ * ⚠️ **每条空隙**都**不与任何占用区间重叠**、也**互不重叠** ⇒ ⇒ 用户挑一条
+ *   填进去 ⇒ ⇒ **不会**因为「撞了已占的地方」被内核拒（`E_PLT_06`）。
+ *
+ * ⚠️ **本函数不判合法性** ⇒ ⇒ 真正的重叠判定**只**由内核做（裁决 H）。
+ *
+ * @param {object} draft — 草稿
+ * @param {Array|null} [deviceTypes] — 内核的器件类型表
+ * @param {object|null} [range] — 规划范围
+ * @returns {Array<{from:number,to:number,size:number}>}
+ */
+export function planBaseGaps(draft, deviceTypes = null, range = null) {
+    const r = normalizePlanRange(range, draft, deviceTypes);
+    const occupied = mergeIntervals(occupiedIntervals(draft, deviceTypes));
+    const gaps = [];
+    let cursor = r.from;
+    for (const it of occupied) {
+        if (it.to <= r.from) continue;
+        if (it.from >= r.to) break;
+        if (it.from > cursor) gaps.push({ from: cursor, to: it.from });
+        if (it.to > cursor) cursor = it.to;
+        if (cursor >= r.to) break;
+    }
+    if (cursor < r.to) gaps.push({ from: cursor, to: r.to });
+    return gaps.map((g) => ({ from: g.from, to: g.to, size: g.to - g.from }));
+}
+
+/**
+ * **目标行**夹到合法范围（裁决 D）。
+ *
+ * @param {unknown} target
+ * @param {number} count — 段数
+ * @returns {number}
+ */
+function clampPlanTarget(target, count) {
+    const n = Number(target);
+    if (!Number.isInteger(n) || n < 0) return 0;
+    if (count <= 0) return 0;
+    return Math.min(n, count - 1);
+}
+
+/**
+ * 渲染**基址规划面板**（STAGE-46 · v0.70 批 · 裁决 B / C / D / E / F / G）。
+ *
+ * ⚠️ **用户自己规划，平台提供入口** ⇒ ⇒ 这里**只**给「哪里空着」这个**信息**
+ *   ＋ 一个**入口**（挑一条填进去）⇒ ⇒ **不替用户决定**。
+ *
+ * ⚠️ **重叠判定仍然只由内核判**（`E_PLT_06`）⇒ ⇒ 面板**只显示**占用区间。
+ *
+ * @param {object} state — 「memory-map」视图状态
+ * @returns {string}
+ */
+export function renderBasePlanner(state) {
+    const draft = currentDraft(state);
+    const deviceTypes = state?.deviceTypes ?? null;
+    const regions = Array.isArray(draft?.regions) ? draft.regions : [];
+    const occupied = occupiedIntervals(draft, deviceTypes);
+    const plan = state?.plan ?? null;
+    const range = normalizePlanRange(plan?.range, draft, deviceTypes);
+    const gaps = planBaseGaps(draft, deviceTypes, range);
+    const target = clampPlanTarget(plan?.target, regions.length);
+    const shown = gaps.slice(0, PLAN_MAX_GAPS);
+    const more = gaps.length - shown.length;
+    const windowUnknown = occupied.some((it) => it.windowKnown === false);
+
+    // ⚠️ **目标行的下拉**：每行一个选项 ⇒ ⇒ 用户**明确**说填给哪一行
+    // ⇒ ⇒ 不给段表加「选中行」概念（裁决 D ⇒ ⇒ 零新增 UI 状态）。
+    const targetOptions = regions.map((region, index) => {
+        const label = segmentLabel(region, String(region?.kind ?? "ram"));
+        const base = (parseNumber(region?.base) ?? 0) >>> 0;
+        const picked = index === target ? " selected" : "";
+        return `<option value="${index}"${picked}>第 ${index + 1} 行 · ${escapeHtml(label)} · ${escapeHtml(hex32(base))}</option>`;
+    }).join("");
+
+    const gapRows = shown.map((gap) => {
+        const last = (gap.to - 1) >>> 0;
+        return (
+            `<tr data-mmap-plan-gap="${gap.from}">` +
+            `<td><code>${escapeHtml(hex32(gap.from))}</code></td>` +
+            `<td><code>${escapeHtml(hex32(last))}</code></td>` +
+            `<td><code>${escapeHtml(String(gap.size))}</code></td>` +
+            `<td><button type="button" class="btn ghost" data-action="use-base-gap" ` +
+            `data-mmap-plan-use="${gap.from}" ` +
+            `data-mmap-gap-from="${gap.from}">用这个</button></td>` +
+            `</tr>`
+        );
+    }).join("");
+
+    // ⚠️ **如实标注**（裁决 E / G）：三件都要说 ⇒ ⇒ 不假装、不静默截断。
+    const notes = [];
+    if (windowUnknown) {
+        notes.push(
+            `<span data-mmap-plan-window-unknown="1">`
+            + `⚠️ **外设窗口大小未知** —— 内核的器件类型表还没到 ⇒ ⇒ 下面按一个`
+            + `**占位长度**折算 ⇒ ⇒ 空隙**可能不准** ⇒ ⇒ 提交后仍以内核的判定为准。`
+            + `</span>`,
+        );
+    }
+    if (more > 0) {
+        notes.push(
+            `<span data-mmap-plan-more="1">`
+            + `这个范围里还有 **${more}** 条空隙（只列了前 ${PLAN_MAX_GAPS} 条）`
+            + ` ⇒ ⇒ 缩小规划范围可以看到更多。`
+            + `</span>`,
+        );
+    }
+    if (shown.length === 0) {
+        notes.push(
+            `<span data-mmap-plan-empty="1">`
+            + `这个范围里**没有空隙**了 ⇒ ⇒ 扩大规划范围，或者改一改已经占掉的段。`
+            + `</span>`,
+        );
+    }
+    const noteBox = notes.length > 0
+        ? `<p class="muted" data-mmap-plan-note>${notes.join("<br/>")}</p>`
+        : `<p class="muted" data-mmap-plan-note>规划范围内有 <strong>${gaps.length}</strong> 条空隙。</p>`;
+
+    return `
+        <section class="card" data-mmap-plan="1">
+            <div class="row">
+                <h3>基址规划</h3>
+                <span class="tag">M-14 · 挑一个空隙</span>
+            </div>
+            <p class="muted">
+                下面是**当前草稿里还没被占用**的地址区间（限在规划范围内）⇒ ⇒
+                挑一条 ⇒ ⇒ 它会填进「目标行」那一行的基址 ⇒ ⇒
+                <strong>基址仍然由你决定</strong> ⇒ ⇒ 真正的重叠判定是内核的
+                <code>E_PLT-06</code>（前端**不**写第二份校验器）。
+            </p>
+            <div class="grid-2">
+                <label class="plan-range">
+                    规划范围起
+                    <input type="number" min="0" step="1" value="${range.from}"
+                        data-mmap-plan-range-from>
+                </label>
+                <label class="plan-range">
+                    规划范围止
+                    <input type="number" min="0" step="1" value="${range.to}"
+                        data-mmap-plan-range-to>
+                </label>
+            </div>
+            <label class="plan-target">
+                目标行（填给哪一行）
+                <select data-mmap-plan-target${regions.length === 0 ? " disabled" : ""}>
+                    ${targetOptions}
+                </select>
+            </label>
+            <p class="muted">已占用 ${occupied.length} 段（规划范围 ${escapeHtml(hex32(range.from))} – ${escapeHtml(hex32((range.to - 1) >>> 0))}）。</p>
+            <table class="map-table" data-mmap-plan-table>
+                <thead><tr><th>起</th><th>止（含）</th><th>可用字节</th><th></th></tr></thead>
+                <tbody>
+                    ${gapRows || `<tr><td colspan="4" class="muted">（这个范围里没有空隙）</td></tr>`}
+                </tbody>
+            </table>
+            ${noteBox}
+        </section>
+    `;
+}
+
+/**
+ * 草稿 + 改**某一段**的基址 → **新草稿**（纯函数）。
+ *
+ * ⚠️ **基址是字符串**（与草稿里其它数值一样 ⇒ ⇒ 重渲染不会把用户正在敲的
+ *   `0x8000` 变成 `32768`）⇒ ⇒ 这里写**十进制字符串**（与 `nextFreeBase`
+ *   同一个形态 ⇒ ⇒ 一个落点）。
+ *
+ * ⚠️ **越界 / 非法 ⇒ ⇒ 原样不动** ⇒ ⇒ **不猜**一个地址 ⇒ ⇒ 界面看得见
+ *   「没改成」而不是「改成了某个奇怪的值」。
+ *
+ * @param {object} draft
+ * @param {number} index — 第几行
+ * @param {string|number} base — 新的基址
+ * @returns {object}
+ */
+export function setRegionBase(draft, index, base) {
+    const next = cloneDraft(draft ?? defaultDraft());
+    const i = Number(index);
+    const regions = Array.isArray(next.regions) ? next.regions : [];
+    if (!Number.isInteger(i) || i < 0 || i >= regions.length) return next;
+    const value = String(base ?? "").trim();
+    const parsed = parseNumber(value);
+    if (parsed === null || parsed < 0 || parsed > 0xffff_ffff) return next;
+    next.regions = regions.map((region, k) => (
+        k === i ? { ...region, base: String(parsed >>> 0) } : { ...region }
+    ));
+    return next;
 }
 
 /**
@@ -556,9 +927,11 @@ export function uniqueDeviceId(draft, kind) {
  * @param {"ram"|"rom"|"peripheral"} kind
  * @returns {object}
  */
-export function addRegion(draft, kind) {
+export function addRegion(draft, kind, deviceTypes = null) {
     const next = cloneDraft(draft ?? defaultDraft());
-    const base = nextFreeBase(next, kind);
+    // ⚠️ **STAGE-46 · 裁决 E / I**：摆放基址时**外设窗口用内核给的
+    //   `window_bytes`** ⇒ ⇒ 查不到才退回占位常量。
+    const base = nextFreeBase(next, kind, deviceTypes);
     if (kind === "peripheral") {
         const device = newDevice("gpio");
         // ⚠️ **id 必须不重**（V-9）⇒ ⇒ 否则内核报 `E_PLT_08` ⇒ ⇒ 那块板
@@ -1364,7 +1737,7 @@ function segmentLabel(region, kind) {
  * @param {object} draft — 草稿
  * @returns {{span: number, segments: Array<{index:number,kind:string,cls:string,label:string,base:number,size:number,end:number,ratio:number,title:string}>}}
  */
-export function memoryMapLayout(draft) {
+export function memoryMapLayout(draft, deviceTypes = null) {
     const regions = Array.isArray(draft?.regions) ? draft.regions : [];
 
     /** @type {Array<{kind: string, base: number, size: number}>} */
@@ -1373,8 +1746,12 @@ export function memoryMapLayout(draft) {
         const base = parseNumber(region?.base) ?? 0;
         // ⚠️ **外设段没有 `size`** ⇒ 用**摆放窗口**折算（见
         // `PERIPHERAL_WINDOW_BYTES` 的注释）。
+        //
+        // ⚠️ **STAGE-46 · 裁决 I**：优先用**内核类型表给的 `window_bytes`**
+        // ⇒ ⇒ 查不到才退回占位常量 ⇒ ⇒ **窗口大小只有一个真相**（内核那份）。
         const size = kind === "peripheral"
-            ? PERIPHERAL_WINDOW_BYTES
+            ? (deviceWindowBytes(deviceTypes, region?.device?.device)
+                ?? PERIPHERAL_WINDOW_BYTES)
             : (parseNumber(region?.size) ?? 0);
         return { kind, base, size };
     });
@@ -1720,7 +2097,10 @@ export function renderMemoryMapPanel(state) {
 
     // ⚠️ **比例条的分段**（STAGE-35 · 裁决 D）：**按真地址区间**算，不是
     // 写死的百分比 ⇒ ⇒ 分段数 == 段表行数（验收 A-11）。
-    const layout = memoryMapLayout(draft);
+    //
+    // ⚠️ **STAGE-46 · 裁决 I**：外设段的**长度**用**内核类型表给的
+    //   `window_bytes`** ⇒ ⇒ 查不到才退回占位常量。
+    const layout = memoryMapLayout(draft, state?.deviceTypes ?? null);
     const segments = layout.segments;
     const memoryCount = segments.filter((seg) => seg.kind !== "peripheral").length;
     const peripheralCount = segments.length - memoryCount;
@@ -1810,6 +2190,8 @@ export function renderMemoryMapPanel(state) {
                         <button type="button" class="btn" data-action="add-peripheral">+ 外设窗口</button>
                     </div>
                 </div>
+
+                ${renderBasePlanner(state)}
 
                 ${renderArchivePanel(state)}
 

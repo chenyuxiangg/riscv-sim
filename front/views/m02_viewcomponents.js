@@ -79,6 +79,9 @@ import {
     renderMemoryMapPanel,
     renderMemoryMapTable,
     setDeviceKind,
+    // ⚠️ **基址规划**（STAGE-46 · v0.70 批 · 台账 D-175 候选 B 的第一半）
+    // ⇒ ⇒ 用户自己在前端规划基址 ⇒ ⇒ 平台提供**信息 + 入口**。
+    setRegionBase,
 } from "./components/memory-map.js";
 import {
     publishProductState,
@@ -430,10 +433,30 @@ const memoryMapView = register({
                 // ⚠️ 先采集再改：用户正在敲的数**不许**被这次点击冲掉。
                 const base = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
                 const kind = action === "add-ram" ? "ram" : action === "add-rom" ? "rom" : "peripheral";
-                const draft = addRegion(base, kind);
+                // ⚠️ **STAGE-46 · 裁决 E / I**：摆放基址时外设窗口用**内核类型表**
+                //   给的 `window_bytes` ⇒ ⇒ 查得到就用它。
+                const deviceTypes = viewStore.getState("memory-map")?.deviceTypes ?? null;
+                const draft = addRegion(base, kind, deviceTypes);
                 viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
                 publishMemoryMapState();
                 return `cmd-${action}`;
+            }
+            case "use-base-gap": {
+                // ⚠️ **基址规划**：用户挑了一条空隙 ⇒ ⇒ 填进「目标行」那一行的
+                //   基址 ⇒ ⇒ **真相仍是描述里的那个 `base`**（裁决 A）。
+                //
+                // ⚠️ **先采集再改**：用户正在敲的数**不许**被这次点击冲掉。
+                const base = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
+                const gapFrom = Number(el?.dataset?.mmapGapFrom);
+                // ⚠️ **目标行以 DOM 为准**（面板顶部那个下拉）⇒ ⇒ 用户刚改过就
+                //   立刻点 ⇒ ⇒ 用的是**最新**那个 ⇒ ⇒ 不必等失焦。
+                const picked = root?.querySelector?.("[data-mmap-plan-target]")?.value;
+                const target = Number(picked);
+                if (!Number.isFinite(gapFrom)) return undefined;
+                const draft = setRegionBase(base, target, gapFrom);
+                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
+                publishMemoryMapState();
+                return "cmd-use-base-gap";
             }
             case "remove-region": {
                 const base = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
@@ -561,8 +584,48 @@ const memoryMapView = register({
         el.addEventListener("change", (ev) => {
             if (!memoryMapPanel) return;
             const changed = ev.target?.closest?.("[data-mm-device-kind]");
+            // ⚠️ **基址规划的范围 / 目标行**（STAGE-46 · 裁决 D / N）⇒ ⇒ 它们
+            //   **住视图状态**（不是描述的一部分 ⇒ ⇒ 不进 `collectDraft`）。
+            const planChanged = ev.target?.closest?.(
+                "[data-mmap-plan-range-from], [data-mmap-plan-range-to], [data-mmap-plan-target]",
+            );
             syncMemoryMapDraft(memoryMapPanel);
-            if (changed) publishMemoryMapState();
+            if (planChanged) {
+                const rangeFrom = memoryMapPanel.querySelector("[data-mmap-plan-range-from]")?.value ?? "";
+                const rangeTo = memoryMapPanel.querySelector("[data-mmap-plan-range-to]")?.value ?? "";
+                const target = memoryMapPanel.querySelector("[data-mmap-plan-target]")?.value ?? "0";
+                viewStore.setState("memory-map", (prev) => ({
+                    ...prev,
+                    plan: {
+                        range: { from: rangeFrom, to: rangeTo },
+                        target: Number(target),
+                    },
+                }));
+            }
+            if (changed || planChanged) publishMemoryMapState();
+        });
+        // ⚠️ **「用这个」在 `pointerdown` 里处理**（STAGE-46 · 施工期踩到的一处
+        //   **时序陷阱**）⇒ ⇒ 用户**刚在范围框里敲完字**就点它 ⇒ ⇒ 那一下
+        //   先触发 `blur` ⇒ ⇒ `change` ⇒ ⇒ **重渲染** ⇒ ⇒ 按钮**被换掉** ⇒ ⇒
+        //   `click` **根本到不了** ⇒ ⇒ 用户点了**没反应**。
+        //
+        // ⇒ ⇒ 所以**在 blur 之前**（`pointerdown` 阶段）就把动作做完 ⇒ ⇒
+        //   随后的 `change` 重渲染**带着已更新的草稿** ⇒ ⇒ 状态一致 ✓。
+        el.addEventListener("pointerdown", (ev) => {
+            const hit = ev.target?.closest?.('[data-action="use-base-gap"]');
+            if (!hit) return;
+            const root2 = memoryMapPanel;
+            if (!root2) return;
+            const base = collectDraft(root2, memoryMapDraft());
+            const gapFrom = Number(hit.dataset?.mmapGapFrom);
+            const picked = root2.querySelector("[data-mmap-plan-target]")?.value;
+            const target = Number(picked);
+            if (!Number.isFinite(gapFrom)) return;
+            const draft = setRegionBase(base, target, gapFrom);
+            viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
+            // ⚠️ **这里就重渲染** ⇒ ⇒ 那一行的基址**立刻**看得见 ⇒ ⇒
+            //   （随后的 `change` 重渲染**带着已更新的草稿**⇒ ⇒ 状态一致 ✓）
+            publishMemoryMapState();
         });
     },
 });
