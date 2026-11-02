@@ -92,6 +92,12 @@
 
 import { escapeHtml } from "../../lib/escape.js";
 import { PLATFORM_SCHEMA_VERSION } from "../../lib/message.js";
+// ⚠️ **连线报告**（STAGE-48 · v0.72 · D-177 A）—— 纯函数（显示层）。
+import {
+    describeDroppedWire,
+    describeWiringReport,
+    normalizeWiringReport,
+} from "../../lib/wiring-report.js";
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -1426,6 +1432,38 @@ export function renderEffectiveSummary(memoryMap) {
     );
 }
 
+/**
+ * **连线报告**（STAGE-48 · v0.72 · D-177 A）—— 「你写的 N 根线里有 M 根
+ * 当前抬不了」。
+ *
+ * ⚠️ **前端不自己判**（裁决 L）⇒ ⇒ 数字（`declared` / `live`）与理由
+ * **全部**来自内核 ⇒ ⇒ 这里**只做显示** ⇒ ⇒ **不重算**（那会是第二个
+ * 真相源）。
+ *
+ * ⚠️ **原词一定在**（`wireDropReasonLabel` 返回 `code` + 白话）⇒ ⇒ 用户
+ * 能拿界面上的词去对内核的原文 ⇒ ⇒ **未知词**原样显示、**不编**。
+ *
+ * ⚠️ **缺省那档**（老内核 / 老事件没有这个字段）⇒ ⇒ 显示「内核没有给出
+ * 连线报告」⇒ ⇒ **不炸**（N-4）。
+ *
+ * @param {object|null} memoryMap
+ * @returns {string}
+ */
+export function renderWiringReport(memoryMap) {
+    const report = normalizeWiringReport(memoryMap?.wiringReport);
+    const summary = describeWiringReport(report);
+    if (!report || report.dropped.length === 0) {
+        return `<p class="muted" data-mmap-wiring="summary">${escapeHtml(summary)}</p>`;
+    }
+    const items = report.dropped
+        .map((one) => `<li>${escapeHtml(describeDroppedWire(one))}</li>`)
+        .join("");
+    return (
+        `<p class="muted" data-mmap-wiring="summary">${escapeHtml(summary)}</p>` +
+        `<ul class="muted" data-mmap-wiring="dropped">${items}</ul>`
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 板档案（STAGE-15 · v0.30 · D-136 / D-140）
 // ---------------------------------------------------------------------------
@@ -2209,6 +2247,7 @@ export function renderMemoryMapPanel(state) {
                 <div class="card">
                     <h3>当前生效的内存图</h3>
                     ${renderEffectiveSummary(memoryMap)}
+                    ${renderWiringReport(memoryMap)}
                 </div>
             </div>
         </section>

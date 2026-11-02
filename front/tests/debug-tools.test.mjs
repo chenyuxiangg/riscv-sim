@@ -147,7 +147,7 @@ describe("契约镜像的版本与两个上限（视图层 · C-1）", () => {
             resolve(repoRoot, "crates/contract/fixtures/debug-limits.json"),
             "utf8",
         ));
-        assert.equal(msg.SCHEMA_VERSION, 10, "前端镜像的信封版本必须是 10（契约 v10）");
+        assert.equal(msg.SCHEMA_VERSION, 11, "前端镜像的信封版本必须是 11（契约 v11）");
         assert.equal(
             msg.DUMP_MAX_BYTES,
             fixture.dump_max_bytes,

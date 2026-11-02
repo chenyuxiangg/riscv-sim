@@ -2575,9 +2575,12 @@ mod tests {
     ///
     /// ⚠️ **v0.57** (STAGE-42) moved it **8 → 9**（符号查询 + 整段转储 +
     /// 条件断点表达式）⇒ ⇒ 同理：literal 与 name 一起跟。
+    ///
+    /// ⚠️ **v0.72** (STAGE-48 · D-177 A) moved it **10 → 11**（`MemoryMap`
+    /// 事件多一个 `wiring_report` 字段 ⇒ ⇒ **线上形状变了**）⇒ ⇒ 同理。
     #[test]
-    fn s16_a1_the_contract_schema_version_is_nine() {
-        assert_eq!(crate::SCHEMA_VERSION, 10);
+    fn s16_a1_the_contract_schema_version_is_eleven() {
+        assert_eq!(crate::SCHEMA_VERSION, 11);
     }
 
     /// **STAGE-16 A-2** — the **description format**'s version is still
@@ -2979,11 +2982,12 @@ mod tests {
             pending: false,
             loaded: true,
             revision: 42,
+            wiring_report: crate::model::WiringReportDto::default(),
         };
 
         let description_json = serde_json::to_string(&sample()).expect("json");
         let expected = format!(
-            r#"{{"MemoryMap":{{"description":{description_json},"pending":false,"loaded":true,"revision":42}}}}"#
+            r#"{{"MemoryMap":{{"description":{description_json},"pending":false,"loaded":true,"revision":42,"wiring_report":{{"declared":0,"live":0,"dropped":[]}}}}}}"#
         );
         assert_eq!(
             serde_json::to_string(&ev).expect("json"),
@@ -3000,7 +3004,13 @@ mod tests {
         names.sort_unstable();
         assert_eq!(
             names,
-            vec!["description", "loaded", "pending", "revision"],
+            vec![
+                "description",
+                "loaded",
+                "pending",
+                "revision",
+                "wiring_report"
+            ],
             "事件的字段名集合必须精确固定"
         );
     }

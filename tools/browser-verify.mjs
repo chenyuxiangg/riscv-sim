@@ -179,6 +179,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "terminalScreen",
     "memoryMap",
     "unknownSystem",
+    "wiringReport",
     "boardArchive",
     "boardDelta",
     "boardOrdering",
@@ -1589,6 +1590,88 @@ const BV_PARTIAL_BOARD = {
 };
 
 /**
+ * 「**连线报告**」用的板 —— STAGE-48 · v0.72 · D-177 A（B-146 ~ B-150）。
+ *
+ * ⚠️ **为什么源器件是 GPIO**：契约层的 **V-18 只管源器件「在不在」**、
+ *   **不管**它「是什么」⇒ ⇒ 这根线**合法**（描述**装得上**）⇒ ⇒ 但宿主
+ *   **抬不了**它（宿主只从 UART 抬 `rx_ready`）⇒ ⇒ **理由 == `source-type`**
+ *   ⇒ ⇒ 这正是「合法描述上**真的**会发生的丢线」。
+ *
+ * ⚠️ **为什么目标必须是 PLIC**：**V-19** 要求目标**是 PLIC** 且源号
+ *   **小于**它的源数 ⇒ ⇒ 源 11 < 64 ✓。
+ *
+ * ⚠️ **必须带一块 RAM**：demo 固件要落在地址 0 附近（40 字节）⇒ ⇒ 这块板
+ *   得装得下它 ⇒ ⇒ 否则本段会**污染**后面的段。
+ */
+const BV_WIRING_BOARD = {
+    schema_version: 1,
+    id: "bv-wiring-board",
+    name: "browser-verify 连线报告板",
+    priority: 996,
+    // ⚠️ **预算必须够**：PLIC 的窗口（`0x200000 + 0x1000×contexts`）**约 2 MB**
+    //   ⇒ ⇒ 1 MB 的预算**装不下** ⇒ ⇒ 内核报 `E_PLT-07` ⇒ ⇒ 板**被拒**
+    //   ⇒ ⇒ 报告**根本没机会更新**（本批**实测踩到**：预算给小了 ⇒ ⇒
+    //   B-146 ~ B-149 全红且 `declared=0` ⇒ ⇒ 看起来像「报告没实现」）。
+    region_budget_bytes: 134217728,
+    regions: [
+        { kind: "ram", base: 0, size: 4096 },
+        {
+            kind: "peripheral",
+            base: 201326592,
+            device: { device: "plic", id: "PLIC", sources: 64, contexts: 16 },
+        },
+        {
+            kind: "peripheral",
+            base: 268435456,
+            device: { device: "gpio", id: "GPIO0" },
+        },
+    ],
+    wiring: [
+        {
+            from: { device: "GPIO0", event: "rx_ready" },
+            to: { device: "PLIC", source: 11 },
+        },
+    ],
+};
+
+/**
+ * 「**抬得了**」的对照板 —— STAGE-48 · v0.72 · B-150。
+ *
+ * ⚠️ **必要对照**：它与 [`BV_WIRING_BOARD`] **只有源器件那一个差别**
+ * （GPIO ⇒ ⇒ UART）⇒ ⇒ 线**合法**、**抬得了** ⇒ ⇒ 报告从「1 根抬不了」
+ * 变成「**全部通电**」⇒ ⇒ ⇒ **报告跟着板变** ⇒ ⇒ ⇒ 这证明
+ * [`BV_WIRING_BOARD`] **真的被内核应用了**（否则两块板的报告**一样**）
+ * ⇒ ⇒ ⇒ ⇒ 这才是**真对照**（用「一块没有连线的板」当对照是**空转**：报告
+ * 本来就是「0 根」⇒ ⇒ 那条断言**恒真**）。
+ */
+const BV_RAISABLE_WIRING_BOARD = {
+    schema_version: 1,
+    id: "bv-raisable-wiring-board",
+    name: "browser-verify 抬得了连线板",
+    priority: 995,
+    region_budget_bytes: 134217728,
+    regions: [
+        { kind: "ram", base: 0, size: 4096 },
+        {
+            kind: "peripheral",
+            base: 201326592,
+            device: { device: "plic", id: "PLIC", sources: 64, contexts: 16 },
+        },
+        {
+            kind: "peripheral",
+            base: 268435456,
+            device: { device: "uart16550", id: "UART0", irq_line: 1, baud_rate: 115200 },
+        },
+    ],
+    wiring: [
+        {
+            from: { device: "UART0", event: "rx_ready" },
+            to: { device: "PLIC", source: 11 },
+        },
+    ],
+};
+
+/**
  * 读产品视图里那张内存映射表的**行**（按 `data-*`，**不靠文案**）。
  *
  * ⚠️ `data-region-size` **外设行没有**（外设窗口的大小由器件自报，声明里
@@ -2225,6 +2308,203 @@ async function runUnknownSystemSection(cdp, opts) {
 }
 
 /**
+ * STAGE-48 · v0.72 批的真机段：**连线报告**（B-146 ~ B-150）。
+ *
+ * ⚠️ **这段要钉的是「内核说的那句话真的到界面上了」** ⇒ ⇒ 断的是「**真
+ *   WASM 内核** ⇒ `memory.map` 事件（第五个字段 `wiring_report`）⇒ ⇒
+ *   视图状态 ⇒ ⇒ DOM」**整条链** ⇒ ⇒ 前端塞 mock 数据糊弄不过去。
+ *
+ * ⚠️ **段序**：必须排在「板级内存图」那段**之后**（那一段已经把一张板配出来
+ *   了 ⇒ ⇒ 才有「换板」这个动作可做）。
+ *
+ * ⚠️ **必须先「卸载工程」**：**已装载**时改板是**待生效**的 ⇒ ⇒ 报告说的
+ *   仍是**旧板**的 ⇒ ⇒ 「报告变了」那条判据就**看不到** ⇒ ⇒ **零判别力**
+ *   ⇒ ⇒ 未装载时改板**立即生效**（D-139）⇒ ⇒ 报告**立刻**就是新板的那份。
+ *
+ * ⚠️ **每条判据都要自带正向对照**：
+ * - B-146（报告出现了）的前置是 B-150（**没连线的板**显示的是「0 根」那档）
+ *   ⇒ ⇒ 否则「界面显示了报告」**恒真** ⇒ ⇒ 零判别力；
+ * - B-147（理由词逐字）比的是**内核事件里的那个词**⇒ ⇒ 前端**编不出来**。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
+ */
+async function runWiringReportSection(cdp, opts) {
+    /** @type {{name: string, ok: boolean, detail: string}[]} */
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+
+    // ⚠️ **先装两个钩子**：命令捕获（看前端发了什么）+ 线钩子（看**内核**回了
+    //   什么）⇒ ⇒ 「内核原文」那条判据才有数据可读。
+    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
+    await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
+
+    // ---- ① 切到编辑器视图 --------------------------------------------------
+    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await sleep(800);
+
+    // ---- ② **卸载工程** ⇒ ⇒ 改板**立即生效**（D-139）⇒ ⇒ 报告是**新板**的 --
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-action="unload-project"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(900);
+    const unloaded = await awaitEval(cdp, `(() => {
+        const pending = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+        return !pending;
+    })()`);
+    add(
+        "**前置**：工程已**卸载** ⇒ ⇒ 改板**立即生效**（D-139）⇒ ⇒ 报告说的"
+        + "是**新板**的那份（⇒ ⇒ 不是「旧板的报告」）",
+        unloaded === true,
+        `无待生效横幅=${unloaded}`,
+    );
+    if (unloaded !== true) {
+        return { skipped: false, checks };
+    }
+
+    // ---- ③ 提交那张「**源器件是 GPIO**」的板 ⇒ ⇒ 那根线**抬不了** ---------
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "submit-memory-map",
+            requestId: "bv-wiring-board",
+            viewId: "memory-map",
+            params: { description: ${JSON.stringify(BV_WIRING_BOARD)} },
+        },
+    }))`);
+
+    // ⚠️ **等报告出现在 DOM 里**（⇒ ⇒ 内核**收了**这张板 ⇒ ⇒ 事件回来了）。
+    const deadline = Date.now() + opts.timeoutMs;
+    let summaryText = null;
+    let droppedText = null;
+    while (Date.now() < deadline) {
+        const now = await awaitEval(cdp, `(() => {
+            const s = document.querySelector('[data-mmap-wiring="summary"]');
+            const d = document.querySelector('[data-mmap-wiring="dropped"]');
+            return {
+                summary: s ? String(s.textContent ?? "") : null,
+                dropped: d ? String(d.textContent ?? "") : null,
+            };
+        })()`);
+        if (now && now.summary && now.dropped) {
+            summaryText = now.summary;
+            droppedText = now.dropped;
+            break;
+        }
+        await sleep(200);
+    }
+
+    // ---- ④ 内核那条事件里的**原值**（界面上的数必须**等于**它）--------------
+    const lastMap = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
+    const report = lastMap?.wiring_report ?? null;
+    const declared = Number(report?.declared ?? -1);
+    const live = Number(report?.live ?? -1);
+    const dropped = Array.isArray(report?.dropped) ? report.dropped : [];
+
+    // -- B-146：报告出现了，且**内核说的**是「1 根写、1 根抬不了」------------
+    add(
+        "B-146 · 真机上提交一份带 `wiring` 的板 ⇒ ⇒ 界面显示**连线报告**"
+        + "（⇒ ⇒ 内核说的那句话**真的到了界面**）",
+        summaryText !== null && droppedText !== null && declared === 1 && dropped.length === 1,
+        `摘要=${JSON.stringify(summaryText)} 丢线数=${dropped.length} `
+        + `内核 declared=${declared} live=${live}`,
+    );
+
+    // -- B-147：界面**逐字**显示内核给的那个理由词 -----------------------------
+    const reasonWord = String(dropped[0]?.reason ?? "");
+    add(
+        "B-147 · 界面**逐字**显示内核给的理由词（前端**不自己判**）",
+        reasonWord !== "" && String(droppedText ?? "").includes(reasonWord),
+        `内核理由=${JSON.stringify(reasonWord)} 界面=${JSON.stringify(droppedText)}`,
+    );
+
+    // -- B-148：界面上的**数** == 内核的**数** ---------------------------------
+    add(
+        "B-148 · 界面上的数**等于**内核给的数（前端**不重算**）",
+        String(summaryText ?? "").includes(`写了 ${declared} 根`)
+            && String(summaryText ?? "").includes(`${dropped.length} 根当前抬不了`),
+        `界面摘要=${JSON.stringify(summaryText)} 内核 declared=${declared} live=${live} `
+        + `dropped=${dropped.length}`,
+    );
+
+    // -- B-149：报告**跟着内核那条事件**走（不是前端自己算的）----------------
+    add(
+        "B-149 · 界面上的报告**就是内核那条事件带回来的那份**（⇒ ⇒ 不是"
+        + "前端自己算的 ⇒ ⇒ 与内核**同源**）",
+        report !== null && report !== undefined && dropped.length === 1
+            && String(dropped[0]?.from_device ?? "") === "GPIO0",
+        `内核那条事件的报告=${JSON.stringify(report)}`,
+    );
+
+    // ---- ⑤ **必要对照**：换成一块**抬得了**的板 ⇒ ⇒ 报告说「全部通电」-------
+    //
+    // ⚠️ **为什么不是「一块没有连线的板」**：那种板的报告**本来就是**「0 根」
+    //   ⇒ ⇒ 那条断言**恒真** ⇒ ⇒ **空转**（本批**实测踩到**：第一次写的就是
+    //   它 ⇒ ⇒ 结果它**因为同一个原因**绿了 ⇒ ⇒ 什么也证明不了）。
+    //
+    // ⚠️ **这一条真正证明的是**：报告**跟着板变** ⇒ ⇒ ⇒ 前一块板**真的被
+    //   内核应用了**（否则两块板的报告**一样**）⇒ ⇒ ⇒ **真对照**。
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "submit-memory-map",
+            requestId: "bv-raisable-wiring-board",
+            viewId: "memory-map",
+            params: { description: ${JSON.stringify(BV_RAISABLE_WIRING_BOARD)} },
+        },
+    }))`);
+    const deadline2 = Date.now() + opts.timeoutMs;
+    let liveText = null;
+    while (Date.now() < deadline2) {
+        const now = await awaitEval(cdp, `(() => {
+            const s = document.querySelector('[data-mmap-wiring="summary"]');
+            return s ? String(s.textContent ?? "") : null;
+        })()`);
+        if (now && String(now).includes("全部通电")) {
+            liveText = now;
+            break;
+        }
+        await sleep(200);
+    }
+    add(
+        "B-150 · **必要对照**：换成一块**抬得了**的板 ⇒ ⇒ 界面显示「全部通电」"
+        + "（⇒ ⇒ 报告**跟着板变** ⇒ ⇒ 前一块板**真的被内核应用了** ⇒ ⇒ "
+        + "「界面显示了报告」**不是恒真**的）",
+        liveText !== null,
+        `对照板摘要=${JSON.stringify(liveText)}`,
+    );
+
+    // ---- ⑥ **收尾**：把板与**装载状态**都复原 ⇒ ⇒ 后面那些段不被污染 -------
+    //
+    // ⚠️ **必须复原两样**（本批**实测踩到**：只换板、**不复原装载状态** ⇒ ⇒
+    //   后面那段要「**待生效**横幅」⇒ ⇒ 而工程**被卸载**了 ⇒ ⇒ 改板**立即
+    //   生效** ⇒ ⇒ 横幅**不出现** ⇒ ⇒ 那段**假红**）：
+    //   ① **板** ⇒ ⇒ 配回 [`BV_BOARD`]（能装下 demo 的那张）；
+    //   ② **装载状态** ⇒ ⇒ **重新装 demo 固件**（本段开头卸了它）⇒ ⇒ 后面
+    //   那些段拿到的还是「**已装载**」的现场。
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "submit-memory-map",
+            requestId: "bv-wiring-restore-board",
+            viewId: "memory-map",
+            params: { description: ${JSON.stringify(BV_BOARD)} },
+        },
+    }))`);
+    await sleep(600);
+    const restored = await loadDemoFirmware(cdp, opts);
+    add(
+        "**收尾**：板与**装载状态**都复原 ⇒ ⇒ 后面那些段拿到的还是一张**正常**的板"
+        + "（⇒ ⇒ 本段**不污染**别人）",
+        restored === true,
+        `demo 固件装上了=${restored}`,
+    );
+
+    return { skipped: false, checks };
+}
+
+/**
  * 器件类型注册表 + 逐实例状态（STAGE-43 · v0.66 · B-115 ~ B-117）。
  *
  * ⚠️ **要真内核的数据** ⇒ ⇒ 断的是「真 WASM 内核 ⇒ `device.types` /
@@ -2669,7 +2949,16 @@ async function runBoardArchiveSection(cdp, opts) {
     await Promise.race([reloadLoaded, sleep(opts.timeoutMs)]);
 
     // ⚠️ 刷新后前端要**重新引导**（Worker / WASM 内核也重启了）⇒ 等它起来。
-    const bootDeadline = Date.now() + opts.timeoutMs;
+    //
+    // ⚠️ **D-159（v0.72 批）**：这里的预算是 `opts.timeoutMs`（默认 20 s）
+    //   ⇒ ⇒ 机器**很**慢时**引导**（Worker + WASM 编译 + 首次装载）**超时**
+    //   ⇒ ⇒ 「刷新后前端没起来」**假红** ⇒ ⇒ 这里给**三倍**预算 ⇒ ⇒ 机器
+    //   忙时只是等久一点 ⇒ ⇒ **不会假红**（上限仍有限 ⇒ ⇒ 不会卡死）。
+    //
+    // ⚠️ **失败时把用时报出来** ⇒ ⇒ 将来再红 ⇒ ⇒ **能一眼看出**是「引导
+    //   真的失败」还是「**机器慢**」⇒ ⇒ 这正是 D-159 一直缺的那一格信息。
+    const bootDeadline = Date.now() + opts.timeoutMs * 3;
+    const bootStarted = Date.now();
     let booted = false;
     while (Date.now() < bootDeadline) {
         const p = await awaitEval(cdp, PROBE_EXPRESSION);
@@ -2680,10 +2969,14 @@ async function runBoardArchiveSection(cdp, opts) {
         }
         await sleep(250);
     }
+    const bootElapsed = Date.now() - bootStarted;
     add(
         "刷新后前端**重新引导**成功（落地页检查全过）",
         booted,
-        booted ? "落地页检查全过" : "刷新后前端没起来",
+        booted
+            ? `落地页检查全过（用时 ${bootElapsed} ms · 预算 ${opts.timeoutMs * 3} ms）`
+            : `刷新后前端没起来（等了 ${bootElapsed} ms · 预算 ${opts.timeoutMs * 3} ms`
+              + ` ⇒ ⇒ 机器慢的话可以调大 --timeout-ms）`,
     );
 
     const storedText = await awaitEval(cdp, `new Promise((resolve) => {
@@ -2865,6 +3158,9 @@ const BV_LAST_MEMORY_MAP_EXPRESSION = `(() => {
       pending: ev.MemoryMap.pending === true,
       loaded: ev.MemoryMap.loaded === true,
       revision: Number(ev.MemoryMap.revision ?? 0),
+      // ⚠️ **连线报告**（STAGE-48 · v0.72 · D-177 A）—— 读**内核那条事件**
+      // 里的原值 ⇒ ⇒ 「界面上的数 == 内核的数」那条判据才有基准。
+      wiring_report: ev.MemoryMap.wiring_report ?? null,
     };
   }
   return last;
@@ -3977,6 +4273,40 @@ async function waitForImageState(cdp, opts, predicate) {
         await sleep(200);
     }
     return last;
+}
+
+/**
+ * **等一个状态**（**不等一个时长**）—— D-159 做法 A 的**唯一落点**。
+ *
+ * ⚠️ **为什么要有这个**：门禁里大量判据是「**等 N 毫秒** ⇒ 然后断言某个
+ *   状态」⇒ ⇒ 那是**固定时长** ⇒ ⇒ 机器有负载时**页面里的定时器会晚到**
+ *   ⇒ ⇒ 动画没走完 / 弹窗没关 ⇒ ⇒ **假红**（台账 **D-159**）。
+ *
+ * ⚠️ **等状态 ≠ 等时长**：轮询到**目标状态真的出现**就返回 ⇒ ⇒ 机器忙时
+ *   **只是等久一点** ⇒ ⇒ **不会假红**；而且**上限**给够 ⇒ ⇒ 不会卡死。
+ *
+ * ⚠️ **返回「等到了没有」** ⇒ ⇒ 判据能区分「等到了」与「等不到」⇒ ⇒
+ *   **不会**把「等不到」当成「状态不对」⇒ ⇒ 失败时**能说清是哪一种**。
+ *
+ * @param {object} cdp
+ * @param {string} probeExpr — 一次 `awaitEval` 的表达式（返回状态对象）
+ * @param {(state: object) => boolean} predicate — 「到了吗」的判据
+ * @param {number} budgetMs — **上限**（等不到就返回 `waited: false`）
+ * @param {number} [stepMs] — 轮询间隔
+ * @returns {Promise<{state: object|null, waited: boolean, elapsedMs: number}>}
+ */
+async function waitForState(cdp, probeExpr, predicate, budgetMs, stepMs = 200) {
+    const started = Date.now();
+    const deadline = started + budgetMs;
+    let last = null;
+    while (Date.now() < deadline) {
+        last = await awaitEval(cdp, probeExpr);
+        if (last && predicate(last)) {
+            return { state: last, waited: true, elapsedMs: Date.now() - started };
+        }
+        await sleep(stepMs);
+    }
+    return { state: last, waited: false, elapsedMs: Date.now() - started };
 }
 
 /**
@@ -5104,8 +5434,17 @@ async function runUiLayoutSection(cdp, opts) {
     await cdp.send("Emulation.setDeviceMetricsOverride", {
         width: 375, height: 667, deviceScaleFactor: 1, mobile: false,
     });
-    await sleep(600);
-    const narrow = await awaitEval(cdp, BV_SIDEBAR_PROBE);
+    // ⚠️ **D-159（v0.72 批）**：**等状态**，**不等时长** ⇒ ⇒ 侧边栏的
+    //   `translateX(-100%)` 过渡**走完**就返回 ⇒ ⇒ 机器有负载时**只是等久
+    //   一点** ⇒ ⇒ **不会假红**（原来固定等 600 ms ⇒ ⇒ 机器慢时过渡没走完
+    //   ⇒ ⇒ 「右缘 = 0」判不到 ⇒ ⇒ 假红）。
+    const narrowWait = await waitForState(
+        cdp,
+        BV_SIDEBAR_PROBE,
+        (s) => s?.hasHost === true && s?.sidebarRight !== undefined && s.sidebarRight <= 1,
+        8000,
+    );
+    const narrow = narrowWait.state;
     add(
         "B-17 · 窄屏（375）⇒ ⇒ 侧边栏**收起**（不占宽度）⇒ ⇒ 主区不被遮挡",
         // ⚠️ **必须先确认侧边栏存在** ⇒ ⇒ 否则「侧边栏整个没了」时
@@ -5113,7 +5452,8 @@ async function runUiLayoutSection(cdp, opts) {
         // （STAGE-34 §8 订正 6：变异自检 T1 实测到的就是这个）。
         narrow?.hasHost === true
             && narrow.mainX !== undefined && narrow.mainX <= 1 && narrow.sidebarRight <= 1,
-        `侧边栏存在=${narrow?.hasHost} 主区 x=${JSON.stringify(narrow?.mainX ?? "")} 侧边栏右缘=${JSON.stringify(narrow?.sidebarRight ?? "")}`,
+        `侧边栏存在=${narrow?.hasHost} 主区 x=${JSON.stringify(narrow?.mainX ?? "")} 侧边栏右缘=${JSON.stringify(narrow?.sidebarRight ?? "")}`
+        + `（等过渡用时 ${narrowWait.elapsedMs} ms · 等到了=${narrowWait.waited}）`,
     );
     // ⚠️ **点击无条件执行**（不藏在某个断言的短路条件里）⇒ ⇒ 否则「汉堡
     // 不可见」时点击**根本不发生** ⇒ ⇒ B-17c 变成**测另一个东西** ⇒ ⇒
@@ -5129,12 +5469,20 @@ async function runUiLayoutSection(cdp, opts) {
         !!narrow?.burgerVisible,
         `汉堡可见=${narrow?.burgerVisible}`,
     );
-    await sleep(400);
-    const opened = await awaitEval(cdp, BV_SIDEBAR_PROBE);
+    // ⚠️ **D-159（v0.72 批）**：抽屉进屏也是**过渡动画** ⇒ ⇒ **等状态**
+    //   （**不等时长**）⇒ ⇒ 机器慢时只是等久一点 ⇒ ⇒ **不会假红**。
+    const openedWait = await waitForState(
+        cdp,
+        BV_SIDEBAR_PROBE,
+        (s) => s?.open === true && s?.sidebarX !== undefined && s.sidebarX >= -1,
+        8000,
+    );
+    const opened = openedWait.state;
     add(
         "B-17c · 点汉堡 ⇒ ⇒ 侧边栏**真的进屏了**（不再是抽屉外面）",
         opened?.open === true && opened?.sidebarX !== undefined && opened.sidebarX >= -1,
-        `open=${opened?.open} 侧边栏 x=${JSON.stringify(opened?.sidebarX ?? "")}`,
+        `open=${opened?.open} 侧边栏 x=${JSON.stringify(opened?.sidebarX ?? "")}`
+        + `（等过渡用时 ${openedWait.elapsedMs} ms · 等到了=${openedWait.waited}）`,
     );
     // ⚠️ **恢复视口** ⇒ ⇒ 后面那些段（以及下一轮跑）看到的还是宽屏。
     await cdp.send("Emulation.clearDeviceMetricsOverride");
@@ -6002,17 +6350,31 @@ async function runLiveReadoutSection(cdp, opts) {
     //   ⇒ ⇒ **余量只有 200 ms** ⇒ ⇒ 机器有负载时**页面里的定时器会晚到**
     //   ⇒ ⇒ 判据会**假红**（本批实测到过一次：对照跑里它红了）。
     //   ⇒ ⇒ 这里等到 **7 000 ms** ⇒ ⇒ 余量 1.6 s ⇒ ⇒ 判稳。
+    //
+    // ⚠️ **D-159（v0.72 批）**：**7 000 ms 仍然是「等时长」** ⇒ ⇒ 机器**很**
+    //   慢时 7 秒**还不够** ⇒ ⇒ **还是假红** ⇒ ⇒ 改成「**等状态**」⇒ ⇒
+    //   弹窗**真的关掉了**就返回 ⇒ ⇒ 机器忙时**只是等久一点** ⇒ ⇒
+    //   **不会假红**（而且通常 5.4 ~ 5.6 s 就返回 ⇒ ⇒ 比等满 7 秒**更快**）。
+    //
+    // ⚠️ **上限 20 s** ⇒ ⇒ 「弹窗**永远**不关」那种真缺陷**仍然会红**
+    //   ⇒ ⇒ 门禁**不会**因为这条而卡死。
     await clickReadMemoryButton(cdp, "debug");
     await sleep(300);
     const reopened = await readProbe();
     const stateBefore = String(reopened?.alertState ?? "");
-    await sleep(7000);
-    const afterAuto = await readProbe();
+    const autoWait = await waitForState(
+        cdp,
+        BV_LIVE_READOUT_PROBE,
+        (s) => String(s?.alertState ?? "") === "",
+        20000,
+    );
+    const afterAuto = autoWait.state;
     add(
         "B-52 · 弹窗**不点**任何按钮 ⇒ ⇒ 5 秒之后**自己**消失"
         + "（⇒ ⇒ 「5 秒后渐隐」这条**在真机上**成立）",
         stateBefore === "open" && String(afterAuto?.alertState ?? "") === "",
-        `刚打开时=${JSON.stringify(stateBefore)} 7 秒后=${JSON.stringify(afterAuto?.alertState ?? "")}`,
+        `刚打开时=${JSON.stringify(stateBefore)} 关掉用时 ${autoWait.elapsedMs} ms`
+        + ` · 等到了=${autoWait.waited} · 之后=${JSON.stringify(afterAuto?.alertState ?? "")}`,
     );
 
     // -- B-53 · 脚本口 `readMemory` 在运行中 ⇒ ⇒ **不**弹窗 ---------------
@@ -8983,6 +9345,15 @@ async function main() {
         const unknownSystem = await runSection("unknownSystem", () => runUnknownSystemSection(cdp, opts));
         registerSection("unknownSystem", unknownSystem.checks, {
             title: "「未知系统」门禁（真内核拒 · PC 没动 · 只显示内核原文 · 中档不拒）",
+        });
+
+        // -- the WIRING REPORT (STAGE-48 · v0.72 · B-146 ~ B-150) ----------------
+        // ⚠️ **必须排在板级内存图那段之后**（那一段已经把一张板配出来了 ⇒ ⇒
+        //    才有「换板」这个动作可做）⇒ ⇒ 本段**自己先卸载**（⇒ ⇒ 改板
+        //    立即生效 ⇒ ⇒ 报告说的是**新板**的那份）。
+        const wiringReport = await runSection("wiringReport", () => runWiringReportSection(cdp, opts));
+        registerSection("wiringReport", wiringReport.checks, {
+            title: "连线报告（真内核说「你写了 N 根线里有 M 根抬不了」· 界面逐字显示 · 数字与内核一致）",
         });
 
         // -- the BASE PLANNER (STAGE-46 · v0.70 · B-136 ~ B-140) --------------        // ⚠️ **必须排在板级内存图那段之后**：那一段已经把一张板配出来了 ⇒ ⇒

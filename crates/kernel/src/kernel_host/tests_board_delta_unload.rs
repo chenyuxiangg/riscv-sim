@@ -69,6 +69,7 @@ fn first_memory_map(events: &[EventPayload]) -> MemoryMapState {
             pending,
             loaded,
             revision,
+            ..
         } = e
         {
             return MemoryMapState {

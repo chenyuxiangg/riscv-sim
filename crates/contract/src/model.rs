@@ -145,6 +145,65 @@ pub struct DeviceInstanceInfo {
     pub window_bytes: u32,
 }
 
+/// 一根线**抬不了**的理由 —— **稳定枚举**（STAGE-48 · v0.72 · D-177 A）。
+///
+/// ⚠️ **它不是场景码**（裁决 H）：描述**被接受了**（没有失败）⇒ ⇒ 这里
+/// 没有「错误」⇒ ⇒ **不进 `error.rs`** ⇒ ⇒ `error_code_check.py` 零改动。
+///
+/// ⚠️ **线上形态是 kebab-case**（`source-unknown` / `source-type` /
+/// `target-unknown` / `target-type` / `source-out-of-range` /
+/// `overridden`）⇒ ⇒ **恰好 6 个值** ⇒ ⇒ 词表**漂移**必红（A-4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WireDropReason {
+    /// 源器件**不在**宿主的实例表里（描述里没这个器件）。
+    SourceUnknown,
+    /// 源器件在表里，但**不是 UART**（宿主只从 UART 抬 `rx_ready`）。
+    SourceType,
+    /// 目标器件**不在**宿主的实例表里。
+    TargetUnknown,
+    /// 目标器件在表里，但**不是 PLIC**（宿主只往 PLIC 递源）。
+    TargetType,
+    /// 源号**越界**（≥ 该 PLIC 的源数）⇒ ⇒ PLIC 抬不起来。
+    SourceOutOfRange,
+    /// 被**同键**的后一条线**顶掉**（一个键一根线是构造保证）。
+    Overridden,
+}
+
+/// **连线报告** —— 「你写的 N 根线里有 M 根当前抬不了」
+/// （STAGE-48 · v0.72 · D-177 A）。
+///
+/// ⚠️ **恒等式**：`declared == live + dropped.len()` ⇒ ⇒ **一个判据管
+/// 三件事**（裁决 I）。
+///
+/// ⚠️ **`declared` 只数「描述里用户写的线」**（裁决 J）⇒ ⇒ **默认连线
+/// 不计入** ⇒ ⇒ 「你写了 N 根线」= **用户写的**线。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WiringReportDto {
+    /// 描述里 `wiring` 段的条数（「你写了 N 根线」）。
+    pub declared: u32,
+    /// 其中**当前真的在连线表里**的条数。
+    pub live: u32,
+    /// 其余的 —— 逐条带理由（**不静默**）。
+    #[serde(default)]
+    pub dropped: Vec<DroppedWireDto>,
+}
+
+/// 一根**抬不了**的线 + **为什么**（STAGE-48 · v0.72 · D-177 A）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DroppedWireDto {
+    /// 源器件的 id（描述里的器件 id）。
+    pub from_device: String,
+    /// 事件名（**只有** `rx_ready` ⇒ 契约层那个常量）。
+    pub event: String,
+    /// 目标器件的 id（PLIC）。
+    pub to_device: String,
+    /// 目标 PLIC 的**源号**。
+    pub source: u32,
+    /// **为什么**抬不了（稳定枚举 · 6 个值）。
+    pub reason: WireDropReason,
+}
+
 /// Reference to a loadable image. The kernel will hand this to M-06
 /// (ELF/Raw-HEX parser) to obtain a binary blob to load.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

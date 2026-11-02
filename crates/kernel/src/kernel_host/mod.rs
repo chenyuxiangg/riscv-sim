@@ -201,8 +201,6 @@ use crate::m11_symbol::{
 };
 use crate::m14_bus::{Bus, BusWidth};
 use crate::m15_peripheral;
-use crate::m15_peripheral::clint::Clint;
-use crate::m15_peripheral::plic::Plic;
 use crate::m15_peripheral::uart::Uart16550;
 use crate::m16_interrupt::InterruptController;
 use crate::m17_backend::{SelfIssBackend, SharedInterruptPort};
@@ -907,12 +905,17 @@ pub struct KernelHost {
     /// 裁决 C 第 ④ 步就落空了。
     last_project: Option<Project>,
 
-    /// UART0 的句柄（**只有** QEMU virt 档才有）—— console 字节从这里取。
-    uart0: Option<Rc<RefCell<Uart16550>>>,
-    /// CLINT 的句柄（**只有** QEMU virt 档才有）—— `mtimecmp` 从这里喂给 M-16。
-    clint: Option<Rc<RefCell<Clint>>>,
-    /// PLIC 的句柄（**只有** QEMU virt 档才有）—— 外部中断的源头。
-    plic: Option<Rc<RefCell<Plic>>>,
+    /// **按 id 索引**的器件实例表（v0.72 · STAGE-48 · D-177 B）—— 宿主手里
+    /// **真正持有**的那些句柄。
+    ///
+    /// ⚠️ **它取代了三个固定角色句柄**（`uart0` / `clint` / `plic`）⇒ ⇒
+    /// 「板上的器件实例」**不再**被塌缩成三个角色 ⇒ ⇒ **第二个 UART 也有
+    /// 句柄** ⇒ ⇒ 第二个 UART 的线**真的**能通电。
+    ///
+    /// ⚠️ **角色 = id，句柄 = 从表里查出来的**（裁决 B）⇒ ⇒ 表是**唯一
+    /// 真相源** ⇒ ⇒ 「console 是哪个 / 时间源是哪个」只由**角色 id**决定
+    /// ⇒ ⇒ 少一个状态就少一处可能不同步的地方。
+    devices: platform::DeviceInstanceTable,
     /// **连线表**（v0.34 · D-125）—— 从**生效的描述**编译出来的。
     ///
     /// ⚠️ **它在建图时编译**（[`KernelHost::map_memory`]）⇒ ⇒ 换一块板
@@ -921,6 +924,15 @@ pub struct KernelHost {
     /// ⚠️ **它不是第二个真相源**：表里的每一行都来自**生效的描述**
     /// （默认连线或描述里的 `wiring`）⇒ ⇒ 描述是真相，表是它的投影。
     wiring: Vec<platform::Wiring>,
+    /// **丢线报告**（v0.72 · STAGE-48 · D-177 A）—— 「你写的 N 根线里有
+    /// M 根当前抬不了」。
+    ///
+    /// ⚠️ **它随图走**（建图时**重算**）⇒ ⇒ 改板之后**不留**上一份的残留
+    /// ⇒ ⇒ 恒等式 `declared == live + dropped.len()` **始终**成立。
+    ///
+    /// ⚠️ **它过 wire**（`memory.map` 事件的第五个字段）⇒ ⇒ 用户**看得见**
+    /// ⇒ ⇒ 「描述被接受但线被静默丢弃」这件事**不再是静默的**。
+    wiring_report: riscv_sim_contract::model::WiringReportDto,
     /// 已经从 UART 取走、但**还没推给前端**的 console 字节。
     ///
     /// ⚠️ **必须**及时把 UART 的字节取走（捕获环满了会丢最新的字节），
@@ -1080,12 +1092,15 @@ impl KernelHost {
             map_revision: 0,
             // STAGE-16 裁决 C 第 ④ 步：新会话**还没有**装载过的工程。
             last_project: None,
-            uart0: None,
-            clint: None,
-            plic: None,
+            // ⚠️ v0.72（STAGE-48 · D-177 B）：实例表在**建图时**产出 ⇒
+            // 新会话先空着。
+            devices: platform::DeviceInstanceTable::default(),
             // ⚠️ v0.34（D-125）：连线表在**建图时**编译（`map_memory`）⇒
             // 这里只是**初值**（还没有建图 ⇒ 还没有表）。
             wiring: Vec::new(),
+            // ⚠️ v0.72（STAGE-48 · D-177 A）：丢线报告**随图**重算 ⇒ 这里
+            // 只是**初值**（还没有建图 ⇒ 没有线 ⇒ 0 根）。
+            wiring_report: riscv_sim_contract::model::WiringReportDto::default(),
             console_backlog: Vec::new(),
             hms,
             log_buffer,
@@ -1277,9 +1292,10 @@ impl KernelHost {
         // ⚠️ 借用的作用域要收窄：`bus` 是 `self.backend` 的可变借用，
         // 而下面要把新外设的句柄写回 `self` 的字段 —— 两个借用不能重叠。
         let devices = platform::map_platform(self.backend.bus_mut(), description)?;
-        self.uart0 = devices.uart0;
-        self.clint = devices.clint;
-        self.plic = devices.plic;
+        // ⚠️ **v0.72（STAGE-48 · D-177 B）**：句柄**全部**进**按 id 索引**
+        // 的实例表 ⇒ ⇒ 「第二个 UART」**也有句柄** ⇒ ⇒ 它的线**真的**能
+        // 通电（裁决 E）。
+        self.devices = devices.handles;
         // ⚠️ **逐实例**清单（STAGE-43 · v0.66 · D-175）—— **建图时**顺带
         // 产出 ⇒ ⇒ 与总线上的实际布局**同源** ⇒ ⇒ 不另算一遍。
         self.device_instances = devices.instances;
@@ -1287,15 +1303,28 @@ impl KernelHost {
         // ⇒ ⇒ guest 读 `time` 与宿主调试读 `time` **同源**（STAGE-26 验收
         // B-9）⇒ ⇒ 平台时钟的真相**只有一份**（CLINT 自己那份）。
         //
+        // ⚠️ **角色 = id，句柄 = 从表里查出来的**（裁决 B）⇒ ⇒ 时间角色
+        // 仍是「**第一个** CLINT」（裁决 D：逐字不变）。
+        //
         // ⚠️ **没有 CLINT 的板 ⇒ 没有时钟** ⇒ ⇒ `time` / `timeh` 报 **0**
         // ⇒ ⇒ `default` / `minimal` 两档与黄金 runner 的行为**逐字不变**。
-        let time_source = self.clint.as_ref().map(platform::clint_time_source);
+        let time_source = self
+            .devices
+            .first_clint()
+            .and_then(|entry| self.devices.clint(&entry.id))
+            .map(|clint| platform::clint_time_source(&clint));
         self.backend.install_time_source(time_source);
         self.platform = description.clone();
         // ⚠️ **v0.34（D-125）**：**连线表在建图时从生效的描述编译**（冻结
         // 规格 STAGE-19 §3.1）⇒ ⇒ 「换一块板改连线」不用改宿主 ⇒ ⇒
         // 宿主抬线时读的是**这张表**，不是源码里的一个数。
-        self.wiring = platform::compile_wiring(description);
+        //
+        // ⚠️ **v0.72（STAGE-48 · D-177 A/B）**：**表与丢线报告一次编译**
+        // ⇒ ⇒ 两者**同源** ⇒ ⇒ 报告说的**就是**表里的那些线 ⇒ ⇒ 不会
+        // 出现「报告说丢了、表里还在」这种自相矛盾。
+        let compiled = platform::compile_wiring(description, &self.devices);
+        self.wiring = compiled.wires;
+        self.wiring_report = compiled.report;
         Ok(())
     }
 
@@ -1343,12 +1372,21 @@ impl KernelHost {
     /// [`SelfIssBackend::install_peripheral_ticker`] 的理由）—— 外设
     /// 本身不持有 M-16 的引用（M-15 LLD 的形状），不知道该往哪抬线。
     fn sync_interrupts(&mut self) {
-        let Some(clint) = self.clint.clone() else {
+        // ⚠️ **角色 = id，句柄 = 从实例表里查出来的**（裁决 B）⇒ ⇒ 「第一个
+        // CLINT」= 时间源（裁决 D：逐字不变）。
+        let Some(clint) = self
+            .devices
+            .first_clint()
+            .and_then(|entry| self.devices.clint(&entry.id))
+        else {
             return;
         };
-        let Some(plic) = self.plic.clone() else {
+        // ⚠️ **没有 PLIC ⇒ 整个函数不做任何事**（**存量逐字不变**：今天的
+        // `let Some(plic) = ... else { return }` 就是这个效果 ⇒ ⇒ 定时器
+        // 比较值也**不**喂 ⇒ ⇒ 「无 PLIC 的板不抬任何线」这条不变式保留）。
+        if self.devices.first_plic().is_none() {
             return;
-        };
+        }
         let now_ps = self.backend.engine().now_ps();
 
         // ---- 1) 定时器：CLINT 的 mtimecmp（周期）→ M-16（ps） ----
@@ -1361,7 +1399,7 @@ impl KernelHost {
         };
         self.intc.controller.borrow_mut().set_timer_compare(cmp_ps);
 
-        // ---- 2) UART 的 RX 就绪 → PLIC 的源（**按连线表**）----
+        // ---- 2) UART 的 RX 就绪 → PLIC 的源（**按连线表** · **逐线查实例**）----
         //
         // ⚠️ **电平语义**（STAGE-40 · v0.55 · 裁决 A）：PLIC 的**源挂起位**
         // 必须跟着**设备的中断线电平**走 —— 设备还「有话说」就挂着，没话说
@@ -1383,32 +1421,49 @@ impl KernelHost {
         // 固件（osz）写回 Claim 时用的是 `claim − 16`（legacy PLIC 约定）
         // ⇒ ⇒ 那个写值在平台（与参考侧）都是**非法源号** ⇒ ⇒ **被忽略**
         // ⇒ ⇒ 平台**不能**指望 guest 的 complete 来清挂起位。
-        if let Some(uart) = self.uart0.clone() {
+        //
+        // ⚠️ **v0.72（STAGE-48 · D-177 E）**：**每根线各自查两端** ⇒ ⇒
+        // 源按 `from_device` **查表**、目标按 `to_device` **查表** ⇒ ⇒
+        // **第二个 UART 的 `rx_ready` 真的抬的是它那根线的那个 PLIC 源**
+        // ⇒ ⇒ 「第二个 UART 的连线也真的通电」（本批的里程碑）。
+        //
+        // ⚠️ **旧写法只算「第一个 UART」的 `rx_ready`、再塞给「第一个
+        // PLIC」** ⇒ ⇒ 线的两端**从来没被分别查过** ⇒ ⇒ 只修
+        // `compile_wiring` 的过滤**不够**（§7.1 订正 2）。
+        for wire in self.wiring.iter() {
+            // ⚠️ **事件名用契约层那个常量**（不写字面量）⇒ ⇒ 事件名只有
+            // 一处定义。
+            if wire.event != WIRING_EVENT_RX_READY {
+                continue;
+            }
+            // ⚠️ **源**：按 `from_device` **查表**（不是「第一个 UART」）。
+            let Some(uart) = self.devices.uart(&wire.from_device) else {
+                continue;
+            };
+            // ⚠️ **目标**：按 `to_device` **查表**（不是「第一个 PLIC」）。
+            let Some(plic) = self.devices.plic(&wire.to_device) else {
+                continue;
+            };
             let rx_ready = match uart.try_borrow() {
                 Ok(u) => {
                     // LSR bit0 = RX 有字节；IER bit0 = 允许 RX 中断。
                     u.line_status() & 0x01 != 0 && u.interrupt_enable() & 0x01 != 0
                 }
-                Err(_) => return,
+                // ⚠️ **争用 ⇒ 跳过这根线**（不是 `return`）⇒ ⇒ 别的线**照常**
+                // ⇒ ⇒ 一根线读不到**不会**让整张表停摆。
+                Err(_) => continue,
             };
             if let Ok(mut p) = plic.try_borrow_mut() {
                 // ⚠️ **源号来自连线表**（v0.34 · D-125）⇒ ⇒ 表里是
                 // 「这个事件接到哪个源」⇒ ⇒ 换板改连线不用改宿主。
-                for wire in self.wiring.iter() {
-                    // ⚠️ **事件名用契约层那个常量**（不写字面量）⇒ ⇒
-                    // 事件名只有一处定义。
-                    if wire.event != WIRING_EVENT_RX_READY {
-                        continue;
-                    }
-                    if rx_ready {
-                        p.request(wire.source);
-                    } else {
-                        // ⚠️ **撤销挂起** = 设备把中断线放下来了 ⇒ ⇒
-                        // 源不再「有话说」⇒ ⇒ 不再占着 PLIC 的名额。
-                        p.set_pending(wire.source, false);
-                    }
+                if rx_ready {
+                    p.request(wire.source);
+                } else {
+                    // ⚠️ **撤销挂起** = 设备把中断线放下来了 ⇒ ⇒
+                    // 源不再「有话说」⇒ ⇒ 不再占着 PLIC 的名额。
+                    p.set_pending(wire.source, false);
                 }
-            }
+            };
         }
 
         // ---- 3) PLIC 的待交付源 → M-16 的外部中断线 ----
@@ -1416,10 +1471,29 @@ impl KernelHost {
         // ⚠️ 用**外部中断线**（`IRQ_UART_RX_READY` = 1）：平台的内部线号
         // 空间里 1 与 2 都映射到**架构 cause 码 11**（外部中断）⇒
         // guest 读到的 `mcause` 是 `0x8000_000B`，与 RISC-V 架构一致。
-        let claimed = match plic.try_borrow_mut() {
-            Ok(mut p) => p.claim(PLIC_CONTEXT_MACHINE),
-            Err(_) => return,
-        };
+        //
+        // ⚠️ **v0.72（STAGE-48 · D-177 F）**：**遍历全部 PLIC** ⇒ ⇒ 任一
+        // PLIC 有可交付源就抬外部线 ⇒ ⇒ 「第二个 PLIC 的源」**也**抬得到
+        // 架构层 ⇒ ⇒ 「通了一半」不算通电。
+        //
+        // ⚠️ **单 PLIC 时与今天逐字相同**（只有一个可问的 PLIC ⇒ 同一个
+        // `claim` 调用 ⇒ 同一个结果）。
+        let mut claimed: Option<u32> = None;
+        let mut any_readable = false;
+        for plic in self.devices.plic_handles() {
+            match plic.try_borrow_mut() {
+                Ok(mut p) => {
+                    any_readable = true;
+                    if let Some(source) = p.claim(PLIC_CONTEXT_MACHINE) {
+                        claimed = Some(source);
+                        break;
+                    }
+                }
+                // ⚠️ **争用 ⇒ 跳过这个 PLIC**（不是 `return`）⇒ ⇒ 别的 PLIC
+                // **照常**被问。
+                Err(_) => continue,
+            }
+        }
         match claimed {
             Some(_source) => {
                 let _ = self.intc.controller.borrow_mut().request(
@@ -1449,9 +1523,14 @@ impl KernelHost {
             // PLIC 的挂起位仍在 ⇒ ⇒ `claim()` 仍返回 `Some` ⇒ ⇒ 平台
             // **继续**请求 ⇒ ⇒ guest 立刻再次陷入（死循环）⇒ ⇒ 那是
             // **guest 的 bug**，平台**不**替它擦。
-            None => {
+            //
+            // ⚠️ **一个 PLIC 都读不到 ⇒ 什么都不做**（与今天的
+            // `Err(_) => return` 逐字一致 ⇒ ⇒ 「读不到就不改」这条口径
+            // **不变**）。
+            None if any_readable => {
                 self.intc.controller.borrow_mut().clear(IRQ_UART_RX_READY);
             }
+            None => {}
         }
     }
 
@@ -1470,6 +1549,16 @@ impl KernelHost {
         std::mem::take(&mut self.console_backlog)
     }
 
+    /// **console 角色**的 UART 句柄（**第一个** UART —— 裁决 D：逐字不变）。
+    ///
+    /// ⚠️ **角色 = id，句柄 = 从实例表里查出来的**（裁决 B）⇒ ⇒ 表是
+    /// **唯一真相源** ⇒ ⇒ 「console 是哪个」这件事**只由角色 id 决定**。
+    fn console_uart(&self) -> Option<Rc<RefCell<Uart16550>>> {
+        self.devices
+            .first_uart()
+            .and_then(|entry| self.devices.uart(&entry.id))
+    }
+
     /// **直接从 UART 的捕获环**取走字节（**不碰** backlog）。
     ///
     /// ⚠️ **为什么必须单独一个函数**：`collect_console`（收进 backlog）与
@@ -1481,7 +1570,7 @@ impl KernelHost {
     /// `drain_console` 改成「先 collect 再取 backlog」，release 构建当场
     /// 栈溢出（debug 构建的栈帧更大，反而先崩在别处）。
     fn drain_uart(&mut self) -> Vec<u8> {
-        let Some(uart) = self.uart0.clone() else {
+        let Some(uart) = self.console_uart() else {
             return Vec::new();
         };
         // ⚠️ 绑到局部变量：`match` 的临时值会活到块尾，而 `uart` 在那
@@ -1496,7 +1585,7 @@ impl KernelHost {
 
     /// console 方向**已经发出**但还没被取走的字节数。
     pub fn console_pending(&self) -> usize {
-        let Some(uart) = self.uart0.as_ref() else {
+        let Some(uart) = self.console_uart() else {
             return 0;
         };
         let n = match uart.try_borrow() {
@@ -1641,7 +1730,7 @@ impl KernelHost {
     /// ⚠️ 平台的 UART 是**捕获环**模型：TX 方向是「guest 写进来、
     /// 宿主取走」；RX 方向是「宿主塞进去、guest 取走」。
     pub fn uart_receive(&mut self, byte: u8) {
-        let Some(uart) = self.uart0.clone() else {
+        let Some(uart) = self.console_uart() else {
             return;
         };
         let done = match uart.try_borrow_mut() {
@@ -1652,6 +1741,34 @@ impl KernelHost {
             Err(_) => false,
         };
         let _ = done;
+    }
+
+    /// 往**指定 id 的 UART** 的**接收** FIFO 塞一个字节（STAGE-48 · D-177 B）。
+    ///
+    /// ⚠️ **为什么必须有这一条**：console 角色**仍是「第一个 UART」**（角色
+    /// 显式化是 D-177 **C**，第 57 批）⇒ ⇒ [`Self::uart_receive`] **只能**
+    /// 往第一个 UART 塞字节 ⇒ ⇒ **第二个 UART 的 RX FIFO 永远空** ⇒ ⇒
+    /// 它的 `rx_ready` **永远为假** ⇒ ⇒ **它的连线测不到** ⇒ ⇒ 「第二个
+    /// UART 的连线也真的通电」这件事**根本证明不了**。
+    ///
+    /// ⚠️ **只增不减**：console 那条路（[`Self::uart_receive`]）**逐字不变**
+    /// ⇒ ⇒ 存量行为**不受影响** ⇒ ⇒ 这**不是**「把角色改成第二个 UART」。
+    ///
+    /// @param id — 器件 id（描述里的那个 id）
+    /// @param byte — 塞进去的那个字节
+    /// @returns `true` ⇒ 那个 id **确实**是一台 UART 且注入**成功**
+    pub fn uart_receive_on(&mut self, id: &str, byte: u8) -> bool {
+        let Some(uart) = self.devices.uart(id) else {
+            return false;
+        };
+        let done = match uart.try_borrow_mut() {
+            Ok(mut u) => {
+                u.receive(byte);
+                true
+            }
+            Err(_) => false,
+        };
+        done
     }
 
     /// 装上探针管道（D-46）：M-14 总线 → M-18 判沿 → M-19 环形缓冲。
@@ -2920,6 +3037,10 @@ impl KernelHost {
             pending: self.memory_map_pending(),
             loaded: self.image_loaded,
             revision: self.map_revision,
+            // ⚠️ **连线报告**（STAGE-48 · D-177 A）—— 「你写的 N 根线里有
+            // M 根当前抬不了」⇒ ⇒ **在「内核接受描述的那一刻」就到** ⇒ ⇒
+            // 前端**不自己判**（只显示内核给的）。
+            wiring_report: self.wiring_report.clone(),
         }
     }
 
@@ -4720,6 +4841,14 @@ mod tests_v059_reset;
 mod tests_v066_devices;
 #[cfg(test)]
 mod tests_v071_unknown_system;
+
+/// **宿主不再把器件实例塌缩成「几个固定角色」**（v0.72 · STAGE-48 ·
+/// D-177）。
+///
+/// ⚠️ 盯的是「**第二个 UART 的线也真的通电**」+「**丢线不再静默**」⇒ ⇒
+/// 断言全部落在**契约命令回的事件**与**宿主真的持有句柄**这两件事上。
+#[cfg(test)]
+mod tests_v072_wiring;
 
 /// 平台描述的加载 · 器件工厂 · 建图（v0.27 · D-123-B）。
 ///

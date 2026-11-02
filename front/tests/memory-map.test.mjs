@@ -1666,3 +1666,105 @@ describe("板级内存图 · 差量提交后的落库门槛（STAGE-16 · C-14�
         );
     });
 });
+
+// ---------------------------------------------------------------------------
+// D-178（v0.72 批 · STAGE-48）—— 失败的装载**也要重订流**。
+//
+// ⚠️ **根因链**：内核在「挑平台描述」那一步就会把**待生效的板应用**
+//   （修订号 **+1**）⇒ ⇒ 那之后才失败（写不进总线 / 符号索引重建失败）
+//   ⇒ ⇒ 内核**已经**是新修订号 ⇒ ⇒ 而**失败路径不回 `memory.map`**
+//   ⇒ ⇒ 前端**唯一**能学到新修订号的途径是「重订 ⇒ 内核强推一次」
+//   ⇒ ⇒ 不重订 ⇒ ⇒ 前端停在旧修订号 ⇒ ⇒ **下一次改板报 `E_PLT-13`**
+//   ⇒ ⇒ 板换不回去、零提示。
+//
+// ⚠️ **判别力**：把 `loadProjectIntoKernel` 里那个 catch 删掉 ⇒ ⇒
+//   第一条**必须红** ⇒ ⇒ 这条判据**不是空的**。
+// ---------------------------------------------------------------------------
+
+describe("D-178 · 失败的装载也要重订流（修订号不许停在旧值）", () => {
+    test("装载失败 ⇒ 内存图流**仍然被重订**（否则前端学不到新修订号）", async () => {
+        const router = fakeKernel();
+        const wiring = app.wireMemoryMap(router);
+        await wiring.subscribeMemoryMapStream();
+        assert.equal(router.topics.has("memory.map"), true, "先订阅上了");
+
+        const services = servicesFor(router, wiring);
+        // ⚠️ 装载在**内核已经顶了修订号之后**失败（STAGE-47 §7.1 第 7 条
+        //   那个**可达**路径）。
+        services.registerMemory.loadProject = async (project) => {
+            await router.dispatchCommand(message.Command.loadProject(project));
+            // ⚠️ 内核这边：板被应用了 ⇒ 修订号 +1 ⇒ ⇒ 然后装载失败。
+            throw new Error("装载失败：固件要的地址不在板上");
+        };
+
+        await assert.rejects(
+            () => app.loadProjectIntoKernel(services, { id: "p" }),
+            /装载失败/,
+            "装载失败**必须**照旧抛出来（错误语义一字未变）",
+        );
+        assert.equal(
+            router.topics.has("memory.map"),
+            true,
+            "装载失败后内存图流**没有**被重订 ⇒ ⇒ 前端学不到内核顶上去的修订号 ⇒ ⇒ 下次改板报 E_PLT-13",
+        );
+    });
+
+    test("装载失败后重订 ⇒ 前端**真的**学到了内核的新修订号", async () => {
+        // ⚠️ **正向对照**：重订之后内核**强推**一次 ⇒ ⇒ 前端的 revision
+        //   **真的**变成新值 ⇒ ⇒ 「重订了」不只是「发过一条命令」。
+        const router = fakeKernel();
+        const wiring = app.wireMemoryMap(router);
+        await wiring.subscribeMemoryMapStream();
+        // ⚠️ 先学一个**旧**修订号（0）。
+        router.emitMemoryMap(USER_BOARD, false, false, 0);
+        assert.equal(wiring.get().revision, 0, "先落在旧修订号上");
+
+        const services = servicesFor(router, wiring);
+        services.registerMemory.loadProject = async (project) => {
+            await router.dispatchCommand(message.Command.loadProject(project));
+            throw new Error("装载失败");
+        };
+        // ⚠️ 假内核：**订阅时**强推当前图（真内核就是这样 ⇒ 契约层
+        //   `on_subscribe` 无条件推一次）。
+        const origDispatch = router.dispatchCommand.bind(router);
+        router.dispatchCommand = async (payload) => {
+            const out = await origDispatch(payload);
+            if (payload && typeof payload === "object" && "Subscribe" in payload
+                && payload.Subscribe.topic === "memory.map") {
+                router.emitMemoryMap(USER_BOARD, false, false, 7);
+            }
+            return out;
+        };
+
+        await assert.rejects(
+            () => app.loadProjectIntoKernel(services, { id: "p" }),
+            /装载失败/,
+        );
+        assert.equal(
+            wiring.get().revision,
+            7,
+            "前端**没有**学到内核的新修订号 ⇒ ⇒ 它下一次提交会带旧的 expected_revision ⇒ ⇒ 内核报 E_PLT-13",
+        );
+    });
+
+    test("装载**成功**时行为**一字未变**（只重订一次）", async () => {
+        // ⚠️ **必要对照**：成功路径**不许**多发一次订阅 ⇒ ⇒ 否则这条修复
+        //   会带来「每次装载多一条命令」的副作用。
+        const router = fakeKernel();
+        const wiring = app.wireMemoryMap(router);
+        await wiring.subscribeMemoryMapStream();
+        const services = servicesFor(router, wiring);
+        const before = router.sent.length;
+        await app.loadProjectIntoKernel(services, { id: "p" });
+        const kinds = router.sent.slice(before).map((c) => {
+            if (c && typeof c === "object" && "LoadProject" in c) return "LoadProject";
+            if (c && typeof c === "object" && "Subscribe" in c) return c.Subscribe.topic;
+            return String(c);
+        });
+        assert.deepEqual(
+            kinds,
+            ["LoadProject", "memory.map"],
+            "成功路径必须**只**重订一次（失败路径的重订**不许**漏到这里）",
+        );
+    });
+});

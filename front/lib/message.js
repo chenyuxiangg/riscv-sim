@@ -123,6 +123,23 @@
 //   - ⚠️ the **platform description format did not change** ⇒ ⇒ the stored
 //     board archives are unaffected (PLATFORM_SCHEMA_VERSION stays 1).
 //
+// Contract **v11** adds the **连线报告**（STAGE-48 · v0.72 · debt ledger
+// D-177 A）—— 「宿主不再把器件实例塌缩成固定角色」批的**一半**：
+//
+//   - one new event field: `MemoryMap` gained `wiring_report` — 「你写的
+//     N 根线里有 M 根当前抬不了」（`{declared, live, dropped[]}`）⇒ ⇒
+//     **形状变了** ⇒ ⇒ `SCHEMA_VERSION` **10 → 11**（⚠️ 产品计划里写的
+//     「零升版」**不成立** ⇒ ⇒ 订正见 STAGE-48 §7.1 订正 1）;
+//   - three new DTO shapes: `WiringReportDto` / `DroppedWireDto` /
+//     `WireDropReason` —— ⚠️ **理由词表**是**稳定枚举**（**线上形态是
+//     kebab-case**：`source-unknown` / `source-type` / `target-unknown` /
+//     `target-type` / `source-out-of-range` / `overridden`）⇒ ⇒ **恰好
+//     6 个值** ⇒ ⇒ 词表漂移必红;
+//   - ⚠️ **命令侧零改动** ⇒ ⇒ 只有这一处形状变化 ⇒ ⇒ `SCHEMA_VERSION`
+//     只因它而升;
+//   - ⚠️ `SIM_STATE_SCHEMA_VERSION` / `PLATFORM_SCHEMA_VERSION` /
+//     `PLATFORM_RULES_VERSION` are **unchanged** (still 2 / 1 / 3).
+//
 // ⚠️ The two admin DTOs (`LogEntryDto` / `AdminDiagDto`) have **one**
 //   truth: `crates/contract/fixtures/admin-dto.json` ⇒ ⇒ the Rust side
 //   asserts its serialisation against that file and the front side reads
@@ -130,7 +147,7 @@
 //   on either side turns the other side red.
 
 /** Protocol schema version — mirrors `riscv_sim_contract::SCHEMA_VERSION`. */
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 /**
  * 转储长度上限（字节）—— mirrors `riscv_sim_contract::DUMP_MAX_BYTES`.
@@ -970,16 +987,35 @@ export const Event = Object.freeze({
      * @param {boolean} pending — 有无待生效的板级配置
      * @param {boolean} loaded — 有没有装载镜像
      * @param {number} revision — 当前的修订号（缺省 0）
-     * @returns {{MemoryMap: {description: object, pending: boolean, loaded: boolean, revision: number}}}
+     * @param {object|null} [wiringReport] — **连线报告**（STAGE-48 ·
+     *   D-177 A；缺省 = 「0 根线、0 根丢」那档）⇒ ⇒ 老内核 / 老事件
+     *   **不会**让前端炸
+     * @returns {{MemoryMap: {description: object, pending: boolean, loaded: boolean, revision: number, wiring_report: object}}}
      */
-    memoryMap: (description, pending, loaded, revision) => ({
-        MemoryMap: {
-            description,
-            pending: Boolean(pending),
-            loaded: Boolean(loaded),
-            revision: Number(revision ?? 0),
-        },
-    }),
+    memoryMap: (description, pending, loaded, revision, wiringReport = null) => {
+        // ⚠️ **报告对象在 `MemoryMap` 字面量之外构造** ⇒ ⇒ `MemoryMap: { … }`
+        // 那个块里**只有 5 个键** ⇒ ⇒ 跨层的「两侧逐字段同形且同序」那条
+        // 判据（契约层 `the_v7_payload_shapes_are_the_same_on_both_sides`）
+        // 才不会被嵌套键**污染**。
+        const report = wiringReport
+            ? {
+                  declared: Number(wiringReport.declared ?? 0),
+                  live: Number(wiringReport.live ?? 0),
+                  dropped: Array.isArray(wiringReport.dropped)
+                      ? wiringReport.dropped
+                      : [],
+              }
+            : { declared: 0, live: 0, dropped: [] };
+        return {
+            MemoryMap: {
+                description,
+                pending: Boolean(pending),
+                loaded: Boolean(loaded),
+                revision: Number(revision ?? 0),
+                wiring_report: report,
+            },
+        };
+    },
     /**
      * `EventPayload::DeviceTypes { types }` — **器件类型注册表**
      * （契约 v10 · STAGE-43 · D-175）。

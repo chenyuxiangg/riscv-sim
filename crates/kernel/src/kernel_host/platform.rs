@@ -304,24 +304,136 @@ fn build_device(spec: &DeviceSpec, base: u32) -> Result<BuiltDevice, PlatformErr
 }
 
 // ---------------------------------------------------------------------------
+// 器件实例表（STAGE-48 · v0.72 · D-177 B）
+// ---------------------------------------------------------------------------
+
+/// 宿主手里**真正持有的**器件句柄 —— 实例表里的那一格。
+///
+/// ⚠️ **它取代了「三个固定角色句柄」**（裁决 A）⇒ ⇒ 「板上的器件实例」
+/// **不再**被塌缩成 `uart0` / `clint` / `plic` ⇒ ⇒ **第二个 UART 也有
+/// 句柄** ⇒ ⇒ 第二个 UART 的线**真的**能通电（裁决 E）。
+#[derive(Debug, Clone)]
+pub enum DeviceHandle {
+    /// UART16550 —— 宿主能从它抬 `rx_ready`，也能当 console。
+    Uart(Rc<RefCell<Uart16550>>),
+    /// CLINT —— `time` / `mtimecmp` 的**唯一**来源。
+    Clint(Rc<RefCell<Clint>>),
+    /// PLIC —— 外部中断的源头。
+    Plic(Rc<RefCell<Plic>>),
+    /// 宿主**不**持有专用句柄的器件（今天的 GPIO）⇒ ⇒ 只登记「**它在**」
+    /// ⇒ ⇒ 「GPIO 能不能当线的两端」**判得出来**（⇒ ⇒ `source-type` /
+    /// `target-type` 而不是 `source-unknown`）。
+    Opaque,
+}
+
+/// 器件实例表 —— **按 id 索引**（STAGE-48 · v0.72 · D-177 B）。
+///
+/// ⚠️ **它与建图结果同源**（在**同一次**遍历里产出）⇒ ⇒ 不是「另算一遍」
+/// ⇒ ⇒ 不可能与总线上的实际布局对不上。
+///
+/// ⚠️ **顺序 = base 升序**（建图遍历的顺序）⇒ ⇒ 「第一个 UART / 第一个
+/// PLIC」与建图时**同序** ⇒ ⇒ **存量行为逐字不变**（裁决 D）。
+#[derive(Debug, Default)]
+pub struct DeviceInstanceTable {
+    entries: Vec<DeviceInstanceEntry>,
+}
+
+/// 实例表里的一格。
+#[derive(Debug, Clone)]
+pub struct DeviceInstanceEntry {
+    /// 器件 id（描述里的那个 id）。
+    pub id: String,
+    /// 器件种类（`"uart16550"` / `"plic"` / `"clint"` / `"gpio"`）。
+    pub kind: String,
+    /// 宿主持有的句柄。
+    pub handle: DeviceHandle,
+}
+
+impl DeviceInstanceTable {
+    /// 登记一个实例（**建图遍历的顺序** = base 升序 ⇒ ⇒ 「第一个」口径）。
+    fn push(&mut self, entry: DeviceInstanceEntry) {
+        self.entries.push(entry);
+    }
+
+    /// 按 id 查一格。
+    pub fn get(&self, id: &str) -> Option<&DeviceInstanceEntry> {
+        self.entries.iter().find(|e| e.id == id)
+    }
+
+    /// 按 id 查一个 **UART** 句柄。
+    pub fn uart(&self, id: &str) -> Option<Rc<RefCell<Uart16550>>> {
+        match self.get(id).map(|e| &e.handle) {
+            Some(DeviceHandle::Uart(h)) => Some(Rc::clone(h)),
+            _ => None,
+        }
+    }
+
+    /// 按 id 查一个 **PLIC** 句柄。
+    pub fn plic(&self, id: &str) -> Option<Rc<RefCell<Plic>>> {
+        match self.get(id).map(|e| &e.handle) {
+            Some(DeviceHandle::Plic(h)) => Some(Rc::clone(h)),
+            _ => None,
+        }
+    }
+
+    /// 按 id 查一个 **CLINT** 句柄。
+    pub fn clint(&self, id: &str) -> Option<Rc<RefCell<Clint>>> {
+        match self.get(id).map(|e| &e.handle) {
+            Some(DeviceHandle::Clint(h)) => Some(Rc::clone(h)),
+            _ => None,
+        }
+    }
+
+    /// **第一个** UART（base 升序）—— **console 角色**（裁决 D：逐字不变）。
+    pub fn first_uart(&self) -> Option<&DeviceInstanceEntry> {
+        self.entries.iter().find(|e| e.kind == "uart16550")
+    }
+
+    /// **第一个** PLIC（base 升序）。
+    pub fn first_plic(&self) -> Option<&DeviceInstanceEntry> {
+        self.entries.iter().find(|e| e.kind == "plic")
+    }
+
+    /// **第一个** CLINT（base 升序）—— **时间角色**（裁决 D：逐字不变）。
+    pub fn first_clint(&self) -> Option<&DeviceInstanceEntry> {
+        self.entries.iter().find(|e| e.kind == "clint")
+    }
+
+    /// **全部** PLIC 句柄（base 升序）—— 裁决 F：外部线由**任一** PLIC 抬。
+    pub fn plic_handles(&self) -> Vec<Rc<RefCell<Plic>>> {
+        self.entries
+            .iter()
+            .filter(|e| e.kind == "plic")
+            .filter_map(|e| match &e.handle {
+                DeviceHandle::Plic(h) => Some(Rc::clone(h)),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 建图
 // ---------------------------------------------------------------------------
 
 /// 建完图之后，宿主**要留着的**器件句柄。
+///
+/// ⚠️ **v0.72（STAGE-48 · D-177 B）**：三个固定角色句柄（`uart0` /
+/// `clint` / `plic`）**已删** ⇒ ⇒ 代之以 [`DeviceInstanceTable`]（**按 id
+/// 索引**）⇒ ⇒ 「板上的器件实例」**不再**被塌缩成三个角色。
+///
+/// ⚠️ **角色 = id，句柄 = 从表里查出来的**（裁决 B）⇒ ⇒ 表是**唯一真相
+/// 源** ⇒ ⇒ 「console 是哪个 / 时间源是哪个」只由**角色 id**决定。
 #[derive(Debug, Default)]
 pub struct MappedDevices {
-    /// 第一个 UART16550（`None` = 这份描述里没有 UART）。
-    pub uart0: Option<Rc<RefCell<Uart16550>>>,
-    /// 第一个 CLINT。
-    pub clint: Option<Rc<RefCell<Clint>>>,
-    /// 第一个 PLIC。
-    pub plic: Option<Rc<RefCell<Plic>>>,
     /// **逐实例**清单（STAGE-43 · v0.66 · D-175）—— 谁、什么类型、绑到
     /// 哪个基址、窗口多大。
     ///
     /// ⚠️ **它与建图结果同源**（在**同一次**遍历里产出）⇒ ⇒ 不是「另算
     /// 一遍」⇒ ⇒ 不可能与总线上的实际布局对不上。
     pub instances: Vec<riscv_sim_contract::model::DeviceInstanceInfo>,
+    /// **按 id 索引**的器件实例表 —— 宿主手里**真正持有**的那些句柄。
+    pub handles: DeviceInstanceTable,
 }
 
 /// 按描述**建图**。
@@ -394,17 +506,24 @@ pub fn map_platform(
                         base: Some(*base),
                         window_bytes: window,
                     });
-                // ⚠️ **第一个**同种器件被宿主认领（描述里没有第二个
-                // UART 的语义；今天的宿主也只有一路 console）。
-                if devices.uart0.is_none() {
-                    devices.uart0 = uart;
-                }
-                if devices.clint.is_none() {
-                    devices.clint = clint;
-                }
-                if devices.plic.is_none() {
-                    devices.plic = plic;
-                }
+                // ⚠️ **实例表**（STAGE-48 · D-177 B）：**每一个**器件实例都
+                // 进表 ⇒ ⇒ **第二个 UART 也有句柄** ⇒ ⇒ 它的线**真的**能
+                // 通电（裁决 E）。
+                //
+                // ⚠️ **GPIO 没有专用句柄** ⇒ ⇒ 记成 `Opaque` ⇒ ⇒ 「它在」
+                // 这件事**判得出来**（⇒ ⇒ 线的两端是 GPIO 时报
+                // `source-type` / `target-type`，**不是** `source-unknown`）。
+                let handle = match (uart, clint, plic) {
+                    (Some(u), None, None) => DeviceHandle::Uart(u),
+                    (None, Some(c), None) => DeviceHandle::Clint(c),
+                    (None, None, Some(p)) => DeviceHandle::Plic(p),
+                    _ => DeviceHandle::Opaque,
+                };
+                devices.handles.push(DeviceInstanceEntry {
+                    id: device.id().to_string(),
+                    kind: device.kind().to_string(),
+                    handle,
+                });
             }
         }
     }
@@ -540,7 +659,76 @@ pub fn default_wiring(description: &PlatformDescription) -> Vec<Wiring> {
     vec![wire]
 }
 
-/// 从**生效的描述**编译出**连线表**（冻结规格 STAGE-19 §3.1）。
+/// **连线编译的结果** —— 表 + **丢线报告**（STAGE-48 · v0.72 · D-177 A）。
+#[derive(Debug, Clone, Default)]
+pub struct WiringCompile {
+    /// **活着的**线（宿主真的抬得了的那些）。
+    pub wires: Vec<Wiring>,
+    /// **丢线报告** —— 「你写的 N 根线里有 M 根当前抬不了」。
+    pub report: riscv_sim_contract::model::WiringReportDto,
+}
+
+/// 描述里某个 PLIC 的**源数**（`None` ⇒ 描述里没这个 PLIC）。
+///
+/// ⚠️ **用描述里的那个数**（不是从 PLIC 实例里读）⇒ ⇒ 借用的争用**不
+/// 影响**判定 ⇒ ⇒ 「拿不到就不判越界」那种 fail-open **不需要**。
+fn plic_sources_of(description: &PlatformDescription, id: &str) -> Option<u32> {
+    regions_by_base(description)
+        .into_iter()
+        .find_map(|region| match region {
+            RegionSpec::Peripheral {
+                device:
+                    DeviceSpec::Plic {
+                        id: plic_id,
+                        sources,
+                        ..
+                    },
+                ..
+            } if plic_id == id => Some(*sources),
+            _ => None,
+        })
+}
+
+/// 一根线**抬不了**的**第一条**理由（`Ok` ⇒ 抬得了）。
+///
+/// ⚠️ **五条判据分开算**（STAGE-48 §2.1）⇒ ⇒ 界面能说清「**为什么**」
+/// ⇒ ⇒ 「不知道抬不了」与「抬不了」是**两件事**。
+fn check_wire(
+    description: &PlatformDescription,
+    devices: &DeviceInstanceTable,
+    wire: &Wiring,
+) -> Result<(), riscv_sim_contract::model::WireDropReason> {
+    use riscv_sim_contract::model::WireDropReason;
+
+    // ---- 源器件 ----
+    let Some(source) = devices.get(&wire.from_device) else {
+        return Err(WireDropReason::SourceUnknown);
+    };
+    if source.kind != "uart16550" {
+        return Err(WireDropReason::SourceType);
+    }
+
+    // ---- 目标器件 ----
+    let Some(target) = devices.get(&wire.to_device) else {
+        return Err(WireDropReason::TargetUnknown);
+    };
+    if target.kind != "plic" {
+        return Err(WireDropReason::TargetType);
+    }
+
+    // ---- 源号范围 ----
+    let Some(sources) = plic_sources_of(description, &wire.to_device) else {
+        return Err(WireDropReason::TargetUnknown);
+    };
+    if wire.source >= sources {
+        return Err(WireDropReason::SourceOutOfRange);
+    }
+
+    Ok(())
+}
+
+/// 从**生效的描述**编译出**连线表** + **丢线报告**（冻结规格 STAGE-19 §3.1
+/// · **STAGE-48 §3 裁决 C**）。
 ///
 /// ```text
 /// 生效描述 ──► 编译连线表 ──► sync_interrupts 按表抬线
@@ -551,14 +739,32 @@ pub fn default_wiring(description: &PlatformDescription) -> Vec<Wiring> {
 /// ⚠️ **同一时刻一个键只有一根线**（覆盖 ⇒ **不**追加）⇒ ⇒ 「同一时刻只有
 /// 一个 source」是**构造保证**的，不是运行时判出来的。
 ///
-/// ⚠️ **表里只有宿主真的抬得了的线**：源器件必须是**宿主手里那路 UART**、
-/// 目标器件必须是**宿主手里那个 PLIC** ⇒ ⇒ 描述里那些「指向别的器件」的
-/// 线（V-18 只要求器件**存在**）**不在表里** ⇒ ⇒ 它们**不会**让宿主在
-/// 「UART 的 RX 就绪」时去抬一个不属于它的源。
-pub fn compile_wiring(description: &PlatformDescription) -> Vec<Wiring> {
-    let mut table = default_wiring(description);
+/// ⚠️ **v0.72（STAGE-48 · D-177 B）**：末尾那个 `retain`（只留「第一个 UART
+/// → 第一个 PLIC」）**已删** ⇒ ⇒ 代之以「**查得到就留、查不到就记一笔**」
+/// ⇒ ⇒ **丢线不再静默**（裁决 C）⇒ ⇒ **第二个 UART 的线也留在表里**
+/// ⇒ ⇒ 配合 [`crate::kernel_host::KernelHost`] 侧「逐线查实例」
+/// （裁决 E）⇒ ⇒ **第二个 UART 的连线也真的通电**。
+///
+/// ⚠️ **默认连线**（[`default_wiring`]）**逐字不变** ⇒ ⇒ 存量行为一字不改
+/// （裁决 D）⇒ ⇒ 「第一个 UART / 第一个 PLIC」这个口径**仍是描述里的
+/// 那一个**。
+pub fn compile_wiring(
+    description: &PlatformDescription,
+    devices: &DeviceInstanceTable,
+) -> WiringCompile {
+    use riscv_sim_contract::model::{DroppedWireDto, WireDropReason};
 
-    // 描述里的连线：**按 (from.device, from.event) 覆盖**同键的默认项。
+    // ---- 1) 默认连线（**逐字不变**；`false` = 不是用户写的）----
+    let mut entries: Vec<(Wiring, bool)> = default_wiring(description)
+        .into_iter()
+        .map(|w| (w, false))
+        .collect();
+
+    // ---- 2) 描述里的连线：按 (from.device, from.event) 覆盖同键 ----
+    //
+    // ⚠️ **被顶掉的那些**（同键的前一条）**要记一笔**（裁决 K）⇒ ⇒ 否则
+    // 「你写了 2 根、只有 1 根生效」这件事**仍然静默**。
+    let mut shadowed: Vec<Wiring> = Vec::new();
     for spec in description.wiring.iter().flatten() {
         let wire = Wiring {
             from_device: spec.from.device.clone(),
@@ -566,22 +772,74 @@ pub fn compile_wiring(description: &PlatformDescription) -> Vec<Wiring> {
             to_device: spec.to.device.clone(),
             source: spec.to.source,
         };
-        match table
-            .iter_mut()
-            .find(|w| w.from_device == wire.from_device && w.event == wire.event)
+        match entries
+            .iter()
+            .position(|(w, _)| w.from_device == wire.from_device && w.event == wire.event)
         {
-            Some(slot) => *slot = wire,
-            None => table.push(wire),
+            Some(idx) => {
+                let (old, was_written_by_user) = entries[idx].clone();
+                // ⚠️ 被顶掉的若是**默认连线** ⇒ ⇒ **不记**（它不是用户写的
+                // ⇒ ⇒ 裁决 J：`declared` 只数用户写的线）。
+                if was_written_by_user {
+                    shadowed.push(old);
+                }
+                entries[idx] = (wire, true);
+            }
+            None => entries.push((wire, true)),
         }
     }
 
-    // 只留宿主**真的抬得了**的那些线（见本函数的文档）。
-    let (uart_id, plic_id) = match (first_uart_id(description), first_plic(description)) {
-        (Some(uart_id), Some((plic_id, _))) => (uart_id, plic_id),
-        _ => return Vec::new(),
-    };
-    table.retain(|w| w.from_device == uart_id && w.to_device == plic_id);
-    table
+    // ---- 3) 端点检查：**查得到就留、查不到就记一笔**（裁决 C）----
+    let mut wires: Vec<Wiring> = Vec::new();
+    let mut dropped: Vec<DroppedWireDto> = Vec::new();
+    let mut live = 0u32;
+    for (wire, written_by_user) in entries.iter() {
+        match check_wire(description, devices, wire) {
+            Ok(()) => {
+                wires.push(wire.clone());
+                if *written_by_user {
+                    live += 1;
+                }
+            }
+            Err(reason) => dropped.push(DroppedWireDto {
+                from_device: wire.from_device.clone(),
+                event: wire.event.clone(),
+                to_device: wire.to_device.clone(),
+                source: wire.source,
+                reason,
+            }),
+        }
+    }
+
+    // ---- 4) 被顶掉的那几根（**用户写的**才算数）----
+    for wire in shadowed {
+        dropped.push(DroppedWireDto {
+            from_device: wire.from_device.clone(),
+            event: wire.event.clone(),
+            to_device: wire.to_device.clone(),
+            source: wire.source,
+            reason: WireDropReason::Overridden,
+        });
+    }
+
+    // ⚠️ **恒等式**：`declared == live + dropped.len()`（裁决 I）⇒ ⇒ 一个判据
+    // 管三件事。
+    //
+    // ⚠️ ⚠️ **这里**刻意**不写** `debug_assert_eq!` —— **恒等式的落点只有
+    // 一处**（`tests_v072_wiring.rs` 的 **K-12**）⇒ ⇒ 两处都写 = 一个约束
+    // 两个落点 ⇒ ⇒ 而且那个 `debug_assert`（**release 里被编掉**⇒ ⇒ 生产
+    // 上**根本不守**）⇒ ⇒ 更糟的是它会**先炸** ⇒ ⇒ 变异自检的红集**全被它
+    // 掩盖** ⇒ ⇒ 归因失真（本批**实测踩到**：T-4 的红集里 10 条全是它）。
+    let declared = description.wiring.iter().flatten().count() as u32;
+
+    WiringCompile {
+        wires,
+        report: riscv_sim_contract::model::WiringReportDto {
+            declared,
+            live,
+            dropped,
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------

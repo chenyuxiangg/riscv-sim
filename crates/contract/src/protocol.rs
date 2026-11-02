@@ -712,7 +712,8 @@ pub enum EventPayload {
     /// running" ⇒ in a loaded session `pending = true` is the **normal**
     /// state (a board change is stored as pending).
     ///
-    /// Added in contract v6; **`loaded` / `revision` added in v7**.
+    /// Added in contract v6; **`loaded` / `revision` added in v7**;
+    /// **`wiring_report` added in v11**.
     MemoryMap {
         /// **当前生效**的图（裁决 D）。
         description: PlatformDescription,
@@ -728,6 +729,19 @@ pub enum EventPayload {
         /// ⚠️ 前端下次提交时把它作为 `expected_revision` 带上 ⇒ 并发
         /// 丢更新**看得见**（`E_PLT_13`）。
         revision: u64,
+        /// **连线报告** —— 「你写的 N 根线里有 M 根当前抬不了」
+        /// （STAGE-48 · v0.72 · D-177 A）。
+        ///
+        /// ⚠️ **它在「内核接受描述的那一刻」就在**（裁决 G）⇒ 用户提交
+        /// 一份带 `wiring` 的板 ⇒ ⇒ **立刻**知道哪几根线没通电。
+        ///
+        /// ⚠️ **`declared` 只数描述里用户写的线**（裁决 J）⇒ ⇒ 默认连线
+        /// **不计入** ⇒ ⇒ 「你写了 N 根线」= **用户写的**线。
+        ///
+        /// ⚠️ **`#[serde(default)]`** ⇒ ⇒ 老载荷（**没有**这个字段）**仍能
+        /// 解析** ⇒ ⇒ 前端拿不到时**不炸**（N-4）。
+        #[serde(default)]
+        wiring_report: crate::model::WiringReportDto,
     },
     /// **器件类型注册表**（内核支持什么 · M-15 · STAGE-43 · v0.66）。
     ///
@@ -883,9 +897,14 @@ mod tests {
     ///
     /// ⚠️ **A-1**（STAGE-42 §6.1）：断言写**字面量** ⇒ ⇒ 升版 / 漏升版
     /// 都会当场变红。
+    ///
+    /// ⚠️ **v11**（STAGE-48 · D-177 A）：`MemoryMap` 事件**多一个**
+    /// `wiring_report` 字段 ⇒ ⇒ **线上形状变了** ⇒ ⇒ `SCHEMA_VERSION`
+    /// **10 → 11**（⚠️ 计划里说的「零升版」**不成立** ⇒ ⇒ 订正见
+    /// STAGE-48 §7.1 订正 1）。
     #[test]
-    fn the_schema_version_is_nine() {
-        assert_eq!(crate::SCHEMA_VERSION, 10);
+    fn the_schema_version_is_eleven() {
+        assert_eq!(crate::SCHEMA_VERSION, 11);
     }
 
     /// `AdminOp`'s **doc** must state the gate the platform **really**
@@ -1100,7 +1119,7 @@ mod tests {
         let msg = Message::command(8, CommandPayload::Nop);
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
-        assert_eq!(json["schema_version"], 10);
+        assert_eq!(json["schema_version"], 11);
     }
 
     // -----------------------------------------------------------------
@@ -1502,17 +1521,22 @@ mod tests {
     ///
     /// ⚠️ **v7**: the event gained `loaded` and `revision` (after
     /// `pending`) ⇒ the pinned string moves with it.
+    ///
+    /// ⚠️ **v11**: the event gained `wiring_report` (after `revision`)
+    /// ⇒ ⇒ the pinned string moves with it ⇒ ⇒ **改名 / 删字段 / 改字段序
+    /// 必红**（A-2）。
     #[test]
-    fn the_v7_memory_map_event_has_a_pinned_wire_shape() {
+    fn the_v11_memory_map_event_has_a_pinned_wire_shape() {
         let ev = EventPayload::MemoryMap {
             description: a_user_configured_board(),
             pending: false,
             loaded: true,
             revision: 7,
+            wiring_report: crate::model::WiringReportDto::default(),
         };
         assert_eq!(
             serde_json::to_string(&ev).expect("json"),
-            r#"{"MemoryMap":{"description":{"schema_version":1,"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{"kind":"ram","base":0,"size":1048576}]},"pending":false,"loaded":true,"revision":7}}"#
+            r#"{"MemoryMap":{"description":{"schema_version":1,"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{"kind":"ram","base":0,"size":1048576}]},"pending":false,"loaded":true,"revision":7,"wiring_report":{"declared":0,"live":0,"dropped":[]}}}"#
         );
         assert_eq!(
             serde_json::to_value(&ev).expect("json"),
@@ -1525,7 +1549,99 @@ mod tests {
                 "region_budget_bytes": 1048576,
                 "max_region_bytes": null,
                 "regions": [{ "kind": "ram", "base": 0, "size": 1048576 }]
-            }, "pending": false, "loaded": true, "revision": 7 } })
+            }, "pending": false, "loaded": true, "revision": 7,
+            "wiring_report": { "declared": 0, "live": 0, "dropped": [] } } })
+        );
+    }
+
+    /// ⚠️ **老载荷（没有 `wiring_report`）仍能解析**（N-4 的契约那一半）。
+    ///
+    /// ⚠️ 判别力：把 `#[serde(default)]` 删掉 ⇒ ⇒ 这一条**必红** ⇒ ⇒
+    /// 「前端拿不到那个字段时不炸」这件事**结构上**成立。
+    #[test]
+    fn a_memory_map_payload_without_the_wiring_report_still_parses() {
+        let raw = r#"{"MemoryMap":{"description":{"schema_version":1,"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{"kind":"ram","base":0,"size":1048576}]},"pending":false,"loaded":true,"revision":7}}"#;
+        let ev: EventPayload = serde_json::from_str(raw).expect("老载荷必须能解析");
+        match ev {
+            EventPayload::MemoryMap { wiring_report, .. } => {
+                assert_eq!(wiring_report.declared, 0);
+                assert_eq!(wiring_report.live, 0);
+                assert!(wiring_report.dropped.is_empty());
+            }
+            other => panic!("expected a MemoryMap, got {other:?}"),
+        }
+    }
+
+    /// **理由词表**恰好 **6 个值**（A-4）⇒ ⇒ 词表**漂移**必红。
+    ///
+    /// ⚠️ **线上形态是 kebab-case** ⇒ ⇒ 断言钉的是**线上那个字符串**，
+    /// **不是** Rust 的枚举名（⇒ ⇒ 与 D-177 那条「码有两个名字」的坑
+    /// 同族 ⇒ ⇒ 钉线上形态）。
+    #[test]
+    fn the_wire_drop_reason_vocabulary_has_exactly_six_wire_forms() {
+        use crate::model::WireDropReason::{
+            self, Overridden, SourceOutOfRange, SourceType, SourceUnknown, TargetType,
+            TargetUnknown,
+        };
+        let forms: Vec<(&str, WireDropReason)> = vec![
+            ("source-unknown", SourceUnknown),
+            ("source-type", SourceType),
+            ("target-unknown", TargetUnknown),
+            ("target-type", TargetType),
+            ("source-out-of-range", SourceOutOfRange),
+            ("overridden", Overridden),
+        ];
+        assert_eq!(forms.len(), 6, "理由词表**恰好 6 个值**");
+        for (wire, reason) in &forms {
+            assert_eq!(
+                serde_json::to_string(reason).expect("json"),
+                format!("\"{wire}\""),
+                "理由的线上形态必须是 `{wire}`",
+            );
+        }
+    }
+
+    /// **连线报告**的恒等式：`declared == live + dropped.len()`（A-3）。
+    ///
+    /// ⚠️ 判别力：把 `declared` 改成「数默认连线」⇒ ⇒ 这一条**必红** ⇒ ⇒
+    /// 「你写了 N 根线」= **用户写的**线（裁决 J）这件事**结构上**成立。
+    #[test]
+    fn the_wiring_report_keeps_the_declared_equals_live_plus_dropped_identity() {
+        use crate::model::{DroppedWireDto, WireDropReason, WiringReportDto};
+        let report = WiringReportDto {
+            declared: 3,
+            live: 1,
+            dropped: vec![
+                DroppedWireDto {
+                    from_device: "UART1".into(),
+                    event: "rx_ready".into(),
+                    to_device: "PLIC0".into(),
+                    source: 11,
+                    reason: WireDropReason::SourceUnknown,
+                },
+                DroppedWireDto {
+                    from_device: "UART2".into(),
+                    event: "rx_ready".into(),
+                    to_device: "PLIC0".into(),
+                    source: 12,
+                    reason: WireDropReason::TargetType,
+                },
+            ],
+        };
+        assert_eq!(
+            report.declared,
+            report.live + report.dropped.len() as u32,
+            "恒等式 `declared == live + dropped.len()` 必须成立",
+        );
+        // ⚠️ **往返**也要保住恒等式（线上的形态不能把它压扁）。
+        let back: WiringReportDto =
+            serde_json::from_str(&serde_json::to_string(&report).expect("json"))
+                .expect("round trip");
+        assert_eq!(back, report);
+        assert_eq!(
+            back.declared,
+            back.live + back.dropped.len() as u32,
+            "往返之后恒等式**仍然**必须成立",
         );
     }
 
@@ -1542,6 +1658,7 @@ mod tests {
                 pending,
                 loaded: true,
                 revision: 3,
+                wiring_report: crate::model::WiringReportDto::default(),
             };
             let back: EventPayload =
                 serde_json::from_str(&serde_json::to_string(&ev).expect("json"))

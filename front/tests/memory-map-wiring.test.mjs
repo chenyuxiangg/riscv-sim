@@ -497,8 +497,8 @@ describe("规则集版本 · 前端镜像（C-3）", () => {
         //   信封版本仍然被**钉死**在 9（只是它不再是「不升」的那一个了）。
         assert.equal(
             message.SCHEMA_VERSION,
-            10,
-            "契约信封版本是 10（契约 v10：器件类型注册表 + 逐实例状态）",
+            11,
+            "契约信封版本是 11（契约 v11：STAGE-48 的连线报告）",
         );
         assert.equal(
             message.PLATFORM_SCHEMA_VERSION,

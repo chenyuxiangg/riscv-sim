@@ -61,17 +61,105 @@ REGRESSION = [
 
 # --------------------------------------------------------------------------- 词法
 
+# ⚠️ **正则字面量的判定**（D-174 做法 A · v0.72 批 STAGE-48）
+#
+# ⚠️ **为什么要做**：JS 的正则字面量 `/…/` 里**可以**有单引号 ⇒ ⇒ 旧版
+# `strip_code` 把那个 `'` 当成**字符串开头** ⇒ ⇒ 一路抹到下一个 `'` ⇒ ⇒
+# 中间整段代码（含若干 `test(` 调用）**被抹掉** ⇒ ⇒ 工具**静默少算**。
+#
+# ⚠️ **怎么区分「除号」与「正则开头」**：ECMAScript 的规则是「`/` 开始正则
+# **当且仅当** 前一个 token **不能结束一个表达式**」⇒ ⇒ 可操作化为「看前
+# 一个**有效字符**」。
+#
+# ⚠️ **保守白名单**：只有落在下面这组字符里（或某个关键字后面）⇒ ⇒ 才把
+# `/` 当正则开头 ⇒ ⇒ **误判方向是「不掩码」而不是「误掩码」** ⇒ ⇒ 严格
+# 优于旧版（旧版是把正则里的一切都当字符串）。
+#
+# ⚠️ **`}` 不在白名单里**（块结束 vs 对象字面量结束有二义）⇒ ⇒ 保守判成
+# 除号 ⇒ ⇒ 与旧版同行为 ⇒ ⇒ **不新增风险**。
+_REGEX_OK_PREV_CHARS = set("(,:;=&|?!+-*%~^<>[/")
+# ⚠️ **关键字**：这些后面出现 `/` ⇒ ⇒ 是正则开头（`return /re/`）。
+_REGEX_OK_PREV_WORDS = {
+    "return", "throw", "case", "typeof", "void", "delete",
+    "in", "of", "instanceof", "yield", "await", "new", "else", "do",
+}
+# ⚠️ **标识符字符**（用来切出「上一个词」）。
+_IDENT_CHARS = set(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$"
+)
+
+
+def _regex_can_start(prev):
+    """前一个有效 token ⇒ ⇒ 这里的 `/` **可能**是正则开头吗？
+
+    @param {str|None} prev — 前一个有效 token（单词 / 单字符 / None）
+    @returns {bool}
+    """
+    if prev is None:
+        # ⚠️ 文件开头 ⇒ ⇒ `/` 只可能是正则。
+        return True
+    if prev in _REGEX_OK_PREV_WORDS:
+        return True
+    if len(prev) == 1 and prev in _REGEX_OK_PREV_CHARS:
+        return True
+    # ⚠️ **其它一律判成除号**（标识符 / 数字 / `)` / `]` / `}` / 字符串 …）
+    # ⇒ ⇒ 保守 ⇒ ⇒ 不掩码 ⇒ ⇒ 与旧版同行为。
+    return False
+
+
+def _scan_regex(text, i, n):
+    """从 `/`（下标 `i`）开始扫描一个正则字面量 ⇒ ⇒ 返回**结束 `/` 的下标**。
+
+    ⚠️ **规则**：
+      * `\\` 转义下一个字符（`\\/` **不是**结束符）；
+      * `[...]` 字符类里的 `/` **不是**结束符；
+      * 正则**不能跨行** ⇒ ⇒ 遇到换行就**放弃**（返回 -1 ⇒ 不是正则）。
+
+    @param {str} text — 原文
+    @param {int} i — `/` 的下标
+    @param {int} n — 长度
+    @returns {int} 结束 `/` 的下标；-1 ⇒ 不是正则字面量
+    """
+    j = i + 1
+    in_class = False
+    while j < n:
+        ch = text[j]
+        if ch == "\n":
+            # ⚠️ **正则不能跨行** ⇒ ⇒ 这不是正则 ⇒ ⇒ 放弃（回退成除号）。
+            return -1
+        if ch == "\\":
+            j += 2
+            continue
+        if ch == "[":
+            in_class = True
+        elif ch == "]":
+            in_class = False
+        elif ch == "/" and not in_class:
+            return j
+        j += 1
+    return -1
+
 
 def strip_code(text):
-    """抹掉注释与字符串字面量（**保留长度** ⇒ 偏移不变）。"""
+    """抹掉注释、字符串字面量与**正则字面量**（**保留长度** ⇒ 偏移不变）。
+
+    ⚠️ **v0.72（STAGE-48 · D-174 做法 A）**：**正则字面量整段抹掉** ⇒ ⇒
+    正则里那个 `'` **不再**被当成字符串开头 ⇒ ⇒ 「后面若干条用例整段被
+    抹掉」那个洞**治根**。
+    """
     out = list(text)
     i, n = 0, len(text)
+    # ⚠️ **前一个有效 token**（决定 `/` 是除号还是正则开头）。
+    prev = None
     while i < n:
         c = text[i]
         if c == "/" and i + 1 < n and text[i + 1] == "/":
             while i < n and text[i] != "\n":
                 out[i] = " "
                 i += 1
+            # ⚠️ **注释不是 token** ⇒ ⇒ `prev` **不变**（`x /* c */ /re/` 里
+            # `/` 仍然是除号）。
+            continue
         elif c == "/" and i + 1 < n and text[i + 1] == "*":
             while i < n and not (text[i] == "*" and i + 1 < n and text[i + 1] == "/"):
                 if text[i] != "\n":
@@ -81,6 +169,8 @@ def strip_code(text):
                 if i < n:
                     out[i] = " "
                     i += 1
+            # ⚠️ 同上：`prev` **不变**。
+            continue
         elif c in "\"'`":
             q = c
             i += 1
@@ -97,7 +187,45 @@ def strip_code(text):
                     out[i] = " "
                 i += 1
             i += 1
+            # ⚠️ **字符串是「表达式可以结束」的位置** ⇒ ⇒ 后面那个 `/` 是
+            # 除号（`"a" / 2`）。
+            prev = "<string>"
+            continue
+        elif c == "/":
+            # ⚠️ **既不是 `//` 也不是 `/*`** ⇒ ⇒ 可能是**正则字面量**。
+            if _regex_can_start(prev):
+                end = _scan_regex(text, i, n)
+                if end >= 0:
+                    # ⚠️ **整段抹掉**（含 flags）—— 只中和那个引号**不够**：
+                    # 正则体里常含 `//`（如 `/https?:\\/\\//`）⇒ ⇒ 不整段
+                    # 抹的话后面会把 `//` 当注释开头。
+                    k = end
+                    while k < n and text[k] in _IDENT_CHARS:
+                        k += 1
+                    for x in range(i, k):
+                        if text[x] != "\n":
+                            out[x] = " "
+                    i = k
+                    prev = "<regex>"
+                    continue
+            # ⚠️ **不是正则** ⇒ ⇒ 除号 ⇒ ⇒ `prev` 记成 `/`（除号之后**可以**
+            # 跟一个正则：`a / /re/`）。
+            prev = "/"
+            i += 1
+            continue
+        elif c in _IDENT_CHARS:
+            j = i
+            while j < n and text[j] in _IDENT_CHARS:
+                j += 1
+            prev = text[i:j]
+            i = j
+            continue
+        elif c.isspace():
+            # ⚠️ **空白不是 token** ⇒ ⇒ `prev` **不变**。
+            i += 1
+            continue
         else:
+            prev = c
             i += 1
     return "".join(out)
 
@@ -175,35 +303,47 @@ def detect_mask_mismatch(text, authoritative):
 
 
 def selftest_mask():
-    """**掩码检测的自检**（D-174 做法 B 的**判别力来源**）。
+    """**掩码的自检**（D-174 做法 **A** 的**判别力来源** ＋ 做法 B 的兜底）。
 
-    ⚠️ **必须有「改前红 / 改后绿」**：把 `detect_mask_mismatch` 删掉 ⇒ ⇒
-    这一项**必须红** ⇒ ⇒ 否则那条判据**恒绿** ⇒ ⇒ 零判别力。
+    ⚠️ **v0.72（STAGE-48）**：做法 A（**认正则字面量**）落地 ⇒ ⇒ 含单引号
+    正则的文件**不再**被少算 ⇒ ⇒ 断言从「**必须报出差异**」翻成「**掩码数
+    必须等于权威数**」⇒ ⇒ **把做法 A 撤掉 ⇒ ⇒ 必红**（判别力**保住**）。
 
-    ⚠️ **必要对照**：一个**不含**单引号正则的文件 ⇒ ⇒ **不许**报差异 ⇒ ⇒
-    否则这条自检**恒红**。
+    ⚠️ **必要对照**：一个**不含**单引号正则的文件 ⇒ ⇒ 掩码数**也**等于
+    权威数 ⇒ ⇒ 不许过掩码（否则「数对了」是因为「什么都不数」）。
+
+    ⚠️ **做法 B 仍然要能报差异**（兜底）：给它一个**对不上**的权威数 ⇒ ⇒
+    它**必须**报出来 ⇒ ⇒ 删掉 `detect_mask_mismatch` ⇒ ⇒ **必红** ⇒ ⇒
+    做法 B 那条护栏**不会**被悄悄拆掉。
     """
-    # -- ① 含单引号正则 ⇒ ⇒ 掩码会把**后面**的用例整段抹掉 ----------------
+    # -- ① 含单引号正则 ⇒ ⇒ 掩码**整段抹掉** ⇒ ⇒ 用例数**一个不少** --------
     tricky = (
         "const re = /don't/;\n"
         'test("one", () => {});\n'
         'test("two", () => {});\n'
         'test("three", () => {});\n'
     )
-    hit = detect_mask_mismatch(tricky, 3)
-    ok_tricky = hit is not None and hit["static"] < hit["authoritative"]
+    static_tricky = count_tests(strip_code(tricky))
+    ok_tricky = static_tricky == 3
+    ok_tricky_no_mismatch = detect_mask_mismatch(tricky, 3) is None
     # -- ② 必要对照：**不含**单引号正则 ⇒ ⇒ 掩码数 == 权威数 ⇒ ⇒ 不报 ------
     easy = (
         'test("one", () => {});\n'
         'test("two", () => {});\n'
     )
-    ok_easy = detect_mask_mismatch(easy, 2) is None
-    print("  %-10s 含单引号正则 ⇒ %s ｜ 不含 ⇒ %s" % (
-        "掩码检测",
-        "OK（抓到了）" if ok_tricky else "★红★（没抓到 ⇒ 判据恒绿）",
-        "OK（没误报）" if ok_easy else "★红★（误报）",
+    static_easy = count_tests(strip_code(easy))
+    ok_easy = static_easy == 2
+    ok_easy_no_mismatch = detect_mask_mismatch(easy, 2) is None
+    # -- ③ 做法 B **仍然能报差异**（兜底护栏**没被拆**）----------------------
+    ok_detects = detect_mask_mismatch(easy, 99) is not None
+    print("  %-10s 含单引号正则 ⇒ %s ｜ 不含 ⇒ %s ｜ 仍能报差异 ⇒ %s" % (
+        "掩码自检",
+        "OK（数对了）" if ok_tricky and ok_tricky_no_mismatch
+        else "★红★（数少了 ⇒ 做法 A 没生效）",
+        "OK（没误报）" if ok_easy and ok_easy_no_mismatch else "★红★（误报）",
+        "OK" if ok_detects else "★红★（报不出差异 ⇒ 做法 B 被拆了）",
     ))
-    return ok_tricky and ok_easy
+    return ok_tricky and ok_tricky_no_mismatch and ok_easy and ok_easy_no_mismatch and ok_detects
 
 
 def imports_of(text):

@@ -121,6 +121,9 @@ import { collectTraceChunks } from "./lib/trace-export.js";
 // ⚠️ **告警弹窗**（STAGE-38 · v0.53 批）⇒ ⇒ 运行中点「读内存」= 拒绝 + 弹窗。
 // ⇒ ⇒ 本仓**第一个**碰 DOM 的 lib 模块（弹窗是**全局**的，不属于任何一个视图）。
 import { showAlert } from "./lib/alert.js";
+// ⚠️ **连线报告**（STAGE-48 · v0.72 · D-177 A）—— 「你写的 N 根线里有 M 根
+// 当前抬不了」⇒ ⇒ **内核说**的 ⇒ ⇒ 前端**只**归一化形状、**不判定**。
+import { normalizeWiringReport } from "./lib/wiring-report.js";
 
 /** URL of the WASM kernel Worker (same-origin HTTP required). */
 const KERNEL_WORKER_URL = "./kernel-worker.js";
@@ -2318,13 +2321,38 @@ export async function loadProjectIntoKernel(services, project) {
     // ⚠️ 器件实例状态**跟着工程重建**（STAGE-43 · v0.66 · 同一个坑）⇒ ⇒
     // 上一块板的实例清单不算数。
     services.devices?.reset?.();
-    await registerMemory.loadProject(project);
+    // ⚠️ **D-178（v0.72 批）**：装载**失败**时**也要重订一次流** ⇒ ⇒
+    // 否则前端**学不到**内核顶上去的修订号。
+    //
+    // ⚠️ **根因链**：内核在「挑平台描述」那一步就会把**待生效的板应用**
+    // （修订号 **+1**）⇒ ⇒ 那之后才失败（写不进总线 / 符号索引重建失败）
+    // ⇒ ⇒ 内核**已经**是新修订号 ⇒ ⇒ 而**失败路径不回 `memory.map`** ⇒ ⇒
+    // 前端**唯一**能学到新修订号的途径是「重订 ⇒ 内核强推一次」⇒ ⇒
+    // 不重订 ⇒ ⇒ 前端停在旧修订号 ⇒ ⇒ **下一次改板报 `E_PLT-13`**
+    // ⇒ ⇒ 板换不回去、零提示。
+    //
+    // ⚠️ **失败也要重订**（不是「成功才重订」）⇒ ⇒ **重订在 catch 里**也
+    // 跑一遍 ⇒ ⇒ 原错误**原样抛出**（不改调用点现有的错误语义）⇒ ⇒
+    // 「装载失败」这件事**照旧**被看见。
+    //
+    // ⚠️ **重订**失败**不掩盖**装载错误 ⇒ ⇒ 各流**各自**兜住自己的错误
+    // （`resubscribeAllStreams` 内部就是那样做的）⇒ ⇒ 这里**不**追加。
+    let loadError = null;
+    try {
+        await registerMemory.loadProject(project);
+    } catch (err) {
+        loadError = err;
+    }
     // ⚠️ **重订部分抽成助手**（裁决 F · v0.31）⇒ 装载与卸载**共用**同一套
     // ⇒ **不写第二套**。
     //
     // ⚠️ `skipRegisters` = 真：M-10 的 `loadProject()` **自己**就强制重订
     // 了寄存器流（第 3 步）⇒ 这里不再重复发一次。
     const errors = await resubscribeAllStreams(services, { skipRegisters: true });
+    // ⚠️ **原错误原样抛出** ⇒ ⇒ 调用点的错误语义**一字未变**。
+    if (loadError) {
+        throw loadError;
+    }
     return {
         probeError: errors.probeError,
         consoleError: errors.consoleError,
@@ -2714,6 +2742,13 @@ export function wireMemoryMap(commandRouter) {
             pending: event.value?.pending === true,
             loaded: event.value?.loaded === true,
             revision: Number(event.value?.revision ?? 0),
+            // ⚠️ **连线报告**（STAGE-48 · v0.72 · D-177 A）—— 「你写的 N 根
+            // 线里有 M 根当前抬不了」⇒ ⇒ **内核说**的 ⇒ ⇒ 前端**不自己判**
+            // ⇒ ⇒ 只**原样**显示内核给的数字与理由（不翻译、不改写）。
+            //
+            // ⚠️ **缺省那档**（老内核 / 老事件没有这个字段）⇒ ⇒ 视图**不
+            // 炸** ⇒ ⇒ 显示「无连线报告」那档（N-4）。
+            wiringReport: normalizeWiringReport(event.value?.wiring_report),
         };
         // ⚠️ **乱序护栏**（裁决 F）：`revision` **严格更旧**的事件 ⇒ **不覆盖**
         // 已有状态 ⇒ 状态留在较新那份 ⇒ 差量**算在较新的那张图上**。

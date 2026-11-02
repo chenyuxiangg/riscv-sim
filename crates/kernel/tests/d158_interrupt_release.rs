@@ -1122,8 +1122,8 @@ fn the_external_interrupt_is_delivered_after_the_timer_line_was_released() {
 fn the_contract_layer_version_numbers_are_untouched() {
     assert_eq!(
         riscv_sim_contract::SCHEMA_VERSION,
-        10,
-        "契约层的信封版本号（v0.66 批升到 10：器件类型注册表 + 逐实例状态两条只读通道）"
+        11,
+        "契约层的信封版本号（v0.72 批 STAGE-48 升到 11：`MemoryMap` 事件多一个 `wiring_report` 字段 ⇒ ⇒ 线上形状变了）"
     );
     assert_eq!(
         riscv_sim_contract::model::SIM_STATE_SCHEMA_VERSION,
