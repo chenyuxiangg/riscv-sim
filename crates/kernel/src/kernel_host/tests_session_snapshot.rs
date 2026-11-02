@@ -75,7 +75,7 @@ fn gpio_base() -> u32 {
 fn gpio_id() -> String {
     default_regions()
         .iter()
-        .find(|region| region.base() == gpio_base())
+        .find(|region| region.base() == Some(gpio_base()))
         .and_then(|region| region.device_id())
         .expect("默认描述里的 GPIO 有器件 id")
         .to_string()
@@ -427,16 +427,25 @@ fn capture_session_assembles_the_six_segments_from_their_sources() {
         described.len(),
         "区域数量必须与**描述**一致（两段 RAM + 一个 GPIO 外设窗口）"
     );
-    assert_eq!(payload.m14_map.regions[0].base, described[0].base());
+    assert_eq!(
+        payload.m14_map.regions[0].base,
+        described[0].base().unwrap_or(0)
+    );
     assert_eq!(payload.m14_map.regions[0].kind, described[0].kind());
-    assert_eq!(payload.m14_map.regions[1].base, described[1].base());
+    assert_eq!(
+        payload.m14_map.regions[1].base,
+        described[1].base().unwrap_or(0)
+    );
     assert_eq!(payload.m14_map.regions[1].kind, described[1].kind());
     assert_eq!(
         payload.m14_map.regions[1].target,
         described[1].device_id().unwrap_or_default(),
         "外设区域的 target 必须是描述里那个器件的 id"
     );
-    assert_eq!(payload.m14_map.regions[2].base, described[2].base());
+    assert_eq!(
+        payload.m14_map.regions[2].base,
+        described[2].base().unwrap_or(0)
+    );
     assert_eq!(payload.m14_map.regions[2].kind, described[2].kind());
 
     // 段 4 —— M-15 的外设内部状态。

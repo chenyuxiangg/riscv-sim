@@ -1320,11 +1320,15 @@ impl KernelHost {
         // ⇒ ⇒ `default` / `minimal` 两档与黄金 runner 的行为**逐字不变**。
         // ⚠️ **时间源角色**（STAGE-49 · D-177 的 C）：声明了就用它，没声明
         // ⇒ ⇒ **第一个 CLINT**（今天的口径，逐字不变）。
+        // ⚠️ ⚠️ **只走 `resolve_roles` 那一个落点**（v0.73 施工期订正）：这里
+        //   **原来自己**又做了一遍「缺省 ⇒ 第一个 CLINT」的回落 ⇒ ⇒ ⇒
+        //   「缺省行为不变」这条性质被**两道**护栏保证 ⇒ ⇒ ⇒ **结构上不可
+        //   证伪** ⇒ ⇒ ⇒ 变异 T-4 **实测零红** ⇒ ⇒ ⇒ ⇒ 现在这里**不**再
+        //   自己回落 ⇒ ⇒ ⇒ 「回落」这条**只有一处**（一个约束一个落点）。
         let time_source = self
             .roles
             .time_source
             .as_deref()
-            .or_else(|| self.devices.first_clint().map(|e| e.id.as_str()))
             .and_then(|id| self.devices.clint(id))
             .map(|clint| platform::clint_time_source(&clint));
         self.backend.install_time_source(time_source);
@@ -1389,11 +1393,12 @@ impl KernelHost {
         // ⚠️ **角色 = id，句柄 = 从实例表里查出来的**（裁决 B）⇒ ⇒ 「第一个
         // CLINT」= 时间源（裁决 D：逐字不变）。
         // ⚠️ **时间源角色**（STAGE-49 · D-177 的 C）—— 同上：**缺省逐字不变**。
+        // ⚠️ **同一个落点**（`resolve_roles`）—— **不**在这里自己回落
+        // （v0.73 施工期订正：那会**两处**保证同一条性质 ⇒ ⇒ ⇒ 不可证伪）。
         let Some(clint) = self
             .roles
             .time_source
             .as_deref()
-            .or_else(|| self.devices.first_clint().map(|e| e.id.as_str()))
             .and_then(|id| self.devices.clint(id))
         else {
             return;
@@ -1580,11 +1585,15 @@ impl KernelHost {
     fn console_uart(&self) -> Option<Rc<RefCell<Uart16550>>> {
         // ⚠️ **console 角色**（STAGE-49 · D-177 的 C）：描述里声明了**它**
         // ⇒ ⇒ 就是它；没声明 ⇒ ⇒ **第一个 UART**（今天的口径，逐字不变）。
-        let id = self
-            .roles
-            .console
-            .as_deref()
-            .or_else(|| self.devices.first_uart().map(|e| e.id.as_str()))?;
+        //
+        // ⚠️ ⚠️ **只走 `resolve_roles` 那一个落点**（v0.73 施工期订正）：这里
+        //   **原来自己**又做了一遍「缺省 ⇒ 第一个 UART」的回落 ⇒ ⇒ ⇒
+        //   「缺省行为不变」这条性质被**两道**护栏保证（`resolve_roles` 一道
+        //   + 这里一道）⇒ ⇒ ⇒ **结构上不可证伪** ⇒ ⇒ ⇒ 变异 T-4（「roles
+        //   缺省时**不**回落」）**实测零红**（⇒ ⇒ 零判别力）⇒ ⇒ ⇒
+        //   ⇒ 现在这里**不**再自己回落 ⇒ ⇒ ⇒ 「回落」这条**只有一处** ⇒ ⇒
+        //   ⇒ 「角色解析」这条约束**只有一个落点**（一个约束一个落点）。
+        let id = self.roles.console.as_deref()?;
         self.devices.uart(id)
     }
 
@@ -2701,6 +2710,16 @@ impl KernelHost {
                     // **被应用** ⇒ 生效的图变了 ⇒ 修订号 +1。
                     self.map_revision += 1;
                 }
+                // ⚠️ **v0.73（STAGE-49 · B2）**：**分配基址** ⇒ ⇒ 生效图里
+                // 那些段**真的有地址**（⇒ ⇒ 与 `on_set_memory_map` 第 ②b 步
+                // **同一个落点**：装配期分配）。
+                //
+                // ⚠️ **装不下 ⇒ ⇒ 报既有码** ⇒ ⇒ **什么都不动**（下面那步
+                // `rebuild_platform` 之前就退出了）⇒ ⇒ ⇒ **不静默**。
+                let board = match platform::assign_bases(board) {
+                    Ok(assigned) => assigned,
+                    Err(err) => return vec![self.error_from(&err)],
+                };
                 self.platform = board.clone();
             }
             None => match self.choose_platform(&ranges) {
@@ -2871,6 +2890,21 @@ impl KernelHost {
             return vec![self.error_from(&err)];
         }
 
+        // ---- ②b **分配基址**（v0.73 · STAGE-49 · B2）----
+        //
+        // ⚠️ **为什么在这里分配**（不是只在建图时）：**生效图**要带**具体
+        // 基址** ⇒ ⇒ 前端拿到的 `memory.map` 事件里那些段**真的有地址**
+        // ⇒ ⇒ ⇒ 「装配期分配」这件事**看得见**（不是只在内核内部发生）。
+        //
+        // ⚠️ **老描述 ⇒ 分配是恒等变换**（⇒ ⇒ **一个字节都不变**）⇒ ⇒
+        // 存量板档案**零风险**（裁决 K）。
+        //
+        // ⚠️ **装不下 ⇒ ⇒ 报既有码**（`E_PLT-07`）⇒ ⇒ **零新场景码**。
+        let description = match platform::assign_bases(&description) {
+            Ok(assigned) => assigned,
+            Err(err) => return vec![self.error_from(&err)],
+        };
+
         // ---- ③ 记下**用户配的板**（裁决 A：住在宿主会话内）----
         //
         // ⚠️ 存的是**一份拷贝** ⇒ 第 ④ 步可以把原件直接换进 `self.platform`
@@ -2971,8 +3005,24 @@ impl KernelHost {
             return vec![self.error_from(&err)];
         }
 
+        // ---- ③b **分配基址**（v0.73 · STAGE-49 · B2）----
+        //
+        // ⚠️ **与整份路径同一处**（[`on_set_memory_map`] 的第 ②b 步）⇒ ⇒
+        // 「装配期分配」这条约束**只有一个落点**（一个约束一个落点）。
+        //
+        // ⚠️ **差量路径的基底 = 生效图**（每段**都带**基址）⇒ ⇒ ⇒ 分配是
+        // **恒等变换**（⇒ ⇒ 老板**逐字不变**）。
+        //
+        // ⚠️ ⚠️ **保留原件**（与整份路径同一纪律）：`user_board` 记的是**用户
+        //   意图**⇒ ⇒ ⇒ 存**未分配**的那份。
+        let user_intent = synthesized.clone();
+        let synthesized = match platform::assign_bases(&synthesized) {
+            Ok(assigned) => assigned,
+            Err(err) => return vec![self.error_from(&err)],
+        };
+
         // ---- ④ 记下**用户配的板**（合成结果本身就是整图）----
-        self.user_board = Some(synthesized.clone());
+        self.user_board = Some(user_intent);
 
         // ---- ⑤ 未装载过镜像 ⇒ **立即生效**----
         if !self.image_loaded {
@@ -3116,11 +3166,17 @@ impl KernelHost {
             let window_bytes = crate::m15_peripheral::types::window_bytes(&kind).unwrap_or(0);
             // ⚠️ **唯一判据**：生效图里有**同一个 id + 同一个类型 + 同一个
             // 基址** ⇒ ⇒ 已绑定；否则 ⇒ 待生效。
-            let bound = self
-                .device_instances
-                .iter()
-                .find(|inst| inst.id == id && inst.kind == kind && inst.base == Some(*base))
-                .and_then(|inst| inst.base);
+            //
+            // ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** 的段 ⇒ ⇒ 它**还没
+            // 有位置** ⇒ ⇒ ⇒ 判不出「绑在哪儿」⇒ ⇒ ⇒ **不静默**当成
+            // 「基址 0」（那会与真的 `base = 0` 混成一样）⇒ ⇒ ⇒ 这里**跳过**
+            // （⇒ ⇒ `bound` 留 `None` ⇒ ⇒ 前端看得见「待生效」）。
+            let bound = base.and_then(|base| {
+                self.device_instances
+                    .iter()
+                    .find(|inst| inst.id == id && inst.kind == kind && inst.base == Some(base))
+                    .and_then(|inst| inst.base)
+            });
             out.push(riscv_sim_contract::model::DeviceInstanceInfo {
                 id,
                 kind,
@@ -4568,11 +4624,23 @@ fn compose_memory_map(
         match op {
             MemoryMapOp::UpsertRegion { spec } => {
                 // ⚠️ 按 **`spec.base`** 定位：命中 ⇒ 替换；未命中 ⇒ 追加。
-                let region_base = spec.base();
+                //
+                // ⚠️ **v0.73（STAGE-49 · B2 · §7.1 订正 6 ②）**：**缺
+                // `base`** ⇒ ⇒ **定位不到** ⇒ ⇒ ⇒ **报既有码 `E_PLT-14`**
+                // （与「删一段删不到」**同形** ⇒ ⇒ ⇒ **零新场景码**）⇒ ⇒ ⇒
+                // ⚠️ **不静默**把它当成「基址 0」（那会与真的 `base = 0`
+                // 混成一样 ⇒ ⇒ ⇒ 定位会**指错段**）。
+                let Some(region_base) = spec.base() else {
+                    return Err(PlatformError::new(
+                        PLATFORM_FAMILY,
+                        E_PLT_14_REGION_NOT_FOUND,
+                        "差量要改的那一段没有基址 ⇒ 定位不到（差量要求基址存在）",
+                    ));
+                };
                 match synthesized
                     .regions
                     .iter()
-                    .position(|region| region.base() == region_base)
+                    .position(|region| region.base() == Some(region_base))
                 {
                     Some(index) => synthesized.regions[index] = spec.clone(),
                     None => synthesized.regions.push(spec.clone()),
@@ -4583,7 +4651,7 @@ fn compose_memory_map(
                 match synthesized
                     .regions
                     .iter()
-                    .position(|region| region.base() == *base)
+                    .position(|region| region.base() == Some(*base))
                 {
                     Some(index) => {
                         synthesized.regions.remove(index);
@@ -4885,6 +4953,14 @@ mod tests_v072_wiring;
 /// 其余三项（B2 / D1 / D-177 的 C）落地后再往这里加。
 #[cfg(test)]
 mod tests_v073_schema;
+
+/// **B2**（v0.73 · STAGE-49 · D-175 的 B2）—— `base` 可缺省 + **装配期分配**。
+///
+/// ⚠️ **分配器在内核侧**（[`platform::assign_bases`]）—— 契约层**看不到**外设的
+///   **窗口大小**（那是 **M-15 注册表**的事 · 裁决 D）⇒ ⇒ ⇒ 「分配 + 判重叠」
+///   **必须**在**同一处**（一个约束一个落点）。
+#[cfg(test)]
+mod tests_v073_b2;
 
 /// 平台描述的加载 · 器件工厂 · 建图（v0.27 · D-123-B）。
 ///

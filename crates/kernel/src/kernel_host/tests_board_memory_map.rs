@@ -138,21 +138,22 @@ fn user_board() -> PlatformDescription {
         max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
-                base: 0x0000_0000,
+                base: Some(0x0000_0000),
                 size: 0x0001_0000,
             },
             RegionSpec::Rom {
-                base: 0x5000_0000,
+                base: Some(0x5000_0000),
                 size: 0x0000_1000,
             },
             RegionSpec::Peripheral {
-                base: 0x6000_0000,
+                base: Some(0x6000_0000),
                 device: DeviceSpec::Gpio {
                     id: "GPIO0".to_string(),
                 },
             },
         ],
         roles: None,
+        pins: None,
     }
 }
 
@@ -173,17 +174,17 @@ fn board_with_four_devices() -> PlatformDescription {
         max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
-                base: 0x0000_0000,
+                base: Some(0x0000_0000),
                 size: 0x0001_0000,
             },
             RegionSpec::Peripheral {
-                base: 0x7000_0000,
+                base: Some(0x7000_0000),
                 device: DeviceSpec::Gpio {
                     id: "GPIO0".to_string(),
                 },
             },
             RegionSpec::Peripheral {
-                base: 0x7001_0000,
+                base: Some(0x7001_0000),
                 device: DeviceSpec::Uart16550 {
                     id: "UART0".to_string(),
                     irq_line: 1,
@@ -191,7 +192,7 @@ fn board_with_four_devices() -> PlatformDescription {
                 },
             },
             RegionSpec::Peripheral {
-                base: 0x7002_0000,
+                base: Some(0x7002_0000),
                 device: DeviceSpec::Clint {
                     id: "CLINT0".to_string(),
                     freq_hz: 10_000_000,
@@ -199,7 +200,7 @@ fn board_with_four_devices() -> PlatformDescription {
                 },
             },
             RegionSpec::Peripheral {
-                base: 0x7004_0000,
+                base: Some(0x7004_0000),
                 device: DeviceSpec::Plic {
                     id: "PLIC0".to_string(),
                     sources: 64,
@@ -208,6 +209,7 @@ fn board_with_four_devices() -> PlatformDescription {
             },
         ],
         roles: None,
+        pins: None,
     }
 }
 
@@ -232,15 +234,16 @@ fn board_with_eight_mib_ram() -> PlatformDescription {
         max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
-                base: 0x0000_0000,
+                base: Some(0x0000_0000),
                 size: 0x0001_0000,
             },
             RegionSpec::Ram {
-                base: 0x0001_0000,
+                base: Some(0x0001_0000),
                 size: 0x0080_0000,
             },
         ],
         roles: None,
+        pins: None,
     }
 }
 
@@ -258,9 +261,9 @@ fn assert_bus_matches_description(description: &PlatformDescription, host: &Kern
     );
     for spec in &description.regions {
         let (base, kind) = match spec {
-            RegionSpec::Ram { base, .. } => (*base, "ram"),
-            RegionSpec::Rom { base, .. } => (*base, "rom"),
-            RegionSpec::Peripheral { base, .. } => (*base, "peripheral"),
+            RegionSpec::Ram { base, .. } => (base.unwrap_or(0), "ram"),
+            RegionSpec::Rom { base, .. } => (base.unwrap_or(0), "rom"),
+            RegionSpec::Peripheral { base, .. } => (base.unwrap_or(0), "peripheral"),
         };
         let found = regions
             .iter()
@@ -461,7 +464,7 @@ fn b1_the_old_map_is_restored_when_the_new_one_cannot_be_mapped() {
         max_region_bytes: None,
         regions: vec![
             RegionSpec::Peripheral {
-                base: 0x7002_0000,
+                base: Some(0x7002_0000),
                 device: DeviceSpec::Clint {
                     id: "CLINT0".to_string(),
                     freq_hz: 10_000_000,
@@ -469,7 +472,7 @@ fn b1_the_old_map_is_restored_when_the_new_one_cannot_be_mapped() {
                 },
             },
             RegionSpec::Peripheral {
-                base: 0x7002_1000,
+                base: Some(0x7002_1000),
                 device: DeviceSpec::Plic {
                     id: "PLIC0".to_string(),
                     sources: 64,
@@ -478,6 +481,7 @@ fn b1_the_old_map_is_restored_when_the_new_one_cannot_be_mapped() {
             },
         ],
         roles: None,
+        pins: None,
     };
 
     let events = dispatch(
@@ -547,10 +551,11 @@ fn b2_an_over_budget_description_is_rejected_with_e_plt_07() {
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
         max_region_bytes: None,
         regions: vec![RegionSpec::Ram {
-            base: 0x0000_0000,
+            base: Some(0x0000_0000),
             size: 0x0001_0000,
         }],
         roles: None,
+        pins: None,
     };
 
     let events = dispatch(
@@ -586,10 +591,11 @@ fn b2_a_rejected_description_changes_nothing() {
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
         max_region_bytes: None,
         regions: vec![RegionSpec::Ram {
-            base: 0x0000_0000,
+            base: Some(0x0000_0000),
             size: 0x0001_0000,
         }],
         roles: None,
+        pins: None,
     };
     dispatch(
         &mut host,

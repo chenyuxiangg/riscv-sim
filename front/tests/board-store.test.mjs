@@ -157,15 +157,18 @@ describe("板档案服务 · 纯逻辑层（B-1 ~ B-5 · B-8）", () => {
         assert.equal(isBoardIdTaken([], "board-a"), false);
     });
 
-    test("B-5 `checkBoardVersion`：`schema_version` 不等于 1 ⇒ 明确地拒", () => {
-        const result = checkBoardVersion({ ...DESC_A, schema_version: 2 });
+    test("B-5 `checkBoardVersion`：**不支持**的 `schema_version` ⇒ 明确地拒", () => {
+        // ⚠️ **v0.73（STAGE-49 · B2）**：**版本 2 现在合法**（⇒ ⇒ **缺省
+        // 优先**：老描述仍能装）⇒ ⇒ ⇒ 这条判据**改成**「**不支持**的
+        // 版本」⇒ ⇒ ⇒ **判别力保留**（仍断「不静默硬解未知格式」）。
+        const result = checkBoardVersion({ ...DESC_A, schema_version: 99 });
         assert.equal(result.ok, false);
         assert.equal(result.reason, "version");
-        assert.equal(result.expected, 1);
-        assert.equal(result.actual, 2);
+        assert.equal(result.expected, 2);
+        assert.equal(result.actual, 99);
     });
 
-    test("B-5 `checkBoardVersion`：`schema_version` 等于 1 ⇒ 通过", () => {
+    test("B-5 `checkBoardVersion`：`schema_version` 等于 1（老格式）⇒ 通过（缺省优先）", () => {
         const result = checkBoardVersion(DESC_A);
         assert.equal(result.ok, true);
         assert.equal("reason" in result, false);
@@ -183,7 +186,7 @@ describe("板档案服务 · 纯逻辑层（B-1 ~ B-5 · B-8）", () => {
         const result = checkBoardVersion({ id: "board-a", name: "板 A" });
         assert.equal(result.ok, false);
         assert.equal(result.reason, "version");
-        assert.equal(result.expected, 1);
+        assert.equal(result.expected, 2);
         assert.equal(result.actual, null);
     });
 
@@ -344,7 +347,9 @@ describe("板档案服务 · 存储门面（`createBoardStore`）", () => {
         assert.equal(BOARD_DB_VERSION, 1);
         assert.equal(BOARD_STORE_NAME, "boards");
         assert.equal(BOARD_STORE_KEY, "id");
-        assert.equal(PLATFORM_SCHEMA_VERSION, 1);
+        // ⚠️ **v0.73（STAGE-49 · B2）**：描述格式 **1 → 2** ⇒ ⇒ 断言跟到
+        // **2** ⇒ ⇒ **判别力保留**（它钉的仍是「这个数就是当前那个」）。
+        assert.equal(PLATFORM_SCHEMA_VERSION, 2);
     });
 });
 

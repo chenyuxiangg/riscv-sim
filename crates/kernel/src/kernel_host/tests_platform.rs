@@ -214,11 +214,11 @@ fn an_over_budget_region_is_rejected_before_anything_is_mapped() {
         max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
-                base: 0,
+                base: Some(0),
                 size: 1024,
             },
             RegionSpec::Ram {
-                base: 0x8000_0000,
+                base: Some(0x8000_0000),
                 size: 32 * 1024 * 1024, // ⚠️ 超过 16 MiB 的预算
             },
         ],
@@ -227,6 +227,7 @@ fn an_over_budget_region_is_rejected_before_anything_is_mapped() {
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         wiring: None,
         roles: None,
+        pins: None,
     };
 
     let mut bus = Bus::new();
@@ -331,7 +332,11 @@ fn the_minimal_description_builds_its_own_map_without_any_host_change() {
     let description = minimal_description();
     let described = platform::regions_by_base(&description);
     for (region, spec) in regions.iter().zip(described.iter()) {
-        assert_eq!(region.base, spec.base(), "内存图与描述逐条相等（基址）");
+        assert_eq!(
+            region.base,
+            spec.base().unwrap_or(0),
+            "内存图与描述逐条相等（基址）"
+        );
         assert_eq!(region.kind, spec.kind(), "内存图与描述逐条相等（种类）");
         assert_eq!(
             region.size,
@@ -469,7 +474,10 @@ fn the_auto_selection_is_equivalent_to_todays_rule() {
 /// 一份描述**装不装得下**某个区间（只看 RAM 区域 —— 与选档判据同口径）。
 fn holds(description: &PlatformDescription, range: (u32, u32)) -> bool {
     description.regions.iter().any(|region| match region {
-        RegionSpec::Ram { base, size } => range.0 >= *base && range.1 <= base.saturating_add(*size),
+        RegionSpec::Ram { size, .. } => region
+            .base()
+            .map(|base| range.0 >= base && range.1 <= base.saturating_add(*size))
+            .unwrap_or(false),
         RegionSpec::Rom { .. } | RegionSpec::Peripheral { .. } => false,
     })
 }
@@ -649,7 +657,9 @@ fn the_compatible_api_still_works() {
 fn a_broken_description_reports_its_own_code() {
     // ① 版本不对 ⇒ E_PLT-01。
     let mut wrong_version = default_description();
-    wrong_version.schema_version = 2;
+    // ⚠️ **v0.73（STAGE-49 · B2）**：**版本 2 现在合法**（⇒ ⇒ 缺省优先）⇒ ⇒
+    // 「版本不对」改成**不支持**的版本（⇒ ⇒ 99）⇒ ⇒ ⇒ **判别力保留**。
+    wrong_version.schema_version = 99;
     // ② 区域重叠 ⇒ E_PLT-06。
     let overlapping = PlatformDescription {
         schema_version: 1,
@@ -662,11 +672,11 @@ fn a_broken_description_reports_its_own_code() {
         max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
-                base: 0,
+                base: Some(0),
                 size: 0x1000,
             },
             RegionSpec::Ram {
-                base: 0x0800,
+                base: Some(0x0800),
                 size: 0x1000,
             },
         ],
@@ -675,6 +685,7 @@ fn a_broken_description_reports_its_own_code() {
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         wiring: None,
         roles: None,
+        pins: None,
     };
     // ③ 预算超了 ⇒ E_PLT-07。
     let over_budget = PlatformDescription {
@@ -687,7 +698,7 @@ fn a_broken_description_reports_its_own_code() {
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
         max_region_bytes: None,
         regions: vec![RegionSpec::Ram {
-            base: 0,
+            base: Some(0),
             size: 4096,
         }],
         description: None,
@@ -695,6 +706,7 @@ fn a_broken_description_reports_its_own_code() {
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         wiring: None,
         roles: None,
+        pins: None,
     };
     // ④ 器件 id 重复 ⇒ E_PLT-08。
     let duplicate_id = PlatformDescription {
@@ -708,13 +720,13 @@ fn a_broken_description_reports_its_own_code() {
         max_region_bytes: None,
         regions: vec![
             RegionSpec::Peripheral {
-                base: 0x4000_0000,
+                base: Some(0x4000_0000),
                 device: DeviceSpec::Gpio {
                     id: "GPIO0".to_string(),
                 },
             },
             RegionSpec::Peripheral {
-                base: 0x4000_1000,
+                base: Some(0x4000_1000),
                 device: DeviceSpec::Gpio {
                     id: "GPIO0".to_string(),
                 },
@@ -725,6 +737,7 @@ fn a_broken_description_reports_its_own_code() {
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         wiring: None,
         roles: None,
+        pins: None,
     };
 
     let cases: [(&str, PlatformDescription, u16); 4] = [
@@ -804,11 +817,17 @@ fn the_builtin_descriptions_are_well_formed() {
     let descriptions = platform::builtin_descriptions().expect("内置描述都合法");
     assert_eq!(descriptions.len(), 3, "三份内置描述");
     for description in descriptions {
-        assert_eq!(
-            description.schema_version,
-            riscv_sim_contract::platform::PLATFORM_SCHEMA_VERSION,
-            "{} 的格式版本",
-            description.id
+        // ⚠️ **v0.73（STAGE-49 · B2）**：内置描述是**老格式**
+        // （`schema_version = 1` ⇒ ⇒ 缺省优先 ⇒ ⇒ 仍合法）⇒ ⇒ ⇒ 这里断的
+        // 是「**在支持的版本里**」（⇒ ⇒ 而不是「== 当前那个」⇒ ⇒ ⇒
+        // **判别力保留**：它仍会拒掉一个未来格式）。
+        assert!(
+            riscv_sim_contract::platform::SUPPORTED_PLATFORM_SCHEMA_VERSIONS
+                .contains(&description.schema_version),
+            "{} 的格式版本必须在支持的版本 {:?} 里（实际 {}）",
+            description.id,
+            riscv_sim_contract::platform::SUPPORTED_PLATFORM_SCHEMA_VERSIONS,
+            description.schema_version
         );
         assert!(!description.id.is_empty(), "平台 id 不能为空");
         assert!(

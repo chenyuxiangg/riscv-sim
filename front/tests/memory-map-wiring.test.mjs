@@ -76,7 +76,9 @@ await m02.mountViewComponents();
  * 逐字段相同了 ⇒ 那条断言会变成「断言另一件事」）。
  */
 const WIRED_DESC = {
-    schema_version: 1,
+    // ⚠️ **v0.73（STAGE-49）**：**引用当前版本**（⇒ ⇒ 前端写什么版本，
+    // 往返就必须是那个版本 ⇒ ⇒ 「往返逐字段相同」这条判据**继续有效**）。
+    schema_version: message.PLATFORM_SCHEMA_VERSION,
     id: "wired-board",
     name: "带连线的板",
     priority: 100,
@@ -138,7 +140,8 @@ const REORDERED_WIRING_DESC = {
  * ⇒ 契约层 serde 那边就是 `None` ⇒ ⇒ 「没有连线的板」这条存量情形。
  */
 const PLAIN_DESC = {
-    schema_version: 1,
+    // ⚠️ **同上**：引用当前版本（⇒ ⇒ 往返才可能逐字段相同）。
+    schema_version: message.PLATFORM_SCHEMA_VERSION,
     id: "plain-board",
     name: "普通板",
     priority: 100,
@@ -483,10 +486,14 @@ describe("提交选路 · `wiring` 的改动**真的**提交出去（C-5 · app 
 
 describe("规则集版本 · 前端镜像（C-3）", () => {
     test("C-3 `PLATFORM_RULES_VERSION` = **3**（规则集收紧 ⇒ 这个数 +1）", () => {
+        // ⚠️ **v0.73（STAGE-49）**：规则集 **3 → 4**（描述格式升版 ⇒ ⇒ 规则集
+        // 跟着走）⇒ ⇒ 字面量跟到 **4** ⇒ ⇒ **判别力保留**（它钉的仍是
+        // 「镜像里那个数 == 规则集当前版本」⇒ ⇒ ⚠️ **不是** `x == x` 那种
+        // 恒真的写法）。
         assert.equal(
             message.PLATFORM_RULES_VERSION,
-            3,
-            "规则集版本必须是 3（STAGE-19 裁决 F：2 → 3）",
+            4,
+            "规则集版本必须是 4（STAGE-19 裁决 F：2 → 3；STAGE-49：3 → 4）",
         );
     });
 
@@ -502,8 +509,8 @@ describe("规则集版本 · 前端镜像（C-3）", () => {
         );
         assert.equal(
             message.PLATFORM_SCHEMA_VERSION,
-            1,
-            "描述格式版本必须仍是 1（只加了一个带缺省的可选字段）",
+            2,
+            "描述格式版本是 2（STAGE-49 · B2：base 可缺省）",
         );
     });
 

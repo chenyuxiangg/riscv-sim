@@ -1410,7 +1410,7 @@ mod tests {
         // ⚠️ 护栏：描述改了 base ⇒ ⇒ **明确报错**，不静默漂移。
         let mut description = platform_description().expect("the built-in description is valid");
         description.regions = vec![RegionSpec::Ram {
-            base: 0x1000_0000,
+            base: Some(0x1000_0000),
             size: 4096,
         }];
         let err = ram_window(&description).expect_err("the base guard must fire");
@@ -1429,11 +1429,11 @@ mod tests {
         let mut description = platform_description().expect("the built-in description is valid");
         description.regions = vec![
             RegionSpec::Ram {
-                base: 0,
+                base: Some(0),
                 size: 4096,
             },
             RegionSpec::Ram {
-                base: REQUIRED_RAM_BASE,
+                base: Some(REQUIRED_RAM_BASE),
                 size: 8 * 1024 * 1024,
             },
         ];

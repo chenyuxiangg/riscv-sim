@@ -47,6 +47,7 @@ import {
     FRONT_ERROR_CODES,
     PLATFORM_RULES_VERSION,
     PLATFORM_SCHEMA_VERSION,
+    SUPPORTED_PLATFORM_SCHEMA_VERSIONS,
     protocolError,
 } from "../lib/message.js";
 
@@ -306,7 +307,13 @@ export function isBoardIdTaken(archive, id) {
  */
 export function checkBoardVersion(description) {
     const actual = description?.schema_version;
-    if (actual === PLATFORM_SCHEMA_VERSION) return { ok: true };
+    // ⚠️ **v0.73（STAGE-49 · B2）**：**接受版本 1 与版本 2** ⇒ ⇒ ⇒
+    // **缺省优先**（规格 §2.2）：老描述（`schema_version = 1`）⇒ ⇒ **仍能
+    // 装** ⇒ ⇒ **存量板档案零风险**（⇒ ⇒ 前端**不**把它当坏库存拒掉）。
+    //
+    // ⚠️ **判据与契约层 V-1 同源**（同一个常量 ⇒ ⇒ 不会漂）⇒ ⇒ **版本 0
+    // 与 > 2 一律拒**（⇒ ⇒ 「完全不认识」与「未来格式」都**不静默硬解**）。
+    if (SUPPORTED_PLATFORM_SCHEMA_VERSIONS.includes(actual)) return { ok: true };
     return {
         ok: false,
         reason: "version",

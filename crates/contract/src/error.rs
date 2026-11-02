@@ -593,6 +593,13 @@ pub const E_PLT_16_WIRING_INVALID: u16 = 16;
 /// one meaning** ⇒ ⇒ ⇒ **a new code** is required (STAGE-49 §7.1 订正 1).
 pub const E_PLT_18_ROLES_INVALID: u16 = 18;
 
+/// **引脚表指向的器件不在描述里**（v0.73 · STAGE-49 · D-175 的 D1）。
+///
+/// ⚠️ **It does not reuse [`E_PLT_16_WIRING_INVALID`] / [`E_PLT_18_ROLES_INVALID`]**:
+/// 那两个分别是「**这条连线**非法」与「**这份角色声明**不合法」⇒ ⇒ 引脚表是
+/// **第三个对象** ⇒ ⇒ 一码两义 ⇒ 禁止 ⇒ ⇒ **自己一个码**。
+pub const E_PLT_19_PINS_INVALID: u16 = 19;
+
 /// Scenario code: the image wants an address range that the **board in
 /// effect** does not have at all — 「**未知系统**」.
 ///

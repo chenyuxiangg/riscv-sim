@@ -77,7 +77,7 @@ fn described_high_ram(description: &PlatformDescription) -> (u32, u32) {
     rams.sort_by_key(|region| region.declared_size().unwrap_or(0));
     let high = rams.last().expect("描述里有 RAM 区域");
     (
-        high.base(),
+        high.base().unwrap_or(0),
         high.declared_size().expect("RAM 区域有声明大小"),
     )
 }
@@ -86,8 +86,13 @@ fn described_high_ram(description: &PlatformDescription) -> (u32, u32) {
 fn described_low_ram(description: &PlatformDescription) -> (u32, u32) {
     described_ram_regions(description)
         .into_iter()
-        .find(|region| region.base() == 0)
-        .map(|region| (region.base(), region.declared_size().unwrap_or(0)))
+        .find(|region| region.base() == Some(0))
+        .map(|region| {
+            (
+                region.base().unwrap_or(0),
+                region.declared_size().unwrap_or(0),
+            )
+        })
         .expect("描述里有 base 为 0 的低段 RAM")
 }
 

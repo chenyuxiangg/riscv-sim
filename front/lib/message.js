@@ -183,7 +183,21 @@ export const SYMBOL_CANDIDATE_LIMIT = 16;
  * **一个定义处**（STAGE-15 裁决 K：初版让服务层「另立一个同值常量」⇒
  * 那是**两个真相** ⇒ 不接受）。
  */
-export const PLATFORM_SCHEMA_VERSION = 1;
+export const PLATFORM_SCHEMA_VERSION = 2;
+
+/**
+ * **本前端能读**的平台描述格式版本 — mirrors
+ * `riscv_sim_contract::platform::SUPPORTED_PLATFORM_SCHEMA_VERSIONS`.
+ *
+ * ⚠️ **v0.73（STAGE-49 · B2）**：**`[1, 2]`** ⇒ ⇒ ⇒ **缺省优先**：老描述
+ * （`schema_version = 1` ⇒ ⇒ 区域**都带** `base`）⇒ ⇒ **仍能装** ⇒ ⇒
+ * **存量板档案零风险**。
+ *
+ * ⚠️ **为什么不是一个数**：`PLATFORM_SCHEMA_VERSION` = 「**本构建写**的
+ * 那个」（⇒ ⇒ 前端**写**它）⇒ ⇒ 「**本构建能读**的那些」是**另一件事**
+ * ⇒ ⇒ ⇒ **两个数，两个含义**（一个约束一个落点）。
+ */
+export const SUPPORTED_PLATFORM_SCHEMA_VERSIONS = [1, 2];
 
 /**
  * 合法性**规则集**版本 — mirrors `riscv_sim_contract::platform::PLATFORM_RULES_VERSION`.
@@ -219,7 +233,7 @@ export const PLATFORM_SCHEMA_VERSION = 1;
  * ⚠️ **唯一落点**（STAGE-18 裁决 E）：住在这**一层**（`front/lib/`）⇒ 服务层
  * 与视图层**都从这里 import** ⇒ **一个定义处** ⇒ 依赖方向仍单向。
  */
-export const PLATFORM_RULES_VERSION = 3;
+export const PLATFORM_RULES_VERSION = 4;
 
 // ---------------------------------------------------------------------------
 // 场景码表（STAGE-29 · 裁决 E · v0.44 批）

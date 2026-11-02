@@ -56,7 +56,7 @@ use crate::error::{
     PlatformError, E_PLT_01_SCHEMA_VERSION, E_PLT_02_EMPTY_ID, E_PLT_03_NO_REGIONS,
     E_PLT_04_ZERO_SIZE, E_PLT_05_OVERFLOW, E_PLT_06_OVERLAP, E_PLT_07_OVER_BUDGET,
     E_PLT_08_DUPLICATE_DEVICE_ID, E_PLT_12_PARAMETER_OUT_OF_RANGE, E_PLT_15_DEVICE_EMPTY_ID,
-    E_PLT_16_WIRING_INVALID, E_PLT_18_ROLES_INVALID, PLATFORM_FAMILY,
+    E_PLT_16_WIRING_INVALID, E_PLT_18_ROLES_INVALID, E_PLT_19_PINS_INVALID, PLATFORM_FAMILY,
 };
 use crate::session::{REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
 
@@ -73,7 +73,29 @@ use crate::session::{REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
 /// (what the front end mirrors), the description version governs the
 /// **memory-map description shape** (what the host reads). Adding this
 /// module therefore requires **no** front-end change at all.
-pub const PLATFORM_SCHEMA_VERSION: u32 = 1;
+/// ⚠️ **v0.73（STAGE-49 · B2）**：**描述格式升版** **1 → 2** ⇒ ⇒
+/// **版本 2** = 区域（`RegionSpec`）的 `base` **可缺省**（⇒ ⇒ 缺省 =
+/// 由内核在**装配期**分配）⇒ ⇒ ⇒ **存量板档案要迁**（⇒ ⇒ 但**缺省
+/// 优先**：老描述**带** `base` ⇒ ⇒ **仍能装** ⇒ ⇒ **一个字节都不变**）。
+///
+/// ⚠️ **版本 1** = 区域**必须**带 `base`（⇒ ⇒ 那时还没有「由内核分配」
+/// 这件事）⇒ ⇒ ⇒ 老描述**逐字**按老办法装（⇒ ⇒ **零风险**）。
+pub const PLATFORM_SCHEMA_VERSION: u32 = 2;
+
+/// **本构建能读**的平台描述格式版本（V-1 判的就是它）。
+///
+/// ⚠️ **v0.73（STAGE-49 · B2）**：**`[1, 2]`** ⇒ ⇒ ⇒ **缺省优先**：老描述
+/// （`schema_version = 1`）⇒ ⇒ **仍能装**（⇒ ⇒ 它的区域**都带** `base`
+/// ⇒ ⇒ 装配结果**逐字不变**）⇒ ⇒ ⇒ **存量板档案零风险**。
+///
+/// ⚠️ **为什么不是一个数**：`PLATFORM_SCHEMA_VERSION` 是「**本构建写**的
+/// 那个版本」（⇒ ⇒ 前端**写**它）⇒ ⇒ 而「**本构建能读**的那些版本」是
+/// **另一件事**（⇒ ⇒ 读比写**宽** ⇒ ⇒ 这是**格式兼容**的常态）⇒ ⇒ ⇒
+/// **两个数，两个含义**（一个约束一个落点）。
+///
+/// ⚠️ **版本 0 与 > 2 不在其中** ⇒ ⇒ 「完全不认识」与「未来格式」都
+/// **明确拒**（⇒ ⇒ 既有码 `E_PLT-01`）⇒ ⇒ ⇒ **不静默硬解**。
+pub const SUPPORTED_PLATFORM_SCHEMA_VERSIONS: &[u32] = &[1, 2];
 
 /// The version of the platform description's **legality rule set**.
 ///
@@ -94,6 +116,12 @@ pub const PLATFORM_SCHEMA_VERSION: u32 = 1;
 /// PLIC must actually have that source) ⇒ ⇒ each step adds **exactly**
 /// the rules it names and nothing else.
 ///
+/// ⚠️ **v0.73（STAGE-49）**：**version 4** = the rule set **with**
+/// V-20（角色声明）/ V-21（引脚表）/ **V-22**（缺 `base` ⇒ ⇒ 由装配期
+/// 分配 ⇒ ⇒ **V-5 / V-6 在基址未定的那一段上判不了** ⇒ ⇒ ⇒ **分配器
+/// 负责**）⇒ ⇒ ⇒ **规则集跟着描述格式走**（描述格式升到 **2** ⇒ ⇒ 这个
+/// 也升到 **4**）⇒ ⇒ ⇒ **一次升版**（⇒ ⇒ §4.1「一次升版、一次迁移」）。
+///
 /// ⚠️ **v0.34 (D-125)**: the rule set **tightened** ⇒ 2 → 3 ⇒ the boards
 /// stored under version 2 go through v0.33's migration path (an
 /// **explicit** prompt, the kernel's verdict, then the stored entry is
@@ -110,7 +138,13 @@ pub const PLATFORM_SCHEMA_VERSION: u32 = 1;
 /// ⚠️ **Tightening a rule does NOT change the description's shape** ⇒
 /// [`PLATFORM_SCHEMA_VERSION`] does **not** move with it ⇒ ⇒ no stored
 /// description becomes unreadable.
-pub const PLATFORM_RULES_VERSION: u32 = 3;
+///
+/// ⚠️ **v0.73（STAGE-49）**：这一批**两件事同时发生** ⇒ ⇒ 描述格式**改了**
+/// （`base` 可缺省 ⇒ ⇒ `PLATFORM_SCHEMA_VERSION` 1 → 2）⇒ ⇒ **规则集也
+/// 跟着走**（3 → 4）⇒ ⇒ ⇒ **存量板档案要迁**（⇒ ⇒ **缺省优先**：老描述
+/// **带** `base` ⇒ ⇒ **仍能装** ⇒ ⇒ 前端**显式提示**「按旧规则存的」
+/// ⇒ ⇒ **不自动迁** ⇒ ⇒ 用户**手动**才升级）。
+pub const PLATFORM_RULES_VERSION: u32 = 4;
 
 /// The **upper bound** of a CLINT's timer frequency (1 THz).
 ///
@@ -278,6 +312,14 @@ pub struct PlatformDescription {
     /// ⚠️ **指了不存在的器件 ⇒ ⇒ 拒**（`E_PLT-18`）⇒ ⇒ **不静默回落**。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roles: Option<DeviceRoles>,
+
+    /// **引脚表**（v0.73 · STAGE-49 · D-175 的 D1）—— 每个引脚接到哪个信号。
+    ///
+    /// ⚠️ **可选** ⇒ ⇒ **缺省 = 无引脚** ⇒ ⇒ **加法**⇒ ⇒ 老描述**零影响**。
+    ///
+    /// ⚠️ **本批只定形状**：引脚名 / 信号名**自由** ⇒ ⇒ 语义属第 58 批。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pins: Option<Vec<PinBinding>>,
 }
 
 /// One **wire** between two devices — the wiring table's row.
@@ -351,20 +393,35 @@ enum WiringRule {
 /// kind vocabulary of [`crate::session::RegionDto::kind`] — so a
 /// description needs **no** translation when it is compared with an
 /// exported memory map.
+///
+/// ⚠️ **v0.73（STAGE-49 · B2）**：三个变体的 `base` 都从 `u32` 改成
+/// **`Option<u32>`** ⇒ ⇒ **缺省 = 由内核在装配期分配**（⇒ ⇒ 这是**本批
+/// 唯一改形状**的那一项 ⇒ ⇒ `PLATFORM_SCHEMA_VERSION` 1 → 2）。
+///
+/// ⚠️ **缺省优先**：老描述**带** `base` ⇒ ⇒ **逐字按老办法**装 ⇒ ⇒
+/// **一个字节都不变** ⇒ ⇒ 存量板档案**零影响**。
+///
+/// ⚠️ **`skip_serializing_if`**：缺 `base` 的那段 ⇒ ⇒ 线上**不带** `base`
+/// 键 ⇒ ⇒ 与前端镜像**同形** ⇒ ⇒ 「缺省」在**线上是可表达的**（不是
+/// `null`、不是 `0`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RegionSpec {
     /// Ordinary memory (lazily allocated since v0.26).
     Ram {
-        /// Interval base address.
-        base: u32,
+        /// Interval base address — **`None`** = 由内核在装配期分配
+        /// （v0.73 · STAGE-49 · B2）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<u32>,
         /// Interval size in bytes.
         size: u32,
     },
     /// Read-only memory (writes are silently dropped).
     Rom {
-        /// Interval base address.
-        base: u32,
+        /// Interval base address — **`None`** = 由内核在装配期分配
+        /// （v0.73 · STAGE-49 · B2）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<u32>,
         /// Interval size in bytes.
         size: u32,
     },
@@ -376,8 +433,10 @@ pub enum RegionSpec {
     /// description would create a **second source of truth** that goes
     /// stale the moment a device's register map changes.
     Peripheral {
-        /// Interval base address.
-        base: u32,
+        /// Interval base address — **`None`** = 由内核在装配期分配
+        /// （v0.73 · STAGE-49 · B2）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<u32>,
         /// The device sitting at `base`.
         device: DeviceSpec,
     },
@@ -406,7 +465,26 @@ pub struct DeviceRoles {
     pub main_plic: Option<String>,
 }
 
-/// One declared peripheral device — internally tagged by **`device`**.
+/// **一条引脚绑定**（v0.73 · STAGE-49 · D-175 的 D1）—— 哪个器件的哪个引脚
+/// 接到了哪个**信号**。
+///
+/// ⚠️ **本批只定「形状」**：引脚名与信号名**自由** ⇒ ⇒ **不**在这里判它们
+/// 合不合法 ⇒ ⇒ 那件事属**第 58 批**的通用连接路由（它才是**消费**这份表的
+/// 那一层）⇒ ⇒ ⇒ ⇒ **边界如实登记**。
+///
+/// ⚠️ **唯一在这里判的是「器件在不在」** ⇒ ⇒ 指了不存在的器件 ⇒ ⇒ **拒**
+/// （`E_PLT-19`）⇒ ⇒ **不静默**。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinBinding {
+    /// **器件 id**（描述里声明过的那一个）。
+    pub device: String,
+    /// **引脚名**（该器件的哪个引脚）。
+    pub pin: String,
+    /// **信号名**（这个引脚接到了哪个信号）。
+    pub signal: String,
+}
+
+/// One declared peripheral device — internally tagged by **`device **`.
 ///
 /// ⚠️ The internal tag's key is literally `device` (**not** `kind` —
 /// that one is already the region's tag, and **not** `type`): the wire
@@ -573,13 +651,25 @@ impl PlatformDescription {
     /// that can ⇒ it must. Two layers, two semantics, two codes.
     pub fn validate(&self) -> Result<(), PlatformError> {
         // V-1 — the format version this build speaks.
-        if self.schema_version != PLATFORM_SCHEMA_VERSION {
+        //
+        // ⚠️ **v0.73（STAGE-49 · B2）**：**接受版本 1 与版本 2** ⇒ ⇒
+        // **缺省优先**（规格 §2.2）：老描述（`schema_version = 1` ⇒ ⇒ 它的
+        // 区域**都带** `base`）⇒ ⇒ **仍能装** ⇒ ⇒ **一个字节都不变** ⇒ ⇒
+        // 存量板档案**零风险**（裁决 K）。
+        //
+        // ⚠️ **为什么接受两个版本**：描述格式升版（1 → 2）**只**加了「`base`
+        // 可缺省」这一件事 ⇒ ⇒ **版本 1 的描述是版本 2 的子集** ⇒ ⇒ ⇒
+        // 「老格式」**不是**「坏格式」⇒ ⇒ ⇒ **不**该被拒。
+        //
+        // ⚠️ **版本 0 与 > 2 一律拒**（⇒ ⇒ 「完全不认识」与「未来格式」都
+        // 不许**硬解**）⇒ ⇒ ⇒ 仍是**既有码 `E_PLT-01`**（⇒ ⇒ **零新码**）。
+        if !SUPPORTED_PLATFORM_SCHEMA_VERSIONS.contains(&self.schema_version) {
             return Err(PlatformError::new(
                 PLATFORM_FAMILY,
                 E_PLT_01_SCHEMA_VERSION,
                 format!(
-                    "平台描述的格式版本不受支持：{} != {}",
-                    self.schema_version, PLATFORM_SCHEMA_VERSION
+                    "平台描述的格式版本不受支持：{} 不在支持的版本 {:?} 里",
+                    self.schema_version, SUPPORTED_PLATFORM_SCHEMA_VERSIONS
                 ),
             ));
         }
@@ -607,6 +697,12 @@ impl PlatformDescription {
         // ⚠️ Only RAM / ROM have a **declared** size here; a peripheral
         // window's size is the device's own register map (裁决 D), so
         // there is nothing to check for it at this layer.
+        //
+        // ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** 的段（⇒ ⇒ 由内核在
+        // 装配期分配）⇒ ⇒ **V-4 与 V-7 照判**（它们只管**大小** ⇒ ⇒ 与
+        // 基址无关）⇒ ⇒ 但 **V-5（溢出）判不了**（⇒ ⇒ 那是**基址**的事）
+        // ⇒ ⇒ ⇒ **V-5 由装配期分配器负责**（分配器知道分配出来的基址
+        // ⇒ ⇒ 越界 ⇒ ⇒ **报既有码 `E_PLT-05`**）⇒ ⇒ ⇒ **零新场景码**。
         for region in &self.regions {
             let Some(size) = region.declared_size() else {
                 continue;
@@ -615,18 +711,18 @@ impl PlatformDescription {
                 return Err(PlatformError::new(
                     PLATFORM_FAMILY,
                     E_PLT_04_ZERO_SIZE,
-                    format!("区域 {:#x} 的大小为 0", region.base()),
+                    format!("区域 {:#x} 的大小为 0", region.base().unwrap_or(0)),
                 ));
             }
-            if region.base().checked_add(size).is_none() {
+            // ⚠️ **基址未定 ⇒ ⇒ V-5 判不了** ⇒ ⇒ 跳过（分配器负责）。
+            let Some(base) = region.base() else {
+                continue;
+            };
+            if base.checked_add(size).is_none() {
                 return Err(PlatformError::new(
                     PLATFORM_FAMILY,
                     E_PLT_05_OVERFLOW,
-                    format!(
-                        "区域 {:#x} + {:#x} 越过了 u32 的地址空间",
-                        region.base(),
-                        size
-                    ),
+                    format!("区域 {:#x} + {:#x} 越过了 u32 的地址空间", base, size),
                 ));
             }
         }
@@ -638,18 +734,32 @@ impl PlatformDescription {
         // description holds a handful of regions, so the quadratic scan
         // costs nothing and needs no "adjacent pairs are enough"
         // argument to be obviously complete.
+        //
+        // ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** 的段 ⇒ ⇒ **这里判
+        // 不了**（它还没有位置）⇒ ⇒ ⇒ **不静默**跳过它 ⇒ ⇒ ⇒ **装配期
+        // 分配器**在分配完之后**自己**判重叠（⇒ ⇒ 仍报**既有码
+        // `E_PLT-06`**）⇒ ⇒ ⇒ **零新场景码**。
+        //
+        // ⚠️ **排序键**：缺 `base` 的段排在**前面**（`None` < `Some`）⇒ ⇒
+        // 排序**稳定**（`sort_by_key` 是稳定的）⇒ ⇒ ⇒ 缺基址的段之间
+        // **保持声明顺序** ⇒ ⇒ ⇒ 判据顺序**可复算**。
         let mut sorted: Vec<&RegionSpec> = self.regions.iter().collect();
         sorted.sort_by_key(|region| region.base());
         for i in 0..sorted.len() {
             for j in (i + 1)..sorted.len() {
-                if regions_overlap(sorted[i], sorted[j]) {
+                // ⚠️ **判不出来**（有一段缺基址）⇒ ⇒ **跳过这一对**
+                // ⇒ ⇒ ⇒ **不**当成「不重叠」⇒ ⇒ ⇒ 分配器负责最终裁决。
+                let Some(overlap) = regions_overlap(sorted[i], sorted[j]) else {
+                    continue;
+                };
+                if overlap {
                     return Err(PlatformError::new(
                         PLATFORM_FAMILY,
                         E_PLT_06_OVERLAP,
                         format!(
                             "区域 {:#x} 与区域 {:#x} 重叠",
-                            sorted[i].base(),
-                            sorted[j].base()
+                            sorted[i].base().unwrap_or(0),
+                            sorted[j].base().unwrap_or(0)
                         ),
                     ));
                 }
@@ -672,7 +782,7 @@ impl PlatformDescription {
                     E_PLT_07_OVER_BUDGET,
                     format!(
                         "区域 {:#x} 声明的大小 {:#x} 超过了每区域预算 {:#x}",
-                        region.base(),
+                        region.base().unwrap_or(0),
                         size,
                         self.region_budget_bytes
                     ),
@@ -870,7 +980,10 @@ impl PlatformDescription {
                 return Err(PlatformError::new(
                     PLATFORM_FAMILY,
                     E_PLT_15_DEVICE_EMPTY_ID,
-                    format!("外设器件（基址 {:#x}）的 id 为空", region.base()),
+                    format!(
+                        "外设器件（基址 {:#x}）的 id 为空",
+                        region.base().unwrap_or(0)
+                    ),
                 ));
             }
         }
@@ -951,6 +1064,38 @@ impl PlatformDescription {
             }
         }
 
+        // V-21 — the **pin table** must name devices that are there
+        // (v0.73 · STAGE-49 · D-175 的 D1).
+        //
+        // ⚠️ **Appended after V-20** ⇒ the report order of V-1 ~ V-20 is
+        // unchanged, byte for byte.
+        //
+        // ⚠️ **Only the device reference is judged here** ⇒ ⇒ 引脚名与信号名
+        // **自由** ⇒ ⇒ 它们的合法性属**第 58 批**（通用连接路由才是**消费**
+        // 这一层的那一层）⇒ ⇒ ⇒ **边界如实登记**。
+        if let Some(pins) = self.pins.as_ref() {
+            let declared: Vec<&str> = self
+                .regions
+                .iter()
+                .filter_map(|region| match region {
+                    RegionSpec::Peripheral { device, .. } => Some(device.id()),
+                    _ => None,
+                })
+                .collect();
+            for binding in pins {
+                if !declared.contains(&binding.device.as_str()) {
+                    return Err(PlatformError::new(
+                        PLATFORM_FAMILY,
+                        E_PLT_19_PINS_INVALID,
+                        format!(
+                            "引脚表指向的器件 {} 不在本描述声明的器件集合里",
+                            binding.device
+                        ),
+                    ));
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -976,7 +1121,10 @@ impl PlatformDescription {
         self.regions
             .iter()
             .filter_map(|region| match region {
-                RegionSpec::Ram { base, size } => Some((*base, u64::from(*size))),
+                // ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** 的段 ⇒ ⇒
+                // **跳过**（⇒ ⇒ 它还没有位置 ⇒ ⇒ 分配之后才有）⇒ ⇒ ⇒
+                // **不**把它当成「基址 0」。
+                RegionSpec::Ram { base, size } => base.map(|base| (base, u64::from(*size))),
                 RegionSpec::Rom { .. } | RegionSpec::Peripheral { .. } => None,
             })
             .max_by_key(|(base, _)| *base)
@@ -1091,12 +1239,30 @@ impl PlatformDescription {
 }
 
 impl RegionSpec {
-    /// The region's base address.
-    pub fn base(&self) -> u32 {
+    /// The region's base address — **`None`** when it is **not declared**
+    /// (v0.73 · STAGE-49 · B2 ⇒ ⇒ 由内核在装配期分配)。
+    ///
+    /// ⚠️ **这是 base 的唯一读取落点**（一个约束一个落点）⇒ ⇒ 想知道
+    /// 「这段的基址定了没有」的地方**都调它** ⇒ ⇒ 不会有一处读 `Option`
+    /// 的字段、另一处读别的。
+    pub fn base(&self) -> Option<u32> {
         match self {
             RegionSpec::Ram { base, .. }
             | RegionSpec::Rom { base, .. }
             | RegionSpec::Peripheral { base, .. } => *base,
+        }
+    }
+
+    /// **装配期分配之后**把基址**写回**这一段（v0.73 · STAGE-49 · B2）。
+    ///
+    /// ⚠️ **这是基址的唯一写入落点**（一个约束一个落点）⇒ ⇒ 分配器**不**
+    /// 直接改 `RegionSpec` 的字段（⇒ ⇒ 绕过这个方法就绕过了「一处改」的
+    /// 纪律）。
+    pub fn set_base(&mut self, base: u32) {
+        match self {
+            RegionSpec::Ram { base: slot, .. }
+            | RegionSpec::Rom { base: slot, .. }
+            | RegionSpec::Peripheral { base: slot, .. } => *slot = Some(base),
         }
     }
 
@@ -1270,30 +1436,35 @@ enum DeclaredExtent {
 /// peripherals sharing a base overlap each other. These are exactly the
 /// overlaps M-14 will report at mapping time — the description layer
 /// catches them earlier and with its own code.
-fn regions_overlap(a: &RegionSpec, b: &RegionSpec) -> bool {
+///
+/// ⚠️ **v0.73（STAGE-49 · B2）**：**三态**返回 —— `None` = **判不出来**
+/// ⇒ ⇒ 那是因为**有一段还没有基址**（⇒ ⇒ 由装配期分配器负责 ⇒ ⇒ ⇒
+/// 分配器**自己**判重叠 ⇒ ⇒ 仍报既有码 `E_PLT-06`）⇒ ⇒ ⇒ **不静默**
+/// 把「判不出来」当成「不重叠」（那会让一块真的重叠的板**装上去**）。
+fn regions_overlap(a: &RegionSpec, b: &RegionSpec) -> Option<bool> {
+    // ⚠️ **先取基址**（`Option<u32>`）⇒ ⇒ 有一段没定 ⇒ ⇒ `?` 早退 ⇒ ⇒
+    //   整个函数返回 `None`（= **判不出来**）⇒ ⇒ ⇒ **不**把它当成「不重叠」。
+    let a_base = a.base()?;
+    let b_base = b.base()?;
     let a = match a {
-        RegionSpec::Ram { base, size } | RegionSpec::Rom { base, size } => {
-            DeclaredExtent::Interval {
-                lo: u64::from(*base),
-                hi: u64::from(*base) + u64::from(*size),
-            }
-        }
-        RegionSpec::Peripheral { base, .. } => DeclaredExtent::BaseOnly {
-            addr: u64::from(*base),
+        RegionSpec::Ram { size, .. } | RegionSpec::Rom { size, .. } => DeclaredExtent::Interval {
+            lo: u64::from(a_base),
+            hi: u64::from(a_base) + u64::from(*size),
+        },
+        RegionSpec::Peripheral { .. } => DeclaredExtent::BaseOnly {
+            addr: u64::from(a_base),
         },
     };
     let b = match b {
-        RegionSpec::Ram { base, size } | RegionSpec::Rom { base, size } => {
-            DeclaredExtent::Interval {
-                lo: u64::from(*base),
-                hi: u64::from(*base) + u64::from(*size),
-            }
-        }
-        RegionSpec::Peripheral { base, .. } => DeclaredExtent::BaseOnly {
-            addr: u64::from(*base),
+        RegionSpec::Ram { size, .. } | RegionSpec::Rom { size, .. } => DeclaredExtent::Interval {
+            lo: u64::from(b_base),
+            hi: u64::from(b_base) + u64::from(*size),
+        },
+        RegionSpec::Peripheral { .. } => DeclaredExtent::BaseOnly {
+            addr: u64::from(b_base),
         },
     };
-    match (a, b) {
+    Some(match (a, b) {
         (
             DeclaredExtent::Interval { lo: a_lo, hi: a_hi },
             DeclaredExtent::Interval { lo: b_lo, hi: b_hi },
@@ -1307,7 +1478,7 @@ fn regions_overlap(a: &RegionSpec, b: &RegionSpec) -> bool {
         (DeclaredExtent::BaseOnly { addr: a_addr }, DeclaredExtent::BaseOnly { addr: b_addr }) => {
             a_addr == b_addr
         }
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1331,21 +1502,21 @@ mod tests {
             max_region_bytes: None,
             regions: vec![
                 RegionSpec::Ram {
-                    base: 0,
+                    base: Some(0),
                     size: 1_048_576,
                 },
                 RegionSpec::Ram {
-                    base: 0x8000_0000,
+                    base: Some(0x8000_0000),
                     size: 134_217_728,
                 },
                 RegionSpec::Peripheral {
-                    base: 0x4000_0000,
+                    base: Some(0x4000_0000),
                     device: DeviceSpec::Gpio {
                         id: "GPIO0".to_string(),
                     },
                 },
                 RegionSpec::Peripheral {
-                    base: 0x1000_0000,
+                    base: Some(0x1000_0000),
                     device: DeviceSpec::Uart16550 {
                         id: "UART0".to_string(),
                         irq_line: 1,
@@ -1353,7 +1524,7 @@ mod tests {
                     },
                 },
                 RegionSpec::Peripheral {
-                    base: 0x0200_0000,
+                    base: Some(0x0200_0000),
                     device: DeviceSpec::Clint {
                         id: "CLINT".to_string(),
                         freq_hz: 10_000_000,
@@ -1361,7 +1532,7 @@ mod tests {
                     },
                 },
                 RegionSpec::Peripheral {
-                    base: 0x0C00_0000,
+                    base: Some(0x0C00_0000),
                     device: DeviceSpec::Plic {
                         id: "PLIC".to_string(),
                         sources: 64,
@@ -1372,6 +1543,7 @@ mod tests {
             description: None,
             wiring: None,
             roles: None,
+            pins: None,
         }
     }
 
@@ -1390,13 +1562,16 @@ mod tests {
     // A-1 — the format version
     // -----------------------------------------------------------------
 
-    /// **A-1** — the description's format version is `1`.
+    /// **A-1** — the description's format version is `2`.
     ///
-    /// ⚠️ Asserted against the **literal** `1`, not against the constant
+    /// ⚠️ Asserted against the **literal** `2`, not against the constant
     /// it also defines ⇒ the constant cannot vouch for itself.
+    ///
+    /// ⚠️ **v0.73（STAGE-49 · B2）**：**1 → 2**（区域 `base` 可缺省）⇒ ⇒
+    /// 这是**本批唯一改形状**的那一项。
     #[test]
-    fn a1_the_platform_schema_version_is_one() {
-        assert_eq!(PLATFORM_SCHEMA_VERSION, 1);
+    fn a1_the_platform_schema_version_is_two() {
+        assert_eq!(PLATFORM_SCHEMA_VERSION, 2);
     }
 
     /// **A-1 / V-1** — a description whose `schema_version` is not the one
@@ -1404,14 +1579,32 @@ mod tests {
     ///
     /// ⚠️ The judgement is on `family` + `scenario`, **not** on the
     /// message text.
+    ///
+    /// ⚠️ **v0.73（STAGE-49 · B2）**：V-1 现在**接受版本 1 与版本 2**
+    /// （⇒ ⇒ **缺省优先**：老描述仍能装）⇒ ⇒ ⇒ 「版本不对」的例子改成
+    /// **不支持**的版本（⇒ ⇒ 0 与 99）⇒ ⇒ ⇒ **判别力保留**（仍断「不静默
+    /// 硬解未知格式」）。
     #[test]
     fn v1_a_wrong_schema_version_is_rejected() {
         let mut desc = sample();
-        desc.schema_version = 2;
+        desc.schema_version = 99;
         let err = desc.validate().expect_err("版本不对必须被拒");
         assert_eq!(err.family, PLATFORM_FAMILY);
         assert_eq!(err.scenario, E_PLT_01_SCHEMA_VERSION);
         assert!(err.to_string().starts_with("E_PLT-01: "));
+    }
+
+    /// **A-1 / V-1（v0.73 · STAGE-49 · B2）** —— 老描述（`schema_version = 1`）
+    /// ⇒ ⇒ **仍然合法**（⇒ ⇒ **缺省优先** ⇒ ⇒ 存量板档案**零风险**）。
+    #[test]
+    fn v1_an_old_schema_version_is_still_accepted() {
+        let mut desc = sample();
+        desc.schema_version = 1;
+        assert!(
+            desc.validate().is_ok(),
+            "老描述（schema_version = 1）必须仍然合法（缺省优先）：{:?}",
+            desc.validate()
+        );
     }
 
     // -----------------------------------------------------------------
@@ -1586,7 +1779,7 @@ mod tests {
     fn v4_a_zero_sized_region_is_rejected() {
         let mut desc = sample();
         desc.regions = vec![RegionSpec::Ram {
-            base: 0x1000,
+            base: Some(0x1000),
             size: 0,
         }];
         let err = desc.validate().expect_err("大小为 0 的区域必须被拒");
@@ -1600,7 +1793,7 @@ mod tests {
     fn v5_a_region_overflowing_u32_is_rejected() {
         let mut desc = sample();
         desc.regions = vec![RegionSpec::Ram {
-            base: 0xFFFF_F000,
+            base: Some(0xFFFF_F000),
             size: 0x2000,
         }];
         let err = desc.validate().expect_err("越界的区域必须被拒");
@@ -1619,11 +1812,11 @@ mod tests {
         let mut desc = sample();
         desc.regions = vec![
             RegionSpec::Ram {
-                base: 0x2000,
+                base: Some(0x2000),
                 size: 0x1000,
             },
             RegionSpec::Ram {
-                base: 0x1000,
+                base: Some(0x1000),
                 size: 0x2000,
             },
         ];
@@ -1644,11 +1837,11 @@ mod tests {
         let mut desc = sample();
         desc.regions = vec![
             RegionSpec::Ram {
-                base: 0x1000,
+                base: Some(0x1000),
                 size: 0x1000,
             },
             RegionSpec::Peripheral {
-                base: 0x1800,
+                base: Some(0x1800),
                 device: DeviceSpec::Gpio {
                     id: "GPIO0".to_string(),
                 },
@@ -1669,7 +1862,7 @@ mod tests {
         let mut desc = sample();
         desc.region_budget_bytes = 1024;
         desc.regions = vec![RegionSpec::Ram {
-            base: 0x1000,
+            base: Some(0x1000),
             size: 2048,
         }];
         let err = desc.validate().expect_err("超预算的区域必须被拒");
@@ -1687,7 +1880,7 @@ mod tests {
         let mut desc = sample();
         desc.region_budget_bytes = 134_217_728;
         desc.regions = vec![RegionSpec::Ram {
-            base: 0x8000_0000,
+            base: Some(0x8000_0000),
             size: 134_217_728,
         }];
         assert!(desc.validate().is_ok(), "恰好等于预算的区域必须被接受");
@@ -1746,13 +1939,13 @@ mod tests {
         let mut desc = sample();
         desc.regions = vec![
             RegionSpec::Peripheral {
-                base: 0x1000,
+                base: Some(0x1000),
                 device: DeviceSpec::Gpio {
                     id: "DUP".to_string(),
                 },
             },
             RegionSpec::Peripheral {
-                base: 0x2000,
+                base: Some(0x2000),
                 device: DeviceSpec::Uart16550 {
                     id: "DUP".to_string(),
                     irq_line: 1,
@@ -1872,11 +2065,25 @@ mod tests {
         assert_eq!(REGION_KIND_ROM, "rom");
         assert_eq!(REGION_KIND_PERIPHERAL, "peripheral");
 
-        assert_eq!(RegionSpec::Ram { base: 0, size: 1 }.kind(), "ram");
-        assert_eq!(RegionSpec::Rom { base: 0, size: 1 }.kind(), "rom");
+        assert_eq!(
+            RegionSpec::Ram {
+                base: Some(0),
+                size: 1
+            }
+            .kind(),
+            "ram"
+        );
+        assert_eq!(
+            RegionSpec::Rom {
+                base: Some(0),
+                size: 1
+            }
+            .kind(),
+            "rom"
+        );
         assert_eq!(
             RegionSpec::Peripheral {
-                base: 0,
+                base: Some(0),
                 device: DeviceSpec::Gpio {
                     id: "G".to_string()
                 }
@@ -1978,21 +2185,21 @@ mod tests {
         assert_eq!(
             desc.regions[0],
             RegionSpec::Ram {
-                base: 0,
+                base: Some(0),
                 size: 1_048_576
             }
         );
         assert_eq!(
             desc.regions[1],
             RegionSpec::Rom {
-                base: 4096,
+                base: Some(4096),
                 size: 65_536
             }
         );
         assert_eq!(
             desc.regions[2],
             RegionSpec::Peripheral {
-                base: 1_073_741_824,
+                base: Some(1_073_741_824),
                 device: DeviceSpec::Uart16550 {
                     id: "UART0".to_string(),
                     irq_line: 1,
@@ -2091,13 +2298,14 @@ mod tests {
                 .into_iter()
                 .enumerate()
                 .map(|(index, device)| RegionSpec::Peripheral {
-                    base: 0x1000_0000u32 + (index as u32) * 0x1_0000,
+                    base: Some(0x1000_0000u32 + (index as u32) * 0x1_0000),
                     device,
                 })
                 .collect(),
             description: None,
             wiring: None,
             roles: None,
+            pins: None,
         }
     }
 
@@ -2712,7 +2920,11 @@ mod tests {
     /// invalidate **every** board stored by v0.30 (D-143) ⇒ it stays.
     #[test]
     fn s16_a2_the_platform_schema_version_is_still_one() {
-        assert_eq!(PLATFORM_SCHEMA_VERSION, 1);
+        // ⚠️ **v0.73（STAGE-49 · B2）**：这一条**当时**的判据（格式**没变**
+        // ⇒ ⇒ 版本**不动**）**已经被本批推翻**（⇒ ⇒ 本批**改了**形状 ⇒ ⇒
+        // 版本**动了** 1 → 2）⇒ ⇒ ⇒ **断言跟着**（⇒ ⇒ 数字是 2）⇒ ⇒
+        // **判别力保留**（它钉的仍是「这个数就是当前描述格式版本」）。
+        assert_eq!(PLATFORM_SCHEMA_VERSION, 2);
     }
 
     /// **STAGE-16 A-3** — the three built-in descriptions parse
@@ -2932,7 +3144,7 @@ mod tests {
     fn s16_a9_the_memory_map_op_wire_shape_is_pinned() {
         let upsert = MemoryMapOp::UpsertRegion {
             spec: RegionSpec::Ram {
-                base: 0,
+                base: Some(0),
                 size: 1_048_576,
             },
         };
@@ -2993,21 +3205,21 @@ mod tests {
     fn s16_a10_a_region_spec_nested_in_a_memory_map_op_round_trips() {
         let specs = [
             RegionSpec::Ram {
-                base: 0,
+                base: Some(0),
                 size: 1_048_576,
             },
             RegionSpec::Rom {
-                base: 0x0010_0000,
+                base: Some(0x0010_0000),
                 size: 0x0001_0000,
             },
             RegionSpec::Peripheral {
-                base: 0x1000_0000,
+                base: Some(0x1000_0000),
                 device: DeviceSpec::Gpio {
                     id: "GPIO0".to_string(),
                 },
             },
             RegionSpec::Peripheral {
-                base: 0x2000_0000,
+                base: Some(0x2000_0000),
                 device: DeviceSpec::Uart16550 {
                     id: "UART0".to_string(),
                     irq_line: 1,
@@ -3245,7 +3457,10 @@ mod tests {
     /// they define ⇒ a constant cannot vouch for itself.
     #[test]
     fn s18_a5_the_shape_version_is_still_one_and_never_equals_the_rules_version() {
-        assert_eq!(PLATFORM_SCHEMA_VERSION, 1);
+        // ⚠️ **v0.73（STAGE-49 · B2）**：形状版本 **1 → 2** ⇒ ⇒ 断言跟到
+        // **2** ⇒ ⇒ **判别力保留**（它钉的仍是「形状版本 == 当前那个」+
+        // 「它与规则集版本**永不相等**」）。
+        assert_eq!(PLATFORM_SCHEMA_VERSION, 2);
         assert_ne!(
             PLATFORM_RULES_VERSION, PLATFORM_SCHEMA_VERSION,
             "规则集版本与形状版本是两个不同的东西，永不相等"
@@ -3544,8 +3759,12 @@ mod tests {
     /// `protocol::tests::the_schema_version_is_eight`.
     #[test]
     fn s19_a6_the_rules_version_is_three_and_the_description_version_is_still_one() {
-        assert_eq!(PLATFORM_RULES_VERSION, 3);
-        assert_eq!(PLATFORM_SCHEMA_VERSION, 1);
+        // ⚠️ **v0.73（STAGE-49 · B2）**：**两个都动了**（⇒ ⇒ 描述格式**改**
+        // 了形状 ⇒ ⇒ 规则集**跟着**走）⇒ ⇒ 规则集 **3 → 4**、形状 **1 → 2**
+        // ⇒ ⇒ ⇒ 断言跟到新值 ⇒ ⇒ **判别力保留**（它钉的仍是「这两个数
+        // 就是当前那两个」）。
+        assert_eq!(PLATFORM_RULES_VERSION, 4);
+        assert_eq!(PLATFORM_SCHEMA_VERSION, 2);
     }
 
     /// **STAGE-19 A-7** — a description **without** a `wiring` section is
@@ -3686,7 +3905,7 @@ mod tests {
         // A **small** segment at a **higher** base wins ⇒ the size does
         // not decide it.
         desc.regions.push(RegionSpec::Ram {
-            base: 0x9000_0000,
+            base: Some(0x9000_0000),
             size: 4096,
         });
         assert_eq!(desc.ram_window(), Some((0x9000_0000, 4096)));
@@ -3694,7 +3913,7 @@ mod tests {
         // A ROM segment is **not** a RAM window.
         let mut desc = sample();
         desc.regions = vec![RegionSpec::Rom {
-            base: 0x9000_0000,
+            base: Some(0x9000_0000),
             size: 4096,
         }];
         assert_eq!(desc.ram_window(), None, "没有 RAM 段时必须返回 None");

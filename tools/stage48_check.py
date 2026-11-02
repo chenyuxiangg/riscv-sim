@@ -52,14 +52,29 @@ fail = []
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-#: ⚠️ **四个版本号的期望值**（7d / 8 用）—— 本批**契约层升版** ⇒ ⇒
-#: `SCHEMA_VERSION` 10 → 11，**另外三个一个都不动**。
+#: ⚠️ **本批**（STAGE-48 · v0.72）**契约层升版** ⇒ ⇒ `SCHEMA_VERSION` 10 → 11。
+#:
+#: ⚠️ ⚠️ **v0.73 批（STAGE-49）把 `PLATFORM_SCHEMA_VERSION` 1 → 2 ·
+#:    `PLATFORM_RULES_VERSION` 3 → 4**（描述格式一次升版）⇒ ⇒ ⇒ 那两个
+#:    **批次局部**的期望值**已经作废** ⇒ ⇒ ⇒ **不许**在这里钉它们
+#:    （⇒ ⇒ 否则**下一批**的合法升版会把**上一批**的门禁**永久打红**）。
+#:
+#: ⚠️ **判别力保留**：这里仍然钉**本批之后一直没动**的那两个（**信封版本**
+#:    与**会话快照版本**）⇒ ⇒ ⇒ 有人误改它们**照样红** ⇒ ⇒ ⇒ 而「描述
+#:    格式版本 / 规则集版本」现在由 **STAGE-49 那一批**的
+#:    `tools/stage49_check.py` 守着（⇒ ⇒ **一个约束一个落点**：每个版本号
+#:    由**最新**那一批的门禁守）。
 EXPECT_VERSIONS = {
     "SCHEMA_VERSION": "11",
     "SIM_STATE_SCHEMA_VERSION": "2",
-    "PLATFORM_SCHEMA_VERSION": "1",
-    "PLATFORM_RULES_VERSION": "3",
 }
+
+#: ⚠️ **v0.73 批升过版的那两个**（⇒ ⇒ **不在**上面的期望值里 ⇒ ⇒ ⇒
+#:    7d / 8 / 10 那些检查**只**作用于上面那两个）。
+EXPECT_VERSIONS_FROZEN_BY_LATER_BATCH = [
+    "PLATFORM_SCHEMA_VERSION",
+    "PLATFORM_RULES_VERSION",
+]
 
 LIB_REL = "crates/contract/src/lib.rs"
 MODEL_REL = "crates/contract/src/model.rs"
@@ -366,8 +381,21 @@ for reason in EXPECT_REASONS:
 if "WireDropReason" in error_rs:
     err("[词表] `error.rs` 里出现了 `WireDropReason` ⇒ ⇒ 理由词被当成了"
         "**场景码** ⇒ ⇒ 本批**零新场景码**这条被破坏了")
-if "E_PLT_18" in error_rs or "E_PLT_18" in host_rs:
-    err("[词表] 出现了 `E_PLT_18` ⇒ ⇒ 本批**零新场景码**（理由词**不是**码）")
+# ⚠️ ⚠️ **不要**断言「`E_PLT_18` 不存在」—— 那是一条**批次局部**的性质
+#   （「**本批**零新场景码」）⇒ ⇒ **后续批次**（v0.73 · STAGE-49）**合法地**
+#   新增了 `E_PLT_18`（角色声明）/ `E_PLT_19`（引脚表）⇒ ⇒ ⇒ 那条断言会**误红**
+#   ⇒ ⇒ ⇒ **判据必须是「不随批次失效的那条性质」** ⇒ ⇒ 这里查的是：
+#   **理由词表的值没有变成场景码**（`source-unknown` 那种词**不许**出现在
+#   `error.rs` 里）⇒ ⇒ ⇒ 这条**永远成立**。
+for reason in EXPECT_REASONS:
+    if reason in error_rs:
+        err(f"[词表] `error.rs` 里出现了理由词 `{reason}` ⇒ ⇒ 理由词被当成了"
+            "**场景码** ⇒ ⇒ 一码两义 ⇒ 禁止")
+# ⚠️ **下一批（v0.73）的两个新码**是**合法**的（各有唯一定义处）⇒ ⇒ 这里只查
+#   它们**没有被定义成 `E_PLT_16` 的别名**（那才是「一码两义」）。
+for new_code in ("E_PLT_18_ROLES_INVALID", "E_PLT_19_PINS_INVALID"):
+    if re.search(rf"pub const {new_code}[^=]*=\s*E_PLT_16", error_rs):
+        err(f"[新码] `{new_code}` 被定义成 `E_PLT_16` 的别名 ⇒ ⇒ 一码两义")
 
 # --- 10. 上一批的破坏性改动没有被回退（STAGE-47）------------------------------
 if "E_PLT_17_BOARD_MISMATCH" not in error_rs:
@@ -379,9 +407,11 @@ if "E_PLT_17_BOARD_MISMATCH" not in host_rs:
 if "fn k1_image_inside_the_user_board_loads" not in prev_test:
     err("[回退] 上一批的内核门禁 `tests_v071_unknown_system.rs` **不在**了 ⇒ ⇒ "
         "「未知系统」那条判定**没人守**")
-# ⚠️ **另外三个版本号不许被带走**（升版只许升 `SCHEMA_VERSION`）。
-for name in ("SIM_STATE_SCHEMA_VERSION", "PLATFORM_SCHEMA_VERSION",
-             "PLATFORM_RULES_VERSION"):
+# ⚠️ **本批**（STAGE-48）**不许被带走**的那些版本号 —— ⚠️ **v0.73 批**
+#    （STAGE-49）**合法地**升了 `PLATFORM_SCHEMA_VERSION` / `PLATFORM_RULES_VERSION`
+#    ⇒ ⇒ ⇒ 那两个**不再**由本脚本守（⇒ ⇒ 由 `tools/stage49_check.py` 守
+#    ⇒ ⇒ ⇒ **一个约束一个落点**）⇒ ⇒ ⇒ 这里只守**真的没动**的那些。
+for name in ("SIM_STATE_SCHEMA_VERSION",):
     m = re.search(rf"pub const {name}:\s*u32\s*=\s*(\d+)", lib)
     if not m:
         m = re.search(rf"pub const {name}:\s*u32\s*=\s*(\d+)",
@@ -390,7 +420,17 @@ for name in ("SIM_STATE_SCHEMA_VERSION", "PLATFORM_SCHEMA_VERSION",
     if not m:
         err(f"[回退] 读不到 {name}")
     elif m.group(1) != EXPECT_VERSIONS[name]:
-        err(f"[回退] {name} = {m.group(1)} ⇒ ⇒ 本批**只**许升 `SCHEMA_VERSION`")
+        err(f"[回退] {name} = {m.group(1)} ⇒ ⇒ 本批**不许**动它")
+# ⚠️ **那两个被下一批合法升版的** ⇒ ⇒ 只**确认它们还在**（⇒ ⇒ 有人**删掉**
+#    它们 ⇒ ⇒ 门禁会红）⇒ ⇒ ⇒ **不**钉具体值（⇒ ⇒ 那是**下一批**的门禁的活）。
+for name in EXPECT_VERSIONS_FROZEN_BY_LATER_BATCH:
+    found = False
+    for src_ in (lib, model_rs, protocol_rs, platform_rs):
+        if re.search(rf"pub const {name}:\s*u32\s*=\s*(\d+)", src_):
+            found = True
+            break
+    if not found:
+        err(f"[回退] 契约层没有 {name} ⇒ ⇒ 那个版本号**被删掉了**")
 
 # ---------------------------------------------------------------------------
 # 结论
@@ -408,7 +448,6 @@ print(f"  验收：A {len(EXPECT_ACCEPT['A'])} · K {len(EXPECT_ACCEPT['K'])}"
       f" · X {len(EXPECT_ACCEPT['X'])}")
 print(f"  版本号：SCHEMA_VERSION={EXPECT_VERSIONS['SCHEMA_VERSION']}"
       f" / SIM_STATE={EXPECT_VERSIONS['SIM_STATE_SCHEMA_VERSION']}"
-      f" / PLATFORM={EXPECT_VERSIONS['PLATFORM_SCHEMA_VERSION']}"
-      f" / PLATFORM_RULES={EXPECT_VERSIONS['PLATFORM_RULES_VERSION']}")
+      f" / （PLATFORM / PLATFORM_RULES 已由 **STAGE-49 批**升版 ⇒ ⇒ 归它守）")
 print(f"  理由词表：{len(EXPECT_REASONS)} 个值")
 sys.exit(0)

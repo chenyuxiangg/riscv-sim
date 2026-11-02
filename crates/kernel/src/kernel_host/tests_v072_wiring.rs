@@ -58,7 +58,7 @@ const SECOND_BASE: u32 = 0x1000_1000;
 fn board_with_second_uart() -> PlatformDescription {
     let mut description = qemu_virt_description();
     description.regions.push(RegionSpec::Peripheral {
-        base: SECOND_BASE,
+        base: Some(SECOND_BASE),
         device: DeviceSpec::Uart16550 {
             id: "UART1".to_string(),
             irq_line: 1,
@@ -73,7 +73,7 @@ fn board_with_second_uart() -> PlatformDescription {
 fn board_with_second_gpio() -> PlatformDescription {
     let mut description = qemu_virt_description();
     description.regions.push(RegionSpec::Peripheral {
-        base: SECOND_BASE,
+        base: Some(SECOND_BASE),
         device: DeviceSpec::Gpio {
             id: "GPIO1".to_string(),
         },
@@ -655,7 +655,7 @@ fn k12_every_real_report_keeps_the_identity() {
         {
             let mut d = board_with_second_uart();
             d.regions.push(RegionSpec::Peripheral {
-                base: 0x2000_2000,
+                base: Some(0x2000_2000),
                 device: DeviceSpec::Gpio {
                     id: "GPIO1".to_string(),
                 },
@@ -729,7 +729,7 @@ fn k13_the_host_really_holds_a_handle_for_the_second_uart() {
     // ⚠️ **类型别搞混**：GPIO **没有** UART 句柄。
     let mut with_gpio = board_with_second_gpio();
     with_gpio.regions.push(RegionSpec::Peripheral {
-        base: 0x2000_2000,
+        base: Some(0x2000_2000),
         device: DeviceSpec::Uart16550 {
             id: "UART2".to_string(),
             irq_line: 1,
@@ -761,7 +761,7 @@ fn k14_the_second_plics_source_really_reaches_the_architecture() {
     // ⚠️ **两块 PLIC**：PLIC0（第一个）与 PLIC1（**第二个**）。
     let mut description = qemu_virt_description();
     description.regions.push(RegionSpec::Peripheral {
-        base: 0x2000_2000,
+        base: Some(0x2000_2000),
         device: DeviceSpec::Plic {
             id: "PLIC1".to_string(),
             sources: 64,

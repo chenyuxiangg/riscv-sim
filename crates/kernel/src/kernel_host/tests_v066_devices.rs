@@ -36,12 +36,13 @@ fn ram_only_description(id: &str) -> PlatformDescription {
         region_budget_bytes: 1024 * 1024,
         max_region_bytes: None,
         regions: vec![RegionSpec::Ram {
-            base: 0,
+            base: Some(0),
             size: 1024 * 1024,
         }],
         description: None,
         wiring: None,
         roles: None,
+        pins: None,
     }
 }
 
@@ -49,13 +50,13 @@ fn ram_only_description(id: &str) -> PlatformDescription {
 fn board_description(id: &str) -> PlatformDescription {
     let mut description = ram_only_description(id);
     description.regions.push(RegionSpec::Peripheral {
-        base: 0x4000_0000,
+        base: Some(0x4000_0000),
         device: DeviceSpec::Gpio {
             id: "GPIO0".to_string(),
         },
     });
     description.regions.push(RegionSpec::Peripheral {
-        base: 0x1000_0000,
+        base: Some(0x1000_0000),
         device: DeviceSpec::Uart16550 {
             id: "UART0".to_string(),
             irq_line: 1,
@@ -257,7 +258,7 @@ fn an_instance_of_a_board_that_is_not_in_effect_yet_has_no_base() {
     // 换一块板（多一个器件、改一个基址）⇒ 挂起待生效。
     let mut board = board_description("board-b");
     board.regions.push(RegionSpec::Peripheral {
-        base: 0x2000_0000,
+        base: Some(0x2000_0000),
         device: DeviceSpec::Gpio {
             id: "GPIO1".to_string(),
         },
@@ -324,7 +325,7 @@ fn accepting_a_board_change_updates_the_instance_state() {
     for region in board.regions.iter_mut() {
         if let RegionSpec::Peripheral { base, device } = region {
             if device.id() == "UART0" {
-                *base = 0x2000_0000;
+                *base = Some(0x2000_0000);
             }
         }
     }

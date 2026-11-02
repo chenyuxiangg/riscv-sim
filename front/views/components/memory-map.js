@@ -375,6 +375,10 @@ export function cloneDraft(draft) {
     // 浅拷贝会让「改草稿」改到内核给的那份 ⇒ ⇒ 与 `wiring` 同一条纪律。
     const roles = normalizeRoles(next.roles);
     if (roles) next.roles = roles;
+    // ⚠️ `pins` 也**深复制**（STAGE-49 · D1）：它是**对象数组** ⇒ ⇒ 浅拷贝
+    // 会让「改草稿」改到内核给的那份 ⇒ ⇒ 与 `wiring` 同一条纪律。
+    const pins = normalizePins(next.pins);
+    if (pins) next.pins = pins;
     return next;
 }
 
@@ -386,7 +390,11 @@ export function cloneDraft(draft) {
  */
 export function regionToDraft(region) {
     const kind = String(region?.kind ?? "ram");
-    const base = Number(region?.base ?? 0) >>> 0;
+    // ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** ⇒ ⇒ 草稿里 **`base`
+    // 留空**（**空字符串**）⇒ ⇒ ⇒ **不静默**变成 `"0"`（那会让「没有
+    // 基址」与「基址就是 0」在草稿里**分不开**）。
+    const base = regionBase(region);
+    const baseText = base === null ? "" : String(base);
     if (kind === "peripheral") {
         const device = region?.device ?? {};
         const kindName = String(device.device ?? "gpio");
@@ -394,11 +402,11 @@ export function regionToDraft(region) {
         for (const param of deviceParams(kindName)) {
             draftDevice[param.name] = String(device[param.name] ?? 0);
         }
-        return { kind: "peripheral", base: String(base), device: draftDevice };
+        return { kind: "peripheral", base: baseText, device: draftDevice };
     }
     return {
         kind: kind === "rom" ? "rom" : "ram",
-        base: String(base),
+        base: baseText,
         size: String(Number(region?.size ?? 0) >>> 0),
     };
 }
@@ -447,6 +455,29 @@ export function normalizeRoles(roles) {
     return Object.keys(out).length > 0 ? out : null;
 }
 
+/**
+ * 线上�� `pins` 段 → **草稿形状**（STAGE-49 · D-175 的 D1）。
+ *
+ * ⚠️ **前端只做「透传」**：引脚表指错了由**内核**的 V-21 裁决（`E_PLT-19`）
+ * ⇒ ⇒ 前端**不**写第二个校验器 ⇒ ⇒ 也**不**在这里判引脚名 / 信号名合不合法
+ * （那属**第 58 批**的通用连接路由）。
+ *
+ * @param {unknown} pins — 线上的 `pins` 段 / 草稿里的 `pins`
+ * @returns {Array<{device: string, pin: string, signal: string}>|null}
+ */
+export function normalizePins(pins) {
+    if (!Array.isArray(pins)) return null;
+    const out = pins
+        .filter((one) => one && typeof one === "object")
+        .map((one) => ({
+            device: String(one.device ?? ""),
+            pin: String(one.pin ?? ""),
+            signal: String(one.signal ?? ""),
+        }))
+        .filter((one) => one.device.length > 0);
+    return out.length > 0 ? out : null;
+}
+
 export function normalizeWiringList(wiring) {
     if (!Array.isArray(wiring)) return [];
     return wiring.map((entry) => ({
@@ -474,7 +505,14 @@ export function draftFromDescription(description) {
     if (!description || typeof description !== "object") return null;
     const regions = Array.isArray(description.regions) ? description.regions : [];
     const draft = {
-        schema_version: PLATFORM_SCHEMA_VERSION,
+        // ⚠️ ⚠️ **用描述自己的** `schema_version`（v0.73 · STAGE-49 · 施工期
+        //   订正）：**不**无条件写当前版本 ⇒ ⇒ 否则「从存量板档案载入选一块
+        //   老板 ⇒ ⇒ 碰一下 ⇒ ⇒ 提交」**就把它的格式版本悄悄升了** ⇒ ⇒ ⇒
+        //   那是**前端自动改写用户的数据** ⇒ ⇒ ⇒ 违反 N-4「前端**不自动**
+        //   改写板档案的描述」⇒ ⇒ ⇒ **缺省**（描述没带这个字段）才用常量。
+        schema_version: Number.isFinite(Number(description.schema_version))
+            ? Number(description.schema_version) >>> 0
+            : PLATFORM_SCHEMA_VERSION,
         id: String(description.id ?? ""),
         name: String(description.name ?? ""),
         priority: String(Number(description.priority ?? 0)),
@@ -493,6 +531,9 @@ export function draftFromDescription(description) {
     // 悄悄变回「第一个 UART」）。
     const roles = normalizeRoles(description.roles);
     if (roles) draft.roles = roles;
+    // ⚠️ `pins`（STAGE-49 · D1）：描述里有 ⇒ **草稿里带上** ⇒ ⇒ 提交回去还在。
+    const pins = normalizePins(description.pins);
+    if (pins) draft.pins = pins;
     return draft;
 }
 
@@ -518,7 +559,13 @@ export function draftToDescription(draft) {
         return n === null ? 0 : Math.max(0, Math.trunc(n)) >>> 0;
     };
     const description = {
-        schema_version: PLATFORM_SCHEMA_VERSION,
+        // ⚠️ ⚠️ **用草稿里带的那个**（v0.73 · STAGE-49 · 施工期订正）：草稿从
+        //   哪份描述来 ⇒ ⇒ 提交回去还是**同一个格式版本** ⇒ ⇒ ⇒ **存量板档案
+        //   不会被前端悄悄升版**（⇒ ⇒ 差量路径与整份路径的生效图**逐字段
+        //   相同**——那两条路径**改的是同一张图**）⇒ ⇒ ⇒ 缺省才用常量。
+        schema_version: Number.isFinite(Number(draft?.schema_version))
+            ? Number(draft.schema_version) >>> 0
+            : PLATFORM_SCHEMA_VERSION,
         id: String(draft?.id ?? ""),
         name: String(draft?.name ?? ""),
         priority: num(draft?.priority),
@@ -526,18 +573,30 @@ export function draftToDescription(draft) {
         region_budget_bytes: num(draft?.region_budget_bytes),
         regions: regions.map((region) => {
             const kind = String(region?.kind ?? "ram");
+            // ⚠️ **v0.73（STAGE-49 · B2）**：草稿里 `base` **留空** ⇒ ⇒
+            // 线上描述**不带** `base` 键 ⇒ ⇒ ⇒ 与契约层 serde 的
+            // `skip_serializing_if = "Option::is_none"` **同形** ⇒ ⇒ ⇒
+            // **缺省优先**（老描述**带** base ⇒ ⇒ 往返后**仍然带**）。
+            //
+            // ⚠️ **不静默**把空 base 变成 `0`（那会让内核**永远**分配不到
+            // 「由内核决定基址」这个语义 ⇒ ⇒ ⇒ 用户**明确留空**的意图
+            // **被吃掉**了）。
+            const base = regionBase(region);
             if (kind === "peripheral") {
                 const device = region?.device ?? {};
                 const kindName = String(device.device ?? "gpio");
                 const wire = { device: kindName, id: String(device.id ?? "") };
                 for (const param of deviceParams(kindName)) wire[param.name] = num(device[param.name]);
-                return { kind: "peripheral", base: num(region?.base), device: wire };
+                const out = { kind: "peripheral", device: wire };
+                if (base !== null) out.base = base;
+                return out;
             }
-            return {
+            const out = {
                 kind: kind === "rom" ? "rom" : "ram",
-                base: num(region?.base),
                 size: num(region?.size),
             };
+            if (base !== null) out.base = base;
+            return out;
         }),
     };
     // ⚠️ `wiring`（STAGE-19 · 裁决 G）：**逐字段重建**（同一个
@@ -555,6 +614,11 @@ export function draftToDescription(draft) {
     // 没有 `roles`。
     const roles = normalizeRoles(draft?.roles);
     if (roles) description.roles = roles;
+    // ⚠️ `pins`（STAGE-49 · D1）：**逐字段重建**（同一个 `normalizePins`）⇒ ⇒
+    // 草稿里多出来的键**不可能**漏进契约；⚠️ **空 / 缺省 ⇒ 线上描述不带这个
+    // 键**（不是 `null`）⇒ ⇒ 与契约层 serde 的 `skip_serializing_if` **同形**。
+    const pins = normalizePins(draft?.pins);
+    if (pins) description.pins = pins;
     return description;
 }
 
@@ -572,7 +636,11 @@ export function nextFreeBase(draft, kind, deviceTypes = null) {
     const regions = Array.isArray(draft?.regions) ? draft.regions : [];
     let top = 0;
     for (const region of regions) {
-        const base = parseNumber(region?.base) ?? 0;
+        // ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** 的段 ⇒ ⇒ 它**没有
+        // 位置** ⇒ ⇒ ⇒ **不抬高游标**（⇒ ⇒ 它不占任何地址）⇒ ⇒ ⇒ **不静默**
+        // 把它当成「基址 0」（那会算出一个假的占用区间）。
+        const base = regionBase(region);
+        if (base === null) continue;
         const size = parseNumber(region?.size) ?? 0;
         const end = String(region?.kind) === "peripheral"
             // ⚠️ **外设窗口用内核类型表给的那个**（STAGE-46 · 裁决 E / I）
@@ -660,7 +728,11 @@ export function occupiedIntervals(draft, deviceTypes = null) {
     const regions = Array.isArray(draft?.regions) ? draft.regions : [];
     return regions.map((region, index) => {
         const kind = String(region?.kind ?? "ram");
-        const base = (parseNumber(region?.base) ?? 0) >>> 0;
+        // ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** 的段 ⇒ ⇒ **没有
+        // 区间**（⇒ ⇒ 它还没有位置）⇒ ⇒ ⇒ **不静默**当成「占用
+        // [0, size)」⇒ ⇒ ⇒ **跳过**它（⇒ ⇒ 规划面板**不会**把它算成
+        // 已占用的地址 ⇒ ⇒ ⇒ 用户看得见「这段还没定基址」）。
+        const base = regionBase(region);
         let size = 0;
         let windowKnown = true;
         if (kind === "peripheral") {
@@ -680,7 +752,7 @@ export function occupiedIntervals(draft, deviceTypes = null) {
             kind,
             base,
             size,
-            end: (base + size) >>> 0,
+            end: base === null ? null : (base + size) >>> 0,
             windowKnown,
         };
     });
@@ -698,7 +770,13 @@ export function occupiedIntervals(draft, deviceTypes = null) {
  */
 export function mergeIntervals(intervals) {
     const list = (Array.isArray(intervals) ? intervals : [])
-        .map((it) => ({ from: Number(it?.from ?? it?.base ?? 0) >>> 0, to: Number(it?.to ?? it?.end ?? 0) >>> 0 }))
+        .map((it) => ({
+            from: Number(it?.from ?? it?.base ?? 0) >>> 0,
+            to: Number(it?.to ?? it?.end ?? 0) >>> 0,
+        }))
+        // ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** 的段（⇒ ⇒ `base` 与
+        // `end` 都是 `null`）⇒ ⇒ **跳过**（⇒ ⇒ 它没有区间 ⇒ ⇒ 不该进并集）
+        // ⇒ ⇒ ⇒ **不静默**把 `null` 变成 `0`（那会造出一个假的区间）。
         .filter((it) => it.to > it.from)
         .sort((a, b) => a.from - b.from);
     const merged = [];
@@ -728,6 +806,11 @@ export function defaultPlanRange(draft, deviceTypes = null) {
     let lo = Infinity;
     let hi = -Infinity;
     for (const it of occupied) {
+        // ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** 的段（⇒ ⇒ `base` 是
+        // `null`）⇒ ⇒ **跳过**（⇒ ⇒ 它没有位置 ⇒ ⇒ 不该参与范围计算）
+        // ⇒ ⇒ ⇒ **不静默**让 `null` 参与比较（`null < Infinity` 为真 ⇒ ⇒
+        // 会把 `lo` 悄悄拉成 **0** ⇒ ⇒ ⇒ 规划范围**骗人**）。
+        if (it.base === null || it.end === null) continue;
         if (it.base < lo) lo = it.base;
         if (it.end > hi) hi = it.end;
     }
@@ -837,9 +920,13 @@ export function renderBasePlanner(state) {
     // ⇒ ⇒ 不给段表加「选中行」概念（裁决 D ⇒ ⇒ 零新增 UI 状态）。
     const targetOptions = regions.map((region, index) => {
         const label = segmentLabel(region, String(region?.kind ?? "ram"));
-        const base = (parseNumber(region?.base) ?? 0) >>> 0;
+        // ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** 的段 ⇒ ⇒ 显示
+        // 「**未分配**」⇒ ⇒ ⇒ **不静默**显示成 `0x00000000`（那会让用户
+        // 以为它就落在 0）。
+        const base = regionBase(region);
+        const baseText = base === null ? "未分配" : hex32(base);
         const picked = index === target ? " selected" : "";
-        return `<option value="${index}"${picked}>第 ${index + 1} 行 · ${escapeHtml(label)} · ${escapeHtml(hex32(base))}</option>`;
+        return `<option value="${index}"${picked}>第 ${index + 1} 行 · ${escapeHtml(label)} · ${escapeHtml(baseText)}</option>`;
     }).join("");
 
     const gapRows = shown.map((gap) => {
@@ -1158,11 +1245,35 @@ export function isDraftAccepted(state) {
  * ⚠️ 契约层保证**生效图里不可能有两个同 `base` 的段**（V-6 重叠检查）
  * ⇒ 按 `base` 定位**永远唯一**。
  *
+ * ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** 的段 ⇒ ⇒ **定位键不存在**
+ * ⇒ ⇒ ⇒ 返回 **`null`**（⇒ ⇒ **不是** `0`！）⇒ ⇒ ⇒ **不静默**把「没有
+ * 基址」与「基址就是 0」**混成一样**（那会让两者**互相覆盖**）。
+ *
+ * ⚠️ **调用方必须处理 `null`** ⇒ ⇒ 「按 base 定位」这件事在缺 base 的段
+ * 上**不成立** ⇒ ⇒ ⇒ 差量路径遇到它 ⇒ ⇒ **整份替换**（§7.1 订正 6 ③）。
+ *
  * @param {unknown} region
- * @returns {number}
+ * @returns {number|null} `null` = 这段**没有**基址
  */
 export function regionBase(region) {
-    return Number(region?.base ?? 0) >>> 0;
+    const raw = region?.base;
+    if (raw === undefined || raw === null || raw === "") return null;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return null;
+    return value >>> 0;
+}
+
+/**
+ * 一个段**有没有**基址（**定位键**在不在）。
+ *
+ * ⚠️ **与 [`regionBase`] 同源**（一个约束一个落点）⇒ ⇒ 「这段能不能按
+ * base 定位」这件事**只有一处**判定。
+ *
+ * @param {unknown} region
+ * @returns {boolean}
+ */
+export function regionHasBase(region) {
+    return regionBase(region) !== null;
 }
 
 /**
@@ -1250,12 +1361,21 @@ export function diffMemoryMapOps(baseDescription, draftDescription) {
 
     /** 生效图：按 `base` 索引。 */
     const baseByBase = new Map();
-    for (const region of baseRegions) baseByBase.set(regionBase(region), region);
+    for (const region of baseRegions) {
+        const base = regionBase(region);
+        if (base === null) continue;
+        baseByBase.set(base, region);
+    }
 
     /** 草稿里出现过的 `base`。 */
     const draftBases = new Set();
     for (const region of draftRegions) {
         const base = regionBase(region);
+        // ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** 的段 ⇒ ⇒ **定位键
+        // 不存在** ⇒ ⇒ ⇒ **差量表达不了它** ⇒ ⇒ ⇒ **跳过**（⇒ ⇒ 调用方
+        // [`planMemoryMapUpdate`] 会因此**走整份替换**）⇒ ⇒ ⇒ **不静默**
+        // 把它当成「基址 0」（那会**指错段**）。
+        if (base === null) continue;
         draftBases.add(base);
         const current = baseByBase.get(base);
         // ⚠️ **不在生效图里** 或 **内容不同** ⇒ 插入 / 替换。
@@ -1266,6 +1386,7 @@ export function diffMemoryMapOps(baseDescription, draftDescription) {
     // ⚠️ 生效图里有、草稿里没有的段 ⇒ 删掉。
     for (const region of baseRegions) {
         const base = regionBase(region);
+        if (base === null) continue;
         if (!draftBases.has(base)) ops.push({ RemoveRegion: { base } });
     }
 
@@ -1332,9 +1453,30 @@ export function planMemoryMapUpdate(baseDescription, draftDescription, options =
     if (!sameWiring(baseDescription, draftDescription)) {
         return { mode: "replace", ops: [] };
     }
+    // ⚠️ **v0.73（STAGE-49 · B2 · §7.1 订正 6 ③）**：草稿里有**缺 `base`**
+    // 的段 ⇒ ⇒ **差量表达不了它**（⇒ ⇒ `UpsertRegion` 按 `base` 定位 ⇒ ⇒
+    // 定位键不存在）⇒ ⇒ ⇒ **整份替换** ⇒ ⇒ ⇒ **不静默**把它当成
+    // 「基址 0」（那会与真的 `base = 0` 的段**互相覆盖**）。
+    if (hasRegionWithoutBase(draftDescription)) {
+        return { mode: "replace", ops: [] };
+    }
     const ops = diffMemoryMapOps(baseDescription, draftDescription);
     if (ops.length === 0) return { mode: "none", ops: [] };
     return { mode: "patch", ops };
+}
+
+/**
+ * 这份描述里**有没有段缺 `base`**（⇒ ⇒ 差量定位不了它）。
+ *
+ * ⚠️ **v0.73（STAGE-49 · B2）**：与 [`regionBase`] **同源**（一个约束一个
+ * 落点）⇒ ⇒ 「这段能不能按 base 定位」**只有一处**判定。
+ *
+ * @param {object|null|undefined} description
+ * @returns {boolean}
+ */
+export function hasRegionWithoutBase(description) {
+    const regions = Array.isArray(description?.regions) ? description.regions : [];
+    return regions.some((region) => !regionHasBase(region));
 }
 
 /**
@@ -1378,7 +1520,9 @@ export function descriptionToRows(description) {
     const regions = Array.isArray(description?.regions) ? description.regions : [];
     return regions.map((region) => {
         const kind = String(region?.kind ?? "");
-        const base = Number(region?.base ?? 0) >>> 0;
+        // ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** ⇒ ⇒ `null` ⇒ ⇒ ⇒
+        // 界面**如实**显示「未分配」（⇒ ⇒ 不静默显示 0）。
+        const base = regionBase(region);
         if (kind === "peripheral") {
             const device = region?.device ?? {};
             const kindName = String(device.device ?? "");
@@ -1394,12 +1538,17 @@ export function descriptionToRows(description) {
         }
         const size = Number(region?.size ?? 0) >>> 0;
         const label = kind === "rom" ? "ROM" : "RAM";
+        // ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** ⇒ ⇒ 区间**如实**写
+        // 「未分配」⇒ ⇒ ⇒ **不静默**显示成 `0x00000000`（那会骗人）。
+        const detail = base === null
+            ? "[未分配]"
+            : `[${hex32(base)}, ${hex32((base + size) >>> 0)})`;
         return {
             base,
             size,
             kind,
             type: label,
-            detail: `[${hex32(base)}, ${hex32((base + size) >>> 0)})`,
+            detail,
         };
     });
 }
@@ -1419,9 +1568,14 @@ export function renderMapRows(rows) {
         const sizeAttr = row.size === null
             ? ""
             : ` data-region-size="${String(row.size)}"`;
+        // ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** ⇒ ⇒ 单元格显示
+        // 「**未分配**」⇒ ⇒ ⇒ `data-region-base` **不挂**（⇒ ⇒ 脚本**不会**
+        // 拿它去比一个不存在的地址）⇒ ⇒ ⇒ **不静默**写成 `0`。
+        const baseAttr = row.base === null ? "" : ` data-region-base="${String(row.base)}"`;
+        const baseText = row.base === null ? "未分配" : hex32(row.base);
         return `
-            <tr data-region-base="${String(row.base)}" data-region-kind="${escapeHtml(row.kind)}"${sizeAttr}>
-                <td><code>${escapeHtml(hex32(row.base))}</code></td>
+            <tr${baseAttr} data-region-kind="${escapeHtml(row.kind)}"${sizeAttr}>
+                <td><code>${escapeHtml(baseText)}</code></td>
                 <td>${escapeHtml(row.type)}</td>
                 <td>${row.size === null ? "由器件自报" : escapeHtml(hex32(row.size))}</td>
                 <td>${escapeHtml(row.detail)}</td>
@@ -1840,7 +1994,10 @@ export function memoryMapLayout(draft, deviceTypes = null) {
     /** @type {Array<{kind: string, base: number, size: number}>} */
     const intervals = regions.map((region) => {
         const kind = String(region?.kind ?? "ram");
-        const base = parseNumber(region?.base) ?? 0;
+        // ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** 的段 ⇒ ⇒ 它**没有
+        // 位置**⇒ ⇒ ⇒ 在比例条上**不占宽度**（⇒ ⇒ `base` 记 0，但**它
+        // 不参与**下面的跨度计算 —— 那部分用 `placed` 过滤）。
+        const base = regionBase(region) ?? 0;
         // ⚠️ **外设段没有 `size`** ⇒ 用**摆放窗口**折算（见
         // `PERIPHERAL_WINDOW_BYTES` 的注释）。
         //

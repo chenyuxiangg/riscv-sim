@@ -58,7 +58,7 @@ fn described_high_ram() -> (u32, u32) {
     let mut rams: Vec<(u32, u32)> = described_regions()
         .iter()
         .filter_map(|region| match region {
-            RegionSpec::Ram { base, size } => Some((*base, *size)),
+            RegionSpec::Ram { size, .. } => Some((region.base()?, *size)),
             _ => None,
         })
         .collect();

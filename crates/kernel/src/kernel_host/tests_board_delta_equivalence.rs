@@ -108,21 +108,22 @@ fn user_board() -> PlatformDescription {
         max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
-                base: 0x0000_0000,
+                base: Some(0x0000_0000),
                 size: 0x0001_0000,
             },
             RegionSpec::Rom {
-                base: 0x5000_0000,
+                base: Some(0x5000_0000),
                 size: 0x0000_1000,
             },
             RegionSpec::Peripheral {
-                base: 0x6000_0000,
+                base: Some(0x6000_0000),
                 device: DeviceSpec::Gpio {
                     id: "GPIO0".to_string(),
                 },
             },
         ],
         roles: None,
+        pins: None,
     }
 }
 
@@ -268,7 +269,7 @@ fn b1_compose_is_a_pure_function() {
     let ops = vec![
         MemoryMapOp::UpsertRegion {
             spec: RegionSpec::Ram {
-                base: 0x0000_0000,
+                base: Some(0x0000_0000),
                 size: 0x0002_0000,
             },
         },
@@ -319,13 +320,13 @@ fn b2_the_delta_path_validates_the_whole_composed_map() {
             ops: vec![
                 MemoryMapOp::UpsertRegion {
                     spec: RegionSpec::Ram {
-                        base: 0x1000_0000,
+                        base: Some(0x1000_0000),
                         size: 0x0000_1000,
                     },
                 },
                 MemoryMapOp::UpsertRegion {
                     spec: RegionSpec::Ram {
-                        base: 0x1000_0800,
+                        base: Some(0x1000_0800),
                         size: 0x0000_1000,
                     },
                 },
@@ -356,7 +357,7 @@ fn b2_the_delta_path_applies_the_result_in_one_go() {
             ops: vec![
                 MemoryMapOp::UpsertRegion {
                     spec: RegionSpec::Ram {
-                        base: 0x0000_0000,
+                        base: Some(0x0000_0000),
                         size: 0x0003_0000,
                     },
                 },
@@ -378,12 +379,12 @@ fn b2_the_delta_path_applies_the_result_in_one_go() {
         .effective
         .regions
         .iter()
-        .find(|region| region.base() == 0x0000_0000)
+        .find(|region| region.base() == Some(0x0000_0000))
         .expect("低段 RAM 必须还在");
     assert_eq!(
         ram,
         &RegionSpec::Ram {
-            base: 0x0000_0000,
+            base: Some(0x0000_0000),
             size: 0x0001_0000,
         },
         "**一次性应用** ⇒ 前面那条合法的 op 也不许生效"
@@ -407,7 +408,7 @@ fn b2_the_composition_comes_before_the_whole_map_validation() {
                 // ⚠️ 这条单独看会让整图重叠（V-6 ⇒ `E_PLT-06`）。
                 MemoryMapOp::UpsertRegion {
                     spec: RegionSpec::Ram {
-                        base: 0x0000_0000,
+                        base: Some(0x0000_0000),
                         size: 0x5000_1000,
                     },
                 },
@@ -452,18 +453,19 @@ fn target_with_three_changes() -> PlatformDescription {
         regions: vec![
             // ⚠️ 改一段：低段 RAM 64 KiB → 128 KiB。
             RegionSpec::Ram {
-                base: 0x0000_0000,
+                base: Some(0x0000_0000),
                 size: 0x0002_0000,
             },
             // ⚠️ 删一段：`0x5000_0000` 那段 ROM 没了。
             RegionSpec::Peripheral {
-                base: 0x6000_0000,
+                base: Some(0x6000_0000),
                 device: DeviceSpec::Gpio {
                     id: "GPIO0".to_string(),
                 },
             },
         ],
         roles: None,
+        pins: None,
     }
 }
 
@@ -473,7 +475,7 @@ fn three_change_ops() -> Vec<MemoryMapOp> {
         // ⚠️ 改一段：低段 RAM 64 KiB → 128 KiB。
         MemoryMapOp::UpsertRegion {
             spec: RegionSpec::Ram {
-                base: 0x0000_0000,
+                base: Some(0x0000_0000),
                 size: 0x0002_0000,
             },
         },
@@ -533,12 +535,12 @@ fn b4_equivalence_holds_for_changing_one_region() {
     let base = base_board();
     let mut target = base.clone();
     target.regions[0] = RegionSpec::Ram {
-        base: 0x0000_0000,
+        base: Some(0x0000_0000),
         size: 0x0002_0000,
     };
     let ops = vec![MemoryMapOp::UpsertRegion {
         spec: RegionSpec::Ram {
-            base: 0x0000_0000,
+            base: Some(0x0000_0000),
             size: 0x0002_0000,
         },
     }];
@@ -566,7 +568,9 @@ fn b4_equivalence_holds_for_changing_one_region() {
 fn b4_equivalence_holds_for_removing_one_region() {
     let base = base_board();
     let mut target = base.clone();
-    target.regions.retain(|region| region.base() != 0x5000_0000);
+    target
+        .regions
+        .retain(|region| region.base() != Some(0x5000_0000));
     let ops = vec![MemoryMapOp::RemoveRegion { base: 0x5000_0000 }];
 
     let mut host_whole = host_with_board(&base);
@@ -589,7 +593,7 @@ fn b4_equivalence_holds_for_removing_one_region() {
         !effective_delta
             .regions
             .iter()
-            .any(|region| region.base() == 0x5000_0000),
+            .any(|region| region.base() == Some(0x5000_0000)),
         "「删一段」⇒ 那段必须真的没了：{:?}",
         effective_delta.regions
     );
@@ -646,12 +650,12 @@ fn b5_an_illegal_overlap_is_rejected_by_both_paths_and_changes_nothing() {
     // `0x5000_0000` 那段 ROM（V-6 ⇒ `E_PLT-06`）。
     let mut illegal_target = base.clone();
     illegal_target.regions[0] = RegionSpec::Ram {
-        base: 0x0000_0000,
+        base: Some(0x0000_0000),
         size: 0x5000_1000,
     };
     let illegal_ops = vec![MemoryMapOp::UpsertRegion {
         spec: RegionSpec::Ram {
-            base: 0x0000_0000,
+            base: Some(0x0000_0000),
             size: 0x5000_1000,
         },
     }];

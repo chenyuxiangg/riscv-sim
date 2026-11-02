@@ -42,7 +42,7 @@ fn board_with_timer() -> PlatformDescription {
     let mut description =
         platform::builtin_description(platform::PLATFORM_ID_QEMU_VIRT).expect("内置描述 qemu-virt");
     description.regions.push(RegionSpec::Peripheral {
-        base: 0x2000_2000,
+        base: Some(0x2000_2000),
         device: DeviceSpec::TimerRiscv {
             id: "TIMER0".to_string(),
             irq_line: 11,
@@ -190,6 +190,15 @@ fn k5_a_description_can_declare_a_timer_riscv_and_the_kernel_builds_it() {
 
 /// **K-6** —— ⚠️ **必要对照**：`timer_riscv` 的**窗口**与 `clint` 的**不同**
 /// ⇒ ⇒ 证明内核造的是**那台**器件（不是把 CLINT 塞进去了）。
+///
+/// ⚠️ ⚠️ **v0.73 施工期订正（判别力修复）**：这条判据**原来只读注册表**
+///   （`types::window_bytes("timer_riscv")` vs `types::window_bytes("clint")`）
+///   ⇒ ⇒ ⇒ **它根本没读内核造出来的那台器件** ⇒ ⇒ ⇒ 于是「把工厂改成造
+///   CLINT」那条变异（**T-3**）**打不红**（**实测零红**）⇒ ⇒ ⇒ **零判别力**。
+///   ⇒ ⇒ **修法**：让它**真的去读那台器件** ⇒ ⇒ 写它的 `MTIMECMP_LO`
+///   （偏移 **0x8**）再读回来 ⇒ ⇒ **`timer_riscv`** 读得回**写进去的值**
+///   （那是 `mtimecmp` 的低半）⇒ ⇒ **CLINT** 读**不回来**（偏移 0x8 是
+///   `msip` 数组 ⇒ ⇒ 那是 pending 位、**不是数据**）⇒ ⇒ ⇒ ⇒ **判别力回来**。
 #[test]
 fn k6_the_timer_window_is_not_the_clint_window() {
     let timer = types::window_bytes("timer_riscv").expect("注册表里有 timer_riscv");
@@ -209,6 +218,47 @@ fn k6_the_timer_window_is_not_the_clint_window() {
         4,
         "`timer_riscv` 的寄存器表必须是 4 条（MTIME_LO / MTIME_HI / MTIMECMP_LO / MTIMECMP_HI）"
     );
+
+    // ⚠️ ⚠️ **真的去读那台器件**（⇒ ⇒ 这才是「内核造的是**那台**」的证据）——
+    let description = board_with_timer();
+    let mut host = KernelHost::new();
+    let events = host.handle_message(&Message::command(
+        1,
+        CommandPayload::SetMemoryMap {
+            description: description.clone(),
+            expected_revision: None,
+        },
+    ));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Error { .. })),
+        "装板不该报错：{events:?}"
+    );
+
+    // ⚠️ **偏移 0x8 = `MTIMECMP_LO`**（`timer_riscv` 的第二个可写寄存器）⇒ ⇒
+    //   写进去**读得回来** ⇒ ⇒ ⇒ 那台器件**真的**是 `timer_riscv`
+    //   ⇒ ⇒ ⇒ 换成 CLINT 就**读不回来**（`msip` 数组 ⇒ pending 位）。
+    const MTIMECMP_LO_OFFSET: u32 = 0x8;
+    const PROBE_VALUE: u32 = 0x1234_5678;
+    host.bus_mut()
+        .write(
+            0x2000_2000 + MTIMECMP_LO_OFFSET,
+            crate::m14_bus::BusWidth::Word,
+            PROBE_VALUE,
+        )
+        .expect("写 timer_riscv 的 MTIMECMP_LO");
+    let readback = host
+        .bus()
+        .read_only(
+            0x2000_2000 + MTIMECMP_LO_OFFSET,
+            crate::m14_bus::BusWidth::Word,
+        )
+        .expect("读回 timer_riscv 的 MTIMECMP_LO");
+    assert_eq!(
+        readback, PROBE_VALUE,
+        "写进 MTIMECMP_LO 的值必须读得回来 ⇒ 那台器件真的是 timer_riscv"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +269,7 @@ fn k6_the_timer_window_is_not_the_clint_window() {
 fn board_with_two_uarts() -> PlatformDescription {
     let mut description = board_with_timer();
     description.regions.push(RegionSpec::Peripheral {
-        base: 0x1000_1000,
+        base: Some(0x1000_1000),
         device: DeviceSpec::Uart16550 {
             id: "UART1".to_string(),
             irq_line: 12,
@@ -387,5 +437,101 @@ fn k9b_a_role_naming_the_wrong_kind_of_device_is_rejected() {
         err.scenario, 18,
         "必须报 `E_PLT-18`，实际是 scenario={}",
         err.scenario
+    );
+}
+
+// ---------------------------------------------------------------------------
+// D-175 的 D1 —— **引脚表**（`pins` 段 · 本批只定**形状**）
+// ---------------------------------------------------------------------------
+
+/// **K-11** —— 引脚表指向**存在**的器件 ⇒ ⇒ 描述**合法** ⇒ ⇒ 装得上。
+///
+/// ⚠️ **本批只定形状**：引脚名 / 信号名**自由** ⇒ ⇒ 这里**不**判它们
+/// （那属**第 58 批**的通用连接路由）⇒ ⇒ ⇒ **边界如实登记**。
+#[test]
+fn k11_a_pin_table_naming_an_existing_device_is_accepted() {
+    let mut description = board_with_two_uarts();
+    description.pins = Some(vec![
+        riscv_sim_contract::platform::PinBinding {
+            device: "UART0".to_string(),
+            pin: "rx".to_string(),
+            signal: "s_uart0_rx".to_string(),
+        },
+        riscv_sim_contract::platform::PinBinding {
+            device: "UART1".to_string(),
+            pin: "tx".to_string(),
+            signal: "s_uart1_tx".to_string(),
+        },
+    ]);
+    assert!(
+        description.validate().is_ok(),
+        "引脚表指向已声明的器件必须合法：{:?}",
+        description.validate()
+    );
+
+    // ⚠️ **装得上**（真走一遍契约命令）。
+    let mut host = KernelHost::new();
+    let events = host.handle_message(&Message::command(
+        1,
+        CommandPayload::SetMemoryMap {
+            description: description.clone(),
+            expected_revision: None,
+        },
+    ));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Error { .. })),
+        "装板不该报错：{events:?}"
+    );
+}
+
+/// **K-12** —— 引脚表指向**不存在**的器件 ⇒ ⇒ **拒**（`E_PLT-19`）⇒ ⇒
+/// **不静默**。
+#[test]
+fn k12_a_pin_table_naming_a_missing_device_is_rejected() {
+    let mut description = board_with_two_uarts();
+    description.pins = Some(vec![riscv_sim_contract::platform::PinBinding {
+        device: "NOPE".to_string(),
+        pin: "rx".to_string(),
+        signal: "s_nope_rx".to_string(),
+    }]);
+    let err = description
+        .validate()
+        .expect_err("引脚表指了不存在的器件必须被拒");
+    assert_eq!(
+        err.family,
+        riscv_sim_contract::error::PLATFORM_FAMILY,
+        "场景码的族必须是 PLT"
+    );
+    assert_eq!(
+        err.scenario, 19,
+        "必须报 `E_PLT-19`（引脚表非法）⇒ ⇒ 实际是 scenario={}",
+        err.scenario
+    );
+}
+
+/// **K-10** —— **没有 `pins` 段的板 ⇒ ⇒ 行为逐字不变**（缺省 = 无引脚）。
+#[test]
+fn k10_a_board_without_a_pin_table_behaves_exactly_as_before() {
+    let description = board_with_two_uarts();
+    assert!(
+        description.pins.is_none(),
+        "这块板**不许**带引脚段（⇒ ⇒ 缺省那档）"
+    );
+    // ⚠️ **装得上** ⇒ ⇒ 缺省**不**改任何行为。
+    let mut host = KernelHost::new();
+    let events = host.handle_message(&Message::command(
+        1,
+        CommandPayload::SetMemoryMap {
+            description: description.clone(),
+            expected_revision: None,
+        },
+    ));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Error { .. })),
+        "装板不该报错：{events:?}"
     );
 }

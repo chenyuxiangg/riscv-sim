@@ -215,7 +215,10 @@ describe("板档案 · 规则集版本（B-1 ~ B-4）", () => {
             ["description", "id", "rules_version"],
             "条目字段集合必须是 { id, description, rules_version } 三个",
         );
-        assert.equal(entry.rules_version, 3, "规则版本必须是当前版本 3");
+        // ⚠️ **v0.73（STAGE-49）**：规则集 **3 → 4**（描述格式升版 ⇒ ⇒ 规则集
+        // 跟着走）⇒ ⇒ 断言跟到 **4** ⇒ ⇒ **判别力保留**（它钉的仍是
+        // 「落库条目带的是**当前**规则版本」）。
+        assert.equal(entry.rules_version, 4, "规则版本必须是当前版本 4");
         assert.equal(entry.id, "rules-board");
         assert.deepEqual(entry.description, BOARD_DESC, "描述一个字段都不许改");
         // ⚠️ **不存时间戳、不存 `name`**（既有纪律一字不变）。
@@ -229,14 +232,14 @@ describe("板档案 · 规则集版本（B-1 ~ B-4）", () => {
         await store.put(boardstore.boardEntry(BOARD_DESC));
         const rows = await store.list();
         assert.equal(rows.length, 1);
-        assert.equal(rows[0].rules_version, 3, "读回来的条目必须带着规则版本");
+        assert.equal(rows[0].rules_version, message.PLATFORM_RULES_VERSION, "读回来的条目必须带着规则版本");
     });
 
     test("B-2 老条目（**没有** `rules_version`）⇒ 报 `{ok:false, reason:\"rules\"}`", () => {
         const result = boardstore.checkBoardRules(OLD_ENTRY);
         assert.equal(result.ok, false);
         assert.equal(result.reason, "rules");
-        assert.equal(result.expected, 3, "期望的是当前规则版本 3");
+        assert.equal(result.expected, message.PLATFORM_RULES_VERSION, "期望的是当前规则版本 3");
         assert.equal(result.actual, 1, "老条目隐含的规则版本是 1");
         // ⚠️ **隐含值 1** = 「规则集收紧**之前**的那一版」（裁决 G）。
         assert.equal(boardstore.boardRulesVersion(OLD_ENTRY), 1);
@@ -257,16 +260,24 @@ describe("板档案 · 规则集版本（B-1 ~ B-4）", () => {
         const result = boardstore.checkBoardRules(entry);
         assert.equal(result.ok, true);
         assert.equal("reason" in result, false, "通过的结果里不该带 reason");
-        assert.equal(boardstore.boardRulesVersion(entry), 3);
+        assert.equal(boardstore.boardRulesVersion(entry), message.PLATFORM_RULES_VERSION);
     });
 
-    test("B-4 `checkBoardVersion` 对 `schema_version != 1` 仍报 `reason:\"version\"`", () => {
+    test("B-4 `checkBoardVersion` 对**不支持**的 `schema_version` 仍报 `reason:\"version\"`", () => {
         // ⚠️ **形状**不对 ⇒ `version`。
-        const shape = boardstore.checkBoardVersion({ ...BOARD_DESC, schema_version: 2 });
+        //
+        // ⚠️ **v0.73（STAGE-49 · B2）**：**版本 2 现在是合法的**（⇒ ⇒
+        // **缺省优先**：老描述 `schema_version = 1` 仍能装 ⇒ ⇒ ⇒ 缺的
+        // 基址由内核分配）⇒ ⇒ ⇒ 这条判据**改成**「**不支持**的版本」
+        // （⇒ ⇒ 0 与 99 ⇒ ⇒ **不静默硬解**）⇒ ⇒ ⇒ **判别力保留**。
+        const shape = boardstore.checkBoardVersion({ ...BOARD_DESC, schema_version: 99 });
         assert.equal(shape.ok, false);
         assert.equal(shape.reason, "version");
-        assert.equal(shape.expected, 1);
-        assert.equal(shape.actual, 2);
+        assert.equal(shape.expected, message.PLATFORM_SCHEMA_VERSION);
+        assert.equal(shape.actual, 99);
+        // ⚠️ **老格式（版本 1）⇒ ⇒ 仍然合法**（缺省优先 · 存量零风险）。
+        const old = boardstore.checkBoardVersion({ ...BOARD_DESC, schema_version: 1 });
+        assert.equal(old.ok, true, "老描述（schema_version = 1）必须仍然合法（缺省优先）");
         // ⚠️ **规则**已收紧 ⇒ `rules` ⇒ ⇒ **两个 reason 不共用**（裁决 H）。
         const rules = boardstore.checkBoardRules(OLD_ENTRY);
         assert.equal(rules.ok, false);
@@ -299,7 +310,7 @@ describe("板档案 · 选用与升级（app 层 · B-5 ~ B-7）", () => {
             `提示里必须含「这块板的规则版本」（实际提示：${text}）`,
         );
         assert.ok(
-            text.includes("当前规则版本 3"),
+            text.includes(`当前规则版本 ${message.PLATFORM_RULES_VERSION}`),
             `提示里必须含「当前规则版本」（实际提示：${text}）`,
         );
         // ⚠️ **提示之后仍然可以选用**（前端**不判**合法性）⇒ 草稿照常载入。
@@ -347,17 +358,17 @@ describe("板档案 · 选用与升级（app 层 · B-5 ~ B-7）", () => {
         // ⚠️ **库里那一条被重写了**（带上当前规则版本）。
         const rows = await store.list();
         assert.equal(rows.length, 1);
-        assert.equal(rows[0].rules_version, 3, "条目必须被升级到当前规则版本");
+        assert.equal(rows[0].rules_version, message.PLATFORM_RULES_VERSION, "条目必须被升级到当前规则版本");
         assert.deepEqual(rows[0].description, BOARD_DESC, "描述一个字都不许改");
 
         // ⚠️ **视图状态里的档案**也跟着升级（不是第二个真相源：同一份条目）。
         const archived = m03.getState("memory-map").archive;
         assert.equal(archived.length, 1);
-        assert.equal(archived[0].rules_version, 3);
+        assert.equal(archived[0].rules_version, message.PLATFORM_RULES_VERSION);
 
         // ⚠️ **升级要说得出来**（裁决 J：不静默迁移）。
         assert.ok(
-            noteText().includes("已升级到当前规则版本 3"),
+            noteText().includes(`已升级到当前规则版本 ${message.PLATFORM_RULES_VERSION}`),
             `升级必须有用户可见的提示（实际：${noteText()}）`,
         );
     });
@@ -384,7 +395,7 @@ describe("板档案 · 选用与升级（app 层 · B-5 ~ B-7）", () => {
 
         const rows = await store.list();
         assert.equal(rows.length, 1);
-        assert.equal(rows[0].rules_version, 3, "带器件的板也必须升级（按 id 判）");
+        assert.equal(rows[0].rules_version, message.PLATFORM_RULES_VERSION, "带器件的板也必须升级（按 id 判）");
     });
 
     test("B-6（对照）内核**接受**但档案里**没有**这一块 ⇒ 不升级、不谎报", async () => {
@@ -472,7 +483,7 @@ describe("存量板（rules_version = 2）· C-4", () => {
         const result = boardstore.checkBoardRules(V33_ENTRY);
         assert.equal(result.ok, false);
         assert.equal(result.reason, "rules", "规则集收紧 ⇒ reason 仍是 `rules`");
-        assert.equal(result.expected, 3, "期望的是当前规则版本 3");
+        assert.equal(result.expected, message.PLATFORM_RULES_VERSION, "期望的是当前规则版本 3");
         assert.equal(result.actual, 2, "存量板就是按 2 校验过的");
         assert.equal(boardstore.boardRulesVersion(V33_ENTRY), 2);
     });
@@ -492,7 +503,7 @@ describe("存量板（rules_version = 2）· C-4", () => {
             `提示里必须含「这块板的规则版本」（实际提示：${text}）`,
         );
         assert.ok(
-            text.includes("当前规则版本 3"),
+            text.includes(`当前规则版本 ${message.PLATFORM_RULES_VERSION}`),
             `提示里必须含「当前规则版本」（实际提示：${text}）`,
         );
         // ⚠️ **提示之后仍然可以选用**（前端**不判**合法性）⇒ 草稿照常载入。
@@ -522,17 +533,17 @@ describe("存量板（rules_version = 2）· C-4", () => {
         // ⚠️ **库里那一条被重写了**（带上当前规则版本 3）。
         const rows = await store.list();
         assert.equal(rows.length, 1);
-        assert.equal(rows[0].rules_version, 3, "存量条目必须被升级到当前规则版本 3");
+        assert.equal(rows[0].rules_version, message.PLATFORM_RULES_VERSION, "存量条目必须被升级到当前规则版本 3");
         assert.deepEqual(rows[0].description, BOARD_DESC, "描述一个字都不许改");
 
         // ⚠️ **视图状态里的档案**也跟着升级（不是第二个真相源：同一份条目）。
         const archived = m03.getState("memory-map").archive;
         assert.equal(archived.length, 1);
-        assert.equal(archived[0].rules_version, 3);
+        assert.equal(archived[0].rules_version, message.PLATFORM_RULES_VERSION);
 
         // ⚠️ **升级要说得出来**（裁决 J：不静默迁移）。
         assert.ok(
-            noteText().includes("已升级到当前规则版本 3"),
+            noteText().includes(`已升级到当前规则版本 ${message.PLATFORM_RULES_VERSION}`),
             `升级必须有用户可见的提示（实际：${noteText()}）`,
         );
     });

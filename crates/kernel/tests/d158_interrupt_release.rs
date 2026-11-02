@@ -1132,13 +1132,13 @@ fn the_contract_layer_version_numbers_are_untouched() {
     );
     assert_eq!(
         riscv_sim_contract::platform::PLATFORM_SCHEMA_VERSION,
-        1,
-        "板级描述的版本号不许动"
+        2,
+        "板级描述的版本号（v0.73 批 STAGE-49 升到 2：`base` 可缺省 ⇒ ⇒ 描述格式变了）"
     );
     assert_eq!(
         riscv_sim_contract::platform::PLATFORM_RULES_VERSION,
-        3,
-        "板级合法性规则集的版本号不许动"
+        4,
+        "板级合法性规则集的版本号（v0.73 批 STAGE-49 升到 4：规则集**跟着**描述格式走）"
     );
 }
 

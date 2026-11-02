@@ -301,8 +301,8 @@ describe("板级内存图 · 编辑器（规格 §3.3）", () => {
         assert.equal(detail.action, "submit-memory-map");
         const description = detail.params.description;
         assert.equal(
-            description.schema_version, 1,
-            "描述的 `schema_version` 必须是 `PLATFORM_SCHEMA_VERSION` = 1（不是信封的 6）",
+            description.schema_version, mm.PLATFORM_SCHEMA_VERSION,
+            "描述的 `schema_version` 必须是 `PLATFORM_SCHEMA_VERSION`（不是信封的那个）",
         );
         assert.deepEqual(
             Object.keys(description).sort(),
@@ -1838,5 +1838,180 @@ describe("STAGE-49 · 角色声明（roles）的草稿往返", () => {
         );
         assert.equal(mm.normalizeRoles(null), null, "null ⇒ null");
         assert.equal(mm.normalizeRoles({}), null, "空 ⇒ null");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// D-175 的 D1 —— **引脚表**（`pins` 段 · 本批只定**形状**）
+// ---------------------------------------------------------------------------
+
+describe("STAGE-49 · 引脚表（pins）的草稿往返", () => {
+    test("描述里的 `pins` ⇒ ⇒ 草稿里带上 ⇒ ⇒ 提交回去**还在**", () => {
+        const description = {
+            schema_version: 1,
+            id: "pins-board",
+            name: "引脚板",
+            priority: 100,
+            auto_selectable: false,
+            region_budget_bytes: 1048576,
+            regions: [{ kind: "ram", base: 0, size: 4096 }],
+            pins: [{ device: "UART0", pin: "rx", signal: "s_uart0_rx" }],
+        };
+        const draft = mm.draftFromDescription(description);
+        assert.deepEqual(
+            draft.pins, [{ device: "UART0", pin: "rx", signal: "s_uart0_rx" }],
+            "描述里的引脚表**必须**进草稿（否则一提交就把引脚丢了）",
+        );
+        const back = mm.draftToDescription(draft);
+        assert.deepEqual(
+            back.pins, [{ device: "UART0", pin: "rx", signal: "s_uart0_rx" }],
+            "引脚表必须**逐字段**回到线上描述",
+        );
+    });
+
+    test("没有 `pins` 的板 ⇒ ⇒ 往返后**仍然没有**（不塞空数组）", () => {
+        const description = {
+            schema_version: 1,
+            id: "no-pins-board",
+            name: "无引脚板",
+            priority: 100,
+            auto_selectable: false,
+            region_budget_bytes: 1048576,
+            regions: [{ kind: "ram", base: 0, size: 4096 }],
+        };
+        const draft = mm.draftFromDescription(description);
+        assert.equal(draft.pins, undefined, "没有引脚表的板**不许**被塞一个空数组");
+        const back = mm.draftToDescription(draft);
+        assert.equal(
+            back.pins, undefined,
+            "线上描述**不许**多一个 `pins` 键（与契约层的 skip_serializing_if 同形）",
+        );
+    });
+
+    test("归一化**不判定**（前端**不**写第二个校验器）", () => {
+        // ⚠️ 引脚表指错了由**内核**的 V-21 裁决 ⇒ ⇒ 前端**只透传** ⇒ ⇒
+        // 前端**不许**因为「这个器件在不在」而改写引脚表。
+        const pins = mm.normalizePins([{ device: "NOT-THERE", pin: "rx", signal: "s" }]);
+        assert.equal(pins[0].device, "NOT-THERE", "前端**不许**自己判引脚表指得对不对");
+        assert.equal(mm.normalizePins(null), null, "null ⇒ null");
+        assert.equal(mm.normalizePins([]), null, "空 ⇒ null（不塞空数组）");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// STAGE-49 · v0.73 批 —— **描述格式一次升版**（N 组）
+//
+// 这一套盯住规格 §4.3 的四条：
+//
+//   N-1 前端镜像的**四处版本号**与契约层**逐字相同**；
+//   N-2 前端**零处**自己判「描述格式对不对」⇒ ⇒ 合法性**只**由内核判；
+//   N-3 板档案的 `rules_version` 为**旧**的板 ⇒ ⇒ **仍能装** ⇒ ⇒ 前端
+//       **显式提示**「按旧规则存的」；
+//   N-4 前端**不自动**改写板档案的描述 ⇒ ⇒ 迁移是**用户触发**的。
+//
+// ⚠️ **N-1 的「四处」** = `SCHEMA_VERSION`（契约信封）· `SIM_STATE_SCHEMA_VERSION`
+//   · `PLATFORM_SCHEMA_VERSION`（描述**形状**）· `PLATFORM_RULES_VERSION`（**规则集**）
+//   ⇒ ⇒ 四个数**各管各的**（⇒ ⇒ 别混）。
+// ---------------------------------------------------------------------------
+
+describe("STAGE-49 · v0.73 描述格式升版（N 组）", () => {
+    test("N-1 · 前端镜像的**四处版本号**与契约层**逐字相同**", () => {
+        // ⚠️ **逐字读 Rust 源码**（⇒ ⇒ 不是「跟一个常量比」那种恒真写法）。
+        const contractSrc = readFileSync(
+            resolve(frontDir, "../crates/contract/src/lib.rs"),
+            "utf8",
+        );
+        const platformSrc = readFileSync(
+            resolve(frontDir, "../crates/contract/src/platform.rs"),
+            "utf8",
+        );
+        const modelSrc = readFileSync(
+            resolve(frontDir, "../crates/contract/src/model.rs"),
+            "utf8",
+        );
+        // ⚠️ **前端镜像导出的是三个**（`SIM_STATE_SCHEMA_VERSION` 是**会话
+        //   快照**的版本 ⇒ ⇒ 前端不碰它）⇒ ⇒ 见规格 §7.1 订正 11。
+        const expectations = [
+            ["SCHEMA_VERSION", contractSrc],
+            ["PLATFORM_SCHEMA_VERSION", platformSrc],
+            ["PLATFORM_RULES_VERSION", platformSrc],
+        ];
+        for (const [name, src] of expectations) {
+            const m = src.match(new RegExp(`pub const ${name}:\\s*u32\\s*=\\s*(\\d+)`));
+            assert.ok(m, `契约层必须定义 ${name}`);
+            assert.equal(
+                Number(message[name]),
+                Number(m[1]),
+                `${name}：前端镜像必须与契约层**逐字相同**`,
+            );
+        }
+    });
+
+    test("N-2 · 前端**零处**自己判「描述格式对不对」⇒ ⇒ 合法性**只**由内核判", () => {
+        // ⚠️ **读源码**（⇒ ⇒ 前端**不许**出现「描述格式版本对不对」那套判定）。
+        const mmSrc = readFileSync(resolve(frontDir, "views/components/memory-map.js"), "utf8");
+        const storeSrc = readFileSync(resolve(frontDir, "services/m23_boardstore.js"), "utf8");
+        // ⚠️ **允许**的只有「**读**那个版本号去比对」⇒ ⇒ **不许**的是
+        //   「**自己判**一份描述**合不合法**」⇒ ⇒ ⇒ 前端**不写第二个校验器**。
+        for (const [label, src] of [["memory-map", mmSrc], ["boardstore", storeSrc]]) {
+            assert.ok(
+                !/schema_version\s*!==|schema_version\s*==\s*\d/.test(src),
+                `${label}：前端**不许**自己判描述的格式版本对不对（合法性只由内核判）`,
+            );
+        }
+    });
+
+    test("N-3 · 存量板（`rules_version` 是**旧**的）⇒ ⇒ **仍能装** ⇒ ⇒ 前端**显式提示**", async () => {
+        const boardstore = await importFront("services/m23_boardstore.js");
+        // ⚠️ **老条目**（按旧规则校验过的）⇒ ⇒ **规则版本落后** ⇒ ⇒ 要提示。
+        const oldEntry = {
+            id: "old-board",
+            description: { schema_version: 1, id: "old-board", name: "老板" },
+            rules_version: message.PLATFORM_RULES_VERSION - 1,
+        };
+        const check = boardstore.checkBoardRules(oldEntry);
+        assert.equal(check.ok, false, "老条目的规则版本落后 ⇒ ⇒ 要报出来");
+        assert.equal(check.reason, "rules");
+        const notice = boardstore.boardRulesNotice(oldEntry);
+        assert.ok(notice, "老条目**必须**有一句提示（**不静默**）");
+        assert.ok(
+            notice.includes(String(message.PLATFORM_RULES_VERSION)),
+            "提示里**必须**说清当前规则版本（用户看得见差在哪）",
+        );
+        // ⚠️ **提示 ≠ 拒用** ⇒ ⇒ 老板**仍能装**（⇒ ⇒ 存量零风险）。
+        assert.ok(
+            boardstore.checkBoardVersion(oldEntry.description).ok,
+            "老描述（schema_version = 1）**仍能装**（缺省优先 ⇒ ⇒ 存量零风险）",
+        );
+    });
+
+    test("N-4 · 前端**不自动**改写板档案的描述 ⇒ ⇒ 迁移是**用户触发**的", async () => {
+        const boardstore = await importFront("services/m23_boardstore.js");
+        // ⚠️ **缺基址**的那份描述 ⇒ ⇒ 前端**不许**把它**自动**填上基址
+        // （⇒ ⇒ 「由内核决定基址」那个**用户意图**必须**留住**）。
+        const description = {
+            schema_version: message.PLATFORM_SCHEMA_VERSION,
+            id: "auto-base-board",
+            name: "自动基址板",
+            priority: 100,
+            auto_selectable: false,
+            region_budget_bytes: 1048576,
+            regions: [{ kind: "ram", size: 4096 }],
+        };
+        const draft = mm.draftFromDescription(description);
+        assert.equal(
+            draft.regions[0].base,
+            "",
+            "缺基址的段**必须**在草稿里保持**留空**（前端**不许**自动填 0）",
+        );
+        const back = mm.draftToDescription(draft);
+        assert.equal(
+            "base" in back.regions[0],
+            false,
+            "线上描述**不许**多一个 `base` 键（前端**不许**自动改写）",
+        );
+        // ⚠️ **板档案那一层**也一样：它只**存**用户交的那份 ⇒ ⇒ 不改写。
+        const entry = boardstore.boardEntry(description);
+        assert.deepEqual(entry.description, description, "板档案**不许**改写描述");
     });
 });

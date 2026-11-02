@@ -57,7 +57,9 @@ fn described_low_ram() -> (u32, u32) {
     described_regions()
         .iter()
         .find_map(|region| match region {
-            RegionSpec::Ram { base, size } if *base == 0 => Some((*base, *size)),
+            RegionSpec::Ram { size, .. } if region.base() == Some(0) => {
+                Some((region.base()?, *size))
+            }
             _ => None,
         })
         .expect("default 描述里有 base 为 0 的低段 RAM")
@@ -69,7 +71,7 @@ fn described_high_ram() -> (u32, u32) {
     let mut rams: Vec<(u32, u32)> = described_regions()
         .iter()
         .filter_map(|region| match region {
-            RegionSpec::Ram { base, size } => Some((*base, *size)),
+            RegionSpec::Ram { size, .. } => Some((region.base()?, *size)),
             _ => None,
         })
         .collect();
@@ -87,7 +89,7 @@ fn described_gpio_id() -> String {
     let base = described_gpio_base();
     described_regions()
         .iter()
-        .find(|region| region.base() == base)
+        .find(|region| region.base() == Some(base))
         .and_then(|region| region.device_id())
         .expect("默认描述里的 GPIO 有器件 id")
         .to_string()

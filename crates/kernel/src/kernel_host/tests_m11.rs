@@ -44,8 +44,10 @@ fn ram_low_end() -> u32 {
     let low = platform::regions_by_base(&description)
         .into_iter()
         .find_map(|region| match region {
-            riscv_sim_contract::platform::RegionSpec::Ram { base, size } if *base == 0 => {
-                Some(base + size)
+            riscv_sim_contract::platform::RegionSpec::Ram { size, .. }
+                if region.base() == Some(0) =>
+            {
+                Some(region.base().unwrap_or(0) + size)
             }
             _ => None,
         })

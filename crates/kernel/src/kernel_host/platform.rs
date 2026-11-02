@@ -55,8 +55,8 @@ use std::path::Path;
 use std::rc::Rc;
 
 use riscv_sim_contract::error::{
-    PlatformError, E_PLT_09_UNKNOWN_PLATFORM, E_PLT_10_PLATFORM_FILE_UNREADABLE,
-    E_PLT_11_PLATFORM_FILE_MALFORMED, PLATFORM_FAMILY,
+    PlatformError, E_PLT_05_OVERFLOW, E_PLT_07_OVER_BUDGET, E_PLT_09_UNKNOWN_PLATFORM,
+    E_PLT_10_PLATFORM_FILE_UNREADABLE, E_PLT_11_PLATFORM_FILE_MALFORMED, PLATFORM_FAMILY,
 };
 use riscv_sim_contract::platform::{
     DeviceSpec, PlatformDescription, RegionSpec, WIRING_EVENT_RX_READY,
@@ -186,6 +186,14 @@ pub fn description_from_file(path: &Path) -> Result<PlatformDescription, Platfor
 /// ⚠️ **为什么需要它**：总线的 `export_map()` 遍历的是 `BTreeMap` ⇒
 /// 天然按 base 升序 ⇒ 「描述的第 i 个区域」与「导出地图的第 i 个区域」
 /// 要能一一对应 ⇒ 这里给出**同样顺序**的视图（描述本身允许乱序）。
+///
+/// ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** 的段排**前面**（`None` <
+/// `Some`）⇒ ⇒ 排序**稳定** ⇒ ⇒ 缺基址的段之间**保持声明顺序** ⇒ ⇒ ⇒
+/// **可复算**。
+///
+/// ⚠️ **调用方必须先分配基址**（[`assign_bases`]）⇒ ⇒ 否则「第一个
+/// UART」那个口径**没有意义**（它还没有位置）⇒ ⇒ ⇒ 那条纪律由**调用
+/// 时序**保证（[`map_platform`] 里**第一句**就是分配）。
 pub fn regions_by_base(description: &PlatformDescription) -> Vec<&RegionSpec> {
     let mut regions: Vec<&RegionSpec> = description.regions.iter().collect();
     regions.sort_by_key(|region| region.base());
@@ -201,7 +209,7 @@ pub fn device_base(description: &PlatformDescription, device_id: &str) -> Option
         .regions
         .iter()
         .filter(|region| region.device_id() == Some(device_id))
-        .map(|region| region.base())
+        .filter_map(|region| region.base())
         .next()
 }
 
@@ -507,8 +515,19 @@ pub fn map_platform(
     bus: &mut Bus,
     description: &PlatformDescription,
 ) -> Result<MappedDevices, PlatformError> {
+    // ⚠️ **v0.73（STAGE-49 · B2）**：**先分配基址**，**再**校验，**再**建图。
+    //
+    // ⚠️ **为什么分配在校验之前**（§7.1 订正 6 ①）：契约层的 V-5（溢出）
+    // 与 V-6（重叠）都**要基址**⇒ ⇒ 缺基址的段**判不了**⇒ ⇒ ⇒ 分配
+    // 完了才判得出来 ⇒ ⇒ ⇒ **分配器自己**判「分配出来的图重叠不重叠」
+    // ⇒ ⇒ ⇒ 仍报**既有码 `E_PLT-06`**（⇒ ⇒ **零新场景码**）。
+    //
+    // ⚠️ **老描述 ⇒ 分配是恒等变换**（⇒ ⇒ **一个字节都不变**）⇒ ⇒
+    // 存量板档案**零风险**（裁决 K）。
+    let assigned = assign_bases(description)?;
     // 校验**先**于建图 ⇒ 不合规的描述不留任何区域。
-    description.validate()?;
+    assigned.validate()?;
+    let description = &assigned;
 
     // 护栏预算：描述说了算（§2.5 对照表最后一行）。
     //
@@ -529,23 +548,33 @@ pub fn map_platform(
     // ⚠️ 按 **base 升序**建图（与总线的 `BTreeMap` 顺序一致）⇒ 建图
     // 顺序是**确定的**，不依赖描述里的书写顺序。
     for region in regions_by_base(description) {
+        // ⚠️ **v0.73（STAGE-49 · B2）**：基址**一定已经分配好了**
+        // （[`assign_bases`] 是**第一句**）⇒ ⇒ 这里**不该**是 `None` ⇒ ⇒
+        // 但**不静默**编一个（⇒ ⇒ 编一个 = 第二个真相源）⇒ ⇒ ⇒ 报出来。
+        let Some(base) = region.base() else {
+            return Err(PlatformError::new(
+                PLATFORM_FAMILY,
+                E_PLT_05_OVERFLOW,
+                "区域没有基址（装配期分配没有生效）",
+            ));
+        };
         match region {
-            RegionSpec::Ram { base, size } => {
-                bus.map_ram(*base, *size, &[])?;
+            RegionSpec::Ram { size, .. } => {
+                bus.map_ram(base, *size, &[])?;
             }
-            RegionSpec::Rom { base, size } => {
-                bus.map_rom(*base, *size, &[])?;
+            RegionSpec::Rom { size, .. } => {
+                bus.map_rom(base, *size, &[])?;
             }
-            RegionSpec::Peripheral { base, device } => {
+            RegionSpec::Peripheral { device, .. } => {
                 let BuiltDevice {
                     peripheral,
                     uart,
                     clint,
                     plic,
-                } = build_device(device, *base)?;
+                } = build_device(device, base)?;
                 // ⚠️ 窗口大小**由器件自己报**（裁决 D）。
                 let window = peripheral.borrow().size();
-                bus.map_peripheral_instance(*base, window, peripheral)?;
+                bus.map_peripheral_instance(base, window, peripheral)?;
                 // ⚠️ **逐实例**清单（STAGE-43 · 裁决 K / L）—— 与建图**同源**
                 // ⇒ ⇒ 「谁绑在哪儿」**不需要**另算一遍。
                 devices
@@ -553,7 +582,7 @@ pub fn map_platform(
                     .push(riscv_sim_contract::model::DeviceInstanceInfo {
                         id: device.id().to_string(),
                         kind: device.kind().to_string(),
-                        base: Some(*base),
+                        base: Some(base),
                         window_bytes: window,
                     });
                 // ⚠️ **实例表**（STAGE-48 · D-177 B）：**每一个**器件实例都
@@ -902,9 +931,14 @@ pub fn compile_wiring(
 /// 一个地址区间是否被描述的**某个 RAM 区域**完整覆盖。
 ///
 /// ⚠️ **只看 RAM**：ROM 不是 RAM（裁决 E 说「取它的**全部 RAM 区域**」）。
+///
+/// ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** 的段 ⇒ ⇒ **跳过**
+/// （⇒ ⇒ 它还没有位置）⇒ ⇒ ⇒ **不**把它当成「覆盖 [0, size)」。
 fn covered_by_ram(description: &PlatformDescription, lo: u32, hi: u32) -> bool {
     description.regions.iter().any(|region| match region {
-        RegionSpec::Ram { base, size } => lo >= *base && hi <= base.saturating_add(*size),
+        RegionSpec::Ram { base, size } => base
+            .map(|base| lo >= base && hi <= base.saturating_add(*size))
+            .unwrap_or(false),
         RegionSpec::Rom { .. } | RegionSpec::Peripheral { .. } => false,
     })
 }
@@ -935,17 +969,128 @@ pub struct BoardCompatibility {
 /// ⚠️ **外设窗口不参与**（STAGE-47 裁决 E）⇒ ⇒ 窗口大小**不在描述里**
 /// （`RegionSpec::Peripheral` **故意**没有那个字段）⇒ ⇒ 要算就得引
 /// 「器件自报」那份 ⇒ ⇒ **本批不引** ⇒ ⇒ **已知边界**，如实登记。
+///
+/// ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** 的段 ⇒ ⇒ **跳过**
+/// （⇒ ⇒ 它还没有位置 ⇒ ⇒ 分配之后才有）⇒ ⇒ ⇒ **不**把它当成
+/// 「占用 [0, size)」⇒ ⇒ ⇒ **不静默**编一个基址。
 pub fn board_intervals(description: &PlatformDescription) -> Vec<(u32, u32)> {
     description
         .regions
         .iter()
         .filter_map(|region| match region {
             RegionSpec::Ram { base, size } | RegionSpec::Rom { base, size } => {
-                Some((*base, base.saturating_add(*size)))
+                base.map(|base| (base, base.saturating_add(*size)))
             }
             RegionSpec::Peripheral { .. } => None,
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// 装配期分配基址（v0.73 · STAGE-49 · B2）
+// ---------------------------------------------------------------------------
+
+/// **分配基址**：给**缺 `base`** 的段按**声明顺序**分配一个装得下的基址。
+///
+/// ⚠️ **这是 B2 的唯一落点**（一个约束一个落点）⇒ ⇒ 契约层**不**分配
+/// （⇒ ⇒ 契约层看不到外设的窗口大小 —— 那是 **M-15 注册表**的事）。
+///
+/// ⚠️ **规则**（冻结规格 §2.3 · 裁决 H）：
+/// - **顺序 = 描述里的声明顺序**（**不是** base 升序 ⇒ ⇒ 因为还没有 base）；
+/// - 每段**从当前游标往上**找**第一个装得下的**空隙 ⇒ ⇒ **跳过**别的段
+///   已经占住的区间；
+/// - **结果确定**（同样的输入 ⇒ ⇒ 同样的输出）⇒ ⇒ ⇒ **可复算**。
+///
+/// ⚠️ **游标从 0 开始**：地址空间的**最低点** ⇒ ⇒ 第一段缺基址的段落在
+/// **最低的可装下处** ⇒ ⇒ **确定**（不是「随机找一处」）。
+///
+/// ⚠️ **老描述逐字不变**（裁决 K）：**每一段都带 `base`** ⇒ ⇒ **一个字节
+/// 都不改** ⇒ ⇒ ⇒ 返回的描述与输入**完全相同** ⇒ ⇒ 存量板档案**零风险**。
+///
+/// ⚠️ **零新场景码**（裁决 I）：
+/// - **装不下**（地址空间放不下这一段）⇒ ⇒ **`E_PLT_07`**（超预算）
+///   —— 那正是「这段声明的大小超过每区域预算」**已经**在契约层 V-7 判过
+///   的那件事（⇒ ⇒ **复用既有码**，不造第三个）；
+/// - **分配出来之后互相重叠** ⇒ ⇒ **`E_PLT_06`**（既有码）⇒ ⇒ ⇒ **零新码**。
+///
+/// @param description — 描述（**不被修改**）
+/// @returns 一份**每段都有基址**的描述（老描述 ⇒ ⇒ 与输入逐字相同）
+pub fn assign_bases(
+    description: &PlatformDescription,
+) -> Result<PlatformDescription, PlatformError> {
+    let mut assigned = description.clone();
+    // ⚠️ **已占用的区间**：先收下**显式带基址**的那些 ⇒ ⇒ 缺基址的段
+    //   **跳过**它们（⇒ ⇒ 不会撞上用户明确写过的地址）。
+    let mut occupied: Vec<(u64, u64)> = Vec::new();
+    for region in &assigned.regions {
+        let (Some(base), Some(size)) = (region.base(), region_footprint(region)) else {
+            continue;
+        };
+        occupied.push((u64::from(base), u64::from(base) + u64::from(size)));
+    }
+
+    // ⚠️ **游标**：从 **0** 往上走（⇒ ⇒ 找**第一个**装得下的空隙）。
+    let mut cursor: u64 = 0;
+    for index in 0..assigned.regions.len() {
+        // ⚠️ **已有基址 ⇒ 不动它**（⇒ ⇒ 老描述逐字不变 ⇒ ⇒ 用户明确
+        //   写过的地址**一个都不改**）。
+        let Some(size) = region_footprint(&assigned.regions[index]) else {
+            continue;
+        };
+        if assigned.regions[index].base().is_some() {
+            // ⚠️ **不推进游标**（v0.73 施工期订正）：规格 §2.3 写的是
+            //   「从当前游标往上找**第一个装得下的**空隙 ⇒ ⇒ **跳过**被别的段
+            //   占掉的区间」⇒ ⇒ 显式段**只是「占住区间」**（⇒ ⇒ 撞上就跳过）
+            //   ⇒ ⇒ **不是**「屏障」（⇒ ⇒ 屏障的读法会让「高位显式段在前、
+            //   缺基址段在后」的板把缺基址段推到**高位之后**⇒ ⇒ ⇒ 那与
+            //   「第一个空隙」**不符**）⇒ ⇒ ⇒ 游标**只在真的分配时**前进。
+            continue;
+        }
+        // ⚠️ **从游标往上**找**第一个**装得下的空隙（⇒ ⇒ 跳过已被占的）。
+        let mut candidate = cursor;
+        let mut placed: Option<u64> = None;
+        while candidate + u64::from(size) <= u64::from(u32::MAX) + 1 {
+            let end = candidate + u64::from(size);
+            let clashes = occupied.iter().any(|&(lo, hi)| candidate < hi && lo < end);
+            if !clashes {
+                placed = Some(candidate);
+                break;
+            }
+            // ⚠️ **跳过**撞上的那个区间 ⇒ ⇒ 往上找下一个。
+            let hit_end = occupied
+                .iter()
+                .filter(|&&(lo, hi)| candidate < hi && lo < end)
+                .map(|&(_, hi)| hi)
+                .max()
+                .unwrap_or(end);
+            candidate = hit_end;
+        }
+        let Some(base) = placed else {
+            return Err(PlatformError::new(
+                PLATFORM_FAMILY,
+                E_PLT_07_OVER_BUDGET,
+                format!("区域（缺基址）的大小 {:#x} 在地址空间里装不下", size),
+            ));
+        };
+        assigned.regions[index].set_base(base as u32);
+        occupied.push((base, base + u64::from(size)));
+        cursor = base + u64::from(size);
+    }
+    Ok(assigned)
+}
+
+/// **一段占多大**（字节）—— 外设的**窗口大小**从 **M-15 注册表**取
+/// （⇒ ⇒ 那是**唯一**那份真相 · 裁决 D）。
+///
+/// ⚠️ **契约层看不到**这个大小（描述里**故意**没有窗口大小那个字段）⇒ ⇒
+/// ⇒ ⇒ **这**就是分配器**必须在内核侧**的理由。
+fn region_footprint(region: &RegionSpec) -> Option<u32> {
+    match region {
+        RegionSpec::Ram { size, .. } | RegionSpec::Rom { size, .. } => Some(*size),
+        RegionSpec::Peripheral { device, .. } => {
+            crate::m15_peripheral::types::window_bytes(device.kind())
+        }
+    }
 }
 
 /// 镜像要的地址区间 ⟷ 板的分区（STAGE-47 · **纯函数**）。

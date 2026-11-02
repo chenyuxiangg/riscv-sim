@@ -183,8 +183,11 @@ describe("契约镜像的版本与两个上限（视图层 · C-1）", () => {
     });
 
     test("C-1 · 另外三个版本号**一个都不升**（规格 §2.8）", () => {
-        assert.equal(msg.PLATFORM_SCHEMA_VERSION, 1, "描述格式版本必须仍是 1");
-        assert.equal(msg.PLATFORM_RULES_VERSION, 3, "规则集版本必须仍是 3");
+        // ⚠️ **v0.73（STAGE-49）**：描述格式 **1 → 2** · 规则集 **3 → 4**
+        // ⇒ ⇒ **两个都动了**（⇒ ⇒ 一次升版 ⇒ ⇒ 一次迁移）⇒ ⇒ ⇒ 断言跟到
+        // 新值 ⇒ ⇒ **判别力保留**（它钉的仍是「这两个数就是当前那两个」）。
+        assert.equal(msg.PLATFORM_SCHEMA_VERSION, 2, "描述格式版本是 2（STAGE-49 升版）");
+        assert.equal(msg.PLATFORM_RULES_VERSION, 4, "规则集版本是 4（STAGE-49 升版）");
     });
 });
 

@@ -82,7 +82,7 @@
 //         *not* a verification failure
 
 import { spawn, spawnSync } from "node:child_process";
-import { createReadStream, existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -180,6 +180,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "memoryMap",
     "unknownSystem",
     "wiringReport",
+    "platformSchemaV2",
     "boardArchive",
     "boardDelta",
     "boardOrdering",
@@ -344,6 +345,50 @@ const IGNORED_CONSOLE = [/favicon\.ico/i];
  * @param {string[]} argv
  * @returns {{url: string, cdpPort: number, servePort: number, serve: boolean, timeoutMs: number}}
  */
+/**
+ * **自检**：本脚本里**每一个**送进页面的模板**必须能独立求值**。
+ *
+ * ⚠️ **为什么要有这条**（v0.73 · STAGE-49 · 施工期订正）：本脚本的判据
+ *   **都是**「一段代码送进浏览器执行」⇒ ⇒ 那段代码里**一个语法错** ⇒ ⇒ ⇒
+ *   整段**抛异常** ⇒ ⇒ ⇒ 那一段里的**所有**判据**全废**（只报「这一段抛
+ *   异常了」）⇒ ⇒ ⇒ **看不出**是哪一行写错 ⇒ ⇒ ⇒ 排查成本极高。
+ *
+ * ⚠️ **本批实测踩到**（两次，都是「只报 SyntaxError」看不出行号）：
+ *   ① **模板里 `&&` 与 `??` 混用**（JS 语法错误：两者不能不带括号地混用）；
+ *   ② **模板里放了未转义的反引号**（**提前闭合了**那个模板字符串 ⇒ ⇒ ⇒
+ *      后面整段被当成代码 ⇒ ⇒ ⇒ 报错位置离真凶很远）。
+ *
+ * ⚠️ **怎么查**：把每个模板里的**占位**换成**无害的替身** ⇒ ⇒ 再用
+ *   `new Function(...)` 求值一遍 ⇒ ⇒ ⇒ 语法错**在跑浏览器之前**就暴露。
+ *
+ * @returns {Array<{index: number, message: string}>} 有问题的模板（**空** = 全过）
+ */
+function selfCheckPageTemplates() {
+    const findings = [];
+    const src = readFileSync(fileURLToPath(import.meta.url), "utf8");
+    // ⚠️ **`BV_LAST_MEMORY_MAP_FN`** 是**函数本体**（不带调用）⇒ ⇒ 嵌进别的
+    //   模板时**外面要再加一层括号**（否则 `=` 右边括号不配平）。
+    const fnMatch = src.match(/const BV_LAST_MEMORY_MAP_FN = `([\s\S]*?)`;/);
+    const fn = fnMatch ? fnMatch[1] : "";
+    const re = /awaitEval\(cdp, `([\s\S]*?)`\)/g;
+    let index = 0;
+    for (const match of src.matchAll(re)) {
+        index += 1;
+        const raw = match[1];
+        const expanded = raw
+            .replace(/\$\{BV_LAST_MEMORY_MAP_FN\}\(\)/g, fn + "()")
+            .replace(/\$\{JSON\.stringify\([^)]*\)\}/g, '"__probe__"')
+            .replace(/\$\{[^}]*\}/g, "0");
+        try {
+            // eslint-disable-next-line no-new-func
+            new Function(expanded);
+        } catch (err) {
+            findings.push({ index, message: String(err && err.message ? err.message : err) });
+        }
+    }
+    return findings;
+}
+
 function parseArgs(argv) {
     const opts = {
         url: "http://localhost:8080/",
@@ -673,7 +718,14 @@ async function awaitEval(cdp, expression, timeoutMs = 15000) {
         const err = res.exceptionDetails.exception?.description
             ?? res.exceptionDetails.text
             ?? "未知错误";
-        throw new Error(`页面求值失败：${String(err).slice(0, 300)}`);
+        // ⚠️ **把送进去的那段代码也打出来**（v0.73 施工期改进）：只说
+        //   「SyntaxError」**看不出是哪一行** ⇒ ⇒ ⇒ 诊断成本极高 ⇒ ⇒ ⇒
+        //   连**代码的头几行**一起打（⇒ ⇒ 够看出是不是括号/模板问题）。
+        const head = String(expression).split("\n").slice(0, 6).join(" | ");
+        throw new Error(
+            `页面求值失败：${String(err).slice(0, 300)}`
+            + `；送进去的代码（头几行）：${head.slice(0, 600)}`,
+        );
     }
     return res.result?.value ?? null;
 }
@@ -1536,6 +1588,73 @@ const BV_NEW_RAM_BASE = 2147483648;
 const BV_NEW_RAM_SIZE = 8388608;
 /** 写进新 RAM 的那个值（0xA5A5_A5A5 ⇒ 肉眼可辨）。 */
 const BV_NEW_RAM_VALUE = 0xa5a5a5a5;
+
+// ---------------------------------------------------------------------------
+// STAGE-49 · v0.73 批的**夹具板**（B2：`base` 可缺省）
+// ---------------------------------------------------------------------------
+
+/**
+ * 一块**不带 `base`** 的板（v0.73 · STAGE-49 · B2）—— 两段 RAM。
+ *
+ * ⚠️ **老格式**（`schema_version = 1`）⇒ ⇒ **缺省优先**：它**仍能装** ⇒ ⇒ ⇒
+ *   存量板档案**零风险**那条在真机上**也**验得到。
+ *
+ * ⚠️ **两段都缺 `base`** ⇒ ⇒ 内核**按声明顺序**分配 ⇒ ⇒ ⇒ 两次分配**结果
+ *   相同**（⇒ ⇒ B-152 那条判据的基准）。
+ */
+const BV_AUTO_BASE_BOARD = {
+    schema_version: 1,
+    id: "browser-verify-auto-base",
+    name: "browser-verify 自动基址板",
+    priority: 998,
+    region_budget_bytes: 16777216,
+    regions: [
+        { kind: "ram", size: 1048576 },
+        { kind: "ram", size: 2097152 },
+    ],
+};
+
+/**
+ * 一块**装不下**的板（v0.73 · STAGE-49 · B2 · K-4）—— 它的段**大小超过**每
+ * 区域预算 ⇒ ⇒ 内核必须报**既有码** `E_PLT-07`（⇒ ⇒ **不是**新码）。
+ *
+ * ⚠️ **为什么不是「缺 `base`」**：缺 `base` 的段**由内核分配** ⇒ ⇒ 它**装得
+ *   下**（只要大小不超预算）⇒ ⇒ ⇒ 真正「装不下」的那一条是**大小超预算**
+ *   ⇒ ⇒ ⇒ 这块板**正是**那条路。
+ */
+const BV_UNFITTABLE_BOARD = {
+    schema_version: 1,
+    id: "browser-verify-unfittable",
+    name: "browser-verify 装不下的板",
+    priority: 997,
+    region_budget_bytes: 1048576,
+    regions: [
+        { kind: "ram", size: 8388608 },
+    ],
+};
+
+/**
+ * 一块**带 `timer_riscv`** 的板（v0.73 · STAGE-49 · G）—— 描述**能写出**那台
+ * 器件 ⇒ ⇒ 内核**收下** ⇒ ⇒ 器件清单里**有它**。
+ *
+ * ⚠️ **参数只有两个**（`id` + `irq_line`）⇒ ⇒ 与内核的 `TimerRiscv::new`
+ *   **逐字对齐**（⇒ ⇒ 不加 `freq_hz` / `harts`）。
+ */
+const BV_TIMER_BOARD = {
+    schema_version: 1,
+    id: "browser-verify-timer",
+    name: "browser-verify 计时器板",
+    priority: 996,
+    region_budget_bytes: 16777216,
+    regions: [
+        { kind: "ram", base: 0, size: 1048576 },
+        {
+            kind: "peripheral",
+            base: 268435456,
+            device: { device: "timer_riscv", id: "TIMER0", irq_line: 11 },
+        },
+    ],
+};
 
 // ---------------------------------------------------------------------------
 // STAGE-47 · v0.71 批的**夹具板**
@@ -2505,6 +2624,268 @@ async function runWiringReportSection(cdp, opts) {
 }
 
 /**
+ * **描述格式升版 v2**（STAGE-49 · v0.73 · B2）—— 缺 `base` 的板**真的**能被
+ * 内核收下并**分配出基址**。
+ *
+ * ⚠️ **要真内核的数据** ⇒ ⇒ 断的是「真 WASM 内核 ⇒ `memory.map` 事件 ⇒ 那里
+ *   的 `description.regions[*].base`」**整条链** ⇒ ⇒ ⇒ 前端塞 mock 数据糊弄
+ *   不过去（前端**不自己算**基址）。
+ *
+ * ⚠️ **段的位置** ⇒ ⇒ 排在 `wiringReport` **之后**、其余段**之前** ⇒ ⇒ ⇒
+ *   **必须**排在会改板的那几段**之后**（⇒ ⇒ 本段自己改的板**也要复原**）。
+ */
+async function runPlatformSchemaV2Section(cdp, opts) {
+    /** @type {{name: string, ok: boolean, detail: string}[]} */
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+
+    // ---- ① 切到编辑器视图 --------------------------------------------------
+    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await sleep(800);
+
+    // ---- ② **卸载工程** ⇒ ⇒ 改板**立即生效**（D-139）------------------------
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector('[data-action="unload-project"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await sleep(900);
+    const unloaded = await awaitEval(cdp, `(() => {
+        const pending = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+        return !pending;
+    })()`);
+    add(
+        "**前置**：工程已**卸载** ⇒ ⇒ 改板**立即生效**（⇒ ⇒ 本段断的是"
+        + "**新板**的那份生效图）",
+        unloaded === true,
+        `无待生效横幅=${unloaded}`,
+    );
+    if (unloaded !== true) {
+        return { skipped: false, checks };
+    }
+
+    // ---- ③ 提交那块**不带 `base`** 的板 ⇒ ⇒ 内核**收下**且**分配出基址** ----
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "submit-memory-map",
+            requestId: "bv-auto-base-board",
+            viewId: "memory-map",
+            params: { description: ${JSON.stringify(BV_AUTO_BASE_BOARD)} },
+        },
+    }))`);
+
+    // ⚠️ **等状态**（不等时长 —— D-159 教训：机器忙时定时器会晚到 ⇒ ⇒ 假红）。
+    const deadline = Date.now() + opts.timeoutMs;
+    let firstBases = null;
+    let firstIds = null;
+    while (Date.now() < deadline) {
+        const now = await awaitEval(cdp, `(() => {
+            const map = (${BV_LAST_MEMORY_MAP_FN})();
+            if (!map || !map.description) return null;
+            const regions = Array.isArray(map.description.regions) ? map.description.regions : [];
+            if (regions.length === 0) return null;
+            // ⚠️ **板 id = 描述自己的 id**（**区域**没有 id 字段 ——
+            //   那是**器件**的 id）⇒ ⇒ 判据**不许**去区域里找。
+            const boardId = String(map.description.id ?? "");
+            if (boardId !== "browser-verify-auto-base") return null;
+            return {
+                bases: regions.map((r) => (r && r.base === undefined ? null : r.base)),
+                ids: [boardId],
+                revision: Number(map.revision ?? 0),
+            };
+        })()`);
+        if (now && Array.isArray(now.bases)) {
+            firstBases = now.bases;
+            firstIds = now.ids;
+            break;
+        }
+        await sleep(200);
+    }
+
+    // -- B-151：内核**收下**了缺基址的板 ⇒ ⇒ 那些段**真的有地址** -------------
+    add(
+        "B-151 · 真机上提交一份**不带** `base` 的板 ⇒ ⇒ 内核**收下**且"
+        + "**分配出基址** ⇒ ⇒ 生效图里那些段**真的有地址**",
+        Array.isArray(firstBases)
+            && firstBases.length === 2
+            && firstBases.every((b) => Number.isFinite(Number(b))),
+        `内核给的基址=${JSON.stringify(firstBases)} 板 id=${JSON.stringify(firstIds)}`,
+    );
+
+    // ---- ④ **再提交一次** ⇒ ⇒ 分配结果**相同** ⇒ ⇒ **确定** ----------------
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "submit-memory-map",
+            requestId: "bv-auto-base-board-2",
+            viewId: "memory-map",
+            params: { description: ${JSON.stringify(BV_AUTO_BASE_BOARD)} },
+        },
+    }))`);
+    const deadline2 = Date.now() + opts.timeoutMs;
+    let secondBases = null;
+    while (Date.now() < deadline2) {
+        const now = await awaitEval(cdp, `(() => {
+            const map = (${BV_LAST_MEMORY_MAP_FN})();
+            if (!map || !map.description) return null;
+            const regions = Array.isArray(map.description.regions) ? map.description.regions : [];
+            // ⚠️ **板 id = 描述自己的 id**（**区域**没有 id 字段 ——
+            //   那是**器件**的 id）⇒ ⇒ 判据**不许**去区域里找。
+            const boardId = String(map.description.id ?? "");
+            if (boardId !== "browser-verify-auto-base") return null;
+            return { bases: regions.map((r) => (r && r.base === undefined ? null : r.base)) };
+        })()`);
+        if (now && Array.isArray(now.bases) && now.bases.length === 2) {
+            secondBases = now.bases;
+            break;
+        }
+        await sleep(200);
+    }
+
+    // -- B-152：两次的分配结果**相同** ⇒ ⇒ **确定** ⇒ ⇒ **可复算** -------------
+    add(
+        "B-152 · 那份板**再提交一次** ⇒ ⇒ 分配结果**相同** ⇒ ⇒ **确定**"
+        + "（⇒ ⇒ 同一份描述两次装得到**同一个**图）",
+        Array.isArray(firstBases) && Array.isArray(secondBases)
+            && JSON.stringify(firstBases) === JSON.stringify(secondBases),
+        `第一次=${JSON.stringify(firstBases)} 第二次=${JSON.stringify(secondBases)}`,
+    );
+
+    // -- B-153：⚠️ **必要对照** —— **老格式**（带 `base`）的板 ⇒ ⇒ **照旧能装** ---
+    //
+    // ⚠️ **为什么是「必要对照」**：如果内核**只**认缺基址的板 ⇒ ⇒ ⇒ 那么
+    //   **老格式**的板（存量板档案）就**全废了** ⇒ ⇒ ⇒ 那条判据必须**真的
+    //   断**「老格式仍能装」⇒ ⇒ ⇒ **不是**「反正都能装」的恒真。
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "submit-memory-map",
+            requestId: "bv-old-format-board",
+            viewId: "memory-map",
+            params: { description: ${JSON.stringify(BV_BOARD)} },
+        },
+    }))`);
+    const deadline3 = Date.now() + opts.timeoutMs;
+    let oldBases = null;
+    while (Date.now() < deadline3) {
+        const now = await awaitEval(cdp, `(() => {
+            const map = (${BV_LAST_MEMORY_MAP_FN})();
+            if (!map || !map.description) return null;
+            const regions = Array.isArray(map.description.regions) ? map.description.regions : [];
+            const boardId = String(map.description.id ?? "");
+            if (boardId !== "browser-verify-board") return null;
+            return { bases: regions.map((r) => (r && r.base === undefined ? null : r.base)) };
+        })()`);
+        if (now && Array.isArray(now.bases) && now.bases.length > 0) {
+            oldBases = now.bases;
+            break;
+        }
+        await sleep(200);
+    }
+    add(
+        "B-153 · **必要对照**：老格式（**带** `base`）的板 ⇒ ⇒ **照旧能装**"
+        + " ⇒ ⇒ **存量板档案零风险**（⇒ ⇒ 缺省优先）",
+        Array.isArray(oldBases)
+            && oldBases.length === 2
+            && oldBases.every((b) => Number.isFinite(Number(b))),
+        `老板的基址=${JSON.stringify(oldBases)}`,
+    );
+
+    // -- B-154：描述里写 `timer_riscv` ⇒ ⇒ 内核**收下** ⇒ ⇒ 器件清单里**有它** ---
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "submit-memory-map",
+            requestId: "bv-timer-board",
+            viewId: "memory-map",
+            params: { description: ${JSON.stringify(BV_TIMER_BOARD)} },
+        },
+    }))`);
+    const deadline4 = Date.now() + opts.timeoutMs;
+    let timerFound = null;
+    while (Date.now() < deadline4) {
+        const now = await awaitEval(cdp, `(() => {
+            const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
+            let found = null;
+            for (const raw of frames) {
+                let frame = null;
+                try { frame = JSON.parse(String(raw)); } catch (e) { continue; }
+                const msg = (frame && frame.payload) ? frame.payload : null;
+                const body = (msg && msg.payload) ? msg.payload : null;
+                const ev = (body && body.Event) ? body.Event : null;
+                if (!ev || !ev.DeviceInstances) continue;
+                const list = Array.isArray(ev.DeviceInstances.instances) ? ev.DeviceInstances.instances : [];
+                // ⚠️ **&& 与 ?? 不能混用**（JS 语法错误 ⇒ 要**加括号**）。
+                const hit = list.find((i) => String((i && i.kind) ?? "") === "timer_riscv");
+                if (hit) { found = { id: String(hit.id ?? ""), base: hit.base ?? null }; break; }
+            }
+            return found;
+        })()`);
+        if (now) {
+            timerFound = now;
+            break;
+        }
+        await sleep(200);
+    }
+    add(
+        "B-154 · 描述里写 `timer_riscv` ⇒ ⇒ 内核**收下** ⇒ ⇒ 器件清单里**有它**"
+        + "（⇒ ⇒ 描述**能写出**那台器件）",
+        timerFound !== null && typeof timerFound === "object",
+        `器件清单里的那台=${JSON.stringify(timerFound)}`,
+    );
+
+    // -- B-155：⚠️ **必要对照** —— 一块**装不下**的板 ⇒ ⇒ 界面显示**既有码** ---
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "submit-memory-map",
+            requestId: "bv-unfittable-board",
+            viewId: "memory-map",
+            params: { description: ${JSON.stringify(BV_UNFITTABLE_BOARD)} },
+        },
+    }))`);
+    const deadline5 = Date.now() + opts.timeoutMs;
+    let errorText = null;
+    while (Date.now() < deadline5) {
+        const now = await awaitEval(cdp, `(() => {
+            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-error]')
+                || document.querySelector('[data-view-body="memory-map"] .error')
+                || document.querySelector('[data-view-body="memory-map"] [data-error]');
+            return el ? String(el.textContent ?? "") : null;
+        })()`);
+        if (now && String(now).includes("E_PLT")) {
+            errorText = now;
+            break;
+        }
+        await sleep(200);
+    }
+    add(
+        "B-155 · **必要对照**：一块**装不下**的板 ⇒ ⇒ 界面显示**既有码**"
+        + "（⇒ ⇒ `E_PLT-07` ⇒ ⇒ **不是**新码 ⇒ ⇒ 零新场景码那条在真机上"
+        + "**也**成立）",
+        errorText !== null && String(errorText).includes("E_PLT-07"),
+        `界面上的错误=${JSON.stringify(errorText)}`,
+    );
+
+    // ---- ⑥ **收尾**：把板与**装载状态**都复原 ⇒ ⇒ 后面那些段不被污染 -------
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "submit-memory-map",
+            requestId: "bv-v2-restore-board",
+            viewId: "memory-map",
+            params: { description: ${JSON.stringify(BV_BOARD)} },
+        },
+    }))`);
+    await sleep(600);
+    const restored = await loadDemoFirmware(cdp, opts);
+    add(
+        "**收尾**：板与**装载状态**都复原 ⇒ ⇒ 后面那些段拿到的还是一张**正常**的板"
+        + "（⇒ ⇒ 本段**不污染**别人）",
+        restored === true,
+        `demo 固件装上了=${restored}`,
+    );
+
+    return { skipped: false, checks };
+}
+
+/**
  * 器件类型注册表 + 逐实例状态（STAGE-43 · v0.66 · B-115 ~ B-117）。
  *
  * ⚠️ **要真内核的数据** ⇒ ⇒ 断的是「真 WASM 内核 ⇒ `device.types` /
@@ -3141,7 +3522,7 @@ const BV_TOOL_COMMAND_SEQ = 900001;
  * ⚠️ **生效图 = 事件载荷的 `description`**（不是 DOM 上的投影）⇒ ⇒ 比的
  * 是**图本身**。
  */
-const BV_LAST_MEMORY_MAP_EXPRESSION = `(() => {
+const BV_LAST_MEMORY_MAP_FN = `(() => {
   const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
   let last = null;
   for (const raw of frames) {
@@ -3164,7 +3545,16 @@ const BV_LAST_MEMORY_MAP_EXPRESSION = `(() => {
     };
   }
   return last;
-})()`;
+})`;
+
+/**
+ * **最后一条 `memory.map` 事件**（**自带调用**的那一份）⇒ ⇒ 直接当表达式用。
+ *
+ * ⚠️ **为什么另有一份「不带调用」的**：`BV_LAST_MEMORY_MAP_FN` 是**函数本体**
+ *   ⇒ ⇒ 嵌进别的模板里时**自己**加 `()` ⇒ ⇒ ⇒ 而 `BV_LAST_MEMORY_MAP_EXPRESSION`
+ *   已经**自带**调用 ⇒ ⇒ ⇒ 两者混用会多一个分号 ⇒ ⇒ ⇒ **语法错误**。
+ */
+const BV_LAST_MEMORY_MAP_EXPRESSION = `${BV_LAST_MEMORY_MAP_FN}()`;
 
 /**
  * **侧边栏**探针（STAGE-34 · v0.49 批）。
@@ -7772,12 +8162,20 @@ async function runBasePlannerSection(cdp, opts) {
     // ⇒ ⇒ 若那个空隙**撞了**，内核会报 `E_PLT-06` ⇒ ⇒ 横幅**不会出现**。
     const deadline = Date.now() + opts.timeoutMs;
     let accepted = false;
+    // ⚠️ **记下最后看到的错误码**（v0.73 施工期改进）：失败时**光说「内核没接受」
+    //   没有用** ⇒ ⇒ 得知道**它为什么没接受** ⇒ ⇒ ⇒ 详情里打出来。
+    let lastCode = "";
+    let lastErrorText = "";
     while (Date.now() < deadline) {
         const now = await awaitEval(cdp, `(() => {
             const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
             const err = document.querySelector('[data-view-body="memory-map"] [data-memory-map-error]');
-            return { pending: Boolean(el), code: err ? String(err.getAttribute("data-error-code") || "") : "" };
+            return { pending: Boolean(el), code: err ? String(err.getAttribute("data-error-code") || "") : "", text: err ? String(err.textContent ?? "") : "" };
         })()`);
+        if (now?.code) {
+            lastCode = String(now.code);
+            lastErrorText = String(now.text ?? "");
+        }
         if (now?.code === "E_PLT_06") break;
         if (now?.pending === true) {
             accepted = true;
@@ -7802,7 +8200,8 @@ async function runBasePlannerSection(cdp, opts) {
         + "⇒ ⇒ 且**命令载荷**里那一段的基址 **== 面板给的那个**",
         accepted === true && Boolean(sentHit),
         `内核接受=${accepted} 载荷里那段=${JSON.stringify(sentHit ?? null)}`
-        + ` 面板给的那个=${JSON.stringify(gapFrom)}`,
+        + ` 面板给的那个=${JSON.stringify(gapFrom)}`
+        + ` 最后一个错误码=${JSON.stringify(lastCode)} 错误原文=${JSON.stringify(lastErrorText)}`,
     );
 
     // -- B-140 · **正向对照**：规划面板**只有一处** ----------------------------
@@ -8850,6 +9249,27 @@ function staleRustSources(wasmPath) {
 async function main() {
     const opts = parseArgs(process.argv.slice(2));
 
+    // ⚠️ ⚠️ **自检**：本脚本里**每一个**送进页面的模板**必须能独立求值**
+    // （v0.73 · STAGE-49 · 施工期订正）。
+    //
+    // ⚠️ **为什么要有这条**：本脚本的判据**都是**「一段代码送进浏览器执行」
+    //   ⇒ ⇒ 那段代码里**一个语法错** ⇒ ⇒ ⇒ 整段**抛异常** ⇒ ⇒ ⇒ 那一段
+    //   里的**所有**判据**全废**（报成「这一段抛异常了」）⇒ ⇒ ⇒ **看不出**
+    //   是哪一行写错 ⇒ ⇒ ⇒ 排查成本极高（本批实测踩到：模板里 **`&&` 与
+    //   `??` 混用**（JS 语法错误）＋ **模板里未转义的反引号**（提前闭合了
+    //   模板）⇒ ⇒ 两次都只报「SyntaxError」）。
+    //   ⇒ ⇒ ⇒ **这里**在**启动时**就把那些模板**逐个**求值一遍 ⇒ ⇒ ⇒
+    //   **语法错在跑浏览器之前就暴露**（且**指出是哪一段**）。
+    const templateFindings = selfCheckPageTemplates();
+    if (templateFindings.length > 0) {
+        console.error([
+            "error: 本脚本里送进页面的模板**有语法错**（⇒ ⇒ 那些段会抛异常"
+                + " ⇒ ⇒ ⇒ 那一段的判据**全废**）。",
+            ...templateFindings.map((f) => `  · 第 ${f.index} 个模板：${f.message}`),
+        ].join("\n"));
+        return EXIT_PRECONDITION;
+    }
+
     // The front end now mounts the **real** WASM kernel, so the artifact
     // is a hard precondition. Missing it is *not* a verification failure
     // (the wasm build is a separate, deliberate step) — it is the same
@@ -9354,6 +9774,21 @@ async function main() {
         const wiringReport = await runSection("wiringReport", () => runWiringReportSection(cdp, opts));
         registerSection("wiringReport", wiringReport.checks, {
             title: "连线报告（真内核说「你写了 N 根线里有 M 根抬不了」· 界面逐字显示 · 数字与内核一致）",
+        });
+
+        // -- the PLATFORM SCHEMA V2 (STAGE-49 · v0.73 · B2 · B-151 ~ B-155) -----
+        // ⚠️ **必须排在 wiringReport 之后**：那一段把板配成了「GPIO 当源」⇒ ⇒
+        //   本段要的是一块**干净的**板（⇒ ⇒ 缺基址的那块）⇒ ⇒ 排在它后面
+        //   才不会被上一段留下的现场影响。
+        //
+        // ⚠️ **必须排在 basePlanner 之前**：本段也会改板 ⇒ ⇒ ⇒ 后面那些段拿到
+        //   的还是本段**复原**过的那张。
+        const platformSchemaV2 = await runSection(
+            "platformSchemaV2",
+            () => runPlatformSchemaV2Section(cdp, opts),
+        );
+        registerSection("platformSchemaV2", platformSchemaV2.checks, {
+            title: "描述格式 v2（缺 base 的板内核收下并分配基址 · 两次分配相同 · 老格式照旧能装 · timer_riscv 能装 · 装不下报既有码）",
         });
 
         // -- the BASE PLANNER (STAGE-46 · v0.70 · B-136 ~ B-140) --------------        // ⚠️ **必须排在板级内存图那段之后**：那一段已经把一张板配出来了 ⇒ ⇒

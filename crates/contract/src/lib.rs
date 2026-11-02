@@ -332,8 +332,11 @@ mod tests {
     #[test]
     fn a8_the_other_three_version_numbers_do_not_move() {
         assert_eq!(SIM_STATE_SCHEMA_VERSION, 2);
-        assert_eq!(PLATFORM_SCHEMA_VERSION, 1);
-        assert_eq!(PLATFORM_RULES_VERSION, 3);
+        // ⚠️ **v0.73（STAGE-49）**：描述格式 **1 → 2** · 规则集 **3 → 4**
+        // ⇒ ⇒ **两个都动了**（⇒ ⇒ 一次升版 ⇒ ⇒ 一次迁移）⇒ ⇒ **信封版本
+        // （`SCHEMA_VERSION`）不动**（⇒ ⇒ 那是**另一个数**）。
+        assert_eq!(PLATFORM_SCHEMA_VERSION, 2);
+        assert_eq!(PLATFORM_RULES_VERSION, 4);
     }
 
     /// **A-6**：两个新错误码的**值与名相符**，且族已声明。

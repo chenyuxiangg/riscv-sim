@@ -130,21 +130,22 @@ fn user_board() -> PlatformDescription {
         max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
-                base: 0x0000_0000,
+                base: Some(0x0000_0000),
                 size: 0x0001_0000,
             },
             RegionSpec::Rom {
-                base: 0x5000_0000,
+                base: Some(0x5000_0000),
                 size: 0x0000_1000,
             },
             RegionSpec::Peripheral {
-                base: 0x6000_0000,
+                base: Some(0x6000_0000),
                 device: DeviceSpec::Gpio {
                     id: "GPIO0".to_string(),
                 },
             },
         ],
         roles: None,
+        pins: None,
     }
 }
 
@@ -167,10 +168,11 @@ fn ram_only_board(max_region_bytes: Option<u32>) -> PlatformDescription {
         region_budget_bytes: 16 * 1024 * 1024,
         max_region_bytes,
         regions: vec![RegionSpec::Ram {
-            base: 0x0000_0000,
+            base: Some(0x0000_0000),
             size: 0x0001_0000,
         }],
         roles: None,
+        pins: None,
     }
 }
 
@@ -431,7 +433,7 @@ fn b4_patching_one_region_size_changes_only_that_region() {
         CommandPayload::PatchMemoryMap {
             ops: vec![MemoryMapOp::UpsertRegion {
                 spec: RegionSpec::Ram {
-                    base: 0x0000_0000,
+                    base: Some(0x0000_0000),
                     size: 0x0002_0000,
                 },
             }],
@@ -446,12 +448,12 @@ fn b4_patching_one_region_size_changes_only_that_region() {
         .description
         .regions
         .iter()
-        .find(|region| region.base() == 0x0000_0000)
+        .find(|region| region.base() == Some(0x0000_0000))
         .expect("低段 RAM 必须还在");
     assert_eq!(
         patched,
         &RegionSpec::Ram {
-            base: 0x0000_0000,
+            base: Some(0x0000_0000),
             size: 0x0002_0000,
         },
         "改过的那一段必须**逐字段**等于新值"
@@ -462,12 +464,12 @@ fn b4_patching_one_region_size_changes_only_that_region() {
         .description
         .regions
         .iter()
-        .filter(|region| region.base() != 0x0000_0000)
+        .filter(|region| region.base() != Some(0x0000_0000))
         .collect();
     let before_others: Vec<&RegionSpec> = board
         .regions
         .iter()
-        .filter(|region| region.base() != 0x0000_0000)
+        .filter(|region| region.base() != Some(0x0000_0000))
         .collect();
     assert_eq!(others, before_others, "没被改的段必须**逐字段**不变");
     assert_eq!(
@@ -505,7 +507,7 @@ fn b5_patching_a_removal_drops_that_region_only() {
             .description
             .regions
             .iter()
-            .any(|region| region.base() == 0x5000_0000),
+            .any(|region| region.base() == Some(0x5000_0000)),
         "被删的那一段必须消失：{:?}",
         state.description.regions
     );
@@ -514,12 +516,12 @@ fn b5_patching_a_removal_drops_that_region_only() {
         .description
         .regions
         .iter()
-        .filter(|region| region.base() != 0x5000_0000)
+        .filter(|region| region.base() != Some(0x5000_0000))
         .collect();
     let before_kept: Vec<&RegionSpec> = board
         .regions
         .iter()
-        .filter(|region| region.base() != 0x5000_0000)
+        .filter(|region| region.base() != Some(0x5000_0000))
         .collect();
     assert_eq!(kept, before_kept, "其余段必须**逐字段**不变");
 }
@@ -546,7 +548,7 @@ fn b8_patching_a_region_into_an_overlap_is_rejected_and_changes_nothing() {
         CommandPayload::PatchMemoryMap {
             ops: vec![MemoryMapOp::UpsertRegion {
                 spec: RegionSpec::Ram {
-                    base: 0x0000_0000,
+                    base: Some(0x0000_0000),
                     size: 0x5000_1000,
                 },
             }],
@@ -662,7 +664,7 @@ fn b4_the_delta_is_located_by_base_not_by_array_order() {
         CommandPayload::PatchMemoryMap {
             ops: vec![MemoryMapOp::UpsertRegion {
                 spec: RegionSpec::Rom {
-                    base: 0x5000_0000,
+                    base: Some(0x5000_0000),
                     size: 0x0000_2000,
                 },
             }],
@@ -674,12 +676,12 @@ fn b4_the_delta_is_located_by_base_not_by_array_order() {
         .description
         .regions
         .iter()
-        .find(|region| region.base() == 0x5000_0000)
+        .find(|region| region.base() == Some(0x5000_0000))
         .expect("ROM 必须在");
     assert_eq!(
         patched,
         &RegionSpec::Rom {
-            base: 0x5000_0000,
+            base: Some(0x5000_0000),
             size: 0x0000_2000,
         },
         "按 base 定位 ⇒ 命中**同一条**（与数组顺序无关）"
@@ -711,7 +713,7 @@ fn b4_a_failing_op_in_the_middle_rolls_the_whole_patch_back() {
             ops: vec![
                 MemoryMapOp::UpsertRegion {
                     spec: RegionSpec::Ram {
-                        base: 0x0000_0000,
+                        base: Some(0x0000_0000),
                         size: 0x0003_0000,
                     },
                 },

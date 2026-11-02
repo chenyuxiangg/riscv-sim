@@ -1468,12 +1468,13 @@ mod tests {
             region_budget_bytes: 0x0010_0000,
             max_region_bytes: None,
             regions: vec![crate::platform::RegionSpec::Ram {
-                base: 0x0000_0000,
+                base: Some(0x0000_0000),
                 size: 0x0010_0000,
             }],
             description: None,
             wiring: None,
             roles: None,
+            pins: None,
         }
     }
 
@@ -1495,7 +1496,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&cmd).expect("json"),
-            r#"{"SetMemoryMap":{"description":{"schema_version":1,"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{"kind":"ram","base":0,"size":1048576}]},"expected_revision":null}}"#
+            r#"{"SetMemoryMap":{"description":{"schema_version":2,"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{"kind":"ram","base":0,"size":1048576}]},"expected_revision":null}}"#
         );
         // ⚠️ 描述 DTO **只多了一个带 default 的可选字段** ⇒ 线上还是
         // `PlatformDescription` 的原样形态（`kind` 标签、`auto_selectable`、
@@ -1503,7 +1504,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&cmd).expect("json"),
             serde_json::json!({ "SetMemoryMap": { "description": {
-                "schema_version": 1,
+                // ⚠️ **v0.73（STAGE-49 · B2）**：描述格式 **1 → 2** ⇒ ⇒ 线上
+                // 那个 `schema_version` 字段跟到 **2** ⇒ ⇒ **信封版本不动**
+                // （⇒ ⇒ 那是**另一个数**）。
+                "schema_version": 2,
                 "id": "user-board",
                 "name": "User board",
                 "priority": 100,
@@ -1537,12 +1541,14 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&ev).expect("json"),
-            r#"{"MemoryMap":{"description":{"schema_version":1,"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{"kind":"ram","base":0,"size":1048576}]},"pending":false,"loaded":true,"revision":7,"wiring_report":{"declared":0,"live":0,"dropped":[]}}}"#
+            r#"{"MemoryMap":{"description":{"schema_version":2,"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{"kind":"ram","base":0,"size":1048576}]},"pending":false,"loaded":true,"revision":7,"wiring_report":{"declared":0,"live":0,"dropped":[]}}}"#
         );
         assert_eq!(
             serde_json::to_value(&ev).expect("json"),
             serde_json::json!({ "MemoryMap": { "description": {
-                "schema_version": 1,
+                // ⚠️ **v0.73（STAGE-49 · B2）**：描述格式 **1 → 2** ⇒ ⇒ 线上
+                // 那个 `schema_version` 字段跟到 **2**。
+                "schema_version": 2,
                 "id": "user-board",
                 "name": "User board",
                 "priority": 100,
@@ -1690,21 +1696,21 @@ mod tests {
             max_region_bytes: None,
             regions: vec![
                 crate::platform::RegionSpec::Ram {
-                    base: 0x0000_0000,
+                    base: Some(0x0000_0000),
                     size: 0x0010_0000,
                 },
                 crate::platform::RegionSpec::Rom {
-                    base: 0x0010_0000,
+                    base: Some(0x0010_0000),
                     size: 0x0001_0000,
                 },
                 crate::platform::RegionSpec::Peripheral {
-                    base: 0x1000_0000,
+                    base: Some(0x1000_0000),
                     device: crate::platform::DeviceSpec::Gpio {
                         id: "GPIO0".to_string(),
                     },
                 },
                 crate::platform::RegionSpec::Peripheral {
-                    base: 0x1000_1000,
+                    base: Some(0x1000_1000),
                     device: crate::platform::DeviceSpec::Uart16550 {
                         id: "UART0".to_string(),
                         irq_line: 1,
@@ -1712,7 +1718,7 @@ mod tests {
                     },
                 },
                 crate::platform::RegionSpec::Peripheral {
-                    base: 0x2000_0000,
+                    base: Some(0x2000_0000),
                     device: crate::platform::DeviceSpec::Clint {
                         id: "CLINT".to_string(),
                         freq_hz: 10_000_000,
@@ -1720,7 +1726,7 @@ mod tests {
                     },
                 },
                 crate::platform::RegionSpec::Peripheral {
-                    base: 0x2000_1000,
+                    base: Some(0x2000_1000),
                     device: crate::platform::DeviceSpec::Plic {
                         id: "PLIC".to_string(),
                         sources: 16,
@@ -1731,6 +1737,7 @@ mod tests {
             description: Some("用户配的板".to_string()),
             wiring: None,
             roles: None,
+            pins: None,
         };
         let cmd = CommandPayload::SetMemoryMap {
             description: description.clone(),
