@@ -581,6 +581,18 @@ pub const E_PLT_15_DEVICE_EMPTY_ID: u16 = 15;
 /// different object ⇒ forbidden.
 pub const E_PLT_16_WIRING_INVALID: u16 = 16;
 
+/// **角色声明指向的器件不在描述里**（v0.73 · STAGE-49 · D-177 的 C）。
+///
+/// ⚠️ **It does not reuse [`E_PLT_16_WIRING_INVALID`]**: that one means
+/// 「**这条连线**非法」⇒ ⇒ a **role** naming a device that is not there is
+/// a **different object** ⇒ ⇒ one code, two meanings ⇒ forbidden.
+/// ⚠️ It does not reuse [`E_PLT_02_EMPTY_ID`] / [`E_PLT_08_DUPLICATE_DEVICE_ID`] /
+/// [`E_PLT_12_PARAMETER_OUT_OF_RANGE`] / [`E_PLT_15_DEVICE_EMPTY_ID`] either —
+/// each of those judges something else (the description's own id / duplicate
+/// ids / a parameter's value / a declared device's own id) ⇒ ⇒ **one code,
+/// one meaning** ⇒ ⇒ ⇒ **a new code** is required (STAGE-49 §7.1 订正 1).
+pub const E_PLT_18_ROLES_INVALID: u16 = 18;
+
 /// Scenario code: the image wants an address range that the **board in
 /// effect** does not have at all — 「**未知系统**」.
 ///

@@ -56,7 +56,7 @@ use crate::error::{
     PlatformError, E_PLT_01_SCHEMA_VERSION, E_PLT_02_EMPTY_ID, E_PLT_03_NO_REGIONS,
     E_PLT_04_ZERO_SIZE, E_PLT_05_OVERFLOW, E_PLT_06_OVERLAP, E_PLT_07_OVER_BUDGET,
     E_PLT_08_DUPLICATE_DEVICE_ID, E_PLT_12_PARAMETER_OUT_OF_RANGE, E_PLT_15_DEVICE_EMPTY_ID,
-    E_PLT_16_WIRING_INVALID, PLATFORM_FAMILY,
+    E_PLT_16_WIRING_INVALID, E_PLT_18_ROLES_INVALID, PLATFORM_FAMILY,
 };
 use crate::session::{REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
 
@@ -268,6 +268,16 @@ pub struct PlatformDescription {
     /// boards it already has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wiring: Option<Vec<WiringSpec>>,
+
+    /// **角色声明**（v0.73 · STAGE-49 · D-177 的 C）—— 哪个实例扮演 console /
+    /// 时间源 / 主 PLIC。
+    ///
+    /// ⚠️ **缺省 ⇒ 今天的口径逐字不变**（裁决 E）⇒ ⇒ **加法**⇒ ⇒ 存量板档案
+    /// **零影响**。
+    ///
+    /// ⚠️ **指了不存在的器件 ⇒ ⇒ 拒**（`E_PLT-18`）⇒ ⇒ **不静默回落**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles: Option<DeviceRoles>,
 }
 
 /// One **wire** between two devices — the wiring table's row.
@@ -371,6 +381,29 @@ pub enum RegionSpec {
         /// The device sitting at `base`.
         device: DeviceSpec,
     },
+}
+
+/// **角色声明**（v0.73 · STAGE-49 · D-177 的 C）—— 哪个器件实例扮演哪个角色。
+///
+/// ⚠️ **三个角色**：`console`（宿主跟它说话的那台 · 今天 = 第一个 UART）·
+///   `time_source`（`time` / `mtimecmp` 的来源 · 今天 = 第一个 CLINT）·
+///   `main_plic`（外部中断线从哪儿来 · 今天 = 第一个 PLIC）。
+///
+/// ⚠️ **缺省 ⇒ 今天的口径逐字不变**（裁决 E）⇒ ⇒ **加法**⇒ ⇒ 存量板档案
+/// **零影响**（STAGE-16 的同形先例）。
+///
+/// ⚠️ **指了不存在的器件 ⇒ ⇒ 拒**（`E_PLT-18`）⇒ ⇒ **不静默回落**。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DeviceRoles {
+    /// 哪台器件是 **console**（缺省 = 第一个 UART）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub console: Option<String>,
+    /// 哪台器件是**时间源**（缺省 = 第一个 CLINT）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_source: Option<String>,
+    /// 哪台器件是**主 PLIC**（缺省 = 第一个 PLIC）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_plic: Option<String>,
 }
 
 /// One declared peripheral device — internally tagged by **`device`**.
@@ -869,6 +902,55 @@ impl PlatformDescription {
             ));
         }
 
+        // V-20 — the **role declaration** must name devices that are there
+        // (v0.73 · STAGE-49 · D-177 的 C).
+        //
+        // ⚠️ **Appended after V-19** ⇒ the report order of V-1 ~ V-19 is
+        // unchanged, byte for byte.
+        //
+        // ⚠️ **One code** (`E_PLT_18`) for the two shapes（器件**不存在** /
+        // 器件**类型不对**）⇒ ⇒ 「**这份角色声明不合法**」⇒ ⇒ one code, not
+        // two (同 E_PLT-12 / E_PLT-16 的做法).
+        //
+        // ⚠️ **不复用 `E_PLT_16`**：那个意思是「**这条连线**非法」⇒ ⇒ 角色
+        // 指向一个不存在的器件是**另一个对象**⇒ ⇒ 一码两义 ⇒ 禁止（§7.1 订正 1）.
+        if let Some(roles) = self.roles.as_ref() {
+            let declared: Vec<(&str, &str)> = self
+                .regions
+                .iter()
+                .filter_map(|region| match region {
+                    RegionSpec::Peripheral { device, .. } => Some((device.id(), device.kind())),
+                    _ => None,
+                })
+                .collect();
+            for (role, id, wanted_kind) in [
+                ("console", roles.console.as_deref(), "uart16550"),
+                ("time_source", roles.time_source.as_deref(), "clint"),
+                ("main_plic", roles.main_plic.as_deref(), "plic"),
+            ] {
+                let Some(id) = id else {
+                    continue;
+                };
+                match declared.iter().find(|(did, _)| *did == id) {
+                    None => {
+                        return Err(PlatformError::new(
+                            PLATFORM_FAMILY,
+                            E_PLT_18_ROLES_INVALID,
+                            format!("角色 {role} 指向的器件 {id} 不在本描述声明的器件集合里"),
+                        ));
+                    }
+                    Some((_, kind)) if *kind != wanted_kind => {
+                        return Err(PlatformError::new(
+                            PLATFORM_FAMILY,
+                            E_PLT_18_ROLES_INVALID,
+                            format!("角色 {role} 指向的器件 {id} 是 {kind}，不是 {wanted_kind}"),
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1289,6 +1371,7 @@ mod tests {
             ],
             description: None,
             wiring: None,
+            roles: None,
         }
     }
 
@@ -2014,6 +2097,7 @@ mod tests {
                 .collect(),
             description: None,
             wiring: None,
+            roles: None,
         }
     }
 

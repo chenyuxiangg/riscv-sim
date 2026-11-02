@@ -152,6 +152,7 @@ fn user_board() -> PlatformDescription {
                 },
             },
         ],
+        roles: None,
     }
 }
 
@@ -206,6 +207,7 @@ fn board_with_four_devices() -> PlatformDescription {
                 },
             },
         ],
+        roles: None,
     }
 }
 
@@ -238,6 +240,7 @@ fn board_with_eight_mib_ram() -> PlatformDescription {
                 size: 0x0080_0000,
             },
         ],
+        roles: None,
     }
 }
 
@@ -474,6 +477,7 @@ fn b1_the_old_map_is_restored_when_the_new_one_cannot_be_mapped() {
                 },
             },
         ],
+        roles: None,
     };
 
     let events = dispatch(
@@ -546,6 +550,7 @@ fn b2_an_over_budget_description_is_rejected_with_e_plt_07() {
             base: 0x0000_0000,
             size: 0x0001_0000,
         }],
+        roles: None,
     };
 
     let events = dispatch(
@@ -584,6 +589,7 @@ fn b2_a_rejected_description_changes_nothing() {
             base: 0x0000_0000,
             size: 0x0001_0000,
         }],
+        roles: None,
     };
     dispatch(
         &mut host,

@@ -344,6 +344,48 @@ pub struct DeviceInstanceTable {
     entries: Vec<DeviceInstanceEntry>,
 }
 
+/// **角色解析**的结果（STAGE-49 · v0.73 · D-177 的 C）。
+///
+/// ⚠️ **角色 = 器件 id**（不是句柄）⇒ ⇒ 句柄**一律**从实例表按 id 查
+/// ⇒ ⇒ 表是**唯一真相源**（裁决 B）。
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedRoles {
+    /// **console** 角色的器件 id（`None` ⇒ 这块板**没有** UART）。
+    pub console: Option<String>,
+    /// **时间源**角色的器件 id（`None` ⇒ 没有 CLINT）。
+    pub time_source: Option<String>,
+    /// **主 PLIC** 角色的器件 id。
+    ///
+    /// ⚠️ **`None` ⇒ 不限** ⇒ ⇒ **所有** PLIC 都抬外部线 ⇒ ⇒ **今天的
+    /// 行为逐字不变**（v0.72 批裁决 F）。
+    pub main_plic: Option<String>,
+}
+
+/// **角色解析**（STAGE-49 · D-177 的 C）：描述里的 `roles` **优先**；
+/// **缺省** ⇒ ⇒ **今天的口径**（第一个 UART / 第一个 CLINT）。
+///
+/// ⚠️ **缺省行为逐字不变**（裁决 E）⇒ ⇒ 这是**加法**⇒ ⇒ 存量板档案
+/// **零影响**。
+///
+/// ⚠️ 描述里点名了**不存在**或**类型不对**的器件 ⇒ ⇒ **在校验阶段就被拒**
+/// （契约层 V-20 · `E_PLT-18`）⇒ ⇒ ⇒ **这里不可能拿到坏 id** ⇒ ⇒ ⇒
+/// **不静默回落**。
+pub fn resolve_roles(
+    description: &PlatformDescription,
+    devices: &DeviceInstanceTable,
+) -> ResolvedRoles {
+    let declared = description.roles.as_ref();
+    ResolvedRoles {
+        console: declared
+            .and_then(|r| r.console.clone())
+            .or_else(|| devices.first_uart().map(|e| e.id.clone())),
+        time_source: declared
+            .and_then(|r| r.time_source.clone())
+            .or_else(|| devices.first_clint().map(|e| e.id.clone())),
+        main_plic: declared.and_then(|r| r.main_plic.clone()),
+    }
+}
+
 /// 实例表里的一格。
 #[derive(Debug, Clone)]
 pub struct DeviceInstanceEntry {
@@ -440,6 +482,8 @@ pub struct MappedDevices {
     pub instances: Vec<riscv_sim_contract::model::DeviceInstanceInfo>,
     /// **按 id 索引**的器件实例表 —— 宿主手里**真正持有**的那些句柄。
     pub handles: DeviceInstanceTable,
+    /// **角色解析**的结果（STAGE-49 · D-177 的 C）—— 哪个 id 扮演哪个角色。
+    pub roles: ResolvedRoles,
 }
 
 /// 按描述**建图**。
@@ -533,6 +577,9 @@ pub fn map_platform(
             }
         }
     }
+    // ⚠️ **角色解析**（STAGE-49 · D-177 的 C）：描述里的 `roles` **优先**，
+    // **缺省** ⇒ ⇒ 今天的口径（第一个 UART / 第一个 CLINT）⇒ ⇒ **逐字不变**。
+    devices.roles = resolve_roles(description, &devices.handles);
     Ok(devices)
 }
 

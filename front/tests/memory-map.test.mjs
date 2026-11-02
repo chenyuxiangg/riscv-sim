@@ -1778,3 +1778,65 @@ describe("D-178 · 失败的装载也要重订流（修订号不许停在旧值�
         );
     });
 });
+
+// ---------------------------------------------------------------------------
+// D-177 的 C —— **角色声明**（`roles`）的草稿往返（STAGE-49 · v0.73）
+// ---------------------------------------------------------------------------
+
+describe("STAGE-49 · 角色声明（roles）的草稿往返", () => {
+    test("描述里的 `roles` ⇒ ⇒ 草稿里带上 ⇒ ⇒ 提交回去**还在**", () => {
+        const description = {
+            schema_version: 1,
+            id: "roles-board",
+            name: "角色板",
+            priority: 100,
+            auto_selectable: false,
+            region_budget_bytes: 1048576,
+            regions: [{ kind: "ram", base: 0, size: 4096 }],
+            roles: { console: "UART1", time_source: "CLINT0" },
+        };
+        const draft = mm.draftFromDescription(description);
+        assert.equal(
+            draft.roles?.console, "UART1",
+            "描述里的角色**必须**进草稿（否则一提交就把角色丢了 ⇒ ⇒ console 悄悄变回第一个 UART）",
+        );
+        assert.equal(draft.roles?.time_source, "CLINT0");
+
+        const back = mm.draftToDescription(draft);
+        assert.deepEqual(
+            back.roles, { console: "UART1", time_source: "CLINT0" },
+            "角色必须**逐字段**回到线上描述",
+        );
+    });
+
+    test("没有 `roles` 的板 ⇒ ⇒ 往返后**仍然没有**（不塞空对象）", () => {
+        const description = {
+            schema_version: 1,
+            id: "no-roles-board",
+            name: "无角色板",
+            priority: 100,
+            auto_selectable: false,
+            region_budget_bytes: 1048576,
+            regions: [{ kind: "ram", base: 0, size: 4096 }],
+        };
+        const draft = mm.draftFromDescription(description);
+        assert.equal(draft.roles, undefined, "没有角色的板**不许**被塞一个空对象");
+        const back = mm.draftToDescription(draft);
+        assert.equal(
+            back.roles, undefined,
+            "线上描述**不许**多一个 `roles` 键（与契约层的 skip_serializing_if 同形）",
+        );
+    });
+
+    test("归一化**不判定**（前端**不**写第二个校验器）", () => {
+        // ⚠️ 角色指错了由**内核**的 V-20 裁决 ⇒ ⇒ 前端**只透传** ⇒ ⇒
+        // 前端**不许**因为「这个 id 在不在」而改写角色。
+        const roles = mm.normalizeRoles({ console: "NOT-THERE" });
+        assert.equal(
+            roles.console, "NOT-THERE",
+            "前端**不许**自己判角色指得对不对 ⇒ ⇒ 原样透传",
+        );
+        assert.equal(mm.normalizeRoles(null), null, "null ⇒ null");
+        assert.equal(mm.normalizeRoles({}), null, "空 ⇒ null");
+    });
+});

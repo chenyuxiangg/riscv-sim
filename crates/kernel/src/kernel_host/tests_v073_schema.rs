@@ -31,6 +31,12 @@ use crate::m15_peripheral::types;
 use super::platform;
 use super::KernelHost;
 
+/// 描述里某个**器件**的基址（按器件 id 查）。
+fn device_base(description: &PlatformDescription, device_id: &str) -> u32 {
+    platform::device_base(description, device_id)
+        .unwrap_or_else(|| panic!("描述里必须有器件 {device_id}"))
+}
+
 /// 一块**带 `timer_riscv`** 的板（RAM 一段 + 那台计时器）。
 fn board_with_timer() -> PlatformDescription {
     let mut description =
@@ -202,5 +208,184 @@ fn k6_the_timer_window_is_not_the_clint_window() {
         entry.registers.len(),
         4,
         "`timer_riscv` 的寄存器表必须是 4 条（MTIME_LO / MTIME_HI / MTIMECMP_LO / MTIMECMP_HI）"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// D-177 的 C —— **角色声明**（`roles`）
+// ---------------------------------------------------------------------------
+
+/// 一块**两块 UART** 的板（`UART0` / `UART1`）+ 一个 PLIC。
+fn board_with_two_uarts() -> PlatformDescription {
+    let mut description = board_with_timer();
+    description.regions.push(RegionSpec::Peripheral {
+        base: 0x1000_1000,
+        device: DeviceSpec::Uart16550 {
+            id: "UART1".to_string(),
+            irq_line: 12,
+            baud_rate: 115200,
+        },
+    });
+    description
+}
+
+/// 某台 UART 的 **LSR bit0**（`RX 有字节`）。
+///
+/// ⚠️ **LSR 的偏移是 5**（M-15 注册表里 `LSR` 在 `THR`/`IER`/`FCR`/`LCR`/
+///   `MCR` 之后）⇒ ⇒ **不**写一个字面量偏移 ⇒ ⇒ 与模型**不会**漂。
+fn uart_has_rx_byte(host: &KernelHost, base: u32) -> bool {
+    let lsr = host
+        .bus()
+        .read_only(base + 5, crate::m14_bus::BusWidth::Byte)
+        .expect("读 UART 的 LSR");
+    lsr & 0x01 != 0
+}
+
+/// **K-7** —— `roles` **缺省** ⇒ ⇒ 行为**逐字不变**（console 仍是**第一个
+/// UART** · 时间源仍是**第一个 CLINT**）。
+#[test]
+fn k7_without_roles_the_console_is_still_the_first_uart() {
+    let description = board_with_two_uarts();
+    assert!(description.roles.is_none(), "这块板**不许**声明角色");
+
+    let mut host = KernelHost::new();
+    let events = host.handle_message(&Message::command(
+        1,
+        CommandPayload::SetMemoryMap {
+            description: description.clone(),
+            expected_revision: None,
+        },
+    ));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Error { .. })),
+        "装板不该报错：{events:?}"
+    );
+
+    // ⚠️ **宿主往 console 塞一个字节** ⇒ ⇒ **第一个 UART**（UART0）收到。
+    host.uart_receive(b'x');
+    assert!(
+        uart_has_rx_byte(&host, device_base(&description, "UART0")),
+        "缺省 ⇒ ⇒ console 必须是**第一个 UART**（UART0）"
+    );
+    assert!(
+        !uart_has_rx_byte(&host, device_base(&description, "UART1")),
+        "缺省 ⇒ ⇒ **第二个 UART**（UART1）**不许**收到那个字节"
+    );
+}
+
+/// **K-8** —— `roles` **显式** ⇒ ⇒ **生效**：指了 `UART1` 当 console ⇒ ⇒
+/// **它**才是 console。
+#[test]
+fn k8_an_explicit_console_role_takes_effect() {
+    let mut description = board_with_two_uarts();
+    description.roles = Some(riscv_sim_contract::platform::DeviceRoles {
+        console: Some("UART1".to_string()),
+        ..Default::default()
+    });
+    // ⚠️ **描述本身合法**（V-20：指的器件**存在**且**类型对**）。
+    assert!(
+        description.validate().is_ok(),
+        "指向 UART1 的 console 角色必须合法：{:?}",
+        description.validate()
+    );
+
+    let mut host = KernelHost::new();
+    let events = host.handle_message(&Message::command(
+        1,
+        CommandPayload::SetMemoryMap {
+            description: description.clone(),
+            expected_revision: None,
+        },
+    ));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Error { .. })),
+        "装板不该报错：{events:?}"
+    );
+
+    // ⚠️ **角色生效** ⇒ ⇒ 那个字节进的是 **UART1**。
+    host.uart_receive(b'x');
+    assert!(
+        uart_has_rx_byte(&host, device_base(&description, "UART1")),
+        "显式声明 console = UART1 ⇒ ⇒ **UART1** 必须收到那个字节"
+    );
+    assert!(
+        !uart_has_rx_byte(&host, device_base(&description, "UART0")),
+        "显式声明 console = UART1 ⇒ ⇒ **UART0** **不许**收到那个字节"
+    );
+}
+
+/// **K-9** —— `roles` 指了**不存在**的器件 ⇒ ⇒ **拒**（`E_PLT-18`）⇒ ⇒
+/// **不静默回落**。
+#[test]
+fn k9_a_role_naming_a_missing_device_is_rejected() {
+    let mut description = board_with_two_uarts();
+    description.roles = Some(riscv_sim_contract::platform::DeviceRoles {
+        console: Some("NOPE".to_string()),
+        ..Default::default()
+    });
+    // ⚠️ **校验阶段就拒** ⇒ ⇒ 那根线**根本到不了**宿主。
+    let err = description
+        .validate()
+        .expect_err("角色指了不存在的器件必须被拒");
+    // ⚠️ 判据是 **family + scenario**（**不看** message 文本）。
+    assert_eq!(
+        err.family,
+        riscv_sim_contract::error::PLATFORM_FAMILY,
+        "场景码的族必须是 PLT"
+    );
+    assert_eq!(
+        err.scenario, 18,
+        "必须报 `E_PLT-18`（角色声明非法）⇒ ⇒ 实际是 scenario={}",
+        err.scenario
+    );
+
+    // ⚠️ **装板时报同一个码** ⇒ ⇒ 前端显示的是**内核原文**。
+    let mut host = KernelHost::new();
+    let events = host.handle_message(&Message::command(
+        1,
+        CommandPayload::SetMemoryMap {
+            description: description.clone(),
+            expected_revision: None,
+        },
+    ));
+    let codes: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            EventPayload::Error { code, .. } => Some(code.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        codes,
+        vec!["E_PLT-18".to_string()],
+        "装板必须回 `E_PLT-18`，实际是 {codes:?}"
+    );
+}
+
+/// **K-9b** —— ⚠️ **必要对照**：`roles` 指了**类型不对**的器件（console 指了
+/// 一台 PLIC）⇒ ⇒ **也拒**（同一个码 ⇒ ⇒ 「这份角色声明不合法」是**一件事**）。
+#[test]
+fn k9b_a_role_naming_the_wrong_kind_of_device_is_rejected() {
+    let mut description = board_with_two_uarts();
+    description.roles = Some(riscv_sim_contract::platform::DeviceRoles {
+        console: Some("PLIC".to_string()),
+        ..Default::default()
+    });
+    let err = description
+        .validate()
+        .expect_err("console 指了一台 PLIC 必须被拒");
+    assert_eq!(
+        err.family,
+        riscv_sim_contract::error::PLATFORM_FAMILY,
+        "场景码的族必须是 PLT"
+    );
+    assert_eq!(
+        err.scenario, 18,
+        "必须报 `E_PLT-18`，实际是 scenario={}",
+        err.scenario
     );
 }

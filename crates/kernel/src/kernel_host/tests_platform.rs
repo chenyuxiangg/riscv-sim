@@ -226,6 +226,7 @@ fn an_over_budget_region_is_rejected_before_anything_is_mapped() {
         // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         wiring: None,
+        roles: None,
     };
 
     let mut bus = Bus::new();
@@ -673,6 +674,7 @@ fn a_broken_description_reports_its_own_code() {
         // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         wiring: None,
+        roles: None,
     };
     // ③ 预算超了 ⇒ E_PLT-07。
     let over_budget = PlatformDescription {
@@ -692,6 +694,7 @@ fn a_broken_description_reports_its_own_code() {
         // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         wiring: None,
+        roles: None,
     };
     // ④ 器件 id 重复 ⇒ E_PLT-08。
     let duplicate_id = PlatformDescription {
@@ -721,6 +724,7 @@ fn a_broken_description_reports_its_own_code() {
         // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         wiring: None,
+        roles: None,
     };
 
     let cases: [(&str, PlatformDescription, u16); 4] = [

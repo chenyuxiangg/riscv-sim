@@ -371,6 +371,10 @@ export function cloneDraft(draft) {
     // ⚠️ `wiring` 也**深复制**（STAGE-19）：它是**对象数组** ⇒ 浅拷贝会让
     // 「改草稿」改到内核给的那份 ⇒ ⇒ 与 `regions` 同一条纪律。
     if (Array.isArray(next.wiring)) next.wiring = normalizeWiringList(next.wiring);
+    // ⚠️ `roles` 也**深复制**（STAGE-49 · D-177 的 C）：它是**对象** ⇒ ⇒
+    // 浅拷贝会让「改草稿」改到内核给的那份 ⇒ ⇒ 与 `wiring` 同一条纪律。
+    const roles = normalizeRoles(next.roles);
+    if (roles) next.roles = roles;
     return next;
 }
 
@@ -420,6 +424,29 @@ export function regionToDraft(region) {
  * @param {unknown} wiring — 线上的 `wiring` 段 / 草稿里的 `wiring`
  * @returns {Array<{from: {device: string, event: string}, to: {device: string, source: number}}>}
  */
+/**
+ * 线上�� `roles` 段 → **草稿形状**（STAGE-49 · D-177 的 C）。
+ *
+ * ⚠️ **前端只做「透传」**：角色**指错了**由**内核**的 V-20 裁决（`E_PLT-18`）
+ * ⇒ ⇒ 前端**不**写第二个校验器 ⇒ ⇒ 也**不**在这里判「这个 id 在不在」。
+ *
+ * ⚠️ **三个键各自可缺省** ⇒ ⇒ **空 / 缺省 ⇒ 该键不带**（不是空串）⇒ ⇒
+ * 与契约层 serde 的 `skip_serializing_if = "Option::is_none"` **同形** ⇒ ⇒
+ * 没有 `roles` 的板往返后**仍然**没有 `roles`。
+ *
+ * @param {unknown} roles — 线上的 `roles` 段 / 草稿里的 `roles`
+ * @returns {{console?: string, time_source?: string, main_plic?: string}|null}
+ */
+export function normalizeRoles(roles) {
+    if (!roles || typeof roles !== "object") return null;
+    const out = {};
+    for (const key of ["console", "time_source", "main_plic"]) {
+        const value = roles[key];
+        if (typeof value === "string" && value.length > 0) out[key] = value;
+    }
+    return Object.keys(out).length > 0 ? out : null;
+}
+
 export function normalizeWiringList(wiring) {
     if (!Array.isArray(wiring)) return [];
     return wiring.map((entry) => ({
@@ -461,6 +488,11 @@ export function draftFromDescription(description) {
     // ⚠️ **空 / 缺省 ⇒ 草稿里**不带**这个键**（不给所有板都塞一个空数组）。
     const wiring = normalizeWiringList(description.wiring);
     if (wiring.length > 0) draft.wiring = wiring;
+    // ⚠️ `roles`（STAGE-49 · D-177 的 C）：描述里有 ⇒ **草稿里带上** ⇒ ⇒
+    // 提交回去还在（否则「板档案里那块板」一提交就把角色丢了 ⇒ ⇒ console
+    // 悄悄变回「第一个 UART」）。
+    const roles = normalizeRoles(description.roles);
+    if (roles) draft.roles = roles;
     return draft;
 }
 
@@ -516,6 +548,13 @@ export function draftToDescription(draft) {
     // 没有 `wiring` 的板往返后**仍然**没有 `wiring`。
     const wiring = normalizeWiringList(draft?.wiring);
     if (wiring.length > 0) description.wiring = wiring;
+    // ⚠️ `roles`（STAGE-49 · D-177 的 C）：**逐字段重建**（同一个
+    // `normalizeRoles`）⇒ ⇒ 草稿里多出来的键**不可能**漏进契约；
+    // ⚠️ **空 / 缺省 ⇒ 线上描述不带这个键**（不是 `null`）⇒ ⇒ 与契约层 serde
+    // 的 `skip_serializing_if` **同形** ⇒ ⇒ 没有 `roles` 的板往返后**仍然**
+    // 没有 `roles`。
+    const roles = normalizeRoles(draft?.roles);
+    if (roles) description.roles = roles;
     return description;
 }
 

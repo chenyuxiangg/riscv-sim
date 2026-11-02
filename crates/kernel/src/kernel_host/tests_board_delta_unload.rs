@@ -144,6 +144,7 @@ fn user_board() -> PlatformDescription {
                 },
             },
         ],
+        roles: None,
     }
 }
 
@@ -169,6 +170,7 @@ fn ram_only_board(max_region_bytes: Option<u32>) -> PlatformDescription {
             base: 0x0000_0000,
             size: 0x0001_0000,
         }],
+        roles: None,
     }
 }
 

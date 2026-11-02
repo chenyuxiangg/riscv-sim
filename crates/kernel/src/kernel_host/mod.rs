@@ -933,6 +933,12 @@ pub struct KernelHost {
     /// ⚠️ **它过 wire**（`memory.map` 事件的第五个字段）⇒ ⇒ 用户**看得见**
     /// ⇒ ⇒ 「描述被接受但线被静默丢弃」这件事**不再是静默的**。
     wiring_report: riscv_sim_contract::model::WiringReportDto,
+    /// **角色解析**的结果（v0.73 · STAGE-48 · D-177 的 C）—— 哪个 id 扮演
+    /// console / 时间源 / 主 PLIC。
+    ///
+    /// ⚠️ **缺省 ⇒ 今天的口径逐字不变**（第一个 UART / 第一个 CLINT）⇒ ⇒
+    /// 存量板档案**零影响**。
+    roles: platform::ResolvedRoles,
     /// 已经从 UART 取走、但**还没推给前端**的 console 字节。
     ///
     /// ⚠️ **必须**及时把 UART 的字节取走（捕获环满了会丢最新的字节），
@@ -1101,6 +1107,7 @@ impl KernelHost {
             // ⚠️ v0.72（STAGE-48 · D-177 A）：丢线报告**随图**重算 ⇒ 这里
             // 只是**初值**（还没有建图 ⇒ 没有线 ⇒ 0 根）。
             wiring_report: riscv_sim_contract::model::WiringReportDto::default(),
+            roles: platform::ResolvedRoles::default(),
             console_backlog: Vec::new(),
             hms,
             log_buffer,
@@ -1296,6 +1303,9 @@ impl KernelHost {
         // 的实例表 ⇒ ⇒ 「第二个 UART」**也有句柄** ⇒ ⇒ 它的线**真的**能
         // 通电（裁决 E）。
         self.devices = devices.handles;
+        // ⚠️ **角色**（STAGE-49 · D-177 的 C）：描述里声明了就用它，没声明就
+        // **今天那个口径**（第一个 UART / 第一个 CLINT）⇒ ⇒ **逐字不变**。
+        self.roles = devices.roles;
         // ⚠️ **逐实例**清单（STAGE-43 · v0.66 · D-175）—— **建图时**顺带
         // 产出 ⇒ ⇒ 与总线上的实际布局**同源** ⇒ ⇒ 不另算一遍。
         self.device_instances = devices.instances;
@@ -1308,10 +1318,14 @@ impl KernelHost {
         //
         // ⚠️ **没有 CLINT 的板 ⇒ 没有时钟** ⇒ ⇒ `time` / `timeh` 报 **0**
         // ⇒ ⇒ `default` / `minimal` 两档与黄金 runner 的行为**逐字不变**。
+        // ⚠️ **时间源角色**（STAGE-49 · D-177 的 C）：声明了就用它，没声明
+        // ⇒ ⇒ **第一个 CLINT**（今天的口径，逐字不变）。
         let time_source = self
-            .devices
-            .first_clint()
-            .and_then(|entry| self.devices.clint(&entry.id))
+            .roles
+            .time_source
+            .as_deref()
+            .or_else(|| self.devices.first_clint().map(|e| e.id.as_str()))
+            .and_then(|id| self.devices.clint(id))
             .map(|clint| platform::clint_time_source(&clint));
         self.backend.install_time_source(time_source);
         self.platform = description.clone();
@@ -1374,10 +1388,13 @@ impl KernelHost {
     fn sync_interrupts(&mut self) {
         // ⚠️ **角色 = id，句柄 = 从实例表里查出来的**（裁决 B）⇒ ⇒ 「第一个
         // CLINT」= 时间源（裁决 D：逐字不变）。
+        // ⚠️ **时间源角色**（STAGE-49 · D-177 的 C）—— 同上：**缺省逐字不变**。
         let Some(clint) = self
-            .devices
-            .first_clint()
-            .and_then(|entry| self.devices.clint(&entry.id))
+            .roles
+            .time_source
+            .as_deref()
+            .or_else(|| self.devices.first_clint().map(|e| e.id.as_str()))
+            .and_then(|id| self.devices.clint(id))
         else {
             return;
         };
@@ -1480,7 +1497,14 @@ impl KernelHost {
         // `claim` 调用 ⇒ 同一个结果）。
         let mut claimed: Option<u32> = None;
         let mut any_readable = false;
-        for plic in self.devices.plic_handles() {
+        // ⚠️ **主 PLIC 角色**（STAGE-49 · D-177 的 C）：**声明了** ⇒ ⇒ **只有
+        //   它**抬外部线；**没声明** ⇒ ⇒ **所有** PLIC 都抬 ⇒ ⇒ ⇒ **今天的
+        //   行为逐字不变**（v0.72 批裁决 F）。
+        let plics: Vec<_> = match self.roles.main_plic.as_deref() {
+            Some(id) => self.devices.plic(id).into_iter().collect(),
+            None => self.devices.plic_handles(),
+        };
+        for plic in plics {
             match plic.try_borrow_mut() {
                 Ok(mut p) => {
                     any_readable = true;
@@ -1554,9 +1578,14 @@ impl KernelHost {
     /// ⚠️ **角色 = id，句柄 = 从实例表里查出来的**（裁决 B）⇒ ⇒ 表是
     /// **唯一真相源** ⇒ ⇒ 「console 是哪个」这件事**只由角色 id 决定**。
     fn console_uart(&self) -> Option<Rc<RefCell<Uart16550>>> {
-        self.devices
-            .first_uart()
-            .and_then(|entry| self.devices.uart(&entry.id))
+        // ⚠️ **console 角色**（STAGE-49 · D-177 的 C）：描述里声明了**它**
+        // ⇒ ⇒ 就是它；没声明 ⇒ ⇒ **第一个 UART**（今天的口径，逐字不变）。
+        let id = self
+            .roles
+            .console
+            .as_deref()
+            .or_else(|| self.devices.first_uart().map(|e| e.id.as_str()))?;
+        self.devices.uart(id)
     }
 
     /// **直接从 UART 的捕获环**取走字节（**不碰** backlog）。

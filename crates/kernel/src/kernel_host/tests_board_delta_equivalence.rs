@@ -122,6 +122,7 @@ fn user_board() -> PlatformDescription {
                 },
             },
         ],
+        roles: None,
     }
 }
 
@@ -462,6 +463,7 @@ fn target_with_three_changes() -> PlatformDescription {
                 },
             },
         ],
+        roles: None,
     }
 }
 

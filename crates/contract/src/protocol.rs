@@ -1473,6 +1473,7 @@ mod tests {
             }],
             description: None,
             wiring: None,
+            roles: None,
         }
     }
 
@@ -1729,6 +1730,7 @@ mod tests {
             ],
             description: Some("用户配的板".to_string()),
             wiring: None,
+            roles: None,
         };
         let cmd = CommandPayload::SetMemoryMap {
             description: description.clone(),
