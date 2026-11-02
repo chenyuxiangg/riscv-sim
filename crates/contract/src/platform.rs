@@ -413,6 +413,23 @@ pub enum DeviceSpec {
         /// The number of interrupt contexts.
         contexts: u32,
     },
+    /// A RISC-V style timer (`mtime` / `mtimecmp`，**无** hart 数组).
+    ///
+    /// ⚠️ **v0.73（STAGE-49 · G）**：内核**早就实现了**这台器件（M-15 注册表
+    ///   的第五个类型 `timer_riscv`）⇒ ⇒ 但描述格式**写不出来**它 ⇒ ⇒ 这
+    ///   就是 STAGE-43 裁决 J 说的「内核实现了、描述还写不出来」⇒ ⇒ 本变体
+    ///   **补上那个缺口**。
+    ///
+    /// ⚠️ **参数只有两个**（`id` + `irq_line`）⇒ ⇒ 与内核的
+    ///   `TimerRiscv::new(id, base, irq_line)` **逐字对齐** ⇒ ⇒ **不**加
+    ///   `freq_hz` / `harts`（那两样是 **CLINT** 的，不是它的）⇒ ⇒ ⇒ **不造
+    ///   第二个真相**。
+    TimerRiscv {
+        /// The device id — the key the restore path matches on.
+        id: String,
+        /// The interrupt line this timer raises.
+        irq_line: u16,
+    },
 }
 
 impl DeviceSpec {
@@ -420,18 +437,22 @@ impl DeviceSpec {
     /// set (STAGE-43 · v0.66 · D-175 · 裁决 H / I).
     ///
     /// ⚠️ **This is NOT the same thing as "what the kernel implements"**:
-    /// - **this** = what the *description format* can write (today **4**);
+    /// - **this** = what the *description format* can write (today **5**);
     /// - the kernel's *device type registry* (M-15) = what the kernel
-    ///   implements (today **5** — it also has a timer).
+    ///   implements (today **5**).
     ///
     /// ⇒ ⇒ The invariant is **"instantiable ⊆ implemented"** ⇒ ⇒ the
-    /// reverse direction is **not** required (the timer is implemented but
-    /// not writable yet — 裁决 J ⇒ 登记为 D-175 的子项).
+    /// reverse direction is **not** required.
+    ///
+    /// ⚠️ **v0.73（STAGE-49 · G）**：**两边相等了** ⇒ ⇒ 此前 STAGE-43 裁决 J
+    ///   说的「内核实现了、描述还写不出来」的那一条（`timer_riscv`）**补上了**
+    ///   ⇒ ⇒ ⇒ 本清单**多**了 `timer_riscv` ⇒ ⇒ 前端的器件下拉**跟着多**
+    ///   一项（跨层门禁**逐字**比这两份 ⇒ ⇒ 少一侧就红）。
     ///
     /// ⚠️ **One landing spot** (裁决 I) ⇒ ⇒ the front end's `DEVICE_KINDS`
     /// is checked against **this** list by a cross-layer gate ⇒ ⇒ a new
     /// variant here turns the front end **red** instead of drifting.
-    pub const KINDS: [&'static str; 4] = ["gpio", "uart16550", "clint", "plic"];
+    pub const KINDS: [&'static str; 5] = ["gpio", "uart16550", "clint", "plic", "timer_riscv"];
 }
 
 impl PlatformDescription {
@@ -734,19 +755,25 @@ impl PlatformDescription {
         });
         if let Some(min_sources) = plic_sources.min() {
             for region in &self.regions {
-                let RegionSpec::Peripheral {
-                    device: DeviceSpec::Uart16550 { id, irq_line, .. },
-                    ..
-                } = region
-                else {
+                let RegionSpec::Peripheral { device, .. } = region else {
                     continue;
                 };
-                if u32::from(*irq_line) >= min_sources {
+                // ⚠️ **v0.73（STAGE-49 · G）**：`timer_riscv` **也**带
+                //   `irq_line` ⇒ ⇒ **同一条规则**管它 ⇒ ⇒ 否则「UART 的
+                //   irq_line 要判、计时器的 irq_line 不判」⇒ ⇒ **同一个量两个
+                //   口径** ⇒ ⇒ ⇒ 一个约束**一个落点**。
+                let (id, irq_line) = match device {
+                    DeviceSpec::Uart16550 { id, irq_line, .. } => (id, *irq_line),
+                    DeviceSpec::TimerRiscv { id, irq_line } => (id, *irq_line),
+                    _ => continue,
+                };
+                if u32::from(irq_line) >= min_sources {
                     return Err(PlatformError::new(
                         PLATFORM_FAMILY,
                         E_PLT_12_PARAMETER_OUT_OF_RANGE,
                         format!(
-                            "器件 {id}（uart16550）的参数 irq_line = {irq_line} 不在 PLIC 的中断源数之内（图中最小的 sources = {min_sources}）"
+                            "器件 {id}（{kind}）的参数 irq_line = {irq_line} 不在 PLIC 的中断源数之内（图中最小的 sources = {min_sources}）",
+                            kind = device.kind(),
                         ),
                     ));
                 }
@@ -1026,7 +1053,8 @@ impl DeviceSpec {
             DeviceSpec::Gpio { id }
             | DeviceSpec::Uart16550 { id, .. }
             | DeviceSpec::Clint { id, .. }
-            | DeviceSpec::Plic { id, .. } => id,
+            | DeviceSpec::Plic { id, .. }
+            | DeviceSpec::TimerRiscv { id, .. } => id,
         }
     }
 
@@ -1038,6 +1066,7 @@ impl DeviceSpec {
             DeviceSpec::Uart16550 { .. } => "uart16550",
             DeviceSpec::Clint { .. } => "clint",
             DeviceSpec::Plic { .. } => "plic",
+            DeviceSpec::TimerRiscv { .. } => "timer_riscv",
         }
     }
 
@@ -1093,6 +1122,9 @@ impl DeviceSpec {
                 ("sources", u64::from(*sources)),
                 ("contexts", u64::from(*contexts)),
             ],
+            // ⚠️ **这台器件没有数值参数**（只有 `id` + `irq_line`，而 `irq_line`
+            //   归**跨字段**规则 V-15 管）⇒ ⇒ 空列表。
+            DeviceSpec::TimerRiscv { .. } => Vec::new(),
         }
     }
 
@@ -1107,9 +1139,12 @@ impl DeviceSpec {
     ///   second interval table.
     ///
     /// ⚠️ **An unknown kind yields an empty domain** — that is the honest
-    /// answer for a type the description format cannot express (today:
-    /// `timer_riscv`, which the kernel implements but the format cannot
-    /// write yet — 裁决 J).
+    /// answer for a type the description format cannot express.
+    ///
+    /// ⚠️ **v0.73（STAGE-49 · G）**：`timer_riscv` **不再**是这种类型 ⇒ ⇒
+    ///   描述**能写出它**了 ⇒ ⇒ 它**自己**的域是**空**（它没有数值参数）⇒ ⇒
+    ///   下面**显式**列出它（不靠「未知类型 ⇒ 空」那条兜底）⇒ ⇒ ⇒ **域的
+    ///   归属**看得见。
     ///
     /// @param {string} kind — the device kind tag (e.g. `"uart16550"`)
     /// @returns {Array<[string, number, number|null]>}
@@ -1125,6 +1160,8 @@ impl DeviceSpec {
                 ("sources", 1, Some(u64::from(MAX_PLIC_SOURCES))),
                 ("contexts", 1, Some(u64::from(MAX_PLIC_CONTEXTS))),
             ],
+            // ⚠️ **`timer_riscv` 没有数值参数**（`irq_line` 归 V-15）⇒ ⇒ 空。
+            "timer_riscv" => Vec::new(),
             _ => Vec::new(),
         }
     }

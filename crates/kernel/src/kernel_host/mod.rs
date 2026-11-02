@@ -4850,6 +4850,13 @@ mod tests_v071_unknown_system;
 #[cfg(test)]
 mod tests_v072_wiring;
 
+/// **描述格式升版**（v0.73 · STAGE-49 · D-175 的 B2 / G / D1 + D-177 的 C）。
+///
+/// ⚠️ 本批**施工中** ⇒ ⇒ 这一组先盯**G**（`timer_riscv` 进描述格式）⇒ ⇒
+/// 其余三项（B2 / D1 / D-177 的 C）落地后再往这里加。
+#[cfg(test)]
+mod tests_v073_schema;
+
 /// 平台描述的加载 · 器件工厂 · 建图（v0.27 · D-123-B）。
 ///
 /// ⚠️ **它是公开的**：外部（headless runner / 将来的 server crate）可能

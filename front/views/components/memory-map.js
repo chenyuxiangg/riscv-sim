@@ -91,7 +91,7 @@
 // 不变。
 
 import { escapeHtml } from "../../lib/escape.js";
-import { PLATFORM_SCHEMA_VERSION } from "../../lib/message.js";
+import { PLATFORM_SCHEMA_VERSION, SCHEMA_VERSION } from "../../lib/message.js";
 // ⚠️ **连线报告**（STAGE-48 · v0.72 · D-177 A）—— 纯函数（显示层）。
 import {
     describeDroppedWire,
@@ -132,10 +132,23 @@ export { PLATFORM_SCHEMA_VERSION };
  * ⚠️ **v0.57（契约 v9）**：调试器增强批（符号查询 + 条件断点 + 整段转储）
  *   ⇒ ⇒ 信封版本 **8 → 9** ⇒ ⇒ 文案跟着改。
  */
-export const CONTRACT_SCHEMA_VERSION = 9;
+export const CONTRACT_SCHEMA_VERSION = SCHEMA_VERSION;
 
-/** 器件类型（`DeviceSpec` 的四个变体，snake_case 线上名）。 */
-export const DEVICE_KINDS = Object.freeze(["gpio", "uart16550", "clint", "plic"]);
+/**
+ * 器件类型（`DeviceSpec` 的**五个**变体，snake_case 线上名）。
+ *
+ * ⚠️ **v0.73（STAGE-49 · G）**：加了 `timer_riscv`（内核**早就实现了**这台
+ *   器件 ⇒ ⇒ 此前只是**描述写不出来**它 ⇒ ⇒ 现在**能写了**）⇒ ⇒ 本清单
+ *   与契约层 `DeviceSpec::KINDS` **逐字相同** ⇒ ⇒ ⇒ 跨层门禁**逐字**比这两
+ *   份 ⇒ ⇒ **少一侧就红**。
+ */
+export const DEVICE_KINDS = Object.freeze([
+    "gpio",
+    "uart16550",
+    "clint",
+    "plic",
+    "timer_riscv",
+]);
 
 /** 区域类型（`RegionSpec` 的三个变体，snake_case 线上名）。 */
 export const REGION_KINDS = Object.freeze(["ram", "rom", "peripheral"]);
@@ -165,6 +178,10 @@ const DEVICE_DEFAULTS = Object.freeze({
     uart16550: { id: "UART0", irq_line: 10, baud_rate: 115200 },
     clint: { id: "CLINT", freq_hz: 10000000, harts: 1 },
     plic: { id: "PLIC", sources: 32, contexts: 1 },
+    // ⚠️ **`timer_riscv` 的参数只有 `id` + `irq_line`**（与内核的
+    //   `TimerRiscv::new(id, base, irq_line)` **逐字对齐** ⇒ ⇒ **不**加
+    //   `freq_hz` / `harts`——那两样是 **CLINT** 的）。
+    timer_riscv: { id: "TIMER0", irq_line: 11 },
 });
 
 /** 器件类型 → 显示名。 */
@@ -173,6 +190,7 @@ export const DEVICE_LABELS = Object.freeze({
     uart16550: "UART16550",
     clint: "CLINT",
     plic: "PLIC",
+    timer_riscv: "TIMER",
 });
 
 /**
@@ -194,6 +212,8 @@ const DEVICE_PARAMS = Object.freeze({
         { name: "sources", label: "中断源数 sources" },
         { name: "contexts", label: "上下文数 contexts" },
     ],
+    // ⚠️ **只有 `irq_line`**（与内核 `TimerRiscv::new` 的参数**逐字对齐**）。
+    timer_riscv: [{ name: "irq_line", label: "中断号 irq_line" }],
 });
 
 // ---------------------------------------------------------------------------

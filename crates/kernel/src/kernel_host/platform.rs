@@ -300,6 +300,12 @@ fn build_device(spec: &DeviceSpec, base: u32) -> Result<BuiltDevice, PlatformErr
             sources,
             contexts,
         } => BuiltDevice::plic(Plic::with_capacity(id.clone(), base, *sources, *contexts)),
+        // ⚠️ **v0.73（STAGE-49 · G）**：这台器件**内核早就实现了**（M-15
+        //   注册表里的第五个类型）⇒ ⇒ 这里只是让**描述能写出它** ⇒ ⇒ 参数
+        //   **逐字**对齐 `TimerRiscv::new(id, base, irq_line)`。
+        DeviceSpec::TimerRiscv { id, irq_line } => BuiltDevice::opaque(
+            crate::m15_peripheral::timer::TimerRiscv::new(id.clone(), base, *irq_line),
+        ),
     })
 }
 

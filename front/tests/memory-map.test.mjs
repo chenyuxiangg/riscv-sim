@@ -255,15 +255,25 @@ describe("板级内存图 · 编辑器（规格 §3.3）", () => {
         );
     });
 
-    test("C-2 器件类型下拉框正好是契约里的 4 种", () => {
+    test("C-2 器件类型下拉框**正好是**契约的那些种（**不写死个数**）", () => {
         setup();
         $("[data-action='add-peripheral']").dispatchEvent(new Event("click"));
         const select = $("[data-mm-device-kind]");
         assert.ok(select, "没有器件类型下拉框");
+        // ⚠️ **不写死个数**：契约层 `DeviceSpec::KINDS` **会**变（v0.73 加了
+        //   `timer_riscv`）⇒ ⇒ 写死「4 种」的那条断言**必然**过时 ⇒ ⇒
+        //   ⇒ 这里断言「下拉框 == **前端镜像那份清单**」⇒ ⇒ 而「前端镜像那份
+        //   == **契约源码那份**」由**跨层**那条判据守
+        //   （`front/tests/device-registry.test.mjs` 的跨层比对）⇒ ⇒ ⇒
+        //   **两个断言各管一件事**（一个约束一个落点）。
         assert.deepEqual(
             select.querySelectorAll("option").map((o) => o.getAttribute("value")),
-            ["gpio", "uart16550", "clint", "plic"],
-            "器件类型必须正好是契约 `DeviceSpec` 的 4 种",
+            [...mm.DEVICE_KINDS],
+            "器件类型下拉框必须**正好是**前端镜像的那份清单",
+        );
+        assert.ok(
+            mm.DEVICE_KINDS.includes("timer_riscv"),
+            "契约能写的器件类型里**必须**有 `timer_riscv`（v0.73 批 · G）",
         );
     });
 
