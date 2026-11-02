@@ -278,7 +278,13 @@ riscv_sim/
    - 缺陷在**同一个分支**上追加 fix commit 闭环（不重写已推送历史）
    - 检视未闭环完 → **不合并**，`main` 保持不动
 
-4. **同步回 main**
+4. **销账**（欠账闭环时）
+   - **从 `docs/reviews/REVIEWS.md` 里删掉那一行** ⇒ ⇒ **移入** `docs/reviews/REVIEWS-archive.md` §1（并把**处置**补进归档那一行）
+   - ⛔ **不是**「在台账里留着打个 ✅ 标记」⇒ ⇒ 台账的价值在「**还欠什么**」⇒ ⇒ 留一堆已闭环的行会**稀释**它
+   - 同步更新 `docs/progress/PROGRESS.md` 的顺手批那行（**只列未闭环的**）与台账 §0.2 的计数
+   - 机器口径：`python3 tools/ledger_check.py --ledger` ⇒ ⇒ **标记区只数未闭环** ⇒ ⇒ 销账后该数**会变小**（这是**对的**）
+
+5. **同步回 main**
    - 检视闭环 + 门禁全绿后，才把分支同步到 `main`（squash merge 或 fast-forward + merge）
    - 同步后删本地分支 + 远端分支；同步动作需向用户确认后执行
 
