@@ -58,7 +58,7 @@
 
 | 项 | 数值 |
 | --- | --- |
-| `schema_version` | **10** |
+| `schema_version` | **11** |
 | 命令 / 事件 / 错误族 | 29 / 21 / 15 |
 
 ### 调试与观测
@@ -91,16 +91,18 @@
 | 内置描述 | `default` / `qemu-virt` / `minimal`（后者只能显式指定） |
 | 自动选档 | 按镜像实际用到的地址挑描述 |
 | 板级编辑 | 浏览器里定制 RAM / ROM / 外设窗口、差量改板、板档案持久化、基址规划、器件类型/实例注册表 |
+| 器件实例 | 宿主按 **id 索引**持有每个器件实例 ⇒ ⇒ 多个 UART / PLIC **各有各的连线**，不再塌缩成三个固定角色 |
+| 连线报告 | 内核在**接受描述的那一刻**说清「你写了 N 根线里有 M 根当前抬不了」⇒ ⇒ 逐条带原因 ⇒ ⇒ **不静默丢线** |
 
 ### 工程规模
 
 | 项 | 数值 |
 | --- | --- |
-| 契约层 | **16 000** 行（11 个 `.rs`） |
-| 仿真内核 | **77 052** 行（94 个 `.rs`，含宿主装配层） |
-| 前端 | **41 085** 行（`front/` 下 git 跟踪源码） |
-| 设计文档 | **86** 篇（26 HTML + 60 Markdown） |
-| 测试 | **1 865** 条 Rust + **808** 条前端（157 suite）+ **267** 条真机断言（31 段） |
+| 契约层 | **16 208** 行（11 个 `.rs`） |
+| 仿真内核 | **78 280** 行（95 个 `.rs`，含宿主装配层） |
+| 前端 | **41 303** 行（`front/` 下 git 跟踪源码） |
+| 设计文档 | **88** 篇（26 HTML + 62 Markdown） |
+| 测试 | **1 878** 条 Rust + **819** 条前端（160 suite）+ **274** 条真机断言（32 段） |
 
 ---
 
@@ -280,11 +282,11 @@ node tools/browser-verify.mjs
 | --- | --- | --- |
 | 1 | `cargo fmt --all -- --check` | 格式 |
 | 2 | `cargo clippy --workspace --all-targets -- -D warnings` | 静态检查 |
-| 3 | `cargo test --workspace --no-fail-fast --lib --tests` | 1 865 条 Rust 用例 |
-| 4 | `tools/check-front.sh` | 808 用例 / 157 suite |
+| 3 | `cargo test --workspace --no-fail-fast --lib --tests` | 1 878 条 Rust 用例 |
+| 4 | `tools/check-front.sh` | 819 用例 / 160 suite |
 | 5 | `tools/golden-run.sh --self-check` + `--keep-going` | 指令级判决（77/77） |
 | 6 | `tools/build-wasm.sh` + `node tools/wasm-smoke.mjs` | 真 WASM 产物桥接冒烟 |
-| 7 | `node tools/browser-verify.mjs` | 真 Chrome 端到端断言（267 ✓ / 0 ✗） |
+| 7 | `node tools/browser-verify.mjs` | 真 Chrome 端到端断言（274 ✓ / 0 ✗ · 32 段） |
 | 8 | `tools/boot-osz.sh` | 真实 RTOS 与 Spike 逐字节对拍（需仓外 osz ELF + Spike，不进默认门禁） |
 | 9 | **变异自检**（每批至少一条「对照变异 0 红」） | 判别力的证据：真变异必须精确红在预期处，对照变异必须 0 红 |
 
