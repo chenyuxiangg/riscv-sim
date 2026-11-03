@@ -80,7 +80,7 @@
 | UART（ns16550） | 8 字节寄存器 + DLAB 真切换 + 无损 TX 捕获环 + 16 字节 RX FIFO |
 | CLINT | `msip` / `mtimecmp` / `mtime` |
 | PLIC | priority / pending / enable / threshold / claim + complete |
-| GPIO | PL061 布局，驱动探针边沿 |
+| GPIO | PL061 布局，驱动探针边沿；**引脚级 IRQ**（`pin_irq`，一次性边沿语义）可路由进 PLIC |
 | 中断控制器 | 保序挂起队列 + 同线去重 + 优先级仲裁 + 拉取式交付 |
 
 ### 平台与内存图
@@ -90,9 +90,10 @@
 | 平台描述 | 一份 JSON 数据承载地址空间 + 器件清单；契约层唯一校验器；换描述、宿主代码零改动 |
 | 内置描述 | `default` / `qemu-virt` / `minimal`（后者只能显式指定） |
 | 自动选档 | 按镜像实际用到的地址挑描述 |
-| 板级编辑 | 浏览器里定制 RAM / ROM / 外设窗口、差量改板、板档案持久化、基址规划、器件类型/实例注册表 |
+| 板级编辑 | 浏览器里定制 RAM / ROM / 外设窗口、差量改板、板档案持久化、基址规划、器件类型/实例注册表、**器件连线编辑面**（加 / 删连线） |
 | 器件实例 | 宿主按 **id 索引**持有每个器件实例 ⇒ ⇒ 多个 UART / PLIC **各有各的连线**，不再塌缩成三个固定角色 |
 | 连线报告 | 内核在**接受描述的那一刻**说清「你写了 N 根线里有 M 根当前抬不了」⇒ ⇒ 逐条带原因 ⇒ ⇒ **不静默丢线** |
+| 引脚级连线 | **v0.74 起**：连线可落到**引脚级**（`from.pin`）+ **通用连接路由**（事件词表化 ⇒ ⇒ `rx_ready`（`uart16550`）· `pin_irq`（`gpio`）⇒ ⇒ 按描述的 `wiring` 编译，不再硬编码「UART→PLIC 一条」） |
 
 ### 工程规模
 
@@ -102,7 +103,7 @@
 | 仿真内核 | **78 280** 行（95 个 `.rs`，含宿主装配层） |
 | 前端 | **41 303** 行（`front/` 下 git 跟踪源码） |
 | 设计文档 | **88** 篇（26 HTML + 62 Markdown） |
-| 测试 | **1 878** 条 Rust + **819** 条前端（160 suite）+ **274** 条真机断言（32 段） |
+| 测试 | **1 917** 条 Rust + **845** 条前端（168 suite）+ **292** 条真机断言（**34** 段） |
 
 ---
 
@@ -125,10 +126,10 @@ node --version
 
 ```bash
 cargo build                                    # native
-cargo test --workspace --no-fail-fast --lib --tests   # 1 865 条
+cargo test --workspace --no-fail-fast --lib --tests   # 1 917 条
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
-tools/check-front.sh        # 前端门禁 —— 808 用例 / 157 suite
+tools/check-front.sh        # 前端门禁 —— 845 用例 / 168 suite
 ```
 
 > ⚠️ **不要**用裸 `cargo test --workspace`：它会带上 doc-test，在 macOS 上会**假挂死**。用 `--lib --tests`。
@@ -282,11 +283,11 @@ node tools/browser-verify.mjs
 | --- | --- | --- |
 | 1 | `cargo fmt --all -- --check` | 格式 |
 | 2 | `cargo clippy --workspace --all-targets -- -D warnings` | 静态检查 |
-| 3 | `cargo test --workspace --no-fail-fast --lib --tests` | 1 878 条 Rust 用例 |
-| 4 | `tools/check-front.sh` | 819 用例 / 160 suite |
+| 3 | `cargo test --workspace --no-fail-fast --lib --tests` | 1 917 条 Rust 用例 |
+| 4 | `tools/check-front.sh` | 845 用例 / 168 suite |
 | 5 | `tools/golden-run.sh --self-check` + `--keep-going` | 指令级判决（77/77） |
 | 6 | `tools/build-wasm.sh` + `node tools/wasm-smoke.mjs` | 真 WASM 产物桥接冒烟 |
-| 7 | `node tools/browser-verify.mjs` | 真 Chrome 端到端断言（274 ✓ / 0 ✗ · 32 段） |
+| 7 | `node tools/browser-verify.mjs` | 真 Chrome 端到端断言（292 ✓ / 0 ✗ · 34 段） |
 | 8 | `tools/boot-osz.sh` | 真实 RTOS 与 Spike 逐字节对拍（需仓外 osz ELF + Spike，不进默认门禁） |
 | 9 | **变异自检**（每批至少一条「对照变异 0 红」） | 判别力的证据：真变异必须精确红在预期处，对照变异必须 0 红 |
 

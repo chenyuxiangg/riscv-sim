@@ -79,7 +79,7 @@ RISC-V 仿真/调试平台 —— 多模块协作的端到端工程。详细设�
 | 起前端 | `python3 tools/serve-front.py`（**唯一落点**，带 `Cache-Control: no-store`） |
 | 构建 WASM | `tools/build-wasm.sh` 或 `--release` |
 | 测试（Rust） | `cargo test --workspace --no-fail-fast --lib --tests`（⚠️ 不带 `--lib --tests` 会因 doc-test **假挂死**） |
-| 测试（前端） | `tools/check-front.sh`（819 用例 / 160 suite，Node ≥ 22） |
+| 测试（前端） | `tools/check-front.sh`（845 用例 / 168 suite，Node ≥ 22） |
 | 测试（WASM 桥） | `tools/build-wasm.sh` → `node tools/wasm-smoke.mjs`（产物缺失则跳过） |
 | 测试（浏览器真机） | `tools/browser-verify.mjs`（需 Chrome + WASM 产物 + 起前端；不进默认门禁） |
 | 测试（黄金对拍） | `tools/fetch-golden-deps.sh` → `tools/golden-run.sh --self-check` → `--keep-going` |
@@ -116,7 +116,7 @@ riscv_sim/
 ├── tests/
 │   ├── unit/                 # 单元与集成测试
 │   └── golden/               # Spike 对拍 harness（env / canary / corpus.txt / README.md）
-└── docs/                     # 88 篇设计文档（26 HTML + 62 Markdown）+ reviews/（1 入口 + 9 份模块报告）
+└── docs/                     # 91 篇设计文档（26 HTML + 65 Markdown）+ reviews/（1 入口 + 9 份模块报告）
 ```
 
 ### `tools/` 脚本
@@ -134,6 +134,8 @@ riscv_sim/
 | `ui-image-fixture.mjs` | 真机门禁的固件夹具（机器码由编码器从助记符推出，禁手抄十六进制） |
 | `stage*_check.py` | 每份冻结规格的 7~10 项自检（切分口径复用 `doc_check.split_row`，禁自己写） |
 | `mutation_v072.py` | v0.72 批的**变异自检驱动**（T-1 ~ T-7）—— 规格 §7.2 的「实测红集」**可复算**（每条前还原**全部**目标文件 + 复跑基线 + 信号处理还原） |
+| `mutation_v074.py` | v0.74 批的**变异自检驱动**（T-1 ~ T-8）—— 同上纪律（继承 v0.72 / v0.73 的五条铁律） |
+| `stage50_check.py` | STAGE-50（v0.74）规格自检（裁决 / 事实 / 变异 / 版本号 / 新场景码 5 项） |
 | `error_code_check.py` | 场景码口径自检（唯一定义 / 值名一致 / 族已声明 / 前端×内核不撞号） |
 | `ledger_check.py` | 台账口径自检（`--ledger` 真台账 / `--self-test` 夹具） |
 | `front_test_attrib.py` | 台账 §0.1 前端两行「测试」列的唯一算法（从当前树重算） |
