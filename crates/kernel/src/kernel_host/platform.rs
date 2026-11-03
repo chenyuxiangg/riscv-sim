@@ -238,6 +238,12 @@ pub struct BuiltDevice {
     clint: Option<Rc<RefCell<Clint>>>,
     /// 宿主留着的 PLIC 句柄。
     plic: Option<Rc<RefCell<Plic>>>,
+    /// 宿主留着的 **GPIO** 句柄（v0.74 · STAGE-50 · 引脚级连线的源）。
+    ///
+    /// ⚠️ **为什么 GPIO 现在要留句柄**（v0.73 批它是 `Opaque`）：引脚级连线
+    ///   要**读它的 pending IRQ**（⇒ ⇒ 抬 PLIC 的源）⇒ ⇒ ⇒ **拿不到句柄
+    ///   就抬不了** ⇒ ⇒ ⇒ **一个约束一个落点**：句柄**必须**在这儿。
+    gpio: Option<Rc<RefCell<GpioBank>>>,
 }
 
 impl BuiltDevice {
@@ -251,6 +257,7 @@ impl BuiltDevice {
             uart: None,
             clint: None,
             plic: None,
+            gpio: None,
         }
     }
 
@@ -262,6 +269,7 @@ impl BuiltDevice {
             uart: Some(handle),
             clint: None,
             plic: None,
+            gpio: None,
         }
     }
 
@@ -273,6 +281,19 @@ impl BuiltDevice {
             uart: None,
             clint: Some(handle),
             plic: None,
+            gpio: None,
+        }
+    }
+
+    /// **GPIO** —— 宿主要留句柄（**引脚级连线**的源 · v0.74 · STAGE-50）。
+    fn gpio(device: GpioBank) -> Self {
+        let handle = Rc::new(RefCell::new(device));
+        BuiltDevice {
+            peripheral: handle.clone(),
+            uart: None,
+            clint: None,
+            plic: None,
+            gpio: Some(handle),
         }
     }
 
@@ -284,6 +305,7 @@ impl BuiltDevice {
             uart: None,
             clint: None,
             plic: Some(handle),
+            gpio: None,
         }
     }
 }
@@ -294,7 +316,7 @@ impl BuiltDevice {
 /// 边界 ⇒ 规格明说：**平台（内存图）零代码，器件种类要代码**。
 fn build_device(spec: &DeviceSpec, base: u32) -> Result<BuiltDevice, PlatformError> {
     Ok(match spec {
-        DeviceSpec::Gpio { id } => BuiltDevice::opaque(GpioBank::new(id.clone(), base)),
+        DeviceSpec::Gpio { id } => BuiltDevice::gpio(GpioBank::new(id.clone(), base)),
         DeviceSpec::Uart16550 {
             id,
             irq_line,
@@ -334,8 +356,13 @@ pub enum DeviceHandle {
     Clint(Rc<RefCell<Clint>>),
     /// PLIC —— 外部中断的源头。
     Plic(Rc<RefCell<Plic>>),
-    /// 宿主**不**持有专用句柄的器件（今天的 GPIO）⇒ ⇒ 只登记「**它在**」
-    /// ⇒ ⇒ 「GPIO 能不能当线的两端」**判得出来**（⇒ ⇒ `source-type` /
+    /// **GPIO**（v0.74 · STAGE-50 · 引脚级连线的源）。
+    ///
+    /// ⚠️ v0.73 批它是 `Opaque`（宿主**不**持有专用句柄）⇒ ⇒ 引脚级连线
+    ///   **抬不了** ⇒ ⇒ ⇒ 现在**必须**持有句柄（一个约束一个落点）。
+    Gpio(Rc<RefCell<GpioBank>>),
+    /// 宿主**不**持有专用句柄的器件（今天的 `timer_riscv`）⇒ ⇒ 只登记
+    /// 「**它在**」⇒ ⇒ 「它能不能当线的两端」**判得出来**（⇒ ⇒ `source-type` /
     /// `target-type` 而不是 `source-unknown`）。
     Opaque,
 }
@@ -436,6 +463,17 @@ impl DeviceInstanceTable {
     pub fn clint(&self, id: &str) -> Option<Rc<RefCell<Clint>>> {
         match self.get(id).map(|e| &e.handle) {
             Some(DeviceHandle::Clint(h)) => Some(Rc::clone(h)),
+            _ => None,
+        }
+    }
+
+    /// 按 id 查一个 **GPIO** 句柄（**引脚级连线的源** · v0.74 · STAGE-50）。
+    ///
+    /// ⚠️ **为什么 GPIO 现在有句柄**（v0.73 批它是 `Opaque`）：引脚级连线要
+    ///   **读它的 pending IRQ** ⇒ ⇒ ⇒ **拿不到句柄就抬不了**。
+    pub fn gpio(&self, id: &str) -> Option<Rc<RefCell<GpioBank>>> {
+        match self.get(id).map(|e| &e.handle) {
+            Some(DeviceHandle::Gpio(h)) => Some(Rc::clone(h)),
             _ => None,
         }
     }
@@ -571,6 +609,7 @@ pub fn map_platform(
                     uart,
                     clint,
                     plic,
+                    gpio,
                 } = build_device(device, base)?;
                 // ⚠️ 窗口大小**由器件自己报**（裁决 D）。
                 let window = peripheral.borrow().size();
@@ -592,10 +631,11 @@ pub fn map_platform(
                 // ⚠️ **GPIO 没有专用句柄** ⇒ ⇒ 记成 `Opaque` ⇒ ⇒ 「它在」
                 // 这件事**判得出来**（⇒ ⇒ 线的两端是 GPIO 时报
                 // `source-type` / `target-type`，**不是** `source-unknown`）。
-                let handle = match (uart, clint, plic) {
-                    (Some(u), None, None) => DeviceHandle::Uart(u),
-                    (None, Some(c), None) => DeviceHandle::Clint(c),
-                    (None, None, Some(p)) => DeviceHandle::Plic(p),
+                let handle = match (uart, clint, plic, gpio) {
+                    (Some(u), None, None, None) => DeviceHandle::Uart(u),
+                    (None, Some(c), None, None) => DeviceHandle::Clint(c),
+                    (None, None, Some(p), None) => DeviceHandle::Plic(p),
+                    (None, None, None, Some(g)) => DeviceHandle::Gpio(g),
                     _ => DeviceHandle::Opaque,
                 };
                 devices.handles.push(DeviceInstanceEntry {
@@ -668,8 +708,12 @@ pub fn clint_time_source(clint: &Rc<RefCell<Clint>>) -> Rc<dyn TimeSource> {
 pub struct Wiring {
     /// 源器件的 `id`（描述里的器件 id ⇒ 覆盖键的第一半）。
     pub from_device: String,
-    /// 事件名（**只有** `rx_ready` ⇒ 契约层那个常量）。
+    /// 事件名（**契约层那个词表**里的一个 ⇒ 语义由它决定）。
     pub event: String,
+    /// **哪一个引脚**（引脚级寻址 · v0.74 · STAGE-50 · `None` = 不是引脚级）。
+    ///
+    /// ⚠️ **覆盖键的这一半**（⇒ ⇒ 两个**不同**引脚的两根线**各管各的**）。
+    pub pin: Option<u32>,
     /// 目标器件的 `id`（PLIC）。
     pub to_device: String,
     /// 目标 PLIC 的**源号**。
@@ -729,6 +773,8 @@ pub fn default_wiring(description: &PlatformDescription) -> Vec<Wiring> {
     let wire = Wiring {
         from_device: uart_id,
         event: WIRING_EVENT_RX_READY.to_string(),
+        // ⚠️ 默认连线**不是**引脚级（UART 没有引脚）⇒ ⇒ `None`。
+        pin: None,
         to_device: plic_id,
         source: 10,
     };
@@ -786,7 +832,18 @@ fn check_wire(
     let Some(source) = devices.get(&wire.from_device) else {
         return Err(WireDropReason::SourceUnknown);
     };
-    if source.kind != "uart16550" {
+    // ⚠️ **查契约层那个词表**（v0.74 · STAGE-50 · 裁决 J / §7.1 订正 2）
+    //   ⇒ ⇒ 「这个事件要的源**是哪种器件**」**只有一处**判定（契约层
+    //   `wiring_event_info`）⇒ ⇒ ⇒ **不再**在这里抄一遍「源必须是
+    //   `uart16550`」⇒ ⇒ ⇒ **否则**扩词表时这行**必然**漂移
+    //   （⇒ ⇒ 描述**被接受**、线**被静默丢弃** ⇒ ⇒ 正是 v0.71 批 D-177
+    //   查出的那个缺陷）。
+    let Some(info) = riscv_sim_contract::platform::wiring_event_info(&wire.event) else {
+        // ⚠️ **词表外**的事件名 ⇒ ⇒ 描述**已经被契约层 V-18 拒了**
+        //   ⇒ ⇒ 正常路径**到不了**这里 ⇒ ⇒ 这是**兜底**。
+        return Err(WireDropReason::SourceType);
+    };
+    if source.kind != info.source_kind {
         return Err(WireDropReason::SourceType);
     }
 
@@ -851,13 +908,16 @@ pub fn compile_wiring(
         let wire = Wiring {
             from_device: spec.from.device.clone(),
             event: spec.from.event.clone(),
+            // ⚠️ **引脚号**（引脚级寻址 · v0.74 · STAGE-50）。
+            pin: spec.from.pin,
             to_device: spec.to.device.clone(),
             source: spec.to.source,
         };
-        match entries
-            .iter()
-            .position(|(w, _)| w.from_device == wire.from_device && w.event == wire.event)
-        {
+        // ⚠️ **覆盖键 = (器件, 事件, 引脚)**（v0.74 · STAGE-50）：引脚级的
+        //   两根线（**不同**引脚）**各管各的** ⇒ ⇒ 键**必须**带上 `pin`。
+        match entries.iter().position(|(w, _)| {
+            w.from_device == wire.from_device && w.event == wire.event && w.pin == wire.pin
+        }) {
             Some(idx) => {
                 let (old, was_written_by_user) = entries[idx].clone();
                 // ⚠️ 被顶掉的若是**默认连线** ⇒ ⇒ **不记**（它不是用户写的
@@ -891,6 +951,42 @@ pub fn compile_wiring(
                 reason,
             }),
         }
+    }
+
+    // ---- 3b) **引脚级连线 ⇒ ⇒ 把那根引脚的 IRQ 线号绑到连线上的源号** ----
+    //
+    // ⚠️ ⚠️ **为什么必须有这一步**（v0.74 · STAGE-50 · 施工期订正 7）：
+    //   GPIO 的引脚 IRQ **线号**默认是 `0xFFFF`（**未配置** · M-15 的
+    //   `GpioBank::new`）⇒ ⇒ 而**宿主抬线**时读的是「**那根引脚的线号**」
+    //   ⇒ ⇒ ⇒ **不绑** ⇒ ⇒ 抬线那一步永远拿到 `0xFFFF` ⇒ ⇒ ⇒ **这根线
+    //   永远抬不起来**（⇒ ⇒ 描述被收下了、线却是死的 —— 正是 v0.71 批
+    //   D-177 查出的那种「静默」）。
+    //
+    // ⚠️ **绑定源 = 连线表**（不是另一个地方）⇒ ⇒ 「这根引脚接到哪个源」
+    //   **只有一处**定义（一个约束一个落点）⇒ ⇒ ⇒ 换板改连线 ⇒ ⇒ 绑定
+    //   跟着换（**不用改代码**）。
+    //
+    // ⚠️ **号空间**（§2.3）：引脚号与 PLIC 源号**各管各的** ⇒ ⇒ 这里绑的
+    //   是**设备侧的 IRQ 线号**（M-15 的 `irq_lines`）⇒ ⇒ 它**必须**等于
+    //   连线上的源号 ⇒ ⇒ ⇒ 宿主抬线时的「线号 == 源号」那条判据**成立**
+    //   （它仍留着：万一有人事后改了设备的绑定 ⇒ ⇒ 那一处**不抬**）。
+    for wire in wires.iter() {
+        let Some(pin) = wire.pin else {
+            continue;
+        };
+        let Some(gpio) = devices.gpio(&wire.from_device) else {
+            continue;
+        };
+        let Ok(mut bank) = gpio.try_borrow_mut() else {
+            continue;
+        };
+        // ⚠️ **源号塞得进 u16**（PLIC 的源数 ≤ 64 ⇒ ⇒ 塞得进）⇒ ⇒ 塞不进
+        //   的**不绑**（⇒ ⇒ 那根线抬不起来 ⇒ ⇒ 但它**已经**被报告成
+        //   「活的」⇒ ⇒ ⇒ 这是**不可能**的分支 ⇒ ⇒ 真发生了就是**缺陷**）。
+        if wire.source > u16::MAX as u32 {
+            continue;
+        }
+        bank.set_irq_line_for_pin(pin, wire.source as u16);
     }
 
     // ---- 4) 被顶掉的那几根（**用户写的**才算数）----

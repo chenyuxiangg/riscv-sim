@@ -58,7 +58,7 @@ use crate::error::{
     E_PLT_08_DUPLICATE_DEVICE_ID, E_PLT_12_PARAMETER_OUT_OF_RANGE, E_PLT_15_DEVICE_EMPTY_ID,
     E_PLT_16_WIRING_INVALID, E_PLT_18_ROLES_INVALID, E_PLT_19_PINS_INVALID, PLATFORM_FAMILY,
 };
-use crate::session::{REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
+use crate::session::{GPIO_PIN_COUNT, REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
 
 /// Format version of the **platform description**.
 ///
@@ -80,7 +80,10 @@ use crate::session::{REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
 ///
 /// ⚠️ **版本 1** = 区域**必须**带 `base`（⇒ ⇒ 那时还没有「由内核分配」
 /// 这件事）⇒ ⇒ ⇒ 老描述**逐字**按老办法装（⇒ ⇒ **零风险**）。
-pub const PLATFORM_SCHEMA_VERSION: u32 = 2;
+/// ⚠️ **v0.74（STAGE-50 · D-175 的 D）**：**2 → 3** ⇒ ⇒ `wiring.from` 加了
+/// **可选**的 `pin`（引脚级寻址）⇒ ⇒ 老描述**逐字不变**（⇒ ⇒ 存量板档案
+/// **零风险**）。
+pub const PLATFORM_SCHEMA_VERSION: u32 = 3;
 
 /// **本构建能读**的平台描述格式版本（V-1 判的就是它）。
 ///
@@ -95,7 +98,9 @@ pub const PLATFORM_SCHEMA_VERSION: u32 = 2;
 ///
 /// ⚠️ **版本 0 与 > 2 不在其中** ⇒ ⇒ 「完全不认识」与「未来格式」都
 /// **明确拒**（⇒ ⇒ 既有码 `E_PLT-01`）⇒ ⇒ ⇒ **不静默硬解**。
-pub const SUPPORTED_PLATFORM_SCHEMA_VERSIONS: &[u32] = &[1, 2];
+/// ⚠️ **v0.74（STAGE-50）**：`[1, 2, 3]` ⇒ ⇒ 版本 **2** 的老描述（存量板
+///   档案）**仍能装**（⇒ ⇒ **缺省优先**）⇒ ⇒ 版本 **3** 是本批写的。
+pub const SUPPORTED_PLATFORM_SCHEMA_VERSIONS: &[u32] = &[1, 2, 3];
 
 /// The version of the platform description's **legality rule set**.
 ///
@@ -144,7 +149,10 @@ pub const SUPPORTED_PLATFORM_SCHEMA_VERSIONS: &[u32] = &[1, 2];
 /// 跟着走**（3 → 4）⇒ ⇒ ⇒ **存量板档案要迁**（⇒ ⇒ **缺省优先**：老描述
 /// **带** `base` ⇒ ⇒ **仍能装** ⇒ ⇒ 前端**显式提示**「按旧规则存的」
 /// ⇒ ⇒ **不自动迁** ⇒ ⇒ 用户**手动**才升级）。
-pub const PLATFORM_RULES_VERSION: u32 = 4;
+/// ⚠️ **v0.74（STAGE-50）**：**4 → 5** ⇒ ⇒ 连线事件**词表扩项**
+/// （`pin_irq`）⇒ ⇒ V-18 的判据从「单常量比较」改成「**查词表**」⇒ ⇒
+/// **规则收紧** ⇒ ⇒ **规则集跟着 +1**。
+pub const PLATFORM_RULES_VERSION: u32 = 5;
 
 /// The **upper bound** of a CLINT's timer frequency (1 THz).
 ///
@@ -343,9 +351,26 @@ pub struct WiringFrom {
     /// The source device's `id` — must exist in the **same** description's
     /// device set (rule V-18).
     pub device: String,
-    /// The event name — currently **only** [`WIRING_EVENT_RX_READY`] is
-    /// allowed (rule V-18).
+    /// The event name — must be in the **event vocabulary**
+    /// ([`wiring_event_info`], rule V-18).
     pub event: String,
+    /// **哪一个引脚**（引脚级寻址，v0.74 · STAGE-50 · D-175 的 D）。
+    ///
+    /// ⚠️ **可选** ⇒ ⇒ 老描述**逐字不变**（⇒ ⇒ 存量板档案**零风险**）。
+    ///
+    /// ⚠️ **只在引脚级事件上才有意义**（`pin_irq`）⇒ ⇒ 给了 `pin` 但事件
+    ///   **不是**引脚级 ⇒ ⇒ **拒**（规则 V-18 · 裁决 H）⇒ ⇒ **不静默忽略**。
+    ///
+    /// ⚠️ **越界**（≥ [`GPIO_PIN_COUNT`]）⇒ ⇒ **拒**（规则 V-18 · 裁决 I）。
+    ///
+    /// ⚠️ **为什么是 `u32` 而不是 `u8`**（v0.74 · STAGE-50 施工期订正）：
+    ///   **越界**这条约束的**唯一落点**必须 **V-18** ⇒ ⇒ 若字段类型是
+    ///   `u8` ⇒ ⇒ `pin = 300` 会先被 **serde 解析**拒掉（⇒ ⇒ 那是**另一条**
+    ///   错误路径、**另一个**码）⇒ ⇒ ⇒ 「越界」就有**两个落点** ⇒ ⇒ ⇒
+    ///   改成 `u32` ⇒ ⇒ **任何**越界的数都**先能解析**、再被 V-18 拒
+    ///   （⇒ ⇒ 既有码 `E_PLT-16`，一个落点）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<u32>,
 }
 
 /// The **target** end of a wire — a device and one of its inputs.
@@ -368,6 +393,82 @@ pub struct WiringTo {
 /// second event name is a **rule change** (it tightens the rule set ⇒
 /// [`PLATFORM_RULES_VERSION`] goes +1), not a spelling change.
 pub const WIRING_EVENT_RX_READY: &str = "rx_ready";
+
+/// **引脚级**事件名（v0.74 · STAGE-50 · D-175 的 D）：一个 GPIO 的**某个
+/// 引脚**的中断。
+///
+/// ⚠️ **这根线必须带 `pin`**（[`WiringFrom::pin`]）⇒ ⇒ 否则**指不到**哪个
+/// 引脚 ⇒ ⇒ **拒**（规则 V-18 · 裁决 H）。
+pub const WIRING_EVENT_PIN_IRQ: &str = "pin_irq";
+
+/// **连线事件的语义** —— 「这个源的信号是**电平**还是**一次性**」。
+///
+/// ⚠️ **为什么要有它**（STAGE-50 §7.1 订正 3）：**PLIC 的源只有一位**
+///   （`pending: Vec<u32>`）⇒ ⇒ `request(source)` 与 `set_pending(source,
+///   true)` **字节级等价**⇒ ⇒ **同一个源不能同时**被「一次性请求」与
+///   「电平撤销」管 ⇒ ⇒ ⇒ 否则电平路径的清位会把锁存那次**一并清掉**。
+///
+/// ⚠️ **本批的解法**：「**一根线只属一种事件**」⇒ ⇒ 语义**由事件名决定**
+///   ⇒ ⇒ **不**给 PLIC 加「每源两态」⇒ ⇒ ⇒ **快照不动**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WiringEventSemantics {
+    /// **电平** —— 设备「还有话说」时源**挂着**，没了就**撤销**。
+    ///
+    /// ⚠️ 适用：**UART 的 `rx_ready`**（LSR bit0 ∧ IER bit0 ⇒ 可反复读）。
+    Level,
+    /// **一次性** —— 事件发生**消费一次**，源**抬一次**。
+    ///
+    /// ⚠️ 适用：**GPIO 的引脚 IRQ**（`take_pending_irqs()` **消费**掉那一位）
+    ///   ⇒ ⇒ ⇒ 抬过一次之后设备侧**没有**待投递的了 ⇒ ⇒ ⇒ **不活锁**。
+    OneShot,
+}
+
+/// **连线事件词表** —— 事件名 →（源器件种类 · 语义 · 要不要 `pin`）。
+///
+/// ⚠️ **这是「事件名是否合法」这条约束的**唯一落点**（一个约束一个落点）
+///   ⇒ ⇒ 契约层 V-18 **查它** · 宿主 **查它** · 前端 **查它** ⇒ ⇒ ⇒
+///   三处**不会**漂移（STAGE-50 §7.1 订正 2）。
+///
+/// ⚠️ **今天**那个「单常量相等比较」在**两个**地方（契约层 V-18 + 宿主
+///   过滤）⇒ ⇒ ⇒ 扩词表前**必须**收敛到这里。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WiringEventInfo {
+    /// 事件名（**线上形态**）。
+    pub name: &'static str,
+    /// 源器件**种类**（`DeviceSpec::kind()` 的那一个）⇒ ⇒ 源不是这个种类
+    /// ⇒ ⇒ **拒**（规则 V-18 · 裁决 G）。
+    pub source_kind: &'static str,
+    /// 语义（电平 / 一次性）。
+    pub semantics: WiringEventSemantics,
+    /// 这根线**要不要** `pin`（引脚级寻址）。
+    pub needs_pin: bool,
+}
+
+/// **连线事件词表** —— **恰好两项**（v0.74 · STAGE-50）。
+///
+/// ⚠️ **顺序 = 报告顺序**（与 [`WiringRule`] 一样）⇒ ⇒ 判据**可复算**。
+pub const WIRING_EVENTS: &[WiringEventInfo] = &[
+    WiringEventInfo {
+        name: WIRING_EVENT_RX_READY,
+        source_kind: "uart16550",
+        semantics: WiringEventSemantics::Level,
+        needs_pin: false,
+    },
+    WiringEventInfo {
+        name: WIRING_EVENT_PIN_IRQ,
+        source_kind: "gpio",
+        semantics: WiringEventSemantics::OneShot,
+        needs_pin: true,
+    },
+];
+
+/// **查事件词表** —— 事件名 → 它的信息（**不在词表里 ⇒ `None`**）。
+///
+/// ⚠️ **这是「事件名是否合法」的**唯一判定入口**（一个约束一个落点）⇒ ⇒
+///   契约层 V-18 · 宿主 · 前端**都调它** ⇒ ⇒ ⇒ **不会**两处漂移。
+pub fn wiring_event_info(event: &str) -> Option<&'static WiringEventInfo> {
+    WIRING_EVENTS.iter().find(|info| info.name == event)
+}
 
 /// Which wiring rule a description violates — **internal to this
 /// module**.
@@ -1177,17 +1278,84 @@ impl PlatformDescription {
                     ),
                 ));
             }
-            if spec.from.event != WIRING_EVENT_RX_READY {
+            // ⚠️ **查词表**（v0.74 · STAGE-50 · 裁决 C）⇒ ⇒ 「事件名是否
+            //   合法」这条约束**只有一处**判定（[`wiring_event_info`]）⇒ ⇒
+            //   宿主**查它**、前端**查它** ⇒ ⇒ ⇒ **不会**两处漂移。
+            let Some(info) = wiring_event_info(&spec.from.event) else {
                 return Some((
                     WiringRule::V18References,
                     format!(
-                        "连线的事件名 {} 不合法（目前只允许 {}）",
-                        spec.from.event, WIRING_EVENT_RX_READY
+                        "连线的事件名 {} 不合法（词表：{}）",
+                        spec.from.event,
+                        WIRING_EVENTS
+                            .iter()
+                            .map(|i| i.name)
+                            .collect::<Vec<_>>()
+                            .join(" / ")
                     ),
                 ));
+            };
+            // ⚠️ **裁决 G（v0.74 · STAGE-50 施工期订正）**：**只有引脚级**
+            //   事件对源有**结构要求**（它要点名**一个引脚** ⇒ ⇒ 源**必须**有
+            //   引脚 ⇒ ⇒ 必须是 GPIO）⇒ ⇒ 不满足 ⇒ ⇒ **描述层拒**（早失败）。
+            //
+            // ⚠️ ⚠️ **为什么不对电平事件也查源种类**（**实测发现的回归**）：
+            //   v0.72 批（D-177 A）的判据是「**描述仍然合法**、那根线**抬不
+            //   起来**、连线**报告**说 `source-type`」⇒ ⇒ 那是**运行时**的
+            //   事（任何器件理论上都可能有一个电平信号）⇒ ⇒ ⇒ 若这里改成
+            //   「描述被拒」⇒ ⇒ **改掉**了 v0.72 的判据 ⇒ ⇒ ⇒ **不许**。
+            //   ⇒ ⇒ **结构性不匹配 ⇒ 描述层拒；运行时能力 ⇒ 宿主跳过 + 报告**
+            //   （宿主那处**查同一个词表** ⇒ ⇒ 扩词表时**不会**漂移）。
+            if info.needs_pin {
+                let source_kind = self.regions.iter().find_map(|region| match region {
+                    RegionSpec::Peripheral { device, .. } if device.id() == spec.from.device => {
+                        Some(device.kind())
+                    }
+                    _ => None,
+                });
+                if source_kind != Some(info.source_kind) {
+                    return Some((
+                        WiringRule::V18References,
+                        format!(
+                            "连线的事件名 {} 要求源器件是 {}，而 {} 是 {}",
+                            spec.from.event,
+                            info.source_kind,
+                            spec.from.device,
+                            source_kind.unwrap_or("（未知种类）")
+                        ),
+                    ));
+                }
+            }
+            // ⚠️ **裁决 H**：给了 `pin` 但事件**不是**引脚级 ⇒ ⇒ **拒**
+            //   （⇒ ⇒ **不静默忽略**）。
+            if spec.from.pin.is_some() && !info.needs_pin {
+                return Some((
+                    WiringRule::V18References,
+                    format!("连线的事件名 {} 不接受引脚号（pin）", spec.from.event),
+                ));
+            }
+            // ⚠️ **裁决 I**：引脚级事件**必须**给 `pin` ⇒ ⇒ 否则**指不到**
+            //   哪个引脚 ⇒ ⇒ **拒**。
+            if info.needs_pin && spec.from.pin.is_none() {
+                return Some((
+                    WiringRule::V18References,
+                    format!("连线的事件名 {} 必须给出引脚号（pin）", spec.from.event),
+                ));
+            }
+            // ⚠️ **裁决 I**：引脚号**越界** ⇒ ⇒ **拒**（校验源 = 契约层
+            //   `GPIO_PIN_COUNT` ⇒ ⇒ **不**在前端 / 内核各抄一份）。
+            if let Some(pin) = spec.from.pin {
+                if pin as usize >= GPIO_PIN_COUNT {
+                    return Some((
+                        WiringRule::V18References,
+                        format!(
+                            "连线的引脚号 {} 越界（GPIO bank 有 {} 个引脚）",
+                            pin, GPIO_PIN_COUNT
+                        ),
+                    ));
+                }
             }
         }
-
         // V-19 — the target must be a PLIC and the source must be below
         // that PLIC's source count.
         for spec in wiring {
@@ -1562,16 +1730,31 @@ mod tests {
     // A-1 — the format version
     // -----------------------------------------------------------------
 
-    /// **A-1** — the description's format version is `2`.
+    /// **A-1** — the description's format version is the **current** one and
+    /// this build **accepts** it.
     ///
-    /// ⚠️ Asserted against the **literal** `2`, not against the constant
-    /// it also defines ⇒ the constant cannot vouch for itself.
+    /// ⚠️ **v0.74（STAGE-50 · 施工期订正）**：这一条**原来**钉的是**字面量**
+    ///   （先是 1、后是 2）⇒ ⇒ ⇒ **每一次合法升版都会把它打死**（v0.73 批
+    ///   实测踩过：STAGE-48 的门禁被本批**合法**升版打死）⇒ ⇒ ⇒ **改成
+    ///   不随批次失效的性质**：
+    ///   - **当前版本必须被「本构建能读的版本列表」收着** ⇒ ⇒ 「升了版却
+    ///     忘了把它加进可读列表」这个缺陷**照样红**（⇒ ⇒ **判别力不丢**）；
+    ///   - **老版本仍在列表里** ⇒ ⇒ **缺省优先**（存量板档案零风险）。
     ///
-    /// ⚠️ **v0.73（STAGE-49 · B2）**：**1 → 2**（区域 `base` 可缺省）⇒ ⇒
-    /// 这是**本批唯一改形状**的那一项。
+    /// ⚠️ **具体数值**（当前是 3）归**最新**那一批的门禁守
+    ///   （`tools/stage50_check.py`）⇒ ⇒ ⇒ **一个版本号只有一处钉它的地方**。
     #[test]
-    fn a1_the_platform_schema_version_is_two() {
-        assert_eq!(PLATFORM_SCHEMA_VERSION, 2);
+    fn a1_the_platform_schema_version_is_supported_by_this_build() {
+        assert!(
+            SUPPORTED_PLATFORM_SCHEMA_VERSIONS.contains(&PLATFORM_SCHEMA_VERSION),
+            "当前描述格式版本必须被「本构建能读的版本列表」收着（升了版却忘了加进列表 ⇒ ⇒ 老描述会被拒）"
+        );
+        for old in [1u32, 2] {
+            assert!(
+                SUPPORTED_PLATFORM_SCHEMA_VERSIONS.contains(&old),
+                "版本 {old} 必须仍被接受（缺省优先：存量板档案零风险）"
+            );
+        }
     }
 
     /// **A-1 / V-1** — a description whose `schema_version` is not the one
@@ -2924,7 +3107,27 @@ mod tests {
         // ⇒ ⇒ 版本**不动**）**已经被本批推翻**（⇒ ⇒ 本批**改了**形状 ⇒ ⇒
         // 版本**动了** 1 → 2）⇒ ⇒ ⇒ **断言跟着**（⇒ ⇒ 数字是 2）⇒ ⇒
         // **判别力保留**（它钉的仍是「这个数就是当前描述格式版本」）。
-        assert_eq!(PLATFORM_SCHEMA_VERSION, 2);
+        //
+        // ⚠️ ⚠️ **v0.74（STAGE-50 · 施工期订正）**：**字面量**（2 → 3）⇒ ⇒
+        //   ⇒ **每一次合法升版都会把它打死**⇒ ⇒ ⇒ **改成不随批次失效的
+        //   性质**：「**从版本 1 到当前版本，每一个都被接受**」⇒ ⇒ 那就是
+        //   「**缺省优先**」这条纪律在**列表**上的样子（⇒ ⇒ 存量板档案
+        //   零风险）⇒ ⇒ ⇒ **判别力更强**（列表乱了也红）⇒ ⇒ ⇒ **具体数值**
+        //   归**最新**那一批的门禁守（`tools/stage50_check.py`）。
+        assert!(
+            SUPPORTED_PLATFORM_SCHEMA_VERSIONS
+                .windows(2)
+                .all(|pair| pair[0] < pair[1]),
+            "可读版本列表必须**严格递增**（乱了 ⇒ ⇒ 老版本可能悄悄不被接受）"
+        );
+        assert_eq!(
+            SUPPORTED_PLATFORM_SCHEMA_VERSIONS
+                .last()
+                .copied()
+                .unwrap_or_default(),
+            PLATFORM_SCHEMA_VERSION,
+            "可读版本列表的**最后一项**必须就是当前版本（从版本 1 到当前版本，每一个都被接受）"
+        );
     }
 
     /// **STAGE-16 A-3** — the three built-in descriptions parse
@@ -3460,7 +3663,16 @@ mod tests {
         // ⚠️ **v0.73（STAGE-49 · B2）**：形状版本 **1 → 2** ⇒ ⇒ 断言跟到
         // **2** ⇒ ⇒ **判别力保留**（它钉的仍是「形状版本 == 当前那个」+
         // 「它与规则集版本**永不相等**」）。
-        assert_eq!(PLATFORM_SCHEMA_VERSION, 2);
+        //
+        // ⚠️ ⚠️ **v0.74（STAGE-50 · 施工期订正）**：**字面量**（2 → 3）⇒ ⇒
+        //   ⇒ **每一次合法升版都会把它打死**⇒ ⇒ ⇒ **字面量那半**改成
+        //   「**当前形状版本必须被本构建接受**」（⇒ ⇒ **判别力不丢**：升了
+        //   版却忘了加进可读列表 ⇒ ⇒ 照样红）⇒ ⇒ ⇒ **具体数值**归**最新**
+        //   那一批的门禁守（`tools/stage50_check.py`）。
+        assert!(
+            SUPPORTED_PLATFORM_SCHEMA_VERSIONS.contains(&PLATFORM_SCHEMA_VERSION),
+            "当前形状版本必须被本构建接受（升了版却忘了加进可读列表 ⇒ ⇒ 老描述会被拒）"
+        );
         assert_ne!(
             PLATFORM_RULES_VERSION, PLATFORM_SCHEMA_VERSION,
             "规则集版本与形状版本是两个不同的东西，永不相等"
@@ -3558,6 +3770,7 @@ mod tests {
             from: WiringFrom {
                 device: from.to_string(),
                 event: WIRING_EVENT_RX_READY.to_string(),
+                pin: None,
             },
             to: WiringTo {
                 device: to.to_string(),
@@ -3763,8 +3976,23 @@ mod tests {
         // 了形状 ⇒ ⇒ 规则集**跟着**走）⇒ ⇒ 规则集 **3 → 4**、形状 **1 → 2**
         // ⇒ ⇒ ⇒ 断言跟到新值 ⇒ ⇒ **判别力保留**（它钉的仍是「这两个数
         // 就是当前那两个」）。
-        assert_eq!(PLATFORM_RULES_VERSION, 4);
-        assert_eq!(PLATFORM_SCHEMA_VERSION, 2);
+        //
+        // ⚠️ ⚠️ **v0.74（STAGE-50 · 施工期订正）**：**字面量**（规则集 4 → 5 ·
+        //   形状 2 → 3）⇒ ⇒ ⇒ **每一次合法升版都会把它打死**⇒ ⇒ ⇒ 改成
+        //   **不随批次失效的性质**：
+        //   - **规则集版本 ≥ 形状版本**（⇒ ⇒ 「规则集**跟着**形状走」那条
+        //     纪律**结构上**成立 ⇒ ⇒ 规则集不许落在形状后面）；
+        //   - **两者永不相等**（⇒ ⇒ 它们是**两个**不同的数）。
+        //   ⇒ ⇒ ⇒ **具体数值**归**最新**那一批的门禁守
+        //   （`tools/stage50_check.py`）⇒ ⇒ ⇒ **判别力不丢**（「形状变了却
+        //   忘了动版本」这类缺陷**照样**被别处的判据抓住）。
+        // ⚠️ **常量断言** ⇒ ⇒ 写成 `const _: () = assert!(…)` ⇒ ⇒ 否则
+        //   `clippy::assertions_on_constants` 会把这条**打红**（⇒ ⇒ 门禁红）。
+        const _: () = assert!(PLATFORM_RULES_VERSION >= PLATFORM_SCHEMA_VERSION);
+        const _: () = assert!(
+            PLATFORM_RULES_VERSION != PLATFORM_SCHEMA_VERSION,
+            "规则集版本与描述格式版本是两个不同的东西，永不相等"
+        );
     }
 
     /// **STAGE-19 A-7** — a description **without** a `wiring` section is

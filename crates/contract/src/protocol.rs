@@ -1494,9 +1494,16 @@ mod tests {
             description: a_user_configured_board(),
             expected_revision: None,
         };
+        // ⚠️ ⚠️ **v0.74（STAGE-50 · 施工期订正）**：**形状**（键集合与**顺序**）
+        //   仍然逐字钉住 ⇒ ⇒ **判别力不丢**；但那个 `schema_version` 的**值**
+        //   ⇒ ⇒ 改成**引用常量**（⇒ ⇒ **每一次合法升版都不会再打死这条**）
+        //   ⇒ ⇒ ⇒ **具体数值**归**最新**那一批的门禁守。
         assert_eq!(
             serde_json::to_string(&cmd).expect("json"),
-            r#"{"SetMemoryMap":{"description":{"schema_version":2,"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{"kind":"ram","base":0,"size":1048576}]},"expected_revision":null}}"#
+            format!(
+                r#"{{"SetMemoryMap":{{"description":{{"schema_version":{},"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{{"kind":"ram","base":0,"size":1048576}}]}},"expected_revision":null}}}}"#,
+                crate::platform::PLATFORM_SCHEMA_VERSION
+            )
         );
         // ⚠️ 描述 DTO **只多了一个带 default 的可选字段** ⇒ 线上还是
         // `PlatformDescription` 的原样形态（`kind` 标签、`auto_selectable`、
@@ -1507,7 +1514,10 @@ mod tests {
                 // ⚠️ **v0.73（STAGE-49 · B2）**：描述格式 **1 → 2** ⇒ ⇒ 线上
                 // 那个 `schema_version` 字段跟到 **2** ⇒ ⇒ **信封版本不动**
                 // （⇒ ⇒ 那是**另一个数**）。
-                "schema_version": 2,
+                //
+                // ⚠️ **v0.74（STAGE-50）**：改成**引用常量** ⇒ ⇒ 合法升版
+                //   **不再**打死这条（形状仍逐字钉住 ⇒ ⇒ 判别力不丢）。
+                "schema_version": crate::platform::PLATFORM_SCHEMA_VERSION,
                 "id": "user-board",
                 "name": "User board",
                 "priority": 100,
@@ -1539,16 +1549,25 @@ mod tests {
             revision: 7,
             wiring_report: crate::model::WiringReportDto::default(),
         };
+        // ⚠️ ⚠️ **v0.74（STAGE-50 · 施工期订正）**：**形状**（键集合与**顺序**）
+        //   仍然逐字钉住 ⇒ ⇒ **判别力不丢**；但那个 `schema_version` 的**值**
+        //   ⇒ ⇒ 改成**引用常量**（⇒ ⇒ **每一次合法升版都不会再打死这条**）。
         assert_eq!(
             serde_json::to_string(&ev).expect("json"),
-            r#"{"MemoryMap":{"description":{"schema_version":2,"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{"kind":"ram","base":0,"size":1048576}]},"pending":false,"loaded":true,"revision":7,"wiring_report":{"declared":0,"live":0,"dropped":[]}}}"#
+            format!(
+                r#"{{"MemoryMap":{{"description":{{"schema_version":{},"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{{"kind":"ram","base":0,"size":1048576}}]}},"pending":false,"loaded":true,"revision":7,"wiring_report":{{"declared":0,"live":0,"dropped":[]}}}}}}"#,
+                crate::platform::PLATFORM_SCHEMA_VERSION
+            )
         );
         assert_eq!(
             serde_json::to_value(&ev).expect("json"),
             serde_json::json!({ "MemoryMap": { "description": {
                 // ⚠️ **v0.73（STAGE-49 · B2）**：描述格式 **1 → 2** ⇒ ⇒ 线上
                 // 那个 `schema_version` 字段跟到 **2**。
-                "schema_version": 2,
+                //
+                // ⚠️ **v0.74（STAGE-50）**：改成**引用常量** ⇒ ⇒ 合法升版
+                //   **不再**打死这条（形状仍逐字钉住 ⇒ ⇒ 判别力不丢）。
+                "schema_version": crate::platform::PLATFORM_SCHEMA_VERSION,
                 "id": "user-board",
                 "name": "User board",
                 "priority": 100,

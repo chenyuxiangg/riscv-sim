@@ -95,6 +95,17 @@ pub struct DeviceTypeInfo {
     pub registers: Vec<DeviceRegisterInfo>,
     /// The instance parameters and their legal value domain (裁决 E).
     pub params: Vec<DeviceParamInfo>,
+    /// **这个类型有多少个引脚**（`None` ⇒ ⇒ **没有引脚**这个概念）。
+    ///
+    /// ⚠️ **v0.74（STAGE-50 · 裁决 F）**：引脚数是**契约层**那份真相
+    ///   （`GPIO_PIN_COUNT`）⇒ ⇒ 前端**查**它、**不抄** ⇒ ⇒ ⇒ 「前端抄一份
+    ///   引脚数」那个第二个真相源**被堵死**了。
+    ///
+    /// ⚠️ **为什么是 `Option` + 缺省不带这个键**：只有**有引脚**的器件类型
+    ///   才有这个数 ⇒ ⇒ UART / PLIC / CLINT **不带**这个键 ⇒ ⇒ ⇒ **形状
+    ///   兼容**（旧载荷仍能解析 ⇒ ⇒ 契约信封版本**不因本条升**）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_count: Option<u32>,
 }
 
 /// One register of a device type — **an offset, not an address**.
