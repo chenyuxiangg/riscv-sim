@@ -32,6 +32,7 @@ import {
     createIndexedDbBackend,
     createBoardStore,
 } from "../services/m23_boardstore.js";
+import * as message from "../lib/message.js";
 
 // ---------------------------------------------------------------------------
 // 固定数据（**字面量**，不从被测实现反推）
@@ -164,7 +165,10 @@ describe("板档案服务 · 纯逻辑层（B-1 ~ B-5 · B-8）", () => {
         const result = checkBoardVersion({ ...DESC_A, schema_version: 99 });
         assert.equal(result.ok, false);
         assert.equal(result.reason, "version");
-        assert.equal(result.expected, 2);
+        // ⚠️ ⚠️ **v0.74（STAGE-50）**：**字面量**（2 → 3）⇒ ⇒ ⇒ **每一次
+        //   合法升版都会把它打死**⇒ ⇒ ⇒ 改成**引用镜像那份常量**（服务层
+        //   re-export 的那个 ⇒ ⇒ 同一个数）⇒ ⇒ ⇒ **判别力保留**。
+        assert.equal(result.expected, PLATFORM_SCHEMA_VERSION);
         assert.equal(result.actual, 99);
     });
 
@@ -186,7 +190,8 @@ describe("板档案服务 · 纯逻辑层（B-1 ~ B-5 · B-8）", () => {
         const result = checkBoardVersion({ id: "board-a", name: "板 A" });
         assert.equal(result.ok, false);
         assert.equal(result.reason, "version");
-        assert.equal(result.expected, 2);
+        // ⚠️ **v0.74（STAGE-50）**：同上 ⇒ ⇒ 引用镜像那份常量（不钉字面量）。
+        assert.equal(result.expected, PLATFORM_SCHEMA_VERSION);
         assert.equal(result.actual, null);
     });
 
@@ -347,9 +352,15 @@ describe("板档案服务 · 存储门面（`createBoardStore`）", () => {
         assert.equal(BOARD_DB_VERSION, 1);
         assert.equal(BOARD_STORE_NAME, "boards");
         assert.equal(BOARD_STORE_KEY, "id");
-        // ⚠️ **v0.73（STAGE-49 · B2）**：描述格式 **1 → 2** ⇒ ⇒ 断言跟到
-        // **2** ⇒ ⇒ **判别力保留**（它钉的仍是「这个数就是当前那个」）。
-        assert.equal(PLATFORM_SCHEMA_VERSION, 2);
+        // ⚠️ ⚠️ **v0.74（STAGE-50）**：**字面量**（2 → 3）⇒ ⇒ ⇒ **每一次
+        //   合法升版都会把它打死**⇒ ⇒ ⇒ 改成**不随批次失效的性质**：
+        //   「当前描述格式版本**必须被本构建接受**」⇒ ⇒ ⇒ 而**具体数值**归
+        //   **最新**那一批的门禁守（`tools/stage50_check.py`）⇒ ⇒ ⇒
+        //   **一个版本号只有一处钉它的地方**。
+        assert.ok(
+            message.SUPPORTED_PLATFORM_SCHEMA_VERSIONS.includes(PLATFORM_SCHEMA_VERSION),
+            "当前描述格式版本必须被本构建接受（升了版却忘了加进可读列表 ⇒ ⇒ 老描述会被拒）",
+        );
     });
 });
 

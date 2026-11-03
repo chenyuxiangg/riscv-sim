@@ -31,7 +31,7 @@
  */
 export const WIRE_DROP_REASON_TEXT = Object.freeze({
     "source-unknown": "源器件不在板上的器件实例里",
-    "source-type": "源器件不是 UART（宿主只从 UART 抬 rx_ready）",
+    "source-type": "源器件的类型不是这个事件要的源类型（rx_ready 要 uart16550 · pin_irq 要 gpio）",
     "target-unknown": "目标器件不在板上的器件实例里",
     "target-type": "目标器件不是 PLIC（宿主只往 PLIC 递源）",
     "source-out-of-range": "源号超出该 PLIC 的源数",
