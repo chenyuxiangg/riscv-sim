@@ -98,6 +98,12 @@ import {
     describeWiringReport,
     normalizeWiringReport,
 } from "../../lib/wiring-report.js";
+// ⚠️ **连线编辑面**（v0.74 · STAGE-50 · D-177 的 D）—— **新能力住新模块**
+// ⇒ ⇒ 这里只**调用**它（渲染 + 采集）⇒ ⇒ 连线的形状**只有那一处**。
+import {
+    collectWiring,
+    renderWiringEditor,
+} from "./wiring-editor.js";
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -480,16 +486,34 @@ export function normalizePins(pins) {
 
 export function normalizeWiringList(wiring) {
     if (!Array.isArray(wiring)) return [];
-    return wiring.map((entry) => ({
-        from: {
+    return wiring.map((entry) => {
+        // ⚠️ **引脚号**（v0.74 · STAGE-50 · 引脚级寻址）⇒ ⇒ **可选**
+        //   ⇒ ⇒ 老描述**没有**它 ⇒ ⇒ ⇒ **不带**这个键（⇒ ⇒ 与契约层
+        //   serde 的 `skip_serializing_if` **同形**）。
+        const from = {
             device: String(entry?.from?.device ?? ""),
             event: String(entry?.from?.event ?? ""),
-        },
-        to: {
-            device: String(entry?.to?.device ?? ""),
-            source: Number(entry?.to?.source ?? 0) >>> 0,
-        },
-    }));
+        };
+        const pin = entry?.from?.pin;
+        if (pin !== undefined && pin !== null && pin !== "") {
+            // ⚠️ ⚠️ **不裁剪上界**（v0.74 · STAGE-50 · 施工期订正）：契约层的
+            //   `pin` 是 `u32` ⇒ ⇒ **越界的数必须能送到内核**（⇒ ⇒ 内核的
+            //   V-18 判它 ⇒ ⇒ 既有码 `E_PLT-16`）⇒ ⇒ ⇒ 前端**不许**先把它
+            //   裁成别的数（裁了就是前端替内核做判定 ⇒ ⇒ 第二个真相源）。
+            //
+            // ⚠️ **负数**按本仓**数字输入框的既有惯例**夹到 0（与 `to.source`
+            //   同一手法）⇒ ⇒ 那不是「合法性判定」，只是「形状」。
+            const n = Number(pin);
+            from.pin = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+        }
+        return {
+            from,
+            to: {
+                device: String(entry?.to?.device ?? ""),
+                source: Number(entry?.to?.source ?? 0) >>> 0,
+            },
+        };
+    });
 }
 
 /**
@@ -1885,7 +1909,10 @@ export function collectDraft(root, draft) {
         device[field] = readNumber(el, device[field]);
     }
 
-    return next;
+    // ⚠️ **连线**（v0.74 · STAGE-50 · D-177 的 D）：面板上的连线输入框
+    //   **也是 DOM** ⇒ ⇒ 用户刚敲进去的事件名 / 引脚号**不许**丢 ⇒ ⇒ ⇒
+    //   采集**放在最后**做（⇒ ⇒ 器件那几轮改写**已经**落到草稿上了）。
+    return collectWiring(root, next);
 }
 
 /**
@@ -2446,6 +2473,8 @@ export function renderMemoryMapPanel(state) {
                 </div>
 
                 ${renderBasePlanner(state)}
+
+                ${renderWiringEditor({ draft, deviceTypes: state?.deviceTypes ?? null })}
 
                 ${renderArchivePanel(state)}
 

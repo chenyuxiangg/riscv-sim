@@ -78,6 +78,7 @@ fn board_with_wiring(source: u32) -> PlatformDescription {
         from: WiringFrom {
             device: first_uart_id(&description),
             event: WIRING_EVENT_RX_READY.to_string(),
+            pin: None,
         },
         to: WiringTo {
             device: "PLIC".to_string(),

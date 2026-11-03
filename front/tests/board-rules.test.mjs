@@ -215,10 +215,17 @@ describe("板档案 · 规则集版本（B-1 ~ B-4）", () => {
             ["description", "id", "rules_version"],
             "条目字段集合必须是 { id, description, rules_version } 三个",
         );
-        // ⚠️ **v0.73（STAGE-49）**：规则集 **3 → 4**（描述格式升版 ⇒ ⇒ 规则集
-        // 跟着走）⇒ ⇒ 断言跟到 **4** ⇒ ⇒ **判别力保留**（它钉的仍是
-        // 「落库条目带的是**当前**规则版本」）。
-        assert.equal(entry.rules_version, 4, "规则版本必须是当前版本 4");
+        // ⚠️ ⚠️ **v0.74（STAGE-50）**：**字面量**（4 → 5）⇒ ⇒ ⇒ **每一次
+        //   合法升版都会把它打死**⇒ ⇒ ⇒ 改成**引用镜像那份常量**⇒ ⇒ ⇒
+        //   **判别力保留**（它钉的仍是「落库条目带的是**当前**规则版本」）
+        //   ⇒ ⇒ 而「镜像那份 == 契约层源码那份」由**跨层**判据守
+        //   （`front/tests/wiring-editor.test.mjs` 的 X-1）⇒ ⇒ ⇒ **一个
+        //   版本号只有一处钉它的地方**。
+        assert.equal(
+            entry.rules_version,
+            message.PLATFORM_RULES_VERSION,
+            "规则版本必须是当前版本（镜像那份常量）",
+        );
         assert.equal(entry.id, "rules-board");
         assert.deepEqual(entry.description, BOARD_DESC, "描述一个字段都不许改");
         // ⚠️ **不存时间戳、不存 `name`**（既有纪律一字不变）。

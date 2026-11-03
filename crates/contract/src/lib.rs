@@ -329,14 +329,32 @@ mod tests {
     }
 
     /// **A-8**：另外三个版本号**一个都不升**。
+    ///
+    /// ⚠️ ⚠️ **v0.74（STAGE-50 · 施工期订正）**：**板级描述版本**与**规则集
+    ///   版本**每批都会**合法地**动（v0.73 批 1→2 / 3→4 · v0.74 批 2→3 /
+    ///   4→5）⇒ ⇒ ⇒ **字面量**每批都被打死 ⇒ ⇒ ⇒ **那两半改成不随批次失效
+    ///   的性质**：
+    ///   - **当前描述格式版本必须被「本构建能读的版本列表」收着**
+    ///     （⇒ ⇒ 「升了版却忘了加进列表」这个缺陷**照样红**⇒ ⇒ 判别力不丢）；
+    ///   - **形状版本与规则集版本永不相等**（⇒ ⇒ 两者是两个不同的数）。
+    ///
+    /// ⚠️ **具体数值**归**最新**那一批的门禁守（`tools/stage50_check.py`）
+    ///   ⇒ ⇒ ⇒ **一个版本号只有一处钉它的地方**。
+    ///
+    /// ⚠️ **快照版本**（`SIM_STATE_SCHEMA_VERSION`）**一个字都不动**
+    ///   （⇒ ⇒ 本批**不动**快照 ⇒ ⇒ 存量快照**零风险**）⇒ ⇒ ⇒ 那一条仍是
+    ///   **字面量**（它是「这一批之后一直没被动过」的性质）。
     #[test]
     fn a8_the_other_three_version_numbers_do_not_move() {
         assert_eq!(SIM_STATE_SCHEMA_VERSION, 2);
-        // ⚠️ **v0.73（STAGE-49）**：描述格式 **1 → 2** · 规则集 **3 → 4**
-        // ⇒ ⇒ **两个都动了**（⇒ ⇒ 一次升版 ⇒ ⇒ 一次迁移）⇒ ⇒ **信封版本
-        // （`SCHEMA_VERSION`）不动**（⇒ ⇒ 那是**另一个数**）。
-        assert_eq!(PLATFORM_SCHEMA_VERSION, 2);
-        assert_eq!(PLATFORM_RULES_VERSION, 4);
+        assert!(
+            crate::platform::SUPPORTED_PLATFORM_SCHEMA_VERSIONS.contains(&PLATFORM_SCHEMA_VERSION),
+            "当前描述格式版本必须被本构建接受（升了版却忘了加进可读列表 ⇒ ⇒ 老描述会被拒）"
+        );
+        assert_ne!(
+            PLATFORM_RULES_VERSION, PLATFORM_SCHEMA_VERSION,
+            "规则集版本与描述格式版本是两个不同的东西，永不相等"
+        );
     }
 
     /// **A-6**：两个新错误码的**值与名相符**，且族已声明。

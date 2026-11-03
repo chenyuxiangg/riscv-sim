@@ -1118,6 +1118,13 @@ fn the_external_interrupt_is_delivered_after_the_timer_line_was_released() {
 /// ⚠️ **v0.57 批（STAGE-42）** 是**契约升版**的那一批（符号查询 + 整段转储 + 条件断点表达式 ⇒ ⇒ 两条新命令 + 两条新事件）⇒ ⇒ **信封版本号从 8 升到 9** ⇒ ⇒ **literal 跟着走**（同 `crates/contract/src/platform.rs` 里那条 `s16_a1`）。
 ///
 /// ⚠️ **另外三个版本号仍然一个都不动**（STAGE-42 §2.8）⇒ ⇒ 那三条断言**一字未改** ⇒ ⇒ 快照 / 板级描述 / 板级规则集**没有**因为这一批变形。
+///
+/// ⚠️ ⚠️ **v0.74（STAGE-50 · 施工期订正）**：**板级描述版本**与**规则集版本**
+///   **每批都会合法地动**（v0.73 批 1→2 / 3→4 · v0.74 批 2→3 / 4→5）⇒ ⇒
+///   ⇒ **字面量**每批都被打死 ⇒ ⇒ ⇒ **那两半改成不随批次失效的性质**
+///   （「当前描述格式版本必须被本构建接受」+「形状版本与规则集版本**永不相
+///   等**」）⇒ ⇒ ⇒ **具体数值**归**最新**那一批的门禁守
+///   （`tools/stage50_check.py`）⇒ ⇒ ⇒ **一个版本号只有一处钉它的地方**。
 #[test]
 fn the_contract_layer_version_numbers_are_untouched() {
     assert_eq!(
@@ -1130,15 +1137,15 @@ fn the_contract_layer_version_numbers_are_untouched() {
         2,
         "会话快照的版本号不许动"
     );
-    assert_eq!(
-        riscv_sim_contract::platform::PLATFORM_SCHEMA_VERSION,
-        2,
-        "板级描述的版本号（v0.73 批 STAGE-49 升到 2：`base` 可缺省 ⇒ ⇒ 描述格式变了）"
+    assert!(
+        riscv_sim_contract::platform::SUPPORTED_PLATFORM_SCHEMA_VERSIONS
+            .contains(&riscv_sim_contract::platform::PLATFORM_SCHEMA_VERSION),
+        "当前板级描述版本必须被本构建接受（升了版却忘了加进可读列表 ⇒ ⇒ 老描述会被拒）"
     );
-    assert_eq!(
+    assert_ne!(
         riscv_sim_contract::platform::PLATFORM_RULES_VERSION,
-        4,
-        "板级合法性规则集的版本号（v0.73 批 STAGE-49 升到 4：规则集**跟着**描述格式走）"
+        riscv_sim_contract::platform::PLATFORM_SCHEMA_VERSION,
+        "板级规则集版本与板级描述版本是两个不同的东西，永不相等"
     );
 }
 

@@ -182,7 +182,7 @@ use riscv_sim_contract::model::{
     Edge, ImageKind, ImageRef, ImageSource, Project, TraceEvent, TraceFormat, TraceSource,
     WaveformHistory, WaveformStream, WriteSize, SIM_STATE_SCHEMA_VERSION,
 };
-use riscv_sim_contract::platform::{PlatformDescription, WIRING_EVENT_RX_READY};
+use riscv_sim_contract::platform::{wiring_event_info, PlatformDescription, WiringEventSemantics};
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
 use riscv_sim_contract::protocol::{
     AdminOp, CommandPayload, Direction, EventPayload, HaltReason, MemoryMapOp, Message, Payload,
@@ -1453,39 +1453,80 @@ impl KernelHost {
         // PLIC」** ⇒ ⇒ 线的两端**从来没被分别查过** ⇒ ⇒ 只修
         // `compile_wiring` 的过滤**不够**（§7.1 订正 2）。
         for wire in self.wiring.iter() {
-            // ⚠️ **事件名用契约层那个常量**（不写字面量）⇒ ⇒ 事件名只有
-            // 一处定义。
-            if wire.event != WIRING_EVENT_RX_READY {
-                continue;
-            }
-            // ⚠️ **源**：按 `from_device` **查表**（不是「第一个 UART」）。
-            let Some(uart) = self.devices.uart(&wire.from_device) else {
+            // ⚠️ **查契约层那个词表**（v0.74 · STAGE-50 · 裁决 J）⇒ ⇒ 「事件名
+            //   → 语义」**只有一处**判定（契约层那一份）⇒ ⇒ ⇒ 这里**不再**抄
+            //   一遍单常量比较（⇒ ⇒ 那会是**第二个真相源**）。
+            //
+            // ⚠️ **不在词表里 ⇒ 跳过这根线**（描述**已经被契约层 V-18 拒了**
+            //   ⇒ ⇒ 正常路径**到不了**这里 ⇒ ⇒ 这是**兜底**，不是主判据）。
+            let Some(info) = wiring_event_info(&wire.event) else {
                 continue;
             };
             // ⚠️ **目标**：按 `to_device` **查表**（不是「第一个 PLIC」）。
             let Some(plic) = self.devices.plic(&wire.to_device) else {
                 continue;
             };
-            let rx_ready = match uart.try_borrow() {
-                Ok(u) => {
-                    // LSR bit0 = RX 有字节；IER bit0 = 允许 RX 中断。
-                    u.line_status() & 0x01 != 0 && u.interrupt_enable() & 0x01 != 0
+            match info.semantics {
+                // ⚠️ **电平语义**（UART 的 `rx_ready`）⇒ ⇒ 设备「还有话说」
+                //   就挂着、没了就撤销（**逐字不变** · F-6）。
+                WiringEventSemantics::Level => {
+                    // ⚠️ **源**：按 `from_device` **查表**（不是「第一个 UART」）。
+                    let Some(uart) = self.devices.uart(&wire.from_device) else {
+                        continue;
+                    };
+                    let rx_ready = match uart.try_borrow() {
+                        Ok(u) => {
+                            // LSR bit0 = RX 有字节；IER bit0 = 允许 RX 中断。
+                            u.line_status() & 0x01 != 0 && u.interrupt_enable() & 0x01 != 0
+                        }
+                        // ⚠️ **争用 ⇒ 跳过这根线**（不是 `return`）⇒ ⇒ 别的线**照常**
+                        // ⇒ ⇒ 一根线读不到**不会**让整张表停摆。
+                        Err(_) => continue,
+                    };
+                    if let Ok(mut p) = plic.try_borrow_mut() {
+                        // ⚠️ **源号来自连线表**（v0.34 · D-125）⇒ ⇒ 表里是
+                        // 「这个事件接到哪个源」⇒ ⇒ 换板改连线不用改宿主。
+                        if rx_ready {
+                            p.request(wire.source);
+                        } else {
+                            // ⚠️ **撤销挂起** = 设备把中断线放下来了 ⇒ ⇒
+                            // 源不再「有话说」⇒ ⇒ 不再占着 PLIC 的名额。
+                            p.set_pending(wire.source, false);
+                        }
+                    };
                 }
-                // ⚠️ **争用 ⇒ 跳过这根线**（不是 `return`）⇒ ⇒ 别的线**照常**
-                // ⇒ ⇒ 一根线读不到**不会**让整张表停摆。
-                Err(_) => continue,
-            };
-            if let Ok(mut p) = plic.try_borrow_mut() {
-                // ⚠️ **源号来自连线表**（v0.34 · D-125）⇒ ⇒ 表里是
-                // 「这个事件接到哪个源」⇒ ⇒ 换板改连线不用改宿主。
-                if rx_ready {
-                    p.request(wire.source);
-                } else {
-                    // ⚠️ **撤销挂起** = 设备把中断线放下来了 ⇒ ⇒
-                    // 源不再「有话说」⇒ ⇒ 不再占着 PLIC 的名额。
-                    p.set_pending(wire.source, false);
+                // ⚠️ **一次性语义**（GPIO 的引脚 IRQ · v0.74 · STAGE-50 · 裁决 K）
+                //   ⇒ ⇒ 设备侧**消费**掉那一位（`take_pending_irqs`）⇒ ⇒ 抬一次
+                //   ⇒ ⇒ **不重抬**（⇒ ⇒ **不活锁**：guest claim + complete 清掉
+                //   PLIC 挂起位后 ⇒ ⇒ 设备侧**没有**待投递的了）。
+                WiringEventSemantics::OneShot => {
+                    let Some(pin) = wire.pin else {
+                        continue;
+                    };
+                    // ⚠️ **源**：按 `from_device` **查表**（不是「第一个 GPIO」）。
+                    let Some(gpio) = self.devices.gpio(&wire.from_device) else {
+                        continue;
+                    };
+                    // ⚠️ **drain**：取出**这个引脚**的 IRQ 线号（消费掉）。
+                    let Ok(mut g) = gpio.try_borrow_mut() else {
+                        continue;
+                    };
+                    let line = g.take_irq_line_for_pin(pin);
+                    let Some(line) = line else {
+                        continue;
+                    };
+                    // ⚠️ **号空间**（裁决：两个号各管各的）：引脚的 IRQ **线号**
+                    //   与连线表里的 **PLIC 源号** **不是同一个** ⇒ ⇒ ⇒
+                    //   **线号 == 源号** 才是本批约定的「同一个」⇒ ⇒ 否则**不抬**
+                    //   （⇒ ⇒ **不静默**抬到错的源上）。
+                    if u32::from(line) != wire.source {
+                        continue;
+                    }
+                    if let Ok(mut p) = plic.try_borrow_mut() {
+                        p.request(wire.source);
+                    }
                 }
-            };
+            }
         }
 
         // ---- 3) PLIC 的待交付源 → M-16 的外部中断线 ----
@@ -1724,6 +1765,15 @@ impl KernelHost {
     /// ⚠️ `None` = 这个会话**还没装载成功过**任何工程。
     pub fn last_project(&self) -> Option<&Project> {
         self.last_project.as_ref()
+    }
+
+    /// 只读地看**器件实例表**（诊断 / 测试用 · v0.74 · STAGE-50）。
+    ///
+    /// ⚠️ **为什么暴露它**：引脚级连线的判据要**真的去读那台器件**
+    ///   （⇒ ⇒ 「内核造的是**那台**器件」不能只靠注册表）⇒ ⇒ ⇒ 测试与
+    ///   诊断都需要**按 id 拿句柄**。
+    pub fn device_table(&self) -> &crate::kernel_host::platform::DeviceInstanceTable {
+        &self.devices
     }
 
     /// 只读地看总线（诊断 / 测试用）。
@@ -4953,6 +5003,14 @@ mod tests_v072_wiring;
 /// 其余三项（B2 / D1 / D-177 的 C）落地后再往这里加。
 #[cfg(test)]
 mod tests_v073_schema;
+
+/// **引脚级连线 + 通用连接路由**（v0.74 · STAGE-50 · D-175 的 D / E）。
+///
+/// ⚠️ **引脚级**（`wiring.from.pin`）⇒ ⇒ 源可以是 **GPIO 的某个引脚**；
+/// ⚠️ **通用路由** ⇒ ⇒ 事件从「只有 `rx_ready`」扩成**词表**（⇒ ⇒ 语义由
+///   事件名决定：电平 / 一次性）。
+#[cfg(test)]
+mod tests_v074_pin_routing;
 
 /// **B2**（v0.73 · STAGE-49 · D-175 的 B2）—— `base` 可缺省 + **装配期分配**。
 ///

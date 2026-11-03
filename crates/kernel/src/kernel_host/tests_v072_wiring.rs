@@ -87,6 +87,7 @@ fn wire(from: &str, to: &str, source: u32) -> WiringSpec {
         from: WiringFrom {
             device: from.to_string(),
             event: WIRING_EVENT_RX_READY.to_string(),
+            pin: None,
         },
         to: WiringTo {
             device: to.to_string(),

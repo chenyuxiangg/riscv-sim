@@ -183,11 +183,27 @@ describe("契约镜像的版本与两个上限（视图层 · C-1）", () => {
     });
 
     test("C-1 · 另外三个版本号**一个都不升**（规格 §2.8）", () => {
-        // ⚠️ **v0.73（STAGE-49）**：描述格式 **1 → 2** · 规则集 **3 → 4**
-        // ⇒ ⇒ **两个都动了**（⇒ ⇒ 一次升版 ⇒ ⇒ 一次迁移）⇒ ⇒ ⇒ 断言跟到
-        // 新值 ⇒ ⇒ **判别力保留**（它钉的仍是「这两个数就是当前那两个」）。
-        assert.equal(msg.PLATFORM_SCHEMA_VERSION, 2, "描述格式版本是 2（STAGE-49 升版）");
-        assert.equal(msg.PLATFORM_RULES_VERSION, 4, "规则集版本是 4（STAGE-49 升版）");
+        // ⚠️ ⚠️ **v0.74（STAGE-50）**：**字面量**（形状 2 → 3 · 规则集 4 → 5）
+        //   ⇒ ⇒ ⇒ **每一次合法升版都会把它打死**⇒ ⇒ ⇒ 改成**跨层判据**
+        //   （**逐字读 Rust 源码**）⇒ ⇒ ⇒ **判别力更强**（两侧任一边漂了
+        //   都红）⇒ ⇒ ⇒ 而且**不再**随批次失效。
+        const platformRs = resolve(repoRoot, "crates/contract/src/platform.rs");
+        const src = readFileSync(platformRs, "utf8");
+        const readConst = (name) => {
+            const m = src.match(new RegExp(`pub const ${name}:\\s*u32\\s*=\\s*(\\d+)`));
+            assert.ok(m, `契约层源码里读不到 ${name}`);
+            return Number(m[1]);
+        };
+        assert.equal(
+            msg.PLATFORM_SCHEMA_VERSION,
+            readConst("PLATFORM_SCHEMA_VERSION"),
+            "描述格式版本：前端镜像必须与**契约层源码**逐字相同",
+        );
+        assert.equal(
+            msg.PLATFORM_RULES_VERSION,
+            readConst("PLATFORM_RULES_VERSION"),
+            "规则集版本：前端镜像必须与**契约层源码**逐字相同",
+        );
     });
 });
 

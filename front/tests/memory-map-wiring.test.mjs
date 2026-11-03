@@ -34,13 +34,14 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { installDom } from "./dom-stub.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const frontDir = resolve(here, "..");
+const repoRoot = resolve(frontDir, "..");
 
 const importFront = (rel) => import(pathToFileURL(resolve(frontDir, rel)).href);
 
@@ -336,7 +337,14 @@ describe("器件连线 · 已知边界（裁决 G）", () => {
         assert.equal("wiring" in description, false, "空表也不该造出一个 `wiring` 键");
     });
 
-    test("⚠️ 裁决 G：**从界面提交的板永远没有 `wiring`**（编辑器不暴露它）", () => {
+    test("⚠️ **没有画线**时提交的那份**不带** `wiring`（缺省优先）", () => {
+        // ⚠️ ⚠️ **v0.74（STAGE-50 · D-177 的 D）**：这条**原来**叫「从界面
+        //   提交的板**永远没有** `wiring`」⇒ ⇒ 那是 v0.34 ~ v0.73 的**已知
+        //   边界**（编辑器**不暴露**连线）⇒ ⇒ ⇒ **本批把那个边界拆掉了**
+        //   （⇒ ⇒ 「能画线」由 `front/tests/wiring-editor.test.mjs` 的 N-3 /
+        //   N-4 钉住）⇒ ⇒ ⇒ **本条保留的是它**真正要钉的那件事：
+        //   **默认草稿没有线 ⇒ ⇒ 提交的那份也不带 `wiring` 键**
+        //   （⇒ ⇒ 不给所有板都塞一个空数组 ⇒ ⇒ 存量板**逐字不变**）。
         const draft = mm.defaultDraft();
         assert.equal("wiring" in draft, false, "默认草稿不该带 `wiring`");
         const description = mm.draftToDescription(draft);
@@ -485,32 +493,46 @@ describe("提交选路 · `wiring` 的改动**真的**提交出去（C-5 · app 
 });
 
 describe("规则集版本 · 前端镜像（C-3）", () => {
-    test("C-3 `PLATFORM_RULES_VERSION` = **3**（规则集收紧 ⇒ 这个数 +1）", () => {
-        // ⚠️ **v0.73（STAGE-49）**：规则集 **3 → 4**（描述格式升版 ⇒ ⇒ 规则集
-        // 跟着走）⇒ ⇒ 字面量跟到 **4** ⇒ ⇒ **判别力保留**（它钉的仍是
-        // 「镜像里那个数 == 规则集当前版本」⇒ ⇒ ⚠️ **不是** `x == x` 那种
-        // 恒真的写法）。
+    test("C-3 前端镜像的版本号 == **契约层源码**里那几个（跨层判据）", () => {
+        // ⚠️ ⚠️ **为什么改成跨层判据**（v0.74 · STAGE-50 · 施工期订正）：
+        //   这组断言原来钉的是**具体数字**（规则集 3→4→5、描述格式 1→2→3）
+        //   ⇒ ⇒ ⇒ **每一次**合法升版都要改它 ⇒ ⇒ ⇒ 下一批又会被打死
+        //   （v0.73 批实测踩过：STAGE-48 的门禁被本批合法升版打死 ⇒ ⇒
+        //   ⇒ **跨批门禁只钉「不随批次失效的性质」**）。
+        //
+        // ⚠️ **改成「镜像 == 契约层源码」** ⇒ ⇒ 判别力**更强**（两侧任一
+        //   边漂了都会红）⇒ ⇒ ⇒ 而且**不再**随批次失效。
+        const platformRs = resolve(repoRoot, "crates/contract/src/platform.rs");
+        assert.ok(existsSync(platformRs), "契约层源码不在（跨层门禁必须是硬失败，不是跳过）");
+        const src = readFileSync(platformRs, "utf8");
+        const readConst = (name) => {
+            const at = src.indexOf(`pub const ${name}`);
+            assert.notEqual(at, -1, `契约层读不到 ${name}`);
+            const eq = src.indexOf("=", at);
+            const semi = src.indexOf(";", eq);
+            return Number(src.slice(eq + 1, semi).trim());
+        };
         assert.equal(
             message.PLATFORM_RULES_VERSION,
-            4,
-            "规则集版本必须是 4（STAGE-19 裁决 F：2 → 3；STAGE-49：3 → 4）",
+            readConst("PLATFORM_RULES_VERSION"),
+            "规则集版本：前端镜像必须与**契约层源码**逐字相同",
+        );
+        assert.equal(
+            message.PLATFORM_SCHEMA_VERSION,
+            readConst("PLATFORM_SCHEMA_VERSION"),
+            "描述格式版本：前端镜像必须与**契约层源码**逐字相同",
         );
     });
 
-    test("C-3 描述格式版本**不升**（契约 v9 升的是信封版本）", () => {
+    test("C-3 契约**信封**版本**不动**（描述格式升版不许带走它）", () => {
         // ⚠️ **原名是「另外两个版本号一个都不升」** ⇒ ⇒ 契约 v9 升了信封
         //   版本 ⇒ ⇒ **那句话已不成立** ⇒ ⇒ 按本仓先例（契约 v8 那次把
         //   `s19_a6` 收窄并改名）**收窄 + 改名** ⇒ ⇒ 但**断言一条都不删**：
-        //   信封版本仍然被**钉死**在 9（只是它不再是「不升」的那一个了）。
+        //   信封版本仍然被**钉死**在 11（只是它不再是「不升」的那一个了）。
         assert.equal(
             message.SCHEMA_VERSION,
             11,
             "契约信封版本是 11（契约 v11：STAGE-48 的连线报告）",
-        );
-        assert.equal(
-            message.PLATFORM_SCHEMA_VERSION,
-            2,
-            "描述格式版本是 2（STAGE-49 · B2：base 可缺省）",
         );
     });
 

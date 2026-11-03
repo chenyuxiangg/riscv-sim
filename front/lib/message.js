@@ -183,7 +183,7 @@ export const SYMBOL_CANDIDATE_LIMIT = 16;
  * **一个定义处**（STAGE-15 裁决 K：初版让服务层「另立一个同值常量」⇒
  * 那是**两个真相** ⇒ 不接受）。
  */
-export const PLATFORM_SCHEMA_VERSION = 2;
+export const PLATFORM_SCHEMA_VERSION = 3;
 
 /**
  * **本前端能读**的平台描述格式版本 — mirrors
@@ -197,7 +197,7 @@ export const PLATFORM_SCHEMA_VERSION = 2;
  * 那个」（⇒ ⇒ 前端**写**它）⇒ ⇒ 「**本构建能读**的那些」是**另一件事**
  * ⇒ ⇒ ⇒ **两个数，两个含义**（一个约束一个落点）。
  */
-export const SUPPORTED_PLATFORM_SCHEMA_VERSIONS = [1, 2];
+export const SUPPORTED_PLATFORM_SCHEMA_VERSIONS = [1, 2, 3];
 
 /**
  * 合法性**规则集**版本 — mirrors `riscv_sim_contract::platform::PLATFORM_RULES_VERSION`.
@@ -233,7 +233,34 @@ export const SUPPORTED_PLATFORM_SCHEMA_VERSIONS = [1, 2];
  * ⚠️ **唯一落点**（STAGE-18 裁决 E）：住在这**一层**（`front/lib/`）⇒ 服务层
  * 与视图层**都从这里 import** ⇒ **一个定义处** ⇒ 依赖方向仍单向。
  */
-export const PLATFORM_RULES_VERSION = 4;
+export const PLATFORM_RULES_VERSION = 5;
+
+/**
+ * **连线事件词表（建议清单）** — mirrors
+ * `riscv_sim_contract::platform::WIRING_EVENTS`.
+ *
+ * ⚠️ **它只是「建议」**（v0.74 · STAGE-50 · D-177 的 D）：连线编辑面用它做
+ *   **候选提示**（`<datalist>`）⇒ ⇒ 用户**可以**手输别的名字 ⇒ ⇒ ⇒ 前端
+ *   **不约束**内核的词表（内核将来加了新事件 ⇒ ⇒ 前端照样能表达 ⇒ ⇒ ⇒
+ *   「前端抄一份词表就等于第二个真相源」那个坑**被躲开**了）。
+ *
+ * ⚠️ **合法性只由内核判**（契约层 V-18）⇒ ⇒ 前端**不**拿它判「这个名字合不
+ *   合法」⇒ ⇒ ⇒ 它在这儿的**唯一**用途是「给用户看几个常见值」。
+ *
+ * ⚠️ **跨层判据**（`front/tests/wiring-editor.test.mjs`）：本表**逐字**等于
+ *   契约层源码里那张表（⇒ ⇒ 两侧漂了会红）⇒ ⇒ ⇒ **一个版本号 / 一张词表
+ *   只有一处钉它的地方**（契约层那一份是**真的**那一份）。
+ *
+ * ⚠️ **字段**：只镜像前端**用得到**的三项（`name` / `source_kind` /
+ *   `needs_pin`）⇒ ⇒ 前端**不需要**语义（电平 / 一次性）⇒ ⇒ **不抄**那一项
+ *   （⇒ ⇒ 少一处会漂的东西）。
+ *
+ * @type {ReadonlyArray<{name: string, source_kind: string, needs_pin: boolean}>}
+ */
+export const WIRING_EVENTS = Object.freeze([
+    Object.freeze({ name: "rx_ready", source_kind: "uart16550", needs_pin: false }),
+    Object.freeze({ name: "pin_irq", source_kind: "gpio", needs_pin: true }),
+]);
 
 // ---------------------------------------------------------------------------
 // 场景码表（STAGE-29 · 裁决 E · v0.44 批）

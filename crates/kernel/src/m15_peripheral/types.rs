@@ -22,6 +22,7 @@
 
 use riscv_sim_contract::model::{DeviceParamInfo, DeviceRegisterInfo, DeviceTypeInfo};
 use riscv_sim_contract::platform::DeviceSpec;
+use riscv_sim_contract::session::GPIO_PIN_COUNT;
 
 use super::clint::{self, reg as clint_reg};
 use super::gpio::{self, reg as gpio_reg};
@@ -42,6 +43,12 @@ pub struct DeviceTypeEntry {
     pub window_bytes: u32,
     /// The register map —— `(name, byte offset within the window)`.
     pub registers: &'static [(&'static str, u32)],
+    /// **这个类型有多少个引脚**（`None` ⇒ ⇒ **没有引脚**这个概念）。
+    ///
+    /// ⚠️ **v0.74（STAGE-50 · 裁决 F）**：引脚数**只有一处**（契约层
+    ///   `GPIO_PIN_COUNT`）⇒ ⇒ 这里**引用**它、**不抄** ⇒ ⇒ ⇒ 前端**查**
+    ///   内核的类型表就拿到 ⇒ ⇒ **不抄第二份**。
+    pub pin_count: Option<u32>,
 }
 
 /// ⚠️ **The CLINT's `msip` array starts at offset 0** —— the model spells
@@ -63,6 +70,8 @@ pub const DEVICE_TYPES: &[DeviceTypeEntry] = &[
             ("IN", gpio_reg::IN),
             ("TOGGLE", gpio_reg::TOGGLE),
         ],
+        // ⚠️ **引脚数来自契约层那一份**（`GPIO_PIN_COUNT`）⇒ ⇒ **不抄**。
+        pin_count: Some(GPIO_PIN_COUNT as u32),
     },
     DeviceTypeEntry {
         kind: "uart16550",
@@ -77,6 +86,7 @@ pub const DEVICE_TYPES: &[DeviceTypeEntry] = &[
             ("MSR", uart_reg::MSR),
             ("SCR", uart_reg::SCR),
         ],
+        pin_count: None,
     },
     DeviceTypeEntry {
         kind: "clint",
@@ -86,6 +96,7 @@ pub const DEVICE_TYPES: &[DeviceTypeEntry] = &[
             ("MTIMECMP", clint_reg::MTIMECMP),
             ("MTIME", clint_reg::MTIME),
         ],
+        pin_count: None,
     },
     DeviceTypeEntry {
         kind: "plic",
@@ -96,6 +107,7 @@ pub const DEVICE_TYPES: &[DeviceTypeEntry] = &[
             ("THRESHOLD", plic_reg::THRESHOLD),
             ("CLAIM", plic_reg::CLAIM),
         ],
+        pin_count: None,
     },
     DeviceTypeEntry {
         kind: "timer_riscv",
@@ -106,6 +118,7 @@ pub const DEVICE_TYPES: &[DeviceTypeEntry] = &[
             ("MTIMECMP_LO", timer_reg::MTIMECMP_LO),
             ("MTIMECMP_HI", timer_reg::MTIMECMP_HI),
         ],
+        pin_count: None,
     },
 ];
 
@@ -134,6 +147,8 @@ pub fn device_type_infos() -> Vec<DeviceTypeInfo> {
                 })
                 .collect(),
             params: parameter_infos(entry.kind),
+            // ⚠️ **引脚数**（v0.74 · 裁决 F）⇒ ⇒ 前端**查**它、**不抄**。
+            pin_count: entry.pin_count,
         })
         .collect()
 }

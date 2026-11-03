@@ -105,6 +105,15 @@ impl GpioBank {
         }
     }
 
+    /// **当前输入电平**（只读 · v0.74 · STAGE-50 · 引脚级用例用）。
+    ///
+    /// ⚠️ **为什么需要它**：用例要「**翻转**某个引脚的电平」来制造边沿
+    ///   ⇒ ⇒ 而 `inputs` 是**私有**的 ⇒ ⇒ ⇒ 给一个**只读**入口（⇒ ⇒ 不
+    ///   破坏封装）。
+    pub fn inputs(&self) -> u32 {
+        self.inputs
+    }
+
     /// Set the pin direction bitmask (1 = output, 0 = input).
     pub fn set_directions(&mut self, mask: u32) {
         self.directions = mask & PIN_COUNT_MASK;
@@ -158,6 +167,55 @@ impl GpioBank {
             }
         }
         out
+    }
+
+    /// **取**某个引脚的 **IRQ 线号**并**消费**掉它的 pending 位
+    /// （v0.74 · STAGE-50 · 引脚级连线的源）。
+    ///
+    /// ⚠️ **为什么是「消费」**（裁决 K）：PLIC 的源**只有一位**（F-3）⇒ ⇒
+    ///   一个源**不能**既被「一次性请求」又被「电平撤销」管 ⇒ ⇒ ⇒ 引脚级
+    ///   的中断**天然**是**一次性**语义 ⇒ ⇒ ⇒ 取一次就**消费掉**⇒ ⇒ 抬过
+    ///   一次之后设备侧**没有**待投递的了 ⇒ ⇒ ⇒ **不活锁**。
+    ///
+    /// ⚠️ **没有 pending**（或该引脚**没配** IRQ 线）⇒ ⇒ `None`（⇒ ⇒ 不抬）。
+    ///
+    /// @param pin — 引脚号（0..[`GPIO_PIN_COUNT`]）
+    /// @returns 该引脚的 IRQ 线号（`0xFFFF` = 未配置 ⇒ `None`）
+    pub fn take_irq_line_for_pin(&mut self, pin: u32) -> Option<u16> {
+        if pin >= PIN_COUNT {
+            return None;
+        }
+        // ⚠️ **消费**掉这一位（⇒ ⇒ 不会重抬）。
+        if (self.pending_irqs >> pin) & 1 == 0 {
+            return None;
+        }
+        self.pending_irqs &= !(1u32 << pin);
+        let line = self.irq_lines.get(pin as usize).copied()?;
+        if line == 0xFFFF {
+            return None;
+        }
+        Some(line)
+    }
+
+    /// **读**某个引脚的 **IRQ 线号**（**只读** · v0.74 · STAGE-50）。
+    ///
+    /// ⚠️ **为什么需要它**：「连线表把引脚绑到哪个源」这条**只有一个落点**
+    ///   （`compile_wiring`）⇒ ⇒ ⇒ 判据要能**直接读到**那根绑定（⇒ ⇒ 否则
+    ///   只能靠「端到端通电」那种**间接**证据 ⇒ ⇒ ⇒ 归因分不清）。
+    ///
+    /// ⚠️ **未配置**（`0xFFFF`）⇒ ⇒ `None`（**不是** `0xFFFF` 那个数 ⇒ ⇒
+    ///   「没绑」与「绑到 0xFFFF」分得开）。
+    ///
+    /// @param pin — 引脚号（0..[`GPIO_PIN_COUNT`]）
+    /// @returns 该引脚的 IRQ 线号（未配置 ⇒ ⇒ `None`）
+    pub fn irq_line_for_pin(&self, pin: u32) -> Option<u16> {
+        if pin >= PIN_COUNT {
+            return None;
+        }
+        match self.irq_lines.get(pin as usize).copied() {
+            Some(0xFFFF) | None => None,
+            Some(line) => Some(line),
+        }
     }
 
     /// Bind an IRQ line to a pin (0..32). Use `0xFFFF` to disable.
