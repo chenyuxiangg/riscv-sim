@@ -94,6 +94,9 @@ import {
     UI_IMAGE_ELF_MARKER_B,
     UI_IMAGE_ELF_PADDR,
     UI_IMAGE_ELF_X3_B,
+    GPIO_PIN_IRQ_ELF_FAIL_MARKER,
+    GPIO_PIN_IRQ_ELF_MARKER,
+    buildGpioPinIrqElf,
     buildUiImageElf,
     checkEncoderAgainstDemoFirmware,
 } from "./ui-image-fixture.mjs";
@@ -181,6 +184,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "unknownSystem",
     "wiringReport",
     "platformSchemaV2",
+    "pinLevelRouting",
     "boardArchive",
     "boardDelta",
     "boardOrdering",
@@ -1588,6 +1592,100 @@ const BV_NEW_RAM_BASE = 2147483648;
 const BV_NEW_RAM_SIZE = 8388608;
 /** 写进新 RAM 的那个值（0xA5A5_A5A5 ⇒ 肉眼可辨）。 */
 const BV_NEW_RAM_VALUE = 0xa5a5a5a5;
+
+// ---------------------------------------------------------------------------
+// STAGE-50 · v0.74 批的**夹具板**（引脚级连线）
+// ---------------------------------------------------------------------------
+
+/**
+ * 一块**带引脚级连线**的板（v0.74 · STAGE-50 · B-156）。
+ *
+ * ⚠️ **形状 = qemu-virt 那张**（RAM 在 0x8000_0000 · PLIC 在 0x0c00_0000 ·
+ *   UART0 在 0x1000_0000 · GPIO0 在 0x4000_0000）⇒ ⇒ ⇒ 那份**引脚级固件**
+ *   里写死的地址**正好**对上（⇒ ⇒ 固件与这块板是**一对**）⇒ ⇒ ⇒ 固件里的
+ *   PLIC / GPIO / UART 基址**不许**乱改。
+ *
+ * ⚠️ **那根线**：GPIO0 的**引脚 3** ⇒ ⇒ PLIC 的**源 11** ⇒ ⇒ ⇒ 引脚号与
+ *   源号**两个号各管各的**（规格 §2.3）⇒ ⇒ ⇒ 这里**两个都写**。
+ *
+ * ⚠️ **必须有 CLINT**（v0.74 · STAGE-50 · B-156b 真机实测钉死的）：宿主的
+ *   `sync_interrupts` 开头「没有 CLINT 时间源 ⇒ 整个函数直接返回」（存量
+ *   不变式）⇒ ⇒ ⇒ **没有 CLINT 的板：连线的抬线永不执行** ⇒ ⇒ guest 永远
+ *   领不到那个源（B-156b 在真机上打出「X」的根因）⇒ ⇒ Rust 侧的 K 测试用
+ *   的是**内置 qemu-virt**（带 CLINT）⇒ ⇒ 过了 ⇒ ⇒ 而这块夹具板当初漏了
+ *   CLINT ⇒ ⇒ 形状**不再**等于 qemu-virt ⇒ ⇒ 真机门禁把它逮住了 ⇒ ⇒ 补上
+ *   （基址 0x0200_0000 · 与内置描述逐字一致）。
+ */
+const BV_PIN_LEVEL_BOARD = {
+    schema_version: 3,
+    id: "browser-verify-pin-level",
+    name: "browser-verify 引脚级连线板",
+    priority: 997,
+    region_budget_bytes: 134217728,
+    regions: [
+        { kind: "ram", base: 0, size: 1048576 },
+        { kind: "peripheral", base: 33554432, device: { device: "clint", id: "CLINT", freq_hz: 10000000, harts: 1 } },
+        { kind: "peripheral", base: 201326592, device: { device: "plic", id: "PLIC", sources: 64, contexts: 16 } },
+        { kind: "peripheral", base: 268435456, device: { device: "uart16550", id: "UART0", irq_line: 1, baud_rate: 115200 } },
+        { kind: "peripheral", base: 1073741824, device: { device: "gpio", id: "GPIO0" } },
+        { kind: "ram", base: 2147483648, size: 134217728 },
+    ],
+    wiring: [
+        { from: { device: "GPIO0", event: "pin_irq", pin: 3 }, to: { device: "PLIC", source: 11 } },
+    ],
+};
+
+/**
+ * **老格式**的那块板（v0.74 · STAGE-50 · B-158）—— 一根 `rx_ready` 的线。
+ *
+ * ⚠️ **没有 `pin`** ⇒ ⇒ **老描述逐字不变** ⇒ ⇒ ⇒ 存量板档案**零风险**那条
+ *   在真机上**也**验得到。
+ */
+const BV_OLD_WIRING_BOARD = {
+    schema_version: 2,
+    id: "browser-verify-old-wiring",
+    name: "browser-verify 老连线板",
+    priority: 996,
+    region_budget_bytes: 134217728,
+    regions: [
+        { kind: "ram", base: 0, size: 1048576 },
+        { kind: "peripheral", base: 33554432, device: { device: "clint", id: "CLINT", freq_hz: 10000000, harts: 1 } },
+        { kind: "peripheral", base: 201326592, device: { device: "plic", id: "PLIC", sources: 64, contexts: 16 } },
+        { kind: "peripheral", base: 268435456, device: { device: "uart16550", id: "UART0", irq_line: 1, baud_rate: 115200 } },
+        { kind: "peripheral", base: 1073741824, device: { device: "gpio", id: "GPIO0" } },
+        { kind: "ram", base: 2147483648, size: 134217728 },
+    ],
+    wiring: [
+        { from: { device: "UART0", event: "rx_ready" }, to: { device: "PLIC", source: 10 } },
+    ],
+};
+
+/**
+ * 一块**写着非法事件名**的板（v0.74 · STAGE-50 · B-159）。
+ *
+ * ⚠️ **期望**：内核**拒**它 ⇒ ⇒ 界面显示**既有码** `E_PLT-16` ⇒ ⇒ ⇒
+ *   **零新场景码**那条在真机上**也**成立。
+ */
+const BV_ILLEGAL_EVENT_BOARD = {
+    ...BV_PIN_LEVEL_BOARD,
+    id: "browser-verify-illegal-event",
+    name: "browser-verify 非法事件名板",
+    wiring: [
+        { from: { device: "GPIO0", event: "not_an_event" }, to: { device: "PLIC", source: 11 } },
+    ],
+};
+
+/**
+ * 一块**没有连线**的板（v0.74 · STAGE-50 · B-160）。
+ *
+ * ⚠️ **期望**：**照旧能装** ⇒ ⇒ ⇒ 界面上画的线**没有**弄坏既有板。
+ */
+const BV_NO_WIRING_BOARD = {
+    ...BV_PIN_LEVEL_BOARD,
+    id: "browser-verify-no-wiring",
+    name: "browser-verify 没有连线的板",
+    wiring: [],
+};
 
 // ---------------------------------------------------------------------------
 // STAGE-49 · v0.73 批的**夹具板**（B2：`base` 可缺省）
@@ -8050,6 +8148,339 @@ async function runStaleSurfacesSection(cdp, opts) {
     return { checks };
 }
 
+
+/**
+ * **引脚级连线**那一段（v0.74 · STAGE-50 · B-156 ~ B-160）。
+ *
+ * ## 它要断什么
+ *
+ * - **B-156**：真机上提交一份**带引脚级连线**的板 ⇒ ⇒ 内核**收下** ⇒ ⇒
+ *   guest **真的**收到那个源的中断（⇒ ⇒ guest **自己**去 PLIC 的 claim 寄存器
+ *   **领**到了那个源 ⇒ ⇒ 不是「描述被接受了」那种弱证据）；
+ * - **B-157**：⚠️ **必要对照** —— 那份板**再提交一次** ⇒ ⇒ 生效图**相同**
+ *   （⇒ ⇒ **确定** ⇒ ⇒ 可复算）；
+ * - **B-158**：⚠️ **必要对照** —— **老格式**（`rx_ready`）的板 ⇒ ⇒ **照旧能装**
+ *   （⇒ ⇒ 存量板档案零风险）；
+ * - **B-159**：描述里写**非法事件名** ⇒ ⇒ 界面显示**既有码** `E_PLT-16`
+ *   （⇒ ⇒ **不是**新码 ⇒ ⇒ 零新场景码那条在真机上**也**成立）；
+ * - **B-160**：⚠️ **必要对照** —— **没有连线**的板 ⇒ ⇒ **照旧能装**
+ *   （⇒ ⇒ 界面上画的线**没有**弄坏既有板）。
+ *
+ * ## ⚠️ **顺序是硬约束**
+ *
+ * ① **先卸载工程** ⇒ ⇒ 改板**立即生效**（否则板是「待生效」⇒ ⇒ 生效图
+ *    还是旧的 ⇒ ⇒ 那些判据会**恒真**）；
+ * ② **板先、固件后** ⇒ ⇒ guest 必须**带着那块板**跑（⇒ ⇒ 那根线**真的**
+ *    绑在那块板上）⇒ ⇒ ⇒ 固件**最后**才装；
+ * ③ **收尾复原**（板 + 固件）⇒ ⇒ 后面那些段拿到的还是**一张正常的板**
+ *    （⇒ ⇒ 本段**不污染**别人 —— 真机门禁的段**共用一个浏览器会话**）。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{skipped: boolean, checks: object[]}>}
+ */
+async function runPinLevelRoutingSection(cdp, opts) {
+    /** @type {{name: string, ok: boolean, detail: string}[]} */
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+    const tmpDir = mkdtempSync(join(tmpdir(), "riscv-pin-irq-"));
+
+    /**
+     * 提交一块板（走**界面那条路**：发 `riscv:command` 信号）。
+     *
+     * @param {object} board
+     * @param {string} requestId
+     */
+    const submitBoard = async (board, requestId) => {
+        await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+            detail: {
+                action: "submit-memory-map",
+                requestId: ${JSON.stringify(requestId)},
+                viewId: "memory-map",
+                params: { description: ${JSON.stringify(board)} },
+            },
+        }))`);
+    };
+
+    /**
+     * 从**内核那条 `memory.map` 事件**里找某一块板的生效图。
+     *
+     * ⚠️ **不取「最后一条」** ⇒ ⇒ 因为本段要提交**好几块**板 ⇒ ⇒ ⇒ 「最后
+     *   一条」会随提交顺序变 ⇒ ⇒ ⇒ **按板 id 找** ⇒ ⇒ ⇒ 判据**稳定**。
+     *
+     * @param {string} boardId
+     * @returns {Promise<object|null>}
+     */
+    const mapOfBoard = async (boardId) => awaitEval(cdp, `(() => {
+        const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
+        let last = null;
+        for (const raw of frames) {
+            let frame = null;
+            try { frame = JSON.parse(String(raw)); } catch (e) { continue; }
+            // ⚠️ **双层包裹**：postMessage 上跑的是**前端 transport 那一层**
+            //   帧（payload.payload.Event —— 与 BV_LAST_MEMORY_MAP_FN
+            //   **同一个形状**）⇒ ⇒ 少跳一层 ⇒ ⇒ **永远读不到** MemoryMap
+            //   ⇒ ⇒ 五条判据一起红、症状与「内核没接受那块板」一模一样
+            //   （v0.74 批 · B-156 ~ B-160 **实测踩到**：wiring_report
+            //   恒 null ⇒ ⇒ 而内核其实是**收下**的 —— 用 wasm-smoke 同款
+            //   直驱复现已证）。
+            const msg = (frame && frame.payload) ? frame.payload : null;
+            const body = (msg && msg.payload) ? msg.payload : null;
+            const ev = (body && body.Event) ? body.Event : null;
+            if (!ev || !ev.MemoryMap) continue;
+            if (String((ev.MemoryMap.description || {}).id ?? "") !== ${JSON.stringify(boardId)}) continue;
+            last = {
+                wiring_report: ev.MemoryMap.wiring_report ?? null,
+                revision: Number(ev.MemoryMap.revision ?? 0),
+                regions: ((ev.MemoryMap.description || {}).regions || []).length,
+            };
+        }
+        return last;
+    })()`);
+
+    /**
+     * 等某一块板的生效图**真的出现**（⇒ ⇒ 不等时长 —— D-159 教训）。
+     *
+     * @param {string} boardId
+     * @returns {Promise<object|null>}
+     */
+    const waitForBoard = async (boardId) => {
+        const deadline = Date.now() + opts.timeoutMs;
+        while (Date.now() < deadline) {
+            const now = await mapOfBoard(boardId);
+            if (now) return now;
+            await sleep(200);
+        }
+        return null;
+    };
+
+    try {
+        // ---- ① 切到编辑器视图 ------------------------------------------------
+        await runEffect(cdp, 'location.hash = "#/memory-map";');
+        await sleep(800);
+
+        // ---- ①b **重装帧捕获钩子**（v0.74 批 · 施工期订正 1）------------------
+        //
+        // ⚠️ **为什么必须**：那个钩子挂在 `Worker.prototype.postMessage` **上**
+        // ⇒ ⇒ **页面一刷新就丢**（工具自己的注释写明了这条）⇒ ⇒ ⇒ 上一段
+        // （v0.73 的 `platformSchemaV2`）结尾**刷新过页面** ⇒ ⇒ ⇒ 于是本段
+        // 读 `window.__bvIn` **永远是空数组** ⇒ ⇒ ⇒ `mapOfBoard` **恒返回
+        // null** ⇒ ⇒ ⇒ ⇒ **五条判据一起红、而症状与「内核没接受那块板」
+        // 一模一样**（⇒ ⇒ ⇒ 排查成本极高 ⇒ ⇒ ⇒ ⇒ 真机门禁自己的一个坑）。
+        //
+        // ⚠️ **通用判据**：**真机门禁的每一段都假定「上一段留下的现场还在」**
+        // ⇒ ⇒ ⇒ **刷新之后必须重新装钩子** ⇒ ⇒ ⇒ 否则「读到空」会被误判成
+        // 「产品没做」。
+        await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
+
+        // ---- ② **卸载工程** ⇒ ⇒ 改板**立即生效** ----------------------------
+        await runEffect(cdp, `(() => {
+            const btn = document.querySelector('[data-action="unload-project"]');
+            if (!btn) return "no-button";
+            btn.click();
+            return "clicked";
+        })()`);
+        await sleep(900);
+        const unloaded = await awaitEval(cdp, `(() => {
+            const pending = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+            return !pending;
+        })()`);
+        add(
+            "**前置**：工程已**卸载** ⇒ ⇒ 改板**立即生效**（⇒ ⇒ 本段断的是"
+            + "**新板**的那份生效图）",
+            unloaded === true,
+            `无待生效横幅=${unloaded}`,
+        );
+        if (unloaded !== true) {
+            return { skipped: false, checks };
+        }
+
+        // ---- ③ 提交带引脚级连线的板 ⇒ ⇒ 内核**收下** + 那根线**在用** ------
+        await submitBoard(BV_PIN_LEVEL_BOARD, "bv-pin-level-board");
+
+        // ⚠️ **前置**：帧捕获**真的**在工作（v0.74 批 · 施工期订正 1）——⇒ ⇒
+        //   没有这条 ⇒ ⇒ 「读不到」会被误判成「内核没接受那块板」⇒ ⇒ ⇒
+        //   ⇒ 症状与「功能没做」**一模一样** ⇒ ⇒ ⇒ 排查成本极高。
+        //
+        // ⚠️ **顺带把「内核说的错误原文」与「前端发出去的那一帧」一起抓出来**
+        //   （v0.74 批 · 施工期订正 2）⇒ ⇒ **「为什么没被接受」必须**看得到
+        //   ⇒ ⇒ ⇒ 否则「证据 = null」只能说明「没看到」⇒ ⇒ ⇒ **说明不了「为什么」**。
+        const captured = await awaitEval(cdp, `(() => {
+            const frames = Array.isArray(window.__bvIn) ? window.__bvIn : null;
+            const out = Array.isArray(window.__bvWire) ? window.__bvWire : [];
+            // ⚠️ **出站那一帧**（前端 → 内核）⇒ ⇒ 找最后一条含 SetMemoryMap 的。
+            let sent = null;
+            for (const raw of out) {
+                let obj = raw;
+                try { obj = JSON.parse(String(raw)); } catch (e) { /* 可能是字符串 */ }
+                if (typeof obj === "string") {
+                    try { obj = JSON.parse(obj); } catch (e) { /* 不是 JSON 文本 */ }
+                }
+                const text = JSON.stringify(obj);
+                if (text && text.includes("SetMemoryMap")) sent = text;
+            }
+            const err = document.querySelector('[data-view-body="memory-map"] [data-memory-map-error]')
+                || document.querySelector('[data-view-body="memory-map"] .error')
+                || document.querySelector('[data-view-body="memory-map"] [data-error]');
+            return {
+                hooked: frames !== null,
+                count: frames === null ? 0 : frames.length,
+                sent,
+                error: err ? String(err.textContent ?? "") : null,
+            };
+        })()`);
+        add(
+            "**前置**：**帧捕获钩子**真的装上了（⇒ ⇒ 内核的回复看得见）"
+            + "（⚠️ 不许**读错位置**：上一段刷新过页面 ⇒ ⇒ 钩子会丢 ⇒ ⇒ "
+            + "读到的会是空数组 ⇒ ⇒ 症状与「内核没接受那块板」**一样**）",
+            captured?.hooked === true && Number(captured?.count ?? 0) > 0,
+            `钩子装上了=${captured?.hooked} 已捕获帧数=${captured?.count}`
+            + ` 界面上的错误=${JSON.stringify(captured?.error ?? null)}`
+            + ` 发出去的那一帧=${String(captured?.sent ?? "").slice(0, 600)}`,
+        );
+
+        const pinMap = await waitForBoard("browser-verify-pin-level");
+        add(
+            "B-156a · 真机上提交一份**带引脚级连线**的板 ⇒ ⇒ 内核**收下**"
+            + " ⇒ ⇒ 那根线**在用**（连线报告说它**活着** ⇒ ⇒ 不是「被静默丢弃」）",
+            pinMap !== null
+                && pinMap.wiring_report !== null
+                && Number(pinMap.wiring_report.declared) === 1
+                && Number(pinMap.wiring_report.live) === 1
+                && (pinMap.wiring_report.dropped ?? []).length === 0,
+            `连线报告=${JSON.stringify(pinMap?.wiring_report ?? null)}`,
+        );
+
+        // ---- ④ **再提交一次** ⇒ ⇒ 生效图**相同**（确定）----------------------
+        await submitBoard(BV_PIN_LEVEL_BOARD, "bv-pin-level-board-2");
+        const pinMap2 = await waitForBoard("browser-verify-pin-level");
+        add(
+            "B-157 · ⚠️ **必要对照**：那份板**再提交一次** ⇒ ⇒ 生效图**相同**"
+            + " ⇒ ⇒ **确定**（⇒ ⇒ 同一份描述两次装得到**同一个**图 ⇒ ⇒ 可复算）",
+            pinMap !== null
+                && pinMap2 !== null
+                && JSON.stringify(pinMap.wiring_report) === JSON.stringify(pinMap2.wiring_report)
+                && JSON.stringify(pinMap.regions) === JSON.stringify(pinMap2.regions),
+            `第一次=${JSON.stringify(pinMap)} 第二次=${JSON.stringify(pinMap2)}`,
+        );
+
+        // ---- ⑤ 非法事件名 ⇒ ⇒ 界面显示**既有码** ----------------------------
+        await submitBoard(BV_ILLEGAL_EVENT_BOARD, "bv-illegal-event-board");
+        const deadlineErr = Date.now() + opts.timeoutMs;
+        let errorText = null;
+        while (Date.now() < deadlineErr) {
+            const now = await awaitEval(cdp, `(() => {
+                const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-error]')
+                    || document.querySelector('[data-view-body="memory-map"] .error')
+                    || document.querySelector('[data-view-body="memory-map"] [data-error]');
+                return el ? String(el.textContent ?? "") : null;
+            })()`);
+            if (now && String(now).includes("E_PLT")) {
+                errorText = now;
+                break;
+            }
+            await sleep(200);
+        }
+        add(
+            "B-159 · 描述里写**非法事件名** ⇒ ⇒ 界面显示**既有码** `E_PLT-16`"
+            + "（⇒ ⇒ **不是**新码 ⇒ ⇒ 零新场景码那条在真机上**也**成立）",
+            errorText !== null && String(errorText).includes("E_PLT-16"),
+            `界面上的错误=${JSON.stringify(errorText)}`,
+        );
+
+        // ---- ⑥ **没有连线**的板 ⇒ ⇒ 照旧能装 -------------------------------
+        await submitBoard(BV_NO_WIRING_BOARD, "bv-no-wiring-board");
+        const noWireMap = await waitForBoard("browser-verify-no-wiring");
+        add(
+            "B-160 · ⚠️ **必要对照**：**没有连线**的板 ⇒ ⇒ **照旧能装**"
+            + "（⇒ ⇒ 界面上画的线**没有**弄坏既有板）",
+            noWireMap !== null
+                && noWireMap.wiring_report !== null
+                && Number(noWireMap.wiring_report.declared) === 0,
+            `连线报告=${JSON.stringify(noWireMap?.wiring_report ?? null)}`,
+        );
+
+        // ---- ⑦ **老格式**的板 ⇒ ⇒ 照旧能装 ---------------------------------
+        await submitBoard(BV_OLD_WIRING_BOARD, "bv-old-wiring-board");
+        const oldMap = await waitForBoard("browser-verify-old-wiring");
+        add(
+            "B-158 · ⚠️ **必要对照**：**老格式**（`rx_ready`）的板 ⇒ ⇒ **照旧能装**"
+            + " ⇒ ⇒ **存量板档案零风险**（⇒ ⇒ 缺省优先）",
+            oldMap !== null
+                && oldMap.wiring_report !== null
+                && Number(oldMap.wiring_report.declared) === 1
+                && Number(oldMap.wiring_report.live) === 1,
+            `连线报告=${JSON.stringify(oldMap?.wiring_report ?? null)}`,
+        );
+
+        // ---- ⑧ **装那份引脚级固件** ⇒ ⇒ guest **真的**领到那个源 -----------
+        //
+        // ⚠️ **顺序**：板**先**、固件**后** ⇒ ⇒ guest 带着那块板跑 ⇒ ⇒ ⇒
+        //   那根线**真的**绑在那块板上。
+        await submitBoard(BV_PIN_LEVEL_BOARD, "bv-pin-level-board-3");
+        const pinMap3 = await waitForBoard("browser-verify-pin-level");
+        add(
+            "**前置**：板又提交了一次（⇒ ⇒ guest 带着**带引脚级连线**的那块板跑）",
+            pinMap3 !== null,
+            `生效图=${JSON.stringify(pinMap3)}`,
+        );
+
+        const elfPath = join(tmpDir, "pin-irq.elf");
+        writeFileSync(elfPath, buildGpioPinIrqElf());
+        await runEffect(cdp, `(() => {
+            const input = document.querySelector('input[data-image-load-from="topbar"]');
+            if (!input) return "no-input";
+            input.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+            return "clicked";
+        })()`);
+        await selectFileForInput(cdp, 'input[data-image-load-from="topbar"]', elfPath);
+        const pendingReady = await waitForImagePendingReady(cdp, opts.timeoutMs);
+        let loaded = false;
+        if (pendingReady.ready) {
+            await runEffect(cdp,
+                'document.querySelector(\'[data-action="load-image"][data-image-load-from="topbar"]\').click();');
+            loaded = true;
+        }
+        add(
+            "**前置**：那份**引脚级固件**真的装上了（走界面那条路 ⇒ ⇒ 文件选择器 + 「加载固件」）",
+            loaded === true,
+            `待加载就绪=${JSON.stringify(pendingReady)}`,
+        );
+
+        // ⚠️ **等 guest 真的领到那个源**：那份固件**自己**去 PLIC 的 claim
+        //   寄存器领 ⇒ ⇒ ⇒ 领到了就在 console 上打「PIN」⇒ ⇒ ⇒ **领不到**
+        //   就打「X」⇒ ⇒ ⇒ 两个标记**分得开**（⇒ ⇒ 「没领到」与「根本没跑」
+        //   **不是**同一件事）。
+        const consoleRun = await awaitEval(cdp,
+            `window.riscv_image.runUntilConsole(${JSON.stringify(GPIO_PIN_IRQ_ELF_MARKER)}, { timeoutMs: ${UART_ECHO_TIMEOUT_MS} })`,
+            UART_ECHO_TIMEOUT_MS + 30000);
+        const consoleText = String(consoleRun?.text ?? "");
+        add(
+            "B-156b · guest **真的**收到那个源的中断（⇒ ⇒ guest **自己**去 PLIC 的"
+            + " claim 寄存器**领**到了它 ⇒ ⇒ console 上出现「"
+            + GPIO_PIN_IRQ_ELF_MARKER + "」）",
+            consoleRun?.matched === true,
+            `matched=${consoleRun?.matched} batches=${consoleRun?.batches}`
+            + ` console=${JSON.stringify(consoleText.slice(-80))}`
+            + ` 失败标记=${consoleText.includes(GPIO_PIN_IRQ_ELF_FAIL_MARKER) ? "出现了（没领到）" : "没出现"}`,
+        );
+
+        // ---- ⑨ **收尾**：板与**装载状态**都复原 ⇒ ⇒ 后面那些段不被污染 ------
+        await submitBoard(BV_BOARD, "bv-pin-level-restore-board");
+        await sleep(600);
+        const restored = await loadDemoFirmware(cdp, opts);
+        add(
+            "**收尾**：板与**装载状态**都复原 ⇒ ⇒ 后面那些段拿到的还是一张**正常**的板"
+            + "（⇒ ⇒ 本段**不污染**别人）",
+            restored === true,
+            `demo 固件装上了=${restored}`,
+        );
+
+        return { skipped: false, checks };
+    } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+    }
+}
 /**
  * STAGE-46 · v0.70 批的真机探针：**基址规划面板**。
  *
@@ -9789,6 +10220,20 @@ async function main() {
         );
         registerSection("platformSchemaV2", platformSchemaV2.checks, {
             title: "描述格式 v2（缺 base 的板内核收下并分配基址 · 两次分配相同 · 老格式照旧能装 · timer_riscv 能装 · 装不下报既有码）",
+        });
+
+        // -- the PIN-LEVEL ROUTING (STAGE-50 · v0.74 · B-156 ~ B-160) ---------
+        // ⚠️ **必须排在 platformSchemaV2 之后**：那一段把板配成了「缺基址的
+        //   那块」⇒ ⇒ 本段要的是**自己的**板（⇒ ⇒ 按板 id 找生效图 ⇒ ⇒ 不受
+        //   上一段留下的现场影响）。
+        // ⚠️ **必须排在 basePlanner 之前**：本段也会改板 ⇒ ⇒ ⇒ 后面那些段拿到
+        //   的还是本段**复原**过的那张。
+        const pinLevelRouting = await runSection(
+            "pinLevelRouting",
+            () => runPinLevelRoutingSection(cdp, opts),
+        );
+        registerSection("pinLevelRouting", pinLevelRouting.checks, {
+            title: "引脚级连线（真机收下带引脚的板 · guest 真的领到那个源 · 再提交一次相同 · 老格式照旧能装 · 非法事件名报既有码 · 没有连线也照旧能装）",
         });
 
         // -- the BASE PLANNER (STAGE-46 · v0.70 · B-136 ~ B-140) --------------        // ⚠️ **必须排在板级内存图那段之后**：那一段已经把一张板配出来了 ⇒ ⇒

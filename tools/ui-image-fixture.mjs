@@ -54,6 +54,17 @@ export const UI_IMAGE_ELF_X3 = 0x00000123;
 export const UI_IMAGE_ELF_MARKER_B = "UIB";
 export const UI_IMAGE_ELF_X3_B = 0x00000456;
 
+/** **引脚级中断**那条固件的**成功标记**（guest 领到了那个源 ⇒ ⇒ 打这三个字符）。 */
+export const GPIO_PIN_IRQ_ELF_MARKER = "PIN";
+
+/**
+ * **引脚级中断**那条固件的**失败标记**（预算用完**还没**领到那个源）。
+ *
+ * ⚠️ **为什么要有它**：真机门禁要能区分「**没领到**」与「**根本没跑**」
+ * ⇒ ⇒ ⇒ 前者打 `X`、后者**什么都没有**⇒ ⇒ ⇒ 两种情况的**判据不同**。
+ */
+export const GPIO_PIN_IRQ_ELF_FAIL_MARKER = "X";
+
 /**
  * U 型编码（`LUI` / `AUIPC`）。
  *
@@ -78,12 +89,12 @@ export function uType(opcode, rd, imm) {
  * @param {number} imm — 12 位有符号
  * @returns {number}
  */
-export function iType(opcode, rd, rs1, imm) {
+export function iType(opcode, rd, rs1, imm, funct3 = 0) {
     if (!Number.isInteger(imm) || imm < -2048 || imm > 2047) {
         throw new Error(`I 型立即数越界：${imm}`);
     }
     return ((((imm & 0xfff) << 20) | ((rs1 & 0x1f) << 15)
-        | ((rd & 0x1f) << 7) | (opcode & 0x7f)) >>> 0);
+        | ((funct3 & 0x7) << 12) | ((rd & 0x1f) << 7) | (opcode & 0x7f)) >>> 0);
 }
 
 /**
@@ -145,6 +156,49 @@ export function jType(opcode, rd, imm) {
     return (((((imm21 >> 20) & 1) << 31) | (((imm21 >> 1) & 0x3ff) << 21)
         | (((imm21 >> 11) & 1) << 20) | (((imm21 >> 12) & 0xff) << 12)
         | ((rd & 0x1f) << 7) | (opcode & 0x7f)) >>> 0);
+}
+
+/**
+ * **B 型编码**（条件分支 · `BEQ` / `BNE` …）。
+ *
+ * ⚠️ **v0.74（STAGE-50 · B-156 的固件）**：引脚级那条真机判据要 guest
+ *   **轮询** PLIC 的 claim 寄存器 ⇒ ⇒ ⇒ **必须有分支** ⇒ ⇒ ⇒ 之前这个模块
+ *   只有 U / I / S / R / J 五种形式（⇒ ⇒ 那条固件**轮询不了**）⇒ ⇒ ⇒
+ *   **补上**这第六种。
+ *
+ * ⚠️ **立即数是「字节偏移」**（相对于**本条指令**的 PC）⇒ ⇒ ⇒ 与汇编器
+ *   写的那份**同义**（⇒ ⇒ 判据能对着汇编读）。
+ *
+ * @param {number} opcode
+ * @param {number} rs1
+ * @param {number} rs2
+ * @param {number} funct3 — `0` = BEQ · `1` = BNE
+ * @param {number} imm — 字节偏移（**偶数**）
+ * @returns {number}
+ */
+export function bType(opcode, rs1, rs2, funct3, imm) {
+    if (!Number.isInteger(imm) || imm % 2 !== 0) {
+        throw new Error(`B 型立即数必须是偶数的字节偏移：${imm}`);
+    }
+    if (imm < -4096 || imm > 4094) {
+        throw new Error(`B 型立即数超出 ±4 KiB：${imm}`);
+    }
+    const i = imm & 0xfff;
+    // ⚠️ **符号位是「13 位」的那个**（imm[12]）⇒ ⇒ **不能**从 12 位掩码里
+    //   取（⇒ ⇒ 掩码只有 12 位 ⇒ ⇒ 取出来**永远是 0** ⇒ ⇒ **负偏移会跳到
+    //   +4096 附近** ⇒ ⇒ ⇒ 实测踩到过：分支跳飞 ⇒ ⇒ 访客**trap**）。
+    const b12 = imm < 0 ? 1 : 0;
+    const b11 = (i >> 11) & 1;
+    const b105 = (i >> 5) & 0x3f;
+    const b41 = (i >> 1) & 0xf;
+    return ((((b12 << 31) >>> 0)
+        | (b105 << 25)
+        | (rs2 << 20)
+        | (rs1 << 15)
+        | (funct3 << 12)
+        | (b41 << 8)
+        | (b11 << 7)
+        | (opcode & 0x7f)) >>> 0);
 }
 
 /**
@@ -237,9 +291,147 @@ export function buildUiImageWords(options = {}) {
  * @returns {Buffer}
  */
 export function buildUiImageElf(options = {}) {
+    return buildElfFromWords(buildUiImageWords(options), UI_IMAGE_ELF_PADDR);
+}
+
+/**
+ * **引脚级中断**那条固件的机器码（v0.74 · STAGE-50 · B-156 的固件）。
+ *
+ * ## 它要证明什么
+ *
+ * guest **真的**收到那个源的中断 ⇒ ⇒ ⇒ guest 必须**自己**去 PLIC 的 claim
+ * 寄存器里**领**那个源 ⇒ ⇒ ⇒ 「内核把挂起位置上了」这件事**在 guest 那一侧
+ * 可观察**（⇒ ⇒ 不是「描述被接受了」那种弱证据）。
+ *
+ * ## 机器码（**逐条**注释 ⇒ ⇒ 禁手抄十六进制）
+ *
+ *   lui  x1, 0x40000        ; x1 = 0x4000_0000（qemu-virt 的 GPIO0）
+ *   lui  x2, 0xc000         ; x2 = 0x0c00_0000（PLIC）
+ *   lui  x3, 0x10000        ; x3 = 0x1000_0000（UART0）
+ *   lui  x8, 0xc200         ; x8 = 0x0c20_0000（PLIC 的 context 区）
+ *   lui  x10, 0xc002        ; x10 = 0x0c00_2000（PLIC 的 enable 区）
+ *   addi x4, x0, 1          ; 优先级 = 1（门限默认 0 ⇒ ⇒ 必须 > 门限）
+ *   sw   x4, 0x2c(x2)       ; PLIC 的 priority[11] = 1
+ *   addi x5, x0, 1
+ *   slli x5, x5, 11         ; x5 = 1 << 11（enable 的那一位）
+ *   sw   x5, 0(x10)         ; PLIC 的 enable[0] 的第 11 位
+ *   addi x6, x0, 8          ; x6 = 1 << 3（引脚 3）
+ *   sw   x6, 0xc(x1)        ; GPIO0.TOGGLE ⇒ ⇒ 引脚 3 出现**边沿**
+ *   lui  x7, 1              ; x7 = 0x1000（预算的高半 ⇒ ⇒ 12 位立即数**放不下** 5000）
+ *   addi x7, x7, 904        ; x7 = 5000（轮询预算 · **有界** ⇒ ⇒ 失败时也会退出）
+ *   loop: lw  x9, 4(x8)     ; 读 PLIC 的 claim（ctx 0）
+ *         bne  x9, x0, ok   ; 领到了 ⇒ ⇒ 跳到成功
+ *         addi x7, x7, -1
+ *         bne  x7, x0, loop  ; 还有预算 ⇒ ⇒ 再读一次
+ *         addi x11, x0, 'X' ; ⚠️ **失败标记**（预算用完还没领到）
+ *         sb   x11, 0(x3)
+ *         jal  x0, 0        ; 自环（结束）
+ *   ok:  addi x11, x0, 'P'  ; ✅ **成功标记**（"PIN"）
+ *         sb   x11, 0(x3)
+ *         addi x11, x0, 'I'
+ *         sb   x11, 0(x3)
+ *         addi x11, x0, 'N'
+ *         sb   x11, 0(x3)
+ *         jal  x0, 0
+ *
+ * ⚠️ ⚠️ **为什么预算是 5000 而不是 200**（v0.74 批 · STAGE-50 · 施工期订正）：
+ *   **一轮轮询 = 4 条指令** ⇒ ⇒ 200 轮 ≈ **800 条指令** ⇒ ⇒ 而**一个批次**
+ *   （`DEFAULT_INSTRUCTION_BUDGET`）是 **10 000 条指令** ⇒ ⇒ ⇒ 整个轮询
+ *   **在同一个批次里就跑完了** ⇒ ⇒ ⇒ 而宿主**只在批次边界**调
+ *   `sync_interrupts()`（`on_run` 的「跑之前 / 跑之后」各一次）⇒ ⇒ ⇒
+ *   ⇒ ⇒ **那个源永远没被抬起来** ⇒ ⇒ ⇒ guest 读到的 claim **恒为 0** ⇒ ⇒ ⇒
+ *   ⇒ ⇒ ⇒ 于是固件打的是**失败标记 `X`** ⇒ ⇒ ⇒ **看起来像「引脚级连线没通电」
+ *   ⇒ ⇒ ⇒ 其实只是「固件没活到下一个批次边界」**⇒ ⇒ ⇒ ⇒ 5000 轮 ≈
+ *   **20 000 条指令 ≈ 两个批次** ⇒ ⇒ ⇒ ⇒ 必**跨过**一次批次边界 ⇒ ⇒ ⇒ ⇒
+ *   ⇒ ⇒ ⇒ ⇒ 第二次 `sync_interrupts()` 才把那个源抬起来 ⇒ ⇒ ⇒ ⇒ guest
+ *   **领得到** ⇒ ⇒ ⇒ ⇒ ⇒ ⚠️ **教训**：**「guest 轮询等中断」这件事 ⇒ ⇒ 轮询
+ *   预算必须大于「一个批次的指令数」** ⇒ ⇒ ⇒ 否则判据**恒假**（⇒ ⇒ 且症状
+ *   与「功能没做」**长得一样** ⇒ ⇒ ⇒ 排查成本极高）。
+ *
+ * ⚠️ **为什么预算要用两条指令拼**（`lui` + `addi`）：**RISC-V 的 `addi` 立即数
+ *   是 12 位有符号**（-2048..2047）⇒ ⇒ ⇒ **5000 放不下**⇒ ⇒ ⇒ 若硬写
+ *   `addi x7, x0, 5000` ⇒ ⇒ ⇒ 编码器只会留下低 12 位 ⇒ ⇒ ⇒ 预算变成
+ *   **904** ⇒ ⇒ ⇒ **又不够跨批次了** ⇒ ⇒ ⇒ ⇒ 症状**完全一样** ⇒ ⇒ ⇒ ⇒
+ *   ⇒ ⇒ ⇒ **「立即数放不下」这件事必须当场换编码方式**（⇒ ⇒ 而不是「改小
+ *   数值」⇒ ⇒ 那是**把判据改成恒假**）。
+ *
+ * ⚠️ **为什么成功标记是三个字符**（与 `UIL` / `UIB` 同款）⇒ ⇒ 免得跟别的
+ *   段的输出撞上（⇒ ⇒ 撞上了就**恒真**了 ⇒ ⇒ 零判别力）。
+ *
+ * ⚠️ **为什么要有失败标记 `X`**：预算用完 ⇒ ⇒ 说明**没领到** ⇒ ⇒ 写一个
+ *   **看得见**的标记（⇒ ⇒ 真机门禁能区分「没领到」与「根本没跑」）。
+ *
+ * @returns {number[]}
+ */
+export function buildGpioPinIrqWords() {
+    // ⚠️ **指令下标**（分支偏移是**算**出来的 ⇒ ⇒ 改顺序时**必须**重算）。
+    //
+    // ⚠️ **下标全部写成常量**（不许出现裸的 14 / 16）⇒ ⇒ 插一条指令时
+    //   **只改常量**、偏移**自动**跟上 ⇒ ⇒ ⇒ 不会「插了忘了改偏移」⇒ ⇒ ⇒
+    //   ⇒ 那类错的症状是「跳到垃圾地址」⇒ ⇒ ⇒ 极难查。
+    const LOOP = 14;       // lw  x9, 4(x8)
+    const BR_CLAIM = 15;   // bne x9, x0, ok
+    const BR_LOOP = 17;    // bne x7, x0, loop
+    const OK = 22;         // addi x11, x0, 'P'
+    return [
+        uType(0x37, 1, 0x40000),      // 0: lui  x1, 0x40000
+        uType(0x37, 2, 0xc000),       // 1: lui  x2, 0xc000
+        uType(0x37, 3, 0x10000),      // 2: lui  x3, 0x10000
+        uType(0x37, 8, 0xc200),       // 3: lui  x8, 0xc200
+        uType(0x37, 10, 0xc002),      // 4: lui  x10, 0xc002
+        iType(0x13, 4, 0, 1),        // 5: addi x4, x0, 1
+        sType(0x23, 2, 2, 4, 0x2c),  // 6: sw   x4, 0x2c(x2)
+        iType(0x13, 5, 0, 1),        // 7: addi x5, x0, 1
+        iType(0x13, 5, 5, 11, 1),   // 8: slli x5, x5, 11（funct3 = 001 ⇒ 移位）
+        sType(0x23, 2, 10, 5, 0),    // 9: sw   x5, 0(x10)
+        iType(0x13, 6, 0, 8),        // 10: addi x6, x0, 8
+        sType(0x23, 2, 1, 6, 0xc),   // 11: sw   x6, 0xc(x1)
+        uType(0x37, 7, 1),            // 12: lui  x7, 1（预算的高半）
+        iType(0x13, 7, 7, 904),      // 13: addi x7, x7, 904 ⇒ x7 = 5000
+        iType(0x03, 9, 8, 4, 2),     // 14: lw   x9, 4(x8)（funct3 = 010 ⇒ 字读）
+        bType(0x63, 9, 0, 1, (OK - BR_CLAIM) * 4),   // 15: bne  x9, x0, ok
+        iType(0x13, 7, 7, -1),       // 16: addi x7, x7, -1
+        bType(0x63, 7, 0, 1, (LOOP - BR_LOOP) * 4), // 17: bne  x7, x0, loop
+        iType(0x13, 11, 0, 0x58),    // 18: addi x11, x0, 'X'
+        sType(0x23, 0, 3, 11, 0),    // 19: sb   x11, 0(x3)
+        jType(0x6f, 0, 0),           // 20: jal  x0, 0
+        iType(0x13, 0, 0, 0),        // 21: （填充 ⇒ ⇒ 目标下标固定）
+        iType(0x13, 11, 0, 0x50),    // 22: addi x11, x0, 'P'
+        sType(0x23, 0, 3, 11, 0),    // 23: sb   x11, 0(x3)
+        iType(0x13, 11, 0, 0x49),    // 24: addi x11, x0, 'I'
+        sType(0x23, 0, 3, 11, 0),    // 25: sb   x11, 0(x3)
+        iType(0x13, 11, 0, 0x4e),    // 26: addi x11, x0, 'N'
+        sType(0x23, 0, 3, 11, 0),    // 27: sb   x11, 0(x3)
+        jType(0x6f, 0, 0),           // 28: jal  x0, 0
+    ];
+}
+
+/**
+ * **引脚级中断**那条固件的镜像（最小 RV32 ELF32）。
+ *
+ * @returns {Buffer}
+ */
+export function buildGpioPinIrqElf() {
+    return buildElfFromWords(buildGpioPinIrqWords(), UI_IMAGE_ELF_PADDR);
+}
+
+/**
+ * 把机器码装成一个**最小 RV32 ELF32**（一个 `PT_LOAD`）。
+ *
+ * ⚠️ **为什么抽出来**（v0.74 · STAGE-50）：第二份固件（引脚级中断）要用
+ *   **同一套** ELF 形状 ⇒ ⇒ ⇒ **不写第二份**（⇒ ⇒ 形状漂了就完了）⇒ ⇒ ⇒
+ *   **一个构造器** ⇒ ⇒ 两份固件**逐字同形**。
+ *
+ * ⚠️ **既有那份夹具的字节**（`buildUiImageElf`）**一个都不许变** ⇒ ⇒
+ *   ⇒ STAGE-32 那一批的门禁结论**仍然成立**。
+ *
+ * @param {number[]} words
+ * @param {number} paddr — 落址
+ * @returns {Buffer}
+ */
+export function buildElfFromWords(words, paddr) {
     const EHDR = 52;
     const PHDR = 32;
-    const words = buildUiImageWords(options);
     const text = Buffer.alloc(words.length * 4);
     words.forEach((w, i) => text.writeUInt32LE(w >>> 0, i * 4));
 
@@ -254,7 +446,7 @@ export function buildUiImageElf(options = {}) {
     out.writeUInt16LE(2, 16); // e_type = ET_EXEC
     out.writeUInt16LE(0xf3, 18); // e_machine = EM_RISCV
     out.writeUInt32LE(1, 20); // e_version
-    out.writeUInt32LE(UI_IMAGE_ELF_PADDR, 24); // e_entry
+    out.writeUInt32LE(paddr, 24); // e_entry
     out.writeUInt32LE(EHDR, 28); // e_phoff
     out.writeUInt16LE(EHDR, 40); // e_ehsize
     out.writeUInt16LE(PHDR, 42); // e_phentsize
@@ -262,8 +454,8 @@ export function buildUiImageElf(options = {}) {
     const p = EHDR;
     out.writeUInt32LE(1, p); // p_type = PT_LOAD
     out.writeUInt32LE(EHDR + PHDR, p + 4); // p_offset
-    out.writeUInt32LE(UI_IMAGE_ELF_PADDR, p + 8); // p_vaddr
-    out.writeUInt32LE(UI_IMAGE_ELF_PADDR, p + 12); // p_paddr
+    out.writeUInt32LE(paddr, p + 8); // p_vaddr
+    out.writeUInt32LE(paddr, p + 12); // p_paddr
     out.writeUInt32LE(text.length, p + 16); // p_filesz
     out.writeUInt32LE(text.length, p + 20); // p_memsz
     out.writeUInt32LE(5, p + 24); // p_flags = PF_R | PF_X
