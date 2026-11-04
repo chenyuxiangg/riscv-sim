@@ -127,13 +127,13 @@ fn enable_source(plic: &std::rc::Rc<std::cell::RefCell<Plic>>, source: u32) {
 fn a1_the_four_version_numbers_are_the_current_ones() {
     assert_eq!(
         riscv_sim_contract::platform::PLATFORM_SCHEMA_VERSION,
-        3,
-        "描述格式版本（v0.74 批升到 3：`wiring.from` 加了可选的 `pin`）"
+        4,
+        "描述格式版本（v0.75 批升到 4：顶层加了可选的 `mcu` 段）"
     );
     assert_eq!(
         riscv_sim_contract::platform::PLATFORM_RULES_VERSION,
-        5,
-        "规则集版本（v0.74 批升到 5：连线事件词表扩项）"
+        6,
+        "规则集版本（v0.75 批升到 6：加 V-23 —— `mcu` 段词法/形状校验）"
     );
     assert_eq!(
         riscv_sim_contract::SCHEMA_VERSION,

@@ -91,7 +91,7 @@ fn first_memory_map(events: &[EventPayload]) -> (PlatformDescription, bool) {
             ..
         } = e
         {
-            return (description.clone(), *pending);
+            return (*description.clone(), *pending);
         }
     }
     panic!("没有 MemoryMap 事件：{events:?}");
@@ -154,6 +154,7 @@ fn user_board() -> PlatformDescription {
         ],
         roles: None,
         pins: None,
+        mcu: None,
     }
 }
 
@@ -210,6 +211,7 @@ fn board_with_four_devices() -> PlatformDescription {
         ],
         roles: None,
         pins: None,
+        mcu: None,
     }
 }
 
@@ -244,6 +246,7 @@ fn board_with_eight_mib_ram() -> PlatformDescription {
         ],
         roles: None,
         pins: None,
+        mcu: None,
     }
 }
 
@@ -482,6 +485,7 @@ fn b1_the_old_map_is_restored_when_the_new_one_cannot_be_mapped() {
         ],
         roles: None,
         pins: None,
+        mcu: None,
     };
 
     let events = dispatch(
@@ -556,6 +560,7 @@ fn b2_an_over_budget_description_is_rejected_with_e_plt_07() {
         }],
         roles: None,
         pins: None,
+        mcu: None,
     };
 
     let events = dispatch(
@@ -596,6 +601,7 @@ fn b2_a_rejected_description_changes_nothing() {
         }],
         roles: None,
         pins: None,
+        mcu: None,
     };
     dispatch(
         &mut host,

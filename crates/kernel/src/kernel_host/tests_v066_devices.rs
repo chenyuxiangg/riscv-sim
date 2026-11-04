@@ -43,6 +43,7 @@ fn ram_only_description(id: &str) -> PlatformDescription {
         wiring: None,
         roles: None,
         pins: None,
+        mcu: None,
     }
 }
 

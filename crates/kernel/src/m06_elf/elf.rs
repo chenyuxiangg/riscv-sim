@@ -18,7 +18,7 @@
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 
-use super::{LoadImage, ParseLimits};
+use super::{ElfIsaFacts, LoadImage, ParseLimits};
 
 /// Family used by all M-06 errors. Matches `ErrorFamily::Loader` from
 /// the contract (`E_LDR-NN`).
@@ -397,6 +397,12 @@ pub fn parse(bytes: &[u8], limits: &ParseLimits) -> Result<LoadImage, PlatformEr
         segments,
         entry: e_entry,
         debug_sections,
+        // v0.75（STAGE-51 · D-175 的 F）：ELF32 恒 class=32；`e_flags` 的
+        // `EF_RISCV_RVC = 1`（第 0 位）⇒ ⇒ 内核 ISA 门禁（`E_PLT-20`）的判据。
+        elf_isa: ElfIsaFacts {
+            bits: 32,
+            has_rvc: e_flags & 0x1 != 0,
+        },
     };
     Ok(load_image)
 }

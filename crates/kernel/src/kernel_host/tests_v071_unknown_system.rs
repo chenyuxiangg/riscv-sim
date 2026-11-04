@@ -67,6 +67,7 @@ fn board_with_ram(id: &str, base: u32, size: u32) -> PlatformDescription {
         }],
         roles: None,
         pins: None,
+        mcu: None,
     }
 }
 

@@ -600,6 +600,34 @@ pub const E_PLT_18_ROLES_INVALID: u16 = 18;
 /// **第三个对象** ⇒ ⇒ 一码两义 ⇒ 禁止 ⇒ ⇒ **自己一个码**。
 pub const E_PLT_19_PINS_INVALID: u16 = 19;
 
+/// **固件与板声明的 MCU ISA 不匹配**（v0.75 · STAGE-51 · D-175 的 F）。
+///
+/// ⚠️ 判据（三个，内核装载门禁）：
+/// ① class 双向严格（声明 `rv64…` + ELF32 固件 ⇒ 拒）；
+/// ② c 位**单方向**严格（声明**不含** `c` + 固件 `e_flags` 带 `EF_RISCV_RVC` ⇒ 拒；
+///    声明含 `c` ⇒ 不要求 —— `c` 是能力不是义务，双向会把存量非压缩固件全灭）；
+/// ③ m/a/f/d 等扩展 ELF 头查不到 ⇒ **不校验**（如实登记）。
+///
+/// ⚠️ **It does not reuse [`E_PLT_17_BOARD_MISMATCH`]**: 那个是「**地址**层面」
+/// （镜像要的区间不在板上）⇒ 这个是「**架构**层面」（固件的 ISA 与板声明不符）⇒
+/// 一码两义 ⇒ 禁止 ⇒ ⇒ **自己一个码**。
+///
+/// ⚠️ **No contract version bump**: adding a scenario code does not change
+/// any **shape** on the wire ⇒ ⇒ `SCHEMA_VERSION` stays **11**（同
+/// `E_PLT_17` / `E_PLT_18` 的先例）⇒ ⇒ 描述格式升版是 `PLATFORM_SCHEMA_VERSION`
+/// 那一个数（本批 3 → 4）。
+pub const E_PLT_20_FW_ISA_MISMATCH: u16 = 20;
+
+/// **`mcu` 段自身形状/词法非法**（v0.75 · STAGE-51 · D-175 的 F）。
+///
+/// ⚠️ 判据：isa 词法（`rv` + `32`|`64` + 扩展字母串 `{i,e,m,a,f,d,c}` 去重按规范序；
+/// 归一化后比较）非法 ⇒ 拒；`vector_table` 表项数 0 ⇒ 拒。
+///
+/// ⚠️ **It does not reuse [`E_PLT_20_FW_ISA_MISMATCH`]**: 那个是「固件与板
+/// **不匹配**」⇒ 这个是「**mcu 段自己写错了**」⇒ 两个对象 ⇒ 一码两义 ⇒ 禁止 ⇒ ⇒
+/// **自己一个码**。
+pub const E_PLT_21_MCU_INVALID: u16 = 21;
+
 /// Scenario code: the image wants an address range that the **board in
 /// effect** does not have at all — 「**未知系统**」.
 ///

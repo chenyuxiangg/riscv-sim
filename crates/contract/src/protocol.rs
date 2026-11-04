@@ -48,7 +48,7 @@ impl Message {
             schema_version: SCHEMA_VERSION,
             direction: Direction::Command,
             seq,
-            payload: Payload::Command(payload.into()),
+            payload: Payload::Command(Box::new(payload.into())),
         }
     }
 
@@ -69,7 +69,7 @@ impl Default for Message {
             schema_version: SCHEMA_VERSION,
             direction: Direction::Command,
             seq: 0,
-            payload: Payload::Command(CommandPayload::Nop),
+            payload: Payload::Command(Box::new(CommandPayload::Nop)),
         }
     }
 }
@@ -78,14 +78,18 @@ impl Default for Message {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Payload {
     /// Host → kernel command.
-    Command(CommandPayload),
+    ///
+    /// ⚠️ `CommandPayload` 自 v0.75 起随 `PlatformDescription`（含 `McuSpec`）
+    /// 变大 ⇒ ⇒ 触发 `large_enum_variant` ⇒ ⇒ **装箱**（`serde` 对 `Box`
+    /// 透明 ⇒ ⇒ 钉死的线格式**无感**）。
+    Command(Box<CommandPayload>),
     /// Kernel → host event.
     Event(EventPayload),
 }
 
 impl Default for Payload {
     fn default() -> Self {
-        Self::Command(CommandPayload::Nop)
+        Self::Command(Box::new(CommandPayload::Nop))
     }
 }
 
@@ -481,7 +485,7 @@ impl Default for CommandPayload {
 
 impl From<CommandPayload> for Payload {
     fn from(c: CommandPayload) -> Self {
-        Self::Command(c)
+        Self::Command(Box::new(c))
     }
 }
 
@@ -716,7 +720,11 @@ pub enum EventPayload {
     /// **`wiring_report` added in v11**.
     MemoryMap {
         /// **当前生效**的图（裁决 D）。
-        description: PlatformDescription,
+        ///
+        /// ⚠️ `PlatformDescription` 自 v0.75（MCU 概念）起携带 `McuSpec`
+        /// ⇒ ⇒ 变体间体积差触发 `large_enum_variant` ⇒ ⇒ **装箱**（协议
+        /// 序列化对 `Box` 透明 ⇒ ⇒ 前端/线格式**无感**）。
+        description: Box<PlatformDescription>,
         /// 宿主是否存着一份**待生效**的板级配置（裁决 B / D）。
         pending: bool,
         /// 有没有装载镜像 ⇒ 决定「改板」是**立即生效**还是**待生效**。
@@ -1475,6 +1483,7 @@ mod tests {
             wiring: None,
             roles: None,
             pins: None,
+            mcu: None,
         }
     }
 
@@ -1543,7 +1552,7 @@ mod tests {
     #[test]
     fn the_v11_memory_map_event_has_a_pinned_wire_shape() {
         let ev = EventPayload::MemoryMap {
-            description: a_user_configured_board(),
+            description: Box::new(a_user_configured_board()),
             pending: false,
             loaded: true,
             revision: 7,
@@ -1680,7 +1689,7 @@ mod tests {
     fn the_v6_memory_map_pending_flag_survives_the_round_trip() {
         for pending in [true, false] {
             let ev = EventPayload::MemoryMap {
-                description: a_user_configured_board(),
+                description: Box::new(a_user_configured_board()),
                 pending,
                 loaded: true,
                 revision: 3,
@@ -1757,6 +1766,7 @@ mod tests {
             wiring: None,
             roles: None,
             pins: None,
+            mcu: None,
         };
         let cmd = CommandPayload::SetMemoryMap {
             description: description.clone(),

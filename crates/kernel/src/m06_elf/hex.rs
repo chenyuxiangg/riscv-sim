@@ -26,7 +26,7 @@
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 
-use super::{LoadImage, ParseLimits, BUS_SIZE};
+use super::{ElfIsaFacts, LoadImage, ParseLimits, BUS_SIZE};
 
 const FAMILY: ErrorFamily = ErrorFamily::Loader;
 
@@ -322,6 +322,8 @@ fn finalise(
         segments: final_segments,
         entry: 0,
         debug_sections: Vec::new(),
+        // 非 ELF ⇒ 无 ISA 头 ⇒ 缺省（bits=0 ⇒ 内核 ISA 门禁跳过它）。
+        elf_isa: ElfIsaFacts::default(),
     })
 }
 

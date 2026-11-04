@@ -175,14 +175,16 @@ use riscv_sim_contract::csr::IRQ_UART_RX_READY;
 use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_03_DUMP_TOO_LARGE, E_DBG_04_SYMBOL_NAME_EMPTY,
     E_ENG_03_NO_PROGRESS, E_HMS_02_FATAL_TERMINATED, E_PLT_13_REVISION_CONFLICT,
-    E_PLT_14_REGION_NOT_FOUND, E_PLT_17_BOARD_MISMATCH, E_PROTO_01_VERSION_MISMATCH,
-    PLATFORM_FAMILY, PROTO_FAMILY,
+    E_PLT_14_REGION_NOT_FOUND, E_PLT_17_BOARD_MISMATCH, E_PLT_20_FW_ISA_MISMATCH,
+    E_PROTO_01_VERSION_MISMATCH, PLATFORM_FAMILY, PROTO_FAMILY,
 };
 use riscv_sim_contract::model::{
     Edge, ImageKind, ImageRef, ImageSource, Project, TraceEvent, TraceFormat, TraceSource,
     WaveformHistory, WaveformStream, WriteSize, SIM_STATE_SCHEMA_VERSION,
 };
-use riscv_sim_contract::platform::{wiring_event_info, PlatformDescription, WiringEventSemantics};
+use riscv_sim_contract::platform::{
+    mcu_isa_info, wiring_event_info, PlatformDescription, WiringEventSemantics,
+};
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
 use riscv_sim_contract::protocol::{
     AdminOp, CommandPayload, Direction, EventPayload, HaltReason, MemoryMapOp, Message, Payload,
@@ -193,7 +195,7 @@ use riscv_sim_contract::session::{
 use riscv_sim_contract::snapshot::{EngineSnapshotDto, DEFAULT_INSTRUCTION_BUDGET};
 use riscv_sim_contract::{DUMP_MAX_BYTES, SCHEMA_VERSION, SYMBOL_CANDIDATE_LIMIT};
 
-use crate::m06_elf::{DefaultLoader, Kind as LoadKind, ParseLimits};
+use crate::m06_elf::{DefaultLoader, ElfIsaFacts, Kind as LoadKind, ParseLimits};
 use crate::m11_symbol::disasm::fetch_instruction_code as m11_fetch_instruction_code;
 use crate::m11_symbol::trace::{E_CTX_03_ILLEGAL_EXPORT_FORMAT, TRACE_FAMILY};
 use crate::m11_symbol::{
@@ -2339,7 +2341,7 @@ impl KernelHost {
             }];
         }
         match msg.payload {
-            Payload::Command(cmd) => self.dispatch(cmd),
+            Payload::Command(cmd) => self.dispatch(*cmd),
             Payload::Event(_) => vec![EventPayload::Error {
                 code: "E_PROTO-08".to_string(),
                 message: "收到 Event 方向的消息".to_string(),
@@ -2629,6 +2631,58 @@ impl KernelHost {
         entries.iter().map(LogEntry::to_dto).collect()
     }
 
+    /// **ISA 门禁的单一落点**（v0.75 · STAGE-51 · D-175 的 F）。
+    ///
+    /// 判据 = 板声明的 `mcu.isa` ⟷ 镜像的 ELF 头 ⇒ ⇒ **一个约束一个落点**：
+    /// 用户板与自动选出的内置板**都**从这一处拿判据（词法解析走契约层
+    /// [`mcu_isa_info`]，**不**在这里重抄词法）。
+    ///
+    /// ⚠️ 只对 **ELF** 镜像判（`elf_isa.bits != 0`）⇒ ⇒ raw/hex 没有
+    /// ELF 头 ⇒ 无 ISA 可判 ⇒ ⇒ 跳过。
+    ///
+    /// ⚠️ 判据只有两条（ELF 头给得出来的）：
+    /// ① **class 双向严格**：板声明 RV64 + ELF32 固件 ⇒ 拒；
+    /// ② **c 位单方向严格**：板声明**不含** `c` + 固件 `e_flags` 带
+    ///    `EF_RISCV_RVC` ⇒ 拒；板含 `c` ⇒ **不要求**（`c` 是能力不是
+    ///    义务，双向会把存量非压缩固件全灭）。
+    /// m/a/f/d 在 ELF 头查不到 ⇒ ⇒ **不校验**（规格 §2.4 ③，如实登记）。
+    ///
+    /// ⚠️ 判不过返回 `E_PLT-20` ⇒ ⇒ 调用方在**应用板之前**返回 ⇒ ⇒
+    /// 机器/生效板/修订号**全都不动**（与「未知系统」门禁同款次序纪律）。
+    fn isa_gate_error(
+        board: &PlatformDescription,
+        parsed: &[ParsedImage],
+    ) -> Option<PlatformError> {
+        let mcu = board.mcu.as_ref()?;
+        // ⚠️ V-23（契约层）已保证词法合法 ⇒ 这里 `expect` 不触发。
+        let info = mcu_isa_info(&mcu.isa).expect("V-23 已保证 mcu.isa 词法合法");
+        for p in parsed {
+            if p.elf_isa.bits == 0 {
+                continue; // 非 ELF（raw/hex）⇒ 无 ISA 可判
+            }
+            if p.elf_isa.bits != info.bits {
+                return Some(PlatformError::new(
+                    PLATFORM_FAMILY,
+                    E_PLT_20_FW_ISA_MISMATCH,
+                    format!(
+                        "固件是 RV{}（ELF class），这块板声明的 MCU {} 是 RV{} ⇒ ISA 位宽不匹配",
+                        p.elf_isa.bits, mcu.isa, info.bits
+                    ),
+                ));
+            }
+            if !info.has_c && p.elf_isa.has_rvc {
+                return Some(PlatformError::new(
+                    PLATFORM_FAMILY,
+                    E_PLT_20_FW_ISA_MISMATCH,
+                    format!(
+                        "固件带压缩指令扩展（EF_RISCV_RVC），这块板声明的 MCU {} 不含 c ⇒ ISA 不匹配",
+                        mcu.isa
+                    ),
+                ));
+            }
+        }
+        None
+    }
     /// 装载工程：**判定** → 复位 → 重建平台 → 加载镜像 → 换新会话（清订阅）。
     ///
     /// ⚠️ **复位排在判定之后**（STAGE-47 施工期订正 4）：初版把
@@ -2755,6 +2809,18 @@ impl KernelHost {
                         detail,
                     ))];
                 }
+                // ⚠️ **v0.75（STAGE-51 · D-175 的 F）**：**ISA 门禁** —— 在
+                // **应用这块板之前**判（同「未知系统」门禁的次序纪律）⇒ ⇒
+                // 判不过 ⇒ ⇒ `self.platform` **没被动过** ⇒ ⇒ 修订号不动 ⇒ ⇒
+                // **不建图、不写总线** ⇒ ⇒ 机器一个字都没动（正在跑的访客
+                // 不受影响）。
+                //
+                // ⚠️ 判据 = **这块即将生效的板**的 `mcu.isa`；缺省（无 mcu）
+                // ⇒ 不校验（存量零风险）。只对 ELF 镜像判（`elf_isa.bits != 0`，
+                // raw/hex 无 ELF 头 ⇒ 跳过）。
+                if let Some(err) = Self::isa_gate_error(board, &parsed) {
+                    return vec![self.error_from(&err)];
+                }
                 if self.platform != *board {
                     // ⚠️ **待生效**（用户的板 ≠ 当前生效的图）⇒ 它在这里
                     // **被应用** ⇒ 生效的图变了 ⇒ 修订号 +1。
@@ -2773,7 +2839,15 @@ impl KernelHost {
                 self.platform = board.clone();
             }
             None => match self.choose_platform(&ranges) {
-                Ok(description) => self.platform = description,
+                Ok(description) => {
+                    // ⚠️ **ISA 门禁**（v0.75 · STAGE-51 · D-175 的 F）：自动
+                    // 选出的内置板**同样**在应用前判 ⇒ ⇒ 判不过 ⇒ ⇒ 不应用、
+                    // 机器不动（同款次序纪律）。
+                    if let Some(err) = Self::isa_gate_error(&description, &parsed) {
+                        return vec![self.error_from(&err)];
+                    }
+                    self.platform = description
+                }
                 Err(err) => return vec![self.error_from(&err)],
             },
         }
@@ -3162,7 +3236,7 @@ impl KernelHost {
     /// · §3.4 的即时推送 —— 四处**同形**。
     fn memory_map_event(&self) -> EventPayload {
         EventPayload::MemoryMap {
-            description: self.platform.clone(),
+            description: Box::new(self.platform.clone()),
             pending: self.memory_map_pending(),
             loaded: self.image_loaded,
             revision: self.map_revision,
@@ -3271,6 +3345,7 @@ impl KernelHost {
             entry: loaded.entry,
             segments: loaded.segments,
             debug_sections: loaded.debug_sections,
+            elf_isa: loaded.elf_isa,
         })
     }
 
@@ -4751,6 +4826,9 @@ struct ParsedImage {
     segments: Vec<(u32, Vec<u8>)>,
     /// 调试节区的原始字节（`(节名, 内容)`）。
     debug_sections: DebugSections,
+    /// ELF 头的 ISA 事实（v0.75 · STAGE-51 · D-175 的 F）；非 ELF
+    /// （raw/hex）为缺省（`bits = 0` ⇒ ISA 门禁跳过它）。
+    elf_isa: ElfIsaFacts,
 }
 
 /// 取指 / 读内存的**宽度映射**。
@@ -5011,6 +5089,10 @@ mod tests_v073_schema;
 ///   事件名决定：电平 / 一次性）。
 #[cfg(test)]
 mod tests_v074_pin_routing;
+
+/// **v0.75（STAGE-51 · D-175 的 F）** —— MCU 概念：ISA 门禁的 K 组 / A-3 / X-1。
+#[cfg(test)]
+mod tests_v075_mcu;
 
 /// **B2**（v0.73 · STAGE-49 · D-175 的 B2）—— `base` 可缺省 + **装配期分配**。
 ///
