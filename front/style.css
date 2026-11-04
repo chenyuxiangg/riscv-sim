@@ -184,6 +184,29 @@ a { color: inherit; text-decoration: none; }
 }
 .btn.ghost:hover { color: var(--tx); }
 
+/* ⚠️ **危险操作**（v0.75 · STAGE-51 · §2.6 顺手整改④）：删除按钮从信息行
+   里降级出来 ⇒ ⇒ 危险色 + 幽灵底 ⇒ ⇒ 误点成本看得见。 */
+.btn.ghost.danger { color: var(--red); }
+.btn.ghost.danger:hover {
+    border-color: var(--red);
+    color: var(--red);
+    background: transparent;
+}
+
+/* ⚠️ **器件类型徽标**（v0.75 · STAGE-51 · §2.6 顺手整改④）：id 旁边一个小
+   芯片 ⇒ ⇒ 不再 `CLINT (CLINT)` 两个一样的名字。 */
+.badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--panel2);
+    color: var(--tx2);
+    font-size: 11px;
+    font-family: var(--mono);
+}
+
 .seed-btn {
     background: var(--panel2);
     color: var(--green);
@@ -712,6 +735,83 @@ a { color: inherit; text-decoration: none; }
 .tree .kids {
     margin-left: 16px; border-left: 1px dashed var(--line2); padding-left: 10px;
 }
+
+/* ⚠️ **器件卡片**（v0.75 · STAGE-51 · §2.6 顺手整改④）：每台器件一块小卡，
+   字段行 label 定宽、value 定宽 ⇒ ⇒ 不再 label/value 参差。 */
+.tree .node.board-device {
+    display: block;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin: 6px 0;
+    background: var(--panel2);
+}
+.tree .node.board-device .board-device-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.tree .node.board-device .board-device-head .btn.ghost.danger {
+    margin-left: auto;
+    padding: 2px 8px;
+    font-size: 12px;
+}
+.tree .node.board-device .board-device-head .tag { margin-left: 0; }
+.board-device-fields {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px 12px;
+    margin-top: 8px;
+}
+
+/* ⚠️ **字段行对齐**（v0.75 · STAGE-51 · §2.6 顺手整改④）：label 定宽、
+   value 输入框占满剩余 ⇒ ⇒ 同一张卡里的字段列起点一致。 */
+.mmap-field,
+.board-device-fields .mmap-field {
+    display: grid;
+    grid-template-columns: 92px 1fr;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--tx2);
+}
+.mmap-field span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mmap-field input,
+.board-device-fields input,
+.board-device-fields select {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 4px 6px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--tx);
+}
+.mmap-field input[data-mmap-invalid],
+.board-device-fields input[data-mmap-invalid] {
+    border-color: var(--red);
+    color: var(--red);
+}
+
+/* MCU 摘要（v0.75 · STAGE-51 · 只展示）。 */
+.mcu-summary {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.mcu-summary li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    flex-wrap: wrap;
+}
+.mcu-summary .tag { margin-left: 0; }
 
 /* 内存图**地址比例条**（裁决 D —— 宽度按**真地址区间**算，不是写死的百分比）。 */
 .segbar {

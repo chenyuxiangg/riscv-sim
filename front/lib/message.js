@@ -183,7 +183,7 @@ export const SYMBOL_CANDIDATE_LIMIT = 16;
  * **一个定义处**（STAGE-15 裁决 K：初版让服务层「另立一个同值常量」⇒
  * 那是**两个真相** ⇒ 不接受）。
  */
-export const PLATFORM_SCHEMA_VERSION = 3;
+export const PLATFORM_SCHEMA_VERSION = 4;
 
 /**
  * **本前端能读**的平台描述格式版本 — mirrors
@@ -197,7 +197,7 @@ export const PLATFORM_SCHEMA_VERSION = 3;
  * 那个」（⇒ ⇒ 前端**写**它）⇒ ⇒ 「**本构建能读**的那些」是**另一件事**
  * ⇒ ⇒ ⇒ **两个数，两个含义**（一个约束一个落点）。
  */
-export const SUPPORTED_PLATFORM_SCHEMA_VERSIONS = [1, 2, 3];
+export const SUPPORTED_PLATFORM_SCHEMA_VERSIONS = [1, 2, 3, 4];
 
 /**
  * 合法性**规则集**版本 — mirrors `riscv_sim_contract::platform::PLATFORM_RULES_VERSION`.
@@ -233,7 +233,7 @@ export const SUPPORTED_PLATFORM_SCHEMA_VERSIONS = [1, 2, 3];
  * ⚠️ **唯一落点**（STAGE-18 裁决 E）：住在这**一层**（`front/lib/`）⇒ 服务层
  * 与视图层**都从这里 import** ⇒ **一个定义处** ⇒ 依赖方向仍单向。
  */
-export const PLATFORM_RULES_VERSION = 5;
+export const PLATFORM_RULES_VERSION = 6;
 
 /**
  * **连线事件词表（建议清单）** — mirrors

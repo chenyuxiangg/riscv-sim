@@ -257,6 +257,28 @@ export function parseNumber(raw) {
 }
 
 /**
+ * 基址的**展示形态**（v0.75 · STAGE-51 · §2.6 顺手整改③）：统一 **16 进制**
+ * 显示（`0x…`）。
+ *
+ * ⚠️ **草稿里存的仍是十进制字符串**（提交给内核的口径不变）⇒ ⇒ 这里只改
+ * 「显示」⇒ ⇒ 采集时 `parseNumber` 两种写法都认（十进制 / `0x`）⇒ ⇒ 往返
+ * 安全。
+ *
+ * ⚠️ **缺 `base`（留空 = 由内核装配期分配）⇒ ⇒ 显示空串**（**不**显示
+ * `0x0` —— 那会把「没有基址」与「基址就是 0」混成一眼）。
+ *
+ * @param {unknown} raw — 草稿里的 `base`（十进制字符串，或空串）
+ * @returns {string}
+ */
+export function formatBase(raw) {
+    const text = String(raw ?? "").trim();
+    if (text === "") return "";
+    const n = parseNumber(text);
+    if (n === null) return text; // 编辑中（输入框被临时写了一半）⇒ 原样显示
+    return `0x${(n >>> 0).toString(16)}`;
+}
+
+/**
  * 错误码 → **族 + 场景码**。
  *
  * ⚠️ 契约的错误码形状是 `E_<FAMILY>-<SCENARIO>`（族标签见
@@ -385,6 +407,10 @@ export function cloneDraft(draft) {
     // 会让「改草稿」改到内核给的那份 ⇒ ⇒ 与 `wiring` 同一条纪律。
     const pins = normalizePins(next.pins);
     if (pins) next.pins = pins;
+    // ⚠️ `mcu` 也**深复制**（v0.75 · STAGE-51 · F）：它是**对象** ⇒ ⇒ 浅拷贝
+    // 会让「改草稿」改到内核给的那份 ⇒ ⇒ 与 `roles` 同一条纪律。
+    const mcu = normalizeMcu(next.mcu);
+    if (mcu) next.mcu = mcu;
     return next;
 }
 
@@ -484,6 +510,37 @@ export function normalizePins(pins) {
     return out.length > 0 ? out : null;
 }
 
+/**
+ * 线上�� `mcu` 段 → **草稿形状**（v0.75 · STAGE-51 · D-175 的 F）。
+ *
+ * ⚠️ **前端只做「透传」**：isa 词法合不合法由**内核**的 V-23 裁决
+ * （`E_PLT-21`）、固件匹配由**内核**的装载门禁裁决（`E_PLT-20`）⇒ ⇒
+ * 前端**不写第二个校验器**（与 `roles` / `pins` 同一条纪律）。
+ *
+ * ⚠️ **只展示，不编辑**（用户 2026-11-03 拍板）⇒ ⇒ 草稿里带着它 ⇒ ⇒
+ * 提交回去还在 ⇒ ⇒ **不在这里**提供 mcu 的编辑入口。
+ *
+ * ⚠️ **无 / 缺省 ⇒ 不带键**（与契约层 serde 的 `skip_serializing_if` 同形）。
+ *
+ * @param {unknown} mcu — 线上的 `mcu` 段 / 草稿里的 `mcu`
+ * @returns {object|null}
+ */
+export function normalizeMcu(mcu) {
+    if (!mcu || typeof mcu !== "object") return null;
+    const out = { isa: String(mcu.isa ?? "") };
+    if (typeof mcu.vendor === "string" && mcu.vendor.length > 0) out.vendor = mcu.vendor;
+    if (typeof mcu.model === "string" && mcu.model.length > 0) out.model = mcu.model;
+    const vt = mcu.vector_table;
+    if (vt && typeof vt === "object") {
+        const base = parseNumber(vt.base);
+        const entries = parseNumber(vt.entries);
+        if (base !== null && entries !== null) {
+            out.vector_table = { base: base >>> 0, entries: entries >>> 0 };
+        }
+    }
+    return out;
+}
+
 export function normalizeWiringList(wiring) {
     if (!Array.isArray(wiring)) return [];
     return wiring.map((entry) => {
@@ -558,6 +615,10 @@ export function draftFromDescription(description) {
     // ⚠️ `pins`（STAGE-49 · D1）：描述里有 ⇒ **草稿里带上** ⇒ ⇒ 提交回去还在。
     const pins = normalizePins(description.pins);
     if (pins) draft.pins = pins;
+    // ⚠️ `mcu`（v0.75 · STAGE-51 · F）：描述里有 ⇒ **草稿里带上** ⇒ ⇒
+    // 提交回去还在（否则「从内置模版开始」一提交就把 MCU 丢了）。
+    const mcu = normalizeMcu(description.mcu);
+    if (mcu) draft.mcu = mcu;
     return draft;
 }
 
@@ -643,6 +704,11 @@ export function draftToDescription(draft) {
     // 键**（不是 `null`）⇒ ⇒ 与契约层 serde 的 `skip_serializing_if` **同形**。
     const pins = normalizePins(draft?.pins);
     if (pins) description.pins = pins;
+    // ⚠️ `mcu`（v0.75 · STAGE-51 · F）：**逐字段重建**（同一个 `normalizeMcu`）
+    // ⇒ ⇒ 草稿里多出来的键**不可能**漏进契约；⚠️ **空 / 缺省 ⇒ 线上描述不带
+    // 这个键**（不是 `null`）⇒ ⇒ 与契约层 serde 的 `skip_serializing_if` **同形**。
+    const mcu = normalizeMcu(draft?.mcu);
+    if (mcu) description.mcu = mcu;
     return description;
 }
 
@@ -1171,15 +1237,19 @@ export function setDeviceKind(draft, index, kind, keepId) {
  * ⚠️ 渲染与「采集」必须用**同一个**基底 ⇒ 否则「显示的」与「提交的」会
  * 不是同一份东西。
  *
- * 优先级：用户已编辑的草稿 → 当前生效的图 → 一份默认草稿。
+ * 优先级：**用户已编辑的草稿 → 一份默认草稿**。
+ *
+ * ⚠️ **v0.75（STAGE-51 · §2.6 顺手整改①）**：中间的「当前生效的图」**作废**
+ * ⇒ ⇒ 生效板描述**不再**被实例化成草稿 ⇒ ⇒ 加载固件后编辑面**不会**自动
+ * 冒出那 4 个器件（用户 2026-11-03 拍板：板级视图由用户自己配置，内置板只
+ * 作模板参考）⇒ ⇒ 生效板信息**只读展示**（见 [`renderMcuAndEffective`]）⇒ ⇒
+ * 「从内置模版开始」按钮（`load-current`）才把生效板描述**显式**导入草稿。
  *
  * @param {object} state — 「memory-map」视图状态
  * @returns {object}
  */
 export function currentDraft(state) {
-    return state?.draft
-        ?? draftFromDescription(state?.memoryMap?.description)
-        ?? defaultDraft();
+    return state?.draft ?? defaultDraft();
 }
 
 // ---------------------------------------------------------------------------
@@ -1346,6 +1416,28 @@ export function sameWiring(a, b) {
 }
 
 /**
+ * 两份描述的 **MCU**（`mcu`）一样吗。
+ *
+ * ⚠️ **与 `sameWiring` 同风格**：两边都过 [`normalizeMcu`]（**唯一落点**）
+ * ⇒ ⇒ 「同样的 MCU、**键序不同**」**不会**被判成不同 ⇒ ⇒ 不会假触发整份
+ * 替换 ⇒ ⇒ 「一个约束一个落点」这条纪律在**第三处**也成立。
+ *
+ * ⚠️ **缺省 = 没有 MCU**：两边都缺省 ⇒ 一样；一边缺省、一边有 ⇒ 不同
+ * ⇒ ⇒ **「加上 / 去掉 MCU」也是改动**（v0.75 · STAGE-51 · F：只换
+ * `mcu.isa` 提交 ⇒ ⇒ **必须**真的发出去 ⇒ ⇒ 内核那道 ISA 门禁（E_PLT-20）
+ * 才判得到 ⇒ ⇒ 否则「改 MCU 提交」永远 `mode="none"` 命令不发 ⇒ ⇒
+ * 换 `isa` 的板**永远**不会被拒 ⇒ ⇒ B-162/B-164 的真机判据全灭）。
+ *
+ * @param {object|null|undefined} a
+ * @param {object|null|undefined} b
+ * @returns {boolean}
+ */
+export function sameMcu(a, b) {
+    return canonicalJson(normalizeMcu(a?.mcu))
+        === canonicalJson(normalizeMcu(b?.mcu));
+}
+
+/**
  * 运行期上界（`max_region_bytes`）的**归一化值**。
  *
  * ⚠️ **缺省与 `null` 是同一件事**（契约层：`None` ⇒ 等于声明期那个）
@@ -1475,6 +1567,13 @@ export function planMemoryMapUpdate(baseDescription, draftDescription, options =
     // ⚠️ **同一个归一化函数**（`sameWiring` ⇒ `normalizeWiringList`）⇒ ⇒
     // 「同样的连线、键序不同」**不**算改动 ⇒ ⇒ 不会假触发整份替换。
     if (!sameWiring(baseDescription, draftDescription)) {
+        return { mode: "replace", ops: [] };
+    }
+    // ⚠️ **`mcu` 变了 ⇒ 也走整份**（v0.75 · STAGE-51 · F）：差量契约里
+    // **没有** `mcu` 操作 ⇒ ⇒ 差量路径表达不了 ⇒ ⇒ 「元数据变了 ⇒ 整份」
+    // 这条判据**同样**管 `mcu` ⇒ ⇒ **改 MCU 提交**必须能发出去（否则换
+    // `isa` 的板永远不会被内核那道 ISA 门禁拒掉 ⇒ ⇒ 概念就是一句空话）。
+    if (!sameMcu(baseDescription, draftDescription)) {
         return { mode: "replace", ops: [] };
     }
     // ⚠️ **v0.73（STAGE-49 · B2 · §7.1 订正 6 ③）**：草稿里有**缺 `base`**
@@ -2204,10 +2303,13 @@ function field({ field: name, value, label, hex = null, extra = "" }) {
  * @returns {string}
  */
 export function regionField({ index, name, label, value, extra = "" }) {
+    // ⚠️ **v0.75（STAGE-51 · §2.6 顺手整改③）**：`base` 统一 **16 进制**
+    // 显示（草稿里的十进制字符串不变，采集时两种写法都认）。
+    const shown = name === "base" ? formatBase(value) : String(value);
     return (
         `<label class="mmap-field"><span>${escapeHtml(label)}</span>` +
         `<input type="text" inputmode="numeric" data-mmap-region-field="${escapeHtml(name)}" ` +
-        `data-mmap-index="${index}" ${extra} value="${escapeHtml(String(value))}"></label>`
+        `data-mmap-index="${index}" ${extra} value="${escapeHtml(shown)}"></label>`
     );
 }
 
@@ -2298,6 +2400,64 @@ function renderPeripheralRow(region, index, kinds = DEVICE_KINDS) {
             </td>
             <td><button type="button" class="btn ghost" data-action="remove-region" data-mmap-index="${index}">删除</button></td>
         </tr>
+    `;
+}
+
+/**
+ * 一行 MCU 摘要（只读展示用）。
+ *
+ * @param {object} mcu — `normalizeMcu` 后的形状
+ * @param {string} label — 「草稿 MCU」/「当前生效板 MCU」
+ * @returns {string}
+ */
+function renderMcuLine(mcu, label) {
+    const vt = mcu.vector_table;
+    const vtText = vt
+        ? ` · 向量表 ${formatBase(String(vt.base))} × ${escapeHtml(String(vt.entries))} 项`
+        : " · （未声明向量表）";
+    const vendorText = mcu.vendor
+        ? `（${escapeHtml(mcu.vendor)}${mcu.model ? " / " + escapeHtml(mcu.model) : ""}）`
+        : "";
+    return (
+        `<li data-mcu-line="${escapeHtml(label)}">` +
+        `<span class="tag">${escapeHtml(label)}</span> ` +
+        `<code>${escapeHtml(mcu.isa)}</code>${vendorText}${vtText}</li>`
+    );
+}
+
+/**
+ * **MCU 区**（v0.75 · STAGE-51 · D-175 的 F —— 只展示，不编辑）。
+ *
+ * ⚠️ **用户 2026-11-03 拍板**：MCU（ISA / 厂商 / 型号 / 向量表）只做
+ * **展示** ⇒ ⇒ 不在这里提供任何编辑入口 ⇒ ⇒ 草稿里的 `mcu` 只能从
+ * 「从内置模版开始」或存量板档案带进来。
+ *
+ * ⚠️ 展示两行（有哪行显示哪行）：草稿 MCU（将随提交生效）+ 当前生效板
+ * MCU（只读参考）。都无 ⇒ 引导行。
+ *
+ * @param {object} draft — 当前草稿
+ * @param {object|null} memoryMap — 内核的 memory.map 状态
+ * @returns {string}
+ */
+function renderMcuCard(draft, memoryMap) {
+    const draftMcu = normalizeMcu(draft?.mcu);
+    const effectiveMcu = normalizeMcu(memoryMap?.description?.mcu);
+    const lines = [];
+    if (draftMcu) lines.push(renderMcuLine(draftMcu, "草稿 MCU"));
+    if (effectiveMcu) lines.push(renderMcuLine(effectiveMcu, "当前生效板 MCU（只读）"));
+    const body = lines.length > 0
+        ? `<ul class="mcu-summary">${lines.join("")}</ul>`
+        : `<p class="muted" data-mcu-none="1">未声明 MCU —— 从「从内置模版开始」导入模板可带出（如 rv32imac）。</p>`;
+    return `
+        <div class="card" data-mcu-display="1">
+            <h3>MCU<span class="tag">只展示 · 不编辑</span></h3>
+            ${body}
+            <p class="muted">
+                板声明 <code>isa</code> 后，内核装载固件时**按 ISA 校验**（位宽 + 压缩指令位，
+                不匹配 ⇒ <code>E_PLT-20</code>）；<code>vendor</code> / <code>model</code> /
+                向量表是身份数据（只展示）。
+            </p>
+        </div>
     `;
 }
 
@@ -2398,11 +2558,30 @@ export function renderMemoryMapPanel(state) {
     const selectedId = state?.selectedId ?? null;
     const idExtra = selectedId === null || selectedId === undefined ? "" : "readonly";
 
+    // ⚠️ **v0.75（STAGE-51 · §2.6 顺手整改①）**：草稿是「用户自己的东西」
+    // 的标志 = `state.draft` 被设过 ⇒ ⇒ **没设过**（编辑器从默认草稿起步）
+    // 且存在生效板 ⇒ ⇒ 提示「当前生效板（自动选择）· 只读」+ 引导自己配置。
+    // ⚠️ **v0.75 · STAGE-51 · §2.6 顺手整改①**：草稿是「用户自己的东西」的
+    // 标志 = **内容**≠默认草稿（不是「state.draft 被设过」）⇒ ⇒ 点「重建
+    // 草稿」（new-draft ⇒ draft = `defaultDraft()`）之后**内容仍是默认** ⇒ ⇒
+    // 提示还在（B-166a 在真机上等它）⇒ ⇒ 真改了内容（加段 / 改名字）⇒ ⇒
+    // 提示消失（N-4b：不教用户做事）。
+    const draftTouched = state?.draft !== null
+        && state?.draft !== undefined
+        && canonicalJson(state.draft) !== canonicalJson(defaultDraft());
+    const effectiveName = String(memoryMap?.description?.name ?? "");
+    const effectiveBanner = (!draftTouched && effectiveName !== "")
+        ? `<p class="banner" data-mmap-effective-banner="1">` +
+          `当前生效板：<strong>${escapeHtml(effectiveName)}</strong>（自动选择 · 仅用于运行 · 只读）` +
+          `——板级视图由你配置：点「从内置模版开始」把模板导入草稿自己改。</p>`
+        : "";
+
     return `
         <section class="memory-map-editor">
             <div class="cards" style="grid-template-columns: 1fr;">
                 <div class="card">
                     <h3>板级内存图<span class="tag">M-14 · 板级配置</span></h3>
+                    ${effectiveBanner}
                     ${pendingBox}
                     ${errorBox}
                     <div class="row">
@@ -2436,6 +2615,8 @@ export function renderMemoryMapPanel(state) {
                         按各段的声明值另算，<strong>界面只提供这一个旋钮</strong>。
                     </p>
                 </div>
+
+                ${renderMcuCard(draft, memoryMap)}
 
                 <div class="card">
                     <h3>地址布局<span class="tag">按真实地址区间着色</span></h3>
@@ -2484,9 +2665,13 @@ export function renderMemoryMapPanel(state) {
                         <button type="button" class="btn primary" data-action="submit-memory-map">提交板级内存图（整份替换 / 差量）</button>
                         <button type="button" class="btn" data-action="unload-project">卸载工程</button>
                         <button type="button" class="btn" data-action="reload-project">重新装载工程</button>
-                        <button type="button" class="btn" data-action="load-current">从当前生效的图载入</button>
+                        <button type="button" class="btn" data-action="load-current" data-template-entry="1">从内置模版开始</button>
                         <button type="button" class="btn ghost" data-action="new-draft">重建草稿</button>
                     </div>
+                    <p class="muted">
+                        「从内置模版开始」= 把**当前生效板**（内置 qemu-virt 等模板）导入草稿作为
+                        **起点**，由你自行修改（v0.75 · 板级视图由你配置，加载固件**不会**自动填充编辑面）。
+                    </p>
                 </div>
 
                 <div class="card">

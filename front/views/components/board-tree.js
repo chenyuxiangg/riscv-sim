@@ -99,13 +99,14 @@ function renderDeviceNode({ index, region, kinds, pending }) {
              data-device-node="${escapeHtml(id)}"
              data-device-node-kind="${escapeHtml(kind)}"
              data-device-node-pending="${pending ? "1" : "0"}">
-            <div class="row">
+            <div class="row board-device-head">
                 <span class="caret leaf" aria-hidden="true">·</span>
                 <span class="name">${escapeHtml(id || "(未命名器件)")}</span>
-                <span class="sub">(${escapeHtml(DEVICE_LABELS[kind] ?? kind)})</span>
+                <span class="badge" data-device-node-badge>${escapeHtml(DEVICE_LABELS[kind] ?? kind)}</span>
                 ${pending ? `<span class="tag" data-device-node-pending-tag="1">待生效</span>` : ""}
-                <button type="button" class="btn ghost"
-                        data-action="remove-device" data-mmap-index="${index}">删除</button>
+                <button type="button" class="btn ghost danger"
+                        data-action="remove-device" data-mmap-index="${index}"
+                        title="从草稿删除这个器件实例">删除</button>
             </div>
             <div class="board-device-fields">
                 ${regionField({ index, name: "base", label: "基址 base", value: base })}
