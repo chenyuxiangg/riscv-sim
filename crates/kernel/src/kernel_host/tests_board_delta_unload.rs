@@ -73,7 +73,7 @@ fn first_memory_map(events: &[EventPayload]) -> MemoryMapState {
         } = e
         {
             return MemoryMapState {
-                description: description.clone(),
+                description: *description.clone(),
                 pending: *pending,
                 loaded: *loaded,
                 revision: *revision,
@@ -146,6 +146,7 @@ fn user_board() -> PlatformDescription {
         ],
         roles: None,
         pins: None,
+        mcu: None,
     }
 }
 
@@ -173,6 +174,7 @@ fn ram_only_board(max_region_bytes: Option<u32>) -> PlatformDescription {
         }],
         roles: None,
         pins: None,
+        mcu: None,
     }
 }
 

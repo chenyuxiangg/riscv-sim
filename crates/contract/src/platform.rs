@@ -56,7 +56,8 @@ use crate::error::{
     PlatformError, E_PLT_01_SCHEMA_VERSION, E_PLT_02_EMPTY_ID, E_PLT_03_NO_REGIONS,
     E_PLT_04_ZERO_SIZE, E_PLT_05_OVERFLOW, E_PLT_06_OVERLAP, E_PLT_07_OVER_BUDGET,
     E_PLT_08_DUPLICATE_DEVICE_ID, E_PLT_12_PARAMETER_OUT_OF_RANGE, E_PLT_15_DEVICE_EMPTY_ID,
-    E_PLT_16_WIRING_INVALID, E_PLT_18_ROLES_INVALID, E_PLT_19_PINS_INVALID, PLATFORM_FAMILY,
+    E_PLT_16_WIRING_INVALID, E_PLT_18_ROLES_INVALID, E_PLT_19_PINS_INVALID, E_PLT_21_MCU_INVALID,
+    PLATFORM_FAMILY,
 };
 use crate::session::{GPIO_PIN_COUNT, REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
 
@@ -83,7 +84,10 @@ use crate::session::{GPIO_PIN_COUNT, REGION_KIND_PERIPHERAL, REGION_KIND_RAM, RE
 /// ⚠️ **v0.74（STAGE-50 · D-175 的 D）**：**2 → 3** ⇒ ⇒ `wiring.from` 加了
 /// **可选**的 `pin`（引脚级寻址）⇒ ⇒ 老描述**逐字不变**（⇒ ⇒ 存量板档案
 /// **零风险**）。
-pub const PLATFORM_SCHEMA_VERSION: u32 = 3;
+/// ⚠️ **v0.75（STAGE-51 · D-175 的 F）**：**3 → 4** ⇒ ⇒ 顶层加了**可选**
+/// `mcu` 段（MCU 概念：ISA / 厂商 / 型号 / 向量表）⇒ ⇒ 老描述**缺省不带键**
+/// ⇒ ⇒ **逐字不变**（⇒ ⇒ 存量板档案**零风险** ⇒ ⇒ **缺省优先迁移**）。
+pub const PLATFORM_SCHEMA_VERSION: u32 = 4;
 
 /// **本构建能读**的平台描述格式版本（V-1 判的就是它）。
 ///
@@ -100,7 +104,7 @@ pub const PLATFORM_SCHEMA_VERSION: u32 = 3;
 /// **明确拒**（⇒ ⇒ 既有码 `E_PLT-01`）⇒ ⇒ ⇒ **不静默硬解**。
 /// ⚠️ **v0.74（STAGE-50）**：`[1, 2, 3]` ⇒ ⇒ 版本 **2** 的老描述（存量板
 ///   档案）**仍能装**（⇒ ⇒ **缺省优先**）⇒ ⇒ 版本 **3** 是本批写的。
-pub const SUPPORTED_PLATFORM_SCHEMA_VERSIONS: &[u32] = &[1, 2, 3];
+pub const SUPPORTED_PLATFORM_SCHEMA_VERSIONS: &[u32] = &[1, 2, 3, 4];
 
 /// The version of the platform description's **legality rule set**.
 ///
@@ -152,7 +156,9 @@ pub const SUPPORTED_PLATFORM_SCHEMA_VERSIONS: &[u32] = &[1, 2, 3];
 /// ⚠️ **v0.74（STAGE-50）**：**4 → 5** ⇒ ⇒ 连线事件**词表扩项**
 /// （`pin_irq`）⇒ ⇒ V-18 的判据从「单常量比较」改成「**查词表**」⇒ ⇒
 /// **规则收紧** ⇒ ⇒ **规则集跟着 +1**。
-pub const PLATFORM_RULES_VERSION: u32 = 5;
+/// ⚠️ **v0.75（STAGE-51）**：**规则集 6** ⇒ ⇒ 加 **V-23**（`mcu` 段词法/
+/// 形状校验；码 `E_PLT-21`）⇒ ⇒ V-22 编号不变（仍属装配期分配器）。
+pub const PLATFORM_RULES_VERSION: u32 = 6;
 
 /// The **upper bound** of a CLINT's timer frequency (1 THz).
 ///
@@ -328,6 +334,18 @@ pub struct PlatformDescription {
     /// ⚠️ **本批只定形状**：引脚名 / 信号名**自由** ⇒ ⇒ 语义属第 58 批。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pins: Option<Vec<PinBinding>>,
+
+    /// **MCU 段**（v0.75 · STAGE-51 · D-175 的 F）—— 这块板上的处理器
+    /// （α 路线：一块板一个 MCU）。
+    ///
+    /// ⚠️ **可选** ⇒ ⇒ **缺省不带键** ⇒ ⇒ 无 `mcu` ⇒ **无 ISA 校验** ⇒ ⇒
+    /// 存量板档案**逐字不变**（缺省优先迁移）。
+    ///
+    /// ⚠️ **本批唯一行为**：给 `mcu.isa` 时，内核装载固件**按 ISA 校验**
+    /// （class + c 位）⇒ ⇒ 不匹配 ⇒ `E_PLT-20`；`mcu` 段自身词法非法 ⇒
+    /// V-23 拒 `E_PLT-21`。vendor / model / vector_table 仅身份数据。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcu: Option<McuSpec>,
 }
 
 /// One **wire** between two devices — the wiring table's row.
@@ -583,6 +601,95 @@ pub struct PinBinding {
     pub pin: String,
     /// **信号名**（这个引脚接到了哪个信号）。
     pub signal: String,
+}
+
+/// **MCU 段**（v0.75 · STAGE-51 · D-175 的 F）—— 这块板上的处理器是什么。
+///
+/// ⚠️ **α 路线（一块板一个 MCU）**：它是**顶层属性**，**不是**器件、**不是**
+/// 角色 ⇒ ⇒ 缺省（无 `mcu` 键）⇒ ⇒ **无 ISA 校验**（存量行为**逐字不变**）。
+///
+/// ⚠️ **本批唯一内核行为 = 按 `isa` 校验固件**（V-23 + 内核装载门禁）；
+/// `vendor` / `model` / `vector_table` 是**身份数据**（前端展示、契约往返、
+/// 内核接受但不据此行为）⇒ ⇒ **边界如实登记**。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McuSpec {
+    /// **ISA 串**（如 `rv32ima`）—— 词法见 [`mcu_isa_info`]（**一个落点**）。
+    pub isa: String,
+    /// 厂商（自由文本）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    /// 型号（自由文本）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// 向量表（可选 · 声明 + 展示，不做校验）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector_table: Option<VectorTableSpec>,
+}
+
+/// **向量表声明**（v0.75 · STAGE-51 · D-175 的 F）—— 这颗 MCU 的
+/// 复位/中断向量表布局（**数据手册信息**，非运行时行为）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VectorTableSpec {
+    /// 向量表首地址（RISC-V 惯例 = 复位入口）。
+    pub base: u32,
+    /// 表项数（× 4 字节 = 表长）。
+    pub entries: u32,
+}
+
+/// **解析出的 ISA 事实**（V-23 与内核装载门禁共用 —— **一个落点**）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McuIsaInfo {
+    /// 基础位宽：`32` 或 `64`。
+    pub bits: u32,
+    /// 声明了压缩指令扩展（`c`）。
+    pub has_c: bool,
+    /// 声明了嵌入式扩展（`e`）。
+    pub has_e: bool,
+}
+
+/// **ISA 词法解析 —— 唯一落点**（v0.75 · STAGE-51 · D-175 的 F）。
+///
+/// ⚠️ 契约层 V-23 用它判 `mcu.isa` 合不合法 ⇒ ⇒ 内核装载门禁用它取
+/// class / c 位判据 ⇒ ⇒ **一次查表，两处都用**（与事件词表同款「一个落点」）。
+///
+/// ⚠️ 词法：`rv` + `32`|`64` + 扩展字母串（字符集 `{i,e,m,a,f,d,c}`，
+/// **去重 + 规范序** `i e m a f d c`）；大小写**归一**（`"RV32IMA"` ⇒ 合法，
+/// 语义 = `"rv32ima"`）。`"rv32"`（无扩展字母）与 `"arm"` 等 ⇒ `None`。
+///
+/// ⚠️ 只做**词法**：m/a/f/d 等扩展在 ELF 头里查不到 ⇒ ⇒ 词法合法**不等于**
+/// 固件能验证 —— 那件事在内核装载门禁（本批能查的只有 class 与 c 位）。
+pub fn mcu_isa_info(isa: &str) -> Option<McuIsaInfo> {
+    let s = isa.trim().to_ascii_lowercase();
+    let rest = s.strip_prefix("rv")?;
+    let (bits_str, ext) = rest.split_at(2);
+    let bits: u32 = match bits_str {
+        "32" => 32,
+        "64" => 64,
+        _ => return None,
+    };
+    if ext.is_empty() {
+        return None;
+    }
+    // 去重 + 规范序：i e m a f d c（重复或乱序 ⇒ 非法 ⇒ 归一化后逐字比较）。
+    let order: &[char] = &['i', 'e', 'm', 'a', 'f', 'd', 'c'];
+    let mut prev = -1i32;
+    let mut has_c = false;
+    let mut has_e = false;
+    for ch in ext.chars() {
+        let idx = order.iter().position(|&c| c == ch)?;
+        let i = idx as i32;
+        if i <= prev {
+            return None;
+        }
+        prev = i;
+        if ch == 'c' {
+            has_c = true;
+        }
+        if ch == 'e' {
+            has_e = true;
+        }
+    }
+    Some(McuIsaInfo { bits, has_c, has_e })
 }
 
 /// One declared peripheral device — internally tagged by **`device **`.
@@ -1197,6 +1304,44 @@ impl PlatformDescription {
             }
         }
 
+        // V-23 — the **`mcu` segment** must be well-formed (v0.75 ·
+        // STAGE-51 · D-175 的 F).
+        //
+        // ⚠️ **编号为什么是 V-23 而不是 V-22**：V-22 已被「缺 `base` ⇒ ⇒
+        // 由装配期分配」占用（v0.73 的 B2，见规则集文档）⇒ ⇒ MCU 校验
+        // **顺延到 V-23**（一次一个编号、一码一义）。
+        //
+        // ⚠️ **缺省（无 `mcu` 段）⇒ ⇒ 不校验**（存量行为逐字不变 —— 缺省
+        // 优先迁移）。
+        //
+        // ⚠️ **只判 mcu 段自身形状**：isa 词法（[`mcu_isa_info`]，唯一落点）
+        // 非法 ⇒ 拒；向量表表项数 0 ⇒ 拒。
+        //
+        // ⚠️ **「固件与 MCU 不匹配」不在这里判** —— 那是内核装载门禁的事
+        // （`E_PLT-20`）⇒ ⇒ 这里是「mcu 段自己写错了」（`E_PLT-21`）⇒ ⇒
+        // **两个对象、两个码**（一码一义纪律照旧）。
+        if let Some(mcu) = self.mcu.as_ref() {
+            if mcu_isa_info(&mcu.isa).is_none() {
+                return Err(PlatformError::new(
+                    PLATFORM_FAMILY,
+                    E_PLT_21_MCU_INVALID,
+                    format!(
+                        "mcu 段的 isa 词法非法：{:?}（应为 rv32/rv64 + 扩展字母串 {{i,e,m,a,f,d,c}}）",
+                        mcu.isa
+                    ),
+                ));
+            }
+            if let Some(vt) = mcu.vector_table.as_ref() {
+                if vt.entries == 0 {
+                    return Err(PlatformError::new(
+                        PLATFORM_FAMILY,
+                        E_PLT_21_MCU_INVALID,
+                        format!("mcu 段向量表的表项数不能为 0（base={:#x}）", vt.base),
+                    ));
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1712,6 +1857,7 @@ mod tests {
             wiring: None,
             roles: None,
             pins: None,
+            mcu: None,
         }
     }
 
@@ -2489,6 +2635,7 @@ mod tests {
             wiring: None,
             roles: None,
             pins: None,
+            mcu: None,
         }
     }
 
@@ -3514,7 +3661,7 @@ mod tests {
     #[test]
     fn s16_a12_the_memory_map_event_fields_are_pinned() {
         let ev = EventPayload::MemoryMap {
-            description: sample(),
+            description: Box::new(sample()),
             pending: false,
             loaded: true,
             revision: 42,

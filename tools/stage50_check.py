@@ -61,11 +61,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: ⚠️ **四个版本号的期望值**（7d / 8 用）—— 本批**描述格式升版** ⇒ ⇒
 #: `PLATFORM_SCHEMA_VERSION` 2 → 3 · `PLATFORM_RULES_VERSION` 4 → 5 ⇒ ⇒
 #: **契约信封 `SCHEMA_VERSION` 不动**（仍 11）· `SIM_STATE_SCHEMA_VERSION` 仍 2。
+#: ⚠️ **跨批纪律**（STAGE-51 规格 §4.5 X-2 已明文）：上一批检查器**不许**钉死
+#: `PLATFORM_*` 的具体值（下一批合法升版会误红）⇒ ⇒ 只钉**性质**：
+#: `PLATFORM_SCHEMA_VERSION` 必须**出现在 `SUPPORTED_PLATFORM_SCHEMA_VERSIONS`
+#: 里**（值随代码走）· `PLATFORM_RULES_VERSION` 只许升（≥ 5）。
+#: 信封两个**不动**（仍 11 / 2 ⇒ ⇒ 钉死是安全的）。
 EXPECT_VERSIONS = {
     "SCHEMA_VERSION": "11",
     "SIM_STATE_SCHEMA_VERSION": "2",
-    "PLATFORM_SCHEMA_VERSION": "3",
-    "PLATFORM_RULES_VERSION": "5",
+    "PLATFORM_SCHEMA_VERSION": None,  # 性质断言（∈ SUPPORTED）
+    "PLATFORM_RULES_VERSION": None,   # 性质断言（≥ 5）
 }
 
 LIB_REL = "crates/contract/src/lib.rs"
@@ -245,7 +250,20 @@ for name, want in EXPECT_VERSIONS.items():
     if not m:
         err(f"[版本] 契约层读不到 {name}")
         continue
-    if m.group(1) != want:
+    if want is None:
+        # ⚠️ 跨批纪律：**性质断言**（值随代码走，不钉死具体数字）。
+        if name == "PLATFORM_SCHEMA_VERSION":
+            supported = re.search(
+                r"SUPPORTED_PLATFORM_SCHEMA_VERSIONS:\s*&\[u32\]\s*=\s*&\[([^\]]*)\]",
+                platform_rs,
+            )
+            listed = [int(x) for x in re.findall(r"\d+", supported.group(1))] if supported else []
+            if int(m.group(1)) not in listed:
+                err(f"[版本] {name} = {m.group(1)} ∉ 可读版本列表 {listed} ⇒ ⇒ 性质破坏")
+        else:
+            if int(m.group(1)) < 5:
+                err(f"[版本] {name} = {m.group(1)} < 5 ⇒ ⇒ 只许升不许降")
+    elif m.group(1) != want:
         err(f"[版本] {name} = {m.group(1)} ≠ 规格的 {want}")
     if name not in text:
         err(f"[版本] 规格里没有提到 {name}")
@@ -256,13 +274,19 @@ elif m2.group(1) != EXPECT_VERSIONS["SCHEMA_VERSION"]:
     err(f"[版本] 前端镜像的 SCHEMA_VERSION = {m2.group(1)} ≠ 契约层的 "
         f"{EXPECT_VERSIONS['SCHEMA_VERSION']} ⇒ ⇒ 两边**不一致**")
 # ⚠️ **前端镜像的描述格式 / 规则集版本**也必须**逐字相同**（N-1 / X-1）。
+# ⚠️ 跨批纪律：基准是**契约层实际值**（先读契约层再比镜像，不钉死数字）。
 for name in ("PLATFORM_SCHEMA_VERSION", "PLATFORM_RULES_VERSION"):
     m3 = re.search(rf"export const {name}\s*=\s*(\d+)", mirror_js)
+    m4 = re.search(rf"pub const {name}:\s*u32\s*=\s*(\d+)", lib or "")
+    if not m4:
+        m4 = re.search(rf"pub const {name}:\s*u32\s*=\s*(\d+)", platform_rs or "")
     if not m3:
         err(f"[版本] 前端镜像读不到 `{name}`")
-    elif m3.group(1) != EXPECT_VERSIONS[name]:
+    elif not m4:
+        err(f"[版本] 契约层读不到 `{name}` ⇒ ⇒ 镜像一致性无法核对")
+    elif m3.group(1) != m4.group(1):
         err(f"[版本] 前端镜像的 {name} = {m3.group(1)} ≠ 契约层的 "
-            f"{EXPECT_VERSIONS[name]} ⇒ ⇒ 两边**不一致**")
+            f"{m4.group(1)} ⇒ ⇒ 两边**不一致**")
 
 # 7e. 跨层源码锚点
 ANCHORS = [
@@ -346,15 +370,12 @@ else:
                 err(f"[订正] T-{tid} 的实测红集是空的 ⇒ ⇒ 那条变异零判别力"
                     f"（⇒ ⇒ 若它**确实不成立**，必须在规格里**明写**「零红 / 不成立」）")
 
-# --- 9. 零新场景码 ---------------------------------------------------------
-# ⚠️ **本批复用既有码 `E_PLT_16`** ⇒ ⇒ 契约层**不许**出现 `E_PLT_20` 及以后
-# ⇒ ⇒ 「一个场景码只一个含义」这条**没被破坏**。
-for m in re.finditer(r"pub const (E_PLT_\d+)_[A-Z_]+", error_rs):
-    code = m.group(1)
-    num = int(re.search(r"\d+", code).group(0))
-    if num > 19:
-        err(f"[新码] 契约层出现了 `{code}` ⇒ ⇒ 本批**零新场景码**"
-            f"（非法连线一律复用既有的 `E_PLT_16`）")
+# --- 9. 新场景码（跨批纪律）---------------------------------------------
+# ⚠️ **本批（STAGE-50）复用既有码 `E_PLT_16`**（自己批次零新码 ⇒ ⇒ 规格
+# 文本这么写）⇒ ⇒ 但**契约层的码空间是跨批共享的**：`E_PLT_20 / E_PLT_21`
+# 由**下一批（STAGE-51）登记** ⇒ ⇒ 上一批检查器**不许**因后续批合法新码
+# 而红（「一个场景码只一个含义」的唯一落点检查由 `error_code_check.py`
+# 与各批自己的 stageNN_check 守）。
 if "E_PLT_16" not in text:
     err("[新码] 规格里没有写明复用的既有码 `E_PLT_16`")
 
@@ -382,7 +403,7 @@ for name in ("SCHEMA_VERSION", "SIM_STATE_SCHEMA_VERSION"):
                 break
     if not m:
         err(f"[回退] 读不到 {name}")
-    elif m.group(1) != EXPECT_VERSIONS[name]:
+    elif EXPECT_VERSIONS[name] is not None and m.group(1) != EXPECT_VERSIONS[name]:
         err(f"[回退] {name} = {m.group(1)} ⇒ ⇒ 本批**只**许升描述格式那两个")
 # ⚠️ **可读版本列表必须收着 1 / 2**（缺省优先：存量板档案零风险）。
 m = re.search(r"SUPPORTED_PLATFORM_SCHEMA_VERSIONS:\s*&\[u32\]\s*=\s*&\[([^\]]*)\]",
@@ -411,7 +432,7 @@ print(f"  验收：A {len(EXPECT_ACCEPT['A'])} · K {len(EXPECT_ACCEPT['K'])}"
       f" · X {len(EXPECT_ACCEPT['X'])}")
 print(f"  版本号：SCHEMA_VERSION={EXPECT_VERSIONS['SCHEMA_VERSION']}"
       f" / SIM_STATE={EXPECT_VERSIONS['SIM_STATE_SCHEMA_VERSION']}"
-      f" / PLATFORM={EXPECT_VERSIONS['PLATFORM_SCHEMA_VERSION']}"
-      f" / PLATFORM_RULES={EXPECT_VERSIONS['PLATFORM_RULES_VERSION']}")
-print("  新场景码：0 个（非法连线一律复用既有的 `E_PLT_16`）")
+      f" / PLATFORM=性质断言（∈ SUPPORTED，值随代码）"
+      f" / PLATFORM_RULES=性质断言（只许升，值随代码）")
+print("  新场景码：0 个（非法连线一律复用既有的 `E_PLT_16`；后续批新码由各批自守）")
 sys.exit(0)

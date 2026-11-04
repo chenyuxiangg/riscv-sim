@@ -55,5 +55,14 @@
       "base": 2147483648,
       "size": 134217728
     }
-  ]
+  ],
+  "mcu": {
+    "isa": "rv32imac",
+    "vendor": "qemu",
+    "model": "virt",
+    "vector_table": {
+      "base": 2147483648,
+      "entries": 16
+    }
+  }
 }

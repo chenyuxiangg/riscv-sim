@@ -98,6 +98,7 @@ import {
     GPIO_PIN_IRQ_ELF_MARKER,
     buildGpioPinIrqElf,
     buildUiImageElf,
+    buildElfFromWords,
     checkEncoderAgainstDemoFirmware,
 } from "./ui-image-fixture.mjs";
 // ⚠️ **断点靶点不是写死的**（STAGE-35 · v0.50 批 · B 组）⇒ ⇒ 从仓内那份
@@ -185,6 +186,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "wiringReport",
     "platformSchemaV2",
     "pinLevelRouting",
+    "mcuConcept",
     "boardArchive",
     "boardDelta",
     "boardOrdering",
@@ -1688,6 +1690,123 @@ const BV_NO_WIRING_BOARD = {
 };
 
 // ---------------------------------------------------------------------------
+// STAGE-51 · v0.75 批的**夹具板**（MCU 概念 + ISA 门禁）
+// ---------------------------------------------------------------------------
+
+/**
+ * 一块**带 `mcu`** 的板（v0.75 · STAGE-51 · B-161）—— `rv32ima` + ELF32
+ * 固件 ⇒ ⇒ **照常装**（⇒ ⇒ 板声明了 MCU 不破坏既有装载路径）。
+ *
+ * ⚠️ **形状 = qemu-virt 那张**（regions 复用 STAGE-50 的引脚级夹具板：RAM
+ *   0x8000_0000 128MiB + CLINT/PLIC/UART0/GPIO0）⇒ ⇒ demo 固件（ELF32）能装
+ *   能跑（B-161 的「照常装 + 跑」判据）。
+ *
+ * ⚠️ **`schema_version = 4`**（v0.75 升版 3→4）⇒ ⇒ 描述里**新增** `mcu` 字段
+ *   （`McuSpec` 形状：`isa` / `vendor` / `model` / `vector_table` —— 与契约
+ *   `crates/contract/src/platform.rs` 逐字对齐）。
+ *
+ * ⚠️ **`vector_table.base = 0x8000_0000`**（2147483648）⇒ ⇒ 界面上应显示
+ *   **16 进制** `0x80000000`（顺手整改④：基址统一 16 进制显示/输入）⇒ ⇒
+ *   B-165 / B-167 的判据基准。
+ */
+const BV_MCU_BOARD = {
+    schema_version: 4,
+    id: "browser-verify-mcu",
+    name: "browser-verify MCU 板",
+    priority: 995,
+    region_budget_bytes: 134217728,
+    regions: [
+        { kind: "ram", base: 0, size: 1048576 },
+        { kind: "peripheral", base: 33554432, device: { device: "clint", id: "CLINT", freq_hz: 10000000, harts: 1 } },
+        { kind: "peripheral", base: 201326592, device: { device: "plic", id: "PLIC", sources: 64, contexts: 16 } },
+        { kind: "peripheral", base: 268435456, device: { device: "uart16550", id: "UART0", irq_line: 1, baud_rate: 115200 } },
+        { kind: "peripheral", base: 1073741824, device: { device: "gpio", id: "GPIO0" } },
+        { kind: "ram", base: 2147483648, size: 134217728 },
+    ],
+    mcu: {
+        isa: "rv32ima",
+        vendor: "qemu",
+        model: "virt",
+        vector_table: { base: 2147483648, entries: 16 },
+    },
+};
+
+/**
+ * 声明 **`rv64ima`** 的板（v0.75 · STAGE-51 · B-162）+ ELF32 固件 ⇒ ⇒ **拒**
+ * `E_PLT-20`（位宽不匹配）⇒ ⇒ 且**应用前判**（生效板**没被换掉**）。
+ */
+const BV_MCU_BOARD_RV64 = {
+    ...BV_MCU_BOARD,
+    id: "browser-verify-mcu-rv64",
+    name: "browser-verify MCU rv64 板",
+    mcu: { ...BV_MCU_BOARD.mcu, isa: "rv64ima" },
+};
+
+/**
+ * 声明 **`rv32i`**（无 c）的板（v0.75 · STAGE-51 · B-164）+ **RVC 固件**
+ * （`e_flags` 带 `EF_RISCV_RVC`）⇒ ⇒ **拒** `E_PLT-20`（固件用了板不支持的
+ * 压缩指令位）。
+ */
+const BV_MCU_BOARD_RV32I = {
+    ...BV_MCU_BOARD,
+    id: "browser-verify-mcu-rv32i",
+    name: "browser-verify MCU rv32i 板",
+    mcu: { ...BV_MCU_BOARD.mcu, isa: "rv32i" },
+};
+
+/**
+ * **没有 `mcu`** 的板（v0.75 · STAGE-51 · B-163）+ ELF32 固件 ⇒ ⇒ **照常装**
+ * （⇒ ⇒ 缺省零风险：存量 79 个非压缩固件**不受**新门禁影响）。
+ */
+const BV_NO_MCU_BOARD = {
+    ...BV_MCU_BOARD,
+    id: "browser-verify-no-mcu",
+    name: "browser-verify 无 mcu 板",
+    // ⚠️ 必须**显式删掉** `mcu`：spread 会把它带过来 ⇒ ⇒ 「无 mcu 板」
+    //   名不副实（B-163 那个「缺省零风险」对照就白做了）。`undefined`
+    //   JSON 序列化时会被丢掉 ⇒ 提交载荷里**没有** mcu 键。
+    mcu: undefined,
+};
+
+/**
+ * **RVC 固件**（v0.75 · STAGE-51 · B-164）—— 一个 ELF32，`e_flags = 0x1`
+ * （`EF_RISCV_RVC`）⇒ ⇒ 内核 ISA 门禁判 `has_rvc = true`。
+ *
+ * ⚠️ **内容只是几条 `addi x0, x0, 0`（0x13）** ⇒ ⇒ 合法 RV32I（能装能跑，
+ * 无副作用）⇒ ⇒ 门禁判的是 **`e_flags`**（偏移 36..40），**不是**指令字节
+ * ⇒ ⇒ 内容不用真的压缩指令（与 Rust 侧 K-3 的 `minimal_elf(vaddr, code,
+ * flags)` 同一个口径）。
+ *
+ * ⚠️ **落址 0x8000_0000** ⇒ ⇒ B-164 装它时当前板是 BV_NO_MCU_BOARD（RAM
+ *   0x8000_0000 128MiB）⇒ ⇒ 能装。
+ *
+ * @returns {Buffer}
+ */
+function buildRvcElf() {
+    return buildElfFromWords([0x13, 0x13, 0x13, 0x13], 0x80000000, { e_flags: 0x1 });
+}
+
+/**
+ * **demo 的 ELF32 版本**（v0.75 · STAGE-51 · B-161b / B-162 / B-163）。
+ *
+ * ⚠️ 为什么要它：内核 ISA 门禁**只对 ELF 判**（`elf_isa.bits != 0`）⇒ ⇒
+ *   raw `.bin`（demo-firmware.bin）**没有 ELF 头** ⇒ ⇒ 提交 rv64 板时门禁
+ *   被跳过 ⇒ ⇒ 内核把板**收成「待生效」**而不是拒（B-162 首轮假绿的根因）。
+ *   ⇒ ⇒ 凡断言「ELF32 固件 + 带 mcu 的板」的段，都改走这份 **真 ELF32**。
+ *
+ * ⚠️ 内容 = demo 固件**前 4 条指令**（addi x1,x0,42 → x1=0x2a；addi x2；add；
+ *   sw）⇒ ⇒ B-161c 的 `x1 = 0x2a` 断言**不用改** ⇒ ⇒ 落址 0x8000_0000
+ *   （带 mcu 夹具板的高 RAM 段）⇒ ⇒ 能装能跑。
+ */
+function buildDemoElf32() {
+    const words = [0x02a00093, 0x00700113, 0x002081b3, 0x10302023];
+    // ⚠️ 落址 **0x0**（低 RAM 段 base=0）⇒ ⇒ 装载后 `PC = 0x00000000` ⇒ ⇒
+    // `loadFirmwareFile` 的装载探针（等 PC=0）才等得到 ⇒ ⇒ 落 0x8000_0000
+    // 会让 PC=0x8000_0000 ⇒ 探针超时 ⇒ 误判「没装上」（B-161b 假红根因）。
+    return buildElfFromWords(words, 0x0, {});
+}
+
+// ---------------------------------------------------------------------------
 // STAGE-49 · v0.73 批的**夹具板**（B2：`base` 可缺省）
 // ---------------------------------------------------------------------------
 
@@ -3117,6 +3236,33 @@ async function runBoardTreeSection(cdp, opts) {
     add("产品视图挂上了「产品树」（= 草稿的派生视图）", true,
         `树里 ${tree.nodes.length} 个器件节点`);
 
+    // -- ①b ⚠️ v0.75（STAGE-51 · 顺手整改）：草稿**独立**（加载固件 / 选中板
+    //     都**不**自动实例化编辑面 ⇒ ⇒ 树从**空**起步）⇒ ⇒ 旧段「树 = 生效板
+    //     快照」的现场**不在了** ⇒ ⇒ **显式**把当前生效板导入草稿（点
+    //     「从内置模版开始」= `load-current`）⇒ ⇒ 下面那些断言（4→5→4）
+    //     恢复成 v0.74 的语义 ⇒ ⇒ 提交后**生效板 = 原板 + 那 1 个器件** ⇒ ⇒
+    //     后续段拿到的还是那块能跑 demo / osz 的板。
+    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, `(() => {
+        const btn = document.querySelector(
+            '[data-view-body="memory-map"] [data-action="load-current"][data-template-entry="1"]');
+        if (!btn) return "no-button";
+        btn.click();
+        return "clicked";
+    })()`);
+    await runEffect(cdp, 'location.hash = "#/product";');
+    tree = await waitFor(async () => {
+        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
+        return value && value.nodes.length > 0
+            && value.instances.length === value.nodes.length ? value : null;
+    }, opts.timeoutMs);
+    add(
+        "**前置**（v0.75 顺手整改）：草稿独立 ⇒ 显式把**当前生效板**导入草稿"
+        + "（「从内置模版开始」）⇒ ⇒ 树 = 生效板实例数",
+        tree?.nodes.length > 0 && tree?.nodes.length === tree?.instances.length,
+        `导入后树 ${tree?.nodes.length ?? "?"} 个器件（生效板实例 ${tree?.instances.length ?? "?"} 个）`,
+    );
+
     // -- ② 真点「+ 器件」⇒ 树上多一个节点 ------------------------------------
     const nodesBefore = tree.nodes.length;
     await runEffect(cdp, `(() => {
@@ -4003,7 +4149,10 @@ async function runBoardDeltaSection(cdp, opts) {
         for (const row of rows) {
             const baseInput = row.querySelector('[data-mmap-region-field="base"]');
             if (!baseInput) continue;
-            const base = parseInt(String(baseInput.value ?? "").trim(), 10);
+            // ⚠️ v0.75 顺手整改：基址输入框统一 16 进制（0x 前缀）⇒ ⇒
+            // 10 进制 parseInt 会把 0x80000000 解析成 0 ⇒ 永远 no-row。
+            const rawBase = String(baseInput.value ?? "").trim();
+            const base = /^0x/i.test(rawBase) ? parseInt(rawBase, 16) : parseInt(rawBase, 10);
             if (base === ${BV_DELTA_RAM_BASE}) { target = row; break; }
         }
         if (!target) return "no-row";
@@ -4494,7 +4643,19 @@ async function selectFileForInput(cdp, selector, filePath) {
  * @param {{timeoutMs: number}} opts
  * @returns {Promise<boolean>} — demo 固件**真的**装上了（PC 回到 0）
  */
+/**
+ * **显式装 demo 固件**（v0.59 批 · 复位语义回归批）—— 包装
+ * {@link loadFirmwareFile} 用**共享 demo 字节**（`.bin`）。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<boolean>}
+ */
 async function loadDemoFirmware(cdp, opts) {
+    return loadFirmwareFile(cdp, opts, DEMO_FIRMWARE_PATH);
+}
+
+async function loadFirmwareFile(cdp, opts, filePath) {
     // ⚠️ **先点一下选择器**（用户点开文件选择器的那一下）⇒ ⇒ 页面里那个
     // 「点开之前先清空当前选择」的逻辑会把 `value` 清掉 ⇒ ⇒ 于是「选回**同一个**
     // 文件」在浏览器看来**也是变了**⇒ ⇒ `change` 照常触发（⛔ 不许「选不动」
@@ -4505,7 +4666,7 @@ async function loadDemoFirmware(cdp, opts) {
         input.dispatchEvent(new MouseEvent("click", { bubbles: true }));
         return "clicked";
     })()`);
-    await selectFileForInput(cdp, 'input[data-image-load-from="topbar"]', DEMO_FIRMWARE_PATH);
+    await selectFileForInput(cdp, 'input[data-image-load-from="topbar"]', filePath);
     // ⚠️⚠️ **必须等「待加载的字节真的读到了」再点「加载固件」**（v0.59 批 ·
     // 施工期实测撞到 ⇒ ⇒ **竞态** ⇒ ⇒ 偶发「装载没发生」）。
     //
@@ -8482,6 +8643,460 @@ async function runPinLevelRoutingSection(cdp, opts) {
     }
 }
 /**
+ * **MCU 概念 + ISA 门禁**那一段（v0.75 · STAGE-51 · B-161 ~ B-167）。
+ *
+ * ## 它要断什么
+ *
+ * - **B-161**：真机上提交一份**带 `mcu`** 的板（`rv32ima`）⇒ ⇒ 内核**收下**
+ *   ⇒ ⇒ **ELF32 固件照常装**（demo 固件）⇒ ⇒ **真的跑**（step 一次 ⇒
+ *   x1 = 0x2a）；
+ * - **B-162**：声明 **`rv64ima`** 的板 + ELF32 固件 ⇒ ⇒ **拒** ⇒ ⇒ 界面显示
+ *   **内核原文** `E_PLT-20` ⇒ ⇒ 且**生效板没被换掉**（⇒ ⇒ **应用前判**那条
+ *   在真机上也成立）；
+ * - **B-163**：⚠️ **必要对照** —— **没有 `mcu`** 的板 + 同固件 ⇒ ⇒ **照常装**
+ *   （⇒ ⇒ 缺省零风险）；
+ * - **B-164**：声明 **`rv32i`**（无 c）的板 + **RVC 固件** ⇒ ⇒ **拒** `E_PLT-20`
+ *   ⇒ ⇒ **收尾复原**（板 + demo 固件 ⇒ 不污染后续段）；
+ * - **B-165**：编辑器显示 **MCU 区**（isa / vendor / model / 向量表）⇒ ⇒
+ *   界面上看得到（含**当前生效板 MCU（只读）**那行）；
+ * - **B-166**：（顺手整改）加载固件后编辑面**不自动实例化**：草稿为空 +
+ *   生效板=内置 ⇒ ⇒ 界面显示「当前生效板（自动选择 · 只读）」横幅、**不见**
+ *   器件实例；点「从内置模版开始」⇒ ⇒ 器件进入草稿（可编辑）；
+ * - **B-167**：（顺手整改）基址以 **16 进制**显示（`0x…`）。
+ *
+ * ## ⚠️ **顺序是硬约束**
+ *
+ * ① **板先、固件后** ⇒ ⇒ 门禁判的是「**当前装载的固件** vs **要应用的板**」
+ *   ⇒ ⇒ 必须先让固件在场再提交板（否则 `elf_isa.bits == 0` ⇒ 门禁跳过 ⇒
+ *   判据恒绿、零判别力）；
+ * ② **拒的场景要当场留下内核原文**（`E_PLT-20` 在界面上）⇒ ⇒ 与「没判」分得开；
+ * ③ **收尾复原**（板 + demo 固件）⇒ ⇒ 本段**不污染**后续段（真机门禁的段
+ *   **共用一个浏览器会话**）。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{skipped: boolean, checks: object[]}>}
+ */
+async function runMcuConceptSection(cdp, opts) {
+    /** @type {{name: string, ok: boolean, detail: string}[]} */
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+    const tmpDir = mkdtempSync(join(tmpdir(), "riscv-mcu-"));
+
+    /** 提交一块板（走界面那条路：发 `riscv:command` 信号）。 */
+    const submitBoard = async (board, requestId) => {
+        await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+            detail: {
+                action: "submit-memory-map",
+                requestId: ${JSON.stringify(requestId)},
+                viewId: "memory-map",
+                params: { description: ${JSON.stringify(board)} },
+            },
+        }))`);
+    };
+
+    /**
+     * 从**内核那条 `memory.map` 事件**里找某一块板的生效图（**按板 id 找**，
+     * 不是「最后一条」——本段要提交好几块板）。附带回显的 `mcu` 字段。
+     */
+    const mapOfBoard = async (boardId) => awaitEval(cdp, `(() => {
+        const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
+        let last = null;
+        for (const raw of frames) {
+            let frame = null;
+            try { frame = JSON.parse(String(raw)); } catch (e) { continue; }
+            const msg = (frame && frame.payload) ? frame.payload : null;
+            const body = (msg && msg.payload) ? msg.payload : null;
+            const ev = (body && body.Event) ? body.Event : null;
+            if (!ev || !ev.MemoryMap) continue;
+            const desc = ev.MemoryMap.description || {};
+            last = {
+                id: String(desc.id ?? ""),
+                mcu: desc.mcu ?? null,
+                revision: Number(ev.MemoryMap.revision ?? 0),
+            };
+        }
+        return last && last.id === ${JSON.stringify(boardId)} ? last : null;
+    })()`);
+
+    /** 取**最后一条**生效图的板 id（⇒ ⇒ 「生效板没被换掉」的判据）。 */
+    const latestMapId = async () => awaitEval(cdp, `(() => {
+        const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
+        let id = null;
+        for (const raw of frames) {
+            let frame = null;
+            try { frame = JSON.parse(String(raw)); } catch (e) { continue; }
+            const msg = (frame && frame.payload) ? frame.payload : null;
+            const body = (msg && msg.payload) ? msg.payload : null;
+            const ev = (body && body.Event) ? body.Event : null;
+            if (!ev || !ev.MemoryMap) continue;
+            id = String((ev.MemoryMap.description || {}).id ?? "");
+        }
+        return id;
+    })()`);
+
+    /** 等某一块板的生效图**真的出现**。 */
+    const waitForBoard = async (boardId) => {
+        const deadline = Date.now() + opts.timeoutMs;
+        while (Date.now() < deadline) {
+            const now = await mapOfBoard(boardId);
+            if (now) return now;
+            await sleep(200);
+        }
+        return null;
+    };
+
+    /** 等**界面**上出现某条错误原文（含给定码）。 */
+    const waitForError = async (needle) => {
+        const deadline = Date.now() + opts.timeoutMs;
+        while (Date.now() < deadline) {
+            const probe = await awaitEval(cdp, `(() => {
+                const view = document.querySelector('[data-view-body="memory-map"]');
+                const el = view ? (view.querySelector('[data-memory-map-error]')
+                    || view.querySelector('.error') || view.querySelector('[data-error]')) : null;
+                return el ? String(el.textContent || "").trim() : null;
+            })()`);
+            if (probe && String(probe).includes(needle)) return probe;
+            await sleep(200);
+        }
+        return null;
+    };
+
+    /** MCU 区 + 横幅 + 草稿器件行的**只读探针**。 */
+    const MCU_VIEW_PROBE = `(() => {
+        const view = document.querySelector('[data-view-body="memory-map"]');
+        const card = view ? view.querySelector('[data-mcu-display="1"]') : null;
+        const lines = card ? Array.from(card.querySelectorAll('[data-mcu-line]')) : [];
+        const lineOf = (label) => {
+            const el = lines.find((l) => String(l.getAttribute("data-mcu-line") ?? "") === label);
+            return el ? String(el.textContent || "").trim() : null;
+        };
+        const banner = view ? view.querySelector('[data-mmap-effective-banner="1"]') : null;
+        const loadCurrent = view ? view.querySelector('[data-action="load-current"][data-template-entry="1"]') : null;
+        // ⚠️ 空态 = 一行占位（「还没有外设窗口。」）⇒ ⇒ 不许数成 1 ⇒ ⇒ 只有
+        // **真的外设行**才算（行里有 data-mmap-index 属性）。
+        const periphRows = view
+            ? Array.from(view.querySelectorAll('[data-mmap-peripheral-rows] tbody tr'))
+                .filter((r) => r.querySelector('[data-mmap-index]') !== null)
+            : [];
+        const memRows = view ? Array.from(view.querySelectorAll('[data-mmap-memory-rows] tbody tr')) : [];
+        // ⚠️ 基址是行内**输入框**（data-mmap-region-field=base）的值（16 进制，
+        // 0x 前缀）；表格第一列是**类型**标签 ⇒ ⇒ 读列会读到「RAM / 基址 base」。
+        const firstBaseInput = memRows.length > 0
+            ? memRows[0].querySelector('[data-mmap-region-field="base"]') : null;
+        const firstMemBase = firstBaseInput
+            ? String(firstBaseInput.value ?? "").trim() : "";
+        return {
+            hasCard: !!card,
+            draftMcu: lineOf("草稿 MCU"),
+            effectiveMcu: lineOf("当前生效板 MCU（只读）"),
+            bannerText: banner ? String(banner.textContent || "").trim() : null,
+            hasLoadCurrent: !!loadCurrent,
+            periphCount: periphRows.length,
+            memRowCount: memRows.length,
+            memBase: firstMemBase,
+            errorText: null,
+        };
+    })()`;
+
+    try {
+        // ---- ① 切到编辑器视图 + 重装帧捕获钩子 ---------------------------
+        // ⚠️ 与 pinLevelRouting 段同款：**真机门禁的每一段都假定「上一段留下的
+        //   现场还在」** ⇒ ⇒ 上段没刷新页面，但保险起见**再装一次**（幂等）。
+        await runEffect(cdp, 'location.hash = "#/memory-map";');
+        await sleep(800);
+        await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
+
+        // ---- ② **卸载工程** ⇒ ⇒ 改板**立即生效** --------------------------
+        await runEffect(cdp, `(() => {
+            const btn = document.querySelector('[data-action="unload-project"]');
+            if (!btn) return "no-button";
+            btn.click();
+            return "clicked";
+        })()`);
+        await sleep(900);
+        const unloaded = await awaitEval(cdp, `(() => {
+            const pending = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+            return !pending;
+        })()`);
+        add(
+            "**前置**：工程已**卸载** ⇒ ⇒ 改板**立即生效**",
+            unloaded === true,
+            `无待生效横幅=${unloaded}`,
+        );
+        if (unloaded !== true) {
+            return { skipped: false, checks };
+        }
+
+        // ---- ③ B-161：带 mcu 的板 ⇒ ⇒ 内核收下 ⇒ ⇒ ELF32 固件照常装 + 跑 --
+        await submitBoard(BV_MCU_BOARD, "bv-mcu-board");
+        const mcuMap = await waitForBoard("browser-verify-mcu");
+        add(
+            "B-161a · 真机上提交一份**带 `mcu`** 的板（`rv32ima`）⇒ ⇒ 内核**收下**"
+            + " ⇒ ⇒ 生效图**回显** MCU（isa / vendor / model / 向量表）",
+            mcuMap !== null
+                && mcuMap.mcu !== null
+                && String(mcuMap.mcu.isa ?? "") === "rv32ima"
+                && Number((mcuMap.mcu.vector_table || {}).base ?? 0) === 2147483648
+                && Number((mcuMap.mcu.vector_table || {}).entries ?? 0) === 16,
+            `生效图=${JSON.stringify(mcuMap)}`,
+        );
+
+        // B-165 · MCU 区**看得到**（当前生效板那行 = 上面这块 rv32ima）。
+        await sleep(400);
+        const mcuView1 = await awaitEval(cdp, MCU_VIEW_PROBE);
+        add(
+            "B-165 · 编辑器显示 **MCU 区** ⇒ ⇒ 界面上看得到（当前生效板 MCU："
+            + " isa / vendor / model / 向量表）",
+            mcuView1?.hasCard === true
+                && mcuView1?.effectiveMcu !== null
+                && String(mcuView1.effectiveMcu).includes("rv32ima")
+                && String(mcuView1.effectiveMcu).includes("qemu")
+                && String(mcuView1.effectiveMcu).includes("virt")
+                && String(mcuView1.effectiveMcu).includes("0x80000000"),
+            `MCU 卡=${mcuView1?.hasCard} 生效板行=${JSON.stringify(mcuView1?.effectiveMcu)}`,
+        );
+
+        // ---- ④ B-161b：**ELF32 固件照常装**（demo）⇒ ⇒ **真的跑** ---------
+        // ⚠️ 装的是 **demo32.elf**（真 ELF32）⇒ ⇒ 门禁这次**真的判它**（rv32ima
+        // 板 + ELF32 ⇒ 放行）⇒ ⇒ raw `.bin` 会让门禁被跳过（B-162 假绿根因）。
+        const demo32Path = join(tmpDir, "demo32.elf");
+        writeFileSync(demo32Path, buildDemoElf32());
+        const demoLoaded = await loadFirmwareFile(cdp, opts, demo32Path);
+        add(
+            "B-161b · **ELF32 固件照常装**（demo 固件 + 带 mcu 的板 ⇒ ⇒ 门禁放行）",
+            demoLoaded === true,
+            `demo 固件装上了=${demoLoaded}`,
+        );
+        if (demoLoaded === true) {
+            await runEffect(cdp, 'location.hash = "#/debug";');
+            await sleep(800);
+            await runEffect(cdp, `(() => {
+                const b = document.querySelector('[data-topbar-action="step"]');
+                if (!b) return false;
+                b.click();
+                return true;
+            })()`);
+            await sleep(700);
+            const reg = await awaitEval(cdp, `(() => {
+                const cells = Array.from(document.querySelectorAll('[data-view-body="debug"] .reg-grid > div'));
+                const cellText = (i) => {
+                    const c = cells[i];
+                    return c ? String((c.querySelector("code") || {}).textContent || "").trim() : "";
+                };
+                return {
+                    x1: cellText(1),
+                    pc: String((document.querySelector('[data-view-body="debug"] .pc') || {}).textContent || "").trim(),
+                };
+            })()`);
+            add(
+                "B-161c · **真的跑**：step 一次 ⇒ ⇒ x1 = 0x2a（demo 固件第一条指令）"
+                + " ⇒ ⇒ 带 mcu 的板**不**破坏执行",
+                String(reg?.x1 ?? "") === "0000002a" && String(reg?.pc ?? "") === "0x00000004",
+                `x1=${JSON.stringify(reg?.x1)} pc=${JSON.stringify(reg?.pc)}`,
+            );
+        }
+        await runEffect(cdp, 'location.hash = "#/memory-map";');
+        await sleep(800);
+
+        // ---- ⑤ B-162：rv64ima 板 + ELF32 固件 ⇒ ⇒ 拒 + 应用前判 ----------
+        // ⚠️ 门禁时机 = **装载**（K-2 口径）：提交带 mcu 的板时**不**立刻校验
+        // （已装载 ⇒ 待生效）⇒ ⇒ **重装工程**（reload-project）才让内核把
+        // 待生效板**应用** ⇒ ⇒ 那一步 gate：rv64ima + ELF32 ⇒ `E_PLT-20` ⇒ ⇒
+        // 装载失败 ⇒ 顶部通知条（`#kernel-note`）显示**内核原文**。
+        await submitBoard(BV_MCU_BOARD_RV64, "bv-mcu-board-rv64");
+        await sleep(400);
+        await runEffect(cdp, `(() => {
+            const btn = document.querySelector('[data-action="reload-project"]');
+            if (!btn) return "no-button";
+            btn.click();
+            return "clicked";
+        })()`);
+        await sleep(1200);
+        const rv64Note = await awaitEval(cdp, `(() => {
+            const el = document.getElementById("kernel-note");
+            return el ? String(el.textContent || "") : null;
+        })()`);
+        const latestAfterRv64 = await latestMapId();
+        add(
+            "B-162 · 声明 **`rv64ima`** 的板 + ELF32 固件 ⇒ ⇒ **拒** ⇒ ⇒ 界面"
+            + " 显示**内核原文** `E_PLT-20`（位宽不匹配）",
+            rv64Note !== null && String(rv64Note).includes("E_PLT-20"),
+            `顶部通知=${JSON.stringify(rv64Note)}`,
+        );
+        add(
+            "B-162b · ⚠️ **应用前判**：拒了之后**生效板没被换掉**（还是 rv32ima 那块）",
+            latestAfterRv64 === "browser-verify-mcu",
+            `最后一条生效图板 id=${JSON.stringify(latestAfterRv64)}`,
+        );
+
+        // ---- ⑥ B-163：**没有 mcu** 的板 + 同固件 ⇒ ⇒ **照常装** -----------
+        await runEffect(cdp, `(() => {
+            const btn = document.querySelector('[data-action="unload-project"]');
+            if (!btn) return "no-button";
+            btn.click();
+            return "clicked";
+        })()`);
+        await sleep(900);
+        await submitBoard(BV_NO_MCU_BOARD, "bv-no-mcu-board");
+        const noMcuMap = await waitForBoard("browser-verify-no-mcu");
+        // ⚠️ 同固件 = **demo32.elf**（B-161b 那份）⇒ ⇒ 无 mcu ⇒ 门禁跳过 ⇒
+        // **照常装得上**（B-163 要断的就是这条「缺省零风险」）。
+        const noMcuLoaded = await loadFirmwareFile(cdp, opts, demo32Path);
+        add(
+            "B-163 · ⚠️ **必要对照**：**没有 `mcu`** 的板 + 同固件 ⇒ ⇒ **照常装**"
+            + "（⇒ ⇒ 缺省零风险 ⇒ ⇒ 存量板档案不受新门禁影响）",
+            noMcuMap !== null && noMcuLoaded === true,
+            `生效图=${JSON.stringify(noMcuMap)} 同固件装上了=${noMcuLoaded}`,
+        );
+
+        // ---- ⑦ B-164：rv32i（无 c）板 + RVC 固件 ⇒ ⇒ 拒 + 收尾复原 -------
+        // ⑦a · 先装 RVC 固件（当前板 = 无 mcu ⇒ ⇒ 门禁跳过 ⇒ 装成功）。
+        const rvcElfPath = join(tmpDir, "rvc.elf");
+        writeFileSync(rvcElfPath, buildRvcElf());
+        await runEffect(cdp, `(() => {
+            const input = document.querySelector('input[data-image-load-from="topbar"]');
+            if (!input) return "no-input";
+            input.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+            return "clicked";
+        })()`);
+        await selectFileForInput(cdp, 'input[data-image-load-from="topbar"]', rvcElfPath);
+        const rvcPending = await waitForImagePendingReady(cdp, opts.timeoutMs);
+        let rvcLoaded = false;
+        if (rvcPending.ready) {
+            await runEffect(cdp,
+                'document.querySelector(\'[data-action="load-image"][data-image-load-from="topbar"]\').click();');
+            rvcLoaded = true;
+        }
+        add(
+            "**前置**：**RVC 固件**（`e_flags` = 0x1）真的装上了（当前板无 mcu ⇒ 门禁跳过）",
+            rvcLoaded === true,
+            `待加载就绪=${JSON.stringify(rvcPending)}`,
+        );
+
+        // ⑦b · 提交 rv32i（无 c）板 ⇒ ⇒ 固件 has_rvc + 板不含 c ⇒ ⇒ **拒**。
+        // ⚠️ 同 B-162 的时机口径：提交（待生效）⇒ ⇒ **reload** 触发装载 gate
+        // ⇒ ⇒ 当前工程 = rvc.elf（⑦a 装的）⇒ ⇒ rv32i（无 c）+ RVC ⇒ `E_PLT-20`
+        // ⇒ ⇒ 顶部通知条显示**内核原文**。
+        await submitBoard(BV_MCU_BOARD_RV32I, "bv-mcu-board-rv32i");
+        await sleep(400);
+        await runEffect(cdp, `(() => {
+            const btn = document.querySelector('[data-action="reload-project"]');
+            if (!btn) return "no-button";
+            btn.click();
+            return "clicked";
+        })()`);
+        await sleep(1200);
+        const rv32iNote = await awaitEval(cdp, `(() => {
+            const el = document.getElementById("kernel-note");
+            return el ? String(el.textContent || "") : null;
+        })()`);
+        add(
+            "B-164 · 声明 **`rv32i`**（无 c）的板 + **RVC 固件** ⇒ ⇒ **拒** `E_PLT-20`"
+            + "（固件用了板不支持的压缩指令位 —— c 位单方向严格）",
+            rv32iNote !== null && String(rv32iNote).includes("E_PLT-20"),
+            `顶部通知=${JSON.stringify(rv32iNote)}`,
+        );
+
+        // ⑦c · **收尾复原**（板 + demo 固件）⇒ ⇒ 不污染后续段。
+        await submitBoard(BV_BOARD, "bv-mcu-restore-board");
+        await sleep(600);
+        const restored1 = await loadDemoFirmware(cdp, opts);
+        add(
+            "**收尾**：板与**装载状态**都复原（⇒ ⇒ 后面那些段不被污染）",
+            restored1 === true,
+            `demo 固件装上了=${restored1}`,
+        );
+
+        // ---- ⑧ B-166：加载固件后编辑面**不自动实例化** + 模板入口 ---------
+        // ⚠️ 前置一：**先把草稿重置成默认**（点「重建草稿」= `new-draft`）⇒ ⇒
+        //   前面那些段（product tree / 差量段）把 `state.draft` 改成了别的
+        //   板 ⇒ ⇒ 不重置就测不到「草稿从空起步」。
+        await runEffect(cdp, `(() => {
+            const btn = document.querySelector('[data-action="new-draft"]');
+            if (!btn) return "no-button";
+            btn.click();
+            return "clicked";
+        })()`);
+        await sleep(500);
+        // ⚠️ 前置二：生效板 = **当前工程**（内置模板档）⇒ ⇒ 「重新装载工程」
+        //   重新 LoadProject ⇒ ⇒ 内核重推 memory.map ⇒ ⇒ 草稿**仍是默认**
+        //   （前端**不**自动实例化 ⇒ ⇒ 这正是本批要断的）⇒ ⇒ 编辑面从
+        //   **默认草稿**起步。
+        await runEffect(cdp, `(() => {
+            const btn = document.querySelector('[data-action="reload-project"]');
+            if (!btn) return "no-button";
+            btn.click();
+            return "clicked";
+        })()`);
+        await sleep(1200);
+        const mcuView2 = await awaitEval(cdp, MCU_VIEW_PROBE);
+        add(
+            "B-166a · 加载固件后编辑面**不自动实例化**：草稿为空 + 生效板=内置 ⇒ ⇒"
+            + " 界面显示「当前生效板（自动选择 · 只读）」横幅",
+            mcuView2?.bannerText !== null
+                && String(mcuView2.bannerText).includes("自动选择")
+                && String(mcuView2.bannerText).includes("只读"),
+            `横幅=${JSON.stringify(mcuView2?.bannerText)}`,
+        );
+        add(
+            "B-166b · **不见器件实例**（草稿从默认起步：0 个外设窗口）⇒ ⇒"
+            + " 板级视图由**你**配置，平台不默认选",
+            Number(mcuView2?.periphCount ?? -1) === 0,
+            `草稿外设窗口数=${mcuView2?.periphCount}`,
+        );
+        add(
+            "B-166c · 「**从内置模版开始**」按钮在（把模板导入草稿自己改）",
+            mcuView2?.hasLoadCurrent === true,
+            `按钮存在=${mcuView2?.hasLoadCurrent}`,
+        );
+        if (mcuView2?.hasLoadCurrent === true) {
+            // ⚠️ 先钉死 memory-map 视图（reload-project 可能把 hash 切走 ⇒ ⇒
+            // 编辑器不在 DOM ⇒ ⇒ 点击落空 ⇒ 草稿不动 ⇒ B-166d 假红）。
+            await runEffect(cdp, 'location.hash = "#/memory-map";');
+            await sleep(500);
+            const clicked = await runEffect(cdp, `(() => {
+                const btn = document.querySelector('[data-action="load-current"][data-template-entry="1"]');
+                if (!btn) return "no-btn";
+                btn.click();
+                return "clicked";
+            })()`);
+            await sleep(600);
+            const mcuView3 = await awaitEval(cdp, MCU_VIEW_PROBE);
+            console.log("B-166d 点击:", clicked, "草稿外设=", mcuView3?.periphCount,
+                "内存行=", mcuView3?.memRowCount);
+            add(
+                "B-166d · 点「从内置模版开始」⇒ ⇒ 生效板描述**进入草稿**（分段行数"
+                + " > 默认草稿的 1 段 ⇒ ⇒ 可编辑）",
+                Number(mcuView3?.memRowCount ?? 0) > 1,
+                `草稿内存行数=${mcuView3?.memRowCount}`,
+            );
+            add(
+                "B-167 · （顺手整改）基址以 **16 进制**显示（`0x…`）——草稿 RAM 段"
+                + " 首行基址",
+                mcuView3?.memBase !== null
+                    && /^0x[0-9a-f]+$/i.test(String(mcuView3?.memBase ?? "")),
+                `草稿 RAM 首行基址=${JSON.stringify(mcuView3?.memBase)}`,
+            );
+        }
+
+        // ---- ⑨ **最终收尾**：板 + 装载状态复原 ---------------------------------
+        await submitBoard(BV_BOARD, "bv-mcu-final-restore");
+        await sleep(600);
+        const restored2 = await loadDemoFirmware(cdp, opts);
+        add(
+            "**收尾**：最终板与**装载状态**都复原（⇒ ⇒ 后续段拿到正常现场）",
+            restored2 === true,
+            `demo 固件装上了=${restored2}`,
+        );
+
+        return { skipped: false, checks };
+    } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+    }
+}
+
+/**
  * STAGE-46 · v0.70 批的真机探针：**基址规划面板**。
  *
  * ⚠️ **按 `data-mmap-row` 取那一行**（不是「第几行」）⇒ ⇒ RAM / ROM 与外设
@@ -8577,7 +9192,11 @@ async function runBasePlannerSection(cdp, opts) {
     add(
         "B-138 · 真点「**用这个**」⇒ ⇒ **目标行**的基址**真的**变了"
         + "（⇒ ⇒ 入口**不是**个摆设 ⇒ ⇒ 用户挑的那条**真的**填进去了）",
-        p?.targetBase !== baseBefore && String(p?.targetBase ?? "") === String(gapFrom ?? ""),
+        p?.targetBase !== baseBefore && (() => {
+            const raw = String(p?.targetBase ?? "").trim();
+            const value = /^0x/i.test(raw) ? parseInt(raw, 16) : parseInt(raw, 10);
+            return value === Number(gapFrom ?? NaN);
+        })(),
         `点之前=${JSON.stringify(baseBefore)} 点之后=${JSON.stringify(p?.targetBase)}`
         + ` 面板给的那个=${JSON.stringify(gapFrom)} 目标行=${p?.targetIndex}`,
     );
@@ -10234,6 +10853,20 @@ async function main() {
         );
         registerSection("pinLevelRouting", pinLevelRouting.checks, {
             title: "引脚级连线（真机收下带引脚的板 · guest 真的领到那个源 · 再提交一次相同 · 老格式照旧能装 · 非法事件名报既有码 · 没有连线也照旧能装）",
+        });
+
+        // -- the MCU CONCEPT (STAGE-51 · v0.75 · B-161 ~ B-167) ----------------
+        // ⚠️ **必须排在 pinLevelRouting 之后**：那一段收尾复原成「用户板 +
+        //   demo 固件」⇒ ⇒ 本段要的是**自己的**板（按板 id 找生效图 ⇒ 不受
+        //   上一段留下的现场影响）。
+        // ⚠️ **必须排在 basePlanner 之前**：本段也会改板 ⇒ ⇒ ⇒ 后面那些段
+        //   拿到的还是本段**复原**过的那张。
+        const mcuConcept = await runSection(
+            "mcuConcept",
+            () => runMcuConceptSection(cdp, opts),
+        );
+        registerSection("mcuConcept", mcuConcept.checks, {
+            title: "MCU 概念（带 mcu 的板照常装+跑 · rv64+ELF32 拒且生效板没动 · 无 mcu 照常装 · rv32i+RVC 拒且复原 · MCU 区展示 · 加载固件不自动实例化 · 基址 16 进制）",
         });
 
         // -- the BASE PLANNER (STAGE-46 · v0.70 · B-136 ~ B-140) --------------        // ⚠️ **必须排在板级内存图那段之后**：那一段已经把一张板配出来了 ⇒ ⇒

@@ -76,6 +76,24 @@ pub struct LoadImage {
     /// Names are the raw section names (e.g. `.symtab`, `.debug_line`).
     /// Only the whitelist is extracted — the whole file is never kept.
     pub debug_sections: Vec<(String, Vec<u8>)>,
+    /// ELF 头的 RISC-V ISA 事实（v0.75 · STAGE-51 · D-175 的 F）。
+    ///
+    /// ⚠️ 内核装载 ISA 门禁（`E_PLT-20`）的**判据输入**：`bits`（M-06 只
+    /// 收 ELF32 ⇒ 恒为 32）+ `has_rvc`（`e_flags` 带 `EF_RISCV_RVC`）。
+    /// m/a/f/d 在 ELF 头查不到 ⇒ ⇒ 门禁只查 class 与 c 位（如实登记）。
+    pub elf_isa: ElfIsaFacts,
+}
+
+/// ELF 头的 RISC-V ISA 事实（v0.75 · STAGE-51 · D-175 的 F）。
+///
+/// ⚠️ `EF_RISCV_RVC = 1`（`e_flags` 的第 0 位）⇒ ⇒ 唯一能从这个 ELF32
+/// 头拿到的「扩展位」⇒ ⇒ c 位单方向门禁就吃它。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ElfIsaFacts {
+    /// ELF class 位宽（恒 32 —— M-06 只收 ELF32）。
+    pub bits: u32,
+    /// `e_flags` 带 `EF_RISCV_RVC`（=1，固件含压缩指令）。
+    pub has_rvc: bool,
 }
 
 impl Default for LoadImage {
@@ -84,6 +102,7 @@ impl Default for LoadImage {
             segments: Vec::new(),
             entry: 0,
             debug_sections: Vec::new(),
+            elf_isa: ElfIsaFacts::default(),
         }
     }
 }
@@ -467,6 +486,8 @@ pub fn parse_raw(
         segments: vec![(base, bytes.to_vec())],
         entry: 0,
         debug_sections: Vec::new(),
+        // 非 ELF ⇒ 无 ISA 头 ⇒ 缺省（bits=0 ⇒ 内核 ISA 门禁跳过它）。
+        elf_isa: ElfIsaFacts::default(),
     })
 }
 

@@ -69,7 +69,7 @@ fn first_memory_map(events: &[EventPayload]) -> MemoryMapState {
         } = e
         {
             return MemoryMapState {
-                description: description.clone(),
+                description: *description.clone(),
                 pending: *pending,
                 loaded: *loaded,
                 revision: *revision,
@@ -124,6 +124,7 @@ fn user_board() -> PlatformDescription {
         ],
         roles: None,
         pins: None,
+        mcu: None,
     }
 }
 
@@ -466,6 +467,7 @@ fn target_with_three_changes() -> PlatformDescription {
         ],
         roles: None,
         pins: None,
+        mcu: None,
     }
 }
 

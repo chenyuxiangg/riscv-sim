@@ -228,6 +228,7 @@ fn an_over_budget_region_is_rejected_before_anything_is_mapped() {
         wiring: None,
         roles: None,
         pins: None,
+        mcu: None,
     };
 
     let mut bus = Bus::new();
@@ -686,6 +687,7 @@ fn a_broken_description_reports_its_own_code() {
         wiring: None,
         roles: None,
         pins: None,
+        mcu: None,
     };
     // ③ 预算超了 ⇒ E_PLT-07。
     let over_budget = PlatformDescription {
@@ -707,6 +709,7 @@ fn a_broken_description_reports_its_own_code() {
         wiring: None,
         roles: None,
         pins: None,
+        mcu: None,
     };
     // ④ 器件 id 重复 ⇒ E_PLT-08。
     let duplicate_id = PlatformDescription {
@@ -738,6 +741,7 @@ fn a_broken_description_reports_its_own_code() {
         wiring: None,
         roles: None,
         pins: None,
+        mcu: None,
     };
 
     let cases: [(&str, PlatformDescription, u16); 4] = [
