@@ -427,9 +427,12 @@ export function buildGpioPinIrqElf() {
  *
  * @param {number[]} words
  * @param {number} paddr — 落址
+ * @param {{e_flags?: number}} [options] — v0.75 · STAGE-51：`e_flags`（偏移 36）
+ *   —— 内核 ISA 门禁（`E_PLT-20`）的判据 `EF_RISCV_RVC = 0x1` ⇒ ⇒ RVC 固件
+ *   的夹具从这里造（默认 0 ⇒ 既有夹具字节**一个都不变**）。
  * @returns {Buffer}
  */
-export function buildElfFromWords(words, paddr) {
+export function buildElfFromWords(words, paddr, options = {}) {
     const EHDR = 52;
     const PHDR = 32;
     const text = Buffer.alloc(words.length * 4);
@@ -448,6 +451,7 @@ export function buildElfFromWords(words, paddr) {
     out.writeUInt32LE(1, 20); // e_version
     out.writeUInt32LE(paddr, 24); // e_entry
     out.writeUInt32LE(EHDR, 28); // e_phoff
+    out.writeUInt32LE(options.e_flags ?? 0, 36); // e_flags（RVC 判据 · v0.75）
     out.writeUInt16LE(EHDR, 40); // e_ehsize
     out.writeUInt16LE(PHDR, 42); // e_phentsize
     out.writeUInt16LE(1, 44); // e_phnum
