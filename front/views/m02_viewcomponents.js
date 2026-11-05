@@ -492,11 +492,29 @@ const memoryMapView = register({
                 return "cmd-remove-wiring";
             }
             case "load-current": {
-                const current = viewStore.getState("memory-map")?.memoryMap?.description ?? null;
-                const draft = draftFromDescription(current) ?? defaultDraft();
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-                publishMemoryMapState();
+                // ⚠️ **v0.76（STAGE-52 · 裁决 M）**：「从内置模版开始」升级为
+                // **模板库入口** ⇒ ⇒ 点它 = 把模板库卡滚进视野（清单由内核
+                // **订阅即推**，常驻渲染）⇒ ⇒ **不再**在这里把「当前生效板」
+                // 偷偷塞进草稿（B1：**不兜底**生效板）。
+                const target = root?.querySelector("[data-tpl-library]");
+                if (target) {
+                    target.scrollIntoView({ behavior: "smooth", block: "start" });
+                    target.classList.add("tpl-highlight");
+                }
                 return "cmd-load-current";
+            }
+            case "load-template": {
+                // ⚠️ **v0.76（STAGE-52 · 裁决 M）**：「导入」按钮 ⇒ 发信号
+                // 带模板 id ⇒ ⇒ 异步等待在 app 层（GetPlatformTemplate →
+                // 完整描述 → draftFromDescription → 草稿）。
+                //
+                // ⚠️ **onCommand(ev) 的参数是点击事件**（`ev`），不是 `detail`
+                //   —— r10 现场：引用 `detail` 直接 ReferenceError ⇒ 导入永远
+                //   不发生 ⇒ boardTree 段提交空板 ⇒ 后续断点段整片 cascade。
+                //   模板 id 从按钮的 `data-template-id` 读（`el.dataset`）。
+                const templateId = String(el?.dataset?.templateId ?? "");
+                if (!templateId) return "cmd-load-template-invalid";
+                return emitCommand("load-template", "memory-map", { id: templateId });
             }
             case "new-draft": {
                 viewStore.setState("memory-map", (prev) => ({ ...prev, draft: defaultDraft() }));

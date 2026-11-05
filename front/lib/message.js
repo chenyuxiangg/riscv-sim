@@ -147,7 +147,7 @@
 //   on either side turns the other side red.
 
 /** Protocol schema version — mirrors `riscv_sim_contract::SCHEMA_VERSION`. */
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 12;
 
 /**
  * 转储长度上限（字节）—— mirrors `riscv_sim_contract::DUMP_MAX_BYTES`.
@@ -183,7 +183,7 @@ export const SYMBOL_CANDIDATE_LIMIT = 16;
  * **一个定义处**（STAGE-15 裁决 K：初版让服务层「另立一个同值常量」⇒
  * 那是**两个真相** ⇒ 不接受）。
  */
-export const PLATFORM_SCHEMA_VERSION = 4;
+export const PLATFORM_SCHEMA_VERSION = 5;
 
 /**
  * **本前端能读**的平台描述格式版本 — mirrors
@@ -197,7 +197,7 @@ export const PLATFORM_SCHEMA_VERSION = 4;
  * 那个」（⇒ ⇒ 前端**写**它）⇒ ⇒ 「**本构建能读**的那些」是**另一件事**
  * ⇒ ⇒ ⇒ **两个数，两个含义**（一个约束一个落点）。
  */
-export const SUPPORTED_PLATFORM_SCHEMA_VERSIONS = [1, 2, 3, 4];
+export const SUPPORTED_PLATFORM_SCHEMA_VERSIONS = [1, 2, 3, 4, 5];
 
 /**
  * 合法性**规则集**版本 — mirrors `riscv_sim_contract::platform::PLATFORM_RULES_VERSION`.
@@ -233,7 +233,7 @@ export const SUPPORTED_PLATFORM_SCHEMA_VERSIONS = [1, 2, 3, 4];
  * ⚠️ **唯一落点**（STAGE-18 裁决 E）：住在这**一层**（`front/lib/`）⇒ 服务层
  * 与视图层**都从这里 import** ⇒ **一个定义处** ⇒ 依赖方向仍单向。
  */
-export const PLATFORM_RULES_VERSION = 6;
+export const PLATFORM_RULES_VERSION = 7;
 
 /**
  * **连线事件词表（建议清单）** — mirrors
@@ -449,6 +449,9 @@ export const EVENT_TOPIC = Object.freeze({
     // ⚠️ **器件实例**是**动态**的（随建图变化）⇒ ⇒ **每次建图后**推。
     DeviceTypes: "device.types",
     DeviceInstances: "device.instances",
+    // 契约 v12 新增：内置板模板库（STAGE-52 · 裁决 M）。
+    PlatformTemplates: "platform.templates",
+    PlatformTemplate: "platform.template",
 });
 
 /**
@@ -807,6 +810,32 @@ export const Command = Object.freeze({
      */
     listDeviceInstances: () => "ListDeviceInstances",
     /**
+     * `CommandPayload::ListPlatformTemplates` — 列出**内置板模板**
+     * （契约 v12 · STAGE-52 · 裁决 M）。
+     *
+     * ⚠️ **只读** ⇒ ⇒ 不判错 ⇒ ⇒ 零新场景码。
+     *
+     * ⚠️ **它是「平台有哪些内置模板」的那一份真相** ⇒ ⇒ 前端**查**它 ⇒ ⇒
+     * **不抄**模板数据（抄的那份是第二个真相源）。
+     *
+     * ⚠️ **unit 变体** ⇒ 线上形态是**裸字符串** `"ListPlatformTemplates"`。
+     *
+     * @returns {"ListPlatformTemplates"}
+     */
+    listPlatformTemplates: () => "ListPlatformTemplates",
+    /**
+     * `CommandPayload::GetPlatformTemplate { id }` — 取一块**内置板模板的
+     * 完整描述**（契约 v12 · STAGE-52 · 裁决 M）。
+     *
+     * ⚠️ **未知 `id` ⇒ 拒 `E_PLT-22`**（与「无板装载」同一个码 ⇒ ⇒
+     * 引导用户从模板库选择）⇒ ⇒ 前端模板库**只列清单给的 id** ⇒ ⇒
+     * 正常路径不触这个拒。
+     *
+     * @param {string} id — 模板 `id`（default / minimal / qemu-virt）
+     * @returns {{GetPlatformTemplate: {id: string}}}
+     */
+    getPlatformTemplate: (id) => ({ GetPlatformTemplate: { id } }),
+    /**
      * `CommandPayload::ResolveSymbol { name }` — 按**名字**查符号（契约 v9）。
      *
      * ⚠️ **一条命令服务两种用法**（契约 v9 §3 裁决 B）：
@@ -1090,6 +1119,38 @@ export const Event = Object.freeze({
      */
     deviceInstances: (instances) => ({
         DeviceInstances: { instances: instances ?? [] },
+    }),
+    /**
+     * `EventPayload::PlatformTemplates { templates }` — **内置板模板清单**
+     * （契约 v12 · STAGE-52 · 裁决 M）。
+     *
+     * ⚠️ 回复 `CommandPayload::ListPlatformTemplates`。
+     *
+     * ⚠️ **清单 = 元数据**（id / 名称 / 优先级 / 器件数 · **priority
+     * 升序**）⇒ ⇒ 要**完整描述**再发 `getPlatformTemplate(id)`。
+     *
+     * ⚠️ **条目原样透传** ⇒ ⇒ 前端**不复制**契约层的 DTO 形状。
+     *
+     * @param {Array<object>} templates — `PlatformTemplateInfo` 列表
+     * @returns {{PlatformTemplates: {templates: Array<object>}}}
+     */
+    platformTemplates: (templates) => ({
+        PlatformTemplates: { templates: templates ?? [] },
+    }),
+    /**
+     * `EventPayload::PlatformTemplate { description }` — **一块内置板模板
+     * 的完整描述**（契约 v12 · STAGE-52 · 裁决 M）。
+     *
+     * ⚠️ 回复 `CommandPayload::GetPlatformTemplate`。
+     *
+     * ⚠️ 描述**逐字等于内置 JSON 解析结果** ⇒ ⇒ 前端拿它当草稿起点
+     * （`draftFromDescription`）⇒ ⇒ **不抄**模板数据。
+     *
+     * @param {object} description — `PlatformDescription`
+     * @returns {{PlatformTemplate: {description: object}}}
+     */
+    platformTemplate: (description) => ({
+        PlatformTemplate: { description },
     }),
     /**
      * `EventPayload::AdminLogs { entries }` — 管理员通道导出的**日志条目**

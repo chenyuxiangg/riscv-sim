@@ -83,7 +83,8 @@ const WIRED_DESC = {
     id: "wired-board",
     name: "带连线的板",
     priority: 100,
-    auto_selectable: false,
+    // ⚠️ **v0.76（STAGE-52 · B3）**：`auto_selectable` 已废弃 ⇒ ⇒
+    // 夹具里**不再带**这个键（往返逐字比才成立）。
     region_budget_bytes: 8388608,
     regions: [
         { kind: "ram", base: 2147483648, size: 8388608 },
@@ -146,7 +147,7 @@ const PLAIN_DESC = {
     id: "plain-board",
     name: "普通板",
     priority: 100,
-    auto_selectable: false,
+    // ⚠️ **v0.76（STAGE-52 · B3）**：同上（废弃字段不进夹具）。
     region_budget_bytes: 8388608,
     regions: [
         { kind: "ram", base: 2147483648, size: 8388608 },
@@ -531,8 +532,8 @@ describe("规则集版本 · 前端镜像（C-3）", () => {
         //   信封版本仍然被**钉死**在 11（只是它不再是「不升」的那一个了）。
         assert.equal(
             message.SCHEMA_VERSION,
-            11,
-            "契约信封版本是 11（契约 v11：STAGE-48 的连线报告）",
+            12,
+            "契约信封版本是 12（契约 v12：STAGE-52 的模板库协议）",
         );
     });
 

@@ -304,10 +304,13 @@ describe("板级内存图 · 编辑器（规格 §3.3）", () => {
             description.schema_version, mm.PLATFORM_SCHEMA_VERSION,
             "描述的 `schema_version` 必须是 `PLATFORM_SCHEMA_VERSION`（不是信封的那个）",
         );
+        // ⚠️ **v0.76（STAGE-52 · B3）**：`auto_selectable` 已废弃 ⇒ ⇒
+        // 提交的描述**不再带**这个键 ⇒ ⇒ 字段集合随之收窄（与契约层
+        // `PlatformDescription` 逐字同形）。
         assert.deepEqual(
             Object.keys(description).sort(),
             [
-                "auto_selectable", "id", "name", "priority",
+                "id", "name", "priority",
                 "region_budget_bytes", "regions", "schema_version",
             ],
             "描述的字段必须与契约层的 `PlatformDescription` 逐字同形（不多不少）",
@@ -605,10 +608,12 @@ describe("板级内存图 · 装载工程后的强制重订", () => {
 describe("板级内存图 · 描述形状（契约逐字同形）", () => {
     test("草稿 ⇒ 线上描述：字段不多不少（草稿的内部字段漏不进契约）", () => {
         const description = mm.draftToDescription(mm.defaultDraft());
+        // ⚠️ **v0.76（STAGE-52 · B3）**：`auto_selectable` 已废弃 ⇒ ⇒
+        // 草稿与线上描述**都不再带**这个键。
         assert.deepEqual(
             Object.keys(description).sort(),
             [
-                "auto_selectable", "id", "name", "priority",
+                "id", "name", "priority",
                 "region_budget_bytes", "regions", "schema_version",
             ],
         );
