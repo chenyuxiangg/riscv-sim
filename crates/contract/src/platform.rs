@@ -87,7 +87,12 @@ use crate::session::{GPIO_PIN_COUNT, REGION_KIND_PERIPHERAL, REGION_KIND_RAM, RE
 /// ⚠️ **v0.75（STAGE-51 · D-175 的 F）**：**3 → 4** ⇒ ⇒ 顶层加了**可选**
 /// `mcu` 段（MCU 概念：ISA / 厂商 / 型号 / 向量表）⇒ ⇒ 老描述**缺省不带键**
 /// ⇒ ⇒ **逐字不变**（⇒ ⇒ 存量板档案**零风险** ⇒ ⇒ **缺省优先迁移**）。
-pub const PLATFORM_SCHEMA_VERSION: u32 = 4;
+/// ⚠️ **v0.76（STAGE-52）**：**4 → 5** ⇒ ⇒ **删 `auto_selectable`**（模板
+///   导入 · 不兜底生效板 · B3 决议）＋ **`pins` 段升级为引脚规格**
+///   （`PinSpec` 功能列表 · 引脚的复用功能 / 方向 + 固件动态切换）⇒ ⇒
+///   老描述**带 `auto_selectable` 键仍能解析**（serde 忽略未知字段 ⇒ ⇒
+///   **缺省优先迁移** ⇒ ⇒ 存量板档案**零风险**）。
+pub const PLATFORM_SCHEMA_VERSION: u32 = 5;
 
 /// **本构建能读**的平台描述格式版本（V-1 判的就是它）。
 ///
@@ -104,7 +109,10 @@ pub const PLATFORM_SCHEMA_VERSION: u32 = 4;
 /// **明确拒**（⇒ ⇒ 既有码 `E_PLT-01`）⇒ ⇒ ⇒ **不静默硬解**。
 /// ⚠️ **v0.74（STAGE-50）**：`[1, 2, 3]` ⇒ ⇒ 版本 **2** 的老描述（存量板
 ///   档案）**仍能装**（⇒ ⇒ **缺省优先**）⇒ ⇒ 版本 **3** 是本批写的。
-pub const SUPPORTED_PLATFORM_SCHEMA_VERSIONS: &[u32] = &[1, 2, 3, 4];
+/// ⚠️ **v0.76（STAGE-52）**：`[1, 2, 3, 4, 5]` ⇒ ⇒ 版本 **4** 的老描述
+///   （存量板档案 · 带 `auto_selectable` 键）**仍能装**（serde 忽略未知键）
+///   ⇒ ⇒ 版本 **5** 是本批写的。
+pub const SUPPORTED_PLATFORM_SCHEMA_VERSIONS: &[u32] = &[1, 2, 3, 4, 5];
 
 /// The version of the platform description's **legality rule set**.
 ///
@@ -158,7 +166,11 @@ pub const SUPPORTED_PLATFORM_SCHEMA_VERSIONS: &[u32] = &[1, 2, 3, 4];
 /// **规则收紧** ⇒ ⇒ **规则集跟着 +1**。
 /// ⚠️ **v0.75（STAGE-51）**：**规则集 6** ⇒ ⇒ 加 **V-23**（`mcu` 段词法/
 /// 形状校验；码 `E_PLT-21`）⇒ ⇒ V-22 编号不变（仍属装配期分配器）。
-pub const PLATFORM_RULES_VERSION: u32 = 6;
+/// ⚠️ **v0.76（STAGE-52）**：**规则集 7** ⇒ ⇒ V-21 语义**扩展**（引脚规格
+///   `PinSpec`：器件在 + 引脚号 + 方向 + 同引脚唯一 + 冲突）＋ 加 **V-24**
+///   （引脚规格形状 · 码 `E_PLT-19` 复用）＋ **V-25**（`pinmux` 器件形状 ·
+///   码 `E_PLT-19` / `E_PLT-23`）＋ **V-26**（无板装载 ⇒ 码 `E_PLT-22`）。
+pub const PLATFORM_RULES_VERSION: u32 = 7;
 
 /// The **upper bound** of a CLINT's timer frequency (1 THz).
 ///
@@ -198,15 +210,6 @@ pub const MAX_PLIC_SOURCES: u32 = 1024;
 /// ⇒ `ctx ≤ 16`.
 pub const MAX_PLIC_CONTEXTS: u32 = 16;
 
-/// The default value of [`PlatformDescription::auto_selectable`].
-///
-/// ⚠️ **Absent ⇒ `true`**: a description that says nothing about
-/// auto-selection **does** take part in it ⇒ a hand-written description
-/// behaves like a normal platform, not like a demo one.
-fn default_true() -> bool {
-    true
-}
-
 /// A platform description — the declared memory map of one board.
 ///
 /// The wire form is JSON (the only serialization format the repository
@@ -218,7 +221,6 @@ fn default_true() -> bool {
 ///   "id": "qemu-virt",
 ///   "name": "QEMU virt",
 ///   "priority": 20,
-///   "auto_selectable": true,
 ///   "region_budget_bytes": 134217728,
 ///   "regions": [
 ///     { "kind": "ram", "base": 0, "size": 1048576 },
@@ -227,6 +229,10 @@ fn default_true() -> bool {
 ///   ]
 /// }
 /// ```
+///
+/// ⚠️ **v0.76（STAGE-52 · B3 决议）**：`auto_selectable` 字段**废弃** ⇒ ⇒
+/// 老描述**带这个键仍能解析**（serde 忽略未知字段 ⇒ ⇒ 存量板档案零风险）；
+/// 内置板降级为**模板预设**，由用户**显式导入**（`query_templates` 那条线）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlatformDescription {
     /// Format version of this description — must be
@@ -237,24 +243,8 @@ pub struct PlatformDescription {
     pub id: String,
     /// Human-readable name.
     pub name: String,
-    /// Auto-selection order — **smaller wins** (the frozen spec §3 裁决 E:
-    /// the order must not depend on registration order or on capacity).
+    /// 模板展示顺序 — **smaller wins**（模板库列表排序用 · 不再参与自动选档）。
     pub priority: u32,
-    /// Does this description take part in **auto-selection**?
-    ///
-    /// ⚠️ **This is where the "only the high segment is looked at"
-    /// difference lives** (the frozen spec §3 裁决 E). The auto-selection
-    /// judgement asks a description for **all** of its RAM regions, so a
-    /// description whose **low** segment is bigger than the other
-    /// platforms' would win images those platforms cannot hold ⇒ the
-    /// demo platform sets this to `false` ⇒ it can only be named
-    /// **explicitly**.
-    ///
-    /// ⚠️ **Default `true`**: absent from the JSON means "a normal
-    /// platform" ⇒ a hand-written description participates unless it says
-    /// otherwise.
-    #[serde(default = "default_true")]
-    pub auto_selectable: bool,
     /// Per-region budget in bytes — the ceiling for one region's
     /// **declared** size.
     ///
@@ -327,13 +317,17 @@ pub struct PlatformDescription {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roles: Option<DeviceRoles>,
 
-    /// **引脚表**（v0.73 · STAGE-49 · D-175 的 D1）—— 每个引脚接到哪个信号。
+    /// **引脚规格**（v0.73 `pins` 段 · v0.76 **升级为功能列表**）—— 哪个
+    /// 器件的哪个引脚有哪几种功能（复用 + 方向 + 各自中断目标）。
     ///
-    /// ⚠️ **可选** ⇒ ⇒ **缺省 = 无引脚** ⇒ ⇒ **加法**⇒ ⇒ 老描述**零影响**。
+    /// ⚠️ **可选** ⇒ ⇒ **缺省 = 无引脚规格** ⇒ ⇒ 无 pinmux 行为 ⇒ ⇒ 老描述
+    /// **零影响**（缺省优先）。
     ///
-    /// ⚠️ **本批只定形状**：引脚名 / 信号名**自由** ⇒ ⇒ 语义属第 58 批。
+    /// ⚠️ **v0.76（STAGE-52 · 裁决 E/G/K）**：`PinSpec.functions[].irq` 是
+    /// **声明** ⇒ ⇒ 内核经 pinmux 器件翻译成运行时路由 ⇒ ⇒ ⛔ 不许直接写
+    /// GPIO 的 `irq_lines[pin]`（分层禁令保持）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pins: Option<Vec<PinBinding>>,
+    pub pins: Option<Vec<PinSpec>>,
 
     /// **MCU 段**（v0.75 · STAGE-51 · D-175 的 F）—— 这块板上的处理器
     /// （α 路线：一块板一个 MCU）。
@@ -584,23 +578,82 @@ pub struct DeviceRoles {
     pub main_plic: Option<String>,
 }
 
-/// **一条引脚绑定**（v0.73 · STAGE-49 · D-175 的 D1）—— 哪个器件的哪个引脚
-/// 接到了哪个**信号**。
+/// **引脚方向 —— 平台封闭枚举**（v0.76 · STAGE-52 · 裁决 F）。
 ///
-/// ⚠️ **本批只定「形状」**：引脚名与信号名**自由** ⇒ ⇒ **不**在这里判它们
-/// 合不合法 ⇒ ⇒ 那件事属**第 58 批**的通用连接路由（它才是**消费**这份表的
-/// 那一层）⇒ ⇒ ⇒ ⇒ **边界如实登记**。
+/// ⚠️ **方向是平台行为语义**（输出 ⇒ 固件写 OUT 驱动 · 输入 ⇒ 允许宿主喂
+/// `set_external_inputs` · 双向 ⇒ 两可）⇒ ⇒ **封闭**、装载时校验；功能名
+/// 才是**用户自由命名**的那一半（裁决 G）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PinDirection {
+    /// 输入：固件读 IN 拿到外部喂进来的值。
+    Input,
+    /// 输出：固件写 OUT 驱动电平。
+    Output,
+    /// 双向：两可。
+    Bidir,
+}
+
+/// **一个功能的中断目标**（v0.76 · STAGE-52 · 裁决 J）—— 中断绑「引脚 ×
+/// 当前功能」⇒ ⇒ 每个功能自带各自中断目标 ⇒ ⇒ 同引脚不同功能可拉**不同**
+/// 中断线（STM32 PA9 先例：USART1_TX → USART1 线 / GPIO → EXTI9 /
+/// I2C1 SDA → I2C1 线）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinIrq {
+    /// 拉到 PLIC 的哪个源。
+    pub source: u32,
+}
+
+/// **一个引脚的一种功能**（v0.76 · STAGE-52 · 裁决 E）。
 ///
-/// ⚠️ **唯一在这里判的是「器件在不在」** ⇒ ⇒ 指了不存在的器件 ⇒ ⇒ **拒**
-/// （`E_PLT-19`）⇒ ⇒ **不静默**。
+/// ⚠️ **`name` 开放**（用户自由命名 · **不词表化** · 裁决 G）—— 平台只做
+/// 同引脚内功能名**唯一**；`direction` 是平台枚举（裁决 F）；`irq` 可选。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PinBinding {
-    /// **器件 id**（描述里声明过的那一个）。
+pub struct PinFunction {
+    /// 功能名 —— **用户自由命名**（外设扩展沿用 `KINDS` 注册制，不限
+    /// GPIO / UART）。
+    pub name: String,
+    /// 方向 —— 平台枚举。
+    pub direction: PinDirection,
+    /// 该功能的中断目标（可选）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub irq: Option<PinIrq>,
+}
+
+/// **一条引脚规格**（v0.76 · STAGE-52 · 裁决 E）—— 哪个器件的哪个引脚有
+/// 哪几种**功能**（v0.73 `PinBinding` 升级：`signal` 单一信号 → **功能列表**）。
+///
+/// ⚠️ **本批唯一解析规则（GPIO 引脚）**：`pin` 必须形如 `pin{0..GPIO_PIN_COUNT-1}`
+/// ⇒ ⇒ 非 GPIO 器件的引脚（UART 等无引脚号概念）**本批不支持** ⇒ ⇒ 声明了
+/// ⇒ ⇒ **拒**（`E_PLT-19` · 明确不做、不静默）。
+///
+/// ⚠️ **校验**：器件在（V-21 既有语义）· 引脚号合法 · 方向合法 · 同引脚
+/// 重复声明拒 · 功能名同引脚内唯一 ⇒ ⇒ 全部 `E_PLT-19`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinSpec {
+    /// **器件 id**（描述里声明过的那一个 · 本批须为 GPIO 器件）。
     pub device: String,
-    /// **引脚名**（该器件的哪个引脚）。
+    /// **引脚名**（该器件的哪个引脚 · 本批 `pin{0..31}` 形）。
     pub pin: String,
-    /// **信号名**（这个引脚接到了哪个信号）。
-    pub signal: String,
+    /// **功能列表**（≥ 1 · 同引脚内功能名唯一）。
+    pub functions: Vec<PinFunction>,
+}
+
+/// **GPIO 引脚名的唯一解析规则**（v0.76 · STAGE-52 · 裁决 E）—— `pin{N}` 形
+/// （`N ∈ 0..GPIO_PIN_COUNT`）。
+///
+/// ⚠️ **一个落点**：契约层校验（V-24）、内核装配期路由表、pinmux 寄存器
+/// 索引都**引用**这个解析结果、**不各自解析** ⇒ ⇒ 规则只在这里活一次。
+///
+/// ⚠️ 返回 `None` = 名字不是 `pin{N}` 形**或** N 越界（不区分 —— 两个都
+/// 是「引脚名非法」）。
+pub fn parse_gpio_pin_name(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("pin")?;
+    let n: u32 = rest.parse().ok()?;
+    if n >= GPIO_PIN_COUNT as u32 {
+        return None;
+    }
+    Some(n)
 }
 
 /// **MCU 段**（v0.75 · STAGE-51 · D-175 的 F）—— 这块板上的处理器是什么。
@@ -749,6 +802,18 @@ pub enum DeviceSpec {
         /// The interrupt line this timer raises.
         irq_line: u16,
     },
+    /// **引脚复用控制器（pinmux）**（v0.76 · STAGE-52 · C1 决议）——
+    /// **平台通用基座**：服务**所有**器件的引脚 · 固件写寄存器**切换**某个
+    /// 引脚的**当前功能** ⇒ ⇒ 平台按「引脚 × 当前功能」拉中断。
+    ///
+    /// ⚠️ **本批最小形态（裁决 I）**：每引脚一个**功能选择**寄存器（偏移
+    /// `0x4 × 引脚号` · 写**功能索引**）⇒ ⇒ 不建模 AF 矩阵（§6 明确不做）。
+    /// 引脚规格声明在 `pins` 段（`PinSpec`）；pinmux 器件存在 ⇒ 启用「当前
+    /// 功能 → 中断」路由（无 `pins` 段 ⇒ 拒 `E_PLT-19` · V-25）。
+    Pinmux {
+        /// The device id — the key the restore path matches on.
+        id: String,
+    },
 }
 
 impl DeviceSpec {
@@ -771,7 +836,17 @@ impl DeviceSpec {
     /// ⚠️ **One landing spot** (裁决 I) ⇒ ⇒ the front end's `DEVICE_KINDS`
     /// is checked against **this** list by a cross-layer gate ⇒ ⇒ a new
     /// variant here turns the front end **red** instead of drifting.
-    pub const KINDS: [&'static str; 5] = ["gpio", "uart16550", "clint", "plic", "timer_riscv"];
+    ///
+    /// ⚠️ **v0.76（STAGE-52）**：加 `pinmux` ⇒ ⇒ 本清单 **6** 项（契约层
+    ///   `DeviceSpec` 第 **6** 个变体）。
+    pub const KINDS: [&'static str; 6] = [
+        "gpio",
+        "uart16550",
+        "clint",
+        "plic",
+        "timer_riscv",
+        "pinmux",
+    ];
 }
 
 impl PlatformDescription {
@@ -798,6 +873,8 @@ impl PlatformDescription {
     /// | V-17 | a peripheral device's `id` is empty | `E_PLT-15` |
     /// | V-18 | a `wiring` entry names a device that is **not** in the map (or an unknown event name) | `E_PLT-16` |
     /// | V-19 | a `wiring` entry's target is not a PLIC, or its `to.source` is **not below** that PLIC's `sources` | `E_PLT-16` |
+    /// | V-24 | a `pins` entry is not a well-formed pin spec (device not GPIO · pin not `pin{N}` · empty functions · duplicated pin / function name · irq-vs-wiring source clash) | `E_PLT-19` |
+    /// | V-25 | a `pinmux` device is declared without a `pins` section (nothing to serve) | `E_PLT-19` |
     ///
     /// ⚠️ **V-2 judges the *description's* `id`** — the **device's** `id`
     /// is judged by **V-17** ⇒ they are two different objects with two
@@ -1272,35 +1349,159 @@ impl PlatformDescription {
             }
         }
 
-        // V-21 — the **pin table** must name devices that are there
-        // (v0.73 · STAGE-49 · D-175 的 D1).
+        // V-21 + V-24 — the **pin spec table** must be well-formed
+        // (v0.73 · STAGE-49 · D-175 的 D1；**v0.76 · STAGE-52 · 裁决 E/G** 扩展为
+        // 引脚规格：器件在 + GPIO 器件 + 引脚号合法 + 功能名唯一 + 同引脚唯一
+        // + 与 wiring 冲突一致）。
         //
         // ⚠️ **Appended after V-20** ⇒ the report order of V-1 ~ V-20 is
         // unchanged, byte for byte.
         //
-        // ⚠️ **Only the device reference is judged here** ⇒ ⇒ 引脚名与信号名
-        // **自由** ⇒ ⇒ 它们的合法性属**第 58 批**（通用连接路由才是**消费**
-        // 这一层的那一层）⇒ ⇒ ⇒ **边界如实登记**。
+        // ⚠️ **v0.76 语义扩展（V-24 · 码 `E_PLT-19` 复用）**：
+        //   · 器件在（V-21 既有）⇒ ⇒ 且**必须是 GPIO 器件**（本批引脚号解析
+        //     仅 GPIO · 非 GPIO 器件引脚复用留后续 ⇒ ⇒ 明确拒、不静默）；
+        //   · `pin` 必须形如 `pin{N}` 且 `N < GPIO_PIN_COUNT`；
+        //   · `functions` 非空 · 同引脚内功能名**唯一**；
+        //   · 同 `device + pin` 不得重复声明（两个 PinSpec 撞同一引脚）。
         if let Some(pins) = self.pins.as_ref() {
-            let declared: Vec<&str> = self
+            // 器件集合：id → kind（判断 GPIO 用）。
+            let declared: Vec<(&str, &'static str)> = self
                 .regions
                 .iter()
                 .filter_map(|region| match region {
-                    RegionSpec::Peripheral { device, .. } => Some(device.id()),
+                    RegionSpec::Peripheral { device, .. } => Some((device.id(), device.kind())),
                     _ => None,
                 })
                 .collect();
-            for binding in pins {
-                if !declared.contains(&binding.device.as_str()) {
+            let mut seen: Vec<(&str, &str)> = Vec::new();
+            for spec in pins {
+                let Some((_, kind)) = declared.iter().find(|(id, _)| *id == spec.device) else {
                     return Err(PlatformError::new(
                         PLATFORM_FAMILY,
                         E_PLT_19_PINS_INVALID,
                         format!(
-                            "引脚表指向的器件 {} 不在本描述声明的器件集合里",
-                            binding.device
+                            "引脚规格指向的器件 {} 不在本描述声明的器件集合里",
+                            spec.device
+                        ),
+                    ));
+                };
+                // ⚠️ 本批唯一引脚号解析规则：GPIO 器件（`pin{N}` 形）。
+                if *kind != "gpio" {
+                    return Err(PlatformError::new(
+                        PLATFORM_FAMILY,
+                        E_PLT_19_PINS_INVALID,
+                        format!(
+                            "引脚规格指向的器件 {} 不是 GPIO（{}）⇒ ⇒ 非 GPIO 器件的 \
+                             引脚复用留后续批 · 本批明确不做",
+                            spec.device, kind
                         ),
                     ));
                 }
+                let pin_index = parse_gpio_pin_name(&spec.pin).ok_or_else(|| {
+                    PlatformError::new(
+                        PLATFORM_FAMILY,
+                        E_PLT_19_PINS_INVALID,
+                        format!(
+                            "引脚规格的引脚名 {:?} 不是 pin{{0..{}}} 形（本批唯一解析规则）",
+                            spec.pin,
+                            GPIO_PIN_COUNT - 1
+                        ),
+                    )
+                })?;
+                if spec.functions.is_empty() {
+                    return Err(PlatformError::new(
+                        PLATFORM_FAMILY,
+                        E_PLT_19_PINS_INVALID,
+                        format!("引脚 {} 的功能列表不能为空", spec.pin),
+                    ));
+                }
+                // 同引脚不得重复声明（同一 device+pin 只允许一条 PinSpec）。
+                if seen
+                    .iter()
+                    .any(|(d, p)| *d == spec.device && *p == spec.pin)
+                {
+                    return Err(PlatformError::new(
+                        PLATFORM_FAMILY,
+                        E_PLT_19_PINS_INVALID,
+                        format!(
+                            "引脚 {}.{} 被重复声明了多条引脚规格（同引脚只能一条）",
+                            spec.device, spec.pin
+                        ),
+                    ));
+                }
+                seen.push((spec.device.as_str(), spec.pin.as_str()));
+                // 同引脚内功能名唯一。
+                let mut names: Vec<&str> = Vec::new();
+                for function in &spec.functions {
+                    if function.name.is_empty() {
+                        return Err(PlatformError::new(
+                            PLATFORM_FAMILY,
+                            E_PLT_19_PINS_INVALID,
+                            format!("引脚 {} 的功能名不能为空", spec.pin),
+                        ));
+                    }
+                    if names.contains(&function.name.as_str()) {
+                        return Err(PlatformError::new(
+                            PLATFORM_FAMILY,
+                            E_PLT_19_PINS_INVALID,
+                            format!(
+                                "引脚 {} 的功能名 {:?} 重复（同引脚内功能名必须唯一）",
+                                spec.pin, function.name
+                            ),
+                        ));
+                    }
+                    names.push(function.name.as_str());
+                }
+                // 冲突校验（裁决 L）：同引脚既有 PinFunction.irq 又有
+                // wiring.from.pin 绑定 ⇒ ⇒ 两者源号**必须一致**（不一致 ⇒ 拒）。
+                if let Some(wiring) = self.wiring.as_ref() {
+                    let wired_source = wiring
+                        .iter()
+                        .filter(|wire| {
+                            wire.from.device == spec.device && wire.from.pin == Some(pin_index)
+                        })
+                        .map(|wire| wire.to.source)
+                        .collect::<Vec<_>>();
+                    for function in &spec.functions {
+                        if let Some(irq) = function.irq.as_ref() {
+                            for wired in &wired_source {
+                                if *wired != irq.source {
+                                    return Err(PlatformError::new(
+                                        PLATFORM_FAMILY,
+                                        E_PLT_19_PINS_INVALID,
+                                        format!(
+                                            "引脚 {}.{} 的 irq 源 {} 与 wiring 绑定源 {} \
+                                             不一致（同引脚两路径必须指向同一源）",
+                                            spec.device, spec.pin, irq.source, wired
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // V-25 — 声明了 `pinmux` 器件但没有 `pins` 段 ⇒ ⇒ 控制器空转 ⇒ ⇒
+        // 用户配置不一致 ⇒ ⇒ **拒**（`E_PLT-19` · V-25 · 码与引脚规格同族）。
+        //
+        // ⚠️ **v0.76（STAGE-52 · 裁决 I）**：pinmux 器件 = 引脚功能选择器 ⇒ ⇒
+        // 它服务 `pins` 段声明的引脚 ⇒ ⇒ 无 `pins` 段 ⇒ 无可服务 ⇒ ⇒ 拒。
+        {
+            let has_pinmux = self.regions.iter().any(|region| match region {
+                RegionSpec::Peripheral { device, .. } => {
+                    matches!(device, DeviceSpec::Pinmux { .. })
+                }
+                _ => false,
+            });
+            if has_pinmux && self.pins.is_none() {
+                return Err(PlatformError::new(
+                    PLATFORM_FAMILY,
+                    E_PLT_19_PINS_INVALID,
+                    "声明了 pinmux 器件但没有 pins 段（引脚规格）⇒ ⇒ pinmux 没有 \
+                     任何引脚可服务",
+                ));
             }
         }
 
@@ -1615,7 +1816,8 @@ impl DeviceSpec {
             | DeviceSpec::Uart16550 { id, .. }
             | DeviceSpec::Clint { id, .. }
             | DeviceSpec::Plic { id, .. }
-            | DeviceSpec::TimerRiscv { id, .. } => id,
+            | DeviceSpec::TimerRiscv { id, .. }
+            | DeviceSpec::Pinmux { id } => id,
         }
     }
 
@@ -1628,6 +1830,7 @@ impl DeviceSpec {
             DeviceSpec::Clint { .. } => "clint",
             DeviceSpec::Plic { .. } => "plic",
             DeviceSpec::TimerRiscv { .. } => "timer_riscv",
+            DeviceSpec::Pinmux { .. } => "pinmux",
         }
     }
 
@@ -1686,6 +1889,8 @@ impl DeviceSpec {
             // ⚠️ **这台器件没有数值参数**（只有 `id` + `irq_line`，而 `irq_line`
             //   归**跨字段**规则 V-15 管）⇒ ⇒ 空列表。
             DeviceSpec::TimerRiscv { .. } => Vec::new(),
+            // ⚠️ **pinmux 没有数值参数**（只有 `id`；寄存器布局是固定偏移）⇒ ⇒ 空列表。
+            DeviceSpec::Pinmux { .. } => Vec::new(),
         }
     }
 
@@ -1810,7 +2015,6 @@ mod tests {
             id: "qemu-virt".to_string(),
             name: "QEMU virt".to_string(),
             priority: 20,
-            auto_selectable: true,
             region_budget_bytes: 134_217_728,
             max_region_bytes: None,
             regions: vec![
@@ -1943,13 +2147,10 @@ mod tests {
     /// **A-2** — the description's **top-level key set** is pinned.
     ///
     /// ⚠️ `description` is **absent** when it is `None` (it carries
-    /// `skip_serializing_if`) ⇒ the key set is the seven mandatory keys,
-    /// not eight.
+    /// `skip_serializing_if`) ⇒ the key set is the seven mandatory keys.
     ///
-    /// ⚠️ `auto_selectable` **is** one of them: it is a plain field (no
-    /// `skip_serializing_if`) ⇒ it is always written, because a
-    /// description that hides it would hide **the difference between the
-    /// real platforms and the demo one**.
+    /// ⚠️ **v0.76（STAGE-52 · B3 决议）**：`auto_selectable` **不在其中**
+    /// （字段已废弃 · 线上不再有该键 ⇒ ⇒ 老描述带键靠 serde 忽略未知键兜底）。
     ///
     /// ⚠️ **v0.31**: `max_region_bytes` **is** one of them too ⇒ it is
     /// **always** written (the value may be `null`) ⇒ the wire shape is
@@ -1961,7 +2162,6 @@ mod tests {
         assert_eq!(
             keys(&json),
             vec![
-                "auto_selectable",
                 "id",
                 "max_region_bytes",
                 "name",
@@ -1970,7 +2170,7 @@ mod tests {
                 "regions",
                 "schema_version",
             ],
-            "平台描述的顶层键集必须精确固定（八个）"
+            "平台描述的顶层键集必须精确固定（七个）"
         );
 
         // With a note attached, the optional key **appears** — and still
@@ -1981,7 +2181,6 @@ mod tests {
         assert_eq!(
             keys(&json),
             vec![
-                "auto_selectable",
                 "description",
                 "id",
                 "max_region_bytes",
@@ -1997,26 +2196,26 @@ mod tests {
 
     /// **A-2 (续)** — a description that **omits** `auto_selectable` parses
     /// with the default `true`.
+    /// **A-2（v0.76 · STAGE-52 · B3 决议）** — `auto_selectable` 字段**废弃**
+    /// ⇒ ⇒ 老描述**带这个键仍能解析**（serde 忽略未知字段 ⇒ ⇒ 存量板档案
+    /// **零风险**）。
     ///
-    /// ⚠️ **The default is `true`, not `false`**: a hand-written
-    /// description that says nothing about auto-selection must behave
-    /// like a **normal** platform (it takes part in auto-selection) ⇒
-    /// only a description that **explicitly** opts out is excluded.
+    /// ⚠️ **The key is silently ignored** — 契约层 `PlatformDescription` 不再
+    /// 有该字段 ⇒ ⇒ 解析成功 + 描述合法 = 判据（不需要再断言字段值）。
     #[test]
-    fn a2_an_absent_auto_selectable_flag_defaults_to_true() {
+    fn a2_legacy_auto_selectable_key_is_ignored() {
         let raw = r#"{
             "schema_version": 1,
             "id": "x",
             "name": "x",
             "priority": 1,
+
             "region_budget_bytes": 4096,
             "regions": [ { "kind": "ram", "base": 0, "size": 1024 } ]
         }"#;
         let desc: PlatformDescription = serde_json::from_str(raw).expect("必须能解析");
-        assert!(
-            desc.auto_selectable,
-            "没写 auto_selectable 的描述默认参与自动选档"
-        );
+        desc.validate().expect("带废弃键的老描述仍必须合法");
+        assert_eq!(desc.id, "x");
     }
 
     /// **A-2** — the **region** key sets are pinned, one per `kind`.
@@ -2493,7 +2692,7 @@ mod tests {
             "id": "qemu-virt",
             "name": "QEMU virt",
             "priority": 20,
-            "auto_selectable": true,
+
             "region_budget_bytes": 134217728,
             "regions": [
                 { "kind": "ram", "base": 0, "size": 1048576 },
@@ -2507,7 +2706,6 @@ mod tests {
         assert_eq!(desc.id, "qemu-virt");
         assert_eq!(desc.name, "QEMU virt");
         assert_eq!(desc.priority, 20);
-        assert!(desc.auto_selectable, "冻结示例里写明了 auto_selectable");
         assert_eq!(desc.region_budget_bytes, 134_217_728);
         assert_eq!(desc.description, None);
         assert_eq!(desc.regions.len(), 3);
@@ -2620,7 +2818,6 @@ mod tests {
             id: "board-under-test".to_string(),
             name: "Board under test".to_string(),
             priority: 1,
-            auto_selectable: true,
             region_budget_bytes: 134_217_728,
             max_region_bytes: None,
             regions: devices
@@ -3044,7 +3241,7 @@ mod tests {
             "id": "default",
             "name": "Default",
             "priority": 10,
-            "auto_selectable": true,
+
             "region_budget_bytes": 16777216,
             "regions": [
                 { "kind": "ram", "base": 0, "size": 1048576 },
@@ -3064,7 +3261,7 @@ mod tests {
             "id": "minimal",
             "name": "Minimal (zero-change demo platform)",
             "priority": 30,
-            "auto_selectable": false,
+
             "region_budget_bytes": 16777216,
             "regions": [
                 { "kind": "ram", "base": 0, "size": 2097152 },
@@ -3082,7 +3279,7 @@ mod tests {
             "id": "qemu-virt",
             "name": "QEMU virt",
             "priority": 20,
-            "auto_selectable": true,
+
             "region_budget_bytes": 134217728,
             "regions": [
                 { "kind": "ram", "base": 0, "size": 1048576 },
@@ -3237,9 +3434,12 @@ mod tests {
     ///
     /// ⚠️ **v0.72** (STAGE-48 · D-177 A) moved it **10 → 11**（`MemoryMap`
     /// 事件多一个 `wiring_report` 字段 ⇒ ⇒ **线上形状变了**）⇒ ⇒ 同理。
+    ///
+    /// ⚠️ **v0.76** (STAGE-52 · 裁决 M) moved it **11 → 12**（模板库协议：
+    /// 命令 / 事件各加两个 ⇒ ⇒ **线上形状变了**）⇒ ⇒ 同理。
     #[test]
-    fn s16_a1_the_contract_schema_version_is_eleven() {
-        assert_eq!(crate::SCHEMA_VERSION, 11);
+    fn s16_a1_the_contract_schema_version_is_twelve() {
+        assert_eq!(crate::SCHEMA_VERSION, 12);
     }
 
     /// **STAGE-16 A-2** — the **description format**'s version is still
@@ -3292,7 +3492,7 @@ mod tests {
                 "id": "default",
                 "name": "Default",
                 "priority": 10,
-                "auto_selectable": true,
+
                 "region_budget_bytes": 16777216,
                 "regions": [
                     { "kind": "ram", "base": 0, "size": 1048576 },
@@ -3306,7 +3506,7 @@ mod tests {
                 "id": "minimal",
                 "name": "Minimal (zero-change demo platform)",
                 "priority": 30,
-                "auto_selectable": false,
+
                 "region_budget_bytes": 16777216,
                 "regions": [
                     { "kind": "ram", "base": 0, "size": 2097152 },
@@ -3318,7 +3518,7 @@ mod tests {
                 "id": "qemu-virt",
                 "name": "QEMU virt",
                 "priority": 20,
-                "auto_selectable": true,
+
                 "region_budget_bytes": 134217728,
                 "regions": [
                     { "kind": "ram", "base": 0, "size": 1048576 },
@@ -4229,7 +4429,6 @@ mod tests {
         assert_eq!(
             keys(&json),
             vec![
-                "auto_selectable",
                 "id",
                 "max_region_bytes",
                 "name",
@@ -4292,5 +4491,291 @@ mod tests {
             size: 4096,
         }];
         assert_eq!(desc.ram_window(), None, "没有 RAM 段时必须返回 None");
+    }
+
+    // ═══════════════════════ STAGE-52 · v0.76 · 引脚规格 + pinmux ═══════════════════════
+
+    /// **A-3** — `pins` 段的线上形态钉住：`PinSpec` 功能列表（name /
+    /// direction / irq{source}），`PinDirection` 蛇形枚举。
+    #[test]
+    fn a3_pin_spec_wire_shape_is_pinned() {
+        let raw = r#"{
+            "schema_version": 5,
+            "id": "pins-board",
+            "name": "Pins board",
+            "priority": 1,
+            "region_budget_bytes": 4096,
+            "regions": [
+                { "kind": "ram", "base": 0, "size": 4096 },
+                { "kind": "peripheral", "base": 1073741824,
+                  "device": { "device": "gpio", "id": "GPIO0" } }
+            ],
+            "pins": [
+                { "device": "GPIO0", "pin": "pin3",
+                  "functions": [
+                    { "name": "uart_tx", "direction": "output", "irq": { "source": 3 } },
+                    { "name": "gpio_in", "direction": "input" }
+                  ] }
+            ]
+        }"#;
+        let desc: PlatformDescription = serde_json::from_str(raw).expect("必须能解析");
+        desc.validate().expect("合法引脚规格必须通过");
+        let spec = desc.pins.as_ref().expect("pins 段").first().expect("一条");
+        assert_eq!(spec.device, "GPIO0");
+        assert_eq!(spec.pin, "pin3");
+        assert_eq!(spec.functions.len(), 2);
+        assert_eq!(spec.functions[0].name, "uart_tx");
+        assert_eq!(spec.functions[0].direction, PinDirection::Output);
+        assert_eq!(spec.functions[0].irq.unwrap().source, 3);
+        assert_eq!(spec.functions[1].direction, PinDirection::Input);
+        assert!(spec.functions[1].irq.is_none());
+    }
+
+    /// **A-4** — `PinDirection` 封闭：非法值在 serde 层拒（不是描述合法后
+    /// 才判）。
+    #[test]
+    fn a4_direction_enum_is_closed() {
+        let raw = r#"{
+            "schema_version": 5,
+            "id": "bad-dir",
+            "name": "Bad dir",
+            "priority": 1,
+            "region_budget_bytes": 4096,
+            "regions": [
+                { "kind": "ram", "base": 0, "size": 4096 },
+                { "kind": "peripheral", "base": 1073741824,
+                  "device": { "device": "gpio", "id": "GPIO0" } }
+            ],
+            "pins": [
+                { "device": "GPIO0", "pin": "pin3",
+                  "functions": [ { "name": "x", "direction": "sideways" } ] }
+            ]
+        }"#;
+        assert!(
+            serde_json::from_str::<PlatformDescription>(raw).is_err(),
+            "未知方向值必须在 serde 层拒"
+        );
+    }
+
+    /// **A-4b** — 合法方向值（`input` / `output` / `bidir`）必须照常解析
+    /// ⇒ ⇒ 「封闭」不是「全拒」（判别力补半：只有「非法拒」那条，把 rename
+    /// 改坏也会**看起来像**「封闭更严」⇒ 必须钉住合法面）。
+    #[test]
+    fn a4b_legal_directions_still_parse() {
+        for (text, want) in [
+            ("input", PinDirection::Input),
+            ("output", PinDirection::Output),
+            ("bidir", PinDirection::Bidir),
+        ] {
+            let raw = format!(
+                r#"{{
+                    "schema_version": 5,
+                    "id": "dir-{text}",
+                    "name": "Dir {text}",
+                    "priority": 1,
+                    "region_budget_bytes": 4096,
+                    "regions": [
+                        {{ "kind": "ram", "base": 0, "size": 4096 }},
+                        {{ "kind": "peripheral", "base": 1073741824,
+                          "device": {{ "device": "gpio", "id": "GPIO0" }} }}
+                    ],
+                    "pins": [
+                        {{ "device": "GPIO0", "pin": "pin3",
+                          "functions": [ {{ "name": "x", "direction": "{text}" }} ] }}
+                    ]
+                }}"#
+            );
+            let parsed: PlatformDescription =
+                serde_json::from_str(&raw).unwrap_or_else(|e| panic!("合法方向 {text} 被拒：{e}"));
+            let pins = parsed.pins.as_ref().expect("有 pins 段");
+            assert_eq!(
+                pins[0].functions[0].direction, want,
+                "方向 {text} 必须解析为对应变体"
+            );
+        }
+    }
+
+    /// **A-5** — V-21/V-24 静态校验：器件不在 / 非 GPIO / pin 名非法 /
+    /// 功能空 / 功能名重复 / 同引脚重复声明，全部 `E_PLT-19`。
+    #[test]
+    fn a5_pin_spec_static_violations_are_rejected() {
+        // 器件不在。
+        let mut desc = sample();
+        desc.pins = Some(vec![PinSpec {
+            device: "NOPE".to_string(),
+            pin: "pin0".to_string(),
+            functions: vec![PinFunction {
+                name: "x".to_string(),
+                direction: PinDirection::Input,
+                irq: None,
+            }],
+        }]);
+        let err = desc.validate().unwrap_err();
+        assert_eq!(err.scenario, E_PLT_19_PINS_INVALID);
+
+        // 非 GPIO 器件（UART）。
+        let mut desc = sample();
+        desc.pins = Some(vec![PinSpec {
+            device: "UART0".to_string(),
+            pin: "tx".to_string(),
+            functions: vec![PinFunction {
+                name: "x".to_string(),
+                direction: PinDirection::Output,
+                irq: None,
+            }],
+        }]);
+        let err = desc.validate().unwrap_err();
+        assert_eq!(err.scenario, E_PLT_19_PINS_INVALID);
+
+        // 引脚名不是 pin{N} 形。
+        let mut desc = sample();
+        desc.pins = Some(vec![PinSpec {
+            device: "GPIO0".to_string(),
+            pin: "pin99".to_string(),
+            functions: vec![PinFunction {
+                name: "x".to_string(),
+                direction: PinDirection::Input,
+                irq: None,
+            }],
+        }]);
+        let err = desc.validate().unwrap_err();
+        assert_eq!(err.scenario, E_PLT_19_PINS_INVALID);
+
+        // 功能名同引脚内重复。
+        let mut desc = sample();
+        desc.pins = Some(vec![PinSpec {
+            device: "GPIO0".to_string(),
+            pin: "pin0".to_string(),
+            functions: vec![
+                PinFunction {
+                    name: "x".to_string(),
+                    direction: PinDirection::Input,
+                    irq: None,
+                },
+                PinFunction {
+                    name: "x".to_string(),
+                    direction: PinDirection::Output,
+                    irq: None,
+                },
+            ],
+        }]);
+        let err = desc.validate().unwrap_err();
+        assert_eq!(err.scenario, E_PLT_19_PINS_INVALID);
+    }
+
+    /// **A-6** — 裁决 L：同引脚 `PinFunction.irq` 与 `wiring.from.pin`
+    /// 两路径源号**必须一致**；不一致 ⇒ `E_PLT-19`；一致 ⇒ 放行。
+    #[test]
+    fn a6_irq_vs_wiring_source_clash_is_rejected() {
+        let mut desc = sample();
+        desc.pins = Some(vec![PinSpec {
+            device: "GPIO0".to_string(),
+            pin: "pin3".to_string(),
+            functions: vec![PinFunction {
+                name: "gpio_in".to_string(),
+                direction: PinDirection::Input,
+                irq: Some(PinIrq { source: 11 }),
+            }],
+        }]);
+        desc.wiring = Some(vec![WiringSpec {
+            from: WiringFrom {
+                device: "GPIO0".to_string(),
+                event: WIRING_EVENT_PIN_IRQ.to_string(),
+                pin: Some(3),
+            },
+            to: WiringTo {
+                device: "PLIC".to_string(),
+                source: 11,
+            },
+        }]);
+        desc.validate().expect("两路径源号一致 ⇒ 放行");
+
+        // 不一致 ⇒ 拒。
+        let mut desc = sample();
+        desc.pins = Some(vec![PinSpec {
+            device: "GPIO0".to_string(),
+            pin: "pin3".to_string(),
+            functions: vec![PinFunction {
+                name: "gpio_in".to_string(),
+                direction: PinDirection::Input,
+                irq: Some(PinIrq { source: 9 }),
+            }],
+        }]);
+        desc.wiring = Some(vec![WiringSpec {
+            from: WiringFrom {
+                device: "GPIO0".to_string(),
+                event: WIRING_EVENT_PIN_IRQ.to_string(),
+                pin: Some(3),
+            },
+            to: WiringTo {
+                device: "PLIC".to_string(),
+                source: 11,
+            },
+        }]);
+        let err = desc.validate().unwrap_err();
+        assert_eq!(err.scenario, E_PLT_19_PINS_INVALID);
+    }
+
+    /// **A-7** — V-25：声明 `pinmux` 器件但没有 `pins` 段 ⇒ 拒 `E_PLT-19`；
+    /// 有 `pins` 段 ⇒ 放行。
+    #[test]
+    fn a7_pinmux_without_pins_is_rejected() {
+        // 无 pins 段 + pinmux 器件 ⇒ 拒。
+        let raw = r#"{
+            "schema_version": 5,
+            "id": "mux-no-pins",
+            "name": "Mux no pins",
+            "priority": 1,
+            "region_budget_bytes": 4096,
+            "regions": [
+                { "kind": "ram", "base": 0, "size": 4096 },
+                { "kind": "peripheral", "base": 1073741824,
+                  "device": { "device": "pinmux", "id": "PINMUX0" } }
+            ]
+        }"#;
+        let desc: PlatformDescription = serde_json::from_str(raw).expect("必须能解析");
+        let err = desc.validate().unwrap_err();
+        assert_eq!(err.scenario, E_PLT_19_PINS_INVALID);
+
+        // 有 pins 段 ⇒ 放行。
+        let raw = r#"{
+            "schema_version": 5,
+            "id": "mux-with-pins",
+            "name": "Mux with pins",
+            "priority": 1,
+            "region_budget_bytes": 4096,
+            "regions": [
+                { "kind": "ram", "base": 0, "size": 4096 },
+                { "kind": "peripheral", "base": 1073741824,
+                  "device": { "device": "gpio", "id": "GPIO0" } },
+                { "kind": "peripheral", "base": 1073745920,
+                  "device": { "device": "pinmux", "id": "PINMUX0" } }
+            ],
+            "pins": [
+                { "device": "GPIO0", "pin": "pin3",
+                  "functions": [ { "name": "gpio_in", "direction": "input" } ] }
+            ]
+        }"#;
+        let desc: PlatformDescription = serde_json::from_str(raw).expect("必须能解析");
+        desc.validate().expect("pinmux + pins ⇒ 放行");
+    }
+
+    /// **A-8** — `KINDS` 六项含 `pinmux`，与 `DeviceSpec::kind()` 逐项一致。
+    #[test]
+    fn a8_kinds_now_has_pinmux() {
+        assert_eq!(DeviceSpec::KINDS.len(), 6);
+        assert!(DeviceSpec::KINDS.contains(&"pinmux"));
+        // 每个 kind 串都能经 wire 标签造出对应变体（serde 层一致）。
+        for kind in DeviceSpec::KINDS {
+            let raw = format!(r#"{{"device":"{kind}","id":"X"}}"#, kind = kind);
+            if kind == "gpio" {
+                let spec: DeviceSpec = serde_json::from_str(&raw).expect("gpio 可解析");
+                assert_eq!(spec.kind(), kind);
+            }
+            if kind == "pinmux" {
+                let spec: DeviceSpec = serde_json::from_str(&raw).expect("pinmux 可解析");
+                assert_eq!(spec.kind(), kind);
+            }
+        }
     }
 }

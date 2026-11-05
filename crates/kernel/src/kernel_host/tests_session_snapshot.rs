@@ -132,6 +132,16 @@ fn meta() -> CheckpointMetaDto {
 /// 造一个装好 demo 固件、跑过 `steps` 条指令的宿主。
 fn host_with_demo(steps: u32) -> KernelHost {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    let _ = host.handle_message(&Message::command(
+        1,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    ));
     let events = host.handle_message(&Message::command(
         1,
         CommandPayload::LoadProject(demo_project()),

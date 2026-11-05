@@ -10,6 +10,7 @@
 //! ⚠️ 断言全部落在**输出**上：M-18 收到的**边沿**、M-16 **导出的状态**
 //! （`M16IntcDto`）。没有一条断言是「我调用了某个内部函数」。
 
+use crate::kernel_host::platform;
 use riscv_sim_contract::csr::IRQ_TIMER_COMPARE;
 use riscv_sim_contract::model::{
     Edge, ImageKind, ImageRef, ImageSource, ProductTree, Project, ProjectVersion,
@@ -79,6 +80,16 @@ fn one_request_produces_exactly_one_irq_pulse_edge() {
 #[test]
 fn the_pulse_sink_survives_a_project_reload() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
     host.raise_irq(1).expect("raise irq");
@@ -124,6 +135,16 @@ fn clear_irq_clears_the_pending_entry() {
 #[test]
 fn the_timer_compare_line_is_raised_at_a_quantum_boundary() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
     // 比较值 = 1000 ps：跑第一个量子（1 µs = 1 000 000 ps）就会越过它。
@@ -146,6 +167,16 @@ fn the_timer_compare_line_is_raised_at_a_quantum_boundary() {
 #[test]
 fn a_zero_timer_compare_arms_nothing() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     host.set_timer_compare(0).expect("set timer compare");
 
@@ -169,6 +200,16 @@ fn a_zero_timer_compare_arms_nothing() {
 #[test]
 fn a_raised_irq_really_reaches_the_guest() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(
         &mut host,
         CommandPayload::LoadProject(Project {

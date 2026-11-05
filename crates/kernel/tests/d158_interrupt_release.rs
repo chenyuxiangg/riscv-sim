@@ -601,6 +601,17 @@ fn project_with(code: &[u8]) -> Project {
 /// 装载固件并返回宿主。
 fn host_with(code: &[u8]) -> KernelHost {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：自动选档已废 ⇒ ⇒ 无用户板装载被拒
+    //   （`E_PLT-22`）⇒ ⇒ 固件落在 0x8400_0000（qemu-virt 高段）⇒ ⇒
+    //   装载前**显式配 qemu-virt 板**。
+    let _ = host.handle_message(&Message::command(
+        1,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_QEMU_VIRT)
+                .expect("内置 qemu-virt 必须存在"),
+            expected_revision: None,
+        },
+    ));
     let events = host.handle_message(&Message::command(
         1,
         CommandPayload::LoadProject(project_with(code)),
@@ -614,7 +625,7 @@ fn host_with(code: &[u8]) -> KernelHost {
     assert_eq!(
         host.platform_id(),
         platform::PLATFORM_ID_QEMU_VIRT,
-        "固件落在 0x8400_0000 ⇒ 必须自动切到 qemu-virt 档（只有它有 PLIC / UART）"
+        "配了 qemu-virt 板 ⇒ 装载后档位即 qemu-virt（只有它有 PLIC / UART）"
     );
     host
 }
@@ -1129,8 +1140,8 @@ fn the_external_interrupt_is_delivered_after_the_timer_line_was_released() {
 fn the_contract_layer_version_numbers_are_untouched() {
     assert_eq!(
         riscv_sim_contract::SCHEMA_VERSION,
-        11,
-        "契约层的信封版本号（v0.72 批 STAGE-48 升到 11：`MemoryMap` 事件多一个 `wiring_report` 字段 ⇒ ⇒ 线上形状变了）"
+        12,
+        "契约层的信封版本号（v0.76 批 STAGE-52 升到 12：模板库协议新增两条命令、两条事件 ⇒ ⇒ 线上形状变了）"
     );
     assert_eq!(
         riscv_sim_contract::model::SIM_STATE_SCHEMA_VERSION,

@@ -21,6 +21,7 @@ use riscv_sim_contract::model::{
     TraceSource,
 };
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload, Message, Payload};
+use riscv_sim_kernel::kernel_host::platform;
 use riscv_sim_kernel::kernel_host::{
     KernelHost, TOPIC_DISASM, TOPIC_DUMP, TOPIC_EXPORT, TOPIC_SOURCE, TOPIC_SYMBOL, TOPIC_TRACE,
 };
@@ -54,7 +55,16 @@ fn dispatch(host: &mut KernelHost, cmd: CommandPayload) -> Vec<EventPayload> {
 
 #[test]
 fn the_four_debug_commands_are_wired_not_placeholders() {
-    let mut host = KernelHost::new();
+    let mut host = KernelHost::new(); // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+                                      //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
     // ① `Disasm` ⇒ 一条 `Disasm` 事件（**不是** `E_CTX-03`）。
@@ -128,7 +138,16 @@ fn the_four_debug_commands_are_wired_not_placeholders() {
 fn the_json_bridge_carries_the_new_commands() {
     // ⚠️ **生产路径**是 WASM 桥（`handle_json`）——前端拿到的是 JSON，
     // 不是 Rust 的枚举。走一遍 JSON 才证明「契约的形状真的到了前端」。
-    let mut host = KernelHost::new();
+    let mut host = KernelHost::new(); // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+                                      //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     let load = serde_json::to_string(&Message::command(
         1,
         CommandPayload::LoadProject(demo_project()),
@@ -159,7 +178,16 @@ fn the_json_bridge_carries_the_new_commands() {
 #[test]
 fn the_m18_trace_ring_has_a_consumer_on_the_production_path() {
     // **D-51**：M-18 的访存 trace 环在宿主里**有消费者**（不再只写不读）。
-    let mut host = KernelHost::new();
+    let mut host = KernelHost::new(); // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+                                      //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(&mut host, CommandPayload::StepN { n: 4 });
 
@@ -174,7 +202,16 @@ fn the_m18_trace_ring_has_a_consumer_on_the_production_path() {
 #[test]
 fn the_waveform_export_reads_the_m19_ring_on_the_production_path() {
     // **D-50**：波形导出的数据源是 M-19 的环 ⇒ M-19 的环**有读者**。
-    let mut host = KernelHost::new();
+    let mut host = KernelHost::new(); // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+                                      //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(&mut host, CommandPayload::StepN { n: 8 });
 

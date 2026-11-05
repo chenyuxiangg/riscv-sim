@@ -259,6 +259,16 @@ fn push_shdr(out: &mut Vec<u8>, sh_name: u32, sh_type: u32, sh_offset: u32, sh_s
 fn k1_the_host_reports_the_prefix_candidates() {
     let mut host = KernelHost::new();
     let (symtab, strtab) = elf_symbol_table(&["main", "malloc", "domain"]);
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(
         &mut host,
         CommandPayload::LoadProject(elf_project(&[(".symtab", symtab), (".strtab", strtab)])),
@@ -289,6 +299,16 @@ fn k1_the_host_reports_the_prefix_candidates() {
 fn k3_an_exact_hit_reports_the_symbol_and_keeps_it_out_of_the_candidates() {
     let mut host = KernelHost::new();
     let (symtab, strtab) = elf_symbol_table(&["main", "malloc"]);
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(
         &mut host,
         CommandPayload::LoadProject(elf_project(&[(".symtab", symtab), (".strtab", strtab)])),
@@ -317,6 +337,16 @@ fn k3_an_exact_hit_reports_the_symbol_and_keeps_it_out_of_the_candidates() {
 fn k3_a_prefix_only_hit_reports_no_exact_symbol_but_candidates() {
     let mut host = KernelHost::new();
     let (symtab, strtab) = elf_symbol_table(&["main", "malloc"]);
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(
         &mut host,
         CommandPayload::LoadProject(elf_project(&[(".symtab", symtab), (".strtab", strtab)])),
@@ -341,6 +371,16 @@ fn k3_a_prefix_only_hit_reports_no_exact_symbol_but_candidates() {
 fn k4_an_empty_symbol_name_is_rejected_and_no_event_is_sent() {
     let mut host = KernelHost::new();
     let (symtab, strtab) = elf_symbol_table(&["main"]);
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(
         &mut host,
         CommandPayload::LoadProject(elf_project(&[(".symtab", symtab), (".strtab", strtab)])),
@@ -388,6 +428,16 @@ fn an_image_without_a_symbol_table_reports_a_total_of_zero() {
 #[test]
 fn k5_an_out_of_range_dump_length_is_rejected_and_no_event_is_sent() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     for len in [0u32, 4097, 100_000] {
         let events = dispatch(&mut host, CommandPayload::DumpMemory { addr: 0, len });
@@ -406,6 +456,16 @@ fn k5_an_out_of_range_dump_length_is_rejected_and_no_event_is_sent() {
 #[test]
 fn k6_a_dump_returns_the_exact_bytes() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // 先写一段已知字节进去（调试器写内存走的是**普通**总线写）。
     dispatch(
@@ -434,6 +494,16 @@ fn k6_a_dump_returns_the_exact_bytes() {
 #[test]
 fn k7_a_dump_does_not_count_as_a_bus_access() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     let before = host.backend.bus().stats().reads;
     let events = dispatch(
@@ -462,6 +532,16 @@ fn k7_a_dump_does_not_count_as_a_bus_access() {
 #[test]
 fn k8_a_dump_does_not_fire_a_read_watchpoint() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,
@@ -507,6 +587,16 @@ fn k8_a_dump_does_not_fire_a_read_watchpoint() {
 #[test]
 fn an_unmapped_dump_passes_the_bus_error_through_unchanged() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     let events = dispatch(
         &mut host,
@@ -537,6 +627,16 @@ fn an_unmapped_dump_passes_the_bus_error_through_unchanged() {
 #[test]
 fn k11_an_illegal_condition_is_rejected_and_the_table_is_unchanged() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // 先放一个**合法**的断点 ⇒ ⇒ 表里有一条。
     dispatch(
@@ -577,6 +677,16 @@ fn k11_an_illegal_condition_is_rejected_and_the_table_is_unchanged() {
 #[test]
 fn k12_a_false_condition_does_not_stop_at_the_breakpoint_address() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // x1 在 demo 固件里被写成 42（`addi x1, x0, 42`）⇒ ⇒ 条件 `x1 == 5`
     // 在断点地址处是**假**的。
@@ -623,6 +733,16 @@ fn k12_a_false_condition_does_not_stop_at_the_breakpoint_address() {
 #[test]
 fn k13_a_true_condition_stops_at_the_breakpoint_address() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // 条件用 `pc` ⇒ ⇒ 它在**取指之前**就是断点地址 ⇒ ⇒ 恒真。
     //
@@ -655,6 +775,16 @@ fn k13_a_true_condition_stops_at_the_breakpoint_address() {
 #[test]
 fn k13_the_condition_sees_the_values_from_before_the_instruction() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // demo 固件：0x00 = `addi x1, x0, 42`；0x04 = `addi x2, x0, 7`。
     // ⇒ ⇒ 断点打在 0x04 上，条件 `x1 == 42`：
@@ -690,6 +820,16 @@ fn k13_the_condition_sees_the_values_from_before_the_instruction() {
 #[test]
 fn k14_an_unconditional_breakpoint_stops_exactly_as_before() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,
@@ -717,6 +857,16 @@ fn k14_an_unconditional_breakpoint_stops_exactly_as_before() {
 #[test]
 fn k15_a_conditional_breakpoint_also_works_on_the_time_driven_path() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // 条件恒真（PC 就是断点地址）⇒ ⇒ 时间驱动路径**必须**停下来。
     dispatch(
@@ -743,6 +893,16 @@ fn k15_a_conditional_breakpoint_also_works_on_the_time_driven_path() {
 #[test]
 fn k15_a_false_condition_does_not_stop_on_the_time_driven_path() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,

@@ -116,6 +116,18 @@ fn dispatch(host: &mut KernelHost, cmd: CommandPayload) -> Vec<EventPayload> {
 
 fn host_with_intc_firmware() -> KernelHost {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: riscv_sim_kernel::kernel_host::platform::builtin_description(
+                riscv_sim_kernel::kernel_host::platform::PLATFORM_ID_DEFAULT,
+            )
+            .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     let events = dispatch(&mut host, CommandPayload::LoadProject(intc_project()));
     assert!(
         !events

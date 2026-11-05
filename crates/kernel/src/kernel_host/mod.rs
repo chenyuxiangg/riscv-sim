@@ -176,14 +176,14 @@ use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_03_DUMP_TOO_LARGE, E_DBG_04_SYMBOL_NAME_EMPTY,
     E_ENG_03_NO_PROGRESS, E_HMS_02_FATAL_TERMINATED, E_PLT_13_REVISION_CONFLICT,
     E_PLT_14_REGION_NOT_FOUND, E_PLT_17_BOARD_MISMATCH, E_PLT_20_FW_ISA_MISMATCH,
-    E_PROTO_01_VERSION_MISMATCH, PLATFORM_FAMILY, PROTO_FAMILY,
+    E_PLT_22_NO_BOARD, E_PROTO_01_VERSION_MISMATCH, PLATFORM_FAMILY, PROTO_FAMILY,
 };
 use riscv_sim_contract::model::{
-    Edge, ImageKind, ImageRef, ImageSource, Project, TraceEvent, TraceFormat, TraceSource,
-    WaveformHistory, WaveformStream, WriteSize, SIM_STATE_SCHEMA_VERSION,
+    Edge, ImageKind, ImageRef, ImageSource, PlatformTemplateInfo, Project, TraceEvent, TraceFormat,
+    TraceSource, WaveformHistory, WaveformStream, WriteSize, SIM_STATE_SCHEMA_VERSION,
 };
 use riscv_sim_contract::platform::{
-    mcu_isa_info, wiring_event_info, PlatformDescription, WiringEventSemantics,
+    mcu_isa_info, wiring_event_info, PlatformDescription, RegionSpec, WiringEventSemantics,
 };
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
 use riscv_sim_contract::protocol::{
@@ -404,6 +404,15 @@ pub const TOPIC_MEMORY_MAP: &str = "memory.map";
 /// ⚠️ 它归 **`device.*` 族** —— 这是**器件**这一族自己的命名法，与
 /// `sim.*` / `memory.*` / `debug.*` **平级**（不是它们的一部分）。
 pub const TOPIC_DEVICE_TYPES: &str = "device.types";
+
+/// 主题：内置板模板清单（`EventPayload::PlatformTemplates` · STAGE-52 ·
+/// v0.76 · 裁决 M）。
+///
+/// ⚠️ **值必须与前端 `front/lib/message.js` 的 `EVENT_TOPIC.PlatformTemplates`
+/// 逐字相同**（= `"platform.templates"`）。
+///
+/// ⚠️ **归 `platform.*` 族** —— 平台级（内置板模板）自己的命名法。
+pub const TOPIC_PLATFORM_TEMPLATES: &str = "platform.templates";
 
 /// 主题：逐实例状态（`EventPayload::DeviceInstances` · STAGE-43 · v0.66）。
 ///
@@ -935,6 +944,13 @@ pub struct KernelHost {
     /// ⚠️ **它过 wire**（`memory.map` 事件的第五个字段）⇒ ⇒ 用户**看得见**
     /// ⇒ ⇒ 「描述被接受但线被静默丢弃」这件事**不再是静默的**。
     wiring_report: riscv_sim_contract::model::WiringReportDto,
+    /// **pinmux 路由表**（v0.76 · STAGE-52 · C1 / J / K）—— 从**生效的
+    /// 描述** `pins` 段编译（与建图同源）。
+    ///
+    /// ⚠️ 每项 = `(gpio 器件 id, 引脚号, 功能列表)` ⇒ ⇒ 宿主同步中断时按
+    /// 「当前功能 → irq 源」抬线 ⇒ ⇒ **不**写 GPIO 的 `irq_lines[pin]`
+    /// （分层禁令 · 裁决 K）。
+    pinmux_routes: Vec<(String, u32, Vec<riscv_sim_contract::platform::PinFunction>)>,
     /// **角色解析**的结果（v0.73 · STAGE-48 · D-177 的 C）—— 哪个 id 扮演
     /// console / 时间源 / 主 PLIC。
     ///
@@ -1109,6 +1125,9 @@ impl KernelHost {
             // ⚠️ v0.72（STAGE-48 · D-177 A）：丢线报告**随图**重算 ⇒ 这里
             // 只是**初值**（还没有建图 ⇒ 没有线 ⇒ 0 根）。
             wiring_report: riscv_sim_contract::model::WiringReportDto::default(),
+            // ⚠️ v0.76（STAGE-52 · C1/J/K）：pinmux 路由表**随图**重算 ⇒
+            // 这里只是**初值**（还没有建图 ⇒ 没有引脚路由）。
+            pinmux_routes: Vec::new(),
             roles: platform::ResolvedRoles::default(),
             console_backlog: Vec::new(),
             hms,
@@ -1345,29 +1364,16 @@ impl KernelHost {
         let compiled = platform::compile_wiring(description, &self.devices);
         self.wiring = compiled.wires;
         self.wiring_report = compiled.report;
+        // ⚠️ **v0.76（STAGE-52 · C1/J/K）**：pinmux 路由表**随图重算** ⇒ ⇒
+        // 改板之后**不留**上一份的残留（与连线表同一条纪律）。
+        self.pinmux_routes = devices.pinmux_routes;
         Ok(())
     }
 
-    /// 按镜像**实际用到的地址**挑平台描述（裁决 E）。
+    /// ⚠️ **v0.76（STAGE-52 · B3 / 裁决 C）**：自动选档链路（`choose_platform`
+    ///   方法 + [`platform::choose_description`]）**已删除** ⇒ ⇒ 无用户板时
+    ///   装载**不再自动挑板**，改拒 `E_PLT-22`（见装载流程 None 分支）。
     ///
-    /// ⚠️ **为什么需要这一步**：默认档的高段 RAM 只有 4 MiB
-    /// （`0x8000_0000..0x8040_0000`），而真实 RTOS（osz）的镜像落在
-    /// `0x8000_0000`（代码）、`0x83C0_0000`（init）、`0x8400_0000`（数据 /
-    /// bss / 栈 / 堆）三处 ⇒ 默认档**装不下**。
-    ///
-    /// ⚠️ **判据是「镜像用到的地址落在哪一档的映射范围内」**，不是
-    /// 「镜像是不是某个特定的 ELF」—— 这样别的 RTOS 也能受益，而规则
-    /// 只有一条、写在代码里。
-    ///
-    /// ⚠️ **判据本身在 [`platform`] 里**（描述化，裁决 E）：今天它查的是
-    /// 「两档的**高段**窗口」；描述化之后它查的是「每个**参与自动选档**
-    /// 的描述（`auto_selectable == true`）的**全部 RAM 区域**」，
-    /// **区间在外层**逐个过，候选按 `priority` 小者优先，**无候选 ⇒ 回落
-    /// `default`** ⇒ **与今天逐字等价**（B-9 的六条用例钉住）。
-    fn choose_platform(&self, ranges: &[(u32, u32)]) -> Result<PlatformDescription, PlatformError> {
-        platform::choose_description(ranges)
-    }
-
     /// 把外设的中断源**同步**到 M-16（v0.23）。
     ///
     /// 三条通路，逐条说清楚：
@@ -1527,6 +1533,67 @@ impl KernelHost {
                     if let Ok(mut p) = plic.try_borrow_mut() {
                         p.request(wire.source);
                     }
+                }
+            }
+        }
+
+        // ---- 2.5) pinmux 路由（v0.76 · STAGE-52 · 裁决 C1 / I / J / K）----
+        //
+        // ⚠️ **分层禁令（K-6）**：本分支**不**写 GPIO 的 `irq_lines[pin]`
+        //   —— 读 GPIO 的 **pending 位**（引脚有沿事件）、查 pinmux 器件的
+        //   **当前功能**、按「当前功能 → irq 源」抬 PLIC ⇒ ⇒ 与 wiring 路径
+        //   **并行不互写**（wiring 路径写 `irq_lines`，pinmux 路径不碰它）。
+        //
+        // ⚠️ **一次性语义（K-4）**：抬一次、**消费掉** pending
+        //   （`clear_pending_pin`）⇒ ⇒ **不活锁**（与 wiring 的 OneShot
+        //   同一个道理）。
+        //
+        // ⚠️ **当前功能由固件写 pinmux 寄存器决定（K-5）**：同一引脚切功能
+        //   ⇒ ⇒ 下次沿事件抬**新功能**的源 ⇒ ⇒ 中断绑「引脚 × 当前功能」。
+        //
+        // ⚠️ **MVP 取第一个 pinmux 器件**（裁决 C1：所有 pinmux 器件同一份
+        //   功能数）⇒ ⇒ 路由表里没有 pinmux id（单 pinmux 部署下语义正确）。
+        for (gpio_id, pin, functions) in self.pinmux_routes.iter() {
+            let Some(gpio) = self.devices.gpio(gpio_id) else {
+                continue;
+            };
+            // ① 引脚有 pending 活动？（**只读** —— 不消费、不改写）
+            let Ok(g) = gpio.try_borrow() else { continue };
+            if !g.pending_pin(*pin) {
+                continue;
+            }
+            drop(g);
+            // ② 当前功能索引（第一个 pinmux 器件 · 与「喂功能数」同源）。
+            let mut current = None;
+            for mux in self.devices.iter_pinmux() {
+                if let Ok(m) = mux.try_borrow() {
+                    current = m.current_function(*pin);
+                    break;
+                }
+            }
+            let Some(current) = current else { continue };
+            // ③ 当前功能 → irq 源（PinSpec 是**建图同源**编译的 ⇒ ⇒ 功能
+            //    列表与 pinmux 器件的功能数来自同一份 `pins` 段）。
+            let Some(fn_spec) = functions.get(current as usize) else {
+                continue;
+            };
+            let Some(source) = fn_spec.irq.as_ref().map(|irq| irq.source) else {
+                continue;
+            };
+            // ④ 消费 pending + 抬源（一次性 ⇒ ⇒ 不重抬）。
+            if let Ok(mut g) = gpio.try_borrow_mut() {
+                g.clear_pending_pin(*pin);
+            }
+            // ⚠️ **PLIC 句柄在本分支内自己取**（函数开头只检查了
+            //   「有 PLIC」—— wiring 循环里的 `plic` 是它**自己查表**的
+            //   局部变量 ⇒ ⇒ 这里不沿用）。
+            let plic = self
+                .devices
+                .first_plic()
+                .and_then(|e| self.devices.plic(&e.id));
+            if let Some(plic) = plic {
+                if let Ok(mut p) = plic.try_borrow_mut() {
+                    p.request(source);
                 }
             }
         }
@@ -2443,6 +2510,33 @@ impl KernelHost {
                 types: crate::m15_peripheral::types::device_type_infos(),
             }],
             CommandPayload::ListDeviceInstances => vec![self.device_instances_event()],
+            // ⚠️ v0.76 · STAGE-52 · 裁决 M —— **模板库**：清单 + 取完整描述。
+            //
+            // ⚠️ **前端不抄模板数据** ⇒ ⇒ 内置板清单（名称 / 优先级 / 器件
+            // 数）**由内核报** ⇒ ⇒ 前端要哪块再按 `id` 取**完整描述**导入
+            // 草稿。
+            CommandPayload::ListPlatformTemplates => {
+                vec![self.platform_templates_event()]
+            }
+            CommandPayload::GetPlatformTemplate { id } => {
+                match platform::builtin_description(&id) {
+                    Ok(description) => vec![EventPayload::PlatformTemplate {
+                        description: Box::new(description),
+                    }],
+                    Err(_) => {
+                        // ⚠️ 未知模板 id ⇒ 拒 **E_PLT-22**（与「无板装载」
+                        //   同一个码）⇒ ⇒ 引导用户从模板库列出的模板选择。
+                        let detail = format!(
+                            "没有这块模板：{id} —— 请从模板库列出的模板中选择（default / minimal / qemu-virt）"
+                        );
+                        vec![self.error_from(&PlatformError::new(
+                            PLATFORM_FAMILY,
+                            E_PLT_22_NO_BOARD,
+                            detail,
+                        ))]
+                    }
+                }
+            }
             CommandPayload::Unsubscribe { topic } => {
                 self.topics.remove(&topic);
                 vec![self.tick()]
@@ -2838,18 +2932,22 @@ impl KernelHost {
                 };
                 self.platform = board.clone();
             }
-            None => match self.choose_platform(&ranges) {
-                Ok(description) => {
-                    // ⚠️ **ISA 门禁**（v0.75 · STAGE-51 · D-175 的 F）：自动
-                    // 选出的内置板**同样**在应用前判 ⇒ ⇒ 判不过 ⇒ ⇒ 不应用、
-                    // 机器不动（同款次序纪律）。
-                    if let Some(err) = Self::isa_gate_error(&description, &parsed) {
-                        return vec![self.error_from(&err)];
-                    }
-                    self.platform = description
-                }
-                Err(err) => return vec![self.error_from(&err)],
-            },
+            // ⚠️ **v0.76（STAGE-52 · B1 决议 / 裁决 C）**：**不兜底生效板** ⇒ ⇒
+            //   用户没配板 ⇒ ⇒ **不再自动选档**（`choose_platform` 调用点摘除）
+            //   ⇒ ⇒ 装载 ⇒ ⇒ **拒 + 引导**（`E_PLT-22`：先导入模板或配置板）。
+            //
+            // ⚠️ **次序纪律同款**：这一步在复位**之前** ⇒ ⇒ 拒 ⇒ ⇒ 机器
+            //   一个字都没动 ⇒ ⇒ 正在跑的访客不受影响。
+            None => {
+                let detail = "没有生效板：这台机器还没配置板 —— 请先从模板导入 \
+                     （default / minimal / qemu-virt）或配置一块板再装载"
+                    .to_string();
+                return vec![self.error_from(&PlatformError::new(
+                    PLATFORM_FAMILY,
+                    E_PLT_22_NO_BOARD,
+                    detail,
+                ))];
+            }
         }
         // ---- 第三步：**换工程 ⇒ 复位机器** ----
         //
@@ -3251,6 +3349,38 @@ impl KernelHost {
     ///
     /// ⚠️ **逐实例**（裁决 B）—— 不是板级：板级的那一份已经有
     /// [`Self::memory_map_event`] 了 ⇒ ⇒ 这一条说的是「**每个实例**」。
+    /// 模板清单事件 —— **订阅即推 / 命令回复共用**（v0.76 · STAGE-52 ·
+    /// 裁决 M）。
+    ///
+    /// ⚠️ 顺序**按 priority 升序** ⇒ 确定性（default 10 → qemu-virt 20 →
+    /// minimal 30）⇒ ⇒ **数值不在这份代码里**（那是内置 JSON 的事）。
+    fn platform_templates_event(&self) -> EventPayload {
+        let ids = [
+            platform::PLATFORM_ID_DEFAULT,
+            platform::PLATFORM_ID_QEMU_VIRT,
+            platform::PLATFORM_ID_MINIMAL,
+        ];
+        let mut templates: Vec<PlatformTemplateInfo> = ids
+            .iter()
+            .filter_map(|id| {
+                let description = platform::builtin_description(id).ok()?;
+                let device_count = description
+                    .regions
+                    .iter()
+                    .filter(|region| matches!(region, RegionSpec::Peripheral { .. }))
+                    .count() as u32;
+                Some(PlatformTemplateInfo {
+                    id: (*id).to_string(),
+                    name: description.name.clone(),
+                    priority: description.priority,
+                    device_count,
+                })
+            })
+            .collect();
+        templates.sort_by_key(|entry| entry.priority);
+        EventPayload::PlatformTemplates { templates }
+    }
+
     fn device_instances_event(&self) -> EventPayload {
         EventPayload::DeviceInstances {
             instances: self.reported_device_instances(),
@@ -4229,6 +4359,7 @@ impl KernelHost {
         let want_memory_map = topic == TOPIC_MEMORY_MAP;
         let want_device_types = topic == TOPIC_DEVICE_TYPES;
         let want_device_instances = topic == TOPIC_DEVICE_INSTANCES;
+        let want_platform_templates = topic == TOPIC_PLATFORM_TEMPLATES;
         self.topics.insert(topic);
         let mut events = vec![self.tick()];
         if want_registers {
@@ -4284,6 +4415,12 @@ impl KernelHost {
         }
         if want_device_instances {
             events.push(self.device_instances_event());
+        }
+        // ⚠️ v0.76 · STAGE-52 · 裁决 M —— 模板库：**订阅即推一条清单**
+        //（与 `device.types` 同一个套路）⇒ ⇒ 前端**不必**等下一次改板
+        // 才拿到模板清单。
+        if want_platform_templates {
+            events.push(self.platform_templates_event());
         }
         events
     }
@@ -5090,9 +5227,18 @@ mod tests_v073_schema;
 #[cfg(test)]
 mod tests_v074_pin_routing;
 
+/// pinmux 中断路由的**宿主侧运行时门禁**（v0.76 · STAGE-52 · K-4 ~ K-10）。
+///
+/// ⚠️ 与 `tests_v074_pin_routing`（接线路径）**并行不互写**（K-6 · 分层
+/// 禁令）⇒ ⇒ 各自单独一个文件 ⇒ 「接线一条不改仍绿」由 `git diff` 一眼可见。
+#[cfg(test)]
+mod tests_v076_pinmux_runtime;
+
 /// **v0.75（STAGE-51 · D-175 的 F）** —— MCU 概念：ISA 门禁的 K 组 / A-3 / X-1。
 #[cfg(test)]
 mod tests_v075_mcu;
+#[cfg(test)]
+mod tests_v076_templates;
 
 /// **B2**（v0.73 · STAGE-49 · D-175 的 B2）—— `base` 可缺省 + **装配期分配**。
 ///

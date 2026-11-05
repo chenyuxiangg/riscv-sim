@@ -80,6 +80,25 @@ impl Default for TreeNode {
 /// ⇒ ⇒ 两者**必须**满足「可实例化 ⊆ 已实现」（裁决 H 的硬约束）⇒ ⇒
 /// 「内核实现了、但描述还写不出来」的那一条（`timer_riscv`）**如实报出来**
 /// （裁决 J）⇒ ⇒ **不假装**内核没有它。
+/// 内置板模板的**清单条目**（v0.76 · STAGE-52 · 裁决 M）。
+///
+/// ⚠️ **清单 = 元数据**（名称 / 优先级 / 器件数）⇒ ⇒ **完整描述**由
+/// [`crate::protocol::CommandPayload::GetPlatformTemplate`] 按 `id` 取
+/// ⇒ ⇒ 清单**不**把整份描述塞进列表（列表只该轻）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformTemplateInfo {
+    /// 模板 `id` —— 就是内置板描述的那个 `id`（`default` / `minimal` /
+    /// `qemu-virt`）。
+    pub id: String,
+    /// 展示名（内置描述里的 `name`）。
+    pub name: String,
+    /// 优先级（内置描述里的 `priority`）。
+    pub priority: u32,
+    /// **外设器件实例数**（描述里 `peripheral` 区域的数量）—— 模板库
+    /// 卡片上让用户一眼看出「这块模板带几个器件」。
+    pub device_count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceTypeInfo {
     /// The type name — byte-identical to the [`crate::platform::DeviceSpec`]

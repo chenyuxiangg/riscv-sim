@@ -387,6 +387,34 @@ pub enum CommandPayload {
     ///
     /// Added in contract v10.
     ListDeviceInstances,
+    /// **列出内置板模板**（v0.76 · STAGE-52 · 裁决 M）。
+    ///
+    /// ⚠️ **无载荷**：这是一条**只读**查询 ⇒ ⇒ 不判错 ⇒ ⇒ 零新场景码。
+    ///
+    /// ⚠️ **它是「平台有哪些内置模板」的那一份真相**（裁决 M：前端
+    /// **查**它 ⇒ ⇒ **不抄**模板数据 ⇒ ⇒ 抄的那份是第二个真相源）。
+    ///
+    /// ⚠️ 回复的是**清单元数据**（名称 / 优先级 / 器件数）⇒ ⇒ 要**完整
+    /// 描述**再发 [`CommandPayload::GetPlatformTemplate`]。
+    ///
+    /// The reply is [`EventPayload::PlatformTemplates`].
+    ///
+    /// Added in contract v12.
+    ListPlatformTemplates,
+    /// **取一块内置板模板的完整描述**（v0.76 · STAGE-52 · 裁决 M）。
+    ///
+    /// ⚠️ 载荷 = 模板 `id`（`default` / `minimal` / `qemu-virt`）⇒ ⇒
+    /// 未知 `id` ⇒ 拒 `E_PLT-22`（**没有**这块模板 ⇒ 引导「先从模板导入
+    /// default / minimal / qemu-virt」）⇒ ⇒ 与「无板装载」同一个码 ⇒ ⇒
+    /// 前端模板库**只列清单给的 id** ⇒ ⇒ 正常路径不触这个拒。
+    ///
+    /// The reply is [`EventPayload::PlatformTemplate`].
+    ///
+    /// Added in contract v12.
+    GetPlatformTemplate {
+        /// 模板 `id`。
+        id: String,
+    },
 
     ///
     /// ⚠️ **一条命令同时服务两种用法**（裁决 B）：
@@ -440,9 +468,8 @@ pub enum CommandPayload {
 /// （键 = 变体名）⇒ 而 `spec` 里的 [`RegionSpec`] 是**内部标签**（线上
 /// 是 `{"kind": "ram", ...}`）⇒ **不要**把两层的规则混在一起写。
 ///
-/// ⚠️ **差量不覆盖元数据**（`id` / `name` / `priority` /
-/// `auto_selectable`）⇒ 改板的身份属于「换一块板」⇒ 走**整份替换**
-/// （[`CommandPayload::SetMemoryMap`]）。
+/// ⚠️ **差量不覆盖元数据**（`id` / `name` / `priority`）⇒ 改板的身份属于
+/// 「换一块板」⇒ 走**整份替换**（[`CommandPayload::SetMemoryMap`]）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MemoryMapOp {
     /// 插入或替换**一段**（`base` 在 `spec` 里）。
@@ -780,6 +807,37 @@ pub enum EventPayload {
         /// 每个器件实例一条（顺序**按实例 id 升序** ⇒ 确定性）。
         instances: Vec<crate::model::DeviceInstanceInfo>,
     },
+    /// **内置板模板清单**（v0.76 · STAGE-52 · 裁决 M）。
+    ///
+    /// ⚠️ 回复 [`CommandPayload::ListPlatformTemplates`]。
+    ///
+    /// ⚠️ **清单 = 元数据** ⇒ ⇒ 完整描述走
+    /// [`EventPayload::PlatformTemplate`]。
+    ///
+    /// ⚠️ **顺序按 `priority` 升序** ⇒ 确定性（default 10 → qemu-virt 20 →
+    /// minimal 30 —— 顺序是内核排的，这里不抄数值）。
+    ///
+    /// Added in contract v12.
+    PlatformTemplates {
+        /// 每个模板一条。
+        templates: Vec<crate::model::PlatformTemplateInfo>,
+    },
+    /// **一块内置板模板的完整描述**（v0.76 · STAGE-52 · 裁决 M）。
+    ///
+    /// ⚠️ 回复 [`CommandPayload::GetPlatformTemplate`]。
+    ///
+    /// ⚠️ 描述**逐字等于内置 JSON 解析结果** ⇒ ⇒ 前端拿它当草稿起点
+    /// （`draftFromDescription`）⇒ ⇒ **不抄**模板数据。
+    ///
+    /// Added in contract v12.
+    PlatformTemplate {
+        /// 完整描述。
+        ///
+        /// ⚠️ **Box 化**（v0.76 批）：`PlatformDescription` 带 `pins` 段后涨到
+        /// ~328 字节 ⇒ `EventPayload` 出现 large_enum_variant（clippy
+        /// `-D warnings` 会拦）；`serde` 对 `Box` 透明 ⇒ **线格式零变更**。
+        description: Box<crate::platform::PlatformDescription>,
+    },
     /// 管理通道：导出的**日志条目**（回复 `CommandPayload::Admin { op:
     /// AdminOp::DrainLogs }`）。
     ///
@@ -911,8 +969,87 @@ mod tests {
     /// **10 → 11**（⚠️ 计划里说的「零升版」**不成立** ⇒ ⇒ 订正见
     /// STAGE-48 §7.1 订正 1）。
     #[test]
-    fn the_schema_version_is_eleven() {
-        assert_eq!(crate::SCHEMA_VERSION, 11);
+    fn the_schema_version_is_twelve() {
+        assert_eq!(crate::SCHEMA_VERSION, 12);
+    }
+
+    /// **v12**（v0.76 · STAGE-52 · 裁决 M）：模板库协议 —— 两个命令、
+    /// 两个事件 + 清单 DTO ⇒ ⇒ wire 形状逐字断言 ⇒ ⇒ 前端镜像（
+    /// `front/lib/message.js`）抄错一个字符就红。
+    #[test]
+    fn the_template_protocol_round_trips_over_json() {
+        let info = crate::model::PlatformTemplateInfo {
+            id: "qemu-virt".to_string(),
+            name: "QEMU virt 参考板".to_string(),
+            priority: 50,
+            device_count: 4,
+        };
+        let templates_event = EventPayload::PlatformTemplates {
+            templates: vec![info],
+        };
+        let json = serde_json::to_string(&templates_event).expect("序列化必须成功");
+        assert!(
+            json.contains("\"PlatformTemplates\"") && json.contains("qemu-virt"),
+            "线上键必须是变体名（外部标签）：{json}"
+        );
+        let back: EventPayload = serde_json::from_str(&json).expect("反序列化必须成功");
+        match back {
+            EventPayload::PlatformTemplates { templates } => {
+                assert_eq!(templates.len(), 1);
+                assert_eq!(templates[0].id, "qemu-virt");
+                assert_eq!(templates[0].priority, 50);
+                assert_eq!(templates[0].device_count, 4);
+            }
+            other => panic!("必须仍是 PlatformTemplates，实际 {other:?}"),
+        }
+
+        // 取模板：完整描述 round-trip。
+        let mut description = crate::platform::PlatformDescription {
+            schema_version: crate::platform::PLATFORM_SCHEMA_VERSION,
+            id: "minimal".to_string(),
+            name: "minimal".to_string(),
+            priority: 30,
+            region_budget_bytes: 16777216,
+            max_region_bytes: None,
+            regions: Vec::new(),
+            description: None,
+            wiring: None,
+            roles: None,
+            pins: None,
+            mcu: None,
+        };
+        description.id = "minimal".to_string();
+        let get = CommandPayload::GetPlatformTemplate {
+            id: "minimal".to_string(),
+        };
+        let json = serde_json::to_string(&get).expect("序列化必须成功");
+        assert!(json.contains("minimal"), "载荷必须带 id：{json}");
+        let back: CommandPayload = serde_json::from_str(&json).expect("反序列化必须成功");
+        match back {
+            CommandPayload::GetPlatformTemplate { id } => assert_eq!(id, "minimal"),
+            other => panic!("必须仍是 GetPlatformTemplate，实际 {other:?}"),
+        }
+        let template_event = EventPayload::PlatformTemplate {
+            description: Box::new(description),
+        };
+        let json = serde_json::to_string(&template_event).expect("序列化必须成功");
+        let back: EventPayload = serde_json::from_str(&json).expect("反序列化必须成功");
+        match back {
+            EventPayload::PlatformTemplate { description } => {
+                assert_eq!(description.id, "minimal");
+            }
+            other => panic!("必须仍是 PlatformTemplate，实际 {other:?}"),
+        }
+
+        // 无载荷命令 wire 形状。
+        let list = CommandPayload::ListPlatformTemplates;
+        let json = serde_json::to_string(&list).expect("序列化必须成功");
+        assert_eq!(json, "\"ListPlatformTemplates\"");
+        let back: CommandPayload = serde_json::from_str(&json).expect("反序列化必须成功");
+        match back {
+            CommandPayload::ListPlatformTemplates => {}
+            other => panic!("必须仍是 ListPlatformTemplates，实际 {other:?}"),
+        }
     }
 
     /// `AdminOp`'s **doc** must state the gate the platform **really**
@@ -1127,7 +1264,7 @@ mod tests {
         let msg = Message::command(8, CommandPayload::Nop);
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
-        assert_eq!(json["schema_version"], 11);
+        assert_eq!(json["schema_version"], 12);
     }
 
     // -----------------------------------------------------------------
@@ -1472,7 +1609,6 @@ mod tests {
             id: "user-board".to_string(),
             name: "User board".to_string(),
             priority: 100,
-            auto_selectable: false,
             region_budget_bytes: 0x0010_0000,
             max_region_bytes: None,
             regions: vec![crate::platform::RegionSpec::Ram {
@@ -1510,13 +1646,13 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&cmd).expect("json"),
             format!(
-                r#"{{"SetMemoryMap":{{"description":{{"schema_version":{},"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{{"kind":"ram","base":0,"size":1048576}}]}},"expected_revision":null}}}}"#,
+                r#"{{"SetMemoryMap":{{"description":{{"schema_version":{},"id":"user-board","name":"User board","priority":100,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{{"kind":"ram","base":0,"size":1048576}}]}},"expected_revision":null}}}}"#,
                 crate::platform::PLATFORM_SCHEMA_VERSION
             )
         );
         // ⚠️ 描述 DTO **只多了一个带 default 的可选字段** ⇒ 线上还是
-        // `PlatformDescription` 的原样形态（`kind` 标签、`auto_selectable`、
-        // 省略的 `description`、**总是出现的** `max_region_bytes`）。
+        // `PlatformDescription` 的原样形态（`kind` 标签、省略的
+        // `description`、**总是出现的** `max_region_bytes`）。
         assert_eq!(
             serde_json::to_value(&cmd).expect("json"),
             serde_json::json!({ "SetMemoryMap": { "description": {
@@ -1530,7 +1666,7 @@ mod tests {
                 "id": "user-board",
                 "name": "User board",
                 "priority": 100,
-                "auto_selectable": false,
+
                 "region_budget_bytes": 1048576,
                 "max_region_bytes": null,
                 "regions": [{ "kind": "ram", "base": 0, "size": 1048576 }]
@@ -1564,7 +1700,7 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ev).expect("json"),
             format!(
-                r#"{{"MemoryMap":{{"description":{{"schema_version":{},"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{{"kind":"ram","base":0,"size":1048576}}]}},"pending":false,"loaded":true,"revision":7,"wiring_report":{{"declared":0,"live":0,"dropped":[]}}}}}}"#,
+                r#"{{"MemoryMap":{{"description":{{"schema_version":{},"id":"user-board","name":"User board","priority":100,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{{"kind":"ram","base":0,"size":1048576}}]}},"pending":false,"loaded":true,"revision":7,"wiring_report":{{"declared":0,"live":0,"dropped":[]}}}}}}"#,
                 crate::platform::PLATFORM_SCHEMA_VERSION
             )
         );
@@ -1580,7 +1716,7 @@ mod tests {
                 "id": "user-board",
                 "name": "User board",
                 "priority": 100,
-                "auto_selectable": false,
+
                 "region_budget_bytes": 1048576,
                 "max_region_bytes": null,
                 "regions": [{ "kind": "ram", "base": 0, "size": 1048576 }]
@@ -1595,7 +1731,7 @@ mod tests {
     /// 「前端拿不到那个字段时不炸」这件事**结构上**成立。
     #[test]
     fn a_memory_map_payload_without_the_wiring_report_still_parses() {
-        let raw = r#"{"MemoryMap":{"description":{"schema_version":1,"id":"user-board","name":"User board","priority":100,"auto_selectable":false,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{"kind":"ram","base":0,"size":1048576}]},"pending":false,"loaded":true,"revision":7}}"#;
+        let raw = r#"{"MemoryMap":{"description":{"schema_version":1,"id":"user-board","name":"User board","priority":100,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{"kind":"ram","base":0,"size":1048576}]},"pending":false,"loaded":true,"revision":7}}"#;
         let ev: EventPayload = serde_json::from_str(raw).expect("老载荷必须能解析");
         match ev {
             EventPayload::MemoryMap { wiring_report, .. } => {
@@ -1719,7 +1855,6 @@ mod tests {
             id: "full-board".to_string(),
             name: "Full board".to_string(),
             priority: 7,
-            auto_selectable: true,
             region_budget_bytes: 0x0020_0000,
             max_region_bytes: None,
             regions: vec![

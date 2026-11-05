@@ -11,6 +11,7 @@
 //! - 把注册表的窗口大小写死 ⇒ ⇒ K-2 **变红**；
 //! - 事件**不推** ⇒ ⇒ 真机门禁那条**变红**。
 
+use crate::kernel_host::platform;
 use riscv_sim_contract::model::{
     ImageKind, ImageRef, ImageSource, ProductTree, Project, ProjectVersion,
 };
@@ -32,7 +33,6 @@ fn ram_only_description(id: &str) -> PlatformDescription {
         id: id.to_string(),
         name: id.to_string(),
         priority: 100,
-        auto_selectable: false,
         region_budget_bytes: 1024 * 1024,
         max_region_bytes: None,
         regions: vec![RegionSpec::Ram {
@@ -93,16 +93,23 @@ fn instances_of(events: &[EventPayload]) -> Vec<riscv_sim_contract::model::Devic
 // K 组
 // ---------------------------------------------------------------------------
 
-/// K-1 —— 类型注册表**含 5 种**（内核实现了 5 种；那个定时器**如实**报出来）。
+/// K-1 —— 类型注册表**含 6 种**（内核实现了 6 种；那个定时器**如实**报出来）。
 #[test]
-fn the_type_registry_reports_the_five_types_the_kernel_implements() {
+fn the_type_registry_reports_the_six_types_the_kernel_implements() {
     let mut host = host();
     let events = dispatch(&mut host, CommandPayload::ListDeviceTypes);
     let types = types_of(&events);
     let kinds: Vec<&str> = types.iter().map(|t| t.kind.as_str()).collect();
     assert_eq!(
         kinds,
-        vec!["clint", "gpio", "plic", "timer_riscv", "uart16550"],
+        vec![
+            "clint",
+            "gpio",
+            "pinmux",
+            "plic",
+            "timer_riscv",
+            "uart16550"
+        ],
         "类型注册表的内容不对（顺序按类型名升序）",
     );
 }
@@ -239,6 +246,16 @@ fn every_instance_reports_the_base_address_it_is_bound_to() {
 #[test]
 fn an_instance_of_a_board_that_is_not_in_effect_yet_has_no_base() {
     let mut host = host();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     // 先装一块板并**装载镜像** ⇒ 之后改板**挂起待生效**。
     let project = Project {
         id: "p".to_string(),
@@ -296,6 +313,16 @@ fn an_instance_of_a_board_that_is_not_in_effect_yet_has_no_base() {
 #[test]
 fn accepting_a_board_change_updates_the_instance_state() {
     let mut host = host();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     // 装载镜像 ⇒ 之后的改板**挂起待生效**。
     let project = Project {
         id: "p".to_string(),

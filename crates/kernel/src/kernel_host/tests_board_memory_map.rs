@@ -128,7 +128,6 @@ fn user_board() -> PlatformDescription {
         name: "User board".to_string(),
         priority: 100,
         // ⚠️ 它**不**参与自动选档（用户配的板是**点名**用的）。
-        auto_selectable: false,
         description: None,
         // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
@@ -165,7 +164,6 @@ fn board_with_four_devices() -> PlatformDescription {
         id: "user-board-devices".to_string(),
         name: "User board (four devices)".to_string(),
         priority: 100,
-        auto_selectable: false,
         description: None,
         // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
@@ -226,7 +224,6 @@ fn board_with_eight_mib_ram() -> PlatformDescription {
         id: "user-board-8mib".to_string(),
         name: "User board (8 MiB RAM)".to_string(),
         priority: 100,
-        auto_selectable: false,
         description: None,
         // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
@@ -457,7 +454,6 @@ fn b1_the_old_map_is_restored_when_the_new_one_cannot_be_mapped() {
         id: "overlapping".to_string(),
         name: "Overlapping".to_string(),
         priority: 100,
-        auto_selectable: false,
         description: None,
         // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
@@ -545,7 +541,6 @@ fn b2_an_over_budget_description_is_rejected_with_e_plt_07() {
         id: "too-big".to_string(),
         name: "Too big".to_string(),
         priority: 100,
-        auto_selectable: false,
         description: None,
         // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
@@ -587,7 +582,6 @@ fn b2_a_rejected_description_changes_nothing() {
         id: "too-big".to_string(),
         name: "Too big".to_string(),
         priority: 100,
-        auto_selectable: false,
         description: None,
         // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
@@ -638,7 +632,23 @@ fn b2_a_rejected_description_changes_nothing() {
 #[test]
 fn b3_set_memory_map_after_loading_is_pending_and_leaves_the_guest_alone() {
     let mut host = KernelHost::new();
-    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    let _ = dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    let loaded_events = dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    assert!(
+        !loaded_events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Error { .. })),
+        "装载 demo 必须成功：{loaded_events:?}"
+    );
     dispatch(&mut host, CommandPayload::StepN { n: 3 });
 
     let before_state = host.engine_snapshot().state;
@@ -686,6 +696,16 @@ fn b3_set_memory_map_after_loading_is_pending_and_leaves_the_guest_alone() {
 fn b4_load_project_uses_the_user_board_instead_of_auto_selection() {
     let mut host = KernelHost::new();
     // 先装载 ⇒ 之后的改板才是「待生效」。
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     assert_eq!(host.platform_id(), "default", "先走一次自动选档");
 
@@ -779,26 +799,27 @@ fn b4_a_board_configured_before_loading_survives_the_load() {
 // B-5 · 用户从未配过板 ⇒ 自动选档（逐字不变）
 // ---------------------------------------------------------------------------
 
-/// **B-5** —— **用户从未配过板**时 `LoadProject` ⇒ 走今天的自动选档
-/// ⇒ **逐字等价**（既有断言一条不改）。
+/// **B-5** —— **用户从未配过板**时 `LoadProject` ⇒ **拒**（`E_PLT-22`）⇒
+/// **不再自动选档**（v0.76 · STAGE-52 · B1 决议 / 裁决 C）。
 #[test]
 fn b5_load_project_without_a_user_board_still_auto_selects() {
     let mut host = KernelHost::new();
-    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    let events = dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
-    // 自动选档挑中的是内置的 `default`（demo 镜像落在低段 ⇒ 两张
-    // `auto_selectable` 的内置档都能装下 ⇒ **priority 小者**胜）。
-    assert_eq!(host.platform_id(), "default");
-    let expected =
-        platform::builtin_description(platform::PLATFORM_ID_DEFAULT).expect("内置默认档必须存在");
-    assert_bus_matches_description(&expected, &host);
+    // ⚠️ **不兜底生效板**：无用户板 ⇒ 装载 ⇒ 拒 + 引导（`E_PLT-22`）。
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Error { code, .. } if code == "E_PLT-22")),
+        "无用户板装载必须拒 `E_PLT-22`：{events:?}"
+    );
 }
 
-/// **B-5（正向）** —— 一个**从未配过板**的宿主 ⇒ 装载工程 ⇒ 走自动选档
-/// ⇒ 图是**内置默认档**，而且**不是**任何用户板。
+/// **B-5（v0.76 改写）** —— 一个**从未配过板**的宿主 ⇒ 装载工程 ⇒ **拒**
+/// （`E_PLT-22` · 引导导入模板）⇒ ⇒ **图不动**（仍是初始内置档）。
 ///
-/// ⚠️ **条件是「从未配过板」**，不是「没有待生效配置」⇒ 本条是 B-5 在
-/// 新模型下的**判别式**：只要用户配过一次板，就**再也不**自动选档。
+/// ⚠️ **v0.76（STAGE-52 · B1 决议 / 裁决 C）**：自动选档**已废** ⇒ ⇒
+/// 无用户板 ⇒ 装载 ⇒ **不兜底生效板** ⇒ ⇒ 拒 + 引导。
 #[test]
 fn b5_a_host_that_never_configured_a_board_auto_selects() {
     let mut host = KernelHost::new();
@@ -818,12 +839,20 @@ fn b5_a_host_that_never_configured_a_board_auto_selects() {
     );
     assert!(!pending, "从未配过板 ⇒ 没有待生效的");
 
-    // 装载工程 ⇒ 自动选档。
-    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
-    assert_eq!(host.platform_id(), "default", "从未配过板 ⇒ 必须走自动选档");
-    let expected =
-        platform::builtin_description(platform::PLATFORM_ID_DEFAULT).expect("内置默认档必须存在");
-    assert_bus_matches_description(&expected, &host);
+    // 装载工程 ⇒ **拒**（不再自动选档）。
+    let events = dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Error { code, .. } if code == "E_PLT-22")),
+        "无用户板装载必须拒 `E_PLT-22`：{events:?}"
+    );
+    // ⚠️ 次序纪律：拒在复位之前 ⇒ ⇒ 图**一个字都没动**。
+    assert_eq!(
+        host.platform_id(),
+        "default",
+        "拒绝装载不许换掉当前生效的图"
+    );
 }
 
 /// **B-5（负向半）** —— 装载**失败**时**不许**把「已装载」置真 ⇒ 之后的
@@ -976,6 +1005,16 @@ fn b7_the_mounted_uart_really_carries_bytes() {
 fn b8_the_ram_size_is_really_customizable() {
     let mut host = KernelHost::new();
     // 先装载（⇒ 之后的改板是「待生效」），再改板，再重新装载 ⇒ 用用户的图。
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     let board = board_with_eight_mib_ram();
     dispatch(
@@ -1017,6 +1056,16 @@ fn b8_the_ram_size_is_really_customizable() {
 #[test]
 fn b8_an_unmapped_load_traps_with_cause_5() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,
@@ -1086,6 +1135,16 @@ fn b8_an_unmapped_load_traps_with_cause_5() {
 #[test]
 fn b8_an_unmapped_store_traps_with_cause_7() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,

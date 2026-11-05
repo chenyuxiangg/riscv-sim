@@ -190,6 +190,14 @@ fn load(
     host.handle_message(&Message::command(1, CommandPayload::LoadProject(project)))
 }
 
+/// 与 `load` 同一模式：配板 / 订阅等命令也走 `Message::command`。
+fn dispatch(
+    host: &mut KernelHost,
+    cmd: CommandPayload,
+) -> Vec<riscv_sim_contract::protocol::EventPayload> {
+    host.handle_message(&Message::command(1, cmd))
+}
+
 /// ---- 内存图档位 ----
 
 #[test]
@@ -270,6 +278,17 @@ fn an_image_outside_the_default_window_switches_the_profile() {
     let mut host = KernelHost::new();
     assert_eq!(host.memory_profile(), MemoryProfile::Default);
 
+    // ⚠️ **v0.76（STAGE-52 · B1）**：自动选档已废 ⇒ ⇒ 高段镜像不再自动
+    //   切档 ⇒ ⇒ 显式配 qemu-virt 板（镜像落在它的高段窗口）⇒ 装载。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_QEMU_VIRT)
+                .expect("内置 qemu-virt 必须存在"),
+            expected_revision: None,
+        },
+    );
+
     // 落址 0x8400_0000（osz 的数据 / bss / 栈 / 堆那一段）。
     let elf = minimal_elf(0x8400_0000, &uart_write_two_bytes());
     let events = load(&mut host, elf_project(elf));
@@ -282,7 +301,7 @@ fn an_image_outside_the_default_window_switches_the_profile() {
     assert_eq!(
         host.memory_profile(),
         MemoryProfile::QemuVirt,
-        "镜像落在 0x8400_0000 ⇒ 必须切到 QEMU virt 档（默认档只铺 4 MiB）"
+        "配了 qemu-virt 板 ⇒ 装载后档位就是 QEMU virt（默认档只铺 4 MiB）"
     );
 }
 
@@ -291,6 +310,16 @@ fn an_image_outside_the_default_window_switches_the_profile() {
 #[test]
 fn a_guest_that_writes_the_uart_is_drained_from_the_console() {
     let mut host = KernelHost::new_with_profile(MemoryProfile::QemuVirt);
+    // ⚠️ **v0.76（STAGE-52 · B1）**：`new_with_profile` 只铺图、**不算**配板
+    //   （`user_board = None`）⇒ ⇒ 装载前**显式配 qemu-virt 板**。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_QEMU_VIRT)
+                .expect("内置 qemu-virt 必须存在"),
+            expected_revision: None,
+        },
+    );
     let elf = minimal_elf(0x8400_0000, &uart_write_two_bytes());
     let events = load(&mut host, elf_project(elf));
     assert!(
