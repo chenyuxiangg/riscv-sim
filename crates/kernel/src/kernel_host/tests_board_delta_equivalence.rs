@@ -99,7 +99,6 @@ fn user_board() -> PlatformDescription {
         id: "user-board".to_string(),
         name: "User board".to_string(),
         priority: 100,
-        auto_selectable: false,
         description: None,
         // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
@@ -442,7 +441,6 @@ fn target_with_three_changes() -> PlatformDescription {
         id: "user-board".to_string(),
         name: "User board".to_string(),
         priority: 100,
-        auto_selectable: false,
         description: None,
         // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。

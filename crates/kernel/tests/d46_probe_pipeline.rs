@@ -125,6 +125,16 @@ fn stream<'a>(
 /// 装载 demo 工程 + 订阅探针流，返回宿主。
 fn host_with_probe_subscription() -> KernelHost {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,
@@ -189,6 +199,16 @@ fn a_fresh_host_already_has_the_probe_pipeline_wired() {
 #[test]
 fn subscribing_lists_the_gpio_channel_even_before_any_edge() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     let events = dispatch(
         &mut host,
@@ -208,6 +228,16 @@ fn subscribing_lists_the_gpio_channel_even_before_any_edge() {
 #[test]
 fn the_channel_id_is_the_peripheral_id_plus_the_signal_name() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     let events = dispatch(
         &mut host,
@@ -243,6 +273,16 @@ fn the_channel_id_is_the_peripheral_id_plus_the_signal_name() {
 #[test]
 fn no_probe_waveform_is_pushed_when_the_topic_is_not_subscribed() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // 没订阅 `sim.waveform` —— 不该有探针波形。
     let events = dispatch(&mut host, CommandPayload::StepN { n: 8 });
@@ -322,6 +362,16 @@ fn a_second_run_of_the_same_value_produces_no_new_edge() {
 #[test]
 fn the_gpio_window_is_mapped_in_the_default_memory_map() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // 读 GPIO 的 DIR 寄存器（偏移 0）——固件没配过方向，应当是 0，
     // 但**读得到**本身就说明窗口映射好了。
@@ -336,6 +386,16 @@ fn the_gpio_window_is_mapped_in_the_default_memory_map() {
 #[test]
 fn load_project_reinstalls_the_probe_pipeline() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,
@@ -514,6 +574,16 @@ fn the_m19_ring_actually_receives_the_edges() {
     // 立刻变红。删掉握手之后 M-19 的环恒为 0 条——**M-19 成了死代码**，
     // 而此前的 D-46 用例一条都不会红。
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,

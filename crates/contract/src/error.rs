@@ -628,6 +628,27 @@ pub const E_PLT_20_FW_ISA_MISMATCH: u16 = 20;
 /// **自己一个码**。
 pub const E_PLT_21_MCU_INVALID: u16 = 21;
 
+/// **没有生效板就装载 / 运行固件**（v0.76 · STAGE-52 · B1 决议）—— 平台
+/// **不再自动选档兜底** ⇒ ⇒ 无生效板是**合法初始状态** ⇒ ⇒ 用户必须先
+/// 「从模板导入」或配置板 ⇒ ⇒ 否则 **拒 + 引导**。
+///
+/// ⚠️ **It does not reuse [`E_PLT_09_UNKNOWN_PLATFORM`]**: 那个是「**按名字**
+/// 找一块板而找不到」⇒ 这个是「**根本没有生效板**」⇒ 两个对象 ⇒ 一码两义 ⇒
+/// 禁止 ⇒ ⇒ **自己一个码**。
+///
+/// ⚠️ **No contract version bump**: adding a scenario code does not change
+/// any **shape** on the wire ⇒ ⇒ `SCHEMA_VERSION` stays **11**（同
+/// `E_PLT_20` 的先例）⇒ ⇒ 描述格式升版是 `PLATFORM_SCHEMA_VERSION` 那一个数
+/// （本批 4 → 5）。
+pub const E_PLT_22_NO_BOARD: u16 = 22;
+
+/// **pinmux 运行时寄存器操作非法**（v0.76 · STAGE-52 · 裁决 H）—— 固件写
+/// pinmux 功能选择寄存器：索引越界（≥ 该引脚功能数）⇒ 拒。
+///
+/// ⚠️ **静态**（描述层）引脚规格非法是 `E_PLT-19` 的事（V-24）⇒ 这个是
+/// **运行时**（固件动作）⇒ 两个对象 ⇒ 一码两义 ⇒ 禁止 ⇒ ⇒ **自己一个码**。
+pub const E_PLT_23_PINMUX_INVALID: u16 = 23;
+
 /// Scenario code: the image wants an address range that the **board in
 /// effect** does not have at all — 「**未知系统**」.
 ///

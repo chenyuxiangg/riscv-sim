@@ -284,7 +284,25 @@ pub mod snapshot;
 /// 事件**多一个字段** ⇒ ⇒ **必须升版**。详见
 /// `docs/detailed-design/STAGE-48_V072_Device_Instance_Table.md` §7.1
 /// 订正 1。
-pub const SCHEMA_VERSION: u32 = 11;
+/// ⚠️ **v0.76（STAGE-52 · 裁决 M）**：**模板库**需要「内置板模板清单
+/// 查询」—— 前端**查**内核拿模板（名称 / 优先级 / 器件数）⇒ ⇒ 再按
+/// `id` 取**完整描述**导入草稿 ⇒ ⇒ **前端不抄模板数据** ⇒ ⇒ 命令 / 事件
+/// 各加两个 ⇒ ⇒ **协议形状变了** ⇒ ⇒ **`SCHEMA_VERSION` 11 → 12**。
+///
+/// Contract **v12** adds the **内置板模板库**（v0.76 · STAGE-52）：
+///
+/// - new DTO `model::PlatformTemplateInfo` —— 模板清单条目（id / 名称 /
+///   优先级 / 器件数）；
+/// - `CommandPayload::ListPlatformTemplates` /
+///   `CommandPayload::GetPlatformTemplate { id }`；
+/// - `EventPayload::PlatformTemplates` / `EventPayload::PlatformTemplate`
+///   —— 回复侧；
+/// - ⚠️ **描述格式**也随本批升版（`PLATFORM_SCHEMA_VERSION` 4 → 5：
+///   删 `auto_selectable` · `pins` 升级为 `PinSpec`；`PLATFORM_RULES_VERSION`
+///   6 → 7：V-21 扩展 · V-24 / V-25）⇒ ⇒ **这两个数在平台层**，信封
+///   `SCHEMA_VERSION` **只**管消息形状；
+/// - ⚠️ `SIM_STATE_SCHEMA_VERSION` stays `2`（快照载荷没变）。
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// 转储长度上限（字节）—— v0.57 批（STAGE-42 §2.5 · 裁决 D）。
 ///

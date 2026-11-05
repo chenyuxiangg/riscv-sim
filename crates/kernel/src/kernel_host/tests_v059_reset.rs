@@ -15,6 +15,7 @@
 //! ⚠️ **第一段与第二段**（前端）落在 `front/tests/reset-semantics.test.mjs`
 //! 与真机门禁的 `loadImage` 段 ⇒ ⇒ 三段**分层**钉。
 
+use crate::kernel_host::platform;
 use riscv_sim_contract::error::PlatformError;
 use riscv_sim_contract::model::{
     ImageKind, ImageRef, ImageSource, ProductTree, Project, ProjectVersion,
@@ -133,6 +134,16 @@ fn first_tick_pc(events: &[EventPayload]) -> Option<u32> {
 #[test]
 fn the_watchdog_terminated_kernel_is_revived_by_loading_a_project() {
     let mut host = terminated_host();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     assert!(host.hms.terminated(), "前置条件：内核已经被看门狗终止");
     // ⚠️ **换成安静端口** ⇒ ⇒ guest 不再停滞 ⇒ ⇒ 「能再跑」这件事**看得见**
     // （否则复位后跑的第一件事就是又停滞 ⇒ ⇒ 又终止 ⇒ ⇒ 分不出新旧）。
@@ -169,6 +180,16 @@ fn the_watchdog_terminated_kernel_is_revived_by_loading_a_project() {
 #[test]
 fn loading_a_project_clears_the_watchdog_flag_and_the_health_state() {
     let mut host = terminated_host();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     assert!(host.watchdog_fired(), "前置条件：看门狗已触发");
     assert_eq!(
         host.health(),
@@ -199,6 +220,16 @@ fn a_host_that_never_fired_the_watchdog_is_healthy_after_loading() {
     let mut host = KernelHost::new();
     assert_eq!(host.health(), Health::Ok, "前置条件：本来就是 Ok");
 
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     let events = dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     assert!(
         errors_of(&events).is_empty(),
@@ -217,6 +248,16 @@ fn a_host_that_never_fired_the_watchdog_is_healthy_after_loading() {
 #[test]
 fn a_failed_load_does_not_reset_the_health_state() {
     let mut host = terminated_host();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     assert_eq!(
         host.health(),
         Health::Critical,
@@ -247,6 +288,16 @@ fn a_failed_load_does_not_reset_the_health_state() {
 #[test]
 fn the_watchdog_can_terminate_the_kernel_again_after_a_reload() {
     let mut host = terminated_host();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     assert!(!host.hms.terminated(), "前置条件：装载后内核是活的");
 
@@ -269,6 +320,16 @@ fn the_watchdog_can_terminate_the_kernel_again_after_a_reload() {
 #[test]
 fn loading_a_project_moves_the_pc_back_to_the_entry() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // 跑一段 ⇒ PC 离开入口。
     dispatch(&mut host, CommandPayload::Continue);

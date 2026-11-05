@@ -415,6 +415,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             // 契约 v10 新增：内核侧中间层的两条**只读**命令（STAGE-43）。
             variantOf(Command.listDeviceTypes()),
             variantOf(Command.listDeviceInstances()),
+            // 契约 v12 新增：模板库协议（STAGE-52 · 裁决 M）。
+            variantOf(Command.listPlatformTemplates()),
+            variantOf(Command.getPlatformTemplate("default")),
         ].sort();
         assert.deepEqual(js, rust, "JS 命令变体与 Rust CommandPayload 不一致");
     });
@@ -452,6 +455,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             // 契约 v10 新增：器件类型注册表 + 逐实例状态（STAGE-43）。
             variantOf(Event.deviceTypes([])),
             variantOf(Event.deviceInstances([])),
+            // 契约 v12 新增：模板库协议（STAGE-52 · 裁决 M）。
+            variantOf(Event.platformTemplates([])),
+            variantOf(Event.platformTemplate({})),
         ].sort();
         assert.deepEqual(js, rust, "JS 事件变体与 Rust EventPayload 不一致");
     });
@@ -565,6 +571,12 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 //   跨层门禁**看不见**它们的字段名。
                 ListDeviceTypes: Command.listDeviceTypes(),
                 ListDeviceInstances: Command.listDeviceInstances(),
+                // ⚠️ **契约 v12**（STAGE-52 · 模板库协议批）⇒ ⇒ 这两个
+                //   构造器**必须**在这儿登记 ⇒ ⇒ 否则 Rust 侧一加变体，
+                //   跨层门禁**看不见**它们的字段名（unit 变体是裸字符串；
+                //   Get 是单键对象）。
+                ListPlatformTemplates: Command.listPlatformTemplates(),
+                GetPlatformTemplate: Command.getPlatformTemplate("default"),
             },
             EventPayload: {
                 Tick: Event.tick(0, 0),
@@ -599,6 +611,10 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 //   逐字比对的**登记处**（`types` / `instances`）。
                 DeviceTypes: Event.deviceTypes([]),
                 DeviceInstances: Event.deviceInstances([]),
+                // ⚠️ **契约 v12**（STAGE-52 · 模板库协议批）⇒ ⇒ 字段名
+                //   逐字比对的**登记处**（`templates` / `description`）。
+                PlatformTemplates: Event.platformTemplates([]),
+                PlatformTemplate: Event.platformTemplate({}),
             },
         };
 

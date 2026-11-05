@@ -268,6 +268,41 @@ check(
     check("Nop 回一个 Tick", find(events, "Tick") !== undefined);
 }
 
+// -- 模板导入（配板 · v0.76 · STAGE-52 · B1 不兜底）------------------------
+//
+// ⚠️ **为什么必须先配板**：v0.76 起**无板装载被拒**（E_PLT-22 · 引导用户
+// 从模板导入）⇒ ⇒ 冒烟流程在 LoadProject 之前**走一遍模板库链路**
+// （`ListPlatformTemplates` → `GetPlatformTemplate` → `SetMemoryMap`）⇒ ⇒
+// 这条门禁同时覆盖 **B-168 同源**的「模板导入 ⇒ 配板 ⇒ 装载」路径。
+{
+    const listed = send("ListPlatformTemplates");
+    const listEvent = find(listed, "PlatformTemplates");
+    check(
+        "ListPlatformTemplates 回 3 块内置模板",
+        listEvent?.PlatformTemplates?.templates?.length === 3,
+        `实际 ${listEvent?.PlatformTemplates?.templates?.length}`,
+    );
+
+    const got = send({ GetPlatformTemplate: { id: "default" } });
+    const templateEvent = find(got, "PlatformTemplate");
+    const description = templateEvent?.PlatformTemplate?.description;
+    check(
+        "GetPlatformTemplate(default) 回完整描述",
+        description?.id === "default",
+        `实际 ${description?.id}`,
+    );
+
+    const mapped = send({
+        SetMemoryMap: { description, expected_revision: null },
+    });
+    const mapEvent = find(mapped, "MemoryMap");
+    check(
+        "导入模板后 SetMemoryMap 立即生效（pending = false）",
+        mapEvent?.MemoryMap?.pending === false,
+        `实际 pending=${mapEvent?.MemoryMap?.pending}`,
+    );
+}
+
 // -- LoadProject ----------------------------------------------------------
 {
     const project = {
@@ -669,7 +704,6 @@ check(
             id: "smoke-board",
             name: "Smoke board",
             priority: 100,
-            auto_selectable: false,
             region_budget_bytes: 16 * 1024 * 1024,
             max_region_bytes: null,
         };

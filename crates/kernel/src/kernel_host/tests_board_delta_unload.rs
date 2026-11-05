@@ -120,7 +120,6 @@ fn user_board() -> PlatformDescription {
         id: "user-board".to_string(),
         name: "User board".to_string(),
         priority: 100,
-        auto_selectable: false,
         description: None,
         // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
@@ -161,7 +160,6 @@ fn ram_only_board(max_region_bytes: Option<u32>) -> PlatformDescription {
         id: "ram-only".to_string(),
         name: "RAM only".to_string(),
         priority: 100,
-        auto_selectable: false,
         description: None,
         // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
@@ -862,6 +860,16 @@ fn b7_a_given_runtime_cap_is_the_one_the_bus_uses() {
 fn b11_after_unloading_a_board_change_takes_effect_immediately() {
     let mut host = KernelHost::new();
     // 装载 ⇒ 之后改板只能「待生效」。
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,
@@ -876,7 +884,9 @@ fn b11_after_unloading_a_board_change_takes_effect_immediately() {
     let events = dispatch(&mut host, CommandPayload::UnloadProject);
     let state = first_memory_map(&events);
     assert!(!state.loaded, "卸载 ⇒ `loaded` 变假：{events:?}");
-    assert_eq!(state.revision, 1, "卸载**不 +1**（卸载不改图）");
+    // ⚠️ **v0.76**：前置配过一块默认板（修订号 1）+ 待生效改板（2）⇒ ⇒
+    //   卸载**不 +1** ⇒ 停在 2。
+    assert_eq!(state.revision, 2, "卸载**不 +1**（卸载不改图）");
 
     // ⇒ 之后的改板**立即生效**。
     let board = ram_only_board(None);
@@ -893,7 +903,7 @@ fn b11_after_unloading_a_board_change_takes_effect_immediately() {
         "卸载之后 ⇒ 改板**立即生效**（生效图逐字段等于新板）"
     );
     assert!(!state.pending, "立即生效 ⇒ 没有待生效的");
-    assert_eq!(state.revision, 2, "改板被接受 ⇒ 修订号 +1");
+    assert_eq!(state.revision, 3, "改板被接受 ⇒ 修订号 +1");
 }
 
 /// **B-12** —— `UnloadProject` ⇒ 用户的板**留着** ⇒ 镜像**留着** ⇒
@@ -902,6 +912,16 @@ fn b11_after_unloading_a_board_change_takes_effect_immediately() {
 fn b12_unloading_keeps_the_user_board_and_the_mirror_bytes() {
     let mut host = KernelHost::new();
     let project = demo_project();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(project.clone()));
     let board = user_board();
     dispatch(
@@ -993,6 +1013,16 @@ fn b13_the_unload_reply_is_not_empty() {
 #[test]
 fn b11_unloading_clears_the_running_state() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(&mut host, CommandPayload::StepN { n: 3 });
     assert_ne!(host.pc(), 0, "跑了几条指令 ⇒ PC 不为零（前置条件）");
@@ -1012,10 +1042,21 @@ fn b11_unloading_clears_the_running_state() {
 fn b14_loading_applies_the_pending_board_and_bumps_the_revision() {
     let mut host = KernelHost::new();
     // 先装载一次 ⇒ 之后的改板只能「待生效」。
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     let before = current_state(&mut host);
-    assert_eq!(before.revision, 0, "还没改过板 ⇒ 修订号 0");
-    assert!(!before.pending, "从未配过板 ⇒ 没有待生效的");
+    // ⚠️ **v0.76**：前置配过一块默认板 ⇒ 修订号 1（装载本身不 +1）。
+    assert_eq!(before.revision, 1, "只配过默认板 ⇒ 修订号 1");
+    assert!(!before.pending, "生效图 == 用户的板 ⇒ 没有待生效的");
 
     // 配一块板（已装载 ⇒ 待生效）⇒ 修订号 +1。
     let board = user_board();
@@ -1027,7 +1068,7 @@ fn b14_loading_applies_the_pending_board_and_bumps_the_revision() {
         },
     );
     let pending_state = current_state(&mut host);
-    assert_eq!(pending_state.revision, 1, "改板被接受 ⇒ 修订号 +1");
+    assert_eq!(pending_state.revision, 2, "改板被接受 ⇒ 修订号 +1");
     assert!(pending_state.pending, "已装载 ⇒ 改板只能待生效");
 
     // 重新装载 ⇒ **待生效的板被应用** ⇒ 生效图 = 那块板 ⇒ 修订号再 +1。
@@ -1041,7 +1082,7 @@ fn b14_loading_applies_the_pending_board_and_bumps_the_revision() {
         !after.pending,
         "板被应用了 ⇒ 没有待生效的（`pending == false`）"
     );
-    assert_eq!(after.revision, 2, "待生效的板被应用 ⇒ 修订号 **+1**");
+    assert_eq!(after.revision, 3, "待生效的板被应用 ⇒ 修订号 **+1**");
     assert_eq!(
         host.platform_id(),
         "user-board",
@@ -1054,13 +1095,23 @@ fn b14_loading_applies_the_pending_board_and_bumps_the_revision() {
 #[test]
 fn b14_loading_without_a_pending_board_does_not_bump_the_revision() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     let state = current_state(&mut host);
     assert_eq!(
-        state.revision, 0,
-        "自动选档**不是**「待生效的板被应用」⇒ 修订号不 +1"
+        state.revision, 1,
+        "装载**不是**「待生效的板被应用」⇒ 修订号不 +1（前置配过默认板 ⇒ 停在 1）"
     );
-    assert_eq!(host.platform_id(), "default", "走自动选档");
+    assert_eq!(host.platform_id(), "default", "生效图是内置 default");
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,6 +1124,16 @@ fn b14_loading_without_a_pending_board_does_not_bump_the_revision() {
 #[test]
 fn b3_the_memory_map_push_carries_the_loaded_flag_and_the_revision() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,
@@ -1091,7 +1152,7 @@ fn b3_the_memory_map_push_carries_the_loaded_flag_and_the_revision() {
     let state = first_memory_map(&events);
     assert!(state.loaded, "推送必须带 `loaded`（已装载）");
     assert_eq!(
-        state.revision, 1,
-        "推送必须带 `revision` ⇒ 前端重订之后**不会误报冲突**"
+        state.revision, 2,
+        "推送必须带 `revision` ⇒ 前端重订之后**不会误报冲突**（配板 1 + 改板 2）"
     );
 }

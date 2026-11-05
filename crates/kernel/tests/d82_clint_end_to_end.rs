@@ -352,6 +352,17 @@ fn d82_project() -> Project {
 /// `qemu-virt` 档 ⇒ **CLINT 存在** ⇒ 定时器通路存在。
 fn host_with_d82_firmware() -> KernelHost {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：自动选档已废 ⇒ ⇒ 无用户板装载被拒
+    //   （`E_PLT-22`）⇒ ⇒ 固件落在 0x8400_0000（qemu-virt 高段）⇒ ⇒
+    //   装载前**显式配 qemu-virt 板**（CLINT 在 qemu-virt 档 ⇒ 定时器通路在）。
+    let _ = host.handle_message(&Message::command(
+        1,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_QEMU_VIRT)
+                .expect("内置 qemu-virt 必须存在"),
+            expected_revision: None,
+        },
+    ));
     let events = host.handle_message(&Message::command(
         1,
         CommandPayload::LoadProject(d82_project()),

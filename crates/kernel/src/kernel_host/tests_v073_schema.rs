@@ -444,28 +444,47 @@ fn k9b_a_role_naming_the_wrong_kind_of_device_is_rejected() {
 // D-175 的 D1 —— **引脚表**（`pins` 段 · 本批只定**形状**）
 // ---------------------------------------------------------------------------
 
-/// **K-11** —— 引脚表指向**存在**的器件 ⇒ ⇒ 描述**合法** ⇒ ⇒ 装得上。
+/// **K-11** —— 引脚规格指向**存在**的 **GPIO** 器件 ⇒ ⇒ 描述**合法** ⇒ ⇒
+/// 装得上。
 ///
-/// ⚠️ **本批只定形状**：引脚名 / 信号名**自由** ⇒ ⇒ 这里**不**判它们
-/// （那属**第 58 批**的通用连接路由）⇒ ⇒ ⇒ **边界如实登记**。
+/// ⚠️ **v0.76（STAGE-52 · A 裁决）**：`PinBinding{device,pin,signal}` →
+/// `PinSpec{device,pin,functions}` ⇒ ⇒ 引脚规格只能指向 **GPIO** 器件
+/// （V-21 扩展 · V-24）⇒ ⇒ 指向存在但**非 GPIO** 的器件（UART）**也拒**。
 #[test]
 fn k11_a_pin_table_naming_an_existing_device_is_accepted() {
     let mut description = board_with_two_uarts();
-    description.pins = Some(vec![
-        riscv_sim_contract::platform::PinBinding {
-            device: "UART0".to_string(),
-            pin: "rx".to_string(),
-            signal: "s_uart0_rx".to_string(),
-        },
-        riscv_sim_contract::platform::PinBinding {
-            device: "UART1".to_string(),
-            pin: "tx".to_string(),
-            signal: "s_uart1_tx".to_string(),
-        },
-    ]);
+    // ⚠️ UART0 是**非 GPIO** 器件 ⇒ ⇒ 指向它 ⇒ ⇒ **拒**（V-24）。
+    description.pins = Some(vec![riscv_sim_contract::platform::PinSpec {
+        device: "UART0".to_string(),
+        pin: "pin0".to_string(),
+        functions: vec![riscv_sim_contract::platform::PinFunction {
+            name: "rx".to_string(),
+            direction: riscv_sim_contract::platform::PinDirection::Input,
+            irq: None,
+        }],
+    }]);
+    let err = description
+        .validate()
+        .expect_err("引脚规格指向非 GPIO 器件必须被拒");
+    assert_eq!(
+        err.scenario, 19,
+        "必须报 `E_PLT-19`（引脚规格非法）⇒ ⇒ 实际是 scenario={}",
+        err.scenario
+    );
+
+    // ⚠️ qemu-virt 板自带 GPIO0 ⇒ ⇒ 指向它 ⇒ ⇒ 合法 ⇒ ⇒ **装得上**。
+    description.pins = Some(vec![riscv_sim_contract::platform::PinSpec {
+        device: "GPIO0".to_string(),
+        pin: "pin0".to_string(),
+        functions: vec![riscv_sim_contract::platform::PinFunction {
+            name: "gpio_in".to_string(),
+            direction: riscv_sim_contract::platform::PinDirection::Input,
+            irq: None,
+        }],
+    }]);
     assert!(
         description.validate().is_ok(),
-        "引脚表指向已声明的器件必须合法：{:?}",
+        "引脚规格指向已声明的 GPIO 器件必须合法：{:?}",
         description.validate()
     );
 
@@ -486,15 +505,19 @@ fn k11_a_pin_table_naming_an_existing_device_is_accepted() {
     );
 }
 
-/// **K-12** —— 引脚表指向**不存在**的器件 ⇒ ⇒ **拒**（`E_PLT-19`）⇒ ⇒
+/// **K-12** —— 引脚规格指向**不存在**的器件 ⇒ ⇒ **拒**（`E_PLT-19`）⇒ ⇒
 /// **不静默**。
 #[test]
 fn k12_a_pin_table_naming_a_missing_device_is_rejected() {
     let mut description = board_with_two_uarts();
-    description.pins = Some(vec![riscv_sim_contract::platform::PinBinding {
+    description.pins = Some(vec![riscv_sim_contract::platform::PinSpec {
         device: "NOPE".to_string(),
-        pin: "rx".to_string(),
-        signal: "s_nope_rx".to_string(),
+        pin: "pin0".to_string(),
+        functions: vec![riscv_sim_contract::platform::PinFunction {
+            name: "s_nope".to_string(),
+            direction: riscv_sim_contract::platform::PinDirection::Input,
+            irq: None,
+        }],
     }]);
     let err = description
         .validate()

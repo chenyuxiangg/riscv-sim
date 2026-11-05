@@ -59,13 +59,14 @@ use riscv_sim_contract::error::{
     E_PLT_10_PLATFORM_FILE_UNREADABLE, E_PLT_11_PLATFORM_FILE_MALFORMED, PLATFORM_FAMILY,
 };
 use riscv_sim_contract::platform::{
-    DeviceSpec, PlatformDescription, RegionSpec, WIRING_EVENT_RX_READY,
+    DeviceSpec, PinFunction, PlatformDescription, RegionSpec, WIRING_EVENT_RX_READY,
 };
 use riscv_sim_contract::port::{Peripheral, TimeSource};
 
 use crate::m14_bus::Bus;
 use crate::m15_peripheral::clint::Clint;
 use crate::m15_peripheral::gpio::GpioBank;
+use crate::m15_peripheral::pinmux::PinmuxDevice;
 use crate::m15_peripheral::plic::Plic;
 use crate::m15_peripheral::uart::Uart16550;
 
@@ -109,9 +110,8 @@ pub const PLATFORM_ID_MINIMAL: &str = "minimal";
 
 /// 全部内置描述 —— **(id, JSON 原文)**。
 ///
-/// ⚠️ **顺序是「自动选档的同分兜底顺序」**：裁决 E 说「`priority` 小者
-/// 优先」⇒ 同分时谁先谁后由这里决定 ⇒ 顺序**不是**语义（语义在
-/// `priority` 里），但它必须**稳定**。
+/// ⚠️ **顺序是内置清单的稳定顺序**：**v0.76（STAGE-52 · B3）**自动选档
+/// 已废 ⇒ ⇒ 顺序只决定**模板清单**的展示次序（裁决 M）⇒ ⇒ 必须**稳定**。
 const BUILTIN_DESCRIPTIONS: &[(&str, &str)] = &[
     (PLATFORM_ID_DEFAULT, BUILTIN_JSON_DEFAULT),
     (PLATFORM_ID_QEMU_VIRT, BUILTIN_JSON_QEMU_VIRT),
@@ -154,11 +154,11 @@ pub fn builtin_description(id: &str) -> Result<PlatformDescription, PlatformErro
     parse_description(json)
 }
 
-/// 全部**内置描述**（自动选档的**候选来源**）。
+/// 全部**内置描述**（**模板清单** · v0.76 · STAGE-52 · 裁决 M）。
 ///
-/// ⚠️ **这里返回的是「全部」**：哪一份**参与**自动选档，由描述自己的
-/// `auto_selectable` 字段决定（裁决 E）⇒ 宿主**不按 id 硬编码**候选集
-/// ⇒ 「演示平台只能被显式指定」这条规则写在**数据里**，不在代码里。
+/// ⚠️ **这里返回的是「全部」**：前端模板库**查**这份清单 ⇒ ⇒ 模板导入
+///   由**用户显式选一块** ⇒ ⇒ 宿主**不按 id 硬编码**候选集 ⇒ ⇒
+///   `auto_selectable` **已废弃**（B3 · 字段删除）。
 pub fn builtin_descriptions() -> Result<Vec<PlatformDescription>, PlatformError> {
     BUILTIN_DESCRIPTIONS
         .iter()
@@ -244,10 +244,16 @@ pub struct BuiltDevice {
     ///   要**读它的 pending IRQ**（⇒ ⇒ 抬 PLIC 的源）⇒ ⇒ ⇒ **拿不到句柄
     ///   就抬不了** ⇒ ⇒ ⇒ **一个约束一个落点**：句柄**必须**在这儿。
     gpio: Option<Rc<RefCell<GpioBank>>>,
+    /// 宿主留着的 **pinmux** 句柄（v0.76 · STAGE-52 · C1 决议）。
+    ///
+    /// ⚠️ **为什么 pinmux 要留句柄**：固件**写它的寄存器**切当前功能、宿主
+    ///   **读当前功能**查「功能 → 中断源」⇒ ⇒ 拿不到句柄就切不了、抬不了
+    ///   ⇒ ⇒ **一个约束一个落点**：句柄**必须**在这儿。
+    pinmux: Option<Rc<RefCell<PinmuxDevice>>>,
 }
 
 impl BuiltDevice {
-    /// 一个**宿主不直接碰**的器件（今天只有 GPIO 是这样）。
+    /// 一个**宿主不直接碰**的器件。
     fn opaque<P>(device: P) -> Self
     where
         P: Peripheral + 'static,
@@ -258,6 +264,7 @@ impl BuiltDevice {
             clint: None,
             plic: None,
             gpio: None,
+            pinmux: None,
         }
     }
 
@@ -270,6 +277,7 @@ impl BuiltDevice {
             clint: None,
             plic: None,
             gpio: None,
+            pinmux: None,
         }
     }
 
@@ -282,6 +290,7 @@ impl BuiltDevice {
             clint: Some(handle),
             plic: None,
             gpio: None,
+            pinmux: None,
         }
     }
 
@@ -294,6 +303,20 @@ impl BuiltDevice {
             clint: None,
             plic: None,
             gpio: Some(handle),
+            pinmux: None,
+        }
+    }
+
+    /// **pinmux** —— 宿主要留句柄（**功能切换 + 中断路由** · v0.76 · STAGE-52）。
+    fn pinmux(device: PinmuxDevice) -> Self {
+        let handle = Rc::new(RefCell::new(device));
+        BuiltDevice {
+            peripheral: handle.clone(),
+            uart: None,
+            clint: None,
+            plic: None,
+            gpio: None,
+            pinmux: Some(handle),
         }
     }
 
@@ -306,6 +329,7 @@ impl BuiltDevice {
             clint: None,
             plic: Some(handle),
             gpio: None,
+            pinmux: None,
         }
     }
 }
@@ -336,6 +360,13 @@ fn build_device(spec: &DeviceSpec, base: u32) -> Result<BuiltDevice, PlatformErr
         DeviceSpec::TimerRiscv { id, irq_line } => BuiltDevice::opaque(
             crate::m15_peripheral::timer::TimerRiscv::new(id.clone(), base, *irq_line),
         ),
+        // ⚠️ **v0.76（STAGE-52 · C1 决议）**：pinmux = 独立器件 —— 每引脚
+        //   一个功能选择寄存器（`4×引脚号` 偏移）。参数逐字对齐
+        //   `PinmuxDevice::new(id, base)`；功能数在**建图之后**从描述 `pins`
+        //   段喂入（[`map_platform`] 的 pinmux 装配段）。
+        DeviceSpec::Pinmux { id } => {
+            BuiltDevice::pinmux(crate::m15_peripheral::PinmuxDevice::new(id.clone(), base))
+        }
     })
 }
 
@@ -361,6 +392,8 @@ pub enum DeviceHandle {
     /// ⚠️ v0.73 批它是 `Opaque`（宿主**不**持有专用句柄）⇒ ⇒ 引脚级连线
     ///   **抬不了** ⇒ ⇒ ⇒ 现在**必须**持有句柄（一个约束一个落点）。
     Gpio(Rc<RefCell<GpioBank>>),
+    /// **pinmux**（v0.76 · STAGE-52 · C1 决议 —— 功能切换 + 中断路由）。
+    Pinmux(Rc<RefCell<PinmuxDevice>>),
     /// 宿主**不**持有专用句柄的器件（今天的 `timer_riscv`）⇒ ⇒ 只登记
     /// 「**它在**」⇒ ⇒ 「它能不能当线的两端」**判得出来**（⇒ ⇒ `source-type` /
     /// `target-type` 而不是 `source-unknown`）。
@@ -478,6 +511,25 @@ impl DeviceInstanceTable {
         }
     }
 
+    /// 按 id 查一个 **pinmux** 句柄（v0.76 · STAGE-52 · C1 决议）。
+    pub fn pinmux(&self, id: &str) -> Option<Rc<RefCell<PinmuxDevice>>> {
+        match self.get(id).map(|e| &e.handle) {
+            Some(DeviceHandle::Pinmux(h)) => Some(Rc::clone(h)),
+            _ => None,
+        }
+    }
+
+    /// 遍历所有 **pinmux** 句柄（v0.76 · STAGE-52 —— 装配期喂功能数）。
+    pub fn iter_pinmux(&self) -> Vec<Rc<RefCell<PinmuxDevice>>> {
+        self.entries
+            .iter()
+            .filter_map(|e| match &e.handle {
+                DeviceHandle::Pinmux(h) => Some(Rc::clone(h)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// **第一个** UART（base 升序）—— **console 角色**（裁决 D：逐字不变）。
     pub fn first_uart(&self) -> Option<&DeviceInstanceEntry> {
         self.entries.iter().find(|e| e.kind == "uart16550")
@@ -530,6 +582,12 @@ pub struct MappedDevices {
     pub handles: DeviceInstanceTable,
     /// **角色解析**的结果（STAGE-49 · D-177 的 C）—— 哪个 id 扮演哪个角色。
     pub roles: ResolvedRoles,
+    /// **pinmux 路由表**（v0.76 · STAGE-52 · C1 / J / K）。
+    ///
+    /// ⚠️ 每项 = `(gpio 器件 id, 引脚号, 功能列表)` —— 建图时从描述 `pins`
+    ///   段编译 ⇒ ⇒ 与建图**同源** ⇒ ⇒ 宿主同步中断时按「当前功能 → irq 源」
+    ///   抬线 ⇒ ⇒ **不**写 GPIO 的 `irq_lines[pin]`（分层禁令）。
+    pub pinmux_routes: Vec<(String, u32, Vec<PinFunction>)>,
 }
 
 /// 按描述**建图**。
@@ -610,6 +668,7 @@ pub fn map_platform(
                     clint,
                     plic,
                     gpio,
+                    pinmux,
                 } = build_device(device, base)?;
                 // ⚠️ 窗口大小**由器件自己报**（裁决 D）。
                 let window = peripheral.borrow().size();
@@ -631,11 +690,12 @@ pub fn map_platform(
                 // ⚠️ **GPIO 没有专用句柄** ⇒ ⇒ 记成 `Opaque` ⇒ ⇒ 「它在」
                 // 这件事**判得出来**（⇒ ⇒ 线的两端是 GPIO 时报
                 // `source-type` / `target-type`，**不是** `source-unknown`）。
-                let handle = match (uart, clint, plic, gpio) {
-                    (Some(u), None, None, None) => DeviceHandle::Uart(u),
-                    (None, Some(c), None, None) => DeviceHandle::Clint(c),
-                    (None, None, Some(p), None) => DeviceHandle::Plic(p),
-                    (None, None, None, Some(g)) => DeviceHandle::Gpio(g),
+                let handle = match (uart, clint, plic, gpio, pinmux) {
+                    (Some(u), None, None, None, None) => DeviceHandle::Uart(u),
+                    (None, Some(c), None, None, None) => DeviceHandle::Clint(c),
+                    (None, None, Some(p), None, None) => DeviceHandle::Plic(p),
+                    (None, None, None, Some(g), None) => DeviceHandle::Gpio(g),
+                    (None, None, None, None, Some(x)) => DeviceHandle::Pinmux(x),
                     _ => DeviceHandle::Opaque,
                 };
                 devices.handles.push(DeviceInstanceEntry {
@@ -649,6 +709,38 @@ pub fn map_platform(
     // ⚠️ **角色解析**（STAGE-49 · D-177 的 C）：描述里的 `roles` **优先**，
     // **缺省** ⇒ ⇒ 今天的口径（第一个 UART / 第一个 CLINT）⇒ ⇒ **逐字不变**。
     devices.roles = resolve_roles(description, &devices.handles);
+
+    // ---- **pinmux 装配**（v0.76 · STAGE-52 · C1 / I / J / K）----
+    //
+    // ⚠️ 描述 `pins` 段 ⇒ ⇒ 编译「引脚路由表」：`(gpio 器件 id, 引脚号,
+    //   功能列表)` ⇒ ⇒ 宿主同步中断时按「当前功能 → irq 源」抬线。
+    //
+    // ⚠️ **功能数喂给 pinmux 器件**：固件写功能索引越界要能判
+    //   （`E_PLT-23`）⇒ ⇒ 器件层**不知道功能名**（裁决 G）⇒ ⇒ 只喂**数量**。
+    //   MVP：**所有**存在的 pinmux 器件都喂同一份数量（同一份 `pins` 段）。
+    //
+    // ⚠️ **老描述没有 `pins` 段** ⇒ ⇒ 这一整段**零行为**（裁决 E）⇒ ⇒
+    //   存量板档案照装（B-171）。
+    if let Some(pin_specs) = description.pins.as_ref() {
+        for spec in pin_specs {
+            let Some(pin) = riscv_sim_contract::platform::parse_gpio_pin_name(&spec.pin) else {
+                // ⚠️ 契约层 V-24 已把非 `pin{N}` 形拒掉 ⇒ ⇒ 这里**到不了** ⇒ ⇒
+                // 兜底：跳过（不静默造路由）。
+                continue;
+            };
+            let function_count = spec.functions.len() as u32;
+            // 喂功能数（给所有存在的 pinmux 器件 —— 数量是同一份）。
+            for entry in devices.handles.iter_pinmux() {
+                if let Ok(mut mux) = entry.try_borrow_mut() {
+                    mux.set_function_count(pin, function_count);
+                }
+            }
+            devices
+                .pinmux_routes
+                .push((spec.device.clone(), pin, spec.functions.clone()));
+        }
+    }
+
     Ok(devices)
 }
 
@@ -1021,25 +1113,6 @@ pub fn compile_wiring(
 }
 
 // ---------------------------------------------------------------------------
-// 自动选档（裁决 E）
-// ---------------------------------------------------------------------------
-
-/// 一个地址区间是否被描述的**某个 RAM 区域**完整覆盖。
-///
-/// ⚠️ **只看 RAM**：ROM 不是 RAM（裁决 E 说「取它的**全部 RAM 区域**」）。
-///
-/// ⚠️ **v0.73（STAGE-49 · B2）**：**缺 `base`** 的段 ⇒ ⇒ **跳过**
-/// （⇒ ⇒ 它还没有位置）⇒ ⇒ ⇒ **不**把它当成「覆盖 [0, size)」。
-fn covered_by_ram(description: &PlatformDescription, lo: u32, hi: u32) -> bool {
-    description.regions.iter().any(|region| match region {
-        RegionSpec::Ram { base, size } => base
-            .map(|base| lo >= base && hi <= base.saturating_add(*size))
-            .unwrap_or(false),
-        RegionSpec::Rom { .. } | RegionSpec::Peripheral { .. } => false,
-    })
-}
-
-// ---------------------------------------------------------------------------
 // 「未知系统」门禁（v0.71 · STAGE-47 · 台账 D-175 候选 C）
 // ---------------------------------------------------------------------------
 
@@ -1225,62 +1298,4 @@ pub fn compatibility(mirror_ranges: &[(u32, u32)], board: &[(u32, u32)]) -> Boar
         missing,
         partial,
     }
-}
-
-/// 按镜像**实际用到的地址**挑平台描述（裁决 E）。
-///
-/// ## 判据（规格 §3 裁决 E 的**逐字**写法）
-///
-/// 1. **候选描述** = 全部 `auto_selectable == true` 的内置描述 ⇒ 演示
-///    平台（`auto_selectable: false`）**只能被显式指定**；
-/// 2. **区间在外层**逐个过：对每个区间 `(lo, hi)`，在候选里找**能完整
-///    覆盖它**的那些（`lo >= base && hi <= base + size`，在它的**全部
-///    RAM 区域**里找）中 `priority` **最小**的那个：
-///    - **找不到** ⇒ 跳过这个区间（= 今天的 `continue`）；
-///    - 找到的是 **`default`** ⇒ **继续下一个区间**（= 今天「被 Default
-///      覆盖 ⇒ 不 return」）；
-///    - 找到的是**别的** ⇒ **立即**选它（= 今天的 `return QemuVirt`）；
-/// 3. **全部区间过完 ⇒ 回落 `default`**。
-///
-/// ⚠️ **「区间在外层」这条结构不能倒过来**（规格 §5.2 B-9 的补充）：
-/// 「描述在外层、找第一个能装下**全部**区间的描述」在今天的两个真实
-/// 描述上**结果相同**，但它**不是**同一条规则 ⇒ 用例用一个「区间落在
-/// qemu-virt 高段 + 区间落在两档之外」的镜像把它**钉住**（区间在外层
-/// ⇒ `qemu-virt`；描述在外层 ⇒ `default`）。
-///
-/// ⚠️ **为什么 `minimal` 不参与**（裁决 E 的**数据化**）：`minimal` 的
-/// **低段**是 2 MiB（比 `default` 的 1 MiB 大）⇒ 若它参与选档，一段
-/// 「比 `default` 低段大**一个字节**」的镜像会**改选 `minimal`** ⇒ 今天
-/// 报 `E_BUS-01` 的那次装载会**悄悄成功** ⇒ 「今天只查高段」这个差异
-/// 由 `auto_selectable: false` **显式承载在数据里** ⇒ 宿主**不按 id
-/// 硬编码**候选集。
-pub fn choose_description(ranges: &[(u32, u32)]) -> Result<PlatformDescription, PlatformError> {
-    // ① 候选：全部 `auto_selectable == true` 的描述（裁决 E）。
-    let candidates: Vec<PlatformDescription> = builtin_descriptions()?
-        .into_iter()
-        .filter(|description| description.auto_selectable)
-        .collect();
-
-    // ② **区间在外层**逐个过。
-    for &(lo, hi) in ranges {
-        // 覆盖这个区间的候选里，`priority` 最小的那个。
-        let best = candidates
-            .iter()
-            .filter(|description| covered_by_ram(description, lo, hi))
-            .min_by_key(|description| description.priority);
-
-        match best {
-            // 找不到 ⇒ 跳过这个区间（= 今天的 `continue`）。
-            None => continue,
-            // 找到的是 `default` ⇒ 继续下一个区间（= 今天「被 Default
-            // 覆盖 ⇒ 不 return」）。
-            Some(description) if description.id == PLATFORM_ID_DEFAULT => continue,
-            // 找到的是别的 ⇒ **立即**选它（= 今天的 `return QemuVirt`）。
-            Some(description) => return Ok(description.clone()),
-        }
-    }
-
-    // ③ 全部区间过完 ⇒ 回落 `default`（**今天**也是这样：两档都装不下 ⇒
-    // 返回 Default ⇒ 随后由 M-14 报「未映射访问」）。
-    builtin_description(PLATFORM_ID_DEFAULT)
 }

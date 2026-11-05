@@ -154,6 +154,10 @@ export const DEVICE_KINDS = Object.freeze([
     "clint",
     "plic",
     "timer_riscv",
+    // ⚠️ **v0.76（STAGE-52）**：pinmux —— 每引脚功能选择寄存器
+    // （偏移 0x4 × 引脚号 · 写功能索引）⇒ ⇒ 内核已实现 ⇒ ⇒ 本清单
+    // 与契约层 `DeviceSpec::KINDS` 逐字相同（跨层门禁逐字比）。
+    "pinmux",
 ]);
 
 /** 区域类型（`RegionSpec` 的三个变体，snake_case 线上名）。 */
@@ -369,9 +373,9 @@ export function defaultDraft() {
         id: "custom",
         name: "自定义板",
         priority: "100",
-        // ⚠️ 用户配的板**不该**参与自动选档（契约层自己的 user-board 样例
-        // 也是 `false`）⇒ 显式写出来，不靠 serde 的缺省。
-        auto_selectable: false,
+        // ⚠️ **v0.76（STAGE-52 · B3 决议）**：`auto_selectable` 字段已
+        // **废弃** ⇒ ⇒ 草稿里**不再带**这个键（老板档案里的旧键**仍能**解析
+        // —— 契约层 serde 忽略未知字段 ⇒ ⇒ 存量零风险）。
         region_budget_bytes: "8388608",
         regions: [
             { kind: "ram", base: "2147483648", size: "8388608" },
@@ -502,11 +506,20 @@ export function normalizePins(pins) {
     const out = pins
         .filter((one) => one && typeof one === "object")
         .map((one) => ({
-            device: String(one.device ?? ""),
-            pin: String(one.pin ?? ""),
-            signal: String(one.signal ?? ""),
-        }))
-        .filter((one) => one.device.length > 0);
+            ...one,
+            // ⚠Ｕ`functions` 嵌套数组也深拷（PinSpec 的必填件）⇒⇒
+            // 草稿与描述不共用同一批功能对象。
+            // ⚠老 `signal` 形键也原样透传（但不新增 `functions` 键）。
+            ...(Array.isArray(one.functions)
+                ? { functions: one.functions.map((fn) => ({
+                    ...fn,
+                    irq:
+                        fn?.irq && typeof fn.irq === "object"
+                            ? { ...fn.irq }
+                            : fn?.irq,
+                })) }
+                : {}),
+        }));
     return out.length > 0 ? out : null;
 }
 
@@ -597,7 +610,8 @@ export function draftFromDescription(description) {
         id: String(description.id ?? ""),
         name: String(description.name ?? ""),
         priority: String(Number(description.priority ?? 0)),
-        auto_selectable: description.auto_selectable === true,
+        // ⚠️ **v0.76（STAGE-52 · B3 决议）**：`auto_selectable` **废弃** ⇒ ⇒
+        // 描述里那个旧键**不透传**进草稿（前端**不抄**废弃字段）。
         region_budget_bytes: String(Number(description.region_budget_bytes ?? 0)),
         regions: regions.map((region) => regionToDraft(region)),
     };
@@ -654,7 +668,8 @@ export function draftToDescription(draft) {
         id: String(draft?.id ?? ""),
         name: String(draft?.name ?? ""),
         priority: num(draft?.priority),
-        auto_selectable: draft?.auto_selectable === true,
+        // ⚠️ **v0.76（STAGE-52 · B3 决议）**：`auto_selectable` **废弃** ⇒ ⇒
+        // 提交的描述**不再带**这个键。
         region_budget_bytes: num(draft?.region_budget_bytes),
         regions: regions.map((region) => {
             const kind = String(region?.kind ?? "ram");
@@ -1329,8 +1344,9 @@ export function isDraftAccepted(state) {
 //
 // ⚠️ **按 `base` 定位 ⇒ 与数组顺序无关**（台账判别力 ③）。
 //
-// ⚠️ **元数据变了走整份替换**（裁决 D）：`id` / `name` / `priority` /
-// `auto_selectable` 是**板的身份** ⇒ 改身份属于「换一块板」。
+// ⚠️ **元数据变了走整份替换**（裁决 D）：`id` / `name` / `priority`
+// 是**板的身份** ⇒ 改身份属于「换一块板」（v0.76 · B3：`auto_selectable`
+// 已废弃，不再是身份的一部分）。
 // ---------------------------------------------------------------------------
 
 /**
@@ -1385,8 +1401,9 @@ export function sameMemoryMapMetadata(a, b) {
     if (!a || !b) return false;
     return String(a.id ?? "") === String(b.id ?? "")
         && String(a.name ?? "") === String(b.name ?? "")
-        && (Number(a.priority ?? 0) >>> 0) === (Number(b.priority ?? 0) >>> 0)
-        && (a.auto_selectable === true) === (b.auto_selectable === true);
+        && (Number(a.priority ?? 0) >>> 0) === (Number(b.priority ?? 0) >>> 0);
+        // ⚠️ **v0.76（STAGE-52 · B3 决议）**：`auto_selectable` **废弃** ⇒ ⇒
+        // 不再是板的身份 ⇒ ⇒ 差异比较**不再比**它（旧键已从两份描述消失）。
 }
 
 /**
@@ -2410,6 +2427,132 @@ function renderPeripheralRow(region, index, kinds = DEVICE_KINDS) {
  * @param {string} label — 「草稿 MCU」/「当前生效板 MCU」
  * @returns {string}
  */
+/**
+ * **引脚区**（v0.76 · STAGE-52 · 裁决 E / G —— **只读展示，不编辑**）。
+ *
+ * ⚠️ **用户 2026-11-03 拍板**：引脚规格 = **功能列表**（`PinSpec`）⇒ ⇒
+ * 前端编辑面**压缩为只读展示** ⇒ ⇒ **不在这里提供任何编辑入口** ⇒ ⇒
+ * 草稿里的 `pins` 只能从模板导入 / 存量板档案带进来。
+ *
+ * ⚠️ **前端不写第二个校验器**（内核 V-24 / V-25 是唯一校验器 ⇒
+ * `E_PLT-19`）⇒ ⇒ 这里**逐字透传**显示（`functions[].name` /
+ * `direction` / `irq.source`）⇒ ⇒ **不判** `direction` 枚举、不判
+ * `irq.source` 越界（那都是内核的事）。
+ *
+ * ⚠️ 展示两行（有哪行显示哪行）：草稿引脚（将随提交生效）+ 当前生效板
+ * 引脚（只读参考）。都无 ⇒ 引导行。
+ *
+ * @param {object} draft — 当前草稿
+ * @param {object|null} memoryMap — 内核的 memory.map 状态
+ * @returns {string}
+ */
+function renderPinsCard(draft, memoryMap) {
+    const draftPins = normalizePins(draft?.pins) ?? [];
+    const effectivePins = normalizePins(memoryMap?.description?.pins) ?? [];
+    const lines = [];
+    if (draftPins.length > 0) {
+        lines.push(`<li data-pins-line="草稿引脚">${renderPinSpecList(draftPins)}</li>`);
+    }
+    if (effectivePins.length > 0) {
+        lines.push(`<li data-pins-line="当前生效板引脚（只读）">${renderPinSpecList(effectivePins)}</li>`);
+    }
+    const body = lines.length > 0
+        ? `<ul class="mcu-summary">${lines.join("")}</ul>`
+        : `<p class="muted" data-pins-none="1">未声明引脚 —— 从「模板导入」导入模板可带出（如 qemu-virt 的 GPIO0 引脚）。</p>`;
+    return `
+        <div class="card" data-pins-display="1">
+            <h3>引脚规格<span class="tag">只展示 · 不编辑</span></h3>
+            ${body}
+            <p class="muted">
+                每个引脚是**功能列表**（<code>PinSpec</code>）：同名引脚可挂多个功能，每个功能
+                自带方向与中断目标（<code>irq.source</code>）⇒ ⇒ 中断绑「引脚 × 当前功能」。
+                合法性由内核校验（<code>E_PLT-19</code>）；前端**只读透传**，不写第二份校验器。
+            </p>
+        </div>
+    `;
+}
+
+/**
+ * 一组 `PinSpec` 的只读展示。
+ *
+ * @param {Array<object>} pins — `PinSpec` 数组
+ * @returns {string}
+ */
+function renderPinSpecList(pins) {
+    return pins
+        .map((one) => {
+            const device = escapeHtml(String(one?.device ?? ""));
+            const pin = escapeHtml(String(one?.pin ?? ""));
+            const fns = Array.isArray(one?.functions)
+                ? one.functions
+                    .map((fn) => {
+                        const name = escapeHtml(String(fn?.name ?? ""));
+                        const dir = escapeHtml(String(fn?.direction ?? ""));
+                        const irq = fn?.irq && typeof fn.irq === "object"
+                            ? ` · irq=<code>${escapeHtml(String(fn.irq.source))}</code>`
+                            : "";
+                        return `<code>${name}</code>（${dir}${irq}）`;
+                    })
+                    .join(" ")
+                : escapeHtml(one?.signal ? `（老格式 signal=${one.signal}）` : "（无功能声明）");
+            return `<span class="pin-spec"><code>${device}.${pin}</code> → ${fns}</span>`;
+        })
+        .join("<br>");
+}
+
+/**
+ * **模板库**（v0.76 · STAGE-52 · 裁决 M —— 前端**查**内核，**不抄**模板）。
+ *
+ * ⚠️ **清单是内核报的那一份真相**（`platform.templates` 订阅即推）⇒ ⇒
+ * 本卡**只渲染 state.templates** ⇒ ⇒ **不**在这里硬编码任何模板数据。
+ *
+ * ⚠️ **选一块 ⇒ 「导入」**：发 `GetPlatformTemplate{id}` ⇒ 内核回完整
+ * 描述 ⇒ 前端 `draftFromDescription` 导入草稿（**起点**，可继续改）。
+ *
+ * ⚠️ **无板时这是 B1 的引导面**：装载被拒（`E_PLT-22`）⇒ ⇒ 引导文案
+ * 说「先从模板导入 default / minimal / qemu-virt」⇒ ⇒ 就是这块卡。
+ *
+ * @param {object} state — memory-map 视图状态（含 `templates`）
+ * @returns {string}
+ */
+function renderTemplateLibrary(state) {
+    const templates = Array.isArray(state?.templates) ? state.templates : null;
+    let body;
+    if (templates === null) {
+        body = `<p class="muted" data-tpl-none="1">模板清单还没到 —— 内核**订阅即推**，稍候自动出现。</p>`;
+    } else if (templates.length === 0) {
+        body = `<p class="muted" data-tpl-empty="1">内核报了空的模板清单（内置模板不存在？）。</p>`;
+    } else {
+        body = templates
+            .map((one) => {
+                const id = escapeHtml(String(one?.id ?? ""));
+                const name = escapeHtml(String(one?.name ?? ""));
+                const deviceCount = Number(one?.device_count ?? 0);
+                return `
+                    <div class="row tpl-entry" data-tpl-id="${id}">
+                        <div class="kpi" style="flex:1">
+                            <span class="k">${id}</span>
+                            <span class="v">${name} · ${deviceCount} 个外设器件</span>
+                        </div>
+                        <button type="button" class="btn" data-action="load-template"
+                                data-template-id="${id}">导入</button>
+                    </div>`;
+            })
+            .join("");
+    }
+    return `
+        <div class="card" data-tpl-library="1">
+            <h3>模板库<span class="tag">内置板 · 内核报清单</span></h3>
+            ${body}
+            <p class="muted">
+                「导入」= 把**内置板模板的完整描述**导入草稿作为**起点**，由你自行修改；
+                装载固件**不会**自动填充编辑面。无板装载会被拒（<code>E_PLT-22</code>），
+                请先从这里导入一块或配置一块板。
+            </p>
+        </div>
+    `;
+}
+
 function renderMcuLine(mcu, label) {
     const vt = mcu.vector_table;
     const vtText = vt
@@ -2560,7 +2703,10 @@ export function renderMemoryMapPanel(state) {
 
     // ⚠️ **v0.75（STAGE-51 · §2.6 顺手整改①）**：草稿是「用户自己的东西」
     // 的标志 = `state.draft` 被设过 ⇒ ⇒ **没设过**（编辑器从默认草稿起步）
-    // 且存在生效板 ⇒ ⇒ 提示「当前生效板（自动选择）· 只读」+ 引导自己配置。
+    // 且存在生效板 ⇒ ⇒ 提示「当前生效板 · 只读」+ 引导自己配置。
+    // ⚠️ **v0.76（STAGE-52 · B3 摘除）**：**不再有「自动选择」概念**（内置
+    //   板 = 模板预设 · 显式导入）⇒ ⇒ 文案里**不出现**「自动选择」四个字
+    //   （N-3 判据同源）。
     // ⚠️ **v0.75 · STAGE-51 · §2.6 顺手整改①**：草稿是「用户自己的东西」的
     // 标志 = **内容**≠默认草稿（不是「state.draft 被设过」）⇒ ⇒ 点「重建
     // 草稿」（new-draft ⇒ draft = `defaultDraft()`）之后**内容仍是默认** ⇒ ⇒
@@ -2572,7 +2718,7 @@ export function renderMemoryMapPanel(state) {
     const effectiveName = String(memoryMap?.description?.name ?? "");
     const effectiveBanner = (!draftTouched && effectiveName !== "")
         ? `<p class="banner" data-mmap-effective-banner="1">` +
-          `当前生效板：<strong>${escapeHtml(effectiveName)}</strong>（自动选择 · 仅用于运行 · 只读）` +
+          `当前生效板：<strong>${escapeHtml(effectiveName)}</strong>（仅用于运行 · 只读）` +
           `——板级视图由你配置：点「从内置模版开始」把模板导入草稿自己改。</p>`
         : "";
 
@@ -2594,7 +2740,7 @@ export function renderMemoryMapPanel(state) {
                         描述格式版本固定为 <code>${PLATFORM_SCHEMA_VERSION}</code>
                         （<code>PLATFORM_SCHEMA_VERSION</code>）——它与契约信封的
                         <code>schema_version</code>（${CONTRACT_SCHEMA_VERSION}）是**两件事**，不要混。
-                        <code>auto_selectable</code> 固定为 <code>false</code>（用户配的板不参与自动选档）。
+                        <code>auto_selectable</code> 已废弃（v0.76 · B3）——描述里**不再带**这个键。
                     </p>
                     <div class="grid-2">
                         ${field({ field: "id", label: "板 id", value: draft.id ?? "", extra: idExtra })}
@@ -2617,6 +2763,8 @@ export function renderMemoryMapPanel(state) {
                 </div>
 
                 ${renderMcuCard(draft, memoryMap)}
+
+                ${renderPinsCard(draft, memoryMap)}
 
                 <div class="card">
                     <h3>地址布局<span class="tag">按真实地址区间着色</span></h3>
@@ -2658,6 +2806,8 @@ export function renderMemoryMapPanel(state) {
                 ${renderWiringEditor({ draft, deviceTypes: state?.deviceTypes ?? null })}
 
                 ${renderArchivePanel(state)}
+
+                ${renderTemplateLibrary(state)}
 
                 <div class="card">
                     <h3>提交与工程</h3>

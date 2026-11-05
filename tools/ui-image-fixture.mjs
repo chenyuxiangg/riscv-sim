@@ -66,6 +66,18 @@ export const GPIO_PIN_IRQ_ELF_MARKER = "PIN";
 export const GPIO_PIN_IRQ_ELF_FAIL_MARKER = "X";
 
 /**
+ * **引脚复用**那条固件（v0.76 · STAGE-52 · B-171 / B-172）的**阶段标记**。
+ *
+ * ⚠️ **两个时刻两个源**：同一引脚（`GPIO0.pin3`）先选 `uart_tx`（⇒ 源 3，
+ * 打 `A3`），再切到 `gpio_in`（⇒ 源 11，打 `B11`）⇒ ⇒ console 上「先 `A3`
+ * 后 `B11`」= **切换跟着变**（B-172）⇒ ⇒ 单独出现 `B11` = **通电**（B-171）。
+ *
+ * ⚠️ **失败标记沿用 `X`**（与 v0.74 那份共享 ⇒ ⇒ 判据分得开）。
+ */
+export const PINMUX_IRQ_ELF_MARKER_A3 = "A3";
+export const PINMUX_IRQ_ELF_MARKER_B11 = "B11";
+
+/**
  * U 型编码（`LUI` / `AUIPC`）。
  *
  * @param {number} opcode
@@ -413,6 +425,144 @@ export function buildGpioPinIrqWords() {
  */
 export function buildGpioPinIrqElf() {
     return buildElfFromWords(buildGpioPinIrqWords(), UI_IMAGE_ELF_PADDR);
+}
+
+/**
+ * **引脚复用**那条固件的机器码（v0.76 · STAGE-52 · B-171 / B-172）。
+ *
+ * ⚠️ **为什么要有它**：pinmux 的「通电」判据必须是「固件**写选择寄存器** ⇒
+ * 活动 ⇒ guest **自己**去 PLIC claim 到**那个源**」⇒ ⇒ demo 固件**不写**
+ * pinmux 寄存器 ⇒ ⇒ 必须**自造**一份固件（同 v0.74 那套机器码纪律）。
+ *
+ * ⚠️ **它做什么**（地址按 [`BV_PINMUX_BOARD`] 的布局写死）：
+ *
+ * 1. 写 `PINMUX` 选择寄存器（`0x4000_1000 + 0x4×pin3 = 0x4000_100C`）← 0
+ *    （功能 `uart_tx` ⇒ PLIC 源 3）；
+ * 2. 使能 PLIC 源 3（`0xc000_0000 + 0x0c`）⇒ 设 `mie.MEIE` + `mstatus.MIE`
+ *    ⇒ `mtvec` = 本固件的 handler；
+ * 3. GPIO `DIR` ← 8 + `TOGGLE`（沿 1）⇒ 中断 ⇒ handler claim 到源 3 ⇒
+ *    打 `A3`（阶段 0）⇒ complete ⇒ `mret`；
+ * 4. 睡眠后**切**选择 ← 1（功能 `gpio_in` ⇒ PLIC 源 11）+ 使能源 11
+ *    （`0xc000_0000 + 0x2c`）⇒ `TOGGLE`（沿 2）⇒ handler claim 到源 11 ⇒
+ *    打 `B11`（阶段 1）⇒ complete ⇒ `mret`；
+ * 5. 打错的源 ⇒ 打 `X`（失败标记）。
+ *
+ * ⚠️ **指令下标全部写成常量**（先例纪律）⇒ ⇒ 插指令只改常量、偏移自动跟上。
+ *
+ * ⚠️ **claim / complete 在 `0xc020_0004`**（PLIC base + `0x200004`）⇒ ⇒
+ * `0x2004` 超 I 型 12 位 ⇒ ⇒ 用 `lui x14, 0xc020` + `4(x14)` 取址。
+ *
+ * @returns {number[]}
+ */
+export function buildPinmuxIrqWords() {
+    // ⚠️ **睡眠预算必须跨批次**（v0.74 · STAGE-50 施工期教训）：宿主只在
+    //   批次边界（`DEFAULT_INSTRUCTION_BUDGET` = 10 000 条）调
+    //   `sync_interrupts()` ⇒ ⇒ 预算 = 6000 轮 × 2 条/轮 = **12 000 条**
+    //   ⇒ **稳跨一次边界** ⇒ 中断**真的**投得进来（5000 会恰好卡在边界上）。
+    //
+    // ⚠️ **立即数 ≤ 2047**：6000 = `lui 0x1` + `addi 1904`（两条拼）。
+    //   `addi x?, x?, 6000` 直接写 ⇒ 编码器抛 I 型越界。enable 位 11
+    //   = 2048 同样放不下 ⇒ `lui 0x1` + `addi -0x800` 拼。
+    //
+    // ⚠️ **判源用 x12 阶段**：阶段 0 期望**源 3**（`uart_tx`）⇒ 打 `A3`；
+    //   阶段 1 期望**源 11**（`gpio_in`）⇒ 打 `B11`；claim 到的源不对 ⇒
+    //   打 `X`。
+    //
+    // ⚠️ **v0.76 夹具钉正（r46）**：PLIC 必须**双写**（priority 区
+    //   `0x0c/0x2c` 写 1 ⇒ claim 判据 priority>threshold；enable 区
+    //   `0xc0002000` 写位掩码 8 / 2048 ⇒ 源 3 / 源 11 使能）。只写 priority
+    //   （旧版）⇒ PLIC 拒交 ⇒ 中断永不投递。enable 区偏移 0x2000 超出
+    //   S 型立即数上限 2047 ⇒ **独立基址寄存器 x15**（`lui 0xc0002` 一步）。
+    const LOOP1 = 28;          // bne x13, x0, loop1
+    const LOOP2 = 40;          // bne x13, x0, loop2
+    const HANDLER = 44;        // 中断 handler 起点（mtvec 落点）
+    const STAGE1 = 51;         // 阶段 1 判源入口
+    const PRINT_B11 = 54;      // 打 B11
+    const PRINT_A3 = 62;       // 打 A3
+    const FAIL = 68;           // 打 X
+    const WORDS = [];
+    const w = (v) => WORDS.push(v);
+    w(uType(0x37, 1, 0x40000));       // 0:  lui  x1, 0x40000      ⇒ x1 = 0x4000_0000 (GPIO0)
+    w(uType(0x37, 2, 0xc0000));       // 1:  lui  x2, 0xc0000      ⇒ x2 = 0xc000_0000 (PLIC)
+    w(uType(0x37, 3, 0x10000));       // 2:  lui  x3, 0x10000      ⇒ x3 = 0x1000_0000 (UART0)
+    w(uType(0x37, 5, 0x40001));       // 3:  lui  x5, 0x40001      ⇒ x5 = 0x4000_1000 (PINMUX)
+    w(iType(0x13, 5, 5, 0));          // 4:  addi x5, x5, 0        ⇒ 保号（指令号不动）
+    w(iType(0x13, 4, 0, 0));          // 5:  addi x4, x0, 0        ⇒ 选择 0（uart_tx ⇒ 源 3）
+    w(sType(0x23, 2, 5, 4, 0x0c));    // 6:  sw   x4, 0x0c(x5)     ⇒ pin3 选择寄存器
+    w(iType(0x13, 4, 0, 1));          // 7:  addi x4, x0, 1        ⇒ priority 值
+    w(sType(0x23, 2, 2, 4, 0x0c));    // 8:  sw   x4, 0x0c(x2)     ⇒ PLIC 源 3 priority ← 1
+    w(uType(0x37, 15, 0xc0002));      // 9:  lui  x15, 0xc0002     ⇒ x15 = 0xc000_2000（enable 区基址）
+    w(iType(0x13, 4, 0, 8));          // 10: addi x4, x0, 8        ⇒ enable 位 3（1<<3）
+    w(sType(0x23, 2, 15, 4, 0x0));    // 11: sw   x4, 0(x15)       ⇒ PLIC enable[0] 位 3
+    w(uType(0x37, 6, 0x1));           // 12: lui  x6, 0x1          ⇒ x6 = 0x1000
+    w(iType(0x13, 6, 6, -2048));      // 13: addi x6, x6, -2048    ⇒ x6 = 0x800（MEIE · 拆两条免 I 型越界）
+    w(iType(0x73, 7, 6, 0x304, 0b010)); // 14: csrrs x7, mie, x6
+    w(iType(0x13, 6, 0, 8));          // 15: addi x6, x0, 8        ⇒ MIE
+    w(iType(0x73, 7, 6, 0x300, 0b010)); // 16: csrrs x7, mstatus, x6
+    w(uType(0x37, 6, 0x80000));       // 17: lui  x6, 0x80000      ⇒ 固件落址高（0x8000_0000）
+    w(iType(0x13, 6, 6, HANDLER * 4)); // 18: addi x6, x6, HANDLER*4
+    w(iType(0x73, 0, 6, 0x305, 0b010)); // 19: csrrs x0, mtvec, x6
+    w(iType(0x13, 6, 0, 8));          // 20: addi x6, x0, 8        ⇒ 1<<3
+    w(sType(0x23, 2, 1, 6, 0x0));     // 21: sw   x6, 0(x1)        ⇒ GPIO DIR ← 8
+    w(sType(0x23, 2, 1, 6, 0x0c));    // 22: sw   x6, 0x0c(x1)     ⇒ TOGGLE（沿 1：0→8）
+    w(iType(0x13, 12, 0, 0));         // 23: addi x12, x0, 0       ⇒ 阶段 0（期望源 3）
+    w(uType(0x37, 14, 0xc0200));      // 24: lui  x14, 0xc0200     ⇒ x14 = 0xc020_0000（claim/complete 高）
+    w(uType(0x37, 13, 0x1));          // 25: lui  x13, 0x1
+    w(iType(0x13, 13, 13, 1904));     // 26: addi x13, x13, 1904   ⇒ 预算 6000（跨批次）
+    w(iType(0x13, 13, 13, -1));       // 27: addi x13, x13, -1     （loop1）
+    w(bType(0x63, 13, 0, 1, (LOOP1 - (LOOP1 + 1)) * 4)); // 28: bne x13, x0, loop1
+    w(iType(0x13, 4, 0, 1));          // 29: addi x4, x0, 1
+    w(sType(0x23, 2, 5, 4, 0x0c));    // 30: sw   x4, 0x0c(x5)     ⇒ 选择 1（gpio_in ⇒ 源 11）
+    w(iType(0x13, 4, 0, 1));          // 31: addi x4, x0, 1        ⇒ priority 值
+    w(sType(0x23, 2, 2, 4, 0x2c));    // 32: sw   x4, 0x2c(x2)     ⇒ PLIC 源 11 priority ← 1
+    w(uType(0x37, 4, 0x1));           // 33: lui  x4, 0x1          ⇒ x4 = 0x1000
+    w(iType(0x13, 4, 4, -2048));      // 34: addi x4, x4, -0x800   ⇒ x4 = 0x800（enable 位 11）
+    w(sType(0x23, 2, 15, 4, 0x0));    // 35: sw   x4, 0(x15)       ⇒ PLIC enable[0] 位 11（x15 复用）
+    w(sType(0x23, 2, 1, 6, 0x0c));    // 36: sw   x6, 0x0c(x1)     ⇒ TOGGLE（沿 2：8→0）
+    w(sType(0x23, 2, 1, 6, 0x0c));    // 37: sw   x6, 0x0c(x1)     ⇒ TOGGLE（沿 3：0→8）
+    w(iType(0x13, 12, 0, 1));         // 38: addi x12, x0, 1       ⇒ 阶段 1（期望源 11）
+    w(uType(0x37, 13, 0x1));          // 39: lui  x13, 0x1
+    w(iType(0x13, 13, 13, 1904));     // 40: addi x13, x13, 1904   ⇒ 预算 6000
+    w(iType(0x13, 13, 13, -1));       // 41: addi x13, x13, -1     （loop2）
+    w(bType(0x63, 13, 0, 1, (LOOP2 - (LOOP2 + 1)) * 4)); // 42: bne x13, x0, loop2
+    w(jType(0x6f, 0, 0));             // 43: jal  x0, 0            ⇒ 主循环死循环（等中断）
+    // ---- handler（44 起） ----
+    w(0x7c015073);                    // 44: csrrwi x0, irq_clear, 2 ⇒ 清外部中断线（M-16 单级语义）
+    w(iType(0x03, 10, 14, 4, 0b010)); // 45: lw   x10, 4(x14)     ⇒ claim
+    w(bType(0x63, 10, 0, 0, (HANDLER - (HANDLER + 1)) * 4)); // 46: beq x10, x0, 45（自旋）
+    w(bType(0x63, 12, 0, 1, (STAGE1 - 47) * 4));              // 47: bne x12, x0, STAGE1
+    w(iType(0x13, 11, 0, 3));         // 48: addi x11, x0, 3      ⇒ 阶段 0 期望源 3
+    w(bType(0x63, 10, 11, 1, (FAIL - 49) * 4));               // 49: bne x10, x11, FAIL
+    w(jType(0x6f, 0, (PRINT_A3 - 50) * 4));                   // 50: jal x0, PRINT_A3
+    // STAGE1 = 51
+    w(iType(0x13, 11, 0, 11));        // 51: addi x11, x0, 11     ⇒ 阶段 1 期望源 11
+    w(bType(0x63, 10, 11, 1, (FAIL - 52) * 4));               // 52: bne x10, x11, FAIL
+    w(jType(0x6f, 0, (PRINT_B11 - 53) * 4));                  // 53: jal x0, PRINT_B11
+    // PRINT_B11 = 54
+    w(iType(0x13, 11, 0, 0x42));      // 54: addi x11, x0, 'B'
+    w(sType(0x23, 0, 3, 11, 0x0));    // 55: sb   x11, 0(x3)
+    w(iType(0x13, 11, 0, 0x31));      // 56: addi x11, x0, '1'
+    w(sType(0x23, 0, 3, 11, 0x0));    // 57: sb   x11, 0(x3)
+    w(iType(0x13, 11, 0, 0x31));      // 58: addi x11, x0, '1'
+    w(sType(0x23, 0, 3, 11, 0x0));    // 59: sb   x11, 0(x3)
+    w(sType(0x23, 2, 14, 10, 0x4));   // 60: sw   x10, 4(x14)    ⇒ complete
+    w(0x30200073);                    // 61: mret
+    // PRINT_A3 = 62
+    w(iType(0x13, 11, 0, 0x41));      // 62: addi x11, x0, 'A'
+    w(sType(0x23, 0, 3, 11, 0x0));    // 63: sb   x11, 0(x3)
+    w(iType(0x13, 11, 0, 0x33));      // 64: addi x11, x0, '3'
+    w(sType(0x23, 0, 3, 11, 0x0));    // 65: sb   x11, 0(x3)
+    w(sType(0x23, 2, 14, 10, 0x4));   // 66: sw   x10, 4(x14)    ⇒ complete
+    w(0x30200073);                    // 67: mret
+    // FAIL = 68
+    w(iType(0x13, 11, 0, 0x58));      // 68: addi x11, x0, 'X'
+    w(sType(0x23, 0, 3, 11, 0x0));    // 69: sb   x11, 0(x3)
+    w(jType(0x6f, 0, 0));             // 70: jal  x0, 0          ⇒ 死循环
+    return WORDS;
+}
+
+export function buildPinmuxIrqElf() {
+    return buildElfFromWords(buildPinmuxIrqWords(), 0x8000_0000);
 }
 
 /**

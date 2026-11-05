@@ -159,6 +159,16 @@ fn error_code(events: &[EventPayload]) -> String {
 #[test]
 fn disasm_command_produces_exactly_one_disasm_event() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
     let events = dispatch(&mut host, CommandPayload::Disasm { addr: 0, count: 3 });
@@ -178,6 +188,16 @@ fn disasm_command_produces_exactly_one_disasm_event() {
 #[test]
 fn disasm_of_an_unmapped_address_is_an_empty_sequence_not_an_error() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
     // 0x2000_0000 在默认内存图里**没有**映射（低段 RAM 0x0、高段 RAM
@@ -196,6 +216,16 @@ fn disasm_of_an_unmapped_address_is_an_empty_sequence_not_an_error() {
 #[test]
 fn disasm_count_above_the_kernel_limit_is_rejected() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
     let events = dispatch(
@@ -215,6 +245,16 @@ fn disasm_count_above_the_kernel_limit_is_rejected() {
 #[test]
 fn the_fetch_reads_exactly_two_bytes_so_a_compressed_tail_is_not_a_false_miss() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
     // 把一条**压缩指令**写到低段 RAM 的**最后 2 个字节**——它的后面
@@ -259,6 +299,16 @@ fn the_fetch_reads_exactly_two_bytes_so_a_compressed_tail_is_not_a_false_miss() 
 #[test]
 fn resolve_line_reports_the_degraded_state_when_there_is_no_dwarf() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
     let events = dispatch(&mut host, CommandPayload::ResolveLine { addr: 0x1000 });
@@ -366,6 +416,16 @@ fn the_two_no_answer_states_are_distinguishable() {
 #[test]
 fn waveform_export_reads_the_m19_ring_and_not_the_m18_edge_store() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // 跑到 demo 固件里那条写 GPIO 的指令（第 8 条）⇒ 产生一条边沿。
     dispatch(&mut host, CommandPayload::StepN { n: 8 });
@@ -415,6 +475,16 @@ fn waveform_export_reads_the_m19_ring_and_not_the_m18_edge_store() {
 #[test]
 fn the_m19_ring_has_a_reader() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(&mut host, CommandPayload::StepN { n: 8 });
 
@@ -444,6 +514,16 @@ fn the_m19_ring_has_a_reader() {
 #[test]
 fn execution_export_reads_the_m11_trace_ring() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // 三条指令 ⇒ 三次取指（**没有**数据访存）。
     dispatch(&mut host, CommandPayload::StepN { n: 3 });
@@ -472,6 +552,16 @@ fn execution_export_reads_the_m11_trace_ring() {
 #[test]
 fn illegal_export_combinations_are_rejected() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
     // 波形 + JSON：M-19 没有 JSON 波形导出。
@@ -504,6 +594,16 @@ fn illegal_export_combinations_are_rejected() {
 #[test]
 fn the_continuation_protocol_visits_every_entry_exactly_once() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(&mut host, CommandPayload::StepN { n: 4 });
 
@@ -553,6 +653,16 @@ fn the_debugger_disassembly_does_not_show_up_as_guest_traffic() {
     // 进 M-18 的访存 trace 环，也不能进执行轨迹环 ⇒ 导出里的「访存流水」
     // 只讲访客的事。
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
     let events = dispatch(&mut host, CommandPayload::Disasm { addr: 0, count: 3 });
@@ -575,6 +685,16 @@ fn the_debugger_disassembly_does_not_show_up_as_guest_traffic() {
 #[test]
 fn the_m18_trace_ring_is_drained_into_the_m11_ring() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
     // ⚠️ 镜像装载本身会写总线（`load_bytes` 逐字节写）⇒ 那些写**不是**
@@ -607,6 +727,16 @@ fn the_m18_trace_ring_is_drained_into_the_m11_ring() {
 #[test]
 fn the_trace_switch_stops_and_resumes_recording() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
     // 关闭。
@@ -660,6 +790,16 @@ fn the_trace_switch_stops_and_resumes_recording() {
 #[test]
 fn overflow_marked_is_set_when_the_ring_dropped_entries() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // 把轨迹环换成一个**小**的 ⇒ 跑几条指令就会溢出。
     host.trace = TraceBuffer::new(2);
@@ -686,6 +826,16 @@ fn overflow_marked_is_set_when_the_ring_dropped_entries() {
 #[test]
 fn a_write_invalidates_only_the_written_address() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
     // 先反汇编三条 ⇒ 三个地址进缓存。
@@ -731,6 +881,16 @@ fn the_trace_switch_does_not_disable_the_cache_invalidation() {
     // 耦合 ⇒ 关闭 trace 期间访客自改代码 ⇒ 缓存**陈旧** ⇒ 用户看到的
     // 反汇编是**旧的** ⇒ 调试器给出**错误**的指令。
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
     // 先反汇编 ⇒ 地址 0 进缓存。
@@ -781,6 +941,16 @@ fn the_execution_trace_carries_real_timestamps() {
     // `last_ts_ps`，它只由 `Bus::set_now_ps` 更新 ⇒ 没有 M-17 的那次接线，
     // 导出里的时间列**全是 0**（数据看着有，时间却是平的）。
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(&mut host, CommandPayload::StepN { n: 3 });
 
@@ -833,6 +1003,16 @@ fn the_disasm_cache_absorbs_the_repeated_fetch() {
     //
     // ⚠️ 那句话**必须可观测** ⇒ 用 `lookup_hits` 计数钉住它。
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
     // 先反汇编 ⇒ 三个地址进缓存。
@@ -860,6 +1040,16 @@ fn loading_a_new_project_rebuilds_the_m11_indexes() {
 
     // 第一个工程：带一个符号表（符号 `alpha`）。
     let (symtab, strtab) = elf_symbol_table(&["alpha"]);
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(
         &mut host,
         CommandPayload::LoadProject(elf_project(&[(".symtab", symtab), (".strtab", strtab)])),
@@ -889,6 +1079,16 @@ fn loading_a_new_project_rebuilds_the_m11_indexes() {
 fn a_project_without_debug_sections_still_loads() {
     let mut host = KernelHost::new();
     // 裸机镜像（没有节区表）⇒ 空的符号表 + 降级的 DWARF。
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     assert_eq!(host.symbol_count(), 0);
     assert_eq!(
@@ -946,6 +1146,16 @@ fn a_long_step_batch_keeps_the_invalidation_channel_lossless() {
     //
     // ⇒ `StepN` 按指令预算**分块** ⇒ 单块事件数 ≪ 环的容量 ⇒ 环**不溢出**。
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(loop_project()));
 
     // 25 万条指令 ⇒ 不分块的话，访存环（20 万条）**必然溢出**。
@@ -963,6 +1173,16 @@ fn restoring_a_session_invalidates_the_m11_session_scoped_state() {
     // ⚠️ **还原会话 = 新会话** ⇒ M-11 的**会话级**缓存与历史必须作废
     // （STAGE-5 §9.2 的同一条规矩：「新会话 ⇒ 旧的索引全部作废」）。
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
     // 先反汇编（缓存里有条目）+ 跑几条（轨迹环里有历史）。
@@ -999,6 +1219,16 @@ fn the_trace_instruction_code_matches_the_disassembly_entry() {
     // 访存轨迹里的机器码必须与反汇编条目的机器码**逐字段相同**。
     // 压缩指令尤其要验：**16 位原码**，不是展开后的 32 位形式。
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
 
     // 把一条**压缩指令**写到地址 0 ⇒ 访客第一条取指就是它。
@@ -1050,6 +1280,16 @@ fn the_waveform_vcd_export_produces_a_vcd_product() {
     // 「**返回的是 VCD**」⇒ 把 `export_vcd` 换成 `export_csv`，**795 + 5 条
     // 用例全绿** ⇒ 那条分支**没有判别力**。
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(&mut host, CommandPayload::StepN { n: 8 });
 
@@ -1112,6 +1352,16 @@ fn the_host_can_look_up_a_symbol_by_address() {
     // 被覆盖，**宿主根本没有它** ⇒ 与 D-50 / D-51 同形的「实现了 ≠ 接上了」。
     let mut host = KernelHost::new();
     let (symtab, strtab) = elf_symbol_table(&["alpha"]);
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(
         &mut host,
         CommandPayload::LoadProject(elf_project(&[(".symtab", symtab), (".strtab", strtab)])),

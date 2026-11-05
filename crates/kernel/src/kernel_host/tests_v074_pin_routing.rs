@@ -116,7 +116,7 @@ fn enable_source(plic: &std::rc::Rc<std::cell::RefCell<Plic>>, source: u32) {
     p.enable(0, source, true);
 }
 
-/// **A-1** —— **四个版本号**（描述格式 3 · 规则集 5 · 信封 11 · 快照 2）。
+/// **A-1** —— **四个版本号**（描述格式 5 · 规则集 7 · 信封 12 · 快照 2）。
 ///
 /// ⚠️ **为什么这一组在内核侧**（而不是只在契约层）：变异自检的**红集**要
 ///   **可复算**⇒ ⇒ ⇒ 同一批的判据**放在同一条门禁**里才量得出来 ⇒ ⇒ ⇒
@@ -127,18 +127,18 @@ fn enable_source(plic: &std::rc::Rc<std::cell::RefCell<Plic>>, source: u32) {
 fn a1_the_four_version_numbers_are_the_current_ones() {
     assert_eq!(
         riscv_sim_contract::platform::PLATFORM_SCHEMA_VERSION,
-        4,
-        "描述格式版本（v0.75 批升到 4：顶层加了可选的 `mcu` 段）"
+        5,
+        "描述格式版本（v0.76 批升到 5：删 `auto_selectable` · `pins` 升级为 `PinSpec`）"
     );
     assert_eq!(
         riscv_sim_contract::platform::PLATFORM_RULES_VERSION,
-        6,
-        "规则集版本（v0.75 批升到 6：加 V-23 —— `mcu` 段词法/形状校验）"
+        7,
+        "规则集版本（v0.76 批升到 7：V-21 扩展 · V-24/V-25 引脚规格校验）"
     );
     assert_eq!(
         riscv_sim_contract::SCHEMA_VERSION,
-        11,
-        "契约信封版本**不动**（本批的改动**不是**信封形状的变化）"
+        12,
+        "契约信封版本（v0.76 批升到 12：裁决 M 的模板库协议新增两个命令、两个事件 ⇒ 线上形状变了）"
     );
     assert_eq!(
         riscv_sim_contract::model::SIM_STATE_SCHEMA_VERSION,
@@ -156,7 +156,7 @@ fn a2_an_old_description_still_parses_and_is_still_legal() {
         "id": "old-board",
         "name": "老板",
         "priority": 100,
-        "auto_selectable": false,
+        
         "region_budget_bytes": 1048576,
         "regions": [
             { "kind": "ram", "base": 0, "size": 1048576 },

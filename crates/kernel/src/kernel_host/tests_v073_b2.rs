@@ -42,7 +42,6 @@ fn description_without_bases() -> PlatformDescription {
         id: "auto-base".to_string(),
         name: "Auto base".to_string(),
         priority: 100,
-        auto_selectable: false,
         region_budget_bytes: 16 * 1024 * 1024,
         max_region_bytes: None,
         regions: vec![
@@ -71,7 +70,7 @@ fn a3_a_description_without_base_parses() {
         "id": "auto-base",
         "name": "Auto base",
         "priority": 100,
-        "auto_selectable": false,
+        
         "region_budget_bytes": 16777216,
         "regions": [
             { "kind": "ram", "size": 1048576 },

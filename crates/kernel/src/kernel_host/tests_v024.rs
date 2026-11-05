@@ -267,6 +267,16 @@ fn elf_project(elf: Vec<u8>) -> Project {
 /// 装载固件并返回宿主（固件落在 QEMU virt 的 RAM ⇒ 档位自动切过去）。
 fn host_with_firmware() -> KernelHost {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   `FW_BASE` 落在 qemu-virt 高段 ⇒ ⇒ 显式配 qemu-virt 板。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_QEMU_VIRT)
+                .expect("内置 qemu-virt 必须存在"),
+            expected_revision: None,
+        },
+    );
     let elf = minimal_elf(FW_BASE, &firmware_bytes());
     let events = dispatch(&mut host, CommandPayload::LoadProject(elf_project(elf)));
     assert!(
@@ -709,6 +719,16 @@ fn a_dwarf_image_gives_the_disassembly_real_file_and_line() {
 fn an_image_without_dwarf_leaves_the_disassembly_file_and_line_none() {
     let mut host = KernelHost::new();
     // 裸镜像（没有调试节区）⇒ 没有 DWARF。
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(
         &mut host,
         CommandPayload::LoadProject(Project {

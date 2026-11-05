@@ -3,7 +3,6 @@
   "id": "minimal",
   "name": "Minimal (zero-change demo platform)",
   "priority": 30,
-  "auto_selectable": false,
   "region_budget_bytes": 16777216,
   "max_region_bytes": null,
   "regions": [

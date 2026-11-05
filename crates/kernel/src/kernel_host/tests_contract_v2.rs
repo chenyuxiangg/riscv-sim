@@ -104,6 +104,16 @@ fn first_error_code(events: &[EventPayload]) -> String {
 /// 装载 demo 固件并跑完前 `n` 条指令的宿主。
 fn host_after_steps(n: u32) -> KernelHost {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(&mut host, CommandPayload::StepN { n });
     host
@@ -474,6 +484,16 @@ fn reading_x0_always_yields_zero_even_after_a_corrupted_restore() {
 #[test]
 fn waveform_edges_arrive_as_the_renamed_waveform_history_event() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,

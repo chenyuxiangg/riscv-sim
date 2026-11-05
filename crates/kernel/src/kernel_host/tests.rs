@@ -122,6 +122,16 @@ fn load_project_resets_and_clears_the_session() {
             topic: TOPIC_REGISTERS.to_string(),
         },
     );
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     let events = dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     assert_eq!(
         events.len(),
@@ -134,6 +144,16 @@ fn load_project_resets_and_clears_the_session() {
 #[test]
 fn load_project_maps_the_image_at_base_zero() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // 第一条指令的机器码必须在 0 处。
     let value = host.read_memory(0, WriteSize::Word).expect("read");
@@ -143,6 +163,16 @@ fn load_project_maps_the_image_at_base_zero() {
 #[test]
 fn step_n_executes_the_guest_program() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,
@@ -166,6 +196,16 @@ fn step_n_executes_the_guest_program() {
 #[test]
 fn step_n_pushes_only_the_dirty_registers() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,
@@ -194,6 +234,16 @@ fn step_n_pushes_only_the_dirty_registers() {
 #[test]
 fn subscribe_registers_pushes_a_full_snapshot() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     let events = dispatch(
         &mut host,
@@ -209,6 +259,16 @@ fn subscribe_registers_pushes_a_full_snapshot() {
 #[test]
 fn store_then_read_memory_round_trips() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(&mut host, CommandPayload::StepN { n: 4 }); // 执行到 sw
     let events = dispatch(
@@ -231,6 +291,16 @@ fn store_then_read_memory_round_trips() {
 #[test]
 fn read_memory_on_unmapped_address_is_an_error() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // 0x5000_0000 不在默认内存图里。
     //
@@ -253,6 +323,16 @@ fn read_memory_on_unmapped_address_is_an_error() {
 #[test]
 fn write_memory_then_read_back() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     let events = dispatch(
         &mut host,
@@ -270,6 +350,16 @@ fn write_memory_then_read_back() {
 #[test]
 fn write_memory_to_unmapped_address_is_an_error() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // 0x5000_0000 不在默认内存图里（0x4000_0000 现在是 GPIO，见
     // `read_memory_on_unmapped_address_is_an_error` 的口径说明）。
@@ -290,6 +380,16 @@ fn write_memory_to_unmapped_address_is_an_error() {
 #[test]
 fn breakpoint_halts_execution_at_its_address() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     let events = dispatch(
         &mut host,
@@ -312,6 +412,16 @@ fn breakpoint_halts_execution_at_its_address() {
 #[test]
 fn breakpoint_does_not_modify_the_machine_state() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,
@@ -375,6 +485,16 @@ fn clear_breakpoint_with_unknown_id_is_idempotent() {
 #[test]
 fn cleared_breakpoint_no_longer_halts() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,
@@ -437,6 +557,16 @@ fn admin_is_not_enabled() {
 #[test]
 fn unsubscribe_stops_the_register_pushes() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,
@@ -462,6 +592,16 @@ fn unsubscribe_stops_the_register_pushes() {
 #[test]
 fn fetch_from_unmapped_memory_is_reported_as_a_trap() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     // 把 PC 挪到未映射地址（契约的 `Restore` 带完整 `SimState`）。
     //
@@ -591,6 +731,16 @@ fn read_memory_command_has_no_side_effect_on_the_bus() {
     // 任何用例守护——把命令层改成走普通 `bus.read()`（进统计、进 hook），
     // 全部测试仍然绿，而调试器的 peek 会开始误触发读观察点。
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     let before = host.backend.bus().stats().reads;
     let events = dispatch(
@@ -620,6 +770,16 @@ fn a_debugger_read_does_not_fire_a_read_watchpoint() {
     // 回归 V-A 🟡-1 的第二半：调试读命中了一个读观察点之后，
     // **下一条** guest 指令不得误报观察点命中。
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,
@@ -658,6 +818,16 @@ fn a_breakpoint_run_emits_tick_then_waveform_then_halted() {
     // 「**首个**事件携带 reqId」关联命令——顺序不是可有可无的装饰。
     // 此前所有用例都只「找第一条某类型事件」，把 Halted 挪到前面也没人管。
     let mut host = KernelHost::new();
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
     dispatch(
         &mut host,
@@ -703,6 +873,16 @@ fn an_image_that_runs_past_the_mapped_region_is_rejected() {
     let mut oversized = vec![0u8; 0x10_0000 + 1];
     oversized[0] = 0x93;
     project.images[0].source = ImageSource::Bytes(oversized);
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     let events = dispatch(&mut host, CommandPayload::LoadProject(project));
     let (code, _) = first_error(&events);
     assert_eq!(code, "E_BUS-01", "越界的镜像必须被拒绝");

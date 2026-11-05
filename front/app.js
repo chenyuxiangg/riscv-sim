@@ -30,11 +30,15 @@ import { mountRegisterMemory } from "./services/m10_registermemory.js";
 // ⚠️ M-15 器件中间层的前端接线（STAGE-43 · v0.66 · D-175）⇒ ⇒ 器件类型
 // 注册表与逐实例状态**只**从内核来（前端不抄第二份）。
 import { wireDevices } from "./services/m15_devices.js";
+// ⚠️ 模板库（v0.76 · STAGE-52 · 裁决 M）：清单订阅即推 + 按 id 取完整
+// 描述 ⇒ ⇒ 前端**不抄**模板数据。
+import { wireTemplates } from "./services/m76_templates.js";
 import { Command, TRACE_FORMAT, TRACE_SOURCE, WRITE_SIZE } from "./lib/message.js";
 // ⚠️ 只导入**纯函数**（错误码拆分、草稿转换、「已被内核接受」推导量）⇒
 // 不引入服务层依赖，也不构成循环依赖。
 import {
     currentDraft,
+    defaultDraft,
     describeMemoryMapError,
     draftFromDescription,
     draftToDescription,
@@ -1990,6 +1994,36 @@ export async function handleCommand(detail, services) {
                 }
                 break;
             }
+            case "load-template": {
+                // ⚠️ **v0.76（STAGE-52 · 裁决 M）**：模板库「导入」。
+                // 等待在**这一层**（GetPlatformTemplate 是异步命令）⇒ ⇒
+                // 完整描述回来 ⇒ ⇒ `draftFromDescription` 导入草稿作为
+                // **起点** ⇒ ⇒ 之后用户想怎么改都行（不默认兜底生效板）。
+                const id = String(detail?.params?.id ?? "");
+                if (!id) {
+                    setMemoryMapError({ code: "E_PLT-22", message: "模板 id 缺失。" });
+                    break;
+                }
+                const description = await services.templates?.loadTemplate?.(id);
+                if (!description || typeof description !== "object") {
+                    // ⚠️ 未知 id / 内核拒 ⇒ **原样**摆出来（不吞）⇒ 码由
+                    // 内核定（未知模板 id 是 `E_PLT-22` 的同一族）。
+                    setMemoryMapError({ code: "E_PLT-22", message: "模板没取到（未知模板 id？请回模板库选一块）。" });
+                    break;
+                }
+                const draft = draftFromDescription(description) ?? defaultDraft();
+                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
+                setMemoryMapError(null);
+                setNote(`已从模板导入：${description.name ?? id} —— 作为草稿起点，可继续修改后提交。`);
+                window.dispatchEvent(new CustomEvent("riscv:render", {
+                    detail: {
+                        viewId: "memory-map",
+                        type: "update",
+                        state: viewStore.getState("memory-map"),
+                    },
+                }));
+                break;
+            }
             case "submit-memory-map": {
                 // 提交板级内存图（契约 v6 的 `SetMemoryMap` / **v7 的
                 // `PatchMemoryMap`**）。
@@ -2212,6 +2246,10 @@ async function startSession(services) {
                 // ⇒ ⇒ 那两条流**永远不订阅** ⇒ ⇒ 产品视图那两张卡**永远是
                 // 空态**（⚠️ 这正是真机门禁第一次跑就抓到的那个坑）。
                 devices: services.devices,
+                // ⚠️ **模板清单流**（v0.76 · STAGE-52）—— 同形：装载 / 卸载
+                // 清掉内核主题集合 ⇒ `resubscribeAllStreams` 看不到它就不重订
+                // ⇒ 模板库清单**永远停在空态**（r12/r13 真机：30s 等不到）。
+                templates: services.templates,
             },
             project,
         );
@@ -2321,6 +2359,9 @@ export async function loadProjectIntoKernel(services, project) {
     // ⚠️ 器件实例状态**跟着工程重建**（STAGE-43 · v0.66 · 同一个坑）⇒ ⇒
     // 上一块板的实例清单不算数。
     services.devices?.reset?.();
+    // ⚠️ 模板清单**跟着工程重建**（v0.76 · STAGE-52 · 同一个坑）⇒ ⇒
+    // 上一会话的清单不算数。
+    services.templates?.reset?.();
     // ⚠️ **D-178（v0.72 批）**：装载**失败**时**也要重订一次流** ⇒ ⇒
     // 否则前端**学不到**内核顶上去的修订号。
     //
@@ -2359,6 +2400,8 @@ export async function loadProjectIntoKernel(services, project) {
         memoryMapError: errors.memoryMapError,
         // ⚠️ 器件中间层（STAGE-43 · v0.66）—— 与其它流**同形**地报出来。
         deviceError: errors.deviceError,
+        // ⚠️ 模板清单流（v0.76 · STAGE-52）—— 同形报出来。
+        templateError: errors.templateError,
     };
 }
 
@@ -2399,6 +2442,8 @@ export async function resubscribeAllStreams(services, options = {}) {
         memoryMapError: null,
         // ⚠️ 器件中间层的两条流（STAGE-43 · v0.66）⇒ ⇒ **各自兜住**（不牵连别的流）。
         deviceError: null,
+        // ⚠️ 模板清单流（v0.76 · STAGE-52 · 裁决 M）—— 同形兜住。
+        templateError: null,
     };
     if (!skipRegisters) {
         try {
@@ -2430,6 +2475,13 @@ export async function resubscribeAllStreams(services, options = {}) {
         await services.devices?.subscribeDeviceStreams?.();
     } catch (err) {
         errors.deviceError = err;
+    }
+    // ⚠️ 模板清单流（v0.76 · STAGE-52）—— 装载 / 卸载清掉内核主题集合 ⇒
+    // 不重订就**静默**停在旧清单上（与 device.types 同一个坑）。
+    try {
+        await services.templates?.subscribeTemplateStreams?.();
+    } catch (err) {
+        errors.templateError = err;
     }
     return errors;
 }
@@ -3759,6 +3811,10 @@ async function bootstrap() {
     // 内核侧**订阅了** `device.types` / `device.instances` 才会推 ⇒ ⇒ 不先挂好，
     // 第一批就丢了（与 `memory.map` 同一个坑）。
     const devicesWiring = wireDevices(commandRouter);
+    // ⚠️ 模板库（v0.76 · STAGE-52 · 裁决 M）—— 与器件中间层**同形**：
+    // 内核侧**订阅了** `platform.templates` 才会推清单 ⇒ ⇒ 不先挂好，
+    // 模板库卡就一直「清单还没到」。
+    const templatesWiring = wireTemplates(commandRouter);
     // 板档案（STAGE-15 · v0.30）：建存储实例 + **恢复档案列表**。
     //
     // ⚠️ **不自动重新提交**（裁决 D）：刷新后板**还在**，但**要重新提交**才
@@ -3818,6 +3874,8 @@ async function bootstrap() {
         memoryMap: memoryMapWiring,
         // ⚠️ 器件中间层（STAGE-43 · v0.66）⇒ ⇒ 装载时要跟着重订两条流。
         devices: devicesWiring,
+        // ⚠️ 模板库（v0.76 · STAGE-52 · 裁决 M）⇒ ⇒ 装载时要跟着重订清单流。
+        templates: templatesWiring,
         // ⚠️ 板档案的**存储实例**（可能是 `null` ⇒ 「只存在于本会话」）。
         boardStore: board.store,
     };

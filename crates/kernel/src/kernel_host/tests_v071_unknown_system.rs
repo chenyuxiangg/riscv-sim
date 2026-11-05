@@ -56,7 +56,6 @@ fn board_with_ram(id: &str, base: u32, size: u32) -> PlatformDescription {
         name: format!("Board {id}"),
         priority: 100,
         // ⚠️ 用户配的板**不**参与自动选档（它是**点名**用的）。
-        auto_selectable: false,
         description: None,
         wiring: None,
         region_budget_bytes: 16 * 1024 * 1024,

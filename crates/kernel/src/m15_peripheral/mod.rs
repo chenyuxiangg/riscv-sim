@@ -33,6 +33,7 @@ use std::rc::Rc;
 
 pub mod clint;
 pub mod gpio;
+pub mod pinmux;
 pub mod plic;
 pub mod reg;
 pub mod timer;
@@ -41,6 +42,7 @@ pub mod uart;
 
 pub use clint::Clint;
 pub use gpio::GpioBank;
+pub use pinmux::PinmuxDevice;
 pub use plic::Plic;
 pub use timer::TimerRiscv;
 pub use uart::Uart16550;

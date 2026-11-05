@@ -169,6 +169,25 @@ impl GpioBank {
         out
     }
 
+    /// **该引脚有没有 pending 活动**（**只读** · v0.76 · STAGE-52 · pinmux 路径）。
+    ///
+    /// ⚠️ **pinmux 分支用**：查「这个引脚有活动」而不取线号（线号由
+    ///   pinmux「当前功能 → 源」决定）⇒ ⇒ 消费由 [`Self::clear_pending_pin`]
+    ///   单独做 ⇒ ⇒ **不**经 `irq_lines`（分层禁令 · 裁决 K）。
+    pub fn pending_pin(&self, pin: u32) -> bool {
+        if pin >= PIN_COUNT {
+            return false;
+        }
+        (self.pending_irqs >> pin) & 1 == 1
+    }
+
+    /// **消费**某个引脚的 pending 位（v0.76 · STAGE-52 · pinmux 路径）。
+    pub fn clear_pending_pin(&mut self, pin: u32) {
+        if pin < PIN_COUNT {
+            self.pending_irqs &= !(1u32 << pin);
+        }
+    }
+
     /// **取**某个引脚的 **IRQ 线号**并**消费**掉它的 pending 位
     /// （v0.74 · STAGE-50 · 引脚级连线的源）。
     ///
@@ -227,15 +246,20 @@ impl GpioBank {
 
     /// Internal: latch a sticky pending IRQ for every pin with a set
     /// bit in `changed`. Pins with `0xFFFF` IRQ line are skipped.
+    /// 把沿事件的引脚**无条件**锁进 `pending_irqs`（v0.76 · STAGE-52 · 裁决
+    /// K —— **pinmux 路径**）。
+    ///
+    /// ⚠️ **为什么去掉 `irq_lines[pin] != 0xFFFF` 门控**：pinmux 路径（分层
+    /// 禁令）**不写** GPIO 的 `irq_lines` ⇒ ⇒ 若锁存还依赖「线号已配」，那
+    /// 条路径的沿就**永远锁不进来**（K-4 通电判据当场红）⇒ ⇒ ⇒ **锁存与
+    /// 线号映射解耦**：
+    /// - **锁存**：沿 ⇒ 置位（**无条件** —— 方向过滤在调用方：外部喂入
+    ///   只对 input 引脚、OUT/TOGGLE 对任意引脚）；
+    /// - **线号映射**：只发生在**输出侧**（[`Self::take_pending_irqs`] /
+    ///   [`Self::take_irq_line_for_pin`]）⇒ ⇒ 未配线号的引脚**不进**那两条
+    ///   的输出（`0xFFFF` 跳过）⇒ ⇒ **接线路径的外部行为逐字不变**。
     fn latch_edges(&mut self, changed: u32) {
-        for pin in 0..PIN_COUNT {
-            if (changed >> pin) & 1 == 1 {
-                let line = self.irq_lines[pin as usize];
-                if line != 0xFFFF {
-                    self.pending_irqs |= 1 << pin;
-                }
-            }
-        }
+        self.pending_irqs |= changed & PIN_COUNT_MASK;
     }
 
     /// Effective pin level as observed by firmware reading the IN

@@ -14,6 +14,7 @@
 //! 某个内部函数」（纯函数那部分 —— 词法 —— 在契约层 [`mcu_isa_info`]，
 //! 这里只断**宿主行为**）。
 
+use crate::kernel_host::platform;
 use riscv_sim_contract::error::{E_PLT_21_MCU_INVALID, PLATFORM_FAMILY};
 use riscv_sim_contract::model::{ImageKind, ImageRef, ImageSource, ProductTree, Project};
 use riscv_sim_contract::platform::{
@@ -79,7 +80,6 @@ fn board(id: &str, base: u32, size: u32, mcu: Option<McuSpec>) -> PlatformDescri
         name: format!("Board {id}"),
         priority: 100,
         // ⚠️ 用户配的板**不**参与自动选档（它是**点名**用的）。
-        auto_selectable: false,
         description: None,
         wiring: None,
         region_budget_bytes: 16 * 1024 * 1024,
@@ -134,6 +134,11 @@ fn elf_project(elf: Vec<u8>) -> Project {
 }
 
 /// 配一张**用户的板**（⇒ ⇒ 之后 `LoadProject` 就**用**它）。
+/// 内置 qemu-virt 板（v0.76 · B1：自动选档已废 ⇒ 测试前置显式配板）。
+fn qemu_virt_board() -> PlatformDescription {
+    platform::builtin_description(platform::PLATFORM_ID_QEMU_VIRT).expect("内置 qemu-virt 必须存在")
+}
+
 fn set_user_board(host: &mut KernelHost, description: PlatformDescription) {
     let events = dispatch(
         host,
@@ -382,35 +387,40 @@ fn k4_without_mcu_compressed_firmware_also_loads() {
     );
 }
 
-/// **K-5** —— 自动选档路径（**用户没配板** ⇒ ⇒ 走内置 qemu-virt，`mcu` =
-/// `rv32imac`）⇒ ⇒ ELF32 固件照装；RVC 固件**也**装（声明含 c）。
+/// **K-5** —— **显式配 qemu-virt 板**（`mcu` = `rv32imac`）⇒ ⇒ ELF32 固件
+/// 照装；RVC 固件**也**装（声明含 c）。
 ///
 /// ⚠️ 这是**存量链路零影响**的那条护栏：平台的真机门禁（脚本口、demo 固件、
 /// osz）全都走这条路 ⇒ ⇒ 它们**必须**照旧装得上（80 个 golden 固件全部
 /// class=32 / 不带 RVC ⇒ ⇒ 本判据覆盖它们的公共形状）。
+///
+/// ⚠️ **v0.76（STAGE-52 · B1）**：自动选档已废 ⇒ ⇒ 高段镜像不再自动切档 ⇒ ⇒
+/// 测试前置**显式配 qemu-virt 板**（装载语义不变）。
 #[test]
-fn k5_auto_selected_qemu_virt_accepts_legacy_firmware() {
+fn k5_configured_qemu_virt_accepts_legacy_firmware() {
     // ① ELF32（不带 RVC）⇒ 装。
     let mut host = KernelHost::new();
+    set_user_board(&mut host, qemu_virt_board());
     let events = load(
         &mut host,
         elf_project(minimal_elf(0x8400_0000, &firmware_bytes(), 0)),
     );
     assert!(
         errors_of(&events).is_empty(),
-        "自动选 qemu-virt + ELF32 却装不上（{:?}）⇒ ⇒ 存量链路被破坏",
+        "配 qemu-virt + ELF32 却装不上（{:?}）⇒ ⇒ 存量链路被破坏",
         errors_of(&events)
     );
 
     // ② RVC 固件 ⇒ 也装（qemu-virt 声明 rv32imac，含 c）。
     let mut host = KernelHost::new();
+    set_user_board(&mut host, qemu_virt_board());
     let events = load(
         &mut host,
         elf_project(minimal_elf(0x8400_0000, &firmware_bytes(), 0x1)),
     );
     assert!(
         errors_of(&events).is_empty(),
-        "自动选 qemu-virt（含 c）+ RVC 固件却装不上（{:?}）⇒ ⇒ c 位做成了双向严格",
+        "配 qemu-virt（含 c）+ RVC 固件却装不上（{:?}）⇒ ⇒ c 位做成了双向严格",
         errors_of(&events)
     );
 }

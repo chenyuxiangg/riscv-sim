@@ -162,6 +162,16 @@ fn dispatch(host: &mut KernelHost, cmd: CommandPayload) -> Vec<EventPayload> {
 
 /// 装载 demo 工程。
 fn load_demo(host: &mut KernelHost) {
+    // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
+    //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
+    let _ = dispatch(
+        host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
     let events = dispatch(host, CommandPayload::LoadProject(demo_project()));
     assert!(
         !events

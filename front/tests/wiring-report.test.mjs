@@ -56,12 +56,12 @@ function frontProductSources() {
 }
 
 describe("STAGE-48 · 连线报告 · 前端那一侧", () => {
-    test("N-1 · 前端镜像的 `SCHEMA_VERSION` **== 11**（与契约层同批）", async () => {
+    test("N-1 · 前端镜像的 `SCHEMA_VERSION` **== 12**（与契约层同批）", async () => {
         const message = await importFront("lib/message.js");
         assert.equal(
             message.SCHEMA_VERSION,
-            11,
-            "前端镜像的 SCHEMA_VERSION 必须是 11（契约 v11：STAGE-48 的连线报告）",
+            12,
+            "前端镜像的 SCHEMA_VERSION 必须是 12（契约 v12：STAGE-52 的模板库协议）",
         );
     });
 
