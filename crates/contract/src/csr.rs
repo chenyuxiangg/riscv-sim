@@ -654,6 +654,15 @@ pub const MIE_MEIE_BIT: u32 = 11;
 /// `mie.MTIE` — machine **timer** interrupt enable (bit 7).
 pub const MIE_MTIE_BIT: u32 = 7;
 
+/// `mie.MSIE` — machine **software** interrupt enable (bit 3).
+///
+/// ⚠️ This is the RISC-V standard `mie`/`mip` bit number (`MSIE`/`MSIP`)
+/// **and** the architectural cause code for a machine software
+/// interrupt — the two coincide here for the same reason `MTIE` (7) and
+/// `MEIE` (11) coincide with their cause codes. The platform's *internal*
+/// line number is [`IRQ_SOFTWARE`] (4), a third space.
+pub const MIE_MSIE_BIT: u32 = 3;
+
 /// The interrupt bit of `mcause` — `mcause[31]`.
 ///
 /// An interrupt cause is `IRQ_BASE | <architectural cause code>`; an
@@ -666,10 +675,12 @@ pub const IRQ_BASE: u32 = 0x8000_0000;
 
 /// Architectural `mcause` code — **machine software interrupt**.
 ///
-/// ⚠️ The platform has **no software-interrupt source** today ⇒
-/// [`arch_cause_for_line`] never returns this code.  It is spelled out
-/// anyway because the code is part of the architectural vocabulary the
-/// platform must speak: a guest that switches on `mcause` may name it.
+/// ⚠️ Produced by [`arch_cause_for_line`] for [`IRQ_SOFTWARE`] — the
+/// CLINT `msip` register drives that line. Before v0.77 the platform had
+/// **no** software-interrupt line: the register was modeled but nothing
+/// moved it into the controller ⇒ the code was never delivered. The code
+/// is part of the architectural vocabulary; every M-mode interrupt
+/// source must be expressible.
 pub const CAUSE_MACHINE_SOFTWARE: u32 = 3;
 
 /// Architectural `mcause` code — **machine timer interrupt**.
@@ -693,6 +704,15 @@ pub const IRQ_UART_TX_EMPTY: u16 = 2;
 /// The **highest** priority line of the platform (LLD §2.2).
 pub const IRQ_TIMER_COMPARE: u16 = 3;
 
+/// Interrupt line — machine **software** interrupt (CLINT `msip`).
+///
+/// ⚠️ The **source** is the CLINT device's `msip` register (bit 0 = pending,
+/// level semantics): the host reads `msip_pending()` every quantum and
+/// raises / lowers this line. Before v0.77 this line did not exist ⇒ a
+/// guest writing `msip = 1` got **no interrupt** while the register still
+/// read back 1 — a silent half-implementation.
+pub const IRQ_SOFTWARE: u16 = 4;
+
 /// The "no active interrupt" marker.
 ///
 /// ⚠️ It is **not** `0`: line 0 is not a line at all, but the marker is
@@ -701,14 +721,15 @@ pub const NO_ACTIVE_IRQ: u16 = 0xFFFF;
 
 /// The `mie` / `mip` bit that gates an interrupt line.
 ///
-/// The platform's **line space** (`1` / `2` / `3`) and the RISC-V
-/// **standard interrupt bit space** (`11` / `7`) are **different numbering
-/// spaces**; this function is the **only** place that translates between
-/// them.
+/// The platform's **line space** (`1` / `2` / `3` / `4`) and the RISC-V
+/// **standard interrupt bit space** (`11` / `7` / `3`) are **different
+/// numbering spaces**; this function is the **only** place that translates
+/// between them.
 ///
 /// * `1` (UART rx-ready) and `2` (UART tx-empty) → bit **11** (`MEIE` /
 ///   `MEIP`)
 /// * `3` (timer compare) → bit **7** (`MTIE` / `MTIP`)
+/// * `4` (software) → bit **3** (`MSIE` / `MSIP`)
 /// * anything else → `None` — the line has **no** standard interrupt bit.
 ///
 /// ⚠️ A `None` result does **not** mean "disabled": it means "this line
@@ -732,6 +753,7 @@ pub fn std_irq_bit_for_line(line: u16) -> Option<u32> {
     match line {
         IRQ_UART_RX_READY | IRQ_UART_TX_EMPTY => Some(MIE_MEIE_BIT),
         IRQ_TIMER_COMPARE => Some(MIE_MTIE_BIT),
+        IRQ_SOFTWARE => Some(MIE_MSIE_BIT),
         _ => None,
     }
 }
@@ -780,8 +802,8 @@ pub fn pending_lines_to_mip_mask(lines: &[u16]) -> u32 {
 /// into the kernel crate (one rule, one landing spot).
 ///
 /// ⚠️ The mask is a `u32`, so it can name lines `0 ..= 31`; **line 0 does
-/// not exist** (the platform's lines are `1 / 2 / 3` — see
-/// [`IRQ_UART_RX_READY`]), so bit 0 is simply inert.
+/// not exist** (the platform's lines are `1 / 2 / 3 / 4` — see
+/// [`IRQ_UART_RX_READY`] and [`IRQ_SOFTWARE`]), so bit 0 is simply inert.
 pub fn irq_clear_mask_targets(mask: u32) -> Vec<u16> {
     (0u16..32)
         .filter(|line| mask & (1u32 << line) != 0)
@@ -793,9 +815,10 @@ pub fn irq_clear_mask_targets(mask: u32) -> Vec<u16> {
 ///
 /// # Why this map exists at all
 ///
-/// The platform numbers its interrupt lines `1 / 2 / 3` (UART rx-ready
-/// / UART tx-empty / timer-compare).  RISC-V numbers the *machine
-/// interrupt causes* `3` (software) / `7` (timer) / `11` (external).
+/// The platform numbers its interrupt lines `1 / 2 / 3 / 4` (UART
+/// rx-ready / UART tx-empty / timer-compare / software).  RISC-V numbers
+/// the *machine interrupt causes* `3` (software) / `7` (timer) / `11`
+/// (external).
 /// **Those are two different numbering spaces**, and the guest only
 /// ever sees the second one: `mcause` is what a trap handler reads.
 ///
@@ -827,6 +850,8 @@ pub fn irq_clear_mask_targets(mask: u32) -> Vec<u16> {
 /// # The mapping
 ///
 /// * `3` (timer-compare) → **7** ([`CAUSE_MACHINE_TIMER`])
+/// * `4` (software / CLINT `msip`) → **3**
+///   ([`CAUSE_MACHINE_SOFTWARE`])
 /// * `1` / `2` (UART rx-ready / tx-empty) → **11**
 ///   ([`CAUSE_MACHINE_EXTERNAL`]) — M-mode has **one** external
 ///   interrupt bit, so both UART lines share the external cause, just
@@ -836,13 +861,13 @@ pub fn irq_clear_mask_targets(mask: u32) -> Vec<u16> {
 ///   interrupt whose `mcause` is not an architectural code is exactly
 ///   the defect this map exists to remove)
 ///
-/// ⚠️ **The software-interrupt code (3) is never produced** — the
-/// platform has no software-interrupt source today
-/// ([`CAUSE_MACHINE_SOFTWARE`]).
+/// ⚠️ **The software-interrupt code (3) is produced for line 4** —
+/// [`IRQ_SOFTWARE`], driven by the CLINT `msip` register.
 pub fn arch_cause_for_line(line: u16) -> Option<u32> {
     match line {
         IRQ_TIMER_COMPARE => Some(CAUSE_MACHINE_TIMER),
         IRQ_UART_RX_READY | IRQ_UART_TX_EMPTY => Some(CAUSE_MACHINE_EXTERNAL),
+        IRQ_SOFTWARE => Some(CAUSE_MACHINE_SOFTWARE),
         _ => None,
     }
 }
@@ -1656,6 +1681,24 @@ mod tests {
     #[test]
     fn the_timer_line_uses_the_timer_interrupt_bit() {
         assert_eq!(mie_bit_for_line(IRQ_TIMER_COMPARE), Some(MIE_MTIE_BIT));
+    }
+
+    /// **软件中断线**（CLINT `msip` → 架构 cause 3）。
+    ///
+    /// ⚠️ 期望值写**架构字面量**（线号 4 / 位号 3 / cause 3），不从映射
+    /// 函数反推 ⇒ 哪天有人把这条线接错位（比如接到 `MEIE` 11），这条会红。
+    #[test]
+    fn the_software_line_uses_the_software_interrupt_bit_and_cause() {
+        assert_eq!(IRQ_SOFTWARE, 4, "内部线号：software (CLINT msip)");
+        assert_eq!(MIE_MSIE_BIT, 3, "mie.MSIE 的位号是架构字面量 3");
+        assert_eq!(std_irq_bit_for_line(IRQ_SOFTWARE), Some(MIE_MSIE_BIT));
+        assert_eq!(
+            arch_cause_for_line(IRQ_SOFTWARE),
+            Some(CAUSE_MACHINE_SOFTWARE)
+        );
+        assert_eq!(arch_cause_for_line(IRQ_SOFTWARE), Some(3), "架构码：软件中断");
+        assert_eq!(arch_mcause_for_line(IRQ_SOFTWARE), Some(0x8000_0003));
+        assert_eq!(pending_lines_to_mip_mask(&[IRQ_SOFTWARE]), 1 << 3);
     }
 
     #[test]

@@ -171,7 +171,7 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use riscv_sim_contract::admin::LogEntryDto;
-use riscv_sim_contract::csr::IRQ_UART_RX_READY;
+use riscv_sim_contract::csr::{IRQ_SOFTWARE, IRQ_UART_RX_READY};
 use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_03_DUMP_TOO_LARGE, E_DBG_04_SYMBOL_NAME_EMPTY,
     E_ENG_03_NO_PROGRESS, E_HMS_02_FATAL_TERMINATED, E_PLT_13_REVISION_CONFLICT,
@@ -1428,6 +1428,33 @@ impl KernelHost {
             Err(_) => return,
         };
         self.intc.controller.borrow_mut().set_timer_compare(cmp_ps);
+
+        // ---- 1b) CLINT 的 msip（软件中断）→ M-16 的软件线（v0.77 补线）----
+        //
+        // ⚠️ **这一段以前不存在**：CLINT 的 `msip` 有寄存器模型、可写可读、
+        // 进快照，但**没有任何人把它搬进控制器** ⇒ guest 写 `msip = 1` 什么
+        // 都不会发生（比未实现更危险：寄存器读回来是 1）。
+        //
+        // ⚠️ **电平语义**（与 UART 那条线一致）：`msip` 的 bit0 本身就是
+        // **挂起电平** —— `1` 抬线、`0` 撤线。guest 在 handler 里写回
+        // `msip = 0` 之后，宿主下一拍就把线撤掉 ⇒ 下一次自陷才有机会进来。
+        //
+        // ⚠️ **hart 0** 是平台唯一被交付的 hart（与 `PLIC_CONTEXT_MACHINE`、
+        // 定时器 `mtimecmp` 同一口径）。
+        let msip = match clint.try_borrow() {
+            Ok(c) => c.msip_pending(),
+            Err(_) => return,
+        };
+        if msip {
+            let _ = self.intc.controller.borrow_mut().request(
+                IRQ_SOFTWARE,
+                now_ps,
+                "clint",
+                crate::m16_interrupt::TRIGGER_LEVEL,
+            );
+        } else {
+            self.intc.controller.borrow_mut().clear(IRQ_SOFTWARE);
+        }
 
         // ---- 2) UART 的 RX 就绪 → PLIC 的源（**按连线表** · **逐线查实例**）----
         //
