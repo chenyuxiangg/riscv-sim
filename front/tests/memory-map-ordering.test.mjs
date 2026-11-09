@@ -217,7 +217,7 @@ function fakeKernel() {
  *
  * @param {string} [hash]
  */
-function setup(hash = "#/memory-map") {
+function setup(hash = "#/product") {
     m03.reset();
     m01.assembleWorkspace("product");
     m01.route(hash);
@@ -252,10 +252,11 @@ async function unloadServices(router) {
  * @param {object} draft
  */
 async function submitDraft(router, draft) {
-    m03.setState("memory-map", (prev) => ({ ...prev, draft }));
+    // ⚠️ 走**产品视图**的真实通路：`reload-product`（送板 + 再装载工程）。
+    m03.setState("product", (prev) => ({ ...prev, board: draft, draft }));
     await app.handleCommand(
-        { action: "submit-memory-map", params: { description: mm.draftToDescription(draft) } },
-        { commandRouter: router },
+        { action: "reload-product", params: { description: mm.draftToDescription(draft) } },
+        { commandRouter: router, registerMemory: { async loadProject() {} } },
     );
 }
 
@@ -294,9 +295,9 @@ describe("板级内存图 · 乱序到达（STAGE-17 · C-1 ~ C-6）", () => {
             wiring.discardedCount(), 1,
             "丢弃必须**可观测**（计数 +1 ⇒ 判定靠数、不靠文案）",
         );
-        // ⚠️ **两个视图状态**也不许被旧事件改掉（它们与缓存是同一个引用）。
-        assert.equal(m03.getState("memory-map").memoryMap.revision, 5);
-        assert.equal(m03.getState("memory-map").memoryMap.description.regions.length, 1);
+        // ⚠️ **视图状态**也不许被旧事件改掉（它与缓存是同一个引用）。
+        assert.equal(m03.getState("product").memoryMap.revision, 5);
+        assert.equal(m03.getState("product").memoryMap.description.regions.length, 1);
         assert.equal(m03.getState("product").memoryMap.revision, 5);
     });
 
@@ -344,7 +345,7 @@ describe("板级内存图 · 乱序到达（STAGE-17 · C-1 ~ C-6）", () => {
             wiring.discardedCount(), 0,
             "更新的事件**不许**被丢弃（否则「一律丢弃」也会让这条假绿）",
         );
-        assert.equal(m03.getState("memory-map").memoryMap.revision, 5);
+        assert.equal(m03.getState("product").memoryMap.revision, 5);
     });
 
     test("C-4 护栏**不改提交路径**：基底旧了就**照常提交** ⇒ `expected_revision` 照常兜底", async () => {
@@ -413,44 +414,6 @@ describe("板级内存图 · 乱序到达（STAGE-17 · C-1 ~ C-6）", () => {
         });
     });
 
-    test("C-6 护栏**不改**「已被内核接受」这个推导量 ⇒ 落库门槛照旧可用", async () => {
-        setup();
-        const router = fakeKernel();
-        app.wireMemoryMap(router);
-        router.emitMemoryMap(NEW_BOARD, { loaded: true, revision: 5 });
-        const draft = mm.draftFromDescription(NEW_BOARD);
-        draft.regions[0].size = "4194304";
-        await submitDraft(router, draft);
-
-        // ⚠️ 提交成功 ⇒ 这一份**已被内核接受** ⇒ 落库门槛解禁。
-        assert.equal(
-            mm.isDraftAccepted(m03.getState("memory-map")), true,
-            "前置：草稿已被内核接受（推导量为真）",
-        );
-        assert.equal(
-            $("[data-mmap-validated]").getAttribute("data-mmap-validated"), "1",
-            "面板上必须显示「已被内核接受」",
-        );
-        assert.equal(
-            $("[data-action='save-memory-map']").hasAttribute("disabled"), false,
-            "「保存当前板」必须**可用**（落库门槛）",
-        );
-
-        // ⚠️ 一个**乱序**（更旧）的事件到达 ⇒ 护栏丢弃它 ⇒ 推导量不许变。
-        router.emitMemoryMap(OLD_BOARD, { loaded: true, revision: 3 });
-        assert.equal(
-            mm.isDraftAccepted(m03.getState("memory-map")), true,
-            "护栏不许改「已被内核接受」这个推导量",
-        );
-        assert.equal(
-            $("[data-mmap-validated]").getAttribute("data-mmap-validated"), "1",
-            "面板上仍必须显示「已被内核接受」",
-        );
-        assert.equal(
-            $("[data-action='save-memory-map']").hasAttribute("disabled"), false,
-            "落库门槛必须**照旧可用**",
-        );
-    });
 
     test("丢弃计数**只增不减**（`reset()` 不抹掉证据）", () => {
         setup();

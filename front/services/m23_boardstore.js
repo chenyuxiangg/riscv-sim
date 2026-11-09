@@ -129,9 +129,20 @@ export function boardId(description) {
 /**
  * 把一个描述变成**落库条目**。
  *
- * ⚠️ 字段集合**恰为三个**：`id` + `description` + `rules_version` ⇒
- * **不存时间戳**（确定性）、**不存 `name`**（`name` 在描述里 ⇒ 另存就是
- * 第二份真相）。
+ * ⚠️ 字段集合**恰为四个**：`id` + `description` + `rules_version` +
+ * `registers` ⇒ **不存时间戳**（确定性）、**不存 `name`**（`name` 在描述里
+ * ⇒ 另存就是第二份真相）。
+ *
+ * ⚠️ **`registers` 是「偏移 / 偏移含义」这份文档层**（产品视图的寄存器表）⇒
+ * 它**不进描述 DTO**（契约 `PlatformDescription` 里没有这个字段，塞进去要升
+ * `PLATFORM_SCHEMA_VERSION` 并动内核/服务端）⇒ 落在**条目这个容器**里，按
+ * **器件身份**索引（`core` / `device:<id>` / `mem:<kind>:<n>`）⇒ 内核把段
+ * 排序后推回来时**下标会变、身份不变** ⇒ 草稿不会错位。
+ *
+ * ⚠️ **不升 `BOARD_DB_VERSION`**：IndexedDB 的记录是**无模式**的，加一个字段
+ * 不改表结构（`keyPath` 仍是 `id`）⇒ 升版本号只会平白制造
+ * `onblocked`（别的标签页还开着旧版本时打开会被阻塞），而老条目（没有
+ * `registers`）本来就能读 ⇒ 用 `boardRegisters()` 兜底成空表。
  *
  * ⚠️ **`rules_version` = 这块板是按哪一版合法性规则校验过的**
  * （STAGE-18 · D-143 · 裁决 F）⇒ 它**不**进描述 DTO（那是两个真相）⇒
@@ -142,10 +153,40 @@ export function boardId(description) {
  * @param {object|null|undefined} description
  * @returns {{id: string, description: object, rules_version: number}|null} 取不到 `id` ⇒ `null`
  */
-export function boardEntry(description) {
+export function boardEntry(description, registers) {
     const id = boardId(description);
     if (id === null) return null;
-    return { id, description, rules_version: PLATFORM_RULES_VERSION };
+    return {
+        id,
+        description,
+        rules_version: PLATFORM_RULES_VERSION,
+        registers: normalizeRegisters(registers),
+    };
+}
+
+/**
+ * 取一条板档案条目的**寄存器文档**（偏移 / 偏移含义）。
+ *
+ * ⚠️ **老条目没有这个字段** ⇒ 返回空表（`{}`）⇒ 视图层回落到内置表 ⇒
+ * 「老档案照样能装、装出来就是内置文案」。
+ *
+ * @param {object|null|undefined} entry — 板档案条目
+ * @returns {Object<string, {unit?: string, regs: Array<object>}>} 按器件身份索引的文档
+ */
+export function boardRegisters(entry) {
+    return normalizeRegisters(entry?.registers);
+}
+
+/**
+ * 寄存器文档的**归一化**：只要对象就深拷贝，其余（缺省 / `null` / 数组）
+ * 一律当空表 ⇒ 落库内容永远是「对象」这一种形状。
+ *
+ * @param {unknown} registers
+ * @returns {Object<string, object>}
+ */
+function normalizeRegisters(registers) {
+    if (!registers || typeof registers !== "object" || Array.isArray(registers)) return {};
+    return JSON.parse(JSON.stringify(registers));
 }
 
 /**

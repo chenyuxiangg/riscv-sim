@@ -28,19 +28,22 @@ import {
     matchSourceFile,
     renderSourceText,
 } from "./components/source-view.js";
+import { parseNumber } from "./components/memory-map.js";
 import {
-    addRegion,
-    collectDraft,
-    countInvalidFields,
-    currentDraft,
-    defaultDraft,
-    draftFromDescription,
-    draftToDescription,
-    removeRegion,
-    renderMemoryMapPanel,
-    renderMemoryMapTable,
-    setDeviceKind,
-} from "./components/memory-map.js";
+    buildDeviceNodes,
+    cloneRegisterDoc,
+} from "./components/device-docs.js";
+import {
+    boardDraft,
+    cloneDescription,
+    createBoardDraft,
+    effectiveDescription,
+    findTemplateEntry,
+    projectTreeFrom,
+    readArchiveDraft,
+    readCreateKinds,
+    renderProductWorkspace,
+} from "./components/product-workspace.js";
 
 // ---------------------------------------------------------------------------
 // ViewComponent shape (LLD §2.1.1)
@@ -131,274 +134,415 @@ function emitCommand(action, viewId, params = null) {
 }
 
 // ---------------------------------------------------------------------------
-// productTreeView — shows the M-14 mapping table (FR-01/02/03)
+// productTreeView — 双栏工作面：左侧产品树 + 右侧器件内存窗口（FR-01/02/03）
+//
+// ⚠️ **板级内存图不再是独立工作面**（本轮重构推翻 STAGE-14 §3.3 的
+// 「编辑器是独立工作面」）：基址 / 偏移 / 含义都在产品视图右栏里改 ⇒
+// `#/memory-map` 路由、面板与编辑器渲染代码一并删除。
+//
+// ⚠️ **默认空树**：启动不装载任何板子 ⇒ 左栏只有「创建」「从模版加载」两个
+// 入口，右栏居中显示「内存展示区」。
 // ---------------------------------------------------------------------------
+
+/**
+ * 让产品视图按**当前状态**重渲染一次。
+ *
+ * ⚠️ 走 M-01 的 `riscv:render` 事件（与终端 / 源码视图同一条路）⇒ 视图层
+ * 不直接摸 DOM。
+ */
+function publishProductState() {
+    window.dispatchEvent(new CustomEvent("riscv:render", {
+        detail: { viewId: "product", type: "update", state: viewStore.getState("product") },
+    }));
+}
+
+/** 当前 product 视图状态（永远返回对象，不返回 undefined）。 */
+function productState() {
+    return viewStore.getState("product") ?? {};
+}
+
+/**
+ * 写 product 视图状态；`publish` 决定要不要立刻重渲染。
+ *
+ * ⚠️ **输入过程中不重渲染**（`body.innerHTML = html` 会重建输入框 ⇒ 焦点与
+ * 光标位置全丢）⇒ 逐键输入只写状态，失焦（`change`）/按钮再重渲染。
+ *
+ * @param {object|((prev: object) => object)} patch
+ * @param {boolean} [publish]
+ */
+function setProductState(patch, publish = true) {
+    viewStore.setState("product", (prev) => {
+        const base = prev ?? {};
+        return typeof patch === "function" ? patch(base) : { ...base, ...patch };
+    });
+    if (publish) publishProductState();
+}
+
+/**
+ * 取**可编辑**的板描述草稿；没有草稿就从「生效中的描述」拷一份。
+ *
+ * @returns {object|null}
+ */
+function ensureBoardDraft() {
+    const state = productState();
+    if (state.board?.description) return state.board.description;
+    const eff = effectiveDescription(state);
+    const clone = cloneDescription(eff);
+    if (!clone) return null;
+    setProductState({ board: { description: clone } }, false);
+    return clone;
+}
+
+/** 选中节点的 node 对象（找不到 ⇒ `null`）。 */
+function selectedNode() {
+    const state = productState();
+    const key = state.selected ?? null;
+    if (!key) return null;
+    return buildDeviceNodes(state).find((node) => node.key === key) ?? null;
+}
+
+/**
+ * 往草稿的某一段写一个数值字段（基址 / 段长度）。
+ *
+ * ⚠️ 解析不出来 ⇒ **不写**（保留用户上一次的合法值）；数值合法性最终仍由
+ * 内核的校验器裁决（前端不写第二份校验器）。
+ *
+ * @param {object} node
+ * @param {"base"|"size"} field
+ * @param {unknown} raw
+ */
+function writeRegionNumber(node, field, raw) {
+    const index = node?.regionIndex;
+    if (!Number.isInteger(index)) return;
+    const value = parseNumber(raw);
+    if (value === null) return;
+    const draft = ensureBoardDraft();
+    const region = Array.isArray(draft?.regions) ? draft.regions[index] : null;
+    if (!region) return;
+    region[field] = value;
+    setProductState({ board: { description: draft } }, false);
+}
+
+/**
+ * 改当前选中器件的一行寄存器描述（写进 `docs` 草稿）。
+ *
+ * @param {string} field — offset / name / meaning / width
+ * @param {number} index — 行号
+ * @param {unknown} raw
+ */
+function writeRegisterField(field, index, raw) {
+    const node = selectedNode();
+    if (!node) return;
+    const state = productState();
+    const key = node.key;
+    const current = state.docs?.[key] ?? cloneRegisterDoc(node.deviceKind);
+    const rows = Array.isArray(current.regs) ? current.regs.slice() : [];
+    const row = rows[index];
+    if (!row) return;
+    const value = field === "width" ? parseNumber(raw) : String(raw ?? "");
+    if (field === "width" && value === null) return;
+    rows[index] = { ...row, [field]: value };
+    setProductState({
+        docs: { ...(state.docs ?? {}), [key]: { unit: current.unit, regs: rows } },
+    }, false);
+}
 
 const productTreeView = register({
     id: "product",
     channels: ["sim"],
     /** Render to body. Pure: same storeState → same DOM string. */
     render(state) {
-        // ⚠️ **真数据**（STAGE-14 ⑦ · 裁决 F）：内存映射来自内核的
-        // `memory.map` 事件（**当前生效**的板级内存图）⇒ 不再是 demo 的
-        // 假数据。
-        //
-        // ⚠️ **「没有数据」与「数据是空的」必须分得开**：没收到事件 ⇒
-        // 「尚无内存图数据」；收到了但 0 段 ⇒ 「当前生效的内存图为空」。
-        const memoryMap = state?.memoryMap ?? null;
-        const tree = state?.tree ?? { root: { name: "未加载", children: [] } };
-        return `
-            <div class="product-grid">
-                <section class="product-tree">
-                    <h3>产品树</h3>
-                    ${renderTree(tree.root)}
-                </section>
-                <section class="memory-map">
-                    <h3>内存映射 (M-14)</h3>
-                    ${renderMemoryMapTable(memoryMap)}
-                    <div class="debug-toolbar">
-                        <button type="button" data-action="go-memory-map">编辑板级内存图</button>
-                        <button type="button" data-action="seed-demo">重新 seed demo 状态（dev only）</button>
-                    </div>
-                </section>
-            </div>
-            <p class="muted">
-                内存映射表显示的是内核 <code>memory.map</code> 事件里的
-                <strong>当前生效</strong>的板级内存图；没有数据时如实显示空态，不显示假数据。
-            </p>
-        `;
-    },
-    onCommand(ev) {
-        // User action: ask for the demo product tree / sim state to be re-seeded.
-        //
-        // The button carries `data-action` itself and lives *outside* the
-        // <table>, so it has no `[data-region-base]` ancestor — requiring
-        // one made the button permanently dead (FRONTEND_Review.md #3).
-        const target = /** @type {HTMLElement} */ (ev.target);
-        if (target?.matches?.("[data-action='seed-demo']")) {
-            seedBus("product");
-            return "cmd-seed-demo";
-        }
-        // 「编辑板级内存图」⇒ 跳到板级内存图编辑器（独立工作面）。
-        const el = ev.target?.closest?.("[data-action]");
-        if (el?.dataset?.action === "go-memory-map") {
-            route("#/memory-map");
-            return "cmd-go-memory-map";
-        }
-        return undefined;
-    },
-    onDelta(_delta) {
-        // No-op until M-18 hooks land.
-    },
-    mountFor(el) {
-        el.addEventListener("click", (ev) => productTreeView.onCommand(ev));
-    },
-});
-
-function renderTree(node) {
-    if (!node) return "";
-    const children = (node.children ?? [])
-        .map(renderTree)
-        .join("");
-    const id = node.component_id
-        ? `<span class="muted">(${escapeHtml(node.component_id)})</span>`
-        : "";
-    return `<li>${escapeHtml(node.name)} ${id}${children ? `<ul>${children}</ul>` : ""}</li>`;
-}
-
-// ---------------------------------------------------------------------------
-// memoryMapView — 板级内存图编辑器（STAGE-14 · v0.29）。
-//
-// ⚠️ **编辑器是独立工作面**：路由 `#/memory-map`、面板 `[data-view-panel="memory-map"]`。
-// 它**不**塞进产品树视图（规格 §3.3）。
-//
-// ⚠️ **草稿住 M-03 视图状态**（规格 §3.3 / 裁决 D）：草稿是**前端自己的东西**
-// ⇒ 不进契约、不进事件 ⇒ 刷新页面即失（D-136，规格已如实登记）。
-//
-// ⚠️ **视图层不碰服务层**：提交只发 `riscv:command` 信号（`emitCommand`），
-// 由 `app.js` 的 `handleCommand` 变成真正的 M-05 命令。
-// ---------------------------------------------------------------------------
-
-/** 编辑器面板的 DOM（挂载时记下 ⇒ 采集与渲染看的是**同一份**东西）。 */
-let memoryMapPanel = null;
-
-/**
- * 内存图视图状态里的**当前草稿**（渲染与采集共用同一个基底）。
- *
- * @returns {object}
- */
-function memoryMapDraft() {
-    return currentDraft(viewStore.getState("memory-map"));
-}
-
-/**
- * 把编辑器面板的最新输入采集成草稿，写回 M-03 视图状态。
- *
- * ⚠️ **不重渲染**：重渲染会重建 DOM ⇒ 输入框失焦、正在敲的字丢掉。
- * 草稿在视图状态里 ⇒ 下次重渲染时值还在。
- *
- * @param {Element} root — 面板元素
- * @returns {object} 采集到的草稿
- */
-function syncMemoryMapDraft(root) {
-    const draft = collectDraft(root, memoryMapDraft());
-    viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-    return draft;
-}
-
-/**
- * 让内存图编辑器按当前视图状态重渲染一次。
- */
-function publishMemoryMapState() {
-    window.dispatchEvent(new CustomEvent("riscv:render", {
-        detail: {
-            viewId: "memory-map",
-            type: "update",
-            state: viewStore.getState("memory-map"),
-        },
-    }));
-}
-
-const memoryMapView = register({
-    id: "memory-map",
-    channels: ["sim"],
-    render(state) {
-        return renderMemoryMapPanel(state);
+        return renderProductWorkspace(state ?? {});
     },
     onCommand(ev) {
         const el = ev.target?.closest?.("[data-action]");
         const action = el?.dataset?.action;
         if (!action) return undefined;
-        const index = Number(el?.dataset?.mmapIndex ?? -1);
-        const root = memoryMapPanel;
+        const state = productState();
         switch (action) {
-            case "add-ram":
-            case "add-rom":
-            case "add-peripheral": {
-                // ⚠️ 先采集再改：用户正在敲的数**不许**被这次点击冲掉。
-                const base = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
-                const kind = action === "add-ram" ? "ram" : action === "add-rom" ? "rom" : "peripheral";
-                const draft = addRegion(base, kind);
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-                publishMemoryMapState();
-                return `cmd-${action}`;
+            // ---- 视图本地状态（不发命令） --------------------------------
+            case "select-device": {
+                setProductState({ selected: el.dataset.deviceKey ?? null, dialog: null });
+                return "cmd-select-device";
             }
-            case "remove-region": {
-                const base = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
-                const draft = removeRegion(base, index);
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-                publishMemoryMapState();
-                return "cmd-remove-region";
+            case "toggle-lock": {
+                if (state.loaded !== true) return undefined;
+                setProductState({ locked: state.locked === false });
+                return "cmd-toggle-lock";
             }
-            case "load-current": {
-                const current = viewStore.getState("memory-map")?.memoryMap?.description ?? null;
-                const draft = draftFromDescription(current) ?? defaultDraft();
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-                publishMemoryMapState();
-                return "cmd-load-current";
+            case "open-create": {
+                setProductState({ dialog: "create" });
+                return "cmd-open-create";
             }
-            case "new-draft": {
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft: defaultDraft() }));
-                publishMemoryMapState();
-                return "cmd-new-draft";
+            case "open-templates": {
+                setProductState({ dialog: "templates" });
+                // 模版列表 = 内置 + 本机板档案 ⇒ 档案要现取（app.js 读板档案服务）。
+                emitCommand("list-templates", "product", null);
+                return "cmd-open-templates";
             }
-            case "submit-memory-map": {
-                const root2 = root;
-                const draft = root2 ? collectDraft(root2, memoryMapDraft()) : memoryMapDraft();
-                // ⚠️ 有栏没看懂 ⇒ **不提交**（提交一份内核看不懂的描述只会换来
-                // 一个更费解的错）。
-                const invalid = root2 ? countInvalidFields(root2) : 0;
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-                if (invalid > 0) {
-                    publishMemoryMapState();
-                    return "cmd-submit-memory-map-invalid";
+            case "close-dialog": {
+                setProductState({ dialog: null });
+                return "cmd-close-dialog";
+            }
+            // ---- 创建 / 模版 / 重新载入 ----------------------------------
+            case "confirm-create": {
+                const body = el.closest?.(".pw-dialog") ?? document;
+                const nameInput = body.querySelector?.("[data-create-name]");
+                const kinds = readCreateKinds(body);
+                if (kinds.length === 0) {
+                    setNoteInProduct("至少勾一个器件 —— 空白板没有可展示的器件。");
+                    return undefined;
                 }
-                // ⚠️ 载荷形状 = 契约的 `PlatformDescription`（**逐字同形**）。
-                return emitCommand("submit-memory-map", "memory-map", {
-                    description: draftToDescription(draft),
+                const description = createBoardDraft(nameInput?.value ?? "", kinds);
+                setProductState({ dialog: null }, false);
+                emitCommand("create-product", "product", { description });
+                return "cmd-create-product";
+            }
+            case "use-template": {
+                // ⚠️ 连**寄存器文档**一起取：档案里存了偏移 / 含义 ⇒ 装载时
+                // 要按器件身份把它们搬回视图状态的 `docs`（否则「从模版加载」
+                // 出来的东西跟保存时不一样）。
+                const entry = findTemplateEntry(state, el.dataset.templateId, el.dataset.templateSrc);
+                if (!entry) {
+                    setNoteInProduct("模版没找到 —— 板档案可能已被删除。");
+                    return undefined;
+                }
+                setProductState({ dialog: null }, false);
+                emitCommand("load-template", "product", {
+                    description: entry.description,
+                    registers: entry.registers,
                 });
+                return "cmd-load-template";
             }
-            case "reload-project":
-                // 「重新装载工程」⇒ 宿主在下次 LoadProject 时应用待生效的板级配置。
-                return emitCommand("reload-project", "memory-map");
-            case "unload-project":
-                // 「卸载工程」⇒ 契约 v7 的 `UnloadProject`（D-139）。
-                //
-                // ⚠️ **只发这一个信号**：真正发命令的是 app 层（它持有服务
-                // 接线）⇒ 视图层**不**自己碰内核。
-                return emitCommand("unload-project", "memory-map");
-            case "save-memory-map": {
-                // 「保存当前板」⇒ 把**当前草稿**写进板档案（键 = 草稿的 id）。
-                //
-                // ⚠️ **不改内核状态** ⇒ 不发契约命令 ⇒ 只发 `riscv:command`
-                // 信号给 app.js（它持有板档案存储）。
-                // ⚠️ **先采集再发**：用户正在敲的内容以 DOM 为准。
-                const draft = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-                return emitCommand("save-memory-map", "memory-map");
+            case "save-archive": {
+                if (state.loaded === false) {
+                    setNoteInProduct("先创建或从模版装载一块板，再另存为档案。");
+                    return undefined;
+                }
+                setProductState({ dialog: "archive" });
+                return undefined;
             }
-            case "save-memory-map-as": {
-                // 「另存为板」⇒ 以当前草稿为模板**新建**一块板（新 id + 新 name）。
-                //
-                // ⚠️ 新 id / 新 name 从**面板上的两个输入框**读（不用 `prompt()`
-                // —— 浏览器真机门禁没法驱动 `prompt`）。
-                const draft = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-                const newId = root?.querySelector?.("[data-mmap-new-id]")?.value ?? "";
-                const newName = root?.querySelector?.("[data-mmap-new-name]")?.value ?? "";
-                return emitCommand("save-memory-map-as", "memory-map", {
-                    id: String(newId ?? ""),
-                    name: String(newName ?? ""),
-                });
+            case "confirm-save-as": {
+                const draft = readArchiveDraft(el.closest("[data-dialog]") ?? document);
+                setProductState({ dialog: null }, false);
+                emitCommand("save-board-as", "product", draft);
+                return "cmd-save-board-as";
             }
-            case "select-memory-map": {
-                // 「选用」档案里的一块 ⇒ **载入草稿**（`draftFromDescription`）
-                // ⇒ `selectedId` 跟着变。
-                //
-                // ⚠️ **不发契约命令**（内核状态不变）⇒ 但**要发** `riscv:command`
-                // 信号：档案与 `selectedId` 住在 app.js 那一侧的视图状态里。
-                const id = String(el?.dataset?.mmapTargetId ?? "");
-                return emitCommand("select-memory-map", "memory-map", { id });
+            case "reload-product": {
+                const draft = boardDraft(state);
+                emitCommand("reload-product", "product", { description: cloneDescription(draft) });
+                return "cmd-reload-product";
             }
-            case "delete-memory-map": {
-                // 「删除」档案里的一块 ⇒ 不改内核状态。
-                const id = String(el?.dataset?.mmapTargetId ?? "");
-                return emitCommand("delete-memory-map", "memory-map", { id });
-            }
-            case "new-memory-map": {
-                // 「新板」⇒ 清空当前编辑（草稿回到默认、**取消选中**）。
-                //
-                // ⚠️ **不发命令**：它只改**草稿**与 `selectedId`（都在视图状态里）
-                // ⇒ 落库与否是「保存」那一步的事。
-                viewStore.setState("memory-map", (prev) => ({
-                    ...prev,
-                    draft: defaultDraft(),
-                    selectedId: null,
-                }));
-                publishMemoryMapState();
-                return "cmd-new-memory-map";
+            case "discard-product": {
+                // 放弃草稿 = 回到「生效中的描述」；寄存器基线也回到内置表。
+                setProductState({ board: null, docs: {}, docsBase: {} });
+                return "cmd-discard-product";
             }
             default:
                 return undefined;
         }
     },
-    onDelta(_delta) {},
+    onDelta(_delta) {
+        // No-op until M-18 hooks land.
+    },
     mountFor(el) {
-        memoryMapPanel = el;
-        el.addEventListener("click", (ev) => memoryMapView.onCommand(ev));
-        // ⚠️ 输入 ⇒ 采集进草稿（**不重渲染** ⇒ 不失焦）。
-        el.addEventListener("input", () => {
-            if (memoryMapPanel) syncMemoryMapDraft(memoryMapPanel);
+        // ⚠️ **事件委托**：`applyRenderEvent` 每次重建 `body.innerHTML` ⇒
+        // 监听器必须绑在容器上，不能绑在按钮 / 输入框上。
+        el.addEventListener("click", (ev) => productTreeView.onCommand(ev));
+        el.addEventListener("input", (ev) => {
+            const input = ev.target;
+            if (!input?.matches) return;
+            if (input.matches("[data-base-input]")) {
+                const node = selectedNode();
+                if (node) writeRegionNumber(node, "base", input.value);
+                return;
+            }
+            if (input.matches("[data-size-input]")) {
+                const node = selectedNode();
+                if (node) writeRegionNumber(node, "size", input.value);
+                return;
+            }
+            if (input.matches("[data-reg-field]")) {
+                writeRegisterField(
+                    String(input.dataset.regField ?? ""),
+                    Number(input.dataset.regIndex ?? -1),
+                    input.value,
+                );
+            }
         });
-        // ⚠️ 换器件类型 ⇒ 参数集变了 ⇒ 必须重渲染（否则还挂着旧类型的参数栏）。
+        // 失焦 / 提交时重渲染一次：把草稿归一化显示，并刷新「未生效」标记。
         el.addEventListener("change", (ev) => {
-            if (!memoryMapPanel) return;
-            const changed = ev.target?.closest?.("[data-mm-device-kind]");
-            syncMemoryMapDraft(memoryMapPanel);
-            if (changed) publishMemoryMapState();
+            if (ev.target?.matches?.("[data-base-input],[data-size-input],[data-reg-field]")) {
+                publishProductState();
+            }
         });
     },
 });
+
+/**
+ * 在产品视图的错误条上放一句话（视图本地提示，不冒充内核错误）。
+ *
+ * ⚠️ 用 `error` 字段会带 `data-memory-map-error` 钩子 ⇒ 会被当成「内核拒绝
+ * 的描述」⇒ 所以这里只写 `notice`，由渲染层单独显示。
+ *
+ * @param {string} text
+ */
+function setNoteInProduct(text) {
+    setProductState({ notice: String(text ?? "") });
+}
+
+/**
+ * 把一段描述装进产品视图（装载 / 重载成功后调用）。
+ *
+ * @param {object} description — 生效的描述
+ * @param {{resetDocs?: boolean}} [options]
+ */
+export function adoptProductDescription(description, options = {}) {
+    const state = productState();
+    const keepSelected = options.resetDocs === true ? null : (state.selected ?? null);
+    const docs = options?.docs && typeof options.docs === "object"
+        ? JSON.parse(JSON.stringify(options.docs))
+        : {};
+    setProductState({
+        loaded: true,
+        justApplied: false,
+        board: { description: cloneDescription(description) },
+        tree: state.tree ?? { root: projectTreeFrom(description).root },
+        selected: keepSelected,
+        ...(options.resetDocs === true ? { docs, docsBase: JSON.parse(JSON.stringify(docs)) } : {}),
+    });
+}
+
+/**
+ * 一段描述在**生效描述**里是否已经落位（按器件身份 + 基址逐段比对）。
+ *
+ * ⚠️ 用来挡住「事件还没到就扶正基线」的假动作：只有内核真把这份板推出
+ * 来了，才把草稿换成它。
+ *
+ * @param {object|null} description — 生效描述
+ * @param {object|null} draft — 刚提交的那份
+ * @returns {boolean}
+ */
+function boardReflectedIn(description, draft) {
+    const effRegions = Array.isArray(description?.regions) ? description.regions : [];
+    const draftRegions = Array.isArray(draft?.regions) ? draft.regions : [];
+    if (draftRegions.length === 0) return false;
+    for (const region of draftRegions) {
+        const found = region.kind === "peripheral"
+            ? effRegions.find((r) => String(r?.device?.id ?? "") === String(region?.device?.id ?? ""))
+            : effRegions.filter((r) => r?.kind === region.kind)[
+                draftRegions.filter((r) => r?.kind === region.kind).indexOf(region)
+            ];
+        if (!found) return false;
+        if (String(found.base ?? "") !== String(region.base ?? "")) return false;
+        if (region.kind !== "peripheral" && String(found.size ?? "") !== String(region.size ?? "")) return false;
+    }
+    return true;
+}
+
+/**
+ * 节点的**身份**（跨「内核重排段」仍然指同一个器件）。
+ *
+ * @param {object|null} node
+ * @param {object|null} description
+ * @returns {string|null}
+ */
+function nodeIdentity(node, description) {
+    if (!node) return null;
+    if (node.kind === "core") return "core";
+    const regions = Array.isArray(description?.regions) ? description.regions : [];
+    const region = regions[node.regionIndex] ?? null;
+    if (!region) return null;
+    if (region.kind === "peripheral") return `id:${region?.device?.id ?? ""}`;
+    const nth = regions.filter((r) => r?.kind === region.kind).indexOf(region);
+    return `kind:${region.kind}:${nth}`;
+}
+
+/**
+ * 「重新载入」已经生效 ⇒ 把**内核推回来的那份**扶正成新基线。
+ *
+ * ⚠️ 用内核那份而不是我们提交的那份：内核会把段**按 base 重排** ⇒ 不扶正
+ * 就会出现「刚刚载入成功，界面上却写着 N 处未生效」这种自相矛盾的画面
+ * （这是真机验收里抓到的）。
+ *
+ * ⚠️ 只有 `boardReflectedIn` 成立才动 ⇒ 事件没到时什么都不改，等事件来。
+ *
+ * @returns {boolean} 扶正了吗
+ */
+export function syncProductBaseline() {
+    const state = productState();
+    if (state.justApplied !== true) return false;
+    const eff = effectiveDescription(state);
+    const draft = boardDraft(state);
+    if (!eff || !boardReflectedIn(eff, draft)) return false;
+    const nodes = buildDeviceNodes(state);
+    const nextNodes = buildDeviceNodes({ loaded: true, board: { description: eff }, tree: state.tree });
+    const current = nodes.find((node) => node.key === state.selected) ?? null;
+    const identity = nodeIdentity(current, draft);
+    // ⚠️ **寄存器草稿按器件身份搬家**：`docs` 是按节点 key（`r<i>`）索引的，
+    // 而内核重排段之后 key 会变 ⇒ 不搬家就又变成「改了含义一重载就没了」。
+    const relocated = {};
+    for (const node of nodes) {
+        const id = nodeIdentity(node, draft);
+        if (!id) continue;
+        const target = nextNodes.find((n) => nodeIdentity(n, eff) === id);
+        if (!target || target.key === node.key) continue;
+        relocated[node.key] = target.key;
+    }
+    const moveDocs = (source) => {
+        const out = {};
+        for (const [key, value] of Object.entries(source ?? {})) {
+            out[relocated[key] ?? key] = value;
+        }
+        return out;
+    };
+    const nextDocs = moveDocs(state.docs);
+    const nextSelected = identity ? (selectedKeyFor(eff, identity) ?? state.selected) : state.selected;
+    setProductState({
+        justApplied: false,
+        loaded: true,
+        board: { description: cloneDescription(eff) },
+        selected: nextSelected,
+        docs: nextDocs,
+        docsBase: JSON.parse(JSON.stringify(nextDocs)),
+    });
+    return true;
+}
+
+/**
+ * 扶正之后，按**身份**把选中项搬到新下标上（内核重排后 `r<i>` 会变）。
+ *
+ * @param {object|null} description
+ * @param {string} identity
+ * @returns {string|null}
+ */
+function selectedKeyFor(description, identity) {
+    const nodes = buildDeviceNodes({
+        loaded: true,
+        board: { description },
+        tree: productState().tree,
+    });
+    for (const node of nodes) {
+        if (nodeIdentity(node, description) === identity) return node.key;
+    }
+    return null;
+}
+
+/**
+ * 点「重新载入」成功之后：把当前草稿扶正成**新基线**。
+ *
+ * ⚠️ 「生效」与 lock **无关**：锁定状态下也能重载（lock 只门控编辑）。
+ */
+export function markProductApplied() {
+    const state = productState();
+    setProductState({
+        justApplied: true,
+        docsBase: JSON.parse(JSON.stringify(state.docs ?? {})),
+    }, false);
+    // 事件已经到了（本函数跑在 `LoadProject` 之后）⇒ 立刻扶正；没到就等
+    // 事件来（`app.js` 的内存图回落会再调一次）。
+    syncProductBaseline();
+}
 
 // ---------------------------------------------------------------------------
 // embeddedView — 落地视图（D-33 · STAGE-10 裁决 C）。

@@ -23,6 +23,7 @@ import {
     PLATFORM_SCHEMA_VERSION,
     boardId,
     boardEntry,
+    boardRegisters,
     mergeBoard,
     dropBoard,
     findBoard,
@@ -187,16 +188,44 @@ describe("板档案服务 · 纯逻辑层（B-1 ~ B-5 · B-8）", () => {
         assert.equal(result.actual, null);
     });
 
-    test("B-8 板档案条目**不含时间戳**：字段集合恰为 `id` + `description` + `rules_version`", () => {
+    test("B-8 板档案条目**不含时间戳**：字段集合恰为 `id` + `description` + `rules_version` + `registers`", () => {
         const entry = boardEntry(DESC_A);
-        // ⚠️ **三个**字段（STAGE-18 · 裁决 F）：`rules_version` 是「这块板是按
-        // 哪一版规则校验过的」⇒ 它落在**条目的容器**里 ⇒ **不塞进描述 DTO**
-        // （塞进去就是两个真相）。
-        assert.deepEqual(Object.keys(entry).sort(), ["description", "id", "rules_version"]);
+        // ⚠️ **四个**字段（冻结 STAGE-18 裁决 F + 本轮扩展）：`rules_version`
+        // 是「这块板是按哪一版规则校验过的」、`registers` 是「偏移 / 偏移含义」
+        // 这份文档层 ⇒ 两个都落在**条目的容器**里 ⇒ **不塞进描述 DTO**
+        // （塞进去就是两个真相，还要升 `PLATFORM_SCHEMA_VERSION`）。
+        assert.deepEqual(
+            Object.keys(entry).sort(),
+            ["description", "id", "registers", "rules_version"],
+        );
         // ⚠️ `name` 在描述里 ⇒ 条目里**不另存**一份（否则就是第二份真相）
         assert.equal("name" in entry, false);
         assert.equal("createdAt" in entry, false);
         assert.equal("updatedAt" in entry, false);
+    });
+
+    test("条目带 `registers`：给了就原样落库（深拷贝），没给就是空表", () => {
+        const docs = { "device:UART0": { unit: "B", regs: [{ offset: "0x00", name: "THR", meaning: "改过的含义", width: 1 }] } };
+        const entry = boardEntry(DESC_A, docs);
+        assert.deepEqual(entry.registers, docs);
+        // ⚠️ 深拷贝 ⇒ 视图状态之后再改草稿，不会把已落库的那份一起改掉
+        docs["device:UART0"].regs[0].meaning = "又改了";
+        assert.equal(entry.registers["device:UART0"].regs[0].meaning, "改过的含义");
+
+        assert.deepEqual(boardEntry(DESC_A).registers, {}, "没给文档 ⇒ 空表（不是 undefined）");
+        assert.deepEqual(boardEntry(DESC_A, null).registers, {}, "null ⇒ 空表");
+        assert.deepEqual(boardEntry(DESC_A, []).registers, {}, "数组不是文档 ⇒ 空表");
+    });
+
+    test("`boardRegisters` 读老条目（没有 `registers` 字段）⇒ 空表，不炸", () => {
+        const legacy = { id: "old", description: DESC_A, rules_version: 1 };
+        assert.deepEqual(boardRegisters(legacy), {});
+        assert.deepEqual(boardRegisters(null), {});
+        // 有就深拷贝回来（不把库里的对象直接交给视图）
+        const entry = boardEntry(DESC_A, { core: { unit: "bit", regs: [] } });
+        const read = boardRegisters(entry);
+        assert.deepEqual(read, { core: { unit: "bit", regs: [] } });
+        assert.notEqual(read.core, entry.registers.core);
     });
 
     test("B-8 `boardEntry` 取不到 `id` ⇒ `null`（不产出一条没主键的条目）", () => {

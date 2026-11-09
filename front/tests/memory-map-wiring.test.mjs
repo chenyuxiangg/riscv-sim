@@ -221,7 +221,7 @@ function findCommand(sent, variant) {
 function setup() {
     m03.reset();
     m01.assembleWorkspace("product");
-    m01.route("#/memory-map");
+    m01.route("#/product");
 }
 
 // ---------------------------------------------------------------------------
@@ -441,8 +441,8 @@ describe("提交选路 · `wiring` 的改动**真的**提交出去（C-5 · app 
         // 这条用例**不**经过 `draftToDescription` ⇒ ⇒ 变异 M1（丢 wiring）
         // 不会把它带红 ⇒ ⇒ M1 的红集仍**精确**是 C-1。
         await app.handleCommand(
-            { action: "submit-memory-map", params: { description: OTHER_WIRING_DESC } },
-            { commandRouter: router },
+            { action: "reload-product", params: { description: OTHER_WIRING_DESC } },
+            { commandRouter: router, registerMemory: { async loadProject() {} } },
         );
 
         const set = findCommand(router.sent, "SetMemoryMap");
@@ -463,8 +463,8 @@ describe("提交选路 · `wiring` 的改动**真的**提交出去（C-5 · app 
         router.emitMemoryMap(WIRED_DESC, false, true, 7);
 
         await app.handleCommand(
-            { action: "submit-memory-map", params: { description: WIRED_DESC } },
-            { commandRouter: router },
+            { action: "reload-product", params: { description: WIRED_DESC } },
+            { commandRouter: router, registerMemory: { async loadProject() {} } },
         );
 
         assert.equal(
