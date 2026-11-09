@@ -212,8 +212,9 @@ describe("板档案 · 规则集版本（B-1 ~ B-4）", () => {
         assert.ok(entry, "boardEntry 应当产出一条");
         assert.deepEqual(
             Object.keys(entry).sort(),
-            ["description", "id", "rules_version"],
-            "条目字段集合必须是 { id, description, rules_version } 三个",
+            ["description", "id", "registers", "rules_version"],
+            "条目字段集合必须是 { id, description, rules_version, registers } 四个" +
+                "（`registers` = 偏移 / 偏移含义那份前端文档层，契约里没有它）",
         );
         // ⚠️ ⚠️ **v0.74（STAGE-50）**：**字面量**（4 → 5）⇒ ⇒ ⇒ **每一次
         //   合法升版都会把它打死**⇒ ⇒ ⇒ 改成**引用镜像那份常量**⇒ ⇒ ⇒

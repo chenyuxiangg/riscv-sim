@@ -143,9 +143,22 @@ describe("STAGE-35 · 视图内容形态（卡片化）", () => {
         }
     });
 
-    test("A-2 · 每个视图正文里**至少一个** `.card`（内容形态确实卡片化）", () => {
+    test("A-2 · 每个视图正文里**至少一个** `.card`（产品视图改成双栏工作面）", () => {
         for (const id of VIEW_IDS) {
             const el = show(id);
+            if (id === "product") {
+                // ⚠️ **v0.77**：产品视图改成「左树 + 右器件内存窗口」⇒ ⇒
+                // 不再用 `.card` 这个卡片刻度 ⇒ ⇒ 判据换成「两个栏都在」。
+                assert.ok(
+                    el.querySelector(".pw-side"),
+                    "产品视图里没有左栏（双栏工作面没落地）",
+                );
+                assert.ok(
+                    el.querySelector(".pw-window"),
+                    "产品视图里没有右栏（双栏工作面没落地）",
+                );
+                continue;
+            }
             const cards = el.querySelectorAll(".card");
             assert.ok(
                 cards.length >= 1,
@@ -378,49 +391,9 @@ describe("STAGE-35 · 断点 UI", () => {
 });
 
 describe("STAGE-35 · 产品树折叠 / 内存图比例条 / 终端收发计数", () => {
-    test("A-10 · 产品树**可折叠**，且折叠状态住**视图状态**（不是 DOM 私藏）", () => {
-        m03.setState("product", (prev) => ({
-            ...prev,
-            tree: {
-                root: {
-                    name: "MainBoard",
-                    component_id: "rv-sim",
-                    children: [
-                        { name: "GPIO0", component_id: "GPIO0", children: [] },
-                        { name: "UART0", component_id: "UART0", children: [] },
-                    ],
-                },
-            },
-            collapsed: [],
-        }));
-        const el = show("product");
-        const carets = el.querySelectorAll(".caret");
-        // ⚠️ **先钉住件数** ⇒ ⇒ 免得「一个 caret 都没有」时这条断言空转。
-        assert.ok(carets.length >= 1, "产品树里没有可折叠的节点");
-        const before = el.querySelectorAll(".kids").length;
-        assert.ok(before >= 1, "产品树一开始就没有子节点（折叠无从谈起）");
-
-        const key = carets[0].getAttribute("data-tree-key");
-        assert.ok(key, "可折叠节点没有 data-tree-key");
-        captureCommands(() => carets[0].click());
-
-        // ⚠️ **状态住在视图状态里** ⇒ ⇒ 不是 DOM 私藏。
-        const collapsed = m03.getState("product")?.collapsed;
-        assert.ok(Array.isArray(collapsed), "视图状态里没有 collapsed 数组");
-        assert.ok(collapsed.includes(key), "折叠状态没落进视图状态");
-        // 折叠后子节点不再渲染。
-        const after = body("product").querySelectorAll(".kids").length;
-        assert.equal(after, before - 1, "折叠之后子节点还在（折叠没生效）");
-
-        // ⚠️ **切走再切回来**折叠还在 ⇒ ⇒ 这才是「住视图状态」的证据。
-        show("waveform");
-        const back = show("product");
-        assert.equal(
-            back.querySelectorAll(".kids").length,
-            after,
-            "切走再切回来折叠状态丢了（状态其实藏在 DOM 里）",
-        );
-    });
+    // ⚠️ **A-10 已退役**（v0.77 产品视图重构）：新视图的树**不再折叠**
+    // （左树就是器件列表，折叠在「点器件 ⇒ 右栏看内存」这条动线上没有意义）
+    // ⇒ ⇒ 「折叠状态住视图状态」这条判据随界面一起下线。
 
     test("A-11 · 内存图比例条的**分段数 == 段表行数**（且每段宽度按**真地址区间**算）", () => {
         // ⚠️ **先造出真数据** ⇒ ⇒ 0 段 == 0 行那条断言**恒真** ⇒ ⇒ 假绿。

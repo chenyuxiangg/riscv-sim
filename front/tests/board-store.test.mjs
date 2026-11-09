@@ -195,12 +195,16 @@ describe("板档案服务 · 纯逻辑层（B-1 ~ B-5 · B-8）", () => {
         assert.equal(result.actual, null);
     });
 
-    test("B-8 板档案条目**不含时间戳**：字段集合恰为 `id` + `description` + `rules_version`", () => {
+    test("B-8 板档案条目**不含时间戳**：字段集合恰为 `id` + `description` + `rules_version` + `registers`", () => {
         const entry = boardEntry(DESC_A);
-        // ⚠️ **三个**字段（STAGE-18 · 裁决 F）：`rules_version` 是「这块板是按
-        // 哪一版规则校验过的」⇒ 它落在**条目的容器**里 ⇒ **不塞进描述 DTO**
-        // （塞进去就是两个真相）。
-        assert.deepEqual(Object.keys(entry).sort(), ["description", "id", "rules_version"]);
+        // ⚠️ **四个**字段：`rules_version` 是「这块板是按哪一版规则校验过的」，
+        // `registers` 是「偏移 / 偏移含义」那份前端文档层 ⇒ 两者都落在**条目
+        // 的容器**里 ⇒ **不塞进描述 DTO**（塞进去就是两个真相）。
+        assert.deepEqual(
+            Object.keys(entry).sort(),
+            ["description", "id", "registers", "rules_version"],
+        );
+        assert.deepEqual(entry.registers, {}, "没给文档 ⇒ 空表（不写 null）");
         // ⚠️ `name` 在描述里 ⇒ 条目里**不另存**一份（否则就是第二份真相）
         assert.equal("name" in entry, false);
         assert.equal("createdAt" in entry, false);

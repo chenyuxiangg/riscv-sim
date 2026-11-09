@@ -16,7 +16,9 @@
 
 import { mountWorkbench } from "./views/m01_workbench.js";
 import {
+    adoptProductDescription,
     downloadExportChunk,
+    markProductApplied,
     mountViewComponents,
     resetTerminalScreen,
     seedBus,
@@ -46,6 +48,8 @@ import {
     planMemoryMapUpdate,
     splitErrorCode,
 } from "./views/components/memory-map.js";
+import { docsByDevice, docsForKeyed } from "./views/components/device-docs.js";
+import { projectTreeFrom } from "./views/components/product-workspace.js";
 // ⚠️ **镜像加载的状态写入**（STAGE-32 · v0.47 批）⇒ ⇒ 与视图层**共用**
 // ⇒ ⇒ 住在一处 ⇒ ⇒ **不写第二份**。
 //
@@ -2118,6 +2122,74 @@ export async function handleCommand(detail, services) {
                 }
                 break;
             }
+            case "create-product":
+            case "load-archive":
+            case "reload-product": {
+                // 产品视图（双栏工作面）的三条通路：
+                //   - `create-product` / `load-archive`：「创建」「从模版加载」
+                //     ⇒ 换一块板（树与寄存器草稿全部重建）；
+                //   - `reload-product`：「重新载入」⇒ 把草稿送进内核**并重新装载
+                //     工程**（板级配置是待生效的，宿主在下一次 `LoadProject`
+                //     时才应用）。
+                //
+                // ⚠️ **生效与 lock 无关**：锁只门控编辑，重载照常走。
+                const description = detail?.params?.description ?? null;
+                if (!description) {
+                    setNote("没有可装载的板描述 —— 先在「创建」或「从模版加载」里选一块");
+                    return;
+                }
+                const result = await applyProductBoard(services, description, {
+                    fresh: action !== "reload-product",
+                    registers: detail?.params?.registers ?? {},
+                });
+                resetProbeError = result.probeError;
+                resetConsoleError = result.consoleError;
+                resetMemoryMapError = result.memoryMapError;
+                break;
+            }
+            case "save-board-as": {
+                // 「另存为档案」：把**当前草稿 + 当前寄存器文档**复制成库里
+                // 另一条档案；当前产品不动（换 id 会触发描述元数据变更）。
+                const nextId = String(detail?.params?.id ?? "").trim();
+                const nextName = String(detail?.params?.name ?? "").trim();
+                if (!nextId) {
+                    setNote("档案 id 不能为空。");
+                    return;
+                }
+                const state = viewStore.getState("product") ?? {};
+                const draft = state?.board?.description ?? null;
+                if (!draft) {
+                    setNote("当前没有可另存的产品。");
+                    return;
+                }
+                // ⚠️ id 唯一是**档案**的约束 ⇒ 占用就明确拒绝（覆盖同 id 的
+                // 旧档案会静默毁掉别人的板）。
+                const archive = Array.isArray(state.archive) ? state.archive : [];
+                if (archive.some((row) => String(row?.id) === nextId)
+                    || nextId === String(draft.id ?? "")) {
+                    setNote(`档案 id「${nextId}」已经存在 —— 换一个。`);
+                    return;
+                }
+                const copy = {
+                    ...draft,
+                    id: nextId,
+                    name: nextName || nextId,
+                };
+                const saved = await writeProductArchive(
+                    services,
+                    copy,
+                    docsByDevice(state),
+                );
+                if (saved.saved) {
+                    setNote(`已保存到本机数据库：${nextId}（产品本身未改动）。`);
+                }
+                return;
+            }
+            case "list-templates": {
+                // 模版弹层的数据源：板档案服务（M-23）。
+                await refreshProductArchive(services);
+                return;
+            }
             case "unload-project": {
                 // 「卸载工程」⇒ 契约 v7 的 `UnloadProject`（D-139）。
                 //
@@ -2217,6 +2289,170 @@ export async function handleCommand(detail, services) {
  *
  * @param {{session: object, commandRouter: object, registerMemory: object, waveform: object, workspace: object}} services
  */
+/**
+ * 产品视图这一侧的板档案状态（住「product」视图状态，与板级内存图视图
+ * 那套 `memory-map` 的字段**各住一处**，互不混淆）。
+ *
+ * @param {object} patch
+ */
+function patchProductBoard(patch) {
+    viewStore.setState("product", (prev) => ({ ...prev, ...patch }));
+    publishViewState("product");
+}
+
+/**
+ * 重新读一次板档案列表（「从模版加载」弹层的数据源）。
+ *
+ * ⚠️ 读失败**不静默**：状态写 `error` 并显示原因（板档案只是**模版来源**，
+ * 读不出来不影响已经装上的产品）。
+ *
+ * @param {{boardStore?: object|null}} services
+ */
+async function refreshProductArchive(services) {
+    const store = services?.boardStore ?? null;
+    if (!store || store.supported === false) {
+        patchProductBoard({ archive: [], archiveStatus: "unsupported" });
+        return;
+    }
+    try {
+        const entries = await store.list();
+        patchProductBoard({
+            archive: Array.isArray(entries) ? entries : [],
+            archiveStatus: "ok",
+        });
+    } catch (err) {
+        patchProductBoard({ archiveStatus: "error" });
+        setNote(`板档案读取失败：${err?.message ?? err}`);
+    }
+}
+
+/**
+ * 把一份「内核接受过的描述 + 寄存器文档」写进**本机数据库**（板档案）。
+ *
+ * ⚠️ **落库门槛**（沿用规格裁决 B）：只有内核接受过的描述才允许落库 ⇒
+ * 调用点都在 `SetMemoryMap` 成功之后；本函数**不**自己判描述合法性。
+ *
+ * @param {{boardStore?: object|null}} services
+ * @param {object} description — 内核接受过的描述
+ * @param {object} registers — 按器件身份索引的寄存器文档（可为 `{}`）
+ * @returns {Promise<{saved: boolean, id: string|null, reason: string|null}>}
+ */
+async function writeProductArchive(services, description, registers) {
+    const store = services?.boardStore ?? null;
+    if (!store || store.supported === false) {
+        return { saved: false, id: null, reason: "unsupported" };
+    }
+    const { api } = await loadBoardStoreModule();
+    if (!api) return { saved: false, id: null, reason: "module" };
+    const entry = api.boardEntry(description, registers);
+    if (!entry) return { saved: false, id: null, reason: "no-id" };
+    try {
+        await store.put(entry);
+    } catch (err) {
+        setNote(`板档案写入失败：${err?.message ?? err}`);
+        return { saved: false, id: entry.id, reason: "write" };
+    }
+    await refreshProductArchive(services);
+    return { saved: true, id: entry.id, reason: null };
+}
+
+/**
+ * 把一份板描述**装进内核**（产品视图的「创建 / 从模版加载 / 重新载入」共用）。
+ *
+ * 三步绑在一个函数里 ⇒ 调用点不会漏掉后两步：
+ * 1. `SetMemoryMap` / `PatchMemoryMap` —— 路由仍由 `planMemoryMapUpdate` 判；
+ * 2. `LoadProject` —— 宿主在这次装载时应用**待生效**的板；
+ * 3. 视图状态扶正 —— 树、板草稿、寄存器基线与「已装载」标志。
+ *
+ * ⚠️ **基址真提交内核，偏移 / 含义是前端文档层**（`DeviceSpec` 没有寄存器
+ * 偏移字段）⇒ 第 3 步把 `docs` 扶正成新基线。
+ *
+ * @param {object} services
+ * @param {object} rawDescription — 草稿形状的描述（数值可能是字符串）
+ * @param {{fresh?: boolean, registers?: object}} [options]
+ * @returns {Promise<{probeError: Error|null, consoleError: Error|null, memoryMapError: Error|null}>}
+ */
+export async function applyProductBoard(services, rawDescription, options = {}) {
+    const {
+        commandRouter,
+        registerMemory,
+        waveform,
+        debug,
+        console: consoleWiring,
+        memoryMap: memoryMapWiring,
+    } = services;
+    const description = draftToDescription(rawDescription ?? {});
+    const product = viewStore.getState("product") ?? {};
+    const base = product.memoryMap?.description ?? null;
+    // ⚠️ **期望修订号**：从没收到过 `memory.map` 事件 ⇒ `null`（不检查）。
+    const expectedRevision = product.memoryMap
+        ? Number(product.memoryMap.revision ?? 0)
+        : null;
+    const plan = planMemoryMapUpdate(base, description, {
+        pending: product.memoryMap?.pending === true,
+    });
+    if (plan.mode !== "none") {
+        try {
+            if (plan.mode === "replace") {
+                await commandRouter.dispatchCommand(
+                    Command.setMemoryMap(description, expectedRevision),
+                );
+            } else {
+                await commandRouter.dispatchCommand(
+                    Command.patchMemoryMap(plan.ops, expectedRevision),
+                );
+            }
+            setMemoryMapError(null);
+            // ⚠️ 只有**内核接受过**的描述才算「被接受过」（板档案落库门槛）。
+            viewStore.setState("product", (prev) => ({ ...prev, acceptedDescription: description }));
+        } catch (err) {
+            const { code, message } = splitErrorCode(err);
+            setMemoryMapError({ code, message: describeMemoryMapError(code, message) });
+            throw err;
+        }
+    }
+    // 树跟着描述走：核节点固定，外设节点 = 每段外设的器件 id。
+    const tree = projectTreeFrom(description);
+    viewStore.setState("product", (prev) => ({ ...prev, tree }));
+    // ⚠️ 从**档案**装载时把寄存器文档一起搬回视图状态（按器件身份 → 当前
+    // 节点 key）：档案里存了偏移 / 含义 ⇒ 装出来的东西必须和保存时一致。
+    const docs = options.fresh === true
+        ? docsForKeyed(options.registers ?? {}, description, tree)
+        : undefined;
+    adoptProductDescription(description, { resetDocs: options.fresh === true, docs });
+    // ⚠️ `images: []` 是**如实**的：产品视图这一批还没有固件装载面。
+    const project = {
+        id: `proj-${description.id || "board"}`,
+        name: description.name || "产品",
+        tree,
+        images: [],
+        version: { schema: 1, isa: "RV32IMC", toolchain: "front (product view)" },
+    };
+    const result = await loadProjectIntoKernel(
+        {
+            commandRouter,
+            registerMemory,
+            waveform,
+            debug,
+            console: consoleWiring,
+            memoryMap: memoryMapWiring,
+            devices: services.devices,
+            templates: services.templates,
+        },
+        project,
+    );
+    markProductApplied();
+    // ⚠️ **内核接受过 ⇒ 顺手写进本机数据库**（板档案）：重新载入、创建、
+    // 从模版加载三条通路都走这里 ⇒ 库里的板永远等于「最近一次真装上的那份」
+    // （带偏移 / 含义）。写库失败只提示、不回滚装载。
+    await writeProductArchive(
+        services,
+        description,
+        docsByDevice(viewStore.getState("product") ?? {}),
+    );
+    return result;
+}
+
 async function startSession(services) {
     const { session, commandRouter, registerMemory, waveform, debug, workspace } = services;
     try {
