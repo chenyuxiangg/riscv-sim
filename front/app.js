@@ -2457,6 +2457,23 @@ async function startSession(services) {
     const { session, commandRouter, registerMemory, waveform, debug, workspace } = services;
     try {
         await session.createSession({ role: workspace.role });
+        // ⚠️ **产品视图默认是空产品**（v0.77 双栏工作面的口径）：启动时
+        // 内核里那块 default 板 / mock 工程**不算用户的产品** ⇒ ⇒ 产品树
+        // 不显示它（否则「默认不加载任何板子」这条就落不了地）。
+        //
+        // ⚠️ **只动 `product` 视图状态**：板级内存图视图（`memory-map`）
+        // 照旧吃内核推来的 `memory.map`，两个视图各管各的。
+        viewStore.setState("product", (prev) => ({
+            ...prev,
+            loaded: false,
+            locked: true,
+            selected: null,
+            board: null,
+            tree: null,
+            docs: {},
+            docsBase: {},
+        }));
+        publishViewState("product");
         const project = buildMockProject();
         // 装载工程**并且**把内核侧订阅都强制重订。
         //
@@ -2489,11 +2506,6 @@ async function startSession(services) {
             },
             project,
         );
-        viewStore.setState("product", (prev) => ({
-            ...prev,
-            tree: project.tree,
-        }));
-        publishViewState("product");
         await commandRouter.dispatchCommand(Command.nop());
         if (probeError) {
             // ⚠️ **内核是好的**——工程装好了、寄存器流也重订了、连 Nop
