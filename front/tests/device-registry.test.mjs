@@ -97,60 +97,13 @@ function renderProduct(extra = {}) {
 // ---------------------------------------------------------------------------
 
 describe("STAGE-43 · 器件类型注册表与逐实例状态（产品视图）", () => {
-    test("N-1 产品视图里有「器件类型」「器件实例」两张卡", () => {
-        const html = renderProduct({ deviceTypes: TYPES, deviceInstances: INSTANCES });
-        assert.ok(html.includes('data-device-types="rows"'), "缺「器件类型」那张卡的表");
-        assert.ok(html.includes('data-device-instances="rows"'), "缺「器件实例」那张卡的表");
-    });
-
-    test("N-2 器件实例表逐实例列出 id / 类型 / 基址", () => {
-        const html = renderProduct({ deviceInstances: INSTANCES });
-        assert.ok(
-            html.includes('data-device-instance="GPIO0"'),
-            "GPIO0 这一行不在（逐实例 = 每个实例一行）",
-        );
-        assert.ok(html.includes('data-device-instance-kind="gpio"'), "GPIO0 的类型没列出来");
-        assert.ok(
-            html.includes('data-device-instance-base="1073741824"'),
-            "GPIO0 的基址没列出来（应是十进制字符串）",
-        );
-        assert.ok(html.includes('data-device-instance="UART0"'), "UART0 这一行不在");
-    });
-
-    test("N-3 待生效的实例**显式**标出来（不是空着）", () => {
-        const html = renderProduct({ deviceInstances: INSTANCES });
-        assert.ok(
-            html.includes('data-device-instance-pending="1"'),
-            "UART0（base=null）没有标成待生效",
-        );
-        assert.ok(html.includes('data-device-pending="1"'), "界面上的「待生效」标记不在");
-        assert.ok(html.includes("待生效"), "界面文案里没有「待生效」");
-        // ⚠️ **已绑定的那一个不许**被标成待生效。
-        assert.ok(
-            html.includes('data-device-instance-pending="0"'),
-            "GPIO0（已绑定）没有被标成已绑定",
-        );
-    });
-
-    test("N-4 空态分得开（没收到事件 vs 收到但 0 条）", () => {
-        const none = renderProduct({ deviceTypes: null, deviceInstances: null });
-        assert.ok(none.includes('data-device-types="no-data"'), "「没收到」的空态不对");
-        assert.ok(none.includes('data-device-instances="no-data"'), "「没收到」的空态不对");
-
-        const empty = renderProduct({ deviceTypes: [], deviceInstances: [] });
-        assert.ok(empty.includes('data-device-types="empty"'), "「0 条」的空态不对");
-        assert.ok(empty.includes('data-device-instances="empty"'), "「0 条」的空态不对");
-    });
-
-    test("N-5 前端**不**自己判参数合法性（只显示内核给的区间）", () => {
-        const html = renderProduct({ deviceTypes: TYPES });
-        // ⚠️ 区间**原样**显示（`baud_rate` 的上界是 `null` ⇒ 显示 `∞`）。
-        assert.ok(html.includes("baud_rate∈[1, ∞]"), "内核给的区间没原样显示");
-        // ⚠️ **不许**出现前端自造的「越界 / 非法 / 不合法」判断。
-        assert.ok(!html.includes("越界"), "界面上出现了前端自造的「越界」判断");
-        assert.ok(!html.includes("非法"), "界面上出现了前端自造的「非法」判断");
-        assert.ok(!html.includes("不合法"), "界面上出现了前端自造的「不合法」判断");
-    });
+    // ⚠️ **v0.77 产品视图重构**：原来的「器件类型（内核支持）」「器件实例（逐
+    // 实例）」两张卡随产品视图改成「左树 + 右器件内存窗口」一起下线（新视图
+    // 不展示这两张只读清单，器件落在左树里、内存落在右窗口）⇒ ⇒ N-1 ~ N-5
+    // **随界面退役**。
+    //
+    // ⚠️ 留下的 X 组是**跨层**判据（前端那份类型清单 == 契约层的变体集合），
+    // 它与界面无关 ⇒ ⇒ **一个字都不动**。
 
     test("N-6 跨层：前端的器件类型清单 == 契约层的变体集合（裁决 I）", () => {
         const platformRs = resolve(repoRoot, "crates/contract/src/platform.rs");

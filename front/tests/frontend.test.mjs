@@ -357,37 +357,25 @@ describe("M-02 视图组件", () => {
         assert.equal(m03.getState("terminal").term.bytes, "<a>");
     });
 
-    test("demo 按钮可点击（seedDemoBus 未定义回归）", () => {
+    test("产品视图（双栏工作面）渲染出真按钮，点「创建」发的是真命令", () => {
+        // ⚠️ **v0.77**：产品视图改成「左树 + 右器件内存窗口」⇒ ⇒ 原来那个
+        // dev-only 的「重新 seed demo」按钮随视图一起下线。这条用例改成盯
+        // 同一类缺陷（按钮渲染了但 handler 没接上 ⇒ 点了没反应）：
         m01.assembleWorkspace("embedded");
         m01.route("#/product");
-        // 走**生产信号**而不是 dev-only 全局——门禁不该依赖
-        // window.riscv_demo（FRONTEND_Review.md R-18）。
-        dom.window.dispatchEvent(new CustomEvent("riscv:seed", { detail: { viewId: "product" } }));
-        const button = $("[data-action='seed-demo']");
-        assert.ok(button, "demo 按钮未渲染");
+        const button = $('[data-action="open-create"]');
+        assert.ok(button, "产品视图里没有「创建」按钮（视图体没渲染出来）");
 
-        // The click must actually reach the handler: the button emits the
-        // `riscv:seed` signal, and the demo data is re-seeded.
-        let signals = 0;
-        const listener = () => { signals += 1; };
-        dom.window.addEventListener("riscv:seed", listener);
-        // ⚠️ **不再断言 `sim.memoryMap`**（STAGE-14 · v0.29）：demo 里的那份
-        // **假内存映射**已经删掉（规格 §2.6：内存映射表显示内核 `memory.map`
-        // 事件里的当前生效图 ⇒ demo 塞一份假图就是第二个真相源）⇒ 这里改断言
-        // demo **产品树**被重新 seed（同一件事：点击确实走到了 handler）。
-        m03.setState("product", { tree: { root: { name: "被清空", children: [] } } });
-        // A handler that throws would propagate out of dispatchEvent.
-        button.dispatchEvent(new Event("click"));
-        dom.window.removeEventListener("riscv:seed", listener);
-
-        assert.equal(signals, 1, "点击 demo 按钮没有发出 riscv:seed 信号");
+        // ⚠️ 这里直接调视图的 `onCommand`（同一条 handler 链：按钮 →
+        //   `onCommand` → `riscv:command`）：DOM 绑定的那一段由
+        //   `tests/board-tree.test.mjs` / `tests/product-view.test.mjs`
+        //   （真点真发）覆盖，这里只钉「按钮存在且 handler 认得它」。
+        const requestId = m02.get("product").onCommand({ target: button });
+        assert.equal(requestId, "cmd-open-create", "handler 没认得「创建」这个按钮");
         assert.equal(
-            m03.getState("product").tree.root.children.length, 2,
-            "点击 demo 按钮没有重新 seed demo 状态",
-        );
-        assert.equal(
-            m03.getState("product").sim.memoryMap, undefined,
-            "demo 状态里不该再有假内存映射（内存映射表的唯一数据源是内核事件）",
+            m03.getState("product")?.dialog,
+            "create",
+            "点了「创建」但创建弹层没打开（handler 没接上）",
         );
     });
 });

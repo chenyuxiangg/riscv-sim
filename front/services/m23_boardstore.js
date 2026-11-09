@@ -143,10 +143,47 @@ export function boardId(description) {
  * @param {object|null|undefined} description
  * @returns {{id: string, description: object, rules_version: number}|null} 取不到 `id` ⇒ `null`
  */
-export function boardEntry(description) {
+export function boardEntry(description, registers) {
     const id = boardId(description);
     if (id === null) return null;
-    return { id, description, rules_version: PLATFORM_RULES_VERSION };
+    return {
+        id,
+        description,
+        rules_version: PLATFORM_RULES_VERSION,
+        // ⚠️ 字段集合**恰为四个**：`registers` 是「偏移 / 偏移含义」这份
+        // **文档层**（产品视图的寄存器表）⇒ 契约 `PlatformDescription` 里
+        // 没有它 ⇒ 落在条目这个容器里，按**器件身份**索引（`core` /
+        // `device:<id>` / `mem:<kind>:<n>`）⇒ 内核把段排序后推回来时**下标
+        // 会变、身份不变** ⇒ 草稿不会错位。
+        //
+        // ⚠️ **不升 `BOARD_DB_VERSION`**：IndexedDB 记录无模式，加字段不改
+        // 表结构（`keyPath` 仍是 `id`）⇒ 升版本只会平白触发 `onblocked`；
+        // 老条目没有 `registers` ⇒ `boardRegisters()` 兜底成空表。
+        registers: normalizeRegisters(registers),
+    };
+}
+
+/**
+ * 取一条板档案条目的**寄存器文档**（偏移 / 偏移含义）。
+ *
+ * ⚠️ **老条目没有这个字段** ⇒ 返回空表 ⇒ 视图层回落到内置表。
+ *
+ * @param {object|null|undefined} entry
+ * @returns {Object<string, object>}
+ */
+export function boardRegisters(entry) {
+    return normalizeRegisters(entry?.registers);
+}
+
+/**
+ * 寄存器文档归一化：只要对象就深拷贝，其余一律当空表。
+ *
+ * @param {unknown} registers
+ * @returns {Object<string, object>}
+ */
+function normalizeRegisters(registers) {
+    if (!registers || typeof registers !== "object" || Array.isArray(registers)) return {};
+    return JSON.parse(JSON.stringify(registers));
 }
 
 /**
