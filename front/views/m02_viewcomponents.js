@@ -69,18 +69,6 @@ import {
 } from "./components/source-view.js";
 import {
     addRegion,
-    collectDraft,
-    countInvalidFields,
-    currentDraft,
-    defaultDraft,
-    draftFromDescription,
-    draftToDescription,
-    removeRegion,
-    renderMemoryMapPanel,
-    setDeviceKind,
-    // ⚠️ **基址规划**（STAGE-46 · v0.70 批 · 台账 D-175 候选 B 的第一半）
-    // ⇒ ⇒ 用户自己在前端规划基址 ⇒ ⇒ 平台提供**信息 + 入口**。
-    setRegionBase,
     parseNumber,
 } from "./components/memory-map.js";
 import {
@@ -292,6 +280,25 @@ function writeRegionNumber(node, field, raw) {
 }
 
 /**
+ * 改当前选中外设的**器件参数**（例如 UART 的 PLIC 源号 / 波特率）。
+ *
+ * ⚠️ 只写草稿；合法性（源号范围 / 是否重复）仍由内核装载时裁决。
+ *
+ * @param {string} name
+ * @param {unknown} raw
+ */
+function writeDeviceParam(name, raw) {
+    const node = selectedNode();
+    const index = node?.regionIndex;
+    if (!Number.isInteger(index)) return;
+    const draft = ensureBoardDraft();
+    const region = Array.isArray(draft?.regions) ? draft.regions[index] : null;
+    if (!region || !region.device) return;
+    region.device[String(name)] = String(raw ?? "");
+    setProductState({ board: { description: draft } }, false);
+}
+
+/**
  * 改当前选中器件的一行寄存器描述（写进 `docs` 草稿）。
  *
  * @param {string} field — offset / name / meaning / width
@@ -348,6 +355,39 @@ const productTreeView = register({
                 emitCommand("list-templates", "product", null);
                 return "cmd-open-templates";
             }
+            case "open-archives": {
+                setProductState({ dialog: "archives" });
+                emitCommand("list-templates", "product", null);
+                return "cmd-open-archives";
+            }
+            case "open-add-device": {
+                if (state.loaded !== true) return undefined;
+                setProductState({ dialog: "add-device" });
+                return "cmd-open-add-device";
+            }
+            case "add-device": {
+                if (state.loaded !== true) return undefined;
+                const kind = el?.dataset?.addKind;
+                const draft = ensureBoardDraft();
+                if (!kind || !draft) return undefined;
+                const next = addRegion(draft, kind);
+                setProductState({ board: { description: next }, dialog: null });
+                publishTwoPaneState();
+                return "cmd-add-device";
+            }
+            case "use-product-gap": {
+                const node = selectedNode();
+                const from = Number(el?.dataset?.gapFrom);
+                if (!node || !Number.isFinite(from)) return undefined;
+                const draft = ensureBoardDraft();
+                const index = node.regionIndex;
+                const region = Array.isArray(draft?.regions) ? draft.regions[index] : null;
+                if (!region) return undefined;
+                region.base = from;
+                setProductState({ board: { description: draft } });
+                publishTwoPaneState();
+                return "cmd-use-product-gap";
+            }
             case "close-dialog": {
                 setProductState({ dialog: null });
                 return "cmd-close-dialog";
@@ -396,6 +436,12 @@ const productTreeView = register({
                 emitCommand("save-board-as", "product", draft);
                 return "cmd-save-board-as";
             }
+            case "delete-product-archive": {
+                const id = String(el?.dataset?.archiveId ?? "");
+                if (!id) return undefined;
+                emitCommand("delete-product-archive", "product", { id });
+                return "cmd-delete-product-archive";
+            }
             case "reload-product": {
                 const draft = boardDraft(state);
                 emitCommand("reload-product", "product", { description: cloneDescription(draft) });
@@ -436,11 +482,15 @@ const productTreeView = register({
                     Number(input.dataset.regIndex ?? -1),
                     input.value,
                 );
+                return;
+            }
+            if (input.matches("[data-device-param]")) {
+                writeDeviceParam(String(input.dataset.deviceParam ?? ""), input.value);
             }
         });
         // 失焦 / 提交时重渲染一次：把草稿归一化显示，并刷新「未生效」标记。
         el.addEventListener("change", (ev) => {
-            if (ev.target?.matches?.("[data-base-input],[data-size-input],[data-reg-field]")) {
+            if (ev.target?.matches?.("[data-base-input],[data-size-input],[data-reg-field],[data-device-param]")) {
                 publishTwoPaneState();
             }
         });
@@ -631,294 +681,6 @@ export function markProductApplied() {
 // `pending` ⇒ ⇒ 用户在**一处**装完（成功 ⇒ ⇒ `pending` 被清掉）⇒ ⇒ 到
 // **另一处**再点 ⇒ ⇒ 撞上「没有待加载的文件」⇒ ⇒ 而那次装载**其实成功
 // 了**⇒ ⇒ 界面在骗人。⇒ ⇒ 一个功能**只留一个入口**，状态就不会有两套。
-
-// ---------------------------------------------------------------------------
-// memoryMapView — 板级内存图编辑器（STAGE-14 · v0.29）。
-//
-// ⚠️ **编辑器是独立工作面**：路由 `#/memory-map`、面板 `[data-view-panel="memory-map"]`。
-// 它**不**塞进产品树视图（规格 §3.3）。
-//
-// ⚠️ **草稿住 M-03 视图状态**（规格 §3.3 / 裁决 D）：草稿是**前端自己的东西**
-// ⇒ 不进契约、不进事件 ⇒ 刷新页面即失（D-136，规格已如实登记）。
-//
-// ⚠️ **视图层不碰服务层**：提交只发 `riscv:command` 信号（`emitCommand`），
-// 由 `app.js` 的 `handleCommand` 变成真正的 M-05 命令。
-// ---------------------------------------------------------------------------
-
-/** 编辑器面板的 DOM（挂载时记下 ⇒ 采集与渲染看的是**同一份**东西）。 */
-let memoryMapPanel = null;
-
-/**
- * 内存图视图状态里的**当前草稿**（渲染与采集共用同一个基底）。
- *
- * @returns {object}
- */
-function memoryMapDraft() {
-    return currentDraft(viewStore.getState("memory-map"));
-}
-
-/**
- * 把编辑器面板的最新输入采集成草稿，写回 M-03 视图状态。
- *
- * ⚠️ **不重渲染**：重渲染会重建 DOM ⇒ 输入框失焦、正在敲的字丢掉。
- * 草稿在视图状态里 ⇒ 下次重渲染时值还在。
- *
- * @param {Element} root — 面板元素
- * @returns {object} 采集到的草稿
- */
-function syncMemoryMapDraft(root) {
-    const draft = collectDraft(root, memoryMapDraft());
-    viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-    return draft;
-}
-
-/**
- * 让内存图编辑器按当前视图状态重渲染一次。
- */
-function publishMemoryMapState() {
-    window.dispatchEvent(new CustomEvent("riscv:render", {
-        detail: {
-            viewId: "memory-map",
-            type: "update",
-            state: viewStore.getState("memory-map"),
-        },
-    }));
-}
-
-const memoryMapView = register({
-    id: "memory-map",
-    channels: ["sim"],
-    render(state) {
-        return renderMemoryMapPanel(state);
-    },
-    onCommand(ev) {
-        const el = ev.target?.closest?.("[data-action]");
-        const action = el?.dataset?.action;
-        if (!action) return undefined;
-        const index = Number(el?.dataset?.mmapIndex ?? -1);
-        // ⚠️ **连线那套索引**（v0.74 · STAGE-50）—— 与段表的索引**各管各的**。
-        const root = memoryMapPanel;
-        switch (action) {
-            case "add-ram":
-            case "add-rom":
-            case "add-peripheral": {
-                // ⚠️ 先采集再改：用户正在敲的数**不许**被这次点击冲掉。
-                const base = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
-                const kind = action === "add-ram" ? "ram" : action === "add-rom" ? "rom" : "peripheral";
-                // ⚠️ **STAGE-46 · 裁决 E / I**：摆放基址时外设窗口用**内核类型表**
-                //   给的 `window_bytes` ⇒ ⇒ 查得到就用它。
-                const deviceTypes = viewStore.getState("memory-map")?.deviceTypes ?? null;
-                const draft = addRegion(base, kind, deviceTypes);
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-                publishMemoryMapState();
-                return `cmd-${action}`;
-            }
-            case "use-base-gap": {
-                // ⚠️ **基址规划**：用户挑了一条空隙 ⇒ ⇒ 填进「目标行」那一行的
-                //   基址 ⇒ ⇒ **真相仍是描述里的那个 `base`**（裁决 A）。
-                //
-                // ⚠️ **先采集再改**：用户正在敲的数**不许**被这次点击冲掉。
-                const base = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
-                const gapFrom = Number(el?.dataset?.mmapGapFrom);
-                // ⚠️ **目标行以 DOM 为准**（面板顶部那个下拉）⇒ ⇒ 用户刚改过就
-                //   立刻点 ⇒ ⇒ 用的是**最新**那个 ⇒ ⇒ 不必等失焦。
-                const picked = root?.querySelector?.("[data-mmap-plan-target]")?.value;
-                const target = Number(picked);
-                if (!Number.isFinite(gapFrom)) return undefined;
-                const draft = setRegionBase(base, target, gapFrom);
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-                publishMemoryMapState();
-                return "cmd-use-base-gap";
-            }
-            case "remove-region": {
-                const base = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
-                const draft = removeRegion(base, index);
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-                publishMemoryMapState();
-                return "cmd-remove-region";
-            }
-            case "load-current": {
-                // ⚠️ **v0.76（STAGE-52 · 裁决 M）**：「从内置模版开始」升级为
-                // **模板库入口** ⇒ ⇒ 点它 = 把模板库卡滚进视野（清单由内核
-                // **订阅即推**，常驻渲染）⇒ ⇒ **不再**在这里把「当前生效板」
-                // 偷偷塞进草稿（B1：**不兜底**生效板）。
-                const target = root?.querySelector("[data-tpl-library]");
-                if (target) {
-                    target.scrollIntoView({ behavior: "smooth", block: "start" });
-                    target.classList.add("tpl-highlight");
-                }
-                return "cmd-load-current";
-            }
-            case "load-template": {
-                // ⚠️ **v0.76（STAGE-52 · 裁决 M）**：「导入」按钮 ⇒ 发信号
-                // 带模板 id ⇒ ⇒ 异步等待在 app 层（GetPlatformTemplate →
-                // 完整描述 → draftFromDescription → 草稿）。
-                //
-                // ⚠️ **onCommand(ev) 的参数是点击事件**（`ev`），不是 `detail`
-                //   —— r10 现场：引用 `detail` 直接 ReferenceError ⇒ 导入永远
-                //   不发生 ⇒ boardTree 段提交空板 ⇒ 后续断点段整片 cascade。
-                //   模板 id 从按钮的 `data-template-id` 读（`el.dataset`）。
-                const templateId = String(el?.dataset?.templateId ?? "");
-                if (!templateId) return "cmd-load-template-invalid";
-                return emitCommand("load-template", "memory-map", { id: templateId });
-            }
-            case "new-draft": {
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft: defaultDraft() }));
-                publishMemoryMapState();
-                return "cmd-new-draft";
-            }
-            case "submit-memory-map": {
-                const root2 = root;
-                const draft = root2 ? collectDraft(root2, memoryMapDraft()) : memoryMapDraft();
-                // ⚠️ 有栏没看懂 ⇒ **不提交**（提交一份内核看不懂的描述只会换来
-                // 一个更费解的错）。
-                const invalid = root2 ? countInvalidFields(root2) : 0;
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-                if (invalid > 0) {
-                    publishMemoryMapState();
-                    return "cmd-submit-memory-map-invalid";
-                }
-                // ⚠️ 载荷形状 = 契约的 `PlatformDescription`（**逐字同形**）。
-                return emitCommand("submit-memory-map", "memory-map", {
-                    description: draftToDescription(draft),
-                });
-            }
-            case "reload-project":
-                // 「重新装载工程」⇒ 宿主在下次 LoadProject 时应用待生效的板级配置。
-                return emitCommand("reload-project", "memory-map");
-            case "unload-project":
-                // 「卸载工程」⇒ 契约 v7 的 `UnloadProject`（D-139）。
-                //
-                // ⚠️ **只发这一个信号**：真正发命令的是 app 层（它持有服务
-                // 接线）⇒ 视图层**不**自己碰内核。
-                return emitCommand("unload-project", "memory-map");
-            case "save-memory-map": {
-                // 「保存当前板」⇒ 把**当前草稿**写进板档案（键 = 草稿的 id）。
-                //
-                // ⚠️ **不改内核状态** ⇒ 不发契约命令 ⇒ 只发 `riscv:command`
-                // 信号给 app.js（它持有板档案存储）。
-                // ⚠️ **先采集再发**：用户正在敲的内容以 DOM 为准。
-                const draft = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-                return emitCommand("save-memory-map", "memory-map");
-            }
-            case "save-memory-map-as": {
-                // 「另存为板」⇒ 以当前草稿为模板**新建**一块板（新 id + 新 name）。
-                //
-                // ⚠️ 新 id / 新 name 从**面板上的两个输入框**读（不用 `prompt()`
-                // —— 浏览器真机门禁没法驱动 `prompt`）。
-                const draft = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-                const newId = root?.querySelector?.("[data-mmap-new-id]")?.value ?? "";
-                const newName = root?.querySelector?.("[data-mmap-new-name]")?.value ?? "";
-                return emitCommand("save-memory-map-as", "memory-map", {
-                    id: String(newId ?? ""),
-                    name: String(newName ?? ""),
-                });
-            }
-            case "select-memory-map": {
-                // 「选用」档案里的一块 ⇒ **载入草稿**（`draftFromDescription`）
-                // ⇒ `selectedId` 跟着变。
-                //
-                // ⚠️ **不发契约命令**（内核状态不变）⇒ 但**要发** `riscv:command`
-                // 信号：档案与 `selectedId` 住在 app.js 那一侧的视图状态里。
-                const id = String(el?.dataset?.mmapTargetId ?? "");
-                return emitCommand("select-memory-map", "memory-map", { id });
-            }
-            case "delete-memory-map": {
-                // 「删除」档案里的一块 ⇒ 不改内核状态。
-                const id = String(el?.dataset?.mmapTargetId ?? "");
-                return emitCommand("delete-memory-map", "memory-map", { id });
-            }
-            case "new-memory-map": {
-                // 「新板」⇒ 清空当前编辑（草稿回到默认、**取消选中**）。
-                //
-                // ⚠️ **不发命令**：它只改**草稿**与 `selectedId`（都在视图状态里）
-                // ⇒ 落库与否是「保存」那一步的事。
-                viewStore.setState("memory-map", (prev) => ({
-                    ...prev,
-                    draft: defaultDraft(),
-                    selectedId: null,
-                }));
-                publishMemoryMapState();
-                return "cmd-new-memory-map";
-            }
-            case "focus-region": {
-                // 点比例条上的**一段** ⇒ 焦点跳到下面段表的**那一行**
-                // （STAGE-35 · v0.50 批）—— 横幅上写着的「点击任一分段即可在
-                // 下方编辑」**必须是真的**（通用判据：界面文案是能力声明 ⇒ ⇒
-                // 声明的必须是现在真有的）。
-                //
-                // ⚠️ **只挪焦点，不改草稿** ⇒ ⇒ 用户的输入不会被这次点击冲掉。
-                const row = root?.querySelector?.(`[data-mmap-row="${index}"]`) ?? null;
-                const field = row?.querySelector?.("input, select") ?? null;
-                if (field && typeof field.focus === "function") {
-                    field.focus();
-                    row?.scrollIntoView?.({ block: "nearest" });
-                }
-                return "cmd-focus-region";
-            }
-            default:
-                return undefined;
-        }
-    },
-    onDelta(_delta) {},
-    mountFor(el) {
-        memoryMapPanel = el;
-        el.addEventListener("click", (ev) => memoryMapView.onCommand(ev));
-        // ⚠️ 输入 ⇒ 采集进草稿（**不重渲染** ⇒ 不失焦）。
-        el.addEventListener("input", () => {
-            if (memoryMapPanel) syncMemoryMapDraft(memoryMapPanel);
-        });
-        // ⚠️ 换器件类型 ⇒ 参数集变了 ⇒ 必须重渲染（否则还挂着旧类型的参数栏）。
-        el.addEventListener("change", (ev) => {
-            if (!memoryMapPanel) return;
-            const changed = ev.target?.closest?.("[data-mm-device-kind]");
-            // ⚠️ **基址规划的范围 / 目标行**（STAGE-46 · 裁决 D / N）⇒ ⇒ 它们
-            //   **住视图状态**（不是描述的一部分 ⇒ ⇒ 不进 `collectDraft`）。
-            const planChanged = ev.target?.closest?.(
-                "[data-mmap-plan-range-from], [data-mmap-plan-range-to], [data-mmap-plan-target]",
-            );
-            syncMemoryMapDraft(memoryMapPanel);
-            if (planChanged) {
-                const rangeFrom = memoryMapPanel.querySelector("[data-mmap-plan-range-from]")?.value ?? "";
-                const rangeTo = memoryMapPanel.querySelector("[data-mmap-plan-range-to]")?.value ?? "";
-                const target = memoryMapPanel.querySelector("[data-mmap-plan-target]")?.value ?? "0";
-                viewStore.setState("memory-map", (prev) => ({
-                    ...prev,
-                    plan: {
-                        range: { from: rangeFrom, to: rangeTo },
-                        target: Number(target),
-                    },
-                }));
-            }
-            if (changed || planChanged) publishMemoryMapState();
-        });
-        // ⚠️ **「用这个」在 `pointerdown` 里处理**（STAGE-46 · 施工期踩到的一处
-        //   **时序陷阱**）⇒ ⇒ 用户**刚在范围框里敲完字**就点它 ⇒ ⇒ 那一下
-        //   先触发 `blur` ⇒ ⇒ `change` ⇒ ⇒ **重渲染** ⇒ ⇒ 按钮**被换掉** ⇒ ⇒
-        //   `click` **根本到不了** ⇒ ⇒ 用户点了**没反应**。
-        //
-        // ⇒ ⇒ 所以**在 blur 之前**（`pointerdown` 阶段）就把动作做完 ⇒ ⇒
-        //   随后的 `change` 重渲染**带着已更新的草稿** ⇒ ⇒ 状态一致 ✓。
-        el.addEventListener("pointerdown", (ev) => {
-            const hit = ev.target?.closest?.('[data-action="use-base-gap"]');
-            if (!hit) return;
-            const root2 = memoryMapPanel;
-            if (!root2) return;
-            const base = collectDraft(root2, memoryMapDraft());
-            const gapFrom = Number(hit.dataset?.mmapGapFrom);
-            const picked = root2.querySelector("[data-mmap-plan-target]")?.value;
-            const target = Number(picked);
-            if (!Number.isFinite(gapFrom)) return;
-            const draft = setRegionBase(base, target, gapFrom);
-            viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-            // ⚠️ **这里就重渲染** ⇒ ⇒ 那一行的基址**立刻**看得见 ⇒ ⇒
-            //   （随后的 `change` 重渲染**带着已更新的草稿**⇒ ⇒ 状态一致 ✓）
-            publishMemoryMapState();
-        });
-    },
-});
 
 // ---------------------------------------------------------------------------
 // embeddedView — 落地视图（D-33 · STAGE-10 裁决 C）。

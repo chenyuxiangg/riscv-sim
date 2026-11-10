@@ -35,7 +35,14 @@ import {
 } from "./device-docs.js";
 
 import { PLATFORM_SCHEMA_VERSION } from "../../lib/message.js";
-import { parseErrorCode } from "./memory-map.js";
+import {
+    PLAN_MAX_GAPS,
+    defaultPlanRange,
+    deviceParams,
+    hex32,
+    parseErrorCode,
+    planBaseGaps,
+} from "./memory-map.js";
 import { renderImageLoadStatus } from "./image-loader.js";
 
 /** 创建面板里可勾选的器件（顺序即展示顺序）。 */
@@ -393,6 +400,7 @@ function renderSidebar(state, nodes, locked, dirty) {
                     <h3>产品树</h3>
                     <p class="pw-side-sub">${escapeHtml(tree?.name ?? "（空）")}</p>
                 </div>
+                <button type="button" class="pw-lock" data-action="open-add-device" ${loaded ? "" : "disabled"}>添加器件</button>
                 <button type="button" class="pw-lock ${locked ? "is-locked" : ""}" data-action="toggle-lock" ${loaded ? "" : "disabled"}>
                     ${locked ? "已锁定 · 点此解锁" : "已解锁 · 点此锁定"}
                 </button>
@@ -407,6 +415,7 @@ function renderSidebar(state, nodes, locked, dirty) {
                 <div class="pw-side-actions">
                     <button type="button" class="pw-btn" data-action="open-create">创建</button>
                     <button type="button" class="pw-btn" data-action="open-templates">从模版加载</button>
+                    <button type="button" class="pw-btn" data-action="open-archives">档案管理</button>
                     <button type="button" class="pw-btn" data-action="save-archive" ${loaded ? "" : "disabled"}>另存为档案</button>
                     <button type="button" class="pw-btn pw-btn-primary" data-action="reload-product" ${loaded ? "" : "disabled"}>重新载入</button>
                 </div>
@@ -424,6 +433,90 @@ function renderWindowEmpty() {
             <div class="pw-window-plate">内存展示区</div>
             <p>点左侧产品树里的器件，这里显示它的基址、各偏移与偏移含义。</p>
         </div>
+    `;
+}
+
+/**
+ * 某个器件实例可用的**地址空隙**（把它自己先摘掉再算，所以它当前的位置
+ * 也算「可用」）。空隙只作参考，重叠仍由内核判。
+ *
+ * @param {object|null} draft
+ * @param {object} node
+ * @returns {Array<{from:number,to:number,size:number}>}
+ */
+function gapsForNode(draft, node) {
+    if (!Number.isInteger(node?.regionIndex)) return [];
+    const regions = Array.isArray(draft?.regions) ? draft.regions : [];
+    const without = regions.filter((_, index) => index !== node.regionIndex);
+    const range = defaultPlanRange(draft);
+    return planBaseGaps({ ...draft, regions: without }, null, range).slice(0, PLAN_MAX_GAPS);
+}
+
+/**
+ * 右栏的「本器件基址空隙」块。
+ *
+ * @param {object|null} draft
+ * @param {object} node
+ * @param {boolean} locked
+ * @returns {string}
+ */
+function renderGapPlanner(draft, node, locked) {
+    if (!Number.isInteger(node?.regionIndex)) return "";
+    const gaps = gapsForNode(draft, node);
+    const range = defaultPlanRange(draft);
+    const rows = gaps.length
+        ? gaps.map((gap) => `
+            <tr>
+                <td class="pw-mono">${escapeHtml(hex32(gap.from))}</td>
+                <td class="pw-mono">${escapeHtml(hex32(gap.to - 1))}</td>
+                <td class="pw-mono">${escapeHtml(String(gap.size))}</td>
+                <td><button type="button" class="pw-btn pw-btn-small" data-action="use-product-gap" data-gap-from="${gap.from}" ${locked ? "disabled" : ""}>用这个</button></td>
+            </tr>
+        `).join("")
+        : `<tr><td colspan="4" class="pw-table-empty">规划范围内没有可用空隙。</td></tr>`;
+    return `
+        <section class="pw-gaps" data-product-gaps>
+            <div class="pw-regs-head">
+                <h4>本器件可用的地址空隙</h4>
+                <span class="muted">规划范围 ${escapeHtml(hex32(range.from))} – ${escapeHtml(hex32(range.to))}</span>
+            </div>
+            <p class="pw-tip">只给「哪里空着」作参考；点「用这个」把本器件基址填过去，重叠仍由内核判。</p>
+            <table class="pw-table pw-table-gaps">
+                <colgroup><col style="width:32%"><col style="width:32%"><col style="width:20%"><col style="width:16%"></colgroup>
+                <thead><tr><th>起</th><th>止（含）</th><th>可用字节</th><th></th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </section>
+    `;
+}
+
+/**
+ * 右栏的**器件参数**块（外设专用）。
+ *
+ * ⚠️ `irq_line` 在 UI 上统一叫「PLIC 源号」；底层字段不变。
+ *
+ * @param {object|null} region
+ * @param {object} node
+ * @param {boolean} locked
+ * @returns {string}
+ */
+function renderDeviceParams(region, node, locked) {
+    if (node.kind !== "peripheral") return "";
+    const device = region?.device ?? {};
+    const params = deviceParams(node.deviceKind);
+    const fields = params.map((param) => `
+        <label class="pw-field">
+            <span>${escapeHtml(param.name === "irq_line" ? "PLIC 源号" : param.label)}</span>
+            <input type="text" class="pw-input pw-mono" data-device-param="${escapeHtml(param.name)}"
+                   value="${escapeHtml(device[param.name] ?? "")}" ${locked ? "disabled" : ""}>
+        </label>
+    `).join("");
+    if (!fields) return "";
+    return `
+        <section class="pw-params" data-product-device-params>
+            <div class="pw-regs-head"><h4>器件参数</h4></div>
+            <div class="pw-fields">${fields}</div>
+        </section>
     `;
 }
 
@@ -491,6 +584,8 @@ function renderWindowDetail(state, node, locked) {
                 ${dirty.base || dirty.doc ? `<span class="pw-dirty-flag">有未生效的改动</span>` : `<span class="pw-clean-flag">与生效一致</span>`}
             </header>
             <div class="pw-fields">${baseField}${sizeField}</div>
+            ${renderDeviceParams(region, node, locked)}
+            ${renderGapPlanner(draft, node, locked)}
             <section class="pw-regs">
                 <div class="pw-regs-head">
                     <h4>${node.kind === "core" ? "内部寄存器（CSR）" : `${escapeHtml(unitLabel)}与含义`}</h4>
@@ -531,6 +626,28 @@ function renderCreateDialog(state, locked) {
                 <footer class="pw-dialog-foot">
                     <button type="button" class="pw-btn" data-action="close-dialog">取消</button>
                     <button type="button" class="pw-btn pw-btn-primary" data-action="confirm-create">创建并装载</button>
+                </footer>
+            </div>
+        </div>
+    `;
+}
+
+/** 添加器件弹层：从器件目录里挑一个，插进当前产品树。 */
+function renderAddDeviceDialog(state, locked) {
+    const items = CREATE_CATALOG.map((item) => `
+        <button type="button" class="pw-template" data-action="add-device" data-add-kind="${escapeHtml(item.kind)}" ${locked ? "disabled" : ""}>
+            <b>${escapeHtml(item.label)}</b>
+            <span class="muted">建议基址 <b class="pw-mono">${escapeHtml(item.base)}</b></span>
+        </button>
+    `).join("");
+    return `
+        <div class="pw-scrim" data-dialog="add-device">
+            <div class="pw-dialog" role="dialog" aria-modal="true">
+                <h3>添加器件</h3>
+                <p class="muted">器件会插进当前产品树；基址先按建议值落草稿，可到右栏改成实际规划的空隙。</p>
+                <div class="pw-template-list">${items}</div>
+                <footer class="pw-dialog-foot">
+                    <button type="button" class="pw-btn" data-action="close-dialog">取消</button>
                 </footer>
             </div>
         </div>
@@ -595,6 +712,50 @@ function renderArchiveDialog(state) {
     `;
 }
 
+/** 档案管理弹层：列出本机已有档案，可载入或删除。 */
+function renderArchivesDialog(state) {
+    const archive = Array.isArray(state?.archive) ? state.archive : [];
+    const status = String(state?.archiveStatus ?? "ok");
+    const statusText = status === "unsupported"
+        ? "板档案只存在于本会话（本浏览器没有可用的持久化存储）。"
+        : status === "error"
+            ? "板档案读取失败 —— 先看右栏提示。"
+            : "板档案存在本机浏览器，刷新后仍在。";
+    const rows = archive.length
+        ? archive.map((entry) => {
+            const name = entry?.description?.name ?? entry?.id ?? "";
+            return `
+                <tr>
+                    <td><b>${escapeHtml(name)}</b><br><span class="pw-mono muted">${escapeHtml(entry?.id ?? "")}</span></td>
+                    <td class="pw-mono">${escapeHtml(String(entry?.description?.regions?.length ?? 0))}</td>
+                    <td>
+                        <button type="button" class="pw-btn pw-btn-small" data-action="use-template"
+                                data-template-id="${escapeHtml(entry?.id ?? "")}" data-template-src="archive">载入</button>
+                        <button type="button" class="pw-btn pw-btn-small pw-btn-danger" data-action="delete-product-archive"
+                                data-archive-id="${escapeHtml(entry?.id ?? "")}">删除</button>
+                    </td>
+                </tr>
+            `;
+        }).join("")
+        : `<tr><td colspan="3" class="pw-table-empty">还没有板档案 —— 用「另存为档案」保存第一块板。</td></tr>`;
+    return `
+        <div class="pw-scrim" data-dialog="archives">
+            <div class="pw-dialog pw-dialog-wide" role="dialog" aria-modal="true">
+                <h3>档案管理</h3>
+                <p class="muted">${escapeHtml(statusText)}</p>
+                <table class="pw-table pw-table-archives">
+                    <colgroup><col style="width:56%"><col style="width:14%"><col style="width:30%"></colgroup>
+                    <thead><tr><th>档案</th><th>器件数</th><th></th></tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>
+                <footer class="pw-dialog-foot">
+                    <button type="button" class="pw-btn" data-action="close-dialog">关闭</button>
+                </footer>
+            </div>
+        </div>
+    `;
+}
+
 /** 读档案弹层里填的 id / 名称（渲染层只读 DOM，不写状态）。 */
 export function readArchiveDraft(root) {
     const idEl = root?.querySelector?.("[data-archive-id]");
@@ -633,8 +794,10 @@ export function renderProductWorkspace(state) {
                 ${windowHtml}
             </main>
             ${dialog === "create" ? renderCreateDialog(state, locked) : ""}
+            ${dialog === "add-device" ? renderAddDeviceDialog(state, locked) : ""}
             ${dialog === "templates" ? renderTemplateDialog(state) : ""}
             ${dialog === "archive" ? renderArchiveDialog(state) : ""}
+            ${dialog === "archives" ? renderArchivesDialog(state) : ""}
         </section>
     `;
 }

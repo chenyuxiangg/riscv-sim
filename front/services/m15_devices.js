@@ -31,9 +31,7 @@ import * as viewStore from "../views/m03_viewstore.js";
 /**
  * 把内核的两张表接进**产品视图**的视图状态。
  *
- * ⚠️ **两个视图共用**（`product` / `memory-map`）？—— **不**共用：器件实例
- * 是「产品构成」的信息 ⇒ ⇒ 只住在 `product` 视图的状态里 ⇒ ⇒ 板级内存图
- * 编辑器**不**重复渲染（免得同一件事显示两处 ⇒ 同一个量只显示一处）。
+ * ⚠️ 器件实例是「产品构成」的信息 ⇒ 只住在 `product` 视图的状态里。
  *
  * @param {object} commandRouter — M-05 命令路由
  * @returns {{reset: () => void, subscribeDeviceStreams: () => Promise<object>,
@@ -66,15 +64,8 @@ export function wireDevices(commandRouter) {
      * ⇒ ⇒ 不会出现两份拷贝不同步。
      */
     function publish() {
-        // ⚠️ **两个视图写的是同一个引用**（与 `wireMemoryMap` 那份**同款**）
-        // ⇒ ⇒ 「器件类型清单」与「逐实例状态」**各只有一份** ⇒ ⇒ 产品视图的
-        // 树与板级内存图编辑器**看到的是同一批事实**（STAGE-44 裁决 H / F）。
+        // ⚠️ **只写产品视图**：器件类型清单与逐实例状态各只有一份。
         viewStore.setState("product", (prev) => ({
-            ...prev,
-            deviceTypes: types,
-            deviceInstances: instances,
-        }));
-        viewStore.setState("memory-map", (prev) => ({
             ...prev,
             deviceTypes: types,
             deviceInstances: instances,
@@ -84,13 +75,6 @@ export function wireDevices(commandRouter) {
                 viewId: "product",
                 type: "update",
                 state: viewStore.getState("product"),
-            },
-        }));
-        window.dispatchEvent(new CustomEvent("riscv:render", {
-            detail: {
-                viewId: "memory-map",
-                type: "update",
-                state: viewStore.getState("memory-map"),
             },
         }));
     }

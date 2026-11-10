@@ -39,12 +39,7 @@ import { Command, TRACE_FORMAT, TRACE_SOURCE, WRITE_SIZE } from "./lib/message.j
 // ⚠️ 只导入**纯函数**（错误码拆分、草稿转换、「已被内核接受」推导量）⇒
 // 不引入服务层依赖，也不构成循环依赖。
 import {
-    currentDraft,
-    defaultDraft,
-    describeMemoryMapError,
-    draftFromDescription,
     draftToDescription,
-    isDraftAccepted,
     planMemoryMapUpdate,
     splitErrorCode,
 } from "./views/components/memory-map.js";
@@ -936,32 +931,6 @@ function publishViewState(viewId) {
 let loadedProject = null;
 
 /**
- * 把「上一次提交板级内存图的错误」写进「memory-map」视图状态并重渲染。
- *
- * ⚠️ **错误显示在面板上**，不只是页脚一行字：验收 C-5 要的是「校验失败必须
- * 在界面上显示」⇒ 面板上有一块带 `data-memory-map-error` 与
- * `data-error-code` / `data-error-family` / `data-error-scenario` 的区域。
- *
- * ⚠️ 判定靠**族 + 码**（`E_PLT-07` ⇒ 族 `PLT`、场景 `07`），**不靠文案**。
- *
- * @param {{code: string, message: string}|null} error — `null` 表示清掉
- */
-function setMemoryMapError(error) {
-    viewStore.setState("memory-map", (prev) => ({ ...prev, error: error ?? null }));
-    publishViewState("memory-map");
-}
-
-// ---------------------------------------------------------------------------
-// 板档案（STAGE-15 · v0.30 · D-136 / D-140）
-//
-// ⚠️ **落库门槛**（裁决 B）：只有**被内核接受过**的描述才允许落库 ⇒ 库里
-// 不会有「永远装不上的板」⇒ 前端**不写第二份校验器**（延续裁决 E）。
-//
-// ⚠️ **保存 ≠ 生效**（裁决 C）：「保存 / 另存为 / 选用 / 删除」**都不改内核
-// 状态**（不发契约命令）⇒ 板要生效仍需「提交板级内存图」。
-// ---------------------------------------------------------------------------
-
-/**
  * 板档案服务（M-23）的**懒加载**句柄。
  *
  * ⚠️ **为什么是动态 import 而不是静态 import**：板档案服务是**另一条
@@ -985,47 +954,6 @@ export function loadBoardStoreModule() {
             .catch((error) => ({ api: null, error }));
     }
     return boardStoreModulePromise;
-}
-
-/**
- * 板档案在**视图状态**里的四个字段（读的时候把缺省值补上 ⇒ 调用方不必判空）。
- *
- * ⚠️ 这四个字段住在 M-03 的「memory-map」视图状态里（**前端自己的东西**）
- * ⇒ 不进契约、不进事件。
- *
- * @param {object} [state] — 「memory-map」视图状态（不给就读当前状态）
- * @returns {{archive: object[], selectedId: string|null, archiveStatus: string, acceptedDescription: object|null}}
- */
-export function boardState(state) {
-    const src = state ?? viewStore.getState("memory-map") ?? {};
-    return {
-        archive: Array.isArray(src.archive) ? src.archive : [],
-        selectedId: src.selectedId ?? null,
-        archiveStatus: src.archiveStatus ?? "ok",
-        acceptedDescription: src.acceptedDescription ?? null,
-    };
-}
-
-/**
- * 把板档案的四个字段**初始化**进视图状态（缺什么补什么 ⇒ 不覆盖已有值）。
- *
- * @returns {object} 初始化后的视图状态
- */
-export function ensureBoardState() {
-    const prev = viewStore.getState("memory-map") ?? {};
-    const next = { ...prev, ...boardState(prev) };
-    viewStore.setState("memory-map", next);
-    return next;
-}
-
-/**
- * 写板档案的视图状态并重渲染一次。
- *
- * @param {object} patch
- */
-function setBoardState(patch) {
-    viewStore.setState("memory-map", (prev) => ({ ...prev, ...patch }));
-    publishViewState("memory-map");
 }
 
 /**
@@ -1057,275 +985,34 @@ async function createBoardStoreInstance() {
 }
 
 /**
- * 板档案服务缺席时的**显式**降级（不静默）。
+ * 删除产品视图「档案管理」里的一条板档案。
  *
- * @param {unknown} error
- */
-function setArchiveUnavailable(error) {
-    setBoardState({ archiveStatus: "error" });
-    setNote(`板档案服务不可用：${error?.message ?? error}`);
-}
-
-/**
- * 把一条档案写进**持久化存储**。
- *
- * ⚠️ 没有存储 ⇒ **明确降级**为「只存在于本会话」（返回 `unsupported`），
- * 不假装存下来了；写失败 ⇒ 返回 `error`（调用方据此**不**改档案）。
- *
- * ⚠️ **失败时把原因带回去**（`reason`）⇒ 上层**能说清**失败在哪 ⇒
- * **不静默**（STAGE-18 裁决 I：升级失败要显示失败原因）。
- *
- * @param {{boardStore?: object|null}} services
- * @param {{id: string, description: object, rules_version?: number}} entry
- * @returns {Promise<{status: "ok"|"unsupported"|"error", reason: string|null}>}
- */
-async function persistBoard(services, entry) {
-    const store = services?.boardStore ?? null;
-    if (!store) return { status: "unsupported", reason: null };
-    try {
-        await store.put(entry);
-        return { status: "ok", reason: null };
-    } catch (err) {
-        const reason = err?.message ?? String(err);
-        setBoardState({ archiveStatus: "error" });
-        setNote(`板档案落库失败：${reason}`);
-        return { status: "error", reason };
-    }
-}
-
-/**
- * 「保存当前板」⇒ 把**当前草稿**写进板档案（键 = 草稿的 `id`）。
- *
- * ⚠️ **不改内核状态**（不发契约命令）⇒ 板要生效仍需「提交」。
- *
- * @param {object} services
- */
-async function saveCurrentBoard(services) {
-    ensureBoardState();
-    if (!isDraftAccepted(viewStore.getState("memory-map"))) {
-        setNote("当前草稿还没被内核接受过 —— 先提交，校验通过后才能保存");
-        return;
-    }
-    const { api, error } = await loadBoardStoreModule();
-    if (!api) {
-        setArchiveUnavailable(error);
-        return;
-    }
-    const state = boardState();
-    const description = draftToDescription(currentDraft(viewStore.getState("memory-map")));
-    const entry = api.boardEntry(description);
-    if (!entry) {
-        setNote("板 id 为空 —— 这块板存不进档案（先给板 id）");
-        return;
-    }
-    // ⚠️ **新板**（没选中档案里的一块）⇒ id 不能与已有档案撞。
-    // ⇒ 这不是「描述合法性」（那是内核的事）⇒ 是**档案的主键唯一性**
-    //   （裁决 E：「前端唯一会判的事：档案里 id 不重复」）。
-    if (state.selectedId === null && api.isBoardIdTaken(state.archive, entry.id)) {
-        setNote(`板 id「${entry.id}」已被占用 —— 改个 id，或先「选用」那块板再保存（那是覆盖）`);
-        return;
-    }
-    const merged = api.mergeBoard(state.archive, entry);
-    const persisted = await persistBoard(services, entry);
-    if (persisted.status === "error") return;
-    setBoardState({
-        archive: merged.archive,
-        selectedId: entry.id,
-        archiveStatus: persisted.status === "ok" ? "ok" : "unsupported",
-    });
-    setNote(persisted.status === "ok"
-        ? `已保存板「${entry.id}」`
-        : `板「${entry.id}」已存入本会话（板档案只存在于本会话）`);
-}
-
-/**
- * 「另存为板」⇒ 以当前草稿为模板**新建**一块板（新 `id` + 新 `name`）。
- *
- * ⚠️ **只改 `id` / `name`** ⇒ 其余字段与**已通过校验**的那份逐字相同 ⇒
- * 合法性必然相同 ⇒ **不需要第二次提交、也不需要第二次校验**。
- *
- * ⚠️ **不改内核状态**（不发契约命令）。
- *
- * @param {object} services
- * @param {{id?: string, name?: string}} [params]
- */
-async function saveBoardAs(services, params) {
-    ensureBoardState();
-    if (!isDraftAccepted(viewStore.getState("memory-map"))) {
-        setNote("当前草稿还没被内核接受过 —— 先提交，校验通过后才能保存");
-        return;
-    }
-    const { api, error } = await loadBoardStoreModule();
-    if (!api) {
-        setArchiveUnavailable(error);
-        return;
-    }
-    const state = boardState();
-    const newId = String(params?.id ?? "").trim();
-    const newName = String(params?.name ?? "").trim();
-    if (newId === "") {
-        setNote("另存为需要一个新的板 id —— 填了再点");
-        return;
-    }
-    if (newName === "") {
-        setNote("另存为需要一个新的板名 —— 填了再点");
-        return;
-    }
-    // ⚠️ **id 唯一**（裁决 E）：已被占用 ⇒ 明确拒绝，不静默覆盖。
-    if (api.isBoardIdTaken(state.archive, newId)) {
-        setNote(`板 id「${newId}」已被占用 —— 换一个没被占用的 id`);
-        return;
-    }
-    const description = draftToDescription(currentDraft(viewStore.getState("memory-map")));
-    const entry = api.boardEntry({ ...description, id: newId, name: newName });
-    if (!entry) {
-        setNote("板 id 为空 —— 这块板存不进档案");
-        return;
-    }
-    const merged = api.mergeBoard(state.archive, entry);
-    const persisted = await persistBoard(services, entry);
-    if (persisted.status === "error") return;
-    // ⚠️ **选中项不变**：草稿一个字都没改 ⇒ 它仍代表原来那块板。
-    setBoardState({
-        archive: merged.archive,
-        archiveStatus: persisted.status === "ok" ? "ok" : "unsupported",
-    });
-    setNote(persisted.status === "ok"
-        ? `已另存为板「${newId}」（原板仍在档案里）`
-        : `板「${newId}」已存入本会话（板档案只存在于本会话）`);
-}
-
-/**
- * 「选用」档案里的一块 ⇒ **载入草稿**（**不改内核状态**）。
- *
- * ⚠️ 载入**不是**接受：被载入的草稿**还要重新提交**才被内核接受 ⇒
- * 「保存 / 另存为」在重新提交前是**禁用**的（落库门槛，裁决 B）。
- *
- * ⚠️ **规则版本落后 ⇒ 明确提示**（STAGE-18 · D-143 · 裁决 I）：提示里**同时**
- * 给出「这块板的规则版本」与「当前规则版本」⇒ ⇒ **不静默**。
- * ⚠️ **提示之后仍然可以选用**（草稿照常载入）⇒ ⇒ 前端**不判**合法性
- * （合法性**只**由内核那一处裁决 ⇒ 不写第二份校验器）。
- *
- * @param {string} id
- */
-async function selectBoard(id) {
-    ensureBoardState();
-    const { api, error } = await loadBoardStoreModule();
-    if (!api) {
-        setArchiveUnavailable(error);
-        return;
-    }
-    const state = boardState();
-    const entry = api.findBoard(state.archive, String(id ?? ""));
-    if (!entry) {
-        setNote(`板档案里没有 id「${String(id ?? "")}」这一块`);
-        return;
-    }
-    const draft = draftFromDescription(entry.description);
-    if (!draft) {
-        setNote("这块板的描述读不出来 —— 档案可能坏了");
-        return;
-    }
-    // ⚠️ **规则版本判定在载入之前**（但**不拦**载入）⇒ 提示与「已选用」一起
-    // 说 ⇒ 用户既看得见差在哪，也照样能把板载进草稿。
-    const notice = api.boardRulesNotice(entry);
-    setBoardState({ draft, selectedId: entry.id });
-    setNote(notice
-        ? `已选用板「${entry.id}」—— ⚠️ ${notice}（尚未提交 —— 要生效请点「提交板级内存图」）`
-        : `已选用板「${entry.id}」（尚未提交 —— 要生效请点「提交板级内存图」）`);
-}
-
-/**
- * 「删除」档案里的一块 ⇒ **不改内核状态**。
+ * ⚠️ 只动本机档案，不改当前产品、不改内核状态；删除后当前产品仍可继续用。
  *
  * @param {object} services
  * @param {string} id
  */
-async function deleteBoard(services, id) {
-    ensureBoardState();
-    const { api, error } = await loadBoardStoreModule();
-    if (!api) {
-        setArchiveUnavailable(error);
-        return;
-    }
-    const state = boardState();
-    const dropped = api.dropBoard(state.archive, String(id ?? ""));
-    if (!dropped.changed) {
-        setNote(`板档案里没有 id「${String(id ?? "")}」这一块`);
+async function deleteProductArchive(services, id) {
+    const state = viewStore.getState("product") ?? {};
+    const archive = Array.isArray(state.archive) ? state.archive : [];
+    const target = String(id ?? "");
+    if (!archive.some((row) => String(row?.id) === target)) {
+        setNote(`板档案里没有 id「${target}」这一块`);
         return;
     }
     const store = services?.boardStore ?? null;
     if (store) {
         try {
-            await store.remove(String(id ?? ""));
+            await store.remove(target);
         } catch (err) {
-            setBoardState({ archiveStatus: "error" });
             setNote(`板档案删除失败：${err?.message ?? err}`);
             return;
         }
     }
-    setBoardState({
-        archive: dropped.archive,
-        // ⚠️ 被删的那块不再是「选中项」⇒ 选中清空（草稿还在，id 重新可编辑）。
-        selectedId: state.selectedId === String(id ?? "") ? null : state.selectedId,
-        archiveStatus: store ? "ok" : "unsupported",
-    });
+    patchProductBoard({ archive: archive.filter((row) => String(row?.id) !== target) });
     setNote(store
-        ? `已删除板「${String(id ?? "")}」`
-        : `已删除板「${String(id ?? "")}」（板档案只存在于本会话）`);
-}
-
-/**
- * 内核**真的接受**了一份描述之后 ⇒ 把档案里对应的那一条**升级**到当前规则版本。
- *
- * ⚠️ **升级条件 = 内核真的接受过**（STAGE-18 · D-143 · 裁决 I 的最后一条）
- * ⇒ ⇒ 不引入「前端说它没问题」这种第二判据 ⇒ ⇒ **只**在提交**成功**之后
- * 调它。
- *
- * ⚠️ **升级动作 = 重写那一条**（带上当前 `rules_version`）⇒ ⇒ **不发任何
- * 契约命令**（纯前端动作）。
- *
- * ⚠️ **升级失败不静默**（裁决 I）：写库失败 ⇒ 把原因带回去 ⇒ 上层显示它
- * ⇒ ⇒ **描述仍然可用**（只是条目还是旧的 ⇒ 下次还会提示）。
- *
- * ⚠️ **按 `id` 找那一条**（不按描述逐字段比）：板档案的**主键就是 `id`**
- * ⇒ 「那块板」= 那个 id ⇒ ⇒ 草稿 → 描述的往返**本来就不是逐字节相同**的
- * （实测：器件会被补上 `irq_line: 0`、可选的 `max_region_bytes` 会掉）
- * ⇒ ⇒ 若按字段相同来判 ⇒ **永远升级不了**（静默失效）⇒ ⇒ 按 id 判。
- *
- * @param {{boardStore?: object|null}} services
- * @param {object|null|undefined} description — 内核刚接受的那份描述
- * @returns {Promise<{status: "upgraded"|"current"|"skipped"|"error"|"unavailable", version?: number, reason: string|null, persisted?: "ok"|"unsupported"}>}
- */
-async function upgradeBoardRules(services, description) {
-    const { api, error } = await loadBoardStoreModule();
-    if (!api) {
-        return {
-            status: "unavailable",
-            reason: `板档案服务不可用：${error?.message ?? error}`,
-        };
-    }
-    const id = api.boardId(description);
-    if (id === null) return { status: "skipped", reason: null };
-    const state = boardState();
-    const entry = api.findBoard(state.archive, id);
-    // ⚠️ 档案里**没有**这一块 ⇒ 没什么可升级（它还没被保存进档案）。
-    if (!entry) return { status: "skipped", reason: null };
-    // ⚠️ **已经是当前版本** ⇒ 不重写（不制造无谓的写）。
-    if (api.checkBoardRules(entry).ok) return { status: "current", reason: null };
-    const upgraded = { ...entry, rules_version: api.PLATFORM_RULES_VERSION };
-    const persisted = await persistBoard(services, upgraded);
-    if (persisted.status === "error") {
-        return { status: "error", reason: persisted.reason };
-    }
-    const merged = api.mergeBoard(state.archive, upgraded);
-    setBoardState({ archive: merged.archive });
-    return {
-        status: "upgraded",
-        version: api.PLATFORM_RULES_VERSION,
-        reason: null,
-        persisted: persisted.status,
-    };
+        ? `已删除板档案「${target}」`
+        : `已删除板档案「${target}」（板档案只存在于本会话）`);
 }
 
 /**
@@ -1997,130 +1684,6 @@ export async function handleCommand(detail, services) {
                 }
                 break;
             }
-            case "load-template": {
-                // ⚠️ **v0.76（STAGE-52 · 裁决 M）**：模板库「导入」。
-                // 等待在**这一层**（GetPlatformTemplate 是异步命令）⇒ ⇒
-                // 完整描述回来 ⇒ ⇒ `draftFromDescription` 导入草稿作为
-                // **起点** ⇒ ⇒ 之后用户想怎么改都行（不默认兜底生效板）。
-                const id = String(detail?.params?.id ?? "");
-                if (!id) {
-                    setMemoryMapError({ code: "E_PLT-22", message: "模板 id 缺失。" });
-                    break;
-                }
-                const description = await services.templates?.loadTemplate?.(id);
-                if (!description || typeof description !== "object") {
-                    // ⚠️ 未知 id / 内核拒 ⇒ **原样**摆出来（不吞）⇒ 码由
-                    // 内核定（未知模板 id 是 `E_PLT-22` 的同一族）。
-                    setMemoryMapError({ code: "E_PLT-22", message: "模板没取到（未知模板 id？请回模板库选一块）。" });
-                    break;
-                }
-                const draft = draftFromDescription(description) ?? defaultDraft();
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-                setMemoryMapError(null);
-                setNote(`已从模板导入：${description.name ?? id} —— 作为草稿起点，可继续修改后提交。`);
-                window.dispatchEvent(new CustomEvent("riscv:render", {
-                    detail: {
-                        viewId: "memory-map",
-                        type: "update",
-                        state: viewStore.getState("memory-map"),
-                    },
-                }));
-                break;
-            }
-            case "submit-memory-map": {
-                // 提交板级内存图（契约 v6 的 `SetMemoryMap` / **v7 的
-                // `PatchMemoryMap`**）。
-                //
-                // ⚠️ **走哪条路由前端自己判**（裁决 D）：元数据（`id` /
-                // `name` / `priority` / `auto_selectable`）变了 ⇒ **整份
-                // 替换**；否则 ⇒ **差量**（只发改动的那几段）。
-                //
-                // ⚠️ **差量的基底 = 最近一次 `memory.map` 事件带回来的生效
-                // 图**（裁决 I）⇒ 与宿主作用的对象**是同一个东西**。
-                //
-                // ⚠️ **前端不自写校验**（裁决 E）：契约层那个唯一校验器在内核
-                // 侧 ⇒ 校验失败由内核报 `E_PLT-*` ⇒ 这里**如实显示**它。
-                const description = detail?.params?.description ?? null;
-                // ⚠️ 板档案的四个字段**先**初始化（缺省值就是规格里的初值）
-                // ⇒ 「失败时 `acceptedDescription` 不动」这条断言看得见的是
-                //   `null`（初值），而不是「字段压根不存在」。
-                ensureBoardState();
-                const state = viewStore.getState("memory-map") ?? {};
-                const base = state.memoryMap?.description ?? null;
-                // ⚠️ **期望修订号**（裁决 B）：**从没收到过** `memory.map`
-                // 事件 ⇒ `null`（不检查）；否则带上事件带来的那个。
-                const expectedRevision = state.memoryMap
-                    ? Number(state.memoryMap.revision ?? 0)
-                    : null;
-                // ⚠️ **用户的板还挂着 ⇒ ⇒ 一律整份**（STAGE-44 施工期实测）：
-                // 差量的基底是**生效图**，而正在被改的是**用户的板** ⇒ ⇒
-                // 「改回生效图那样」会被算成「没有改动」⇒ ⇒ 命令不发 ⇒ ⇒
-                // **用户的板永远停在旧的那份**。
-                const plan = planMemoryMapUpdate(base, description, {
-                    pending: state.memoryMap?.pending === true,
-                });
-                if (plan.mode === "none") {
-                    // ⚠️ **什么都没改 ⇒ 不发命令**（免得白涨一次修订号）。
-                    setNote("板级内存图没有改动 —— 不用提交");
-                    return;
-                }
-                try {
-                    if (plan.mode === "replace") {
-                        await commandRouter.dispatchCommand(
-                            Command.setMemoryMap(description, expectedRevision),
-                        );
-                    } else {
-                        await commandRouter.dispatchCommand(
-                            Command.patchMemoryMap(plan.ops, expectedRevision),
-                        );
-                    }
-                    setMemoryMapError(null);
-                    // ⚠️ **成功后**才记「这份描述被内核接受过」（裁决 B 的落库
-                    // 门槛）⇒ 失败时**不动** `acceptedDescription`（失败分支
-                    // 只做 `setMemoryMapError`）⇒ 库里不会有没校验过的板。
-                    //
-                    // ⚠️ 记的是**草稿那一份**（差量合成结果逐字段等于草稿 ⇒
-                    // 裁决 I 的推论）⇒ 落库门槛**一字不改**。
-                    setBoardState({ acceptedDescription: description ?? null });
-                } catch (err) {
-                    // ⚠️ **校验失败必须在界面上显示**（验收 C-5）⇒ 码与文案
-                    // 写进「memory-map」视图状态 ⇒ 面板上有一块
-                    // `data-memory-map-error`。
-                    //
-                    // ⚠️ **修订号冲突（`E_PLT-13`）不许吞掉**（验收 C-8）⇒
-                    // 附带一句「图已被改，请刷新后再提交」。
-                    const { code, message } = splitErrorCode(err);
-                    setMemoryMapError({
-                        code,
-                        message: describeMemoryMapError(code, message),
-                    });
-                    throw err;
-                }
-                // ⚠️ **升级**（STAGE-18 · D-143 · 裁决 I / J）：内核**真的接受**
-                // 之后 ⇒ 把档案里对应的那一条**重写一次**（带上当前
-                // `rules_version`）⇒ ⇒ **有提示**（不静默迁移）。
-                //
-                // ⚠️ **落点在 `catch` 之后** ⇒ 走到这里**只可能**是内核接受
-                // 了（失败那条路 `catch` 里 `throw` 掉了）⇒ ⇒ **不引入**「前端
-                // 说它没问题」这种第二判据（裁决 I 的最后一条）。
-                //
-                // ⚠️ **不发任何契约命令** ⇒ 升级是**纯前端**动作（重写库里的
-                // 那一条）。
-                const upgrade = await upgradeBoardRules(services, description);
-                if (upgrade.status === "upgraded") {
-                    setNote(upgrade.persisted === "unsupported"
-                        ? `已升级到当前规则版本 ${upgrade.version}（板档案只存在于本会话）`
-                        : `已升级到当前规则版本 ${upgrade.version}`);
-                    return;
-                }
-                if (upgrade.status === "error") {
-                    // ⚠️ **失败不静默**（裁决 I）⇒ 显示原因 ⇒ 描述**仍然可用**
-                    // （只是条目还是旧的 ⇒ 下次还会提示）。
-                    setNote(`板档案升级失败：${upgrade.reason} —— 描述仍然可用（这块板的条目还是旧的，下次还会提示）`);
-                    return;
-                }
-                break;
-            }
             case "create-product":
             case "load-archive":
             case "reload-product": {
@@ -2240,21 +1803,9 @@ export async function handleCommand(detail, services) {
                 resetMemoryMapError = result.memoryMapError;
                 break;
             }
-            case "save-memory-map":
-                // 「保存当前板」⇒ 落库（**不改内核状态**）。
-                await saveCurrentBoard(services);
-                return;
-            case "save-memory-map-as":
-                // 「另存为板」⇒ 新建一块板落库（**不改内核状态**）。
-                await saveBoardAs(services, detail?.params);
-                return;
-            case "select-memory-map":
-                // 「选用」⇒ 把档案里那块板载进草稿（**不改内核状态**）。
-                await selectBoard(detail?.params?.id);
-                return;
-            case "delete-memory-map":
-                // 「删除」⇒ 从档案里删一块（**不改内核状态**）。
-                await deleteBoard(services, detail?.params?.id);
+            case "delete-product-archive":
+                // 产品视图「档案管理」的删除：只动本机档案。
+                await deleteProductArchive(services, detail?.params?.id);
                 return;
             // ⚠️ **v0.58 批：这里**没有** `load-image` 分支了** ⇒ ⇒ 装载入口
             // **只有页头那一个** ⇒ ⇒ 视图层**不再**发这条信号 ⇒ ⇒ 这个分支
@@ -2401,12 +1952,12 @@ export async function applyProductBoard(services, rawDescription, options = {}) 
                     Command.patchMemoryMap(plan.ops, expectedRevision),
                 );
             }
-            setMemoryMapError(null);
+
             // ⚠️ 只有**内核接受过**的描述才算「被接受过」（板档案落库门槛）。
             viewStore.setState("product", (prev) => ({ ...prev, acceptedDescription: description }));
         } catch (err) {
             const { code, message } = splitErrorCode(err);
-            setMemoryMapError({ code, message: describeMemoryMapError(code, message) });
+            setNote(`内存图流不可用：${code} ${message}`);
             throw err;
         }
     }
@@ -3058,9 +2609,7 @@ export function wireMemoryMap(commandRouter) {
         current = next;
         // ⚠️ **同一个引用**写进两个视图状态 ⇒ 两个视图不可能显示不同的图。
         viewStore.setState("product", (prev) => ({ ...prev, memoryMap: current }));
-        viewStore.setState("memory-map", (prev) => ({ ...prev, memoryMap: current }));
         publishViewState("product");
-        publishViewState("memory-map");
     });
 
     return {
@@ -3071,9 +2620,7 @@ export function wireMemoryMap(commandRouter) {
         reset() {
             current = null;
             viewStore.setState("product", (prev) => ({ ...prev, memoryMap: current }));
-            viewStore.setState("memory-map", (prev) => ({ ...prev, memoryMap: current }));
             publishViewState("product");
-            publishViewState("memory-map");
         },
         /**
          * 订阅内核侧的内存图流。
@@ -4060,21 +3607,20 @@ async function bootstrap() {
     // 生效 ⇒ 自动提交在「已装载镜像」时会变成「挂起待生效」⇒ 用户刷新
     // 一次就多一次「改了板没反应」的困惑 ⇒ 这里**不发任何命令**。
     const board = await createBoardStoreInstance();
-    ensureBoardState();
     if (board.store) {
         try {
             const entries = await board.store.list();
-            setBoardState({
+            patchProductBoard({
                 archive: Array.isArray(entries) ? entries : [],
                 archiveStatus: "ok",
             });
         } catch (err) {
-            setBoardState({ archiveStatus: "error" });
+            patchProductBoard({ archiveStatus: "error" });
             setNote(`板档案读取失败：${err?.message ?? err}`);
         }
     } else {
         // ⚠️ **显式**降级（不静默）：面板上明说「板档案只存在于本会话」。
-        setBoardState({ archiveStatus: board.status });
+        patchProductBoard({ archiveStatus: board.status });
         if (board.reason) setNote(board.reason);
     }
 

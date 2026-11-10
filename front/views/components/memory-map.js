@@ -591,15 +591,16 @@ export function nextFreeBase(draft, kind, deviceTypes = null) {
         const base = regionBase(region);
         if (base === null) continue;
         const size = parseNumber(region?.size) ?? 0;
-        const end = String(region?.kind) === "peripheral"
+        const memoryKind = String(region?.kind) === "ram" || String(region?.kind) === "rom";
+        const end = memoryKind
+            ? (base + size) >>> 0
             // ⚠️ **外设窗口用内核类型表给的那个**（STAGE-46 · 裁决 E / I）
             // ⇒ ⇒ 查不到才退回占位常量 ⇒ ⇒ **窗口大小只有一个真相**。
-            ? (base + (deviceWindowBytes(deviceTypes, region?.device?.device)
-                ?? PERIPHERAL_WINDOW_BYTES)) >>> 0
-            : (base + size) >>> 0;
+            : (base + (deviceWindowBytes(deviceTypes, region?.device?.device)
+                ?? PERIPHERAL_WINDOW_BYTES)) >>> 0;
         if (end > top) top = end;
     }
-    const aligned = (top + 0xfff) >>> 0;
+    const aligned = ((top + 0xfff) & ~0xfff) >>> 0;
     if (kind === "rom") return String(aligned);
     if (kind === "peripheral") return String(aligned);
     return String(Math.max(aligned, 0x8000_0000) >>> 0);
@@ -1032,12 +1033,14 @@ export function addRegion(draft, kind, deviceTypes = null) {
     const next = cloneDraft(draft ?? defaultDraft());
     // ⚠️ **STAGE-46 · 裁决 E / I**：摆放基址时**外设窗口用内核给的
     //   `window_bytes`** ⇒ ⇒ 查不到才退回占位常量。
-    const base = nextFreeBase(next, kind, deviceTypes);
-    if (kind === "peripheral") {
-        const device = newDevice("gpio");
+    const memory = kind === "ram" || kind === "rom";
+    const deviceKind = kind === "peripheral" ? "gpio" : kind;
+    const base = nextFreeBase(next, memory ? kind : "peripheral", deviceTypes);
+    if (!memory) {
+        const device = newDevice(deviceKind);
         // ⚠️ **id 必须不重**（V-9）⇒ ⇒ 否则内核报 `E_PLT_08` ⇒ ⇒ 那块板
         // **永远装不上**（STAGE-44 施工期实测撞见）。
-        device.id = uniqueDeviceId(next, "gpio");
+        device.id = uniqueDeviceId(next, deviceKind);
         next.regions.push({ kind: "peripheral", base, device });
         return next;
     }
