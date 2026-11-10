@@ -263,9 +263,8 @@ impl PeripheralRegistry {
     ///
     /// ⚠️ That promise is kept by a **read-only validation pass over
     /// every instance** ([`Peripheral::validate_session_state`]) that
-    /// runs **before** the write stage — the peripheral's own integrity
-    /// rules (e.g. the GPIO's `irq_lines` must have exactly
-    /// [`riscv_sim_contract::session::GPIO_PIN_COUNT`] entries) live
+    /// runs **before** the write stage — the per-peripheral identity
+    /// rules (a state must name the instance it is applied to) live
     /// **inside** the peripheral, so the contract layer cannot check
     /// them. Without that pass, a payload whose *second* peripheral is
     /// malformed would leave the *first* one already overwritten.
@@ -347,9 +346,8 @@ pub fn collect_session_state(instances: &[(u32, SharedPeripheral)]) -> M15Periph
 /// 3. **apply** — one instance at a time.
 ///
 /// ⚠️ Phase 2 is **not** redundant with the checks inside
-/// [`Peripheral::restore_session_state`]. A peripheral's own integrity
-/// rules (e.g. the GPIO's `irq_lines` must have exactly
-/// [`riscv_sim_contract::session::GPIO_PIN_COUNT`] entries) live
+/// [`Peripheral::restore_session_state`]. A peripheral's own identity
+/// rules (the state must name the instance it is applied to) live
 /// **inside** the peripheral — the contract layer cannot check them,
 /// because it does not know what the peripheral's state *means*. If
 /// those rules were only checked in the write path, then "write the

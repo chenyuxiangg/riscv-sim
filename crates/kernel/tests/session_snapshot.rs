@@ -639,6 +639,5 @@ fn the_peripheral_state_survives_the_round_trip() {
     assert_eq!(got.outputs, want.outputs, "输出锁存必须回到载荷里的值");
     assert_eq!(got.inputs, want.inputs, "输入锁存必须回到载荷里的值");
     assert_eq!(got.pending_irqs, want.pending_irqs);
-    assert_eq!(got.irq_lines, want.irq_lines);
     assert_eq!(got.now_ps, want.now_ps, "外设自己的时钟必须回到载荷里的值");
 }

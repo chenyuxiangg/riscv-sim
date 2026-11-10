@@ -2106,12 +2106,11 @@ mod tests {
             );
         }
     }
-    /// **A-8** — the contract layer's **session payload** version is
-    /// untouched: a platform description is **not** a session payload, so
-    /// it does not move that number.
+    /// **A-8** — the contract layer's **session payload** version moved
+    /// to 4 when GPIO session state dropped its per-pin IRQ list.
     #[test]
-    fn a8_the_session_payload_version_is_untouched() {
-        assert_eq!(crate::session::SESSION_SNAPSHOT_SCHEMA_VERSION, 3);
+    fn a8_the_session_payload_version_is_four() {
+        assert_eq!(crate::session::SESSION_SNAPSHOT_SCHEMA_VERSION, 4);
     }
     // -----------------------------------------------------------------
     // STAGE-15 · v0.30 · D-141 — the devices' legal value domain
