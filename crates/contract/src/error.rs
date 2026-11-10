@@ -622,6 +622,20 @@ pub const E_PLT_21_MCU_INVALID: u16 = 21;
 /// （本批 4 → 5）。
 pub const E_PLT_22_NO_BOARD: u16 = 22;
 
+/// **一块板声明了多于一个 PLIC**（v0.78 · 单板单 PLIC 收口）。
+///
+/// 本平台只有一个 hart 上下文，且外设的中断源只抬到板上的**主 PLIC**
+/// （第一个 PLIC）⇒ ⇒ 第二个 PLIC 永远收不到外设源 ⇒ ⇒ 允许多个 PLIC
+/// 等于允许「装得上但半通」⇒ ⇒ 在声明期拒掉。
+///
+/// ⚠️ **不复用 [`E_PLT_08_DUPLICATE_DEVICE_ID`]**：那个判的是**两个器件
+/// 用了同一个 id**；这里是**同类型器件的实例数量**超限，两个对象 ⇒
+/// 一码一义 ⇒ 自己一个码。
+///
+/// ⚠️ **也不复用 23**：23 曾是 pinmux 运行时错误码（v0.76 占用，后随
+/// pinmux 器件退役删除）。**退役 ≠ 可以换义复用** ⇒ 从空闲号里取 24。
+pub const E_PLT_24_MULTIPLE_PLIC: u16 = 24;
+
 /// Scenario code: the image wants an address range that the **board in
 /// effect** does not have at all — 「**未知系统**」.
 ///

@@ -233,7 +233,7 @@ export const SUPPORTED_PLATFORM_SCHEMA_VERSIONS = [1, 2, 3, 4, 5];
  * ⚠️ **唯一落点**（STAGE-18 裁决 E）：住在这**一层**（`front/lib/`）⇒ 服务层
  * 与视图层**都从这里 import** ⇒ **一个定义处** ⇒ 依赖方向仍单向。
  */
-export const PLATFORM_RULES_VERSION = 7;
+export const PLATFORM_RULES_VERSION = 8;
 
 // ---------------------------------------------------------------------------
 // 场景码表（STAGE-29 · 裁决 E · v0.44 批）
