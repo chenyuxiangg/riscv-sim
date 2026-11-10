@@ -59,7 +59,7 @@ const DEVICE_ID_PREFIX = Object.freeze({
 /** 器件类型的默认参数（与契约 `DeviceSpec` 的参数表一致）。 */
 const DEVICE_PARAM_DEFAULTS = Object.freeze({
     uart16550: { irq_line: 10, baud_rate: 115200 },
-    gpio: {},
+    gpio: { irq_line: 11 },
     clint: { freq_hz: 10000000, harts: 1 },
     plic: { sources: 32, contexts: 1 },
 });
@@ -86,7 +86,7 @@ export const BUILTIN_TEMPLATES = Object.freeze([
                 Object.freeze({
                     kind: "peripheral",
                     base: 0x40001000,
-                    device: Object.freeze({ device: "gpio", id: "GPIO0" }),
+                    device: Object.freeze({ device: "gpio", id: "GPIO0", irq_line: 11 }),
                 }),
             ]),
         }),

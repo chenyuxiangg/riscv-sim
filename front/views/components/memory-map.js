@@ -92,18 +92,7 @@
 
 import { escapeHtml } from "../../lib/escape.js";
 import { PLATFORM_SCHEMA_VERSION, SCHEMA_VERSION } from "../../lib/message.js";
-// ⚠️ **连线报告**（STAGE-48 · v0.72 · D-177 A）—— 纯函数（显示层）。
-import {
-    describeDroppedWire,
-    describeWiringReport,
-    normalizeWiringReport,
-} from "../../lib/wiring-report.js";
-// ⚠️ **连线编辑面**（v0.74 · STAGE-50 · D-177 的 D）—— **新能力住新模块**
-// ⇒ ⇒ 这里只**调用**它（渲染 + 采集）⇒ ⇒ 连线的形状**只有那一处**。
-import {
-    collectWiring,
-    renderWiringEditor,
-} from "./wiring-editor.js";
+import { renderIrqEditor } from "./irq-editor.js";
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -154,10 +143,6 @@ export const DEVICE_KINDS = Object.freeze([
     "clint",
     "plic",
     "timer_riscv",
-    // ⚠️ **v0.76（STAGE-52）**：pinmux —— 每引脚功能选择寄存器
-    // （偏移 0x4 × 引脚号 · 写功能索引）⇒ ⇒ 内核已实现 ⇒ ⇒ 本清单
-    // 与契约层 `DeviceSpec::KINDS` 逐字相同（跨层门禁逐字比）。
-    "pinmux",
 ]);
 
 /** 区域类型（`RegionSpec` 的三个变体，snake_case 线上名）。 */
@@ -184,7 +169,7 @@ export const PERIPHERAL_WINDOW_BYTES = 0x1000;
  * 裁决 ⇒ 裁决 E）。
  */
 const DEVICE_DEFAULTS = Object.freeze({
-    gpio: { id: "GPIO0" },
+    gpio: { id: "GPIO0", irq_line: 11 },
     uart16550: { id: "UART0", irq_line: 10, baud_rate: 115200 },
     clint: { id: "CLINT", freq_hz: 10000000, harts: 1 },
     plic: { id: "PLIC", sources: 32, contexts: 1 },
@@ -209,7 +194,7 @@ export const DEVICE_LABELS = Object.freeze({
  * @type {Readonly<Record<string, ReadonlyArray<{name: string, label: string}>>>}
  */
 const DEVICE_PARAMS = Object.freeze({
-    gpio: [],
+    gpio: [{ name: "irq_line", label: "中断号 irq_line" }],
     uart16550: [
         { name: "irq_line", label: "中断号 irq_line" },
         { name: "baud_rate", label: "波特率 baud_rate" },
@@ -436,7 +421,9 @@ export function regionToDraft(region) {
         const kindName = String(device.device ?? "gpio");
         const draftDevice = { device: kindName, id: String(device.id ?? "") };
         for (const param of deviceParams(kindName)) {
-            draftDevice[param.name] = String(device[param.name] ?? 0);
+            if (device[param.name] !== undefined) {
+                draftDevice[param.name] = String(device[param.name]);
+            }
         }
         return { kind: "peripheral", base: baseText, device: draftDevice };
     }
@@ -686,7 +673,10 @@ export function draftToDescription(draft) {
                 const device = region?.device ?? {};
                 const kindName = String(device.device ?? "gpio");
                 const wire = { device: kindName, id: String(device.id ?? "") };
-                for (const param of deviceParams(kindName)) wire[param.name] = num(device[param.name]);
+                for (const param of deviceParams(kindName)) {
+                    if (device[param.name] === undefined) continue;
+                    wire[param.name] = num(device[param.name]);
+                }
                 const out = { kind: "peripheral", device: wire };
                 if (base !== null) out.base = base;
                 return out;
@@ -1802,20 +1792,6 @@ export function renderEffectiveSummary(memoryMap) {
  * @param {object|null} memoryMap
  * @returns {string}
  */
-export function renderWiringReport(memoryMap) {
-    const report = normalizeWiringReport(memoryMap?.wiringReport);
-    const summary = describeWiringReport(report);
-    if (!report || report.dropped.length === 0) {
-        return `<p class="muted" data-mmap-wiring="summary">${escapeHtml(summary)}</p>`;
-    }
-    const items = report.dropped
-        .map((one) => `<li>${escapeHtml(describeDroppedWire(one))}</li>`)
-        .join("");
-    return (
-        `<p class="muted" data-mmap-wiring="summary">${escapeHtml(summary)}</p>` +
-        `<ul class="muted" data-mmap-wiring="dropped">${items}</ul>`
-    );
-}
 
 // ---------------------------------------------------------------------------
 // 板档案（STAGE-15 · v0.30 · D-136 / D-140）
@@ -2028,7 +2004,7 @@ export function collectDraft(root, draft) {
     // ⚠️ **连线**（v0.74 · STAGE-50 · D-177 的 D）：面板上的连线输入框
     //   **也是 DOM** ⇒ ⇒ 用户刚敲进去的事件名 / 引脚号**不许**丢 ⇒ ⇒ ⇒
     //   采集**放在最后**做（⇒ ⇒ 器件那几轮改写**已经**落到草稿上了）。
-    return collectWiring(root, next);
+    return next;
 }
 
 /**
@@ -2803,7 +2779,7 @@ export function renderMemoryMapPanel(state) {
 
                 ${renderBasePlanner(state)}
 
-                ${renderWiringEditor({ draft, deviceTypes: state?.deviceTypes ?? null })}
+                ${renderIrqEditor({ draft })}
 
                 ${renderArchivePanel(state)}
 
@@ -2827,7 +2803,6 @@ export function renderMemoryMapPanel(state) {
                 <div class="card">
                     <h3>当前生效的内存图</h3>
                     ${renderEffectiveSummary(memoryMap)}
-                    ${renderWiringReport(memoryMap)}
                 </div>
             </div>
         </section>
