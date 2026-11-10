@@ -77,7 +77,6 @@ import {
     draftToDescription,
     removeRegion,
     renderMemoryMapPanel,
-    renderMemoryMapTable,
     setDeviceKind,
     // ⚠️ **基址规划**（STAGE-46 · v0.70 批 · 台账 D-175 候选 B 的第一半）
     // ⇒ ⇒ 用户自己在前端规划基址 ⇒ ⇒ 平台提供**信息 + 入口**。

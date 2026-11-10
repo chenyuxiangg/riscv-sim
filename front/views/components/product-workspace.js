@@ -35,7 +35,7 @@ import {
 } from "./device-docs.js";
 
 import { PLATFORM_SCHEMA_VERSION } from "../../lib/message.js";
-import { parseErrorCode, renderMemoryMapTable } from "./memory-map.js";
+import { parseErrorCode } from "./memory-map.js";
 import { renderImageLoadStatus } from "./image-loader.js";
 
 /** 创建面板里可勾选的器件（顺序即展示顺序）。 */
@@ -412,10 +412,6 @@ function renderSidebar(state, nodes, locked, dirty) {
                 </div>
                 <p class="pw-tip">${locked ? "锁定：字段只读。解锁后可改基址 / 偏移 / 含义。" : "解锁：可直接改基址 / 偏移 / 含义，改完点「重新载入」才生效。"}</p>
                 ${renderImageLoadStatus(state?.imageLoad ?? null)}
-                <details class="pw-m14">
-                    <summary>当前生效内存映射 (M-14)</summary>
-                    ${renderMemoryMapTable(state?.memoryMap ?? null)}
-                </details>
             </footer>
         </aside>
     `;

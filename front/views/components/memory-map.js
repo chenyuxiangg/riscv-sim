@@ -1528,7 +1528,7 @@ export function renderMapRows(rows) {
 }
 
 /**
- * 当前生效的内存图 → **M-14 内存映射表**（产品视图用）。
+ * 当前生效的内存图 → **M-14 内存映射表**（可复用组件）。
  *
  * ⚠️ **「没有数据」与「数据是空的」必须分得开**（裁决 F）：
  * - 没收到 `memory.map` 事件 ⇒ 「尚无数据」；
@@ -1560,8 +1560,8 @@ export function renderMemoryMapTable(memoryMap) {
 /**
  * 当前生效的内存图的**一句话摘要**（编辑器面板用）。
  *
- * ⚠️ 编辑器**不重复**渲染 M-14 那张表 ⇒ `data-region-*` 钩子在整页里
- * **只有一份**（产品视图那张表）⇒ 脚本按行核对时不会数到两套行。
+ * ⚠️ 编辑器只给摘要，不重复渲染 M-14 表；产品视图左栏的折叠表也已删除
+ * ⇒ 整页不再有 `data-region-*` 行。
  *
  * @param {object|null} memoryMap
  * @returns {string}
