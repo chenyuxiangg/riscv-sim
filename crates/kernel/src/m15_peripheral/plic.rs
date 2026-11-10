@@ -12,14 +12,18 @@
 //!
 //! 基址 `0x0C000000`（QEMU virt 的 `VIRT_PLIC_BASE`）。
 //!
-//! # 三条必须做对的语义（Renode / RISC-V PLIC 规范）
+//! # 四条必须做对的语义（Renode / RISC-V PLIC 规范）
 //!
 //! 1. **claim 读有副作用**：原子选出该 context 最高优先级的待交付源、
 //!    **清掉它的 pending**、压入该 context 的 active 栈；没有可交付源
 //!    时读回 `0`。claim 的判据是「优先级严格大于 threshold」。
+//!    guest 主动 claim 时**不受 active 栈压制**（Renode 同口径）。
 //! 2. **complete 写只弹 active 栈**：源仍为高电平（网关未 retract）且
 //!    仍使能时才**重新置 pending**；源已落下则只移除，不再挂起。
-//! 3. **complete 必须容忍非法 source id**。osz 的 `interrupt_handler` 在
+//! 3. **宿主抬线要再压一层 active**：pending 源除了「已使能 ∧ 大于门限」，
+//!    还必须**严格大于 active 栈顶**才允许抬线（Renode `RefreshInterrupt`）
+//!    ⇒ 避免低优先级源在服务期间造成优先级反转。
+//! 4. **complete 必须容忍非法 source id**。osz 的 `interrupt_handler` 在
 //!    处理**定时器**中断时也会执行 `PLIC_NOTIFY_COMPLETE(base, ctx,
 //!    source_id - 16)`，而定时器的 `source_id` 是 7 ⇒ `7 - 16 = -9` ⇒ 以
 //!    无符号写进 Claim/Complete 寄存器的是 `0xFFFF_FFF7`。⇒ 越界的 id
@@ -331,7 +335,9 @@ impl Plic {
     /// 判据（Renode / RISC-V PLIC）：
     /// - 该源**已挂起**；
     /// - 该源在**这个 context 下已使能**；
-    /// - 该源的优先级**严格大于**这个 context 的门限。
+    /// - 该源的优先级**严格大于**这个 context 的门限；
+    /// - 该源的优先级**严格大于** active 栈顶的优先级（Renode
+    ///   `RefreshInterrupt` 的 `isPending`；active 期间不抬新线）。
     ///
     /// 多个源同时满足时取**优先级最高**的；优先级相同时取**编号最小**的。
     ///
@@ -340,12 +346,23 @@ impl Plic {
     /// ⚠️ 宿主**只能**用这个只读接口抬线；[`Plic::claim`] 是 guest 的
     /// 领取动作，会消费 pending。
     pub fn deliverable_source(&self, context: u32) -> Option<u32> {
+        let active_top = self
+            .active
+            .borrow()
+            .get(context as usize)
+            .and_then(|stack| stack.last().copied());
+        let active_priority = active_top.map_or(0, |source| self.priority[source as usize]);
+        self.highest_pending_source(context, active_priority)
+    }
+
+    /// 在 pending 里选最高优先级的源；`floor` 以下的源不参与。
+    fn highest_pending_source(&self, context: u32, floor: u8) -> Option<u32> {
         let threshold = *self.threshold.get(context as usize)?;
         let pending = self.pending.borrow();
         let mut best: Option<(u8, u32)> = None;
         for source in 1..self.source_count {
             let priority = self.priority[source as usize];
-            if priority <= threshold {
+            if priority <= threshold || priority <= floor {
                 continue;
             }
             let word = (source / 32) as usize;
@@ -371,6 +388,9 @@ impl Plic {
 
     /// **guest claim**：返回源并消费它的 pending，压入该 context 的
     /// active 栈。同一个源在 complete 之前不会再次被 claim。
+    ///
+    /// ⚠️ **不受 active 栈压制**：Renode 的 `AcknowledgePendingInterrupt`
+    /// 只按 pending 优先级选源；「不抬线」是 `RefreshInterrupt` 的事。
     ///
     /// ⚠️ 这是**有副作用**的动作；宿主抬线只能读
     /// [`Plic::deliverable_source`]。
@@ -448,8 +468,12 @@ impl Plic {
     }
 
     /// claim 的 `&self` 实现（寄存器读路径用）。
+    ///
+    /// ⚠️ **claim 不受 active 栈压制**（Renode 的 `AcknowledgePendingInterrupt`
+    /// 只看 pending / 门限；压线发生在 `RefreshInterrupt`）⇒ 用 `floor = 0`
+    /// 走原始仲裁，而不是 [`Plic::deliverable_source`]。
     fn claim_at(&self, context: u32) -> Option<u32> {
-        let source = self.deliverable_source(context)?;
+        let source = self.highest_pending_source(context, 0)?;
         self.set_ip(source, false);
         let mut active = self.active.borrow_mut();
         let stack = active.get_mut(context as usize)?;
@@ -894,6 +918,81 @@ mod tests {
         // 先让 11 完成：它仍为高 ⇒ 重新挂起，才能在 12 面前再次胜出。
         plic.complete(0, 11);
         assert_eq!(plic.claim(0), Some(11));
+    }
+
+    /// active 栈里的高优先级源**压住**低优先级源的交付线；claim 仍可
+    /// 取走低优先级源（Renode 的 `RefreshInterrupt` 只压线、不压 claim）。
+    #[test]
+    fn a_lower_priority_source_does_not_raise_the_line_while_higher_is_active() {
+        let mut plic = Plic::new("PLIC0", PLIC_BASE);
+
+        plic.set_threshold(0, 0);
+        for (source, priority) in [(11u32, 5u8), (12u32, 1u8)] {
+            plic.enable(0, source, true);
+            plic.set_priority(source, priority);
+            plic.request(source);
+        }
+        assert_eq!(plic.deliverable_source(0), Some(11), "先交高优先级源");
+        assert_eq!(plic.claim(0), Some(11));
+        assert!(
+            plic.deliverable_source(0).is_none(),
+            "高优先级源还在 active，低优先级源不得把交付线抬起来"
+        );
+
+        // 网关线落下，complete 才只移除、不重新挂起。
+        plic.set_source_level(11, false);
+        plic.complete(0, 11);
+        assert_eq!(
+            plic.deliverable_source(0),
+            Some(12),
+            "高优先级源完成后，低优先级源才允许交付"
+        );
+    }
+
+    /// 同优先级同样受 active 栈顶压制（Renode 用严格的 `>`）。
+    #[test]
+    fn an_equal_priority_source_does_not_raise_the_line_while_one_is_active() {
+        let mut plic = Plic::new("PLIC0", PLIC_BASE);
+
+        plic.set_threshold(0, 0);
+        for source in [11u32, 12u32] {
+            plic.enable(0, source, true);
+            plic.set_priority(source, 3);
+            plic.request(source);
+        }
+        assert_eq!(plic.claim(0), Some(11), "同优先级取小编号");
+        assert!(
+            plic.deliverable_source(0).is_none(),
+            "同优先级的源不得在 active 期间抬线"
+        );
+
+        plic.set_source_level(11, false);
+        plic.complete(0, 11);
+        assert_eq!(plic.deliverable_source(0), Some(12));
+    }
+
+    /// claim 不读 active 栈：guest 主动认领时仍能拿到下一个 pending 源。
+    #[test]
+    fn claim_ignores_the_active_stack_when_the_guest_asks_again() {
+        let mut plic = Plic::new("PLIC0", PLIC_BASE);
+
+        plic.set_threshold(0, 0);
+        for (source, priority) in [(11u32, 5u8), (12u32, 1u8)] {
+            plic.enable(0, source, true);
+            plic.set_priority(source, priority);
+            plic.request(source);
+        }
+        assert_eq!(plic.claim(0), Some(11));
+        assert!(
+            plic.deliverable_source(0).is_none(),
+            "前置：交付线已被高优先级 active 压住"
+        );
+        assert_eq!(
+            plic.claim(0),
+            Some(12),
+            "claim 是 guest 的主动动作，不受 active 栈压制"
+        );
+        assert!(!plic.pending(12), "第二次 claim 也必须消费源 12 的 pending");
     }
 
     /// **优先级等于门限的源不被交付**（QEMU / SiFive 语义是「> 门限」）。
