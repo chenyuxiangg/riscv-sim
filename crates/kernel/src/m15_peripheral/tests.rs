@@ -385,7 +385,8 @@ fn uart_sub_register_byte_access() {
     uart.receive(0xAB);
     assert_eq!(uart.read(0x0, WriteSize::Byte).unwrap(), 0xAB);
     assert_eq!(uart.read(0x1, WriteSize::Byte).unwrap(), 0x00);
-    assert_eq!(uart.read(0x2, WriteSize::Byte).unwrap(), 0x00);
+    // `0x2` on read is IIR (write is FCR): no enabled source ⇒ 0x01.
+    assert_eq!(uart.read(0x2, WriteSize::Byte).unwrap(), 0x01);
     assert_eq!(uart.read(0x3, WriteSize::Byte).unwrap(), 0x00);
     // Halfword reads span two bytes.
     assert_eq!(uart.read(0x0, WriteSize::Half).unwrap(), 0x00AB);

@@ -182,9 +182,7 @@ use riscv_sim_contract::model::{
     Edge, ImageKind, ImageRef, ImageSource, PlatformTemplateInfo, Project, TraceEvent, TraceFormat,
     TraceSource, WaveformHistory, WaveformStream, WriteSize, SIM_STATE_SCHEMA_VERSION,
 };
-use riscv_sim_contract::platform::{
-    mcu_isa_info, PlatformDescription, RegionSpec,
-};
+use riscv_sim_contract::platform::{mcu_isa_info, PlatformDescription, RegionSpec};
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
 use riscv_sim_contract::protocol::{
     AdminOp, CommandPayload, Direction, EventPayload, HaltReason, MemoryMapOp, Message, Payload,
@@ -1448,58 +1446,65 @@ impl KernelHost {
                 crate::m16_interrupt::TRIGGER_LEVEL,
             );
         } else {
-        // ---- 2) 每个中断外设按**自己的** ⚠️中断号抬 PLIC 源 ----
-        //
-        // ⚠️ UART 只有一个源：RX（IER bit0 ∧ LSR bit0）与 TX-empty
-        //   （IER bit1 ∧ LSR.THRE）**共用**它（物理 16550 只有一根 IRQ 线）。
-        // ⚠️ GPIO 整块只有一个源：任意引脚有待处理事件就抬一次（一次性 ⇒ 消费掉）。
-        let plic = self.devices.first_plic().and_then(|e| self.devices.plic(&e.id));
-        let Some(plic) = plic else { return };
-        for irq in self.peripheral_irqs.iter() {
-            match irq.kind {
-                platform::PeripheralIrqKind::Uart => {
-                    let Some(uart) = self.devices.uart(&irq.id) else { continue };
-                    let (rx, tx) = match uart.try_borrow() {
-                        Ok(u) => {
-                            let ier = u.interrupt_enable();
-                            (
-                                (ier & 0x01) != 0 && (u.line_status() & 0x01) != 0,
-                                (ier & 0x02) != 0 && (u.line_status() & 0x02) != 0,
-                            )
-                        }
-                        Err(_) => continue,
-                    };
-                    if let Ok(mut p) = plic.try_borrow_mut() {
-                        if rx || tx {
-                            p.request(u32::from(irq.source));
-                        } else {
-                            p.set_pending(u32::from(irq.source), false);
+            // ---- 2) 每个中断外设按**自己的** ⚠️中断号抬 PLIC 源 ----
+            //
+            // ⚠️ UART 只有一个源：RX（IER bit0 ∧ LSR bit0）与 TX-empty
+            //   （IER bit1 ∧ LSR.THRE）**共用**它（物理 16550 只有一根 IRQ 线）。
+            // ⚠️ GPIO 整块只有一个源：任意引脚有待处理事件就抬一次（一次性 ⇒ 消费掉）。
+            let plic = self
+                .devices
+                .first_plic()
+                .and_then(|e| self.devices.plic(&e.id));
+            let Some(plic) = plic else { return };
+            for irq in self.peripheral_irqs.iter() {
+                match irq.kind {
+                    platform::PeripheralIrqKind::Uart => {
+                        let Some(uart) = self.devices.uart(&irq.id) else {
+                            continue;
+                        };
+                        let (rx, tx) = match uart.try_borrow() {
+                            Ok(u) => {
+                                let ier = u.interrupt_enable();
+                                (
+                                    (ier & 0x01) != 0 && (u.line_status() & 0x01) != 0,
+                                    u.tx_interrupt_pending(),
+                                )
+                            }
+                            Err(_) => continue,
+                        };
+                        if let Ok(mut p) = plic.try_borrow_mut() {
+                            if rx || tx {
+                                p.request(u32::from(irq.source));
+                            } else {
+                                p.set_pending(u32::from(irq.source), false);
+                            }
                         }
                     }
-                }
-                platform::PeripheralIrqKind::Gpio => {
-                    let Some(gpio) = self.devices.gpio(&irq.id) else { continue };
-                    let any = match gpio.try_borrow_mut() {
-                        Ok(mut g) => {
-                            let mut any = false;
-                            for pin in 0..32u32 {
-                                if g.pending_pin(pin) {
-                                    any = true;
-                                    g.clear_pending_pin(pin);
+                    platform::PeripheralIrqKind::Gpio => {
+                        let Some(gpio) = self.devices.gpio(&irq.id) else {
+                            continue;
+                        };
+                        let any = match gpio.try_borrow_mut() {
+                            Ok(mut g) => {
+                                let mut any = false;
+                                for pin in 0..32u32 {
+                                    if g.pending_pin(pin) {
+                                        any = true;
+                                        g.clear_pending_pin(pin);
+                                    }
                                 }
+                                any
                             }
-                            any
-                        }
-                        Err(_) => continue,
-                    };
-                    if any {
-                        if let Ok(mut p) = plic.try_borrow_mut() {
-                            p.request(u32::from(irq.source));
+                            Err(_) => continue,
+                        };
+                        if any {
+                            if let Ok(mut p) = plic.try_borrow_mut() {
+                                p.request(u32::from(irq.source));
+                            }
                         }
                     }
                 }
             }
-        }
 
             self.intc.controller.borrow_mut().clear(IRQ_SOFTWARE);
         }
@@ -4987,7 +4992,6 @@ mod tests_intc;
 mod tests_m11;
 
 #[cfg(test)]
-
 #[cfg(test)]
 mod tests_v024;
 

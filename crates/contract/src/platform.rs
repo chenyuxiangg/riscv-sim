@@ -49,15 +49,14 @@
 //! ⚠️ **The host-side codes live here too** (V-10 .. V-12): the *rules*
 //! are the host's, but a code with **two** landing spots is a code with
 //! two meanings ⇒ the contract layer owns every `E_PLT-*` number.
-use serde::{Deserialize, Serialize};
 use crate::error::{
     PlatformError, E_PLT_01_SCHEMA_VERSION, E_PLT_02_EMPTY_ID, E_PLT_03_NO_REGIONS,
     E_PLT_04_ZERO_SIZE, E_PLT_05_OVERFLOW, E_PLT_06_OVERLAP, E_PLT_07_OVER_BUDGET,
     E_PLT_08_DUPLICATE_DEVICE_ID, E_PLT_12_PARAMETER_OUT_OF_RANGE, E_PLT_15_DEVICE_EMPTY_ID,
-    E_PLT_16_IRQ_SOURCE_INVALID, E_PLT_18_ROLES_INVALID, E_PLT_21_MCU_INVALID,
-    PLATFORM_FAMILY,
+    E_PLT_16_IRQ_SOURCE_INVALID, E_PLT_18_ROLES_INVALID, E_PLT_21_MCU_INVALID, PLATFORM_FAMILY,
 };
 use crate::session::{REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
+use serde::{Deserialize, Serialize};
 /// Format version of the **platform description**.
 ///
 /// ⚠️ **This is not the session payload's version** and it is not the
@@ -551,13 +550,7 @@ impl DeviceSpec {
     ///
     /// ⚠️ **v0.76（STAGE-52）**：加 `pinmux` ⇒ ⇒ 本清单 **6** 项（契约层
     ///   `DeviceSpec` 第 **6** 个变体）。
-    pub const KINDS: [&'static str; 5] = [
-        "gpio",
-        "uart16550",
-        "clint",
-        "plic",
-        "timer_riscv",
-    ];
+    pub const KINDS: [&'static str; 5] = ["gpio", "uart16550", "clint", "plic", "timer_riscv"];
 }
 impl PlatformDescription {
     /// Validate this description against the frozen rules.
@@ -1015,7 +1008,6 @@ impl PlatformDescription {
                 ));
             }
         }
-
 
         // V-20 — the **role declaration** must name devices that are there
         // (v0.73 · STAGE-49 · D-177 的 C).
@@ -1993,7 +1985,14 @@ mod tests {
                 .and_then(|v| v.as_str())
                 .expect("device tag")
         };
-        assert_eq!(wire(2), DeviceSpec::Gpio { id: "G".into(), irq_line: 11 }.kind());
+        assert_eq!(
+            wire(2),
+            DeviceSpec::Gpio {
+                id: "G".into(),
+                irq_line: 11
+            }
+            .kind()
+        );
         assert_eq!(
             wire(3),
             DeviceSpec::Uart16550 {
@@ -3150,7 +3149,10 @@ mod tests {
     /// ⇒ the case that reaches V-17 at all is exactly the **single** one.
     #[test]
     fn s18_a1_a_single_empty_device_id_is_rejected() {
-        let desc = board_with(vec![DeviceSpec::Gpio { id: String::new(), irq_line: 11 }]);
+        let desc = board_with(vec![DeviceSpec::Gpio {
+            id: String::new(),
+            irq_line: 11,
+        }]);
         let err = desc.validate().expect_err("空 id 的器件必须被拒");
         assert_eq!(err.family, PLATFORM_FAMILY);
         assert_eq!(
@@ -3164,8 +3166,14 @@ mod tests {
     #[test]
     fn s18_a2_two_empty_device_ids_are_still_rejected_by_v9() {
         let desc = board_with(vec![
-            DeviceSpec::Gpio { id: String::new(), irq_line: 11 },
-            DeviceSpec::Gpio { id: String::new(), irq_line: 11 },
+            DeviceSpec::Gpio {
+                id: String::new(),
+                irq_line: 11,
+            },
+            DeviceSpec::Gpio {
+                id: String::new(),
+                irq_line: 11,
+            },
         ]);
         let err = desc.validate().expect_err("两个空 id 的器件必须被拒");
         assert_eq!(err.family, PLATFORM_FAMILY);
@@ -3355,8 +3363,14 @@ mod tests {
     #[test]
     fn s19_a4_two_empty_device_ids_are_still_rejected_by_v9() {
         let desc = board_with(vec![
-            DeviceSpec::Gpio { id: String::new(), irq_line: 11 },
-            DeviceSpec::Gpio { id: String::new(), irq_line: 11 },
+            DeviceSpec::Gpio {
+                id: String::new(),
+                irq_line: 11,
+            },
+            DeviceSpec::Gpio {
+                id: String::new(),
+                irq_line: 11,
+            },
         ]);
         let err = desc.validate().expect_err("两个空 id 的器件必须被拒");
         assert_eq!(err.family, PLATFORM_FAMILY);

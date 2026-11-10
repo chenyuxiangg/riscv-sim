@@ -1696,7 +1696,11 @@ mod tests {
             arch_cause_for_line(IRQ_SOFTWARE),
             Some(CAUSE_MACHINE_SOFTWARE)
         );
-        assert_eq!(arch_cause_for_line(IRQ_SOFTWARE), Some(3), "架构码：软件中断");
+        assert_eq!(
+            arch_cause_for_line(IRQ_SOFTWARE),
+            Some(3),
+            "架构码：软件中断"
+        );
         assert_eq!(arch_mcause_for_line(IRQ_SOFTWARE), Some(0x8000_0003));
         assert_eq!(pending_lines_to_mip_mask(&[IRQ_SOFTWARE]), 1 << 3);
     }

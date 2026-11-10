@@ -58,9 +58,7 @@ use riscv_sim_contract::error::{
     PlatformError, E_PLT_05_OVERFLOW, E_PLT_07_OVER_BUDGET, E_PLT_09_UNKNOWN_PLATFORM,
     E_PLT_10_PLATFORM_FILE_UNREADABLE, E_PLT_11_PLATFORM_FILE_MALFORMED, PLATFORM_FAMILY,
 };
-use riscv_sim_contract::platform::{
-    DeviceSpec, PlatformDescription, RegionSpec,
-};
+use riscv_sim_contract::platform::{DeviceSpec, PlatformDescription, RegionSpec};
 use riscv_sim_contract::port::{Peripheral, TimeSource};
 
 use crate::m14_bus::Bus;
@@ -304,19 +302,6 @@ impl BuiltDevice {
             plic: None,
             gpio: Some(handle),
             pinmux: None,
-        }
-    }
-
-    /// **pinmux** —— 宿主要留句柄（**功能切换 + 中断路由** · v0.76 · STAGE-52）。
-    fn pinmux(device: PinmuxDevice) -> Self {
-        let handle = Rc::new(RefCell::new(device));
-        BuiltDevice {
-            peripheral: handle.clone(),
-            uart: None,
-            clint: None,
-            plic: None,
-            gpio: None,
-            pinmux: Some(handle),
         }
     }
 
@@ -735,7 +720,10 @@ impl TimeSource for ClintTimeSource {
 
 /// 一个「外设 → PLIC 源号」绑定（装载期从描述编译）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PeripheralIrqKind { Uart, Gpio }
+pub enum PeripheralIrqKind {
+    Uart,
+    Gpio,
+}
 
 #[derive(Debug, Clone)]
 pub struct PeripheralIrq {
@@ -748,13 +736,19 @@ pub struct PeripheralIrq {
 pub fn compile_peripheral_irqs(description: &PlatformDescription) -> Vec<PeripheralIrq> {
     let mut out = Vec::new();
     for region in description.regions.iter() {
-        let RegionSpec::Peripheral { device, .. } = region else { continue };
+        let RegionSpec::Peripheral { device, .. } = region else {
+            continue;
+        };
         match device {
             DeviceSpec::Uart16550 { id, irq_line, .. } => out.push(PeripheralIrq {
-                id: id.clone(), kind: PeripheralIrqKind::Uart, source: *irq_line,
+                id: id.clone(),
+                kind: PeripheralIrqKind::Uart,
+                source: *irq_line,
             }),
             DeviceSpec::Gpio { id, irq_line } => out.push(PeripheralIrq {
-                id: id.clone(), kind: PeripheralIrqKind::Gpio, source: *irq_line,
+                id: id.clone(),
+                kind: PeripheralIrqKind::Gpio,
+                source: *irq_line,
             }),
             _ => {}
         }
@@ -772,16 +766,6 @@ pub fn clint_time_source(clint: &Rc<RefCell<Clint>>) -> Rc<dyn TimeSource> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// 连线表（v0.34 · D-125 · 冻结规格 STAGE-19 §3.1）
-// ---------------------------------------------------------------------------
-
-/// 宿主侧**编译出来的一条连线**。
-///
-/// ⚠️ **它不是契约层的 `WiringSpec`**：契约层那份是**描述里的形状**（字段
-/// 名就是线上的名字）；宿主这份是**编译后的形状**——「谁的事件 ⇒ 抬哪个
-/// 源」已经判完了 ⇒ 运行时只需要这两个数。
-// ---------------------------------------------------------------------------
 // 「未知系统」门禁（v0.71 · STAGE-47 · 台账 D-175 候选 C）
 // ---------------------------------------------------------------------------
 

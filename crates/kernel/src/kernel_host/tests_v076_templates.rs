@@ -20,9 +20,7 @@
 use riscv_sim_contract::model::{
     ImageKind, ImageRef, ImageSource, PlatformTemplateInfo, ProductTree, Project, ProjectVersion,
 };
-use riscv_sim_contract::platform::{
-    RegionSpec,
-};
+use riscv_sim_contract::platform::RegionSpec;
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload};
 
 use super::tests_watchdog::dispatch;

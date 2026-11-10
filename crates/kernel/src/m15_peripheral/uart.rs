@@ -182,6 +182,7 @@ pub mod reg {
     /// `0x1` — interrupt enable register / divisor latch high (while
     /// `LCR.DLAB` is set).
     pub const IER: u32 = 0x1;
+    pub const IIR: u32 = 0x2;
     /// `0x0` while `LCR.DLAB` is set — divisor latch **low** byte.
     ///
     /// ⚠️ Same offset as `THR` / `RHR`: `DLAB` is what picks which one
@@ -440,6 +441,7 @@ pub struct Uart16550 {
     rx_overrun: bool,
     /// Latched TX capture overrun (LSR bit 3).
     tx_overrun: bool,
+    tx_int_pending: bool,
     /// The lossless TX capture ring.
     tx: TxCapture,
     /// IRQ line to raise on RX.
@@ -483,6 +485,7 @@ impl Uart16550 {
             rx: VecDeque::new(),
             rx_overrun: false,
             tx_overrun: false,
+            tx_int_pending: false,
             tx: TxCapture::new(tx_capacity),
             irq_line,
             probe: ProbeSlot::default(),
@@ -528,6 +531,23 @@ impl Uart16550 {
     /// The scratch register (`SCR @ 0x7`).
     pub fn scratch(&self) -> u8 {
         self.scr
+    }
+
+    /// The interrupt identification register (`IIR @ 0x2`).
+    pub fn interrupt_id(&self) -> u8 {
+        let rx = self.ier & 0x01 != 0 && !self.rx.is_empty();
+        if rx {
+            0x04
+        } else if self.tx_interrupt_pending() {
+            0x02
+        } else {
+            0x01
+        }
+    }
+
+    /// Whether a THR-empty interrupt is latched for the host.
+    pub fn tx_interrupt_pending(&self) -> bool {
+        self.ier & 0x02 != 0 && self.tx_int_pending
     }
 
     /// The line status register (`LSR @ 0x5`) — see [`lsr_bits`].
@@ -700,7 +720,7 @@ impl Uart16550 {
                     self.ier
                 }
             }
-            reg::FCR => self.fcr,
+            reg::IIR => self.interrupt_id(),
             reg::LCR => self.lcr,
             reg::MCR => self.mcr,
             reg::LSR => self.line_status(),
@@ -718,6 +738,7 @@ impl Uart16550 {
                 if self.dlab_enabled() {
                     self.dll = value;
                 } else {
+                    self.tx_int_pending = false;
                     self.transmit(value);
                 }
             }
@@ -726,6 +747,7 @@ impl Uart16550 {
                     self.dlm = value;
                 } else {
                     self.ier = value;
+                    self.tx_int_pending = value & 0x02 != 0;
                 }
             }
             reg::FCR => {
@@ -1446,7 +1468,8 @@ mod tests {
         assert_eq!(u.read(reg::LCR, WriteSize::Byte).unwrap(), 0x03);
         assert_eq!(u.read(reg::MCR, WriteSize::Byte).unwrap(), 0x0B);
         assert_eq!(u.read(reg::SCR, WriteSize::Byte).unwrap(), 0x5A);
-        assert_eq!(u.read(reg::FCR, WriteSize::Byte).unwrap(), 0x07);
+        // `0x2` on read is IIR; IER bit1 is enabled ⇒ THRI = 0x02.
+        assert_eq!(u.read(reg::IIR, WriteSize::Byte).unwrap(), 0x02);
         assert_eq!(u.read(reg::IER, WriteSize::Byte).unwrap(), 0x02);
     }
 
@@ -1742,5 +1765,50 @@ mod tests {
             err.scenario,
             super::super::E_PER_04_UNSUPPORTED_SESSION_STATE
         );
+    }
+}
+
+/// IIR（`0x2` 读）与 THR-empty 锁存的回归用例。
+#[cfg(test)]
+mod iir_tests {
+    use super::*;
+
+    fn uart() -> Uart16550 {
+        Uart16550::new("UART0", 0x1000_0000, 115_200, 10)
+    }
+
+    /// IER bit0 使能且 RX 有字节 ⇒ `IIR` 返回 `0x04`。
+    #[test]
+    fn iir_reports_rx_available_when_ier_bit0_is_set() {
+        let mut u = uart();
+        u.write(reg::IER, WriteSize::Byte, 0x01).expect("write IER");
+        u.receive(b'A');
+        assert_eq!(u.read(reg::IIR, WriteSize::Byte).unwrap(), 0x04);
+    }
+
+    /// IER bit1 使能 ⇒ `IIR` 返回 `0x02`（THRI）。
+    #[test]
+    fn iir_reports_thr_empty_when_ier_bit1_is_set() {
+        let mut u = uart();
+        u.write(reg::IER, WriteSize::Byte, 0x02).expect("write IER");
+        assert_eq!(u.read(reg::IIR, WriteSize::Byte).unwrap(), 0x02);
+    }
+
+    /// 写 `THR` 清掉 THRI ⇒ 下一次读 `IIR` 回到 `0x01`。
+    #[test]
+    fn writing_thr_clears_the_thr_empty_interrupt() {
+        let mut u = uart();
+        u.write(reg::IER, WriteSize::Byte, 0x02).expect("write IER");
+        assert_eq!(u.read(reg::IIR, WriteSize::Byte).unwrap(), 0x02);
+        u.write(reg::THR, WriteSize::Byte, u32::from(b'x'))
+            .expect("write THR");
+        assert_eq!(u.read(reg::IIR, WriteSize::Byte).unwrap(), 0x01);
+    }
+
+    /// 两个源都屏蔽 ⇒ `IIR` 返回 `0x01`（无中断）。
+    #[test]
+    fn iir_reports_no_interrupt_when_all_sources_are_masked() {
+        let u = uart();
+        assert_eq!(u.read(reg::IIR, WriteSize::Byte).unwrap(), 0x01);
     }
 }
