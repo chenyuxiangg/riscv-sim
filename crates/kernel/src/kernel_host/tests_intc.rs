@@ -15,8 +15,9 @@ use crate::m14_bus::BusWidth;
 use crate::m15_peripheral::gpio::reg as gpio_reg;
 use riscv_sim_contract::csr::{IRQ_SOFTWARE, IRQ_TIMER_COMPARE};
 use riscv_sim_contract::model::{
-    Edge, ImageKind, ImageRef, ImageSource, ProductTree, Project, ProjectVersion,
+    Edge, ImageKind, ImageRef, ImageSource, ProductTree, Project, ProjectVersion, WriteSize,
 };
+use riscv_sim_contract::port::Peripheral;
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload, Message};
 
 use super::{KernelHost, DEMO_FIRMWARE_BYTES};
@@ -343,6 +344,9 @@ fn gpio_pending_survives_host_sync_and_is_cleared_by_guest_w1c() {
 
     let gpio = host.devices.gpio("GPIO0").expect("qemu-virt 必须有 GPIO0");
     gpio.borrow_mut().set_directions(0);
+    gpio.borrow_mut()
+        .write(gpio_reg::RISE_IE, WriteSize::Word, 0b101)
+        .expect("使能两路输入的上升沿");
     gpio.borrow_mut().set_external_inputs(0b101);
     assert!(
         gpio.borrow().pending_pin(0) && gpio.borrow().pending_pin(2),
@@ -386,5 +390,47 @@ fn gpio_pending_survives_host_sync_and_is_cleared_by_guest_w1c() {
     assert!(
         !plic.borrow().pending(GPIO_IRQ_SOURCE),
         "全部 pending 清零之后 PLIC 源必须被撤掉"
+    );
+}
+
+/// **未使能的边沿不许抬 PLIC 源**（RISE_IE/FALL_IE 的端到端判别力）。
+#[test]
+fn gpio_pending_requires_edge_enable_to_reach_plic() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_QEMU_VIRT)
+                .expect("内置 qemu-virt 必须存在"),
+            expected_revision: None,
+        },
+    );
+
+    const GPIO_IRQ_SOURCE: u32 = 11;
+    let gpio = host.devices.gpio("GPIO0").expect("qemu-virt 必须有 GPIO0");
+    let plic = host.devices.plic("PLIC").expect("qemu-virt 必须有 PLIC");
+    gpio.borrow_mut().set_directions(0);
+
+    // 未使能：边沿不进 pending，也不许抬 PLIC 源。
+    gpio.borrow_mut().set_external_inputs(0b1);
+    host.sync_interrupts_now();
+    assert!(!gpio.borrow().pending_pin(0), "未使能的边沿不许进 pending");
+    assert!(
+        !plic.borrow().pending(GPIO_IRQ_SOURCE),
+        "没有 pending 就不许抬 PLIC 源"
+    );
+
+    // 使能上升沿之后：从 0 回到 1 必须进 pending 并抬源。
+    gpio.borrow_mut()
+        .write(gpio_reg::RISE_IE, WriteSize::Word, 0b1)
+        .expect("使能上升沿");
+    gpio.borrow_mut().set_external_inputs(0b0);
+    assert!(!gpio.borrow().pending_pin(0), "下降沿仍未使能");
+    gpio.borrow_mut().set_external_inputs(0b1);
+    host.sync_interrupts_now();
+    assert!(gpio.borrow().pending_pin(0), "已使能的上升沿必须进 pending");
+    assert!(
+        plic.borrow().pending(GPIO_IRQ_SOURCE),
+        "有 pending 就必须抬 PLIC 源"
     );
 }

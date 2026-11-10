@@ -80,6 +80,8 @@ export const DEVICE_DOCS = Object.freeze({
             { offset: "0x008", name: "IN", meaning: "引脚当前电平（只读）", width: 4 },
             { offset: "0x00C", name: "TOGGLE", meaning: "按位翻转输出（写 1 翻转）", width: 4 },
             { offset: "0x010", name: "PENDING", meaning: "引脚边沿挂起位图（写 1 清，W1C）", width: 4 },
+            { offset: "0x014", name: "RISE_IE", meaning: "引脚上升沿中断使能", width: 4 },
+            { offset: "0x018", name: "FALL_IE", meaning: "引脚下降沿中断使能", width: 4 },
         ]),
     }),
     clint: Object.freeze({

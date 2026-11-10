@@ -75,6 +75,11 @@
 //! [`crate::platform::DeviceSpec::Gpio`] 的 `irq_line`），不属于外设
 //! 运行态 ⇒ [`SESSION_SNAPSHOT_SCHEMA_VERSION`] **3 → 4**。
 //!
+//! ⚠️ **v5 是破坏性变更**：`GpioStateDto` 加了 `rise_enable` /
+//! `fall_enable`（逐引脚上升/下降沿中断使能）—— 这是新的运行态，
+//! 不随快照走就会在还原后丢配置 ⇒
+//! [`SESSION_SNAPSHOT_SCHEMA_VERSION`] **4 → 5**。
+//!
 //! ⚠️ **前端不受影响**：`front/lib/message.js` 镜像的是**协议**的
 //! `schema_version`（5），**不是**会话快照的 schema ⇒ 契约层升版
 //! **不需要**动前端。
@@ -115,7 +120,10 @@ use crate::snapshot::{EngineSnapshotDto, SNAPSHOT_FAMILY, SNAPSHOT_SCHEMA_VERSIO
 /// ⚠️ **v4**：`GpioStateDto` **删掉** `irq_lines`（逐引脚中断线）——
 /// 中断号属于板级描述（每个外设一个 PLIC 源号），不是外设运行态 ⇒
 /// 快照形状变了 ⇒ 版本再升一次。
-pub const SESSION_SNAPSHOT_SCHEMA_VERSION: u32 = 4;
+/// ⚠️ **v5**：`GpioStateDto` 加了 `rise_enable` / `fall_enable`
+/// （逐引脚上升/下降沿中断使能）—— 这是新的运行态，不随快照走就会
+/// 在还原后丢配置 ⇒ 形状变了 ⇒ 版本再升一次。
+pub const SESSION_SNAPSHOT_SCHEMA_VERSION: u32 = 5;
 
 /// Number of pins in a **GPIO bank** — the single landing spot for that
 /// number.
@@ -400,6 +408,10 @@ pub struct GpioStateDto {
     pub outputs: u32,
     /// Input latch.
     pub inputs: u32,
+    /// Per-pin rising-edge interrupt enable mask.
+    pub rise_enable: u32,
+    /// Per-pin falling-edge interrupt enable mask.
+    pub fall_enable: u32,
     /// Pending IRQ bitmask.
     pub pending_irqs: u32,
     /// Peripheral's authoritative virtual timestamp — **decimal string**.
@@ -1206,6 +1218,8 @@ mod tests {
                     directions: 0xF,
                     outputs: 0x1,
                     inputs: 0x2,
+                    rise_enable: 0,
+                    fall_enable: 0,
                     pending_irqs: 0,
                     now_ps: 600,
                 }],
@@ -1345,11 +1359,13 @@ mod tests {
             gk,
             vec![
                 "directions",
+                "fall_enable",
                 "id",
                 "inputs",
                 "now_ps",
                 "outputs",
                 "pending_irqs",
+                "rise_enable",
             ],
             "GPIO 状态的键集必须精确固定——多一个字段就是载荷形状变了"
         );
@@ -1857,6 +1873,8 @@ mod tests {
             directions: 0,
             outputs: 0,
             inputs: 0,
+            rise_enable: 0,
+            fall_enable: 0,
             pending_irqs: 0,
             now_ps: 0,
         };
@@ -1950,11 +1968,12 @@ mod tests {
     /// `mem_pages` 的**语义**改成「只装写过的页」。
     ///
     /// ⚠️ **v4**：`GpioStateDto` 删掉逐引脚 `irq_lines`。
+    /// ⚠️ **v5**：`GpioStateDto` 加了 `rise_enable` / `fall_enable`。
     #[test]
-    fn the_session_snapshot_schema_version_is_four() {
+    fn the_session_snapshot_schema_version_is_five() {
         assert_eq!(
-            SESSION_SNAPSHOT_SCHEMA_VERSION, 4,
-            "会话载荷的格式版本必须是 4——v4 删掉了 GPIO 的逐引脚 irq_lines"
+            SESSION_SNAPSHOT_SCHEMA_VERSION, 5,
+            "会话载荷的格式版本必须是 5——v5 给 GPIO 加了逐引脚边沿使能"
         );
     }
 
