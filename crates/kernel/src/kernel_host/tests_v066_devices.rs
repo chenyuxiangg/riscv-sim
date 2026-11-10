@@ -92,23 +92,16 @@ fn instances_of(events: &[EventPayload]) -> Vec<riscv_sim_contract::model::Devic
 // K 组
 // ---------------------------------------------------------------------------
 
-/// K-1 —— 类型注册表**含 6 种**（内核实现了 6 种；那个定时器**如实**报出来）。
+/// K-1 —— 类型注册表**含 5 种**（内核实现了 5 种；那个定时器**如实**报出来）。
 #[test]
-fn the_type_registry_reports_the_six_types_the_kernel_implements() {
+fn the_type_registry_reports_the_five_types_the_kernel_implements() {
     let mut host = host();
     let events = dispatch(&mut host, CommandPayload::ListDeviceTypes);
     let types = types_of(&events);
     let kinds: Vec<&str> = types.iter().map(|t| t.kind.as_str()).collect();
     assert_eq!(
         kinds,
-        vec![
-            "clint",
-            "gpio",
-            "pinmux",
-            "plic",
-            "timer_riscv",
-            "uart16550"
-        ],
+        vec!["clint", "gpio", "plic", "timer_riscv", "uart16550"],
         "类型注册表的内容不对（顺序按类型名升序）",
     );
 }

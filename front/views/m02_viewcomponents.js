@@ -101,7 +101,6 @@ import {
 } from "./components/product-workspace.js";
 // ⚠️ **连线编辑面**（v0.74 · STAGE-50 · D-177 的 D）—— **新能力住新模块**
 // ⇒ ⇒ 视图层只**调用**它（加一根 / 删一根）⇒ ⇒ 形状**只有那一处**。
-import { addWiring, removeWiring } from "./components/wiring-editor.js";
 import {
     publishProductState,
     renderImageLoadStatus,
@@ -699,7 +698,6 @@ const memoryMapView = register({
         if (!action) return undefined;
         const index = Number(el?.dataset?.mmapIndex ?? -1);
         // ⚠️ **连线那套索引**（v0.74 · STAGE-50）—— 与段表的索引**各管各的**。
-        const wireIndex = Number(el?.dataset?.wiringIndex ?? -1);
         const root = memoryMapPanel;
         switch (action) {
             case "add-ram":
@@ -739,27 +737,6 @@ const memoryMapView = register({
                 viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
                 publishMemoryMapState();
                 return "cmd-remove-region";
-            }
-            case "add-wiring": {
-                // ⚠️ **加一根线**（v0.74 · STAGE-50 · D-177 的 D）。
-                //
-                // ⚠️ **先采集再改**：用户正在敲的数**不许**被这次点击冲掉。
-                const base = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
-                const draft = addWiring(base);
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-                publishMemoryMapState();
-                return "cmd-add-wiring";
-            }
-            case "remove-wiring": {
-                // ⚠️ **删一根线**（v0.74 · STAGE-50 · D-177 的 D）。
-                //
-                // ⚠️ **索引取自那枚按钮自己**（`data-wiring-index`）⇒ ⇒ 不与
-                //   段表的索引混用（两套索引**各自**一套）。
-                const base = root ? collectDraft(root, memoryMapDraft()) : memoryMapDraft();
-                const draft = removeWiring(base, wireIndex);
-                viewStore.setState("memory-map", (prev) => ({ ...prev, draft }));
-                publishMemoryMapState();
-                return "cmd-remove-wiring";
             }
             case "load-current": {
                 // ⚠️ **v0.76（STAGE-52 · 裁决 M）**：「从内置模版开始」升级为

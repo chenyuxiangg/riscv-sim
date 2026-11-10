@@ -1102,8 +1102,6 @@ impl KernelHost {
             peripheral_irqs: Vec::new(),
             // ⚠️ v0.72（STAGE-48 · D-177 A）：丢线报告**随图**重算 ⇒ 这里
             // 只是**初值**（还没有建图 ⇒ 没有线 ⇒ 0 根）。
-            // ⚠️ v0.76（STAGE-52 · C1/J/K）：pinmux 路由表**随图**重算 ⇒
-            // 这里只是**初值**（还没有建图 ⇒ 没有引脚路由）。
             roles: platform::ResolvedRoles::default(),
             console_backlog: Vec::new(),
             hms,
@@ -1338,8 +1336,6 @@ impl KernelHost {
         // ⇒ ⇒ 两者**同源** ⇒ ⇒ 报告说的**就是**表里的那些线 ⇒ ⇒ 不会
         // 出现「报告说丢了、表里还在」这种自相矛盾。
         self.peripheral_irqs = platform::compile_peripheral_irqs(description);
-        // ⚠️ **v0.76（STAGE-52 · C1/J/K）**：pinmux 路由表**随图重算** ⇒ ⇒
-        // 改板之后**不留**上一份的残留（与连线表同一条纪律）。
         Ok(())
     }
 
@@ -5100,12 +5096,6 @@ mod tests_v073_schema;
 /// ⚠️ **引脚级**（`wiring.from.pin`）⇒ ⇒ 源可以是 **GPIO 的某个引脚**；
 /// ⚠️ **通用路由** ⇒ ⇒ 事件从「只有 `rx_ready`」扩成**词表**（⇒ ⇒ 语义由
 ///   事件名决定：电平 / 一次性）。
-#[cfg(test)]
-
-/// pinmux 中断路由的**宿主侧运行时门禁**（v0.76 · STAGE-52 · K-4 ~ K-10）。
-///
-/// ⚠️ 与 `tests_v074_pin_routing`（接线路径）**并行不互写**（K-6 · 分层
-/// 禁令）⇒ ⇒ 各自单独一个文件 ⇒ 「接线一条不改仍绿」由 `git diff` 一眼可见。
 #[cfg(test)]
 
 /// **v0.75（STAGE-51 · D-175 的 F）** —— MCU 概念：ISA 门禁的 K 组 / A-3 / X-1。

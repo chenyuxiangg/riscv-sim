@@ -633,7 +633,7 @@ describe("板级内存图 · 描述形状（契约逐字同形）", () => {
         const description = mm.draftToDescription(draft);
         const peripheral = description.regions.find((r) => r.kind === "peripheral");
         assert.equal(peripheral.device.device, "gpio");
-        assert.deepEqual(Object.keys(peripheral.device).sort(), ["device", "id"]);
+        assert.deepEqual(Object.keys(peripheral.device).sort(), ["device", "id", "irq_line"]);
     });
 
     test("非法数字**不写进草稿**（前端不猜用户的意图）", () => {

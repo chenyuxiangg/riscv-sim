@@ -26,7 +26,6 @@ use riscv_sim_contract::session::GPIO_PIN_COUNT;
 
 use super::clint::{self, reg as clint_reg};
 use super::gpio::{self, reg as gpio_reg};
-use super::pinmux::{self};
 use super::plic::{self, reg as plic_reg};
 use super::timer::{self, reg as timer_reg};
 use super::uart::{self, reg as uart_reg};
@@ -121,15 +120,6 @@ pub const DEVICE_TYPES: &[DeviceTypeEntry] = &[
         ],
         pin_count: None,
     },
-    DeviceTypeEntry {
-        kind: "pinmux",
-        window_bytes: pinmux::PINMUX_WINDOW,
-        // ⚠️ 寄存器 = 每引脚一个功能选择（偏移 `4×引脚号`）⇒ ⇒ 类型表里
-        //   登记首寄存器（引脚 0 的选择位）即可 —— 完整映射是**规则偏移**。
-        registers: &[("FUNCSEL_0", 0x0)],
-        // ⚠️ 服务 GPIO 的引脚 ⇒ ⇒ 引脚数 = GPIO_PIN_COUNT（一个落点）。
-        pin_count: Some(GPIO_PIN_COUNT as u32),
-    },
 ];
 
 /// The registry → the contract layer's DTO（**the wire shape**）.
@@ -202,21 +192,14 @@ pub fn window_bytes(kind: &str) -> Option<u32> {
 mod tests {
     use super::*;
 
-    /// STAGE-43 K-1 —— the registry holds the **six** types the kernel
+    /// STAGE-43 K-1 —— the registry holds the **five** types the kernel
     /// implements（the timer included — 裁决 J: it is reported honestly).
     #[test]
-    fn the_registry_holds_the_six_types_the_kernel_implements() {
+    fn the_registry_holds_the_five_types_the_kernel_implements() {
         let kinds: Vec<&str> = DEVICE_TYPES.iter().map(|e| e.kind).collect();
         assert_eq!(
             kinds,
-            vec![
-                "gpio",
-                "uart16550",
-                "clint",
-                "plic",
-                "timer_riscv",
-                "pinmux"
-            ]
+            vec!["gpio", "uart16550", "clint", "plic", "timer_riscv"]
         );
     }
 

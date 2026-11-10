@@ -139,10 +139,10 @@ const QEMU_VIRT_DESC = {
 // ---------------------------------------------------------------------------
 
 describe("STAGE-52 · 模板库（裁决 M · N 组）", () => {
-    test("N-1 `DEVICE_KINDS` 逐字含 `pinmux`（与契约层 DeviceSpec::KINDS 同批）", () => {
+    test("N-1 `DEVICE_KINDS` 已不含已退役的 `pinmux`（与契约层 DeviceSpec::KINDS 同批）", () => {
         assert.ok(
-            mm.DEVICE_KINDS.includes("pinmux"),
-            "DEVICE_KINDS 必须含 pinmux（v0.76 新增器件）",
+            !mm.DEVICE_KINDS.includes("pinmux"),
+            "pinmux 已退役 ⇒ 前端清单不得再列出它",
         );
         // ⚠️ 跨层逐字：从契约源码读 `KINDS` 数组 ⇒ ⇒ 前端这份必须**包含**
         // 契约那份（前端只展示内核认识的器件）。
