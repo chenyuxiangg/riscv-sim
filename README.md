@@ -80,7 +80,7 @@
 | UART（ns16550） | 8 字节寄存器 + DLAB 真切换 + 无损 TX 捕获环 + 16 字节 RX FIFO |
 | CLINT | `msip` / `mtimecmp` / `mtime` |
 | PLIC | priority / pending / enable / threshold / claim + complete |
-| GPIO | PL061 布局，驱动探针边沿；**整块 GPIO 一个 PLIC 源号**，任意引脚边沿锁进 `pending_irqs` 位图 |
+| GPIO | 通用 32 位 bank，驱动探针边沿；**整块 GPIO 一个 PLIC 源号**，任意引脚边沿锁进 `pending_irqs` 位图，guest 写 `PENDING`（0x10）W1C 消费 |
 | 中断控制器 | 保序挂起队列 + 同线去重 + 优先级仲裁 + 拉取式交付 |
 
 ### 平台与内存图

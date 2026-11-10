@@ -62,10 +62,10 @@ fn the_default_description_builds_the_default_memory_map() {
     let regions = host.bus().export_map().regions;
 
     // ⚠️ **架构字面量**（今天的 Default 档）：低段 RAM 1 MiB ·
-    // GPIO0 @ 0x4000_0000（窗口 16 字节）· 高段 RAM 4 MiB。
+    // GPIO0 @ 0x4000_0000（窗口 20 字节）· 高段 RAM 4 MiB。
     let expected: [(u32, u32, &str, &str); 3] = [
         (0x0000_0000, 0x0010_0000, "ram", ""),
-        (0x4000_0000, 0x0000_0010, "peripheral", "GPIO0"),
+        (0x4000_0000, 0x0000_0014, "peripheral", "GPIO0"),
         (0x8000_0000, 0x0040_0000, "ram", ""),
     ];
     assert_eq!(
@@ -106,7 +106,7 @@ fn the_qemu_virt_description_builds_the_qemu_virt_memory_map() {
         (0x0200_0000, 0x0001_0000, "peripheral", "CLINT"),
         (0x0C00_0000, 0x0021_0000, "peripheral", "PLIC"),
         (0x1000_0000, 0x0000_0008, "peripheral", "UART0"),
-        (0x4000_0000, 0x0000_0010, "peripheral", "GPIO0"),
+        (0x4000_0000, 0x0000_0014, "peripheral", "GPIO0"),
         (0x8000_0000, 0x0800_0000, "ram", ""),
     ];
     assert_eq!(
@@ -130,7 +130,8 @@ fn the_qemu_virt_description_builds_the_qemu_virt_memory_map() {
 /// 大小 ⇒ 断言的是**架构字面量**。
 ///
 /// ⚠️ 四个窗口：UART0 = **8 字节** · CLINT = **64 KiB** · PLIC =
-/// **0x21_0000** · GPIO0 = **16 字节**。
+/// **0x21_0000** · GPIO0 = **20 字节**（5 个 32 位寄存器，含 W1C
+/// `PENDING`）。
 #[test]
 fn the_peripheral_window_size_comes_from_the_device() {
     let host =
@@ -141,7 +142,7 @@ fn the_peripheral_window_size_comes_from_the_device() {
         (0x1000_0000, 0x0000_0008), // UART0
         (0x0200_0000, 0x0001_0000), // CLINT
         (0x0C00_0000, 0x0021_0000), // PLIC
-        (0x4000_0000, 0x0000_0010), // GPIO0
+        (0x4000_0000, 0x0000_0014), // GPIO0
     ];
     for (base, window) in expected {
         let region = regions

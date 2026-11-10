@@ -464,14 +464,44 @@ fn gpio_out_write_latches_irq_on_each_edge() {
     // First OUT write: pin 2 rises 0 → 1.
     let _ = gpio.write(0x4, WriteSize::Byte, 1 << 2);
     assert!(gpio.pending_pin(2), "rising OUT edge must latch");
-    gpio.clear_pending_pin(2);
+    gpio.write(gpio::reg::PENDING, WriteSize::Word, 1 << 2)
+        .expect("W1C 清 pending");
     // Second OUT write: pin 2 stays high → no edge.
     let _ = gpio.write(0x4, WriteSize::Byte, 1 << 2);
     assert!(!gpio.pending_pin(2), "unchanged level must not latch");
     // Third OUT write: pin 2 falls 1 → 0.
     let _ = gpio.write(0x4, WriteSize::Byte, 0);
     assert!(gpio.pending_pin(2), "falling OUT edge must latch");
-    gpio.clear_pending_pin(2);
+    gpio.write(gpio::reg::PENDING, WriteSize::Word, 1 << 2)
+        .expect("W1C 清 pending");
+}
+
+/// **GPIO PENDING 必须可读、且是 W1C**（Renode 的消费口径）。
+///
+/// 位图由外设锁存：边沿置位；guest 读到的是「哪些引脚还在挂起」；
+/// 写 1 清对应位、写 0 不影响其他位。
+#[test]
+fn gpio_pending_register_is_readable_and_write_one_to_clear() {
+    let mut gpio = GpioBank::new("GPIO0", 0);
+    gpio.set_directions(0);
+    gpio.set_external_inputs(0b101);
+
+    assert_eq!(
+        gpio.read(gpio::reg::PENDING, WriteSize::Word)
+            .expect("PENDING 必须可读"),
+        0b101,
+        "两路输入边沿都必须锁进 pending 位图"
+    );
+
+    gpio.write(gpio::reg::PENDING, WriteSize::Word, 0b001)
+        .expect("PENDING 必须可写（W1C）");
+    assert_eq!(
+        gpio.read(gpio::reg::PENDING, WriteSize::Word).unwrap(),
+        0b100,
+        "只清写 1 的位，其他挂起位必须保留"
+    );
+    assert!(gpio.pending_pin(2), "未写 1 的位不许被顺手清掉");
+    assert!(!gpio.pending_pin(0), "写 1 的位必须被清掉");
 }
 
 #[test]
