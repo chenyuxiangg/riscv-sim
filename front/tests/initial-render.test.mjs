@@ -40,5 +40,5 @@ test("初始路由的 render 事件不丢失（视图体必须已渲染）", () 
         body.innerHTML.includes("产品树"),
         `初始视图体是空的 —— 首次 render 事件被丢弃（innerHTML 长度 ${body.innerHTML.length}）`,
     );
-    assert.ok(body.innerHTML.includes("内存映射"), "初始视图体缺少内存映射区");
+    assert.ok(body.innerHTML.includes("内存展示区"), "初始视图体缺少双栏右窗");
 });

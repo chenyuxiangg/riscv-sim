@@ -110,6 +110,17 @@ function typeInto(el, value) {
     el.dispatchEvent(new Event("input"));
 }
 
+describe("产品视图 · 生效内存映射不再占左栏", () => {
+    test("M-14 折叠表已删除，只留左树与右器件窗口", () => {
+        setupLoaded();
+        assert.equal($(".pw-m14"), null, "左栏不该再有 M-14 折叠表");
+        assert.ok(
+            !dom.document.body.textContent.includes("当前生效内存映射"),
+            "页面不该再出现「当前生效内存映射」",
+        );
+    });
+});
+
 describe("产品视图 · 默认空态", () => {
     test("没装载产品 ⇒ 左栏只有两个入口，右栏居中「内存展示区」", () => {
         setupEmpty();

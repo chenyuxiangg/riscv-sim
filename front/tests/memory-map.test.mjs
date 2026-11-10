@@ -448,12 +448,20 @@ describe("板级内存图 · 编辑器（规格 §3.3）", () => {
 });
 
 describe("板级内存图 · M-14 内存映射表显示真数据（C-4）", () => {
+    let tableHost = null;
+    /** 直接渲染表组件（产品视图左栏的折叠表已删除，组件本身仍受门禁）。 */
+    function renderTable(memoryMap) {
+        if (!tableHost) {
+            tableHost = dom.document.createElement("div");
+            dom.document.body.appendChild(tableHost);
+        }
+        tableHost.innerHTML = mm.renderMemoryMapTable(memoryMap);
+        return tableHost;
+    }
+
     test("C-4 内存映射表显示内核推来的**真数据**", () => {
-        setup("#/product");
-        const router = fakeKernel();
-        app.wireMemoryMap(router);
-        assert.equal(router.emitMemoryMap(USER_BOARD, false), true, "内核该推这个事件");
-        const rows = $$("[data-region-base]");
+        const host = renderTable({ description: USER_BOARD, pending: false });
+        const rows = host.querySelectorAll("[data-region-base]");
         assert.equal(rows.length, 2, "内存映射表该有两行");
         assert.equal(rows[0].getAttribute("data-region-base"), "2147483648");
         assert.equal(rows[0].getAttribute("data-region-kind"), "ram");
@@ -463,11 +471,8 @@ describe("板级内存图 · M-14 内存映射表显示真数据（C-4）", () =
     });
 
     test("C-4 外设行**不挂** `data-region-size`（窗口大小由器件自报，没有数据源）", () => {
-        setup("#/product");
-        const router = fakeKernel();
-        app.wireMemoryMap(router);
-        router.emitMemoryMap(USER_BOARD, false);
-        const rows = $$("[data-region-base]");
+        const host = renderTable({ description: USER_BOARD, pending: false });
+        const rows = host.querySelectorAll("[data-region-base]");
         const peripheral = rows.find((r) => r.getAttribute("data-region-kind") === "peripheral");
         assert.ok(peripheral, "没有外设行");
         assert.equal(
@@ -481,11 +486,8 @@ describe("板级内存图 · M-14 内存映射表显示真数据（C-4）", () =
     });
 
     test("C-4 `data-region-base` / `data-region-size` 是**十进制字符串**", () => {
-        setup("#/product");
-        const router = fakeKernel();
-        app.wireMemoryMap(router);
-        router.emitMemoryMap(USER_BOARD, false);
-        for (const row of $$("[data-region-base]")) {
+        const host = renderTable({ description: USER_BOARD, pending: false });
+        for (const row of host.querySelectorAll("[data-region-base]")) {
             const base = row.getAttribute("data-region-base");
             assert.match(base, /^[0-9]+$/, `base 必须是十进制字符串：${base}`);
             const size = row.getAttribute("data-region-size");
@@ -502,22 +504,20 @@ describe("板级内存图 · M-14 内存映射表显示真数据（C-4）", () =
     });
 
     test("C-4 「没有数据」与「数据是空的」分得开", () => {
-        setup("#/product");
+        const emptyHost = renderTable(null);
         assert.ok(
-            $("[data-memory-map-table='no-data']"),
+            emptyHost.querySelector("[data-memory-map-table='no-data']"),
             "没收到事件时必须显示「尚无数据」",
         );
-        const router = fakeKernel();
-        app.wireMemoryMap(router);
-        router.emitMemoryMap(
-            {
+        const zeroHost = renderTable({
+            description: {
                 schema_version: 1, id: "empty", name: "空板", priority: 0,
                 auto_selectable: false, region_budget_bytes: 0, regions: [],
             },
-            false,
-        );
+            pending: false,
+        });
         assert.ok(
-            $("[data-memory-map-table='empty']"),
+            zeroHost.querySelector("[data-memory-map-table='empty']"),
             "收到一条 0 段的图时必须显示「图为空」（不是「尚无数据」）",
         );
     });
