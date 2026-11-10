@@ -20,7 +20,7 @@ use riscv_sim_contract::model::{
 use riscv_sim_contract::port::Peripheral;
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload, Message};
 
-use super::{KernelHost, DEMO_FIRMWARE_BYTES};
+use super::{KernelHost, DEMO_FIRMWARE_BYTES, IRQ_UART_RX_READY, QEMU_VIRT_UART0_BASE};
 use crate::m17_backend::IRQ_FIRMWARE_BYTES;
 use crate::m18_probe::CH_IRQ_PULSE;
 
@@ -413,6 +413,98 @@ fn gpio_pending_survives_host_sync_and_is_cleared_by_guest_w1c() {
         "全部 pending 清零 + complete 之后 PLIC 源必须消失"
     );
     assert_eq!(plic.borrow_mut().claim(0), None, "不再有可交付的源");
+}
+
+/// **active 的高优先级源压住低优先级源的外部线**（Renode
+/// `RefreshInterrupt`：pending 优先级必须严格大于 active 栈顶）。
+///
+/// 判别力：UART 源 10（优先级 5）与 GPIO 源 11（优先级 1）同时挂起，
+/// guest claim 走 UART 后，外部线必须落下；不补这条压制时，GPIO 会把
+/// 线一直抬着，形成优先级反转。
+#[test]
+fn a_lower_priority_source_does_not_raise_the_external_line_while_higher_is_active() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_QEMU_VIRT)
+                .expect("内置 qemu-virt 必须存在"),
+            expected_revision: None,
+        },
+    );
+
+    const UART_SOURCE: u32 = 10;
+    const GPIO_SOURCE: u32 = 11;
+
+    // UART：打开 RX 中断（IER bit0），再塞一个字节。
+    host.bus_mut()
+        .write(QEMU_VIRT_UART0_BASE + 1, BusWidth::Byte, 0x01)
+        .expect("guest 必须能写 UART 的 IER");
+    host.uart_receive(0x41);
+
+    // GPIO：一路上升沿。
+    let gpio = host.devices.gpio("GPIO0").expect("qemu-virt 必须有 GPIO0");
+    gpio.borrow_mut().set_directions(0);
+    gpio.borrow_mut()
+        .write(gpio_reg::RISE_IE, WriteSize::Word, 0b1)
+        .expect("使能一路输入的上升沿");
+    gpio.borrow_mut().set_external_inputs(0b1);
+
+    // PLIC：UART 高、GPIO 低。
+    let plic = host.devices.plic("PLIC").expect("qemu-virt 必须有 PLIC");
+    {
+        let mut p = plic.borrow_mut();
+        p.set_threshold(0, 0);
+        for (source, priority) in [(UART_SOURCE, 5u8), (GPIO_SOURCE, 1u8)] {
+            p.enable(0, source, true);
+            p.set_priority(source, priority);
+        }
+    }
+
+    host.sync_interrupts_now();
+    assert!(plic.borrow().pending(UART_SOURCE), "UART 源必须挂起");
+    assert!(plic.borrow().pending(GPIO_SOURCE), "GPIO 源必须挂起");
+    assert!(
+        host.intc_state()
+            .pending
+            .iter()
+            .any(|p| p.line == IRQ_UART_RX_READY),
+        "两个源都在，外部线必须抬起"
+    );
+
+    // guest claim 走 UART（高优先级）。
+    assert_eq!(
+        plic.borrow_mut().claim(0),
+        Some(UART_SOURCE),
+        "先交付高优先级的 UART 源"
+    );
+    host.sync_interrupts_now();
+    assert!(
+        plic.borrow().pending(GPIO_SOURCE),
+        "GPIO 仍在排队（它没有被 claim）"
+    );
+    assert!(
+        !host
+            .intc_state()
+            .pending
+            .iter()
+            .any(|p| p.line == IRQ_UART_RX_READY),
+        "UART 还在 active，低优先级 GPIO 不得把外部线抬起来"
+    );
+
+    // guest 读走 UART 字节 ⇒ 网关线落下；再 complete ⇒ 轮到 GPIO。
+    host.bus_mut()
+        .read(QEMU_VIRT_UART0_BASE, BusWidth::Byte)
+        .expect("guest 必须能读 UART 的 RBR");
+    plic.borrow_mut().complete(0, UART_SOURCE);
+    host.sync_interrupts_now();
+    assert!(
+        host.intc_state()
+            .pending
+            .iter()
+            .any(|p| p.line == IRQ_UART_RX_READY),
+        "高优先级源完成后，GPIO 才允许抬线"
+    );
 }
 
 /// **未使能的边沿不许抬 PLIC 源**（RISE_IE/FALL_IE 的端到端判别力）。
