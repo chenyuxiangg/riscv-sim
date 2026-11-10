@@ -11,6 +11,8 @@
 //! （`M16IntcDto`）。没有一条断言是「我调用了某个内部函数」。
 
 use crate::kernel_host::platform;
+use crate::m14_bus::BusWidth;
+use crate::m15_peripheral::gpio::reg as gpio_reg;
 use riscv_sim_contract::csr::{IRQ_SOFTWARE, IRQ_TIMER_COMPARE};
 use riscv_sim_contract::model::{
     Edge, ImageKind, ImageRef, ImageSource, ProductTree, Project, ProjectVersion,
@@ -318,4 +320,71 @@ fn a_raised_irq_really_reaches_the_guest() {
         "guest 的 handler 必须跑过一遍 —— 宿主拉起的 IRQ 没有到达 guest"
     );
     assert_eq!(host.pc(), 0x18, "mret 之后 guest 回到主循环");
+}
+
+/// **GPIO 的 pending 由 guest 用 W1C 消费，宿主不替它清**（Renode 口径）。
+///
+/// 宿主 `sync_interrupts` 只根据 pending 位图抬/撤 PLIC 源；位图本身
+/// 必须留到 guest 写 `PENDING` 寄存器（0x10）才消失。
+#[test]
+fn gpio_pending_survives_host_sync_and_is_cleared_by_guest_w1c() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_QEMU_VIRT)
+                .expect("内置 qemu-virt 必须存在"),
+            expected_revision: None,
+        },
+    );
+
+    const GPIO_BASE: u32 = 0x4000_0000;
+    const GPIO_IRQ_SOURCE: u32 = 11;
+
+    let gpio = host.devices.gpio("GPIO0").expect("qemu-virt 必须有 GPIO0");
+    gpio.borrow_mut().set_directions(0);
+    gpio.borrow_mut().set_external_inputs(0b101);
+    assert!(
+        gpio.borrow().pending_pin(0) && gpio.borrow().pending_pin(2),
+        "前置：两路边沿都必须锁存"
+    );
+
+    host.sync_interrupts_now();
+    assert!(
+        gpio.borrow().pending_pin(0) && gpio.borrow().pending_pin(2),
+        "宿主 sync 不许替 guest 消费 pending（必须留到 W1C）"
+    );
+    let plic = host.devices.plic("PLIC").expect("qemu-virt 必须有 PLIC");
+    assert!(
+        plic.borrow().pending(GPIO_IRQ_SOURCE),
+        "pending 还在，PLIC 源必须保持挂起"
+    );
+
+    host.bus_mut()
+        .write(GPIO_BASE + gpio_reg::PENDING, BusWidth::Word, 0b01)
+        .expect("guest 必须能写 GPIO 的 PENDING 寄存器");
+    assert!(
+        !gpio.borrow().pending_pin(0) && gpio.borrow().pending_pin(2),
+        "W1C 只清写 1 的位，另一路必须还在"
+    );
+
+    host.sync_interrupts_now();
+    assert!(
+        plic.borrow().pending(GPIO_IRQ_SOURCE),
+        "还有一路 pending 时 PLIC 源不能撤（Renode：全部 active 清掉才 Unset）"
+    );
+
+    host.bus_mut()
+        .write(GPIO_BASE + gpio_reg::PENDING, BusWidth::Word, 0b100)
+        .expect("guest 必须能清最后一路");
+    assert!(
+        !gpio.borrow().pending_pin(2),
+        "guest 写 1 之后最后一路 pending 必须消失"
+    );
+
+    host.sync_interrupts_now();
+    assert!(
+        !plic.borrow().pending(GPIO_IRQ_SOURCE),
+        "全部 pending 清零之后 PLIC 源必须被撤掉"
+    );
 }

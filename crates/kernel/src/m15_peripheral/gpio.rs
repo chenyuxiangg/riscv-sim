@@ -14,12 +14,17 @@
 //!   flips the corresponding pin's `out` in one shot (M-15 review #3).
 //!   Reads return `0`. Example: `value = 1<<3 | 1<<0` flips pins 0
 //!   and 3 atomically.
+//! - `0x10 PENDING` (rw1c): sticky edge-triggered pending bitmap.
+//!   Reading returns every pin that still has an unhandled edge; writing
+//!   a `1` clears **only** those bits (write `0` is a no-op). This follows
+//!   Renode's GPIO models: the peripheral owns the pending bits and the
+//!   guest driver consumes them with W1C — the host must not clear them.
 //!
-//! IRQ: the bank is **one** interrupt source for the whole port. Any
-//! edge on any pin latches a sticky bit in `pending_irqs`; the host
-//! consumes the bitmask and raises the bank's single PLIC source. The
-//! source number lives in the platform description, not in this
-//! peripheral's state.
+//! IRQ: the bank is **one** interrupt source for the whole port. Any edge
+//! on any pin latches a sticky bit in `pending_irqs`; the **host only
+//! reflects that bitmap** onto the bank's single PLIC source (set when
+//! non-zero, cleared when zero). The source number lives in the platform
+//! description, not in this peripheral's state.
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
@@ -29,7 +34,7 @@ use riscv_sim_contract::session::{GpioStateDto, PeripheralSessionState, GPIO_PIN
 use super::reg::{extract_subword, register_offset};
 use super::ProbeSlot;
 
-pub const GPIO_WINDOW: u32 = 0x10;
+pub const GPIO_WINDOW: u32 = 0x14;
 
 /// Probe signal name for the output latch (D-12 / N5).
 ///
@@ -61,6 +66,8 @@ pub mod reg {
     pub const OUT: u32 = 0x4;
     pub const IN: u32 = 0x8;
     pub const TOGGLE: u32 = 0xC;
+    /// Sticky pending bitmap — **read**: unhandled pins; **write**: W1C.
+    pub const PENDING: u32 = 0x10;
 }
 
 #[derive(Debug)]
@@ -130,21 +137,20 @@ impl GpioBank {
         self.latch_edges(changed);
     }
 
-    /// **该引脚有没有 pending 活动**（**只读**）。
+    /// **当前 pending 位图**（**只读**）。
     ///
-    /// ⚠️ 查「这个引脚有活动」；消费由 [`Self::clear_pending_pin`] 单独做。
+    /// 宿主用它决定要不要抬/撤整块 GPIO 的那一个 PLIC 源；它**不**消费
+    /// 任何位 —— 消费只走 guest 对 [`reg::PENDING`] 的 W1C 写。
+    pub fn pending_irqs(&self) -> u32 {
+        self.pending_irqs
+    }
+
+    /// **该引脚有没有 pending 活动**（**只读**）。
     pub fn pending_pin(&self, pin: u32) -> bool {
         if pin >= PIN_COUNT {
             return false;
         }
         (self.pending_irqs >> pin) & 1 == 1
-    }
-
-    /// **消费**某个引脚的 pending 位。
-    pub fn clear_pending_pin(&mut self, pin: u32) {
-        if pin < PIN_COUNT {
-            self.pending_irqs &= !(1u32 << pin);
-        }
     }
 
     /// Internal: latch a sticky pending IRQ for every pin with a set
@@ -228,6 +234,12 @@ impl Peripheral for GpioBank {
                         self.report(SIGNAL_OUT, self.outputs);
                     }
                 }
+                Ok(())
+            }
+            reg::PENDING => {
+                // W1C: write 1 clears the corresponding sticky bit;
+                // write 0 leaves it untouched.
+                self.pending_irqs &= !(value & PIN_COUNT_MASK);
                 Ok(())
             }
             reg::IN => {
@@ -341,6 +353,7 @@ impl GpioBank {
             // output latch on output-direction
             // pins so firmware can read back
             // what it drove.
+            reg::PENDING => Ok(self.pending_irqs),
             reg::TOGGLE => Ok(0), // write-only register
             other => Err(PlatformError::new(
                 ErrorFamily::Peripheral,

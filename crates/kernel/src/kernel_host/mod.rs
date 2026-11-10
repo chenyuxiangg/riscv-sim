@@ -1468,23 +1468,15 @@ impl KernelHost {
                         let Some(gpio) = self.devices.gpio(&irq.id) else {
                             continue;
                         };
-                        let any = match gpio.try_borrow_mut() {
-                            Ok(mut g) => {
-                                let mut any = false;
-                                for pin in 0..32u32 {
-                                    if g.pending_pin(pin) {
-                                        any = true;
-                                        g.clear_pending_pin(pin);
-                                    }
-                                }
-                                any
-                            }
+                        // ⚠️ **pending 归外设、由 guest W1C 消费**（Renode
+                        // 口径）：宿主只把位图映射成 PLIC 源的电平 ——
+                        // 非空就挂起、为空就撤销，**不**替 guest 清位。
+                        let pending = match gpio.try_borrow() {
+                            Ok(g) => g.pending_irqs() != 0,
                             Err(_) => continue,
                         };
-                        if any {
-                            if let Ok(mut p) = plic.try_borrow_mut() {
-                                p.request(u32::from(irq.source));
-                            }
+                        if let Ok(mut p) = plic.try_borrow_mut() {
+                            p.set_pending(u32::from(irq.source), pending);
                         }
                     }
                 }

@@ -69,6 +69,7 @@ pub const DEVICE_TYPES: &[DeviceTypeEntry] = &[
             ("OUT", gpio_reg::OUT),
             ("IN", gpio_reg::IN),
             ("TOGGLE", gpio_reg::TOGGLE),
+            ("PENDING", gpio_reg::PENDING),
         ],
         // ⚠️ **引脚数来自契约层那一份**（`GPIO_PIN_COUNT`）⇒ ⇒ **不抄**。
         pin_count: Some(GPIO_PIN_COUNT as u32),
@@ -223,6 +224,8 @@ mod tests {
         assert_eq!(gpio.registers[0].offset, gpio_reg::DIR);
         assert_eq!(gpio.registers[3].name, "TOGGLE");
         assert_eq!(gpio.registers[3].offset, gpio_reg::TOGGLE);
+        assert_eq!(gpio.registers[4].name, "PENDING");
+        assert_eq!(gpio.registers[4].offset, gpio_reg::PENDING);
 
         let uart = infos.iter().find(|t| t.kind == "uart16550").expect("uart");
         assert_eq!(uart.registers[0].offset, uart_reg::THR);
