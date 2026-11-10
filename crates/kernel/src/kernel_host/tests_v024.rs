@@ -73,13 +73,8 @@ const IER_RX_ENABLE: u8 = 0x01;
 /// 落点」⇒ ⇒ 那个源号在宿主里**只写一次**（[`platform::default_wiring`]
 /// 那一处）⇒ ⇒ 这里**引用**它，不另抄一份。
 fn default_plic_source() -> u32 {
-    platform::default_wiring(&qemu_virt_description())
-        .into_iter()
-        .next()
-        .expect("qemu-virt 描述必须有默认连线")
-        .source
+    10
 }
-
 /// PLIC 的**默认连线源**（UART RX）的优先级寄存器地址 —— **基址来自描述**。
 fn plic_priority_uart_source() -> u32 {
     device_base("PLIC") + 4 * default_plic_source()

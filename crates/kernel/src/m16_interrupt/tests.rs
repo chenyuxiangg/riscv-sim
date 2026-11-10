@@ -12,8 +12,8 @@
 
 use super::*;
 use riscv_sim_contract::csr::{
-    IRQ_BASE, IRQ_TIMER_COMPARE, IRQ_UART_RX_READY, IRQ_UART_TX_EMPTY, MIE_MEIE_BIT, MIE_MTIE_BIT,
-    MSTATUS_MIE_BIT, NO_ACTIVE_IRQ,
+    IRQ_BASE, IRQ_SOFTWARE, IRQ_TIMER_COMPARE, IRQ_UART_RX_READY, IRQ_UART_TX_EMPTY, MIE_MEIE_BIT,
+    MIE_MSIE_BIT, MIE_MTIE_BIT, MSTATUS_MIE_BIT, NO_ACTIVE_IRQ,
 };
 use riscv_sim_contract::session::SessionSnapshotDto;
 use std::cell::RefCell;
@@ -23,6 +23,8 @@ use std::rc::Rc;
 const MIE_EXTERNAL: u32 = 1 << MIE_MEIE_BIT;
 /// `mie` 的「机器定时器中断」位（→ 线 3）。
 const MIE_TIMER: u32 = 1 << MIE_MTIE_BIT;
+/// `mie` 的「机器软件中断」位（→ 线 4）。
+const MIE_SOFTWARE: u32 = 1 << MIE_MSIE_BIT;
 /// `mstatus` 的全局中断使能位。
 const MSTATUS_ON: u32 = 1 << MSTATUS_MIE_BIT;
 
@@ -116,6 +118,36 @@ fn arbitration_takes_the_highest_priority_line() {
         "定时器线优先级最高（= 2），必须压过外部线（= 1）"
     );
     assert_eq!(intc.active_irq(), IRQ_TIMER_COMPARE);
+}
+
+/// **软件中断线**（线 4）：`mie.MSIE` 使能时，交付的 `mcause` 必须是
+/// **架构 cause 3**（`0x8000_0003`），不是内部线号 4。
+///
+/// ⚠️ 这条同时钉住两件事：线 4 有 `mie` 映射（否则 `poll` 里
+/// `is_line_enabled` 恒假 ⇒ 永远不交付）；cause 走的是
+/// `arch_cause_for_line`，不是「线号或进去」。
+#[test]
+fn the_software_line_is_delivered_with_the_architectural_cause_three() {
+    let mut intc = InterruptController::new();
+    intc.request(IRQ_SOFTWARE, 100, "clint", LEVEL)
+        .expect("request");
+
+    let delivered = intc
+        .poll(200, MIE_SOFTWARE, MSTATUS_ON)
+        .expect("poll")
+        .expect("应当交付软件中断");
+
+    assert_eq!(delivered.line, IRQ_SOFTWARE);
+    assert_eq!(delivered.cause, 0x8000_0003, "mcause = IRQ_BASE | 3");
+    assert_eq!(intc.active_irq(), IRQ_SOFTWARE);
+
+    // 清源（guest 写 `msip = 0` 之后宿主做的那一步）⇒ 队列里不再有这条线。
+    intc.clear(IRQ_SOFTWARE);
+    assert!(
+        intc.pending_lines().is_empty(),
+        "清掉 msip 之后线 4 必须离队，实际 {:?}",
+        intc.pending_lines()
+    );
 }
 
 /// 同优先级按 `(request_time_ps, insert_seq)` 取**最早**的。

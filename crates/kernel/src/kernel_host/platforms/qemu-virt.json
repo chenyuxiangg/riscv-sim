@@ -37,7 +37,7 @@
       "device": {
         "device": "uart16550",
         "id": "UART0",
-        "irq_line": 1,
+        "irq_line": 10,
         "baud_rate": 115200
       }
     },
@@ -46,7 +46,8 @@
       "base": 1073741824,
       "device": {
         "device": "gpio",
-        "id": "GPIO0"
+        "id": "GPIO0",
+        "irq_line": 11
       }
     },
     {

@@ -45,7 +45,7 @@ fn board_with_timer() -> PlatformDescription {
         base: Some(0x2000_2000),
         device: DeviceSpec::TimerRiscv {
             id: "TIMER0".to_string(),
-            irq_line: 11,
+            irq_line: 3,
         },
     });
     description
@@ -73,16 +73,16 @@ fn elf_project(elf: Vec<u8>) -> Project {
 fn a4_the_timer_riscv_wire_shape_is_pinned() {
     let spec = DeviceSpec::TimerRiscv {
         id: "TIMER0".to_string(),
-        irq_line: 11,
+        irq_line: 3,
     };
     assert_eq!(
         serde_json::to_string(&spec).expect("json"),
-        r#"{"device":"timer_riscv","id":"TIMER0","irq_line":11}"#,
+        r#"{"device":"timer_riscv","id":"TIMER0","irq_line":3}"#,
         "`timer_riscv` 的线上形态必须逐字固定",
     );
     // ⚠️ **往返**：线上那个形态必须能**解析回**同一个变体。
     let back: DeviceSpec =
-        serde_json::from_str(r#"{"device":"timer_riscv","id":"TIMER0","irq_line":11}"#)
+        serde_json::from_str(r#"{"device":"timer_riscv","id":"TIMER0","irq_line":3}"#)
             .expect("解析");
     assert_eq!(back, spec, "线上形态必须能解析回同一个变体");
     // ⚠️ **它在「描述能写的那些种」里** ⇒ ⇒ 前端的下拉框**跟着**有它。
@@ -443,118 +443,3 @@ fn k9b_a_role_naming_the_wrong_kind_of_device_is_rejected() {
 // ---------------------------------------------------------------------------
 // D-175 的 D1 —— **引脚表**（`pins` 段 · 本批只定**形状**）
 // ---------------------------------------------------------------------------
-
-/// **K-11** —— 引脚规格指向**存在**的 **GPIO** 器件 ⇒ ⇒ 描述**合法** ⇒ ⇒
-/// 装得上。
-///
-/// ⚠️ **v0.76（STAGE-52 · A 裁决）**：`PinBinding{device,pin,signal}` →
-/// `PinSpec{device,pin,functions}` ⇒ ⇒ 引脚规格只能指向 **GPIO** 器件
-/// （V-21 扩展 · V-24）⇒ ⇒ 指向存在但**非 GPIO** 的器件（UART）**也拒**。
-#[test]
-fn k11_a_pin_table_naming_an_existing_device_is_accepted() {
-    let mut description = board_with_two_uarts();
-    // ⚠️ UART0 是**非 GPIO** 器件 ⇒ ⇒ 指向它 ⇒ ⇒ **拒**（V-24）。
-    description.pins = Some(vec![riscv_sim_contract::platform::PinSpec {
-        device: "UART0".to_string(),
-        pin: "pin0".to_string(),
-        functions: vec![riscv_sim_contract::platform::PinFunction {
-            name: "rx".to_string(),
-            direction: riscv_sim_contract::platform::PinDirection::Input,
-            irq: None,
-        }],
-    }]);
-    let err = description
-        .validate()
-        .expect_err("引脚规格指向非 GPIO 器件必须被拒");
-    assert_eq!(
-        err.scenario, 19,
-        "必须报 `E_PLT-19`（引脚规格非法）⇒ ⇒ 实际是 scenario={}",
-        err.scenario
-    );
-
-    // ⚠️ qemu-virt 板自带 GPIO0 ⇒ ⇒ 指向它 ⇒ ⇒ 合法 ⇒ ⇒ **装得上**。
-    description.pins = Some(vec![riscv_sim_contract::platform::PinSpec {
-        device: "GPIO0".to_string(),
-        pin: "pin0".to_string(),
-        functions: vec![riscv_sim_contract::platform::PinFunction {
-            name: "gpio_in".to_string(),
-            direction: riscv_sim_contract::platform::PinDirection::Input,
-            irq: None,
-        }],
-    }]);
-    assert!(
-        description.validate().is_ok(),
-        "引脚规格指向已声明的 GPIO 器件必须合法：{:?}",
-        description.validate()
-    );
-
-    // ⚠️ **装得上**（真走一遍契约命令）。
-    let mut host = KernelHost::new();
-    let events = host.handle_message(&Message::command(
-        1,
-        CommandPayload::SetMemoryMap {
-            description: description.clone(),
-            expected_revision: None,
-        },
-    ));
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, EventPayload::Error { .. })),
-        "装板不该报错：{events:?}"
-    );
-}
-
-/// **K-12** —— 引脚规格指向**不存在**的器件 ⇒ ⇒ **拒**（`E_PLT-19`）⇒ ⇒
-/// **不静默**。
-#[test]
-fn k12_a_pin_table_naming_a_missing_device_is_rejected() {
-    let mut description = board_with_two_uarts();
-    description.pins = Some(vec![riscv_sim_contract::platform::PinSpec {
-        device: "NOPE".to_string(),
-        pin: "pin0".to_string(),
-        functions: vec![riscv_sim_contract::platform::PinFunction {
-            name: "s_nope".to_string(),
-            direction: riscv_sim_contract::platform::PinDirection::Input,
-            irq: None,
-        }],
-    }]);
-    let err = description
-        .validate()
-        .expect_err("引脚表指了不存在的器件必须被拒");
-    assert_eq!(
-        err.family,
-        riscv_sim_contract::error::PLATFORM_FAMILY,
-        "场景码的族必须是 PLT"
-    );
-    assert_eq!(
-        err.scenario, 19,
-        "必须报 `E_PLT-19`（引脚表非法）⇒ ⇒ 实际是 scenario={}",
-        err.scenario
-    );
-}
-
-/// **K-10** —— **没有 `pins` 段的板 ⇒ ⇒ 行为逐字不变**（缺省 = 无引脚）。
-#[test]
-fn k10_a_board_without_a_pin_table_behaves_exactly_as_before() {
-    let description = board_with_two_uarts();
-    assert!(
-        description.pins.is_none(),
-        "这块板**不许**带引脚段（⇒ ⇒ 缺省那档）"
-    );
-    // ⚠️ **装得上** ⇒ ⇒ 缺省**不**改任何行为。
-    let mut host = KernelHost::new();
-    let events = host.handle_message(&Message::command(
-        1,
-        CommandPayload::SetMemoryMap {
-            description: description.clone(),
-            expected_revision: None,
-        },
-    ));
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, EventPayload::Error { .. })),
-        "装板不该报错：{events:?}"
-    );
-}

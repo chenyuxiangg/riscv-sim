@@ -123,7 +123,6 @@ fn user_board() -> PlatformDescription {
         description: None,
         // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
-        wiring: None,
         region_budget_bytes: 16 * 1024 * 1024,
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个。
         max_region_bytes: None,
@@ -139,12 +138,12 @@ fn user_board() -> PlatformDescription {
             RegionSpec::Peripheral {
                 base: Some(0x6000_0000),
                 device: DeviceSpec::Gpio {
+                    irq_line: 11,
                     id: "GPIO0".to_string(),
                 },
             },
         ],
         roles: None,
-        pins: None,
         mcu: None,
     }
 }
@@ -163,7 +162,6 @@ fn ram_only_board(max_region_bytes: Option<u32>) -> PlatformDescription {
         description: None,
         // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
         // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
-        wiring: None,
         region_budget_bytes: 16 * 1024 * 1024,
         max_region_bytes,
         regions: vec![RegionSpec::Ram {
@@ -171,7 +169,6 @@ fn ram_only_board(max_region_bytes: Option<u32>) -> PlatformDescription {
             size: 0x0001_0000,
         }],
         roles: None,
-        pins: None,
         mcu: None,
     }
 }

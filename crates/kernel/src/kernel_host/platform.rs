@@ -58,9 +58,7 @@ use riscv_sim_contract::error::{
     PlatformError, E_PLT_05_OVERFLOW, E_PLT_07_OVER_BUDGET, E_PLT_09_UNKNOWN_PLATFORM,
     E_PLT_10_PLATFORM_FILE_UNREADABLE, E_PLT_11_PLATFORM_FILE_MALFORMED, PLATFORM_FAMILY,
 };
-use riscv_sim_contract::platform::{
-    DeviceSpec, PinFunction, PlatformDescription, RegionSpec, WIRING_EVENT_RX_READY,
-};
+use riscv_sim_contract::platform::{DeviceSpec, PlatformDescription, RegionSpec};
 use riscv_sim_contract::port::{Peripheral, TimeSource};
 
 use crate::m14_bus::Bus;
@@ -307,19 +305,6 @@ impl BuiltDevice {
         }
     }
 
-    /// **pinmux** —— 宿主要留句柄（**功能切换 + 中断路由** · v0.76 · STAGE-52）。
-    fn pinmux(device: PinmuxDevice) -> Self {
-        let handle = Rc::new(RefCell::new(device));
-        BuiltDevice {
-            peripheral: handle.clone(),
-            uart: None,
-            clint: None,
-            plic: None,
-            gpio: None,
-            pinmux: Some(handle),
-        }
-    }
-
     /// PLIC —— 宿主要留句柄（外部中断的源头）。
     fn plic(device: Plic) -> Self {
         let handle = Rc::new(RefCell::new(device));
@@ -340,7 +325,7 @@ impl BuiltDevice {
 /// 边界 ⇒ 规格明说：**平台（内存图）零代码，器件种类要代码**。
 fn build_device(spec: &DeviceSpec, base: u32) -> Result<BuiltDevice, PlatformError> {
     Ok(match spec {
-        DeviceSpec::Gpio { id } => BuiltDevice::gpio(GpioBank::new(id.clone(), base)),
+        DeviceSpec::Gpio { id, .. } => BuiltDevice::gpio(GpioBank::new(id.clone(), base)),
         DeviceSpec::Uart16550 {
             id,
             irq_line,
@@ -360,13 +345,6 @@ fn build_device(spec: &DeviceSpec, base: u32) -> Result<BuiltDevice, PlatformErr
         DeviceSpec::TimerRiscv { id, irq_line } => BuiltDevice::opaque(
             crate::m15_peripheral::timer::TimerRiscv::new(id.clone(), base, *irq_line),
         ),
-        // ⚠️ **v0.76（STAGE-52 · C1 决议）**：pinmux = 独立器件 —— 每引脚
-        //   一个功能选择寄存器（`4×引脚号` 偏移）。参数逐字对齐
-        //   `PinmuxDevice::new(id, base)`；功能数在**建图之后**从描述 `pins`
-        //   段喂入（[`map_platform`] 的 pinmux 装配段）。
-        DeviceSpec::Pinmux { id } => {
-            BuiltDevice::pinmux(crate::m15_peripheral::PinmuxDevice::new(id.clone(), base))
-        }
     })
 }
 
@@ -582,12 +560,6 @@ pub struct MappedDevices {
     pub handles: DeviceInstanceTable,
     /// **角色解析**的结果（STAGE-49 · D-177 的 C）—— 哪个 id 扮演哪个角色。
     pub roles: ResolvedRoles,
-    /// **pinmux 路由表**（v0.76 · STAGE-52 · C1 / J / K）。
-    ///
-    /// ⚠️ 每项 = `(gpio 器件 id, 引脚号, 功能列表)` —— 建图时从描述 `pins`
-    ///   段编译 ⇒ ⇒ 与建图**同源** ⇒ ⇒ 宿主同步中断时按「当前功能 → irq 源」
-    ///   抬线 ⇒ ⇒ **不**写 GPIO 的 `irq_lines[pin]`（分层禁令）。
-    pub pinmux_routes: Vec<(String, u32, Vec<PinFunction>)>,
 }
 
 /// 按描述**建图**。
@@ -710,37 +682,6 @@ pub fn map_platform(
     // **缺省** ⇒ ⇒ 今天的口径（第一个 UART / 第一个 CLINT）⇒ ⇒ **逐字不变**。
     devices.roles = resolve_roles(description, &devices.handles);
 
-    // ---- **pinmux 装配**（v0.76 · STAGE-52 · C1 / I / J / K）----
-    //
-    // ⚠️ 描述 `pins` 段 ⇒ ⇒ 编译「引脚路由表」：`(gpio 器件 id, 引脚号,
-    //   功能列表)` ⇒ ⇒ 宿主同步中断时按「当前功能 → irq 源」抬线。
-    //
-    // ⚠️ **功能数喂给 pinmux 器件**：固件写功能索引越界要能判
-    //   （`E_PLT-23`）⇒ ⇒ 器件层**不知道功能名**（裁决 G）⇒ ⇒ 只喂**数量**。
-    //   MVP：**所有**存在的 pinmux 器件都喂同一份数量（同一份 `pins` 段）。
-    //
-    // ⚠️ **老描述没有 `pins` 段** ⇒ ⇒ 这一整段**零行为**（裁决 E）⇒ ⇒
-    //   存量板档案照装（B-171）。
-    if let Some(pin_specs) = description.pins.as_ref() {
-        for spec in pin_specs {
-            let Some(pin) = riscv_sim_contract::platform::parse_gpio_pin_name(&spec.pin) else {
-                // ⚠️ 契约层 V-24 已把非 `pin{N}` 形拒掉 ⇒ ⇒ 这里**到不了** ⇒ ⇒
-                // 兜底：跳过（不静默造路由）。
-                continue;
-            };
-            let function_count = spec.functions.len() as u32;
-            // 喂功能数（给所有存在的 pinmux 器件 —— 数量是同一份）。
-            for entry in devices.handles.iter_pinmux() {
-                if let Ok(mut mux) = entry.try_borrow_mut() {
-                    mux.set_function_count(pin, function_count);
-                }
-            }
-            devices
-                .pinmux_routes
-                .push((spec.device.clone(), pin, spec.functions.clone()));
-        }
-    }
-
     Ok(devices)
 }
 
@@ -777,6 +718,44 @@ impl TimeSource for ClintTimeSource {
     }
 }
 
+/// 一个「外设 → PLIC 源号」绑定（装载期从描述编译）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeripheralIrqKind {
+    Uart,
+    Gpio,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeripheralIrq {
+    pub id: String,
+    pub kind: PeripheralIrqKind,
+    pub source: u16,
+}
+
+/// 从描述里收集**每个中断外设自己的 PLIC 源号**（UART / GPIO）。
+pub fn compile_peripheral_irqs(description: &PlatformDescription) -> Vec<PeripheralIrq> {
+    let mut out = Vec::new();
+    for region in description.regions.iter() {
+        let RegionSpec::Peripheral { device, .. } = region else {
+            continue;
+        };
+        match device {
+            DeviceSpec::Uart16550 { id, irq_line, .. } => out.push(PeripheralIrq {
+                id: id.clone(),
+                kind: PeripheralIrqKind::Uart,
+                source: *irq_line,
+            }),
+            DeviceSpec::Gpio { id, irq_line } => out.push(PeripheralIrq {
+                id: id.clone(),
+                kind: PeripheralIrqKind::Gpio,
+                source: *irq_line,
+            }),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// 把宿主的 CLINT 句柄**适配**成 `Rc<dyn TimeSource>`。
 ///
 /// ⚠️ **幂等**：重复调用只是多造一个**指向同一个 CLINT** 的适配器 ⇒ ⇒
@@ -787,332 +766,6 @@ pub fn clint_time_source(clint: &Rc<RefCell<Clint>>) -> Rc<dyn TimeSource> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// 连线表（v0.34 · D-125 · 冻结规格 STAGE-19 §3.1）
-// ---------------------------------------------------------------------------
-
-/// 宿主侧**编译出来的一条连线**。
-///
-/// ⚠️ **它不是契约层的 `WiringSpec`**：契约层那份是**描述里的形状**（字段
-/// 名就是线上的名字）；宿主这份是**编译后的形状**——「谁的事件 ⇒ 抬哪个
-/// 源」已经判完了 ⇒ 运行时只需要这两个数。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Wiring {
-    /// 源器件的 `id`（描述里的器件 id ⇒ 覆盖键的第一半）。
-    pub from_device: String,
-    /// 事件名（**契约层那个词表**里的一个 ⇒ 语义由它决定）。
-    pub event: String,
-    /// **哪一个引脚**（引脚级寻址 · v0.74 · STAGE-50 · `None` = 不是引脚级）。
-    ///
-    /// ⚠️ **覆盖键的这一半**（⇒ ⇒ 两个**不同**引脚的两根线**各管各的**）。
-    pub pin: Option<u32>,
-    /// 目标器件的 `id`（PLIC）。
-    pub to_device: String,
-    /// 目标 PLIC 的**源号**。
-    pub source: u32,
-}
-
-/// 描述里**第一个** UART 的器件 id。
-///
-/// ⚠️ **口径 = 建图时「第一个同种器件被宿主认领」那一条**（按 base 升序）
-/// ⇒ ⇒ 「宿主手里那路 UART」与「这里的第一个 UART」**永远是同一个**。
-fn first_uart_id(description: &PlatformDescription) -> Option<String> {
-    regions_by_base(description)
-        .into_iter()
-        .find_map(|region| match region {
-            RegionSpec::Peripheral {
-                device: DeviceSpec::Uart16550 { id, .. },
-                ..
-            } => Some(id.clone()),
-            _ => None,
-        })
-}
-
-/// 描述里**第一个** PLIC 的 `(器件 id, 源数)`。
-///
-/// ⚠️ **口径同 [`first_uart_id`]**（按 base 升序的第一个 PLIC）⇒ ⇒ 与宿主
-/// 手里那个 PLIC 句柄**是同一个**。
-fn first_plic(description: &PlatformDescription) -> Option<(String, u32)> {
-    regions_by_base(description)
-        .into_iter()
-        .find_map(|region| match region {
-            RegionSpec::Peripheral {
-                device: DeviceSpec::Plic { id, sources, .. },
-                ..
-            } => Some((id.clone(), *sources)),
-            _ => None,
-        })
-}
-
-/// **默认连线**（宿主里**唯一**那处）—— 冻结规格 STAGE-19 §3.1 · 裁决 E。
-///
-/// ⚠️ **它说的是「这块板上的第一个 UART / 第一个 PLIC」**：宿主今天写死的
-/// 行为就是「**第一个** UART 的 RX 就绪 ⇒ 抬 PLIC 的**源 10**」⇒ ⇒ 用
-/// **角色**（而不是写死的器件 id）表述 ⇒ ⇒ 存量行为**一字未变**（B-2）。
-///
-/// ⚠️ **源号 10 在整个宿主里只写在这里**：那个写死的 PLIC source 常量
-/// **已删**（保留 = 又一个真相源；名字见冻结规格 STAGE-19 §3.1 · 裁决 E）
-/// ⇒ ⇒ 「换一块板改连线」不用改宿主（D-125）。
-///
-/// ⚠️ **两端器件缺一 ⇒ 没有默认连线**（不是空指针）：描述里没有 UART 或
-/// 没有 PLIC ⇒ 这根线**不生效**（B-3）。
-pub fn default_wiring(description: &PlatformDescription) -> Vec<Wiring> {
-    let (uart_id, (plic_id, plic_sources)) =
-        match (first_uart_id(description), first_plic(description)) {
-            (Some(uart_id), Some(plic)) => (uart_id, plic),
-            _ => return Vec::new(),
-        };
-    let wire = Wiring {
-        from_device: uart_id,
-        event: WIRING_EVENT_RX_READY.to_string(),
-        // ⚠️ 默认连线**不是**引脚级（UART 没有引脚）⇒ ⇒ `None`。
-        pin: None,
-        to_device: plic_id,
-        source: 10,
-    };
-    // ⚠️ **源号越界 ⇒ 不接这根线**：PLIC 的源数不够 ⇒ 抬不起来 ⇒ ⇒
-    // （今天的行为也一样：PLIC 的 `request` 忽略越界的源）⇒ ⇒ 描述里的
-    // `wiring` 仍可以给它一个合法的源号。
-    if wire.source >= plic_sources {
-        return Vec::new();
-    }
-    vec![wire]
-}
-
-/// **连线编译的结果** —— 表 + **丢线报告**（STAGE-48 · v0.72 · D-177 A）。
-#[derive(Debug, Clone, Default)]
-pub struct WiringCompile {
-    /// **活着的**线（宿主真的抬得了的那些）。
-    pub wires: Vec<Wiring>,
-    /// **丢线报告** —— 「你写的 N 根线里有 M 根当前抬不了」。
-    pub report: riscv_sim_contract::model::WiringReportDto,
-}
-
-/// 描述里某个 PLIC 的**源数**（`None` ⇒ 描述里没这个 PLIC）。
-///
-/// ⚠️ **用描述里的那个数**（不是从 PLIC 实例里读）⇒ ⇒ 借用的争用**不
-/// 影响**判定 ⇒ ⇒ 「拿不到就不判越界」那种 fail-open **不需要**。
-fn plic_sources_of(description: &PlatformDescription, id: &str) -> Option<u32> {
-    regions_by_base(description)
-        .into_iter()
-        .find_map(|region| match region {
-            RegionSpec::Peripheral {
-                device:
-                    DeviceSpec::Plic {
-                        id: plic_id,
-                        sources,
-                        ..
-                    },
-                ..
-            } if plic_id == id => Some(*sources),
-            _ => None,
-        })
-}
-
-/// 一根线**抬不了**的**第一条**理由（`Ok` ⇒ 抬得了）。
-///
-/// ⚠️ **五条判据分开算**（STAGE-48 §2.1）⇒ ⇒ 界面能说清「**为什么**」
-/// ⇒ ⇒ 「不知道抬不了」与「抬不了」是**两件事**。
-fn check_wire(
-    description: &PlatformDescription,
-    devices: &DeviceInstanceTable,
-    wire: &Wiring,
-) -> Result<(), riscv_sim_contract::model::WireDropReason> {
-    use riscv_sim_contract::model::WireDropReason;
-
-    // ---- 源器件 ----
-    let Some(source) = devices.get(&wire.from_device) else {
-        return Err(WireDropReason::SourceUnknown);
-    };
-    // ⚠️ **查契约层那个词表**（v0.74 · STAGE-50 · 裁决 J / §7.1 订正 2）
-    //   ⇒ ⇒ 「这个事件要的源**是哪种器件**」**只有一处**判定（契约层
-    //   `wiring_event_info`）⇒ ⇒ ⇒ **不再**在这里抄一遍「源必须是
-    //   `uart16550`」⇒ ⇒ ⇒ **否则**扩词表时这行**必然**漂移
-    //   （⇒ ⇒ 描述**被接受**、线**被静默丢弃** ⇒ ⇒ 正是 v0.71 批 D-177
-    //   查出的那个缺陷）。
-    let Some(info) = riscv_sim_contract::platform::wiring_event_info(&wire.event) else {
-        // ⚠️ **词表外**的事件名 ⇒ ⇒ 描述**已经被契约层 V-18 拒了**
-        //   ⇒ ⇒ 正常路径**到不了**这里 ⇒ ⇒ 这是**兜底**。
-        return Err(WireDropReason::SourceType);
-    };
-    if source.kind != info.source_kind {
-        return Err(WireDropReason::SourceType);
-    }
-
-    // ---- 目标器件 ----
-    let Some(target) = devices.get(&wire.to_device) else {
-        return Err(WireDropReason::TargetUnknown);
-    };
-    if target.kind != "plic" {
-        return Err(WireDropReason::TargetType);
-    }
-
-    // ---- 源号范围 ----
-    let Some(sources) = plic_sources_of(description, &wire.to_device) else {
-        return Err(WireDropReason::TargetUnknown);
-    };
-    if wire.source >= sources {
-        return Err(WireDropReason::SourceOutOfRange);
-    }
-
-    Ok(())
-}
-
-/// 从**生效的描述**编译出**连线表** + **丢线报告**（冻结规格 STAGE-19 §3.1
-/// · **STAGE-48 §3 裁决 C**）。
-///
-/// ```text
-/// 生效描述 ──► 编译连线表 ──► sync_interrupts 按表抬线
-///   ├─ 默认连线：第一个 UART.rx_ready ──► 第一个 PLIC.source 10
-///   └─ 描述里的 wiring：按 (from.device, from.event) **覆盖**同键的默认项
-/// ```
-///
-/// ⚠️ **同一时刻一个键只有一根线**（覆盖 ⇒ **不**追加）⇒ ⇒ 「同一时刻只有
-/// 一个 source」是**构造保证**的，不是运行时判出来的。
-///
-/// ⚠️ **v0.72（STAGE-48 · D-177 B）**：末尾那个 `retain`（只留「第一个 UART
-/// → 第一个 PLIC」）**已删** ⇒ ⇒ 代之以「**查得到就留、查不到就记一笔**」
-/// ⇒ ⇒ **丢线不再静默**（裁决 C）⇒ ⇒ **第二个 UART 的线也留在表里**
-/// ⇒ ⇒ 配合 [`crate::kernel_host::KernelHost`] 侧「逐线查实例」
-/// （裁决 E）⇒ ⇒ **第二个 UART 的连线也真的通电**。
-///
-/// ⚠️ **默认连线**（[`default_wiring`]）**逐字不变** ⇒ ⇒ 存量行为一字不改
-/// （裁决 D）⇒ ⇒ 「第一个 UART / 第一个 PLIC」这个口径**仍是描述里的
-/// 那一个**。
-pub fn compile_wiring(
-    description: &PlatformDescription,
-    devices: &DeviceInstanceTable,
-) -> WiringCompile {
-    use riscv_sim_contract::model::{DroppedWireDto, WireDropReason};
-
-    // ---- 1) 默认连线（**逐字不变**；`false` = 不是用户写的）----
-    let mut entries: Vec<(Wiring, bool)> = default_wiring(description)
-        .into_iter()
-        .map(|w| (w, false))
-        .collect();
-
-    // ---- 2) 描述里的连线：按 (from.device, from.event) 覆盖同键 ----
-    //
-    // ⚠️ **被顶掉的那些**（同键的前一条）**要记一笔**（裁决 K）⇒ ⇒ 否则
-    // 「你写了 2 根、只有 1 根生效」这件事**仍然静默**。
-    let mut shadowed: Vec<Wiring> = Vec::new();
-    for spec in description.wiring.iter().flatten() {
-        let wire = Wiring {
-            from_device: spec.from.device.clone(),
-            event: spec.from.event.clone(),
-            // ⚠️ **引脚号**（引脚级寻址 · v0.74 · STAGE-50）。
-            pin: spec.from.pin,
-            to_device: spec.to.device.clone(),
-            source: spec.to.source,
-        };
-        // ⚠️ **覆盖键 = (器件, 事件, 引脚)**（v0.74 · STAGE-50）：引脚级的
-        //   两根线（**不同**引脚）**各管各的** ⇒ ⇒ 键**必须**带上 `pin`。
-        match entries.iter().position(|(w, _)| {
-            w.from_device == wire.from_device && w.event == wire.event && w.pin == wire.pin
-        }) {
-            Some(idx) => {
-                let (old, was_written_by_user) = entries[idx].clone();
-                // ⚠️ 被顶掉的若是**默认连线** ⇒ ⇒ **不记**（它不是用户写的
-                // ⇒ ⇒ 裁决 J：`declared` 只数用户写的线）。
-                if was_written_by_user {
-                    shadowed.push(old);
-                }
-                entries[idx] = (wire, true);
-            }
-            None => entries.push((wire, true)),
-        }
-    }
-
-    // ---- 3) 端点检查：**查得到就留、查不到就记一笔**（裁决 C）----
-    let mut wires: Vec<Wiring> = Vec::new();
-    let mut dropped: Vec<DroppedWireDto> = Vec::new();
-    let mut live = 0u32;
-    for (wire, written_by_user) in entries.iter() {
-        match check_wire(description, devices, wire) {
-            Ok(()) => {
-                wires.push(wire.clone());
-                if *written_by_user {
-                    live += 1;
-                }
-            }
-            Err(reason) => dropped.push(DroppedWireDto {
-                from_device: wire.from_device.clone(),
-                event: wire.event.clone(),
-                to_device: wire.to_device.clone(),
-                source: wire.source,
-                reason,
-            }),
-        }
-    }
-
-    // ---- 3b) **引脚级连线 ⇒ ⇒ 把那根引脚的 IRQ 线号绑到连线上的源号** ----
-    //
-    // ⚠️ ⚠️ **为什么必须有这一步**（v0.74 · STAGE-50 · 施工期订正 7）：
-    //   GPIO 的引脚 IRQ **线号**默认是 `0xFFFF`（**未配置** · M-15 的
-    //   `GpioBank::new`）⇒ ⇒ 而**宿主抬线**时读的是「**那根引脚的线号**」
-    //   ⇒ ⇒ ⇒ **不绑** ⇒ ⇒ 抬线那一步永远拿到 `0xFFFF` ⇒ ⇒ ⇒ **这根线
-    //   永远抬不起来**（⇒ ⇒ 描述被收下了、线却是死的 —— 正是 v0.71 批
-    //   D-177 查出的那种「静默」）。
-    //
-    // ⚠️ **绑定源 = 连线表**（不是另一个地方）⇒ ⇒ 「这根引脚接到哪个源」
-    //   **只有一处**定义（一个约束一个落点）⇒ ⇒ ⇒ 换板改连线 ⇒ ⇒ 绑定
-    //   跟着换（**不用改代码**）。
-    //
-    // ⚠️ **号空间**（§2.3）：引脚号与 PLIC 源号**各管各的** ⇒ ⇒ 这里绑的
-    //   是**设备侧的 IRQ 线号**（M-15 的 `irq_lines`）⇒ ⇒ 它**必须**等于
-    //   连线上的源号 ⇒ ⇒ ⇒ 宿主抬线时的「线号 == 源号」那条判据**成立**
-    //   （它仍留着：万一有人事后改了设备的绑定 ⇒ ⇒ 那一处**不抬**）。
-    for wire in wires.iter() {
-        let Some(pin) = wire.pin else {
-            continue;
-        };
-        let Some(gpio) = devices.gpio(&wire.from_device) else {
-            continue;
-        };
-        let Ok(mut bank) = gpio.try_borrow_mut() else {
-            continue;
-        };
-        // ⚠️ **源号塞得进 u16**（PLIC 的源数 ≤ 64 ⇒ ⇒ 塞得进）⇒ ⇒ 塞不进
-        //   的**不绑**（⇒ ⇒ 那根线抬不起来 ⇒ ⇒ 但它**已经**被报告成
-        //   「活的」⇒ ⇒ ⇒ 这是**不可能**的分支 ⇒ ⇒ 真发生了就是**缺陷**）。
-        if wire.source > u16::MAX as u32 {
-            continue;
-        }
-        bank.set_irq_line_for_pin(pin, wire.source as u16);
-    }
-
-    // ---- 4) 被顶掉的那几根（**用户写的**才算数）----
-    for wire in shadowed {
-        dropped.push(DroppedWireDto {
-            from_device: wire.from_device.clone(),
-            event: wire.event.clone(),
-            to_device: wire.to_device.clone(),
-            source: wire.source,
-            reason: WireDropReason::Overridden,
-        });
-    }
-
-    // ⚠️ **恒等式**：`declared == live + dropped.len()`（裁决 I）⇒ ⇒ 一个判据
-    // 管三件事。
-    //
-    // ⚠️ ⚠️ **这里**刻意**不写** `debug_assert_eq!` —— **恒等式的落点只有
-    // 一处**（`tests_v072_wiring.rs` 的 **K-12**）⇒ ⇒ 两处都写 = 一个约束
-    // 两个落点 ⇒ ⇒ 而且那个 `debug_assert`（**release 里被编掉**⇒ ⇒ 生产
-    // 上**根本不守**）⇒ ⇒ 更糟的是它会**先炸** ⇒ ⇒ 变异自检的红集**全被它
-    // 掩盖** ⇒ ⇒ 归因失真（本批**实测踩到**：T-4 的红集里 10 条全是它）。
-    let declared = description.wiring.iter().flatten().count() as u32;
-
-    WiringCompile {
-        wires,
-        report: riscv_sim_contract::model::WiringReportDto {
-            declared,
-            live,
-            dropped,
-        },
-    }
-}
-
-// ---------------------------------------------------------------------------
 // 「未知系统」门禁（v0.71 · STAGE-47 · 台账 D-175 候选 C）
 // ---------------------------------------------------------------------------
 

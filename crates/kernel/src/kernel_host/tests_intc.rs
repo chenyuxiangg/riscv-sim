@@ -11,7 +11,7 @@
 //! （`M16IntcDto`）。没有一条断言是「我调用了某个内部函数」。
 
 use crate::kernel_host::platform;
-use riscv_sim_contract::csr::IRQ_TIMER_COMPARE;
+use riscv_sim_contract::csr::{IRQ_SOFTWARE, IRQ_TIMER_COMPARE};
 use riscv_sim_contract::model::{
     Edge, ImageKind, ImageRef, ImageSource, ProductTree, Project, ProjectVersion,
 };
@@ -157,6 +157,90 @@ fn the_timer_compare_line_is_raised_at_a_quantum_boundary() {
         state.pending.iter().any(|p| p.line == IRQ_TIMER_COMPARE),
         "定时器线必须在挂起队列里，实际 {:?}",
         state.pending
+    );
+}
+
+/// **guest 写 CLINT 的 `msip` ⇒ 软件中断线（线 4）真的被抬起来 / 撤下去**
+/// （v0.77 补线：寄存器 → 宿主搬运这一段）。
+///
+/// ⚠️ 判别力：器件层早就实现了 `msip`（可写可读、进快照），但宿主
+/// `sync_interrupts` 若**不读**它，写寄存器完全不产生任何线 —— 症状是
+/// 静默无反应。这条断言落在 M-16 导出的**挂起队列**上，不是「寄存器可读
+/// 回」。
+///
+/// ⚠️ 写必须由 **guest 指令**发出：调试器的 `WriteMemory` 走的是调试侧的
+/// 内存通道，**不**经过外设窗口（`read_memory(0x0200_0000)` 会报未映射）。
+#[test]
+fn writing_the_clint_msip_raises_the_software_line() {
+    // 固件（3 条写 1，随后 2 条写 0，最后自旋）：
+    //   lui   x5, 0x02000     ; x5 = 0x0200_0000（CLINT 的 msip）
+    //   addi  x6, x0, 1
+    //   sw    x6, 0(x5)       ; msip = 1（抬线）
+    //   addi  x6, x0, 0
+    //   sw    x6, 0(x5)       ; msip = 0（撤线）
+    //   jal   x0, 0           ; 自旋
+    const SOFTWARE_FIRMWARE: [u8; 24] = [
+        0xB7, 0x02, 0x00, 0x02, // lui  x5, 0x02000
+        0x13, 0x03, 0x10, 0x00, // addi x6, x0, 1
+        0x23, 0xA0, 0x62, 0x00, // sw   x6, 0(x5)
+        0x13, 0x03, 0x00, 0x00, // addi x6, x0, 0
+        0x23, 0xA0, 0x62, 0x00, // sw   x6, 0(x5)
+        0x6F, 0x00, 0x00, 0x00, // jal  x0, 0
+    ];
+
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_QEMU_VIRT)
+                .expect("内置 qemu-virt 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(
+        &mut host,
+        CommandPayload::LoadProject(Project {
+            id: "proj-intc-msip".to_string(),
+            name: "intc-msip".to_string(),
+            tree: ProductTree::default(),
+            images: vec![ImageRef {
+                name: "software-irq.bin".to_string(),
+                kind: ImageKind::RawHex,
+                source: ImageSource::Bytes(SOFTWARE_FIRMWARE.to_vec()),
+            }],
+            version: ProjectVersion::default(),
+        }),
+    );
+
+    // 前置：msip = 0 时没有线 4。
+    host.sync_interrupts_now();
+    assert!(
+        !host
+            .intc_state()
+            .pending
+            .iter()
+            .any(|p| p.line == IRQ_SOFTWARE),
+        "msip = 0 时不该有软件中断线"
+    );
+
+    // 跑完前 3 条指令（停在 `sw` 之后）：msip = 1。
+    dispatch(&mut host, CommandPayload::StepN { n: 3 });
+    host.sync_interrupts_now();
+    let raised = host.intc_state();
+    assert!(
+        raised.pending.iter().any(|p| p.line == IRQ_SOFTWARE),
+        "guest 写 msip = 1 必须抬软件中断线，实际 {:?}",
+        raised.pending
+    );
+
+    // 再跑 2 条（`addi 0` + `sw 0`）：msip 落电平 ⇒ 线必须被撤掉。
+    dispatch(&mut host, CommandPayload::StepN { n: 2 });
+    host.sync_interrupts_now();
+    let lowered = host.intc_state();
+    assert!(
+        !lowered.pending.iter().any(|p| p.line == IRQ_SOFTWARE),
+        "guest 写 msip = 0 必须撤掉软件中断线，实际 {:?}",
+        lowered.pending
     );
 }
 

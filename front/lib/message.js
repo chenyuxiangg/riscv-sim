@@ -1057,32 +1057,15 @@ export const Event = Object.freeze({
      * @param {boolean} pending — 有无待生效的板级配置
      * @param {boolean} loaded — 有没有装载镜像
      * @param {number} revision — 当前的修订号（缺省 0）
-     * @param {object|null} [wiringReport] — **连线报告**（STAGE-48 ·
-     *   D-177 A；缺省 = 「0 根线、0 根丢」那档）⇒ ⇒ 老内核 / 老事件
-     *   **不会**让前端炸
-     * @returns {{MemoryMap: {description: object, pending: boolean, loaded: boolean, revision: number, wiring_report: object}}}
+     * @returns {{MemoryMap: {description: object, pending: boolean, loaded: boolean, revision: number }}}
      */
-    memoryMap: (description, pending, loaded, revision, wiringReport = null) => {
-        // ⚠️ **报告对象在 `MemoryMap` 字面量之外构造** ⇒ ⇒ `MemoryMap: { … }`
-        // 那个块里**只有 5 个键** ⇒ ⇒ 跨层的「两侧逐字段同形且同序」那条
-        // 判据（契约层 `the_v7_payload_shapes_are_the_same_on_both_sides`）
-        // 才不会被嵌套键**污染**。
-        const report = wiringReport
-            ? {
-                  declared: Number(wiringReport.declared ?? 0),
-                  live: Number(wiringReport.live ?? 0),
-                  dropped: Array.isArray(wiringReport.dropped)
-                      ? wiringReport.dropped
-                      : [],
-              }
-            : { declared: 0, live: 0, dropped: [] };
+    memoryMap: (description, pending, loaded, revision) => {
         return {
             MemoryMap: {
                 description,
                 pending: Boolean(pending),
                 loaded: Boolean(loaded),
                 revision: Number(revision ?? 0),
-                wiring_report: report,
             },
         };
     },

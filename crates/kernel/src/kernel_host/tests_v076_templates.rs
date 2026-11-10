@@ -20,9 +20,7 @@
 use riscv_sim_contract::model::{
     ImageKind, ImageRef, ImageSource, PlatformTemplateInfo, ProductTree, Project, ProjectVersion,
 };
-use riscv_sim_contract::platform::{
-    PinDirection, PinFunction, PinIrq, PinSpec, RegionSpec, WiringFrom, WiringSpec, WiringTo,
-};
+use riscv_sim_contract::platform::RegionSpec;
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload};
 
 use super::tests_watchdog::dispatch;
@@ -277,111 +275,6 @@ fn k3_a_big_image_on_the_minimal_template_is_rejected_as_unknown_system() {
 // K-7 —— 冲突校验（E_PLT-19 · 同引脚两路径源不一致 ⇒ 拒）
 // ---------------------------------------------------------------------------
 
-/// **K-7** —— 同一引脚既有 `PinFunction.irq.source`（11）又有
-/// `wiring.from.pin` 绑定（源 3）⇒ ⇒ 两者**不一致** ⇒ ⇒ 拒 `E_PLT-19`
-/// （裁决 L · 报错不静默）。
-#[test]
-fn k7_a_clashing_wiring_source_is_rejected() {
-    let mut description =
-        super::platform::builtin_description(super::platform::PLATFORM_ID_QEMU_VIRT)
-            .expect("内置描述 qemu-virt");
-    // ⚠️ 老描述**没有** `pins` 段 ⇒ ⇒ 本批加一条引脚规格：GPIO0.pin3
-    //   ⇒ 功能 `gpio_in`（irq.source = **11**）。
-    description.pins = Some(vec![PinSpec {
-        device: "GPIO0".to_string(),
-        pin: "pin3".to_string(),
-        functions: vec![PinFunction {
-            name: "gpio_in".to_string(),
-            direction: PinDirection::Input,
-            irq: Some(PinIrq { source: 11 }),
-        }],
-    }]);
-    // ⚠️ wiring：同一条 GPIO0.pin3 ⇒ PLIC **源 3**（≠ 11 ⇒ ⇒ 冲突）。
-    description.wiring = Some(vec![WiringSpec {
-        from: WiringFrom {
-            device: "GPIO0".to_string(),
-            event: "pin_irq".to_string(),
-            pin: Some(3),
-        },
-        to: WiringTo {
-            device: "PLIC".to_string(),
-            source: 3,
-        },
-    }]);
-    let events = dispatch(
-        &mut host(),
-        CommandPayload::SetMemoryMap {
-            description,
-            expected_revision: None,
-        },
-    );
-    match events.as_slice() {
-        [EventPayload::Error { code, message }] => {
-            assert_eq!(*code, "E_PLT-19", "冲突校验必须拒 E_PLT-19");
-            assert!(
-                message.contains("不一致"),
-                "详情必须说清两源不一致 · 实际 {message}"
-            );
-        }
-        other => panic!("回复必须是单条 Error，实际 {other:?}"),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // K-9 —— 必要对照：存量描述（无 pins / 无 pinmux）照装（B-173 同源）
 // ---------------------------------------------------------------------------
-
-/// **K-9** —— default 模板（老描述：无 `pins` 段、无 pinmux 器件）⇒
-/// 导入 + 装载 ⇒ **照装照跑**（存量零风险 · 自动选档摘除后行为一致）。
-#[test]
-fn k9_a_legacy_description_still_loads_after_the_template_import() {
-    let mut host = host();
-    let listed = dispatch(
-        &mut host,
-        CommandPayload::GetPlatformTemplate {
-            id: "default".to_string(),
-        },
-    );
-    let description = match listed.as_slice() {
-        [EventPayload::PlatformTemplate { description }] => description.as_ref().clone(),
-        other => panic!("GetPlatformTemplate 必须回描述，实际 {other:?}"),
-    };
-    assert!(
-        description.pins.is_none() && description.roles.is_none(),
-        "default 是**存量形状**（无 pins / 无 roles）· 实际有 pins/roles ⇒ ⇒ 夹具失效"
-    );
-    let mapped = dispatch(
-        &mut host,
-        CommandPayload::SetMemoryMap {
-            description,
-            expected_revision: None,
-        },
-    );
-    assert!(
-        !mapped
-            .iter()
-            .any(|e| matches!(e, EventPayload::Error { .. })),
-        "存量描述必须装得上：{mapped:?}"
-    );
-    // ---- 装载一条落在 0 的裸镜像 ⇒ 照跑（不拒）--------------------------
-    let events = dispatch(
-        &mut host,
-        CommandPayload::LoadProject(Project {
-            id: "proj-legacy".to_string(),
-            name: "legacy".to_string(),
-            tree: ProductTree::default(),
-            images: vec![ImageRef {
-                name: "demo.bin".to_string(),
-                kind: ImageKind::RawHex,
-                source: ImageSource::Bytes(vec![0x13u8; 8]),
-            }],
-            version: ProjectVersion::default(),
-        }),
-    );
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, EventPayload::Error { .. })),
-        "存量描述 + 裸镜像必须照装照跑：{events:?}"
-    );
-}

@@ -61,7 +61,7 @@
 //! 是 P1 的落点。
 
 use riscv_sim_contract::csr::{
-    arch_mcause_for_line, mie_bit_for_line, IRQ_TIMER_COMPARE, IRQ_UART_RX_READY,
+    arch_mcause_for_line, mie_bit_for_line, IRQ_SOFTWARE, IRQ_TIMER_COMPARE, IRQ_UART_RX_READY,
     IRQ_UART_TX_EMPTY, MSTATUS_MIE_BIT, NO_ACTIVE_IRQ,
 };
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
@@ -95,7 +95,7 @@ pub const MAX_MASKABLE_LINE: u16 = 31;
 pub struct PendingIntr {
     /// 中断线号。
     ///
-    /// ⚠️ 这是**平台的内部线号**（`1 / 2 / 3`）—— 它**不**是 guest 看
+    /// ⚠️ 这是**平台的内部线号**（`1 / 2 / 3 / 4`）—— 它**不**是 guest 看
     /// 到的 `mcause`。
     pub line: u16,
     /// `mcause` 的值（中断 = `IRQ_BASE | <架构 cause 码>`）。
@@ -142,12 +142,17 @@ impl PendingIrq {
 /// | 1 | UART rx-ready | 1 |
 /// | 2 | UART tx-empty | 1 |
 /// | 3 | timer-compare | 2（最高） |
+/// | 4 | software（CLINT `msip`） | 0（最低） |
+///
+/// ⚠️ 软件中断是**自陷**（guest 写 `msip`）⇒ 它应该让位给真正的外设 /
+/// 定时器事件，所以排在最低。
 ///
 /// ⚠️ **没有**在优先级表里显式设置过的线，仲裁时用这里的**回落值**。
 fn default_priority(line: u16) -> u8 {
     match line {
         IRQ_TIMER_COMPARE => 2,
         IRQ_UART_RX_READY | IRQ_UART_TX_EMPTY => 1,
+        IRQ_SOFTWARE => 0,
         _ => 0,
     }
 }
@@ -248,6 +253,7 @@ impl Default for InterruptController {
             (IRQ_UART_RX_READY, default_priority(IRQ_UART_RX_READY)),
             (IRQ_UART_TX_EMPTY, default_priority(IRQ_UART_TX_EMPTY)),
             (IRQ_TIMER_COMPARE, default_priority(IRQ_TIMER_COMPARE)),
+            (IRQ_SOFTWARE, default_priority(IRQ_SOFTWARE)),
         ] {
             priorities.insert(line, prio);
         }
@@ -450,7 +456,7 @@ impl InterruptController {
         //
         // ⚠️ **`mcause` 报的是架构 cause 码，不是内部线号**（v0.23 批）。
         //
-        // 平台的内部线号是 `1 / 2 / 3`，而 RISC-V 的机器中断 cause 码是
+        // 平台的内部线号是 `1 / 2 / 3 / 4`，而 RISC-V 的机器中断 cause 码是
         // `3`（软件）/ `7`（定时器）/ `11`（外部）⇒ 交付给 guest 的
         // `mcause` 必须是 `0x8000_0007`（定时器）/ `0x8000_000B`（外部）。
         //

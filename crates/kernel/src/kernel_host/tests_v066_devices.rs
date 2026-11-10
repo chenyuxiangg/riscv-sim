@@ -40,9 +40,7 @@ fn ram_only_description(id: &str) -> PlatformDescription {
             size: 1024 * 1024,
         }],
         description: None,
-        wiring: None,
         roles: None,
-        pins: None,
         mcu: None,
     }
 }
@@ -53,6 +51,7 @@ fn board_description(id: &str) -> PlatformDescription {
     description.regions.push(RegionSpec::Peripheral {
         base: Some(0x4000_0000),
         device: DeviceSpec::Gpio {
+            irq_line: 11,
             id: "GPIO0".to_string(),
         },
     });
@@ -278,6 +277,7 @@ fn an_instance_of_a_board_that_is_not_in_effect_yet_has_no_base() {
     board.regions.push(RegionSpec::Peripheral {
         base: Some(0x2000_0000),
         device: DeviceSpec::Gpio {
+            irq_line: 12,
             id: "GPIO1".to_string(),
         },
     });

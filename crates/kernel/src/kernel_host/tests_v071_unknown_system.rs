@@ -57,7 +57,6 @@ fn board_with_ram(id: &str, base: u32, size: u32) -> PlatformDescription {
         priority: 100,
         // ⚠️ 用户配的板**不**参与自动选档（它是**点名**用的）。
         description: None,
-        wiring: None,
         region_budget_bytes: 16 * 1024 * 1024,
         max_region_bytes: None,
         regions: vec![RegionSpec::Ram {
@@ -65,7 +64,6 @@ fn board_with_ram(id: &str, base: u32, size: u32) -> PlatformDescription {
             size,
         }],
         roles: None,
-        pins: None,
         mcu: None,
     }
 }
