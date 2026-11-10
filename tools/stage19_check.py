@@ -25,7 +25,7 @@ from doc_check import split_row  # noqa: E402  (必须在 sys.path 调整之后)
 `SCHEMA_VERSION = 8` 与 `PLATFORM_SCHEMA_VERSION = 2` ⇒ ⇒ 一旦出现，
 说明有人偷偷给契约层升了版 ⇒ ⇒ **规格与实现就此脱节**。
 
-⚠️ **本批新增** `E_PLT_16`（wiring 非法）与 **V-18 / V-19**（那两条规则）⇒ ⇒ 它们
+⚠️ **本批新增** `E_PLT_16`（bridge 非法）与 **V-18 / V-19**（那两条规则）⇒ ⇒ 它们
 在「必列」里，而**下一个**码 `E_PLT_17` 与**下一条**规则 `V-20` 在「禁列」里。
 """
 import re
@@ -140,20 +140,20 @@ for grp in "ABCTX":
 
 # ---- 7. 关键约束字面量钉住（防规格被悄悄改软） --------------------------
 must = [
-    "E_PLT_16",              # 裁决 C：本批新增的场景码（wiring 非法）
+    "E_PLT_16",              # 裁决 C：本批新增的场景码（bridge 非法）
     "V-18",                  # 裁决 C：本批新增的校验规则（引用器件必须存在）
     "V-19",                  # 裁决 C：本批新增的校验规则（source 必须小于 sources）
     "E_PLT_08",              # V-9：两个器件共用一个 id（不得改）
     "E_PLT_15",              # v0.33 的码（不得改）
-    "wiring",                # 裁决 B / D：连线段的字段名
-    "WiringSpec",            # 裁决 B：连线的形状
-    "WiringFrom",            # 裁决 B：连线的形状
-    "WiringTo",              # 裁决 B：连线的形状
+    "bridge",                # 裁决 B / D：连线段的字段名
+    "BridgeSpec",            # 裁决 B：连线的形状
+    "BridgeFrom",            # 裁决 B：连线的形状
+    "BridgeTo",              # 裁决 B：连线的形状
     "ram_window",            # 裁决 I：「取哪段 RAM」这条规则的**唯一**落点
     "PLATFORM_RULES_VERSION",  # 裁决 F：本批的规则集版本（2 → 3）
     "PLATFORM_SCHEMA_VERSION",  # 描述形状版本（**不升**）
     "SCHEMA_VERSION",        # 契约信封版本（**不升**）
-    "DEFAULT_WIRING",        # 裁决 E：默认连线的唯一落点
+    "DEFAULT_BRIDGE",        # 裁决 E：默认连线的唯一落点
     "irq_line",              # 裁决 D：语义**不动**的那个字段
     "split_row",             # 裁决 H：表格切分的唯一落点
     "tools/doc_check.py",    # 裁决 H：切分口径的定义处

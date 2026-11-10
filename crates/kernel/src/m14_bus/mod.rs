@@ -463,7 +463,7 @@ pub enum RegionTarget {
     Ram(RamBackend),
     Rom(RomBackend),
     Peripheral(PeripheralId),
-    /// A peripheral region bound to a live instance (D-12 wiring).
+    /// A peripheral region bound to a live instance (D-12 bridge).
     PeripheralBound(BoundPeripheral),
 }
 
@@ -869,7 +869,7 @@ impl Bus {
     ///
     /// **Id-only mapping — nothing to dispatch to.** The bus has no
     /// instance behind the id, so every access to this window surfaces
-    /// E_BUS-05. Use [`Bus::map_peripheral_instance`] for real wiring;
+    /// E_BUS-05. Use [`Bus::map_peripheral_instance`] for real bridge;
     /// this entry point is kept for compatibility with the pre-D-12
     /// call sites (a typed handle without an instance).
     ///
@@ -891,7 +891,7 @@ impl Bus {
         })
     }
 
-    /// Map a peripheral **instance** onto the bus (D-12 wiring).
+    /// Map a peripheral **instance** onto the bus (D-12 bridge).
     ///
     /// This is the real M-14 ↔ M-15 junction: accesses that land in
     /// `[base, base + size)` are dispatched into the instance
@@ -1754,7 +1754,7 @@ impl Bus {
     /// addresses.
     ///
     /// The assembly layer (M-17 / `kernel_host`) needs this for two
-    /// wirings that the bus itself does not own:
+    /// hookups that the bus itself does not own:
     ///
     /// - **D-46** — attaching a probe sink to each peripheral
     ///   ([`crate::m18_probe::ProbeRegistry::attach_signal`]) so the
@@ -2377,7 +2377,7 @@ impl Bus {
             RegionTarget::Peripheral(id) => {
                 // Id-only mapping: the bus holds no instance, so there
                 // is nothing to dispatch to. Kept for the pre-D-12
-                // call sites; real wiring uses `map_peripheral_instance`.
+                // call sites; real bridge uses `map_peripheral_instance`.
                 Err(PlatformError::new(
                     BUS_FAMILY,
                     5,

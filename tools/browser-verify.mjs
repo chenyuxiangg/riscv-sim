@@ -44,7 +44,7 @@
 //   - it is **not** a gate: it needs a local Chrome and a local HTTP
 //     server, so it is deliberately *not* part of `tools/check-front.sh`;
 //   - it does not replace the Node gate — the Node gate checks the
-//     contract / module behaviour, this one checks the wiring in a
+//     contract / module behaviour, this one checks the bridge in a
 //     browser.
 //
 // Prerequisites
@@ -186,7 +186,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "terminalScreen",
     "memoryMap",
     "unknownSystem",
-    "wiringReport",
+    "bridgeReport",
     "platformSchemaV2",
     "pinLevelRouting",
     "mcuConcept",
@@ -1667,7 +1667,7 @@ const BV_PIN_LEVEL_BOARD = {
         { kind: "peripheral", base: 1073741824, device: { device: "gpio", id: "GPIO0" } },
         { kind: "ram", base: 2147483648, size: 134217728 },
     ],
-    wiring: [
+    bridge: [
         { from: { device: "GPIO0", event: "pin_irq", pin: 3 }, to: { device: "PLIC", source: 11 } },
     ],
 };
@@ -1690,7 +1690,7 @@ const BV_PIN_LEVEL_BOARD = {
  *   寄存器偏移 `0x4×引脚号`）· PLIC = `0xc000_0000`（enable `+0x4×源` ·
  *   claim/complete `+0x200004`）· UART0 = `0x1000_0000`。
  *
- * ⚠️ **wiring 留空**（本批判据走 **pinmux 路由**，不挂 `pin_irq` 线 ⇒ ⇒
+ * ⚠️ **bridge 留空**（本批判据走 **pinmux 路由**，不挂 `pin_irq` 线 ⇒ ⇒
  *   E_PLT-19 冲突校验的“反证面”由契约/内核测试盖，真机只走通电路径）。
  */
 const BV_PINMUX_BOARD = {
@@ -1708,7 +1708,7 @@ const BV_PINMUX_BOARD = {
         { kind: "peripheral", base: 1073741824 + 4096, device: { device: "pinmux", id: "PINMUX" } },
         { kind: "ram", base: 2147483648, size: 134217728 },
     ],
-    wiring: null,
+    bridge: null,
     pins: [
         {
             device: "GPIO0",
@@ -1744,14 +1744,14 @@ const BV_LEGACY_AUTOSELECT_BOARD = {
         { kind: "peripheral", base: 1073741824, device: { device: "gpio", id: "GPIO0" } },
         { kind: "ram", base: 2147483648, size: 134217728 },
     ],
-    wiring: [
+    bridge: [
         { from: { device: "UART0", event: "rx_ready" }, to: { device: "PLIC", source: 10 } },
     ],
 };
 
-const BV_OLD_WIRING_BOARD = {
+const BV_OLD_BRIDGE_BOARD = {
     schema_version: 2,
-    id: "browser-verify-old-wiring",
+    id: "browser-verify-old-bridge",
     name: "browser-verify 老连线板",
     priority: 996,
     region_budget_bytes: 134217728,
@@ -1763,7 +1763,7 @@ const BV_OLD_WIRING_BOARD = {
         { kind: "peripheral", base: 1073741824, device: { device: "gpio", id: "GPIO0" } },
         { kind: "ram", base: 2147483648, size: 134217728 },
     ],
-    wiring: [
+    bridge: [
         { from: { device: "UART0", event: "rx_ready" }, to: { device: "PLIC", source: 10 } },
     ],
 };
@@ -1778,7 +1778,7 @@ const BV_ILLEGAL_EVENT_BOARD = {
     ...BV_PIN_LEVEL_BOARD,
     id: "browser-verify-illegal-event",
     name: "browser-verify 非法事件名板",
-    wiring: [
+    bridge: [
         { from: { device: "GPIO0", event: "not_an_event" }, to: { device: "PLIC", source: 11 } },
     ],
 };
@@ -1788,11 +1788,11 @@ const BV_ILLEGAL_EVENT_BOARD = {
  *
  * ⚠️ **期望**：**照旧能装** ⇒ ⇒ ⇒ 界面上画的线**没有**弄坏既有板。
  */
-const BV_NO_WIRING_BOARD = {
+const BV_NO_BRIDGE_BOARD = {
     ...BV_PIN_LEVEL_BOARD,
-    id: "browser-verify-no-wiring",
+    id: "browser-verify-no-bridge",
     name: "browser-verify 没有连线的板",
-    wiring: [],
+    bridge: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -2045,9 +2045,9 @@ const BV_PARTIAL_BOARD = {
  * ⚠️ **必须带一块 RAM**：demo 固件要落在地址 0 附近（40 字节）⇒ ⇒ 这块板
  *   得装得下它 ⇒ ⇒ 否则本段会**污染**后面的段。
  */
-const BV_WIRING_BOARD = {
+const BV_BRIDGE_BOARD = {
     schema_version: 1,
-    id: "bv-wiring-board",
+    id: "bv-bridge-board",
     name: "browser-verify 连线报告板",
     priority: 996,
     // ⚠️ **预算必须够**：PLIC 的窗口（`0x200000 + 0x1000×contexts`）**约 2 MB**
@@ -2068,7 +2068,7 @@ const BV_WIRING_BOARD = {
             device: { device: "gpio", id: "GPIO0" },
         },
     ],
-    wiring: [
+    bridge: [
         {
             from: { device: "GPIO0", event: "rx_ready" },
             to: { device: "PLIC", source: 11 },
@@ -2079,16 +2079,16 @@ const BV_WIRING_BOARD = {
 /**
  * 「**抬得了**」的对照板 —— STAGE-48 · v0.72 · B-150。
  *
- * ⚠️ **必要对照**：它与 [`BV_WIRING_BOARD`] **只有源器件那一个差别**
+ * ⚠️ **必要对照**：它与 [`BV_BRIDGE_BOARD`] **只有源器件那一个差别**
  * （GPIO ⇒ ⇒ UART）⇒ ⇒ 线**合法**、**抬得了** ⇒ ⇒ 报告从「1 根抬不了」
  * 变成「**全部通电**」⇒ ⇒ ⇒ **报告跟着板变** ⇒ ⇒ ⇒ 这证明
- * [`BV_WIRING_BOARD`] **真的被内核应用了**（否则两块板的报告**一样**）
+ * [`BV_BRIDGE_BOARD`] **真的被内核应用了**（否则两块板的报告**一样**）
  * ⇒ ⇒ ⇒ ⇒ 这才是**真对照**（用「一块没有连线的板」当对照是**空转**：报告
  * 本来就是「0 根」⇒ ⇒ 那条断言**恒真**）。
  */
-const BV_RAISABLE_WIRING_BOARD = {
+const BV_RAISABLE_BRIDGE_BOARD = {
     schema_version: 1,
-    id: "bv-raisable-wiring-board",
+    id: "bv-raisable-bridge-board",
     name: "browser-verify 抬得了连线板",
     priority: 995,
     region_budget_bytes: 134217728,
@@ -2105,7 +2105,7 @@ const BV_RAISABLE_WIRING_BOARD = {
             device: { device: "uart16550", id: "UART0", irq_line: 1, baud_rate: 115200 },
         },
     ],
-    wiring: [
+    bridge: [
         {
             from: { device: "UART0", event: "rx_ready" },
             to: { device: "PLIC", source: 11 },
@@ -2785,7 +2785,7 @@ async function runUnknownSystemSection(cdp, opts) {
  * STAGE-48 · v0.72 批的真机段：**连线报告**（B-146 ~ B-150）。
  *
  * ⚠️ **这段要钉的是「内核说的那句话真的到界面上了」** ⇒ ⇒ 断的是「**真
- *   WASM 内核** ⇒ `memory.map` 事件（第五个字段 `wiring_report`）⇒ ⇒
+ *   WASM 内核** ⇒ `memory.map` 事件（第五个字段 `bridge_report`）⇒ ⇒
  *   视图状态 ⇒ ⇒ DOM」**整条链** ⇒ ⇒ 前端塞 mock 数据糊弄不过去。
  *
  * ⚠️ **段序**：必须排在「板级内存图」那段**之后**（那一段已经把一张板配出来
@@ -2804,7 +2804,7 @@ async function runUnknownSystemSection(cdp, opts) {
  * @param {{timeoutMs: number}} opts
  * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
  */
-async function runWiringReportSection(cdp, opts) {
+async function runBridgeReportSection(cdp, opts) {
     /** @type {{name: string, ok: boolean, detail: string}[]} */
     const checks = [];
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
@@ -2844,9 +2844,9 @@ async function runWiringReportSection(cdp, opts) {
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
             action: "submit-memory-map",
-            requestId: "bv-wiring-board",
+            requestId: "bv-bridge-board",
             viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_WIRING_BOARD)} },
+            params: { description: ${JSON.stringify(BV_BRIDGE_BOARD)} },
         },
     }))`);
 
@@ -2856,8 +2856,8 @@ async function runWiringReportSection(cdp, opts) {
     let droppedText = null;
     while (Date.now() < deadline) {
         const now = await awaitEval(cdp, `(() => {
-            const s = document.querySelector('[data-mmap-wiring="summary"]');
-            const d = document.querySelector('[data-mmap-wiring="dropped"]');
+            const s = document.querySelector('[data-mmap-bridge="summary"]');
+            const d = document.querySelector('[data-mmap-bridge="dropped"]');
             return {
                 summary: s ? String(s.textContent ?? "") : null,
                 dropped: d ? String(d.textContent ?? "") : null,
@@ -2873,14 +2873,14 @@ async function runWiringReportSection(cdp, opts) {
 
     // ---- ④ 内核那条事件里的**原值**（界面上的数必须**等于**它）--------------
     const lastMap = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
-    const report = lastMap?.wiring_report ?? null;
+    const report = lastMap?.bridge_report ?? null;
     const declared = Number(report?.declared ?? -1);
     const live = Number(report?.live ?? -1);
     const dropped = Array.isArray(report?.dropped) ? report.dropped : [];
 
     // -- B-146：报告出现了，且**内核说的**是「1 根写、1 根抬不了」------------
     add(
-        "B-146 · 真机上提交一份带 `wiring` 的板 ⇒ ⇒ 界面显示**连线报告**"
+        "B-146 · 真机上提交一份带 `bridge` 的板 ⇒ ⇒ 界面显示**连线报告**"
         + "（⇒ ⇒ 内核说的那句话**真的到了界面**）",
         summaryText !== null && droppedText !== null && declared === 1 && dropped.length === 1,
         `摘要=${JSON.stringify(summaryText)} 丢线数=${dropped.length} `
@@ -2924,16 +2924,16 @@ async function runWiringReportSection(cdp, opts) {
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
             action: "submit-memory-map",
-            requestId: "bv-raisable-wiring-board",
+            requestId: "bv-raisable-bridge-board",
             viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_RAISABLE_WIRING_BOARD)} },
+            params: { description: ${JSON.stringify(BV_RAISABLE_BRIDGE_BOARD)} },
         },
     }))`);
     const deadline2 = Date.now() + opts.timeoutMs;
     let liveText = null;
     while (Date.now() < deadline2) {
         const now = await awaitEval(cdp, `(() => {
-            const s = document.querySelector('[data-mmap-wiring="summary"]');
+            const s = document.querySelector('[data-mmap-bridge="summary"]');
             return s ? String(s.textContent ?? "") : null;
         })()`);
         if (now && String(now).includes("全部通电")) {
@@ -2961,7 +2961,7 @@ async function runWiringReportSection(cdp, opts) {
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
             action: "submit-memory-map",
-            requestId: "bv-wiring-restore-board",
+            requestId: "bv-bridge-restore-board",
             viewId: "memory-map",
             params: { description: ${JSON.stringify(BV_DEMO_BOARD)} },
         },
@@ -2986,7 +2986,7 @@ async function runWiringReportSection(cdp, opts) {
  *   的 `description.regions[*].base`」**整条链** ⇒ ⇒ ⇒ 前端塞 mock 数据糊弄
  *   不过去（前端**不自己算**基址）。
  *
- * ⚠️ **段的位置** ⇒ ⇒ 排在 `wiringReport` **之后**、其余段**之前** ⇒ ⇒ ⇒
+ * ⚠️ **段的位置** ⇒ ⇒ 排在 `bridgeReport` **之后**、其余段**之前** ⇒ ⇒ ⇒
  *   **必须**排在会改板的那几段**之后**（⇒ ⇒ 本段自己改的板**也要复原**）。
  */
 async function runPlatformSchemaV2Section(cdp, opts) {
@@ -3997,7 +3997,7 @@ const BV_LAST_MEMORY_MAP_FN = `(() => {
       revision: Number(ev.MemoryMap.revision ?? 0),
       // ⚠️ **连线报告**（STAGE-48 · v0.72 · D-177 A）—— 读**内核那条事件**
       // 里的原值 ⇒ ⇒ 「界面上的数 == 内核的数」那条判据才有基准。
-      wiring_report: ev.MemoryMap.wiring_report ?? null,
+      bridge_report: ev.MemoryMap.bridge_report ?? null,
     };
   }
   return last;
@@ -8769,7 +8769,7 @@ async function runPinLevelRoutingSection(cdp, opts) {
             //   帧（payload.payload.Event —— 与 BV_LAST_MEMORY_MAP_FN
             //   **同一个形状**）⇒ ⇒ 少跳一层 ⇒ ⇒ **永远读不到** MemoryMap
             //   ⇒ ⇒ 五条判据一起红、症状与「内核没接受那块板」一模一样
-            //   （v0.74 批 · B-156 ~ B-160 **实测踩到**：wiring_report
+            //   （v0.74 批 · B-156 ~ B-160 **实测踩到**：bridge_report
             //   恒 null ⇒ ⇒ 而内核其实是**收下**的 —— 用 wasm-smoke 同款
             //   直驱复现已证）。
             const msg = (frame && frame.payload) ? frame.payload : null;
@@ -8778,7 +8778,7 @@ async function runPinLevelRoutingSection(cdp, opts) {
             if (!ev || !ev.MemoryMap) continue;
             if (String((ev.MemoryMap.description || {}).id ?? "") !== ${JSON.stringify(boardId)}) continue;
             last = {
-                wiring_report: ev.MemoryMap.wiring_report ?? null,
+                bridge_report: ev.MemoryMap.bridge_report ?? null,
                 revision: Number(ev.MemoryMap.revision ?? 0),
                 regions: ((ev.MemoryMap.description || {}).regions || []).length,
             };
@@ -8892,11 +8892,11 @@ async function runPinLevelRoutingSection(cdp, opts) {
             "B-156a · 真机上提交一份**带引脚级连线**的板 ⇒ ⇒ 内核**收下**"
             + " ⇒ ⇒ 那根线**在用**（连线报告说它**活着** ⇒ ⇒ 不是「被静默丢弃」）",
             pinMap !== null
-                && pinMap.wiring_report !== null
-                && Number(pinMap.wiring_report.declared) === 1
-                && Number(pinMap.wiring_report.live) === 1
-                && (pinMap.wiring_report.dropped ?? []).length === 0,
-            `连线报告=${JSON.stringify(pinMap?.wiring_report ?? null)}`,
+                && pinMap.bridge_report !== null
+                && Number(pinMap.bridge_report.declared) === 1
+                && Number(pinMap.bridge_report.live) === 1
+                && (pinMap.bridge_report.dropped ?? []).length === 0,
+            `连线报告=${JSON.stringify(pinMap?.bridge_report ?? null)}`,
         );
 
         // ---- ④ **再提交一次** ⇒ ⇒ 生效图**相同**（确定）----------------------
@@ -8907,7 +8907,7 @@ async function runPinLevelRoutingSection(cdp, opts) {
             + " ⇒ ⇒ **确定**（⇒ ⇒ 同一份描述两次装得到**同一个**图 ⇒ ⇒ 可复算）",
             pinMap !== null
                 && pinMap2 !== null
-                && JSON.stringify(pinMap.wiring_report) === JSON.stringify(pinMap2.wiring_report)
+                && JSON.stringify(pinMap.bridge_report) === JSON.stringify(pinMap2.bridge_report)
                 && JSON.stringify(pinMap.regions) === JSON.stringify(pinMap2.regions),
             `第一次=${JSON.stringify(pinMap)} 第二次=${JSON.stringify(pinMap2)}`,
         );
@@ -8937,28 +8937,28 @@ async function runPinLevelRoutingSection(cdp, opts) {
         );
 
         // ---- ⑥ **没有连线**的板 ⇒ ⇒ 照旧能装 -------------------------------
-        await submitBoard(BV_NO_WIRING_BOARD, "bv-no-wiring-board");
-        const noWireMap = await waitForBoard("browser-verify-no-wiring");
+        await submitBoard(BV_NO_BRIDGE_BOARD, "bv-no-bridge-board");
+        const noWireMap = await waitForBoard("browser-verify-no-bridge");
         add(
             "B-160 · ⚠️ **必要对照**：**没有连线**的板 ⇒ ⇒ **照旧能装**"
             + "（⇒ ⇒ 界面上画的线**没有**弄坏既有板）",
             noWireMap !== null
-                && noWireMap.wiring_report !== null
-                && Number(noWireMap.wiring_report.declared) === 0,
-            `连线报告=${JSON.stringify(noWireMap?.wiring_report ?? null)}`,
+                && noWireMap.bridge_report !== null
+                && Number(noWireMap.bridge_report.declared) === 0,
+            `连线报告=${JSON.stringify(noWireMap?.bridge_report ?? null)}`,
         );
 
         // ---- ⑦ **老格式**的板 ⇒ ⇒ 照旧能装 ---------------------------------
-        await submitBoard(BV_OLD_WIRING_BOARD, "bv-old-wiring-board");
-        const oldMap = await waitForBoard("browser-verify-old-wiring");
+        await submitBoard(BV_OLD_BRIDGE_BOARD, "bv-old-bridge-board");
+        const oldMap = await waitForBoard("browser-verify-old-bridge");
         add(
             "B-158 · ⚠️ **必要对照**：**老格式**（`rx_ready`）的板 ⇒ ⇒ **照旧能装**"
             + " ⇒ ⇒ **存量板档案零风险**（⇒ ⇒ 缺省优先）",
             oldMap !== null
-                && oldMap.wiring_report !== null
-                && Number(oldMap.wiring_report.declared) === 1
-                && Number(oldMap.wiring_report.live) === 1,
-            `连线报告=${JSON.stringify(oldMap?.wiring_report ?? null)}`,
+                && oldMap.bridge_report !== null
+                && Number(oldMap.bridge_report.declared) === 1
+                && Number(oldMap.bridge_report.live) === 1,
+            `连线报告=${JSON.stringify(oldMap?.bridge_report ?? null)}`,
         );
 
         // ---- ⑧ **装那份引脚级固件** ⇒ ⇒ guest **真的**领到那个源 -----------
@@ -11985,17 +11985,17 @@ async function main() {
             title: "「未知系统」门禁（真内核拒 · PC 没动 · 只显示内核原文 · 中档不拒）",
         });
 
-        // -- the WIRING REPORT (STAGE-48 · v0.72 · B-146 ~ B-150) ----------------
+        // -- the BRIDGE REPORT (STAGE-48 · v0.72 · B-146 ~ B-150) ----------------
         // ⚠️ **必须排在板级内存图那段之后**（那一段已经把一张板配出来了 ⇒ ⇒
         //    才有「换板」这个动作可做）⇒ ⇒ 本段**自己先卸载**（⇒ ⇒ 改板
         //    立即生效 ⇒ ⇒ 报告说的是**新板**的那份）。
-        const wiringReport = await runSection("wiringReport", () => runWiringReportSection(cdp, opts));
-        registerSection("wiringReport", wiringReport.checks, {
+        const bridgeReport = await runSection("bridgeReport", () => runBridgeReportSection(cdp, opts));
+        registerSection("bridgeReport", bridgeReport.checks, {
             title: "连线报告（真内核说「你写了 N 根线里有 M 根抬不了」· 界面逐字显示 · 数字与内核一致）",
         });
 
         // -- the PLATFORM SCHEMA V2 (STAGE-49 · v0.73 · B2 · B-151 ~ B-155) -----
-        // ⚠️ **必须排在 wiringReport 之后**：那一段把板配成了「GPIO 当源」⇒ ⇒
+        // ⚠️ **必须排在 bridgeReport 之后**：那一段把板配成了「GPIO 当源」⇒ ⇒
         //   本段要的是一块**干净的**板（⇒ ⇒ 缺基址的那块）⇒ ⇒ 排在它后面
         //   才不会被上一段留下的现场影响。
         //

@@ -98,7 +98,7 @@ function inProcessTransport(kernel) {
 }
 
 /**
- * Build a clean wiring: mock kernel → transport → M-05 → 调试面接线，
+ * Build a clean bridge: mock kernel → transport → M-05 → 调试面接线，
  * plus the mounted + rendered debug view.
  *
  * @returns {{kernel: object, transport: object, router: object}}

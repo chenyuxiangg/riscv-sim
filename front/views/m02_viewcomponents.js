@@ -3132,7 +3132,7 @@ export async function mountViewComponents() {
  * Ask the dev layer to (re)seed the demo data.
  *
  * M-02 must not know how demo data is produced, so it only emits the
- * `riscv:seed` signal; the dev wiring in app.js turns that signal into
+ * `riscv:seed` signal; the dev bridge in app.js turns that signal into
  * store state. The demo data itself lives in `front/dev/demo-state.js`.
  *
  * @param {string} [viewId]

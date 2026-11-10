@@ -68,7 +68,7 @@ function boardDraft() {
             { kind: "peripheral", base: "1073741824", device: { device: "gpio", id: "GPIO0" } },
             { kind: "ram", base: "2147483648", size: "8388608" },
         ],
-        wiring: [],
+        bridge: [],
     };
 }
 
@@ -168,7 +168,7 @@ describe("STAGE-44 · 产品树 = 板的派生视图（双栏工作面）", () =
             auto_selectable: "false",
             region_budget_bytes: "8388608",
             regions: [{ kind: "ram", base: "0", size: "1048576" }],
-            wiring: [],
+            bridge: [],
         };
         // ⚠️ 用户的板**挂着**（≠ 生效图）⇒ ⇒ 草稿被改回生效图那样。
         const plan = memoryMap.planMemoryMapUpdate(

@@ -10,7 +10,7 @@
 //! 端到端判别力」**：
 //!
 //! - 宿主侧那条 `the_clint_mtimecmp_reaches_the_interrupt_controller`
-//!   （`kernel_host/tests_osz_wiring.rs`）是**宿主直接写总线**
+//!   （旧的宿主直写总线用例）是**宿主直接写总线**
 //!   （`host.bus_mut().write(...)`）⇒ 它证明「写总线 → CLINT 存下 → 同步
 //!   → M-16 拿到比较值」；
 //! - M-16 侧有单测证明「电平语义」。

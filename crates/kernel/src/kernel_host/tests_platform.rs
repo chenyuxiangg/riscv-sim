@@ -222,8 +222,6 @@ fn an_over_budget_region_is_rejected_before_anything_is_mapped() {
             },
         ],
         description: None,
-        // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
-        // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         roles: None,
         mcu: None,
     };
@@ -477,8 +475,6 @@ fn a_broken_description_reports_its_own_code() {
             },
         ],
         description: None,
-        // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
-        // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         roles: None,
         mcu: None,
     };
@@ -496,8 +492,6 @@ fn a_broken_description_reports_its_own_code() {
             size: 4096,
         }],
         description: None,
-        // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
-        // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         roles: None,
         mcu: None,
     };
@@ -527,8 +521,6 @@ fn a_broken_description_reports_its_own_code() {
             },
         ],
         description: None,
-        // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
-        // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         roles: None,
         mcu: None,
     };

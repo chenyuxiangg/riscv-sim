@@ -220,7 +220,7 @@ describe("板档案 · 规则集版本（B-1 ~ B-4）", () => {
         //   合法升版都会把它打死**⇒ ⇒ ⇒ 改成**引用镜像那份常量**⇒ ⇒ ⇒
         //   **判别力保留**（它钉的仍是「落库条目带的是**当前**规则版本」）
         //   ⇒ ⇒ 而「镜像那份 == 契约层源码那份」由**跨层**判据守
-        //   （`front/tests/wiring-editor.test.mjs` 的 X-1）⇒ ⇒ ⇒ **一个
+        //   （`front/tests/bridge-editor.test.mjs` 的 X-1）⇒ ⇒ ⇒ **一个
         //   版本号只有一处钉它的地方**。
         assert.equal(
             entry.rules_version,

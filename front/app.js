@@ -1579,8 +1579,8 @@ export async function handleCommand(detail, services) {
         registerMemory,
         waveform,
         debug,
-        console: consoleWiring,
-        memoryMap: memoryMapWiring,
+        console: consoleBridge,
+        memoryMap: memoryMapBridge,
     } = services;
     const action = detail?.action;
     /** 探针流重订失败（仅「reset」路径可能非空）。 */
@@ -1725,8 +1725,8 @@ export async function handleCommand(detail, services) {
                             registerMemory,
                             waveform,
                             debug,
-                            console: consoleWiring,
-                            memoryMap: memoryMapWiring,
+                            console: consoleBridge,
+                            memoryMap: memoryMapBridge,
                             // ⚠️ 器件中间层（STAGE-43 · v0.66）—— 复位也**要**
                             // 重订那两条流（`LoadProject` 清了内核的主题集合）。
                             devices: services.devices,
@@ -2200,7 +2200,7 @@ export async function handleCommand(detail, services) {
                 registerMemory?.reset?.();
                 waveform?.reset?.();
                 debug?.reset?.();
-                consoleWiring?.reset?.();
+                consoleBridge?.reset?.();
                 // ⚠️ 卸载 ⇒ 内核侧的主题集合被清空 ⇒ **必须重订全部流**
                 // （裁决 F）⇒ 复用装载那套助手，不写第二套。
                 const errors = await resubscribeAllStreams(services);
@@ -2228,8 +2228,8 @@ export async function handleCommand(detail, services) {
                         registerMemory,
                         waveform,
                         debug,
-                        console: consoleWiring,
-                        memoryMap: memoryMapWiring,
+                        console: consoleBridge,
+                        memoryMap: memoryMapBridge,
                         // ⚠️ 器件中间层（STAGE-43 · v0.66）—— 同上。
                         devices: services.devices,
                     },
@@ -2377,8 +2377,8 @@ export async function applyProductBoard(services, rawDescription, options = {}) 
         registerMemory,
         waveform,
         debug,
-        console: consoleWiring,
-        memoryMap: memoryMapWiring,
+        console: consoleBridge,
+        memoryMap: memoryMapBridge,
     } = services;
     const description = draftToDescription(rawDescription ?? {});
     const product = viewStore.getState("product") ?? {};
@@ -2433,8 +2433,8 @@ export async function applyProductBoard(services, rawDescription, options = {}) 
             registerMemory,
             waveform,
             debug,
-            console: consoleWiring,
-            memoryMap: memoryMapWiring,
+            console: consoleBridge,
+            memoryMap: memoryMapBridge,
             devices: services.devices,
             templates: services.templates,
         },
@@ -2580,8 +2580,8 @@ async function startSession(services) {
  * 与 D-45 同一个坑——「我记得要重订」写在注释里，不如用一条用例钉住。
  */
 export async function loadProjectIntoKernel(services, project) {
-    const { registerMemory, waveform, debug, console: consoleWiring } = services;
-    if (!consoleWiring) {
+    const { registerMemory, waveform, debug, console: consoleBridge } = services;
+    if (!consoleBridge) {
         // ⚠️ **不静默**：console 接线漏了 ⇒ 终端永远是空的，而页面上看不出
         // 任何异常 ⇒ 这是最难查的一类故障。宁可当场抛错。
         throw new Error(
@@ -2602,7 +2602,7 @@ export async function loadProjectIntoKernel(services, project) {
     // `debug` 是可选的——不是每个调用点都装了调试面。
     debug?.reset?.();
     // ⚠️ 新程序 ⇒ 上一个程序的 console 字节不算数（同一个坑）。
-    consoleWiring.reset();
+    consoleBridge.reset();
     // ⚠️ 器件实例状态**跟着工程重建**（STAGE-43 · v0.66 · 同一个坑）⇒ ⇒
     // 上一块板的实例清单不算数。
     services.devices?.reset?.();
@@ -4041,19 +4041,19 @@ async function bootstrap() {
     });
     // console 流（契约 v4 的 `Console` 事件）同样必须**在任何**装载之前
     // 挂好：内核侧**订阅了** `sim.console` 才会推字节流。
-    const consoleWiring = wireConsole(commandRouter);
+    const consoleBridge = wireConsole(commandRouter);
     // 板级内存图（契约 v6 的 `MemoryMap` 事件）同样必须**在任何**装载之前
     // 挂好：内核侧**订阅了** `memory.map` 才会推那张图（裁决 J：订阅即强制
     // 推一条当前生效的图）⇒ 不先挂好，第一批图就丢了。
-    const memoryMapWiring = wireMemoryMap(commandRouter);
+    const memoryMapBridge = wireMemoryMap(commandRouter);
     // 器件中间层的两张表（STAGE-43 · v0.66）同样必须**在任何**装载之前挂好：
     // 内核侧**订阅了** `device.types` / `device.instances` 才会推 ⇒ ⇒ 不先挂好，
     // 第一批就丢了（与 `memory.map` 同一个坑）。
-    const devicesWiring = wireDevices(commandRouter);
+    const devicesBridge = wireDevices(commandRouter);
     // ⚠️ 模板库（v0.76 · STAGE-52 · 裁决 M）—— 与器件中间层**同形**：
     // 内核侧**订阅了** `platform.templates` 才会推清单 ⇒ ⇒ 不先挂好，
     // 模板库卡就一直「清单还没到」。
-    const templatesWiring = wireTemplates(commandRouter);
+    const templatesBridge = wireTemplates(commandRouter);
     // 板档案（STAGE-15 · v0.30）：建存储实例 + **恢复档案列表**。
     //
     // ⚠️ **不自动重新提交**（裁决 D）：刷新后板**还在**，但**要重新提交**才
@@ -4109,12 +4109,12 @@ async function bootstrap() {
         registerMemory,
         waveform,
         debug,
-        console: consoleWiring,
-        memoryMap: memoryMapWiring,
+        console: consoleBridge,
+        memoryMap: memoryMapBridge,
         // ⚠️ 器件中间层（STAGE-43 · v0.66）⇒ ⇒ 装载时要跟着重订两条流。
-        devices: devicesWiring,
+        devices: devicesBridge,
         // ⚠️ 模板库（v0.76 · STAGE-52 · 裁决 M）⇒ ⇒ 装载时要跟着重订清单流。
-        templates: templatesWiring,
+        templates: templatesBridge,
         // ⚠️ 板档案的**存储实例**（可能是 `null` ⇒ 「只存在于本会话」）。
         boardStore: board.store,
     };

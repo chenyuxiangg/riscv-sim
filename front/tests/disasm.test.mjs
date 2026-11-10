@@ -108,7 +108,7 @@ function inProcessTransport(kernel) {
 }
 
 /**
- * Build a clean wiring: mock kernel → transport → M-05 → 调试面接线，
+ * Build a clean bridge: mock kernel → transport → M-05 → 调试面接线，
  * plus the mounted + rendered debug view.
  *
  * ⚠️ 视图状态是**模块级单例**（M-03），用例之间共享 ⇒ 每个用例都要

@@ -1,6 +1,6 @@
 # M-14 / M-15 / M-18 接线 · 代码审查报告
 
-> **审查对象**：`crates/kernel/src/m14_bus/`、`crates/kernel/src/m15_peripheral/`、`crates/kernel/src/m18_probe/`（含新增集成测试 `crates/kernel/tests/m14_m15_m19_wiring.rs`）
+> **审查对象**：`crates/kernel/src/m14_bus/`、`crates/kernel/src/m15_peripheral/`、`crates/kernel/src/m18_probe/`（含新增集成测试 `crates/kernel/tests/m14_m15_m19_bridge.rs`）
 > **审查基准**：`docs/detailed-design/M-14_BusMemoryMap.html`（§3.2 读写分发、§6.1 错误码）、`M-15_PeripheralModel.html`（§4.4.4 外设接口、§9.3 探针对接）、`M-18_Probe.html`（§1.3 MVP 范围、§2.1.1 表 68 通道定义）、`docs/reviews/REVIEWS.md`（D-07 / D-10 / D-12 / D-14）、`riscv_sim_contract::port`
 > **审查日期**：2026-10-20
 > **审查方式**：接线 PR 自审 + 端到端集成测试实证（真实 `Bus` + 真实 `PeripheralRegistry` + 真实 `ProbeRegistry` + 真实 `WaveformPipeline`，无一处绕过）
@@ -51,7 +51,7 @@ let handle = peripherals.handle("GPIO0").unwrap();
 bus.map_peripheral_instance(GPIO_BASE, GPIO_WINDOW, handle)?;
 ```
 
-参考实现见 `crates/kernel/tests/m14_m15_m19_wiring.rs` 的 `build()`。
+参考实现见 `crates/kernel/tests/m14_m15_m19_bridge.rs` 的 `build()`。
 
 ---
 
@@ -114,7 +114,7 @@ M-14 LLD §6.1：外设内部错误 → **E_BUS-05**（与未映射 E_BUS-01 可
 
 ## 三、端到端验证（N5 闭合的证据）
 
-`crates/kernel/tests/m14_m15_m19_wiring.rs`（11 个用例，全部走真实跨模块路径）：
+`crates/kernel/tests/m14_m15_m19_bridge.rs`（11 个用例，全部走真实跨模块路径）：
 
 | 用例 | 验证内容 |
 | --- | --- |
@@ -192,7 +192,7 @@ $ cargo clippy --workspace --all-targets -- -D warnings
 $ cargo test --workspace
 running 213 tests   → 213 passed; 0 failed     （内核单测，基线 193 → +20）
 running 5 tests     → 5 passed; 0 failed       （m06_load_to_bus，未改动）
-running 11 tests    → 11 passed; 0 failed      （m14_m15_m19_wiring，新增）
+running 11 tests    → 11 passed; 0 failed      （m14_m15_m19_bridge，新增）
 running 5 tests     → 5 passed; 0 failed       （m18_to_m19_waveform，未改动）
 合计 234 passed / 0 failed（基线 203 → +31）
 ```

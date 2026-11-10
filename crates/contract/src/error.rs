@@ -550,35 +550,15 @@ pub const E_PLT_14_REGION_NOT_FOUND: u16 = 14;
 /// **parameter's value** ⇒ an `id` is **not** a parameter ⇒ forbidden.
 pub const E_PLT_15_DEVICE_EMPTY_ID: u16 = 15;
 
-/// Scenario code: the description's optional **`wiring` section** names
-/// something that does not exist — a device that is **not** in the map, an
-/// event name outside the vocabulary, or a source that the target PLIC
-/// does not have.
+/// Scenario code: 同一块板上两个外设声明了**同一个 PLIC 中断源号**。
 ///
-/// ⚠️ **New in v0.34 (D-125)**: the wiring between the devices became
-/// **data** (an optional `wiring` section in the description) ⇒ the
-/// host compiles the interrupt routing from the description instead of
-/// from a hard-coded table ⇒ a wiring that names a device that is not
-/// there would route an interrupt into the void ⇒ such a declaration is
-/// rejected here, at declaration time.
+/// PLIC 的源号是板级资源 ⇒ 两个外设共用一个号 ⇒ guest `claim()` 分不出是谁
+/// ⇒ 声明期就拒。
 ///
-/// ⚠️ **One code covers two shapes** (frozen spec STAGE-19 §2.2): the
-/// rules **V-18** (the references must resolve) and **V-19** (the source
-/// must be below the target PLIC's source count) mean the same thing —
-/// 「这条连线非法」⇒ **one code**, not two (the same shape as V-13 / V-14
-/// / V-15 sharing `E_PLT-12`).
+/// ⚠️ 它不复用 [`E_PLT_02_EMPTY_ID`] / [`E_PLT_08_DUPLICATE_DEVICE_ID`] /
+/// [`E_PLT_12_PARAMETER_OUT_OF_RANGE`] / [`E_PLT_15_DEVICE_EMPTY_ID`]：那几个
+/// 判的是 id 或参数取值，这里判的是**源号冲突**，对象不同 ⇒ 独立一个码。
 ///
-/// ⚠️ **It does not reuse [`E_PLT_02_EMPTY_ID`]**: that one means
-/// 「**描述**的 `id` 为空」⇒ one code, two meanings ⇒ forbidden. It does
-/// not reuse [`E_PLT_08_DUPLICATE_DEVICE_ID`] either: that one means
-/// 「两个器件共用一个 id」⇒ a wiring that names a device that is not
-/// there is **not** a duplicate id. It does not reuse
-/// [`E_PLT_12_PARAMETER_OUT_OF_RANGE`] either: that one judges a device
-/// **parameter's value** ⇒ a wiring's source number is not a device
-/// parameter ⇒ forbidden. It does not reuse
-/// [`E_PLT_15_DEVICE_EMPTY_ID`] either: that one judges a **declared**
-/// device's own `id` ⇒ a wiring's **reference** to a device is a
-/// different object ⇒ forbidden.
 pub const E_PLT_16_IRQ_SOURCE_INVALID: u16 = 16;
 
 /// **角色声明指向的器件不在描述里**（v0.73 · STAGE-49 · D-177 的 C）。

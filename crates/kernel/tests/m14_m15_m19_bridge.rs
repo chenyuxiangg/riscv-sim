@@ -106,7 +106,7 @@ impl Harness {
 
 /// Build the fully wired platform.
 ///
-/// The wiring is the three-step recipe the coordinator can reuse in
+/// The bridge is the three-step recipe the coordinator can reuse in
 /// M-12's boot sequence:
 ///
 /// 1. M-15 creates the instances and registers them (the registry owns

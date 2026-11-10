@@ -51,31 +51,6 @@
 // ⚠️ **落库门槛**（STAGE-15 裁决 B）：只有被内核接受过的描述才允许落库
 // ⇒ 库里不会有**永远装不上的板** ⇒ 前端**仍然不写第二份校验器**。
 
-//
-// # 器件连线 `wiring`（STAGE-19 · v0.34 · D-125 · 裁决 G）
-//
-// 「UART 的 RX 中断连到 PLIC 的哪个源」这条约束**进数据**（平台描述里的
-// **可选** `wiring` 段）⇒ 换一块板改连线**不用改代码**。
-//
-// ⚠️ **前端只做「透传」**（裁决 G）：编辑器**不暴露** `wiring` 的 UI ⇒ 「从
-// 界面提交的板永远没有 `wiring`」是**已知边界**（不假装界面支持）⇒ 这里
-// **只**保证「描述里有 ⇒ 草稿里有 ⇒ 提交回去还在」。
-//
-// ⚠️ **逐字段重建**（裁决 G）：`from.device` / `from.event` / `to.device` /
-// `to.source` **逐个重建** ⇒ 草稿里多出来的键**不可能**漏进契约 ⇒ 「逐
-// 字段重建」这条纪律**不许破**。
-//
-// ⚠️ **形状**：`[{ from: { device, event }, to: { device, source } }]`（契约
-// 层 `WiringSpec` / `WiringFrom` / `WiringTo`，规格 §2.1 钉死名字）⇒ 草稿
-// 里就按这个形状存（**数组**，不是对象）。
-//
-// ⚠️ **空 / 缺省 ⇒ 线上描述**不带** `wiring` 键**（不是 `null`、不是空数组）
-// ⇒ 与契约层 serde 的 `skip_serializing_if = "Option::is_none"` **同形** ⇒
-// 没有 `wiring` 的板往返后**仍然**没有 `wiring`（不给所有板都塞一个空数组）
-// ⇒ 内核回传的那份与前端提交的那份**逐字段相同** ⇒ 「已被内核接受」这个
-// 推导量**不会**因为多一个 `wiring: null` 而永远为假。
-//
-//
 // # 地址比例条（STAGE-35 · v0.50 批 · 裁决 D）
 //
 // 视图正文改成**卡片形态**（`.cards` / `.card` / `.banner` / `.empty` /
@@ -385,17 +360,10 @@ export function cloneDraft(draft) {
             return { ...region };
         }),
     };
-    // ⚠️ `wiring` 也**深复制**（STAGE-19）：它是**对象数组** ⇒ 浅拷贝会让
-    // 「改草稿」改到内核给的那份 ⇒ ⇒ 与 `regions` 同一条纪律。
-    if (Array.isArray(next.wiring)) next.wiring = normalizeWiringList(next.wiring);
     // ⚠️ `roles` 也**深复制**（STAGE-49 · D-177 的 C）：它是**对象** ⇒ ⇒
-    // 浅拷贝会让「改草稿」改到内核给的那份 ⇒ ⇒ 与 `wiring` 同一条纪律。
+    // 浅拷贝会让「改草稿」改到内核给的那份 ⇒ ⇒ 与 `regions` 同一条纪律。
     const roles = normalizeRoles(next.roles);
     if (roles) next.roles = roles;
-    // ⚠️ `pins` 也**深复制**（STAGE-49 · D1）：它是**对象数组** ⇒ ⇒ 浅拷贝
-    // 会让「改草稿」改到内核给的那份 ⇒ ⇒ 与 `wiring` 同一条纪律。
-    const pins = normalizePins(next.pins);
-    if (pins) next.pins = pins;
     // ⚠️ `mcu` 也**深复制**（v0.75 · STAGE-51 · F）：它是**对象** ⇒ ⇒ 浅拷贝
     // 会让「改草稿」改到内核给的那份 ⇒ ⇒ 与 `roles` 同一条纪律。
     const mcu = normalizeMcu(next.mcu);
@@ -435,27 +403,6 @@ export function regionToDraft(region) {
 }
 
 /**
- * 一组器件连线 → **规范形状**（草稿形状 == 线上形状）。
- *
- * ⚠️ **唯一落点**（STAGE-19 裁决 G）：线上 → 草稿、草稿 → 线上**共用这一个
- * 函数** ⇒ ⇒ 「连线长什么样」这条约束**只有一处定义**（不会漂）。
- *
- * ⚠️ **逐字段重建**：`from.device` / `from.event` / `to.device` /
- * `to.source` **逐个重建** ⇒ ⇒ 草稿里多出来的键**不可能**漏进契约 ⇒ ⇒
- * 「逐字段重建」这条纪律**不许破**。
- *
- * ⚠️ **形状**：`[{ from: { device, event }, to: { device, source } }]`（契约
- * 层 `WiringSpec` / `WiringFrom` / `WiringTo`，规格 §2.1 钉死名字）。
- *
- * ⚠️ **不是数组 ⇒ 当作没有连线**（缺省）⇒ ⇒ 前端**不猜**。
- *
- * ⚠️ **不判合法性**：连线引用的器件存不存在、`to.source` 在不在范围内 ⇒ ⇒
- * **只**由内核那一处裁决（`E_PLT_16`）⇒ ⇒ 前端**不写第二个校验器**。
- *
- * @param {unknown} wiring — 线上的 `wiring` 段 / 草稿里的 `wiring`
- * @returns {Array<{from: {device: string, event: string}, to: {device: string, source: number}}>}
- */
-/**
  * 线上�� `roles` 段 → **草稿形状**（STAGE-49 · D-177 的 C）。
  *
  * ⚠️ **前端只做「透传」**：角色**指错了**由**内核**的 V-20 裁决（`E_PLT-18`）
@@ -479,43 +426,11 @@ export function normalizeRoles(roles) {
 }
 
 /**
- * 线上�� `pins` 段 → **草稿形状**（STAGE-49 · D-175 的 D1）。
- *
- * ⚠️ **前端只做「透传」**：引脚表指错了由**内核**的 V-21 裁决（`E_PLT-19`）
- * ⇒ ⇒ 前端**不**写第二个校验器 ⇒ ⇒ 也**不**在这里判引脚名 / 信号名合不合法
- * （那属**第 58 批**的通用连接路由）。
- *
- * @param {unknown} pins — 线上的 `pins` 段 / 草稿里的 `pins`
- * @returns {Array<{device: string, pin: string, signal: string}>|null}
- */
-export function normalizePins(pins) {
-    if (!Array.isArray(pins)) return null;
-    const out = pins
-        .filter((one) => one && typeof one === "object")
-        .map((one) => ({
-            ...one,
-            // ⚠Ｕ`functions` 嵌套数组也深拷（PinSpec 的必填件）⇒⇒
-            // 草稿与描述不共用同一批功能对象。
-            // ⚠老 `signal` 形键也原样透传（但不新增 `functions` 键）。
-            ...(Array.isArray(one.functions)
-                ? { functions: one.functions.map((fn) => ({
-                    ...fn,
-                    irq:
-                        fn?.irq && typeof fn.irq === "object"
-                            ? { ...fn.irq }
-                            : fn?.irq,
-                })) }
-                : {}),
-        }));
-    return out.length > 0 ? out : null;
-}
-
-/**
  * 线上�� `mcu` 段 → **草稿形状**（v0.75 · STAGE-51 · D-175 的 F）。
  *
  * ⚠️ **前端只做「透传」**：isa 词法合不合法由**内核**的 V-23 裁决
  * （`E_PLT-21`）、固件匹配由**内核**的装载门禁裁决（`E_PLT-20`）⇒ ⇒
- * 前端**不写第二个校验器**（与 `roles` / `pins` 同一条纪律）。
+ * 前端**不写第二个校验器**（与 `roles` 同一条纪律）。
  *
  * ⚠️ **只展示，不编辑**（用户 2026-11-03 拍板）⇒ ⇒ 草稿里带着它 ⇒ ⇒
  * 提交回去还在 ⇒ ⇒ **不在这里**提供 mcu 的编辑入口。
@@ -541,43 +456,8 @@ export function normalizeMcu(mcu) {
     return out;
 }
 
-export function normalizeWiringList(wiring) {
-    if (!Array.isArray(wiring)) return [];
-    return wiring.map((entry) => {
-        // ⚠️ **引脚号**（v0.74 · STAGE-50 · 引脚级寻址）⇒ ⇒ **可选**
-        //   ⇒ ⇒ 老描述**没有**它 ⇒ ⇒ ⇒ **不带**这个键（⇒ ⇒ 与契约层
-        //   serde 的 `skip_serializing_if` **同形**）。
-        const from = {
-            device: String(entry?.from?.device ?? ""),
-            event: String(entry?.from?.event ?? ""),
-        };
-        const pin = entry?.from?.pin;
-        if (pin !== undefined && pin !== null && pin !== "") {
-            // ⚠️ ⚠️ **不裁剪上界**（v0.74 · STAGE-50 · 施工期订正）：契约层的
-            //   `pin` 是 `u32` ⇒ ⇒ **越界的数必须能送到内核**（⇒ ⇒ 内核的
-            //   V-18 判它 ⇒ ⇒ 既有码 `E_PLT-16`）⇒ ⇒ ⇒ 前端**不许**先把它
-            //   裁成别的数（裁了就是前端替内核做判定 ⇒ ⇒ 第二个真相源）。
-            //
-            // ⚠️ **负数**按本仓**数字输入框的既有惯例**夹到 0（与 `to.source`
-            //   同一手法）⇒ ⇒ 那不是「合法性判定」，只是「形状」。
-            const n = Number(pin);
-            from.pin = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
-        }
-        return {
-            from,
-            to: {
-                device: String(entry?.to?.device ?? ""),
-                source: Number(entry?.to?.source ?? 0) >>> 0,
-            },
-        };
-    });
-}
-
 /**
  * 把内核给的**当前生效的图**复制成一份草稿。
- *
- * ⚠️ **`wiring` 也读进来**（STAGE-19 · 裁决 G）：描述里有 ⇒ 草稿里有 ⇒ ⇒
- * 提交回去还在；⚠️ **空 / 缺省 ⇒ 草稿里**不带**这个键**。
  *
  * @param {object|null|undefined} description
  * @returns {object|null}
@@ -602,20 +482,11 @@ export function draftFromDescription(description) {
         region_budget_bytes: String(Number(description.region_budget_bytes ?? 0)),
         regions: regions.map((region) => regionToDraft(region)),
     };
-    // ⚠️ `wiring`（STAGE-19 · 裁决 G）：描述里有 ⇒ **草稿里带上** ⇒ ⇒
-    // 提交回去还在（否则「板档案里那块板」一提交就把连线丢了）。
-    //
-    // ⚠️ **空 / 缺省 ⇒ 草稿里**不带**这个键**（不给所有板都塞一个空数组）。
-    const wiring = normalizeWiringList(description.wiring);
-    if (wiring.length > 0) draft.wiring = wiring;
     // ⚠️ `roles`（STAGE-49 · D-177 的 C）：描述里有 ⇒ **草稿里带上** ⇒ ⇒
     // 提交回去还在（否则「板档案里那块板」一提交就把角色丢了 ⇒ ⇒ console
     // 悄悄变回「第一个 UART」）。
     const roles = normalizeRoles(description.roles);
     if (roles) draft.roles = roles;
-    // ⚠️ `pins`（STAGE-49 · D1）：描述里有 ⇒ **草稿里带上** ⇒ ⇒ 提交回去还在。
-    const pins = normalizePins(description.pins);
-    if (pins) draft.pins = pins;
     // ⚠️ `mcu`（v0.75 · STAGE-51 · F）：描述里有 ⇒ **草稿里带上** ⇒ ⇒
     // 提交回去还在（否则「从内置模版开始」一提交就把 MCU 丢了）。
     const mcu = normalizeMcu(description.mcu);
@@ -630,10 +501,6 @@ export function draftFromDescription(description) {
  * 草稿里多出来的键 ⇒ 草稿的内部字段**不可能**漏进契约。
  *
  * ⚠️ **外设窗口没有 `size`** ⇒ 这里**绝不**补一个（补了就是编数据）。
- *
- * ⚠️ **`wiring` 逐字段重建**（STAGE-19 · 裁决 G）：`from.device` /
- * `from.event` / `to.device` / `to.source` **逐个重建** ⇒ ⇒ 草稿里多出来的
- * 键**漏不进**契约；⚠️ **空 / 缺省 ⇒ 这个键**不带**（不是 `null`）。
  *
  * @param {object} draft
  * @returns {object}
@@ -689,14 +556,6 @@ export function draftToDescription(draft) {
             return out;
         }),
     };
-    // ⚠️ `wiring`（STAGE-19 · 裁决 G）：**逐字段重建**（同一个
-    // `normalizeWiringList`）⇒ ⇒ 草稿里多出来的键**不可能**漏进契约。
-    //
-    // ⚠️ **空 / 缺省 ⇒ 线上描述**不带**这个键**（不是 `null`、不是空数组）⇒ ⇒
-    // 与契约层 serde 的 `skip_serializing_if = "Option::is_none"` **同形** ⇒ ⇒
-    // 没有 `wiring` 的板往返后**仍然**没有 `wiring`。
-    const wiring = normalizeWiringList(draft?.wiring);
-    if (wiring.length > 0) description.wiring = wiring;
     // ⚠️ `roles`（STAGE-49 · D-177 的 C）：**逐字段重建**（同一个
     // `normalizeRoles`）⇒ ⇒ 草稿里多出来的键**不可能**漏进契约；
     // ⚠️ **空 / 缺省 ⇒ 线上描述不带这个键**（不是 `null`）⇒ ⇒ 与契约层 serde
@@ -704,11 +563,6 @@ export function draftToDescription(draft) {
     // 没有 `roles`。
     const roles = normalizeRoles(draft?.roles);
     if (roles) description.roles = roles;
-    // ⚠️ `pins`（STAGE-49 · D1）：**逐字段重建**（同一个 `normalizePins`）⇒ ⇒
-    // 草稿里多出来的键**不可能**漏进契约；⚠️ **空 / 缺省 ⇒ 线上描述不带这个
-    // 键**（不是 `null`）⇒ ⇒ 与契约层 serde 的 `skip_serializing_if` **同形**。
-    const pins = normalizePins(draft?.pins);
-    if (pins) description.pins = pins;
     // ⚠️ `mcu`（v0.75 · STAGE-51 · F）：**逐字段重建**（同一个 `normalizeMcu`）
     // ⇒ ⇒ 草稿里多出来的键**不可能**漏进契约；⚠️ **空 / 缺省 ⇒ 线上描述不带
     // 这个键**（不是 `null`）⇒ ⇒ 与契约层 serde 的 `skip_serializing_if` **同形**。
@@ -1397,35 +1251,9 @@ export function sameMemoryMapMetadata(a, b) {
 }
 
 /**
- * 两份描述的**器件连线**（`wiring`）一样吗。
- *
- * ⚠️ **用同一个归一化函数比**（STAGE-19 · 验收 C-5 的第 2 条）：两边都过
- * `normalizeWiringList`（**唯一落点**）⇒ ⇒ 「同样的连线、**键序不同**」
- * **不会**被判成不同 ⇒ ⇒ 不会**假触发**整份替换 ⇒ ⇒ 「一个约束一个落点」
- * 这条纪律在**第二处**也成立。
- *
- * ⚠️ **缺省 = 没有连线**：两边都缺省 ⇒ 一样；一边缺省、一边有 ⇒ 不同 ⇒ ⇒
- * 「删掉连线」也是**改动**（也得提交得出去）。
- *
- * ⚠️ **列表顺序算数据的一部分**（契约层是 `Vec`）⇒ 顺序不同 ⇒ 不同 ⇒ ⇒
- * ⚠️ 但界面**没有** `wiring` 的编辑器 ⇒ 顺序**改不了** ⇒ ⇒ 不会假触发。
- *
- * ⚠️ **不判合法性**：连线引用的器件存不存在、`source` 在不在范围内 ⇒ ⇒
- * **只**由内核那一处裁决 ⇒ ⇒ 前端**不写第二个校验器**。
- *
- * @param {object|null|undefined} a
- * @param {object|null|undefined} b
- * @returns {boolean}
- */
-export function sameWiring(a, b) {
-    return canonicalJson(normalizeWiringList(a?.wiring))
-        === canonicalJson(normalizeWiringList(b?.wiring));
-}
-
-/**
  * 两份描述的 **MCU**（`mcu`）一样吗。
  *
- * ⚠️ **与 `sameWiring` 同风格**：两边都过 [`normalizeMcu`]（**唯一落点**）
+ * ⚠️ 两边都过 [`normalizeMcu`]（**唯一落点**）
  * ⇒ ⇒ 「同样的 MCU、**键序不同**」**不会**被判成不同 ⇒ ⇒ 不会假触发整份
  * 替换 ⇒ ⇒ 「一个约束一个落点」这条纪律在**第三处**也成立。
  *
@@ -1541,11 +1369,6 @@ export function diffMemoryMapOps(baseDescription, draftDescription) {
  * ⚠️ **差量为空**（什么都没改）⇒ `mode = "none"` ⇒ 前端**不发命令**
  * ⇒ 免得白涨一次修订号。
  *
- * ⚠️ **`wiring` 变了 ⇒ 也走**整份**（STAGE-19 §9 第 1 条 · 验收 C-5）：
- * 差量契约里**没有** `wiring` 操作 ⇒ ⇒ 差量路径**表达不了** ⇒ ⇒ 「元数据
- * 变了 ⇒ **整份**」这条判据**同样**管 `wiring` ⇒ ⇒ `wiring` 的改动**必须**
- * 能提交出去。
- *
  * @param {object|null|undefined} baseDescription — **当前生效的图**
  * @param {object|null|undefined} draftDescription — 草稿转成的线上描述
  * @returns {{mode: "replace"|"patch"|"none", ops: Array<object>}}
@@ -1564,16 +1387,6 @@ export function planMemoryMapUpdate(baseDescription, draftDescription, options =
     // **不**自己猜「有没有挂着」。
     if (options.pending === true) return { mode: "replace", ops: [] };
     if (!sameMemoryMapMetadata(baseDescription, draftDescription)) {
-        return { mode: "replace", ops: [] };
-    }
-    // ⚠️ **`wiring` 变了 ⇒ 也走**整份**（STAGE-19 §9 第 1 条 · 验收 C-5）：
-    // 差量契约里**没有** `wiring` 操作 ⇒ ⇒ 差量路径**表达不了** ⇒ ⇒
-    // 「元数据变了 ⇒ **整份**」这条判据**同样**管 `wiring` ⇒ ⇒ `wiring` 的
-    // 改动**必须**能提交出去（否则它**永远**提交不出去）。
-    //
-    // ⚠️ **同一个归一化函数**（`sameWiring` ⇒ `normalizeWiringList`）⇒ ⇒
-    // 「同样的连线、键序不同」**不**算改动 ⇒ ⇒ 不会假触发整份替换。
-    if (!sameWiring(baseDescription, draftDescription)) {
         return { mode: "replace", ops: [] };
     }
     // ⚠️ **`mcu` 变了 ⇒ 也走整份**（v0.75 · STAGE-51 · F）：差量契约里
@@ -2404,79 +2217,6 @@ function renderPeripheralRow(region, index, kinds = DEVICE_KINDS) {
  * @returns {string}
  */
 /**
- * **引脚区**（v0.76 · STAGE-52 · 裁决 E / G —— **只读展示，不编辑**）。
- *
- * ⚠️ **用户 2026-11-03 拍板**：引脚规格 = **功能列表**（`PinSpec`）⇒ ⇒
- * 前端编辑面**压缩为只读展示** ⇒ ⇒ **不在这里提供任何编辑入口** ⇒ ⇒
- * 草稿里的 `pins` 只能从模板导入 / 存量板档案带进来。
- *
- * ⚠️ **前端不写第二个校验器**（内核 V-24 / V-25 是唯一校验器 ⇒
- * `E_PLT-19`）⇒ ⇒ 这里**逐字透传**显示（`functions[].name` /
- * `direction` / `irq.source`）⇒ ⇒ **不判** `direction` 枚举、不判
- * `irq.source` 越界（那都是内核的事）。
- *
- * ⚠️ 展示两行（有哪行显示哪行）：草稿引脚（将随提交生效）+ 当前生效板
- * 引脚（只读参考）。都无 ⇒ 引导行。
- *
- * @param {object} draft — 当前草稿
- * @param {object|null} memoryMap — 内核的 memory.map 状态
- * @returns {string}
- */
-function renderPinsCard(draft, memoryMap) {
-    const draftPins = normalizePins(draft?.pins) ?? [];
-    const effectivePins = normalizePins(memoryMap?.description?.pins) ?? [];
-    const lines = [];
-    if (draftPins.length > 0) {
-        lines.push(`<li data-pins-line="草稿引脚">${renderPinSpecList(draftPins)}</li>`);
-    }
-    if (effectivePins.length > 0) {
-        lines.push(`<li data-pins-line="当前生效板引脚（只读）">${renderPinSpecList(effectivePins)}</li>`);
-    }
-    const body = lines.length > 0
-        ? `<ul class="mcu-summary">${lines.join("")}</ul>`
-        : `<p class="muted" data-pins-none="1">未声明引脚 —— 从「模板导入」导入模板可带出（如 qemu-virt 的 GPIO0 引脚）。</p>`;
-    return `
-        <div class="card" data-pins-display="1">
-            <h3>引脚规格<span class="tag">只展示 · 不编辑</span></h3>
-            ${body}
-            <p class="muted">
-                每个引脚是**功能列表**（<code>PinSpec</code>）：同名引脚可挂多个功能，每个功能
-                自带方向与中断目标（<code>irq.source</code>）⇒ ⇒ 中断绑「引脚 × 当前功能」。
-                合法性由内核校验（<code>E_PLT-19</code>）；前端**只读透传**，不写第二份校验器。
-            </p>
-        </div>
-    `;
-}
-
-/**
- * 一组 `PinSpec` 的只读展示。
- *
- * @param {Array<object>} pins — `PinSpec` 数组
- * @returns {string}
- */
-function renderPinSpecList(pins) {
-    return pins
-        .map((one) => {
-            const device = escapeHtml(String(one?.device ?? ""));
-            const pin = escapeHtml(String(one?.pin ?? ""));
-            const fns = Array.isArray(one?.functions)
-                ? one.functions
-                    .map((fn) => {
-                        const name = escapeHtml(String(fn?.name ?? ""));
-                        const dir = escapeHtml(String(fn?.direction ?? ""));
-                        const irq = fn?.irq && typeof fn.irq === "object"
-                            ? ` · irq=<code>${escapeHtml(String(fn.irq.source))}</code>`
-                            : "";
-                        return `<code>${name}</code>（${dir}${irq}）`;
-                    })
-                    .join(" ")
-                : escapeHtml(one?.signal ? `（老格式 signal=${one.signal}）` : "（无功能声明）");
-            return `<span class="pin-spec"><code>${device}.${pin}</code> → ${fns}</span>`;
-        })
-        .join("<br>");
-}
-
-/**
  * **模板库**（v0.76 · STAGE-52 · 裁决 M —— 前端**查**内核，**不抄**模板）。
  *
  * ⚠️ **清单是内核报的那一份真相**（`platform.templates` 订阅即推）⇒ ⇒
@@ -2740,7 +2480,6 @@ export function renderMemoryMapPanel(state) {
 
                 ${renderMcuCard(draft, memoryMap)}
 
-                ${renderPinsCard(draft, memoryMap)}
 
                 <div class="card">
                     <h3>地址布局<span class="tag">按真实地址区间着色</span></h3>

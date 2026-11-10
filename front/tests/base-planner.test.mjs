@@ -66,7 +66,7 @@ function boardDraft() {
             { kind: "peripheral", base: "1073741824", device: { device: "gpio", id: "GPIO0" } },
             { kind: "ram", base: "2147483648", size: "8388608" },
         ],
-        wiring: [],
+        bridge: [],
     };
 }
 

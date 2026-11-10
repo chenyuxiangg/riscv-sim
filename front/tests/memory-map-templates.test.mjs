@@ -124,16 +124,6 @@ const QEMU_VIRT_DESC = {
         { kind: "peripheral", base: 1073742848, device: { device: "plic", id: "PLIC", irq_line: 11 } },
         { kind: "peripheral", base: 1073743872, device: { device: "gpio", id: "GPIO0", irq_line: 12 } },
     ],
-    pins: [
-        {
-            device: "GPIO0",
-            pin: "pin3",
-            functions: [
-                { name: "gpio_in", direction: "input", irq: { source: 11 } },
-                { name: "uart_tx", direction: "output", irq: { source: 3 } },
-            ],
-        },
-    ],
 };
 
 // ---------------------------------------------------------------------------
@@ -199,11 +189,11 @@ describe("STAGE-52 · 模板库（裁决 M · N 组）", () => {
         m01.route("#/memory-map");
         const router = fakeKernel();
         router.templateDescriptions["qemu-virt"] = QEMU_VIRT_DESC;
-        const wiring = templates.wireTemplates(router);
+        const bridge = templates.wireTemplates(router);
 
         await app.handleCommand(
             { action: "load-template", params: { id: "qemu-virt" } },
-            { commandRouter: router, templates: wiring },
+            { commandRouter: router, templates: bridge },
         );
 
         const d = mm.currentDraft(m03.getState("memory-map"));
@@ -213,9 +203,6 @@ describe("STAGE-52 · 模板库（裁决 M · N 组）", () => {
             4,
             "导入后草稿必须带 4 个外设器件（CLINT/PLIC/UART0/GPIO0）",
         );
-        assert.ok(Array.isArray(d.pins), "导入后草稿必须带引脚规格");
-        assert.equal(d.pins[0].device, "GPIO0", "引脚规格跟着模板一起进草稿");
-        assert.equal(d.pins[0].functions.length, 2, "同名引脚的两个功能必须都在");
     });
 
     test("N-2 未知模板 id ⇒ 内核错误原样摆出（不吞）", async () => {
@@ -223,11 +210,11 @@ describe("STAGE-52 · 模板库（裁决 M · N 组）", () => {
         m01.assembleWorkspace("product");
         m01.route("#/memory-map");
         const router = fakeKernel();
-        const wiring = templates.wireTemplates(router);
+        const bridge = templates.wireTemplates(router);
 
         await app.handleCommand(
             { action: "load-template", params: { id: "no-such" } },
-            { commandRouter: router, templates: wiring },
+            { commandRouter: router, templates: bridge },
         );
 
         const state = m03.getState("memory-map");
@@ -262,48 +249,6 @@ describe("STAGE-52 · 模板库（裁决 M · N 组）", () => {
 });
 
 describe("STAGE-52 · 引脚只读展示（裁决 E/G · N 组）", () => {
-    test("N-4 引脚规格卡：只读展示功能名/方向/irq 源 ⇒ 零编辑入口", () => {
-        m03.reset();
-        m01.assembleWorkspace("product");
-        m01.route("#/memory-map");
-        const router = fakeKernel();
-        app.wireMemoryMap(router);
-        router.emitMemoryMap(QEMU_VIRT_DESC, false, true, 7);
-
-        const card = $("[data-pins-display='1']");
-        assert.ok(card, "引脚规格卡必须在");
-        assert.ok(card.textContent.includes("只展示 · 不编辑"), "必须自标「只展示 · 不编辑」");
-        assert.ok(card.textContent.includes("gpio_in"), "功能名必须显示");
-        assert.ok(card.textContent.includes("input"), "方向必须显示");
-        assert.ok(card.textContent.includes("uart_tx"), "第二个功能也必须显示");
-        assert.ok(card.textContent.includes("11"), "irq 源必须显示");
-        assert.ok(card.textContent.includes("3"), "第二个功能的 irq 源也必须显示");
-        assert.equal(card.querySelectorAll("input").length, 0, "引脚卡不能有任何输入框");
-        assert.equal(
-            card.querySelectorAll("[data-action]").length,
-            0,
-            "引脚卡不能有任何动作按钮（只读透传）",
-        );
-    });
-
-    test("N-4 前端**不判**合法性：非法方向 / 越界源照原样透传显示（内核是唯一校验器）", () => {
-        const draft = mm.draftFromDescription({
-            schema_version: 5,
-            id: "weird-pins",
-            name: "怪引脚板",
-            priority: 1,
-            region_budget_bytes: 4096,
-            regions: [{ kind: "ram", base: 0, size: 4096 }],
-            pins: [
-                { device: "GPIO0", pin: "pin9", functions: [{ name: "whatever", direction: "sideways", irq: { source: 999 } }] },
-            ],
-        });
-        assert.equal(draft.pins[0].functions[0].direction, "sideways", "非法方向照透传");
-        assert.equal(draft.pins[0].functions[0].irq.source, 999, "越界源照透传");
-        const back = mm.draftToDescription(draft);
-        assert.equal(back.pins[0].functions[0].irq.source, 999, "往返后越界源仍在（前端不纠）");
-    });
-
     test("N-5 `defaultDraft()` 不再含 `auto_selectable` 键（B3 决议）", () => {
         const d = mm.defaultDraft();
         assert.ok(!("auto_selectable" in d), "默认草稿不许再带 auto_selectable（废弃字段）");

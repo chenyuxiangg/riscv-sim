@@ -13,7 +13,7 @@
 //!
 //! ⚠️ **B-4 不许只数区域条数**：换档失败时
 //! [`riscv_sim_kernel::kernel_host::KernelHost::new_with_profile`] 会
-//! **静默退回默认档**（只留一个 `probe_wiring_failures` 计数）⇒ 断言必须
+//! **静默退回默认档**（只留一个 `probe_bridge_failures` 计数）⇒ 断言必须
 //! 同时落在「**真的是 QemuVirt 布局**」这件事上：一个 `base == 0x8000_0000`
 //! 且 `size == 128 MiB` 的 RAM 区域。
 
@@ -287,7 +287,7 @@ fn the_qemuvirt_profile_maps_one_128_mib_ram_region() {
     // ⚠️ **换档失败会静默退回默认档**（`new_with_profile` 的失败路径只留
     // 一个计数）⇒ 这条断言是「**没有**发生静默降级」的直接证据。
     assert_eq!(
-        host.probe_wiring_failures(),
+        host.probe_bridge_failures(),
         0,
         "换档失败会**静默退回默认档** ⇒ 失败次数必须是 0"
     );
@@ -390,7 +390,7 @@ fn the_default_profile_keeps_its_own_region_layout() {
     // ⚠️ **Default 档不受本批影响**（裁决 G 只动 QemuVirt 档）⇒ 这条
     // 用例钉住「没动」。
     let host = KernelHost::new();
-    assert_eq!(host.probe_wiring_failures(), 0);
+    assert_eq!(host.probe_bridge_failures(), 0);
     let map = host.bus().export_map();
     // ⚠️ **期望值从 `default` 描述查**（规格 §6.3 第 5 条）。
     let described_count = described_regions(&default_description()).len();

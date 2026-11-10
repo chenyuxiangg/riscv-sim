@@ -266,7 +266,7 @@ pub struct RamBackend {
       > ⇒ 「护栏只能放宽、不能去掉」**可证**。
       > 证据：`the_default_physical_occupancy_cap_is_still_sixteen_mib`；
       > 另有两处集成层钉住同一件事：
-      > `crates/kernel/tests/m14_m15_m19_wiring.rs` 的
+      > `crates/kernel/tests/m14_m15_m19_bridge.rs` 的
       > `oversized_region_is_rejected_without_allocating`（声明 256 MiB **成功**且
       > `ram_allocated_bytes() == 0`；真占超预算 ⇒ `E_BUS-09` 且**零页留下**）与
       > `the_region_size_cap_is_configurable`（声明免费 → 写第二个页被拒

@@ -83,11 +83,11 @@ ERROR_REL = "crates/contract/src/error.rs"
 PLATFORM_REL = "crates/contract/src/platform.rs"
 HOST_PLATFORM_REL = "crates/kernel/src/kernel_host/platform.rs"
 HOST_REL = "crates/kernel/src/kernel_host/mod.rs"
-KTEST_REL = "crates/kernel/src/kernel_host/tests_v072_wiring.rs"
+KTEST_REL = "crates/kernel/src/kernel_host/tests_v072_bridge.rs"
 MIRROR_REL = "front/lib/message.js"
-WRLIB_REL = "front/lib/wiring-report.js"
+WRLIB_REL = "front/lib/bridge-report.js"
 MMAP_REL = "front/views/components/memory-map.js"
-TEST_REL = "front/tests/wiring-report.test.mjs"
+TEST_REL = "front/tests/bridge-report.test.mjs"
 BROWSER_REL = "tools/browser-verify.mjs"
 LEDGER_REL = "docs/reviews/REVIEWS.md"
 PREV_TEST_REL = "crates/kernel/src/kernel_host/tests_v071_unknown_system.rs"
@@ -274,23 +274,23 @@ ANCHORS = [
     (host_platform, "pub fn uart(&self, id: &str)"),
     (host_platform, "pub fn plic(&self, id: &str)"),
     # ⚠️ **连线编译**（裁决 C / D）
-    (host_platform, "pub fn compile_wiring("),
-    (host_platform, "pub struct WiringCompile"),
+    (host_platform, "pub fn compile_bridge("),
+    (host_platform, "pub struct BridgeCompile"),
     (host_platform, "fn check_wire("),
     # ⚠️ **宿主消费实例表**（裁决 E / F）
     (host_rs, "self.devices.uart(&wire.from_device)"),
     (host_rs, "self.devices.plic(&wire.to_device)"),
     (host_rs, "pub fn uart_receive_on("),
-    (host_rs, "wiring_report: self.wiring_report.clone()"),
+    (host_rs, "bridge_report: self.bridge_report.clone()"),
     # ⚠️ **契约层的新 DTO**（裁决 G / H）
-    (model_rs, "pub struct WiringReportDto"),
+    (model_rs, "pub struct BridgeReportDto"),
     (model_rs, "pub struct DroppedWireDto"),
     (model_rs, "pub enum WireDropReason"),
-    (protocol_rs, "wiring_report: crate::model::WiringReportDto"),
+    (protocol_rs, "bridge_report: crate::model::BridgeReportDto"),
     # ⚠️ **内核的门禁**（K-1 ~ K-13）
     (ktest, "fn k1_the_second_uarts_wire_really_carries_the_interrupt"),
     (ktest, "fn k2_the_control_a_gpio_source_cannot_be_raised"),
-    (ktest, "fn k3_the_default_wiring_still_claims_source_10"),
+    (ktest, "fn k3_the_default_bridge_still_claims_source_10"),
     (ktest, "fn k4_a_shadowed_wire_is_replaced_not_appended"),
     (ktest, "fn k5_a_wire_to_a_missing_device_is_rejected"),
     (ktest, "fn k6_on_a_valid_description_only_two_reasons_are_reachable"),
@@ -300,16 +300,16 @@ ANCHORS = [
     (ktest, "fn k12_every_real_report_keeps_the_identity"),
     (ktest, "fn k13_the_host_really_holds_a_handle_for_the_second_uart"),
     # ⚠️ **前端那几条**（N-1 ~ N-4）
-    (wr_lib, "export function normalizeWiringReport"),
+    (wr_lib, "export function normalizeBridgeReport"),
     (wr_lib, "export function wireDropReasonLabel"),
-    (wr_lib, "export function describeWiringReport"),
-    (mmap_js, "export function renderWiringReport"),
+    (wr_lib, "export function describeBridgeReport"),
+    (mmap_js, "export function renderBridgeReport"),
     (test_js, "N-1"),
     (test_js, "N-2"),
     (test_js, "N-3"),
     (test_js, "N-4"),
     # ⚠️ **真机段**（B-146 ~ B-150）
-    (browser, "wiringReport"),
+    (browser, "bridgeReport"),
 ]
 for src_, needle in ANCHORS:
     if src_ is None:

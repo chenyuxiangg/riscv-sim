@@ -111,7 +111,7 @@ function fakeKernel() {
 /**
  * 装一套干净的接线（视图状态是**模块级单例** ⇒ 每个用例都重置）。
  *
- * @returns {Promise<{router: object, consoleWiring: object}>}
+ * @returns {Promise<{router: object, consoleBridge: object}>}
  */
 async function setup() {
     m01.assembleWorkspace("embedded");
@@ -119,9 +119,9 @@ async function setup() {
     m03.setState("terminal", { term: { bytes: "" } });
     m02.resetTerminalScreen();
     const router = fakeKernel();
-    const consoleWiring = app.wireConsole(router);
-    await consoleWiring.subscribeConsoleStream();
-    return { router, consoleWiring };
+    const consoleBridge = app.wireConsole(router);
+    await consoleBridge.subscribeConsoleStream();
+    return { router, consoleBridge };
 }
 
 // ---------------------------------------------------------------------------
@@ -241,10 +241,10 @@ describe("终端视图 · 显示的是「屏幕」", () => {
     });
 
     test("N-13：新程序 ⇒ 屏幕**清空**（不继承上一段工程）", async () => {
-        const { router, consoleWiring } = await setup();
+        const { router, consoleBridge } = await setup();
         router.emitConsole(bytesOf(OSZ_BOOT + OSZ_TYPED));
         assert.ok(terminalText().includes("cyx"), "夹具：先让屏幕上有一行命令");
-        consoleWiring.reset();
+        consoleBridge.reset();
         router.emitConsole(bytesOf("second program\n"));
         const text = terminalText();
         // ⚠️ 末尾那个 `\n` 是**光标已经换到下一行**⇒ ⇒ 屏幕上是两行

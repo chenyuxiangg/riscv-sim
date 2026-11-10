@@ -5,7 +5,7 @@
 // renders a static "intelligent light" product tree.
 //
 // The demo data deliberately lives *outside* the production render path
-// (M-02): M-02 only emits the `riscv:seed` signal, and the dev wiring
+// (M-02): M-02 only emits the `riscv:seed` signal, and the dev bridge
 // in app.js is what turns that signal into state. When M-07 lands, this
 // file and the dev-only button go away together.
 //

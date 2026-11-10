@@ -41,14 +41,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TARGETS = [
     "crates/kernel/src/kernel_host/platform.rs",
     "crates/kernel/src/kernel_host/mod.rs",
-    "front/lib/wiring-report.js",
+    "front/lib/bridge-report.js",
 ]
 
 #: ⚠️ **两条门禁命令**（Rust 侧 / 前端侧）。
 RUST_GATE = [
-    "cargo", "test", "-p", "riscv_sim_kernel", "--lib", "tests_v072_wiring",
+    "cargo", "test", "-p", "riscv_sim_kernel", "--lib", "tests_v072_bridge",
 ]
-FRONT_GATE = ["node", "--test", "front/tests/wiring-report.test.mjs"]
+FRONT_GATE = ["node", "--test", "front/tests/bridge-report.test.mjs"]
 
 #: ⚠️ **变异表**（T-1 ~ T-7）—— 每条 = (编号, 落点文件, 旧串, 新串, 门禁)。
 #:
@@ -101,7 +101,7 @@ MUTATIONS = [
         "id": "T-4",
         "what": "`declared` 改成数**连线表里**的线（含默认连线）",
         "file": "crates/kernel/src/kernel_host/platform.rs",
-        "old": """    let declared = description.wiring.iter().flatten().count() as u32;""",
+        "old": """    let declared = description.bridge.iter().flatten().count() as u32;""",
         "new": """    let declared = entries.len() as u32;""",
         "gate": "rust",
     },
@@ -118,7 +118,7 @@ MUTATIONS = [
     {
         "id": "T-6",
         "what": "前端**自己重算** `declared`（不显示内核给的那个数）",
-        "file": "front/lib/wiring-report.js",
+        "file": "front/lib/bridge-report.js",
         "old": """        declared: Number(raw.declared ?? 0),""",
         "new": """        declared: Number(Array.isArray(raw.dropped) ? raw.dropped.length : 0),""",
         "gate": "front",
@@ -194,7 +194,7 @@ def reds_from_output(gate, out):
                     break
                 if not stripped:
                     continue
-                # `    kernel_host::tests_v072_wiring::k2_…`
+                # `    kernel_host::tests_v072_bridge::k2_…`
                 for part in stripped.split("::"):
                     if part.startswith("k") and "_" in part:
                         num = part[1:].split("_")[0]

@@ -541,11 +541,11 @@ describe("板级内存图 · M-14 内存映射表显示真数据（C-4）", () =
 describe("板级内存图 · 装载工程后的强制重订", () => {
     test("装载工程后内存图流被**强制重订**（否则表永远停在旧图上）", async () => {
         const router = fakeKernel();
-        const wiring = app.wireMemoryMap(router);
-        await wiring.subscribeMemoryMapStream();
+        const bridge = app.wireMemoryMap(router);
+        await bridge.subscribeMemoryMapStream();
         assert.equal(router.topics.has("memory.map"), true, "先订阅上了");
 
-        await app.loadProjectIntoKernel(servicesFor(router, wiring), { id: "p" });
+        await app.loadProjectIntoKernel(servicesFor(router, bridge), { id: "p" });
         assert.equal(
             router.topics.has("memory.map"), true,
             "装载工程后内存图流没有被强制重订 —— 内核不会再推任何图",
@@ -558,8 +558,8 @@ describe("板级内存图 · 装载工程后的强制重订", () => {
 
     test("内存图的订阅发生在 `LoadProject` **之后**", async () => {
         const router = fakeKernel();
-        const wiring = app.wireMemoryMap(router);
-        const services = servicesFor(router, wiring);
+        const bridge = app.wireMemoryMap(router);
+        const services = servicesFor(router, bridge);
         const before = router.sent.length;
         await app.loadProjectIntoKernel(services, { id: "p" });
         const kinds = router.sent.slice(before).map((c) => {
@@ -589,8 +589,8 @@ describe("板级内存图 · 装载工程后的强制重订", () => {
 
     test("「重新装载工程」⇒ 再发一次同一个工程（宿主在下一次装载时应用待生效配置）", async () => {
         const router = fakeKernel();
-        const wiring = app.wireMemoryMap(router);
-        const services = servicesFor(router, wiring);
+        const bridge = app.wireMemoryMap(router);
+        const services = servicesFor(router, bridge);
         const project = { id: "p", name: "工程" };
         await app.loadProjectIntoKernel(services, project);
         const count = () => router.sent.filter((c) => c && "LoadProject" in c).length;
@@ -1699,11 +1699,11 @@ describe("板级内存图 · 差量提交后的落库门槛（STAGE-16 · C-14�
 describe("D-178 · 失败的装载也要重订流（修订号不许停在旧值）", () => {
     test("装载失败 ⇒ 内存图流**仍然被重订**（否则前端学不到新修订号）", async () => {
         const router = fakeKernel();
-        const wiring = app.wireMemoryMap(router);
-        await wiring.subscribeMemoryMapStream();
+        const bridge = app.wireMemoryMap(router);
+        await bridge.subscribeMemoryMapStream();
         assert.equal(router.topics.has("memory.map"), true, "先订阅上了");
 
-        const services = servicesFor(router, wiring);
+        const services = servicesFor(router, bridge);
         // ⚠️ 装载在**内核已经顶了修订号之后**失败（STAGE-47 §7.1 第 7 条
         //   那个**可达**路径）。
         services.registerMemory.loadProject = async (project) => {
@@ -1728,13 +1728,13 @@ describe("D-178 · 失败的装载也要重订流（修订号不许停在旧值�
         // ⚠️ **正向对照**：重订之后内核**强推**一次 ⇒ ⇒ 前端的 revision
         //   **真的**变成新值 ⇒ ⇒ 「重订了」不只是「发过一条命令」。
         const router = fakeKernel();
-        const wiring = app.wireMemoryMap(router);
-        await wiring.subscribeMemoryMapStream();
+        const bridge = app.wireMemoryMap(router);
+        await bridge.subscribeMemoryMapStream();
         // ⚠️ 先学一个**旧**修订号（0）。
         router.emitMemoryMap(USER_BOARD, false, false, 0);
-        assert.equal(wiring.get().revision, 0, "先落在旧修订号上");
+        assert.equal(bridge.get().revision, 0, "先落在旧修订号上");
 
-        const services = servicesFor(router, wiring);
+        const services = servicesFor(router, bridge);
         services.registerMemory.loadProject = async (project) => {
             await router.dispatchCommand(message.Command.loadProject(project));
             throw new Error("装载失败");
@@ -1756,7 +1756,7 @@ describe("D-178 · 失败的装载也要重订流（修订号不许停在旧值�
             /装载失败/,
         );
         assert.equal(
-            wiring.get().revision,
+            bridge.get().revision,
             7,
             "前端**没有**学到内核的新修订号 ⇒ ⇒ 它下一次提交会带旧的 expected_revision ⇒ ⇒ 内核报 E_PLT-13",
         );
@@ -1766,9 +1766,9 @@ describe("D-178 · 失败的装载也要重订流（修订号不许停在旧值�
         // ⚠️ **必要对照**：成功路径**不许**多发一次订阅 ⇒ ⇒ 否则这条修复
         //   会带来「每次装载多一条命令」的副作用。
         const router = fakeKernel();
-        const wiring = app.wireMemoryMap(router);
-        await wiring.subscribeMemoryMapStream();
-        const services = servicesFor(router, wiring);
+        const bridge = app.wireMemoryMap(router);
+        await bridge.subscribeMemoryMapStream();
+        const services = servicesFor(router, bridge);
         const before = router.sent.length;
         await app.loadProjectIntoKernel(services, { id: "p" });
         const kinds = router.sent.slice(before).map((c) => {
@@ -1843,63 +1843,6 @@ describe("STAGE-49 · 角色声明（roles）的草稿往返", () => {
         );
         assert.equal(mm.normalizeRoles(null), null, "null ⇒ null");
         assert.equal(mm.normalizeRoles({}), null, "空 ⇒ null");
-    });
-});
-
-// ---------------------------------------------------------------------------
-// D-175 的 D1 —— **引脚表**（`pins` 段 · 本批只定**形状**）
-// ---------------------------------------------------------------------------
-
-describe("STAGE-49 · 引脚表（pins）的草稿往返", () => {
-    test("描述里的 `pins` ⇒ ⇒ 草稿里带上 ⇒ ⇒ 提交回去**还在**", () => {
-        const description = {
-            schema_version: 1,
-            id: "pins-board",
-            name: "引脚板",
-            priority: 100,
-            auto_selectable: false,
-            region_budget_bytes: 1048576,
-            regions: [{ kind: "ram", base: 0, size: 4096 }],
-            pins: [{ device: "UART0", pin: "rx", signal: "s_uart0_rx" }],
-        };
-        const draft = mm.draftFromDescription(description);
-        assert.deepEqual(
-            draft.pins, [{ device: "UART0", pin: "rx", signal: "s_uart0_rx" }],
-            "描述里的引脚表**必须**进草稿（否则一提交就把引脚丢了）",
-        );
-        const back = mm.draftToDescription(draft);
-        assert.deepEqual(
-            back.pins, [{ device: "UART0", pin: "rx", signal: "s_uart0_rx" }],
-            "引脚表必须**逐字段**回到线上描述",
-        );
-    });
-
-    test("没有 `pins` 的板 ⇒ ⇒ 往返后**仍然没有**（不塞空数组）", () => {
-        const description = {
-            schema_version: 1,
-            id: "no-pins-board",
-            name: "无引脚板",
-            priority: 100,
-            auto_selectable: false,
-            region_budget_bytes: 1048576,
-            regions: [{ kind: "ram", base: 0, size: 4096 }],
-        };
-        const draft = mm.draftFromDescription(description);
-        assert.equal(draft.pins, undefined, "没有引脚表的板**不许**被塞一个空数组");
-        const back = mm.draftToDescription(draft);
-        assert.equal(
-            back.pins, undefined,
-            "线上描述**不许**多一个 `pins` 键（与契约层的 skip_serializing_if 同形）",
-        );
-    });
-
-    test("归一化**不判定**（前端**不**写第二个校验器）", () => {
-        // ⚠️ 引脚表指错了由**内核**的 V-21 裁决 ⇒ ⇒ 前端**只透传** ⇒ ⇒
-        // 前端**不许**因为「这个器件在不在」而改写引脚表。
-        const pins = mm.normalizePins([{ device: "NOT-THERE", pin: "rx", signal: "s" }]);
-        assert.equal(pins[0].device, "NOT-THERE", "前端**不许**自己判引脚表指得对不对");
-        assert.equal(mm.normalizePins(null), null, "null ⇒ null");
-        assert.equal(mm.normalizePins([]), null, "空 ⇒ null（不塞空数组）");
     });
 });
 

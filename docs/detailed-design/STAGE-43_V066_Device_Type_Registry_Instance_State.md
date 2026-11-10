@@ -31,9 +31,9 @@
 | F-5 | `Peripheral` trait 的寄存器访问**本来就是偏移相对**的（`read(offset, size)` / `write(offset, …)`）⇒ ⇒ 「布局只定义偏移」**内核这半边已经成立** | `crates/contract/src/port.rs:185` |
 | F-6 | 总线分派时算 `addr - region.base` ⇒ ⇒ 偏移语义在**总线层**闭合 | `crates/kernel/src/m14_bus/mod.rs:2146` |
 | F-7 | 各器件模型的寄存器偏移**已是类型级常量**（`Uart16550::THR = 0x0` … `SCR = 0x7`、`UART_WINDOW = 0x8`；`GPIO_WINDOW = 0x10`；`CLINT_WINDOW = 0x1_0000`；`PLIC_WINDOW = 0x21_0000`；`TIMER_WINDOW = 0x10`）⇒ ⇒ 「偏移只写一处」的原料**已在** | `crates/kernel/src/m15_peripheral/{uart,gpio,clint,plic,timer}.rs` |
-| F-8 | 契约层 `wiring` 是**器件事件级**（`from.device` + `from.event`，词表**只有** `rx_ready`）且**目标端只允许 PLIC**（V-19）⇒ ⇒ **不是 pin 级** | `crates/contract/src/platform.rs:270-330` |
-| F-9 | 内核路由是宿主**硬编码窄口**：`compile_wiring` 最后 `table.retain(...)` **只保留 UART→PLIC 一条** | `crates/kernel/src/kernel_host/platform.rs:562-568` |
-| F-10 | 前端**不暴露** `wiring` 编辑 UI ⇒ ⇒ 「从界面提交的板永远没有 `wiring`」是**已知边界** | `front/views/components/memory-map.js:60` |
+| F-8 | 契约层 `bridge` 是**器件事件级**（`from.device` + `from.event`，词表**只有** `rx_ready`）且**目标端只允许 PLIC**（V-19）⇒ ⇒ **不是 pin 级** | `crates/contract/src/platform.rs:270-330` |
+| F-9 | 内核路由是宿主**硬编码窄口**：`compile_bridge` 最后 `table.retain(...)` **只保留 UART→PLIC 一条** | `crates/kernel/src/kernel_host/platform.rs:562-568` |
+| F-10 | 前端**不暴露** `bridge` 编辑 UI ⇒ ⇒ 「从界面提交的板永远没有 `bridge`」是**已知边界** | `front/views/components/memory-map.js:60` |
 | F-11 | 器件参数的**合法上下界**已在契约层（`MAX_PLIC_SOURCES = 1024` / `MAX_PLIC_CONTEXTS = 16` / `MAX_CLINT_HARTS = 4096` / `MAX_CLINT_FREQ_HZ = 1 THz`）⇒ ⇒ 注册表**引用**那一份，**不写第二份** | `crates/contract/src/platform.rs:125-151` |
 | F-12 | 内核建图前先 `description.validate()` ⇒ ⇒ **描述不合规 ⇒ 一个区域都不留**（原子）⇒ ⇒ 「某个实例建不起来」**今天没有可达路径** | `crates/kernel/src/kernel_host/platform.rs:343` |
 | F-13 | `memory.map` 事件在**每次建图后**推送 ⇒ ⇒ 「随建图变化的状态」的推送时机**已有先例** | `crates/kernel/src/kernel_host/mod.rs:2802` |

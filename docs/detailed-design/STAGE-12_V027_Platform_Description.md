@@ -371,7 +371,7 @@ fn build_device(spec: &DeviceSpec, base: u32) -> Result<BuiltDevice, PlatformErr
 ### 4.3 D-82 的真实剩余缺口
 
 **不是**「通路不存在」，而是「**通路没有 guest 指令级的端到端判别力**」：
-- 现有的 `the_clint_mtimecmp_reaches_the_interrupt_controller`（`tests_osz_wiring.rs:264`）是**宿主侧**写总线（`host.bus_mut().write(...)`）⇒ 它证明「写总线 → CLINT 存下 → 同步 → M-16 拿到比较值」⇒ **不覆盖**「guest 指令写 → 定时器线挂起 → 交付 → 陷入」。
+- 现有的 `the_clint_mtimecmp_reaches_the_interrupt_controller`（`tests_osz_bridge.rs:264`）是**宿主侧**写总线（`host.bus_mut().write(...)`）⇒ 它证明「写总线 → CLINT 存下 → 同步 → M-16 拿到比较值」⇒ **不覆盖**「guest 指令写 → 定时器线挂起 → 交付 → 陷入」。
 - M-16 侧有单测（`m16_interrupt/tests.rs:348` 的电平语义）⇒ 两端各测一半 ⇒ **中间那一段没有一条用例**。
 
 ### 4.4 本批怎么做（裁决 H）
@@ -575,12 +575,12 @@ riscv-none-elf-objcopy -O binary --only-section=.text d82.o d82.bin
 | 6 | 同上 `:263` | Default 高段 `size` ⇒ 从描述查 |
 | 7 | 同上 `:277/285` | 护栏预算 ⇒ 从描述查 |
 | 8 | `crates/kernel/tests/v026_payload_slimming.rs:71` | `assert_qemu_virt_layout` ⇒ 从描述查 |
-| 9 | `crates/kernel/src/kernel_host/tests_osz_wiring.rs:184/191/199` | 「一个 128 MiB RAM」⇒ 从描述查 |
+| 9 | `crates/kernel/src/kernel_host/tests_osz_bridge.rs:184/191/199` | 「一个 128 MiB RAM」⇒ 从描述查 |
 | 10 | `crates/kernel/src/kernel_host/tests_session_snapshot.rs:389-400` | 默认档 3 区域 + base/kind/target ⇒ 从描述查 |
 | 11 | 同上 `:830/846/921` | 3 段 / 4 段拓扑 ⇒ 从描述查 |
 | 12 | `crates/kernel/tests/session_snapshot.rs:226-228` | 两块 RAM 的 `(base,size)` ⇒ 从描述查 |
-| 13 | `tests_osz_wiring.rs:137/214/226` · `tests_v024.rs:239` | `memory_profile()` ⇒ 保留（裁决 C ⇒ **不改**） |
-| 14 | `tests_osz_wiring.rs:141/145/205/206/207` · `tests_v024.rs:39/41/43/54/56/58` | 外设寄存器地址 ⇒ 从描述取 base + 偏移 |
+| 13 | `tests_osz_bridge.rs:137/214/226` · `tests_v024.rs:239` | `memory_profile()` ⇒ 保留（裁决 C ⇒ **不改**） |
+| 14 | `tests_osz_bridge.rs:141/145/205/206/207` · `tests_v024.rs:39/41/43/54/56/58` | 外设寄存器地址 ⇒ 从描述取 base + 偏移 |
 | 15 | `tests_m11.rs:38` · `d46_probe_pipeline.rs:146/309/479` · `session_snapshot.rs:157/227` · `v026_uart_tx_ring.rs:58` | `DEFAULT_RAM_*` / `DEFAULT_GPIO_BASE` ⇒ 从描述取 |
 | 16 | `v026_memory_map.rs:35/38/44` · `v026_payload_slimming.rs:41/44` | **自抄副本** ⇒ ⚠️ **保留为「架构字面量」**（不从描述取 —— 它们的作用是「不与实现同源」）⇒ 但**要加注释**说明它与描述的对应关系 |
 | 17 | `kernel_host/mod.rs:918-935` · `:1799` | 挑档判据 ⇒ 描述化（裁决 E） |

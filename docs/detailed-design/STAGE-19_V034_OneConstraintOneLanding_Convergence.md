@@ -24,7 +24,7 @@
 | # | 欠账 | 落点 | 一句话 |
 | --- | --- | --- | --- |
 | 1 | **D-149** | `tools/stage14/15/16/17_check.py` | 表格切分**复用** `tools/doc_check.py` 的 `split_row` ⇒ 切分这条约束**只有一处定义** |
-| 2 | **D-125** | 契约层 + 内核宿主 + 前端 | 器件之间的**连线**进平台描述（**可选** `wiring` 段）⇒ 换一块板改连线**不用改代码** |
+| 2 | **D-125** | 契约层 + 内核宿主 + 前端 | 器件之间的**连线**进平台描述（**可选** `bridge` 段）⇒ 换一块板改连线**不用改代码** |
 | 3 | **D-126** | 契约层 + 候选侧 harness + 参考侧脚本 | RAM 窗口的**单一真相源 = 平台描述** ⇒ 三份手抄地址副本**清零** |
 
 ### 本批**明确不做**的事（**六件**）
@@ -32,7 +32,7 @@
 | 不做 | 为什么 |
 | --- | --- |
 | **不**改 M-15 器件模型里 `irq_line` 的**语义** | 改语义 ⇒ 行为变化 ⇒ 要迁移口径 ⇒ 本批**不**背这个包（裁决 D） |
-| **不**给界面暴露 `wiring` 的**编辑器** | 「从界面提交的板没有 wiring」是**已知边界** ⇒ 说出来，不假装支持（裁决 G） |
+| **不**给界面暴露 `bridge` 的**编辑器** | 「从界面提交的板没有 bridge」是**已知边界** ⇒ 说出来，不假装支持（裁决 G） |
 | **不**升 `SCHEMA_VERSION`（仍 **7**） | 契约信封**零**变更 ⇒ ⇒ 不制造存量问题 |
 | **不**升 `PLATFORM_SCHEMA_VERSION`（仍 **1**） | 只加了一个**带缺省**的**可选**字段 ⇒ 按 STAGE-16 `max_region_bytes` 的**同形先例** ⇒ **不是**破坏性格式变更（裁决 B） |
 | **不**把四个旧自检脚本**合并**成一个 | 那是 D-149 的「做法 B」，约 **2 人日** ⇒ ⇒ **不建议**（做法 A 约 **1 小时**） |
@@ -89,7 +89,7 @@
 
 ## §2 契约层设计（D-125）
 
-### §2.1 形状：加一个**可选**的 `wiring` 段
+### §2.1 形状：加一个**可选**的 `bridge` 段
 
 ```rust
 // crates/contract/src/platform.rs
@@ -97,17 +97,17 @@ pub struct PlatformDescription {
     // ...既有字段一字不改...
     /// 器件之间的**连线**（可选）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wiring: Option<Vec<WiringSpec>>,
+    pub bridge: Option<Vec<BridgeSpec>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WiringSpec {
-    pub from: WiringFrom,
-    pub to: WiringTo,
+pub struct BridgeSpec {
+    pub from: BridgeFrom,
+    pub to: BridgeTo,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WiringFrom {
+pub struct BridgeFrom {
     /// 源器件的 `id`（必须存在于同一份描述的器件集合里）。
     pub device: String,
     /// 事件名 —— 目前**只允许** `rx_ready`。
@@ -115,7 +115,7 @@ pub struct WiringFrom {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WiringTo {
+pub struct BridgeTo {
     /// 目标器件的 `id`（必须存在，且必须是 PLIC）。
     pub device: String,
     /// 目标 PLIC 的源号。
@@ -123,7 +123,7 @@ pub struct WiringTo {
 }
 ```
 
-⚠️ **名字必须钉死**（跨 lane 协作 ⇒ 名字不钉 ⇒ 各写各的 ⇒ 合不拢）：`wiring` / `WiringSpec` / `WiringFrom` / `WiringTo` / `from.device` / `from.event` / `to.device` / `to.source` —— **一字不改**。
+⚠️ **名字必须钉死**（跨 lane 协作 ⇒ 名字不钉 ⇒ 各写各的 ⇒ 合不拢）：`bridge` / `BridgeSpec` / `BridgeFrom` / `BridgeTo` / `from.device` / `from.event` / `to.device` / `to.source` —— **一字不改**。
 
 ⚠️ **「取哪一段 RAM」那条规则的落点**（裁决 I）也**钉死名字**：
 
@@ -143,14 +143,14 @@ impl PlatformDescription {
 
 | 规则 | 内容 | 场景码 |
 | --- | --- | --- |
-| **V-18** | `wiring` 里 `from.device` / `to.device` 必须**存在于**同一份描述的器件集合里 | `E_PLT_16_WIRING_INVALID` |
-| **V-19** | `wiring` 里 `to.source` 必须**小于**目标 PLIC 的 `sources` | `E_PLT_16_WIRING_INVALID` |
+| **V-18** | `bridge` 里 `from.device` / `to.device` 必须**存在于**同一份描述的器件集合里 | `E_PLT_16_BRIDGE_INVALID` |
+| **V-19** | `bridge` 里 `to.source` 必须**小于**目标 PLIC 的 `sources` | `E_PLT_16_BRIDGE_INVALID` |
 
 ⚠️ **编号纪律**（裁决 K）：`E_PLT_01` ~ `E_PLT_15` **已被占**（`E_PLT_15` 是 v0.33 落的）⇒ ⇒ 新码只能是 **`E_PLT_16`**（落在 `crates/contract/src/error.rs`）；规则 `V-1` ~ `V-17` **已被占**（`V-17` 是 v0.33 落的）⇒ ⇒ 新规则只能是 **V-18 / V-19**（裁决 C）⇒ ⇒ **每个号都得先查占用表**（v0.33 已抓出台账原文两处过期写法）。
 
 ⚠️ **V-18 排在 V-17 之后、V-19 排在 V-18 之后** ⇒ ⇒ **V-1 ~ V-17 的报告顺序一字不改** ⇒ ⇒ **两个**空器件 `id` 仍归 **V-9 / `E_PLT_08`**（V-9 不改）。
 
-⚠️ **一个码一个含义**：`E_PLT_16` 的族名是「wiring 非法」⇒ V-18 与 V-19 是**同一个族**（与 V-13 / V-14 / V-15 共用 `E_PLT_12` 同形）⇒ ⇒ **不**新开第二个码。
+⚠️ **一个码一个含义**：`E_PLT_16` 的族名是「bridge 非法」⇒ V-18 与 V-19 是**同一个族**（与 V-13 / V-14 / V-15 共用 `E_PLT_12` 同形）⇒ ⇒ **不**新开第二个码。
 
 ### §2.3 规则集版本：2 → **3**
 
@@ -161,7 +161,7 @@ impl PlatformDescription {
 - 内核**拒绝** ⇒ 显示**内核原文**（**不吞**）⇒
 - ⇒ ⇒ **前端不写第二份校验器**（合法性**只**由内核那一处裁决）。
 
-⚠️ **提示是保守的**：一块**行为不变**的板（没有 `wiring` ⇒ 走默认连线）**也会**被提示 ⇒ ⇒ 这是**诚实**的（规则集确实变了）⇒ ⇒ 规格**不**把它说成「行为变更」。
+⚠️ **提示是保守的**：一块**行为不变**的板（没有 `bridge` ⇒ 走默认连线）**也会**被提示 ⇒ ⇒ 这是**诚实**的（规则集确实变了）⇒ ⇒ 规格**不**把它说成「行为变更」。
 
 ⇒ ⇒ ⚠️ **这是 v0.33 铺的路的第一次实战**：v0.33 落的是「**再收紧合法性规则时必须给迁移口径**」这条机制，本批**真的收紧了** ⇒ ⇒ 那套机制**必须**被用上 ⇒ ⇒ 「机制只是写在 prose 里」这条风险在本批**被证伪**。
 
@@ -175,16 +175,16 @@ impl PlatformDescription {
 生效描述 ──► 编译连线表 ──► sync_interrupts 按表抬线
    │
    ├─ 默认连线：UART0.rx_ready ──► PLIC.source 10
-   └─ 描述里的 wiring：按 (from.device, from.event) **覆盖**同键的默认项
+   └─ 描述里的 bridge：按 (from.device, from.event) **覆盖**同键的默认项
 ```
 
-⚠️ **默认连线只有一处**（裁决 E）：宿主里的 `DEFAULT_WIRING` ⇒ ⇒ 那个写死的 PLIC source 常量**删掉**（保留 = 又一个真相源）⇒ ⇒ 缺省连线**只在两端器件都存在时**才生效（描述里没有 UART 或没有 PLIC ⇒ 缺省连线**不生效**，不是空指针）。
+⚠️ **默认连线只有一处**（裁决 E）：宿主里的 `DEFAULT_BRIDGE` ⇒ ⇒ 那个写死的 PLIC source 常量**删掉**（保留 = 又一个真相源）⇒ ⇒ 缺省连线**只在两端器件都存在时**才生效（描述里没有 UART 或没有 PLIC ⇒ 缺省连线**不生效**，不是空指针）。
 
 ⚠️ `sync_interrupts` 的第 2 步从「抬到写死的 source」改成「**按连线表**抬」⇒ ⇒ 其余三步（CLINT 定时器、PLIC → M-16 外部线）**一字不改**。
 
 ### §3.2 端到端判别式（**D-125 的判别力**）
 
-写一份**带自定义 `wiring`** 的描述（UART0 的 `rx_ready` → PLIC 的 **source 3**）⇒ 装载 ⇒ guest 让 UART 收到一个字节 ⇒ ⇒ guest 侧能观察到 **source 3** 被 claim（**不是** source 10）⇒ ⇒ **换一块板改连线，宿主零改动**。
+写一份**带自定义 `bridge`** 的描述（UART0 的 `rx_ready` → PLIC 的 **source 3**）⇒ 装载 ⇒ guest 让 UART 收到一个字节 ⇒ ⇒ guest 侧能观察到 **source 3** 被 claim（**不是** source 10）⇒ ⇒ **换一块板改连线，宿主零改动**。
 
 ⇒ ⇒ 这条判别式**必须**打在**真正走的那条分支**上（v0.32 抓过「变异打不到 T-4 的路上 ⇒ 门禁仍全绿 ⇒ 验不到任何东西」的坑）⇒ ⇒ 变异要**真的改掉**连线的解析结果。
 
@@ -195,13 +195,13 @@ impl PlatformDescription {
 | 落点 | 变更 |
 | --- | --- |
 | `front/lib/message.js` | `PLATFORM_RULES_VERSION` **2 → 3**（镜像契约层）⇒ ⇒ wasm 冒烟的「前端镜像与契约层一致」那条断言**必须能红**（判别力） |
-| `front/views/components/memory-map.js` | `draftFromDescription` **读** `wiring`；`draftToDescription` **写** `wiring` |
+| `front/views/components/memory-map.js` | `draftFromDescription` **读** `bridge`；`draftToDescription` **写** `bridge` |
 | `front/services/m23_boardstore.js` | **零改动**（`rules_version` 的语义**不变**：条目容器里的戳）⇒ ⇒ v0.33 的「明确提示 + 升级」机制**原样复用** |
 | `front/app.js` | **零改动**（选用提示与升级的**流程**不变，只是规则版本号变了） |
 
-⚠️ **「逐字段重建」纪律怎么守**（裁决 G）：`wiring` 的**每个子字段**（`from.device` / `from.event` / `to.device` / `to.source`）**逐个重建** ⇒ ⇒ **不透传**草稿里多出来的键 ⇒ ⇒ 草稿的内部字段**不可能**漏进契约。
+⚠️ **「逐字段重建」纪律怎么守**（裁决 G）：`bridge` 的**每个子字段**（`from.device` / `from.event` / `to.device` / `to.source`）**逐个重建** ⇒ ⇒ **不透传**草稿里多出来的键 ⇒ ⇒ 草稿的内部字段**不可能**漏进契约。
 
-⚠️ **已知边界**（裁决 G）：编辑器**不暴露** `wiring` 的 UI ⇒ ⇒ **从界面提交的板永远没有 `wiring`** ⇒ ⇒ 「换板改连线」目前**只能手写描述 JSON** ⇒ ⇒ 这是**已知边界**，**不假装**界面支持。
+⚠️ **已知边界**（裁决 G）：编辑器**不暴露** `bridge` 的 UI ⇒ ⇒ **从界面提交的板永远没有 `bridge`** ⇒ ⇒ 「换板改连线」目前**只能手写描述 JSON** ⇒ ⇒ 这是**已知边界**，**不假装**界面支持。
 
 ---
 
@@ -209,23 +209,23 @@ impl PlatformDescription {
 
 | 编号 | 内容 |
 | --- | --- |
-| **A-1** | `validate()` 追加 **V-18**：`wiring` 引用了**不存在**的器件 `id` ⇒ 报 `E_PLT_16_WIRING_INVALID` |
-| **A-2** | `validate()` 追加 **V-19**：`wiring` 的 `to.source` **不小于**目标 PLIC 的 `sources` ⇒ 报 `E_PLT_16_WIRING_INVALID` |
+| **A-1** | `validate()` 追加 **V-18**：`bridge` 引用了**不存在**的器件 `id` ⇒ 报 `E_PLT_16_BRIDGE_INVALID` |
+| **A-2** | `validate()` 追加 **V-19**：`bridge` 的 `to.source` **不小于**目标 PLIC 的 `sources` ⇒ 报 `E_PLT_16_BRIDGE_INVALID` |
 | **A-3** | **V-18 排在 V-17 之后、V-19 排在 V-18 之后** ⇒ V-1 ~ V-17 的报告顺序**一字未改** |
 | **A-4** | **两个**空器件 `id` 仍归 **V-9 / `E_PLT_08`**（V-9 不改） |
 | **A-5** | `E_PLT_16` 与 `E_PLT_02` / `E_PLT_08` / `E_PLT_12` / `E_PLT_15` **互异** |
 | **A-6** | `PLATFORM_RULES_VERSION` = **3**，且 `SCHEMA_VERSION` **仍 7**、`PLATFORM_SCHEMA_VERSION` **仍 1** |
-| **A-7** | 缺省（**无** `wiring`）的描述**校验通过** ⇒ ⇒ 存量板**不被新规则拒** |
-| **B-1** | 宿主按**生效描述的 `wiring`** 抬线：自定义 `wiring`（source 3）⇒ guest 侧观察到 **source 3** 被 claim（**不是** 10）⇒ ⇒ **端到端** |
-| **B-2** | **默认连线**（无 `wiring`）⇒ guest 侧观察到 **source 10** 被 claim ⇒ ⇒ **存量行为一字未变** |
+| **A-7** | 缺省（**无** `bridge`）的描述**校验通过** ⇒ ⇒ 存量板**不被新规则拒** |
+| **B-1** | 宿主按**生效描述的 `bridge`** 抬线：自定义 `bridge`（source 3）⇒ guest 侧观察到 **source 3** 被 claim（**不是** 10）⇒ ⇒ **端到端** |
+| **B-2** | **默认连线**（无 `bridge`）⇒ guest 侧观察到 **source 10** 被 claim ⇒ ⇒ **存量行为一字未变** |
 | **B-3** | 描述里**没有** UART 或**没有** PLIC ⇒ **不 panic**、**不**抬线 |
-| **B-4** | 写死的那个 PLIC source 常量**已从宿主源码里消失**（只剩 `DEFAULT_WIRING` **一处**） |
-| **B-5** | `wiring` 覆盖默认连线的**同键项** ⇒ ⇒ 覆盖生效、**不**出现两条连线 |
-| **C-1** | 前端 `draftFromDescription` → `draftToDescription` 往返 ⇒ `wiring` **逐字段**保留 |
-| **C-2** | 草稿里 `wiring` 的**多余键** ⇒ ⇒ **不**进契约（逐字段重建纪律） |
+| **B-4** | 写死的那个 PLIC source 常量**已从宿主源码里消失**（只剩 `DEFAULT_BRIDGE` **一处**） |
+| **B-5** | `bridge` 覆盖默认连线的**同键项** ⇒ ⇒ 覆盖生效、**不**出现两条连线 |
+| **C-1** | 前端 `draftFromDescription` → `draftToDescription` 往返 ⇒ `bridge` **逐字段**保留 |
+| **C-2** | 草稿里 `bridge` 的**多余键** ⇒ ⇒ **不**进契约（逐字段重建纪律） |
 | **C-3** | 前端镜像 `PLATFORM_RULES_VERSION` 与契约层**严格相等**（跨层断言，见 X-1） |
 | **C-4** | 存量板（`rules_version = 2`）选用 ⇒ **明确提示**；内核**接受**后 ⇒ 条目**升级**到 3 |
-| **C-5** | **仅** `wiring` 不同（其余相同）⇒ 计划为**整份** `SetMemoryMap`（差量契约里**没有** wiring 操作 ⇒ 差量路径**表达不了**）⇒ ⇒ `wiring` 的改动**必须**能提交出去 |
+| **C-5** | **仅** `bridge` 不同（其余相同）⇒ 计划为**整份** `SetMemoryMap`（差量契约里**没有** bridge 操作 ⇒ 差量路径**表达不了**）⇒ ⇒ `bridge` 的改动**必须**能提交出去 |
 | **T-1** | `stage14/15/16/17_check.py` 的表格切分**复用** `doc_check.split_row` ⇒ ⇒ 切分这条约束**只有一处定义** |
 | **T-2** | **零回归**：四个脚本对**历史四份规格**的失败集与改动前**逐项相同**（条数与消息都相同） |
 | **T-3** | **夹具**：一份含**转义竖线**的迷你规格 ⇒ ⇒ **旧口径红、新口径绿**（判别力） |
@@ -298,23 +298,23 @@ impl PlatformDescription {
 ### 裁决 A · 本批范围
 本批 = **D-149 + D-125 + D-126**（口径收敛批）⇒ ⇒ 三条的根因**同源**（「一条约束写了不止一遍」）⇒ ⇒ 放一批里改才说得通 ⇒ ⇒ **I2C 那批顺延为 STAGE-20**。
 
-### 裁决 B · `wiring` 是**可选**段
-`wiring` 是**可选**字段（缺省 = 默认连线）⇒ ⇒ **存量板行为一字不变** ⇒ ⇒ `PLATFORM_SCHEMA_VERSION` **不升**（STAGE-16 同形先例）⇒ ⇒ `SCHEMA_VERSION` **不升**。
+### 裁决 B · `bridge` 是**可选**段
+`bridge` 是**可选**字段（缺省 = 默认连线）⇒ ⇒ **存量板行为一字不变** ⇒ ⇒ `PLATFORM_SCHEMA_VERSION` **不升**（STAGE-16 同形先例）⇒ ⇒ `SCHEMA_VERSION` **不升**。
 
 ### 裁决 C · 新号先查占用表
-新码 = **`E_PLT_16_WIRING_INVALID`**、新规则 = **V-18**（引用器件必须存在）与 **V-19**（source 必须小于 `sources`）⇒ ⇒ V-18 排在 V-17 之后、V-19 排在 V-18 之后 ⇒ ⇒ V-1 ~ V-17 顺序不变 ⇒ ⇒ 两个空 `id` 仍归 `E_PLT_08`。
+新码 = **`E_PLT_16_BRIDGE_INVALID`**、新规则 = **V-18**（引用器件必须存在）与 **V-19**（source 必须小于 `sources`）⇒ ⇒ V-18 排在 V-17 之后、V-19 排在 V-18 之后 ⇒ ⇒ V-1 ~ V-17 顺序不变 ⇒ ⇒ 两个空 `id` 仍归 `E_PLT_08`。
 
 ### 裁决 D · `irq_line` 的语义**不动**
-`irq_line` = **M-15 内部中断线号**，**不是** PLIC source，且**当前不接进任何行为**（死字段）⇒ ⇒ 本批**不**改它的语义（改 ⇒ 行为变化 ⇒ 要迁移口径）⇒ ⇒ 连线**只**由 `wiring` 表达 ⇒ ⇒ 「两个真相源」由此消掉。
+`irq_line` = **M-15 内部中断线号**，**不是** PLIC source，且**当前不接进任何行为**（死字段）⇒ ⇒ 本批**不**改它的语义（改 ⇒ 行为变化 ⇒ 要迁移口径）⇒ ⇒ 连线**只**由 `bridge` 表达 ⇒ ⇒ 「两个真相源」由此消掉。
 
 ### 裁决 E · 默认连线**只有一处**
-默认连线写在宿主里的 `DEFAULT_WIRING` **一处** ⇒ ⇒ 那个写死的 PLIC source 常量**删掉**⇒ ⇒ 缺省连线**只在两端器件都存在时**生效。
+默认连线写在宿主里的 `DEFAULT_BRIDGE` **一处** ⇒ ⇒ 那个写死的 PLIC source 常量**删掉**⇒ ⇒ 缺省连线**只在两端器件都存在时**生效。
 
 ### 裁决 F · 规则集版本 2 → 3
 规则集**收紧** ⇒ ⇒ `PLATFORM_RULES_VERSION` **2 → 3** ⇒ ⇒ 存量板走 v0.33 的「明确提示 + 内核定生死 + 升级」机制 ⇒ ⇒ ⚠️ 提示**保守**（行为不变的板也会被提示）⇒ ⇒ 前端**不**写第二份校验器。
 
-### 裁决 G · 前端只**透传** `wiring`
-`wiring` 逐字段重建（`from.device` / `from.event` / `to.device` / `to.source` 逐个重建）⇒ ⇒ 不透传草稿的多余键 ⇒ ⇒ 编辑器**不暴露** `wiring` UI ⇒ ⇒ ⚠️「界面提交的板没有 wiring」是**已知边界**。
+### 裁决 G · 前端只**透传** `bridge`
+`bridge` 逐字段重建（`from.device` / `from.event` / `to.device` / `to.source` 逐个重建）⇒ ⇒ 不透传草稿的多余键 ⇒ ⇒ 编辑器**不暴露** `bridge` UI ⇒ ⇒ ⚠️「界面提交的板没有 bridge」是**已知边界**。
 
 ### 裁决 H · 切分口径**只有一处**
 四个脚本**复用** `doc_check.split_row` ⇒ ⇒ 「表格怎么切」**只有一处定义** ⇒ ⇒ 零回归判据 = 对历史四份规格失败集**逐项相同** ⇒ ⇒ 判别力靠**专门夹具**（旧口径红 / 新口径绿）⇒ ⇒ ⚠️「真规格跑绿」不代表口径对。
@@ -345,18 +345,18 @@ impl PlatformDescription {
 
 | # | 订正 | 依据 |
 | --- | --- | --- |
-| 1 | **差量路径看不见 `wiring`** ⇒ ⇒ `planMemoryMapUpdate` 只比「元数据 + 段 + 预算」⇒ ⇒ **仅** `wiring` 不同时计划为 `none`（不发命令）⇒ ⇒ `wiring` 的改动**永远提交不出去** ⇒ ⇒ **修法** = 把 `wiring` 计入「元数据变了 ⇒ **整份**」的判据 ⇒ ⇒ 新增验收 **C-5** ⇒ ⇒ ⚠️ **不做**「给 `PatchMemoryMap` 加 wiring 操作」（那要升契约信封 ⇒ 本批**不**做） | Lane D 实测（前端 lane 报出） |
-| 2 | 草稿里 `wiring.to.source` 用**数值**（按 §2.1 钉死的形状）⇒ ⇒ 与草稿其余数值用字符串的约定**不同** ⇒ ⇒ ⚠️ 但 `wiring` **无 UI** ⇒ ⇒ 保持数值（否则往返**不可能**逐字段相同）⇒ ⇒ 裁定 | Lane D 实测（前端 lane 报出） |
+| 1 | **差量路径看不见 `bridge`** ⇒ ⇒ `planMemoryMapUpdate` 只比「元数据 + 段 + 预算」⇒ ⇒ **仅** `bridge` 不同时计划为 `none`（不发命令）⇒ ⇒ `bridge` 的改动**永远提交不出去** ⇒ ⇒ **修法** = 把 `bridge` 计入「元数据变了 ⇒ **整份**」的判据 ⇒ ⇒ 新增验收 **C-5** ⇒ ⇒ ⚠️ **不做**「给 `PatchMemoryMap` 加 bridge 操作」（那要升契约信封 ⇒ 本批**不**做） | Lane D 实测（前端 lane 报出） |
+| 2 | 草稿里 `bridge.to.source` 用**数值**（按 §2.1 钉死的形状）⇒ ⇒ 与草稿其余数值用字符串的约定**不同** ⇒ ⇒ ⚠️ 但 `bridge` **无 UI** ⇒ ⇒ 保持数值（否则往返**不可能**逐字段相同）⇒ ⇒ 裁定 | Lane D 实测（前端 lane 报出） |
 | 3 | §10 的变异表原本用「lane 字母」（A / B / C）⇒ ⇒ 与**验收分组字母**（A / B / C / T / X）**撞** ⇒ ⇒ 改成「**层名**」（契约层 / 宿主 / 前端 / 工具层）⇒ ⇒ 避免「C 组是契约层还是前端」这种歧义 | 统筹方自查（Lane D 报出） |
 | 4 | 验收 **C-3**（前端镜像与契约层严格相等）的**跨层那一半**在 lane 内**无法自证**（契约层还没落地）⇒ ⇒ 归**整合批**的 **X-1 / X-2** 验 ⇒ ⇒ lane 只钉本地常量 | Lane D 实测（前端 lane 报出） |
 | 5 | 规格 §2.1 的派生列表**漏了 `Eq`** ⇒ ⇒ 而 `PlatformDescription` 本身派生 `Eq` ⇒ ⇒ 新结构体不加 `Eq` **编译不过** ⇒ ⇒ 契约层 lane 补上 ⇒ ⇒ 规格的派生列表应为 `Debug, Clone, PartialEq, Eq, Serialize, Deserialize` | Lane A 实测（契约层 lane 报出） |
 | 6 | `ram_window` 的返回类型按规格给 `Option<(u32, u64)>`，而 `RegionSpec::Ram { size: u32 }` ⇒ ⇒ 内部做 u32→u64 **无损加宽** ⇒ ⇒ ⚠️ 这是**加宽不是截断** ⇒ ⇒ 不会丢精度 | Lane A 实测（契约层 lane 报出） |
 | 7 | ⚠️ **V-18 与 V-19 的分工**：V-18 = 「**引用**的器件必须存在 + 事件名只允许 `rx_ready`」；V-19 = 「**目标**须是 PLIC + `to.source < sources`」⇒ ⇒ 两者共用 `E_PLT_16`（同族）⇒ ⇒ 规格 §2.1 的字段注释与 §2.2 的规则表**措辞**已对齐 | Lane A 实测（契约层 lane 报出）+ 统筹方裁定 |
-| 8 | ⚠️ **连线列表的顺序算数据的一部分**（契约层是 `Vec`）⇒ ⇒ 顺序不同也判为「改动」⇒ ⇒ 会走**整份**替换 ⇒ ⇒ ⚠️ **当前不会假触发**（界面**没有** `wiring` 编辑器 ⇒ 顺序**改不了**）⇒ ⇒ 若将来给了编辑器，这条要**重新裁决**（是否改成「按 `(from.device, from.event)` 排序后再比」）⇒ ⇒ 已写进前端 `sameWiring` 的注释 | Lane D 实测（前端 lane 返工时报出） |
+| 8 | ⚠️ **连线列表的顺序算数据的一部分**（契约层是 `Vec`）⇒ ⇒ 顺序不同也判为「改动」⇒ ⇒ 会走**整份**替换 ⇒ ⇒ ⚠️ **当前不会假触发**（界面**没有** `bridge` 编辑器 ⇒ 顺序**改不了**）⇒ ⇒ 若将来给了编辑器，这条要**重新裁决**（是否改成「按 `(from.device, from.event)` 排序后再比」）⇒ ⇒ 已写进前端 `sameBridge` 的注释 | Lane D 实测（前端 lane 返工时报出） |
 | 9 | ⚠️ **默认连线按「角色」解析**：§3.1 的图画的是固定 id「UART0.rx_ready ──► PLIC.source 10」，而实现是「**这块板的第一个 UART** ──► **这块板的第一个 PLIC** 的 source 10」⇒ ⇒ 内置板上与图**逐字一致**，且**今天写死的行为一字未变**（第一个 UART ⇒ 源 10）⇒ ⇒ 但描述里 UART / PLIC **改名**时按**角色**解析（更稳） | Lane B 实测（宿主 lane 报出） |
 | 10 | ⚠️ **连线表在编译末步只保留宿主真抬得了的线**（源 = 宿主那一路 UART、目标 = 宿主那个 PLIC）⇒ ⇒ 否则一条 V-18 / V-19 **合法**但指向**别的器件**的线（例如 `CLINT.rx_ready → PLIC.5`）会让宿主在「UART 的 RX 就绪」时去抬**不属于它的源** ⇒ ⇒ §3.1 / B-3 未写这条 ⇒ ⇒ 补上 | Lane B 实测（宿主 lane 报出） |
 | 11 | ⚠️ **默认连线在 PLIC 的 `sources < 11` 时不接**（越界的源抬不起来；与今天 `Plic::request` 忽略越界源的行为**一致**）⇒ ⇒ 规格未写 ⇒ ⇒ 补上 | Lane B 实测（宿主 lane 报出） |
-| 12 | ⚠️ **§10 宿主行「M1 ⇒ 精确红 B-1」**：实测红集是 **{B-1, B-5}** ⇒ ⇒ B-5 钉的正是「描述里的 `wiring` 生效」⇒ ⇒ 同一故障的**第二个**探测器 ⇒ ⇒ ⚠️ 但在**抬线那一步**做同样的变异时红集**精确为 {B-1}** ⇒ ⇒ B-1 是**独立**探测器，无无关用例变红 | Lane B 实测（宿主 lane 报出） |
+| 12 | ⚠️ **§10 宿主行「M1 ⇒ 精确红 B-1」**：实测红集是 **{B-1, B-5}** ⇒ ⇒ B-5 钉的正是「描述里的 `bridge` 生效」⇒ ⇒ 同一故障的**第二个**探测器 ⇒ ⇒ ⚠️ 但在**抬线那一步**做同样的变异时红集**精确为 {B-1}** ⇒ ⇒ B-1 是**独立**探测器，无无关用例变红 | Lane B 实测（宿主 lane 报出） |
 | 13 | ⚠️ **宿主只持有一路 UART 与一个 PLIC** ⇒ ⇒ **第二路 UART 的连线当前无法表达**（编译期被滤掉）⇒ ⇒ 已知边界 | Lane B 实测（宿主 lane 报出） |
 | 14 | ⚠️ **候选侧用宿主自己的 `BUILTIN_JSON_DEFAULT` 常量**取内置描述（它内部就是 `include_str!`）⇒ ⇒ **不**自己再写一份 `include_str!("../kernel_host/platforms/default.json")` ⇒ ⇒ 否则「内置描述文件在哪」会有**两个落点**⇒ ⇒ 性质与规格 §6.2 相同（零运行时依赖） | Lane C 实测（工具层 lane 报出） |
 | 15 | ⚠️ **删掉了「按镜像跨度加宽内存窗口」那段**（旧 `riscv-golden.rs` 337-347）⇒ ⇒ 理由：T-5 要求「打印的 == 实际映射的」⇒ 加宽会让两者不等 ⇒ ⇒ 现在映射**就是**描述那段 RAM ⇒ ⇒ 镜像装不下 ⇒ **明确报错**（`load@0x…`）而不是**静默加宽**⇒ ⇒ ⚠️ 这是**行为变化**（以前会悄悄加宽）⇒ ⇒ 语料 68/68 不受影响 | Lane C 实测（工具层 lane 报出） |
@@ -375,11 +375,11 @@ impl PlatformDescription {
 | 契约层 | 把 V-18 改成「**不**查引用器件」 | 精确红 **A-1** |
 | 契约层 | 把 V-18 排到 **V-17 之前** | 精确红 **A-3** |
 | 契约层 | 把 `PLATFORM_RULES_VERSION` 改成 **2** | 精确红 **A-6** |
-| 宿主 | 让连线解析**忽略**描述里的 `wiring` | 精确红 **B-1** |
+| 宿主 | 让连线解析**忽略**描述里的 `bridge` | 精确红 **B-1** |
 | 宿主 | 把默认连线的 source 改成 **11** | 精确红 **B-2** |
-| 前端 | 让 `draftToDescription` **丢** `wiring` | 精确红 **C-1** |
-| 前端 | 让 `draftToDescription` **透传**草稿里 `wiring` 的多余键 | 精确红 **C-2** |
-| 前端 | 让「元数据变了 ⇒ 整份」的判据**不**看 `wiring` | 精确红 **C-5** |
+| 前端 | 让 `draftToDescription` **丢** `bridge` | 精确红 **C-1** |
+| 前端 | 让 `draftToDescription` **透传**草稿里 `bridge` 的多余键 | 精确红 **C-2** |
+| 前端 | 让「元数据变了 ⇒ 整份」的判据**不**看 `bridge` | 精确红 **C-5** |
 | 工具层 | 把切分**退回**朴素写法 | 夹具**红 1**（T-3）⇒ ⇒ ⚠️ **真规格仍 0 红** ⇒ ⇒ **真规格跑绿不代表口径对** |
 | 工具层 | 让 harness **打印**的值与**实际映射**不一致 | 精确红 **T-5** |
 | 整合批 | 把契约层 `PLATFORM_RULES_VERSION` 改成 **4** | wasm 冒烟**红 1**（X-2） |
@@ -391,7 +391,7 @@ impl PlatformDescription {
 | # | 项 | 说明 |
 | --- | --- | --- |
 | 1 | **提示噪音** | 行为不变的存量板**也会**被提示（规则集确实变了）⇒ ⇒ 保守但诚实 |
-| 2 | **界面不支持编辑 `wiring`** | 「换板改连线」目前**只能手写描述 JSON** ⇒ ⇒ 已知边界，**不假装**支持 |
+| 2 | **界面不支持编辑 `bridge`** | 「换板改连线」目前**只能手写描述 JSON** ⇒ ⇒ 已知边界，**不假装**支持 |
 | 3 | **描述改 base 会被断言挡住** | 候选侧断言 base 必须是 `0x8000_0000` ⇒ ⇒ **故意**的：宁可明确报错，不静默漂移 |
 | 4 | **Spike 的 `-m` 只吃十进制** | ⇒ 打印格式**写死十进制** ⇒ ⇒ 脚本不做进制转换 |
 | 5 | **规格号已顺延四次** | ⇒ I2C 那批 = **STAGE-20** ⇒ ⇒ 台账 / PROGRESS / README / AGENTS **三处**同步 |

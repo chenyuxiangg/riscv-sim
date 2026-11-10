@@ -47,7 +47,7 @@ TARGETS = [
     "crates/kernel/src/kernel_host/platform.rs",
     "crates/kernel/src/kernel_host/mod.rs",
     "front/views/components/memory-map.js",
-    "front/views/components/wiring-editor.js",
+    "front/views/components/bridge-editor.js",
     "front/lib/message.js",
 ]
 
@@ -55,7 +55,7 @@ TARGETS = [
 RUST_GATE = [
     "cargo", "test", "-p", "riscv_sim_kernel", "--lib", "tests_v074",
 ]
-FRONT_GATE = ["node", "--test", "front/tests/wiring-editor.test.mjs"]
+FRONT_GATE = ["node", "--test", "front/tests/bridge-editor.test.mjs"]
 
 #: ⚠️ **变异表**（T-1 ~ T-8）—— 每条 = (编号, 落点文件, 旧串, 新串, 门禁)。
 #:
@@ -65,14 +65,14 @@ MUTATIONS = [
         "id": "T-1",
         "what": "连线事件词表**退回单常量比较**（`pin_irq` 一律被拒）",
         "file": "crates/contract/src/platform.rs",
-        "old": """pub fn wiring_event_info(event: &str) -> Option<&'static WiringEventInfo> {
-    WIRING_EVENTS.iter().find(|info| info.name == event)
+        "old": """pub fn bridge_event_info(event: &str) -> Option<&'static BridgeEventInfo> {
+    BRIDGE_EVENTS.iter().find(|info| info.name == event)
 }""",
-        "new": """pub fn wiring_event_info(event: &str) -> Option<&'static WiringEventInfo> {
-    if event != WIRING_EVENT_RX_READY {
+        "new": """pub fn bridge_event_info(event: &str) -> Option<&'static BridgeEventInfo> {
+    if event != BRIDGE_EVENT_RX_READY {
         return None;
     }
-    WIRING_EVENTS.iter().find(|info| info.name == event)
+    BRIDGE_EVENTS.iter().find(|info| info.name == event)
 }""",
         "gate": "rust",
     },
@@ -126,7 +126,7 @@ MUTATIONS = [
         "id": "T-7",
         "what": "前端**不采集**连线（画出来的线**丢**了）",
         "file": "front/views/components/memory-map.js",
-        "old": """    return collectWiring(root, next);""",
+        "old": """    return collectBridge(root, next);""",
         "new": """    return next;""",
         "gate": "front",
     },

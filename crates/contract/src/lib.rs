@@ -266,10 +266,8 @@ pub mod snapshot;
 /// Contract **v11** adds the **连线报告**（STAGE-48 · v0.72 · debt ledger
 /// **D-177 A**）—— 「宿主不再把器件实例塌缩成固定角色」批的**一半**：
 ///
-/// - new DTOs `model::WiringReportDto` / `model::DroppedWireDto` /
 ///   `model::WireDropReason` —— **连线报告**（描述里用户写了几根线、其中
 ///   几根当前真的在连线表里、其余的**逐条带理由**）；
-/// - `EventPayload::MemoryMap` gains `wiring_report` ⇒ ⇒ **形状变了**
 ///   ⇒ ⇒ **`SCHEMA_VERSION` 10 → 11**；
 /// - ⚠️ **只有这一处形状变化** ⇒ ⇒ **命令侧零改动**；
 /// - ⚠️ **`PLATFORM_SCHEMA_VERSION` stays `1`** and
@@ -279,7 +277,6 @@ pub mod snapshot;
 ///   change either).
 ///
 /// ⚠️ **订正**：产品计划把这一批写成「**零升版**」⇒ ⇒ **不成立** ——
-/// 「丢线可见」必须**过 wire**（前端**能**提交带 `wiring` 的描述 ⇒ ⇒ 线被
 /// 静默丢弃**用户真的会遇到**）⇒ ⇒ 报告**必须**到界面 ⇒ ⇒ `MemoryMap`
 /// 事件**多一个字段** ⇒ ⇒ **必须升版**。详见
 /// `docs/detailed-design/STAGE-48_V072_Device_Instance_Table.md` §7.1

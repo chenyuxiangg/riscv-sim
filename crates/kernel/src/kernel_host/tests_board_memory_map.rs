@@ -129,8 +129,6 @@ fn user_board() -> PlatformDescription {
         priority: 100,
         // ⚠️ 它**不**参与自动选档（用户配的板是**点名**用的）。
         description: None,
-        // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
-        // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         region_budget_bytes: 16 * 1024 * 1024,
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
         max_region_bytes: None,
@@ -164,8 +162,6 @@ fn board_with_four_devices() -> PlatformDescription {
         name: "User board (four devices)".to_string(),
         priority: 100,
         description: None,
-        // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
-        // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         region_budget_bytes: 16 * 1024 * 1024,
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
         max_region_bytes: None,
@@ -223,8 +219,6 @@ fn board_with_eight_mib_ram() -> PlatformDescription {
         name: "User board (8 MiB RAM)".to_string(),
         priority: 100,
         description: None,
-        // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
-        // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         region_budget_bytes: 16 * 1024 * 1024,
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
         max_region_bytes: None,
@@ -451,8 +445,6 @@ fn b1_the_old_map_is_restored_when_the_new_one_cannot_be_mapped() {
         name: "Overlapping".to_string(),
         priority: 100,
         description: None,
-        // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
-        // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         region_budget_bytes: 16 * 1024 * 1024,
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
         max_region_bytes: None,
@@ -536,8 +528,6 @@ fn b2_an_over_budget_description_is_rejected_with_e_plt_07() {
         name: "Too big".to_string(),
         priority: 100,
         description: None,
-        // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
-        // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         // 预算 4 KiB，段却要 64 KiB ⇒ 违反 V-7。
         region_budget_bytes: 0x1000,
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
@@ -575,8 +565,6 @@ fn b2_a_rejected_description_changes_nothing() {
         name: "Too big".to_string(),
         priority: 100,
         description: None,
-        // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
-        // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         region_budget_bytes: 0x1000,
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
         max_region_bytes: None,
