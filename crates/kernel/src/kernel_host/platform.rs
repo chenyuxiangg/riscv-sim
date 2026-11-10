@@ -64,7 +64,6 @@ use riscv_sim_contract::port::{Peripheral, TimeSource};
 use crate::m14_bus::Bus;
 use crate::m15_peripheral::clint::Clint;
 use crate::m15_peripheral::gpio::GpioBank;
-use crate::m15_peripheral::pinmux::PinmuxDevice;
 use crate::m15_peripheral::plic::Plic;
 use crate::m15_peripheral::uart::Uart16550;
 
@@ -242,12 +241,6 @@ pub struct BuiltDevice {
     ///   要**读它的 pending IRQ**（⇒ ⇒ 抬 PLIC 的源）⇒ ⇒ ⇒ **拿不到句柄
     ///   就抬不了** ⇒ ⇒ ⇒ **一个约束一个落点**：句柄**必须**在这儿。
     gpio: Option<Rc<RefCell<GpioBank>>>,
-    /// 宿主留着的 **pinmux** 句柄（v0.76 · STAGE-52 · C1 决议）。
-    ///
-    /// ⚠️ **为什么 pinmux 要留句柄**：固件**写它的寄存器**切当前功能、宿主
-    ///   **读当前功能**查「功能 → 中断源」⇒ ⇒ 拿不到句柄就切不了、抬不了
-    ///   ⇒ ⇒ **一个约束一个落点**：句柄**必须**在这儿。
-    pinmux: Option<Rc<RefCell<PinmuxDevice>>>,
 }
 
 impl BuiltDevice {
@@ -262,7 +255,6 @@ impl BuiltDevice {
             clint: None,
             plic: None,
             gpio: None,
-            pinmux: None,
         }
     }
 
@@ -275,7 +267,6 @@ impl BuiltDevice {
             clint: None,
             plic: None,
             gpio: None,
-            pinmux: None,
         }
     }
 
@@ -288,7 +279,6 @@ impl BuiltDevice {
             clint: Some(handle),
             plic: None,
             gpio: None,
-            pinmux: None,
         }
     }
 
@@ -301,7 +291,6 @@ impl BuiltDevice {
             clint: None,
             plic: None,
             gpio: Some(handle),
-            pinmux: None,
         }
     }
 
@@ -314,7 +303,6 @@ impl BuiltDevice {
             clint: None,
             plic: Some(handle),
             gpio: None,
-            pinmux: None,
         }
     }
 }
@@ -370,8 +358,6 @@ pub enum DeviceHandle {
     /// ⚠️ v0.73 批它是 `Opaque`（宿主**不**持有专用句柄）⇒ ⇒ 引脚级连线
     ///   **抬不了** ⇒ ⇒ ⇒ 现在**必须**持有句柄（一个约束一个落点）。
     Gpio(Rc<RefCell<GpioBank>>),
-    /// **pinmux**（v0.76 · STAGE-52 · C1 决议 —— 功能切换 + 中断路由）。
-    Pinmux(Rc<RefCell<PinmuxDevice>>),
     /// 宿主**不**持有专用句柄的器件（今天的 `timer_riscv`）⇒ ⇒ 只登记
     /// 「**它在**」⇒ ⇒ 「它能不能当线的两端」**判得出来**（⇒ ⇒ `source-type` /
     /// `target-type` 而不是 `source-unknown`）。
@@ -487,25 +473,6 @@ impl DeviceInstanceTable {
             Some(DeviceHandle::Gpio(h)) => Some(Rc::clone(h)),
             _ => None,
         }
-    }
-
-    /// 按 id 查一个 **pinmux** 句柄（v0.76 · STAGE-52 · C1 决议）。
-    pub fn pinmux(&self, id: &str) -> Option<Rc<RefCell<PinmuxDevice>>> {
-        match self.get(id).map(|e| &e.handle) {
-            Some(DeviceHandle::Pinmux(h)) => Some(Rc::clone(h)),
-            _ => None,
-        }
-    }
-
-    /// 遍历所有 **pinmux** 句柄（v0.76 · STAGE-52 —— 装配期喂功能数）。
-    pub fn iter_pinmux(&self) -> Vec<Rc<RefCell<PinmuxDevice>>> {
-        self.entries
-            .iter()
-            .filter_map(|e| match &e.handle {
-                DeviceHandle::Pinmux(h) => Some(Rc::clone(h)),
-                _ => None,
-            })
-            .collect()
     }
 
     /// **第一个** UART（base 升序）—— **console 角色**（裁决 D：逐字不变）。
@@ -640,7 +607,6 @@ pub fn map_platform(
                     clint,
                     plic,
                     gpio,
-                    pinmux,
                 } = build_device(device, base)?;
                 // ⚠️ 窗口大小**由器件自己报**（裁决 D）。
                 let window = peripheral.borrow().size();
@@ -662,12 +628,11 @@ pub fn map_platform(
                 // ⚠️ **GPIO 没有专用句柄** ⇒ ⇒ 记成 `Opaque` ⇒ ⇒ 「它在」
                 // 这件事**判得出来**（⇒ ⇒ 线的两端是 GPIO 时报
                 // `source-type` / `target-type`，**不是** `source-unknown`）。
-                let handle = match (uart, clint, plic, gpio, pinmux) {
-                    (Some(u), None, None, None, None) => DeviceHandle::Uart(u),
-                    (None, Some(c), None, None, None) => DeviceHandle::Clint(c),
-                    (None, None, Some(p), None, None) => DeviceHandle::Plic(p),
-                    (None, None, None, Some(g), None) => DeviceHandle::Gpio(g),
-                    (None, None, None, None, Some(x)) => DeviceHandle::Pinmux(x),
+                let handle = match (uart, clint, plic, gpio) {
+                    (Some(u), None, None, None) => DeviceHandle::Uart(u),
+                    (None, Some(c), None, None) => DeviceHandle::Clint(c),
+                    (None, None, Some(p), None) => DeviceHandle::Plic(p),
+                    (None, None, None, Some(g)) => DeviceHandle::Gpio(g),
                     _ => DeviceHandle::Opaque,
                 };
                 devices.handles.push(DeviceInstanceEntry {

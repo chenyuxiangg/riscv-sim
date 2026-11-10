@@ -642,13 +642,6 @@ pub const E_PLT_21_MCU_INVALID: u16 = 21;
 /// （本批 4 → 5）。
 pub const E_PLT_22_NO_BOARD: u16 = 22;
 
-/// **pinmux 运行时寄存器操作非法**（v0.76 · STAGE-52 · 裁决 H）—— 固件写
-/// pinmux 功能选择寄存器：索引越界（≥ 该引脚功能数）⇒ 拒。
-///
-/// ⚠️ **静态**（描述层）引脚规格非法是 `E_PLT-19` 的事（V-24）⇒ 这个是
-/// **运行时**（固件动作）⇒ 两个对象 ⇒ 一码两义 ⇒ 禁止 ⇒ ⇒ **自己一个码**。
-pub const E_PLT_23_PINMUX_INVALID: u16 = 23;
-
 /// Scenario code: the image wants an address range that the **board in
 /// effect** does not have at all — 「**未知系统**」.
 ///

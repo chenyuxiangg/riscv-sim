@@ -162,8 +162,7 @@ pub const SUPPORTED_PLATFORM_SCHEMA_VERSIONS: &[u32] = &[1, 2, 3, 4, 5];
 /// 形状校验；码 `E_PLT-21`）⇒ ⇒ V-22 编号不变（仍属装配期分配器）。
 /// ⚠️ **v0.76（STAGE-52）**：**规则集 7** ⇒ ⇒ V-21 语义**扩展**（引脚规格
 ///   `PinSpec`：器件在 + 引脚号 + 方向 + 同引脚唯一 + 冲突）＋ 加 **V-24**
-///   （引脚规格形状 · 码 `E_PLT-19` 复用）＋ **V-25**（`pinmux` 器件形状 ·
-///   码 `E_PLT-19` / `E_PLT-23`）＋ **V-26**（无板装载 ⇒ 码 `E_PLT-22`）。
+///   **V-26**（无板装载 ⇒ 码 `E_PLT-22`）。
 pub const PLATFORM_RULES_VERSION: u32 = 7;
 /// The **upper bound** of a CLINT's timer frequency (1 THz).
 ///
@@ -547,9 +546,6 @@ impl DeviceSpec {
     /// ⚠️ **One landing spot** (裁决 I) ⇒ ⇒ the front end's `DEVICE_KINDS`
     /// is checked against **this** list by a cross-layer gate ⇒ ⇒ a new
     /// variant here turns the front end **red** instead of drifting.
-    ///
-    /// ⚠️ **v0.76（STAGE-52）**：加 `pinmux` ⇒ ⇒ 本清单 **6** 项（契约层
-    ///   `DeviceSpec` 第 **6** 个变体）。
     pub const KINDS: [&'static str; 5] = ["gpio", "uart16550", "clint", "plic", "timer_riscv"];
 }
 impl PlatformDescription {
@@ -577,7 +573,6 @@ impl PlatformDescription {
     /// | V-18 | a `wiring` entry names a device that is **not** in the map (or an unknown event name) | `E_PLT-16` |
     /// | V-19 | a `wiring` entry's target is not a PLIC, or its `to.source` is **not below** that PLIC's `sources` | `E_PLT-16` |
     /// | V-24 | a `pins` entry is not a well-formed pin spec (device not GPIO · pin not `pin{N}` · empty functions · duplicated pin / function name · irq-vs-wiring source clash) | `E_PLT-19` |
-    /// | V-25 | a `pinmux` device is declared without a `pins` section (nothing to serve) | `E_PLT-19` |
     ///
     /// ⚠️ **V-2 judges the *description's* `id`** — the **device's** `id`
     /// is judged by **V-17** ⇒ they are two different objects with two
