@@ -925,30 +925,11 @@ pub struct KernelHost {
     /// 真相源** ⇒ ⇒ 「console 是哪个 / 时间源是哪个」只由**角色 id**决定
     /// ⇒ ⇒ 少一个状态就少一处可能不同步的地方。
     devices: platform::DeviceInstanceTable,
-    /// **连线表**（v0.34 · D-125）—— 从**生效的描述**编译出来的。
+    /// **外设中断源表** —— 从**生效的描述**编译：每个 UART/GPIO 一个 PLIC 源号。
     ///
-    /// ⚠️ **它在建图时编译**（[`KernelHost::map_memory`]）⇒ ⇒ 换一块板
-    /// 就是换一张表 ⇒ ⇒ 宿主源码里**没有**第二个「PLIC 源号」。
-    ///
-    /// ⚠️ **它不是第二个真相源**：表里的每一行都来自**生效的描述**
-    /// （默认连线或描述里的 `wiring`）⇒ ⇒ 描述是真相，表是它的投影。
+    /// ⚠️ 建图时重算（[`KernelHost::map_memory`]）⇒ 换板即换表 ⇒ 宿主源码里**没有**第二个「PLIC 源号」。
     peripheral_irqs: Vec<platform::PeripheralIrq>,
-    /// **丢线报告**（v0.72 · STAGE-48 · D-177 A）—— 「你写的 N 根线里有
-    /// M 根当前抬不了」。
-    ///
-    /// ⚠️ **它随图走**（建图时**重算**）⇒ ⇒ 改板之后**不留**上一份的残留
-    /// ⇒ ⇒ 恒等式 `declared == live + dropped.len()` **始终**成立。
-    ///
-    /// ⚠️ **它过 wire**（`memory.map` 事件的第五个字段）⇒ ⇒ 用户**看得见**
-    /// ⇒ ⇒ 「描述被接受但线被静默丢弃」这件事**不再是静默的**。
-    wiring_report: riscv_sim_contract::model::WiringReportDto,
-    /// **pinmux 路由表**（v0.76 · STAGE-52 · C1 / J / K）—— 从**生效的
-    /// 描述** `pins` 段编译（与建图同源）。
-    ///
-    /// ⚠️ 每项 = `(gpio 器件 id, 引脚号, 功能列表)` ⇒ ⇒ 宿主同步中断时按
-    /// 「当前功能 → irq 源」抬线 ⇒ ⇒ **不**写 GPIO 的 `irq_lines[pin]`
-    /// （分层禁令 · 裁决 K）。
-    /// **角色解析**的结果（v0.73 · STAGE-48 · D-177 的 C）—— 哪个 id 扮演
+
     /// console / 时间源 / 主 PLIC。
     ///
     /// ⚠️ **缺省 ⇒ 今天的口径逐字不变**（第一个 UART / 第一个 CLINT）⇒ ⇒
@@ -1121,7 +1102,6 @@ impl KernelHost {
             peripheral_irqs: Vec::new(),
             // ⚠️ v0.72（STAGE-48 · D-177 A）：丢线报告**随图**重算 ⇒ 这里
             // 只是**初值**（还没有建图 ⇒ 没有线 ⇒ 0 根）。
-            wiring_report: riscv_sim_contract::model::WiringReportDto::default(),
             // ⚠️ v0.76（STAGE-52 · C1/J/K）：pinmux 路由表**随图**重算 ⇒
             // 这里只是**初值**（还没有建图 ⇒ 没有引脚路由）。
             roles: platform::ResolvedRoles::default(),
@@ -3242,10 +3222,6 @@ impl KernelHost {
             pending: self.memory_map_pending(),
             loaded: self.image_loaded,
             revision: self.map_revision,
-            // ⚠️ **连线报告**（STAGE-48 · D-177 A）—— 「你写的 N 根线里有
-            // M 根当前抬不了」⇒ ⇒ **在「内核接受描述的那一刻」就到** ⇒ ⇒
-            // 前端**不自己判**（只显示内核给的）。
-            wiring_report: self.wiring_report.clone(),
         }
     }
 

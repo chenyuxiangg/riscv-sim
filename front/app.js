@@ -131,7 +131,6 @@ import { collectTraceChunks } from "./lib/trace-export.js";
 import { showAlert } from "./lib/alert.js";
 // ⚠️ **连线报告**（STAGE-48 · v0.72 · D-177 A）—— 「你写的 N 根线里有 M 根
 // 当前抬不了」⇒ ⇒ **内核说**的 ⇒ ⇒ 前端**只**归一化形状、**不判定**。
-import { normalizeWiringReport } from "./lib/wiring-report.js";
 
 /** URL of the WASM kernel Worker (same-origin HTTP required). */
 const KERNEL_WORKER_URL = "./kernel-worker.js";
@@ -3041,15 +3040,7 @@ export function wireMemoryMap(commandRouter) {
             description: event.value?.description ?? null,
             pending: event.value?.pending === true,
             loaded: event.value?.loaded === true,
-            revision: Number(event.value?.revision ?? 0),
-            // ⚠️ **连线报告**（STAGE-48 · v0.72 · D-177 A）—— 「你写的 N 根
-            // 线里有 M 根当前抬不了」⇒ ⇒ **内核说**的 ⇒ ⇒ 前端**不自己判**
-            // ⇒ ⇒ 只**原样**显示内核给的数字与理由（不翻译、不改写）。
-            //
-            // ⚠️ **缺省那档**（老内核 / 老事件没有这个字段）⇒ ⇒ 视图**不
-            // 炸** ⇒ ⇒ 显示「无连线报告」那档（N-4）。
-            wiringReport: normalizeWiringReport(event.value?.wiring_report),
-        };
+            revision: Number(event.value?.revision ?? 0),        };
         // ⚠️ **乱序护栏**（裁决 F）：`revision` **严格更旧**的事件 ⇒ **不覆盖**
         // 已有状态 ⇒ 状态留在较新那份 ⇒ 差量**算在较新的那张图上**。
         //
