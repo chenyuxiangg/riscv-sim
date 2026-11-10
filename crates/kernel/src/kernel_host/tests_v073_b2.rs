@@ -55,9 +55,7 @@ fn description_without_bases() -> PlatformDescription {
             },
         ],
         description: None,
-        wiring: None,
         roles: None,
-        pins: None,
         mcu: None,
     }
 }

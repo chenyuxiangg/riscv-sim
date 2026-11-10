@@ -1013,9 +1013,7 @@ mod tests {
             max_region_bytes: None,
             regions: Vec::new(),
             description: None,
-            wiring: None,
             roles: None,
-            pins: None,
             mcu: None,
         };
         description.id = "minimal".to_string();
@@ -1616,9 +1614,7 @@ mod tests {
                 size: 0x0010_0000,
             }],
             description: None,
-            wiring: None,
             roles: None,
-            pins: None,
             mcu: None,
         }
     }
@@ -1869,6 +1865,7 @@ mod tests {
                 crate::platform::RegionSpec::Peripheral {
                     base: Some(0x1000_0000),
                     device: crate::platform::DeviceSpec::Gpio {
+                        irq_line: 11,
                         id: "GPIO0".to_string(),
                     },
                 },
@@ -1898,9 +1895,7 @@ mod tests {
                 },
             ],
             description: Some("用户配的板".to_string()),
-            wiring: None,
             roles: None,
-            pins: None,
             mcu: None,
         };
         let cmd = CommandPayload::SetMemoryMap {

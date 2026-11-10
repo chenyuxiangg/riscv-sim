@@ -579,11 +579,11 @@ pub const E_PLT_15_DEVICE_EMPTY_ID: u16 = 15;
 /// [`E_PLT_15_DEVICE_EMPTY_ID`] either: that one judges a **declared**
 /// device's own `id` ⇒ a wiring's **reference** to a device is a
 /// different object ⇒ forbidden.
-pub const E_PLT_16_WIRING_INVALID: u16 = 16;
+pub const E_PLT_16_IRQ_SOURCE_INVALID: u16 = 16;
 
 /// **角色声明指向的器件不在描述里**（v0.73 · STAGE-49 · D-177 的 C）。
 ///
-/// ⚠️ **It does not reuse [`E_PLT_16_WIRING_INVALID`]**: that one means
+/// ⚠️ **It does not reuse [`E_PLT_16_IRQ_SOURCE_INVALID`]**: that one means
 /// 「**这条连线**非法」⇒ ⇒ a **role** naming a device that is not there is
 /// a **different object** ⇒ ⇒ one code, two meanings ⇒ forbidden.
 /// ⚠️ It does not reuse [`E_PLT_02_EMPTY_ID`] / [`E_PLT_08_DUPLICATE_DEVICE_ID`] /
@@ -595,7 +595,7 @@ pub const E_PLT_18_ROLES_INVALID: u16 = 18;
 
 /// **引脚表指向的器件不在描述里**（v0.73 · STAGE-49 · D-175 的 D1）。
 ///
-/// ⚠️ **It does not reuse [`E_PLT_16_WIRING_INVALID`] / [`E_PLT_18_ROLES_INVALID`]**:
+/// ⚠️ **It does not reuse [`E_PLT_16_IRQ_SOURCE_INVALID`] / [`E_PLT_18_ROLES_INVALID`]**:
 /// 那两个分别是「**这条连线**非法」与「**这份角色声明**不合法」⇒ ⇒ 引脚表是
 /// **第三个对象** ⇒ ⇒ 一码两义 ⇒ 禁止 ⇒ ⇒ **自己一个码**。
 pub const E_PLT_19_PINS_INVALID: u16 = 19;

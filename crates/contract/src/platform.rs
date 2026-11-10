@@ -49,18 +49,15 @@
 //! ⚠️ **The host-side codes live here too** (V-10 .. V-12): the *rules*
 //! are the host's, but a code with **two** landing spots is a code with
 //! two meanings ⇒ the contract layer owns every `E_PLT-*` number.
-
 use serde::{Deserialize, Serialize};
-
 use crate::error::{
     PlatformError, E_PLT_01_SCHEMA_VERSION, E_PLT_02_EMPTY_ID, E_PLT_03_NO_REGIONS,
     E_PLT_04_ZERO_SIZE, E_PLT_05_OVERFLOW, E_PLT_06_OVERLAP, E_PLT_07_OVER_BUDGET,
     E_PLT_08_DUPLICATE_DEVICE_ID, E_PLT_12_PARAMETER_OUT_OF_RANGE, E_PLT_15_DEVICE_EMPTY_ID,
-    E_PLT_16_WIRING_INVALID, E_PLT_18_ROLES_INVALID, E_PLT_19_PINS_INVALID, E_PLT_21_MCU_INVALID,
+    E_PLT_16_IRQ_SOURCE_INVALID, E_PLT_18_ROLES_INVALID, E_PLT_21_MCU_INVALID,
     PLATFORM_FAMILY,
 };
-use crate::session::{GPIO_PIN_COUNT, REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
-
+use crate::session::{REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
 /// Format version of the **platform description**.
 ///
 /// ⚠️ **This is not the session payload's version** and it is not the
@@ -93,7 +90,6 @@ use crate::session::{GPIO_PIN_COUNT, REGION_KIND_PERIPHERAL, REGION_KIND_RAM, RE
 ///   老描述**带 `auto_selectable` 键仍能解析**（serde 忽略未知字段 ⇒ ⇒
 ///   **缺省优先迁移** ⇒ ⇒ 存量板档案**零风险**）。
 pub const PLATFORM_SCHEMA_VERSION: u32 = 5;
-
 /// **本构建能读**的平台描述格式版本（V-1 判的就是它）。
 ///
 /// ⚠️ **v0.73（STAGE-49 · B2）**：**`[1, 2]`** ⇒ ⇒ ⇒ **缺省优先**：老描述
@@ -113,7 +109,6 @@ pub const PLATFORM_SCHEMA_VERSION: u32 = 5;
 ///   （存量板档案 · 带 `auto_selectable` 键）**仍能装**（serde 忽略未知键）
 ///   ⇒ ⇒ 版本 **5** 是本批写的。
 pub const SUPPORTED_PLATFORM_SCHEMA_VERSIONS: &[u32] = &[1, 2, 3, 4, 5];
-
 /// The version of the platform description's **legality rule set**.
 ///
 /// ⚠️ **This is not [`PLATFORM_SCHEMA_VERSION`]** and it is not the
@@ -171,7 +166,6 @@ pub const SUPPORTED_PLATFORM_SCHEMA_VERSIONS: &[u32] = &[1, 2, 3, 4, 5];
 ///   （引脚规格形状 · 码 `E_PLT-19` 复用）＋ **V-25**（`pinmux` 器件形状 ·
 ///   码 `E_PLT-19` / `E_PLT-23`）＋ **V-26**（无板装载 ⇒ 码 `E_PLT-22`）。
 pub const PLATFORM_RULES_VERSION: u32 = 7;
-
 /// The **upper bound** of a CLINT's timer frequency (1 THz).
 ///
 /// ⚠️ The platform's smallest time granularity is **1 ps**
@@ -183,7 +177,6 @@ pub const PLATFORM_RULES_VERSION: u32 = 7;
 /// **reference** it, they never copy it (one constant, one truth — the
 /// same discipline as v0.22's `MSTATUS_WARL_MASK`).
 pub const MAX_CLINT_FREQ_HZ: u64 = 1_000_000_000_000;
-
 /// The **upper bound** of the number of harts a CLINT serves (4096).
 ///
 /// ⚠️ From the device model's register layout (not from taste): the
@@ -192,7 +185,6 @@ pub const MAX_CLINT_FREQ_HZ: u64 = 1_000_000_000_000;
 /// (`0x4000 + 8×hart`) must not run into the `mtime` area at `0xBFF8` ⇒
 /// the same bound, from another road.
 pub const MAX_CLINT_HARTS: u32 = 4096;
-
 /// The **upper bound** of the number of interrupt sources a PLIC has
 /// (1024).
 ///
@@ -201,7 +193,6 @@ pub const MAX_CLINT_HARTS: u32 = 4096;
 /// ⇒ `source < 1024`; the Enable area gives the same bound from another
 /// road (32 words per context ⇒ `ceil(sources/32) ≤ 32`).
 pub const MAX_PLIC_SOURCES: u32 = 1024;
-
 /// The **upper bound** of the number of interrupt contexts a PLIC has
 /// (16).
 ///
@@ -209,7 +200,11 @@ pub const MAX_PLIC_SOURCES: u32 = 1024;
 /// is `0x200000 + 0x1000×ctx` and must stay inside the `0x210000` window
 /// ⇒ `ctx ≤ 16`.
 pub const MAX_PLIC_CONTEXTS: u32 = 16;
-
+/// **GPIO 缺省中断号** —— 描述里没写 `irq_line` 时取 `11`
+/// （与 QEMU virt 的 GPIO 源习惯一致；`0` 是保留号，永远不合法）。
+pub fn default_gpio_irq_line() -> u16 {
+    11
+}
 /// A platform description — the declared memory map of one board.
 ///
 /// The wire form is JSON (the only serialization format the repository
@@ -287,26 +282,6 @@ pub struct PlatformDescription {
     /// carry comments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// The **wiring** between the devices (optional).
-    ///
-    /// ⚠️ **v0.34 (D-125)**: the wiring between the devices became
-    /// **data** ⇒ the host compiles the interrupt routing from the
-    /// description instead of from a hard-coded table ⇒ "use a different
-    /// board with a different wiring" stops meaning "edit the host".
-    ///
-    /// ⚠️ **Absent ⇒ the host's default wiring** ⇒ an old description
-    /// (one without this key) behaves **byte for byte** as before ⇒ the
-    /// stored boards are **not** invalidated by this batch ⇒ ⇒ this is
-    /// why [`PLATFORM_SCHEMA_VERSION`] does **not** move (裁决 B — the
-    /// same shape as v0.31's `max_region_bytes`).
-    ///
-    /// ⚠️ **`skip_serializing_if`** ⇒ the key is **absent** when there is
-    /// no wiring ⇒ the wire shape of a description without wiring is
-    /// **unchanged** ⇒ the front end's mirror needs no rewrite for the
-    /// boards it already has.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wiring: Option<Vec<WiringSpec>>,
-
     /// **角色声明**（v0.73 · STAGE-49 · D-177 的 C）—— 哪个实例扮演 console /
     /// 时间源 / 主 PLIC。
     ///
@@ -316,19 +291,6 @@ pub struct PlatformDescription {
     /// ⚠️ **指了不存在的器件 ⇒ ⇒ 拒**（`E_PLT-18`）⇒ ⇒ **不静默回落**。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roles: Option<DeviceRoles>,
-
-    /// **引脚规格**（v0.73 `pins` 段 · v0.76 **升级为功能列表**）—— 哪个
-    /// 器件的哪个引脚有哪几种功能（复用 + 方向 + 各自中断目标）。
-    ///
-    /// ⚠️ **可选** ⇒ ⇒ **缺省 = 无引脚规格** ⇒ ⇒ 无 pinmux 行为 ⇒ ⇒ 老描述
-    /// **零影响**（缺省优先）。
-    ///
-    /// ⚠️ **v0.76（STAGE-52 · 裁决 E/G/K）**：`PinSpec.functions[].irq` 是
-    /// **声明** ⇒ ⇒ 内核经 pinmux 器件翻译成运行时路由 ⇒ ⇒ ⛔ 不许直接写
-    /// GPIO 的 `irq_lines[pin]`（分层禁令保持）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pins: Option<Vec<PinSpec>>,
-
     /// **MCU 段**（v0.75 · STAGE-51 · D-175 的 F）—— 这块板上的处理器
     /// （α 路线：一块板一个 MCU）。
     ///
@@ -341,165 +303,6 @@ pub struct PlatformDescription {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcu: Option<McuSpec>,
 }
-
-/// One **wire** between two devices — the wiring table's row.
-///
-/// ⚠️ **The shape is pinned** (frozen spec STAGE-19 §2.1): the field
-/// names `from` / `to` and the nested `device` / `event` / `source` are
-/// **one word each** ⇒ the host, the front end and the contract layer
-/// must spell them the same way ⇒ a rename on one side turns the
-/// others' tests red instead of drifting silently.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WiringSpec {
-    /// The **source** end of the wire.
-    pub from: WiringFrom,
-    /// The **target** end of the wire.
-    pub to: WiringTo,
-}
-
-/// The **source** end of a wire — a device and one of its events.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WiringFrom {
-    /// The source device's `id` — must exist in the **same** description's
-    /// device set (rule V-18).
-    pub device: String,
-    /// The event name — must be in the **event vocabulary**
-    /// ([`wiring_event_info`], rule V-18).
-    pub event: String,
-    /// **哪一个引脚**（引脚级寻址，v0.74 · STAGE-50 · D-175 的 D）。
-    ///
-    /// ⚠️ **可选** ⇒ ⇒ 老描述**逐字不变**（⇒ ⇒ 存量板档案**零风险**）。
-    ///
-    /// ⚠️ **只在引脚级事件上才有意义**（`pin_irq`）⇒ ⇒ 给了 `pin` 但事件
-    ///   **不是**引脚级 ⇒ ⇒ **拒**（规则 V-18 · 裁决 H）⇒ ⇒ **不静默忽略**。
-    ///
-    /// ⚠️ **越界**（≥ [`GPIO_PIN_COUNT`]）⇒ ⇒ **拒**（规则 V-18 · 裁决 I）。
-    ///
-    /// ⚠️ **为什么是 `u32` 而不是 `u8`**（v0.74 · STAGE-50 施工期订正）：
-    ///   **越界**这条约束的**唯一落点**必须 **V-18** ⇒ ⇒ 若字段类型是
-    ///   `u8` ⇒ ⇒ `pin = 300` 会先被 **serde 解析**拒掉（⇒ ⇒ 那是**另一条**
-    ///   错误路径、**另一个**码）⇒ ⇒ ⇒ 「越界」就有**两个落点** ⇒ ⇒ ⇒
-    ///   改成 `u32` ⇒ ⇒ **任何**越界的数都**先能解析**、再被 V-18 拒
-    ///   （⇒ ⇒ 既有码 `E_PLT-16`，一个落点）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pin: Option<u32>,
-}
-
-/// The **target** end of a wire — a device and one of its inputs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WiringTo {
-    /// The target device's `id` — must exist in the **same** description's
-    /// device set (rule V-18) and must be a **PLIC** (rule V-19).
-    pub device: String,
-    /// The target PLIC's source number — must be **below** that PLIC's
-    /// `sources` (rule V-19).
-    pub source: u32,
-}
-
-/// The one event name the wiring vocabulary currently allows:
-/// **`rx_ready`** — a UART's "a byte has arrived" event.
-///
-/// ⚠️ **This is the only place the string lives** ⇒ the host, the front
-/// end and the contract layer all **reference** it ⇒ the vocabulary has
-/// **one** landing spot (one constraint, one landing spot) ⇒ adding a
-/// second event name is a **rule change** (it tightens the rule set ⇒
-/// [`PLATFORM_RULES_VERSION`] goes +1), not a spelling change.
-pub const WIRING_EVENT_RX_READY: &str = "rx_ready";
-
-/// **引脚级**事件名（v0.74 · STAGE-50 · D-175 的 D）：一个 GPIO 的**某个
-/// 引脚**的中断。
-///
-/// ⚠️ **这根线必须带 `pin`**（[`WiringFrom::pin`]）⇒ ⇒ 否则**指不到**哪个
-/// 引脚 ⇒ ⇒ **拒**（规则 V-18 · 裁决 H）。
-pub const WIRING_EVENT_PIN_IRQ: &str = "pin_irq";
-
-/// **连线事件的语义** —— 「这个源的信号是**电平**还是**一次性**」。
-///
-/// ⚠️ **为什么要有它**（STAGE-50 §7.1 订正 3）：**PLIC 的源只有一位**
-///   （`pending: Vec<u32>`）⇒ ⇒ `request(source)` 与 `set_pending(source,
-///   true)` **字节级等价**⇒ ⇒ **同一个源不能同时**被「一次性请求」与
-///   「电平撤销」管 ⇒ ⇒ ⇒ 否则电平路径的清位会把锁存那次**一并清掉**。
-///
-/// ⚠️ **本批的解法**：「**一根线只属一种事件**」⇒ ⇒ 语义**由事件名决定**
-///   ⇒ ⇒ **不**给 PLIC 加「每源两态」⇒ ⇒ ⇒ **快照不动**。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WiringEventSemantics {
-    /// **电平** —— 设备「还有话说」时源**挂着**，没了就**撤销**。
-    ///
-    /// ⚠️ 适用：**UART 的 `rx_ready`**（LSR bit0 ∧ IER bit0 ⇒ 可反复读）。
-    Level,
-    /// **一次性** —— 事件发生**消费一次**，源**抬一次**。
-    ///
-    /// ⚠️ 适用：**GPIO 的引脚 IRQ**（`take_pending_irqs()` **消费**掉那一位）
-    ///   ⇒ ⇒ ⇒ 抬过一次之后设备侧**没有**待投递的了 ⇒ ⇒ ⇒ **不活锁**。
-    OneShot,
-}
-
-/// **连线事件词表** —— 事件名 →（源器件种类 · 语义 · 要不要 `pin`）。
-///
-/// ⚠️ **这是「事件名是否合法」这条约束的**唯一落点**（一个约束一个落点）
-///   ⇒ ⇒ 契约层 V-18 **查它** · 宿主 **查它** · 前端 **查它** ⇒ ⇒ ⇒
-///   三处**不会**漂移（STAGE-50 §7.1 订正 2）。
-///
-/// ⚠️ **今天**那个「单常量相等比较」在**两个**地方（契约层 V-18 + 宿主
-///   过滤）⇒ ⇒ ⇒ 扩词表前**必须**收敛到这里。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WiringEventInfo {
-    /// 事件名（**线上形态**）。
-    pub name: &'static str,
-    /// 源器件**种类**（`DeviceSpec::kind()` 的那一个）⇒ ⇒ 源不是这个种类
-    /// ⇒ ⇒ **拒**（规则 V-18 · 裁决 G）。
-    pub source_kind: &'static str,
-    /// 语义（电平 / 一次性）。
-    pub semantics: WiringEventSemantics,
-    /// 这根线**要不要** `pin`（引脚级寻址）。
-    pub needs_pin: bool,
-}
-
-/// **连线事件词表** —— **恰好两项**（v0.74 · STAGE-50）。
-///
-/// ⚠️ **顺序 = 报告顺序**（与 [`WiringRule`] 一样）⇒ ⇒ 判据**可复算**。
-pub const WIRING_EVENTS: &[WiringEventInfo] = &[
-    WiringEventInfo {
-        name: WIRING_EVENT_RX_READY,
-        source_kind: "uart16550",
-        semantics: WiringEventSemantics::Level,
-        needs_pin: false,
-    },
-    WiringEventInfo {
-        name: WIRING_EVENT_PIN_IRQ,
-        source_kind: "gpio",
-        semantics: WiringEventSemantics::OneShot,
-        needs_pin: true,
-    },
-];
-
-/// **查事件词表** —— 事件名 → 它的信息（**不在词表里 ⇒ `None`**）。
-///
-/// ⚠️ **这是「事件名是否合法」的**唯一判定入口**（一个约束一个落点）⇒ ⇒
-///   契约层 V-18 · 宿主 · 前端**都调它** ⇒ ⇒ ⇒ **不会**两处漂移。
-pub fn wiring_event_info(event: &str) -> Option<&'static WiringEventInfo> {
-    WIRING_EVENTS.iter().find(|info| info.name == event)
-}
-
-/// Which wiring rule a description violates — **internal to this
-/// module**.
-///
-/// ⚠️ The **order of the variants** is the **report order**: V-18 is
-/// judged before V-19 ⇒ the frozen spec's order is observable
-/// **structurally** (through [`PlatformDescription::wiring_violation`])
-/// even though the two rules **share** one scenario code (`E_PLT-16`)
-/// ⇒ the code alone cannot tell them apart.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WiringRule {
-    /// **V-18** — the wiring names a device that the map does not
-    /// declare, or an event name outside the vocabulary.
-    V18References,
-    /// **V-19** — the wiring's target is not a PLIC, or its source is not
-    /// below that PLIC's source count.
-    V19Source,
-}
-
 /// One declared region — internally tagged by **`kind`**.
 ///
 /// ⚠️ The internal tag's key is literally `kind`, matching the region
@@ -554,7 +357,6 @@ pub enum RegionSpec {
         device: DeviceSpec,
     },
 }
-
 /// **角色声明**（v0.73 · STAGE-49 · D-177 的 C）—— 哪个器件实例扮演哪个角色。
 ///
 /// ⚠️ **三个角色**：`console`（宿主跟它说话的那台 · 今天 = 第一个 UART）·
@@ -577,85 +379,6 @@ pub struct DeviceRoles {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub main_plic: Option<String>,
 }
-
-/// **引脚方向 —— 平台封闭枚举**（v0.76 · STAGE-52 · 裁决 F）。
-///
-/// ⚠️ **方向是平台行为语义**（输出 ⇒ 固件写 OUT 驱动 · 输入 ⇒ 允许宿主喂
-/// `set_external_inputs` · 双向 ⇒ 两可）⇒ ⇒ **封闭**、装载时校验；功能名
-/// 才是**用户自由命名**的那一半（裁决 G）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PinDirection {
-    /// 输入：固件读 IN 拿到外部喂进来的值。
-    Input,
-    /// 输出：固件写 OUT 驱动电平。
-    Output,
-    /// 双向：两可。
-    Bidir,
-}
-
-/// **一个功能的中断目标**（v0.76 · STAGE-52 · 裁决 J）—— 中断绑「引脚 ×
-/// 当前功能」⇒ ⇒ 每个功能自带各自中断目标 ⇒ ⇒ 同引脚不同功能可拉**不同**
-/// 中断线（STM32 PA9 先例：USART1_TX → USART1 线 / GPIO → EXTI9 /
-/// I2C1 SDA → I2C1 线）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PinIrq {
-    /// 拉到 PLIC 的哪个源。
-    pub source: u32,
-}
-
-/// **一个引脚的一种功能**（v0.76 · STAGE-52 · 裁决 E）。
-///
-/// ⚠️ **`name` 开放**（用户自由命名 · **不词表化** · 裁决 G）—— 平台只做
-/// 同引脚内功能名**唯一**；`direction` 是平台枚举（裁决 F）；`irq` 可选。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PinFunction {
-    /// 功能名 —— **用户自由命名**（外设扩展沿用 `KINDS` 注册制，不限
-    /// GPIO / UART）。
-    pub name: String,
-    /// 方向 —— 平台枚举。
-    pub direction: PinDirection,
-    /// 该功能的中断目标（可选）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub irq: Option<PinIrq>,
-}
-
-/// **一条引脚规格**（v0.76 · STAGE-52 · 裁决 E）—— 哪个器件的哪个引脚有
-/// 哪几种**功能**（v0.73 `PinBinding` 升级：`signal` 单一信号 → **功能列表**）。
-///
-/// ⚠️ **本批唯一解析规则（GPIO 引脚）**：`pin` 必须形如 `pin{0..GPIO_PIN_COUNT-1}`
-/// ⇒ ⇒ 非 GPIO 器件的引脚（UART 等无引脚号概念）**本批不支持** ⇒ ⇒ 声明了
-/// ⇒ ⇒ **拒**（`E_PLT-19` · 明确不做、不静默）。
-///
-/// ⚠️ **校验**：器件在（V-21 既有语义）· 引脚号合法 · 方向合法 · 同引脚
-/// 重复声明拒 · 功能名同引脚内唯一 ⇒ ⇒ 全部 `E_PLT-19`。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PinSpec {
-    /// **器件 id**（描述里声明过的那一个 · 本批须为 GPIO 器件）。
-    pub device: String,
-    /// **引脚名**（该器件的哪个引脚 · 本批 `pin{0..31}` 形）。
-    pub pin: String,
-    /// **功能列表**（≥ 1 · 同引脚内功能名唯一）。
-    pub functions: Vec<PinFunction>,
-}
-
-/// **GPIO 引脚名的唯一解析规则**（v0.76 · STAGE-52 · 裁决 E）—— `pin{N}` 形
-/// （`N ∈ 0..GPIO_PIN_COUNT`）。
-///
-/// ⚠️ **一个落点**：契约层校验（V-24）、内核装配期路由表、pinmux 寄存器
-/// 索引都**引用**这个解析结果、**不各自解析** ⇒ ⇒ 规则只在这里活一次。
-///
-/// ⚠️ 返回 `None` = 名字不是 `pin{N}` 形**或** N 越界（不区分 —— 两个都
-/// 是「引脚名非法」）。
-pub fn parse_gpio_pin_name(name: &str) -> Option<u32> {
-    let rest = name.strip_prefix("pin")?;
-    let n: u32 = rest.parse().ok()?;
-    if n >= GPIO_PIN_COUNT as u32 {
-        return None;
-    }
-    Some(n)
-}
-
 /// **MCU 段**（v0.75 · STAGE-51 · D-175 的 F）—— 这块板上的处理器是什么。
 ///
 /// ⚠️ **α 路线（一块板一个 MCU）**：它是**顶层属性**，**不是**器件、**不是**
@@ -678,7 +401,6 @@ pub struct McuSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector_table: Option<VectorTableSpec>,
 }
-
 /// **向量表声明**（v0.75 · STAGE-51 · D-175 的 F）—— 这颗 MCU 的
 /// 复位/中断向量表布局（**数据手册信息**，非运行时行为）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -688,7 +410,6 @@ pub struct VectorTableSpec {
     /// 表项数（× 4 字节 = 表长）。
     pub entries: u32,
 }
-
 /// **解析出的 ISA 事实**（V-23 与内核装载门禁共用 —— **一个落点**）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct McuIsaInfo {
@@ -699,7 +420,6 @@ pub struct McuIsaInfo {
     /// 声明了嵌入式扩展（`e`）。
     pub has_e: bool,
 }
-
 /// **ISA 词法解析 —— 唯一落点**（v0.75 · STAGE-51 · D-175 的 F）。
 ///
 /// ⚠️ 契约层 V-23 用它判 `mcu.isa` 合不合法 ⇒ ⇒ 内核装载门禁用它取
@@ -744,7 +464,6 @@ pub fn mcu_isa_info(isa: &str) -> Option<McuIsaInfo> {
     }
     Some(McuIsaInfo { bits, has_c, has_e })
 }
-
 /// One declared peripheral device — internally tagged by **`device **`.
 ///
 /// ⚠️ The internal tag's key is literally `device` (**not** `kind` —
@@ -757,6 +476,12 @@ pub enum DeviceSpec {
     Gpio {
         /// The device id — the key the restore path matches on.
         id: String,
+        /// 这块 **GPIO 整块**在 PLIC 上的中断源号（`1..plic.sources`，`0` 保留）。
+        ///
+        /// ⚠️ **整块一个号**：任意引脚有事件就抬这一个源，全部清空才撤 ⇒
+        ///   不按引脚分号。缺省 `11`（与 QEMU virt 的 GPIO 源习惯一致）。
+        #[serde(default = "default_gpio_irq_line")]
+        irq_line: u16,
     },
     /// An ns16550 UART.
     Uart16550 {
@@ -802,20 +527,7 @@ pub enum DeviceSpec {
         /// The interrupt line this timer raises.
         irq_line: u16,
     },
-    /// **引脚复用控制器（pinmux）**（v0.76 · STAGE-52 · C1 决议）——
-    /// **平台通用基座**：服务**所有**器件的引脚 · 固件写寄存器**切换**某个
-    /// 引脚的**当前功能** ⇒ ⇒ 平台按「引脚 × 当前功能」拉中断。
-    ///
-    /// ⚠️ **本批最小形态（裁决 I）**：每引脚一个**功能选择**寄存器（偏移
-    /// `0x4 × 引脚号` · 写**功能索引**）⇒ ⇒ 不建模 AF 矩阵（§6 明确不做）。
-    /// 引脚规格声明在 `pins` 段（`PinSpec`）；pinmux 器件存在 ⇒ 启用「当前
-    /// 功能 → 中断」路由（无 `pins` 段 ⇒ 拒 `E_PLT-19` · V-25）。
-    Pinmux {
-        /// The device id — the key the restore path matches on.
-        id: String,
-    },
 }
-
 impl DeviceSpec {
     /// **Every kind a platform description can express** — the *instantiable*
     /// set (STAGE-43 · v0.66 · D-175 · 裁决 H / I).
@@ -839,16 +551,14 @@ impl DeviceSpec {
     ///
     /// ⚠️ **v0.76（STAGE-52）**：加 `pinmux` ⇒ ⇒ 本清单 **6** 项（契约层
     ///   `DeviceSpec` 第 **6** 个变体）。
-    pub const KINDS: [&'static str; 6] = [
+    pub const KINDS: [&'static str; 5] = [
         "gpio",
         "uart16550",
         "clint",
         "plic",
         "timer_riscv",
-        "pinmux",
     ];
 }
-
 impl PlatformDescription {
     /// Validate this description against the frozen rules.
     ///
@@ -1190,22 +900,55 @@ impl PlatformDescription {
                 //   `irq_line` ⇒ ⇒ **同一条规则**管它 ⇒ ⇒ 否则「UART 的
                 //   irq_line 要判、计时器的 irq_line 不判」⇒ ⇒ **同一个量两个
                 //   口径** ⇒ ⇒ ⇒ 一个约束**一个落点**。
+                //
+                // ⚠️ **v0.78（本批）**：GPIO **整块**一个源号 ⇒ ⇒ 同一条
+                //   规则也管它 ⇒ ⇒ 三个外设一个口径。
                 let (id, irq_line) = match device {
+                    DeviceSpec::Gpio { id, irq_line } => (id, *irq_line),
                     DeviceSpec::Uart16550 { id, irq_line, .. } => (id, *irq_line),
                     DeviceSpec::TimerRiscv { id, irq_line } => (id, *irq_line),
                     _ => continue,
                 };
-                if u32::from(irq_line) >= min_sources {
+                // `0` 是保留号（PLIC 永不交付源 0）⇒ ⇒ 写了 `0` 就是非法。
+                if irq_line == 0 || u32::from(irq_line) >= min_sources {
                     return Err(PlatformError::new(
                         PLATFORM_FAMILY,
                         E_PLT_12_PARAMETER_OUT_OF_RANGE,
                         format!(
-                            "器件 {id}（{kind}）的参数 irq_line = {irq_line} 不在 PLIC 的中断源数之内（图中最小的 sources = {min_sources}）",
+                            "器件 {id}（{kind}）的参数 irq_line = {irq_line} 不是合法的 PLIC 中断源号（取值 1..{min_sources}）",
                             kind = device.kind(),
                         ),
                     ));
                 }
             }
+        }
+
+        // V-15b — 同一块板上**一个源号只能属于一个外设**。
+        //
+        // ⚠️ PLIC 的源号是**板级资源** ⇒ 两个外设共用一个号 ⇒ guest 读
+        //   `claim()` 拿到号也分不出是谁 ⇒ ⇒ 声明期就拒（`E_PLT-16`）。
+        let mut seen_sources: Vec<(u16, &str)> = Vec::new();
+        for region in &self.regions {
+            let RegionSpec::Peripheral { device, .. } = region else {
+                continue;
+            };
+            let (id, irq_line) = match device {
+                DeviceSpec::Gpio { id, irq_line } => (id, *irq_line),
+                DeviceSpec::Uart16550 { id, irq_line, .. } => (id, *irq_line),
+                DeviceSpec::TimerRiscv { id, irq_line } => (id, *irq_line),
+                _ => continue,
+            };
+            if let Some((_, other)) = seen_sources.iter().find(|(line, _)| *line == irq_line) {
+                return Err(PlatformError::new(
+                    PLATFORM_FAMILY,
+                    E_PLT_16_IRQ_SOURCE_INVALID,
+                    format!(
+                        "器件 {id}（{kind}）的中断号 {irq_line} 与器件 {other} 重复：同一块板上一个中断号只能属于一个外设",
+                        kind = device.kind(),
+                    ),
+                ));
+            }
+            seen_sources.push((irq_line, id.as_str()));
         }
 
         // V-16 — the **runtime** ceiling's legal value domain
@@ -1273,32 +1016,6 @@ impl PlatformDescription {
             }
         }
 
-        // V-18 / V-19 — the optional `wiring` section
-        // (v0.34 · D-125 · frozen spec STAGE-19 §2.2).
-        //
-        // ⚠️ **Appended after V-17** ⇒ the report order of V-1 ~ V-17 is
-        // unchanged, byte for byte ⇒ in particular **V-9 still comes
-        // first** ⇒ **two** devices with an empty `id` are still rejected
-        // by **V-9 / `E_PLT-08`** ⇒ V-17 does not take that case away
-        // from V-9 either.
-        //
-        // ⚠️ **V-18 and V-19 share one scenario code** (`E_PLT-16`): a
-        // wiring that names a device that is not there and a wiring whose
-        // source is out of range mean the same thing — 「这条连线非法」
-        // ⇒ one code, not two (the same shape as V-13 / V-14 / V-15
-        // sharing `E_PLT-12`).
-        //
-        // ⚠️ **The two rules are judged in this order** (V-18 first) ⇒ the
-        // order is **observable** through
-        // [`Self::wiring_violation`] even though the code cannot tell
-        // the two apart ⇒ one rule, one landing spot, one order.
-        if let Some((_rule, message)) = self.wiring_violation() {
-            return Err(PlatformError::new(
-                PLATFORM_FAMILY,
-                E_PLT_16_WIRING_INVALID,
-                message,
-            ));
-        }
 
         // V-20 — the **role declaration** must name devices that are there
         // (v0.73 · STAGE-49 · D-177 的 C).
@@ -1349,162 +1066,6 @@ impl PlatformDescription {
             }
         }
 
-        // V-21 + V-24 — the **pin spec table** must be well-formed
-        // (v0.73 · STAGE-49 · D-175 的 D1；**v0.76 · STAGE-52 · 裁决 E/G** 扩展为
-        // 引脚规格：器件在 + GPIO 器件 + 引脚号合法 + 功能名唯一 + 同引脚唯一
-        // + 与 wiring 冲突一致）。
-        //
-        // ⚠️ **Appended after V-20** ⇒ the report order of V-1 ~ V-20 is
-        // unchanged, byte for byte.
-        //
-        // ⚠️ **v0.76 语义扩展（V-24 · 码 `E_PLT-19` 复用）**：
-        //   · 器件在（V-21 既有）⇒ ⇒ 且**必须是 GPIO 器件**（本批引脚号解析
-        //     仅 GPIO · 非 GPIO 器件引脚复用留后续 ⇒ ⇒ 明确拒、不静默）；
-        //   · `pin` 必须形如 `pin{N}` 且 `N < GPIO_PIN_COUNT`；
-        //   · `functions` 非空 · 同引脚内功能名**唯一**；
-        //   · 同 `device + pin` 不得重复声明（两个 PinSpec 撞同一引脚）。
-        if let Some(pins) = self.pins.as_ref() {
-            // 器件集合：id → kind（判断 GPIO 用）。
-            let declared: Vec<(&str, &'static str)> = self
-                .regions
-                .iter()
-                .filter_map(|region| match region {
-                    RegionSpec::Peripheral { device, .. } => Some((device.id(), device.kind())),
-                    _ => None,
-                })
-                .collect();
-            let mut seen: Vec<(&str, &str)> = Vec::new();
-            for spec in pins {
-                let Some((_, kind)) = declared.iter().find(|(id, _)| *id == spec.device) else {
-                    return Err(PlatformError::new(
-                        PLATFORM_FAMILY,
-                        E_PLT_19_PINS_INVALID,
-                        format!(
-                            "引脚规格指向的器件 {} 不在本描述声明的器件集合里",
-                            spec.device
-                        ),
-                    ));
-                };
-                // ⚠️ 本批唯一引脚号解析规则：GPIO 器件（`pin{N}` 形）。
-                if *kind != "gpio" {
-                    return Err(PlatformError::new(
-                        PLATFORM_FAMILY,
-                        E_PLT_19_PINS_INVALID,
-                        format!(
-                            "引脚规格指向的器件 {} 不是 GPIO（{}）⇒ ⇒ 非 GPIO 器件的 \
-                             引脚复用留后续批 · 本批明确不做",
-                            spec.device, kind
-                        ),
-                    ));
-                }
-                let pin_index = parse_gpio_pin_name(&spec.pin).ok_or_else(|| {
-                    PlatformError::new(
-                        PLATFORM_FAMILY,
-                        E_PLT_19_PINS_INVALID,
-                        format!(
-                            "引脚规格的引脚名 {:?} 不是 pin{{0..{}}} 形（本批唯一解析规则）",
-                            spec.pin,
-                            GPIO_PIN_COUNT - 1
-                        ),
-                    )
-                })?;
-                if spec.functions.is_empty() {
-                    return Err(PlatformError::new(
-                        PLATFORM_FAMILY,
-                        E_PLT_19_PINS_INVALID,
-                        format!("引脚 {} 的功能列表不能为空", spec.pin),
-                    ));
-                }
-                // 同引脚不得重复声明（同一 device+pin 只允许一条 PinSpec）。
-                if seen
-                    .iter()
-                    .any(|(d, p)| *d == spec.device && *p == spec.pin)
-                {
-                    return Err(PlatformError::new(
-                        PLATFORM_FAMILY,
-                        E_PLT_19_PINS_INVALID,
-                        format!(
-                            "引脚 {}.{} 被重复声明了多条引脚规格（同引脚只能一条）",
-                            spec.device, spec.pin
-                        ),
-                    ));
-                }
-                seen.push((spec.device.as_str(), spec.pin.as_str()));
-                // 同引脚内功能名唯一。
-                let mut names: Vec<&str> = Vec::new();
-                for function in &spec.functions {
-                    if function.name.is_empty() {
-                        return Err(PlatformError::new(
-                            PLATFORM_FAMILY,
-                            E_PLT_19_PINS_INVALID,
-                            format!("引脚 {} 的功能名不能为空", spec.pin),
-                        ));
-                    }
-                    if names.contains(&function.name.as_str()) {
-                        return Err(PlatformError::new(
-                            PLATFORM_FAMILY,
-                            E_PLT_19_PINS_INVALID,
-                            format!(
-                                "引脚 {} 的功能名 {:?} 重复（同引脚内功能名必须唯一）",
-                                spec.pin, function.name
-                            ),
-                        ));
-                    }
-                    names.push(function.name.as_str());
-                }
-                // 冲突校验（裁决 L）：同引脚既有 PinFunction.irq 又有
-                // wiring.from.pin 绑定 ⇒ ⇒ 两者源号**必须一致**（不一致 ⇒ 拒）。
-                if let Some(wiring) = self.wiring.as_ref() {
-                    let wired_source = wiring
-                        .iter()
-                        .filter(|wire| {
-                            wire.from.device == spec.device && wire.from.pin == Some(pin_index)
-                        })
-                        .map(|wire| wire.to.source)
-                        .collect::<Vec<_>>();
-                    for function in &spec.functions {
-                        if let Some(irq) = function.irq.as_ref() {
-                            for wired in &wired_source {
-                                if *wired != irq.source {
-                                    return Err(PlatformError::new(
-                                        PLATFORM_FAMILY,
-                                        E_PLT_19_PINS_INVALID,
-                                        format!(
-                                            "引脚 {}.{} 的 irq 源 {} 与 wiring 绑定源 {} \
-                                             不一致（同引脚两路径必须指向同一源）",
-                                            spec.device, spec.pin, irq.source, wired
-                                        ),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // V-25 — 声明了 `pinmux` 器件但没有 `pins` 段 ⇒ ⇒ 控制器空转 ⇒ ⇒
-        // 用户配置不一致 ⇒ ⇒ **拒**（`E_PLT-19` · V-25 · 码与引脚规格同族）。
-        //
-        // ⚠️ **v0.76（STAGE-52 · 裁决 I）**：pinmux 器件 = 引脚功能选择器 ⇒ ⇒
-        // 它服务 `pins` 段声明的引脚 ⇒ ⇒ 无 `pins` 段 ⇒ 无可服务 ⇒ ⇒ 拒。
-        {
-            let has_pinmux = self.regions.iter().any(|region| match region {
-                RegionSpec::Peripheral { device, .. } => {
-                    matches!(device, DeviceSpec::Pinmux { .. })
-                }
-                _ => false,
-            });
-            if has_pinmux && self.pins.is_none() {
-                return Err(PlatformError::new(
-                    PLATFORM_FAMILY,
-                    E_PLT_19_PINS_INVALID,
-                    "声明了 pinmux 器件但没有 pins 段（引脚规格）⇒ ⇒ pinmux 没有 \
-                     任何引脚可服务",
-                ));
-            }
-        }
-
         // V-23 — the **`mcu` segment** must be well-formed (v0.75 ·
         // STAGE-51 · D-175 的 F).
         //
@@ -1545,7 +1106,6 @@ impl PlatformDescription {
 
         Ok(())
     }
-
     /// The RAM window this description declares — the **base-maximal**
     /// RAM region's `(base, size)`; `None` when the description declares
     /// **no** RAM region at all.
@@ -1576,182 +1136,7 @@ impl PlatformDescription {
             })
             .max_by_key(|(base, _)| *base)
     }
-
-    /// The **first** wiring rule this description violates — `None` when
-    /// the wiring is legal (or absent).
-    ///
-    /// ⚠️ **V-18 is judged before V-19** ⇒ the returned
-    /// [`WiringRule`] is the one the frozen spec's order names ⇒ the
-    /// order is pinned by a **structural** assertion (no message text is
-    /// ever looked at) even though the two rules **share** one scenario
-    /// code and the code alone cannot tell them apart.
-    ///
-    /// ⚠️ **One rule, one landing spot**: this method is the **only**
-    /// place the wiring is judged ⇒ the host does not write a second
-    /// checker for it.
-    fn wiring_violation(&self) -> Option<(WiringRule, String)> {
-        let wiring = self.wiring.as_ref()?;
-        if wiring.is_empty() {
-            return None;
-        }
-
-        // The declared devices' ids — read through the **same** accessor
-        // as V-9's / V-17's ⇒ there is **one** way to get a device's id
-        // in this module ⇒ no second spelling of it.
-        let device_ids: Vec<&str> = self
-            .regions
-            .iter()
-            .filter_map(RegionSpec::device_id)
-            .collect();
-
-        // V-18 — the wiring's references must resolve.
-        for spec in wiring {
-            if !device_ids.contains(&spec.from.device.as_str()) {
-                return Some((
-                    WiringRule::V18References,
-                    format!(
-                        "连线的源器件 {} 不在本描述声明的器件集合里",
-                        spec.from.device
-                    ),
-                ));
-            }
-            if !device_ids.contains(&spec.to.device.as_str()) {
-                return Some((
-                    WiringRule::V18References,
-                    format!(
-                        "连线的目标器件 {} 不在本描述声明的器件集合里",
-                        spec.to.device
-                    ),
-                ));
-            }
-            // ⚠️ **查词表**（v0.74 · STAGE-50 · 裁决 C）⇒ ⇒ 「事件名是否
-            //   合法」这条约束**只有一处**判定（[`wiring_event_info`]）⇒ ⇒
-            //   宿主**查它**、前端**查它** ⇒ ⇒ ⇒ **不会**两处漂移。
-            let Some(info) = wiring_event_info(&spec.from.event) else {
-                return Some((
-                    WiringRule::V18References,
-                    format!(
-                        "连线的事件名 {} 不合法（词表：{}）",
-                        spec.from.event,
-                        WIRING_EVENTS
-                            .iter()
-                            .map(|i| i.name)
-                            .collect::<Vec<_>>()
-                            .join(" / ")
-                    ),
-                ));
-            };
-            // ⚠️ **裁决 G（v0.74 · STAGE-50 施工期订正）**：**只有引脚级**
-            //   事件对源有**结构要求**（它要点名**一个引脚** ⇒ ⇒ 源**必须**有
-            //   引脚 ⇒ ⇒ 必须是 GPIO）⇒ ⇒ 不满足 ⇒ ⇒ **描述层拒**（早失败）。
-            //
-            // ⚠️ ⚠️ **为什么不对电平事件也查源种类**（**实测发现的回归**）：
-            //   v0.72 批（D-177 A）的判据是「**描述仍然合法**、那根线**抬不
-            //   起来**、连线**报告**说 `source-type`」⇒ ⇒ 那是**运行时**的
-            //   事（任何器件理论上都可能有一个电平信号）⇒ ⇒ ⇒ 若这里改成
-            //   「描述被拒」⇒ ⇒ **改掉**了 v0.72 的判据 ⇒ ⇒ ⇒ **不许**。
-            //   ⇒ ⇒ **结构性不匹配 ⇒ 描述层拒；运行时能力 ⇒ 宿主跳过 + 报告**
-            //   （宿主那处**查同一个词表** ⇒ ⇒ 扩词表时**不会**漂移）。
-            if info.needs_pin {
-                let source_kind = self.regions.iter().find_map(|region| match region {
-                    RegionSpec::Peripheral { device, .. } if device.id() == spec.from.device => {
-                        Some(device.kind())
-                    }
-                    _ => None,
-                });
-                if source_kind != Some(info.source_kind) {
-                    return Some((
-                        WiringRule::V18References,
-                        format!(
-                            "连线的事件名 {} 要求源器件是 {}，而 {} 是 {}",
-                            spec.from.event,
-                            info.source_kind,
-                            spec.from.device,
-                            source_kind.unwrap_or("（未知种类）")
-                        ),
-                    ));
-                }
-            }
-            // ⚠️ **裁决 H**：给了 `pin` 但事件**不是**引脚级 ⇒ ⇒ **拒**
-            //   （⇒ ⇒ **不静默忽略**）。
-            if spec.from.pin.is_some() && !info.needs_pin {
-                return Some((
-                    WiringRule::V18References,
-                    format!("连线的事件名 {} 不接受引脚号（pin）", spec.from.event),
-                ));
-            }
-            // ⚠️ **裁决 I**：引脚级事件**必须**给 `pin` ⇒ ⇒ 否则**指不到**
-            //   哪个引脚 ⇒ ⇒ **拒**。
-            if info.needs_pin && spec.from.pin.is_none() {
-                return Some((
-                    WiringRule::V18References,
-                    format!("连线的事件名 {} 必须给出引脚号（pin）", spec.from.event),
-                ));
-            }
-            // ⚠️ **裁决 I**：引脚号**越界** ⇒ ⇒ **拒**（校验源 = 契约层
-            //   `GPIO_PIN_COUNT` ⇒ ⇒ **不**在前端 / 内核各抄一份）。
-            if let Some(pin) = spec.from.pin {
-                if pin as usize >= GPIO_PIN_COUNT {
-                    return Some((
-                        WiringRule::V18References,
-                        format!(
-                            "连线的引脚号 {} 越界（GPIO bank 有 {} 个引脚）",
-                            pin, GPIO_PIN_COUNT
-                        ),
-                    ));
-                }
-            }
-        }
-        // V-19 — the target must be a PLIC and the source must be below
-        // that PLIC's source count.
-        for spec in wiring {
-            let target = self.regions.iter().find_map(|region| {
-                let RegionSpec::Peripheral { device, .. } = region else {
-                    return None;
-                };
-                (device.id() == spec.to.device).then_some(device)
-            });
-            match target {
-                // ⚠️ **Unreachable in practice**: V-18 has already
-                // checked that the device exists ⇒ the `None` arm only
-                // exists because the compiler cannot know that.
-                None => {
-                    return Some((
-                        WiringRule::V19Source,
-                        format!(
-                            "连线的目标器件 {} 不在本描述声明的器件集合里",
-                            spec.to.device
-                        ),
-                    ));
-                }
-                Some(DeviceSpec::Plic { sources, .. }) => {
-                    if spec.to.source >= *sources {
-                        return Some((
-                            WiringRule::V19Source,
-                            format!(
-                                "连线的目标 PLIC {} 只有 {} 个中断源，而连线用了源号 {}",
-                                spec.to.device, sources, spec.to.source
-                            ),
-                        ));
-                    }
-                }
-                Some(other) => {
-                    return Some((
-                        WiringRule::V19Source,
-                        format!(
-                            "连线的目标器件 {} 是 {}，不是 PLIC",
-                            spec.to.device,
-                            other.kind()
-                        ),
-                    ));
-                }
-            }
-        }
-
-        None
-    }
 }
-
 impl RegionSpec {
     /// The region's base address — **`None`** when it is **not declared**
     /// (v0.73 · STAGE-49 · B2 ⇒ ⇒ 由内核在装配期分配)。
@@ -1766,7 +1151,6 @@ impl RegionSpec {
             | RegionSpec::Peripheral { base, .. } => *base,
         }
     }
-
     /// **装配期分配之后**把基址**写回**这一段（v0.73 · STAGE-49 · B2）。
     ///
     /// ⚠️ **这是基址的唯一写入落点**（一个约束一个落点）⇒ ⇒ 分配器**不**
@@ -1779,7 +1163,6 @@ impl RegionSpec {
             | RegionSpec::Peripheral { base: slot, .. } => *slot = Some(base),
         }
     }
-
     /// The region's **declared** size in bytes — `None` for a peripheral
     /// window, whose size belongs to the device's register map (裁决 D).
     pub fn declared_size(&self) -> Option<u32> {
@@ -1788,7 +1171,6 @@ impl RegionSpec {
             RegionSpec::Peripheral { .. } => None,
         }
     }
-
     /// The region kind — one of the three vocabulary strings of
     /// [`crate::session`] (`"ram"` / `"rom"` / `"peripheral"`).
     pub fn kind(&self) -> &'static str {
@@ -1798,7 +1180,6 @@ impl RegionSpec {
             RegionSpec::Peripheral { .. } => REGION_KIND_PERIPHERAL,
         }
     }
-
     /// The peripheral device's id — `None` for a RAM / ROM region.
     pub fn device_id(&self) -> Option<&str> {
         match self {
@@ -1807,20 +1188,17 @@ impl RegionSpec {
         }
     }
 }
-
 impl DeviceSpec {
     /// The device id — the key the restore path matches on.
     pub fn id(&self) -> &str {
         match self {
-            DeviceSpec::Gpio { id }
+            DeviceSpec::Gpio { id, .. }
             | DeviceSpec::Uart16550 { id, .. }
             | DeviceSpec::Clint { id, .. }
             | DeviceSpec::Plic { id, .. }
-            | DeviceSpec::TimerRiscv { id, .. }
-            | DeviceSpec::Pinmux { id } => id,
+            | DeviceSpec::TimerRiscv { id, .. } => id,
         }
     }
-
     /// The device kind on the wire (`"gpio"` / `"uart16550"` / `"clint"` /
     /// `"plic"`) — the value of the `device` internal tag.
     pub fn kind(&self) -> &'static str {
@@ -1830,10 +1208,8 @@ impl DeviceSpec {
             DeviceSpec::Clint { .. } => "clint",
             DeviceSpec::Plic { .. } => "plic",
             DeviceSpec::TimerRiscv { .. } => "timer_riscv",
-            DeviceSpec::Pinmux { .. } => "pinmux",
         }
     }
-
     /// The device's **numeric** parameters and their legal value domain.
     ///
     /// The tuple is `(field name, value, lower bound, upper bound)`; the
@@ -1864,7 +1240,6 @@ impl DeviceSpec {
             })
             .collect()
     }
-
     /// The **numeric values** of this instance's parameters — the value
     /// half of [`Self::numeric_parameters`].
     ///
@@ -1889,11 +1264,8 @@ impl DeviceSpec {
             // ⚠️ **这台器件没有数值参数**（只有 `id` + `irq_line`，而 `irq_line`
             //   归**跨字段**规则 V-15 管）⇒ ⇒ 空列表。
             DeviceSpec::TimerRiscv { .. } => Vec::new(),
-            // ⚠️ **pinmux 没有数值参数**（只有 `id`；寄存器布局是固定偏移）⇒ ⇒ 空列表。
-            DeviceSpec::Pinmux { .. } => Vec::new(),
         }
     }
-
     /// The **legal value domain** of one device kind — `(name, lower,
     /// upper)` per numeric parameter.
     ///
@@ -1932,7 +1304,6 @@ impl DeviceSpec {
         }
     }
 }
-
 /// What the description **knows** about one region's extent.
 ///
 /// ⚠️ A peripheral window declares only its **base**: its size is the
@@ -1944,7 +1315,6 @@ enum DeclaredExtent {
     /// A peripheral window — only the base address is declared.
     BaseOnly { addr: u64 },
 }
-
 /// Do two declared regions overlap?
 ///
 /// ⚠️ The peripheral case is deliberately conservative: the window's
@@ -1998,11 +1368,9 @@ fn regions_overlap(a: &RegionSpec, b: &RegionSpec) -> Option<bool> {
         }
     })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
     /// The `qemu-virt` built-in description, as the frozen spec §1.2 /
     /// §1.4 / §1.5 spells it.
     ///
@@ -2029,6 +1397,7 @@ mod tests {
                 RegionSpec::Peripheral {
                     base: Some(0x4000_0000),
                     device: DeviceSpec::Gpio {
+                        irq_line: 11,
                         id: "GPIO0".to_string(),
                     },
                 },
@@ -2058,13 +1427,10 @@ mod tests {
                 },
             ],
             description: None,
-            wiring: None,
             roles: None,
-            pins: None,
             mcu: None,
         }
     }
-
     fn keys(value: &serde_json::Value) -> Vec<&str> {
         let mut keys: Vec<&str> = value
             .as_object()
@@ -2075,11 +1441,9 @@ mod tests {
         keys.sort_unstable();
         keys
     }
-
     // -----------------------------------------------------------------
     // A-1 — the format version
     // -----------------------------------------------------------------
-
     /// **A-1** — the description's format version is the **current** one and
     /// this build **accepts** it.
     ///
@@ -2106,7 +1470,6 @@ mod tests {
             );
         }
     }
-
     /// **A-1 / V-1** — a description whose `schema_version` is not the one
     /// this build speaks is rejected with `E_PLT-01`.
     ///
@@ -2126,7 +1489,6 @@ mod tests {
         assert_eq!(err.scenario, E_PLT_01_SCHEMA_VERSION);
         assert!(err.to_string().starts_with("E_PLT-01: "));
     }
-
     /// **A-1 / V-1（v0.73 · STAGE-49 · B2）** —— 老描述（`schema_version = 1`）
     /// ⇒ ⇒ **仍然合法**（⇒ ⇒ **缺省优先** ⇒ ⇒ 存量板档案**零风险**）。
     #[test]
@@ -2139,11 +1501,9 @@ mod tests {
             desc.validate()
         );
     }
-
     // -----------------------------------------------------------------
     // A-2 — the key sets are pinned
     // -----------------------------------------------------------------
-
     /// **A-2** — the description's **top-level key set** is pinned.
     ///
     /// ⚠️ `description` is **absent** when it is `None` (it carries
@@ -2193,7 +1553,6 @@ mod tests {
             "带说明的描述只多出 description 一个键"
         );
     }
-
     /// **A-2 (续)** — a description that **omits** `auto_selectable` parses
     /// with the default `true`.
     /// **A-2（v0.76 · STAGE-52 · B3 决议）** — `auto_selectable` 字段**废弃**
@@ -2217,7 +1576,6 @@ mod tests {
         desc.validate().expect("带废弃键的老描述仍必须合法");
         assert_eq!(desc.id, "x");
     }
-
     /// **A-2** — the **region** key sets are pinned, one per `kind`.
     ///
     /// ⚠️ A peripheral region carries **no** `size`: the window size is
@@ -2242,7 +1600,6 @@ mod tests {
             "外设条目的键集（没有 size）"
         );
     }
-
     /// **A-2** — the **device** key sets are pinned, one per device kind.
     #[test]
     fn a2_the_device_key_sets_are_pinned() {
@@ -2255,7 +1612,11 @@ mod tests {
         let device =
             |index: usize| -> &serde_json::Value { regions[index].get("device").expect("device") };
 
-        assert_eq!(keys(device(2)), vec!["device", "id"], "GPIO 的键集");
+        assert_eq!(
+            keys(device(2)),
+            vec!["device", "id", "irq_line"],
+            "GPIO 的键集（整块一个中断号）"
+        );
         assert_eq!(
             keys(device(3)),
             vec!["baud_rate", "device", "id", "irq_line"],
@@ -2272,11 +1633,9 @@ mod tests {
             "PLIC 的键集"
         );
     }
-
     // -----------------------------------------------------------------
     // A-3 — one rule, one scenario code
     // -----------------------------------------------------------------
-
     /// **A-3 / V-2** — an empty platform id is rejected with `E_PLT-02`.
     #[test]
     fn v2_an_empty_id_is_rejected() {
@@ -2286,7 +1645,6 @@ mod tests {
         assert_eq!(err.family, PLATFORM_FAMILY);
         assert_eq!(err.scenario, E_PLT_02_EMPTY_ID);
     }
-
     /// **A-3 / V-3** — a description with no region at all is rejected
     /// with `E_PLT-03`.
     #[test]
@@ -2297,7 +1655,6 @@ mod tests {
         assert_eq!(err.family, PLATFORM_FAMILY);
         assert_eq!(err.scenario, E_PLT_03_NO_REGIONS);
     }
-
     /// **A-3 / V-4** — a RAM region of size zero is rejected with
     /// `E_PLT-04`.
     ///
@@ -2314,7 +1671,6 @@ mod tests {
         assert_eq!(err.family, PLATFORM_FAMILY);
         assert_eq!(err.scenario, E_PLT_04_ZERO_SIZE);
     }
-
     /// **A-3 / V-5** — a region whose `base + size` leaves the 32-bit
     /// address space is rejected with `E_PLT-05`.
     #[test]
@@ -2328,7 +1684,6 @@ mod tests {
         assert_eq!(err.family, PLATFORM_FAMILY);
         assert_eq!(err.scenario, E_PLT_05_OVERFLOW);
     }
-
     /// **A-3 / V-6** — two overlapping regions are rejected with
     /// `E_PLT-06`.
     ///
@@ -2352,7 +1707,6 @@ mod tests {
         assert_eq!(err.family, PLATFORM_FAMILY);
         assert_eq!(err.scenario, E_PLT_06_OVERLAP);
     }
-
     /// **A-3 / V-6** — a peripheral window whose base falls inside a
     /// declared RAM interval overlaps it.
     ///
@@ -2371,6 +1725,7 @@ mod tests {
             RegionSpec::Peripheral {
                 base: Some(0x1800),
                 device: DeviceSpec::Gpio {
+                    irq_line: 11,
                     id: "GPIO0".to_string(),
                 },
             },
@@ -2379,7 +1734,6 @@ mod tests {
         assert_eq!(err.family, PLATFORM_FAMILY);
         assert_eq!(err.scenario, E_PLT_06_OVERLAP);
     }
-
     /// **A-3 / V-7** — a RAM region whose **declared** size exceeds the
     /// description's budget is rejected with `E_PLT-07`.
     ///
@@ -2397,7 +1751,6 @@ mod tests {
         assert_eq!(err.family, PLATFORM_FAMILY);
         assert_eq!(err.scenario, E_PLT_07_OVER_BUDGET);
     }
-
     /// **A-3 / V-7** — a region whose size is **exactly** the budget is
     /// allowed (`>` and not `>=`).
     ///
@@ -2413,7 +1766,6 @@ mod tests {
         }];
         assert!(desc.validate().is_ok(), "恰好等于预算的区域必须被接受");
     }
-
     /// **A-3 / V-8** — an unknown device kind fails during
     /// **deserialization**, not during validation.
     ///
@@ -2437,7 +1789,6 @@ mod tests {
             "serde 的报错必须点名那个未知的器件种类，实际：{text}"
         );
     }
-
     /// **A-3 / V-8** — a device with a **missing** parameter fails in the
     /// serde layer too.
     #[test]
@@ -2455,7 +1806,6 @@ mod tests {
             "缺参数的器件条目必须解析失败"
         );
     }
-
     /// **A-3 / V-9** — two peripheral devices sharing an id are rejected
     /// with `E_PLT-08`.
     ///
@@ -2469,6 +1819,7 @@ mod tests {
             RegionSpec::Peripheral {
                 base: Some(0x1000),
                 device: DeviceSpec::Gpio {
+                    irq_line: 11,
                     id: "DUP".to_string(),
                 },
             },
@@ -2485,7 +1836,6 @@ mod tests {
         assert_eq!(err.family, PLATFORM_FAMILY);
         assert_eq!(err.scenario, E_PLT_08_DUPLICATE_DEVICE_ID);
     }
-
     /// **A-3** — a well-formed description passes validation.
     ///
     /// ⚠️ Without this, "everything is rejected" would satisfy every
@@ -2494,11 +1844,9 @@ mod tests {
     fn a_valid_description_passes_validation() {
         assert!(sample().validate().is_ok());
     }
-
     // -----------------------------------------------------------------
     // A-4 — the round trip
     // -----------------------------------------------------------------
-
     /// **A-4** — the description survives a JSON round trip field by
     /// field.
     #[test]
@@ -2514,7 +1862,6 @@ mod tests {
         assert_eq!(back.regions, original.regions);
         assert_eq!(back.description, original.description);
     }
-
     /// **A-4** — the maximum budget round-trips; **one more** is rejected
     /// in the **serde** layer.
     ///
@@ -2543,11 +1890,9 @@ mod tests {
             "超过 u32::MAX 的预算必须在 serde 阶段被拒"
         );
     }
-
     // -----------------------------------------------------------------
     // A-5 — the internal tag keys
     // -----------------------------------------------------------------
-
     /// **A-5** — the internal tags are literally `kind` (regions) and
     /// `device` (devices) — **not** `type`, **not** `t`.
     #[test]
@@ -2579,7 +1924,6 @@ mod tests {
         assert!(device.get("type").is_none(), "器件条目不许有 type 键");
         assert!(device.get("kind").is_none(), "器件条目不许有 kind 键");
     }
-
     /// **A-5** — the description layer and the snapshot topology speak
     /// **one** region-kind vocabulary.
     ///
@@ -2613,6 +1957,7 @@ mod tests {
             RegionSpec::Peripheral {
                 base: Some(0),
                 device: DeviceSpec::Gpio {
+                    irq_line: 11,
                     id: "G".to_string()
                 }
             }
@@ -2632,7 +1977,6 @@ mod tests {
             Some("peripheral")
         );
     }
-
     /// **A-5** — the device kinds on the wire agree with
     /// [`DeviceSpec::kind`].
     #[test]
@@ -2649,7 +1993,7 @@ mod tests {
                 .and_then(|v| v.as_str())
                 .expect("device tag")
         };
-        assert_eq!(wire(2), DeviceSpec::Gpio { id: "G".into() }.kind());
+        assert_eq!(wire(2), DeviceSpec::Gpio { id: "G".into(), irq_line: 11 }.kind());
         assert_eq!(
             wire(3),
             DeviceSpec::Uart16550 {
@@ -2678,11 +2022,9 @@ mod tests {
             .kind()
         );
     }
-
     // -----------------------------------------------------------------
     // The frozen example
     // -----------------------------------------------------------------
-
     /// The frozen spec's example (§1.2 / §1.4 / §1.5) parses into the
     /// expected value, field by field.
     #[test]
@@ -2735,11 +2077,9 @@ mod tests {
             }
         );
     }
-
     // -----------------------------------------------------------------
     // A-6 / A-8 — the error family and the untouched contract version
     // -----------------------------------------------------------------
-
     /// **A-6** — the platform error family is registered with its
     /// **three-character** wire tag.
     #[test]
@@ -2751,7 +2091,6 @@ mod tests {
             "Platform 必须出现在族清单里"
         );
     }
-
     /// **A-6** — the scenario codes render as the frozen spec's codes,
     /// digit for digit.
     ///
@@ -2789,7 +2128,6 @@ mod tests {
             );
         }
     }
-
     /// **A-8** — the contract layer's **session payload** version is
     /// untouched: a platform description is **not** a session payload, so
     /// it does not move that number.
@@ -2797,7 +2135,6 @@ mod tests {
     fn a8_the_session_payload_version_is_untouched() {
         assert_eq!(crate::session::SESSION_SNAPSHOT_SCHEMA_VERSION, 3);
     }
-
     // -----------------------------------------------------------------
     // STAGE-15 · v0.30 · D-141 — the devices' legal value domain
     // (V-13 ~ V-15 · `E_PLT-12`)
@@ -2806,7 +2143,6 @@ mod tests {
     // acceptance items (A-1 ~ A-9) — **not** the older "A-n" labels the
     // STAGE-12 cases above carry ⇒ every label here says "STAGE-15".
     // -----------------------------------------------------------------
-
     /// A description made of the given **peripheral devices** only.
     ///
     /// ⚠️ Each device gets its own window base ⇒ the map has **no**
@@ -2829,13 +2165,10 @@ mod tests {
                 })
                 .collect(),
             description: None,
-            wiring: None,
             roles: None,
-            pins: None,
             mcu: None,
         }
     }
-
     /// Assert that a description is rejected with the platform family's
     /// `E_PLT-12` scenario code.
     ///
@@ -2849,11 +2182,9 @@ mod tests {
             "{what} 的场景码不是 E_PLT-12（实际 {err}）"
         );
     }
-
     // -------------------------------------------------------------
     // STAGE-15 A-1 — V-13: the lower bounds
     // -------------------------------------------------------------
-
     /// **STAGE-15 A-1 / V-13** — a UART whose `baud_rate` is **zero** is
     /// rejected with `E_PLT-12`.
     ///
@@ -2868,7 +2199,6 @@ mod tests {
         }]);
         assert_parameter_out_of_range(&desc, "波特率为 0 的 UART");
     }
-
     /// **STAGE-15 A-2 / V-13** — a CLINT whose `freq_hz` is **zero** is
     /// rejected with `E_PLT-12`.
     #[test]
@@ -2880,7 +2210,6 @@ mod tests {
         }]);
         assert_parameter_out_of_range(&desc, "频率为 0 的 CLINT");
     }
-
     /// **STAGE-15 A-3 / V-13** — a CLINT with **zero harts** is rejected
     /// with `E_PLT-12`.
     #[test]
@@ -2892,7 +2221,6 @@ mod tests {
         }]);
         assert_parameter_out_of_range(&desc, "hart 数为 0 的 CLINT");
     }
-
     /// **STAGE-15 A-3 / V-13** — a PLIC with **zero sources** is rejected
     /// with `E_PLT-12`.
     #[test]
@@ -2904,7 +2232,6 @@ mod tests {
         }]);
         assert_parameter_out_of_range(&desc, "中断源数为 0 的 PLIC");
     }
-
     /// **STAGE-15 A-3 / V-13** — a PLIC with **zero contexts** is rejected
     /// with `E_PLT-12`.
     #[test]
@@ -2916,11 +2243,9 @@ mod tests {
         }]);
         assert_parameter_out_of_range(&desc, "context 数为 0 的 PLIC");
     }
-
     // -------------------------------------------------------------
     // STAGE-15 A-4 — V-14: the upper bounds
     // -------------------------------------------------------------
-
     /// **STAGE-15 A-4 / V-14** — a CLINT whose `freq_hz` is **one above
     /// 1 THz** is rejected with `E_PLT-12`.
     ///
@@ -2936,7 +2261,6 @@ mod tests {
         }]);
         assert_parameter_out_of_range(&desc, "频率超过 1 THz 的 CLINT");
     }
-
     /// **STAGE-15 A-4 / V-14** — a CLINT with **4097 harts** is rejected
     /// with `E_PLT-12`.
     #[test]
@@ -2948,7 +2272,6 @@ mod tests {
         }]);
         assert_parameter_out_of_range(&desc, "hart 数超过 4096 的 CLINT");
     }
-
     /// **STAGE-15 A-4 / V-14** — a PLIC with **1025 sources** is rejected
     /// with `E_PLT-12`.
     #[test]
@@ -2960,7 +2283,6 @@ mod tests {
         }]);
         assert_parameter_out_of_range(&desc, "中断源数超过 1024 的 PLIC");
     }
-
     /// **STAGE-15 A-4 / V-14** — a PLIC with **17 contexts** is rejected
     /// with `E_PLT-12`.
     #[test]
@@ -2972,11 +2294,9 @@ mod tests {
         }]);
         assert_parameter_out_of_range(&desc, "context 数超过 16 的 PLIC");
     }
-
     // -------------------------------------------------------------
     // STAGE-15 A-5 — the boundary values are legal
     // -------------------------------------------------------------
-
     /// **STAGE-15 A-5 / V-13** — a baud rate of **1** is legal (the lower
     /// bound is inclusive).
     #[test]
@@ -2988,7 +2308,6 @@ mod tests {
         }]);
         assert!(desc.validate().is_ok(), "波特率 1 必须被接受");
     }
-
     /// **STAGE-15 A-5 / V-13** — a CLINT frequency of **1 Hz** is legal.
     #[test]
     fn v13_the_lowest_legal_clint_frequency_is_accepted() {
@@ -2999,7 +2318,6 @@ mod tests {
         }]);
         assert!(desc.validate().is_ok(), "频率 1 Hz 必须被接受");
     }
-
     /// **STAGE-15 A-5 / V-13** — **one hart** is legal.
     #[test]
     fn v13_the_lowest_legal_clint_hart_count_is_accepted() {
@@ -3010,7 +2328,6 @@ mod tests {
         }]);
         assert!(desc.validate().is_ok(), "单 hart 的 CLINT 必须被接受");
     }
-
     /// **STAGE-15 A-5 / V-13** — **one source** is legal.
     #[test]
     fn v13_the_lowest_legal_plic_source_count_is_accepted() {
@@ -3021,7 +2338,6 @@ mod tests {
         }]);
         assert!(desc.validate().is_ok(), "单中断源的 PLIC 必须被接受");
     }
-
     /// **STAGE-15 A-5 / V-13** — **one context** is legal.
     #[test]
     fn v13_the_lowest_legal_plic_context_count_is_accepted() {
@@ -3032,7 +2348,6 @@ mod tests {
         }]);
         assert!(desc.validate().is_ok(), "单 context 的 PLIC 必须被接受");
     }
-
     /// **STAGE-15 A-5 / V-14** — a CLINT frequency of exactly
     /// **1 THz** is legal (the upper bound is inclusive).
     #[test]
@@ -3044,7 +2359,6 @@ mod tests {
         }]);
         assert!(desc.validate().is_ok(), "1 THz 的 CLINT 必须被接受");
     }
-
     /// **STAGE-15 A-5 / V-14** — exactly **4096 harts** are legal.
     #[test]
     fn v14_the_highest_legal_clint_hart_count_is_accepted() {
@@ -3055,7 +2369,6 @@ mod tests {
         }]);
         assert!(desc.validate().is_ok(), "4096 个 hart 的 CLINT 必须被接受");
     }
-
     /// **STAGE-15 A-5 / V-14** — exactly **1024 sources** are legal.
     #[test]
     fn v14_the_highest_legal_plic_source_count_is_accepted() {
@@ -3066,7 +2379,6 @@ mod tests {
         }]);
         assert!(desc.validate().is_ok(), "1024 个中断源的 PLIC 必须被接受");
     }
-
     /// **STAGE-15 A-5 / V-14** — exactly **16 contexts** are legal.
     #[test]
     fn v14_the_highest_legal_plic_context_count_is_accepted() {
@@ -3077,7 +2389,6 @@ mod tests {
         }]);
         assert!(desc.validate().is_ok(), "16 个 context 的 PLIC 必须被接受");
     }
-
     /// **STAGE-15 A-5 / V-14** — the baud rate has **no upper bound**.
     ///
     /// ⚠️ The RISC-V architecture does not cap the baud rate ⇒ the
@@ -3092,11 +2403,9 @@ mod tests {
         }]);
         assert!(desc.validate().is_ok(), "波特率没有上界 ⇒ 不该被拒");
     }
-
     // -------------------------------------------------------------
     // STAGE-15 A-6 / A-7 — V-15: the cross-field rule
     // -------------------------------------------------------------
-
     /// **STAGE-15 A-6 / V-15** — with a PLIC of **16 sources**, a UART
     /// whose `irq_line` is **20** is rejected with `E_PLT-12`.
     ///
@@ -3118,7 +2427,6 @@ mod tests {
         ]);
         assert_parameter_out_of_range(&desc, "中断线超出 PLIC 源数的 UART");
     }
-
     /// **STAGE-15 A-6 / V-15** — with a PLIC of **16 sources**, a UART
     /// whose `irq_line` is **15** (the highest legal id) is accepted.
     #[test]
@@ -3137,7 +2445,6 @@ mod tests {
         ]);
         assert!(desc.validate().is_ok(), "irq_line 15 必须被接受");
     }
-
     /// **STAGE-15 A-6 / V-15** — with **two** PLICs (16 and 64 sources), a
     /// UART whose `irq_line` is **20** is rejected with `E_PLT-12`.
     ///
@@ -3172,7 +2479,6 @@ mod tests {
         ]);
         assert_parameter_out_of_range(&desc, "在最小那个 PLIC 上越界的中断线");
     }
-
     /// **STAGE-15 A-6 / V-15** — with a PLIC of **16 sources**, a UART
     /// whose `irq_line` is **16** — one past the highest legal id — is
     /// rejected with `E_PLT-12`.
@@ -3196,7 +2502,6 @@ mod tests {
         ]);
         assert_parameter_out_of_range(&desc, "中断线等于 PLIC 源数的 UART");
     }
-
     /// **STAGE-15 A-7 / V-15** — a map with **no PLIC** and a UART whose
     /// `irq_line` is **65535** is accepted.
     ///
@@ -3215,11 +2520,9 @@ mod tests {
             "没有 PLIC 时 irq_line 不该被判非法"
         );
     }
-
     // -------------------------------------------------------------
     // STAGE-15 A-8 — the built-in descriptions stay legal
     // -------------------------------------------------------------
-
     /// The built-in `default` description — a **hand-written copy** of
     /// `kernel_host/platforms/default.json`.
     ///
@@ -3241,7 +2544,6 @@ mod tests {
             "id": "default",
             "name": "Default",
             "priority": 10,
-
             "region_budget_bytes": 16777216,
             "regions": [
                 { "kind": "ram", "base": 0, "size": 1048576 },
@@ -3250,7 +2552,6 @@ mod tests {
                 { "kind": "ram", "base": 2147483648, "size": 4194304 }
             ]
         }"#;
-
     /// The built-in `minimal` description — a **hand-written copy** of
     /// `kernel_host/platforms/minimal.json`.
     ///
@@ -3261,14 +2562,12 @@ mod tests {
             "id": "minimal",
             "name": "Minimal (zero-change demo platform)",
             "priority": 30,
-
             "region_budget_bytes": 16777216,
             "regions": [
                 { "kind": "ram", "base": 0, "size": 2097152 },
                 { "kind": "ram", "base": 268435456, "size": 16777216 }
             ]
         }"#;
-
     /// The built-in `qemu-virt` description — a **hand-written copy** of
     /// `kernel_host/platforms/qemu-virt.json`.
     ///
@@ -3279,7 +2578,6 @@ mod tests {
             "id": "qemu-virt",
             "name": "QEMU virt",
             "priority": 20,
-
             "region_budget_bytes": 134217728,
             "regions": [
                 { "kind": "ram", "base": 0, "size": 1048576 },
@@ -3294,7 +2592,6 @@ mod tests {
                 { "kind": "ram", "base": 2147483648, "size": 134217728 }
             ]
         }"#;
-
     /// The three built-in descriptions as **hand-written copies**, in the
     /// order the kernel crate ships them.
     ///
@@ -3308,7 +2605,6 @@ mod tests {
             ("qemu-virt", BUILTIN_QEMU_VIRT_RAW),
         ]
     }
-
     /// **STAGE-15 A-8** — the built-in `default` description is still
     /// legal under the new rules.
     ///
@@ -3323,7 +2619,6 @@ mod tests {
             serde_json::from_str(BUILTIN_DEFAULT_RAW).expect("必须能解析");
         assert!(desc.validate().is_ok(), "内置 default 描述必须仍然合法");
     }
-
     /// **STAGE-15 A-8** — the built-in `minimal` description is still
     /// legal under the new rules.
     ///
@@ -3336,7 +2631,6 @@ mod tests {
             serde_json::from_str(BUILTIN_MINIMAL_RAW).expect("必须能解析");
         assert!(desc.validate().is_ok(), "内置 minimal 描述必须仍然合法");
     }
-
     /// **STAGE-15 A-8** — the built-in `qemu-virt` description is still
     /// legal under the new rules.
     ///
@@ -3352,11 +2646,9 @@ mod tests {
             serde_json::from_str(BUILTIN_QEMU_VIRT_RAW).expect("必须能解析");
         assert!(desc.validate().is_ok(), "内置 qemu-virt 描述必须仍然合法");
     }
-
     // -------------------------------------------------------------
     // STAGE-15 A-9 — the report order of V-1 ~ V-9 does not move
     // -------------------------------------------------------------
-
     /// **STAGE-15 A-9** — a description that breaks **both** V-2 (empty
     /// `id`) and V-13 (a zero baud rate) reports **V-2**.
     ///
@@ -3377,7 +2669,6 @@ mod tests {
             "同时违反 V-2 与 V-13 时必须先报 V-2（实际 {err}）"
         );
     }
-
     /// **STAGE-15 A-9** — a description that breaks **both** V-9 (two
     /// devices share an `id`) and V-13 (a zero baud rate) reports **V-9**.
     #[test]
@@ -3389,6 +2680,7 @@ mod tests {
                 baud_rate: 0,
             },
             DeviceSpec::Gpio {
+                irq_line: 11,
                 id: "DUP".to_string(),
             },
         ]);
@@ -3399,7 +2691,6 @@ mod tests {
             "同时违反 V-9 与 V-13 时必须先报 V-9（实际 {err}）"
         );
     }
-
     // -------------------------------------------------------------
     // STAGE-16 · v0.31 · D-137 / D-138 / D-139 — the **A group**
     // (frozen spec STAGE-16 §5).
@@ -3415,10 +2706,8 @@ mod tests {
     // [`crate::protocol`] (the contract layer's own module — no cycle,
     // no second copy of a DTO).
     // -------------------------------------------------------------
-
     use crate::error::{E_PLT_13_REVISION_CONFLICT, E_PLT_14_REGION_NOT_FOUND};
     use crate::protocol::{CommandPayload, EventPayload, MemoryMapOp};
-
     /// **STAGE-16 A-1** — the **contract envelope**'s schema version is
     /// pinned to a **literal** ⇒ the constant cannot vouch for itself.
     ///
@@ -3441,7 +2730,6 @@ mod tests {
     fn s16_a1_the_contract_schema_version_is_twelve() {
         assert_eq!(crate::SCHEMA_VERSION, 12);
     }
-
     /// **STAGE-16 A-2** — the **description format**'s version is still
     /// `1`.
     ///
@@ -3476,7 +2764,6 @@ mod tests {
             "可读版本列表的**最后一项**必须就是当前版本（从版本 1 到当前版本，每一个都被接受）"
         );
     }
-
     /// **STAGE-16 A-3** — the three built-in descriptions parse
     /// **unchanged** ⇒ `max_region_bytes` is `None` ⇒ their behaviour is
     /// **byte for byte** the same.
@@ -3543,7 +2830,6 @@ mod tests {
             assert!(desc.validate().is_ok(), "内置描述 {} 必须仍然合法", desc.id);
         }
     }
-
     /// **STAGE-16 A-4** — an **old** description (a JSON without
     /// `max_region_bytes`) parses ⇒ `max_region_bytes == None`.
     ///
@@ -3572,7 +2858,6 @@ mod tests {
         );
         assert!(desc.validate().is_ok(), "旧描述必须仍然合法");
     }
-
     /// **STAGE-16 A-5** — `max_region_bytes = Some(0)` is **rejected**
     /// with `E_PLT-12`.
     ///
@@ -3590,7 +2875,6 @@ mod tests {
             "V-16 的场景码必须是 E_PLT-12（实际 {err}）"
         );
     }
-
     /// **STAGE-16 A-6** — `max_region_bytes = Some(1)` is **legal**: the
     /// lower bound itself is a legal value.
     ///
@@ -3602,7 +2886,6 @@ mod tests {
         desc.max_region_bytes = Some(1);
         assert!(desc.validate().is_ok(), "运行期上界的下界 1 本身必须合法");
     }
-
     /// **STAGE-16 A-7** — V-16 is reported **after** the old rules ⇒ the
     /// existing "V-2 first" / "V-9 first" order assertions still hold.
     ///
@@ -3632,6 +2915,7 @@ mod tests {
                 baud_rate: 115_200,
             },
             DeviceSpec::Gpio {
+                irq_line: 11,
                 id: "DUP".to_string(),
             },
         ]);
@@ -3642,7 +2926,6 @@ mod tests {
             "同时违反 V-9 与 V-16 时必须先报 V-9（实际 {err}）"
         );
     }
-
     /// **STAGE-16 A-8** — `E_PLT_13` / `E_PLT_14` are **new** scenario
     /// codes ⇒ each means exactly one thing ⇒ none of them reuses
     /// `E_PLT_08` or `E_PLT-12`.
@@ -3678,7 +2961,6 @@ mod tests {
             "E_PLT-14: x"
         );
     }
-
     /// **STAGE-16 A-9** — the `MemoryMapOp` **wire shape** is pinned, one
     /// case per variant ⇒ and the nested `RegionSpec` stays
     /// **internally tagged** ⇒ **the two layers' rules differ**.
@@ -3739,7 +3021,6 @@ mod tests {
             "内层的 RegionSpec 仍是内部标签（kind）"
         );
     }
-
     /// **STAGE-16 A-10** — a `RegionSpec` **nested in** a `MemoryMapOp`
     /// survives the round trip ⇒ serde's nested internal tag limit is
     /// **not** hit.
@@ -3765,6 +3046,7 @@ mod tests {
             RegionSpec::Peripheral {
                 base: Some(0x1000_0000),
                 device: DeviceSpec::Gpio {
+                    irq_line: 11,
                     id: "GPIO0".to_string(),
                 },
             },
@@ -3789,7 +3071,6 @@ mod tests {
             );
         }
     }
-
     /// **STAGE-16 A-11** — an **old payload** (one without
     /// `expected_revision`) still parses ⇒ `expected_revision == None`
     /// ⇒ the old caller is **not** affected.
@@ -3850,54 +3131,6 @@ mod tests {
             other => panic!("expected a PatchMemoryMap, got {other:?}"),
         }
     }
-
-    /// **STAGE-16 A-12** — the `MemoryMap` event's fields are pinned,
-    /// **name and order**.
-    ///
-    /// ⚠️ The order is pinned on the **string** form: `serde_json`'s
-    /// `Value` sorts its keys (a `BTreeMap`) ⇒ comparing values would
-    /// accept a shuffled key set ⇒ the string form is the one that
-    /// holds the declaration order.
-    #[test]
-    fn s16_a12_the_memory_map_event_fields_are_pinned() {
-        let ev = EventPayload::MemoryMap {
-            description: Box::new(sample()),
-            pending: false,
-            loaded: true,
-            revision: 42,
-            wiring_report: crate::model::WiringReportDto::default(),
-        };
-
-        let description_json = serde_json::to_string(&sample()).expect("json");
-        let expected = format!(
-            r#"{{"MemoryMap":{{"description":{description_json},"pending":false,"loaded":true,"revision":42,"wiring_report":{{"declared":0,"live":0,"dropped":[]}}}}}}"#
-        );
-        assert_eq!(
-            serde_json::to_string(&ev).expect("json"),
-            expected,
-            "事件的字段名字与顺序必须逐字固定"
-        );
-
-        let value = serde_json::to_value(&ev).expect("json");
-        let inner = value
-            .get("MemoryMap")
-            .and_then(|v| v.as_object())
-            .expect("MemoryMap");
-        let mut names: Vec<&str> = inner.keys().map(String::as_str).collect();
-        names.sort_unstable();
-        assert_eq!(
-            names,
-            vec![
-                "description",
-                "loaded",
-                "pending",
-                "revision",
-                "wiring_report"
-            ],
-            "事件的字段名集合必须精确固定"
-        );
-    }
-
     // -------------------------------------------------------------
     // STAGE-18 · v0.33 · D-142 / D-143 — the **A group**
     // (frozen spec STAGE-18 §5).
@@ -3907,7 +3140,6 @@ mod tests {
     // STAGE-12 / STAGE-15 / STAGE-16 cases above carry ⇒ every label here
     // says "STAGE-18" and every test name says "s18".
     // -------------------------------------------------------------
-
     /// **STAGE-18 A-1** — a board with **one** device whose `id` is empty
     /// is **rejected** with `E_PLT-15`.
     ///
@@ -3918,7 +3150,7 @@ mod tests {
     /// ⇒ the case that reaches V-17 at all is exactly the **single** one.
     #[test]
     fn s18_a1_a_single_empty_device_id_is_rejected() {
-        let desc = board_with(vec![DeviceSpec::Gpio { id: String::new() }]);
+        let desc = board_with(vec![DeviceSpec::Gpio { id: String::new(), irq_line: 11 }]);
         let err = desc.validate().expect_err("空 id 的器件必须被拒");
         assert_eq!(err.family, PLATFORM_FAMILY);
         assert_eq!(
@@ -3926,15 +3158,14 @@ mod tests {
             "V-17 的场景码必须是 E_PLT-15（实际 {err}）"
         );
     }
-
     /// **STAGE-18 A-2** — **two** devices with an empty `id` are still
     /// rejected by **V-9 / `E_PLT-08`** ⇒ V-17 does **not** take that
     /// case away from V-9.
     #[test]
     fn s18_a2_two_empty_device_ids_are_still_rejected_by_v9() {
         let desc = board_with(vec![
-            DeviceSpec::Gpio { id: String::new() },
-            DeviceSpec::Gpio { id: String::new() },
+            DeviceSpec::Gpio { id: String::new(), irq_line: 11 },
+            DeviceSpec::Gpio { id: String::new(), irq_line: 11 },
         ]);
         let err = desc.validate().expect_err("两个空 id 的器件必须被拒");
         assert_eq!(err.family, PLATFORM_FAMILY);
@@ -3943,7 +3174,6 @@ mod tests {
             "两个空 id 仍然归 V-9 / E_PLT-08（实际 {err}）"
         );
     }
-
     /// **STAGE-18 A-3** — the three **built-in** descriptions are still
     /// legal under V-17 ⇒ the **stock risk is zero**: the boards the
     /// kernel ships with have **no** empty device id.
@@ -3977,7 +3207,6 @@ mod tests {
             );
         }
     }
-
     /// **STAGE-18 A-4** — the **description's** `id` is empty ⇒ still
     /// rejected by **V-2 / `E_PLT-02`** ⇒ V-17 did not take that case
     /// away from V-2 either.
@@ -3992,7 +3221,6 @@ mod tests {
             "描述的 id 归 V-2 / E_PLT-02（实际 {err}）"
         );
     }
-
     /// **STAGE-18 A-5** — the **rule set**'s version and the **shape**'s
     /// version are **not** the same thing ⇒ only the first one ever moves.
     ///
@@ -4025,7 +3253,6 @@ mod tests {
             "规则集版本与形状版本是两个不同的东西，永不相等"
         );
     }
-
     /// **STAGE-18 A-6** — **regression**: a non-empty device `id` behaves
     /// **exactly** as before ⇒ V-17 changed nothing for the legal cases.
     #[test]
@@ -4040,6 +3267,7 @@ mod tests {
         // V-9 / `E_PLT-08` ⇒ V-17 did not swallow that case either.
         let desc = board_with(vec![
             DeviceSpec::Gpio {
+                irq_line: 11,
                 id: "DUP".to_string(),
             },
             DeviceSpec::Uart16550 {
@@ -4055,7 +3283,6 @@ mod tests {
             "非空 id 的重复仍然归 V-9 / E_PLT-08（实际 {err}）"
         );
     }
-
     /// **STAGE-18 A-7** — a device `id` that is **one space** is
     /// **legal** ⇒ the judgement is `is_empty()`, **not**
     /// `trim().is_empty()` ⇒ the front end and the kernel use **one**
@@ -4063,6 +3290,7 @@ mod tests {
     #[test]
     fn s18_a7_a_blank_device_id_is_legal() {
         let desc = board_with(vec![DeviceSpec::Gpio {
+            irq_line: 11,
             id: " ".to_string(),
         }]);
         assert!(
@@ -4070,7 +3298,6 @@ mod tests {
             "只含一个空格的 id 必须合法（判据是 is_empty，不 trim）"
         );
     }
-
     /// The new scenario code means **exactly one thing** ⇒ it is
     /// distinct from the three codes it must not be confused with
     /// (the description's empty id / two devices sharing an id / a
@@ -4095,7 +3322,6 @@ mod tests {
             "E_PLT-15: x"
         );
     }
-
     // -------------------------------------------------------------
     // STAGE-19 · v0.34 · D-125 — the **A group**
     // (frozen spec STAGE-19 §5).
@@ -4105,27 +3331,6 @@ mod tests {
     // STAGE-12 / STAGE-15 / STAGE-16 / STAGE-18 cases above carry ⇒
     // every label here says "STAGE-19" and every test name says "s19".
     // -------------------------------------------------------------
-
-    /// 一条连线 —— **现搭**（不读内核 crate 的任何文件）。
-    ///
-    /// ⚠️ **为什么现搭**：契约层 crate **不得**依赖内核 crate ⇒ 连线
-    /// 的样本只能在这里搭 ⇒ 但搭出来的**形状**与线上一致（外部标签的
-    /// 普通结构体 ⇒ `{"from":{…},"to":{…}}`）⇒ 下面那条钉字符串的用例
-    /// 把它钉死。
-    fn wiring(from: &str, to: &str, source: u32) -> WiringSpec {
-        WiringSpec {
-            from: WiringFrom {
-                device: from.to_string(),
-                event: WIRING_EVENT_RX_READY.to_string(),
-                pin: None,
-            },
-            to: WiringTo {
-                device: to.to_string(),
-                source,
-            },
-        }
-    }
-
     /// 一块「有 UART 与 PLIC」的板 —— 两条新规则都拿它当底板。
     ///
     /// ⚠️ PLIC 的 `sources = 16` ⇒ 合法源号是 `0 ..= 15` ⇒ 越界样本
@@ -4144,124 +3349,14 @@ mod tests {
             },
         ])
     }
-
-    /// **STAGE-19 A-1** — a `wiring` entry that names a device the map
-    /// does **not** declare is rejected with `E_PLT-16`.
-    ///
-    /// ⚠️ The judgement is on `family` + `scenario`, **not** on the
-    /// message text.
-    ///
-    /// ⚠️ **Both ends are checked**: the source end and the target end
-    /// ⇒ a wire into a device that is not there is as illegal as a wire
-    /// out of one that is not there.
-    #[test]
-    fn s19_a1_a_wiring_that_names_a_missing_device_is_rejected() {
-        // The **source** end names a device that is not in the map.
-        let mut desc = board_with_uart_and_plic();
-        desc.wiring = Some(vec![wiring("UART9", "PLIC", 3)]);
-        let err = desc.validate().expect_err("引用不存在器件的连线必须被拒");
-        assert_eq!(err.family, PLATFORM_FAMILY);
-        assert_eq!(
-            err.scenario, E_PLT_16_WIRING_INVALID,
-            "V-18 的场景码必须是 E_PLT-16（实际 {err}）"
-        );
-
-        // The **target** end names a device that is not in the map.
-        let mut desc = board_with_uart_and_plic();
-        desc.wiring = Some(vec![wiring("UART0", "PLIC9", 3)]);
-        let err = desc.validate().expect_err("指向不存在器件的连线必须被拒");
-        assert_eq!(err.family, PLATFORM_FAMILY);
-        assert_eq!(
-            err.scenario, E_PLT_16_WIRING_INVALID,
-            "V-18 的场景码必须是 E_PLT-16（实际 {err}）"
-        );
-    }
-
-    /// **STAGE-19 A-2** — a `wiring` entry whose `to.source` is **not
-    /// below** the target PLIC's `sources` is rejected with `E_PLT-16`.
-    ///
-    /// ⚠️ **The bound is exclusive**: `source == sources` is already
-    /// **too large** ⇒ the highest legal source is `sources - 1`.
-    ///
-    /// ⚠️ **The bound comes from the target PLIC** — the one the wire
-    /// names — not from the smallest one in the map ⇒ a board with two
-    /// PLICs is judged per wire.
-    #[test]
-    fn s19_a2_a_wiring_source_beyond_the_plic_source_count_is_rejected() {
-        let mut desc = board_with_uart_and_plic();
-        // `sources = 16` ⇒ source 16 is **not** below it.
-        desc.wiring = Some(vec![wiring("UART0", "PLIC", 16)]);
-        let err = desc.validate().expect_err("越界的中断源号必须被拒");
-        assert_eq!(err.family, PLATFORM_FAMILY);
-        assert_eq!(
-            err.scenario, E_PLT_16_WIRING_INVALID,
-            "V-19 的场景码必须是 E_PLT-16（实际 {err}）"
-        );
-
-        // The highest legal source is accepted.
-        let mut desc = board_with_uart_and_plic();
-        desc.wiring = Some(vec![wiring("UART0", "PLIC", 15)]);
-        assert!(
-            desc.validate().is_ok(),
-            "最高合法源号（sources - 1）本身必须合法"
-        );
-    }
-
-    /// **STAGE-19 A-3** — the new rules are reported **after** V-17, and
-    /// V-18 is reported **before** V-19 ⇒ the report order of V-1 ~ V-17
-    /// is **unchanged, byte for byte**.
-    ///
-    /// ⚠️ **Why the second half needs a structural assertion**: V-18 and
-    /// V-19 **share** one scenario code (`E_PLT-16`) ⇒ the code alone
-    /// cannot tell them apart ⇒ the order is pinned through
-    /// [`PlatformDescription::wiring_violation`] (which returns **which**
-    /// rule was violated) ⇒ the judgement never looks at the message
-    /// text.
-    #[test]
-    fn s19_a3_the_wiring_rules_come_after_v17_and_in_order() {
-        // V-17 (one device with an empty id) + V-18 (a wire naming a
-        // device that is not there) ⇒ **V-17** is reported.
-        let mut desc = board_with(vec![DeviceSpec::Gpio { id: String::new() }]);
-        desc.wiring = Some(vec![wiring("UART0", "PLIC", 3)]);
-        let err = desc.validate().expect_err("必须被拒");
-        assert_eq!(err.family, PLATFORM_FAMILY);
-        assert_eq!(
-            err.scenario, E_PLT_15_DEVICE_EMPTY_ID,
-            "V-17 排在 V-18 之前（实际 {err}）"
-        );
-
-        // V-18 (an event name outside the vocabulary) + V-19 (a source
-        // beyond the PLIC's count) ⇒ **V-18** is reported.
-        //
-        // ⚠️ **Why the event name and not a missing device**: the two
-        // rules share one code ⇒ their order can only be told apart
-        // **structurally** ⇒ and a missing device must stay usable as
-        // the *other* rule's failure mode (the mutation that drops the
-        // existence check must not move this order).
-        let mut desc = board_with_uart_and_plic();
-        let mut spec = wiring("UART0", "PLIC", 99);
-        spec.from.event = "tx_done".to_string();
-        desc.wiring = Some(vec![spec]);
-        assert_eq!(
-            desc.wiring_violation().map(|(rule, _)| rule),
-            Some(WiringRule::V18References),
-            "V-18 排在 V-19 之前"
-        );
-        assert_eq!(
-            desc.validate().expect_err("必须被拒").scenario,
-            E_PLT_16_WIRING_INVALID,
-            "两条规则共用一个场景码"
-        );
-    }
-
     /// **STAGE-19 A-4** — **two** devices with an empty `id` are still
     /// rejected by **V-9 / `E_PLT-08`** ⇒ the new rules did not take
     /// that case away from V-9.
     #[test]
     fn s19_a4_two_empty_device_ids_are_still_rejected_by_v9() {
         let desc = board_with(vec![
-            DeviceSpec::Gpio { id: String::new() },
-            DeviceSpec::Gpio { id: String::new() },
+            DeviceSpec::Gpio { id: String::new(), irq_line: 11 },
+            DeviceSpec::Gpio { id: String::new(), irq_line: 11 },
         ]);
         let err = desc.validate().expect_err("两个空 id 的器件必须被拒");
         assert_eq!(err.family, PLATFORM_FAMILY);
@@ -4270,35 +3365,33 @@ mod tests {
             "两个空 id 仍然归 V-9 / E_PLT-08（实际 {err}）"
         );
     }
-
     /// **STAGE-19 A-5** — the new scenario code means **exactly one
     /// thing** ⇒ it is distinct from the four codes it must not be
     /// confused with.
     #[test]
     fn s19_a5_the_new_scenario_code_is_distinct_from_the_ones_it_must_not_reuse() {
-        assert_eq!(E_PLT_16_WIRING_INVALID, 16);
+        assert_eq!(E_PLT_16_IRQ_SOURCE_INVALID, 16);
         assert_ne!(
-            E_PLT_16_WIRING_INVALID, E_PLT_02_EMPTY_ID,
+            E_PLT_16_IRQ_SOURCE_INVALID, E_PLT_02_EMPTY_ID,
             "连线非法不得复用「描述的 id 为空」"
         );
         assert_ne!(
-            E_PLT_16_WIRING_INVALID, E_PLT_08_DUPLICATE_DEVICE_ID,
+            E_PLT_16_IRQ_SOURCE_INVALID, E_PLT_08_DUPLICATE_DEVICE_ID,
             "连线非法不得复用「两个器件共用一个 id」"
         );
         assert_ne!(
-            E_PLT_16_WIRING_INVALID, E_PLT_12_PARAMETER_OUT_OF_RANGE,
+            E_PLT_16_IRQ_SOURCE_INVALID, E_PLT_12_PARAMETER_OUT_OF_RANGE,
             "连线非法不得复用「器件参数越界」"
         );
         assert_ne!(
-            E_PLT_16_WIRING_INVALID, E_PLT_15_DEVICE_EMPTY_ID,
+            E_PLT_16_IRQ_SOURCE_INVALID, E_PLT_15_DEVICE_EMPTY_ID,
             "连线非法不得复用「器件的 id 为空」"
         );
         assert_eq!(
-            PlatformError::new(PLATFORM_FAMILY, E_PLT_16_WIRING_INVALID, "x").to_string(),
+            PlatformError::new(PLATFORM_FAMILY, E_PLT_16_IRQ_SOURCE_INVALID, "x").to_string(),
             "E_PLT-16: x"
         );
     }
-
     /// **STAGE-19 A-6** — the **rule set**'s version is `3` and the
     /// **description format**'s version did **not** move.
     ///
@@ -4341,128 +3434,6 @@ mod tests {
             "规则集版本与描述格式版本是两个不同的东西，永不相等"
         );
     }
-
-    /// **STAGE-19 A-7** — a description **without** a `wiring` section is
-    /// still legal ⇒ ⇒ the stored boards are **not** rejected by the new
-    /// rules ⇒ ⇒ the rule set may be tightened without invalidating a
-    /// single stored board.
-    ///
-    /// ⚠️ The three **built-in** descriptions are read as **hand-written
-    /// copies** — the contract layer does **not** depend on the kernel
-    /// crate ⇒ the copies live in [`BUILTIN_DEFAULT_RAW`] /
-    /// [`BUILTIN_MINIMAL_RAW`] / [`BUILTIN_QEMU_VIRT_RAW`] ⇒ one copy,
-    /// several readers.
-    #[test]
-    fn s19_a7_a_description_without_wiring_is_still_legal() {
-        assert_eq!(sample().wiring, None, "样例板没有连线段");
-        assert!(sample().validate().is_ok(), "没有连线的描述必须仍然合法");
-
-        for (name, raw) in builtin_copies() {
-            let desc: PlatformDescription = serde_json::from_str(raw)
-                .unwrap_or_else(|e| panic!("内置描述 {name} 必须能解析：{e}"));
-            assert_eq!(desc.wiring, None, "内置描述 {name} 没有连线段");
-            assert!(
-                desc.validate().is_ok(),
-                "内置描述 {name} 必须仍然合法（存量板不被新规则拒）"
-            );
-        }
-    }
-
-    /// **STAGE-19 补强** — an **unknown event name** is rejected with
-    /// `E_PLT-16` too ⇒ the event vocabulary has **one** landing spot
-    /// ([`WIRING_EVENT_RX_READY`]) and it is judged **here**.
-    #[test]
-    fn s19_a_wiring_that_names_an_unknown_event_is_rejected() {
-        let mut desc = board_with_uart_and_plic();
-        let mut spec = wiring("UART0", "PLIC", 3);
-        spec.from.event = "tx_done".to_string();
-        desc.wiring = Some(vec![spec]);
-        let err = desc.validate().expect_err("不认识的事件名必须被拒");
-        assert_eq!(err.family, PLATFORM_FAMILY);
-        assert_eq!(
-            err.scenario, E_PLT_16_WIRING_INVALID,
-            "非法事件名归 E_PLT-16（实际 {err}）"
-        );
-    }
-
-    /// **STAGE-19 补强** — a wire whose target is **not** a PLIC is
-    /// rejected with `E_PLT-16` ⇒ a wire can only land on an interrupt
-    /// controller.
-    #[test]
-    fn s19_a_wiring_that_targets_a_non_plic_is_rejected() {
-        let mut desc = board_with(vec![
-            DeviceSpec::Uart16550 {
-                id: "UART0".to_string(),
-                irq_line: 1,
-                baud_rate: 115_200,
-            },
-            DeviceSpec::Gpio {
-                id: "GPIO0".to_string(),
-            },
-        ]);
-        desc.wiring = Some(vec![wiring("UART0", "GPIO0", 3)]);
-        let err = desc.validate().expect_err("目标不是 PLIC 的连线必须被拒");
-        assert_eq!(err.family, PLATFORM_FAMILY);
-        assert_eq!(
-            err.scenario, E_PLT_16_WIRING_INVALID,
-            "目标不是 PLIC 归 E_PLT-16（实际 {err}）"
-        );
-    }
-
-    /// **STAGE-19 补强** — the `wiring` section's **wire shape** is
-    /// pinned ⇒ the host and the front end spell it the same way.
-    ///
-    /// ⚠️ **The key is absent when there is no wiring** ⇒ the wire shape
-    /// of a description without wiring is **unchanged** ⇒ the boards the
-    /// front end already has need no rewrite.
-    #[test]
-    fn s19_the_wiring_wire_shape_is_pinned() {
-        let mut desc = board_with_uart_and_plic();
-        assert_eq!(desc.wiring, None);
-
-        // No wiring ⇒ no `wiring` key at all.
-        let json = serde_json::to_value(&desc).expect("json");
-        assert!(
-            json.get("wiring").is_none(),
-            "没有连线时 `wiring` 键必须不出现（skip_serializing_if）"
-        );
-        assert_eq!(
-            keys(&json),
-            vec![
-                "id",
-                "max_region_bytes",
-                "name",
-                "priority",
-                "region_budget_bytes",
-                "regions",
-                "schema_version",
-            ],
-            "加连线段**没有**改动没有连线的描述的顶层键集"
-        );
-
-        // With wiring ⇒ the exact shape, field by field.
-        desc.wiring = Some(vec![wiring("UART0", "PLIC", 3)]);
-        let json = serde_json::to_value(&desc).expect("json");
-        let entry = json
-            .get("wiring")
-            .and_then(|v| v.as_array())
-            .expect("wiring 数组");
-        assert_eq!(entry.len(), 1, "一条连线就是一个数组元素");
-        assert_eq!(
-            entry[0],
-            serde_json::json!({
-                "from": { "device": "UART0", "event": "rx_ready" },
-                "to": { "device": "PLIC", "source": 3 }
-            }),
-            "连线的线上形状必须逐字固定"
-        );
-
-        // …and it survives the round trip.
-        let text = serde_json::to_string(&desc).expect("json");
-        let back: PlatformDescription = serde_json::from_str(&text).expect("必须能解析");
-        assert_eq!(back.wiring, desc.wiring, "连线段必须逐字段原样回来");
-    }
-
     /// **STAGE-19 补强** — the **RAM window** is the **base-maximal**
     /// RAM region ⇒ the single landing spot both sides ask.
     ///
@@ -4492,290 +3463,48 @@ mod tests {
         }];
         assert_eq!(desc.ram_window(), None, "没有 RAM 段时必须返回 None");
     }
-
-    // ═══════════════════════ STAGE-52 · v0.76 · 引脚规格 + pinmux ═══════════════════════
-
-    /// **A-3** — `pins` 段的线上形态钉住：`PinSpec` 功能列表（name /
-    /// direction / irq{source}），`PinDirection` 蛇形枚举。
+    /// **X-1** — 同一块板上两个外设**不能共用**一个 PLIC 源号。
     #[test]
-    fn a3_pin_spec_wire_shape_is_pinned() {
+    fn x1_two_peripherals_must_not_share_one_plic_source() {
         let raw = r#"{
             "schema_version": 5,
-            "id": "pins-board",
-            "name": "Pins board",
+            "id": "dup-irq",
+            "name": "Dup irq",
             "priority": 1,
             "region_budget_bytes": 4096,
             "regions": [
                 { "kind": "ram", "base": 0, "size": 4096 },
+                { "kind": "peripheral", "base": 268435456,
+                  "device": { "device": "uart16550", "id": "UART0", "irq_line": 10, "baud_rate": 115200 } },
                 { "kind": "peripheral", "base": 1073741824,
-                  "device": { "device": "gpio", "id": "GPIO0" } }
-            ],
-            "pins": [
-                { "device": "GPIO0", "pin": "pin3",
-                  "functions": [
-                    { "name": "uart_tx", "direction": "output", "irq": { "source": 3 } },
-                    { "name": "gpio_in", "direction": "input" }
-                  ] }
-            ]
-        }"#;
-        let desc: PlatformDescription = serde_json::from_str(raw).expect("必须能解析");
-        desc.validate().expect("合法引脚规格必须通过");
-        let spec = desc.pins.as_ref().expect("pins 段").first().expect("一条");
-        assert_eq!(spec.device, "GPIO0");
-        assert_eq!(spec.pin, "pin3");
-        assert_eq!(spec.functions.len(), 2);
-        assert_eq!(spec.functions[0].name, "uart_tx");
-        assert_eq!(spec.functions[0].direction, PinDirection::Output);
-        assert_eq!(spec.functions[0].irq.unwrap().source, 3);
-        assert_eq!(spec.functions[1].direction, PinDirection::Input);
-        assert!(spec.functions[1].irq.is_none());
-    }
-
-    /// **A-4** — `PinDirection` 封闭：非法值在 serde 层拒（不是描述合法后
-    /// 才判）。
-    #[test]
-    fn a4_direction_enum_is_closed() {
-        let raw = r#"{
-            "schema_version": 5,
-            "id": "bad-dir",
-            "name": "Bad dir",
-            "priority": 1,
-            "region_budget_bytes": 4096,
-            "regions": [
-                { "kind": "ram", "base": 0, "size": 4096 },
-                { "kind": "peripheral", "base": 1073741824,
-                  "device": { "device": "gpio", "id": "GPIO0" } }
-            ],
-            "pins": [
-                { "device": "GPIO0", "pin": "pin3",
-                  "functions": [ { "name": "x", "direction": "sideways" } ] }
-            ]
-        }"#;
-        assert!(
-            serde_json::from_str::<PlatformDescription>(raw).is_err(),
-            "未知方向值必须在 serde 层拒"
-        );
-    }
-
-    /// **A-4b** — 合法方向值（`input` / `output` / `bidir`）必须照常解析
-    /// ⇒ ⇒ 「封闭」不是「全拒」（判别力补半：只有「非法拒」那条，把 rename
-    /// 改坏也会**看起来像**「封闭更严」⇒ 必须钉住合法面）。
-    #[test]
-    fn a4b_legal_directions_still_parse() {
-        for (text, want) in [
-            ("input", PinDirection::Input),
-            ("output", PinDirection::Output),
-            ("bidir", PinDirection::Bidir),
-        ] {
-            let raw = format!(
-                r#"{{
-                    "schema_version": 5,
-                    "id": "dir-{text}",
-                    "name": "Dir {text}",
-                    "priority": 1,
-                    "region_budget_bytes": 4096,
-                    "regions": [
-                        {{ "kind": "ram", "base": 0, "size": 4096 }},
-                        {{ "kind": "peripheral", "base": 1073741824,
-                          "device": {{ "device": "gpio", "id": "GPIO0" }} }}
-                    ],
-                    "pins": [
-                        {{ "device": "GPIO0", "pin": "pin3",
-                          "functions": [ {{ "name": "x", "direction": "{text}" }} ] }}
-                    ]
-                }}"#
-            );
-            let parsed: PlatformDescription =
-                serde_json::from_str(&raw).unwrap_or_else(|e| panic!("合法方向 {text} 被拒：{e}"));
-            let pins = parsed.pins.as_ref().expect("有 pins 段");
-            assert_eq!(
-                pins[0].functions[0].direction, want,
-                "方向 {text} 必须解析为对应变体"
-            );
-        }
-    }
-
-    /// **A-5** — V-21/V-24 静态校验：器件不在 / 非 GPIO / pin 名非法 /
-    /// 功能空 / 功能名重复 / 同引脚重复声明，全部 `E_PLT-19`。
-    #[test]
-    fn a5_pin_spec_static_violations_are_rejected() {
-        // 器件不在。
-        let mut desc = sample();
-        desc.pins = Some(vec![PinSpec {
-            device: "NOPE".to_string(),
-            pin: "pin0".to_string(),
-            functions: vec![PinFunction {
-                name: "x".to_string(),
-                direction: PinDirection::Input,
-                irq: None,
-            }],
-        }]);
-        let err = desc.validate().unwrap_err();
-        assert_eq!(err.scenario, E_PLT_19_PINS_INVALID);
-
-        // 非 GPIO 器件（UART）。
-        let mut desc = sample();
-        desc.pins = Some(vec![PinSpec {
-            device: "UART0".to_string(),
-            pin: "tx".to_string(),
-            functions: vec![PinFunction {
-                name: "x".to_string(),
-                direction: PinDirection::Output,
-                irq: None,
-            }],
-        }]);
-        let err = desc.validate().unwrap_err();
-        assert_eq!(err.scenario, E_PLT_19_PINS_INVALID);
-
-        // 引脚名不是 pin{N} 形。
-        let mut desc = sample();
-        desc.pins = Some(vec![PinSpec {
-            device: "GPIO0".to_string(),
-            pin: "pin99".to_string(),
-            functions: vec![PinFunction {
-                name: "x".to_string(),
-                direction: PinDirection::Input,
-                irq: None,
-            }],
-        }]);
-        let err = desc.validate().unwrap_err();
-        assert_eq!(err.scenario, E_PLT_19_PINS_INVALID);
-
-        // 功能名同引脚内重复。
-        let mut desc = sample();
-        desc.pins = Some(vec![PinSpec {
-            device: "GPIO0".to_string(),
-            pin: "pin0".to_string(),
-            functions: vec![
-                PinFunction {
-                    name: "x".to_string(),
-                    direction: PinDirection::Input,
-                    irq: None,
-                },
-                PinFunction {
-                    name: "x".to_string(),
-                    direction: PinDirection::Output,
-                    irq: None,
-                },
-            ],
-        }]);
-        let err = desc.validate().unwrap_err();
-        assert_eq!(err.scenario, E_PLT_19_PINS_INVALID);
-    }
-
-    /// **A-6** — 裁决 L：同引脚 `PinFunction.irq` 与 `wiring.from.pin`
-    /// 两路径源号**必须一致**；不一致 ⇒ `E_PLT-19`；一致 ⇒ 放行。
-    #[test]
-    fn a6_irq_vs_wiring_source_clash_is_rejected() {
-        let mut desc = sample();
-        desc.pins = Some(vec![PinSpec {
-            device: "GPIO0".to_string(),
-            pin: "pin3".to_string(),
-            functions: vec![PinFunction {
-                name: "gpio_in".to_string(),
-                direction: PinDirection::Input,
-                irq: Some(PinIrq { source: 11 }),
-            }],
-        }]);
-        desc.wiring = Some(vec![WiringSpec {
-            from: WiringFrom {
-                device: "GPIO0".to_string(),
-                event: WIRING_EVENT_PIN_IRQ.to_string(),
-                pin: Some(3),
-            },
-            to: WiringTo {
-                device: "PLIC".to_string(),
-                source: 11,
-            },
-        }]);
-        desc.validate().expect("两路径源号一致 ⇒ 放行");
-
-        // 不一致 ⇒ 拒。
-        let mut desc = sample();
-        desc.pins = Some(vec![PinSpec {
-            device: "GPIO0".to_string(),
-            pin: "pin3".to_string(),
-            functions: vec![PinFunction {
-                name: "gpio_in".to_string(),
-                direction: PinDirection::Input,
-                irq: Some(PinIrq { source: 9 }),
-            }],
-        }]);
-        desc.wiring = Some(vec![WiringSpec {
-            from: WiringFrom {
-                device: "GPIO0".to_string(),
-                event: WIRING_EVENT_PIN_IRQ.to_string(),
-                pin: Some(3),
-            },
-            to: WiringTo {
-                device: "PLIC".to_string(),
-                source: 11,
-            },
-        }]);
-        let err = desc.validate().unwrap_err();
-        assert_eq!(err.scenario, E_PLT_19_PINS_INVALID);
-    }
-
-    /// **A-7** — V-25：声明 `pinmux` 器件但没有 `pins` 段 ⇒ 拒 `E_PLT-19`；
-    /// 有 `pins` 段 ⇒ 放行。
-    #[test]
-    fn a7_pinmux_without_pins_is_rejected() {
-        // 无 pins 段 + pinmux 器件 ⇒ 拒。
-        let raw = r#"{
-            "schema_version": 5,
-            "id": "mux-no-pins",
-            "name": "Mux no pins",
-            "priority": 1,
-            "region_budget_bytes": 4096,
-            "regions": [
-                { "kind": "ram", "base": 0, "size": 4096 },
-                { "kind": "peripheral", "base": 1073741824,
-                  "device": { "device": "pinmux", "id": "PINMUX0" } }
+                  "device": { "device": "gpio", "id": "GPIO0", "irq_line": 10 } },
+                { "kind": "peripheral", "base": 201326592,
+                  "device": { "device": "plic", "id": "PLIC0", "sources": 64, "contexts": 16 } }
             ]
         }"#;
         let desc: PlatformDescription = serde_json::from_str(raw).expect("必须能解析");
         let err = desc.validate().unwrap_err();
-        assert_eq!(err.scenario, E_PLT_19_PINS_INVALID);
-
-        // 有 pins 段 ⇒ 放行。
+        assert_eq!(err.scenario, 16, "中断号重复必须拒");
+    }
+    /// **X-2** — GPIO 的中断号与 UART 一样受合法取值域约束（> 0 且 < sources）。
+    #[test]
+    fn x2_gpio_irq_line_is_a_legal_plic_source() {
         let raw = r#"{
             "schema_version": 5,
-            "id": "mux-with-pins",
-            "name": "Mux with pins",
+            "id": "bad-gpio-irq",
+            "name": "Bad gpio irq",
             "priority": 1,
             "region_budget_bytes": 4096,
             "regions": [
                 { "kind": "ram", "base": 0, "size": 4096 },
                 { "kind": "peripheral", "base": 1073741824,
-                  "device": { "device": "gpio", "id": "GPIO0" } },
-                { "kind": "peripheral", "base": 1073745920,
-                  "device": { "device": "pinmux", "id": "PINMUX0" } }
-            ],
-            "pins": [
-                { "device": "GPIO0", "pin": "pin3",
-                  "functions": [ { "name": "gpio_in", "direction": "input" } ] }
+                  "device": { "device": "gpio", "id": "GPIO0", "irq_line": 64 } },
+                { "kind": "peripheral", "base": 201326592,
+                  "device": { "device": "plic", "id": "PLIC0", "sources": 64, "contexts": 16 } }
             ]
         }"#;
         let desc: PlatformDescription = serde_json::from_str(raw).expect("必须能解析");
-        desc.validate().expect("pinmux + pins ⇒ 放行");
-    }
-
-    /// **A-8** — `KINDS` 六项含 `pinmux`，与 `DeviceSpec::kind()` 逐项一致。
-    #[test]
-    fn a8_kinds_now_has_pinmux() {
-        assert_eq!(DeviceSpec::KINDS.len(), 6);
-        assert!(DeviceSpec::KINDS.contains(&"pinmux"));
-        // 每个 kind 串都能经 wire 标签造出对应变体（serde 层一致）。
-        for kind in DeviceSpec::KINDS {
-            let raw = format!(r#"{{"device":"{kind}","id":"X"}}"#, kind = kind);
-            if kind == "gpio" {
-                let spec: DeviceSpec = serde_json::from_str(&raw).expect("gpio 可解析");
-                assert_eq!(spec.kind(), kind);
-            }
-            if kind == "pinmux" {
-                let spec: DeviceSpec = serde_json::from_str(&raw).expect("pinmux 可解析");
-                assert_eq!(spec.kind(), kind);
-            }
-        }
+        let err = desc.validate().unwrap_err();
+        assert_eq!(err.scenario, 12, "GPIO 中断号越界必须拒");
     }
 }

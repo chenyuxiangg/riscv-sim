@@ -183,7 +183,7 @@ use riscv_sim_contract::model::{
     TraceSource, WaveformHistory, WaveformStream, WriteSize, SIM_STATE_SCHEMA_VERSION,
 };
 use riscv_sim_contract::platform::{
-    mcu_isa_info, wiring_event_info, PlatformDescription, RegionSpec, WiringEventSemantics,
+    mcu_isa_info, PlatformDescription, RegionSpec,
 };
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
 use riscv_sim_contract::protocol::{
@@ -934,7 +934,7 @@ pub struct KernelHost {
     ///
     /// ⚠️ **它不是第二个真相源**：表里的每一行都来自**生效的描述**
     /// （默认连线或描述里的 `wiring`）⇒ ⇒ 描述是真相，表是它的投影。
-    wiring: Vec<platform::Wiring>,
+    peripheral_irqs: Vec<platform::PeripheralIrq>,
     /// **丢线报告**（v0.72 · STAGE-48 · D-177 A）—— 「你写的 N 根线里有
     /// M 根当前抬不了」。
     ///
@@ -950,7 +950,6 @@ pub struct KernelHost {
     /// ⚠️ 每项 = `(gpio 器件 id, 引脚号, 功能列表)` ⇒ ⇒ 宿主同步中断时按
     /// 「当前功能 → irq 源」抬线 ⇒ ⇒ **不**写 GPIO 的 `irq_lines[pin]`
     /// （分层禁令 · 裁决 K）。
-    pinmux_routes: Vec<(String, u32, Vec<riscv_sim_contract::platform::PinFunction>)>,
     /// **角色解析**的结果（v0.73 · STAGE-48 · D-177 的 C）—— 哪个 id 扮演
     /// console / 时间源 / 主 PLIC。
     ///
@@ -1121,13 +1120,12 @@ impl KernelHost {
             devices: platform::DeviceInstanceTable::default(),
             // ⚠️ v0.34（D-125）：连线表在**建图时**编译（`map_memory`）⇒
             // 这里只是**初值**（还没有建图 ⇒ 还没有表）。
-            wiring: Vec::new(),
+            peripheral_irqs: Vec::new(),
             // ⚠️ v0.72（STAGE-48 · D-177 A）：丢线报告**随图**重算 ⇒ 这里
             // 只是**初值**（还没有建图 ⇒ 没有线 ⇒ 0 根）。
             wiring_report: riscv_sim_contract::model::WiringReportDto::default(),
             // ⚠️ v0.76（STAGE-52 · C1/J/K）：pinmux 路由表**随图**重算 ⇒
             // 这里只是**初值**（还没有建图 ⇒ 没有引脚路由）。
-            pinmux_routes: Vec::new(),
             roles: platform::ResolvedRoles::default(),
             console_backlog: Vec::new(),
             hms,
@@ -1361,12 +1359,9 @@ impl KernelHost {
         // ⚠️ **v0.72（STAGE-48 · D-177 A/B）**：**表与丢线报告一次编译**
         // ⇒ ⇒ 两者**同源** ⇒ ⇒ 报告说的**就是**表里的那些线 ⇒ ⇒ 不会
         // 出现「报告说丢了、表里还在」这种自相矛盾。
-        let compiled = platform::compile_wiring(description, &self.devices);
-        self.wiring = compiled.wires;
-        self.wiring_report = compiled.report;
+        self.peripheral_irqs = platform::compile_peripheral_irqs(description);
         // ⚠️ **v0.76（STAGE-52 · C1/J/K）**：pinmux 路由表**随图重算** ⇒ ⇒
         // 改板之后**不留**上一份的残留（与连线表同一条纪律）。
-        self.pinmux_routes = devices.pinmux_routes;
         Ok(())
     }
 
@@ -1453,176 +1448,60 @@ impl KernelHost {
                 crate::m16_interrupt::TRIGGER_LEVEL,
             );
         } else {
-            self.intc.controller.borrow_mut().clear(IRQ_SOFTWARE);
-        }
-
-        // ---- 2) UART 的 RX 就绪 → PLIC 的源（**按连线表** · **逐线查实例**）----
+        // ---- 2) 每个中断外设按**自己的** ⚠️中断号抬 PLIC 源 ----
         //
-        // ⚠️ **电平语义**（STAGE-40 · v0.55 · 裁决 A）：PLIC 的**源挂起位**
-        // 必须跟着**设备的中断线电平**走 —— 设备还「有话说」就挂着，没话说
-        // 就撤销 ⇒ ⇒ **不是**一次性的锁存。
-        //
-        // ⚠️ **参考侧口径**（Spike 的 `riscv/plic.cc` · `set_interrupt_level`）：
-        //     `if (lvl) { pending |= mask; } else { pending &= ~mask; claimed &= ~mask; }`
-        // ⇒ ⇒ **源被撤销时，挂起位**与**已认领位**一起清掉 ⇒ ⇒ 同一个源
-        // **可以再来一次** ⇒ ⇒ 这正是「第二个字节能被交付」的前提。
-        //
-        // ⚠️ **为什么这条是必须的**（D-158 的另一半）：`rx_ready` 这一句
-        // **就是** ns16550 的中断线电平（LSR bit0 ∧ IER bit0）⇒ ⇒ guest
-        // 把 RX FIFO 排空 ⇒ ⇒ 电平落 ⇒ ⇒ 源被撤销 ⇒ ⇒ 平台才可能把外部
-        // 线撤掉（D-158 的第一个坑）⇒ ⇒ **下一个字节才有机会被交付**。
-        //
-        // ⚠️ **原来的写法只 `request` 从不撤销** ⇒ ⇒ 源被**永久锁存** ⇒ ⇒
-        // `plic.claim()` **永远**返回 `Some` ⇒ ⇒ 外部线**永远**撤不掉 ⇒ ⇒
-        // guest 收完第一个字节之后，**第二个字节永远进不来** ⇒ ⇒ 而标准
-        // 固件（osz）写回 Claim 时用的是 `claim − 16`（legacy PLIC 约定）
-        // ⇒ ⇒ 那个写值在平台（与参考侧）都是**非法源号** ⇒ ⇒ **被忽略**
-        // ⇒ ⇒ 平台**不能**指望 guest 的 complete 来清挂起位。
-        //
-        // ⚠️ **v0.72（STAGE-48 · D-177 E）**：**每根线各自查两端** ⇒ ⇒
-        // 源按 `from_device` **查表**、目标按 `to_device` **查表** ⇒ ⇒
-        // **第二个 UART 的 `rx_ready` 真的抬的是它那根线的那个 PLIC 源**
-        // ⇒ ⇒ 「第二个 UART 的连线也真的通电」（本批的里程碑）。
-        //
-        // ⚠️ **旧写法只算「第一个 UART」的 `rx_ready`、再塞给「第一个
-        // PLIC」** ⇒ ⇒ 线的两端**从来没被分别查过** ⇒ ⇒ 只修
-        // `compile_wiring` 的过滤**不够**（§7.1 订正 2）。
-        for wire in self.wiring.iter() {
-            // ⚠️ **查契约层那个词表**（v0.74 · STAGE-50 · 裁决 J）⇒ ⇒ 「事件名
-            //   → 语义」**只有一处**判定（契约层那一份）⇒ ⇒ ⇒ 这里**不再**抄
-            //   一遍单常量比较（⇒ ⇒ 那会是**第二个真相源**）。
-            //
-            // ⚠️ **不在词表里 ⇒ 跳过这根线**（描述**已经被契约层 V-18 拒了**
-            //   ⇒ ⇒ 正常路径**到不了**这里 ⇒ ⇒ 这是**兜底**，不是主判据）。
-            let Some(info) = wiring_event_info(&wire.event) else {
-                continue;
-            };
-            // ⚠️ **目标**：按 `to_device` **查表**（不是「第一个 PLIC」）。
-            let Some(plic) = self.devices.plic(&wire.to_device) else {
-                continue;
-            };
-            match info.semantics {
-                // ⚠️ **电平语义**（UART 的 `rx_ready`）⇒ ⇒ 设备「还有话说」
-                //   就挂着、没了就撤销（**逐字不变** · F-6）。
-                WiringEventSemantics::Level => {
-                    // ⚠️ **源**：按 `from_device` **查表**（不是「第一个 UART」）。
-                    let Some(uart) = self.devices.uart(&wire.from_device) else {
-                        continue;
-                    };
-                    let rx_ready = match uart.try_borrow() {
+        // ⚠️ UART 只有一个源：RX（IER bit0 ∧ LSR bit0）与 TX-empty
+        //   （IER bit1 ∧ LSR.THRE）**共用**它（物理 16550 只有一根 IRQ 线）。
+        // ⚠️ GPIO 整块只有一个源：任意引脚有待处理事件就抬一次（一次性 ⇒ 消费掉）。
+        let plic = self.devices.first_plic().and_then(|e| self.devices.plic(&e.id));
+        let Some(plic) = plic else { return };
+        for irq in self.peripheral_irqs.iter() {
+            match irq.kind {
+                platform::PeripheralIrqKind::Uart => {
+                    let Some(uart) = self.devices.uart(&irq.id) else { continue };
+                    let (rx, tx) = match uart.try_borrow() {
                         Ok(u) => {
-                            // LSR bit0 = RX 有字节；IER bit0 = 允许 RX 中断。
-                            u.line_status() & 0x01 != 0 && u.interrupt_enable() & 0x01 != 0
+                            let ier = u.interrupt_enable();
+                            (
+                                (ier & 0x01) != 0 && (u.line_status() & 0x01) != 0,
+                                (ier & 0x02) != 0 && (u.line_status() & 0x02) != 0,
+                            )
                         }
-                        // ⚠️ **争用 ⇒ 跳过这根线**（不是 `return`）⇒ ⇒ 别的线**照常**
-                        // ⇒ ⇒ 一根线读不到**不会**让整张表停摆。
                         Err(_) => continue,
                     };
                     if let Ok(mut p) = plic.try_borrow_mut() {
-                        // ⚠️ **源号来自连线表**（v0.34 · D-125）⇒ ⇒ 表里是
-                        // 「这个事件接到哪个源」⇒ ⇒ 换板改连线不用改宿主。
-                        if rx_ready {
-                            p.request(wire.source);
+                        if rx || tx {
+                            p.request(u32::from(irq.source));
                         } else {
-                            // ⚠️ **撤销挂起** = 设备把中断线放下来了 ⇒ ⇒
-                            // 源不再「有话说」⇒ ⇒ 不再占着 PLIC 的名额。
-                            p.set_pending(wire.source, false);
+                            p.set_pending(u32::from(irq.source), false);
                         }
-                    };
-                }
-                // ⚠️ **一次性语义**（GPIO 的引脚 IRQ · v0.74 · STAGE-50 · 裁决 K）
-                //   ⇒ ⇒ 设备侧**消费**掉那一位（`take_pending_irqs`）⇒ ⇒ 抬一次
-                //   ⇒ ⇒ **不重抬**（⇒ ⇒ **不活锁**：guest claim + complete 清掉
-                //   PLIC 挂起位后 ⇒ ⇒ 设备侧**没有**待投递的了）。
-                WiringEventSemantics::OneShot => {
-                    let Some(pin) = wire.pin else {
-                        continue;
-                    };
-                    // ⚠️ **源**：按 `from_device` **查表**（不是「第一个 GPIO」）。
-                    let Some(gpio) = self.devices.gpio(&wire.from_device) else {
-                        continue;
-                    };
-                    // ⚠️ **drain**：取出**这个引脚**的 IRQ 线号（消费掉）。
-                    let Ok(mut g) = gpio.try_borrow_mut() else {
-                        continue;
-                    };
-                    let line = g.take_irq_line_for_pin(pin);
-                    let Some(line) = line else {
-                        continue;
-                    };
-                    // ⚠️ **号空间**（裁决：两个号各管各的）：引脚的 IRQ **线号**
-                    //   与连线表里的 **PLIC 源号** **不是同一个** ⇒ ⇒ ⇒
-                    //   **线号 == 源号** 才是本批约定的「同一个」⇒ ⇒ 否则**不抬**
-                    //   （⇒ ⇒ **不静默**抬到错的源上）。
-                    if u32::from(line) != wire.source {
-                        continue;
                     }
-                    if let Ok(mut p) = plic.try_borrow_mut() {
-                        p.request(wire.source);
+                }
+                platform::PeripheralIrqKind::Gpio => {
+                    let Some(gpio) = self.devices.gpio(&irq.id) else { continue };
+                    let any = match gpio.try_borrow_mut() {
+                        Ok(mut g) => {
+                            let mut any = false;
+                            for pin in 0..32u32 {
+                                if g.pending_pin(pin) {
+                                    any = true;
+                                    g.clear_pending_pin(pin);
+                                }
+                            }
+                            any
+                        }
+                        Err(_) => continue,
+                    };
+                    if any {
+                        if let Ok(mut p) = plic.try_borrow_mut() {
+                            p.request(u32::from(irq.source));
+                        }
                     }
                 }
             }
         }
 
-        // ---- 2.5) pinmux 路由（v0.76 · STAGE-52 · 裁决 C1 / I / J / K）----
-        //
-        // ⚠️ **分层禁令（K-6）**：本分支**不**写 GPIO 的 `irq_lines[pin]`
-        //   —— 读 GPIO 的 **pending 位**（引脚有沿事件）、查 pinmux 器件的
-        //   **当前功能**、按「当前功能 → irq 源」抬 PLIC ⇒ ⇒ 与 wiring 路径
-        //   **并行不互写**（wiring 路径写 `irq_lines`，pinmux 路径不碰它）。
-        //
-        // ⚠️ **一次性语义（K-4）**：抬一次、**消费掉** pending
-        //   （`clear_pending_pin`）⇒ ⇒ **不活锁**（与 wiring 的 OneShot
-        //   同一个道理）。
-        //
-        // ⚠️ **当前功能由固件写 pinmux 寄存器决定（K-5）**：同一引脚切功能
-        //   ⇒ ⇒ 下次沿事件抬**新功能**的源 ⇒ ⇒ 中断绑「引脚 × 当前功能」。
-        //
-        // ⚠️ **MVP 取第一个 pinmux 器件**（裁决 C1：所有 pinmux 器件同一份
-        //   功能数）⇒ ⇒ 路由表里没有 pinmux id（单 pinmux 部署下语义正确）。
-        for (gpio_id, pin, functions) in self.pinmux_routes.iter() {
-            let Some(gpio) = self.devices.gpio(gpio_id) else {
-                continue;
-            };
-            // ① 引脚有 pending 活动？（**只读** —— 不消费、不改写）
-            let Ok(g) = gpio.try_borrow() else { continue };
-            if !g.pending_pin(*pin) {
-                continue;
-            }
-            drop(g);
-            // ② 当前功能索引（第一个 pinmux 器件 · 与「喂功能数」同源）。
-            let mut current = None;
-            for mux in self.devices.iter_pinmux() {
-                if let Ok(m) = mux.try_borrow() {
-                    current = m.current_function(*pin);
-                    break;
-                }
-            }
-            let Some(current) = current else { continue };
-            // ③ 当前功能 → irq 源（PinSpec 是**建图同源**编译的 ⇒ ⇒ 功能
-            //    列表与 pinmux 器件的功能数来自同一份 `pins` 段）。
-            let Some(fn_spec) = functions.get(current as usize) else {
-                continue;
-            };
-            let Some(source) = fn_spec.irq.as_ref().map(|irq| irq.source) else {
-                continue;
-            };
-            // ④ 消费 pending + 抬源（一次性 ⇒ ⇒ 不重抬）。
-            if let Ok(mut g) = gpio.try_borrow_mut() {
-                g.clear_pending_pin(*pin);
-            }
-            // ⚠️ **PLIC 句柄在本分支内自己取**（函数开头只检查了
-            //   「有 PLIC」—— wiring 循环里的 `plic` 是它**自己查表**的
-            //   局部变量 ⇒ ⇒ 这里不沿用）。
-            let plic = self
-                .devices
-                .first_plic()
-                .and_then(|e| self.devices.plic(&e.id));
-            if let Some(plic) = plic {
-                if let Ok(mut p) = plic.try_borrow_mut() {
-                    p.request(source);
-                }
-            }
+            self.intc.controller.borrow_mut().clear(IRQ_SOFTWARE);
         }
 
         // ---- 3) PLIC 的待交付源 → M-16 的外部中断线 ----
@@ -1834,16 +1713,9 @@ impl KernelHost {
         &self.platform.id
     }
 
-    /// 当前生效的**连线表**（v0.34 · D-125 · STAGE-19 §3.1）。
-    ///
-    /// ⚠️ **它是从生效的描述编译出来的** ⇒ 换一块板就是换一张表 ⇒ ⇒
-    /// 宿主源码里**没有**第二个「PLIC 源号」。
-    ///
-    /// ⚠️ **可观察**：B-5 用它证明「描述里的 `wiring` **覆盖**了默认连线的
-    /// 同键项 ⇒ **不**出现两条连线」—— 那是**表**的性质，不是运行时碰巧
-    /// 抬对了线。
-    pub fn wiring_table(&self) -> &[platform::Wiring] {
-        &self.wiring
+    /// 当前生效的**外设中断号表**（每个 UART / GPIO 一个 PLIC 源号）。
+    pub fn peripheral_irq_table(&self) -> &[platform::PeripheralIrq] {
+        &self.peripheral_irqs
     }
 
     /// 板级内存图的**修订号**（v0.31 · STAGE-16 裁决 A）。
@@ -5115,7 +4987,6 @@ mod tests_intc;
 mod tests_m11;
 
 #[cfg(test)]
-mod tests_osz_wiring;
 
 #[cfg(test)]
 mod tests_v024;
@@ -5137,7 +5008,6 @@ mod tests_time_source;
 /// ⚠️ 它钉的是**宿主这一段**：描述里的 `wiring` ⇒ 抬到哪个源 / 默认连线
 /// ⇒ 存量行为一字未变 / 缺一端 ⇒ 不抬线 / 写死的那个常量已消失。
 #[cfg(test)]
-mod tests_wiring_v034;
 
 /// 板级内存图（v0.29 · STAGE-14 · 验收 B-1 ~ B-9）。
 ///
@@ -5237,7 +5107,6 @@ mod tests_v071_unknown_system;
 /// ⚠️ 盯的是「**第二个 UART 的线也真的通电**」+「**丢线不再静默**」⇒ ⇒
 /// 断言全部落在**契约命令回的事件**与**宿主真的持有句柄**这两件事上。
 #[cfg(test)]
-mod tests_v072_wiring;
 
 /// **描述格式升版**（v0.73 · STAGE-49 · D-175 的 B2 / G / D1 + D-177 的 C）。
 ///
@@ -5252,14 +5121,12 @@ mod tests_v073_schema;
 /// ⚠️ **通用路由** ⇒ ⇒ 事件从「只有 `rx_ready`」扩成**词表**（⇒ ⇒ 语义由
 ///   事件名决定：电平 / 一次性）。
 #[cfg(test)]
-mod tests_v074_pin_routing;
 
 /// pinmux 中断路由的**宿主侧运行时门禁**（v0.76 · STAGE-52 · K-4 ~ K-10）。
 ///
 /// ⚠️ 与 `tests_v074_pin_routing`（接线路径）**并行不互写**（K-6 · 分层
 /// 禁令）⇒ ⇒ 各自单独一个文件 ⇒ 「接线一条不改仍绿」由 `git diff` 一眼可见。
 #[cfg(test)]
-mod tests_v076_pinmux_runtime;
 
 /// **v0.75（STAGE-51 · D-175 的 F）** —— MCU 概念：ISA 门禁的 K 组 / A-3 / X-1。
 #[cfg(test)]

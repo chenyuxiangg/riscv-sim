@@ -16,7 +16,8 @@
       "base": 1073741824,
       "device": {
         "device": "gpio",
-        "id": "GPIO0"
+        "id": "GPIO0",
+        "irq_line": 11
       }
     },
     {
