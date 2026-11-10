@@ -120,10 +120,6 @@ const NAV_ICONS = {
         ["rect", { x: "4", y: "10", width: "16", height: "11", rx: "2" }],
         ["path", { d: "M8 10V7a4 4 0 018 0v3" }],
     ],
-    "memory-map": [
-        ["rect", { x: "3", y: "5", width: "18", height: "14", rx: "2" }],
-        ["path", { d: "M3 12h18M9 5v14M15 5v14" }],
-    ],
     source: [["path", { d: "M8 7l-4 5 4 5M16 7l4 5-4 5M13 5l-2 14" }]],
 };
 
@@ -163,7 +159,7 @@ const VIEW_REGISTRY = new Map([
         panel: '[data-view-panel="product"]',
         role: "product",
         group: "platform",
-        hint: "器件树 · 板级内存图",
+        hint: "器件树 · 器件内存窗口",
     }],
     ["embedded", {
         hash: "embedded",
@@ -211,23 +207,6 @@ const VIEW_REGISTRY = new Map([
         role: "product",
         group: "run",
         hint: "字节流实时上屏 · 可向 guest 打字",
-    }],
-    // 板级内存图编辑器（STAGE-14 · v0.29）。
-    //
-    // ⚠️ **独立工作面**：编辑器**不**塞进产品树视图（规格 §3.3）⇒ 它是
-    // 自己的一条路由 + 自己的一块面板。
-    //
-    // ⚠️ **能力位复用 `view.productTree`**（两个角色都有它）⇒ 不新增能力位
-    // 概念、也不动内核的 `KERNEL_CAP_BITS`（那是内核的分级数值，与前端的
-    // 字符串能力位是两个不同的东西）。
-    ["memory-map", {
-        hash: "memory-map",
-        name: "板级内存图",
-        capability: "view.productTree",
-        panel: '[data-view-panel="memory-map"]',
-        role: "product",
-        group: "platform",
-        hint: "段表编辑 · 差量提交 · 板档案",
     }],
 ]);
 

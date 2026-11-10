@@ -28,10 +28,7 @@ import { Command, EVENT_TOPIC } from "../lib/message.js";
 import * as viewStore from "../views/m03_viewstore.js";
 
 /**
- * 把内核的模板库接进 **memory-map 视图**的视图状态。
- *
- * ⚠️ 模板清单**只有一份**（`memory-map` 视图持有）⇒ ⇒ 板级编辑器用；
- * 产品视图不重复渲染（同一件事只显示一处）。
+ * 把内核的模板库缓存起来（产品视图的内置模板之外，档案走板档案服务）。
  *
  * @param {object} commandRouter — M-05 命令路由
  * @returns {{reset: () => void, subscribeTemplateStreams: () => Promise<object>,
@@ -49,20 +46,8 @@ export function wireTemplates(commandRouter) {
      */
     let templates = null;
 
-    /** 把当前清单写进视图状态并重渲染。 */
-    function publish() {
-        viewStore.setState("memory-map", (prev) => ({
-            ...prev,
-            templates,
-        }));
-        window.dispatchEvent(new CustomEvent("riscv:render", {
-            detail: {
-                viewId: "memory-map",
-                type: "update",
-                state: viewStore.getState("memory-map"),
-            },
-        }));
-    }
+    /** 当前清单只在这个服务里缓存（界面不再单列模板库卡）。 */
+    function publish() {}
 
     commandRouter.subscribe(EVENT_TOPIC.PlatformTemplates, (event) => {
         templates = Array.isArray(event.value?.templates) ? event.value.templates : [];

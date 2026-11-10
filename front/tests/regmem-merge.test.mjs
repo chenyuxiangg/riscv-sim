@@ -71,7 +71,7 @@ const sidebarItems = () =>
 
 // ---------------------------------------------------------------------------
 
-describe("v0.65 · 「寄存器 / 内存」那个**独立视图**没了", () => {
+describe("v0.65 · 已撤销的独立视图都不在", () => {
     test("M-1 · 视图层**没有**注册那个视图了（不是「隐藏了」，是**没了**）", () => {
         // ⚠️ **先钉住「视图层确实还注册着别的视图」** ⇒ ⇒ 否则「一个视图都
         //   没注册」时这条断言**恒真** ⇒ ⇒ **假绿**。
@@ -90,7 +90,7 @@ describe("v0.65 · 「寄存器 / 内存」那个**独立视图**没了", () => 
         show("debug");
         const items = sidebarItems();
         // ⚠️ **先钉住件数** ⇒ ⇒ 免得「侧边栏一个项都没有」时这个循环空转。
-        assert.ok(items.length >= 7, `侧边栏一个导航项都没有（实际 ${items.length}）`);
+        assert.ok(items.length >= 6, `侧边栏一个导航项都没有（实际 ${items.length}）`);
         const hashes = items.map((el) => el.getAttribute("data-view-tab"));
         assert.ok(
             !hashes.includes("regmem"),

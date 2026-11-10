@@ -1549,6 +1549,13 @@ select.addr-field {
 }
 .pw-template:hover { border-color: var(--teal); }
 .pw-dialog-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.pw-dialog-wide { width: min(720px, 100%); }
+.pw-btn-small { font-size: 11px; padding: 2px 8px; }
+.pw-btn-danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+.pw-params { padding: 0 16px; }
+.pw-gaps { border-top: 1px solid var(--line); padding: 12px 16px 0; }
+.pw-table-gaps { margin-top: 6px; }
+.pw-table-archives td { vertical-align: middle; }
 
 @media (max-width: 880px) {
     .pw { grid-template-columns: 1fr; min-height: 0; }

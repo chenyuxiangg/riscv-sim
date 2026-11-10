@@ -543,3 +543,127 @@ describe("产品视图 · 板档案落在数据库里（偏移 / 含义随档持
         assert.deepEqual(state.docsBase, state.docs, "基线没跟上（会立刻显示「未生效」）");
     });
 });
+
+describe("产品视图 · 器件参数与基址空隙进右栏", () => {
+    test("外设右栏显示 PLIC 源号；改它只写草稿", () => {
+        setupLoaded({ locked: false });
+        clickNode("r1");
+        const irq = $("[data-device-param='irq_line']");
+        assert.ok(irq, "外设右栏没有 PLIC 源号输入框");
+        assert.equal(irq.value, "10");
+        const label = irq.closest(".pw-field").querySelector("span");
+        assert.equal(label.textContent, "PLIC 源号", "中断号在 UI 上必须叫 PLIC 源号");
+
+        typeInto(irq, "12");
+        const state = m03.getState("product");
+        assert.equal(state.board.description.regions[1].device.irq_line, "12", "源号没写进草稿");
+        assert.ok($(".pw-dirty-flag"), "改了源号但没有「未生效」标记");
+    });
+
+    test("RAM 右栏有地址空隙；点「用这个」把基址填过去", () => {
+        setupLoaded({ locked: false });
+        clickNode("r0");
+        assert.ok($("[data-product-gaps]"), "RAM 右栏没有地址空隙块");
+        const buttons = $$("[data-action='use-product-gap']");
+        assert.ok(buttons.length > 0, "没有可用的空隙");
+        assert.equal(buttons[0].hasAttribute("disabled"), false, "解锁后「用这个」不该禁用");
+
+        buttons[0].dispatchEvent(new Event("click"));
+        const state = m03.getState("product");
+        assert.equal(
+            state.board.description.regions[0].base,
+            Number(buttons[0].getAttribute("data-gap-from")),
+            "点了「用这个」基址没填进草稿",
+        );
+    });
+});
+
+describe("产品视图 · 添加器件", () => {
+    test("点「添加器件」⇒ 弹层列出 RAM / ROM；添加后树里多一个器件节点", () => {
+        setupLoaded({ locked: false });
+        const open = $("[data-action='open-add-device']");
+        assert.ok(open, "产品树头部没有「添加器件」入口");
+        open.dispatchEvent(new Event("click"));
+        assert.ok($('[data-dialog="add-device"]'), "没有添加器件弹层");
+        const rom = $("[data-action='add-device'][data-add-kind='rom']");
+        assert.ok(rom, "弹层里没有 ROM");
+        const before = m03.getState("product").board.description.regions.length;
+        rom.dispatchEvent(new Event("click"));
+        const after = m03.getState("product").board.description;
+        assert.equal(after.regions.length, before + 1, "添加 ROM 后器件数没加一");
+        assert.equal(after.regions.at(-1).kind, "rom", "新加的器件不是 ROM");
+        assert.equal(
+            Number(after.regions.at(-1).base) % 4096,
+            0,
+            `新器件的基址没有按 4 KiB 对齐：${after.regions.at(-1).base}`,
+        );
+        assert.equal(m03.getState("product").dialog, null, "添加成功后弹层没关");
+    });
+    test("添加外设（GPIO）⇒ 多一个 peripheral 段，器件类型是 gpio", () => {
+        setupLoaded({ locked: false });
+        $("[data-action='open-add-device']").dispatchEvent(new Event("click"));
+        $("[data-action='add-device'][data-add-kind='gpio']").dispatchEvent(new Event("click"));
+        const regions = m03.getState("product").board.description.regions;
+        const added = regions.at(-1);
+        assert.equal(added.kind, "peripheral", "外设器件没有落成 peripheral 段");
+        assert.equal(added.device.device, "gpio", "器件类型没有落成 gpio");
+        assert.match(String(added.device.id), /^GPIO/, "器件 id 没有走 GPIO 前缀");
+        assert.equal(regions.filter((r) => r.device?.id === added.device.id).length, 1, "器件 id 重复");
+    });
+});
+
+describe("产品视图 · 档案管理子窗", () => {
+    const ARCHIVED = {
+        id: "archived-board",
+        description: { ...JSON.parse(JSON.stringify(BOARD)), id: "archived-board", name: "档案板" },
+        rules_version: 1,
+        registers: {},
+    };
+
+    test("点「档案管理」⇒ 弹层列出档案，可载入", () => {
+        setupLoaded({ archive: [ARCHIVED] });
+        const btn = $("[data-action='open-archives']");
+        assert.ok(btn, "左栏没有「档案管理」入口");
+        btn.dispatchEvent(new Event("click"));
+        assert.ok($('[data-dialog="archives"]'), "点了按钮没有档案管理弹层");
+        const load = $("[data-action='use-template'][data-template-src='archive']");
+        assert.ok(load, "档案行没有「载入」");
+        assert.equal(load.getAttribute("data-template-id"), "archived-board");
+    });
+
+    test("点「删除」⇒ 发出 `delete-product-archive`（带 id）", () => {
+        setupLoaded({ archive: [ARCHIVED] });
+        m01.route("#/product");
+        $("[data-action='open-archives']").dispatchEvent(new Event("click"));
+        let detail = null;
+        const listener = (ev) => { detail = ev.detail; };
+        dom.window.addEventListener("riscv:command", listener);
+        $("[data-action='delete-product-archive']").dispatchEvent(new Event("click"));
+        dom.window.removeEventListener("riscv:command", listener);
+        assert.ok(detail, "删除档案没有发命令");
+        assert.equal(detail.action, "delete-product-archive");
+        assert.equal(detail.params.id, "archived-board");
+    });
+
+    test("app 层：删除档案 ⇒ 只动本机档案，当前产品不变", async () => {
+        setupLoaded({ archive: [ARCHIVED] });
+        const rows = [JSON.parse(JSON.stringify(ARCHIVED))];
+        const store = {
+            supported: true,
+            async list() { return rows; },
+            async put(entry) { rows.push(entry); },
+            async remove(id) {
+                const at = rows.findIndex((row) => row.id === id);
+                if (at >= 0) rows.splice(at, 1);
+            },
+        };
+        await app.handleCommand(
+            { action: "delete-product-archive", params: { id: "archived-board" } },
+            { boardStore: store },
+        );
+        const state = m03.getState("product");
+        assert.deepEqual(state.archive, [], "档案列表没刷新");
+        assert.equal(state.board.description.id, "user-board", "删除档案把当前产品也改掉了");
+        assert.equal(rows.length, 0, "持久化层没删掉");
+    });
+});

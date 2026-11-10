@@ -34,7 +34,6 @@ const app = await importFront("app.js");
 const m01 = await importFront("views/m01_workbench.js");
 const m02 = await importFront("views/m02_viewcomponents.js");
 const m03 = await importFront("views/m03_viewstore.js");
-const memoryMap = await importFront("views/components/memory-map.js");
 
 // M-02 的渲染监听器只挂一次（模块级单例）。
 await m02.mountViewComponents();
@@ -62,14 +61,14 @@ function show(viewId) {
 }
 
 /**
- * 七个视图（v0.65 批：**「寄存器 / 内存」那个独立视图撤销了** ⇒ ⇒ 8 变 7）。
+ * 六个视图（板级内存图已并入产品视图）。
  *
  * ⚠️ **不是「删一个功能」**：那些内容**搬进了调试视图**（拆成「寄存器窗口」
  *   与「内存窗口」两张卡）⇒ ⇒ 功能一件没少 ⇒ ⇒ 只是**不再有第二个入口**。
  */
 const VIEW_IDS = [
     "debug", "embedded", "terminal",
-    "waveform", "memory-map", "product", "source",
+    "waveform", "product", "source",
 ];
 
 // ⚠️ **反汇编条目**（内核的 `debug.disasm` 事件的载荷形状）。
@@ -126,10 +125,10 @@ function fakeServices(extra = {}) {
 // ---------------------------------------------------------------------------
 
 describe("STAGE-35 · 视图内容形态（卡片化）", () => {
-    test("A-1 · 七个视图的正文**都非空**（7 / 7）", () => {
+    test("A-1 · 六个视图的正文**都非空**（6 / 6）", () => {
         // ⚠️ **先钉住件数** ⇒ ⇒ 否则「视图一个都没挂上」时这个 `for`
         // **一次都不执行** ⇒ ⇒ 用例**空转通过** ⇒ ⇒ **假绿**。
-        assert.equal(VIEW_IDS.length, 7, "本批的视图清单必须是 7 个");
+        assert.equal(VIEW_IDS.length, 6, "本批的视图清单必须是 6 个");
         for (const id of VIEW_IDS) {
             const el = show(id);
             assert.ok(
@@ -390,44 +389,10 @@ describe("STAGE-35 · 断点 UI", () => {
     });
 });
 
-describe("STAGE-35 · 产品树折叠 / 内存图比例条 / 终端收发计数", () => {
+describe("STAGE-35 · 产品树折叠 / 终端收发计数", () => {
     // ⚠️ **A-10 已退役**（v0.77 产品视图重构）：新视图的树**不再折叠**
     // （左树就是器件列表，折叠在「点器件 ⇒ 右栏看内存」这条动线上没有意义）
     // ⇒ ⇒ 「折叠状态住视图状态」这条判据随界面一起下线。
-
-    test("A-11 · 内存图比例条的**分段数 == 段表行数**（且每段宽度按**真地址区间**算）", () => {
-        // ⚠️ **先造出真数据** ⇒ ⇒ 0 段 == 0 行那条断言**恒真** ⇒ ⇒ 假绿。
-        let draft = memoryMap.defaultDraft();
-        draft = memoryMap.addRegion(draft, "ram");
-        draft = memoryMap.addRegion(draft, "rom");
-        m03.setState("memory-map", (prev) => ({ ...prev, draft }));
-        const el = show("memory-map");
-        const segs = el.querySelectorAll(".seg");
-        const rows = el.querySelectorAll("[data-mmap-row]");
-        assert.ok(rows.length >= 2, `段表应当至少有 2 行，实际 ${rows.length}`);
-        assert.equal(
-            segs.length,
-            rows.length,
-            `比例条分段数 ${segs.length} 与段表行数 ${rows.length} 对不上`,
-        );
-        // ⚠️ **宽度按真地址区间算** ⇒ ⇒ 逐段核对比例。
-        const regions = draft.regions ?? [];
-        const lo = Math.min(...regions.map((r) => Number(r.base)));
-        const hi = Math.max(...regions.map((r) => Number(r.base) + Number(r.size)));
-        const span = hi - lo;
-        assert.ok(span > 0, "这块板的地址跨度是 0（算不出比例）");
-        for (let i = 0; i < segs.length; i += 1) {
-            const style = String(segs[i].getAttribute("style") ?? "");
-            const m = /flex:\s*([0-9.eE+-]+)/.exec(style);
-            assert.ok(m, `第 ${i} 段没有宽度（style=${style}）`);
-            const expected = Number(regions[i].size) / span;
-            const actual = Number(m[1]);
-            assert.ok(
-                Math.abs(actual - expected) < 1e-9,
-                `第 ${i} 段的比例 ${actual} 不是按真地址区间算的（期望 ${expected}）`,
-            );
-        }
-    });
 
     test("A-12 · 终端**显示 TX / RX 计数**，且**分别标注方向**（裁决 G）", () => {
         m03.setState("terminal", (prev) => ({

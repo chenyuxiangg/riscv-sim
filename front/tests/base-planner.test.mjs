@@ -188,26 +188,6 @@ describe("STAGE-46 · 基址规划 · 纯函数", () => {
         );
     });
 
-    test("N-5 · 面板**列出了**空隙 ⇒ ⇒ 每条有**起止地址 + 可用字节**", () => {
-        setDraft(boardDraft());
-        const view = show("memory-map");
-        const plan = view.querySelector("[data-mmap-plan]");
-        assert.ok(plan, "编辑器里没有「基址规划」面板");
-        const rows = gapRows(view);
-        assert.ok(rows.length > 0, "面板一条空隙都没列 ⇒ ⇒ 那条断言会**恒真**（假绿）");
-        for (const row of rows) {
-            const cells = row.querySelectorAll("td");
-            assert.ok(cells.length >= 3, `空隙行只有 ${cells.length} 列（起 / 止 / 字节）`);
-            for (const cell of cells) {
-                assert.ok(
-                    String(cell.textContent || "").trim().length > 0,
-                    "空隙行里有一格是空的 ⇒ ⇒ 用户看不见那个区间",
-                );
-            }
-            const use = row.querySelector('[data-action="use-base-gap"]');
-            assert.ok(use, "空隙行没有「用这个」入口 ⇒ ⇒ 面板只是个说明");
-        }
-    });
 
     test("N-8 · **规划范围**改了 ⇒ ⇒ 空隙**跟着变**", () => {
         const draft = boardDraft();
@@ -223,29 +203,6 @@ describe("STAGE-46 · 基址规划 · 纯函数", () => {
         }
     });
 
-    test("N-9 · 范围里**没有空隙** ⇒ ⇒ 面板**如实说**（不是显示一个空列表）", () => {
-        const draft = boardDraft();
-        // ⚠️ **故意**把范围设成正好被占满的那一小块。
-        const occupied = mm.occupiedIntervals(draft, TYPES);
-        const tight = { from: occupied[0].base, to: occupied[0].end };
-        assert.equal(
-            mm.planBaseGaps(draft, TYPES, tight).length,
-            0,
-            "这个范围**不该**有空隙（前提不成立 ⇒ ⇒ 后面那条断言就**恒假**了）",
-        );
-        setDraft(draft);
-        m03.setState("memory-map", (prev) => ({
-            ...prev,
-            plan: { range: tight, target: 0 },
-        }));
-        const view = show("memory-map");
-        const note = view.querySelector("[data-mmap-plan-note]");
-        assert.ok(note, "面板没有那行说明");
-        assert.ok(
-            view.querySelector("[data-mmap-plan-empty]"),
-            `范围里没有空隙却没说：${JSON.stringify(note.textContent)}`,
-        );
-    });
 
     test("N-10 · 比例条的外设段宽度**按内核给的窗口大小**算（裁决 I）", () => {
         const draft = boardDraft();
@@ -259,57 +216,6 @@ describe("STAGE-46 · 基址规划 · 纯函数", () => {
             fallback.segments.find((seg) => seg.kind === "peripheral").size,
             mm.PERIPHERAL_WINDOW_BYTES,
             "内核还没报时**不该**用占位长度 ⇒ ⇒ 判据反了",
-        );
-    });
-});
-
-describe("STAGE-46 · 基址规划 · 视图层交互", () => {
-    test("N-6 · 点「用这个」⇒ ⇒ **目标行**的基址**真的**变了", () => {
-        setDraft(boardDraft());
-        const view = show("memory-map");
-        const rows = gapRows(view);
-        assert.ok(rows.length > 0, "面板一条空隙都没列 ⇒ ⇒ 后面无从谈起");
-        const first = rows[0];
-        const gapFrom = Number(first.getAttribute("data-mmap-plan-gap"));
-        const use = first.querySelector('[data-action="use-base-gap"]');
-        assert.ok(use, "空隙行没有「用这个」按钮");
-        // ⚠️ **在 `pointerdown` 阶段触发**（真实浏览器里「刚敲完范围就点它」那个
-        //   时序陷阱 ⇒ ⇒ `blur` → `change` → 重渲染 ⇒ ⇒ 按钮**被换掉** ⇒ ⇒
-        //   `click` 根本到不了）。
-        use.dispatchEvent(new Event("pointerdown", { bubbles: true }));
-        const draft = m03.getState("memory-map")?.draft;
-        assert.ok(draft, "视图状态里没有草稿");
-        assert.equal(
-            String(draft.regions[0].base),
-            String(gapFrom),
-            "点「用这个」之后目标行的基址**没变** ⇒ ⇒ 入口没生效",
-        );
-    });
-
-    test("N-7 · **目标行**换一行 ⇒ ⇒ 填给的是**那一行**（不是永远第 0 行）", () => {
-        setDraft(boardDraft());
-        m03.setState("memory-map", (prev) => ({
-            ...prev,
-            plan: { range: null, target: 2 },
-        }));
-        const view = show("memory-map");
-        const rows = gapRows(view);
-        assert.ok(rows.length > 0, "面板一条空隙都没列");
-        const gapFrom = Number(rows[0].getAttribute("data-mmap-plan-gap"));
-        const use = rows[0].querySelector('[data-action="use-base-gap"]');
-        assert.ok(use, "空隙行没有「用这个」按钮");
-        use.dispatchEvent(new Event("pointerdown", { bubbles: true }));
-        const draft = m03.getState("memory-map")?.draft;
-        assert.ok(draft, "视图状态里没有草稿");
-        assert.equal(
-            String(draft.regions[2].base),
-            String(gapFrom),
-            "目标行是第 2 行，却把基址填到了别处 ⇒ ⇒ 目标行**没生效**",
-        );
-        assert.notEqual(
-            String(draft.regions[0].base),
-            String(gapFrom),
-            "第 0 行**也被**改了 ⇒ ⇒ 目标行被**忽略**了（永远填第 0 行）",
         );
     });
 });
