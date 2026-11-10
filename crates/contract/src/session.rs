@@ -70,6 +70,11 @@
 //! 全部待取字节 + 溢出丢弃的累计计数），`mem_pages` 的**语义**改成
 //! 「只装写过的页」⇒ [`SESSION_SNAPSHOT_SCHEMA_VERSION`] **2 → 3**。
 //!
+//! ⚠️ **v4 是破坏性变更**：`GpioStateDto` 删掉了逐引脚 `irq_lines`。
+//! 整块 GPIO 只有一个 PLIC 源号，源号属于**板级描述**（
+//! [`crate::platform::DeviceSpec::Gpio`] 的 `irq_line`），不属于外设
+//! 运行态 ⇒ [`SESSION_SNAPSHOT_SCHEMA_VERSION`] **3 → 4**。
+//!
 //! ⚠️ **前端不受影响**：`front/lib/message.js` 镜像的是**协议**的
 //! `schema_version`（5），**不是**会话快照的 schema ⇒ 契约层升版
 //! **不需要**动前端。
@@ -107,18 +112,16 @@ use crate::snapshot::{EngineSnapshotDto, SNAPSHOT_FAMILY, SNAPSHOT_SCHEMA_VERSIO
 /// 即使 [`MemPageDto`] 的**形状**没变 ⇒ 一个 v2 载荷读得回来，但它装
 /// 的是「整段 RAM 按 64 KiB 切的全部块」⇒ 还原出来的会话与采快照的那次
 /// **不是同一个** ⇒ 同样必须**显式**拒收。
-pub const SESSION_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+/// ⚠️ **v4**：`GpioStateDto` **删掉** `irq_lines`（逐引脚中断线）——
+/// 中断号属于板级描述（每个外设一个 PLIC 源号），不是外设运行态 ⇒
+/// 快照形状变了 ⇒ 版本再升一次。
+pub const SESSION_SNAPSHOT_SCHEMA_VERSION: u32 = 4;
 
 /// Number of pins in a **GPIO bank** — the single landing spot for that
 /// number.
 ///
-/// ⚠️ **One number, one home.** The GPIO's per-pin IRQ list
-/// ([`GpioStateDto::irq_lines`]) must have **exactly** this many entries:
-/// fewer would leave the remaining pins' IRQ lines undefined, more would
-/// carry lines that do not exist. M-15's `PIN_COUNT` **references** this
-/// constant instead of spelling out `32` a second time — two copies of
-/// the same number is two truths, and the moment one of them moves the
-/// payload silently stops validating.
+/// M-15's `PIN_COUNT` **references** this constant instead of spelling
+/// out `32` a second time — two copies of the same number is two truths.
 pub const GPIO_PIN_COUNT: usize = 32;
 
 /// Scenario code: the session payload's shape is malformed — its
@@ -397,13 +400,6 @@ pub struct GpioStateDto {
     pub outputs: u32,
     /// Input latch.
     pub inputs: u32,
-    /// IRQ line per pin.
-    ///
-    /// ⚠️ **Exactly [`GPIO_PIN_COUNT`] entries** — one per pin, in pin
-    /// order. Fewer leaves the remaining pins' lines undefined, more
-    /// carries lines that do not exist; neither is padded nor truncated
-    /// (see [`SessionSnapshotDto::validate`]).
-    pub irq_lines: Vec<u16>,
     /// Pending IRQ bitmask.
     pub pending_irqs: u32,
     /// Peripheral's authoritative virtual timestamp — **decimal string**.
@@ -703,8 +699,6 @@ impl SessionSnapshotDto {
     /// 6. `m13_state.mem_pages` — ascending by `base`, non-overlapping,
     ///    and each page fits inside a RAM region
     /// 7. `m15_periph` — no duplicate id, **across kinds** as well
-    /// 8. `m15_periph.gpios[*].irq_lines` — exactly [`GPIO_PIN_COUNT`]
-    ///    entries
     ///
     /// ⚠️ **v0.24 另加一条**（不是编号里的一条 ⇒ 它是**形状**检查，不是
     /// 规格 §5 表里那 14 条之一）：`m15_periph.uarts[*].rx` 必须**等于**
@@ -939,21 +933,6 @@ impl SessionSnapshotDto {
                         p.pending.len()
                     )));
                 }
-            }
-        }
-
-        // 8 — every GPIO bank must carry **exactly one IRQ line per pin**.
-        //
-        // ⚠️ Neither padded nor truncated: padding fabricates lines the
-        // firmware never wrote, truncation drops lines it did. Both are
-        // rejected.
-        for g in &self.m15_periph.gpios {
-            if g.irq_lines.len() != GPIO_PIN_COUNT {
-                return Err(self.malformed(&format!(
-                    "GPIO '{}' 的 irq_lines 有 {} 条，应恰好 {GPIO_PIN_COUNT} 条（不补齐也不截断）",
-                    g.id,
-                    g.irq_lines.len()
-                )));
             }
         }
 
@@ -1227,7 +1206,6 @@ mod tests {
                     directions: 0xF,
                     outputs: 0x1,
                     inputs: 0x2,
-                    irq_lines: (0..GPIO_PIN_COUNT).map(|i| 4 + i as u16).collect(),
                     pending_irqs: 0,
                     now_ps: 600,
                 }],
@@ -1369,7 +1347,6 @@ mod tests {
                 "directions",
                 "id",
                 "inputs",
-                "irq_lines",
                 "now_ps",
                 "outputs",
                 "pending_irqs",
@@ -1869,55 +1846,31 @@ mod tests {
         assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
     }
 
-    /// GPIO 的每引脚 IRQ 线**少一条** → 拒。
+    /// GPIO 的状态里**不许**再有每引脚 IRQ 线。
     ///
-    /// ⚠️ **不补齐**：补齐 = 造出固件没写过的事实。
+    /// 中断号属于板级描述（每个外设一个 PLIC 源号），不是外设运行态；
+    /// 会话快照再带一份逐引脚线号就是第二个真相源。
     #[test]
-    fn a_gpio_with_too_few_irq_lines_is_rejected() {
-        let mut s = sample();
-        s.m15_periph.gpios[0].irq_lines = vec![1, 2, 3];
-        let err = s.validate().expect_err("irq_lines 少一条必须被拒");
-        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
+    fn a_gpio_state_carries_no_per_pin_irq_lines() {
+        let g = GpioStateDto {
+            id: "GPIO0".to_string(),
+            directions: 0,
+            outputs: 0,
+            inputs: 0,
+            pending_irqs: 0,
+            now_ps: 0,
+        };
+        let v = serde_json::to_value(&g).expect("serialize");
+        assert!(
+            v.get("irq_lines").is_none(),
+            "GPIO 状态不许再带逐引脚 irq_lines：{v}"
+        );
     }
 
-    /// GPIO 的每引脚 IRQ 线**多一条** → 拒。
-    ///
-    /// ⚠️ **不截断**：截断 = 丢状态。
-    #[test]
-    fn a_gpio_with_too_many_irq_lines_is_rejected() {
-        let mut s = sample();
-        s.m15_periph.gpios[0].irq_lines = vec![0xFFFF; GPIO_PIN_COUNT + 1];
-        let err = s.validate().expect_err("irq_lines 多一条必须被拒");
-        assert_eq!(err.scenario, E_SNAP_06_MALFORMED_SESSION);
-    }
-
-    /// 恰好**每引脚一条** → 载荷通过校验。
-    ///
-    /// ⚠️ 这条是上面两条的**反面**：只有「少一条 / 多一条都拒」而没有
-    /// 「刚好一条放行」，那两条断言就分不清「校验器在数条数」和「校验器
-    /// 什么都拒」。
-    #[test]
-    fn a_gpio_with_exactly_one_irq_line_per_pin_is_accepted() {
-        let mut s = sample();
-        s.m15_periph.gpios[0].irq_lines = vec![0xFFFF; GPIO_PIN_COUNT];
-        s.validate()
-            .expect("恰好每引脚一条的 GPIO 状态必须通过校验");
-    }
-
-    /// ⚠️ **数字由常量自己说**：引脚数改了，这条用例的「恰好」也要跟着
-    /// 变——所以断言的是**条数**，不是字面量 `32`。
-    ///
-    /// 这条钉住的是「契约层导出的那个数」与「载荷的形状」是**同一个数**：
-    /// 把 `GPIO_PIN_COUNT` 改成 16 之后，M-15 的 `PIN_COUNT` 必须跟着变
-    /// （它引用的是这个常量），否则 GPIO 的导出就会带 32 条线而契约层
-    /// 只认 16 条 ——**载荷再也过不了自己的校验**。
+    /// GPIO 引脚数是 32 —— 常量只有这一处。
     #[test]
     fn the_gpio_pin_count_is_the_single_landing_spot() {
-        assert_eq!(GPIO_PIN_COUNT, 32, "MVP 的 GPIO  Bank 是 32 引脚");
-        let mut s = sample();
-        s.m15_periph.gpios[0].irq_lines = vec![0xFFFF; GPIO_PIN_COUNT];
-        s.validate()
-            .expect("按契约层导出的引脚数构造的载荷必须通过校验");
+        assert_eq!(GPIO_PIN_COUNT, 32, "MVP 的 GPIO Bank 是 32 引脚");
     }
 
     #[test]
@@ -1993,15 +1946,15 @@ mod tests {
     /// 变更** ⇒ 版本必须**显式**升到 2（旧载荷会被**明确地**拒掉，
     /// 而不是被「读得回来但含义已变」地静默接受）。
     ///
-    /// ⚠️ **v3**（v0.26 · STAGE-11 裁决 C-4 / E）：`UartStateDto` 加了
-    /// `tx_ring` / `tx_dropped`，`mem_pages` 的**语义**改成「只装写过的
-    /// 页」⇒ **破坏性变更** ⇒ 版本必须**显式**升到 3。
+    /// ⚠️ **v3**：`UartStateDto` 加了 `tx_ring` / `tx_dropped`，
+    /// `mem_pages` 的**语义**改成「只装写过的页」。
+    ///
+    /// ⚠️ **v4**：`GpioStateDto` 删掉逐引脚 `irq_lines`。
     #[test]
-    fn the_session_snapshot_schema_version_is_three() {
+    fn the_session_snapshot_schema_version_is_four() {
         assert_eq!(
-            SESSION_SNAPSHOT_SCHEMA_VERSION, 3,
-            "会话载荷的格式版本必须是 3——v3 改了 DTO 的形状（UART 的 TX 捕获环两个字段）\
-             与 mem_pages 的语义"
+            SESSION_SNAPSHOT_SCHEMA_VERSION, 4,
+            "会话载荷的格式版本必须是 4——v4 删掉了 GPIO 的逐引脚 irq_lines"
         );
     }
 

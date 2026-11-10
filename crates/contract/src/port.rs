@@ -262,9 +262,9 @@ pub trait Peripheral {
     ///
     /// ⚠️ **This method is not optional in spirit, but it is additive in
     /// form.** The restore path's write stage may hide integrity
-    /// constraints that **only this peripheral knows** (e.g. the GPIO's
-    /// `irq_lines` must have exactly [`crate::session::GPIO_PIN_COUNT`]
-    /// entries). If those checks live **only** in the write path, then
+    /// constraints that **only this peripheral knows** (e.g. a snapshot
+    /// state must name the instance it is applied to). If those checks
+    /// live **only** in the write path, then
     /// "restore the UART first, discover the malformed GPIO afterwards"
     /// leaves a **half-applied session** (the UART has already been
     /// overwritten) behind an `Err`. A half-applied snapshot is worse

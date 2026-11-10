@@ -683,8 +683,8 @@ fn restore_session_rejects_an_unknown_peripheral_id_without_touching_the_periphe
 ///
 /// ## 场景
 ///
-/// 载荷里有一个合法的外设状态 + 一个**畸形**的（GPIO 的 `irq_lines` 只有
-/// 3 条）。契约层的 [`validate`](riscv_sim_contract::session::SessionSnapshotDto::validate)
+/// 载荷里有一个合法的外设状态 + 一个**畸形**的（同一个 GPIO id 重复
+/// 出现）。契约层的 [`validate`](riscv_sim_contract::session::SessionSnapshotDto::validate)
 /// 会先把它拒掉（`E_SNAP-06`）——**第一层**闸门。
 ///
 /// ## 为什么还要断言总线
@@ -704,8 +704,9 @@ fn restore_session_rejects_a_malformed_peripheral_state_without_touching_the_bus
         1,
         "夹具：载荷里必须有一个**合法**的 UART"
     );
-    // 畸形：GPIO 的每引脚 IRQ 线只有 3 条（应为 32 条）。
-    payload.m15_periph.gpios[0].irq_lines = vec![1, 2, 3];
+    // 畸形：同一个 GPIO id 出现两次（契约层跨类型唯一性检查会拒）。
+    let dup = payload.m15_periph.gpios[0].clone();
+    payload.m15_periph.gpios.push(dup);
 
     // 漂移：把 RAM 里那块内存改掉。
     write_ram(&mut host, DEMO_STORE_ADDR, 0xDEAD);
@@ -869,7 +870,6 @@ fn a_successful_restore_puts_every_field_back() {
     assert_eq!(gpio.inputs, want.inputs);
     assert_eq!(gpio.pending_irqs, want.pending_irqs);
     assert_eq!(gpio.now_ps, want.now_ps, "外设自己的时钟必须回到载荷里的值");
-    assert_eq!(gpio.irq_lines, want.irq_lines);
     assert_eq!(
         host.registers(),
         payload.m12_engine.state.gpr,

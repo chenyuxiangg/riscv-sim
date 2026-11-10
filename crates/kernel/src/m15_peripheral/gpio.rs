@@ -15,12 +15,11 @@
 //!   Reads return `0`. Example: `value = 1<<3 | 1<<0` flips pins 0
 //!   and 3 atomically.
 //!
-//! IRQ: each pin can raise its own IRQ on either edge (configurable
-//! via [`GpioBank::set_irq_line_for_pin`]). MVP does NOT mask: each
-//! edge latches a sticky bit in `pending_irqs`; `take_pending_irqs`
-//! consumes the pending vector and **deduplicates** by IRQ line so
-//! that multi-pin → same-line bindings do not flood the consumer
-//! (M-15 review #13).
+//! IRQ: the bank is **one** interrupt source for the whole port. Any
+//! edge on any pin latches a sticky bit in `pending_irqs`; the host
+//! consumes the bitmask and raises the bank's single PLIC source. The
+//! source number lives in the platform description, not in this
+//! peripheral's state.
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
@@ -50,9 +49,7 @@ pub const SIGNAL_OUT: &str = "OUT";
 /// Number of pins in the bank.
 ///
 /// ⚠️ **One number, one home** — the contract layer owns it
-/// ([`GPIO_PIN_COUNT`]). The number is spelled out in the *contract*
-/// because the **payload's** shape depends on it (the per-pin IRQ list
-/// must have exactly this many entries); the model here just follows.
+/// ([`GPIO_PIN_COUNT`]); the model here just follows.
 const PIN_COUNT: u32 = GPIO_PIN_COUNT as u32;
 /// Mask of all valid pin bits for a 32-pin bank. MVP: bank is fixed at
 /// 32 pins so the mask is simply `u32::MAX`. Reserved for narrower banks
@@ -73,8 +70,6 @@ pub struct GpioBank {
     directions: u32, // 1 = output
     outputs: u32,
     inputs: u32,
-    /// Per-pin IRQ line (16-bit; 0xFFFF = no IRQ).
-    irq_lines: [u16; PIN_COUNT as usize],
     /// Sticky edge-triggered pending IRQ vector. Low bit = pin 0.
     pending_irqs: u32,
     /// M-18 probe callback (D-12). Empty = no observer attached.
@@ -98,7 +93,6 @@ impl GpioBank {
             directions: 0,
             outputs: 0,
             inputs: 0,
-            irq_lines: [0xFFFF; PIN_COUNT as usize],
             pending_irqs: 0,
             probe: ProbeSlot::default(),
             now_ps: 0,
@@ -136,43 +130,9 @@ impl GpioBank {
         self.latch_edges(changed);
     }
 
-    /// Take the pending-IRQ pin mask and clear it. Returns a
-    /// deduplicated list of IRQ lines (M-15 review #13): if multiple
-    /// pins bind to the same line, that line appears once.
-    pub fn take_pending_irqs(&mut self) -> Vec<u16> {
-        let pending = std::mem::take(&mut self.pending_irqs);
-        // M-15 review N3: bit-set of lines already emitted. Covers
-        // `line ∈ [0, 32)` (was `[0, 16)` — `line ∈ [16, 32)` previously
-        // bypassed dedup entirely, contradicting the documented "the
-        // IRQ line per pin is unique" contract).
-        let mut seen: u32 = 0;
-        let mut out = Vec::new();
-        for pin in 0..PIN_COUNT {
-            if (pending >> pin) & 1 == 1 {
-                if let Some(&line) = self.irq_lines.get(pin as usize) {
-                    if line != 0xFFFF && line < 32 {
-                        let bit = 1u32 << line;
-                        if seen & bit == 0 {
-                            seen |= bit;
-                            out.push(line);
-                        }
-                    } else if line != 0xFFFF {
-                        // Lines >= 32 cannot be represented in the
-                        // 32-bit dedup bitmap; emit them as-is without
-                        // dedup (they are very rare in MVP — most
-                        // RISC-V MCUs use line numbers < 32).
-                        out.push(line);
-                    }
-                }
-            }
-        }
-        out
-    }
-
     /// **该引脚有没有 pending 活动**（**只读**）。
     ///
-    /// ⚠️ 查「这个引脚有活动」而不取线号 ⇒ ⇒ 消费由 [`Self::clear_pending_pin`]
-    ///   单独做 ⇒ ⇒ **不**经 `irq_lines`（分层禁令 · 裁决 K）。
+    /// ⚠️ 查「这个引脚有活动」；消费由 [`Self::clear_pending_pin`] 单独做。
     pub fn pending_pin(&self, pin: u32) -> bool {
         if pin >= PIN_COUNT {
             return false;
@@ -187,75 +147,12 @@ impl GpioBank {
         }
     }
 
-    /// **取**某个引脚的 **IRQ 线号**并**消费**掉它的 pending 位
-    /// （v0.74 · STAGE-50 · 引脚级连线的源）。
-    ///
-    /// ⚠️ **为什么是「消费」**（裁决 K）：PLIC 的源**只有一位**（F-3）⇒ ⇒
-    ///   一个源**不能**既被「一次性请求」又被「电平撤销」管 ⇒ ⇒ ⇒ 引脚级
-    ///   的中断**天然**是**一次性**语义 ⇒ ⇒ ⇒ 取一次就**消费掉**⇒ ⇒ 抬过
-    ///   一次之后设备侧**没有**待投递的了 ⇒ ⇒ ⇒ **不活锁**。
-    ///
-    /// ⚠️ **没有 pending**（或该引脚**没配** IRQ 线）⇒ ⇒ `None`（⇒ ⇒ 不抬）。
-    ///
-    /// @param pin — 引脚号（0..[`GPIO_PIN_COUNT`]）
-    /// @returns 该引脚的 IRQ 线号（`0xFFFF` = 未配置 ⇒ `None`）
-    pub fn take_irq_line_for_pin(&mut self, pin: u32) -> Option<u16> {
-        if pin >= PIN_COUNT {
-            return None;
-        }
-        // ⚠️ **消费**掉这一位（⇒ ⇒ 不会重抬）。
-        if (self.pending_irqs >> pin) & 1 == 0 {
-            return None;
-        }
-        self.pending_irqs &= !(1u32 << pin);
-        let line = self.irq_lines.get(pin as usize).copied()?;
-        if line == 0xFFFF {
-            return None;
-        }
-        Some(line)
-    }
-
-    /// **读**某个引脚的 **IRQ 线号**（**只读** · v0.74 · STAGE-50）。
-    ///
-    /// ⚠️ **为什么需要它**：「连线表把引脚绑到哪个源」这条**只有一个落点**
-    ///   ⇒ ⇒ ⇒ 判据要能**直接读到**那根绑定（⇒ ⇒ 否则
-    ///   只能靠「端到端通电」那种**间接**证据 ⇒ ⇒ ⇒ 归因分不清）。
-    ///
-    /// ⚠️ **未配置**（`0xFFFF`）⇒ ⇒ `None`（**不是** `0xFFFF` 那个数 ⇒ ⇒
-    ///   「没绑」与「绑到 0xFFFF」分得开）。
-    ///
-    /// @param pin — 引脚号（0..[`GPIO_PIN_COUNT`]）
-    /// @returns 该引脚的 IRQ 线号（未配置 ⇒ ⇒ `None`）
-    pub fn irq_line_for_pin(&self, pin: u32) -> Option<u16> {
-        if pin >= PIN_COUNT {
-            return None;
-        }
-        match self.irq_lines.get(pin as usize).copied() {
-            Some(0xFFFF) | None => None,
-            Some(line) => Some(line),
-        }
-    }
-
-    /// Bind an IRQ line to a pin (0..32). Use `0xFFFF` to disable.
-    pub fn set_irq_line_for_pin(&mut self, pin: u32, line: u16) {
-        if pin < PIN_COUNT {
-            self.irq_lines[pin as usize] = line;
-        }
-    }
-
     /// Internal: latch a sticky pending IRQ for every pin with a set
-    /// bit in `changed`（无条件，不看线号）。
-    /// 把沿事件的引脚**无条件**锁进 `pending_irqs`。
+    /// bit in `changed`.
     ///
-    /// ⚠️ **为什么去掉 `irq_lines[pin] != 0xFFFF` 门控**：单源路径（分层
-    /// 禁令）**不写** GPIO 的 `irq_lines` ⇒ ⇒ 若锁存还依赖「线号已配」，那
-    /// 条路径的沿就**永远锁不进来**（K-4 通电判据当场红）⇒ ⇒ ⇒ **锁存与
-    /// 线号映射解耦**：
-    /// - **锁存**：沿 ⇒ 置位（**无条件** —— 方向过滤在调用方：外部喂入
-    ///   只对 input 引脚、OUT/TOGGLE 对任意引脚）；
-    /// - **线号映射**：只发生在**输出侧**（[`Self::take_pending_irqs`] /
-    ///   [`Self::take_irq_line_for_pin`]）⇒ ⇒ 未配线号的引脚**不进**那两条
-    ///   的输出（`0xFFFF` 跳过）⇒ ⇒ **接线路径的外部行为逐字不变**。
+    /// 锁存与中断号**无关**：沿 ⇒ 置位（方向过滤在调用方：外部喂入只
+    /// 对 input 引脚、OUT/TOGGLE 对任意引脚）；整块 GPIO 共用一个 PLIC
+    /// 源号，源号由板级描述决定。
     fn latch_edges(&mut self, changed: u32) {
         self.pending_irqs |= changed & PIN_COUNT_MASK;
     }
@@ -362,18 +259,14 @@ impl Peripheral for GpioBank {
     /// This GPIO bank's share of the **session snapshot** (segment 4 —
     /// STAGE-3 §3.3).
     ///
-    /// The per-pin IRQ lines are exported as a **list in pin order**
-    /// (pin 0 first): the DTO carries a `Vec`, the bank owns a
-    /// `[u16; PIN_COUNT]`, and the order is the whole meaning of the
-    /// list. A reordering would silently move a pin's IRQ line onto
-    /// another pin.
+    /// The IRQ source number is **not** part of this state: it belongs
+    /// to the board description, not to the peripheral's runtime.
     fn session_state(&self) -> Option<PeripheralSessionState> {
         Some(PeripheralSessionState::Gpio(GpioStateDto {
             id: self.id.clone(),
             directions: self.directions,
             outputs: self.outputs,
             inputs: self.inputs,
-            irq_lines: self.irq_lines.to_vec(),
             pending_irqs: self.pending_irqs,
             now_ps: self.now_ps,
         }))
@@ -382,16 +275,10 @@ impl Peripheral for GpioBank {
     /// Restore the GPIO bank's session state (segment 4's consumer).
     ///
     /// **Every** field is restored: the direction mask, the output
-    /// latch, the input latch, the per-pin IRQ lines, the sticky
-    /// pending-IRQ vector and `now_ps`.
+    /// latch, the input latch, the sticky pending-IRQ vector and
+    /// `now_ps`.
     ///
-    /// ⚠️ The IRQ-line list must have **exactly one entry per pin** —
-    /// a shorter list would leave the remaining pins' lines undefined
-    /// and a longer one would carry lines that do not exist. Neither
-    /// is repaired silently: the state is **rejected**
-    /// ([`E_PER_04_UNSUPPORTED_SESSION_STATE`]).
-    ///
-    /// ⚠️ The same rule is also checked **before** the write stage
+    /// ⚠️ The same id check is also run **before** the write stage
     /// ([`Peripheral::validate_session_state`]) — the check here is
     /// **defensive redundancy**, not the gate. The gate is the
     /// read-only pass, because a check that only lives here would let
@@ -409,11 +296,9 @@ impl Peripheral for GpioBank {
             ));
         };
         super::check_same_id(&self.id, &s.id)?;
-        self.check_irq_lines(&s.irq_lines)?;
         self.directions = s.directions & PIN_COUNT_MASK;
         self.outputs = s.outputs & PIN_COUNT_MASK;
         self.inputs = s.inputs & PIN_COUNT_MASK;
-        self.irq_lines.copy_from_slice(&s.irq_lines);
         self.pending_irqs = s.pending_irqs & PIN_COUNT_MASK;
         self.now_ps = s.now_ps;
         Ok(())
@@ -423,12 +308,8 @@ impl Peripheral for GpioBank {
     /// (STAGE-3 §3.3) — the gate that runs **before** anything is
     /// written.
     ///
-    /// ⚠️ The rule that lives **only here**: the per-pin IRQ list must
-    /// have **exactly one entry per pin** — no padding, no truncation.
-    /// The contract layer checks the same shape rule on the *payload*
-    /// (it knows the pin count), but the **peripheral** owns the
-    /// meaning of the list, so the peripheral checks it too — and the
-    /// peripheral's check is the one that guards the **write** stage.
+    /// ⚠️ The rule that lives **only here**: the state must name this
+    /// bank (same id). The rest of the shape is the contract's.
     fn validate_session_state(&self, state: &PeripheralSessionState) -> Result<(), PlatformError> {
         let PeripheralSessionState::Gpio(s) = state else {
             return Err(super::wrong_state_kind(
@@ -438,33 +319,11 @@ impl Peripheral for GpioBank {
             ));
         };
         super::check_same_id(&self.id, &s.id)?;
-        self.check_irq_lines(&s.irq_lines)
+        Ok(())
     }
 }
 
 impl GpioBank {
-    /// The bank's **own** integrity rule: the per-pin IRQ list must have
-    /// exactly one entry per pin.
-    ///
-    /// ⚠️ **Neither padded nor truncated**: padding fabricates IRQ
-    /// lines the firmware never wrote, truncation drops lines it did.
-    /// Both are rejected with the contract's "this peripheral cannot
-    /// take that state" code.
-    fn check_irq_lines(&self, lines: &[u16]) -> Result<(), PlatformError> {
-        if lines.len() != GPIO_PIN_COUNT {
-            return Err(PlatformError::new(
-                super::PERIPHERAL_FAMILY,
-                super::E_PER_04_UNSUPPORTED_SESSION_STATE,
-                format!(
-                    "GPIO '{}' 的会话状态带 {} 条 IRQ 线，应为 {GPIO_PIN_COUNT} 条",
-                    self.id,
-                    lines.len()
-                ),
-            ));
-        }
-        Ok(())
-    }
-
     /// Report one signal observation to the M-18 probe pipeline.
     ///
     /// The value is the pin bitmap; the timestamp is the last virtual

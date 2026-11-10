@@ -25,7 +25,6 @@ use riscv_sim_contract::model::WriteSize;
 use riscv_sim_contract::port::ProbeSink;
 use riscv_sim_contract::session::{
     ClintStateDto, GpioStateDto, M15PeriphDto, PeripheralSessionState, PlicStateDto, UartStateDto,
-    GPIO_PIN_COUNT,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -442,51 +441,37 @@ fn gpio_external_inputs_latch_pending_irqs_only_for_input_pins() {
     // consulted. Now external-input edge IRQs latch only for pins
     // configured as input (direction bit = 0).
     let mut gpio = GpioBank::new("GPIO0", 0);
-    gpio.set_irq_line_for_pin(0, 11); // input pin
-    gpio.set_irq_line_for_pin(1, 12); // output pin (per next line)
     gpio.set_directions(0b10); // pin 0 = input, pin 1 = output
 
     // Rising edge on pin 0 (input) → IRQ latched.
     gpio.set_external_inputs(0b01);
-    assert_eq!(gpio.take_pending_irqs(), vec![11]);
+    assert!(gpio.pending_pin(0), "input pin edge must latch");
 
     // Rising edge on pin 1 (output) → NO IRQ (output pin transitions
     // come from firmware via OUT/TOGGLE, not from the wire).
     gpio.set_external_inputs(0b11);
-    assert!(gpio.take_pending_irqs().is_empty());
+    assert!(
+        !gpio.pending_pin(1),
+        "output pin does not latch from the wire"
+    );
 }
 
 #[test]
 fn gpio_out_write_latches_irq_on_each_edge() {
     let mut gpio = GpioBank::new("GPIO0", 0);
     gpio.set_directions(0xFFFF_FFFF);
-    gpio.set_irq_line_for_pin(2, 13);
     let _ = gpio.write(0x4, WriteSize::Byte, 0);
     // First OUT write: pin 2 rises 0 → 1.
     let _ = gpio.write(0x4, WriteSize::Byte, 1 << 2);
-    assert_eq!(gpio.take_pending_irqs(), vec![13]);
+    assert!(gpio.pending_pin(2), "rising OUT edge must latch");
+    gpio.clear_pending_pin(2);
     // Second OUT write: pin 2 stays high → no edge.
     let _ = gpio.write(0x4, WriteSize::Byte, 1 << 2);
-    assert!(gpio.take_pending_irqs().is_empty());
+    assert!(!gpio.pending_pin(2), "unchanged level must not latch");
     // Third OUT write: pin 2 falls 1 → 0.
     let _ = gpio.write(0x4, WriteSize::Byte, 0);
-    assert_eq!(gpio.take_pending_irqs(), vec![13]);
-}
-
-#[test]
-fn gpio_take_pending_irqs_dedupes_by_line() {
-    // M-15 review #13: multiple pins binding the same IRQ line should
-    // not produce duplicate entries in `take_pending_irqs`.
-    let mut gpio = GpioBank::new("GPIO0", 0);
-    gpio.set_irq_line_for_pin(0, 11);
-    gpio.set_irq_line_for_pin(1, 11);
-    gpio.set_irq_line_for_pin(2, 12);
-    // Trigger edges on pins 0 and 1 (both → line 11) and pin 2 (→ line 12).
-    let _ = gpio.write(0x4, WriteSize::Byte, 0b111);
-    let pending = gpio.take_pending_irqs();
-    assert_eq!(pending.len(), 2);
-    assert!(pending.contains(&11));
-    assert!(pending.contains(&12));
+    assert!(gpio.pending_pin(2), "falling OUT edge must latch");
+    gpio.clear_pending_pin(2);
 }
 
 #[test]
@@ -516,23 +501,6 @@ fn gpio_in_reflects_output_latch_on_output_direction_pins() {
     let in_reg = gpio.read(0x8, WriteSize::Byte).unwrap();
     // pin 0 (out, 1) + pin 2 (in, 1) + pin 3 (in, 1) = 0b1101
     assert_eq!(in_reg, 0b1101);
-}
-
-#[test]
-fn gpio_take_pending_irqs_dedupes_lines_in_upper_half() {
-    // M-15 review N3: previously the dedup bitmap only covered
-    // `line < 16`; lines in [16, 32) bypassed dedup entirely. Now
-    // the bitmap covers `line < 32` (full u16 space minus 0xFFFF).
-    let mut gpio = GpioBank::new("GPIO0", 0);
-    gpio.set_irq_line_for_pin(0, 17);
-    gpio.set_irq_line_for_pin(1, 17);
-    gpio.set_irq_line_for_pin(2, 31);
-    // Trigger edges on pins 0 and 1 (both → line 17) and pin 2 (→ line 31).
-    let _ = gpio.write(0x4, WriteSize::Byte, 0b111);
-    let pending = gpio.take_pending_irqs();
-    assert_eq!(pending.len(), 2);
-    assert!(pending.contains(&17));
-    assert!(pending.contains(&31));
 }
 
 #[test]
@@ -672,7 +640,6 @@ fn uart_byte_drives_gpio_led_pin() {
     let mut uart = Uart16550::new("UART0", 0, 9600, 4);
     let mut gpio = GpioBank::new("GPIO0", 0);
     gpio.set_directions(0xFFFF_FFFF);
-    gpio.set_irq_line_for_pin(0, 11);
 
     // The host bridge translates one UART TX byte into a LED pin toggle:
     // a single-shot "echo back" that demonstrates how peripheral
@@ -687,8 +654,7 @@ fn uart_byte_drives_gpio_led_pin() {
     // Toggle pin 0 with doc semantics: 1<<0.
     let _ = gpio.write(0xC, WriteSize::Word, 1 << 0);
     assert_eq!(gpio.read(0x4, WriteSize::Byte).unwrap(), 1);
-    let pending = gpio.take_pending_irqs();
-    assert_eq!(pending, vec![11]);
+    assert!(gpio.pending_pin(0), "the LED toggle must latch pin 0");
 }
 
 // ---------------------------------------------------------------------------
@@ -744,8 +710,6 @@ fn uart_session_state_round_trips_every_field() {
 fn gpio_session_state_round_trips_every_field() {
     let mut gpio = GpioBank::new("GPIO0", 0x2000);
     gpio.set_directions(0xFFFF_FFFF);
-    gpio.set_irq_line_for_pin(3, 12);
-    gpio.set_irq_line_for_pin(31, 20);
     gpio.write(0x4, WriteSize::Word, 0x0000_0008).expect("out");
     gpio.set_external_inputs(0x0000_00F0);
     gpio.tick(4_321).expect("tick");
@@ -765,18 +729,6 @@ fn gpio_session_state_round_trips_every_field() {
         "the sticky pending vector is carried"
     );
     assert_eq!(state.now_ps, 4_321);
-    assert_eq!(
-        state.irq_lines.len(),
-        GPIO_PIN_COUNT,
-        "one IRQ line per pin must be carried"
-    );
-    assert_eq!(state.irq_lines[3], 12, "the lines are in **pin order**");
-    assert_eq!(state.irq_lines[31], 20, "the lines are in **pin order**");
-    assert_eq!(
-        state.irq_lines[0], 0xFFFF,
-        "an unconfigured pin keeps its default"
-    );
-
     let mut fresh = GpioBank::new("GPIO0", 0x2000);
     fresh
         .restore_session_state(&exported)
@@ -829,7 +781,6 @@ fn restoring_a_state_of_the_wrong_kind_is_rejected() {
         directions: 0,
         outputs: 0,
         inputs: 0,
-        irq_lines: vec![0xFFFF; GPIO_PIN_COUNT],
         pending_irqs: 0,
         now_ps: 0,
     });
@@ -862,46 +813,15 @@ fn restoring_a_state_that_names_another_peripheral_is_rejected() {
 }
 
 #[test]
-fn gpio_rejects_a_state_with_the_wrong_number_of_irq_lines() {
-    // A short list would leave the other pins' lines undefined; a long
-    // one would carry lines that do not exist. Neither is repaired
-    // silently.
-    let mut gpio = GpioBank::new("GPIO0", 0x2000);
-    let bad = PeripheralSessionState::Gpio(GpioStateDto {
-        id: "GPIO0".to_string(),
-        directions: 0,
-        outputs: 0,
-        inputs: 0,
-        irq_lines: vec![1, 2, 3],
-        pending_irqs: 0,
-        now_ps: 0,
-    });
-    let err = gpio
-        .restore_session_state(&bad)
-        .expect_err("a malformed GPIO state must be rejected");
-    assert_eq!(err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE);
-}
-
-/// ⚠️ **一个数，一个落点**：GPIO 导出的每引脚 IRQ 线**条数**必须等于
-/// **契约层**导出的引脚数。
-///
-/// M-15 的 `PIN_COUNT` **引用**契约层的 `GPIO_PIN_COUNT`，不是自己再写
-/// 一份 `32`。这条用例钉的是那个**引用关系**：哪天 M-15 改成写死一个
-/// `32`、而契约层的常数动了，导出的条数与契约层要求的对不上，载荷再也
-/// 过不了自己的校验（而 GPIO 自己的校验也会拒它）——**两个真相**。
-#[test]
-fn the_gpio_exports_exactly_one_irq_line_per_contract_pin() {
+fn the_gpio_export_carries_no_per_pin_irq_lines() {
     let gpio = GpioBank::new("GPIO0", 0x2000);
     let exported = gpio
         .session_state()
         .expect("the GPIO participates in the session state");
-    let PeripheralSessionState::Gpio(s) = exported else {
-        panic!("a GPIO must export a GPIO state");
-    };
-    assert_eq!(
-        s.irq_lines.len(),
-        GPIO_PIN_COUNT,
-        "GPIO 导出的 IRQ 线条数必须等于契约层的引脚数——M-15 不得自己写一份 32"
+    let v = serde_json::to_value(&exported).expect("serialize");
+    assert!(
+        v.get("Gpio").and_then(|g| g.get("irq_lines")).is_none(),
+        "GPIO 的会话状态不许再携带逐引脚 irq_lines：{v}"
     );
 }
 
@@ -1198,8 +1118,8 @@ fn restore_session_states_rejects_a_payload_that_misses_a_live_peripheral() {
 // ---------------------------------------------------------------------------
 
 /// ⚠️ **核心用例**：一个**合法**的 UART + 一个**畸形**的 GPIO
-/// （`irq_lines` 只有 3 条）→ 回灌必须**报错**，且 **UART 的状态一字
-/// 未改**。
+/// （状态里的 id 不是这个实例）→ 回灌必须**报错**，且 **UART 的状态
+/// 一字未改**。
 ///
 /// ## 这条用例在钉什么
 ///
@@ -1207,7 +1127,7 @@ fn restore_session_states_rejects_a_payload_that_misses_a_live_peripheral() {
 /// 只在**写入路径**里被发现，那么：
 ///
 /// 1. UART 被**改写**（`tx` / `irq_line` / `now_ps` 全变成载荷里的值）；
-/// 2. 写 GPIO 时才发现 `irq_lines` 的条数不对 → 返回 `Err`；
+/// 2. 写 GPIO 时才发现状态里的 id 不对 → 返回 `Err`；
 /// 3. 函数返回 `Err`，**会话已经坏了**——半个应用完的快照比被拒的快照
 ///    更糟（STAGE-3 §5）。
 ///
@@ -1232,7 +1152,7 @@ fn restore_session_states_writes_nothing_when_one_state_is_malformed() {
         vec![(0x1000, Rc::clone(&uart)), (0x2000, Rc::clone(&gpio))];
 
     // 载荷：一个**合法**的 UART（与活状态逐字段不同）+ 一个**畸形**的
-    // GPIO（`irq_lines` 只有 3 条）。
+    // GPIO（状态里的 id 不是这个实例）。
     let state = M15PeriphDto {
         uarts: vec![UartStateDto {
             id: "UART0".to_string(),
@@ -1249,7 +1169,6 @@ fn restore_session_states_writes_nothing_when_one_state_is_malformed() {
             directions: 0xF0,
             outputs: 0xF0,
             inputs: 0,
-            irq_lines: vec![1, 2, 3],
             pending_irqs: 0,
             now_ps: 0,
         }],
@@ -1261,7 +1180,7 @@ fn restore_session_states_writes_nothing_when_one_state_is_malformed() {
     assert_eq!(err.family, ErrorFamily::Peripheral, "族必须是 PER");
     assert_eq!(
         err.scenario, E_PER_04_UNSUPPORTED_SESSION_STATE,
-        "必须是 E_PER-04（这个外设不接受这份状态）"
+        "这份状态无法配对到活实例，必须在写入前被拒"
     );
 
     // ⚠️ **UART 的状态一字未改**——它是**合法**的那一个，却因为别人
@@ -1319,7 +1238,6 @@ fn the_read_only_preflight_rejects_a_malformed_state_and_writes_nothing() {
             directions: 0,
             outputs: 0,
             inputs: 0,
-            irq_lines: vec![1, 2, 3],
             pending_irqs: 0,
             now_ps: 0,
         }],
@@ -1382,7 +1300,6 @@ fn a_uart_state_with_undefined_status_bits_is_rejected_before_anything_is_writte
             directions: 0,
             outputs: 0,
             inputs: 0,
-            irq_lines: vec![0xFFFF; GPIO_PIN_COUNT],
             pending_irqs: 0,
             now_ps: 0,
         }],
@@ -1430,25 +1347,24 @@ fn a_uart_state_whose_status_contradicts_its_fifos_is_rejected() {
 ///
 /// 判别式是**行为**，不是白盒检查「谁覆写了」：
 ///
-/// - GPIO 的规则（`irq_lines` 的条数）必须**拒**；
+/// - GPIO 的规则（状态里的 id 必须是自己）必须**拒**；
 /// - UART 的规则（未定义的 STATUS 位）必须**拒**；
 /// - 定时器必须**接受**它自己的状态（它没有别的规则）。
 #[test]
 fn every_participating_peripheral_overrides_its_own_acceptance_check() {
-    // GPIO：条数不对 → 拒。
+    // GPIO：状态里的 id 不符 → 拒。
     let gpio = GpioBank::new("GPIO0", 0x2000);
-    let short = PeripheralSessionState::Gpio(GpioStateDto {
-        id: "GPIO0".to_string(),
+    let foreign = PeripheralSessionState::Gpio(GpioStateDto {
+        id: "GPIO9".to_string(),
         directions: 0,
         outputs: 0,
         inputs: 0,
-        irq_lines: vec![1, 2, 3],
         pending_irqs: 0,
         now_ps: 0,
     });
     assert!(
-        gpio.validate_session_state(&short).is_err(),
-        "GPIO 必须拒掉条数不对的 irq_lines"
+        gpio.validate_session_state(&foreign).is_err(),
+        "GPIO 必须拒掉不属于自己的状态"
     );
 
     // UART：未定义的 STATUS 位 → 拒。
