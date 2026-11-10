@@ -419,6 +419,10 @@ fn gpio_toggle_uses_documented_pin_bit_semantics() {
     // documentation and confused firmware authors.
     let mut gpio = GpioBank::new("GPIO0", 0);
     gpio.set_directions(0xFFFF_FFFF);
+    gpio.write(0x14, WriteSize::Word, 1 << 2)
+        .expect("使能 pin 2 的上升沿");
+    gpio.write(0x18, WriteSize::Word, 1 << 2)
+        .expect("使能 pin 2 的下降沿");
     let _ = gpio.write(0x4, WriteSize::Byte, 0);
     assert_eq!(gpio.read(0x4, WriteSize::Byte).unwrap(), 0);
 
@@ -442,6 +446,8 @@ fn gpio_external_inputs_latch_pending_irqs_only_for_input_pins() {
     // configured as input (direction bit = 0).
     let mut gpio = GpioBank::new("GPIO0", 0);
     gpio.set_directions(0b10); // pin 0 = input, pin 1 = output
+    gpio.write(0x14, WriteSize::Word, 0b1)
+        .expect("使能 pin 0 的上升沿");
 
     // Rising edge on pin 0 (input) → IRQ latched.
     gpio.set_external_inputs(0b01);
@@ -460,6 +466,10 @@ fn gpio_external_inputs_latch_pending_irqs_only_for_input_pins() {
 fn gpio_out_write_latches_irq_on_each_edge() {
     let mut gpio = GpioBank::new("GPIO0", 0);
     gpio.set_directions(0xFFFF_FFFF);
+    gpio.write(0x14, WriteSize::Word, 1 << 2)
+        .expect("使能 pin 2 的上升沿");
+    gpio.write(0x18, WriteSize::Word, 1 << 2)
+        .expect("使能 pin 2 的下降沿");
     let _ = gpio.write(0x4, WriteSize::Byte, 0);
     // First OUT write: pin 2 rises 0 → 1.
     let _ = gpio.write(0x4, WriteSize::Byte, 1 << 2);
@@ -480,10 +490,45 @@ fn gpio_out_write_latches_irq_on_each_edge() {
 ///
 /// 位图由外设锁存：边沿置位；guest 读到的是「哪些引脚还在挂起」；
 /// 写 1 清对应位、写 0 不影响其他位。
+/// **边沿只有在对应方向使能时才进 pending**（Renode 的 RISE_IE/FALL_IE）。
+///
+/// 复位后两个使能掩码都是 0 ⇒ 任何边沿都不许自发抬中断；写 1 使能
+/// 某方向后，只有那个方向的边沿锁存。
+#[test]
+fn gpio_pending_only_latches_enabled_edge_directions() {
+    let mut gpio = GpioBank::new("GPIO0", 0);
+    gpio.set_directions(0); // 全部输入
+
+    // 未使能：上升沿不进 pending。
+    gpio.set_external_inputs(0b1);
+    assert!(!gpio.pending_pin(0), "未使能的上升沿不许锁存");
+
+    // 只使能上升沿：下降沿仍然不进 pending。
+    gpio.write(0x14, WriteSize::Word, 0b1)
+        .expect("RISE_IE 必须可写");
+    gpio.set_external_inputs(0b0);
+    assert!(!gpio.pending_pin(0), "未使能的下降沿不许锁存");
+
+    // 上升沿使能后：上升沿锁存。
+    gpio.set_external_inputs(0b1);
+    assert!(gpio.pending_pin(0), "已使能的上升沿必须锁存");
+
+    // 清掉 pending，再只使能下降沿：下降沿锁存。
+    gpio.write(0x10, WriteSize::Word, 0b1)
+        .expect("W1C 清 pending");
+    gpio.write(0x14, WriteSize::Word, 0).expect("撤上升沿使能");
+    gpio.write(0x18, WriteSize::Word, 0b1)
+        .expect("FALL_IE 必须可写");
+    gpio.set_external_inputs(0b0);
+    assert!(gpio.pending_pin(0), "已使能的下降沿必须锁存");
+}
+
 #[test]
 fn gpio_pending_register_is_readable_and_write_one_to_clear() {
     let mut gpio = GpioBank::new("GPIO0", 0);
     gpio.set_directions(0);
+    gpio.write(0x14, WriteSize::Word, 0b101)
+        .expect("使能两路输入的上升沿");
     gpio.set_external_inputs(0b101);
 
     assert_eq!(
@@ -670,6 +715,8 @@ fn uart_byte_drives_gpio_led_pin() {
     let mut uart = Uart16550::new("UART0", 0, 9600, 4);
     let mut gpio = GpioBank::new("GPIO0", 0);
     gpio.set_directions(0xFFFF_FFFF);
+    gpio.write(0x14, WriteSize::Word, 1 << 0)
+        .expect("使能 LED 引脚的上升沿");
 
     // The host bridge translates one UART TX byte into a LED pin toggle:
     // a single-shot "echo back" that demonstrates how peripheral
@@ -740,6 +787,10 @@ fn uart_session_state_round_trips_every_field() {
 fn gpio_session_state_round_trips_every_field() {
     let mut gpio = GpioBank::new("GPIO0", 0x2000);
     gpio.set_directions(0xFFFF_FFFF);
+    gpio.write(0x14, WriteSize::Word, 0x0000_0008)
+        .expect("使能 pin 3 的上升沿");
+    gpio.write(0x18, WriteSize::Word, 0x0000_00F0)
+        .expect("使能 pin 4..7 的下降沿");
     gpio.write(0x4, WriteSize::Word, 0x0000_0008).expect("out");
     gpio.set_external_inputs(0x0000_00F0);
     gpio.tick(4_321).expect("tick");
@@ -754,6 +805,8 @@ fn gpio_session_state_round_trips_every_field() {
     assert_eq!(state.directions, 0xFFFF_FFFF);
     assert_eq!(state.outputs, 0x8);
     assert_eq!(state.inputs, 0xF0);
+    assert_eq!(state.rise_enable, 0x8, "上升沿使能必须随状态走");
+    assert_eq!(state.fall_enable, 0xF0, "下降沿使能必须随状态走");
     assert_eq!(
         state.pending_irqs, 0x8,
         "the sticky pending vector is carried"
@@ -811,6 +864,8 @@ fn restoring_a_state_of_the_wrong_kind_is_rejected() {
         directions: 0,
         outputs: 0,
         inputs: 0,
+        rise_enable: 0,
+        fall_enable: 0,
         pending_irqs: 0,
         now_ps: 0,
     });
@@ -1199,6 +1254,8 @@ fn restore_session_states_writes_nothing_when_one_state_is_malformed() {
             directions: 0xF0,
             outputs: 0xF0,
             inputs: 0,
+            rise_enable: 0,
+            fall_enable: 0,
             pending_irqs: 0,
             now_ps: 0,
         }],
@@ -1268,6 +1325,8 @@ fn the_read_only_preflight_rejects_a_malformed_state_and_writes_nothing() {
             directions: 0,
             outputs: 0,
             inputs: 0,
+            rise_enable: 0,
+            fall_enable: 0,
             pending_irqs: 0,
             now_ps: 0,
         }],
@@ -1330,6 +1389,8 @@ fn a_uart_state_with_undefined_status_bits_is_rejected_before_anything_is_writte
             directions: 0,
             outputs: 0,
             inputs: 0,
+            rise_enable: 0,
+            fall_enable: 0,
             pending_irqs: 0,
             now_ps: 0,
         }],
@@ -1389,6 +1450,8 @@ fn every_participating_peripheral_overrides_its_own_acceptance_check() {
         directions: 0,
         outputs: 0,
         inputs: 0,
+        rise_enable: 0,
+        fall_enable: 0,
         pending_irqs: 0,
         now_ps: 0,
     });

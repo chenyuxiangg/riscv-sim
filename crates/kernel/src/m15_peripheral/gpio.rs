@@ -19,12 +19,17 @@
 //!   a `1` clears **only** those bits (write `0` is a no-op). This follows
 //!   Renode's GPIO models: the peripheral owns the pending bits and the
 //!   guest driver consumes them with W1C — the host must not clear them.
+//! - `0x14 RISE_IE` / `0x18 FALL_IE` (rw): per-pin rising / falling edge
+//!   interrupt enables. Reset value is `0` ⇒ no edge interrupts until the
+//!   guest enables the direction it cares about (Renode's `RISE_IE` /
+//!   `FALL_IE` in `SiFive_GPIO`, and STM32 EXTI's `RTSR` / `FTSR`).
 //!
-//! IRQ: the bank is **one** interrupt source for the whole port. Any edge
-//! on any pin latches a sticky bit in `pending_irqs`; the **host only
-//! reflects that bitmap** onto the bank's single PLIC source (set when
-//! non-zero, cleared when zero). The source number lives in the platform
-//! description, not in this peripheral's state.
+//! IRQ: the bank is **one** interrupt source for the whole port. An edge
+//! on any pin **whose direction is enabled** latches a sticky bit in
+//! `pending_irqs`; the **host only reflects that bitmap** onto the bank's
+//! single PLIC source (set when non-zero, cleared when zero). The source
+//! number lives in the platform description, not in this peripheral's
+//! state.
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
@@ -34,7 +39,7 @@ use riscv_sim_contract::session::{GpioStateDto, PeripheralSessionState, GPIO_PIN
 use super::reg::{extract_subword, register_offset};
 use super::ProbeSlot;
 
-pub const GPIO_WINDOW: u32 = 0x14;
+pub const GPIO_WINDOW: u32 = 0x1C;
 
 /// Probe signal name for the output latch (D-12 / N5).
 ///
@@ -68,6 +73,10 @@ pub mod reg {
     pub const TOGGLE: u32 = 0xC;
     /// Sticky pending bitmap — **read**: unhandled pins; **write**: W1C.
     pub const PENDING: u32 = 0x10;
+    /// Per-pin rising-edge interrupt enable.
+    pub const RISE_IE: u32 = 0x14;
+    /// Per-pin falling-edge interrupt enable.
+    pub const FALL_IE: u32 = 0x18;
 }
 
 #[derive(Debug)]
@@ -79,6 +88,10 @@ pub struct GpioBank {
     inputs: u32,
     /// Sticky edge-triggered pending IRQ vector. Low bit = pin 0.
     pending_irqs: u32,
+    /// Per-pin rising-edge interrupt enables (1 = enabled).
+    rise_enable: u32,
+    /// Per-pin falling-edge interrupt enables (1 = enabled).
+    fall_enable: u32,
     /// M-18 probe callback (D-12). Empty = no observer attached.
     probe: ProbeSlot,
     /// Last virtual time this peripheral observed (ps).
@@ -101,6 +114,8 @@ impl GpioBank {
             outputs: 0,
             inputs: 0,
             pending_irqs: 0,
+            rise_enable: 0,
+            fall_enable: 0,
             probe: ProbeSlot::default(),
             now_ps: 0,
         }
@@ -133,8 +148,7 @@ impl GpioBank {
         // are driven by firmware via OUT/TOGGLE; their transitions
         // produce output-edge IRQs through `write(OUT/TOGGLE)`.
         let input_mask = !self.directions & PIN_COUNT_MASK;
-        let changed = (prev ^ value) & input_mask;
-        self.latch_edges(changed);
+        self.latch_edges(prev & input_mask, value & input_mask);
     }
 
     /// **当前 pending 位图**（**只读**）。
@@ -153,14 +167,20 @@ impl GpioBank {
         (self.pending_irqs >> pin) & 1 == 1
     }
 
-    /// Internal: latch a sticky pending IRQ for every pin with a set
-    /// bit in `changed`.
+    /// Internal: latch a sticky pending IRQ for every pin whose edge is
+    /// enabled.
     ///
-    /// 锁存与中断号**无关**：沿 ⇒ 置位（方向过滤在调用方：外部喂入只
-    /// 对 input 引脚、OUT/TOGGLE 对任意引脚）；整块 GPIO 共用一个 PLIC
-    /// 源号，源号由板级描述决定。
-    fn latch_edges(&mut self, changed: u32) {
-        self.pending_irqs |= changed & PIN_COUNT_MASK;
+    /// Rising edges are bits that changed from 0→1 (`changed & next`);
+    /// falling edges are bits that changed from 1→0 (`changed & prev`).
+    /// Each direction is then filtered by its own enable mask. Pin
+    /// direction filtering is the caller's job (external drive only sees
+    /// input pins; OUT/TOGGLE see the firmware-driven latch).
+    fn latch_edges(&mut self, prev: u32, next: u32) {
+        let changed = (prev ^ next) & PIN_COUNT_MASK;
+        let rising = changed & next;
+        let falling = changed & prev;
+        self.pending_irqs |= (rising & self.rise_enable) | (falling & self.fall_enable);
+        self.pending_irqs &= PIN_COUNT_MASK;
     }
 
     /// Effective pin level as observed by firmware reading the IN
@@ -207,10 +227,10 @@ impl Peripheral for GpioBank {
             reg::OUT => {
                 let prev = self.outputs;
                 self.outputs = value & PIN_COUNT_MASK;
-                // Output-pin transitions latch output-edge IRQs (any
-                // configured pin, regardless of direction — the OUT
-                // latch is firmware-controlled).
-                self.latch_edges(prev ^ self.outputs);
+                // Output-pin transitions latch output-edge IRQs only
+                // when the matching direction is enabled (any pin,
+                // regardless of DIR — the OUT latch is firmware-controlled).
+                self.latch_edges(prev, self.outputs);
                 // D-12: report the new pin level to the probe
                 // pipeline. Only on an actual change — an unchanged
                 // level must not spam the waveform.
@@ -228,7 +248,7 @@ impl Peripheral for GpioBank {
                 if mask != 0 {
                     let prev = self.outputs;
                     self.outputs ^= mask;
-                    self.latch_edges(mask);
+                    self.latch_edges(prev, self.outputs);
                     // D-12: a toggle is a level change too.
                     if prev != self.outputs {
                         self.report(SIGNAL_OUT, self.outputs);
@@ -240,6 +260,14 @@ impl Peripheral for GpioBank {
                 // W1C: write 1 clears the corresponding sticky bit;
                 // write 0 leaves it untouched.
                 self.pending_irqs &= !(value & PIN_COUNT_MASK);
+                Ok(())
+            }
+            reg::RISE_IE => {
+                self.rise_enable = value & PIN_COUNT_MASK;
+                Ok(())
+            }
+            reg::FALL_IE => {
+                self.fall_enable = value & PIN_COUNT_MASK;
                 Ok(())
             }
             reg::IN => {
@@ -279,6 +307,8 @@ impl Peripheral for GpioBank {
             directions: self.directions,
             outputs: self.outputs,
             inputs: self.inputs,
+            rise_enable: self.rise_enable,
+            fall_enable: self.fall_enable,
             pending_irqs: self.pending_irqs,
             now_ps: self.now_ps,
         }))
@@ -287,8 +317,8 @@ impl Peripheral for GpioBank {
     /// Restore the GPIO bank's session state (segment 4's consumer).
     ///
     /// **Every** field is restored: the direction mask, the output
-    /// latch, the input latch, the sticky pending-IRQ vector and
-    /// `now_ps`.
+    /// latch, the input latch, the two edge-enable masks, the sticky
+    /// pending-IRQ vector and `now_ps`.
     ///
     /// ⚠️ The same id check is also run **before** the write stage
     /// ([`Peripheral::validate_session_state`]) — the check here is
@@ -311,6 +341,8 @@ impl Peripheral for GpioBank {
         self.directions = s.directions & PIN_COUNT_MASK;
         self.outputs = s.outputs & PIN_COUNT_MASK;
         self.inputs = s.inputs & PIN_COUNT_MASK;
+        self.rise_enable = s.rise_enable & PIN_COUNT_MASK;
+        self.fall_enable = s.fall_enable & PIN_COUNT_MASK;
         self.pending_irqs = s.pending_irqs & PIN_COUNT_MASK;
         self.now_ps = s.now_ps;
         Ok(())
@@ -354,6 +386,8 @@ impl GpioBank {
             // pins so firmware can read back
             // what it drove.
             reg::PENDING => Ok(self.pending_irqs),
+            reg::RISE_IE => Ok(self.rise_enable),
+            reg::FALL_IE => Ok(self.fall_enable),
             reg::TOGGLE => Ok(0), // write-only register
             other => Err(PlatformError::new(
                 ErrorFamily::Peripheral,

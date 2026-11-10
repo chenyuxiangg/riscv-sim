@@ -2149,10 +2149,10 @@ mod tests {
         }
     }
     /// **A-8** — the contract layer's **session payload** version moved
-    /// to 4 when GPIO session state dropped its per-pin IRQ list.
+    /// to 5 when GPIO session state gained per-pin edge enable masks.
     #[test]
-    fn a8_the_session_payload_version_is_four() {
-        assert_eq!(crate::session::SESSION_SNAPSHOT_SCHEMA_VERSION, 4);
+    fn a8_the_session_payload_version_is_five() {
+        assert_eq!(crate::session::SESSION_SNAPSHOT_SCHEMA_VERSION, 5);
     }
     // -----------------------------------------------------------------
     // STAGE-15 · v0.30 · D-141 — the devices' legal value domain
