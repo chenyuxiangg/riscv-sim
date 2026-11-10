@@ -378,8 +378,11 @@ pub struct ResolvedRoles {
     pub time_source: Option<String>,
     /// **主 PLIC** 角色的器件 id。
     ///
-    /// ⚠️ **`None` ⇒ 不限** ⇒ ⇒ **所有** PLIC 都抬外部线 ⇒ ⇒ **今天的
-    /// 行为逐字不变**（v0.72 批裁决 F）。
+    /// ⚠️ **缺省 = 板上第一个 PLIC**（与契约的角色文档同口径）；板上没有
+    /// PLIC 时才是 `None` ⇒ ⇒ `sync_interrupts` 整体返回（「无 PLIC 的板
+    /// 不抬任何线」那条不变式不变）。
+    ///
+    /// ⚠️ **不是「不限」**：单板单 PLIC 之后没有「所有 PLIC」这条路。
     pub main_plic: Option<String>,
 }
 
@@ -404,7 +407,9 @@ pub fn resolve_roles(
         time_source: declared
             .and_then(|r| r.time_source.clone())
             .or_else(|| devices.first_clint().map(|e| e.id.clone())),
-        main_plic: declared.and_then(|r| r.main_plic.clone()),
+        main_plic: declared
+            .and_then(|r| r.main_plic.clone())
+            .or_else(|| devices.first_plic().map(|e| e.id.clone())),
     }
 }
 
@@ -478,18 +483,6 @@ impl DeviceInstanceTable {
     /// **第一个** CLINT（base 升序）—— **时间角色**（裁决 D：逐字不变）。
     pub fn first_clint(&self) -> Option<&DeviceInstanceEntry> {
         self.entries.iter().find(|e| e.kind == "clint")
-    }
-
-    /// **全部** PLIC 句柄（base 升序）—— 裁决 F：外部线由**任一** PLIC 抬。
-    pub fn plic_handles(&self) -> Vec<Rc<RefCell<Plic>>> {
-        self.entries
-            .iter()
-            .filter(|e| e.kind == "plic")
-            .filter_map(|e| match &e.handle {
-                DeviceHandle::Plic(h) => Some(Rc::clone(h)),
-                _ => None,
-            })
-            .collect()
     }
 }
 
@@ -905,5 +898,75 @@ pub fn compatibility(mirror_ranges: &[(u32, u32)], board: &[(u32, u32)]) -> Boar
         fully_covered: !missing && !partial,
         missing,
         partial,
+    }
+}
+
+#[cfg(test)]
+mod single_plic_role_tests {
+    use super::*;
+    use riscv_sim_contract::platform::{DeviceRoles, PlatformDescription, PLATFORM_SCHEMA_VERSION};
+
+    fn bare_board(roles: Option<DeviceRoles>) -> PlatformDescription {
+        PlatformDescription {
+            schema_version: PLATFORM_SCHEMA_VERSION,
+            id: "single-plic".to_string(),
+            name: "single PLIC".to_string(),
+            priority: 0,
+            region_budget_bytes: 1 << 20,
+            max_region_bytes: None,
+            regions: Vec::new(),
+            description: None,
+            roles,
+            mcu: None,
+        }
+    }
+
+    fn table_with(kind: &str, id: &str) -> DeviceInstanceTable {
+        DeviceInstanceTable {
+            entries: vec![DeviceInstanceEntry {
+                id: id.to_string(),
+                kind: kind.to_string(),
+                handle: DeviceHandle::Opaque,
+            }],
+        }
+    }
+
+    /// **K-P1** — `main_plic` 缺省 ⇒ 默认到那块**唯一** PLIC。
+    ///
+    /// 契约的角色文档写的就是「缺省 = 第一个 PLIC」；内核此前缺省返回
+    /// `None`，再由 `sync_interrupts` 退化成「遍历所有 PLIC」。单板单 PLIC
+    /// 之后这两条路径必须收敛成同一个：角色缺省就有值。
+    #[test]
+    fn kp1_main_plic_defaults_to_the_only_plic() {
+        let description = bare_board(None);
+        let table = table_with("plic", "PLIC0");
+        let roles = resolve_roles(&description, &table);
+        assert_eq!(
+            roles.main_plic.as_deref(),
+            Some("PLIC0"),
+            "缺省时必须落到唯一 PLIC"
+        );
+    }
+
+    /// **K-P2** — 显式声明 `main_plic` ⇒ 保留声明值。
+    #[test]
+    fn kp2_declared_main_plic_wins() {
+        let description = bare_board(Some(DeviceRoles {
+            console: None,
+            time_source: None,
+            main_plic: Some("PLIC0".to_string()),
+        }));
+        let table = table_with("plic", "PLIC0");
+        let roles = resolve_roles(&description, &table);
+        assert_eq!(roles.main_plic.as_deref(), Some("PLIC0"));
+    }
+
+    /// **K-P3** — 板上没有 PLIC ⇒ `main_plic` 仍是 `None`（不是空字符串）。
+    #[test]
+    fn kp3_no_plic_keeps_main_plic_empty() {
+        let description = bare_board(None);
+        let table = table_with("uart16550", "UART0");
+        let roles = resolve_roles(&description, &table);
+        assert_eq!(roles.main_plic, None, "没有 PLIC 时不许编一个 id 出来");
     }
 }
