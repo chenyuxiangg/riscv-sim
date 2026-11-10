@@ -69,7 +69,7 @@ pub const UNCONSUMED_HISTORY_CAP: usize = 4096;
 /// Hook invoked when the `PAUSE_SIM` overflow policy trips.
 ///
 /// The argument is the channel number whose ring overflowed. The
-/// wiring binds this to M-12's pause semantics; until M-12 grows a
+/// bridge binds this to M-12's pause semantics; until M-12 grows a
 /// pause API the hook may be left unset, in which case the overflow
 /// is still counted and reported.
 pub type PauseHook = Box<dyn FnMut(u8)>;
@@ -77,7 +77,7 @@ pub type PauseHook = Box<dyn FnMut(u8)>;
 /// Hook invoked when the memory-budget reconcile forces downsampling.
 ///
 /// The argument is the new throttle coefficient (observations
-/// emitted per Nth sample). The wiring binds this to M-18's
+/// emitted per Nth sample). The bridge binds this to M-18's
 /// `set_rate`.
 pub type RateHook = Box<dyn FnMut(u8)>;
 
@@ -241,7 +241,7 @@ impl WaveformPipeline {
     /// Declaring a channel is what gives the exporter a label and a
     /// VCD variable width. It is *not* required for the pipeline to
     /// work: an event for an undeclared channel is still recorded,
-    /// using [`ChannelMeta::fallback`] metadata. The wiring code
+    /// using [`ChannelMeta::fallback`] metadata. The bridge code
     /// calls this once per M-18 channel at boot.
     ///
     /// Re-declaring a channel updates its metadata (it is not an
@@ -307,7 +307,7 @@ impl WaveformPipeline {
     pub fn encode_edge(&mut self, ev: EdgeEvent) -> EncodeOutcome {
         // Unknown channel: fall back to default metadata rather than
         // dropping the observation. Losing an event because of a
-        // wiring mistake is worse than labelling it generically.
+        // bridge mistake is worse than labelling it generically.
         self.channels
             .entry(ev.ch)
             .or_insert_with(|| ChannelMeta::fallback(ev.ch));

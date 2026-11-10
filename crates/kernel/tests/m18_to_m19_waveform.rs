@@ -28,7 +28,7 @@ use riscv_sim_kernel::m19_waveform::{ChannelMeta, ExportFilter, SharedPipeline, 
 /// 建一条带探针的链路：返回 (总线, 探针注册表, 共享管道)。
 ///
 /// 探针注册表通过 `Rc<RefCell<..>>` 挂在总线的 hook 上，这样总线
-/// 访存和探针采样走的是同一套 wiring——这正是生产环境的接法。
+/// 访存和探针采样走的是同一套 bridge——这正是生产环境的接法。
 fn build_pipeline() -> (Bus, Rc<RefCell<ProbeRegistry>>, SharedPipeline) {
     let mut bus = Bus::new();
     bus.map_ram(0x8000_0000, 0x1000, &[]).expect("map ram");

@@ -134,7 +134,7 @@ function fakeKernel() {
  * 字节流（`console_event()` 没订阅就返回 `None`）⇒ 不订阅的话内核**根本
  * 不会推**，用例就测不到「事件落进终端」这一段。
  *
- * @returns {Promise<{router: object, consoleWiring: object}>}
+ * @returns {Promise<{router: object, consoleBridge: object}>}
  */
 async function setup() {
     m01.assembleWorkspace("embedded");
@@ -145,9 +145,9 @@ async function setup() {
     //   ⇒ ⇒ 用例之间互相污染 ⇒ ⇒ 判据口径会悄悄变。
     m02.resetTerminalScreen();
     const router = fakeKernel();
-    const consoleWiring = app.wireConsole(router);
-    await consoleWiring.subscribeConsoleStream();
-    return { router, consoleWiring };
+    const consoleBridge = app.wireConsole(router);
+    await consoleBridge.subscribeConsoleStream();
+    return { router, consoleBridge };
 }
 
 /**
@@ -254,8 +254,8 @@ describe("console 事件 · 落进终端视图", () => {
             "sim.console",
             "契约镜像里的 topic 变了",
         );
-        const { router, consoleWiring } = await setup();
-        await consoleWiring.subscribeConsoleStream();
+        const { router, consoleBridge } = await setup();
+        await consoleBridge.subscribeConsoleStream();
         const subscribes = router.sent.filter(
             (c) => c && typeof c === "object" && "Subscribe" in c,
         );
@@ -288,11 +288,11 @@ describe("console 流 · 装载工程后的强制重订", () => {
         // ⚠️ **这条是本 lane 最核心的不变量**：真内核的 `LoadProject` 清掉了
         // 主题集合 ⇒ 装载之后不重订，内核就**不再推** console ⇒ 终端**永远**
         // 是空的，而页面上看不出任何异常（与 D-45 / D-46 同一个坑）。
-        const { router, consoleWiring } = await setup();
+        const { router, consoleBridge } = await setup();
         assert.equal(router.topics.has("sim.console"), true, "先订阅上了");
 
         const services = servicesFor(router);
-        services.console = consoleWiring;
+        services.console = consoleBridge;
         await app.loadProjectIntoKernel(services, { id: "p" });
 
         // 装载之后：主题集合被清空过 ⇒ **必须**被重订回来。
@@ -310,9 +310,9 @@ describe("console 流 · 装载工程后的强制重订", () => {
     });
 
     test("console 的订阅发生在 `LoadProject` **之后**", async () => {
-        const { router, consoleWiring } = await setup();
+        const { router, consoleBridge } = await setup();
         const services = servicesFor(router);
-        services.console = consoleWiring;
+        services.console = consoleBridge;
         const before = router.sent.length;
         await app.loadProjectIntoKernel(services, { id: "p" });
         const kinds = router.sent.slice(before).map((c) => {
@@ -441,7 +441,7 @@ describe("端到端 · 装载 → 跑 → 终端里看得见 console", () => {
         // ⚠️ 这一条把三段接在一起（装载入口 / 强制重订 / 跑到前缀）——单段
         // 的用例各自绿，但**接起来断掉**的情况它们抓不到。
         const router = fakeKernel();
-        const consoleWiring = app.wireConsole(router);
+        const consoleBridge = app.wireConsole(router);
         m01.assembleWorkspace("embedded");
         m01.route("#/terminal");
         m03.setState("terminal", { term: { bytes: "" } });
@@ -469,7 +469,7 @@ describe("端到端 · 装载 → 跑 → 终端里看得见 console", () => {
         let result;
         try {
             const services = servicesFor(router);
-            services.console = consoleWiring;
+            services.console = consoleBridge;
             await app.loadImageFromUrl(services, "http://127.0.0.1:9999/osz.elf");
             result = await app.runUntilConsole(
                 { commandRouter: router },

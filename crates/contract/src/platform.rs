@@ -27,7 +27,7 @@
 //! | layer | what it judges | codes |
 //! | --- | --- | --- |
 //! | **serde** | the *shape* — unknown device kind, missing parameter, wrong parameter type | serde's own error (V-8) |
-//! | **this module** | the *declaration* — version, id, regions, sizes, overlaps, budget, duplicate device id, empty device id, device parameters' legal value domain, the wiring's references | `E_PLT-01`..`E_PLT-08` · `E_PLT-12` · `E_PLT-15` · `E_PLT-16` |
+//! | **this module** | the *declaration* — version, id, regions, sizes, overlaps, budget, duplicate device id, empty device id, device parameters' legal value domain, and each peripheral's PLIC source id | `E_PLT-01`..`E_PLT-08` · `E_PLT-12` · `E_PLT-15` · `E_PLT-16` |
 //! | **the host** | the *lookup* — unknown platform id, unreadable file, malformed file, a stale revision, a delta that targets a missing region | `E_PLT-09`..`E_PLT-11` · `E_PLT-13` · `E_PLT-14` (owned **here**, judged by the host) |
 //! | **M-14** | the *live bus* — unmapped access, region over the runtime budget | `E_BUS-*` |
 //!
@@ -77,7 +77,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// ⚠️ **版本 1** = 区域**必须**带 `base`（⇒ ⇒ 那时还没有「由内核分配」
 /// 这件事）⇒ ⇒ ⇒ 老描述**逐字**按老办法装（⇒ ⇒ **零风险**）。
-/// ⚠️ **v0.74（STAGE-50 · D-175 的 D）**：**2 → 3** ⇒ ⇒ `wiring.from` 加了
+/// ⚠️ **v0.78**：描述格式已收敛为外设中断号映射；本版本号只记录格式演进。
 /// **可选**的 `pin`（引脚级寻址）⇒ ⇒ 老描述**逐字不变**（⇒ ⇒ 存量板档案
 /// **零风险**）。
 /// ⚠️ **v0.75（STAGE-51 · D-175 的 F）**：**3 → 4** ⇒ ⇒ 顶层加了**可选**
@@ -122,10 +122,9 @@ pub const SUPPORTED_PLATFORM_SCHEMA_VERSIONS: &[u32] = &[1, 2, 3, 4, 5];
 ///
 /// ⚠️ **Version 1** = the rule set **before** V-17 ⇒ **version 2** = the
 /// rule set **with** V-17 (every peripheral device's `id` must be
-/// non-empty) ⇒ **version 3** = the rule set **with** V-18 / V-19 (the
-/// optional `wiring` section's references must resolve, and its target
-/// PLIC must actually have that source) ⇒ ⇒ each step adds **exactly**
-/// the rules it names and nothing else.
+/// non-empty) ⇒ **version 3** = the rule set with the later cross-field
+/// checks ⇒ ⇒ each step adds **exactly** the rules it names and nothing
+/// else.
 ///
 /// ⚠️ **v0.73（STAGE-49）**：**version 4** = the rule set **with**
 /// V-20（角色声明）/ V-21（引脚表）/ **V-22**（缺 `base` ⇒ ⇒ 由装配期
@@ -567,12 +566,10 @@ impl PlatformDescription {
     /// | V-9 | two peripheral devices share an `id` | `E_PLT-08` |
     /// | V-13 | a device parameter is **below** its legal lower bound | `E_PLT-12` |
     /// | V-14 | a device parameter is **above** its legal upper bound | `E_PLT-12` |
-    /// | V-15 | a UART's `irq_line` is not a valid PLIC source id (only when the map has a PLIC) | `E_PLT-12` |
+    /// | V-15 | an interrupt peripheral's `irq_line` is not a valid PLIC source id (only when the map has a PLIC) | `E_PLT-12` |
     /// | V-16 | `max_region_bytes` is given and is **zero** (the runtime ceiling must be ≥ 1) | `E_PLT-12` |
     /// | V-17 | a peripheral device's `id` is empty | `E_PLT-15` |
-    /// | V-18 | a `wiring` entry names a device that is **not** in the map (or an unknown event name) | `E_PLT-16` |
-    /// | V-19 | a `wiring` entry's target is not a PLIC, or its `to.source` is **not below** that PLIC's `sources` | `E_PLT-16` |
-    /// | V-24 | a `pins` entry is not a well-formed pin spec (device not GPIO · pin not `pin{N}` · empty functions · duplicated pin / function name · irq-vs-wiring source clash) | `E_PLT-19` |
+    /// | V-15b | two interrupt peripherals on one board declare the same PLIC source id | `E_PLT-16` |
     ///
     /// ⚠️ **V-2 judges the *description's* `id`** — the **device's** `id`
     /// is judged by **V-17** ⇒ they are two different objects with two
@@ -608,19 +605,6 @@ impl PlatformDescription {
     /// particular **V-9 still comes first** ⇒ **two** devices with an
     /// empty `id` are still rejected by **V-9 / `E_PLT-08`** ⇒ V-17
     /// only ever fires for a **single** empty `id`.
-    ///
-    /// ⚠️ **V-18 / V-19 were appended after V-17** (v0.34 · D-125) ⇒ the
-    /// report order of V-1 ~ V-17 is **unchanged, byte for byte** ⇒ the
-    /// two empty ids are still caught by **V-9** ⇒ and V-18 is judged
-    /// **before** V-19 ⇒ the two rules **share** one scenario code
-    /// (`E_PLT-16`) but their order is still **observable** (through
-    /// [`Self::wiring_violation`]) ⇒ a wiring that is broken in two ways
-    /// reports the **V-18** one.
-    ///
-    /// ⚠️ **A description without a `wiring` section is judged by
-    /// V-1 ~ V-17 only** ⇒ the stored boards (which have no wiring) are
-    /// **not** rejected by the new rules ⇒ the rule set may be tightened
-    /// without invalidating a single stored board.
     ///
     /// ⚠️ **Judgements never look at the message text** — they assert
     /// `family == Platform && scenario == <code>`. Rewording a message
@@ -2716,7 +2700,7 @@ mod tests {
     /// 条件断点表达式）⇒ ⇒ 同理：literal 与 name 一起跟。
     ///
     /// ⚠️ **v0.72** (STAGE-48 · D-177 A) moved it **10 → 11**（`MemoryMap`
-    /// 事件多一个 `wiring_report` 字段 ⇒ ⇒ **线上形状变了**）⇒ ⇒ 同理。
+    /// 事件多一个字段 ⇒ ⇒ **线上形状变了**）⇒ ⇒ 同理。
     ///
     /// ⚠️ **v0.76** (STAGE-52 · 裁决 M) moved it **11 → 12**（模板库协议：
     /// 命令 / 事件各加两个 ⇒ ⇒ **线上形状变了**）⇒ ⇒ 同理。

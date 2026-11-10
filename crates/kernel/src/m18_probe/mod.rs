@@ -20,9 +20,9 @@
 //! 独立成流供 M-11 导出，不并入波形通道"). Both are read-only
 //! observations — M-18 never mutates simulation state.
 //!
-//! ## MVP wiring
+//! ## MVP bridge
 //!
-//! The three wiring points are all in place:
+//! The three bridge points are all in place:
 //!
 //! - **M-14 → M-18** (bus trace): [`ProbeRegistry::make_bus_hook`]
 //!   hands a `BusHook` to the bus; every access lands in the trace

@@ -86,8 +86,8 @@ TYPES_REL = "crates/kernel/src/m15_peripheral/types.rs"
 KTEST_REL = "crates/kernel/src/kernel_host/tests_v074_pin_routing.rs"
 MIRROR_REL = "front/lib/message.js"
 MMAP_REL = "front/views/components/memory-map.js"
-WEDITOR_REL = "front/views/components/wiring-editor.js"
-WTEST_REL = "front/tests/wiring-editor.test.mjs"
+WEDITOR_REL = "front/views/components/bridge-editor.js"
+WTEST_REL = "front/tests/bridge-editor.test.mjs"
 BOARDSTORE_REL = "front/services/m23_boardstore.js"
 BROWSER_REL = "tools/browser-verify.mjs"
 LEDGER_REL = "docs/reviews/REVIEWS.md"
@@ -290,35 +290,35 @@ for name in ("PLATFORM_SCHEMA_VERSION", "PLATFORM_RULES_VERSION"):
 
 # 7e. 跨层源码锚点
 ANCHORS = [
-    # ⚠️ **D-175 的 D**（裁决 B / E / H / I）：`wiring.from` 的**可选** `pin`
+    # ⚠️ **D-175 的 D**（裁决 B / E / H / I）：`bridge.from` 的**可选** `pin`
     (platform_rs, "pub pin: Option<u32>"),
     (platform_rs, "skip_serializing_if = \"Option::is_none\""),
     # ⚠️ **D-175 的 E**（裁决 C / J）：**词表**是「事件名是否合法」的**唯一落点**
-    (platform_rs, "pub const WIRING_EVENTS"),
-    (platform_rs, "pub fn wiring_event_info("),
-    (platform_rs, "pub const WIRING_EVENT_PIN_IRQ"),
-    (platform_rs, "pub enum WiringEventSemantics"),
+    (platform_rs, "pub const BRIDGE_EVENTS"),
+    (platform_rs, "pub fn bridge_event_info("),
+    (platform_rs, "pub const BRIDGE_EVENT_PIN_IRQ"),
+    (platform_rs, "pub enum BridgeEventSemantics"),
     (platform_rs, "OneShot"),
     # ⚠️ **引脚数的唯一落点**（裁决 E）：契约层的 `GPIO_PIN_COUNT`
     (session_rs, "pub const GPIO_PIN_COUNT"),
     # ⚠️ **内核侧**：按引脚**取并消费** IRQ 线号（裁决 K）
     (gpio_rs, "pub fn take_irq_line_for_pin("),
-    (host_rs, "WiringEventSemantics::OneShot"),
-    (host_rs, "WiringEventSemantics::Level"),
+    (host_rs, "BridgeEventSemantics::OneShot"),
+    (host_rs, "BridgeEventSemantics::Level"),
     (host_platform, "DeviceHandle::Gpio("),
     (host_platform, "pub fn gpio(&self"),
     # ⚠️ **裁决 F**：引脚数**由内核报**（前端**不抄**）
     (model_rs, "pub pin_count: Option<u32>"),
     (types_rs, "pin_count: Some(GPIO_PIN_COUNT as u32)"),
     # ⚠️ **前端那条新模块**（N-3 / N-4 / X-3）
-    (weditor_js, "export function renderWiringEditor("),
-    (weditor_js, "export function collectWiring("),
-    (weditor_js, "export function addWiring("),
-    (weditor_js, "export function removeWiring("),
+    (weditor_js, "export function renderBridgeEditor("),
+    (weditor_js, "export function collectBridge("),
+    (weditor_js, "export function addBridge("),
+    (weditor_js, "export function removeBridge("),
     (weditor_js, "export function pinCountOf("),
-    (mmap_js, "renderWiringEditor({ draft, deviceTypes:"),
-    (mmap_js, "collectWiring(root, next)"),
-    (mirror_js, "export const WIRING_EVENTS"),
+    (mmap_js, "renderBridgeEditor({ draft, deviceTypes:"),
+    (mmap_js, "collectBridge(root, next)"),
+    (mirror_js, "export const BRIDGE_EVENTS"),
     # ⚠️ **真机段**（B-156 ~ B-160）
     (browser, "pinLevelRouting"),
 ]

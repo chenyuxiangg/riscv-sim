@@ -268,7 +268,7 @@ os 是 M 模式、**不需要** A 扩展（D 是死代码）⇒ `misa` 一个位
 
 - [x] **D-1** `0x80000000` 起 **128 MiB**（拆成 8 个 ≤16 MiB 的区域）
       > ⚠️ **口径按裁决 C′ 修订**：这是 `QemuVirt` **档**，**默认档不铺**（默认档铺满会吃掉几个 GiB、测试跑不动）⇒ 宿主按镜像用到的地址自动挑档。
-      > 证据：`crates/kernel/src/kernel_host/tests_osz_wiring.rs` 的 `the_qemu_virt_profile_maps_the_whole_128_mib_and_the_three_devices`（逐条检查含堆尾 `0x87FF_FFFC`）与 `the_default_profile_leaves_the_qemu_virt_window_unmapped`
+      > 证据：`crates/kernel/src/kernel_host/tests_osz_bridge.rs` 的 `the_qemu_virt_profile_maps_the_whole_128_mib_and_the_three_devices`（逐条检查含堆尾 `0x87FF_FFFC`）与 `the_default_profile_leaves_the_qemu_virt_window_unmapped`
 - [x] **D-2** UART 映射到 `0x10000000`、CLINT 到 `0x02000000`、PLIC 到 `0x0C000000`
       > 证据：同上用例的三个 `lookup(...).is_some()` 断言
 - [x] **D-3** CLINT 的 `mtimecmp`（周期）↔ M-16 的 `set_timer_compare`（ps）换算接通

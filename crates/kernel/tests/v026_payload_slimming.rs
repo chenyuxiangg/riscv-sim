@@ -18,7 +18,7 @@
 //! ## ⚠️ 为什么必须**同时**断言「真的是 QemuVirt 布局」
 //!
 //! `KernelHost::new_with_profile` 的返回值**不是 `Result`**：换档失败时它
-//! **静默退回默认档**（只留一个 `probe_wiring_failures` 计数，**不 panic**）
+//! **静默退回默认档**（只留一个 `probe_bridge_failures` 计数，**不 panic**）
 //! ⇒ 只断言「载荷小」的话，**降级成 Default 档也会绿** ⇒ 那就是**白测**。
 //!
 //! ⇒ 所以这条用例**先**断言 QemuVirt 的实际布局（`0x8000_0000` 起有

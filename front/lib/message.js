@@ -126,11 +126,11 @@
 // Contract **v11** adds the **连线报告**（STAGE-48 · v0.72 · debt ledger
 // D-177 A）—— 「宿主不再把器件实例塌缩成固定角色」批的**一半**：
 //
-//   - one new event field: `MemoryMap` gained `wiring_report` — 「你写的
+//   - one new event field: `MemoryMap` gained `bridge_report` — 「你写的
 //     N 根线里有 M 根当前抬不了」（`{declared, live, dropped[]}`）⇒ ⇒
 //     **形状变了** ⇒ ⇒ `SCHEMA_VERSION` **10 → 11**（⚠️ 产品计划里写的
 //     「零升版」**不成立** ⇒ ⇒ 订正见 STAGE-48 §7.1 订正 1）;
-//   - three new DTO shapes: `WiringReportDto` / `DroppedWireDto` /
+//   - three new DTO shapes: `BridgeReportDto` / `DroppedWireDto` /
 //     `WireDropReason` —— ⚠️ **理由词表**是**稳定枚举**（**线上形态是
 //     kebab-case**：`source-unknown` / `source-type` / `target-unknown` /
 //     `target-type` / `source-out-of-range` / `overridden`）⇒ ⇒ **恰好
@@ -207,8 +207,8 @@ export const SUPPORTED_PLATFORM_SCHEMA_VERSIONS = [1, 2, 3, 4, 5];
  *   - `PLATFORM_RULES_VERSION` = **合法性规则集**版本（**哪些**描述合法）。
  *
  * ⚠️ **值 3 的含义**：版本 **1** = V-17 之前那套规则（**存量**按它判）⇒
- * 版本 **2** = 加上 V-17 之后那套 ⇒ 版本 **3** = 再加上 **V-18**（`wiring`
- * 里引用的器件必须存在于同一份描述里）与 **V-19**（`wiring` 的 `to.source`
+ * 版本 **2** = 加上 V-17 之后那套 ⇒ 版本 **3** = 再加上 **V-18**（`bridge`
+ * 里引用的器件必须存在于同一份描述里）与 **V-19**（`bridge` 的 `to.source`
  * 必须小于目标 PLIC 的 `sources`）之后那套 ⇒ ⇒ **老条目缺这个戳 ⇒ 隐含
  * 版本 1**（STAGE-18 裁决 G）⇒ ⇒ 「存量是不是老存量」**判得出来**。
  *
@@ -218,7 +218,7 @@ export const SUPPORTED_PLATFORM_SCHEMA_VERSIONS = [1, 2, 3, 4, 5];
  * ⚠️ **本批只升规则集版本**（STAGE-19 裁决 F）：规则集**收紧**了 ⇒ ⇒ 这个数
  * **2 → 3**；⚠️ **另外两个版本号一个都不升** ⇒ `SCHEMA_VERSION` **不因本批
  * 而变**（契约信封**零**变更）、`PLATFORM_SCHEMA_VERSION` **仍 1**（只加了一个
- * **带缺省**的**可选**字段 `wiring` ⇒ 按 STAGE-16 `max_region_bytes` 的
+ * **带缺省**的**可选**字段 `bridge` ⇒ 按 STAGE-16 `max_region_bytes` 的
  * **同形先例** ⇒ **不是**破坏性格式变更 ⇒ ⇒ 存量板**不被新规则拒**）。
  *
  * ⚠️ **「不因本批而变」≠「永远是那个数」**：契约信封版本后来在 **v0.44 批**
@@ -234,33 +234,6 @@ export const SUPPORTED_PLATFORM_SCHEMA_VERSIONS = [1, 2, 3, 4, 5];
  * 与视图层**都从这里 import** ⇒ **一个定义处** ⇒ 依赖方向仍单向。
  */
 export const PLATFORM_RULES_VERSION = 7;
-
-/**
- * **连线事件词表（建议清单）** — mirrors
- * `riscv_sim_contract::platform::WIRING_EVENTS`.
- *
- * ⚠️ **它只是「建议」**（v0.74 · STAGE-50 · D-177 的 D）：连线编辑面用它做
- *   **候选提示**（`<datalist>`）⇒ ⇒ 用户**可以**手输别的名字 ⇒ ⇒ ⇒ 前端
- *   **不约束**内核的词表（内核将来加了新事件 ⇒ ⇒ 前端照样能表达 ⇒ ⇒ ⇒
- *   「前端抄一份词表就等于第二个真相源」那个坑**被躲开**了）。
- *
- * ⚠️ **合法性只由内核判**（契约层 V-18）⇒ ⇒ 前端**不**拿它判「这个名字合不
- *   合法」⇒ ⇒ ⇒ 它在这儿的**唯一**用途是「给用户看几个常见值」。
- *
- * ⚠️ **跨层判据**（`front/tests/wiring-editor.test.mjs`）：本表**逐字**等于
- *   契约层源码里那张表（⇒ ⇒ 两侧漂了会红）⇒ ⇒ ⇒ **一个版本号 / 一张词表
- *   只有一处钉它的地方**（契约层那一份是**真的**那一份）。
- *
- * ⚠️ **字段**：只镜像前端**用得到**的三项（`name` / `source_kind` /
- *   `needs_pin`）⇒ ⇒ 前端**不需要**语义（电平 / 一次性）⇒ ⇒ **不抄**那一项
- *   （⇒ ⇒ 少一处会漂的东西）。
- *
- * @type {ReadonlyArray<{name: string, source_kind: string, needs_pin: boolean}>}
- */
-export const WIRING_EVENTS = Object.freeze([
-    Object.freeze({ name: "rx_ready", source_kind: "uart16550", needs_pin: false }),
-    Object.freeze({ name: "pin_irq", source_kind: "gpio", needs_pin: true }),
-]);
 
 // ---------------------------------------------------------------------------
 // 场景码表（STAGE-29 · 裁决 E · v0.44 批）

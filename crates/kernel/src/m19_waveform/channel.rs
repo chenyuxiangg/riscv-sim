@@ -8,7 +8,7 @@
 //! The channel table is deliberately separate from the M-18 channel
 //! table: M-18 owns *probe* bindings (source + signal → channel),
 //! M-19 owns *rendering* metadata (label + value width → channel).
-//! The wiring code copies the relevant fields across at boot.
+//! The bridge code copies the relevant fields across at boot.
 
 use riscv_sim_contract::error::PlatformError;
 use riscv_sim_contract::model::EdgeKind;
@@ -58,7 +58,7 @@ impl ChannelMeta {
     /// 64-bit value channel labelled `"ch<N>"`.
     ///
     /// M-19 never drops an event just because the channel was not
-    /// declared — a missing declaration is a wiring mistake, and
+    /// declared — a missing declaration is a bridge mistake, and
     /// silently discarding the observation would hide it. The event
     /// is recorded with this fallback metadata instead.
     pub fn fallback(ch: u8) -> Self {

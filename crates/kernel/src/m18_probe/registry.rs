@@ -156,7 +156,7 @@ impl SampleCfg {
     }
 
     /// Enable a single channel. Convenience for tests + the demo
-    /// wiring path.
+    /// bridge path.
     pub fn enable_channel(&mut self, ch: u8) {
         self.enable |= 1 << ch;
     }
@@ -412,7 +412,7 @@ impl ProbeRegistry {
         })
     }
 
-    /// Convenience wiring: build a probe callback that routes
+    /// Convenience bridge: build a probe callback that routes
     /// periph-side signal observations into the channel bound to
     /// `(periph_id, signal)` (M-18 v0.8 §3.2, §18-2, additive
     /// contract method `Peripheral::on_probe`).
@@ -447,7 +447,7 @@ impl ProbeRegistry {
     /// `borrow_mut()`. If the caller is currently holding a
     /// `borrow()` on the registry, the closure drops the
     /// observation and increments `borrow_contended` rather than
-    /// panicking. The M-15 ↔ M-18 wiring will produce high-
+    /// panicking. The M-15 ↔ M-18 bridge will produce high-
     /// frequency callbacks; a panic in the hot path would be
     /// unrecoverable from a peripheral interrupt context.
     pub fn wire_signal_probe(
@@ -761,7 +761,7 @@ impl ProbeRegistry {
     ///
     /// The sink receives every edge the registry emits, together with
     /// the classified [`EdgeKind`]. M-19's `WaveformPipeline`
-    /// implements the [`EdgeSink`] port; the wiring code installs it
+    /// implements the [`EdgeSink`] port; the bridge code installs it
     /// once at boot:
     ///
     /// ```ignore

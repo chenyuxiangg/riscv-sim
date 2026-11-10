@@ -507,7 +507,7 @@ impl Uart16550 {
     /// The interrupt enable register (`IER @ 0x1`).
     ///
     /// ⚠️ The guest writes it through `WRITE_BYTE(base + IER, en)` — osz's
-    /// `hal_uart_set_irq_en()` does exactly that. The **host / PLIC wiring**
+    /// `hal_uart_set_irq_en()` does exactly that. The **host / PLIC bridge**
     /// reads it through this accessor.
     pub fn interrupt_enable(&self) -> u8 {
         self.ier

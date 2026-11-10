@@ -7,15 +7,15 @@
 ## §1 事实（**逐条读源码**，不是推断）
 
 1. **路线 α 已拍板**（STAGE-44 分岔点 0）：「现阶段**一块板一个 MCU** 就够」⇒ ⇒ 产品树 = 当前生效板的**派生视图**（前端算）⇒ ⇒ **本批的 MCU = 板描述的顶层属性**（不是内存图里的器件）⇒ ⇒ 路线 β（产品树进内核）仍排队第 60 批（**若选 β**）。
-2. **描述形状**（`crates/contract/src/platform.rs:225` `PlatformDescription`）：顶层已有 `wiring` / `roles` / `pins` 三个**可选**段（各带 `#[serde(default, skip_serializing_if = "Option::is_none")]` ⇒ ⇒ 缺省**不带键**）⇒ ⇒ **MCU 段沿用同一加法模式**。
+2. **描述形状**（`crates/contract/src/platform.rs:225` `PlatformDescription`）：顶层已有 `bridge` / `roles` / `pins` 三个**可选**段（各带 `#[serde(default, skip_serializing_if = "Option::is_none")]` ⇒ ⇒ 缺省**不带键**）⇒ ⇒ **MCU 段沿用同一加法模式**。
 3. **固件装载只认 ELF32**（`crates/kernel/src/m06_elf/elf.rs`）：`ELFCLASS` 必须 1（32 位）；`e_machine` 必须 `EM_RISCV=0xF3`；`e_type` 必须 `ET_EXEC=2` ⇒ ⇒ **固件侧的 ISA 事实只有四个**：**class**（32/64）、**e_machine**（已查）、**e_flags**（MVP 里 `let _ = (e_flags, e_ehsize)` **未用**）、**e_entry**。
 4. **固件实测**（`tests/golden/_out/*.elf` 共 80 个，逐一读头）：**全部** `class=1`（ELF32）、`machine=243`、`entry=0x8000_0000`、`flags=0x0`——**除一个**：`local-compressed_trap.elf` `flags=0x1`（`EF_RISCV_RVC`=1<<0 **置位**）⇒ ⇒ **只有这一个固件带 RVC 位**。
 5. **RISC-V ELF 的 e_flags 只编码三件事**：`EF_RISCV_RVC`（bit0，压缩指令）、`EF_RISCV_RVE`（bit5，嵌入式）、float ABI（bits 8-11）⇒ ⇒ **m / a / f / d 等扩展在 ELF 头里查不到**（要 .riscv.attributes 段或指令解码，MVP 都不做）⇒ ⇒ **「按 ISA 校验固件」能查的只有 class 与 RVC 位**。
-6. **内置描述不跟版本走**：`crates/kernel/src/kernel_host/platforms/qemu-virt.json` 是 `schema_version: 1`（v0.73/v0.74 两次升版都没动它 ⇒ ⇒ 内置靠**缺省优先**逐字不变）⇒ ⇒ **本批内置描述补 `mcu` 键、`schema_version` 仍保持 1**（老形状 + 新可选键，与 roles/pins/wiring 同款惯例）。
+6. **内置描述不跟版本走**：`crates/kernel/src/kernel_host/platforms/qemu-virt.json` 是 `schema_version: 1`（v0.73/v0.74 两次升版都没动它 ⇒ ⇒ 内置靠**缺省优先**逐字不变）⇒ ⇒ **本批内置描述补 `mcu` 键、`schema_version` 仍保持 1**（老形状 + 新可选键，与 roles/pins/bridge 同款惯例）。
 7. **版本现状**（`crates/contract/src/platform.rs:86-103`）：`PLATFORM_SCHEMA_VERSION = 3` · `SUPPORTED_PLATFORM_SCHEMA_VERSIONS = [1, 2, 3]` ⇒ ⇒ 本批 **3 → 4**、`SUPPORTED = [1, 2, 3, 4]`；**信封 `SCHEMA_VERSION` 11 不动** · **会话快照 `SIM_STATE_SCHEMA_VERSION` 2 不动**。
 8. **场景码现状**（`crates/contract/src/error.rs`）：`E_PLT` 最高 **19**（`E_PLT_19_PINS_INVALID`）；`E_PLT_17_BOARD_MISMATCH` = 「未知系统」（**地址**层面：镜像要的区间不在板上）⇒ ⇒ **ISA 不匹配是另一层语义**（固件**架构**与板声明不符）⇒ ⇒ **一码一义：新码 `E_PLT_20_FW_ISA_MISMATCH`**。
 9. **固件装载门禁的位置**（`crates/kernel/src/kernel_host/mod.rs:2639` `on_load_project`）：`backend.reset()` 在**函数开头** ⇒ ⇒ 「未知系统」判不过时 `E_PLT_17` 已把现场复原 ⇒ ⇒ **ISA 校验放同一处**（同款「判不过 ⇒ 报码 + 复原」）。
-10. **前端板编辑器**（`front/views/components/memory-map.js`）：`roles` / `pins` 已有 `normalize*` 深复制往返（有 ⇒ 草稿有 ⇒ 提交回去还在；无 ⇒ **不带键**）⇒ ⇒ **MCU 段沿用同一模式**；前端**不判** roles/pins/wiring 的合法性（原样透传，合法性只由内核判）⇒ ⇒ **MCU 同样透传**。
+10. **前端板编辑器**（`front/views/components/memory-map.js`）：`roles` / `pins` 已有 `normalize*` 深复制往返（有 ⇒ 草稿有 ⇒ 提交回去还在；无 ⇒ **不带键**）⇒ ⇒ **MCU 段沿用同一模式**；前端**不判** roles/pins/bridge 的合法性（原样透传，合法性只由内核判）⇒ ⇒ **MCU 同样透传**。
 
 ## §2 口径（**逐字冻结** · 草稿版）
 

@@ -11,7 +11,7 @@
 import { DEMO_FIRMWARE_BYTES } from "./demo-firmware.js";
 
 /**
- * Build the mock project used by the dev wiring.
+ * Build the mock project used by the dev bridge.
  *
  * @returns {object} a `model::Project` shaped object
  */

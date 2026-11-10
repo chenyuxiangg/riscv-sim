@@ -276,22 +276,22 @@ describe("板级内存图 · 乱序到达（STAGE-17 · C-1 ~ C-6）", () => {
     test("C-1 **严格更旧**的事件 ⇒ **不覆盖**已有状态 ⇒ 丢弃计数 +1", () => {
         setup();
         const router = fakeKernel();
-        const wiring = app.wireMemoryMap(router);
+        const bridge = app.wireMemoryMap(router);
         router.emitMemoryMap(NEW_BOARD, { loaded: true, revision: 5 });
-        assert.equal(wiring.get().revision, 5, "前置：手上是较新那份（修订号 5）");
+        assert.equal(bridge.get().revision, 5, "前置：手上是较新那份（修订号 5）");
         // ⚠️ **乱序**：一个**严格更旧**的事件**后到**。
         router.emitMemoryMap(OLD_BOARD, { loaded: true, revision: 3 });
 
         assert.equal(
-            wiring.get().revision, 5,
+            bridge.get().revision, 5,
             "严格更旧的事件不许覆盖较新那份的修订号",
         );
         assert.equal(
-            wiring.get().description.regions.length, 1,
+            bridge.get().description.regions.length, 1,
             "较新那张图必须留着（旧那张有两段 ⇒ 段数对不上就是被覆盖了）",
         );
         assert.equal(
-            wiring.discardedCount(), 1,
+            bridge.discardedCount(), 1,
             "丢弃必须**可观测**（计数 +1 ⇒ 判定靠数、不靠文案）",
         );
         // ⚠️ **两个视图状态**也不许被旧事件改掉（它们与缓存是同一个引用）。
@@ -304,26 +304,26 @@ describe("板级内存图 · 乱序到达（STAGE-17 · C-1 ~ C-6）", () => {
         setup();
         const router = fakeKernel();
         const services = await unloadServices(router);
-        const wiring = services.memoryMap;
+        const bridge = services.memoryMap;
         // 内核此刻的图：修订号 4、**已装载镜像**。
         router.emitMemoryMap(NEW_BOARD, { loaded: true, revision: 4 });
-        assert.equal(wiring.get().revision, 4, "前置：手上是修订号 4");
-        assert.equal(wiring.get().loaded, true, "前置：已装载镜像");
+        assert.equal(bridge.get().revision, 4, "前置：手上是修订号 4");
+        assert.equal(bridge.get().loaded, true, "前置：已装载镜像");
 
         // ⚠️ 「卸载工程」⇒ 内核清订阅 + **修订号不 +1** + 「已装载镜像」变假
         // ⇒ 随后的重订推送是**同号**、但**内容不同**（`loaded = false`）。
         await app.handleCommand({ action: "unload-project" }, services);
 
         assert.equal(
-            wiring.get().revision, 4,
+            bridge.get().revision, 4,
             "卸载不改图 ⇒ 修订号不变（同号事件必须**照收**）",
         );
         assert.equal(
-            wiring.get().loaded, false,
+            bridge.get().loaded, false,
             "**同号**事件必须照收 ⇒ `loaded` 要更新（挡掉 ⇒ 前端停在旧状态）",
         );
         assert.equal(
-            wiring.discardedCount(), 0,
+            bridge.discardedCount(), 0,
             "同号事件**不许**被丢弃（裁决 G）",
         );
     });
@@ -331,17 +331,17 @@ describe("板级内存图 · 乱序到达（STAGE-17 · C-1 ~ C-6）", () => {
     test("C-3 **更新**的事件 ⇒ **照收** ⇒ 状态推进", () => {
         setup();
         const router = fakeKernel();
-        const wiring = app.wireMemoryMap(router);
+        const bridge = app.wireMemoryMap(router);
         router.emitMemoryMap(OLD_BOARD, { loaded: true, revision: 3 });
         router.emitMemoryMap(NEW_BOARD, { loaded: true, revision: 5 });
 
-        assert.equal(wiring.get().revision, 5, "更新的修订号必须被收下");
+        assert.equal(bridge.get().revision, 5, "更新的修订号必须被收下");
         assert.equal(
-            wiring.get().description.regions.length, 1,
+            bridge.get().description.regions.length, 1,
             "更新的那张图必须生效（否则「一律不更新」也会让这条假绿）",
         );
         assert.equal(
-            wiring.discardedCount(), 0,
+            bridge.discardedCount(), 0,
             "更新的事件**不许**被丢弃（否则「一律丢弃」也会让这条假绿）",
         );
         assert.equal(m03.getState("memory-map").memoryMap.revision, 5);
@@ -350,11 +350,11 @@ describe("板级内存图 · 乱序到达（STAGE-17 · C-1 ~ C-6）", () => {
     test("C-4 护栏**不改提交路径**：基底旧了就**照常提交** ⇒ `expected_revision` 照常兜底", async () => {
         setup();
         const router = fakeKernel();
-        const wiring = app.wireMemoryMap(router);
+        const bridge = app.wireMemoryMap(router);
         router.emitMemoryMap(NEW_BOARD, { loaded: true, revision: 7 });
         // ⚠️ 内核的修订号**偷偷**往前走了（前端不知道 ⇒ 前端的基底**旧了**）。
         router.bumpRevision(2);
-        assert.equal(wiring.get().revision, 7, "前置：前端手上还是旧的那个修订号");
+        assert.equal(bridge.get().revision, 7, "前置：前端手上还是旧的那个修订号");
 
         const draft = mm.draftFromDescription(NEW_BOARD);
         draft.regions[0].size = "4194304";
@@ -455,18 +455,18 @@ describe("板级内存图 · 乱序到达（STAGE-17 · C-1 ~ C-6）", () => {
     test("丢弃计数**只增不减**（`reset()` 不抹掉证据）", () => {
         setup();
         const router = fakeKernel();
-        const wiring = app.wireMemoryMap(router);
+        const bridge = app.wireMemoryMap(router);
         router.emitMemoryMap(NEW_BOARD, { loaded: true, revision: 5 });
         router.emitMemoryMap(OLD_BOARD, { loaded: true, revision: 3 });
-        assert.equal(wiring.discardedCount(), 1);
-        wiring.reset();
+        assert.equal(bridge.discardedCount(), 1);
+        bridge.reset();
         assert.equal(
-            wiring.discardedCount(), 1,
+            bridge.discardedCount(), 1,
             "`reset()` 只清「当前生效的图」⇒ 丢弃的**证据**不许被抹掉",
         );
         // ⚠️ 清完之后，下一个事件**重新**成为「手上那个」。
         router.emitMemoryMap(OLD_BOARD, { loaded: true, revision: 3 });
-        assert.equal(wiring.get().revision, 3, "清掉缓存之后 ⇒ 新事件照收");
-        assert.equal(wiring.discardedCount(), 1, "计数不因新事件而变");
+        assert.equal(bridge.get().revision, 3, "清掉缓存之后 ⇒ 新事件照收");
+        assert.equal(bridge.discardedCount(), 1, "计数不因新事件而变");
     });
 });

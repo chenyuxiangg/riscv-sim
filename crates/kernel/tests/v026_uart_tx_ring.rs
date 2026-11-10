@@ -60,7 +60,7 @@ fn meta() -> CheckpointMetaDto {
 fn qemuvirt_host() -> KernelHost {
     let host = KernelHost::new_with_profile(MemoryProfile::QemuVirt);
     assert_eq!(
-        host.probe_wiring_failures(),
+        host.probe_bridge_failures(),
         0,
         "换档失败会**静默退回默认档** ⇒ 失败次数必须是 0"
     );

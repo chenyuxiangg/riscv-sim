@@ -387,7 +387,7 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
     /// The injected dependencies (event bus, interrupt sink), the
     /// peripheral-tick seam ([`Engine::set_peripheral_ticker`]) and the
     /// peripheral registry ([`Engine::register_peripheral`]) are
-    /// **wiring**, not simulation state: they are deliberately left in
+    /// **bridge**, not simulation state: they are deliberately left in
     /// place, because silently dropping the ticker would stop peripherals
     /// from ever being ticked again.
     pub fn reset(&mut self) {
@@ -1359,7 +1359,7 @@ mod tests {
 
     #[test]
     fn engine_reset_keeps_the_peripheral_ticker_wired() {
-        // The ticker is *wiring*, not simulation state: dropping it on
+        // The ticker is *bridge*, not simulation state: dropping it on
         // reset would silently stop peripherals from ever being ticked.
         let mut eng: Engine<TestBus, TestBus> = Engine::default();
         let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));

@@ -369,7 +369,7 @@ pub const TOPIC_TRACE: &str = "debug.trace";
 /// `reqId` 关联「命令 → 回复」⇒ ⇒ **不需要先订阅**。
 ///
 /// ⚠️ 与前端 `EVENT_TOPIC` 里的 `SymbolResolved` **逐字相同**（STAGE-42
-/// §2.7）⇒ ⇒ 两侧的一致性由 `crates/kernel/tests/m11_host_wiring.rs` 里
+/// §2.7）⇒ ⇒ 两侧的一致性由 `crates/kernel/tests/m11_host_bridge.rs` 里
 /// 那条用例钉住。
 pub const TOPIC_SYMBOL: &str = "debug.symbol";
 
@@ -814,8 +814,8 @@ pub struct KernelHost {
     ///
     /// 装配期的 `define_channel` / `attach_signal` 失败原本被 `let _ =`
     /// 静默吞掉——通道没接上，波形视图就是空的，而**没有任何报错**。
-    /// 现在失败是**可见的**：计数器 + [`KernelHost::probe_wiring_failures`]。
-    probe_wiring_failures: u32,
+    /// 现在失败是**可见的**：计数器 + [`KernelHost::probe_bridge_failures`]。
+    probe_bridge_failures: u32,
     /// 发布波形事件时因**超出单事件边沿上限**而截断的条数
     /// （V-A 检视 · 🟠-1）。
     waveform_edges_truncated: u64,
@@ -1064,7 +1064,7 @@ impl KernelHost {
             published_valid: false,
             probes: None,
             waveform: None,
-            probe_wiring_failures: 0,
+            probe_bridge_failures: 0,
             waveform_edges_truncated: 0,
             intc,
             snapshots: SnapshotManager::new(),
@@ -1276,7 +1276,7 @@ impl KernelHost {
                 // 真失败说明描述或总线出了问题 —— 退回默认档让调用方
                 // 至少拿到一个能用的宿主。
                 let mut host = Self::new();
-                host.probe_wiring_failures += 1;
+                host.probe_bridge_failures += 1;
                 host
             }
         }
@@ -1356,7 +1356,7 @@ impl KernelHost {
     ///    上，不在 M-16 上。
     ///
     ///    ⚠️ **v0.34（D-125）**：那个源号**不再是源码里的字面量** ⇒ 它来自
-    ///    **连线表**（默认连线或描述里的 `wiring`）⇒ ⇒ 换一块板改连线
+    ///    **中断源表**（描述里每个外设的 `irq_line`）⇒ ⇒ 换一块板改号
     ///    **不用改宿主**。
     /// 3. **PLIC 的待交付源 → M-16 的外部中断线**。⚠️ **claim 是 guest
     ///    的权利**：平台这一侧**只读** PLIC 的「当前该交付哪个源」，
@@ -1855,7 +1855,7 @@ impl KernelHost {
         //
         // ⚠️ 失败**不能静默吞掉**（V-A 检视 · 🟡-6）：通道没接上时，
         // 波形视图就是空的，而宿主**一声不吭**。失败计入
-        // `probe_wiring_failures`，由 [`KernelHost::probe_wiring_failures`]
+        // `probe_bridge_failures`，由 [`KernelHost::probe_bridge_failures`]
         // 暴露。
         if registry
             .borrow_mut()
@@ -1867,7 +1867,7 @@ impl KernelHost {
             ))
             .is_err()
         {
-            self.probe_wiring_failures += 1;
+            self.probe_bridge_failures += 1;
         }
 
         // M-16 → M-18 的**中断脉冲**通道（接缝 #5 / 台账 D-26）。
@@ -1884,7 +1884,7 @@ impl KernelHost {
             ))
             .is_err()
         {
-            self.probe_wiring_failures += 1;
+            self.probe_bridge_failures += 1;
         }
 
         // 打开探针：master + 通道。
@@ -1916,7 +1916,7 @@ impl KernelHost {
             Err(_) => {
                 // 控制器正被占用 ⇒ 脉冲回调**没装上**：这一轮的脉冲探针
                 // 不会有边沿。失败**可见**（计数器），不静默。
-                self.probe_wiring_failures += 1;
+                self.probe_bridge_failures += 1;
             }
         }
 
@@ -1959,9 +1959,9 @@ impl KernelHost {
             //
             // ⚠️ 但「跳过」是**有代价**的：这一轮里该外设的写不会产生
             // 任何边沿，而宿主**不吭声**（V-A 检视 · 🟡-7）。失败计入
-            // `probe_wiring_failures`。
+            // `probe_bridge_failures`。
             let Ok(mut periph) = handle.try_borrow_mut() else {
-                self.probe_wiring_failures += 1;
+                self.probe_bridge_failures += 1;
                 continue;
             };
             if periph.id() != GPIO_PERIPH_ID {
@@ -1977,7 +1977,7 @@ impl KernelHost {
             )
             .is_err()
             {
-                self.probe_wiring_failures += 1;
+                self.probe_bridge_failures += 1;
             }
         }
     }
@@ -2064,8 +2064,8 @@ impl KernelHost {
     ///
     /// 非零 = 有通道或回调没接上，波形视图会少东西——但宿主不会报错，
     /// 所以这个计数器是唯一的信号。
-    pub fn probe_wiring_failures(&self) -> u32 {
-        self.probe_wiring_failures
+    pub fn probe_bridge_failures(&self) -> u32 {
+        self.probe_bridge_failures
     }
 
     /// 因超出 [`MAX_WAVEFORM_EDGES_PER_EVENT`] 而被截断的边沿条数。
@@ -4979,12 +4979,6 @@ mod tests_platform;
 #[cfg(test)]
 mod tests_time_source;
 
-/// 器件连线**数据化**（v0.34 · D-125 · STAGE-19 · 验收 B-1 ~ B-5）。
-///
-/// ⚠️ 它钉的是**宿主这一段**：描述里的 `wiring` ⇒ 抬到哪个源 / 默认连线
-/// ⇒ 存量行为一字未变 / 缺一端 ⇒ 不抬线 / 写死的那个常量已消失。
-#[cfg(test)]
-
 /// 板级内存图（v0.29 · STAGE-14 · 验收 B-1 ~ B-9）。
 ///
 /// ⚠️ 它钉的是**宿主**这一段：立即生效 / 待生效 / 装载时应用 /
@@ -5090,13 +5084,6 @@ mod tests_v071_unknown_system;
 /// 其余三项（B2 / D1 / D-177 的 C）落地后再往这里加。
 #[cfg(test)]
 mod tests_v073_schema;
-
-/// **引脚级连线 + 通用连接路由**（v0.74 · STAGE-50 · D-175 的 D / E）。
-///
-/// ⚠️ **引脚级**（`wiring.from.pin`）⇒ ⇒ 源可以是 **GPIO 的某个引脚**；
-/// ⚠️ **通用路由** ⇒ ⇒ 事件从「只有 `rx_ready`」扩成**词表**（⇒ ⇒ 语义由
-///   事件名决定：电平 / 一次性）。
-#[cfg(test)]
 
 /// **v0.75（STAGE-51 · D-175 的 F）** —— MCU 概念：ISA 门禁的 K 组 / A-3 / X-1。
 #[cfg(test)]

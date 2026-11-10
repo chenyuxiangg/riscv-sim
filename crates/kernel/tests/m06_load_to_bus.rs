@@ -144,7 +144,7 @@ fn text_only_elf_with_padded_entry_loads_and_runs() {
     // Implementation note: this only works if we manually craft the
     // program-header p_paddr to be 16 — for the MVP we test only the
     // canonical case (entry at paddr 0). The canonical case still
-    // gives us M-06 → M-14 → M-13 wiring validated end-to-end.
+    // gives us M-06 → M-14 → M-13 bridge validated end-to-end.
 
     let elf = make_minimal_elf(4, 4, 0);
     let li = DefaultLoader.load(&elf, Kind::Elf).expect("elf parse");

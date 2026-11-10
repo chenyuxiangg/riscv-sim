@@ -152,15 +152,15 @@ describe("STAGE-43 · 器件中间层的前端接线", () => {
                 return cmd;
             },
         };
-        const wiring = devices.wireDevices(router);
-        assert.equal(wiring.getTypes(), null, "还没收到事件时，类型表应是 null（不是空数组）");
-        assert.equal(wiring.getInstances(), null, "还没收到事件时，实例表应是 null（不是空数组）");
+        const bridge = devices.wireDevices(router);
+        assert.equal(bridge.getTypes(), null, "还没收到事件时，类型表应是 null（不是空数组）");
+        assert.equal(bridge.getInstances(), null, "还没收到事件时，实例表应是 null（不是空数组）");
 
         router.subs.get("device.types")({ value: { types: TYPES } });
         router.subs.get("device.instances")({ value: { instances: INSTANCES } });
 
-        assert.deepEqual(wiring.getTypes(), TYPES, "类型表没进缓存");
-        assert.deepEqual(wiring.getInstances(), INSTANCES, "实例表没进缓存");
+        assert.deepEqual(bridge.getTypes(), TYPES, "类型表没进缓存");
+        assert.deepEqual(bridge.getInstances(), INSTANCES, "实例表没进缓存");
         const state = m03.getState("product");
         assert.deepEqual(state.deviceTypes, TYPES, "类型表没进产品视图的视图状态");
         assert.deepEqual(state.deviceInstances, INSTANCES, "实例表没进产品视图的视图状态");
@@ -178,8 +178,8 @@ describe("STAGE-43 · 器件中间层的前端接线", () => {
                 return cmd;
             },
         };
-        const wiring = devices.wireDevices(router);
-        await wiring.subscribeDeviceStreams();
+        const bridge = devices.wireDevices(router);
+        await bridge.subscribeDeviceStreams();
         assert.deepEqual(
             sent,
             [
@@ -202,11 +202,11 @@ describe("STAGE-43 · 器件中间层的前端接线", () => {
                 return cmd;
             },
         };
-        const wiring = devices.wireDevices(router);
+        const bridge = devices.wireDevices(router);
         router.subs.get("device.types")({ value: { types: TYPES } });
         router.subs.get("device.instances")({ value: { instances: INSTANCES } });
-        wiring.reset();
-        assert.equal(wiring.getTypes(), null, "reset 之后类型表应该回到 null");
-        assert.equal(wiring.getInstances(), null, "reset 之后实例表应该回到 null");
+        bridge.reset();
+        assert.equal(bridge.getTypes(), null, "reset 之后类型表应该回到 null");
+        assert.equal(bridge.getInstances(), null, "reset 之后实例表应该回到 null");
     });
 });

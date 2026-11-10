@@ -335,7 +335,7 @@ if "E_PLT_18" in error_rs and "E_PLT_16" in error_rs:
             err(f"[新码] `{code}` 被定义成 `E_PLT_16` 的别名 ⇒ ⇒ 一码两义")
 
 # --- 10. 上一批的破坏性改动没有被回退（STAGE-48）---------------------------
-for dto in ("pub struct WiringReportDto", "pub struct DroppedWireDto",
+for dto in ("pub struct BridgeReportDto", "pub struct DroppedWireDto",
             "pub enum WireDropReason"):
     if dto not in model_rs:
         err(f"[回退] 契约层没有 `{dto}` ⇒ ⇒ 上一批（STAGE-48）的连线报告"

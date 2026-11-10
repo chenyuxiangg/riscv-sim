@@ -67,15 +67,11 @@ const LSR_OVERRUN: u8 = 0x04;
 /// `IER` 的 RX 中断使能位（bit0）。
 const IER_RX_ENABLE: u8 = 0x01;
 
-/// 默认连线的**目标源号** —— **取值来源 = 默认连线那一份**。
-///
-/// ⚠️ **为什么不是写字面量 10**：v0.34（D-125）的主题是「一个约束一个
-/// 落点」⇒ ⇒ 那个源号在宿主里**只写一次**（[`platform::default_wiring`]
-/// 那一处）⇒ ⇒ 这里**引用**它，不另抄一份。
+/// 缺省 UART 中断号 —— 与内置板描述里的 UART0 号对齐。
 fn default_plic_source() -> u32 {
     10
 }
-/// PLIC 的**默认连线源**（UART RX）的优先级寄存器地址 —— **基址来自描述**。
+/// PLIC 上 UART 中断源的优先级寄存器地址 —— **基址来自描述**。
 fn plic_priority_uart_source() -> u32 {
     device_base("PLIC") + 4 * default_plic_source()
 }

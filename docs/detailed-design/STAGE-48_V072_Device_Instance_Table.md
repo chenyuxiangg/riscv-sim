@@ -16,11 +16,11 @@
 | --- | --- | --- |
 | F-1 | 宿主的 `MappedDevices` **只有三个固定角色句柄**（`uart0` / `clint` / `plic`）⇒ ⇒ 「板上的器件实例」被塌缩成「**三个角色**」⇒ ⇒ 第二个 UART **在宿主里没有句柄** | `crates/kernel/src/kernel_host/platform.rs:312-318` |
 | F-2 | ⚠️ **v0.66 已经在建图时产出了逐实例清单**（`MappedDevices.instances`：`id` / `kind` / `base` / `window_bytes`）⇒ ⇒ **实例表早就在**，只是**没有句柄** ⇒ ⇒ 本批**不是**「造实例表」，是「**给实例表装上句柄**」 | `crates/kernel/src/kernel_host/platform.rs:319-324` + `:387-396` |
-| F-3 | `compile_wiring` 末尾那个 `table.retain(\|w\| w.from_device == uart_id && w.to_device == plic_id)` ⇒ ⇒ **只保留「第一个 UART → 第一个 PLIC」**⇒ ⇒ 描述里指向**第二个 UART** 的线**被静默丢弃** | `crates/kernel/src/kernel_host/platform.rs:583` |
+| F-3 | `compile_bridge` 末尾那个 `table.retain(\|w\| w.from_device == uart_id && w.to_device == plic_id)` ⇒ ⇒ **只保留「第一个 UART → 第一个 PLIC」**⇒ ⇒ 描述里指向**第二个 UART** 的线**被静默丢弃** | `crates/kernel/src/kernel_host/platform.rs:583` |
 | F-4 | 「第一个」的口径 = **按 base 升序的第一个同种器件**（`first_uart_id` / `first_plic`）⇒ ⇒ 与建图时「第一个同种器件被宿主认领」**同序** | `crates/kernel/src/kernel_host/platform.rs:482-508` + `:397-407` |
 | F-5 | ⚠️ **`sync_interrupts` 第 2 步只算 `self.uart0` 的 `rx_ready`**，然后把**所有**线的源号塞给 `self.plic` ⇒ ⇒ **线的两端根本没被分别查过** ⇒ ⇒ 这是 D-177 的**第二个**落点（只修 `retain` **不够**） | `crates/kernel/src/kernel_host/mod.rs:1386-1411` |
 | F-6 | `sync_interrupts` 第 3 步（PLIC → M-16 外部线）**只问 `self.plic`** ⇒ ⇒ 第二个 PLIC 的源**永远抬不到架构层** | `crates/kernel/src/kernel_host/mod.rs:1419-1420` |
-| F-7 | ⚠️ **前端能提交带 `wiring` 的描述**：`draftFromDescription` / `draftToDescription` **逐字段保留 `wiring`** ⇒ ⇒ 板档案里带 `wiring` ⇒ ⇒ 「选用档案里的一块」⇒ ⇒ **整份 `SetMemoryMap`** ⇒ ⇒ **线真的会到内核** ⇒ ⇒ ⇒ 「丢线」有**用户侧消费者** | `front/views/components/memory-map.js:420` / `:456` + `front/views/m02_viewcomponents.js:530` |
+| F-7 | ⚠️ **前端能提交带 `bridge` 的描述**：`draftFromDescription` / `draftToDescription` **逐字段保留 `bridge`** ⇒ ⇒ 板档案里带 `bridge` ⇒ ⇒ 「选用档案里的一块」⇒ ⇒ **整份 `SetMemoryMap`** ⇒ ⇒ **线真的会到内核** ⇒ ⇒ ⇒ 「丢线」有**用户侧消费者** | `front/views/components/memory-map.js:420` / `:456` + `front/views/m02_viewcomponents.js:530` |
 | F-8 | ⚠️ **前端**没有任何**连线编辑面** ⇒ ⇒ 用户能**提交**线，但**画不出**线 ⇒ ⇒ 线只能来自**手写的板档案 JSON** | `front/views/components/memory-map.js`（无连线编辑器）|
 | F-9 | 内核 `on_subscribe` **无条件**推一次当前生效的内存图（`memory_map_event()`）⇒ ⇒ 「重订一次流」**确实**能拿到当前真值 | `crates/kernel/src/kernel_host/mod.rs:3930-3943` |
 | F-10 | ⚠️ **`LoadProject` 成功时内核**也**不**推 `memory.map` ⇒ ⇒ 前端学会新修订号的**唯一**途径是「重订 ⇒ 内核强推」 | `crates/kernel/src/kernel_host/mod.rs:2660-2664` |
@@ -51,7 +51,7 @@
 「端点不存在」/「目标不是 PLIC」/「源号越界」三类描述 ⇒ ⇒ 那**三条理由**
 （`source-unknown` / `target-unknown` / `target-type` / `source-out-of-range`）
 ⇒ ⇒ 在**经校验**的描述上**不可达** ⇒ ⇒ 它们是**兜底**（宿主**不盲目信任**
-描述 ⇒ ⇒ `compile_wiring` 是 `pub` ⇒ ⇒ 可能被喂进一份**没过校验**的描述）。
+描述 ⇒ ⇒ `compile_bridge` 是 `pub` ⇒ ⇒ 可能被喂进一份**没过校验**的描述）。
 
 ⇒ ⇒ **合法描述上真正可达的两条**：`source-type`（源器件**存在**但**不是 UART**
 —— V-18 **不管**源的**类型** ⇒ ⇒ 这是真的能发生）与 `overridden`
@@ -60,8 +60,8 @@
 ### §2.2 连线报告的三个字段 + **一条恒等式**
 
 ```
-WiringReport {
-    declared: u32,          // 描述里 `wiring` 段的条数（「你写了 N 根线」）
+BridgeReport {
+    declared: u32,          // 描述里 `bridge` 段的条数（「你写了 N 根线」）
     live:     u32,          // 其中**当前真的在连线表里**的条数
     dropped:  Vec<DroppedWire>,  // 其余的，逐条带理由
 }
@@ -90,11 +90,11 @@ DroppedWire { from_device, event, to_device, source, reason }
 | --- | --- | --- |
 | **A** | `MappedDevices` 从「三个固定角色句柄」改成「**按 id 索引的实例表**」（表里带**句柄**）⇒ ⇒ `uart0` / `clint` / `plic` 三个字段**删掉** | F-1 + F-2 ⇒ ⇒ `MappedDevices` 只在 `platform.rs` 内部用 ⇒ ⇒ **不是公开 API 变更** ⇒ ⇒ 「塌缩」在数据层消失 |
 | **B** | **角色 = id，句柄 = 从表里查出来的** ⇒ ⇒ 宿主**不再持有**「角色句柄」⇒ ⇒ 表是**唯一真相源** | ⇒ ⇒ 少一个状态就少一处可能不同步的地方 |
-| **C** | `compile_wiring` 末尾那个 `retain` **换成**「**查得到就留、查不到就记一笔**」⇒ ⇒ 丢线**不再静默** | F-3 ⇒ ⇒ 这就是 D-177 的**正题** |
+| **C** | `compile_bridge` 末尾那个 `retain` **换成**「**查得到就留、查不到就记一笔**」⇒ ⇒ 丢线**不再静默** | F-3 ⇒ ⇒ 这就是 D-177 的**正题** |
 | **D** | ⚠️ **默认连线逐字不变**（「第一个 UART → 第一个 PLIC · 源 10」）⇒ ⇒ 「第一个」由**实例表**按 base 序给出 | F-4 ⇒ ⇒ 与今天的 `first_uart_id` / `first_plic` **同序** ⇒ ⇒ **存量行为一字不变** |
 | **E** | `sync_interrupts` 第 2 步**遍历所有线**、每根线**各自查表**（源查 UART、目标查 PLIC）⇒ ⇒ **第二个 UART 的线也真的通电** | F-5 ⇒ ⇒ ⚠️ **只修 `retain` 不够**（线的两端从来没被分别查过）⇒ ⇒ 这才是里程碑 |
 | **F** | `sync_interrupts` 第 3 步**遍历所有 PLIC** ⇒ ⇒ 任一 PLIC 有可交付源就抬 M-16 外部线，否则撤线 ⇒ ⇒ **单 PLIC 时与今天逐字相同** | F-6 ⇒ ⇒ 「UART1 的线通了但中断抬不到架构层」= **通了一半** ⇒ ⇒ 不算通电 |
-| **G** | **丢线报告过 wire**：`EventPayload::MemoryMap` 增字段 `wiring_report` ⇒ ⇒ ⚠️ **契约升版**（10 → 11） | F-7 + F-11 ⇒ ⇒ 「内核接受描述时明说」⇒ ⇒ 报告必须在**接受的那一刻**到 ⇒ ⇒ `memory.map` 事件是那一刻的载体 |
+| **G** | **丢线报告过 wire**：`EventPayload::MemoryMap` 增字段 `bridge_report` ⇒ ⇒ ⚠️ **契约升版**（10 → 11） | F-7 + F-11 ⇒ ⇒ 「内核接受描述时明说」⇒ ⇒ 报告必须在**接受的那一刻**到 ⇒ ⇒ `memory.map` 事件是那一刻的载体 |
 | **H** | **理由词表**是**稳定枚举**（6 个值）⇒ ⇒ **不是**场景码 ⇒ ⇒ `error.rs` **零改动** | ⇒ ⇒ 描述**被接受了** ⇒ ⇒ 没有失败 ⇒ ⇒ 「一场景一码」不适用 |
 | **I** | **恒等式** `declared == live + dropped.len()` | §2.2 ⇒ ⇒ 一个判据管三件事 |
 | **J** | **默认连线不计入** `declared` | §2.2 ⇒ ⇒ 「你写了 N 根线」= **用户写的**线 |
@@ -112,7 +112,7 @@ DroppedWire { from_device, event, to_device, source, reason }
 | 编号 | 判据 |
 | --- | --- |
 | **A-1** | 契约层 `SCHEMA_VERSION` **== 11**；`SIM_STATE_SCHEMA_VERSION` 仍 **2** / `PLATFORM_SCHEMA_VERSION` 仍 **1** / `PLATFORM_RULES_VERSION` 仍 **3** |
-| **A-2** | `MemoryMap` 事件**多一个** `wiring_report` 字段 ⇒ ⇒ **线上钉串**逐字更新 ⇒ ⇒ 改名/删字段/改字段序**必红** |
+| **A-2** | `MemoryMap` 事件**多一个** `bridge_report` 字段 ⇒ ⇒ **线上钉串**逐字更新 ⇒ ⇒ 改名/删字段/改字段序**必红** |
 | **A-3** | **恒等式**：`declared == live + dropped.len()`（**每一个**报告都要满足） |
 | **A-4** | 理由词表**恰好 6 个值**（`source-unknown` / `source-type` / `target-unknown` / `target-type` / `source-out-of-range` / `overridden`）⇒ ⇒ **新增一个词**或**改一个字**都必红（防止词表漂移） |
 | **A-5** | **跨层**：Rust 的 `SCHEMA_VERSION` == 前端 JS 镜像的 `SCHEMA_VERSION`（由 `tools/wasm-smoke.mjs` 的 X 组钉） |
@@ -131,7 +131,7 @@ DroppedWire { from_device, event, to_device, source, reason }
 | **K-8** | **默认连线不计入 `declared`** ⇒ ⇒ 一块没写线的板 ⇒ ⇒ `declared == 0` ⇒ ⇒ `live == 0` ⇒ ⇒ `dropped` 为空 |
 | **K-9** | **报告跟着图走**：改板（`SetMemoryMap`）⇒ ⇒ 报告**重算** ⇒ ⇒ 不留上一份的残留 |
 | **K-10** | **零板时**：没有 PLIC / 没有 UART 的板 ⇒ ⇒ **不 panic** ⇒ ⇒ 报告**如实**（`declared` 按描述算，`dropped` 按五条判据算） |
-| **K-11** | ⚠️ **四条兜底理由**（`source-unknown` / `target-unknown` / `target-type` / `source-out-of-range`）在**绕过描述校验**时**仍能判出来**（直接调 `compile_wiring` 喂一份**没过校验**的描述）⇒ ⇒ 它们**不是死词** ⇒ ⇒ 判别力**有** |
+| **K-11** | ⚠️ **四条兜底理由**（`source-unknown` / `target-unknown` / `target-type` / `source-out-of-range`）在**绕过描述校验**时**仍能判出来**（直接调 `compile_bridge` 喂一份**没过校验**的描述）⇒ ⇒ 它们**不是死词** ⇒ ⇒ 判别力**有** |
 | **K-12** | **恒等式**：**真报告**（五种板各一份）都必须满足 `declared == live + dropped.len()` |
 | **K-13** | ⚠️ **宿主手里确实有第二个 UART 的句柄** ⇒ ⇒ 「实例表」这件事**真的**发生了（不是「表里有、句柄没有」）⇒ ⇒ 而且 GPIO **不许**被当成 UART |
 | **K-14** | ⚠️ **第二个 PLIC 的源也真的抬得到架构层**（裁决 F）⇒ ⇒ guest 读**第二个 PLIC** 的 claim 寄存器**拿得到源 11** ⇒ ⇒ **这是变异 T-3 的判别力来源**（只用一块 PLIC 的板**看不出**裁决 F 那个差别） |
@@ -142,14 +142,14 @@ DroppedWire { from_device, event, to_device, source, reason }
 | --- | --- |
 | **N-1** | 前端镜像的 `SCHEMA_VERSION` **== 11** ⇒ ⇒ 两侧一致（跨层那半在 X 组） |
 | **N-2** | 前端**产品代码**里**零个**连线抬不了的**判定** ⇒ ⇒ 前端**不自己判** ⇒ ⇒ **不写第二份校验器** |
-| **N-3** | 前端把**内核给的** `wiring_report` **原样显示**（`declared` / `live` / 逐条 `reason`）⇒ ⇒ **不翻译、不改写**内核的词 |
-| **N-4** | `wiring_report` **缺省**（老内核 / 老事件）⇒ ⇒ 视图**不炸** ⇒ ⇒ 显示「无连线报告」那档 |
+| **N-3** | 前端把**内核给的** `bridge_report` **原样显示**（`declared` / `live` / 逐条 `reason`）⇒ ⇒ **不翻译、不改写**内核的词 |
+| **N-4** | `bridge_report` **缺省**（老内核 / 老事件）⇒ ⇒ 视图**不炸** ⇒ ⇒ 显示「无连线报告」那档 |
 
 ### §4.4 真机门禁（B 组 · **B-146 ~ B-150**）
 
 | 编号 | 判据 |
 | --- | --- |
-| **B-146** | 真机上「提交一份带 `wiring` 的板」⇒ ⇒ 内核**接受** ⇒ ⇒ 界面显示**连线报告** |
+| **B-146** | 真机上「提交一份带 `bridge` 的板」⇒ ⇒ 内核**接受** ⇒ ⇒ 界面显示**连线报告** |
 | **B-147** | 那份板里有一根**指向不存在器件**的线 ⇒ ⇒ 界面**逐字**显示内核给的理由 |
 | **B-148** | 报告里的数字与**界面上的数字**一致（`declared` / `live`）⇒ ⇒ 前端**不另算** |
 | **B-149** | 报告**在提交后立刻出现**（不是等下一次事件）⇒ ⇒ 提交 ⇒ ⇒ 报告更新 |
@@ -171,7 +171,7 @@ DroppedWire { from_device, event, to_device, source, reason }
 
 | # | 变异 | 预期红集（= §7.2 的实测值） |
 | --- | --- | --- |
-| **T-1** | `compile_wiring` 的「查不到就记一笔」改成「查不到就**静默丢**」（回到旧行为） | K-2 · K-6 · K-9 · K-11 · K-12 |
+| **T-1** | `compile_bridge` 的「查不到就记一笔」改成「查不到就**静默丢**」（回到旧行为） | K-2 · K-6 · K-9 · K-11 · K-12 |
 | **T-2** | `sync_interrupts` 第 2 步只算**第一个 UART** 的 `rx_ready`（回到旧行为） | K-1 |
 | **T-3** | `sync_interrupts` 第 3 步只问**第一个 PLIC**（回到旧行为） | K-14 |
 | **T-4** | 报告里的 `declared` 改成数**连线表里**的线（**含默认连线** ⇒ ⇒ 口径错） | K-1 · K-2 · K-3 · K-7 · K-8 · K-9 · K-12 |
@@ -198,16 +198,16 @@ DroppedWire { from_device, event, to_device, source, reason }
 ### §7.1 **事实订正**（施工期撞见，**不是**推断）
 
 1. ⚠️ **计划说的「零升版」不成立** ⇒ ⇒ **订正为升版**（`SCHEMA_VERSION` **10 → 11**）。
-   - **原因**：「丢线可见」必须**过 wire**（F-7 ⇒ ⇒ 前端**能**提交带 `wiring` 的描述 ⇒ ⇒ 「线被静默丢弃」**用户真的会遇到**⇒ ⇒ 报告**必须**到界面）⇒ ⇒ `MemoryMap` 事件**多一个字段** ⇒ ⇒ **线上形状变了** ⇒ ⇒ **必须升版**。
+   - **原因**：「丢线可见」必须**过 wire**（F-7 ⇒ ⇒ 前端**能**提交带 `bridge` 的描述 ⇒ ⇒ 「线被静默丢弃」**用户真的会遇到**⇒ ⇒ 报告**必须**到界面）⇒ ⇒ `MemoryMap` 事件**多一个字段** ⇒ ⇒ **线上形状变了** ⇒ ⇒ **必须升版**。
    - **仍然不动**的三个版本号：`SIM_STATE_SCHEMA_VERSION`（**2**）· `PLATFORM_SCHEMA_VERSION`（**1**）· `PLATFORM_RULES_VERSION`（**3**）⇒ ⇒ **描述格式一字未改** ⇒ ⇒ **存量板档案零影响**（描述里**没有**新字段）⇒ ⇒ 「存量板档案要迁」是**第 57 批**的事，不是本批。
-2. ⚠️ **「只修 `retain` 是不够的」** —— 这是勘察期就撞见的（F-5 / F-6）⇒ ⇒ 本批**必须**同时改 `compile_wiring`（裁决 C）**与** `sync_interrupts`（裁决 E / F）⇒ ⇒ 否则「表里留着那根线」但「运行时只问第一个 UART」⇒ ⇒ **看起来通了其实没通**。
+2. ⚠️ **「只修 `retain` 是不够的」** —— 这是勘察期就撞见的（F-5 / F-6）⇒ ⇒ 本批**必须**同时改 `compile_bridge`（裁决 C）**与** `sync_interrupts`（裁决 E / F）⇒ ⇒ 否则「表里留着那根线」但「运行时只问第一个 UART」⇒ ⇒ **看起来通了其实没通**。
 3. ⚠️ **边界如实登记**：本批**没有**前端连线编辑器（F-8）⇒ ⇒ 用户能**提交**线但**画不出**线 ⇒ ⇒ 线只能来自**手写的板档案 JSON** ⇒ ⇒ 报告的**主要读者**当前是**写板档案的人**与**真机门禁**。
 4. ⚠️ **台账 D-174 的口径订正**（顺手批勘察撞见）：**做法 B**（掩码后数 ≠ 权威数 ⇒ 报错）**已在 v0.69 批落地**（`tools/front_test_attrib.py` 的 `detect_mask_mismatch` / `selftest_mask`）⇒ ⇒ 台账 §1.3 里「当前：无修」那句**陈旧** ⇒ ⇒ 本批**只做做法 A**（识别正则字面量，治根）⇒ ⇒ 并**订正台账**。
 5. ⚠️ **D-174 当前树无活跃触发点**：实测 `front/tests/*.test.mjs` 里 **165 个正则字面量、含 `'` 的 = 0 个** ⇒ ⇒ 工具合计 **808** == 门禁总数 **808** ⇒ ⇒ **差 0** ⇒ ⇒ 做法 A 是**治根**（把「下一个带引号的正则会咬人」这件事**掐掉**），**不是**修一个当前正在发生的少算。
-6. ⚠️ ⚠️ **「五种理由」在合法描述上只有两条可达** —— **施工期撞见**（读契约层 `PlatformDescription::wiring_violation` 时才发现）。
+6. ⚠️ ⚠️ **「五种理由」在合法描述上只有两条可达** —— **施工期撞见**（读契约层 `PlatformDescription::bridge_violation` 时才发现）。
    - **事实**：契约层的描述校验器（`PLATFORM_RULES_VERSION` = **3**）已经含 **V-18**（连线的两端**必须**是本描述声明过的器件；事件名**必须**是 `rx_ready`）与 **V-19**（目标**必须**是 PLIC；源号**必须** < 那个 PLIC 的源数）⇒ ⇒ 「端点不存在」/「目标不是 PLIC」/「源号越界」这三类描述**根本过不了校验** ⇒ ⇒ 它们**到不了**宿主 ⇒ ⇒ 报告里**永远不会**出现 `source-unknown` / `target-unknown` / `target-type` / `source-out-of-range`。
    - **真正可达的只有两条**：`source-type`（源器件**存在**但**不是 UART** —— ⚠️ **V-18 只管源器件**「在不在」，**不管**它「是什���」）与 `overridden`（同键的后一条顶掉前一条 —— 契约层**不管**这件事）。
-   - **裁决**：**词表保留 6 个值**（**不删**）⇒ ⇒ ① 宿主**不盲目信任**描述（`compile_wiring` 是 `pub` ⇒ ⇒ 可能被喂进一份**没过校验**的描述）⇒ ⇒ 那四条是**兜底**；② **词表不许漂移** ⇒ ⇒ 线上形态逐字钉住；③ **判据里必须写清「哪两条可达」**（K-6）⇒ ⇒ **不许**让人以为六条都能在正常链路上发生。
+   - **裁决**：**词表保留 6 个值**（**不删**）⇒ ⇒ ① 宿主**不盲目信任**描述（`compile_bridge` 是 `pub` ⇒ ⇒ 可能被喂进一份**没过校验**的描述）⇒ ⇒ 那四条是**兜底**；② **词表不许漂移** ⇒ ⇒ 线上形态逐字钉住；③ **判据里必须写清「哪两条可达」**（K-6）⇒ ⇒ **不许**让人以为六条都能在正常链路上发生。
    - **代价（如实登记）**：**报告的主要价值**不是「端点错了」（那种描述**提交不了**）⇒ ⇒ 而是「**你写的那根合法的线，宿主抬不了**」（源不是 UART）与「**你写了两根同键的，只有一根生效**」。
    - ⚠️ **这不影响本批的里程碑**：**「第二个 UART 的线」是 V-18/V-19 都判合法**的描述 ⇒ ⇒ 它今天被**静默丢弃**（那才是真缺陷）⇒ ⇒ 本批让它**真的通电**。
 7. ⚠️ **宿主侧新增一条「按 id 注入」的入口**（`KernelHost::uart_receive_on`）——
@@ -226,7 +226,7 @@ DroppedWire { from_device, event, to_device, source, reason }
 | **T-3** | 第 3 步只问**第一个 PLIC** | **K-14** | **Rust 红 1 条** —— **只有 `K-14`**（**第二个 PLIC 的源抬不到架构层**）⇒ ⇒ ⇒ 它是 **T-3 的专属判据** | 内核（Rust lib） |
 | **T-4** | `declared` 改成数**连线表里**的线 | **K-3** / **K-8** | **Rust 红 7 条** —— `K-3`（**专属**：默认连线**不该**算进 `declared`）**＋连带** `K-8`（**专属**：同上，另一条口径）**＋连带** `K-1` · `K-2` · `K-7` · `K-9`（`declared` 那个数**全错**）**＋连带** `K-12`（恒等式**破掉**） | 内核（Rust lib） |
 | **T-5** | 被同键顶掉的那根**不记** | **K-7** | **Rust 红 3 条** —— `K-7`（**专属**：那条**没有被报出来**）**＋连带** `K-6`（可达理由集合**变了**）**＋连带** `K-12`（恒等式**破掉**） | 内核（Rust lib） |
-| **T-6** | 前端**自己重算** `declared` | **N-3** / **N-3c** | **前端 红 3 条** —— `N-3`（**专属**：原词**必须**在）**＋连带** `N-3c`（**专属**：界面上的数**必须**等于内核的）**＋连带** `N-4c` | 前端（`front/tests/wiring-report.test.mjs`） |
+| **T-6** | 前端**自己重算** `declared` | **N-3** / **N-3c** | **前端 红 3 条** —— `N-3`（**专属**：原词**必须**在）**＋连带** `N-3c`（**专属**：界面上的数**必须**等于内核的）**＋连带** `N-4c` | 前端（`front/tests/bridge-report.test.mjs`） |
 | **T-7** | **对照**：只改注释 | —— | **零红**（Rust **0** 条 · 前端 **0** 条）⇒ ⇒ ⇒ 对照**守住**了 | 内核 ＋ 前端 |
 
 ⚠️ **可复算**：`python3 tools/mutation_v072.py` ⇒ ⇒ **工具进仓** ⇒ ⇒ 这张表**不是手工数字** ⇒ ⇒ 任何人重跑都得到**同一组**红集。

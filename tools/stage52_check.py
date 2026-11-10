@@ -313,7 +313,7 @@ ANCHORS = [
     (mmap_js, 'data-pins-display'),
     (mmap_js, "已废弃（v0.76 · B3）"),
     (m02_js, 'case "load-template"'),
-    (app_js, "templatesWiring"),
+    (app_js, "templatesBridge"),
     (mirror_js, 'PlatformTemplates: "platform.templates"'),
     # ⚠️ 前端：模板测试 + 真机段 + 冒烟配板段
     (ntest_js, "data-tpl-library"),

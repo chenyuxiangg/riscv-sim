@@ -676,7 +676,7 @@ fn uart_byte_drives_gpio_led_pin() {
 
     // The host bridge translates one UART TX byte into a LED pin toggle:
     // a single-shot "echo back" that demonstrates how peripheral
-    // outputs compose without M-14 wiring yet.
+    // outputs compose without M-14 bridge yet.
     let _ = uart.write(0x0, WriteSize::Byte, u32::from(b'T'));
     assert!(!uart.tx_pin(), "TX pin should reflect busy state");
 

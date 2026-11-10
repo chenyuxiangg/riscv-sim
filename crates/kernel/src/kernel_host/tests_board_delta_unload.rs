@@ -121,8 +121,6 @@ fn user_board() -> PlatformDescription {
         name: "User board".to_string(),
         priority: 100,
         description: None,
-        // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
-        // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         region_budget_bytes: 16 * 1024 * 1024,
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个。
         max_region_bytes: None,
@@ -160,8 +158,6 @@ fn ram_only_board(max_region_bytes: Option<u32>) -> PlatformDescription {
         name: "RAM only".to_string(),
         priority: 100,
         description: None,
-        // ⚠️ v0.34（D-125）：契约层给描述加了**可选**的 `wiring` 段 ⇒
-        // 这里显式写「没有连线」⇒ 走**默认连线**（存量行为一字未变）。
         region_budget_bytes: 16 * 1024 * 1024,
         max_region_bytes,
         regions: vec![RegionSpec::Ram {

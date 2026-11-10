@@ -295,7 +295,7 @@ export function buildUiImageWords(options = {}) {
  * 造夹具镜像（最小 RV32 ELF32 · 一个 `PT_LOAD`）。
  *
  * ⚠️ **形状照着内核自己的测试夹具**（`crates/kernel/src/m06_elf/tests.rs`
- * 的 `make_minimal_elf` 与 `kernel_host/tests_osz_wiring.rs` 的
+ * 的 `make_minimal_elf` 与 `kernel_host/tests_osz_bridge.rs` 的
  * `minimal_elf`）⇒ ⇒ M-06 一定认得它 ⇒ ⇒ 真机门禁测的是**界面那条装载
  * 路**，不是「这个 ELF 能不能被解析」。
  *

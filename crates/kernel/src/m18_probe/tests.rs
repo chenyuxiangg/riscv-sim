@@ -487,7 +487,7 @@ fn wire_signal_probe_routes_periph_signal_to_channel() {
 
 #[test]
 fn wire_signal_probe_keeps_channel_and_replaces_sink() {
-    // Re-wiring the same channel replaces the previous sink without
+    // Re-bridge the same channel replaces the previous sink without
     // conflict. Conflict semantics live in define_channel, not
     // wire_signal_probe (the design doc §3.2's "同 ch 冲突拒绝"
     // is enforced at the channel-definition step).

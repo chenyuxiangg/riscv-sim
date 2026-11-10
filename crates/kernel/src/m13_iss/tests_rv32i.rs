@@ -1,5 +1,5 @@
 //! RV32I coverage for M-13: decode tables, execution semantics and the
-//! architectural edge cases (x0 hardwiring, sign extension, shift
+//! architectural edge cases (x0 hardwired, sign extension, shift
 //! amounts, branch / jump immediate splicing, misaligned accesses,
 //! illegal encodings).
 //!
