@@ -80,6 +80,12 @@
 //! 不随快照走就会在还原后丢配置 ⇒
 //! [`SESSION_SNAPSHOT_SCHEMA_VERSION`] **4 → 5**。
 //!
+//! ⚠️ **v6 是破坏性变更**：`PlicStateDto` 加了 `asserted` / `active`
+//! （网关电平与每个 context 的 active 栈）—— claim/complete 改成
+//! Renode 口径后，complete 要靠它们决定是否重新挂起 ⇒ 丢了这个状态，
+//! 还原出来的 PLIC 会把仍在服务的源当成都已完成 ⇒
+//! [`SESSION_SNAPSHOT_SCHEMA_VERSION`] **5 → 6**。
+//!
 //! ⚠️ **前端不受影响**：`front/lib/message.js` 镜像的是**协议**的
 //! `schema_version`（5），**不是**会话快照的 schema ⇒ 契约层升版
 //! **不需要**动前端。
@@ -123,7 +129,9 @@ use crate::snapshot::{EngineSnapshotDto, SNAPSHOT_FAMILY, SNAPSHOT_SCHEMA_VERSIO
 /// ⚠️ **v5**：`GpioStateDto` 加了 `rise_enable` / `fall_enable`
 /// （逐引脚上升/下降沿中断使能）—— 这是新的运行态，不随快照走就会
 /// 在还原后丢配置 ⇒ 形状变了 ⇒ 版本再升一次。
-pub const SESSION_SNAPSHOT_SCHEMA_VERSION: u32 = 5;
+/// ⚠️ **v6**：`PlicStateDto` 加了 `asserted` / `active`（网关电平与
+/// active 栈）—— claim/complete 的 Renode 语义要靠它们 ⇒ 形状变了。
+pub const SESSION_SNAPSHOT_SCHEMA_VERSION: u32 = 6;
 
 /// Number of pins in a **GPIO bank** — the single landing spot for that
 /// number.
@@ -497,6 +505,12 @@ pub struct PlicStateDto {
     pub thresholds: Vec<u8>,
     /// **挂起位图**（每 32 个源一个字）。
     pub pending: Vec<u32>,
+    /// 每个源的**网关输入电平**（Renode `IrqSource.State`）。
+    ///
+    /// ⚠️ 长度必须等于源的个数；源下落不会撤销 pending。
+    pub asserted: Vec<bool>,
+    /// 每个 context 的 **active 栈**（claim 压栈、complete 弹栈）。
+    pub active: Vec<Vec<u32>>,
     /// 器件的权威虚拟时间（ps）—— **十进制字符串**。
     #[serde(with = "crate::numstr::u64_decimal")]
     pub now_ps: u64,
@@ -1970,9 +1984,9 @@ mod tests {
     /// ⚠️ **v4**：`GpioStateDto` 删掉逐引脚 `irq_lines`。
     /// ⚠️ **v5**：`GpioStateDto` 加了 `rise_enable` / `fall_enable`。
     #[test]
-    fn the_session_snapshot_schema_version_is_five() {
+    fn the_session_snapshot_schema_version_is_six() {
         assert_eq!(
-            SESSION_SNAPSHOT_SCHEMA_VERSION, 5,
+            SESSION_SNAPSHOT_SCHEMA_VERSION, 6,
             "会话载荷的格式版本必须是 5——v5 给 GPIO 加了逐引脚边沿使能"
         );
     }
@@ -2396,6 +2410,8 @@ mod tests {
             enables: vec![vec![0b0100_0000, 0]],
             thresholds: vec![1],
             pending: vec![0b0100_0000, 0],
+            asserted: vec![false, true, true],
+            active: vec![vec![2]],
             now_ps: 800,
         }];
         s
@@ -2433,6 +2449,8 @@ mod tests {
         assert_eq!(
             pk,
             vec![
+                "active",
+                "asserted",
                 "enables",
                 "id",
                 "now_ps",

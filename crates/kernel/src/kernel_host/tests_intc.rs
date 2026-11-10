@@ -325,8 +325,9 @@ fn a_raised_irq_really_reaches_the_guest() {
 
 /// **GPIO 的 pending 由 guest 用 W1C 消费，宿主不替它清**（Renode 口径）。
 ///
-/// 宿主 `sync_interrupts` 只根据 pending 位图抬/撤 PLIC 源；位图本身
-/// 必须留到 guest 写 `PENDING` 寄存器（0x10）才消失。
+/// 完整时序：宿主 sync 只抬 PLIC 源（不 claim）→ guest claim →
+/// guest W1C 设备 pending → guest complete。claim 之后、complete 之前，
+/// 宿主每拍 sync 都**不能**把同一个源重新挂起（否则会重复投递）。
 #[test]
 fn gpio_pending_survives_host_sync_and_is_cleared_by_guest_w1c() {
     let mut host = KernelHost::new();
@@ -341,6 +342,14 @@ fn gpio_pending_survives_host_sync_and_is_cleared_by_guest_w1c() {
 
     const GPIO_BASE: u32 = 0x4000_0000;
     const GPIO_IRQ_SOURCE: u32 = 11;
+
+    let plic = host.devices.plic("PLIC").expect("qemu-virt 必须有 PLIC");
+    {
+        let mut p = plic.borrow_mut();
+        p.set_threshold(0, 0);
+        p.enable(0, GPIO_IRQ_SOURCE, true);
+        p.set_priority(GPIO_IRQ_SOURCE, 1);
+    }
 
     let gpio = host.devices.gpio("GPIO0").expect("qemu-virt 必须有 GPIO0");
     gpio.borrow_mut().set_directions(0);
@@ -358,10 +367,20 @@ fn gpio_pending_survives_host_sync_and_is_cleared_by_guest_w1c() {
         gpio.borrow().pending_pin(0) && gpio.borrow().pending_pin(2),
         "宿主 sync 不许替 guest 消费 pending（必须留到 W1C）"
     );
-    let plic = host.devices.plic("PLIC").expect("qemu-virt 必须有 PLIC");
     assert!(
         plic.borrow().pending(GPIO_IRQ_SOURCE),
-        "pending 还在，PLIC 源必须保持挂起"
+        "pending 还在，PLIC 源必须保持挂起（宿主 sync 不得 claim）"
+    );
+
+    // guest 读 Claim：消费 PLIC pending，压入 active 栈。
+    assert_eq!(
+        plic.borrow_mut().claim(0),
+        Some(GPIO_IRQ_SOURCE),
+        "guest claim 必须拿到 GPIO 源"
+    );
+    assert!(
+        !plic.borrow().pending(GPIO_IRQ_SOURCE),
+        "claim 必须清掉 PLIC 的 pending"
     );
 
     host.bus_mut()
@@ -374,8 +393,8 @@ fn gpio_pending_survives_host_sync_and_is_cleared_by_guest_w1c() {
 
     host.sync_interrupts_now();
     assert!(
-        plic.borrow().pending(GPIO_IRQ_SOURCE),
-        "还有一路 pending 时 PLIC 源不能撤（Renode：全部 active 清掉才 Unset）"
+        !plic.borrow().pending(GPIO_IRQ_SOURCE),
+        "源还在 active，宿主不得在 complete 前重新挂起"
     );
 
     host.bus_mut()
@@ -386,11 +405,14 @@ fn gpio_pending_survives_host_sync_and_is_cleared_by_guest_w1c() {
         "guest 写 1 之后最后一路 pending 必须消失"
     );
 
+    // 设备线落下之后宿主 sync，再 complete：不得重新挂起。
     host.sync_interrupts_now();
+    plic.borrow_mut().complete(0, GPIO_IRQ_SOURCE);
     assert!(
         !plic.borrow().pending(GPIO_IRQ_SOURCE),
-        "全部 pending 清零之后 PLIC 源必须被撤掉"
+        "全部 pending 清零 + complete 之后 PLIC 源必须消失"
     );
+    assert_eq!(plic.borrow_mut().claim(0), None, "不再有可交付的源");
 }
 
 /// **未使能的边沿不许抬 PLIC 源**（RISE_IE/FALL_IE 的端到端判别力）。

@@ -1359,9 +1359,9 @@ impl KernelHost {
     ///    **中断源表**（描述里每个外设的 `irq_line`）⇒ ⇒ 换一块板改号
     ///    **不用改宿主**。
     /// 3. **PLIC 的待交付源 → M-16 的外部中断线**。⚠️ **claim 是 guest
-    ///    的权利**：平台这一侧**只读** PLIC 的「当前该交付哪个源」，
-    ///    **不代 guest claim**（`Plic::claim` 不清挂起位，所以读它不会
-    ///    抢走 guest 的源）。
+    ///    的权利**：平台这一侧**只读** PLIC 的「当前该交付哪个源」
+    ///    （`Plic::deliverable_source`），**不代 guest claim** ——
+    ///    真正的 `claim` 会消费 pending，宿主每拍调它就会抢走 guest 的源。
     ///
     /// ⚠️ **这一段是「宿主唯一知道外设挂了哪些」的地方**（同
     /// [`SelfIssBackend::install_peripheral_ticker`] 的理由）—— 外设
@@ -1386,7 +1386,7 @@ impl KernelHost {
         //
         // ⚠️ **单板单 PLIC**（契约 V-27 / `E_PLT-24`）：角色缺省已经在
         // `resolve_roles` 里落到那块唯一 PLIC ⇒ 这里只取**一个**句柄，
-        // 第 2 步抬源与第 3 步 claim 用**同一个** ⇒ 不再有「遍历所有
+        // 第 2 步抬源与第 3 步只读仲裁用**同一个** ⇒ 不再有「遍历所有
         // PLIC」这条半通路径。
         let Some(plic) = self
             .roles
@@ -1436,9 +1436,10 @@ impl KernelHost {
             //
             // ⚠️ UART 只有一个源：RX（IER bit0 ∧ LSR bit0）与 TX-empty
             //   （IER bit1 ∧ LSR.THRE）**共用**它（物理 16550 只有一根 IRQ 线）。
-            // ⚠️ GPIO 整块只有一个源：任意引脚有待处理事件就抬一次（一次性 ⇒ 消费掉）。
+            // ⚠️ GPIO 整块只有一个源：任意引脚有待处理事件就抬线，直到
+            //   guest 用 W1C 把 pending 清完才落线。
             //
-            // ⚠️ 这里的 `plic` 与第 3 步 claim 的是**同一个句柄**（单板单
+            // ⚠️ 这里的 `plic` 与第 3 步只读仲裁用的是**同一个句柄**（单板单
             //   PLIC ⇒ 不再按 `first_plic()` 另查一遍）。
             for irq in self.peripheral_irqs.iter() {
                 match irq.kind {
@@ -1457,11 +1458,9 @@ impl KernelHost {
                             Err(_) => continue,
                         };
                         if let Ok(mut p) = plic.try_borrow_mut() {
-                            if rx || tx {
-                                p.request(u32::from(irq.source));
-                            } else {
-                                p.set_pending(u32::from(irq.source), false);
-                            }
+                            // Renode 口径：这里只同步**网关输入电平**；
+                            // 源落下不 retract 已经送进 PLIC 的请求。
+                            p.set_source_level(u32::from(irq.source), rx || tx);
                         }
                     }
                     platform::PeripheralIrqKind::Gpio => {
@@ -1469,14 +1468,15 @@ impl KernelHost {
                             continue;
                         };
                         // ⚠️ **pending 归外设、由 guest W1C 消费**（Renode
-                        // 口径）：宿主只把位图映射成 PLIC 源的电平 ——
-                        // 非空就挂起、为空就撤销，**不**替 guest 清位。
+                        // 口径）：宿主只把位图映射成 PLIC 源的**网关电平**
+                        // —— 非空抬线、为空落线；落线不 retract 已送进
+                        // PLIC 的请求，**不**替 guest 清位。
                         let pending = match gpio.try_borrow() {
                             Ok(g) => g.pending_irqs() != 0,
                             Err(_) => continue,
                         };
                         if let Ok(mut p) = plic.try_borrow_mut() {
-                            p.set_pending(u32::from(irq.source), pending);
+                            p.set_source_level(u32::from(irq.source), pending);
                         }
                     }
                 }
@@ -1497,11 +1497,14 @@ impl KernelHost {
         //
         // ⚠️ **读不到 ⇒ 什么都不做**（不抬也不撤）：与原先「一个 PLIC 都
         //   读不到 ⇒ 什么都不做」逐字一致。
-        let claimed = match plic.try_borrow_mut() {
-            Ok(mut p) => p.claim(PLIC_CONTEXT_MACHINE),
+        // ⚠️ **宿主只读仲裁结果，不代 guest claim**：claim 是 guest
+        // 读 Claim 寄存器的动作，会消费 pending。这里必须用只读的
+        // `deliverable_source`。
+        let deliverable = match plic.try_borrow() {
+            Ok(p) => p.deliverable_source(PLIC_CONTEXT_MACHINE),
             Err(_) => return,
         };
-        match claimed {
+        match deliverable {
             Some(_source) => {
                 let _ = self.intc.controller.borrow_mut().request(
                     IRQ_UART_RX_READY,
@@ -1518,16 +1521,16 @@ impl KernelHost {
             // 单级嵌套护栏把**之后所有中断**永久堵死（D-158 的另一半根因）。
             //
             // ⚠️ **判据就是 PLIC 自己的「当前应该交付哪个源」**
-            // （`Plic::best_source`：已挂起 ∧ 已使能 ∧ 优先级**严格大于**
+            // （`Plic::deliverable_source`：已挂起 ∧ 已使能 ∧ 优先级**严格大于**
             // 门限）⇒ ⇒ 「源被 guest 解除」/「源被门限挡住」/「源被禁用」
-            // 三种情况都会让 `claim()` 返回 `None` ⇒ ⇒ **撤线是对的** ⇒ ⇒
+            // 三种情况都会让只读仲裁返回 `None` ⇒ ⇒ **撤线是对的** ⇒ ⇒
             // **一条判据管三件事**。
             //
             // ⚠️ **与上面的 `Some` 分支完全对称** ⇒ ⇒ 「有源就抬线、无源就
             // 撤线」⇒ ⇒ 外部线也是**电平**语义。
             //
             // ⚠️ **不替 guest 掩盖**（裁决 E）：guest **没有**解除源 ⇒ ⇒
-            // PLIC 的挂起位仍在 ⇒ ⇒ `claim()` 仍返回 `Some` ⇒ ⇒ 平台
+            // PLIC 的挂起位仍在 ⇒ ⇒ 只读仲裁仍返回 `Some` ⇒ ⇒ 平台
             // **继续**请求 ⇒ ⇒ guest 立刻再次陷入（死循环）⇒ ⇒ 那是
             // **guest 的 bug**，平台**不**替它擦。
             //

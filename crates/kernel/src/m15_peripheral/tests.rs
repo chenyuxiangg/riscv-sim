@@ -1694,6 +1694,12 @@ fn the_plic_session_state_carries_priority_enable_and_threshold_and_round_trips(
     );
     assert_eq!(s.thresholds, vec![1, 0], "每个 context 的门限必须带");
     assert_eq!(s.pending, vec![0x0000_0002], "挂起位图必须带（源 1 挂着）");
+    assert!(s.asserted[1], "网关电平必须带（源 1 的线仍为高）");
+    assert_eq!(
+        s.active,
+        vec![Vec::<u32>::new(), Vec::new()],
+        "还没 claim，active 栈必须为空"
+    );
     assert_eq!(s.now_ps, 500);
 
     let mut fresh = Plic::with_capacity("PLIC0", plic::PLIC_BASE, 4, 2);
@@ -1709,6 +1715,40 @@ fn the_plic_session_state_carries_priority_enable_and_threshold_and_round_trips(
     assert!(fresh.enabled(0, 1).unwrap(), "使能位必须被还原");
     assert_eq!(fresh.threshold(0), Some(1), "门限必须被还原");
     assert!(fresh.pending(1), "挂起位必须被还原");
+}
+
+/// claim 之后的 **active 栈与网关电平**必须随快照往返 —— complete 靠
+/// 它们决定要不要重新挂起。
+#[test]
+fn a_plic_state_restores_the_active_stack_and_gateway_level() {
+    let mut plic = Plic::with_capacity("PLIC0", plic::PLIC_BASE, 4, 2);
+    plic.enable(0, 1, true);
+    plic.set_priority(1, 3);
+    plic.request(1);
+    assert_eq!(plic.claim(0), Some(1), "前置：claim 成功");
+
+    let exported = plic
+        .session_state()
+        .expect("the PLIC participates in the session state");
+    let PeripheralSessionState::Plic(s) = &exported else {
+        panic!("a PLIC must export a PLIC state");
+    };
+    assert_eq!(s.active, vec![vec![1], Vec::new()], "active 栈必须带");
+    assert!(s.asserted[1], "网关电平必须带");
+    assert!(
+        !s.pending.iter().any(|w| *w & 0b10 != 0),
+        "claim 已清 pending"
+    );
+
+    let mut fresh = Plic::with_capacity("PLIC0", plic::PLIC_BASE, 4, 2);
+    fresh
+        .restore_session_state(&exported)
+        .expect("the PLIC must accept its own state");
+    fresh.complete(0, 1);
+    assert!(
+        fresh.pending(1),
+        "还原出的 active + 电平必须让 complete 重新挂起源 1"
+    );
 }
 
 /// ⚠️ **I-4a**：CLINT 的 `validate_session_state()` **不是**默认放行 ——
@@ -1760,6 +1800,8 @@ fn a_plic_rejects_a_state_with_the_wrong_number_of_sources() {
         enables: vec![vec![0], vec![0]],
         thresholds: vec![0, 0],
         pending: vec![0],
+        asserted: vec![false; 3],
+        active: vec![Vec::new(), Vec::new()],
         now_ps: 0,
     });
     let err = plic
@@ -1779,6 +1821,8 @@ fn a_plic_rejects_a_state_with_the_wrong_number_of_contexts() {
         enables: vec![vec![0]],
         thresholds: vec![0],
         pending: vec![0],
+        asserted: vec![false; 4],
+        active: vec![Vec::new()],
         now_ps: 0,
     });
     let err = plic
@@ -1812,6 +1856,8 @@ fn a_clint_and_a_plic_accept_a_state_that_matches_their_capability() {
         enables: vec![vec![0], vec![0]],
         thresholds: vec![0, 0],
         pending: vec![0],
+        asserted: vec![false; 4],
+        active: vec![Vec::new(), Vec::new()],
         now_ps: 0,
     });
     assert!(
@@ -1849,6 +1895,8 @@ fn a_clint_state_handed_to_a_plic_is_rejected() {
         enables: vec![vec![0]],
         thresholds: vec![0],
         pending: vec![0],
+        asserted: vec![false; plic::DEFAULT_SOURCE_COUNT as usize],
+        active: vec![Vec::new(); plic::DEFAULT_CONTEXT_COUNT as usize],
         now_ps: 0,
     });
     let err = clint
