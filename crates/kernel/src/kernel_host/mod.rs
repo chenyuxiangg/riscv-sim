@@ -1380,12 +1380,22 @@ impl KernelHost {
         else {
             return;
         };
-        // ⚠️ **没有 PLIC ⇒ 整个函数不做任何事**（**存量逐字不变**：今天的
-        // `let Some(plic) = ... else { return }` 就是这个效果 ⇒ ⇒ 定时器
-        // 比较值也**不**喂 ⇒ ⇒ 「无 PLIC 的板不抬任何线」这条不变式保留）。
-        if self.devices.first_plic().is_none() {
+        // ⚠️ **没有 PLIC ⇒ 整个函数不做任何事**（**存量逐字不变**：
+        // `let Some(plic) = ... else { return }` ⇒ ⇒ 定时器比较值也**不**喂
+        // ⇒ ⇒ 「无 PLIC 的板不抬任何线」这条不变式保留）。
+        //
+        // ⚠️ **单板单 PLIC**（契约 V-27 / `E_PLT-24`）：角色缺省已经在
+        // `resolve_roles` 里落到那块唯一 PLIC ⇒ 这里只取**一个**句柄，
+        // 第 2 步抬源与第 3 步 claim 用**同一个** ⇒ 不再有「遍历所有
+        // PLIC」这条半通路径。
+        let Some(plic) = self
+            .roles
+            .main_plic
+            .as_deref()
+            .and_then(|id| self.devices.plic(id))
+        else {
             return;
-        }
+        };
         let now_ps = self.backend.engine().now_ps();
 
         // ---- 1) 定时器：CLINT 的 mtimecmp（周期）→ M-16（ps） ----
@@ -1427,11 +1437,9 @@ impl KernelHost {
             // ⚠️ UART 只有一个源：RX（IER bit0 ∧ LSR bit0）与 TX-empty
             //   （IER bit1 ∧ LSR.THRE）**共用**它（物理 16550 只有一根 IRQ 线）。
             // ⚠️ GPIO 整块只有一个源：任意引脚有待处理事件就抬一次（一次性 ⇒ 消费掉）。
-            let plic = self
-                .devices
-                .first_plic()
-                .and_then(|e| self.devices.plic(&e.id));
-            let Some(plic) = plic else { return };
+            //
+            // ⚠️ 这里的 `plic` 与第 3 步 claim 的是**同一个句柄**（单板单
+            //   PLIC ⇒ 不再按 `first_plic()` 另查一遍）。
             for irq in self.peripheral_irqs.iter() {
                 match irq.kind {
                     platform::PeripheralIrqKind::Uart => {
@@ -1491,35 +1499,16 @@ impl KernelHost {
         // 空间里 1 与 2 都映射到**架构 cause 码 11**（外部中断）⇒
         // guest 读到的 `mcause` 是 `0x8000_000B`，与 RISC-V 架构一致。
         //
-        // ⚠️ **v0.72（STAGE-48 · D-177 F）**：**遍历全部 PLIC** ⇒ ⇒ 任一
-        // PLIC 有可交付源就抬外部线 ⇒ ⇒ 「第二个 PLIC 的源」**也**抬得到
-        // 架构层 ⇒ ⇒ 「通了一半」不算通电。
+        // ⚠️ **单板单 PLIC**：只问这一个 PLIC 的「当前该交付哪个源」⇒
+        //   与第 2 步抬源用同一个句柄 ⇒ 「外设抬到 A、claim 从 B 取」这种
+        //   半通缺口在结构上不存在；也不再有「遍历所有 PLIC」那条路径。
         //
-        // ⚠️ **单 PLIC 时与今天逐字相同**（只有一个可问的 PLIC ⇒ 同一个
-        // `claim` 调用 ⇒ 同一个结果）。
-        let mut claimed: Option<u32> = None;
-        let mut any_readable = false;
-        // ⚠️ **主 PLIC 角色**（STAGE-49 · D-177 的 C）：**声明了** ⇒ ⇒ **只有
-        //   它**抬外部线；**没声明** ⇒ ⇒ **所有** PLIC 都抬 ⇒ ⇒ ⇒ **今天的
-        //   行为逐字不变**（v0.72 批裁决 F）。
-        let plics: Vec<_> = match self.roles.main_plic.as_deref() {
-            Some(id) => self.devices.plic(id).into_iter().collect(),
-            None => self.devices.plic_handles(),
+        // ⚠️ **读不到 ⇒ 什么都不做**（不抬也不撤）：与原先「一个 PLIC 都
+        //   读不到 ⇒ 什么都不做」逐字一致。
+        let claimed = match plic.try_borrow_mut() {
+            Ok(mut p) => p.claim(PLIC_CONTEXT_MACHINE),
+            Err(_) => return,
         };
-        for plic in plics {
-            match plic.try_borrow_mut() {
-                Ok(mut p) => {
-                    any_readable = true;
-                    if let Some(source) = p.claim(PLIC_CONTEXT_MACHINE) {
-                        claimed = Some(source);
-                        break;
-                    }
-                }
-                // ⚠️ **争用 ⇒ 跳过这个 PLIC**（不是 `return`）⇒ ⇒ 别的 PLIC
-                // **照常**被问。
-                Err(_) => continue,
-            }
-        }
         match claimed {
             Some(_source) => {
                 let _ = self.intc.controller.borrow_mut().request(
@@ -1550,13 +1539,11 @@ impl KernelHost {
             // **继续**请求 ⇒ ⇒ guest 立刻再次陷入（死循环）⇒ ⇒ 那是
             // **guest 的 bug**，平台**不**替它擦。
             //
-            // ⚠️ **一个 PLIC 都读不到 ⇒ 什么都不做**（与今天的
-            // `Err(_) => return` 逐字一致 ⇒ ⇒ 「读不到就不改」这条口径
-            // **不变**）。
-            None if any_readable => {
+            // ⚠️ **读不到 PLIC ⇒ 什么都不做**（不抬也不撤）⇒ ⇒ 「读不到就不改」
+            // 这条口径保持不变。
+            None => {
                 self.intc.controller.borrow_mut().clear(IRQ_UART_RX_READY);
             }
-            None => {}
         }
     }
 

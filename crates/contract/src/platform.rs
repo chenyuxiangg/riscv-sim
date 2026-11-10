@@ -785,8 +785,8 @@ impl PlatformDescription {
 
         // V-27 — one board, **one** PLIC (v0.78).
         //
-        // ⚠️ **Why declaration-time**：外设只把中断源抬到第一个 PLIC
-        // （`sync_interrupts` 的 `first_plic()`）⇒ ⇒ 第二个 PLIC 永远收不到
+        // ⚠️ **Why declaration-time**：外设抬源与 claim 共用**同一个**
+        // PLIC（`main_plic`，缺省 = 第一个）⇒ ⇒ 第二个 PLIC 永远收不到
         // 外设源 ⇒ ⇒ 允许它等于允许一份「装得上但中断半通」的板描述 ⇒ ⇒
         // 在声明期拒掉，理由还能被看见。
         //
