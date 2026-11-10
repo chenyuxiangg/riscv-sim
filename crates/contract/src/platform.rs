@@ -53,7 +53,8 @@ use crate::error::{
     PlatformError, E_PLT_01_SCHEMA_VERSION, E_PLT_02_EMPTY_ID, E_PLT_03_NO_REGIONS,
     E_PLT_04_ZERO_SIZE, E_PLT_05_OVERFLOW, E_PLT_06_OVERLAP, E_PLT_07_OVER_BUDGET,
     E_PLT_08_DUPLICATE_DEVICE_ID, E_PLT_12_PARAMETER_OUT_OF_RANGE, E_PLT_15_DEVICE_EMPTY_ID,
-    E_PLT_16_IRQ_SOURCE_INVALID, E_PLT_18_ROLES_INVALID, E_PLT_21_MCU_INVALID, PLATFORM_FAMILY,
+    E_PLT_16_IRQ_SOURCE_INVALID, E_PLT_18_ROLES_INVALID, E_PLT_21_MCU_INVALID,
+    E_PLT_24_MULTIPLE_PLIC, PLATFORM_FAMILY,
 };
 use crate::session::{REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
 use serde::{Deserialize, Serialize};
@@ -162,7 +163,9 @@ pub const SUPPORTED_PLATFORM_SCHEMA_VERSIONS: &[u32] = &[1, 2, 3, 4, 5];
 /// ⚠️ **v0.76（STAGE-52）**：**规则集 7** ⇒ ⇒ V-21 语义**扩展**（引脚规格
 ///   `PinSpec`：器件在 + 引脚号 + 方向 + 同引脚唯一 + 冲突）＋ 加 **V-24**
 ///   **V-26**（无板装载 ⇒ 码 `E_PLT-22`）。
-pub const PLATFORM_RULES_VERSION: u32 = 7;
+/// ⚠️ **v0.78**：**规则集 8** ⇒ ⇒ 加 **V-27**（一块板最多一个 PLIC；
+///   码 `E_PLT-24`）。
+pub const PLATFORM_RULES_VERSION: u32 = 8;
 /// The **upper bound** of a CLINT's timer frequency (1 THz).
 ///
 /// ⚠️ The platform's smallest time granularity is **1 ps**
@@ -564,6 +567,7 @@ impl PlatformDescription {
     /// | V-7 | a RAM / ROM region's **declared** size `> region_budget_bytes` | `E_PLT-07` |
     /// | V-8 | unknown device kind / missing parameter / wrong parameter type | **serde** (not here) |
     /// | V-9 | two peripheral devices share an `id` | `E_PLT-08` |
+    /// | V-27 | a board declares **more than one** `plic` device | `E_PLT-24` |
     /// | V-13 | a device parameter is **below** its legal lower bound | `E_PLT-12` |
     /// | V-14 | a device parameter is **above** its legal upper bound | `E_PLT-12` |
     /// | V-15 | an interrupt peripheral's `irq_line` is not a valid PLIC source id (only when the map has a PLIC) | `E_PLT-12` |
@@ -779,6 +783,44 @@ impl PlatformDescription {
             seen.push(id);
         }
 
+        // V-27 — one board, **one** PLIC (v0.78).
+        //
+        // ⚠️ **Why declaration-time**：外设只把中断源抬到第一个 PLIC
+        // （`sync_interrupts` 的 `first_plic()`）⇒ ⇒ 第二个 PLIC 永远收不到
+        // 外设源 ⇒ ⇒ 允许它等于允许一份「装得上但中断半通」的板描述 ⇒ ⇒
+        // 在声明期拒掉，理由还能被看见。
+        //
+        // ⚠️ **数量上限，不是 id 冲突**：两个 PLIC 用不同 id 依然要被拒 ⇒
+        // 不复用 `E_PLT_08`（那个判的是同 id）⇒ ⇒ 自己一个码。
+        //
+        // ⚠️ **编号最大、位置最前**：V-27 是**后加**的规则（编号只表示
+        // 身份），但它必须排在 V-13 ~ V-15 之前 ⇒ ⇒ 多 PLIC 是**更根本**
+        // 的板形状错误；否则一份「两个 PLIC + 越界 irq_line」会先报
+        // `E_PLT-12`（V-15），把真正的根因藏起来。改成前置后，**单 PLIC
+        // 的板**报错顺序逐字不变（多 PLIC 的板以前反正也装不上）。
+        let plic_ids: Vec<&str> = self
+            .regions
+            .iter()
+            .filter_map(|region| match region {
+                RegionSpec::Peripheral {
+                    device: DeviceSpec::Plic { id, .. },
+                    ..
+                } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        if plic_ids.len() > 1 {
+            return Err(PlatformError::new(
+                PLATFORM_FAMILY,
+                E_PLT_24_MULTIPLE_PLIC,
+                format!(
+                    "一块板最多声明一个 PLIC（实际 {} 个：{}）",
+                    plic_ids.len(),
+                    plic_ids.join(", ")
+                ),
+            ));
+        }
+
         // V-13 / V-14 / V-15 — the devices' **legal value domain**
         // (v0.30 · D-141 · frozen spec STAGE-15 §3.1).
         //
@@ -851,8 +893,8 @@ impl PlatformDescription {
         // routing ⇒ `irq_line` is meaningless but harmless ⇒ refusing such
         // a board would refuse a legal one.
         //
-        // ⚠️ The bound is the **smallest** `sources` in the map ⇒ every
-        // PLIC in the map accepts the line ⇒ conservative and unambiguous.
+        // ⚠️ V-27 already guarantees **at most one** PLIC ⇒ the bound is
+        // that PLIC's `sources`; there is no "smallest across many" left.
         let plic_sources = self.regions.iter().filter_map(|region| {
             let RegionSpec::Peripheral {
                 device: DeviceSpec::Plic { sources, .. },
@@ -2422,40 +2464,6 @@ mod tests {
         ]);
         assert!(desc.validate().is_ok(), "irq_line 15 必须被接受");
     }
-    /// **STAGE-15 A-6 / V-15** — with **two** PLICs (16 and 64 sources), a
-    /// UART whose `irq_line` is **20** is rejected with `E_PLT-12`.
-    ///
-    /// ⚠️ **这条用例钉的是「取最小的 `sources`」这个语义**，不是单块 PLIC 的
-    /// 越界（那条已由上一条用例钉住）。规格 §2.7 写的是「`irq_line` 必须
-    /// `< min(所有 plic.sources)`」⇒ **保守**取法：这条中断线要对**每一个**
-    /// PLIC 都合法。
-    ///
-    /// ⚠️ **没有它会怎样**：把实现里的 `min()` 改成 `max()` ⇒ 上面那条
-    /// 「单块 PLIC」的用例**照样绿**（只有一块 PLIC 时 `min` 与 `max` 相同）
-    /// ⇒ **规则被悄悄放松**（ irq_line 20 在 64 源的 PLIC 上合法、在 16 源
-    /// 的那个上**不合法** ⇒ guest 永远收不到这条中断）⇒ **判别力缺口**。
-    /// ⇒ 本条是**统筹方在收口阶段补的**（实测发现的缺口，见 §9.4）。
-    #[test]
-    fn v15_the_irq_line_must_be_legal_for_every_plic_in_the_map() {
-        let desc = board_with(vec![
-            DeviceSpec::Plic {
-                id: "PLIC_SMALL".to_string(),
-                sources: 16,
-                contexts: 16,
-            },
-            DeviceSpec::Plic {
-                id: "PLIC_BIG".to_string(),
-                sources: 64,
-                contexts: 16,
-            },
-            DeviceSpec::Uart16550 {
-                id: "UART0".to_string(),
-                irq_line: 20,
-                baud_rate: 115_200,
-            },
-        ]);
-        assert_parameter_out_of_range(&desc, "在最小那个 PLIC 上越界的中断线");
-    }
     /// **STAGE-15 A-6 / V-15** — with a PLIC of **16 sources**, a UART
     /// whose `irq_line` is **16** — one past the highest legal id — is
     /// rejected with `E_PLT-12`.
@@ -3478,6 +3486,62 @@ mod tests {
         let err = desc.validate().unwrap_err();
         assert_eq!(err.scenario, 16, "中断号重复必须拒");
     }
+    /// **X-3** — 一块板最多一个 PLIC：两个 PLIC 实例必须拒。
+    ///
+    /// ⚠️ 多 PLIC 的板在真实世界里只出现在分区多 hart 或厂商定制控制器
+    /// （如 Andes 双 PLIC）的场景；本平台只有一个 hart 上下文，且外设源号
+    /// 的抬线路径写死了第一个 PLIC ⇒ ⇒ 第二个 PLIC 永远收不到外设源
+    /// ⇒ ⇒ 与其「装得上但半通」，不如在声明期拒掉。
+    #[test]
+    fn x3_a_board_must_not_declare_more_than_one_plic() {
+        let desc = board_with(vec![
+            DeviceSpec::Plic {
+                id: "PLIC0".to_string(),
+                sources: 64,
+                contexts: 16,
+            },
+            DeviceSpec::Plic {
+                id: "PLIC_AUX".to_string(),
+                sources: 32,
+                contexts: 4,
+            },
+        ]);
+        let err = desc.validate().expect_err("两个 PLIC 必须被拒");
+        assert_eq!(err.family, PLATFORM_FAMILY);
+        assert_eq!(err.scenario, 24, "多 PLIC 必须报 E_PLT-24（实际 {err}）");
+    }
+
+    /// **X-3b** — 多 PLIC + 越界 `irq_line` ⇒ 先报「多 PLIC」而不是 `E_PLT-12`。
+    ///
+    /// ⚠️ 多 PLIC 是更根本的板形状错误；若 V-27 排在 V-15 之后，用户会先
+    /// 看到「中断号越界」，改完中断号才发现板根本不该有两个 PLIC。
+    #[test]
+    fn x3b_multiple_plic_is_reported_before_irq_line_range() {
+        let desc = board_with(vec![
+            DeviceSpec::Plic {
+                id: "PLIC_SMALL".to_string(),
+                sources: 16,
+                contexts: 16,
+            },
+            DeviceSpec::Plic {
+                id: "PLIC_BIG".to_string(),
+                sources: 64,
+                contexts: 16,
+            },
+            DeviceSpec::Uart16550 {
+                id: "UART0".to_string(),
+                irq_line: 20,
+                baud_rate: 115_200,
+            },
+        ]);
+        let err = desc.validate().expect_err("两个 PLIC 必须被拒");
+        assert_eq!(err.family, PLATFORM_FAMILY);
+        assert_eq!(
+            err.scenario, 24,
+            "多 PLIC 必须先于 irq_line 越界被报出（实际 {err}）"
+        );
+    }
+
     /// **X-2** — GPIO 的中断号与 UART 一样受合法取值域约束（> 0 且 < sources）。
     #[test]
     fn x2_gpio_irq_line_is_a_legal_plic_source() {
