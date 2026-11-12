@@ -239,42 +239,27 @@ pub fn parse(text: &str, limits: &ParseLimits) -> Result<LoadImage, PlatformErro
     ))
 }
 
-/// Finalise the merged buffer. Two rules apply (06-4):
-/// 1. Same-base rows → last byte wins (later record overwrites).
-/// 2. Adjacent rows where `prev.end == next.base` → fold into one row
-///    (saves M-14 segment slots).
+/// Finalise the parse buffer. The only merge rule left is:
 ///
-/// Overlapping but distinct rows are NOT merged — M-14 catches them
-/// as E_BUS-03 collisions and the host surfaces a clear error.
+/// * adjacent rows where `prev.end == next.base` fold into one row
+///   (saves M-14 segment slots).
 ///
-/// If the merged result still exceeds `limits.segment_count` this returns
-/// `Err` (E_LDR-02) instead of silently dropping the tail: dropping
-/// firmware bytes would load a truncated image that looks valid (D-08).
+/// **Any** overlap — same base, partial intersection, or a later row
+/// that lands inside an earlier row — is rejected with `E_LDR-01`.
+/// The previous "last record wins" rule was deliberately removed: the
+/// host writes `load_bytes` sequentially and M-14 does not report
+/// overlapping byte writes as `E_BUS-03`, so last-wins could silently
+/// depend on sort order rather than record order.
 fn finalise(
     mut buf: Vec<(u32, Vec<u8>)>,
     limits: &ParseLimits,
 ) -> Result<LoadImage, PlatformError> {
-    buf.sort_by_key(|(b, _)| *b);
+    super::sort_and_check_no_overlap(&mut buf)?;
 
-    // Step 1: collapse same-base duplicates (last wins).
-    let mut collapsed: Vec<(u32, Vec<u8>)> = Vec::new();
-    for (base, data) in buf {
-        if let Some((last_base, last_data)) = collapsed.last_mut() {
-            if *last_base == base {
-                if last_data.len() < data.len() {
-                    last_data.resize(data.len(), 0);
-                }
-                let n = data.len().min(last_data.len());
-                last_data[..n].copy_from_slice(&data[..n]);
-                continue;
-            }
-        }
-        collapsed.push((base, data));
-    }
-
-    // Step 2: fold adjacent runs (prev.end == curr.base).
+    // Fold adjacent runs (prev.end == curr.base). Overlap has already
+    // been rejected, so this is safe and deterministic.
     let mut final_segments: Vec<(u32, Vec<u8>)> = Vec::new();
-    for (base, mut data) in collapsed {
+    for (base, mut data) in buf {
         if let Some((prev_base, prev_data)) = final_segments.last_mut() {
             // `checked_add` rather than `wrapping_add`: a segment that
             // ends exactly at the 4 GiB bus boundary must not wrap around
@@ -328,8 +313,9 @@ fn finalise(
 }
 
 /// Append `bytes` at `base` into `buf`, merging with the previous
-/// `(base, data)` row when the previous run ends exactly at `base`
-/// (06-4).
+/// `(base, data)` row only when the previous run ends exactly at `base`
+/// (06-4). Same-base records stay separate so `finalise` can reject the
+/// overlap instead of silently applying last-wins.
 fn append_or_merge(buf: &mut Vec<(u32, Vec<u8>)>, base: u32, bytes: &[u8]) {
     // A data record with zero payload bytes contributes nothing. Emitting
     // a zero-length row would hand M-14 a phantom region that maps a
@@ -339,18 +325,10 @@ fn append_or_merge(buf: &mut Vec<(u32, Vec<u8>)>, base: u32, bytes: &[u8]) {
         return;
     }
     if let Some((last_base, last_data)) = buf.last_mut() {
-        if *last_base == base {
-            // Same exact base — last-wins overwrite (data len capped).
-            if last_data.len() < bytes.len() {
-                last_data.resize(bytes.len(), 0);
-            }
-            let n = bytes.len().min(last_data.len());
-            last_data[..n].copy_from_slice(&bytes[..n]);
-            return;
-        }
-        if last_base
-            .checked_add(last_data.len() as u32)
-            .is_some_and(|end| end == base)
+        if *last_base != base
+            && last_base
+                .checked_add(last_data.len() as u32)
+                .is_some_and(|end| end == base)
         {
             last_data.extend_from_slice(bytes);
             return;

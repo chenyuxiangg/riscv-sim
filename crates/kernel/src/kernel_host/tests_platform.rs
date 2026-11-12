@@ -30,7 +30,7 @@ use riscv_sim_contract::error::{ErrorFamily, PlatformError, PLATFORM_FAMILY};
 use riscv_sim_contract::platform::{DeviceSpec, PlatformDescription, RegionSpec};
 
 use super::platform;
-use super::{KernelHost, MemoryProfile};
+use super::{load_segment_overlap_error, ElfIsaFacts, KernelHost, MemoryProfile, ParsedImage};
 use crate::m14_bus::Bus;
 
 /// 内置描述 `default`（**今天的 Default 档**）。
@@ -634,4 +634,51 @@ fn the_platform_error_carries_a_judgeable_code() {
     assert_eq!(err.family, PLATFORM_FAMILY);
     assert_eq!(err.family, ErrorFamily::Platform);
     assert_eq!(err.family.as_str(), "PLT");
+}
+
+/// 跨镜像的装载段重叠必须在写总线之前被拒绝。
+#[test]
+fn cross_image_overlapping_segments_are_rejected() {
+    let parsed = vec![
+        ParsedImage {
+            entry: 0,
+            segments: vec![(0, vec![0u8; 4])],
+            debug_sections: Vec::new(),
+            elf_isa: ElfIsaFacts::default(),
+        },
+        ParsedImage {
+            entry: 0,
+            segments: vec![(2, vec![1u8; 4])],
+            debug_sections: Vec::new(),
+            elf_isa: ElfIsaFacts::default(),
+        },
+    ];
+    let err = load_segment_overlap_error(&parsed).expect("must reject overlap");
+    assert_eq!(err.family, ErrorFamily::Loader);
+    assert_eq!(err.scenario, 1, "overlap -> E_LDR-01");
+    assert!(
+        err.message.contains("across images"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+/// 首尾相接不是重叠：跨镜像相邻段必须放行。
+#[test]
+fn cross_image_adjacent_segments_are_not_overlap() {
+    let parsed = vec![
+        ParsedImage {
+            entry: 0,
+            segments: vec![(0, vec![0u8; 4])],
+            debug_sections: Vec::new(),
+            elf_isa: ElfIsaFacts::default(),
+        },
+        ParsedImage {
+            entry: 0,
+            segments: vec![(4, vec![1u8; 4])],
+            debug_sections: Vec::new(),
+            elf_isa: ElfIsaFacts::default(),
+        },
+    ];
+    assert!(load_segment_overlap_error(&parsed).is_none());
 }

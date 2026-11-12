@@ -2686,6 +2686,11 @@ impl KernelHost {
 
         // ---- 第二步：挑平台描述（**判定在这之前**）----
         //
+        // ⚠️ 跨镜像的装载段重叠必须在这里拒绝：解析是纯计算，拒绝时
+        // 机器还没复位、平台还没重建、总线一个字都没写。
+        if let Some(err) = load_segment_overlap_error(&parsed) {
+            return vec![self.error_from(&err)];
+        }
         // ⚠️ **重建平台**：**内存图 + 探针管道 + 外设探针回调**一起重来。
         //
         // ⚠️ 不能只 `reset_memory_map()` + 建图：
@@ -4824,6 +4829,41 @@ struct ParsedImage {
     /// ELF 头的 ISA 事实（v0.75 · STAGE-51 · D-175 的 F）；非 ELF
     /// （raw/hex）为缺省（`bits = 0` ⇒ ISA 门禁跳过它）。
     elf_isa: ElfIsaFacts,
+}
+
+/// 同一工程**多个镜像之间**的装载段重叠检查。
+///
+/// M-06 已经在单个镜像内拒绝重叠；这里补上跨镜像的检查，因为宿主
+/// 是逐镜像解析、最后统一写总线的。重叠一律 `E_LDR-01`，且在复位 /
+/// 建图之前返回，机器状态不动。
+fn load_segment_overlap_error(parsed: &[ParsedImage]) -> Option<PlatformError> {
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    for p in parsed {
+        for (addr, bytes) in &p.segments {
+            if bytes.is_empty() {
+                continue;
+            }
+            let start = *addr as u64;
+            let end = start.saturating_add(bytes.len() as u64);
+            ranges.push((start, end));
+        }
+    }
+    ranges.sort_by_key(|(start, _)| *start);
+    for window in ranges.windows(2) {
+        let (prev_start, prev_end) = window[0];
+        let (start, end) = window[1];
+        if start < prev_end {
+            return Some(PlatformError::new(
+                ErrorFamily::Loader,
+                1,
+                format!(
+                    "overlapping load segments across images: \
+                     [0x{prev_start:08x}..0x{prev_end:08x}) and [0x{start:08x}..0x{end:08x})"
+                ),
+            ));
+        }
+    }
+    None
 }
 
 /// 取指 / 读内存的**宽度映射**。

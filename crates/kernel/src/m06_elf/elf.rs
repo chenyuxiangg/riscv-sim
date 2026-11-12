@@ -388,6 +388,11 @@ pub fn parse(bytes: &[u8], limits: &ParseLimits) -> Result<LoadImage, PlatformEr
         ));
     }
 
+    // The public `LoadImage` contract promises segments sorted by paddr.
+    // Sorting before the overlap check also makes the rejection message
+    // deterministic.
+    super::sort_and_check_no_overlap(&mut segments)?;
+
     // The whitelisted debug sections (STAGE-5 裁决 B). M-06 hands the
     // raw bytes over; M-11 interprets them.
     let debug_sections =
