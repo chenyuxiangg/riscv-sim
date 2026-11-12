@@ -977,8 +977,11 @@ pub struct KernelHost {
     /// 说明（见 [`KernelHost::on_admin`]），这里还留一个**机器可读**的计数
     /// ⇒ 「少了一批」这件事**两处都看得见**。
     admin_drain_truncated: u64,
-    /// 上一次「命中断点」日志的宿主时间（毫秒）—— **≥1s 限频**的唯一状态。
-    bp_hit_log_last_ms: Option<u64>,
+    /// 上一次「命中断点」日志的**虚拟时间**（皮秒）—— **≥1s 限频**的唯一状态。
+    ///
+    /// ⚠️ 用**虚拟时间**而不是宿主墙钟：日志顺序必须可复现（同一份快照
+    /// 两次回放的日志序列逐条相同）。
+    bp_hit_log_last_ps: Option<u64>,
     /// 限频窗口内被压掉的命中日志条数（下一条放行日志里如实带出）。
     bp_hit_log_suppressed: u64,
 }
@@ -1122,7 +1125,7 @@ impl KernelHost {
             // 一个独立布尔旋钮 ⇒ ⇒ 默认角色是 `Product`（`Hms::new()` 就是
             // `with_role(Role::Product)`）⇒ ⇒ 准入判据天然为「关」。
             admin_drain_truncated: 0,
-            bp_hit_log_last_ms: None,
+            bp_hit_log_last_ps: None,
             bp_hit_log_suppressed: 0,
         };
         // The default memory map cannot fail on a fresh bus (the regions do
@@ -3456,11 +3459,11 @@ impl KernelHost {
     /// ⚠️ 被压掉的条数会累计，并在**下一条放行**的日志里如实带出
     /// ⇒ ⇒ 不是静默丢弃。
     fn log_breakpoint_hit(&mut self, pc: u32) {
-        const BP_HIT_LOG_THROTTLE_MS: u64 = 1_000;
-        let now_ms = self.host_now_ms();
-        let allow = match self.bp_hit_log_last_ms {
+        const BP_HIT_LOG_THROTTLE_PS: u64 = 1_000_000_000_000; // 1s
+        let now_ps = self.backend.engine().now_ps();
+        let allow = match self.bp_hit_log_last_ps {
             None => true,
-            Some(last) => now_ms.saturating_sub(last) >= BP_HIT_LOG_THROTTLE_MS,
+            Some(last) => now_ps.saturating_sub(last) >= BP_HIT_LOG_THROTTLE_PS,
         };
         if !allow {
             self.bp_hit_log_suppressed = self.bp_hit_log_suppressed.saturating_add(1);
@@ -3468,13 +3471,12 @@ impl KernelHost {
         }
         let suppressed = self.bp_hit_log_suppressed;
         self.bp_hit_log_suppressed = 0;
-        self.bp_hit_log_last_ms = Some(now_ms);
+        self.bp_hit_log_last_ps = Some(now_ps);
         let msg = if suppressed == 0 {
             format!("命中断点：pc=0x{pc:08x}")
         } else {
             format!("命中断点：pc=0x{pc:08x}（限频窗口内另有 {suppressed} 次命中未记日志）")
         };
-        let now_ps = self.backend.engine().now_ps();
         let t_host_ms = self.host_now_ms();
         self.log_buffer.borrow_mut().log(
             LogLevel::Info,

@@ -1002,12 +1002,12 @@ fn set_breakpoint_enabled_replies_with_the_updated_table() {
 fn breakpoint_hit_log_is_throttled_to_one_per_second() {
     let mut host = KernelHost::new();
     let before = host.log_buffer.borrow().len();
-    host.bp_hit_log_last_ms = Some(host.host_now_ms());
+    host.bp_hit_log_last_ps = Some(host.backend.engine().now_ps());
     host.log_breakpoint_hit(0x8000_0010);
     assert_eq!(host.bp_hit_log_suppressed, 1, "窗口内第二次命中必须被压掉");
     assert_eq!(host.log_buffer.borrow().len(), before, "被压掉时不写日志");
 
-    host.bp_hit_log_last_ms = None;
+    host.bp_hit_log_last_ps = None;
     host.log_breakpoint_hit(0x8000_0010);
     assert_eq!(host.bp_hit_log_suppressed, 0, "放行后抑制计数清零");
     assert_eq!(host.log_buffer.borrow().len(), before + 1, "放行时写一条");
