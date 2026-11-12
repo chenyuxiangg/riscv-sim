@@ -6,8 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    Breakpoint, DeltaRegister, DisasmEntryDto, Project, SimState, Symbol, TraceFormat, TraceSource,
-    Watchpoint, WaveformHistory, WriteSize,
+    Breakpoint, BreakpointInfo, DeltaRegister, DisasmEntryDto, Project, SimState, Symbol,
+    TraceFormat, TraceSource, Watchpoint, WaveformHistory, WriteSize,
 };
 use crate::platform::{PlatformDescription, RegionSpec};
 use crate::SCHEMA_VERSION;
@@ -142,6 +142,18 @@ pub enum CommandPayload {
     ClearBreakpoint {
         id: u32,
     },
+    /// **Enable / disable** a breakpoint by id（契约 v13 · M-08）。
+    ///
+    /// 幂等：id 不存在时内核不改表、不报错，回执里仍然是当前的真实表。
+    SetBreakpointEnabled {
+        id: u32,
+        enabled: bool,
+    },
+    /// **List** the kernel's current breakpoint table（契约 v13 · M-08）。
+    ///
+    /// 回执是 [`EventPayload::Breakpoints`]。前端不再自己维护「本会话
+    /// 请求过的地址」——这张表才是真相。
+    ListBreakpoints,
     SetWatchpoint(Watchpoint),
     ClearWatchpoint {
         id: u32,
@@ -569,6 +581,13 @@ pub enum EventPayload {
         elapsed_ps: u64,
         pc: u32,
     },
+    /// The kernel's **breakpoint table**（契约 v13 · M-08）.
+    ///
+    /// `ListBreakpoints` / `SetBreakpointEnabled` 的回复，也是前端断点
+    /// 列表的**唯一数据源**。条目按地址升序。
+    Breakpoints {
+        breakpoints: Vec<BreakpointInfo>,
+    },
     /// The simulation hit a breakpoint or watchpoint and paused.
     Halted {
         reason: HaltReason,
@@ -953,9 +972,15 @@ mod tests {
     /// ⚠️ **v11**（STAGE-48 · D-177 A）：`MemoryMap` 事件**多一个**
     /// **10 → 11**（⚠️ 计划里说的「零升版」**不成立** ⇒ ⇒ 订正见
     /// STAGE-48 §7.1 订正 1）。
+    /// **v12** adds the **内置板模板库**（`ListPlatformTemplates` /
+    /// `GetPlatformTemplate` + 两条回复事件 + `PlatformTemplateInfo`）。
+    ///
+    /// **v13** adds the **断点表查询 / 使能 / 命中计数** batch
+    /// (`ListBreakpoints` + `SetBreakpointEnabled` + `Breakpoints` +
+    /// `BreakpointInfo`).
     #[test]
-    fn the_schema_version_is_twelve() {
-        assert_eq!(crate::SCHEMA_VERSION, 12);
+    fn the_schema_version_is_thirteen() {
+        assert_eq!(crate::SCHEMA_VERSION, 13);
     }
 
     /// **v12**（v0.76 · STAGE-52 · 裁决 M）：模板库协议 —— 两个命令、
@@ -1247,7 +1272,7 @@ mod tests {
         let msg = Message::command(8, CommandPayload::Nop);
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
-        assert_eq!(json["schema_version"], 12);
+        assert_eq!(json["schema_version"], 13);
     }
 
     // -----------------------------------------------------------------

@@ -1594,6 +1594,28 @@ export async function handleCommand(detail, services) {
                 withdrawBreakpoint(addr);
                 break;
             }
+            case "list-breakpoints": {
+                // 契约 v13：直接把内核的断点表取回来（回执照
+                // `debug.breakpoints` 订阅落进视图状态）。
+                await commandRouter.dispatchCommand(Command.listBreakpoints());
+                break;
+            }
+            case "toggle-breakpoint": {
+                // 契约 v13：enable / disable。id 就是地址；当前状态从视图
+                // 状态读，命令成功后再翻本地那一格（回执也会整表覆盖）。
+                const addr = toInt(detail.params?.addr, 0) >>> 0;
+                const current = viewStore.getState("debug")?.debug?.bpEnabled?.[String(addr)] !== false;
+                const next = !current;
+                await commandRouter.dispatchCommand(Command.setBreakpointEnabled(addr, next));
+                updateDebugState((prev) => ({
+                    ...prev,
+                    debug: {
+                        ...(prev.debug ?? {}),
+                        bpEnabled: { ...(prev.debug?.bpEnabled ?? {}), [String(addr)]: next },
+                    },
+                }));
+                break;
+            }
             case "resolve-line": {
                 // 源码视图问内核「当前 PC 对应哪一行」（契约 v3 的
                 // `ResolveLine`，M-11 的 DWARF 行表）。
@@ -2728,6 +2750,14 @@ function updateDebugState(mutator) {
  * @returns {number[]} 写进去的列表
  */
 export function requestBreakpoint(addr) {
+    // 新加的断点默认启用（与 `Command.setBreakpoint` 的 `enabled: true` 同拍）。
+    updateDebugState((prev) => ({
+        ...prev,
+        debug: {
+            ...(prev.debug ?? {}),
+            bpEnabled: { ...(prev.debug?.bpEnabled ?? {}), [String(addr)]: true },
+        },
+    }));
     return updateBreakpoints((list) => (
         list.includes(addr) ? list : [...list, addr]
     ));
@@ -2745,10 +2775,15 @@ export function requestBreakpoint(addr) {
 export function withdrawBreakpoint(addr) {
     updateDebugState((prev) => {
         const symbols = { ...(prev?.debug?.bpSymbols ?? {}) };
-        delete symbols[String(Number(addr ?? 0) >>> 0)];
+        const enabled = { ...(prev?.debug?.bpEnabled ?? {}) };
+        const hits = { ...(prev?.debug?.bpHits ?? {}) };
+        const key = String(Number(addr ?? 0) >>> 0);
+        delete symbols[key];
+        delete enabled[key];
+        delete hits[key];
         return {
             ...prev,
-            debug: { ...(prev.debug ?? {}), bpSymbols: symbols },
+            debug: { ...(prev.debug ?? {}), bpSymbols: symbols, bpEnabled: enabled, bpHits: hits },
         };
     });
     return updateBreakpoints((list) => list.filter((a) => a !== addr));
@@ -2882,6 +2917,40 @@ export function wireDebug(commandRouter, services = {}) {
         viewStore.setState("debug", (prev) => ({
             ...prev,
             debug: { ...(prev.debug ?? {}), trace: event.value ?? null },
+        }));
+        publishViewState("debug");
+    });
+
+    /**
+     * 内核断点表的**只读回执**（契约 v13 · `debug.breakpoints`）。
+     *
+     * ⚠️ 这是断点列表的**唯一数据源**：`ListBreakpoints` 与
+     * `SetBreakpointEnabled` 的回复都走这里 ⇒ ⇒ 前端不再自己猜「内核有
+     * 哪些断点」。
+     */
+    commandRouter.subscribe("debug.breakpoints", (event) => {
+        const entries = Array.isArray(event.value?.breakpoints) ? event.value.breakpoints : [];
+        const addresses = [];
+        const symbols = {};
+        const enabled = {};
+        const hits = {};
+        for (const item of entries) {
+            const bp = item?.breakpoint ?? item ?? {};
+            const addr = Number(bp.addr ?? 0) >>> 0;
+            addresses.push(addr);
+            enabled[String(addr)] = bp.enabled !== false;
+            hits[String(addr)] = Number(item?.hit_count ?? 0);
+            if (bp.source_hint) symbols[String(addr)] = String(bp.source_hint);
+        }
+        viewStore.setState("debug", (prev) => ({
+            ...prev,
+            debug: {
+                ...(prev.debug ?? {}),
+                breakpoints: addresses,
+                bpSymbols: symbols,
+                bpEnabled: enabled,
+                bpHits: hits,
+            },
         }));
         publishViewState("debug");
     });
@@ -3120,6 +3189,8 @@ export function wireDebug(commandRouter, services = {}) {
                     //   `requestBreakpoint` 去重拦住，命令根本发不出去。
                     breakpoints: [],
                     bpSymbols: {},
+                    bpEnabled: {},
+                    bpHits: {},
                     // ⚠️ **读回的那一份也清掉**（v0.67 批）⇒ ⇒ 基准与「上次
                     //   读回」说的都是**上一个程序**⇒ ⇒ 留着就是一份**不存在的**
                     //   对比⇒ ⇒ 用户会看到**上一趟**的高亮。

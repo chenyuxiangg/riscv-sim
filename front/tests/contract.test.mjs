@@ -418,6 +418,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             // 契约 v12 新增：模板库协议（STAGE-52 · 裁决 M）。
             variantOf(Command.listPlatformTemplates()),
             variantOf(Command.getPlatformTemplate("default")),
+            // 契约 v13 新增：断点表查询 / 使能（M-08）。
+            variantOf(Command.listBreakpoints()),
+            variantOf(Command.setBreakpointEnabled(1, false)),
         ].sort();
         assert.deepEqual(js, rust, "JS 命令变体与 Rust CommandPayload 不一致");
     });
@@ -458,6 +461,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             // 契约 v12 新增：模板库协议（STAGE-52 · 裁决 M）。
             variantOf(Event.platformTemplates([])),
             variantOf(Event.platformTemplate({})),
+            // 契约 v13 新增：内核断点表的只读回执。
+            variantOf(Event.breakpoints([])),
         ].sort();
         assert.deepEqual(js, rust, "JS 事件变体与 Rust EventPayload 不一致");
     });
@@ -577,6 +582,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 //   Get 是单键对象）。
                 ListPlatformTemplates: Command.listPlatformTemplates(),
                 GetPlatformTemplate: Command.getPlatformTemplate("default"),
+                // ⚠️ **契约 v13**（M-08 断点表查询 / 使能批）⇒ ⇒ 登记。
+                ListBreakpoints: Command.listBreakpoints(),
+                SetBreakpointEnabled: Command.setBreakpointEnabled(1, false),
             },
             EventPayload: {
                 Tick: Event.tick(0, 0),
@@ -615,6 +623,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 //   逐字比对的**登记处**（`templates` / `description`）。
                 PlatformTemplates: Event.platformTemplates([]),
                 PlatformTemplate: Event.platformTemplate({}),
+                // ⚠️ **契约 v13**（M-08 断点表查询 / 使能批）⇒ ⇒ 字段名
+                //   逐字比对的登记处（`breakpoints`）。
+                Breakpoints: Event.breakpoints([]),
             },
         };
 

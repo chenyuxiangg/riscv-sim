@@ -147,7 +147,7 @@
 //   on either side turns the other side red.
 
 /** Protocol schema version — mirrors `riscv_sim_contract::SCHEMA_VERSION`. */
-export const SCHEMA_VERSION = 12;
+export const SCHEMA_VERSION = 13;
 
 /**
  * 转储长度上限（字节）—— mirrors `riscv_sim_contract::DUMP_MAX_BYTES`.
@@ -425,6 +425,8 @@ export const EVENT_TOPIC = Object.freeze({
     // 契约 v12 新增：内置板模板库（STAGE-52 · 裁决 M）。
     PlatformTemplates: "platform.templates",
     PlatformTemplate: "platform.template",
+    // 契约 v13 新增：内核断点表的查询 / 使能回执。
+    Breakpoints: "debug.breakpoints",
 });
 
 /**
@@ -572,6 +574,12 @@ export const Command = Object.freeze({
     setBreakpoint: (breakpoint) => ({ SetBreakpoint: breakpoint }),
     /** `CommandPayload::ClearBreakpoint { id }`. */
     clearBreakpoint: (id) => ({ ClearBreakpoint: { id: Number(id) } }),
+    /** `CommandPayload::SetBreakpointEnabled { id, enabled }`（契约 v13）. */
+    setBreakpointEnabled: (id, enabled) => ({
+        SetBreakpointEnabled: { id: Number(id), enabled: Boolean(enabled) },
+    }),
+    /** `CommandPayload::ListBreakpoints`（契约 v13）. */
+    listBreakpoints: () => "ListBreakpoints",
     /** `CommandPayload::SetWatchpoint(Watchpoint)`. */
     setWatchpoint: (watchpoint) => ({ SetWatchpoint: watchpoint }),
     /** `CommandPayload::ClearWatchpoint { id }`. */
@@ -1180,6 +1188,19 @@ export const Event = Object.freeze({
             addr: Number(addr),
             bytes: (bytes ?? []).map((b) => Number(b) & 0xff),
         },
+    }),
+    /**
+     * `EventPayload::Breakpoints { breakpoints }` — 内核断点表的只读回执
+     * （契约 v13）。
+     *
+     * ⚠️ 回复 `ListBreakpoints` / `SetBreakpointEnabled`；条目是
+     * `BreakpointInfo { breakpoint, hit_count }`。
+     *
+     * @param {Array<object>} breakpoints — `BreakpointInfo` 列表
+     * @returns {{Breakpoints: {breakpoints: Array<object>}}}
+     */
+    breakpoints: (breakpoints) => ({
+        Breakpoints: { breakpoints: breakpoints ?? [] },
     }),
 });
 

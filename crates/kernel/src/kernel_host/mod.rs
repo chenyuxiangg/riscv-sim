@@ -977,6 +977,10 @@ pub struct KernelHost {
     /// 说明（见 [`KernelHost::on_admin`]），这里还留一个**机器可读**的计数
     /// ⇒ 「少了一批」这件事**两处都看得见**。
     admin_drain_truncated: u64,
+    /// 上一次「命中断点」日志的宿主时间（毫秒）—— **≥1s 限频**的唯一状态。
+    bp_hit_log_last_ms: Option<u64>,
+    /// 限频窗口内被压掉的命中日志条数（下一条放行日志里如实带出）。
+    bp_hit_log_suppressed: u64,
 }
 
 impl std::fmt::Debug for KernelHost {
@@ -1118,6 +1122,8 @@ impl KernelHost {
             // 一个独立布尔旋钮 ⇒ ⇒ 默认角色是 `Product`（`Hms::new()` 就是
             // `with_role(Role::Product)`）⇒ ⇒ 准入判据天然为「关」。
             admin_drain_truncated: 0,
+            bp_hit_log_last_ms: None,
+            bp_hit_log_suppressed: 0,
         };
         // The default memory map cannot fail on a fresh bus (the regions do
         // not overlap and are far below the per-region budget). If it ever
@@ -2305,6 +2311,16 @@ impl KernelHost {
                 let _ = self.backend.clear_breakpoint_by_id(id);
                 vec![self.tick()]
             }
+            CommandPayload::SetBreakpointEnabled { id, enabled } => {
+                // 幂等：id 不存在不是错误；回执带**当前真实表**。
+                let _ = self.backend.set_breakpoint_enabled(id, enabled);
+                vec![EventPayload::Breakpoints {
+                    breakpoints: self.backend.list_breakpoints(),
+                }]
+            }
+            CommandPayload::ListBreakpoints => vec![EventPayload::Breakpoints {
+                breakpoints: self.backend.list_breakpoints(),
+            }],
             CommandPayload::SetWatchpoint(wp) => match self.backend.set_watchpoint_with_id(wp) {
                 Ok(()) => vec![self.tick()],
                 Err(err) => vec![self.error_from(&err)],
@@ -3425,9 +3441,49 @@ impl KernelHost {
         });
         if let Some(reason) = reason {
             let pc = self.backend.engine().snapshot().pc;
+            // 命中日志：**≥1s 限频**（同一次连续运行里同一断点反复停住时，
+            // 不让日志环被同一条消息刷满）。
+            if reason == HaltReason::Breakpoint {
+                self.log_breakpoint_hit(pc);
+            }
             events.push(EventPayload::Halted { reason, pc });
         }
         events
+    }
+
+    /// 写一条「命中断点」日志，**≥1s 限频**。
+    ///
+    /// ⚠️ 被压掉的条数会累计，并在**下一条放行**的日志里如实带出
+    /// ⇒ ⇒ 不是静默丢弃。
+    fn log_breakpoint_hit(&mut self, pc: u32) {
+        const BP_HIT_LOG_THROTTLE_MS: u64 = 1_000;
+        let now_ms = self.host_now_ms();
+        let allow = match self.bp_hit_log_last_ms {
+            None => true,
+            Some(last) => now_ms.saturating_sub(last) >= BP_HIT_LOG_THROTTLE_MS,
+        };
+        if !allow {
+            self.bp_hit_log_suppressed = self.bp_hit_log_suppressed.saturating_add(1);
+            return;
+        }
+        let suppressed = self.bp_hit_log_suppressed;
+        self.bp_hit_log_suppressed = 0;
+        self.bp_hit_log_last_ms = Some(now_ms);
+        let msg = if suppressed == 0 {
+            format!("命中断点：pc=0x{pc:08x}")
+        } else {
+            format!("命中断点：pc=0x{pc:08x}（限频窗口内另有 {suppressed} 次命中未记日志）")
+        };
+        let now_ps = self.backend.engine().now_ps();
+        let t_host_ms = self.host_now_ms();
+        self.log_buffer.borrow_mut().log(
+            LogLevel::Info,
+            "breakpoint",
+            &msg,
+            "",
+            now_ps,
+            t_host_ms,
+        );
     }
 
     /// 跑 `n` 条指令，**按指令预算分块**（`DEFAULT_INSTRUCTION_BUDGET`）。

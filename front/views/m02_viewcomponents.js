@@ -1602,6 +1602,13 @@ const debugView = register({
         const bpSymbols = debug.bpSymbols && typeof debug.bpSymbols === "object"
             ? debug.bpSymbols
             : {};
+        // 契约 v13：内核回执里的使能位与命中次数（按地址索引；缺省 = 启用 / 0）。
+        const bpEnabled = debug.bpEnabled && typeof debug.bpEnabled === "object"
+            ? debug.bpEnabled
+            : {};
+        const bpHits = debug.bpHits && typeof debug.bpHits === "object"
+            ? debug.bpHits
+            : {};
         // ⚠️ **符号查询的答复**（一次查询的答复 ⇒ ⇒ 推导量 ⇒ ⇒ 只住视图
         //   状态、**不持久化**）。
         const symbolResult = debug.symbol ?? null;
@@ -1670,7 +1677,7 @@ const debugView = register({
                     </table>
                 </section>
                 <section class="card breakpoint-card">
-                    <div class="row"><h3>断点</h3><span class="tag">${breakpoints.length} 个</span></div>
+                    <div class="row"><h3>断点</h3><span class="tag">${breakpoints.length} 个</span><button type="button" data-action="list-breakpoints">刷新内核断点表</button></div>
                     ${renderBreakpointAddrRow({ draft: draft.bpAddr })}
                     ${renderBreakpointCondRow({ draft: draft.bpCond, error: condError })}
                     ${renderSymbolLookupRow({ draft: draft.bpSymbol, error: symbolError, result: symbolResult })}
@@ -1683,15 +1690,19 @@ const debugView = register({
                             // 既有那行「断点 id = 地址」**保持不变** ⇒ ⇒ 两个
                             // `.note` 并列。
                             const symbol = bpSymbols[String(addr)] ?? null;
+                            const on = bpEnabled[String(addr)] !== false;
+                            const hits = Number(bpHits[String(addr)] ?? 0);
                             return `
-                                <div class="bp-row" data-bp-row data-bp-addr="${addrText}">
+                                <div class="bp-row" data-bp-row data-bp-addr="${addrText}" data-bp-enabled="${on ? "true" : "false"}">
                                     <code class="addr">${addrText}</code>
                                     ${symbol ? `<span class="note">${escapeHtml(String(symbol))}</span>` : ""}
                                     <span class="note">断点 id = 地址</span>
+                                    <span class="note" data-bp-hits>命中 ${hits} 次</span>
+                                    <button type="button" data-action="toggle-breakpoint" data-addr="${addrText}" aria-pressed="${on ? "true" : "false"}">${on ? "禁用" : "启用"}</button>
                                     <button type="button" data-action="clear-breakpoint" data-addr="${addrText}">撤掉</button>
                                 </div>`;
                         }).join("")}</div>`}
-                    <p class="muted">这里列的是<strong>本会话由界面请求过的断点</strong>（界面回显）—— 内核没有「列出断点」的事件，所以它<strong>不是</strong>内核断点集的镜像；用脚本口设的断点在这里看不到。</p>
+                    <p class="muted">这里列的是<strong>内核断点表</strong>（契约 v13 的 <code>ListBreakpoints</code> 回执）—— 点「刷新内核断点表」可把脚本口设的断点也读回来。命中次数来自内核的命中计数。</p>
                 </section>
                 <section class="card trace-export">
                     <div class="row"><h3>trace 记录 / 导出 (M-11 / M-19)</h3></div>

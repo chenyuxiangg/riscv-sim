@@ -36,7 +36,9 @@ use riscv_sim_contract::csr::{
 use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_01_INVALID_REGISTER_INDEX, E_ENG_03_NO_PROGRESS,
 };
-use riscv_sim_contract::model::{Breakpoint, SimState, WatchAccess, Watchpoint, WriteSize};
+use riscv_sim_contract::model::{
+    Breakpoint, BreakpointInfo, SimState, WatchAccess, Watchpoint, WriteSize,
+};
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink, TimeSource};
 use riscv_sim_contract::protocol::HaltReason;
 use riscv_sim_contract::snapshot::EngineSnapshotDto;
@@ -791,6 +793,11 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
         enabled: bool,
     ) -> Result<bool, PlatformError> {
         self.breakpoints.set_enabled(id, enabled)
+    }
+
+    /// **只读回执**：当前断点表（按地址升序，带命中计数）。
+    pub fn list_breakpoints(&self) -> Vec<BreakpointInfo> {
+        self.breakpoints.infos()
     }
 
     /// Register a watchpoint with the **host-assigned** contract id.

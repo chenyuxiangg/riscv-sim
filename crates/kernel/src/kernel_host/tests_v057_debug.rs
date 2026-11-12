@@ -937,3 +937,78 @@ fn k15_a_false_condition_does_not_stop_on_the_time_driven_path() {
         "时间驱动路径上条件为假 ⇒ ⇒ 断点处那条指令**执行了**"
     );
 }
+
+// -- 契约 v13：断点表查询 / 使能 / 命中计数 ------------------------------
+
+/// 取第一条 `Breakpoints` 回执。
+fn first_breakpoints(events: &[EventPayload]) -> Vec<riscv_sim_contract::model::BreakpointInfo> {
+    for e in events {
+        if let EventPayload::Breakpoints { breakpoints } = e {
+            return breakpoints.clone();
+        }
+    }
+    panic!("没有 Breakpoints 事件：{events:?}");
+}
+
+#[test]
+fn list_breakpoints_replies_with_the_kernel_table() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetBreakpoint(Breakpoint {
+            id: 7,
+            addr: 0x8000_0010,
+            source_hint: Some("main".to_string()),
+            enabled: true,
+            condition: None,
+        }),
+    );
+
+    let events = dispatch(&mut host, CommandPayload::ListBreakpoints);
+    let infos = first_breakpoints(&events);
+    assert_eq!(infos.len(), 1, "回执必须来自内核表");
+    assert_eq!(infos[0].breakpoint.id, 7);
+    assert_eq!(infos[0].breakpoint.source_hint.as_deref(), Some("main"));
+    assert_eq!(infos[0].hit_count, 0, "尚未命中 ⇒ 0");
+}
+
+#[test]
+fn set_breakpoint_enabled_replies_with_the_updated_table() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetBreakpoint(Breakpoint {
+            id: 9,
+            addr: 0x8000_0020,
+            source_hint: None,
+            enabled: true,
+            condition: None,
+        }),
+    );
+
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetBreakpointEnabled {
+            id: 9,
+            enabled: false,
+        },
+    );
+    let infos = first_breakpoints(&events);
+    assert_eq!(infos.len(), 1);
+    assert!(!infos[0].breakpoint.enabled, "禁用必须真的写进表");
+}
+
+#[test]
+fn breakpoint_hit_log_is_throttled_to_one_per_second() {
+    let mut host = KernelHost::new();
+    let before = host.log_buffer.borrow().len();
+    host.bp_hit_log_last_ms = Some(host.host_now_ms());
+    host.log_breakpoint_hit(0x8000_0010);
+    assert_eq!(host.bp_hit_log_suppressed, 1, "窗口内第二次命中必须被压掉");
+    assert_eq!(host.log_buffer.borrow().len(), before, "被压掉时不写日志");
+
+    host.bp_hit_log_last_ms = None;
+    host.log_breakpoint_hit(0x8000_0010);
+    assert_eq!(host.bp_hit_log_suppressed, 0, "放行后抑制计数清零");
+    assert_eq!(host.log_buffer.borrow().len(), before + 1, "放行时写一条");
+}

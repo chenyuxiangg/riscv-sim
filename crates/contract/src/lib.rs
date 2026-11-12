@@ -299,7 +299,19 @@ pub mod snapshot;
 ///   6 → 7：V-21 扩展 · V-24 / V-25）⇒ ⇒ **这两个数在平台层**，信封
 ///   `SCHEMA_VERSION` **只**管消息形状；
 /// - ⚠️ `SIM_STATE_SCHEMA_VERSION` stays `2`（快照载荷没变）。
-pub const SCHEMA_VERSION: u32 = 12;
+///
+/// Contract **v13** adds the **断点表查询 / 使能 / 命中计数** batch
+/// （M-08）：
+///
+/// - new DTO `model::BreakpointInfo` —— 内核断点表的只读回执
+///   （`breakpoint` + `hit_count`）；
+/// - `CommandPayload::ListBreakpoints` /
+///   `CommandPayload::SetBreakpointEnabled { id, enabled }`；
+/// - `EventPayload::Breakpoints { breakpoints }` —— 两者的回复，也是
+///   前端断点列表的唯一数据源；
+/// - ⚠️ `Breakpoint` 的线格式**一字不动**（`hit_count` 只在回执 DTO 里）；
+/// - ⚠️ `SIM_STATE_SCHEMA_VERSION` stays `2`（快照载荷没变）。
+pub const SCHEMA_VERSION: u32 = 13;
 
 /// 转储长度上限（字节）—— v0.57 批（STAGE-42 §2.5 · 裁决 D）。
 ///

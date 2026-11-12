@@ -147,7 +147,7 @@ describe("契约镜像的版本与两个上限（视图层 · C-1）", () => {
             resolve(repoRoot, "crates/contract/fixtures/debug-limits.json"),
             "utf8",
         ));
-        assert.equal(msg.SCHEMA_VERSION, 12, "前端镜像的信封版本必须是 12（契约 v12：模板库协议）");
+        assert.equal(msg.SCHEMA_VERSION, 13, "前端镜像的信封版本必须是 13（契约 v13：断点表查询/使能）");
         assert.equal(
             msg.DUMP_MAX_BYTES,
             fixture.dump_max_bytes,
@@ -482,12 +482,13 @@ describe("下断点：条件与符号（视图层 · C-7 ~ C-10）", () => {
             "断点那一行必须**显示符号名**",
         );
         // ⚠️ **既有那行「断点 id = 地址」保持不变** ⇒ ⇒ 符号名是**另起**的
-        //   一个 `.note` ⇒ ⇒ 两个 `.note` 并列。
+        //   一个 `.note` ⇒ ⇒ 契约 v13 又加了命中次数 ⇒ ⇒ 三个 `.note` 并列。
         const notes = rows[0].querySelectorAll(".note");
-        assert.equal(notes.length, 2, "断点行里必须**两个** `.note`（符号名 + 既有那句）");
+        assert.equal(notes.length, 3, "断点行里必须**三个** `.note`（符号名 + id 那句 + 命中次数）");
         const texts = notes.map((n) => n.textContent);
         assert.ok(texts.includes("main"), "其中一个 `.note` 必须是符号名");
         assert.ok(texts.includes("断点 id = 地址"), "既有那句「断点 id = 地址」必须**保持不变**");
+        assert.ok(texts.some((t) => t.includes("命中")), "其中一个 `.note` 必须显示命中次数");
     });
 });
 
@@ -746,5 +747,64 @@ describe("M-08 调试状态同步（回归）", () => {
 
         const state = m03.getState("debug");
         assert.deepEqual(state?.debug?.breakpoints ?? [], [0x80000000], "清除失败时不能先删界面项");
+    });
+});
+
+describe("M-08 断点表回执（契约 v13）", () => {
+    let router;
+    let stop;
+
+    beforeEach(() => {
+        m03.reset();
+        router = fakeRouter();
+        app.wireDebug(router);
+        stop = forwardCommands(router);
+    });
+
+    test("`Breakpoints` 回执替换界面列表，并带上使能位与命中次数", () => {
+        router.emit("debug.breakpoints", {
+            breakpoints: [
+                {
+                    breakpoint: {
+                        id: 0x80000010,
+                        addr: 0x80000010,
+                        source_hint: "main",
+                        enabled: false,
+                        condition: null,
+                    },
+                    hit_count: 2,
+                },
+            ],
+        });
+
+        const state = m03.getState("debug");
+        assert.deepEqual(state.debug.breakpoints, [0x80000010], "列表必须来自内核回执");
+        assert.equal(state.debug.bpEnabled["2147483664"], false, "使能位必须来自回执");
+        assert.equal(state.debug.bpHits["2147483664"], 2, "命中次数必须来自回执");
+
+        const body = show("debug");
+        const row = body.querySelector("[data-bp-row]");
+        assert.ok(row, "断点行必须渲染出来");
+        assert.equal(row.dataset.bpEnabled, "false", "禁用状态必须显示在行上");
+        assert.ok(row.textContent.includes("命中 2 次"), "行里必须显示命中次数");
+        assert.ok(row.textContent.includes("main"), "行里必须显示 source_hint");
+    });
+
+    test("点「禁用」发 `SetBreakpointEnabled`，参数逐字一致", async () => {
+        app.requestBreakpoint(0x80000010);
+        const body = show("debug");
+        const button = body.querySelector("[data-action=\"toggle-breakpoint\"]");
+        assert.ok(button, "必须**有**一个启用/禁用按钮");
+        button.click();
+        await new Promise((r) => setTimeout(r, 0));
+        stop();
+
+        const sent = sentOf(router, "SetBreakpointEnabled");
+        assert.equal(sent.length, 1, "点一次必须发**一条**命令");
+        assert.deepEqual(
+            sent[0].SetBreakpointEnabled,
+            { id: 0x80000010, enabled: false },
+            "当前是启用 ⇒ 点一次必须发「禁用」",
+        );
     });
 });

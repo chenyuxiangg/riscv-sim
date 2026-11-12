@@ -52,7 +52,7 @@ function frontSources() {
 
 
 describe("STAGE-47 · 「未知系统」门禁 · 前端那一侧", () => {
-    test("N-1 · 前端镜像的 `SCHEMA_VERSION` **与契约层同批**（当前 **12**）", () => {
+    test("N-1 · 前端镜像的 `SCHEMA_VERSION` **与契约层同批**（当前 **13**）", () => {
         // ⚠️ **这条断言跟版本号走**（literal 钉住当前值）⇒ ⇒ 每批升版
         //   都要**同步**它 ⇒ ⇒ 「一侧升了一侧没升」这件事**当场变红**。
         //
@@ -62,7 +62,7 @@ describe("STAGE-47 · 「未知系统」门禁 · 前端那一侧", () => {
         //   升到 **12** ⇒ ⇒ 这里跟着升。
         assert.equal(
             String(message.SCHEMA_VERSION),
-            "12",
+            "13",
             "前端镜像的 SCHEMA_VERSION 变了 ⇒ ⇒ 它与契约层**不同批**了",
         );
     });

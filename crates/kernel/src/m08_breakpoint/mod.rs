@@ -45,7 +45,8 @@
 //! **顺手订正**成指向本规格（STAGE-42 · F-15）。
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError, DEBUG_FAMILY};
-use riscv_sim_contract::model::{Breakpoint, WatchAccess, Watchpoint, WriteSize};
+use riscv_sim_contract::model::{Breakpoint, BreakpointInfo, WatchAccess, Watchpoint, WriteSize};
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use riscv_sim_contract::error::E_DBG_02_CONDITION_INVALID;
@@ -73,6 +74,8 @@ struct Entry {
     bp: Breakpoint,
     /// **已解析**的条件（`None` ⇒ 无条件断点）。
     cond: Option<cond::Condition>,
+    /// **命中计数**（契约 v13）。只在内核判定「真的命中」时 +1。
+    hits: Cell<u64>,
 }
 
 /// 断点表 —— 按地址索引 + id 反查索引。
@@ -136,7 +139,7 @@ impl BreakpointTable {
         };
         let id = bp.id;
         let addr = bp.addr;
-        self.by_addr.insert(addr, Entry { bp, cond });
+        self.by_addr.insert(addr, Entry { bp, cond, hits: Cell::new(0) });
         self.by_id.insert(id, addr);
         Ok(())
     }
@@ -202,9 +205,13 @@ impl BreakpointTable {
     pub fn hit_check_cond(&self, pc: u32, gpr: &[u32; 32]) -> Option<Breakpoint> {
         let entry = self.hit_entry(pc)?;
         match &entry.cond {
-            None => Some(entry.bp.clone()),
+            None => {
+                entry.hits.set(entry.hits.get() + 1);
+                Some(entry.bp.clone())
+            }
             Some(expr) => {
                 if expr.eval(gpr, pc) != 0 {
+                    entry.hits.set(entry.hits.get() + 1);
                     Some(entry.bp.clone())
                 } else {
                     None
@@ -249,6 +256,23 @@ impl BreakpointTable {
     /// 按地址升序遍历断点。
     pub fn iter(&self) -> impl Iterator<Item = &Breakpoint> {
         self.by_addr.values().map(|entry| &entry.bp)
+    }
+
+    /// **只读回执**：按地址升序返回「断点 + 命中次数」（契约 v13）。
+    pub fn infos(&self) -> Vec<BreakpointInfo> {
+        self.by_addr
+            .values()
+            .map(|entry| BreakpointInfo {
+                breakpoint: entry.bp.clone(),
+                hit_count: entry.hits.get(),
+            })
+            .collect()
+    }
+
+    /// 某个 id 的命中次数（未知 id ⇒ `None`）。
+    pub fn hit_count(&self, id: u32) -> Option<u64> {
+        let addr = *self.by_id.get(&id)?;
+        self.by_addr.get(&addr).map(|entry| entry.hits.get())
     }
 
     /// 清空整张表（会话重置用）。
@@ -647,5 +671,43 @@ mod tests {
         assert!(t.clear(1).is_some());
         assert!(t.clear(1).is_none(), "重复清除必须幂等");
         assert!(t.is_empty());
+    }
+
+    // -- 契约 v13：只读回执 / 命中计数 --------------------------------------
+
+    #[test]
+    fn infos_lists_by_addr_with_zero_hits() {
+        let mut t = BreakpointTable::new();
+        t.set(bp(2, 0x8000_0020)).expect("set");
+        t.set(bp(1, 0x8000_0010)).expect("set");
+        let infos = t.infos();
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].breakpoint.addr, 0x8000_0010, "回执按地址升序");
+        assert_eq!(infos[1].breakpoint.addr, 0x8000_0020);
+        assert_eq!(infos[0].hit_count, 0, "未命中过 ⇒ 0");
+    }
+
+    #[test]
+    fn hit_check_cond_increments_only_on_true_hit() {
+        let mut t = BreakpointTable::new();
+        t.set(bp_cond(1, 0x8000_0010, "a0 != 0")).expect("set");
+        let mut gpr = [0u32; 32];
+        assert!(t.hit_check_cond(0x8000_0010, &gpr).is_none(), "条件假不命中");
+        assert_eq!(t.hit_count(1), Some(0), "条件假不能计数");
+        gpr[10] = 7;
+        assert!(t.hit_check_cond(0x8000_0010, &gpr).is_some());
+        assert_eq!(t.hit_count(1), Some(1));
+        assert!(t.hit_check_cond(0x8000_0010, &gpr).is_some());
+        assert_eq!(t.hit_count(1), Some(2));
+    }
+
+    #[test]
+    fn disabled_breakpoint_does_not_count_hits() {
+        let mut t = BreakpointTable::new();
+        t.set(bp(1, 0x8000_0010)).expect("set");
+        assert!(t.set_enabled(1, false).expect("enable"));
+        let gpr = [0u32; 32];
+        assert!(t.hit_check_cond(0x8000_0010, &gpr).is_none());
+        assert_eq!(t.hit_count(1), Some(0), "禁用断点不命中 ⇒ 不计数");
     }
 }

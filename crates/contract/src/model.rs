@@ -470,6 +470,32 @@ impl Default for Breakpoint {
     }
 }
 
+/// 内核断点表的**只读回执**（M-08 · 契约 v13）。
+///
+/// ⚠️ 它是**查询结果**，不是注册参数：`breakpoint` 是内核表里的那一份
+/// （含 `enabled` / `condition` / `source_hint`），`hit_count` 是**命中
+/// 计数**（每次 `hit_check_cond` 真正命中并返回 `Some` 时 +1）。
+///
+/// ⚠️ **不把 `hit_count` 塞进 [`Breakpoint`]**：注册请求里没有这个字段，
+/// 它只属于**内核的运行时统计** ⇒ ⇒ 放进回执 DTO ⇒ ⇒ `Breakpoint` 的
+/// 线格式一字不动。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BreakpointInfo {
+    /// 内核表里的断点（id / 地址 / 使能 / 条件 / 来源提示）。
+    pub breakpoint: Breakpoint,
+    /// 命中次数（`u64`；WASM 侧按 JS 安全整数范围内使用）。
+    pub hit_count: u64,
+}
+
+impl Default for BreakpointInfo {
+    fn default() -> Self {
+        Self {
+            breakpoint: Breakpoint::default(),
+            hit_count: 0,
+        }
+    }
+}
+
 /// A watch point (M-10). Fires when the access matches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Watchpoint {
