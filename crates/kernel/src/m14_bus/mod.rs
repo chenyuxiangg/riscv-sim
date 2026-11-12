@@ -1962,6 +1962,21 @@ impl Bus {
         result
     }
 
+    /// **窥视**一条指令的原始编码：与 [`Self::read_fetch_instruction`]
+    /// 读到的字节相同，但**不计数、不触发 hook**。
+    ///
+    /// 调试器（如 stepOver 判调用）需要看当前指令是不是 `jal` / `jalr`，
+    /// 这种窥视**不能**进 guest 的访存 trace —— 否则调试动作会污染
+    /// 被测程序自己的历史。
+    pub fn peek_fetch_instruction(&self, addr: u32) -> Result<u32, PlatformError> {
+        let half = self.read_only(addr, BusWidth::Half)?;
+        if half & 0b11 != 0b11 {
+            Ok(half)
+        } else {
+            self.read_only(addr, BusWidth::Word)
+        }
+    }
+
     /// The fetch itself: probe the width, then read the instruction.
     ///
     /// Returns the instruction **and** the width it was read with. The

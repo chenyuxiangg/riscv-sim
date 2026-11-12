@@ -311,7 +311,21 @@ pub mod snapshot;
 ///   前端断点列表的唯一数据源；
 /// - ⚠️ `Breakpoint` 的线格式**一字不动**（`hit_count` 只在回执 DTO 里）；
 /// - ⚠️ `SIM_STATE_SCHEMA_VERSION` stays `2`（快照载荷没变）。
-pub const SCHEMA_VERSION: u32 = 13;
+///
+/// Contract **v14** adds **stepOver + 观察表达式**（M-08 / M-17）：
+///
+/// - `CommandPayload::StepOver` —— unit 变体；后端在当前指令是
+///   `jal` / `jalr` 且写 `ra` 时，往返回地址注入**临时断点**，停下后
+///   无条件移除；其它指令按一条执行；
+/// - new DTO `model::WatchExpr` / `model::WatchValue` —— 观察表达式与
+///   它的一次求值结果（`value` / `error` 只出现一个）；
+/// - `CommandPayload::SetWatchExpr { id, expr }` /
+///   `ClearWatchExpr { id }` / `ListWatchExprs`；
+/// - `EventPayload::WatchValues { values }` —— 设置 / 清除 / 列表的回复，
+///   也是每次运行窗口结束后的轮询推送；
+/// - ⚠️ 临时断点**不是** `Breakpoint` 的持久字段（不污染断点表）；
+/// - ⚠️ `SIM_STATE_SCHEMA_VERSION` stays `2`（快照载荷没变）。
+pub const SCHEMA_VERSION: u32 = 14;
 
 /// 转储长度上限（字节）—— v0.57 批（STAGE-42 §2.5 · 裁决 D）。
 ///

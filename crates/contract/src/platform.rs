@@ -2713,7 +2713,7 @@ mod tests {
     /// 命令 / 事件各加两个 ⇒ ⇒ **线上形状变了**）⇒ ⇒ 同理。
     #[test]
     fn s16_a1_the_contract_schema_version_is_thirteen() {
-        assert_eq!(crate::SCHEMA_VERSION, 13);
+        assert_eq!(crate::SCHEMA_VERSION, 14);
     }
     /// **STAGE-16 A-2** — the **description format**'s version is still
     /// `1`.

@@ -1012,3 +1012,95 @@ fn breakpoint_hit_log_is_throttled_to_one_per_second() {
     assert_eq!(host.bp_hit_log_suppressed, 0, "放行后抑制计数清零");
     assert_eq!(host.log_buffer.borrow().len(), before + 1, "放行时写一条");
 }
+
+fn first_watch_values(events: &[EventPayload]) -> Vec<WatchValue> {
+    for e in events {
+        if let EventPayload::WatchValues { values } = e {
+            return values.clone();
+        }
+    }
+    panic!("没有 WatchValues 事件：{events:?}");
+}
+
+#[test]
+fn set_watch_expr_replies_with_a_register_value() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetWatchExpr(WatchExpr {
+            id: 3,
+            expr: "pc".to_string(),
+        }),
+    );
+    let values = first_watch_values(&events);
+    assert_eq!(values.len(), 1);
+    assert_eq!(values[0].id, 3);
+    assert_eq!(values[0].expr, "pc");
+    assert!(values[0].value.is_some(), "pc 必须求值成功");
+    assert!(values[0].changed, "首次求值视为变化");
+}
+
+#[test]
+fn watch_address_is_polled_after_step_and_reports_changes() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    dispatch(
+        &mut host,
+        CommandPayload::SetWatchExpr(WatchExpr {
+            id: 9,
+            expr: "[0x100]".to_string(),
+        }),
+    );
+    let events = dispatch(&mut host, CommandPayload::StepN { n: 12 });
+    let values = first_watch_values(&events);
+    assert_eq!(values[0].value, Some(DEMO_STORE_VALUE), "sw 之后读回 49");
+    assert!(values[0].changed);
+
+    let events = dispatch(&mut host, CommandPayload::StepN { n: 1 });
+    let values = first_watch_values(&events);
+    assert_eq!(values[0].value, Some(DEMO_STORE_VALUE));
+    assert!(!values[0].changed, "值没变时 changed=false");
+}
+
+#[test]
+fn invalid_watch_expr_is_rejected_without_changing_the_table() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetWatchExpr(WatchExpr {
+            id: 11,
+            expr: "foo".to_string(),
+        }),
+    );
+    let (code, message) = first_error(&events);
+    assert_eq!(code, "E_DBG-02");
+    assert!(message.contains("foo"), "错误消息要带出错记号：{message}");
+    let events = dispatch(&mut host, CommandPayload::ListWatchExprs);
+    assert!(first_watch_values(&events).is_empty(), "非法表达式不能落表");
+}

@@ -623,13 +623,13 @@ describe("一个落点与契约版本", () => {
         //   它**继续**有效）⇒ ⇒ 逐字保留。
         const contract = readFileSync(resolve(repoRoot, "crates/contract/src/lib.rs"), "utf8");
         assert.ok(
-            contract.includes("pub const SCHEMA_VERSION: u32 = 13;"),
-            "契约的 `SCHEMA_VERSION` 必须**是 13**（契约 v13：断点表查询/使能）",
+            contract.includes("pub const SCHEMA_VERSION: u32 = 14;"),
+            "契约的 `SCHEMA_VERSION` 必须**是 14**（契约 v14：stepOver / 观察表达式）",
         );
         const mirror = readFileSync(resolve(frontDir, "lib/message.js"), "utf8");
         assert.ok(
-            mirror.includes("SCHEMA_VERSION = 13"),
-            "前端镜像的 `SCHEMA_VERSION` 必须**是 13**（与契约层同批升版）",
+            mirror.includes("SCHEMA_VERSION = 14"),
+            "前端镜像的 `SCHEMA_VERSION` 必须**是 14**（与契约层同批升版）",
         );
         const kernel = readFileSync(
             resolve(repoRoot, "crates/kernel/src/m08_breakpoint/mod.rs"),

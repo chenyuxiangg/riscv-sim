@@ -520,6 +520,43 @@ impl Default for Watchpoint {
     }
 }
 
+/// 一个**观察表达式**（契约 v14 · M-08/M-17）。
+///
+/// 与 [`Watchpoint`] 的分工：`Watchpoint` 是「哪次总线访问命中」的硬件式
+/// 观察点；本类型是「停下来之后看一眼这个值」的软件观察项，**不参与**
+/// 运行期停止判断。
+///
+/// 语法（冻结）：
+/// - `pc` / `$pc` ⇒ 当前 PC；
+/// - `x0`..`x31` / `$xN` / ABI 名（`ra` / `sp` / `a0` ...）⇒ 通用寄存器；
+/// - `0x80000000` / 十进制 ⇒ 读该地址的一个 **word**；
+/// - `@expr` / `[expr]` ⇒ 读 `expr` 指向地址的一个 **word**；
+/// - `expr` 可为寄存器 / `pc` / 数字，并允许 `+` / `-` 一个小整数偏移。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WatchExpr {
+    /// 稳定 id（按 id 覆盖，不按表达式去重）。
+    pub id: u32,
+    /// 用户输入的表达式原文（回执原样带回，便于界面显示）。
+    pub expr: String,
+}
+
+/// 一次观察表达式的求值结果（契约 v14）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WatchValue {
+    /// 对应的 [`WatchExpr::id`]。
+    pub id: u32,
+    /// 表达式原文。
+    pub expr: String,
+    /// 求值成功时的 u32 值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<u32>,
+    /// 求值失败的原因（未映射地址 / 表达式非法等）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// 与**上一次轮询**相比是否变了。首次求值视为「变了」。
+    pub changed: bool,
+}
+
 /// Watchpoint access kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WatchAccess {

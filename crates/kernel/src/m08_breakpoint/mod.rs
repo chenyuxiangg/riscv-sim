@@ -51,6 +51,8 @@ use std::collections::BTreeMap;
 
 use riscv_sim_contract::error::E_DBG_02_CONDITION_INVALID;
 
+pub mod watch_expr;
+
 pub mod cond;
 
 /// 断点地址的对齐粒度（字节）。
@@ -139,7 +141,14 @@ impl BreakpointTable {
         };
         let id = bp.id;
         let addr = bp.addr;
-        self.by_addr.insert(addr, Entry { bp, cond, hits: Cell::new(0) });
+        self.by_addr.insert(
+            addr,
+            Entry {
+                bp,
+                cond,
+                hits: Cell::new(0),
+            },
+        );
         self.by_id.insert(id, addr);
         Ok(())
     }
@@ -246,6 +255,31 @@ impl BreakpointTable {
     /// 断点数量。
     pub fn len(&self) -> usize {
         self.by_addr.len()
+    }
+
+    /// 注入一个**临时断点**（stepOver 用）：地址已有断点时返回 `None`
+    /// （复用用户那条，**不改它的 id / 条件 / 使能位**）。
+    ///
+    /// 临时 id 从 `u32::MAX` 往下找空位 ⇒ ⇒ 不与用户给的 id 冲突；
+    /// 返回的 `Some(id)` 必须由调用方在停止后 [`BreakpointTable::clear`]。
+    pub fn set_temporary(&mut self, addr: u32) -> Result<Option<u32>, PlatformError> {
+        if self.by_addr.contains_key(&addr) {
+            return Ok(None);
+        }
+        let mut id = u32::MAX;
+        while self.by_id.contains_key(&id) {
+            id = id
+                .checked_sub(1)
+                .ok_or_else(|| self.error("临时断点 id 已耗尽：断点表占满了全部 id".to_string()))?;
+        }
+        self.set(Breakpoint {
+            id,
+            addr,
+            source_hint: Some("step-over 临时断点".to_string()),
+            enabled: true,
+            condition: None,
+        })?;
+        Ok(Some(id))
     }
 
     /// 表是否为空。
@@ -692,7 +726,10 @@ mod tests {
         let mut t = BreakpointTable::new();
         t.set(bp_cond(1, 0x8000_0010, "a0 != 0")).expect("set");
         let mut gpr = [0u32; 32];
-        assert!(t.hit_check_cond(0x8000_0010, &gpr).is_none(), "条件假不命中");
+        assert!(
+            t.hit_check_cond(0x8000_0010, &gpr).is_none(),
+            "条件假不命中"
+        );
         assert_eq!(t.hit_count(1), Some(0), "条件假不能计数");
         gpr[10] = 7;
         assert!(t.hit_check_cond(0x8000_0010, &gpr).is_some());

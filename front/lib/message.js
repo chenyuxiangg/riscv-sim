@@ -147,7 +147,7 @@
 //   on either side turns the other side red.
 
 /** Protocol schema version — mirrors `riscv_sim_contract::SCHEMA_VERSION`. */
-export const SCHEMA_VERSION = 13;
+export const SCHEMA_VERSION = 14;
 
 /**
  * 转储长度上限（字节）—— mirrors `riscv_sim_contract::DUMP_MAX_BYTES`.
@@ -427,6 +427,8 @@ export const EVENT_TOPIC = Object.freeze({
     PlatformTemplate: "platform.template",
     // 契约 v13 新增：内核断点表的查询 / 使能回执。
     Breakpoints: "debug.breakpoints",
+    // 契约 v14 新增：观察表达式轮询回执。
+    WatchValues: "debug.watch",
 });
 
 /**
@@ -559,6 +561,8 @@ export const Command = Object.freeze({
     continueRun: () => "Continue",
     /** `CommandPayload::StepN { n }` — run exactly `n` instructions. */
     stepN: (n) => ({ StepN: { n: Number(n) } }),
+    /** `CommandPayload::StepOver` — step over the current call（契约 v14）. */
+    stepOver: () => "StepOver",
     /**
      * `CommandPayload::Pause` — stop the engine at the next **instruction**
      * boundary.
@@ -584,6 +588,12 @@ export const Command = Object.freeze({
     setWatchpoint: (watchpoint) => ({ SetWatchpoint: watchpoint }),
     /** `CommandPayload::ClearWatchpoint { id }`. */
     clearWatchpoint: (id) => ({ ClearWatchpoint: { id: Number(id) } }),
+    /** `CommandPayload::SetWatchExpr(WatchExpr)`（契约 v14）. */
+    setWatchExpr: (watchExpr) => ({ SetWatchExpr: watchExpr }),
+    /** `CommandPayload::ClearWatchExpr { id }`（契约 v14）. */
+    clearWatchExpr: (id) => ({ ClearWatchExpr: { id: Number(id) } }),
+    /** `CommandPayload::ListWatchExprs`（契约 v14）. */
+    listWatchExprs: () => "ListWatchExprs",
     /** `CommandPayload::ReadMemory { addr, size }`. */
     readMemory: (addr, size) => ({ ReadMemory: { addr: Number(addr), size } }),
     /** `CommandPayload::WriteMemory { addr, size, value }`. */
@@ -1201,6 +1211,16 @@ export const Event = Object.freeze({
      */
     breakpoints: (breakpoints) => ({
         Breakpoints: { breakpoints: breakpoints ?? [] },
+    }),
+    /**
+     * `EventPayload::WatchValues { values }` — 观察表达式的轮询回执
+     * （契约 v14）。
+     *
+     * @param {Array<object>} values — `WatchValue` 列表
+     * @returns {{WatchValues: {values: Array<object>}}}
+     */
+    watchValues: (values) => ({
+        WatchValues: { values: values ?? [] },
     }),
 });
 

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{
     Breakpoint, BreakpointInfo, DeltaRegister, DisasmEntryDto, Project, SimState, Symbol,
-    TraceFormat, TraceSource, Watchpoint, WaveformHistory, WriteSize,
+    TraceFormat, TraceSource, WatchExpr, WatchValue, Watchpoint, WaveformHistory, WriteSize,
 };
 use crate::platform::{PlatformDescription, RegionSpec};
 use crate::SCHEMA_VERSION;
@@ -124,6 +124,14 @@ pub enum CommandPayload {
     StepN {
         n: u32,
     },
+    /// **Step over** the current call（契约 v14 · M-09/M-17）。
+    ///
+    /// 当前指令是 `jal` / `jalr` 且写 `ra` ⇒ 后端在返回地址注入**临时断点**，
+    /// 一直跑到它命中（或陷阱 / 观察点 / 暂停先到），然后**无论怎么停都
+    /// 把临时断点删掉**。非调用指令 ⇒ 恰好执行一条。
+    ///
+    /// 回执与 `StepN` 同形：运行窗口结束后照常推 `Halted`（若真的停下）。
+    StepOver,
     /// Request a pause.
     ///
     /// The engine records the request and the host reports
@@ -158,6 +166,17 @@ pub enum CommandPayload {
     ClearWatchpoint {
         id: u32,
     },
+    /// **新增 / 覆盖**一个观察表达式（契约 v14 · M-08）。
+    ///
+    /// 表达式在**设置时**校验；非法 ⇒ `E_DBG-02`，观察表不变。
+    /// 回执是 [`EventPayload::WatchValues`]（当前全部观察项的值）。
+    SetWatchExpr(WatchExpr),
+    /// 删除一个观察表达式（幂等）。
+    ClearWatchExpr {
+        id: u32,
+    },
+    /// 列出当前观察表达式并立即求值。
+    ListWatchExprs,
     /// Read `size` bytes at `addr` from the simulated memory map.
     ReadMemory {
         addr: u32,
@@ -588,6 +607,14 @@ pub enum EventPayload {
     Breakpoints {
         breakpoints: Vec<BreakpointInfo>,
     },
+    /// **观察表达式的轮询结果**（契约 v14 · M-08）。
+    ///
+    /// 宿主在每次运行 / 单步 / 步过停下后求值一次；`changed` 表示与上一次
+    /// 轮询相比是否变了。表达式的语法错误在**设置时**就拒；这里出现的
+    /// `error` 是**求值期**失败（如观察地址当前未映射）。
+    WatchValues {
+        values: Vec<WatchValue>,
+    },
     /// The simulation hit a breakpoint or watchpoint and paused.
     Halted {
         reason: HaltReason,
@@ -978,9 +1005,13 @@ mod tests {
     /// **v13** adds the **断点表查询 / 使能 / 命中计数** batch
     /// (`ListBreakpoints` + `SetBreakpointEnabled` + `Breakpoints` +
     /// `BreakpointInfo`).
+    ///
+    /// **v14** adds **stepOver + 观察表达式**（`StepOver` +
+    /// `SetWatchExpr` / `ClearWatchExpr` / `ListWatchExprs` +
+    /// `WatchValues` + `WatchExpr` / `WatchValue`）。
     #[test]
-    fn the_schema_version_is_thirteen() {
-        assert_eq!(crate::SCHEMA_VERSION, 13);
+    fn the_schema_version_is_fourteen() {
+        assert_eq!(crate::SCHEMA_VERSION, 14);
     }
 
     /// **v12**（v0.76 · STAGE-52 · 裁决 M）：模板库协议 —— 两个命令、
@@ -1272,7 +1303,7 @@ mod tests {
         let msg = Message::command(8, CommandPayload::Nop);
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
-        assert_eq!(json["schema_version"], 13);
+        assert_eq!(json["schema_version"], 14);
     }
 
     // -----------------------------------------------------------------

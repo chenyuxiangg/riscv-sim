@@ -786,6 +786,9 @@ export function wireTopbarRunbar(services) {
     bind('[data-topbar-action="step"]', () => {
         void handleCommand({ action: "step" }, services);
     });
+    bind('[data-topbar-action="step-over"]', () => {
+        void handleCommand({ action: "step-over" }, services);
+    });
     bind('[data-topbar-action="reset"]', () => {
         void handleCommand({ action: "reset" }, services);
     });
@@ -1293,6 +1296,14 @@ export async function handleCommand(detail, services) {
                 // ⇒ ⇒ 取回来的就是**走完那一步之后**的值。
                 await performReadback(services, READBACK_REASON.STEP, { auto: true });
                 break;
+            case "step-over":
+                // 「步过」与「单步」同一条收尾路径：退出连续模式、记基准、
+                // 发命令、停下后读回。区别只在命令本身（内核负责临时断点）。
+                setRunState(markStarted(stopRunState(getRunState())));
+                captureGprBaseline(services);
+                await commandRouter.dispatchCommand(Command.stepOver());
+                await performReadback(services, READBACK_REASON.STEP, { auto: true });
+                break;
             case "step-n": {
                 // ⚠️ **按步数单步**（v0.63 批 · 用户拍板「在反汇编窗口中增加一个
                 //   输入框和一个按钮，用于支持用户指定执行多少步」）⇒ ⇒ 契约层
@@ -1614,6 +1625,32 @@ export async function handleCommand(detail, services) {
                         bpEnabled: { ...(prev.debug?.bpEnabled ?? {}), [String(addr)]: next },
                     },
                 }));
+                break;
+            }
+            case "set-watch-expr": {
+                // 契约 v14：新增 / 覆盖观察表达式。id 用视图里的递增计数，
+                // 保证同一项可以重复「覆盖」而不是无限追加。
+                const expr = String(detail.params?.expr ?? "").trim();
+                if (!expr) break;
+                const id = toInt(viewStore.getState("debug")?.debug?.watchNextId, 1) >>> 0;
+                await commandRouter.dispatchCommand(Command.setWatchExpr({ id, expr }));
+                updateDebugState((prev) => ({
+                    ...prev,
+                    debug: {
+                        ...(prev.debug ?? {}),
+                        watchNextId: (id + 1) >>> 0,
+                        watchExpr: "",
+                    },
+                }));
+                break;
+            }
+            case "clear-watch-expr": {
+                const id = toInt(detail.params?.id, 0) >>> 0;
+                await commandRouter.dispatchCommand(Command.clearWatchExpr(id));
+                break;
+            }
+            case "list-watch-exprs": {
+                await commandRouter.dispatchCommand(Command.listWatchExprs());
                 break;
             }
             case "resolve-line": {
@@ -2966,6 +3003,19 @@ export function wireDebug(commandRouter, services = {}) {
      * `line === 0xFFFFFFFF` = 有 DWARF 但地址没命中行表。视图**如实**
      * 区分这两种，不显示错误的行号。
      */
+    /**
+     * 观察表达式轮询回执（契约 v14 · `debug.watch`）。
+     * 值变化由内核计算，前端只显示。
+     */
+    commandRouter.subscribe("debug.watch", (event) => {
+        const values = Array.isArray(event.value?.values) ? event.value.values : [];
+        viewStore.setState("debug", (prev) => ({
+            ...prev,
+            debug: { ...(prev.debug ?? {}), watchValues: values },
+        }));
+        publishViewState("debug");
+    });
+
     commandRouter.subscribe("debug.source", (event) => {
         viewStore.setState("source", (prev) => ({
             ...prev,
@@ -3191,6 +3241,8 @@ export function wireDebug(commandRouter, services = {}) {
                     bpSymbols: {},
                     bpEnabled: {},
                     bpHits: {},
+                    watchValues: [],
+                    watchNextId: 1,
                     // ⚠️ **读回的那一份也清掉**（v0.67 批）⇒ ⇒ 基准与「上次
                     //   读回」说的都是**上一个程序**⇒ ⇒ 留着就是一份**不存在的**
                     //   对比⇒ ⇒ 用户会看到**上一趟**的高亮。

@@ -147,7 +147,7 @@ describe("契约镜像的版本与两个上限（视图层 · C-1）", () => {
             resolve(repoRoot, "crates/contract/fixtures/debug-limits.json"),
             "utf8",
         ));
-        assert.equal(msg.SCHEMA_VERSION, 13, "前端镜像的信封版本必须是 13（契约 v13：断点表查询/使能）");
+        assert.equal(msg.SCHEMA_VERSION, 14, "前端镜像的信封版本必须是 14（契约 v14：stepOver / 观察表达式）");
         assert.equal(
             msg.DUMP_MAX_BYTES,
             fixture.dump_max_bytes,
@@ -806,5 +806,66 @@ describe("M-08 断点表回执（契约 v13）", () => {
             { id: 0x80000010, enabled: false },
             "当前是启用 ⇒ 点一次必须发「禁用」",
         );
+    });
+});
+
+describe("M-08 观察表达式与 stepOver（契约 v14）", () => {
+    let router;
+    let stop;
+
+    beforeEach(() => {
+        m03.reset();
+        router = fakeRouter();
+        app.wireDebug(router);
+        stop = forwardCommands(router);
+    });
+
+    test("`WatchValues` 回执渲染值、变化标记与求值错误", () => {
+        router.emit("debug.watch", {
+            values: [
+                { id: 1, expr: "pc", value: 0x80000010, changed: true },
+                { id: 2, expr: "[0x2000]", value: null, error: "读取 0x00002000 失败", changed: false },
+            ],
+        });
+        const state = m03.getState("debug");
+        assert.equal(state.debug.watchValues.length, 2, "回执必须落进视图状态");
+        const body = show("debug");
+        const rows = body.querySelectorAll("[data-watch-row]");
+        assert.equal(rows.length, 2, "两项都要渲染");
+        assert.equal(rows[0].dataset.watchChanged, "true");
+        assert.ok(rows[0].textContent.includes("0x80000010"), "值必须显示十六进制");
+        assert.ok(rows[0].textContent.includes("变化"), "变化标记必须显示");
+        assert.ok(rows[1].textContent.includes("读取 0x00002000 失败"), "求值错误必须原样显示");
+    });
+
+    test("添加观察发 `SetWatchExpr`，id 递增且表达式逐字一致", async () => {
+        const body = show("debug");
+        const input = body.querySelector("[data-watch-expr-input]");
+        assert.ok(input, "必须有观察表达式输入框");
+        type(body, "[data-watch-expr-input]", "pc");
+        body.querySelector("[data-action=\"set-watch-expr\"]").click();
+        await new Promise((r) => setTimeout(r, 0));
+        stop();
+
+        const sent = sentOf(router, "SetWatchExpr");
+        assert.equal(sent.length, 1);
+        assert.deepEqual(sent[0].SetWatchExpr, { id: 1, expr: "pc" });
+        assert.equal(m03.getState("debug").debug.watchNextId, 2, "下一条 id 必须递增");
+    });
+
+    test("删除观察发 `ClearWatchExpr`，id 来自行内 data-id", async () => {
+        router.emit("debug.watch", {
+            values: [{ id: 7, expr: "x2", value: 0x9000, changed: false }],
+        });
+        const body = show("debug");
+        const button = body.querySelector("[data-action=\"clear-watch-expr\"]");
+        assert.ok(button);
+        button.click();
+        await new Promise((r) => setTimeout(r, 0));
+        stop();
+
+        const sent = sentOf(router, "ClearWatchExpr");
+        assert.equal(sent.length, 1);
+        assert.equal(sent[0].ClearWatchExpr.id, 7);
     });
 });

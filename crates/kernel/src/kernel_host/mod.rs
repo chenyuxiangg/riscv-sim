@@ -167,20 +167,22 @@
 //! 投影，裁决 C）⇒ 真实 id 用 [`KernelHost::platform_id`]。
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use riscv_sim_contract::admin::LogEntryDto;
 use riscv_sim_contract::csr::{IRQ_SOFTWARE, IRQ_UART_RX_READY};
 use riscv_sim_contract::error::{
-    ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_03_DUMP_TOO_LARGE, E_DBG_04_SYMBOL_NAME_EMPTY,
-    E_ENG_03_NO_PROGRESS, E_HMS_02_FATAL_TERMINATED, E_PLT_13_REVISION_CONFLICT,
-    E_PLT_14_REGION_NOT_FOUND, E_PLT_17_BOARD_MISMATCH, E_PLT_20_FW_ISA_MISMATCH,
-    E_PLT_22_NO_BOARD, E_PROTO_01_VERSION_MISMATCH, PLATFORM_FAMILY, PROTO_FAMILY,
+    ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_02_CONDITION_INVALID, E_DBG_03_DUMP_TOO_LARGE,
+    E_DBG_04_SYMBOL_NAME_EMPTY, E_ENG_03_NO_PROGRESS, E_HMS_02_FATAL_TERMINATED,
+    E_PLT_13_REVISION_CONFLICT, E_PLT_14_REGION_NOT_FOUND, E_PLT_17_BOARD_MISMATCH,
+    E_PLT_20_FW_ISA_MISMATCH, E_PLT_22_NO_BOARD, E_PROTO_01_VERSION_MISMATCH, PLATFORM_FAMILY,
+    PROTO_FAMILY,
 };
 use riscv_sim_contract::model::{
     Edge, ImageKind, ImageRef, ImageSource, PlatformTemplateInfo, Project, TraceEvent, TraceFormat,
-    TraceSource, WaveformHistory, WaveformStream, WriteSize, SIM_STATE_SCHEMA_VERSION,
+    TraceSource, WatchExpr, WatchValue, WaveformHistory, WaveformStream, WriteSize,
+    SIM_STATE_SCHEMA_VERSION,
 };
 use riscv_sim_contract::platform::{mcu_isa_info, PlatformDescription, RegionSpec};
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
@@ -194,6 +196,7 @@ use riscv_sim_contract::snapshot::{EngineSnapshotDto, DEFAULT_INSTRUCTION_BUDGET
 use riscv_sim_contract::{DUMP_MAX_BYTES, SCHEMA_VERSION, SYMBOL_CANDIDATE_LIMIT};
 
 use crate::m06_elf::{DefaultLoader, ElfIsaFacts, Kind as LoadKind, ParseLimits};
+use crate::m08_breakpoint::watch_expr::WatchTarget;
 use crate::m11_symbol::disasm::fetch_instruction_code as m11_fetch_instruction_code;
 use crate::m11_symbol::trace::{E_CTX_03_ILLEGAL_EXPORT_FORMAT, TRACE_FAMILY};
 use crate::m11_symbol::{
@@ -787,6 +790,12 @@ impl HostSinks {
     }
 }
 
+/// 一条观察表达式（原文 + 已解析目标）。解析在**设置时**完成。
+struct WatchEntry {
+    expr: WatchExpr,
+    target: WatchTarget,
+}
+
 /// 内核宿主 —— 一个会话的全部状态。
 pub struct KernelHost {
     /// 执行后端（M-17）：它持有 M-12 引擎、M-13 ISS、M-14 总线与 M-08 的
@@ -984,6 +993,10 @@ pub struct KernelHost {
     bp_hit_log_last_ps: Option<u64>,
     /// 限频窗口内被压掉的命中日志条数（下一条放行日志里如实带出）。
     bp_hit_log_suppressed: u64,
+    /// 观察表达式（按 id 覆盖）。**不参与**运行期停止判断。
+    watch_items: Vec<WatchEntry>,
+    /// 上一次轮询的观察值（用于计算 `changed`）。
+    watch_last: BTreeMap<u32, WatchValue>,
 }
 
 impl std::fmt::Debug for KernelHost {
@@ -1127,6 +1140,8 @@ impl KernelHost {
             admin_drain_truncated: 0,
             bp_hit_log_last_ps: None,
             bp_hit_log_suppressed: 0,
+            watch_items: Vec::new(),
+            watch_last: BTreeMap::new(),
         };
         // The default memory map cannot fail on a fresh bus (the regions do
         // not overlap and are far below the per-region budget). If it ever
@@ -2304,6 +2319,7 @@ impl KernelHost {
             CommandPayload::LoadProject(project) => self.on_load_project(project),
             CommandPayload::Continue => self.on_run(None),
             CommandPayload::StepN { n } => self.on_run(Some(n)),
+            CommandPayload::StepOver => self.on_step_over(),
             CommandPayload::Pause => self.on_pause(),
             CommandPayload::SetBreakpoint(bp) => match self.backend.set_breakpoint_with_id(bp) {
                 Ok(()) => vec![self.tick()],
@@ -2332,6 +2348,13 @@ impl KernelHost {
                 let _ = self.backend.clear_watchpoint_by_id(id);
                 vec![self.tick()]
             }
+            CommandPayload::SetWatchExpr(expr) => self.on_set_watch_expr(expr),
+            CommandPayload::ClearWatchExpr { id } => {
+                self.watch_items.retain(|item| item.expr.id != id);
+                self.watch_last.remove(&id);
+                vec![self.watch_values_event()]
+            }
+            CommandPayload::ListWatchExprs => vec![self.watch_values_event()],
             CommandPayload::ReadMemory { addr, size } => {
                 match self.backend.read_memory(addr, size) {
                     Ok(value) => vec![EventPayload::MemoryRead { addr, size, value }],
@@ -2848,6 +2871,8 @@ impl KernelHost {
         //   ⇒ ⇒ **界面在骗人**。
         let _ = self.backend.reset();
         self.backend.clear_debug_state();
+        self.watch_items.clear();
+        self.watch_last.clear();
 
         // ---- 第四步：重建平台 ----
         if let Err(err) = self.rebuild_platform() {
@@ -3174,6 +3199,8 @@ impl KernelHost {
         // ---- ① 清**运行态**（寄存器 / 事件队列 / 断点 / 观察点）----
         let _ = self.backend.reset();
         self.backend.clear_debug_state();
+        self.watch_items.clear();
+        self.watch_last.clear();
 
         // ---- ② 新会话 ⇒ 订阅全部失效（前端**必须重订**）----
         self.topics.clear();
@@ -3363,6 +3390,16 @@ impl KernelHost {
 
     /// 执行一批指令（`None` = 跑到停止条件，`Some(n)` = 恰好 n 条）。
     fn on_run(&mut self, steps: Option<u32>) -> Vec<EventPayload> {
+        self.on_run_inner(steps, false)
+    }
+
+    /// **步过**：后端识别调用并注入临时断点，宿主把它当作一次「一步」的
+    /// 运行窗口收尾（事件、tick、波形、停下原因完全同一套）。
+    fn on_step_over(&mut self) -> Vec<EventPayload> {
+        self.on_run_inner(Some(1), true)
+    }
+
+    fn on_run_inner(&mut self, steps: Option<u32>, step_over: bool) -> Vec<EventPayload> {
         // 运行期**重试**装探针回调（V-A 检视 · 🟡-7）。
         //
         // 装配那一刻外设可能正被总线派发路径占用（`try_borrow_mut` 失败）
@@ -3389,13 +3426,17 @@ impl KernelHost {
         //
         // 两条路径共用同一个执行器（`m17_backend::IssExecutor`），所以
         // 「按指令跑」与「按时间跑」不会各自长出一套 ISS 逻辑（D-07）。
-        let run = match steps {
-            Some(n) => self.step_in_chunks(n),
-            // ⚠️ **`Continue` 分支就是看门狗的接线落点**（规格 §3.3）：
-            // 一次 `continue_until_event` = **一个**检查窗口 ⇒ 停滞时
-            // **不立即上抛**，而是**记一次窗口** ⇒ 连续三个窗口无进展才触发
-            // 处置（裁决 G）。
-            None => self.run_continue_windows(),
+        let run = if step_over {
+            self.backend.step_over().map(|_| ())
+        } else {
+            match steps {
+                Some(n) => self.step_in_chunks(n),
+                // ⚠️ **`Continue` 分支就是看门狗的接线落点**（规格 §3.3）：
+                // 一次 `continue_until_event` = **一个**检查窗口 ⇒ 停滞时
+                // **不立即上抛**，而是**记一次窗口** ⇒ 连续三个窗口无进展才触发
+                // 处置（裁决 G）。
+                None => self.run_continue_windows(),
+            }
         };
         match run {
             Ok(()) => {}
@@ -3436,7 +3477,7 @@ impl KernelHost {
             // `Continue` 跑到预算上限也是一个合法的停止条件（契约里
             // 最接近的取值是 `EndOfExecution`）；`StepN` 跑满 n 条是
             // **正常完成**，不是停止。
-            if steps.is_none() {
+            if steps.is_none() && !step_over {
                 Some(HaltReason::EndOfExecution)
             } else {
                 None
@@ -3451,7 +3492,81 @@ impl KernelHost {
             }
             events.push(EventPayload::Halted { reason, pc });
         }
+        // 停下（或本窗口跑完）之后轮询一次观察表达式：值变化 / 求值期
+        // 错误都在同一个回执里带回。设置 / 列表命令也会走同一个方法。
+        if !self.watch_items.is_empty() {
+            let watch = self.watch_values_event();
+            events.push(watch);
+        }
         events
+    }
+
+    /// 设置 / 覆盖一条观察表达式。**语法非法 ⇒ 表不变**。
+    fn on_set_watch_expr(&mut self, expr: WatchExpr) -> Vec<EventPayload> {
+        let target = match WatchTarget::parse(&expr.expr) {
+            Ok(target) => target,
+            Err(err) => {
+                return vec![self.error_from(&PlatformError::new(
+                    DEBUG_FAMILY,
+                    E_DBG_02_CONDITION_INVALID,
+                    err.message(),
+                ))];
+            }
+        };
+        if let Some(item) = self
+            .watch_items
+            .iter_mut()
+            .find(|item| item.expr.id == expr.id)
+        {
+            item.expr = expr;
+            item.target = target;
+        } else {
+            self.watch_items.push(WatchEntry { expr, target });
+        }
+        vec![self.watch_values_event()]
+    }
+
+    /// 对全部观察表达式求值一次，并计算 `changed`。
+    ///
+    /// 内存表达式走 M-17 的 `read_memory`（最终到 M-14 总线）；该地址当前
+    /// 未映射 ⇒ **该项**带 `error`，其他项照常求值（不让一条坏观察项把整
+    /// 张表打掉）。
+    fn watch_values_event(&mut self) -> EventPayload {
+        let state = match self.backend.snapshot() {
+            Ok(state) => state,
+            Err(err) => return self.error_from(&err),
+        };
+        let mut values = Vec::with_capacity(self.watch_items.len());
+        let mut next = BTreeMap::new();
+        for item in &self.watch_items {
+            let id = item.expr.id;
+            let (value, error) = match item.target.value(&state) {
+                Some(v) => (Some(v), None),
+                None => match item.target.address(&state) {
+                    Some(addr) => match self.backend.read_memory(addr, WriteSize::Word) {
+                        Ok(v) => (Some(v), None),
+                        Err(err) => (None, Some(format!("读取 0x{addr:08x} 失败：{err}"))),
+                    },
+                    None => (None, Some("无法解析出观察地址".to_string())),
+                },
+            };
+            let previous = self.watch_last.get(&id);
+            let changed = match previous {
+                Some(prev) => prev.value != value || prev.error != error,
+                None => true,
+            };
+            let value_dto = WatchValue {
+                id,
+                expr: item.expr.expr.clone(),
+                value,
+                error,
+                changed,
+            };
+            next.insert(id, value_dto.clone());
+            values.push(value_dto);
+        }
+        self.watch_last = next;
+        EventPayload::WatchValues { values }
     }
 
     /// 写一条「命中断点」日志，**≥1s 限频**。
@@ -3478,14 +3593,9 @@ impl KernelHost {
             format!("命中断点：pc=0x{pc:08x}（限频窗口内另有 {suppressed} 次命中未记日志）")
         };
         let t_host_ms = self.host_now_ms();
-        self.log_buffer.borrow_mut().log(
-            LogLevel::Info,
-            "breakpoint",
-            &msg,
-            "",
-            now_ps,
-            t_host_ms,
-        );
+        self.log_buffer
+            .borrow_mut()
+            .log(LogLevel::Info, "breakpoint", &msg, "", now_ps, t_host_ms);
     }
 
     /// 跑 `n` 条指令，**按指令预算分块**（`DEFAULT_INSTRUCTION_BUDGET`）。

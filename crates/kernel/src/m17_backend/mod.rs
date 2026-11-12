@@ -49,7 +49,7 @@ use crate::m12_engine::{
     TIME_QUANTUM_PS,
 };
 use crate::m13_iss::csr::{csr_read, csr_read_with_time, csr_write};
-use crate::m13_iss::{enter_trap, write_gpr, Iss, StepOutcome};
+use crate::m13_iss::{enter_trap, write_gpr, Decoder, Iss, StepOutcome};
 use crate::m14_bus::{AccessDir, Bus, BusWidth, BUS_FAMILY};
 use crate::m16_interrupt::{InterruptPort, PendingIntr};
 
@@ -695,6 +695,34 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
     /// Borrow the memory bus (M-14) mutable.
     pub fn bus_mut(&mut self) -> &mut Bus {
         &mut self.bus
+    }
+
+    /// **步过**当前调用：若当前指令是 `jal` / `jalr` 且写 `ra`，就在返回地址
+    /// 注入**临时断点**，一直跑到它命中（或陷阱 / 观察点 / 暂停先到），
+    /// 然后**无论怎么停都把临时断点删掉**。
+    ///
+    /// 非调用指令 ⇒ **恰好执行一条**（与普通单步同口径）。
+    ///
+    /// ⚠️ 返回地址已有用户断点 ⇒ **复用**那条，不新建、也不在收尾时删除
+    /// （`set_temporary` 返回 `None`）。
+    ///
+    /// ⚠️ 返回地址 = `pc + 指令长度`，长度来自 M-13 解码（压缩指令是 2）。
+    pub fn step_over(&mut self) -> Result<u32, PlatformError> {
+        let pc = self.engine.pc();
+        let raw = self.bus.peek_fetch_instruction(pc)?;
+        let decoded = Decoder::default().decode(raw, pc);
+        let is_call = decoded.rd == 1 && (decoded.opcode == 0x6f || decoded.opcode == 0x67);
+        if !is_call {
+            return self.step_n(1);
+        }
+        let return_pc = pc.wrapping_add(u32::from(decoded.len));
+        let temporary = self.breakpoints.set_temporary(return_pc)?;
+        let run = self.step_n(u32::MAX);
+        if let Some(id) = temporary {
+            // 清理错误不能盖掉真正的运行结果：先清，再原样返回 run。
+            let _ = self.breakpoints.clear(id)?;
+        }
+        run
     }
 
     /// Why the last step batch stopped, if it stopped for a reason other
@@ -2769,6 +2797,60 @@ mod tests {
             guest_csr(&backend, CSR_MIP),
             1 << 11,
             "读不到挂起线时 `mip` **不得**被改写（读失败 ≠ 没有挂起）"
+        );
+    }
+    #[test]
+    fn step_over_runs_through_a_call_and_removes_the_temporary_breakpoint() {
+        // 0x00: jal ra, +0x10  → 0x10
+        // 0x04: nop            ← 返回地址（临时断点在这里）
+        // 0x08: nop
+        // 0x0c: nop
+        // 0x10: ret            → ra = 0x04
+        let mut program = vec![0u8; 0x14];
+        program[0..4].copy_from_slice(&0x0100_00efu32.to_le_bytes());
+        program[4..8].copy_from_slice(&0x0000_0013u32.to_le_bytes());
+        program[8..12].copy_from_slice(&0x0000_0013u32.to_le_bytes());
+        program[12..16].copy_from_slice(&0x0000_0013u32.to_le_bytes());
+        program[16..20].copy_from_slice(&0x0000_8067u32.to_le_bytes());
+
+        let mut backend = backend_with_program(&program);
+        let reads_before = backend.bus.stats().reads;
+        let executed = backend.step_over().expect("step over");
+        assert_eq!(executed, 2, "只执行 call 与 ret 两条");
+        assert_eq!(
+            backend.bus.stats().reads,
+            reads_before + 2,
+            "stepOver 的指令窥视不能计入 guest 的取指次数"
+        );
+        assert_eq!(backend.snapshot().expect("snapshot").pc, 0x04);
+        assert_eq!(backend.last_stop_reason(), Some(HaltReason::Breakpoint));
+        assert!(
+            backend.breakpoints.get_by_addr(0x04).is_none(),
+            "stepOver 注入的临时断点必须在停下后移除"
+        );
+    }
+
+    #[test]
+    fn step_over_keeps_a_user_breakpoint_at_the_return_address() {
+        let mut program = vec![0u8; 0x14];
+        program[0..4].copy_from_slice(&0x0100_00efu32.to_le_bytes());
+        program[4..8].copy_from_slice(&0x0000_0013u32.to_le_bytes());
+        program[16..20].copy_from_slice(&0x0000_8067u32.to_le_bytes());
+        let mut backend = backend_with_program(&program);
+        backend
+            .set_breakpoint_with_id(Breakpoint {
+                id: 7,
+                addr: 0x04,
+                source_hint: None,
+                enabled: true,
+                condition: None,
+            })
+            .expect("set breakpoint");
+        backend.step_over().expect("step over");
+        assert_eq!(backend.snapshot().expect("snapshot").pc, 0x04);
+        assert!(
+            backend.breakpoints.get_by_addr(0x04).is_some(),
+            "用户自己的返回地址断点不能被 stepOver 的清场带走"
         );
     }
 }

@@ -1265,6 +1265,8 @@ export function debuggerDraft() {
         // ⚠️ **步数草稿也住这里**（v0.63 批）⇒ ⇒ 渲染会重建 DOM ⇒ ⇒ 草稿住在
         //   DOM 里会被清空 ⇒ ⇒ 用户填的步数**必须**在视图状态里。
         stepCount: String(s.stepCount ?? DEFAULT_STEP_COUNT),
+        // 契约 v14：观察表达式草稿（同一规矩：重渲染不丢）。
+        watchExpr: String(s.watchExpr ?? ""),
     };
 }
 
@@ -1477,6 +1479,9 @@ function mountAddrInputListeners(el) {
         if (target?.closest?.("[data-step-count-input]")) {
             setDebuggerDraft({ stepCount: target.value ?? "" });
         }
+        if (target?.closest?.("[data-watch-expr-input]")) {
+            setDebuggerDraft({ watchExpr: target.value ?? "" });
+        }
     });
     el.addEventListener("change", (ev) => {
         const target = ev.target?.closest?.("[data-mem-size]");
@@ -1609,6 +1614,8 @@ const debugView = register({
         const bpHits = debug.bpHits && typeof debug.bpHits === "object"
             ? debug.bpHits
             : {};
+        // 契约 v14：观察表达式的轮询回执（`WatchValue` 列表）。
+        const watchValues = Array.isArray(debug.watchValues) ? debug.watchValues : [];
         // ⚠️ **符号查询的答复**（一次查询的答复 ⇒ ⇒ 推导量 ⇒ ⇒ 只住视图
         //   状态、**不持久化**）。
         const symbolResult = debug.symbol ?? null;
@@ -1704,6 +1711,29 @@ const debugView = register({
                         }).join("")}</div>`}
                     <p class="muted">这里列的是<strong>内核断点表</strong>（契约 v13 的 <code>ListBreakpoints</code> 回执）—— 点「刷新内核断点表」可把脚本口设的断点也读回来。命中次数来自内核的命中计数。</p>
                 </section>
+                <section class="card watch-card">
+                    <div class="row"><h3>观察表达式</h3><span class="tag">${watchValues.length} 项</span><button type="button" data-action="list-watch-exprs">刷新</button></div>
+                    <div class="card-actions">
+                        <input type="text" value="${escapeHtml(draft.watchExpr)}" placeholder="pc / x1 / 0x80000000 / @x2+4" spellcheck="false" autocomplete="off" data-watch-expr-input>
+                        <button type="button" data-action="set-watch-expr">添加观察</button>
+                    </div>
+                    ${watchValues.length === 0
+                        ? `<p class="muted">尚无观察项 — 支持 <code>pc</code>、<code>xN</code>、<code>0x...</code> 地址、<code>@x2+4</code> 或 <code>[pc-4]</code>。停下后自动轮询。</p>`
+                        : `<div class="watch-list">${watchValues.map((item) => {
+                            const value = item?.value;
+                            const text = value === null || value === undefined
+                                ? "—"
+                                : `0x${(Number(value) >>> 0).toString(16).padStart(8, "0")}`;
+                            const error = item?.error ? `<span class="note">${escapeHtml(String(item.error))}</span>` : "";
+                            return `<div class="watch-row" data-watch-row data-watch-id="${Number(item?.id ?? 0)}" data-watch-changed="${item?.changed === true ? "true" : "false"}">
+                                <code>${escapeHtml(String(item?.expr ?? ""))}</code>
+                                <code class="addr">${text}</code>
+                                ${item?.changed === true ? `<span class="tag">变化</span>` : ""}
+                                ${error}
+                                <button type="button" data-action="clear-watch-expr" data-id="${Number(item?.id ?? 0)}">删除</button>
+                            </div>`;
+                        }).join("")}</div>`}
+                </section>
                 <section class="card trace-export">
                     <div class="row"><h3>trace 记录 / 导出 (M-11 / M-19)</h3></div>
                     <div class="card-actions">
@@ -1764,6 +1794,16 @@ const debugView = register({
             const box = el?.closest?.("[data-step-count-box]");
             const raw = String(box?.querySelector?.("[data-step-count-input]")?.value ?? "");
             return emitCommand("step-n", "debug", { steps: raw });
+        }
+        if (action === "set-watch-expr") {
+            const input = el?.closest?.(".card")?.querySelector?.("[data-watch-expr-input]");
+            return emitCommand("set-watch-expr", "debug", { expr: String(input?.value ?? "") });
+        }
+        if (action === "clear-watch-expr") {
+            return emitCommand("clear-watch-expr", "debug", { id: el?.getAttribute?.("data-id") });
+        }
+        if (action === "list-watch-exprs") {
+            return emitCommand("list-watch-exprs", "debug", {});
         }
         // ⚠️ **任意地址**（STAGE-39 · v0.54 批 · 裁决 B）⇒ ⇒ 地址有两个
         // 来源：按钮**自带** `data-addr`（反汇编行的旧按钮 ⇒ ⇒ **一字不变**）

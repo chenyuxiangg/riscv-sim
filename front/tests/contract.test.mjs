@@ -382,11 +382,15 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Command.loadProject({})),
             variantOf(Command.continueRun()),
             variantOf(Command.stepN(1)),
+            variantOf(Command.stepOver()),
             variantOf(Command.pause()),
             variantOf(Command.setBreakpoint({})),
             variantOf(Command.clearBreakpoint(1)),
             variantOf(Command.setWatchpoint({})),
             variantOf(Command.clearWatchpoint(1)),
+            variantOf(Command.setWatchExpr({})),
+            variantOf(Command.clearWatchExpr(1)),
+            variantOf(Command.listWatchExprs()),
             variantOf(Command.readMemory(0, "Word")),
             variantOf(Command.writeMemory(0, "Word", 0)),
             variantOf(Command.readRegisters(0, 1)),
@@ -463,6 +467,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Event.platformTemplate({})),
             // 契约 v13 新增：内核断点表的只读回执。
             variantOf(Event.breakpoints([])),
+            // 契约 v14 新增：观察表达式轮询回执。
+            variantOf(Event.watchValues([])),
         ].sort();
         assert.deepEqual(js, rust, "JS 事件变体与 Rust EventPayload 不一致");
     });
@@ -538,11 +544,15 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 LoadProject: Command.loadProject({}),
                 Continue: Command.continueRun(),
                 StepN: Command.stepN(1),
+                StepOver: Command.stepOver(),
                 Pause: Command.pause(),
                 SetBreakpoint: Command.setBreakpoint({}),
                 ClearBreakpoint: Command.clearBreakpoint(1),
                 SetWatchpoint: Command.setWatchpoint({}),
                 ClearWatchpoint: Command.clearWatchpoint(1),
+                SetWatchExpr: Command.setWatchExpr({ id: 1, expr: "pc" }),
+                ClearWatchExpr: Command.clearWatchExpr(1),
+                ListWatchExprs: Command.listWatchExprs(),
                 ReadMemory: Command.readMemory(0, "Word"),
                 WriteMemory: Command.writeMemory(0, "Word", 0),
                 ReadRegisters: Command.readRegisters(0, 1),
@@ -626,6 +636,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 // ⚠️ **契约 v13**（M-08 断点表查询 / 使能批）⇒ ⇒ 字段名
                 //   逐字比对的登记处（`breakpoints`）。
                 Breakpoints: Event.breakpoints([]),
+                // ⚠️ **契约 v14**（stepOver / 观察表达式批）⇒ ⇒ 字段名
+                //   逐字比对的登记处（`values`）。
+                WatchValues: Event.watchValues([]),
             },
         };
 
