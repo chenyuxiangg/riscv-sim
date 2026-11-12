@@ -268,40 +268,6 @@ export function pendingImage() {
 }
 
 /**
- * 把本地持久化的记录恢复成「已选择」状态（刷新后使用）。
- *
- * ⚠️ 只恢复 **pending**，不自动发 `LoadProject`：刷新后内核里装的是
- * 启动时的 mock 工程；若这里直接标成“已装载”，界面就在骗人。用户点
- * 「加载固件」后才真正进内核。
- *
- * @param {{name?: string, kind?: string, bytes?: number[]}|null} record
- * @returns {{status: "idle", name: string, byteLength: number, error: null, pending: object}|null}
- */
-export function imageLoadStateFromRecord(record) {
-    const bytes = Array.isArray(record?.bytes) ? Array.from(record.bytes) : [];
-    if (bytes.length === 0) return null;
-    const name = String(record?.name ?? "").trim() || "image.bin";
-    if (isIhexFile(name)) return null;
-    let kind;
-    if (record?.kind === IMAGE_KINDS.Elf || record?.kind === IMAGE_KINDS.RawHex) {
-        kind = record.kind;
-    } else {
-        try {
-            kind = imageKindFor(name);
-        } catch {
-            return null;
-        }
-    }
-    return {
-        status: "idle",
-        name,
-        byteLength: bytes.length,
-        error: null,
-        pending: { bytes, name, kind },
-    };
-}
-
-/**
  * 读用户选的文件 ⇒ 存成「待加载的镜像」。
  *
  * ⚠️ **读失败如实显示**（规格 §3 裁决 J）⇒ ⇒ 不静默。
