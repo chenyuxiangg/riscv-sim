@@ -328,10 +328,14 @@ describe("WASM 传输宿主 · 帧 → 消息 → 帧", () => {
         const host = createWasmWorker("init-fail");
         host.send(commandFrame("Nop", { reqId: 12 }));
         await host.waitFor(() => host.frames().length >= 1);
-        // ⚠️ **并行时序**：node --test 全量并发时 150ms 偶发不够等齐所有
-        // 帧（在飞命令帧 + 启动级帧）⇒ ⇒ 放宽到 500ms（判据语义不变：
-        // 「所有帧里只有一种文案」）。
-        await new Promise((r) => setTimeout(r, 500));
+        // ⚠️ **并行时序**：全量门禁并发时固定 500ms 偶发不够等齐
+        // 「在飞命令帧 + 启动级帧」⇒ ⇒ 改成等**带 reqId 12 的那一帧**
+        // 真正到达（判据语义不变：所有帧里只有一种文案）。
+        await host.waitFor(
+            () => host.frames().some((f) => f.reqId === 12),
+            10000,
+        );
+        await new Promise((r) => setTimeout(r, 50));
 
         const frames = host.frames();
         const messages = frames.map(

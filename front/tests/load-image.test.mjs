@@ -883,3 +883,38 @@ describe("实现唯一性（⛔ 不许有第二份）", () => {
         );
     });
 });
+
+describe("刷新后恢复镜像选择", () => {
+    test("持久化记录恢复成 idle + pending，状态是“已选择”", () => {
+        const state = loader.imageLoadStateFromRecord({
+            key: "last",
+            name: RAW_NAME,
+            kind: "RawHex",
+            byteLength: RAW_BYTE_LENGTH,
+            bytes: [...RAW_BYTES],
+        });
+        assert.equal(state.status, "idle");
+        assert.equal(state.name, RAW_NAME);
+        assert.equal(state.byteLength, RAW_BYTE_LENGTH);
+        assert.deepEqual(state.pending.bytes, [...RAW_BYTES]);
+        assert.equal(state.pending.kind, "RawHex");
+        assert.equal(loader.imageLoadDecision(state).kind, "load");
+    });
+
+    test("空字节 / 坏文件名 / 缺记录都返回 null（不假装恢复成功）", () => {
+        assert.equal(loader.imageLoadStateFromRecord(null), null);
+        assert.equal(
+            loader.imageLoadStateFromRecord({ name: "x.bin", bytes: [], kind: "RawHex" }),
+            null,
+        );
+        assert.equal(
+            loader.imageLoadStateFromRecord({ name: "x.hex", bytes: [1], kind: "Hex" }),
+            null,
+        );
+        assert.equal(
+            loader.imageLoadStateFromRecord({ name: "x.hex", bytes: [1], kind: "RawHex" }),
+            null,
+            "IHEX 文件名即使带合法 kind 也不能从持久化恢复",
+        );
+    });
+});
