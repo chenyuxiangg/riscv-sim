@@ -60,17 +60,11 @@ import {
     describeImageLoadShort,
     IMAGE_ENTRY_FROM,
     imageLoadDecision,
-    imageLoadStateFromRecord,
     loadImageFileIntoPending,
-    pendingImage,
     publishProductState,
     renderImageLoaderControl,
     setImageLoadState,
 } from "./views/components/image-loader.js";
-import {
-    createImageStore,
-    createIndexedDbImageBackend,
-} from "./services/m23_image_store.js";
 import { buildMockProject } from "./dev/mock-project.js";
 import { buildDemoStoreState, seedDemoState } from "./dev/demo-state.js";
 // ⚠️ **波形边沿的纯函数**（STAGE-36 · v0.51 批）⇒ ⇒ 累加与截断**剥成纯函数**
@@ -241,19 +235,7 @@ export function wireTopbarImageLoader(services) {
     fileInput?.addEventListener("change", (ev) => {
         const file = ev.target?.files?.[0] ?? null;
         if (!file) return;
-        void loadImageFileIntoPending(file).then(async () => {
-            const selected = pendingImage();
-            if (!selected) return;
-            const store = services?.imageStore;
-            if (!store?.supported) return;
-            try {
-                await store.save(selected);
-            } catch (err) {
-                setNote(`固件已选择，但刷新后无法恢复：${err?.message ?? err}`);
-            }
-        }).catch((err) => {
-            setNote(`读取固件失败：${err?.message ?? err}`);
-        });
+        void loadImageFileIntoPending(file);
     });
     // ⚠️⚠️ **同一个文件重选要能再次触发 `change`**（v0.59 批 · 用户报的现象
     // 「复位后无法再运行」的第二段）。
@@ -317,27 +299,6 @@ export function wireTopbarImageLoader(services) {
         window.addEventListener("riscv:render", syncTopbarImageBrief);
     }
     syncTopbarImageBrief();
-}
-
-/**
- * 刷新后恢复上次选中的镜像为 `pending`。
- *
- * ⚠️ 只恢复选择状态，**不自动发 `LoadProject`**：启动时内核装的是 mock
- * 工程；若这里标成“已装载”，界面就会说假话。用户点「加载固件」后再进内核。
- *
- * @param {{supported: boolean, load: Function}|null} imageStore
- */
-async function restoreImageSelection(imageStore) {
-    if (!imageStore?.supported) return;
-    try {
-        const record = await imageStore.load();
-        const restored = imageLoadStateFromRecord(record);
-        if (!restored) return;
-        setImageLoadState(restored);
-        publishProductState();
-    } catch (err) {
-        setNote(`刷新后恢复固件失败：${err?.message ?? err}`);
-    }
 }
 
 /**
@@ -3663,10 +3624,6 @@ async function bootstrap() {
         if (board.reason) setNote(board.reason);
     }
 
-    // 镜像持久化：只存“上次选中的镜像”，刷新后恢复为 pending；
-    // 不自动重装内核（见 `restoreImageSelection`）。
-    const imageStore = createImageStore(createIndexedDbImageBackend());
-
     const pending = {
         components: componentsPromise,
         workspace: workspacePromise,
@@ -3706,16 +3663,12 @@ async function bootstrap() {
         templates: templatesBridge,
         // ⚠️ 板档案的**存储实例**（可能是 `null` ⇒ 「只存在于本会话」）。
         boardStore: board.store,
-        // ⚠️ 镜像持久化（刷新后恢复“已选择”状态）。
-        imageStore,
     };
     exposeImageLoader(services);
     // ⚠️ **页头的「加载固件」入口**（STAGE-33）⇒ ⇒ 必须在这里挂（`services`
     // 要用）⇒ ⇒ 它的按钮走**同一个** `handleLoadImageCommand` ⇒ ⇒ 一条
     // 装载路径。
     wireTopbarImageLoader(services);
-    // 刷新后恢复上次选中的镜像；只恢复 pending，不自动装载。
-    await restoreImageSelection(imageStore);
     // ⚠️ **顶栏那条全局运行条**（STAGE-34 · v0.49 批）⇒ ⇒ 三个按钮直接调
     // `handleCommand` ⇒ ⇒ 与调试视图那份**共用同一条命令路径**。
     wireTopbarRunbar(services);
