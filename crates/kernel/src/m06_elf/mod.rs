@@ -9,7 +9,8 @@
 //!     DWARF line-table programs).
 //!   - parse Raw `bytes` at a caller-provided base.
 //!   - parse Intel HEX text (with 0x02 / 0x04 extended-address records,
-//!     06-2 / 06-4).
+//!     06-2 / 06-4). **Library-only**: the contract `ImageKind` has no
+//!     `Hex` variant and the product load path rejects `.hex` / `.ihex`.
 //!   - enforce `parseLimit` (ELF ≤16 MiB, segment ≤64, …) up front, so
 //!     a pathological host file never reaches M-14 / M-18.
 //!   - On success: return `LoadImage { segments, entry, debug_sections }`.
@@ -18,10 +19,12 @@
 //!
 //! ## Image-kind detection
 //!
-//! The host should call [`detect_kind_with_hint`]: the **magic bytes**
-//! decide, and the file extension is only a secondary hint. An unknown
-//! extension is treated as a raw blob rather than being assumed to be an
-//! ELF (D-21) — a raw blob is the only interpretation that cannot be
+//! [`detect_kind_with_hint`] is a **library helper**: magic bytes decide,
+//! the extension is only a hint. The current host does **not** call it —
+//! it routes by the contract `ImageKind` (`Elf` / `RawHex`), and the
+//! front end rejects `.hex` / `.ihex` before a project is built. An
+//! unknown extension is treated as a raw blob rather than assumed to be
+//! an ELF (D-21) — a raw blob is the only interpretation that cannot be
 //! wrong for an arbitrary byte sequence.
 //!
 //! DWARF line-table parsing is out of scope (M-5 / M-11). The
@@ -37,7 +40,7 @@
 //!
 //! | code    | name               | meaning                                       |
 //! | ------- | ------------------ | --------------------------------------------- |
-//! | LDR-01  | malformed          | bad ELF magic / class / version / machine; HEX checksum mismatch; unknown record type; missing EOF; malformed section table |
+//! | LDR-01  | malformed          | bad ELF magic / class / version / machine; HEX checksum mismatch; unknown record type; missing EOF; malformed section table; overlapping load segments |
 //! | LDR-02  | parse-limit        | file > 16 MiB, >64 segments, record byte count >0xFF, debug sections > `debug_section_bytes`, etc. |
 //! | LDR-03  | address-overflow   | paddr + memsz crosses 4 GiB; HEX extended+local base overflow |
 //! | LDR-04  | out-of-bus         | segment mapped outside the [0, 4 GiB) bus window (currently aliased to LDR-03) |
@@ -84,6 +87,42 @@ pub struct LoadImage {
     pub elf_isa: ElfIsaFacts,
 }
 
+/// Sort the output segments by physical address and reject any overlap.
+///
+/// The public [`LoadImage`] contract promises `segments` sorted by `paddr`;
+/// the load path also needs a single, explicit overlap policy.  Adjacent
+/// ranges (`prev.end == next.base`) are allowed; any intersection is
+/// `E_LDR-01` — including a repeated same-base record.
+pub(crate) fn sort_and_check_no_overlap(
+    segments: &mut [(u32, Vec<u8>)],
+) -> Result<(), PlatformError> {
+    segments.sort_by_key(|(base, _)| *base);
+    let mut prev: Option<(u64, u64)> = None;
+    for (base, data) in segments.iter() {
+        if data.is_empty() {
+            continue;
+        }
+        let start = *base as u64;
+        let end = start
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| PlatformError::new(ErrorFamily::Loader, 3, "segment end overflow"))?;
+        if let Some((prev_start, prev_end)) = prev {
+            if start < prev_end {
+                return Err(PlatformError::new(
+                    ErrorFamily::Loader,
+                    1,
+                    format!(
+                        "overlapping load segments: [0x{prev_start:08x}..0x{prev_end:08x}) \
+                         and [0x{start:08x}..0x{end:08x})"
+                    ),
+                ));
+            }
+        }
+        prev = Some((start, end));
+    }
+    Ok(())
+}
+
 /// ELF 头的 RISC-V ISA 事实（v0.75 · STAGE-51 · D-175 的 F）。
 ///
 /// ⚠️ `EF_RISCV_RVC = 1`（`e_flags` 的第 0 位）⇒ ⇒ 唯一能从这个 ELF32
@@ -114,7 +153,8 @@ impl Default for LoadImage {
 pub enum Kind {
     /// ELF file (RISC-V).
     Elf,
-    /// Intel HEX text (IHEX).
+    /// Intel HEX text (IHEX). **Library-only**: the contract cannot
+    /// express it and the product entry rejects `.hex` / `.ihex`.
     Hex,
     /// Raw binary blob (caller supplies a base address).
     RawHex,
@@ -153,7 +193,8 @@ pub struct ParseLimits {
     pub hex_size: usize,
     /// Maximum raw-binary file size in bytes (default 16 MiB).
     pub raw_size: usize,
-    /// Maximum number of PT_LOAD segments (default 64).
+    /// Maximum number of output load segments (default 64). One ELF
+    /// `PT_LOAD` with a `.bss` tail can produce two output segments.
     pub segment_count: u32,
     /// Maximum number of DWARF symbol-table entries (default 1e5).
     pub symbol_count: u32,

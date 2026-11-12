@@ -365,7 +365,16 @@ describe("固件加载器 · 纯逻辑", () => {
     test("未知扩展名 ⇒ RawHex（**不**猜 ELF）", () => {
         assert.equal(loader.imageKindFor("demo-user.bin"), "RawHex");
         assert.equal(loader.imageKindFor("demo-user"), "RawHex");
-        assert.equal(loader.imageKindFor("demo-user.hex"), "RawHex");
+    });
+
+    test("`.hex` / `.ihex` ⇒ 明确拒绝（IHEX 不是产品能力）", () => {
+        for (const name of ["demo-user.hex", "demo-user.ihex"]) {
+            assert.throws(
+                () => loader.imageKindFor(name),
+                /暂不支持 IHEX/,
+                `${name} 不应被静默当成 RawHex`,
+            );
+        }
     });
 
     test("字节 ⇒ 工程（`ImageSource::Bytes` 同形 + `isa` 是 RV32IMC）", () => {
@@ -528,15 +537,21 @@ describe("加载入口 · **只有一个**（v0.58 批）", () => {
         assert.ok(panel.querySelector("[data-image-load-status]"), "产品视图里没有加载状态块");
     });
 
-    test("选择器接受 `.elf` / `.hex` / `.bin`", async () => {
+    test("选择器接受 `.elf` / `.bin` / `.raw`，且**不接受** `.hex`", async () => {
         await setup();
         mountTopbar(makeServices({}));
         const input = dom.document.querySelector('input[data-image-load-from="topbar"]');
         const accept = String(input.getAttribute("accept") ?? "");
-        for (const ext of [".elf", ".hex", ".bin"]) {
+        for (const ext of [".elf", ".bin", ".raw"]) {
             assert.ok(
                 accept.includes(ext),
                 `accept 属性缺 ${ext}（实测 "${accept}"）`,
+            );
+        }
+        for (const ext of [".hex", ".ihex"]) {
+            assert.ok(
+                !accept.includes(ext),
+                `accept 属性仍在宣称支持 ${ext}（实测 "${accept}"）`,
             );
         }
     });
@@ -577,6 +592,19 @@ describe("页头 · 选文件 ⇒ ⇒ 真的装载", () => {
         const brief = topbarBrief();
         assert.equal(brief.status, "error", "读文件失败时状态应是 error");
         assert.ok(brief.text.includes("模拟的读取失败"), `状态条没显示失败原因：${brief.text}`);
+    });
+
+    test("选 `.hex` ⇒ ⇒ 明确报 IHEX 不支持（⛔ 不静默当 RawHex）", async () => {
+        await setup();
+        mountTopbar(makeServices({}));
+        await selectFileInTopbar("demo-user.hex", RAW_BYTES);
+        const brief = topbarBrief();
+        assert.equal(brief.status, "error", "IHEX 应直接报错");
+        assert.ok(
+            brief.text.includes("IHEX"),
+            `状态条没有说清是 IHEX 不支持：${brief.text}`,
+        );
+        assert.equal(loader.pendingImage(), null, "不支持的 IHEX 不应进入 pending");
     });
 
     test("点「加载固件」⇒ ⇒ **真的** `LoadProject` 上线（⛔ 不是假按钮）", async () => {

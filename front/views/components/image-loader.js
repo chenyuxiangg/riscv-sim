@@ -28,8 +28,9 @@
 // 「继续」命令⇒ ⇒ 跑不跑由用户自己点。
 //
 // ⚠️ **镜像类型只认契约层有的两个变体**（`Elf` / `RawHex`）⇒ ⇒ M-06 那
-// 第三种 IHEX（`Kind::Hex`）**在契约层表达不了**⇒ ⇒ 本模块**不假装支持**
-// （规格 §8 订正 1）。
+// 第三种 IHEX（`Kind::Hex`）**在契约层表达不了**⇒ ⇒ 2026-11-12 定案
+// 「IHEX 先不做」⇒ ⇒ 产品入口**明确拒绝** `.hex` / `.ihex`（⛔ 不静默
+// 当 RawHex，规格 §8 订正 1）。
 
 import { escapeHtml } from "../../lib/escape.js";
 import * as viewStore from "../m03_viewstore.js";
@@ -46,6 +47,27 @@ export const IMAGE_KINDS = Object.freeze({
     Elf: "Elf",
     RawHex: "RawHex",
 });
+
+/**
+ * IHEX 不在产品能力范围内（2026-11-12 定案）：契约层没有 `Hex` 变体，
+ * 宿主也不接 `hex::parse`。`.hex` / `.ihex` 必须显式拒绝，⛔ 不能静默
+ * 落到 `RawHex` 当成原始二进制写进总线。
+ */
+const IHEX_EXTENSIONS = Object.freeze(["hex", "ihex"]);
+const IHEX_UNSUPPORTED_MESSAGE = "暂不支持 IHEX 格式，请使用 ELF 或 Raw/BIN";
+
+/**
+ * 文件名是不是 IHEX（按扩展名判断）。
+ *
+ * @param {string} name
+ * @returns {boolean}
+ */
+export function isIhexFile(name) {
+    const text = String(name ?? "");
+    const dot = text.lastIndexOf(".");
+    const ext = dot >= 0 ? text.slice(dot + 1).toLowerCase() : "";
+    return IHEX_EXTENSIONS.includes(ext);
+}
 
 /**
  * 加载入口的**位置标记**（v0.58 批起**只有一个入口** ⇒ ⇒ 只剩页头这一处）。
@@ -69,20 +91,22 @@ export const IMAGE_ENTRY_FROM = "topbar";
  * ⚠️ **口径必须与 M-06 一致**（规格 §3 裁决 F + §8 订正 1）：M-06 的
  * `kind_from_extension` 把 `.elf` / `.out` 判成 ELF，`.hex` / `.ihex`
  * 判成 **IHEX**（第三种）——而**契约层只有两个变体**⇒ ⇒ IHEX **表达不了**
- * ⇒ ⇒ 这里**不发明第三种**⇒ ⇒ `.hex` 落到 `RawHex`（**如实登记为已知
- * 边界**，不假装支持 IHEX）。
+ * ⇒ ⇒ 产品入口**明确拒绝**（2026-11-12 定案：IHEX 先不做）⇒ ⇒ ⛔ 不再
+ * 静默落到 `RawHex`。
  *
  * ⚠️ **未知扩展名 ⇒ `RawHex`**（不是猜 ELF）——与 M-06 的 `detect_kind`
  * 同一原则（`D-21`）：猜 ELF 会让每个无扩展名的文件都报「bad ELF magic」。
  *
  * @param {string} name — 文件名（含扩展名）
  * @returns {"Elf"|"RawHex"}
+ * @throws {Error} 当文件是 `.hex` / `.ihex`（IHEX 暂不支持）
  */
 export function imageKindFor(name) {
     const text = String(name ?? "");
     const dot = text.lastIndexOf(".");
     const ext = dot >= 0 ? text.slice(dot + 1).toLowerCase() : "";
     if (ext === "elf" || ext === "out") return IMAGE_KINDS.Elf;
+    if (IHEX_EXTENSIONS.includes(ext)) throw new Error(IHEX_UNSUPPORTED_MESSAGE);
     return IMAGE_KINDS.RawHex;
 }
 
@@ -255,6 +279,20 @@ export function pendingImage() {
  * @returns {Promise<void>}
  */
 export async function loadImageFileIntoPending(file) {
+    const fileName = String(file?.name ?? "image.bin");
+    // IHEX 不在产品能力范围内：在读取字节之前就拒绝，别让 `.hex`
+    // 被当成原始二进制写进内存。
+    if (isIhexFile(fileName)) {
+        setImageLoadState({
+            status: "error",
+            name: fileName,
+            byteLength: Number(file?.size ?? 0),
+            error: IHEX_UNSUPPORTED_MESSAGE,
+            pending: null,
+        });
+        publishProductState();
+        return;
+    }
     // ⚠️⚠️ **先写「读取中」**（v0.59 批 · 施工期实测撞到）⇒ ⇒ **这是竞态，
     // 必须在**第一个 `await` **之前**写。
     //
@@ -274,14 +312,14 @@ export async function loadImageFileIntoPending(file) {
     // ⇒ ⇒ `pending`（真字节）仍然要等读完了才有。
     setImageLoadState({
         status: "reading",
-        name: String(file?.name ?? "image.bin"),
+        name: fileName,
         byteLength: Number(file?.size ?? 0),
         error: null,
     });
     publishProductState();
     try {
         const bytes = await readImageFile(file);
-        const name = String(file?.name ?? "image.bin");
+        const name = fileName;
         setImageLoadState({
             status: "idle",
             name,
@@ -384,7 +422,7 @@ export function renderImageLoaderControl(options = {}) {
         <span class="image-loader-control">
             <label class="source-input">
                 ${escapeHtml(label)}
-                <input type="file" accept=".elf,.out,.hex,.ihex,.bin,.raw"
+                <input type="file" accept=".elf,.out,.bin,.raw"
                        data-image-input data-image-load-from="${escapeHtml(IMAGE_ENTRY_FROM)}">
             </label>
             <button type="button" data-action="load-image"
@@ -423,10 +461,11 @@ export function renderImageLoadStatus(state) {
             <p class="muted">
                 ⚠️ **加载入口只有页头那一个**（「加载固件」）⇒ ⇒ 在**任何视图**
                 都能装载；支持 <code>.elf</code> / <code>.out</code>（按 ELF 解析）
-                与 <code>.hex</code> / <code>.bin</code> / <code>.raw</code>
-                （按原始字节解析）⇒ ⇒ 文件在**浏览器里**读成字节后交给内核
+                与 <code>.bin</code> / <code>.raw</code>（按原始字节解析）
+                ⇒ ⇒ 文件在**浏览器里**读成字节后交给内核
                 ⇒ ⇒ **不需要**任何 HTTP 服务；⚠️ 装完**不自动跑**⇒ ⇒ 请自己
-                点「继续」。
+                点「继续」；⚠️ IHEX（<code>.hex</code> / <code>.ihex</code>）
+                暂不支持。
             </p>
         </section>
     `;

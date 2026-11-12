@@ -1184,3 +1184,33 @@ fn b8_an_unmapped_store_traps_with_cause_7() {
         "陷阱处理器必须真的执行过（它把 mcause 存了下来）"
     );
 }
+
+/// 跨镜像装载段重叠：在选板 / 复位之前就拒绝，错误是 `E_LDR-01`。
+#[test]
+fn load_project_rejects_cross_image_overlap_before_board_selection() {
+    let mut host = KernelHost::new();
+    let project = Project {
+        id: "proj-overlap".to_string(),
+        name: "overlap".to_string(),
+        tree: ProductTree::default(),
+        images: vec![
+            ImageRef {
+                name: "a.bin".to_string(),
+                kind: ImageKind::RawHex,
+                source: ImageSource::Bytes(vec![0xAA; 4]),
+            },
+            ImageRef {
+                name: "b.bin".to_string(),
+                kind: ImageKind::RawHex,
+                source: ImageSource::Bytes(vec![0xBB; 4]),
+            },
+        ],
+        version: ProjectVersion::default(),
+    };
+    let events = dispatch(&mut host, CommandPayload::LoadProject(project));
+    assert_eq!(
+        first_error_code(&events),
+        "E_LDR-01",
+        "跨镜像重叠必须在选板之前被拒绝"
+    );
+}

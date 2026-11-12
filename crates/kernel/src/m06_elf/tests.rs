@@ -7,8 +7,8 @@
 //!   - ELF rejection paths: bad magic, bad class, oversize file,
 //!     segment-count overflow, address overflow
 //!   - Raw parser happy + out-of-bus
-//!   - HEX parser: simple, extended linear address, EOF, last-wins
-//!     overwrite, checksum mismatch, malformed lines
+//!   - HEX parser: simple, extended linear address, EOF, overlap reject,
+//!     checksum mismatch, malformed lines
 //!   - Loader trait dispatch + Detect_kind helper
 
 use super::*;
@@ -286,19 +286,44 @@ fn hex_extended_linear_address_applied_to_records() {
 }
 
 #[test]
-fn hex_last_wins_overwrites_same_base() {
-    // Two data records both at local 0x0000 — later bytes win.
+fn hex_rejects_same_base_overlap() {
+    // Two data records both at local 0x0000 — the second overlaps the
+    // first, so the whole image is rejected (no last-wins semantics).
     let text = format!(
         "{}{}{}",
         hex_line(0x0000, 0x00, &[0x00, 0x00, 0x00, 0x00]),
         hex_line(0x0000, 0x00, &[0x11, 0x22, 0x33]),
         hex_line(0x0000, 0x01, &[]),
     );
-    let li = DefaultLoader.load(text.as_bytes(), Kind::Hex).expect("hex");
-    // Final row: [0x11, 0x22, 0x33, 0x00] — last-wins preserves the
-    // earlier 4-byte row's last (zero) byte untouched by the 3-byte
-    // overwrite.
-    assert_eq!(li.segments, vec![(0x0000, vec![0x11, 0x22, 0x33, 0x00])]);
+    let err = DefaultLoader.load(text.as_bytes(), Kind::Hex).unwrap_err();
+    assert_eq!(err.family, ErrorFamily::Loader);
+    assert_eq!(err.scenario, 1, "overlap -> E_LDR-01");
+    assert!(
+        err.message.contains("overlap"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+#[test]
+fn hex_rejects_partial_overlap() {
+    // 0x0000..0x0004 and 0x0002..0x0004 intersect, but are not the
+    // same base and not adjacent. They must be rejected rather than
+    // silently written in sorted order.
+    let text = format!(
+        "{}{}{}",
+        hex_line(0x0000, 0x00, &[0x00, 0x00, 0x00, 0x00]),
+        hex_line(0x0002, 0x00, &[0x11, 0x22]),
+        hex_line(0x0000, 0x01, &[]),
+    );
+    let err = DefaultLoader.load(text.as_bytes(), Kind::Hex).unwrap_err();
+    assert_eq!(err.family, ErrorFamily::Loader);
+    assert_eq!(err.scenario, 1, "overlap -> E_LDR-01");
+    assert!(
+        err.message.contains("overlap"),
+        "unexpected message: {}",
+        err.message
+    );
 }
 
 #[test]
@@ -729,6 +754,12 @@ fn elf_rejects_image_larger_than_the_total_budget() {
 /// paddr. The program-header table sits right after the ELF header and
 /// the shared `.text` follows it.
 fn make_two_segment_elf(memsz1: u32, memsz2: u32) -> Vec<u8> {
+    make_two_segment_elf_at(0, 0x1000, memsz1, memsz2)
+}
+
+/// Same fixture, but with explicit physical addresses so the overlap
+/// and sort checks can be exercised without editing raw ELF bytes.
+fn make_two_segment_elf_at(paddr1: u32, paddr2: u32, memsz1: u32, memsz2: u32) -> Vec<u8> {
     let phnum = 2u16;
     let text_offset = 52 + phnum as usize * 32;
     let mut bytes = Vec::new();
@@ -757,7 +788,7 @@ fn make_two_segment_elf(memsz1: u32, memsz2: u32) -> Vec<u8> {
     bytes[44..46].copy_from_slice(&phnum.to_le_bytes());
 
     // ----- Two program headers -----
-    for (paddr, memsz) in [(0u32, memsz1), (0x1000u32, memsz2)] {
+    for (paddr, memsz) in [(paddr1, memsz1), (paddr2, memsz2)] {
         bytes.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
         bytes.extend_from_slice(&(text_offset as u32).to_le_bytes()); // p_offset
         bytes.extend_from_slice(&paddr.to_le_bytes()); // p_vaddr
@@ -772,6 +803,32 @@ fn make_two_segment_elf(memsz1: u32, memsz2: u32) -> Vec<u8> {
     // ----- .text (one RV32 ADDI x1, x0, 42) -----
     bytes.extend_from_slice(&0x02A0_0093u32.to_le_bytes());
     bytes
+}
+
+#[test]
+fn elf_sorts_segments_by_paddr() {
+    // Program-header order is 0x1000 then 0; the public `LoadImage`
+    // contract says segments are sorted by paddr.
+    let elf = make_two_segment_elf_at(0x1000, 0, 4, 4);
+    let li = DefaultLoader.load(&elf, Kind::Elf).expect("elf parse");
+    assert_eq!(
+        li.segments.iter().map(|(b, _)| *b).collect::<Vec<_>>(),
+        vec![0, 0x1000]
+    );
+}
+
+#[test]
+fn elf_rejects_overlapping_pt_load_segments() {
+    // Two PT_LOADs whose memory ranges intersect (0..8 and 2..10).
+    let elf = make_two_segment_elf_at(0, 2, 8, 8);
+    let err = DefaultLoader.load(&elf, Kind::Elf).unwrap_err();
+    assert_eq!(err.family, ErrorFamily::Loader);
+    assert_eq!(err.scenario, 1, "overlap -> E_LDR-01");
+    assert!(
+        err.message.contains("overlap"),
+        "unexpected message: {}",
+        err.message
+    );
 }
 
 #[test]
