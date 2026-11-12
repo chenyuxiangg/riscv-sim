@@ -1519,7 +1519,6 @@ export async function handleCommand(detail, services) {
                 // `null`**（C-9，不是空串）⇒ ⇒ 无条件断点的语义**一字不变**。
                 const addr = toInt(detail.params?.addr, 0) >>> 0;
                 const condition = normalizeCondition(detail.params?.condition);
-                requestBreakpoint(addr);
                 // ⚠️ **内核错误落在「条件」那一位** ⇒ ⇒ 先记目标位、再发命令。
                 pendingErrorSlot = "cond";
                 writeErrorSlot("cond", "");
@@ -1530,6 +1529,10 @@ export async function handleCommand(detail, services) {
                     enabled: true,
                     condition,
                 }));
+                // ⚠️ **成功之后才落界面列表**：内核可能因地址未对齐 / 地址
+                //   重复 / 条件非法拒绝这条命令 ⇒ ⇒ 先落列表会留下一个内核
+                //   并不存在的断点（界面在骗人）。
+                requestBreakpoint(addr);
                 break;
             }
             case "set-symbol-breakpoint": {
@@ -1542,8 +1545,6 @@ export async function handleCommand(detail, services) {
                 const addr = toInt(detail.params?.addr, 0) >>> 0;
                 const symbol = detail.params?.symbol ? String(detail.params.symbol) : null;
                 const condition = normalizeCondition(detail.params?.condition);
-                requestBreakpoint(addr);
-                if (symbol) labelBreakpointSymbol(addr, symbol);
                 pendingErrorSlot = "cond";
                 writeErrorSlot("cond", "");
                 await commandRouter.dispatchCommand(Command.setBreakpoint({
@@ -1553,6 +1554,9 @@ export async function handleCommand(detail, services) {
                     enabled: true,
                     condition,
                 }));
+                // ⚠️ **成功之后才落列表 / 贴标签**（同上：失败不留假断点）。
+                requestBreakpoint(addr);
+                if (symbol) labelBreakpointSymbol(addr, symbol);
                 break;
             }
             case "lookup-symbol": {
@@ -1584,8 +1588,10 @@ export async function handleCommand(detail, services) {
                 // 撤掉断点 ⇒ ⇒ id 同样**就是地址**（裁决 J）⇒ ⇒ 前端列表
                 // 只存地址就够 ⇒ ⇒ `ClearBreakpoint { id }` 传的是地址。
                 const addr = toInt(detail.params?.addr, 0) >>> 0;
-                withdrawBreakpoint(addr);
                 await commandRouter.dispatchCommand(Command.clearBreakpoint(addr));
+                // ⚠️ **清除成功之后才撤界面项**：传输失败 / 命令失败时先删
+                //   会留下一个「内核还在、界面没了」的反向假状态。
+                withdrawBreakpoint(addr);
                 break;
             }
             case "resolve-line": {
@@ -3107,6 +3113,13 @@ export function wireDebug(commandRouter, services = {}) {
                     export: null,
                     symbol: null,
                     dump: null,
+                    // ⚠️ **断点 / 符号标签也必须清**：内核在 `LoadProject` /
+                    //   `UnloadProject` 里调 `clear_debug_state()`，但契约
+                    //   **没有**「列出断点」的事件 ⇒ ⇒ 前端不在这里清，就会
+                    //   保留上一程序的假断点；用户再点同一地址时又会被
+                    //   `requestBreakpoint` 去重拦住，命令根本发不出去。
+                    breakpoints: [],
+                    bpSymbols: {},
                     // ⚠️ **读回的那一份也清掉**（v0.67 批）⇒ ⇒ 基准与「上次
                     //   读回」说的都是**上一个程序**⇒ ⇒ 留着就是一份**不存在的**
                     //   对比⇒ ⇒ 用户会看到**上一趟**的高亮。

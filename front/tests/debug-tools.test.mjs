@@ -466,11 +466,14 @@ describe("下断点：条件与符号（视图层 · C-7 ~ C-10）", () => {
         assert.equal(sent[0].SetBreakpoint.condition, "a0 != 0", "地址断点也必须带上条件");
     });
 
-    test("C-10 · 断点列表**显示**符号名", () => {
+    test("C-10 · 断点列表**显示**符号名", async () => {
         const body = seedCandidates();
         body.querySelector("[data-bp-symbol-candidates]").querySelectorAll(".symbol-candidate")[0].click();
         stop();
 
+        // ⚠️ **成功后才落列表**（M-08 状态同步回归）：命令是异步的 ⇒ ⇒
+        //   等这次 `SetBreakpoint` 的 promise 走完再读界面。
+        await new Promise((r) => setTimeout(r, 0));
         const after = show("debug");
         const rows = after.querySelectorAll("[data-bp-row]");
         assert.equal(rows.length, 1, "断点列表必须**有**一行（对象存在 ⇒ 不是空断言）");
@@ -667,5 +670,81 @@ describe("内核原文上屏（视图层 · C-13）", () => {
         const slot = after.querySelector("[data-bp-symbol-error]");
         assert.ok(slot, "必须**有**符号的错误位");
         assert.equal(slot.textContent, raw, "符号那一位上必须是**内核原文**");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// M-08 调试状态同步（回归）——装载 / 卸载 / 命令失败后，界面列表不能留下
+// 内核并不存在的断点。
+// ---------------------------------------------------------------------------
+
+describe("M-08 调试状态同步（回归）", () => {
+    let router;
+
+    beforeEach(() => {
+        m03.reset();
+        router = fakeRouter();
+    });
+
+    test("调试面 reset 清掉界面断点列表与符号标签", () => {
+        const debug = app.wireDebug(router);
+        app.requestBreakpoint(0x80000000);
+        app.labelBreakpointSymbol(0x80000000, "main");
+
+        debug.reset();
+
+        const state = m03.getState("debug");
+        assert.deepEqual(state?.debug?.breakpoints, [], "reset 后断点地址列表必须为空");
+        assert.deepEqual(state?.debug?.bpSymbols, {}, "reset 后符号标签必须为空");
+    });
+
+    test("`SetBreakpoint` 被内核拒绝时，界面列表不落这个地址", async () => {
+        const failing = {
+            ...fakeRouter(),
+            async dispatchCommand() {
+                throw new Error("E_DBG-02: 条件表达式无效");
+            },
+        };
+        await app.handleCommand(
+            { action: "set-breakpoint", params: { addr: 0x80000000, condition: "x1 ==" } },
+            { commandRouter: failing },
+        );
+
+        const state = m03.getState("debug");
+        assert.deepEqual(state?.debug?.breakpoints ?? [], [], "失败的命令不能留下界面断点");
+    });
+
+    test("`SetBreakpoint`（符号入口）失败时，地址与符号标签都不落", async () => {
+        const failing = {
+            ...fakeRouter(),
+            async dispatchCommand() {
+                throw new Error("E_CTX-07: 断点地址未按 2 字节对齐");
+            },
+        };
+        await app.handleCommand(
+            { action: "set-symbol-breakpoint", params: { addr: 0x80000001, symbol: "main" } },
+            { commandRouter: failing },
+        );
+
+        const state = m03.getState("debug");
+        assert.deepEqual(state?.debug?.breakpoints ?? [], [], "失败时不能留下地址");
+        assert.deepEqual(state?.debug?.bpSymbols ?? {}, {}, "失败时不能留下符号标签");
+    });
+
+    test("`ClearBreakpoint` 失败时，界面列表保留原断点", async () => {
+        const failing = {
+            ...fakeRouter(),
+            async dispatchCommand() {
+                throw new Error("E_CTX-06: 传输通道断开");
+            },
+        };
+        app.requestBreakpoint(0x80000000);
+        await app.handleCommand(
+            { action: "clear-breakpoint", params: { addr: 0x80000000 } },
+            { commandRouter: failing },
+        );
+
+        const state = m03.getState("debug");
+        assert.deepEqual(state?.debug?.breakpoints ?? [], [0x80000000], "清除失败时不能先删界面项");
     });
 });

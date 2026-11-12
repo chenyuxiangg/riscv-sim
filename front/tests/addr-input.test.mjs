@@ -504,6 +504,8 @@ describe("回显、回归与委托", () => {
         box.querySelector("[data-action=\"set-breakpoint\"]").click();
         stop();
 
+        // ⚠️ **成功后才落列表**（M-08 状态同步回归）：命令是异步的。
+        await new Promise((r) => setTimeout(r, 0));
         assert.equal(signals.length, 1, "必须发出**一条**命令");
         const state = m03.getState("debug");
         assert.deepEqual(
