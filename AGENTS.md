@@ -39,10 +39,10 @@ RISC-V 仿真/调试平台 —— 多模块协作的端到端工程。详细设�
 | 正确性对拍 | Spike golden + riscv-tests（外部工具，不进主代码） |
 | 测试 | headless CLI + 断言引擎（LLD §9.7 矩阵） |
 
-### 模块划分（23 个详细设计模块，5 横层 + 3 横切）
+### 模块划分（22 个详细设计模块，5 横层 + 3 横切）
 
 - **仿真核心**（M-12 ~ M-17、M-20）：事件驱动引擎、RISC-V ISS、总线/内存映射、外设模型、中断控制器、执行后端、快照与确定性事件流
-- **调试与探针**（M-08、M-09、M-11、M-18、M-19）：断点管理、单步引擎、DWARF/反汇编/trace 导出、探针、波形管道
+- **调试与探针**（M-08、M-11、M-18、M-19）：断点管理、DWARF/反汇编/trace 导出、探针、波形管道
 - **前端 / 工作台**（M-01、M-02、M-03）：工作台装配与多视图路由、视图组件库、视图状态管理
 - **基础设施**（M-04、M-05、M-07、M-10、M-21、M-22、M-23）：会话管理、命令路由与事件分发、传输适配器、寄存器/内存服务、日志、健康管理、持久化 DataStore
 - **文件与解析**（M-06）：ELF / Raw-HEX 解析器
@@ -162,7 +162,7 @@ riscv_sim/
 | M-14 | 总线与内存映射 | `crates/kernel/src/m14_bus/` | ✅ |
 | M-15 | 外设模型层 | `crates/kernel/src/m15_peripheral/` | ✅ |
 | M-16 | 中断控制器 | `crates/kernel/src/m16_interrupt/` | ✅ |
-| M-17 | ExecutionBackend 执行后端 | `crates/kernel/src/m17_backend/` | ✅ |
+| M-17 | ExecutionBackend 执行后端（含单步 / stepOver） | `crates/kernel/src/m17_backend/` | ✅ |
 | M-20 | 快照与确定性事件流记录 | `crates/kernel/src/m20_snapshot/` | 🟡 快照已落地；输入事件流/CrashKit 仍 stub |
 
 ### 调试与探针
@@ -170,7 +170,6 @@ riscv_sim/
 | 编号 | 模块 | 物理位置 | 状态 |
 | --- | --- | --- | --- |
 | M-08 | 断点管理器 | `crates/kernel/src/m08_breakpoint/` | ✅ |
-| M-09 | 单步引擎 | `crates/kernel/src/m09_step/` | ✅ |
 | M-11 | 符号表/DWARF/反汇编/trace 导出 | `crates/kernel/src/m11_symbol/` | ✅ |
 | M-18 | 探针 | `crates/kernel/src/m18_probe/` | ✅ |
 | M-19 | 波形管道 | `crates/kernel/src/m19_waveform/` | ✅ |

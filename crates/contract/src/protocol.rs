@@ -124,7 +124,7 @@ pub enum CommandPayload {
     StepN {
         n: u32,
     },
-    /// **Step over** the current call（契约 v14 · M-09/M-17）。
+    /// **Step over** the current call（契约 v14 · M-17）。
     ///
     /// 当前指令是 `jal` / `jalr` 且写 `ra` ⇒ 后端在返回地址记下**临时停点**
     /// （不进入 M-08 断点表），一直跑到它命中（或陷阱 / 观察点 / 暂停先到），

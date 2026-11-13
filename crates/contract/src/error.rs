@@ -166,7 +166,7 @@ error_families! {
     Peripheral => "PER",
     /// Interrupt controller (M-16).
     Interrupt => "INT",
-    /// Debug services: breakpoint, step, register/memory (M-08, M-09, M-10).
+    /// Debug services: breakpoint, step, register/memory (M-08, M-10).
     Debug => "DBG",
     /// Observability: probe, waveform, trace, symbol (M-18, M-19, M-11).
     Observability => "OBS",
@@ -303,8 +303,7 @@ pub const E_PROTO_08_BAD_MESSAGE: u16 = 8;
 /// would silently write a *different* register than the caller named.
 ///
 /// The `Debug` family is the contract's declared home for the debug
-/// services (breakpoint / step / register-and-memory, i.e. M-08 / M-09 /
-/// M-10); M-09 already declares it as its family.
+/// services (breakpoint / step / register-and-memory, i.e. M-08 / M-10).
 pub const E_DBG_01_INVALID_REGISTER_INDEX: u16 = 1;
 
 /// Scenario code: the **condition expression** of a breakpoint could not

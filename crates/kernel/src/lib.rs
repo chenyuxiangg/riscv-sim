@@ -1,6 +1,6 @@
 //! RISC-V simulation kernel (AD §3, LLD §4).
 //!
-//! 14 sub-modules map 1-to-1 to the M-06 / M-08 / M-09 / M-11 / M-12 / M-13 /
+//! 15 sub-modules map 1-to-1 to the M-06 / M-08 / M-11 / M-12 / M-13 /
 //! M-14 / M-15 / M-16 / M-17 / M-18 / M-19 / M-20 / M-21 / M-22 / M-23
 //! detailed design. All cross-module communication goes through
 //! `riscv_sim_contract`.
@@ -14,7 +14,6 @@
 
 pub mod m06_elf;
 pub mod m08_breakpoint;
-pub mod m09_step;
 pub mod m11_symbol;
 pub mod m12_engine;
 pub mod m13_iss;

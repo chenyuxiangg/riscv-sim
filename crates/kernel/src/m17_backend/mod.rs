@@ -2,7 +2,7 @@
 //!
 //! Implements the `ExecutionBackend` port from `riscv_sim_contract`,
 //! wrapping the M-12 engine and M-13 ISS behind a single object
-//! that the debug services (M-08, M-09, M-10) talk to.
+//! that the debug services (M-08, M-10) talk to.
 //!
 //! A second implementation (QEMU via GDB RSP) is reserved for P1
 //! and will live in the same crate but be feature-gated.
