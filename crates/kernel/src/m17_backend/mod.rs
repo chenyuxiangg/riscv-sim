@@ -2828,7 +2828,7 @@ mod tests {
     #[test]
     fn step_over_runs_through_a_call_without_touching_the_breakpoint_table() {
         // 0x00: jal ra, +0x10  → 0x10
-        // 0x04: nop            ← 返回地址（临时断点在这里）
+        // 0x04: nop            ← 返回地址（stepOver 的临时停点）
         // 0x08: nop
         // 0x0c: nop
         // 0x10: ret            → ra = 0x04

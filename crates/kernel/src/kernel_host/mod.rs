@@ -3393,8 +3393,8 @@ impl KernelHost {
         self.on_run_inner(steps, false)
     }
 
-    /// **步过**：后端识别调用并注入临时断点，宿主把它当作一次「一步」的
-    /// 运行窗口收尾（事件、tick、波形、停下原因完全同一套）。
+    /// **步过**：后端识别调用并记下返回地址停点（不进入断点表），宿主把
+    /// 它当作一次「一步」的运行窗口收尾（事件、tick、波形、停下原因同一套）。
     fn on_step_over(&mut self) -> Vec<EventPayload> {
         self.on_run_inner(Some(1), true)
     }

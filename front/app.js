@@ -1298,7 +1298,7 @@ export async function handleCommand(detail, services) {
                 break;
             case "step-over":
                 // 「步过」与「单步」同一条收尾路径：退出连续模式、记基准、
-                // 发命令、停下后读回。区别只在命令本身（内核负责临时断点）。
+                // 发命令、停下后读回。区别只在命令本身（内核负责返回地址停点）。
                 setRunState(markStarted(stopRunState(getRunState())));
                 captureGprBaseline(services);
                 await commandRouter.dispatchCommand(Command.stepOver());

@@ -315,8 +315,9 @@ pub mod snapshot;
 /// Contract **v14** adds **stepOver + 观察表达式**（M-08 / M-17）：
 ///
 /// - `CommandPayload::StepOver` —— unit 变体；后端在当前指令是
-///   `jal` / `jalr` 且写 `ra` 时，往返回地址注入**临时断点**，停下后
-///   无条件移除；其它指令按一条执行；
+///   `jal` / `jalr` 且写 `ra` 时，在返回地址记下**临时停点**；v15 起
+///   该停点**不进入断点表**，停止原因走 `HaltReason::StepOver`；
+///   其它指令按一条执行；
 /// - new DTO `model::WatchExpr` / `model::WatchValue` —— 观察表达式与
 ///   它的一次求值结果（`value` / `error` 只出现一个）；
 /// - `CommandPayload::SetWatchExpr { id, expr }` /
