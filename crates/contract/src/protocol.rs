@@ -945,6 +945,8 @@ impl From<EventPayload> for Payload {
 pub enum HaltReason {
     /// Hit a user breakpoint.
     Breakpoint,
+    /// stepOver 到达本次调用应返回的地址（不是用户在断点表里下的断点）。
+    StepOver,
     /// Hit a watchpoint.
     Watchpoint,
     /// Reached end of execution (e.g. `mret` to non-existent PC).
@@ -1009,9 +1011,12 @@ mod tests {
     /// **v14** adds **stepOver + 观察表达式**（`StepOver` +
     /// `SetWatchExpr` / `ClearWatchExpr` / `ListWatchExprs` +
     /// `WatchValues` + `WatchExpr` / `WatchValue`）。
+    ///
+    /// **v15** adds `HaltReason::StepOver` —— stepOver 的返回地址停点
+    /// **不再伪装成用户断点**（`Halted` 的线上标签多一个取值）。
     #[test]
-    fn the_schema_version_is_fourteen() {
-        assert_eq!(crate::SCHEMA_VERSION, 14);
+    fn the_schema_version_is_fifteen() {
+        assert_eq!(crate::SCHEMA_VERSION, 15);
     }
 
     /// **v12**（v0.76 · STAGE-52 · 裁决 M）：模板库协议 —— 两个命令、
@@ -1303,7 +1308,7 @@ mod tests {
         let msg = Message::command(8, CommandPayload::Nop);
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
-        assert_eq!(json["schema_version"], 14);
+        assert_eq!(json["schema_version"], 15);
     }
 
     // -----------------------------------------------------------------

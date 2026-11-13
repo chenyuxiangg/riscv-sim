@@ -153,6 +153,9 @@ export function readbackReasonOf(haltReason) {
     switch (haltReason) {
         case HALT_REASON_BREAKPOINT:
             return READBACK_REASON.BREAKPOINT;
+        case "StepOver":
+            // stepOver 的返回地址停点不是用户断点，读回原因按「单步」标。
+            return READBACK_REASON.STEP;
         case HALT_REASON_WATCHPOINT:
             return READBACK_REASON.WATCHPOINT;
         case HALT_REASON_TRAP:

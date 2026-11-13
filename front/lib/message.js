@@ -147,7 +147,7 @@
 //   on either side turns the other side red.
 
 /** Protocol schema version — mirrors `riscv_sim_contract::SCHEMA_VERSION`. */
-export const SCHEMA_VERSION = 14;
+export const SCHEMA_VERSION = 15;
 
 /**
  * 转储长度上限（字节）—— mirrors `riscv_sim_contract::DUMP_MAX_BYTES`.
@@ -341,6 +341,7 @@ export const WRITE_SIZE = Object.freeze({
 /** `protocol::HaltReason` — serde unit variants. */
 export const HALT_REASON = Object.freeze({
     Breakpoint: "Breakpoint",
+    StepOver: "StepOver",
     Watchpoint: "Watchpoint",
     EndOfExecution: "EndOfExecution",
     Trap: "Trap",

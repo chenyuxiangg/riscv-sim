@@ -123,7 +123,7 @@ describe("连续运行的判定（纯函数）", () => {
     });
 
     test("A-3 · 四种「真停」原因 ⇒ ⇒ 「停」（四个**逐个**验）", () => {
-        for (const reason of ["Breakpoint", "Watchpoint", "Trap", "UserPause"]) {
+        for (const reason of ["Breakpoint", "Watchpoint", "Trap", "UserPause", "StepOver"]) {
             assert.equal(
                 runloop.nextRunAction({ mode: "running", reason }),
                 "stop",

@@ -293,6 +293,8 @@ pub struct IssExecutor<'a> {
     intc: &'a mut dyn InterruptPort,
     /// 上次**量子边界采样**的时刻（跨批次持久 —— 裁决 I）。
     last_poll_ps: &'a mut u64,
+    /// stepOver 的返回地址停点（**不进入断点表**）。
+    step_over_return: Option<u32>,
 }
 
 impl<'a> IssExecutor<'a> {
@@ -311,6 +313,7 @@ impl<'a> IssExecutor<'a> {
         intc: &'a mut dyn InterruptPort,
         last_poll_ps: &'a mut u64,
         pause_requested: &'a mut bool,
+        step_over_return: Option<u32>,
     ) -> Self {
         Self {
             iss,
@@ -320,6 +323,7 @@ impl<'a> IssExecutor<'a> {
             pause_requested,
             intc,
             last_poll_ps,
+            step_over_return,
         }
     }
 
@@ -606,6 +610,11 @@ pub struct SelfIssBackend<B: EventBus, I: InterruptSink> {
     watch_hit: Rc<RefCell<Option<Watchpoint>>>,
     /// Why the last step batch stopped (`None` = it ran its budget out).
     last_stop: Option<HaltReason>,
+    /// stepOver 的返回地址停点：只在一次 `step_over` 窗口内有效。
+    ///
+    /// ⚠️ **故意不放进 M-08 的断点表**：用户断点可能被禁用或带条件；
+    /// 复用那条断点会让 stepOver 停不住，强改它又会破坏用户状态。
+    step_over_return: Option<u32>,
     /// The watchpoint that fired in the last step batch, if any.
     last_watchpoint: Option<Watchpoint>,
     /// Next auto-assigned watchpoint id (port-level entries only).
@@ -654,6 +663,7 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
             watch_hit: Rc::new(RefCell::new(None)),
             last_stop: None,
             last_watchpoint: None,
+            step_over_return: None,
             next_watch_id: 1,
             total_executed: 0,
             pause_requested: false,
@@ -697,14 +707,15 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
         &mut self.bus
     }
 
-    /// **步过**当前调用：若当前指令是 `jal` / `jalr` 且写 `ra`，就在返回地址
-    /// 注入**临时断点**，一直跑到它命中（或陷阱 / 观察点 / 暂停先到），
-    /// 然后**无论怎么停都把临时断点删掉**。
+    /// **步过**当前调用：若当前指令是 `jal` / `jalr` 且写 `ra`，就在后端
+    /// 记下返回地址作为**临时停点**，一直跑到它命中（或陷阱 / 观察点 / 暂停
+    /// 先到），然后**无论怎么停都把停点清掉**。
     ///
     /// 非调用指令 ⇒ **恰好执行一条**（与普通单步同口径）。
     ///
-    /// ⚠️ 返回地址已有用户断点 ⇒ **复用**那条，不新建、也不在收尾时删除
-    /// （`set_temporary` 返回 `None`）。
+    /// ⚠️ 返回地址**不进入** M-08 的断点表：用户断点可能被禁用或带条件，
+    /// 复用它会让 stepOver 停不住；强改它又会破坏用户状态。因此这里用
+    /// M-17 自己的 `step_over_return`，停止原因走 `HaltReason::StepOver`。
     ///
     /// ⚠️ 返回地址 = `pc + 指令长度`，长度来自 M-13 解码（压缩指令是 2）。
     pub fn step_over(&mut self) -> Result<u32, PlatformError> {
@@ -716,12 +727,10 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
             return self.step_n(1);
         }
         let return_pc = pc.wrapping_add(u32::from(decoded.len));
-        let temporary = self.breakpoints.set_temporary(return_pc)?;
+        self.step_over_return = Some(return_pc);
         let run = self.step_n(u32::MAX);
-        if let Some(id) = temporary {
-            // 清理错误不能盖掉真正的运行结果：先清，再原样返回 run。
-            let _ = self.breakpoints.clear(id)?;
-        }
+        // 无论正常命中、陷阱、暂停还是错误，都要清掉返回地址停点。
+        self.step_over_return = None;
         run
     }
 
@@ -1011,6 +1020,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
         // `clear_debug_state`.)
         self.last_stop = None;
         self.last_watchpoint = None;
+        self.step_over_return = None;
         self.total_executed = 0;
         // 暂停请求属于**上一次批次**的残留 —— reset 之后不该还有效。
         self.pause_requested = false;
@@ -1034,6 +1044,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             pause_requested,
             intc_port,
             last_poll_ps,
+            step_over_return,
             ..
         } = self;
 
@@ -1062,6 +1073,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             intc_port.as_mut(),
             last_poll_ps,
             pause_requested,
+            *step_over_return,
         );
 
         // **无进展计数**（LLD §3.5 的 watchdog · 冻结规格 STAGE-13 裁决 N ·
@@ -1115,6 +1127,17 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             //     条件断点**永远不生效**。
             if executor.breakpoint_at(engine.state()) {
                 *last_stop = Some(HaltReason::Breakpoint);
+                break;
+            }
+
+            // (2b) stepOver 的返回地址停点 —— **排在用户断点之后**：
+            //      用户断点启用且条件为真时仍按用户断点停（命中计数 /
+            //      日志照常）；用户断点被禁用或条件为假时才由这里兜底。
+            //
+            //      ⚠️ 这是**调试控制动作**，不进入断点表、不增加用户断点
+            //      的命中计数，也不伪装成 `HaltReason::Breakpoint`。
+            if executor.step_over_return == Some(engine.state().pc) {
+                *last_stop = Some(HaltReason::StepOver);
                 break;
             }
 
@@ -1252,6 +1275,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             pause_requested,
             intc_port,
             last_poll_ps,
+            step_over_return,
             ..
         } = self;
 
@@ -1267,6 +1291,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             intc_port.as_mut(),
             last_poll_ps,
             pause_requested,
+            *step_over_return,
         );
         // `u64::MAX` = 「不设时间上限」——本轮的边界是**指令预算**，
         // 由 M-12 的 `instruction_budget` 决定。
@@ -1484,6 +1509,7 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
         self.watchpoints.borrow_mut().clear_all();
         *self.watch_hit.borrow_mut() = None;
         self.last_watchpoint = None;
+        self.step_over_return = None;
     }
 }
 
@@ -2800,7 +2826,7 @@ mod tests {
         );
     }
     #[test]
-    fn step_over_runs_through_a_call_and_removes_the_temporary_breakpoint() {
+    fn step_over_runs_through_a_call_without_touching_the_breakpoint_table() {
         // 0x00: jal ra, +0x10  → 0x10
         // 0x04: nop            ← 返回地址（临时断点在这里）
         // 0x08: nop
@@ -2823,10 +2849,10 @@ mod tests {
             "stepOver 的指令窥视不能计入 guest 的取指次数"
         );
         assert_eq!(backend.snapshot().expect("snapshot").pc, 0x04);
-        assert_eq!(backend.last_stop_reason(), Some(HaltReason::Breakpoint));
+        assert_eq!(backend.last_stop_reason(), Some(HaltReason::StepOver));
         assert!(
             backend.breakpoints.get_by_addr(0x04).is_none(),
-            "stepOver 注入的临时断点必须在停下后移除"
+            "stepOver 的返回地址停点不进入断点表"
         );
     }
 
@@ -2848,9 +2874,65 @@ mod tests {
             .expect("set breakpoint");
         backend.step_over().expect("step over");
         assert_eq!(backend.snapshot().expect("snapshot").pc, 0x04);
+        assert_eq!(
+            backend.last_stop_reason(),
+            Some(HaltReason::Breakpoint),
+            "用户断点优先于 stepOver 停点"
+        );
         assert!(
             backend.breakpoints.get_by_addr(0x04).is_some(),
             "用户自己的返回地址断点不能被 stepOver 的清场带走"
+        );
+    }
+
+    #[test]
+    fn step_over_still_stops_at_the_return_address_when_the_user_breakpoint_is_disabled() {
+        let mut program = vec![0u8; 0x14];
+        program[0..4].copy_from_slice(&0x0100_00efu32.to_le_bytes());
+        program[4..8].copy_from_slice(&0x0000_0013u32.to_le_bytes());
+        program[16..20].copy_from_slice(&0x0000_8067u32.to_le_bytes());
+        let mut backend = backend_with_program(&program);
+        backend
+            .set_breakpoint_with_id(Breakpoint {
+                id: 7,
+                addr: 0x04,
+                source_hint: None,
+                enabled: false,
+                condition: None,
+            })
+            .expect("set breakpoint");
+        backend.step_over().expect("step over");
+        assert_eq!(backend.snapshot().expect("snapshot").pc, 0x04);
+        assert_eq!(backend.last_stop_reason(), Some(HaltReason::StepOver));
+        let bp = backend
+            .breakpoints
+            .get_by_addr(0x04)
+            .expect("user bp survives");
+        assert!(!bp.enabled, "用户断点的使能位不能被 stepOver 改写");
+    }
+
+    #[test]
+    fn step_over_still_stops_when_the_user_breakpoint_condition_is_false() {
+        let mut program = vec![0u8; 0x14];
+        program[0..4].copy_from_slice(&0x0100_00efu32.to_le_bytes());
+        program[4..8].copy_from_slice(&0x0000_0013u32.to_le_bytes());
+        program[16..20].copy_from_slice(&0x0000_8067u32.to_le_bytes());
+        let mut backend = backend_with_program(&program);
+        backend
+            .set_breakpoint_with_id(Breakpoint {
+                id: 7,
+                addr: 0x04,
+                source_hint: None,
+                enabled: true,
+                condition: Some("x1 == 0".to_string()),
+            })
+            .expect("set breakpoint");
+        backend.step_over().expect("step over");
+        assert_eq!(backend.snapshot().expect("snapshot").pc, 0x04);
+        assert_eq!(backend.last_stop_reason(), Some(HaltReason::StepOver));
+        assert!(
+            backend.breakpoints.get_by_addr(0x04).is_some(),
+            "条件断点本身不能被 stepOver 删除"
         );
     }
 }

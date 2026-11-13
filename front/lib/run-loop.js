@@ -119,6 +119,8 @@ const STOP_REASONS = Object.freeze(new Set([
     HALT_REASON_WATCHPOINT,
     HALT_REASON_TRAP,
     HALT_REASON_USER_PAUSE,
+    // stepOver 的返回地址停点（契约 v15）：也是真停，连续模式必须停下。
+    "StepOver",
 ]));
 
 /**

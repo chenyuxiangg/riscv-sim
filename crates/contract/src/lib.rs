@@ -325,7 +325,13 @@ pub mod snapshot;
 ///   也是每次运行窗口结束后的轮询推送；
 /// - ⚠️ 临时断点**不是** `Breakpoint` 的持久字段（不污染断点表）；
 /// - ⚠️ `SIM_STATE_SCHEMA_VERSION` stays `2`（快照载荷没变）。
-pub const SCHEMA_VERSION: u32 = 14;
+///
+/// Contract **v15** adds `HaltReason::StepOver`：
+///
+/// - stepOver 的返回地址停点改由 M-17 的临时状态判定，**不再注入断点表**；
+/// - 因此停止原因**多一个线上标签** ⇒ ⇒ `SCHEMA_VERSION` 14 → 15；
+/// - ⚠️ `SIM_STATE_SCHEMA_VERSION` stays `2`；命令 / 事件形状不变。
+pub const SCHEMA_VERSION: u32 = 15;
 
 /// 转储长度上限（字节）—— v0.57 批（STAGE-42 §2.5 · 裁决 D）。
 ///

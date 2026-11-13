@@ -147,7 +147,7 @@ describe("契约镜像的版本与两个上限（视图层 · C-1）", () => {
             resolve(repoRoot, "crates/contract/fixtures/debug-limits.json"),
             "utf8",
         ));
-        assert.equal(msg.SCHEMA_VERSION, 14, "前端镜像的信封版本必须是 14（契约 v14：stepOver / 观察表达式）");
+        assert.equal(msg.SCHEMA_VERSION, 15, "前端镜像的信封版本必须是 15（契约 v15：stepOver 独立停点）");
         assert.equal(
             msg.DUMP_MAX_BYTES,
             fixture.dump_max_bytes,
@@ -809,7 +809,7 @@ describe("M-08 断点表回执（契约 v13）", () => {
     });
 });
 
-describe("M-08 观察表达式与 stepOver（契约 v14）", () => {
+describe("M-08 观察表达式与 stepOver（契约 v15）", () => {
     let router;
     let stop;
 

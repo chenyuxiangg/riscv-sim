@@ -132,6 +132,7 @@ describe("v0.67 · 「读回」的纯函数", () => {
 
     test("R-6 · readbackReasonOf 认得四种真停原因", () => {
         assert.equal(rb.readbackReasonOf("Breakpoint"), rb.READBACK_REASON.BREAKPOINT);
+        assert.equal(rb.readbackReasonOf("StepOver"), rb.READBACK_REASON.STEP);
         assert.equal(rb.readbackReasonOf("Watchpoint"), rb.READBACK_REASON.WATCHPOINT);
         assert.equal(rb.readbackReasonOf("Trap"), rb.READBACK_REASON.TRAP);
         assert.equal(rb.readbackReasonOf("UserPause"), rb.READBACK_REASON.USER_PAUSE);
@@ -145,7 +146,7 @@ describe("v0.67 · 「读回」的纯函数", () => {
     });
 
     test("R-8 · shouldAutoReadback：四种真停 ⇒ ⇒ 读回", () => {
-        for (const reason of ["Breakpoint", "Watchpoint", "Trap", "UserPause"]) {
+        for (const reason of ["Breakpoint", "Watchpoint", "Trap", "UserPause", "StepOver"]) {
             assert.equal(
                 rb.shouldAutoReadback({ haltReason: reason }),
                 true,
