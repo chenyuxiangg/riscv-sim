@@ -286,6 +286,25 @@ describe("探针流 · 装载工程后的强制重订", () => {
         );
     });
 
+    test("装载成功后清掉上一会话的错误提示", async () => {
+        // 空产品启动时会先撞一次 `E_PLT-22`（无生效板）⇒ 那是**启动期的
+        // 预期拒绝**；之后从模版装板成功，调试面板不该继续挂着那条旧错误。
+        m03.setState("debug", (prev) => ({
+            ...prev,
+            debug: {
+                ...(prev.debug ?? {}),
+                error: { code: "E_PLT-22", message: "没有生效板" },
+            },
+        }));
+        const { services } = fakeServices();
+        await app.loadProjectIntoKernel(services, { id: "p" });
+        assert.equal(
+            m03.getState("debug")?.debug?.error,
+            null,
+            "装载成功 ⇒ 旧会话的 E_PLT-22 必须清掉（否则调试视图一直报无板）",
+        );
+    });
+
     test("探针流的重订**必须真的发一条订阅命令**（不是只调了个空函数）", async () => {
         const { router } = setup();
         const services = {

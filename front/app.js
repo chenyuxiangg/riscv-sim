@@ -2283,6 +2283,19 @@ export async function loadProjectIntoKernel(services, project) {
     if (loadError) {
         throw loadError;
     }
+    // ⚠️ **装载成功 ⇒ 上一会话的最后一条错误不再代表当前状态**。
+    //
+    // 空产品启动时会先 `LoadProject` 撞一次 `E_PLT-22`（无生效板，这是
+    // v0.76 的预期拒绝）⇒ 全局 `error` 订阅把那条写进了 `debug.error`
+    // ⇒ 之后从模版装板成功、甚至 `debug.reset()` 也按「保留内核最后一份
+    // 报告」的规矩不清它 ⇒ 调试视图会一直挂「没有生效板」的假状态。
+    // 错误位只在**这一次装载失败**时由 `loadError` 抛出并保留；成功
+    // 就把它收掉。
+    viewStore.setState("debug", (prev) => ({
+        ...prev,
+        debug: { ...(prev.debug ?? {}), error: null },
+    }));
+    publishViewState("debug");
     return {
         probeError: errors.probeError,
         consoleError: errors.consoleError,
