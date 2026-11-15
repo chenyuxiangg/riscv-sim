@@ -23,6 +23,7 @@ import {
     resetTerminalScreen,
     seedBus,
     get as getViewComponent,
+    parseAddrInput,
 } from "./views/m02_viewcomponents.js";
 import * as viewStore from "./views/m03_viewstore.js";
 import { mountSession } from "./services/m04_session.js";
@@ -1436,6 +1437,31 @@ export async function handleCommand(detail, services) {
                     resetMemoryMapError = result.memoryMapError;
                 }
                 break;
+            case "write-register": {
+                // 寄存器格内编辑框失焦 ⇒ 写一个 GPR（复用契约 v2 的
+                // `WriteRegister`，不新增命令）。x0 与运行中由视图层挡掉；
+                // 这里只做参数归一，越界仍交给内核拒绝（写是拒绝、读是钳位）。
+                const index = Number(detail.params?.index);
+                if (!Number.isInteger(index) || index <= 0 || index >= 32) {
+                    setNote(`寄存器下标无效：${detail.params?.index}`);
+                    return;
+                }
+                const rawValue = detail.params?.value;
+                let value = null;
+                if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+                    value = rawValue >>> 0;
+                } else {
+                    // 复用视图层唯一的十六进制解析器（不在 app 里抄第二份）。
+                    const parsed = parseAddrInput(String(rawValue ?? "").trim());
+                    if (parsed.ok) value = parsed.value;
+                }
+                if (value === null) {
+                    setNote(`寄存器值无效：${rawValue}`);
+                    return;
+                }
+                await registerMemory.writeRegister(index, value);
+                break;
+            }
             case "read-regs": {
                 // ⚠️ **手动读回**（v0.67 批）⇒ ⇒ 立即把**当前**的寄存器值取回来
                 // ⇒ ⇒ 界面显示的是**内核此刻**的值，不是缓存里那份旧的。
@@ -2276,10 +2302,9 @@ export async function loadProjectIntoKernel(services, project) {
  * = 新订阅）⇒ 而前端的「已订阅」标志可能还立着 ⇒ 不重订就**静默停流**
  * （台账 D-45 / D-46 的同一个坑）。
  *
- * ⚠️ **要重订的五条流**（前端的**事件流**）：
- *   - 寄存器流 `sim.registers`（M-10 那一条路，顺带管状态增量流
- *     `sim.state.delta` —— 两条流都由 M-10 消费）；
- *   - 状态增量流 `sim.state.delta`（同上）；
+ * ⚠️ **要重订的四条流**（前端的**事件流**）：
+ *   - 状态增量流 `sim.state.delta`（M-10 的寄存器/PC 生产载体；
+ *     `sim.registers` 的波形流只是兼容输入，不再订阅）；
  *   - 探针波形流 `waveform.history`（内核侧主题是 `sim.waveform`）；
  *   - console 流 `sim.console`；
  *   - 内存图流 `memory.map`。
@@ -2729,7 +2754,7 @@ export function wireMemoryMap(commandRouter) {
  *
  * The router still publishes every event to its topic subscribers, so
  * the debug view picks them up by topic exactly like M-10 does with
- * `sim.registers`.
+ * `sim.state.delta`.
  *
  * @param {object} commandRouter
  * @returns {{reset: () => void}}

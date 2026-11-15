@@ -52,7 +52,7 @@ async function settle(times = 4) {
  * @param {{gpr?: number[], memoryReads?: {addr:number,size:string}[]}} [init]
  */
 function fakeRegisterMemory(init = {}) {
-    const calls = { readRegisters: 0, readMemory: [], dumpMemory: [], flushRender: 0 };
+    const calls = { readRegisters: 0, writeRegister: [], readMemory: [], dumpMemory: [], flushRender: 0 };
     const state = {
         gpr: Array.isArray(init.gpr) ? init.gpr.slice() : Array(32).fill(0),
         memoryReads: Array.isArray(init.memoryReads) ? init.memoryReads.map((r) => ({ ...r })) : [],
@@ -66,6 +66,10 @@ function fakeRegisterMemory(init = {}) {
         }),
         readRegisters: async () => {
             calls.readRegisters += 1;
+        },
+        writeRegister: async (index, value) => {
+            calls.writeRegister.push({ index, value });
+            return { index, value };
         },
         readMemory: async (addr, size) => {
             calls.readMemory.push({ addr, size });
@@ -208,6 +212,18 @@ describe("v0.67 · 「读回」的 app 层编排", () => {
             "「读寄存器」把基准冲掉了 ⇒ ⇒ 用户正在查看的那趟对比被抹掉",
         );
         assert.equal(memory.calls.readRegisters, 1, "「读寄存器」没有真的去读寄存器");
+    });
+
+    test("R-11b · 「写寄存器」走 M-10，不额外读回", async () => {
+        const memory = fakeRegisterMemory();
+        const router = fakeRouter();
+        const services = { commandRouter: router, registerMemory: memory };
+        await app.handleCommand(
+            { action: "write-register", params: { index: "5", value: "0000002a" } },
+            services,
+        );
+        assert.deepEqual(memory.calls.writeRegister, [{ index: 5, value: 42 }]);
+        assert.equal(memory.calls.readRegisters, 0, "写寄存器不应再发一次读命令");
     });
 
     test("R-12 · 真停（断点）⇒ ⇒ 自动读回**三样**：寄存器 + 内存单元 + 转储", async () => {

@@ -195,6 +195,27 @@ describe("STAGE-35 · 视图内容形态（卡片化）", () => {
         assert.equal(cells.length, 32, `.reg-grid 里的格子应当是 32 个，实际 ${cells.length}`);
     });
 
+    test("A-4b · 寄存器格复用输入框，失焦发 write-register（x0 / 运行中不可写）", () => {
+        const el = show("debug");
+        const input = el.querySelector('[data-reg-edit="1"]');
+        assert.ok(input, "x1 格子里没有编辑输入框");
+
+        const seen = [];
+        const listener = (ev) => {
+            if (ev.detail?.action === "write-register") seen.push(ev.detail);
+        };
+        dom.window.addEventListener("riscv:command", listener);
+        input.value = "0000002a";
+        input.dispatchEvent(new Event("focusout"));
+        dom.window.removeEventListener("riscv:command", listener);
+
+        assert.equal(seen.length, 1, "失焦没有发 write-register");
+        assert.deepEqual(seen[0].params, { index: 1, value: 42 });
+
+        const x0 = el.querySelector('[data-reg-edit="0"]');
+        assert.ok(x0.hasAttribute("disabled"), "x0 必须不可编辑（恒等于 0）");
+    });
+
     test("A-5 · 波形视图的 `.channel-list > li` **仍在**（稳定钩子 · 裁决 A）", () => {
         m03.setState("waveform", (prev) => ({
             ...prev,

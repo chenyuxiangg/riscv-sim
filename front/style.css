@@ -612,6 +612,20 @@ a { color: inherit; text-decoration: none; }
 }
 .reg-grid > div { background: rgba(255, 255, 255, .02); border-radius: 4px; padding: 4px 6px; }
 .reg-grid span { color: var(--tx2); margin-right: 6px; }
+.reg-grid .reg-edit {
+    width: 7.2em;
+    min-width: 0;
+    padding: 1px 2px;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: right;
+}
+.reg-grid .reg-edit:hover { border-color: var(--line); }
+.reg-grid .reg-edit:focus { border-color: var(--brand); background: var(--panel); outline: none; }
+.reg-grid .reg-edit:disabled { color: var(--tx2); cursor: not-allowed; }
 .grid-2 { display: grid; grid-template-columns: 1fr; gap: 8px; }
 .pc, .timeVirt { font-family: var(--mono); }
 

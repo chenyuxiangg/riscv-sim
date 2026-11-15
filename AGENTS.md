@@ -189,7 +189,7 @@ riscv_sim/
 | M-04 | 会话管理器 | `front/services/m04_session.js` | ✅ |
 | M-05 | 命令路由与事件分发 | `front/services/m05_commandrouter.js` | ✅ |
 | M-07 | 传输适配器 | `front/services/m07_transport.js` | ✅ |
-| M-10 | 寄存器内存服务 | `front/services/m10_registermemory.js` | ✅ |
+| M-10 | 寄存器内存服务（GPR + 内存读写；CSR/PC 写、写版本校验未做） | `front/services/m10_registermemory.js` | 🟡 |
 | M-21 | 日志系统 | `crates/kernel/src/m21_logging/` | ✅ |
 | M-22 | 健康管理 HMS | `crates/kernel/src/m22_hms/` | ✅ |
 | M-23 | 数据存储与持久化 DataStore | `crates/kernel/src/m23_datastore/` + `front/services/m23_boardstore.js` | 🟡 前端 IndexedDB 已落地；SQLite 服务端 stub |

@@ -410,8 +410,8 @@ describe("运行中隐藏活值（视图层）", () => {
         setRunState({ mode: "idle", windows: 0, busy: 0 });
         const idle = view.render({ sim: { gpr: GPR, pc: 0x20 }, debug: {}, timeVirt: 123 });
         const idleCells = [...idle.matchAll(
-            /<span class="muted">x\d+<\/span><code[^>]*>([^<]*)<\/code>/g,
-        )].map((m) => m[1]);
+            /<span class="muted">x\d+<\/span><code[^>]*>(?:<input[^>]*value="([^"]*)")?([^<]*)<\/code>/g,
+        )].map((m) => m[1] ?? m[2]);
         assert.equal(idleCells.length, 32, "寄存器格必须**仍是 32 个**（稳定钩子）");
         assert.ok(
             idleCells.every((c) => c !== "-"),
@@ -473,8 +473,8 @@ describe("运行中隐藏活值（视图层）", () => {
         setRunState({ mode: "idle", windows: 0, busy: 0 });
         const idle = view.render(state);
         const idleCells = [...idle.matchAll(
-            /<span class="muted">x\d+<\/span><code[^>]*>([^<]*)<\/code>/g,
-        )].map((m) => m[1]);
+            /<span class="muted">x\d+<\/span><code[^>]*>(?:<input[^>]*value="([^"]*)")?([^<]*)<\/code>/g,
+        )].map((m) => m[1] ?? m[2]);
         assert.equal(idleCells.length, 32, "寄存器格必须**仍是 32 个**（稳定钩子）");
         assert.ok(
             idleCells.every((c) => c !== "-"),

@@ -332,7 +332,7 @@ describe("M-10 寄存器内存服务", () => {
         assert.equal(transport.sent.length, 1);
         assert.deepEqual(
             transport.sent[0].message.payload,
-            { Command: { Subscribe: { topic: "sim.registers" } } },
+            { Command: { Subscribe: { topic: "sim.state.delta" } } },
         );
         transport.emit(eventFrame(
             transport.sent[0].reqId,
@@ -350,7 +350,7 @@ describe("M-10 寄存器内存服务", () => {
         assert.equal(transport.sent.length, 2, "重连后没有重新订阅");
         assert.deepEqual(
             transport.sent[1].message.payload,
-            { Command: { Subscribe: { topic: "sim.registers" } } },
+            { Command: { Subscribe: { topic: "sim.state.delta" } } },
         );
 
         // Answer the second subscribe so no command is left pending.
@@ -423,7 +423,7 @@ describe("M-10 寄存器内存服务", () => {
         assert.equal(subscribes.length, 2, "装载工程后没有重新订阅，推送会静默停掉");
         assert.deepEqual(
             transport.sent[2].message.payload,
-            { Command: { Subscribe: { topic: "sim.registers" } } },
+            { Command: { Subscribe: { topic: "sim.state.delta" } } },
         );
 
         // 4) 答上订阅，别留 pending。
@@ -461,6 +461,95 @@ describe("M-10 寄存器内存服务", () => {
             Event.registers(0, new Array(32).fill(0)),
         ));
         await again;
+        router.close();
+        service.close();
+    });
+
+    test("同一地址+宽度第二次读命中缓存，不再发 ReadMemory", async () => {
+        const transport = createFakeTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
+
+        const first = service.readMemory(0x100, "Word");
+        const reqId = transport.sent[0].reqId;
+        transport.emit(eventFrame(reqId, Event.memoryRead(0x100, "Word", 49)));
+        await first;
+        const second = await service.readMemory(0x100, "Word");
+        assert.equal(second.value, 49);
+        assert.equal(transport.sent.length, 1, "缓存命中却又发了一次 ReadMemory");
+        router.close();
+        service.close();
+    });
+
+    test("tick 之后内存缓存失效（程序可能已经改过内存）", async () => {
+        const transport = createFakeTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
+
+        const first = service.readMemory(0x100, "Word");
+        transport.emit(eventFrame(transport.sent[0].reqId, Event.memoryRead(0x100, "Word", 49)));
+        await first;
+        transport.emit(eventFrame(null, Event.tick(5000, 0x10)));
+
+        const second = service.readMemory(0x100, "Word");
+        assert.equal(transport.sent.length, 2, "tick 之后仍命中旧缓存");
+        transport.emit(eventFrame(transport.sent[1].reqId, Event.memoryRead(0x100, "Word", 50)));
+        assert.equal((await second).value, 50);
+        router.close();
+        service.close();
+    });
+
+    test("writeMemory 先失效缓存，读回必须真的重新读", async () => {
+        const transport = createFakeTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
+
+        const first = service.readMemory(0x100, "Word");
+        transport.emit(eventFrame(transport.sent[0].reqId, Event.memoryRead(0x100, "Word", 1)));
+        await first;
+
+        const write = service.writeMemory(0x100, "Word", 2);
+        transport.emit(eventFrame(transport.sent[1].reqId, Event.tick(10, 0)));
+        await tick();
+        assert.equal(
+            transport.sent[2].message.payload.Command.ReadMemory.addr,
+            0x100,
+            "写后读回被旧缓存吞掉了",
+        );
+        transport.emit(eventFrame(transport.sent[2].reqId, Event.memoryRead(0x100, "Word", 2)));
+        assert.equal((await write).value, 2);
+        router.close();
+        service.close();
+    });
+
+    test("reset 清掉内存页缓存", async () => {
+        const transport = createFakeTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
+
+        const first = service.readMemory(0x100, "Word");
+        transport.emit(eventFrame(transport.sent[0].reqId, Event.memoryRead(0x100, "Word", 49)));
+        await first;
+        service.reset();
+        const second = service.readMemory(0x100, "Word");
+        assert.equal(transport.sent.length, 2, "reset 之后仍命中上一会话的缓存");
+        transport.emit(eventFrame(transport.sent[1].reqId, Event.memoryRead(0x100, "Word", 0)));
+        await second;
+        router.close();
+        service.close();
+    });
+
+    test("订阅的是状态增量主题，而不是寄存器波形兼容主题", async () => {
+        const transport = createFakeTransport();
+        const router = await m05.mountCommandRouter({ transport });
+        const service = await m10.mountRegisterMemory({ commandRouter: router, transport });
+        const subscribed = service.ensureSubscribed();
+        assert.deepEqual(
+            transport.sent[0].message.payload,
+            { Command: { Subscribe: { topic: "sim.state.delta" } } },
+        );
+        transport.emit(eventFrame(transport.sent[0].reqId, Event.tick(0, 0)));
+        await subscribed;
         router.close();
         service.close();
     });

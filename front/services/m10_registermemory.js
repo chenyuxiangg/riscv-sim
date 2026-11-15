@@ -5,14 +5,13 @@
 // and the memory cells the workbench has read.
 //
 // Where the data comes from (all through M-05 → M-07):
-//   - registers     : `EventPayload::Registers { index, values }` — the
-//                     **first-class** carrier added in contract v2
-//                     (topic `sim.registers`). The kernel may still also
-//                     push the register file as edge-encoded waveform
-//                     streams (`EventPayload::WaveformHistory`, streams
-//                     `cpu.gpr.xN` / `cpu.pc`); that path is kept so the
-//                     service works against a kernel that has not been
-//                     rewired to the new event yet.
+//   - registers     : `EventPayload::SimStateDelta { registers, pc }` — the
+//                     production carrier on topic `sim.state.delta` (the
+//                     first subscription sends a full 32-register batch,
+//                     each run window sends only changes). The
+//                     `Registers` reply and the edge-encoded
+//                     (`cpu.gpr.xN` / `cpu.pc`) waveform path are kept as
+//                     compatibility inputs for older kernels/clients.
 //   - virtual time  : `EventPayload::Tick { elapsed_ps, pc }` —
 //                     `elapsed_ps` travels as a **decimal string**
 //                     (contract v2 §2.2), so it is read back through
@@ -97,6 +96,16 @@ export async function mountRegisterMemory(options = {}) {
      * @type {{addr: number, size: string}[]}
      */
     const memoryReads = [];
+    /**
+     * 内存读缓存：键 = `地址|宽度`。
+     *
+     * 只在**两次执行推进之间**有效：`tick` / `sim.state.delta` / 写内存 /
+     * `reset` 都会清掉。程序没跑过、内存没被写过时，同一个单元重复点
+     * 「读内存」不必再走一次内核往返。
+     *
+     * @type {Map<string, {addr: number, size: string, value: number}>}
+     */
+    const memoryPages = new Map();
     let lastError = null;
     let subscribed = false;
 
@@ -215,6 +224,8 @@ export async function mountRegisterMemory(options = {}) {
 
     const offStateDelta = router?.subscribe?.("sim.state.delta", (event) => {
         applyStateDelta(event.value);
+        // 状态增量说明执行推进过（或寄存器被写过）⇒ 内存页缓存可能过期。
+        invalidateMemoryPages();
         notify();
         scheduleRender();
     }) ?? null;
@@ -248,6 +259,8 @@ export async function mountRegisterMemory(options = {}) {
         }
         if (elapsed !== null) timeVirt = elapsed;
         if (typeof event.value?.pc === "number") pc = event.value.pc >>> 0;
+        // 每个 tick 都代表执行推进过：缓存的内存值不再可信。
+        invalidateMemoryPages();
         notify();
         scheduleRender();
     }) ?? null;
@@ -257,6 +270,12 @@ export async function mountRegisterMemory(options = {}) {
         const value = event.value?.value;
         if (typeof addr === "number" && typeof value === "number") {
             memory[formatAddr(addr)] = value >>> 0;
+            const size = String(event.value?.size ?? WRITE_SIZE.Word);
+            memoryPages.set(memoryPageKey(addr, size), {
+                addr: addr >>> 0,
+                size,
+                value: value >>> 0,
+            });
         }
         notify();
         scheduleRender();
@@ -341,6 +360,16 @@ export async function mountRegisterMemory(options = {}) {
         memoryReads.push({ addr: key, size: width });
     }
 
+    /** 内存读缓存的键：同一个地址按 Byte / Half / Word 是三个不同的值。 */
+    function memoryPageKey(addr, size) {
+        return `${Number(addr ?? 0) >>> 0}|${String(size ?? WRITE_SIZE.Word)}`;
+    }
+
+    /** 执行推进 / 写内存 / 换会话之后，旧值一律不再可信。 */
+    function invalidateMemoryPages() {
+        memoryPages.clear();
+    }
+
     /**
      * Ask the kernel for a fresh register snapshot.
      *
@@ -384,17 +413,20 @@ export async function mountRegisterMemory(options = {}) {
     }
 
     /**
-     * Subscribe to the kernel-side register topic.
+     * Subscribe to the kernel-side state-delta topic.
      *
-     * This is the **push** side: the kernel keeps sending register
-     * updates to the `sim.registers` topic until the subscription dies
-     * (a `LoadProject` kills it, and so does a disconnect).
+     * This is the **push** side: the kernel sends `SimStateDelta` on
+     * `sim.state.delta` until the subscription dies (a `LoadProject`
+     * kills it, and so does a disconnect). The old `sim.registers`
+     * waveform stream remains a compatibility input, but it is no longer
+     * the production carrier — subscribing to both would double every
+     * register update.
      *
      * @returns {Promise<object>}
      */
     async function subscribeRegisterTopic() {
         if (!router) throw new Error(`${FRONT_ERROR_CODES["E_TRX-01"]}: 未挂载命令路由器（M-05）`);
-        const event = await router.dispatchCommand(Command.subscribe("sim.registers"));
+        const event = await router.dispatchCommand(Command.subscribe("sim.state.delta"));
         // The kernel-side subscription only survives while the link is
         // up: a disconnect during the round-trip invalidates it, and
         // `ensureSubscribed()` has to subscribe again after the
@@ -415,8 +447,23 @@ export async function mountRegisterMemory(options = {}) {
      */
     async function readMemory(addr, size = WRITE_SIZE.Word) {
         if (!router) throw new Error(`${FRONT_ERROR_CODES["E_TRX-01"]}: 未挂载命令路由器（M-05）`);
+        const key = memoryPageKey(addr, size);
+        const hit = memoryPages.get(key);
+        if (hit) {
+            // 命中只在执行没推进、内存没被写过的窗口里成立；`tick` /
+            // `sim.state.delta` / `writeMemory` / `reset` 都会清掉这一项。
+            rememberMemoryRead(addr, size);
+            return { ...hit };
+        }
         const event = await router.dispatchCommand(Command.readMemory(addr, size));
         rememberMemoryRead(addr, size);
+        if (event?.value && typeof event.value.addr === "number" && typeof event.value.value === "number") {
+            memoryPages.set(key, {
+                addr: event.value.addr >>> 0,
+                size: String(event.value.size ?? size),
+                value: event.value.value >>> 0,
+            });
+        }
         return event.value;
     }
 
@@ -431,6 +478,8 @@ export async function mountRegisterMemory(options = {}) {
      */
     async function writeMemory(addr, size = WRITE_SIZE.Word, value = 0) {
         if (!router) throw new Error(`${FRONT_ERROR_CODES["E_TRX-01"]}: 未挂载命令路由器（M-05）`);
+        // 写会改变同一地址（及其他宽度）的缓存值：先失效，读回必须走内核。
+        invalidateMemoryPages();
         await router.dispatchCommand(Command.writeMemory(addr, size, value));
         return readMemory(addr, size);
     }
@@ -538,6 +587,7 @@ export async function mountRegisterMemory(options = {}) {
         // ⇒ ⇒ 留着就是一份**不存在的**记忆 ⇒ ⇒ 自动读回会去读**新程序**的
         // 同一批地址 ⇒ ⇒ 那是**另一份**语义。
         memoryReads.length = 0;
+        invalidateMemoryPages();
         notify();
         flushRender();
     }

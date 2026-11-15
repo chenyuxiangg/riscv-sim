@@ -1833,6 +1833,25 @@ const debugView = register({
     mountFor(el) {
         el.addEventListener("click", (ev) => debugView.onCommand(ev));
         mountAddrInputListeners(el);
+        // ⚠️ **寄存器写入复用格内编辑框**：不在别处另开输入口，失焦即写。
+        //   `focusout` 会冒泡（`blur` 不会），所以监听挂在视图正文容器上。
+        el.addEventListener("focusout", (ev) => {
+            const input = ev.target?.closest?.("[data-reg-edit]");
+            if (!input || input.hasAttribute("disabled")) return;
+            const original = String(input.getAttribute("data-reg-original") ?? "");
+            const raw = String(input.value ?? "").trim();
+            if (raw === original) return;
+            const parsed = parseAddrInput(raw);
+            if (!parsed.ok) {
+                // 格式不对就还原，不把一条注定被内核拒掉的命令发出去。
+                input.value = original;
+                return;
+            }
+            emitCommand("write-register", "debug", {
+                index: Number(input.getAttribute("data-reg-edit")),
+                value: parsed.value,
+            });
+        });
         // ⚠️ **「跟随 PC」复选框走 `change`**（不是 `click`）⇒ ⇒ `click` 事件
         //   触发时 `checked` **还没变** ⇒ ⇒ 读它会拿到**旧值** ⇒ ⇒ 必须用
         //   `change`。
@@ -2016,7 +2035,17 @@ export function renderRegGrid(gpr, prevGpr, running = false) {
         }
         const clsAttr = cls ? ` class="${cls}"` : "";
         const text = liveValue(running, cur.toString(16).padStart(8, "0"));
-        return `<div><span class="muted">x${i}</span><code${clsAttr}>${text}</code></div>`;
+        // 运行中不重建输入框：值不可写，也避免抢走运行面板的焦点。
+        if (running === true) {
+            return `<div><span class="muted">x${i}</span><code${clsAttr}>${text}</code></div>`;
+        }
+        // 复用寄存器格里的编辑框：失焦即写；x0 恒等于 0，只读。
+        const disabled = i === 0 ? " disabled" : "";
+        const hex = cur.toString(16).padStart(8, "0");
+        return `<div><span class="muted">x${i}</span><code${clsAttr}>`
+            + `<input class="reg-edit" data-reg-edit="${i}" data-reg-original="${hex}"`
+            + ` value="${hex}" spellcheck="false" autocomplete="off"${disabled}>`
+            + `</code></div>`;
     }).join("");
 }
 

@@ -113,6 +113,49 @@ fn nop_produces_a_tick() {
 }
 
 #[test]
+fn state_delta_subscription_emits_full_then_incremental_register_state() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+
+    // 订阅先给全量：32 个 GPR + PC。
+    let events = dispatch(
+        &mut host,
+        CommandPayload::Subscribe {
+            topic: "sim.state.delta".to_string(),
+        },
+    );
+    let full = events
+        .iter()
+        .find_map(|event| match event {
+            EventPayload::SimStateDelta { registers, pc, .. } => Some((registers.clone(), *pc)),
+            _ => None,
+        })
+        .expect("订阅 sim.state.delta 必须回一条全量 SimStateDelta");
+    assert_eq!(full.0.len(), 32, "首条 SimStateDelta 必须是全量寄存器");
+    assert!(full.1.is_some(), "首条 SimStateDelta 必须带 PC");
+
+    // 跑一条：增量只带变过的寄存器 / PC。
+    let events = dispatch(&mut host, CommandPayload::StepN { n: 1 });
+    let delta = events
+        .iter()
+        .find_map(|event| match event {
+            EventPayload::SimStateDelta { registers, pc, .. } => Some((registers.clone(), *pc)),
+            _ => None,
+        })
+        .expect("步进后必须回一条 SimStateDelta");
+    assert!(delta.0.len() < 32, "增量又把 32 个寄存器全发了一遍");
+    assert!(delta.1.is_some(), "PC 变了却没有带 pc");
+}
+
+#[test]
 fn load_project_resets_and_clears_the_session() {
     let mut host = KernelHost::new();
     // 先订阅，再装载 —— 装载会清掉订阅（新工程 = 新会话，FR-13）。

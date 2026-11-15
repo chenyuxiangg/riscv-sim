@@ -180,9 +180,9 @@ use riscv_sim_contract::error::{
     PROTO_FAMILY,
 };
 use riscv_sim_contract::model::{
-    Edge, ImageKind, ImageRef, ImageSource, PlatformTemplateInfo, Project, TraceEvent, TraceFormat,
-    TraceSource, WatchExpr, WatchValue, WaveformHistory, WaveformStream, WriteSize,
-    SIM_STATE_SCHEMA_VERSION,
+    DeltaRegister, Edge, ImageKind, ImageRef, ImageSource, PlatformTemplateInfo, Project,
+    TraceEvent, TraceFormat, TraceSource, WatchExpr, WatchValue, WaveformHistory, WaveformStream,
+    WriteSize, SIM_STATE_SCHEMA_VERSION,
 };
 use riscv_sim_contract::platform::{mcu_isa_info, PlatformDescription, RegionSpec};
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
@@ -338,6 +338,12 @@ pub const IRQ_PULSE_VALUE_WIDTH: u8 = 64;
 /// **一等公民**的寄存器载体；这条边沿流是**兼容路径**（前端视图仍
 /// 靠它渲染），两者并存。
 pub const TOPIC_REGISTERS: &str = "sim.registers";
+
+/// 订阅主题：状态增量（`EventPayload::SimStateDelta`）。
+///
+/// M-10 的增量订阅落点。与 `TOPIC_REGISTERS` 的波形兼容流并存：
+/// 生产路径用这条自定义事件，旧路径保留给尚未改接的客户端。
+pub const TOPIC_STATE_DELTA: &str = "sim.state.delta";
 
 /// 订阅主题：探针波形。
 pub const TOPIC_WAVEFORM: &str = "sim.waveform";
@@ -815,6 +821,12 @@ pub struct KernelHost {
     published_pc: u32,
     /// 是否已经发布过（全量快照之后才为真）。
     published_valid: bool,
+    /// 上一次已发布的 `SimStateDelta` 寄存器值（与波形那份分开记账）。
+    delta_published_regs: [u32; 32],
+    /// 上一次已发布的 `SimStateDelta` PC。
+    delta_published_pc: u32,
+    /// 是否已经发过全量 `SimStateDelta`。
+    delta_published_valid: bool,
     /// M-18 探针注册表（D-46）—— 判沿 + 访存 trace 环。
     probes: Option<Rc<RefCell<ProbeRegistry>>>,
     /// M-19 波形管道（D-46）—— 边沿的环形缓冲（导出用）。
@@ -1082,6 +1094,9 @@ impl KernelHost {
             published_regs: [0; 32],
             published_pc: 0,
             published_valid: false,
+            delta_published_regs: [0; 32],
+            delta_published_pc: 0,
+            delta_published_valid: false,
             probes: None,
             waveform: None,
             probe_bridge_failures: 0,
@@ -2915,6 +2930,7 @@ impl KernelHost {
         self.topics.clear();
         // The next register push must be a **full** snapshot.
         self.published_valid = false;
+        self.delta_published_valid = false;
 
         // ⚠️ **装载成功** ⇒ 本会话**已经装载过镜像**（STAGE-14 §2.3 裁决 C）。
         //
@@ -3468,6 +3484,10 @@ impl KernelHost {
         events.push(self.tick());
         if let Some(wave) = self.register_waveform(false) {
             events.push(wave);
+        }
+        // M-10 的增量状态：只发订阅了 `sim.state.delta` 的客户端。
+        if let Some(delta) = self.state_delta_event(false) {
+            events.push(delta);
         }
         // 探针波形（D-46）：本轮运行里外设状态变化产生的边沿。
         if let Some(wave) = self.waveform_event(false) {
@@ -4385,6 +4405,7 @@ impl KernelHost {
     /// 订阅一个主题。
     fn on_subscribe(&mut self, topic: String) -> Vec<EventPayload> {
         let want_registers = topic == TOPIC_REGISTERS;
+        let want_state_delta = topic == TOPIC_STATE_DELTA;
         let want_waveform = topic == TOPIC_WAVEFORM;
         let want_console = topic == TOPIC_CONSOLE;
         let want_memory_map = topic == TOPIC_MEMORY_MAP;
@@ -4398,6 +4419,12 @@ impl KernelHost {
             // current register file.
             if let Some(wave) = self.register_waveform(true) {
                 events.push(wave);
+            }
+        }
+        if want_state_delta {
+            // 订阅先给全量，之后每次运行窗口只给增量。
+            if let Some(delta) = self.state_delta_event(true) {
+                events.push(delta);
             }
         }
         if want_waveform {
@@ -4514,6 +4541,47 @@ impl KernelHost {
             schema_version: WAVEFORM_SCHEMA_VERSION,
             streams,
         }))
+    }
+
+    /// 状态增量（`SimStateDelta`）。
+    ///
+    /// - `all = true` → **全量**：32 个 GPR + PC。
+    /// - `all = false` → **增量**：只带值变过的寄存器；PC 变了才带 `Some`。
+    ///
+    /// 没有订阅 `sim.state.delta` 时返回 `None`（不发事件）。
+    fn state_delta_event(&mut self, all: bool) -> Option<EventPayload> {
+        if !self.topics.contains(TOPIC_STATE_DELTA) {
+            return None;
+        }
+        let state = self.backend.engine().snapshot();
+        let now_ps = state.virtual_time_ps;
+        let mut registers: Vec<DeltaRegister> = Vec::new();
+        for i in 0..32usize {
+            let changed =
+                !self.delta_published_valid || self.delta_published_regs[i] != state.gpr[i];
+            if all || changed {
+                registers.push(DeltaRegister {
+                    index: i as u32,
+                    value: state.gpr[i],
+                });
+            }
+            self.delta_published_regs[i] = state.gpr[i];
+        }
+        let pc_changed = !self.delta_published_valid || self.delta_published_pc != state.pc;
+        self.delta_published_pc = state.pc;
+        self.delta_published_valid = true;
+        if registers.is_empty() && !pc_changed {
+            return None;
+        }
+        Some(EventPayload::SimStateDelta {
+            registers,
+            pc: if all || pc_changed {
+                Some(state.pc)
+            } else {
+                None
+            },
+            t_ps: now_ps,
+        })
     }
 
     /// 把平台错误翻译成契约的 `Error` 事件。
