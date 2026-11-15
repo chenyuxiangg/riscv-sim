@@ -130,7 +130,7 @@ fn parse_address(text: &str) -> Result<AddressSpec, WatchExprError> {
         .skip(1)
         .find(|(_, c)| *c == '+' || *c == '-');
     let (base_text, offset) = match split {
-        Some((i, c)) => {
+        Some((i, _)) => {
             let base = &text[..i];
             let off = &text[i..];
             let offset = off
