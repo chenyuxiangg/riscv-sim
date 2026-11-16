@@ -60,6 +60,9 @@
 //! [`DwarfLines::from_sections`] **仍然返回 `Ok`**。理由：「解析不出来」
 //! ≠「加载失败」—— 一个没有行表的 ELF 依然能反汇编、能导出。
 
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
+
 use riscv_sim_contract::error::PlatformError;
 use riscv_sim_contract::model::LineEntry;
 
@@ -141,6 +144,7 @@ pub struct UnitHeaderInfo {
 /// ⚠️ **序列边界不可跨越**（验收 A-7）：一段的行记录**只**覆盖
 /// `[首行地址, end_addr)` —— `end_sequence` 的那个地址**不属于**这一段
 /// （它是下一段的起点，或者根本没人管）。
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Sequence {
     /// 这一段的行记录（按地址升序；同地址时**后出现的**在后 ⇒ 它生效）。
@@ -184,22 +188,140 @@ impl Row {
     }
 }
 
-/// DWARF 行表子组件（**Wave 2 = 真解析**）。
+// 依赖方向：M-06 带出**调试节区原始字节**（裁决 B）⇒ M-11 解析。
+// 本模块**不依赖** M-13 / M-19 / 契约层以外的东西。
+
+/// 一次按需解析时，目标地址之后额外保留的行记录数（预取窗口）。
+const LINE_WINDOW_ROWS: usize = 64;
+
+/// 行缓存最多保留的行记录数（超过就淘汰最早进入缓存的 sequence）。
 ///
-/// 依赖方向：M-06 带出**调试节区原始字节**（裁决 B）⇒ M-11 解析。
-/// 本模块**不依赖** M-13 / M-19 / 契约层以外的东西。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// ⚠️ 这**不是**输入拒绝上限：合法的大行表照样装载、照样可查；它只约束
+/// 「按需解析出来的行」在内存里留多少。
+const LINE_CACHE_MAX_ROWS: usize = 65_536;
+
+/// v5 目录表/文件表的**结构**上限。
+///
+/// ⚠️ 这不是行数上限：v5 的 `directory_entry_format_count == 0` 时，一个
+/// 表项可以**零字节** ⇒ 恶意输入能用极小字节声明一个巨大计数 ⇒ 循环炸弹。
+/// 目录/文件表是头部元数据，正常工具链远低于这个量级。
+const MAX_HEADER_TABLE_ENTRIES: u64 = 65_535;
+
+/// 一个已成功建立索引的行号程序单元。
+#[derive(Debug, Clone)]
+struct LineUnit {
+    /// 单元在 `.debug_line` 里的起始偏移（`unit_length` 字段）。
+    start: usize,
+    /// 单元结束偏移（不含）。
+    end: usize,
+    /// 头部（目录/文件表与状态机初值）。
+    header: Header,
+}
+
+/// 一段行号序列的**索引**（不持有行记录）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SequenceRange {
+    /// 所属 `DwarfLines::units` 下标。
+    unit: usize,
+    /// 这一段第一条行记录的地址。
+    start_addr: u64,
+    /// 这一段的结束地址（不含）。
+    end_addr: u64,
+    /// 这一段在单元内的起始偏移（上一次 `end_sequence` 之后的位置）。
+    start_off: usize,
+    /// 这一段在单元内的结束偏移（`end_sequence` 之后，或单元末尾）。
+    end_off: usize,
+    /// 这一段有多少条行记录（索引阶段数出来，不存行）。
+    row_count: usize,
+}
+
+/// 某个 sequence 按需解析后留下的窗口。
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    rows: Vec<Row>,
+    /// 窗口覆盖的起始地址（含）。
+    window_start: u64,
+    /// 窗口覆盖的结束地址（不含）。
+    window_end: u64,
+}
+
+impl CacheEntry {
+    /// 在窗口内取「最后一条 address ≤ addr」的行。
+    fn lookup(&self, addr: u64) -> Option<LineEntry> {
+        let idx = self.rows.partition_point(|row| u64::from(row.addr) <= addr);
+        if idx == 0 {
+            return None;
+        }
+        let row = &self.rows[idx - 1];
+        if row.line == 0 || row.file.is_empty() {
+            return None;
+        }
+        Some(row.to_entry())
+    }
+}
+
+/// 行窗口缓存（按 sequence 下标索引，FIFO 淘汰）。
+#[derive(Debug, Clone, Default)]
+struct LineCache {
+    entries: HashMap<usize, CacheEntry>,
+    order: VecDeque<usize>,
+    rows: usize,
+}
+
+impl LineCache {
+    fn insert(&mut self, key: usize, entry: CacheEntry) {
+        if entry.rows.is_empty() {
+            return;
+        }
+        if let Some(old) = self.entries.remove(&key) {
+            self.rows = self.rows.saturating_sub(old.rows.len());
+        }
+        self.rows += entry.rows.len();
+        self.order.push_back(key);
+        self.entries.insert(key, entry);
+        while self.rows > LINE_CACHE_MAX_ROWS {
+            let Some(victim) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(old) = self.entries.remove(&victim) {
+                self.rows = self.rows.saturating_sub(old.rows.len());
+            }
+        }
+    }
+}
+
+/// DWARF 行表子组件（**懒解析**）。
+///
+/// 装载阶段只建立 **unit 头部 + sequence 范围索引**；行记录不落内存。
+/// `resolve` / `Disasm` 第一次查某个地址时，才按需跑那一段行号程序，并
+/// 只保留「目标行 + 预取窗口」。这样合法的大行表不再被整体物化，
+/// 也不需要「超过 2×10⁵ 条就拒绝文件」这种语义上限。
+#[derive(Debug, Clone, Default)]
 pub struct DwarfLines {
     /// 如实记录的状态。
     status: DwarfStatus,
-    /// 全部行号程序单元的行记录（按序列归并）。
-    sequences: Vec<Sequence>,
-    /// 每个**成功解析**的单元的头部自检信息。
+    /// 原始 `.debug_line`（按需解析要重新跑字节）。
+    line_bytes: Vec<u8>,
+    /// `.debug_line_str`（v5 路径字符串）。
+    line_str: Vec<u8>,
+    /// `.debug_str`（v5 路径字符串）。
+    debug_str: Vec<u8>,
+    /// 成功索引的单元。
+    units: Vec<LineUnit>,
+    /// 全部 sequence 的范围索引（按 `start_addr` 排序）。
+    sequences: Vec<SequenceRange>,
+    /// `sequences[..=i]` 的 `end_addr` 最大值（查地址时用来提前停）。
+    prefix_max_end: Vec<u64>,
+    /// 每个成功索引的单元的头部自检信息。
     unit_headers: Vec<UnitHeaderInfo>,
-    /// 成功解析的单元数。
+    /// 成功索引的单元数。
     units_parsed: usize,
     /// 降级（不贡献行记录）的单元数。
     units_degraded: usize,
+    /// 索引阶段数出来的总行记录数（不物化行）。
+    total_rows: usize,
+    /// 按需解析的行窗口缓存。
+    cache: RefCell<LineCache>,
 }
 
 impl DwarfLines {
@@ -208,9 +330,6 @@ impl DwarfLines {
     /// ⚠️ **恒返回 `Ok`** —— 畸形输入一律**降级**
     /// （[`DwarfStatus::Malformed`]），**不是错误**（「解析不出来」≠
     /// 「加载失败」）。
-    ///
-    /// ⚠️ 多个 `.debug_line` ⇒ **最后一个**说了算（白名单提取时本就只应
-    /// 有一个）。
     pub fn from_sections(sections: &[(String, Vec<u8>)]) -> Result<Self, PlatformError> {
         let mut line: Option<&[u8]> = None;
         let mut line_str: &[u8] = &[];
@@ -224,41 +343,55 @@ impl DwarfLines {
             }
         }
         let Some(bytes) = line else {
-            return Ok(Self {
-                status: DwarfStatus::Absent,
-                sequences: Vec::new(),
-                unit_headers: Vec::new(),
-                units_parsed: 0,
-                units_degraded: 0,
-            });
+            return Ok(Self::default());
         };
-        Ok(Self::parse(bytes, line_str, debug_str))
+        Ok(Self::parse(
+            bytes.to_vec(),
+            line_str.to_vec(),
+            debug_str.to_vec(),
+        ))
     }
 
-    /// 解析 `.debug_line` 节区（**全部**行号程序单元）。
-    fn parse(bytes: &[u8], line_str: &[u8], debug_str: &[u8]) -> Self {
-        let mut sequences: Vec<Sequence> = Vec::new();
+    /// 建立索引：只跑行号程序来收集 sequence 范围，不保留行记录。
+    fn parse(bytes: Vec<u8>, line_str: Vec<u8>, debug_str: Vec<u8>) -> Self {
+        let mut units: Vec<LineUnit> = Vec::new();
+        let mut sequences: Vec<SequenceRange> = Vec::new();
         let mut unit_headers: Vec<UnitHeaderInfo> = Vec::new();
         let mut units_parsed = 0usize;
         let mut units_degraded = 0usize;
+        let mut total_rows = 0usize;
         let mut first_version: Option<u16> = None;
         let mut unsupported_version: Option<u16> = None;
 
         let mut off = 0usize;
         while off < bytes.len() {
-            match parse_unit(bytes, off, line_str, debug_str) {
+            match parse_unit_index(&bytes, off, &line_str, &debug_str) {
                 Ok(unit) => {
                     if unit.supported && !unit.degraded {
+                        let Some(header) = unit.header else {
+                            units_degraded += 1;
+                            off = unit.next_off;
+                            continue;
+                        };
                         units_parsed += 1;
                         if first_version.is_none() {
                             first_version = Some(unit.version);
                         }
-                        unit_headers.push(unit.header);
-                        sequences.extend(unit.sequences);
+                        unit_headers.push(unit.header_info);
+                        let unit_idx = units.len();
+                        total_rows += unit.row_count;
+                        for mut seq in unit.sequences {
+                            seq.unit = unit_idx;
+                            sequences.push(seq);
+                        }
+                        units.push(LineUnit {
+                            start: off,
+                            end: unit.next_off,
+                            header,
+                        });
                     } else {
                         // 降级（未知 form / 未知扩展操作码 / 版本不支持）⇒
-                        // **只降级这个单元**，其余单元照常解析（裁决 B：
-                        // 行号表单元之间互不依赖；裁决 C：降级是**单元级**的）。
+                        // 只降级这个单元，其余单元照常索引。
                         units_degraded += 1;
                         if !unit.supported && unsupported_version.is_none() {
                             unsupported_version = Some(unit.version);
@@ -271,7 +404,7 @@ impl DwarfLines {
                     off = unit.next_off;
                 }
                 Err(_) => {
-                    // 畸形 ⇒ **停在这里**：后面的单元边界已经不可信了。
+                    // 畸形 ⇒ 停在这里：后面的单元边界已经不可信了。
                     units_degraded += 1;
                     break;
                 }
@@ -287,23 +420,34 @@ impl DwarfLines {
             (_, None) => DwarfStatus::Malformed,
         };
 
-        // 归并：按地址排序（**稳定**排序 ⇒ 同地址时后出现的行记录在后 ⇒
-        // 它生效 —— DWARF 的语义是「后一行覆盖前一行」）。
-        for seq in &mut sequences {
-            seq.rows.sort_by_key(|row| row.addr);
+        // 按地址排序。同 start 时按 end 稳定排序；查地址时用前缀最大 end
+        // 处理重叠 sequence。
+        sequences.sort_by_key(|seq| (seq.start_addr, seq.end_addr));
+        let mut prefix_max_end = Vec::with_capacity(sequences.len());
+        let mut running = 0u64;
+        for seq in &sequences {
+            running = running.max(seq.end_addr);
+            prefix_max_end.push(running);
         }
 
         Self {
             status,
+            line_bytes: bytes,
+            line_str,
+            debug_str,
+            units,
             sequences,
+            prefix_max_end,
             unit_headers,
             units_parsed,
             units_degraded,
+            total_rows,
+            cache: RefCell::new(LineCache::default()),
         }
     }
 
     /// 当前状态（宿主 / 测试据此区分「没有 DWARF」「有 DWARF 但解析不出来」
-    /// 与「有 DWARF 且**真的**查过」）。
+    /// 与「有 DWARF 且真的查过」）。
     pub fn status(&self) -> DwarfStatus {
         self.status
     }
@@ -318,36 +462,62 @@ impl DwarfLines {
         self.status.is_recognised()
     }
 
-    /// 成功解析的行号程序单元数。
+    /// 成功索引的行号程序单元数。
     pub fn units_parsed(&self) -> usize {
         self.units_parsed
     }
 
     /// 降级（不贡献行记录）的行号程序单元数。
-    ///
-    /// ⚠️ **可见的降级**：一个单元降级了（未知 form / 畸形）⇒ 它的行记录
-    /// **一条都没有** —— 没人知道就等于「行号表少了一截」。
     pub fn units_degraded(&self) -> usize {
         self.units_degraded
     }
 
-    /// 每个成功解析的单元的头部自检信息。
+    /// 每个成功索引的单元的头部自检信息。
     pub fn unit_headers(&self) -> &[UnitHeaderInfo] {
         &self.unit_headers
     }
 
-    /// 行表里一共有多少条行记录。
+    /// 行表里一共有多少条行记录（索引阶段数出来的，不物化）。
     pub fn line_count(&self) -> usize {
-        self.sequences.iter().map(|s| s.rows.len()).sum()
+        self.total_rows
     }
 
-    /// **测试专用**：全部行记录（含 `is_stmt` / `column` 两个状态机寄存器）。
+    /// **测试专用**：全部行记录（会按需解析所有 sequence）。
     #[cfg(test)]
     fn raw_rows(&self) -> Vec<Row> {
-        self.sequences
-            .iter()
-            .flat_map(|s| s.rows.iter().cloned())
-            .collect()
+        let mut out = Vec::new();
+        for (idx, seq) in self.sequences.iter().enumerate() {
+            let Some(unit) = self.units.get(seq.unit) else {
+                continue;
+            };
+            let bytes = &self.line_bytes[unit.start..unit.end];
+            let mut header = unit.header.clone();
+            let mut cur = Cursor::new(bytes, seq.start_off);
+            let mut sink = RowsSink::default();
+            if run_program_with(
+                &mut cur,
+                &mut header,
+                seq.end_off,
+                &self.line_str,
+                &self.debug_str,
+                &mut sink,
+            )
+            .is_ok()
+            {
+                for mut seq in sink.sequences {
+                    seq.rows.sort_by_key(|row| row.addr);
+                    out.extend(seq.rows);
+                }
+            }
+            let _ = idx;
+        }
+        out
+    }
+
+    /// **测试专用**：当前缓存里保留了多少条行记录。
+    #[cfg(test)]
+    fn cached_row_count(&self) -> usize {
+        self.cache.borrow().rows
     }
 
     /// 地址 → 源码行。
@@ -356,64 +526,109 @@ impl DwarfLines {
     /// * **查过行表、没命中** ⇒ [`LineLookup::Missed`]；
     /// * **压根没查**（无 `.debug_line` / 版本不支持 / 解析失败）⇒
     ///   [`LineLookup::NoDwarf`]。
-    ///
-    /// ⚠️ **两态不得混**（裁决 J）：「查过没命中」与「没查」对调用方是
-    /// **两件事**（契约把前者映射成 `line = u32::MAX`，后者映射成
-    /// `line = 0`）。
     pub fn resolve(&self, addr: u32) -> LineLookup {
         if !matches!(self.status, DwarfStatus::Supported(_)) {
             return LineLookup::NoDwarf;
         }
-        match self.lookup_line(addr) {
+        let candidates = self.find_candidates(addr);
+        if candidates.is_empty() {
+            return LineLookup::Missed;
+        }
+        let mut best: Option<LineEntry> = None;
+        for seq_idx in candidates {
+            if let Some(entry) = self.row_for_sequence(seq_idx, addr) {
+                // 候选按 sequence 下标**倒序**处理：同地址时先处理的是
+                // 「后出现的 sequence」⇒ 用严格 `>` 保住它（旧语义：同地址
+                // 以后出现的行生效）。
+                let better = best
+                    .as_ref()
+                    .map_or(true, |current| entry.addr > current.addr);
+                if better {
+                    best = Some(entry);
+                }
+            }
+        }
+        match best {
             Some(entry) => LineLookup::Found(entry),
             None => LineLookup::Missed,
         }
     }
 
-    /// 行表查询：取「**最后一条 address ≤ 目标地址**」的行记录，
-    /// 且**不跨过 `end_sequence` 的段边界**（验收 A-7）。
-    fn lookup_line(&self, addr: u32) -> Option<LineEntry> {
-        let mut best: Option<&Row> = None;
-        for seq in &self.sequences {
-            // 这一段**不覆盖**这个地址（`end_sequence` 的地址属于下一段）。
-            if u64::from(addr) >= seq.end_addr {
-                continue;
+    /// 找出所有覆盖 `addr` 的 sequence（用前缀最大 end 提前停）。
+    fn find_candidates(&self, addr: u32) -> Vec<usize> {
+        let addr64 = u64::from(addr);
+        let end = self
+            .sequences
+            .partition_point(|seq| seq.start_addr <= addr64);
+        let mut out = Vec::new();
+        for idx in (0..end).rev() {
+            if self.prefix_max_end[idx] <= addr64 {
+                break;
             }
-            // 二分：最后一条 `addr <= 目标` 的行记录。
-            let idx = seq.rows.partition_point(|row| row.addr <= addr);
-            if idx == 0 {
-                continue;
-            }
-            let row = &seq.rows[idx - 1];
-            // ⚠️ `line == 0` 的行记录表示「这一行**没有**源码行号」
-            // （DWARF 的 `line = 0` 语义）⇒ 不报行号（报 0 会与契约的
-            // 「没有 DWARF」态撞车）。
-            if row.line == 0 {
-                continue;
-            }
-            // ⚠️ **文件名为空**的行记录（VA-02）：文件索引越界 / 名字取不到
-            // ⇒ 这一行**不知道自己属于哪个文件** ⇒ 报出去就是契约层的
-            // **第三种「没有答案」**（`file == ""` 但 `line` 是**真行号**）
-            // ⇒ 与 `Missed`（`line = u32::MAX`）、`NoDwarf`（`line = 0`）
-            // **都不同** ⇒ 前端 `location?.file` 判空会把它**吞掉**
-            // （用户看到「没变化」，分不清是没点生效还是真的没有）。
-            //
-            // 处理方式与 `line == 0` **完全一致**：这一段**答不了**这个
-            // 地址 ⇒ 跳过这一段（`continue`），**不**退回到上一行 ——
-            // 上一行的行号是**上一行**的（DWARF 里行号是寄存器，逐行可变）
-            // ⇒ 拿它顶替就是「猜出来的行号」（裁决 J 第 1 条）。
-            if row.file.is_empty() {
-                continue;
-            }
-            let better = match best {
-                None => true,
-                Some(current) => row.addr >= current.addr,
-            };
-            if better {
-                best = Some(row);
+            let seq = &self.sequences[idx];
+            if seq.end_addr > addr64 {
+                out.push(idx);
             }
         }
-        best.map(Row::to_entry)
+        out
+    }
+
+    /// 某一段 sequence 在 `addr` 处的行：先查窗口缓存，未命中再按需解析。
+    fn row_for_sequence(&self, seq_idx: usize, addr: u32) -> Option<LineEntry> {
+        let addr64 = u64::from(addr);
+        {
+            let cache = self.cache.borrow();
+            if let Some(entry) = cache.entries.get(&seq_idx) {
+                if addr64 >= entry.window_start && addr64 < entry.window_end {
+                    // 命中缓存：即使这一行本身答不了（line=0 / 文件为空），
+                    // 也**不**回退到别的行 —— 旧语义就是「这一段答不了」。
+                    return entry.lookup(addr64);
+                }
+            }
+        }
+        let entry = self.parse_window(seq_idx, addr)?;
+        let row = entry.lookup(addr64);
+        self.cache.borrow_mut().insert(seq_idx, entry);
+        row
+    }
+
+    /// 按需解析一段 sequence，只保留「目标行 + 预取窗口」。
+    fn parse_window(&self, seq_idx: usize, addr: u32) -> Option<CacheEntry> {
+        let seq = *self.sequences.get(seq_idx)?;
+        let unit = self.units.get(seq.unit)?;
+        let bytes = self.line_bytes.get(unit.start..unit.end)?;
+        let mut header = unit.header.clone();
+        let mut cur = Cursor::new(bytes, seq.start_off);
+        let mut sink = WindowSink::new(addr);
+        run_program_with(
+            &mut cur,
+            &mut header,
+            seq.end_off,
+            &self.line_str,
+            &self.debug_str,
+            &mut sink,
+        )
+        .ok()?;
+        let mut rows: Vec<Row> = Vec::new();
+        if let Some(prev) = sink.prev {
+            rows.push(prev);
+        }
+        rows.extend(sink.after);
+        rows.sort_by_key(|row| row.addr);
+        if rows.is_empty() {
+            return None;
+        }
+        let window_start = u64::from(rows.first()?.addr);
+        let window_end = if sink.complete {
+            seq.end_addr
+        } else {
+            u64::from(rows.last()?.addr).saturating_add(1)
+        };
+        Some(CacheEntry {
+            rows,
+            window_start,
+            window_end,
+        })
     }
 }
 
@@ -432,32 +647,25 @@ enum ParseError {
     UnknownExtendedOpcode,
 }
 
-/// 一个行号程序单元的解析结果。
-struct UnitResult {
-    /// 这个单元的 DWARF 版本。
+/// 一个单元的**索引**结果（只含 sequence 范围，不含行记录）。
+struct UnitIndexResult {
     version: u16,
-    /// 版本在支持集里吗？
     supported: bool,
-    /// 这个单元**降级**了吗（未知 form / 未知扩展操作码）？
-    ///
-    /// ⚠️ 降级的单元**不贡献任何行记录**，但**不牵连**别的单元
-    /// （裁决 C：「整个行号程序单元降级」—— 单元级，不是节区级）。
     degraded: bool,
-    /// 这个单元贡献的行记录（按序列）。
-    sequences: Vec<Sequence>,
-    /// 头部自检信息。
-    header: UnitHeaderInfo,
-    /// 下一个单元的起始偏移。
+    sequences: Vec<SequenceRange>,
+    header: Option<Header>,
+    header_info: UnitHeaderInfo,
     next_off: usize,
+    row_count: usize,
 }
 
-/// 解析一个行号程序单元（`start` = `unit_length` 字段的偏移）。
-fn parse_unit(
+/// 索引一个行号程序单元（`start` = `unit_length` 字段的偏移）。
+fn parse_unit_index(
     bytes: &[u8],
     start: usize,
     line_str: &[u8],
     debug_str: &[u8],
-) -> Result<UnitResult, ParseError> {
+) -> Result<UnitIndexResult, ParseError> {
     if start + 4 > bytes.len() {
         return Err(ParseError::Malformed);
     }
@@ -467,8 +675,6 @@ fn parse_unit(
         bytes[start + 2],
         bytes[start + 3],
     ]);
-    // DWARF64：`initial_length == 0xffff_ffff` ⇒ 长度字段占 12 字节
-    // （标记 4 + 长度 8），`version` 在偏移 12。
     let (length_field, unit_len) = if prefix == 0xffff_ffff {
         if start + 12 > bytes.len() {
             return Err(ParseError::Malformed);
@@ -483,78 +689,130 @@ fn parse_unit(
         .checked_add(length_field as u64)
         .and_then(|v| v.checked_add(unit_len))
         .ok_or(ParseError::Malformed)? as usize;
-    // ⚠️ `unit_length` 越界 ⇒ 节区被截断 ⇒ 畸形（验收 A-10）。
     if unit_end > bytes.len() {
         return Err(ParseError::Malformed);
     }
 
-    // 单元内部的相对偏移（0 = `unit_length` 字段）。
     let unit = &bytes[start..unit_end];
     let mut cur = Cursor::new(unit, length_field);
     let version = cur.u16()?;
 
     if !SUPPORTED_VERSIONS.contains(&version) {
-        return Ok(UnitResult {
+        return Ok(UnitIndexResult {
             version,
             supported: false,
             degraded: true,
             sequences: Vec::new(),
-            header: UnitHeaderInfo {
+            header: None,
+            header_info: UnitHeaderInfo {
                 version,
                 header_length: 0,
                 program_start: unit_end - start,
                 program_end: unit_end - start,
             },
             next_off: unit_end,
+            row_count: 0,
         });
     }
 
     let dwarf64 = length_field == 12;
-    // ⚠️ 「可降级」的错误（未知 form / 未知扩展操作码）⇒ **只降级这个
-    // 单元**：它的边界是**知道的**（`unit_length` 已读到）⇒ 后面的单元
-    // 照常解析。真正的「畸形」（截断 / 越界）⇒ 停。
-    let parsed = (|| -> Result<(Header, Vec<Sequence>), ParseError> {
+    let parsed = (|| -> Result<(Header, IndexSink), ParseError> {
         let mut header = parse_header(&mut cur, version, dwarf64, line_str, debug_str)?;
         let mut prog = Cursor::new(unit, header.program_start);
-        let sequences = run_program(&mut prog, &mut header, unit_end - start)?;
-        Ok((header, sequences))
+        let mut sink = IndexSink::default();
+        run_program_with(
+            &mut prog,
+            &mut header,
+            unit_end - start,
+            line_str,
+            debug_str,
+            &mut sink,
+        )?;
+        Ok((header, sink))
     })();
-    let (header, sequences) = match parsed {
+    let (header, sink) = match parsed {
         Ok(v) => v,
         Err(ParseError::UnsupportedForm) | Err(ParseError::UnknownExtendedOpcode) => {
-            return Ok(UnitResult {
+            return Ok(UnitIndexResult {
                 version,
                 supported: true,
                 degraded: true,
                 sequences: Vec::new(),
-                header: UnitHeaderInfo {
+                header: None,
+                header_info: UnitHeaderInfo {
                     version,
                     header_length: 0,
                     program_start: unit_end - start,
                     program_end: unit_end - start,
                 },
                 next_off: unit_end,
+                row_count: 0,
             });
         }
         Err(e) => return Err(e),
     };
 
-    Ok(UnitResult {
+    Ok(UnitIndexResult {
         version,
         supported: true,
         degraded: false,
-        sequences,
-        header: UnitHeaderInfo {
+        sequences: sink.sequences,
+        header: Some(header.clone()),
+        header_info: UnitHeaderInfo {
             version,
             header_length: header.header_length,
             program_start: header.program_start,
             program_end: unit_end - start,
         },
         next_off: unit_end,
+        row_count: sink.row_count,
     })
 }
 
+/// `DW_LNE_define_file` —— 往文件表里追加一项。
+///
+/// ⚠️ v5 的路径 form（`DW_FORM_line_strp` / `DW_FORM_strp`）需要
+/// `.debug_line_str` / `.debug_str`；旧实现这里传空节区 ⇒ 任何 v5
+/// `define_file` 都会解析失败并把**整个单元**降级（D-104）。
+fn define_file(
+    cur: &mut Cursor,
+    header: &mut Header,
+    line_str: &[u8],
+    debug_str: &[u8],
+) -> Result<(), ParseError> {
+    if header.version >= 5 {
+        // v5：按文件表项格式读**一项**。
+        let entry = read_v5_entry(
+            cur,
+            &header.file_format,
+            header.dwarf64,
+            line_str,
+            debug_str,
+        )?;
+        let name = entry.path.ok_or(ParseError::Malformed)?;
+        if header.files.len() as u64 >= MAX_HEADER_TABLE_ENTRIES {
+            return Err(ParseError::Malformed);
+        }
+        header.files.push(Some(FileEntry {
+            name,
+            dir_index: entry.dir_index,
+        }));
+    } else {
+        // v2~v4：`{ name, dir_index, mtime, length }`。
+        let name = cur.cstring()?;
+        let dir_index = cur.uleb()?;
+        let _mtime = cur.uleb()?;
+        let _length = cur.uleb()?;
+        if header.files.len() as u64 >= MAX_HEADER_TABLE_ENTRIES {
+            return Err(ParseError::Malformed);
+        }
+        header.files.push(Some(FileEntry { name, dir_index }));
+    }
+    Ok(())
+}
+
 /// 行号程序单元的头部。
+#[derive(Debug, Clone)]
 struct Header {
     version: u16,
     /// `minimum_instruction_length`。
@@ -675,6 +933,9 @@ fn parse_header_v2_v4(cur: &mut Cursor, version: u16, dwarf64: bool) -> Result<H
         if name.is_empty() {
             break;
         }
+        if dirs.len() as u64 >= MAX_HEADER_TABLE_ENTRIES {
+            return Err(ParseError::Malformed);
+        }
         dirs.push(Some(name));
     }
 
@@ -689,6 +950,9 @@ fn parse_header_v2_v4(cur: &mut Cursor, version: u16, dwarf64: bool) -> Result<H
         let dir_index = cur.uleb()?;
         let _mtime = cur.uleb()?;
         let _length = cur.uleb()?;
+        if files.len() as u64 >= MAX_HEADER_TABLE_ENTRIES {
+            return Err(ParseError::Malformed);
+        }
         files.push(Some(FileEntry { name, dir_index }));
     }
 
@@ -748,9 +1012,17 @@ fn parse_header_v5(
     let std_opcode_lengths = read_standard_opcode_lengths(cur, opcode_base)?;
 
     // 目录表。
+    //
+    // ⚠️ v5 的计数是 ULEB，且表项格式可以为空（零字节表项）⇒
+    // `Vec::with_capacity(count)` 会被一个极小输入骗成巨额预分配。
+    // 这里先做**结构**校验：计数不能超过头部表项上限；空格式 + 非零计数
+    // 直接判畸形（这种表项既没有路径也没有目录索引，后面必然答不了）。
     let dir_format = read_entry_format(cur)?;
     let dir_count = cur.uleb()?;
-    let mut dirs: Vec<Option<String>> = Vec::with_capacity(dir_count as usize);
+    if dir_count > MAX_HEADER_TABLE_ENTRIES || (dir_format.is_empty() && dir_count > 0) {
+        return Err(ParseError::Malformed);
+    }
+    let mut dirs: Vec<Option<String>> = Vec::new();
     for _ in 0..dir_count {
         dirs.push(read_v5_entry(cur, &dir_format, dwarf64, line_str, debug_str)?.path);
     }
@@ -758,7 +1030,10 @@ fn parse_header_v5(
     // 文件表（v5 的文件索引从 **0** 开始）。
     let file_format = read_entry_format(cur)?;
     let file_count = cur.uleb()?;
-    let mut files: Vec<Option<FileEntry>> = Vec::with_capacity(file_count as usize);
+    if file_count > MAX_HEADER_TABLE_ENTRIES || (file_format.is_empty() && file_count > 0) {
+        return Err(ParseError::Malformed);
+    }
+    let mut files: Vec<Option<FileEntry>> = Vec::new();
     for _ in 0..file_count {
         let entry = read_v5_entry(cur, &file_format, dwarf64, line_str, debug_str)?;
         let name = entry.path.ok_or(ParseError::Malformed)?;
@@ -963,15 +1238,222 @@ impl LineState {
     }
 }
 
-/// 跑一遍行号程序，返回它产生的序列。
-fn run_program(
+/// 行号程序把「状态机事件」抛给谁。
+trait ProgramSink {
+    fn row(&mut self, state: &LineState, header: &Header);
+    fn end_sequence(
+        &mut self,
+        start_off: usize,
+        end_off: usize,
+        start_addr: u64,
+        end_addr: u64,
+        rows: usize,
+    );
+    fn unfinished(
+        &mut self,
+        start_off: usize,
+        end_off: usize,
+        start_addr: u64,
+        end_addr: u64,
+        rows: usize,
+    );
+    /// 预取窗口收够了 ⇒ 提前停（只用于按需解析）。
+    fn should_stop(&self) -> bool {
+        false
+    }
+}
+
+/// 收集完整行记录（测试 / `raw_rows` 用）。
+#[cfg(test)]
+#[derive(Default)]
+struct RowsSink {
+    rows: Vec<Row>,
+    sequences: Vec<Sequence>,
+}
+
+#[cfg(test)]
+impl ProgramSink for RowsSink {
+    fn row(&mut self, state: &LineState, header: &Header) {
+        self.rows.push(Row {
+            addr: clamp_u32(state.address),
+            file: header.file_path(state.file),
+            line: if state.line <= 0 {
+                0
+            } else {
+                u32::try_from(state.line).unwrap_or(u32::MAX)
+            },
+            is_stmt: state.is_stmt,
+            column: u32::try_from(state.column).unwrap_or(u32::MAX),
+        });
+    }
+
+    fn end_sequence(
+        &mut self,
+        _start_off: usize,
+        _end_off: usize,
+        _start_addr: u64,
+        end_addr: u64,
+        _rows: usize,
+    ) {
+        self.sequences.push(Sequence {
+            rows: std::mem::take(&mut self.rows),
+            end_addr,
+        });
+    }
+
+    fn unfinished(
+        &mut self,
+        _start_off: usize,
+        _end_off: usize,
+        _start_addr: u64,
+        end_addr: u64,
+        _rows: usize,
+    ) {
+        self.sequences.push(Sequence {
+            rows: std::mem::take(&mut self.rows),
+            end_addr,
+        });
+    }
+}
+
+/// 只收集 sequence 范围，不保留行记录。
+#[derive(Default)]
+struct IndexSink {
+    sequences: Vec<SequenceRange>,
+    row_count: usize,
+}
+
+impl ProgramSink for IndexSink {
+    fn row(&mut self, _state: &LineState, _header: &Header) {
+        self.row_count += 1;
+    }
+
+    fn end_sequence(
+        &mut self,
+        start_off: usize,
+        end_off: usize,
+        start_addr: u64,
+        end_addr: u64,
+        rows: usize,
+    ) {
+        if rows > 0 {
+            self.sequences.push(SequenceRange {
+                unit: 0,
+                start_addr,
+                end_addr,
+                start_off,
+                end_off,
+                row_count: rows,
+            });
+        }
+    }
+
+    fn unfinished(
+        &mut self,
+        start_off: usize,
+        end_off: usize,
+        start_addr: u64,
+        end_addr: u64,
+        rows: usize,
+    ) {
+        if rows > 0 {
+            self.sequences.push(SequenceRange {
+                unit: 0,
+                start_addr,
+                end_addr,
+                start_off,
+                end_off,
+                row_count: rows,
+            });
+        }
+    }
+}
+
+/// 按需解析一个 sequence，只保留「目标行 + 后面 N 条」。
+struct WindowSink {
+    target: u32,
+    prev: Option<Row>,
+    after: Vec<Row>,
+    complete: bool,
+    stop: bool,
+}
+
+impl WindowSink {
+    fn new(target: u32) -> Self {
+        Self {
+            target,
+            prev: None,
+            after: Vec::new(),
+            complete: false,
+            stop: false,
+        }
+    }
+}
+
+impl ProgramSink for WindowSink {
+    fn row(&mut self, state: &LineState, header: &Header) {
+        let row = Row {
+            addr: clamp_u32(state.address),
+            file: header.file_path(state.file),
+            line: if state.line <= 0 {
+                0
+            } else {
+                u32::try_from(state.line).unwrap_or(u32::MAX)
+            },
+            is_stmt: state.is_stmt,
+            column: u32::try_from(state.column).unwrap_or(u32::MAX),
+        };
+        if row.addr <= self.target {
+            // 只要「目标地址之前最后一条」；更早的直接丢。
+            self.prev = Some(row);
+        } else if self.after.len() < LINE_WINDOW_ROWS {
+            self.after.push(row);
+        } else {
+            self.stop = true;
+        }
+    }
+
+    fn end_sequence(
+        &mut self,
+        _start_off: usize,
+        _end_off: usize,
+        _start_addr: u64,
+        _end_addr: u64,
+        _rows: usize,
+    ) {
+        self.complete = true;
+    }
+
+    fn unfinished(
+        &mut self,
+        _start_off: usize,
+        _end_off: usize,
+        _start_addr: u64,
+        _end_addr: u64,
+        _rows: usize,
+    ) {
+        self.complete = true;
+    }
+
+    fn should_stop(&self) -> bool {
+        self.stop
+    }
+}
+
+/// 跑一遍行号程序，把状态机事件抛给 `sink`。
+fn run_program_with<S: ProgramSink>(
     cur: &mut Cursor,
     header: &mut Header,
     unit_end: usize,
-) -> Result<Vec<Sequence>, ParseError> {
+    line_str: &[u8],
+    debug_str: &[u8],
+    sink: &mut S,
+) -> Result<(), ParseError> {
     let mut state = LineState::new(header);
-    let mut sequences: Vec<Sequence> = Vec::new();
-    let mut rows: Vec<Row> = Vec::new();
+    let mut seq_start_off = cur.pos;
+    let mut seq_start_addr: Option<u64> = None;
+    let mut seq_last_addr = 0u64;
+    let mut seq_rows = 0usize;
 
     while cur.pos < unit_end {
         let opcode = cur.u8()?;
@@ -986,12 +1468,22 @@ fn run_program(
             match sub {
                 // `DW_LNE_end_sequence`
                 1 => {
-                    sequences.push(Sequence {
-                        rows: std::mem::take(&mut rows),
-                        end_addr: u64::from(clamp_u32(state.address)),
-                    });
+                    let end_addr = u64::from(clamp_u32(state.address));
+                    if seq_rows > 0 {
+                        sink.end_sequence(
+                            seq_start_off,
+                            end,
+                            seq_start_addr.unwrap_or(0),
+                            end_addr,
+                            seq_rows,
+                        );
+                    }
                     // 序列结束 ⇒ 状态机复位（地址 / 文件 / 行都回到初值）。
                     state = LineState::new(header);
+                    seq_start_off = end;
+                    seq_start_addr = None;
+                    seq_last_addr = 0;
+                    seq_rows = 0;
                 }
                 // `DW_LNE_set_address`（操作数宽度 = 扩展操作码的长度字段）
                 2 => {
@@ -1000,9 +1492,8 @@ fn run_program(
                     state.address = value;
                 }
                 // `DW_LNE_define_file`
-                3 => define_file(cur, header)?,
-                // `DW_LNE_set_discriminator`（DWARF 4/5 新增）——
-                // 操作数是 ULEB，**不影响**地址 / 行号 ⇒ 读掉即可。
+                3 => define_file(cur, header, line_str, debug_str)?,
+                // `DW_LNE_set_discriminator`（DWARF 4/5 新增）
                 4 => {
                     let _discriminator = cur.uleb()?;
                 }
@@ -1020,11 +1511,33 @@ fn run_program(
             state.line = state
                 .line
                 .saturating_add(header.line_base + (adjusted % header.line_range) as i64);
-            emit_row(&mut rows, &state, header);
+            emit_row_event(
+                sink,
+                &state,
+                header,
+                &mut seq_start_addr,
+                &mut seq_last_addr,
+                &mut seq_rows,
+            );
+            if sink.should_stop() {
+                return Ok(());
+            }
         } else {
             match opcode {
                 // `DW_LNS_copy`
-                1 => emit_row(&mut rows, &state, header),
+                1 => {
+                    emit_row_event(
+                        sink,
+                        &state,
+                        header,
+                        &mut seq_start_addr,
+                        &mut seq_last_addr,
+                        &mut seq_rows,
+                    );
+                    if sink.should_stop() {
+                        return Ok(());
+                    }
+                }
                 // `DW_LNS_advance_pc`
                 2 => {
                     let delta = cur.uleb()?;
@@ -1093,75 +1606,36 @@ fn run_program(
         }
     }
 
-    if !rows.is_empty() {
-        // ⚠️ **没有 `end_sequence` 收尾的段**（VA-01）：DWARF 规定每段行号
-        // 序列**必须**以 `DW_LNE_end_sequence` 收尾 ⇒ 没收尾 ⇒ 这一段的
-        // **结束地址是未知的**。
-        //
-        // ⛔ 旧实现把它当成「覆盖到地址空间的末尾」（`end_addr = u32::MAX`）
-        // ⇒ **任意远处的地址**都会被报成 `Found`（带一个**自信但错误**的
-        // 源码行）⇒ 违反裁决 J 第 1 条「绝不产出猜出来的行号」。
-        //
-        // 修法：把 `end_addr` 收到**本段最后一条行记录的地址 + 1** ——
-        // 「我们真的看到的行」照常可用，**不再声称**覆盖到看不见的地方
-        // （越界 ⇒ `Missed`）。
-        //
-        // ⚠️ 为什么**不**把这一段整个丢掉（另一种修法）：那些行记录是
-        // **真的**（地址、文件、行号都是解析出来的真值）⇒ 丢掉它们是把
-        // 「真值」降级成「没有」；收窄区间只影响「我们没看见的那部分」
-        // ⇒ 诚实性的损失更小、保留的信息更多。
-        //
-        // ⚠️ 取**所有行里的最大地址**而不是「最后一条」：这一段的行记录
-        // 在 `parse` 里才排序 ⇒ 这里按**程序顺序**追加（DWARF 规定地址
-        // 单调递增，但取 max 不依赖这个前提）。
-        let last_addr = rows
-            .iter()
-            .map(|row| u64::from(row.addr))
-            .max()
-            .unwrap_or(0);
-        sequences.push(Sequence {
-            rows,
-            end_addr: last_addr + 1,
-        });
-    }
-    Ok(sequences)
-}
-
-/// `DW_LNE_define_file` —— 往文件表里追加一项。
-fn define_file(cur: &mut Cursor, header: &mut Header) -> Result<(), ParseError> {
-    if header.version >= 5 {
-        // v5：按文件表项格式读**一项**。
-        let entry = read_v5_entry(cur, &header.file_format, header.dwarf64, &[], &[])?;
-        let name = entry.path.ok_or(ParseError::Malformed)?;
-        header.files.push(Some(FileEntry {
-            name,
-            dir_index: entry.dir_index,
-        }));
-    } else {
-        // v2~v4：`{ name, dir_index, mtime, length }`。
-        let name = cur.cstring()?;
-        let dir_index = cur.uleb()?;
-        let _mtime = cur.uleb()?;
-        let _length = cur.uleb()?;
-        header.files.push(Some(FileEntry { name, dir_index }));
+    if seq_rows > 0 {
+        // ⚠️ **没有 `end_sequence` 收尾的段**（VA-01）：结束地址未知 ⇒
+        // 收到「本段最后一条行记录的地址 + 1」，不假装覆盖到地址空间末尾。
+        sink.unfinished(
+            seq_start_off,
+            unit_end,
+            seq_start_addr.unwrap_or(0),
+            seq_last_addr.saturating_add(1),
+            seq_rows,
+        );
     }
     Ok(())
 }
 
-/// 发一行行记录。
-fn emit_row(rows: &mut Vec<Row>, state: &LineState, header: &Header) {
-    let line = if state.line <= 0 {
-        0
-    } else {
-        u32::try_from(state.line).unwrap_or(u32::MAX)
-    };
-    rows.push(Row {
-        addr: clamp_u32(state.address),
-        file: header.file_path(state.file),
-        line,
-        is_stmt: state.is_stmt,
-        column: u32::try_from(state.column).unwrap_or(u32::MAX),
-    });
+/// 发一行事件，并维护当前 sequence 的首地址 / 末地址 / 行数。
+fn emit_row_event<S: ProgramSink>(
+    sink: &mut S,
+    state: &LineState,
+    header: &Header,
+    start_addr: &mut Option<u64>,
+    last_addr: &mut u64,
+    rows: &mut usize,
+) {
+    let addr = u64::from(clamp_u32(state.address));
+    if start_addr.is_none() {
+        *start_addr = Some(addr);
+    }
+    *last_addr = (*last_addr).max(addr);
+    *rows += 1;
+    sink.row(state, header);
 }
 
 /// 地址 → u32（超出范围就**夹住**，不猜）。
@@ -2414,5 +2888,173 @@ mod tests {
             ("inc/main.c".to_string(), 1),
             "v2~v4 的首行必须落在文件表第 **1** 项（不是第 0 项）"
         );
+    }
+    // -----------------------------------------------------------------
+    // 局部加载：装载只建索引，查询才按需解析 + 预取窗口。
+    // -----------------------------------------------------------------
+
+    /// 造一段 v4 行号程序：`count` 行，每行地址 +4。
+    fn many_rows_unit(count: usize) -> Vec<u8> {
+        let mut program: Vec<u8> = Vec::new();
+        program.push(0);
+        program.push(5);
+        program.push(2);
+        program.extend_from_slice(&0x1000u32.to_le_bytes());
+        for _ in 0..count {
+            program.push(1); // copy
+            program.push(2); // advance_pc
+            program.push(4);
+        }
+        // end_sequence（地址 = 最后一行 +4）
+        program.push(0);
+        program.push(1);
+        program.push(1);
+        v4_unit(&program)
+    }
+
+    #[test]
+    fn lazy_resolve_does_not_materialise_the_whole_line_table() {
+        let count = 200_005usize; // > 原先讨论的 2×10⁵ 上限
+        let lines = DwarfLines::from_sections(&v_sections(&many_rows_unit(count)))
+            .expect("合法大行表不得被拒绝");
+        assert_eq!(lines.status(), DwarfStatus::Supported(4));
+        assert_eq!(lines.line_count(), count, "索引阶段要数清总行数");
+
+        let last = 0x1000u32 + 4 * (count as u32 - 1);
+        assert_eq!(found(&lines, last), ("inc/main.c".to_string(), 1));
+        let cached = lines.cached_row_count();
+        assert!(
+            cached <= 65,
+            "只应保留目标行 + 预取窗口，实际缓存了 {cached} 条（总 {count}）"
+        );
+    }
+
+    #[test]
+    fn a_second_lookup_inside_the_window_reuses_the_cache() {
+        let count = 500usize;
+        let lines =
+            DwarfLines::from_sections(&v_sections(&many_rows_unit(count))).expect("不得报错");
+        found(&lines, 0x1000);
+        let after_first = lines.cached_row_count();
+        // 窗口内的下一个地址：不应再解析、也不应增加缓存。
+        found(&lines, 0x1004);
+        assert_eq!(lines.cached_row_count(), after_first, "窗口内必须复用缓存");
+        // 窗口外的地址：允许再解析一段，但仍然只是窗口量级。
+        found(&lines, 0x1000 + 4 * 200);
+        assert!(lines.cached_row_count() <= 2 * 65);
+    }
+
+    // -----------------------------------------------------------------
+    // v5 头部计数：零字节表项不能变成预分配炸弹。
+    // -----------------------------------------------------------------
+
+    fn push_uleb(out: &mut Vec<u8>, mut value: u64) {
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+    }
+
+    /// 最小 v5 头部：`dir_format` 为空、`dir_count` 巨大。
+    fn v5_zero_byte_directory_bomb(count: u64) -> Vec<u8> {
+        let mut unit: Vec<u8> = vec![0, 0, 0, 0]; // unit_length 占位
+        unit.extend_from_slice(&5u16.to_le_bytes()); // version
+        unit.extend_from_slice(&[4, 0]); // address_size, segment_selector_size
+        unit.extend_from_slice(&[0, 0, 0, 0]); // header_length
+        unit.extend_from_slice(&[1, 1, 1, 0, 1, 1]); // min_inst, max_ops, default, line_base, line_range, opcode_base
+        unit.push(0); // dir_format count = 0（表项零字节）
+        push_uleb(&mut unit, count); // dir_count
+        let len = (unit.len() - 4) as u32;
+        unit[0..4].copy_from_slice(&len.to_le_bytes());
+        unit
+    }
+
+    #[test]
+    fn a_zero_byte_v5_table_entry_cannot_trigger_a_huge_allocation() {
+        let lines = DwarfLines::from_sections(&v_sections(&v5_zero_byte_directory_bomb(1_000_000)))
+            .expect("畸形输入也只能降级，不得返回 Err");
+        assert_eq!(lines.status(), DwarfStatus::Malformed);
+        assert_eq!(lines.units_parsed(), 0);
+        assert_eq!(lines.units_degraded(), 1);
+    }
+
+    // -----------------------------------------------------------------
+    // D-104：v5 `DW_LNE_define_file` 必须能用 `.debug_line_str` 解析路径。
+    // -----------------------------------------------------------------
+
+    fn v5_define_file_unit() -> Vec<u8> {
+        // 头部体（`header_length` 之后的部分）：6 个标量 +
+        // 目录表（空格式、0 项）+ 文件表（2 项格式、1 项）。
+        let mut header: Vec<u8> = vec![
+            1,  // minimum_instruction_length
+            1,  // maximum_operations_per_instruction
+            1,  // default_is_stmt
+            0,  // line_base
+            1,  // line_range
+            13, // opcode_base
+        ];
+        header.extend_from_slice(&[0; 12]); // standard_opcode_lengths（全部 0）
+        header.push(0); // directory_entry_format_count = 0
+        header.push(0); // directories_count = 0
+        header.push(2); // file_name_entry_format_count = 2
+        header.extend_from_slice(&[1, 0x1f]); // DW_LNCT_path, DW_FORM_line_strp
+        header.extend_from_slice(&[2, 0x0f]); // DW_LNCT_directory_index, DW_FORM_udata
+        header.push(1); // file_names_count = 1
+        header.extend_from_slice(&0u32.to_le_bytes()); // path offset 0 ⇒ "a.c"
+        header.push(0); // directory_index = 0
+
+        let mut program: Vec<u8> = Vec::new();
+        program.push(0);
+        program.push(5);
+        program.push(2);
+        program.extend_from_slice(&0x1000u32.to_le_bytes());
+        program.push(1); // copy @0x1000 ⇒ a.c
+                         // define_file：路径偏移 0 ⇒ "b.c"（走 .debug_line_str），dir 0
+        program.push(0);
+        program.push(6);
+        program.push(3);
+        program.extend_from_slice(&4u32.to_le_bytes());
+        program.push(0);
+        program.push(4); // set_file 1
+        program.push(1);
+        program.push(2); // advance_pc 4
+        program.push(4);
+        program.push(1); // copy @0x1004 ⇒ b.c
+        program.push(2); // advance_pc 4
+        program.push(4);
+        program.push(0); // end_sequence
+        program.push(1);
+        program.push(1);
+
+        let mut unit: Vec<u8> = Vec::new();
+        let body_len = 2 + 1 + 1 + 4 + header.len() + program.len();
+        unit.extend_from_slice(&(body_len as u32).to_le_bytes());
+        unit.extend_from_slice(&5u16.to_le_bytes());
+        unit.push(4); // address_size
+        unit.push(0); // segment_selector_size
+        unit.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        unit.extend_from_slice(&header);
+        unit.extend_from_slice(&program);
+        unit
+    }
+
+    #[test]
+    fn v5_define_file_uses_the_line_str_section_instead_of_degrading_the_unit() {
+        let sections = vec![
+            (DEBUG_LINE_SECTION.to_string(), v5_define_file_unit()),
+            (DEBUG_LINE_STR_SECTION.to_string(), b"a.c\0b.c\0".to_vec()),
+        ];
+        let lines = DwarfLines::from_sections(&sections).expect("不得报错");
+        assert_eq!(lines.status(), DwarfStatus::Supported(5));
+        assert_eq!(lines.units_degraded(), 0, "define_file 不得再拖垮整个单元");
+        assert_eq!(found(&lines, 0x1000), ("a.c".to_string(), 1));
+        assert_eq!(found(&lines, 0x1004), ("b.c".to_string(), 1));
     }
 }
