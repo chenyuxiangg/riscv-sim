@@ -33,13 +33,19 @@ export const TRACE_EXPORT_MAX_CHUNKS = 256;
  *
  * @param {(offset: number) => Promise<{chunk?: unknown, next_offset?: unknown, total?: unknown}>} fetchChunk
  *   — 取一块的函数（由调用方注入 ⇒ ⇒ 本模块**不认识**服务层）
- * @param {{maxChunks?: number}} [opts]
+ * @param {{maxChunks?: number, format?: string}} [opts]
+ *   `format` 用于分块拼接：CSV 直接拼接；JSON 每块都是完整对象 ⇒
+ *   必须解析后合并 `entries`，否则拼出来是 `{"entries":[]}{"entries":[]}`。
  * @returns {Promise<{content: string, chunks: number, total: number, nextOffset: number, truncated: boolean}>}
  */
 export async function collectTraceChunks(fetchChunk, opts = {}) {
     const maxChunks = Number(opts.maxChunks ?? TRACE_EXPORT_MAX_CHUNKS);
+    const format = String(opts.format ?? "Csv").trim().toLowerCase();
     /** @type {string[]} */
     const parts = [];
+    /** @type {unknown[]} */
+    const jsonEntries = [];
+    let jsonSeen = false;
     let offset = 0;
     let total = 0;
     let nextOffset = 0;
@@ -48,7 +54,18 @@ export async function collectTraceChunks(fetchChunk, opts = {}) {
     for (;;) {
         const value = await fetchChunk(offset);
         const chunk = String(value?.chunk ?? "");
-        if (chunk) parts.push(chunk);
+        if (chunk) {
+            if (format === "json") {
+                // ⚠️ **每块都是完整 JSON 对象** ⇒ ⇒ 解析后只取 `entries`；
+                //   直接 `join("")` 会得到两段对象裸拼，下载文件不是合法 JSON。
+                const parsed = JSON.parse(chunk);
+                const entries = Array.isArray(parsed?.entries) ? parsed.entries : [];
+                jsonEntries.push(...entries);
+                jsonSeen = true;
+            } else {
+                parts.push(chunk);
+            }
+        }
         chunks += 1;
         const rawNext = Number(value?.next_offset ?? offset);
         const rawTotal = Number(value?.total ?? rawNext);
@@ -65,5 +82,8 @@ export async function collectTraceChunks(fetchChunk, opts = {}) {
         }
         offset = nextOffset;
     }
-    return { content: parts.join(""), chunks, total, nextOffset, truncated };
+    const content = format === "json" && jsonSeen
+        ? JSON.stringify({ entries: jsonEntries })
+        : parts.join("");
+    return { content, chunks, total, nextOffset, truncated };
 }

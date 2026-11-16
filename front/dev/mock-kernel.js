@@ -720,7 +720,15 @@ export function createMockKernel(options = {}) {
                 //   结论不可信」）。
                 // ⚠️ **空块必须真的是空**（末尾不能多一个换行）⇒ ⇒ 判空在前。
                 const slice = lines.slice(start, end);
-                const chunk = slice.length > 0 ? slice.join("\n") + "\n" : "";
+                // ⚠️ **JSON 块的真形状**：真内核每块都是
+                // `{"entries":[{...},...]}`（**不带换行**）⇒ ⇒ 前端必须解析
+                // 后合并 `entries`；这里不能返回一行行裸对象（那是替身失真）。
+                const isJson = format === "Json";
+                const chunk = slice.length > 0
+                    ? (isJson
+                        ? `{"entries":[${slice.join(",")}]}`
+                        : slice.join("\n") + "\n")
+                    : "";
                 // `next_offset` is the **next** block's start (= this
                 // block's end); at the end of the buffer it equals
                 // `total` (STAGE-5 §3.2).

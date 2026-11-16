@@ -206,6 +206,32 @@ describe("trace 导出 · 分页收集（纯逻辑）", () => {
         assert.equal(result.truncated, false);
     });
 
+    test("JSON 多块 ⇒ ⇒ 合并 entries，结果是**合法** JSON（不是两段对象裸拼）", async () => {
+        const calls = [];
+        const result = await collectTraceChunks(async (offset) => {
+            calls.push(offset);
+            if (offset === 0) {
+                return {
+                    chunk: JSON.stringify({ entries: [{ addr: 1 }] }),
+                    next_offset: 1,
+                    total: 2,
+                };
+            }
+            return {
+                chunk: JSON.stringify({ entries: [{ addr: 2 }] }),
+                next_offset: 2,
+                total: 2,
+            };
+        }, { format: "Json" });
+        assert.deepEqual(calls, [0, 1]);
+        assert.deepEqual(
+            JSON.parse(result.content),
+            { entries: [{ addr: 1 }, { addr: 2 }] },
+            "两块 JSON 必须合并成一个对象，否则下载出来的文件不是合法 JSON",
+        );
+        assert.equal(result.chunks, 2);
+    });
+
     test("内核不推进 ⇒ ⇒ 停（不死循环）且**如实说没拿全**", async () => {
         let calls = 0;
         const result = await collectTraceChunks(async () => {
@@ -302,22 +328,45 @@ describe("trace 导出 · 暂停 ⇒ ⇒ 自动渲染", () => {
 });
 
 describe("trace 导出 · 「下载轨迹到本地」", () => {
-    test("调试视图里**没有**旧的「导出执行轨迹」按钮，新按钮写着「下载轨迹到本地」", async () => {
+    test("执行轨迹给出 CSV / JSON 两个格式入口，下载仍只有一个", async () => {
         const { router } = await setup();
-        assert.equal(
-            debugBody().querySelector('[data-action="export-trace"][data-source="Execution"]'),
-            null,
-            "旧的「导出执行轨迹」按钮还在",
+        const csv = debugBody().querySelector(
+            '[data-action="export-trace"][data-source="Execution"][data-format="Csv"]',
         );
-        const btn = debugBody().querySelector('[data-action="download-trace-local"]');
-        assert.ok(btn, "没有「下载轨迹到本地」按钮");
-        assert.match(btn.textContent, /下载轨迹到本地/);
-        // ⚠️ **它住在 trace 卡片里**（v0.63 批：工具条整块撤掉了）⇒ ⇒ trace
-        //   的东西**只有那一个落点**。
+        const json = debugBody().querySelector(
+            '[data-action="export-trace"][data-source="Execution"][data-format="Json"]',
+        );
+        assert.ok(csv, "没有「导出执行轨迹 (CSV)」按钮");
+        assert.ok(json, "没有「导出执行轨迹 (JSON)」按钮");
+        assert.equal(
+            debugBody().querySelectorAll('[data-action="download-trace-local"]').length,
+            1,
+            "整份下载入口必须仍然只有一个",
+        );
         assert.ok(
             debugBody().querySelector("[data-trace-state]"),
-            "trace 卡片不在（下载按钮跑到别处去了）",
+            "trace 卡片不在（格式入口跑到别处去了）",
         );
+        router.close();
+    });
+
+    test("点 JSON 入口 ⇒ ⇒ 真的发 ExportTrace(Execution, Json)", async () => {
+        const { router, transport } = await setup();
+        const before = exportCommands(transport).length;
+        await clickAndDispatch(
+            router,
+            debugBody().querySelector(
+                '[data-action="export-trace"][data-source="Execution"][data-format="Json"]',
+            ),
+        );
+        const exports = exportCommands(transport).slice(before);
+        assert.equal(exports.length, 1, "点 JSON 入口没有发导出命令");
+        assert.deepEqual(exports[0], {
+            source: "Execution",
+            format: "Json",
+            offset: 0,
+            limit: 0,
+        });
         router.close();
     });
 
@@ -344,6 +393,38 @@ describe("trace 导出 · 「下载轨迹到本地」", () => {
 
         assert.equal(downloaded.getAttribute("download"), "trace-execution.csv");
         assert.ok(downloaded.getAttribute("href").startsWith("blob:"), "href 不是 blob: URL");
+        router.close();
+    });
+
+    test("导出 JSON 后点下载 ⇒ ⇒ 落盘的是**合法 JSON**（多块 entries 合并）", async () => {
+        const { router } = await setup();
+        await clickAndDispatch(
+            router,
+            debugBody().querySelector(
+                '[data-action="export-trace"][data-source="Execution"][data-format="Json"]',
+            ),
+        );
+        let blobText = null;
+        const origBlob = globalThis.Blob;
+        globalThis.Blob = class extends origBlob {
+            constructor(parts, opts) {
+                super(parts, opts);
+                blobText = parts.join("");
+            }
+        };
+        try {
+            await clickAndDispatch(
+                router,
+                debugBody().querySelector('[data-action="download-trace-local"]'),
+            );
+        } finally {
+            globalThis.Blob = origBlob;
+        }
+        assert.ok(blobText !== null, "没有造出 Blob");
+        const parsed = JSON.parse(blobText);
+        assert.equal(parsed.entries.length, 3, "JSON 下载没有合并全部块");
+        assert.equal(parsed.entries[0].kind, "instr");
+        assert.equal(parsed.entries[2].addr, 256);
         router.close();
     });
 

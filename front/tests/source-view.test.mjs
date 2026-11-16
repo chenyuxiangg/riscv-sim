@@ -413,6 +413,37 @@ describe("源码视图（A-15 / A-16 / A-17 / A-18 / A-19）", () => {
         );
     });
 
+    test("单步停下 ⇒ ⇒ 自动解析当前 PC 并高亮源码行（不需要点按钮）", async () => {
+        const { transport, router } = await setup();
+        const body = sourceBody();
+        loadFiles(body, [fakeFile("demo.c", "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n")]);
+        await new Promise((r) => setTimeout(r, 0));
+
+        const regmem = await m10.mountRegisterMemory({
+            commandRouter: router,
+            transport,
+            viewStore: m03,
+            viewIds: app.REGISTER_MEMORY_VIEW_IDS,
+        });
+        transport.emit(EventPayload.simStateDelta([], 0x1000, 0));
+        regmem.flushRender();
+        m01.route("#/source");
+
+        await app.handleCommand(
+            { action: "step" },
+            { commandRouter: router, registerMemory: regmem },
+        );
+
+        const location = m03.getState("source")?.source?.location ?? null;
+        assert.equal(location?.file, "demo.c", "单步后没有自动解析源码行");
+        assert.equal(location?.line, 7, "自动解析的地址必须是当前 PC");
+
+        m01.route("#/source");
+        const marked = sourceBody().querySelector(".src-line.is-current");
+        assert.ok(marked, "自动解析后必须高亮当前行");
+        assert.equal(marked.getAttribute("data-src-line"), "7");
+    });
+
     test("多候选 ⇒ 视图列出候选，**不**静默挑一个", async () => {
         const { transport } = await setup();
         const body = sourceBody();

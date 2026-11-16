@@ -503,7 +503,26 @@ async function performReadback(services, reason, options = {}) {
             errors.push(err?.message ?? String(err));
         }
     }
-    // ⑤ 写状态（**基准那一格不动** ⇒ ⇒ `mergeReadbackState` 只并 patch）
+    // ⑤ 源码联动（STAGE-7 A-16 · 本批自动化）：**真停**后顺手问内核
+    // 「当前 PC 对应哪一行」⇒ ⇒ 源码视图不用再点按钮。
+    //
+    // ⚠️ **只跟自动读回走**（`options.auto === true`）⇒ ⇒ 手动「读寄存器」
+    //   不是停下事件 ⇒ ⇒ 不额外发 `ResolveLine`。
+    //
+    // ⚠️ **PC 来自 M-10 快照**（与顶栏 / 反汇编同一个源）⇒ ⇒ 不是第二个
+    //   真相；PC 未知时**不发**（地址 0 不等于「未知」⇒ ⇒ 见 D-107 的口径）。
+    if (commandRouter && options.auto === true) {
+        const snapshot = registerMemory?.getSnapshot?.();
+        const pcRaw = Number(snapshot?.pc);
+        if (Number.isFinite(pcRaw)) {
+            try {
+                await commandRouter.dispatchCommand(Command.resolveLine(pcRaw >>> 0));
+            } catch (err) {
+                errors.push(err?.message ?? String(err));
+            }
+        }
+    }
+    // ⑥ 写状态（**基准那一格不动** ⇒ ⇒ `mergeReadbackState` 只并 patch）
     updateDebugState((prev) => ({
         ...prev,
         debug: {
@@ -1259,7 +1278,7 @@ async function downloadWholeTrace(services, options = {}) {
             Command.exportTrace(source, format, offset, 0),
         );
         return ev?.value ?? {};
-    });
+    }, { format });
     if (!result.content) return null;
     return downloadExportChunk({ source, format, chunk: result.content });
 }

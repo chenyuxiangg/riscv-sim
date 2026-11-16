@@ -1738,6 +1738,8 @@ const debugView = register({
                     <div class="row"><h3>trace 记录 / 导出 (M-11 / M-19)</h3></div>
                     <div class="card-actions">
                         <button type="button" data-action="trace-toggle" data-trace-switch="${traceSwitch.state}" aria-pressed="${traceSwitch.state === TRACE_SWITCH_ON ? "true" : "false"}">${escapeHtml(traceToggleLabel(traceSwitch))}</button>
+                        <button type="button" data-action="export-trace" data-source="Execution" data-format="Csv" data-offset="0" data-limit="0" title="导出执行轨迹第一块（CSV）">导出执行轨迹 (CSV)</button>
+                        <button type="button" data-action="export-trace" data-source="Execution" data-format="Json" data-offset="0" data-limit="0" title="导出执行轨迹第一块（JSON）">导出执行轨迹 (JSON)</button>
                         <button type="button" data-action="download-trace-local" data-trace-download-button title="把**整份**导出翻完并落盘（不是第一块）">${escapeHtml(exportDownloadLabel(exportState?.source, exportState?.format))}</button>
                     </div>
                     <p class="trace-state" data-trace-state data-trace-switch="${traceSwitch.state}"${traceSwitch.state === TRACE_SWITCH_ON ? " data-trace-notice" : ""}>${renderTraceStatus(traceSwitch)}</p>

@@ -37,6 +37,7 @@ const importFront = (rel) => import(pathToFileURL(resolve(frontDir, rel)).href);
 
 const app = await importFront("app.js");
 const rb = await importFront("lib/readback.js");
+const { Command } = await importFront("lib/message.js");
 const m03 = await importFront("views/m03_viewstore.js");
 
 /** 让微任务与定时器都跑完（读回是异步的）。 */
@@ -55,6 +56,7 @@ function fakeRegisterMemory(init = {}) {
     const calls = { readRegisters: 0, writeRegister: [], readMemory: [], dumpMemory: [], flushRender: 0 };
     const state = {
         gpr: Array.isArray(init.gpr) ? init.gpr.slice() : Array(32).fill(0),
+        pc: Number(init.pc ?? 0) >>> 0,
         memoryReads: Array.isArray(init.memoryReads) ? init.memoryReads.map((r) => ({ ...r })) : [],
     };
     return {
@@ -62,6 +64,7 @@ function fakeRegisterMemory(init = {}) {
         state,
         getSnapshot: () => ({
             gpr: state.gpr.slice(),
+            pc: state.pc,
             memoryReads: state.memoryReads.map((r) => ({ ...r })),
         }),
         readRegisters: async () => {
@@ -315,6 +318,38 @@ describe("v0.67 · 「读回」的 app 层编排", () => {
             m03.getState("debug")?.debug?.readback?.reason,
             rb.READBACK_REASON.USER_PAUSE,
             "读回原因没有落成「暂停」",
+        );
+    });
+
+    test("R-17 · 「单步」走完 ⇒ ⇒ 自动解析当前 PC 的源码行", async () => {
+        const memory = fakeRegisterMemory({ gpr: Array(32).fill(0), pc: 0x1000 });
+        const router = fakeRouter();
+        await app.handleCommand(
+            { action: "step" },
+            { commandRouter: router, registerMemory: memory },
+        );
+        const resolves = router.dispatched.filter(
+            (payload) => payload?.ResolveLine !== undefined,
+        );
+        assert.equal(resolves.length, 1, "单步后没有自动解析源码行");
+        assert.equal(
+            Number(resolves[0].ResolveLine.addr),
+            0x1000,
+            "自动解析必须问当前 PC",
+        );
+    });
+
+    test("R-18 · 手动「读寄存器」⇒ ⇒ 不自动解析源码行", async () => {
+        const memory = fakeRegisterMemory({ gpr: Array(32).fill(0), pc: 0x1000 });
+        const router = fakeRouter();
+        await app.handleCommand(
+            { action: "read-regs" },
+            { commandRouter: router, registerMemory: memory },
+        );
+        assert.equal(
+            router.dispatched.filter((p) => p?.ResolveLine !== undefined).length,
+            0,
+            "手动读回不是停下事件，不该顺带解析源码行",
         );
     });
 
