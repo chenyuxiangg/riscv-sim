@@ -173,8 +173,9 @@ impl Default for Kind {
 /// Every field is enforced by the parser that owns the corresponding
 /// input: `elf_size` by the ELF parser, `hex_size` by the Intel HEX
 /// parser, `raw_size` by the raw parser, `segment_count` by both the ELF
-/// and the HEX parser. `symbol_count` / `line_entry_count` bound the
-/// DWARF tables and are enforced by M-11, which owns that parsing.
+/// and the HEX parser. `symbol_count` bounds the DWARF symbol table and is
+/// enforced by M-11. The line table has **no entry-count ceiling**: M-11
+/// indexes it and materialises only the window a query needs.
 /// `debug_section_bytes` bounds the **raw bytes** M-06 extracts from the
 /// ELF section table and is enforced by the ELF parser (M-06 owns the
 /// extraction; M-11 owns the parsing of what is extracted).
@@ -198,8 +199,6 @@ pub struct ParseLimits {
     pub segment_count: u32,
     /// Maximum number of DWARF symbol-table entries (default 1e5).
     pub symbol_count: u32,
-    /// Maximum number of DWARF line-table entries (default 2e5).
-    pub line_entry_count: u32,
     /// Maximum total bytes of the extracted debug sections (default 8 MiB).
     pub debug_section_bytes: u32,
     /// Maximum number of bytes the loader may materialise in total
@@ -218,7 +217,6 @@ impl Default for ParseLimits {
             raw_size: 16 * 1024 * 1024,
             segment_count: 64,
             symbol_count: 100_000,
-            line_entry_count: 200_000,
             debug_section_bytes: 8 * 1024 * 1024,
             total_image_bytes: 64 * 1024 * 1024,
             max_region_bytes: 16 * 1024 * 1024,
