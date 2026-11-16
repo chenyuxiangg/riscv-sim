@@ -495,7 +495,6 @@ pub enum CommandPayload {
 /// ```text
 /// {"UpsertRegion": {"spec": {"kind": "ram", "base": 0, "size": 1048576}}}
 /// {"RemoveRegion": {"base": 0}}
-/// {"SetBudget": {"region_budget_bytes": 16777216, "max_region_bytes": null}}
 /// ```
 ///
 /// ⚠️ **不许**给它加 `#[serde(tag = "op")]`（那是**内部标签**）⇒ 裁决 H
@@ -527,20 +526,6 @@ pub enum MemoryMapOp {
     RemoveRegion {
         /// 那一段的基地址（**定位键**）。
         base: u32,
-    },
-    /// 改预算（声明期 + 运行期）。
-    ///
-    /// ⚠️ `max_region_bytes` 为 `None` ⇒ 运行期上界**等于**声明期那个。
-    SetBudget {
-        /// 声明期每区域的**声明大小**上界（V-7 判它）。
-        region_budget_bytes: u32,
-        /// 运行期每区域的**物理占用**上界（`None` ⇒ 等于声明期那个）。
-        ///
-        /// ⚠️ **`#[serde(default)]`**：这个字段的**含义**是可选的（缺省
-        /// 即「等于声明期那个」）⇒ 载荷里**不带**它也解析得出 `None` ⇒
-        /// 线上形态**不变**（序列化时它**总是**出现，值可以是 `null`）。
-        #[serde(default)]
-        max_region_bytes: Option<u32>,
     },
 }
 
@@ -1025,7 +1010,7 @@ mod tests {
     /// **不再伪装成用户断点**（`Halted` 的线上标签多一个取值）。
     #[test]
     fn the_schema_version_is_fifteen() {
-        assert_eq!(crate::SCHEMA_VERSION, 16);
+        assert_eq!(crate::SCHEMA_VERSION, 17);
     }
 
     /// **v12**（v0.76 · STAGE-52 · 裁决 M）：模板库协议 —— 两个命令、
@@ -1064,8 +1049,6 @@ mod tests {
             id: "minimal".to_string(),
             name: "minimal".to_string(),
             priority: 30,
-            region_budget_bytes: 16777216,
-            max_region_bytes: None,
             regions: Vec::new(),
             description: None,
             roles: None,
@@ -1317,7 +1300,8 @@ mod tests {
         let msg = Message::command(8, CommandPayload::Nop);
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
-        assert_eq!(json["schema_version"], 16);
+        // ⚠️ **v17（v0.77 · STAGE-53）**：`SetBudget` 变体退役。
+        assert_eq!(json["schema_version"], 17);
     }
 
     // -----------------------------------------------------------------
@@ -1685,8 +1669,6 @@ mod tests {
             id: "user-board".to_string(),
             name: "User board".to_string(),
             priority: 100,
-            region_budget_bytes: 0x0010_0000,
-            max_region_bytes: None,
             regions: vec![crate::platform::RegionSpec::Ram {
                 base: Some(0x0000_0000),
                 size: 0x0010_0000,
@@ -1706,7 +1688,7 @@ mod tests {
     ///
     /// ⚠️ **v7**: the command gained `expected_revision` (after
     /// `description`) and the description gained `max_region_bytes`
-    /// (after `region_budget_bytes`) ⇒ the pinned string moves with it.
+    /// (after the key set) ⇒ the pinned string moves with it.
     #[test]
     fn the_v7_set_memory_map_command_has_a_pinned_wire_shape() {
         let cmd = CommandPayload::SetMemoryMap {
@@ -1720,7 +1702,7 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&cmd).expect("json"),
             format!(
-                r#"{{"SetMemoryMap":{{"description":{{"schema_version":{},"id":"user-board","name":"User board","priority":100,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{{"kind":"ram","base":0,"size":1048576}}]}},"expected_revision":null}}}}"#,
+                r#"{{"SetMemoryMap":{{"description":{{"schema_version":{},"id":"user-board","name":"User board","priority":100,"regions":[{{"kind":"ram","base":0,"size":1048576}}]}},"expected_revision":null}}}}"#,
                 crate::platform::PLATFORM_SCHEMA_VERSION
             )
         );
@@ -1740,9 +1722,6 @@ mod tests {
                 "id": "user-board",
                 "name": "User board",
                 "priority": 100,
-
-                "region_budget_bytes": 1048576,
-                "max_region_bytes": null,
                 "regions": [{ "kind": "ram", "base": 0, "size": 1048576 }]
             }, "expected_revision": null } })
         );
@@ -1772,7 +1751,7 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ev).expect("json"),
             format!(
-                r#"{{"MemoryMap":{{"description":{{"schema_version":{},"id":"user-board","name":"User board","priority":100,"region_budget_bytes":1048576,"max_region_bytes":null,"regions":[{{"kind":"ram","base":0,"size":1048576}}]}},"pending":false,"loaded":true,"revision":7}}}}"#,
+                r#"{{"MemoryMap":{{"description":{{"schema_version":{},"id":"user-board","name":"User board","priority":100,"regions":[{{"kind":"ram","base":0,"size":1048576}}]}},"pending":false,"loaded":true,"revision":7}}}}"#,
                 crate::platform::PLATFORM_SCHEMA_VERSION
             )
         );
@@ -1788,9 +1767,6 @@ mod tests {
                 "id": "user-board",
                 "name": "User board",
                 "priority": 100,
-
-                "region_budget_bytes": 1048576,
-                "max_region_bytes": null,
                 "regions": [{ "kind": "ram", "base": 0, "size": 1048576 }]
             }, "pending": false, "loaded": true, "revision": 7,
             } })
@@ -1835,8 +1811,6 @@ mod tests {
             id: "full-board".to_string(),
             name: "Full board".to_string(),
             priority: 7,
-            region_budget_bytes: 0x0020_0000,
-            max_region_bytes: None,
             regions: vec![
                 crate::platform::RegionSpec::Ram {
                     base: Some(0x0000_0000),

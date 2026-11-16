@@ -134,7 +134,7 @@ must = [
     "PlatformDescription",       # 零新 DTO：复用已有描述 DTO
     "零新 DTO",
     "E_PLT-07",                  # 校验用的族 + 码
-    "region_budget_bytes",       # 预算与 size 的耦合
+    # ⚠️ v0.77（STAGE-53）：`region_budget_bytes` 已退役 ⇒ 该 token 删（预算概念整体退役）
     "image_loaded",              # 「已装载」判定
     "pending_platform",          # 待生效配置字段
     "rebuild_platform",          # 立即生效的落点

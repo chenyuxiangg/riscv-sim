@@ -431,20 +431,13 @@ pub const E_PLT_05_OVERFLOW: u16 = 5;
 /// Scenario code: two declared regions **overlap**.
 pub const E_PLT_06_OVERLAP: u16 = 6;
 
-/// Scenario code: a RAM / ROM region's **declared size** exceeds the
-/// description's `region_budget_bytes`.
+/// Scenario code `E_PLT-07` — **retired**（已退役 · 保留号 · 不再产生）.
 ///
-/// ⚠️ **This is a declaration-time check, and it is NOT the same
-/// constraint as M-14's `E_BUS-09`.** Two different layers, two different
-/// semantics, two different codes:
+/// ⚠️ **v0.77（STAGE-53）**：按区域预算这个概念**整体退役** ⇒ V-7 一并退役
+/// ⇒ ⇒ **没有任何路径**产生这个码。编号 **7 保留、不复用**（复用一个已退役
+/// 的号 ⇒ 老日志里的 07 会被读成新含义 ⇒ ⇒ 这是**最贵**的一种错）。
 ///
-/// | | layer | measured |
-/// | --- | --- | --- |
-/// | `E_PLT_07` (this one) | **declaration** (before mapping) | the **declared** size |
-/// | `E_BUS-09` | **runtime** (after mapping) | the **physical occupancy** (RAM is lazily allocated) |
-///
-/// ⇒ they must not be merged, and this code deliberately does **not**
-/// reuse `E_BUS_09`'s number (one code, two meanings).
+/// ⇒ 现在只剩运行期那一层（`E_BUS-09`：init 物理页 > **本段自己的 size**）。
 pub const E_PLT_07_OVER_BUDGET: u16 = 7;
 
 /// Scenario code: two declared peripheral devices share the same `id`.

@@ -35,14 +35,21 @@
 //
 // 契约层那个唯一校验器（`PlatformDescription::validate` ⇒ E_PLT-01..11）
 // 是**内核**与**前端**的同一套判据（裁决 E）⇒ 前端**不自写一份校验**
-// ⇒ 编辑器只**呈现**约束（V-7），最终由内核裁决。
+// ⇒ 编辑器只**呈现**约束，最终由内核裁决。
+//
+// ⚠️ **v0.77（STAGE-53）**：每区域预算（`region_budget_bytes` /
+// `max_region_bytes`）整体退役 ⇒ **段的 size 就是它的容量** ⇒
+// 本模块不再有「预算」这一列、也不再合成 `SetBudget` 差量。
 //
 // # 板档案（STAGE-15 · v0.30 · D-136 / D-140）
 //
 // 板档案的**存储**在 `front/services/m23_boardstore.js`（服务层，另一条
-// lane 的产出）⇒ 本模块**只**做两件纯的事：
-//   - 「当前草稿**已被内核接受过**」这个**推导量**（`isDraftAccepted`）；
-//   - 板档案区块的**渲染**（`renderArchivePanel`）。
+// lane 的产出）⇒ 本模块**只**留「当前草稿**已被内核接受过**」这个
+// **推导量**（`isDraftAccepted`）。
+//
+// ⚠️ **v0.77（STAGE-53）**：独立 `#/memory-map` 板编辑面已被裁 ⇒
+// `renderMemoryMapPanel` / `renderArchivePanel` / `renderTemplateLibrary`
+// 三个**死渲染函数**一并删除（不再有「没人挂载的 HTML 生成器」）。
 //
 // ⚠️ 「已被内核接受」是**推导量**（`acceptedDescription` 与当前草稿
 // **逐字段相同**）⇒ 不是标志位 ⇒ 不需要「一改输入就手工清标志」那种
@@ -280,6 +287,39 @@ export function splitErrorCode(err) {
     return { code, message };
 }
 
+/**
+ * 板级提交失败的**人话**原因（STAGE-53 · 表 11）。
+ *
+ * ⚠️ 为什么要这张表：用户上一次卡住的**不是**内核不认这块板，而是
+ * **界面什么都不说**（弹层关了、只有页脚一行）⇒ ⇒ 错误码必须**在
+ * 工作面上说出来**，并且说**下一步该干什么**。
+ *
+ * ⚠️ 码 → 文案的映射只做「解释」，**不**改判据 ⇒ 判别仍在内核。
+ *
+ * @param {unknown} code — `E_<FAMILY>-<SCENARIO>`
+ * @returns {string} 空串表示「没有专门解释，沿用内核文案」
+ */
+export function boardErrorHint(code) {
+    switch (String(code ?? "")) {
+        case "E_PLT-01":
+            return "这块板不是合法 JSON 形状 —— 从模板重新导入一份。";
+        case "E_PLT-02":
+            return "板 id 不能为空 —— 填一个 id 再点「重新载入」。";
+        case "E_PLT-04":
+        case "E_PLT-05":
+        case "E_PLT-06":
+        case "E_PLT-12":
+        case "E_PLT-20":
+            return "这份板没通过校验：草稿已保留，改完再点「重新载入」。";
+        case "E_PLT-13":
+            return "板级配置已在别处被改过（修订号对不上）—— 先看当前生效图，再重新提交。";
+        case "E_PLT-03":
+            return "这块板的描述格式版本当前不接受 —— 从模板重新导入一份。";
+        default:
+            return "";
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 器件
 // ---------------------------------------------------------------------------
@@ -322,8 +362,8 @@ export function newDevice(kind, keepId) {
  * ⚠️ 草稿里的数值是**字符串**（用户输入的原样）⇒ 重渲染不会把用户正在敲的
  * `0x8000` 变成 `32768`；提交时才解析成数字。
  *
- * ⚠️ 默认值选得**合法**（V-7：段 size ≤ `region_budget_bytes`）⇒ 用户一打开
- * 编辑器就能提交一个内核会接受的描述。
+ * ⚠️ **v0.77（STAGE-53）**：没有「每区域预算」这个概念了 ⇒ 段 size 自己
+ * 就是容量 ⇒ 默认草稿只要自身合法（非零、不重叠）就能被内核接受。
  *
  * @returns {object}
  */
@@ -336,7 +376,6 @@ export function defaultDraft() {
         // ⚠️ **v0.76（STAGE-52 · B3 决议）**：`auto_selectable` 字段已
         // **废弃** ⇒ ⇒ 草稿里**不再带**这个键（老板档案里的旧键**仍能**解析
         // —— 契约层 serde 忽略未知字段 ⇒ ⇒ 存量零风险）。
-        region_budget_bytes: "8388608",
         regions: [
             { kind: "ram", base: "2147483648", size: "8388608" },
         ],
@@ -479,7 +518,6 @@ export function draftFromDescription(description) {
         priority: String(Number(description.priority ?? 0)),
         // ⚠️ **v0.76（STAGE-52 · B3 决议）**：`auto_selectable` **废弃** ⇒ ⇒
         // 描述里那个旧键**不透传**进草稿（前端**不抄**废弃字段）。
-        region_budget_bytes: String(Number(description.region_budget_bytes ?? 0)),
         regions: regions.map((region) => regionToDraft(region)),
     };
     // ⚠️ `roles`（STAGE-49 · D-177 的 C）：描述里有 ⇒ **草稿里带上** ⇒ ⇒
@@ -524,7 +562,6 @@ export function draftToDescription(draft) {
         priority: num(draft?.priority),
         // ⚠️ **v0.76（STAGE-52 · B3 决议）**：`auto_selectable` **废弃** ⇒ ⇒
         // 提交的描述**不再带**这个键。
-        region_budget_bytes: num(draft?.region_budget_bytes),
         regions: regions.map((region) => {
             const kind = String(region?.kind ?? "ram");
             // ⚠️ **v0.73（STAGE-49 · B2）**：草稿里 `base` **留空** ⇒ ⇒
@@ -1276,22 +1313,6 @@ export function sameMcu(a, b) {
 }
 
 /**
- * 运行期上界（`max_region_bytes`）的**归一化值**。
- *
- * ⚠️ **缺省与 `null` 是同一件事**（契约层：`None` ⇒ 等于声明期那个）
- * ⇒ 归一化成 `null` 才能比较 ⇒ 否则「基底没有这个键」与「草稿没有这个
- * 键」会被判成「不同」⇒ 差量**永远不空**。
- *
- * @param {object|null|undefined} description
- * @returns {number|null}
- */
-function normalizedMaxRegionBytes(description) {
-    const raw = description?.max_region_bytes;
-    if (raw === null || raw === undefined) return null;
-    return Number(raw) >>> 0;
-}
-
-/**
  * **差量**：草稿 vs 生效图 ⇒ 一串差量操作。
  *
  * ⚠️ **按 `base` 定位**（不是按数组下标）⇒ 段**重排**不产生任何操作
@@ -1344,19 +1365,7 @@ export function diffMemoryMapOps(baseDescription, draftDescription) {
         if (!draftBases.has(base)) ops.push({ RemoveRegion: { base } });
     }
 
-    // ⚠️ **预算**：两个字段任一不同 ⇒ `SetBudget`。
-    const baseBudget = Number(baseDescription?.region_budget_bytes ?? 0) >>> 0;
-    const draftBudget = Number(draftDescription?.region_budget_bytes ?? 0) >>> 0;
-    const baseMax = normalizedMaxRegionBytes(baseDescription);
-    const draftMax = normalizedMaxRegionBytes(draftDescription);
-    if (baseBudget !== draftBudget || baseMax !== draftMax) {
-        ops.push({
-            SetBudget: {
-                region_budget_bytes: draftBudget,
-                max_region_bytes: draftMax,
-            },
-        });
-    }
+    // ⚠️ **没有预算差量了**（v0.77 · STAGE-53）：差量只剩「改一段 / 删一段」。
     return ops;
 }
 
@@ -1577,7 +1586,6 @@ export function renderEffectiveSummary(memoryMap) {
     if (rows.length === 0) {
         return `<p class="muted" data-mmap-effective="empty">当前生效的内存图为空（0 段）。</p>`;
     }
-    const budget = Number(memoryMap.description.region_budget_bytes ?? 0) >>> 0;
     const counts = rows.reduce((acc, row) => {
         acc[row.type] = (acc[row.type] ?? 0) + 1;
         return acc;
@@ -1585,8 +1593,8 @@ export function renderEffectiveSummary(memoryMap) {
     const parts = Object.keys(counts).sort().map((k) => `${counts[k]} ${k}`).join(" · ");
     return (
         `<p class="muted" data-mmap-effective="summary">` +
-        `当前生效：${rows.length} 段（${escapeHtml(parts)}）· 预算 ${escapeHtml(String(budget))} 字节` +
-        `（${escapeHtml(hex32(budget))}）· 板 id ${escapeHtml(String(memoryMap.description.id ?? ""))}` +
+        `当前生效：${rows.length} 段（${escapeHtml(parts)}）` +
+        `· 板 id ${escapeHtml(String(memoryMap.description.id ?? ""))}` +
         `</p>`
     );
 }
@@ -1661,64 +1669,6 @@ export function renderArchiveRow(entry, selectedId) {
     `;
 }
 
-/**
- * 板档案区块（表 + 工具条 + 新板输入 + 持久化状态 + 校验状态）。
- *
- * ⚠️ **落库门槛的呈现**：「保存 / 另存为」在草稿**没被内核接受过**时
- * `disabled`，并有一句明说的话 ⇒ 用户不会以为自己存下来了。
- *
- * ⚠️ **前端不显示参数区间常量**（那会是第二份真相）⇒ 只在器件参数旁写
- * 一句「区间由内核校验（`E_PLT-12`）」。
- *
- * ⚠️ **它自己就是一张卡**（STAGE-35 · 裁决 B ⇒ 复用 `.card`）⇒ ⇒ 面板那边
- * 直接把它放进卡片流里（**不再**套一层）。
- *
- * @param {object} state — 「memory-map」视图状态
- * @returns {string}
- */
-export function renderArchivePanel(state) {
-    const archive = Array.isArray(state?.archive) ? state.archive : [];
-    const selectedId = state?.selectedId ?? null;
-    const status = String(state?.archiveStatus ?? "ok");
-    const accepted = isDraftAccepted(state);
-
-    const rows = archive.map((entry) => renderArchiveRow(entry, selectedId)).join("");
-    const table = archive.length === 0
-        ? `<tr><td colspan="4" class="muted" data-mmap-archive-empty="1">还没有板档案 —— 提交一块板之后可以「保存当前板」。</td></tr>`
-        : rows;
-
-    const disabled = accepted ? "" : " disabled";
-
-    return `
-        <section class="card memory-map-archive">
-            <h3>板档案<span class="tag">本机浏览器</span></h3>
-            <p class="muted" data-mmap-archive-status="${escapeHtml(status)}">${escapeHtml(archiveStatusText(status))}</p>
-            <p class="muted" data-mmap-validated="${accepted ? "1" : "0"}">${accepted
-                ? "当前草稿已被内核接受（校验通过）—— 可以保存进板档案。"
-                : "当前草稿尚未被内核接受 —— 先提交，校验通过后才能保存。"}</p>
-            <table class="map-table" data-mmap-archive="1">
-                <thead><tr><th>板名</th><th>id</th><th></th><th></th></tr></thead>
-                <tbody>${table}</tbody>
-            </table>
-            <div class="row">
-                <button type="button" class="btn" data-action="save-memory-map"${disabled}>保存当前板</button>
-                <button type="button" class="btn" data-action="save-memory-map-as"${disabled}>另存为板</button>
-                <button type="button" class="btn ghost" data-action="new-memory-map">新板</button>
-            </div>
-            <div class="grid-2">
-                <label class="mmap-field"><span>新板 id</span>
-                    <input type="text" data-mmap-new-id value=""></label>
-                <label class="mmap-field"><span>新板名</span>
-                    <input type="text" data-mmap-new-name value=""></label>
-            </div>
-            <p class="muted" data-mmap-archive-note>
-                「保存 / 另存为」只写**本机浏览器**的板档案，**不改内核状态** ——
-                板要生效仍需「提交板级内存图」。已存在的板**不能改 id**（id 是它的主键）
-                ⇒ 想换一块板请用「另存为板」。
-            </p>
-        </section>
-    `;
-}
 
 // ---------------------------------------------------------------------------
 // DOM 采集：DOM → 草稿
@@ -1758,8 +1708,6 @@ export function collectDraft(root, draft) {
             next[field] = String(raw ?? "");
         } else if (field === "priority") {
             next.priority = readNumber(el, next.priority);
-        } else if (field === "region_budget_bytes") {
-            next.region_budget_bytes = readNumber(el, next.region_budget_bytes);
         }
     }
 
@@ -2212,65 +2160,6 @@ function renderPeripheralRow(region, index, kinds = DEVICE_KINDS) {
     `;
 }
 
-/**
- * 一行 MCU 摘要（只读展示用）。
- *
- * @param {object} mcu — `normalizeMcu` 后的形状
- * @param {string} label — 「草稿 MCU」/「当前生效板 MCU」
- * @returns {string}
- */
-/**
- * **模板库**（v0.76 · STAGE-52 · 裁决 M —— 前端**查**内核，**不抄**模板）。
- *
- * ⚠️ **清单是内核报的那一份真相**（`platform.templates` 订阅即推）⇒ ⇒
- * 本卡**只渲染 state.templates** ⇒ ⇒ **不**在这里硬编码任何模板数据。
- *
- * ⚠️ **选一块 ⇒ 「导入」**：发 `GetPlatformTemplate{id}` ⇒ 内核回完整
- * 描述 ⇒ 前端 `draftFromDescription` 导入草稿（**起点**，可继续改）。
- *
- * ⚠️ **无板时这是 B1 的引导面**：装载被拒（`E_PLT-22`）⇒ ⇒ 引导文案
- * 说「先从模板导入 default / minimal / qemu-virt」⇒ ⇒ 就是这块卡。
- *
- * @param {object} state — memory-map 视图状态（含 `templates`）
- * @returns {string}
- */
-function renderTemplateLibrary(state) {
-    const templates = Array.isArray(state?.templates) ? state.templates : null;
-    let body;
-    if (templates === null) {
-        body = `<p class="muted" data-tpl-none="1">模板清单还没到 —— 内核**订阅即推**，稍候自动出现。</p>`;
-    } else if (templates.length === 0) {
-        body = `<p class="muted" data-tpl-empty="1">内核报了空的模板清单（内置模板不存在？）。</p>`;
-    } else {
-        body = templates
-            .map((one) => {
-                const id = escapeHtml(String(one?.id ?? ""));
-                const name = escapeHtml(String(one?.name ?? ""));
-                const deviceCount = Number(one?.device_count ?? 0);
-                return `
-                    <div class="row tpl-entry" data-tpl-id="${id}">
-                        <div class="kpi" style="flex:1">
-                            <span class="k">${id}</span>
-                            <span class="v">${name} · ${deviceCount} 个外设器件</span>
-                        </div>
-                        <button type="button" class="btn" data-action="load-template"
-                                data-template-id="${id}">导入</button>
-                    </div>`;
-            })
-            .join("");
-    }
-    return `
-        <div class="card" data-tpl-library="1">
-            <h3>模板库<span class="tag">内置板 · 内核报清单</span></h3>
-            ${body}
-            <p class="muted">
-                「导入」= 把**内置板模板的完整描述**导入草稿作为**起点**，由你自行修改；
-                装载固件**不会**自动填充编辑面。无板装载会被拒（<code>E_PLT-22</code>），
-                请先从这里导入一块或配置一块板。
-            </p>
-        </div>
-    `;
-}
 
 function renderMcuLine(mcu, label) {
     const vt = mcu.vector_table;
@@ -2342,211 +2231,3 @@ function renderMemoryRow(region, index) {
     `;
 }
 
-/**
- * 渲染**内存图编辑器**面板。
- *
- * @param {object} state — 「memory-map」视图状态
- * @returns {string}
- */
-export function renderMemoryMapPanel(state) {
-    const memoryMap = state?.memoryMap ?? null;
-    const error = state?.error ?? null;
-    const pending = memoryMap?.pending === true;
-    // ⚠️ **草稿是前端自己的东西**（规格 §3.3 / 裁决 D）：不进契约、不进事件。
-    const draft = currentDraft(state);
-
-    let errorBox = "";
-    if (error) {
-        const parsed = parseErrorCode(error.code);
-        errorBox =
-            `<p class="mmap-error" data-memory-map-error="1" ` +
-            `data-error-code="${escapeHtml(parsed.code)}" ` +
-            `data-error-family="${escapeHtml(parsed.family)}" ` +
-            `data-error-scenario="${escapeHtml(parsed.scenario)}">` +
-            `${escapeHtml(parsed.code)}：${escapeHtml(String(error.message ?? ""))}</p>`;
-    }
-
-    // ⚠️ **「待生效」是横幅**（原型与真机门禁都叫它「横幅」⇒ ⇒ 复用
-    // `.banner`，不新造类名）。
-    const pendingBox = pending
-        ? `<p class="banner mmap-pending" data-memory-map-pending="1">` +
-          `待生效 —— 重新装载工程后应用（板级配置已存下，但当前会话的镜像还在跑：` +
-          `改板只换总线、不动固件）。</p>`
-        : "";
-
-    // ⚠️ **修订号**（裁决 A · v0.31）：它是**内核事件带回来的**⇒ 与
-    // 「当前生效的图」住在**同一个对象**里（不是另设的标志位）⇒
-    // 提交时原样带上 ⇒ 并发丢更新看得见（`E_PLT-13`）。
-    //
-    // ⚠️ **没收到过事件 ⇒ 显示 0**（不许显示 `undefined` / 空）。
-    const revision = Number(memoryMap?.revision ?? 0);
-    const loaded = memoryMap?.loaded === true;
-    const revisionBox =
-        `<p class="muted" data-mmap-revision-line>` +
-        `内存图修订号：<span data-mmap-revision>${escapeHtml(String(revision))}</span>` +
-        ` · <span data-mmap-loaded="${loaded ? "1" : "0"}">${loaded ? "已装载工程" : "未装载工程"}</span>` +
-        `</p>`;
-
-    const regions = Array.isArray(draft.regions) ? draft.regions : [];
-    // ⚠️ **类型下拉的选项** = 「前端可实例化」∩「内核已实现」（裁决 H）
-    // ⇒ ⇒ 前端**不再**自说自话 ⇒ ⇒ 内核没有的类型**选不出来**。
-    const kinds = availableDeviceKinds(state?.deviceTypes);
-    const memoryRows = [];
-    const peripheralRows = [];
-    regions.forEach((region, index) => {
-        if (String(region?.kind) === "peripheral") peripheralRows.push(renderPeripheralRow(region, index, kinds));
-        else memoryRows.push(renderMemoryRow(region, index));
-    });
-
-    // ⚠️ **比例条的分段**（STAGE-35 · 裁决 D）：**按真地址区间**算，不是
-    // 写死的百分比 ⇒ ⇒ 分段数 == 段表行数（验收 A-11）。
-    //
-    // ⚠️ **STAGE-46 · 裁决 I**：外设段的**长度**用**内核类型表给的
-    //   `window_bytes`** ⇒ ⇒ 查不到才退回占位常量。
-    const layout = memoryMapLayout(draft, state?.deviceTypes ?? null);
-    const segments = layout.segments;
-    const memoryCount = segments.filter((seg) => seg.kind !== "peripheral").length;
-    const peripheralCount = segments.length - memoryCount;
-
-    // ⚠️ **提示条只在真的有分段时出现** ⇒ ⇒ 没有段时那句话是**假的**（没东西
-    // 可点）⇒ ⇒ 那时给的是 `.empty` 空态。
-    const hintBox = segments.length > 0
-        ? `<p class="banner" data-mmap-seg-hint="1">${escapeHtml(SEGMENT_BAR_HINT)}</p>`
-        : "";
-
-    // ⚠️ **已有板的 id 只读**（STAGE-15 裁决 E）：主键 = 描述的 `id`
-    // ⇒ 改 id 就是「另一块板」⇒ **改 id 的入口不存在**（`selectedId` 为空
-    // = 正在起一块**新**板 ⇒ 那时 id 才可编辑）。
-    const selectedId = state?.selectedId ?? null;
-    const idExtra = selectedId === null || selectedId === undefined ? "" : "readonly";
-
-    // ⚠️ **v0.75（STAGE-51 · §2.6 顺手整改①）**：草稿是「用户自己的东西」
-    // 的标志 = `state.draft` 被设过 ⇒ ⇒ **没设过**（编辑器从默认草稿起步）
-    // 且存在生效板 ⇒ ⇒ 提示「当前生效板 · 只读」+ 引导自己配置。
-    // ⚠️ **v0.76（STAGE-52 · B3 摘除）**：**不再有「自动选择」概念**（内置
-    //   板 = 模板预设 · 显式导入）⇒ ⇒ 文案里**不出现**「自动选择」四个字
-    //   （N-3 判据同源）。
-    // ⚠️ **v0.75 · STAGE-51 · §2.6 顺手整改①**：草稿是「用户自己的东西」的
-    // 标志 = **内容**≠默认草稿（不是「state.draft 被设过」）⇒ ⇒ 点「重建
-    // 草稿」（new-draft ⇒ draft = `defaultDraft()`）之后**内容仍是默认** ⇒ ⇒
-    // 提示还在（B-166a 在真机上等它）⇒ ⇒ 真改了内容（加段 / 改名字）⇒ ⇒
-    // 提示消失（N-4b：不教用户做事）。
-    const draftTouched = state?.draft !== null
-        && state?.draft !== undefined
-        && canonicalJson(state.draft) !== canonicalJson(defaultDraft());
-    const effectiveName = String(memoryMap?.description?.name ?? "");
-    const effectiveBanner = (!draftTouched && effectiveName !== "")
-        ? `<p class="banner" data-mmap-effective-banner="1">` +
-          `当前生效板：<strong>${escapeHtml(effectiveName)}</strong>（仅用于运行 · 只读）` +
-          `——板级视图由你配置：点「从内置模版开始」把模板导入草稿自己改。</p>`
-        : "";
-
-    return `
-        <section class="memory-map-editor">
-            <div class="cards" style="grid-template-columns: 1fr;">
-                <div class="card">
-                    <h3>板级内存图<span class="tag">M-14 · 板级配置</span></h3>
-                    ${effectiveBanner}
-                    ${pendingBox}
-                    ${errorBox}
-                    <div class="row">
-                        <div class="kpi"><span class="k">分段数</span><span class="v">${segments.length}</span></div>
-                        <div class="kpi"><span class="k">RAM / ROM 段</span><span class="v">${memoryCount}</span></div>
-                        <div class="kpi"><span class="k">外设窗口</span><span class="v">${peripheralCount}</span></div>
-                    </div>
-                    ${revisionBox}
-                    <p class="muted">
-                        描述格式版本固定为 <code>${PLATFORM_SCHEMA_VERSION}</code>
-                        （<code>PLATFORM_SCHEMA_VERSION</code>）——它与契约信封的
-                        <code>schema_version</code>（${CONTRACT_SCHEMA_VERSION}）是**两件事**，不要混。
-                        <code>auto_selectable</code> 已废弃（v0.76 · B3）——描述里**不再带**这个键。
-                    </p>
-                    <div class="grid-2">
-                        ${field({ field: "id", label: "板 id", value: draft.id ?? "", extra: idExtra })}
-                        ${field({ field: "name", label: "板名", value: draft.name ?? "" })}
-                        ${field({ field: "priority", label: "优先级 priority", value: draft.priority ?? "0" })}
-                        ${field({
-                            field: "region_budget_bytes",
-                            label: "每段的声明大小上限（region_budget_bytes，字节）",
-                            value: draft.region_budget_bytes ?? "0",
-                            hex: hex32(parseNumber(draft.region_budget_bytes) ?? 0),
-                            extra: "data-mm-budget",
-                        })}
-                    </div>
-                    <p class="muted" data-mmap-budget-note>
-                        ⚠️ <strong>V-7</strong>：任一 RAM / ROM 段的<strong>声明</strong> size
-                        不得超过 <code>region_budget_bytes</code>（超出 ⇒ 内核报 <code>E_PLT-07</code>）——
-                        它是<strong>每段的声明大小上限</strong>；运行期的占用上限由内核
-                        按各段的声明值另算，<strong>界面只提供这一个旋钮</strong>。
-                    </p>
-                </div>
-
-                ${renderMcuCard(draft, memoryMap)}
-
-
-                <div class="card">
-                    <h3>地址布局<span class="tag">按真实地址区间着色</span></h3>
-                    ${hintBox}
-                    ${renderSegmentBar(segments)}
-                    ${renderSegmentLegend()}
-                    ${renderSpanChip(layout.span)}
-                </div>
-
-                <div class="card">
-                    <h3>RAM / ROM 段<span class="tag">${memoryCount} 段</span></h3>
-                    <table class="map-table" data-mmap-memory-rows>
-                        <thead><tr><th>类型</th><th>基址</th><th>大小</th><th></th></tr></thead>
-                        <tbody>${memoryRows.join("") || `<tr><td colspan="4" class="muted">还没有 RAM / ROM 段。</td></tr>`}</tbody>
-                    </table>
-                    <div class="row">
-                        <button type="button" class="btn" data-action="add-ram">+ RAM 段</button>
-                        <button type="button" class="btn" data-action="add-rom">+ ROM 段</button>
-                    </div>
-                </div>
-
-                <div class="card">
-                    <h3>外设窗口<span class="tag">${peripheralCount} 个</span></h3>
-                    <p class="muted" data-mmap-device-range-note>
-                        器件参数的合法区间**由内核校验**（越界 ⇒ <code>E_PLT-12</code>）——
-                        前端**不写第二份区间表**（那会是第二个真相）⇒ 区间值只在内核的消息里给出。
-                    </p>
-                    <table class="map-table" data-mmap-peripheral-rows>
-                        <thead><tr><th>基址</th><th>器件类型</th><th>器件参数</th><th></th></tr></thead>
-                        <tbody>${peripheralRows.join("") || `<tr><td colspan="4" class="muted">还没有外设窗口。</td></tr>`}</tbody>
-                    </table>
-                    <div class="row">
-                        <button type="button" class="btn" data-action="add-peripheral">+ 外设窗口</button>
-                    </div>
-                </div>
-
-                ${renderBasePlanner(state)}
-
-                ${renderIrqEditor({ draft })}
-
-                ${renderArchivePanel(state)}
-
-                ${renderTemplateLibrary(state)}
-
-                <div class="card">
-                    <h3>提交与工程</h3>
-                    <div class="row">
-                        <button type="button" class="btn primary" data-action="submit-memory-map">提交板级内存图（整份替换 / 差量）</button>
-                        <button type="button" class="btn" data-action="unload-project">卸载工程</button>
-                        <button type="button" class="btn" data-action="reload-project">重新装载工程</button>
-                        <button type="button" class="btn" data-action="load-current" data-template-entry="1">从内置模版开始</button>
-                        <button type="button" class="btn ghost" data-action="new-draft">重建草稿</button>
-                    </div>
-                    <p class="muted">
-                        「从内置模版开始」= 把**当前生效板**（内置 qemu-virt 等模板）导入草稿作为
-                        **起点**，由你自行修改（v0.75 · 板级视图由你配置，加载固件**不会**自动填充编辑面）。
-                    </p>
-                </div>
-
-                <div class="card">
-                    <h3>当前生效的内存图</h3>
-                    ${renderEffectiveSummary(memoryMap)}
-                </div>
-            </div>
-        </section>
-    `;
-}

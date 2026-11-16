@@ -100,8 +100,6 @@ fn user_board() -> PlatformDescription {
         name: "User board".to_string(),
         priority: 100,
         description: None,
-        region_budget_bytes: 16 * 1024 * 1024,
-        max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
                 base: Some(0x0000_0000),
@@ -271,10 +269,6 @@ fn b1_compose_is_a_pure_function() {
             },
         },
         MemoryMapOp::RemoveRegion { base: 0x5000_0000 },
-        MemoryMapOp::SetBudget {
-            region_budget_bytes: 0x0080_0000,
-            max_region_bytes: Some(0x0040_0000),
-        },
     ];
 
     let first = compose_memory_map(&host.platform, &ops).expect("合成必须成功");
@@ -439,10 +433,6 @@ fn target_with_three_changes() -> PlatformDescription {
         name: "User board".to_string(),
         priority: 100,
         description: None,
-        // ⚠️ 改预算：声明期 16 MiB → 8 MiB。
-        region_budget_bytes: 0x0080_0000,
-        // ⚠️ 改预算：运行期上界 缺省 → 4 MiB。
-        max_region_bytes: Some(0x0040_0000),
         regions: vec![
             // ⚠️ 改一段：低段 RAM 64 KiB → 128 KiB。
             RegionSpec::Ram {
@@ -475,11 +465,6 @@ fn three_change_ops() -> Vec<MemoryMapOp> {
         },
         // ⚠️ 删一段：`0x5000_0000` 那段 ROM。
         MemoryMapOp::RemoveRegion { base: 0x5000_0000 },
-        // ⚠️ 改预算：两个字段一起改。
-        MemoryMapOp::SetBudget {
-            region_budget_bytes: 0x0080_0000,
-            max_region_bytes: Some(0x0040_0000),
-        },
     ]
 }
 
@@ -593,38 +578,6 @@ fn b4_equivalence_holds_for_removing_one_region() {
     );
 }
 
-/// **B-4（改预算）** —— 只**改预算** ⇒ 两条路径的生效图**逐字段相同**。
-#[test]
-fn b4_equivalence_holds_for_changing_the_budget() {
-    let base = base_board();
-    let mut target = base.clone();
-    target.region_budget_bytes = 0x0080_0000;
-    target.max_region_bytes = Some(0x0040_0000);
-    let ops = vec![MemoryMapOp::SetBudget {
-        region_budget_bytes: 0x0080_0000,
-        max_region_bytes: Some(0x0040_0000),
-    }];
-
-    let mut host_whole = host_with_board(&base);
-    let mut host_delta = host_with_board(&base);
-
-    let effective_whole = apply_whole(&mut host_whole, &target);
-    let effective_delta = apply_delta(&mut host_delta, &ops);
-
-    assert_eq!(
-        canonical(&effective_whole),
-        canonical(&effective_delta),
-        "「改预算」⇒ 两条路径的生效图必须**逐字段相同**"
-    );
-    assert_eq!(
-        canonical(&effective_delta),
-        canonical(&target),
-        "「改预算」⇒ 生效图必须**逐字段等于**目标图"
-    );
-    // ⚠️ **两个预算字段一起改**（声明期 + 运行期）。
-    assert_eq!(effective_delta.region_budget_bytes, 0x0080_0000);
-    assert_eq!(effective_delta.max_region_bytes, Some(0x0040_0000));
-}
 
 // ---------------------------------------------------------------------------
 // B-5 · 非法操作 ⇒ 两条路径**都拒** ⇒ **都什么都不动**

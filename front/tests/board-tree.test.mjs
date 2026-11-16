@@ -62,7 +62,6 @@ function boardDraft() {
         name: "测试板",
         priority: "100",
         auto_selectable: "false",
-        region_budget_bytes: "8388608",
         regions: [
             { kind: "ram", base: "0", size: "1048576" },
             { kind: "peripheral", base: "1073741824", device: { device: "gpio", id: "GPIO0" } },
@@ -166,7 +165,6 @@ describe("STAGE-44 · 产品树 = 板的派生视图（双栏工作面）", () =
             name: "测试板",
             priority: "100",
             auto_selectable: "false",
-            region_budget_bytes: "8388608",
             regions: [{ kind: "ram", base: "0", size: "1048576" }],
             bridge: [],
         };

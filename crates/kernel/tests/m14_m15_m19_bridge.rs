@@ -511,7 +511,7 @@ fn oversized_region_is_rejected_without_allocating() {
     );
 
     // ② 真占超预算 ⇒ **E_BUS-09**，且**零页留下**。
-    let mut small = Bus::with_max_region_bytes(0x1000);
+    let mut small = Bus::new();
     let err = small
         .map_ram(0, 0x1000, &[0u8; 0x1001])
         .expect_err("a region that really occupies more than the cap must be rejected");
@@ -525,89 +525,7 @@ fn oversized_region_is_rejected_without_allocating() {
     assert_eq!(small.region_count(), 0);
 }
 
-#[test]
-fn the_region_size_cap_is_configurable() {
-    // 上限可配：默认 16 MiB，宿主可按自己的预算策略调整。
-    //
-    // ⚠️ **v0.26（STAGE-11 裁决 B）**：上限现在管的是**物理占用**，不是
-    // 声明大小 ⇒ 「声明多大」不再被拒，**「真占多少」才被拒**。
-    let mut bus = Bus::with_max_region_bytes(0x1000);
-    assert_eq!(bus.max_region_bytes(), 0x1000);
 
-    // 声明本身**免费** ⇒ 超过上限的声明也**合法**。
-    bus.map_ram(0x2000, 0x1001, &[])
-        .expect("a declaration over the cap is free now");
-    assert_eq!(bus.ram_allocated_bytes(), 0);
-
-    // 但**物化**第二页就会超过上限（0x1000 = 1 页）⇒ 被拒。
-    //
-    // ⚠️ 区域必须**够大**（0x2000 = 2 页）才能让第二个写落在**区域内部**：
-    // 否则 `0x1000` 落在区域**外面** ⇒ 那报的是 **E_BUS-01（未映射）**，
-    // 压根走不到护栏 ⇒ 断言会挂在场景码上而不是挂在护栏上。
-    bus.map_ram(0, 0x2000, &[])
-        .expect("a two-page region is free to declare");
-    bus.write(0, BusWidth::Byte, 0xAA)
-        .expect("the first page fits");
-    let err = bus
-        .write(0x1000, BusWidth::Byte, 0xBB)
-        .expect_err("a second page is over the cap");
-    assert_eq!(err.scenario, 9, "over-cap occupancy raises E_BUS-09");
-    assert_eq!(
-        bus.ram_allocated_bytes(),
-        4096,
-        "被拒的那次写**不得**留下已物化的页"
-    );
-
-    // 调整上限后同样的写**成功** ⇒ 护栏**只能放宽，不能去掉**。
-    bus.set_max_region_bytes(0x2000);
-    bus.write(0x1000, BusWidth::Byte, 0xBB)
-        .expect("raising the cap works");
-    assert_eq!(bus.ram_allocated_bytes(), 2 * 4096);
-}
-
-#[test]
-fn oversized_peripheral_window_is_rejected_by_the_region_cap() {
-    // F-7（M-14 侧盲区）：外设路径的区域大小上限必须被拒绝。
-    //
-    // `map_ram` / `map_rom` 有**两层**保护（`prepare_bytes` 的预分配检查
-    // + `map_region` 的统一上限），而 `map_peripheral_instance` 只有
-    // `map_region` 这一层。之前的接线测试只覆盖了 `map_ram` 路径，
-    // 于是「外设路径的上限」这条防线**没有任何测试守护**——一旦
-    // `map_region` 里的上限检查被误删，外设路径会静默放行。
-    //
-    // 这里造一个 `size()` = 1 GiB 的外设（远超默认 16 MiB 上限），
-    // 挂载必须被拒，且错误必须是 E_BUS-09。
-    const HUGE_BASE: u32 = 0x4000_0000;
-    const HUGE_SIZE: u32 = 0x4000_0000; // 1 GiB
-
-    let mut peripherals = PeripheralRegistry::new();
-    peripherals
-        .register(SizedPeripheral::new("HUGE0", HUGE_BASE, HUGE_SIZE))
-        .expect("register the oversized peripheral");
-    let handle = peripherals.handle("HUGE0").expect("handle");
-
-    let mut bus = Bus::new();
-    let err = bus
-        .map_peripheral_instance(HUGE_BASE, HUGE_SIZE, Rc::clone(&handle))
-        .expect_err("外设路径的区域大小上限必须被拒绝");
-    assert_eq!(err.family, ErrorFamily::Bus);
-    assert_eq!(
-        err.scenario, 9,
-        "an over-cap peripheral window must raise E_BUS-09"
-    );
-    assert_eq!(
-        bus.region_count(),
-        0,
-        "a rejected mount must leave the region set untouched"
-    );
-
-    // 窗口 size 与外设声明不一致时先报 E_BUS-08 —— 说明 1 GiB 那个
-    // 用例确实是被**上限**挡下来的，而不是被尺寸校验挡下来的。
-    let err = bus
-        .map_peripheral_instance(HUGE_BASE, HUGE_SIZE - 4, handle)
-        .expect_err("a size mismatch is rejected too");
-    assert_eq!(err.scenario, 8, "size mismatch raises E_BUS-08");
-}
 
 #[test]
 fn a_peripheral_window_within_the_cap_still_mounts() {

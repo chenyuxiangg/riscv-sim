@@ -27,7 +27,9 @@
 use std::path::PathBuf;
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError, PLATFORM_FAMILY};
-use riscv_sim_contract::platform::{DeviceSpec, PlatformDescription, RegionSpec};
+use riscv_sim_contract::platform::{
+    DeviceSpec, PlatformDescription, RegionSpec, PLATFORM_SCHEMA_VERSION,
+};
 
 use super::platform;
 use super::{load_segment_overlap_error, ElfIsaFacts, KernelHost, MemoryProfile, ParsedImage};
@@ -171,47 +173,22 @@ fn the_peripheral_window_size_comes_from_the_device() {
 // B-4 · 护栏预算
 // ---------------------------------------------------------------------------
 
-/// **B-4** 每区域的护栏预算**由描述说** ⇒ `bus.max_region_bytes()` 与
-/// `region_budget_bytes` **逐字相等**。
-#[test]
-fn the_guardrail_budget_comes_from_the_description() {
-    for (id, budget) in [
-        (platform::PLATFORM_ID_DEFAULT, 16 * 1024 * 1024u64),
-        (platform::PLATFORM_ID_QEMU_VIRT, 128 * 1024 * 1024u64),
-    ] {
-        let host = KernelHost::new_with_platform(id).expect("内置平台");
-        assert_eq!(
-            host.bus().max_region_bytes(),
-            budget,
-            "{id} 的每区域护栏预算"
-        );
-        let description = platform::builtin_description(id).expect("内置描述");
-        assert_eq!(
-            u64::from(description.region_budget_bytes),
-            budget,
-            "{id} 描述里的 region_budget_bytes"
-        );
-    }
-}
 
 // ---------------------------------------------------------------------------
-// B-5 · V-7 生效（超预算 ⇒ 建图前就被拒）
+// B-5 · 预算退役（大段声明合法 · 懒分配照旧）
 // ---------------------------------------------------------------------------
 
-/// **B-5** 描述声明一段**超过**预算的 RAM ⇒ **建图前**就被拒
-/// （`E_PLT-07`）⇒ **一个区域都不留**。
+/// **B-5（v0.77 起）** 描述声明一段 **32 MiB** 的 RAM ⇒ 现在**合法**
+/// （没有任何「每区域预算」）⇒ 建图成功，且**声明不占物理内存**。
 ///
-/// ⚠️ 判据是 `family` + `scenario`，**不看** message 文本。
+/// ⚠️ 这条钉的是「预算退役」**正面**语义：大段声明不再被拒，懒分配照旧。
 #[test]
-fn an_over_budget_region_is_rejected_before_anything_is_mapped() {
+fn a_large_declaration_is_legal_now_that_the_budget_is_gone() {
     let description = PlatformDescription {
-        schema_version: 1,
-        id: "over-budget".to_string(),
-        name: "Over budget".to_string(),
+        schema_version: PLATFORM_SCHEMA_VERSION,
+        id: "large-ram".to_string(),
+        name: "Large RAM".to_string(),
         priority: 5,
-        region_budget_bytes: 16 * 1024 * 1024,
-        // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
-        max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
                 base: Some(0),
@@ -219,7 +196,7 @@ fn an_over_budget_region_is_rejected_before_anything_is_mapped() {
             },
             RegionSpec::Ram {
                 base: Some(0x8000_0000),
-                size: 32 * 1024 * 1024, // ⚠️ 超过 16 MiB 的预算
+                size: 32 * 1024 * 1024, // 以前会被 16 MiB 的预算挡下
             },
         ],
         description: None,
@@ -228,13 +205,9 @@ fn an_over_budget_region_is_rejected_before_anything_is_mapped() {
     };
 
     let mut bus = Bus::new();
-    let err = platform::map_platform(&mut bus, &description).expect_err("超预算必须被拒");
-    assert_eq!(err.family, PLATFORM_FAMILY, "错误族");
-    assert_eq!(err.scenario, 7, "场景码必须是 E_PLT-07（声明期超预算）");
-    assert!(
-        bus.export_map().regions.is_empty(),
-        "建图前就被拒 ⇒ 一个区域都不留"
-    );
+    platform::map_platform(&mut bus, &description).expect("没有预算 ⇒ 32 MiB 的声明合法");
+    assert_eq!(bus.export_map().regions.len(), 2, "两段都在");
+    assert_eq!(bus.ram_allocated_bytes(), 0, "声明不物化任何页（懒分配）");
 }
 
 // ---------------------------------------------------------------------------
@@ -379,11 +352,6 @@ fn a_description_loaded_from_a_file_matches_the_built_in_one() {
         );
     }
     assert_eq!(host.platform_id(), "default", "平台 id");
-    assert_eq!(
-        host.bus().max_region_bytes(),
-        16 * 1024 * 1024,
-        "护栏预算也一样"
-    );
 
     // ⚠️ 顺手清掉临时文件（它在**仓外**）。
     let _ = std::fs::remove_file(&path);
@@ -436,11 +404,6 @@ fn the_compatible_api_still_works() {
         by_id.bus().export_map().regions.len(),
         "两条入口的区域数量"
     );
-    assert_eq!(
-        by_profile.bus().max_region_bytes(),
-        by_id.bus().max_region_bytes(),
-        "两条入口的护栏预算"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -462,9 +425,7 @@ fn a_broken_description_reports_its_own_code() {
         id: "overlap".to_string(),
         name: "Overlap".to_string(),
         priority: 5,
-        region_budget_bytes: 16 * 1024 * 1024,
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
-        max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
                 base: Some(0),
@@ -479,32 +440,14 @@ fn a_broken_description_reports_its_own_code() {
         roles: None,
         mcu: None,
     };
-    // ③ 预算超了 ⇒ E_PLT-07。
-    let over_budget = PlatformDescription {
-        schema_version: 1,
-        id: "budget".to_string(),
-        name: "Budget".to_string(),
-        priority: 5,
-        region_budget_bytes: 1024,
-        // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
-        max_region_bytes: None,
-        regions: vec![RegionSpec::Ram {
-            base: Some(0),
-            size: 4096,
-        }],
-        description: None,
-        roles: None,
-        mcu: None,
-    };
-    // ④ 器件 id 重复 ⇒ E_PLT-08。
+    // ③ **预算超了** 那条已随预算概念退役（v0.77 · STAGE-53）⇒ 不再有这一例。
+    // ③ 器件 id 重复 ⇒ E_PLT-08。
     let duplicate_id = PlatformDescription {
         schema_version: 1,
         id: "dup".to_string(),
         name: "Duplicate".to_string(),
         priority: 5,
-        region_budget_bytes: 16 * 1024 * 1024,
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
-        max_region_bytes: None,
         regions: vec![
             RegionSpec::Peripheral {
                 base: Some(0x4000_0000),
@@ -526,10 +469,11 @@ fn a_broken_description_reports_its_own_code() {
         mcu: None,
     };
 
-    let cases: [(&str, PlatformDescription, u16); 4] = [
+    // ⚠️ v0.77（STAGE-53）：`预算超了` 那条**随预算概念一起退役**
+    //    （`E_PLT-07` 保留号但不再产生）⇒ 三例，各自的码仍互不相同。
+    let cases: [(&str, PlatformDescription, u16); 3] = [
         ("版本不对", wrong_version, 1),
         ("区域重叠", overlapping, 6),
-        ("预算超了", over_budget, 7),
         ("器件 id 重复", duplicate_id, 8),
     ];
     let mut seen: Vec<u16> = Vec::new();

@@ -154,8 +154,7 @@ must = [
     "PLATFORM_SCHEMA_VERSION",     # 描述格式版本（不升）
     "E_PLT_07",                    # 声明期护栏（不能删）
     "E_BUS_09",                    # 运行期护栏（不合并）
-    "set_max_region_bytes",        # 宿主那一行
-    "region_budget_bytes",         # 声明期预算
+    # ⚠️ v0.77（STAGE-53）：`set_max_region_bytes` / `region_budget_bytes` 已退役
     "image_loaded",                # 卸载要清的那一位
     "user_board",                  # 用户的板（卸载**不**清）
     "topics.clear",                # 卸载必然清订阅

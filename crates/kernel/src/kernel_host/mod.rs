@@ -4957,7 +4957,8 @@ impl KernelHost {
 /// ① `UpsertRegion` —— 按 **`spec.base()`** 定位 ⇒ 命中**替换** / 未命中
 ///    **追加**（⇒ 与数组顺序无关）
 /// ② `RemoveRegion` —— 定位不到 ⇒ **`E_PLT_14`**，**不静默忽略**
-/// ③ `SetBudget` —— **两个预算字段一起改**（声明期 + 运行期）
+/// ③ **不再有 `SetBudget`**（v0.77 · STAGE-53 · 预算概念整体退役 ⇒ ⇒
+///    差量只剩「改一段 / 删一段」两种）
 fn compose_memory_map(
     base: &PlatformDescription,
     ops: &[MemoryMapOp],
@@ -5010,14 +5011,6 @@ fn compose_memory_map(
                         ));
                     }
                 }
-            }
-            MemoryMapOp::SetBudget {
-                region_budget_bytes,
-                max_region_bytes,
-            } => {
-                // ⚠️ **两个预算字段一起改**（声明期 + 运行期）。
-                synthesized.region_budget_bytes = *region_budget_bytes;
-                synthesized.max_region_bytes = *max_region_bytes;
             }
         }
     }

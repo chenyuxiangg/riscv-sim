@@ -339,7 +339,18 @@ pub mod snapshot;
 /// - 旧生产者缺该字段 ⇒ `serde(default)` 读成 `0`，但新生产者**总是**
 ///   序列化它（`0` 是真实值，不是“缺失”）；
 /// - ⇒ ⇒ `SCHEMA_VERSION` 15 → 16；`SIM_STATE_SCHEMA_VERSION` stays `2`。
-pub const SCHEMA_VERSION: u32 = 16;
+///
+/// Contract **v17** removes `MemoryMapOp::SetBudget`
+/// （v0.77 · STAGE-53 · 「每区域预算」整体退役）：
+///
+/// - 描述里的 `region_budget_bytes` / `max_region_bytes` 两个键随之删除
+///   ⇒ ⇒ **段的 size 就是它的容量**；
+/// - 差量只剩 `UpsertRegion` / `RemoveRegion` ⇒ ⇒ 线上**少一个变体**
+///   ⇒ ⇒ `SCHEMA_VERSION` 16 → 17；`SIM_STATE_SCHEMA_VERSION` stays `2`。
+///
+/// ⚠️ 两批**各自**是一次信封升版（16 = TraceEvent 带访问值，
+/// 17 = 少一个差量变体）⇒ ⇒ 合并时**不并成一个数**。
+pub const SCHEMA_VERSION: u32 = 17;
 
 /// 转储长度上限（字节）—— v0.57 批（STAGE-42 §2.5 · 裁决 D）。
 ///

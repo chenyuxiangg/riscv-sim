@@ -40,6 +40,7 @@ import { Command, TRACE_FORMAT, TRACE_SOURCE, WRITE_SIZE } from "./lib/message.j
 // ⚠️ 只导入**纯函数**（错误码拆分、草稿转换、「已被内核接受」推导量）⇒
 // 不引入服务层依赖，也不构成循环依赖。
 import {
+    boardErrorHint,
     draftToDescription,
     planMemoryMapUpdate,
     splitErrorCode,
@@ -1872,7 +1873,12 @@ export async function handleCommand(detail, services) {
                     docsByDevice(state),
                 );
                 if (saved.saved) {
+                    // ⚠️ **v0.77（STAGE-53）**：存完**当次就刷新**档案列表
+                    //    ⇒ 否则「另存为」之后从模板加载里**选不到刚存的那块**。
+                    await refreshProductArchive(services);
                     setNote(`已保存到本机数据库：${nextId}（产品本身未改动）。`);
+                } else {
+                    setNote(`另存失败：${saved.reason ?? "库不可用"}（草稿还在，换块板名再试）。`);
                 }
                 return;
             }
@@ -2083,9 +2089,22 @@ export async function applyProductBoard(services, rawDescription, options = {}) 
             }
 
             // ⚠️ 只有**内核接受过**的描述才算「被接受过」（板档案落库门槛）。
-            viewStore.setState("product", (prev) => ({ ...prev, acceptedDescription: description }));
+            // ⚠️ 接受成功 ⇒ **清掉**上一次的横幅（否则旧错会一直挂着）。
+            viewStore.setState("product", (prev) => ({
+                ...prev,
+                acceptedDescription: description,
+                error: null,
+            }));
         } catch (err) {
             const { code, message } = splitErrorCode(err);
+            // ⚠️ **v0.77（STAGE-53 · 表 11）**：校验失败要在**工作面横幅**上
+            //    说出来（用户当时的实感是「弹层关了，什么都没发生」）。
+            const hint = boardErrorHint(code);
+            const detail = hint ? `${hint}${message ? `（${message}）` : ""}` : message;
+            viewStore.setState("product", (prev) => ({
+                ...prev,
+                error: { code, message: detail || code },
+            }));
             setNote(`内存图流不可用：${code} ${message}`);
             throw err;
         }

@@ -147,7 +147,9 @@
 //   on either side turns the other side red.
 
 /** Protocol schema version — mirrors `riscv_sim_contract::SCHEMA_VERSION`. */
-export const SCHEMA_VERSION = 16;
+// ⚠️ **v16**：`TraceEvent` 带访问值；**v17**：`SetBudget` 变体退役
+//   （v0.77 · STAGE-53）⇒ ⇒ 前端镜像跟契约层**同批**。
+export const SCHEMA_VERSION = 17;
 
 /**
  * 转储长度上限（字节）—— mirrors `riscv_sim_contract::DUMP_MAX_BYTES`.
@@ -183,7 +185,10 @@ export const SYMBOL_CANDIDATE_LIMIT = 16;
  * **一个定义处**（STAGE-15 裁决 K：初版让服务层「另立一个同值常量」⇒
  * 那是**两个真相** ⇒ 不接受）。
  */
-export const PLATFORM_SCHEMA_VERSION = 5;
+///
+/// ⚠️ **v0.77（STAGE-53）**：`5 → 6` ⇒ 删掉 `region_budget_bytes` /
+/// `max_region_bytes` 两个键（预算概念整体退役）。
+export const PLATFORM_SCHEMA_VERSION = 6;
 
 /**
  * **本前端能读**的平台描述格式版本 — mirrors
@@ -197,7 +202,10 @@ export const PLATFORM_SCHEMA_VERSION = 5;
  * 那个」（⇒ ⇒ 前端**写**它）⇒ ⇒ 「**本构建能读**的那些」是**另一件事**
  * ⇒ ⇒ ⇒ **两个数，两个含义**（一个约束一个落点）。
  */
-export const SUPPORTED_PLATFORM_SCHEMA_VERSIONS = [1, 2, 3, 4, 5];
+///
+/// ⚠️ **v0.77（STAGE-53）**：`[1, 2, 3, 4, 5, 6]` ⇒ 版本 5 的老档案
+/// 带那两个预算键**仍能装**（serde 忽略未知键）。
+export const SUPPORTED_PLATFORM_SCHEMA_VERSIONS = [1, 2, 3, 4, 5, 6];
 
 /**
  * 合法性**规则集**版本 — mirrors `riscv_sim_contract::platform::PLATFORM_RULES_VERSION`.
@@ -756,7 +764,7 @@ export const Command = Object.freeze({
      * ⇒ 键**就是 Rust 变体名**：
      *   `{"UpsertRegion": {"spec": {"kind": "ram", "base": 0, "size": 1048576}}}`
      *   `{"RemoveRegion": {"base": 0}}`
-     *   `{"SetBudget": {"region_budget_bytes": 16777216, "max_region_bytes": null}}`
+     *   （`SetBudget` 已随预算概念一起退役 ⇒ v0.77 · STAGE-53）
      * ⇒ ⚠️ **不是** `{"op": "upsert_region", ...}`。
      *
      * @param {Array<object>} ops — 差量操作（按顺序施加）

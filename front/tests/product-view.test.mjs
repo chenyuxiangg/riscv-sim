@@ -46,7 +46,6 @@ const BOARD = {
     name: "我的板",
     priority: 100,
     auto_selectable: false,
-    region_budget_bytes: 0x01000000,
     regions: [
         { kind: "ram", base: 0x80000000, size: 0x00100000 },
         {

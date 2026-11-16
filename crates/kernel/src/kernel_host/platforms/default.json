@@ -3,8 +3,6 @@
   "id": "default",
   "name": "Default",
   "priority": 10,
-  "region_budget_bytes": 16777216,
-  "max_region_bytes": null,
   "regions": [
     {
       "kind": "ram",
