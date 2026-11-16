@@ -332,7 +332,14 @@ pub mod snapshot;
 /// - stepOver 的返回地址停点改由 M-17 的临时状态判定，**不再注入断点表**；
 /// - 因此停止原因**多一个线上标签** ⇒ ⇒ `SCHEMA_VERSION` 14 → 15；
 /// - ⚠️ `SIM_STATE_SCHEMA_VERSION` stays `2`；命令 / 事件形状不变。
-pub const SCHEMA_VERSION: u32 = 15;
+///
+/// Contract **v16** adds the access value to `model::TraceEvent`：
+///
+/// - `value` 承载**读值 / 写值 / 取指机器码**；失败访问为 `0`；
+/// - 旧生产者缺该字段 ⇒ `serde(default)` 读成 `0`，但新生产者**总是**
+///   序列化它（`0` 是真实值，不是“缺失”）；
+/// - ⇒ ⇒ `SCHEMA_VERSION` 15 → 16；`SIM_STATE_SCHEMA_VERSION` stays `2`。
+pub const SCHEMA_VERSION: u32 = 16;
 
 /// 转储长度上限（字节）—— v0.57 批（STAGE-42 §2.5 · 裁决 D）。
 ///

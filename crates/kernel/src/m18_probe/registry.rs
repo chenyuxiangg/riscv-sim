@@ -577,6 +577,9 @@ impl ProbeRegistry {
             addr: access.addr,
             width,
             dir,
+            // 总线**当场**看到的值：读值 / 写值 / 取指机器码 ⇒
+            // M-11 不再需要事后重取机器码（D-87）。
+            value: access.value,
             // ⚠️ 取指与数据访问在总线上**都是读** —— 这个标志是唯一
             // 能把它们分开的依据（M-14 的 `BusAccess::is_fetch`，
             // v0.13 为观察点修的那个）。M-11 的执行轨迹要用它把取指

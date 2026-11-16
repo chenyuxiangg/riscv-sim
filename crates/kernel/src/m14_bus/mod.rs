@@ -285,6 +285,15 @@ pub struct BusAccess {
     pub width: BusWidth,
     /// Read or write.
     pub dir: AccessDir,
+    /// Value carried by the access:
+    ///
+    /// - read  ⇒ the value returned on the wire (0 on failure);
+    /// - write ⇒ the value the caller attempted to write (even if the
+    ///   store was rejected / dropped, so the trace can show what was
+    ///   attempted);
+    /// - fetch ⇒ the instruction's original code, **measured at fetch
+    ///   time** (not re-read later — D-87).
+    pub value: u32,
     /// Dispatch outcome:
     /// - `true`  → the access landed on a mapped region and either
     ///   returned the read byte(s) or applied the write (including
@@ -1883,7 +1892,8 @@ impl Bus {
                 (false, Some(e.scenario))
             }
         };
-        self.fire_hook(addr, width, AccessDir::Read, ok, scenario, false);
+        let value = result.as_ref().copied().unwrap_or(0);
+        self.fire_hook(addr, width, AccessDir::Read, ok, scenario, false, value);
         result
     }
 
@@ -1908,7 +1918,8 @@ impl Bus {
                 (false, Some(e.scenario))
             }
         };
-        self.fire_hook(addr, width, AccessDir::Read, ok, scenario, true);
+        let value = result.as_ref().copied().unwrap_or(0);
+        self.fire_hook(addr, width, AccessDir::Read, ok, scenario, true, value);
         result
     }
 
@@ -1958,7 +1969,8 @@ impl Bus {
                 (false, Some(e.scenario))
             }
         };
-        self.fire_hook(addr, width, AccessDir::Read, ok, scenario, true);
+        let value = result.as_ref().copied().unwrap_or(0);
+        self.fire_hook(addr, width, AccessDir::Read, ok, scenario, true, value);
         result
     }
 
@@ -2222,7 +2234,7 @@ impl Bus {
                 (false, Some(e.scenario))
             }
         };
-        self.fire_hook(addr, width, AccessDir::Write, ok, scenario, false);
+        self.fire_hook(addr, width, AccessDir::Write, ok, scenario, false, value);
         result
     }
 
@@ -2604,6 +2616,7 @@ impl Bus {
         ok: bool,
         err_scenario: Option<u16>,
         is_fetch: bool,
+        value: u32,
     ) {
         if self.hooks.is_empty() {
             return;
@@ -2613,6 +2626,7 @@ impl Bus {
             addr,
             width,
             dir,
+            value,
             ok,
             err_scenario,
             is_fetch,

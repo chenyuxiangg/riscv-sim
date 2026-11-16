@@ -44,6 +44,7 @@ fn make_bus_access(ts_ps: u64, addr: u32, w: BusWidth, dir: AccessDir, ok: bool)
         addr,
         width: w,
         dir,
+        value: 0,
         ok,
         err_scenario: if ok { None } else { Some(1) },
         is_fetch: false,
@@ -438,7 +439,8 @@ fn unbound_signal_dropped_silently() {
 fn make_bus_hook_routes_record_bus_access() {
     let reg = Rc::new(RefCell::new(ProbeRegistry::new()));
     let mut hook = ProbeRegistry::make_bus_hook(Rc::clone(&reg));
-    let access = make_bus_access(42, 0x2000_0000, BusWidth::Word, AccessDir::Read, true);
+    let mut access = make_bus_access(42, 0x2000_0000, BusWidth::Word, AccessDir::Read, true);
+    access.value = 0xCAFE_F00D;
     hook(&access);
     hook(&access);
     let mut borrow = reg.borrow_mut();
@@ -448,6 +450,7 @@ fn make_bus_hook_routes_record_bus_access() {
     assert_eq!(drained[0].addr, 0x2000_0000);
     assert_eq!(drained[0].width, 4);
     assert_eq!(drained[0].dir.as_byte(), 0, "read = 0");
+    assert_eq!(drained[0].value, 0xCAFE_F00D, "访问值必须进入环");
 }
 
 // ---------------------------------------------------------------------------

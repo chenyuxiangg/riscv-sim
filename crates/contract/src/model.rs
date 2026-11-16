@@ -734,6 +734,21 @@ pub struct TraceEvent {
     pub width: u8,
     /// Access direction.
     pub dir: TraceDir,
+    /// Value carried by the access:
+    ///
+    /// - data **read** ⇒ the little-endian value returned by the bus;
+    /// - data **write** ⇒ the value the guest attempted to write;
+    /// - instruction **fetch** ⇒ the instruction's original code
+    ///   (compressed instructions keep their 16-bit form).
+    ///
+    /// A failed access has no observable value (the bus returns nothing
+    /// and the store did not land) ⇒ `0`.
+    ///
+    /// ⚠️ `#[serde(default)]` keeps old producers readable, but the
+    /// field is **always** serialized — a zero is a real value, not a
+    /// "missing" marker.
+    #[serde(default)]
+    pub value: u32,
     /// Whether this access was an **instruction fetch** rather than a
     /// data access.
     ///
@@ -747,10 +762,6 @@ pub struct TraceEvent {
     /// v0.13 for the watchpoint fix, V-A 🟠-2) and was carried up to
     /// the contract in v3 (STAGE-5 §9.4).
     ///
-    /// ⚠️ **This event carries no access *value*** — M-18's ring never
-    /// recorded one, so `data` in the exported trace is not available
-    /// for memory accesses (only for instructions). Filling that gap
-    /// means changing M-18's ring layout — P1, not this batch.
     pub is_fetch: bool,
 }
 

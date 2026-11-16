@@ -620,6 +620,47 @@ fn hook_succeed_entry_has_ok_true() {
 }
 
 #[test]
+fn hook_carries_the_access_value() {
+    // 访存轨迹的 `data` 必须来自总线**当场**看到的值：
+    // 读 = 返回值，写 = 尝试写入的值，取指 = 机器码，失败 = 0。
+    let sink: Rc<RefCell<Vec<BusAccess>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink_for_hook = Rc::clone(&sink);
+    let mut bus = Bus::new();
+    bus.map_ram(0x1000, 0x10, &[0xAA; 16]).unwrap();
+    bus.add_hook(Box::new(move |a: &BusAccess| {
+        sink_for_hook.borrow_mut().push(*a);
+    }));
+
+    let read = bus.read(0x1000, BusWidth::Word).expect("read");
+    assert_eq!(read, 0xAAAA_AAAA);
+    bus.write(0x1000, BusWidth::Word, 0x1234_5678)
+        .expect("write");
+    let _ = bus.read(0x9000, BusWidth::Word).expect_err("miss");
+
+    let events = sink.borrow();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].value, 0xAAAA_AAAA, "读值必须带上来");
+    assert_eq!(events[1].value, 0x1234_5678, "写值必须带上来");
+    assert_eq!(events[2].value, 0, "失败访问没有值");
+}
+
+#[test]
+fn fetch_hook_carries_the_instruction_code() {
+    let image = vec![0x93, 0x00, 0xA0, 0x02]; // addi x1, x0, 42
+    let mut bus = Bus::new();
+    bus.map_ram(0, 4, &image).unwrap();
+    let sink: Rc<RefCell<Vec<BusAccess>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink_for_hook = Rc::clone(&sink);
+    bus.add_hook(Box::new(move |a: &BusAccess| {
+        sink_for_hook.borrow_mut().push(*a);
+    }));
+    bus.read_fetch_instruction(0).expect("fetch");
+    let events = sink.borrow();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].value, 0x02A0_0093, "取指值 = 原码");
+}
+
+#[test]
 fn busmaster_trait_dispatches_to_bus() {
     let mut bus = Bus::new();
     bus.map_ram(0x6000, 0x10, &[0xAA, 0xBB, 0xCC, 0xDD])

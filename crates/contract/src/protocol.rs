@@ -1025,7 +1025,7 @@ mod tests {
     /// **不再伪装成用户断点**（`Halted` 的线上标签多一个取值）。
     #[test]
     fn the_schema_version_is_fifteen() {
-        assert_eq!(crate::SCHEMA_VERSION, 15);
+        assert_eq!(crate::SCHEMA_VERSION, 16);
     }
 
     /// **v12**（v0.76 · STAGE-52 · 裁决 M）：模板库协议 —— 两个命令、
@@ -1317,7 +1317,7 @@ mod tests {
         let msg = Message::command(8, CommandPayload::Nop);
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
-        assert_eq!(json["schema_version"], 15);
+        assert_eq!(json["schema_version"], 16);
     }
 
     // -----------------------------------------------------------------

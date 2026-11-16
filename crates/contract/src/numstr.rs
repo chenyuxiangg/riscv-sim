@@ -373,10 +373,16 @@ mod field_tests {
             addr: 0x1000,
             width: 4,
             dir: TraceDir::Read,
+            value: 42,
             is_fetch: false,
         };
         let json = serde_json::to_value(tr).expect("json");
         assert_decimal_string(&json, &["t_ps"], "model::TraceEvent::t_ps");
+        assert_eq!(json["value"], 42, "访存值必须真的上线（不是导出恒为 0）");
+        let mut old_shape = json.clone();
+        old_shape.as_object_mut().expect("object").remove("value");
+        let decoded: TraceEvent = serde_json::from_value(old_shape).expect("旧生产者");
+        assert_eq!(decoded.value, 0, "缺字段的旧事件读成 0，不报错");
 
         // -- model::WaveformDelta::t_virt --------------------------------
         let batch = WaveformDelta {

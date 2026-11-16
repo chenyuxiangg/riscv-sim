@@ -136,9 +136,9 @@ pub struct TraceEntry {
     pub kind: TraceKind,
     /// 指令机器码，或访存值。
     ///
-    /// ⚠️ **诚实点**：M-18 的访存事件流（契约 `TraceEvent`）**不带值**
-    /// ⇒ 用 [`TraceBuffer::record`] 记进来的访存条目 `data` 恒为 0；
-    /// 只有指令条目带机器码，只有走 [`TraceBuffer::record_with_value`]
+    /// - 指令条目 = 机器码（取指事件当场带上来）；
+    /// - 访存条目 = 读值 / 写值（M-18 事件自带）；
+    /// - 只有走 [`TraceBuffer::record_with_value`]
     /// 的访存条目才带值。**不猜值。**
     pub data: u32,
     /// 访存宽度（字节）；指令条目 = 0。
@@ -227,10 +227,11 @@ impl TraceBuffer {
         self.enabled
     }
 
-    /// 记录一条 **M-18 访存事件**。
+    /// 记录一条 **M-18 访存事件**（含事件自带的访问值）。
     ///
-    /// ⚠️ M-18 的事件**不带值** ⇒ 条目的 `data` 恒为 0（见
-    /// [`TraceEntry::data`]）。要带值请用 [`TraceBuffer::record_with_value`]。
+    /// `data` = `ev.value`：读值 / 写值 / 取指机器码。M-18 在
+    /// **访问发生的那一刻**从总线捕获它 ⇒ 同一批次内的自修改代码也
+    /// 不会让机器码「时间倒流」（D-87）。
     ///
     /// 开关关闭时**立即返回**（不分配、不入环、不计数）。
     pub fn record(&mut self, ev: &TraceEvent) {
@@ -241,7 +242,7 @@ impl TraceBuffer {
             time_virt: ev.t_ps,
             addr: ev.addr,
             kind: TraceKind::from_dir(ev.dir),
-            data: 0,
+            data: ev.value,
             width: ev.width,
         });
     }
@@ -509,6 +510,7 @@ mod tests {
             addr,
             width,
             dir,
+            value: 0,
             is_fetch: false,
         }
     }
@@ -600,6 +602,19 @@ mod tests {
     // -----------------------------------------------------------------
     // 3. kind 映射（LLD 11-6）
     // -----------------------------------------------------------------
+
+    #[test]
+    fn the_recorded_data_comes_from_the_event_value() {
+        // 访存 trace 的 `data` 不再是恒 0：M-18 在访问发生的那一刻
+        // 已经把值带进事件 ⇒ M-11 原样落环。
+        let mut ev = mem(1, 0x2000, 4, TraceDir::Write);
+        ev.value = 0xDEAD_BEEF;
+        let mut buf = TraceBuffer::new(8);
+        buf.record(&ev);
+        let entry = buf.entries().next().copied().expect("one entry");
+        assert_eq!(entry.kind, TraceKind::Write);
+        assert_eq!(entry.data, 0xDEAD_BEEF, "写值必须落环");
+    }
 
     #[test]
     fn the_m18_direction_maps_onto_the_kind() {

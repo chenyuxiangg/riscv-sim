@@ -197,7 +197,6 @@ use riscv_sim_contract::{DUMP_MAX_BYTES, SCHEMA_VERSION, SYMBOL_CANDIDATE_LIMIT}
 
 use crate::m06_elf::{DefaultLoader, ElfIsaFacts, Kind as LoadKind, ParseLimits};
 use crate::m08_breakpoint::watch_expr::WatchTarget;
-use crate::m11_symbol::disasm::fetch_instruction_code as m11_fetch_instruction_code;
 use crate::m11_symbol::trace::{E_CTX_03_ILLEGAL_EXPORT_FORMAT, TRACE_FAMILY};
 use crate::m11_symbol::{
     Disassembler, LineLookup, SymbolIndex, SymbolService, TraceBuffer, TRACE_CAP,
@@ -4313,13 +4312,11 @@ impl KernelHost {
                 continue;
             }
             if ev.is_fetch {
-                // 取指 ⇒ 指令条目（kind = 0）。
-                //
-                // ⚠️ M-18 的事件**不带数据** ⇒ 机器码要**额外取一次指**
-                // （规格 §9.4 承认这是重复取指的性能代价；`disasmCache`
-                // 能兜住一部分 —— 见 [`fetch_instruction_code`]）。
-                let code = self.fetch_instruction_code(ev.addr);
-                self.trace.record_instruction(ev.t_ps, ev.addr, code);
+                // 取指 ⇒ 指令条目（kind = 0）⇒ **直接用取指事件当场带
+                // 上来的原码**。不再事后按 PC 重取 —— 同一批次里访客
+                // 自改代码时，重取会把第一条取指记成改写**后**的码
+                // （D-87 的「时间倒流」）。
+                self.trace.record_instruction(ev.t_ps, ev.addr, ev.value);
             } else {
                 self.trace.record(&ev);
             }
@@ -4364,23 +4361,6 @@ impl KernelHost {
     /// ⚠️ 缓存里的 `code` 是**原码**（压缩指令 = 16 位原码），与下面现场
     /// 取指的口径**一致** ⇒ 两条路给出同一个值。
     ///
-    /// ⚠️ **取指口径只有一份实现**（M-11 的 `disasm::fetch_instruction_code`
-    ///）：先读 2 字节判宽度（低 2 位 ≠ `0b11` ⇒ 压缩指令，16 位原码就够），
-    /// 否则再读 4 字节。⚠️ **必须真的只读 `size` 字节**（「读一个字取低半」
-    /// 会让映射区**末端**的压缩指令越界 ⇒ 被误报成「未映射」，LLD 11-1）。
-    ///
-    /// ⚠️ 读不到 ⇒ `0`。`0` **不是**一条真的指令（全零的低 2 位是
-    /// `0b00` ⇒ 非法压缩指令）⇒ 它唯一可能的含义是「取指失败，机器码
-    /// 未知」。**不猜值**（与 M-11 对访存值的口径一致）。
-    fn fetch_instruction_code(&mut self, addr: u32) -> u32 {
-        if let Some(entry) = self.disassembler.lookup(addr) {
-            return entry.code;
-        }
-        let bus = self.backend.bus();
-        let mut read = |addr: u32, size: u32| fetch_bytes(bus, addr, size);
-        m11_fetch_instruction_code(&mut read, addr).unwrap_or(0)
-    }
-
     /// 重建 M-11 的索引（装载工程时**无条件**重建，STAGE-5 §9.2）。
     ///
     /// ⚠️ **必须重建，不能缓存**：装载新工程 = 新会话（D-45 的教训：装载

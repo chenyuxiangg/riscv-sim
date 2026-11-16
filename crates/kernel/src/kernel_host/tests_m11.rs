@@ -1035,15 +1035,14 @@ fn the_execution_trace_carries_real_timestamps() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. 缓存**兜住**访存轨迹那次重复取指（规格 §9.4）
+// 9. 取指事件自带机器码后，轨迹**不再**需要重复取指
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_disasm_cache_absorbs_the_repeated_fetch() {
-    // 规格 §9.4 的原话：「M-18 的 `TraceEvent` **不带数据** ⇒ 指令条目需要
-    // 宿主**额外取一次指**……但 M-11 的 `disasmCache` 可以兜住它。」
-    //
-    // ⚠️ 那句话**必须可观测** ⇒ 用 `lookup_hits` 计数钉住它。
+fn the_trace_fetch_no_longer_needs_the_disasm_cache() {
+    // 旧的规格 §9.4 让宿主为指令条目额外取一次指、靠 `disasmCache` 兜住。
+    // 现在 M-18 的 `TraceEvent` 在取指发生时就带上原码 ⇒ 轨迹记录**不查
+    // 缓存、不重取**（也顺带修掉 D-87 的时间倒流）。
     let mut host = KernelHost::new();
     // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
     //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
@@ -1062,13 +1061,13 @@ fn the_disasm_cache_absorbs_the_repeated_fetch() {
     assert_eq!(host.disasm_cache_len(), 3);
     let hits_before = host.disasm_cache_hits();
 
-    // 跑三条指令 ⇒ 三次取指事件要机器码 ⇒ 应当**命中缓存**（少三次总线读）。
+    // 跑三条指令 ⇒ 机器码直接来自取指事件 ⇒ **零**次缓存查询。
     dispatch(&mut host, CommandPayload::StepN { n: 3 });
 
     assert_eq!(
         host.disasm_cache_hits() - hits_before,
-        3,
-        "访存轨迹的取指**必须**复用反汇编缓存（规格 §9.4）"
+        0,
+        "取指事件自带机器码 ⇒ 轨迹记录不再重取、不再依赖反汇编缓存"
     );
 }
 
@@ -1314,6 +1313,101 @@ fn the_trace_instruction_code_matches_the_disassembly_entry() {
         entries[0].code,
         "轨迹里的机器码必须与反汇编条目**逐字段相同**（同一条取指口径）：{row}"
     );
+}
+
+#[test]
+fn the_trace_instruction_code_is_captured_at_fetch_time() {
+    // D-87：同一批次内访客自改代码 ⇒ 第一条取指必须记**当时**的码，
+    // 不能因为批次结束时重取而变成改写**后**的码（时间倒流）。
+    //
+    // 程序：`addi x3,x0,42` → `sw x3,0(x0)`（把地址 0 改成 42）→
+    // `jal x0,0` 跳回 ⇒ 第 4 次取指再次读地址 0。
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    for (addr, value) in [(0u32, 0x02A0_0193u32), (4, 0x0030_2023), (8, 0xFF9F_F06F)] {
+        dispatch(
+            &mut host,
+            CommandPayload::WriteMemory {
+                addr,
+                size: WriteSize::Word,
+                value,
+            },
+        );
+    }
+    dispatch(&mut host, CommandPayload::StepN { n: 4 });
+
+    let events = dispatch(
+        &mut host,
+        CommandPayload::ExportTrace {
+            source: TraceSource::Execution,
+            format: TraceFormat::Csv,
+            offset: 0,
+            limit: 0,
+            filter: Default::default(),
+        },
+    );
+    let (_s, _f, _o, _n, _t, chunk, _ov) = trace_export(&events);
+    let zero_rows: Vec<Vec<&str>> = chunk
+        .lines()
+        .skip(1)
+        .map(|l| l.split(',').collect())
+        .filter(|cols: &Vec<&str>| cols.len() >= 5 && cols[1] == "0" && cols[2] == "instruction")
+        .collect();
+    assert_eq!(zero_rows.len(), 2, "地址 0 应在批次内被取指两次：{chunk}");
+    assert_eq!(
+        zero_rows[0][3], "44040595",
+        "第一次取指必须记原码 0x02A00193，不能是后来被改写的 42"
+    );
+    assert_eq!(
+        zero_rows[1][3], "42",
+        "第二次取指（自改代码之后）才记 42 —— 时间必须正向"
+    );
+}
+
+#[test]
+fn the_trace_write_carries_the_value_the_guest_stored() {
+    // 端到端：demo 固件前 4 条执行完后，`sw x3,0(x6)` 真的写了一条
+    // 访存 ⇒ 导出的执行轨迹里 `data` 必须是**写入值**（不是恒 0）。
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    dispatch(&mut host, CommandPayload::StepN { n: 4 });
+
+    let events = dispatch(
+        &mut host,
+        CommandPayload::ExportTrace {
+            source: TraceSource::Execution,
+            format: TraceFormat::Csv,
+            offset: 0,
+            limit: 0,
+            filter: Default::default(),
+        },
+    );
+    let (_s, _f, _o, _n, _t, chunk, _ov) = trace_export(&events);
+    let row = chunk
+        .lines()
+        .skip(1)
+        .find(|l| l.split(',').nth(2) == Some("write"))
+        .unwrap_or_else(|| panic!("轨迹里没有写访存：{chunk}"));
+    let cols: Vec<&str> = row.split(',').collect();
+    assert_eq!(cols[1], "256", "写地址（demo 板 x6 的初值）");
+    assert_eq!(cols[3], "49", "x3 = 42 + 7 ⇒ 写入值必须是 49");
+    assert_eq!(cols[4], "4", "word 写");
 }
 
 #[test]
