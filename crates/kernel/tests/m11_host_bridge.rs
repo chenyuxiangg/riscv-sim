@@ -95,6 +95,7 @@ fn the_four_debug_commands_are_wired_not_placeholders() {
             format: TraceFormat::Csv,
             offset: 0,
             limit: 0,
+            filter: Default::default(),
         },
     );
     assert_eq!(events.len(), 1);
@@ -222,6 +223,7 @@ fn the_waveform_export_reads_the_m19_ring_on_the_production_path() {
             format: TraceFormat::Csv,
             offset: 0,
             limit: 0,
+            filter: Default::default(),
         },
     );
     let EventPayload::TraceExport { chunk, total, .. } = &events[0] else {

@@ -120,18 +120,53 @@ const MOCK_EXPORT_LINES = Object.freeze({
         "1!",
         "$end",
     ]),
+    // ⚠️ 与真内核的 CSV/JSON 形状**逐字一致**（time_ps 是带引号的十进制
+    // 字符串 / JSON 字符串）⇒ ⇒ 筛选与分块在前端看到的东西就是真产物。
     "Execution:Csv": Object.freeze([
-        "kind,addr,value",
-        "instr,00000000,02a00093",
-        "instr,00000004,00700113",
-        "mem,00000100,0000002a",
+        "time_ps,addr,kind,data,width",
+        '"1000",0,instruction,19,0',
+        '"2000",4,instruction,7,0',
+        '"3000",256,read,42,4',
+        '"4000",260,write,42,4',
     ]),
     "Execution:Json": Object.freeze([
-        '{"kind":"instr","addr":0,"code":"02a00093"}',
-        '{"kind":"instr","addr":4,"code":"00700113"}',
-        '{"kind":"mem","addr":256,"value":42}',
+        '{"time_ps":"1000","addr":0,"kind":"instruction","data":19,"width":0}',
+        '{"time_ps":"2000","addr":4,"kind":"instruction","data":7,"width":0}',
+        '{"time_ps":"3000","addr":256,"kind":"read","data":42,"width":4}',
+        '{"time_ps":"4000","addr":260,"kind":"write","data":42,"width":4}',
     ]),
 });
+
+/** 对 mock 的执行轨迹按时间/地址窗口过滤（与真内核的含首含尾口径一致）。 */
+function filterMockExecutionLines(lines, format, filter) {
+    if (!filter || typeof filter !== "object") return lines;
+    const isJson = format === "Json";
+    const kept = [];
+    for (const line of lines) {
+        let time;
+        let addr;
+        if (isJson) {
+            try {
+                const row = JSON.parse(line);
+                time = String(row.time_ps ?? "");
+                addr = Number(row.addr ?? 0);
+            } catch {
+                continue;
+            }
+        } else {
+            const cols = line.split(",");
+            if (cols.length < 2 || cols[0] === "time_ps") continue;
+            time = String(cols[0]).replaceAll('"', "");
+            addr = Number(cols[1]);
+        }
+        if (filter.time_from_ps !== undefined && BigInt(time) < BigInt(filter.time_from_ps)) continue;
+        if (filter.time_to_ps !== undefined && BigInt(time) > BigInt(filter.time_to_ps)) continue;
+        if (filter.addr_from !== undefined && addr < Number(filter.addr_from)) continue;
+        if (filter.addr_to !== undefined && addr > Number(filter.addr_to)) continue;
+        kept.push(line);
+    }
+    return kept;
+}
 
 /**
  * Default number of entries per export block (the mock's "kernel default
@@ -690,7 +725,14 @@ export function createMockKernel(options = {}) {
             case "ExportTrace": {
                 const source = String(value.source ?? "");
                 const format = String(value.format ?? "");
-                const lines = MOCK_EXPORT_LINES[`${source}:${format}`];
+                const baseLines = MOCK_EXPORT_LINES[`${source}:${format}`];
+                let lines = baseLines;
+                if (source === "Execution" && format !== "Vcd" && value.filter) {
+                    const rows = filterMockExecutionLines(baseLines, format, value.filter);
+                    lines = format === "Csv" && rows.length > 0
+                        ? [baseLines[0], ...rows]
+                        : rows;
+                }
                 if (!lines) {
                     // An illegal source/format combination is **rejected**
                     // by the kernel (ruling D / §9.5) — the mock rejects it
@@ -702,7 +744,12 @@ export function createMockKernel(options = {}) {
                     )));
                     break;
                 }
-                const total = lines.length;
+                const isCsv = format === "Csv";
+                // CSV 表头**不算条目**（真内核的 total 只数数据行）⇒
+                // 否则 `limit=2` 会把表头占掉一格、第二块丢行。
+                const header = isCsv ? baseLines[0] : null;
+                const rows = isCsv ? lines.slice(1) : lines;
+                const total = rows.length;
                 const offset = toCount(value.offset);
                 const wanted = toCount(value.limit);
                 // `limit = 0` means "the kernel picks the block size".
@@ -719,7 +766,7 @@ export function createMockKernel(options = {}) {
                 //   dom-stub 补 `className` —— 「保真度不足 ⇒ ⇒ 整套前端门禁的
                 //   结论不可信」）。
                 // ⚠️ **空块必须真的是空**（末尾不能多一个换行）⇒ ⇒ 判空在前。
-                const slice = lines.slice(start, end);
+                const slice = rows.slice(start, end);
                 // ⚠️ **JSON 块的真形状**：真内核每块都是
                 // `{"entries":[{...},...]}`（**不带换行**）⇒ ⇒ 前端必须解析
                 // 后合并 `entries`；这里不能返回一行行裸对象（那是替身失真）。
@@ -727,7 +774,9 @@ export function createMockKernel(options = {}) {
                 const chunk = slice.length > 0
                     ? (isJson
                         ? `{"entries":[${slice.join(",")}]}`
-                        : slice.join("\n") + "\n")
+                        : isCsv && offset === 0
+                            ? `${header}\n${slice.join("\n")}\n`
+                            : slice.join("\n") + "\n")
                     : "";
                 // `next_offset` is the **next** block's start (= this
                 // block's end); at the end of the buffer it equals

@@ -457,6 +457,7 @@ fn waveform_export_reads_the_m19_ring_and_not_the_m18_edge_store() {
             format: TraceFormat::Csv,
             offset: 0,
             limit: 0,
+            filter: Default::default(),
         },
     );
     assert_eq!(events.len(), 1);
@@ -504,6 +505,7 @@ fn the_m19_ring_has_a_reader() {
             format: TraceFormat::Csv,
             offset: 0,
             limit: 0,
+            filter: Default::default(),
         },
     );
     let (_source, _format, _offset, _next, total, chunk, _overflow) = trace_export(&events);
@@ -535,6 +537,7 @@ fn execution_export_reads_the_m11_trace_ring() {
             format: TraceFormat::Csv,
             offset: 0,
             limit: 0,
+            filter: Default::default(),
         },
     );
     assert_eq!(events.len(), 1);
@@ -547,6 +550,40 @@ fn execution_export_reads_the_m11_trace_ring() {
     assert!(chunk.starts_with("time_ps,addr,kind,data,width"), "{chunk}");
     // 三条**取指** ⇒ kind = instruction（`is_fetch` 的映射）。
     assert_eq!(chunk.matches(",instruction,").count(), 3, "{chunk}");
+}
+
+#[test]
+fn execution_export_honours_the_address_filter() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    dispatch(&mut host, CommandPayload::StepN { n: 3 });
+
+    let events = dispatch(
+        &mut host,
+        CommandPayload::ExportTrace {
+            source: TraceSource::Execution,
+            format: TraceFormat::Csv,
+            offset: 0,
+            limit: 0,
+            filter: riscv_sim_contract::model::TraceFilter {
+                addr_from: Some(4),
+                addr_to: Some(4),
+                ..Default::default()
+            },
+        },
+    );
+    let (_s, _f, _o, _n, total, chunk, _overflow) = trace_export(&events);
+    assert_eq!(total, 1, "地址窗口含首含尾 ⇒ 只剩 0x4 这一条：{chunk}");
+    assert!(chunk.contains(",4,instruction,"), "{chunk}");
+    assert_eq!(chunk.matches(",instruction,").count(), 1, "{chunk}");
 }
 
 #[test]
@@ -572,6 +609,7 @@ fn illegal_export_combinations_are_rejected() {
             format: TraceFormat::Json,
             offset: 0,
             limit: 0,
+            filter: Default::default(),
         },
     );
     assert_eq!(events.len(), 1);
@@ -585,6 +623,7 @@ fn illegal_export_combinations_are_rejected() {
             format: TraceFormat::Vcd,
             offset: 0,
             limit: 0,
+            filter: Default::default(),
         },
     );
     assert_eq!(events.len(), 1);
@@ -622,6 +661,7 @@ fn the_continuation_protocol_visits_every_entry_exactly_once() {
                 format: TraceFormat::Csv,
                 offset,
                 limit: 1,
+                filter: Default::default(),
             },
         );
         let (_s, _f, echoed, next_offset, t, chunk, _o) = trace_export(&events);
@@ -813,6 +853,7 @@ fn overflow_marked_is_set_when_the_ring_dropped_entries() {
             format: TraceFormat::Csv,
             offset: 0,
             limit: 0,
+            filter: Default::default(),
         },
     );
     let (_s, _f, _o, _n, _t, _chunk, overflow) = trace_export(&events);
@@ -961,6 +1002,7 @@ fn the_execution_trace_carries_real_timestamps() {
             format: TraceFormat::Csv,
             offset: 0,
             limit: 0,
+            filter: Default::default(),
         },
     );
     let (_s, _f, _o, _n, _t, chunk, _ov) = trace_export(&events);
@@ -1256,6 +1298,7 @@ fn the_trace_instruction_code_matches_the_disassembly_entry() {
             format: TraceFormat::Csv,
             offset: 0,
             limit: 0,
+            filter: Default::default(),
         },
     );
     let (_s, _f, _o, _n, _t, chunk, _ov) = trace_export(&events);
@@ -1300,6 +1343,7 @@ fn the_waveform_vcd_export_produces_a_vcd_product() {
             format: TraceFormat::Vcd,
             offset: 0,
             limit: 0,
+            filter: Default::default(),
         },
     );
     assert_eq!(events.len(), 1);

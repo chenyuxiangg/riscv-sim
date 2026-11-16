@@ -158,6 +158,75 @@ pub mod u64_decimal_list {
     }
 }
 
+/// `Option<u64>` 的十进制字符串形态。
+///
+/// `None` 写 `null`；`Some(v)` 写**十进制字符串**（与 [`u64_decimal`] 同一条
+/// 精度约束）。读入接受 `null`、字符串和旧数字。
+pub mod opt_u64_decimal {
+    use super::u64_decimal;
+    use serde::de::{Deserializer, Unexpected, Visitor};
+    use serde::Serializer;
+    use std::fmt;
+
+    /// Write `Some` as a decimal string, `None` as `null`.
+    pub fn serialize<S: Serializer>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(v) => serializer.serialize_some(&v.to_string()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    /// Read `null`, a decimal string, or a legacy JSON number.
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<u64>, D::Error> {
+        struct OptionalVisitor;
+
+        impl<'de> Visitor<'de> for OptionalVisitor {
+            type Value = Option<u64>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("null, a decimal string, or a non-negative integer")
+            }
+
+            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_some<D: Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<Self::Value, D::Error> {
+                u64_decimal::deserialize(deserializer).map(Some)
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                v.parse::<u64>()
+                    .map(Some)
+                    .map_err(|_| E::invalid_value(Unexpected::Str(v), &self))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(Some(v))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                u64::try_from(v)
+                    .map(Some)
+                    .map_err(|_| E::invalid_value(Unexpected::Signed(v), &self))
+            }
+        }
+
+        // `Option<T>` short-circuits `null` to `visit_none`; `deserialize_option`
+        // is the correct entry point for an optional field.
+        deserializer.deserialize_option(OptionalVisitor)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::u64_decimal;

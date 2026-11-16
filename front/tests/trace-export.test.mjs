@@ -37,7 +37,7 @@ const m02 = await importFront("views/m02_viewcomponents.js");
 const m03 = await importFront("views/m03_viewstore.js");
 const m05 = await importFront("services/m05_commandrouter.js");
 const { Command, eventMessage } = await importFront("lib/message.js");
-const { collectTraceChunks, TRACE_EXPORT_MAX_CHUNKS } = await importFront("lib/trace-export.js");
+const { collectTraceChunks, normalizeTraceFilter, TRACE_EXPORT_MAX_CHUNKS } = await importFront("lib/trace-export.js");
 const { createMockKernel } = await importFront("dev/mock-kernel.js");
 
 await m02.mountViewComponents();
@@ -177,6 +177,32 @@ function exportCommands(transport) {
 
 // ---------------------------------------------------------------------------
 
+describe("trace 导出 · 时间/地址筛选归一（纯逻辑）", () => {
+    test("空输入 ⇒ ⇒ 不生成 filter（旧命令形状不变）", () => {
+        assert.deepEqual(normalizeTraceFilter({}), { ok: true, filter: null });
+    });
+
+    test("时间保持十进制字符串、地址是 u32 数字", () => {
+        const result = normalizeTraceFilter({
+            timeFrom: "9007199254740993",
+            addrFrom: 0x1000,
+            addrTo: 0x1fff,
+        });
+        assert.equal(result.ok, true);
+        assert.deepEqual(result.filter, {
+            time_from_ps: "9007199254740993",
+            addr_from: 0x1000,
+            addr_to: 0x1fff,
+        });
+    });
+
+    test("起点大于终点 ⇒ ⇒ 报错，不静默给空结果", () => {
+        assert.equal(normalizeTraceFilter({ timeFrom: "20", timeTo: "10" }).ok, false);
+        assert.equal(normalizeTraceFilter({ addrFrom: 0x2000, addrTo: 0x1000 }).ok, false);
+        assert.equal(normalizeTraceFilter({ timeFrom: "abc" }).ok, false);
+    });
+});
+
 describe("trace 导出 · 分页收集（纯逻辑）", () => {
     test("一块就够 ⇒ ⇒ 一次取回、内容就是那一块", async () => {
         const calls = [];
@@ -274,7 +300,7 @@ describe("trace 导出 · 暂停 ⇒ ⇒ 自动渲染", () => {
         // ⇒ ⇒ 面板**真的有内容**（不是只发了命令）。
         const chunk = dom.document.querySelector("[data-trace-chunk]");
         assert.ok(chunk, "面板没有内容区");
-        assert.ok(chunk.textContent.includes("kind,addr,value"), "面板里没有导出的内容");
+        assert.ok(chunk.textContent.includes("time_ps,addr,kind,data,width"), "面板里没有导出的内容");
         router.close();
     });
 
@@ -370,6 +396,75 @@ describe("trace 导出 · 「下载轨迹到本地」", () => {
         router.close();
     });
 
+    test("填了时间/地址窗口 ⇒ ⇒ ExportTrace 带 filter（含首含尾）", async () => {
+        const { router, transport } = await setup();
+        const before = exportCommands(transport).length;
+        const body = debugBody();
+        body.querySelector("[data-trace-time-from]").value = "1000";
+        body.querySelector("[data-trace-time-to]").value = "2000";
+        body.querySelector("[data-trace-addr-from]").value = "0x1000";
+        body.querySelector("[data-trace-addr-to]").value = "0x1fff";
+        await clickAndDispatch(
+            router,
+            body.querySelector(
+                '[data-action="export-trace"][data-source="Execution"][data-format="Csv"]',
+            ),
+        );
+        const exports = exportCommands(transport).slice(before);
+        assert.equal(exports.length, 1);
+        assert.deepEqual(exports[0].filter, {
+            time_from_ps: "1000",
+            time_to_ps: "2000",
+            addr_from: 4096,
+            addr_to: 8191,
+        });
+        router.close();
+    });
+
+    test("筛选区间非法 ⇒ ⇒ 不发命令", async () => {
+        const { router, transport } = await setup();
+        const before = exportCommands(transport).length;
+        const body = debugBody();
+        body.querySelector("[data-trace-time-from]").value = "2000";
+        body.querySelector("[data-trace-time-to]").value = "1000";
+        await clickAndDispatch(
+            router,
+            body.querySelector(
+                '[data-action="export-trace"][data-source="Execution"][data-format="Csv"]',
+            ),
+        );
+        assert.equal(exportCommands(transport).length, before, "非法筛选不该发给内核");
+        router.close();
+    });
+
+    test("筛完再下载 ⇒ ⇒ 续导的每一块都带同一个 filter", async () => {
+        const { router, transport } = await setup();
+        const body = debugBody();
+        body.querySelector("[data-trace-time-from]").value = "1000";
+        body.querySelector("[data-trace-time-to]").value = "";
+        body.querySelector("[data-trace-addr-from]").value = "";
+        body.querySelector("[data-trace-addr-to]").value = "";
+        await clickAndDispatch(
+            router,
+            body.querySelector(
+                '[data-action="export-trace"][data-source="Execution"][data-format="Csv"]',
+            ),
+        );
+        const before = exportCommands(transport).length;
+        const calls = observeBrowserCalls();
+        try {
+            await clickAndDispatch(router, body.querySelector('[data-action="download-trace-local"]'));
+        } finally {
+            calls.restore();
+        }
+        const exports = exportCommands(transport).slice(before);
+        assert.ok(exports.length >= 2, "下载没有翻完所有块");
+        for (const cmd of exports) {
+            assert.deepEqual(cmd.filter, { time_from_ps: "1000" }, "续导丢了筛选条件");
+        }
+        router.close();
+    });
+
     test("点它 ⇒ ⇒ **翻完所有块**并落盘（内容是全部块拼起来的）", async () => {
         const { router, transport } = await setup();
         const before = exportCommands(transport).length;
@@ -422,8 +517,8 @@ describe("trace 导出 · 「下载轨迹到本地」", () => {
         }
         assert.ok(blobText !== null, "没有造出 Blob");
         const parsed = JSON.parse(blobText);
-        assert.equal(parsed.entries.length, 3, "JSON 下载没有合并全部块");
-        assert.equal(parsed.entries[0].kind, "instr");
+        assert.equal(parsed.entries.length, 4, "JSON 下载没有合并全部块");
+        assert.equal(parsed.entries[0].kind, "instruction");
         assert.equal(parsed.entries[2].addr, 256);
         router.close();
     });
@@ -445,11 +540,11 @@ describe("trace 导出 · 「下载轨迹到本地」", () => {
             globalThis.Blob = origBlob;
         }
         assert.ok(blobText !== null, "没有造出 Blob");
-        // ⇒ mock 的 Execution:Csv 共 4 行、块大小 2 ⇒ ⇒ 两块拼起来是 4 行。
+        // ⇒ mock 的 Execution:Csv 共 4 条数据行、块大小 2 ⇒ ⇒ 两块拼起来是表头 + 4 行。
         const lines = blobText.split("\n").filter((l) => l.length > 0);
-        assert.equal(lines.length, 4, `下载的内容只有 ${lines.length} 行（应当是全量 4 行）`);
-        assert.ok(lines[0].includes("kind,addr,value"), "第一行不是表头");
-        assert.ok(lines[3].includes("mem,00000100,0000002a"), "最后一行不在（没翻完）");
+        assert.equal(lines.length, 5, `下载的内容只有 ${lines.length} 行（应当是表头 + 全量 4 行）`);
+        assert.ok(lines[0].includes("time_ps,addr,kind,data,width"), "第一行不是表头");
+        assert.ok(lines[4].includes('"4000",260,write,42,4'), "最后一行不在（没翻完）");
         router.close();
     });
 });

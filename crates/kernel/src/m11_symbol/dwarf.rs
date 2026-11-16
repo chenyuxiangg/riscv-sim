@@ -13,20 +13,17 @@
 //! **解析 `.debug_line` 里全部的行号程序单元**，把产生的行记录按地址归并
 //! 成一张表 ⇒ [`DwarfLines::resolve`] 能给出**真的**源码行号。
 //!
-//! 裁决 B 说清了**为什么只解析行表**：解析 `.debug_info` + `.debug_abbrev`
-//! 拿到 `DW_AT_stmt_list` 是「DIE / 属性 / 缩写表」三套格式的全解析 ——
-//! 评审 P-07 判定的「M-11 最大的风险项」。而行号程序**自带**地址与文件
-//! 索引，足以回答「地址 → 行」。
+//! 行表解析**不物化 DIE 树**：只从 `.debug_info` + `.debug_abbrev` 里取
+//! 每个 CU 的 `DW_AT_stmt_list` + `DW_AT_comp_dir` 两个属性
+//! （[`super::dwarf_info`]），其余调试信息一概不读。行号程序**自带**地址
+//! 与文件索引，足以回答「地址 → 行」。
 //!
-//! # ⚠️ 裁决 B 的**已知代价**（必须如实体现，不得假装）
+//! # 路径归一
 //!
-//! v2~v4 的**目录索引 0** 指的是编译单元的 `DW_AT_comp_dir`，它在
-//! `.debug_info` 里 ⇒ 我们拿不到 ⇒ **目录索引 0 的文件只有文件名、没有
-//! 目录前缀**。
-//!
-//! - v2~v4：`dirs[1] = "src"` + `file[1] = "main.c"` ⇒ `"src/main.c"`；
-//! - v5：`dirs[0]` **就是**编译目录（DWARF 5 的目录表首项）⇒ 能拼出
-//!   **完整路径**（`"/tmp/…/hook.c"`）。
+//! - v2~v4：`dir_index == 0` 指向 CU 的 `DW_AT_comp_dir` ⇒ 拿到就拼出
+//!   **绝对路径**；拿不到（没有 `.debug_info` / 属性缺失）才退回只有文件名。
+//! - v5：`dirs[0]` **就是**编译目录 ⇒ 能拼出完整路径。
+//! - 拼接后统一消掉 `.`、`..` 与空段；相对路径开头的 `..` 保留。
 //!
 //! # 降级三态（裁决 J）
 //!
@@ -334,26 +331,39 @@ impl DwarfLines {
         let mut line: Option<&[u8]> = None;
         let mut line_str: &[u8] = &[];
         let mut debug_str: &[u8] = &[];
+        let mut debug_info: &[u8] = &[];
+        let mut debug_abbrev: &[u8] = &[];
         for (name, bytes) in sections {
             match name.as_str() {
                 DEBUG_LINE_SECTION => line = Some(bytes.as_slice()),
                 DEBUG_LINE_STR_SECTION => line_str = bytes.as_slice(),
                 DEBUG_STR_SECTION => debug_str = bytes.as_slice(),
+                ".debug_info" => debug_info = bytes.as_slice(),
+                ".debug_abbrev" => debug_abbrev = bytes.as_slice(),
                 _ => {}
             }
         }
         let Some(bytes) = line else {
             return Ok(Self::default());
         };
+        // ⚠️ **只取 comp_dir 这一对属性**（`stmt_list` + `comp_dir`）⇒ ⇒
+        // 不解析 DIE 树、不物化任何调试信息 ⇒ 「行表局部加载」的内存账不变。
+        let comp_dirs = super::dwarf_info::comp_dirs(debug_info, debug_abbrev, debug_str, line_str);
         Ok(Self::parse(
             bytes.to_vec(),
             line_str.to_vec(),
             debug_str.to_vec(),
+            comp_dirs,
         ))
     }
 
     /// 建立索引：只跑行号程序来收集 sequence 范围，不保留行记录。
-    fn parse(bytes: Vec<u8>, line_str: Vec<u8>, debug_str: Vec<u8>) -> Self {
+    fn parse(
+        bytes: Vec<u8>,
+        line_str: Vec<u8>,
+        debug_str: Vec<u8>,
+        comp_dirs: std::collections::HashMap<u64, String>,
+    ) -> Self {
         let mut units: Vec<LineUnit> = Vec::new();
         let mut sequences: Vec<SequenceRange> = Vec::new();
         let mut unit_headers: Vec<UnitHeaderInfo> = Vec::new();
@@ -368,11 +378,19 @@ impl DwarfLines {
             match parse_unit_index(&bytes, off, &line_str, &debug_str) {
                 Ok(unit) => {
                     if unit.supported && !unit.degraded {
-                        let Some(header) = unit.header else {
+                        let Some(mut header) = unit.header else {
                             units_degraded += 1;
                             off = unit.next_off;
                             continue;
                         };
+                        // v2~v4 的目录索引 0 = CU 的 `DW_AT_comp_dir` ⇒
+                        // `.debug_info` 里拿到的就填进 `dirs[0]`；没有就保持
+                        // `None`（只给文件名，绝不编造绝对路径）。
+                        if unit.version < 5 {
+                            if let Some(dir) = comp_dirs.get(&(off as u64)) {
+                                header.dirs[0] = Some(dir.clone());
+                            }
+                        }
                         units_parsed += 1;
                         if first_version.is_none() {
                             first_version = Some(unit.version);
@@ -829,7 +847,8 @@ struct Header {
     opcode_base: u8,
     /// `standard_opcode_lengths`（长度 = `opcode_base - 1`）。
     std_opcode_lengths: Vec<u8>,
-    /// 目录表（v2~v4 的索引 0 = 编译目录 ⇒ **拿不到** ⇒ `None`）。
+    /// 目录表（v2~v4 的索引 0 = 编译目录；能从 `.debug_info` 拿到就填
+    /// `Some(comp_dir)`，拿不到就保持 `None`）。
     dirs: Vec<Option<String>>,
     /// 文件表（v2~v4 的索引 0 未用 ⇒ `None`；v5 从 0 开始）。
     files: Vec<Option<FileEntry>>,
@@ -857,8 +876,9 @@ struct FileEntry {
 impl Header {
     /// 文件索引 → 路径。
     ///
-    /// ⚠️ **裁决 B 的代价就在这里**：v2~v4 的 `dir_index == 0` 指向
-    /// `.debug_info` 里的 `DW_AT_comp_dir` ⇒ 拿不到 ⇒ **只有文件名**。
+    /// v2~v4 的 `dir_index == 0` 指向 `.debug_info` 里的
+    /// `DW_AT_comp_dir`；本批已补最小解析 ⇒ 拿到就拼出完整路径，拿不到
+    /// 才退回**只有文件名**。
     fn file_path(&self, index: u64) -> String {
         let Some(entry) = self.files.get(index as usize).and_then(|f| f.as_ref()) else {
             // 越界的文件索引 ⇒ 没有文件名（**不猜**）。
@@ -869,17 +889,45 @@ impl Header {
         }
         if entry.name.starts_with('/') {
             // 本身就是绝对路径 ⇒ 不用拼目录。
-            return entry.name.clone();
+            return normalize_dwarf_path(&entry.name);
         }
         match self
             .dirs
             .get(entry.dir_index as usize)
             .and_then(|d| d.as_ref())
         {
-            Some(dir) if !dir.is_empty() => format!("{dir}/{}", entry.name),
-            // 目录索引 0（v2~v4）⇒ 编译目录拿不到 ⇒ **只有文件名**。
-            _ => entry.name.clone(),
+            Some(dir) if !dir.is_empty() => normalize_dwarf_path(&format!("{dir}/{}", entry.name)),
+            // 目录索引 0（v2~v4）且 `.debug_info` 里没有 comp_dir ⇒ 只有文件名。
+            _ => normalize_dwarf_path(&entry.name),
         }
+    }
+}
+
+/// 归一一条 DWARF 路径：消掉空段、`.` 和可消的 `..`。
+///
+/// - 绝对路径保留根（`/a/../b` ⇒ `/b`）；
+/// - 相对路径开头的 `..` **保留**（`../../x` ⇒ `../../x`）；
+/// - **不**做操作系统层面的规范化、不碰磁盘、不猜符号链接。
+fn normalize_dwarf_path(path: &str) -> String {
+    let absolute = path.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.last().is_some_and(|last| *last != "..") {
+                    parts.pop();
+                } else if !absolute {
+                    parts.push("..");
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+    if absolute {
+        format!("/{}", parts.join("/"))
+    } else {
+        parts.join("/")
     }
 }
 
@@ -2004,6 +2052,88 @@ mod tests {
         vec![(DEBUG_LINE_SECTION.to_string(), bytes.to_vec())]
     }
 
+    /// 造一个最小 v4 行号单元：一个文件（`dir_index` 可控），地址
+    /// `0x1000` 一行、`end_sequence` 在 `0x1004`。
+    fn minimal_v4_line(dir_index: u8, name: &str) -> Vec<u8> {
+        let mut header = vec![1, 1, 1, 0xfb, 0x0e, 13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        header.push(0); // 目录表结束（没有目录 ⇒ dirs[0] = None）
+        header.extend_from_slice(name.as_bytes());
+        header.push(0);
+        header.push(dir_index);
+        header.push(0); // mtime
+        header.push(0); // size
+        header.push(0); // 文件表结束
+        let mut program = vec![0x00, 0x05, 0x02, 0x00, 0x10, 0x00, 0x00];
+        program.push(0x01); // copy
+        program.extend_from_slice(&[0x02, 0x04]); // advance_pc 4
+        program.extend_from_slice(&[0x00, 0x01, 0x01]); // end_sequence
+
+        let mut content = Vec::new();
+        content.extend_from_slice(&4u16.to_le_bytes());
+        content.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        content.extend_from_slice(&header);
+        content.extend_from_slice(&program);
+        let mut unit = (content.len() as u32).to_le_bytes().to_vec();
+        unit.extend_from_slice(&content);
+        unit
+    }
+
+    /// 造一个最小 v4 `.debug_info`：一个 CU，带 `stmt_list` + `comp_dir`。
+    fn minimal_v4_info(stmt_list: u32, comp_dir: &str, name: &str) -> Vec<u8> {
+        let mut content = Vec::new();
+        content.extend_from_slice(&4u16.to_le_bytes()); // version
+        content.extend_from_slice(&0u32.to_le_bytes()); // abbrev offset
+        content.push(4); // address size
+        content.push(1); // abbrev code
+        content.extend_from_slice(&stmt_list.to_le_bytes());
+        content.extend_from_slice(comp_dir.as_bytes());
+        content.push(0);
+        content.extend_from_slice(name.as_bytes());
+        content.push(0);
+        let mut unit = (content.len() as u32).to_le_bytes().to_vec();
+        unit.extend_from_slice(&content);
+        unit
+    }
+
+    /// 同上，但 `DW_AT_comp_dir` 用 `DW_FORM_strp`（GCC 的常见形态）⇒
+    /// 走 `.debug_str` 偏移而不是内联字符串。
+    fn minimal_v4_info_strp(stmt_list: u32, comp_dir_offset: u32, name: &str) -> Vec<u8> {
+        let mut content = Vec::new();
+        content.extend_from_slice(&4u16.to_le_bytes());
+        content.extend_from_slice(&0u32.to_le_bytes());
+        content.push(4);
+        content.push(1);
+        content.extend_from_slice(&stmt_list.to_le_bytes());
+        content.extend_from_slice(&comp_dir_offset.to_le_bytes());
+        content.extend_from_slice(name.as_bytes());
+        content.push(0);
+        let mut unit = (content.len() as u32).to_le_bytes().to_vec();
+        unit.extend_from_slice(&content);
+        unit
+    }
+
+    /// 与 [`minimal_v4_info_strp`] 配套的缩写表。
+    fn minimal_v4_abbrev_strp() -> Vec<u8> {
+        vec![
+            0x01, 0x11, 0x00, // code 1, DW_TAG_compile_unit, no children
+            0x10, 0x17, // DW_AT_stmt_list, DW_FORM_sec_offset
+            0x1b, 0x0e, // DW_AT_comp_dir, DW_FORM_strp
+            0x03, 0x08, // DW_AT_name, DW_FORM_string
+            0x00, 0x00, 0x00,
+        ]
+    }
+
+    /// 与 [`minimal_v4_info`] 配套的缩写表：CU + stmt_list + comp_dir + name。
+    fn minimal_v4_abbrev() -> Vec<u8> {
+        vec![
+            0x01, 0x11, 0x00, // code 1, DW_TAG_compile_unit, no children
+            0x10, 0x17, // DW_AT_stmt_list, DW_FORM_sec_offset
+            0x1b, 0x08, // DW_AT_comp_dir, DW_FORM_string
+            0x03, 0x08, // DW_AT_name, DW_FORM_string
+            0x00, 0x00, 0x00, // end attrs + end table
+        ]
+    }
+
     /// 断言某个地址命中，并返回 `(file, line)`。
     fn found(lines: &DwarfLines, addr: u32) -> (String, u32) {
         match lines.resolve(addr) {
@@ -2144,6 +2274,69 @@ mod tests {
             !file.starts_with('/'),
             "v2~v4 拿不到编译目录 ⇒ 路径**不该**是绝对路径：{file}"
         );
+    }
+
+    #[test]
+    fn a_v4_file_with_dir_index_zero_uses_the_comp_dir() {
+        let mut sections = vec![
+            (DEBUG_LINE_SECTION.to_string(), minimal_v4_line(0, "./a.c")),
+            (
+                ".debug_info".to_string(),
+                minimal_v4_info(0, "/proj/./src/..", "a.c"),
+            ),
+            (".debug_abbrev".to_string(), minimal_v4_abbrev()),
+        ];
+        let lines = DwarfLines::from_sections(&sections).expect("不得报错");
+        assert_eq!(lines.status(), DwarfStatus::Supported(4));
+        assert_eq!(found(&lines, 0x1000), ("/proj/a.c".to_string(), 1));
+        sections.clear();
+    }
+
+    #[test]
+    fn a_v4_comp_dir_from_debug_str_is_used() {
+        let sections = vec![
+            (DEBUG_LINE_SECTION.to_string(), minimal_v4_line(0, "a.c")),
+            (".debug_info".to_string(), minimal_v4_info_strp(0, 0, "a.c")),
+            (".debug_abbrev".to_string(), minimal_v4_abbrev_strp()),
+            (".debug_str".to_string(), b"/proj/src\0".to_vec()),
+        ];
+        let lines = DwarfLines::from_sections(&sections).expect("不得报错");
+        assert_eq!(found(&lines, 0x1000), ("/proj/src/a.c".to_string(), 1));
+    }
+
+    #[test]
+    fn a_v5_path_with_dot_and_dotdot_is_normalized() {
+        // v5 的目录/文件表本身可以带 `.` / `..` ⇒ 拼接后统一归一。
+        let header = Header {
+            version: 5,
+            min_inst_len: 1,
+            max_ops: 1,
+            default_is_stmt: true,
+            line_base: 0,
+            line_range: 1,
+            opcode_base: 13,
+            std_opcode_lengths: Vec::new(),
+            dirs: vec![Some("/root/sub/../src".to_string())],
+            files: vec![Some(FileEntry {
+                name: "./y.c".to_string(),
+                dir_index: 0,
+            })],
+            file_format: Vec::new(),
+            header_length: 0,
+            program_start: 0,
+            dwarf64: false,
+            initial_file: 0,
+        };
+        assert_eq!(header.file_path(0), "/root/src/y.c");
+    }
+
+    #[test]
+    fn normalize_dwarf_path_keeps_leading_parents_for_relative_paths() {
+        assert_eq!(normalize_dwarf_path("a/./b/../c.c"), "a/c.c");
+        assert_eq!(normalize_dwarf_path("/a//b/../c.c"), "/a/c.c");
+        assert_eq!(normalize_dwarf_path("../../x/./y.c"), "../../x/y.c");
+        assert_eq!(normalize_dwarf_path("/a/../../b"), "/b");
+        assert_eq!(normalize_dwarf_path("./a.c"), "a.c");
     }
 
     // -----------------------------------------------------------------

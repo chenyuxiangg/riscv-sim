@@ -935,6 +935,58 @@ impl Default for TraceFormat {
     }
 }
 
+/// Optional time/address window for execution-trace export (M-11).
+///
+/// Bounds are **inclusive on both ends**; `None` means "no bound on this
+/// side". The filter is applied **before** `offset` / `limit`, so the
+/// `total` in `TraceExport` is the filtered count and chunked exports walk
+/// a stable sequence without duplicates or gaps.
+///
+/// `time_*` fields travel as decimal strings (contract §2.2: quantities
+/// that grow with simulated time must not lose precision in JavaScript);
+/// `addr_*` fields are plain `u32` addresses.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceFilter {
+    /// Include entries whose virtual time is `>=` this value (ps).
+    #[serde(
+        default,
+        with = "crate::numstr::opt_u64_decimal",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub time_from_ps: Option<u64>,
+    /// Include entries whose virtual time is `<=` this value (ps).
+    #[serde(
+        default,
+        with = "crate::numstr::opt_u64_decimal",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub time_to_ps: Option<u64>,
+    /// Include entries whose address is `>=` this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addr_from: Option<u32>,
+    /// Include entries whose address is `<=` this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addr_to: Option<u32>,
+}
+
+impl TraceFilter {
+    /// `true` when no bound is set (the wire form is omitted entirely).
+    pub fn is_empty(&self) -> bool {
+        self.time_from_ps.is_none()
+            && self.time_to_ps.is_none()
+            && self.addr_from.is_none()
+            && self.addr_to.is_none()
+    }
+
+    /// Does this entry fall inside the window? Both bounds are inclusive.
+    pub fn matches(&self, time_ps: u64, addr: u32) -> bool {
+        self.time_from_ps.map_or(true, |v| time_ps >= v)
+            && self.time_to_ps.map_or(true, |v| time_ps <= v)
+            && self.addr_from.map_or(true, |v| addr >= v)
+            && self.addr_to.map_or(true, |v| addr <= v)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

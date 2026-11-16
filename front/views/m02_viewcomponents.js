@@ -1743,6 +1743,13 @@ const debugView = register({
                         <button type="button" data-action="download-trace-local" data-trace-download-button title="把**整份**导出翻完并落盘（不是第一块）">${escapeHtml(exportDownloadLabel(exportState?.source, exportState?.format))}</button>
                     </div>
                     <p class="trace-state" data-trace-state data-trace-switch="${traceSwitch.state}"${traceSwitch.state === TRACE_SWITCH_ON ? " data-trace-notice" : ""}>${renderTraceStatus(traceSwitch)}</p>
+                    <div class="trace-filter" data-trace-filter>
+                        <input type="text" data-trace-time-from placeholder="起始时间 ps（含）" spellcheck="false" autocomplete="off">
+                        <input type="text" data-trace-time-to placeholder="结束时间 ps（含）" spellcheck="false" autocomplete="off">
+                        <input type="text" data-trace-addr-from placeholder="起始地址（十六进制，含）" spellcheck="false" autocomplete="off">
+                        <input type="text" data-trace-addr-to placeholder="结束地址（十六进制，含）" spellcheck="false" autocomplete="off">
+                    </div>
+                    <p class="note" data-trace-filter-error></p>
                     ${exportState
                         ? `<p class="muted" data-trace-progress>${escapeHtml(String(exportState.source))} / ${escapeHtml(String(exportState.format))} · 条目 ${Number(exportState.offset)} → ${Number(exportState.next_offset)} / ${Number(exportState.total)}</p>`
                         : `<p class="muted">尚未导出 — 选一个数据源与格式发起导出。</p>`}
@@ -1821,6 +1828,14 @@ const debugView = register({
         }
         // The command's parameters travel **with the signal** — the
         // bootstrap's listener runs on `window` and cannot see the button.
+        const traceBox = el?.closest?.("[data-trace-filter]")?.parentElement
+            ?? el?.closest?.(".trace-export");
+        const traceFilterParams = {
+            filterTimeFrom: traceBox?.querySelector?.("[data-trace-time-from]")?.value,
+            filterTimeTo: traceBox?.querySelector?.("[data-trace-time-to]")?.value,
+            filterAddrFrom: traceBox?.querySelector?.("[data-trace-addr-from]")?.value,
+            filterAddrTo: traceBox?.querySelector?.("[data-trace-addr-to]")?.value,
+        };
         return emitCommand(action, "debug", {
             ...(addrParams ?? {}),
             addr: addrParams?.addr ?? el.dataset.addr,
@@ -1829,6 +1844,7 @@ const debugView = register({
             format: el.dataset.format,
             offset: el.dataset.offset,
             limit: el.dataset.limit,
+            ...traceFilterParams,
         });
     },
     onDelta(_delta) {},

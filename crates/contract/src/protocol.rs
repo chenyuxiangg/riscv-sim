@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{
     Breakpoint, BreakpointInfo, DeltaRegister, DisasmEntryDto, Project, SimState, Symbol,
-    TraceFormat, TraceSource, WatchExpr, WatchValue, Watchpoint, WaveformHistory, WriteSize,
+    TraceFilter, TraceFormat, TraceSource, WatchExpr, WatchValue, Watchpoint, WaveformHistory,
+    WriteSize,
 };
 use crate::platform::{PlatformDescription, RegionSpec};
 use crate::SCHEMA_VERSION;
@@ -289,6 +290,13 @@ pub enum CommandPayload {
         offset: u64,
         /// Maximum number of entries in this chunk (0 = kernel default).
         limit: u32,
+        /// Optional time / address window (Execution only).
+        ///
+        /// Omitted when empty ⇒ old producers keep the exact same wire
+        /// shape. Applied **before** `offset` / `limit`, so `total` is
+        /// the filtered count.
+        #[serde(default, skip_serializing_if = "TraceFilter::is_empty")]
+        filter: TraceFilter,
     },
     /// Turn execution-trace recording on or off (M-11, review R9).
     ///
@@ -1344,12 +1352,35 @@ mod tests {
             format: TraceFormat::Csv,
             offset: 16,
             limit: 32,
+            filter: TraceFilter::default(),
         };
         assert_eq!(
             serde_json::to_value(&export).expect("json"),
             serde_json::json!({ "ExportTrace": {
                 "source": "Execution", "format": "Csv",
                 "offset": 16, "limit": 32 } })
+        );
+
+        let filtered = CommandPayload::ExportTrace {
+            source: TraceSource::Execution,
+            format: TraceFormat::Json,
+            offset: 0,
+            limit: 10,
+            filter: TraceFilter {
+                time_from_ps: Some(1_000),
+                time_to_ps: Some(2_000),
+                addr_from: Some(0x1000),
+                addr_to: Some(0x1fff),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&filtered).expect("json"),
+            serde_json::json!({ "ExportTrace": {
+                "source": "Execution", "format": "Json",
+                "offset": 0, "limit": 10,
+                "filter": {
+                    "time_from_ps": "1000", "time_to_ps": "2000",
+                    "addr_from": 4096, "addr_to": 8191 } } })
         );
 
         let enable = CommandPayload::SetTraceEnabled { enabled: true };

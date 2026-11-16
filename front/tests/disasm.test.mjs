@@ -392,8 +392,24 @@ describe("trace 导出入口", () => {
         );
         const chunk = dom.document.querySelector("[data-trace-chunk]");
         assert.ok(chunk, "没有导出内容区");
-        assert.ok(chunk.textContent.includes("kind,addr,value"), "chunk 内容没显示");
-        assert.ok(chunk.textContent.includes("instr,00000000,02a00093"), "chunk 内容不完整");
+        assert.ok(chunk.textContent.includes("time_ps,addr,kind,data,width"), "chunk 内容没显示");
+        assert.ok(chunk.textContent.includes('"1000",0,instruction,19,0'), "chunk 内容不完整");
+        router.close();
+    });
+
+    test("mock 内核也按 filter 过滤（页面手点不是假象）", async () => {
+        const { router } = await setup();
+        await router.dispatchCommand(
+            Command.exportTrace(TRACE_SOURCE.Execution, TRACE_FORMAT.Csv, 0, 0, {
+                time_from_ps: "2000",
+                time_to_ps: "3000",
+            }),
+        );
+        const chunk = dom.document.querySelector("[data-trace-chunk]");
+        assert.ok(chunk.textContent.includes('"2000",4'), "2000 那条丢了");
+        assert.ok(chunk.textContent.includes('"3000",256'), "3000 那条丢了");
+        assert.ok(!chunk.textContent.includes('"1000",0'), "窗口外的 1000 没被筛掉");
+        assert.ok(!chunk.textContent.includes('"4000",260'), "窗口外的 4000 没被筛掉");
         router.close();
     });
 

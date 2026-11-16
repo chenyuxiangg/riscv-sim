@@ -566,7 +566,7 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 // 契约 v3（M-11 调试面）。
                 Disasm: Command.disasm(0, 8),
                 ResolveLine: Command.resolveLine(0),
-                ExportTrace: Command.exportTrace("Execution", "Csv", 0, 16),
+                ExportTrace: Command.exportTrace("Execution", "Csv", 0, 16, { time_from_ps: "1000" }),
                 SetTraceEnabled: Command.setTraceEnabled(true),
                 // 契约 v5：往当前会话唯一的 UART0 写字节。
                 WriteConsole: Command.writeConsole([104, 105]),

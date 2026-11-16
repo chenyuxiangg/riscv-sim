@@ -41,11 +41,12 @@
 //!   CSV 单元**带引号**（`"1000"`）、JSON 是**字符串**（`"1000"`）。
 //!   Rust 内部仍然是 `u64`（算术不受影响）。
 //!
-//! ⚠️ 本批**没有**筛选器（LLD §3.3 的时间 / 地址筛选未实现）⇒ `total`
-//! 就是环内条目数。
+//! - **筛选**（LLD §3.3）：可选的时间 / 地址窗口（**含首含尾**），
+//!   在 `offset` / `limit` **之前**应用 ⇒ `total` 是**过滤后**的条目数，
+//!   续导沿着同一份过滤结果走，不重不漏。
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
-use riscv_sim_contract::model::{TraceDir, TraceEvent, TraceFormat};
+use riscv_sim_contract::model::{TraceDir, TraceEvent, TraceFilter, TraceFormat};
 
 /// 默认环容量（LLD 表47：`T_CAP = 10^5` 条目，估算基线）。
 ///
@@ -342,7 +343,27 @@ impl TraceBuffer {
         offset: u64,
         limit: u32,
     ) -> Result<ExportChunk, PlatformError> {
-        let total = self.len as u64;
+        self.export_filtered(format, offset, limit, &TraceFilter::default())
+    }
+
+    /// 导出**一块**，先按 `filter` 过滤再分块（LLD §3.3）。
+    ///
+    /// - 过滤在 `offset` / `limit` **之前** ⇒ `total` 是过滤后总数；
+    /// - 上下界**含首含尾**；`None` 表示该侧不设界；
+    /// - 其余续导语义与 [`TraceBuffer::export`] 完全一致。
+    pub fn export_filtered(
+        &self,
+        format: TraceFormat,
+        offset: u64,
+        limit: u32,
+        filter: &TraceFilter,
+    ) -> Result<ExportChunk, PlatformError> {
+        // ⚠️ 先过滤再算 total：续导的 offset 是**过滤后**的序号，不是环下标。
+        let filtered: Vec<&TraceEntry> = self
+            .entries()
+            .filter(|e| filter.matches(e.time_virt, e.addr))
+            .collect();
+        let total = filtered.len() as u64;
         let limit = if limit == 0 {
             EXPORT_DEFAULT_LIMIT
         } else {
@@ -355,10 +376,16 @@ impl TraceBuffer {
             let remaining = (total - offset).min(u32::MAX as u64) as u32;
             limit.min(remaining) as usize
         };
+        let window = if take == 0 {
+            &filtered[0..0]
+        } else {
+            let start = offset as usize;
+            &filtered[start..start + take]
+        };
 
         let text = match format {
-            TraceFormat::Csv => Ok(self.render_csv(offset, take)),
-            TraceFormat::Json => Ok(self.render_json(offset, take)),
+            TraceFormat::Csv => Ok(self.render_csv(offset, window)),
+            TraceFormat::Json => Ok(self.render_json(window)),
             TraceFormat::Vcd => Err(PlatformError::new(
                 TRACE_FAMILY,
                 E_CTX_03_ILLEGAL_EXPORT_FORMAT,
@@ -411,13 +438,13 @@ impl TraceBuffer {
     /// 渲染 CSV 块。
     ///
     /// ⚠️ **表头只在 `offset == 0` 的那块出现** ⇒ 各块拼起来是一份 CSV。
-    fn render_csv(&self, offset: u64, take: usize) -> String {
+    fn render_csv(&self, offset: u64, entries: &[&TraceEntry]) -> String {
         let mut out = String::new();
-        if offset == 0 && take > 0 {
+        if offset == 0 && !entries.is_empty() {
             out.push_str(CSV_HEADER);
             out.push('\n');
         }
-        for e in self.entries().skip(offset as usize).take(take) {
+        for e in entries {
             // ⚠️ 时间是**带引号的十进制字符串** —— CSV 没有类型系统，
             // 引号是唯一能让读者看出「这不是一个整数」的办法。
             out.push('"');
@@ -441,10 +468,10 @@ impl TraceBuffer {
     /// 里面没有任何需要转义的自由文本（时间 = 数字，kind = 固定标识），
     /// 所以手拼既能逐字钉住形状，也不会引入 `serde` 依赖
     /// （kernel crate 没有 `serde` 依赖）。
-    fn render_json(&self, offset: u64, take: usize) -> String {
+    fn render_json(&self, entries: &[&TraceEntry]) -> String {
         let mut out = String::from("{\"entries\":[");
         let mut first = true;
-        for e in self.entries().skip(offset as usize).take(take) {
+        for e in entries {
             if !first {
                 out.push(',');
             }
@@ -668,6 +695,104 @@ mod tests {
         assert_eq!(sorted.len(), n, "**不能有重复**");
         let expected: Vec<u32> = (0..n).map(|i| 0x1000 + i as u32).collect();
         assert_eq!(seen, expected, "顺序必须是时间顺序且一条不漏");
+    }
+
+    // -----------------------------------------------------------------
+    // 5b. 时间 / 地址筛选（LLD §3.3）
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn the_time_window_is_inclusive_and_total_is_filtered() {
+        let buf = ring_with_instructions(10);
+        let filter = TraceFilter {
+            time_from_ps: Some(1002),
+            time_to_ps: Some(1004),
+            ..TraceFilter::default()
+        };
+        let chunk = buf
+            .export_filtered(TraceFormat::Json, 0, 0, &filter)
+            .expect("导出");
+        assert_eq!(chunk.total, 3, "total 必须是**过滤后**的条数");
+        let v: serde_json::Value = serde_json::from_str(&chunk.chunk).expect("JSON");
+        let times: Vec<&str> = v["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .map(|e| e["time_ps"].as_str().expect("时间"))
+            .collect();
+        assert_eq!(times, vec!["1002", "1003", "1004"], "上下界都含");
+    }
+
+    #[test]
+    fn the_address_window_is_inclusive() {
+        let buf = ring_with_instructions(10);
+        let filter = TraceFilter {
+            addr_from: Some(0x1003),
+            addr_to: Some(0x1005),
+            ..TraceFilter::default()
+        };
+        let chunk = buf
+            .export_filtered(TraceFormat::Json, 0, 0, &filter)
+            .expect("导出");
+        assert_eq!(chunk.total, 3);
+        let v: serde_json::Value = serde_json::from_str(&chunk.chunk).expect("JSON");
+        let addrs: Vec<u64> = v["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .map(|e| e["addr"].as_u64().expect("地址"))
+            .collect();
+        assert_eq!(addrs, vec![0x1003, 0x1004, 0x1005]);
+    }
+
+    #[test]
+    fn filtering_happens_before_offset_so_continuation_has_no_gaps() {
+        let buf = ring_with_instructions(12);
+        let filter = TraceFilter {
+            time_from_ps: Some(1005),
+            ..TraceFilter::default()
+        };
+        // 过滤后共有 7 条（1005..=1011）；每块 2 条。
+        let first = buf
+            .export_filtered(TraceFormat::Csv, 0, 2, &filter)
+            .expect("第一块");
+        assert_eq!(first.total, 7);
+        assert!(first.chunk.starts_with(CSV_HEADER));
+        assert!(first.chunk.contains("\"1005\""));
+        assert!(first.chunk.contains("\"1006\""));
+        assert!(!first.chunk.contains("\"1004\""), "界外条目不得出现");
+
+        let second = buf
+            .export_filtered(TraceFormat::Csv, first.next_offset, 2, &filter)
+            .expect("第二块");
+        assert_eq!(second.total, 7);
+        assert!(
+            !second.chunk.starts_with(CSV_HEADER),
+            "表头只在 offset == 0"
+        );
+        assert!(second.chunk.contains("\"1007\""));
+        assert!(second.chunk.contains("\"1008\""));
+        assert!(!second.chunk.contains("\"1006\""), "续导不得重复");
+    }
+
+    #[test]
+    fn an_empty_filter_result_is_a_legal_empty_chunk() {
+        let buf = ring_with_instructions(4);
+        let filter = TraceFilter {
+            time_from_ps: Some(9999),
+            ..TraceFilter::default()
+        };
+        let json = buf
+            .export_filtered(TraceFormat::Json, 0, 0, &filter)
+            .expect("空结果不是错误");
+        assert_eq!(json.total, 0);
+        assert_eq!(json.next_offset, 0);
+        assert_eq!(json.chunk, "{\"entries\":[]}");
+        let csv = buf
+            .export_filtered(TraceFormat::Csv, 0, 0, &filter)
+            .expect("空结果不是错误");
+        assert_eq!(csv.total, 0);
+        assert!(csv.chunk.is_empty());
     }
 
     #[test]

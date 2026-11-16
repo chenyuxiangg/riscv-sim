@@ -657,18 +657,20 @@ export const Command = Object.freeze({
      */
     resolveLine: (addr) => ({ ResolveLine: { addr: Number(addr) } }),
     /**
-     * `CommandPayload::ExportTrace { source, format, offset, limit }` — 导出。
+     * `CommandPayload::ExportTrace { source, format, offset, limit, filter? }` — 导出。
      *
      * `source` 选数据源、`format` 选序列化器；**非法组合会被拒绝**
      * （`Vcd` 只对 `Waveform` 合法，`Json` 只对 `Execution` 合法）。
      * `offset` 是**条目偏移**，续传时传上次回复的 `next_offset`。
+     * `filter` 可选：执行轨迹的时间/地址窗口（含首含尾），省略即全量。
      */
-    exportTrace: (source, format, offset, limit) => ({
+    exportTrace: (source, format, offset, limit, filter = null) => ({
         ExportTrace: {
             source,
             format,
             offset: Number(offset),
             limit: Number(limit),
+            ...(filter ? { filter } : {}),
         },
     }),
     /**

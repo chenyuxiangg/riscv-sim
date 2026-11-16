@@ -87,3 +87,49 @@ export async function collectTraceChunks(fetchChunk, opts = {}) {
         : parts.join("");
     return { content, chunks, total, nextOffset, truncated };
 }
+
+/**
+ * 把界面上的时间/地址筛选输入归一成契约的 `filter` 对象。
+ *
+ * - 空输入 = 该侧不设界；
+ * - 时间走**十进制 ps 字符串**（超过 2^53 也不丢精度）；
+ * - 地址已经是 `parseAddrInput` 解析出来的 `u32`（这里只查类型/范围）；
+ * - 上下界**含首含尾**，起点大于终点直接报错（不静默导出空结果）。
+ *
+ * @param {{timeFrom?: unknown, timeTo?: unknown, addrFrom?: unknown, addrTo?: unknown}} [raw]
+ * @returns {{ok: true, filter: null|object}|{ok: false, error: string}}
+ */
+export function normalizeTraceFilter(raw = {}) {
+    const filter = {};
+    const timeFrom = String(raw.timeFrom ?? "").trim();
+    const timeTo = String(raw.timeTo ?? "").trim();
+    for (const [key, text] of [["time_from_ps", timeFrom], ["time_to_ps", timeTo]]) {
+        if (!text) continue;
+        if (!/^\d{1,20}$/.test(text)) {
+            return { ok: false, error: "时间筛选要填十进制 ps（非负整数）" };
+        }
+        if (BigInt(text) > 18446744073709551615n) {
+            return { ok: false, error: "时间筛选超出 u64 范围" };
+        }
+        filter[key] = text;
+    }
+    for (const [key, value] of [["addr_from", raw.addrFrom], ["addr_to", raw.addrTo]]) {
+        if (value === null || value === undefined || value === "") continue;
+        const n = Number(value);
+        if (!Number.isInteger(n) || n < 0 || n > 0xffffffff) {
+            return { ok: false, error: "地址筛选必须是 32 位地址" };
+        }
+        filter[key] = n >>> 0;
+    }
+    if (filter.time_from_ps !== undefined
+        && filter.time_to_ps !== undefined
+        && BigInt(filter.time_from_ps) > BigInt(filter.time_to_ps)) {
+        return { ok: false, error: "时间起点大于终点" };
+    }
+    if (filter.addr_from !== undefined
+        && filter.addr_to !== undefined
+        && filter.addr_from > filter.addr_to) {
+        return { ok: false, error: "地址起点大于终点" };
+    }
+    return { ok: true, filter: Object.keys(filter).length > 0 ? filter : null };
+}

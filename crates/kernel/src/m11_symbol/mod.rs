@@ -23,6 +23,7 @@ use riscv_sim_contract::model::{LineEntry, Symbol};
 
 pub mod disasm;
 pub mod dwarf;
+mod dwarf_info;
 pub mod render;
 pub mod symbols;
 pub mod trace;

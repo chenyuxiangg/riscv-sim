@@ -181,8 +181,8 @@ use riscv_sim_contract::error::{
 };
 use riscv_sim_contract::model::{
     DeltaRegister, Edge, ImageKind, ImageRef, ImageSource, PlatformTemplateInfo, Project,
-    TraceEvent, TraceFormat, TraceSource, WatchExpr, WatchValue, WaveformHistory, WaveformStream,
-    WriteSize, SIM_STATE_SCHEMA_VERSION,
+    TraceEvent, TraceFilter, TraceFormat, TraceSource, WatchExpr, WatchValue, WaveformHistory,
+    WaveformStream, WriteSize, SIM_STATE_SCHEMA_VERSION,
 };
 use riscv_sim_contract::platform::{mcu_isa_info, PlatformDescription, RegionSpec};
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
@@ -2502,7 +2502,8 @@ impl KernelHost {
                 format,
                 offset,
                 limit,
-            } => self.on_export_trace(source, format, offset, limit),
+                filter,
+            } => self.on_export_trace(source, format, offset, limit, filter),
             CommandPayload::SetTraceEnabled { enabled } => self.on_set_trace_enabled(enabled),
             // ⚠️ **契约 v9 的两条新命令**（STAGE-42 · v0.57 批）。
             //
@@ -4165,10 +4166,13 @@ impl KernelHost {
         format: TraceFormat,
         offset: u64,
         limit: u32,
+        filter: TraceFilter,
     ) -> Vec<EventPayload> {
         match source {
+            // ⚠️ 筛选只对 **Execution** 有意义：波形导出的是「信号随时间
+            // 变化」，按地址/时间窗口切会把一条边沿流切成不连续的片段。
             TraceSource::Waveform => self.export_waveform(format, offset),
-            TraceSource::Execution => self.export_execution(format, offset, limit),
+            TraceSource::Execution => self.export_execution(format, offset, limit, &filter),
         }
     }
 
@@ -4254,8 +4258,9 @@ impl KernelHost {
         format: TraceFormat,
         offset: u64,
         limit: u32,
+        filter: &TraceFilter,
     ) -> Vec<EventPayload> {
-        match self.trace.export(format, offset, limit) {
+        match self.trace.export_filtered(format, offset, limit, filter) {
             Ok(chunk) => vec![EventPayload::TraceExport {
                 source: TraceSource::Execution,
                 format,

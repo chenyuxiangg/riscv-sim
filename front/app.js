@@ -121,7 +121,7 @@ import { nextTraceEnabled, traceSwitchState, TRACE_SWITCH_OFF } from "./lib/trac
 import { shouldFollowDisasm } from "./lib/disasm-follow.js";
 // ⚠️ **「把整条轨迹翻完」的分页收集**（纯逻辑）⇒ ⇒ 「下载轨迹到本地」
 //   顺着 `next_offset` 一块一块翻 ⇒ ⇒ 翻完才是**完整**的一份。
-import { collectTraceChunks } from "./lib/trace-export.js";
+import { collectTraceChunks, normalizeTraceFilter } from "./lib/trace-export.js";
 // ⚠️ **告警弹窗**（STAGE-38 · v0.53 批）⇒ ⇒ 运行中点「读内存」= 拒绝 + 弹窗。
 // ⇒ ⇒ 本仓**第一个**碰 DOM 的 lib 模块（弹窗是**全局**的，不属于任何一个视图）。
 import { showAlert } from "./lib/alert.js";
@@ -1275,10 +1275,10 @@ async function downloadWholeTrace(services, options = {}) {
     const format = String(options.format ?? TRACE_FORMAT.Csv);
     const result = await collectTraceChunks(async (offset) => {
         const ev = await router.dispatchCommand(
-            Command.exportTrace(source, format, offset, 0),
+            Command.exportTrace(source, format, offset, 0, options.filter ?? null),
         );
         return ev?.value ?? {};
-    }, { format });
+    }, { format, filter: options.filter ?? null });
     if (!result.content) return null;
     return downloadExportChunk({ source, format, chunk: result.content });
 }
@@ -1727,8 +1727,26 @@ export async function handleCommand(detail, services) {
                 const format = String(detail.params?.format ?? TRACE_FORMAT.Csv);
                 const offset = toInt(detail.params?.offset, 0);
                 const limit = toInt(detail.params?.limit, 0);
+                const addrFrom = parseOptionalFilterAddr(detail.params?.filterAddrFrom);
+                const addrTo = parseOptionalFilterAddr(detail.params?.filterAddrTo);
+                const normalized = normalizeTraceFilter({
+                    timeFrom: detail.params?.filterTimeFrom,
+                    timeTo: detail.params?.filterTimeTo,
+                    addrFrom,
+                    addrTo,
+                });
+                if (!normalized.ok) {
+                    setNote(`筛选条件无效：${normalized.error}`);
+                    break;
+                }
+                // ⚠️ 下载走**同一次导出的筛选条件**：`TraceExport` 回包不带
+                //   filter ⇒ 前端记住它，否则「筛完再下载」会静默退回全量。
+                updateDebugState((prev) => ({
+                    ...prev,
+                    debug: { ...(prev.debug ?? {}), traceFilter: normalized.filter },
+                }));
                 await commandRouter.dispatchCommand(
-                    Command.exportTrace(source, format, offset, limit),
+                    Command.exportTrace(source, format, offset, limit, normalized.filter),
                 );
                 break;
             }
@@ -1741,10 +1759,11 @@ export async function handleCommand(detail, services) {
                 // ⚠️ **默认值与视图层那个按钮的文案逐字一致**（`Execution` /
                 //   `Csv`）⇒ ⇒ 按钮上写的与实际下的**不可能**对不上。
                 const current = viewStore.getState("debug")?.debug?.export ?? null;
+                const filter = viewStore.getState("debug")?.debug?.traceFilter ?? null;
                 const source = String(current?.source ?? TRACE_SOURCE.Execution);
                 const format = String(current?.format ?? TRACE_FORMAT.Csv);
                 try {
-                    const result = await downloadWholeTrace(services, { source, format });
+                    const result = await downloadWholeTrace(services, { source, format, filter });
                     if (result) {
                         setNote(`已下载 ${result.filename}（内核报告 ${result.total ?? "?"} 条）`);
                     }
@@ -2828,6 +2847,14 @@ function updateBreakpoints(mutator) {
  * @param {(prev: object) => object} mutator
  * @returns {object} 写进去的 `debug` 子树
  */
+/** 空输入 ⇒ `undefined`；非空按十六进制解析，解析不了 ⇒ `NaN`（交给归一器报错）。 */
+function parseOptionalFilterAddr(raw) {
+    const text = String(raw ?? "").trim();
+    if (!text) return undefined;
+    const parsed = parseAddrInput(text);
+    return parsed.ok ? parsed.value : Number.NaN;
+}
+
 function updateDebugState(mutator) {
     const next = viewStore.setState("debug", (prev) => mutator(prev));
     publishViewState("debug");
