@@ -3,8 +3,8 @@
 > **本文件跟踪「当前需求的完成情况」**；逐版本详细变更日志已归档至 [`PROGRESS-history.md`](./PROGRESS-history.md)（同源，git history 是最终真相）。
 > **欠账的真相在台账** [`../reviews/REVIEWS.md`](../reviews/REVIEWS.md)；批次顺序与依赖在 [`../plans/PRODUCT_BOARD_PLAN.md`](../plans/PRODUCT_BOARD_PLAN.md)。
 
-- **当前里程碑**：**v0.74**（2026-11-03 · STAGE-50 引脚级连线 + 通用连接路由 + 前端连线编辑面）
-- **下一批**：**第 59 批 / v0.75** · D-175 的 F MCU 概念（ISA / 厂商 / 型号 / 向量表）
+- **当前里程碑**：**v0.77**（2026-11-16 · STAGE-53 每区域预算整体退役）
+- **下一批**：**第 62 批**（主题待定）· **仍欠**：门禁工具改造 [`GATE_TOOLING_PREREQ.md`](../plans/GATE_TOOLING_PREREQ.md) 的 **R-1~R-4**（本批按用户拍板先行，欠账顺延）
 - **Owner**：zyzs
 
 ---
@@ -24,7 +24,8 @@
 | **58** | **v0.74** | **D-175 的 D + E**（引脚级连线 + 通用连接路由）+ **D-177 的 D**（前端连线编辑面） | ✅ 已落地 | **L3 通了**（⚠️ 破坏性：`PLATFORM_SCHEMA_VERSION` 2 → 3） |
 | **59** | **v0.75** | **D-175 的 F：MCU 概念**（ISA/厂商/型号/向量表） | ✅ 已落地 | **装载时按板 ISA 校验固件**（位宽 + RVC 单向 `c` ⇒ `E_PLT-20/21`）+ 板级视图**用户自配**（内置板=「从内置模版开始」模板入口）+ 基址 **16 进制**（⚠️ 破坏性：`PLATFORM_SCHEMA_VERSION` 3 → 4） |
 | 60 | v0.76 | 模板导入 + 不兜底生效板 · 引脚的复用功能 / 方向 + 固件动态切换（pinmux 器件） | ✅ 已落地 | 平台不兜底（auto_selectable 废弃 · 无板装载拒 `E_PLT-22` + 引导 · 内置板降级为模板预设 · 前端「从模板导入」）· 引脚复用（`pins[].functions[]` 功能列表 · 独立 pinmux 器件 · 中断绑「引脚 × 当前功能」· 前端只读展示）· ⚠️ 破坏性：描述格式 4 → 5（`PLATFORM_SCHEMA_VERSION` 4 → 5） |
-| 61 | v0.77 | （待定 · β 取消后空出） | — | — |
+| **61** | **v0.77** | **每区域预算整体退役**（STAGE-53 · 方案 A 根治：段 size 即容量） | ✅ 已落地 | 删 `region_budget_bytes` / `max_region_bytes` 两个键 + 删 V-7/V-16 + 删 `MemoryMapOp::SetBudget` + M-14 去掉 `DEFAULT_MAX_REGION_BYTES`（改为按**本段 size 分页取整**的容量）· 前端删预算列 / 差量 / 三个死渲染函数 + 补错误横幅与存完刷新档案 · 门禁脚本 token 同步 · ⚠️ 破坏性：描述格式 5 → 6、信封 15 → 16（`E_PLT-07` 保留号 retired） |
+| 61-前置 | — | 门禁工具改造（开工前置） | ⏳ 仍欠 | ⚠️ **R-1~R-4**（分段重跑 / 失败即 dump 证据 / 采集通道 health check / wasm mtime 前置），见 [`../plans/GATE_TOOLING_PREREQ.md`](../plans/GATE_TOOLING_PREREQ.md)；**R-5~R-7** 随批顺手整改 |
 
 **顺手批**（可插任意两批之间，**只列未闭环的** ⇒ ⇒ 闭环的从这里划掉、销账的处置进 `REVIEWS-archive.md`）：**D-159**（真机门禁在有负载时假红 · **根因已定位**：判据等的是**时长**而不是**状态** ⇒ ⇒ 三处改成「等状态」⇒ ⇒ 剩**做法 B**（不节流环境跑门禁：`Emulation.setCPUThrottlingRate` 那一路未做）⇒ ⇒ **未销账**）。
 

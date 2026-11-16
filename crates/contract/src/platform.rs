@@ -37,21 +37,18 @@
 //! occupancy** (after mapping — RAM is lazily allocated since v0.26, so
 //! a region may declare a large size and cost nothing).
 //!
-//! ⚠️ **v0.31 (D-138)**: the **numbers** behind those two rules used to
-//! be the **same field** (`region_budget_bytes` fed both) ⇒ they are
-//! split into two: `region_budget_bytes` stays the **declaration-time**
-//! ceiling (judged here by V-7) and
-//! [`PlatformDescription::max_region_bytes`] is the **runtime** ceiling
-//! (judged by M-14's `E_BUS-09`). Absent ⇒ the runtime one **equals**
-//! the declaration-time one ⇒ an old description behaves **byte for
-//! byte** as before.
+//! ⚠️ **v0.77（STAGE-53）**：**声明期那个上限已经不存在了** ⇒
+//! `region_budget_bytes` / `max_region_bytes` **两个键已删**（V-7 同步
+//! 退役，`E_PLT-07` 保留号但不再产生）⇒ ⇒ 段的 `size` **就是**它的容量
+//! ⇒ 只剩 M-14 那一层「init 物理页 > 本段 size」（`E_BUS-09`）。
+//! ⇒ 老描述**带那两个键仍能解析**（serde 忽略未知键 ⇒ 存量档案零迁移）。
 //!
 //! ⚠️ **The host-side codes live here too** (V-10 .. V-12): the *rules*
 //! are the host's, but a code with **two** landing spots is a code with
 //! two meanings ⇒ the contract layer owns every `E_PLT-*` number.
 use crate::error::{
     PlatformError, E_PLT_01_SCHEMA_VERSION, E_PLT_02_EMPTY_ID, E_PLT_03_NO_REGIONS,
-    E_PLT_04_ZERO_SIZE, E_PLT_05_OVERFLOW, E_PLT_06_OVERLAP, E_PLT_07_OVER_BUDGET,
+    E_PLT_04_ZERO_SIZE, E_PLT_05_OVERFLOW, E_PLT_06_OVERLAP,
     E_PLT_08_DUPLICATE_DEVICE_ID, E_PLT_12_PARAMETER_OUT_OF_RANGE, E_PLT_15_DEVICE_EMPTY_ID,
     E_PLT_16_IRQ_SOURCE_INVALID, E_PLT_18_ROLES_INVALID, E_PLT_21_MCU_INVALID,
     E_PLT_24_MULTIPLE_PLIC, PLATFORM_FAMILY,
@@ -89,7 +86,12 @@ use serde::{Deserialize, Serialize};
 ///   （`PinSpec` 功能列表 · 引脚的复用功能 / 方向 + 固件动态切换）⇒ ⇒
 ///   老描述**带 `auto_selectable` 键仍能解析**（serde 忽略未知字段 ⇒ ⇒
 ///   **缺省优先迁移** ⇒ ⇒ 存量板档案**零风险**）。
-pub const PLATFORM_SCHEMA_VERSION: u32 = 5;
+///
+/// ⚠️ **v0.77（STAGE-53）**：`5 → 6` ⇒ 删掉 `region_budget_bytes` /
+/// `max_region_bytes` **两个键**（⇒ ⇒ 这是**缩小**形状，但仍是一次
+/// **不兼容**的线上变化 ⇒ ⇒ 版本**必须动**）⇒ ⇒ 老描述**仍然能读**
+/// （见 [`SUPPORTED_PLATFORM_SCHEMA_VERSIONS`]）。
+pub const PLATFORM_SCHEMA_VERSION: u32 = 6;
 /// **本构建能读**的平台描述格式版本（V-1 判的就是它）。
 ///
 /// ⚠️ **v0.73（STAGE-49 · B2）**：**`[1, 2]`** ⇒ ⇒ ⇒ **缺省优先**：老描述
@@ -108,7 +110,10 @@ pub const PLATFORM_SCHEMA_VERSION: u32 = 5;
 /// ⚠️ **v0.76（STAGE-52）**：`[1, 2, 3, 4, 5]` ⇒ ⇒ 版本 **4** 的老描述
 ///   （存量板档案 · 带 `auto_selectable` 键）**仍能装**（serde 忽略未知键）
 ///   ⇒ ⇒ 版本 **5** 是本批写的。
-pub const SUPPORTED_PLATFORM_SCHEMA_VERSIONS: &[u32] = &[1, 2, 3, 4, 5];
+/// ⚠️ **v0.77（STAGE-53）**：`[1, 2, 3, 4, 5, 6]` ⇒ ⇒ 版本 **5** 的老描述
+///   （存量板档案 · 带两个预算键）**仍能装**（serde 忽略未知键 ⇒ ⇒ 那两块
+///   「16 MiB 预算 · 64 MiB 段」的板**自动变成合法**）⇒ 版本 **6** 是本批写的。
+pub const SUPPORTED_PLATFORM_SCHEMA_VERSIONS: &[u32] = &[1, 2, 3, 4, 5, 6];
 /// The version of the platform description's **legality rule set**.
 ///
 /// ⚠️ **This is not [`PLATFORM_SCHEMA_VERSION`]** and it is not the
@@ -216,7 +221,6 @@ pub fn default_gpio_irq_line() -> u16 {
 ///   "id": "qemu-virt",
 ///   "name": "QEMU virt",
 ///   "priority": 20,
-///   "region_budget_bytes": 134217728,
 ///   "regions": [
 ///     { "kind": "ram", "base": 0, "size": 1048576 },
 ///     { "kind": "peripheral", "base": 1073741824,
@@ -240,41 +244,6 @@ pub struct PlatformDescription {
     pub name: String,
     /// 模板展示顺序 — **smaller wins**（模板库列表排序用 · 不再参与自动选档）。
     pub priority: u32,
-    /// Per-region budget in bytes — the ceiling for one region's
-    /// **declared** size.
-    ///
-    /// ⚠️ This is a **declaration-time** budget. The runtime budget
-    /// (M-14's `E_BUS-09`) measures the **physical occupancy** instead
-    /// (RAM is lazily allocated) ⇒ two constraints, two layers, two
-    /// codes.
-    ///
-    /// ⚠️ **v0.31 (D-138)**: this field used to carry **two** meanings
-    /// (the declaration-time ceiling **and** the runtime physical
-    /// occupancy ceiling) ⇒ they are split: the declaration-time one
-    /// stays here (V-7 / [`E_PLT_07_OVER_BUDGET`]), the runtime one
-    /// moved to [`PlatformDescription::max_region_bytes`].
-    pub region_budget_bytes: u32,
-    /// The **runtime** ceiling for one region's **physical occupancy**
-    /// (optional) — `None` means **equal to** `region_budget_bytes`.
-    ///
-    /// ⚠️ **v0.31 (D-138)**: this is the **second half** of the split —
-    /// the declaration-time ceiling is [`Self::region_budget_bytes`]
-    /// (judged by V-7 / `E_PLT_07`), the runtime physical occupancy
-    /// ceiling is **this** one (judged by M-14's `E_BUS-09`). Two
-    /// layers, two semantics, two codes — the two are **not** merged.
-    ///
-    /// ⚠️ **`None` means "the same as the declaration-time budget"**,
-    /// **not** "unlimited" ⇒ an old description (one without this key)
-    /// behaves **byte for byte** as before. To say "unlimited"
-    /// explicitly, write a large enough value (`u32::MAX` ≈ 4 GiB − 1)
-    /// ⇒ one number is harder to misread than a vague word.
-    ///
-    /// ⚠️ **No `skip_serializing_if`**: the key is **always** written
-    /// (the value may be `null`) ⇒ the wire shape is **unique** ⇒ the
-    /// contract layer and the front-end mirror can be compared field by
-    /// field.
-    #[serde(default)]
-    pub max_region_bytes: Option<u32>,
     /// The declared regions — may be listed in any order (the overlap
     /// check sorts by `base` first).
     pub regions: Vec<RegionSpec>,
@@ -564,14 +533,12 @@ impl PlatformDescription {
     /// | V-4 | a RAM / ROM region's `size == 0` | `E_PLT-04` |
     /// | V-5 | `base + size` overflows `u32` | `E_PLT-05` |
     /// | V-6 | two regions overlap | `E_PLT-06` |
-    /// | V-7 | a RAM / ROM region's **declared** size `> region_budget_bytes` | `E_PLT-07` |
     /// | V-8 | unknown device kind / missing parameter / wrong parameter type | **serde** (not here) |
     /// | V-9 | two peripheral devices share an `id` | `E_PLT-08` |
     /// | V-27 | a board declares **more than one** `plic` device | `E_PLT-24` |
     /// | V-13 | a device parameter is **below** its legal lower bound | `E_PLT-12` |
     /// | V-14 | a device parameter is **above** its legal upper bound | `E_PLT-12` |
     /// | V-15 | an interrupt peripheral's `irq_line` is not a valid PLIC source id (only when the map has a PLIC) | `E_PLT-12` |
-    /// | V-16 | `max_region_bytes` is given and is **zero** (the runtime ceiling must be ≥ 1) | `E_PLT-12` |
     /// | V-17 | a peripheral device's `id` is empty | `E_PLT-15` |
     /// | V-15b | two interrupt peripherals on one board declare the same PLIC source id | `E_PLT-16` |
     ///
@@ -598,14 +565,8 @@ impl PlatformDescription {
     /// relation mean the same thing — 「某个器件参数的值不在它的合法取值域内」
     /// ⇒ one code, not two.
     ///
-    /// ⚠️ **V-16 was appended after V-15** (v0.31 · D-138) ⇒ the report
-    /// order of V-1 ~ V-15 is **unchanged, byte for byte** ⇒ the
-    /// existing "V-2 before V-9 / V-13" order assertions still hold. It
-    /// **shares** `E_PLT-12` as well: a zero runtime ceiling is a
-    /// parameter outside its legal value domain ⇒ one code, not two.
-    ///
-    /// ⚠️ **V-17 was appended after V-16** (v0.33 · D-142) ⇒ the report
-    /// order of V-1 ~ V-16 is **unchanged, byte for byte** ⇒ in
+    /// ⚠️ **V-17 was appended after V-15** (v0.33 · D-142) ⇒ the report
+    /// order of V-1 ~ V-15 is **unchanged, byte for byte** ⇒ in
     /// particular **V-9 still comes first** ⇒ **two** devices with an
     /// empty `id` are still rejected by **V-9 / `E_PLT-08`** ⇒ V-17
     /// only ever fires for a **single** empty `id`.
@@ -615,11 +576,9 @@ impl PlatformDescription {
     /// must not turn a test red, and a message must never carry the
     /// meaning.
     ///
-    /// ⚠️ **V-7 is a declaration-time check and is deliberately not M-14's
-    /// `E_BUS-09`**: v0.26 made RAM lazily allocated, so the runtime
-    /// guard measures the **physical occupancy** and no longer catches a
-    /// huge *declaration* ⇒ the description layer is the only place left
-    /// that can ⇒ it must. Two layers, two semantics, two codes.
+    /// ⚠️ **V-7 已退役**（v0.77 · STAGE-53 · 按区域预算整体退役）⇒ 段的
+    /// `size` **本身就是**它的容量（声明即容量）⇒ 「声明期上限」这个约束
+    /// 不再存在 ⇒ 运行期只剩一条「init 物理页 > 本段 size」（`E_BUS-09`）。
     pub fn validate(&self) -> Result<(), PlatformError> {
         // V-1 — the format version this build speaks.
         //
@@ -734,30 +693,6 @@ impl PlatformDescription {
                         ),
                     ));
                 }
-            }
-        }
-
-        // V-7 — the **declared** size against the description's budget.
-        //
-        // ⚠️ `>` and not `>=`: a region whose size is **exactly** the
-        // budget is allowed (the built-in `qemu-virt` description declares
-        // a 128 MiB RAM against a 128 MiB budget) — the same wording as
-        // M-14's runtime guard.
-        for region in &self.regions {
-            let Some(size) = region.declared_size() else {
-                continue;
-            };
-            if size > self.region_budget_bytes {
-                return Err(PlatformError::new(
-                    PLATFORM_FAMILY,
-                    E_PLT_07_OVER_BUDGET,
-                    format!(
-                        "区域 {:#x} 声明的大小 {:#x} 超过了每区域预算 {:#x}",
-                        region.base().unwrap_or(0),
-                        size,
-                        self.region_budget_bytes
-                    ),
-                ));
             }
         }
 
@@ -965,36 +900,10 @@ impl PlatformDescription {
             seen_sources.push((irq_line, id.as_str()));
         }
 
-        // V-16 — the **runtime** ceiling's legal value domain
-        // (v0.31 · D-138 · frozen spec STAGE-16 §2.3).
-        //
-        // ⚠️ **Appended after V-15** ⇒ the report order of V-1 ~ V-15 is
-        // unchanged, byte for byte.
-        //
-        // ⚠️ **Why zero is illegal**: a runtime ceiling of **zero** would
-        // make **every** region exceed it ⇒ the board could not be used
-        // at all ⇒ it is rejected **here** (at declaration time) rather
-        // than at the first write.
-        //
-        // ⚠️ The rule is judged on the **declared** value only: `None`
-        // means "the same as the declaration-time budget" (and that one
-        // is judged by V-7) ⇒ no number is invented here.
-        if let Some(max_region_bytes) = self.max_region_bytes {
-            if max_region_bytes == 0 {
-                return Err(PlatformError::new(
-                    PLATFORM_FAMILY,
-                    E_PLT_12_PARAMETER_OUT_OF_RANGE,
-                    format!(
-                        "运行期每区域的物理占用上界 {max_region_bytes} 为 0（必须 ≥ 1，否则每一段都超限）"
-                    ),
-                ));
-            }
-        }
-
         // V-17 — a device must have an **identity**
         // (v0.33 · D-142 · frozen spec STAGE-18 §2.1).
         //
-        // ⚠️ **Appended after V-16** ⇒ the report order of V-1 ~ V-16 is
+        // ⚠️ **Appended after V-15** ⇒ the report order of V-1 ~ V-15 is
         // unchanged, byte for byte ⇒ in particular **V-9 still comes
         // first** ⇒ **two** devices with an empty `id` are still rejected
         // by V-9 / `E_PLT-08` ⇒ V-17 only ever fires for **one** of them.
@@ -1396,8 +1305,6 @@ mod tests {
             id: "qemu-virt".to_string(),
             name: "QEMU virt".to_string(),
             priority: 20,
-            region_budget_bytes: 134_217_728,
-            max_region_bytes: None,
             regions: vec![
                 RegionSpec::Ram {
                     base: Some(0),
@@ -1525,10 +1432,8 @@ mod tests {
     /// ⚠️ **v0.76（STAGE-52 · B3 决议）**：`auto_selectable` **不在其中**
     /// （字段已废弃 · 线上不再有该键 ⇒ ⇒ 老描述带键靠 serde 忽略未知键兜底）。
     ///
-    /// ⚠️ **v0.31**: `max_region_bytes` **is** one of them too ⇒ it is
-    /// **always** written (the value may be `null`) ⇒ the wire shape is
-    /// **unique** ⇒ the contract layer and the front-end mirror can be
-    /// compared field by field.
+    /// ⚠️ **v0.77（STAGE-53）**：`region_budget_bytes` / `max_region_bytes`
+    /// **两个键已删** ⇒ 顶层只剩五个必填键。
     #[test]
     fn a2_the_top_level_key_set_is_pinned() {
         let json = serde_json::to_value(sample()).expect("json");
@@ -1536,14 +1441,12 @@ mod tests {
             keys(&json),
             vec![
                 "id",
-                "max_region_bytes",
                 "name",
                 "priority",
-                "region_budget_bytes",
                 "regions",
                 "schema_version",
             ],
-            "平台描述的顶层键集必须精确固定（七个）"
+            "平台描述的顶层键集必须精确固定（五个）"
         );
 
         // With a note attached, the optional key **appears** — and still
@@ -1556,10 +1459,8 @@ mod tests {
             vec![
                 "description",
                 "id",
-                "max_region_bytes",
                 "name",
                 "priority",
-                "region_budget_bytes",
                 "regions",
                 "schema_version",
             ],
@@ -1581,8 +1482,6 @@ mod tests {
             "id": "x",
             "name": "x",
             "priority": 1,
-
-            "region_budget_bytes": 4096,
             "regions": [ { "kind": "ram", "base": 0, "size": 1024 } ]
         }"#;
         let desc: PlatformDescription = serde_json::from_str(raw).expect("必须能解析");
@@ -1747,38 +1646,6 @@ mod tests {
         assert_eq!(err.family, PLATFORM_FAMILY);
         assert_eq!(err.scenario, E_PLT_06_OVERLAP);
     }
-    /// **A-3 / V-7** — a RAM region whose **declared** size exceeds the
-    /// description's budget is rejected with `E_PLT-07`.
-    ///
-    /// ⚠️ **Not** M-14's `E_BUS-09`: that one judges the **physical
-    /// occupancy** at runtime, this one judges the **declaration**.
-    #[test]
-    fn v7_a_region_over_the_declared_budget_is_rejected() {
-        let mut desc = sample();
-        desc.region_budget_bytes = 1024;
-        desc.regions = vec![RegionSpec::Ram {
-            base: Some(0x1000),
-            size: 2048,
-        }];
-        let err = desc.validate().expect_err("超预算的区域必须被拒");
-        assert_eq!(err.family, PLATFORM_FAMILY);
-        assert_eq!(err.scenario, E_PLT_07_OVER_BUDGET);
-    }
-    /// **A-3 / V-7** — a region whose size is **exactly** the budget is
-    /// allowed (`>` and not `>=`).
-    ///
-    /// ⚠️ The built-in `qemu-virt` description declares a 128 MiB RAM
-    /// against a 128 MiB budget ⇒ `>=` would reject a valid platform.
-    #[test]
-    fn v7_a_region_exactly_at_the_budget_is_allowed() {
-        let mut desc = sample();
-        desc.region_budget_bytes = 134_217_728;
-        desc.regions = vec![RegionSpec::Ram {
-            base: Some(0x8000_0000),
-            size: 134_217_728,
-        }];
-        assert!(desc.validate().is_ok(), "恰好等于预算的区域必须被接受");
-    }
     /// **A-3 / V-8** — an unknown device kind fails during
     /// **deserialization**, not during validation.
     ///
@@ -1791,7 +1658,6 @@ mod tests {
             "id": "x",
             "name": "x",
             "priority": 1,
-            "region_budget_bytes": 1024,
             "regions": [ { "kind": "peripheral", "base": 0, "device": { "device": "nvme", "id": "X" } } ]
         }"#;
         let err =
@@ -1811,7 +1677,6 @@ mod tests {
             "id": "x",
             "name": "x",
             "priority": 1,
-            "region_budget_bytes": 1024,
             "regions": [ { "kind": "peripheral", "base": 0, "device": { "device": "uart16550", "id": "U0" } } ]
         }"#;
         assert!(
@@ -1871,37 +1736,8 @@ mod tests {
         assert_eq!(back.id, original.id);
         assert_eq!(back.name, original.name);
         assert_eq!(back.priority, original.priority);
-        assert_eq!(back.region_budget_bytes, original.region_budget_bytes);
         assert_eq!(back.regions, original.regions);
         assert_eq!(back.description, original.description);
-    }
-    /// **A-4** — the maximum budget round-trips; **one more** is rejected
-    /// in the **serde** layer.
-    ///
-    /// ⚠️ The budget is a `u32` (not a `u64`): it is a **per-region**
-    /// byte budget and the address space is 4 GiB ⇒ a budget beyond
-    /// `u32::MAX` is meaningless. Out-of-range values therefore fail
-    /// during deserialization — they never reach `validate()`.
-    #[test]
-    fn the_maximum_budget_round_trips_and_one_more_is_rejected_by_serde() {
-        let mut desc = sample();
-        desc.region_budget_bytes = u32::MAX;
-        let text = serde_json::to_string(&desc).expect("serialize");
-        let back: PlatformDescription = serde_json::from_str(&text).expect("deserialize");
-        assert_eq!(back.region_budget_bytes, 4_294_967_295);
-
-        let raw = r#"{
-            "schema_version": 1,
-            "id": "x",
-            "name": "x",
-            "priority": 1,
-            "region_budget_bytes": 4294967296,
-            "regions": [ { "kind": "ram", "base": 0, "size": 1024 } ]
-        }"#;
-        assert!(
-            serde_json::from_str::<PlatformDescription>(raw).is_err(),
-            "超过 u32::MAX 的预算必须在 serde 阶段被拒"
-        );
     }
     // -----------------------------------------------------------------
     // A-5 — the internal tag keys
@@ -2054,8 +1890,6 @@ mod tests {
             "id": "qemu-virt",
             "name": "QEMU virt",
             "priority": 20,
-
-            "region_budget_bytes": 134217728,
             "regions": [
                 { "kind": "ram", "base": 0, "size": 1048576 },
                 { "kind": "rom", "base": 4096, "size": 65536 },
@@ -2068,7 +1902,6 @@ mod tests {
         assert_eq!(desc.id, "qemu-virt");
         assert_eq!(desc.name, "QEMU virt");
         assert_eq!(desc.priority, 20);
-        assert_eq!(desc.region_budget_bytes, 134_217_728);
         assert_eq!(desc.description, None);
         assert_eq!(desc.regions.len(), 3);
         assert_eq!(
@@ -2130,7 +1963,7 @@ mod tests {
             (E_PLT_04_ZERO_SIZE, "E_PLT-04"),
             (E_PLT_05_OVERFLOW, "E_PLT-05"),
             (E_PLT_06_OVERLAP, "E_PLT-06"),
-            (E_PLT_07_OVER_BUDGET, "E_PLT-07"),
+            (crate::error::E_PLT_07_OVER_BUDGET, "E_PLT-07"),
             (E_PLT_08_DUPLICATE_DEVICE_ID, "E_PLT-08"),
             (E_PLT_09_UNKNOWN_PLATFORM, "E_PLT-09"),
             (E_PLT_10_PLATFORM_FILE_UNREADABLE, "E_PLT-10"),
@@ -2173,8 +2006,6 @@ mod tests {
             id: "board-under-test".to_string(),
             name: "Board under test".to_string(),
             priority: 1,
-            region_budget_bytes: 134_217_728,
-            max_region_bytes: None,
             regions: devices
                 .into_iter()
                 .enumerate()
@@ -2529,7 +2360,6 @@ mod tests {
             "id": "default",
             "name": "Default",
             "priority": 10,
-            "region_budget_bytes": 16777216,
             "regions": [
                 { "kind": "ram", "base": 0, "size": 1048576 },
                 { "kind": "peripheral", "base": 1073741824,
@@ -2547,7 +2377,6 @@ mod tests {
             "id": "minimal",
             "name": "Minimal (zero-change demo platform)",
             "priority": 30,
-            "region_budget_bytes": 16777216,
             "regions": [
                 { "kind": "ram", "base": 0, "size": 2097152 },
                 { "kind": "ram", "base": 268435456, "size": 16777216 }
@@ -2563,7 +2392,6 @@ mod tests {
             "id": "qemu-virt",
             "name": "QEMU virt",
             "priority": 20,
-            "region_budget_bytes": 134217728,
             "regions": [
                 { "kind": "ram", "base": 0, "size": 1048576 },
                 { "kind": "peripheral", "base": 33554432,
@@ -2692,7 +2520,7 @@ mod tests {
     // no second copy of a DTO).
     // -------------------------------------------------------------
     use crate::error::{E_PLT_13_REVISION_CONFLICT, E_PLT_14_REGION_NOT_FOUND};
-    use crate::protocol::{CommandPayload, EventPayload, MemoryMapOp};
+    use crate::protocol::{CommandPayload, MemoryMapOp};
     /// **STAGE-16 A-1** — the **contract envelope**'s schema version is
     /// pinned to a **literal** ⇒ the constant cannot vouch for itself.
     ///
@@ -2713,7 +2541,7 @@ mod tests {
     /// 命令 / 事件各加两个 ⇒ ⇒ **线上形状变了**）⇒ ⇒ 同理。
     #[test]
     fn s16_a1_the_contract_schema_version_is_thirteen() {
-        assert_eq!(crate::SCHEMA_VERSION, 15);
+        assert_eq!(crate::SCHEMA_VERSION, 16);
     }
     /// **STAGE-16 A-2** — the **description format**'s version is still
     /// `1`.
@@ -2764,8 +2592,6 @@ mod tests {
                 "id": "default",
                 "name": "Default",
                 "priority": 10,
-
-                "region_budget_bytes": 16777216,
                 "regions": [
                     { "kind": "ram", "base": 0, "size": 1048576 },
                     { "kind": "peripheral", "base": 1073741824,
@@ -2778,8 +2604,6 @@ mod tests {
                 "id": "minimal",
                 "name": "Minimal (zero-change demo platform)",
                 "priority": 30,
-
-                "region_budget_bytes": 16777216,
                 "regions": [
                     { "kind": "ram", "base": 0, "size": 2097152 },
                     { "kind": "ram", "base": 268435456, "size": 16777216 }
@@ -2790,8 +2614,6 @@ mod tests {
                 "id": "qemu-virt",
                 "name": "QEMU virt",
                 "priority": 20,
-
-                "region_budget_bytes": 134217728,
                 "regions": [
                     { "kind": "ram", "base": 0, "size": 1048576 },
                     { "kind": "peripheral", "base": 33554432,
@@ -2808,10 +2630,6 @@ mod tests {
         ];
         for raw in builtins {
             let desc: PlatformDescription = serde_json::from_str(raw).expect("内置描述必须能解析");
-            assert_eq!(
-                desc.max_region_bytes, None,
-                "内置描述不含 max_region_bytes ⇒ 缺省必须是 None"
-            );
             assert!(desc.validate().is_ok(), "内置描述 {} 必须仍然合法", desc.id);
         }
     }
@@ -2833,83 +2651,10 @@ mod tests {
             "id": "x",
             "name": "x",
             "priority": 1,
-            "region_budget_bytes": 4096,
             "regions": [ { "kind": "ram", "base": 0, "size": 1024 } ]
         }"#;
         let desc: PlatformDescription = serde_json::from_str(raw).expect("必须能解析");
-        assert_eq!(
-            desc.max_region_bytes, None,
-            "旧描述缺这个键 ⇒ 必须是 None（= 等于声明期那个预算）"
-        );
         assert!(desc.validate().is_ok(), "旧描述必须仍然合法");
-    }
-    /// **STAGE-16 A-5** — `max_region_bytes = Some(0)` is **rejected**
-    /// with `E_PLT-12`.
-    ///
-    /// ⚠️ A runtime ceiling of **zero** would make **every** region
-    /// exceed it ⇒ the board would be unusable ⇒ it is rejected at
-    /// declaration time.
-    #[test]
-    fn s16_a5_a_zero_runtime_ceiling_is_rejected() {
-        let mut desc = sample();
-        desc.max_region_bytes = Some(0);
-        let err = desc.validate().expect_err("运行期上界为 0 必须被拒");
-        assert_eq!(err.family, PLATFORM_FAMILY);
-        assert_eq!(
-            err.scenario, E_PLT_12_PARAMETER_OUT_OF_RANGE,
-            "V-16 的场景码必须是 E_PLT-12（实际 {err}）"
-        );
-    }
-    /// **STAGE-16 A-6** — `max_region_bytes = Some(1)` is **legal**: the
-    /// lower bound itself is a legal value.
-    ///
-    /// ⚠️ The judgement is on `family` + `scenario`, **not** on the
-    /// message text.
-    #[test]
-    fn s16_a6_the_lowest_legal_runtime_ceiling_is_accepted() {
-        let mut desc = sample();
-        desc.max_region_bytes = Some(1);
-        assert!(desc.validate().is_ok(), "运行期上界的下界 1 本身必须合法");
-    }
-    /// **STAGE-16 A-7** — V-16 is reported **after** the old rules ⇒ the
-    /// existing "V-2 first" / "V-9 first" order assertions still hold.
-    ///
-    /// ⚠️ **Why not "V-15 before V-16"?** V-15 and V-16 **share** the
-    /// scenario code `E_PLT-12` ⇒ their relative order **cannot** be
-    /// told apart by the code (and the judgement never looks at the
-    /// message text) ⇒ the order is pinned through the rules with
-    /// **distinct** codes (V-2 / V-9), which are earlier than V-15 and
-    /// therefore earlier than V-16 as well.
-    #[test]
-    fn s16_a7_the_old_rules_are_reported_before_v16() {
-        // V-2 (empty id) + V-16 (zero runtime ceiling) ⇒ V-2 first.
-        let mut desc = sample();
-        desc.id = String::new();
-        desc.max_region_bytes = Some(0);
-        let err = desc.validate().expect_err("空 id 必须被拒");
-        assert_eq!(
-            err.scenario, E_PLT_02_EMPTY_ID,
-            "同时违反 V-2 与 V-16 时必须先报 V-2（实际 {err}）"
-        );
-
-        // V-9 (two devices share an id) + V-16 ⇒ V-9 first.
-        let mut desc = board_with(vec![
-            DeviceSpec::Uart16550 {
-                id: "DUP".to_string(),
-                irq_line: 0,
-                baud_rate: 115_200,
-            },
-            DeviceSpec::Gpio {
-                irq_line: 11,
-                id: "DUP".to_string(),
-            },
-        ]);
-        desc.max_region_bytes = Some(0);
-        let err = desc.validate().expect_err("重复的器件 id 必须被拒");
-        assert_eq!(
-            err.scenario, E_PLT_08_DUPLICATE_DEVICE_ID,
-            "同时违反 V-9 与 V-16 时必须先报 V-9（实际 {err}）"
-        );
     }
     /// **STAGE-16 A-8** — `E_PLT_13` / `E_PLT_14` are **new** scenario
     /// codes ⇒ each means exactly one thing ⇒ none of them reuses
@@ -2951,7 +2696,7 @@ mod tests {
     /// **internally tagged** ⇒ **the two layers' rules differ**.
     ///
     /// ⚠️ **External tagging** ⇒ the wire key is the **Rust variant
-    /// name** (`UpsertRegion` / `RemoveRegion` / `SetBudget`) ⇒ there is
+    /// name** (`UpsertRegion` / `RemoveRegion`) ⇒ there is
     /// **no** `op` key (that would be the internal tagging).
     ///
     /// ⚠️ The nested `RegionSpec` is **internally tagged** ⇒ its wire
@@ -2974,15 +2719,6 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&remove).expect("json"),
             r#"{"RemoveRegion":{"base":0}}"#
-        );
-
-        let budget = MemoryMapOp::SetBudget {
-            region_budget_bytes: 16_777_216,
-            max_region_bytes: None,
-        };
-        assert_eq!(
-            serde_json::to_string(&budget).expect("json"),
-            r#"{"SetBudget":{"region_budget_bytes":16777216,"max_region_bytes":null}}"#
         );
 
         // The two layers' tag rules differ: the outer key is the variant
@@ -3325,24 +3061,6 @@ mod tests {
     // STAGE-12 / STAGE-15 / STAGE-16 / STAGE-18 cases above carry ⇒
     // every label here says "STAGE-19" and every test name says "s19".
     // -------------------------------------------------------------
-    /// 一块「有 UART 与 PLIC」的板 —— 两条新规则都拿它当底板。
-    ///
-    /// ⚠️ PLIC 的 `sources = 16` ⇒ 合法源号是 `0 ..= 15` ⇒ 越界样本
-    /// 写 `16` 与 `99` 都能越界。
-    fn board_with_uart_and_plic() -> PlatformDescription {
-        board_with(vec![
-            DeviceSpec::Uart16550 {
-                id: "UART0".to_string(),
-                irq_line: 1,
-                baud_rate: 115_200,
-            },
-            DeviceSpec::Plic {
-                id: "PLIC".to_string(),
-                sources: 16,
-                contexts: 1,
-            },
-        ])
-    }
     /// **STAGE-19 A-4** — **two** devices with an empty `id` are still
     /// rejected by **V-9 / `E_PLT-08`** ⇒ the new rules did not take
     /// that case away from V-9.
@@ -3471,7 +3189,6 @@ mod tests {
             "id": "dup-irq",
             "name": "Dup irq",
             "priority": 1,
-            "region_budget_bytes": 4096,
             "regions": [
                 { "kind": "ram", "base": 0, "size": 4096 },
                 { "kind": "peripheral", "base": 268435456,
@@ -3550,7 +3267,6 @@ mod tests {
             "id": "bad-gpio-irq",
             "name": "Bad gpio irq",
             "priority": 1,
-            "region_budget_bytes": 4096,
             "regions": [
                 { "kind": "ram", "base": 0, "size": 4096 },
                 { "kind": "peripheral", "base": 1073741824,

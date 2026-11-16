@@ -147,12 +147,6 @@ const DEFAULT_REGION_COUNT: usize = 3;
 /// ⚠️ **对应关系**：`default` 描述里那段高段 RAM 的 `size`。
 const DEFAULT_HIGH_RAM_BYTES: u32 = 4 * 1024 * 1024;
 
-/// `default` 档的每区域护栏预算（16 MiB）。
-///
-/// ⚠️ **自抄副本**（同上）⇒ **不从描述取**。
-/// ⚠️ **对应关系**：`default` 描述的 `region_budget_bytes`。
-const DEFAULT_REGION_BUDGET_BYTES: u32 = 16 * 1024 * 1024;
-
 /// 手工构造的那一页的**基址**（4096 对齐）。
 const PAGE_BASE: u32 = 0x1000;
 
@@ -425,39 +419,3 @@ fn the_default_profile_keeps_its_own_region_layout() {
     );
 }
 
-#[test]
-fn the_qemuvirt_profile_raises_the_per_region_guardrail_budget() {
-    // ⚠️ **护栏预算是宿主策略**（裁决 B / G）：QemuVirt 档必须把每区域的
-    // 上限抬到 128 MiB，否则「声明一段 128 MiB」会被 16 MiB 的默认值挡下
-    // （`E_BUS-09`）⇒ 换档会**失败** ⇒ 静默退回默认档。
-    let host = KernelHost::new_with_profile(MemoryProfile::QemuVirt);
-    // ⚠️ **期望值从 `qemu-virt` 描述查**（规格 §6.3 第 7 条）：护栏预算是
-    // 描述里的 `region_budget_bytes` ⇒ 宿主**不按 id 硬编码**预算。
-    let described_budget = qemu_virt_description().region_budget_bytes;
-    assert_eq!(
-        host.bus().max_region_bytes(),
-        u64::from(described_budget),
-        "QemuVirt 档的每区域护栏预算必须等于**描述**里的 region_budget_bytes"
-    );
-    // ⚠️ **独立字面量交叉核对**（规格 §6.3 第 16 条的口径）：预算必须是
-    // 128 MiB（= 那段高段 RAM 的大小）。
-    assert_eq!(
-        described_budget, QEMU_VIRT_RAM_BYTES,
-        "qemu-virt 描述的 region_budget_bytes 必须还是 128 MiB（独立字面量交叉核对）"
-    );
-
-    // ⚠️ **Default 档的护栏没被削弱**（仍是默认的 16 MiB）。
-    let default_host = KernelHost::new();
-    // ⚠️ **期望值从 `default` 描述查**（规格 §6.3 第 7 条）。
-    let described_default_budget = default_description().region_budget_bytes;
-    assert_eq!(
-        default_host.bus().max_region_bytes(),
-        u64::from(described_default_budget),
-        "Default 档的每区域护栏必须等于**描述**里的 region_budget_bytes"
-    );
-    // ⚠️ **独立字面量交叉核对**（规格 §6.3 第 16 条的口径）。
-    assert_eq!(
-        described_default_budget, DEFAULT_REGION_BUDGET_BYTES,
-        "default 描述的 region_budget_bytes 必须还是 16 MiB（独立字面量交叉核对）"
-    );
-}

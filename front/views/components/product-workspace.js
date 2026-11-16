@@ -82,7 +82,6 @@ export const BUILTIN_TEMPLATES = Object.freeze([
             name: "最小系统",
             priority: 100,
             auto_selectable: false,
-            region_budget_bytes: 0x01000000,
             regions: Object.freeze([
                 Object.freeze({ kind: "ram", base: 0x80000000, size: 0x00100000 }),
                 Object.freeze({
@@ -107,7 +106,6 @@ export const BUILTIN_TEMPLATES = Object.freeze([
             name: "带中断的 SoC",
             priority: 100,
             auto_selectable: false,
-            region_budget_bytes: 0x01000000,
             regions: Object.freeze([
                 Object.freeze({ kind: "rom", base: 0x00010000, size: 0x00080000 }),
                 Object.freeze({ kind: "ram", base: 0x80000000, size: 0x00200000 }),
@@ -323,7 +321,6 @@ export function createBoardDraft(name, kinds, id) {
         name: boardName,
         priority: "100",
         auto_selectable: false,
-        region_budget_bytes: "0x01000000",
         regions,
     };
 }
@@ -788,7 +785,7 @@ export function renderProductWorkspace(state) {
             ${renderSidebar(state, nodes, locked, dirty)}
             <main class="pw-window">
                 ${error
-        ? `<div class="pw-error" data-memory-map-error data-error-code="${escapeHtml(error.code)}" data-error-family="${escapeHtml(parsed?.family ?? "")}" data-error-scenario="${escapeHtml(parsed?.scenario ?? "")}"><b>${escapeHtml(error.code)}</b><span>${escapeHtml(error.message)}</span></div>`
+        ? `<div class="pw-error" data-memory-map-error data-board-error-banner data-error-code="${escapeHtml(error.code)}" data-error-family="${escapeHtml(parsed?.family ?? "")}" data-error-scenario="${escapeHtml(parsed?.scenario ?? "")}"><b>${escapeHtml(error.code)}</b><span>${escapeHtml(error.message)}</span></div>`
         : ""}
                 ${notice ? `<p class="pw-tip" data-product-notice>${escapeHtml(notice)}</p>` : ""}
                 ${windowHtml}

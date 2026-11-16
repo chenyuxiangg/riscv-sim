@@ -6,8 +6,9 @@
 //   C-2 编辑器能**增 / 删外设窗口**并选**器件类型**（4 种）
 //   C-3 点提交 ⇒ **真的发出** `SetMemoryMap` 命令，载荷形状与契约**逐字同形**
 //   C-4 **内存映射表显示真数据**（不再是 mock）
-//   C-5 校验失败（`E_PLT-07`）⇒ **界面上说出来**（不是静默、不是只进日志）
-//   C-6 `region_budget_bytes` **可改**且 V-7 约束**显式呈现**
+//   C-5 校验失败 ⇒ **界面上说出来**（不是静默、不是只进日志）
+//   C-6 ~~`region_budget_bytes` 可改~~ **已退役**（v0.77 · STAGE-53：
+//        预算概念整体退役 ⇒ 段 size 就是容量）
 //   C-7 既有前端断言**一条未改**（由 `tools/check-front.sh` 全绿保证）
 //
 // ⚠️ **C-8（端到端）不在本文件**：它要真 Chrome + 真 WASM 内核 ⇒ 归
@@ -63,7 +64,6 @@ const USER_BOARD = {
     name: "用户板",
     priority: 100,
     auto_selectable: false,
-    region_budget_bytes: 8388608,
     regions: [
         { kind: "ram", base: 2147483648, size: 8388608 },
         {
@@ -281,10 +281,7 @@ describe("板级内存图 · 描述形状（契约逐字同形）", () => {
         // 草稿与线上描述**都不再带**这个键。
         assert.deepEqual(
             Object.keys(description).sort(),
-            [
-                "id", "name", "priority",
-                "region_budget_bytes", "regions", "schema_version",
-            ],
+            ["id", "name", "priority", "regions", "schema_version"],
         );
     });
 
@@ -338,8 +335,6 @@ describe("整合批 · 真内核的八字段描述 vs 前端的七字段草稿",
         name: "自定义板",
         priority: 100,
         auto_selectable: false,
-        region_budget_bytes: 8388608,
-        max_region_bytes: null,
         regions: [{ kind: "ram", base: 2147483648, size: 8388608 }],
     };
 
@@ -380,30 +375,6 @@ describe("整合批 · 真内核的八字段描述 vs 前端的七字段草稿",
         );
     });
 
-    test("基底多一个 `max_region_bytes: null` ⇒ **不产生**多余的 `SetBudget`", () => {
-        const draftDescription = mm.draftToDescription(mm.defaultDraft());
-        const ops = mm.diffMemoryMapOps(KERNEL_SHAPED, draftDescription);
-        assert.deepEqual(
-            ops.filter((op) => "SetBudget" in op),
-            [],
-            "预算没改 ⇒ 不该有 `SetBudget`（否则每次提交都白涨一次修订号）",
-        );
-    });
-
-    test("基底带**真值**的 `max_region_bytes` ⇒ 必须产生 `SetBudget`（不许静默忽略）", () => {
-        // ⚠️ 这一条是上面那条的**反面**：让「缺省 ≡ null」与「真值」不等价
-        // ⇒ 运行期上界的变化**看得见**（而不是被当成没变）。
-        const base = { ...KERNEL_SHAPED, max_region_bytes: 4096 };
-        const draftDescription = mm.draftToDescription(mm.defaultDraft());
-        const ops = mm.diffMemoryMapOps(base, draftDescription);
-        const budgets = ops.filter((op) => "SetBudget" in op);
-        assert.equal(budgets.length, 1, "运行期上界变了 ⇒ 必须有一条 `SetBudget`");
-        assert.deepEqual(
-            budgets[0].SetBudget,
-            { region_budget_bytes: 8388608, max_region_bytes: null },
-            "`SetBudget` 两个字段都要带上（验收 C-5）",
-        );
-    });
 });
 
 // ---------------------------------------------------------------------------
@@ -475,7 +446,6 @@ function customDraft(id, name) {
         name,
         priority: "100",
         auto_selectable: false,
-        region_budget_bytes: "8388608",
         regions: [{ kind: "ram", base: "2147483648", size: "8388608" }],
     };
 }
@@ -616,7 +586,6 @@ describe("STAGE-49 · 角色声明（roles）的草稿往返", () => {
             name: "角色板",
             priority: 100,
             auto_selectable: false,
-            region_budget_bytes: 1048576,
             regions: [{ kind: "ram", base: 0, size: 4096 }],
             roles: { console: "UART1", time_source: "CLINT0" },
         };
@@ -641,7 +610,6 @@ describe("STAGE-49 · 角色声明（roles）的草稿往返", () => {
             name: "无角色板",
             priority: 100,
             auto_selectable: false,
-            region_budget_bytes: 1048576,
             regions: [{ kind: "ram", base: 0, size: 4096 }],
         };
         const draft = mm.draftFromDescription(description);
@@ -763,7 +731,6 @@ describe("STAGE-49 · v0.73 描述格式升版（N 组）", () => {
             name: "自动基址板",
             priority: 100,
             auto_selectable: false,
-            region_budget_bytes: 1048576,
             regions: [{ kind: "ram", size: 4096 }],
         };
         const draft = mm.draftFromDescription(description);

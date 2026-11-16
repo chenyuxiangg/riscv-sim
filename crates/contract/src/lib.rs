@@ -332,7 +332,10 @@ pub mod snapshot;
 /// - stepOver 的返回地址停点改由 M-17 的临时状态判定，**不再注入断点表**；
 /// - 因此停止原因**多一个线上标签** ⇒ ⇒ `SCHEMA_VERSION` 14 → 15；
 /// - ⚠️ `SIM_STATE_SCHEMA_VERSION` stays `2`；命令 / 事件形状不变。
-pub const SCHEMA_VERSION: u32 = 15;
+///
+/// ⚠️ **v0.77（STAGE-53）**：`15 → 16` ⇒ `MemoryMapOp` **少了一个变体**
+/// （`SetBudget` 退役）⇒ ⇒ 线上载荷形状变了 ⇒ ⇒ 信封版本**必须动**。
+pub const SCHEMA_VERSION: u32 = 16;
 
 /// 转储长度上限（字节）—— v0.57 批（STAGE-42 §2.5 · 裁决 D）。
 ///

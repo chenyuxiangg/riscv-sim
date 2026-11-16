@@ -33,8 +33,6 @@ fn ram_only_description(id: &str) -> PlatformDescription {
         id: id.to_string(),
         name: id.to_string(),
         priority: 100,
-        region_budget_bytes: 1024 * 1024,
-        max_region_bytes: None,
         regions: vec![RegionSpec::Ram {
             base: Some(0),
             size: 1024 * 1024,

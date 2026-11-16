@@ -53,30 +53,6 @@ use riscv_sim_contract::session::{M14MapDto, MemPageDto, RegionDto};
 /// 4 GiB — covers the entire RV32 physical address space.
 pub const BUS_SIZE: u64 = 0x1_0000_0000;
 
-/// Default upper bound on a single region's **budget**, in bytes (D-10).
-///
-/// A malformed firmware image can declare a segment of ~4 GiB; without a
-/// cap, the bus would happily hand out that much and OOM the host (in
-/// the browser: OOM the tab). 16 MiB matches the order of magnitude of
-/// M-06's `ParseLimits::max_region_bytes` default — M-14 does not depend
-/// on `m06_elf`, so the constant is defined locally (the two sides are
-/// independent; see `docs/reviews/REVIEWS.md` D-10).
-///
-/// ⚠ **What the cap measures changed in v0.26 (STAGE-11 裁决 B)** — the
-/// constant's **name and value did not**. It used to bound a region's
-/// *declared* size; it now bounds the region's **budget**, and the
-/// measured quantity depends on the region kind:
-///
-/// | kind | holds memory? | measured |
-/// | --- | --- | --- |
-/// | RAM | lazily (only written pages exist) | **physical occupancy** (materialized pages × 4096) |
-/// | ROM | yes (the content is part of the image) | **declared size** (== physical occupancy) |
-/// | peripheral window | no (it claims an *address interval*) | **declared size** |
-///
-/// ⇒ **no guard was lost**: a region that really wants GiB-scale memory
-/// is still refused (E_BUS-09), while a RAM region may now *declare*
-/// 128 MiB and cost nothing until somebody writes to it.
-pub const DEFAULT_MAX_REGION_BYTES: u64 = 16 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Session snapshot (STAGE-3 §3.2) — memory pages + memory-map topology.
@@ -612,8 +588,7 @@ impl RamBackend {
                 BUS_FAMILY,
                 E_BUS_09_TOO_LARGE,
                 format!(
-                    "RAM region would physically occupy {physical} allocated bytes \
-                     (materialized pages), over the per-region cap of {cap} bytes"
+                    "RAM 段会物化 {physical} 字节，超过这一段自己的 size {cap} 字节"
                 ),
             ));
         }
@@ -751,15 +726,6 @@ pub struct Bus {
     hooks: Vec<BusHook>,
     last_ts_ps: u64,
     stats: BusStats,
-    /// Upper bound on a single region's budget, in bytes (D-10).
-    ///
-    /// ⚠ **What is measured depends on the region kind** (STAGE-11
-    /// 裁决 B): **physical occupancy** for RAM (its materialized
-    /// pages), **declared size** for ROM and for peripheral windows.
-    /// Checked **before** any backing store is allocated, so a
-    /// malformed firmware segment can never make the host allocate
-    /// GiB-scale memory. See [`DEFAULT_MAX_REGION_BYTES`].
-    max_region_bytes: u64,
     /// Next bus-side peripheral token handed out by
     /// [`Bus::map_peripheral_instance`].
     next_periph_id: u32,
@@ -772,7 +738,6 @@ impl Default for Bus {
             hooks: Vec::new(),
             last_ts_ps: 0,
             stats: BusStats::default(),
-            max_region_bytes: DEFAULT_MAX_REGION_BYTES,
             next_periph_id: 0,
         }
     }
@@ -784,7 +749,6 @@ impl std::fmt::Debug for Bus {
             .field("regions.len", &self.regions.len())
             .field("stats", &self.stats)
             .field("hook.count", &self.hooks.len())
-            .field("max_region_bytes", &self.max_region_bytes)
             .finish()
     }
 }
@@ -795,39 +759,16 @@ impl Bus {
         Self::default()
     }
 
-    /// Build an empty bus with a custom per-region budget cap (D-10).
+    /// **一段的物理容量**，按 4 KiB 页**向上取整**（v0.77 · STAGE-53）.
     ///
-    /// `max_region_bytes` is a plain upper bound: `0` means *no region
-    /// fits at all*, `u64::MAX` means *effectively unlimited*. The
-    /// default ([`DEFAULT_MAX_REGION_BYTES`]) is the safe one — use
-    /// this constructor only when the host has its own budget policy.
+    /// ⚠️ 内存是**按页**物化的 ⇒ 一段 4 字节的 RAM 也要占**一整页** ⇒
+    /// 上限若直接用 `size`（未对齐）⇒ 「一页 4096 > 4」⇒ 连最正常的小段
+    /// 都会被拒 ⇒ ⇒ 上限必须与**物化粒度**同单位（页）。
     ///
-    /// ⚠ **What the cap measures** (STAGE-11 裁决 B): **physical
-    /// occupancy** for RAM (its materialized pages × 4096), **declared
-    /// size** for ROM and for peripheral windows. ⇒ the host's budget
-    /// policy really is the host's business: a host that declares a
-    /// 128 MiB RAM region simply raises the cap to 128 MiB.
-    pub fn with_max_region_bytes(max_region_bytes: u64) -> Self {
-        Self {
-            max_region_bytes,
-            ..Self::default()
-        }
-    }
-
-    /// Current per-region budget cap, in bytes (D-10).
-    ///
-    /// ⚠ See [`Bus::with_max_region_bytes`] for what the cap measures.
-    pub fn max_region_bytes(&self) -> u64 {
-        self.max_region_bytes
-    }
-
-    /// Adjust the per-region budget cap at runtime (D-10).
-    ///
-    /// The cap is enforced on the *next* mapping operation **and** on
-    /// the next write that would grow a region's physical occupancy;
-    /// regions that are already mapped are untouched.
-    pub fn set_max_region_bytes(&mut self, max_region_bytes: u64) {
-        self.max_region_bytes = max_region_bytes;
+    /// ⚠️ 这条**不**是「预算」：它就是**这一段自己的 size**取整到页 ⇒
+    /// 没有第二个真相源 ⇒ `init.len() > size` 仍由 `E_BUS-07` 单判。
+    fn region_capacity(size: u32) -> u64 {
+        u64::from(size).div_ceil(MEM_PAGE_BYTES as u64) * (MEM_PAGE_BYTES as u64)
     }
 
     /// Map a RAM region into the bus.
@@ -838,7 +779,8 @@ impl Bus {
     /// materializes the pages it covers (that is the only RAM path
     /// that costs anything up front).
     pub fn map_ram(&mut self, base: u32, size: u32, init: &[u8]) -> Result<(), PlatformError> {
-        let cap = self.max_region_bytes;
+        // ⚠️ **v0.77**：上限**就是这一段自己的声明大小**（按页取整 ⇒ 没有第二真相源）。
+        let cap = Self::region_capacity(size);
         self.map_region(Region {
             base,
             size,
@@ -853,13 +795,13 @@ impl Bus {
     /// of the firmware image (an *input*), so it is in memory by
     /// definition ⇒ the cap measures its **declared size**.
     pub fn map_rom(&mut self, base: u32, size: u32, init: &[u8]) -> Result<(), PlatformError> {
-        let cap = self.max_region_bytes;
+        // ⚠️ **v0.77**：ROM 的容量**就是** `size` ⇒ 不再有「超上限」这条判据。
         self.map_region(Region {
             base,
             size,
             kind: RegionType::Rom,
             target: RegionTarget::Rom(RomBackend {
-                bytes: Self::prepare_rom_bytes(base, size, init, cap)?,
+                bytes: Self::prepare_rom_bytes(base, size, init)?,
                 base_addr: base,
             }),
         })
@@ -882,7 +824,6 @@ impl Bus {
         size: u32,
         id: PeripheralId,
     ) -> Result<(), PlatformError> {
-        self.assert_window_within_cap(base, size)?;
         self.map_region(Region {
             base,
             size,
@@ -907,11 +848,6 @@ impl Bus {
     ///   [`Peripheral::size`] — otherwise the bus window and the
     ///   peripheral's register file disagree and accesses would land
     ///   outside the peripheral's own view. Mismatch → **E_BUS-08**.
-    /// - `size` must also respect the bus-wide cap
-    ///   ([`Bus::max_region_bytes`], D-10) → **E_BUS-09**.
-    ///   ⚠ A peripheral window holds **no memory** ⇒ the cap measures
-    ///   its **declared size** (it guards against "one device claims a
-    ///   GiB window"), exactly as it did before v0.26.
     /// - Overlap with an existing region → **E_BUS-03**.
     ///
     /// Every failure leaves the existing region set untouched.
@@ -946,7 +882,6 @@ impl Bus {
                 ),
             ));
         }
-        self.assert_window_within_cap(base, size)?;
         let id = PeripheralId(self.next_periph_id);
         self.next_periph_id = self.next_periph_id.wrapping_add(1);
         self.map_region(Region {
@@ -965,26 +900,6 @@ impl Bus {
         }
     }
 
-    /// D-10: the peripheral window must respect the bus-wide cap.
-    ///
-    /// ⚠ A peripheral window holds **no memory** ⇒ the measured
-    /// quantity is its **declared size** (STAGE-11 裁决 B, 规格订正):
-    /// the guard protects against "one device claims a GiB window".
-    fn assert_window_within_cap(&self, base: u32, size: u32) -> Result<(), PlatformError> {
-        if u64::from(size) > self.max_region_bytes {
-            return Err(PlatformError::new(
-                BUS_FAMILY,
-                E_BUS_09_TOO_LARGE,
-                format!(
-                    "peripheral window size {size} exceeds the per-region cap of {} bytes \
-                     (base=0x{base:08x})",
-                    self.max_region_bytes
-                ),
-            ));
-        }
-        Ok(())
-    }
-
     /// Build the **lazily allocated** backing store of a RAM region.
     ///
     /// ⚠ **D-10 / 裁决 B:** the cap is checked against the region's
@@ -997,22 +912,22 @@ impl Bus {
         base: u32,
         size: u32,
         init: &[u8],
-        max_region_bytes: u64,
+        _declared_capacity: u64,
     ) -> Result<RamBackend, PlatformError> {
         if size == 0 {
             return Err(PlatformError::new(BUS_FAMILY, 6, "region size must be > 0"));
         }
-        // D-10: reject an over-cap physical occupancy *before* allocating.
+        // ⚠️ v0.77：上限 = 本段 size **取整到页**（物化粒度）。
+        let capacity = Self::region_capacity(size);
         let pages = init.len().div_ceil(MEM_PAGE_BYTES);
         let physical = (pages as u64) * (MEM_PAGE_BYTES as u64);
-        if physical > max_region_bytes {
+        if physical > capacity {
             return Err(PlatformError::new(
                 BUS_FAMILY,
                 E_BUS_09_TOO_LARGE,
                 format!(
-                    "RAM region would physically occupy {physical} allocated bytes \
-                     (materialized pages), over the per-region cap of {max_region_bytes} bytes \
-                     (base=0x{base:08x})"
+                    "RAM 段 0x{base:08x} 的 init 会物化 {physical} 字节（页数 × 4096），\
+                     超过这一段自己的 size（{capacity} 字节，按页取整）"
                 ),
             ));
         }
@@ -1052,27 +967,12 @@ impl Bus {
     /// region's **declared size**, exactly as it did before v0.26. The
     /// size cap is checked *before* the allocation, so a malformed
     /// firmware segment can never make the host reserve GiB of memory.
-    /// `max_region_bytes` is the bus-wide cap
-    /// ([`Bus::max_region_bytes`]).
-    fn prepare_rom_bytes(
-        base: u32,
-        size: u32,
-        init: &[u8],
-        max_region_bytes: u64,
-    ) -> Result<Vec<u8>, PlatformError> {
+    /// ⚠️ **v0.77（STAGE-53）**：`size` 自己就是容量 ⇒ **本函数不再有**
+    /// 「超上限」这条判据（`size > size` 永远不成立）⇒ ⇒ 剩下的唯一硬约束
+    /// 是 `init.len() <= size`（`E_BUS-09`）。
+    fn prepare_rom_bytes(base: u32, size: u32, init: &[u8]) -> Result<Vec<u8>, PlatformError> {
         if size == 0 {
             return Err(PlatformError::new(BUS_FAMILY, 6, "region size must be > 0"));
-        }
-        // D-10: reject oversized regions *before* allocating.
-        if u64::from(size) > max_region_bytes {
-            return Err(PlatformError::new(
-                BUS_FAMILY,
-                9,
-                format!(
-                    "region size {size} exceeds the per-region cap of {max_region_bytes} bytes \
-                     (base=0x{base:08x})"
-                ),
-            ));
         }
         if init.len() > size as usize {
             // Review #7: split this off from E_BUS-04 (overflow) so
@@ -1354,25 +1254,6 @@ impl Bus {
                             format!("region 0x{:08x}..0x{:08x} exceeds 4 GiB bus", r.base, end),
                         ));
                     }
-                    // D-10 / 裁决 B: the cap is measured **per region
-                    // kind**. A **RAM** region in the topology holds no
-                    // memory yet (its content arrives in segment 2,
-                    // `load_pages`, which applies the cap to the pages
-                    // it materializes) ⇒ its declared size is **not**
-                    // measured here. A **ROM** region keeps its content
-                    // ⇒ its declared size **is** its physical occupancy
-                    // ⇒ it is measured here.
-                    if r.kind == REGION_KIND_ROM && u64::from(r.size) > self.max_region_bytes {
-                        return Err(PlatformError::new(
-                            BUS_FAMILY,
-                            E_BUS_09_TOO_LARGE,
-                            format!(
-                                "ROM region size {} exceeds the per-region cap of {} bytes \
-                                 (base=0x{:08x})",
-                                r.size, self.max_region_bytes, r.base
-                            ),
-                        ));
-                    }
                     rebuild.push(r);
                 }
                 // Kept in place — deliberately not rebuilt (see the doc).
@@ -1591,7 +1472,6 @@ impl Bus {
     /// payload that does not fit the host's budget is **rejected**
     /// (E_BUS-09) rather than half-applied.
     pub fn load_pages(&mut self, pages: &[MemPageDto]) -> Result<(), PlatformError> {
-        let cap = self.max_region_bytes;
         // ---- Phase 1: resolve every page to a RAM region, touch nothing. ----
         let mut plan: Vec<(u32, usize)> = Vec::with_capacity(pages.len());
         // region base → the page count the region would have **after**
@@ -1669,14 +1549,15 @@ impl Bus {
                     *count += 1;
                 }
             }
+            let cap = Self::region_capacity(region.size);
             let physical = (*count as u64) * (MEM_PAGE_BYTES as u64);
             if physical > cap {
                 return Err(PlatformError::new(
                     BUS_FAMILY,
                     E_BUS_09_TOO_LARGE,
                     format!(
-                        "restoring the memory pages would make RAM region 0x{:08x} physically \
-                         occupy {physical} allocated bytes, over the per-region cap of {cap} bytes",
+                        "恢复这些页会让 RAM 段 0x{:08x} 物化 {physical} 字节，\
+                         超过这一段自己的 size {cap} 字节",
                         region_base
                     ),
                 ));
@@ -2261,9 +2142,6 @@ impl Bus {
                 ));
             }
         };
-        // The cap is read **before** the mutable borrow of the region
-        // table — it is the host's budget policy, not the region's.
-        let cap = self.max_region_bytes;
         let region = self.regions.get_mut(&base).ok_or_else(|| {
             PlatformError::new(
                 BUS_FAMILY,
@@ -2271,6 +2149,8 @@ impl Bus {
                 format!("write region vanished mid-flight base=0x{:08x}", base),
             )
         })?;
+        // ⚠️ **v0.77**：上限 = **本段自己的 size**。
+        let cap = Self::region_capacity(region.size);
         Self::write_region(region, off, width, value, cap)?;
         // ROM write silently dropped (评审 14-4) → bump_write_hit does
         // nothing for ROM; per-byte writes also skip the bump.
@@ -2279,7 +2159,6 @@ impl Bus {
     }
 
     fn write_split(&mut self, addr: u32, width: BusWidth, value: u32) -> Result<(), PlatformError> {
-        let cap = self.max_region_bytes;
         // Phase 1: pre-check every byte slice before mutating anything.
         //
         // ⚠ The physical-occupancy cap is pre-checked here too: a
@@ -2318,14 +2197,15 @@ impl Bus {
                 if !ram.pages.contains_key(&page) {
                     *count += 1;
                 }
+                let cap = Self::region_capacity(region.size);
                 let physical = (*count as u64) * (MEM_PAGE_BYTES as u64);
                 if physical > cap {
                     return Err(PlatformError::new(
                         BUS_FAMILY,
                         E_BUS_09_TOO_LARGE,
                         format!(
-                            "RAM region would physically occupy {physical} allocated bytes \
-                             (materialized pages), over the per-region cap of {cap} bytes"
+                            "RAM 段 0x{:08x} 会物化 {physical} 字节，超过这一段自己的 size {cap} 字节",
+                            region.base
                         ),
                     ));
                 }
@@ -2352,7 +2232,7 @@ impl Bus {
                 )
             })?;
             let b = ((value >> (i * 8)) & 0xFF) as u8;
-            Self::write_region_byte(region, off, b, cap)?;
+            Self::write_region_byte(region, off, b, Self::region_capacity(region.size))?;
             self.bump_write_hit(kind);
         }
         Ok(())

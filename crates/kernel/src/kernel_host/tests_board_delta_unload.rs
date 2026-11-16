@@ -41,7 +41,6 @@ use riscv_sim_contract::model::{ProductTree, ProjectVersion};
 use riscv_sim_contract::platform::{DeviceSpec, RegionSpec, PLATFORM_SCHEMA_VERSION};
 use riscv_sim_contract::protocol::MemoryMapOp;
 
-use crate::m14_bus::BusWidth;
 
 // ---------------------------------------------------------------------------
 // 夹具
@@ -121,9 +120,7 @@ fn user_board() -> PlatformDescription {
         name: "User board".to_string(),
         priority: 100,
         description: None,
-        region_budget_bytes: 16 * 1024 * 1024,
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个。
-        max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
                 base: Some(0x0000_0000),
@@ -151,15 +148,13 @@ fn user_board() -> PlatformDescription {
 /// ⚠️ **为什么只有 RAM**：外设窗口的大小也走运行期上界那条检查
 /// ⇒ 板里有 GPIO 的话，「上界 = 1 字节」会在**建图**时就报 `E_BUS_09`
 /// ⇒ 钉的就不是「**写入**超限」而是「建图超限」了 ⇒ 判据被换掉了。
-fn ram_only_board(max_region_bytes: Option<u32>) -> PlatformDescription {
+fn ram_only_board() -> PlatformDescription {
     PlatformDescription {
         schema_version: PLATFORM_SCHEMA_VERSION,
         id: "ram-only".to_string(),
         name: "RAM only".to_string(),
         priority: 100,
         description: None,
-        region_budget_bytes: 16 * 1024 * 1024,
-        max_region_bytes,
         regions: vec![RegionSpec::Ram {
             base: Some(0x0000_0000),
             size: 0x0001_0000,
@@ -294,7 +289,7 @@ fn b2_a_stale_expected_revision_is_rejected_and_changes_nothing() {
     assert!(!before.pending, "用户的板就是生效的图 ⇒ 没有待生效的");
 
     // 拿一个**过期**的修订号（0）提交另一张板 ⇒ 必须被明确拒绝。
-    let other = ram_only_board(None);
+    let other = ram_only_board();
     let events = dispatch(
         &mut host,
         CommandPayload::SetMemoryMap {
@@ -325,7 +320,7 @@ fn b2_a_stale_expected_revision_is_rejected_and_changes_nothing() {
 /// **不会互相盖住**。
 ///
 /// ⚠️ 判据：一份**既过期**又**不合规**的提交 ⇒ 报的是 **`E_PLT-13`**
-/// （而不是 `E_PLT-07`）⇒ 「你是不是基于旧状态」**更先**被回答。
+/// （而不是描述校验那条）⇒ 「你是不是基于旧状态」**更先**被回答。
 #[test]
 fn b2_the_revision_check_comes_before_the_description_validation() {
     let mut host = KernelHost::new();
@@ -337,14 +332,13 @@ fn b2_the_revision_check_comes_before_the_description_validation() {
         },
     );
 
-    // 一份**超预算**的描述（违反 V-7 ⇒ 本该报 `E_PLT-07`）+ **过期**的
-    // 期望修订号（0）。
-    let mut over_budget = user_board();
-    over_budget.region_budget_bytes = 0x1000;
+    // 一份**非法**的描述（空 id ⇒ 违反 V-2）**加上**过期的期望修订号（0）。
+    let mut invalid = user_board();
+    invalid.id = String::new();
     let events = dispatch(
         &mut host,
         CommandPayload::SetMemoryMap {
-            description: over_budget,
+            description: invalid,
             expected_revision: Some(0),
         },
     );
@@ -355,19 +349,19 @@ fn b2_the_revision_check_comes_before_the_description_validation() {
     );
 
     // ⚠️ **同一个描述** + **正确**的期望修订号 ⇒ 这时才轮到 `validate()` ⇒
-    // 报 `E_PLT-07` ⇒ 证明两个错**各归各的**（不是同一个错被换了名字）。
-    let mut over_budget = user_board();
-    over_budget.region_budget_bytes = 0x1000;
+    // 报 `E_PLT-02` ⇒ 证明两个错**各归各的**（不是同一个错被换了名字）。
+    let mut invalid = user_board();
+    invalid.id = String::new();
     let events = dispatch(
         &mut host,
         CommandPayload::SetMemoryMap {
-            description: over_budget,
+            description: invalid,
             expected_revision: Some(1),
         },
     );
     assert_eq!(
         first_error_code(&events),
-        "E_PLT-07",
+        "E_PLT-02",
         "修订号对得上 ⇒ 才轮到描述校验：{events:?}"
     );
 }
@@ -733,114 +727,9 @@ fn b4_a_failing_op_in_the_middle_rolls_the_whole_patch_back() {
 // B-6 / B-7 · 运行期上界（声明期 / 运行期两层护栏）
 // ---------------------------------------------------------------------------
 
-/// **B-6** —— 描述里 `max_region_bytes` 给一个**比声明期小**的值 ⇒
-/// **写入**超限 ⇒ **`E_BUS-09`** ⇒ **两层护栏能分别触发**（裁决 K）。
-///
-/// ⚠️ **口径**：声明期那条（V-7 / `E_PLT-07`）判的是**声明的 size**；
-/// 运行期那条（`E_BUS_09`）判的是**物理占用**（真正落地的页）⇒ 这份板
-/// 的声明 size（64 KiB）**远小于**声明期预算（16 MiB）⇒ 声明期那条
-/// **放行** ⇒ 到了运行期，写一下就**超限** ⇒ 两个码**各归各的**。
-#[test]
-fn b6_a_smaller_runtime_cap_makes_a_write_hit_the_bus_guard() {
-    let mut host = KernelHost::new();
-    // 运行期上界 = **1 字节**（声明期上界 = 16 MiB ⇒ 明显更小）。
-    let board = ram_only_board(Some(1));
 
-    // ⚠️ **声明期那条放行**（V-7：64 KiB ≤ 16 MiB）⇒ 板被接受。
-    let events = dispatch(
-        &mut host,
-        CommandPayload::SetMemoryMap {
-            description: board.clone(),
-            expected_revision: None,
-        },
-    );
-    let state = first_memory_map(&events);
-    assert_eq!(
-        state.description, board,
-        "声明期护栏**放行**（V-7 判的是声明 size）"
-    );
 
-    // ⚠️ **运行期那条拦下**：写一下就要落地一整页（4 KiB）⇒ 超过 1 字节。
-    let err = host
-        .bus_mut()
-        .write(0x0000_0000, BusWidth::Word, 0x1234_5678)
-        .expect_err("超过运行期上界的写必须被拒");
-    assert_eq!(
-        err.family,
-        ErrorFamily::Bus,
-        "运行期那条是总线侧的错（族 BUS）：{err:?}"
-    );
-    assert_eq!(err.scenario, 9, "E_BUS-09（场景码 9）");
-}
 
-/// **B-6（负向半）** —— **不给**运行期上界 ⇒ 同样的写**成功** ⇒ 两层
-/// 护栏**分别**触发（不是「一起触发」）。
-#[test]
-fn b6_without_a_runtime_cap_the_same_write_succeeds() {
-    let mut host = KernelHost::new();
-    dispatch(
-        &mut host,
-        CommandPayload::SetMemoryMap {
-            description: ram_only_board(None),
-            expected_revision: None,
-        },
-    );
-    host.bus_mut()
-        .write(0x0000_0000, BusWidth::Word, 0x1234_5678)
-        .expect("没有运行期上界 ⇒ 同样的写必须成功");
-    assert_eq!(
-        host.read_memory(0x0000_0000, WriteSize::Word)
-            .expect("读回刚写的那个字"),
-        0x1234_5678,
-        "内容必须真的写进去了"
-    );
-}
-
-/// **B-7** —— 描述里**不给** `max_region_bytes` ⇒ `bus.max_region_bytes() ==
-/// region_budget_bytes` ⇒ **既有断言一条不改**。
-#[test]
-fn b7_without_a_runtime_cap_the_runtime_bound_equals_the_declared_budget() {
-    let mut host = KernelHost::new();
-    let board = user_board();
-    assert_eq!(board.max_region_bytes, None, "这份板**不给**运行期上界");
-    dispatch(
-        &mut host,
-        CommandPayload::SetMemoryMap {
-            description: board.clone(),
-            expected_revision: None,
-        },
-    );
-    assert_eq!(
-        host.bus().max_region_bytes(),
-        u64::from(board.region_budget_bytes),
-        "不给运行期上界 ⇒ 运行期上界 = **声明期**那个"
-    );
-}
-
-/// **B-7（给了的时候）** —— 给了运行期上界 ⇒ 总线上就是**那个**值（不是
-/// 声明期的那个）⇒ 两层真的**各管各的**。
-#[test]
-fn b7_a_given_runtime_cap_is_the_one_the_bus_uses() {
-    let mut host = KernelHost::new();
-    let board = ram_only_board(Some(0x2000));
-    dispatch(
-        &mut host,
-        CommandPayload::SetMemoryMap {
-            description: board.clone(),
-            expected_revision: None,
-        },
-    );
-    assert_eq!(
-        host.bus().max_region_bytes(),
-        0x2000,
-        "给了运行期上界 ⇒ 总线上就是那个值"
-    );
-    assert_ne!(
-        host.bus().max_region_bytes(),
-        u64::from(board.region_budget_bytes),
-        "它**不等于**声明期那个 ⇒ 两层不是同一个东西"
-    );
-}
 
 // ---------------------------------------------------------------------------
 // B-11 / B-12 / B-13 · 卸载
@@ -882,7 +771,7 @@ fn b11_after_unloading_a_board_change_takes_effect_immediately() {
     assert_eq!(state.revision, 2, "卸载**不 +1**（卸载不改图）");
 
     // ⇒ 之后的改板**立即生效**。
-    let board = ram_only_board(None);
+    let board = ram_only_board();
     let events = dispatch(
         &mut host,
         CommandPayload::SetMemoryMap {

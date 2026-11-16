@@ -45,7 +45,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 use riscv_sim_contract::error::{
-    PlatformError, E_PLT_05_OVERFLOW, E_PLT_07_OVER_BUDGET, E_PLT_09_UNKNOWN_PLATFORM,
+    PlatformError, E_PLT_05_OVERFLOW, E_PLT_09_UNKNOWN_PLATFORM,
     E_PLT_10_PLATFORM_FILE_UNREADABLE, E_PLT_11_PLATFORM_FILE_MALFORMED, PLATFORM_FAMILY,
 };
 use riscv_sim_contract::platform::{DeviceSpec, PlatformDescription, RegionSpec};
@@ -521,11 +521,11 @@ pub struct MappedDevices {
 ///     ram        → bus.map_ram(base, size, &[])
 ///     rom        → bus.map_rom(base, size, &[])
 ///     peripheral → 工厂造实例 → bus.map_peripheral_instance(base, 实例.size(), 实例)
-/// 护栏预算 → bus.set_max_region_bytes(描述.max_region_bytes ?? 描述.region_budget_bytes)
+/// 上限 → **各段自己的 size**（没有第二真相源 · v0.77 STAGE-53）
 /// ```
 ///
 /// ⚠️ **校验在建图之前**：不合规的描述**一个区域都不留**（B-5）⇒
-/// 「声明一段超预算的 RAM」在**建图前**就被 `E_PLT-07` 拒掉。
+/// 「一段声明的大小在地址空间里装不下」在**建图前**就被 `E_PLT-05` 拒掉。
 ///
 /// ⚠️ **外设窗口大小由器件自己报**（`实例.size()`）⇒ 描述里没有窗口
 /// 大小（裁决 D）⇒ 没有第二个真相源。
@@ -547,21 +547,10 @@ pub fn map_platform(
     assigned.validate()?;
     let description = &assigned;
 
-    // 护栏预算：描述说了算（§2.5 对照表最后一行）。
-    //
-    // ⚠️ **v0.31（STAGE-16 §3.5 · D-138）**：**运行期**上界 =
-    // `max_region_bytes`（缺省 = **声明期**那个）⇒ 与拆字段之前**逐字
-    // 相同** ⇒ 既有断言（「`bus.max_region_bytes() == region_budget_bytes`」）
-    // **一条不改**。
-    //
-    // ⚠️ **两层护栏各管各的**：声明期那条判 V-7（`E_PLT_07`），运行期这条
-    // 判**物理占用**（`E_BUS_09`）⇒ 两个码**故意不复用**。
-    bus.set_max_region_bytes(u64::from(
-        description
-            .max_region_bytes
-            .unwrap_or(description.region_budget_bytes),
-    ));
-
+    // ⚠️ **v0.77（STAGE-53 · 按区域预算整体退役）**：这里**不再**给总线
+    // 设「每区域预算」⇒ ⇒ 总线的上限**只**来自**每一段自己的 `size`**
+    // （`init` 物化的页数 > 本段 size ⇒ `E_BUS-09`）⇒ ⇒ **没有第二真相源**
+    // ⇒ ⇒ 也就不存在「描述里的预算与本段 size 打架」这种自相矛盾的死结。
     let mut devices = MappedDevices::default();
     // ⚠️ 按 **base 升序**建图（与总线的 `BTreeMap` 顺序一致）⇒ 建图
     // 顺序是**确定的**，不依赖描述里的书写顺序。
@@ -838,8 +827,8 @@ pub fn assign_bases(
         let Some(base) = placed else {
             return Err(PlatformError::new(
                 PLATFORM_FAMILY,
-                E_PLT_07_OVER_BUDGET,
-                format!("区域（缺基址）的大小 {:#x} 在地址空间里装不下", size),
+                E_PLT_05_OVERFLOW,
+                format!("区域（缺基址）的大小 {:#x} 在 4 GiB 地址空间里装不下", size),
             ));
         };
         assigned.regions[index].set_base(base as u32);
@@ -912,8 +901,6 @@ mod single_plic_role_tests {
             id: "single-plic".to_string(),
             name: "single PLIC".to_string(),
             priority: 0,
-            region_budget_bytes: 1 << 20,
-            max_region_bytes: None,
             regions: Vec::new(),
             description: None,
             roles,

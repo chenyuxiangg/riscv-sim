@@ -129,9 +129,7 @@ fn user_board() -> PlatformDescription {
         priority: 100,
         // ⚠️ 它**不**参与自动选档（用户配的板是**点名**用的）。
         description: None,
-        region_budget_bytes: 16 * 1024 * 1024,
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
-        max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
                 base: Some(0x0000_0000),
@@ -162,9 +160,7 @@ fn board_with_four_devices() -> PlatformDescription {
         name: "User board (four devices)".to_string(),
         priority: 100,
         description: None,
-        region_budget_bytes: 16 * 1024 * 1024,
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
-        max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
                 base: Some(0x0000_0000),
@@ -219,9 +215,7 @@ fn board_with_eight_mib_ram() -> PlatformDescription {
         name: "User board (8 MiB RAM)".to_string(),
         priority: 100,
         description: None,
-        region_budget_bytes: 16 * 1024 * 1024,
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
-        max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
                 base: Some(0x0000_0000),
@@ -445,9 +439,7 @@ fn b1_the_old_map_is_restored_when_the_new_one_cannot_be_mapped() {
         name: "Overlapping".to_string(),
         priority: 100,
         description: None,
-        region_budget_bytes: 16 * 1024 * 1024,
         // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
-        max_region_bytes: None,
         regions: vec![
             RegionSpec::Peripheral {
                 base: Some(0x7002_0000),
@@ -518,20 +510,20 @@ fn b1_the_old_map_is_restored_when_the_new_one_cannot_be_mapped() {
 /// 报 **`E_PLT-07`**。
 ///
 /// ⚠️ 判据是**族 + 码**（`PLT` + `07`）—— 契约层的 `CTX` 族**没有**
-/// 具名场景码 ⇒ 只能这么判，不能靠 message 文本。
+/// **B-2（v0.77 起）** —— 一段 64 KiB 的 RAM 声明现在**合法**：没有
+/// 「每区域预算」⇒ 板装得上，且**声明不物化任何页**。
+///
+/// ⚠️ 这条以前钉 `E_PLT-07`；预算退役后钉**反向**（不再有那个码）⇒
+/// 判别力不丢：只要有人把预算偷偷加回来（且小于 64 KiB）这条就红。
 #[test]
-fn b2_an_over_budget_description_is_rejected_with_e_plt_07() {
+fn b2_a_64_kib_region_is_legal_now_that_the_budget_is_gone() {
     let mut host = KernelHost::new();
-    let bad = PlatformDescription {
+    let board = PlatformDescription {
         schema_version: PLATFORM_SCHEMA_VERSION,
-        id: "too-big".to_string(),
-        name: "Too big".to_string(),
+        id: "plain-ram".to_string(),
+        name: "Plain RAM".to_string(),
         priority: 100,
         description: None,
-        // 预算 4 KiB，段却要 64 KiB ⇒ 违反 V-7。
-        region_budget_bytes: 0x1000,
-        // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
-        max_region_bytes: None,
         regions: vec![RegionSpec::Ram {
             base: Some(0x0000_0000),
             size: 0x0001_0000,
@@ -540,18 +532,13 @@ fn b2_an_over_budget_description_is_rejected_with_e_plt_07() {
         mcu: None,
     };
 
-    let events = dispatch(
-        &mut host,
-        CommandPayload::SetMemoryMap {
-            description: bad,
-            expected_revision: None,
-        },
-    );
-    assert_eq!(
-        first_error_code(&events),
-        "E_PLT-07",
-        "超预算必须是 E_PLT-07（族 PLT / 码 07）：{events:?}"
-    );
+    let events = dispatch(&mut host, CommandPayload::SetMemoryMap {
+        description: board,
+        expected_revision: None,
+    });
+    let (description, pending) = first_memory_map(&events);
+    assert_eq!(description.regions.len(), 1, "板装上了 ⇒ 一段都在");
+    assert!(!pending, "没装载过镜像 ⇒ 板**立即**生效（不待生效）");
 }
 
 /// **B-2（负向半）** —— 校验失败时**什么都不动**：当前的图没被污染，
@@ -559,15 +546,14 @@ fn b2_an_over_budget_description_is_rejected_with_e_plt_07() {
 #[test]
 fn b2_a_rejected_description_changes_nothing() {
     let mut host = KernelHost::new();
+    // ⚠️ **v0.77（STAGE-53）**：本来这里靠「超预算」造非法板 ⇒ 预算退役后
+    //    改用**空 id**（V-2 ⇒ `E_PLT-02`）——不变的是「不合规 ⇒ 什么都不动」。
     let bad = PlatformDescription {
         schema_version: PLATFORM_SCHEMA_VERSION,
-        id: "too-big".to_string(),
-        name: "Too big".to_string(),
+        id: String::new(),
+        name: "Broken".to_string(),
         priority: 100,
         description: None,
-        region_budget_bytes: 0x1000,
-        // ⚠️ v0.31（D-138）：运行期上界**缺省** ⇒ 等于声明期那个
-        max_region_bytes: None,
         regions: vec![RegionSpec::Ram {
             base: Some(0x0000_0000),
             size: 0x0001_0000,

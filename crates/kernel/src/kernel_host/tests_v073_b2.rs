@@ -26,7 +26,7 @@
 //
 // ⚠️ 断言值是**写死的字面量**，不从被测实现反推。
 
-use riscv_sim_contract::error::{E_PLT_07_OVER_BUDGET, PLATFORM_FAMILY};
+use riscv_sim_contract::error::{E_PLT_05_OVERFLOW, PLATFORM_FAMILY};
 use riscv_sim_contract::platform::{DeviceSpec, PlatformDescription, RegionSpec};
 
 use super::platform;
@@ -42,8 +42,6 @@ fn description_without_bases() -> PlatformDescription {
         id: "auto-base".to_string(),
         name: "Auto base".to_string(),
         priority: 100,
-        region_budget_bytes: 16 * 1024 * 1024,
-        max_region_bytes: None,
         regions: vec![
             RegionSpec::Ram {
                 base: None,
@@ -68,8 +66,6 @@ fn a3_a_description_without_base_parses() {
         "id": "auto-base",
         "name": "Auto base",
         "priority": 100,
-        
-        "region_budget_bytes": 16777216,
         "regions": [
             { "kind": "ram", "size": 1048576 },
             { "kind": "ram", "size": 2097152 }
@@ -176,14 +172,11 @@ fn k4_a_region_that_cannot_fit_reports_an_existing_code() {
             size: 0x0000_0001,
         },
     ];
-    // ⚠️ **先让预算这一关放行**（否则 V-7 会先拒 ⇒ ⇒ 那样就测不到分配器
-    //   那条路了）⇒ ⇒ 预算调到最大。
-    description.region_budget_bytes = u32::MAX;
     let err = platform::assign_bases(&description).expect_err("装不下 ⇒ ⇒ 必须报错");
     assert_eq!(err.family, PLATFORM_FAMILY);
     assert_eq!(
-        err.scenario, E_PLT_07_OVER_BUDGET,
-        "装不下 ⇒ ⇒ 报**既有码** `E_PLT-07`（⇒ ⇒ 零新场景码）"
+        err.scenario, E_PLT_05_OVERFLOW,
+        "装不下 ⇒ ⇒ 报**地址空间溢出** `E_PLT-05`（⇒ ⇒ 零新场景码）"
     );
 }
 
@@ -236,8 +229,6 @@ fn k4d_a_board_without_bases_really_loads() {
     let mut host = KernelHost::new();
     let mut description = description_without_bases();
     description.id = "auto-base-host".to_string();
-    // ⚠️ **预算要够大**（⇒ ⇒ 否则 V-7 会先拒 ⇒ ⇒ 那样测不到「装得上」）。
-    description.region_budget_bytes = 0x4000_0000;
     let events = host.handle_message(&riscv_sim_contract::protocol::Message::command(
         1,
         riscv_sim_contract::protocol::CommandPayload::SetMemoryMap {

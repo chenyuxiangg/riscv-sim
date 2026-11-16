@@ -60,7 +60,6 @@ function boardDraft() {
         name: "测试板",
         priority: "100",
         auto_selectable: "false",
-        region_budget_bytes: "8388608",
         regions: [
             { kind: "ram", base: "0", size: "1048576" },
             { kind: "peripheral", base: "1073741824", device: { device: "gpio", id: "GPIO0" } },

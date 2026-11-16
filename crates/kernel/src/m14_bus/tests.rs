@@ -752,17 +752,15 @@ fn id_only_peripheral_mapping_still_reports_not_wired() {
 
 #[test]
 fn oversized_ram_region_is_rejected_before_allocating() {
-    // D-10 → v0.26 裁决 B: the cap measures the region's **physical
-    // occupancy** (its materialized pages), **not** its declared size.
-    // The guard is unchanged in kind — a region that really wants more
-    // memory than the host's budget is still refused, and it is refused
-    // **before** a single page is allocated.
-    let mut bus = Bus::with_max_region_bytes(0x1000);
+    // ⚠️ **v0.77（STAGE-53）**：上限 = **这一段自己的 size** ⇒ 判据是
+    // 「init 要物化的页 × 4096 不超过本段 size」⇒ 超了 ⇒ `E_BUS-09`
+    // ⇒ 且**一页都不分配**（拒绝发生在物化之前）。
+    let mut bus = Bus::new();
     let err = bus
-        .map_ram(0, 0x8000, &[0u8; 0x2000])
-        .expect_err("a region over the physical-occupancy cap must be rejected");
+        .map_ram(0, 0x2000, &[0u8; 0x2001])
+        .expect_err("init 物化的页超过本段自己的 size ⇒ 必须被拒");
     assert_eq!(err.family, ErrorFamily::Bus);
-    assert_eq!(err.scenario, 9, "over-cap region → E_BUS-09");
+    assert_eq!(err.scenario, 9, "init 超过本段 size → E_BUS-09");
     assert_eq!(bus.region_count(), 0);
     assert_eq!(
         bus.ram_allocated_bytes(),
@@ -771,58 +769,9 @@ fn oversized_ram_region_is_rejected_before_allocating() {
     );
 }
 
-#[test]
-fn oversized_rom_region_is_rejected_before_allocating() {
-    // The ROM path allocates too — it must be capped as well.
-    let mut bus = Bus::new();
-    let err = bus
-        .map_rom(0, 0x4000_0000, &[])
-        .expect_err("a 1 GiB region must be rejected");
-    assert_eq!(err.scenario, 9);
-}
 
-#[test]
-fn the_region_size_cap_is_configurable() {
-    let mut bus = Bus::with_max_region_bytes(0x1000);
-    assert_eq!(bus.max_region_bytes(), 0x1000);
-    bus.map_ram(0, 0x1000, &[])
-        .expect("a region at the cap is fine");
-    // ⚠ v0.26 裁决 B: the cap is measured against the **physical
-    // occupancy** ⇒ the判据 is the pages the region would materialize,
-    // not the size it declares.
-    let err = bus
-        .map_ram(0x2000, 0x2000, &[0u8; 0x2000])
-        .expect_err("a region over the cap must be rejected");
-    assert_eq!(err.scenario, 9);
-    // The cap can be raised at runtime (the host owns the budget).
-    bus.set_max_region_bytes(0x2000);
-    bus.map_ram(0x2000, 0x2000, &[0u8; 0x2000])
-        .expect("raising the cap works");
-}
 
-#[test]
-fn the_default_cap_leaves_normal_regions_untouched() {
-    // The default cap must not get in the way of a realistic image.
-    let mut bus = Bus::new();
-    assert_eq!(bus.max_region_bytes(), DEFAULT_MAX_REGION_BYTES);
-    bus.map_ram(0x8000_0000, 0x1000, &[0xAA; 4])
-        .expect("normal region");
-    bus.map_ram(0x8001_0000, 0x10_0000, &[])
-        .expect("16 MiB region");
-    assert_eq!(bus.region_count(), 2);
-}
 
-#[test]
-fn the_cap_also_guards_the_peripheral_window() {
-    // A peripheral window claims an address interval just like a RAM
-    // region does — the cap applies to it too.
-    let mock = Rc::new(RefCell::new(MockPeripheral::new("MOCK0", 0x3000, 0x10)));
-    let mut bus = Bus::with_max_region_bytes(0x8);
-    let err = bus
-        .map_peripheral_instance(0x3000, 0x10, Rc::clone(&mock) as _)
-        .expect_err("over-cap peripheral window must be rejected");
-    assert_eq!(err.scenario, 9);
-}
 
 // ---------------------------------------------------------------------------
 // Session snapshot (STAGE-3 §3.2) — segment 2 (memory pages) and
@@ -1380,40 +1329,6 @@ fn load_map_rejects_a_region_whose_end_overflows_u32() {
     );
 }
 
-/// ⚠️ **E_BUS-09（区域超过单区上限）必须有用例钉住**。
-///
-/// 同上：这条路径此前**无用例在守**。
-///
-/// ⚠️ v0.26 裁决 B：上限量的是**物理占用**——RAM 区域在拓扑阶段还**没有**
-/// 任何页（内容走段 2 `load_pages` 灌回来），所以**声明大小**不再被量；
-/// **ROM** 区域的内容本来就在内存里 ⇒ 它的声明大小**就是**物理占用 ⇒
-/// 这里用 ROM 来钉这条路径。
-#[test]
-fn load_map_rejects_a_region_larger_than_the_per_region_cap() {
-    let mut bus = Bus::with_max_region_bytes(0x1000);
-    bus.map_rom(0x8000, 0x1000, &[]).expect("rom at the cap");
-    let map = M14MapDto {
-        regions: vec![RegionDto {
-            base: 0x8000,
-            size: 0x2000,
-            kind: "rom".to_string(),
-            target: String::new(),
-        }],
-    };
-    let err = bus
-        .load_map(&map)
-        .expect_err("a region larger than the cap must be rejected");
-    assert_eq!(err.family, ErrorFamily::Bus);
-    assert_eq!(
-        err.scenario, E_BUS_09_TOO_LARGE,
-        "超过单区上限必须报 E_BUS-09"
-    );
-    assert_eq!(
-        bus.region_count(),
-        1,
-        "a rejected map must leave the bus untouched"
-    );
-}
 
 #[test]
 fn load_map_rejects_a_region_overlapping_a_kept_peripheral_window() {
@@ -1746,47 +1661,6 @@ fn writing_two_non_adjacent_pages_materializes_two_pages() {
     assert_eq!(bus.read_only(0x9000, BusWidth::Word).unwrap(), 0x2222_2222);
 }
 
-/// **A-5** 护栏：**默认** cap 仍是 **16 MiB**；往一个 region 写超 16 MiB
-/// ⇒ **E_BUS-09**；**抬高** cap 后同样的写**成功**。
-///
-/// ⇒ 「护栏只能放宽、不能去掉」**可证**。
-#[test]
-fn the_default_physical_occupancy_cap_is_still_sixteen_mib() {
-    let mut bus = Bus::new();
-    assert_eq!(
-        bus.max_region_bytes(),
-        16 * 1024 * 1024,
-        "the default cap is unchanged"
-    );
-    bus.map_ram(0x1000, 0x2000_0000, &[]).expect("ram");
-
-    // 16 MiB / 4 KiB = 4096 pages ⇒ the 4097th page is over the cap.
-    for i in 0..4096u32 {
-        bus.write(0x1000 + i * 4096, BusWidth::Byte, 1)
-            .expect("within the cap");
-    }
-    let err = bus
-        .write(0x1000 + 4096 * 4096, BusWidth::Byte, 1)
-        .expect_err("over the cap");
-    assert_eq!(err.family, ErrorFamily::Bus);
-    assert_eq!(err.scenario, 9, "E_BUS-09 — the cap is not gone");
-    assert_eq!(
-        bus.ram_allocated_bytes(),
-        4096 * 4096,
-        "the refused write must not leave a page behind"
-    );
-
-    // … and raising the cap makes the very same write succeed.
-    let mut roomy = Bus::new();
-    roomy.set_max_region_bytes(32 * 1024 * 1024);
-    roomy.map_ram(0x1000, 0x2000_0000, &[]).expect("ram");
-    for i in 0..4097u32 {
-        roomy
-            .write(0x1000 + i * 4096, BusWidth::Byte, 1)
-            .expect("the raised cap allows it");
-    }
-    assert_eq!(roomy.ram_allocated_bytes(), 4097 * 4096);
-}
 
 /// **A-6** 单个 region 的**声明**大小可 > 16 MiB ⇒ 映射**成功**且**零**
 /// 物化页。
@@ -1808,33 +1682,6 @@ fn a_ram_region_may_declare_more_than_the_cap_and_costs_nothing() {
     assert_eq!(bus.ram_allocated_bytes(), 4096);
 }
 
-/// **A-7** **非 RAM** 的护栏行为**逐条不变**：`map_rom(base, 32 MiB, …)`
-/// ⇒ **E_BUS-09**；**外设窗口**超 cap ⇒ **E_BUS-09**。
-///
-/// ⚠ 规格订正：护栏是「单个 region 相对宿主预算的上限」，**被测量的量按
-/// region 种类定**：RAM 量**物理占用**，ROM 与外设窗口量**声明大小**
-/// （它们不持内存，量物理占用永远是 0 ⇒ 那条保护会静默消失）。
-#[test]
-fn non_ram_regions_keep_the_declared_size_cap() {
-    // ROM: its content is part of the firmware image ⇒ in memory by
-    // definition ⇒ the cap measures its declared size.
-    let mut bus = Bus::new();
-    let err = bus
-        .map_rom(0, 32 * 1024 * 1024, &[])
-        .expect_err("a 32 MiB ROM is over the 16 MiB cap");
-    assert_eq!(err.family, ErrorFamily::Bus);
-    assert_eq!(err.scenario, 9, "E_BUS-09");
-
-    // Peripheral window: it claims an *address interval*, not memory ⇒
-    // the cap measures its declared size too.
-    let mock = Rc::new(RefCell::new(MockPeripheral::new("MOCK0", 0x3000, 0x10)));
-    let mut bus = Bus::with_max_region_bytes(0x8);
-    let err = bus
-        .map_peripheral_instance(0x3000, 0x10, Rc::clone(&mock) as _)
-        .expect_err("an over-cap peripheral window must be rejected");
-    assert_eq!(err.family, ErrorFamily::Bus);
-    assert_eq!(err.scenario, 9, "E_BUS-09");
-}
 
 /// **A-8** `export_pages` 只导出**写过的页**：写 1 页 ⇒ 恰好 1 条、`base`
 /// 落在该 region 的页网格上、`bytes.len() == 4096`；不写 ⇒ **0** 条；
@@ -2017,23 +1864,3 @@ fn load_pages_rejects_a_page_off_the_regions_page_grid() {
     assert_eq!(bus.ram_allocated_bytes(), 0, "nothing was materialized");
 }
 
-/// 裁决 C-3：还原也要过护栏 ⇒ 物理占用超 cap ⇒ **E_BUS-09** ⇒ 还原失败
-/// （宿主预算不够就不还原——这是**预期行为**，不是缺陷）。
-#[test]
-fn load_pages_over_the_physical_occupancy_cap_is_rejected() {
-    let mut bus = Bus::with_max_region_bytes(0x1000);
-    bus.map_ram(0x1000, 0x10_0000, &[]).expect("ram");
-    let err = bus
-        .load_pages(&[MemPageDto {
-            base: 0x1000,
-            bytes: vec![0u8; 8192],
-        }])
-        .expect_err("a restore over the cap must be rejected");
-    assert_eq!(err.family, ErrorFamily::Bus);
-    assert_eq!(err.scenario, 9, "E_BUS-09");
-    assert_eq!(
-        bus.ram_allocated_bytes(),
-        0,
-        "a rejected restore must not leave a page behind"
-    );
-}
