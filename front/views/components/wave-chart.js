@@ -217,19 +217,127 @@ export function buildWaveOption(channels, theme) {
     return option;
 }
 
+
+/**
+ * 中断通道的**分组**（核中断 / 外设中断）。
+ *
+ * ⚠️ 判据是**流 id 前缀**（`irq.core.*` / `irq.dev.*`），不是 label 文本 ——
+ *   label 会随语言/格式改，id 不会。
+ *
+ * @param {Array<{id:string,label:string,edges:number,samples:Array}>} channels
+ * @returns {Array<{key:string,title:string,channels:Array}>}
+ */
+export function groupIrqChannels(channels) {
+    const core = [];
+    const dev = [];
+    for (const c of channels || []) {
+        const id = String(c?.id ?? "");
+        if (id.startsWith("irq.core.")) core.push(c);
+        else if (id.startsWith("irq.dev.")) dev.push(c);
+    }
+    return [
+        { key: "core", title: "核中断", channels: core },
+        { key: "dev", title: "外设中断", channels: dev },
+    ].filter((g) => g.channels.length > 0);
+}
+
+/**
+ * 默认筛选：**只勾核中断**（2026-11-18 用户拍板）。
+ *
+ * ⚠️ 非中断通道（`GPIO0.OUT` 之类）默认**可见** —— 它们本来就在图上，
+ *   不该因为这次加筛选而消失。
+ *
+ * @param {Array<{id:string}>} channels
+ * @returns {Object<string, boolean>}
+ */
+export function defaultIrqSelection(channels) {
+    const sel = {};
+    for (const c of channels || []) {
+        const id = String(c?.id ?? "");
+        sel[id] = !id.startsWith("irq.dev.");
+    }
+    return sel;
+}
+
+/**
+ * 平台变更后**合并**筛选状态：已有的选择保留，新通道按默认值补上。
+ *
+ * ⚠️ 这就是「产品视图加器件后不丢选择」的落点：键是**流 id**，
+ *   不是通道号。
+ *
+ * @param {Object<string, boolean>|null} prev
+ * @param {Array<{id:string}>} channels
+ * @returns {Object<string, boolean>}
+ */
+export function mergeIrqSelection(prev, channels) {
+    const def = defaultIrqSelection(channels);
+    if (!prev || typeof prev !== "object") return def;
+    const out = { ...prev };
+    for (const [id, on] of Object.entries(def)) {
+        if (!(id in out)) out[id] = on;
+    }
+    return out;
+}
+
+/**
+ * 按筛选结果过滤通道（未出现在选择表里的通道**保留**）。
+ *
+ * @param {Array} channels
+ * @param {Object<string, boolean>|null} selected
+ * @returns {Array}
+ */
+export function visibleChannels(channels, selected) {
+    if (!selected || typeof selected !== "object") return channels || [];
+    return (channels || []).filter((c) => selected[String(c?.id ?? "")] !== false);
+}
+
+/**
+ * 通道筛选区的 HTML（复选框 + 全选/仅核/清空）。
+ *
+ * @param {Array} channels
+ * @param {Object<string, boolean>|null} selected
+ * @returns {string}
+ */
+export function channelFilterHtml(channels, selected) {
+    const groups = groupIrqChannels(channels);
+    if (groups.length === 0) return "";
+    const row = (c) => {
+        const id = String(c?.id ?? "");
+        const on = selected?.[id] !== false;
+        return `<label class="wave-filter-item">
+            <input type="checkbox" data-action="toggle-wave-channel" data-id="${escapeHtml(id)}"${on ? " checked" : ""}>
+            <span>${escapeHtml(String(c?.label ?? id))}</span>
+            <span class="muted">${Number(c?.edges ?? 0)} edges</span>
+        </label>`;
+    };
+    return `<div class="wave-filter" data-wave-filter>
+        <div class="row">
+            <h4>通道筛选</h4>
+            <button type="button" data-action="wave-select" data-scope="all">全选</button>
+            <button type="button" data-action="wave-select" data-scope="core">仅核</button>
+            <button type="button" data-action="wave-select" data-scope="none">清空</button>
+        </div>
+        ${groups.map((g) => `<fieldset class="wave-filter-group">
+            <legend>${escapeHtml(g.title)}</legend>
+            ${g.channels.map(row).join("")}
+        </fieldset>`).join("")}
+    </div>`;
+}
+
 /**
  * 波形图卡片的 HTML 片段（按图表状态分支）。
  *
  * ⚠️ **降级分支与正常分支**是**两个不同的 DOM** ⇒ ⇒ 降级时**没有**图表插槽
  *   ⇒ ⇒ 不会有「一个空白的框在那儿装样子」。
  *
- * @param {{status?:string, channels?:Array, limit?:number}} chart
+ * @param {{status?:string, channels?:Array, limit?:number, selected?:Object}} chart
  * @returns {string}
  */
 export function waveChartHtml(chart) {
     const status = String(chart?.status ?? "idle");
     const channels = Array.isArray(chart?.channels) ? chart.channels : [];
     const limit = Number(chart?.limit ?? WAVE_SAMPLE_LIMIT);
+    const selected = chart?.selected ?? null;
 
     if (status === "degraded") {
         return `
@@ -242,9 +350,11 @@ export function waveChartHtml(chart) {
             </div>`;
     }
 
-    const drawable = chartableChannels(channels).length;
+    const visible = visibleChannels(channels, selected);
+    const drawable = chartableChannels(visible).length;
     return `
         <div class="wave-chart" data-wave-chart data-wave-chart-status="${escapeHtml(status)}">
+            ${channelFilterHtml(channels, selected)}
             <div class="wave-chart-slot" data-wave-chart-slot></div>
             <p class="muted">每个通道最多显示最近 ${limit} 条边沿；通道列表里的「N edges」是总数。</p>
             <p class="muted">${drawable > 0

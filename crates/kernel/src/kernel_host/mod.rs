@@ -171,7 +171,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use riscv_sim_contract::admin::LogEntryDto;
-use riscv_sim_contract::csr::{IRQ_SOFTWARE, IRQ_UART_RX_READY};
+use riscv_sim_contract::csr::{IRQ_SOFTWARE, IRQ_TIMER_COMPARE, IRQ_UART_RX_READY};
 use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_02_CONDITION_INVALID, E_DBG_03_DUMP_TOO_LARGE,
     E_DBG_04_SYMBOL_NAME_EMPTY, E_ENG_03_NO_PROGRESS, E_HMS_02_FATAL_TERMINATED,
@@ -206,7 +206,10 @@ use crate::m15_peripheral;
 use crate::m15_peripheral::uart::Uart16550;
 use crate::m16_interrupt::InterruptController;
 use crate::m17_backend::{SelfIssBackend, SharedInterruptPort};
-use crate::m18_probe::{ChannelDef, ChannelKind, ProbeRegistry, SampleCfg, CH_GPIO0, CH_IRQ_PULSE};
+use crate::m18_probe::{
+    ChannelDef, ChannelKind, ProbeRegistry, SampleCfg, CH_GPIO0, CH_IRQ_EXTERNAL,
+    CH_IRQ_SOFTWARE, CH_IRQ_SRC_BASE, CH_IRQ_TIMER,
+};
 use crate::m19_waveform::{ChannelMeta, ExportFilter, SharedPipeline, WaveformPipeline};
 use crate::m20_snapshot::SnapshotManager;
 use crate::m21_logging::{LogBuffer, LogEntry, LogLevel, LogQuery};
@@ -312,20 +315,44 @@ pub const GPIO_SIGNAL_LABEL: &str = "GPIO0.OUT";
 /// 与 M-18 LLD 表 68 的「valueWidth = 按端口位宽」一致。
 pub const GPIO_VALUE_WIDTH: u8 = 32;
 
-/// **中断脉冲**通道（M-16 → M-18，接缝 #5 / 台账 D-26）的 source id。
+/// 核中断通道的流 id 前缀（M-18 的 id = `"{source}.{signal}"`）。
+pub const IRQ_CORE_SOURCE: &str = "irq.core";
+
+/// 外设中断通道的流 id 前缀。
+pub const IRQ_DEV_SOURCE: &str = "irq.dev";
+
+/// 软中断通道标签（**外设名 + 中断号**的同一写法：名字 + 号）。
+pub const IRQ_LABEL_SOFTWARE: &str = "software · IRQ 3";
+
+/// 定时器中断通道标签。
+pub const IRQ_LABEL_TIMER: &str = "timer · IRQ 7";
+
+/// 外部中断通道标签。
 ///
-/// M-18 的流 id 是 `"{source}.{signal}"` ⇒ 这条通道的 id 是
-/// `"M16.irq_pulse"`。
-pub const IRQ_PULSE_SOURCE: &str = "M16";
+/// ⚠️ **不写 "IRQ 11"**：cause 11 与某台设备的 PLIC 源 11 同数字 ⇒ 写
+/// `MEIP` 才是无歧义的那个名字（源号在设备通道那一侧出现）。
+pub const IRQ_LABEL_EXTERNAL: &str = "external · MEIP";
 
-/// **中断脉冲**通道的信号名。
-pub const IRQ_PULSE_SIGNAL: &str = "irq_pulse";
+/// 外设通道标签：`"{id} · IRQ {source}"`（**外设名 + 中断号**）。
+pub fn irq_device_label(id: &str, source: u16) -> String {
+    format!("{id} · IRQ {source}")
+}
 
-/// **中断脉冲**通道的显示标签（与 M-18 那一侧逐字相同）。
-pub const IRQ_PULSE_LABEL: &str = "M16.irq_pulse";
-
-/// **中断脉冲**通道的值宽（脉冲的「值」是中断线号 ⇒ 64 位足够）。
-pub const IRQ_PULSE_VALUE_WIDTH: u8 = 64;
+/// 线号 → 核中断通道。未知名（已退役的线 2）⇒ `None`。
+fn irq_ch_for_line(line: u16) -> Option<u8> {
+    // ⚠️ 必须用 `if` 比**值**，不能 `match` 常量名 —— 常量若不在作用域里，
+    // `match` 会把它当成**绑定**（irrefutable）⇒ 第一条臂吞掉所有线号，
+    // 编译器只给一句"unused variable"，波形却全画到一条通道上。
+    if line == IRQ_SOFTWARE {
+        Some(CH_IRQ_SOFTWARE)
+    } else if line == IRQ_TIMER_COMPARE {
+        Some(CH_IRQ_TIMER)
+    } else if line == IRQ_UART_RX_READY {
+        Some(CH_IRQ_EXTERNAL)
+    } else {
+        None
+    }
+}
 
 /// 订阅主题：寄存器快照。
 ///
@@ -949,6 +976,11 @@ pub struct KernelHost {
     ///
     /// ⚠️ 建图时重算（[`KernelHost::map_memory`]）⇒ 换板即换表 ⇒ 宿主源码里**没有**第二个「PLIC 源号」。
     peripheral_irqs: Vec<platform::PeripheralIrq>,
+    /// **外设中断通道表**：`(PLIC 源号, 通道号)`，随平台重建。
+    ///
+    /// ⚠️ 通道号取「声明序号 + 基址」而不是源号本身：源号按 PLIC 规范
+    /// 可到 1023，`ch` 是 `u8` 装不下。这张表就是二者的**唯一**映射。
+    irq_src_channels: Vec<(u32, u8)>,
 
     /// console / 时间源 / 主 PLIC。
     ///
@@ -1134,6 +1166,7 @@ impl KernelHost {
             // ⚠️ v0.34（D-125）：连线表在**建图时**编译（`map_memory`）⇒
             // 这里只是**初值**（还没有建图 ⇒ 还没有表）。
             peripheral_irqs: Vec::new(),
+            irq_src_channels: Vec::new(),
             // ⚠️ v0.72（STAGE-48 · D-177 A）：丢线报告**随图**重算 ⇒ 这里
             // 只是**初值**（还没有建图 ⇒ 没有线 ⇒ 0 根）。
             roles: platform::ResolvedRoles::default(),
@@ -1500,6 +1533,8 @@ impl KernelHost {
                             // 源落下不 retract 已经送进 PLIC 的请求。
                             p.set_source_level(u32::from(irq.source), rx || tx);
                         }
+                        // 设备级电平通道：这里正是「源抬手 / 落手」的时刻。
+                        self.sample_irq_source(u32::from(irq.source), rx || tx);
                     }
                     platform::PeripheralIrqKind::Gpio => {
                         let Some(gpio) = self.devices.gpio(&irq.id) else {
@@ -1516,6 +1551,7 @@ impl KernelHost {
                         if let Ok(mut p) = plic.try_borrow_mut() {
                             p.set_source_level(u32::from(irq.source), pending);
                         }
+                        self.sample_irq_source(u32::from(irq.source), pending);
                     }
                 }
             }
@@ -1851,18 +1887,68 @@ impl KernelHost {
         // 表 68 的「valueWidth = 按端口位宽」。把它当单比特通道，
         // 32 个引脚就只剩 pin 0 有信息了（M-15 的 `gpio.rs` 头注释
         // 明确写了这条）。
+        // ---- IRQ 电平通道表：核 3 条 + 每台已接线设备 1 条 ----
+        //
+        // ⚠️ **按平台现算**：`peripheral_irqs` 是建图时从描述编译出来的
+        // ⇒ 产品视图新增器件 / 改中断号 ⇒ `rebuild_platform()` ⇒ 这里重跑
+        // ⇒ 波形自动多一条；删器件同理自动消失。
+        //
+        // ⚠️ `ch` 只是**内部键**（0..4 已被表 68 占，且 cause 与 PLIC 源号
+        // 会撞号）：核用 16/17/18，设备用 19 + 声明序号。对外身份是流 id
+        // （`irq.core.software` / `irq.dev.uart0`）与 label（`uart0 · IRQ 10`）。
+        let mut irq_defs: Vec<(u8, String, String, String)> = vec![
+            (
+                CH_IRQ_SOFTWARE,
+                IRQ_CORE_SOURCE.to_string(),
+                "software".to_string(),
+                IRQ_LABEL_SOFTWARE.to_string(),
+            ),
+            (
+                CH_IRQ_TIMER,
+                IRQ_CORE_SOURCE.to_string(),
+                "timer".to_string(),
+                IRQ_LABEL_TIMER.to_string(),
+            ),
+            (
+                CH_IRQ_EXTERNAL,
+                IRQ_CORE_SOURCE.to_string(),
+                "external".to_string(),
+                IRQ_LABEL_EXTERNAL.to_string(),
+            ),
+        ];
+        let mut irq_src_channels: Vec<(u32, u8)> = Vec::new();
+        for (i, irq) in self.peripheral_irqs.iter().enumerate() {
+            let ordinal = match u8::try_from(i) {
+                Ok(v) => v,
+                // 设备多到 `u8` 装不下是平台错误（不是运行时错误）⇒ 记一次
+                // 桥接失败，后面的设备不再建通道（可见，不静默）。
+                Err(_) => {
+                    self.probe_bridge_failures += 1;
+                    break;
+                }
+            };
+            let ch = CH_IRQ_SRC_BASE.saturating_add(ordinal);
+            irq_defs.push((
+                ch,
+                IRQ_DEV_SOURCE.to_string(),
+                irq.id.clone(),
+                irq_device_label(&irq.id, irq.source),
+            ));
+            irq_src_channels.push((u32::from(irq.source), ch));
+        }
+
         let shared = SharedPipeline::new({
             let mut p = WaveformPipeline::new();
             p.define_channel(
                 CH_GPIO0,
                 ChannelMeta::multi_bit(GPIO_SIGNAL_LABEL, GPIO_VALUE_WIDTH),
             );
-            // 中断脉冲通道（接缝 #5）—— 标签与 M-18 那一侧**逐字相同**
-            // （M-18 的流 id 是 `"{source}.{signal}"`）。
-            p.define_channel(
-                CH_IRQ_PULSE,
-                ChannelMeta::multi_bit(IRQ_PULSE_LABEL, IRQ_PULSE_VALUE_WIDTH),
-            );
+            // ⚠️ 中断通道一律 **single_bit**：注册表只在 0↔1 变化时发边沿
+            // ⇒ 画出来就是「有中断=1 / 没有=0」的阶梯，不会像旧脉冲通道
+            // 那样把**线号**当电平。
+            for (ch, _source, _signal, label) in irq_defs.iter() {
+                p.define_channel(*ch, ChannelMeta::single_bit(label.clone()));
+            }
             p
         });
 
@@ -1873,10 +1959,8 @@ impl KernelHost {
 
         // M-18 的通道定义（通道号与 M-19 的**必须**一致）。
         //
-        // ⚠️ 失败**不能静默吞掉**（V-A 检视 · 🟡-6）：通道没接上时，
-        // 波形视图就是空的，而宿主**一声不吭**。失败计入
-        // `probe_bridge_failures`，由 [`KernelHost::probe_bridge_failures`]
-        // 暴露。
+        // ⚠️ 失败**不能静默吞掉**：通道没接上时波形视图就是空的。失败计入
+        // `probe_bridge_failures`，由 [`KernelHost::probe_bridge_failures`] 暴露。
         if registry
             .borrow_mut()
             .define_channel(ChannelDef::multi_bit(
@@ -1890,21 +1974,14 @@ impl KernelHost {
             self.probe_bridge_failures += 1;
         }
 
-        // M-16 → M-18 的**中断脉冲**通道（接缝 #5 / 台账 D-26）。
-        //
-        // ⚠️ 通道**必须**注册成 `Pulse`：脉冲通道「每次观测都发」，
-        // 同一根线上的重复请求**不合并**（多比特通道会把第二次相同值
-        // 吞掉）。
-        if registry
-            .borrow_mut()
-            .define_channel(ChannelDef::pulse(
-                CH_IRQ_PULSE,
-                IRQ_PULSE_SOURCE,
-                IRQ_PULSE_SIGNAL,
-            ))
-            .is_err()
-        {
-            self.probe_bridge_failures += 1;
+        for (ch, source, signal, _label) in irq_defs.iter() {
+            if registry
+                .borrow_mut()
+                .define_channel(ChannelDef::single_bit(*ch, source.clone(), signal.clone()))
+                .is_err()
+            {
+                self.probe_bridge_failures += 1;
+            }
         }
 
         // 打开探针：master + 通道。
@@ -1913,29 +1990,54 @@ impl KernelHost {
             ..Default::default()
         };
         cfg.enable_channel(CH_GPIO0);
-        cfg.enable_channel(CH_IRQ_PULSE);
+        // ⚠️ 全部中断通道都**开着采样**：筛选是**前端**的事 —— 后端若按
+        // 勾选关采样，用户中途勾上一项就永远没有历史可看。
+        for (ch, _source, _signal, _label) in irq_defs.iter() {
+            cfg.enable_channel(*ch);
+        }
         registry.borrow_mut().set_rate(cfg);
+        self.irq_src_channels = irq_src_channels;
 
-        // M-16 的脉冲回调 → M-18 的 `sample_irq_pulse`。
+        // M-16 → M-18 的**电平**回调：抬线写 1、撤线写 0。
         //
-        // ⚠️ **不许在回调里回头碰控制器**：回调是在控制器**借出**的状态下
-        // 被调用的（`intc.request()` ⇒ `pulse_sink(now_ps, line)`），回头
-        // 碰控制器就是**自引用借用** ⇒ `RefCell` 争用 ⇒ panic。
+        // ⚠️ 为什么不是一条「脉冲」通道：脉冲把**线号当值**画 —— 既看不出
+        // 「有/无」，也表达不了「落了」。抬/撤两条回调合起来，每条线就有了
+        // 自己的 0/1 边沿流；注册表按值去重 ⇒ 重复请求不产生额外边沿。
         //
-        // ⚠️ 探针注册表被占用时**丢弃**这条脉冲（`try_borrow_mut`），不
-        // panic：M-18 的访存 hook 也是这么处理争用的。
-        let pulse_registry = Rc::clone(&registry);
-        let sink = Box::new(move |now_ps: u64, line: u16| {
-            let Ok(mut reg) = pulse_registry.try_borrow_mut() else {
+        // ⚠️ 回调里**不许回头碰控制器**（`request()` / `clear()` 期间控制器
+        // 是借出的）⇒ 只碰探针表，且 `try_borrow_mut` 争用时丢弃（与访存
+        // hook 同一口径）。
+        let rise_reg = Rc::clone(&registry);
+        let rise = Box::new(move |now_ps: u64, line: u16| {
+            let Some(ch) = irq_ch_for_line(line) else {
                 return;
             };
-            let _ = reg.sample_irq_pulse(now_ps, u64::from(line));
+            let Ok(mut reg) = rise_reg.try_borrow_mut() else {
+                return;
+            };
+            let _ = reg.sample(now_ps, ch, 1);
         });
         match self.intc.controller.try_borrow_mut() {
-            Ok(mut intc) => intc.set_pulse_sink(sink),
+            Ok(mut intc) => intc.set_pulse_sink(rise),
             Err(_) => {
-                // 控制器正被占用 ⇒ 脉冲回调**没装上**：这一轮的脉冲探针
-                // 不会有边沿。失败**可见**（计数器），不静默。
+                // 控制器正被占用 ⇒ 抬线回调没装上：这一轮不会上升沿。
+                self.probe_bridge_failures += 1;
+            }
+        }
+
+        let fall_reg = Rc::clone(&registry);
+        let fall = Box::new(move |now_ps: u64, line: u16| {
+            let Some(ch) = irq_ch_for_line(line) else {
+                return;
+            };
+            let Ok(mut reg) = fall_reg.try_borrow_mut() else {
+                return;
+            };
+            let _ = reg.sample(now_ps, ch, 0);
+        });
+        match self.intc.controller.try_borrow_mut() {
+            Ok(mut intc) => intc.set_clear_sink(fall),
+            Err(_) => {
                 self.probe_bridge_failures += 1;
             }
         }
@@ -1964,6 +2066,33 @@ impl KernelHost {
                 shared,
                 Rc::clone(&self.degrade_dispatch),
             )));
+    }
+
+    /// 采一次**设备级**中断电平（PLIC 网关电平），喂给该设备的 0/1 通道。
+    ///
+    /// ⚠️ **只在电平真的变了**才产生边沿（注册表按值去重）⇒ 每拍无条件调用
+    /// 即可，开销只多一次比较。
+    ///
+    /// ⚠️ 画的是**网关电平**（设备有没有在请求 PLIC），**不是**「核有没有
+    /// 看到」—— 后者是 `external · MEIP` 那条通道。PLIC 源落下**不 retract**
+    /// 已送进 PLIC 的请求（Renode 口径），所以两条通道**允许**不同步。
+    fn sample_irq_source(&self, source: u32, level: bool) {
+        let Some(ch) = self
+            .irq_src_channels
+            .iter()
+            .find(|(s, _)| *s == source)
+            .map(|(_, ch)| *ch)
+        else {
+            return;
+        };
+        let Some(registry) = self.probes.as_ref() else {
+            return;
+        };
+        let Ok(mut reg) = registry.try_borrow_mut() else {
+            return;
+        };
+        let now_ps = self.backend.engine().now_ps();
+        let _ = reg.sample(now_ps, ch, u64::from(level));
     }
 
     /// 给已映射的外设装上探针回调（M-18 `attach_signal`）。
@@ -2038,6 +2167,24 @@ impl KernelHost {
         let registry = self.probes.as_ref()?;
         let mut reg = registry.try_borrow_mut().ok()?;
         let mut wave = reg.drain_waveform();
+        // ⚠️ **标签在这一层补**：M-18 的 `ChannelDef` 只有 (source, signal)，
+        // 流 id 就是 `"{source}.{signal}"` ⇒ ⇒ 标签默认等于 id。而用户要的是
+        // **外设名 + 中断号**（`uart0 · IRQ 10`）⇒ ⇒ 这里按 id 反查板上的
+        // 中断表把它写上。**不动契约**（`WaveformStream.label` 本来就是给它
+        // 用的那个字段）。
+        for stream in wave.streams.iter_mut() {
+            if let Some(rest) = stream.id.strip_prefix("irq.dev.") {
+                if let Some(irq) = self.peripheral_irqs.iter().find(|i| i.id == rest) {
+                    stream.label = irq_device_label(&irq.id, irq.source);
+                }
+            } else if stream.id == "irq.core.software" {
+                stream.label = IRQ_LABEL_SOFTWARE.to_string();
+            } else if stream.id == "irq.core.timer" {
+                stream.label = IRQ_LABEL_TIMER.to_string();
+            } else if stream.id == "irq.core.external" {
+                stream.label = IRQ_LABEL_EXTERNAL.to_string();
+            }
+        }
         if wave.streams.is_empty() {
             return None;
         }

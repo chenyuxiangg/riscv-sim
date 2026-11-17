@@ -232,8 +232,13 @@ pub struct InterruptController {
     mtimecmp_ps: u64,
     /// 交付交接结构（LLD 评审 16-4：M-13 拉取式）。
     pending_delivery: Option<PendingIntr>,
-    /// 中断脉冲回调（→ M-18 `sample_irq_pulse`）。
+    /// 抬线回调（→ M-18 的 0/1 电平通道，写 1）。
     pulse_sink: Option<Box<dyn FnMut(u64, u16)>>,
+    /// 撤线回调（→ 同一条电平通道，写 0）。
+    ///
+    /// ⚠️ 与抬线回调**配对**：只有抬没有撤，波形就会永远停在 1 —— 那正是
+    /// 旧「脉冲通道」的毛病（它把线号当值画，看不出有没有落）。
+    clear_sink: Option<Box<dyn FnMut(u64, u16)>>,
     /// 最近一次 [`InterruptController::poll`] 收到的虚拟时间。
     ///
     /// ⚠️ **为什么需要它**：契约层的 [`InterruptSink::raise`] 只有
@@ -269,6 +274,7 @@ impl Default for InterruptController {
             mtimecmp_ps: 0,
             pending_delivery: None,
             pulse_sink: None,
+            clear_sink: None,
             last_now_ps: 0,
         }
     }
@@ -289,6 +295,7 @@ impl std::fmt::Debug for InterruptController {
             .field("mtimecmp_ps", &self.mtimecmp_ps)
             .field("pending_delivery", &self.pending_delivery)
             .field("has_pulse_sink", &self.pulse_sink.is_some())
+            .field("has_clear_sink", &self.clear_sink.is_some())
             .field("last_now_ps", &self.last_now_ps)
             .finish()
     }
@@ -366,6 +373,11 @@ impl InterruptController {
         }
         if self.pending_delivery.map(|d| d.line) == Some(line) {
             self.pending_delivery = None;
+        }
+        // 撤线边沿（写 0）。`clear()` 没有时间参数 ⇒ 用最近一次采样的虚拟
+        // 时间（与 `raise` 路径同一口径）。
+        if let Some(sink) = self.clear_sink.as_mut() {
+            sink(self.last_now_ps, line);
         }
     }
 
@@ -658,6 +670,12 @@ impl InterruptController {
     /// 请求**不发**脉冲）。
     pub fn set_pulse_sink(&mut self, sink: Box<dyn FnMut(u64, u16)>) {
         self.pulse_sink = Some(sink);
+    }
+
+    /// 安装「撤线」回调：`FnMut(now_ps, line)`。与 [`Self::set_pulse_sink`]
+    /// 成对使用，把同一条线画成 0/1 两个方向。
+    pub fn set_clear_sink(&mut self, sink: Box<dyn FnMut(u64, u16)>) {
+        self.clear_sink = Some(sink);
     }
 
     // ------------------------------------------------------------------

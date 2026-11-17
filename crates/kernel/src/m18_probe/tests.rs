@@ -29,7 +29,7 @@ use riscv_sim_contract::model::{Edge, TraceEvent};
 
 use crate::m14_bus::{AccessDir, BusAccess, BusWidth};
 use crate::m18_probe::{
-    channel::{ChannelDef, CH_GPIO0, CH_IRQ_PULSE, CH_KEY_STATE},
+    channel::{ChannelDef, CH_GPIO0, CH_KEY_STATE, CH_TIMER_CMP},
     registry::{ProbeError, ProbeRegistry, SampleCfg},
     trace_stream::TRACE_CAP,
 };
@@ -155,35 +155,51 @@ fn multi_bit_value_change_does_not_classify_edges() {
 
 #[test]
 fn pulse_channel_emits_every_event() {
+    // ⚠️ 这里钉的是**通道类型**的语义（Pulse 不按值去重），与具体信号无关。
+    // 中断已经改成**每根线一条 0/1 电平通道**，不再有"把线号当值"的脉冲
+    // 通道，所以用例改用一个测试专用通道号（2 现在空着）。
+    const CH_TEST_PULSE: u8 = 2;
     let mut reg = ProbeRegistry::new();
-    reg.define_channel(ChannelDef::pulse(CH_IRQ_PULSE, "M16", "irq_pulse"))
+    reg.define_channel(ChannelDef::pulse(CH_TEST_PULSE, "TEST", "pulse"))
         .unwrap();
     let mut cfg = default_cfg();
-    cfg.enable_channel(CH_IRQ_PULSE);
+    cfg.enable_channel(CH_TEST_PULSE);
     reg.set_rate(cfg);
 
-    // Same value, twice. Pulse must emit both times (the IRQ line
-    // is a "request happened" event, not a level signal).
-    let e1 = reg.sample(0, CH_IRQ_PULSE, 5).expect("pulse 1 emits");
+    // Same value, twice. Pulse must emit both times (an event that
+    // repeats is still an event).
+    let e1 = reg.sample(0, CH_TEST_PULSE, 5).expect("pulse 1 emits");
     let e2 = reg
-        .sample(1, CH_IRQ_PULSE, 5)
-        .expect("pulse 2 emits (same line)");
+        .sample(1, CH_TEST_PULSE, 5)
+        .expect("pulse 2 emits (same value)");
     let e3 = reg
-        .sample(2, CH_IRQ_PULSE, 7)
-        .expect("pulse 3 emits (different line)");
+        .sample(2, CH_TEST_PULSE, 7)
+        .expect("pulse 3 emits (different value)");
 
     assert_eq!(e1.t_ps, 0);
     assert_eq!(e2.t_ps, 1);
     assert_eq!(e3.t_ps, 2);
     assert_eq!(reg.edge_count(), 3);
+}
 
-    // `sample_irq_pulse` convenience routes to CH_IRQ_PULSE only
-    // if the channel is registered as Pulse. This exercises that
-    // path:
-    let e4 = reg
-        .sample_irq_pulse(3, 5)
-        .expect("irq_pulse convenience emits");
-    assert_eq!(e4.t_ps, 3);
+// ---------------------------------------------------------------------------
+// 4b. 电平通道（中断线用这种）：同值重复**不**发边沿
+// ---------------------------------------------------------------------------
+
+#[test]
+fn single_bit_level_channel_coalesces_same_value() {
+    let mut reg = ProbeRegistry::new();
+    reg.define_channel(ChannelDef::single_bit(CH_TIMER_CMP, "TEST", "level"))
+        .unwrap();
+    let mut cfg = default_cfg();
+    cfg.enable_channel(CH_TIMER_CMP);
+    reg.set_rate(cfg);
+
+    assert!(reg.sample(0, CH_TIMER_CMP, 1).is_some(), "0→1 发边沿");
+    assert!(reg.sample(1, CH_TIMER_CMP, 1).is_none(), "1→1 不发");
+    assert!(reg.sample(2, CH_TIMER_CMP, 0).is_some(), "1→0 发边沿");
+    assert!(reg.sample(3, CH_TIMER_CMP, 0).is_none(), "0→0 不发");
+    assert_eq!(reg.edge_count(), 2);
 }
 
 // ---------------------------------------------------------------------------

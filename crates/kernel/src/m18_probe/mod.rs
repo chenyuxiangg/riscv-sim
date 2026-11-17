@@ -34,8 +34,8 @@
 //! - **M-18 → M-19** (waveform handoff): [`ProbeRegistry::set_edge_sink`]
 //!   installs the downstream [`EdgeSink`](riscv_sim_contract::port::EdgeSink).
 //!
-//! The four default channel numbers (`CH_TIMER_CMP`, `CH_GPIO0`,
-//! `CH_IRQ_PULSE`, `CH_KEY_STATE`) come from M-18 v0.8 §2.1.1;
+//! The three default channel numbers (`CH_TIMER_CMP`, `CH_GPIO0`,
+//! `CH_KEY_STATE`) come from M-18 v0.8 §2.1.1;
 //! `CH_UART_TX` is an additional channel for the UART's per-byte TX
 //! event stream (the channel map is an open table, not a fixed array).
 //!
@@ -55,7 +55,8 @@ pub mod registry;
 pub mod trace_stream;
 
 pub use channel::{
-    ChannelDef, ChannelKind, CH_GPIO0, CH_IRQ_PULSE, CH_KEY_STATE, CH_TIMER_CMP, CH_UART_TX,
+    ChannelDef, ChannelKind, CH_GPIO0, CH_IRQ_EXTERNAL, CH_IRQ_SOFTWARE, CH_IRQ_SRC_BASE,
+    CH_IRQ_TIMER, CH_KEY_STATE, CH_TIMER_CMP, CH_UART_TX,
 };
 pub use registry::{ProbeError, ProbeRegistry, SampleCfg, EDGE_STORE_CAP};
 pub use trace_stream::{TraceStream, TRACE_CAP};
