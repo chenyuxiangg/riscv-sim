@@ -689,15 +689,20 @@ pub const CAUSE_MACHINE_TIMER: u32 = 7;
 /// Architectural `mcause` code — **machine external interrupt**.
 pub const CAUSE_MACHINE_EXTERNAL: u32 = 11;
 
-/// Interrupt line — UART receive-ready.
+/// Interrupt line — UART receive-ready (the platform's **external** line).
 ///
-/// Shares the `MEIE` bit with [`IRQ_UART_TX_EMPTY`]: M-mode has one
-/// external-interrupt bit, so the two UART lines cannot be enabled
-/// independently through `mie` (see [`mie_bit_for_line`]).
+/// ⚠️ **平台只有三根 hart 级中断线**：`1`（外部）/ `3`（定时器）/
+/// `4`（软件），与真机的 `MEIP` / `MTIP` / `MSIP` 一一对应。
+///
+/// ⚠️ **线 `2`（UART tx-empty）已删除**：真 16550 只有**一根** IRQ
+/// ⇒ TX-empty 与 RX **共用同一根线、同一个 `MEIE` 位**，靠 guest 读
+/// IIR / LSR 分辨；给 TX 单开一根 hart 引脚在架构上**不存在**（与
+/// [`std_irq_bit_for_line`] 的 RISC-V 位表也对不上）。
+///
+/// ⚠️ **线号 2 空缺，且不重排** —— 重排会让会话载荷
+/// （`M16IntcDto.raised` / `pending` / `active_irq`）与波形边沿里的
+/// 历史线段语义**漂移**；空缺比漂移便宜。
 pub const IRQ_UART_RX_READY: u16 = 1;
-
-/// Interrupt line — UART transmit-empty.
-pub const IRQ_UART_TX_EMPTY: u16 = 2;
 
 /// Interrupt line — timer compare expiry.
 ///
@@ -751,7 +756,7 @@ pub const NO_ACTIVE_IRQ: u16 = 0xFFFF;
 /// are a **third** space, and the delivery path needs the *cause* one.
 pub fn std_irq_bit_for_line(line: u16) -> Option<u32> {
     match line {
-        IRQ_UART_RX_READY | IRQ_UART_TX_EMPTY => Some(MIE_MEIE_BIT),
+        IRQ_UART_RX_READY => Some(MIE_MEIE_BIT),
         IRQ_TIMER_COMPARE => Some(MIE_MTIE_BIT),
         IRQ_SOFTWARE => Some(MIE_MSIE_BIT),
         _ => None,
@@ -866,7 +871,7 @@ pub fn irq_clear_mask_targets(mask: u32) -> Vec<u16> {
 pub fn arch_cause_for_line(line: u16) -> Option<u32> {
     match line {
         IRQ_TIMER_COMPARE => Some(CAUSE_MACHINE_TIMER),
-        IRQ_UART_RX_READY | IRQ_UART_TX_EMPTY => Some(CAUSE_MACHINE_EXTERNAL),
+        IRQ_UART_RX_READY => Some(CAUSE_MACHINE_EXTERNAL),
         IRQ_SOFTWARE => Some(CAUSE_MACHINE_SOFTWARE),
         _ => None,
     }
@@ -1673,9 +1678,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_uart_lines_share_the_external_interrupt_bit() {
+    fn the_uart_line_uses_the_external_interrupt_bit() {
         assert_eq!(mie_bit_for_line(IRQ_UART_RX_READY), Some(MIE_MEIE_BIT));
-        assert_eq!(mie_bit_for_line(IRQ_UART_TX_EMPTY), Some(MIE_MEIE_BIT));
+        // ⚠️ 线 2 已删除 ⇒ 只有**一根**外部线；这条用例钉住「不再有第二条」。
+        assert_eq!(mie_bit_for_line(2), None, "线 2 已退役，不得再有映射");
     }
 
     #[test]
@@ -2013,29 +2019,27 @@ mod tests {
     /// ⇒ 留作别名，但新名必须与旧名**逐线相等**。
     #[test]
     fn the_standard_irq_bit_table_serves_mie_and_mip_alike() {
-        for line in [IRQ_UART_RX_READY, IRQ_UART_TX_EMPTY, IRQ_TIMER_COMPARE] {
+        for line in [IRQ_UART_RX_READY, IRQ_TIMER_COMPARE, IRQ_SOFTWARE] {
             assert_eq!(
                 std_irq_bit_for_line(line),
                 mie_bit_for_line(line),
                 "线 {line} 的标准中断位号，两个入口必须一致"
             );
         }
-        // 位号本身钉死：**换一种写法**（例如把 UART 线分到不同位）也会红。
+        // 位号本身钉死：**换一种写法**（例如把外部线分到不同位）也会红。
         assert_eq!(std_irq_bit_for_line(IRQ_UART_RX_READY), Some(11));
-        assert_eq!(std_irq_bit_for_line(IRQ_UART_TX_EMPTY), Some(11));
         assert_eq!(std_irq_bit_for_line(IRQ_TIMER_COMPARE), Some(7));
+        assert_eq!(std_irq_bit_for_line(IRQ_SOFTWARE), Some(3));
+        // ⚠️ 线 2 已退役 ⇒ 不再有位号。
+        assert_eq!(std_irq_bit_for_line(2), None);
         assert_eq!(std_irq_bit_for_line(0), None);
     }
 
     /// 挂起的线 ⇒ `mip` 位掩码。
     ///
-    /// ⚠️ **线 1 与线 2 折叠成同一位**（两条 UART 线共用 `MEIP`）⇒
-    /// guest 读 `mip` **分辨不出**是哪条线挂起；线号只在投递时通过
-    /// `mcause = IRQ_BASE | line` 到达 guest。
-    ///
-    /// 这条用例把「折叠」钉死 —— 若哪天给两条 UART 线分了不同的位
-    /// （例如给 `MEIP` 之外再加一位），这里会红，而 guest 的行为差异
-    /// 需要**另一条**用例单独钉。
+    /// ⚠️ 线 2 删除后，**外部线只有 1 根** ⇒ `mip` 上只有 `MEIP` 一位；
+    /// 设备级分辨（UART RX / TX、CLINT / GPIO）全部在 guest 侧完成
+    /// （PLIC claim + 外设寄存器），不在 `mip` 上。
     #[test]
     fn pending_lines_project_onto_the_mip_bit_mask() {
         assert_eq!(
@@ -2044,20 +2048,15 @@ mod tests {
             "UART rx 线 ⇒ MEIP 位"
         );
         assert_eq!(
-            pending_lines_to_mip_mask(&[IRQ_UART_TX_EMPTY]),
-            1 << 11,
-            "UART tx 线与 rx 线共用 MEIP 位"
-        );
-        assert_eq!(
             pending_lines_to_mip_mask(&[IRQ_TIMER_COMPARE]),
             1 << 7,
             "定时器线 ⇒ MTIP 位"
         );
-        // 两条 UART 线**折叠成一位**（不是两位）。
+        // ⚠️ 退役的线 2 不得投影出任何位（不是「映射到 0 号位」）。
         assert_eq!(
-            pending_lines_to_mip_mask(&[IRQ_UART_RX_READY, IRQ_UART_TX_EMPTY]),
-            1 << 11,
-            "两条 UART 线必须折叠进同一位"
+            pending_lines_to_mip_mask(&[2]),
+            0,
+            "退役的线 2 不得投影出任何 mip 位"
         );
         assert_eq!(
             pending_lines_to_mip_mask(&[IRQ_UART_RX_READY, IRQ_TIMER_COMPARE]),
@@ -2086,9 +2085,10 @@ mod tests {
     #[test]
     fn the_architectural_cause_codes_are_not_the_internal_line_numbers() {
         // 内部线号 —— 平台自己的空间，**一个字都不能改**。
-        assert_eq!(IRQ_UART_RX_READY, 1, "内部线号：UART rx-ready");
-        assert_eq!(IRQ_UART_TX_EMPTY, 2, "内部线号：UART tx-empty");
+        assert_eq!(IRQ_UART_RX_READY, 1, "内部线号：外部（UART rx-ready）");
+        // ⚠️ 线 2 空缺：UART tx-empty 的 hart 引脚在架构上不存在，已退役。
         assert_eq!(IRQ_TIMER_COMPARE, 3, "内部线号：timer-compare");
+        assert_eq!(IRQ_SOFTWARE, 4, "内部线号：software（CLINT msip）");
 
         // 架构 cause 码 —— RISC-V 的空间。
         assert_eq!(CAUSE_MACHINE_SOFTWARE, 3, "架构码：机器软件中断");
@@ -2122,7 +2122,9 @@ mod tests {
     fn the_arch_cause_map_speaks_the_riscv_codes() {
         assert_eq!(arch_cause_for_line(IRQ_TIMER_COMPARE), Some(7));
         assert_eq!(arch_cause_for_line(IRQ_UART_RX_READY), Some(11));
-        assert_eq!(arch_cause_for_line(IRQ_UART_TX_EMPTY), Some(11));
+        assert_eq!(arch_cause_for_line(IRQ_SOFTWARE), Some(3));
+        // ⚠️ 线 2 已退役 ⇒ 没有架构 cause 码。
+        assert_eq!(arch_cause_for_line(2), None);
         // 没有架构 cause 码的线 —— 一律 `None`。
         assert_eq!(arch_cause_for_line(0), None);
         assert_eq!(arch_cause_for_line(9), None);
@@ -2146,9 +2148,9 @@ mod tests {
             "外部中断 ⇒ mcause = 0x8000_000B（架构码 11）"
         );
         assert_eq!(
-            arch_mcause_for_line(IRQ_UART_TX_EMPTY),
-            Some(0x8000_000B),
-            "外部中断 ⇒ mcause = 0x8000_000B（架构码 11）"
+            arch_mcause_for_line(IRQ_SOFTWARE),
+            Some(0x8000_0003),
+            "软件中断 ⇒ mcause = 0x8000_0003（架构码 3）"
         );
         assert_eq!(arch_mcause_for_line(9), None);
     }
@@ -2162,8 +2164,10 @@ mod tests {
     fn the_mie_bit_map_is_untouched_by_the_cause_map() {
         // 位号表本身。
         assert_eq!(std_irq_bit_for_line(IRQ_UART_RX_READY), Some(11));
-        assert_eq!(std_irq_bit_for_line(IRQ_UART_TX_EMPTY), Some(11));
         assert_eq!(std_irq_bit_for_line(IRQ_TIMER_COMPARE), Some(7));
+        assert_eq!(std_irq_bit_for_line(IRQ_SOFTWARE), Some(3));
+        // ⚠️ 线 2 已退役。
+        assert_eq!(std_irq_bit_for_line(2), None);
         assert_eq!(std_irq_bit_for_line(0), None);
         // `mip` 投影。
         assert_eq!(
@@ -2179,7 +2183,8 @@ mod tests {
         // ⚠️ **RISC-V 有意让 `mie` / `mip` 的位号 = 中断的 cause 号**
         // （MTIE 的位 7 = 定时器 cause 7；MEIE 的位 11 = 外部 cause 11）
         // ⇒ 这两个空间**数字上重合**，但它们**不是**平台的内部线号空间
-        // （`1 / 2 / 3`）。⇒ 平台报 cause 时**必须**查 cause 映射表，
+        // （`1 / 3 / 4`，线 2 退役后空缺）。⇒ 平台报 cause 时**必须**查
+        // cause 映射表，
         // 不能拿内部线号凑 —— 那正是本批修掉的缺陷。
         assert_eq!(MIE_MTIE_BIT, 7);
         assert_eq!(MIE_MEIE_BIT, 11);

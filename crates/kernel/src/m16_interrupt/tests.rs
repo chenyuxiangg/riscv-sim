@@ -12,7 +12,7 @@
 
 use super::*;
 use riscv_sim_contract::csr::{
-    IRQ_BASE, IRQ_SOFTWARE, IRQ_TIMER_COMPARE, IRQ_UART_RX_READY, IRQ_UART_TX_EMPTY, MIE_MEIE_BIT,
+    IRQ_BASE, IRQ_SOFTWARE, IRQ_TIMER_COMPARE, IRQ_UART_RX_READY, MIE_MEIE_BIT,
     MIE_MSIE_BIT, MIE_MTIE_BIT, MSTATUS_MIE_BIT, NO_ACTIVE_IRQ,
 };
 use riscv_sim_contract::session::SessionSnapshotDto;
@@ -154,19 +154,22 @@ fn the_software_line_is_delivered_with_the_architectural_cause_three() {
 #[test]
 fn equal_priority_lines_are_ordered_by_request_time() {
     let mut intc = InterruptController::new();
-    // 线 1 与线 2 的默认优先级**相同**（都是 1）。
+    // ⚠️ 线 2 退役后，优先级 1 只剩线 1 ⇒ 这里**显式**把软中断拉到 1，
+    // 造出「同优先级」这个前提（不再靠两条 UART 线）。
+    intc.set_priority(IRQ_SOFTWARE, 1);
     intc.request(IRQ_UART_RX_READY, 200, "uart", EDGE)
         .expect("request");
-    intc.request(IRQ_UART_TX_EMPTY, 100, "uart", EDGE)
+    intc.request(IRQ_SOFTWARE, 100, "clint", EDGE)
         .expect("request");
 
     let delivered = intc
-        .poll(300, MIE_EXTERNAL, MSTATUS_ON)
+        // ⚠️ 软中断要开 **MSIE** 位，只开 MEIE 的话它根本没使能。
+        .poll(300, MIE_EXTERNAL | MIE_SOFTWARE, MSTATUS_ON)
         .expect("poll")
         .expect("应当交付一条");
 
     assert_eq!(
-        delivered.line, IRQ_UART_TX_EMPTY,
+        delivered.line, IRQ_SOFTWARE,
         "同优先级取请求时刻**最早**的那条"
     );
 }
@@ -175,13 +178,14 @@ fn equal_priority_lines_are_ordered_by_request_time() {
 #[test]
 fn equal_priority_and_equal_time_lines_are_ordered_by_insert_seq() {
     let mut intc = InterruptController::new();
+    intc.set_priority(IRQ_SOFTWARE, 1);
     intc.request(IRQ_UART_RX_READY, 100, "uart", EDGE)
         .expect("request");
-    intc.request(IRQ_UART_TX_EMPTY, 100, "uart", EDGE)
+    intc.request(IRQ_SOFTWARE, 100, "clint", EDGE)
         .expect("request");
 
     let delivered = intc
-        .poll(300, MIE_EXTERNAL, MSTATUS_ON)
+        .poll(300, MIE_EXTERNAL | MIE_SOFTWARE, MSTATUS_ON)
         .expect("poll")
         .expect("应当交付一条");
 
@@ -344,15 +348,15 @@ fn the_quantum_boundary_refreshes_the_enable_mask_from_mie() {
     intc.poll(0, MIE_EXTERNAL, 0).expect("poll");
     assert_eq!(
         intc.enabled_mask(),
-        (1 << IRQ_UART_RX_READY) | (1 << IRQ_UART_TX_EMPTY),
-        "mie 的 bit 11 ⇒ 线 1 与线 2 的使能位"
+        1 << IRQ_UART_RX_READY,
+        "mie 的 bit 11 ⇒ 线 1 的使能位（线 2 已退役）"
     );
 
     intc.poll(1, MIE_TIMER, 0).expect("poll");
     assert_eq!(
         intc.enabled_mask(),
         1 << IRQ_TIMER_COMPARE,
-        "mie 的 bit 7 ⇒ 线 3 的使能位；外部位没开 ⇒ 线 1 / 2 被清掉"
+        "mie 的 bit 7 ⇒ 线 3 的使能位；外部位没开 ⇒ 线 1 被清掉"
     );
 }
 
@@ -481,12 +485,12 @@ fn the_pulse_callback_fires_once_per_registered_request() {
         .expect("request");
     intc.request(IRQ_UART_RX_READY, 43, "uart", EDGE)
         .expect("request");
-    intc.request(IRQ_UART_TX_EMPTY, 44, "uart", EDGE)
+    intc.request(IRQ_SOFTWARE, 44, "clint", EDGE)
         .expect("request");
 
     assert_eq!(
         *pulses.borrow(),
-        vec![(42, IRQ_UART_RX_READY), (44, IRQ_UART_TX_EMPTY)],
+        vec![(42, IRQ_UART_RX_READY), (44, IRQ_SOFTWARE)],
         "每条**真的登记**的挂起一条脉冲；被折叠的重复请求没有脉冲"
     );
 }
@@ -572,12 +576,11 @@ fn the_delivery_cause_encodes_the_interrupt_bit_and_the_architectural_code() {
 
 /// ⚠️ **外部线**交付时 `mcause` = 中断位 | **架构码 11**。
 ///
-/// 两条 UART 线（内部线号 1 / 2）都映射到**外部中断**（架构码 11）——
-/// M 模式只有**一个**外部中断位（`MEIE` = 11），两条 UART 线与 `MEIP`
-/// 一样共享它。
+/// 外部线（内部线号 1）映射到**外部中断**（架构码 11）—— M 模式只有
+/// **一个**外部中断位（`MEIE` = 11）；设备级分辨由 guest 自己读外设。
 #[test]
 fn an_external_line_is_delivered_with_the_architectural_external_cause() {
-    for line in [IRQ_UART_RX_READY, IRQ_UART_TX_EMPTY] {
+    for line in [IRQ_UART_RX_READY] {
         let mut intc = InterruptController::new();
         intc.request(line, 100, "uart", EDGE).expect("request");
 
@@ -676,14 +679,14 @@ fn take_intr_hands_out_exactly_what_poll_registered() {
 // 优先级表
 // ---------------------------------------------------------------------------
 
-/// 平台的**默认优先级**（STAGE-4 §1.2 的表）：线 3 = 2，线 1 / 2 = 1，
-/// 其它线 = 0。
+/// 平台的**默认优先级**（STAGE-4 §1.2 的表）：线 3 = 2，线 1 = 1，
+/// 其它线 = 0（线 2 已退役）。
 #[test]
 fn the_priority_table_falls_back_to_the_platform_defaults() {
     let intc = InterruptController::new();
     assert_eq!(intc.priority_of(IRQ_TIMER_COMPARE), 2);
     assert_eq!(intc.priority_of(IRQ_UART_RX_READY), 1);
-    assert_eq!(intc.priority_of(IRQ_UART_TX_EMPTY), 1);
+    assert_eq!(intc.priority_of(2), 0, "退役的线 2 回落到最低");
     assert_eq!(intc.priority_of(77), 0, "未知线回落 0（最低）");
 }
 
@@ -817,7 +820,7 @@ fn a_request_after_a_restore_continues_the_insert_sequence() {
     let mut fresh = InterruptController::new();
     fresh.load_state(&state);
     fresh
-        .request(IRQ_UART_TX_EMPTY, 200, "uart", EDGE)
+        .request(IRQ_SOFTWARE, 200, "clint", EDGE)
         .expect("request");
 
     let exported = fresh.export_state();

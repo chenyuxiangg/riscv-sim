@@ -127,7 +127,7 @@ ITCM : 0x80000000  60M      INIT : 0x83c00000  4M      DTCM : 0x84000000  64M
 ### 裁决 D · `mcause` 的中断码改成 **RISC-V 架构码**；内部线号空间与架构码空间**分离**
 
 **这是本批暴露出的平台真 bug**（不是缺功能）。现状：M-16 在交付时算
-`cause = IRQ_BASE | line`，而 `line` 是**内部线号**（`IRQ_UART_RX_READY=1` / `IRQ_UART_TX_EMPTY=2` / `IRQ_TIMER_COMPARE=3`）
+`cause = IRQ_BASE | line`，而 `line` 是**内部线号**（`IRQ_UART_RX_READY=1`（外部）/ `IRQ_TIMER_COMPARE=3` / `IRQ_SOFTWARE=4`；线 2 已退役）
 ⇒ 交给 guest 的 `mcause` 是 `0x8000_0001` / `0x8000_0002` / `0x8000_0003`。
 而 RISC-V 架构规定：**3** = 软件中断 / **7** = 机器定时器中断 / **11** = 机器外部中断。
 osz 的中断分发**完全依赖**这三个码（`kernel/base/trap/interrupt/include/interrupt.h`）⇒ 现在**一个都匹配不上**。
