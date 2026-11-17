@@ -548,3 +548,54 @@ fn gpio_pending_requires_edge_enable_to_reach_plic() {
         "有 pending 就必须抬 PLIC 源"
     );
 }
+
+/// **UART 的设备通道必须既有上升沿、也有下降沿**（v0.79 追问：
+/// 「为什么只观测到上升沿」的判别用例）。
+///
+/// 口径：16550 的 RX 中断是**电平**——源电平 = `IER.bit0 ∧ LSR.RX_VALID`。
+/// 所以「塞一个字节 ⇒ 抬线」与「guest 把 RBR 读空 ⇒ 落线」必须**都**在
+/// `irq.dev.uart0` 上留下边沿。只抬不落 ⇒ 用户看到的就是「一条永远为 1
+/// 的线」，那要么是固件没排空（语义如此），要么是本用例要抓的缺陷。
+#[test]
+fn the_uart_device_channel_falls_when_the_receive_buffer_is_drained() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_QEMU_VIRT)
+                .expect("内置 qemu-virt 必须存在"),
+            expected_revision: None,
+        },
+    );
+
+    let ch = host
+        .irq_src_channels
+        .iter()
+        .find(|(s, _)| *s == 10)
+        .map(|(_, ch)| *ch)
+        .expect("qemu-virt 的 UART0 是 PLIC 源 10 ⇒ 必须有设备通道");
+
+    // 固件侧：打开 RX 中断，来一个字节。
+    host.bus_mut()
+        .write(QEMU_VIRT_UART0_BASE + 1, BusWidth::Byte, 0x01)
+        .expect("guest 必须能写 UART 的 IER");
+    host.uart_receive(0x41);
+    host.sync_interrupts_now();
+    let after_rx = irq_level_edges(&host, ch);
+    assert_eq!(
+        after_rx.iter().map(|e| e.value).collect::<Vec<_>>(),
+        vec![1u64],
+        "来了一个字节 ⇒ 设备通道必须抬到 1"
+    );
+
+    // guest 侧：把 RBR 读走（读空 ⇒ LSR.RX_VALID 落）。
+    let _ = host.read_memory(QEMU_VIRT_UART0_BASE, WriteSize::Byte);
+
+    host.sync_interrupts_now();
+    let all = irq_level_edges(&host, ch);
+    assert_eq!(
+        all.iter().map(|e| e.value).collect::<Vec<_>>(),
+        vec![1u64, 0u64],
+        "读空之后 ⇒ 设备通道必须**落**到 0（这正是「只有上升沿」缺的那一半）"
+    );
+}
