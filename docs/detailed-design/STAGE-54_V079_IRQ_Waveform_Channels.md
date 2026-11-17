@@ -92,6 +92,8 @@ PLIC 源号按规范可到 1023。**对外身份是流 id 与 label，不是这�
 **口径**：旧文档正文保留原文作为历史记录，只在开头加「已被取代」的说明 —— 不当成事实来源，
 也不做无意义的全文重写。
 
+**云端归档**：`https://my.feishu.cn/file/FMpJb2mKFoiAzLxPSZdcNAFQn3P`（file_token `FMpJb2mKFoiAzLxPSZdcNAFQn3P`，size 26727，version `7709177917162392824`）。
+
 ## 10 剩余欠账
 
 - 门禁工具改造 R-1~R-4（分段重跑 / 失败即 dump / 采集通道 health check / wasm mtime 前置）仍欠；
