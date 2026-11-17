@@ -80,8 +80,19 @@ PLIC 源号按规范可到 1023。**对外身份是流 id 与 label，不是这�
 | D-46 | 通道 id 集合含 3 条核中断 + 每台设备；设备 label 必须是 `名字 · IRQ 号` |
 | 前端 | 分组 / 默认只勾核 / 合并保留选择 / 筛选区 HTML |
 
-## 9 已知欠账
+## 9 文档同步（已补齐）
 
-- `M-16_InterruptController.html` 与 `M-18_Probe.html` 仍是「中断脉冲 / `sample_irq_pulse`」
-  的旧表述（历史批次文档），需要一条 v0.79 修订；
-- `STAGE-4_Interrupt_Controller.md` 的 D-26 行同理。
+| 文档 | 处置 |
+| --- | --- |
+| 本规格（HTML 版） | `STAGE-54_V079_IRQ_Waveform_Channels.html`，由 `tools/build_stage54_doc.py` 数据驱动生成（13 表 + SVG 流程图 + 移动端视图） |
+| `M-16_InterruptController.html` | 版本行升 v1.8 + 第 1 章前插入 v0.79 修订说明（脉冲通道退役、`pulse_sink` 抬线 / `clear_sink` 撤线） |
+| `M-18_Probe.html` | 版本行升 v1.4 + 第 1 章前插入 v0.79 修订说明（18-2 脉冲通道退役、改单比特电平通道） |
+| `STAGE-4_Interrupt_Controller.md` | 台账上方加 v0.79 变更段；D-26 行标注「v0.79 起已退役」；顺带修一处未闭合的反引号 |
+
+**口径**：旧文档正文保留原文作为历史记录，只在开头加「已被取代」的说明 —— 不当成事实来源，
+也不做无意义的全文重写。
+
+## 10 剩余欠账
+
+- 门禁工具改造 R-1~R-4（分段重跑 / 失败即 dump / 采集通道 health check / wasm mtime 前置）仍欠；
+- 器件级二级通道（UART RX/TX 分开）本批明确不做。

@@ -5,6 +5,8 @@
 > **权威上位**：`docs/detailed-design/M-16_InterruptController.html`（LLD v1.4，本批更新为 v1.5）·
 > `docs/architecture/RISC-V_Architecture_Design.html`（AD v2.6.2）· `docs/module-design-spec/RISC-V_Module_Design_Specification.html`。
 > **台账**：`docs/reviews/REVIEWS.md` §1.2（**D-26 / D-59 / D-63 / D-64 / D-72 / D-74**）。
+
+> **v0.79 变更（2026-11-18 · STAGE-54）**：本文档中的「中断脉冲（D-26）」观测通道**已退役**，改为「每条中断一个 0/1 电平通道」——核 3 条（`software` / `timer` / `external`）+ 每台已接线设备 1 条（标签 `设备名 · IRQ 源号`）。M-16 侧接口：抬线写 1（`pulse_sink`）、撤线写 0（`clear_sink`）。**下文 D-26 及其关联条目保留原文作为历史记录**，现行口径见 `docs/detailed-design/STAGE-54_V079_IRQ_Waveform_Channels.md`。
 >
 > **前置**：`STAGE-2_Contract_V2.md`（契约层 v2 冻结规格）· `STAGE-3_Session_Snapshot.md`（会话快照六段载荷）。
 
@@ -142,7 +144,7 @@ csr 0x305 must be aligned
 
 | 条目 | 内容 | 本批怎么闭环 |
 | --- | --- | --- |
-| **D-26** | M-18 的 ch=2（中断脉冲）无生产者 | M-16 的 `request()` 每次登记挂起时**调一次脉冲回调** → 宿主把它接到 M-18 的 `sample_irq_pulse` |
+| **D-26**<br>（v0.79 起<b>已退役</b>：改为 0/1 电平通道，见 STAGE-54） | M-18 的 ch=2（中断脉冲）无生产者 | M-16 的 `request()` 每次登记挂起时**调一次脉冲回调** → 宿主把它接到 M-18 的 `sample_irq_pulse` |
 | **D-59** | `pause()` 语义要定 | 裁决 C：下一条指令边界停 |
 | **D-63** | 取指未对齐与访存未对齐共用 `TrapCause` | 裁决 B：拆三个变体（mcause 0 / 4 / 6） |
 | **D-64** | `mtval` 全平台不存在 | 裁决 A：落 CSR `0x343`（通用 CSR 文件）；陷阱投递时按 cause 写入（§3.5） |
@@ -318,7 +320,7 @@ pub struct InterruptController {
 1. **刷新使能**：对每个**已知** line（有 `mie_bit_for_line` 映射的）⇒ `enabled_mask` 的 bit L := `mie` 的对应位。**没有**映射的 line ⇒ **保持原值**（不静默清零）。
 2. **定时器轮询**：`mtime_ps := now_ps`；若 `mtime_ps >= mtimecmp_ps` 且 `mtimecmp_ps != 0` ⇒ 按**电平**语义 `request(timer-compare)`（**同线去重** ⇒ 不会堆积）。
 3. **单级嵌套防护**（LLD 评审 16-6）：`active_irq != 0xFFFF` ⇒ **直接返回 `None`**（不覆盖已交付的中断）。
-4. **候选筛选**：`pending` 里**挂起 ∧ `enabled_mask` 的 bit L 为 1`** 的项。
+4. **候选筛选**：`pending` 里**挂起 ∧ `enabled_mask` 的 bit L 为 1** 的项。
 5. **全局使能**：`mstatus.MIE` 为 0 ⇒ **返回 `None`**（保持挂起，不丢）。
 6. **仲裁**：取**最高优先级**；同优先级按 `(request_time_ps, insert_seq)` **升序**取第一个（确定性）。
 7. **登记交付**：`pending_delivery = Some(PendingIntr { line, cause: IRQ_BASE | line })`；`active_irq = line`。

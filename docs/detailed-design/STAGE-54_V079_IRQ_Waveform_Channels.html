@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STAGE-54 · v0.79 中断波形通道（每条中断一个 0/1 电平通道）</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='4' width='24' height='24' rx='3' fill='%231e3a8a'/%3E%3Crect x='9' y='9' width='14' height='14' rx='1.5' fill='%23f8fafc'/%3E%3C/svg%3E">
+<style>
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 18px; }
+.kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin:6px 0 22px; }
+.kpi { background:var(--head-bg); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+.kpi-n { font-size:22px; font-weight:900; color:var(--brand); line-height:1.2; }
+.kpi-t { font-size:13px; font-weight:700; color:#111827; margin-top:2px; }
+.kpi-d { font-size:12px; color:var(--ink-2); margin-top:3px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.body { margin:0 0 10px; text-align:justify; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px;
+  line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.caption { text-align:left; font-size:12.5px; color:var(--ink-2); margin:14px 0 4px; font-weight:700; }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.6; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  white-space:pre; margin:10px 0 16px; }
+.flow-svg { width:100%; height:auto; }
+.flow-mobile { display:none; }
+.flow-step { display:flex; gap:10px; margin:8px 0; align-items:flex-start; }
+.flow-step .num { flex:0 0 26px; height:26px; border-radius:50%; background:var(--brand);
+  color:#fff; font-weight:700; font-size:13px; display:flex; align-items:center; justify-content:center; }
+.flow-step .txt { font-size:14px; }
+.callout { display:flex; gap:8px; align-items:flex-start; background:#fffbeb; border:1px solid #fcd34d;
+  border-left-width:4px; border-radius:6px; padding:9px 12px; margin:12px 0 16px; }
+.callout-tag { flex:0 0 auto; font-weight:800; color:#92400e; font-size:13px; }
+.callout-txt { font-size:13.5px; color:#3f2d0a; }
+.list { margin:8px 0 14px; padding-left:20px; }
+.list li { margin:5px 0; font-size:14.5px; }
+.nav-toggle { margin:14px 0 4px; }
+.nav-toggle summary { cursor:pointer; font-weight:700; color:var(--brand);
+  padding:9px 12px; border:1px solid var(--line); border-radius:6px; background:var(--head-bg); list-style:none; }
+.nav-box { display:flex; flex-direction:column; gap:2px; padding:10px 4px 2px; }
+.nav-l1 { color:var(--brand); font-weight:700; text-decoration:none; padding:3px 4px; }
+.nav-l1:hover { color:var(--brand-2); text-decoration:underline; }
+.foot { margin:40px 0 8px; padding-top:10px; border-top:1px solid var(--line);
+  font-size:12.5px; color:#6b7280; }
+@media (max-width:767px) {
+  .flow-svg { display:none; }
+  .flow-mobile { display:block; }
+  .doc-table { font-size:12px; }
+  .kpis { grid-template-columns:repeat(2,1fr); }
+  .wrap { padding:12px; }
+  .doc-title { font-size:20px; }
+  .h-sec { font-size:18px; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1 class="doc-title">STAGE-54 · v0.79 中断波形通道（每条中断一个 0/1 电平通道）</h1>
+<p class="subtitle">RISC-V 仿真平台 · 波形可观测性改造 · 冻结规格</p>
+<p class="version">版本 v1.0 · 2026-11-18 · 分支 feature/irq-waveform-channels · 基线 1cd8b05</p>
+<div class="kpis"><div class="kpi"><div class="kpi-n">1</div><div class="kpi-t">条废弃通道</div><div class="kpi-d">「中断脉冲」把线号当电平画，已删除</div></div><div class="kpi"><div class="kpi-n">3</div><div class="kpi-t">条核中断通道</div><div class="kpi-d">software / timer / external</div></div><div class="kpi"><div class="kpi-n">1</div><div class="kpi-t">条/台设备</div><div class="kpi-d">按板上 irq_line 现算，加删器件自动跟随</div></div><div class="kpi"><div class="kpi-n">0</div><div class="kpi-t">处契约变更</div><div class="kpi-d">WaveformStream 本来就带 label</div></div></div>
+<details class="nav-toggle" open><summary>目录</summary><div class="nav-box"><a class="nav-l1" href="#s1">1 为什么要改：那条波形画的不是电平</a><a class="nav-l1" href="#s2">2 概念空间：三套编号不是一套</a><a class="nav-l1" href="#s3">3 通道表：核 3 条 + 每台设备 1 条</a><a class="nav-l1" href="#s4">4 通道号：内部键，不是身份</a><a class="nav-l1" href="#s5">5 采样路径：事件驱动，不轮询</a><a class="nav-l1" href="#s6">6 动态适应：产品视图加器件，波形自己长出来</a><a class="nav-l1" href="#s7">7 前端交互</a><a class="nav-l1" href="#s8">8 改动清单</a><a class="nav-l1" href="#s9">9 测试矩阵</a><a class="nav-l1" href="#s10">10 欠账与后续</a></div></details>
+<h2 class="h-sec" id="s1">1 为什么要改：那条波形画的不是电平</h2>
+<p class="body">现场现象：波形面板上只有一条 <b>M16.irq_pulse</b>，纵轴 1～3，常驻在 <b>3</b>，偶发短暂掉到 1。用户据此判断「波形初值是 3」——但 3 不是电平，是<b>中断线号</b>。</p>
+<pre class="code">第一帧实测
+{"t_ps":"2089000000","value":3}   // value = line，不是 level</pre>
+<p class="body">成因：M-16 在每次 <i>request()</i> 时调 <i>sample_irq_pulse(now_ps, u64::from(line))</i>，M-18 的脉冲通道（<i>pulse=true</i>）把 <i>line</i> 原样当采样值推给 M-19，M-19 按「值变才发边沿」记账 ⇒ 于是「3 一直没有变化」看起来像恒定的电平，而 UART 收到一帧时冒出 line=1 的脉冲。</p>
+<div class="callout"><span class="callout-tag">结</span><span class="callout-txt">论</span></div>
+<p class="caption">表 1 · 旧通道 vs 新通道</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:16%"><col style="width:26%"><col style="width:26%"><col style="width:32%"></colgroup><thead><tr><th></th><th>旧：中断脉冲</th><th>新：0/1 电平通道</th><th>用户得到什么</th></tr></thead><tbody><tr><td>值域</td><td>中断线号（1/3/4…），数值无上界</td><td>0 或 1（单比特，M-19 按值去重）</td><td>一眼看到「有/无」，不再被线号误导</td></tr><tr class="row1"><td>通道数</td><td>1 条（全部中断挤在一起）</td><td>3 条核 + 每台已接线设备 1 条</td><td>能分辨是哪根线、哪台设备</td></tr><tr><td>分辨率</td><td>只有「收到了一个事件」</td><td>每条通道各自抬/落</td><td>能看出中断挂起多久、何时被清</td></tr><tr class="row1"><td>筛选</td><td>无（就一条）</td><td>分组复选框 + 全选/仅核/清空</td><td>只留感兴趣的线，图例不糊</td></tr></tbody></table></div>
+<h2 class="h-sec" id="s2">2 概念空间：三套编号不是一套</h2>
+<p class="body">这次改动最容易踩的坑是「用一个数字表达两个身份」。本平台的编号分成三套，互相之间<b>只映射、不合并</b>。</p>
+<p class="caption">表 2 · 三套编号各自的含义</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:18%"><col style="width:14%"><col style="width:26%"><col style="width:42%"></colgroup><thead><tr><th>编号空间</th><th>取值（本平台）</th><th>谁在用</th><th>能不能拿来当通道身份</th></tr></thead><tbody><tr><td>L2 平台内部线号</td><td>1 / 3 / 4（线 2 已退役空缺）</td><td>M-16 的 pending 位、CLINT msip / mtimecmp 接线</td><td><b>不能</b>：只有 3 个值，装不下设备</td></tr><tr class="row1"><td>RISC-V cause</td><td>中断 3 / 7 / 11（bit31=1）</td><td>mcause、mip 的 MSIP/MTIP/MEIP 位</td><td><b>不能</b>：cause 11 与设备源 11 同数字，会撞</td></tr><tr><td>PLIC 源号</td><td>板上 <i>irq_line</i>，1..1023</td><td>PLIC 网关、设备请求</td><td><b>不能直接</b>：u8 的 ch 装不下 1023</td></tr></tbody></table></div>
+<div class="callout"><span class="callout-tag">对</span><span class="callout-txt">齐</span></div>
+<p class="caption">表 3 · 现行映射表（与代码常量一一对应）</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:20%"><col style="width:14%"><col style="width:18%"><col style="width:18%"><col style="width:24%"></colgroup><thead><tr><th>语义</th><th>L2 线号</th><th>mip 位</th><th>mcause</th><th>优先级</th></tr></thead><tbody><tr><td>timer（CLINT mtimecmp）</td><td>IRQ_TIMER_COMPARE = 3</td><td>MTIP 7</td><td>0x8000_0007</td><td>2（最高）</td></tr><tr class="row1"><td>external（PLIC）</td><td>IRQ_UART_RX_READY = 1（语义=外部）</td><td>MEIP 11</td><td>0x8000_000B</td><td>1</td></tr><tr><td>software（CLINT msip）</td><td>IRQ_SOFTWARE = 4</td><td>MSIP 3</td><td>0x8000_0003</td><td>0</td></tr><tr class="row1"><td>（退役）UART tx-empty</td><td>线 2 空缺、不重排</td><td>—</td><td>—</td><td>—</td></tr></tbody></table></div>
+<h2 class="h-sec" id="s3">3 通道表：核 3 条 + 每台设备 1 条</h2>
+<p class="caption">表 4 · 中断波形通道全集</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:12%"><col style="width:22%"><col style="width:22%"><col style="width:10%"><col style="width:28%"></colgroup><thead><tr><th>组</th><th>流 id</th><th>图例标签</th><th>值</th><th>边沿从哪来</th></tr></thead><tbody><tr><td>核</td><td><i>irq.core.software</i></td><td>software · IRQ 3</td><td>0/1</td><td>M-16 request() 抬 / clear() 落</td></tr><tr class="row1"><td>核</td><td><i>irq.core.timer</i></td><td>timer · IRQ 7</td><td>0/1</td><td>M-16 poll() 抬 / set_timer_compare() 落</td></tr><tr><td>核</td><td><i>irq.core.external</i></td><td>external · MEIP</td><td>0/1</td><td>宿主 sync_interrupts()：PLIC 有无可交付源</td></tr><tr class="row1"><td>外设</td><td><i>irq.dev.{id}</i></td><td>{id} · IRQ {source}</td><td>0/1</td><td>宿主在 Plic::set_source_level 处同步采样</td></tr></tbody></table></div>
+<div class="callout"><span class="callout-tag">为</span><span class="callout-txt">什</span></div>
+<p class="caption">表 5 · 设备通道的粒度（按用户拍板）</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:26%"><col style="width:22%"><col style="width:52%"></colgroup><thead><tr><th>粒度</th><th>结论</th><th>理由 / 代价</th></tr></thead><tbody><tr><td>每台已接线设备一条</td><td>采用</td><td>板级声明里 <i>irq_line</i> 就是 PLIC 源号，天然一一对应</td></tr><tr class="row1"><td>UART RX / TX 拆两条</td><td>不做</td><td>真 16550 只有一根 IRQ（同 MEIE 位）⇒ 物理上分不开；要分只能另开器件级二级通道，本批明确不做</td></tr><tr><td>PLIC 32 个源全建（含空线）</td><td>不做</td><td>空线永远不动，图例只会更糊</td></tr></tbody></table></div>
+<h2 class="h-sec" id="s4">4 通道号：内部键，不是身份</h2>
+<p class="body">M-18 的通道号是 <i>u8</i>，只作内部键使用。对外身份是<b>流 id 与图例标签</b>，前端与断言都不解析这个数字。</p>
+<p class="caption">表 6 · 通道号分配</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:18%"><col style="width:30%"><col style="width:52%"></colgroup><thead><tr><th>区间</th><th>用途</th><th>说明</th></tr></thead><tbody><tr><td>0～4</td><td>既有器件通道</td><td>TIM0.CMP / GPIO0.OUT / 空闲 / KEY0.IN / UART0.TX</td></tr><tr class="row1"><td>16 / 17 / 18</td><td>核中断</td><td>software / timer / external</td></tr><tr><td>19 + 声明序号</td><td>设备通道</td><td>按板上中断表顺序编号，随平台重建</td></tr></tbody></table></div>
+<div class="callout"><span class="callout-tag">为</span><span class="callout-txt">什</span></div>
+<h2 class="h-sec" id="s5">5 采样路径：事件驱动，不轮询</h2>
+<p class="body">单比特通道只在 0↔1 变化时产生边沿（M-19 按值去重）⇒ 重复请求不会刷边沿，长时间挂起也只占一个点。</p>
+
+<svg class="flow-svg" viewBox="0 0 1040 400" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="中断波形采样路径">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1e3a8a"/>
+    </marker>
+    <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9aa1af"/>
+    </marker>
+  </defs>
+  <!-- 设备行 -->
+  <rect x="20" y="40" width="200" height="76" rx="8" fill="#eef2fb" stroke="#c7d2e5"/>
+  <text x="120" y="70" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">外设（UART / GPIO）</text>
+  <text x="120" y="94" text-anchor="middle" font-size="12.5" fill="#4b5563">拉高自身 IRQ 电平</text>
+  <text x="120" y="112" text-anchor="middle" font-size="12.5" fill="#4b5563">（RX || TX，整块一个源）</text>
+
+  <line x1="222" y1="78" x2="316" y2="78" stroke="#1e3a8a" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="269" y="66" text-anchor="middle" font-size="12" fill="#1e3a8a">请求</text>
+
+  <!-- PLIC 网关 -->
+  <rect x="318" y="34" width="220" height="92" rx="8" fill="#fff7ed" stroke="#fdba74"/>
+  <text x="428" y="62" text-anchor="middle" font-size="15" font-weight="700" fill="#9a3412">PLIC 网关</text>
+  <text x="428" y="86" text-anchor="middle" font-size="12.5" fill="#4b5563">set_source_level(src, level)</text>
+  <text x="428" y="104" text-anchor="middle" font-size="12.5" fill="#4b5563">⇒ 设备通道写 level</text>
+  <text x="428" y="120" text-anchor="middle" font-size="12" fill="#9a3412">（网关电平，不 retract）</text>
+
+  <line x1="540" y1="78" x2="626" y2="78" stroke="#1e3a8a" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="583" y="66" text-anchor="middle" font-size="12" fill="#1e3a8a">可交付源</text>
+
+  <!-- 核 */
+  <rect x="628" y="30" width="222" height="104" rx="8" fill="#eef2fb" stroke="#c7d2e5"/>
+  <text x="739" y="58" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">hart（M 模式，3 根输入）</text>
+  <text x="739" y="82" text-anchor="middle" font-size="12.5" fill="#4b5563">MEIP ← PLIC ／ MTIP ← CLINT</text>
+  <text x="739" y="102" text-anchor="middle" font-size="12.5" fill="#4b5563">MSIP ← CLINT</text>
+  <text x="739" y="122" text-anchor="middle" font-size="12" fill="#1e3a8a">external / timer / software 三条通道</text>
+
+  <line x1="850" y1="78" x2="936" y2="78" stroke="#1e3a8a" stroke-width="2" marker-end="url(#ar)"/>
+
+  <!-- 波形 */
+  <rect x="938" y="40" width="86" height="76" rx="8" fill="#f0fdf4" stroke="#86efac"/>
+  <text x="981" y="70" text-anchor="middle" font-size="14" font-weight="700" fill="#166534">M-19</text>
+  <text x="981" y="90" text-anchor="middle" font-size="12" fill="#166534">波形回放</text>
+  <text x="981" y="108" text-anchor="middle" font-size="12" fill="#166534">0/1 阶梯</text>
+
+  <!-- 下半：M-16 登记 + 清除 -->
+  <rect x="318" y="200" width="220" height="92" rx="8" fill="#eef2fb" stroke="#c7d2e5"/>
+  <text x="428" y="228" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">M-16 中断控制器</text>
+  <text x="428" y="252" text-anchor="middle" font-size="12.5" fill="#4b5563">request(line) ⇒ 线通道 = 1</text>
+  <text x="428" y="270" text-anchor="middle" font-size="12.5" fill="#4b5563">clear() ⇒ 线通道 = 0</text>
+  <text x="428" y="286" text-anchor="middle" font-size="12" fill="#9a3412">（clear_sink：v0.79 新增）</text>
+
+  <path d="M739,136 L739,180 L540,246" fill="none" stroke="#9aa1af" stroke-width="1.8" marker-end="url(#ar2)"/>
+  <text x="668" y="212" text-anchor="middle" font-size="12" fill="#6b7280">登记 pending</text>
+
+  <path d="M428,294 L428,330 L739,330 L739,136" fill="none" stroke="#9aa1af" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#ar2)"/>
+  <text x="586" y="322" text-anchor="middle" font-size="12" fill="#6b7280">clear() 撤线 ⇒ 发 0 边沿</text>
+
+  <line x1="120" y1="118" x2="120" y2="246" stroke="#9aa1af" stroke-width="1.2" stroke-dasharray="5 4"/>
+  <path d="M120,246 L316,246" fill="none" stroke="#9aa1af" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#ar2)"/>
+  <text x="222" y="238" text-anchor="middle" font-size="12" fill="#6b7280">电平变化 → 设备通道</text>
+
+  <text x="20" y="378" font-size="12" fill="#6b7280">图注：实线 = 请求路径；虚线 = 清除/回写路径；橙色 = PLIC 网关（设备视角）；蓝色 = 核视角。</text>
+</svg>
+
+<div class="flow-mobile"><div class="flow-step"><span class="num">1</span><span class="txt">设备请求：UART/GPIO 拉高自身 IRQ 电平</span></div><div class="flow-step"><span class="num">2</span><span class="txt">PLIC 网关：set_source_level(src, 1) ⇒ 同步写设备通道 = 1</span></div><div class="flow-step"><span class="num">3</span><span class="txt">宿主裁决：deliverable_source() 有可交付源 ⇒ external 通道 = 1</span></div><div class="flow-step"><span class="num">4</span><span class="txt">M-16 登记：request(line) ⇒ 该线通道 = 1，等 M-17 在量子边界仲裁</span></div><div class="flow-step"><span class="num">5</span><span class="txt">清除：clear() ⇒ 该线通道 = 0；PLIC 源落下不 retract（Renode 口径）</span></div></div>
+<p class="caption">表 7 · 谁在什么时候写哪条通道</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:34%"><col style="width:18%"><col style="width:48%"></colgroup><thead><tr><th>事件</th><th>写谁</th><th>写什么 / 注意</th></tr></thead><tbody><tr><td>M-16 request() 真的登记挂起</td><td>对应线通道</td><td>写 1；被掩码丢弃的请求不算</td></tr><tr class="row1"><td>M-16 clear()</td><td>对应线通道</td><td>写 0；含 timer 撤线、软中断落、外部无可交付源</td></tr><tr><td>Plic::set_source_level(src, level)</td><td>该设备通道</td><td>写 level；这是<b>网关电平</b>，不是核视角</td></tr><tr class="row1"><td>设备改板 / 重装工程</td><td>整表重建</td><td>install_probe_pipeline() 按 peripheral_irqs 现算</td></tr></tbody></table></div>
+<div class="callout"><span class="callout-tag">两</span><span class="callout-txt">条</span></div>
+<h2 class="h-sec" id="s6">6 动态适应：产品视图加器件，波形自己长出来</h2>
+<p class="body">用户要求「在产品视图增加器件实例并分配中断号之后，波形视图动态适应」——这条链路本来就是现成的，本批只是把中断通道挂到它上面。</p>
+<p class="caption">表 8 · 重建链路（从上到下，一次改板全走完）</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:30%"><col style="width:34%"><col style="width:36%"></colgroup><thead><tr><th>步骤</th><th>入口</th><th>结果</th></tr></thead><tbody><tr><td>1 重装内存图</td><td>rebuild_platform() → reset_memory_map()</td><td>清掉旧段与旧外设实例</td></tr><tr class="row1"><td>2 重编译中断表</td><td>map_memory() → compile_peripheral_irqs()</td><td>peripheral_irqs 变成新板的设备→源号</td></tr><tr><td>3 重装 tick</td><td>install_peripheral_ticker()</td><td>新器件实例拿到时间驱动</td></tr><tr class="row1"><td>4 重装探针管道</td><td>install_probe_pipeline()</td><td>中断通道按新表重建（多/少几条）</td></tr><tr><td>5 装外设探针</td><td>attach_peripheral_probes()</td><td>器件级信号（GPIO0.OUT 等）重新挂上</td></tr></tbody></table></div>
+<p class="caption">表 9 · 前端如何不丢勾选</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:26%"><col style="width:34%"><col style="width:40%"></colgroup><thead><tr><th>状态</th><th>键</th><th>行为</th></tr></thead><tbody><tr><td>用户勾选</td><td>流 id（如 irq.dev.uart0）</td><td>按 id 保留；不按序号、不按位置</td></tr><tr class="row1"><td>新出现的通道</td><td>默认值</td><td>核中断默认勾，外设默认不勾</td></tr><tr><td>消失的通道</td><td>—</td><td>静默丢弃，不报错</td></tr><tr class="row1"><td>非中断通道</td><td>—</td><td>保持可见（GPIO0.OUT 等不受筛选影响）</td></tr></tbody></table></div>
+<h2 class="h-sec" id="s7">7 前端交互</h2>
+<p class="caption">表 10 · 筛选条元素</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:20%"><col style="width:26%"><col style="width:54%"></colgroup><thead><tr><th>元素</th><th>位置</th><th>行为</th></tr></thead><tbody><tr><td>分组</td><td>核中断 / 外设中断</td><td>按流 id 前缀分组，不靠标签文本猜</td></tr><tr class="row1"><td>复选框</td><td>每条通道一项</td><td>显示通道标签 + 边沿条数（N edges）</td></tr><tr><td>快捷按钮</td><td>全选 / 仅核 / 清空</td><td>同步刷新 DOM 复选框状态</td></tr><tr class="row1"><td>默认</td><td>打开即生效</td><td>核 3 条勾选；外设全部不勾</td></tr></tbody></table></div>
+<p class="caption">表 11 · 重画策略</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:24%"><col style="width:34%"><col style="width:42%"></colgroup><thead><tr><th>动作</th><th>做什么</th><th>为什么</th></tr></thead><tbody><tr><td>勾选变化</td><td>只重算 ECharts option</td><td>不重新 dump 边沿，避免把历史刷掉</td></tr><tr class="row1"><td>新数据到达</td><td>按当前可见集重画</td><td>隐藏通道不参与渲染，但不丢数据</td></tr><tr><td>自报属性</td><td>同步 data-wave-chart-*</td><td>门禁脚本与回归用例可断言</td></tr></tbody></table></div>
+<h2 class="h-sec" id="s8">8 改动清单</h2>
+<p class="caption">表 12 · 文件级改动</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:40%"><col style="width:60%"></colgroup><thead><tr><th>文件</th><th>改了什么</th></tr></thead><tbody><tr><td>crates/kernel/src/m18_probe/channel.rs</td><td>删 CH_IRQ_PULSE；新增 16/17/18 与设备基址 19</td></tr><tr class="row1"><td>crates/kernel/src/m18_probe/registry.rs</td><td>删 sample_irq_pulse（脉冲语义整体退役）</td></tr><tr><td>crates/kernel/src/m16_interrupt/mod.rs</td><td>新增 clear_sink：clear() 时发 0 边沿</td></tr><tr class="row1"><td>crates/kernel/src/kernel_host/mod.rs</td><td>标签常量、irq_ch_for_line、irq_src_channels、sample_irq_source、waveform_event 补标签</td></tr><tr><td>front/views/components/wave-chart.js</td><td>分组/默认选择/合并/可见集/筛选区 HTML</td></tr><tr class="row1"><td>front/views/m02_viewcomponents.js</td><td>筛选状态、_redrawWaveChart、两个命令分支</td></tr><tr><td>front/style.css</td><td>.wave-filter 样式（限高滚动，不撑爆面板）</td></tr><tr class="row1"><td>front/tests/wave-irq-filter.test.mjs</td><td>新增 8 条纯函数用例</td></tr></tbody></table></div>
+<h2 class="h-sec" id="s9">9 测试矩阵</h2>
+<p class="caption">表 13 · 验证结果（本批实测）</p>
+<div class="tbl-wrap"><table class="doc-table wide"><colgroup><col style="width:26%"><col style="width:26%"><col style="width:16%"><col style="width:32%"></colgroup><thead><tr><th>层</th><th>用例</th><th>结果</th><th>钉住什么</th></tr></thead><tbody><tr><td>M-18</td><td>single_bit_level_channel_coalesces_same_value</td><td>通过</td><td>0→1 发、1→1 不发、1→0 发、0→0 不发</td></tr><tr class="row1"><td>M-16 → M-18</td><td>one_request_produces_exactly_one_level_edge</td><td>通过</td><td>一次 request() 恰好一条 0→1，值为 1 而不是线号</td></tr><tr><td>D-46</td><td>中断通道集合与标签格式</td><td>通过</td><td>核 3 条必在；设备标签必须是「名 · IRQ 号」</td></tr><tr class="row1"><td>前端</td><td>wave-irq-filter.test.mjs</td><td>8/8</td><td>分组 / 默认只勾核 / 合并保选 / 筛选区 HTML</td></tr><tr><td>全量</td><td>cargo test --workspace</td><td>通过</td><td>lib 1449、contract 281、d46 15/15</td></tr><tr class="row1"><td>门禁</td><td>check-front.sh + stage14/16 + error_code + doc_check</td><td>通过</td><td>静态服务与文档口径</td></tr></tbody></table></div>
+<h2 class="h-sec" id="s10">10 欠账与后续</h2>
+<ul class="list"><li><b>M-16 / M-18 的 HTML 详设</b>：本批已在原位加了 v0.79 修订说明（旧表述保留并标注取代），彻底改写要等这两份文档下一次整体改版。</li><li><b>STAGE-4 的 D-26</b>：同上，已补「v0.79 取消中间信号」一行。</li><li><b>门禁工具改造 R-1~R-4</b>（分段重跑 / 失败即 dump / 采集通道 health check / wasm mtime 前置）仍欠。</li><li><b>器件级二级通道</b>（UART RX/TX 分开）：本批明确不做，若将来要分，需在器件层开子通道。</li></ul>
+<div class="callout"><span class="callout-tag">一</span><span class="callout-txt">条</span></div>
+<p class="foot">本文件由 <b>tools/build_stage54_doc.py</b> 数据驱动生成；改内容请改脚本后重跑，
+不要手改 HTML。冻结规格的 Markdown 副本见 STAGE-54_V079_IRQ_Waveform_Channels.md。</p>
+</div>
+</body>
+</html>
