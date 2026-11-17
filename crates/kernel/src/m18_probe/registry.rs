@@ -607,7 +607,7 @@ impl ProbeRegistry {
 
     /// Direct `sample()` call (M-18 v0.8 §3.3, table 69). The
     /// central edge-judgment function; every other entry point
-    /// (`record_signal`, `record_irq_pulse`, future timers) routes
+    /// (`record_signal`, IRQ level channels, future timers) routes
     /// through here.
     ///
     /// Returns the emitted edge event, or `None` if the observation
@@ -615,44 +615,6 @@ impl ProbeRegistry {
     /// same-value repeat on a non-pulse channel).
     pub fn sample(&mut self, time_ps: u64, ch: u8, value: u64) -> Option<Edge> {
         self.sample_inner(time_ps, ch, value)
-    }
-
-    /// `sample()` for the IRQ-pulse channel (M-18 v0.8 §3.5, N2).
-    /// Same semantics as the general `sample`; the convenience
-    /// exists so the call site reads "irq_pulse" instead of a
-    /// bare channel number.
-    ///
-    /// **Preconditions (M-18 review #7, 2026-10-19):**
-    ///
-    /// The caller must have previously invoked
-    /// [`Self::define_channel`] with `ch == CH_IRQ_PULSE` and
-    /// `kind == ChannelKind::Pulse`. If the channel is undefined
-    /// or registered with a non-pulse kind, this method silently
-    /// returns `None` — there is no way to distinguish "no pulse
-    /// arrived" from "channel not registered". This is by design
-    /// (the registry does not auto-create channels to keep channel
-    /// ownership explicit), but callers should set up the channel
-    /// once at boot and not rely on the silent no-op path.
-    pub fn sample_irq_pulse(&mut self, time_ps: u64, irq_line: u64) -> Option<Edge> {
-        // CH_IRQ_PULSE must be defined as a pulse channel for this
-        // to be meaningful. The edge judgment rules (pulse → always
-        // emit) do not depend on the channel being registered as
-        // Pulse, only on `kind == Pulse`; we re-check that here for
-        // the no-channel case.
-        let kind = self
-            .channels
-            .get(&super::channel::CH_IRQ_PULSE)
-            .map(|d| d.kind);
-        match kind {
-            Some(ChannelKind::Pulse) => {
-                self.sample_inner(time_ps, super::channel::CH_IRQ_PULSE, irq_line)
-            }
-            // If the caller forgot to register the pulse channel we
-            // surface a no-op rather than emit on an undefined
-            // channel. The registry does not auto-register to keep
-            // channel ownership explicit.
-            _ => None,
-        }
     }
 
     fn sample_inner(&mut self, time_ps: u64, ch: u8, value: u64) -> Option<Edge> {

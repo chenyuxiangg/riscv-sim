@@ -63,11 +63,12 @@ use riscv_sim_kernel::kernel_host::DEMO_FIRMWARE_BYTES as DEMO_BYTES;
 /// demo 固件写的 GPIO 通道 id（M-18 的 `"{source}.{signal}"`）。
 const GPIO_STREAM_ID: &str = "GPIO0.OUT";
 
-/// **中断脉冲**通道 id（M-16 → M-18，接缝 #5 / 台账 D-26）。
-///
-/// ⚠️ v0.19 起**多了一条**通道：M-16 每次登记一条挂起中断都会发一个
-/// 脉冲，M-18 的 `CH_IRQ_PULSE` 通道把它收下来。
-const IRQ_PULSE_STREAM_ID: &str = "M16.irq_pulse";
+/// 三条**核中断**通道的流 id（v0.78：每条中断一个 0/1 通道）。
+const IRQ_CORE_STREAM_IDS: [&str; 3] = [
+    "irq.core.software",
+    "irq.core.timer",
+    "irq.core.external",
+];
 
 /// 固件里那条 `sw x6, 4(x5)` 所在的指令序号（1 起）——第 8 条。
 const GPIO_WRITE_INSTRUCTION: u32 = 8;
@@ -247,27 +248,34 @@ fn the_channel_id_is_the_peripheral_id_plus_the_signal_name() {
     );
     let wave = last_probe_waveform(&events).expect("订阅后必须推一条波形");
     let ids: Vec<&str> = wave.streams.iter().map(|s| s.id.as_str()).collect();
-    // ⚠️ **两条**通道（v0.19 起）：GPIO 的 `OUT` 与**中断脉冲**
-    // （接缝 #5 / D-26）。两条的 id 都是 `"{source}.{signal}"`。
-    assert_eq!(
-        ids,
-        vec![GPIO_STREAM_ID, IRQ_PULSE_STREAM_ID],
-        "通道 id 必须是 `{{source}}.{{signal}}`：{ids:?}"
+    // ⚠️ **v0.78**：GPIO 的 `OUT` + 3 条核中断 + 每台已接线设备 1 条。
+    // 通道 id 一律是 `"{source}.{signal}"`。
+    assert!(
+        ids.contains(&GPIO_STREAM_ID),
+        "GPIO 通道必须在：{ids:?}"
     );
+    for id in IRQ_CORE_STREAM_IDS {
+        assert!(ids.contains(&id), "核中断通道 {id} 必须在：{ids:?}");
+    }
+    let dev_channels = ids.iter().filter(|id| id.starts_with("irq.dev.")).count();
+    assert!(dev_channels > 0, "至少一台已接线设备要有通道：{ids:?}");
     assert_eq!(
         GPIO_STREAM_ID,
         format!("{GPIO_PERIPH_ID}.{GPIO_SIGNAL_NAME}"),
         "通道 id 的两段必须真的是外设 id 与信号名"
     );
-    assert_eq!(
-        IRQ_PULSE_STREAM_ID,
-        format!(
-            "{}.{}",
-            riscv_sim_kernel::kernel_host::IRQ_PULSE_SOURCE,
-            riscv_sim_kernel::kernel_host::IRQ_PULSE_SIGNAL
-        ),
-        "中断脉冲通道的 id 必须也是 `{{source}}.{{signal}}`"
-    );
+    // 设备通道的**标签**必须是「外设名 + 中断号」（用户要的那一列）：
+    // `"{device} · IRQ {source}"`。这里不绑定具体设备名 —— 默认板挂的是
+    // 哪台设备是板的事，**格式**才是这条用例的不变量。
+    for s in wave.streams.iter().filter(|s| s.id.starts_with("irq.dev.")) {
+        let signal = s.id.trim_start_matches("irq.dev.");
+        assert!(
+            s.label.starts_with(signal) && s.label.contains(" · IRQ "),
+            "设备通道标签必须是「外设名 · IRQ 号」：id={} label={}",
+            s.id,
+            s.label
+        );
+    }
 }
 
 #[test]

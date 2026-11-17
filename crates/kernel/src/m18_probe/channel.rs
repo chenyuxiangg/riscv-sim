@@ -18,8 +18,23 @@ use riscv_sim_contract::model::EdgeKind;
 /// treats the channel map as an open table.
 pub const CH_TIMER_CMP: u8 = 0;
 pub const CH_GPIO0: u8 = 1;
-pub const CH_IRQ_PULSE: u8 = 2;
 pub const CH_KEY_STATE: u8 = 3;
+
+/// 核中断电平通道（**内部键**，UI 不解析这些数字）。
+///
+/// ⚠️ 为什么另开一段而不是直接用 cause 码：`ch` 是 `u8`，且核中断的
+/// cause 与外设的 PLIC 源号**会撞号**（cause 11 与源 11、cause 3 与
+/// 源 3）⇒ 同一张表里必须有无歧义的键。对外身份一律是流 id
+/// （`irq.core.software` / `irq.dev.uart0`）与 label。
+pub const CH_IRQ_SOFTWARE: u8 = 16;
+/// 定时器中断电平通道（cause 7 / 线 3）。
+pub const CH_IRQ_TIMER: u8 = 17;
+/// 外部中断电平通道（cause 11 / 线 1，PLIC 汇总）。
+pub const CH_IRQ_EXTERNAL: u8 = 18;
+/// 外设中断电平通道基址：`CH_IRQ_SRC_BASE + 设备声明序号`（0 起）。
+///
+/// ⚠️ 用**声明序号**而不是 PLIC 源号：源号按规范可到 1023，塞不进 `u8`。
+pub const CH_IRQ_SRC_BASE: u8 = 19;
 
 /// UART TX byte channel (D-12).
 ///

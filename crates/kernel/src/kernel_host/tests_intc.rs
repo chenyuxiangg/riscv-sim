@@ -22,7 +22,7 @@ use riscv_sim_contract::protocol::{CommandPayload, EventPayload, Message};
 
 use super::{KernelHost, DEMO_FIRMWARE_BYTES, IRQ_UART_RX_READY, QEMU_VIRT_UART0_BASE};
 use crate::m17_backend::IRQ_FIRMWARE_BYTES;
-use crate::m18_probe::CH_IRQ_PULSE;
+use crate::m18_probe::CH_IRQ_EXTERNAL;
 
 /// 造一个挂着 demo 固件的工程（与 D-46 那套夹具同形，但**不共享**——
 /// 那个文件不在本 lane 的所有权里）。
@@ -45,35 +45,35 @@ fn dispatch(host: &mut KernelHost, cmd: CommandPayload) -> Vec<EventPayload> {
     host.handle_message(&Message::command(1, cmd))
 }
 
-/// M-18 收到的 `irq_pulse` 边沿（**不**排空，只是看）。
-fn irq_pulse_edges(host: &KernelHost) -> Vec<Edge> {
+/// 某条核中断通道收到的**电平**边沿（不排空，只是看）。
+fn irq_level_edges(host: &KernelHost, ch: u8) -> Vec<Edge> {
     let registry = host.probes.as_ref().expect("探针注册表必须装上");
-    registry.borrow().edges_for(CH_IRQ_PULSE).to_vec()
+    registry.borrow().edges_for(ch).to_vec()
 }
 
-/// 一次 `request()` ⇒ M-18 收到**恰好一条** `irq_pulse` 边沿（验收 30）。
+/// 一次 `request()` ⇒ 该线自己的电平通道收到**恰好一条** 0→1 边沿。
 ///
-/// ⚠️ **判别力**：脉冲回调没装上、或者通道没注册成 `Pulse`，M-18 就
-/// **一条边沿都收不到**（`sample_irq_pulse` 对未注册的通道返回
-/// `None`）——这条断言当场变红。
+/// ⚠️ **判别力**：抬线回调没装上、或通道没注册成 `SingleBit`，就一条
+/// 边沿都收不到；值必须是 **1**（电平），**不是线号** —— 旧脉冲通道
+/// 把线号当值画，正是这次要消掉的东西。
 #[test]
-fn one_request_produces_exactly_one_irq_pulse_edge() {
+fn one_request_produces_exactly_one_level_edge() {
     let mut host = KernelHost::new();
     assert!(
-        irq_pulse_edges(&host).is_empty(),
+        irq_level_edges(&host, CH_IRQ_EXTERNAL).is_empty(),
         "还没请求过中断，边沿必须是空的"
     );
 
     host.raise_irq(1).expect("raise irq");
 
-    let edges = irq_pulse_edges(&host);
+    let edges = irq_level_edges(&host, CH_IRQ_EXTERNAL);
     assert_eq!(
         edges.len(),
         1,
-        "一次 request() 必须产生**恰好一条** irq_pulse 边沿，实际 {} 条",
+        "一次 request() 必须产生**恰好一条**电平边沿，实际 {} 条",
         edges.len()
     );
-    assert_eq!(edges[0].value, 1, "脉冲的「值」是中断线号");
+    assert_eq!(edges[0].value, 1, "电平通道的值是 1（有中断），不是线号");
 }
 
 /// 装上工程（换总线、换探针注册表）之后，脉冲回调**必须还在**。
@@ -81,7 +81,7 @@ fn one_request_produces_exactly_one_irq_pulse_edge() {
 /// ⚠️ D-46 的教训：「`LoadProject` 之后管道仍在」——换平台会重建整条
 /// 探针管道，脉冲回调是其中一环。
 #[test]
-fn the_pulse_sink_survives_a_project_reload() {
+fn the_level_sink_survives_a_project_reload() {
     let mut host = KernelHost::new();
     // ⚠️ **v0.76（STAGE-52 · B1）**：无用户板装载被拒（`E_PLT-22`）⇒ ⇒
     //   测试前置条件改为**显式配一块默认板**（装载语义不变）。
@@ -98,9 +98,9 @@ fn the_pulse_sink_survives_a_project_reload() {
     host.raise_irq(1).expect("raise irq");
 
     assert_eq!(
-        irq_pulse_edges(&host).len(),
+        irq_level_edges(&host, CH_IRQ_EXTERNAL).len(),
         1,
-        "装工程之后脉冲回调必须还在（换平台会重建探针管道）"
+        "装工程之后电平回调必须还在（换平台会重建探针管道）"
     );
 }
 

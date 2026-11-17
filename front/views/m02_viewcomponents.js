@@ -53,7 +53,15 @@ import {
 } from "../lib/trace-switch.js";
 // ⚠️ **波形图的纯函数 + 片段**（STAGE-36 · v0.51 批）⇒ ⇒ option 的构造
 // **不碰 DOM** ⇒ ⇒ Node 侧零 DOM 就能测「画的是不是真数据」。
-import { buildWaveOption, canDrawChart, resolveWaveTheme, waveChartHtml } from "./components/wave-chart.js";
+import {
+    buildWaveOption,
+    canDrawChart,
+    groupIrqChannels,
+    mergeIrqSelection,
+    resolveWaveTheme,
+    visibleChannels,
+    waveChartHtml,
+} from "./components/wave-chart.js";
 // ⚠️ **终端屏幕仿真**（STAGE-41 · v0.56）：guest 的 shell 是**行编辑器**
 // （每敲一个键就把整行重画一遍）⇒ ⇒ 字节流里同一个提示符出现 N 次 ⇒ ⇒
 // **真实终端**只显示一行 ⇒ ⇒ 本平台此前把字节流**原样**塞进 `<pre>`
@@ -2129,9 +2137,16 @@ const waveformView = register({
      * @type {string|null}
      */
     _chartSize: null,
+    /** 中断通道筛选状态（键 = 流 id ⇒ ⇒ 平台变更不丢选择）。 */
+    _selected: null,
+    /** 上一次的通道表（重画时不重新取 view state）。 */
+    _lastChannels: [],
     render(state) {
         const wave = state?.wave ?? {};
         const channels = wave.channels ?? [];
+        const selected = mergeIrqSelection(waveformView._selected, channels);
+        waveformView._selected = selected;
+        waveformView._lastChannels = channels;
         return `
             <section class="waveform">
                 <div class="card">
@@ -2160,6 +2175,7 @@ const waveformView = register({
                     ${waveChartHtml({
                         status: wave.chart?.status ?? "idle",
                         channels,
+                        selected,
                     })}
                 </div>
             </section>
@@ -2213,7 +2229,8 @@ const waveformView = register({
         //   ⇒ ⇒ 不然这条护栏只能靠「真机恰好撞上那个时序」才有人管。
         if (!canDrawChart(w, h)) return;
 
-        const channels = state?.wave?.channels ?? [];
+        // ⚠️ 图上只画**筛选后**的通道（默认只画核中断）。
+        const channels = visibleChannels(state?.wave?.channels ?? [], waveformView._selected);
         // ⚠️ **颜色从 CSS 令牌来**（`resolveWaveTheme`）⇒ ⇒ echarts 画在
         //   canvas 上 ⇒ ⇒ canvas 里的文字**不受 CSS 管** ⇒ ⇒ 默认的深灰字压
         //   深底 ⇒ ⇒ 看不见 ⇒ ⇒ 必须**显式**把令牌的颜色喂给 echarts。
@@ -2251,10 +2268,67 @@ const waveformView = register({
             String(option?.textStyle?.color ?? ""),
         );
     },
+    /**
+     * 用**当前筛选**重画图表（勾选是纯前端动作，不重新取 view state）。
+     *
+     * ⚠️ 同时刷新自报属性（`data-wave-chart-points/series`）⇒ ⇒ 真机门禁
+     *   读的仍是界面自己说的那个数 ⇒ ⇒ 筛选之后**仍有判别力**。
+     */
+    _redrawWaveChart() {
+        const chart = waveformView._chart;
+        if (!chart) return;
+        const theme = resolveWaveTheme(
+            typeof document !== "undefined" ? document.documentElement : null,
+        );
+        const visible = visibleChannels(
+            waveformView._lastChannels ?? [],
+            waveformView._selected,
+        );
+        chart.setOption(buildWaveOption(visible, theme), true);
+        const host = waveformView._chartHost;
+        if (host) {
+            const points = visible.reduce(
+                (n, c) => n + (Array.isArray(c?.samples) ? c.samples.length : 0),
+                0,
+            );
+            host.setAttribute("data-wave-chart-points", String(points));
+            host.setAttribute("data-wave-chart-series", String(visible.length));
+        }
+    },
     onCommand(ev) {
         const el = ev.target?.closest?.("[data-action]");
         const action = el?.dataset?.action;
         if (!action) return undefined;
+        // ⚠️ 单通道勾选：`el.checked` 已被浏览器翻过 ⇒ 直接写进选择表再重画。
+        if (action === "toggle-wave-channel") {
+            const id = String(el.dataset?.id ?? "");
+            if (!id) return undefined;
+            const sel = { ...(waveformView._selected ?? {}) };
+            sel[id] = el.checked !== false;
+            waveformView._selected = sel;
+            waveformView._redrawWaveChart();
+            return undefined;
+        }
+        // ⚠️ 三个快捷：全选 / 仅核 / 清空（只作用于**中断通道**）。
+        if (action === "wave-select") {
+            const scope = String(el.dataset?.scope ?? "all");
+            const sel = { ...(waveformView._selected ?? {}) };
+            for (const group of groupIrqChannels(waveformView._lastChannels ?? [])) {
+                for (const c of group.channels) {
+                    const id = String(c.id);
+                    sel[id] =
+                        scope === "all" ? true : scope === "none" ? false : group.key === "core";
+                }
+            }
+            waveformView._selected = sel;
+            const root = el.closest?.("[data-wave-chart]");
+            const boxes = root?.querySelectorAll?.("[data-action='toggle-wave-channel']");
+            for (const box of boxes ?? []) {
+                box.checked = sel[String(box.dataset?.id ?? "")] !== false;
+            }
+            waveformView._redrawWaveChart();
+            return undefined;
+        }
         // ⚠️ **导出波形**（v0.63 批 · 用户拍板「导出波形按钮可以放到波形视图」）
         //   ⇒ ⇒ 参数**随信号走**（与调试视图那条路同一手法）⇒ ⇒ 视图层**不碰**
         //   服务层 ⇒ ⇒ 导出结果落在**调试视图的 trace 卡片**里（那里是导出内容
