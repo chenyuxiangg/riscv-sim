@@ -4,7 +4,7 @@
 >
 > **挂接**：本清单为 **STAGE-53（第 61 批 / v0.77）的 §0 开工前置** —— R-1~R-4 未完成前不进入产品实现；R-5~R-7 随批顺手整改。
 >
-> **状态**：未开工。R-1~R-4 全部落地并通过 §4 演练后，本清单标已闭环。
+> **状态**：**R-1~R-4 已落地（2026-11-18 · v0.80）**，`tools/browser-verify.mjs` 单文件改造；R-7（段级计时）随批完成。**§4 的「夹具层 2✗ 演练」仍欠** —— 已完成的三项演练见 §2.5。
 
 ---
 
@@ -124,3 +124,17 @@ R-1~R-4 落地后，做一次**故意引入已知失败**的演练（在夹具�
 2. **不降低任何现有断言强度**——只增加"跳段/证据/自检/计时"能力，不改判据本身；37 段注册表语义不变。
 3. **不用 `--only` 替代全量绿**——每批收口的最终判据**仍然是全量 0 ✗**，分段重跑只用于定位期。
 4. **不引入并行跑多轮**——真机门禁依赖单浏览器 + 单 HTTP server 的独占状态，并行会引入新的假象。
+
+---
+
+## §2.5 落地与演练记录（2026-11-18 · v0.80）
+
+| 项 | 落点（同一文件 `tools/browser-verify.mjs`） | 演练证据 |
+| --- | --- | --- |
+| R-1 分段重跑 | `RUN_POLICY` + `policySkipReason()` 闸门（`runSection` **与** `registerSection` 两处都认：有 5 段不经过 `runSection`） | `--only landing`：**1/37 段**、36 段标 `SKIP（--only=landing ⇒ 本段未选中）`、结论 `browser-verify: 定位跑通过（只跑了 1/37 段；**不是**全量绿…）` |
+| R-2 失败即 dump | `EVAL_RING`（最近 12 次求值）+ `collectEvidence()`（url/view/bodyLen + `outerHTML` 落 `/tmp/bv-dom-*.html` + 最近 6 次求值） | `--inject-fail`：日志出现 `✗ 演练… evidence={"url":…,"view":"product","bodyLen":38078,"dom":"/tmp/…html","evals":[…]}`（**带被测值原文**） |
+| R-3 通道自检 | `harnessHealthCheck()`（默认 needle `[data-view-body]`）+ `EXIT_HARNESS=2` / `E_HARNESS_CHANNEL` | `--health-needle "#不存在的东西"`：`harness: channel unavailable` + `error: E_HARNESS_CHANNEL`，**产品断言一条不出**，退出码 **2**（≠ 产品失败 1） |
+| R-4 wasm mtime 前置 | 过期 ⇒ `autoRebuildWasm()` 直接调 `tools/build-wasm.sh`，重建后仍旧才退 127 | `--no-auto-build` 保留原「秒退」行为；自动重建路径在 v0.79→v0.80 的两次构建里实际走过 |
+| R-7 段级计时 | `TIMING` + `[timing] section=<id> ms=<n>` + top5 汇总 | 全量日志 `[timing]` 行 = 段数（`direct` 段标 ms=0，表示未单独计时，不伪装成有值） |
+
+**仍欠**：§4 的「夹具层制造一个确定 2✗」演练（要动夹具、会真红，留到下一次动夹具的批次一起做）。

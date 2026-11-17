@@ -81,7 +81,7 @@
 //   127 — a precondition is missing (no Chrome, no python3) — this is
 //         *not* a verification failure
 
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createReadStream, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -140,6 +140,54 @@ writeFileSync(DEMO_FIRMWARE_PATH, Buffer.from(DEMO_FIRMWARE_BYTES));
 const EXIT_PRECONDITION = 127;
 /** The verification itself failed. */
 const EXIT_FAILED = 1;
+/**
+ * **工具侧**故障（采集通道不可用）—— 与产品失败**必须**分开。
+ *
+ * ⚠️ 为什么：采集器坏掉与产品缺陷的现场**长得一模一样**（都是断言红）
+ * ⇒ v0.76 因此把工具故障记成内核缺陷（8 个 diag 测试 + 3 轮假红）。
+ */
+const EXIT_HARNESS = 2;
+/** 工具侧错误码（打印用；与 `E_*` 产品码同形，方便 grep）。 */
+const E_HARNESS_CHANNEL = "E_HARNESS_CHANNEL";
+
+/**
+ * **运行策略**（R-1）——`--only` / `--from` 决定这一趟跑哪些段。
+ *
+ * ⚠️ 只影响**定位期**；收口判据仍是全量 0 ✗（见 GATE_TOOLING_PREREQ §5）。
+ */
+const RUN_POLICY = {
+    only: null,
+    from: null,
+    fromReached: false,
+    injectFail: false,
+    autoBuild: true,
+};
+
+/** 段级计时（R-7）：`{name, ms}`。 */
+const TIMING = [];
+
+/** 最近若干次页面求值的环形记录（R-2 证据）。 */
+const EVAL_RING = [];
+const EVAL_RING_MAX = 12;
+
+/**
+ * 记录一次页面求值（R-2 · 只留摘要，不留全量）。
+ *
+ * @param {string} expression
+ * @param {unknown} value
+ * @returns {void}
+ */
+function rememberEval(expression, value) {
+    const expr = String(expression).replace(/\s+/g, " ").trim().slice(0, 160);
+    let shown;
+    try {
+        shown = typeof value === "string" ? value.slice(0, 200) : JSON.stringify(value)?.slice(0, 200) ?? String(value);
+    } catch {
+        shown = String(value).slice(0, 200);
+    }
+    EVAL_RING.push({ expr, value: shown });
+    while (EVAL_RING.length > EVAL_RING_MAX) EVAL_RING.shift();
+}
 
 // ---------------------------------------------------------------------------
 // The section registry (STAGE-17 · 裁决 I / J · D-147)
@@ -223,14 +271,30 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
  * @returns {void}
  */
 function registerSection(name, checks, opts = {}) {
+    // ⚠️ **策略跳过优先于段自己的 skipped**（R-1）：`--only` / `--from`
+    //   没选中它 ⇒ 就是没跑 ⇒ 不能因为「恰好 osz 缺失」而显示成 skipped 的
+    //   同一种原因（那会让人以为「是缺 ELF 才没跑」）。
+    // ⚠️ **两处都要认策略**：除 `runSection` 那条路，还有**若干段根本不过
+    //   `runSection`**（`landing` / `render` / `kernelExec` / `sourceChecks` …
+    //   直接 `registerSection(name, checks)`，因为它们的检查是同步从 probe
+    //   算出来的）⇒ ⇒ 只在 runSection 上设闸门 ⇒ `--only` 会**漏跑**这几段
+    //   ⇒ ⇒ 报告里冒出与目标段无关的红（实测：`--only landing` 报 5 ✗）。
+    const policyReason = (checks && checks.__policySkipped)
+        ? String(checks.__policySkipped)
+        : policySkipReason(String(name));
     SECTION_REGISTRY.push({
         name: String(name),
         title: String(opts.title ?? name),
         skippedTitle: opts.skippedTitle ?? null,
-        checks: Array.isArray(checks) ? checks : [],
-        skipped: opts.skipped === true,
-        reason: opts.reason ?? null,
+        checks: policyReason ? [] : (Array.isArray(checks) ? checks : []),
+        skipped: policyReason ? true : opts.skipped === true,
+        reason: policyReason ?? opts.reason ?? null,
     });
+    // R-7 · 不走 `runSection` 的段也要有一条计时（否则 `[timing]` 行数
+    //   少于段数 ⇒ 「哪一段没被计时」看起来像漏跑）。`direct` 标出来源。
+    if (!policyReason && !TIMING.some((t) => t.name === String(name))) {
+        TIMING.push({ name: String(name), ms: 0, direct: true });
+    }
 }
 
 /**
@@ -263,9 +327,22 @@ function registryDiff() {
  * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
  */
 async function runSection(name, fn) {
+    // R-1 · **策略闸门**：没被选中的段**不跑**，但仍登记成 skipped
+    //（⇒ 报告里显式标 SKIP ⇒ 「跳过的段被误读为通过」结构上不可能）。
+    const blocked = policySkipReason(name);
+    if (blocked) {
+        const empty = [];
+        // 用属性把「策略跳过」传到 registerSection（调用点太多，不改签名）。
+        empty.__policySkipped = blocked;
+        return { skipped: true, reason: blocked, checks: empty };
+    }
+    const startedAt = Date.now();
     try {
-        return await fn();
+        const result = await fn();
+        TIMING.push({ name, ms: Date.now() - startedAt });
+        return result;
     } catch (err) {
+        TIMING.push({ name, ms: Date.now() - startedAt, threw: true });
         return {
             skipped: false,
             checks: [{
@@ -419,6 +496,15 @@ function parseArgs(argv) {
         else if (arg === "--serve-port") opts.servePort = Number(argv[++i]);
         else if (arg === "--timeout-ms") opts.timeoutMs = Number(argv[++i]);
         else if (arg === "--no-serve") opts.serve = false;
+        // R-1 · 分段重跑（定位期用；收口判据仍要求全量 0 ✗）
+        else if (arg === "--only") opts.only = String(argv[++i]);
+        else if (arg === "--from") opts.from = String(argv[++i]);
+        // R-2 · 证据演练：故意构造一条必失败断言，验证 evidence 链可用
+        else if (arg === "--inject-fail") opts.injectFail = true;
+        // R-4 · 关掉「wasm 比源码旧就自动重建」
+        else if (arg === "--no-auto-build") opts.autoBuild = false;
+        // R-3 演练：把 needle 改错 ⇒ 必须报 E_HARNESS_CHANNEL（退出码 2）
+        else if (arg === "--health-needle") opts.healthNeedle = String(argv[++i]);
         else if (arg === "--help" || arg === "-h") {
             printUsage();
             process.exit(0);
@@ -455,6 +541,13 @@ function printUsage() {
         "  --cdp-port <port>    Chrome 远程调试端口（默认 9222）",
         "  --timeout-ms <ms>    等待前端就绪的超时（默认 20000）",
         "  --no-serve           不自己起 HTTP 服务（要求服务已在跑）",
+        "",
+        "  --only <section>     只跑这一段（其余段在报告里标 SKIP，不静默消失）",
+        "  --from <section>     从这一段开始跑（前面的段标 SKIP；真机是顺序累积状态，",
+        "                       所以只有在「前置状态重建得出来」时才可信）",
+        "  --inject-fail        演练：跑一条必失败断言，验证 evidence 链（跑完即退出）",
+        "  --no-auto-build      wasm 比源码旧时**不**自动重建，直接报错退出",
+        "  --health-needle <sel> 采集通道自检的 needle（默认 [data-view-body]；改错可演练 R-3）",
     ].join("\n"));
 }
 
@@ -738,7 +831,9 @@ async function awaitEval(cdp, expression, timeoutMs = 15000) {
             + `；送进去的代码（头几行）：${head.slice(0, 600)}`,
         );
     }
-    return res.result?.value ?? null;
+    const value = res.result?.value ?? null;
+    rememberEval(expression, value);
+    return value;
 }
 
 /**
@@ -11413,12 +11508,129 @@ function staleRustSources(wasmPath) {
 }
 
 /**
+ * 这一段**该不该跑**（R-1）。
+ *
+ * @param {string} name — 段名
+ * @returns {string|null} 跳过原因；`null` = 该跑
+ */
+function policySkipReason(name) {
+    if (RUN_POLICY.only) {
+        return name === RUN_POLICY.only ? null : `SKIP（--only=${RUN_POLICY.only} ⇒ 本段未选中）`;
+    }
+    if (RUN_POLICY.from) {
+        if (RUN_POLICY.fromReached || name === RUN_POLICY.from) {
+            RUN_POLICY.fromReached = true;
+            return null;
+        }
+        return `SKIP（--from=${RUN_POLICY.from} ⇒ 本段在其之前）`;
+    }
+    return null;
+}
+
+/**
+ * **采集通道自检**（R-3）：一个**已知必现**的 needle。
+ *
+ * ⚠️ 为什么：采集器坏掉与产品缺陷的现场**完全一样**（都是断言红）。
+ *   通道不通 ⇒ 这一段**一条产品断言都不许出**，直接 abort 并报
+ *   {@link E_HARNESS_CHANNEL}（退出码 {@link EXIT_HARNESS}，与产品失败分开）。
+ *
+ * @param {object} cdp
+ * @param {object} opts
+ * @returns {Promise<{ok: boolean, needle: string, ms: number}>}
+ */
+async function harnessHealthCheck(cdp, opts) {
+    const needle = opts.healthNeedle ?? '[data-view-body]';
+    const started = Date.now();
+    let ok = false;
+    try {
+        ok = Boolean(await awaitEval(cdp, `!!document.querySelector(${JSON.stringify(needle)})`));
+    } catch {
+        ok = false;
+    }
+    return { ok, needle, ms: Date.now() - started };
+}
+
+/**
+ * 失败时的**结构化证据**（R-2）。
+ *
+ * ⚠️ 只回答一个问题：**「读到的是什么」**。v0.76 那次 8 轮定位的全部成本，
+ *   都来自日志里只有「2✗」而**没有实际值**（读到空串 vs 功能没触发，
+ *   处置完全相反）。
+ *
+ * @param {object} cdp
+ * @param {object} opts
+ * @returns {Promise<string>} 单行 JSON（可直接贴进日志 / issue）
+ */
+async function collectEvidence(cdp, opts) {
+    let snap = {};
+    try {
+        snap = await awaitEval(cdp, `({
+            url: location.href,
+            view: (document.querySelector("[data-view-body]")?.getAttribute("data-view-body")) ?? null,
+            bodyLen: document.body ? document.body.outerHTML.length : 0
+        })`) ?? {};
+    } catch (err) {
+        snap = { snapshotError: String(err?.message ?? err).slice(0, 160) };
+    }
+    let domPath = null;
+    try {
+        const dom = await awaitEval(cdp, "document.body ? document.body.outerHTML : ''");
+        if (typeof dom === "string" && dom.length > 0) {
+            domPath = join(tmpdir(), `bv-dom-${Date.now()}.html`);
+            writeFileSync(domPath, dom.slice(0, 400000));
+        }
+    } catch {
+        // best effort —— 证据链不因为快照失败而整段消失
+    }
+    return JSON.stringify({
+        ...snap,
+        dom: domPath,
+        evals: EVAL_RING.slice(-6),
+    });
+}
+
+/**
+ * R-4 · wasm 比源码旧 ⇒ **自动重建**（失败才算前置不满足）。
+ *
+ * @returns {boolean} 重建后是否仍然过期
+ */
+function autoRebuildWasm() {
+    const repoRoot = dirname(fileURLToPath(import.meta.url));
+    const script = join(repoRoot, "build-wasm.sh");
+    if (!existsSync(script)) return false;
+    console.log("· WASM 比源码旧 ⇒ 自动重建（--no-auto-build 可关掉）…");
+    try {
+        execFileSync("bash", [script], { stdio: "inherit", timeout: 15 * 60 * 1000 });
+        return true;
+    } catch (err) {
+        console.error(`error: 自动重建失败：${String(err?.message ?? err).slice(0, 300)}`);
+        return false;
+    }
+}
+
+/**
  * Run the whole verification.
  *
  * @returns {Promise<number>} the process exit code
  */
 async function main() {
     const opts = parseArgs(process.argv.slice(2));
+    RUN_POLICY.only = opts.only ?? null;
+    RUN_POLICY.from = opts.from ?? null;
+    RUN_POLICY.injectFail = opts.injectFail === true;
+    RUN_POLICY.autoBuild = opts.autoBuild !== false;
+    if (RUN_POLICY.only && RUN_POLICY.from) {
+        console.error("error: --only 与 --from 互斥（一次只表达一种策略）。");
+        return EXIT_PRECONDITION;
+    }
+    if ((RUN_POLICY.only || RUN_POLICY.from)) {
+        const known = EXPECTED_SECTION_NAMES;
+        const bad = [RUN_POLICY.only, RUN_POLICY.from].filter((x) => x && !known.includes(x));
+        if (bad.length > 0) {
+            console.error(`error: 未知段名：${bad.join(" / ")}（可用段名见 --help 或 EXPECTED_SECTION_NAMES）`);
+            return EXIT_PRECONDITION;
+        }
+    }
 
     // ⚠️ ⚠️ **自检**：本脚本里**每一个**送进页面的模板**必须能独立求值**
     // （v0.73 · STAGE-49 · 施工期订正）。
@@ -11474,7 +11686,12 @@ async function main() {
     //
     // ⚠️ **一个参数 ⇒ ⇒ 一个落点**：门禁**测的到底是哪一份代码** ⇒ ⇒
     //   必须**由门禁自己**回答 ⇒ ⇒ 不能靠「我记得重建过」。
-    const stale = staleRustSources(wasmBin);
+    let stale = staleRustSources(wasmBin);
+    if (stale.length > 0 && RUN_POLICY.autoBuild) {
+        // R-4：**先自动重建**（省一整轮人工），重建完再判。
+        autoRebuildWasm();
+        stale = staleRustSources(wasmBin);
+    }
     if (stale.length > 0) {
         console.error([
             "error: WASM 内核产物**比 Rust 源码旧** ⇒ ⇒ 这一趟测的是**旧内核**。",
@@ -11625,6 +11842,32 @@ async function main() {
         // ⚠️ **登记**（裁决 I）：判定聚合**只**从注册表取 ⇒ ⇒ 「新加一段
         // 忘了并进」这件事**结构上不可能**。
         registerSection("landing", landing, { title: "落地页检查" });
+
+        // -- R-3 · 采集通道自检 ------------------------------------------------
+        //
+        // ⚠️ 为什么排在**所有段之前**：这一段之后出现的任何 ✗ 都必须能归因到
+        //   **产品**。通道不通时，产品断言一条都不许出（否则就是 v0.76 那种
+        //   「工具坏掉被记成内核缺陷」）。
+        const health = await harnessHealthCheck(cdp, opts);
+        if (!health.ok) {
+            console.log(`harness: channel unavailable（needle=${health.needle}，${health.ms} ms）`);
+            console.error(`error: ${E_HARNESS_CHANNEL} 采集通道不可用 ⇒ 本趟断言不作数（**不是**产品缺陷）。`);
+            console.error("       ⇒ 先查：页面是否真的渲染了（截图 / 控制台）、needle 是否正确、--url 是否指向前台。");
+            return EXIT_HARNESS;
+        }
+        console.log(`· 采集通道：OK（needle=${health.needle}，${health.ms} ms ≤ 5s 判据）`);
+
+        // -- R-2 · 证据演练（--inject-fail）----------------------------------
+        //
+        // ⚠️ 判据只认一件事：日志里**有没有** `evidence=` 且带**被测值原文**。
+        //   为了让这条判据能随时复算，这里造一条**必失败**断言走同一条证据链。
+        if (RUN_POLICY.injectFail) {
+            const evidence = await collectEvidence(cdp, opts);
+            console.log("  ✗ 演练：故意构造的必失败断言 — 期望 value=1，实际 value=\"\""
+                + ` evidence=${evidence}`);
+            console.log("harness: --inject-fail 演练结束（证据链可用；退出码 1 = 产品失败语义）");
+            return EXIT_FAILED;
+        }
 
         // -- seed a board (v0.76 · STAGE-52 · B1) --------------------------------
         //
@@ -12097,6 +12340,12 @@ async function main() {
 
         // -- report ------------------------------------------------------------
         //
+        // R-2 · 只要**有**失败断言，就先取一份证据（共用一个，避免 N 次 DOM 快照）。
+        const needsEvidence = SECTION_REGISTRY.some(
+            (sec) => !sec.skipped && sec.checks.some((c) => !c.ok),
+        );
+        const evidence = needsEvidence ? await collectEvidence(cdp, opts) : null;
+
         // ⚠️ **按登记顺序打印**（裁决 I）⇒ ⇒ 报告的可读顺序 = 段的运行顺序。
         for (const section of SECTION_REGISTRY) {
             console.log("");
@@ -12106,7 +12355,8 @@ async function main() {
             }
             console.log(`${section.title}：`);
             for (const check of section.checks) {
-                console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}`);
+                const suffix = !check.ok && evidence ? ` evidence=${evidence}` : "";
+                console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}${suffix}`);
             }
         }
         if (consoleErrors.length > 0) {
@@ -12130,12 +12380,39 @@ async function main() {
             + (diff.missing.length > 0 ? `；**该有却没有**：${diff.missing.join(" / ")}` : "")
             + (diff.extra.length > 0 ? `；**多出来没有**：${diff.extra.join(" / ")}` : "")
             + (diff.duplicated.length > 0 ? `；**重复登记**：${diff.duplicated.join(" / ")}` : ""));
+        // -- R-7 · 段级计时（复盘不再靠文件 mtime 反推）------------------------
+        console.log("");
+        console.log(`[timing] 段数 ${TIMING.length}（跳过 ${SECTION_REGISTRY.filter((x) => x.skipped).length} 段）`);
+        for (const t of TIMING) {
+            console.log(`[timing] section=${t.name} ms=${t.ms}${t.threw ? " (抛异常)" : ""}`);
+        }
+        const slowest = [...TIMING].sort((a, b) => b.ms - a.ms).slice(0, 5);
+        if (slowest.length > 0) {
+            console.log(`[timing] top5：${slowest.map((t) => `${t.name}=${t.ms}ms`).join(" · ")}`
+                + `，合计 ${slowest.reduce((a, b) => a + b.ms, 0)}ms / 全程 ${TIMING.reduce((a, b) => a + b.ms, 0)}ms`);
+        }
+        if (RUN_POLICY.only || RUN_POLICY.from) {
+            console.log(`[policy] ${RUN_POLICY.only ? `only=${RUN_POLICY.only}` : `from=${RUN_POLICY.from}`}`
+                + " ⇒ 本趟**不是**全量绿，只用于定位；收口判据仍是全量 0 ✗。");
+        }
+
         const ok = failed.length === 0 && consoleErrors.length === 0 && diff.ok;
         console.log("");
-        console.log(ok
-            ? "browser-verify: 通过（真机挂载 + 渲染路径 + 真内核执行 + 源码视图 + 探针流 + 板级内存图 + 板档案 + 板级差量/卸载 + 乱序到达 + 注册表一致 + 控制台）"
-            : `browser-verify: 失败（${failed.length} 项断言未通过，${consoleErrors.length} 条控制台错误，`
-              + `注册表一致性 ${diff.ok ? "通过" : "**不通过**"}）`);
+        const ranSections = SECTION_REGISTRY.filter((sec) => !sec.skipped).length;
+        // ⚠️ **分段跑绝不能说「通过」**（R-1 的诚实约束）：只跑了 1 段也判绿
+        //   ⇒ ⇒ 「跳过的段被误读为通过」⇒ ⇒ 收口时会把没验证的东西当已验证。
+        if (RUN_POLICY.only || RUN_POLICY.from) {
+            console.log(ok
+                ? `browser-verify: 定位跑通过（只跑了 ${ranSections}/${SECTION_REGISTRY.length} 段；`
+                  + "**不是**全量绿，收口仍须全量 0 ✗）"
+                : `browser-verify: 定位跑失败（${failed.length} 项断言未通过，`
+                  + `只跑了 ${ranSections}/${SECTION_REGISTRY.length} 段）`);
+        } else {
+            console.log(ok
+                ? "browser-verify: 通过（真机挂载 + 渲染路径 + 真内核执行 + 源码视图 + 探针流 + 板级内存图 + 板档案 + 板级差量/卸载 + 乱序到达 + 注册表一致 + 控制台）"
+                : `browser-verify: 失败（${failed.length} 项断言未通过，${consoleErrors.length} 条控制台错误，`
+                  + `注册表一致性 ${diff.ok ? "通过" : "**不通过**"}）`);
+        }
         return ok ? 0 : EXIT_FAILED;
     } finally {
         cdp?.close();
