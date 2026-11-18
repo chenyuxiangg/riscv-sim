@@ -3083,7 +3083,17 @@ impl KernelHost {
         //
         // ⚠️ 置真的位置在**全部步骤成功之后** ⇒ 装载**失败**（中途
         // `return`）时它**保持假** ⇒ 「有没有装载过」这个判据不会撒谎。
-        self.image_loaded = true;
+        //
+        // ⚠️ **v0.88 订正**：判据是「机器里**有没有镜像字节**」⇒ 一个
+        //   `images: []` 的空工程（产品视图「配板」用的就是它：配板＝换图
+        //   + 开新会话 ⇒ ⇒ 镜像本来就是空的）**不许**把它置真。
+        //   置真会让 `memory.map.loaded` 对界面撒谎（「已装载」但其实 PC=0、
+        //   总线上什么都没有），还会让后续 `SetMemoryMap` 误判成「待生效」
+        //   （`if !self.image_loaded` 那条立即生效的分支永远进不去）。
+        let has_image_bytes = parsed
+            .iter()
+            .any(|p| p.segments.iter().any(|(_, bytes)| !bytes.is_empty()));
+        self.image_loaded = has_image_bytes;
 
         // ⚠️ **镜像字节留在宿主**（v0.31 · STAGE-16 裁决 C 第 ④ 步）：
         // 记住**最后一个装载成功的工程** ⇒ 卸载之后**不必重新选文件**就能

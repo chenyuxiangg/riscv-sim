@@ -2500,6 +2500,36 @@ async function runUnknownSystemSection(cdp, opts) {
     );
     if (!pendingSeen) return { skipped: false, checks };
 
+    // ---- ⑤′ **装载前基准** --------------------------------------------------
+    //
+    // ⚠️ **v0.88 · 判据窗口订正**（第二项）：产品视图的「配板」**不是**只记
+    //   一张图 ⇒ ⇒ `applyProductBoard`（`front/app.js`，创建 / 从模版加载 /
+    //   重新载入三条通路共用）干的是**两步**：`SetMemoryMap` + **一次
+    //   `images: []` 的 `LoadProject`** ⇒ ⇒ 后者是「让待生效的板生效」的那次
+    //   装载，**本质是新会话**（`backend.reset()` ⇒ 总线换新、镜像清空
+    //   ⇒ `image_loaded=false`、PC 归 0）。
+    //
+    //   ⇒ ⇒ 所以「正在跑的访客不受影响」这条在本产品 UI 里**不可达**：
+    //   配板那一刻机器就已经空了 ⇒ ⇒ 拿 ③ 之后的 `0x10` 去比 ⑥ 之后的
+    //   `0x0` 是在**指控配板的合法后果**（旧判据的错法）。
+    //
+    //   ⇒ ⇒ 新判据把基准挪到**配板之后**，只问「**拒**这一步」动了什么：
+    //   PC 仍停在空态、`loaded` 仍 `false`（没有半装载）、图与修订号逐字不变。
+    const baseMap = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
+    const baseId = String(baseMap?.descId ?? baseMap?.description?.id ?? "");
+    const baseRev = Number(baseMap?.revision ?? 0);
+    const basePc = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
+    const basePcText = String(basePc?.pcText ?? "").trim();
+    // ⚠️ **前提要明写出来**（⇒ ⇒ 否则「0 == 0」会被当成恒真判据糊过去）：
+    //   配板已经开了一次新会话 ⇒ ⇒ 基准就是「PC 0 + 没镜像」。
+    add(
+        "**前提**：配板＝**换图 + 开新会话**（⇒ ⇒ PC 归 0、镜像清空 ⇒ ⇒ "
+        + "基准是**空态**，不是「还在跑的访客」）",
+        basePcText === "0x00000000" && baseMap?.loaded === false,
+        `基准 PC=${JSON.stringify(basePcText)} loaded=${JSON.stringify(baseMap?.loaded)}`
+        + ` 板=${JSON.stringify(baseId)} 修订号=${baseRev}`,
+    );
+
     // ---- ⑥ 装 demo ⇒ ⇒ 必须被**拒** ----------------------------------------
     const rejected = await attemptLoadDemoFirmware(cdp, opts);
     add(
@@ -2526,21 +2556,41 @@ async function runUnknownSystemSection(cdp, opts) {
         `新增错误事件 ${fresh.length} 条：${JSON.stringify(fresh)}`,
     );
 
-    // ---- ⑧ **PC 没动**（⇒ ⇒ 没建图、没写总线、没复位）----------------------
+    // ---- ⑧ **拒 这一步**一个字都没写（⇒ ⇒ 机器仍是装载前的空态）------------
+    //
+    // ⚠️ **v0.88 · 判据重定义（裁决 A）**：基准 = **⑤′ 配板之后**的空态
+    //   （PC 0 + 没镜像），不是 ③ 那个还在跑的 `0x10`。断言三件：
+    //   ① PC 不被写（仍等于配板后的值）；
+    //   ② 没有**半装载** —— `memory.map.loaded` 仍 `false`（⇒ ⇒ 若装载链路
+    //      偷偷挂了半份镜像，这里会翻 `true`）；
+    //   ③ 机器里**没有可执行内容** —— 拒之后再单步一次，PC **不许**前进
+    //      （⇒ ⇒ 若「拒」留下了旧镜像，单步会从 0 往前走 ⇒ ⇒ 这条会红）。
+    //
+    //   ⚠️ 严格版 K-2（「有镜像在跑 + 板待生效 + 装载被拒 ⇒ pc/寄存器/总线
+    //   一字未动」）在**产品 UI 上不可达**（配板必先开新会话）⇒ ⇒ 那一条
+    //   交给内核单测守；门禁这边只验「拒**不是**一次半装载」。
     const pcAfter = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
     const pcTextAfter = String(pcAfter?.pcText ?? "").trim();
-    // ⚠️ **v0.86 · 标为已知缺陷**：内核侧 `on_load_project` 的次序是对的
-    //   （「未知系统」判在应用板**之前** `return`，见
-    //   `crates/kernel/src/kernel_host/mod.rs:2960` 起）⇒ ⇒ 可**真机现场**
-    //   是 `PC 0x10 → 0x0`、生效图 0 行 ⇒ ⇒ 说明「拒」这件事在**装载链路
-    //   上**还有一处把机器/视图清了（前端或装载前置）⇒ ⇒ 与规格 §4.2 K-2
-    //   「机器一个字都没动」不符 ⇒ ⇒ 需内核+前端联合复核，不属本批门禁包。
+    const mapAfterReject = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
+    await runEffect(cdp, `(() => {
+        const b = document.querySelector('[data-topbar-action="step"]');
+        if (b) b.click();
+        return true;
+    })()`);
+    await sleep(320);
+    const pcAfterStep = String(
+        (await awaitEval(cdp, BV_TOPBAR_STATS_PROBE))?.pcText ?? "",
+    ).trim();
     checks.push({
-        name: "B-142 · 拒了之后 ⇒ ⇒ **PC 没动**（⇒ ⇒ **没建图、没写总线**，"
-            + "⇒ ⇒ 正在跑的访客**不受影响**）【已知缺陷：拒后 PC 被清 0】",
-        ok: pcTextAfter === pcTextBefore,
-        known: true,
-        detail: `拒之前 PC=${JSON.stringify(pcTextBefore)} 拒之后 PC=${JSON.stringify(pcTextAfter)}`,
+        name: "B-142 · 拒了之后 ⇒ ⇒ 机器**仍是装载前的空态**"
+            + "（PC 没被写、**没有半装载**、机器里没有可执行内容）",
+        ok: pcTextAfter === basePcText
+            && mapAfterReject?.loaded === false
+            && pcAfterStep === pcTextAfter,
+        detail: `配板后（基准）PC=${JSON.stringify(basePcText)}`
+        + ` 拒之后 PC=${JSON.stringify(pcTextAfter)}`
+        + ` 拒之后再单步 PC=${JSON.stringify(pcAfterStep)}`
+        + ` loaded=${JSON.stringify(mapAfterReject?.loaded)}`,
     });
 
     // ---- ⑨ **只显示内核原文** ⇒ ⇒ 前端不自己编解释 -------------------------
@@ -2558,26 +2608,27 @@ async function runUnknownSystemSection(cdp, opts) {
         + ` 内核原文=${JSON.stringify(kernelMsg)}`,
     );
 
-    // ---- ⑩ **当前生效的图没被这次装载改动** --------------------------------
-    await runEffect(cdp, 'location.hash = "#/product";');
-    await sleep(800);
-    const mapProbe = await awaitEval(cdp, BV_MEMORY_MAP_PROBE);
-    const rows = Array.isArray(mapProbe?.rows) ? mapProbe.rows : [];
-    const stillHasOldRam = rows.some(
-        (r) => String(r.base) === String(BV_NEW_RAM_BASE) && String(r.kind) === "ram",
-    );
-    const unknownRamPresent = rows.some(
-        (r) => String(r.base) === String(BV_UNKNOWN_BOARD.regions[0].base) && String(r.kind) === "ram",
-    );
-    // ⚠️ **v0.86 · 标为已知缺陷**：现场读到的是 **0 行** —— 与 B-142 同一现场
-    //   （拒之后前端的 `memory.map` 落到空图）⇒ ⇒ 规格要的是「图不换」，
-    //   不是「图没了」⇒ ⇒ 同一族缺陷，另立项复核。
+    // ---- ⑩ **拒 不再改图、不再推修订号** -------------------------------------
+    //
+    // ⚠️ **v0.88 · 判据重定义（裁决 A）**：
+    //   ① 数据源换成**内核那条 `memory.map` 事件**（`__bvIn` 最后一条）——
+    //      旧判据读的是产品视图的 `[data-region-*]` 折叠表，那套 UI 在
+    //      v0.68 就删了（`front/views/components/memory-map.js:1512`）⇒ ⇒
+    //      旧判据**恒 0 行** ⇒ ⇒ 恒红（判据过期，不是产品缺陷）。
+    //   ② 期望值换成「**与 ⑤′ 那张图逐字相同**」——旧期望默认「图还是 demo
+    //      板」，可配板本身就是一次**合法换图**（`description.id` 变成
+    //      `bv-unknown-board`、`loaded=false`）⇒ ⇒ 旧期望必然落空。
+    //   ③ 断言 `id` 与 `revision` **都没变**：拒不许改图、也不许偷加修订号
+    //      （后者会让下一次提交误报 `E_PLT-13`，是本项目真踩过的坑）。
+    const mapAfterLoad = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
+    const afterId = String(mapAfterLoad?.descId ?? mapAfterLoad?.description?.id ?? "");
+    const afterRev = Number(mapAfterLoad?.revision ?? 0);
     checks.push({
-        name: "**当前生效的图没被这次装载改动**（⇒ ⇒ 判定**在应用用户板之前**"
-            + "⇒ ⇒ 判不过 ⇒ ⇒ 连图都不换）【已知缺陷：拒后生效图被清空】",
-        ok: stillHasOldRam === true && unknownRamPresent === false,
-        known: true,
-        detail: `生效图 ${rows.length} 行：${JSON.stringify(rows).slice(0, 200)}`,
+        name: "**拒之后，生效的图**没被再改一次**（id 与修订号逐字相同"
+            + "⇒ ⇒ 拒 不改图、不推修订号）",
+        ok: afterId === baseId && afterRev === baseRev,
+        detail: `配板后 图=${JSON.stringify(baseId)} 修订号=${baseRev}`
+        + ` ｜ 拒之后 图=${JSON.stringify(afterId)} 修订号=${afterRev}`,
     });
 
     // ---- ⑪ **中档**：「部分落不在」⇒ ⇒ **不拒** ----------------------------
