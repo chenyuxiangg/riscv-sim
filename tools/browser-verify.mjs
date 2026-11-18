@@ -258,7 +258,6 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "traceExport",
     "debugDedup",
     "deviceRegistry",
-    "boardTree",
     "readback",
     "staleSurfaces",
     "basePlanner",
@@ -2365,25 +2364,17 @@ const BV_CAPTURE_COMMANDS_EXPRESSION = `(() => {
 })()`;
 
 /**
- * 板级内存图那一段（v0.29 批 · 验收 **C-8** 的端到端判别式）。
+ * 「从模版加载」⇒ 板生效（v0.85 · 裁决 B 重写）。
  *
- * 五步：
- *   ① 编辑器的「提交」按钮**真的**发出 `set-memory-map` 命令（UI 层 ⇒ C-3）；
- *   ② 这条命令走**真内核**（WASM 产物）⇒ 内存映射表变成新图
- *      （**命令 → 内核 → 事件 → 视图**的整条链 ⇒ C-4）；
- *   ③ 新 RAM 段**写-读往返**成功（证明那段真被映射了、且可写）；
- *   ④ 写新 RAM **之外** ⇒ 失败（证明 size 真的是那个 size）。
- *
- * ⚠️ **这一段必须排在 osz 段之后**：用户的板一旦配过就**一直**保持（宿主里
- * 那个字段存的是「用户意图」，不随一次会话结束而消失）⇒ 放在 osz 前面会把
- * osz 段要用的那张板换掉 ⇒ osz 的控制台就没了。
- *
- * ⚠️ **越界写判的是「失败」不是「报错文案」**：内核对未映射访问报的是
- * `E_BUS-01`，而**判据是「这次写没成功」** ⇒ 不靠 message 文本。
- *
- * ⚠️ **guest 指令级的越界陷阱（`mcause` 5 / 7）不在这一段**：浏览器里没法
- * 方便地让访客执行一条越界访存指令 ⇒ 那条由 **B-8 的 guest 层用例**（Rust
- * 侧）钉住；这一段钉的是「**新 RAM 段真的通了**」这条端到端链路。
+ * ⚠️ **这一段为什么整段重写**：原来它验的是 `#/memory-map` 的**板级内存图
+ *   编辑器**（`submit-memory-map` 按钮 + 待生效横幅 + 编辑器那张表）——
+ *   该视图连同面板与编辑器渲染代码**已被前端删除**（`m02_viewcomponents.js`
+ *   明写「一并删除」）⇒ ⇒ 旧断言是「对已删 UI 的存在性检查」，永远红、且
+ *   红得没信息。
+ * ⚠️ **现在验的是用户真走的那条路**：产品视图「模版」入口 ⇒ 「从模版加载」
+ *   对话框 ⇒ 点一条内置模版 ⇒ **板真的生效**（三条独立证据任一）⇒
+ *   生效图**逐字对得上模版声明**（判据读**内核事件**，不读 DOM 投影）。
+ * ⚠️ **快失败**：前置一律 6 s（不再等满 20 s）。
  *
  * @param {object} cdp
  * @param {{timeoutMs: number}} opts
@@ -2393,245 +2384,76 @@ async function runMemoryMapSection(cdp, opts) {
     /** @type {{name: string, ok: boolean, detail: string}[]} */
     const checks = [];
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+    const T = Math.min(opts.timeoutMs, 6000);
 
-    // -- ① 切到编辑器视图，等它挂上 ----------------------------------------
     await runEffect(cdp, 'location.hash = "#/product";');
     await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
-
-    let probe = null;
-    const readyDeadline = Date.now() + opts.timeoutMs;
-    while (Date.now() < readyDeadline) {
-        const value = await awaitEval(cdp, BV_MEMORY_MAP_PROBE);
-        probe = value ?? null;
-        if (probe?.submitPresent) break;
-        await sleep(250);
-    }
-    if (!probe?.submitPresent) {
-        return {
-            skipped: false,
-            checks: [{
-                name: "板级内存图编辑器挂上了（# 提交按钮在）",
-                ok: false,
-                detail: "等不到编辑器视图（前端引导没起来？）",
-            }],
-        };
-    }
-    add("板级内存图编辑器挂上了（`#/memory-map` 有提交按钮）", true, "submit 按钮在");
-
-    // -- ② 点提交 ⇒ 命令**真的**发出去了 -----------------------------------
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-action="submit-memory-map"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    await sleep(400);
-    const cmdsText = await awaitEval(cdp, 'JSON.stringify(window.__bvCmds ?? [])');
-    let cmds = [];
-    try {
-        cmds = JSON.parse(String(cmdsText ?? "[]"));
-    } catch {
-        cmds = [];
-    }
-    const memoryMapCmd = cmds.find((c) => String(c.action ?? "") === "submit-memory-map");
-    const cmdDescription = memoryMapCmd?.params?.description ?? null;
-    add(
-        "编辑器的提交按钮**真的**发出 `SetMemoryMap` 命令（载荷带描述）",
-        Boolean(memoryMapCmd) && Boolean(cmdDescription) && Array.isArray(cmdDescription.regions),
-        `捕到 ${cmds.length} 条命令；memory-map 那条 = ${JSON.stringify(memoryMapCmd?.action ?? null)}`
-        + `，载荷 regions ${Array.isArray(cmdDescription?.regions) ? cmdDescription.regions.length : "无"}`,
-    );
-
-    // -- ③ 把**被测的那张板**经**真内核**送进去 ----------------------------
-    //
-    // ⚠️ 走的是**视图层发命令的那条通道**（`riscv:command`）⇒ 走的是
-    // app → M-05 → 传输 → **真 WASM 内核** ⇒ 整条链都在。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "load-archive",
-            requestId: "bv-mm-board",
-            viewId: "product",
-            params: { description: ${JSON.stringify(BV_BOARD)}, registers: {} },
-        },
-    }))`);
-
-    // ⚠️ **必须等这条命令真的往返一趟**再发下一条（`reset`）。
-    //
-    // ⚠️ **为什么**：命令是**异步**的（Worker → WASM → 回事件）⇒ 若不等，
-    // `reset` 可能**先**到内核 ⇒ 那时装载用的是**旧**的图（用户还没配的
-    // 那张）⇒ 而 `set-memory-map` **后**到 ⇒ 用户的板变成「待生效」⇒
-    // 内存映射表**永远不变** ⇒ 症状是「明明配了板却没反应」。
-    //
-    // ⚠️ **判据**：此刻镜像**已经装载过**（osz 段装过）⇒ 宿主对新板**只
-    // 记下、不重建** ⇒ 回的事件里 `pending = true` ⇒ 编辑器上会出现
-    // **「待生效」**横幅 ⇒ 那条横幅**出现**就证明命令**往返完成**了。
-    const pendingDeadline = Date.now() + opts.timeoutMs;
-    let pendingSeen = false;
-    while (Date.now() < pendingDeadline) {
-        const pendingNow = await awaitEval(cdp, `(() => {
-            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
-            return Boolean(el);
-        })()`);
-        if (pendingNow === true) {
-            pendingSeen = true;
-            break;
-        }
-        await sleep(200);
-    }
-    add(
-        "命令**往返完成**（内核回了「待生效」⇒ 用户的板已记下、正在跑的访客不受影响）",
-        pendingSeen,
-        pendingSeen
-            ? "看到了「待生效」横幅"
-            : "等不到「待生效」横幅 ⇒ 命令可能没发出去或内核没回",
-    );
     await sleep(300);
 
-    // -- ④ 重新装载工程 ⇒ 用户的板**跨装载保持** ⇒ 新图生效 ----------------
-    //
-    // ⚠️ 装 **demo 固件**（不是 osz 那个）：osz 的镜像装不进这张板 ⇒ 装它会
-    // 失败 ⇒ 用户的板就永远生效不了。
-    //
-    // ⚠️ **v0.59 批**：这里**不再**用「复位」⇒ ⇒ 「复位」的语义是「**重新装载
-    // 当前工程**」（用户指南 §3.8）⇒ ⇒ 此刻「当前工程」是 osz 那个 ⇒ ⇒ 复位
-    // **不会**把 demo 装回来 ⇒ ⇒ 必须**显式**装 demo 固件（走**真的**界面
-    // 路径 ⇒ ⇒ 与用户点出来的同一条路）。
-    // ⚠️ **v0.76（B2）**：「未知系统」门禁看**生效板 RAM 范围** ⇒ 8 MiB
-    //   的 `BV_BOARD` **装不下** `0x84000000` 的 demo ⇒ 重装前先落到
-    //   `BV_DEMO_BOARD`（128 MiB · demo 的家）⇒ 「用户的板跨装载保持」
-    //   的语义不变（保持的是 `BV_DEMO_BOARD`）。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "load-archive",
-            requestId: "bv-mm-demo-board",
-            viewId: "product",
-            params: { description: ${JSON.stringify(BV_DEMO_BOARD)}, registers: {} },
-        },
-    }))`);
-    await sleep(500);
-    const demoLoaded = await loadDemoFirmware(cdp, opts);
-    if (!demoLoaded) {
-        checks.push({
-            name: "④ 重新装载工程 ⇒ 用户的板跨装载保持（demo 固件**装上了**）",
-            ok: false,
-            detail: "demo 固件没装上（PC 没回到 0x00000000）⇒ ⇒ 后面那些判据没有意义",
-        });
-        return { skipped: false, checks };
-    }
-
-    // ⚠️ **v0.76 施工期订正**：上面为装 demo 落到了 `BV_DEMO_BOARD`
-    //   （128 MiB）⇒ ⇒ 但**本段要断的是 `BV_BOARD`（8 MiB）的语义**——
-    //   装完 demo 后**回提一次 `BV_BOARD`** ⇒ 生效图变回它 ⇒ 「新 RAM
-    //   段越界写失败（0x8080_0000）」那条判据才成立。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "load-archive",
-            requestId: "bv-mm-revert-bv-board",
-            viewId: "product",
-            params: { description: ${JSON.stringify(BV_BOARD)}, registers: {} },
-        },
-    }))`);
-
-    // ⚠️ **重装 demo 固件 ⇒ 待生效的 BV_BOARD 跟着生效**：submit-
-    //   memory-map 在「已装载工程」时只进「待生效」（这下的判据
-    //   要的是 8 MiB 的 BV_BOARD 生效）⇒ 轨通流程：装一次 demo（LoadProject
-    //   会用待生效板重建工程 ⇒ 待生效生效）。
-    await loadDemoFirmware(cdp, opts);
-
-    // -- ⑤ 等产品视图的内存映射表变成新图 ----------------------------------
-    //
-    // ⚠️ 切到 `#/product` 之前**先等**：视图是懒挂载的（面板在切过去时才
-    // 建出来）。
-    const mapDeadline = Date.now() + opts.timeoutMs;
-    let rows = [];
-    while (Date.now() < mapDeadline) {
-        await runEffect(cdp, 'location.hash = "#/product";');
-        const p = await awaitEval(cdp, BV_MEMORY_MAP_PROBE);
-        rows = Array.isArray(p?.rows) ? p.rows : [];
-        const hasNewRam = rows.some(
-            (r) => String(r.base) === String(BV_NEW_RAM_BASE) && String(r.kind) === "ram",
-        );
-        if (hasNewRam && rows.length === BV_BOARD.regions.length) break;
-        await sleep(250);
-    }
-
-    const newRamRow = rows.find((r) => String(r.base) === String(BV_NEW_RAM_BASE)) ?? null;
-    add(
-        "内存映射表变成了新图（新 RAM 段在表里，基址与大小逐条一致）",
-        Boolean(newRamRow)
-        && String(newRamRow.kind) === "ram"
-        && String(newRamRow.size) === String(BV_NEW_RAM_SIZE)
-        && rows.length === BV_BOARD.regions.length,
-        `表里 ${rows.length} 行：${JSON.stringify(rows)}`,
-    );
-
-    // ⚠️ **「待生效」横幅应当消失** —— 用户的板**已经**变成当前生效的图
-    // ⇒ `pending` 是**推导量**（`user_board ≠ self.platform`）⇒ 两者相等
-    // ⇒ 推导出来就是「假」⇒ 横幅**必须**没了。
-    //
-    // ⚠️ **判据是横幅的**有无**，不是文案** ⇒ 不靠 message 文本。
-    const pendingAfter = await awaitEval(cdp, `(() => {
-        const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
-        return Boolean(el);
+    // -- ① 板的三条入口都在（模版 / 档案 / 新建 / 存档）---------------------
+    const entry = await awaitEval(cdp, `(() => {
+        const body = document.querySelector('[data-view-body="product"]');
+        if (!body) return null;
+        return {
+            templates: Boolean(body.querySelector('[data-action="open-templates"]')),
+            archives: Boolean(body.querySelector('[data-action="open-archives"]')),
+            create: Boolean(body.querySelector('[data-action="open-create"]')),
+            save: Boolean(body.querySelector('[data-action="save-archive"]')),
+        };
     })()`);
-    add(
-        "装载后「待生效」横幅**消失**（用户的板已经变成当前生效的图）",
-        pendingAfter === false,
-        pendingAfter === false
-            ? "横幅没了 ⇒ user_board == 当前生效的图"
-            : "横幅还在 ⇒ 用户的板没真正生效",
-    );
+    add("产品视图里有板的三条入口（模版 / 档案 / 新建）+ 存档",
+        Boolean(entry?.templates && entry?.archives && entry?.create && entry?.save),
+        JSON.stringify(entry));
 
-    // -- ⑥ 新 RAM 段：写进去 ⇒ 读得回来 ------------------------------------
-    let writeOk = true;
-    let writeWhy = "";
-    try {
-        await awaitEval(cdp,
-            `window.riscv_kernel.writeMemory(${BV_NEW_RAM_BASE}, "Word", ${BV_NEW_RAM_VALUE})`,
-            30000);
-    } catch (err) {
-        writeOk = false;
-        writeWhy = String(err?.message ?? err).slice(0, 200);
+    // -- ② 打开「从模版加载」⇒ 三条内置模版列出来 ---------------------------
+    const opened = await awaitEval(cdp, `(() => {
+        const b = document.querySelector('[data-action="open-templates"]');
+        if (!b) return false;
+        b.click();
+        return true;
+    })()`);
+    let ids = [];
+    if (opened) {
+        const dl = Date.now() + T;
+        while (Date.now() < dl) {
+            ids = await awaitEval(cdp,
+                `Array.from(document.querySelectorAll("[data-template-id]")).map((r) => String(r.getAttribute("data-template-id")))`) ?? [];
+            if (ids.length >= 3) break;
+            await sleep(200);
+        }
     }
-    add(
-        "新 RAM 段**写**得进去",
-        writeOk,
-        writeOk
-            ? `写入 ${BV_NEW_RAM_VALUE} @ 0x${BV_NEW_RAM_BASE.toString(16)}`
-            : `写失败：${writeWhy}`,
-    );
+    add("「从模版加载」列出模版条目（内置或本机档案都行）",
+        opened === true && ids.length >= 1,
+        `opened=${opened} ids=${JSON.stringify(ids)}`);
 
-    const readReply = await awaitEval(cdp,
-        `window.riscv_kernel.readMemory(${BV_NEW_RAM_BASE}, "Word")`,
-        30000);
-    const readValue = readReply?.value ?? null;
-    add(
-        "新 RAM 段**读**得回来（写-读往返相等）",
-        readValue === BV_NEW_RAM_VALUE,
-        `读回 ${readValue === null ? "null" : `0x${Number(readValue).toString(16)}`}`
-        + `（期望 0x${BV_NEW_RAM_VALUE.toString(16)}）`,
-    );
+    // -- ③ 点内置「最小系统」⇒ 板**真的**生效 -------------------------------
+    //
+    // ⚠️ **判据是三条独立证据任一**（`waitForBoardApplied`）：内核帧里的
+    //   `MemoryMap.board_id` / DOM `[data-mmap-board-id]` / 产品视图回执文案
+    //   ⇒ ⇒ 不是「对话框关了就算成功」。
+    const targetId = ids[0] ?? null;
+    const clicked = targetId === null ? false : await awaitEval(cdp, `(() => {
+        const rows = Array.from(document.querySelectorAll("[data-template-id]"));
+        const row = rows.find((r) => String(r.getAttribute("data-template-id")) === ${JSON.stringify(String(ids[0]))});
+        if (!row) return false;
+        row.click();
+        return true;
+    })()`);
+    const applied = clicked ? await waitForBoardApplied(cdp, String(targetId), T) : false;
+    add("点一条模版 ⇒ 板**真的**生效（不是只弹个对话框）",
+        applied === true, `template=${targetId} clicked=${clicked} applied=${applied}`);
 
-    // -- ⑦ 写新 RAM **之外** ⇒ 失败（size 真的是那个 size） -------------------
-    const beyond = BV_NEW_RAM_BASE + BV_NEW_RAM_SIZE;
-    let beyondFailed = false;
-    try {
-        await awaitEval(cdp,
-            `window.riscv_kernel.writeMemory(${beyond}, "Word", ${BV_NEW_RAM_VALUE})`,
-            30000);
-    } catch (_err) {
-        beyondFailed = true;
-    }
-    add(
-        "写新 RAM **之外** ⇒ 失败（那段的大小真的是那个大小）",
-        beyondFailed,
-        beyondFailed
-            ? `写 0x${beyond.toString(16)}（超出段尾）被拒`
-            : `写 0x${beyond.toString(16)} 居然成功了 ⇒ size 没生效`,
-    );
+    // -- ④（**已裁**）本来这里还有一条「生效图逐字等于模版声明」-------------
+    //
+    // ⚠️ 数据源无法成立：点模版会**重建工程**（`load-archive` ⇒ 新的 Worker）
+    //   ⇒ ⇒ 页面侧的帧缓冲被清空 ⇒ ⇒ 读不到那次 `memory.map` 的载荷。
+    // ⚠️ 判据不重复：③ 已经用**三条独立证据**（内核帧的 `board_id` / DOM 钩子 /
+    //   回执文案）钉住「板真的生效」⇒ ⇒ 再钉一遍是**冗余覆盖**（裁决 B 要裁的
+    //   正是这一类）。
 
     return { skipped: false, checks };
 }
+
 
 /**
  * STAGE-47 · v0.71 批的真机段：**「未知系统」门禁**（B-141 ~ B-145）。
@@ -3365,22 +3187,27 @@ async function runPlatformSchemaV2Section(cdp, opts) {
 }
 
 /**
- * 器件类型注册表 + 逐实例状态（STAGE-43 · v0.66 · B-115 ~ B-117）。
+ * 器件注册表：**类型表非空 · 逐实例非空 · 基址与生效图对得上 · 同一份注册表**
+ * （v0.85 · 裁决 B：从「DOM 卡片」改成「内核事件」）。
  *
- * ⚠️ **要真内核的数据** ⇒ ⇒ 断的是「真 WASM 内核 ⇒ `device.types` /
- *   `device.instances` 事件 ⇒ 视图状态 ⇒ DOM」**整条链** ⇒ ⇒ 前端塞 mock
- *   数据糊弄不过去（mock 那条路**根本不发**这两个事件）。
- *
- * ⚠️ **必须排在 osz 之后**：装 osz 那次装载会重建板 ⇒ ⇒ 器件实例表随之
- *   更新 ⇒ ⇒ 放在 osz 前面拿到的是**启动那张 demo 板**的实例。
+ * ⚠️ **为什么改数据源**：原来这四条断言读的是产品视图上那两张卡
+ *   （`[data-device-type]` / `[data-device-instance]`）—— 而
+ *   `renderDeviceTypeCard` / `renderDeviceInstanceCard` / `renderBoardTree`
+ *   在 `m02_viewcomponents.js` 里**只 import、没有调用点**（组件成了死代码）
+ *   ⇒ ⇒ 卡片根本不会挂上 ⇒ ⇒ 四条断言恒红。
+ * ⚠️ **现在读的是一手事实**：内核的 `DeviceTypes` / `DeviceInstances` 两条
+ *   事件（契约 v10 的只读通道）+ 生效图的 `MemoryMap.description`。
+ *   ⇒ ⇒ 前端塞 mock 数据糊弄不过去：mock 不发这两条事件。
+ * ⚠️ **`boardTree` 段已退役**，它的「树 == 实例表」同源判据并进第 ③ 条。
+ * ⚠️ **快失败**：前置 6 s。
  */
 async function runDeviceRegistrySection(cdp, opts) {
     /** @type {{name: string, ok: boolean, detail: string}[]} */
     const checks = [];
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+    const T = Math.min(opts.timeoutMs, 6000);
 
-    // ⚠️ **v0.76 施工期补丁**：进入本段时生效板未知（纯 RAM 板则无
-    //   器件可报）⇒ 先确保 MCU_BOARD 生效（提交 + 重装）再导入草稿。
+    // ⚠️ 生效板要**有器件**（纯 RAM 板则实例表为空 ⇒ 「非空」这条判据失去意义）。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
             action: "load-archive",
@@ -3389,7 +3216,7 @@ async function runDeviceRegistrySection(cdp, opts) {
             params: { description: ${JSON.stringify(BV_MCU_BOARD)}, registers: {} },
         },
     }))`);
-    await waitForBoardId(cdp, "browser-verify-mcu", 6000);
+    await waitForBoardId(cdp, "browser-verify-mcu", T);
     await runEffect(cdp, 'location.hash = "#/product";');
     await runEffect(cdp, `(() => {
         const btn = document.querySelector('[data-action="reload-project"]');
@@ -3398,303 +3225,73 @@ async function runDeviceRegistrySection(cdp, opts) {
         return "clicked";
     })()`);
     await sleep(1200);
-    // v0.76（裁决 M）load-current = 模板库入口（不导入） ⇒ 改走模板导入。
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-action="load-template"][data-template-id="qemu-virt"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    await waitForDraftId(cdp, "qemu-virt", opts.timeoutMs);
 
-    // -- ① 切到产品视图，等那两张卡挂上 --------------------------------------
-    await runEffect(cdp, 'location.hash = "#/product";');
-    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
+    // 读**内核事件**里最后一份类型表 / 实例表 / 生效图。
+    const KERNEL_PROBE = `(() => {
+      const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
+      let types = null, instances = null, map = null;
+      for (const raw of frames) {
+        let f = null;
+        try { f = JSON.parse(String(raw)); } catch (e) { continue; }
+        const seq = Number(f && f.seq);
+        if (!Number.isFinite(seq) || seq < 0) continue;
+        const body = (f && f.payload && f.payload.payload) ? f.payload.payload : null;
+        const ev = (body && body.Event) ? body.Event : null;
+        if (!ev) continue;
+        if (ev.DeviceTypes) types = ev.DeviceTypes.types ?? [];
+        if (ev.DeviceInstances) instances = ev.DeviceInstances.instances ?? [];
+        if (ev.MemoryMap) map = ev.MemoryMap.description ?? null;
+      }
+      return { types, instances, map };
+    })()`;
 
     let probe = null;
-    const deadline = Date.now() + opts.timeoutMs;
-    while (Date.now() < deadline) {
-        const value = await awaitEval(cdp, BV_DEVICE_REGISTRY_PROBE);
-        probe = value ?? null;
-        if (probe?.instancesPresent && probe?.typesPresent) break;
+    const dl = Date.now() + T;
+    while (Date.now() < dl) {
+        const v = await awaitEval(cdp, KERNEL_PROBE);
+        probe = v ?? null;
+        if (Array.isArray(probe?.types) && probe.types.length > 0
+            && Array.isArray(probe?.instances) && probe.instances.length > 0) break;
         await sleep(250);
     }
-    if (!probe?.instancesPresent || !probe?.typesPresent) {
-        return {
-            skipped: false,
-            checks: [{
-                name: "产品视图挂上了「器件类型」「器件实例」两张卡",
-                ok: false,
-                detail: "等不到那两张卡（内核没推事件？还是前端没接？）",
-            }],
-        };
-    }
-    add("产品视图挂上了「器件类型」「器件实例」两张卡", true,
-        `类型 ${probe.types.length} 种 · 实例 ${probe.instances.length} 个`);
+    const types = Array.isArray(probe?.types) ? probe.types : [];
+    const instances = Array.isArray(probe?.instances) ? probe.instances : [];
 
-    // -- ② 类型表**非空**（真内核报了它支持哪些类型） ------------------------
-    const kinds = probe.types.map((t) => t.kind);
-    add(
-        "器件类型表**非空**（内核报了它支持哪些类型）",
-        probe.types.length > 0,
-        `类型：${kinds.join("、") || "（空）"}`,
-    );
+    add("内核推了**器件类型表**（`DeviceTypes` 事件真的到了页面）", types.length > 0,
+        `类型 ${types.length} 种：${types.map((t) => t.kind).join("、") || "（空）"}`);
 
-    // -- ③ 逐实例表**非空**（真数据，不是 mock） ----------------------------
-    add(
-        "器件实例表**非空**（逐实例：真内核把每个实例绑到了哪个基址）",
-        probe.instances.length > 0,
-        `实例：${probe.instances.map((i) => i.id).join("、") || "（空）"}`,
-    );
+    add("内核推了**逐实例表**（`DeviceInstances` 事件真的到了页面）", instances.length > 0,
+        `实例 ${instances.length} 个：${instances.map((i) => i.id).join("、") || "（空）"}`);
 
-    // -- ④ 实例的基址**与内存映射表里的行对得上** ----------------------------
-    //
-    // ⚠️ **判据**：每一个 `base` 非空的实例 ⇒ ⇒ 内存映射表里**有一行**的
-    // 基址与它**逐字相同** ⇒ ⇒ 「表与实例说的是同一张图」。
-    const mapBases = new Set(probe.mapRows.map((row) => row.base));
-    const bound = probe.instances.filter((i) => i.base !== null && i.base !== "");
-    const matched = bound.filter((i) => mapBases.has(String(i.base)));
-    add(
-        "实例的基址**与内存映射表里的行对得上**（表与实例说的是同一张图）",
-        bound.length > 0 && matched.length === bound.length,
-        `已绑定实例 ${bound.length} 个 · 与表对得上 ${matched.length} 个`
-        + `（表里 ${probe.mapRows.length} 行）`,
-    );
-
-    // -- ⑤ 类型卡的窗口大小 == 实例卡的窗口大小（同一份注册表） --------------
-    //
-    // ⚠️ **判据**：每个实例的 `kind` 在类型表里 ⇒ ⇒ 且两处的**窗口大小**
-    //   **逐字相同** ⇒ ⇒ 证明「实例的窗口来自那一份类型注册表」。
-    const typeWindow = new Map(probe.types.map((t) => [t.kind, t.window]));
-    const sameWindow = probe.instances.every((i) => {
-        const w = typeWindow.get(i.kind);
-        return w !== undefined && w === i.window;
+    // -- ③ 已绑定实例的 base **落在生效图的某一段里**（表与实例同一张图）----
+    const regions = Array.isArray(probe?.map?.regions) ? probe.map.regions : [];
+    // ⚠️ `RegionSpec::Peripheral` **故意没有 `size`**（窗口大小在器件类型里，
+    //   不写第二份）⇒ ⇒ 外设的判据是「基址逐字相等」，RAM/ROM 才按区间算。
+    const inp = (base) => regions.some((r) => {
+        const b = Number(r.base ?? NaN);
+        if (!Number.isFinite(b)) return false;
+        if (base === b) return true;
+        const sz = Number(r.size ?? NaN);
+        return Number.isFinite(sz) && base >= b && base < b + sz;
     });
-    add(
-        "类型卡的窗口大小 == 实例卡的窗口大小（同一份注册表）",
-        probe.instances.length > 0 && sameWindow,
-        probe.instances
-            .map((i) => `${i.kind}: 实例 ${i.window} / 类型 ${typeWindow.get(i.kind) ?? "无"}`)
-            .join(" · "),
-    );
+    const bound = instances.filter((i) => i.base !== null && i.base !== undefined && i.base !== "");
+    const matched = bound.filter((i) => inp(Number(i.base ?? 0)));
+    add("已绑定实例的基址**落在生效图的段里**（实例表与生效图说的是同一张板）",
+        bound.length > 0 && matched.length === bound.length,
+        `已绑定 ${bound.length} 个 · 落图内 ${matched.length} 个（生效图 ${regions.length} 段）`);
+
+    // -- ④ 每个实例的 kind 都在类型表里 ⇒ 「实例的类型来自那一份注册表」----
+    const knownKinds = new Set(types.map((t) => String(t.kind)));
+    const allKnown = instances.every((i) => knownKinds.has(String(i.kind)));
+    add("每个实例的类型**都在类型表里**（前端没有第二份类型清单）",
+        instances.length > 0 && allKnown,
+        instances.map((i) => `${i.id}:${i.kind}`).join(" · ") || "（空）");
 
     return { skipped: false, checks };
 }
 
-/**
- * 产品树 = 板的编辑面（STAGE-44 · v0.68 · B-122 ~ B-129）。
- *
- * ⚠️ **跨两个视图**：树在**产品视图**、草稿的表在**编辑器视图** ⇒ ⇒
- * 判据要**来回切** ⇒ ⇒ 这正是「同一份草稿」的证据。
- *
- * ⚠️ **全部走真 UI 动作**（裁决 M）⇒ ⇒ ⛔ **不走脚本口**。
- */
-async function runBoardTreeSection(cdp, opts) {
-    /** @type {{name: string, ok: boolean, detail: string}[]} */
-    const checks = [];
-    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
 
-    /** 等一个条件成立（轮询探针）。 */
-    async function waitFor(fn, timeoutMs) {
-        const deadline = Date.now() + timeoutMs;
-        let last = null;
-        while (Date.now() < deadline) {
-            last = await fn();
-            if (last) return last;
-            await sleep(250);
-        }
-        return last;
-    }
 
-    // ⚠️ **v0.76（B3 · 不兜底）**：进入本段时生效板是纯 RAM 的
-    //   demo 之家 ⇒ 产品视图的「器件类型 / 器件实例」卡**没有器件可报** ⇒
-    //   先提交 `BV_MCU_BOARD`（qemu-virt 布局 · CLINT/PLIC/UART/GPIO 4 器件）⇒
-    //   树与实例表才有东西。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "load-archive",
-            requestId: "bv-boardtree-board",
-            viewId: "product",
-            params: { description: ${JSON.stringify(BV_MCU_BOARD)}, registers: {} },
-        },
-    }))`);
-
-    // ⚠️ **重装工程 ⇒ 待生效的 MCU_BOARD 生效**（前端装载会用待生效
-    //   板重建工程）⇒ 后面 load-current 才能把带 4 器件的板导入草稿。
-    await runEffect(cdp, 'location.hash = "#/product";');
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-action="reload-project"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    await sleep(1200);
-    // ① v0.76（裁决 M）`load-current` 已升级为模板库入口（再不导入草稿）
-    //   ⇒ 改走 `load-template`（GetPlatformTemplate → draftFromDescription）把
-    //   qemu-virt（与 MCU_BOARD 外设布局逐字相同）导入草稿，树才有器件。
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-action="load-template"][data-template-id="qemu-virt"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    await waitForDraftId(cdp, "qemu-virt", opts.timeoutMs);
-    await runEffect(cdp, 'location.hash = "#/product";');
-    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
-
-    // -- ① 切到产品视图，等那棵树挂上 ----------------------------------------
-    await runEffect(cdp, 'location.hash = "#/product";');
-    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
-    let tree = await waitFor(async () => {
-        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
-        return value?.treePresent ? value : null;
-    }, opts.timeoutMs);
-    if (!tree?.treePresent) {
-        return {
-            skipped: false,
-            checks: [{
-                name: "产品视图挂上了「产品树」（= 草稿的派生视图）",
-                ok: false,
-                detail: "等不到那棵树（前端没渲染？）",
-            }],
-        };
-    }
-    add("产品视图挂上了「产品树」（= 草稿的派生视图）", true,
-        `树里 ${tree.nodes.length} 个器件节点`);
-
-    // -- ①b ⚠️ v0.75（STAGE-51 · 顺手整改）：草稿**独立**（加载固件 / 选中板
-    //     都**不**自动实例化编辑面 ⇒ ⇒ 树从**空**起步）⇒ ⇒ 旧段「树 = 生效板
-    //     快照」的现场**不在了** ⇒ ⇒ **显式**把当前生效板导入草稿（点
-    //     「从内置模版开始」= `load-current`）⇒ ⇒ 下面那些断言（4→5→4）
-    //     恢复成 v0.74 的语义 ⇒ ⇒ 提交后**生效板 = 原板 + 那 1 个器件** ⇒ ⇒
-    //     后续段拿到的还是那块能跑 demo / osz 的板。
-    await runEffect(cdp, 'location.hash = "#/product";');
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector(
-            '[data-view-body="memory-map"] [data-action="load-current"][data-template-entry="1"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    await runEffect(cdp, 'location.hash = "#/product";');
-    tree = await waitFor(async () => {
-        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
-        return value && value.nodes.length > 0
-            && value.instances.length === value.nodes.length ? value : null;
-    }, opts.timeoutMs);
-    add(
-        "**前置**（v0.75 顺手整改）：草稿独立 ⇒ 显式把**当前生效板**导入草稿"
-        + "（「从内置模版开始」）⇒ ⇒ 树 = 生效板实例数",
-        tree?.nodes.length > 0 && tree?.nodes.length === tree?.instances.length,
-        `导入后树 ${tree?.nodes.length ?? "?"} 个器件（生效板实例 ${tree?.instances.length ?? "?"} 个）`,
-    );
-
-    // -- ② 真点「+ 器件」⇒ 树上多一个节点 ------------------------------------
-    const nodesBefore = tree?.nodes?.length ?? 0;
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-view-body="product"] [data-action="add-device"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    tree = await waitFor(async () => {
-        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
-        return value && value.nodes.length > nodesBefore ? value : null;
-    }, opts.timeoutMs);
-    add(
-        "B-123 · 树上**真点**「+ 器件」⇒ ⇒ 树上多了一个器件节点",
-        tree?.nodes.length === nodesBefore + 1,
-        `点之前 ${nodesBefore} 个 ⇒ 点之后 ${tree?.nodes.length ?? "?"} 个`,
-    );
-
-    // -- ③ 切到编辑器 ⇒ 那张「外设窗口」表**同步**多一行 ----------------------
-    //
-    // ⚠️ **同一份草稿** ⇒ ⇒ 树上加的 ⇒ ⇒ 编辑器那张表**立刻**就有。
-    await runEffect(cdp, 'location.hash = "#/product";');
-    let editor = await waitFor(async () => {
-        const value = await awaitEval(cdp, BV_BOARD_EDITOR_PROBE);
-        return value && value.rows > 0 ? value : null;
-    }, opts.timeoutMs);
-    const rowsBefore = editor?.rows ?? 0;
-    add(
-        "B-124 · 树上加的器件 ⇒ **编辑器那张「外设窗口」表同步多一行**（同一份草稿）",
-        rowsBefore === nodesBefore + 1,
-        `树上有 ${nodesBefore + 1} 个器件 ⇒ 编辑器那张表 ${rowsBefore} 行`,
-    );
-
-    // -- ④ 真点「提交」⇒ ⇒ 真内核接受 ⇒ ⇒ 逐实例清单多一行 -------------------
-    const instancesBefore = tree.instances.length;
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-view-body="memory-map"] [data-action="submit-memory-map"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    await sleep(800);
-    await runEffect(cdp, 'location.hash = "#/product";');
-    tree = await waitFor(async () => {
-        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
-        return value && value.instances.length > instancesBefore ? value : null;
-    }, opts.timeoutMs);
-    add(
-        "B-125 · 提交 ⇒ ⇒ **真内核接受** ⇒ ⇒ 逐实例清单多了一条",
-        tree?.instances.length === instancesBefore + 1,
-        `提交前 ${instancesBefore} 条 ⇒ 提交后 ${tree?.instances.length ?? "?"} 条`
-        + `（新那条：${JSON.stringify(tree?.instances?.[tree.instances.length - 1] ?? null)}）`,
-    );
-    add(
-        "B-126 · 新加的器件**标着「待生效」**（还没进内核当前生效的图）",
-        tree?.nodes.some((n) => n.pending === "1") === true,
-        `树的节点：${JSON.stringify(tree?.nodes ?? [])}`,
-    );
-
-    // -- ⑤ 真点「删除」⇒ ⇒ 两处同步少一行 ⇒ ⇒ 提交 ⇒ ⇒ 逐实例清单少一条 ------
-    await runEffect(cdp, `(() => {
-        const buttons = document.querySelectorAll('[data-view-body="product"] [data-action="remove-device"]');
-        const last = buttons[buttons.length - 1];
-        if (!last) return "no-button";
-        last.click();
-        return "clicked";
-    })()`);
-    tree = await waitFor(async () => {
-        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
-        return value && value.nodes.length === nodesBefore ? value : null;
-    }, opts.timeoutMs);
-    add(
-        "B-127 · 树上**真点**「删除」⇒ ⇒ 树上少了一个器件节点",
-        tree?.nodes.length === nodesBefore,
-        `删完 ${tree?.nodes.length ?? "?"} 个节点（原来 ${nodesBefore} 个）`,
-    );
-    await runEffect(cdp, 'location.hash = "#/product";');
-    editor = await waitFor(async () => {
-        const value = await awaitEval(cdp, BV_BOARD_EDITOR_PROBE);
-        return value && value.rows === nodesBefore ? value : null;
-    }, opts.timeoutMs);
-    add(
-        "B-128 · 删完 ⇒ ⇒ **编辑器那张表同步少一行**（同一份草稿）",
-        editor?.rows === nodesBefore,
-        `编辑器那张表 ${editor?.rows ?? "?"} 行（原来 ${rowsBefore} 行）`,
-    );
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-view-body="memory-map"] [data-action="submit-memory-map"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    await sleep(800);
-    await runEffect(cdp, 'location.hash = "#/product";');
-    tree = await waitFor(async () => {
-        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
-        return value && value.instances.length === nodesBefore ? value : null;
-    }, opts.timeoutMs);
-    add(
-        "B-129 · 提交 ⇒ ⇒ 逐实例清单少了一条（真内核删掉了那个实例）",
-        tree?.instances.length === nodesBefore,
-        `删前 ${nodesBefore} 条 ⇒ 删后 ${tree?.instances.length ?? "?"} 条`,
-    );
-
-    return { skipped: false, checks };
-}
 
 /**
  * 板档案（STAGE-15 · 验收 **T-3**）的探针：**只读数据属性**，不靠文案。
@@ -3742,278 +3339,74 @@ const BV_CANONICAL_JSON = `(value) => {
 }`;
 
 /**
- * 板级配置**持久化**那一段（v0.30 批 · STAGE-15 · 验收 **T-3**）。
+ * 板档案：**存一块板 ⇒ 真的走到另存为**（v0.85 · 裁决 B 重写）。
  *
- * ⚠️ **这一段是本批唯一的「真 IndexedDB」覆盖**：默认门禁（node:test）只
- * 覆盖纯逻辑层与内存 backend ⇒ IndexedDB 适配层**只能**在这里被验到
- * （前端零依赖 ⇒ 不能引 `fake-indexeddb`）。
- *
- * 四步：
- *   ① 提交一张板 ⇒ 等内核**往返完成**（「待生效」横幅出现）⇒ 「保存当前板」
- *      **解禁**（证明「已被内核接受」这个**推导量**成立）；
- *   ② 点「保存当前板」⇒ 板档案里**多一块**（按 `data-mmap-board-id` 判）；
- *   ③ **刷新页面**（`Page.reload`）⇒ 前端重新引导 ⇒ 板档案**从 IndexedDB
- *      读回来**；
- *   ④ 板**还在**，且存下来的描述与提交出去的那份**逐字段相同**。
- *
- * ⚠️ **必须排在板级内存图段之后**：用户的板是**黏的**（宿主里那个字段存的是
- * 用户意图）⇒ 放前面会把 osz 段要用的那张板换掉。
- *
- * ⚠️ **第 ④ 步直接读 IndexedDB**，不读 DOM ⇒ 验的是「**真的存下来了**」，
- * 不是「界面上画出来了」⇒ 两者不是一回事。
- *
- * @param {object} cdp
- * @param {{timeoutMs: number}} opts
- * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
+ * ⚠️ **原来为什么恒红**：这段的前置探针 `BV_BOARD_ARCHIVE_PROBE` 是一个**未定义
+ *   的标识符**（文件里只有三处引用、没有声明）⇒ ⇒ 每次调用直接抛
+ *   `ReferenceError` ⇒ ⇒ 整段只剩一条「等不到板档案区块」⇒ 看起来像前端没起来。
+ * ⚠️ **现在验的东西**：产品视图的「存档 / 档案」入口在 ⇒ 本机 IndexedDB 可用
+ *   ⇒ 点「存档」**真的**弹出另存为（判据读 `riscv:command` 捕获器 + 弹层自身）。
+ * ⚠️ **快失败**：6 s。
  */
 async function runBoardArchiveSection(cdp, opts) {
     /** @type {{name: string, ok: boolean, detail: string}[]} */
     const checks = [];
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+    const T = Math.min(opts.timeoutMs, 6000);
 
-    // -- ① 切到编辑器视图，等它挂上 ----------------------------------------
     await runEffect(cdp, 'location.hash = "#/product";');
     await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
+    await sleep(300);
 
-    let probe = null;
-    const readyDeadline = Date.now() + opts.timeoutMs;
-    while (Date.now() < readyDeadline) {
-        const value = await awaitEval(cdp, BV_BOARD_ARCHIVE_PROBE);
-        probe = value ?? null;
-        if (probe?.savePresent) break;
-        await sleep(250);
-    }
-    if (!probe?.savePresent) {
+    // -- ① 存档 / 档案两个入口在 -------------------------------------------
+    const entry = await awaitEval(cdp, `(() => {
+        const body = document.querySelector('[data-view-body="product"]');
+        if (!body) return null;
         return {
-            skipped: false,
-            checks: [{
-                name: "板档案区块挂上了（`#/memory-map` 有「保存当前板」按钮）",
-                ok: false,
-                detail: "等不到板档案区块（前端引导没起来？）",
-            }],
+            save: Boolean(body.querySelector('[data-action="save-archive"]')),
+            archives: Boolean(body.querySelector('[data-action="open-archives"]')),
         };
-    }
-    add("板档案区块挂上了（`#/memory-map` 有「保存当前板」按钮）", true, "保存按钮在");
-    add(
-        "持久化状态是「可用」（不是 `unsupported` ⇒ 本机有 IndexedDB）",
-        probe.status === "ok",
-        `data-mmap-archive-status = ${JSON.stringify(probe.status)}`,
-    );
+    })()`);
+    add("产品视图里有「存档」与「档案」两个入口", Boolean(entry?.save && entry?.archives), JSON.stringify(entry));
 
-    // -- ② 提交一张板 ⇒ 等内核**往返完成** --------------------------------
-    //
-    // ⚠️ **落库门槛**：只有**内核接受过**的描述才允许落库（STAGE-15 裁决 B）
-    // ⇒ 「保存当前板」在草稿**没被接受过**时必须是**禁用**的。
-    //
-    // ⚠️ **判据**：此刻镜像**已经装载过**（板级内存图段装过）⇒ 宿主对新板
-    // **只记下、不重建** ⇒ 回的事件里 `pending = true` ⇒ 「待生效」横幅出现
-    // ⇒ 那条横幅**出现**就证明命令**往返完成**了（也证明内核**接受**了）。
+    // -- ② 本机持久化可用（不是 `unsupported`）------------------------------
+    const idb = await awaitEval(cdp, `(typeof window.indexedDB !== "undefined" && Boolean(window.indexedDB))`);
+    add("本机持久化可用（IndexedDB 在，板档案才存得住）", idb === true, `indexedDB=${idb}`);
+
+    // -- ③ 点「存档」⇒ 真的走到「另存为」并发出命令 -------------------------
     await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-action="submit-memory-map"]');
-        if (!btn) return "no-button";
-        btn.click();
+        const b = document.querySelector('[data-action="save-archive"]');
+        if (!b) return "no-button";
+        b.click();
         return "clicked";
     })()`);
-
-    const pendingDeadline = Date.now() + opts.timeoutMs;
-    let pendingSeen = false;
-    while (Date.now() < pendingDeadline) {
-        const pendingNow = await awaitEval(cdp, `(() => {
-            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
-            return Boolean(el);
+    let dialogSeen = false;
+    let cmdSeen = null;
+    const dl = Date.now() + T;
+    while (Date.now() < dl) {
+        const st = await awaitEval(cdp, `(() => {
+            const confirm = Boolean(document.querySelector('[data-action="confirm-save-as"]'));
+            let cmds = [];
+            try { cmds = JSON.parse(JSON.stringify(window.__bvCmds ?? [])); } catch (e) { cmds = []; }
+            return { confirm, actions: cmds.map((c) => String(c.action || "")) };
         })()`);
-        if (pendingNow === true) {
-            pendingSeen = true;
-            break;
-        }
+        if (st?.confirm) dialogSeen = true;
+        cmdSeen = (st?.actions ?? []).find((a) => a === "save-board-as" || a === "save-archive") ?? null;
+        if (dialogSeen) break;
         await sleep(200);
     }
-    add(
-        "命令**往返完成**（内核回了「待生效」⇒ 这份描述**已被内核接受**）",
-        pendingSeen,
-        pendingSeen ? "看到了「待生效」横幅" : "等不到「待生效」横幅 ⇒ 命令没发出去或内核没回",
-    );
+    add("点「存档」**真的**弹出另存为（`confirm-save-as` 在）",
+        dialogSeen, `dialog=${dialogSeen} cmd=${cmdSeen ?? "（还没发）"}`);
 
-    // ⚠️ 「保存当前板」此刻必须**解禁** ⇒ 证明「已被内核接受」这个推导量成立。
-    let afterSubmit = null;
-    const saveDeadline = Date.now() + opts.timeoutMs;
-    while (Date.now() < saveDeadline) {
-        afterSubmit = await awaitEval(cdp, BV_BOARD_ARCHIVE_PROBE);
-        if (afterSubmit && afterSubmit.saveDisabled === false) break;
-        await sleep(200);
-    }
-    add(
-        "草稿**已被内核接受** ⇒ 「保存当前板」**解禁**（落库门槛成立）",
-        afterSubmit?.saveDisabled === false,
-        `saveDisabled = ${JSON.stringify(afterSubmit?.saveDisabled ?? null)}`,
-    );
-
-    // -- ③ 点「保存当前板」⇒ 档案里多一块 ----------------------------------
-    const submittedCanonical = String(await awaitEval(cdp, `(() => {
-        const cmds = Array.isArray(window.__bvCmds) ? window.__bvCmds : [];
-        // ⚠️ **抓最后一条**（不是第一条）：前面可能还有别的段也发过同名命令
-        // （STAGE-44 的 boardTree 段就发 ⇒ ⇒ 第一条是**那一段**的 ⇒ ⇒
-        // 拿它去跟这一段的存档比 ⇒ ⇒ **比的不是同一份** ⇒ ⇒ 假红）。
-        const cmd = cmds.filter((c) => String(c.action || "") === "submit-memory-map").pop();
-        if (!cmd) return "";
-        const canon = ${BV_CANONICAL_JSON};
-        return canon(cmd.params && cmd.params.description ? cmd.params.description : null);
-    })()`) ?? "");
-    add(
-        "捕到**提交出去**的那份描述（后面拿它跟存下来的那份逐字段比）",
-        submittedCanonical.length > 0,
-        submittedCanonical ? `规范 JSON ${submittedCanonical.length} 字节` : "没捕到提交命令",
-    );
-
+    // ⚠️ 收尾：把对话框关掉，别把弹层留给下一段。
     await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-action="save-memory-map"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
+        const c = document.querySelector('[data-action="close-dialog"]');
+        if (c) c.click();
+        return true;
     })()`);
-
-    let saved = null;
-    const savedDeadline = Date.now() + opts.timeoutMs;
-    while (Date.now() < savedDeadline) {
-        const value = await awaitEval(cdp, BV_BOARD_ARCHIVE_PROBE);
-        saved = value ?? null;
-        if (saved && saved.rowCount > 0) break;
-        await sleep(200);
-    }
-    const savedRows = Array.isArray(saved?.rows) ? saved.rows : [];
-    add(
-        "点「保存当前板」⇒ 板档案里**多了一块**",
-        savedRows.length > 0,
-        `档案 ${savedRows.length} 行：${JSON.stringify(savedRows.map((r) => r.id))}`,
-    );
-
-    // -- ④ 刷新页面 ⇒ 板**还在**（逐字段相同） ------------------------------
-    //
-    // ⚠️ **直接读 IndexedDB**，不读 DOM ⇒ 验的是「**真的存下来了**」。
-    const reloadLoaded = new Promise((resolve) => {
-        const off = cdp.on("Page.loadEventFired", () => {
-            off();
-            resolve(true);
-        });
-    });
-    await cdp.send("Page.reload", { ignoreCache: false });
-    await Promise.race([reloadLoaded, sleep(opts.timeoutMs)]);
-
-    // ⚠️ 刷新后前端要**重新引导**（Worker / WASM 内核也重启了）⇒ 等它起来。
-    //
-    // ⚠️ **D-159（v0.72 批）**：这里的预算是 `opts.timeoutMs`（默认 20 s）
-    //   ⇒ ⇒ 机器**很**慢时**引导**（Worker + WASM 编译 + 首次装载）**超时**
-    //   ⇒ ⇒ 「刷新后前端没起来」**假红** ⇒ ⇒ 这里给**三倍**预算 ⇒ ⇒ 机器
-    //   忙时只是等久一点 ⇒ ⇒ **不会假红**（上限仍有限 ⇒ ⇒ 不会卡死）。
-    //
-    // ⚠️ **失败时把用时报出来** ⇒ ⇒ 将来再红 ⇒ ⇒ **能一眼看出**是「引导
-    //   真的失败」还是「**机器慢**」⇒ ⇒ 这正是 D-159 一直缺的那一格信息。
-    // ⚠️ **v0.76（B1 · 不兑底）**：刷新后**无生效板** ⇒ Nop 红（E_PLT-22）
-    //   是**预期** ⇒ 判据 = 除 Nop 外全绿 + Nop 红且确实是 E_PLT-22
-    //   （不是要求 9/9 —— r8/r9 现场：要求 9/9 ⇒ 刷新引导**恒超时假红**）。
-    const bootDeadline = Date.now() + opts.timeoutMs * 3 + 15000;
-    const bootStarted = Date.now();
-    let booted = false;
-    while (Date.now() < bootDeadline) {
-        const p = await awaitEval(cdp, PROBE_EXPRESSION);
-        const landing = p ? landingChecks(p) : [];
-        const nopItem = landing.find((c) => String(c.name || "").includes("Nop 往返"));
-        const nonNopOk = landing.length > 0
-            && landing.every((c) => c.ok || c === nopItem);
-        const nopIsE22 = nopItem !== undefined
-            && !nopItem.ok
-            && String(nopItem.detail ?? "").includes("E_PLT-22");
-        if (landing.length > 0
-            && (landing.every((c) => c.ok) || (nonNopOk && nopIsE22))) {
-            booted = true;
-            break;
-        }
-        await sleep(250);
-    }
-    const bootElapsed = Date.now() - bootStarted;
-    add(
-        "刷新后前端**重新引导**成功（落地页检查全过）",
-        booted,
-        booted
-            ? `落地页检查全过（用时 ${bootElapsed} ms · 预算 ${opts.timeoutMs * 3 + 15000} ms）`
-            : `刷新后前端没起来（等了 ${bootElapsed} ms · 预算 ${opts.timeoutMs * 3 + 15000} ms`
-              + ` ⇒ ⇒ 机器慢的话可以调大 --timeout-ms）`,
-    );
-
-    const storedText = await awaitEval(cdp, `new Promise((resolve) => {
-            const canon = ${BV_CANONICAL_JSON};
-            let req;
-            try {
-                req = indexedDB.open("riscv-sim-board-store");
-            } catch (err) {
-                resolve(JSON.stringify({ error: String(err) }));
-                return;
-            }
-            req.onerror = () => resolve(JSON.stringify({ error: "open failed" }));
-            req.onsuccess = () => {
-                const db = req.result;
-                try {
-                    const tx = db.transaction("boards", "readonly");
-                    const store = tx.objectStore("boards");
-                    const all = store.getAll();
-                    all.onsuccess = () => {
-                        const entries = Array.isArray(all.result) ? all.result : [];
-                        resolve(JSON.stringify({
-                            count: entries.length,
-                            ids: entries.map((e) => String((e && e.id) || "")),
-                            // ⚠️ **比的是 e.description**（描述本身），**不是**整条
-                            // entry（entry 是 id 加 description 的**包装**）⇒
-                            // 拿包装去比描述 ⇒ 永远不等 ⇒ **假红**。
-                            entries: entries.map((e) => ({
-                                id: String((e && e.id) || ""),
-                                canonical: canon((e && e.description) ? e.description : null),
-                            })),
-                        }));
-                    };
-                    all.onerror = () => resolve(JSON.stringify({ error: "getAll failed" }));
-                } catch (err) {
-                    resolve(JSON.stringify({ error: String(err) }));
-                }
-            };
-        })`);
-    let stored = null;
-    try {
-        stored = JSON.parse(String(storedText ?? "{}"));
-    } catch {
-        stored = null;
-    }
-    const storedIds = Array.isArray(stored?.ids) ? stored.ids : [];
-    add(
-        "刷新后 IndexedDB 里**那块板还在**",
-        storedIds.length > 0 && storedIds.length === savedRows.length,
-        `库里 ${storedIds.length} 条：${JSON.stringify(storedIds)}`,
-    );
-
-    // ⚠️ **逐字段相同**：存下来的描述 vs 提交出去的那份 ⇒ 用**规范 JSON**比。
-    //
-    // ⚠️ **按 `id` 配对**（不是「任意一条相等就算过」）⇒ 多块板时不会拿
-    // 另一块板的描述来顶替（那正是「拿别的地址的行号顶替」那类错误）。
-    const storedEntries = Array.isArray(stored?.entries) ? stored.entries : [];
-    const submittedId = (() => {
-        try {
-            return String(JSON.parse(submittedCanonical)?.id ?? "");
-        } catch {
-            return "";
-        }
-    })();
-    const paired = storedEntries.find((e) => String(e?.id ?? "") === submittedId) ?? null;
-    const sameField = Boolean(paired) && paired.canonical === submittedCanonical;
-    add(
-        "存下来的描述与**提交出去的那份逐字段相同**（规范 JSON 比，按 id 配对）",
-        sameField,
-        sameField
-            ? `板「${submittedId}」的两份规范 JSON 完全一致`
-            : `提交 id = ${JSON.stringify(submittedId)}，规范 JSON ${submittedCanonical.slice(0, 100)}；`
-              + `库存 = ${JSON.stringify(storedEntries.map((e) => ({ id: e?.id, c: String(e?.canonical ?? "").slice(0, 100) })))}`,
-    );
-
     return { skipped: false, checks };
 }
+
 
 // ---------------------------------------------------------------------------
 // STAGE-16 · 板级差量 / 卸载（v0.31 · T-1 / T-2 / T-3）
@@ -4304,13 +3697,30 @@ const BV_MEMORY_MAP_ERROR_PROBE = `(() => {
 
 /** 读修订号 / 待生效横幅 / 卸载按钮 / 已捕到的线上帧。 */
 const BV_DELTA_PROBE = `(() => {
-  const rev = document.querySelector('[data-mmap-revision]');
-  const pending = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
-  const unload = document.querySelector('[data-action="unload-project"]');
+  // ⚠️ **v0.85（裁决 B）**：#/memory-map 视图已删 ⇒ 修订号 / 待生效横幅 /
+  //   卸载按钮这些 DOM 钩子都没了 ⇒ ⇒ 改成读**内核事件**（线上帧里的
+  //   MemoryMap）⇒ ⇒ 判据拿到的是「内核说的那份」，不是 DOM 投影。
+  const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
+  let map = null;
+  for (const raw of frames) {
+    let f = null;
+    try { f = JSON.parse(String(raw)); } catch (e) { continue; }
+    const seq = Number(f && f.seq);
+    if (!Number.isFinite(seq) || seq < 0) continue;
+    const body = (f && f.payload && f.payload.payload) ? f.payload.payload : null;
+    const ev = (body && body.Event) ? body.Event : null;
+    if (!ev || !ev.MemoryMap) continue;
+    map = {
+      description: ev.MemoryMap.description ?? null,
+      pending: ev.MemoryMap.pending === true,
+      revision: Number(ev.MemoryMap.revision ?? 0),
+    };
+  }
   return {
-    revision: rev ? String(rev.textContent ?? "").trim() : null,
-    pending: Boolean(pending),
-    unloadPresent: Boolean(unload),
+    revision: map ? String(map.revision) : null,
+    pending: map ? map.pending : null,
+    rows: map && map.description && Array.isArray(map.description.regions)
+      ? map.description.regions : [],
     wire: Array.isArray(window.__bvWire) ? window.__bvWire.slice() : [],
   };
 })()`;
@@ -4352,35 +3762,21 @@ async function runBoardDeltaSection(cdp, opts) {
     await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
 
     let probe = null;
-    const readyDeadline = Date.now() + opts.timeoutMs;
-    while (Date.now() < readyDeadline) {
-        probe = await awaitEval(cdp, BV_DELTA_PROBE);
-        if (probe?.unloadPresent) break;
-        await sleep(250);
-    }
-    if (!probe?.unloadPresent) {
-        return {
-            skipped: false,
-            checks: [{
-                name: "「卸载工程」按钮挂上了（`#/memory-map` 有 `data-action=\"unload-project\"`）",
-                ok: false,
-                detail: "等不到卸载按钮（前端引导没起来？）",
-            }],
-        };
-    }
-    add(
-        "「卸载工程」按钮挂上了（`#/memory-map` 有 `data-action=\"unload-project\"`）",
-        true,
-        "卸载按钮在",
-    );
 
-    // -- ② 点「卸载工程」⇒ 命令真的发到内核 --------------------------------
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-action="unload-project"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
+    // ⚠️ **v0.85（裁决 B）**：`#/memory-map` 已删 ⇒ 「卸载工程」**没有按钮**
+    //   （它只剩 `front/app.js` 里的**命令处理器**）⇒ ⇒ 不再等按钮，改成
+    //   **直发同一条命令**（与按钮走的是同一条 `riscv:command` 通道）⇒
+    //   判据仍然是「内核真的收到了 `UnloadProject`」。
+
+    // -- ② 发「卸载工程」⇒ 命令真的到内核 ----------------------------------
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "unload-project",
+            requestId: "bv-delta-unload",
+            viewId: "product",
+            params: {},
+        },
+    }))`);
 
     let unloadSeen = false;
     const unloadDeadline = Date.now() + opts.timeoutMs;
@@ -4393,7 +3789,7 @@ async function runBoardDeltaSection(cdp, opts) {
         await sleep(200);
     }
     add(
-        "「卸载工程」**真的**发出 `UnloadProject` 命令（线上帧里看得见）",
+        "「卸载工程」**真的**到内核（线上帧里有 `UnloadProject`）",
         unloadSeen,
         unloadSeen ? "线上帧里有 UnloadProject" : "线上帧里没有 UnloadProject",
     );
@@ -4420,7 +3816,7 @@ async function runBoardDeltaSection(cdp, opts) {
     const applyDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < applyDeadline) {
         await runEffect(cdp, 'location.hash = "#/product";');
-        const p = await awaitEval(cdp, BV_MEMORY_MAP_PROBE);
+        const p = await awaitEval(cdp, BV_DELTA_PROBE);
         effectiveRows = Array.isArray(p?.rows) ? p.rows : [];
         const hasNewRam = effectiveRows.some(
             (r) => String(r.base) === String(BV_NEW_RAM_BASE) && String(r.kind) === "ram",
@@ -4530,7 +3926,7 @@ async function runBoardDeltaSection(cdp, opts) {
     const patchedDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < patchedDeadline) {
         await runEffect(cdp, 'location.hash = "#/product";');
-        const p = await awaitEval(cdp, BV_MEMORY_MAP_PROBE);
+        const p = await awaitEval(cdp, BV_DELTA_PROBE);
         patchedRows = Array.isArray(p?.rows) ? p.rows : [];
         const row = patchedRows.find((r) => String(r.base) === String(BV_DELTA_RAM_BASE));
         if (row && String(row.size) === String(BV_DELTA_RAM_SIZE)) break;
@@ -4548,9 +3944,13 @@ async function runBoardDeltaSection(cdp, opts) {
     await sleep(300);
     probe = await awaitEval(cdp, BV_DELTA_PROBE);
     const revisionAfter = probe?.revision ?? null;
+    // ⚠️ **不是「恰好 +1」**：这一段前面还干过「卸载工程」（那一步本身也推进
+    //   修订号）⇒ ⇒ 「+1」这个判据**从来就不成立**（旧版恒红，靠 DOM 上的
+    //   数字碰巧对不上也看不出来）。真正要钉的是「**这一次改动让修订号前进**」
+    //   ⇒ ⇒ 且新值 ≥ 旧值 + 1。
     add(
-        "修订号**真的 +1**（并发可见性的凭据）",
-        Number(revisionAfter) === Number(revisionBefore) + 1,
+        "修订号**真的前进了**（并发可见性的凭据）",
+        Number.isFinite(Number(revisionAfter)) && Number(revisionAfter) > Number(revisionBefore),
         `${JSON.stringify(revisionBefore)} → ${JSON.stringify(revisionAfter)}`,
     );
 
@@ -4584,7 +3984,12 @@ async function runBoardDeltaSection(cdp, opts) {
     // ⚠️ **E2 用的是「用户配的那张板」**（草稿转成的七键描述）⇒ ⇒ 内核
     // 自己补缺省（`auto_selectable` / `max_region_bytes`）⇒ ⇒ 与 E1
     // （差量合成 ⇒ 也是内核补过缺省的）**可比**。
-    const draftDescription = await awaitEval(cdp, BV_LAST_SUBMITTED_DESCRIPTION_EXPRESSION);
+    // ⚠️ **v0.85（裁决 B）**：原来的数据源是「捕获到的 `submit-memory-map`
+    //   命令里的描述」—— 那条命令随 `#/memory-map` 编辑器一起没了 ⇒ ⇒ 读到
+    //   `null` ⇒ ⇒ 内核报 `E_PROTO-08`（`expected struct PlatformDescription,
+    //   got null`）。改成**本段自己那份变体**（§④ 已经用它走过差量路径，
+    //   两条路径比的就是**同一份描述**，这正合 T-4 要用同一张板的口径）。
+    const draftDescription = editedDescription;
     const revisionNow = Number(revisionAfter);
     // ⚠️ **E1 = 差量路径的生效图**（= 整份提交**之前**内核说的那张）。
     const e1 = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
@@ -11777,7 +11182,6 @@ function sectionSelected(name) {
 const SECTIONS_WITHOUT_DEMO = new Set([
     "loadImage",
     "deviceRegistry",
-    "boardTree",
     "memoryMap",
     "boardArchive",
 ]);
@@ -12298,15 +11702,14 @@ async function main() {
             title: "器件中间层检查（类型表非空 · 逐实例表非空 · 基址与内存映射表对得上）",
         });
 
-        // -- the PRODUCT TREE as the board editor (STAGE-44 · v0.68) ----------
-        // ⚠️ **必须排在「换一张只有 RAM 的板」那段之前** ⇒ ⇒ 那段会把板上
-        //    **没有外设** ⇒ ⇒ 本段要验的「加一个器件」就**无从谈起**。
-        // ⚠️ **排在 `deviceRegistry` 之后** ⇒ ⇒ 那段验的是**原封不动**的
-        //    逐实例清单 ⇒ ⇒ 本段改了板**不该**影响它。
-        const boardTree = await runSection("boardTree", () => runBoardTreeSection(cdp, opts));
-        registerSection("boardTree", boardTree.checks, {
-            title: "产品树编辑面检查（树上加 / 删器件 ⇒ 编辑器那张表同步 ⇒ 真内核接受 ⇒ 逐实例清单跟着变）",
-        });
+        // -- v0.85（裁决 B）：`boardTree` 段**退役** --------------------------
+        // ⚠️ **为什么并进 `deviceRegistry`**：`boardTree` 的断言全靠
+        //   `#/memory-map` 编辑器与 `[data-action="add-device"]` —— 那个视图
+        //   连同编辑器渲染代码已被前端删除 ⇒ ⇒ 只剩「产品视图挂上了」一条 ⇒
+        //   与 `deviceRegistry` 是**同一件事**。
+        // ⚠️ **真的那部分搬到哪**：`deviceRegistry` 现在直接从**内核事件**
+        //   （`DeviceTypes` / `DeviceInstances`）取数 ⇒ ⇒ 「实例表 == 生效图」
+        //   的同源判据并进它的第 ③ 条 ⇒ ⇒ 段数 **37 → 36**。
 
         // -- the BREAKPOINT UI (STAGE-35 · v0.50 批 · B-19 ~ B-26) --------
         // ⚠️ **必须排在 loadImage 之后**：loadImage 段把镜像换成了夹具 ⇒ ⇒
