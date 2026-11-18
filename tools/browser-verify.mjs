@@ -2395,7 +2395,7 @@ async function runMemoryMapSection(cdp, opts) {
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
 
     // -- ① 切到编辑器视图，等它挂上 ----------------------------------------
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
 
     let probe = null;
@@ -2664,7 +2664,7 @@ async function runUnknownSystemSection(cdp, opts) {
     await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
 
     // ---- ① 切到编辑器视图，等它挂上 ----------------------------------------
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await sleep(800);
 
     // ---- ② **前置**：当前板装得下 demo ⇒ ⇒ 装上它 ---------------------------
@@ -2826,7 +2826,7 @@ async function runUnknownSystemSection(cdp, opts) {
     //
     // ⚠️ 这条是 B-144 ⇒ ⇒ 它验的是「**部分**」那一档 ⇒ ⇒ **必须**与 B-141
     //   的「**完全**」那一档**分开** ⇒ ⇒ 否则「中档」就没了。
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await sleep(600);
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
@@ -2939,7 +2939,7 @@ async function runBridgeReportSection(cdp, opts) {
     await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
 
     // ---- ① 切到编辑器视图 --------------------------------------------------
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await sleep(800);
 
     // ---- ② **卸载工程** ⇒ ⇒ 改板**立即生效**（D-139）⇒ ⇒ 报告是**新板**的 --
@@ -3119,7 +3119,7 @@ async function runPlatformSchemaV2Section(cdp, opts) {
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
 
     // ---- ① 切到编辑器视图 --------------------------------------------------
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await sleep(800);
 
     // ---- ② **卸载工程** ⇒ ⇒ 改板**立即生效**（D-139）------------------------
@@ -3390,7 +3390,7 @@ async function runDeviceRegistrySection(cdp, opts) {
         },
     }))`);
     await waitForBoardId(cdp, "browser-verify-mcu", 6000);
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await runEffect(cdp, `(() => {
         const btn = document.querySelector('[data-action="reload-project"]');
         if (!btn) return "no-button";
@@ -3521,7 +3521,7 @@ async function runBoardTreeSection(cdp, opts) {
 
     // ⚠️ **重装工程 ⇒ 待生效的 MCU_BOARD 生效**（前端装载会用待生效
     //   板重建工程）⇒ 后面 load-current 才能把带 4 器件的板导入草稿。
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await runEffect(cdp, `(() => {
         const btn = document.querySelector('[data-action="reload-project"]');
         if (!btn) return "no-button";
@@ -3568,7 +3568,7 @@ async function runBoardTreeSection(cdp, opts) {
     //     「从内置模版开始」= `load-current`）⇒ ⇒ 下面那些断言（4→5→4）
     //     恢复成 v0.74 的语义 ⇒ ⇒ 提交后**生效板 = 原板 + 那 1 个器件** ⇒ ⇒
     //     后续段拿到的还是那块能跑 demo / osz 的板。
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await runEffect(cdp, `(() => {
         const btn = document.querySelector(
             '[data-view-body="memory-map"] [data-action="load-current"][data-template-entry="1"]');
@@ -3610,7 +3610,7 @@ async function runBoardTreeSection(cdp, opts) {
     // -- ③ 切到编辑器 ⇒ 那张「外设窗口」表**同步**多一行 ----------------------
     //
     // ⚠️ **同一份草稿** ⇒ ⇒ 树上加的 ⇒ ⇒ 编辑器那张表**立刻**就有。
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     let editor = await waitFor(async () => {
         const value = await awaitEval(cdp, BV_BOARD_EDITOR_PROBE);
         return value && value.rows > 0 ? value : null;
@@ -3665,7 +3665,7 @@ async function runBoardTreeSection(cdp, opts) {
         tree?.nodes.length === nodesBefore,
         `删完 ${tree?.nodes.length ?? "?"} 个节点（原来 ${nodesBefore} 个）`,
     );
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     editor = await waitFor(async () => {
         const value = await awaitEval(cdp, BV_BOARD_EDITOR_PROBE);
         return value && value.rows === nodesBefore ? value : null;
@@ -3772,7 +3772,7 @@ async function runBoardArchiveSection(cdp, opts) {
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
 
     // -- ① 切到编辑器视图，等它挂上 ----------------------------------------
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
 
     let probe = null;
@@ -4345,7 +4345,7 @@ async function runBoardDeltaSection(cdp, opts) {
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
 
     // -- ① 切到编辑器视图 + 装线上钩子 --------------------------------------
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
     // ⚠️ **命令捕获器也得装**（板档案段刷新过页面 ⇒ 钩子没了）⇒ ⇒ T-4 要
     // 从「提交出去的那条命令」里拿**用户配的那张板**（草稿转成的线上描述）。
@@ -4440,7 +4440,7 @@ async function runBoardDeltaSection(cdp, opts) {
     );
 
     // ⚠️ 「待生效」横幅**必须不出现**（立即生效 ⇒ 没有待生效的那一份）。
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await sleep(300);
     probe = await awaitEval(cdp, BV_DELTA_PROBE);
     add(
@@ -4544,7 +4544,7 @@ async function runBoardDeltaSection(cdp, opts) {
     );
 
     // -- ⑥ 修订号 **+1** ----------------------------------------------------
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await sleep(300);
     probe = await awaitEval(cdp, BV_DELTA_PROBE);
     const revisionAfter = probe?.revision ?? null;
@@ -4794,7 +4794,7 @@ async function runBoardOrderingSection(cdp, opts) {
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
 
     // -- ① 切到编辑器视图 + **重装**线上钩子（上一页刷新过 ⇒ 钩子丢了） ----
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
     await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
 
@@ -8931,7 +8931,7 @@ async function runPinLevelRoutingSection(cdp, opts) {
 
     try {
         // ---- ① 切到编辑器视图 ------------------------------------------------
-        await runEffect(cdp, 'location.hash = "#/memory-map";');
+        await runEffect(cdp, 'location.hash = "#/product";');
         await sleep(800);
 
         // ---- ①b **重装帧捕获钩子**（v0.74 批 · 施工期订正 1）------------------
@@ -9401,7 +9401,7 @@ async function runTemplateLibrarySection(cdp, opts) {
     // ---- ① 切到编辑器视图，等模板库卡（内核订阅即推） ----------------------
     await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
     await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await sleep(800);
     const libReady = await waitForTemplateLibrary(cdp, opts.timeoutMs);
     add(
@@ -9522,7 +9522,7 @@ async function runTemplateLibrarySection(cdp, opts) {
     );
 
     // ---- ④ B-170：导入 minimal ⇒ 装「要 0x4000_0000」的固件 ⇒ 拒 E_PLT-17 --
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await sleep(800);
     await runEffect(cdp,
         `document.querySelector('[data-action="load-template"][data-template-id="minimal"]').click();`);
@@ -9586,7 +9586,7 @@ async function runTemplateLibrarySection(cdp, opts) {
     //   `ram@0x8000_0000` 4 MiB ⇒ 顶到 `0x8040_0000`）⇒ ⇒ 「照常能装」
     //   的**装固件**那一半由 B-174（legacy 板含 128 MiB RAM）承担 ⇒ ⇒
     //   B-173 断的是**老描述照常生效**（模板导入链路 + 内核收下）。
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await sleep(800);
     await runEffect(cdp,
         `document.querySelector('[data-action="load-template"][data-template-id="default"]').click();`);
@@ -10146,7 +10146,7 @@ async function runMcuConceptSection(cdp, opts) {
         // ---- ① 切到编辑器视图 + 重装帧捕获钩子 ---------------------------
         // ⚠️ 与 pinLevelRouting 段同款：**真机门禁的每一段都假定「上一段留下的
         //   现场还在」** ⇒ ⇒ 上段没刷新页面，但保险起见**再装一次**（幂等）。
-        await runEffect(cdp, 'location.hash = "#/memory-map";');
+        await runEffect(cdp, 'location.hash = "#/product";');
         await sleep(800);
         await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
 
@@ -10239,7 +10239,7 @@ async function runMcuConceptSection(cdp, opts) {
                 `x1=${JSON.stringify(reg?.x1)} pc=${JSON.stringify(reg?.pc)}`,
             );
         }
-        await runEffect(cdp, 'location.hash = "#/memory-map";');
+        await runEffect(cdp, 'location.hash = "#/product";');
         await sleep(800);
 
         // ---- ⑤ B-162：rv64ima 板 + ELF32 固件 ⇒ ⇒ 拒 + 应用前判 ----------
@@ -10397,7 +10397,7 @@ async function runMcuConceptSection(cdp, opts) {
         if (mcuView2?.hasLoadCurrent === true) {
             // ⚠️ 先钉死 memory-map 视图（reload-project 可能把 hash 切走 ⇒ ⇒
             // 编辑器不在 DOM ⇒ ⇒ 点击落空 ⇒ 草稿不动 ⇒ B-166d 假红）。
-            await runEffect(cdp, 'location.hash = "#/memory-map";');
+            await runEffect(cdp, 'location.hash = "#/product";');
             await sleep(500);
             const clicked = await runEffect(cdp, `(() => {
                 const btn = document.querySelector('[data-action="load-current"][data-template-entry="1"]');
@@ -10524,7 +10524,7 @@ async function runBasePlannerSection(cdp, opts) {
     const probe = async () => await awaitEval(cdp, BV_BASE_PLANNER_PROBE);
 
     // -- 前置：切到板级内存图编辑器 -------------------------------------------
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
     await sleep(900);
 
