@@ -859,6 +859,55 @@ fn b5_a_failed_load_does_not_mark_the_session_as_loaded() {
     );
 }
 
+/// **B-5b（v0.88 真机门禁逼出来的那一条）** —— 装载一个 `images: []` 的
+/// **空工程**（产品视图「配板」走的就是它：配板＝换图 + 开新会话）⇒
+/// 机器里**没有任何镜像字节** ⇒ `load_image = false`。
+///
+/// ⚠️ 判据的方向：`loaded` 说的是「**机器里有镜像**」，不是「这个会话
+/// **曾经**收过一个 LoadProject」。置错的后果有两处（都是真机现场）：
+/// ① 界面把「已装载」挂在一台 PC=0、总线上什么都没有的机器上；
+/// ② 之后 `SetMemoryMap` 被当成「待生效」（`if !self.image_loaded` 那条
+///   立即生效的分支进不去）。
+#[test]
+fn b5b_an_empty_project_does_not_mark_the_session_as_loaded() {
+    let mut host = KernelHost::new();
+    let empty = Project {
+        id: "proj-board-only".to_string(),
+        name: "board-only".to_string(),
+        tree: ProductTree::default(),
+        images: Vec::new(),
+        version: ProjectVersion::default(),
+    };
+    let events = dispatch(&mut host, CommandPayload::LoadProject(empty));
+    let loaded = events.iter().find_map(|e| match e {
+        EventPayload::MemoryMap { loaded, .. } => Some(*loaded),
+        _ => None,
+    });
+    // `LoadProject` 的回事件里可能只有 Tick；`Subscribe` 那条才是强推的图。
+    let loaded = match loaded {
+        Some(v) => v,
+        None => {
+            let events = dispatch(
+                &mut host,
+                CommandPayload::Subscribe {
+                    topic: "memory.map".to_string(),
+                },
+            );
+            events
+                .iter()
+                .find_map(|e| match e {
+                    EventPayload::MemoryMap { loaded, .. } => Some(*loaded),
+                    _ => None,
+                })
+                .expect("订阅 memory.map 必须强推一条当前图")
+        }
+    };
+    assert!(
+        !loaded,
+        "空工程 ⇒ 机器里没有镜像字节 ⇒ `loaded` 必须是假：{events:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // B-6 · 订阅即推送
 // ---------------------------------------------------------------------------
