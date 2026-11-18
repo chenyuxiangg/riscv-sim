@@ -238,7 +238,6 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "terminalScreen",
     "memoryMap",
     "unknownSystem",
-    "bridgeReport",
     "platformSchemaV2",
     "pinLevelRouting",
     "mcuConcept",
@@ -260,7 +259,6 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "deviceRegistry",
     "readback",
     "staleSurfaces",
-    "basePlanner",
     "templateLibrary",
     "pinmuxPower",
 ]);
@@ -2163,87 +2161,7 @@ const BV_PARTIAL_BOARD = {
     ],
 };
 
-/**
- * 「**连线报告**」用的板 —— STAGE-48 · v0.72 · D-177 A（B-146 ~ B-150）。
- *
- * ⚠️ **为什么源器件是 GPIO**：契约层的 **V-18 只管源器件「在不在」**、
- *   **不管**它「是什么」⇒ ⇒ 这根线**合法**（描述**装得上**）⇒ ⇒ 但宿主
- *   **抬不了**它（宿主只从 UART 抬 `rx_ready`）⇒ ⇒ **理由 == `source-type`**
- *   ⇒ ⇒ 这正是「合法描述上**真的**会发生的丢线」。
- *
- * ⚠️ **为什么目标必须是 PLIC**：**V-19** 要求目标**是 PLIC** 且源号
- *   **小于**它的源数 ⇒ ⇒ 源 11 < 64 ✓。
- *
- * ⚠️ **必须带一块 RAM**：demo 固件要落在地址 0 附近（40 字节）⇒ ⇒ 这块板
- *   得装得下它 ⇒ ⇒ 否则本段会**污染**后面的段。
- */
-const BV_BRIDGE_BOARD = {
-    schema_version: 1,
-    id: "bv-bridge-board",
-    name: "browser-verify 连线报告板",
-    priority: 996,
-    // ⚠️ **预算必须够**：PLIC 的窗口（`0x200000 + 0x1000×contexts`）**约 2 MB**
-    //   ⇒ ⇒ 1 MB 的预算**装不下** ⇒ ⇒ 内核报 `E_PLT-07` ⇒ ⇒ 板**被拒**
-    //   ⇒ ⇒ 报告**根本没机会更新**（本批**实测踩到**：预算给小了 ⇒ ⇒
-    //   B-146 ~ B-149 全红且 `declared=0` ⇒ ⇒ 看起来像「报告没实现」）。
-    region_budget_bytes: 134217728,
-    regions: [
-        { kind: "ram", base: 0, size: 4096 },
-        {
-            kind: "peripheral",
-            base: 201326592,
-            device: { device: "plic", id: "PLIC", sources: 64, contexts: 16 },
-        },
-        {
-            kind: "peripheral",
-            base: 268435456,
-            device: { device: "gpio", id: "GPIO0" },
-        },
-    ],
-    bridge: [
-        {
-            from: { device: "GPIO0", event: "rx_ready" },
-            to: { device: "PLIC", source: 11 },
-        },
-    ],
-};
 
-/**
- * 「**抬得了**」的对照板 —— STAGE-48 · v0.72 · B-150。
- *
- * ⚠️ **必要对照**：它与 [`BV_BRIDGE_BOARD`] **只有源器件那一个差别**
- * （GPIO ⇒ ⇒ UART）⇒ ⇒ 线**合法**、**抬得了** ⇒ ⇒ 报告从「1 根抬不了」
- * 变成「**全部通电**」⇒ ⇒ ⇒ **报告跟着板变** ⇒ ⇒ ⇒ 这证明
- * [`BV_BRIDGE_BOARD`] **真的被内核应用了**（否则两块板的报告**一样**）
- * ⇒ ⇒ ⇒ ⇒ 这才是**真对照**（用「一块没有连线的板」当对照是**空转**：报告
- * 本来就是「0 根」⇒ ⇒ 那条断言**恒真**）。
- */
-const BV_RAISABLE_BRIDGE_BOARD = {
-    schema_version: 1,
-    id: "bv-raisable-bridge-board",
-    name: "browser-verify 抬得了连线板",
-    priority: 995,
-    region_budget_bytes: 134217728,
-    regions: [
-        { kind: "ram", base: 0, size: 4096 },
-        {
-            kind: "peripheral",
-            base: 201326592,
-            device: { device: "plic", id: "PLIC", sources: 64, contexts: 16 },
-        },
-        {
-            kind: "peripheral",
-            base: 268435456,
-            device: { device: "uart16550", id: "UART0", irq_line: 1, baud_rate: 115200 },
-        },
-    ],
-    bridge: [
-        {
-            from: { device: "UART0", event: "rx_ready" },
-            to: { device: "PLIC", source: 11 },
-        },
-    ],
-};
 
 /**
  * 读产品视图里那张内存映射表的**行**（按 `data-*`，**不靠文案**）。
@@ -2736,214 +2654,6 @@ async function runUnknownSystemSection(cdp, opts) {
     return { skipped: false, checks };
 }
 
-/**
- * STAGE-48 · v0.72 批的真机段：**连线报告**（B-146 ~ B-150）。
- *
- * ⚠️ **这段要钉的是「内核说的那句话真的到界面上了」** ⇒ ⇒ 断的是「**真
- *   WASM 内核** ⇒ `memory.map` 事件（第五个字段 `bridge_report`）⇒ ⇒
- *   视图状态 ⇒ ⇒ DOM」**整条链** ⇒ ⇒ 前端塞 mock 数据糊弄不过去。
- *
- * ⚠️ **段序**：必须排在「板级内存图」那段**之后**（那一段已经把一张板配出来
- *   了 ⇒ ⇒ 才有「换板」这个动作可做）。
- *
- * ⚠️ **必须先「卸载工程」**：**已装载**时改板是**待生效**的 ⇒ ⇒ 报告说的
- *   仍是**旧板**的 ⇒ ⇒ 「报告变了」那条判据就**看不到** ⇒ ⇒ **零判别力**
- *   ⇒ ⇒ 未装载时改板**立即生效**（D-139）⇒ ⇒ 报告**立刻**就是新板的那份。
- *
- * ⚠️ **每条判据都要自带正向对照**：
- * - B-146（报告出现了）的前置是 B-150（**没连线的板**显示的是「0 根」那档）
- *   ⇒ ⇒ 否则「界面显示了报告」**恒真** ⇒ ⇒ 零判别力；
- * - B-147（理由词逐字）比的是**内核事件里的那个词**⇒ ⇒ 前端**编不出来**。
- *
- * @param {object} cdp
- * @param {{timeoutMs: number}} opts
- * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
- */
-async function runBridgeReportSection(cdp, opts) {
-    /** @type {{name: string, ok: boolean, detail: string}[]} */
-    const checks = [];
-    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
-
-    // ⚠️ **先装两个钩子**：命令捕获（看前端发了什么）+ 线钩子（看**内核**回了
-    //   什么）⇒ ⇒ 「内核原文」那条判据才有数据可读。
-    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
-    await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
-
-    // ---- ① 切到编辑器视图 --------------------------------------------------
-    await runEffect(cdp, 'location.hash = "#/product";');
-    await sleep(800);
-
-    // ---- ② **卸载工程** ⇒ ⇒ 改板**立即生效**（D-139）⇒ ⇒ 报告是**新板**的 --
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-action="unload-project"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    await sleep(900);
-    const unloaded = await awaitEval(cdp, `(() => {
-        const pending = document.querySelector('.pw-pending');
-        return !pending;
-    })()`);
-    add(
-        "**前置**：工程已**卸载** ⇒ ⇒ 改板**立即生效**（D-139）⇒ ⇒ 报告说的"
-        + "是**新板**的那份（⇒ ⇒ 不是「旧板的报告」）",
-        unloaded === true,
-        `无待生效横幅=${unloaded}`,
-    );
-    if (unloaded !== true) {
-        return { skipped: false, checks };
-    }
-
-    // ---- ③ 提交那张「**源器件是 GPIO**」的板 ⇒ ⇒ 那根线**抬不了** ---------
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "load-archive",
-            requestId: "bv-bridge-board",
-            viewId: "product",
-            params: { description: ${JSON.stringify(BV_BRIDGE_BOARD)}, registers: {} },
-        },
-    }))`);
-
-    // ⚠️ **等报告出现在 DOM 里**（⇒ ⇒ 内核**收了**这张板 ⇒ ⇒ 事件回来了）。
-    const deadline = Date.now() + opts.timeoutMs;
-    let summaryText = null;
-    let droppedText = null;
-    while (Date.now() < deadline) {
-        const now = await awaitEval(cdp, `(() => {
-            const s = document.querySelector('[data-mmap-bridge="summary"]');
-            const d = document.querySelector('[data-mmap-bridge="dropped"]');
-            return {
-                summary: s ? String(s.textContent ?? "") : null,
-                dropped: d ? String(d.textContent ?? "") : null,
-            };
-        })()`);
-        if (now && now.summary && now.dropped) {
-            summaryText = now.summary;
-            droppedText = now.dropped;
-            break;
-        }
-        await sleep(200);
-    }
-
-    // ---- ④ 内核那条事件里的**原值**（界面上的数必须**等于**它）--------------
-    const lastMap = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
-    const report = lastMap?.bridge_report ?? null;
-    const declared = Number(report?.declared ?? -1);
-    const live = Number(report?.live ?? -1);
-    const dropped = Array.isArray(report?.dropped) ? report.dropped : [];
-
-    // -- B-146：报告出现了，且**内核说的**是「1 根写、1 根抬不了」------------
-    add(
-        "B-146 · 真机上提交一份带 `bridge` 的板 ⇒ ⇒ 界面显示**连线报告**"
-        + "（⇒ ⇒ 内核说的那句话**真的到了界面**）",
-        summaryText !== null && droppedText !== null && declared === 1 && dropped.length === 1,
-        `摘要=${JSON.stringify(summaryText)} 丢线数=${dropped.length} `
-        + `内核 declared=${declared} live=${live}`,
-    );
-
-    // -- B-147：界面**逐字**显示内核给的那个理由词 -----------------------------
-    const reasonWord = String(dropped[0]?.reason ?? "");
-    add(
-        "B-147 · 界面**逐字**显示内核给的理由词（前端**不自己判**）",
-        reasonWord !== "" && String(droppedText ?? "").includes(reasonWord),
-        `内核理由=${JSON.stringify(reasonWord)} 界面=${JSON.stringify(droppedText)}`,
-    );
-
-    // -- B-148：界面上的**数** == 内核的**数** ---------------------------------
-    add(
-        "B-148 · 界面上的数**等于**内核给的数（前端**不重算**）",
-        String(summaryText ?? "").includes(`写了 ${declared} 根`)
-            && String(summaryText ?? "").includes(`${dropped.length} 根当前抬不了`),
-        `界面摘要=${JSON.stringify(summaryText)} 内核 declared=${declared} live=${live} `
-        + `dropped=${dropped.length}`,
-    );
-
-    // -- B-149：报告**跟着内核那条事件**走（不是前端自己算的）----------------
-    add(
-        "B-149 · 界面上的报告**就是内核那条事件带回来的那份**（⇒ ⇒ 不是"
-        + "前端自己算的 ⇒ ⇒ 与内核**同源**）",
-        report !== null && report !== undefined && dropped.length === 1
-            && String(dropped[0]?.from_device ?? "") === "GPIO0",
-        `内核那条事件的报告=${JSON.stringify(report)}`,
-    );
-
-    // ---- ⑤ **必要对照**：换成一块**抬得了**的板 ⇒ ⇒ 报告说「全部通电」-------
-    //
-    // ⚠️ **为什么不是「一块没有连线的板」**：那种板的报告**本来就是**「0 根」
-    //   ⇒ ⇒ 那条断言**恒真** ⇒ ⇒ **空转**（本批**实测踩到**：第一次写的就是
-    //   它 ⇒ ⇒ 结果它**因为同一个原因**绿了 ⇒ ⇒ 什么也证明不了）。
-    //
-    // ⚠️ **这一条真正证明的是**：报告**跟着板变** ⇒ ⇒ ⇒ 前一块板**真的被
-    //   内核应用了**（否则两块板的报告**一样**）⇒ ⇒ ⇒ **真对照**。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "load-archive",
-            requestId: "bv-raisable-bridge-board",
-            viewId: "product",
-            params: { description: ${JSON.stringify(BV_RAISABLE_BRIDGE_BOARD)}, registers: {} },
-        },
-    }))`);
-    const deadline2 = Date.now() + opts.timeoutMs;
-    let liveText = null;
-    while (Date.now() < deadline2) {
-        const now = await awaitEval(cdp, `(() => {
-            const s = document.querySelector('[data-mmap-bridge="summary"]');
-            return s ? String(s.textContent ?? "") : null;
-        })()`);
-        if (now && String(now).includes("全部通电")) {
-            liveText = now;
-            break;
-        }
-        await sleep(200);
-    }
-    add(
-        "B-150 · **必要对照**：换成一块**抬得了**的板 ⇒ ⇒ 界面显示「全部通电」"
-        + "（⇒ ⇒ 报告**跟着板变** ⇒ ⇒ 前一块板**真的被内核应用了** ⇒ ⇒ "
-        + "「界面显示了报告」**不是恒真**的）",
-        liveText !== null,
-        `对照板摘要=${JSON.stringify(liveText)}`,
-    );
-
-    // ---- ⑥ **收尾**：把板与**装载状态**都复原 ⇒ ⇒ 后面那些段不被污染 -------
-    //
-    // ⚠️ **必须复原两样**（本批**实测踩到**：只换板、**不复原装载状态** ⇒ ⇒
-    //   后面那段要「**待生效**横幅」⇒ ⇒ 而工程**被卸载**了 ⇒ ⇒ 改板**立即
-    //   生效** ⇒ ⇒ 横幅**不出现** ⇒ ⇒ 那段**假红**）：
-    //   ① **板** ⇒ ⇒ 配回 [`BV_BOARD`]（能装下 demo 的那张）；
-    //   ② **装载状态** ⇒ ⇒ **重新装 demo 固件**（本段开头卸了它）⇒ ⇒ 后面
-    //   那些段拿到的还是「**已装载**」的现场。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "load-archive",
-            requestId: "bv-bridge-restore-board",
-            viewId: "product",
-            params: { description: ${JSON.stringify(BV_DEMO_BOARD)}, registers: {} },
-        },
-    }))`);
-    await sleep(600);
-    const restored = await loadDemoFirmware(cdp, opts);
-    add(
-        "**收尾**：板与**装载状态**都复原 ⇒ ⇒ 后面那些段拿到的还是一张**正常**的板"
-        + "（⇒ ⇒ 本段**不污染**别人）",
-        restored === true,
-        `demo 固件装上了=${restored}`,
-    );
-
-    return { skipped: false, checks };
-}
-
-/**
- * **描述格式升版 v2**（STAGE-49 · v0.73 · B2）—— 缺 `base` 的板**真的**能被
- * 内核收下并**分配出基址**。
- *
- * ⚠️ **要真内核的数据** ⇒ ⇒ 断的是「真 WASM 内核 ⇒ `memory.map` 事件 ⇒ 那里
- *   的 `description.regions[*].base`」**整条链** ⇒ ⇒ ⇒ 前端塞 mock 数据糊弄
- *   不过去（前端**不自己算**基址）。
- *
- * ⚠️ **段的位置** ⇒ ⇒ 排在 `bridgeReport` **之后**、其余段**之前** ⇒ ⇒ ⇒
- *   **必须**排在会改板的那几段**之后**（⇒ ⇒ 本段自己改的板**也要复原**）。
- */
 async function runPlatformSchemaV2Section(cdp, opts) {
     /** @type {{name: string, ok: boolean, detail: string}[]} */
     const checks = [];
@@ -8330,6 +8040,17 @@ async function runPinLevelRoutingSection(cdp, opts) {
      * @param {string} requestId
      */
     const submitBoard = async (board, requestId) => {
+        // ⚠️ **v0.86 根治「修订号漂移」**（本批实测 B-159 报
+        //   `E_PLT-13 期望的修订号 3 与宿主 4 不一致`）：
+        //   `load-archive` 是**异步往返**（发 `SetMemoryMap` ⇒ 等 `memory.map`
+        //   事件 ⇒ 前端 `viewStore.product.memoryMap` 才更新）。旧版**只发事件、
+        //   不等落地** ⇒ ⇒ 段内连着提交两块板时，第二笔仍用第一笔之前的
+        //   `revision` 当 `expected_revision` ⇒ ⇒ 内核**正确地**拒（E_PLT-13）
+        //   ⇒ ⇒ 断言看起来像「板没生效」。⇒ ⇒ 这里等这次提交的**可观察结果**：
+        //   错误横幅 / 「待生效」徽标 / 生效图里出现这块板的 id / revision 前进。
+        const boardId = String(board?.id ?? "");
+        const before = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION).catch(() => null);
+        const revBefore = Number(before?.revision ?? -1);
         await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
             detail: {
                 action: "load-archive",
@@ -8338,6 +8059,23 @@ async function runPinLevelRoutingSection(cdp, opts) {
                 params: { description: ${JSON.stringify(board)}, registers: {} },
             },
         }))`);
+        const deadline = Date.now() + 3000;
+        while (Date.now() < deadline) {
+            const err = await awaitEval(cdp, `(() => {
+                const el = document.querySelector("[data-board-error-banner][data-error-code]");
+                return el ? String(el.getAttribute("data-error-code") || "") : null;
+            })()`).catch(() => null);
+            if (err) return { ok: false, code: err };
+            const after = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION).catch(() => null);
+            const revAfter = Number(after?.revision ?? -1);
+            const descId = String(after?.description?.id ?? "");
+            const pending = await awaitEval(cdp, '!!document.querySelector(".pw-pending")').catch(() => false);
+            if (revBefore >= 0 && revAfter > revBefore) return { ok: true, revision: revAfter };
+            if (descId === boardId) return { ok: true };
+            if (pending === true) return { ok: true };
+            await sleep(120);
+        }
+        return { ok: false, code: "timeout" };
     };
 
     /**
@@ -9493,12 +9231,11 @@ async function runPinmuxPowerSection(cdp, opts) {
  *   （⇒ ⇒ 缺省零风险）；
  * - **B-164**：声明 **`rv32i`**（无 c）的板 + **RVC 固件** ⇒ ⇒ **拒** `E_PLT-20`
  *   ⇒ ⇒ **收尾复原**（板 + demo 固件 ⇒ 不污染后续段）；
- * - **B-165**：编辑器显示 **MCU 区**（isa / vendor / model / 向量表）⇒ ⇒
- *   界面上看得到（含**当前生效板 MCU（只读）**那行）；
- * - **B-166**：（顺手整改）加载固件后编辑面**不自动实例化**：草稿为空 +
- *   生效板=内置 ⇒ ⇒ 界面显示「当前生效板（自动选择 · 只读）」横幅、**不见**
- *   器件实例；点「从内置模版开始」⇒ ⇒ 器件进入草稿（可编辑）；
- * - **B-167**：（顺手整改）基址以 **16 进制**显示（`0x…`）。
+ * ⚠️ **v0.86 退役**：原 B-165（MCU 卡展示）/ B-166（不自动实例化 + 模板入口）/
+ *   B-167（16 进制基址）三组判据读的是**板级内存图编辑器**那套 UI ⇒ ⇒ 该视图
+ *   已随 `#/memory-map` 删除（`memory-map.js` 只剩 `addRegion`/`parseNumber`
+ *   两个纯函数被引用）⇒ ⇒ 没有落点 ⇒ ⇒ 与 `bridgeReport` / `basePlanner` 两段
+ *   一起退役。留下来的只认**执行与拒码**这条链。
  *
  * ## ⚠️ **顺序是硬约束**
  *
@@ -9678,21 +9415,6 @@ async function runMcuConceptSection(cdp, opts) {
             `生效图=${JSON.stringify(mcuMap)}`,
         );
 
-        // B-165 · MCU 区**看得到**（当前生效板那行 = 上面这块 rv32ima）。
-        await sleep(400);
-        const mcuView1 = await awaitEval(cdp, MCU_VIEW_PROBE);
-        add(
-            "B-165 · 编辑器显示 **MCU 区** ⇒ ⇒ 界面上看得到（当前生效板 MCU："
-            + " isa / vendor / model / 向量表）",
-            mcuView1?.hasCard === true
-                && mcuView1?.effectiveMcu !== null
-                && String(mcuView1.effectiveMcu).includes("rv32imac")
-                && String(mcuView1.effectiveMcu).includes("qemu")
-                && String(mcuView1.effectiveMcu).includes("virt")
-                && String(mcuView1.effectiveMcu).includes("0x80000000"),
-            `MCU 卡=${mcuView1?.hasCard} 生效板行=${JSON.stringify(mcuView1?.effectiveMcu)}`,
-        );
-
         // ---- ④ B-161b：**ELF32 固件照常装**（demo）⇒ ⇒ **真的跑** ---------
         // ⚠️ 装的是 **demo32.elf**（真 ELF32）⇒ ⇒ 门禁这次**真的判它**（rv32ima
         // 板 + ELF32 ⇒ 放行）⇒ ⇒ raw `.bin` 会让门禁被跳过（B-162 假绿根因）。
@@ -9844,107 +9566,6 @@ async function runMcuConceptSection(cdp, opts) {
             `demo 固件装上了=${restored1}`,
         );
 
-        // ---- ⑧ B-166：加载固件后编辑面**不自动实例化** + 模板入口 ---------
-        // ⚠️ 前置一：**先把草稿重置成默认**（点「重建草稿」= `new-draft`）⇒ ⇒
-        //   前面那些段（product tree / 差量段）把 `state.draft` 改成了别的
-        //   板 ⇒ ⇒ 不重置就测不到「草稿从空起步」。
-        await runEffect(cdp, `(() => {
-            const btn = document.querySelector('[data-action="new-draft"]');
-            if (!btn) return "no-button";
-            btn.click();
-            return "clicked";
-        })()`);
-        await sleep(500);
-        // ⚠️ 前置二：生效板 = **当前工程**（内置模板档）⇒ ⇒ 「重新装载工程」
-        //   重新 LoadProject ⇒ ⇒ 内核重推 memory.map ⇒ ⇒ 草稿**仍是默认**
-        //   （前端**不**自动实例化 ⇒ ⇒ 这正是本批要断的）⇒ ⇒ 编辑面从
-        //   **默认草稿**起步。
-        await runEffect(cdp, `(() => {
-            const btn = document.querySelector('[data-action="reload-project"]');
-            if (!btn) return "no-button";
-            btn.click();
-            return "clicked";
-        })()`);
-        await sleep(1200);
-        const mcuView2 = await awaitEval(cdp, MCU_VIEW_PROBE);
-        add(
-            "B-166a · 加载固件后编辑面**不自动实例化**：草稿为空 + 生效板=内置 ⇒ ⇒"
-            + " 界面显示「当前生效板（仅用于运行 · 只读）」横幅（v0.76 · B3："
-            + "**不兜底** ⇒ 没有「自动选择」）",
-            mcuView2?.bannerText !== null
-                && String(mcuView2.bannerText).includes("仅用于运行")
-                && String(mcuView2.bannerText).includes("只读"),
-            `横幅=${JSON.stringify(mcuView2?.bannerText)}`,
-        );
-        add(
-            "B-166b · **不见器件实例**（草稿从默认起步：0 个外设窗口）⇒ ⇒"
-            + " 板级视图由**你**配置，平台不默认选",
-            Number(mcuView2?.periphCount ?? -1) === 0,
-            `草稿外设窗口数=${mcuView2?.periphCount}`,
-        );
-        add(
-            "B-166c · 「**从内置模版开始**」按钮在（把模板导入草稿自己改）",
-            mcuView2?.hasLoadCurrent === true,
-            `按钮存在=${mcuView2?.hasLoadCurrent}`,
-        );
-        if (mcuView2?.hasLoadCurrent === true) {
-            // ⚠️ 先钉死 memory-map 视图（reload-project 可能把 hash 切走 ⇒ ⇒
-            // 编辑器不在 DOM ⇒ ⇒ 点击落空 ⇒ 草稿不动 ⇒ B-166d 假红）。
-            await runEffect(cdp, 'location.hash = "#/product";');
-            await sleep(500);
-            const clicked = await runEffect(cdp, `(() => {
-                const btn = document.querySelector('[data-action="load-current"][data-template-entry="1"]');
-                if (!btn) return "no-btn";
-                btn.click();
-                return "clicked";
-            })()`);
-            // ⚠️ **v0.76（裁决 M）**：load-current = **模板库入口** ⇒ ⇒ 点它
-            // = 把模板库卡滚进视野 + `tpl-highlight` ⇒ ⇒ **不再**偷偷把生效板
-            // 塞进草稿（B1 不兜底）⇒ ⇒ B-166d 判据跟着改（不再断「草稿变模板」）。
-            const tplInView = await (async () => {
-                const deadline = Date.now() + 3000;
-                while (Date.now() < deadline) {
-                    const st = await awaitEval(cdp, `(() => {
-                        const card = document.querySelector('[data-tpl-library="1"]');
-                        if (!card) return { present: false, highlighted: false };
-                        const r = card.getBoundingClientRect();
-                        const vh = window.innerHeight || 0;
-                        return {
-                            present: true,
-                            highlighted: card.classList.contains("tpl-highlight"),
-                            inView: r.top >= 0 && r.top < vh,
-                        };
-                    })()`);
-                    if (st?.highlighted === true || st?.inView === true) return st;
-                    await sleep(250);
-                }
-                return st;
-            })();
-            const mcuView3 = await awaitEval(cdp, MCU_VIEW_PROBE);
-            console.log("B-166d 点击:", clicked, "模板库=", JSON.stringify(tplInView),
-                "草稿外设=", mcuView3?.periphCount, "内存行=", mcuView3?.memRowCount);
-            add(
-                "B-166d · 点「从内置模版开始」⇒ ⇒ **模板库卡滚进视野 + 高亮**"
-                + "（v0.76 · 裁决 M：这是模板库入口 ⇒ 用户从这里**显式选一块**导入）",
-                clicked !== "no-btn" && Boolean(tplInView?.present) && Boolean(tplInView?.highlighted),
-                `点击=${JSON.stringify(clicked)} 模板库=${JSON.stringify(tplInView)}`,
-            );
-            add(
-                "B-166e · （草稿**不被偷偷塞模板** —— B1 不兜底）点完后草稿仍是"
-                + " **默认起步**（0 外设 · 1 RAM 段）",
-                Number(mcuView3?.periphCount ?? -1) === 0
-                    && Number(mcuView3?.memRowCount ?? -1) === 1,
-                `草稿外设=${mcuView3?.periphCount} 内存行=${mcuView3?.memRowCount}`,
-            );
-            add(
-                "B-167 · （顺手整改）基址以 **16 进制**显示（`0x…`）——草稿 RAM 段"
-                + " 首行基址",
-                mcuView3?.memBase !== null
-                    && /^0x[0-9a-f]+$/i.test(String(mcuView3?.memBase ?? "")),
-                `草稿 RAM 首行基址=${JSON.stringify(mcuView3?.memBase)}`,
-            );
-        }
-
         // ---- ⑨ **最终收尾**：板 + 装载状态复原 ---------------------------------
         await submitBoard(BV_DEMO_BOARD, "bv-mcu-final-restore");
         await sleep(600);
@@ -9961,194 +9582,7 @@ async function runMcuConceptSection(cdp, opts) {
     }
 }
 
-/**
- * STAGE-46 · v0.70 批的真机探针：**基址规划面板**。
- *
- * ⚠️ **按 `data-mmap-row` 取那一行**（不是「第几行」）⇒ ⇒ RAM / ROM 与外设
- *   两张表**分组渲染** ⇒ ⇒ DOM 顺序 ≠ 草稿下标 ⇒ ⇒ 按位置取会**取错行**。
- */
-const BV_BASE_PLANNER_PROBE = `(() => {
-  const view = document.querySelector('[data-view-body="memory-map"]');
-  const plan = view ? view.querySelector("[data-mmap-plan]") : null;
-  const gaps = plan ? Array.from(plan.querySelectorAll("[data-mmap-plan-gap]")) : [];
-  const first = gaps[0] ?? null;
-  const firstCells = first ? Array.from(first.querySelectorAll("td")) : [];
-  const targetSelect = plan ? plan.querySelector("[data-mmap-plan-target]") : null;
-  const targetIndex = Number(targetSelect ? targetSelect.value : 0);
-  const targetRow = view
-    ? view.querySelector('[data-mmap-row="' + String(targetIndex) + '"]')
-    : null;
-  const baseInput = targetRow ? targetRow.querySelector("[data-mm-base]") : null;
-  const product = document.querySelector('[data-view-body="product"]');
-  const err = view ? view.querySelector("[data-memory-map-error]") : null;
-  return {
-    hasPanel: !!plan,
-    gapCount: gaps.length,
-    firstGapFrom: first ? String(first.getAttribute("data-mmap-plan-gap") ?? "") : null,
-    firstGapFromText: firstCells.length > 0 ? String(firstCells[0].textContent || "").trim() : "",
-    firstGapToText: firstCells.length > 1 ? String(firstCells[1].textContent || "").trim() : "",
-    firstGapSizeText: firstCells.length > 2 ? String(firstCells[2].textContent || "").trim() : "",
-    targetIndex,
-    targetBase: baseInput ? String(baseInput.getAttribute("value") ?? "") : null,
-    productPlanCount: product ? product.querySelectorAll("[data-mmap-plan]").length : -1,
-    hasSubmit: !!document.querySelector('[data-action="submit-memory-map"]'),
-    errorCode: err ? String(err.getAttribute("data-error-code") ?? "") : "",
-    pending: !!document.querySelector('.pw-pending'),
-  };
-})()`;
 
-/**
- * STAGE-46 · v0.70 批的真机段：**基址规划面板**（台账 **D-175** 候选 **B** 的第一半）。
- *
- * ⚠️ **本段盯三条**：① 面板**在**、**列得出**空隙；② 真点「**用这个**」⇒ ⇒
- *   **那一行的基址真的变了**；③ 提交 ⇒ ⇒ **真内核接受**（那个空隙**不撞**）
- *   ⇒ ⇒ 且**命令载荷**里那一段的基址 **== 面板给的那个**。
- *
- * ⚠️ **必须排在「板级内存图」那段之后** ⇒ ⇒ 那段已经把一张板配出来了 ⇒ ⇒
- *   草稿里有段 ⇒ ⇒ 才算得出占用区间 ⇒ ⇒ 空隙才**不是**空的。
- *
- * @param {object} cdp
- * @param {{timeoutMs: number}} opts
- * @returns {Promise<{checks: object[]}>}
- */
-async function runBasePlannerSection(cdp, opts) {
-    const checks = [];
-    const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
-    const probe = async () => await awaitEval(cdp, BV_BASE_PLANNER_PROBE);
-
-    // -- 前置：切到板级内存图编辑器 -------------------------------------------
-    await runEffect(cdp, 'location.hash = "#/product";');
-    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
-    await sleep(900);
-
-    let p = await probe();
-
-    // -- B-136 · 面板**在** ---------------------------------------------------
-    add(
-        "B-136 · 板级内存图编辑器里有「**基址规划**」面板"
-        + "（⇒ ⇒ 用户第一眼能找到 ⇒ ⇒ 不是某个藏起来的角落）",
-        p?.hasPanel === true,
-        `面板=${p?.hasPanel}`,
-    );
-
-    // -- B-137 · 面板**列得出**空隙 -------------------------------------------
-    add(
-        "B-137 · 面板**列出了空隙**（不是空的 ⇒ ⇒ 也不是只有一句提示）"
-        + "⇒ ⇒ 每条有**起止地址 + 可用字节**",
-        Number(p?.gapCount ?? 0) > 0
-            && String(p?.firstGapFromText ?? "").length > 0
-            && String(p?.firstGapToText ?? "").length > 0
-            && String(p?.firstGapSizeText ?? "").length > 0,
-        `空隙条数=${p?.gapCount} 第一条=${JSON.stringify(p?.firstGapFromText)}`
-        + ` – ${JSON.stringify(p?.firstGapToText)}（${JSON.stringify(p?.firstGapSizeText)} 字节）`,
-    );
-
-    // -- B-138 · 真点「用这个」⇒ ⇒ **那一行的基址真的变了** -------------------
-    const baseBefore = p?.targetBase ?? null;
-    const gapFrom = p?.firstGapFrom ?? null;
-    await runEffect(cdp, `(() => {
-        const b = document.querySelector('[data-view-body="memory-map"] [data-action="use-base-gap"]');
-        if (!b) return "no-button";
-        b.click();
-        return "clicked";
-    })()`);
-    await sleep(700);
-    p = await probe();
-    add(
-        "B-138 · 真点「**用这个**」⇒ ⇒ **目标行**的基址**真的**变了"
-        + "（⇒ ⇒ 入口**不是**个摆设 ⇒ ⇒ 用户挑的那条**真的**填进去了）",
-        p?.targetBase !== baseBefore && (() => {
-            const raw = String(p?.targetBase ?? "").trim();
-            const value = /^0x/i.test(raw) ? parseInt(raw, 16) : parseInt(raw, 10);
-            return value === Number(gapFrom ?? NaN);
-        })(),
-        `点之前=${JSON.stringify(baseBefore)} 点之后=${JSON.stringify(p?.targetBase)}`
-        + ` 面板给的那个=${JSON.stringify(gapFrom)} 目标行=${p?.targetIndex}`,
-    );
-
-    // -- B-139 · 提交 ⇒ ⇒ **真内核接受** ⇒ ⇒ 载荷里那一段就是那个基址 --------
-    await runEffect(cdp, `(() => {
-        const b = document.querySelector('[data-action="submit-memory-map"]');
-        if (!b) return "no-button";
-        b.click();
-        return "clicked";
-    })()`);
-    // ⚠️ **等这条命令往返一趟** ⇒ ⇒ 「待生效」横幅**出现** = 内核**收了**这张板
-    // ⇒ ⇒ 若那个空隙**撞了**，内核会报 `E_PLT-06` ⇒ ⇒ 横幅**不会出现**。
-    const deadline = Date.now() + opts.timeoutMs;
-    let accepted = false;
-    // ⚠️ **记下最后看到的错误码**（v0.73 施工期改进）：失败时**光说「内核没接受」
-    //   没有用** ⇒ ⇒ 得知道**它为什么没接受** ⇒ ⇒ ⇒ 详情里打出来。
-    let lastCode = "";
-    let lastErrorText = "";
-    while (Date.now() < deadline) {
-        const now = await awaitEval(cdp, `(() => {
-            const el = document.querySelector('.pw-pending');
-            const err = document.querySelector('[data-board-error-banner][data-error-code]');
-            return { pending: Boolean(el), code: err ? String(err.getAttribute("data-error-code") || "") : "", text: err ? String(err.textContent ?? "") : "" };
-        })()`);
-        if (now?.code) {
-            lastCode = String(now.code);
-            lastErrorText = String(now.text ?? "");
-        }
-        if (now?.code === "E_PLT_06") break;
-        if (now?.pending === true) {
-            accepted = true;
-            break;
-        }
-        await sleep(200);
-    }
-    const cmdsText = await awaitEval(cdp, 'JSON.stringify(window.__bvCmds ?? [])');
-    let cmds = [];
-    try {
-        cmds = JSON.parse(String(cmdsText ?? "[]"));
-    } catch {
-        cmds = [];
-    }
-    const mmCmd = [...cmds].reverse().find((c) => String(c.action ?? "") === "submit-memory-map");
-    const sentRegions = Array.isArray(mmCmd?.params?.description?.regions)
-        ? mmCmd.params.description.regions
-        : [];
-    const sentHit = sentRegions.find((r) => String(r.base) === String(gapFrom ?? ""));
-    add(
-        "B-139 · 提交 ⇒ ⇒ **真内核接受**（那个空隙**不撞** ⇒ ⇒ 没有 `E_PLT-06`）"
-        + "⇒ ⇒ 且**命令载荷**里那一段的基址 **== 面板给的那个**",
-        accepted === true && Boolean(sentHit),
-        `内核接受=${accepted} 载荷里那段=${JSON.stringify(sentHit ?? null)}`
-        + ` 面板给的那个=${JSON.stringify(gapFrom)}`
-        + ` 最后一个错误码=${JSON.stringify(lastCode)} 错误原文=${JSON.stringify(lastErrorText)}`,
-    );
-
-    // -- B-140 · **正向对照**：规划面板**只有一处** ----------------------------
-    await runEffect(cdp, 'location.hash = "#/product";');
-    await sleep(700);
-    p = await probe();
-    add(
-        "B-140 · **正向对照**：规划面板**只有编辑器那一个落点**"
-        + "（产品视图里**零个** ⇒ ⇒ 一个动作一个落点 ⇒ ⇒ 那条断言不许空转）",
-        Number(p?.productPlanCount ?? -1) === 0 && p?.hasPanel === true,
-        `产品视图里的面板个数=${p?.productPlanCount} 编辑器里的=${p?.hasPanel ? 1 : 0}`,
-    );
-
-    return { checks };
-}
-
-
-
-/**
- * STAGE-42 · v0.57 批的真机段：**符号入口**（在 **demo 固件**上 ⇒ ⇒ 没有
- * 符号表 ⇒ ⇒ 专打「没有符号表」那一态）。
- *
- * ⚠️ **必须排在 osz 之前**：osz 段把镜像换成仓外的真 RTOS ⇒ ⇒ 放在它后面，
- * 本段看到的镜像**有**符号表 ⇒ ⇒ 「没有符号表」那一态就**测不到**了。
- *
- * ⚠️ **必须排在 addrInput 之后**：那一段结束时已经**复位**过 ⇒ ⇒ 本段
- * 看到的是干净的 demo 固件。
- *
- * @param {object} cdp
- * @param {{timeoutMs: number}} opts
- * @returns {Promise<{checks: object[]}>}
- */
 async function runSymbolUiSection(cdp, opts) {
     const checks = [];
     const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
@@ -11989,15 +11423,6 @@ async function main() {
             title: "「未知系统」门禁（真内核拒 · PC 没动 · 只显示内核原文 · 中档不拒）",
         });
 
-        // -- the BRIDGE REPORT (STAGE-48 · v0.72 · B-146 ~ B-150) ----------------
-        // ⚠️ **必须排在板级内存图那段之后**（那一段已经把一张板配出来了 ⇒ ⇒
-        //    才有「换板」这个动作可做）⇒ ⇒ 本段**自己先卸载**（⇒ ⇒ 改板
-        //    立即生效 ⇒ ⇒ 报告说的是**新板**的那份）。
-        const bridgeReport = await runSection("bridgeReport", () => runBridgeReportSection(cdp, opts));
-        registerSection("bridgeReport", bridgeReport.checks, {
-            title: "连线报告（真内核说「你写了 N 根线里有 M 根抬不了」· 界面逐字显示 · 数字与内核一致）",
-        });
-
         // -- the PLATFORM SCHEMA V2 (STAGE-49 · v0.73 · B2 · B-151 ~ B-155) -----
         // ⚠️ **必须排在 bridgeReport 之后**：那一段把板配成了「GPIO 当源」⇒ ⇒
         //   本段要的是一块**干净的**板（⇒ ⇒ 缺基址的那块）⇒ ⇒ 排在它后面
@@ -12039,13 +11464,6 @@ async function main() {
         );
         registerSection("mcuConcept", mcuConcept.checks, {
             title: "MCU 概念（带 mcu 的板照常装+跑 · rv64+ELF32 拒且生效板没动 · 无 mcu 照常装 · rv32i+RVC 拒且复原 · MCU 区展示 · 加载固件不自动实例化 · 基址 16 进制）",
-        });
-
-        // -- the BASE PLANNER (STAGE-46 · v0.70 · B-136 ~ B-140) --------------        // ⚠️ **必须排在板级内存图那段之后**：那一段已经把一张板配出来了 ⇒ ⇒
-        //    草稿里有段 ⇒ ⇒ 才算得出占用区间 ⇒ ⇒ 空隙才**不是**空的。
-        const basePlanner = await runSection("basePlanner", () => runBasePlannerSection(cdp, opts));
-        registerSection("basePlanner", basePlanner.checks, {
-            title: "基址规划检查（面板列出空隙 · 真点「用这个」⇒ 那一行的基址真的变了 · 真内核接受那个空隙）",
         });
 
 
