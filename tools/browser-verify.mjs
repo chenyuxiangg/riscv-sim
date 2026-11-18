@@ -1952,7 +1952,7 @@ const BV_MCU_BOARD = {
         { kind: "ram", base: 0, size: 1048576 },
         { kind: "peripheral", base: 33554432, device: { device: "clint", id: "CLINT", freq_hz: 10000000, harts: 1 } },
         { kind: "peripheral", base: 201326592, device: { device: "plic", id: "PLIC", sources: 64, contexts: 16 } },
-        { kind: "peripheral", base: 268435456, device: { device: "uart16550", id: "UART0", irq_line: 1, baud_rate: 115200 } },
+        { kind: "peripheral", base: 268435456, device: { device: "uart16550", id: "UART0", irq_line: 10, baud_rate: 115200 } },
         { kind: "peripheral", base: 1073741824, device: { device: "gpio", id: "GPIO0" } },
         { kind: "ram", base: 2147483648, size: 134217728 },
     ],
@@ -2594,19 +2594,12 @@ async function runUnknownSystemSection(cdp, opts) {
             params: { description: ${JSON.stringify(BV_PARTIAL_BOARD)}, registers: {} },
         },
     }))`);
-    const partialDeadline = Date.now() + opts.timeoutMs;
-    let partialPending = false;
-    while (Date.now() < partialDeadline) {
-        const now = await awaitEval(cdp, `(() => {
-            const el = document.querySelector('.pw-pending');
-            return Boolean(el);
-        })()`);
-        if (now === true) {
-            partialPending = true;
-            break;
-        }
-        await sleep(200);
-    }
+    // ⚠️ **v0.87 · 判据换成「板真的换了」**：`.pw-pending` 是**瞬时**的
+    //   在飞指示器（本地内核可能在两次 200 ms 采样之间就落地）⇒ ⇒ 用它当
+    //   判据会按机器快慢随机红（全量顺序下已实测红过）。这里改成等
+    //   **生效板 id** 变成这块板的 id ⇒ ⇒ 同一个事实，不依赖渲染时机。
+    const partialMap = await waitForBoardId(cdp, BV_PARTIAL_BOARD.id, opts.timeoutMs);
+    const partialPending = partialMap !== null;
     const errCountBeforePartial = (await awaitEval(cdp, BV_ALL_ERROR_EVENTS_EXPRESSION) ?? []).length;
     const partialAttempt = await attemptLoadDemoFirmware(cdp, opts);
     const errorsAfterPartial = await awaitEval(cdp, BV_ALL_ERROR_EVENTS_EXPRESSION);
@@ -9007,24 +9000,62 @@ async function runSymbolBreakpointSection(cdp, opts) {
     );
 
     // -- 点候选 ⇒ ⇒ **真的下了断点** ⇒ ⇒ 列表里出现符号名与那个地址 --------
+    // ⚠️ **v0.87 · 先清掉条件框**：`symbolUi` 段（B-79）故意留了一条**非法
+    //   条件** `x1 ==` 在同一个条件框里 ⇒ ⇒ 本段点候选时 `resolveAddrParams`
+    //   会把那条条件带上 ⇒ ⇒ 内核**拒**（合法行为）⇒ ⇒ 断点列表当然是空的
+    //   ⇒ ⇒ 假红。候选按钮只该带「地址 + 符号」，条件必须由本段自己给。
     await runEffect(cdp, `(() => {
-        const box = document.querySelector('[data-view-body="debug"] [data-symbol-input="breakpoint"]');
-        const btn = box
-            ? box.querySelector('[data-action="set-symbol-breakpoint"][data-symbol="' + ${JSON.stringify(target.name)} + '"]')
-            : null;
-        if (!btn) return "no-candidate";
-        btn.click();
-        return "clicked";
+        const dbg = document.querySelector('[data-view-body="debug"]');
+        const condBox = dbg ? dbg.querySelector('[data-cond-input="breakpoint"]') : null;
+        const input = condBox ? condBox.querySelector("[data-bp-cond-input]") : null;
+        if (!input) return "no-cond";
+        input.value = "";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        return "cleared";
     })()`);
-    await sleep(900);
-    p = await probe();
-    const rows = Array.isArray(p?.bpRows) ? p.bpRows : [];
-    const row = rows.find((r) => r.addr === targetHex);
+    await sleep(300);
+    const clicked = await awaitEval(cdp, `(() => {
+        const boxes = Array.from(document.querySelectorAll('[data-symbol-input="breakpoint"]'));
+        const want = ${JSON.stringify(target.name)};
+        let buttons = 0;
+        for (const box of boxes) {
+            const btns = Array.from(box.querySelectorAll('[data-action="set-symbol-breakpoint"]'));
+            buttons += btns.length;
+            const hit = btns.find((b) => String(b.dataset.symbol ?? "") === want);
+            if (hit) { hit.click(); return "clicked boxes=" + boxes.length + " buttons=" + buttons; }
+        }
+        return "no-candidate boxes=" + boxes.length + " buttons=" + buttons;
+    })()`);
+    // ⚠️ **v0.87 · 轮询而不是睡一次**：断点列表是异步渲染的（视图重绘 +
+    //   内核回信两条链），单次 900 ms 采样在全量顺序下会撞到中间态 ⇒ ⇒
+    //   判据不变，只是把采样窗口拉到 3 s 并**提前返回**。
+    let rows = [];
+    let row = null;
+    const bpDeadline = Date.now() + 3000;
+    let reNav = 0;
+    while (Date.now() < bpDeadline) {
+        p = await probe();
+        rows = Array.isArray(p?.bpRows) ? p.bpRows : [];
+        row = rows.find((r) => r.addr === targetHex);
+        if (row) break;
+        // ⚠️ **v0.87 · 路由会被命令带跑**：每条命令都带 `viewId`，宿主按
+        //   它切视图 ⇒ ⇒ 发完 `lookup-symbol` 后 hash 可能已经离开
+        //   `#/debug`（断点列表的探针只读 debug 视图）⇒ ⇒ 这里最多补切一次
+        //   再采样，**不**改判据（断点仍在不在内核里由内核说了算）。
+        if (reNav < 1 && Date.now() > bpDeadline - 2000) {
+            reNav += 1;
+            await runEffect(cdp, 'location.hash = "#/debug";');
+            await sleep(600);
+        }
+        await sleep(200);
+    }
     add(
         "B-86 · 点候选 ⇒ ⇒ 断点列表里出现**那个地址**，且那一行**写着符号名**"
         + "（⇒ ⇒ 符号断点这条路从界面一路通到内核）",
         !!row && row.notes.some((n) => n.includes(target.name)),
-        `断点行=${JSON.stringify(rows)} 期望名字=${target.name}`,
+        `断点行=${JSON.stringify(rows)} 期望名字=${target.name}`
+        + ` 点击=${JSON.stringify(clicked)} 补切路由=${reNav}`
+        + ` 条件错原文=${JSON.stringify(p?.condErrorText ?? "")}`,
     );
 
     // -- 收尾：**撤掉**那个断点 ⇒ ⇒ 不给后面的段留一个会误停的断点 ---------
@@ -9616,13 +9647,67 @@ async function runUartEchoProbe(cdp, opts) {
     //   ② **没匹配上就不再往下等**——后面三档（执行整行 / 第二行 / 不回显）
     //      的前提都是「回显来了」⇒ ⇒ 回显没来，它们只会重复烧超时；
     //      这里只留**一条** ✗，并说明「后续三档未执行」。
+    // ⚠️ **v0.86 · 失败现场取证（判据不变，detail 加四个寄存器真值）**：
+    //   回显没来时，只有「字节到没到」「中断标识是哪一类」能区分
+    //   「传输丢了」与「中断没被交付 / 驱动没认这一类」。
+    const IIR_ADDR = 0x10000002;
+    let preLsr = null;
+    let preIir = null;
+    try {
+        const v1 = await awaitEval(cdp, `window.riscv_kernel.readMemory(0x10000005, "Byte")`, 30000);
+        preLsr = typeof v1?.value === "number" ? (v1.value >>> 0) : null;
+        const v2 = await awaitEval(cdp, `window.riscv_kernel.readMemory(${IIR_ADDR}, "Byte")`, 30000);
+        preIir = typeof v2?.value === "number" ? (v2.value >>> 0) : null;
+    } catch (_err) {
+        /* 取证失败不影响判据 */
+    }
     const echo = await awaitEval(cdp,
         `window.riscv_image.runUntilConsole("OSZ$ Q", { timeoutMs: 30000 })`,
         60000);
+    // ⚠️ PLIC 侧真值：enable(ctx0 word0) / pending(word0) / prio[src10] / threshold(ctx0)
+    //   ⇒ ⇒ 区分「源没被 guest 使能」与「使能了但没被仲裁出来」。
+    let plicEnable = null;
+    let plicPending = null;
+    let plicPrio10 = null;
+    let plicThreshold = null;
+    try {
+        // ⚠️ 地址按 `plic.rs` 的表：enable = 0x2000 + 0x80×ctx，ctx0 ⇒ 0x0C002000；
+        //   threshold = 0x200000 + 0x1000×ctx，ctx0 ⇒ 0x0C200000。
+        const words = [
+            [0x0C002000, "plEnable"],
+            [0x0C001000, "plPending"],
+            [0x0C000028, "plPrio"],
+            [0x0C200000, "plThresh"],
+        ];
+        const got = {};
+        for (const [addr, key] of words) {
+            try {
+                const v = await awaitEval(cdp,
+                    `window.riscv_kernel.readMemory(${addr}, "Word")`, 30000);
+                got[key] = typeof v?.value === "number" ? (v.value >>> 0) : null;
+            } catch (_e) { got[key] = null; }
+        }
+        plicEnable = got.plEnable;
+        plicPending = got.plPending;
+        plicPrio10 = got.plPrio;
+        plicThreshold = got.plThresh;
+    } catch (_err) { /* 同上 */ }
+    let postLsr = null;
+    try {
+        const v = await awaitEval(cdp, `window.riscv_kernel.readMemory(0x10000005, "Byte")`, 30000);
+        postLsr = typeof v?.value === "number" ? (v.value >>> 0) : null;
+    } catch (_err) { /* 同上 */ }
     checks.push({
         name: "B-63 · guest 的 console 出现**回显**（UART RX 中断真的被交付了）",
         ok: echo?.matched === true,
-        detail: `matched=${echo?.matched} batches=${echo?.batches}`,
+        detail: `matched=${echo?.matched} batches=${echo?.batches}`
+            + ` 发送后 LSR=${preLsr === null ? "?" : "0x" + preLsr.toString(16)}`
+            + ` IIR=${preIir === null ? "?" : "0x" + preIir.toString(16)}`
+            + ` 等待后 LSR=${postLsr === null ? "?" : "0x" + postLsr.toString(16)}`
+            + ` PLIC[enable0=${plicEnable === null ? "?" : "0x" + plicEnable.toString(16)}`
+            + ` pending0=${plicPending === null ? "?" : "0x" + plicPending.toString(16)}`
+            + ` prio10=${plicPrio10 === null ? "?" : "0x" + plicPrio10.toString(16)}`
+            + ` thresh0=${plicThreshold === null ? "?" : "0x" + plicThreshold.toString(16)}]`,
     });
     if (echo?.matched !== true) {
         // ⚠️ 现场：把 console 尾巴一起带出来（「一个字符都没有」与「只有一个

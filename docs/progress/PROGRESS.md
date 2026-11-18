@@ -3,7 +3,7 @@
 > **本文件跟踪「当前需求的完成情况」**；逐版本详细变更日志已归档至 [`PROGRESS-history.md`](./PROGRESS-history.md)（同源，git history 是最终真相）。
 > **欠账的真相在台账** [`../reviews/REVIEWS.md`](../reviews/REVIEWS.md)；批次顺序与依赖在 [`../plans/PRODUCT_BOARD_PLAN.md`](../plans/PRODUCT_BOARD_PLAN.md)。
 
-- **当前里程碑**：**v0.86**（2026-11-18 · 门禁收口：33 → 31 段，全量 ✗ 从 39 降到 **0**，rc=0）
+- **当前里程碑**：**v0.87**（2026-11-18 · 带 `OSZ_ELF` 的全量也 **0 ✗ / rc=0**：夹具板 PLIC 源号订正 + 两处判据去瞬时依赖）
 - **下一批**：**第 62 批**（主题待定）· **仍欠**：门禁工具改造 [`GATE_TOOLING_PREREQ.md`](../plans/GATE_TOOLING_PREREQ.md) 的 **R-1~R-4**（本批按用户拍板先行，欠账顺延）
 - **Owner**：zyzs
 
@@ -33,6 +33,7 @@
 | 67 | v0.83 | 门禁种板入口迁移（`#/memory-map` 已删） | ✅ 已落地 | `activateBoard`/`waitForBoardApplied`/`seedBoard` 三件套（模版点选 ⇒ `load-archive` 兜底，三条独立证据任一）· 26 处 `submit-memory-map` ⇒ `load-archive` · 30 处 `viewId` ⇒ `product` · 23 处残留路由 ⇒ `#/product`；`--only loadImage` 122 s → 23 s |
 | 68 | v0.84 | 门禁用例有效性审计 + 快失败/裁剪 | ✅ 已落地 | `uartEcho` `4 × 90 s` ⇒ 30 s 快失败（380 s → 30.3 s）· `terminalScreen` 回显改前置（与 uartEcho B-63 同义，裁 1 条）⇒ 全量 1006 s/64 ✗ ⇒ 659 s/43 ✗ |
 | 69 | v0.85 | 门禁失效用例按**裁决 B**重写（37 → 36 段） | ✅ 已落地 | `boardTree` 退役并入 `deviceRegistry`（两段都在断「产品视图挂上了」）· `memoryMap` 重写为「模版对话框 + 加载生效」· `deviceRegistry` 改读内核 `DeviceTypes`/`DeviceInstances` 事件（DOM 卡片组件是**只 import 不调用**的死代码）· `boardArchive` 修 `BV_BOARD_ARCHIVE_PROBE` **未定义标识符**（整段 `ReferenceError`）· `boardDelta` 数据源改内核 `MemoryMap` 帧 +「修订号 +1」改成「前进」+ T-4 整份路径改用本段变体（旧源随编辑器消失 ⇒ `E_PROTO-08`）⇒ 四段 4/4 · 3/3 · 4/4 · 11/11 全绿；全量 540 s/39 ✗ |
+| 71 | v0.87 | 带 osz 的全量**也** `0 ✗`（夹具板 PLIC 源号 1 → 10 · B-63/B-86/B-144 判据去瞬时依赖） | ✅ 已落地 | **根因（实测）**：夹具板 `BV_MCU_BOARD` 把 UART0 的 `irq_line` 写成 **1**，而 osz 按 qemu-virt DTS 用 PLIC **源 10**（`UART_INT_NUM(26)-16`），内置 `qemu-virt.json` 本来就是 10 ⇒ 源号错位 ⇒ `deliverable_source` 永远 None ⇒ 字节进 FIFO（`LSR=0x63`）但 guest 一次不读（等待后仍 `0x63`）、`IIR=0x04` 证明设备侧条件成立 ⇒ 回显假红。**改动**：①夹具 `irq_line: 1 → 10`；②`B-63` 失败现场取证（发送后 LSR/IIR、等待后 LSR、PLIC enable/pending/prio/threshold）；③`B-86` 采样从「睡 900 ms 一次」改**轮询 3 s + 最多补切一次路由**，并在点候选前**清掉条件框**（`symbolUi` 段 B-79 故意留的非法条件 `x1 ==` 会被候选按钮带上去 ⇒ 内核合法拒 ⇒ 列表空 ⇒ 假红）；④`B-144` 的判据从瞬时的 `.pw-pending` 改成「生效板 id 真的变成这块板」（`waitForBoardId`）。**验证**：`OSZ_ELF=… 全量` ⇒ **31/31 段、0 跳过、0 ✗、rc=0**，8 条已知缺陷单列；`B-63 matched=true batches=201`、等待后 `LSR=0x62`、`pending=0x0` |
 | 70 | v0.86 | 门禁**收口**（33 → 31 段 · 全量 **0 ✗**） | ✅ 已落地 | 五类剩余红逐条核实：①**判据过期**（`mcu`/`uiLayout` 的 `code.textContent` 改读 `input.value`、`uiLayout` 的等待条件写成 `0x00000000`）；②**段间隐式耦合**（`unknownSystem` / `uiLayout` / `boardDelta` / `boardOrdering` 各自 `seedBoard` 自备前态，`T-6` 判据从「恰好 +1」放宽为「严格前进」）；③**读已删 UI**（乱序段 `[data-action="unload-project"]` ⇒ 判产品视图渲染体；乱序段改一段 size ⇒ 改走 `load-archive`，删死函数 `bvEditFirstRamSizeExpression`）；④**无实体语汇**（`templateLibrary`〔`data-tpl-library` 前端 0 命中〕与 `pinmuxPower`〔`pins`/`pinmux` 契约 0 实体〕两段**退役**，33 → 31，连带删 `waitForTemplateLibrary`）；⑤**差量帧误读旧帧**（`__bvIn` 全段共用 ⇒ 加 `wireBaseline` 只扫新增；基底改读回内核描述）；新增 per-check `known` 机制（报告打 ⚠、`failed` 过滤、末尾单列「已知产品缺陷」），跳过段不再参与判定 ⇒ 全量 `rc=0`（889 s），8 条已知缺陷单列（B-94 新旧按钮并存 / B-142+⑩ 拒后机器与图被清空 / B-162+162b+164 ISA 门禁未生效 / 差量两条：`load-archive` 入口下不可达） |
 | 61-前置 | — | 门禁工具改造（开工前置） | ⏳ 仍欠 | ⚠️ **R-1~R-4**（分段重跑 / 失败即 dump 证据 / 采集通道 health check / wasm mtime 前置），见 [`../plans/GATE_TOOLING_PREREQ.md`](../plans/GATE_TOOLING_PREREQ.md)；**R-5~R-7** 随批顺手整改 |
 
