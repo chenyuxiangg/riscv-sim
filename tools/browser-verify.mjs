@@ -2439,10 +2439,10 @@ async function runMemoryMapSection(cdp, opts) {
     // app → M-05 → 传输 → **真 WASM 内核** ⇒ 整条链都在。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-mm-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_BOARD)}, registers: {} },
         },
     }))`);
 
@@ -2493,10 +2493,10 @@ async function runMemoryMapSection(cdp, opts) {
     //   的语义不变（保持的是 `BV_DEMO_BOARD`）。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-mm-demo-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_DEMO_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_DEMO_BOARD)}, registers: {} },
         },
     }))`);
     await sleep(500);
@@ -2516,10 +2516,10 @@ async function runMemoryMapSection(cdp, opts) {
     //   段越界写失败（0x8080_0000）」那条判据才成立。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-mm-revert-bv-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_BOARD)}, registers: {} },
         },
     }))`);
 
@@ -2714,10 +2714,10 @@ async function runUnknownSystemSection(cdp, opts) {
     // ---- ⑤ 配一块「**完全落不下**」的板（⇒ ⇒ 待生效）---------------------
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-unknown-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_UNKNOWN_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_UNKNOWN_BOARD)}, registers: {} },
         },
     }))`);
     // ⚠️ **等这条命令往返一趟** ⇒ ⇒ 「待生效」横幅**出现** = 内核**收了**这张板
@@ -2821,10 +2821,10 @@ async function runUnknownSystemSection(cdp, opts) {
     await sleep(600);
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-partial-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_PARTIAL_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_PARTIAL_BOARD)}, registers: {} },
         },
     }))`);
     const partialDeadline = Date.now() + opts.timeoutMs;
@@ -2871,10 +2871,10 @@ async function runUnknownSystemSection(cdp, opts) {
     //   的 RAM ⇒ ⇒ 镜像要的地址全都在 ⇒ ⇒ 装载成功 ⇒ ⇒ 不留副作用）。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-restore-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_DEMO_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_DEMO_BOARD)}, registers: {} },
         },
     }))`);
     await sleep(600);
@@ -2958,10 +2958,10 @@ async function runBridgeReportSection(cdp, opts) {
     // ---- ③ 提交那张「**源器件是 GPIO**」的板 ⇒ ⇒ 那根线**抬不了** ---------
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-bridge-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_BRIDGE_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_BRIDGE_BOARD)}, registers: {} },
         },
     }))`);
 
@@ -3038,10 +3038,10 @@ async function runBridgeReportSection(cdp, opts) {
     //   内核应用了**（否则两块板的报告**一样**）⇒ ⇒ ⇒ **真对照**。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-raisable-bridge-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_RAISABLE_BRIDGE_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_RAISABLE_BRIDGE_BOARD)}, registers: {} },
         },
     }))`);
     const deadline2 = Date.now() + opts.timeoutMs;
@@ -3075,10 +3075,10 @@ async function runBridgeReportSection(cdp, opts) {
     //   那些段拿到的还是「**已装载**」的现场。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-bridge-restore-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_DEMO_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_DEMO_BOARD)}, registers: {} },
         },
     }))`);
     await sleep(600);
@@ -3138,10 +3138,10 @@ async function runPlatformSchemaV2Section(cdp, opts) {
     // ---- ③ 提交那块**不带 `base`** 的板 ⇒ ⇒ 内核**收下**且**分配出基址** ----
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-auto-base-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_AUTO_BASE_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_AUTO_BASE_BOARD)}, registers: {} },
         },
     }))`);
 
@@ -3186,10 +3186,10 @@ async function runPlatformSchemaV2Section(cdp, opts) {
     // ---- ④ **再提交一次** ⇒ ⇒ 分配结果**相同** ⇒ ⇒ **确定** ----------------
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-auto-base-board-2",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_AUTO_BASE_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_AUTO_BASE_BOARD)}, registers: {} },
         },
     }))`);
     const deadline2 = Date.now() + opts.timeoutMs;
@@ -3228,10 +3228,10 @@ async function runPlatformSchemaV2Section(cdp, opts) {
     //   断**「老格式仍能装」⇒ ⇒ ⇒ **不是**「反正都能装」的恒真。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-old-format-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_BOARD)}, registers: {} },
         },
     }))`);
     const deadline3 = Date.now() + opts.timeoutMs;
@@ -3263,10 +3263,10 @@ async function runPlatformSchemaV2Section(cdp, opts) {
     // -- B-154：描述里写 `timer_riscv` ⇒ ⇒ 内核**收下** ⇒ ⇒ 器件清单里**有它** ---
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-timer-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_TIMER_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_TIMER_BOARD)}, registers: {} },
         },
     }))`);
     const deadline4 = Date.now() + opts.timeoutMs;
@@ -3305,10 +3305,10 @@ async function runPlatformSchemaV2Section(cdp, opts) {
     // -- B-155：⚠️ **必要对照** —— 一块**装不下**的板 ⇒ ⇒ 界面显示**既有码** ---
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-unfittable-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_UNFITTABLE_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_UNFITTABLE_BOARD)}, registers: {} },
         },
     }))`);
     const deadline5 = Date.now() + opts.timeoutMs;
@@ -3337,10 +3337,10 @@ async function runPlatformSchemaV2Section(cdp, opts) {
     // ---- ⑥ **收尾**：把板与**装载状态**都复原 ⇒ ⇒ 后面那些段不被污染 -------
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-v2-restore-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_DEMO_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_DEMO_BOARD)}, registers: {} },
         },
     }))`);
     await sleep(600);
@@ -3374,13 +3374,13 @@ async function runDeviceRegistrySection(cdp, opts) {
     //   器件可报）⇒ 先确保 MCU_BOARD 生效（提交 + 重装）再导入草稿。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-registry-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_MCU_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_MCU_BOARD)}, registers: {} },
         },
     }))`);
-    await waitForBoardId(cdp, "browser-verify-mcu", opts.timeoutMs);
+    await waitForBoardId(cdp, "browser-verify-mcu", 6000);
     await runEffect(cdp, 'location.hash = "#/memory-map";');
     await runEffect(cdp, `(() => {
         const btn = document.querySelector('[data-action="reload-project"]');
@@ -3503,10 +3503,10 @@ async function runBoardTreeSection(cdp, opts) {
     //   树与实例表才有东西。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-boardtree-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_MCU_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_MCU_BOARD)}, registers: {} },
         },
     }))`);
 
@@ -4399,10 +4399,10 @@ async function runBoardDeltaSection(cdp, opts) {
     // 「卸载 ⇒ 改板立即生效」的端到端判别式（D-139 判别力 ⑤）。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-delta-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_BOARD)}, registers: {} },
         },
     }))`);
 
@@ -4482,10 +4482,10 @@ async function runBoardDeltaSection(cdp, opts) {
     };
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-delta-edit",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(editedDescription)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(editedDescription)}, registers: {} },
         },
     }))`);
     add(
@@ -6500,18 +6500,18 @@ async function runUiLayoutSection(cdp, opts) {
     await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
     await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: { action: "unload-project", requestId: "bv-uil-unload", viewId: "memory-map", params: null },
+        detail: { action: "unload-project", requestId: "bv-uil-unload", viewId: "product", params: null },
     }))`);
     await sleep(800);
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-uil-demo-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_DEMO_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_DEMO_BOARD)}, registers: {} },
         },
     }))`);
-    const demoBoardReady = await waitForBoardId(cdp, "browser-verify-demo", opts.timeoutMs);
+    const demoBoardReady = await waitForBoardId(cdp, "browser-verify-demo", 6000);
     add(
         "**前置**（B-16）：demo 板生效",
         demoBoardReady !== null,
@@ -8860,10 +8860,10 @@ async function runPinLevelRoutingSection(cdp, opts) {
     const submitBoard = async (board, requestId) => {
         await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
             detail: {
-                action: "submit-memory-map",
+                action: "load-archive",
                 requestId: ${JSON.stringify(requestId)},
-                viewId: "memory-map",
-                params: { description: ${JSON.stringify(board)} },
+                viewId: "product",
+                params: { description: ${JSON.stringify(board)}, registers: {} },
             },
         }))`);
     };
@@ -9248,7 +9248,7 @@ async function activateBoard(cdp, opts, timeoutMs = 6000) {
                 action: "load-archive",
                 requestId: "bv-activate-board",
                 viewId: "product",
-                params: { description: ${JSON.stringify(description)}, registers: {} },
+                params: { description: ${JSON.stringify(description)}, registers: {}, registers: {} },
             },
         }))`);
         if (await waitForBoardApplied(cdp, wantId, timeoutMs)) {
@@ -9263,6 +9263,35 @@ async function activateBoard(cdp, opts, timeoutMs = 6000) {
         return { notes, rows, hash: location.hash, view: document.querySelector("[data-view-body]")?.getAttribute("data-view-body") ?? null };
     })()`, 4000).catch(() => null);
     return { ok: false, via: "", diag: JSON.stringify(diag) };
+}
+
+/**
+ * **种一块板**（v0.83 · `submit-memory-map` 已随 `#/memory-map` 视图一起退役）。
+ *
+ * ⚠️ 老代码是「dispatch `submit-memory-map` 事件 + 等 `waitForBoardId`」
+ *   ⇒ ⇒ 前端那条路由/按钮**已经删除** ⇒ ⇒ 事件没人接 ⇒ ⇒ 每次**白等满**
+ *   `timeoutMs`（默认 20 s）⇒ ⇒ 全量串起来就是那 16.8 分钟。
+ *
+ * ⚠️ 新路径 = **产品视图的「从模版加载」同一条命令** `load-archive`
+ *   （`use-template` 处理器里 `emitCommand("load-archive", "product", …)`）
+ *   ⇒ ⇒ 不依赖任何已删除的视图，也不改断言里的板语义。
+ *
+ * @param {object} cdp
+ * @param {object} description 板描述（原样透传，`BV_*_BOARD` 语义不变）
+ * @param {string} boardId 期望生效的板 id
+ * @param {number} [timeoutMs] 前置超时（**默认 6 s** ⇒ 快失败）
+ * @returns {Promise<boolean>}
+ */
+async function seedBoard(cdp, description, boardId, timeoutMs = 6000) {
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "load-archive",
+            requestId: "bv-seed-board",
+            viewId: "product",
+            params: { description: ${JSON.stringify(description)}, registers: {}, registers: {} },
+        },
+    }))`);
+    return waitForBoardApplied(cdp, String(boardId), Math.min(timeoutMs, 6000));
 }
 
 /**
@@ -9436,7 +9465,7 @@ async function runTemplateLibrarySection(cdp, opts) {
     //   = true ⇒ 后续提交全进 `pending`（不生效 ⇒ r23/r24 现场）⇒ 提交
     //   「提交即生效」类判据前先空卸载（强制 `image_loaded = false`）。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: { action: "unload-project", requestId: "bv-ul-before-submit", viewId: "memory-map", params: null },
+        detail: { action: "unload-project", requestId: "bv-ul-before-submit", viewId: "product", params: null },
     }))`);
     await sleep(800);
     await runEffect(cdp,
@@ -9574,13 +9603,13 @@ async function runTemplateLibrarySection(cdp, opts) {
     //   RAM 范围干扰。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-restore-bv-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_DEMO_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_DEMO_BOARD)}, registers: {} },
         },
     }))`);
-    await waitForBoardId(cdp, "browser-verify-board", opts.timeoutMs);
+    await waitForBoardId(cdp, "browser-verify-board", 6000);
 
     // ---- ⑥ B-174 对照：带旧键 auto_selectable 的老描述照常能解析、能装 -----
     const err3Before = await awaitEval(cdp, BV_ALL_ERROR_EVENTS_EXPRESSION);
@@ -9589,18 +9618,18 @@ async function runTemplateLibrarySection(cdp, opts) {
     //   = true ⇒ 后续提交全进 `pending`（不生效 ⇒ r23/r24 现场）⇒ 提交
     //   「提交即生效」类判据前先空卸载（强制 `image_loaded = false`）。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: { action: "unload-project", requestId: "bv-ul-before-submit", viewId: "memory-map", params: null },
+        detail: { action: "unload-project", requestId: "bv-ul-before-submit", viewId: "product", params: null },
     }))`);
     await sleep(800);
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-legacy-autoselect",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_LEGACY_AUTOSELECT_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_LEGACY_AUTOSELECT_BOARD)}, registers: {} },
         },
     }))`);
-    const legacyMap = await waitForBoardId(cdp, "browser-verify-legacy-autoselect", opts.timeoutMs);
+    const legacyMap = await waitForBoardId(cdp, "browser-verify-legacy-autoselect", 6000);
     const loadedLegacy = await loadDemoFirmware(cdp, opts);
     const err3After = await awaitEval(cdp, BV_ALL_ERROR_EVENTS_EXPRESSION);
     const fresh3 = Array.isArray(err3After) ? err3After.slice(err3Count) : [];
@@ -9653,15 +9682,15 @@ async function runPinmuxPowerSection(cdp, opts) {
     //   = true ⇒ 后续提交全进 `pending`（不生效 ⇒ r23/r24 现场）⇒ 提交
     //   「提交即生效」类判据前先空卸载（强制 `image_loaded = false`）。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: { action: "unload-project", requestId: "bv-ul-before-submit", viewId: "memory-map", params: null },
+        detail: { action: "unload-project", requestId: "bv-ul-before-submit", viewId: "product", params: null },
     }))`);
     await sleep(800);
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-pinmux-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_PINMUX_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_PINMUX_BOARD)}, registers: {} },
         },
     }))`);
     console.log("PINMUX-STEP-1 submit sent");
@@ -9992,10 +10021,10 @@ async function runMcuConceptSection(cdp, opts) {
     const submitBoard = async (board, requestId) => {
         await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
             detail: {
-                action: "submit-memory-map",
+                action: "load-archive",
                 requestId: ${JSON.stringify(requestId)},
-                viewId: "memory-map",
-                params: { description: ${JSON.stringify(board)} },
+                viewId: "product",
+                params: { description: ${JSON.stringify(board)}, registers: {} },
             },
         }))`);
     };
@@ -11020,13 +11049,13 @@ async function runOszSection(cdp, opts) {
     //   才能真正跑起来（断点 / 终端 / 串口段都挂在它后面）。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-osz-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_MCU_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_MCU_BOARD)}, registers: {} },
         },
     }))`);
-    await waitForBoardId(cdp, "browser-verify-mcu", opts.timeoutMs);
+    await waitForBoardId(cdp, "browser-verify-mcu", 6000);
     console.log(`· osz ELF：${elfPath}`);
 
     // -- 符号表：按**名字**取调度器符号的地址（E-7）----------------------
@@ -11688,6 +11717,37 @@ function staleRustSources(wasmPath) {
  * @param {string} name — 段名
  * @returns {string|null} 跳过原因；`null` = 该跑
  */
+/**
+ * 这一段**在本趟里会不会被采纳**（R-1 的读侧）。
+ *
+ * ⚠️ 存在理由：有几段**不经过 `runSection`**（`landing` / `render` /
+ *   `kernelExec` / `source` / `waveform`）—— 它们的检查是**启动序列里同步
+ *   算出来的**，`registerSection` 只能把它们**标成 SKIP**（拦不住那段
+ *   `while` 轮询照样跑满）⇒ ⇒ `--only loadImage` 实测 **t=122 s** 才进段。
+ *   ⇒ ⇒ 这里给出「选没选中」的判据，让启动序列**真的跳过**它的探针。
+ *
+ * @param {string} name
+ * @returns {boolean}
+ */
+function sectionSelected(name) {
+    return policySkipReason(String(name)) === null;
+}
+
+/**
+ * **不需要 demo 固件**的段（`--only` 命中它们时跳过启动期那一次装载）。
+ *
+ * ⚠️ 只列**确定不需要**的：这些段要么自己装镜像（`loadImage`），要么只关心
+ *   板 / 器件 / 存档（`deviceRegistry` / `boardTree` / `boardArchive` …）。
+ *   拿不准的一律**留在需要 demo 的一侧**（多装一次，好过判据拿到空现场）。
+ */
+const SECTIONS_WITHOUT_DEMO = new Set([
+    "loadImage",
+    "deviceRegistry",
+    "boardTree",
+    "memoryMap",
+    "boardArchive",
+]);
+
 function policySkipReason(name) {
     if (RUN_POLICY.only) {
         return name === RUN_POLICY.only ? null : `SKIP（--only=${RUN_POLICY.only} ⇒ 本段未选中）`;
@@ -12055,15 +12115,16 @@ async function main() {
         //
         // ⚠️ 走 `riscv:command`（与 `runPinLevelRoutingSection` 的
         //   `submitBoard` 同一机制）⇒ **不依赖**模板导入的命令往返。
-        await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-            detail: {
-                action: "submit-memory-map",
-                requestId: "bv-seed-board",
-                viewId: "memory-map",
-                params: { description: ${JSON.stringify(BV_DEMO_BOARD)} },
-            },
-        }))`);
-        await waitForBoardId(cdp, "browser-verify-demo", opts.timeoutMs);
+        // ⚠️ **v0.83**：`#/memory-map` 视图与 `submit-memory-map` 按钮都已被前端
+        //   删除 ⇒ ⇒ 旧种子**永远不生效**（每趟白等 20 s；启动期装 demo 也因
+        //   「没有生效板」失败）⇒ ⇒ 改成走**当前真实入口**：产品视图的模版
+        //   （`qemu-virt` = 128 MiB + UART0 + GPIO0 + CLINT/PLIC，与
+        //   `BV_DEMO_BOARD` 的布局逐字相同）⇒ ⇒ 6 s 快失败。
+        const bootSeed = await activateBoard(cdp, { templateId: "qemu-virt", description: BV_DEMO_BOARD }, 6000);
+        if (!bootSeed.ok) {
+            console.error(`error: 启动期种板失败（via=${bootSeed.via || "none"}）现场=${bootSeed.diag}`);
+            return EXIT_PRECONDITION;
+        }
         // ⚠️ **v0.76（B3 · 不兜底）**：前端引导**不再自动装载**固件 ⇒ 这里
         //   必须**自己装 demo**（v0.75 靠 auto-select 兜底 ⇒ 引导即带 demo；
         //   v0.76 去掉兜底后，后续「x1 = 42 / PC 随单步 / 波形边沿」等判据
