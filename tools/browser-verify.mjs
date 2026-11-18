@@ -155,7 +155,11 @@ const E_HARNESS_CHANNEL = "E_HARNESS_CHANNEL";
  *
  * ⚠️ 只影响**定位期**；收口判据仍是全量 0 ✗（见 GATE_TOOLING_PREREQ §5）。
  */
+const RUN_STARTED_AT = Date.now();
+
 const RUN_POLICY = {
+    /** `--progress`：每段开始/结束立刻打一行（定位「卡在哪段」）。 */
+    progress: false,
     only: null,
     from: null,
     fromReached: false,
@@ -337,9 +341,19 @@ async function runSection(name, fn) {
         return { skipped: true, reason: blocked, checks: empty };
     }
     const startedAt = Date.now();
+    // ⚠️ **进度即时可见**（`--progress`）：报告是**跑完才打印**的 ⇒ ⇒ 一轮
+    //   卡住时，日志里只有开场横幅 ⇒ ⇒ 看不出「卡在哪一段」⇒ ⇒ 这条打印就是
+    //   给那种场面用的（不是常开：默认静默，免得日志变噪声）。
+    if (RUN_POLICY.progress) {
+        const t = ((Date.now() - RUN_STARTED_AT) / 1000).toFixed(1);
+        console.log(`[prog] start ${name} (t=${t}s)`);
+    }
     try {
         const result = await fn();
         TIMING.push({ name, ms: Date.now() - startedAt });
+        if (RUN_POLICY.progress) {
+            console.log(`[prog] end   ${name} (ms=${Date.now() - startedAt})`);
+        }
         return result;
     } catch (err) {
         TIMING.push({ name, ms: Date.now() - startedAt, threw: true });
@@ -458,7 +472,12 @@ function selfCheckPageTemplates() {
     //   模板时**外面要再加一层括号**（否则 `=` 右边括号不配平）。
     const fnMatch = src.match(/const BV_LAST_MEMORY_MAP_FN = `([\s\S]*?)`;/);
     const fn = fnMatch ? fnMatch[1] : "";
-    const re = /awaitEval\(cdp, `([\s\S]*?)`\)/g;
+    // ⚠️ **不要把 `)` 写进正则**：`awaitEval` 的第 3 个参数是**超时**
+    //   （`awaitEval` 的第 3 个参数是超时，例如 4000）⇒ ⇒ 旧正则要求模板
+    //   后面**紧跟** `)`
+    //   ⇒ ⇒ 那种写法一个都不匹配 ⇒ ⇒ 正则退化成「跨越多条模板硬匹配」
+    //   ⇒ ⇒ 报出的语法错**位置全错**（v0.83 实测：第 33/34 个模板假阳性）。
+    const re = /awaitEval\(cdp, `([\s\S]*?)`\s*(?:,\s*\d+)?\)/g;
     let index = 0;
     for (const match of src.matchAll(re)) {
         index += 1;
@@ -495,6 +514,7 @@ function parseArgs(argv) {
         else if (arg === "--cdp-port") opts.cdpPort = Number(argv[++i]);
         else if (arg === "--serve-port") opts.servePort = Number(argv[++i]);
         else if (arg === "--timeout-ms") opts.timeoutMs = Number(argv[++i]);
+        else if (arg === "--progress") RUN_POLICY.progress = true;
         else if (arg === "--no-serve") opts.serve = false;
         // R-1 · 分段重跑（定位期用；收口判据仍要求全量 0 ✗）
         else if (arg === "--only") opts.only = String(argv[++i]);
@@ -5765,15 +5785,18 @@ async function runLoadImageSection(cdp, opts) {
     //   的 BV_BOARD（8 MiB 纯 RAM）⇒ ui-image 固件（0x8400_0000 入口）**装不下**
     //   （E_PLT-17）且无 UART（终端没输出）⇒ 先回到 128 MiB 且带
     //   GPIO0/UART0 的 demo 之家再装（波形 / 终端 / B-9b 一路绿）。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "submit-memory-map",
-            requestId: "bv-loadimage-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_DEMO_BOARD)} },
-        },
-    }))`);
-    await waitForBoardId(cdp, "browser-verify-demo", opts.timeoutMs);
+    // ⚠️ v0.83：走**当前真实入口**（`load-archive`）种板，且**快失败**（6 s）。
+    const seed = await activateBoard(cdp, { templateId: "qemu-virt", description: BV_DEMO_BOARD }, 6000);
+    if (!seed.ok) {
+        return {
+            skipped: false,
+            checks: [{
+                name: "前置 · demo 之家生效（128 MiB + UART0 + GPIO0）",
+                ok: false,
+                detail: `种板失败（via=${seed.via || "none"}）现场=${seed.diag}`
+            }],
+        };
+    }
 
     const checks = [];
     const tmpDir = mkdtempSync(join(tmpdir(), "riscv-ui-image-"));
@@ -9171,6 +9194,114 @@ async function waitForDraftId(cdp, id, timeoutMs) {
 }
 
 /**
+ * **种一块板**（v0.83 · 对齐前端 UI 重构后的真实入口）。
+ *
+ * ⚠️ **为什么不再用 `submit-memory-map`**：前端的 `#/memory-map` 视图及其
+ *   `submit-memory-map` 按钮**已经被删除**（`m02_viewcomponents.js` 里
+ *   「`#/memory-map` 路由、面板与编辑器渲染代码一并删除」）⇒ ⇒ 那条路由
+ *   现在落到 `#/fallback` ⇒ ⇒ 命令没人接 ⇒ **板永远不生效** ⇒ ⇒ 后面每段
+ *   都要白等满 20 s（这就是「全量 16.8 分钟 / 64 项 ✗」的来源）。
+ *
+ * ⚠️ **现在的真实入口**：产品视图的板面板 ⇒ `use-template` / `load-archive`
+ *   命令（viewId `"product"`）。本函数直接发 `load-archive`（与「从模版加载」
+ *   同一条命令），然后**等板真的出现在产品视图里**（DOM 钩子
+ *   `[data-mmap-board-id]`），不是只等事件帧。
+ *
+ * @param {object} cdp
+ * @param {{id: string}} description 目标板描述（`BV_*_BOARD` / 内置 qemu-virt）
+ * @param {number} [timeoutMs] **前置**超时（默认 6000，故意比段超时短 ⇒ 快失败）
+ * @returns {Promise<boolean>}
+ */
+async function activateBoard(cdp, opts, timeoutMs = 6000) {
+    const templateId = String(opts.templateId ?? "");
+    const description = opts.description ?? null;
+    const wantId = String(description?.id ?? templateId);
+    await runEffect(cdp, 'location.hash = "#/product";');
+    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
+
+    // ① **真实 UI 路径**：产品视图的「模版」面板 ⇒ 点某一条模版。
+    const clicked = await awaitEval(cdp, `(() => {
+        const open = document.querySelector('[data-action="open-templates"]');
+        if (!open) return "no-open-button";
+        open.click();
+        return "opened";
+    })()`, 4000).catch(() => "eval-threw");
+    if (clicked === "opened") {
+        await sleep(600);
+        const picked = await awaitEval(cdp, `(() => {
+            const rows = Array.from(document.querySelectorAll("[data-template-id]"));
+            const row = rows.find((r) => String(r.getAttribute("data-template-id")) === ${JSON.stringify(templateId)});
+            if (!row) return { hit: false, ids: rows.map((r) => String(r.getAttribute("data-template-id"))) };
+            row.click();
+            return { hit: true, ids: [] };
+        })()`, 4000).catch(() => null);
+        if (picked && picked.hit) {
+            const okUi = await waitForBoardApplied(cdp, wantId, timeoutMs);
+            if (okUi) return { ok: true, via: "template-click", diag: "" };
+        }
+    }
+
+    // ② **命令路径**（与「从模版加载」同一条命令 `load-archive`）。
+    if (description) {
+        await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+            detail: {
+                action: "load-archive",
+                requestId: "bv-activate-board",
+                viewId: "product",
+                params: { description: ${JSON.stringify(description)}, registers: {} },
+            },
+        }))`);
+        if (await waitForBoardApplied(cdp, wantId, timeoutMs)) {
+            return { ok: true, via: "load-archive", diag: "" };
+        }
+    }
+
+    // ③ 失败也要说清楚**现场**（否则下一轮还是盲猜）。
+    const diag = await awaitEval(cdp, `(() => {
+        const notes = Array.from(document.querySelectorAll("[data-product-note], [data-note]")).map((n) => n.textContent.trim());
+        const rows = Array.from(document.querySelectorAll("[data-mmap-board-id]")).map((r) => String(r.getAttribute("data-mmap-board-id")));
+        return { notes, rows, hash: location.hash, view: document.querySelector("[data-view-body]")?.getAttribute("data-view-body") ?? null };
+    })()`, 4000).catch(() => null);
+    return { ok: false, via: "", diag: JSON.stringify(diag) };
+}
+
+/**
+ * 等「板真的生效」：**三条独立证据**任一成立即可（都不成立才算失败）。
+ *
+ * 1. 线上帧（`__bvIn`）里出现 `MemoryMap` 事件且 `board_id` 对得上；
+ * 2. DOM 里出现 `[data-mmap-board-id="<id>"]`（模版 / 档案列表的行）；
+ * 3. 产品视图的提示语里出现 `<id>`（装载成功的回执）。
+ */
+async function waitForBoardApplied(cdp, boardId, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        const hit = await awaitEval(cdp, `(() => {
+            const want = ${JSON.stringify(boardId)};
+            const rows = Array.from(document.querySelectorAll("[data-mmap-board-id]")).map((r) => String(r.getAttribute("data-mmap-board-id")));
+            const notes = Array.from(document.querySelectorAll("[data-product-note], [data-note]")).map((n) => String(n.textContent));
+            const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
+            let eventHit = false;
+            for (const raw of frames) {
+                let frame = null;
+                try { frame = JSON.parse(String(raw)); } catch (e) { continue; }
+                const ev = frame?.payload?.payload?.Event ?? null;
+                if (!ev || !ev.MemoryMap) continue;
+                const bid = String(ev.MemoryMap.board_id ?? ev.MemoryMap.description?.id ?? "");
+                if (bid === want) eventHit = true;
+            }
+            return {
+                event: eventHit,
+                dom: rows.includes(want),
+                note: notes.some((t) => t.includes(want)),
+            };
+        })()`, 4000).catch(() => null);
+        if (hit && (hit.event || hit.dom || hit.note)) return true;
+        await sleep(200);
+    }
+    return false;
+}
+
+/**
  * 等「提交板级内存图」之后生效图里出现某块板。
  *
  * @param {object} cdp
@@ -11490,6 +11621,45 @@ function staleRustSources(wasmPath) {
     const cratesDir = join(repoRoot, "crates");
     if (!existsSync(cratesDir) || !existsSync(wasmPath)) return [];
     const wasmMtime = statSync(wasmPath).mtimeMs;
+
+    // ⚠️ **v0.83：mtime 只当「候选」，真判据是代码指纹**。
+    //
+    //   为什么：纯 mtime 会把「改一句测试 / 改一行注释 / touch 一下」都算成
+    //   「产物过期」⇒ ⇒ 每次触发一次 `cargo build --target wasm32`（实测约
+    //   **2 分钟**）⇒ ⇒ 全量门禁固定多花两分钟，且**这条开销跟被测对象无关**。
+    //
+    //   怎么判：`tools/build-wasm.sh` 构建成功后写 `tools/.wasm-code.stamp.json`
+    //   （`crates/**/*.rs` 的**代码指纹**：去掉 `#[cfg(test)]` 模块与注释后 hash）
+    //   ⇒ ⇒ 这里只把「mtime 更新且**指纹也变了**」的文件算过期。
+    //
+    //   没有指纹表（老树 / 手删）⇒ ⇒ **退回纯 mtime**（宁可多编一次，
+    //   也不能拿旧产物去测新代码）。
+    const stampPath = join(repoRoot, "tools", ".wasm-code.stamp.json");
+    let stamp = null;
+    if (existsSync(stampPath)) {
+        try {
+            stamp = JSON.parse(readFileSync(stampPath, "utf8"));
+        } catch {
+            stamp = null;
+        }
+    }
+    let fingerprints = null;
+    const codeHashOf = (relPath) => {
+        if (fingerprints === null) {
+            try {
+                fingerprints = JSON.parse(
+                    execFileSync(process.execPath, [join(repoRoot, "tools", "wasm-code-hash.mjs")], {
+                        encoding: "utf8",
+                        timeout: 60000,
+                    }),
+                );
+            } catch {
+                fingerprints = {};
+            }
+        }
+        return fingerprints[relPath] ?? null;
+    };
+
     const out = [];
     const walk = (dir) => {
         for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -11497,9 +11667,14 @@ function staleRustSources(wasmPath) {
             if (entry.isDirectory()) {
                 walk(full);
             } else if (entry.isFile() && entry.name.endsWith(".rs")) {
-                if (statSync(full).mtimeMs > wasmMtime) {
-                    out.push(relative(repoRoot, full));
+                if (statSync(full).mtimeMs <= wasmMtime) continue;
+                const rel = relative(repoRoot, full);
+                if (stamp) {
+                    const now = codeHashOf(rel);
+                    // 指纹一致 ⇒ 只是测试/注释动过 ⇒ **不算过期**。
+                    if (now !== null && stamp[rel] === now) continue;
                 }
+                out.push(rel);
             }
         }
     };
