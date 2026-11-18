@@ -114,10 +114,11 @@ fn arbitration_takes_the_highest_priority_line() {
         .expect("应当交付一条");
 
     assert_eq!(
-        delivered.line, IRQ_TIMER_COMPARE,
-        "定时器线优先级最高（= 2），必须压过外部线（= 1）"
+        delivered.line, IRQ_UART_RX_READY,
+        "外部线（= MEI，优先级 2）必须压过定时器线（= MTI，0）——\
+         RISC-V 规范的多中断序是 MEI > MSI > MTI（v0.82）"
     );
-    assert_eq!(intc.active_irq(), IRQ_TIMER_COMPARE);
+    assert_eq!(intc.active_irq(), IRQ_UART_RX_READY);
 }
 
 /// **软件中断线**（线 4）：`mie.MSIE` 使能时，交付的 `mcause` 必须是
@@ -154,9 +155,9 @@ fn the_software_line_is_delivered_with_the_architectural_cause_three() {
 #[test]
 fn equal_priority_lines_are_ordered_by_request_time() {
     let mut intc = InterruptController::new();
-    // ⚠️ 线 2 退役后，优先级 1 只剩线 1 ⇒ 这里**显式**把软中断拉到 1，
-    // 造出「同优先级」这个前提（不再靠两条 UART 线）。
-    intc.set_priority(IRQ_SOFTWARE, 1);
+    // ⚠️ 要造「同优先级」这个前提 ⇒ 把软中断拉到**外部线的默认值 2**
+    //   （v0.82 起外部线默认 2，不再是 1）。
+    intc.set_priority(IRQ_SOFTWARE, 2);
     intc.request(IRQ_UART_RX_READY, 200, "uart", EDGE)
         .expect("request");
     intc.request(IRQ_SOFTWARE, 100, "clint", EDGE)
@@ -178,7 +179,7 @@ fn equal_priority_lines_are_ordered_by_request_time() {
 #[test]
 fn equal_priority_and_equal_time_lines_are_ordered_by_insert_seq() {
     let mut intc = InterruptController::new();
-    intc.set_priority(IRQ_SOFTWARE, 1);
+    intc.set_priority(IRQ_SOFTWARE, 2);
     intc.request(IRQ_UART_RX_READY, 100, "uart", EDGE)
         .expect("request");
     intc.request(IRQ_SOFTWARE, 100, "clint", EDGE)
@@ -679,13 +680,15 @@ fn take_intr_hands_out_exactly_what_poll_registered() {
 // 优先级表
 // ---------------------------------------------------------------------------
 
-/// 平台的**默认优先级**（STAGE-4 §1.2 的表）：线 3 = 2，线 1 = 1，
+/// 平台的**默认优先级**（v0.82 起按 RISC-V 规范 `MEI > MSI > MTI`）：
+/// 外部线（线 1） = 2，软件线（线 4） = 1，定时器线（线 3） = 0；
 /// 其它线 = 0（线 2 已退役）。
 #[test]
 fn the_priority_table_falls_back_to_the_platform_defaults() {
     let intc = InterruptController::new();
-    assert_eq!(intc.priority_of(IRQ_TIMER_COMPARE), 2);
-    assert_eq!(intc.priority_of(IRQ_UART_RX_READY), 1);
+    assert_eq!(intc.priority_of(IRQ_UART_RX_READY), 2, "MEI 最高");
+    assert_eq!(intc.priority_of(IRQ_SOFTWARE), 1, "MSI 居中");
+    assert_eq!(intc.priority_of(IRQ_TIMER_COMPARE), 0, "MTI 最低");
     assert_eq!(intc.priority_of(2), 0, "退役的线 2 回落到最低");
     assert_eq!(intc.priority_of(77), 0, "未知线回落 0（最低）");
 }
@@ -694,21 +697,21 @@ fn the_priority_table_falls_back_to_the_platform_defaults() {
 #[test]
 fn set_priority_changes_the_arbitration_outcome() {
     let mut intc = InterruptController::new();
-    intc.set_priority(IRQ_UART_RX_READY, 9);
-    assert_eq!(intc.priority_of(IRQ_UART_RX_READY), 9);
+    // ⚠️ **v0.82 起判别力靠「把低默认的那条提上去」**：外部线默认 2、
+    //   定时器默认 0 ⇒ 若不提权，外部线**本来就赢**，那条断言就恒真。
+    //   ⇒ 把定时器提到 9，让「队列第一条 + 已提权」与「按默认优先级」
+    //   给出**不同**答案。
+    intc.set_priority(IRQ_TIMER_COMPARE, 9);
+    assert_eq!(intc.priority_of(IRQ_TIMER_COMPARE), 9);
 
-    // ⚠️ **夹具的讲究**：先请求定时器线（默认优先级 2，队列里排第一），
-    // 再请求被提权的外部线（优先级 9，队列里排第二）—— 这样「按优先级
-    // 选」与「取队列第一条」给出**不同**的答案，断言才有判别力（否则
-    // 「无视优先级」的退化会照样绿）。
-    intc.request(IRQ_TIMER_COMPARE, 100, "timer", LEVEL)
+    intc.request(IRQ_UART_RX_READY, 100, "uart", EDGE)
         .expect("request");
-    intc.request(IRQ_UART_RX_READY, 200, "uart", EDGE)
+    intc.request(IRQ_TIMER_COMPARE, 200, "timer", LEVEL)
         .expect("request");
     assert_eq!(
         intc.pending_lines(),
-        vec![IRQ_TIMER_COMPARE, IRQ_UART_RX_READY],
-        "夹具：被提权的那条在队列里排第二"
+        vec![IRQ_UART_RX_READY, IRQ_TIMER_COMPARE],
+        "夹具：被提权的定时器在队列里排第二"
     );
 
     let delivered = intc
@@ -716,8 +719,8 @@ fn set_priority_changes_the_arbitration_outcome() {
         .expect("poll")
         .expect("应当交付一条");
     assert_eq!(
-        delivered.line, IRQ_UART_RX_READY,
-        "优先级被改成 9 之后，外部线必须压过定时器线 —— 即便它排在队列第二条"
+        delivered.line, IRQ_TIMER_COMPARE,
+        "定时器被提到 9 之后必须压过外部线 —— 即便它排在队列第二条"
     );
 }
 
@@ -887,9 +890,10 @@ fn one_timestamped_input_sequence_yields_one_fixed_delivery_sequence() {
     assert_eq!(
         run(),
         vec![
-            // ⚠️ 架构 cause 码（定时器 7 / 外部 11），不是内部线号。
-            (IRQ_TIMER_COMPARE, 0x8000_0007),
+            // ⚠️ 架构 cause 码（外部 11 / 定时器 7），不是内部线号。
+            //   v0.82 起按规范 MEI > MTI ⇒ 外部线先交付。
             (IRQ_UART_RX_READY, 0x8000_000B),
+            (IRQ_TIMER_COMPARE, 0x8000_0007),
         ],
         "同一串输入 ⇒ 同一串交付（先高优先级，再剩下的）"
     );
@@ -1036,5 +1040,48 @@ fn releasing_the_timer_line_leaves_the_other_lines_alone() {
         intc.pending_lines().contains(&IRQ_UART_RX_READY),
         "撤定时器线不许连别的线的挂起项一起清 {:?}",
         intc.pending_lines()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// v0.82 · 规范的多中断序（MEI > MSI > MTI）
+// ---------------------------------------------------------------------------
+
+/// 三条 M 模式中断**同时**挂起且都使能 ⇒ 交付顺序必须严格是
+/// `MEI(11) > MSI(3) > MTI(7)`（RISC-V 特权规范的 "decreasing priority
+/// order: MEI, MSI, MTI"）。
+///
+/// ⚠️ **夹具的讲究**：三条的**请求时刻与插入序都倒着排**（定时器最早、
+///   外部最晚）⇒ 如果仲裁退化成「按时间/按队列先来先服务」，顺序会**反**
+///   ⇒ 这条断言才有判别力。
+#[test]
+fn the_three_machine_interrupts_are_ordered_mei_msi_mti() {
+    let mut intc = InterruptController::new();
+    intc.request(IRQ_TIMER_COMPARE, 100, "timer", LEVEL)
+        .expect("request");
+    intc.request(IRQ_SOFTWARE, 150, "clint", LEVEL)
+        .expect("request");
+    intc.request(IRQ_UART_RX_READY, 200, "uart", EDGE)
+        .expect("request");
+
+    let mut causes = Vec::new();
+    for now in [300u64, 400, 500] {
+        if let Some(delivered) = intc
+            .poll(
+                now,
+                MIE_EXTERNAL | MIE_SOFTWARE | MIE_TIMER,
+                MSTATUS_ON,
+            )
+            .expect("poll")
+        {
+            causes.push(delivered.cause);
+            intc.clear(delivered.line);
+        }
+    }
+
+    assert_eq!(
+        causes,
+        vec![0x8000_000B, 0x8000_0003, 0x8000_0007],
+        "必须严格按 MEI(11) > MSI(3) > MTI(7) 交付 —— 与请求先后无关"
     );
 }

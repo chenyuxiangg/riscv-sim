@@ -150,11 +150,24 @@ impl PendingIrq {
 /// 定时器事件，所以排在最低。
 ///
 /// ⚠️ **没有**在优先级表里显式设置过的线，仲裁时用这里的**回落值**。
+///
+/// ⚠️ **v0.82：默认表改成 RISC-V 特权规范的多中断优先级**
+///   `MEI(11) > MSI(3) > MTI(7)`（"Multiple simultaneous interrupts
+///   destined for M-mode are handled in the following decreasing
+///   priority order: MEI, MSI, MTI"）⇒ ⇒ 表里就是
+///   external(2) > software(1) > timer(0)。
+///
+/// ⚠️ 之前是 timer(2) > external(1) > software(0) —— 那是**平台的取舍**，
+///   不是规范。后果：真机上 `MEIP` 常高（外设没清源就 complete）会**饿死**
+///   定时器，而旧表把定时器排在前面 ⇒ ⇒ 平台上看不出这个真实故障。
+///   QEMU 默认（不开 AIA）用 `ctz64(pending)`（号小者先）⇒ 也是
+///   timer 先于 external ⇒ ⇒ 同样不合规范；开 `aia=smaia` 后才按 IPRIO
+///   表（`[11]=44 < [3]=45 < [7]=46`）⇒ 与本表**一致**。
 fn default_priority(line: u16) -> u8 {
     match line {
-        IRQ_TIMER_COMPARE => 2,
-        IRQ_UART_RX_READY => 1,
-        IRQ_SOFTWARE => 0,
+        IRQ_UART_RX_READY => 2,
+        IRQ_SOFTWARE => 1,
+        IRQ_TIMER_COMPARE => 0,
         _ => 0,
     }
 }

@@ -1518,14 +1518,14 @@ impl KernelHost {
                         let Some(uart) = self.devices.uart(&irq.id) else {
                             continue;
                         };
+                        // ⚠️ **RX 判据交给 UART 自己**（v0.82）：真 16550 的
+                        //   RDI 条件随 `FCR.FE` 变 —— FIFO 关是「非空」，FIFO 开是
+                        //   「深度 ≥ 触发水位 ∨ 字符超时」⇒ 原来在这里写死
+                        //   `IER bit0 ∧ LSR bit0` 就等于**强行把 FIFO 关掉**，
+                        //   读一个字节不会落线 ⇒ 中断风暴（实测症状：波形只有
+                        //   上升沿、且定时器被压）。
                         let (rx, tx) = match uart.try_borrow() {
-                            Ok(u) => {
-                                let ier = u.interrupt_enable();
-                                (
-                                    (ier & 0x01) != 0 && (u.line_status() & 0x01) != 0,
-                                    u.tx_interrupt_pending(),
-                                )
-                            }
+                            Ok(u) => (u.rx_interrupt_pending(), u.tx_interrupt_pending()),
                             Err(_) => continue,
                         };
                         if let Ok(mut p) = plic.try_borrow_mut() {

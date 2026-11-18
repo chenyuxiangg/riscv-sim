@@ -441,6 +441,19 @@ pub struct Uart16550 {
     rx_overrun: bool,
     /// Latched TX capture overrun (LSR bit 3).
     tx_overrun: bool,
+    /// **字符超时**（IIR = `0b1100`，`CTI`）已挂起。
+    ///
+    /// ⚠️ 只在 `FCR.FE = 1`（FIFO 开）时才有意义：真实 16550 在 FIFO
+    /// 里有字节、但**深度低于触发水位**时不会再发 RDI ⇒ 靠这个超时中断
+    /// 把「零头」捞出来 ⇒ 否则驱动会把最后 1~3 个字节**永远等不到**。
+    ///
+    /// ⚠️ **瞬态、不进快照**：它由「距上一个字节/上一次读过了多久」推出来
+    /// ⇒ 还原后最坏情况是**再等一个超时窗口**才重新挂起 ⇒ 行为差一个
+    /// 窗口，不是丢字节（字节都在 `rx_queue` 里）。
+    fifo_timeout_pending: bool,
+    /// 超时窗口的**起点**（虚拟时间，ps）—— 收到字节 / 从 FIFO 读走字节
+    /// 都会重置它。⚠️ 同样是瞬态，不进快照。
+    rx_window_start_ps: u64,
     tx_int_pending: bool,
     /// The lossless TX capture ring.
     tx: TxCapture,
@@ -485,6 +498,8 @@ impl Uart16550 {
             rx: VecDeque::new(),
             rx_overrun: false,
             tx_overrun: false,
+            fifo_timeout_pending: false,
+            rx_window_start_ps: 0,
             tx_int_pending: false,
             tx: TxCapture::new(tx_capacity),
             irq_line,
@@ -535,14 +550,51 @@ impl Uart16550 {
 
     /// The interrupt identification register (`IIR @ 0x2`).
     pub fn interrupt_id(&self) -> u8 {
-        let rx = self.ier & 0x01 != 0 && !self.rx.is_empty();
-        if rx {
+        // ⚠️ 16550 的中断优先级：RLSI > **CTI / RDI** > THRE > MSI。
+        //   CTI 排在 RDI 前面（两者互斥：超时只在「深度 < 水位」时挂起）。
+        if self.ier & 0x01 != 0 && self.fifo_timeout_pending {
+            0x0c
+        } else if self.rx_interrupt_pending() {
             0x04
         } else if self.tx_interrupt_pending() {
             0x02
         } else {
             0x01
         }
+    }
+
+    /// Whether `FCR.FE`（bit 0）置位 —— FIFO 被使能。
+    pub fn fifo_enabled(&self) -> bool {
+        self.fcr & 0x01 != 0
+    }
+
+    /// FIFO 触发水位（`FCR` bit 6–7）：`0⇒1`、`1⇒4`、`2⇒8`、`3⇒14`。
+    ///
+    /// ⚠️ 这是**真 16550A/16550D 的语义**：FIFO 开时 RDI 的判据是
+    ///   「深度 ≥ 水位」，不是「非空」⇒ 读走一个字节使深度落到水位以下
+    ///   时，中断**自己就落**（QEMU `hw/char/serial.c::serial_update_irq`
+    ///   同口径）。
+    pub fn rx_trigger_level(&self) -> usize {
+        match (self.fcr >> 6) & 0x03 {
+            0 => 1,
+            1 => 4,
+            2 => 8,
+            _ => 14,
+        }
+    }
+
+    /// **RX 数据中断**的判据（真 16550 口径）。
+    ///
+    /// - `FIFO 关`（`FE = 0`）⇒ `非空`（16450 行为，一次一个字节）；
+    /// - `FIFO 开`（`FE = 1`）⇒ `深度 ≥ 水位` ∨ 字符超时已挂起。
+    pub fn rx_interrupt_pending(&self) -> bool {
+        if self.ier & 0x01 == 0 {
+            return false;
+        }
+        if !self.fifo_enabled() {
+            return !self.rx.is_empty();
+        }
+        self.fifo_timeout_pending || self.rx.len() >= self.rx_trigger_level()
     }
 
     /// Whether a THR-empty interrupt is latched for the host.
@@ -671,6 +723,9 @@ impl Uart16550 {
             return;
         }
         self.rx.push_back(byte);
+        // 新字节到达 ⇒ 超时窗口**重新开始**、已挂起的超时**作废**。
+        self.rx_window_start_ps = self.now_ps;
+        self.fifo_timeout_pending = false;
     }
 
     /// TX pin level: `true` when the transmitter is idle (nothing is
@@ -751,8 +806,14 @@ impl Uart16550 {
                 }
             }
             reg::FCR => {
+                let was_enabled = self.fifo_enabled();
                 self.fcr = value;
                 self.apply_fifo_control(value);
+                // 切 FIFO 模式 / 改水位 ⇒ 旧的超时判定不再成立。
+                if was_enabled != self.fifo_enabled() {
+                    self.fifo_timeout_pending = false;
+                    self.rx_window_start_ps = self.now_ps;
+                }
             }
             reg::LCR => self.lcr = value,
             reg::MCR => self.mcr = value,
@@ -801,6 +862,15 @@ impl Uart16550 {
     /// when it *starts* there.
     fn covers_rhr(&self, offset: u32) -> bool {
         offset == reg::THR && !self.dlab_enabled()
+    }
+
+    /// True when the access `offset .. offset + width` **covers** `at`
+    /// (the same byte-window rule as [`Self::covers_rhr`]).
+    fn covers(&self, offset: u32, size: WriteSize, at: u32) -> bool {
+        match span(offset, size) {
+            Ok(n) => offset <= at && at < offset + n,
+            Err(_) => false,
+        }
     }
 
     /// Read the bytes of an access, **without** side effects.
@@ -973,6 +1043,14 @@ impl Peripheral for Uart16550 {
             // ⚠️ 读 `RHR` = **弹出队头**（不是「读了不清空」也不是「读最后一个」）。
             self.rx.pop_front();
             self.rx_overrun = false;
+            // 读走字节 ⇒ 超时中断被清（真 16550 语义），窗口从这一刻重新算
+            // （FIFO 里还有零头时，再等 4 个字符时间才会重新挂 CTI）。
+            self.fifo_timeout_pending = false;
+            self.rx_window_start_ps = self.now_ps;
+        }
+        // 读 `IIR` 也会清掉「字符超时」这一类中断（16550D 数据手册）。
+        if self.covers(offset, size, reg::IIR) {
+            self.fifo_timeout_pending = false;
         }
         Ok(assemble_le(&bytes))
     }
@@ -994,6 +1072,19 @@ impl Peripheral for Uart16550 {
         // of MVP scope 评审 15-1). The tick does carry the authoritative
         // virtual time, which the probe reports are stamped with.
         self.now_ps = now_ps;
+        // ⚠️ **字符超时**（16550D）：FIFO 开、里面**有**字节但**深度低于
+        //   水位** ⇒ RDI 永远不会再触发 ⇒ 等 `4 × 字符时间` 后挂 CTI，
+        //   把剩下的零头交给驱动。字符时间 = 10 bit（起始 + 8 数据 + 停止）
+        //   ÷ 波特率，与 QEMU 的 `char_transmit_time * 4` 同口径。
+        if self.fifo_enabled() && !self.rx.is_empty() && self.rx.len() < self.rx_trigger_level() {
+            let char_time_ps = self.ps_per_bit().saturating_mul(10);
+            let window = char_time_ps.saturating_mul(4);
+            if now_ps.saturating_sub(self.rx_window_start_ps) >= window {
+                self.fifo_timeout_pending = true;
+            }
+        } else {
+            self.fifo_timeout_pending = false;
+        }
         Ok(Vec::new())
     }
 
@@ -1810,5 +1901,81 @@ mod iir_tests {
     fn iir_reports_no_interrupt_when_all_sources_are_masked() {
         let u = uart();
         assert_eq!(u.read(reg::IIR, WriteSize::Byte).unwrap(), 0x01);
+    }
+
+    // -----------------------------------------------------------------
+    // v0.82 · FIFO 触发水位 + 字符超时（真 16550A/16550D 语义）
+    // -----------------------------------------------------------------
+
+    /// FIFO 开、水位 4 ⇒ RDI 的判据是「深度 ≥ 4」，**不是**「非空」。
+    ///
+    /// ⚠️ 这条就是「读一个字节为什么中断不落」的**根因用例**：旧实现恒按
+    ///   「非空」判 ⇒ 深度 3 也发中断 ⇒ 读走一个还是 3 ⇒ 中断永远不落。
+    #[test]
+    fn fifo_mode_interrupt_needs_the_trigger_level() {
+        let mut u = uart();
+        u.write(reg::IER, WriteSize::Byte, 0x01).expect("IER");
+        u.write(reg::FCR, WriteSize::Byte, 0x41).expect("FCR"); // FE=1, itl=4
+        assert!(u.fifo_enabled(), "0x41 的 bit0 = FE");
+        assert_eq!(u.rx_trigger_level(), 4, "bit6-7 = 01 ⇒ 水位 4");
+
+        for b in [b'a', b'b', b'c'] {
+            u.receive(b);
+        }
+        assert!(
+            !u.rx_interrupt_pending(),
+            "深度 3 < 水位 4 ⇒ 不发 RDI（旧实现会在这里错误地发）"
+        );
+        assert_eq!(u.interrupt_id(), 0x01, "IIR 报「无中断」");
+
+        u.receive(b'd');
+        assert!(u.rx_interrupt_pending(), "深度 4 = 水位 ⇒ 发 RDI");
+        assert_eq!(u.interrupt_id(), 0x04, "IIR 报 RDI");
+
+        u.read_clear(reg::THR, WriteSize::Byte).expect("read RHR");
+        assert!(
+            !u.rx_interrupt_pending(),
+            "读走一个 ⇒ 深度 3 < 水位 ⇒ 中断**自己就落**"
+        );
+    }
+
+    /// FIFO 关（`FE = 0`）⇒ 16450 行为：一个字节就中断，读走就落。
+    /// （这条钉住「没开 FIFO 的固件行为不许被改」）
+    #[test]
+    fn fifo_off_keeps_the_16450_one_byte_behaviour() {
+        let mut u = uart();
+        u.write(reg::IER, WriteSize::Byte, 0x01).expect("IER");
+        u.receive(b'x');
+        assert!(u.rx_interrupt_pending(), "FIFO 关 ⇒ 非空就中断");
+        u.read_clear(reg::THR, WriteSize::Byte).expect("read RHR");
+        assert!(!u.rx_interrupt_pending(), "读走就落");
+    }
+
+    /// FIFO 开、深度低于水位 ⇒ 等 `4 × 字符时间` 后发**字符超时**（IIR
+    /// `0b1100`），否则 FIFO 里的零头**永远没人管**。
+    #[test]
+    fn character_timeout_raises_cti_below_the_trigger_level() {
+        let mut u = uart();
+        u.write(reg::IER, WriteSize::Byte, 0x01).expect("IER");
+        u.write(reg::FCR, WriteSize::Byte, 0x41).expect("FCR");
+        for b in [b'a', b'b', b'c'] {
+            u.receive(b);
+        }
+
+        let window = u.ps_per_bit().saturating_mul(10).saturating_mul(4);
+        u.tick(window - 1).expect("tick");
+        assert!(!u.rx_interrupt_pending(), "窗口未满 ⇒ 不许发 CTI");
+
+        u.tick(window).expect("tick");
+        assert!(
+            u.rx_interrupt_pending(),
+            "满 4 个字符时间仍低于水位 ⇒ 必须挂 CTI"
+        );
+        assert_eq!(u.interrupt_id(), 0x0c, "IIR 报字符超时（0b1100）");
+
+        // 读 IIR 清 CTI（16550D 数据手册）。
+        u.read_clear(reg::IIR, WriteSize::Byte).expect("read IIR");
+        assert!(!u.rx_interrupt_pending(), "读完 IIR ⇒ CTI 被清");
+        assert_eq!(u.interrupt_id(), 0x01, "此后 IIR 报「无中断」");
     }
 }

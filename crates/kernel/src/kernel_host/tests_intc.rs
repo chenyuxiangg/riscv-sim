@@ -598,4 +598,65 @@ fn the_uart_device_channel_falls_when_the_receive_buffer_is_drained() {
         vec![1u64, 0u64],
         "读空之后 ⇒ 设备通道必须**落**到 0（这正是「只有上升沿」缺的那一半）"
     );
+
+/// v0.82 · **FIFO 开 + 水位 4** 时设备通道的行为：3 个字节不抬、第 4 个抬、
+/// 读走一个就落 —— 这就是「不再形成中断风暴」的端到端证据。
+#[test]
+fn the_uart_channel_with_fifo_mode_needs_the_trigger_level() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_QEMU_VIRT)
+                .expect("内置 qemu-virt 必须存在"),
+            expected_revision: None,
+        },
+    );
+
+    let ch = host
+        .irq_src_channels
+        .iter()
+        .find(|(s, _)| *s == 10)
+        .map(|(_, ch)| *ch)
+        .expect("qemu-virt 的 UART0 是 PLIC 源 10 ⇒ 必须有设备通道");
+
+    // 固件侧：IER.RDI = 1，FCR = FE(1) | 水位 4（bit6-7 = 01）⇒ 0x41。
+    host.bus_mut()
+        .write(QEMU_VIRT_UART0_BASE + 1, BusWidth::Byte, 0x01)
+        .expect("写 IER");
+    host.bus_mut()
+        .write(QEMU_VIRT_UART0_BASE + 2, BusWidth::Byte, 0x41)
+        .expect("写 FCR");
+
+    for b in [0x41u8, 0x42, 0x43] {
+        host.uart_receive(b);
+    }
+    host.sync_interrupts_now();
+    assert!(
+        irq_level_edges(&host, ch).is_empty(),
+        "深度 3 < 水位 4 ⇒ 网关电平**不许**抬（旧实现会抬 ⇒ 风暴起点）"
+    );
+
+    host.uart_receive(0x44);
+    host.sync_interrupts_now();
+    assert_eq!(
+        irq_level_edges(&host, ch)
+            .iter()
+            .map(|e| e.value)
+            .collect::<Vec<_>>(),
+        vec![1u64],
+        "深度 4 = 水位 ⇒ 抬"
+    );
+
+    let _ = host.read_memory(QEMU_VIRT_UART0_BASE, WriteSize::Byte);
+    host.sync_interrupts_now();
+    assert_eq!(
+        irq_level_edges(&host, ch)
+            .iter()
+            .map(|e| e.value)
+            .collect::<Vec<_>>(),
+        vec![1u64, 0u64],
+        "读走一个 ⇒ 深度 3 < 水位 ⇒ 电平**自己落**（不再需要读空整个 FIFO）"
+    );
+}
 }
