@@ -65,6 +65,11 @@ wasm-pack build \
     $PROFILE \
     crates/kernel
 
+# ⚠️ **构建指纹**（v0.83）：记下「这份产物是由这版**代码**构建的」⇒ ⇒
+#   门禁据此判「要不要重建」⇒ ⇒ **改测试 / 改注释**不再触发 2 分钟重编
+#   （纯 mtime 判据会）。
+node tools/wasm-code-hash.mjs > tools/.wasm-code.stamp.json
+
 echo
 echo "Built:"
 ls -lh "$TARGET_DIR/pkg/" | awk '/riscv_sim_kernel/ {print "  " $5, $9}'

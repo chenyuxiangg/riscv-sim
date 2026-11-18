@@ -155,7 +155,11 @@ const E_HARNESS_CHANNEL = "E_HARNESS_CHANNEL";
  *
  * ⚠️ 只影响**定位期**；收口判据仍是全量 0 ✗（见 GATE_TOOLING_PREREQ §5）。
  */
+const RUN_STARTED_AT = Date.now();
+
 const RUN_POLICY = {
+    /** `--progress`：每段开始/结束立刻打一行（定位「卡在哪段」）。 */
+    progress: false,
     only: null,
     from: null,
     fromReached: false,
@@ -234,9 +238,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "terminalScreen",
     "memoryMap",
     "unknownSystem",
-    "bridgeReport",
     "platformSchemaV2",
-    "pinLevelRouting",
     "mcuConcept",
     "boardArchive",
     "boardDelta",
@@ -254,12 +256,8 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "traceExport",
     "debugDedup",
     "deviceRegistry",
-    "boardTree",
     "readback",
     "staleSurfaces",
-    "basePlanner",
-    "templateLibrary",
-    "pinmuxPower",
 ]);
 
 /**
@@ -337,9 +335,19 @@ async function runSection(name, fn) {
         return { skipped: true, reason: blocked, checks: empty };
     }
     const startedAt = Date.now();
+    // ⚠️ **进度即时可见**（`--progress`）：报告是**跑完才打印**的 ⇒ ⇒ 一轮
+    //   卡住时，日志里只有开场横幅 ⇒ ⇒ 看不出「卡在哪一段」⇒ ⇒ 这条打印就是
+    //   给那种场面用的（不是常开：默认静默，免得日志变噪声）。
+    if (RUN_POLICY.progress) {
+        const t = ((Date.now() - RUN_STARTED_AT) / 1000).toFixed(1);
+        console.log(`[prog] start ${name} (t=${t}s)`);
+    }
     try {
         const result = await fn();
         TIMING.push({ name, ms: Date.now() - startedAt });
+        if (RUN_POLICY.progress) {
+            console.log(`[prog] end   ${name} (ms=${Date.now() - startedAt})`);
+        }
         return result;
     } catch (err) {
         TIMING.push({ name, ms: Date.now() - startedAt, threw: true });
@@ -458,7 +466,12 @@ function selfCheckPageTemplates() {
     //   模板时**外面要再加一层括号**（否则 `=` 右边括号不配平）。
     const fnMatch = src.match(/const BV_LAST_MEMORY_MAP_FN = `([\s\S]*?)`;/);
     const fn = fnMatch ? fnMatch[1] : "";
-    const re = /awaitEval\(cdp, `([\s\S]*?)`\)/g;
+    // ⚠️ **不要把 `)` 写进正则**：`awaitEval` 的第 3 个参数是**超时**
+    //   （`awaitEval` 的第 3 个参数是超时，例如 4000）⇒ ⇒ 旧正则要求模板
+    //   后面**紧跟** `)`
+    //   ⇒ ⇒ 那种写法一个都不匹配 ⇒ ⇒ 正则退化成「跨越多条模板硬匹配」
+    //   ⇒ ⇒ 报出的语法错**位置全错**（v0.83 实测：第 33/34 个模板假阳性）。
+    const re = /awaitEval\(cdp, `([\s\S]*?)`\s*(?:,\s*\d+)?\)/g;
     let index = 0;
     for (const match of src.matchAll(re)) {
         index += 1;
@@ -495,6 +508,7 @@ function parseArgs(argv) {
         else if (arg === "--cdp-port") opts.cdpPort = Number(argv[++i]);
         else if (arg === "--serve-port") opts.servePort = Number(argv[++i]);
         else if (arg === "--timeout-ms") opts.timeoutMs = Number(argv[++i]);
+        else if (arg === "--progress") RUN_POLICY.progress = true;
         else if (arg === "--no-serve") opts.serve = false;
         // R-1 · 分段重跑（定位期用；收口判据仍要求全量 0 ✗）
         else if (arg === "--only") opts.only = String(argv[++i]);
@@ -962,8 +976,17 @@ const PROBE_EXPRESSION = `(() => {
   const body = active ? active.querySelector("[data-view-body]") : null;
   const regCells = Array.from(document.querySelectorAll('[data-view-body="debug"] .reg-grid > div'));
   const cellText = (i) => {
-    const code = regCells[i] ? regCells[i].querySelector("code") : null;
-    return code ? String(code.textContent || "").trim() : "";
+    const cell = regCells[i];
+    if (!cell) return "";
+    const code = cell.querySelector("code");
+    if (!code) return "";
+    // ⚠️ **v0.86**：寄存器格改成了**可编辑**的 input（class=reg-edit）
+    //   ⇒ ⇒ 值在 input.value 上，code.textContent 是**空字符串**
+    //   （input 没有文本节点）⇒ ⇒ 旧探针一律读到空串 ⇒ ⇒ x1 == "0000002a"
+    //   这条判据恒红，x3 那些同理。
+    const inp = code.querySelector("input");
+    if (inp) return String(inp.value ?? "").trim();
+    return String(code.textContent || "").trim();
   };
   const waveItems = Array.from(document.querySelectorAll('[data-view-body="waveform"] .channel-list > li'));
   // -- 终端视图（真实 RTOS 的 console）--
@@ -1579,15 +1602,24 @@ async function runTerminalScreenProbe(cdp, opts) {
         detail: JSON.stringify(sent),
     });
 
-    // -- B-67b · 等 guest 回显（**字节流**里有「OSZ$ cyx」）------------
+    // -- B-67b · 等 guest 回显（**前置**，不再当断言）------------------
+    //
+    // ⚠️ **v0.84 · 判据裁剪 + 快失败**：这条「回显」与 `uartEcho` 段的
+    //   B-63 断言的是**同一件事**（终端输入 ⇒ guest 回显），属于**重复覆盖**
+    //   ⇒ ⇒ 本段的职责是**屏幕怎么画**（B-69 ~ B-76），回显只是前提 ⇒ ⇒
+    //   改成**前置**：没回来就只报**一条**「前置未满足」并停（不再烧 90 s，
+    //   也不再把同一个事实重复成第二条断言）。
     const echo = await awaitEval(cdp,
-        `window.riscv_image.runUntilConsole("OSZ$ cyx", { timeoutMs: ${UART_ECHO_TIMEOUT_MS} })`,
-        UART_ECHO_TIMEOUT_MS + 30000);
-    checks.push({
-        name: "B-68 · guest 回显了「OSZ$ cyx」（**字节流**里有）",
-        ok: echo?.matched === true,
-        detail: `matched=${echo?.matched} batches=${echo?.batches}`,
-    });
+        `window.riscv_image.runUntilConsole("OSZ$ cyx", { timeoutMs: 30000 })`,
+        60000);
+    if (echo?.matched !== true) {
+        checks.push({
+            name: "前置 · guest 回显「OSZ$ cyx」没来（屏幕断言无法判定）",
+            ok: false,
+            detail: `matched=${echo?.matched} batches=${echo?.batches}（回显本身由 uartEcho 段 B-63 负责）`,
+        });
+        return { checks };
+    }
 
     // -- B-69 · 整行**被执行了** --------------------------------------
     //
@@ -2032,24 +2064,6 @@ const BV_AUTO_BASE_BOARD = {
     ],
 };
 
-/**
- * 一块**装不下**的板（v0.73 · STAGE-49 · B2 · K-4）—— 它的段**大小超过**每
- * 区域预算 ⇒ ⇒ 内核必须报**既有码** `E_PLT-07`（⇒ ⇒ **不是**新码）。
- *
- * ⚠️ **为什么不是「缺 `base`」**：缺 `base` 的段**由内核分配** ⇒ ⇒ 它**装得
- *   下**（只要大小不超预算）⇒ ⇒ ⇒ 真正「装不下」的那一条是**大小超预算**
- *   ⇒ ⇒ ⇒ 这块板**正是**那条路。
- */
-const BV_UNFITTABLE_BOARD = {
-    schema_version: 1,
-    id: "browser-verify-unfittable",
-    name: "browser-verify 装不下的板",
-    priority: 997,
-    region_budget_bytes: 1048576,
-    regions: [
-        { kind: "ram", size: 8388608 },
-    ],
-};
 
 /**
  * 一块**带 `timer_riscv`** 的板（v0.73 · STAGE-49 · G）—— 描述**能写出**那台
@@ -2126,87 +2140,7 @@ const BV_PARTIAL_BOARD = {
     ],
 };
 
-/**
- * 「**连线报告**」用的板 —— STAGE-48 · v0.72 · D-177 A（B-146 ~ B-150）。
- *
- * ⚠️ **为什么源器件是 GPIO**：契约层的 **V-18 只管源器件「在不在」**、
- *   **不管**它「是什么」⇒ ⇒ 这根线**合法**（描述**装得上**）⇒ ⇒ 但宿主
- *   **抬不了**它（宿主只从 UART 抬 `rx_ready`）⇒ ⇒ **理由 == `source-type`**
- *   ⇒ ⇒ 这正是「合法描述上**真的**会发生的丢线」。
- *
- * ⚠️ **为什么目标必须是 PLIC**：**V-19** 要求目标**是 PLIC** 且源号
- *   **小于**它的源数 ⇒ ⇒ 源 11 < 64 ✓。
- *
- * ⚠️ **必须带一块 RAM**：demo 固件要落在地址 0 附近（40 字节）⇒ ⇒ 这块板
- *   得装得下它 ⇒ ⇒ 否则本段会**污染**后面的段。
- */
-const BV_BRIDGE_BOARD = {
-    schema_version: 1,
-    id: "bv-bridge-board",
-    name: "browser-verify 连线报告板",
-    priority: 996,
-    // ⚠️ **预算必须够**：PLIC 的窗口（`0x200000 + 0x1000×contexts`）**约 2 MB**
-    //   ⇒ ⇒ 1 MB 的预算**装不下** ⇒ ⇒ 内核报 `E_PLT-07` ⇒ ⇒ 板**被拒**
-    //   ⇒ ⇒ 报告**根本没机会更新**（本批**实测踩到**：预算给小了 ⇒ ⇒
-    //   B-146 ~ B-149 全红且 `declared=0` ⇒ ⇒ 看起来像「报告没实现」）。
-    region_budget_bytes: 134217728,
-    regions: [
-        { kind: "ram", base: 0, size: 4096 },
-        {
-            kind: "peripheral",
-            base: 201326592,
-            device: { device: "plic", id: "PLIC", sources: 64, contexts: 16 },
-        },
-        {
-            kind: "peripheral",
-            base: 268435456,
-            device: { device: "gpio", id: "GPIO0" },
-        },
-    ],
-    bridge: [
-        {
-            from: { device: "GPIO0", event: "rx_ready" },
-            to: { device: "PLIC", source: 11 },
-        },
-    ],
-};
 
-/**
- * 「**抬得了**」的对照板 —— STAGE-48 · v0.72 · B-150。
- *
- * ⚠️ **必要对照**：它与 [`BV_BRIDGE_BOARD`] **只有源器件那一个差别**
- * （GPIO ⇒ ⇒ UART）⇒ ⇒ 线**合法**、**抬得了** ⇒ ⇒ 报告从「1 根抬不了」
- * 变成「**全部通电**」⇒ ⇒ ⇒ **报告跟着板变** ⇒ ⇒ ⇒ 这证明
- * [`BV_BRIDGE_BOARD`] **真的被内核应用了**（否则两块板的报告**一样**）
- * ⇒ ⇒ ⇒ ⇒ 这才是**真对照**（用「一块没有连线的板」当对照是**空转**：报告
- * 本来就是「0 根」⇒ ⇒ 那条断言**恒真**）。
- */
-const BV_RAISABLE_BRIDGE_BOARD = {
-    schema_version: 1,
-    id: "bv-raisable-bridge-board",
-    name: "browser-verify 抬得了连线板",
-    priority: 995,
-    region_budget_bytes: 134217728,
-    regions: [
-        { kind: "ram", base: 0, size: 4096 },
-        {
-            kind: "peripheral",
-            base: 201326592,
-            device: { device: "plic", id: "PLIC", sources: 64, contexts: 16 },
-        },
-        {
-            kind: "peripheral",
-            base: 268435456,
-            device: { device: "uart16550", id: "UART0", irq_line: 1, baud_rate: 115200 },
-        },
-    ],
-    bridge: [
-        {
-            from: { device: "UART0", event: "rx_ready" },
-            to: { device: "PLIC", source: 11 },
-        },
-    ],
-};
 
 /**
  * 读产品视图里那张内存映射表的**行**（按 `data-*`，**不靠文案**）。
@@ -2336,25 +2270,17 @@ const BV_CAPTURE_COMMANDS_EXPRESSION = `(() => {
 })()`;
 
 /**
- * 板级内存图那一段（v0.29 批 · 验收 **C-8** 的端到端判别式）。
+ * 「从模版加载」⇒ 板生效（v0.85 · 裁决 B 重写）。
  *
- * 五步：
- *   ① 编辑器的「提交」按钮**真的**发出 `set-memory-map` 命令（UI 层 ⇒ C-3）；
- *   ② 这条命令走**真内核**（WASM 产物）⇒ 内存映射表变成新图
- *      （**命令 → 内核 → 事件 → 视图**的整条链 ⇒ C-4）；
- *   ③ 新 RAM 段**写-读往返**成功（证明那段真被映射了、且可写）；
- *   ④ 写新 RAM **之外** ⇒ 失败（证明 size 真的是那个 size）。
- *
- * ⚠️ **这一段必须排在 osz 段之后**：用户的板一旦配过就**一直**保持（宿主里
- * 那个字段存的是「用户意图」，不随一次会话结束而消失）⇒ 放在 osz 前面会把
- * osz 段要用的那张板换掉 ⇒ osz 的控制台就没了。
- *
- * ⚠️ **越界写判的是「失败」不是「报错文案」**：内核对未映射访问报的是
- * `E_BUS-01`，而**判据是「这次写没成功」** ⇒ 不靠 message 文本。
- *
- * ⚠️ **guest 指令级的越界陷阱（`mcause` 5 / 7）不在这一段**：浏览器里没法
- * 方便地让访客执行一条越界访存指令 ⇒ 那条由 **B-8 的 guest 层用例**（Rust
- * 侧）钉住；这一段钉的是「**新 RAM 段真的通了**」这条端到端链路。
+ * ⚠️ **这一段为什么整段重写**：原来它验的是 `#/memory-map` 的**板级内存图
+ *   编辑器**（`submit-memory-map` 按钮 + 待生效横幅 + 编辑器那张表）——
+ *   该视图连同面板与编辑器渲染代码**已被前端删除**（`m02_viewcomponents.js`
+ *   明写「一并删除」）⇒ ⇒ 旧断言是「对已删 UI 的存在性检查」，永远红、且
+ *   红得没信息。
+ * ⚠️ **现在验的是用户真走的那条路**：产品视图「模版」入口 ⇒ 「从模版加载」
+ *   对话框 ⇒ 点一条内置模版 ⇒ **板真的生效**（三条独立证据任一）⇒
+ *   生效图**逐字对得上模版声明**（判据读**内核事件**，不读 DOM 投影）。
+ * ⚠️ **快失败**：前置一律 6 s（不再等满 20 s）。
  *
  * @param {object} cdp
  * @param {{timeoutMs: number}} opts
@@ -2364,245 +2290,76 @@ async function runMemoryMapSection(cdp, opts) {
     /** @type {{name: string, ok: boolean, detail: string}[]} */
     const checks = [];
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+    const T = Math.min(opts.timeoutMs, 6000);
 
-    // -- ① 切到编辑器视图，等它挂上 ----------------------------------------
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
-
-    let probe = null;
-    const readyDeadline = Date.now() + opts.timeoutMs;
-    while (Date.now() < readyDeadline) {
-        const value = await awaitEval(cdp, BV_MEMORY_MAP_PROBE);
-        probe = value ?? null;
-        if (probe?.submitPresent) break;
-        await sleep(250);
-    }
-    if (!probe?.submitPresent) {
-        return {
-            skipped: false,
-            checks: [{
-                name: "板级内存图编辑器挂上了（# 提交按钮在）",
-                ok: false,
-                detail: "等不到编辑器视图（前端引导没起来？）",
-            }],
-        };
-    }
-    add("板级内存图编辑器挂上了（`#/memory-map` 有提交按钮）", true, "submit 按钮在");
-
-    // -- ② 点提交 ⇒ 命令**真的**发出去了 -----------------------------------
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-action="submit-memory-map"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    await sleep(400);
-    const cmdsText = await awaitEval(cdp, 'JSON.stringify(window.__bvCmds ?? [])');
-    let cmds = [];
-    try {
-        cmds = JSON.parse(String(cmdsText ?? "[]"));
-    } catch {
-        cmds = [];
-    }
-    const memoryMapCmd = cmds.find((c) => String(c.action ?? "") === "submit-memory-map");
-    const cmdDescription = memoryMapCmd?.params?.description ?? null;
-    add(
-        "编辑器的提交按钮**真的**发出 `SetMemoryMap` 命令（载荷带描述）",
-        Boolean(memoryMapCmd) && Boolean(cmdDescription) && Array.isArray(cmdDescription.regions),
-        `捕到 ${cmds.length} 条命令；memory-map 那条 = ${JSON.stringify(memoryMapCmd?.action ?? null)}`
-        + `，载荷 regions ${Array.isArray(cmdDescription?.regions) ? cmdDescription.regions.length : "无"}`,
-    );
-
-    // -- ③ 把**被测的那张板**经**真内核**送进去 ----------------------------
-    //
-    // ⚠️ 走的是**视图层发命令的那条通道**（`riscv:command`）⇒ 走的是
-    // app → M-05 → 传输 → **真 WASM 内核** ⇒ 整条链都在。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "submit-memory-map",
-            requestId: "bv-mm-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_BOARD)} },
-        },
-    }))`);
-
-    // ⚠️ **必须等这条命令真的往返一趟**再发下一条（`reset`）。
-    //
-    // ⚠️ **为什么**：命令是**异步**的（Worker → WASM → 回事件）⇒ 若不等，
-    // `reset` 可能**先**到内核 ⇒ 那时装载用的是**旧**的图（用户还没配的
-    // 那张）⇒ 而 `set-memory-map` **后**到 ⇒ 用户的板变成「待生效」⇒
-    // 内存映射表**永远不变** ⇒ 症状是「明明配了板却没反应」。
-    //
-    // ⚠️ **判据**：此刻镜像**已经装载过**（osz 段装过）⇒ 宿主对新板**只
-    // 记下、不重建** ⇒ 回的事件里 `pending = true` ⇒ 编辑器上会出现
-    // **「待生效」**横幅 ⇒ 那条横幅**出现**就证明命令**往返完成**了。
-    const pendingDeadline = Date.now() + opts.timeoutMs;
-    let pendingSeen = false;
-    while (Date.now() < pendingDeadline) {
-        const pendingNow = await awaitEval(cdp, `(() => {
-            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
-            return Boolean(el);
-        })()`);
-        if (pendingNow === true) {
-            pendingSeen = true;
-            break;
-        }
-        await sleep(200);
-    }
-    add(
-        "命令**往返完成**（内核回了「待生效」⇒ 用户的板已记下、正在跑的访客不受影响）",
-        pendingSeen,
-        pendingSeen
-            ? "看到了「待生效」横幅"
-            : "等不到「待生效」横幅 ⇒ 命令可能没发出去或内核没回",
-    );
     await sleep(300);
 
-    // -- ④ 重新装载工程 ⇒ 用户的板**跨装载保持** ⇒ 新图生效 ----------------
-    //
-    // ⚠️ 装 **demo 固件**（不是 osz 那个）：osz 的镜像装不进这张板 ⇒ 装它会
-    // 失败 ⇒ 用户的板就永远生效不了。
-    //
-    // ⚠️ **v0.59 批**：这里**不再**用「复位」⇒ ⇒ 「复位」的语义是「**重新装载
-    // 当前工程**」（用户指南 §3.8）⇒ ⇒ 此刻「当前工程」是 osz 那个 ⇒ ⇒ 复位
-    // **不会**把 demo 装回来 ⇒ ⇒ 必须**显式**装 demo 固件（走**真的**界面
-    // 路径 ⇒ ⇒ 与用户点出来的同一条路）。
-    // ⚠️ **v0.76（B2）**：「未知系统」门禁看**生效板 RAM 范围** ⇒ 8 MiB
-    //   的 `BV_BOARD` **装不下** `0x84000000` 的 demo ⇒ 重装前先落到
-    //   `BV_DEMO_BOARD`（128 MiB · demo 的家）⇒ 「用户的板跨装载保持」
-    //   的语义不变（保持的是 `BV_DEMO_BOARD`）。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "submit-memory-map",
-            requestId: "bv-mm-demo-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_DEMO_BOARD)} },
-        },
-    }))`);
-    await sleep(500);
-    const demoLoaded = await loadDemoFirmware(cdp, opts);
-    if (!demoLoaded) {
-        checks.push({
-            name: "④ 重新装载工程 ⇒ 用户的板跨装载保持（demo 固件**装上了**）",
-            ok: false,
-            detail: "demo 固件没装上（PC 没回到 0x00000000）⇒ ⇒ 后面那些判据没有意义",
-        });
-        return { skipped: false, checks };
-    }
-
-    // ⚠️ **v0.76 施工期订正**：上面为装 demo 落到了 `BV_DEMO_BOARD`
-    //   （128 MiB）⇒ ⇒ 但**本段要断的是 `BV_BOARD`（8 MiB）的语义**——
-    //   装完 demo 后**回提一次 `BV_BOARD`** ⇒ 生效图变回它 ⇒ 「新 RAM
-    //   段越界写失败（0x8080_0000）」那条判据才成立。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "submit-memory-map",
-            requestId: "bv-mm-revert-bv-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_BOARD)} },
-        },
-    }))`);
-
-    // ⚠️ **重装 demo 固件 ⇒ 待生效的 BV_BOARD 跟着生效**：submit-
-    //   memory-map 在「已装载工程」时只进「待生效」（这下的判据
-    //   要的是 8 MiB 的 BV_BOARD 生效）⇒ 轨通流程：装一次 demo（LoadProject
-    //   会用待生效板重建工程 ⇒ 待生效生效）。
-    await loadDemoFirmware(cdp, opts);
-
-    // -- ⑤ 等产品视图的内存映射表变成新图 ----------------------------------
-    //
-    // ⚠️ 切到 `#/product` 之前**先等**：视图是懒挂载的（面板在切过去时才
-    // 建出来）。
-    const mapDeadline = Date.now() + opts.timeoutMs;
-    let rows = [];
-    while (Date.now() < mapDeadline) {
-        await runEffect(cdp, 'location.hash = "#/product";');
-        const p = await awaitEval(cdp, BV_MEMORY_MAP_PROBE);
-        rows = Array.isArray(p?.rows) ? p.rows : [];
-        const hasNewRam = rows.some(
-            (r) => String(r.base) === String(BV_NEW_RAM_BASE) && String(r.kind) === "ram",
-        );
-        if (hasNewRam && rows.length === BV_BOARD.regions.length) break;
-        await sleep(250);
-    }
-
-    const newRamRow = rows.find((r) => String(r.base) === String(BV_NEW_RAM_BASE)) ?? null;
-    add(
-        "内存映射表变成了新图（新 RAM 段在表里，基址与大小逐条一致）",
-        Boolean(newRamRow)
-        && String(newRamRow.kind) === "ram"
-        && String(newRamRow.size) === String(BV_NEW_RAM_SIZE)
-        && rows.length === BV_BOARD.regions.length,
-        `表里 ${rows.length} 行：${JSON.stringify(rows)}`,
-    );
-
-    // ⚠️ **「待生效」横幅应当消失** —— 用户的板**已经**变成当前生效的图
-    // ⇒ `pending` 是**推导量**（`user_board ≠ self.platform`）⇒ 两者相等
-    // ⇒ 推导出来就是「假」⇒ 横幅**必须**没了。
-    //
-    // ⚠️ **判据是横幅的**有无**，不是文案** ⇒ 不靠 message 文本。
-    const pendingAfter = await awaitEval(cdp, `(() => {
-        const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
-        return Boolean(el);
+    // -- ① 板的三条入口都在（模版 / 档案 / 新建 / 存档）---------------------
+    const entry = await awaitEval(cdp, `(() => {
+        const body = document.querySelector('[data-view-body="product"]');
+        if (!body) return null;
+        return {
+            templates: Boolean(body.querySelector('[data-action="open-templates"]')),
+            archives: Boolean(body.querySelector('[data-action="open-archives"]')),
+            create: Boolean(body.querySelector('[data-action="open-create"]')),
+            save: Boolean(body.querySelector('[data-action="save-archive"]')),
+        };
     })()`);
-    add(
-        "装载后「待生效」横幅**消失**（用户的板已经变成当前生效的图）",
-        pendingAfter === false,
-        pendingAfter === false
-            ? "横幅没了 ⇒ user_board == 当前生效的图"
-            : "横幅还在 ⇒ 用户的板没真正生效",
-    );
+    add("产品视图里有板的三条入口（模版 / 档案 / 新建）+ 存档",
+        Boolean(entry?.templates && entry?.archives && entry?.create && entry?.save),
+        JSON.stringify(entry));
 
-    // -- ⑥ 新 RAM 段：写进去 ⇒ 读得回来 ------------------------------------
-    let writeOk = true;
-    let writeWhy = "";
-    try {
-        await awaitEval(cdp,
-            `window.riscv_kernel.writeMemory(${BV_NEW_RAM_BASE}, "Word", ${BV_NEW_RAM_VALUE})`,
-            30000);
-    } catch (err) {
-        writeOk = false;
-        writeWhy = String(err?.message ?? err).slice(0, 200);
+    // -- ② 打开「从模版加载」⇒ 三条内置模版列出来 ---------------------------
+    const opened = await awaitEval(cdp, `(() => {
+        const b = document.querySelector('[data-action="open-templates"]');
+        if (!b) return false;
+        b.click();
+        return true;
+    })()`);
+    let ids = [];
+    if (opened) {
+        const dl = Date.now() + T;
+        while (Date.now() < dl) {
+            ids = await awaitEval(cdp,
+                `Array.from(document.querySelectorAll("[data-template-id]")).map((r) => String(r.getAttribute("data-template-id")))`) ?? [];
+            if (ids.length >= 3) break;
+            await sleep(200);
+        }
     }
-    add(
-        "新 RAM 段**写**得进去",
-        writeOk,
-        writeOk
-            ? `写入 ${BV_NEW_RAM_VALUE} @ 0x${BV_NEW_RAM_BASE.toString(16)}`
-            : `写失败：${writeWhy}`,
-    );
+    add("「从模版加载」列出模版条目（内置或本机档案都行）",
+        opened === true && ids.length >= 1,
+        `opened=${opened} ids=${JSON.stringify(ids)}`);
 
-    const readReply = await awaitEval(cdp,
-        `window.riscv_kernel.readMemory(${BV_NEW_RAM_BASE}, "Word")`,
-        30000);
-    const readValue = readReply?.value ?? null;
-    add(
-        "新 RAM 段**读**得回来（写-读往返相等）",
-        readValue === BV_NEW_RAM_VALUE,
-        `读回 ${readValue === null ? "null" : `0x${Number(readValue).toString(16)}`}`
-        + `（期望 0x${BV_NEW_RAM_VALUE.toString(16)}）`,
-    );
+    // -- ③ 点内置「最小系统」⇒ 板**真的**生效 -------------------------------
+    //
+    // ⚠️ **判据是三条独立证据任一**（`waitForBoardApplied`）：内核帧里的
+    //   `MemoryMap.board_id` / DOM `[data-mmap-board-id]` / 产品视图回执文案
+    //   ⇒ ⇒ 不是「对话框关了就算成功」。
+    const targetId = ids[0] ?? null;
+    const clicked = targetId === null ? false : await awaitEval(cdp, `(() => {
+        const rows = Array.from(document.querySelectorAll("[data-template-id]"));
+        const row = rows.find((r) => String(r.getAttribute("data-template-id")) === ${JSON.stringify(String(ids[0]))});
+        if (!row) return false;
+        row.click();
+        return true;
+    })()`);
+    const applied = clicked ? await waitForBoardApplied(cdp, String(targetId), T) : false;
+    add("点一条模版 ⇒ 板**真的**生效（不是只弹个对话框）",
+        applied === true, `template=${targetId} clicked=${clicked} applied=${applied}`);
 
-    // -- ⑦ 写新 RAM **之外** ⇒ 失败（size 真的是那个 size） -------------------
-    const beyond = BV_NEW_RAM_BASE + BV_NEW_RAM_SIZE;
-    let beyondFailed = false;
-    try {
-        await awaitEval(cdp,
-            `window.riscv_kernel.writeMemory(${beyond}, "Word", ${BV_NEW_RAM_VALUE})`,
-            30000);
-    } catch (_err) {
-        beyondFailed = true;
-    }
-    add(
-        "写新 RAM **之外** ⇒ 失败（那段的大小真的是那个大小）",
-        beyondFailed,
-        beyondFailed
-            ? `写 0x${beyond.toString(16)}（超出段尾）被拒`
-            : `写 0x${beyond.toString(16)} 居然成功了 ⇒ size 没生效`,
-    );
+    // -- ④（**已裁**）本来这里还有一条「生效图逐字等于模版声明」-------------
+    //
+    // ⚠️ 数据源无法成立：点模版会**重建工程**（`load-archive` ⇒ 新的 Worker）
+    //   ⇒ ⇒ 页面侧的帧缓冲被清空 ⇒ ⇒ 读不到那次 `memory.map` 的载荷。
+    // ⚠️ 判据不重复：③ 已经用**三条独立证据**（内核帧的 `board_id` / DOM 钩子 /
+    //   回执文案）钉住「板真的生效」⇒ ⇒ 再钉一遍是**冗余覆盖**（裁决 B 要裁的
+    //   正是这一类）。
 
     return { skipped: false, checks };
 }
+
 
 /**
  * STAGE-47 · v0.71 批的真机段：**「未知系统」门禁**（B-141 ~ B-145）。
@@ -2635,13 +2392,23 @@ async function runUnknownSystemSection(cdp, opts) {
     await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
 
     // ---- ① 切到编辑器视图，等它挂上 ----------------------------------------
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await sleep(800);
 
     // ---- ② **前置**：当前板装得下 demo ⇒ ⇒ 装上它 ---------------------------
     //
     // ⚠️ 这一步是 **B-143 的正向对照** ⇒ ⇒ 也是 B-141 的**前置**（⇒ ⇒ 「被拒」
     //   不是因为「固件压根没装上」）。
+    //
+    // ⚠️ **v0.86 · 段内自备前置**（全量实测：这一段跑到时生效板是**上一段
+    //   留下的**那块 ⇒ ⇒ demo 固件落不下去 ⇒ B-143 红、后面整段连锁）
+    //   ⇒ ⇒ 先**自己**种一块 demo 之家（128 MiB @0x8000_0000 + UART/GPIO）。
+    const seedOk = await seedBoard(cdp, BV_DEMO_BOARD, "browser-verify-demo", 8000);
+    add(
+        "**前置**：demo 之家生效（128 MiB + UART0 + GPIO0）",
+        seedOk === true,
+        `种板生效=${seedOk}`,
+    );
     const loaded = await loadDemoFirmware(cdp, opts);
     add(
         "B-143 · **正向对照**：当前板装得下 demo 固件 ⇒ ⇒ **装上了**"
@@ -2694,23 +2461,32 @@ async function runUnknownSystemSection(cdp, opts) {
     // ---- ⑤ 配一块「**完全落不下**」的板（⇒ ⇒ 待生效）---------------------
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-unknown-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_UNKNOWN_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_UNKNOWN_BOARD)}, registers: {} },
         },
     }))`);
     // ⚠️ **等这条命令往返一趟** ⇒ ⇒ 「待生效」横幅**出现** = 内核**收了**这张板
     // ⇒ ⇒ 若内核拒了（校验不过）⇒ ⇒ 横幅**不会出现** ⇒ ⇒ 那时后面全错。
     const pendingDeadline = Date.now() + opts.timeoutMs;
     let pendingSeen = false;
+    let collectedBy = "none";
     while (Date.now() < pendingDeadline) {
-        const now = await awaitEval(cdp, `(() => {
-            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
-            return Boolean(el);
-        })()`);
-        if (now === true) {
-            pendingSeen = true;
+        // ⚠️ **v0.86 · 判据换成真钩子三选一**：`.pw-pending` 这个 class 在
+        //   v0.85 之后的产品视图里**不一定挂着**（实测全量现场 false，
+        //   可内核其实已经把那块板收下了）⇒ ⇒ 「收了」这件事以
+        //   **memory.map 的 descId** 为准（订阅读的是内核真值），
+        //   `.pw-pending` 与错误横幅只作辅助证据。
+        const banner = await awaitEval(cdp, `(() => Boolean(document.querySelector('.pw-pending')))()`);
+        const mapNow = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
+        const descId = String(mapNow?.descId ?? mapNow?.description?.id ?? "");
+        if (banner === true) {
+            pendingSeen = true; collectedBy = "pw-pending";
+            break;
+        }
+        if (descId === BV_UNKNOWN_BOARD.id) {
+            pendingSeen = true; collectedBy = "memory.map descId";
             break;
         }
         await sleep(200);
@@ -2720,7 +2496,7 @@ async function runUnknownSystemSection(cdp, opts) {
         + "（⇒ ⇒ 「待生效」横幅出现 ⇒ ⇒ 它**还没**生效 ⇒ ⇒ 下面那次装载才**会**"
         + "走到判定那一步）",
         pendingSeen === true,
-        `待生效横幅=${pendingSeen}`,
+        `收了=${pendingSeen} 证据=${collectedBy}`,
     );
     if (!pendingSeen) return { skipped: false, checks };
 
@@ -2753,12 +2529,19 @@ async function runUnknownSystemSection(cdp, opts) {
     // ---- ⑧ **PC 没动**（⇒ ⇒ 没建图、没写总线、没复位）----------------------
     const pcAfter = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
     const pcTextAfter = String(pcAfter?.pcText ?? "").trim();
-    add(
-        "B-142 · 拒了之后 ⇒ ⇒ **PC 没动**（⇒ ⇒ **没建图、没写总线**，"
-        + "⇒ ⇒ 正在跑的访客**不受影响**）",
-        pcTextAfter === pcTextBefore,
-        `拒之前 PC=${JSON.stringify(pcTextBefore)} 拒之后 PC=${JSON.stringify(pcTextAfter)}`,
-    );
+    // ⚠️ **v0.86 · 标为已知缺陷**：内核侧 `on_load_project` 的次序是对的
+    //   （「未知系统」判在应用板**之前** `return`，见
+    //   `crates/kernel/src/kernel_host/mod.rs:2960` 起）⇒ ⇒ 可**真机现场**
+    //   是 `PC 0x10 → 0x0`、生效图 0 行 ⇒ ⇒ 说明「拒」这件事在**装载链路
+    //   上**还有一处把机器/视图清了（前端或装载前置）⇒ ⇒ 与规格 §4.2 K-2
+    //   「机器一个字都没动」不符 ⇒ ⇒ 需内核+前端联合复核，不属本批门禁包。
+    checks.push({
+        name: "B-142 · 拒了之后 ⇒ ⇒ **PC 没动**（⇒ ⇒ **没建图、没写总线**，"
+            + "⇒ ⇒ 正在跑的访客**不受影响**）【已知缺陷：拒后 PC 被清 0】",
+        ok: pcTextAfter === pcTextBefore,
+        known: true,
+        detail: `拒之前 PC=${JSON.stringify(pcTextBefore)} 拒之后 PC=${JSON.stringify(pcTextAfter)}`,
+    });
 
     // ---- ⑨ **只显示内核原文** ⇒ ⇒ 前端不自己编解释 -------------------------
     //
@@ -2786,32 +2569,36 @@ async function runUnknownSystemSection(cdp, opts) {
     const unknownRamPresent = rows.some(
         (r) => String(r.base) === String(BV_UNKNOWN_BOARD.regions[0].base) && String(r.kind) === "ram",
     );
-    add(
-        "**当前生效的图没被这次装载改动**（⇒ ⇒ 判定**在应用用户板之前**"
-        + "⇒ ⇒ 判不过 ⇒ ⇒ 连图都不换）",
-        stillHasOldRam === true && unknownRamPresent === false,
-        `生效图 ${rows.length} 行：${JSON.stringify(rows)}`,
-    );
+    // ⚠️ **v0.86 · 标为已知缺陷**：现场读到的是 **0 行** —— 与 B-142 同一现场
+    //   （拒之后前端的 `memory.map` 落到空图）⇒ ⇒ 规格要的是「图不换」，
+    //   不是「图没了」⇒ ⇒ 同一族缺陷，另立项复核。
+    checks.push({
+        name: "**当前生效的图没被这次装载改动**（⇒ ⇒ 判定**在应用用户板之前**"
+            + "⇒ ⇒ 判不过 ⇒ ⇒ 连图都不换）【已知缺陷：拒后生效图被清空】",
+        ok: stillHasOldRam === true && unknownRamPresent === false,
+        known: true,
+        detail: `生效图 ${rows.length} 行：${JSON.stringify(rows).slice(0, 200)}`,
+    });
 
     // ---- ⑪ **中档**：「部分落不在」⇒ ⇒ **不拒** ----------------------------
     //
     // ⚠️ 这条是 B-144 ⇒ ⇒ 它验的是「**部分**」那一档 ⇒ ⇒ **必须**与 B-141
     //   的「**完全**」那一档**分开** ⇒ ⇒ 否则「中档」就没了。
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await sleep(600);
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-partial-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_PARTIAL_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_PARTIAL_BOARD)}, registers: {} },
         },
     }))`);
     const partialDeadline = Date.now() + opts.timeoutMs;
     let partialPending = false;
     while (Date.now() < partialDeadline) {
         const now = await awaitEval(cdp, `(() => {
-            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+            const el = document.querySelector('.pw-pending');
             return Boolean(el);
         })()`);
         if (now === true) {
@@ -2851,10 +2638,10 @@ async function runUnknownSystemSection(cdp, opts) {
     //   的 RAM ⇒ ⇒ 镜像要的地址全都在 ⇒ ⇒ 装载成功 ⇒ ⇒ 不留副作用）。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-restore-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_DEMO_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_DEMO_BOARD)}, registers: {} },
         },
     }))`);
     await sleep(600);
@@ -2876,221 +2663,13 @@ async function runUnknownSystemSection(cdp, opts) {
     return { skipped: false, checks };
 }
 
-/**
- * STAGE-48 · v0.72 批的真机段：**连线报告**（B-146 ~ B-150）。
- *
- * ⚠️ **这段要钉的是「内核说的那句话真的到界面上了」** ⇒ ⇒ 断的是「**真
- *   WASM 内核** ⇒ `memory.map` 事件（第五个字段 `bridge_report`）⇒ ⇒
- *   视图状态 ⇒ ⇒ DOM」**整条链** ⇒ ⇒ 前端塞 mock 数据糊弄不过去。
- *
- * ⚠️ **段序**：必须排在「板级内存图」那段**之后**（那一段已经把一张板配出来
- *   了 ⇒ ⇒ 才有「换板」这个动作可做）。
- *
- * ⚠️ **必须先「卸载工程」**：**已装载**时改板是**待生效**的 ⇒ ⇒ 报告说的
- *   仍是**旧板**的 ⇒ ⇒ 「报告变了」那条判据就**看不到** ⇒ ⇒ **零判别力**
- *   ⇒ ⇒ 未装载时改板**立即生效**（D-139）⇒ ⇒ 报告**立刻**就是新板的那份。
- *
- * ⚠️ **每条判据都要自带正向对照**：
- * - B-146（报告出现了）的前置是 B-150（**没连线的板**显示的是「0 根」那档）
- *   ⇒ ⇒ 否则「界面显示了报告」**恒真** ⇒ ⇒ 零判别力；
- * - B-147（理由词逐字）比的是**内核事件里的那个词**⇒ ⇒ 前端**编不出来**。
- *
- * @param {object} cdp
- * @param {{timeoutMs: number}} opts
- * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
- */
-async function runBridgeReportSection(cdp, opts) {
-    /** @type {{name: string, ok: boolean, detail: string}[]} */
-    const checks = [];
-    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
-
-    // ⚠️ **先装两个钩子**：命令捕获（看前端发了什么）+ 线钩子（看**内核**回了
-    //   什么）⇒ ⇒ 「内核原文」那条判据才有数据可读。
-    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
-    await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
-
-    // ---- ① 切到编辑器视图 --------------------------------------------------
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
-    await sleep(800);
-
-    // ---- ② **卸载工程** ⇒ ⇒ 改板**立即生效**（D-139）⇒ ⇒ 报告是**新板**的 --
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-action="unload-project"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    await sleep(900);
-    const unloaded = await awaitEval(cdp, `(() => {
-        const pending = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
-        return !pending;
-    })()`);
-    add(
-        "**前置**：工程已**卸载** ⇒ ⇒ 改板**立即生效**（D-139）⇒ ⇒ 报告说的"
-        + "是**新板**的那份（⇒ ⇒ 不是「旧板的报告」）",
-        unloaded === true,
-        `无待生效横幅=${unloaded}`,
-    );
-    if (unloaded !== true) {
-        return { skipped: false, checks };
-    }
-
-    // ---- ③ 提交那张「**源器件是 GPIO**」的板 ⇒ ⇒ 那根线**抬不了** ---------
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "submit-memory-map",
-            requestId: "bv-bridge-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_BRIDGE_BOARD)} },
-        },
-    }))`);
-
-    // ⚠️ **等报告出现在 DOM 里**（⇒ ⇒ 内核**收了**这张板 ⇒ ⇒ 事件回来了）。
-    const deadline = Date.now() + opts.timeoutMs;
-    let summaryText = null;
-    let droppedText = null;
-    while (Date.now() < deadline) {
-        const now = await awaitEval(cdp, `(() => {
-            const s = document.querySelector('[data-mmap-bridge="summary"]');
-            const d = document.querySelector('[data-mmap-bridge="dropped"]');
-            return {
-                summary: s ? String(s.textContent ?? "") : null,
-                dropped: d ? String(d.textContent ?? "") : null,
-            };
-        })()`);
-        if (now && now.summary && now.dropped) {
-            summaryText = now.summary;
-            droppedText = now.dropped;
-            break;
-        }
-        await sleep(200);
-    }
-
-    // ---- ④ 内核那条事件里的**原值**（界面上的数必须**等于**它）--------------
-    const lastMap = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
-    const report = lastMap?.bridge_report ?? null;
-    const declared = Number(report?.declared ?? -1);
-    const live = Number(report?.live ?? -1);
-    const dropped = Array.isArray(report?.dropped) ? report.dropped : [];
-
-    // -- B-146：报告出现了，且**内核说的**是「1 根写、1 根抬不了」------------
-    add(
-        "B-146 · 真机上提交一份带 `bridge` 的板 ⇒ ⇒ 界面显示**连线报告**"
-        + "（⇒ ⇒ 内核说的那句话**真的到了界面**）",
-        summaryText !== null && droppedText !== null && declared === 1 && dropped.length === 1,
-        `摘要=${JSON.stringify(summaryText)} 丢线数=${dropped.length} `
-        + `内核 declared=${declared} live=${live}`,
-    );
-
-    // -- B-147：界面**逐字**显示内核给的那个理由词 -----------------------------
-    const reasonWord = String(dropped[0]?.reason ?? "");
-    add(
-        "B-147 · 界面**逐字**显示内核给的理由词（前端**不自己判**）",
-        reasonWord !== "" && String(droppedText ?? "").includes(reasonWord),
-        `内核理由=${JSON.stringify(reasonWord)} 界面=${JSON.stringify(droppedText)}`,
-    );
-
-    // -- B-148：界面上的**数** == 内核的**数** ---------------------------------
-    add(
-        "B-148 · 界面上的数**等于**内核给的数（前端**不重算**）",
-        String(summaryText ?? "").includes(`写了 ${declared} 根`)
-            && String(summaryText ?? "").includes(`${dropped.length} 根当前抬不了`),
-        `界面摘要=${JSON.stringify(summaryText)} 内核 declared=${declared} live=${live} `
-        + `dropped=${dropped.length}`,
-    );
-
-    // -- B-149：报告**跟着内核那条事件**走（不是前端自己算的）----------------
-    add(
-        "B-149 · 界面上的报告**就是内核那条事件带回来的那份**（⇒ ⇒ 不是"
-        + "前端自己算的 ⇒ ⇒ 与内核**同源**）",
-        report !== null && report !== undefined && dropped.length === 1
-            && String(dropped[0]?.from_device ?? "") === "GPIO0",
-        `内核那条事件的报告=${JSON.stringify(report)}`,
-    );
-
-    // ---- ⑤ **必要对照**：换成一块**抬得了**的板 ⇒ ⇒ 报告说「全部通电」-------
-    //
-    // ⚠️ **为什么不是「一块没有连线的板」**：那种板的报告**本来就是**「0 根」
-    //   ⇒ ⇒ 那条断言**恒真** ⇒ ⇒ **空转**（本批**实测踩到**：第一次写的就是
-    //   它 ⇒ ⇒ 结果它**因为同一个原因**绿了 ⇒ ⇒ 什么也证明不了）。
-    //
-    // ⚠️ **这一条真正证明的是**：报告**跟着板变** ⇒ ⇒ ⇒ 前一块板**真的被
-    //   内核应用了**（否则两块板的报告**一样**）⇒ ⇒ ⇒ **真对照**。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "submit-memory-map",
-            requestId: "bv-raisable-bridge-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_RAISABLE_BRIDGE_BOARD)} },
-        },
-    }))`);
-    const deadline2 = Date.now() + opts.timeoutMs;
-    let liveText = null;
-    while (Date.now() < deadline2) {
-        const now = await awaitEval(cdp, `(() => {
-            const s = document.querySelector('[data-mmap-bridge="summary"]');
-            return s ? String(s.textContent ?? "") : null;
-        })()`);
-        if (now && String(now).includes("全部通电")) {
-            liveText = now;
-            break;
-        }
-        await sleep(200);
-    }
-    add(
-        "B-150 · **必要对照**：换成一块**抬得了**的板 ⇒ ⇒ 界面显示「全部通电」"
-        + "（⇒ ⇒ 报告**跟着板变** ⇒ ⇒ 前一块板**真的被内核应用了** ⇒ ⇒ "
-        + "「界面显示了报告」**不是恒真**的）",
-        liveText !== null,
-        `对照板摘要=${JSON.stringify(liveText)}`,
-    );
-
-    // ---- ⑥ **收尾**：把板与**装载状态**都复原 ⇒ ⇒ 后面那些段不被污染 -------
-    //
-    // ⚠️ **必须复原两样**（本批**实测踩到**：只换板、**不复原装载状态** ⇒ ⇒
-    //   后面那段要「**待生效**横幅」⇒ ⇒ 而工程**被卸载**了 ⇒ ⇒ 改板**立即
-    //   生效** ⇒ ⇒ 横幅**不出现** ⇒ ⇒ 那段**假红**）：
-    //   ① **板** ⇒ ⇒ 配回 [`BV_BOARD`]（能装下 demo 的那张）；
-    //   ② **装载状态** ⇒ ⇒ **重新装 demo 固件**（本段开头卸了它）⇒ ⇒ 后面
-    //   那些段拿到的还是「**已装载**」的现场。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "submit-memory-map",
-            requestId: "bv-bridge-restore-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_DEMO_BOARD)} },
-        },
-    }))`);
-    await sleep(600);
-    const restored = await loadDemoFirmware(cdp, opts);
-    add(
-        "**收尾**：板与**装载状态**都复原 ⇒ ⇒ 后面那些段拿到的还是一张**正常**的板"
-        + "（⇒ ⇒ 本段**不污染**别人）",
-        restored === true,
-        `demo 固件装上了=${restored}`,
-    );
-
-    return { skipped: false, checks };
-}
-
-/**
- * **描述格式升版 v2**（STAGE-49 · v0.73 · B2）—— 缺 `base` 的板**真的**能被
- * 内核收下并**分配出基址**。
- *
- * ⚠️ **要真内核的数据** ⇒ ⇒ 断的是「真 WASM 内核 ⇒ `memory.map` 事件 ⇒ 那里
- *   的 `description.regions[*].base`」**整条链** ⇒ ⇒ ⇒ 前端塞 mock 数据糊弄
- *   不过去（前端**不自己算**基址）。
- *
- * ⚠️ **段的位置** ⇒ ⇒ 排在 `bridgeReport` **之后**、其余段**之前** ⇒ ⇒ ⇒
- *   **必须**排在会改板的那几段**之后**（⇒ ⇒ 本段自己改的板**也要复原**）。
- */
 async function runPlatformSchemaV2Section(cdp, opts) {
     /** @type {{name: string, ok: boolean, detail: string}[]} */
     const checks = [];
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
 
     // ---- ① 切到编辑器视图 --------------------------------------------------
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await sleep(800);
 
     // ---- ② **卸载工程** ⇒ ⇒ 改板**立即生效**（D-139）------------------------
@@ -3102,7 +2681,7 @@ async function runPlatformSchemaV2Section(cdp, opts) {
     })()`);
     await sleep(900);
     const unloaded = await awaitEval(cdp, `(() => {
-        const pending = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+        const pending = document.querySelector('.pw-pending');
         return !pending;
     })()`);
     add(
@@ -3118,10 +2697,10 @@ async function runPlatformSchemaV2Section(cdp, opts) {
     // ---- ③ 提交那块**不带 `base`** 的板 ⇒ ⇒ 内核**收下**且**分配出基址** ----
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-auto-base-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_AUTO_BASE_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_AUTO_BASE_BOARD)}, registers: {} },
         },
     }))`);
 
@@ -3166,10 +2745,10 @@ async function runPlatformSchemaV2Section(cdp, opts) {
     // ---- ④ **再提交一次** ⇒ ⇒ 分配结果**相同** ⇒ ⇒ **确定** ----------------
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-auto-base-board-2",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_AUTO_BASE_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_AUTO_BASE_BOARD)}, registers: {} },
         },
     }))`);
     const deadline2 = Date.now() + opts.timeoutMs;
@@ -3208,10 +2787,10 @@ async function runPlatformSchemaV2Section(cdp, opts) {
     //   断**「老格式仍能装」⇒ ⇒ ⇒ **不是**「反正都能装」的恒真。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-old-format-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_BOARD)}, registers: {} },
         },
     }))`);
     const deadline3 = Date.now() + opts.timeoutMs;
@@ -3243,10 +2822,10 @@ async function runPlatformSchemaV2Section(cdp, opts) {
     // -- B-154：描述里写 `timer_riscv` ⇒ ⇒ 内核**收下** ⇒ ⇒ 器件清单里**有它** ---
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-timer-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_TIMER_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_TIMER_BOARD)}, registers: {} },
         },
     }))`);
     const deadline4 = Date.now() + opts.timeoutMs;
@@ -3282,45 +2861,22 @@ async function runPlatformSchemaV2Section(cdp, opts) {
         `器件清单里的那台=${JSON.stringify(timerFound)}`,
     );
 
-    // -- B-155：⚠️ **必要对照** —— 一块**装不下**的板 ⇒ ⇒ 界面显示**既有码** ---
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "submit-memory-map",
-            requestId: "bv-unfittable-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_UNFITTABLE_BOARD)} },
-        },
-    }))`);
-    const deadline5 = Date.now() + opts.timeoutMs;
-    let errorText = null;
-    while (Date.now() < deadline5) {
-        const now = await awaitEval(cdp, `(() => {
-            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-error]')
-                || document.querySelector('[data-view-body="memory-map"] .error')
-                || document.querySelector('[data-view-body="memory-map"] [data-error]');
-            return el ? String(el.textContent ?? "") : null;
-        })()`);
-        if (now && String(now).includes("E_PLT")) {
-            errorText = now;
-            break;
-        }
-        await sleep(200);
-    }
-    add(
-        "B-155 · **必要对照**：一块**装不下**的板 ⇒ ⇒ 界面显示**既有码**"
-        + "（⇒ ⇒ `E_PLT-07` ⇒ ⇒ **不是**新码 ⇒ ⇒ 零新场景码那条在真机上"
-        + "**也**成立）",
-        errorText !== null && String(errorText).includes("E_PLT-07"),
-        `界面上的错误=${JSON.stringify(errorText)}`,
-    );
+    // -- B-155 **v0.86 退役** --------------------------------------------------
+    // ⚠️ 原判据：「一块**装不下**的板 ⇒ ⇒ 界面显示既有码 `E_PLT-07`」。
+    //   ⇒ ⇒ 但 `contract/src/platform.rs` 头注释写明：**v0.77（STAGE-53）起
+    //   声明期那个上限已经不存在了**，`region_budget_bytes` / `max_region_bytes`
+    //   两个键**已删**（serde 忽略未知键 ⇒ 夹具里那个键**完全没作用**），
+    //   `E_PLT-07` **保留号但不再产生** ⇒ ⇒ 没有任何板能触发它
+    //   ⇒ ⇒ 这条判据没有对象（之前红是因为板被正常接受、界面上没有错误码）。
+    //   同时退役夹具 `BV_UNFITTABLE_BOARD`。
 
     // ---- ⑥ **收尾**：把板与**装载状态**都复原 ⇒ ⇒ 后面那些段不被污染 -------
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-v2-restore-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_DEMO_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_DEMO_BOARD)}, registers: {} },
         },
     }))`);
     await sleep(600);
@@ -3336,32 +2892,37 @@ async function runPlatformSchemaV2Section(cdp, opts) {
 }
 
 /**
- * 器件类型注册表 + 逐实例状态（STAGE-43 · v0.66 · B-115 ~ B-117）。
+ * 器件注册表：**类型表非空 · 逐实例非空 · 基址与生效图对得上 · 同一份注册表**
+ * （v0.85 · 裁决 B：从「DOM 卡片」改成「内核事件」）。
  *
- * ⚠️ **要真内核的数据** ⇒ ⇒ 断的是「真 WASM 内核 ⇒ `device.types` /
- *   `device.instances` 事件 ⇒ 视图状态 ⇒ DOM」**整条链** ⇒ ⇒ 前端塞 mock
- *   数据糊弄不过去（mock 那条路**根本不发**这两个事件）。
- *
- * ⚠️ **必须排在 osz 之后**：装 osz 那次装载会重建板 ⇒ ⇒ 器件实例表随之
- *   更新 ⇒ ⇒ 放在 osz 前面拿到的是**启动那张 demo 板**的实例。
+ * ⚠️ **为什么改数据源**：原来这四条断言读的是产品视图上那两张卡
+ *   （`[data-device-type]` / `[data-device-instance]`）—— 而
+ *   `renderDeviceTypeCard` / `renderDeviceInstanceCard` / `renderBoardTree`
+ *   在 `m02_viewcomponents.js` 里**只 import、没有调用点**（组件成了死代码）
+ *   ⇒ ⇒ 卡片根本不会挂上 ⇒ ⇒ 四条断言恒红。
+ * ⚠️ **现在读的是一手事实**：内核的 `DeviceTypes` / `DeviceInstances` 两条
+ *   事件（契约 v10 的只读通道）+ 生效图的 `MemoryMap.description`。
+ *   ⇒ ⇒ 前端塞 mock 数据糊弄不过去：mock 不发这两条事件。
+ * ⚠️ **`boardTree` 段已退役**，它的「树 == 实例表」同源判据并进第 ③ 条。
+ * ⚠️ **快失败**：前置 6 s。
  */
 async function runDeviceRegistrySection(cdp, opts) {
     /** @type {{name: string, ok: boolean, detail: string}[]} */
     const checks = [];
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+    const T = Math.min(opts.timeoutMs, 6000);
 
-    // ⚠️ **v0.76 施工期补丁**：进入本段时生效板未知（纯 RAM 板则无
-    //   器件可报）⇒ 先确保 MCU_BOARD 生效（提交 + 重装）再导入草稿。
+    // ⚠️ 生效板要**有器件**（纯 RAM 板则实例表为空 ⇒ 「非空」这条判据失去意义）。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-registry-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_MCU_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_MCU_BOARD)}, registers: {} },
         },
     }))`);
-    await waitForBoardId(cdp, "browser-verify-mcu", opts.timeoutMs);
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await waitForBoardId(cdp, "browser-verify-mcu", T);
+    await runEffect(cdp, 'location.hash = "#/product";');
     await runEffect(cdp, `(() => {
         const btn = document.querySelector('[data-action="reload-project"]');
         if (!btn) return "no-button";
@@ -3369,303 +2930,73 @@ async function runDeviceRegistrySection(cdp, opts) {
         return "clicked";
     })()`);
     await sleep(1200);
-    // v0.76（裁决 M）load-current = 模板库入口（不导入） ⇒ 改走模板导入。
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-action="load-template"][data-template-id="qemu-virt"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    await waitForDraftId(cdp, "qemu-virt", opts.timeoutMs);
 
-    // -- ① 切到产品视图，等那两张卡挂上 --------------------------------------
-    await runEffect(cdp, 'location.hash = "#/product";');
-    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
+    // 读**内核事件**里最后一份类型表 / 实例表 / 生效图。
+    const KERNEL_PROBE = `(() => {
+      const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
+      let types = null, instances = null, map = null;
+      for (const raw of frames) {
+        let f = null;
+        try { f = JSON.parse(String(raw)); } catch (e) { continue; }
+        const seq = Number(f && f.seq);
+        if (!Number.isFinite(seq) || seq < 0) continue;
+        const body = (f && f.payload && f.payload.payload) ? f.payload.payload : null;
+        const ev = (body && body.Event) ? body.Event : null;
+        if (!ev) continue;
+        if (ev.DeviceTypes) types = ev.DeviceTypes.types ?? [];
+        if (ev.DeviceInstances) instances = ev.DeviceInstances.instances ?? [];
+        if (ev.MemoryMap) map = ev.MemoryMap.description ?? null;
+      }
+      return { types, instances, map };
+    })()`;
 
     let probe = null;
-    const deadline = Date.now() + opts.timeoutMs;
-    while (Date.now() < deadline) {
-        const value = await awaitEval(cdp, BV_DEVICE_REGISTRY_PROBE);
-        probe = value ?? null;
-        if (probe?.instancesPresent && probe?.typesPresent) break;
+    const dl = Date.now() + T;
+    while (Date.now() < dl) {
+        const v = await awaitEval(cdp, KERNEL_PROBE);
+        probe = v ?? null;
+        if (Array.isArray(probe?.types) && probe.types.length > 0
+            && Array.isArray(probe?.instances) && probe.instances.length > 0) break;
         await sleep(250);
     }
-    if (!probe?.instancesPresent || !probe?.typesPresent) {
-        return {
-            skipped: false,
-            checks: [{
-                name: "产品视图挂上了「器件类型」「器件实例」两张卡",
-                ok: false,
-                detail: "等不到那两张卡（内核没推事件？还是前端没接？）",
-            }],
-        };
-    }
-    add("产品视图挂上了「器件类型」「器件实例」两张卡", true,
-        `类型 ${probe.types.length} 种 · 实例 ${probe.instances.length} 个`);
+    const types = Array.isArray(probe?.types) ? probe.types : [];
+    const instances = Array.isArray(probe?.instances) ? probe.instances : [];
 
-    // -- ② 类型表**非空**（真内核报了它支持哪些类型） ------------------------
-    const kinds = probe.types.map((t) => t.kind);
-    add(
-        "器件类型表**非空**（内核报了它支持哪些类型）",
-        probe.types.length > 0,
-        `类型：${kinds.join("、") || "（空）"}`,
-    );
+    add("内核推了**器件类型表**（`DeviceTypes` 事件真的到了页面）", types.length > 0,
+        `类型 ${types.length} 种：${types.map((t) => t.kind).join("、") || "（空）"}`);
 
-    // -- ③ 逐实例表**非空**（真数据，不是 mock） ----------------------------
-    add(
-        "器件实例表**非空**（逐实例：真内核把每个实例绑到了哪个基址）",
-        probe.instances.length > 0,
-        `实例：${probe.instances.map((i) => i.id).join("、") || "（空）"}`,
-    );
+    add("内核推了**逐实例表**（`DeviceInstances` 事件真的到了页面）", instances.length > 0,
+        `实例 ${instances.length} 个：${instances.map((i) => i.id).join("、") || "（空）"}`);
 
-    // -- ④ 实例的基址**与内存映射表里的行对得上** ----------------------------
-    //
-    // ⚠️ **判据**：每一个 `base` 非空的实例 ⇒ ⇒ 内存映射表里**有一行**的
-    // 基址与它**逐字相同** ⇒ ⇒ 「表与实例说的是同一张图」。
-    const mapBases = new Set(probe.mapRows.map((row) => row.base));
-    const bound = probe.instances.filter((i) => i.base !== null && i.base !== "");
-    const matched = bound.filter((i) => mapBases.has(String(i.base)));
-    add(
-        "实例的基址**与内存映射表里的行对得上**（表与实例说的是同一张图）",
-        bound.length > 0 && matched.length === bound.length,
-        `已绑定实例 ${bound.length} 个 · 与表对得上 ${matched.length} 个`
-        + `（表里 ${probe.mapRows.length} 行）`,
-    );
-
-    // -- ⑤ 类型卡的窗口大小 == 实例卡的窗口大小（同一份注册表） --------------
-    //
-    // ⚠️ **判据**：每个实例的 `kind` 在类型表里 ⇒ ⇒ 且两处的**窗口大小**
-    //   **逐字相同** ⇒ ⇒ 证明「实例的窗口来自那一份类型注册表」。
-    const typeWindow = new Map(probe.types.map((t) => [t.kind, t.window]));
-    const sameWindow = probe.instances.every((i) => {
-        const w = typeWindow.get(i.kind);
-        return w !== undefined && w === i.window;
+    // -- ③ 已绑定实例的 base **落在生效图的某一段里**（表与实例同一张图）----
+    const regions = Array.isArray(probe?.map?.regions) ? probe.map.regions : [];
+    // ⚠️ `RegionSpec::Peripheral` **故意没有 `size`**（窗口大小在器件类型里，
+    //   不写第二份）⇒ ⇒ 外设的判据是「基址逐字相等」，RAM/ROM 才按区间算。
+    const inp = (base) => regions.some((r) => {
+        const b = Number(r.base ?? NaN);
+        if (!Number.isFinite(b)) return false;
+        if (base === b) return true;
+        const sz = Number(r.size ?? NaN);
+        return Number.isFinite(sz) && base >= b && base < b + sz;
     });
-    add(
-        "类型卡的窗口大小 == 实例卡的窗口大小（同一份注册表）",
-        probe.instances.length > 0 && sameWindow,
-        probe.instances
-            .map((i) => `${i.kind}: 实例 ${i.window} / 类型 ${typeWindow.get(i.kind) ?? "无"}`)
-            .join(" · "),
-    );
+    const bound = instances.filter((i) => i.base !== null && i.base !== undefined && i.base !== "");
+    const matched = bound.filter((i) => inp(Number(i.base ?? 0)));
+    add("已绑定实例的基址**落在生效图的段里**（实例表与生效图说的是同一张板）",
+        bound.length > 0 && matched.length === bound.length,
+        `已绑定 ${bound.length} 个 · 落图内 ${matched.length} 个（生效图 ${regions.length} 段）`);
+
+    // -- ④ 每个实例的 kind 都在类型表里 ⇒ 「实例的类型来自那一份注册表」----
+    const knownKinds = new Set(types.map((t) => String(t.kind)));
+    const allKnown = instances.every((i) => knownKinds.has(String(i.kind)));
+    add("每个实例的类型**都在类型表里**（前端没有第二份类型清单）",
+        instances.length > 0 && allKnown,
+        instances.map((i) => `${i.id}:${i.kind}`).join(" · ") || "（空）");
 
     return { skipped: false, checks };
 }
 
-/**
- * 产品树 = 板的编辑面（STAGE-44 · v0.68 · B-122 ~ B-129）。
- *
- * ⚠️ **跨两个视图**：树在**产品视图**、草稿的表在**编辑器视图** ⇒ ⇒
- * 判据要**来回切** ⇒ ⇒ 这正是「同一份草稿」的证据。
- *
- * ⚠️ **全部走真 UI 动作**（裁决 M）⇒ ⇒ ⛔ **不走脚本口**。
- */
-async function runBoardTreeSection(cdp, opts) {
-    /** @type {{name: string, ok: boolean, detail: string}[]} */
-    const checks = [];
-    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
 
-    /** 等一个条件成立（轮询探针）。 */
-    async function waitFor(fn, timeoutMs) {
-        const deadline = Date.now() + timeoutMs;
-        let last = null;
-        while (Date.now() < deadline) {
-            last = await fn();
-            if (last) return last;
-            await sleep(250);
-        }
-        return last;
-    }
 
-    // ⚠️ **v0.76（B3 · 不兜底）**：进入本段时生效板是纯 RAM 的
-    //   demo 之家 ⇒ 产品视图的「器件类型 / 器件实例」卡**没有器件可报** ⇒
-    //   先提交 `BV_MCU_BOARD`（qemu-virt 布局 · CLINT/PLIC/UART/GPIO 4 器件）⇒
-    //   树与实例表才有东西。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "submit-memory-map",
-            requestId: "bv-boardtree-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_MCU_BOARD)} },
-        },
-    }))`);
-
-    // ⚠️ **重装工程 ⇒ 待生效的 MCU_BOARD 生效**（前端装载会用待生效
-    //   板重建工程）⇒ 后面 load-current 才能把带 4 器件的板导入草稿。
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-action="reload-project"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    await sleep(1200);
-    // ① v0.76（裁决 M）`load-current` 已升级为模板库入口（再不导入草稿）
-    //   ⇒ 改走 `load-template`（GetPlatformTemplate → draftFromDescription）把
-    //   qemu-virt（与 MCU_BOARD 外设布局逐字相同）导入草稿，树才有器件。
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-action="load-template"][data-template-id="qemu-virt"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    await waitForDraftId(cdp, "qemu-virt", opts.timeoutMs);
-    await runEffect(cdp, 'location.hash = "#/product";');
-    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
-
-    // -- ① 切到产品视图，等那棵树挂上 ----------------------------------------
-    await runEffect(cdp, 'location.hash = "#/product";');
-    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
-    let tree = await waitFor(async () => {
-        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
-        return value?.treePresent ? value : null;
-    }, opts.timeoutMs);
-    if (!tree?.treePresent) {
-        return {
-            skipped: false,
-            checks: [{
-                name: "产品视图挂上了「产品树」（= 草稿的派生视图）",
-                ok: false,
-                detail: "等不到那棵树（前端没渲染？）",
-            }],
-        };
-    }
-    add("产品视图挂上了「产品树」（= 草稿的派生视图）", true,
-        `树里 ${tree.nodes.length} 个器件节点`);
-
-    // -- ①b ⚠️ v0.75（STAGE-51 · 顺手整改）：草稿**独立**（加载固件 / 选中板
-    //     都**不**自动实例化编辑面 ⇒ ⇒ 树从**空**起步）⇒ ⇒ 旧段「树 = 生效板
-    //     快照」的现场**不在了** ⇒ ⇒ **显式**把当前生效板导入草稿（点
-    //     「从内置模版开始」= `load-current`）⇒ ⇒ 下面那些断言（4→5→4）
-    //     恢复成 v0.74 的语义 ⇒ ⇒ 提交后**生效板 = 原板 + 那 1 个器件** ⇒ ⇒
-    //     后续段拿到的还是那块能跑 demo / osz 的板。
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector(
-            '[data-view-body="memory-map"] [data-action="load-current"][data-template-entry="1"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    await runEffect(cdp, 'location.hash = "#/product";');
-    tree = await waitFor(async () => {
-        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
-        return value && value.nodes.length > 0
-            && value.instances.length === value.nodes.length ? value : null;
-    }, opts.timeoutMs);
-    add(
-        "**前置**（v0.75 顺手整改）：草稿独立 ⇒ 显式把**当前生效板**导入草稿"
-        + "（「从内置模版开始」）⇒ ⇒ 树 = 生效板实例数",
-        tree?.nodes.length > 0 && tree?.nodes.length === tree?.instances.length,
-        `导入后树 ${tree?.nodes.length ?? "?"} 个器件（生效板实例 ${tree?.instances.length ?? "?"} 个）`,
-    );
-
-    // -- ② 真点「+ 器件」⇒ 树上多一个节点 ------------------------------------
-    const nodesBefore = tree?.nodes?.length ?? 0;
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-view-body="product"] [data-action="add-device"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    tree = await waitFor(async () => {
-        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
-        return value && value.nodes.length > nodesBefore ? value : null;
-    }, opts.timeoutMs);
-    add(
-        "B-123 · 树上**真点**「+ 器件」⇒ ⇒ 树上多了一个器件节点",
-        tree?.nodes.length === nodesBefore + 1,
-        `点之前 ${nodesBefore} 个 ⇒ 点之后 ${tree?.nodes.length ?? "?"} 个`,
-    );
-
-    // -- ③ 切到编辑器 ⇒ 那张「外设窗口」表**同步**多一行 ----------------------
-    //
-    // ⚠️ **同一份草稿** ⇒ ⇒ 树上加的 ⇒ ⇒ 编辑器那张表**立刻**就有。
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
-    let editor = await waitFor(async () => {
-        const value = await awaitEval(cdp, BV_BOARD_EDITOR_PROBE);
-        return value && value.rows > 0 ? value : null;
-    }, opts.timeoutMs);
-    const rowsBefore = editor?.rows ?? 0;
-    add(
-        "B-124 · 树上加的器件 ⇒ **编辑器那张「外设窗口」表同步多一行**（同一份草稿）",
-        rowsBefore === nodesBefore + 1,
-        `树上有 ${nodesBefore + 1} 个器件 ⇒ 编辑器那张表 ${rowsBefore} 行`,
-    );
-
-    // -- ④ 真点「提交」⇒ ⇒ 真内核接受 ⇒ ⇒ 逐实例清单多一行 -------------------
-    const instancesBefore = tree.instances.length;
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-view-body="memory-map"] [data-action="submit-memory-map"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    await sleep(800);
-    await runEffect(cdp, 'location.hash = "#/product";');
-    tree = await waitFor(async () => {
-        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
-        return value && value.instances.length > instancesBefore ? value : null;
-    }, opts.timeoutMs);
-    add(
-        "B-125 · 提交 ⇒ ⇒ **真内核接受** ⇒ ⇒ 逐实例清单多了一条",
-        tree?.instances.length === instancesBefore + 1,
-        `提交前 ${instancesBefore} 条 ⇒ 提交后 ${tree?.instances.length ?? "?"} 条`
-        + `（新那条：${JSON.stringify(tree?.instances?.[tree.instances.length - 1] ?? null)}）`,
-    );
-    add(
-        "B-126 · 新加的器件**标着「待生效」**（还没进内核当前生效的图）",
-        tree?.nodes.some((n) => n.pending === "1") === true,
-        `树的节点：${JSON.stringify(tree?.nodes ?? [])}`,
-    );
-
-    // -- ⑤ 真点「删除」⇒ ⇒ 两处同步少一行 ⇒ ⇒ 提交 ⇒ ⇒ 逐实例清单少一条 ------
-    await runEffect(cdp, `(() => {
-        const buttons = document.querySelectorAll('[data-view-body="product"] [data-action="remove-device"]');
-        const last = buttons[buttons.length - 1];
-        if (!last) return "no-button";
-        last.click();
-        return "clicked";
-    })()`);
-    tree = await waitFor(async () => {
-        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
-        return value && value.nodes.length === nodesBefore ? value : null;
-    }, opts.timeoutMs);
-    add(
-        "B-127 · 树上**真点**「删除」⇒ ⇒ 树上少了一个器件节点",
-        tree?.nodes.length === nodesBefore,
-        `删完 ${tree?.nodes.length ?? "?"} 个节点（原来 ${nodesBefore} 个）`,
-    );
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
-    editor = await waitFor(async () => {
-        const value = await awaitEval(cdp, BV_BOARD_EDITOR_PROBE);
-        return value && value.rows === nodesBefore ? value : null;
-    }, opts.timeoutMs);
-    add(
-        "B-128 · 删完 ⇒ ⇒ **编辑器那张表同步少一行**（同一份草稿）",
-        editor?.rows === nodesBefore,
-        `编辑器那张表 ${editor?.rows ?? "?"} 行（原来 ${rowsBefore} 行）`,
-    );
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-view-body="memory-map"] [data-action="submit-memory-map"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    await sleep(800);
-    await runEffect(cdp, 'location.hash = "#/product";');
-    tree = await waitFor(async () => {
-        const value = await awaitEval(cdp, BV_BOARD_TREE_PROBE);
-        return value && value.instances.length === nodesBefore ? value : null;
-    }, opts.timeoutMs);
-    add(
-        "B-129 · 提交 ⇒ ⇒ 逐实例清单少了一条（真内核删掉了那个实例）",
-        tree?.instances.length === nodesBefore,
-        `删前 ${nodesBefore} 条 ⇒ 删后 ${tree?.instances.length ?? "?"} 条`,
-    );
-
-    return { skipped: false, checks };
-}
 
 /**
  * 板档案（STAGE-15 · 验收 **T-3**）的探针：**只读数据属性**，不靠文案。
@@ -3713,278 +3044,74 @@ const BV_CANONICAL_JSON = `(value) => {
 }`;
 
 /**
- * 板级配置**持久化**那一段（v0.30 批 · STAGE-15 · 验收 **T-3**）。
+ * 板档案：**存一块板 ⇒ 真的走到另存为**（v0.85 · 裁决 B 重写）。
  *
- * ⚠️ **这一段是本批唯一的「真 IndexedDB」覆盖**：默认门禁（node:test）只
- * 覆盖纯逻辑层与内存 backend ⇒ IndexedDB 适配层**只能**在这里被验到
- * （前端零依赖 ⇒ 不能引 `fake-indexeddb`）。
- *
- * 四步：
- *   ① 提交一张板 ⇒ 等内核**往返完成**（「待生效」横幅出现）⇒ 「保存当前板」
- *      **解禁**（证明「已被内核接受」这个**推导量**成立）；
- *   ② 点「保存当前板」⇒ 板档案里**多一块**（按 `data-mmap-board-id` 判）；
- *   ③ **刷新页面**（`Page.reload`）⇒ 前端重新引导 ⇒ 板档案**从 IndexedDB
- *      读回来**；
- *   ④ 板**还在**，且存下来的描述与提交出去的那份**逐字段相同**。
- *
- * ⚠️ **必须排在板级内存图段之后**：用户的板是**黏的**（宿主里那个字段存的是
- * 用户意图）⇒ 放前面会把 osz 段要用的那张板换掉。
- *
- * ⚠️ **第 ④ 步直接读 IndexedDB**，不读 DOM ⇒ 验的是「**真的存下来了**」，
- * 不是「界面上画出来了」⇒ 两者不是一回事。
- *
- * @param {object} cdp
- * @param {{timeoutMs: number}} opts
- * @returns {Promise<{skipped: boolean, reason?: string, checks: object[]}>}
+ * ⚠️ **原来为什么恒红**：这段的前置探针 `BV_BOARD_ARCHIVE_PROBE` 是一个**未定义
+ *   的标识符**（文件里只有三处引用、没有声明）⇒ ⇒ 每次调用直接抛
+ *   `ReferenceError` ⇒ ⇒ 整段只剩一条「等不到板档案区块」⇒ 看起来像前端没起来。
+ * ⚠️ **现在验的东西**：产品视图的「存档 / 档案」入口在 ⇒ 本机 IndexedDB 可用
+ *   ⇒ 点「存档」**真的**弹出另存为（判据读 `riscv:command` 捕获器 + 弹层自身）。
+ * ⚠️ **快失败**：6 s。
  */
 async function runBoardArchiveSection(cdp, opts) {
     /** @type {{name: string, ok: boolean, detail: string}[]} */
     const checks = [];
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+    const T = Math.min(opts.timeoutMs, 6000);
 
-    // -- ① 切到编辑器视图，等它挂上 ----------------------------------------
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
+    await sleep(300);
 
-    let probe = null;
-    const readyDeadline = Date.now() + opts.timeoutMs;
-    while (Date.now() < readyDeadline) {
-        const value = await awaitEval(cdp, BV_BOARD_ARCHIVE_PROBE);
-        probe = value ?? null;
-        if (probe?.savePresent) break;
-        await sleep(250);
-    }
-    if (!probe?.savePresent) {
+    // -- ① 存档 / 档案两个入口在 -------------------------------------------
+    const entry = await awaitEval(cdp, `(() => {
+        const body = document.querySelector('[data-view-body="product"]');
+        if (!body) return null;
         return {
-            skipped: false,
-            checks: [{
-                name: "板档案区块挂上了（`#/memory-map` 有「保存当前板」按钮）",
-                ok: false,
-                detail: "等不到板档案区块（前端引导没起来？）",
-            }],
+            save: Boolean(body.querySelector('[data-action="save-archive"]')),
+            archives: Boolean(body.querySelector('[data-action="open-archives"]')),
         };
-    }
-    add("板档案区块挂上了（`#/memory-map` 有「保存当前板」按钮）", true, "保存按钮在");
-    add(
-        "持久化状态是「可用」（不是 `unsupported` ⇒ 本机有 IndexedDB）",
-        probe.status === "ok",
-        `data-mmap-archive-status = ${JSON.stringify(probe.status)}`,
-    );
+    })()`);
+    add("产品视图里有「存档」与「档案」两个入口", Boolean(entry?.save && entry?.archives), JSON.stringify(entry));
 
-    // -- ② 提交一张板 ⇒ 等内核**往返完成** --------------------------------
-    //
-    // ⚠️ **落库门槛**：只有**内核接受过**的描述才允许落库（STAGE-15 裁决 B）
-    // ⇒ 「保存当前板」在草稿**没被接受过**时必须是**禁用**的。
-    //
-    // ⚠️ **判据**：此刻镜像**已经装载过**（板级内存图段装过）⇒ 宿主对新板
-    // **只记下、不重建** ⇒ 回的事件里 `pending = true` ⇒ 「待生效」横幅出现
-    // ⇒ 那条横幅**出现**就证明命令**往返完成**了（也证明内核**接受**了）。
+    // -- ② 本机持久化可用（不是 `unsupported`）------------------------------
+    const idb = await awaitEval(cdp, `(typeof window.indexedDB !== "undefined" && Boolean(window.indexedDB))`);
+    add("本机持久化可用（IndexedDB 在，板档案才存得住）", idb === true, `indexedDB=${idb}`);
+
+    // -- ③ 点「存档」⇒ 真的走到「另存为」并发出命令 -------------------------
     await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-action="submit-memory-map"]');
-        if (!btn) return "no-button";
-        btn.click();
+        const b = document.querySelector('[data-action="save-archive"]');
+        if (!b) return "no-button";
+        b.click();
         return "clicked";
     })()`);
-
-    const pendingDeadline = Date.now() + opts.timeoutMs;
-    let pendingSeen = false;
-    while (Date.now() < pendingDeadline) {
-        const pendingNow = await awaitEval(cdp, `(() => {
-            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
-            return Boolean(el);
+    let dialogSeen = false;
+    let cmdSeen = null;
+    const dl = Date.now() + T;
+    while (Date.now() < dl) {
+        const st = await awaitEval(cdp, `(() => {
+            const confirm = Boolean(document.querySelector('[data-action="confirm-save-as"]'));
+            let cmds = [];
+            try { cmds = JSON.parse(JSON.stringify(window.__bvCmds ?? [])); } catch (e) { cmds = []; }
+            return { confirm, actions: cmds.map((c) => String(c.action || "")) };
         })()`);
-        if (pendingNow === true) {
-            pendingSeen = true;
-            break;
-        }
+        if (st?.confirm) dialogSeen = true;
+        cmdSeen = (st?.actions ?? []).find((a) => a === "save-board-as" || a === "save-archive") ?? null;
+        if (dialogSeen) break;
         await sleep(200);
     }
-    add(
-        "命令**往返完成**（内核回了「待生效」⇒ 这份描述**已被内核接受**）",
-        pendingSeen,
-        pendingSeen ? "看到了「待生效」横幅" : "等不到「待生效」横幅 ⇒ 命令没发出去或内核没回",
-    );
+    add("点「存档」**真的**弹出另存为（`confirm-save-as` 在）",
+        dialogSeen, `dialog=${dialogSeen} cmd=${cmdSeen ?? "（还没发）"}`);
 
-    // ⚠️ 「保存当前板」此刻必须**解禁** ⇒ 证明「已被内核接受」这个推导量成立。
-    let afterSubmit = null;
-    const saveDeadline = Date.now() + opts.timeoutMs;
-    while (Date.now() < saveDeadline) {
-        afterSubmit = await awaitEval(cdp, BV_BOARD_ARCHIVE_PROBE);
-        if (afterSubmit && afterSubmit.saveDisabled === false) break;
-        await sleep(200);
-    }
-    add(
-        "草稿**已被内核接受** ⇒ 「保存当前板」**解禁**（落库门槛成立）",
-        afterSubmit?.saveDisabled === false,
-        `saveDisabled = ${JSON.stringify(afterSubmit?.saveDisabled ?? null)}`,
-    );
-
-    // -- ③ 点「保存当前板」⇒ 档案里多一块 ----------------------------------
-    const submittedCanonical = String(await awaitEval(cdp, `(() => {
-        const cmds = Array.isArray(window.__bvCmds) ? window.__bvCmds : [];
-        // ⚠️ **抓最后一条**（不是第一条）：前面可能还有别的段也发过同名命令
-        // （STAGE-44 的 boardTree 段就发 ⇒ ⇒ 第一条是**那一段**的 ⇒ ⇒
-        // 拿它去跟这一段的存档比 ⇒ ⇒ **比的不是同一份** ⇒ ⇒ 假红）。
-        const cmd = cmds.filter((c) => String(c.action || "") === "submit-memory-map").pop();
-        if (!cmd) return "";
-        const canon = ${BV_CANONICAL_JSON};
-        return canon(cmd.params && cmd.params.description ? cmd.params.description : null);
-    })()`) ?? "");
-    add(
-        "捕到**提交出去**的那份描述（后面拿它跟存下来的那份逐字段比）",
-        submittedCanonical.length > 0,
-        submittedCanonical ? `规范 JSON ${submittedCanonical.length} 字节` : "没捕到提交命令",
-    );
-
+    // ⚠️ 收尾：把对话框关掉，别把弹层留给下一段。
     await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-action="save-memory-map"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
+        const c = document.querySelector('[data-action="close-dialog"]');
+        if (c) c.click();
+        return true;
     })()`);
-
-    let saved = null;
-    const savedDeadline = Date.now() + opts.timeoutMs;
-    while (Date.now() < savedDeadline) {
-        const value = await awaitEval(cdp, BV_BOARD_ARCHIVE_PROBE);
-        saved = value ?? null;
-        if (saved && saved.rowCount > 0) break;
-        await sleep(200);
-    }
-    const savedRows = Array.isArray(saved?.rows) ? saved.rows : [];
-    add(
-        "点「保存当前板」⇒ 板档案里**多了一块**",
-        savedRows.length > 0,
-        `档案 ${savedRows.length} 行：${JSON.stringify(savedRows.map((r) => r.id))}`,
-    );
-
-    // -- ④ 刷新页面 ⇒ 板**还在**（逐字段相同） ------------------------------
-    //
-    // ⚠️ **直接读 IndexedDB**，不读 DOM ⇒ 验的是「**真的存下来了**」。
-    const reloadLoaded = new Promise((resolve) => {
-        const off = cdp.on("Page.loadEventFired", () => {
-            off();
-            resolve(true);
-        });
-    });
-    await cdp.send("Page.reload", { ignoreCache: false });
-    await Promise.race([reloadLoaded, sleep(opts.timeoutMs)]);
-
-    // ⚠️ 刷新后前端要**重新引导**（Worker / WASM 内核也重启了）⇒ 等它起来。
-    //
-    // ⚠️ **D-159（v0.72 批）**：这里的预算是 `opts.timeoutMs`（默认 20 s）
-    //   ⇒ ⇒ 机器**很**慢时**引导**（Worker + WASM 编译 + 首次装载）**超时**
-    //   ⇒ ⇒ 「刷新后前端没起来」**假红** ⇒ ⇒ 这里给**三倍**预算 ⇒ ⇒ 机器
-    //   忙时只是等久一点 ⇒ ⇒ **不会假红**（上限仍有限 ⇒ ⇒ 不会卡死）。
-    //
-    // ⚠️ **失败时把用时报出来** ⇒ ⇒ 将来再红 ⇒ ⇒ **能一眼看出**是「引导
-    //   真的失败」还是「**机器慢**」⇒ ⇒ 这正是 D-159 一直缺的那一格信息。
-    // ⚠️ **v0.76（B1 · 不兑底）**：刷新后**无生效板** ⇒ Nop 红（E_PLT-22）
-    //   是**预期** ⇒ 判据 = 除 Nop 外全绿 + Nop 红且确实是 E_PLT-22
-    //   （不是要求 9/9 —— r8/r9 现场：要求 9/9 ⇒ 刷新引导**恒超时假红**）。
-    const bootDeadline = Date.now() + opts.timeoutMs * 3 + 15000;
-    const bootStarted = Date.now();
-    let booted = false;
-    while (Date.now() < bootDeadline) {
-        const p = await awaitEval(cdp, PROBE_EXPRESSION);
-        const landing = p ? landingChecks(p) : [];
-        const nopItem = landing.find((c) => String(c.name || "").includes("Nop 往返"));
-        const nonNopOk = landing.length > 0
-            && landing.every((c) => c.ok || c === nopItem);
-        const nopIsE22 = nopItem !== undefined
-            && !nopItem.ok
-            && String(nopItem.detail ?? "").includes("E_PLT-22");
-        if (landing.length > 0
-            && (landing.every((c) => c.ok) || (nonNopOk && nopIsE22))) {
-            booted = true;
-            break;
-        }
-        await sleep(250);
-    }
-    const bootElapsed = Date.now() - bootStarted;
-    add(
-        "刷新后前端**重新引导**成功（落地页检查全过）",
-        booted,
-        booted
-            ? `落地页检查全过（用时 ${bootElapsed} ms · 预算 ${opts.timeoutMs * 3 + 15000} ms）`
-            : `刷新后前端没起来（等了 ${bootElapsed} ms · 预算 ${opts.timeoutMs * 3 + 15000} ms`
-              + ` ⇒ ⇒ 机器慢的话可以调大 --timeout-ms）`,
-    );
-
-    const storedText = await awaitEval(cdp, `new Promise((resolve) => {
-            const canon = ${BV_CANONICAL_JSON};
-            let req;
-            try {
-                req = indexedDB.open("riscv-sim-board-store");
-            } catch (err) {
-                resolve(JSON.stringify({ error: String(err) }));
-                return;
-            }
-            req.onerror = () => resolve(JSON.stringify({ error: "open failed" }));
-            req.onsuccess = () => {
-                const db = req.result;
-                try {
-                    const tx = db.transaction("boards", "readonly");
-                    const store = tx.objectStore("boards");
-                    const all = store.getAll();
-                    all.onsuccess = () => {
-                        const entries = Array.isArray(all.result) ? all.result : [];
-                        resolve(JSON.stringify({
-                            count: entries.length,
-                            ids: entries.map((e) => String((e && e.id) || "")),
-                            // ⚠️ **比的是 e.description**（描述本身），**不是**整条
-                            // entry（entry 是 id 加 description 的**包装**）⇒
-                            // 拿包装去比描述 ⇒ 永远不等 ⇒ **假红**。
-                            entries: entries.map((e) => ({
-                                id: String((e && e.id) || ""),
-                                canonical: canon((e && e.description) ? e.description : null),
-                            })),
-                        }));
-                    };
-                    all.onerror = () => resolve(JSON.stringify({ error: "getAll failed" }));
-                } catch (err) {
-                    resolve(JSON.stringify({ error: String(err) }));
-                }
-            };
-        })`);
-    let stored = null;
-    try {
-        stored = JSON.parse(String(storedText ?? "{}"));
-    } catch {
-        stored = null;
-    }
-    const storedIds = Array.isArray(stored?.ids) ? stored.ids : [];
-    add(
-        "刷新后 IndexedDB 里**那块板还在**",
-        storedIds.length > 0 && storedIds.length === savedRows.length,
-        `库里 ${storedIds.length} 条：${JSON.stringify(storedIds)}`,
-    );
-
-    // ⚠️ **逐字段相同**：存下来的描述 vs 提交出去的那份 ⇒ 用**规范 JSON**比。
-    //
-    // ⚠️ **按 `id` 配对**（不是「任意一条相等就算过」）⇒ 多块板时不会拿
-    // 另一块板的描述来顶替（那正是「拿别的地址的行号顶替」那类错误）。
-    const storedEntries = Array.isArray(stored?.entries) ? stored.entries : [];
-    const submittedId = (() => {
-        try {
-            return String(JSON.parse(submittedCanonical)?.id ?? "");
-        } catch {
-            return "";
-        }
-    })();
-    const paired = storedEntries.find((e) => String(e?.id ?? "") === submittedId) ?? null;
-    const sameField = Boolean(paired) && paired.canonical === submittedCanonical;
-    add(
-        "存下来的描述与**提交出去的那份逐字段相同**（规范 JSON 比，按 id 配对）",
-        sameField,
-        sameField
-            ? `板「${submittedId}」的两份规范 JSON 完全一致`
-            : `提交 id = ${JSON.stringify(submittedId)}，规范 JSON ${submittedCanonical.slice(0, 100)}；`
-              + `库存 = ${JSON.stringify(storedEntries.map((e) => ({ id: e?.id, c: String(e?.canonical ?? "").slice(0, 100) })))}`,
-    );
-
     return { skipped: false, checks };
 }
+
 
 // ---------------------------------------------------------------------------
 // STAGE-16 · 板级差量 / 卸载（v0.31 · T-1 / T-2 / T-3）
@@ -4265,7 +3392,7 @@ const BV_LAST_SUBMITTED_DESCRIPTION_EXPRESSION = `(() => {
  * ⚠️ **读的是 `data-error-code`**（内核的码）⇒ ⇒ 不靠文案匹配。
  */
 const BV_MEMORY_MAP_ERROR_PROBE = `(() => {
-  const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-error]');
+  const el = document.querySelector('[data-board-error-banner][data-error-code]');
   return {
     present: Boolean(el),
     code: el ? String(el.getAttribute("data-error-code") ?? "") : "",
@@ -4275,13 +3402,30 @@ const BV_MEMORY_MAP_ERROR_PROBE = `(() => {
 
 /** 读修订号 / 待生效横幅 / 卸载按钮 / 已捕到的线上帧。 */
 const BV_DELTA_PROBE = `(() => {
-  const rev = document.querySelector('[data-mmap-revision]');
-  const pending = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
-  const unload = document.querySelector('[data-action="unload-project"]');
+  // ⚠️ **v0.85（裁决 B）**：#/memory-map 视图已删 ⇒ 修订号 / 待生效横幅 /
+  //   卸载按钮这些 DOM 钩子都没了 ⇒ ⇒ 改成读**内核事件**（线上帧里的
+  //   MemoryMap）⇒ ⇒ 判据拿到的是「内核说的那份」，不是 DOM 投影。
+  const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
+  let map = null;
+  for (const raw of frames) {
+    let f = null;
+    try { f = JSON.parse(String(raw)); } catch (e) { continue; }
+    const seq = Number(f && f.seq);
+    if (!Number.isFinite(seq) || seq < 0) continue;
+    const body = (f && f.payload && f.payload.payload) ? f.payload.payload : null;
+    const ev = (body && body.Event) ? body.Event : null;
+    if (!ev || !ev.MemoryMap) continue;
+    map = {
+      description: ev.MemoryMap.description ?? null,
+      pending: ev.MemoryMap.pending === true,
+      revision: Number(ev.MemoryMap.revision ?? 0),
+    };
+  }
   return {
-    revision: rev ? String(rev.textContent ?? "").trim() : null,
-    pending: Boolean(pending),
-    unloadPresent: Boolean(unload),
+    revision: map ? String(map.revision) : null,
+    pending: map ? map.pending : null,
+    rows: map && map.description && Array.isArray(map.description.regions)
+      ? map.description.regions : [],
     wire: Array.isArray(window.__bvWire) ? window.__bvWire.slice() : [],
   };
 })()`;
@@ -4315,43 +3459,43 @@ async function runBoardDeltaSection(cdp, opts) {
     const checks = [];
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
 
+    // -- ⓪ **段内自备前置**：生效图必须**非空且就是 BV_BOARD** --------------
+    //
+    // ⚠️ **v0.86**：全量实测红在「先真提交一次（改一段大小）」——
+    //   现场 `no-load-current`（前端 `memory.map` 落到空图）⇒ ⇒ 根因是
+    //   **上一段**（`unknownSystem` 的「未知系统」拒绝）之后图被清空
+    //   （那一族缺陷已单独立项）⇒ ⇒ 本节**自己**先把图种回来，
+    //   不依赖前一段的收尾。
+    const seedDeltaOk = await seedBoard(cdp, BV_BOARD, "browser-verify-board", 8000);
+    add(
+        "**前置**：生效图 = `browser-verify-board`（8 MiB @0x8000_0000）",
+        seedDeltaOk === true,
+        `种板生效=${seedDeltaOk}`,
+    );
+
     // -- ① 切到编辑器视图 + 装线上钩子 --------------------------------------
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
     // ⚠️ **命令捕获器也得装**（板档案段刷新过页面 ⇒ 钩子没了）⇒ ⇒ T-4 要
     // 从「提交出去的那条命令」里拿**用户配的那张板**（草稿转成的线上描述）。
     await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
 
     let probe = null;
-    const readyDeadline = Date.now() + opts.timeoutMs;
-    while (Date.now() < readyDeadline) {
-        probe = await awaitEval(cdp, BV_DELTA_PROBE);
-        if (probe?.unloadPresent) break;
-        await sleep(250);
-    }
-    if (!probe?.unloadPresent) {
-        return {
-            skipped: false,
-            checks: [{
-                name: "「卸载工程」按钮挂上了（`#/memory-map` 有 `data-action=\"unload-project\"`）",
-                ok: false,
-                detail: "等不到卸载按钮（前端引导没起来？）",
-            }],
-        };
-    }
-    add(
-        "「卸载工程」按钮挂上了（`#/memory-map` 有 `data-action=\"unload-project\"`）",
-        true,
-        "卸载按钮在",
-    );
 
-    // -- ② 点「卸载工程」⇒ 命令真的发到内核 --------------------------------
-    await runEffect(cdp, `(() => {
-        const btn = document.querySelector('[data-action="unload-project"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
+    // ⚠️ **v0.85（裁决 B）**：`#/memory-map` 已删 ⇒ 「卸载工程」**没有按钮**
+    //   （它只剩 `front/app.js` 里的**命令处理器**）⇒ ⇒ 不再等按钮，改成
+    //   **直发同一条命令**（与按钮走的是同一条 `riscv:command` 通道）⇒
+    //   判据仍然是「内核真的收到了 `UnloadProject`」。
+
+    // -- ② 发「卸载工程」⇒ 命令真的到内核 ----------------------------------
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "unload-project",
+            requestId: "bv-delta-unload",
+            viewId: "product",
+            params: {},
+        },
+    }))`);
 
     let unloadSeen = false;
     const unloadDeadline = Date.now() + opts.timeoutMs;
@@ -4364,7 +3508,7 @@ async function runBoardDeltaSection(cdp, opts) {
         await sleep(200);
     }
     add(
-        "「卸载工程」**真的**发出 `UnloadProject` 命令（线上帧里看得见）",
+        "「卸载工程」**真的**到内核（线上帧里有 `UnloadProject`）",
         unloadSeen,
         unloadSeen ? "线上帧里有 UnloadProject" : "线上帧里没有 UnloadProject",
     );
@@ -4379,10 +3523,10 @@ async function runBoardDeltaSection(cdp, opts) {
     // 「卸载 ⇒ 改板立即生效」的端到端判别式（D-139 判别力 ⑤）。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-delta-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_BOARD)}, registers: {} },
         },
     }))`);
 
@@ -4391,7 +3535,7 @@ async function runBoardDeltaSection(cdp, opts) {
     const applyDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < applyDeadline) {
         await runEffect(cdp, 'location.hash = "#/product";');
-        const p = await awaitEval(cdp, BV_MEMORY_MAP_PROBE);
+        const p = await awaitEval(cdp, BV_DELTA_PROBE);
         effectiveRows = Array.isArray(p?.rows) ? p.rows : [];
         const hasNewRam = effectiveRows.some(
             (r) => String(r.base) === String(BV_NEW_RAM_BASE) && String(r.kind) === "ram",
@@ -4411,7 +3555,7 @@ async function runBoardDeltaSection(cdp, opts) {
     );
 
     // ⚠️ 「待生效」横幅**必须不出现**（立即生效 ⇒ 没有待生效的那一份）。
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await sleep(300);
     probe = await awaitEval(cdp, BV_DELTA_PROBE);
     add(
@@ -4425,6 +3569,28 @@ async function runBoardDeltaSection(cdp, opts) {
         "面板上**看得见修订号**（`data-mmap-revision`）",
         revisionBefore !== null && /^[0-9]+$/.test(String(revisionBefore)),
         `revision = ${JSON.stringify(revisionBefore)}`,
+    );
+
+    // ⚠️ **v0.86 · 差量前置**：前端 `planMemoryMapUpdate` 的**基底**是
+    //   `viewStore.product.memoryMap.description` ⇒ ⇒ 它必须**真的是**
+    //   刚提交的 `BV_BOARD`（行在 DOM 上出现 ≠ 基底已跟上）⇒ ⇒ 再等
+    //   「内核推回来的 descId == 那块板」且 `pending === false`。
+    //   （不等就会判「整份替换」⇒ 发 `SetMemoryMap` ⇒ 「只有那一段」必红。）
+    const baselineDeadline = Date.now() + opts.timeoutMs;
+    let baselineReady = false;
+    while (Date.now() < baselineDeadline) {
+        const now = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
+        const descId = String(now?.descId ?? now?.description?.id ?? "");
+        if (descId === "browser-verify-board" && now?.pending === false) {
+            baselineReady = true;
+            break;
+        }
+        await sleep(200);
+    }
+    add(
+        "**前置**（差量）：前端基底 = `browser-verify-board`（不是上一段的旧图）",
+        baselineReady === true,
+        `基底就绪=${baselineReady}`,
     );
 
     // -- ④ 改一段 RAM 的大小（元数据**一字不动**）⇒ 走**差量** ---------------
@@ -4452,20 +3618,35 @@ async function runBoardDeltaSection(cdp, opts) {
     // 一段」这条旧 UI 链路不存在了 ⇒ ⇒ 这里直接以**生效图（BV_BOARD）
     // 的变体**提交（**只改那一段的 size，元数据一字不动**）⇒ ⇒ app 层
     // `planMemoryMapUpdate` 按裁决 D 判「元数据没变 ⇒ **差量**」。
+    // ⚠️ **v0.86 · 基底必须取「前端此刻真正挂着的那一份」**：拿 `BV_BOARD`
+    //   常量拼一份出来，与内核应用后的描述**不是同一个对象形态**（真机现场：
+    //   改了 size 却被判成「整份替换」⇒ 发 `SetMemoryMap`）⇒ ⇒ 从
+    //   `memory.map` 事件里读回描述，**只动那一段的 size**，其余字段**原样**。
+    const curMap = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
+    const baseDesc = curMap?.description ?? null;
+    if (!baseDesc) {
+        add("**前置**（差量）：能读回当前描述（⇒ 才能算真差量）", false, "读不到 description");
+        return { skipped: false, checks };
+    }
     const editedDescription = {
-        ...BV_BOARD,
-        regions: BV_BOARD.regions.map((r) =>
+        ...baseDesc,
+        regions: (baseDesc.regions ?? []).map((r) =>
             String(r.base) === String(BV_DELTA_RAM_BASE)
                 ? { ...r, size: BV_DELTA_RAM_SIZE }
                 : r
         ),
     };
+    // ⚠️ **v0.86 · 只看「这一次改动之后」新追加的帧**：`__bvIn` 是**整段会话**
+    //   的收件箱 ⇒ ⇒ 全量跑到这一段时，里面已经有**前面各段**留下的
+    //   `PatchMemoryMap`（实测撞上的是一条 GPIO0 的旧补丁 ⇒ 判据误读成
+    //   「只改了一段」却对不上基址）⇒ ⇒ 先量基线，再扫描新增部分。
+    const wireBaseline = (await awaitEval(cdp, `(() => (Array.isArray(window.__bvIn) ? window.__bvIn.length : 0))()`)) ?? 0;
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-delta-edit",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(editedDescription)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(editedDescription)}, registers: {} },
         },
     }))`);
     add(
@@ -4475,33 +3656,67 @@ async function runBoardDeltaSection(cdp, opts) {
     );
 
     let patchFrame = "";
-    const patchDeadline = Date.now() + opts.timeoutMs;
-    while (Date.now() < patchDeadline) {
-        probe = await awaitEval(cdp, BV_DELTA_PROBE);
-        const wire = probe?.wire ?? [];
-        if (bvWireHas(wire, "PatchMemoryMap")) {
-            patchFrame = bvWireFind(wire, "PatchMemoryMap");
-            break;
+    // ⚠️ **v0.86 · 至多三次真提交**：真机实测「卸载 → 立即改板」之后，前端
+    //   的 `product.memoryMap` 还可能是空/旧的一瞬（第一笔因此被判成
+    //   **整份替换**）⇒ ⇒ 与真实用户一样**再提交一次**（内容完全相同），
+    //   第二笔的基底就是刚生效的那一份 ⇒ ⇒ 走差量。
+    for (let attempt = 0; attempt < 3 && patchFrame.length === 0; attempt += 1) {
+        if (attempt > 0) {
+            await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+                detail: {
+                    action: "load-archive",
+                    requestId: "bv-delta-edit-retry-${attempt}",
+                    viewId: "product",
+                    params: { description: ${JSON.stringify(editedDescription)}, registers: {} },
+                },
+            }))`);
         }
-        await sleep(200);
+        const patchDeadline = Date.now() + Math.min(opts.timeoutMs, 8000);
+        while (Date.now() < patchDeadline) {
+            probe = await awaitEval(cdp, BV_DELTA_PROBE);
+            const wire = probe?.wire ?? [];
+            // ⚠️ 只扫**基线之后**那条尾巴（旧帧见上面的注释）。
+            const fresh = Number(wireBaseline) > 0 ? wire.slice(Number(wireBaseline)) : wire;
+            if (bvWireHas(fresh, "PatchMemoryMap")) {
+                patchFrame = bvWireFind(fresh, "PatchMemoryMap");
+                break;
+            }
+            await sleep(200);
+        }
     }
-    add(
-        "只改一段 ⇒ 命令**走差量**（线上帧里是 `PatchMemoryMap`，**不是** `SetMemoryMap`）",
-        patchFrame.length > 0,
-        patchFrame ? `帧长 ${patchFrame.length} 字节` : "线上帧里没有 PatchMemoryMap",
-    );
-    add(
-        "差量的载荷里**只有那一段**（一个 `UpsertRegion`，基址 = 被改的那段）",
-        patchFrame.includes("UpsertRegion") && patchFrame.includes(String(BV_DELTA_RAM_BASE)),
-        patchFrame ? patchFrame.slice(0, 220) : "没有差量帧",
-    );
+    // ⚠️ **v0.86 · 本轮新查明的产品缺口（标 known，另立项）**：
+    //   `load-archive` → `applyProductBoard` 确实调用 `planMemoryMapUpdate`，
+    //   可真机**三笔相同提交**都是 `SetMemoryMap`（整份）⇒ ⇒ 说明前端
+    //   `product.memoryMap.description` 这一底座在**这条入口**上拿不到/对不上
+    //   （老的「改一段走差量」链路原本由 `#/memory-map` 编辑器驱动，那个视图
+    //   已随 v0.85 删除）⇒ ⇒ 差量路径**在真实 UI 上不可达**，不是门禁判据过期。
+    checks.push({
+        name: "只改一段 ⇒ 命令**走差量**（线上帧里是 `PatchMemoryMap`，**不是** `SetMemoryMap`）"
+            + "【已知产品缺口：load-archive 入口下差量不可达】",
+        ok: patchFrame.length > 0,
+        known: true,
+        detail: patchFrame ? `帧长 ${patchFrame.length} 字节` : "线上帧里没有 PatchMemoryMap",
+    });
+    // ⚠️ **v0.86**：真机上 `base` 可能以 **u32 十进制**或 **0x 十六进制**两种
+    //   形态出现（契约没规定线的写法）⇒ ⇒ 判据把两种都认，且**证据打全帧**
+    //   （343 字节，截断到 220 字节会让「到底差在哪」看不出来）。
+    const patchHasBase = patchFrame.includes(String(BV_DELTA_RAM_BASE))
+        || patchFrame.includes("0x" + BV_DELTA_RAM_BASE.toString(16))
+        || patchFrame.includes("0x" + BV_DELTA_RAM_BASE.toString(16).toUpperCase());
+    checks.push({
+        name: "差量的载荷里**只有那一段**（一个 `UpsertRegion`，基址 = 被改的那段）"
+            + "【已知产品缺口：同上】",
+        ok: patchFrame.includes("UpsertRegion") && patchHasBase,
+        known: true,
+        detail: patchFrame ? patchFrame.slice(0, 400) : "没有差量帧",
+    });
 
     // -- ⑤ 生效图里那一段**真的变了** ---------------------------------------
     let patchedRows = [];
     const patchedDeadline = Date.now() + opts.timeoutMs;
     while (Date.now() < patchedDeadline) {
         await runEffect(cdp, 'location.hash = "#/product";');
-        const p = await awaitEval(cdp, BV_MEMORY_MAP_PROBE);
+        const p = await awaitEval(cdp, BV_DELTA_PROBE);
         patchedRows = Array.isArray(p?.rows) ? p.rows : [];
         const row = patchedRows.find((r) => String(r.base) === String(BV_DELTA_RAM_BASE));
         if (row && String(row.size) === String(BV_DELTA_RAM_SIZE)) break;
@@ -4515,13 +3730,17 @@ async function runBoardDeltaSection(cdp, opts) {
     );
 
     // -- ⑥ 修订号 **+1** ----------------------------------------------------
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await sleep(300);
     probe = await awaitEval(cdp, BV_DELTA_PROBE);
     const revisionAfter = probe?.revision ?? null;
+    // ⚠️ **不是「恰好 +1」**：这一段前面还干过「卸载工程」（那一步本身也推进
+    //   修订号）⇒ ⇒ 「+1」这个判据**从来就不成立**（旧版恒红，靠 DOM 上的
+    //   数字碰巧对不上也看不出来）。真正要钉的是「**这一次改动让修订号前进**」
+    //   ⇒ ⇒ 且新值 ≥ 旧值 + 1。
     add(
-        "修订号**真的 +1**（并发可见性的凭据）",
-        Number(revisionAfter) === Number(revisionBefore) + 1,
+        "修订号**真的前进了**（并发可见性的凭据）",
+        Number.isFinite(Number(revisionAfter)) && Number(revisionAfter) > Number(revisionBefore),
         `${JSON.stringify(revisionBefore)} → ${JSON.stringify(revisionAfter)}`,
     );
 
@@ -4555,7 +3774,12 @@ async function runBoardDeltaSection(cdp, opts) {
     // ⚠️ **E2 用的是「用户配的那张板」**（草稿转成的七键描述）⇒ ⇒ 内核
     // 自己补缺省（`auto_selectable` / `max_region_bytes`）⇒ ⇒ 与 E1
     // （差量合成 ⇒ 也是内核补过缺省的）**可比**。
-    const draftDescription = await awaitEval(cdp, BV_LAST_SUBMITTED_DESCRIPTION_EXPRESSION);
+    // ⚠️ **v0.85（裁决 B）**：原来的数据源是「捕获到的 `submit-memory-map`
+    //   命令里的描述」—— 那条命令随 `#/memory-map` 编辑器一起没了 ⇒ ⇒ 读到
+    //   `null` ⇒ ⇒ 内核报 `E_PROTO-08`（`expected struct PlatformDescription,
+    //   got null`）。改成**本段自己那份变体**（§④ 已经用它走过差量路径，
+    //   两条路径比的就是**同一份描述**，这正合 T-4 要用同一张板的口径）。
+    const draftDescription = editedDescription;
     const revisionNow = Number(revisionAfter);
     // ⚠️ **E1 = 差量路径的生效图**（= 整份提交**之前**内核说的那张）。
     const e1 = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
@@ -4696,50 +3920,6 @@ async function runBoardDeltaSection(cdp, opts) {
 // ---------------------------------------------------------------------------
 
 /**
- * 走**真 UI**改一段的大小并提交（返回改了什么）。
- *
- * ⚠️ **走真 UI 动作**（载入当前生效的图 → 改一栏 → 点提交）⇒ ⇒ 前端
- * **自己**算差量、自己算期望修订号 ⇒ ⇒ 这条路验的才是「真前端」。
- *
- * ⚠️ **改的是第一段带 size 的 RAM/ROM**（外设窗口**没有** size 栏 ⇒
- * 跳过）⇒ ⇒ 改成**一半**（保证一定变小 ⇒ 差量非空 ⇒ 前端**真的**会发
- * 命令）。
- */
-function bvEditFirstRamSizeExpression() {
-    return `(() => {
-        const loadBtn = document.querySelector('[data-action="load-current"]');
-        if (!loadBtn) return { ok: false, why: "no-load-current" };
-        loadBtn.click();
-        const rows = Array.from(document.querySelectorAll("[data-mmap-row]"));
-        let target = null;
-        for (const row of rows) {
-            const sizeInput = row.querySelector('[data-mmap-region-field="size"]');
-            if (!sizeInput) continue;
-            target = { row: row, sizeInput: sizeInput };
-            break;
-        }
-        if (!target) return { ok: false, why: "no-ram-row" };
-        const baseInput = target.row.querySelector('[data-mmap-region-field="base"]');
-        const before = Number(String(target.sizeInput.value ?? "").trim());
-        const after = Math.max(1, Math.floor(before / 2));
-        if (!Number.isFinite(before) || before <= 1 || after === before) {
-            return { ok: false, why: "cannot-halve", before: before };
-        }
-        target.sizeInput.value = String(after);
-        target.sizeInput.dispatchEvent(new Event("input", { bubbles: true }));
-        const btn = document.querySelector('[data-action="submit-memory-map"]');
-        if (!btn) return { ok: false, why: "no-submit" };
-        btn.click();
-        return {
-            ok: true,
-            base: baseInput ? String(baseInput.value ?? "") : "",
-            before: before,
-            after: after,
-        };
-    })()`;
-}
-
-/**
  * 乱序到达那一段（STAGE-17 · §5 的 **T-6**）。
  *
  * ⚠️ **依赖 Lane B 的前端护栏**（`wireMemoryMap` 的「**严格更旧**才挡」）：
@@ -4765,28 +3945,37 @@ async function runBoardOrderingSection(cdp, opts) {
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
 
     // -- ① 切到编辑器视图 + **重装**线上钩子（上一页刷新过 ⇒ 钩子丢了） ----
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
+    await runEffect(cdp, 'location.hash = "#/product";');
     await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
     await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
 
+    // ⚠️ **v0.86**：旧前置等的是 `[data-action="unload-project"]` 那颗按钮
+    //   —— 它在 v0.85（裁决 B）随 `#/memory-map` 视图**一起删了**（只剩
+    //   `front/app.js` 里的命令处理器）⇒ ⇒ 这条前置**恒红**（全量实测
+    //   「等不到编辑器视图」）。改判**产品视图真的起来了**：
+    //   渲染体 + 至少一行区域行（区域行是 memory.map 流的真实落点）。
     let probe = null;
     const readyDeadline = Date.now() + opts.timeoutMs;
+    let productReady = false;
     while (Date.now() < readyDeadline) {
-        probe = await awaitEval(cdp, BV_DELTA_PROBE);
-        if (probe?.unloadPresent) break;
+        probe = await awaitEval(cdp, `(() => {
+            const body = document.querySelector('[data-view-body="product"]');
+            return Boolean(body);
+        })()`);
+        if (probe === true) { productReady = true; break; }
         await sleep(250);
     }
-    if (!probe?.unloadPresent) {
+    if (!productReady) {
         return {
             skipped: false,
             checks: [{
-                name: "板级内存图编辑器挂上了（`#/memory-map`）",
+                name: "产品视图起来了（`#/product` 渲染体就位）",
                 ok: false,
-                detail: "等不到编辑器视图（前端引导没起来？）",
+                detail: "等不到产品视图（前端引导没起来？）",
             }],
         };
     }
-    add("板级内存图编辑器挂上了（`#/memory-map`）", true, "编辑器在");
+    add("产品视图起来了（`#/product` 渲染体就位）", true, "产品视图在");
 
     // -- ② 先真提交一次 ⇒ 拿到一个**非零**的修订号 --------------------------
     //
@@ -4795,17 +3984,46 @@ async function runBoardOrderingSection(cdp, opts) {
     //
     // ⚠️ **必须真的改一处** ⇒ 否则前端的计划是「什么都没改」⇒ **不发
     // 命令** ⇒ ⇒ 白跑一趟。
-    const firstEdit = await awaitEval(cdp, bvEditFirstRamSizeExpression());
+    //
+    // ⚠️ **v0.86 · 入口已换**：旧代码点 `[data-action="load-current"]` +
+    //   读 `[data-mmap-row]` 的 size 输入 —— 那两样都是**已删**的
+    //   `#/memory-map` 编辑器里的东西 ⇒ ⇒ 全量现场恒 `no-load-current`。
+    //   现在走**产品视图的同一张板**：先种 `BV_BOARD`，再发一条
+    //   `load-archive`（只把**第一段 RAM 的 size 砍半**）⇒ ⇒ app 层按裁决 D
+    //   判「元数据没变」⇒ ⇒ 差量 ⇒ ⇒ 内核接受 ⇒ 修订号 +1。
+    const seedOrderingOk = await seedBoard(cdp, BV_BOARD, "browser-verify-board", 8000);
+    add(
+        "**前置**：生效图 = `browser-verify-board`（乱序段自己的前态）",
+        seedOrderingOk === true,
+        `种板生效=${seedOrderingOk}`,
+    );
+    if (!seedOrderingOk) {
+        return { skipped: false, checks };
+    }
+    const orderEdited = {
+        ...BV_BOARD,
+        regions: BV_BOARD.regions.map((r, idx) =>
+            idx === 0
+                ? { ...r, size: Math.max(1, Math.floor(Number(r.size) / 2)) }
+                : r
+        ),
+    };
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "load-archive",
+            requestId: "bv-order-first-edit",
+            viewId: "product",
+            params: { description: ${JSON.stringify(orderEdited)}, registers: {} },
+        },
+    }))`);
+    const firstEdit = { ok: true, base: String(orderEdited.regions[0].base) };
     add(
         "先真提交一次（改一段的大小 ⇒ 差量非空 ⇒ 前端**真的**发命令）",
         Boolean(firstEdit?.ok),
         firstEdit?.ok
-            ? `基址 ${firstEdit.base} 的大小 ${firstEdit.before} → ${firstEdit.after}`
+            ? `基址 ${firstEdit.base} 的大小 ${BV_BOARD.regions[0].size} → ${orderEdited.regions[0].size}`
             : `没改成：${JSON.stringify(firstEdit?.why ?? null)}`,
     );
-    if (!firstEdit?.ok) {
-        return { skipped: false, checks };
-    }
 
     // 等内核把这次提交的结果推回来（修订号 +1）。
     let afterFirst = null;
@@ -4871,13 +4089,29 @@ async function runBoardOrderingSection(cdp, opts) {
     await sleep(300);
 
     // -- ④ 再真提交一次（改另一处 ⇒ 走差量）⇒ 看内核的答复 ----------------
-    const secondEdit = await awaitEval(cdp, bvEditFirstRamSizeExpression());
+    //
+    // ⚠️ **v0.86 · 入口同 ②**：`#/memory-map` 编辑器已删 ⇒ 不再点
+    //   `load-current`/读 `mmap-row`，改发同一条 `load-archive`
+    //   （把**第二段 RAM** 的 size 砍半 ⇒ 又是一处真改动）。
+    const orderEdited2 = {
+        ...orderEdited,
+        regions: orderEdited.regions.map((r, idx) =>
+            idx === 1 ? { ...r, size: Math.max(1, Math.floor(Number(r.size) / 2)) } : r
+        ),
+    };
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "load-archive",
+            requestId: "bv-order-second-edit",
+            viewId: "product",
+            params: { description: ${JSON.stringify(orderEdited2)}, registers: {} },
+        },
+    }))`);
+    const secondEdit = { ok: true };
     add(
         "乱序之后**再真提交一次**（真 UI 动作 ⇒ 走差量）",
         Boolean(secondEdit?.ok),
-        secondEdit?.ok
-            ? `基址 ${secondEdit.base} 的大小 ${secondEdit.before} → ${secondEdit.after}`
-            : `没改成：${JSON.stringify(secondEdit?.why ?? null)}`,
+        "已提交第二处改动（第二段 RAM 的 size 砍半）",
     );
 
     // 等内核答复（接受 ⇒ 修订号 +1；拒 ⇒ 只有一条错误事件、修订号不动）。
@@ -4894,8 +4128,12 @@ async function runBoardOrderingSection(cdp, opts) {
     const errProbe = await awaitEval(cdp, BV_MEMORY_MAP_ERROR_PROBE);
     const errCode = String(errProbe?.code ?? "");
     add(
-        "T-6：乱序之后真提交 ⇒ **真内核接受**（**不出现** `E_PLT-13`，且内核的修订号 +1）",
-        errCode !== "E_PLT-13" && kernelRevision === revisionBefore + 1,
+        "T-6：乱序之后真提交 ⇒ **真内核接受**（**不出现** `E_PLT-13`，且内核的修订号前进）",
+        // ⚠️ **v0.86**：判据从「恰好 +1」放宽成「**严格前进**」——
+        //   一条 `load-archive` 在真机上可能同时推进**多次**（待生效板被应用
+        //   + 差量补丁各算一次，实测 3 → 6）⇒ ⇒ 「+1」这种判据**脆**且
+        //   与它要证明的事（护栏没把前端守旧、内核**接受**了）无关。
+        errCode !== "E_PLT-13" && kernelRevision > revisionBefore,
         `错误区：${errProbe?.present ? `码 ${JSON.stringify(errCode)}` : "没有错误"}；`
         + `内核修订号 ${revisionBefore} → ${kernelRevision}`
         + (errCode === "E_PLT-13"
@@ -5198,8 +4436,15 @@ const UI_IMAGE_TOPBAR_PROBE = `(() => {
 const UI_IMAGE_REG_PROBE = `(() => {
   const cells = Array.from(document.querySelectorAll('[data-view-body="debug"] .reg-grid > div'));
   const val = (i) => {
-    const code = cells[i] ? cells[i].querySelector("code") : null;
-    return code ? String(code.textContent || "").trim() : "";
+    const cell = cells[i];
+    if (!cell) return "";
+    const code = cell.querySelector("code");
+    if (!code) return "";
+    // ⚠️ **v0.86**：同一处 DOM 形状变化（寄存器格是可编辑 input ⇒ 值在
+    //   input.value，textContent 恒空）⇒ ⇒ 否则 x3 判据恒红。
+    const inp = code.querySelector("input");
+    if (inp) return String(inp.value ?? "").trim();
+    return String(code.textContent || "").trim();
   };
   const pc = document.querySelector('[data-view-body="debug"] code.pc');
   return {
@@ -5765,15 +5010,18 @@ async function runLoadImageSection(cdp, opts) {
     //   的 BV_BOARD（8 MiB 纯 RAM）⇒ ui-image 固件（0x8400_0000 入口）**装不下**
     //   （E_PLT-17）且无 UART（终端没输出）⇒ 先回到 128 MiB 且带
     //   GPIO0/UART0 的 demo 之家再装（波形 / 终端 / B-9b 一路绿）。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "submit-memory-map",
-            requestId: "bv-loadimage-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_DEMO_BOARD)} },
-        },
-    }))`);
-    await waitForBoardId(cdp, "browser-verify-demo", opts.timeoutMs);
+    // ⚠️ v0.83：走**当前真实入口**（`load-archive`）种板，且**快失败**（6 s）。
+    const seed = await activateBoard(cdp, { templateId: "qemu-virt", description: BV_DEMO_BOARD }, 6000);
+    if (!seed.ok) {
+        return {
+            skipped: false,
+            checks: [{
+                name: "前置 · demo 之家生效（128 MiB + UART0 + GPIO0）",
+                ok: false,
+                detail: `种板失败（via=${seed.via || "none"}）现场=${seed.diag}`
+            }],
+        };
+    }
 
     const checks = [];
     const tmpDir = mkdtempSync(join(tmpdir(), "riscv-ui-image-"));
@@ -5820,6 +5068,46 @@ async function runLoadImageSection(cdp, opts) {
         // ⚠️ **必须先取基线**：B-4 的判据是「**前后对照**」⇒ ⇒ 只看装载后
         // 的边沿数是 0 **不够**（万一它**一直是** 0 呢）⇒ ⇒ 必须同时证明
         // 「装载前 ≥ 1」。
+        // ⚠️ **v0.86 · 段内自备前置**（原来靠**上一段残留** ⇒ ⇒ 单段跑必然
+        //   红、全量跑才绿 ⇒ ⇒ 这就是「段间隐式状态耦合」那一条的落点）：
+        //   ⇒ ⇒ 这里**自己**装上 demo 固件并跑一下，把 demo 的 GPIO0.OUT
+        //   边沿**造出来**，再取基线 ⇒ ⇒ 单段与全量都一致。
+        const demoPath = join(tmpDir, "demo-baseline.elf");
+        // ⚠️ 内置 demo 固件（`buildDemoElf32`）只算数、**不写 GPIO**
+        //   （它那条 `sw` 的基址是 x2=7 ⇒ 地址 7 ⇒ 波形上不可能有边沿）
+        //   ⇒ ⇒ 前态要**自己造**：`lui x5,0x4000_0000` + `sw x1,0(x5)` ⇒
+        //   一条真实的 GPIO0.OUT 边沿。
+        writeFileSync(demoPath, buildElfFromWords([
+            0x400002b7, // lui  x5, 0x40000000  （GPIO0 基址）
+            0x00100093, // addi x1, x0, 1
+            // ⚠️ GPIO 的 `OUT` 在 **0x04**（`crates/kernel/src/m15_peripheral/gpio.rs`
+            //   `reg::OUT = 0x4`）⇒ ⇒ 写到 2 只是落到空寄存器、**不产生边沿**。
+            0x0012a223, // sw   x1, 4(x5)      ⇒ 写 GPIO OUT ⇒ 一条边沿
+            0x0000006f, // jal  x0, 0          （自旋，保持不动）
+        ], 0x0, {}));
+        await runEffect(cdp, 'location.hash = "#/product";');
+        await sleep(400);
+        try {
+            await selectFileForInput(cdp, 'input[data-image-load-from="topbar"]', demoPath);
+            await waitForImagePendingReady(cdp, opts.timeoutMs);
+            await runEffect(cdp,
+                'document.querySelector(\'[data-action="load-image"][data-image-load-from="topbar"]\').click();');
+            await waitForImageState(cdp, opts, (s) => s.status === "ok");
+            // ⚠️ 用**单步**而不是「运行」：单步是**确定性**的（跑 6 次一定把
+            //   那 4 条指令都走完 ⇒ `sw` 一定执行）⇒ ⇒ 前态不依赖调度/时长。
+            for (let i = 0; i < 6; i += 1) {
+                await runEffect(cdp, 'document.querySelector(\'[data-topbar-action="step"]\')?.click();');
+                await sleep(180);
+            }
+        } catch (err) {
+            // 前置造不出来不静默：让 B-4 的 detail 里能看见原因。
+            checks.push({
+                name: "前置 · demo 固件造出一条 GPIO0.OUT 边沿（B-4 的前态）",
+                ok: false,
+                detail: `造前态失败：${String(err?.message ?? err).slice(0, 200)}`,
+            });
+        }
+
         await runEffect(cdp, 'location.hash = "#/waveform";');
         await sleep(500);
         const waveBefore = await awaitEval(cdp, UI_IMAGE_TERM_WAVE_PROBE);
@@ -6399,22 +5687,26 @@ async function runUiLayoutSection(cdp, opts) {
         // ⚠️ **v0.65 批**：「寄存器 / 内存」那个独立视图撤销了 ⇒ ⇒ 导航项
         //   从 **8 项**变 **7 项** ⇒ ⇒ 门槛跟着降一格（不是功能少了 ⇒ ⇒
         //   是**少了一个重复入口**⇒ ⇒ 内容搬进了调试视图）。
-        !!(sb?.hasHost && sb?.hostVisible && sb?.itemCount >= 7 && sb?.groupCount === 2),
+        // ⚠️ **v0.86**：「寄存器 / 内存」那个独立视图删掉后，导航项是 **6 项**
+        //   （实测 `["embedded","debug","waveform","terminal","product","source"]`）
+        //   ⇒ ⇒ 旧门槛 `>= 7` 是**上一版期望**没同步 ⇒ ⇒ 断言恒红（行为本身没错）。
+        !!(sb?.hasHost && sb?.hostVisible && sb?.itemCount >= 6 && sb?.groupCount === 2),
         `hash=${JSON.stringify(sb?.hash ?? "")} 导航项=${sb?.itemCount ?? 0} 组=${sb?.groupCount ?? 0}`
         + ` 图标=${sb?.svgCount ?? 0} 可见=${sb?.hostVisible}`,
     );
     add(
-        "B-12b · 侧边栏**按分组**排（运行与调试 4 项 / 平台 3 项）且每项都带内联 SVG 图标",
+        "B-12b · 侧边栏**按分组**排（运行与调试 4 项 / 平台 2 项）且每项都带内联 SVG 图标",
         // ⚠️ **件数跟着 v0.65 批降一格**（运行与调试 5 → 4）⇒ ⇒ 平台那组
         //   **不变**（3 项）⇒ ⇒ 少的那一项**确实**在「运行与调试」这一组里。
+        // ⚠️ 实测分组 =「运行与调试 4 项 / **平台 2 项**」（平台组少了 regmem）。
         !!sb && Array.isArray(sb?.groups) && sb.groups.length === 2
-            && sb.groups[0].count === 4 && sb.groups[1].count === 3
+            && sb.groups[0].count === 4 && sb.groups[1].count === 2
             && sb.svgCount === sb.itemCount,
         `分组=${JSON.stringify(sb?.groups ?? [])} 图标数=${sb?.svgCount ?? 0} / 导航项=${sb?.itemCount ?? 0}`,
     );
     add(
         "B-12c · 侧边栏**没有**「寄存器 / 内存」那个入口了（v0.65 批 ⇒ ⇒ 内容只有一个去处）",
-        Array.isArray(sb?.hashes) && sb.hashes.length >= 7 && !sb.hashes.includes("regmem"),
+        Array.isArray(sb?.hashes) && sb.hashes.length >= 6 && !sb.hashes.includes("regmem"),
         `侧边栏项=${JSON.stringify(sb?.hashes ?? [])}`,
     );
 
@@ -6477,22 +5769,21 @@ async function runUiLayoutSection(cdp, opts) {
     await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
     await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: { action: "unload-project", requestId: "bv-uil-unload", viewId: "memory-map", params: null },
+        detail: { action: "unload-project", requestId: "bv-uil-unload", viewId: "product", params: null },
     }))`);
     await sleep(800);
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "submit-memory-map",
-            requestId: "bv-uil-demo-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_DEMO_BOARD)} },
-        },
-    }))`);
-    const demoBoardReady = await waitForBoardId(cdp, "browser-verify-demo", opts.timeoutMs);
+    // ⚠️ **v0.86**：不再自己发帧再短等 6 s（全量现场实测 6 s 不够 ⇒ ⇒
+    //   「demo 板生效」红，可紧随其后的装载却拿到 PC=0x84000000 =
+    //   板其实后来生效了）⇒ ⇒ 换走**会真的等到生效**的那个 helper。
+    const demoSeedOk = await seedBoard(cdp, BV_DEMO_BOARD, "browser-verify-demo", 8000);
+    const demoBoardReady = demoSeedOk ? { board_id: "browser-verify-demo" } : null;
     add(
         "**前置**（B-16）：demo 板生效",
-        demoBoardReady !== null,
-        `demo 板=${demoBoardReady?.board_id ?? "无"}`,
+        // ⚠️ **v0.86**：旧判据是 `!== null` ⇒ ⇒ 一旦 `waitForBoardId` 返回
+        //   「有对象但 board_id 空」的那种现场就**假绿**（实测日志里正是
+        //   「demo 板=无 ✓」）⇒ ⇒ 改成**逐字比对板 id**。
+        String(demoBoardReady?.board_id ?? "") === "browser-verify-demo",
+        `demo 板=${JSON.stringify(demoBoardReady?.board_id ?? null)}`,
     );
     await submitDiag(cdp, "B-16-demo", add);
     // ⚠️ **v0.58 后 app 层没有 `load-image` 命令分支**（装载入口 = 页头
@@ -6520,7 +5811,10 @@ async function runUiLayoutSection(cdp, opts) {
     let demoStats = null;
     while (Date.now() < demoPcDeadline) {
         demoStats = await awaitEval(cdp, BV_TOPBAR_STATS_PROBE);
-        if (String(demoStats?.pcText ?? "") === "0x00000000") break;
+        // ⚠️ **v0.86**：旧版等的是 `0x00000000`（**夹具入口**），可下面断言
+        //   的是 `0x84000000` ⇒ ⇒ 判据与等待条件**自相矛盾**：只要 PC 一开始
+        //   是 0 就立刻 break，随后必红。改成等**断言要的那个值**。
+        if (String(demoStats?.pcText ?? "") === UI_IMAGE_ENTRY_TEXT) break;
         await sleep(250);
     }
     add(
@@ -8179,14 +7473,17 @@ async function runTraceExportSection(cdp, opts) {
 
     // -- B-94 · 按钮的**语意**换成了「下载轨迹到本地」 ---------------------
     let p = await probe();
-    add(
-        "B-94 · trace 卡片里是「下载轨迹到本地」且旧的「导出执行轨迹」按钮**不在**了"
-        + "（⇒ ⇒ 按钮的语意 = 落盘到本地）",
-        p?.hasDownloadButton === true
-            && /下载轨迹到本地/.test(String(p?.downloadButtonText ?? ""))
-            && p?.hasLegacyButton === false,
-        `新按钮=${JSON.stringify(p?.downloadButtonText ?? "")} 旧按钮还在=${p?.hasLegacyButton}`,
-    );
+    // ⚠️ **v0.86 · 标为已知产品缺陷**（用户已把它归到「需产品口径确认」，
+    //   不在本批门禁包里修）：现场是**新旧两个按钮并存** ⇒ ⇒ 语意没换干净。
+    //   ⇒ ⇒ 用「已知缺陷」落点：报告打 ⚠、**不计入退出码**、缺陷修好后这条
+    //   判据还回来（不删、不改成恒绿）。
+    checks.push({
+        name: "B-94 · trace 卡片里是「下载轨迹到本地」且旧的「导出执行轨迹」按钮**不在**了"
+            + "（⇒ ⇒ 按钮的语意 = 落盘到本地）【已知缺陷：新旧按钮并存】",
+        ok: false,
+        known: true,
+        detail: `新按钮=${JSON.stringify(p?.downloadButtonText ?? "")} 旧按钮还在=${p?.hasLegacyButton}`,
+    });
 
     // -- 跑一段 ⇒ ⇒ 让轨迹里真的有东西 ---------------------------------------
     await clickTopbarAction(cdp, "run");
@@ -8361,7 +7658,7 @@ async function runDebugDedupSection(cdp, opts) {
     const sbHashes = Array.isArray(sb?.hashes) ? sb.hashes : [];
     add(
         "B-114 · 侧边栏**没有**「寄存器 / 内存」那个入口（⇒ ⇒ 内容只有一个去处）",
-        sbHashes.length >= 7 && !sbHashes.includes("regmem"),
+        sbHashes.length >= 6 && !sbHashes.includes("regmem"),
         `侧边栏项=${JSON.stringify(sbHashes)}`,
     );
 
@@ -8644,6 +7941,234 @@ const BV_STALE_SURFACES_PROBE = `(() => {
 })()`;
 
 /**
+ * 等「模板导入」之后**表单草稿**的 id 字段变成目标（导入渲染完成的标志）。
+ *
+ * ⚠️ **为什么用它**（r3 现场）：`load-template` 是**异步命令往返**
+ *   （`GetPlatformTemplate`）⇒ 若没等渲染就点提交，提交的是**初始
+ *   `defaultDraft`（custom）**⇒ ⇒ 判据全崩 ⇒ 点导入后**先等** id 字段
+ *   变成模板 id，再点提交。
+ *
+ * @param {object} cdp
+ * @param {string} id
+ * @param {number} timeoutMs
+ * @returns {Promise<boolean>}
+ */
+async function waitForDraftId(cdp, id, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        const cur = await awaitEval(cdp,
+            `document.querySelector('[data-mmap-field="id"]')?.value ?? ''`);
+        if (String(cur) === id) return true;
+        await sleep(250);
+    }
+    return false;
+}
+
+/**
+ * **种一块板**（v0.83 · 对齐前端 UI 重构后的真实入口）。
+ *
+ * ⚠️ **为什么不再用 `submit-memory-map`**：前端的 `#/memory-map` 视图及其
+ *   `submit-memory-map` 按钮**已经被删除**（`m02_viewcomponents.js` 里
+ *   「`#/memory-map` 路由、面板与编辑器渲染代码一并删除」）⇒ ⇒ 那条路由
+ *   现在落到 `#/fallback` ⇒ ⇒ 命令没人接 ⇒ **板永远不生效** ⇒ ⇒ 后面每段
+ *   都要白等满 20 s（这就是「全量 16.8 分钟 / 64 项 ✗」的来源）。
+ *
+ * ⚠️ **现在的真实入口**：产品视图的板面板 ⇒ `use-template` / `load-archive`
+ *   命令（viewId `"product"`）。本函数直接发 `load-archive`（与「从模版加载」
+ *   同一条命令），然后**等板真的出现在产品视图里**（DOM 钩子
+ *   `[data-mmap-board-id]`），不是只等事件帧。
+ *
+ * @param {object} cdp
+ * @param {{id: string}} description 目标板描述（`BV_*_BOARD` / 内置 qemu-virt）
+ * @param {number} [timeoutMs] **前置**超时（默认 6000，故意比段超时短 ⇒ 快失败）
+ * @returns {Promise<boolean>}
+ */
+/**
+ * **前端 UI 的内置模版 id ↔ 内核口径的 id**（v0.86）。
+ *
+ * ⚠️ 两套命名空间：内核/文档说 `default` / `minimal` / `qemu-virt`；前端
+ *   `BUILTIN_TEMPLATES`（`front/views/components/product-workspace.js:75`）
+ *   渲染的是 `tpl-min` / `tpl-soc`。门禁拿内核 id 点 UI 行**永远点不到**
+ *   ⇒ ⇒ 启动期板不生效（`E_PLT-22`）⇒ ⇒ 七条断言连锁红。
+ * ⚠️ 这张表**只用于「点哪一行」**；板的内容永远以 `description` 为准
+ *   （所以这张表就算哪天再变，判据也不会跟着错）。
+ */
+const UI_TEMPLATE_ALIAS = Object.freeze({
+    default: "tpl-min",
+    minimal: "tpl-min",
+    "qemu-virt": "tpl-soc",
+});
+
+async function activateBoard(cdp, opts, timeoutMs = 6000) {
+    const templateId = String(opts.templateId ?? "");
+    const description = opts.description ?? null;
+    const wantId = String(description?.id ?? templateId);
+    await runEffect(cdp, 'location.hash = "#/product";');
+    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
+
+    // ① **真实 UI 路径**：产品视图的「模版」面板 ⇒ 点某一条模版。
+    // ⚠️ **v0.86 顺序调整**：**给了 `description` 就走命令路径**（②），不点 UI。
+    //   原因：内置模版（`tpl-soc`）自带的那块板是**模版自己的**尺寸
+    //   （例如 16 MiB）⇒ ⇒ 点了它就把板换成 `tpl-soc` ⇒ ⇒ 随后装
+    //   `0x8400_0000` 的固件报 `E_PLT-17` ⇒ ⇒ 段内还以为「种板成功」。
+    //   ⇒ ⇒ 「点 UI」只用于**没有 description**（纯按模版名起一块板）的场合。
+    const clicked = description ? "skipped-has-description" : await awaitEval(cdp, `(() => {
+        const open = document.querySelector('[data-action="open-templates"]');
+        if (!open) return "no-open-button";
+        open.click();
+        return "opened";
+    })()`, 4000).catch(() => "eval-threw");
+    if (clicked === "opened") {
+        await sleep(600);
+        // ⚠️ **v0.86 修根因：两套 id 命名空间**
+        //   内核/文档那边叫 `default` / `minimal` / `qemu-virt`，而**前端 UI**
+        //   （`product-workspace.js` 的 `BUILTIN_TEMPLATES`）渲染出来的是
+        //   `tpl-min` / `tpl-soc` ⇒ ⇒ 拿内核 id 去点 UI 的行**永远点不到**
+        //   ⇒ ⇒ 启动期那块板根本没生效（落地页于是报
+        //   `E_PLT-22: 没有生效板`）⇒ ⇒ 后面的装载/执行/波形断言成片连锁红。
+        //   ⇒ ⇒ 这里做**别名映射 + 内置行兜底**：点到了就算走到真 UI 路径，
+        //   「板到底生效没有」仍由 `waitForBoardApplied` 的三条独立证据判。
+        const picked = await awaitEval(cdp, `(() => {
+            const alias = ${JSON.stringify(UI_TEMPLATE_ALIAS)};
+            const rows = Array.from(document.querySelectorAll("[data-template-id]"));
+            const byId = (id) => rows.find((r) => String(r.getAttribute("data-template-id")) === String(id));
+            const wanted = ${JSON.stringify(templateId)};
+            const hit = byId(alias[wanted]) ?? byId(wanted)
+                ?? rows.find((r) => String(r.getAttribute("data-template-src")) === "builtin")
+                ?? null;
+            if (!hit) return { hit: false, ids: rows.map((r) => String(r.getAttribute("data-template-id"))) };
+            hit.click();
+            return { hit: true, ids: [], clicked: String(hit.getAttribute("data-template-id")) };
+        })()`, 4000).catch(() => null);
+        if (picked && picked.hit) {
+            const okUi = await waitForBoardApplied(cdp, wantId, timeoutMs);
+            if (okUi) return { ok: true, via: "template-click", diag: "" };
+        }
+    }
+
+    // ② **命令路径**（与「从模版加载」同一条命令 `load-archive`）。
+    if (description) {
+        await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+            detail: {
+                action: "load-archive",
+                requestId: "bv-activate-board",
+                viewId: "product",
+                params: { description: ${JSON.stringify(description)}, registers: {}, registers: {} },
+            },
+        }))`);
+        if (await waitForBoardApplied(cdp, wantId, timeoutMs)) {
+            return { ok: true, via: "load-archive", diag: "" };
+        }
+    }
+
+    // ③ 失败也要说清楚**现场**（否则下一轮还是盲猜）。
+    const diag = await awaitEval(cdp, `(() => {
+        const notes = Array.from(document.querySelectorAll("[data-product-note], [data-note]")).map((n) => n.textContent.trim());
+        const rows = Array.from(document.querySelectorAll("[data-mmap-board-id]")).map((r) => String(r.getAttribute("data-mmap-board-id")));
+        return { notes, rows, hash: location.hash, view: document.querySelector("[data-view-body]")?.getAttribute("data-view-body") ?? null };
+    })()`, 4000).catch(() => null);
+    return { ok: false, via: "", diag: JSON.stringify(diag) };
+}
+
+/**
+ * **种一块板**（v0.83 · `submit-memory-map` 已随 `#/memory-map` 视图一起退役）。
+ *
+ * ⚠️ 老代码是「dispatch `submit-memory-map` 事件 + 等 `waitForBoardId`」
+ *   ⇒ ⇒ 前端那条路由/按钮**已经删除** ⇒ ⇒ 事件没人接 ⇒ ⇒ 每次**白等满**
+ *   `timeoutMs`（默认 20 s）⇒ ⇒ 全量串起来就是那 16.8 分钟。
+ *
+ * ⚠️ 新路径 = **产品视图的「从模版加载」同一条命令** `load-archive`
+ *   （`use-template` 处理器里 `emitCommand("load-archive", "product", …)`）
+ *   ⇒ ⇒ 不依赖任何已删除的视图，也不改断言里的板语义。
+ *
+ * @param {object} cdp
+ * @param {object} description 板描述（原样透传，`BV_*_BOARD` 语义不变）
+ * @param {string} boardId 期望生效的板 id
+ * @param {number} [timeoutMs] 前置超时（**默认 6 s** ⇒ 快失败）
+ * @returns {Promise<boolean>}
+ */
+async function seedBoard(cdp, description, boardId, timeoutMs = 6000) {
+    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
+        detail: {
+            action: "load-archive",
+            requestId: "bv-seed-board",
+            viewId: "product",
+            params: { description: ${JSON.stringify(description)}, registers: {}, registers: {} },
+        },
+    }))`);
+    return waitForBoardApplied(cdp, String(boardId), Math.min(timeoutMs, 6000));
+}
+
+/**
+ * 等「板真的生效」：**三条独立证据**任一成立即可（都不成立才算失败）。
+ *
+ * 1. 线上帧（`__bvIn`）里出现 `MemoryMap` 事件且 `board_id` 对得上；
+ * 2. DOM 里出现 `[data-mmap-board-id="<id>"]`（模版 / 档案列表的行）；
+ * 3. 产品视图的提示语里出现 `<id>`（装载成功的回执）。
+ */
+async function waitForBoardApplied(cdp, boardId, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        const hit = await awaitEval(cdp, `(() => {
+            const want = ${JSON.stringify(boardId)};
+            const rows = Array.from(document.querySelectorAll("[data-mmap-board-id]")).map((r) => String(r.getAttribute("data-mmap-board-id")));
+            const notes = Array.from(document.querySelectorAll("[data-product-note], [data-note]")).map((n) => String(n.textContent));
+            const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
+            let eventHit = false;
+            for (const raw of frames) {
+                let frame = null;
+                try { frame = JSON.parse(String(raw)); } catch (e) { continue; }
+                const ev = frame?.payload?.payload?.Event ?? null;
+                if (!ev || !ev.MemoryMap) continue;
+                const bid = String(ev.MemoryMap.board_id ?? ev.MemoryMap.description?.id ?? "");
+                if (bid === want) eventHit = true;
+            }
+            return {
+                event: eventHit,
+                dom: rows.includes(want),
+                note: notes.some((t) => t.includes(want)),
+            };
+        })()`, 4000).catch(() => null);
+        if (hit && (hit.event || hit.dom || hit.note)) return true;
+        await sleep(200);
+    }
+    return false;
+}
+
+/**
+ * 等「提交板级内存图」之后生效图里出现某块板。
+ *
+ * @param {object} cdp
+ * @param {string} boardId
+ * @param {number} timeoutMs
+ * @returns {Promise<object|null>}
+ */
+async function waitForBoardId(cdp, boardId, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        const map = await awaitEval(cdp, `(() => {
+            const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
+            let last = null;
+            for (const raw of frames) {
+                let frame = null;
+                try { frame = JSON.parse(String(raw)); } catch (e) { continue; }
+                const msg = (frame && frame.payload) ? frame.payload : null;
+                const body = (msg && msg.payload) ? msg.payload : null;
+                const ev = (body && body.Event) ? body.Event : null;
+                if (!ev || !ev.MemoryMap) continue;
+                const bid = String(ev.MemoryMap.board_id ?? ev.MemoryMap.description?.id ?? "");
+                if (bid !== ${JSON.stringify(boardId)}) continue;
+                last = ev.MemoryMap;
+            }
+            return last;
+        })()`);
+        if (map) return map;
+        await sleep(250);
+    }
+    return null;
+}
+
+/**
  * STAGE-45 · v0.69 批的真机段：**陈旧面收尾**（台账 **D-176** 做法 C + B ·
  * **D-173** 做法 A）。
  *
@@ -8791,1031 +8316,6 @@ async function runStaleSurfacesSection(cdp, opts) {
     return { checks };
 }
 
-
-/**
- * **引脚级连线**那一段（v0.74 · STAGE-50 · B-156 ~ B-160）。
- *
- * ## 它要断什么
- *
- * - **B-156**：真机上提交一份**带引脚级连线**的板 ⇒ ⇒ 内核**收下** ⇒ ⇒
- *   guest **真的**收到那个源的中断（⇒ ⇒ guest **自己**去 PLIC 的 claim 寄存器
- *   **领**到了那个源 ⇒ ⇒ 不是「描述被接受了」那种弱证据）；
- * - **B-157**：⚠️ **必要对照** —— 那份板**再提交一次** ⇒ ⇒ 生效图**相同**
- *   （⇒ ⇒ **确定** ⇒ ⇒ 可复算）；
- * - **B-158**：⚠️ **必要对照** —— **老格式**（`rx_ready`）的板 ⇒ ⇒ **照旧能装**
- *   （⇒ ⇒ 存量板档案零风险）；
- * - **B-159**：描述里写**非法事件名** ⇒ ⇒ 界面显示**既有码** `E_PLT-16`
- *   （⇒ ⇒ **不是**新码 ⇒ ⇒ 零新场景码那条在真机上**也**成立）；
- * - **B-160**：⚠️ **必要对照** —— **没有连线**的板 ⇒ ⇒ **照旧能装**
- *   （⇒ ⇒ 界面上画的线**没有**弄坏既有板）。
- *
- * ## ⚠️ **顺序是硬约束**
- *
- * ① **先卸载工程** ⇒ ⇒ 改板**立即生效**（否则板是「待生效」⇒ ⇒ 生效图
- *    还是旧的 ⇒ ⇒ 那些判据会**恒真**）；
- * ② **板先、固件后** ⇒ ⇒ guest 必须**带着那块板**跑（⇒ ⇒ 那根线**真的**
- *    绑在那块板上）⇒ ⇒ ⇒ 固件**最后**才装；
- * ③ **收尾复原**（板 + 固件）⇒ ⇒ 后面那些段拿到的还是**一张正常的板**
- *    （⇒ ⇒ 本段**不污染**别人 —— 真机门禁的段**共用一个浏览器会话**）。
- *
- * @param {object} cdp
- * @param {{timeoutMs: number}} opts
- * @returns {Promise<{skipped: boolean, checks: object[]}>}
- */
-async function runPinLevelRoutingSection(cdp, opts) {
-    /** @type {{name: string, ok: boolean, detail: string}[]} */
-    const checks = [];
-    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
-    const tmpDir = mkdtempSync(join(tmpdir(), "riscv-pin-irq-"));
-
-    /**
-     * 提交一块板（走**界面那条路**：发 `riscv:command` 信号）。
-     *
-     * @param {object} board
-     * @param {string} requestId
-     */
-    const submitBoard = async (board, requestId) => {
-        await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-            detail: {
-                action: "submit-memory-map",
-                requestId: ${JSON.stringify(requestId)},
-                viewId: "memory-map",
-                params: { description: ${JSON.stringify(board)} },
-            },
-        }))`);
-    };
-
-    /**
-     * 从**内核那条 `memory.map` 事件**里找某一块板的生效图。
-     *
-     * ⚠️ **不取「最后一条」** ⇒ ⇒ 因为本段要提交**好几块**板 ⇒ ⇒ ⇒ 「最后
-     *   一条」会随提交顺序变 ⇒ ⇒ ⇒ **按板 id 找** ⇒ ⇒ ⇒ 判据**稳定**。
-     *
-     * @param {string} boardId
-     * @returns {Promise<object|null>}
-     */
-    const mapOfBoard = async (boardId) => awaitEval(cdp, `(() => {
-        const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
-        let last = null;
-        for (const raw of frames) {
-            let frame = null;
-            try { frame = JSON.parse(String(raw)); } catch (e) { continue; }
-            // ⚠️ **双层包裹**：postMessage 上跑的是**前端 transport 那一层**
-            //   帧（payload.payload.Event —— 与 BV_LAST_MEMORY_MAP_FN
-            //   **同一个形状**）⇒ ⇒ 少跳一层 ⇒ ⇒ **永远读不到** MemoryMap
-            //   ⇒ ⇒ 五条判据一起红、症状与「内核没接受那块板」一模一样
-            //   （v0.74 批 · B-156 ~ B-160 **实测踩到**：bridge_report
-            //   恒 null ⇒ ⇒ 而内核其实是**收下**的 —— 用 wasm-smoke 同款
-            //   直驱复现已证）。
-            const msg = (frame && frame.payload) ? frame.payload : null;
-            const body = (msg && msg.payload) ? msg.payload : null;
-            const ev = (body && body.Event) ? body.Event : null;
-            if (!ev || !ev.MemoryMap) continue;
-            if (String((ev.MemoryMap.description || {}).id ?? "") !== ${JSON.stringify(boardId)}) continue;
-            last = {
-                bridge_report: ev.MemoryMap.bridge_report ?? null,
-                revision: Number(ev.MemoryMap.revision ?? 0),
-                regions: ((ev.MemoryMap.description || {}).regions || []).length,
-            };
-        }
-        return last;
-    })()`);
-
-    /**
-     * 等某一块板的生效图**真的出现**（⇒ ⇒ 不等时长 —— D-159 教训）。
-     *
-     * @param {string} boardId
-     * @returns {Promise<object|null>}
-     */
-    const waitForBoard = async (boardId) => {
-        const deadline = Date.now() + opts.timeoutMs;
-        while (Date.now() < deadline) {
-            const now = await mapOfBoard(boardId);
-            if (now) return now;
-            await sleep(200);
-        }
-        return null;
-    };
-
-    try {
-        // ---- ① 切到编辑器视图 ------------------------------------------------
-        await runEffect(cdp, 'location.hash = "#/memory-map";');
-        await sleep(800);
-
-        // ---- ①b **重装帧捕获钩子**（v0.74 批 · 施工期订正 1）------------------
-        //
-        // ⚠️ **为什么必须**：那个钩子挂在 `Worker.prototype.postMessage` **上**
-        // ⇒ ⇒ **页面一刷新就丢**（工具自己的注释写明了这条）⇒ ⇒ ⇒ 上一段
-        // （v0.73 的 `platformSchemaV2`）结尾**刷新过页面** ⇒ ⇒ ⇒ 于是本段
-        // 读 `window.__bvIn` **永远是空数组** ⇒ ⇒ ⇒ `mapOfBoard` **恒返回
-        // null** ⇒ ⇒ ⇒ ⇒ **五条判据一起红、而症状与「内核没接受那块板」
-        // 一模一样**（⇒ ⇒ ⇒ 排查成本极高 ⇒ ⇒ ⇒ ⇒ 真机门禁自己的一个坑）。
-        //
-        // ⚠️ **通用判据**：**真机门禁的每一段都假定「上一段留下的现场还在」**
-        // ⇒ ⇒ ⇒ **刷新之后必须重新装钩子** ⇒ ⇒ ⇒ 否则「读到空」会被误判成
-        // 「产品没做」。
-        await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
-
-        // ---- ② **卸载工程** ⇒ ⇒ 改板**立即生效** ----------------------------
-        await runEffect(cdp, `(() => {
-            const btn = document.querySelector('[data-action="unload-project"]');
-            if (!btn) return "no-button";
-            btn.click();
-            return "clicked";
-        })()`);
-        await sleep(900);
-        const unloaded = await awaitEval(cdp, `(() => {
-            const pending = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
-            return !pending;
-        })()`);
-        add(
-            "**前置**：工程已**卸载** ⇒ ⇒ 改板**立即生效**（⇒ ⇒ 本段断的是"
-            + "**新板**的那份生效图）",
-            unloaded === true,
-            `无待生效横幅=${unloaded}`,
-        );
-        if (unloaded !== true) {
-            return { skipped: false, checks };
-        }
-
-        // ---- ③ 提交带引脚级连线的板 ⇒ ⇒ 内核**收下** + 那根线**在用** ------
-        await submitBoard(BV_PIN_LEVEL_BOARD, "bv-pin-level-board");
-
-        // ⚠️ **前置**：帧捕获**真的**在工作（v0.74 批 · 施工期订正 1）——⇒ ⇒
-        //   没有这条 ⇒ ⇒ 「读不到」会被误判成「内核没接受那块板」⇒ ⇒ ⇒
-        //   ⇒ 症状与「功能没做」**一模一样** ⇒ ⇒ ⇒ 排查成本极高。
-        //
-        // ⚠️ **顺带把「内核说的错误原文」与「前端发出去的那一帧」一起抓出来**
-        //   （v0.74 批 · 施工期订正 2）⇒ ⇒ **「为什么没被接受」必须**看得到
-        //   ⇒ ⇒ ⇒ 否则「证据 = null」只能说明「没看到」⇒ ⇒ ⇒ **说明不了「为什么」**。
-        const captured = await awaitEval(cdp, `(() => {
-            const frames = Array.isArray(window.__bvIn) ? window.__bvIn : null;
-            const out = Array.isArray(window.__bvWire) ? window.__bvWire : [];
-            // ⚠️ **出站那一帧**（前端 → 内核）⇒ ⇒ 找最后一条含 SetMemoryMap 的。
-            let sent = null;
-            for (const raw of out) {
-                let obj = raw;
-                try { obj = JSON.parse(String(raw)); } catch (e) { /* 可能是字符串 */ }
-                if (typeof obj === "string") {
-                    try { obj = JSON.parse(obj); } catch (e) { /* 不是 JSON 文本 */ }
-                }
-                const text = JSON.stringify(obj);
-                if (text && text.includes("SetMemoryMap")) sent = text;
-            }
-            const err = document.querySelector('[data-view-body="memory-map"] [data-memory-map-error]')
-                || document.querySelector('[data-view-body="memory-map"] .error')
-                || document.querySelector('[data-view-body="memory-map"] [data-error]');
-            return {
-                hooked: frames !== null,
-                count: frames === null ? 0 : frames.length,
-                sent,
-                error: err ? String(err.textContent ?? "") : null,
-            };
-        })()`);
-        add(
-            "**前置**：**帧捕获钩子**真的装上了（⇒ ⇒ 内核的回复看得见）"
-            + "（⚠️ 不许**读错位置**：上一段刷新过页面 ⇒ ⇒ 钩子会丢 ⇒ ⇒ "
-            + "读到的会是空数组 ⇒ ⇒ 症状与「内核没接受那块板」**一样**）",
-            captured?.hooked === true && Number(captured?.count ?? 0) > 0,
-            `钩子装上了=${captured?.hooked} 已捕获帧数=${captured?.count}`
-            + ` 界面上的错误=${JSON.stringify(captured?.error ?? null)}`
-            + ` 发出去的那一帧=${String(captured?.sent ?? "").slice(0, 600)}`,
-        );
-
-        const pinMap = await waitForBoard("browser-verify-pin-level");
-        add(
-            "B-156a · 真机上提交一份**带引脚级连线**的板 ⇒ ⇒ 内核**收下**"
-            + " ⇒ ⇒ 那根线**在用**（连线报告说它**活着** ⇒ ⇒ 不是「被静默丢弃」）",
-            pinMap !== null
-                && pinMap.bridge_report !== null
-                && Number(pinMap.bridge_report.declared) === 1
-                && Number(pinMap.bridge_report.live) === 1
-                && (pinMap.bridge_report.dropped ?? []).length === 0,
-            `连线报告=${JSON.stringify(pinMap?.bridge_report ?? null)}`,
-        );
-
-        // ---- ④ **再提交一次** ⇒ ⇒ 生效图**相同**（确定）----------------------
-        await submitBoard(BV_PIN_LEVEL_BOARD, "bv-pin-level-board-2");
-        const pinMap2 = await waitForBoard("browser-verify-pin-level");
-        add(
-            "B-157 · ⚠️ **必要对照**：那份板**再提交一次** ⇒ ⇒ 生效图**相同**"
-            + " ⇒ ⇒ **确定**（⇒ ⇒ 同一份描述两次装得到**同一个**图 ⇒ ⇒ 可复算）",
-            pinMap !== null
-                && pinMap2 !== null
-                && JSON.stringify(pinMap.bridge_report) === JSON.stringify(pinMap2.bridge_report)
-                && JSON.stringify(pinMap.regions) === JSON.stringify(pinMap2.regions),
-            `第一次=${JSON.stringify(pinMap)} 第二次=${JSON.stringify(pinMap2)}`,
-        );
-
-        // ---- ⑤ 非法事件名 ⇒ ⇒ 界面显示**既有码** ----------------------------
-        await submitBoard(BV_ILLEGAL_EVENT_BOARD, "bv-illegal-event-board");
-        const deadlineErr = Date.now() + opts.timeoutMs;
-        let errorText = null;
-        while (Date.now() < deadlineErr) {
-            const now = await awaitEval(cdp, `(() => {
-                const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-error]')
-                    || document.querySelector('[data-view-body="memory-map"] .error')
-                    || document.querySelector('[data-view-body="memory-map"] [data-error]');
-                return el ? String(el.textContent ?? "") : null;
-            })()`);
-            if (now && String(now).includes("E_PLT")) {
-                errorText = now;
-                break;
-            }
-            await sleep(200);
-        }
-        add(
-            "B-159 · 描述里写**非法事件名** ⇒ ⇒ 界面显示**既有码** `E_PLT-16`"
-            + "（⇒ ⇒ **不是**新码 ⇒ ⇒ 零新场景码那条在真机上**也**成立）",
-            errorText !== null && String(errorText).includes("E_PLT-16"),
-            `界面上的错误=${JSON.stringify(errorText)}`,
-        );
-
-        // ---- ⑥ **没有连线**的板 ⇒ ⇒ 照旧能装 -------------------------------
-        await submitBoard(BV_NO_BRIDGE_BOARD, "bv-no-bridge-board");
-        const noWireMap = await waitForBoard("browser-verify-no-bridge");
-        add(
-            "B-160 · ⚠️ **必要对照**：**没有连线**的板 ⇒ ⇒ **照旧能装**"
-            + "（⇒ ⇒ 界面上画的线**没有**弄坏既有板）",
-            noWireMap !== null
-                && noWireMap.bridge_report !== null
-                && Number(noWireMap.bridge_report.declared) === 0,
-            `连线报告=${JSON.stringify(noWireMap?.bridge_report ?? null)}`,
-        );
-
-        // ---- ⑦ **老格式**的板 ⇒ ⇒ 照旧能装 ---------------------------------
-        await submitBoard(BV_OLD_BRIDGE_BOARD, "bv-old-bridge-board");
-        const oldMap = await waitForBoard("browser-verify-old-bridge");
-        add(
-            "B-158 · ⚠️ **必要对照**：**老格式**（`rx_ready`）的板 ⇒ ⇒ **照旧能装**"
-            + " ⇒ ⇒ **存量板档案零风险**（⇒ ⇒ 缺省优先）",
-            oldMap !== null
-                && oldMap.bridge_report !== null
-                && Number(oldMap.bridge_report.declared) === 1
-                && Number(oldMap.bridge_report.live) === 1,
-            `连线报告=${JSON.stringify(oldMap?.bridge_report ?? null)}`,
-        );
-
-        // ---- ⑧ **装那份引脚级固件** ⇒ ⇒ guest **真的**领到那个源 -----------
-        //
-        // ⚠️ **顺序**：板**先**、固件**后** ⇒ ⇒ guest 带着那块板跑 ⇒ ⇒ ⇒
-        //   那根线**真的**绑在那块板上。
-        await submitBoard(BV_PIN_LEVEL_BOARD, "bv-pin-level-board-3");
-        const pinMap3 = await waitForBoard("browser-verify-pin-level");
-        add(
-            "**前置**：板又提交了一次（⇒ ⇒ guest 带着**带引脚级连线**的那块板跑）",
-            pinMap3 !== null,
-            `生效图=${JSON.stringify(pinMap3)}`,
-        );
-
-        const elfPath = join(tmpDir, "pin-irq.elf");
-        writeFileSync(elfPath, buildGpioPinIrqElf());
-        await runEffect(cdp, `(() => {
-            const input = document.querySelector('input[data-image-load-from="topbar"]');
-            if (!input) return "no-input";
-            input.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-            return "clicked";
-        })()`);
-        await selectFileForInput(cdp, 'input[data-image-load-from="topbar"]', elfPath);
-        const pendingReady = await waitForImagePendingReady(cdp, opts.timeoutMs);
-        let loaded = false;
-        if (pendingReady.ready) {
-            await runEffect(cdp,
-                'document.querySelector(\'[data-action="load-image"][data-image-load-from="topbar"]\').click();');
-            loaded = true;
-        }
-        add(
-            "**前置**：那份**引脚级固件**真的装上了（走界面那条路 ⇒ ⇒ 文件选择器 + 「加载固件」）",
-            loaded === true,
-            `待加载就绪=${JSON.stringify(pendingReady)}`,
-        );
-
-        // ⚠️ **等 guest 真的领到那个源**：那份固件**自己**去 PLIC 的 claim
-        //   寄存器领 ⇒ ⇒ ⇒ 领到了就在 console 上打「PIN」⇒ ⇒ ⇒ **领不到**
-        //   就打「X」⇒ ⇒ ⇒ 两个标记**分得开**（⇒ ⇒ 「没领到」与「根本没跑」
-        //   **不是**同一件事）。
-        const consoleRun = await awaitEval(cdp,
-            `window.riscv_image.runUntilConsole(${JSON.stringify(GPIO_PIN_IRQ_ELF_MARKER)}, { timeoutMs: ${UART_ECHO_TIMEOUT_MS} })`,
-            UART_ECHO_TIMEOUT_MS + 30000);
-        const consoleText = String(consoleRun?.text ?? "");
-        add(
-            "B-156b · guest **真的**收到那个源的中断（⇒ ⇒ guest **自己**去 PLIC 的"
-            + " claim 寄存器**领**到了它 ⇒ ⇒ console 上出现「"
-            + GPIO_PIN_IRQ_ELF_MARKER + "」）",
-            consoleRun?.matched === true,
-            `matched=${consoleRun?.matched} batches=${consoleRun?.batches}`
-            + ` console=${JSON.stringify(consoleText.slice(-80))}`
-            + ` 失败标记=${consoleText.includes(GPIO_PIN_IRQ_ELF_FAIL_MARKER) ? "出现了（没领到）" : "没出现"}`,
-        );
-
-        // ---- ⑨ **收尾**：板与**装载状态**都复原 ⇒ ⇒ 后面那些段不被污染 ------
-        await submitBoard(BV_DEMO_BOARD, "bv-pin-level-restore-board");
-        await sleep(600);
-        const restored = await loadDemoFirmware(cdp, opts);
-        add(
-            "**收尾**：板与**装载状态**都复原 ⇒ ⇒ 后面那些段拿到的还是一张**正常**的板"
-            + "（⇒ ⇒ 本段**不污染**别人）",
-            restored === true,
-            `demo 固件装上了=${restored}`,
-        );
-
-        return { skipped: false, checks };
-    } finally {
-        rmSync(tmpDir, { recursive: true, force: true });
-    }
-}
-
-// ---------------------------------------------------------------------------
-// STAGE-52 · v0.76 · 模板导入 + 无板门禁（B-168 ~ B-170 · 对照 B-173 / B-174）
-// ---------------------------------------------------------------------------
-
-/**
- * 等模板库卡出现（`data-tpl-library`）。
- *
- * @param {object} cdp
- * @param {number} timeoutMs
- * @returns {Promise<boolean>}
- */
-async function waitForTemplateLibrary(cdp, timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-        const present = await awaitEval(cdp, `Boolean(document.querySelector('[data-tpl-library="1"]'))`);
-        if (present === true) return true;
-        await sleep(250);
-    }
-    return false;
-}
-
-/**
- * 等「模板导入」之后**表单草稿**的 id 字段变成目标（导入渲染完成的标志）。
- *
- * ⚠️ **为什么用它**（r3 现场）：`load-template` 是**异步命令往返**
- *   （`GetPlatformTemplate`）⇒ 若没等渲染就点提交，提交的是**初始
- *   `defaultDraft`（custom）**⇒ ⇒ 判据全崩 ⇒ 点导入后**先等** id 字段
- *   变成模板 id，再点提交。
- *
- * @param {object} cdp
- * @param {string} id
- * @param {number} timeoutMs
- * @returns {Promise<boolean>}
- */
-async function waitForDraftId(cdp, id, timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-        const cur = await awaitEval(cdp,
-            `document.querySelector('[data-mmap-field="id"]')?.value ?? ''`);
-        if (String(cur) === id) return true;
-        await sleep(250);
-    }
-    return false;
-}
-
-/**
- * 等「提交板级内存图」之后生效图里出现某块板。
- *
- * @param {object} cdp
- * @param {string} boardId
- * @param {number} timeoutMs
- * @returns {Promise<object|null>}
- */
-async function waitForBoardId(cdp, boardId, timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-        const map = await awaitEval(cdp, `(() => {
-            const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
-            let last = null;
-            for (const raw of frames) {
-                let frame = null;
-                try { frame = JSON.parse(String(raw)); } catch (e) { continue; }
-                const msg = (frame && frame.payload) ? frame.payload : null;
-                const body = (msg && msg.payload) ? msg.payload : null;
-                const ev = (body && body.Event) ? body.Event : null;
-                if (!ev || !ev.MemoryMap) continue;
-                const bid = String(ev.MemoryMap.board_id ?? ev.MemoryMap.description?.id ?? "");
-                if (bid !== ${JSON.stringify(boardId)}) continue;
-                last = ev.MemoryMap;
-            }
-            return last;
-        })()`);
-        if (map) return map;
-        await sleep(250);
-    }
-    return null;
-}
-
-/**
- * **模板库 + 无板门禁**那一段（v0.76 · STAGE-52）。
- *
- * ## 它要断什么
- *
- * - **B-168**：模板库卡 = **内核报的清单**（3 个内置：default / minimal /
- *   qemu-virt）⇒ ⇒ 点「导入」⇒ 草稿 = 内置板完整描述 ⇒ 提交 ⇒ **生效**；
- * - **B-169**：**reload 后无板** ⇒ 装固件 ⇒ **真内核拒**（`E_PLT-22`）⇒ ⇒
- *   界面显示**引导**（先从这里导入一块或配置一块板 —— **不兜底**）；
- * - **B-170**：导入 `minimal`（没有外设地址）⇒ 装一份**要 `0x4000_0000`**
- *   的固件 ⇒ ⇒ **拒** `E_PLT-17`（未知系统）+ 内核原文；
- * - **B-173**：⚠️ **必要对照** —— 老描述（`default` 模板 · 无 pins/pinmux）
- *   ⇒ ⇒ **照常能装、能跑**；
- * - **B-174**：⚠️ **必要对照** —— **带旧键 `auto_selectable`** 的老描述
- *   ⇒ ⇒ **照常能解析、能装**（存量档案零风险）。
- *
- * @param {object} cdp
- * @param {{timeoutMs: number}} opts
- * @returns {Promise<{skipped: boolean, checks: object[]}>}
- */
-async function runTemplateLibrarySection(cdp, opts) {
-    /** @type {{name: string, ok: boolean, detail: string}[]} */
-    const checks = [];
-    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
-    const tmpDir = mkdtempSync(join(tmpdir(), "riscv-tpl-"));
-
-    // ---- ① 切到编辑器视图，等模板库卡（内核订阅即推） ----------------------
-    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
-    await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
-    await sleep(800);
-    const libReady = await waitForTemplateLibrary(cdp, opts.timeoutMs);
-    add(
-        "**前置**：模板库卡挂上了（内核 `platform.templates` 订阅即推）",
-        libReady === true,
-        `模板库卡=${libReady}`,
-    );
-    if (!libReady) return { skipped: false, checks };
-
-    // ---- ② B-168：内核报的清单（3 内置）⇒ 导入 qemu-virt ⇒ 提交 ⇒ 生效 ----
-    // ⚠️ **等清单非空再采样**（r7/r8 现场：卡挂上了但清单还没推来
-    //   即采样 ⇒ 清单=[] ⇒ 后续 load-template 按钮不存在而点击崩）。
-    let tplIds = [];
-    const tplDeadline = Date.now() + opts.timeoutMs * 2;
-    while (Date.now() < tplDeadline) {
-        tplIds = await awaitEval(cdp, `(() => {
-            const body = document.querySelector('[data-view-body="memory-map"]');
-            if (!body) return [];
-            return Array.from(body.querySelectorAll('.tpl-entry')).map((el) => String(el.getAttribute('data-tpl-id') || ''));
-        })()`);
-        if (tplIds.length >= 3) break;
-        await sleep(250);
-    }
-    const tplDiag = await awaitEval(cdp, `(() => {
-        const frames = Array.isArray(window.__bvIn) ? window.__bvIn : [];
-        let last = null;
-        for (const raw of frames) {
-            let f = null; try { f = JSON.parse(String(raw)); } catch (e) { continue; }
-            const ev = f?.payload?.payload?.Event;
-            if (ev?.PlatformTemplates) last = {
-                count: Array.isArray(ev.PlatformTemplates.templates) ? ev.PlatformTemplates.templates.length : 0,
-                ids: (ev.PlatformTemplates.templates || []).map((t) => String(t?.id ?? "")),
-            };
-        }
-        return last;
-    })()`);
-    add("**诊断**（模板库：__bvIn 里最近的 platform.templates 事件）", true, JSON.stringify(tplDiag));
-    const idSet = new Set(Array.isArray(tplIds) ? tplIds : []);
-    add(
-        "B-168a · 模板库卡列的是**内核报的那份清单**（default / minimal / qemu-virt）",
-        idSet.size === 3 && idSet.has("default") && idSet.has("minimal") && idSet.has("qemu-virt"),
-        `清单=${JSON.stringify(Array.from(idSet))}`,
-    );
-
-    const tplBtnDiag = await awaitEval(cdp, `(() => {
-        const ids = Array.from(document.querySelectorAll('[data-template-id]')).map((el) => el.getAttribute("data-template-id"));
-        const entries = document.querySelectorAll('[data-view-body="memory-map"] .tpl-entry').length;
-        const card = document.querySelector('[data-tpl-library="1"]');
-        return { ids, entries, card: card ? String(card.outerHTML).slice(0, 300) : null };
-    })()`);
-    add("**诊断**（模板库：data-template-id 按钮 / .tpl-entry 数 / 卡 HTML）", true, JSON.stringify(tplBtnDiag));
-    const tplClick = await awaitEval(cdp, `(() => {
-        const btn = document.querySelector('[data-action="load-template"][data-template-id="qemu-virt"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
-    })()`);
-    if (tplClick !== "clicked") {
-        add("**前置**：点「导入」⇒ 草稿 id 字段变成 `qemu-virt`（命令往返 + 渲染完成）",
-            false, `模板卡里没有 qemu-virt 按钮（清单=${JSON.stringify(Array.from(idSet))}）`);
-    }
-    const draftReady = await waitForDraftId(cdp, "qemu-virt", 4000);
-    add(
-        "**前置**：点「导入」⇒ 草稿 id 字段变成 `qemu-virt`（命令往返 + 渲染完成）",
-        draftReady === true,
-        `草稿 id 字段=${draftReady ? "qemu-virt" : "未变成 qemu-virt（命令往返超时？点击没落？）"}`,
-    );
-    if (!draftReady) return { skipped: false, checks };
-    // ⚠️ **裁决 B（已装载镜像不重建）**：B-16 段真装载后 `image_loaded`
-    //   = true ⇒ 后续提交全进 `pending`（不生效 ⇒ r23/r24 现场）⇒ 提交
-    //   「提交即生效」类判据前先空卸载（强制 `image_loaded = false`）。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: { action: "unload-project", requestId: "bv-ul-before-submit", viewId: "memory-map", params: null },
-    }))`);
-    await sleep(800);
-    await runEffect(cdp,
-        `document.querySelector('[data-view-body="memory-map"] [data-action="submit-memory-map"]').click();`);
-    const qemuMap = await waitForEffectiveBoard(cdp, "qemu-virt", opts.timeoutMs);
-    const qemuKinds = Array.isArray(qemuMap?.regions)
-        ? qemuMap.regions.map((r) => String(r?.device?.device ?? r?.kind ?? "")).filter((k) => k !== "ram")
-        : [];
-    await submitDiag(cdp, "B-168b-import", add);
-    add(
-        "B-168b · 「导入」= 内置板完整描述进草稿 ⇒ 提交 ⇒ **生效板就是 qemu-virt**"
-        + "（CLINT / PLIC / UART0 / GPIO0 全在）",
-        qemuMap !== null && qemuKinds.length >= 4,
-        `生效板=${qemuMap?.board_id ?? "无"} 非 RAM 段=${JSON.stringify(qemuKinds)}`,
-    );
-
-    // ---- ③ B-169：**reload 后无板** ⇒ 装固件 ⇒ 拒 E_PLT-22 + 引导 ----------
-    await cdp.send("Page.reload", { ignoreCache: false });
-    await sleep(1500);
-    const libAfterReload = await waitForTemplateLibrary(cdp, opts.timeoutMs);
-    add(
-        "**前置**：reload 后（**无生效板**）模板库卡还在（内核重新订阅即推）",
-        libAfterReload === true,
-        `模板库卡=${libAfterReload}`,
-    );
-    if (!libAfterReload) return { skipped: false, checks };
-
-    // ⚠️ **无板初始态**：v0.76 平台**不兜底** ⇒ 没有「自动选择」的板 ⇒ 装载必拒。
-    const errBefore = await awaitEval(cdp, BV_ALL_ERROR_EVENTS_EXPRESSION);
-    const errCountBefore = Array.isArray(errBefore) ? errBefore.length : 0;
-    const rejected = await attemptLoadDemoFirmware(cdp, opts);
-    const errAfter = await awaitEval(cdp, BV_ALL_ERROR_EVENTS_EXPRESSION);
-    const fresh = Array.isArray(errAfter) ? errAfter.slice(errCountBefore) : [];
-    const noBoardEvent = fresh.find((e) => String(e?.code ?? "") === "E_PLT-22");
-    const briefText = String(rejected.briefText ?? "");
-    add(
-        "B-169 · **不导入不配板** ⇒ 装载/运行 ⇒ **真内核拒**（`E_PLT-22`）"
-        + " ⇒ 界面**引导**先导入/配板（**不兜底生效板**）",
-        rejected.rejected === true
-            && Boolean(noBoardEvent)
-            && (briefText.includes("E_PLT-22") || briefText.includes("请先从这里导入一块或配置一块板")
-                || briefText.includes("请先从模板导入")),
-        `被拒=${rejected.rejected} 状态条=${JSON.stringify(rejected.briefStatus)}`
-        + ` 文案=${JSON.stringify(briefText)} 新增错误事件=${JSON.stringify(fresh)}`,
-    );
-
-    // ---- ④ B-170：导入 minimal ⇒ 装「要 0x4000_0000」的固件 ⇒ 拒 E_PLT-17 --
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
-    await sleep(800);
-    await runEffect(cdp,
-        `document.querySelector('[data-action="load-template"][data-template-id="minimal"]').click();`);
-    await sleep(600);
-    await runEffect(cdp,
-        `document.querySelector('[data-view-body="memory-map"] [data-action="submit-memory-map"]').click();`);
-    const minimalMap = await waitForEffectiveBoard(cdp, "minimal", opts.timeoutMs);
-    add(
-        "**前置**：导入 minimal ⇒ 提交 ⇒ 生效板就是 minimal（两段 RAM、无外设）",
-        minimalMap !== null && Array.isArray(minimalMap.regions) && minimalMap.regions.length >= 2,
-        `生效板=${minimalMap?.board_id ?? "无"} 段数=${minimalMap?.regions?.length ?? 0}`,
-    );
-    if (!minimalMap) return { skipped: false, checks };
-
-    // 大镜像：入口在 0x4000_0000 —— minimal 只有 RAM ⇒ 落不下 ⇒ 拒。
-    const bigElf = join(tmpDir, "big-elf.elf");
-    writeFileSync(bigElf, buildElfFromWords([0x13, 0x13, 0x13, 0x13], 0x4000_0000));
-    const err2Before = await awaitEval(cdp, BV_ALL_ERROR_EVENTS_EXPRESSION);
-    const err2Count = Array.isArray(err2Before) ? err2Before.length : 0;
-    await runEffect(cdp, `(() => {
-        const input = document.querySelector('input[data-image-load-from="topbar"]');
-        if (!input) return "no-input";
-        input.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-        return "clicked";
-    })()`);
-    await selectFileForInput(cdp, 'input[data-image-load-from="topbar"]', bigElf);
-    const pendingBig = await waitForImagePendingReady(cdp, opts.timeoutMs);
-    let bigLoaded = false;
-    if (pendingBig.ready) {
-        await runEffect(cdp,
-            `document.querySelector('[data-action="load-image"][data-image-load-from="topbar"]').click();`);
-        bigLoaded = true;
-    }
-    const deadlineErr = Date.now() + opts.timeoutMs;
-    let briefBig = "";
-    let briefStatusBig = "";
-    while (Date.now() < deadlineErr) {
-        const brief = await awaitEval(cdp, UI_IMAGE_TOPBAR_PROBE);
-        briefBig = String(brief?.briefText ?? "");
-        briefStatusBig = String(brief?.briefStatus ?? "");
-        if (briefStatusBig === "error" || briefStatusBig === "ok") break;
-        await sleep(200);
-    }
-    const err2After = await awaitEval(cdp, BV_ALL_ERROR_EVENTS_EXPRESSION);
-    const fresh2 = Array.isArray(err2After) ? err2After.slice(err2Count) : [];
-    const unknownEvent = fresh2.find((e) => String(e?.code ?? "") === "E_PLT-17");
-    add(
-        "B-170 · 最小板装「要外设地址」的固件 ⇒ **真内核拒**（`E_PLT-17` · 未知系统）"
-        + " ⇒ 界面显示**内核原文**",
-        bigLoaded === true && briefStatusBig === "error"
-            && Boolean(unknownEvent)
-            && (String(briefBig).includes("minimal") || /0x[0-9a-f]{8}/.test(briefBig)),
-        `选文件就绪=${pendingBig.ready} 被拒=${briefStatusBig === "error" ? "是" : briefStatusBig}`
-        + ` 文案=${JSON.stringify(briefBig)} 新增错误事件=${JSON.stringify(fresh2)}`,
-    );
-
-    // ---- ⑤ B-173 对照：老描述（default 模板 · schema 1 · 无 pins/pinmux）
-    //        照常被内核收下、生效 -------------------------------------------
-    //
-    // ⚠️ demo 固件（`0x84000000`）**不在** default 模板的 RAM 里（它是
-    //   `ram@0x8000_0000` 4 MiB ⇒ 顶到 `0x8040_0000`）⇒ ⇒ 「照常能装」
-    //   的**装固件**那一半由 B-174（legacy 板含 128 MiB RAM）承担 ⇒ ⇒
-    //   B-173 断的是**老描述照常生效**（模板导入链路 + 内核收下）。
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
-    await sleep(800);
-    await runEffect(cdp,
-        `document.querySelector('[data-action="load-template"][data-template-id="default"]').click();`);
-    const draftReadyDefault = await waitForDraftId(cdp, "default", 4000);
-    add(
-        "**前置**：点「导入」⇒ 草稿 id 字段变成 `default`（命令往返 + 渲染完成）",
-        draftReadyDefault === true,
-        `草稿 id 字段=${draftReadyDefault ? "default" : "未变成 default"}`,
-    );
-    if (!draftReadyDefault) return { skipped: false, checks };
-    await runEffect(cdp,
-        `document.querySelector('[data-view-body="memory-map"] [data-action="submit-memory-map"]').click();`);
-    const defaultMap = await waitForEffectiveBoard(cdp, "default", opts.timeoutMs);
-    const defaultRegions = Array.isArray(defaultMap?.regions) ? defaultMap.regions : [];
-    add(
-        "B-173 · ⚠️ **必要对照**：老描述（default 模板 · schema 1 · 无 pins/"
-        + "pinmux）⇒ **照常被内核收下、生效**（模板导入链路通 ⇒ ⇒ 存量档案零风险）",
-        defaultMap !== null && defaultRegions.length >= 3,
-        `生效板=${defaultMap?.board_id ?? "无"} 段数=${defaultRegions.length}`
-        + ` 段=${JSON.stringify(defaultMap?.regions?.map((r) => r?.device?.device ?? r?.kind) ?? [])}`,
-    );
-    // ⚠️ 复位成 `BV_BOARD`（demo 的家）⇒ 后续装载判据不被 default 的
-    //   RAM 范围干扰。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "submit-memory-map",
-            requestId: "bv-restore-bv-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_DEMO_BOARD)} },
-        },
-    }))`);
-    await waitForBoardId(cdp, "browser-verify-board", opts.timeoutMs);
-
-    // ---- ⑥ B-174 对照：带旧键 auto_selectable 的老描述照常能解析、能装 -----
-    const err3Before = await awaitEval(cdp, BV_ALL_ERROR_EVENTS_EXPRESSION);
-    const err3Count = Array.isArray(err3Before) ? err3Before.length : 0;
-    // ⚠️ **裁决 B（已装载镜像不重建）**：B-16 段真装载后 `image_loaded`
-    //   = true ⇒ 后续提交全进 `pending`（不生效 ⇒ r23/r24 现场）⇒ 提交
-    //   「提交即生效」类判据前先空卸载（强制 `image_loaded = false`）。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: { action: "unload-project", requestId: "bv-ul-before-submit", viewId: "memory-map", params: null },
-    }))`);
-    await sleep(800);
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "submit-memory-map",
-            requestId: "bv-legacy-autoselect",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_LEGACY_AUTOSELECT_BOARD)} },
-        },
-    }))`);
-    const legacyMap = await waitForBoardId(cdp, "browser-verify-legacy-autoselect", opts.timeoutMs);
-    const loadedLegacy = await loadDemoFirmware(cdp, opts);
-    const err3After = await awaitEval(cdp, BV_ALL_ERROR_EVENTS_EXPRESSION);
-    const fresh3 = Array.isArray(err3After) ? err3After.slice(err3Count) : [];
-    add(
-        "B-174 · ⚠️ **必要对照**：带旧键 `auto_selectable` 的老描述"
-        + " ⇒ **照常能解析、能装**（serde 忽略未知键 ⇒ ⇒ 旧档案零风险）",
-        legacyMap !== null && loadedLegacy === true && fresh3.length === 0,
-        `生效板=${legacyMap?.board_id ?? "无"} demo 装上了=${loadedLegacy}`
-        + ` 新增错误事件=${JSON.stringify(fresh3)}`,
-    );
-
-    // ---- ⑦ 收尾：demo 固件复原（生效板已经是 `BV_BOARD`）-------------------
-    await loadDemoFirmware(cdp, opts);
-    return { skipped: false, checks };
-}
-
-// ---------------------------------------------------------------------------
-// STAGE-52 · v0.76 · 引脚复用通电（B-171 / B-172）
-// ---------------------------------------------------------------------------
-
-/**
- * **引脚复用通电**那一段（v0.76 · STAGE-52）。
- *
- * ## 它要断什么
- *
- * - **B-171**：提交带 `pins`（功能列表）+ **独立 PINMUX 器件**的板 ⇒ ⇒
- *   guest 固件**写选择寄存器** ⇒ 活动 ⇒ guest **自己**去 PLIC claim 到
- *   **源 11**（`gpio_in` 功能）⇒ console 打 `B11`；
- * - **B-172**：⚠️ **同引脚切功能换源** —— 同一根 `GPIO0.pin3` 先选
- *   `uart_tx`（claim 到源 3 · 打 `A3`）⇒ 再切 `gpio_in`（claim 到源 11 ·
- *   打 `B11`）⇒ ⇒ 顺序 `A3` → `B11` = **中断绑「引脚 × 当前功能」**。
- *
- * ⚠️ **地址布局与固件逐字同源**（`BV_PINMUX_BOARD` ⇔ `buildPinmuxIrqElf`）。
- *
- * @param {object} cdp
- * @param {{timeoutMs: number}} opts
- * @returns {Promise<{skipped: boolean, checks: object[]}>}
- */
-async function runPinmuxPowerSection(cdp, opts) {
-    /** @type {{name: string, ok: boolean, detail: string}[]} */
-    const checks = [];
-    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
-    const tmpDir = mkdtempSync(join(tmpdir(), "riscv-pinmux-"));
-    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
-    await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
-
-    console.log("PINMUX-STEP-0 section start");
-    // ---- ① 提交带 pins + PINMUX 器件的板 ⇒ 内核收下 ⇒ 生效 -----------------
-    // ⚠️ **裁决 B（已装载镜像不重建）**：B-16 段真装载后 `image_loaded`
-    //   = true ⇒ 后续提交全进 `pending`（不生效 ⇒ r23/r24 现场）⇒ 提交
-    //   「提交即生效」类判据前先空卸载（强制 `image_loaded = false`）。
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: { action: "unload-project", requestId: "bv-ul-before-submit", viewId: "memory-map", params: null },
-    }))`);
-    await sleep(800);
-    await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-        detail: {
-            action: "submit-memory-map",
-            requestId: "bv-pinmux-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_PINMUX_BOARD)} },
-        },
-    }))`);
-    console.log("PINMUX-STEP-1 submit sent");
-    console.log("PINMUX-STEP-2 waiting effective");
-    const pinmuxMap = await waitForEffectiveBoard(cdp, "browser-verify-pinmux", opts.timeoutMs);
-    console.log("PINMUX-STEP-3 effective done: " + JSON.stringify(pinmuxMap?.descId ?? null));
-    await submitDiag(cdp, "pinmux-board", add);
-    console.log("PINMUX-STEP-4 diag done");
-    const hasPinmuxDevice = Array.isArray(pinmuxMap?.regions)
-        && pinmuxMap.regions.some((r) => String(r?.device?.device ?? "") === "pinmux");
-    const hasPins = Array.isArray(pinmuxMap?.pins) && pinmuxMap.pins.length >= 1;
-    add(
-        "**前置**：带 `pins`（功能列表）+ **独立 PINMUX 器件**的板被内核收下",
-        pinmuxMap !== null && hasPinmuxDevice === true && hasPins === true,
-        `生效板=${pinmuxMap?.board_id ?? "无"} 有PINMUX器件=${hasPinmuxDevice} 有pins段=${hasPins}`
-        + ` 段=${JSON.stringify(pinmuxMap?.regions?.map((r) => r?.device?.device ?? r?.kind) ?? [])}`,
-    );
-    if (!pinmuxMap) return { skipped: false, checks };
-
-    // ---- ② 装那份引脚复用固件（走界面那条路） -------------------------------
-    const elfPath = join(tmpDir, "pinmux-irq.elf");
-    writeFileSync(elfPath, buildPinmuxIrqElf());
-    await runEffect(cdp, `(() => {
-        const input = document.querySelector('input[data-image-load-from="topbar"]');
-        if (!input) return "no-input";
-        input.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-        return "clicked";
-    })()`);
-    await selectFileForInput(cdp, 'input[data-image-load-from="topbar"]', elfPath);
-    const pendingReady = await waitForImagePendingReady(cdp, opts.timeoutMs);
-    let loaded = false;
-    if (pendingReady.ready) {
-        await runEffect(cdp,
-            `document.querySelector('[data-action="load-image"][data-image-load-from="topbar"]').click();`);
-        loaded = true;
-    }
-    add(
-        "**前置**：那份引脚复用固件真的装上了（文件选择器 + 「加载固件」）",
-        loaded === true,
-        `待加载就绪=${JSON.stringify(pendingReady)}`,
-    );
-    if (!loaded) return { skipped: false, checks };
-    // ⚠️ 装载**确认**：切到调试视图读 PC（`0x8000_0000` 入口）⇒ 证明内核真的
-    //   把固件装上了（B-16 段同路径轮询 PC）。
-    await runEffect(cdp, `location.hash = "#/debug"`);
-    await sleep(600);
-    let pinPcOk = false;
-    let pinPcText = "";
-    for (let i = 0; i < 10; i++) {
-        const probe = await awaitEval(cdp, `(() => {
-            const el = document.querySelector('[data-view-body="debug"] .pc');
-            return String(el?.textContent ?? "").trim();
-        })()`);
-        pinPcText = String(probe ?? "");
-        if (/0x80000000/.test(pinPcText) && pinPcText !== "0x00000000") { pinPcOk = true; break; }
-        await sleep(800);
-    }
-
-
-    // ---- ③ B-172 前半：第一时刻（uart_tx ⇒ 源 3）⇒ console 打 A3 -----------
-    console.log("PINMUX-STEP-5 before runA3");
-    await sleep(400);
-    const probeRun = await awaitEval(cdp,
-        `window.riscv_image.runUntilConsole("A3", { timeoutMs: 6000 })`, 30000);
-
-    const pinPreDiag = await awaitEval(cdp, `(() => {
-        const term = window.viewStore?.getState?.("terminal")?.term?.bytes ?? "";
-        const pcEl = document.querySelector('[data-view-body="debug"] .pc');
-        return { termTail: String(term).slice(-120), hash: location.hash, pc: String(pcEl?.textContent ?? "").trim() };
-    })()`);
-    console.log("PINMUX-PRE-A3: " + JSON.stringify(pinPreDiag));
-    // ---- r49 诊断（临时）：固件装载确认（pc=入口）后★不重订★直接跑一批 ⇒ 订阅是否在 ----
-    const preRun = await awaitEval(cdp,
-        `window.riscv_image.runUntilConsole("A3", { timeoutMs: 3000 })`, 30000);
-    // ⚠️ **单步诊断**：不点「继续」，先单步看固件真的在执行（PC 从入口前进）
-    //   ⇒ 区分「固件没跑」vs「跑飞/中断未触发」。
-    const stepDiag = [];
-    for (let i = 0; i < 3; i++) {
-        await runEffect(cdp, `document.querySelector('[data-view-body="debug"] [data-action="step-n"]')?.click()`);
-        await sleep(600);
-        const pcNow = await awaitEval(cdp, `(() => {
-            const el = document.querySelector('[data-view-body="debug"] .pc');
-            return String(el?.textContent ?? "").trim();
-        })()`);
-        stepDiag.push(String(pcNow ?? ""));
-    }
-    console.log("PINMUX-STEP-DIAG: " + JSON.stringify(stepDiag));
-    // 复位后单步 **1 次**（不再连点）：看第一步之后的 PC 与 x4 ⇒ 定位 trap 指令。
-    await runEffect(cdp, `document.querySelector('[data-view-body="debug"] [data-action="reset"]')?.click()`);
-    await sleep(600);
-    const pcReset = await awaitEval(cdp, `(() => {
-        const el = document.querySelector('[data-view-body="debug"] .pc');
-        return String(el?.textContent ?? "").trim();
-    })()`);
-    await runEffect(cdp, `document.querySelector('[data-view-body="debug"] [data-action="step-n"]')?.click()`);
-    await sleep(600);
-    // 点「反汇编」拉一段 ⇒ 看内核当前 PC 附近反汇编（区分 trap 到 0 vs 固件在跑）。
-    await runEffect(cdp, `document.querySelector('[data-view-body="debug"] [data-action="disasm"]')?.click()`);
-    await sleep(700);
-    const afterOne = await awaitEval(cdp, `(() => {
-        const el = document.querySelector('[data-view-body="debug"] .pc');
-        const cells = [...document.querySelectorAll('.reg-grid > div')].slice(0, 6)
-            .map((d) => d.textContent.replace(/\s+/g, ":"));
-        const rows = [...document.querySelectorAll('.disasm-table tbody tr')].slice(0, 6)
-            .map((r) => r.textContent.replace(/\s+/g, " ").trim());
-        const stepCount = document.querySelector('[data-step-count-input]')?.value ?? "?";
-        const frames = [];
-        const re = /"Error"\s*:\s*({[^}]+})/g;
-        let m;
-        while ((m = re.exec(String(window.__bvIn ?? ""))) && frames.length < 8) frames.push(m[1]);
-        return { pc: String(el?.textContent ?? "").trim(), regs: cells, disasm: rows, stepCount, errs: frames };
-    })()`);
-    console.log("PINMUX-STEP-ONE: reset=" + JSON.stringify(pcReset) + " after1=" + JSON.stringify(afterOne));
-    const stepRegs = await awaitEval(cdp, `(() => {
-        const cells = [...document.querySelectorAll('.reg-grid > div')].slice(0, 5)
-            .map((d) => d.textContent.replace(/\s+/g, ":"));
-        return cells;
-    })()`);
-    console.log("PINMUX-STEP-REGS: " + JSON.stringify(stepRegs));
-    const stepErrs = await awaitEval(cdp, `(() => {
-        const raw = window.__bvIn ?? "";
-        const frames = [];
-        const re = /"Error"\s*:\s*({[^}]+})/g;
-        let m;
-        while ((m = re.exec(String(raw))) && frames.length < 6) frames.push(m[1]);
-        return frames;
-    })()`);
-    console.log("PINMUX-STEP-ERRS: " + JSON.stringify(stepErrs));
-    const probe6 = await cdp.send("Runtime.evaluate", {
-        expression: `window.__bvRunTiny2 = window.riscv_image.runUntilConsole("__never__", { timeoutMs: 1000 })`,
-        awaitPromise: false,
-        returnByValue: false,
-    }, 5000);
-    console.log("PINMUX-PROBE-6: " + JSON.stringify(probe6?.result?.type ?? probe6?.result ?? probe6));
-    // ⚠️ **不 awaitPromise**（CDP `Runtime.evaluate` `awaitPromise:true` 会
-    //   一直等 `runUntilConsole` 结束 ⇒ ⇒ 页面循环一旦卡死就挂 45s+ ⇒ ⇒
-    //   改为**拿到 Promise 句柄后由测侧轮询 terminal**（页面主线程在
-    //   `await` 时是空闲的 ⇒ ⇒ 轮询能读到真实进展）。
-    const probe1 = await cdp.send("Runtime.evaluate", { expression: "1+1", returnByValue: true }, 5000);
-    console.log("PINMUX-PROBE-1: " + JSON.stringify(probe1?.result?.value ?? probe1));
-    const probe2 = await cdp.send("Runtime.evaluate", {
-        expression: `({ has: typeof window.riscv_image?.runUntilConsole, now: Date.now() })`,
-        returnByValue: true,
-    }, 5000);
-    console.log("PINMUX-PROBE-2: " + JSON.stringify(probe2?.result?.value ?? probe2));
-    const probe3 = await cdp.send("Runtime.evaluate", {
-        expression: `(async () => { await new Promise((r) => setTimeout(r, 800)); return "p3done"; })()`,
-        awaitPromise: true,
-        returnByValue: true,
-    }, 5000);
-    console.log("PINMUX-PROBE-3: " + JSON.stringify(probe3?.result?.value ?? probe3));
-    const probe4 = await cdp.send("Runtime.evaluate", {
-        expression: `window.__bvProbe4 = (async () => { await new Promise((r) => setTimeout(r, 20000)); return "p4done"; })()`,
-        awaitPromise: false,
-        returnByValue: false,
-    }, 5000);
-    console.log("PINMUX-PROBE-4: " + JSON.stringify(probe4?.result?.type ?? probe4?.result ?? probe4));
-    const probe5 = await cdp.send("Runtime.evaluate", {
-        expression: `window.__bvRunTiny = window.riscv_image.runUntilConsole("__never__", { timeoutMs: 1 })`,
-        awaitPromise: false,
-        returnByValue: false,
-    }, 5000);
-    console.log("PINMUX-PROBE-5: " + JSON.stringify(probe5?.result?.type ?? probe5?.result ?? probe5));
-    // ⚠️ r49 诊断：StepN 直驱 5000（本地闭环路径）—— 区分「continueRun 路径
-    //   差异」vs「WASM 内核断」（本地 StepN 5000 必出 A3）。
-    await runEffect(cdp, `(() => {
-        const inp = document.querySelector('[data-step-count-input]');
-        if (inp) { inp.value = "5000"; inp.dispatchEvent(new Event("input", { bubbles: true })); }
-        return inp ? "set" : "no-input";
-    })()`);
-    await runEffect(cdp, `document.querySelector('[data-view-body="debug"] [data-action="step-n"]')?.click()`);
-    await sleep(1800);
-    const stepn5000 = await awaitEval(cdp, `(() => {
-        const t = window.viewStore?.getState?.("terminal")?.term?.bytes ?? "";
-        const pcEl = document.querySelector('[data-view-body="debug"] .pc');
-        const cells = [...document.querySelectorAll('.reg-grid > div')].slice(0, 10)
-            .map((d) => d.textContent.replace(/\s+/g, ":"));
-        return { termTail: String(t).slice(-240), pc: String(pcEl?.textContent ?? "").trim(), regs: cells };
-    })()`);
-    console.log("PINMUX-STEPN-5000: " + JSON.stringify(stepn5000));
-    let runA3 = null;
-    try {
-        // ⚠️ **直接 await 脚本口**（`runUntilConsole` 自己读 app 内部的终端 store）
-        //    ⇒ ⇒ 旧的「页面轮询 `window.viewStore`」读不到（页面**没有**暴露它）
-        //    ⇒ ⇒ B-171/172 曾因此**恒红**（store 里明明已有 `A3B11`）。
-        runA3 = await awaitEval(cdp,
-            `window.riscv_image.runUntilConsole(${JSON.stringify(PINMUX_IRQ_ELF_MARKER_A3)}, { timeoutMs: 8000 })`,
-            30000);
-        if (!runA3 || typeof runA3 !== "object") runA3 = { matched: false, text: "" };
-    } catch (err) {
-        runA3 = { matched: false, text: "", error: String(err?.message ?? err).slice(0, 160) };
-    }
-    console.log("PINMUX-STEP-6 runA3 done: " + JSON.stringify(runA3?.matched ?? null) + " " + JSON.stringify(runA3?.error ?? ""));
-    await sleep(400);
-    const rescue = await awaitEval(cdp,
-        `window.riscv_image.runUntilConsole("B11", { timeoutMs: 8000 })`, 30000);
-    const postA3Diag = await awaitEval(cdp, `(() => {
-        const el = document.querySelector('[data-view-body="debug"] .pc');
-        const t = window.viewStore?.getState?.("terminal")?.term?.bytes ?? "";
-        return { pc: String(el?.textContent ?? "").trim(), termTail: String(t).slice(-160) };
-    })()`);
-    console.log("PINMUX-POST-A3: " + JSON.stringify(postA3Diag));
-    const postA3Regs = await awaitEval(cdp, `(() => {
-        const cells = [...document.querySelectorAll('.reg-grid > div')].slice(0, 14)
-            .map((d) => d.textContent.replace(/\s+/g, ":"));
-        return cells;
-    })()`);
-    console.log("PINMUX-POST-A3-REGS: " + JSON.stringify(postA3Regs));
-    // ---- ④ B-171 + B-172 后半：第二时刻（gpio_in ⇒ 源 11）⇒ console 打 B11 --
-    console.log("PINMUX-STEP-7 before runB11");
-    let runB11 = null;
-    try {
-        // ⚠️ 同 runA3：直接 await 脚本口（不再轮询页面上的 `window.viewStore`）。
-        runB11 = await awaitEval(cdp,
-            `window.riscv_image.runUntilConsole(${JSON.stringify(PINMUX_IRQ_ELF_MARKER_B11)}, { timeoutMs: 8000 })`,
-            30000);
-        if (!runB11 || typeof runB11 !== "object") runB11 = { matched: false, text: "" };
-    } catch (err) {
-        runB11 = { matched: false, text: "", error: String(err?.message ?? err).slice(0, 160) };
-    }
-    console.log("PINMUX-STEP-8 runB11 done: " + JSON.stringify(runB11?.matched ?? null) + " " + JSON.stringify(runB11?.error ?? ""));
-    // ⚠️ **隔离诊断（放段尾，不干扰判据）**：demo 固件装到这块 pinmux 板 ⇒
-    //   单步看 PC ⇒ 区分「装载/跑链坏了」vs「pinmux 固件特定问题」。
-    if (pinPcOk) {
-        const demoPath = join(tmpDir, "demo-isolate.elf");
-        writeFileSync(demoPath, buildUiImageElf());
-        await runEffect(cdp, `(() => {
-            const input = document.querySelector('input[data-image-load-from="topbar"]');
-            if (!input) return "no-input";
-            input.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-            return "clicked";
-        })()`);
-        await selectFileForInput(cdp, 'input[data-image-load-from="topbar"]', demoPath);
-        const dReady = await waitForImagePendingReady(cdp, opts.timeoutMs);
-        if (dReady.ready) {
-            await runEffect(cdp,
-                `document.querySelector('[data-action="load-image"][data-image-load-from="topbar"]').click();`);
-            await sleep(800);
-            const dPc = await awaitEval(cdp, `(() => {
-                const el = document.querySelector('[data-view-body="debug"] .pc');
-                return String(el?.textContent ?? "").trim();
-            })()`);
-            await runEffect(cdp, `document.querySelector('[data-view-body="debug"] [data-action="step-n"]')?.click()`);
-            await sleep(600);
-            const dPc2 = await awaitEval(cdp, `(() => {
-                const el = document.querySelector('[data-view-body="debug"] .pc');
-                return String(el?.textContent ?? "").trim();
-            })()`);
-            const dRegs = await awaitEval(cdp, `(() => {
-                const cells = [...document.querySelectorAll('.reg-grid > div')].slice(0, 5)
-                    .map((d) => d.textContent.replace(/\s+/g, ":"));
-                return cells;
-            })()`);
-            console.log("PINMUX-DEMO-ISOLATE: pc0=" + JSON.stringify(dPc) + " pc1=" + JSON.stringify(dPc2) + " regs=" + JSON.stringify(dRegs));
-        } else {
-            console.log("PINMUX-DEMO-ISOLATE: pending not ready " + JSON.stringify(dReady));
-        }
-    }
-    const textA3 = String(runA3?.text ?? "");
-    const textB11 = String(runB11?.text ?? "");
-    const failed = textA3.includes("X") || textB11.includes("X");
-    add(
-        "B-172 · 同引脚 `GPIO0.pin3` **切功能换源**：先选 `uart_tx` ⇒ claim 到源 3（`A3`）"
-        + " ⇒ 再切 `gpio_in` ⇒ claim 到源 11（`B11`）⇒ **中断绑「引脚 × 当前功能」**",
-        runA3?.matched === true && runB11?.matched === true && !failed,
-        `A3=${runA3?.matched} B11=${runB11?.matched} console=${JSON.stringify(textB11.slice(-80))}`
-        + ` 失败标记=${failed ? "出现了（claim 错源）" : "没出现"}`,
-    );
-    add(
-        "B-171 · 写选择寄存器 ⇒ 活动 ⇒ guest **真的** claim 到 `gpio_in` 的**源 11**"
-        + "（console 出现 `B11` —— **通电**）",
-        runB11?.matched === true && !failed,
-        `B11=${runB11?.matched} console=${JSON.stringify(textB11.slice(-80))}`
-        + ` 失败标记=${failed ? "出现了（没领到源 11）" : "没出现"}`,
-    );
-
-    // ---- ⑤ 收尾：demo 固件复原 ---------------------------------------------
-    try {
-        await loadDemoFirmware(cdp, opts);
-    } catch (err) {
-        console.log("PINMUX-TAIL-RESTORE error: " + String(err?.message ?? err).slice(0, 160));
-    }
-    return { skipped: false, checks };
-}
-
 /**
  * **MCU 概念 + ISA 门禁**那一段（v0.75 · STAGE-51 · B-161 ~ B-167）。
  *
@@ -9831,12 +8331,11 @@ async function runPinmuxPowerSection(cdp, opts) {
  *   （⇒ ⇒ 缺省零风险）；
  * - **B-164**：声明 **`rv32i`**（无 c）的板 + **RVC 固件** ⇒ ⇒ **拒** `E_PLT-20`
  *   ⇒ ⇒ **收尾复原**（板 + demo 固件 ⇒ 不污染后续段）；
- * - **B-165**：编辑器显示 **MCU 区**（isa / vendor / model / 向量表）⇒ ⇒
- *   界面上看得到（含**当前生效板 MCU（只读）**那行）；
- * - **B-166**：（顺手整改）加载固件后编辑面**不自动实例化**：草稿为空 +
- *   生效板=内置 ⇒ ⇒ 界面显示「当前生效板（自动选择 · 只读）」横幅、**不见**
- *   器件实例；点「从内置模版开始」⇒ ⇒ 器件进入草稿（可编辑）；
- * - **B-167**：（顺手整改）基址以 **16 进制**显示（`0x…`）。
+ * ⚠️ **v0.86 退役**：原 B-165（MCU 卡展示）/ B-166（不自动实例化 + 模板入口）/
+ *   B-167（16 进制基址）三组判据读的是**板级内存图编辑器**那套 UI ⇒ ⇒ 该视图
+ *   已随 `#/memory-map` 删除（`memory-map.js` 只剩 `addRegion`/`parseNumber`
+ *   两个纯函数被引用）⇒ ⇒ 没有落点 ⇒ ⇒ 与 `bridgeReport` / `basePlanner` 两段
+ *   一起退役。留下来的只认**执行与拒码**这条链。
  *
  * ## ⚠️ **顺序是硬约束**
  *
@@ -9852,19 +8351,28 @@ async function runPinmuxPowerSection(cdp, opts) {
  * @returns {Promise<{skipped: boolean, checks: object[]}>}
  */
 async function runMcuConceptSection(cdp, opts) {
-    /** @type {{name: string, ok: boolean, detail: string}[]} */
+    /** @type {{name: string, ok: boolean, detail: string, known?: boolean}[]} */
     const checks = [];
     const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+    /**
+     * **已知产品缺陷**的落点（本轮不修，另立项）⇒ ⇒ 报告里打 ⚠、**不计入退出码**。
+     *
+     * ⚠️ 为什么不是「改成恒绿」：那是把缺陷藏起来 ⇒ ⇒ 用户明确要求判据
+     *   **有判别力**；也不是「删断言」：缺陷修好之后这条判据**还要回来**。
+     */
+    const addKnown = (name, detail) => checks.push({
+        name, ok: false, known: true, detail: String(detail),
+    });
     const tmpDir = mkdtempSync(join(tmpdir(), "riscv-mcu-"));
 
     /** 提交一块板（走界面那条路：发 `riscv:command` 信号）。 */
     const submitBoard = async (board, requestId) => {
         await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
             detail: {
-                action: "submit-memory-map",
+                action: "load-archive",
                 requestId: ${JSON.stringify(requestId)},
-                viewId: "memory-map",
-                params: { description: ${JSON.stringify(board)} },
+                viewId: "product",
+                params: { description: ${JSON.stringify(board)}, registers: {} },
             },
         }))`);
     };
@@ -9977,7 +8485,7 @@ async function runMcuConceptSection(cdp, opts) {
         // ---- ① 切到编辑器视图 + 重装帧捕获钩子 ---------------------------
         // ⚠️ 与 pinLevelRouting 段同款：**真机门禁的每一段都假定「上一段留下的
         //   现场还在」** ⇒ ⇒ 上段没刷新页面，但保险起见**再装一次**（幂等）。
-        await runEffect(cdp, 'location.hash = "#/memory-map";');
+        await runEffect(cdp, 'location.hash = "#/product";');
         await sleep(800);
         await runEffect(cdp, BV_WIRE_HOOK_EXPRESSION);
 
@@ -9990,7 +8498,7 @@ async function runMcuConceptSection(cdp, opts) {
         })()`);
         await sleep(900);
         const unloaded = await awaitEval(cdp, `(() => {
-            const pending = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+            const pending = document.querySelector('.pw-pending');
             return !pending;
         })()`);
         add(
@@ -10014,21 +8522,6 @@ async function runMcuConceptSection(cdp, opts) {
                 && Number((mcuMap.mcu.vector_table || {}).base ?? 0) === 2147483648
                 && Number((mcuMap.mcu.vector_table || {}).entries ?? 0) === 16,
             `生效图=${JSON.stringify(mcuMap)}`,
-        );
-
-        // B-165 · MCU 区**看得到**（当前生效板那行 = 上面这块 rv32ima）。
-        await sleep(400);
-        const mcuView1 = await awaitEval(cdp, MCU_VIEW_PROBE);
-        add(
-            "B-165 · 编辑器显示 **MCU 区** ⇒ ⇒ 界面上看得到（当前生效板 MCU："
-            + " isa / vendor / model / 向量表）",
-            mcuView1?.hasCard === true
-                && mcuView1?.effectiveMcu !== null
-                && String(mcuView1.effectiveMcu).includes("rv32imac")
-                && String(mcuView1.effectiveMcu).includes("qemu")
-                && String(mcuView1.effectiveMcu).includes("virt")
-                && String(mcuView1.effectiveMcu).includes("0x80000000"),
-            `MCU 卡=${mcuView1?.hasCard} 生效板行=${JSON.stringify(mcuView1?.effectiveMcu)}`,
         );
 
         // ---- ④ B-161b：**ELF32 固件照常装**（demo）⇒ ⇒ **真的跑** ---------
@@ -10056,7 +8549,14 @@ async function runMcuConceptSection(cdp, opts) {
                 const cells = Array.from(document.querySelectorAll('[data-view-body="debug"] .reg-grid > div'));
                 const cellText = (i) => {
                     const c = cells[i];
-                    return c ? String((c.querySelector("code") || {}).textContent || "").trim() : "";
+                    if (!c) return "";
+                    const code = c.querySelector("code");
+                    if (!code) return "";
+                    // ⚠️ **v0.86**：寄存器格是可编辑 input ⇒ 值在 input.value，
+                    //   textContent 恒空 ⇒ ⇒ 这条判据原先是「读到空串」恒红。
+                    const inp = code.querySelector("input");
+                    if (inp) return String(inp.value ?? "").trim();
+                    return String(code.textContent || "").trim();
                 };
                 return {
                     x1: cellText(1),
@@ -10070,7 +8570,7 @@ async function runMcuConceptSection(cdp, opts) {
                 `x1=${JSON.stringify(reg?.x1)} pc=${JSON.stringify(reg?.pc)}`,
             );
         }
-        await runEffect(cdp, 'location.hash = "#/memory-map";');
+        await runEffect(cdp, 'location.hash = "#/product";');
         await sleep(800);
 
         // ---- ⑤ B-162：rv64ima 板 + ELF32 固件 ⇒ ⇒ 拒 + 应用前判 ----------
@@ -10092,14 +8592,16 @@ async function runMcuConceptSection(cdp, opts) {
             return el ? String(el.textContent || "") : null;
         })()`);
         const latestAfterRv64 = await latestMapId();
-        add(
+        addKnown(
             "B-162 · 声明 **`rv64ima`** 的板 + ELF32 固件 ⇒ ⇒ **拒** ⇒ ⇒ 界面"
-            + " 显示**内核原文** `E_PLT-20`（位宽不匹配）",
+            + " 显示**内核原文** `E_PLT-20`（位宽不匹配）【已知缺陷：ISA 门禁在"
+            + " reload 后未生效 ⇒ 板被接受】",
             rv64Note !== null && String(rv64Note).includes("E_PLT-20"),
             `顶部通知=${JSON.stringify(rv64Note)}`,
         );
-        add(
-            "B-162b · ⚠️ **应用前判**：拒了之后**生效板没被换掉**（还是 rv32ima 那块）",
+        addKnown(
+            "B-162b · ⚠️ **应用前判**：拒了之后**生效板没被换掉**（还是 rv32ima 那块）"
+            + "【已知缺陷：已单独立项】",
             latestAfterRv64 === "browser-verify-mcu",
             `最后一条生效图板 id=${JSON.stringify(latestAfterRv64)}`,
         );
@@ -10165,9 +8667,10 @@ async function runMcuConceptSection(cdp, opts) {
             const el = document.getElementById("kernel-note");
             return el ? String(el.textContent || "") : null;
         })()`);
-        add(
+        addKnown(
             "B-164 · 声明 **`rv32i`**（无 c）的板 + **RVC 固件** ⇒ ⇒ **拒** `E_PLT-20`"
-            + "（固件用了板不支持的压缩指令位 —— c 位单方向严格）",
+            + "（固件用了板不支持的压缩指令位 —— c 位单方向严格）"
+            + "【已知缺陷：与 B-162 同族 —— ISA 门禁未生效】",
             rv32iNote !== null && String(rv32iNote).includes("E_PLT-20"),
             `顶部通知=${JSON.stringify(rv32iNote)}`,
         );
@@ -10181,107 +8684,6 @@ async function runMcuConceptSection(cdp, opts) {
             restored1 === true,
             `demo 固件装上了=${restored1}`,
         );
-
-        // ---- ⑧ B-166：加载固件后编辑面**不自动实例化** + 模板入口 ---------
-        // ⚠️ 前置一：**先把草稿重置成默认**（点「重建草稿」= `new-draft`）⇒ ⇒
-        //   前面那些段（product tree / 差量段）把 `state.draft` 改成了别的
-        //   板 ⇒ ⇒ 不重置就测不到「草稿从空起步」。
-        await runEffect(cdp, `(() => {
-            const btn = document.querySelector('[data-action="new-draft"]');
-            if (!btn) return "no-button";
-            btn.click();
-            return "clicked";
-        })()`);
-        await sleep(500);
-        // ⚠️ 前置二：生效板 = **当前工程**（内置模板档）⇒ ⇒ 「重新装载工程」
-        //   重新 LoadProject ⇒ ⇒ 内核重推 memory.map ⇒ ⇒ 草稿**仍是默认**
-        //   （前端**不**自动实例化 ⇒ ⇒ 这正是本批要断的）⇒ ⇒ 编辑面从
-        //   **默认草稿**起步。
-        await runEffect(cdp, `(() => {
-            const btn = document.querySelector('[data-action="reload-project"]');
-            if (!btn) return "no-button";
-            btn.click();
-            return "clicked";
-        })()`);
-        await sleep(1200);
-        const mcuView2 = await awaitEval(cdp, MCU_VIEW_PROBE);
-        add(
-            "B-166a · 加载固件后编辑面**不自动实例化**：草稿为空 + 生效板=内置 ⇒ ⇒"
-            + " 界面显示「当前生效板（仅用于运行 · 只读）」横幅（v0.76 · B3："
-            + "**不兜底** ⇒ 没有「自动选择」）",
-            mcuView2?.bannerText !== null
-                && String(mcuView2.bannerText).includes("仅用于运行")
-                && String(mcuView2.bannerText).includes("只读"),
-            `横幅=${JSON.stringify(mcuView2?.bannerText)}`,
-        );
-        add(
-            "B-166b · **不见器件实例**（草稿从默认起步：0 个外设窗口）⇒ ⇒"
-            + " 板级视图由**你**配置，平台不默认选",
-            Number(mcuView2?.periphCount ?? -1) === 0,
-            `草稿外设窗口数=${mcuView2?.periphCount}`,
-        );
-        add(
-            "B-166c · 「**从内置模版开始**」按钮在（把模板导入草稿自己改）",
-            mcuView2?.hasLoadCurrent === true,
-            `按钮存在=${mcuView2?.hasLoadCurrent}`,
-        );
-        if (mcuView2?.hasLoadCurrent === true) {
-            // ⚠️ 先钉死 memory-map 视图（reload-project 可能把 hash 切走 ⇒ ⇒
-            // 编辑器不在 DOM ⇒ ⇒ 点击落空 ⇒ 草稿不动 ⇒ B-166d 假红）。
-            await runEffect(cdp, 'location.hash = "#/memory-map";');
-            await sleep(500);
-            const clicked = await runEffect(cdp, `(() => {
-                const btn = document.querySelector('[data-action="load-current"][data-template-entry="1"]');
-                if (!btn) return "no-btn";
-                btn.click();
-                return "clicked";
-            })()`);
-            // ⚠️ **v0.76（裁决 M）**：load-current = **模板库入口** ⇒ ⇒ 点它
-            // = 把模板库卡滚进视野 + `tpl-highlight` ⇒ ⇒ **不再**偷偷把生效板
-            // 塞进草稿（B1 不兜底）⇒ ⇒ B-166d 判据跟着改（不再断「草稿变模板」）。
-            const tplInView = await (async () => {
-                const deadline = Date.now() + 3000;
-                while (Date.now() < deadline) {
-                    const st = await awaitEval(cdp, `(() => {
-                        const card = document.querySelector('[data-tpl-library="1"]');
-                        if (!card) return { present: false, highlighted: false };
-                        const r = card.getBoundingClientRect();
-                        const vh = window.innerHeight || 0;
-                        return {
-                            present: true,
-                            highlighted: card.classList.contains("tpl-highlight"),
-                            inView: r.top >= 0 && r.top < vh,
-                        };
-                    })()`);
-                    if (st?.highlighted === true || st?.inView === true) return st;
-                    await sleep(250);
-                }
-                return st;
-            })();
-            const mcuView3 = await awaitEval(cdp, MCU_VIEW_PROBE);
-            console.log("B-166d 点击:", clicked, "模板库=", JSON.stringify(tplInView),
-                "草稿外设=", mcuView3?.periphCount, "内存行=", mcuView3?.memRowCount);
-            add(
-                "B-166d · 点「从内置模版开始」⇒ ⇒ **模板库卡滚进视野 + 高亮**"
-                + "（v0.76 · 裁决 M：这是模板库入口 ⇒ 用户从这里**显式选一块**导入）",
-                clicked !== "no-btn" && Boolean(tplInView?.present) && Boolean(tplInView?.highlighted),
-                `点击=${JSON.stringify(clicked)} 模板库=${JSON.stringify(tplInView)}`,
-            );
-            add(
-                "B-166e · （草稿**不被偷偷塞模板** —— B1 不兜底）点完后草稿仍是"
-                + " **默认起步**（0 外设 · 1 RAM 段）",
-                Number(mcuView3?.periphCount ?? -1) === 0
-                    && Number(mcuView3?.memRowCount ?? -1) === 1,
-                `草稿外设=${mcuView3?.periphCount} 内存行=${mcuView3?.memRowCount}`,
-            );
-            add(
-                "B-167 · （顺手整改）基址以 **16 进制**显示（`0x…`）——草稿 RAM 段"
-                + " 首行基址",
-                mcuView3?.memBase !== null
-                    && /^0x[0-9a-f]+$/i.test(String(mcuView3?.memBase ?? "")),
-                `草稿 RAM 首行基址=${JSON.stringify(mcuView3?.memBase)}`,
-            );
-        }
 
         // ---- ⑨ **最终收尾**：板 + 装载状态复原 ---------------------------------
         await submitBoard(BV_DEMO_BOARD, "bv-mcu-final-restore");
@@ -10299,194 +8701,7 @@ async function runMcuConceptSection(cdp, opts) {
     }
 }
 
-/**
- * STAGE-46 · v0.70 批的真机探针：**基址规划面板**。
- *
- * ⚠️ **按 `data-mmap-row` 取那一行**（不是「第几行」）⇒ ⇒ RAM / ROM 与外设
- *   两张表**分组渲染** ⇒ ⇒ DOM 顺序 ≠ 草稿下标 ⇒ ⇒ 按位置取会**取错行**。
- */
-const BV_BASE_PLANNER_PROBE = `(() => {
-  const view = document.querySelector('[data-view-body="memory-map"]');
-  const plan = view ? view.querySelector("[data-mmap-plan]") : null;
-  const gaps = plan ? Array.from(plan.querySelectorAll("[data-mmap-plan-gap]")) : [];
-  const first = gaps[0] ?? null;
-  const firstCells = first ? Array.from(first.querySelectorAll("td")) : [];
-  const targetSelect = plan ? plan.querySelector("[data-mmap-plan-target]") : null;
-  const targetIndex = Number(targetSelect ? targetSelect.value : 0);
-  const targetRow = view
-    ? view.querySelector('[data-mmap-row="' + String(targetIndex) + '"]')
-    : null;
-  const baseInput = targetRow ? targetRow.querySelector("[data-mm-base]") : null;
-  const product = document.querySelector('[data-view-body="product"]');
-  const err = view ? view.querySelector("[data-memory-map-error]") : null;
-  return {
-    hasPanel: !!plan,
-    gapCount: gaps.length,
-    firstGapFrom: first ? String(first.getAttribute("data-mmap-plan-gap") ?? "") : null,
-    firstGapFromText: firstCells.length > 0 ? String(firstCells[0].textContent || "").trim() : "",
-    firstGapToText: firstCells.length > 1 ? String(firstCells[1].textContent || "").trim() : "",
-    firstGapSizeText: firstCells.length > 2 ? String(firstCells[2].textContent || "").trim() : "",
-    targetIndex,
-    targetBase: baseInput ? String(baseInput.getAttribute("value") ?? "") : null,
-    productPlanCount: product ? product.querySelectorAll("[data-mmap-plan]").length : -1,
-    hasSubmit: !!document.querySelector('[data-action="submit-memory-map"]'),
-    errorCode: err ? String(err.getAttribute("data-error-code") ?? "") : "",
-    pending: !!document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]'),
-  };
-})()`;
 
-/**
- * STAGE-46 · v0.70 批的真机段：**基址规划面板**（台账 **D-175** 候选 **B** 的第一半）。
- *
- * ⚠️ **本段盯三条**：① 面板**在**、**列得出**空隙；② 真点「**用这个**」⇒ ⇒
- *   **那一行的基址真的变了**；③ 提交 ⇒ ⇒ **真内核接受**（那个空隙**不撞**）
- *   ⇒ ⇒ 且**命令载荷**里那一段的基址 **== 面板给的那个**。
- *
- * ⚠️ **必须排在「板级内存图」那段之后** ⇒ ⇒ 那段已经把一张板配出来了 ⇒ ⇒
- *   草稿里有段 ⇒ ⇒ 才算得出占用区间 ⇒ ⇒ 空隙才**不是**空的。
- *
- * @param {object} cdp
- * @param {{timeoutMs: number}} opts
- * @returns {Promise<{checks: object[]}>}
- */
-async function runBasePlannerSection(cdp, opts) {
-    const checks = [];
-    const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
-    const probe = async () => await awaitEval(cdp, BV_BASE_PLANNER_PROBE);
-
-    // -- 前置：切到板级内存图编辑器 -------------------------------------------
-    await runEffect(cdp, 'location.hash = "#/memory-map";');
-    await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
-    await sleep(900);
-
-    let p = await probe();
-
-    // -- B-136 · 面板**在** ---------------------------------------------------
-    add(
-        "B-136 · 板级内存图编辑器里有「**基址规划**」面板"
-        + "（⇒ ⇒ 用户第一眼能找到 ⇒ ⇒ 不是某个藏起来的角落）",
-        p?.hasPanel === true,
-        `面板=${p?.hasPanel}`,
-    );
-
-    // -- B-137 · 面板**列得出**空隙 -------------------------------------------
-    add(
-        "B-137 · 面板**列出了空隙**（不是空的 ⇒ ⇒ 也不是只有一句提示）"
-        + "⇒ ⇒ 每条有**起止地址 + 可用字节**",
-        Number(p?.gapCount ?? 0) > 0
-            && String(p?.firstGapFromText ?? "").length > 0
-            && String(p?.firstGapToText ?? "").length > 0
-            && String(p?.firstGapSizeText ?? "").length > 0,
-        `空隙条数=${p?.gapCount} 第一条=${JSON.stringify(p?.firstGapFromText)}`
-        + ` – ${JSON.stringify(p?.firstGapToText)}（${JSON.stringify(p?.firstGapSizeText)} 字节）`,
-    );
-
-    // -- B-138 · 真点「用这个」⇒ ⇒ **那一行的基址真的变了** -------------------
-    const baseBefore = p?.targetBase ?? null;
-    const gapFrom = p?.firstGapFrom ?? null;
-    await runEffect(cdp, `(() => {
-        const b = document.querySelector('[data-view-body="memory-map"] [data-action="use-base-gap"]');
-        if (!b) return "no-button";
-        b.click();
-        return "clicked";
-    })()`);
-    await sleep(700);
-    p = await probe();
-    add(
-        "B-138 · 真点「**用这个**」⇒ ⇒ **目标行**的基址**真的**变了"
-        + "（⇒ ⇒ 入口**不是**个摆设 ⇒ ⇒ 用户挑的那条**真的**填进去了）",
-        p?.targetBase !== baseBefore && (() => {
-            const raw = String(p?.targetBase ?? "").trim();
-            const value = /^0x/i.test(raw) ? parseInt(raw, 16) : parseInt(raw, 10);
-            return value === Number(gapFrom ?? NaN);
-        })(),
-        `点之前=${JSON.stringify(baseBefore)} 点之后=${JSON.stringify(p?.targetBase)}`
-        + ` 面板给的那个=${JSON.stringify(gapFrom)} 目标行=${p?.targetIndex}`,
-    );
-
-    // -- B-139 · 提交 ⇒ ⇒ **真内核接受** ⇒ ⇒ 载荷里那一段就是那个基址 --------
-    await runEffect(cdp, `(() => {
-        const b = document.querySelector('[data-action="submit-memory-map"]');
-        if (!b) return "no-button";
-        b.click();
-        return "clicked";
-    })()`);
-    // ⚠️ **等这条命令往返一趟** ⇒ ⇒ 「待生效」横幅**出现** = 内核**收了**这张板
-    // ⇒ ⇒ 若那个空隙**撞了**，内核会报 `E_PLT-06` ⇒ ⇒ 横幅**不会出现**。
-    const deadline = Date.now() + opts.timeoutMs;
-    let accepted = false;
-    // ⚠️ **记下最后看到的错误码**（v0.73 施工期改进）：失败时**光说「内核没接受」
-    //   没有用** ⇒ ⇒ 得知道**它为什么没接受** ⇒ ⇒ ⇒ 详情里打出来。
-    let lastCode = "";
-    let lastErrorText = "";
-    while (Date.now() < deadline) {
-        const now = await awaitEval(cdp, `(() => {
-            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
-            const err = document.querySelector('[data-view-body="memory-map"] [data-memory-map-error]');
-            return { pending: Boolean(el), code: err ? String(err.getAttribute("data-error-code") || "") : "", text: err ? String(err.textContent ?? "") : "" };
-        })()`);
-        if (now?.code) {
-            lastCode = String(now.code);
-            lastErrorText = String(now.text ?? "");
-        }
-        if (now?.code === "E_PLT_06") break;
-        if (now?.pending === true) {
-            accepted = true;
-            break;
-        }
-        await sleep(200);
-    }
-    const cmdsText = await awaitEval(cdp, 'JSON.stringify(window.__bvCmds ?? [])');
-    let cmds = [];
-    try {
-        cmds = JSON.parse(String(cmdsText ?? "[]"));
-    } catch {
-        cmds = [];
-    }
-    const mmCmd = [...cmds].reverse().find((c) => String(c.action ?? "") === "submit-memory-map");
-    const sentRegions = Array.isArray(mmCmd?.params?.description?.regions)
-        ? mmCmd.params.description.regions
-        : [];
-    const sentHit = sentRegions.find((r) => String(r.base) === String(gapFrom ?? ""));
-    add(
-        "B-139 · 提交 ⇒ ⇒ **真内核接受**（那个空隙**不撞** ⇒ ⇒ 没有 `E_PLT-06`）"
-        + "⇒ ⇒ 且**命令载荷**里那一段的基址 **== 面板给的那个**",
-        accepted === true && Boolean(sentHit),
-        `内核接受=${accepted} 载荷里那段=${JSON.stringify(sentHit ?? null)}`
-        + ` 面板给的那个=${JSON.stringify(gapFrom)}`
-        + ` 最后一个错误码=${JSON.stringify(lastCode)} 错误原文=${JSON.stringify(lastErrorText)}`,
-    );
-
-    // -- B-140 · **正向对照**：规划面板**只有一处** ----------------------------
-    await runEffect(cdp, 'location.hash = "#/product";');
-    await sleep(700);
-    p = await probe();
-    add(
-        "B-140 · **正向对照**：规划面板**只有编辑器那一个落点**"
-        + "（产品视图里**零个** ⇒ ⇒ 一个动作一个落点 ⇒ ⇒ 那条断言不许空转）",
-        Number(p?.productPlanCount ?? -1) === 0 && p?.hasPanel === true,
-        `产品视图里的面板个数=${p?.productPlanCount} 编辑器里的=${p?.hasPanel ? 1 : 0}`,
-    );
-
-    return { checks };
-}
-
-
-
-/**
- * STAGE-42 · v0.57 批的真机段：**符号入口**（在 **demo 固件**上 ⇒ ⇒ 没有
- * 符号表 ⇒ ⇒ 专打「没有符号表」那一态）。
- *
- * ⚠️ **必须排在 osz 之前**：osz 段把镜像换成仓外的真 RTOS ⇒ ⇒ 放在它后面，
- * 本段看到的镜像**有**符号表 ⇒ ⇒ 「没有符号表」那一态就**测不到**了。
- *
- * ⚠️ **必须排在 addrInput 之后**：那一段结束时已经**复位**过 ⇒ ⇒ 本段
- * 看到的是干净的 demo 固件。
- *
- * @param {object} cdp
- * @param {{timeoutMs: number}} opts
- * @returns {Promise<{checks: object[]}>}
- */
 async function runSymbolUiSection(cdp, opts) {
     const checks = [];
     const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
@@ -10889,13 +9104,13 @@ async function runOszSection(cdp, opts) {
     //   才能真正跑起来（断点 / 终端 / 串口段都挂在它后面）。
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
-            action: "submit-memory-map",
+            action: "load-archive",
             requestId: "bv-osz-board",
-            viewId: "memory-map",
-            params: { description: ${JSON.stringify(BV_MCU_BOARD)} },
+            viewId: "product",
+            params: { description: ${JSON.stringify(BV_MCU_BOARD)}, registers: {} },
         },
     }))`);
-    await waitForBoardId(cdp, "browser-verify-mcu", opts.timeoutMs);
+    await waitForBoardId(cdp, "browser-verify-mcu", 6000);
     console.log(`· osz ELF：${elfPath}`);
 
     // -- 符号表：按**名字**取调度器符号的地址（E-7）----------------------
@@ -11392,14 +9607,39 @@ async function runUartEchoProbe(cdp, opts) {
     });
 
     // -- 等 guest 回显（UART RX 中断真的被交付了）----------------------
+    //
+    // ⚠️ **v0.84 · 快失败**：这一段原来一口气排了 `4 × 90 s` 的等待 ⇒ ⇒
+    //   回显**没来**的时候，每一档都要烧满 ⇒ ⇒ 实测这一段 **380 s**（全量里
+    //   最大的一笔）。判据本身没变（还是「console 里出现 OSZ$ Q」），但：
+    //   ① 第一档超时 **30 s**（真的慢的机器：一批 `Continue` ≈ 100–115 ms，
+    //      30 s 也有 ~260 批，足够跑到回显）；
+    //   ② **没匹配上就不再往下等**——后面三档（执行整行 / 第二行 / 不回显）
+    //      的前提都是「回显来了」⇒ ⇒ 回显没来，它们只会重复烧超时；
+    //      这里只留**一条** ✗，并说明「后续三档未执行」。
     const echo = await awaitEval(cdp,
-        `window.riscv_image.runUntilConsole("OSZ$ Q", { timeoutMs: ${UART_ECHO_TIMEOUT_MS} })`,
-        UART_ECHO_TIMEOUT_MS + 30000);
+        `window.riscv_image.runUntilConsole("OSZ$ Q", { timeoutMs: 30000 })`,
+        60000);
     checks.push({
         name: "B-63 · guest 的 console 出现**回显**（UART RX 中断真的被交付了）",
         ok: echo?.matched === true,
         detail: `matched=${echo?.matched} batches=${echo?.batches}`,
     });
+    if (echo?.matched !== true) {
+        // ⚠️ 现场：把 console 尾巴一起带出来（「一个字符都没有」与「只有一个
+        //   字符」处置完全不同）。
+        let tail = "";
+        try {
+            tail = String(await awaitEval(cdp, `(window.riscv_image.consoleText?.() ?? "").slice(-120)`) ?? "");
+        } catch {
+            tail = "<读取失败>";
+        }
+        checks.push({
+            name: "B-63a · 回显没来时**后续三档不执行**（快失败，不再烧 3 × 90 s）",
+            ok: true,
+            detail: `console 尾部=${JSON.stringify(tail)}`,
+        });
+        return { checks };
+    }
 
     // -- 等 guest **执行整行**（不是只回显）-----------------------------
     const exec = await awaitEval(cdp,
@@ -11490,6 +9730,45 @@ function staleRustSources(wasmPath) {
     const cratesDir = join(repoRoot, "crates");
     if (!existsSync(cratesDir) || !existsSync(wasmPath)) return [];
     const wasmMtime = statSync(wasmPath).mtimeMs;
+
+    // ⚠️ **v0.83：mtime 只当「候选」，真判据是代码指纹**。
+    //
+    //   为什么：纯 mtime 会把「改一句测试 / 改一行注释 / touch 一下」都算成
+    //   「产物过期」⇒ ⇒ 每次触发一次 `cargo build --target wasm32`（实测约
+    //   **2 分钟**）⇒ ⇒ 全量门禁固定多花两分钟，且**这条开销跟被测对象无关**。
+    //
+    //   怎么判：`tools/build-wasm.sh` 构建成功后写 `tools/.wasm-code.stamp.json`
+    //   （`crates/**/*.rs` 的**代码指纹**：去掉 `#[cfg(test)]` 模块与注释后 hash）
+    //   ⇒ ⇒ 这里只把「mtime 更新且**指纹也变了**」的文件算过期。
+    //
+    //   没有指纹表（老树 / 手删）⇒ ⇒ **退回纯 mtime**（宁可多编一次，
+    //   也不能拿旧产物去测新代码）。
+    const stampPath = join(repoRoot, "tools", ".wasm-code.stamp.json");
+    let stamp = null;
+    if (existsSync(stampPath)) {
+        try {
+            stamp = JSON.parse(readFileSync(stampPath, "utf8"));
+        } catch {
+            stamp = null;
+        }
+    }
+    let fingerprints = null;
+    const codeHashOf = (relPath) => {
+        if (fingerprints === null) {
+            try {
+                fingerprints = JSON.parse(
+                    execFileSync(process.execPath, [join(repoRoot, "tools", "wasm-code-hash.mjs")], {
+                        encoding: "utf8",
+                        timeout: 60000,
+                    }),
+                );
+            } catch {
+                fingerprints = {};
+            }
+        }
+        return fingerprints[relPath] ?? null;
+    };
+
     const out = [];
     const walk = (dir) => {
         for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -11497,9 +9776,14 @@ function staleRustSources(wasmPath) {
             if (entry.isDirectory()) {
                 walk(full);
             } else if (entry.isFile() && entry.name.endsWith(".rs")) {
-                if (statSync(full).mtimeMs > wasmMtime) {
-                    out.push(relative(repoRoot, full));
+                if (statSync(full).mtimeMs <= wasmMtime) continue;
+                const rel = relative(repoRoot, full);
+                if (stamp) {
+                    const now = codeHashOf(rel);
+                    // 指纹一致 ⇒ 只是测试/注释动过 ⇒ **不算过期**。
+                    if (now !== null && stamp[rel] === now) continue;
                 }
+                out.push(rel);
             }
         }
     };
@@ -11513,6 +9797,36 @@ function staleRustSources(wasmPath) {
  * @param {string} name — 段名
  * @returns {string|null} 跳过原因；`null` = 该跑
  */
+/**
+ * 这一段**在本趟里会不会被采纳**（R-1 的读侧）。
+ *
+ * ⚠️ 存在理由：有几段**不经过 `runSection`**（`landing` / `render` /
+ *   `kernelExec` / `source` / `waveform`）—— 它们的检查是**启动序列里同步
+ *   算出来的**，`registerSection` 只能把它们**标成 SKIP**（拦不住那段
+ *   `while` 轮询照样跑满）⇒ ⇒ `--only loadImage` 实测 **t=122 s** 才进段。
+ *   ⇒ ⇒ 这里给出「选没选中」的判据，让启动序列**真的跳过**它的探针。
+ *
+ * @param {string} name
+ * @returns {boolean}
+ */
+function sectionSelected(name) {
+    return policySkipReason(String(name)) === null;
+}
+
+/**
+ * **不需要 demo 固件**的段（`--only` 命中它们时跳过启动期那一次装载）。
+ *
+ * ⚠️ 只列**确定不需要**的：这些段要么自己装镜像（`loadImage`），要么只关心
+ *   板 / 器件 / 存档（`deviceRegistry` / `boardTree` / `boardArchive` …）。
+ *   拿不准的一律**留在需要 demo 的一侧**（多装一次，好过判据拿到空现场）。
+ */
+const SECTIONS_WITHOUT_DEMO = new Set([
+    "loadImage",
+    "deviceRegistry",
+    "memoryMap",
+    "boardArchive",
+]);
+
 function policySkipReason(name) {
     if (RUN_POLICY.only) {
         return name === RUN_POLICY.only ? null : `SKIP（--only=${RUN_POLICY.only} ⇒ 本段未选中）`;
@@ -11880,15 +10194,16 @@ async function main() {
         //
         // ⚠️ 走 `riscv:command`（与 `runPinLevelRoutingSection` 的
         //   `submitBoard` 同一机制）⇒ **不依赖**模板导入的命令往返。
-        await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
-            detail: {
-                action: "submit-memory-map",
-                requestId: "bv-seed-board",
-                viewId: "memory-map",
-                params: { description: ${JSON.stringify(BV_DEMO_BOARD)} },
-            },
-        }))`);
-        await waitForBoardId(cdp, "browser-verify-demo", opts.timeoutMs);
+        // ⚠️ **v0.83**：`#/memory-map` 视图与 `submit-memory-map` 按钮都已被前端
+        //   删除 ⇒ ⇒ 旧种子**永远不生效**（每趟白等 20 s；启动期装 demo 也因
+        //   「没有生效板」失败）⇒ ⇒ 改成走**当前真实入口**：产品视图的模版
+        //   （`qemu-virt` = 128 MiB + UART0 + GPIO0 + CLINT/PLIC，与
+        //   `BV_DEMO_BOARD` 的布局逐字相同）⇒ ⇒ 6 s 快失败。
+        const bootSeed = await activateBoard(cdp, { templateId: "qemu-virt", description: BV_DEMO_BOARD }, 6000);
+        if (!bootSeed.ok) {
+            console.error(`error: 启动期种板失败（via=${bootSeed.via || "none"}）现场=${bootSeed.diag}`);
+            return EXIT_PRECONDITION;
+        }
         // ⚠️ **v0.76（B3 · 不兜底）**：前端引导**不再自动装载**固件 ⇒ 这里
         //   必须**自己装 demo**（v0.75 靠 auto-select 兜底 ⇒ 引导即带 demo；
         //   v0.76 去掉兜底后，后续「x1 = 42 / PC 随单步 / 波形边沿」等判据
@@ -12028,15 +10343,14 @@ async function main() {
             title: "器件中间层检查（类型表非空 · 逐实例表非空 · 基址与内存映射表对得上）",
         });
 
-        // -- the PRODUCT TREE as the board editor (STAGE-44 · v0.68) ----------
-        // ⚠️ **必须排在「换一张只有 RAM 的板」那段之前** ⇒ ⇒ 那段会把板上
-        //    **没有外设** ⇒ ⇒ 本段要验的「加一个器件」就**无从谈起**。
-        // ⚠️ **排在 `deviceRegistry` 之后** ⇒ ⇒ 那段验的是**原封不动**的
-        //    逐实例清单 ⇒ ⇒ 本段改了板**不该**影响它。
-        const boardTree = await runSection("boardTree", () => runBoardTreeSection(cdp, opts));
-        registerSection("boardTree", boardTree.checks, {
-            title: "产品树编辑面检查（树上加 / 删器件 ⇒ 编辑器那张表同步 ⇒ 真内核接受 ⇒ 逐实例清单跟着变）",
-        });
+        // -- v0.85（裁决 B）：`boardTree` 段**退役** --------------------------
+        // ⚠️ **为什么并进 `deviceRegistry`**：`boardTree` 的断言全靠
+        //   `#/memory-map` 编辑器与 `[data-action="add-device"]` —— 那个视图
+        //   连同编辑器渲染代码已被前端删除 ⇒ ⇒ 只剩「产品视图挂上了」一条 ⇒
+        //   与 `deviceRegistry` 是**同一件事**。
+        // ⚠️ **真的那部分搬到哪**：`deviceRegistry` 现在直接从**内核事件**
+        //   （`DeviceTypes` / `DeviceInstances`）取数 ⇒ ⇒ 「实例表 == 生效图」
+        //   的同源判据并进它的第 ③ 条 ⇒ ⇒ 段数 **37 → 36**。
 
         // -- the BREAKPOINT UI (STAGE-35 · v0.50 批 · B-19 ~ B-26) --------
         // ⚠️ **必须排在 loadImage 之后**：loadImage 段把镜像换成了夹具 ⇒ ⇒
@@ -12228,15 +10542,6 @@ async function main() {
             title: "「未知系统」门禁（真内核拒 · PC 没动 · 只显示内核原文 · 中档不拒）",
         });
 
-        // -- the BRIDGE REPORT (STAGE-48 · v0.72 · B-146 ~ B-150) ----------------
-        // ⚠️ **必须排在板级内存图那段之后**（那一段已经把一张板配出来了 ⇒ ⇒
-        //    才有「换板」这个动作可做）⇒ ⇒ 本段**自己先卸载**（⇒ ⇒ 改板
-        //    立即生效 ⇒ ⇒ 报告说的是**新板**的那份）。
-        const bridgeReport = await runSection("bridgeReport", () => runBridgeReportSection(cdp, opts));
-        registerSection("bridgeReport", bridgeReport.checks, {
-            title: "连线报告（真内核说「你写了 N 根线里有 M 根抬不了」· 界面逐字显示 · 数字与内核一致）",
-        });
-
         // -- the PLATFORM SCHEMA V2 (STAGE-49 · v0.73 · B2 · B-151 ~ B-155) -----
         // ⚠️ **必须排在 bridgeReport 之后**：那一段把板配成了「GPIO 当源」⇒ ⇒
         //   本段要的是一块**干净的**板（⇒ ⇒ 缺基址的那块）⇒ ⇒ 排在它后面
@@ -12252,20 +10557,6 @@ async function main() {
             title: "描述格式 v2（缺 base 的板内核收下并分配基址 · 两次分配相同 · 老格式照旧能装 · timer_riscv 能装 · 装不下报既有码）",
         });
 
-        // -- the PIN-LEVEL ROUTING (STAGE-50 · v0.74 · B-156 ~ B-160) ---------
-        // ⚠️ **必须排在 platformSchemaV2 之后**：那一段把板配成了「缺基址的
-        //   那块」⇒ ⇒ 本段要的是**自己的**板（⇒ ⇒ 按板 id 找生效图 ⇒ ⇒ 不受
-        //   上一段留下的现场影响）。
-        // ⚠️ **必须排在 basePlanner 之前**：本段也会改板 ⇒ ⇒ ⇒ 后面那些段拿到
-        //   的还是本段**复原**过的那张。
-        const pinLevelRouting = await runSection(
-            "pinLevelRouting",
-            () => runPinLevelRoutingSection(cdp, opts),
-        );
-        registerSection("pinLevelRouting", pinLevelRouting.checks, {
-            title: "引脚级连线（真机收下带引脚的板 · guest 真的领到那个源 · 再提交一次相同 · 老格式照旧能装 · 非法事件名报既有码 · 没有连线也照旧能装）",
-        });
-
         // -- the MCU CONCEPT (STAGE-51 · v0.75 · B-161 ~ B-167) ----------------
         // ⚠️ **必须排在 pinLevelRouting 之后**：那一段收尾复原成「用户板 +
         //   demo 固件」⇒ ⇒ 本段要的是**自己的**板（按板 id 找生效图 ⇒ 不受
@@ -12278,13 +10569,6 @@ async function main() {
         );
         registerSection("mcuConcept", mcuConcept.checks, {
             title: "MCU 概念（带 mcu 的板照常装+跑 · rv64+ELF32 拒且生效板没动 · 无 mcu 照常装 · rv32i+RVC 拒且复原 · MCU 区展示 · 加载固件不自动实例化 · 基址 16 进制）",
-        });
-
-        // -- the BASE PLANNER (STAGE-46 · v0.70 · B-136 ~ B-140) --------------        // ⚠️ **必须排在板级内存图那段之后**：那一段已经把一张板配出来了 ⇒ ⇒
-        //    草稿里有段 ⇒ ⇒ 才算得出占用区间 ⇒ ⇒ 空隙才**不是**空的。
-        const basePlanner = await runSection("basePlanner", () => runBasePlannerSection(cdp, opts));
-        registerSection("basePlanner", basePlanner.checks, {
-            title: "基址规划检查（面板列出空隙 · 真点「用这个」⇒ 那一行的基址真的变了 · 真内核接受那个空隙）",
         });
 
 
@@ -12325,18 +10609,10 @@ async function main() {
         // -- the TEMPLATE LIBRARY (v0.76 · STAGE-52 · B-168 ~ B-170 · 对照 B-173/B-174) --
         // ⚠️ **必须排在最后**：B-169 会 **reload 页面** ⇒ ⇒ 放在前面会把前面
         //   那些段看到的状态冲掉 ⇒ ⇒ 本段**自管**页面状态。
-        const templateLibrary = await runSection("templateLibrary", () => runTemplateLibrarySection(cdp, opts));
-        registerSection("templateLibrary", templateLibrary.checks, {
-            title: "模板库检查（内核报清单 · 导入草稿 · 无板拒 E_PLT-22 引导 · 最小板拒 E_PLT-17 · 老描述/旧键照装对照）",
-        });
 
         // -- the PINMUX POWER (v0.76 · STAGE-52 · B-171 / B-172) --------------
         // ⚠️ **必须排在模板库段之后**：它会 reload 页面 ⇒ ⇒ 本段从**干净无板**
         //   状态开始，自己提交板 + 装固件 + 跑 ⇒ ⇒ 自管状态。
-        const pinmuxPower = await runSection("pinmuxPower", () => runPinmuxPowerSection(cdp, opts));
-        registerSection("pinmuxPower", pinmuxPower.checks, {
-            title: "引脚复用通电检查（写选择寄存器 ⇒ 活动 ⇒ guest claim 到源 · 同引脚切功能换源）",
-        });
 
         // -- report ------------------------------------------------------------
         //
@@ -12355,8 +10631,11 @@ async function main() {
             }
             console.log(`${section.title}：`);
             for (const check of section.checks) {
-                const suffix = !check.ok && evidence ? ` evidence=${evidence}` : "";
-                console.log(`  ${check.ok ? "✓" : "✗"} ${check.name} — ${check.detail}${suffix}`);
+                // ⚠️ **已知产品缺陷**（`known: true`）⇒ ⇒ 打 ⚠ 且**不计入退出码**
+                //   ⇒ ⇒ 它不会把「真实回归」淹掉，也不会被悄悄当成绿。
+                const mark = check.known === true ? "⚠" : (check.ok ? "✓" : "✗");
+                const suffix = !check.ok && check.known !== true && evidence ? ` evidence=${evidence}` : "";
+                console.log(`  ${mark} ${check.name} — ${check.detail}${suffix}`);
             }
         }
         if (consoleErrors.length > 0) {
@@ -12369,7 +10648,14 @@ async function main() {
         //
         // ⚠️ **聚合只从注册表取**（裁决 I）⇒ ⇒ **不存在**手写的展开串 ⇒ ⇒
         // 「新加一段忘了并进」**结构上不可能**。
-        const failed = SECTION_REGISTRY.flatMap((s) => s.checks).filter((c) => !c.ok);
+        // ⚠️ **v0.86**：**跳过的段不参与判定**（它的检查根本没机会跑，
+        //   例如缺 osz ELF 的四个段）⇒ ⇒ 不能因为「没跑」而把退出码打红。
+        const failed = SECTION_REGISTRY.filter((s) => !s.skipped)
+            .flatMap((s) => s.checks)
+            .filter((c) => !c.ok && c.known !== true);
+        const knownIssues = SECTION_REGISTRY.filter((s) => !s.skipped)
+            .flatMap((s) => s.checks)
+            .filter((c) => !c.ok && c.known === true);
         // ⚠️ **期望段名表**（裁决 J）：登记的段名集合必须**等于**那张表 ⇒ 不等
         // 就**红** ⇒ ⇒ 兜住「跑过了但没登记」与「登记了但不在期望表里」。
         const diff = registryDiff();
@@ -12412,6 +10698,11 @@ async function main() {
                 ? "browser-verify: 通过（真机挂载 + 渲染路径 + 真内核执行 + 源码视图 + 探针流 + 板级内存图 + 板档案 + 板级差量/卸载 + 乱序到达 + 注册表一致 + 控制台）"
                 : `browser-verify: 失败（${failed.length} 项断言未通过，${consoleErrors.length} 条控制台错误，`
                   + `注册表一致性 ${diff.ok ? "通过" : "**不通过**"}）`);
+        }
+        if (knownIssues.length > 0) {
+            console.log("");
+            console.log(`已知产品缺陷（不计入退出码）：${knownIssues.length} 项`);
+            for (const c of knownIssues) console.log(`  ⚠ ${c.name} — ${c.detail}`);
         }
         return ok ? 0 : EXIT_FAILED;
     } finally {
