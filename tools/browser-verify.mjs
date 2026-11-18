@@ -1599,15 +1599,24 @@ async function runTerminalScreenProbe(cdp, opts) {
         detail: JSON.stringify(sent),
     });
 
-    // -- B-67b · 等 guest 回显（**字节流**里有「OSZ$ cyx」）------------
+    // -- B-67b · 等 guest 回显（**前置**，不再当断言）------------------
+    //
+    // ⚠️ **v0.84 · 判据裁剪 + 快失败**：这条「回显」与 `uartEcho` 段的
+    //   B-63 断言的是**同一件事**（终端输入 ⇒ guest 回显），属于**重复覆盖**
+    //   ⇒ ⇒ 本段的职责是**屏幕怎么画**（B-69 ~ B-76），回显只是前提 ⇒ ⇒
+    //   改成**前置**：没回来就只报**一条**「前置未满足」并停（不再烧 90 s，
+    //   也不再把同一个事实重复成第二条断言）。
     const echo = await awaitEval(cdp,
-        `window.riscv_image.runUntilConsole("OSZ$ cyx", { timeoutMs: ${UART_ECHO_TIMEOUT_MS} })`,
-        UART_ECHO_TIMEOUT_MS + 30000);
-    checks.push({
-        name: "B-68 · guest 回显了「OSZ$ cyx」（**字节流**里有）",
-        ok: echo?.matched === true,
-        detail: `matched=${echo?.matched} batches=${echo?.batches}`,
-    });
+        `window.riscv_image.runUntilConsole("OSZ$ cyx", { timeoutMs: 30000 })`,
+        60000);
+    if (echo?.matched !== true) {
+        checks.push({
+            name: "前置 · guest 回显「OSZ$ cyx」没来（屏幕断言无法判定）",
+            ok: false,
+            detail: `matched=${echo?.matched} batches=${echo?.batches}（回显本身由 uartEcho 段 B-63 负责）`,
+        });
+        return { checks };
+    }
 
     // -- B-69 · 整行**被执行了** --------------------------------------
     //
@@ -11552,14 +11561,39 @@ async function runUartEchoProbe(cdp, opts) {
     });
 
     // -- 等 guest 回显（UART RX 中断真的被交付了）----------------------
+    //
+    // ⚠️ **v0.84 · 快失败**：这一段原来一口气排了 `4 × 90 s` 的等待 ⇒ ⇒
+    //   回显**没来**的时候，每一档都要烧满 ⇒ ⇒ 实测这一段 **380 s**（全量里
+    //   最大的一笔）。判据本身没变（还是「console 里出现 OSZ$ Q」），但：
+    //   ① 第一档超时 **30 s**（真的慢的机器：一批 `Continue` ≈ 100–115 ms，
+    //      30 s 也有 ~260 批，足够跑到回显）；
+    //   ② **没匹配上就不再往下等**——后面三档（执行整行 / 第二行 / 不回显）
+    //      的前提都是「回显来了」⇒ ⇒ 回显没来，它们只会重复烧超时；
+    //      这里只留**一条** ✗，并说明「后续三档未执行」。
     const echo = await awaitEval(cdp,
-        `window.riscv_image.runUntilConsole("OSZ$ Q", { timeoutMs: ${UART_ECHO_TIMEOUT_MS} })`,
-        UART_ECHO_TIMEOUT_MS + 30000);
+        `window.riscv_image.runUntilConsole("OSZ$ Q", { timeoutMs: 30000 })`,
+        60000);
     checks.push({
         name: "B-63 · guest 的 console 出现**回显**（UART RX 中断真的被交付了）",
         ok: echo?.matched === true,
         detail: `matched=${echo?.matched} batches=${echo?.batches}`,
     });
+    if (echo?.matched !== true) {
+        // ⚠️ 现场：把 console 尾巴一起带出来（「一个字符都没有」与「只有一个
+        //   字符」处置完全不同）。
+        let tail = "";
+        try {
+            tail = String(await awaitEval(cdp, `(window.riscv_image.consoleText?.() ?? "").slice(-120)`) ?? "");
+        } catch {
+            tail = "<读取失败>";
+        }
+        checks.push({
+            name: "B-63a · 回显没来时**后续三档不执行**（快失败，不再烧 3 × 90 s）",
+            ok: true,
+            detail: `console 尾部=${JSON.stringify(tail)}`,
+        });
+        return { checks };
+    }
 
     // -- 等 guest **执行整行**（不是只回显）-----------------------------
     const exec = await awaitEval(cdp,
