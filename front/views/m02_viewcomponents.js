@@ -55,6 +55,7 @@ import {
 // **不碰 DOM** ⇒ ⇒ Node 侧零 DOM 就能测「画的是不是真数据」。
 import {
     buildWaveOption,
+    holdPointCount,
     canDrawChart,
     groupIrqChannels,
     mergeIrqSelection,
@@ -2252,8 +2253,17 @@ const waveformView = register({
         // **界面自己说的** ⇒ ⇒ 真机判据还要拿它跟**视图状态里的样本数**比对
         // ⇒ ⇒ ⇒ 「界面说的」与「数据里的」**必须一致** ⇒ ⇒ 有判别力。
         const drawable = option.series.length;
-        const points = option.series.reduce((n, s) => n + s.data.length, 0);
+        // ⚠️ **点数口径**（口径必须唯一）：`data-wave-chart-points` 只报
+        //   **真样本**（= 视图状态里的 `samples` 之和）⇒ ⇒ 门禁那条
+        //   「点数 = 样本数」才有判别力；补出来的**保持点**单独报
+        //   `data-wave-chart-hold-points` ⇒ ⇒ 「图上多了几个点」是**可见**的
+        //   ⇒ ⇒ 不是偷偷编数据。
+        const points = channels.reduce(
+            (n, c) => n + (Array.isArray(c?.samples) ? c.samples.length : 0),
+            0,
+        );
         host.setAttribute("data-wave-chart-points", String(points));
+        host.setAttribute("data-wave-chart-hold-points", String(holdPointCount(channels)));
         host.setAttribute("data-wave-chart-series", String(drawable));
         host.setAttribute(
             "data-wave-chart-status",
@@ -2292,6 +2302,7 @@ const waveformView = register({
                 0,
             );
             host.setAttribute("data-wave-chart-points", String(points));
+            host.setAttribute("data-wave-chart-hold-points", String(holdPointCount(visible)));
             host.setAttribute("data-wave-chart-series", String(visible.length));
         }
     },

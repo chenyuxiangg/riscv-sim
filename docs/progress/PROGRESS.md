@@ -3,7 +3,7 @@
 > **本文件跟踪「当前需求的完成情况」**；逐版本详细变更日志已归档至 [`PROGRESS-history.md`](./PROGRESS-history.md)（同源，git history 是最终真相）。
 > **欠账的真相在台账** [`../reviews/REVIEWS.md`](../reviews/REVIEWS.md)；批次顺序与依赖在 [`../plans/PRODUCT_BOARD_PLAN.md`](../plans/PRODUCT_BOARD_PLAN.md)。
 
-- **当前里程碑**：**v0.80**（2026-11-18 · 门禁工具改造 R-1~R-4）
+- **当前里程碑**：**v0.81**（2026-11-18 · 门禁工具改造 R-1~R-4）
 - **下一批**：**第 62 批**（主题待定）· **仍欠**：门禁工具改造 [`GATE_TOOLING_PREREQ.md`](../plans/GATE_TOOLING_PREREQ.md) 的 **R-1~R-4**（本批按用户拍板先行，欠账顺延）
 - **Owner**：zyzs
 
@@ -28,6 +28,7 @@
 | 62 | v0.78 | M-16 线 2（UART tx-empty）退役 | ✅ 已落地 | 删 `IRQ_UART_TX_EMPTY` 及其两处映射分支 · 线号收敛为 `1`（外部）/ `3`（timer）/ `4`（software），**线 2 空缺不重排** · 真 16550 只有一根 IRQ（RX/TX 共源同 `MEIE` 位）· 新增三条钉「线 2 无位号 / 无 cause / 不投影 mip」 |
 | 63 | v0.79 | 中断波形通道 + 前端筛选（STAGE-54） | ✅ 已落地 | 波形改为**每条中断一个 0/1 电平通道**：核 3 条（`software · IRQ 3` / `timer · IRQ 7` / `external · MEIP`）+ **每台已接线设备 1 条**（`uart0 · IRQ 10`，按 `peripheral_irqs` 现算 ⇒ 加器件自动出现）· 删「中断脉冲」通道（把线号当值画的那条）· 抬线/撤线回调写 1/0，设备级取 PLIC 网关电平 · 前端分组筛选（默认**只勾核中断**，全选/仅核/清空），选择按**流 id**保留 ⇒ 平台变更不丢 |
 | 64 | v0.80 | 门禁工具改造 R-1~R-4（+R-7 计时） | ✅ 已落地 | `tools/browser-verify.mjs`：`--only/--from` 分段跑（未选中段标 SKIP）· 失败断言挂 `evidence=`（原始值 + DOM 快照路径 + 最近 6 次求值）· 采集通道自检（`E_HARNESS_CHANNEL` · 退出码 2，与产品失败分开）· wasm 比源码旧时自动重建 · `[timing]` 段级计时 · 分段跑**永不**报「通过」（改报「定位跑通过 N/M 段」） |
+| 65 | v0.81 | 波形「右端保持点」（修「只有上升沿、看着断了」） | ✅ 已落地 | `front/views/components/wave-chart.js` 增 `holdToEnd`/`holdPointCount`：通道只在电平变化才有样本 ⇒ `step:"end"` 只在**样本之间**保持 ⇒ 抬了一直没落的线画到最后一个样本就停 ⇒ 补**一个**右端保持点（`t`=全局最右样本、`v`=该通道最后的值，**不新增跳变**）；界面把「保持点数」单独报 `data-wave-chart-hold-points`，`data-wave-chart-points` 仍只报真样本 ⇒ 门禁 B-29 判别力不变（实测 点数 512 = 样本 512、边沿 600） |
 | 61-前置 | — | 门禁工具改造（开工前置） | ⏳ 仍欠 | ⚠️ **R-1~R-4**（分段重跑 / 失败即 dump 证据 / 采集通道 health check / wasm mtime 前置），见 [`../plans/GATE_TOOLING_PREREQ.md`](../plans/GATE_TOOLING_PREREQ.md)；**R-5~R-7** 随批顺手整改 |
 
 **顺手批**（可插任意两批之间，**只列未闭环的** ⇒ ⇒ 闭环的从这里划掉、销账的处置进 `REVIEWS-archive.md`）：**D-159**（真机门禁在有负载时假红 · **根因已定位**：判据等的是**时长**而不是**状态** ⇒ ⇒ 三处改成「等状态」⇒ ⇒ 剩**做法 B**（不节流环境跑门禁：`Emulation.setCPUThrottlingRate` 那一路未做）⇒ ⇒ **未销账**）。

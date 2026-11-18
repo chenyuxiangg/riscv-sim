@@ -281,12 +281,42 @@ describe("波形图 · option 与卡片片段（A-5 ~ A-10、A-16）", () => {
                 opt.series[i].name.startsWith(chans[i].label),
                 `第 ${i} 条 series 必须是通道 ${chans[i].label}（顺序不许乱）`,
             );
-            assert.deepEqual(
-                opt.series[i].data,
-                chans[i].samples.map((s) => [s.t, s.v]),
-                `第 ${i} 条 series 的数据必须是**对应通道**的样本`,
+            // ⚠️ 末尾可能多**一个**保持点（`holdToEnd`）：`t` = 全局最右样本、
+            //   `v` = 该通道最后的值 ⇒ ⇒ 前 N 个点仍必须逐条等于样本本身。
+            const data = opt.series[i].data;
+            const pts = chans[i].samples.map((s) => [s.t, s.v]);
+            assert.ok(
+                data.length === pts.length || data.length === pts.length + 1,
+                `第 ${i} 条 series 的点数 = 样本数 或 样本数+1（末尾保持点）`,
             );
+            for (let k = 0; k < pts.length; k += 1) {
+                assert.deepEqual(
+                    data[k],
+                    pts[k],
+                    `第 ${i} 条 series 的第 ${k} 个点必须是该样本的 [t, v]（顺序不许乱）`,
+                );
+            }
         }
+    });
+
+    test("A-11 · 抬起来没落下 ⇒ 补一个右端保持点（否则图上看着「断了」）", () => {
+        // 现场症状：`uart0 · IRQ 10` 只有一次上升沿（FIFO 一直非空）⇒ ⇒
+        //   没有后续样本 ⇒ ⇒ step:end 不会往右画 ⇒ ⇒ 屏幕上只剩一小段。
+        //   补保持点 ⇒ ⇒ 变成一条到最右端的长 1。
+        const opt = buildWaveOption([
+            channel("uart0 · IRQ 10", 1, [{ t: 10, v: 1 }]),
+            channel("GPIO0.OUT", 1, [{ t: 40, v: 0 }]),
+        ]);
+        assert.deepEqual(
+            opt.series[0].data,
+            [[10, 1], [40, 1]],
+            "抬了没落的那条必须补 [最右时间, 1] —— 水平延续，不是新边沿",
+        );
+        assert.deepEqual(
+            opt.series[1].data,
+            [[40, 0]],
+            "已经画到最右的那条**不许**多补点（点数 = 样本数）",
+        );
     });
 
     test("A-7 · x 轴是 value 轴（⛔ 不是 category 轴）", () => {

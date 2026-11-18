@@ -148,6 +148,50 @@ export function seriesName(label, shown, total) {
  *   不设颜色 ⇒ ⇒ echarts 用它自己的默认值 ⇒ ⇒ Node 侧零 DOM 也能调）
  * @returns {object} echarts option
  */
+/**
+ * 有多少条通道会被补**一个**保持点（判据与 `holdToEnd` 完全一致）。
+ *
+ * ⚠️ 存在的理由：图上的点 = **真样本** + **保持点**，两者必须能分开报
+ *   ⇒ ⇒ 门禁的「点数 = 样本数」那条判据才不会因为保持点变假 ⇒ ⇒ 界面得
+ *   把「补了几个」单独说出来（`data-wave-chart-hold-points`）。
+ *
+ * @param {Array<{samples:Array<{t:number,v:number}>}>} channels
+ * @returns {number}
+ */
+export function holdPointCount(channels) {
+    const list = Array.isArray(channels) ? channels : [];
+    let tEnd = Number.NEGATIVE_INFINITY;
+    for (const c of list) {
+        const sm = Array.isArray(c?.samples) ? c.samples : [];
+        if (sm.length) tEnd = Math.max(tEnd, sm[sm.length - 1].t);
+    }
+    if (!Number.isFinite(tEnd)) return 0;
+    let n = 0;
+    for (const c of list) {
+        const sm = Array.isArray(c?.samples) ? c.samples : [];
+        if (sm.length && sm[sm.length - 1].t < tEnd) n += 1;
+    }
+    return n;
+}
+
+/**
+ * 给一条通道的样本补**右端保持点**（见 `buildWaveOption` 里的长注释）。
+ *
+ * ⚠️ 只在「确实还没画到最右」时补；已经到最右（或一个样本都没有）⇒ 原样返回。
+ * ⚠️ **不新增跳变**：`v` 取最后一个样本的值 ⇒ 绘画上是水平延续，不是新边沿。
+ *
+ * @param {Array<{t:number,v:number}>} samples
+ * @param {number} tEnd —— 全局最右样本时间（ps）；可能为 `-Infinity`
+ * @returns {Array<[number,number]>}
+ */
+export function holdToEnd(samples, tEnd) {
+    const pts = samples.map((s) => [s.t, s.v]);
+    if (pts.length === 0 || !Number.isFinite(tEnd)) return pts;
+    const last = pts[pts.length - 1];
+    if (last[0] < tEnd) pts.push([tEnd, last[1]]);
+    return pts;
+}
+
 export function buildWaveOption(channels, theme) {
     const list = chartableChannels(channels);
     const th = theme && typeof theme === "object" ? theme : {};
@@ -156,6 +200,18 @@ export function buildWaveOption(channels, theme) {
     const line = String(th.line ?? "");
     const tipBg = String(th.tooltipBg ?? "");
     const tipText = String(th.tooltipText ?? text);
+
+    // ⚠️ **保持点（hold-to-end）** —— 通道只在**电平变化**时才产生样本
+    //   （注册表按值去重）⇒ ⇒ 一条「抬起来就没再落下」的线，其最后样本就是
+    //   那一次上升沿 ⇒ ⇒ `step:"end"` 只在**样本之间**保持 ⇒ ⇒ 最后一个
+    //   样本之后**什么都不画** ⇒ ⇒ 屏幕上只剩一小段、看着像「断了」。
+    //   ⇒ ⇒ 给每条通道补**一个**右端保持点：`t` = 全局最右样本、`v` = 该通道
+    //   最后的值。它**不是**编造的边沿（不新增跳变），只是「电平一直保持到
+    //   这一刻」的显式表达 —— 图上点数 = 样本数 + 0/1，测试钉住这一点。
+    const tEnd = list.reduce(
+        (max, c) => (c.samples.length ? Math.max(max, c.samples[c.samples.length - 1].t) : max),
+        Number.NEGATIVE_INFINITY,
+    );
 
     const option = {
         // ⚠️ **不开动画** ⇒ ⇒ 边沿每来一批就重画一次 ⇒ ⇒ 动画会一直闪。
@@ -186,8 +242,9 @@ export function buildWaveOption(channels, theme) {
             symbol: "none",
             lineStyle: { width: 1.5 },
             emphasis: { focus: "series" },
-            // ⚠️ **数据就是样本本身**（`[t, v]`）⇒ ⇒ 图上画的是**真边沿**。
-            data: c.samples.map((s) => [s.t, s.v]),
+            // ⚠️ **数据就是样本本身**（`[t, v]`）⇒ ⇒ 图上画的是**真边沿**；
+            //   末尾那一个「保持点」见上面的说明（不新增跳变）。
+            data: holdToEnd(c.samples, tEnd),
         })),
     };
 
