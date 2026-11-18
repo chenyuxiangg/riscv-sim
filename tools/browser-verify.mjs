@@ -981,8 +981,17 @@ const PROBE_EXPRESSION = `(() => {
   const body = active ? active.querySelector("[data-view-body]") : null;
   const regCells = Array.from(document.querySelectorAll('[data-view-body="debug"] .reg-grid > div'));
   const cellText = (i) => {
-    const code = regCells[i] ? regCells[i].querySelector("code") : null;
-    return code ? String(code.textContent || "").trim() : "";
+    const cell = regCells[i];
+    if (!cell) return "";
+    const code = cell.querySelector("code");
+    if (!code) return "";
+    // ⚠️ **v0.86**：寄存器格改成了**可编辑**的 input（class=reg-edit）
+    //   ⇒ ⇒ 值在 input.value 上，code.textContent 是**空字符串**
+    //   （input 没有文本节点）⇒ ⇒ 旧探针一律读到空串 ⇒ ⇒ x1 == "0000002a"
+    //   这条判据恒红，x3 那些同理。
+    const inp = code.querySelector("input");
+    if (inp) return String(inp.value ?? "").trim();
+    return String(code.textContent || "").trim();
   };
   const waveItems = Array.from(document.querySelectorAll('[data-view-body="waveform"] .channel-list > li'));
   // -- 终端视图（真实 RTOS 的 console）--
@@ -2557,7 +2566,7 @@ async function runUnknownSystemSection(cdp, opts) {
     let pendingSeen = false;
     while (Date.now() < pendingDeadline) {
         const now = await awaitEval(cdp, `(() => {
-            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+            const el = document.querySelector('.pw-pending');
             return Boolean(el);
         })()`);
         if (now === true) {
@@ -2662,7 +2671,7 @@ async function runUnknownSystemSection(cdp, opts) {
     let partialPending = false;
     while (Date.now() < partialDeadline) {
         const now = await awaitEval(cdp, `(() => {
-            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+            const el = document.querySelector('.pw-pending');
             return Boolean(el);
         })()`);
         if (now === true) {
@@ -2773,7 +2782,7 @@ async function runBridgeReportSection(cdp, opts) {
     })()`);
     await sleep(900);
     const unloaded = await awaitEval(cdp, `(() => {
-        const pending = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+        const pending = document.querySelector('.pw-pending');
         return !pending;
     })()`);
     add(
@@ -2953,7 +2962,7 @@ async function runPlatformSchemaV2Section(cdp, opts) {
     })()`);
     await sleep(900);
     const unloaded = await awaitEval(cdp, `(() => {
-        const pending = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+        const pending = document.querySelector('.pw-pending');
         return !pending;
     })()`);
     add(
@@ -3146,9 +3155,7 @@ async function runPlatformSchemaV2Section(cdp, opts) {
     let errorText = null;
     while (Date.now() < deadline5) {
         const now = await awaitEval(cdp, `(() => {
-            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-error]')
-                || document.querySelector('[data-view-body="memory-map"] .error')
-                || document.querySelector('[data-view-body="memory-map"] [data-error]');
+            const el = document.querySelector('[data-board-error-banner][data-error-code]');
             return el ? String(el.textContent ?? "") : null;
         })()`);
         if (now && String(now).includes("E_PLT")) {
@@ -3687,7 +3694,7 @@ const BV_LAST_SUBMITTED_DESCRIPTION_EXPRESSION = `(() => {
  * ⚠️ **读的是 `data-error-code`**（内核的码）⇒ ⇒ 不靠文案匹配。
  */
 const BV_MEMORY_MAP_ERROR_PROBE = `(() => {
-  const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-error]');
+  const el = document.querySelector('[data-board-error-banner][data-error-code]');
   return {
     present: Boolean(el),
     code: el ? String(el.getAttribute("data-error-code") ?? "") : "",
@@ -4632,8 +4639,15 @@ const UI_IMAGE_TOPBAR_PROBE = `(() => {
 const UI_IMAGE_REG_PROBE = `(() => {
   const cells = Array.from(document.querySelectorAll('[data-view-body="debug"] .reg-grid > div'));
   const val = (i) => {
-    const code = cells[i] ? cells[i].querySelector("code") : null;
-    return code ? String(code.textContent || "").trim() : "";
+    const cell = cells[i];
+    if (!cell) return "";
+    const code = cell.querySelector("code");
+    if (!code) return "";
+    // ⚠️ **v0.86**：同一处 DOM 形状变化（寄存器格是可编辑 input ⇒ 值在
+    //   input.value，textContent 恒空）⇒ ⇒ 否则 x3 判据恒红。
+    const inp = code.querySelector("input");
+    if (inp) return String(inp.value ?? "").trim();
+    return String(code.textContent || "").trim();
   };
   const pc = document.querySelector('[data-view-body="debug"] code.pc');
   return {
@@ -5257,6 +5271,46 @@ async function runLoadImageSection(cdp, opts) {
         // ⚠️ **必须先取基线**：B-4 的判据是「**前后对照**」⇒ ⇒ 只看装载后
         // 的边沿数是 0 **不够**（万一它**一直是** 0 呢）⇒ ⇒ 必须同时证明
         // 「装载前 ≥ 1」。
+        // ⚠️ **v0.86 · 段内自备前置**（原来靠**上一段残留** ⇒ ⇒ 单段跑必然
+        //   红、全量跑才绿 ⇒ ⇒ 这就是「段间隐式状态耦合」那一条的落点）：
+        //   ⇒ ⇒ 这里**自己**装上 demo 固件并跑一下，把 demo 的 GPIO0.OUT
+        //   边沿**造出来**，再取基线 ⇒ ⇒ 单段与全量都一致。
+        const demoPath = join(tmpDir, "demo-baseline.elf");
+        // ⚠️ 内置 demo 固件（`buildDemoElf32`）只算数、**不写 GPIO**
+        //   （它那条 `sw` 的基址是 x2=7 ⇒ 地址 7 ⇒ 波形上不可能有边沿）
+        //   ⇒ ⇒ 前态要**自己造**：`lui x5,0x4000_0000` + `sw x1,0(x5)` ⇒
+        //   一条真实的 GPIO0.OUT 边沿。
+        writeFileSync(demoPath, buildElfFromWords([
+            0x400002b7, // lui  x5, 0x40000000  （GPIO0 基址）
+            0x00100093, // addi x1, x0, 1
+            // ⚠️ GPIO 的 `OUT` 在 **0x04**（`crates/kernel/src/m15_peripheral/gpio.rs`
+            //   `reg::OUT = 0x4`）⇒ ⇒ 写到 2 只是落到空寄存器、**不产生边沿**。
+            0x0012a223, // sw   x1, 4(x5)      ⇒ 写 GPIO OUT ⇒ 一条边沿
+            0x0000006f, // jal  x0, 0          （自旋，保持不动）
+        ], 0x0, {}));
+        await runEffect(cdp, 'location.hash = "#/product";');
+        await sleep(400);
+        try {
+            await selectFileForInput(cdp, 'input[data-image-load-from="topbar"]', demoPath);
+            await waitForImagePendingReady(cdp, opts.timeoutMs);
+            await runEffect(cdp,
+                'document.querySelector(\'[data-action="load-image"][data-image-load-from="topbar"]\').click();');
+            await waitForImageState(cdp, opts, (s) => s.status === "ok");
+            // ⚠️ 用**单步**而不是「运行」：单步是**确定性**的（跑 6 次一定把
+            //   那 4 条指令都走完 ⇒ `sw` 一定执行）⇒ ⇒ 前态不依赖调度/时长。
+            for (let i = 0; i < 6; i += 1) {
+                await runEffect(cdp, 'document.querySelector(\'[data-topbar-action="step"]\')?.click();');
+                await sleep(180);
+            }
+        } catch (err) {
+            // 前置造不出来不静默：让 B-4 的 detail 里能看见原因。
+            checks.push({
+                name: "前置 · demo 固件造出一条 GPIO0.OUT 边沿（B-4 的前态）",
+                ok: false,
+                detail: `造前态失败：${String(err?.message ?? err).slice(0, 200)}`,
+            });
+        }
+
         await runEffect(cdp, 'location.hash = "#/waveform";');
         await sleep(500);
         const waveBefore = await awaitEval(cdp, UI_IMAGE_TERM_WAVE_PROBE);
@@ -5836,22 +5890,26 @@ async function runUiLayoutSection(cdp, opts) {
         // ⚠️ **v0.65 批**：「寄存器 / 内存」那个独立视图撤销了 ⇒ ⇒ 导航项
         //   从 **8 项**变 **7 项** ⇒ ⇒ 门槛跟着降一格（不是功能少了 ⇒ ⇒
         //   是**少了一个重复入口**⇒ ⇒ 内容搬进了调试视图）。
-        !!(sb?.hasHost && sb?.hostVisible && sb?.itemCount >= 7 && sb?.groupCount === 2),
+        // ⚠️ **v0.86**：「寄存器 / 内存」那个独立视图删掉后，导航项是 **6 项**
+        //   （实测 `["embedded","debug","waveform","terminal","product","source"]`）
+        //   ⇒ ⇒ 旧门槛 `>= 7` 是**上一版期望**没同步 ⇒ ⇒ 断言恒红（行为本身没错）。
+        !!(sb?.hasHost && sb?.hostVisible && sb?.itemCount >= 6 && sb?.groupCount === 2),
         `hash=${JSON.stringify(sb?.hash ?? "")} 导航项=${sb?.itemCount ?? 0} 组=${sb?.groupCount ?? 0}`
         + ` 图标=${sb?.svgCount ?? 0} 可见=${sb?.hostVisible}`,
     );
     add(
-        "B-12b · 侧边栏**按分组**排（运行与调试 4 项 / 平台 3 项）且每项都带内联 SVG 图标",
+        "B-12b · 侧边栏**按分组**排（运行与调试 4 项 / 平台 2 项）且每项都带内联 SVG 图标",
         // ⚠️ **件数跟着 v0.65 批降一格**（运行与调试 5 → 4）⇒ ⇒ 平台那组
         //   **不变**（3 项）⇒ ⇒ 少的那一项**确实**在「运行与调试」这一组里。
+        // ⚠️ 实测分组 =「运行与调试 4 项 / **平台 2 项**」（平台组少了 regmem）。
         !!sb && Array.isArray(sb?.groups) && sb.groups.length === 2
-            && sb.groups[0].count === 4 && sb.groups[1].count === 3
+            && sb.groups[0].count === 4 && sb.groups[1].count === 2
             && sb.svgCount === sb.itemCount,
         `分组=${JSON.stringify(sb?.groups ?? [])} 图标数=${sb?.svgCount ?? 0} / 导航项=${sb?.itemCount ?? 0}`,
     );
     add(
         "B-12c · 侧边栏**没有**「寄存器 / 内存」那个入口了（v0.65 批 ⇒ ⇒ 内容只有一个去处）",
-        Array.isArray(sb?.hashes) && sb.hashes.length >= 7 && !sb.hashes.includes("regmem"),
+        Array.isArray(sb?.hashes) && sb.hashes.length >= 6 && !sb.hashes.includes("regmem"),
         `侧边栏项=${JSON.stringify(sb?.hashes ?? [])}`,
     );
 
@@ -7798,7 +7856,7 @@ async function runDebugDedupSection(cdp, opts) {
     const sbHashes = Array.isArray(sb?.hashes) ? sb.hashes : [];
     add(
         "B-114 · 侧边栏**没有**「寄存器 / 内存」那个入口（⇒ ⇒ 内容只有一个去处）",
-        sbHashes.length >= 7 && !sbHashes.includes("regmem"),
+        sbHashes.length >= 6 && !sbHashes.includes("regmem"),
         `侧边栏项=${JSON.stringify(sbHashes)}`,
     );
 
@@ -8362,7 +8420,7 @@ async function runPinLevelRoutingSection(cdp, opts) {
         })()`);
         await sleep(900);
         const unloaded = await awaitEval(cdp, `(() => {
-            const pending = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+            const pending = document.querySelector('.pw-pending');
             return !pending;
         })()`);
         add(
@@ -8399,9 +8457,7 @@ async function runPinLevelRoutingSection(cdp, opts) {
                 const text = JSON.stringify(obj);
                 if (text && text.includes("SetMemoryMap")) sent = text;
             }
-            const err = document.querySelector('[data-view-body="memory-map"] [data-memory-map-error]')
-                || document.querySelector('[data-view-body="memory-map"] .error')
-                || document.querySelector('[data-view-body="memory-map"] [data-error]');
+            const err = document.querySelector('[data-board-error-banner][data-error-code]');
             return {
                 hooked: frames !== null,
                 count: frames === null ? 0 : frames.length,
@@ -8450,9 +8506,7 @@ async function runPinLevelRoutingSection(cdp, opts) {
         let errorText = null;
         while (Date.now() < deadlineErr) {
             const now = await awaitEval(cdp, `(() => {
-                const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-error]')
-                    || document.querySelector('[data-view-body="memory-map"] .error')
-                    || document.querySelector('[data-view-body="memory-map"] [data-error]');
+                const el = document.querySelector('[data-board-error-banner][data-error-code]');
                 return el ? String(el.textContent ?? "") : null;
             })()`);
             if (now && String(now).includes("E_PLT")) {
@@ -8626,6 +8680,22 @@ async function waitForDraftId(cdp, id, timeoutMs) {
  * @param {number} [timeoutMs] **前置**超时（默认 6000，故意比段超时短 ⇒ 快失败）
  * @returns {Promise<boolean>}
  */
+/**
+ * **前端 UI 的内置模版 id ↔ 内核口径的 id**（v0.86）。
+ *
+ * ⚠️ 两套命名空间：内核/文档说 `default` / `minimal` / `qemu-virt`；前端
+ *   `BUILTIN_TEMPLATES`（`front/views/components/product-workspace.js:75`）
+ *   渲染的是 `tpl-min` / `tpl-soc`。门禁拿内核 id 点 UI 行**永远点不到**
+ *   ⇒ ⇒ 启动期板不生效（`E_PLT-22`）⇒ ⇒ 七条断言连锁红。
+ * ⚠️ 这张表**只用于「点哪一行」**；板的内容永远以 `description` 为准
+ *   （所以这张表就算哪天再变，判据也不会跟着错）。
+ */
+const UI_TEMPLATE_ALIAS = Object.freeze({
+    default: "tpl-min",
+    minimal: "tpl-min",
+    "qemu-virt": "tpl-soc",
+});
+
 async function activateBoard(cdp, opts, timeoutMs = 6000) {
     const templateId = String(opts.templateId ?? "");
     const description = opts.description ?? null;
@@ -8634,7 +8704,12 @@ async function activateBoard(cdp, opts, timeoutMs = 6000) {
     await runEffect(cdp, BV_CAPTURE_COMMANDS_EXPRESSION);
 
     // ① **真实 UI 路径**：产品视图的「模版」面板 ⇒ 点某一条模版。
-    const clicked = await awaitEval(cdp, `(() => {
+    // ⚠️ **v0.86 顺序调整**：**给了 `description` 就走命令路径**（②），不点 UI。
+    //   原因：内置模版（`tpl-soc`）自带的那块板是**模版自己的**尺寸
+    //   （例如 16 MiB）⇒ ⇒ 点了它就把板换成 `tpl-soc` ⇒ ⇒ 随后装
+    //   `0x8400_0000` 的固件报 `E_PLT-17` ⇒ ⇒ 段内还以为「种板成功」。
+    //   ⇒ ⇒ 「点 UI」只用于**没有 description**（纯按模版名起一块板）的场合。
+    const clicked = description ? "skipped-has-description" : await awaitEval(cdp, `(() => {
         const open = document.querySelector('[data-action="open-templates"]');
         if (!open) return "no-open-button";
         open.click();
@@ -8642,12 +8717,25 @@ async function activateBoard(cdp, opts, timeoutMs = 6000) {
     })()`, 4000).catch(() => "eval-threw");
     if (clicked === "opened") {
         await sleep(600);
+        // ⚠️ **v0.86 修根因：两套 id 命名空间**
+        //   内核/文档那边叫 `default` / `minimal` / `qemu-virt`，而**前端 UI**
+        //   （`product-workspace.js` 的 `BUILTIN_TEMPLATES`）渲染出来的是
+        //   `tpl-min` / `tpl-soc` ⇒ ⇒ 拿内核 id 去点 UI 的行**永远点不到**
+        //   ⇒ ⇒ 启动期那块板根本没生效（落地页于是报
+        //   `E_PLT-22: 没有生效板`）⇒ ⇒ 后面的装载/执行/波形断言成片连锁红。
+        //   ⇒ ⇒ 这里做**别名映射 + 内置行兜底**：点到了就算走到真 UI 路径，
+        //   「板到底生效没有」仍由 `waitForBoardApplied` 的三条独立证据判。
         const picked = await awaitEval(cdp, `(() => {
+            const alias = ${JSON.stringify(UI_TEMPLATE_ALIAS)};
             const rows = Array.from(document.querySelectorAll("[data-template-id]"));
-            const row = rows.find((r) => String(r.getAttribute("data-template-id")) === ${JSON.stringify(templateId)});
-            if (!row) return { hit: false, ids: rows.map((r) => String(r.getAttribute("data-template-id"))) };
-            row.click();
-            return { hit: true, ids: [] };
+            const byId = (id) => rows.find((r) => String(r.getAttribute("data-template-id")) === String(id));
+            const wanted = ${JSON.stringify(templateId)};
+            const hit = byId(alias[wanted]) ?? byId(wanted)
+                ?? rows.find((r) => String(r.getAttribute("data-template-src")) === "builtin")
+                ?? null;
+            if (!hit) return { hit: false, ids: rows.map((r) => String(r.getAttribute("data-template-id"))) };
+            hit.click();
+            return { hit: true, ids: [], clicked: String(hit.getAttribute("data-template-id")) };
         })()`, 4000).catch(() => null);
         if (picked && picked.hit) {
             const okUi = await waitForBoardApplied(cdp, wantId, timeoutMs);
@@ -9564,7 +9652,7 @@ async function runMcuConceptSection(cdp, opts) {
         })()`);
         await sleep(900);
         const unloaded = await awaitEval(cdp, `(() => {
-            const pending = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
+            const pending = document.querySelector('.pw-pending');
             return !pending;
         })()`);
         add(
@@ -9905,7 +9993,7 @@ const BV_BASE_PLANNER_PROBE = `(() => {
     productPlanCount: product ? product.querySelectorAll("[data-mmap-plan]").length : -1,
     hasSubmit: !!document.querySelector('[data-action="submit-memory-map"]'),
     errorCode: err ? String(err.getAttribute("data-error-code") ?? "") : "",
-    pending: !!document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]'),
+    pending: !!document.querySelector('.pw-pending'),
   };
 })()`;
 
@@ -9995,8 +10083,8 @@ async function runBasePlannerSection(cdp, opts) {
     let lastErrorText = "";
     while (Date.now() < deadline) {
         const now = await awaitEval(cdp, `(() => {
-            const el = document.querySelector('[data-view-body="memory-map"] [data-memory-map-pending]');
-            const err = document.querySelector('[data-view-body="memory-map"] [data-memory-map-error]');
+            const el = document.querySelector('.pw-pending');
+            const err = document.querySelector('[data-board-error-banner][data-error-code]');
             return { pending: Boolean(el), code: err ? String(err.getAttribute("data-error-code") || "") : "", text: err ? String(err.textContent ?? "") : "" };
         })()`);
         if (now?.code) {
