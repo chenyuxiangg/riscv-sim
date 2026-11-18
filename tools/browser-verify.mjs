@@ -1952,7 +1952,7 @@ const BV_MCU_BOARD = {
         { kind: "ram", base: 0, size: 1048576 },
         { kind: "peripheral", base: 33554432, device: { device: "clint", id: "CLINT", freq_hz: 10000000, harts: 1 } },
         { kind: "peripheral", base: 201326592, device: { device: "plic", id: "PLIC", sources: 64, contexts: 16 } },
-        { kind: "peripheral", base: 268435456, device: { device: "uart16550", id: "UART0", irq_line: 1, baud_rate: 115200 } },
+        { kind: "peripheral", base: 268435456, device: { device: "uart16550", id: "UART0", irq_line: 10, baud_rate: 115200 } },
         { kind: "peripheral", base: 1073741824, device: { device: "gpio", id: "GPIO0" } },
         { kind: "ram", base: 2147483648, size: 134217728 },
     ],
@@ -9616,13 +9616,67 @@ async function runUartEchoProbe(cdp, opts) {
     //   ② **没匹配上就不再往下等**——后面三档（执行整行 / 第二行 / 不回显）
     //      的前提都是「回显来了」⇒ ⇒ 回显没来，它们只会重复烧超时；
     //      这里只留**一条** ✗，并说明「后续三档未执行」。
+    // ⚠️ **v0.86 · 失败现场取证（判据不变，detail 加四个寄存器真值）**：
+    //   回显没来时，只有「字节到没到」「中断标识是哪一类」能区分
+    //   「传输丢了」与「中断没被交付 / 驱动没认这一类」。
+    const IIR_ADDR = 0x10000002;
+    let preLsr = null;
+    let preIir = null;
+    try {
+        const v1 = await awaitEval(cdp, `window.riscv_kernel.readMemory(0x10000005, "Byte")`, 30000);
+        preLsr = typeof v1?.value === "number" ? (v1.value >>> 0) : null;
+        const v2 = await awaitEval(cdp, `window.riscv_kernel.readMemory(${IIR_ADDR}, "Byte")`, 30000);
+        preIir = typeof v2?.value === "number" ? (v2.value >>> 0) : null;
+    } catch (_err) {
+        /* 取证失败不影响判据 */
+    }
     const echo = await awaitEval(cdp,
         `window.riscv_image.runUntilConsole("OSZ$ Q", { timeoutMs: 30000 })`,
         60000);
+    // ⚠️ PLIC 侧真值：enable(ctx0 word0) / pending(word0) / prio[src10] / threshold(ctx0)
+    //   ⇒ ⇒ 区分「源没被 guest 使能」与「使能了但没被仲裁出来」。
+    let plicEnable = null;
+    let plicPending = null;
+    let plicPrio10 = null;
+    let plicThreshold = null;
+    try {
+        // ⚠️ 地址按 `plic.rs` 的表：enable = 0x2000 + 0x80×ctx，ctx0 ⇒ 0x0C002000；
+        //   threshold = 0x200000 + 0x1000×ctx，ctx0 ⇒ 0x0C200000。
+        const words = [
+            [0x0C002000, "plEnable"],
+            [0x0C001000, "plPending"],
+            [0x0C000028, "plPrio"],
+            [0x0C200000, "plThresh"],
+        ];
+        const got = {};
+        for (const [addr, key] of words) {
+            try {
+                const v = await awaitEval(cdp,
+                    `window.riscv_kernel.readMemory(${addr}, "Word")`, 30000);
+                got[key] = typeof v?.value === "number" ? (v.value >>> 0) : null;
+            } catch (_e) { got[key] = null; }
+        }
+        plicEnable = got.plEnable;
+        plicPending = got.plPending;
+        plicPrio10 = got.plPrio;
+        plicThreshold = got.plThresh;
+    } catch (_err) { /* 同上 */ }
+    let postLsr = null;
+    try {
+        const v = await awaitEval(cdp, `window.riscv_kernel.readMemory(0x10000005, "Byte")`, 30000);
+        postLsr = typeof v?.value === "number" ? (v.value >>> 0) : null;
+    } catch (_err) { /* 同上 */ }
     checks.push({
         name: "B-63 · guest 的 console 出现**回显**（UART RX 中断真的被交付了）",
         ok: echo?.matched === true,
-        detail: `matched=${echo?.matched} batches=${echo?.batches}`,
+        detail: `matched=${echo?.matched} batches=${echo?.batches}`
+            + ` 发送后 LSR=${preLsr === null ? "?" : "0x" + preLsr.toString(16)}`
+            + ` IIR=${preIir === null ? "?" : "0x" + preIir.toString(16)}`
+            + ` 等待后 LSR=${postLsr === null ? "?" : "0x" + postLsr.toString(16)}`
+            + ` PLIC[enable0=${plicEnable === null ? "?" : "0x" + plicEnable.toString(16)}`
+            + ` pending0=${plicPending === null ? "?" : "0x" + plicPending.toString(16)}`
+            + ` prio10=${plicPrio10 === null ? "?" : "0x" + plicPrio10.toString(16)}`
+            + ` thresh0=${plicThreshold === null ? "?" : "0x" + plicThreshold.toString(16)}]`,
     });
     if (echo?.matched !== true) {
         // ⚠️ 现场：把 console 尾巴一起带出来（「一个字符都没有」与「只有一个
