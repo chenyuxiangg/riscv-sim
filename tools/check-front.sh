@@ -30,7 +30,50 @@ if (major < 22) {
   process.exit(1);
 }'
 
-node --test "front/tests/*.test.mjs"
+# ---------------------------------------------------------------------------
+# 按**影响面**选测（`tools/impact.mjs`）—— 改完立刻验，不必等收口
+# ---------------------------------------------------------------------------
+#
+# ⚠️ **规矩**：只许**缩小**本次必跑的用例集合，**不许**把可能被影响的排除。
+#   选不出 / 映射不出来 ⇒ ⇒ 退回全量（`--impact` 只在定位期用；收口仍是全量）。
+#
+# ⚠️ **用例集合是算出来的**：按 `front/tests/*.test.mjs` 的静态 import 闭包
+#   推导 —— 改 `front/lib/x.js` ⇒ 只有（直接或间接）依赖它的用例被选中 ⇒
+#   手写清单不会和真实依赖脱节。
+IMPACT_MODE=0
+for arg in "$@"; do
+    case "$arg" in
+        --impact) IMPACT_MODE=1 ;;
+        --help|-h)
+            echo "usage: tools/check-front.sh [--impact]"
+            echo "  --impact  只跑受本次改动影响的前端用例（默认全量）"
+            exit 0 ;;
+        *) echo "error: unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
+if [ "$IMPACT_MODE" = "1" ]; then
+    if ! command -v git >/dev/null 2>&1; then
+        echo "==> --impact 需要 git（算改动文件）；本机没有 ⇒ ⇒ 退回全量"
+        IMPACT_MODE=0
+    fi
+fi
+
+if [ "$IMPACT_MODE" = "1" ]; then
+    echo
+    echo "==> impact plan (tools/impact.mjs)"
+    node tools/impact.mjs --base "${IMPACT_BASE:-origin/main}"
+    SELECTED="$(node tools/impact.mjs --front-tests --base "${IMPACT_BASE:-origin/main}" || true)"
+    if [ -z "$SELECTED" ]; then
+        echo
+        echo "==> 本次改动不影响前端用例（0 个文件）⇒ ⇒ 跳过 node --test"
+    else
+        # shellcheck disable=SC2086
+        node --test $SELECTED
+    fi
+else
+    node --test "front/tests/*.test.mjs"
+fi
 
 # ---------------------------------------------------------------------------
 # The ledger's front-end attribution (v0.34 · `tools/front_test_attrib.py`)
@@ -55,11 +98,14 @@ node --test "front/tests/*.test.mjs"
 # ⚠️ `python3` may be absent ⇒ ⇒ the check is **skipped with a notice**
 #   (not a silent pass) ⇒ ⇒ a machine without python3 still runs the
 #   front-end gate.
-if command -v python3 >/dev/null 2>&1; then
+if [ "$IMPACT_MODE" = "0" ] && command -v python3 >/dev/null 2>&1; then
     echo
     echo "==> ledger front-end attribution (tools/front_test_attrib.py)"
     python3 tools/front_test_attrib.py || exit 1
     python3 tools/front_test_attrib.py --selftest || exit 1
+elif [ "$IMPACT_MODE" = "1" ]; then
+    echo
+    echo "==> SKIP: ledger attribution（--impact 只跑受影响的用例）"
 else
     echo
     echo "==> SKIP: ledger front-end attribution (python3 not found)"
@@ -80,10 +126,13 @@ fi
 #   invariant**, ⇒ ⇒ and an invariant nobody checks rots.
 #
 # ⚠️ `python3` may be absent ⇒ ⇒ **skipped with a notice** (not a silent pass).
-if command -v python3 >/dev/null 2>&1; then
+if [ "$IMPACT_MODE" = "0" ] && command -v python3 >/dev/null 2>&1; then
     echo
     echo "==> dev server cache headers (tools/serve-front.py --self-check)"
     python3 tools/serve-front.py --self-check || exit 1
+elif [ "$IMPACT_MODE" = "1" ]; then
+    echo
+    echo "==> SKIP: dev server self-check（--impact 只跑受影响的用例）"
 else
     echo
     echo "==> SKIP: dev server cache headers (python3 not found)"

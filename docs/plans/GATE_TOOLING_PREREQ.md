@@ -5,6 +5,8 @@
 > **挂接**：本清单为 **STAGE-53（第 61 批 / v0.77）的 §0 开工前置** —— R-1~R-4 未完成前不进入产品实现；R-5~R-7 随批顺手整改。
 >
 > **状态**：**R-1~R-4 已落地（2026-11-18 · v0.80）**，`tools/browser-verify.mjs` 单文件改造；R-7（段级计时）随批完成。**§4 的「夹具层 2✗ 演练」仍欠** —— 已完成的三项演练见 §2.5。
+>
+> **R-8（按影响面选测）已落地（2026-11-19 · v0.92）**：`tools/impact.mjs` 出计划，`tools/browser-verify.mjs --impact` 与 `tools/check-front.sh --impact` 消费它。见 §5.1。
 
 ---
 
@@ -138,3 +140,37 @@ R-1~R-4 落地后，做一次**故意引入已知失败**的演练（在夹具�
 | R-7 段级计时 | `TIMING` + `[timing] section=<id> ms=<n>` + top5 汇总 | 全量日志 `[timing]` 行 = 段数（`direct` 段标 ms=0，表示未单独计时，不伪装成有值） |
 
 **仍欠**：§4 的「夹具层制造一个确定 2✗」演练（要动夹具、会真红，留到下一次动夹具的批次一起做）。
+
+---
+
+## §5.1 R-8 · 按影响面选测（v0.92）
+
+**动机**：全量门禁 4~15 分钟、前端 758 条、内核数百条 ⇒ ⇒ 改一行注释也跑一遍全量
+⇒ ⇒ 「改完立刻验」在成本上不成立 ⇒ ⇒ 红点攒到收口才暴露。选测把这一步压到可负担。
+
+**两条硬规矩**
+
+1. **不准漏**：选测只许**缩小**必跑集合。映射不出来 / 扇出太大 / 是共享底座
+   ⇒ ⇒ **一律收敛到全量**。计划工具失败、输出不可解析 ⇒ ⇒ 也全量。
+2. **前端用例集合是算出来的**：按 `front/tests/*.test.mjs` 的**静态 import 闭包**
+   （含 `importFront("lib/x.js")` 这类动态字符串写法、以及「正文里点名该路径」的
+   源码文本断言）推导 ⇒ ⇒ 改哪个模块就只跑依赖它的用例，不靠手写清单。
+
+**映射表的写法**：只有「改动面确实很窄」的路径才进窄表（目前 4 条：`docs/**`、
+`trace-export.js`、`trace-switch.js`、`run-loop.js`、`waveform-data.js`）；其余
+一律走兜底（全量）。**收益是少跑，成本是漏跑** ⇒ ⇒ 宁可少写几条。
+
+**用法**
+
+```bash
+node tools/impact.mjs --base origin/main          # 看计划（人类可读）
+node tools/impact.mjs --base origin/main --json    # 给脚本
+node tools/impact.mjs --paths front/lib/x.js       # 演练：模拟一组改动
+node tools/browser-verify.mjs --impact [--impact-base HEAD]
+tools/check-front.sh --impact
+node tools/impact.mjs --selftest                   # 映射规则 8 条不变量
+```
+
+**边界**：`--impact` 只用于**定位期**。收口判据仍是「全量 0 ✗」（§2.5 第 3 条）。
+计划输出会让被跳过的段在报告里显式标 `SKIP（--impact ⇒ 本段不在影响面内）`
+—— 跳过永远是**可见**的，不会静默消失。
