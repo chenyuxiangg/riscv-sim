@@ -3684,7 +3684,15 @@ async function runBoardDeltaSection(cdp, opts) {
     //   的收件箱 ⇒ ⇒ 全量跑到这一段时，里面已经有**前面各段**留下的
     //   `PatchMemoryMap`（实测撞上的是一条 GPIO0 的旧补丁 ⇒ 判据误读成
     //   「只改了一段」却对不上基址）⇒ ⇒ 先量基线，再扫描新增部分。
-    const wireBaseline = (await awaitEval(cdp, `(() => (Array.isArray(window.__bvIn) ? window.__bvIn.length : 0))()`)) ?? 0;
+    // ⚠️ **v0.89 · 基线必须取自同一个数组**：原来这里量的是 `__bvIn`
+    //   （**入向**：内核 → 前端）的长度，却拿它去 `slice` `__bvWire`
+    //   （**出向**：前端 → 内核）——两条数组的节奏完全不同（入向每一条
+    //   事件都长一格，出向只有命令才长）⇒ ⇒ 切片几乎总是**空**
+    //   ⇒ ⇒ 「线上帧里没有 PatchMemoryMap」**恒成立** ⇒ ⇒ 两条判据被当成
+    //   「产品缺口」挂在 `known` 上（v0.86 的错误结论）。
+    //   现场实据：`window.__bvPlanDebug.mode === "patch"`、`ops === 1`，
+    //   `__bvWire` 里**确实有** 1 条 `PatchMemoryMap` ⇒ ⇒ 差量一直在走。
+    const wireBaseline = (await awaitEval(cdp, `(() => (Array.isArray(window.__bvWire) ? window.__bvWire.length : 0))()`)) ?? 0;
     await runEffect(cdp, `window.dispatchEvent(new CustomEvent("riscv:command", {
         detail: {
             action: "load-archive",
@@ -3728,17 +3736,21 @@ async function runBoardDeltaSection(cdp, opts) {
             await sleep(200);
         }
     }
-    // ⚠️ **v0.86 · 本轮新查明的产品缺口（标 known，另立项）**：
+    // ⚠️ **v0.89 · 上一批把这里判成「产品缺口」，是门禁自己的 bug**：
+    //   见上面 `wireBaseline` 那段的说明（基线取错数组 ⇒ 恒空）。
+    //   真机现场：`applyProductBoard` 的 `plan.mode === "patch"`、
+    //   `ops === 1`，出向帧里确实有一条 `PatchMemoryMap`。
+    //
+    // ⚠️ 旧注释（保留原文，便于追溯）：
+    //   「本轮新查明的产品缺口（标 known，另立项）」：
     //   `load-archive` → `applyProductBoard` 确实调用 `planMemoryMapUpdate`，
     //   可真机**三笔相同提交**都是 `SetMemoryMap`（整份）⇒ ⇒ 说明前端
     //   `product.memoryMap.description` 这一底座在**这条入口**上拿不到/对不上
     //   （老的「改一段走差量」链路原本由 `#/memory-map` 编辑器驱动，那个视图
     //   已随 v0.85 删除）⇒ ⇒ 差量路径**在真实 UI 上不可达**，不是门禁判据过期。
     checks.push({
-        name: "只改一段 ⇒ 命令**走差量**（线上帧里是 `PatchMemoryMap`，**不是** `SetMemoryMap`）"
-            + "【已知产品缺口：load-archive 入口下差量不可达】",
+        name: "只改一段 ⇒ 命令**走差量**（线上帧里是 `PatchMemoryMap`，**不是** `SetMemoryMap`）",
         ok: patchFrame.length > 0,
-        known: true,
         detail: patchFrame ? `帧长 ${patchFrame.length} 字节` : "线上帧里没有 PatchMemoryMap",
     });
     // ⚠️ **v0.86**：真机上 `base` 可能以 **u32 十进制**或 **0x 十六进制**两种
@@ -3748,10 +3760,8 @@ async function runBoardDeltaSection(cdp, opts) {
         || patchFrame.includes("0x" + BV_DELTA_RAM_BASE.toString(16))
         || patchFrame.includes("0x" + BV_DELTA_RAM_BASE.toString(16).toUpperCase());
     checks.push({
-        name: "差量的载荷里**只有那一段**（一个 `UpsertRegion`，基址 = 被改的那段）"
-            + "【已知产品缺口：同上】",
+        name: "差量的载荷里**只有那一段**（一个 `UpsertRegion`，基址 = 被改的那段）",
         ok: patchFrame.includes("UpsertRegion") && patchHasBase,
-        known: true,
         detail: patchFrame ? patchFrame.slice(0, 400) : "没有差量帧",
     });
 
