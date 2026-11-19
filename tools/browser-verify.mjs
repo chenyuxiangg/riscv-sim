@@ -137,6 +137,8 @@ const DEMO_FIRMWARE_PATH = join(DEMO_FIRMWARE_TMP_DIR, "demo-firmware.bin");
 writeFileSync(DEMO_FIRMWARE_PATH, Buffer.from(DEMO_FIRMWARE_BYTES));
 
 /** A missing precondition (no Chrome / no python3) — not a test failure. */
+const HERE_TOOLS = dirname(fileURLToPath(import.meta.url));
+const ROOT_DIR = resolve(HERE_TOOLS, "..");
 const EXIT_PRECONDITION = 127;
 /** The verification itself failed. */
 const EXIT_FAILED = 1;
@@ -161,6 +163,12 @@ const RUN_POLICY = {
     /** `--progress`：每段开始/结束立刻打一行（定位「卡在哪段」）。 */
     progress: false,
     only: null,
+    /**
+     * `--impact`：按改动面选出来的段集合（tools/impact.mjs 算的）。
+     * ⚠️ 与 only 同一种东西（都是「这趟只跑这几段」）⇒ ⇒ 收口判据仍是全量 0 ✗。
+     */
+    onlySet: null,
+    impactReason: null,
     from: null,
     fromReached: false,
     injectFail: false,
@@ -490,6 +498,32 @@ function selfCheckPageTemplates() {
     return findings;
 }
 
+/**
+ * 跑一次 tools/impact.mjs --json，拿「这次改动影响哪些段」。
+ *
+ * ⚠️ **失败即全量**：工具挂了 / 输出不是 JSON ⇒ ⇒ 不猜、不跳过，直接全量。
+ *   选测的错法只允许一种：**多跑**。
+ *
+ * @param {string} base — 比较基线（默认 origin/main）
+ * @returns {{full: boolean, sections: string[], reasons: string[], frontTests: string[], cargo: string[]}}
+ */
+function computeImpactPlan(base) {
+    const r = spawnSync(process.execPath, [join(HERE_TOOLS, "impact.mjs"), "--json", "--base", base], {
+        cwd: ROOT_DIR,
+        encoding: "utf8",
+    });
+    if (r.status !== 0) {
+        console.log(`[impact] 计划失败（rc=${r.status}）⇒ ⇒ 保守跑全量：${String(r.stderr ?? "").trim().slice(0, 200)}`);
+        return { full: true, sections: [], reasons: ["impact 工具失败"], frontTests: [], cargo: [] };
+    }
+    try {
+        return JSON.parse(String(r.stdout ?? ""));
+    } catch {
+        console.log("[impact] 计划不是 JSON ⇒ ⇒ 保守跑全量");
+        return { full: true, sections: [], reasons: ["计划解析失败"], frontTests: [], cargo: [] };
+    }
+}
+
 function parseArgs(argv) {
     const opts = {
         url: "http://localhost:8080/",
@@ -513,6 +547,9 @@ function parseArgs(argv) {
         // R-1 · 分段重跑（定位期用；收口判据仍要求全量 0 ✗）
         else if (arg === "--only") opts.only = String(argv[++i]);
         else if (arg === "--from") opts.from = String(argv[++i]);
+        // 按影响面选测（tools/impact.mjs 算；只影响定位期）
+        else if (arg === "--impact") opts.impact = true;
+        else if (arg === "--impact-base") opts.impactBase = String(argv[++i]);
         // R-2 · 证据演练：故意构造一条必失败断言，验证 evidence 链可用
         else if (arg === "--inject-fail") opts.injectFail = true;
         // R-4 · 关掉「wasm 比源码旧就自动重建」
@@ -559,6 +596,9 @@ function printUsage() {
         "  --only <section>     只跑这一段（其余段在报告里标 SKIP，不静默消失）",
         "  --from <section>     从这一段开始跑（前面的段标 SKIP；真机是顺序累积状态，",
         "                       所以只有在「前置状态重建得出来」时才可信）",
+        "  --impact             按改动面只跑受影响的段（tools/impact.mjs 算；",
+        "                       拿不准就自动收敛到全量 ⇒ ⇒ 定位期用，收口仍须全量）",
+        "  --impact-base <rev>  影响面的比较基线（默认 origin/main）",
         "  --inject-fail        演练：跑一条必失败断言，验证 evidence 链（跑完即退出）",
         "  --no-auto-build      wasm 比源码旧时**不**自动重建，直接报错退出",
         "  --health-needle <sel> 采集通道自检的 needle（默认 [data-view-body]；改错可演练 R-3）",
@@ -10043,6 +10083,11 @@ function policySkipReason(name) {
     if (RUN_POLICY.only) {
         return name === RUN_POLICY.only ? null : `SKIP（--only=${RUN_POLICY.only} ⇒ 本段未选中）`;
     }
+    if (RUN_POLICY.onlySet) {
+        return RUN_POLICY.onlySet.includes(name)
+            ? null
+            : `SKIP（--impact ⇒ 本段不在影响面内）`;
+    }
     if (RUN_POLICY.from) {
         if (RUN_POLICY.fromReached || name === RUN_POLICY.from) {
             RUN_POLICY.fromReached = true;
@@ -10143,9 +10188,28 @@ async function main() {
     const opts = parseArgs(process.argv.slice(2));
     RUN_POLICY.only = opts.only ?? null;
     RUN_POLICY.from = opts.from ?? null;
+    if (opts.impact) {
+        // ⚠️ 计划由 tools/impact.mjs 算（同一份映射规则，前端闸门也用它）
+        //   ⇒ ⇒ 这里只消费结果，不复制判断逻辑。
+        const plan = computeImpactPlan(opts.impactBase ?? "origin/main");
+        if (plan.full) {
+            console.log(`[impact] 全量（${plan.reasons.join(" / ") || "改动面覆盖全部段"}）`);
+        } else {
+            RUN_POLICY.onlySet = plan.sections;
+            RUN_POLICY.impactReason = plan.reasons.join(" / ") || "改动只触及这些段";
+            console.log(`[impact] 只跑 ${plan.sections.length} 段：${plan.sections.join(", ")}`);
+            console.log(`[impact] 理由：${RUN_POLICY.impactReason}`);
+        }
+        if (plan.frontTests?.length) {
+            console.log(`[impact] 前端用例 ${plan.frontTests.length} 个文件（用 tools/check-front.sh --impact 跑）`);
+        }
+        if (plan.cargo?.length) {
+            console.log(`[impact] 内核单测：cargo test -p ${plan.cargo.join(" -p ")}`);
+        }
+    }
     RUN_POLICY.injectFail = opts.injectFail === true;
     RUN_POLICY.autoBuild = opts.autoBuild !== false;
-    if (RUN_POLICY.only && RUN_POLICY.from) {
+    if ((RUN_POLICY.only || RUN_POLICY.onlySet) && RUN_POLICY.from) {
         console.error("error: --only 与 --from 互斥（一次只表达一种策略）。");
         return EXIT_PRECONDITION;
     }
@@ -10889,7 +10953,7 @@ async function main() {
             console.log(`[timing] top5：${slowest.map((t) => `${t.name}=${t.ms}ms`).join(" · ")}`
                 + `，合计 ${slowest.reduce((a, b) => a + b.ms, 0)}ms / 全程 ${TIMING.reduce((a, b) => a + b.ms, 0)}ms`);
         }
-        if (RUN_POLICY.only || RUN_POLICY.from) {
+        if (RUN_POLICY.only || RUN_POLICY.onlySet || RUN_POLICY.from) {
             console.log(`[policy] ${RUN_POLICY.only ? `only=${RUN_POLICY.only}` : `from=${RUN_POLICY.from}`}`
                 + " ⇒ 本趟**不是**全量绿，只用于定位；收口判据仍是全量 0 ✗。");
         }
@@ -10899,7 +10963,7 @@ async function main() {
         const ranSections = SECTION_REGISTRY.filter((sec) => !sec.skipped).length;
         // ⚠️ **分段跑绝不能说「通过」**（R-1 的诚实约束）：只跑了 1 段也判绿
         //   ⇒ ⇒ 「跳过的段被误读为通过」⇒ ⇒ 收口时会把没验证的东西当已验证。
-        if (RUN_POLICY.only || RUN_POLICY.from) {
+        if (RUN_POLICY.only || RUN_POLICY.onlySet || RUN_POLICY.from) {
             console.log(ok
                 ? `browser-verify: 定位跑通过（只跑了 ${ranSections}/${SECTION_REGISTRY.length} 段；`
                   + "**不是**全量绿，收口仍须全量 0 ✗）"
