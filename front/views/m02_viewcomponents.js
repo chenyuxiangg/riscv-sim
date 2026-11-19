@@ -841,25 +841,6 @@ function sanitizeFileNamePart(text) {
  * @param {unknown} format — 导出格式（契约的 `TraceFormat`）
  * @returns {string}
  */
-export function exportDownloadLabel(source, format) {
-    const src = String(source ?? "").trim() || TRACE_SOURCE.Execution;
-    const fmt = String(format ?? "").trim() || TRACE_FORMAT.Csv;
-    const label = src === TRACE_SOURCE.Waveform
-        ? "波形"
-        : (src === TRACE_SOURCE.Execution ? "轨迹" : "导出内容");
-    return `下载${label}到本地 (${fmt.toUpperCase()})`;
-}
-
-/**
- * 从导出状态派生**文件名**（源 + 格式）。
- *
- * ⚠️ 这是**纯函数** ⇒ 门禁可以直接断言「文件名由内容派生」，不需要真的
- * 下载一次。
- *
- * @param {unknown} source — 导出源（契约的 `TraceSource`，如 `Execution`）
- * @param {unknown} format — 导出格式（契约的 `TraceFormat`，如 `Csv`）
- * @returns {string} 例如 `trace-execution.csv`
- */
 export function exportFileName(source, format) {
     const src = sanitizeFileNamePart(String(source ?? "").trim().toLowerCase()) || "trace";
     const fmt = sanitizeFileNamePart(String(format ?? "").trim().toLowerCase()) || "txt";
@@ -1761,9 +1742,8 @@ const debugView = register({
                     <div class="row"><h3>trace 记录 / 导出 (M-11 / M-19)</h3></div>
                     <div class="card-actions">
                         <button type="button" data-action="trace-toggle" data-trace-switch="${traceSwitch.state}" aria-pressed="${traceSwitch.state === TRACE_SWITCH_ON ? "true" : "false"}">${escapeHtml(traceToggleLabel(traceSwitch))}</button>
-                        <button type="button" data-action="export-trace" data-source="Execution" data-format="Csv" data-offset="0" data-limit="0" title="导出执行轨迹第一块（CSV）">导出执行轨迹 (CSV)</button>
-                        <button type="button" data-action="export-trace" data-source="Execution" data-format="Json" data-offset="0" data-limit="0" title="导出执行轨迹第一块（JSON）">导出执行轨迹 (JSON)</button>
-                        <button type="button" data-action="download-trace-local" data-trace-download-button title="把**整份**导出翻完并落盘（不是第一块）">${escapeHtml(exportDownloadLabel(exportState?.source, exportState?.format))}</button>
+                        <button type="button" data-action="export-trace" data-source="Execution" data-format="Csv" data-offset="0" data-limit="0" data-whole="1" title="把整条执行轨迹翻完并落盘（CSV）">导出执行轨迹 (CSV)</button>
+                        <button type="button" data-action="export-trace" data-source="Execution" data-format="Json" data-offset="0" data-limit="0" data-whole="1" title="把整条执行轨迹翻完并落盘（JSON）">导出执行轨迹 (JSON)</button>
                     </div>
                     <p class="trace-state" data-trace-state data-trace-switch="${traceSwitch.state}"${traceSwitch.state === TRACE_SWITCH_ON ? " data-trace-notice" : ""}>${renderTraceStatus(traceSwitch)}</p>
                     <div class="trace-filter" data-trace-filter>
@@ -1867,6 +1847,9 @@ const debugView = register({
             format: el.dataset.format,
             offset: el.dataset.offset,
             limit: el.dataset.limit,
+            // ⚠️ **v0.89**：`data-whole="1"` ⇒ 这次「导出」要把**整份**落盘
+            //   （用户拍板：界面只留「导出执行轨迹」，不再有第二颗下载按钮）。
+            whole: el.dataset.whole,
             ...traceFilterParams,
         });
     },
@@ -2168,7 +2151,7 @@ const waveformView = register({
                     <div class="row">
                         <h3>波形 (M-19)</h3>
                         <span class="tag">${channels.length} 个通道</span>
-                        <button type="button" data-action="export-trace" data-source="Waveform" data-format="Vcd" data-offset="0" data-limit="0">导出波形 (VCD)</button>
+                        <button type="button" data-action="export-trace" data-source="Waveform" data-format="Vcd" data-offset="0" data-limit="0" data-whole="1">导出波形 (VCD)</button>
                     </div>
                     ${channels.length === 0
                         ? `<p class="muted">尚无探针信号 — 固件驱动外设后（M-15 + M-18 管道已接通）会列出通道。</p>`
@@ -2364,6 +2347,10 @@ const waveformView = register({
                 format: el.dataset.format,
                 offset: el.dataset.offset,
                 limit: el.dataset.limit,
+                // ⚠️ **v0.89**（用户拍板：「保留导出执行轨迹」）⇒ 界面上**只有
+                //   「导出」入口**（不再有一个平行的「下载轨迹到本地」）⇒ ⇒
+                //   点「导出」＝ 把**整份**翻完并落盘；`whole` 就是这个意思。
+                whole: el.dataset.whole,
             });
         }
         return undefined;

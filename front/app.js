@@ -1746,43 +1746,48 @@ export async function handleCommand(detail, services) {
                     ...prev,
                     debug: { ...(prev.debug ?? {}), traceFilter: normalized.filter },
                 }));
+                // ⚠️ **v0.89**（用户拍板：「保留导出执行轨迹」）⇒ 界面上的「导出」
+                //   就是**唯一**入口 ⇒ ⇒ `data-whole="1"` 的按钮点一下要**落盘**
+                //   （此前这里只出「第一块」到 `<pre>`，另外还有一个平行的
+                //   「下载轨迹到本地」按钮 —— 两颗按钮说同一件事，用户不知道该
+                //   点哪颗）。⇒ ⇒ **一个入口、一份结果**：整份翻完并落盘 ⇒ ⇒
+                //   进度行 / `<pre>` 由翻页的每一块**自然**更新（不重复发一遍
+                //   第一块）。
+                if (detail.params?.whole) {
+                    try {
+                        const result = await downloadWholeTrace(services, {
+                            source,
+                            format,
+                            filter: normalized.filter,
+                        });
+                        if (result) {
+                            setNote(`已导出 ${result.filename}（内核报告 ${result.total ?? "?"} 条）`);
+                        }
+                    } catch (err) {
+                        updateDebugState((prev) => ({
+                            ...prev,
+                            debug: {
+                                ...(prev.debug ?? {}),
+                                error: {
+                                    code: err?.code ?? "E_CTX-06",
+                                    message: `导出落盘失败：${err?.message ?? String(err)}`,
+                                },
+                            },
+                        }));
+                        return;
+                    }
+                    break;
+                }
                 await commandRouter.dispatchCommand(
                     Command.exportTrace(source, format, offset, limit, normalized.filter),
                 );
                 break;
             }
-            case "download-trace-local": {
-                // ⚠️ **「下载当前这份导出的全部内容」**（v0.63 批）⇒ ⇒ 源 / 格式
-                //   **跟着当前导出状态走**（默认 = 执行轨迹 CSV）⇒ ⇒ 「导出波形
-                //   (VCD)」之后点它 ⇒ ⇒ 下的是**整份波形**⇒ ⇒ 波形那条路**没有**
-                //   被这次去重**砍掉**。
-                //
-                // ⚠️ **默认值与视图层那个按钮的文案逐字一致**（`Execution` /
-                //   `Csv`）⇒ ⇒ 按钮上写的与实际下的**不可能**对不上。
-                const current = viewStore.getState("debug")?.debug?.export ?? null;
-                const filter = viewStore.getState("debug")?.debug?.traceFilter ?? null;
-                const source = String(current?.source ?? TRACE_SOURCE.Execution);
-                const format = String(current?.format ?? TRACE_FORMAT.Csv);
-                try {
-                    const result = await downloadWholeTrace(services, { source, format, filter });
-                    if (result) {
-                        setNote(`已下载 ${result.filename}（内核报告 ${result.total ?? "?"} 条）`);
-                    }
-                } catch (err) {
-                    updateDebugState((prev) => ({
-                        ...prev,
-                        debug: {
-                            ...(prev.debug ?? {}),
-                            error: {
-                                code: err?.code ?? "E_CTX-06",
-                                message: `下载轨迹失败：${err?.message ?? String(err)}`,
-                            },
-                        },
-                    }));
-                    return;
-                }
-                break;
-            }
+            // ⚠️ **v0.89**：原来的 `case "download-trace-local"` 已删 —— 它服务的
+            //   那颗「下载轨迹到本地」按钮已撤（用户拍板：保留「导出执行轨迹」）。
+            //   「整份翻完并落盘」能力**没有丢**：它就是 `export-trace` 的
+            //   `whole` 分支（上面那一段）。⇒ ⇒ 界面上**只有一个**导出入口，
+            //   代码里也**只有一条**落盘路径。
             case "trace-toggle": {
                 // ⚠️ **一个开关**（此前是两个按钮）⇒ ⇒ 「下一个值」由**视图状态**
                 // 推导 ⇒ ⇒ 判定只有一处（`front/lib/trace-switch.js`）⇒ ⇒ 视图

@@ -304,10 +304,18 @@ describe("调试视图 · trace 卡片承担「记录开关」与「下载」", 
             1,
             "trace 开关不是一个（应当是一个带状态的开关）",
         );
+        // ⚠️ **v0.89**（用户拍板：保留「导出执行轨迹」）⇒ 下载入口就是两颗
+        //   「导出执行轨迹 (CSV)/(JSON)」（点一下＝**整份**翻完并落盘），
+        //   平行的那颗「下载轨迹到本地」**已撤**。
         assert.equal(
             body.querySelectorAll('[data-action="download-trace-local"]').length,
-            1,
-            "整份下载的入口不是一个",
+            0,
+            "「下载轨迹到本地」那颗平行按钮还在（用户拍板：只留导出执行轨迹）",
+        );
+        assert.equal(
+            body.querySelectorAll('[data-action="export-trace"][data-whole="1"]').length,
+            2,
+            "整份导出（CSV/JSON）的入口不是一个或不是两颗",
         );
         assert.ok(
             body.querySelector("[data-trace-state]"),
@@ -347,9 +355,13 @@ describe("波形视图 · 承担「导出波形」", () => {
         await clickAndDispatch(router, btn);
 
         const exports = exportCommands(transport);
-        assert.equal(exports.length, 1, "点导出没有发出 ExportTrace");
-        assert.equal(exports[0].source, "Waveform");
-        assert.equal(exports[0].format, "Vcd");
+        // ⚠️ **v0.89**：这颗按钮现在**整份**翻页并落盘 ⇒ 命令会多于一条 ⇒ ⇒
+        //   判的是「每一条都是同一个源 / 同一个格式」。
+        assert.ok(exports.length >= 1, "点导出没有发出 ExportTrace");
+        for (const cmd of exports) {
+            assert.equal(cmd.source, "Waveform");
+            assert.equal(cmd.format, "Vcd");
+        }
         router.close();
     });
 

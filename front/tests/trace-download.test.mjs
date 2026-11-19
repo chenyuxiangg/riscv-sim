@@ -174,40 +174,48 @@ describe("导出下载 · 文件名由内容派生", () => {
 });
 
 describe("导出下载 · B-3 下载动作", () => {
-    test("trace 卡片里有下载动作（不是一个只能手动复制的 <pre>）", () => {
+    test("trace 卡片里有导出动作（不是一个只能手动复制的 <pre>）", () => {
         publishExport(exportState());
-        const button = debugBody().querySelector("[data-trace-download-button]");
-        assert.ok(button, "trace 卡片里没有下载动作");
-        assert.match(button.textContent, /下载轨迹到本地/);
+        const button = debugBody().querySelector(
+            '[data-action="export-trace"][data-source="Execution"][data-format="Csv"]',
+        );
+        assert.ok(button, "trace 卡片里没有导出动作");
+        assert.match(String(button.textContent), /导出执行轨迹 \(CSV\)/);
+        // ⚠️ **v0.89**（用户拍板：保留「导出执行轨迹」）⇒ 这一颗按下去就是
+        //   **整份**翻完并落盘（不是「第一块预览」）。
+        assert.equal(button.dataset.whole, "1", "导出按钮没有带「整份」语义");
     });
 
-    test("下载入口**只有一个**（「下载这一块」那个按钮撤掉了）", () => {
+    test("导出入口**只有一种**（平行的那颗「下载轨迹到本地」已撤）", () => {
         publishExport(exportState());
         const body = debugBody();
         assert.equal(
-            body.querySelectorAll("[data-trace-download-button]").length,
-            1,
-            "下载入口不是一个（用户会不知道该点哪个）",
+            body.querySelectorAll('[data-action="download-trace-local"]').length,
+            0,
+            "「下载轨迹到本地」那颗平行按钮还在（用户拍板：只留导出执行轨迹）",
+        );
+        assert.equal(
+            body.querySelectorAll('[data-action="export-trace"][data-whole="1"]').length,
+            2,
+            "整份导出的入口不是两颗（CSV / JSON）",
         );
         assert.equal(
             body.querySelectorAll('[data-action="download-trace"]').length,
             0,
-            "「下载这一块」那个按钮还在（用户拍板：只留整份下载）",
+            "「下载这一块」那个按钮还在（它早就撤掉了）",
         );
     });
 
-    test("下载按钮的文案**跟着当前这份导出走**（导出波形 ⇒ 下的是波形）", () => {
-        publishExport(exportState({ source: "Waveform", format: "Vcd" }));
-        const button = debugBody().querySelector("[data-trace-download-button]");
-        assert.ok(button, "trace 卡片里没有下载动作");
-        assert.match(button.textContent, /下载波形到本地 \(VCD\)/);
-    });
-
-    test("没有导出过时文案是**执行轨迹 CSV**（默认口径）", () => {
-        publishExport(null);
-        const button = debugBody().querySelector("[data-trace-download-button]");
-        assert.ok(button, "trace 卡片里没有下载动作");
-        assert.match(button.textContent, /下载轨迹到本地 \(CSV\)/);
+    test("每个格式入口的文案**写明格式**（CSV / JSON 各一颗）", () => {
+        publishExport(exportState());
+        const csv = debugBody().querySelector(
+            '[data-action="export-trace"][data-source="Execution"][data-format="Csv"]',
+        );
+        const json = debugBody().querySelector(
+            '[data-action="export-trace"][data-source="Execution"][data-format="Json"]',
+        );
+        assert.match(String(csv?.textContent), /CSV/);
+        assert.match(String(json?.textContent), /JSON/);
     });
 
     test("落盘 ⇒ 造出 <a download>：href 是 blob:、download 非空且由内容派生", () => {

@@ -353,7 +353,7 @@ describe("trace 导出 · 暂停 ⇒ ⇒ 自动渲染", () => {
     });
 });
 
-describe("trace 导出 · 「下载轨迹到本地」", () => {
+describe("trace 导出 · 「导出执行轨迹」＝ 整份落盘", () => {
     test("执行轨迹给出 CSV / JSON 两个格式入口，下载仍只有一个", async () => {
         const { router } = await setup();
         const csv = debugBody().querySelector(
@@ -364,11 +364,15 @@ describe("trace 导出 · 「下载轨迹到本地」", () => {
         );
         assert.ok(csv, "没有「导出执行轨迹 (CSV)」按钮");
         assert.ok(json, "没有「导出执行轨迹 (JSON)」按钮");
+        // ⚠️ **v0.89**（用户拍板：保留「导出执行轨迹」）⇒ 界面上的导出入口
+        //   就是这两颗（点一下＝整份翻完并落盘）；平行的那颗下载按钮**已撤**。
         assert.equal(
             debugBody().querySelectorAll('[data-action="download-trace-local"]').length,
-            1,
-            "整份下载入口必须仍然只有一个",
+            0,
+            "「下载轨迹到本地」那颗平行按钮还在（用户拍板：只留导出执行轨迹）",
         );
+        assert.equal(csv.dataset.whole, "1", "CSV 导出不是整份落盘");
+        assert.equal(json.dataset.whole, "1", "JSON 导出不是整份落盘");
         assert.ok(
             debugBody().querySelector("[data-trace-state]"),
             "trace 卡片不在（格式入口跑到别处去了）",
@@ -386,13 +390,13 @@ describe("trace 导出 · 「下载轨迹到本地」", () => {
             ),
         );
         const exports = exportCommands(transport).slice(before);
-        assert.equal(exports.length, 1, "点 JSON 入口没有发导出命令");
+        assert.ok(exports.length >= 1, "点 JSON 入口没有发导出命令");
         assert.deepEqual(exports[0], {
             source: "Execution",
             format: "Json",
             offset: 0,
             limit: 0,
-        });
+        }, "第一块不是从 0 开始（或者格式不对）");
         router.close();
     });
 
@@ -411,13 +415,17 @@ describe("trace 导出 · 「下载轨迹到本地」", () => {
             ),
         );
         const exports = exportCommands(transport).slice(before);
-        assert.equal(exports.length, 1);
-        assert.deepEqual(exports[0].filter, {
-            time_from_ps: "1000",
-            time_to_ps: "2000",
-            addr_from: 4096,
-            addr_to: 8191,
-        });
+        // ⚠️ **v0.89**：这颗按钮现在**整份**翻页 ⇒ 命令不止一条 ⇒ ⇒ 但**每一条**
+        //   都必须带同一份 filter（否则「筛完再下」中途会静默退回全量）。
+        assert.ok(exports.length >= 1, "点导出没有发命令");
+        for (const cmd of exports) {
+            assert.deepEqual(cmd.filter, {
+                time_from_ps: "1000",
+                time_to_ps: "2000",
+                addr_from: 4096,
+                addr_to: 8191,
+            }, "续导丢了筛选条件");
+        }
         router.close();
     });
 
@@ -437,28 +445,24 @@ describe("trace 导出 · 「下载轨迹到本地」", () => {
         router.close();
     });
 
-    test("筛完再下载 ⇒ ⇒ 续导的每一块都带同一个 filter", async () => {
+    test("筛完再导出 ⇒ ⇒ 翻页的每一块都带同一个 filter", async () => {
         const { router, transport } = await setup();
+        const before = exportCommands(transport).length;
         const body = debugBody();
         body.querySelector("[data-trace-time-from]").value = "1000";
         body.querySelector("[data-trace-time-to]").value = "";
         body.querySelector("[data-trace-addr-from]").value = "";
         body.querySelector("[data-trace-addr-to]").value = "";
+        // ⚠️ **v0.89**：导出按钮**一次点击**就整份翻页 ⇒ ⇒ 这一次点击里
+        //   翻出来的**每一块**都必须带同一份 filter（否则会静默退回全量）。
         await clickAndDispatch(
             router,
             body.querySelector(
                 '[data-action="export-trace"][data-source="Execution"][data-format="Csv"]',
             ),
         );
-        const before = exportCommands(transport).length;
-        const calls = observeBrowserCalls();
-        try {
-            await clickAndDispatch(router, body.querySelector('[data-action="download-trace-local"]'));
-        } finally {
-            calls.restore();
-        }
         const exports = exportCommands(transport).slice(before);
-        assert.ok(exports.length >= 2, "下载没有翻完所有块");
+        assert.ok(exports.length >= 2, "整份导出没有翻完所有块");
         for (const cmd of exports) {
             assert.deepEqual(cmd.filter, { time_from_ps: "1000" }, "续导丢了筛选条件");
         }
@@ -473,7 +477,7 @@ describe("trace 导出 · 「下载轨迹到本地」", () => {
         const calls = observeBrowserCalls();
         let downloaded = null;
         try {
-            await clickAndDispatch(router, debugBody().querySelector('[data-action="download-trace-local"]'));
+            await clickAndDispatch(router, debugBody().querySelector('[data-action="export-trace"][data-source="Execution"][data-format="Csv"]'));
             assert.equal(calls.anchors.length, 1, "没有造出下载用的 <a>");
             downloaded = calls.anchors[0];
         } finally {
@@ -491,14 +495,8 @@ describe("trace 导出 · 「下载轨迹到本地」", () => {
         router.close();
     });
 
-    test("导出 JSON 后点下载 ⇒ ⇒ 落盘的是**合法 JSON**（多块 entries 合并）", async () => {
+    test("导出 JSON ⇒ ⇒ 落盘的是**合法 JSON**（多块 entries 合并）", async () => {
         const { router } = await setup();
-        await clickAndDispatch(
-            router,
-            debugBody().querySelector(
-                '[data-action="export-trace"][data-source="Execution"][data-format="Json"]',
-            ),
-        );
         let blobText = null;
         const origBlob = globalThis.Blob;
         globalThis.Blob = class extends origBlob {
@@ -508,9 +506,12 @@ describe("trace 导出 · 「下载轨迹到本地」", () => {
             }
         };
         try {
+            // ⚠️ **v0.89**：JSON 那颗按钮**一次点击**就整份落盘（预览 + 翻页）。
             await clickAndDispatch(
                 router,
-                debugBody().querySelector('[data-action="download-trace-local"]'),
+                debugBody().querySelector(
+                    '[data-action="export-trace"][data-source="Execution"][data-format="Json"]',
+                ),
             );
         } finally {
             globalThis.Blob = origBlob;
@@ -535,7 +536,7 @@ describe("trace 导出 · 「下载轨迹到本地」", () => {
             }
         };
         try {
-            await clickAndDispatch(router, debugBody().querySelector('[data-action="download-trace-local"]'));
+            await clickAndDispatch(router, debugBody().querySelector('[data-action="export-trace"][data-source="Execution"][data-format="Csv"]'));
         } finally {
             globalThis.Blob = origBlob;
         }
