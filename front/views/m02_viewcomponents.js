@@ -82,7 +82,7 @@ import {
 } from "./components/memory-map.js";
 import {
     buildDeviceNodes,
-    cloneRegisterDoc,
+    seedRegisterDoc,
 } from "./components/device-docs.js";
 import {
     boardDraft,
@@ -319,7 +319,7 @@ function writeRegisterField(field, index, raw) {
     if (!node) return;
     const state = productState();
     const key = node.key;
-    const current = state.docs?.[key] ?? cloneRegisterDoc(node.deviceKind);
+    const current = state.docs?.[key] ?? seedRegisterDoc(node.deviceKind, state?.deviceTypes);
     const rows = Array.isArray(current.regs) ? current.regs.slice() : [];
     const row = rows[index];
     if (!row) return;

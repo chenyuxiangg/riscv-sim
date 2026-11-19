@@ -27,11 +27,11 @@
 import {
     DEVICE_DOCS,
     buildDeviceNodes,
-    cloneRegisterDoc,
     hasDeviceDoc,
     hexAddress,
     normalizeText,
     sameRegisterDoc,
+    seedRegisterDoc,
 } from "./device-docs.js";
 
 import { PLATFORM_SCHEMA_VERSION } from "../../lib/message.js";
@@ -160,9 +160,9 @@ export function boardDraft(state) {
 }
 
 /**
- * 某个节点当前的**寄存器草稿**（没有就取内置表的拷贝）。
+ * 某个节点当前的**寄存器草稿**（没有就按内核类型表播种一份默认文档）。
  *
- * ⚠️ 内置表本身**不被修改**（`cloneRegisterDoc` 深拷贝）。
+ * ⚠️ 内置表本身**不被修改**（`seedRegisterDoc` 深拷贝）。
  *
  * @param {object} state
  * @param {object} node
@@ -172,11 +172,11 @@ export function docFor(state, node) {
     const key = String(node?.key ?? "");
     const stored = state?.docs?.[key];
     if (stored && Array.isArray(stored.regs)) return stored;
-    return cloneRegisterDoc(node?.deviceKind);
+    return seedRegisterDoc(node?.deviceKind, state?.deviceTypes);
 }
 
 /**
- * 某个节点**已生效**的寄存器描述（重载后的基线；没有就取内置表）。
+ * 某个节点**已生效**的寄存器描述（重载后的基线；没有就按内核类型表播种）。
  *
  * @param {object} state
  * @param {object} node
@@ -186,7 +186,7 @@ export function baseDocFor(state, node) {
     const key = String(node?.key ?? "");
     const stored = state?.docsBase?.[key];
     if (stored && Array.isArray(stored.regs)) return stored;
-    return cloneRegisterDoc(node?.deviceKind);
+    return seedRegisterDoc(node?.deviceKind, state?.deviceTypes);
 }
 
 /**
