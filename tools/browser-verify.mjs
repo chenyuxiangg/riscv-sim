@@ -2500,6 +2500,39 @@ async function runUnknownSystemSection(cdp, opts) {
     );
     if (!pendingSeen) return { skipped: false, checks };
 
+    // ---- ⑤″ **等配板落定** ---------------------------------------------------
+    //
+    // ⚠️ **为什么要有这一步**（全量顺序下实测红过两条）：
+    //   `pendingSeen` 认的是「内核**收了**这张图」（memory.map 的 descId 换成了
+    //   新板）—— 但产品视图的「配板」是**两步**：`SetMemoryMap` +
+    //   **一次 `images: []` 的 `LoadProject`**（让待生效的板生效 ⇒ 开新会话）。
+    //   第二步还没回来时读基准 ⇒ ⇒ 读到的是**上一段留下的**那份 `memory.map`
+    //   （`loaded=true`、`revision` 还是旧的）⇒ ⇒ 基准与「拒之后」比对时就会
+    //   看到「图换了 / 修订号 +1」⇒ ⇒ 而那其实是**配板的合法后果**，不是拒的
+    //   副作用。
+    //   ⇒ ⇒ 判据本身没错，错在**取样太早**：这里等到「新板的图 + 新会话（空态）」
+    //   真的落地，再取基准。
+    const settleDeadline = Date.now() + Math.min(6000, opts.timeoutMs);
+    let settled = false;
+    let settleEvidence = "";
+    while (Date.now() < settleDeadline) {
+        const mapNow = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
+        const nowId = String(mapNow?.descId ?? mapNow?.description?.id ?? "");
+        const nowLoaded = mapNow?.loaded;
+        settleEvidence = `图=${JSON.stringify(nowId)} loaded=${JSON.stringify(nowLoaded)}`;
+        if (nowId === BV_UNKNOWN_BOARD.id && nowLoaded === false) {
+            settled = true;
+            break;
+        }
+        await sleep(150);
+    }
+    add(
+        "**前提**：配板**两步都落定**后再取基准（新板的图 + 新会话空态）"
+        + "（⇒ ⇒ 不然基准会读成上一段留下的那份图 / 修订号）",
+        settled === true,
+        `落定=${settled} 现场=${settleEvidence}`,
+    );
+
     // ---- ⑤′ **装载前基准** --------------------------------------------------
     //
     // ⚠️ **v0.88 · 判据窗口订正**（第二项）：产品视图的「配板」**不是**只记
@@ -7304,17 +7337,21 @@ const BV_TRACE_EXPORT_PROBE = `(() => {
   const body = document.querySelector('[data-view-body="debug"]');
   const line = body ? body.querySelector("[data-trace-progress]") : null;
   const chunk = body ? body.querySelector("[data-trace-chunk]") : null;
-  const btn = body ? body.querySelector('[data-action="download-trace-local"]') : null;
-  const legacy = body ? body.querySelector('[data-action="export-trace"][data-source="Execution"]') : null;
+  // v0.91（用户拍板：保留「导出执行轨迹」）⇒ 导出入口就是 Execution 上那两颗
+  //   data-whole=1（CSV / JSON）；「下载轨迹到本地」那颗平行按钮已经撤掉。
+  const whole = body
+    ? Array.from(body.querySelectorAll('[data-action="export-trace"][data-source="Execution"][data-whole="1"]'))
+    : [];
+  const parallel = body ? body.querySelector('[data-action="download-trace-local"]') : null;
   return {
     hasBody: !!body,
     hasProgress: !!line,
     progressText: line ? String(line.textContent || "").trim() : "",
     chunkLength: chunk ? String(chunk.textContent || "").length : 0,
     chunkHead: chunk ? String(chunk.textContent || "").slice(0, 120) : "",
-    hasDownloadButton: !!btn,
-    downloadButtonText: btn ? String(btn.textContent || "").trim() : "",
-    hasLegacyButton: !!legacy,
+    exportWholeCount: whole.length,
+    exportWholeTexts: whole.map((b) => String(b.textContent || "").trim()),
+    hasParallelDownload: !!parallel,
   };
 })()`;
 
@@ -7363,8 +7400,11 @@ const BV_DEBUG_DEDUP_PROBE = `(() => {
     stepNCount: count(body, '[data-action="step-n"]'),
     stepInputCount: count(body, "[data-step-count-input]"),
     traceToggleCount: count(body, '[data-action="trace-toggle"]'),
+    // ⚠️ **v0.91**（用户拍板：保留「导出执行轨迹」）⇒ 界面上的导出入口是
+    //   data-whole=1 的两颗（CSV/JSON）；平行的那颗「下载轨迹到本地」= 0。
     downloadLocalCount: count(body, '[data-action="download-trace-local"]'),
     downloadChunkCount: count(body, '[data-action="download-trace"]'),
+    exportWholeCount: count(body, '[data-action="export-trace"][data-whole="1"]'),
     exportWaveInDebug: count(body, '[data-action="export-trace"][data-source="Waveform"]'),
     exportWaveInWave: count(wave, '[data-action="export-trace"][data-source="Waveform"]'),
     runLabel: runBtn ? String(runBtn.textContent || "").trim() : null,
@@ -7531,13 +7571,15 @@ async function runTraceExportSection(cdp, opts) {
     //   不在本批门禁包里修）：现场是**新旧两个按钮并存** ⇒ ⇒ 语意没换干净。
     //   ⇒ ⇒ 用「已知缺陷」落点：报告打 ⚠、**不计入退出码**、缺陷修好后这条
     //   判据还回来（不删、不改成恒绿）。
-    checks.push({
-        name: "B-94 · trace 卡片里是「下载轨迹到本地」且旧的「导出执行轨迹」按钮**不在**了"
-            + "（⇒ ⇒ 按钮的语意 = 落盘到本地）【已知缺陷：新旧按钮并存】",
-        ok: false,
-        known: true,
-        detail: `新按钮=${JSON.stringify(p?.downloadButtonText ?? "")} 旧按钮还在=${p?.hasLegacyButton}`,
-    });
+    add(
+        "B-94 · trace 卡片里**只有一种导出入口**：「导出执行轨迹 (CSV)/(JSON)」两颗都在"
+        + "（点一下＝**整份**翻完并落盘），平行的「下载轨迹到本地」**不在**",
+        p?.exportWholeCount === 2
+            && p?.hasParallelDownload !== true
+            && String(p?.exportWholeTexts?.[0] ?? "").includes("导出执行轨迹"),
+        `整份导出=${p?.exportWholeCount} 文案=${JSON.stringify(p?.exportWholeTexts ?? [])}`
+            + ` 平行下载还在=${p?.hasParallelDownload === true}`,
+    );
 
     // -- 跑一段 ⇒ ⇒ 让轨迹里真的有东西 ---------------------------------------
     await clickTopbarAction(cdp, "run");
@@ -7564,8 +7606,11 @@ async function runTraceExportSection(cdp, opts) {
     );
 
     // -- B-97 · 点「下载轨迹到本地」⇒ ⇒ **翻到末尾** ------------------------
+    // v0.91：整份落盘的入口就是「导出执行轨迹 (CSV)」（data-whole=1）
+    //   ⇒ ⇒ 点它，落盘与翻页一起发生。
     await runEffect(cdp, `(() => {
-        const b = document.querySelector('[data-view-body="debug"] [data-action="download-trace-local"]');
+        const b = document.querySelector('[data-view-body="debug"]'
+            + ' [data-action="export-trace"][data-source="Execution"][data-format="Csv"]');
         if (!b) return "no-button";
         b.click();
         return "clicked";
@@ -7574,7 +7619,7 @@ async function runTraceExportSection(cdp, opts) {
     p = await probe();
     const prog2 = parseProgress(p?.progressText);
     add(
-        "B-97 · 点「下载轨迹到本地」⇒ ⇒ 进度走到**末尾**（`next_offset == total`）"
+        "B-97 · 点「导出执行轨迹 (CSV)」⇒ ⇒ 进度走到**末尾**（`next_offset == total`）"
         + "（⇒ ⇒ 整条轨迹都翻完了 ⇒ ⇒ 落盘的是**全量**）",
         prog2 !== null && prog2[1] === prog2[2] && prog2[2] > 0,
         `下载后进度=${JSON.stringify(prog2)}`,
@@ -7733,9 +7778,14 @@ async function runDebugDedupSection(cdp, opts) {
 
     // -- B-103 · trace 卡片：开关 + 整份下载；「下载这一块」不在 --------------
     add(
-        "B-103 · trace 卡片里**只有**「开关 + 整份下载」，「下载这一块」**不在**了",
-        p?.traceToggleCount === 1 && p?.downloadLocalCount === 1 && p?.downloadChunkCount === 0,
-        `开关=${p?.traceToggleCount} 整份下载=${p?.downloadLocalCount} 这一块=${p?.downloadChunkCount}`,
+        "B-103 · trace 卡片里**只有**「开关 + 整份导出（CSV/JSON）」，"
+        + "平行的「下载轨迹到本地」与「下载这一块」**都不在**",
+        p?.traceToggleCount === 1
+            && p?.downloadLocalCount === 0
+            && p?.downloadChunkCount === 0
+            && p?.exportWholeCount === 2,
+        `开关=${p?.traceToggleCount} 整份导出=${p?.exportWholeCount}`
+            + ` 平行下载=${p?.downloadLocalCount} 这一块=${p?.downloadChunkCount}`,
     );
 
     // -- B-104 · 导出波形**只在波形视图**里 ---------------------------------

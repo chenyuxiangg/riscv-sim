@@ -520,7 +520,7 @@ describe("trace 导出入口", () => {
         router.close();
     });
 
-    test("「下载轨迹到本地」**一个**按钮就够（界面上没有第二个下载入口）", async () => {
+    test("导出入口**只有一种**（「导出执行轨迹」＝ 整份落盘，没有第二颗下载按钮）", async () => {
         const { router } = await setup();
         await router.dispatchCommand(
             Command.exportTrace(TRACE_SOURCE.Execution, TRACE_FORMAT.Csv, 0, 0),
@@ -529,8 +529,8 @@ describe("trace 导出入口", () => {
         assert.ok(body, "调试视图体未挂载");
         assert.equal(
             body.querySelectorAll('[data-action="download-trace-local"]').length,
-            1,
-            "整份下载的入口**必须只有一个**（否则用户不知道该点哪个）",
+            0,
+            "「下载轨迹到本地」那颗平行按钮**应当撤掉**（用户拍板：保留导出执行轨迹）",
         );
         assert.equal(
             body.querySelectorAll('[data-action="download-trace"]').length,
