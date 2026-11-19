@@ -8624,6 +8624,15 @@ async function runMcuConceptSection(cdp, opts) {
         // 装载失败 ⇒ 顶部通知条（`#kernel-note`）显示**内核原文**。
         await submitBoard(BV_MCU_BOARD_RV64, "bv-mcu-board-rv64");
         await sleep(400);
+        // ⚠️ **v0.88 · 判据窗口**：配板（`load-archive` =「重新载入」那条通路）
+        //   已经把 rv64 板**应用**了（内部那次 `images: []` 的装载 ⇒ 新会话）
+        //   ⇒ ⇒ 「拒之前」的基准就是**这块 rv64 板**，不是上一段的 rv32ima 板。
+        //   这里取基准（图 id + 修订号），拒之后必须**逐字相同**。
+        const rv64MapBefore = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
+        const rv64IdBefore = String(
+            rv64MapBefore?.descId ?? rv64MapBefore?.description?.id ?? "",
+        );
+        const rv64RevBefore = Number(rv64MapBefore?.revision ?? 0);
         await runEffect(cdp, `(() => {
             const btn = document.querySelector('[data-action="reload-project"]');
             if (!btn) return "no-button";
@@ -8635,19 +8644,27 @@ async function runMcuConceptSection(cdp, opts) {
             const el = document.getElementById("kernel-note");
             return el ? String(el.textContent || "") : null;
         })()`);
-        const latestAfterRv64 = await latestMapId();
-        addKnown(
-            "B-162 · 声明 **`rv64ima`** 的板 + ELF32 固件 ⇒ ⇒ **拒** ⇒ ⇒ 界面"
-            + " 显示**内核原文** `E_PLT-20`（位宽不匹配）【已知缺陷：ISA 门禁在"
-            + " reload 后未生效 ⇒ 板被接受】",
+        add(
+            "B-162 · 声明 **`rv64ima`** 的板 + ELF32 固件 ⇒ ⇒ 在「**重新装载工程**」"
+            + "那一步**被拒** ⇒ ⇒ 界面显示**内核原文** `E_PLT-20`（位宽不匹配）",
             rv64Note !== null && String(rv64Note).includes("E_PLT-20"),
             `顶部通知=${JSON.stringify(rv64Note)}`,
         );
-        addKnown(
-            "B-162b · ⚠️ **应用前判**：拒了之后**生效板没被换掉**（还是 rv32ima 那块）"
-            + "【已知缺陷：已单独立项】",
-            latestAfterRv64 === "browser-verify-mcu",
-            `最后一条生效图板 id=${JSON.stringify(latestAfterRv64)}`,
+        const latestAfterRv64 = await awaitEval(cdp, BV_LAST_MEMORY_MAP_EXPRESSION);
+        const rv64IdAfter = String(
+            latestAfterRv64?.descId ?? latestAfterRv64?.description?.id ?? "",
+        );
+        const rv64RevAfter = Number(latestAfterRv64?.revision ?? 0);
+        add(
+            "B-162b · **拒不再改图**：拒之后生效图仍是**用户刚配的那块** rv64 板"
+            + "（id / 修订号逐字相同、`loaded` 仍为假 ⇒ ⇒ 拒 不换图、不半装载）",
+            rv64IdAfter === rv64IdBefore
+            && rv64RevAfter === rv64RevBefore
+            && latestAfterRv64?.loaded === false
+            && rv64IdAfter === BV_MCU_BOARD_RV64.id,
+            `拒前 图=${JSON.stringify(rv64IdBefore)} 修订号=${rv64RevBefore}`
+            + ` ｜ 拒后 图=${JSON.stringify(rv64IdAfter)} 修订号=${rv64RevAfter}`
+            + ` loaded=${JSON.stringify(latestAfterRv64?.loaded)}`,
         );
 
         // ---- ⑥ B-163：**没有 mcu** 的板 + 同固件 ⇒ ⇒ **照常装** -----------
@@ -8711,10 +8728,9 @@ async function runMcuConceptSection(cdp, opts) {
             const el = document.getElementById("kernel-note");
             return el ? String(el.textContent || "") : null;
         })()`);
-        addKnown(
+        add(
             "B-164 · 声明 **`rv32i`**（无 c）的板 + **RVC 固件** ⇒ ⇒ **拒** `E_PLT-20`"
-            + "（固件用了板不支持的压缩指令位 —— c 位单方向严格）"
-            + "【已知缺陷：与 B-162 同族 —— ISA 门禁未生效】",
+            + "（固件用了板不支持的压缩指令位 —— c 位单方向严格）",
             rv32iNote !== null && String(rv32iNote).includes("E_PLT-20"),
             `顶部通知=${JSON.stringify(rv32iNote)}`,
         );

@@ -456,6 +456,20 @@ const productTreeView = register({
                 emitCommand("reload-product", "product", { description: cloneDescription(draft) });
                 return "cmd-reload-product";
             }
+            case "reload-project": {
+                // ⚠️ **v0.88**（用户拍板方案 B）：这条分支在 `app.js` 里**一直
+                //   存在**，可视图层**从来没发过它** ⇒ 「重新装载工程」这个能力
+                //   在界面上是**空的**（点了也没有按钮可点）。
+                //
+                //   ⇒ 补上入口：把**当前工程（含固件）**重装进**当前这块板**。
+                //   配板（「重新载入」/「从模版加载」/「创建」）走的是空装载 ⇒
+                //   板一换、固件就没了 ⇒ 用户要靠这一下把固件装回新板；板与
+                //   固件不兼容（ISA 位宽 / c 位）时由**内核**在装载那一刻拒
+                //   （`E_PLT-20/21`）。
+                if (state.loaded !== true) return undefined;
+                emitCommand("reload-project", "product", null);
+                return "cmd-reload-project";
+            }
             case "discard-product": {
                 // 放弃草稿 = 回到「生效中的描述」；寄存器基线也回到内置表。
                 setProductState({ board: null, docs: {}, docsBase: {} });

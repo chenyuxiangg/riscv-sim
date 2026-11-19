@@ -272,6 +272,42 @@ describe("板级内存图 · 装载工程后的强制重订", () => {
         const last = router.sent.filter((c) => c && "LoadProject" in c).pop();
         assert.deepEqual(last.LoadProject, project, "必须重发**同一个**工程");
     });
+
+    // ⚠️ **v0.88（用户拍板方案 B）**：产品视图「配板」（创建 / 从模版加载 /
+    //   「重新载入」三条通路共用 `applyProductBoard`）会发一次 `images: []`
+    //   的内部装载 —— 那是**为了让板生效**，不是用户装了新程序。
+    //
+    //   它**不许**覆盖「用户当前工程」的记忆：否则配完板再点「重新装载工程」
+    //   重发的是一份空工程 ⇒ 固件不会被装回新板、也不报任何错（按钮空转），
+    //   而且「板已应用 + 现有固件」这条路径被抹掉 ⇒ ISA 门禁（`E_PLT-20/21`）
+    //   在重装那一步永远走不到（真机门禁 B-162 / B-164 的现场就是这个）。
+    test("配板的内部空装载**不覆盖**当前工程（⇒ 重新装载仍重装那份**带固件**的）", async () => {
+        const router = fakeKernel();
+        const bridge = app.wireMemoryMap(router);
+        const services = servicesFor(router, bridge);
+        const firmware = {
+            id: "p-fw",
+            name: "固件工程",
+            images: [{ name: "a.elf" }],
+        };
+        await app.loadProjectIntoKernel(services, firmware);
+        // 配板：内部的空装载（`remember: false`）
+        await app.loadProjectIntoKernel(
+            services,
+            { id: "proj-board", name: "板", images: [] },
+            { remember: false },
+        );
+        await app.handleCommand({ action: "reload-project" }, services);
+        const last = router.sent.filter((c) => c && "LoadProject" in c).pop();
+        assert.equal(
+            last?.LoadProject?.id, "p-fw",
+            "「重新装载工程」必须重发**用户当前工程**，不是配板那次空工程",
+        );
+        assert.equal(
+            (last?.LoadProject?.images ?? []).length, 1,
+            "固件必须还在记忆里 —— 否则配完板按钮就是空转",
+        );
+    });
 });
 
 describe("板级内存图 · 描述形状（契约逐字同形）", () => {

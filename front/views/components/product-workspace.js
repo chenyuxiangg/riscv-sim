@@ -415,6 +415,7 @@ function renderSidebar(state, nodes, locked, dirty) {
                     <button type="button" class="pw-btn" data-action="open-archives">档案管理</button>
                     <button type="button" class="pw-btn" data-action="save-archive" ${loaded ? "" : "disabled"}>另存为档案</button>
                     <button type="button" class="pw-btn pw-btn-primary" data-action="reload-product" ${loaded ? "" : "disabled"}>重新载入</button>
+                    <button type="button" class="pw-btn" data-action="reload-project" ${loaded ? "" : "disabled"} title="把**当前工程（含固件）**重装进这块板；板与固件不兼容时内核会拒（E_PLT-20/21）">重新装载工程</button>
                 </div>
                 <p class="pw-tip">${locked ? "锁定：字段只读。解锁后可改基址 / 偏移 / 含义。" : "解锁：可直接改基址 / 偏移 / 含义，改完点「重新载入」才生效。"}</p>
                 ${renderImageLoadStatus(state?.imageLoad ?? null)}

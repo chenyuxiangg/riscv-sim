@@ -2138,6 +2138,9 @@ export async function applyProductBoard(services, rawDescription, options = {}) 
             templates: services.templates,
         },
         project,
+        // ⚠️ **v0.88**：这是「让板生效」的内部空装载 ⇒ 保留「用户当前工程」
+        //   （含固件）⇒ 「重新装载工程」才真的重装固件（方案 B）。
+        { remember: false },
     );
     markProductApplied();
     // ⚠️ **内核接受过 ⇒ 顺手写进本机数据库**（板档案）：重新载入、创建、
@@ -2278,7 +2281,7 @@ async function startSession(services) {
  * 「`LoadProject` 后探针流被强制重订」**根本没有被守**。
  * 与 D-45 同一个坑——「我记得要重订」写在注释里，不如用一条用例钉住。
  */
-export async function loadProjectIntoKernel(services, project) {
+export async function loadProjectIntoKernel(services, project, options = {}) {
     const { registerMemory, waveform, debug, console: consoleBridge } = services;
     if (!consoleBridge) {
         // ⚠️ **不静默**：console 接线漏了 ⇒ 终端永远是空的，而页面上看不出
@@ -2290,7 +2293,17 @@ export async function loadProjectIntoKernel(services, project) {
     }
     // ⚠️ **记下当前工程** ⇒ 「重新装载工程」按钮能再发一次同一个工程
     // （板级配置是**待生效**的 ⇒ 宿主在下一次 `LoadProject` 时才应用）。
-    loadedProject = project;
+    //
+    // ⚠️ **v0.88 · `remember: false`**（用户拍板方案 B）：产品视图「配板」
+    //   用的是一次 `images: []` 的空装载 —— 那是**为了让板生效**的内部装载，
+    //   **不是**用户装了新程序 ⇒ ⇒ 它**不许**把「用户当前工程」的记忆覆盖成
+    //   一份空工程。
+    //
+    //   ⚠️ 覆盖的后果（真机 + 门禁双重现场）：配完板再点「重新装载工程」⇒
+    //   重发的是一份 `images: []` ⇒ **既不会重装固件、也不报任何错**
+    //   ⇒ 按钮形同虚设；同时「板已应用 + 现有固件」这条装载路径被抹掉
+    //   ⇒ ISA 门禁（`E_PLT-20/21`）在重装这一步**永远走不到**。
+    if (options.remember !== false) loadedProject = project;
     // ⚠️ **新工程 = 新程序 ⇒ 运行态归零**（v0.63 批）⇒ ⇒ 顶栏那个按钮回到
     //   「运行」（用户拍板的那条语义：「**当加载之后顶栏的运行应该显示运行**」）
     //   ⇒ ⇒ 「跑过没有」这一格也归零 ⇒ ⇒ 不是上一段程序的历史。
