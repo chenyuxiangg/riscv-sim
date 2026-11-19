@@ -136,6 +136,8 @@ const DEMO_FIRMWARE_TMP_DIR = mkdtempSync(join(tmpdir(), "riscv-bv-demo-"));
 const DEMO_FIRMWARE_PATH = join(DEMO_FIRMWARE_TMP_DIR, "demo-firmware.bin");
 writeFileSync(DEMO_FIRMWARE_PATH, Buffer.from(DEMO_FIRMWARE_BYTES));
 
+/** `--impact` 判定「本次改动不影响任何段」时的早退码（不是失败）。 */
+const EXIT_OK_EARLY = 0;
 /** A missing precondition (no Chrome / no python3) — not a test failure. */
 const HERE_TOOLS = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = resolve(HERE_TOOLS, "..");
@@ -10194,6 +10196,12 @@ async function main() {
         const plan = computeImpactPlan(opts.impactBase ?? "origin/main");
         if (plan.full) {
             console.log(`[impact] 全量（${plan.reasons.join(" / ") || "改动面覆盖全部段"}）`);
+        } else if (Array.isArray(plan.sections) && plan.sections.length === 0) {
+            // ⚠️ **「一段都不用跑」也是合法结论**（纯文档 / 纯测试改动）⇒ ⇒ 直接
+            //   早退，别把 Chrome 和服务起起来跑一个 0/31 —— 那会在报告里显示成
+            //   「定位跑通过」，看着像绿，其实什么都没验。
+            console.log("[impact] 本次改动不影响任何门禁段 ⇒ ⇒ 跳过真机门禁");
+            return EXIT_OK_EARLY;
         } else {
             RUN_POLICY.onlySet = plan.sections;
             RUN_POLICY.impactReason = plan.reasons.join(" / ") || "改动只触及这些段";

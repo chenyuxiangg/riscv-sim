@@ -169,7 +169,15 @@ node tools/impact.mjs --paths front/lib/x.js       # 演练：模拟一组改动
 node tools/browser-verify.mjs --impact [--impact-base HEAD]
 tools/check-front.sh --impact
 node tools/impact.mjs --selftest                   # 映射规则 8 条不变量
+
+# 一键：查计划 → 只看受影响的部分（前端用例 / 内核单测 / 文档台账 / 真机门禁）
+tools/check-impact.sh
+BASE=HEAD tools/check-impact.sh        # 只看未提交改动（改完立刻验）
+tools/check-impact.sh --plan-only      # 只打印计划
 ```
+
+**「一段都不用跑」是合法结论**：纯文档 / 纯测试改动时门禁**早退**（不开 Chrome
+不跑 0/31 ），不会把「什么都没验」显示成「通过」。
 
 **边界**：`--impact` 只用于**定位期**。收口判据仍是「全量 0 ✗」（§2.5 第 3 条）。
 计划输出会让被跳过的段在报告里显式标 `SKIP（--impact ⇒ 本段不在影响面内）`
