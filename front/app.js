@@ -126,6 +126,9 @@ import { collectTraceChunks, normalizeTraceFilter } from "./lib/trace-export.js"
 // ⚠️ **告警弹窗**（STAGE-38 · v0.53 批）⇒ ⇒ 运行中点「读内存」= 拒绝 + 弹窗。
 // ⇒ ⇒ 本仓**第一个**碰 DOM 的 lib 模块（弹窗是**全局**的，不属于任何一个视图）。
 import { showAlert } from "./lib/alert.js";
+// ⚠️ **顶部渐隐 toast** —— 内存读 / 转储被内核拒绝时的轻量即时反馈（无按钮、
+// 自动消失）；与居中模态告警 `alert.js` 分工见 `lib/toast.js` 头注。
+import { showToast } from "./lib/toast.js";
 // ⚠️ **连线报告**（STAGE-48 · v0.72 · D-177 A）—— 「你写的 N 根线里有 M 根
 // 当前抬不了」⇒ ⇒ **内核说**的 ⇒ ⇒ 前端**只**归一化形状、**不判定**。
 
@@ -1522,7 +1525,14 @@ export async function handleCommand(detail, services) {
                 const readSize = Object.prototype.hasOwnProperty.call(WRITE_SIZE, rawSize)
                     ? rawSize
                     : WRITE_SIZE.Word;
-                await registerMemory.readMemory(readAddr, readSize);
+                try {
+                    await registerMemory.readMemory(readAddr, readSize);
+                } catch (err) {
+                    // ⚠️ **越限 / 未映射等读失败**：顶部 toast 即时说原因；再抛出
+                    //    ⇒ ⇒ 外层 catch 照旧写页脚 note，错误位行为不变。
+                    showToast(memoryToastText(err));
+                    throw err;
+                }
                 break;
             }
             case "disasm": {
@@ -1638,7 +1648,14 @@ export async function handleCommand(detail, services) {
                 const len = toInt(detail.params?.len, 0);
                 pendingErrorSlot = "dump";
                 writeErrorSlot("dump", "");
-                await commandRouter.dispatchCommand(Command.dumpMemory(addr, len));
+                try {
+                    await commandRouter.dispatchCommand(Command.dumpMemory(addr, len));
+                } catch (err) {
+                    // ⚠️ 转储越限同样顶部 toast；抛出后外层 catch 写页脚，`dump`
+                    //    错误位由 `error` 订阅回填（既有行为不变）。
+                    showToast(memoryToastText(err));
+                    throw err;
+                }
                 break;
             }
             case "clear-breakpoint": {
@@ -3005,6 +3022,19 @@ export function normalizeCondition(raw) {
  * @type {"cond"|"symbol"|"dump"|null}
  */
 let pendingErrorSlot = null;
+
+/**
+ * 内存读 / 转储失败 → 顶部 toast 正文。
+ *
+ * ⚠️ 写的是内核原文（`code` + `message`）⇒ ⇒ 前端不吞、不改写错误原因。
+ *
+ * @param {unknown} err
+ * @returns {string}
+ */
+function memoryToastText(err) {
+    const { code, message } = splitErrorCode(err);
+    return code ? `${code}：${message || code}` : String(err?.message ?? err);
+}
 
 /**
  * 把**内核原文**写进**某一位**（契约 v9 · C-13）。
