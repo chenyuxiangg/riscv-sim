@@ -120,6 +120,17 @@
     </div>
   </div>
 
+  <!--
+    ⚠️ **顶部渐隐 toast**（轻量非模态提示，如内存读越限）。
+
+    ⚠️ 与告警弹窗同一个落点约定：骨架住顶层，不进 `<main id="app">` ⇒ ⇒
+    视图重渲染销毁不到它。状态用 `data-toast-state`（`open` / `fading` /
+    空），文案由 `front/lib/toast.js` 填。
+  -->
+  <div class="toast" data-toast data-toast-state="" role="status" aria-live="polite">
+    <p class="toast-text" data-toast-text></p>
+  </div>
+
   <div class="shell">
     <!--
       ⚠️ **左侧分组导航**（STAGE-34 · v0.49 批）。

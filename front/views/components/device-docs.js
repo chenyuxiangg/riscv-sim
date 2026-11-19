@@ -61,13 +61,13 @@ export const DEVICE_DOCS = Object.freeze({
         unit: "B",
         regs: Object.freeze([
             { offset: "0x000", name: "RBR / THR", meaning: "接收缓冲 / 发送保持（读 / 写同一地址）", width: 1 },
-            { offset: "0x004", name: "IER", meaning: "中断使能（RX / TX / 错误）", width: 1 },
-            { offset: "0x008", name: "IIR / FCR", meaning: "中断标识（读）/ FIFO 控制（写）", width: 1 },
-            { offset: "0x00C", name: "LCR", meaning: "线路控制（字长 / 停止位 / 校验）", width: 1 },
-            { offset: "0x010", name: "MCR", meaning: "调制解调器控制（DTR / RTS / 回环）", width: 1 },
-            { offset: "0x014", name: "LSR", meaning: "线路状态（DR / THRE / 错误位）", width: 1 },
-            { offset: "0x018", name: "MSR", meaning: "调制解调器状态", width: 1 },
-            { offset: "0x01C", name: "SCR", meaning: "暂存寄存器（软件自定义）", width: 1 },
+            { offset: "0x001", name: "IER", meaning: "中断使能（RX / TX / 错误）", width: 1 },
+            { offset: "0x002", name: "IIR / FCR", meaning: "中断标识（读）/ FIFO 控制（写）", width: 1 },
+            { offset: "0x003", name: "LCR", meaning: "线路控制（字长 / 停止位 / 校验）", width: 1 },
+            { offset: "0x004", name: "MCR", meaning: "调制解调器控制（DTR / RTS / 回环）", width: 1 },
+            { offset: "0x005", name: "LSR", meaning: "线路状态（DR / THRE / 错误位）", width: 1 },
+            { offset: "0x006", name: "MSR", meaning: "调制解调器状态", width: 1 },
+            { offset: "0x007", name: "SCR", meaning: "暂存寄存器（软件自定义）", width: 1 },
         ]),
     }),
     gpio: Object.freeze({
@@ -115,7 +115,7 @@ export function hasDeviceDoc(kind) {
 }
 
 /**
- * 一份**全新的**草稿（深拷贝内置表 ⇒ 改草稿不许改到内置表）。
+ * 一份**全新的**内置表拷贝（深拷贝 ⇒ 改草稿不许改到内置表）。
  *
  * @param {string} kind
  * @returns {RegisterDoc}
@@ -132,6 +132,86 @@ export function cloneRegisterDoc(kind) {
             width: Number(r.width),
         })),
     };
+}
+
+/**
+ * 寄存器偏移 → 文档层字符串（`0x` + 小写十六进制，最少 3 位）。
+ *
+ * @param {number} value
+ * @returns {string}
+ */
+function formatOffset(value) {
+    const n = Number(value) >>> 0;
+    return `0x${n.toString(16).padStart(3, "0")}`;
+}
+
+/**
+ * 文档行名 → 在内核类型表里找对应的寄存器。
+ *
+ * 先按名字 token 精确匹配（`RBR / THR` → `THR`），再退到子串匹配；
+ * 显式的半字拆分行（`MTIMECMP0_HI`）不参与基础寄存器匹配，保留文档自己的
+ * 偏移。
+ *
+ * @param {string} docName
+ * @param {Array<object>} kernelRegs — 内核类型表的 `registers`
+ * @returns {object|null}
+ */
+function matchKernelReg(docName, kernelRegs) {
+    const upper = (s) => String(s ?? "").trim().toUpperCase();
+    const name = upper(docName);
+    if (!name) return null;
+    const tokens = name.split(/[\s/·,()_]+/).filter(Boolean);
+    const isHalfSplit = /(_LO|_HI)$/.test(name);
+
+    const exact = kernelRegs.find((reg) => tokens.includes(upper(reg?.name)));
+    if (exact) return exact;
+    if (isHalfSplit) return null;
+    return kernelRegs.find((reg) => name.includes(upper(reg?.name))) ?? null;
+}
+
+/**
+ * 一份**默认**文档草稿：偏移以内核类型表（`device.types`）为准，前端内置表
+ * 只提供人读的名字 / 含义 / 位宽说明。
+ *
+ * ⚠️ 内核类型表还没推过来（`types == null` 或该类型无寄存器）时，退回纯内置
+ * 表 ⇒ ⇒ 订阅前界面不会空一张表。
+ *
+ * @param {string} kind
+ * @param {Array<object>|null} [types] — 视图状态里的 `deviceTypes`
+ * @returns {RegisterDoc}
+ */
+export function seedRegisterDoc(kind, types = null) {
+    const fallback = cloneRegisterDoc(kind);
+    const type = (Array.isArray(types) ? types : []).find(
+        (entry) => String(entry?.kind ?? "") === String(kind ?? "")
+    );
+    const kernelRegs = Array.isArray(type?.registers) ? type.registers : [];
+    if (kernelRegs.length === 0) return fallback;
+
+    // 骨架沿用文档行序：文档有、内核也有的行，偏移覆盖成内核值；
+    // 文档独有的补充行（半字拆分等）保留文档偏移。
+    const matchedKernel = new Set();
+    const rows = fallback.regs.map((docRow) => {
+        const kernel = matchKernelReg(docRow.name, kernelRegs);
+        if (kernel) matchedKernel.add(String(kernel?.name ?? "").toUpperCase());
+        return kernel
+            ? { ...docRow, offset: formatOffset(kernel.offset) }
+            : { ...docRow };
+    });
+
+    // 内核列了、文档没列的寄存器：追加一行，含义留空待文档层补。
+    for (const kernel of kernelRegs) {
+        const key = String(kernel?.name ?? "").toUpperCase();
+        if (matchedKernel.has(key)) continue;
+        const widthBytes = Math.max(1, Math.round(Number(kernel?.width_bits ?? 8) / 8));
+        rows.push({
+            offset: formatOffset(kernel.offset),
+            name: String(kernel?.name ?? ""),
+            meaning: "",
+            width: widthBytes,
+        });
+    }
+    return { unit: fallback.unit, regs: rows };
 }
 
 /** 数值/十六进制串归一化（只用于比较与相等判定）。 */

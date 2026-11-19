@@ -1166,6 +1166,48 @@ a { color: inherit; text-decoration: none; }
 }
 
 /* ---------------------------------------------------------------------------
+ * §17b 顶部渐隐 toast（轻量非模态提示 · 内存读越限等即时反馈）
+ *
+ * ⚠️ 与 §17 告警弹窗共用「状态属性 + transition 渐隐」的约定：`open` /
+ *    `fading` / 空；区别是 toast 固定在视口顶部居中、无遮罩、无按钮、自动消失。
+ * ------------------------------------------------------------------------- */
+
+.toast {
+    position: fixed;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 95;
+    display: none;
+    max-width: min(480px, calc(100vw - 32px));
+    padding: 10px 16px;
+    border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
+    border-radius: var(--r);
+    background: var(--panel);
+    box-shadow: 0 12px 32px color-mix(in srgb, var(--bg) 70%, transparent);
+    opacity: 1;
+    transition: opacity 300ms ease;
+}
+
+/* 只有「显示中」与「正在渐隐」两种状态才占位 ⇒ ⇒ 关闭时不挡任何点击。 */
+.toast[data-toast-state="open"],
+.toast[data-toast-state="fading"] {
+    display: block;
+}
+
+/* 「正在渐隐」⇒ ⇒ 不透明度降到 0（那 300 ms 就是渐隐本身）。 */
+.toast[data-toast-state="fading"] {
+    opacity: 0;
+}
+
+.toast-text {
+    margin: 0;
+    font-size: 13px;
+    color: var(--red-soft);
+    word-break: break-word;
+}
+
+/* ---------------------------------------------------------------------------
  * §18 任意地址输入行（STAGE-39 · v0.54 批 · 裁决 D / F / K）
  *
  * ⚠️ **本段追加在 §17 告警弹窗之后** ⇒ ⇒ 既有内容**一个字都没动**。
