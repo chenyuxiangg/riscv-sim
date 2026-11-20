@@ -170,8 +170,7 @@ export { escapeHtml };
 
 // ---------------------------------------------------------------------------
 // Command signal — the view layer never talks to the service layer
-// directly (the same rule the demo seeder follows: M-02 only emits a
-// signal, `app.js` turns it into state).
+// directly: M-02 only emits a signal, `app.js` turns it into state.
 // ---------------------------------------------------------------------------
 
 /** Monotonic request id counter (the ViewComponent `onCommand` return). */
@@ -3150,22 +3149,4 @@ export async function mountViewComponents() {
         attachMount(detail.viewId);
         applyRenderEvent(detail);
     });
-}
-
-// ---------------------------------------------------------------------------
-// Dev-only seed signal — the production layer never builds demo data
-// itself, it only asks for it (FRONTEND_Review.md #15).
-// ---------------------------------------------------------------------------
-
-/**
- * Ask the dev layer to (re)seed the demo data.
- *
- * M-02 must not know how demo data is produced, so it only emits the
- * `riscv:seed` signal; the dev bridge in app.js turns that signal into
- * store state. The demo data itself lives in `front/dev/demo-state.js`.
- *
- * @param {string} [viewId]
- */
-export function seedBus(viewId = "product") {
-    window.dispatchEvent(new CustomEvent("riscv:seed", { detail: { viewId } }));
 }

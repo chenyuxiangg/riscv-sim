@@ -21,7 +21,6 @@ import {
     markProductApplied,
     mountViewComponents,
     resetTerminalScreen,
-    seedBus,
     get as getViewComponent,
     parseAddrInput,
 } from "./views/m02_viewcomponents.js";
@@ -68,7 +67,6 @@ import {
     setImageLoadState,
 } from "./views/components/image-loader.js";
 import { buildMockProject } from "./dev/mock-project.js";
-import { buildDemoStoreState, seedDemoState } from "./dev/demo-state.js";
 // ⚠️ **波形边沿的纯函数**（STAGE-36 · v0.51 批）⇒ ⇒ 累加与截断**剥成纯函数**
 // ⇒ ⇒ Node 侧零 DOM 就能测 ⇒ ⇒ 与 v0.31 批「差量合成剥成纯函数」同形。
 import { mergeEdges, WAVE_SAMPLE_LIMIT } from "./lib/wave-samples.js";
@@ -166,21 +164,6 @@ export const REGISTER_MEMORY_VIEW_IDS = ["debug", "source", "embedded"];
 const status = document.getElementById("status");
 
 /**
- * Wire the dev-only "seed demo bus" affordances:
- *   - the top-bar button
- *   - the `riscv:seed` signal emitted by the product view
- * The demo seeder stays available as a fallback for the parts the
- * kernel does not model yet (the M-14 memory map).
- */
-function wireDevSeeding() {
-    const btn = document.getElementById("seed-demo");
-    btn?.addEventListener("click", () => requestDemoSeed());
-    window.addEventListener("riscv:seed", (ev) => {
-        seedDemoState(ev.detail?.viewId ?? "product");
-    });
-}
-
-/**
  * 页头那条短状态条**只订阅一次**（`riscv:render` 是**窗口级**事件）。
  *
  * ⚠️ **为什么要这个标志**：这个函数可能被多次调用（测试里每次 `setup()` 都
@@ -194,7 +177,7 @@ let topbarBriefWired = false;
  * Wire the **top-bar** firmware loader (STAGE-33 · v0.48 批).
  *
  * ⚠️ **为什么在 app 层**：页头**不属于任何视图面板** ⇒ ⇒ 视图层**管不到**
- * 它 ⇒ ⇒ 事件只能挂在这里（而 app 层**已经**在管页头 —— 见 `wireDevSeeding`）。
+ * 它 ⇒ ⇒ 事件只能挂在这里（页头由 app 层统一接线）。
  *
  * ⚠️ **控件本体由共享组件渲染**（`renderImageLoaderControl`）⇒ ⇒ `accept`
  * 列表与按钮文案**只有一处** ⇒ ⇒ **不写第二套**。
@@ -850,20 +833,6 @@ export function syncKernelConn(transport) {
     conn.classList.toggle("is-offline", transport?.connected !== true);
 }
 
-/** Ask for a demo re-seed and report it in the status bar. */
-function requestDemoSeed(viewId = "product") {
-    seedBus(viewId);
-    status.textContent = "已 seed demo 内存映射（M-14 1 RAM + 2 PERIPHERAL）";
-}
-
-/** Expose the seeder on `window.riscv_demo` for console convenience. */
-function exposeDevHelpers() {
-    window.riscv_demo = {
-        seedBus: () => requestDemoSeed(),
-        buildDemoStoreState,
-    };
-}
-
 /**
  * Derive the status-bar text from the real transport state instead of
  * hardcoding it (FRONTEND_Review.md #11).
@@ -1153,7 +1122,7 @@ export async function handleLoadImageCommand(detail, services) {
             name: detail?.params?.name,
             kind: detail?.params?.kind,
         });
-        // ⚠️ **产品树**也要换成新工程的（否则还显示 demo 的树）。
+        // ⚠️ **产品树**也要换成新工程的（否则还显示上一份工程的树）。
         viewStore.setState("product", (prev) => ({
             ...prev,
             tree: result.project.tree,
@@ -1199,7 +1168,7 @@ export async function handleLoadImageCommand(detail, services) {
  * Translate a view-layer `riscv:command` signal into an M-05 command.
  *
  * The view layer does not know the service layer — it only emits the
- * signal (the same rule the demo seeder follows). Every failure is
+ * signal. Every failure is
  * reported in the footer note; nothing is thrown at the view.
  *
  * ⚠️ **导出是为了让它可测**（同 D-46 检视 V-B 的教训）：此前它是私有
@@ -3491,7 +3460,7 @@ export function setSourceTree(tree) {
 /**
  * 把可编程的源码树入口暴露到 `window.riscv_source`。
  *
- * ⚠️ **这不是 dev-only 的 demo 辅助**（与 `window.riscv_demo` 不同）：
+ * ⚠️ **这是给真机脚本用的可编程入口，不是界面按钮**：
  * 真机脚本（`tools/browser-verify.mjs`）没法操作文件选择器 ⇒ 需要一条
  * **可编程**的路把源码树送进前端。
  *
@@ -3806,9 +3775,9 @@ export async function runUntilConsole(services, needle, options = {}) {
 /**
  * 把「装载仓外镜像 + 跑到某个 console 前缀」暴露给页面上的脚本。
  *
- * ⚠️ 这**不是** dev-only 的 demo 辅助（`window.riscv_demo`）：真实 RTOS 的
- * 镜像**在仓外**（不进仓库），浏览器要拿到它就得**自己**把字节取回来——
- * 这条链没有 UI 入口，只能由脚本（`tools/browser-verify.mjs`）驱动。
+ * ⚠️ 这条链**没有 UI 入口**：真实 RTOS 的镜像**在仓外**（不进仓库），
+ * 浏览器要拿到它就得**自己**把字节取回来——只能由脚本
+ * （`tools/browser-verify.mjs`）驱动。
  *
  * @param {object} services
  */
@@ -3927,8 +3896,6 @@ async function bootstrap() {
     );
     void components;
 
-    wireDevSeeding();
-    exposeDevHelpers();
     // ⚠️ 可编程的源码树入口（K-2）：真机脚本没法操作文件选择器 ⇒ 需要一条
     // **可编程**的路把源码树送进前端（**不进内核**）。
     exposeSourceLoader();

@@ -282,18 +282,6 @@ input[type="checkbox"] {
     font-family: var(--mono);
 }
 
-.seed-btn {
-    background: var(--panel);
-    color: var(--green);
-    border: 1px solid var(--line-strong);
-    border-radius: var(--r-pill);
-    padding: 4px 12px;
-    min-height: 28px;
-    cursor: pointer;
-    font-size: 12px;
-    font-weight: 500;
-}
-.seed-btn:hover { border-color: var(--green); background: var(--panel2); }
 .status { color: var(--green); font-variant-numeric: tabular-nums; }
 
 /* ---------------------------------------------------------------------------
