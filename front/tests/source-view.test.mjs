@@ -237,6 +237,43 @@ describe("源码路径匹配（裁决 F）", () => {
             "中段的 `..` 消解后应当匹配上",
         );
     });
+
+    test("目录前缀被吸收：webkitRelativePath 带选中文件夹名也能命中", () => {
+        // ⚠️ 目录选择器给的 key 第一段是选中文件夹名（`osz/...`），而 DWARF
+        // 绝对路径的 comp_dir 尾部是编译机目录名（`…/osz-main/...`）⇒
+        // 前导段本就不该相等；丢掉本地前导段后按尾部匹配。
+        const tree = { "osz/targets/qemu_virt/src/main.c": "a" };
+        const match = sourceView.matchSourceFile(
+            tree,
+            "/home/user/osz_build/osz-main/targets/qemu_virt/src/main.c",
+        );
+        assert.deepEqual(match, { kind: "unique", key: "osz/targets/qemu_virt/src/main.c" });
+    });
+
+    test("多级目录前缀同样被吸收", () => {
+        const tree = { "codehub/osz/kernel/base/task/src/task.c": "a" };
+        const match = sourceView.matchSourceFile(
+            tree,
+            "/home/user/osz_build/osz-main/kernel/base/task/src/task.c",
+        );
+        assert.deepEqual(
+            match,
+            { kind: "unique", key: "codehub/osz/kernel/base/task/src/task.c" },
+        );
+    });
+
+    test("前缀不同、仅末段同名 ⇒ 歧义，不静默挑第一个", () => {
+        const tree = { "a/main.c": "a", "b/main.c": "b" };
+        const match = sourceView.matchSourceFile(tree, "/proj/src/main.c");
+        assert.equal(match.kind, "ambiguous");
+        assert.deepEqual(match.candidates, ["a/main.c", "b/main.c"]);
+    });
+
+    test("丢掉前导段后仍无共同尾段 ⇒ 零命中", () => {
+        const tree = { "a/main.c": "a" };
+        const match = sourceView.matchSourceFile(tree, "kernel/base/hook/src/hook.c");
+        assert.deepEqual(match, { kind: "none", reason: "no-match" });
+    });
 });
 
 // ---------------------------------------------------------------------------
