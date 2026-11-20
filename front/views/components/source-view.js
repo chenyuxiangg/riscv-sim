@@ -126,6 +126,60 @@ function keySuffixMatches(keySegs, targetSegs) {
 }
 
 /**
+ * 路径串 → 正规化后的段序列（丢空段 / `.`、消解可消 `..`）。
+ *
+ * @param {unknown} path
+ * @returns {string[]}
+ */
+function segmentsOf(path) {
+    return normalizePath(path).split("/").filter(Boolean);
+}
+
+/**
+ * 一条用户映射：把 DWARF 编译期前缀 `from` 替换成本地前缀 `to`。
+ *
+ * - `from` 为空 ⇒ 不参与重写；
+ * - `to` 为空 ⇒ 剥掉 `from` 后只留 DWARF 里的相对路径；
+ * - 段级比较（正规化之后），不拼字符串。
+ *
+ * @typedef {{from: string, to: string}} PathRemap
+ */
+
+/**
+ * 对一条 DWARF 段序列套用映射；前缀不匹配 ⇒ 返回 `null`。
+ *
+ * @param {string[]} dwarfSegs
+ * @param {string[]} fromSegs
+ * @param {string[]} toSegs
+ * @returns {string[]|null}
+ */
+function applyRemap(dwarfSegs, fromSegs, toSegs) {
+    if (fromSegs.length === 0 || fromSegs.length > dwarfSegs.length) return null;
+    for (let i = 0; i < fromSegs.length; i += 1) {
+        if (dwarfSegs[i] !== fromSegs[i]) return null;
+    }
+    return [...toSegs, ...dwarfSegs.slice(fromSegs.length)];
+}
+
+/**
+ * 把 DWARF 路径按映射表重写出若干候选段序列（原始路径始终在最前）。
+ *
+ * @param {string[]} dwarfSegs
+ * @param {Array<PathRemap>|null|undefined} remaps
+ * @returns {string[][]}
+ */
+function remappedVariants(dwarfSegs, remaps) {
+    const variants = [dwarfSegs];
+    for (const remap of remaps ?? []) {
+        const fromSegs = segmentsOf(remap?.from);
+        const toSegs = segmentsOf(remap?.to);
+        const mapped = applyRemap(dwarfSegs, fromSegs, toSegs);
+        if (mapped) variants.push(mapped);
+    }
+    return variants;
+}
+
+/**
  * 把 DWARF 的路径匹配到本地源码树的一个 key 上。
  *
  * ⚠️ **三态如实区分**（裁决 J / F）：
@@ -137,24 +191,27 @@ function keySuffixMatches(keySegs, targetSegs) {
  *
  * @param {Map<string, string>|object|null|undefined} tree — 源码树
  * @param {unknown} dwarfPath — DWARF 里的编译期路径
+ * @param {Array<PathRemap>|null|undefined} [remaps] — 用户自填的前缀映射表
  * @returns {SourceMatch}
  */
-export function matchSourceFile(tree, dwarfPath) {
+export function matchSourceFile(tree, dwarfPath, remaps) {
     const keys = treeKeys(tree);
     if (keys.length === 0) {
         // 没有源码树 ⇒ 与「匹配不到」**不是**一回事。
         return { kind: "none", reason: "no-tree" };
     }
-    const target = normalizePath(dwarfPath);
-    const targetSegs = target.split("/").filter(Boolean);
+    const targetSegs = segmentsOf(dwarfPath);
     if (targetSegs.length === 0) {
         return { kind: "none", reason: "no-match" };
     }
+    const variants = remappedVariants(targetSegs, remaps);
     const candidates = [];
     for (const key of keys) {
-        const keySegs = normalizePath(key).split("/").filter(Boolean);
+        const keySegs = segmentsOf(key);
         if (keySegs.length === 0) continue;
-        if (keySuffixMatches(keySegs, targetSegs)) candidates.push(key);
+        if (variants.some((targetSegs_) => keySuffixMatches(keySegs, targetSegs_))) {
+            candidates.push(key);
+        }
     }
     if (candidates.length === 0) return { kind: "none", reason: "no-match" };
     if (candidates.length === 1) return { kind: "unique", key: candidates[0] };

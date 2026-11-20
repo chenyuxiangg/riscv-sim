@@ -274,6 +274,63 @@ describe("源码路径匹配（裁决 F）", () => {
         const match = sourceView.matchSourceFile(tree, "kernel/base/hook/src/hook.c");
         assert.deepEqual(match, { kind: "none", reason: "no-match" });
     });
+
+    // ---- 用户自填的前缀映射（编译期前缀 ⇒ 本地前缀）----
+
+    test("映射 to 留空：剥掉编译期目录后按相对路径命中", () => {
+        const tree = { "targets/qemu_virt/src/main.c": "a" };
+        const remaps = [{ from: "/home/user/osz_build/osz-main", to: "" }];
+        const match = sourceView.matchSourceFile(
+            tree,
+            "/home/user/osz_build/osz-main/targets/qemu_virt/src/main.c",
+            remaps,
+        );
+        assert.deepEqual(match, { kind: "unique", key: "targets/qemu_virt/src/main.c" });
+    });
+
+    test("映射 to 填本地前缀：拼接后命中", () => {
+        const tree = { "osz/targets/qemu_virt/src/main.c": "a" };
+        const remaps = [{ from: "/home/user/osz_build/osz-main", to: "osz" }];
+        const match = sourceView.matchSourceFile(
+            tree,
+            "/home/user/osz_build/osz-main/targets/qemu_virt/src/main.c",
+            remaps,
+        );
+        assert.deepEqual(match, { kind: "unique", key: "osz/targets/qemu_virt/src/main.c" });
+    });
+
+    test("映射前缀不匹配 ⇒ 回退原始后缀匹配", () => {
+        const tree = { "kernel/base/hook/src/hook.c": "a" };
+        const remaps = [{ from: "/opt/other/build", to: "x" }];
+        const match = sourceView.matchSourceFile(
+            tree,
+            "/tmp/osz-probe/kernel/base/hook/src/hook.c",
+            remaps,
+        );
+        assert.deepEqual(match, { kind: "unique", key: "kernel/base/hook/src/hook.c" });
+    });
+
+    test("多条映射：第二条前缀命中", () => {
+        const tree = { "kernel/base/task/src/task.c": "a" };
+        const remaps = [
+            { from: "/home/user/osz_build/osz-main", to: "" },
+            { from: "/home/zyzs/code/osz", to: "" },
+        ];
+        const match = sourceView.matchSourceFile(
+            tree,
+            "/home/zyzs/code/osz/kernel/base/task/src/task.c",
+            remaps,
+        );
+        assert.deepEqual(match, { kind: "unique", key: "kernel/base/task/src/task.c" });
+    });
+
+    test("映射后仍出现多个候选 ⇒ 歧义，不静默挑第一个", () => {
+        const tree = { "a/main.c": "a", "b/main.c": "b" };
+        const remaps = [{ from: "/proj/build", to: "" }];
+        const match = sourceView.matchSourceFile(tree, "/proj/build/src/main.c", remaps);
+        assert.equal(match.kind, "ambiguous");
+        assert.deepEqual(match.candidates, ["a/main.c", "b/main.c"]);
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -323,6 +380,41 @@ describe("源码视图（A-15 / A-16 / A-17 / A-18 / A-19）", () => {
         await new Promise((r) => setTimeout(r, 0));
         const tree = m03.getState("source")?.source?.tree ?? {};
         assert.ok(tree["kernel/base/hook/src/hook.c"], "相对路径必须作 key");
+    });
+
+    test("路径映射：添加 / 改字段 / 删除 只写本会话状态、不发命令", async () => {
+        const { transport } = await setup();
+        let body = sourceBody();
+
+        const signals = [];
+        const listener = (ev) => signals.push(ev.detail);
+        dom.window.addEventListener("riscv:command", listener);
+
+        body.querySelector('[data-action="remap-add"]').dispatchEvent(new Event("click"));
+        body = sourceBody();
+        let remaps = m03.getState("source")?.source?.remaps ?? [];
+        assert.equal(remaps.length, 1, "添加后应有一条映射");
+
+        const fromInput = body.querySelector('[data-remap-field="from"]');
+        const toInput = body.querySelector('[data-remap-field="to"]');
+        assert.ok(fromInput && toInput, "映射行两个输入都在");
+        fromInput.value = "/home/user/osz_build/osz-main";
+        fromInput.dispatchEvent(new Event("change"));
+        toInput.value = "osz";
+        toInput.dispatchEvent(new Event("change"));
+
+        remaps = m03.getState("source")?.source?.remaps ?? [];
+        assert.equal(remaps[0].from, "/home/user/osz_build/osz-main");
+        assert.equal(remaps[0].to, "osz");
+
+        body = sourceBody();
+        body.querySelector('[data-action="remap-remove"]').dispatchEvent(new Event("click"));
+        remaps = m03.getState("source")?.source?.remaps ?? [];
+        assert.equal(remaps.length, 0, "删除后映射表清空");
+
+        dom.window.removeEventListener("riscv:command", listener);
+        assert.deepEqual(signals, [], "映射是纯前端资产 ⇒ 不发任何命令信号");
+        assert.equal(transport.sent.length, 0, "映射不向内核发任何帧");
     });
 
     test("零命中 / 无源码树 ⇒ 如实显示，**不**显示错误的行号", async () => {

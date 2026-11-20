@@ -2390,9 +2390,11 @@ const sourceView = register({
         const location = src.location ?? null;
         // 用户在**多个候选**里选定的那个（裁决 F：不静默挑第一个）。
         const selected = src.selected ?? null;
+        // 用户自填的「编译期前缀 ⇒ 本地前缀」映射表（仅本会话）。
+        const remaps = Array.isArray(src.remaps) ? src.remaps : [];
 
         // 匹配结果在**渲染时**算（纯函数）⇒ 状态里不存第二份真相。
-        const match = location?.file ? matchSourceFile(tree, location.file) : null;
+        const match = location?.file ? matchSourceFile(tree, location.file, remaps) : null;
         // ⚠️ **三种「没有答案」必须分开**（V-B 检视 VB-5）：
         //   - 还没问              ⇒ `location == null`
         //   - 问了，但**没有 DWARF** ⇒ `file === "" && line === 0`
@@ -2436,6 +2438,22 @@ const sourceView = register({
                     <p class="muted" data-source-summary>
                         源码树：${keys.length} 个文件${keys.length > 0 ? `（${escapeHtml(keys.slice(0, 3).join("、"))}${keys.length > 3 ? " …" : ""}）` : ""}
                     </p>
+                    <div class="source-remaps" data-source-remaps>
+                        <div class="row">
+                            <h4>路径前缀映射</h4>
+                            <button type="button" data-action="remap-add">+ 添加映射</button>
+                        </div>
+                        <p class="muted">DWARF 编译期前缀 ⇒ 本地前缀；本地前缀留空 = 剥掉编译期目录。仅本会话有效。</p>
+                        ${remaps.length === 0
+                            ? `<p class="muted">尚无映射 — 路径对不上时在这里加一条。</p>`
+                            : remaps.map((r) => `
+                                <div class="remap-row" data-remap-row data-id="${escapeHtml(String(r.id))}">
+                                    <input type="text" data-remap-field="from" data-id="${escapeHtml(String(r.id))}" value="${escapeHtml(String(r.from ?? ""))}" placeholder="编译期前缀，如 /home/user/osz_build/osz-main" spellcheck="false" autocomplete="off">
+                                    <span class="note">⇒</span>
+                                    <input type="text" data-remap-field="to" data-id="${escapeHtml(String(r.id))}" value="${escapeHtml(String(r.to ?? ""))}" placeholder="本地前缀（留空 = 剥目录）" spellcheck="false" autocomplete="off">
+                                    <button type="button" data-action="remap-remove" data-id="${escapeHtml(String(r.id))}">删除</button>
+                                </div>`).join("")}
+                    </div>
                     <p class="source-status" data-source-status>${escapeHtml(statusText)}</p>
                     ${location
                         ? (location.file
@@ -2473,12 +2491,25 @@ const sourceView = register({
             publishSourceState();
             return "cmd-pick-candidate";
         }
+        if (action === "remap-add") {
+            addRemap();
+            return "cmd-remap-add";
+        }
+        if (action === "remap-remove") {
+            removeRemap(el.dataset.id);
+            return "cmd-remap-remove";
+        }
         return undefined;
     },
     onDelta(_delta) {},
     mountFor(el) {
         el.addEventListener("click", (ev) => sourceView.onCommand(ev));
         el.addEventListener("change", (ev) => {
+            const remapInput = ev.target?.closest?.("[data-remap-field]");
+            if (remapInput) {
+                updateRemap(remapInput.dataset.id, remapInput.dataset.remapField, remapInput.value);
+                return;
+            }
             const input = ev.target?.closest?.("[data-source-input]");
             if (!input) return;
             void loadSourceFiles(input.files);
@@ -2517,6 +2548,59 @@ async function loadSourceFiles(fileList) {
         },
     }));
     publishSourceState();
+}
+
+/**
+ * 当前会话里的路径映射表（纯前端资产 ⇒ 不进内核、不持久化）。
+ *
+ * @returns {Array<{id: number|string, from: string, to: string}>}
+ */
+function currentRemaps() {
+    const prev = viewStore.getState("source")?.source?.remaps;
+    return Array.isArray(prev) ? prev : [];
+}
+
+/**
+ * 把映射表写回 M-03 并触发源码视图重渲染。
+ *
+ * @param {Array<{id: number|string, from: string, to: string}>} remaps
+ */
+function writeRemaps(remaps) {
+    viewStore.setState("source", (prev) => ({
+        ...prev,
+        source: { ...(prev.source ?? {}), remaps },
+    }));
+    publishSourceState();
+}
+
+/** 追加一条空映射。 */
+function addRemap() {
+    const remaps = currentRemaps();
+    const nextId = remaps.reduce((max, r) => Math.max(max, Number(r.id) || 0), 0) + 1;
+    writeRemaps([...remaps, { id: nextId, from: "", to: "" }]);
+}
+
+/**
+ * 按 id 删一条映射。
+ *
+ * @param {string|number} id
+ */
+function removeRemap(id) {
+    writeRemaps(currentRemaps().filter((r) => String(r.id) !== String(id)));
+}
+
+/**
+ * 更新某条映射的 `from` / `to` 字段。
+ *
+ * @param {string|number} id
+ * @param {string} field — `"from"` | `"to"`
+ * @param {string} value
+ */
+function updateRemap(id, field, value) {
+    const remaps = currentRemaps().map((r) =>
+        String(r.id) === String(id) ? { ...r, [field]: String(value ?? "") } : r,
+    );
+    writeRemaps(remaps);
 }
 
 /**
