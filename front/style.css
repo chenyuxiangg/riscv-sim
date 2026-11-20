@@ -77,6 +77,63 @@ html, body {
 a { color: inherit; text-decoration: none; }
 
 /* ---------------------------------------------------------------------------
+ * 基础控件层：未挂专用类的按钮 / 输入框 / 下拉框默认走同一套令牌外观；
+ * 专用类（.btn / .pw-btn / .addr-field …）在各自规则里再覆盖。
+ * ------------------------------------------------------------------------- */
+button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 30px;
+    padding: 5px 14px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-pill);
+    background: var(--panel);
+    color: var(--tx);
+    font-family: var(--sans);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: border-color .15s, color .15s, background .15s, box-shadow .15s;
+}
+button:hover { background: var(--panel2); border-color: var(--tx2); }
+button:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--accent);
+}
+button:disabled { opacity: .45; cursor: default; }
+
+/* 元素级基础外观：专用类 / 属性选择器特异性更高，可在各自规则里覆盖。 */
+input,
+select {
+    box-sizing: border-box;
+    min-height: 30px;
+    padding: 6px 10px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-sm);
+    background: var(--panel);
+    color: var(--tx);
+    font-family: var(--sans);
+    font-size: 12px;
+}
+input:focus,
+select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-wash);
+}
+/* 复选框 / 文件框不走文本框外观（文件框由 .source-input 专用规则接管）。 */
+input[type="checkbox"] {
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    border-radius: 0;
+    accent-color: var(--accent);
+}
+
+/* ---------------------------------------------------------------------------
  * §2 顶栏（品牌 + 连接状态 + **全局运行条**）
  * ------------------------------------------------------------------------- */
 .topbar {
@@ -762,6 +819,26 @@ a { color: inherit; text-decoration: none; }
     cursor: pointer;
 }
 .terminal-send:hover { background: var(--panel2); border-color: var(--accent); }
+
+/* 「原始字节」显示口径开关：未选是次按钮，选中用 accent wash 标出。 */
+.terminal-raw-btn {
+    flex: 0 0 auto;
+    min-height: 34px;
+    padding: 6px 14px;
+    background: var(--panel);
+    color: var(--tx3);
+    font-size: 12px;
+    font-weight: 500;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-pill);
+    cursor: pointer;
+}
+.terminal-raw-btn:hover { color: var(--tx); border-color: var(--tx2); }
+.terminal-raw-btn.is-selected {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-wash);
+}
 
 /* ---------------------------------------------------------------------------
  * §12 footer
