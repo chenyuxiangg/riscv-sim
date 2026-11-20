@@ -21,6 +21,7 @@ import {
     markProductApplied,
     mountViewComponents,
     resetTerminalScreen,
+    resetTerminalXterm,
     get as getViewComponent,
     parseAddrInput,
 } from "./views/m02_viewcomponents.js";
@@ -77,6 +78,9 @@ import {
     loadECharts,
     setChartSource,
 } from "./lib/echarts-loader.js";
+// ⚠️ **终端仿真库（xterm.js）加载器**：与波形库同一条懒加载 / 失败降级口径
+//   ⇒ ⇒ 加载由 app 层发起；视图层只同步读就绪态。
+import { loadXterm } from "./lib/xterm-loader.js";
 // ⚠️ **连续运行的纯函数**（STAGE-37 · v0.52 批）⇒ ⇒ 「该不该续发」**剥成纯函数**
 // ⇒ ⇒ Node 侧零 DOM 就能测 ⇒ ⇒ 与 STAGE-36 的「边沿合并剥成纯函数」同形。
 import {
@@ -1696,12 +1700,11 @@ export async function handleCommand(detail, services) {
                 break;
             }
             case "console-send": {
-                // 终端输入框：文本**按 UTF-8 编码**成的字节 ⇒ 往当前会话
+                // 终端直输：按键经视图层映射成 **UTF-8 字节** ⇒ 往当前会话
                 // 唯一的 UART0 写（契约 v5 的 `WriteConsole`）。
                 //
-                // ⚠️ **只送原始字节**：不追加换行、不模拟终端控制序列
-                // （Ctrl-C / 退格 / 历史）。**回显来自 guest**，平台不做
-                // 本地回显。
+                // ⚠️ **只送原始字节**：EOL 映射 / 控制序列已在视图层按当前档
+                //   处理；**回显来自 guest**，平台不做本地回显。
                 const bytes = toByteArray(detail.params?.bytes);
                 await commandRouter.dispatchCommand(Command.writeConsole(bytes));
                 break;
@@ -2636,6 +2639,43 @@ export function wireWaveform(commandRouter) {
 }
 
 /**
+ * 终端 xterm 库的状态（住视图状态 `term.xterm.status` ⇒ 重渲染不丢）。
+ *
+ * @param {"idle"|"loading"|"ok"|"degraded"} status
+ * @param {string} [reason]
+ */
+function setTerminalXtermStatus(status, reason) {
+    viewStore.setState("terminal", (prev) => ({
+        ...prev,
+        term: {
+            ...(prev.term ?? {}),
+            xterm: { ...(prev.term?.xterm ?? {}), status, ...(reason ? { reason } : {}) },
+        },
+    }));
+    publishViewState("terminal");
+}
+
+/**
+ * **懒加载**终端仿真库（与 `ensureWaveChartLoaded` 同形）。
+ *
+ * ⚠️ **失败不抛** ⇒ 状态落 `degraded` ⇒ 视图退回自研屏幕仿真器降级路径，
+ *   核心调试闭环不受影响。Node 门禁里加载器直接返回 `null` ⇒ 不碰网络。
+ */
+function ensureTerminalXtermLoaded() {
+    const status = viewStore.getState("terminal")?.term?.xterm?.status;
+    // ⚠️ `degraded` 也挡重入：失败这一轮会话内不再重试（刷新页面才重拉）⇒
+    //   否则「落 degraded ⇒ 发布渲染 ⇒ 渲染监听再触发加载」会成死循环。
+    if (status === "ok" || status === "loading" || status === "degraded") return;
+    setTerminalXtermStatus("loading");
+    loadXterm().then((mod) => {
+        setTerminalXtermStatus(
+            mod ? "ok" : "degraded",
+            mod ? undefined : "终端库没加载到（离线或 CDN 不可达）",
+        );
+    });
+}
+
+/**
  * Wire the guest's **console** byte stream (contract v4's `Console` event)
  * into the terminal view.
  *
@@ -2658,6 +2698,8 @@ export function wireConsole(commandRouter) {
         if (!Array.isArray(bytes) || bytes.length === 0) return;
         const terminal = getViewComponent("terminal");
         if (!terminal) return;
+        // 收到第一路串口字节 ⇒ 懒触发终端库加载（已在加载 / 就绪则直接返回）。
+        ensureTerminalXtermLoaded();
         // ⚠️ 走**既有的** `onDelta` 路径：它把字节追加进 store（唯一权威）
         // 并用 `textContent` 写 DOM（**不解析 HTML** ⇒ ANSI 转义与 `<` `&`
         // 都是安全的）。这条路径此前是**死接口**（`termDelta` 没有生产者）。
@@ -2678,6 +2720,8 @@ export function wireConsole(commandRouter) {
             //   有一份**增量**的屏幕实例 ⇒ ⇒ 字节流清了而它没清 ⇒ ⇒
             //   下一个程序的字节会被**接在上一段工程的屏幕后面**⇒ ⇒ 显示错乱。
             resetTerminalScreen();
+            // ⚠️ xterm 实例同样要清空（直输模式的持久宿主）⇒ ⇒ 与上面成对。
+            resetTerminalXterm();
             publishViewState("terminal");
         },
         /**
@@ -3952,6 +3996,10 @@ async function bootstrap() {
 
     window.addEventListener("riscv:command", (ev) => {
         void handleCommand(ev.detail, services);
+    });
+    // 终端视图一露面 ⇒ 就懒触发终端库（在收到串口字节之前也能直输）。
+    window.addEventListener("riscv:render", (ev) => {
+        if (ev.detail?.viewId === "terminal") ensureTerminalXtermLoaded();
     });
 
     // Fire and forget — the session comes up on its own.

@@ -418,7 +418,7 @@ describe("STAGE-35 · 产品树折叠 / 终端收发计数", () => {
     test("A-12 · 终端**显示 TX / RX 计数**，且**分别标注方向**（裁决 G）", () => {
         m03.setState("terminal", (prev) => ({
             ...prev,
-            term: { ...(prev.term ?? {}), bytes: "", draft: "", txBytes: 0, rxBytes: 0 },
+            term: { ...(prev.term ?? {}), bytes: "", txBytes: 0, rxBytes: 0 },
         }));
         const el = show("terminal");
         const tx = el.querySelector("[data-term-tx]");
@@ -441,12 +441,12 @@ describe("STAGE-35 · 产品树折叠 / 终端收发计数", () => {
             "RX 不该被内核的字节影响（两个不是同一个源）",
         );
 
-        // 前端发出去的字节只涨 RX。
-        const input = dom.document.querySelector("[data-terminal-input]");
-        input.value = "hi";
-        const send = dom.document.querySelector('[data-action="console-send"]');
-        assert.ok(send, "终端里没有发送按钮");
-        captureCommands(() => send.click());
+        // 前端发出去的字节只涨 RX（直输模式：按键经 `terminalInputBytes` 映射成
+        // 字节后由 `dispatchTerminalBytes` 发出；"hi" 两个 + 回车按默认档 CR 一个）。
+        captureCommands(() => {
+            const keys = [...m02.terminalInputBytes("hi", "cr"), ...m02.terminalInputBytes("\r", "cr")];
+            m02.dispatchTerminalBytes(keys);
+        });
         assert.equal(
             Number(dom.document.querySelector("[data-term-rx]").textContent),
             3,
