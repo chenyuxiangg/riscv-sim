@@ -42,7 +42,6 @@ const m02 = await importFront("views/m02_viewcomponents.js");
 const m03 = await importFront("views/m03_viewstore.js");
 const message = await importFront("lib/message.js");
 const mm = await importFront("views/components/memory-map.js");
-const demo = await importFront("dev/demo-state.js");
 
 // 视图组件的渲染监听器（`app.js` 的 bootstrap 会挂它；这里自启动关掉了）。
 await m02.mountViewComponents();
