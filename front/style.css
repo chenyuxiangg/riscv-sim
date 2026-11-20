@@ -45,8 +45,14 @@
     --accent-edge: color-mix(in srgb, var(--accent) 22%, transparent);
     --green-wash:  color-mix(in srgb, var(--green)  14%, transparent);
     --red-wash:    color-mix(in srgb, var(--red)     8%, transparent);
-    /* 形状 */
-    --r: 8px;
+    /* 形状：外层卡 12px / 内嵌面板 10px / 输入与小块 8px / 微型 6px / 胶囊 */
+    --r: 12px;
+    --r-md: 10px;
+    --r-sm: 8px;
+    --r-xs: 6px;
+    --r-pill: 999px;
+    /* 边框加深一档（hover / 强调边） */
+    --line-strong: #d4d4d4;
     /* 字体：数值一律等宽，正文用系统 sans（不引外部字体，离线可用） */
     --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "PingFang SC",
@@ -134,21 +140,27 @@ a { color: inherit; text-decoration: none; }
 .stat b { color: var(--tx); font-weight: 600; }
 .stat .mono { color: var(--accent); font-family: var(--mono); }
 
-/* 通用按钮 —— 顶栏、侧边栏、卡片里共用同一套外观。 */
+/* 通用按钮 —— 顶栏、侧边栏、卡片里共用同一套外观（胶囊折中：34px 高 + 全圆角）。 */
 .btn {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    border-radius: 8px;
-    padding: 6px 12px;
-    border: 1px solid var(--line);
-    background: var(--panel2);
-    color: var(--tx2);
+    min-height: 34px;
+    border-radius: var(--r-pill);
+    padding: 7px 14px;
+    border: 1px solid var(--line-strong);
+    background: var(--panel);
+    color: var(--tx);
     font-size: 13px;
+    font-weight: 500;
     cursor: pointer;
-    transition: border-color .15s, color .15s, background .15s;
+    transition: border-color .15s, color .15s, background .15s, box-shadow .15s;
 }
-.btn:hover { border-color: var(--accent); color: var(--tx); }
+.btn:hover { background: var(--panel2); border-color: var(--line-strong); color: var(--tx); }
+.btn:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--accent);
+}
 .btn:disabled { opacity: .45; cursor: not-allowed; }
 .btn.primary {
     background: var(--accent);
@@ -156,12 +168,21 @@ a { color: inherit; text-decoration: none; }
     color: var(--on-accent);
     font-weight: 600;
 }
-.btn.primary:hover { filter: brightness(1.1); color: var(--on-accent); }
+.btn.primary:hover {
+    background: color-mix(in srgb, var(--accent) 88%, #fff);
+    border-color: color-mix(in srgb, var(--accent) 88%, #fff);
+    color: var(--on-accent);
+}
 .btn.run {
     background: var(--green);
     border-color: var(--green);
     color: var(--on-green);
     font-weight: 600;
+}
+.btn.run:hover {
+    background: color-mix(in srgb, var(--green) 90%, #000);
+    border-color: color-mix(in srgb, var(--green) 90%, #000);
+    color: var(--on-green);
 }
 /* 运行中：按钮变成**暂停**的样子（琥珀 + 呼吸）⇒ ⇒ 状态看得见。 */
 .btn.run.running {
@@ -195,8 +216,8 @@ a { color: inherit; text-decoration: none; }
 .badge {
     display: inline-flex;
     align-items: center;
-    padding: 1px 8px;
-    border-radius: 999px;
+    padding: 1px 10px;
+    border-radius: var(--r-pill);
     border: 1px solid var(--line);
     background: var(--panel2);
     color: var(--tx2);
@@ -205,15 +226,17 @@ a { color: inherit; text-decoration: none; }
 }
 
 .seed-btn {
-    background: var(--panel2);
+    background: var(--panel);
     color: var(--green);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 4px 10px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-pill);
+    padding: 4px 12px;
+    min-height: 28px;
     cursor: pointer;
     font-size: 12px;
+    font-weight: 500;
 }
-.seed-btn:hover { border-color: var(--green); }
+.seed-btn:hover { border-color: var(--green); background: var(--panel2); }
 .status { color: var(--green); font-variant-numeric: tabular-nums; }
 
 /* ---------------------------------------------------------------------------
@@ -250,7 +273,7 @@ a { color: inherit; text-decoration: none; }
     width: 100%;
     text-align: left;
     padding: 7px 10px;
-    border-radius: 8px;
+    border-radius: var(--r-md);
     border: none;
     background: transparent;
     color: var(--tx2);
@@ -276,7 +299,7 @@ a { color: inherit; text-decoration: none; }
     justify-content: center;
     width: 30px;
     height: 28px;
-    border-radius: 8px;
+    border-radius: var(--r-sm);
     border: 1px solid var(--line);
     background: var(--panel2);
     color: var(--tx2);
@@ -307,9 +330,11 @@ a { color: inherit; text-decoration: none; }
     background: var(--panel);
     border: 1px solid var(--line);
     border-radius: var(--r);
-    padding: 14px;
+    padding: 16px;
     box-shadow: 0 1px 2px rgba(0, 0, 0, .04);
+    transition: border-color .15s;
 }
+.card:hover { border-color: var(--line-strong); }
 .card h3 {
     font-size: 13px;
     color: var(--tx2);
@@ -370,12 +395,12 @@ a { color: inherit; text-decoration: none; }
     padding: 10px 12px;
     background: var(--panel2);
     border: 1px solid var(--line);
-    border-radius: 8px;
+    border-radius: var(--r-md);
 }
 .chip .ic {
     width: 34px;
     height: 34px;
-    border-radius: 8px;
+    border-radius: var(--r-sm);
     background: var(--accent-wash);
     border: 1px solid var(--accent-edge);
     display: flex;
@@ -421,10 +446,10 @@ a { color: inherit; text-decoration: none; }
     max-width: 15em;
 }
 .image-loader-control button {
-    background: var(--panel2);
+    background: var(--panel);
     color: var(--accent);
-    border: 1px solid var(--line);
-    border-radius: 8px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-pill);
     padding: 4px 10px;
     cursor: pointer;
     font-size: 12px;
@@ -472,7 +497,7 @@ a { color: inherit; text-decoration: none; }
     grid-template-columns: minmax(220px, 1fr) 2fr;
     gap: 16px;
 }
-.product-tree, .memory-map { background: var(--panel2); border-radius: 8px; padding: 12px; }
+.product-tree, .memory-map { background: var(--panel2); border-radius: var(--r-md); padding: 12px; }
 .product-tree ul { list-style: none; padding-left: 1em; border-left: 1px dashed var(--line); }
 .product-tree li { padding: 2px 0; }
 
@@ -527,7 +552,7 @@ a { color: inherit; text-decoration: none; }
     width: 7em;
     font-size: 12px;
 }
-.disasm, .regmem-registers, .regmem-memory, .trace-export { background: var(--panel2); border-radius: 8px; padding: 12px; }
+.disasm, .regmem-registers, .regmem-memory, .trace-export { background: var(--panel2); border-radius: var(--r-md); padding: 12px; }
 .disasm-table, .reg-grid {
     width: 100%;
     font-size: 12px;
@@ -543,7 +568,7 @@ a { color: inherit; text-decoration: none; }
 .trace-notice {
     margin: 8px 0 0;
     padding: 6px 10px;
-    border-radius: 6px;
+    border-radius: var(--r-xs);
     border: 1px solid var(--amber);
     color: var(--amber);
     font-size: 12px;
@@ -554,7 +579,7 @@ a { color: inherit; text-decoration: none; }
 .trace-state {
     margin: 8px 0 0;
     padding: 6px 10px;
-    border-radius: 6px;
+    border-radius: var(--r-xs);
     border: 1px solid var(--line2);
     background: var(--panel2);
     color: var(--tx2);
@@ -573,7 +598,7 @@ a { color: inherit; text-decoration: none; }
 .debug-error {
     margin: 8px 0 0;
     padding: 6px 10px;
-    border-radius: 6px;
+    border-radius: var(--r-xs);
     border: 1px solid var(--red);
     color: var(--red-soft);
     font-size: 12px;
@@ -584,7 +609,7 @@ a { color: inherit; text-decoration: none; }
 .trace-overflow {
     margin: 8px 0 0;
     padding: 6px 10px;
-    border-radius: 6px;
+    border-radius: var(--r-xs);
     border: 1px solid var(--red);
     color: var(--amber-soft);
     font-size: 12px;
@@ -598,7 +623,7 @@ a { color: inherit; text-decoration: none; }
     min-height: 80px;
     max-height: 240px;
     overflow: auto;
-    border-radius: 6px;
+    border-radius: var(--r-sm);
     white-space: pre-wrap;
     word-break: break-all;
 }
@@ -630,7 +655,7 @@ a { color: inherit; text-decoration: none; }
 /* ---------------------------------------------------------------------------
  * §9 embeddedView（落地视图 · D-33）
  * ------------------------------------------------------------------------- */
-.embedded-view { background: var(--panel2); border-radius: 8px; padding: 12px; }
+.embedded-view { background: var(--panel2); border-radius: var(--r-md); padding: 12px; }
 .link-status { margin: 8px 0; }
 /* 三个子视图入口：排成一行，窄屏折行（NFR-05 的 375px 也要读得下）。 */
 .embedded-entries {
@@ -646,7 +671,7 @@ a { color: inherit; text-decoration: none; }
 /* ---------------------------------------------------------------------------
  * §10 waveformView
  * ------------------------------------------------------------------------- */
-.waveform { background: var(--panel2); border-radius: 8px; padding: 12px; }
+.waveform { background: var(--panel2); border-radius: var(--r-md); padding: 12px; }
 .channel-list { list-style: none; padding: 0; margin: 0; }
 .channel-list li {
     display: flex; justify-content: space-between;
@@ -656,7 +681,7 @@ a { color: inherit; text-decoration: none; }
 /* ---------------------------------------------------------------------------
  * §11 terminalView
  * ------------------------------------------------------------------------- */
-.terminal { background: var(--panel2); border-radius: 8px; padding: 12px; }
+.terminal { background: var(--panel2); border-radius: var(--r-md); padding: 12px; }
 .terminal-out {
     background: var(--term-bg);
     color: var(--term-fg);
@@ -666,7 +691,7 @@ a { color: inherit; text-decoration: none; }
     min-height: 160px;
     max-height: 280px;
     overflow: auto;
-    border-radius: 6px;
+    border-radius: var(--r-sm);
     white-space: pre-wrap;
     word-break: break-all;
 }
@@ -681,29 +706,33 @@ a { color: inherit; text-decoration: none; }
 .terminal-input {
     flex: 1 1 auto;
     min-width: 0;
+    min-height: 34px;
     background: var(--term-bg);
     color: var(--term-fg);
     font-family: var(--mono);
     font-size: 12px;
-    padding: 6px 8px;
+    padding: 6px 10px;
     border: 1px solid var(--line2);
-    border-radius: 6px;
+    border-radius: var(--r-sm);
 }
 .terminal-input:focus {
     outline: none;
     border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-wash);
 }
 .terminal-send {
     flex: 0 0 auto;
-    background: var(--panel2);
+    min-height: 34px;
+    background: var(--panel);
     color: var(--accent);
     font-size: 12px;
-    padding: 6px 14px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
+    font-weight: 500;
+    padding: 6px 16px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-pill);
     cursor: pointer;
 }
-.terminal-send:hover { border-color: var(--accent); }
+.terminal-send:hover { background: var(--panel2); border-color: var(--accent); }
 
 /* ---------------------------------------------------------------------------
  * §12 footer
@@ -753,7 +782,7 @@ a { color: inherit; text-decoration: none; }
 .tree .node.board-device {
     display: block;
     border: 1px solid var(--line);
-    border-radius: 8px;
+    border-radius: var(--r-md);
     padding: 8px 10px;
     margin: 6px 0;
     background: var(--panel2);
@@ -795,11 +824,19 @@ a { color: inherit; text-decoration: none; }
     box-sizing: border-box;
     font-family: var(--mono);
     font-size: 12px;
-    padding: 4px 6px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
+    min-height: 30px;
+    padding: 4px 8px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-sm);
     background: var(--panel);
     color: var(--tx);
+}
+.mmap-field input:focus,
+.board-device-fields input:focus,
+.board-device-fields select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-wash);
 }
 .mmap-field input[data-mmap-invalid],
 .board-device-fields input[data-mmap-invalid] {
@@ -828,7 +865,7 @@ a { color: inherit; text-decoration: none; }
 /* 内存图**地址比例条**（裁决 D —— 宽度按**真地址区间**算，不是写死的百分比）。 */
 .segbar {
     display: flex; width: 100%; height: 30px;
-    border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+    border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden;
     background: var(--panel2);
 }
 .seg {
@@ -867,7 +904,7 @@ a { color: inherit; text-decoration: none; }
 .filelist { max-height: 420px; overflow: auto; font-size: 12px; }
 .filelist .fi {
     display: block; width: 100%; text-align: left;
-    padding: 4px 8px; border-radius: 6px; cursor: pointer;
+    padding: 5px 10px; border-radius: var(--r-xs); cursor: pointer;
     color: var(--tx2); border: 1px solid transparent;
     font-family: var(--mono);
 }
@@ -877,7 +914,7 @@ a { color: inherit; text-decoration: none; }
 }
 .code {
     font-family: var(--mono); font-size: 12px; line-height: 1.7;
-    background: var(--panel2); border-radius: 8px; padding: 10px 12px;
+    background: var(--panel2); border-radius: var(--r-md); padding: 10px 12px;
     max-height: 420px; overflow: auto; white-space: pre;
 }
 .code .src-line { display: block; padding: 1px 2px; border-radius: 4px; }
@@ -894,8 +931,12 @@ a { color: inherit; text-decoration: none; }
 .remap-row input[type="text"] {
     flex: 1 1 220px; min-width: 160px; box-sizing: border-box;
     font-family: var(--mono); font-size: 12px;
-    padding: 4px 6px; border: 1px solid var(--line);
-    border-radius: 6px; background: var(--panel); color: var(--tx);
+    min-height: 30px; padding: 4px 10px; border: 1px solid var(--line-strong);
+    border-radius: var(--r-sm); background: var(--panel); color: var(--tx);
+}
+.remap-row input[type="text"]:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-wash);
 }
 .remap-row .note { color: var(--tx3); font-size: 12px; }
 
@@ -914,9 +955,9 @@ a { color: inherit; text-decoration: none; }
 
 /* 反汇编表里的**断点列**按钮。 */
 .bp-toggle {
-    background: transparent; border: 1px solid var(--line);
-    color: var(--tx2); font-size: 11px; padding: 2px 8px;
-    border-radius: 6px; cursor: pointer; white-space: nowrap;
+    background: transparent; border: 1px solid var(--line-strong);
+    color: var(--tx2); font-size: 11px; padding: 3px 12px;
+    border-radius: var(--r-pill); cursor: pointer; white-space: nowrap;
 }
 .bp-toggle:hover { border-color: var(--accent); color: var(--tx); }
 .bp-toggle.on {
@@ -929,7 +970,7 @@ a { color: inherit; text-decoration: none; }
 .bp-list .bp-row {
     display: flex; align-items: center; gap: 10px;
     padding: 6px 10px; border: 1px solid var(--line);
-    border-radius: 8px; background: var(--panel2); font-size: 12px;
+    border-radius: var(--r-md); background: var(--panel2); font-size: 12px;
 }
 .bp-list .bp-row .addr { font-family: var(--mono); color: var(--tx); }
 .bp-list .bp-row .note { color: var(--tx3); font-size: 11px; }
@@ -1065,7 +1106,7 @@ a { color: inherit; text-decoration: none; }
     min-height: 260px;
     background: var(--panel);
     border: 1px solid var(--line2);
-    border-radius: 8px;
+    border-radius: var(--r-sm);
     overflow: hidden;
 }
 /* 被搬进来的宿主节点 ⇒ ⇒ 铺满插槽。
@@ -1251,9 +1292,10 @@ a { color: inherit; text-decoration: none; }
 
 .addr-field {
     min-width: 160px;
-    padding: 6px 10px;
-    border: 1px solid var(--line);
-    border-radius: var(--r);
+    min-height: 34px;
+    padding: 6px 12px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-sm);
     background: var(--panel);
     color: var(--tx);
     font-family: var(--mono);
@@ -1261,8 +1303,9 @@ a { color: inherit; text-decoration: none; }
 }
 
 .addr-field:focus {
-    outline: 2px solid var(--accent-edge);
-    outline-offset: 1px;
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-wash);
 }
 
 select.addr-field {
@@ -1303,8 +1346,8 @@ select.addr-field {
     display: inline-flex;
     flex: 0 0 auto;
     gap: 2px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-sm);
     overflow: hidden;
 }
 
@@ -1361,10 +1404,10 @@ select.addr-field {
 .symbol-candidates .symbol-candidate {
     font-family: var(--mono);
     font-size: 12px;
-    padding: 4px 8px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    background: var(--panel2);
+    padding: 4px 12px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-pill);
+    background: var(--panel);
     color: var(--tx);
     cursor: pointer;
 }
@@ -1415,7 +1458,7 @@ select.addr-field {
 .pw-side {
     background: var(--panel2);
     border: 1px solid var(--line);
-    border-radius: 8px;
+    border-radius: var(--r-md);
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -1433,11 +1476,11 @@ select.addr-field {
 .pw-side-sub { margin: 2px 0 0; color: var(--tx2); font-size: 12px; }
 .pw-lock {
     flex: none;
-    border: 1px solid var(--line);
-    background: var(--bg2);
+    border: 1px solid var(--line-strong);
+    background: var(--panel);
     color: var(--tx2);
-    border-radius: 6px;
-    padding: 4px 8px;
+    border-radius: var(--r-pill);
+    padding: 4px 12px;
     font-size: 11.5px;
     cursor: pointer;
 }
@@ -1460,8 +1503,8 @@ select.addr-field {
     border: 1px solid transparent;
     background: transparent;
     color: var(--tx);
-    border-radius: 6px;
-    padding: 6px 8px;
+    border-radius: var(--r-sm);
+    padding: 6px 10px;
     cursor: pointer;
 }
 .pw-node:hover { background: rgba(0, 0, 0, .04); }
@@ -1494,15 +1537,16 @@ select.addr-field {
 .pw-dirty-count { color: var(--amber); }
 .pw-side-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .pw-btn {
-    border: 1px solid var(--line);
-    background: var(--bg2);
+    border: 1px solid var(--line-strong);
+    background: var(--panel);
     color: var(--tx);
-    border-radius: 6px;
-    padding: 5px 10px;
+    border-radius: var(--r-pill);
+    padding: 5px 14px;
     font-size: 12px;
+    font-weight: 500;
     cursor: pointer;
 }
-.pw-btn:hover { border-color: var(--tx2); }
+.pw-btn:hover { background: var(--panel2); border-color: var(--tx2); }
 .pw-btn:disabled { opacity: 0.45; cursor: default; }
 .pw-btn-primary { border-color: var(--accent); color: var(--accent); }
 .pw-tip { margin: 0; font-size: 11.5px; color: var(--tx2); }
@@ -1511,7 +1555,7 @@ select.addr-field {
     position: relative;
     background: var(--panel2);
     border: 1px solid var(--line);
-    border-radius: 8px;
+    border-radius: var(--r-md);
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -1533,7 +1577,7 @@ select.addr-field {
     letter-spacing: 2px;
     color: var(--tx);
     border: 1px dashed var(--line);
-    border-radius: 10px;
+    border-radius: var(--r-md);
     padding: 18px 32px;
     background:
         radial-gradient(circle at 50% 0, var(--accent-wash), transparent 70%),
@@ -1567,16 +1611,20 @@ select.addr-field {
 .pw-field { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--tx2); }
 .pw-field b { color: var(--tx); font-weight: 500; }
 .pw-input {
-    background: var(--bg2);
-    border: 1px solid var(--line);
-    border-radius: 5px;
+    background: var(--panel);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-sm);
     color: var(--tx);
     font-size: 12.5px;
-    padding: 5px 8px;
+    padding: 5px 10px;
+    min-height: 30px;
     min-width: 0;
     width: 100%;
 }
-.pw-input:focus { outline: none; border-color: var(--accent); }
+.pw-input:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-wash);
+}
 .pw-input:disabled { opacity: 0.6; cursor: not-allowed; }
 .pw-input.pw-mono { font-family: ui-monospace, monospace; }
 .pw-input.pw-narrow { width: 72px; }
@@ -1615,7 +1663,7 @@ select.addr-field {
     margin: 12px 16px 0;
     padding: 8px 10px;
     border: 1px solid var(--red);
-    border-radius: 6px;
+    border-radius: var(--r-xs);
     color: var(--red);
     font-size: 12px;
 }
@@ -1632,7 +1680,8 @@ select.addr-field {
 .pw-dialog {
     background: var(--bg2);
     border: 1px solid var(--line);
-    border-radius: 10px;
+    border-radius: var(--r);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, .18);
     padding: 16px;
     width: min(560px, 100%);
     max-height: 100%;
@@ -1648,9 +1697,9 @@ select.addr-field {
     display: flex;
     align-items: center;
     gap: 8px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    padding: 6px 8px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-sm);
+    padding: 7px 10px;
     font-size: 12px;
     cursor: pointer;
 }
@@ -1660,9 +1709,9 @@ select.addr-field {
 .pw-template {
     text-align: left;
     border: 1px solid var(--line);
-    background: var(--panel2);
-    border-radius: 6px;
-    padding: 8px 10px;
+    background: var(--panel);
+    border-radius: var(--r-sm);
+    padding: 8px 12px;
     color: var(--tx);
     cursor: pointer;
     display: flex;
