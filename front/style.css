@@ -3,57 +3,54 @@
  * Vanilla CSS, no preprocessor. Styles are scoped to the workbench
  * skeleton (M-01) and the MVP view components (M-02).
  *
- * ⚠️ **STAGE-34 · v0.49 批：设计令牌一次性换掉**（原型《riscv-sim-UI 建议原型》）。
- * ⚠️ **旧令牌（`--ink` / `--ink2` / `--teal` / `--bg3`）零残留** ⇒ ⇒ 换名不换值
- *    会**留两套命名** ⇒ ⇒ 那会是**第二个真相** ⇒ ⇒ 本文件里**只此一套**。
+ * ⚠️ 设计令牌只在 §1 `:root` 这一处 ⇒ ⇒ 颜色字面量不进组件规则；
+ *    换主题只改令牌，派生色由 `color-mix()` 跟随。
  */
 
 /* ---------------------------------------------------------------------------
  * §1 设计令牌（STAGE-34 裁决 D —— **只有这一处**）
  * ------------------------------------------------------------------------- */
 :root {
-    /* 底色三层：页面 / 侧边栏 / 卡片 / 卡片内嵌块 */
-    --bg:     #0b1020;
-    --bg2:    #0e1628;
-    --panel:  #111a30;
-    --panel2: #0d1526;
+    /* 底色三层：页面 / 侧边栏 / 卡片 / 卡片内嵌块（hs-fpv 中性浅色风） */
+    --bg:     #f4f5f7;
+    --bg2:    #ffffff;
+    --panel:  #ffffff;
+    --panel2: #f5f5f5;
     /* 边框两级 */
-    --line:  #232f4d;
-    --line2: #1a2340;
+    --line:  #e5e5e5;
+    --line2: #eeeeee;
     /* 文字三级 */
-    --tx:  #e6edf7;
-    --tx2: #a8b4cc;
-    --tx3: #6b7a99;
-    /* 语义色 */
-    --accent: #22d3ee;
-    --amber:  #f5a524;
-    --red:    #f87171;
-    --green:  #34d399;
+    --tx:  #171717;
+    --tx2: #525252;
+    --tx3: #737373;
+    /* 语义色：主交互为近黑 primary；琥珀/绿/红为点缀与状态色 */
+    --accent: #171717;
+    --amber:  #d97706;
+    --red:    #dc2626;
+    --green:  #16a34a;
     /* 派生色（STAGE-34 §8 订正 5）：原先这 6 个颜色散落在组件里逐字写死，
        ⇒ ⇒ 换主题时它们会**漏掉** ⇒ ⇒ 收进 `:root` 才有唯一落点。 */
-    --on-accent: #04121a;   /* 主按钮上的文字 */
-    --on-green:  #04120a;   /* 运行按钮上的文字 */
-    --red-soft:  #ff9a95;   /* 报错提示的浅红文字 */
-    --amber-soft:#ffcf9a;   /* 溢出提示的浅琥珀文字 */
-    --term-bg:   #050a14;   /* 终端 / 追踪块底色 */
-    --term-fg:   #b6f0c4;   /* 终端 / 追踪块前景 */
+    --on-accent: #ffffff;   /* 主按钮上的文字 */
+    --on-green:  #ffffff;   /* 运行按钮上的文字 */
+    --red-soft:  #dc2626;  /* 报错提示的浅红文字 */
+    --amber-soft:#b45309;  /* 溢出提示的浅琥珀文字 */
+    --term-bg:   #18181b;  /* 终端 / 追踪块底色（保留深色面板） */
+    --term-fg:   #e4e4e7;  /* 终端 / 追踪块前景 */
     /* 半透明派生色（STAGE-35 · v0.50 批）—— 值用 `color-mix()` 而不是
-       `rgba(245, 165, 36, .08)` 那种**把基色再写一遍**的形状 ⇒ ⇒
-       ⇒ 基色**只有 `:root` 那一个落点** ⇒ ⇒ 改 `--amber` 时派生色跟着走。
-       ⚠️ **既有的 12 处裸 `rgba(...)` 本批不动**（在 v0.49 批落点之前）
-       ⇒ ⇒ 那是**已知边界**，登记在 STAGE-35 §8 订正 1。 */
-    --amber-wash:  color-mix(in srgb, var(--amber)  8%, transparent);
+       `rgba(...)` 那种**把基色再写一遍**的形状 ⇒ ⇒ 基色**只有 `:root`
+       那一个落点** ⇒ ⇒ 改基色时派生色跟着走。 */
+    --amber-wash:  color-mix(in srgb, var(--amber)  10%, transparent);
     --amber-edge:  color-mix(in srgb, var(--amber) 35%, transparent);
-    --accent-wash: color-mix(in srgb, var(--accent) 12%, transparent);
-    --accent-edge: color-mix(in srgb, var(--accent) 35%, transparent);
-    --green-wash:  color-mix(in srgb, var(--green)  18%, transparent);
+    --accent-wash: color-mix(in srgb, var(--accent)  6%, transparent);
+    --accent-edge: color-mix(in srgb, var(--accent) 22%, transparent);
+    --green-wash:  color-mix(in srgb, var(--green)  14%, transparent);
     --red-wash:    color-mix(in srgb, var(--red)     8%, transparent);
     /* 形状 */
-    --r: 10px;
-    /* 字体：数值一律等宽，正文用系统 sans */
+    --r: 8px;
+    /* 字体：数值一律等宽，正文用系统 sans（不引外部字体，离线可用） */
     --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-    --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei",
-            "Segoe UI", sans-serif;
+    --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "PingFang SC",
+            "Microsoft YaHei", sans-serif;
 }
 
 * { box-sizing: border-box; }
@@ -84,7 +81,7 @@ a { color: inherit; text-decoration: none; }
     align-items: center;
     gap: 10px;
     padding: 8px 12px;
-    background: rgba(11, 16, 32, .92);
+    background: color-mix(in srgb, var(--bg2) 92%, transparent);
     backdrop-filter: blur(8px);
     border-bottom: 1px solid var(--line);
     flex-wrap: wrap;
@@ -174,8 +171,8 @@ a { color: inherit; text-decoration: none; }
     animation: pulse 1.2s ease-in-out infinite;
 }
 @keyframes pulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(245, 165, 36, .35); }
-    50%      { box-shadow: 0 0 0 5px rgba(245, 165, 36, 0); }
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--amber) 35%, transparent); }
+    50%      { box-shadow: 0 0 0 5px color-mix(in srgb, var(--amber) 0%, transparent); }
 }
 .btn.ghost {
     border-color: transparent;
@@ -264,7 +261,7 @@ a { color: inherit; text-decoration: none; }
 .nav-item:hover { background: var(--panel); color: var(--tx); }
 /* 当前视图 ⇒ ⇒ 高亮。判据是 **`aria-current="page"`**（与旧标签页同一条语义）。 */
 .nav-item[aria-current="page"] {
-    background: var(--panel);
+    background: var(--accent-wash);
     color: var(--accent);
     box-shadow: inset 2px 0 0 var(--accent);
 }
@@ -311,6 +308,7 @@ a { color: inherit; text-decoration: none; }
     border: 1px solid var(--line);
     border-radius: var(--r);
     padding: 14px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .04);
 }
 .card h3 {
     font-size: 13px;
@@ -328,8 +326,8 @@ a { color: inherit; text-decoration: none; }
     display: flex;
     gap: 10px;
     align-items: flex-start;
-    background: rgba(245, 165, 36, .08);
-    border: 1px solid rgba(245, 165, 36, .35);
+    background: var(--amber-wash);
+    border: 1px solid var(--amber-edge);
     border-radius: var(--r);
     padding: 10px 14px;
     margin-bottom: 16px;
@@ -378,8 +376,8 @@ a { color: inherit; text-decoration: none; }
     width: 34px;
     height: 34px;
     border-radius: 8px;
-    background: rgba(34, 211, 238, .12);
-    border: 1px solid rgba(34, 211, 238, .35);
+    background: var(--accent-wash);
+    border: 1px solid var(--accent-edge);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -460,7 +458,7 @@ a { color: inherit; text-decoration: none; }
 .view-body { min-height: 200px; }
 .view-error {
     border-left: 4px solid var(--red);
-    background: rgba(248, 113, 113, 0.08);
+    background: var(--red-wash);
     padding: 8px 12px;
     border-radius: 4px;
     color: var(--red);
@@ -489,7 +487,7 @@ a { color: inherit; text-decoration: none; }
     padding: 4px 8px;
     text-align: left;
 }
-.map-table th { background: rgba(255, 255, 255, .03); color: var(--tx2); }
+.map-table th { background: rgba(0, 0, 0, .03); color: var(--tx2); }
 .map-table code { color: var(--accent); }
 .map-table pre { margin: 0; font-size: 11.5px; white-space: pre-wrap; }
 
@@ -539,7 +537,7 @@ a { color: inherit; text-decoration: none; }
 .disasm-table th { color: var(--tx2); text-align: left; }
 .disasm-table code { font-family: var(--mono); }
 /* The row the PC points at (V-12). */
-.disasm-row.is-pc { background: rgba(34, 211, 238, .12); }
+.disasm-row.is-pc { background: var(--accent-wash); }
 .disasm-row.is-pc td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 /* The trace slowdown notice (R9) + the kernel's error reply. */
 .trace-notice {
@@ -610,7 +608,7 @@ a { color: inherit; text-decoration: none; }
     gap: 4px;
     font-family: var(--mono);
 }
-.reg-grid > div { background: rgba(255, 255, 255, .02); border-radius: 4px; padding: 4px 6px; }
+.reg-grid > div { background: rgba(0, 0, 0, .03); border-radius: 4px; padding: 4px 6px; }
 .reg-grid span { color: var(--tx2); margin-right: 6px; }
 .reg-grid .reg-edit {
     width: 7.2em;
@@ -624,7 +622,7 @@ a { color: inherit; text-decoration: none; }
     text-align: right;
 }
 .reg-grid .reg-edit:hover { border-color: var(--line); }
-.reg-grid .reg-edit:focus { border-color: var(--brand); background: var(--panel); outline: none; }
+.reg-grid .reg-edit:focus { border-color: var(--accent); background: var(--panel); outline: none; }
 .reg-grid .reg-edit:disabled { color: var(--tx2); cursor: not-allowed; }
 .grid-2 { display: grid; grid-template-columns: 1fr; gap: 8px; }
 .pc, .timeVirt { font-family: var(--mono); }
@@ -882,6 +880,9 @@ a { color: inherit; text-decoration: none; }
     background: var(--panel2); border-radius: 8px; padding: 10px 12px;
     max-height: 420px; overflow: auto; white-space: pre;
 }
+.code .src-line { display: block; padding: 1px 2px; border-radius: 4px; }
+.code .src-line-no { color: var(--tx3); margin-right: 10px; }
+.code .src-line.is-current { background: var(--amber-wash); }
 
 /* 源码路径前缀映射（编译期前缀 ⇒ 本地前缀）。 */
 .source-remaps { margin: 8px 0; }
@@ -972,7 +973,7 @@ a { color: inherit; text-decoration: none; }
         z-index: 60;
         transform: translateX(-100%);
         transition: transform .22s ease;
-        box-shadow: 8px 0 30px rgba(0, 0, 0, .4);
+        box-shadow: 8px 0 30px rgba(0, 0, 0, .15);
     }
     .sidebar.open { transform: translateX(0); }
     .burger { display: inline-flex; }
@@ -1023,7 +1024,7 @@ a { color: inherit; text-decoration: none; }
     padding: 0;
 }
 .wave-filter-group > legend {
-    color: var(--muted);
+    color: var(--tx3);
     font-size: 11px;
     padding: 0 4px 0 0;
 }
@@ -1035,7 +1036,7 @@ a { color: inherit; text-decoration: none; }
     cursor: pointer;
 }
 .wave-filter-size {
-    color: var(--muted);
+    color: var(--tx3);
     font-variant-numeric: tabular-nums;
 }
 .wave-filter-quick {
@@ -1253,7 +1254,7 @@ a { color: inherit; text-decoration: none; }
     padding: 6px 10px;
     border: 1px solid var(--line);
     border-radius: var(--r);
-    background: var(--panel2);
+    background: var(--panel);
     color: var(--tx);
     font-family: var(--mono);
     font-size: 13px;
@@ -1309,7 +1310,7 @@ select.addr-field {
 
 .terminal-eol-btn {
     background: var(--panel2);
-    color: var(--muted);
+    color: var(--tx3);
     font-family: var(--mono);
     font-size: 11px;
     padding: 5px 7px;
@@ -1412,7 +1413,7 @@ select.addr-field {
     min-height: 520px;
 }
 .pw-side {
-    background: var(--bg3);
+    background: var(--panel2);
     border: 1px solid var(--line);
     border-radius: 8px;
     display: flex;
@@ -1429,12 +1430,12 @@ select.addr-field {
     border-bottom: 1px solid var(--line);
 }
 .pw-side-head h3 { margin: 0; font-size: 14px; }
-.pw-side-sub { margin: 2px 0 0; color: var(--ink2); font-size: 12px; }
+.pw-side-sub { margin: 2px 0 0; color: var(--tx2); font-size: 12px; }
 .pw-lock {
     flex: none;
     border: 1px solid var(--line);
     background: var(--bg2);
-    color: var(--ink2);
+    color: var(--tx2);
     border-radius: 6px;
     padding: 4px 8px;
     font-size: 11.5px;
@@ -1458,21 +1459,21 @@ select.addr-field {
     text-align: left;
     border: 1px solid transparent;
     background: transparent;
-    color: var(--ink);
+    color: var(--tx);
     border-radius: 6px;
     padding: 6px 8px;
     cursor: pointer;
 }
-.pw-node:hover { background: rgba(255, 255, 255, 0.04); }
+.pw-node:hover { background: rgba(0, 0, 0, .04); }
 .pw-node.is-active {
-    background: rgba(62, 198, 160, 0.12);
-    border-color: var(--teal);
+    background: var(--accent-wash);
+    border-color: var(--accent);
 }
 .pw-node-name { font-size: 13px; font-weight: 600; }
-.pw-node-meta { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--ink2); justify-self: end; }
-.pw-node-kind { font-size: 11px; color: var(--ink2); grid-column: 1 / -1; }
+.pw-node-meta { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--tx2); justify-self: end; }
+.pw-node-kind { font-size: 11px; color: var(--tx2); grid-column: 1 / -1; }
 .pw-node-dirty { font-size: 11px; color: var(--amber); grid-column: 1 / -1; }
-.pw-empty-hint { color: var(--ink2); font-size: 12.5px; margin: 8px 4px; }
+.pw-empty-hint { color: var(--tx2); font-size: 12.5px; margin: 8px 4px; }
 .pw-side-foot {
     border-top: 1px solid var(--line);
     padding: 10px 12px 12px;
@@ -1486,29 +1487,29 @@ select.addr-field {
     gap: 6px 10px;
     margin: 0;
     font-size: 11.5px;
-    color: var(--ink2);
+    color: var(--tx2);
 }
-.pw-revision b { color: var(--ink); }
+.pw-revision b { color: var(--tx); }
 .pw-pending { color: var(--amber); }
 .pw-dirty-count { color: var(--amber); }
 .pw-side-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .pw-btn {
     border: 1px solid var(--line);
     background: var(--bg2);
-    color: var(--ink);
+    color: var(--tx);
     border-radius: 6px;
     padding: 5px 10px;
     font-size: 12px;
     cursor: pointer;
 }
-.pw-btn:hover { border-color: var(--ink2); }
+.pw-btn:hover { border-color: var(--tx2); }
 .pw-btn:disabled { opacity: 0.45; cursor: default; }
-.pw-btn-primary { border-color: var(--teal); color: var(--teal); }
-.pw-tip { margin: 0; font-size: 11.5px; color: var(--ink2); }
+.pw-btn-primary { border-color: var(--accent); color: var(--accent); }
+.pw-tip { margin: 0; font-size: 11.5px; color: var(--tx2); }
 
 .pw-window {
     position: relative;
-    background: var(--bg3);
+    background: var(--panel2);
     border: 1px solid var(--line);
     border-radius: 8px;
     display: flex;
@@ -1525,17 +1526,17 @@ select.addr-field {
     gap: 10px;
     padding: 40px 24px;
     text-align: center;
-    color: var(--ink2);
+    color: var(--tx2);
 }
 .pw-window-plate {
     font-size: 20px;
     letter-spacing: 2px;
-    color: var(--ink);
+    color: var(--tx);
     border: 1px dashed var(--line);
     border-radius: 10px;
     padding: 18px 32px;
     background:
-        radial-gradient(circle at 50% 0, rgba(62, 198, 160, 0.10), transparent 70%),
+        radial-gradient(circle at 50% 0, var(--accent-wash), transparent 70%),
         var(--bg2);
 }
 .pw-window-empty p { margin: 0; font-size: 12.5px; max-width: 42ch; }
@@ -1549,11 +1550,11 @@ select.addr-field {
     border-bottom: 1px solid var(--line);
 }
 .pw-window-head h3 { margin: 0; font-size: 15px; }
-.pw-window-head p { margin: 4px 0 0; color: var(--ink2); font-size: 12px; }
+.pw-window-head p { margin: 4px 0 0; color: var(--tx2); font-size: 12px; }
 .pw-badge {
     font-size: 11px;
     font-weight: 500;
-    color: var(--teal);
+    color: var(--accent);
     border: 1px solid var(--line);
     border-radius: 999px;
     padding: 1px 8px;
@@ -1561,21 +1562,21 @@ select.addr-field {
     vertical-align: middle;
 }
 .pw-dirty-flag { font-size: 11.5px; color: var(--amber); white-space: nowrap; }
-.pw-clean-flag { font-size: 11.5px; color: var(--ink2); white-space: nowrap; }
+.pw-clean-flag { font-size: 11.5px; color: var(--tx2); white-space: nowrap; }
 .pw-fields { display: flex; flex-wrap: wrap; gap: 12px; padding: 12px 16px 0; }
-.pw-field { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--ink2); }
-.pw-field b { color: var(--ink); font-weight: 500; }
+.pw-field { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--tx2); }
+.pw-field b { color: var(--tx); font-weight: 500; }
 .pw-input {
     background: var(--bg2);
     border: 1px solid var(--line);
     border-radius: 5px;
-    color: var(--ink);
+    color: var(--tx);
     font-size: 12.5px;
     padding: 5px 8px;
     min-width: 0;
     width: 100%;
 }
-.pw-input:focus { outline: none; border-color: var(--teal); }
+.pw-input:focus { outline: none; border-color: var(--accent); }
 .pw-input:disabled { opacity: 0.6; cursor: not-allowed; }
 .pw-input.pw-mono { font-family: ui-monospace, monospace; }
 .pw-input.pw-narrow { width: 72px; }
@@ -1588,15 +1589,15 @@ select.addr-field {
     border-bottom: 1px solid var(--line);
     padding: 3px 4px;
     text-align: left;
-    color: var(--ink2);
+    color: var(--tx2);
     font-weight: 500;
 }
-.pw-table th { color: var(--ink2); font-size: 11.5px; }
-.pw-table td { color: var(--ink); }
+.pw-table th { color: var(--tx2); font-size: 11.5px; }
+.pw-table td { color: var(--tx); }
 .pw-table tr.is-dirty td:first-child { box-shadow: inset 2px 0 0 var(--amber); }
-.pw-table-empty { color: var(--ink2); text-align: center; }
+.pw-table-empty { color: var(--tx2); text-align: center; }
 .pw-table .pw-input { border-color: transparent; background: transparent; padding: 3px 5px; }
-.pw-table .pw-input:focus { border-color: var(--teal); background: var(--bg2); }
+.pw-table .pw-input:focus { border-color: var(--accent); background: var(--bg2); }
 .pw-window-foot {
     margin-top: auto;
     display: flex;
@@ -1613,15 +1614,15 @@ select.addr-field {
     align-items: baseline;
     margin: 12px 16px 0;
     padding: 8px 10px;
-    border: 1px solid var(--err);
+    border: 1px solid var(--red);
     border-radius: 6px;
-    color: var(--err);
+    color: var(--red);
     font-size: 12px;
 }
 .pw-scrim {
     position: absolute;
     inset: 0;
-    background: rgba(4, 7, 10, 0.72);
+    background: color-mix(in srgb, var(--bg) 72%, transparent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1641,7 +1642,7 @@ select.addr-field {
     gap: 10px;
 }
 .pw-dialog h3 { margin: 0; font-size: 15px; }
-.pw-dialog h4 { margin: 6px 0 0; font-size: 12px; color: var(--ink2); }
+.pw-dialog h4 { margin: 6px 0 0; font-size: 12px; color: var(--tx2); }
 .pw-check-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .pw-check {
     display: flex;
@@ -1653,23 +1654,23 @@ select.addr-field {
     font-size: 12px;
     cursor: pointer;
 }
-.pw-check b { margin-left: auto; font-size: 11px; color: var(--ink2); font-weight: 400; }
-.pw-check input { width: 14px; height: 14px; accent-color: var(--teal); }
+.pw-check b { margin-left: auto; font-size: 11px; color: var(--tx2); font-weight: 400; }
+.pw-check input { width: 14px; height: 14px; accent-color: var(--accent); }
 .pw-template-list { display: flex; flex-direction: column; gap: 6px; }
 .pw-template {
     text-align: left;
     border: 1px solid var(--line);
-    background: var(--bg3);
+    background: var(--panel2);
     border-radius: 6px;
     padding: 8px 10px;
-    color: var(--ink);
+    color: var(--tx);
     cursor: pointer;
     display: flex;
     justify-content: space-between;
     gap: 10px;
     font-size: 12.5px;
 }
-.pw-template:hover { border-color: var(--teal); }
+.pw-template:hover { border-color: var(--accent); }
 .pw-dialog-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 .pw-dialog-wide { width: min(720px, 100%); }
 .pw-btn-small { font-size: 11px; padding: 2px 8px; }
