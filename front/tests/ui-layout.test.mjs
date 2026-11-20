@@ -240,7 +240,9 @@ describe("STAGE-34 · 设计令牌", () => {
             "--panel2": "#f5f5f5", "--line": "#e5e5e5", "--line2": "#eeeeee",
             "--tx": "#171717", "--tx2": "#525252", "--tx3": "#737373",
             "--accent": "#171717", "--amber": "#d97706", "--red": "#dc2626",
-            "--green": "#16a34a", "--r": "8px",
+            "--green": "#16a34a", "--line-strong": "#d4d4d4",
+            "--r": "12px", "--r-md": "10px", "--r-sm": "8px",
+            "--r-xs": "6px", "--r-pill": "999px",
             // ⚠️ **派生色也要逐字钉住**（STAGE-34 §8 订正 5）：这 6 个原先散落在
             // 组件里逐字写死 ⇒ ⇒ 换主题会漏掉 ⇒ ⇒ 收进 `:root` 后逐字钉住。
             "--on-accent": "#ffffff", "--on-green": "#ffffff",
