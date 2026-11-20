@@ -234,18 +234,18 @@ describe("STAGE-34 · 顶栏全局运行条", () => {
 });
 
 describe("STAGE-34 · 设计令牌", () => {
-    test("A-8 · 令牌在 :root 里逐字等于规格 §5.1 的值", () => {
+    test("A-8 · 令牌在 :root 里逐字等于规格 §5.1 的值（hs-fpv 中性浅色风）", () => {
         const expect = {
-            "--bg": "#0b1020", "--bg2": "#0e1628", "--panel": "#111a30",
-            "--panel2": "#0d1526", "--line": "#232f4d", "--line2": "#1a2340",
-            "--tx": "#e6edf7", "--tx2": "#a8b4cc", "--tx3": "#6b7a99",
-            "--accent": "#22d3ee", "--amber": "#f5a524", "--red": "#f87171",
-            "--green": "#34d399", "--r": "10px",
+            "--bg": "#f4f5f7", "--bg2": "#ffffff", "--panel": "#ffffff",
+            "--panel2": "#f5f5f5", "--line": "#e5e5e5", "--line2": "#eeeeee",
+            "--tx": "#171717", "--tx2": "#525252", "--tx3": "#737373",
+            "--accent": "#171717", "--amber": "#d97706", "--red": "#dc2626",
+            "--green": "#16a34a", "--r": "8px",
             // ⚠️ **派生色也要逐字钉住**（STAGE-34 §8 订正 5）：这 6 个原先散落在
             // 组件里逐字写死 ⇒ ⇒ 换主题会漏掉 ⇒ ⇒ 收进 `:root` 后逐字钉住。
-            "--on-accent": "#04121a", "--on-green": "#04120a",
-            "--red-soft": "#ff9a95", "--amber-soft": "#ffcf9a",
-            "--term-bg": "#050a14", "--term-fg": "#b6f0c4",
+            "--on-accent": "#ffffff", "--on-green": "#ffffff",
+            "--red-soft": "#dc2626", "--amber-soft": "#b45309",
+            "--term-bg": "#18181b", "--term-fg": "#e4e4e7",
         };
         const root = styleSrc.match(/:root\s*\{([\s\S]*?)\n\}/);
         assert.ok(root, "style.css 里没有 :root 块");

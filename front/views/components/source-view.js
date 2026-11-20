@@ -241,10 +241,8 @@ export function describeMatch(match) {
  *
  * ⚠️ 文本走 `escapeHtml`（NFR-04）：源码里出现 `<` / `&` 不得变成标记。
  *
- * ⚠️ 高亮用**内联样式**（而不是一条 CSS 规则）：`front/style.css` **不在
- * 本 lane 的文件所有权清单内** ⇒ 不去动它 ⇒ 高亮色与反汇编面板的 PC 行
- * 保持一致（同一个琥珀色）。等样式表归谁管时，再把它挪进 `.src-line
- * .is-current` 规则里（类名已经留好了）。
+ * ⚠️ 高亮色收在样式表的 `.src-line.is-current` 规则里（令牌派生），
+ *    本模块**不写颜色字面量** ⇒ ⇒ 换主题时高亮跟着令牌走。
  *
  * @param {unknown} text — 源码文本
  * @param {number} currentLine — 当前行号（1 起；0 / 非法 ⇒ 不高亮）
@@ -258,9 +256,8 @@ export function renderSourceText(text, currentLine) {
         .map((line, idx) => {
             const no = idx + 1;
             const isCurrent = wanted !== 0 && no === wanted;
-            const style = isCurrent ? ' style="background: rgba(255, 193, 7, 0.14)"' : "";
             return (
-                `<div class="src-line${isCurrent ? " is-current" : ""}" data-src-line="${no}"${style}>` +
+                `<div class="src-line${isCurrent ? " is-current" : ""}" data-src-line="${no}">` +
                 `<span class="src-line-no">${no}</span>` +
                 `<span class="src-line-text">${escapeHtml(line)}</span>` +
                 `</div>`
