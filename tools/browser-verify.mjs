@@ -1138,29 +1138,31 @@ const DISASM_ROWS_EXPRESSION = `(() => {
 })()`;
 
 /**
- * 在终端视图的**输入框**里敲一段文本并点「发送」（K-1 / E-8）。
+ * 在终端视图送出一段文本（K-1 / E-8）—— **xterm 直输模式**探针。
  *
- * ⚠️ 走的是**生产路径**：输入框 → `input` 事件 → 草稿进视图状态 →
- * 「发送」按钮 → `riscv:command` 信号 → `WriteConsole` 命令。
+ * ⚠️ 直输模式没有独立输入框 / 发送钮：生产路径是 xterm `onData` ⇒
+ *   `terminalInputBytes` 映射字节 ⇒ `console-send` 信号 ⇒ `WriteConsole`。
+ *   探针在页面上下文里按**同一口径**组字节（UTF-8 编码 + 当前档 EOL），
+ *   直接派发 `riscv:command` 信号 ⇒ ⇒ 走后半段生产链路（视图信号 → app →
+ *   M-05 → 内核）；`onData` 按键映射本身由前端 Node 门禁钉住。
  *
  * @param {string} text — 要送的文本（**按 UTF-8 编码**成字节）
  * @returns {string} the expression to evaluate in the page
  */
 function sendTerminalTextExpression(text) {
     return `(() => {
-  // ⚠️ **按位置限定优先**：同一个 DOM 里一旦出现**两个**同类控件（顶栏 +
-  //    视图面板），无位置限定的 querySelector 会命中**排在前面的那个**
-  //    ⇒ ⇒ 断言还在跑、断的却不是它以为的那个东西 ⇒ ⇒ 判据口径悄悄变了。
-  //    兜底保留 ⇒ ⇒ 万一视图面板的结构变了，**旧的那条探针**不至于直接失效。
-  const input = document.querySelector('[data-view-body="terminal"] [data-terminal-input]')
-    || document.querySelector("[data-terminal-input]");
-  const btn = document.querySelector('[data-view-body="terminal"] [data-action="console-send"]')
-    || document.querySelector('[data-action="console-send"]');
-  if (!input || !btn) return { ok: false, reason: "输入框或发送按钮不在" };
-  input.value = ${JSON.stringify(text)};
-  input.dispatchEvent(new Event("input", { bubbles: true }));
-  btn.click();
-  return { ok: true, draft: String(input.value) };
+  const body = document.querySelector('[data-view-body="terminal"]') || document;
+  const sel = body.querySelector('[data-eol-selected="true"]');
+  const eol = sel ? String(sel.getAttribute("data-eol") || "cr") : "cr";
+  const EOL = { cr: [13], lf: [10], crlf: [13, 10], none: [] };
+  const eolBytes = Object.prototype.hasOwnProperty.call(EOL, eol) ? EOL[eol] : EOL.cr;
+  const textBytes = Array.from(new TextEncoder().encode(${JSON.stringify(text)}));
+  const bytes = textBytes.concat(eolBytes);
+  if (!bytes.length) return { ok: false, reason: "空字节" };
+  window.dispatchEvent(new CustomEvent("riscv:command", {
+    detail: { action: "console-send", viewId: "terminal", params: { bytes } },
+  }));
+  return { ok: true, eol, bytes };
 })()`;
 }
 
@@ -1639,7 +1641,7 @@ async function runTerminalScreenProbe(cdp, opts) {
     // -- B-67a · 敲三个字符并点「发送」---------------------------------
     const sent = await awaitEval(cdp, sendTerminalTextExpression("cyx"));
     checks.push({
-        name: "B-67 · 在终端输入框敲「cyx」并点「发送」",
+        name: "B-67 · 终端直输送出「cyx」（含默认档 CR）",
         ok: Boolean(sent?.ok),
         detail: JSON.stringify(sent),
     });
@@ -9662,7 +9664,7 @@ async function runDisasmSourceProbe(cdp, opts, scheduler, elfEntry) {
  * ⚠️ **断言要具体**：读 guest 的 UART0 的 LSR（`0x1000_0005`）⇒ 断言
  * `value & 0x1 === 1`。
  *
- * ⚠️ **发送走终端输入框**（生产路径）——这同时是 K-1 的真机证据。
+ * ⚠️ **发送走终端直输链路**（生产路径）——这同时是 K-1 的真机证据。
  *
  * @param {object} cdp
  * @param {{timeoutMs: number}} opts
@@ -9675,7 +9677,7 @@ async function runUartRxProbe(cdp, opts) {
     // -- 送一个字节（"A" = 0x41）-------------------------------------------
     const sent = await awaitEval(cdp, sendTerminalTextExpression("A"));
     checks.push({
-        name: "在终端输入框敲一个字节并点「发送」",
+        name: "终端直输送出一个字节（A = 0x41，含默认档 CR）",
         ok: Boolean(sent?.ok),
         detail: JSON.stringify(sent),
     });
@@ -9801,7 +9803,7 @@ async function runUartEchoProbe(cdp, opts) {
     // -- 送第一行 "Q"（默认档 ⇒ 发出 "Q" + CR）--------------------------
     const sent1 = await awaitEval(cdp, sendTerminalTextExpression("Q"));
     checks.push({
-        name: "B-63a · 在终端输入框敲一行并点「发送」",
+        name: "B-63a · 终端直输送出一行「Q」（含默认档 CR）",
         ok: Boolean(sent1?.ok),
         detail: JSON.stringify(sent1),
     });
@@ -9908,7 +9910,7 @@ async function runUartEchoProbe(cdp, opts) {
     // -- 再送第二行 "W" ⇒ 第二次不被堵死 ------------------------------
     const sent2 = await awaitEval(cdp, sendTerminalTextExpression("W"));
     checks.push({
-        name: "B-65a · 再送第二行",
+        name: "B-65a · 终端直输再送第二行「W」",
         ok: Boolean(sent2?.ok),
         detail: JSON.stringify(sent2),
     });

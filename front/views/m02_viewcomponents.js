@@ -71,6 +71,10 @@ import { createTerminalScreen, renderTerminalScreen } from "./components/termina
 // ⚠️ **波形库加载器的同步读**（STAGE-36）⇒ ⇒ 视图层**只读**已加载好的模块
 // ⇒ ⇒ **加载**由 app 层做（那是它的活）⇒ ⇒ 视图层**不发起**跨源 import。
 import { getECharts } from "../lib/echarts-loader.js";
+// ⚠️ **终端仿真库（xterm.js）加载器**：与 echarts 同一条懒加载 / 失败降级口径。
+//   视图层**只同步读** `getXterm()`；**加载**由 app 层发起（与波形库同形）
+//   ⇒ ⇒ 视图层不在 Node 门禁里碰跨源 `import()`。
+import { getXterm } from "../lib/xterm-loader.js";
 import {
     describeMatch,
     matchSourceFile,
@@ -1287,7 +1291,7 @@ export const DEFAULT_DUMP_LEN = "256";
  * 写**草稿**（**不重渲染** · 裁决 G）。
  *
  * ⚠️ **不在这里重渲染**：每敲一个键就重渲染 ⇒ ⇒ 输入框被重建 ⇒ ⇒ 焦点
- * 没了 ⇒ ⇒ 没法连续打字（terminal 的 `term.draft` 同一惯例 · F10）。
+ * 没了 ⇒ ⇒ 没法连续打字（与终端直输「写入与重渲染分离」同一惯例 · F10）。
  *
  * @param {{bpAddr?: string, memAddr?: string, memSize?: string}} patch
  */
@@ -2857,18 +2861,27 @@ function toggleTerminalRaw() {
 const terminalView = register({
     id: "terminal",
     channels: ["term"],
+    /**
+     * **持久宿主**（与波形图同一个裁决 L）：视图每次重渲染都把 `body.innerHTML`
+     * 整个换掉 ⇒ xterm 实例绑在宿主元素上 ⇒ 宿主元素搬走、实例不重建。
+     *
+     * @type {HTMLElement|null}
+     */
+    _host: null,
+    /** 已初始化的 xterm 实例（库没就绪是 `null` ⇒ 走自研仿真器降级路径）。 */
+    _term: null,
+    /** Fit 自适应附加件实例。 */
+    _fit: null,
+    /** xterm 当前已同步的 store 字节流（用于切档 / 重渲染后的全量对齐）。 */
+    _syncedRaw: null,
     render(state) {
         const buf = state?.term?.bytes ?? "";
-        // ⚠️ **草稿住在视图状态里**（K-1）：`applyRenderEvent` 每次都
-        // `body.innerHTML = html` ⇒ **输入框元素被重建** ⇒ 只存在 DOM 里
-        // 的草稿会**每来一个 console 字节就清一次** ⇒ 根本没法打字。
-        const draft = state?.term?.draft ?? "";
         // ⚠️ **行结束符的选择也住在视图状态里**（STAGE-40 · v0.55 · 裁决 I）
-        // ⇒ ⇒ 与草稿同一个真相 ⇒ ⇒ 重渲染不丢。
+        // ⇒ ⇒ 与既有口径同一个真相 ⇒ ⇒ 重渲染不丢。
         const eol = currentTerminalEol(state);
         // ⚠️ **原始字节档**（STAGE-41 · v0.56 · 裁决 F）：默认显示**屏幕**
         //   （仿真后的）⇒ ⇒ 切到「原始字节」才看未经解释的字节流 ⇒ ⇒
-        //   「字节流才是真相」这条**没有丢**，只是换了个入口。
+        //   两条路都留着。
         const rawMode = state?.term?.raw === true;
         // ⚠️ **TX / RX 是两个不同的源**（STAGE-35 · v0.50 批 · 裁决 G）⇒ ⇒
         // **分别标注方向** ⇒ ⇒ 不许把两个数混成一个。
@@ -2877,21 +2890,19 @@ const terminalView = register({
         return `
             <section class="terminal">
                 <div class="card">
-                    <div class="row"><h3>串口终端 (M-15 UART)</h3><span class="tag">收发字节分别计数</span></div>
-                    <div class="term-scroll">
+                    <div class="row"><h3>串口终端 (M-15 UART)</h3><span class="tag">直输模式 · 字节进 guest UART0</span></div>
+                    <div class="term-scroll" data-xterm-slot>
                         <pre class="terminal-out" data-terminal-out>${escapeHtml(terminalDisplayText(buf, rawMode))}</pre>
                     </div>
                     <div class="term-meta">
                         <span class="dir">TX（guest → 终端，内核 console 事件累计）</span><span class="n" data-term-tx>${txBytes}</span>
                         <span class="dir">RX（终端 → guest，前端发出累计）</span><span class="n" data-term-rx>${rxBytes}</span>
                     </div>
-                    <div class="terminal-input-row">
-                        <input type="text" class="terminal-input" data-terminal-input value="${escapeHtml(draft)}" placeholder="输入后按「发送」——字节会进 guest 的 UART0">
+                    <div class="terminal-toolbar">
                         <div class="terminal-eol" role="group" aria-label="行结束符">${renderTerminalEolButtons(eol)}</div>
                         <button type="button" class="terminal-raw-btn${rawMode ? " is-selected" : ""}" data-action="console-raw-toggle" data-raw-selected="${rawMode ? "true" : "false"}" title="切换「原始字节」与「终端屏幕」两种显示">原始字节</button>
-                        <button type="button" class="terminal-send" data-action="console-send">发送</button>
                     </div>
-                    <p class="muted">输入框里的文本<strong>按 UTF-8 编码</strong>成字节，发给 guest 的 UART0（契约 v5 的 <code>WriteConsole</code>）；<strong>回显来自 guest</strong>，平台不做本地回显。<strong>发送时会追加一个行结束符</strong>（默认 <code>CR</code> = 0x0D —— 真实串口终端按回车发的就是它；osz 这类固件的 shell 也只认它）；选「不加」则只送原始字节。</p>
+                    <p class="muted">直接在终端区域键入 ⇒ 按键字节逐帧进 guest 的 UART0（契约 v5 的 <code>WriteConsole</code>）；<strong>回显来自 guest</strong>，平台不做本地回显。回车发送当前档行结束符（默认 <code>CR</code> = 0x0D；osz 这类 shell 只认它）；Ctrl-C / 退格 / 方向键按原始控制字节透传。</p>
                 </div>
             </section>
         `;
@@ -2899,7 +2910,6 @@ const terminalView = register({
     onCommand(ev) {
         const actionEl = ev.target?.closest?.("[data-action]");
         const action = actionEl?.dataset?.action;
-        if (action === "console-send") return sendTerminalInput();
         // ⚠️ **原始字节档**（STAGE-41 · v0.56）：切显示口径 ⇒ ⇒ **不发**任何
         //   契约命令 ⇒ ⇒ 与板档案那套按钮同一个口径（界面上的显示开关
         //   一律不发命令）。
@@ -2909,6 +2919,72 @@ const terminalView = register({
         const eolEl = ev.target?.closest?.("[data-eol]");
         if (eolEl) return setTerminalEol(eolEl.dataset.eol);
         return undefined;
+    },
+    /**
+     * 渲染**之后**：把持久宿主搬进插槽，（库就绪时）初始化 / 复用 xterm
+     * 实例；库没就绪这一轮继续走降级 `<pre>` 仿真器。
+     *
+     * @param {HTMLElement} body
+     * @param {object} state
+     */
+    afterRender(body, state) {
+        const slot = body?.querySelector?.("[data-xterm-slot]") ?? null;
+        if (!slot) return;
+
+        if (!terminalView._host) {
+            terminalView._host = document.createElement("div");
+            terminalView._host.className = "xterm-host";
+            terminalView._host.setAttribute("data-xterm-host", "");
+        }
+        slot.appendChild(terminalView._host);
+
+        const lib = getXterm();
+        const pre = slot.querySelector("[data-terminal-out]");
+        const rawMode = state?.term?.raw === true;
+
+        if (!lib) {
+            // ⚠️ 库还没好（加载由 app 层触发）：这一轮继续走降级 `<pre>` 仿真器。
+            terminalView._host.hidden = true;
+            if (pre) pre.hidden = false;
+            return;
+        }
+
+        if (!terminalView._term) {
+            const term = new lib.Terminal({
+                theme: resolveXtermTheme(),
+                fontFamily: readMonoFont(),
+                fontSize: 12,
+                scrollback: 5000,
+                convertEol: false,
+                cursorBlink: true,
+            });
+            const fit = new lib.FitAddon();
+            term.open(terminalView._host);
+            terminalView._fit = fit;
+            fit.fit();
+            // ⚠️ **逐键直输**：xterm 把按键（含控制字节 / CSI 序列）原样给回
+            //   onData ⇒ 这里映射成字节就发；行编辑 / 回显都是 guest 的事。
+            term.onData((data) => {
+                dispatchTerminalBytes(terminalInputBytes(data, currentTerminalEol()));
+            });
+            terminalView._term = term;
+            terminalView._syncedRaw = null;
+        }
+
+        // 屏幕档下：xterm 里的内容必须与 store 全量对齐。首次初始化回灌历史
+        // 缓冲；从「原始字节」档切回屏幕档时，期间只进了降级 `<pre>` 的字节
+        // 也要补回来 ⇒ ⇒ 按 store 全量重写一遍（`_syncedRaw` 记下已同步的流）。
+        if (!rawMode && terminalView._syncedRaw !== String(state?.term?.bytes ?? "")) {
+            const buf = String(state?.term?.bytes ?? "");
+            terminalView._term.clear();
+            if (buf) terminalView._term.write(decodeConsoleBytes(buf));
+            terminalView._syncedRaw = buf;
+        }
+        try { terminalView._fit?.fit(); } catch (_err) { /* 尺寸量不到时忽略 */ }
+
+        // 原始字节档 ⇒ 降级 pre 可见、xterm 藏起来；屏幕档反之。
+        terminalView._host.hidden = rawMode;
+        if (pre) pre.hidden = !rawMode;
     },
     /** Append new bytes to the terminal buffer in-place (T1 fast path). */
     onDelta(delta) {
@@ -2937,64 +3013,68 @@ const terminalView = register({
                 txBytes: Number(prev.term?.txBytes ?? 0) + txDelta,
             },
         }));
-        const out = document.querySelector("[data-terminal-out]");
-        // ⚠️ **显示口径**（STAGE-41 · v0.56）：默认「终端屏幕」，切到
-        //   「原始字节」档才显示未经解释的字节流。
-        const rawMode = isRawMode();
-        // ⚠️ **计数也要就地更新**：这条路径**不重渲染**（只写 `textContent`）
+        // ⚠️ **计数也要就地更新**：这条路径**不重渲染**（只写输出面）
         // ⇒ ⇒ 不改计数的话 TX 会**一直停在旧值**。
         const txEl = document.querySelector("[data-term-tx]");
         if (txEl) {
             txEl.textContent = String(Number(viewStore.getState("terminal")?.term?.txBytes ?? 0));
         }
+        const rawMode = isRawMode();
+        // xterm 就绪且在屏幕档 ⇒ 增量喂给它；否则写降级 pre（既有仿真器路径）。
+        if (terminalView._term && !rawMode) {
+            terminalView._term.write(bytes);
+            terminalView._syncedRaw = next;
+            return;
+        }
+        const out = document.querySelector("[data-terminal-out]");
         if (!out) return;
         // `textContent` does not parse HTML — escaping here would print a
         // literal "&lt;" (FRONTEND_Review.md #4).
-        //
-        // ⚠️ **显示的是「屏幕」，不是字节流**（STAGE-41 · v0.56 · 裁决 A）：
-        //   guest 的 shell 每敲一个键就把整行重画一遍 ⇒ ⇒ 字节流里同一个
-        //   提示符出现 N 次 ⇒ ⇒ **原样显示**会把 N 次重画**堆成 N 行**
-        //   （`\r` 被渲染成换行 + `ESC[2K` 的 `[2K` 变成字面量）⇒ ⇒ 用户
-        //   看到的是乱码而不是那一行命令。
         out.textContent = rawMode ? next : terminalScreenText(next);
         out.scrollTop = out.scrollHeight;
     },
     mountFor(el) {
-        // ⚠️ **事件委托**（K-1）：监听器绑在**容器**上，**不**绑在输入框上
-        // ——输入框元素每次重渲染都会被重建（`body.innerHTML = html`）⇒
-        // 绑在它身上的监听器**会丢**（点第二次就没反应了）。
+        // ⚠️ **事件委托**（K-1）：监听器绑在**容器**上 ⇒ 重渲染重建的子元素
+        //   不会把监听器丢掉。直输模式下键盘输入由 xterm 自己接管，这里只剩
+        //   按钮 / EOL 组的点击委托。
         el.addEventListener("click", (ev) => terminalView.onCommand(ev));
-        el.addEventListener("input", (ev) => {
-            const input = ev.target?.closest?.("[data-terminal-input]");
-            if (!input) return;
-            // 草稿进**视图状态**（不是 DOM）⇒ 重渲染也不会丢。
-            setTerminalDraft(input.value ?? "");
-        });
-        el.addEventListener("keydown", (ev) => {
-            const input = ev.target?.closest?.("[data-terminal-input]");
-            if (!input) return;
-            if (ev.key !== "Enter") return;
-            // 「Enter 键发送」是**可选**的加分项（K-1 §7）；送的仍然是
-            // **原始字节**（不追加换行——那不是终端控制序列）。
-            ev.preventDefault?.();
-            sendTerminalInput();
-        });
     },
 });
 
 /**
- * 把终端草稿写进 **M-03 视图状态**（`term.draft`）。
+ * 从 CSS 令牌解析 xterm 主题（终端内部不受 CSS 管 ⇒ 颜色必须显式喂；
+ * 读不到就留空，用 xterm 默认值；Node 侧无 `getComputedStyle` 也安全）。
  *
- * ⚠️ **不在这里重渲染**：每敲一个键就重渲染会把输入框重建一次（焦点
- * 都没了）⇒ 草稿的**写入**与**重渲染**必须分开。
- *
- * @param {unknown} text
+ * @returns {object}
  */
-function setTerminalDraft(text) {
-    viewStore.setState("terminal", (prev) => ({
-        ...prev,
-        term: { ...(prev.term ?? {}), draft: String(text ?? "") },
-    }));
+function resolveXtermTheme() {
+    const out = {};
+    if (typeof document === "undefined" || typeof getComputedStyle !== "function") return out;
+    let cs = null;
+    try { cs = getComputedStyle(document.documentElement); } catch (_err) { return out; }
+    const read = (name) => {
+        try { return String(cs.getPropertyValue(name) ?? "").trim(); } catch (_err) { return ""; }
+    };
+    const bg = read("--term-bg");
+    const fg = read("--term-fg");
+    if (bg) out.background = bg;
+    if (fg) {
+        out.foreground = fg;
+        out.cursor = fg;
+        out.cursorAccent = bg || "#18181b";
+    }
+    return out;
+}
+
+/** 读等宽字体栈（`--mono` 令牌；读不到退回通用 monospace）。 */
+function readMonoFont() {
+    if (typeof document === "undefined" || typeof getComputedStyle !== "function") return "monospace";
+    try {
+        const v = String(getComputedStyle(document.documentElement).getPropertyValue("--mono") ?? "").trim();
+        return v || "monospace";
+    } catch (_err) {
+        return "monospace";
+    }
 }
 
 /**
@@ -3014,52 +3094,76 @@ function publishTerminalState() {
 }
 
 /**
- * 把输入框里的文本**按 UTF-8 编码**成字节 ⇒ 追加**行结束符** ⇒ 发
- * `console-send` 信号 ⇒ 清空输入框。
+ * 把 xterm `onData` 收到的一段按键文本映射成要发出去的**字节**。
  *
  * ⚠️ **字节，不是字符**（K-1）：guest 的 UART 收的是**字节**（契约 v5 的
- * `WriteConsole { bytes: Vec<u8> }`）⇒ 这里用 `TextEncoder` 做 UTF-8 编码
- * （`"A"` ⇒ `[65]`、`"你"` ⇒ `[228, 189, 160]`），**不**送字符串（内核会
- * 按 `E_PROTO-08` 拒掉）。
+ * `WriteConsole { bytes: Vec<u8> }`）⇒ 用 `TextEncoder` 做 UTF-8 编码
+ * （`"A"` ⇒ `[65]`、`"你"` ⇒ `[228, 189, 160]`），**不**送字符串。
  *
- * ⚠️ **追加的行结束符**（STAGE-40 · v0.55 · 裁决 G）：默认为 **CR
- * （0x0D）**⇒ ⇒ 真实串口终端按回车发的就是它 ⇒ ⇒ osz 这类只认 CR 的
- * shell 才能把命令**执行**掉（只送原始字节 ⇒ ⇒ 命令永远停在缓冲区里
- * ⇒ ⇒ 用户看不到任何输出）。
+ * ⚠️ **回车映射行结束符**：直输模式没有整行草稿 ⇒ 回车（`\r` / `\n`）
+ * 只发当前档的 EOL 字节；其余按键逐帧直发。
  *
- * ⚠️ **RX 计数含追加的行结束符**（裁决 J）：RX 的口径是「**前端发出**的
- * 字节数」⇒ ⇒ 追加的 CR **确实发出去了** ⇒ ⇒ 计入。
+ * ⚠️ **控制字节原样透传**：`\x03`（Ctrl-C）、`\x7f`（退格）、方向键的
+ * CSI 序列都不做本地解释 ⇒ 由 guest 的 shell 自己处理。
  *
- * ⚠️ **先发命令，再清草稿**：清早了就把要发的内容一起清掉了。
+ * @param {unknown} data xterm onData 回传的按键文本
+ * @param {string} eol 当前行结束符档（cr / lf / crlf / none）
+ * @returns {number[]}
+ */
+export function terminalInputBytes(data, eol) {
+    const text = String(data ?? "");
+    if (text === "\r" || text === "\n") {
+        const table = Object.prototype.hasOwnProperty.call(TERMINAL_EOL, eol)
+            ? TERMINAL_EOL[eol]
+            : TERMINAL_EOL[TERMINAL_EOL_DEFAULT];
+        return [...table];
+    }
+    return Array.from(new TextEncoder().encode(text));
+}
+
+/**
+ * 把已经算好的字节数组发进 guest 的 UART0（直输模式：调用方负责把按键
+ * 映射成字节）。
  *
- * ⚠️ **视图层不许直接调服务层**（本模块的既有规矩）：这里只发信号，
+ * ⚠️ **RX 计数**（STAGE-35 · v0.50 批 · 裁决 G）：计「前端发出」的字节数；
+ * `WriteConsole` 没有回执 ⇒ 不假装知道内核收没收到。
+ *
+ * ⚠️ **视图层不许直接调服务层**（本模块既有规矩）：这里只发信号，
  * `app.js` 把它变成真的命令。
  *
- * @returns {string} the request id
+ * @param {number[]} bytes
+ * @returns {string|undefined} the request id（空字节时不发命令）
  */
-function sendTerminalInput() {
-    const input = document.querySelector("[data-terminal-input]");
-    const text = String(input?.value ?? "");
-    const payload = Array.from(new TextEncoder().encode(text));
-    // ⚠️ **行结束符取自视图状态**（不是 DOM）⇒ ⇒ **一个真相**。
-    const eol = currentTerminalEol();
-    const bytes = payload.concat(TERMINAL_EOL[eol]);
-    // ⚠️ **RX 计数**（STAGE-35 · v0.50 批 · 裁决 G）：这是**前端发出**的
-    // 字节数（TX 是内核推过来的 ⇒ ⇒ **两个不同的源** ⇒ ⇒ 分别标注）。
-    //
-    // ⚠️ **计的是「发出」不是「内核确认收到」** —— `WriteConsole` 没有回执
-    // 事件 ⇒ ⇒ 界面上就这么说，不假装知道内核收没收到。
+export function dispatchTerminalBytes(bytes) {
+    const payload = Array.isArray(bytes) ? bytes : [];
+    if (payload.length === 0) return undefined;
     viewStore.setState("terminal", (prev) => ({
         ...prev,
         term: {
             ...(prev.term ?? {}),
-            rxBytes: Number(prev.term?.rxBytes ?? 0) + bytes.length,
+            rxBytes: Number(prev.term?.rxBytes ?? 0) + payload.length,
         },
     }));
-    const requestId = emitCommand("console-send", "terminal", { bytes });
-    setTerminalDraft("");
-    publishTerminalState();
-    return requestId;
+    // ⚠️ **计数就地更新**（与 `onDelta` 的 TX 同一条快路径）：这条链路不重渲染
+    //   ⇒ ⇒ 不刷元素的话 RX 会一直停在旧值。
+    const rxEl = document.querySelector("[data-term-rx]");
+    if (rxEl) {
+        rxEl.textContent = String(Number(viewStore.getState("terminal")?.term?.rxBytes ?? 0));
+    }
+    return emitCommand("console-send", "terminal", { bytes: payload });
+}
+
+/**
+ * 新会话 / 清会话时把 xterm 实例一并清空（与 `resetTerminalScreen` 成对）。
+ *
+ * ⚠️ **必须与 store 的 `term.bytes` 清空成对发生** ⇒ 否则实例还拿着上一段
+ * 工程的屏幕 ⇒ 显示错乱。
+ */
+export function resetTerminalXterm() {
+    if (terminalView._term) {
+        try { terminalView._term.clear(); } catch (_err) { /* 实例未就绪时忽略 */ }
+    }
+    terminalView._syncedRaw = null;
 }
 
 // ---------------------------------------------------------------------------

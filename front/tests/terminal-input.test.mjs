@@ -1,42 +1,34 @@
 // v0.24 · Lane K —— 「终端视图能真的把字送进 guest 的 UART」的前端门禁。
 //
-// 这个套件盯 K-1 的六条不变式（外加一条加分项）：
+// ⚠️ **本批（xterm 直输模式）口径变更**：旧版是「独立输入框 + 发送按钮」的
+// 行缓冲模式 ⇒ ⇒ 整段草稿在点发送 / 按 Enter 时一次性发出。新版是**真实
+// 终端直输**：键盘由 xterm 表面接管，逐键（含控制字节 / CSI 序列）经
+// `terminalInputBytes` 映射成字节 ⇒ ⇒ `dispatchTerminalBytes` 发出。
 //
-//   1. 终端视图**渲染出**输入框与「发送」按钮；
-//   2. 输入文本点发送 ⇒ **真的发出** `WriteConsole` 命令，且字节是输入
-//      文本的 **UTF-8 字节**（`"A"` ⇒ `[65]`、`"你"` ⇒ `[228, 189, 160]`）；
-//   3. 发送后**输入框被清空**；
-//   4. ⚠️ **重渲染不丢草稿**：输入了文本之后触发一次重渲染 ⇒ 输入框的
-//      值**还在**（草稿住在 M-03 的视图状态里，不在 DOM 里）；
-//   5. ⚠️ **重渲染不丢监听器**：重渲染之后再点发送 ⇒ **仍然**发出命令
-//      （监听器绑在**容器**上做事件委托，不绑在会被重建的输入框上）；
-//   6. 输入框里的**特殊字符**（`<` / `&` / `"`）被**原样**送出
-//      （不是被 HTML 转义后的东西）；
-//   7. （加分项）Enter 键也能发送。
+// 这套件盯三组不变式：
 //
-// ⚠️ **v0.55 批（STAGE-40）把第 2 条改了**：发送时**追加一个行结束符**
-// （默认 **CR = 0x0D**）⇒ ⇒ 真实串口终端按回车发的就是它 ⇒ ⇒ osz 这类
-// **只认 CR** 的 shell 才能把命令**执行**掉（只送原始字节 ⇒ ⇒ 命令永远
-// 停在缓冲区里 ⇒ ⇒ 用户看不到任何输出）。
+//   **A. 直输形态渲染**
+//     1. 视图里**不再有**独立输入框与「发送」按钮；xterm 持久宿主 + 降级
+//        `<pre>` 都在；
+//     2. 四档行结束符按钮都渲染出来，当前档带 `data-eol-selected`；
+//     3. 行结束符的选择**重渲染不丢**（住在 M-03 视图状态里）。
 //
-// ⇒ ⇒ 于是本文件多盯八条（**N-1 ~ N-8**）：
+//   **B. 纯函数 `terminalInputBytes`（字节映射，零 DOM 可测）**
+//     4. 普通文本按 **UTF-8** 编码（`"A"` ⇒ `[65]`、`"你"` ⇒ `[228,189,160]`）；
+//     5. 特殊字符（`<` / `&` / `"`）原样送字节，不做 HTML 转义；
+//     6. 回车（`\r` / `\n`）按当前档 EOL 映射：CR / LF / CRLF / 不加；
+//     7. 控制字节原样透传：Ctrl-C（0x03）、退格（0x7f）、方向键 CSI 序列；
+//     8. 未知 EOL 档回落默认 CR。
 //
-//   8.  默认档追加 **CR**（0x0D）；
-//   9.  选 **LF** ⇒ 追加 LF（0x0A）；
-//  10.  选 **CRLF** ⇒ 追加两个字节（0x0D 0x0A）；
-//  11.  选 **「不加」** ⇒ **只有原始字节**（**v0.5x 批之前的行为**保留）；
-//  12.  RX 计数**含**追加的行结束符；
-//  13.  行结束符的选择**重渲染不丢**（它住在 M-03 的视图状态里）；
-//  14.  四档按钮都渲染出来，当前档带 `data-eol-selected`；
-//  15.  追加的是**字节**不是字符串（多字节字符照样按 UTF-8 编码）。
+//   **C. 信号与命令链路（视图层 → M-05 → 线上）**
+//     9. `dispatchTerminalBytes` 发一条 `console-send` 信号，落到线上是
+//        `WriteConsole { bytes: [...] }`；
+//    10. RX 计数按实际发出的字节数累计（含 EOL 字节）；
+//    11. 空字节数组**不发**命令、不涨 RX；
+//    12. **回显来自 guest**：平台本地不产生回显命令；
+//    13. 重渲染之后信号路径仍然通（再发一次照样落到线上）。
 //
 // ⚠️ **断言值是写死的字面量**，不从被测实现反推。
-//
-// ⚠️ **为什么第 4 / 5 条是这套件的核心**：`applyRenderEvent` 每次都
-// `body.innerHTML = html` ⇒ **输入框元素被重建** ⇒ ① 直接绑在输入框上的
-// 监听器**会丢**（点第二次就没反应）；② 只存在 DOM 里的草稿**会被清空**
-// （每来一个 console 字节就重渲染一次 ⇒ 每来一个字节就清一次输入框 ⇒
-// 根本没法打字）。这两条就是那两条坑的**判别式**。
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -83,18 +75,6 @@ const BYTES_CR = [13];
 const BYTES_LF = [10];
 /** CRLF = 0x0D 0x0A。 */
 const BYTES_CRLF = [13, 10];
-
-/**
- * 「文本的 UTF-8 字节 **+ 默认档的行结束符**」。
- *
- * ⚠️ **这是 v0.55 批之后「发送」真正发出去的字节**（默认追加 CR）。
- *
- * @param {number[]} bytes
- * @returns {number[]}
- */
-function withCr(bytes) {
-    return bytes.concat(BYTES_CR);
-}
 
 // ---------------------------------------------------------------------------
 // 传输替身
@@ -151,10 +131,10 @@ async function setup() {
     const router = await m05.mountCommandRouter({ transport });
     m01.assembleWorkspace("embedded");
     m01.route("#/terminal");
-    // 视图状态里的终端缓冲清空（`m03.reset()` 已经清了，但路由会写一次）。
+    // 视图状态里的终端缓冲清空。
     m03.setState("terminal", (prev) => ({
         ...prev,
-        term: { ...(prev.term ?? {}), bytes: "", draft: "" },
+        term: { ...(prev.term ?? {}), bytes: "" },
     }));
     publishTerminal();
     /** @type {object[]} */
@@ -171,20 +151,6 @@ function publishTerminal() {
     dom.window.dispatchEvent(new CustomEvent("riscv:render", {
         detail: { viewId: "terminal", type: "update", state: m03.getState("terminal") },
     }));
-}
-
-/** 终端视图当前的输入框元素（每次重渲染都是**新**元素 ⇒ 每次重新取）。 */
-function terminalInput() {
-    const el = dom.document.querySelector("[data-terminal-input]");
-    assert.ok(el, "终端视图没有渲染出输入框");
-    return el;
-}
-
-/** 终端视图当前的「发送」按钮。 */
-function sendButton() {
-    const el = dom.document.querySelector('[data-action="console-send"]');
-    assert.ok(el, "终端视图没有渲染出「发送」按钮");
-    return el;
 }
 
 /**
@@ -208,246 +174,34 @@ function clickEol(id) {
     eolButton(id).dispatchEvent(new Event("click"));
 }
 
-/**
- * 在输入框里「敲」一段文本（模拟用户输入）。
- *
- * ⚠️ 必须**派发 `input` 事件**：草稿是靠 `input` 事件进视图状态的
- * （真实浏览器里用户每敲一个键都会发它）。
- *
- * @param {string} text
- */
-function typeIntoInput(text) {
-    const input = terminalInput();
-    input.value = text;
-    input.dispatchEvent(new Event("input"));
-}
-
+// ---------------------------------------------------------------------------
+// A. 直输形态渲染
 // ---------------------------------------------------------------------------
 
-describe("终端视图 · 输入框与发送按钮（K-1）", () => {
-    test("终端视图渲染出输入框与「发送」按钮", async () => {
+describe("终端视图 · 直输形态（xterm 直输模式）", () => {
+    test("不再渲染独立输入框与「发送」按钮；xterm 宿主与降级屏幕都在", async () => {
         await setup();
-        const input = terminalInput();
-        assert.equal(input.getAttribute("type"), "text", "输入框必须是文本框");
-        const button = sendButton();
-        assert.equal(button.tagName, "BUTTON", "「发送」必须是按钮");
+        assert.equal(
+            dom.document.querySelector("[data-terminal-input]"),
+            null,
+            "旧版独立输入框必须下线（直输由 xterm 表面接管）",
+        );
+        assert.equal(
+            dom.document.querySelector('[data-action="console-send"]'),
+            null,
+            "旧版「发送」按钮必须下线（直输逐键发出）",
+        );
         assert.ok(
-            button.textContent.includes("发送"),
-            `按钮上应该有「发送」两个字：${button.textContent}`,
+            dom.document.querySelector("[data-xterm-host]"),
+            "xterm 持久宿主必须渲染出来（库就绪后接管）",
+        );
+        assert.ok(
+            dom.document.querySelector("[data-terminal-out]"),
+            "降级 `<pre>` 屏幕必须保留（库不可达 / 原始字节档的退路）",
         );
     });
 
-    test("点「发送」真的发出 `WriteConsole` 命令，字节是输入文本的 UTF-8 字节", async () => {
-        const { transport, signals } = await setup();
-        typeIntoInput("A");
-        sendButton().dispatchEvent(new Event("click"));
-
-        // -- 视图层只发**信号**（不直接调服务层）--------------------------
-        assert.equal(signals.length, 1, "点击没有发出 riscv:command 信号");
-        assert.equal(signals[0].action, "console-send");
-        assert.deepEqual(
-            signals[0].params.bytes,
-            withCr(BYTES_A),
-            "信号里带的字节不对（**含默认档的行结束符 CR**）",
-        );
-
-        // -- 真的落到了线上 ------------------------------------------------
-        assert.equal(transport.sent.length, 1, "命令没有发到 M-05");
-        assert.deepEqual(
-            transport.sent[0].message.payload.Command,
-            { WriteConsole: { bytes: withCr(BYTES_A) } },
-            "线上形态必须是 WriteConsole { bytes: [...] }（**含默认档的 CR**）",
-        );
-    });
-
-    test("多字节字符按 **UTF-8** 编码（\"你\" ⇒ [228, 189, 160]，不是一个码位）", async () => {
-        const { transport } = await setup();
-        typeIntoInput("你");
-        sendButton().dispatchEvent(new Event("click"));
-        assert.deepEqual(
-            transport.sent[0].message.payload.Command,
-            { WriteConsole: { bytes: withCr(BYTES_NI) } },
-        );
-    });
-
-    test("发送后**输入框被清空**", async () => {
-        await setup();
-        typeIntoInput("A");
-        assert.equal(terminalInput().value, "A", "先得真的敲进去");
-        sendButton().dispatchEvent(new Event("click"));
-        assert.equal(terminalInput().value, "", "发送后输入框没有清空");
-        assert.equal(
-            m03.getState("terminal")?.term?.draft,
-            "",
-            "草稿也必须清空（视图状态是唯一真相）",
-        );
-    });
-
-    test("⚠️ 重渲染**不丢草稿**（草稿住在 M-03 视图状态里，不在 DOM 里）", async () => {
-        await setup();
-        typeIntoInput("A");
-        assert.equal(m03.getState("terminal")?.term?.draft, "A", "草稿必须进视图状态");
-
-        // 触发一次**生产路径**的重渲染（M-01 的 `riscv:render` 事件 ⇒
-        // `applyRenderEvent` ⇒ `body.innerHTML = html` ⇒ 输入框被重建）。
-        publishTerminal();
-
-        assert.equal(
-            terminalInput().value,
-            "A",
-            "重渲染把草稿弄丢了 —— 草稿必须住在 M-03 的视图状态里",
-        );
-    });
-
-    test("⚠️ 重渲染**不丢监听器**（重渲染之后再点发送，仍然发出命令）", async () => {
-        const { transport } = await setup();
-        typeIntoInput("A");
-        publishTerminal();
-
-        // 重新取元素（重渲染后是**新**的元素）⇒ 点它。
-        sendButton().dispatchEvent(new Event("click"));
-
-        assert.equal(transport.sent.length, 1, "重渲染之后点发送没有发出命令");
-        assert.deepEqual(
-            transport.sent[0].message.payload.Command,
-            { WriteConsole: { bytes: withCr(BYTES_A) } },
-            "重渲染之后发出的字节不对",
-        );
-    });
-
-    test("特殊字符（`<` / `&` / `\"`）被**原样**送出（不是 HTML 转义后的东西）", async () => {
-        const { transport } = await setup();
-        typeIntoInput("<&\"");
-        sendButton().dispatchEvent(new Event("click"));
-        assert.deepEqual(
-            transport.sent[0].message.payload.Command,
-            { WriteConsole: { bytes: withCr(BYTES_SPECIAL) } },
-            "特殊字符被转义了（或被吃掉了）",
-        );
-    });
-
-    test("（加分项）Enter 键也能发送", async () => {
-        const { transport } = await setup();
-        typeIntoInput("A");
-        const ev = new Event("keydown");
-        // ⚠️ 替身不实现 `key` ⇒ 自己挂上（真实浏览器里 `keydown` 带 `key`）。
-        Object.defineProperty(ev, "key", { value: "Enter", configurable: true });
-        terminalInput().dispatchEvent(ev);
-        assert.equal(transport.sent.length, 1, "Enter 没有发出命令");
-        assert.deepEqual(
-            transport.sent[0].message.payload.Command,
-            { WriteConsole: { bytes: withCr(BYTES_A) } },
-        );
-    });
-
-    test("回显**不**由平台本地产生（发送不发任何 `Console` 事件）", async () => {
-        const { transport, signals } = await setup();
-        typeIntoInput("A");
-        sendButton().dispatchEvent(new Event("click"));
-        // ⚠️ **只发一条**命令（`WriteConsole`）⇒ 没有第二条「本地回显」。
-        assert.equal(signals.length, 1, "平台不该自己再发一条命令（回显来自 guest）");
-        assert.equal(
-            transport.sent.filter((s) => s.message.payload.Command.Nop !== undefined).length,
-            0,
-            "不该有 Nop 之类的多余命令",
-        );
-    });
-});
-
-// ---------------------------------------------------------------------------
-// 行结束符（STAGE-40 · v0.55 · 裁决 G ~ J）
-// ---------------------------------------------------------------------------
-
-describe("终端视图 · 行结束符（STAGE-40 · v0.55）", () => {
-    test("**N-1** 「发送」默认追加 **CR**（0x0D）", async () => {
-        const { transport } = await setup();
-        typeIntoInput("A");
-        sendButton().dispatchEvent(new Event("click"));
-        assert.deepEqual(
-            transport.sent[0].message.payload.Command,
-            { WriteConsole: { bytes: [65, 13] } },
-            "默认必须追加 CR（0x0D）—— 真实串口终端按回车发的就是它，\
-             osz 这类只认 CR 的 shell 才能把命令执行掉",
-        );
-    });
-
-    test("**N-2** 选 **LF** ⇒ 追加 LF（0x0A）", async () => {
-        const { transport } = await setup();
-        clickEol("lf");
-        typeIntoInput("A");
-        sendButton().dispatchEvent(new Event("click"));
-        assert.deepEqual(
-            transport.sent[0].message.payload.Command,
-            { WriteConsole: { bytes: [65, 10] } },
-            "选 LF 必须追加 LF（0x0A）",
-        );
-    });
-
-    test("**N-3** 选 **CRLF** ⇒ 追加两个字节（0x0D 0x0A）", async () => {
-        const { transport } = await setup();
-        clickEol("crlf");
-        typeIntoInput("A");
-        sendButton().dispatchEvent(new Event("click"));
-        assert.deepEqual(
-            transport.sent[0].message.payload.Command,
-            { WriteConsole: { bytes: [65, 13, 10] } },
-            "选 CRLF 必须追加 0x0D 0x0A（**顺序**也不能反）",
-        );
-    });
-
-    test("**N-4** 选 **「不加」** ⇒ **只有原始字节**（v0.5x 批之前的行为保留）", async () => {
-        const { transport } = await setup();
-        clickEol("none");
-        typeIntoInput("A");
-        sendButton().dispatchEvent(new Event("click"));
-        assert.deepEqual(
-            transport.sent[0].message.payload.Command,
-            { WriteConsole: { bytes: [65] } },
-            "选「不加」必须**只**送原始字节",
-        );
-    });
-
-    test("**N-5** RX 计数**含**追加的行结束符", async () => {
-        await setup();
-        typeIntoInput("A");
-        sendButton().dispatchEvent(new Event("click"));
-        assert.equal(
-            m03.getState("terminal")?.term?.rxBytes,
-            2,
-            "RX 计数必须**含**追加的那一个字节（它确实发出去了）",
-        );
-        // 「不加」那一档 ⇒ 只算原始字节。
-        clickEol("none");
-        typeIntoInput("B");
-        sendButton().dispatchEvent(new Event("click"));
-        assert.equal(
-            m03.getState("terminal")?.term?.rxBytes,
-            3,
-            "「不加」那一档只算原始字节 ⇒ 计数必须是 2 + 1",
-        );
-    });
-
-    test("**N-6** 行结束符的选择**重渲染不丢**（它住在 M-03 的视图状态里）", async () => {
-        await setup();
-        clickEol("lf");
-        publishTerminal();
-        const el = eolButton("lf");
-        assert.equal(
-            el.getAttribute("data-eol-selected"),
-            "true",
-            "重渲染之后当前档必须还是 LF —— 选择必须住在视图状态里，不在 DOM 里",
-        );
-        // 且重渲染之后发送用的**还是**新档。
-        typeIntoInput("A");
-        sendButton().dispatchEvent(new Event("click"));
-        assert.deepEqual(
-            m03.getState("terminal")?.term?.rxBytes,
-            2,
-            "重渲染之后发送仍然必须按当前档（LF）算 RX 计数",
-        );
-    });
-
-    test("**N-7** 四档按钮都渲染出来，当前档带 `data-eol-selected`", async () => {
+    test("四档行结束符按钮都渲染出来，当前档带 `data-eol-selected`", async () => {
         await setup();
         for (const id of ["cr", "lf", "crlf", "none"]) {
             const el = eolButton(id);
@@ -465,14 +219,133 @@ describe("终端视图 · 行结束符（STAGE-40 · v0.55）", () => {
         );
     });
 
-    test("**N-8** 追加的是**字节**不是字符串（多字节字符照样按 UTF-8 编码）", async () => {
-        const { transport } = await setup();
-        typeIntoInput("你");
-        sendButton().dispatchEvent(new Event("click"));
+    test("⚠️ 行结束符的选择**重渲染不丢**（它住在 M-03 的视图状态里）", async () => {
+        await setup();
+        clickEol("lf");
+        publishTerminal();
+        assert.equal(
+            eolButton("lf").getAttribute("data-eol-selected"),
+            "true",
+            "重渲染之后当前档必须还是 LF —— 选择必须住在视图状态里，不在 DOM 里",
+        );
+    });
+});
+
+// ---------------------------------------------------------------------------
+// B. 纯函数 `terminalInputBytes`
+// ---------------------------------------------------------------------------
+
+describe("终端视图 · 按键字节映射（terminalInputBytes 纯函数）", () => {
+    test("普通文本按 **UTF-8** 编码（ASCII / 多字节字符）", () => {
+        assert.deepEqual(m02.terminalInputBytes("A", "cr"), BYTES_A);
+        assert.deepEqual(m02.terminalInputBytes("你", "cr"), BYTES_NI);
+    });
+
+    test("特殊字符（`<` / `&` / `\"`）被**原样**送字节（不做 HTML 转义）", () => {
+        assert.deepEqual(
+            m02.terminalInputBytes("<&\"", "cr"),
+            BYTES_SPECIAL,
+            "特殊字符被转义了（或被吃掉了）",
+        );
+    });
+
+    test("回车（`\\r` / `\\n`）按当前档 EOL 映射：CR / LF / CRLF / 不加", () => {
+        assert.deepEqual(m02.terminalInputBytes("\r", "cr"), BYTES_CR);
+        assert.deepEqual(m02.terminalInputBytes("\n", "cr"), BYTES_CR);
+        assert.deepEqual(m02.terminalInputBytes("\r", "lf"), BYTES_LF);
+        assert.deepEqual(m02.terminalInputBytes("\n", "lf"), BYTES_LF);
+        assert.deepEqual(m02.terminalInputBytes("\r", "crlf"), BYTES_CRLF);
+        assert.deepEqual(m02.terminalInputBytes("\r", "none"), []);
+    });
+
+    test("控制字节原样透传：Ctrl-C / 退格 / 方向键 CSI 序列", () => {
+        // Ctrl-C = 0x03；退格 = 0x7f；方向键 ↑ = ESC [ A。
+        assert.deepEqual(m02.terminalInputBytes("\x03", "cr"), [3]);
+        assert.deepEqual(m02.terminalInputBytes("\x7f", "cr"), [127]);
+        assert.deepEqual(m02.terminalInputBytes("\x1b[A", "cr"), [27, 91, 65]);
+    });
+
+    test("未知 EOL 档回落默认 CR", () => {
+        assert.deepEqual(m02.terminalInputBytes("\r", "bogus"), BYTES_CR);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// C. 信号与命令链路
+// ---------------------------------------------------------------------------
+
+describe("终端视图 · 信号与命令链路（直输 → WriteConsole）", () => {
+    test("发出的字节落到线上是 `WriteConsole { bytes: [...] }`", async () => {
+        const { transport, signals } = await setup();
+        m02.dispatchTerminalBytes(BYTES_A);
+
+        // -- 视图层只发**信号**（不直接调服务层）--------------------------
+        assert.equal(signals.length, 1, "没有发出 riscv:command 信号");
+        assert.equal(signals[0].action, "console-send");
+        assert.deepEqual(signals[0].params.bytes, BYTES_A);
+
+        // -- 真的落到了线上 ------------------------------------------------
+        assert.equal(transport.sent.length, 1, "命令没有发到 M-05");
         assert.deepEqual(
             transport.sent[0].message.payload.Command,
-            { WriteConsole: { bytes: [228, 189, 160, 13] } },
-            "\"你\" 必须是三个 UTF-8 字节 **+** 一个 CR",
+            { WriteConsole: { bytes: BYTES_A } },
+            "线上形态必须是 WriteConsole { bytes: [...] }",
+        );
+    });
+
+    test("RX 计数按实际发出的字节数累计（含回车 EOL 字节）", async () => {
+        await setup();
+        // 敲 "hi" 两个键 ⇒ 回车按默认档补 CR 一个。
+        m02.dispatchTerminalBytes(m02.terminalInputBytes("hi", "cr"));
+        m02.dispatchTerminalBytes(m02.terminalInputBytes("\r", "cr"));
+        assert.equal(
+            m03.getState("terminal")?.term?.rxBytes,
+            3,
+            "RX 必须按实际发出字节累计（2 个字符 + 1 个 CR）",
+        );
+        // 「不加」那一档 ⇒ 回车不补字节。
+        m02.dispatchTerminalBytes(m02.terminalInputBytes("\r", "none"));
+        assert.equal(
+            m03.getState("terminal")?.term?.rxBytes,
+            3,
+            "EOL = none 时回车不发字节 ⇒ RX 不该再涨",
+        );
+    });
+
+    test("空字节数组**不发**命令、不涨 RX", async () => {
+        const { transport, signals } = await setup();
+        const id = m02.dispatchTerminalBytes([]);
+        assert.equal(id, undefined, "空字节不该返回请求 id");
+        assert.equal(signals.length, 0, "空字节不该发信号");
+        assert.equal(transport.sent.length, 0, "空字节不该落到线上");
+        assert.equal(
+            Number(m03.getState("terminal")?.term?.rxBytes ?? 0),
+            0,
+            "空字节不该涨 RX",
+        );
+    });
+
+    test("回显**不**由平台本地产生（只发 WriteConsole，没有多余命令）", async () => {
+        const { transport, signals } = await setup();
+        m02.dispatchTerminalBytes(BYTES_A);
+        // ⚠️ **只发一条**命令（`WriteConsole`）⇒ 没有第二条「本地回显」。
+        assert.equal(signals.length, 1, "平台不该自己再发一条命令（回显来自 guest）");
+        assert.equal(
+            transport.sent.filter((s) => s.message.payload.Command.Nop !== undefined).length,
+            0,
+            "不该有 Nop 之类的多余命令",
+        );
+    });
+
+    test("⚠️ 重渲染之后信号路径仍然通（再发一次照样落到线上）", async () => {
+        const { transport } = await setup();
+        publishTerminal();
+        m02.dispatchTerminalBytes(BYTES_A);
+        assert.equal(transport.sent.length, 1, "重渲染之后没有发出命令");
+        assert.deepEqual(
+            transport.sent[0].message.payload.Command,
+            { WriteConsole: { bytes: BYTES_A } },
+            "重渲染之后发出的字节不对",
         );
     });
 });
