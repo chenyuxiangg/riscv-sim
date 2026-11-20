@@ -16,7 +16,8 @@
 //
 // 1. 两边都按 `/` 切段；
 // 2. **先正规化**（丢掉 `.` 段、按栈消解 `..` 段）；
-// 3. 从**尾部**逐段比，**全部相同** ⇒ 命中候选；
+// 3. 从**尾部**逐段比，**全部相同** ⇒ 命中候选；本地 key 可先丢掉任意
+//    前导段（目录选择器带的选中文件夹名，与编译机 `comp_dir` 尾部本就不同）；
 // 4. **唯一命中** ⇒ 直接用它；
 // 5. **多个命中** ⇒ **列出候选让用户选**（⛔ 不静默挑第一个）；
 // 6. **零命中** ⇒ 显示「匹配不到」。
@@ -94,6 +95,91 @@ function treeKeys(tree) {
  */
 
 /**
+ * 本地 key 的任意后缀与 DWARF 路径的后缀逐段相同 ⇒ 命中。
+ *
+ * ⚠️ **本地 key 允许丢弃前导段**：目录选择器给的 `webkitRelativePath` 带
+ * 选中文件夹名作为第一段（如 `osz/targets/.../main.c`），而 DWARF 绝对
+ * 路径的 `comp_dir` 尾部是编译机上的目录名（如 `…/osz-main/targets/...`），
+ * 这两个前导段本来就不该相等 ⇒ ⇒ 从 key 的每个后缀起，再按「较短串是
+ * 较长串后缀」的规则比；丢掉的只是本地这边的前导前缀，目标侧一段不丢。
+ *
+ * @param {string[]} keySegs — 已正规化、切段后的本地 key
+ * @param {string[]} targetSegs — 已正规化、切段后的 DWARF 路径
+ * @returns {boolean}
+ */
+function keySuffixMatches(keySegs, targetSegs) {
+    for (let start = 0; start < keySegs.length; start += 1) {
+        const cand = keySegs.slice(start);
+        const count = Math.min(cand.length, targetSegs.length);
+        const candOffset = cand.length - count;
+        const targetOffset = targetSegs.length - count;
+        let same = true;
+        for (let i = 0; i < count; i += 1) {
+            if (cand[candOffset + i] !== targetSegs[targetOffset + i]) {
+                same = false;
+                break;
+            }
+        }
+        if (same) return true;
+    }
+    return false;
+}
+
+/**
+ * 路径串 → 正规化后的段序列（丢空段 / `.`、消解可消 `..`）。
+ *
+ * @param {unknown} path
+ * @returns {string[]}
+ */
+function segmentsOf(path) {
+    return normalizePath(path).split("/").filter(Boolean);
+}
+
+/**
+ * 一条用户映射：把 DWARF 编译期前缀 `from` 替换成本地前缀 `to`。
+ *
+ * - `from` 为空 ⇒ 不参与重写；
+ * - `to` 为空 ⇒ 剥掉 `from` 后只留 DWARF 里的相对路径；
+ * - 段级比较（正规化之后），不拼字符串。
+ *
+ * @typedef {{from: string, to: string}} PathRemap
+ */
+
+/**
+ * 对一条 DWARF 段序列套用映射；前缀不匹配 ⇒ 返回 `null`。
+ *
+ * @param {string[]} dwarfSegs
+ * @param {string[]} fromSegs
+ * @param {string[]} toSegs
+ * @returns {string[]|null}
+ */
+function applyRemap(dwarfSegs, fromSegs, toSegs) {
+    if (fromSegs.length === 0 || fromSegs.length > dwarfSegs.length) return null;
+    for (let i = 0; i < fromSegs.length; i += 1) {
+        if (dwarfSegs[i] !== fromSegs[i]) return null;
+    }
+    return [...toSegs, ...dwarfSegs.slice(fromSegs.length)];
+}
+
+/**
+ * 把 DWARF 路径按映射表重写出若干候选段序列（原始路径始终在最前）。
+ *
+ * @param {string[]} dwarfSegs
+ * @param {Array<PathRemap>|null|undefined} remaps
+ * @returns {string[][]}
+ */
+function remappedVariants(dwarfSegs, remaps) {
+    const variants = [dwarfSegs];
+    for (const remap of remaps ?? []) {
+        const fromSegs = segmentsOf(remap?.from);
+        const toSegs = segmentsOf(remap?.to);
+        const mapped = applyRemap(dwarfSegs, fromSegs, toSegs);
+        if (mapped) variants.push(mapped);
+    }
+    return variants;
+}
+
+/**
  * 把 DWARF 的路径匹配到本地源码树的一个 key 上。
  *
  * ⚠️ **三态如实区分**（裁决 J / F）：
@@ -105,35 +191,27 @@ function treeKeys(tree) {
  *
  * @param {Map<string, string>|object|null|undefined} tree — 源码树
  * @param {unknown} dwarfPath — DWARF 里的编译期路径
+ * @param {Array<PathRemap>|null|undefined} [remaps] — 用户自填的前缀映射表
  * @returns {SourceMatch}
  */
-export function matchSourceFile(tree, dwarfPath) {
+export function matchSourceFile(tree, dwarfPath, remaps) {
     const keys = treeKeys(tree);
     if (keys.length === 0) {
         // 没有源码树 ⇒ 与「匹配不到」**不是**一回事。
         return { kind: "none", reason: "no-tree" };
     }
-    const target = normalizePath(dwarfPath);
-    const targetSegs = target.split("/").filter(Boolean);
+    const targetSegs = segmentsOf(dwarfPath);
     if (targetSegs.length === 0) {
         return { kind: "none", reason: "no-match" };
     }
+    const variants = remappedVariants(targetSegs, remaps);
     const candidates = [];
     for (const key of keys) {
-        const keySegs = normalizePath(key).split("/").filter(Boolean);
+        const keySegs = segmentsOf(key);
         if (keySegs.length === 0) continue;
-        // 尾部逐段比：比**较短的那一段**（短的必须是长的后缀）。
-        const count = Math.min(keySegs.length, targetSegs.length);
-        const keyOffset = keySegs.length - count;
-        const targetOffset = targetSegs.length - count;
-        let same = true;
-        for (let i = 0; i < count; i += 1) {
-            if (keySegs[keyOffset + i] !== targetSegs[targetOffset + i]) {
-                same = false;
-                break;
-            }
+        if (variants.some((targetSegs_) => keySuffixMatches(keySegs, targetSegs_))) {
+            candidates.push(key);
         }
-        if (same) candidates.push(key);
     }
     if (candidates.length === 0) return { kind: "none", reason: "no-match" };
     if (candidates.length === 1) return { kind: "unique", key: candidates[0] };

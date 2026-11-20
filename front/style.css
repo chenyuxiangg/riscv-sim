@@ -883,6 +883,21 @@ a { color: inherit; text-decoration: none; }
     max-height: 420px; overflow: auto; white-space: pre;
 }
 
+/* 源码路径前缀映射（编译期前缀 ⇒ 本地前缀）。 */
+.source-remaps { margin: 8px 0; }
+.source-remaps .row { justify-content: space-between; }
+.remap-row {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 6px 0;
+}
+.remap-row input[type="text"] {
+    flex: 1 1 220px; min-width: 160px; box-sizing: border-box;
+    font-family: var(--mono); font-size: 12px;
+    padding: 4px 6px; border: 1px solid var(--line);
+    border-radius: 6px; background: var(--panel); color: var(--tx);
+}
+.remap-row .note { color: var(--tx3); font-size: 12px; }
+
 /* 终端滚动区 + 收发计数（裁决 G —— 两个数**分别标注方向**）。 */
 .term-scroll { max-height: 300px; overflow: auto; }
 .term-meta {
