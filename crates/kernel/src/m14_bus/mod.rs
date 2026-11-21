@@ -296,6 +296,26 @@ pub struct BusAccess {
     pub is_fetch: bool,
 }
 
+/// 触发访存 hook 时 caller 侧提供的字段（[`BusAccess`] 去掉由总线时钟补的
+/// `ts_ps`）。收成一束，避免 [`Bus::fire_hook`] 带七个并列参数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BusAccessArgs {
+    /// Physical address of the *first byte* of the access.
+    pub addr: u32,
+    /// Width of the access (8 / 16 / 32).
+    pub width: BusWidth,
+    /// Read or write.
+    pub dir: AccessDir,
+    /// Value carried by the access (read result / write attempt / fetch code).
+    pub value: u32,
+    /// Dispatch outcome: `true` → landed on a mapped region; `false` → bus error.
+    pub ok: bool,
+    /// When `ok == false`, the [`PlatformError::scenario`] the caller will receive.
+    pub err_scenario: Option<u16>,
+    /// Whether this access is an instruction fetch rather than a data access.
+    pub is_fetch: bool,
+}
+
 /// Optional callback used by M-18 to capture every bus access for
 /// waveform / observability. Stored as a `Box<dyn FnMut>` so the kernel
 /// crate does not depend on a `tracing`-style runtime.
@@ -1774,7 +1794,15 @@ impl Bus {
             }
         };
         let value = result.as_ref().copied().unwrap_or(0);
-        self.fire_hook(addr, width, AccessDir::Read, ok, scenario, false, value);
+        self.fire_hook(BusAccessArgs {
+            addr,
+            width,
+            dir: AccessDir::Read,
+            value,
+            ok,
+            err_scenario: scenario,
+            is_fetch: false,
+        });
         result
     }
 
@@ -1800,7 +1828,15 @@ impl Bus {
             }
         };
         let value = result.as_ref().copied().unwrap_or(0);
-        self.fire_hook(addr, width, AccessDir::Read, ok, scenario, true, value);
+        self.fire_hook(BusAccessArgs {
+            addr,
+            width,
+            dir: AccessDir::Read,
+            value,
+            ok,
+            err_scenario: scenario,
+            is_fetch: true,
+        });
         result
     }
 
@@ -1851,7 +1887,15 @@ impl Bus {
             }
         };
         let value = result.as_ref().copied().unwrap_or(0);
-        self.fire_hook(addr, width, AccessDir::Read, ok, scenario, true, value);
+        self.fire_hook(BusAccessArgs {
+            addr,
+            width,
+            dir: AccessDir::Read,
+            value,
+            ok,
+            err_scenario: scenario,
+            is_fetch: true,
+        });
         result
     }
 
@@ -2115,7 +2159,15 @@ impl Bus {
                 (false, Some(e.scenario))
             }
         };
-        self.fire_hook(addr, width, AccessDir::Write, ok, scenario, false, value);
+        self.fire_hook(BusAccessArgs {
+            addr,
+            width,
+            dir: AccessDir::Write,
+            value,
+            ok,
+            err_scenario: scenario,
+            is_fetch: false,
+        });
         result
     }
 
@@ -2488,30 +2540,20 @@ impl Bus {
         }
     }
 
-    // 七个访存字段一一对应 `BusAccess`；装配层拆分批次再收成事件结构。
-    #[allow(clippy::too_many_arguments)]
-    fn fire_hook(
-        &mut self,
-        addr: u32,
-        width: BusWidth,
-        dir: AccessDir,
-        ok: bool,
-        err_scenario: Option<u16>,
-        is_fetch: bool,
-        value: u32,
-    ) {
+    // 访存字段收在 [`BusAccessArgs`] 一束里；`ts_ps` 由总线时钟补。
+    fn fire_hook(&mut self, args: BusAccessArgs) {
         if self.hooks.is_empty() {
             return;
         }
         let evt = BusAccess {
             ts_ps: self.last_ts_ps,
-            addr,
-            width,
-            dir,
-            value,
-            ok,
-            err_scenario,
-            is_fetch,
+            addr: args.addr,
+            width: args.width,
+            dir: args.dir,
+            value: args.value,
+            ok: args.ok,
+            err_scenario: args.err_scenario,
+            is_fetch: args.is_fetch,
         };
         for hook in self.hooks.iter_mut() {
             (hook)(&evt);

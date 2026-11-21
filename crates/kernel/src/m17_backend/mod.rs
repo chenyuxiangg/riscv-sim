@@ -269,6 +269,27 @@ impl InterruptPort for NullInterruptPort {
 /// - 状态仍然只有**一份**：ISS 推进的就是引擎持有的那份
 ///   [`SimState`]，虚拟时钟也在这份状态上。
 ///
+/// 执行器每批次新建时由后端注入的协作对象束。
+///
+/// ⚠️ `last_poll_ps` / `pause_requested` 是**后端持有**的可变借用 ⇒ 必须由
+/// 后端传进来（裁决 I）：执行器每批次新建，挂在它身上的跨批次状态会被重置。
+pub(crate) struct IssExecutorDeps<'a> {
+    /// M-13 ISS。
+    pub iss: &'a mut Iss,
+    /// M-14 总线（访存与提交都走它）。
+    pub bus: &'a mut Bus,
+    /// M-08 断点表（取指前的命中判定）。
+    pub breakpoints: &'a BreakpointTable,
+    /// 观察点命中槽（与后端共享同一份）。
+    pub watch_hit: Rc<RefCell<Option<Watchpoint>>>,
+    /// M-16 中断控制器端口。
+    pub intc: &'a mut dyn InterruptPort,
+    /// 上次量子边界采样的时刻（跨批次持久）。
+    pub last_poll_ps: &'a mut u64,
+    /// 宿主暂停标志（与后端共享同一份）—— 裁决 C。
+    pub pause_requested: &'a mut bool,
+}
+
 /// 一条指令的执行顺序（M-08 LLD §3.2 / M-17 LLD）：
 ///
 /// 1. **断点命中检测** —— 挂在**取指之前**，命中时该条指令尚未执行，
@@ -305,26 +326,16 @@ impl<'a> IssExecutor<'a> {
     /// ⇒ 每次新批次都从 0 开始 ⇒ 「上次采样时刻」永远是 0 ⇒ **每个批次的
     /// 第一条指令都会触发一次采样** ⇒ 「仲裁只在量子边界发生」这条不变式
     /// 当场破掉（STAGE-4 裁决 I）。
-    // 依赖束：执行器每批次新建，参数即后端注入的协作对象；留待装配层批次收成 deps 结构。
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        iss: &'a mut Iss,
-        bus: &'a mut Bus,
-        breakpoints: &'a BreakpointTable,
-        watch_hit: Rc<RefCell<Option<Watchpoint>>>,
-        intc: &'a mut dyn InterruptPort,
-        last_poll_ps: &'a mut u64,
-        pause_requested: &'a mut bool,
-        step_over_return: Option<u32>,
-    ) -> Self {
+    // 依赖束见 [`IssExecutorDeps`]；`step_over_return` 是本批次的停点选项，单独传。
+    pub(crate) fn new(deps: IssExecutorDeps<'a>, step_over_return: Option<u32>) -> Self {
         Self {
-            iss,
-            bus,
-            breakpoints,
-            watch_hit,
-            pause_requested,
-            intc,
-            last_poll_ps,
+            iss: deps.iss,
+            bus: deps.bus,
+            breakpoints: deps.breakpoints,
+            watch_hit: deps.watch_hit,
+            pause_requested: deps.pause_requested,
+            intc: deps.intc,
+            last_poll_ps: deps.last_poll_ps,
             step_over_return,
         }
     }
@@ -1068,13 +1079,15 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
         // live in one place — there is no second "step" implementation
         // that could drift from this one.
         let mut executor = IssExecutor::new(
-            iss,
-            bus,
-            breakpoints,
-            Rc::clone(watch_hit),
-            intc_port.as_mut(),
-            last_poll_ps,
-            pause_requested,
+            IssExecutorDeps {
+                iss,
+                bus,
+                breakpoints,
+                watch_hit: Rc::clone(watch_hit),
+                intc: intc_port.as_mut(),
+                last_poll_ps,
+                pause_requested,
+            },
             *step_over_return,
         );
 
@@ -1286,13 +1299,15 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
         *watch_hit.borrow_mut() = None;
 
         let mut executor = IssExecutor::new(
-            iss,
-            bus,
-            breakpoints,
-            Rc::clone(watch_hit),
-            intc_port.as_mut(),
-            last_poll_ps,
-            pause_requested,
+            IssExecutorDeps {
+                iss,
+                bus,
+                breakpoints,
+                watch_hit: Rc::clone(watch_hit),
+                intc: intc_port.as_mut(),
+                last_poll_ps,
+                pause_requested,
+            },
             *step_over_return,
         );
         // `u64::MAX` = 「不设时间上限」——本轮的边界是**指令预算**，
