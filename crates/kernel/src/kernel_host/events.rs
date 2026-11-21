@@ -167,7 +167,7 @@ impl KernelHost {
     /// - `all = false` → **增量**：只带值变过的寄存器；PC 变了才带 `Some`。
     ///
     /// 没有订阅 `sim.state.delta` 时返回 `None`（不发事件）。
-    pub(super) fn state_delta_event(&mut self, all: bool) -> Option<EventPayload> {
+    pub(crate) fn state_delta_event(&mut self, all: bool) -> Option<EventPayload> {
         if !self.topics.contains(TOPIC_STATE_DELTA) {
             return None;
         }
@@ -203,7 +203,7 @@ impl KernelHost {
     }
 
     /// 探针波形（M-18 边沿存储）。
-    pub(super) fn waveform_event(&mut self, force: bool) -> Option<EventPayload> {
+    pub(crate) fn waveform_event(&mut self, force: bool) -> Option<EventPayload> {
         if !self.topics.contains(TOPIC_WAVEFORM) {
             return None;
         }

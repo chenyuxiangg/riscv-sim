@@ -52,7 +52,7 @@ impl KernelHost {
     /// ⚠️ **这一段是「宿主唯一知道外设挂了哪些」的地方**（同
     /// [`SelfIssBackend::install_peripheral_ticker`] 的理由）—— 外设
     /// 本身不持有 M-16 的引用（M-15 LLD 的形状），不知道该往哪抬线。
-    pub(super) fn sync_interrupts(&mut self) {
+    pub(crate) fn sync_interrupts(&mut self) {
         // ⚠️ **角色 = id，句柄 = 从实例表里查出来的**（裁决 B）⇒ ⇒ 「第一个
         // CLINT」= 时间源（裁决 D：逐字不变）。
         // ⚠️ **时间源角色**（STAGE-49 · D-177 的 C）—— 同上：**缺省逐字不变**。

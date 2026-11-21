@@ -11,9 +11,10 @@
 use super::*;
 
 use riscv_sim_contract::model::{
-    ImageKind, ImageRef, ImageSource, ProductTree, ProjectVersion, SimState,
+    ImageKind, ImageRef, ImageSource, ProductTree, ProjectVersion, SimState, WriteSize,
 };
-use riscv_sim_contract::protocol::{Direction, Message, Payload};
+use riscv_sim_contract::protocol::{Direction, HaltReason, Message, Payload};
+use riscv_sim_contract::SCHEMA_VERSION;
 
 /// demo 固件 —— **引用共享常量**，不抄一份。
 ///

@@ -5,8 +5,8 @@
 //! 方法仍挂在 `impl KernelHost` 上，对外调用点一字不变。被父模块调度路径
 //! 直接调用的方法提为 `pub(super)`，族内辅助保持私有。
 
+use super::execute::pipeline_unavailable;
 use super::image::{fetch_bytes, illegal_export, source_location_event, waveform_export_event};
-use super::pipeline_unavailable;
 use super::KernelHost;
 use crate::m11_symbol::{LineLookup, SymbolService};
 use crate::m19_waveform::ExportFilter;
@@ -291,7 +291,7 @@ impl KernelHost {
     /// ⚠️ **关闭期间为什么还要 drain**：M-18 的环是**有界**的（`TRACE_CAP
     /// = 200_000`，常驻几 MB）⇒ 不 drain 它会涨到上限 ⇒ 「关闭 trace」反而
     /// 更费内存。drain 的成本 ≪ record 的成本（record 要 clone + 入环）。
-    pub(super) fn transfer_trace(&mut self) {
+    pub(crate) fn transfer_trace(&mut self) {
         let enabled = self.trace.is_enabled();
         for ev in self.drain_m18_trace() {
             // ⚠️ **写 ⇒ 失效反汇编缓存**（裁决 G 的失效通道 = M-18 的写
