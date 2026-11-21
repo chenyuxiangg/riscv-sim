@@ -2488,6 +2488,8 @@ impl Bus {
         }
     }
 
+    // 七个访存字段一一对应 `BusAccess`；装配层拆分批次再收成事件结构。
+    #[allow(clippy::too_many_arguments)]
     fn fire_hook(
         &mut self,
         addr: u32,

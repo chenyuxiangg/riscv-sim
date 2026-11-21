@@ -77,10 +77,8 @@ impl WatchTarget {
                 .strip_suffix(']')
                 .ok_or_else(|| WatchExprError::new(format!("缺少右括号：{text}")))?;
             Some(inner.trim())
-        } else if let Some(inner) = text.strip_prefix('@') {
-            Some(inner.trim())
         } else {
-            None
+            text.strip_prefix('@').map(|inner| inner.trim())
         };
         if let Some(inner) = memory {
             return Ok(WatchTarget::Memory(parse_address(inner)?));
@@ -140,11 +138,7 @@ fn parse_address(text: &str) -> Result<AddressSpec, WatchExprError> {
         }
         None => (text, 0),
     };
-    let base = match parse_base(base_text)? {
-        AddressBase::Number(n) => AddressBase::Number(n),
-        AddressBase::Register(r) => AddressBase::Register(r),
-        AddressBase::Pc => AddressBase::Pc,
-    };
+    let base = parse_base(base_text)?;
     Ok(AddressSpec { base, offset })
 }
 
@@ -224,8 +218,10 @@ mod tests {
     use super::*;
 
     fn state() -> SimState {
-        let mut state = SimState::default();
-        state.pc = 0x1000;
+        let mut state = SimState {
+            pc: 0x1000,
+            ..Default::default()
+        };
         state.gpr[1] = 0x8000;
         state.gpr[2] = 0x9000;
         state
