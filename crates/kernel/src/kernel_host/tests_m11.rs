@@ -26,8 +26,9 @@ use riscv_sim_contract::protocol::CommandPayload;
 use riscv_sim_contract::session::{CheckpointMetaDto, SESSION_SNAPSHOT_SCHEMA_VERSION};
 
 use crate::m11_symbol::disasm::E_CTX_02_DISASM_COUNT_EXCEEDED;
-use crate::m11_symbol::MAX_DISASM_COUNT;
+use crate::m11_symbol::{LineLookup, MAX_DISASM_COUNT};
 
+use super::image::{source_location_event, waveform_export_event};
 /// demo 固件 —— **引用共享常量**，不抄一份。
 use super::DEMO_FIRMWARE_BYTES as DEMO_BYTES;
 
