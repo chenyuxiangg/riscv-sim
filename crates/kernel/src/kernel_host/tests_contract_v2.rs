@@ -24,6 +24,7 @@
 use super::*;
 
 use riscv_sim_contract::model::{ProductTree, ProjectVersion, SimState};
+use riscv_sim_contract::protocol::Message;
 
 /// demo 固件 —— **引用共享常量**，不抄一份。
 ///

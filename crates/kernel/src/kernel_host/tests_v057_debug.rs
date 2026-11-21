@@ -10,6 +10,7 @@
 use super::*;
 
 use riscv_sim_contract::model::{Breakpoint, ProductTree, ProjectVersion, Symbol};
+use riscv_sim_contract::protocol::Message;
 
 /// demo 固件里 **`sw x3, 256(x0)`** 那条指令的地址（v0.57 批的断点靶点）。
 ///

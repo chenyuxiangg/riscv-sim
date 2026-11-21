@@ -22,7 +22,7 @@ use riscv_sim_contract::model::{
     ImageKind, ImageRef, ImageSource, LineEntry, ProductTree, Project, ProjectVersion, TraceFormat,
     TraceSource,
 };
-use riscv_sim_contract::protocol::CommandPayload;
+use riscv_sim_contract::protocol::{CommandPayload, Message};
 use riscv_sim_contract::session::{CheckpointMetaDto, SESSION_SNAPSHOT_SCHEMA_VERSION};
 
 use crate::m11_symbol::disasm::E_CTX_02_DISASM_COUNT_EXCEEDED;

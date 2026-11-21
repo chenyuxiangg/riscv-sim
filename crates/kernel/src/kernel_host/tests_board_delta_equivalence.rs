@@ -38,7 +38,7 @@ use super::project::compose_memory_map;
 use super::*;
 
 use riscv_sim_contract::platform::{DeviceSpec, RegionSpec, PLATFORM_SCHEMA_VERSION};
-use riscv_sim_contract::protocol::MemoryMapOp;
+use riscv_sim_contract::protocol::{MemoryMapOp, Message};
 
 // ---------------------------------------------------------------------------
 // 夹具
