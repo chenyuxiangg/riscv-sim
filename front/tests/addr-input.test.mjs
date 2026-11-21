@@ -450,9 +450,9 @@ describe("任意地址读内存", () => {
     });
 
     test("A-9 · 宽度**只**用契约的 `WRITE_SIZE`（前端不新造枚举）", () => {
-        const src = readFileSync(resolve(frontDir, "views/m02_viewcomponents.js"), "utf8");
+        const src = readFileSync(resolve(frontDir, "views/components/debug-panel.js"), "utf8");
         assert.ok(
-            src.includes('from "../lib/message.js"'),
+            src.includes('from "../../lib/message.js"'),
             "视图层必须**从契约镜像**导入 `WRITE_SIZE`",
         );
         assert.ok(
@@ -608,7 +608,7 @@ describe("一个落点与契约版本", () => {
         }
         assert.deepEqual(
             hits,
-            ["./front/views/m02_viewcomponents.js"],
+            ["./front/views/components/debug-panel.js"],
             "「解析地址」**只有一处**落点（前端不写第二份校验器）",
         );
         assert.equal(typeof m02.parseAddrInput, "function", "那个落点必须是导出的纯函数");

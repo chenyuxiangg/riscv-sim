@@ -175,9 +175,9 @@ describe("契约镜像的版本与两个上限（视图层 · C-1）", () => {
         );
         // ⚠️ **视图层必须从契约镜像 import 那个常量** ⇒ ⇒ 抄一份到视图层
         //   就会红。
-        const src = readFileSync(resolve(frontDir, "views/m02_viewcomponents.js"), "utf8");
+        const src = readFileSync(resolve(frontDir, "views/components/debug-panel.js"), "utf8");
         assert.ok(
-            /import\s*\{[^}]*DUMP_MAX_BYTES[^}]*\}\s*from\s*"\.\.\/lib\/message\.js"/.test(src),
+            /import\s*\{[^}]*DUMP_MAX_BYTES[^}]*\}\s*from\s*"\.\.\/\.\.\/lib\/message\.js"/.test(src),
             "视图层必须**从契约镜像**导入 `DUMP_MAX_BYTES`（不新造一份）",
         );
     });
