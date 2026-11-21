@@ -6,7 +6,9 @@
 use super::{m15_peripheral, Disassembler, KernelHost, E_INT_01_CONTROLLER_BUSY};
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::port::ExecutionBackend;
-use riscv_sim_contract::session::{CheckpointMetaDto, M13StateDto, M16IntcDto, SessionSnapshotDto};
+use riscv_sim_contract::session::{
+    CheckpointMetaDto, M13StateDto, M14MapDto, M15PeriphDto, M16IntcDto, SessionSnapshotDto,
+};
 
 impl KernelHost {
     /// 采集一份**会话级**快照载荷（六段齐全，STAGE-3 §3.5）。
@@ -185,5 +187,15 @@ impl KernelHost {
         };
         intc.load_state(state);
         Ok(())
+    }
+
+    /// 当前会话的**外设内部状态**（段 4 的同一份导出）。
+    pub fn peripheral_states(&self) -> M15PeriphDto {
+        m15_peripheral::collect_session_state(&self.backend.bus().peripheral_instances())
+    }
+
+    /// 当前会话的**内存映射拓扑**（段 3 的同一份导出）。
+    pub fn memory_map(&self) -> M14MapDto {
+        self.backend.bus().export_map()
     }
 }
