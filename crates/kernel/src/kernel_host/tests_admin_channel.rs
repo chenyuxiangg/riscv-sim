@@ -26,8 +26,8 @@ use super::*;
 use riscv_sim_contract::admin::{AdminDiagDto, LogEntryDto};
 use riscv_sim_contract::protocol::{AdminOp, Message};
 
-use crate::m21_logging::{LogEntry, LogQuery};
-use crate::m22_hms::{DispatchResult, Severity};
+use crate::m21_logging::{LogEntry, LogLevel, LogQuery};
+use crate::m22_hms::{DispatchResult, HealthSignal, Severity, SignalCtx, SignalKind, SignalSrc};
 
 // ---------------------------------------------------------------------------
 // 测试辅助

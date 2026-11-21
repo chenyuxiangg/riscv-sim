@@ -327,7 +327,7 @@ impl KernelHost {
     ///
     /// 这一步把「外设状态变化」接到「M-18 的通道」上——波形流是从**这里**
     /// 来的，不是从总线访存来的（总线访存只进 trace 环）。
-    pub(super) fn attach_peripheral_probes(&mut self) {
+    pub(crate) fn attach_peripheral_probes(&mut self) {
         let Some(registry) = self.probes.clone() else {
             return;
         };

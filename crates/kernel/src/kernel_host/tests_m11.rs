@@ -20,7 +20,7 @@ use super::*;
 
 use riscv_sim_contract::model::{
     ImageKind, ImageRef, ImageSource, LineEntry, ProductTree, Project, ProjectVersion, TraceFormat,
-    TraceSource,
+    TraceSource, WriteSize,
 };
 use riscv_sim_contract::protocol::{CommandPayload, Message};
 use riscv_sim_contract::session::{CheckpointMetaDto, SESSION_SNAPSHOT_SCHEMA_VERSION};
