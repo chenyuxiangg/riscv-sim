@@ -34,6 +34,7 @@
 //! 天然不同：整份路径用调用方给的顺序、差量路径保留基座的顺序）⇒ ⇒ 段的
 //! **集合**与每一段的**每一个字段**仍然被**逐条**比。
 
+use super::project::compose_memory_map;
 use super::*;
 
 use riscv_sim_contract::platform::{DeviceSpec, RegionSpec, PLATFORM_SCHEMA_VERSION};
