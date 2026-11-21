@@ -21,6 +21,10 @@ const frontDir = resolve(here, "..");
 const indexHtml = readFileSync(resolve(frontDir, "index.html"), "utf8");
 const styleSrc = readFileSync(resolve(frontDir, "style.css"), "utf8");
 const appSrc = readFileSync(resolve(frontDir, "app.js"), "utf8");
+const runStateSrc = readFileSync(resolve(frontDir, "views/app/run-state.js"), "utf8");
+// 顶栏运行条按钮接线已迁入 run-state.js ⇒ ⇒ 按钮 action 指纹在门面 + 该子模块
+// 合并文本里找；`handleCommand` 的 `case` 分支仍在门面。
+const appAndRunStateSrc = `${appSrc}\n${runStateSrc}`;
 const m01Src = readFileSync(resolve(frontDir, "views/m01_workbench.js"), "utf8");
 
 // ⚠️ **DOM 全局必须先于前端模块存在**（`app.js` 在模块作用域读
@@ -193,7 +197,7 @@ describe("STAGE-34 · 顶栏全局运行条", () => {
         };
         for (const [attr, cmd] of Object.entries(actionMap)) {
             assert.ok(
-                appSrc.includes(`{ action: "${cmd}" }`),
+                appAndRunStateSrc.includes(`{ action: "${cmd}" }`),
                 `app.js 里没有把 ${attr} 按钮接到 action: "${cmd}"`,
             );
             assert.ok(
@@ -203,13 +207,21 @@ describe("STAGE-34 · 顶栏全局运行条", () => {
         }
     });
 
-    test("A-7b · 顶栏按钮**直接调** handleCommand ⇒ ⇒ 与视图层共用同一条路径", () => {
+    test("A-7b · 顶栏按钮**走** handleCommand ⇒ ⇒ 与视图层共用同一条路径", () => {
         // ⚠️ **不许自己写一套** ⇒ ⇒ 顶栏必须调**那个**函数 ⇒ ⇒
-        // 「一个约束一个落点」。
+        // 「一个约束一个落点」。搬迁后命令分发经注入回调进门面 `handleCommand`：
+        // 门面 bootstrap 把 `handleCommand` 作为 dispatch 传给 `wireTopbarRunbar`，
+        // 子模块按钮只 `emit` action ⇒ ⇒ 两边合起来仍是同一条路径。
         assert.ok(
-            /handleCommand\(\{\s*action:\s*"(continue|step|pause|reset)"\s*\}/.test(appSrc),
-            "顶栏按钮没有直接调 handleCommand ⇒ ⇒ 那是另写了一套路径",
+            /wireTopbarRunbar\([^,]+,\s*\([^)]*\)\s*=>\s*handleCommand\(/.test(appSrc),
+            "门面没有把 handleCommand 作为分发器注入顶栏运行条 ⇒ ⇒ 那是另写了一套路径",
         );
+        for (const cmd of ["continue", "step", "pause", "reset"]) {
+            assert.ok(
+                runStateSrc.includes(`{ action: "${cmd}" }`),
+                `运行条子模块没有把按钮接到 action: "${cmd}"`,
+            );
+        }
     });
 
     test("A-9 · 每个视图面板有 .vhead 外框（标题 + .hint），标题文字与登记表逐字相同", () => {

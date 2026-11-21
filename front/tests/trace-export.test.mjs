@@ -107,7 +107,13 @@ async function setup() {
     //
     // ⚠️ `wireTopbarRunbar` **先退旧的监听器、再挂新的**⇒ ⇒ 每个用例各接一次
     //   **不会**让同一个按钮挂上两个监听器 ⇒ ⇒ 点一下**只**触发一次。
-    app.wireTopbarRunbar({ commandRouter: router });
+    //
+    // ⚠️ 命令分发经注入回调进门面 `handleCommand`（子模块不回引门面）⇒ ⇒
+    //   测试 setup 与生产 bootstrap 一样把分发器传进去。
+    const runbarServices = { commandRouter: router };
+    app.wireTopbarRunbar(runbarServices, (detail) =>
+        app.handleCommand(detail, runbarServices),
+    );
     m01.assembleWorkspace("embedded");
     m01.route("#/debug");
     return { kernel, transport, router };
