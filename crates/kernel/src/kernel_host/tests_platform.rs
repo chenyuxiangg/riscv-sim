@@ -31,8 +31,10 @@ use riscv_sim_contract::platform::{
     DeviceSpec, PlatformDescription, RegionSpec, PLATFORM_SCHEMA_VERSION,
 };
 
+use super::image::{load_segment_overlap_error, ParsedImage};
 use super::platform;
-use super::{load_segment_overlap_error, ElfIsaFacts, KernelHost, MemoryProfile, ParsedImage};
+use super::{KernelHost, MemoryProfile};
+use crate::m06_elf::ElfIsaFacts;
 use crate::m14_bus::Bus;
 
 /// 内置描述 `default`（**今天的 Default 档**）。
