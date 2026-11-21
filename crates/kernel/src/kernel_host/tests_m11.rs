@@ -13,7 +13,7 @@
 //! | `waveform_export_reads_the_m19_ring_…` | **D-50**：波形导出的数据源退回了 M-18 的边沿存储 |
 //! | `the_m18_trace_ring_is_drained_into_the_m11_ring` | **D-51**：M-18 的环还是「只写不读」 |
 //! | `illegal_export_combinations_are_rejected` | 非法组合被「换一个格式凑合」 |
-//! | `a_write_invalidates_only_the_written_address` | 裁决 G：缓存被**整表清空**（而不是只失效一个地址） |
+//! | `a_write_invalidates_only_the_written_address` | 裁决 G：失效覆盖被写地址的指令区间（不是整表清空） |
 //! | `loading_a_new_project_rebuilds_the_m11_indexes` | 索引被缓存 ⇒ 新工程还查得到旧工程的符号 |
 
 use super::*;
@@ -899,7 +899,7 @@ fn a_write_invalidates_only_the_written_address() {
     assert_eq!(
         host.disasm_cache_len(),
         cached - 1,
-        "只失效**被写的那个地址**（不是整表清空 —— 清空的话这里是 0）"
+        "失效覆盖被写地址的指令区间（不是整表清空 —— 清空的话这里是 0）"
     );
 
     // 再反汇编 ⇒ 第一条是新机器码，后两条**不变**。
@@ -1182,7 +1182,7 @@ fn loop_project() -> Project {
 fn a_long_step_batch_keeps_the_invalidation_channel_lossless() {
     // ⚠️ **失效通道必须永远无损**（v0.20 检视 A · 重要 1）：
     // M-18 的访存环是**有界**的（`TRACE_CAP = 200_000`，溢出丢最旧）⇒ 它
-    // 同时是**反汇编缓存的失效通道**（裁决 G：访存写事件 ⇒ 失效对应地址）
+    // 同时是**反汇编缓存的失效通道**（裁决 G：访存写事件 ⇒ 失效覆盖指令区间）
     // ⇒ 环一溢出，写事件就被丢掉 ⇒ 缓存条目不失效 ⇒ **反汇编给出旧机器码**
     // （调试器给出**错误**的指令）。
     //

@@ -27,8 +27,9 @@
 //!
 //! * 缓存**按地址索引**，条目含**机器码**（自修改代码失效后必须能重新
 //!   取指）。
-//! * **只失效被写的那个地址** —— [`Disassembler::invalidate`]。
-//!   **不是整表清空**：整表清空会让自修改代码场景把整段反汇编缓存丢掉。
+//! * **失效覆盖被写地址的指令区间** —— [`Disassembler::invalidate`]：
+//!   部分写落在指令后半部也会让整条条目过期。**不是整表清空**：整表
+//!   清空会让自修改代码场景把整段反汇编缓存丢掉。
 //! * 失效通道的**方向语义**用 M-18 的 `TraceDir`（契约层
 //!   `riscv_sim_contract::model::TraceDir`，`Read` / `Write`）——
 //!   [`Disassembler::invalidate_on_access`] 只在**写**时失效，**不**另造
@@ -269,11 +270,18 @@ impl Disassembler {
         Ok(entries)
     }
 
-    /// **失效一个地址**的缓存条目（裁决 G）。
+    /// 失效覆盖被写地址的缓存条目（裁决 G · D-89）。
     ///
-    /// **只**失效这一个地址——**不是**整表清空。
+    /// 一条指令占 [`entry.addr`, `entry.addr + entry.width`)：部分写落在
+    /// 指令后半部（如写 `X+2`）同样让整条指令的缓存机器码过期，因此按
+    /// **区间覆盖**失效，而不是只删起始地址那一条。不是整表清空——区间
+    /// 不覆盖的条目仍留在缓存里。
     pub fn invalidate(&mut self, addr: u32) {
-        self.cache.remove(&addr);
+        self.cache.retain(|entry_addr, entry| {
+            let start = *entry_addr;
+            let end = start.wrapping_add(u32::from(entry.width));
+            !(start <= addr && addr < end)
+        });
     }
 
     /// 按**访存方向**失效缓存（裁决 G 的失效通道）。
@@ -551,7 +559,7 @@ mod tests {
 
     #[test]
     fn invalidating_one_address_re_fetches_only_that_address() {
-        // 裁决 G：**只**失效被写的那个地址。
+        // 裁决 G：失效覆盖被写地址的指令区间，区间外条目仍留缓存。
         let bytes = std::cell::RefCell::new(CODE.to_vec());
         let mut read = |addr: u32, size: u32| -> Result<u32, PlatformError> {
             let bytes = bytes.borrow();
@@ -589,6 +597,38 @@ mod tests {
         );
         // 缓存条目数不变 ⇒ **不是**整表清空（清空的话这里会是 1）。
         assert_eq!(disasm.cache_len(), cached_before);
+    }
+
+    #[test]
+    fn partial_write_invalidates_the_whole_instruction_span() {
+        // D-89：部分写落在指令后半部（BASE+2）也要失效整条指令条目，
+        // 不能只删起始地址那一条。
+        let bytes = std::cell::RefCell::new(CODE.to_vec());
+        let mut read = |addr: u32, size: u32| -> Result<u32, PlatformError> {
+            let bytes = bytes.borrow();
+            let start = (addr - BASE) as usize;
+            let end = start + size as usize;
+            if end > bytes.len() {
+                return Err(PlatformError::new(DISASM_FAMILY, 1, "not mapped"));
+            }
+            let mut word = 0u32;
+            for (index, byte) in bytes[start..end].iter().enumerate() {
+                word |= (*byte as u32) << (8 * index);
+            }
+            Ok(word)
+        };
+        let mut disasm = Disassembler::new();
+        let _ = disasm.disasm(BASE, 3, &mut read).expect("disasm");
+        assert_eq!(disasm.cache_len(), 3);
+
+        // 部分写第一条指令的第 3 字节（BASE+2，落在 [BASE, BASE+4) 内）。
+        bytes.borrow_mut()[2] ^= 0xFF;
+        disasm.invalidate(BASE + 2);
+
+        // 第一条条目被区间覆盖失效；压缩指令与 sw 两条仍在缓存。
+        assert_eq!(disasm.cache_len(), 2);
+        let after = disasm.disasm(BASE, 3, &mut read).expect("disasm");
+        assert_eq!(after[0].addr, BASE);
     }
 
     #[test]

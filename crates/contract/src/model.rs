@@ -275,7 +275,7 @@ impl Default for ProjectVersion {
 /// the two version numbers **mean different things**, and a future v3
 /// that bumps the inner one to 2 would have rejected **v2's own**
 /// snapshots.
-pub const SIM_STATE_SCHEMA_VERSION: u32 = 2;
+pub const SIM_STATE_SCHEMA_VERSION: u32 = 3;
 
 /// SimState = everything needed to deterministically resume a paused
 /// simulation (M-20). The fields are intentionally serializable so the
@@ -312,8 +312,6 @@ pub struct SimState {
     /// [`crate::snapshot::EngineSnapshotDto`], which is the only snapshot
     /// form that round-trips deterministically.
     pub event_queue_head: u64,
-    /// Deterministic seed (M-12 §1.1 评审 R8).
-    pub seed: u64,
 }
 
 impl Default for SimState {
@@ -326,7 +324,6 @@ impl Default for SimState {
             csrs: Vec::new(),
             pending_writes: Vec::new(),
             event_queue_head: 0,
-            seed: 0,
         }
     }
 }

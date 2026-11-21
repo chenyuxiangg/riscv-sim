@@ -94,7 +94,7 @@ pub trait ExecutionBackend {
     /// [`Self::snapshot`] in the deterministic sense: events queued
     /// after the snapshot was taken are still pending and will still
     /// fire, so a run after a restore can diverge from an uninterrupted
-    /// run with the same seed.
+    /// run from the same starting state.
     ///
     /// Callers that need a deterministic round-trip must snapshot the
     /// event queue as well. Use [`Self::snapshot_full`] /
@@ -364,19 +364,6 @@ pub trait InterruptSink {
     /// ⚠️ Same failure semantics as [`Self::raise`]: `Err` means **this
     /// IRQ line was NOT lowered**.
     fn lower(&mut self, irq: u16) -> Result<(), PlatformError>;
-}
-
-/// Driven port: a probe source (M-18). The probe pipeline attaches one of
-/// these to every bus signal and every peripheral output it wants to
-/// capture for waveform rendering.
-pub trait Probe {
-    /// Stable probe id (e.g. `"BUS.A1.write"`).
-    fn id(&self) -> &str;
-    /// Called on every observed change. The probe is responsible for
-    /// edge-encoding the value and appending it to its internal stream.
-    fn observe(&mut self, now_ps: u64, value: u64) -> Result<(), PlatformError>;
-    /// Snapshot the probe's accumulated edges (e.g. for waveform export).
-    fn drain(&mut self) -> Result<Vec<crate::model::Edge>, PlatformError>;
 }
 
 /// Driven port: M-18 probe → M-19 waveform pipeline (M-19 v0.9 §1.1).

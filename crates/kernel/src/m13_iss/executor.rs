@@ -121,8 +121,6 @@ pub enum TrapCause {
     /// an unmapped address traps; every other bus error is propagated
     /// to the host unchanged.
     StoreAccessFault,
-    /// Out-of-range physical address.
-    OutOfRange,
     /// Environment call from M-mode (`mcause = 11`).
     ///
     /// ⚠️ **cause 的编号按当前特权级而定**（STAGE-22 裁决 K / **F19**）：
@@ -137,19 +135,6 @@ pub enum TrapCause {
     /// inserted by M-08 (which M-17 checks **before** the fetch, so it
     /// never reaches the ISS at all).
     Breakpoint,
-    /// Reserved for a future cause.
-    ///
-    /// **Not raised by RV32M**: a division by zero and the
-    /// `INT_MIN / -1` overflow are architecturally *defined results*,
-    /// not traps (LLD §3.6(11)), so the M extension never reports
-    /// this.  The variant is kept so the taxonomy does not have to
-    /// change shape when a genuine divide-by-zero cause does land.
-    ///
-    /// ⚠️ It is **not** removed by this batch (ledger **D-66** owns
-    /// that decision): removing a public variant and adding the CSR
-    /// instruction family in the same batch would mix two changes and
-    /// dilute the discriminating power of both.
-    IntegerDivideByZero,
 }
 
 impl TrapCause {
@@ -166,23 +151,6 @@ impl TrapCause {
     /// misaligned · `5` load access fault · `6` store address misaligned ·
     /// `7` store / AMO access fault · `8` environment call from U-mode ·
     /// `9` environment call from S-mode · `11` environment call from M-mode.
-    ///
-    /// ⚠️ The two **dead** variants have **no architectural code**:
-    ///
-    /// * `OutOfRange` — RISC-V splits "the access was not allowed"
-    ///   into three access faults (instruction / load / store), and the
-    ///   variant does not say which one it means. It has **no
-    ///   producer** today — **all three** access faults are traps now
-    ///   (`InstructionAccessFault` = 1 / `LoadAccessFault` = 5 /
-    ///   `StoreAccessFault` = 7, v0.22 + v0.25 批) — so its number is a
-    ///   **placeholder** and is unobservable;
-    /// * `IntegerDivideByZero` — RISC-V defines a division by zero as
-    ///   an **architectural result**, not an exception, so there is no
-    ///   code for it at all. Also a **dead** variant (ledger
-    ///   **D-66**).
-    ///
-    /// Both use the **custom** range (`mcause >= 16`), which the
-    /// RISC-V manual reserves for platform-specific causes.
     pub fn mcause(self) -> u32 {
         match self {
             TrapCause::InstructionAddressMisaligned => 0,
@@ -194,8 +162,6 @@ impl TrapCause {
             TrapCause::StoreAddressMisaligned => 6,
             TrapCause::StoreAccessFault => 7,
             TrapCause::Ecall => 11,
-            TrapCause::OutOfRange => 16,
-            TrapCause::IntegerDivideByZero => 17,
         }
     }
 }

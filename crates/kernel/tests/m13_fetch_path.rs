@@ -418,9 +418,9 @@ fn the_cause_1_mapping_lives_in_exactly_one_place() {
 
     // And the **whole** variant→code table lives in that one file too.
     assert_eq!(
-        mappings_total, 11,
+        mappings_total, 9,
         "the variant→code table must have one row per trap cause and live \
-         in one file (11 variants today)"
+         in one file (9 variants today)"
     );
 }
 

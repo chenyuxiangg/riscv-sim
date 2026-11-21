@@ -7,8 +7,6 @@
 //! ISS sees — there is no second execution path for compressed
 //! instructions.
 
-use riscv_sim_contract::model::WriteSize;
-
 use super::compressed;
 
 /// Length of a 32-bit instruction, in bytes.
@@ -210,17 +208,4 @@ fn immediate(opcode: u8, funct3: u8, raw: u32) -> i32 {
 pub(crate) fn sign_extend(value: u32, bits: u32) -> i32 {
     let shift = 32 - bits;
     ((value << shift) as i32) >> shift
-}
-
-/// Width of the access the executor should perform when reading
-/// instruction memory.
-///
-/// The fetch is always 32 bits wide: the hardware fetches a word and
-/// selects the low 16 bits when the instruction turns out to be
-/// compressed (LLD §3.5, C.LW row).  A two-byte fetch would have to
-/// read the halfword first to learn the width, which doubles the
-/// number of bus transactions for every 32-bit instruction and
-/// changes the bus statistics the rest of the platform reports.
-pub fn fetch_size() -> WriteSize {
-    WriteSize::Word
 }

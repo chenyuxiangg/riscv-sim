@@ -44,16 +44,14 @@
 | 7 | 低 | ✅ 闭环 | `sample_irq_pulse` 公开 doc 显式声明「there is no way to distinguish 'no pulse arrived' from 'channel not registered'」并指明「callers should set up the channel once at boot and not rely on the silent no-op path」 |
 | 8 | 低 | ✅ 闭环 | `with_capacity(0)` 仍 `assert!`（契约层风格不一致属低优先），但 panic 信息升级为「use `default()` for MVP capacity (2×10⁵); use this constructor only when you need a non-default size」，给出明确使用建议 |
 | 9 | 低 | ✅ 闭环 | `ChannelDef::classify` 在 `SingleBit` 分支入口对 `prev` 和 `next` 各做 `& 1` 截断；新增 `classify_masks_single_bit_inputs` 测试覆盖 `prev=5, next=1` 等违例输入 |
-| 10 | 低 | ❌ **未闭环** | 契约 `Probe` trait（`port.rs:158-170`）原样保留，全代码库仍无 `impl Probe for`，`ProbeRegistry` 改名为 `make_bus_hook` / `wire_signal_probe` 而非实现该 trait。属契约层技术债，**与 M-15 报告 #10 重复**，建议在 M-0 下一窗口统一清理 |
+| 10 | 低 | ✅ 闭环 | 契约 `Probe` trait（`port.rs`）已删除（v0.121 · 后端历史债收口批，做法①）：全代码库本就 0 个 `impl Probe for`，无 re-export、无文档引用；`EdgeSink` / `DeltaSink` / `ProbeSink` 等同文件其他 trait 保留 |
 | 11 | 低 | ✅ 闭环 | 契约层新增 `pub enum TraceDir { Read, Write }` + `Default` impl（`model.rs:413-432`），`TraceEvent.dir: u8` 改为 `dir: TraceDir`（:454），并附 `from_u8`/`as_u8` 与 `AccessDir` 的双向 `From`。`registry.rs:322-325` 不再硬编码魔数 |
-| 12 | 低 | ❌ **未闭环** | `drain_waveform`（`:549-565`）在迭代 `self.channels` 时调用 `self.edges.remove(ch)` 的借用交错模式未动。当前可工作（不同字段），但未来合并两表会立刻 break；建议拆为「先快照 keys、再分别 remove」两步 |
+| 12 | 低 | ✅ 闭环 | `drain_waveform`（`registry.rs`）已拆为「先从 `channels` 只读快照 `(ch, label: String)` 列表、再遍历快照 `self.edges.remove(&ch)`」两步（v0.121 · 后端历史债收口批），消除迭代中借用交错；未来两表合并也不会立刻破坏 |
 | 13 | 低 | ✅ 闭环 | `TraceStream` 新增 `initial_cap: usize` 字段（`:57`），`with_capacity` 写入该字段；`push` / `drain` / `capacity` 全部改用 `self.initial_cap` 而非 `self.buf.capacity()`，并加 `debug_assert_eq!(self.buf.capacity(), self.initial_cap)`（`:103`）和 `debug_assert!(self.len <= self.initial_cap)`。**从此不再依赖 `Vec::with_capacity` 不超额分配这一未被编译期保证的行为** |
 | 14 | 低 | ✅ 闭环 | `TraceStream` 改 `#[derive(Debug, Clone)]` |
 | 15 | 低 | ✅ 大幅闭环 | 测试 20 → 29 条，新增覆盖：throttle 状态跨 set_rate、`prev` 跨 enable/disable 与 master/disable、SingleBit LSB 截断、`wire_signal_probe` 在借用冲突下不 panic、normal 路径下 contention 计数为 0。**但** 「`ChannelDef::classify` 直接单元测试」是顺手补的（被 #9 测试覆盖），「`TraceEvent::dir` 反向映射」未补独立测试 |
 
-**统计：模块内部 13/15 项闭环，2 项未闭环（#10 契约层技术债，与 M-15 报告 #10 重复；#12 `drain_waveform` 借用交错，属未来重构风险）**。
-
-#10 列入**契约层技术债**清单；#12 与 M-14 报告的「`regions()` 返回迭代器」建议可合并入一次 `refactor(m18): drain + iteration patterns` PR。
+**统计：模块内部 15/15 项闭环（#15 为大幅闭环：独立测试尚有两处未补）；#10 契约 `Probe` trait 与 #12 `drain_waveform` 借用交错均已在 v0.121 批闭环**。
 
 ---
 
@@ -65,7 +63,7 @@
 | **D-07** | M-12 调度器从未调用 `Peripheral::tick`，M-18 的 `record_signal` 端到端不可达 | ❌ 跨模块欠账 |
 | — | M-19 波形管道仍是 stub（42 行），不在本审查范围 | P1 阶段 → **v0.9 已落地完整 `WaveformPipeline`**，并新增 `port::EdgeSink` 端口完成 M-18 → M-19 握手（本报告 §四.2 的待办闭合） |
 
-**模块内未发现阻断级或高危缺陷。** `#1`~`#3` 是中危、可独立处理；`#4`~`#15` 是低危整洁项。`#10`（契约 `Probe` trait 零实现）是契约层技术债，建议放在 M-0 下一窗口统一清理。
+**模块内未发现阻断级或高危缺陷。** `#1`~`#3` 是中危、可独立处理；`#4`~`#15` 是低危整洁项。`#10`（契约 `Probe` trait 零实现）已于 v0.121 批删除闭环。
 
 ---
 
@@ -86,7 +84,7 @@
 
 1. **M-14 / M-15 接线 PR（独立排期）**——#1 / #2 / #3 都在端到端可达性被接通后才能真正暴露；当前 `make_bus_hook` / `wire_signal_probe` 是设计完整但「无人调用的好代码」。**优先级**：`#1`（性能）> `#3`（panic 风险）> `#2`（边沿语义）> `#10`（契约层清理）。
 2. **接线 PR 中必须配套**：M-12 的 `Peripheral::tick` 调用（D-07）——否则 #2 修的 `prev` 跨 enable/disable 行为仍走不到外设；M-19 真正消费 `drain_waveform`（当前仍是 stub）——否则 M-18 边缘事件的「产出」没有「消费者」。
-3. **`#10` 契约 `Probe` trait**：建议在 M-0 下一窗口统一清理（与 `ProbeSink` 的去向一并决定），而不是混在 M-18 接线 PR 里。
+3. **`#10` 契约 `Probe` trait**：已于 v0.121 批删除闭环（做法①，最干净）。
 4. **`#4`~`#15` 整洁项**：合并为 `chore(m18): 清理死代码与统计口径` 提交，可在接线 PR 之后做。
 
 ---

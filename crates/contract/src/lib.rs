@@ -407,12 +407,11 @@ mod tests {
     /// ⚠️ **具体数值**归**最新**那一批的门禁守（`tools/stage50_check.py`）
     ///   ⇒ ⇒ ⇒ **一个版本号只有一处钉它的地方**。
     ///
-    /// ⚠️ **快照版本**（`SIM_STATE_SCHEMA_VERSION`）**一个字都不动**
-    ///   （⇒ ⇒ 本批**不动**快照 ⇒ ⇒ 存量快照**零风险**）⇒ ⇒ ⇒ 那一条仍是
-    ///   **字面量**（它是「这一批之后一直没被动过」的性质）。
+    /// ⚠️ **快照版本**（`SIM_STATE_SCHEMA_VERSION`）：D-109 删除 `SimState::seed`
+    ///   字段后，内层版本按契约规则合法 2→3；外层快照/会话/平台版本仍一个字不动。
     #[test]
     fn a8_the_other_three_version_numbers_do_not_move() {
-        assert_eq!(SIM_STATE_SCHEMA_VERSION, 2);
+        assert_eq!(SIM_STATE_SCHEMA_VERSION, 3);
         assert!(
             crate::platform::SUPPORTED_PLATFORM_SCHEMA_VERSIONS.contains(&PLATFORM_SCHEMA_VERSION),
             "当前描述格式版本必须被本构建接受（升了版却忘了加进可读列表 ⇒ ⇒ 老描述会被拒）"
