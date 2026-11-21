@@ -64,11 +64,7 @@ use riscv_sim_kernel::kernel_host::DEMO_FIRMWARE_BYTES as DEMO_BYTES;
 const GPIO_STREAM_ID: &str = "GPIO0.OUT";
 
 /// 三条**核中断**通道的流 id（v0.78：每条中断一个 0/1 通道）。
-const IRQ_CORE_STREAM_IDS: [&str; 3] = [
-    "irq.core.software",
-    "irq.core.timer",
-    "irq.core.external",
-];
+const IRQ_CORE_STREAM_IDS: [&str; 3] = ["irq.core.software", "irq.core.timer", "irq.core.external"];
 
 /// 固件里那条 `sw x6, 4(x5)` 所在的指令序号（1 起）——第 8 条。
 const GPIO_WRITE_INSTRUCTION: u32 = 8;
@@ -250,10 +246,7 @@ fn the_channel_id_is_the_peripheral_id_plus_the_signal_name() {
     let ids: Vec<&str> = wave.streams.iter().map(|s| s.id.as_str()).collect();
     // ⚠️ **v0.78**：GPIO 的 `OUT` + 3 条核中断 + 每台已接线设备 1 条。
     // 通道 id 一律是 `"{source}.{signal}"`。
-    assert!(
-        ids.contains(&GPIO_STREAM_ID),
-        "GPIO 通道必须在：{ids:?}"
-    );
+    assert!(ids.contains(&GPIO_STREAM_ID), "GPIO 通道必须在：{ids:?}");
     for id in IRQ_CORE_STREAM_IDS {
         assert!(ids.contains(&id), "核中断通道 {id} 必须在：{ids:?}");
     }

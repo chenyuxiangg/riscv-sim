@@ -48,10 +48,9 @@
 //! two meanings ⇒ the contract layer owns every `E_PLT-*` number.
 use crate::error::{
     PlatformError, E_PLT_01_SCHEMA_VERSION, E_PLT_02_EMPTY_ID, E_PLT_03_NO_REGIONS,
-    E_PLT_04_ZERO_SIZE, E_PLT_05_OVERFLOW, E_PLT_06_OVERLAP,
-    E_PLT_08_DUPLICATE_DEVICE_ID, E_PLT_12_PARAMETER_OUT_OF_RANGE, E_PLT_15_DEVICE_EMPTY_ID,
-    E_PLT_16_IRQ_SOURCE_INVALID, E_PLT_18_ROLES_INVALID, E_PLT_21_MCU_INVALID,
-    E_PLT_24_MULTIPLE_PLIC, PLATFORM_FAMILY,
+    E_PLT_04_ZERO_SIZE, E_PLT_05_OVERFLOW, E_PLT_06_OVERLAP, E_PLT_08_DUPLICATE_DEVICE_ID,
+    E_PLT_12_PARAMETER_OUT_OF_RANGE, E_PLT_15_DEVICE_EMPTY_ID, E_PLT_16_IRQ_SOURCE_INVALID,
+    E_PLT_18_ROLES_INVALID, E_PLT_21_MCU_INVALID, E_PLT_24_MULTIPLE_PLIC, PLATFORM_FAMILY,
 };
 use crate::session::{REGION_KIND_PERIPHERAL, REGION_KIND_RAM, REGION_KIND_ROM};
 use serde::{Deserialize, Serialize};
@@ -1439,13 +1438,7 @@ mod tests {
         let json = serde_json::to_value(sample()).expect("json");
         assert_eq!(
             keys(&json),
-            vec![
-                "id",
-                "name",
-                "priority",
-                "regions",
-                "schema_version",
-            ],
+            vec!["id", "name", "priority", "regions", "schema_version",],
             "平台描述的顶层键集必须精确固定（五个）"
         );
 

@@ -12,8 +12,8 @@
 
 use super::*;
 use riscv_sim_contract::csr::{
-    IRQ_BASE, IRQ_SOFTWARE, IRQ_TIMER_COMPARE, IRQ_UART_RX_READY, MIE_MEIE_BIT,
-    MIE_MSIE_BIT, MIE_MTIE_BIT, MSTATUS_MIE_BIT, NO_ACTIVE_IRQ,
+    IRQ_BASE, IRQ_SOFTWARE, IRQ_TIMER_COMPARE, IRQ_UART_RX_READY, MIE_MEIE_BIT, MIE_MSIE_BIT,
+    MIE_MTIE_BIT, MSTATUS_MIE_BIT, NO_ACTIVE_IRQ,
 };
 use riscv_sim_contract::session::SessionSnapshotDto;
 use std::cell::RefCell;
@@ -1066,11 +1066,7 @@ fn the_three_machine_interrupts_are_ordered_mei_msi_mti() {
     let mut causes = Vec::new();
     for now in [300u64, 400, 500] {
         if let Some(delivered) = intc
-            .poll(
-                now,
-                MIE_EXTERNAL | MIE_SOFTWARE | MIE_TIMER,
-                MSTATUS_ON,
-            )
+            .poll(now, MIE_EXTERNAL | MIE_SOFTWARE | MIE_TIMER, MSTATUS_ON)
             .expect("poll")
         {
             causes.push(delivered.cause);

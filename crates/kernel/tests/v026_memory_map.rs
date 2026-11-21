@@ -418,4 +418,3 @@ fn the_default_profile_keeps_its_own_region_layout() {
         "default 描述里高段 RAM 的 size 必须还是 4 MiB（独立字面量交叉核对）"
     );
 }
-

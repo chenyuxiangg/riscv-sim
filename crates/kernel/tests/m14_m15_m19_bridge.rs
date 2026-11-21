@@ -525,8 +525,6 @@ fn oversized_region_is_rejected_without_allocating() {
     assert_eq!(small.region_count(), 0);
 }
 
-
-
 #[test]
 fn a_peripheral_window_within_the_cap_still_mounts() {
     // 回归保护：上限之内的外设窗口照常挂载（别把上限检查写成"一律拒绝"）。
