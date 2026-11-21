@@ -147,6 +147,14 @@ import {
     ensureTerminalXtermLoaded,
 } from "./views/app/probes-wiring.js";
 export { wireWaveform, wireConsole, wireMemoryMap };
+import {
+    setPausePending,
+    consumePausePending,
+    getLoadedProject,
+    setLoadedProject,
+    getPendingErrorSlot,
+    setPendingErrorSlot,
+} from "./views/app/state.js";
 // ⚠️ **连线报告**（STAGE-48 · v0.72 · D-177 A）—— 「你写的 N 根线里有 M 根
 // 当前抬不了」⇒ ⇒ **内核说**的 ⇒ ⇒ 前端**只**归一化形状、**不判定**。
 
@@ -362,38 +370,6 @@ export function formatVirtualTime(ps) {
  */
 export const READ_MEMORY_BLOCKED_MESSAGE = "程序正在运行，暂时不能读内存 —— 请先暂停再读。";
 
-/**
- * 「**用户点了暂停、正在跑的那一个窗口还没结束**」这个**过路状态**
- * （v0.67 批）。
- *
- * ⚠️ **为什么需要它**：界面上的「暂停」**不发** `Pause` 命令（裁决 E）⇒ ⇒ 它
- *   只是**停续发**⇒ ⇒ 正在跑的那**一个**窗口**跑完**才停 ⇒ ⇒ 那次停下**就是**
- *   用户要的那次停 ⇒ ⇒ 但从外面看，「用户点过暂停」这件事**只存在于这一小段
- *   窗口里** ⇒ ⇒ 不记它 ⇒ ⇒ 就分不出「这次 `EndOfExecution` 是用户要的那次停」
- *   与「连续运行里每个窗口都会来的那次」⇒ ⇒ **两者长得一模一样**。
- *
- * ⚠️ **只在两个时刻之间为真**：点「暂停」时**置真**、下一次「停下报告」时
- *   **消费掉** ⇒ ⇒ 不会一直挂着 ⇒ ⇒ 不会把**后面**某次停下也当成用户要的。
- *
- * ⚠️ **不是用户状态** ⇒ ⇒ 不进视图状态 ⇒ ⇒ 只活在这两个时刻之间。
- *
- * @type {boolean}
- */
-let pausePending = false;
-
-/**
- * **消费**一次「用户要的那次停」（v0.67 批）。
- *
- * ⚠️ **消费即清零** ⇒ ⇒ 只可能触发**一次**读回 ⇒ ⇒ 不会连着两次停下都当成
- *   「用户要的那次」⇒ ⇒ 不会连着读回两次。
- *
- * @returns {boolean} 刚才是不是真的在等
- */
-function consumePausePending() {
-    if (!pausePending) return false;
-    pausePending = false;
-    return true;
-}
 
 /**
  * 记下「**本次运行 / 单步开始前**」的寄存器基准（v0.67 批）。
@@ -839,22 +815,6 @@ export function wireTopbarRunbar(services) {
     syncTopbarRunStatus();
 }
 
-// ---------------------------------------------------------------------------
-// 板级内存图（STAGE-14 · v0.29）的前端侧状态
-// ---------------------------------------------------------------------------
-
-/**
- * **当前装载着的工程**（`model::Project` 的线上形态）。
- *
- * ⚠️ 「重新装载工程」按钮需要它：板级配置是**待生效**的，宿主在**下一次**
- * `LoadProject` 时才应用 ⇒ 前端必须能**再发一次同一个工程**。
- *
- * ⚠️ 它由 {@link loadProjectIntoKernel} 记下 ⇒ **每一条**装载路径（启动、
- * 「reset」命令、装载仓外镜像）都会被记到 ⇒ 不会漏。
- *
- * @type {object|null}
- */
-let loadedProject = null;
 
 /**
  * 板档案服务（M-23）的**懒加载**句柄。
@@ -1195,7 +1155,7 @@ export async function handleCommand(detail, services) {
                 // ⚠️ **「用户要的那次停」作废**（v0.67 批）⇒ ⇒ 用户点过暂停**又**
                 //   点了运行 ⇒ ⇒ 那个「等一次停」的意图**已经被覆盖**⇒ ⇒ 不能
                 //   留着去匹配**后面**某次停下。
-                pausePending = false;
+                setPausePending(false);
 
                 // ⚠️ **连续运行 ⇒ ⇒ 程序离开过起点** ⇒ ⇒ 「跑过没有」置真。
                 setRunState({ ...startRunState(), started: true });
@@ -1235,7 +1195,7 @@ export async function handleCommand(detail, services) {
                 //
                 // ⚠️ **只在「内核真的在执行」时记** ⇒ ⇒ 什么都没跑的时候点暂停
                 //   ⇒ ⇒ 不会有任何东西变 ⇒ ⇒ 不该有一次读回。
-                if (isRunning()) pausePending = true;
+                if (isRunning()) setPausePending(true);
                 // ⚠️ **v0.62 批**：暂停 ⇒ ⇒ **自动把 trace 渲染出来**（trace
                 //   开着 / 状态未知时）⇒ ⇒ 用户**点一下暂停**就能看到刚才录到的
                 //   东西 ⇒ ⇒ 不用再点一次「导出」。
@@ -1286,7 +1246,7 @@ export async function handleCommand(detail, services) {
                             // 重订那两条流（`LoadProject` 清了内核的主题集合）。
                             devices: services.devices,
                         },
-                        loadedProject ?? buildMockProject(),
+                        getLoadedProject() ?? buildMockProject(),
                     );
                     resetProbeError = result.probeError;
                     resetConsoleError = result.consoleError;
@@ -1420,7 +1380,7 @@ export async function handleCommand(detail, services) {
                 const addr = toInt(detail.params?.addr, 0) >>> 0;
                 const condition = normalizeCondition(detail.params?.condition);
                 // ⚠️ **内核错误落在「条件」那一位** ⇒ ⇒ 先记目标位、再发命令。
-                pendingErrorSlot = "cond";
+                setPendingErrorSlot("cond");
                 writeErrorSlot("cond", "");
                 await commandRouter.dispatchCommand(Command.setBreakpoint({
                     id: addr,
@@ -1445,7 +1405,7 @@ export async function handleCommand(detail, services) {
                 const addr = toInt(detail.params?.addr, 0) >>> 0;
                 const symbol = detail.params?.symbol ? String(detail.params.symbol) : null;
                 const condition = normalizeCondition(detail.params?.condition);
-                pendingErrorSlot = "cond";
+                setPendingErrorSlot("cond");
                 writeErrorSlot("cond", "");
                 await commandRouter.dispatchCommand(Command.setBreakpoint({
                     id: addr,
@@ -1467,7 +1427,7 @@ export async function handleCommand(detail, services) {
                 // ⚠️ **空名字也照发** ⇒ ⇒ 内核拒（`E_DBG-02`）⇒ ⇒ 前端
                 //   显示**内核原文**（前端**不**写第二套校验器）。
                 const name = String(detail.params?.name ?? "");
-                pendingErrorSlot = "symbol";
+                setPendingErrorSlot("symbol");
                 writeErrorSlot("symbol", "");
                 await commandRouter.dispatchCommand(Command.resolveSymbol(name));
                 break;
@@ -1479,7 +1439,7 @@ export async function handleCommand(detail, services) {
                 //   （`E_DBG-03`）⇒ ⇒ 前端把**内核原文**显示在转储那一位。
                 const addr = toInt(detail.params?.addr, 0) >>> 0;
                 const len = toInt(detail.params?.len, 0);
-                pendingErrorSlot = "dump";
+                setPendingErrorSlot("dump");
                 writeErrorSlot("dump", "");
                 try {
                     await commandRouter.dispatchCommand(Command.dumpMemory(addr, len));
@@ -1767,7 +1727,7 @@ export async function handleCommand(detail, services) {
                 // 「重新装载工程」⇒ 宿主在这次 `LoadProject` 时应用**待生效**的
                 // 板级配置（规格 §2.2 / 裁决 B：已装载镜像时不重建总线 ⇒ 新板
                 // 等下一次装载生效 ⇒ 界面必须显式呈现「待生效」）。
-                const project = loadedProject;
+                const project = getLoadedProject();
                 if (!project) {
                     // ⚠️ **直接返回**：走到 switch 后面那行 `setNote` 会把这条
                     // 具体的话覆盖成「命令完成」⇒ 用户看不到真正的原因。
@@ -2157,7 +2117,7 @@ export async function loadProjectIntoKernel(services, project, options = {}) {
     //   重发的是一份 `images: []` ⇒ **既不会重装固件、也不报任何错**
     //   ⇒ 按钮形同虚设；同时「板已应用 + 现有固件」这条装载路径被抹掉
     //   ⇒ ISA 门禁（`E_PLT-20/21`）在重装这一步**永远走不到**。
-    if (options.remember !== false) loadedProject = project;
+    if (options.remember !== false) setLoadedProject(project);
     // ⚠️ **新工程 = 新程序 ⇒ 运行态归零**（v0.63 批）⇒ ⇒ 顶栏那个按钮回到
     //   「运行」（用户拍板的那条语义：「**当加载之后顶栏的运行应该显示运行**」）
     //   ⇒ ⇒ 「跑过没有」这一格也归零 ⇒ ⇒ 不是上一段程序的历史。
@@ -2473,23 +2433,6 @@ export function normalizeCondition(raw) {
     return text === "" ? null : text;
 }
 
-/**
- * 「**下一次**内核错误显示在哪**一位**」（契约 v9）。
- *
- * ⚠️ **为什么需要它**：错误事件**只带码与消息**，**不带**「该显示在哪一位」
- *   ⇒ ⇒ 发命令时**先记下目标位** ⇒ ⇒ 错误到达时**按位显示**（内核原文，
- *   不吞、不改写）。
- *
- * ⚠️ **注意**：`E_DBG-02`（条件表达式非法）与 `E_DBG-04`（符号名为空）**已经
- *   是两个不同的码**了（整合批拆的 ⇒ ⇒ 「一场景一码」）⇒ ⇒ 但**位**还是
- *   **要记** ⇒ ⇒ 因为**同一个码**也可能从不同的入口来（地址断点 / 符号
- *   候选）⇒ ⇒ 位是**发命令时**决定的 ⇒ ⇒ 不能靠码反推。
- *
- * ⚠️ **它是「下一次」** ⇒ ⇒ 一次错误消费掉 ⇒ ⇒ 不会串位。
- *
- * @type {"cond"|"symbol"|"dump"|null}
- */
-let pendingErrorSlot = null;
 
 /**
  * 内存读 / 转储失败 → 顶部 toast 正文。
@@ -2700,7 +2643,7 @@ export function wireDebug(commandRouter, services = {}) {
             // ⚠️ **「用户要的那次停」作废**（v0.67 批）⇒ ⇒ 用户点过暂停**又**
             //   点了运行 ⇒ ⇒ 那个「等一次停」的意图**已经被覆盖**⇒ ⇒ 不能留着
             //   去匹配**后面**某次停下 ⇒ ⇒ 否则会冒出来一次**没人要**的读回。
-            pausePending = false;
+            setPausePending(false);
             // ⚠️ **不 await** ⇒ ⇒ 这个订阅回调**不等**内核 ⇒ ⇒ 事件处理
             // 不会卡住 ⇒ ⇒ 错误也不往这里抛（抛了就是**未处理的拒绝**）。
             void Promise.resolve(commandRouter.dispatchCommand(Command.continueRun()))
@@ -2779,8 +2722,8 @@ export function wireDebug(commandRouter, services = {}) {
         }));
         // ⚠️ **按位显示**：谁发的命令 ⇒ 错误落在谁那一位 ⇒ ⇒ 一次错误
         //   **消费掉**这个标记 ⇒ ⇒ 不会串位。
-        const slot = pendingErrorSlot;
-        pendingErrorSlot = null;
+        const slot = getPendingErrorSlot();
+        setPendingErrorSlot(null);
         if (slot) writeErrorSlot(slot, message);
         publishViewState("debug");
     });
@@ -2872,7 +2815,7 @@ export function wireDebug(commandRouter, services = {}) {
             // ⚠️ **「用户要的那次停」也作废**（v0.67 批）⇒ ⇒ 复位之后正在跑的
             //   那个窗口**不算**用户要的那次停⇒ ⇒ 否则复位之后会冒出来一次
             //   **没人要**的读回。
-            pausePending = false;
+            setPausePending(false);
             // ⚠️ **源码树留着**，但**行号**要清掉：行号是**上一个程序**的
             // 数据（新工程 = 新程序 ⇒ 旧行号是错的）。源码树是**用户装的
             // 资产**，与程序无关 ⇒ 不能跟着新工程一起没掉（STAGE-7 验收

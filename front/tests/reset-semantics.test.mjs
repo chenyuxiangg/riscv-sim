@@ -334,7 +334,7 @@ describe("复位 · 装的是**当前工程**（用户报的现象）", () => {
         const block = stripComments(appSource.slice(start, end));
         assert.match(
             block,
-            /loadedProject/,
+            /getLoadedProject\(\)/,
             "复位那条路必须读**当前工程**（`loadedProject`）⇒ ⇒ ⛔ 不许硬编码 demo 工程",
         );
         // ⚠️ **反向对照**：剥完注释之后，那段里**确实**还有 `buildMockProject`
