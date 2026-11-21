@@ -305,6 +305,8 @@ impl<'a> IssExecutor<'a> {
     /// ⇒ 每次新批次都从 0 开始 ⇒ 「上次采样时刻」永远是 0 ⇒ **每个批次的
     /// 第一条指令都会触发一次采样** ⇒ 「仲裁只在量子边界发生」这条不变式
     /// 当场破掉（STAGE-4 裁决 I）。
+    // 依赖束：执行器每批次新建，参数即后端注入的协作对象；留待装配层批次收成 deps 结构。
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         iss: &'a mut Iss,
         bus: &'a mut Bus,

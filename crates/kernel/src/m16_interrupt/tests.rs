@@ -581,25 +581,24 @@ fn the_delivery_cause_encodes_the_interrupt_bit_and_the_architectural_code() {
 /// **一个**外部中断位（`MEIE` = 11）；设备级分辨由 guest 自己读外设。
 #[test]
 fn an_external_line_is_delivered_with_the_architectural_external_cause() {
-    for line in [IRQ_UART_RX_READY] {
-        let mut intc = InterruptController::new();
-        intc.request(line, 100, "uart", EDGE).expect("request");
+    let line = IRQ_UART_RX_READY;
+    let mut intc = InterruptController::new();
+    intc.request(line, 100, "uart", EDGE).expect("request");
 
-        let delivered = intc
-            .poll(300, MIE_EXTERNAL, MSTATUS_ON)
-            .expect("poll")
-            .expect("应当交付一条");
+    let delivered = intc
+        .poll(300, MIE_EXTERNAL, MSTATUS_ON)
+        .expect("poll")
+        .expect("应当交付一条");
 
-        assert_eq!(
-            delivered.cause, 0x8000_000B,
-            "外部线 {line} ⇒ mcause = 中断位 | 架构码 11"
-        );
-        assert_ne!(
-            delivered.cause & 0x7FFF_FFFF,
-            u32::from(line),
-            "cause 的低位必须是**架构码**（11），不是内部线号"
-        );
-    }
+    assert_eq!(
+        delivered.cause, 0x8000_000B,
+        "外部线 {line} ⇒ mcause = 中断位 | 架构码 11"
+    );
+    assert_ne!(
+        delivered.cause & 0x7FFF_FFFF,
+        u32::from(line),
+        "cause 的低位必须是**架构码**（11），不是内部线号"
+    );
 }
 
 /// ⚠️ **交付的 cause 落到 guest 的 `mcause` 上** —— 端到端。

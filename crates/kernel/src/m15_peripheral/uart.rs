@@ -1919,7 +1919,7 @@ mod iir_tests {
         assert!(u.fifo_enabled(), "0x41 的 bit0 = FE");
         assert_eq!(u.rx_trigger_level(), 4, "bit6-7 = 01 ⇒ 水位 4");
 
-        for b in [b'a', b'b', b'c'] {
+        for b in *b"abc" {
             u.receive(b);
         }
         assert!(
@@ -1958,7 +1958,7 @@ mod iir_tests {
         let mut u = uart();
         u.write(reg::IER, WriteSize::Byte, 0x01).expect("IER");
         u.write(reg::FCR, WriteSize::Byte, 0x41).expect("FCR");
-        for b in [b'a', b'b', b'c'] {
+        for b in *b"abc" {
             u.receive(b);
         }
 

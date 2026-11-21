@@ -51,6 +51,10 @@ fn irq_level_edges(host: &KernelHost, ch: u8) -> Vec<Edge> {
     registry.borrow().edges_for(ch).to_vec()
 }
 
+fn irq_edge_values(host: &KernelHost, ch: u8) -> Vec<u64> {
+    irq_level_edges(host, ch).iter().map(|e| e.value).collect()
+}
+
 /// 一次 `request()` ⇒ 该线自己的电平通道收到**恰好一条** 0→1 边沿。
 ///
 /// ⚠️ **判别力**：抬线回调没装上、或通道没注册成 `SingleBit`，就一条
@@ -598,6 +602,7 @@ fn the_uart_device_channel_falls_when_the_receive_buffer_is_drained() {
         vec![1u64, 0u64],
         "读空之后 ⇒ 设备通道必须**落**到 0（这正是「只有上升沿」缺的那一半）"
     );
+}
 
 /// v0.82 · **FIFO 开 + 水位 4** 时设备通道的行为：3 个字节不抬、第 4 个抬、
 /// 读走一个就落 —— 这就是「不再形成中断风暴」的端到端证据。
@@ -632,31 +637,25 @@ fn the_uart_channel_with_fifo_mode_needs_the_trigger_level() {
         host.uart_receive(b);
     }
     host.sync_interrupts_now();
+    // 探针首条观测总会记一条边沿（电平 0）⇒ 这里判别「有没有抬升到 1」，
+    // 不是「边沿历史为空」。
     assert!(
-        irq_level_edges(&host, ch).is_empty(),
+        !irq_edge_values(&host, ch).contains(&1),
         "深度 3 < 水位 4 ⇒ 网关电平**不许**抬（旧实现会抬 ⇒ 风暴起点）"
     );
 
     host.uart_receive(0x44);
     host.sync_interrupts_now();
-    assert_eq!(
-        irq_level_edges(&host, ch)
-            .iter()
-            .map(|e| e.value)
-            .collect::<Vec<_>>(),
-        vec![1u64],
+    assert!(
+        irq_edge_values(&host, ch).contains(&1),
         "深度 4 = 水位 ⇒ 抬"
     );
 
     let _ = host.read_memory(QEMU_VIRT_UART0_BASE, WriteSize::Byte);
     host.sync_interrupts_now();
     assert_eq!(
-        irq_level_edges(&host, ch)
-            .iter()
-            .map(|e| e.value)
-            .collect::<Vec<_>>(),
-        vec![1u64, 0u64],
+        irq_edge_values(&host, ch).last().copied(),
+        Some(0),
         "读走一个 ⇒ 深度 3 < 水位 ⇒ 电平**自己落**（不再需要读空整个 FIFO）"
     );
-}
 }
