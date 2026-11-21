@@ -559,10 +559,8 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
     /// 两次调用的时间戳是单调的——量子边界必然**不早于**最后一次指令
     /// 边界的同步。
     ///
-    /// 返回本次推进的外设个数。
-    ///
     /// [`Peripheral::tick`]: riscv_sim_contract::port::Peripheral::tick
-    pub fn tick_peripherals(&mut self, now_ps: u64) -> Result<usize, PlatformError> {
+    pub fn tick_peripherals(&mut self, now_ps: u64) -> Result<(), PlatformError> {
         self.tick_peripherals_except(now_ps, &[])
     }
 
@@ -580,7 +578,7 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
         &mut self,
         now_ps: u64,
         skip: &[u32],
-    ) -> Result<usize, PlatformError> {
+    ) -> Result<(), PlatformError> {
         let Self {
             ticker,
             peripherals,
@@ -588,9 +586,8 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
             ..
         } = self;
         let Some(ticker) = ticker.as_mut() else {
-            return Ok(0);
+            return Ok(());
         };
-        let mut ticked = 0usize;
         let mut first_error: Option<PlatformError> = None;
         for &paddr in peripherals.iter() {
             if skip.contains(&paddr) {
@@ -599,7 +596,6 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
             match ticker.tick(paddr, now_ps) {
                 Ok(writes) => {
                     state.pending_writes.extend(writes);
-                    ticked += 1;
                 }
                 Err(err) => {
                     // 报错的外设**不许牵连别人**：其余外设**照样 tick**
@@ -617,7 +613,7 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
         if let Some(err) = first_error {
             return Err(err);
         }
-        Ok(ticked)
+        Ok(())
     }
 
     /// Schedule an event for the given virtual time.
@@ -1039,10 +1035,10 @@ impl<B: EventBus, I: InterruptSink> Engine<B, I> {
     ///
     /// **This is not a deterministic round-trip.** Events queued *after*
     /// the snapshot was taken are still pending and will still fire, so
-    /// a run after a restore can diverge from an uninterrupted run with
-    /// the same seed. Concretely: schedule A, snapshot, schedule B,
+    /// a run after a restore can diverge from an uninterrupted run from
+    /// the same starting state. Concretely: schedule A, snapshot, schedule B,
     /// restore, run — both A and B fire, while an uninterrupted run
-    /// from the same seed would only fire A.
+    /// from that state would only fire A.
     ///
     /// Use [`Engine::restore_full`] together with
     /// [`Engine::snapshot_full`] whenever determinism is required: that

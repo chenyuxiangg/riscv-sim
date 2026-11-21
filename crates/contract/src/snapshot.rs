@@ -10,7 +10,7 @@
 //! [`crate::port::ExecutionBackend::restore`] can only perform a *partial*
 //! restore: events queued *after* the snapshot was taken are still pending
 //! and still fire, so a run after a restore diverges from an uninterrupted
-//! run with the same seed (debt ledger D-24).
+//! run from the same starting state (debt ledger D-24).
 //!
 //! M-12 does have an engine-level snapshot that carries the queue
 //! (`EngineSnapshot`), but it is **not serializable** — the kernel crate
@@ -450,7 +450,6 @@ mod tests {
                     source: "UART0".to_string(),
                 }],
                 event_queue_head: 3,
-                seed: 42,
             },
             queue: vec![
                 QueuedEventDto {
@@ -545,7 +544,6 @@ mod tests {
                 csrs: Vec::new(),
                 pending_writes: Vec::new(),
                 event_queue_head: 2,
-                seed: 0,
             },
             queue: vec![
                 QueuedEventDto {
@@ -628,7 +626,6 @@ mod tests {
                 "pc",
                 "pending_writes",
                 "schema_version",
-                "seed",
                 "virtual_time_ps"
             ],
             "状态部分的键集变了"
@@ -820,10 +817,10 @@ mod tests {
     /// 所以内层版本号也必须升。否则将来 v3 把内层升到 2 时，**v2 自己
     /// 产的快照会被 v3 拒绝**（V-A 检视 · 中危 7）。
     #[test]
-    fn the_sim_state_schema_version_is_two() {
+    fn the_sim_state_schema_version_is_three() {
         assert_eq!(
             crate::model::SIM_STATE_SCHEMA_VERSION,
-            2,
+            3,
             "SimState 的格式版本必须与它的线上表示同步升版"
         );
     }

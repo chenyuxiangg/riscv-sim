@@ -1266,9 +1266,6 @@ struct LineState {
     line: i64,
     column: u64,
     is_stmt: bool,
-    basic_block: bool,
-    prologue_end: bool,
-    epilogue_begin: bool,
 }
 
 impl LineState {
@@ -1279,9 +1276,6 @@ impl LineState {
             line: 1,
             column: 0,
             is_stmt: header.default_is_stmt,
-            basic_block: false,
-            prologue_end: false,
-            epilogue_begin: false,
         }
     }
 }
@@ -1610,10 +1604,8 @@ fn run_program_with<S: ProgramSink>(
                 6 => {
                     state.is_stmt = !state.is_stmt;
                 }
-                // `DW_LNS_set_basic_block`
-                7 => {
-                    state.basic_block = true;
-                }
+                // `DW_LNS_set_basic_block`（basic_block 状态位已移除，D-106；无操作数）
+                7 => {}
                 // `DW_LNS_const_add_pc`
                 8 => {
                     let adjusted = 255u64 - u64::from(header.opcode_base);
@@ -1626,14 +1618,10 @@ fn run_program_with<S: ProgramSink>(
                     let delta = u64::from(cur.u16()?);
                     state.address = state.address.saturating_add(delta);
                 }
-                // `DW_LNS_set_prologue_end`
-                10 => {
-                    state.prologue_end = true;
-                }
-                // `DW_LNS_set_epilogue_begin`
-                11 => {
-                    state.epilogue_begin = true;
-                }
+                // `DW_LNS_set_prologue_end`（prologue_end 状态位已移除，D-106；无操作数）
+                10 => {}
+                // `DW_LNS_set_epilogue_begin`（epilogue_begin 状态位已移除，D-106；无操作数）
+                11 => {}
                 // `DW_LNS_set_isa`
                 12 => {
                     let _isa = cur.uleb()?;

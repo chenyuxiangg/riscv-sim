@@ -750,15 +750,21 @@ impl ProbeRegistry {
     /// per-channel `Vec<Edge>`s are emptied; the channel map and
     /// other state are untouched.
     pub fn drain_waveform(&mut self) -> WaveformHistory {
+        // 先快照通道号与标签（只读借用 `channels`），再分别清 `edges`，
+        // 避免迭代 `channels` 时借用 `self.edges` 的交错模式（M-18 #12）。
+        let snapshot: Vec<(u8, String)> = self
+            .channels
+            .iter()
+            .map(|(ch, def)| (*ch, format!("{}.{}", def.source, def.signal)))
+            .collect();
         let mut streams = Vec::new();
         // Iterate in channel-number order so the output is stable
         // (matters for tests + diffable exports).
-        for (ch, def) in self.channels.iter() {
-            let edges = self.edges.remove(ch).unwrap_or_default();
-            let id = format!("{}.{}", def.source, def.signal);
+        for (ch, label) in snapshot {
+            let edges = self.edges.remove(&ch).unwrap_or_default();
             streams.push(WaveformStream {
-                label: id.clone(),
-                id,
+                label: label.clone(),
+                id: label,
                 edges,
             });
         }
