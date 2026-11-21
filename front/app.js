@@ -155,6 +155,15 @@ import {
     getPendingErrorSlot,
     setPendingErrorSlot,
 } from "./views/app/state.js";
+import {
+    updateDebugState,
+    updateBreakpoints,
+    parseOptionalFilterAddr,
+    normalizeCondition,
+    memoryToastText,
+    writeErrorSlot,
+} from "./views/app/debug-state.js";
+export { normalizeCondition };
 // ⚠️ **连线报告**（STAGE-48 · v0.72 · D-177 A）—— 「你写的 N 根线里有 M 根
 // 当前抬不了」⇒ ⇒ **内核说**的 ⇒ ⇒ 前端**只**归一化形状、**不判定**。
 
@@ -2293,57 +2302,6 @@ export async function resubscribeAllStreams(services, options = {}) {
  * @returns {{reset: () => void}}
  */
 /**
- * 断点列表的**唯一落点**（STAGE-35 · v0.50 批 · 裁决 K）。
- *
- * ⚠️ **视图层只读 + 发命令** ⇒ ⇒ 它**不碰**服务层、**不持有**第二份列表
- * ⇒ ⇒ 「一个约束一个落点」。
- *
- * ⚠️ **元素是地址数组**（不是 `{id, addr}`）⇒ ⇒ 因为**断点 id 就等于地址**
- * （裁决 J）⇒ ⇒ id **可推导** ⇒ ⇒ **不需要第二个计数器状态**。
- *
- * ⚠️ **它是「本会话由界面请求过的断点」**，**不是**内核断点集的镜像
- * （裁决 O）—— 内核**没有**「列出断点」的事件（`DebugMeta` 是死 DTO）
- * ⇒ ⇒ 所以界面上**如实标注**这一点。
- *
- * @param {(prev: number[]) => number[]} mutator
- * @returns {number[]} 写进去的列表
- */
-function updateBreakpoints(mutator) {
-    const next = updateDebugState((prev) => {
-        const list = Array.isArray(prev?.debug?.breakpoints) ? prev.debug.breakpoints : [];
-        return {
-            ...prev,
-            debug: { ...(prev.debug ?? {}), breakpoints: mutator(list) },
-        };
-    });
-    return next?.breakpoints ?? [];
-}
-
-/**
- * 改**调试视图状态**并重渲染（契约 v9 · 符号标签的落点）。
- *
- * ⚠️ **「有哪些断点」只有一个落点**（`debug.breakpoints`，既有判据 A-7）
- *   ⇒ ⇒ 符号名**只是附注**（`debug.bpSymbols`：地址 → 名字）⇒ ⇒ 列表的
- *   **成员**仍由 `breakpoints` 决定 ⇒ ⇒ 不是第二个真相。
- *
- * @param {(prev: object) => object} mutator
- * @returns {object} 写进去的 `debug` 子树
- */
-/** 空输入 ⇒ `undefined`；非空按十六进制解析，解析不了 ⇒ `NaN`（交给归一器报错）。 */
-function parseOptionalFilterAddr(raw) {
-    const text = String(raw ?? "").trim();
-    if (!text) return undefined;
-    const parsed = parseAddrInput(text);
-    return parsed.ok ? parsed.value : Number.NaN;
-}
-
-function updateDebugState(mutator) {
-    const next = viewStore.setState("debug", (prev) => mutator(prev));
-    publishViewState("debug");
-    return next?.debug ?? {};
-}
-
-/**
  * 记一个「界面请求过的断点」。
  *
  * ⚠️ **已经在列表里就不重复记** ⇒ ⇒ 内核会拒「该地址已存在」（M-08 的
@@ -2412,73 +2370,6 @@ export function labelBreakpointSymbol(addr, symbol) {
             },
         },
     }));
-}
-
-/**
- * 条件表达式的**线上形态**（契约 v9 · C-9）。
- *
- * ⚠️ **空 ⇒ `null`**（**不是**空串）⇒ ⇒ 「无条件断点」在线上是
- *   `condition: null` ⇒ ⇒ 内核那边就是 `Option::None` ⇒ ⇒ 既有断点语义
- *   一字不变。
- *
- * ⚠️ **非空 ⇒ 原样发出去** ⇒ ⇒ 前端**不解析**条件表达式（那是内核的
- *   判据 ⇒ ⇒ `E_DBG-02`）⇒ ⇒ 前端只显示它的原文。
- *
- * @param {unknown} raw
- * @returns {string|null}
- */
-export function normalizeCondition(raw) {
-    if (raw === null || raw === undefined) return null;
-    const text = String(raw);
-    return text === "" ? null : text;
-}
-
-
-/**
- * 内存读 / 转储失败 → 顶部 toast 正文。
- *
- * ⚠️ 写的是内核原文（`code` + `message`）⇒ ⇒ 前端不吞、不改写错误原因。
- *
- * @param {unknown} err
- * @returns {string}
- */
-function memoryToastText(err) {
-    const { code, message } = splitErrorCode(err);
-    return code ? `${code}：${message || code}` : String(err?.message ?? err);
-}
-
-/**
- * 把**内核原文**写进**某一位**（契约 v9 · C-13）。
- *
- * ⚠️ **写的是内核给的原文**（`event.value.message`）⇒ ⇒ **不吞、不改写**
- *   ⇒ ⇒ 真机断言能逐字看到内核说了什么。
- *
- * ⚠️ **空串 = 清掉那一位** ⇒ ⇒ 重试之前先清 ⇒ ⇒ 旧提示不挂着吓人。
- *
- * @param {"cond"|"symbol"|"dump"|null} slot
- * @param {string} message
- */
-function writeErrorSlot(slot, message) {
-    const text = String(message ?? "");
-    if (slot === "cond") {
-        viewStore.setState("debug", (prev) => ({
-            ...prev,
-            debug: { ...(prev.debug ?? {}), condError: text },
-        }));
-        publishViewState("debug");
-    } else if (slot === "symbol") {
-        viewStore.setState("debug", (prev) => ({
-            ...prev,
-            debug: { ...(prev.debug ?? {}), symbolError: text },
-        }));
-        publishViewState("debug");
-    } else if (slot === "dump") {
-        viewStore.setState("debug", (prev) => ({
-            ...prev,
-            debug: { ...(prev.debug ?? {}), dumpError: text },
-        }));
-        publishViewState("debug");
-    }
 }
 
 /**
