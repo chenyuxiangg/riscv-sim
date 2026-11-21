@@ -152,7 +152,7 @@ impl KernelHost {
     /// [`Self::intc_delegation_failures`]。本批**不改**这个行为（改
     /// `capture_session` 的返回类型会波及整条链，而争用在生产路径上
     /// 不可达）——台账留账，下一批处理。
-    pub(super) fn intc_state_inner(&self) -> M16IntcDto {
+    pub(crate) fn intc_state_inner(&self) -> M16IntcDto {
         match self.intc.controller.try_borrow() {
             Ok(intc) => intc.export_state(),
             Err(_) => {
