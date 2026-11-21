@@ -7,7 +7,7 @@
 
 use super::image::{load_segment_overlap_error, ParsedImage};
 use super::platform;
-use super::{HostWatchdog, KernelHost};
+use super::{HostWatchdog, KernelHost, MemoryProfile};
 use riscv_sim_contract::error::{
     PlatformError, E_PLT_13_REVISION_CONFLICT, E_PLT_14_REGION_NOT_FOUND, E_PLT_17_BOARD_MISMATCH,
     E_PLT_22_NO_BOARD, PLATFORM_FAMILY,
@@ -697,6 +697,61 @@ impl KernelHost {
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
+    }
+
+    /// 当前生效的内存图档位（**兼容视图**，裁决 C）。
+    ///
+    /// ⚠️ 它是当前生效的**平台描述的 `id` 的投影**：`default` ⇒
+    /// `Default`、`qemu-virt` ⇒ `QemuVirt`、**其它 id ⇒ `Default`**。
+    ///
+    /// ⚠️ **诚实但信息量低**：新平台（例如 `minimal`）会返回 `Default`
+    /// ⇒ 想知道**真实**的平台请用 [`KernelHost::platform_id`]。
+    ///
+    /// ⚠️ 这个 API 是**公开**的（5 个调用点）⇒ 既有断言**一条不改**。
+    pub fn memory_profile(&self) -> MemoryProfile {
+        match self.platform.id.as_str() {
+            platform::PLATFORM_ID_QEMU_VIRT => MemoryProfile::QemuVirt,
+            _ => MemoryProfile::Default,
+        }
+    }
+
+    /// 当前生效的**平台 id**（**真实**的 id 字符串）。
+    ///
+    /// ⚠️ 这是 v0.27 **新增**的接口：内存图不再只有两档 ⇒ 「档位」这个
+    /// 概念已经装不下真实的信息 ⇒ 真实 id 由这里给出。
+    pub fn platform_id(&self) -> &str {
+        &self.platform.id
+    }
+
+    /// 当前生效的**外设中断号表**（每个 UART / GPIO 一个 PLIC 源号）。
+    pub fn peripheral_irq_table(&self) -> &[platform::PeripheralIrq] {
+        &self.peripheral_irqs
+    }
+
+    /// 板级内存图的**修订号**（v0.31 · STAGE-16 裁决 A）。
+    ///
+    /// ⚠️ **单调递增**的计数器 ⇒ 前端提交时把它作为
+    /// `expected_revision` 带上 ⇒ 并发丢更新**看得见**。
+    pub fn map_revision(&self) -> u64 {
+        self.map_revision
+    }
+
+    /// 最后一个**装载成功**的工程（v0.31 · STAGE-16 裁决 C 第 ④ 步）。
+    ///
+    /// ⚠️ **镜像字节住在它里面** ⇒ 卸载之后**不必重新选文件**就能重装。
+    ///
+    /// ⚠️ `None` = 这个会话**还没装载成功过**任何工程。
+    pub fn last_project(&self) -> Option<&Project> {
+        self.last_project.as_ref()
+    }
+
+    /// 只读地看**器件实例表**（诊断 / 测试用 · v0.74 · STAGE-50）。
+    ///
+    /// ⚠️ **为什么暴露它**：引脚级连线的判据要**真的去读那台器件**
+    ///   （⇒ ⇒ 「内核造的是**那台**器件」不能只靠注册表）⇒ ⇒ ⇒ 测试与
+    ///   诊断都需要**按 id 拿句柄**。
+    pub fn device_table(&self) -> &crate::kernel_host::platform::DeviceInstanceTable {
+        &self.devices
     }
 }
 

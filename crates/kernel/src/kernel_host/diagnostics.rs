@@ -9,7 +9,7 @@ use super::{
     ADMIN_DRAIN_MAX_ENTRIES,
 };
 use crate::m21_logging::{LogEntry, LogLevel, LogQuery};
-use crate::m22_hms::{DegradeAction, Health, Role};
+use crate::m22_hms::{DegradeAction, DiagnosticKit, Health, Role};
 use riscv_sim_contract::admin::LogEntryDto;
 use riscv_sim_contract::error::{PlatformError, E_PLT_20_FW_ISA_MISMATCH, PLATFORM_FAMILY};
 use riscv_sim_contract::platform::{mcu_isa_info, PlatformDescription};
@@ -244,5 +244,72 @@ impl KernelHost {
             }
         }
         None
+    }
+
+    /// 当前角色（**派生只读量** · 裁决 B）。
+    ///
+    /// ⚠️ 角色的**唯一存储**在 `Hms.role` 里 ⇒ ⇒ 这里**只是读它** ⇒ ⇒ 宿主
+    /// **不另存一份** ⇒ ⇒ **零状态新增** ⇒ ⇒ **不存在**「宿主与 `Hms` 角色
+    /// 不一致」那种状态。
+    pub fn role(&self) -> Role {
+        self.hms.role()
+    }
+
+    /// 写入口：改角色（运行时 · v0.45 · STAGE-30 · 裁决 B / F）。
+    ///
+    /// ⚠️ **宿主是唯一的写入口** ⇒ ⇒ 它**同时**改 `Hms` 的角色 ⇒ ⇒ 改完之后
+    ///   宿主的诊断分派**立刻**按新角色走（B-3）。
+    ///
+    /// ⚠️ **不触发任何副作用**（不重算、不清缓存、不发信号）⇒ ⇒ 角色切换后
+    ///   **下一次**分派自然按新角色走。
+    ///
+    /// ⚠️ **MVP 下这个入口没有认证门槛**（X-1）⇒ ⇒ 任何能调到它的调用方都能
+    ///   把自己升成 `Admin` ⇒ ⇒ 这正是 D-131 做法 B（令牌 → 角色）没做的
+    ///   直接后果 ⇒ ⇒ **D-131 不销账**。
+    pub fn set_role(&mut self, role: Role) {
+        self.hms.set_role(role);
+    }
+
+    /// 管理通道**是否启用**（读出口）。
+    ///
+    /// ⚠️ **派生只读量**（裁决 C）：它的值 = 「**当前角色是不是 `Admin`**」
+    /// ⇒ ⇒ **语义从「存储」变成「派生」** ⇒ ⇒ 上一批的公开 API **不破**
+    /// （调用点继续能编译）⇒ ⇒ 但它**不再**是一个独立的布尔旋钮。
+    ///
+    /// ⚠️ **判据与准入同一个来源**（裁决 K）：读的是 [`KernelHost::role`]
+    /// （= `Hms.role`）⇒ ⇒ 角色与开关**不可能**打架。
+    pub fn admin_enabled(&self) -> bool {
+        self.role() == Role::Admin
+    }
+
+    /// 管理员通道的日志导出**累计被上界截掉**的条数（B-6 · 可见的丢弃）。
+    ///
+    /// ⚠️ **不是静默**：截断发生时 M-21 的环里**还会**留下一条说明
+    /// （见 [`KernelHost::on_admin`]）⇒ ⇒ 「少了一批」这件事**两处都看得见**
+    /// ⇒ ⇒ 一处是**人看的**（日志），一处是**机器读的**（这个计数）。
+    pub fn admin_drain_truncated_entries(&self) -> u64 {
+        self.admin_drain_truncated
+    }
+
+    /// 产出脱敏诊断包（**不含原始日志**）。
+    ///
+    /// ⚠️ **v0.43 批（D-135 · 裁决 C / K）**：**宿主是宿主时钟的持有者** ⇒ ⇒
+    /// 「宿主时钟可不可用」这个**事实**由**这里**喂进去 ⇒ ⇒ **M-22 不主动去问
+    /// 时钟**（⇒ ⇒ M-22 **不依赖** `kernel_host` ⇒ ⇒ 依赖方向仍单向）。
+    ///
+    /// ⚠️ **这是真实的生产调用点** ⇒ ⇒ 诊断包里那个**显式**的布尔字段**不是**
+    /// 纸面承诺 ⇒ ⇒ 「宿主时钟读不到」在诊断包里**看得见**。
+    pub fn export_diagnostic_kit(&self, err_code: Option<&str>) -> DiagnosticKit {
+        self.hms
+            .export_diagnostic_kit(err_code, self.started_at.is_available())
+    }
+
+    /// 归档脱敏诊断包（走 M-23 的 `archive`）。
+    ///
+    /// ⚠️ 时钟事实**同样**由宿主喂进去（与 [`KernelHost::export_diagnostic_kit`]
+    /// 同一个来源 ⇒ ⇒ 两个出口**看到的是同一个事实**）。
+    pub fn archive_diagnostic_kit(&mut self, err_code: Option<&str>) -> Result<(), PlatformError> {
+        self.hms
+            .archive_diagnostic_kit(err_code, self.started_at.is_available())
     }
 }

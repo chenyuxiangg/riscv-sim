@@ -185,7 +185,6 @@ use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
 use riscv_sim_contract::protocol::{
     CommandPayload, Direction, EventPayload, HaltReason, Message, Payload,
 };
-use riscv_sim_contract::session::{M14MapDto, M15PeriphDto};
 use riscv_sim_contract::snapshot::DEFAULT_INSTRUCTION_BUDGET;
 use riscv_sim_contract::SCHEMA_VERSION;
 
@@ -203,8 +202,7 @@ use crate::m19_waveform::{ChannelMeta, SharedPipeline, WaveformPipeline};
 use crate::m20_snapshot::SnapshotManager;
 use crate::m21_logging::{LogBuffer, LogLevel};
 use crate::m22_hms::{
-    DegradeAction, DiagnosticKit, HealthSignal, Hms, Role, Severity, SignalCtx, SignalKind,
-    SignalSrc,
+    DegradeAction, HealthSignal, Hms, Role, Severity, SignalCtx, SignalKind, SignalSrc,
 };
 
 /// 管理员通道：**一次日志导出**的条目数**上界**（v0.44 · STAGE-29 · B-6）。
@@ -982,51 +980,6 @@ impl KernelHost {
         self
     }
 
-    /// 当前角色（**派生只读量** · 裁决 B）。
-    ///
-    /// ⚠️ 角色的**唯一存储**在 `Hms.role` 里 ⇒ ⇒ 这里**只是读它** ⇒ ⇒ 宿主
-    /// **不另存一份** ⇒ ⇒ **零状态新增** ⇒ ⇒ **不存在**「宿主与 `Hms` 角色
-    /// 不一致」那种状态。
-    pub fn role(&self) -> Role {
-        self.hms.role()
-    }
-
-    /// 写入口：改角色（运行时 · v0.45 · STAGE-30 · 裁决 B / F）。
-    ///
-    /// ⚠️ **宿主是唯一的写入口** ⇒ ⇒ 它**同时**改 `Hms` 的角色 ⇒ ⇒ 改完之后
-    ///   宿主的诊断分派**立刻**按新角色走（B-3）。
-    ///
-    /// ⚠️ **不触发任何副作用**（不重算、不清缓存、不发信号）⇒ ⇒ 角色切换后
-    ///   **下一次**分派自然按新角色走。
-    ///
-    /// ⚠️ **MVP 下这个入口没有认证门槛**（X-1）⇒ ⇒ 任何能调到它的调用方都能
-    ///   把自己升成 `Admin` ⇒ ⇒ 这正是 D-131 做法 B（令牌 → 角色）没做的
-    ///   直接后果 ⇒ ⇒ **D-131 不销账**。
-    pub fn set_role(&mut self, role: Role) {
-        self.hms.set_role(role);
-    }
-
-    /// 管理通道**是否启用**（读出口）。
-    ///
-    /// ⚠️ **派生只读量**（裁决 C）：它的值 = 「**当前角色是不是 `Admin`**」
-    /// ⇒ ⇒ **语义从「存储」变成「派生」** ⇒ ⇒ 上一批的公开 API **不破**
-    /// （调用点继续能编译）⇒ ⇒ 但它**不再**是一个独立的布尔旋钮。
-    ///
-    /// ⚠️ **判据与准入同一个来源**（裁决 K）：读的是 [`KernelHost::role`]
-    /// （= `Hms.role`）⇒ ⇒ 角色与开关**不可能**打架。
-    pub fn admin_enabled(&self) -> bool {
-        self.role() == Role::Admin
-    }
-
-    /// 管理员通道的日志导出**累计被上界截掉**的条数（B-6 · 可见的丢弃）。
-    ///
-    /// ⚠️ **不是静默**：截断发生时 M-21 的环里**还会**留下一条说明
-    /// （见 [`KernelHost::on_admin`]）⇒ ⇒ 「少了一批」这件事**两处都看得见**
-    /// ⇒ ⇒ 一处是**人看的**（日志），一处是**机器读的**（这个计数）。
-    pub fn admin_drain_truncated_entries(&self) -> u64 {
-        self.admin_drain_truncated
-    }
-
     /// 创建一个**指定内存图档位**的会话。
     ///
     /// ⚠️ **默认档不铺 128 MiB** —— QEMU virt 档要铺的那 128 MiB 在
@@ -1115,61 +1068,6 @@ impl KernelHost {
         // 出现「报告说丢了、表里还在」这种自相矛盾。
         self.peripheral_irqs = platform::compile_peripheral_irqs(description);
         Ok(())
-    }
-
-    /// 当前生效的内存图档位（**兼容视图**，裁决 C）。
-    ///
-    /// ⚠️ 它是当前生效的**平台描述的 `id` 的投影**：`default` ⇒
-    /// `Default`、`qemu-virt` ⇒ `QemuVirt`、**其它 id ⇒ `Default`**。
-    ///
-    /// ⚠️ **诚实但信息量低**：新平台（例如 `minimal`）会返回 `Default`
-    /// ⇒ 想知道**真实**的平台请用 [`KernelHost::platform_id`]。
-    ///
-    /// ⚠️ 这个 API 是**公开**的（5 个调用点）⇒ 既有断言**一条不改**。
-    pub fn memory_profile(&self) -> MemoryProfile {
-        match self.platform.id.as_str() {
-            platform::PLATFORM_ID_QEMU_VIRT => MemoryProfile::QemuVirt,
-            _ => MemoryProfile::Default,
-        }
-    }
-
-    /// 当前生效的**平台 id**（**真实**的 id 字符串）。
-    ///
-    /// ⚠️ 这是 v0.27 **新增**的接口：内存图不再只有两档 ⇒ 「档位」这个
-    /// 概念已经装不下真实的信息 ⇒ 真实 id 由这里给出。
-    pub fn platform_id(&self) -> &str {
-        &self.platform.id
-    }
-
-    /// 当前生效的**外设中断号表**（每个 UART / GPIO 一个 PLIC 源号）。
-    pub fn peripheral_irq_table(&self) -> &[platform::PeripheralIrq] {
-        &self.peripheral_irqs
-    }
-
-    /// 板级内存图的**修订号**（v0.31 · STAGE-16 裁决 A）。
-    ///
-    /// ⚠️ **单调递增**的计数器 ⇒ 前端提交时把它作为
-    /// `expected_revision` 带上 ⇒ 并发丢更新**看得见**。
-    pub fn map_revision(&self) -> u64 {
-        self.map_revision
-    }
-
-    /// 最后一个**装载成功**的工程（v0.31 · STAGE-16 裁决 C 第 ④ 步）。
-    ///
-    /// ⚠️ **镜像字节住在它里面** ⇒ 卸载之后**不必重新选文件**就能重装。
-    ///
-    /// ⚠️ `None` = 这个会话**还没装载成功过**任何工程。
-    pub fn last_project(&self) -> Option<&Project> {
-        self.last_project.as_ref()
-    }
-
-    /// 只读地看**器件实例表**（诊断 / 测试用 · v0.74 · STAGE-50）。
-    ///
-    /// ⚠️ **为什么暴露它**：引脚级连线的判据要**真的去读那台器件**
-    ///   （⇒ ⇒ 「内核造的是**那台**器件」不能只靠注册表）⇒ ⇒ ⇒ 测试与
-    ///   诊断都需要**按 id 拿句柄**。
-    pub fn device_table(&self) -> &crate::kernel_host::platform::DeviceInstanceTable {
-        &self.devices
     }
 
     /// 装上探针管道（D-46）：M-14 总线 → M-18 判沿 → M-19 环形缓冲。
@@ -2278,28 +2176,6 @@ impl KernelHost {
         self.started_at.elapsed_ms()
     }
 
-    /// 产出脱敏诊断包（**不含原始日志**）。
-    ///
-    /// ⚠️ **v0.43 批（D-135 · 裁决 C / K）**：**宿主是宿主时钟的持有者** ⇒ ⇒
-    /// 「宿主时钟可不可用」这个**事实**由**这里**喂进去 ⇒ ⇒ **M-22 不主动去问
-    /// 时钟**（⇒ ⇒ M-22 **不依赖** `kernel_host` ⇒ ⇒ 依赖方向仍单向）。
-    ///
-    /// ⚠️ **这是真实的生产调用点** ⇒ ⇒ 诊断包里那个**显式**的布尔字段**不是**
-    /// 纸面承诺 ⇒ ⇒ 「宿主时钟读不到」在诊断包里**看得见**。
-    pub fn export_diagnostic_kit(&self, err_code: Option<&str>) -> DiagnosticKit {
-        self.hms
-            .export_diagnostic_kit(err_code, self.started_at.is_available())
-    }
-
-    /// 归档脱敏诊断包（走 M-23 的 `archive`）。
-    ///
-    /// ⚠️ 时钟事实**同样**由宿主喂进去（与 [`KernelHost::export_diagnostic_kit`]
-    /// 同一个来源 ⇒ ⇒ 两个出口**看到的是同一个事实**）。
-    pub fn archive_diagnostic_kit(&mut self, err_code: Option<&str>) -> Result<(), PlatformError> {
-        self.hms
-            .archive_diagnostic_kit(err_code, self.started_at.is_available())
-    }
-
     /// 宿主请求暂停。
     fn on_pause(&mut self) -> Vec<EventPayload> {
         let _ = self.backend.pause();
@@ -2690,16 +2566,6 @@ impl KernelHost {
     //
     // ⚠️ 它们**不是契约层**的东西，也不进 `SCHEMA_VERSION`——契约层冻结
     // 的是**线上**的 DTO，这里是**进程内**的观察窗口。
-
-    /// 当前会话的**外设内部状态**（段 4 的同一份导出）。
-    pub fn peripheral_states(&self) -> M15PeriphDto {
-        m15_peripheral::collect_session_state(&self.backend.bus().peripheral_instances())
-    }
-
-    /// 当前会话的**内存映射拓扑**（段 3 的同一份导出）。
-    pub fn memory_map(&self) -> M14MapDto {
-        self.backend.bus().export_map()
-    }
 }
 
 /// 「M-19 的波形管道不可用」的错误（`E_OBS-02`）。
