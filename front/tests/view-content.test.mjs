@@ -284,7 +284,7 @@ describe("STAGE-35 · 断点 UI", () => {
             [0x30, 0x40],
             "app 层没有把断点写进 debug.breakpoints（唯一落点没接上）",
         );
-        const m02Src = readFileSync(resolve(frontDir, "views/m02_viewcomponents.js"), "utf8");
+        const m02Src = readFileSync(resolve(frontDir, "views/components/debug-panel.js"), "utf8");
         assert.ok(
             !/setState\(\s*"debug"/.test(m02Src),
             "m02 里写了 debug 视图状态 ⇒ ⇒ 视图层持有第二份断点列表 ⇒ ⇒ 第二个真相",
