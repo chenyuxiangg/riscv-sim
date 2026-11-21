@@ -13,14 +13,14 @@
 use crate::kernel_host::platform;
 use crate::m14_bus::BusWidth;
 use crate::m15_peripheral::gpio::reg as gpio_reg;
-use riscv_sim_contract::csr::{IRQ_SOFTWARE, IRQ_TIMER_COMPARE};
+use riscv_sim_contract::csr::{IRQ_SOFTWARE, IRQ_TIMER_COMPARE, IRQ_UART_RX_READY};
 use riscv_sim_contract::model::{
     Edge, ImageKind, ImageRef, ImageSource, ProductTree, Project, ProjectVersion, WriteSize,
 };
 use riscv_sim_contract::port::Peripheral;
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload, Message};
 
-use super::{KernelHost, DEMO_FIRMWARE_BYTES, IRQ_UART_RX_READY, QEMU_VIRT_UART0_BASE};
+use super::{KernelHost, DEMO_FIRMWARE_BYTES, QEMU_VIRT_UART0_BASE};
 use crate::m17_backend::IRQ_FIRMWARE_BYTES;
 use crate::m18_probe::CH_IRQ_EXTERNAL;
 
