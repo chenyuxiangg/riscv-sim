@@ -45,8 +45,8 @@ use std::path::Path;
 use std::rc::Rc;
 
 use riscv_sim_contract::error::{
-    PlatformError, E_PLT_05_OVERFLOW, E_PLT_09_UNKNOWN_PLATFORM,
-    E_PLT_10_PLATFORM_FILE_UNREADABLE, E_PLT_11_PLATFORM_FILE_MALFORMED, PLATFORM_FAMILY,
+    PlatformError, E_PLT_05_OVERFLOW, E_PLT_09_UNKNOWN_PLATFORM, E_PLT_10_PLATFORM_FILE_UNREADABLE,
+    E_PLT_11_PLATFORM_FILE_MALFORMED, PLATFORM_FAMILY,
 };
 use riscv_sim_contract::platform::{DeviceSpec, PlatformDescription, RegionSpec};
 use riscv_sim_contract::port::{Peripheral, TimeSource};

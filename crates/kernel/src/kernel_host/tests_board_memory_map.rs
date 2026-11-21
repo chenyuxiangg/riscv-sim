@@ -533,10 +533,13 @@ fn b2_a_64_kib_region_is_legal_now_that_the_budget_is_gone() {
         mcu: None,
     };
 
-    let events = dispatch(&mut host, CommandPayload::SetMemoryMap {
-        description: board,
-        expected_revision: None,
-    });
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: board,
+            expected_revision: None,
+        },
+    );
     let (description, pending) = first_memory_map(&events);
     assert_eq!(description.regions.len(), 1, "板装上了 ⇒ 一段都在");
     assert!(!pending, "没装载过镜像 ⇒ 板**立即**生效（不待生效）");

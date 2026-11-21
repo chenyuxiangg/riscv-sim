@@ -810,10 +810,6 @@ fn oversized_ram_region_is_rejected_before_allocating() {
     );
 }
 
-
-
-
-
 // ---------------------------------------------------------------------------
 // Session snapshot (STAGE-3 §3.2) — segment 2 (memory pages) and
 // segment 3 (memory-map topology).
@@ -1370,7 +1366,6 @@ fn load_map_rejects_a_region_whose_end_overflows_u32() {
     );
 }
 
-
 #[test]
 fn load_map_rejects_a_region_overlapping_a_kept_peripheral_window() {
     // The peripheral window stays in place — a rebuilt region may not
@@ -1702,7 +1697,6 @@ fn writing_two_non_adjacent_pages_materializes_two_pages() {
     assert_eq!(bus.read_only(0x9000, BusWidth::Word).unwrap(), 0x2222_2222);
 }
 
-
 /// **A-6** 单个 region 的**声明**大小可 > 16 MiB ⇒ 映射**成功**且**零**
 /// 物化页。
 #[test]
@@ -1722,7 +1716,6 @@ fn a_ram_region_may_declare_more_than_the_cap_and_costs_nothing() {
         .expect("write");
     assert_eq!(bus.ram_allocated_bytes(), 4096);
 }
-
 
 /// **A-8** `export_pages` 只导出**写过的页**：写 1 页 ⇒ 恰好 1 条、`base`
 /// 落在该 region 的页网格上、`bytes.len() == 4096`；不写 ⇒ **0** 条；
@@ -1904,4 +1897,3 @@ fn load_pages_rejects_a_page_off_the_regions_page_grid() {
     assert_eq!(err.scenario, E_BUS_11_PAGE_OUTSIDE_RAM);
     assert_eq!(bus.ram_allocated_bytes(), 0, "nothing was materialized");
 }
-

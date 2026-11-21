@@ -53,7 +53,6 @@ use riscv_sim_contract::session::{M14MapDto, MemPageDto, RegionDto};
 /// 4 GiB — covers the entire RV32 physical address space.
 pub const BUS_SIZE: u64 = 0x1_0000_0000;
 
-
 // ---------------------------------------------------------------------------
 // Session snapshot (STAGE-3 §3.2) — memory pages + memory-map topology.
 // ---------------------------------------------------------------------------
@@ -616,9 +615,7 @@ impl RamBackend {
             return Err(PlatformError::new(
                 BUS_FAMILY,
                 E_BUS_09_TOO_LARGE,
-                format!(
-                    "RAM 段会物化 {physical} 字节，超过这一段自己的 size {cap} 字节"
-                ),
+                format!("RAM 段会物化 {physical} 字节，超过这一段自己的 size {cap} 字节"),
             ));
         }
         // ③ Materialize, then write.
