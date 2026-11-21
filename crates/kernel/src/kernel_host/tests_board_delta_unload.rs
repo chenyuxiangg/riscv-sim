@@ -37,7 +37,7 @@
 
 use super::*;
 
-use riscv_sim_contract::model::{ProductTree, ProjectVersion};
+use riscv_sim_contract::model::{ImageKind, ImageRef, ImageSource, ProductTree, ProjectVersion};
 use riscv_sim_contract::platform::{DeviceSpec, RegionSpec, PLATFORM_SCHEMA_VERSION};
 use riscv_sim_contract::protocol::{MemoryMapOp, Message};
 

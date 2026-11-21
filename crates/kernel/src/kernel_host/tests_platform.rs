@@ -224,8 +224,8 @@ fn a_large_declaration_is_legal_now_that_the_budget_is_gone() {
 #[test]
 fn map_memory_has_no_address_literal_and_no_device_construction() {
     // ⚠️ `include_str!` 的路径相对于**本文件** ⇒ 指向
-    // `crates/kernel/src/kernel_host/mod.rs`（真的那一个）。
-    let source = include_str!("mod.rs");
+    // `crates/kernel/src/kernel_host/assembly.rs`（真的那一个）。
+    let source = include_str!("assembly.rs");
     let body = map_memory_body(source);
 
     assert!(
@@ -255,7 +255,7 @@ fn map_memory_has_no_address_literal_and_no_device_construction() {
 fn map_memory_body(source: &str) -> String {
     let start = source
         .find("fn map_memory(")
-        .expect("mod.rs 里必须有 map_memory");
+        .expect("assembly.rs 里必须有 map_memory");
     let open = source[start..].find('{').expect("map_memory 必须有函数体");
     let body_start = start + open;
     let mut depth = 0usize;
