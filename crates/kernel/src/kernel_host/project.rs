@@ -593,7 +593,7 @@ impl KernelHost {
     ///
     /// ⚠️ **只有这一个落点** ⇒ §3.1 第 ⑥ 步 · §3.2 第 ⑦ 步 · §3.3 第 ⑥ 步
     /// · §3.4 的即时推送 —— 四处**同形**。
-    pub(super) fn memory_map_event(&self) -> EventPayload {
+    pub(crate) fn memory_map_event(&self) -> EventPayload {
         EventPayload::MemoryMap {
             description: Box::new(self.platform.clone()),
             pending: self.memory_map_pending(),
@@ -611,7 +611,7 @@ impl KernelHost {
     ///
     /// ⚠️ 顺序**按 priority 升序** ⇒ 确定性（default 10 → qemu-virt 20 →
     /// minimal 30）⇒ ⇒ **数值不在这份代码里**（那是内置 JSON 的事）。
-    pub(super) fn platform_templates_event(&self) -> EventPayload {
+    pub(crate) fn platform_templates_event(&self) -> EventPayload {
         let ids = [
             platform::PLATFORM_ID_DEFAULT,
             platform::PLATFORM_ID_QEMU_VIRT,
@@ -638,7 +638,7 @@ impl KernelHost {
         EventPayload::PlatformTemplates { templates }
     }
 
-    pub(super) fn device_instances_event(&self) -> EventPayload {
+    pub(crate) fn device_instances_event(&self) -> EventPayload {
         EventPayload::DeviceInstances {
             instances: self.reported_device_instances(),
         }
