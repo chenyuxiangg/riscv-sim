@@ -131,6 +131,31 @@ import { showAlert } from "./lib/alert.js";
 // ⚠️ **顶部渐隐 toast** —— 内存读 / 转储被内核拒绝时的轻量即时反馈（无按钮、
 // 自动消失）；与居中模态告警 `alert.js` 分工见 `lib/toast.js` 头注。
 import { showToast } from "./lib/toast.js";
+// ⚠️ **App 层按域拆分**（`views/app/`）：本文件收口为门面 + bootstrap，
+// 各域函数由子模块实现；公开符号在此 re-export ⇒ 既有导入路径与符号不变。
+import { setNote, publishViewState } from "./views/app/shared.js";
+import {
+    syncKernelConn,
+    describeTransport,
+    renderStatus,
+    describeWorkspace,
+    publishLinkState,
+} from "./views/app/link-status.js";
+export { syncKernelConn, describeTransport, renderStatus, publishLinkState };
+import {
+    toInt,
+    toByteArray,
+    fetchImageBytes,
+    buildImageProject,
+} from "./views/app/image-project.js";
+export { toByteArray, fetchImageBytes, buildImageProject };
+import {
+    normalizeSourceTree,
+    setSourceTree,
+    exposeSourceLoader,
+    exposeWaveChartCommands,
+} from "./views/app/source-trace.js";
+export { normalizeSourceTree, setSourceTree, exposeSourceLoader, exposeWaveChartCommands };
 // ⚠️ **连线报告**（STAGE-48 · v0.72 · D-177 A）—— 「你写的 N 根线里有 M 根
 // 当前抬不了」⇒ ⇒ **内核说**的 ⇒ ⇒ 前端**只**归一化形状、**不判定**。
 
@@ -823,96 +848,6 @@ export function wireTopbarRunbar(services) {
     syncTopbarRunStatus();
 }
 
-/**
- * 连接状态**胶囊**的点：连上是绿的，没连上是红的。
- *
- * ⚠️ **胶囊里的文字就是 `#status`** ⇒ ⇒ 连接状态的**文案只有一处**
- * （`describeTransport()`）⇒ ⇒ 这里**只切颜色**，**不写第二份文案**。
- *
- * @param {{connected?: boolean}|undefined} transport
- */
-export function syncKernelConn(transport) {
-    const conn = document.querySelector("[data-kernel-conn]");
-    if (!conn) return;
-    conn.classList.toggle("is-offline", transport?.connected !== true);
-}
-
-/**
- * Derive the status-bar text from the real transport state instead of
- * hardcoding it (FRONTEND_Review.md #11).
- *
- * Exported so the front-end gate can assert that the status bar is
- * *derived* rather than a hardcoded string (FRONTEND_Review.md R-02).
- *
- * @param {{mode: string, connected: boolean, label?: string, lastError?: string|null}|undefined} transport
- * @returns {string}
- */
-export function describeTransport(transport) {
-    if (!transport) {
-        // A missing transport descriptor must read differently from a
-        // present-but-disconnected one — otherwise a mis-bound mount
-        // result (e.g. the workspace snapshot landing in the transport
-        // slot) is invisible to the gate (FRONTEND_Review.md R-01/R-02).
-        return "工作台已就绪 — kernel transport 状态未知（M-07 未挂载）";
-    }
-    if (transport.connected) {
-        const label = transport.label ?? `${transport.mode} transport`;
-        return `kernel 已连接 — ${label}`;
-    }
-    const reason = transport.lastError ? transport.lastError : "M-07 待接线";
-    return `工作台已就绪 — kernel transport 未连接（${reason}）`;
-}
-
-/**
- * Write the derived status text into the status bar.
- *
- * @param {{mode: string, connected: boolean}|undefined} transport
- * @param {Element} [el]
- * @returns {string} the text written
- */
-export function renderStatus(transport, el = status) {
-    el.textContent = describeTransport(transport);
-    return el.textContent;
-}
-
-/**
- * Write a short note about the last command / handshake into the
- * footer. The status bar stays reserved for the transport state (the
- * gate asserts that it is derived from it), so command feedback goes
- * here.
- *
- * @param {string} text
- */
-function setNote(text) {
-    const note = document.getElementById("kernel-note");
-    if (note) note.textContent = text;
-}
-
-/**
- * Fill the footer with what is actually mounted, so the copy cannot go
- * stale the way a hardcoded phase label did (FRONTEND_Review.md #12).
- *
- * @param {{role: string, views: {hash: string, name: string}[]}} workspace
- */
-function describeWorkspace(workspace) {
-    const info = document.getElementById("build-info");
-    if (!info) return;
-    const names = (workspace?.views ?? []).map((v) => v.name).join(" / ");
-    info.textContent = `当前工作台：role=${workspace?.role ?? "?"} · ${names}`;
-}
-
-/**
- * Ask the workbench to re-render one view from the store.
- *
- * @param {string} viewId
- */
-function publishViewState(viewId) {
-    const state = viewStore.getState(viewId);
-    window.dispatchEvent(new CustomEvent("riscv:render", {
-        detail: { viewId, type: "update", state },
-    }));
-}
-
 // ---------------------------------------------------------------------------
 // 板级内存图（STAGE-14 · v0.29）的前端侧状态
 // ---------------------------------------------------------------------------
@@ -1013,72 +948,6 @@ async function deleteProductArchive(services, id) {
     setNote(store
         ? `已删除板档案「${target}」`
         : `已删除板档案「${target}」（板档案只存在于本会话）`);
-}
-
-/**
- * Push the **transport link state** into a view's state.
- *
- * ⚠️ **连接状态住在服务层**（M-07 的 `getTransportStatus()` / `onStatus()`）
- * ⇒ 视图组件**不**直接摸服务层（那是 app.js 这一层的活）⇒ 这里把状态
- * **推进**视图状态（M-03），落地视图再从 `state.link` 读。
- *
- * ⚠️ 只有**落地视图**（`embedded`）拿它 ⇒ 只推进这一个视图，不给每个视图都
- * 塞一份连接状态。
- *
- * @param {{mode?: string, connected?: boolean, label?: string, lastError?: string|null}|undefined} transport
- * @param {string} [viewId]
- */
-export function publishLinkState(transport, viewId = "embedded") {
-    viewStore.setState(viewId, (prev) => ({
-        ...prev,
-        link: {
-            connected: transport?.connected === true,
-            mode: transport?.mode ?? "none",
-            label: transport?.label ?? "",
-            lastError: transport?.lastError ?? null,
-        },
-    }));
-    publishViewState(viewId);
-}
-
-/**
- * A non-negative integer from a command parameter (malformed → fallback).
- *
- * The parameters arrive from the DOM (`data-*` attributes ⇒ strings), so
- * they need a conversion before they reach the contract. A malformed
- * value must not become `NaN` on the wire — that is not valid JSON.
- *
- * @param {unknown} raw
- * @param {number} [fallback]
- * @returns {number}
- */
-function toInt(raw, fallback = 0) {
-    const n = Math.trunc(Number(raw));
-    return Number.isFinite(n) ? n : fallback;
-}
-
-/**
- * 一串 **0..255 的整数**（契约 v5 的 `WriteConsole.bytes`）。
- *
- * ⚠️ **传字符串会被内核按 `E_PROTO-08` 拒掉**（不会默默接受）⇒ 前端
- * 在这里就把它挡下来，并给出**说清是哪个字节**的错。
- *
- * @param {unknown} raw
- * @returns {number[]}
- */
-export function toByteArray(raw) {
-    if (!Array.isArray(raw)) {
-        throw new Error(
-            `console-send 的 bytes 必须是字节数组（0..255 的整数），收到：${typeof raw}`,
-        );
-    }
-    return raw.map((b) => {
-        const n = Number(b);
-        if (!Number.isInteger(n) || n < 0 || n > 255) {
-            throw new Error(`console-send 的字节必须是 0..255 的整数：${JSON.stringify(b)}`);
-        }
-        return n;
-    });
 }
 
 /**
@@ -3443,116 +3312,6 @@ export function wireDebug(commandRouter, services = {}) {
 // ---------------------------------------------------------------------------
 
 /**
- * 把一棵源码树**规整**成「路径 → 内容」的对象。
- *
- * ⚠️ **接受 `Map`**（任务书指定的形态）、**也**接受普通对象与
- * `[key, value]` 对的数组 ⇒ 调用方不必为了喂它而改自己的数据结构。
- *
- * @param {Map<string, string>|Record<string, string>|Iterable<[string, string]>|null|undefined} tree
- * @returns {Record<string, string>}
- */
-export function normalizeSourceTree(tree) {
-    /** @type {Record<string, string>} */
-    const out = {};
-    if (!tree) return out;
-    // `Map`（有 `get` / `forEach`）。
-    if (typeof tree.get === "function" && typeof tree.forEach === "function") {
-        tree.forEach((value, key) => {
-            out[String(key)] = String(value ?? "");
-        });
-        return out;
-    }
-    // `[key, value]` 对的数组。
-    if (Array.isArray(tree)) {
-        for (const pair of tree) {
-            if (!Array.isArray(pair) || pair.length < 2) continue;
-            out[String(pair[0])] = String(pair[1] ?? "");
-        }
-        return out;
-    }
-    // 普通对象。
-    if (typeof tree === "object") {
-        for (const [key, value] of Object.entries(tree)) {
-            out[String(key)] = String(value ?? "");
-        }
-    }
-    return out;
-}
-
-/**
- * 把一棵源码树写进 **M-03 视图状态**（**不进内核**）。
- *
- * ⚠️ **并入**已有的树，不丢用户已经装好的文件（与文件选择器那条路
- * 同一口径）。
- *
- * @param {Map<string, string>|Record<string, string>|Iterable<[string, string]>} tree
- * @returns {number} 树里的文件数
- */
-export function setSourceTree(tree) {
-    const normalized = normalizeSourceTree(tree);
-    viewStore.setState("source", (prev) => ({
-        ...prev,
-        source: {
-            ...(prev.source ?? {}),
-            tree: { ...(prev.source?.tree ?? {}), ...normalized },
-        },
-    }));
-    publishViewState("source");
-    return Object.keys(normalized).length;
-}
-
-/**
- * 把可编程的源码树入口暴露到 `window.riscv_source`。
- *
- * ⚠️ **这是给真机脚本用的可编程入口，不是界面按钮**：
- * 真机脚本（`tools/browser-verify.mjs`）没法操作文件选择器 ⇒ 需要一条
- * **可编程**的路把源码树送进前端。
- *
- * @returns {void}
- */
-export function exposeSourceLoader() {
-    window.riscv_source = {
-        setTree: (tree) => setSourceTree(tree),
-    };
-}
-
-/**
- * 把「**波形库来源**」暴露给页面上的脚本（STAGE-36 · v0.51 批 · 裁决 G）。
- *
- * ⚠️ **这不是「测试后门」**，是**能力协商**：离线环境、或用户不想为一个图
- * 拉一兆字节的时候 ⇒ ⇒ 关掉波形图 ⇒ ⇒ 界面如实显示「波形库不可用」
- * ⇒ ⇒ **通道列表仍在** ⇒ ⇒ 核心调试闭环不受影响。
- *
- * ⚠️ **为什么必须有它**（判别力）：降级路径**必须可达** ⇒ ⇒ 真机门禁
- * **主动**触发降级 ⇒ ⇒ ⇒ **降级逻辑永远有人管** ⇒ ⇒ 不能只靠「碰巧没网」。
- *
- * @param {{setChartSource: (next: string) => string, chartSource: () => string}} waveform
- * @returns {void}
- */
-export function exposeWaveChartCommands(waveform) {
-    window.riscv_waveform = {
-        /** 当前波形库来源（默认是那个 CDN URL）。 */
-        chartSource: () => waveform.chartSource(),
-        /**
-         * 换波形库来源（`"off"` = 关掉波形图；给 URL = 换源；给空 = 回到默认）。
-         *
-         * @param {string} next
-         * @returns {string} 换之后的来源。
-         */
-        setChartSource: (next) => waveform.setChartSource(next),
-        /**
-         * 各通道的**计数快照**（`edges` = 边沿总数 / `samples` = 留着的样本数）。
-         *
-         * ⚠️ **只读、只给数字** ⇒ ⇒ 门禁拿它跟「界面上画了几个点」比对 ⇒ ⇒
-         *   两个**独立来源**互相印证 ⇒ ⇒ 界面上报错了就会红。
-         *
-         * @returns {Array<{id:string,label:string,edges:number,samples:number}>}
-         */
-        channelStats: () => waveform.channelStats(),
-    };
-}
-
-/**
  * 把一组「**脚本可调用**」的命令暴露给页面上的脚本。
  *
  * ⚠️ **这不是产品 UI**：真实 RTOS 的复验脚本（`tools/browser-verify.mjs`）
@@ -3658,67 +3417,6 @@ export function exposeScriptCommands(commandRouter) {
 // ---------------------------------------------------------------------------
 // 装载**仓外**的镜像（真实 RTOS 的 ELF 不进仓库）
 // ---------------------------------------------------------------------------
-
-/**
- * 按 URL 取镜像的**字节**。
- *
- * ⚠️ **内核不联网**：契约的 `ImageSource::Url` 会报 `E_LDR-01` ⇒ 前端
- * 必须**先把字节取回来**，再把字节塞进 `LoadProject`。
- *
- * ⚠️ **不许截断**：`arrayBuffer()` 拿的是**完整**响应体（镜像有几百 KiB：
- * osz 的 ELF 是 282 280 字节）⇒ 不能用「读一部分就停」的方式取。
- *
- * @param {string} url
- * @returns {Promise<Uint8Array>}
- */
-export async function fetchImageBytes(url) {
-    const res = await fetch(url);
-    if (!res.ok) {
-        throw new Error(`取镜像字节失败（HTTP ${res.status}）：${url}`);
-    }
-    const buf = await res.arrayBuffer();
-    return new Uint8Array(buf);
-}
-
-/**
- * 造一个「只含一个镜像」的工程（`model::Project` 的线上形态）。
- *
- * ⚠️ **`source` 是外部标签枚举**：`model::ImageSource::Bytes(Vec<u8>)`
- * 的 serde 形态是 `{"Bytes":[...]}`（**不是** base64、**不是**字符串）。
- *
- * ⚠️ **`isa` 必须是 `"RV32IMC"`**：契约层的 `ISA` 常量，别的值会被
- * 内核判「工程 ISA 与内核支持的不一致」。
- *
- * @param {string} url — 镜像的来源（只用来取默认名字）
- * @param {Uint8Array|number[]} bytes — 镜像字节
- * @param {{id?: string, name?: string, imageName?: string, kind?: string, boardName?: string, toolchain?: string}} [options]
- * @returns {object}
- */
-export function buildImageProject(url, bytes, options = {}) {
-    const fileName = String(url).split("/").filter(Boolean).pop() ?? "";
-    const imageName = options.imageName ?? (fileName || "image.elf");
-    return {
-        id: options.id ?? "proj-external-image",
-        name: options.name ?? imageName,
-        tree: {
-            root: {
-                name: options.boardName ?? "MainBoard",
-                component_id: null,
-                children: [],
-            },
-        },
-        images: [{
-            name: imageName,
-            kind: options.kind ?? "Elf",
-            source: { Bytes: Array.from(bytes) },
-        }],
-        version: {
-            schema: 1,
-            isa: "RV32IMC",
-            toolchain: options.toolchain ?? "external (browser)",
-        },
-    };
-}
 
 /**
  * 「按 URL 取镜像字节 → 发 `LoadProject`」的入口。
