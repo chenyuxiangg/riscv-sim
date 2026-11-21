@@ -22,7 +22,7 @@ use riscv_sim_contract::error::ErrorFamily;
 use riscv_sim_contract::model::{
     ImageKind, ImageRef, ImageSource, ProductTree, Project, ProjectVersion, WriteSize,
 };
-use riscv_sim_contract::protocol::CommandPayload;
+use riscv_sim_contract::protocol::{CommandPayload, Message};
 use riscv_sim_contract::session::{CheckpointMetaDto, RegionDto, SESSION_SNAPSHOT_SCHEMA_VERSION};
 
 use crate::m17_backend::INSTRUCTION_COST_PS;
