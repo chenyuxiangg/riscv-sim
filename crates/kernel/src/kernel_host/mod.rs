@@ -178,8 +178,11 @@ use riscv_sim_contract::platform::PlatformDescription;
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload};
 
+use crate::m08_breakpoint::names::{NameClass, NameRef, NameResolver};
 use crate::m08_breakpoint::watch_expr::WatchTarget;
-use crate::m11_symbol::{Disassembler, SymbolIndex, TraceBuffer, TRACE_CAP};
+use crate::m11_symbol::{
+    Disassembler, SymbolClass, SymbolIndex, SymbolTable, TraceBuffer, TRACE_CAP,
+};
 use crate::m15_peripheral;
 use crate::m16_interrupt::InterruptController;
 use crate::m17_backend::SelfIssBackend;
@@ -498,6 +501,27 @@ impl HostSinks {
                 ))
             }
         }
+    }
+}
+
+/// 宿主侧的**名字解析器**：把 M-11 的符号表接到 M-08 的窄接口上。
+///
+/// ⚠️ 只做**分类翻译**（[`SymbolClass`] → [`NameClass`]）与**取地址** ⇒ ⇒
+/// M-08 因此不必知道符号表长什么样。
+struct HostNames<'a>(&'a SymbolTable);
+
+impl NameResolver for HostNames<'_> {
+    fn resolve(&self, name: &str) -> Option<NameRef> {
+        let symbol = self.0.lookup(name)?;
+        // ⚠️ **没有地址的符号**（`SHN_UNDEF`）在解析层就当「查无此名」⇒ ⇒
+        //    报出去的是「未定义符号」，不是「地址是 0」。
+        let addr = symbol.addr?;
+        let class = match self.0.class_of(name).unwrap_or(SymbolClass::Other) {
+            SymbolClass::Function => NameClass::Function,
+            SymbolClass::Object => NameClass::Object,
+            SymbolClass::Other => NameClass::Other,
+        };
+        Some(NameRef { class, addr })
     }
 }
 
@@ -986,7 +1010,10 @@ impl KernelHost {
             CommandPayload::StepN { n } => self.on_run(Some(n)),
             CommandPayload::StepOver => self.on_step_over(),
             CommandPayload::Pause => self.on_pause(),
-            CommandPayload::SetBreakpoint(bp) => match self.backend.set_breakpoint_with_id(bp) {
+            CommandPayload::SetBreakpoint(bp) => match self
+                .backend
+                .set_breakpoint_with_id_and_names(bp, &HostNames(self.index.symbols()))
+            {
                 Ok(()) => vec![self.tick()],
                 Err(err) => vec![self.error_from(&err)],
             },

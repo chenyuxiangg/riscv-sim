@@ -34,7 +34,7 @@ pub mod trace;
 // 这里**不**加，免得两边同时改同一段。
 pub use disasm::{Disassembler, MAX_DISASM_COUNT};
 pub use render::{render_entry, render_mnemonic};
-pub use symbols::SymbolTable;
+pub use symbols::{SymbolClass, SymbolTable};
 
 // C2 的两个子组件的公开出口（统筹方统一补——C2 拥有那两个文件）。
 pub use dwarf::{DwarfLines, DwarfStatus, UnitHeaderInfo};

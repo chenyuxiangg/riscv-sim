@@ -856,11 +856,21 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
         //
         // ⚠️ 取值带**从 `u32::MAX` 往下** ⇒ ⇒ 与「低位地址当 id」错开 ⇒ ⇒
         //    两套命名空间不会在半路撞号（撞了要等累到 4G 量级）。
+        self.set_breakpoint_with_id_and_names(bp, &crate::m08_breakpoint::names::NoNames)
+    }
+
+    /// 注册断点，**带名字解析**（宿主那条路径：条件里的 `main` /
+    /// `&g_counter` 要在注册期就换成地址）。
+    pub fn set_breakpoint_with_id_and_names(
+        &mut self,
+        bp: Breakpoint,
+        names: &dyn crate::m08_breakpoint::names::NameResolver,
+    ) -> Result<(), PlatformError> {
         let mut bp = bp;
         if bp.kind == BreakpointKind::Condition && bp.id == 0 {
             bp.id = self.next_free_predicate_id();
         }
-        self.breakpoints.set(bp)
+        self.breakpoints.set_with(bp, names)
     }
 
     /// 谓词条目可用的下一个 id（**从 `u32::MAX` 往下找空位**）。
