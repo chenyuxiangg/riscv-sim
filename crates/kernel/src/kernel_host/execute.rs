@@ -13,7 +13,7 @@ use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_02_CONDITION_INVALID, E_ENG_03_NO_PROGRESS,
     E_PROTO_01_VERSION_MISMATCH, PROTO_FAMILY,
 };
-use riscv_sim_contract::model::{StackFrame, WatchExpr, WatchValue, WriteSize};
+use riscv_sim_contract::model::{LocalVarInfo, StackFrame, WatchExpr, WatchValue, WriteSize};
 use riscv_sim_contract::port::ExecutionBackend;
 use riscv_sim_contract::protocol::{EventPayload, HaltReason};
 use riscv_sim_contract::snapshot::DEFAULT_INSTRUCTION_BUDGET;
@@ -608,6 +608,48 @@ impl KernelHost {
         }
 
         vec![EventPayload::Backtrace { frames, truncated }]
+    }
+
+    /// 列出**当前帧的局部变量**（`ListLocals` · 真相候选列表批）。
+    ///
+    /// 只看**当前 pc 所在的函数**（用户拍板：跨帧变量不做）；每条只给
+    /// 「名字 + 位置」的人读文本 —— **不带值**（值要读内存 / 读寄存器，
+    /// 是另一条路）、**不带类型**（要顺 `DW_AT_type` 再走一遍 DIE）。
+    ///
+    /// 三种合法结果：
+    ///
+    /// * `function = None` ⇒ 当前 pc 不在任何已知函数里（没有调试信息 /
+    ///   停在库代码 / 停在裸地址）；
+    /// * `function = Some(..)` 且 `vars` 空 ⇒ 函数区间在、变量没了（读不
+    ///   到 CFI 就这结果），**不是**「没有调试信息」；
+    /// * `function = Some(..)` 且 `vars` 有货 ⇒ 正常。
+    pub(super) fn on_list_locals(&mut self) -> Vec<EventPayload> {
+        /// 变量数上限：一个函数的局部变量 / 形参通常个位数；
+        /// 真超了也要明确「列表不完整」，不能悄悄截。
+        const MAX_VARS: usize = 128;
+
+        let pc = self.backend.pc();
+        let Some(scope) = self.index.locals().scope_at(pc) else {
+            return vec![EventPayload::Locals {
+                function: None,
+                vars: Vec::new(),
+                truncated: false,
+            }];
+        };
+        let vars: Vec<LocalVarInfo> = scope
+            .vars
+            .iter()
+            .take(MAX_VARS)
+            .map(|var| LocalVarInfo {
+                name: var.name.clone(),
+                location: var.location.describe(),
+            })
+            .collect();
+        vec![EventPayload::Locals {
+            function: Some(scope.name.clone()),
+            truncated: scope.vars.len() > MAX_VARS,
+            vars,
+        }]
     }
 
     /// 写**一个**通用寄存器（契约 v2 · `WriteRegister`）。

@@ -1119,6 +1119,7 @@ impl KernelHost {
                 breakpoints: self.backend.list_breakpoints(),
             }],
             CommandPayload::Backtrace => self.on_backtrace(),
+            CommandPayload::ListLocals => self.on_list_locals(),
             CommandPayload::SetWatchpoint(wp) => match self.backend.set_watchpoint_with_id(wp) {
                 Ok(()) => vec![self.tick()],
                 Err(err) => vec![self.error_from(&err)],

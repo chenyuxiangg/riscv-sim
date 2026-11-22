@@ -88,6 +88,30 @@ pub enum LocalLocation {
     Frame { base: u8, offset: i32 },
 }
 
+impl LocalLocation {
+    /// 给**人读**的位置写法（真相候选列表用）。
+    ///
+    /// * 寄存器里 ⇒ 直接给 ABI 名（`a0` / `s0` …）；
+    /// * 栈上 ⇒ `[基址寄存器±偏移]`（`[s0-24]` / `[sp+16]` / `[s0]`）。
+    ///
+    /// ⚠️ 只给**位置**，不给值：值要读内存 / 读寄存器，那是另一条路；
+    /// 而且「值」会随指令变化，位置不会。
+    pub fn describe(&self) -> String {
+        match *self {
+            Self::Reg(index) => super::render::reg_name(index).to_string(),
+            Self::Frame { base, offset: 0 } => {
+                format!("[{}]", super::render::reg_name(base))
+            }
+            Self::Frame { base, offset } if offset > 0 => {
+                format!("[{}+{}]", super::render::reg_name(base), offset)
+            }
+            Self::Frame { base, offset } => {
+                format!("[{}{}]", super::render::reg_name(base), offset)
+            }
+        }
+    }
+}
+
 /// 一个局部变量（或形参）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalVar {
@@ -567,6 +591,40 @@ mod tests {
                 (".debug_line_str".to_string(), DEBUG_LINE_STR.to_vec()),
             ])
         }
+    }
+
+    #[test]
+    fn a_local_location_reads_as_a_register_or_a_bracketed_frame_slot() {
+        // 真相候选列表只给「名字 + 位置」⇒ ⇒ 这个写法就是屏上的那一段。
+        assert_eq!(
+            LocalLocation::Reg(8).describe(),
+            "s0",
+            "寄存器里 ⇒ 直接给 ABI 名"
+        );
+        assert_eq!(LocalLocation::Reg(10).describe(), "a0", "ABI 名不是 x 号");
+        assert_eq!(
+            LocalLocation::Frame {
+                base: 8,
+                offset: -24
+            }
+            .describe(),
+            "[s0-24]",
+            "负偏移 ⇒ 中间是减号（`[s0-24]` 是用户能在条件里照抄的写法）"
+        );
+        assert_eq!(
+            LocalLocation::Frame {
+                base: 2,
+                offset: 16
+            }
+            .describe(),
+            "[sp+16]",
+            "正偏移必须带 `+`（否则 `[sp16]` 读不出来）"
+        );
+        assert_eq!(
+            LocalLocation::Frame { base: 8, offset: 0 }.describe(),
+            "[s0]",
+            "偏移 0 ⇒ 不写 `+0`（噪声）"
+        );
     }
 
     #[test]

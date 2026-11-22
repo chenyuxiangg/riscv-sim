@@ -145,6 +145,33 @@ export function wireDebug(commandRouter, services = {}) {
     });
 
     /**
+     * 当前帧局部变量回执（STAGE-55 真相候选列表批 · `debug.locals`）。
+     *
+     * ⚠️ **只读**：名字与位置都来自内核（位置是人读文本，如 `[s0-24]`）
+     * ⇒ ⇒ 前端不解析、不折算、不补值；`function` 为 null 是「pc 不在任何
+     * 函数里」，与「函数在、变量为空」是两件事，原样分开存。
+     */
+    commandRouter.subscribe("debug.locals", (event) => {
+        const raw = Array.isArray(event.value?.vars) ? event.value.vars : [];
+        const vars = raw.map((item) => ({
+            name: String(item?.name ?? ""),
+            location: String(item?.location ?? ""),
+        }));
+        viewStore.setState("debug", (prev) => ({
+            ...prev,
+            debug: {
+                ...(prev.debug ?? {}),
+                locals: {
+                    function: event.value?.function ? String(event.value.function) : null,
+                    vars,
+                    truncated: event.value?.truncated === true,
+                },
+            },
+        }));
+        publishViewState("debug");
+    });
+
+    /**
      * The kernel's source-location reply (M-11's DWARF line table).
      *
      * ⚠️ `SourceLocation` 是**回复事件**（不是推送流）⇒ 内核侧没有可

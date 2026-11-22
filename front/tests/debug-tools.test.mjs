@@ -782,6 +782,89 @@ describe("整段转储（视图层 · C-11 ~ C-12）", () => {
         );
     });
 
+    test("C-15 · 收到 `debug.locals` ⇒ ⇒ 列出函数名与每个变量的「名字 + 位置」", () => {
+        router.emit("debug.locals", {
+            function: "main",
+            vars: [
+                { name: "x", location: "[s0-24]" },
+                { name: "y", location: "[s0-20]" },
+            ],
+            truncated: false,
+        });
+        const body = show("debug");
+        const rows = body.querySelectorAll("[data-locals-row]");
+        assert.equal(rows.length, 2, "两个变量 ⇒ ⇒ 两行");
+        assert.ok(
+            body.querySelector("[data-locals-function]").textContent.includes("main"),
+            "必须说清这是哪个函数的变量",
+        );
+        assert.ok(rows[0].textContent.includes("x"), "名字逐字显示");
+        assert.ok(
+            rows[0].textContent.includes("[s0-24]"),
+            "位置必须**逐字**来自内核（`[s0-24]` 是用户能照抄的写法）",
+        );
+        assert.equal(
+            body.querySelector("[data-locals-truncated]"),
+            null,
+            "`truncated = false` ⇒ ⇒ 不许挂截断提示",
+        );
+    });
+
+    test("C-15b · 「pc 不在任何函数里」与「函数里没有变量」是**两条**文案", () => {
+        // 没有调试信息 / pc 在裸地址 ⇒ function = null。
+        router.emit("debug.locals", { function: null, vars: [], truncated: false });
+        const outside = show("debug");
+        assert.ok(
+            outside.querySelector("[data-locals-no-function]"),
+            "function 缺省 ⇒ ⇒ 说「不在任何已知函数里」",
+        );
+        assert.equal(outside.querySelector("[data-locals-empty]"), null);
+
+        // 函数区间在、变量丢了（读不到 CFI）⇒ 另一条。
+        router.emit("debug.locals", { function: "main", vars: [], truncated: false });
+        const empty = show("debug");
+        const note = empty.querySelector("[data-locals-empty]");
+        assert.ok(note, "函数在、变量空 ⇒ ⇒ 必须给出**另一条**文案");
+        assert.ok(note.textContent.includes("main"));
+        assert.ok(
+            note.textContent.includes("读不到 CFI"),
+            "要把「读不到 CFI」说成可能原因（否则用户以为没有调试信息）",
+        );
+        assert.equal(empty.querySelector("[data-locals-no-function]"), null);
+    });
+
+    test("C-15c · 点「列出」⇒ ⇒ 发出**一条** `ListLocals`（只读命令）", () => {
+        const body = show("debug");
+        const button = body.querySelector("[data-action=\"list-locals\"]");
+        assert.ok(button, "局部变量卡必须**有**「列出」按钮");
+        button.click();
+        stop();
+
+        const sent = router.sent.filter((payload) => payload === "ListLocals");
+        assert.equal(sent.length, 1, "点一次必须发**一条** `ListLocals`（裸字符串）");
+    });
+
+    test("C-15d · 点变量行**不**把名字填进条件框（本批只读，不做补全）", () => {
+        router.emit("debug.locals", {
+            function: "main",
+            vars: [{ name: "x", location: "[s0-24]" }],
+            truncated: false,
+        });
+        const body = show("debug");
+        const row = body.querySelector("[data-locals-row]");
+        assert.ok(row, "必须有一行");
+        row.click();
+        stop();
+
+        const input = show("debug").querySelector("[data-bp-input]");
+        assert.equal(input.value, "", "点行**不许**写条件（补全是另一批的事）");
+        assert.equal(
+            sentOf(router, "SetBreakpoint").length,
+            0,
+            "点行更**不许**顺手加断点",
+        );
+    });
+
     test("C-14 · 收到 `debug.backtrace` ⇒ ⇒ 调用栈按帧列出（当前帧在前）", () => {
         router.emit("debug.backtrace", {
             frames: [

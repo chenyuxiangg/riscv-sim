@@ -865,6 +865,9 @@ const debugView = register({
         const watchValues = Array.isArray(debug.watchValues) ? debug.watchValues : [];
         // STAGE-55 栈回溯批：内核回执的那份帧列表（只读 · `frames[0]` 是当前帧）。
         const backtrace = debug.backtrace ?? null;
+        // STAGE-55 真相候选列表批：当前帧的「名字 + 位置」（只读，不带值）。
+        const localsInfo = debug.locals ?? null;
+        const localsVars = Array.isArray(localsInfo?.vars) ? localsInfo.vars : [];
         const backtraceFrames = Array.isArray(backtrace?.frames) ? backtrace.frames : [];
         const symbolResult = debug.symbol ?? null;
         const bpError = String(debug.bpError ?? "");
@@ -958,6 +961,26 @@ const debugView = register({
                         }).join("")}</div>`}
                     ${backtrace?.truncated === true
                         ? `<p class="note" data-backtrace-truncated>没有走到栈底：返回地址读不到、没有 RA 规则、帧数到上限或检测到调用环。</p>`
+                        : ""}
+                </section>
+                <section class="card locals-card">
+                    <div class="row"><h3>局部变量</h3><span class="tag">${localsVars.length} 个</span><button type="button" data-action="list-locals">列出</button></div>
+                    <p class="note" data-locals-hint>当前帧的名字与位置；点行不填条件（本批只读）。</p>
+                    ${localsInfo === null
+                        ? `<p class="muted">尚未查询</p>`
+                        : localsInfo.function === null
+                            ? `<p class="muted" data-locals-no-function>当前 pc 不在任何已知函数里</p>`
+                            : localsVars.length === 0
+                                ? `<p class="muted" data-locals-empty>${escapeHtml(localsInfo.function)} 里没有可展示的变量（没有调试信息，或读不到 CFI）</p>`
+                                : `<div class="locals-list" data-locals-list>
+                                    <p class="muted" data-locals-function>函数 ${escapeHtml(localsInfo.function)}</p>
+                                    ${localsVars.map((item) => `<div class="locals-row" data-locals-row>
+                                        <code class="locals-name">${escapeHtml(String(item?.name ?? ""))}</code>
+                                        <code class="addr locals-place">${escapeHtml(String(item?.location ?? ""))}</code>
+                                    </div>`).join("")}
+                                </div>`}
+                    ${localsInfo?.truncated === true
+                        ? `<p class="note" data-locals-truncated>变量太多，列表不完整（只给前一批）。</p>`
                         : ""}
                 </section>
                 <section class="card trace-export">

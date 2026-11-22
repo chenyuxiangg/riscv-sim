@@ -6,8 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    Breakpoint, BreakpointInfo, DeltaRegister, DisasmEntryDto, Project, SimState, StackFrame,
-    Symbol, TraceFilter, TraceFormat, TraceSource, WatchExpr, WatchValue, Watchpoint,
+    Breakpoint, BreakpointInfo, DeltaRegister, DisasmEntryDto, LocalVarInfo, Project, SimState,
+    StackFrame, Symbol, TraceFilter, TraceFormat, TraceSource, WatchExpr, WatchValue, Watchpoint,
     WaveformHistory, WriteSize,
 };
 use crate::platform::{PlatformDescription, RegionSpec};
@@ -172,6 +172,14 @@ pub enum CommandPayload {
     /// ⚠️ 只报「pc + 所在函数名」，**不**解析上层帧的局部变量（那要完整
     /// unwind 表与帧选择器，另立批）。
     Backtrace,
+    /// **列出当前帧的局部变量**（STAGE-55 真相候选列表批）。
+    ///
+    /// 只读：按**当前 pc** 找它所在的函数，回执是该帧每个变量的「名字 +
+    /// 位置」（[`EventPayload::Locals`]）。
+    ///
+    /// ⚠️ **不带值、不带类型、不做条件补全**（用户拍板）：这张表回答的是
+    /// 「这个名字此刻在哪儿」，值要另外读，类型要另外解析。
+    ListLocals,
     SetWatchpoint(Watchpoint),
     ClearWatchpoint {
         id: u32,
@@ -617,6 +625,24 @@ pub enum EventPayload {
     /// 假装这就是栈底。
     Backtrace {
         frames: Vec<StackFrame>,
+        #[serde(default)]
+        truncated: bool,
+    },
+    /// **当前帧的局部变量**（STAGE-55 真相候选列表批）。
+    ///
+    /// `function` = 当前 pc 落在哪个函数里（没有调试信息 / 不在任何函数
+    /// 里 ⇒ `None`）；`vars` = 该函数的变量「名字 + 位置」，位置是**人读
+    /// 文本**（`[s0-24]` / `a0`），由内核渲染。
+    ///
+    /// ⚠️ `function` 有值而 `vars` 为空是**合法状态**：区间收了、变量丢
+    /// 了（读不到 CFI 就这结果）⇒ 前端要说「这个函数没有可展示的变量」，
+    /// 不能当成「没有调试信息」。
+    Locals {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        function: Option<String>,
+        #[serde(default)]
+        vars: Vec<LocalVarInfo>,
+        /// 变量多到上限、后面还有 ⇒ 列表不完整。
         #[serde(default)]
         truncated: bool,
     },
