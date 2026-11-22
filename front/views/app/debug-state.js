@@ -25,33 +25,6 @@ export function updateDebugState(mutator) {
     return next?.debug ?? {};
 }
 
-/**
- * 断点列表的**唯一落点**（STAGE-35 · v0.50 批 · 裁决 K）。
- *
- * ⚠️ **视图层只读 + 发命令** ⇒ ⇒ 它**不碰**服务层、**不持有**第二份列表
- * ⇒ ⇒ 「一个约束一个落点」。
- *
- * ⚠️ **元素是地址数组**（不是 `{id, addr}`）⇒ ⇒ 因为**断点 id 就等于地址**
- * （裁决 J）⇒ ⇒ id **可推导** ⇒ ⇒ **不需要第二个计数器状态**。
- *
- * ⚠️ **它是「本会话由界面请求过的断点」**，**不是**内核断点集的镜像
- * （裁决 O）—— 内核**没有**「列出断点」的事件（`DebugMeta` 是死 DTO）
- * ⇒ ⇒ 所以界面上**如实标注**这一点。
- *
- * @param {(prev: number[]) => number[]} mutator
- * @returns {number[]} 写进去的列表
- */
-export function updateBreakpoints(mutator) {
-    const next = updateDebugState((prev) => {
-        const list = Array.isArray(prev?.debug?.breakpoints) ? prev.debug.breakpoints : [];
-        return {
-            ...prev,
-            debug: { ...(prev.debug ?? {}), breakpoints: mutator(list) },
-        };
-    });
-    return next?.breakpoints ?? [];
-}
-
 /** 空输入 ⇒ `undefined`；非空按十六进制解析，解析不了 ⇒ `NaN`（交给归一器报错）。 */
 export function parseOptionalFilterAddr(raw) {
     const text = String(raw ?? "").trim();
@@ -100,21 +73,17 @@ export function memoryToastText(err) {
  *
  * ⚠️ **空串 = 清掉那一位** ⇒ ⇒ 重试之前先清 ⇒ ⇒ 旧提示不挂着吓人。
  *
- * @param {"cond"|"symbol"|"dump"|null} slot
+ * @param {"bp"|"dump"|null} slot
  * @param {string} message
  */
 export function writeErrorSlot(slot, message) {
     const text = String(message ?? "");
-    if (slot === "cond") {
+    if (slot === "bp") {
+        // ⚠️ STAGE-55：地址 / 符号 / 条件**共用一个提示位** ⇒ ⇒ 因为界面上
+        //   只有一个输入框、一个按钮 ⇒ ⇒ 错在哪儿由**内核原文**说。
         viewStore.setState("debug", (prev) => ({
             ...prev,
-            debug: { ...(prev.debug ?? {}), condError: text },
-        }));
-        publishViewState("debug");
-    } else if (slot === "symbol") {
-        viewStore.setState("debug", (prev) => ({
-            ...prev,
-            debug: { ...(prev.debug ?? {}), symbolError: text },
+            debug: { ...(prev.debug ?? {}), bpError: text },
         }));
         publishViewState("debug");
     } else if (slot === "dump") {

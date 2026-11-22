@@ -16,8 +16,10 @@
 
 import { mountWorkbench } from "./views/m01_workbench.js";
 import {
+    BREAKPOINT_KIND,
     downloadExportChunk,
     mountViewComponents,
+    normalizeBreakpointKind,
     parseAddrInput,
 } from "./views/m02_viewcomponents.js";
 import * as viewStore from "./views/m03_viewstore.js";
@@ -134,16 +136,12 @@ export {
     formatVirtualTime,
 };
 import {
-    requestBreakpoint,
-    withdrawBreakpoint,
-    labelBreakpointSymbol,
+    refreshBreakpoints,
     wireDebug,
     exposeScriptCommands,
 } from "./views/app/debug-wiring.js";
 export {
-    requestBreakpoint,
-    withdrawBreakpoint,
-    labelBreakpointSymbol,
+    refreshBreakpoints,
     wireDebug,
     exposeScriptCommands,
 };
@@ -616,59 +614,106 @@ export async function handleCommand(detail, services) {
                 break;
             }
             case "set-breakpoint": {
-                // 断点（STAGE-35 · v0.50 批 · 裁决 J）。
+                // 三类输入**合一**（STAGE-55 · 表 13）：同一个按钮，载荷按
+                // 当前**类型**组装 ⇒ ⇒ 三种类型的落库形态都是
+                // `SetBreakpoint { kind, … }` ⇒ ⇒ **零新命令 / 零新 DTO**。
                 //
-                // ⚠️ **id = addr** ⇒ ⇒ 「一址一断点」这条**内核语义**
-                // （M-08 的第二条规则）在 id 上就成立 ⇒ ⇒ 前端**不需要**
-                // 第二个计数器状态 ⇒ ⇒ **状态只有一份**。
-                //
-                // ⚠️ **契约层早有这两条命令**（`SetBreakpoint` /
-                // `ClearBreakpoint`）⇒ ⇒ **零新命令 / 零新 DTO / 零新事件**
-                // ⇒ ⇒ 内核行为**一字不变**（脚本口走的就是同一条路）。
-                //
-                // ⚠️ **条件（契约 v9 · 裁决 O）**：条件框对**地址断点**与
-                // **符号断点**通用 ⇒ ⇒ 这里**显式**带上 ⇒ ⇒ **空 ⇒
-                // `null`**（C-9，不是空串）⇒ ⇒ 无条件断点的语义**一字不变**。
+                // ⚠️ **地址类**：id 仍然是地址（「一址一断点」这条内核语义
+                //   不变，前端不需要第二个计数器）。
+                // ⚠️ **符号类**：名字**由内核**解成地址（`ResolveSymbol`）
+                //   ⇒ ⇒ 前端**不编**地址；解不出来就**不下断点**。
+                // ⚠️ **条件类**：不绑地址 ⇒ ⇒ `addr = 0` 只是占位，`id = 0`
+                //   是「**请内核分配**」（谓词条目没有地址可当 id）。
+                const kind = normalizeBreakpointKind(detail.params?.kind);
+                setPendingErrorSlot("bp");
+                writeErrorSlot("bp", "");
+                if (kind === BREAKPOINT_KIND.Condition) {
+                    await commandRouter.dispatchCommand(Command.setBreakpoint({
+                        id: 0,
+                        addr: 0,
+                        source_hint: null,
+                        enabled: true,
+                        kind,
+                        condition: String(detail.params?.condition ?? ""),
+                    }));
+                    await refreshBreakpoints(commandRouter);
+                    break;
+                }
+                if (kind === BREAKPOINT_KIND.Symbol) {
+                    const name = String(detail.params?.name ?? "");
+                    const reply = await commandRouter.dispatchCommand(Command.resolveSymbol(name));
+                    const symbol = reply?.value?.symbol ?? null;
+                    const resolved = Number(symbol?.addr);
+                    if (!Number.isFinite(resolved)) {
+                        // ⚠️ **解不出地址 ⇒ 如实说**：不编一个地址，也不发
+                        //   一条注定落到 0 上的断点命令。
+                        writeErrorSlot("bp", `没有这个符号 —— ${name}`);
+                        break;
+                    }
+                    const addr = resolved >>> 0;
+                    await commandRouter.dispatchCommand(Command.setBreakpoint({
+                        id: addr,
+                        addr,
+                        source_hint: name,
+                        enabled: true,
+                        kind,
+                        condition: null,
+                    }));
+                    await refreshBreakpoints(commandRouter);
+                    break;
+                }
                 const addr = toInt(detail.params?.addr, 0) >>> 0;
-                const condition = normalizeCondition(detail.params?.condition);
-                // ⚠️ **内核错误落在「条件」那一位** ⇒ ⇒ 先记目标位、再发命令。
-                setPendingErrorSlot("cond");
-                writeErrorSlot("cond", "");
                 await commandRouter.dispatchCommand(Command.setBreakpoint({
                     id: addr,
                     addr,
                     source_hint: null,
                     enabled: true,
-                    condition,
+                    kind: BREAKPOINT_KIND.Address,
+                    condition: null,
                 }));
-                // ⚠️ **成功之后才落界面列表**：内核可能因地址未对齐 / 地址
-                //   重复 / 条件非法拒绝这条命令 ⇒ ⇒ 先落列表会留下一个内核
-                //   并不存在的断点（界面在骗人）。
-                requestBreakpoint(addr);
+                await refreshBreakpoints(commandRouter);
+                break;
+            }
+            case "bp-kind": {
+                // 类型下拉**换了**（表 14）：清空草稿与错误位 ⇒ ⇒ 免得把
+                // 地址当表达式提交出去。草稿住在共享的 `debugger` 键里
+                // （视图层写的同一个落点）。
+                viewStore.setState("debugger", (prev) => ({
+                    ...prev,
+                    bpKind: normalizeBreakpointKind(detail.params?.kind),
+                    bpDraft: "",
+                    bpTabIndex: -1,
+                }));
+                updateDebugState((prev) => ({
+                    ...prev,
+                    debug: { ...(prev.debug ?? {}), bpError: "" },
+                }));
+                break;
+            }
+            case "bp-tab": {
+                // Tab 选中了某一条候选 ⇒ ⇒ 只要**重渲染**（草稿已经在
+                // 视图层写进 `debugger` 键了）⇒ ⇒ 高亮才看得见。
+                updateDebugState((prev) => prev);
                 break;
             }
             case "set-symbol-breakpoint": {
-                // 从**符号候选**下断点（契约 v9 · 裁决 N）。
+                // 从**符号候选**点一下下断点（契约 v9 · 裁决 N）。
                 //
-                // ⚠️ **id 仍然是地址**（既有「断点 id = 地址」这条内核语义
-                //   **不变**）⇒ ⇒ 前端**不需要**第二个计数器状态。
-                // ⚠️ **`source_hint` = 候选符号名** ⇒ ⇒ 列表里能显示它
-                //   （C-10）⇒ ⇒ 名字**不是**另存的一份状态 ⇒ ⇒ 它随命令走。
+                // ⚠️ **候选自带地址** ⇒ ⇒ 这一条**不需要**再解析一次
+                //   ⇒ ⇒ `kind = Symbol` 只作**来源标记**落库。
                 const addr = toInt(detail.params?.addr, 0) >>> 0;
                 const symbol = detail.params?.symbol ? String(detail.params.symbol) : null;
-                const condition = normalizeCondition(detail.params?.condition);
-                setPendingErrorSlot("cond");
-                writeErrorSlot("cond", "");
+                setPendingErrorSlot("bp");
+                writeErrorSlot("bp", "");
                 await commandRouter.dispatchCommand(Command.setBreakpoint({
                     id: addr,
                     addr,
                     source_hint: symbol,
                     enabled: true,
-                    condition,
+                    kind: BREAKPOINT_KIND.Symbol,
+                    condition: null,
                 }));
-                // ⚠️ **成功之后才落列表 / 贴标签**（同上：失败不留假断点）。
-                requestBreakpoint(addr);
-                if (symbol) labelBreakpointSymbol(addr, symbol);
+                await refreshBreakpoints(commandRouter);
                 break;
             }
             case "lookup-symbol": {
@@ -679,8 +724,8 @@ export async function handleCommand(detail, services) {
                 // ⚠️ **空名字也照发** ⇒ ⇒ 内核拒（`E_DBG-02`）⇒ ⇒ 前端
                 //   显示**内核原文**（前端**不**写第二套校验器）。
                 const name = String(detail.params?.name ?? "");
-                setPendingErrorSlot("symbol");
-                writeErrorSlot("symbol", "");
+                setPendingErrorSlot("bp");
+                writeErrorSlot("bp", "");
                 await commandRouter.dispatchCommand(Command.resolveSymbol(name));
                 break;
             }
@@ -704,13 +749,14 @@ export async function handleCommand(detail, services) {
                 break;
             }
             case "clear-breakpoint": {
-                // 撤掉断点 ⇒ ⇒ id 同样**就是地址**（裁决 J）⇒ ⇒ 前端列表
-                // 只存地址就够 ⇒ ⇒ `ClearBreakpoint { id }` 传的是地址。
-                const addr = toInt(detail.params?.addr, 0) >>> 0;
-                await commandRouter.dispatchCommand(Command.clearBreakpoint(addr));
-                // ⚠️ **清除成功之后才撤界面项**：传输失败 / 命令失败时先删
-                //   会留下一个「内核还在、界面没了」的反向假状态。
-                withdrawBreakpoint(addr);
+                // 撤掉断点 ⇒ ⇒ **按 id**（STAGE-55）：地址类条目的 id 仍
+                // 然等于地址，但**谓词条目没有地址** ⇒ ⇒ 只有 id 是可靠的
+                // 句柄。列表行自己带着内核给的 id（`data-bp-id`）。
+                const id = toInt(detail.params?.id, 0) >>> 0;
+                await commandRouter.dispatchCommand(Command.clearBreakpoint(id));
+                // ⚠️ **清除成功之后才重拉**：传输失败 / 命令失败时先删会留下
+                //   一个「内核还在、界面没了」的反向假状态。
+                await refreshBreakpoints(commandRouter);
                 break;
             }
             case "list-breakpoints": {
@@ -720,19 +766,15 @@ export async function handleCommand(detail, services) {
                 break;
             }
             case "toggle-breakpoint": {
-                // 契约 v13：enable / disable。id 就是地址；当前状态从视图
-                // 状态读，命令成功后再翻本地那一格（回执也会整表覆盖）。
-                const addr = toInt(detail.params?.addr, 0) >>> 0;
-                const current = viewStore.getState("debug")?.debug?.bpEnabled?.[String(addr)] !== false;
-                const next = !current;
-                await commandRouter.dispatchCommand(Command.setBreakpointEnabled(addr, next));
-                updateDebugState((prev) => ({
-                    ...prev,
-                    debug: {
-                        ...(prev.debug ?? {}),
-                        bpEnabled: { ...(prev.debug?.bpEnabled ?? {}), [String(addr)]: next },
-                    },
-                }));
+                // 契约 v13：enable / disable ⇒ ⇒ **按 id**（同上）。
+                // 当前状态从**内核回执那一份**（`debug.bpEntries`）里查，
+                // 不另存一份启停表（那不是第二份真相，那是同一份）。
+                const id = toInt(detail.params?.id, 0) >>> 0;
+                const entries = viewStore.getState("debug")?.debug?.bpEntries ?? [];
+                const entry = entries.find((e) => toInt(e?.id, 0) === id) ?? null;
+                const next = entry ? entry.enabled === false : true;
+                await commandRouter.dispatchCommand(Command.setBreakpointEnabled(id, next));
+                // 内核回执（`Breakpoints`）会整表覆盖 ⇒ ⇒ 界面不必自己翻。
                 break;
             }
             case "set-watch-expr": {

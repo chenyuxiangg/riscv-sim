@@ -166,28 +166,28 @@ describe("任意地址入口（视图层）", () => {
         const box = body.querySelector("[data-addr-input=\"breakpoint\"]");
         assert.ok(box, "断点卡里必须有地址输入的容器");
         assert.ok(
-            box.querySelector("[data-bp-addr-input]"),
-            "断点卡里必须有地址输入框（data-bp-addr-input）",
+            box.querySelector("[data-bp-input]"),
+            "断点卡里必须有地址输入框（data-bp-input）",
         );
         assert.ok(
             box.querySelector("[data-action=\"set-breakpoint\"]"),
             "断点卡里必须有「加断点」按钮",
         );
         assert.ok(
-            box.querySelector("[data-bp-addr-error]"),
-            "断点卡里必须有提示位（data-bp-addr-error）",
+            box.querySelector("[data-bp-error]"),
+            "断点卡里必须有提示位（data-bp-error）",
         );
     });
 
     test("A-2 · 草稿**住视图状态** ⇒ ⇒ 重渲染**不丢**（落点唯一）", () => {
         const body = mountView("#/debug");
         // -- 写草稿（模拟用户敲了字）------------------------------------
-        const input = boxInput(body, "[data-addr-input=\"breakpoint\"]", "[data-bp-addr-input]");
+        const input = boxInput(body, "[data-addr-input=\"breakpoint\"]", "[data-bp-input]");
         input.value = "0x2000";
         input.dispatchEvent(new Event("input", { bubbles: true }));
 
         assert.equal(
-            m02.debuggerDraft().bpAddr,
+            m02.debuggerDraft().bpDraft,
             "0x2000",
             "草稿必须**住视图状态**（不是只存在 DOM 里）",
         );
@@ -199,7 +199,7 @@ describe("任意地址入口（视图层）", () => {
         const after = boxInput(
             dom.document.querySelector('[data-view-body="debug"]'),
             "[data-addr-input=\"breakpoint\"]",
-            "[data-bp-addr-input]",
+            "[data-bp-input]",
         );
         assert.equal(after.value, "0x2000", "重渲染后草稿**不许丢**");
     });
@@ -216,7 +216,7 @@ describe("任意地址断点", () => {
 
     test("A-3 · 点「加断点」⇒ ⇒ `params.addr` = **用户输入的那个**", async () => {
         const body = mountView("#/debug");
-        const input = boxInput(body, "[data-addr-input=\"breakpoint\"]", "[data-bp-addr-input]");
+        const input = boxInput(body, "[data-addr-input=\"breakpoint\"]", "[data-bp-input]");
         input.value = "0x2000";
 
         const router = fakeRouter();
@@ -250,7 +250,7 @@ describe("任意地址断点", () => {
     test("A-4 · 输入**解析不出来** ⇒ ⇒ **不发**命令 **且** 有提示", () => {
         const body = mountView("#/debug");
         const box = body.querySelector("[data-addr-input=\"breakpoint\"]");
-        const input = box.querySelector("[data-bp-addr-input]");
+        const input = box.querySelector("[data-bp-input]");
         input.value = "zzz";
 
         const { signals, stop } = collectSignals();
@@ -258,7 +258,7 @@ describe("任意地址断点", () => {
         stop();
 
         assert.equal(signals.length, 0, "解析不出来 ⇒ ⇒ **一条命令都不发**");
-        const err = box.querySelector("[data-bp-addr-error]");
+        const err = box.querySelector("[data-bp-error]");
         assert.ok(err, "必须有提示位");
         assert.ok(
             String(err.textContent ?? "").length > 0,
@@ -269,7 +269,7 @@ describe("任意地址断点", () => {
     test("A-5 · 输入**奇数**地址 ⇒ ⇒ **照样发**命令（前端不预校验对齐）", () => {
         const body = mountView("#/debug");
         const box = body.querySelector("[data-addr-input=\"breakpoint\"]");
-        const input = box.querySelector("[data-bp-addr-input]");
+        const input = box.querySelector("[data-bp-input]");
         input.value = "0x101";
 
         const { signals, stop } = collectSignals();
@@ -494,7 +494,7 @@ describe("回显、回归与委托", () => {
         const box = body.querySelector("[data-addr-input=\"breakpoint\"]");
         // ⚠️ 裸的十六进制（没有 `0x` 前缀）⇒ ⇒ 解析出来必须是 0x2000 ⇒ ⇒
         // 列表里显示的**不是**原文「2000」而是那个**地址**。
-        box.querySelector("[data-bp-addr-input]").value = "2000";
+        box.querySelector("[data-bp-input]").value = "2000";
 
         const router = fakeRouter();
         const { signals, stop } = collectSignals();
@@ -504,16 +504,26 @@ describe("回显、回归与委托", () => {
         box.querySelector("[data-action=\"set-breakpoint\"]").click();
         stop();
 
-        // ⚠️ **成功后才落列表**（M-08 状态同步回归）：命令是异步的。
+        // ⚠️ **成功之后**才去拉内核表（M-08 状态同步回归）：命令是异步的。
         await new Promise((r) => setTimeout(r, 0));
         assert.equal(signals.length, 1, "必须发出**一条**命令");
-        const state = m03.getState("debug");
-        assert.deepEqual(
-            state.debug.breakpoints,
-            [0x2000],
+        // ⚠️ **列表只有一份真相**（STAGE-55）：前端**不再**自己拼一份
+        //   「我请求过的断点」⇒ ⇒ 注册成功后向内核**拉一次表**。
+        assert.equal(
+            router.sent.find((p) => p?.SetBreakpoint)?.SetBreakpoint.addr,
+            0x2000,
             "断点必须下在**用户输入的那个地址**上（不是 0、不是原文）",
         );
-        const html = m02.get("debug").render(state);
+        assert.ok(
+            router.sent.includes("ListBreakpoints"),
+            "注册成功后必须拉一次内核断点表（列表不许自己编）",
+        );
+        // 回执照原样落进 `bpEntries` ⇒ ⇒ 列表渲染的地址就是它。
+        const html = m02.get("debug").render({
+            debug: {
+                bpEntries: [{ id: 0x2000, addr: 0x2000, kind: "Address", enabled: true, hits: 0 }],
+            },
+        });
         assert.ok(
             html.includes('data-bp-addr="0x00002000"'),
             "断点列表必须显示**那个地址**（机器可读的属性）",
@@ -560,12 +570,12 @@ describe("回显、回归与委托", () => {
 
     test("A-14 · 监听走**事件委托** ⇒ ⇒ 重渲染后**仍能**点", () => {
         const body = mountView("#/debug");
-        const input = boxInput(body, "[data-addr-input=\"breakpoint\"]", "[data-bp-addr-input]");
+        const input = boxInput(body, "[data-addr-input=\"breakpoint\"]", "[data-bp-input]");
         input.value = "0x3000";
         // ⚠️ **事件委托**：监听器绑在**容器**上 ⇒ ⇒ 这里派发到输入框，
         //   冒泡到容器 ⇒ ⇒ 容器上的监听器接得住。
         input.dispatchEvent(new Event("input", { bubbles: true }));
-        assert.equal(m02.debuggerDraft().bpAddr, "0x3000", "输入必须写进草稿");
+        assert.equal(m02.debuggerDraft().bpDraft, "0x3000", "输入必须写进草稿");
 
         // -- 重渲染 ⇒ ⇒ **输入框元素被换掉** --------------------------------
         dom.window.dispatchEvent(new CustomEvent("riscv:render", {
@@ -574,7 +584,7 @@ describe("回显、回归与委托", () => {
         const body2 = dom.document.querySelector('[data-view-body="debug"]');
         const box2 = body2.querySelector("[data-addr-input=\"breakpoint\"]");
         assert.notEqual(
-            box2.querySelector("[data-bp-addr-input]"),
+            box2.querySelector("[data-bp-input]"),
             input,
             "重渲染后输入框**必须**是新的元素（否则这条判据是空转）",
         );

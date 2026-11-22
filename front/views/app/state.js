@@ -85,16 +85,16 @@ export function setLoadedProject(project) {
  *
  * ⚠️ **它是「下一次」** ⇒ ⇒ 一次错误消费掉 ⇒ ⇒ 不会串位。
  *
- * @type {"cond"|"symbol"|"dump"|null}
+ * @type {"bp"|"dump"|null}
  */
 let pendingErrorSlot = null;
 
-/** @returns {"cond"|"symbol"|"dump"|null} 下一条错误的目标位。 */
+/** @returns {"bp"|"dump"|null} 下一条错误的目标位。 */
 export function getPendingErrorSlot() {
     return pendingErrorSlot;
 }
 
-/** @param {"cond"|"symbol"|"dump"|null} slot */
+/** @param {"bp"|"dump"|null} slot */
 export function setPendingErrorSlot(slot) {
     pendingErrorSlot = slot;
 }

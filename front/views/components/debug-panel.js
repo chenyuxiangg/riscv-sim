@@ -186,18 +186,94 @@ export function parseAddrInput(text) {
 }
 
 /**
- * **断点地址**输入行（共享片段 · 裁决 K）。
+ * 断点的**输入方式**三值 —— **与契约 `Breakpoint.kind` 的变体逐个对齐**
+ * （STAGE-55 · 表 13）⇒ ⇒ 前端不另造一套名字。
  *
- * @param {{draft?: string, error?: string}} [opts]
+ * ⚠️ 三值是**落库**的（随 `DebugMeta.breakpoints` 走）⇒ ⇒ 它只是
+ *   「这个断点是**怎么**建起来的」的来源标记 ⇒ ⇒ 运行时仍只有两种命中
+ *   语义（地址命中 / 谓词命中）。
+ *
+ * @type {{Address: string, Symbol: string, Condition: string}}
+ */
+export const BREAKPOINT_KIND = {
+    Address: "Address",
+    Symbol: "Symbol",
+    Condition: "Condition",
+};
+
+/**
+ * 三种类型在界面上的**中文标签**（唯一落点 · 表 14「来源标签」）。
+ *
+ * @type {Record<string, string>}
+ */
+export const BREAKPOINT_KIND_LABEL = {
+    [BREAKPOINT_KIND.Address]: "地址",
+    [BREAKPOINT_KIND.Symbol]: "符号",
+    [BREAKPOINT_KIND.Condition]: "条件",
+};
+
+/**
+ * 按类型切换的 placeholder（唯一落点）。
+ *
+ * @type {Record<string, string>}
+ */
+const BREAKPOINT_KIND_PLACEHOLDER = {
+    [BREAKPOINT_KIND.Address]: "断点地址（十六进制），例如 0x2000",
+    [BREAKPOINT_KIND.Symbol]: "符号名，例如 main（Tab 补全前 5 条）",
+    [BREAKPOINT_KIND.Condition]: "条件表达式，例如 x1 == 5",
+};
+
+/**
+ * **归一化**一个输入方式：不认识的值一律回到 `Address`。
+ *
+ * ⚠️ 旧草稿 / 旧链接 / 旧载荷里没有这个字段 ⇒ ⇒ **默认地址断点**
+ *   ⇒ ⇒ 这一条与契约的 `#[serde(default)]` **同口径**（旧数据不会变味）。
+ *
+ * @param {unknown} raw
  * @returns {string}
  */
-export function renderBreakpointAddrRow({ draft = "", error = "" } = {}) {
+export function normalizeBreakpointKind(raw) {
+    const text = String(raw ?? "");
+    return Object.prototype.hasOwnProperty.call(BREAKPOINT_KIND_LABEL, text)
+        ? text
+        : BREAKPOINT_KIND.Address;
+}
+
+/**
+ * **断点输入行**：类型下拉 + **单输入框** + 一个按钮（STAGE-55 · 表 13/14）。
+ *
+ * ⚠️ **收敛的是入口，不是能力**：三种类型共用一条输入行 ⇒ ⇒ 下拉切换时
+ *   placeholder、候选区与错误位**都**跟着切 ⇒ ⇒ 不存在「地址框旁边还挂着
+ *   一个条件框」这种把地址当表达式提交的口子。
+ *
+ * ⚠️ 符号类型的候选区**只在这一种类型下渲染** ⇒ ⇒ 条件类型**不做**符号
+ *   补全（表 13）。
+ *
+ * @param {{kind?: string, draft?: string, error?: string, symbolResult?: object|null, tabIndex?: number}} [opts]
+ * @returns {string}
+ */
+export function renderBreakpointAddRow({
+    kind = BREAKPOINT_KIND.Address,
+    draft = "",
+    error = "",
+    symbolResult = null,
+    tabIndex = -1,
+} = {}) {
+    const k = normalizeBreakpointKind(kind);
+    const options = Object.values(BREAKPOINT_KIND)
+        .map((value) => `<option value="${value}"${value === k ? " selected" : ""}>${BREAKPOINT_KIND_LABEL[value]}</option>`)
+        .join("");
+    const candidates = k === BREAKPOINT_KIND.Symbol
+        ? `<div class="symbol-candidates" data-bp-symbol-candidates>${renderSymbolCandidates(symbolResult, tabIndex)}</div>`
+        : "";
     return `
-        <div class="addr-input" data-addr-input="breakpoint">
-            <input type="text" class="addr-field" data-bp-addr-input value="${escapeHtml(draft)}"
-                placeholder="断点地址（十六进制）" spellcheck="false" autocomplete="off">
+        <div class="addr-input bp-add" data-addr-input="breakpoint" data-bp-add data-bp-kind="${k}">
+            <select class="addr-field bp-kind" data-bp-kind-input aria-label="断点类型">${options}</select>
+            <input type="text" class="addr-field" data-bp-input value="${escapeHtml(draft)}"
+                placeholder="${escapeHtml(BREAKPOINT_KIND_PLACEHOLDER[k])}" spellcheck="false" autocomplete="off">
             <button type="button" data-action="set-breakpoint">加断点</button>
-            <span class="addr-error" data-bp-addr-error>${escapeHtml(error)}</span>
+            <span class="addr-error" data-bp-error>${escapeHtml(error)}</span>
+            ${candidates}
         </div>`;
 }
 
@@ -232,19 +308,11 @@ export function renderMemoryReadRow({ draft = "", size = WRITE_SIZE.Word, error 
 // ---------------------------------------------------------------------------
 
 /**
- * **条件表达式**输入行（共享片段 · 契约 v9 §5.1 · 裁决 O）。
+ * Tab 补全能循环的候选条数（**前端截前 5** · 表 13）。
  *
- * @param {{draft?: string, error?: string}} [opts]
- * @returns {string}
+ * @type {number}
  */
-export function renderBreakpointCondRow({ draft = "", error = "" } = {}) {
-    return `
-        <div class="cond-input" data-cond-input="breakpoint">
-            <input type="text" class="addr-field" data-bp-cond-input value="${escapeHtml(draft)}"
-                placeholder="条件（可选），例如 x1 == 5" spellcheck="false" autocomplete="off">
-            <span class="addr-error" data-bp-cond-error>${escapeHtml(error)}</span>
-        </div>`;
-}
+export const BREAKPOINT_SYMBOL_TAB_LIMIT = 5;
 
 /**
  * 一条符号候选的**可点按钮**（契约 v9 §5.1 · 裁决 N）。
@@ -256,28 +324,33 @@ export function renderBreakpointCondRow({ draft = "", error = "" } = {}) {
  * 一行字（**不编**一个地址出来）⇒ 它的 class **不是** `symbol-candidate`。
  *
  * @param {{name?: string, addr?: number|null, size?: number|null}} symbol
+ * @param {{index?: number, active?: boolean}} [opts] — Tab 循环的当前位
  * @returns {string}
  */
-export function renderSymbolCandidate(symbol) {
+export function renderSymbolCandidate(symbol, { index = -1, active = false } = {}) {
     const name = String(symbol?.name ?? "");
     const addr = symbol?.addr;
     if (typeof addr !== "number" || !Number.isFinite(addr)) {
         return `<span class="muted symbol-candidate-na" data-bp-symbol-name="${escapeHtml(name)}">${escapeHtml(name)}（无地址）</span>`;
     }
     const addrText = `0x${(addr >>> 0).toString(16).padStart(8, "0")}`;
-    return `<button type="button" class="symbol-candidate" data-action="set-symbol-breakpoint"
-        data-addr="${addrText}" data-symbol="${escapeHtml(name)}">${escapeHtml(name)} @ ${addrText}</button>`;
+    return `<button type="button" class="symbol-candidate${active ? " is-active" : ""}" data-action="set-symbol-breakpoint"
+        data-addr="${addrText}" data-symbol="${escapeHtml(name)}"${active ? " aria-current=\"true\"" : ""}${index >= 0 ? ` data-bp-tab-index="${index}"` : ""}>${escapeHtml(name)} @ ${addrText}</button>`;
 }
 
 /**
- * 候选区（契约 v9 §5.1）。
+ * 候选区（契约 v9 §5.1 · STAGE-55 表 13「候选**前 5 条**」）。
  *
  * ⚠️ **精确命中也在列表里，且排第一** ⇒ 用户填了全名 ⇒ 列表里就是那一条。
  *
+ * ⚠️ **前端只截前 5**（后端上限 16）⇒ ⇒ 截的是**补全候选**（Tab 能循环的
+ *   那几条）⇒ ⇒ 与「一共查到几条」是两回事，`total` 照原样显示。
+ *
  * @param {{name?: string, symbol?: object|null, candidates?: object[], total?: number}|null} result
+ * @param {number} [tabIndex] — Tab 循环的当前位（`-1` = 还没开始循环）
  * @returns {string}
  */
-export function renderSymbolCandidates(result) {
+export function renderSymbolCandidates(result, tabIndex = -1) {
     if (!result) return "";
     const exact = result.symbol ?? null;
     const candidates = Array.isArray(result.candidates) ? result.candidates : [];
@@ -291,24 +364,48 @@ export function renderSymbolCandidates(result) {
     const items = [];
     if (exact) items.push(exact);
     for (const c of candidates) items.push(c);
-    return items.map((s) => renderSymbolCandidate(s)).join("");
+    const shown = items.slice(0, BREAKPOINT_SYMBOL_TAB_LIMIT);
+    return shown
+        .map((s, i) => renderSymbolCandidate(s, { index: i, active: i === tabIndex }))
+        .join("");
 }
 
 /**
- * **符号查询**入口（共享片段 · 契约 v9 §5.1 · 裁决 L / M / N）。
+ * **断点列表的一行**（STAGE-55 · 表 14「断点列表」）。
  *
- * @param {{draft?: string, error?: string, result?: object|null}} [opts]
+ * ⚠️ 一行必须自己说清**四件事**：来源标签（地址 / 符号 / 条件）、
+ *   它凭什么命中（地址 or 表达式原文）、命中次数、启停状态。
+ *
+ * ⚠️ **行内的 id 是内核给的**（`data-bp-id`）⇒ ⇒ 启停 / 撤销都**按 id**
+ *   走 ⇒ ⇒ 谓词条目没有地址，拿地址当句柄会当场坏掉。
+ *
+ * ⚠️ **降级标记**（批 C 的 `degraded`）现在还不产生 ⇒ ⇒ 这里只留一个
+ *   **如实**的位置：有就显示，没有就不显示（**不编**状态）。
+ *
+ * @param {{id?: number, addr?: number, kind?: string, condition?: string|null, symbol?: string|null, enabled?: boolean, hits?: number, degraded?: boolean}} entry
  * @returns {string}
  */
-export function renderSymbolLookupRow({ draft = "", error = "", result = null } = {}) {
-    const query = result ? String(result.name ?? "") : "";
+export function renderBreakpointRow(entry) {
+    const id = Number(entry?.id ?? 0) >>> 0;
+    const kind = normalizeBreakpointKind(entry?.kind);
+    const addr = Number(entry?.addr ?? 0) >>> 0;
+    const addrText = `0x${addr.toString(16).padStart(8, "0")}`;
+    const on = entry?.enabled !== false;
+    const hits = Number(entry?.hits ?? 0);
+    const condition = entry?.condition ? String(entry.condition) : "";
+    const symbol = entry?.symbol ? String(entry.symbol) : "";
+    const where = kind === BREAKPOINT_KIND.Condition
+        ? `<code class="cond" data-bp-cond-text>${escapeHtml(condition)}</code>`
+        : `<code class="addr">${addrText}</code>`;
     return `
-        <div class="symbol-input" data-symbol-input="breakpoint">
-            <input type="text" class="addr-field" data-bp-symbol-input value="${escapeHtml(draft)}"
-                placeholder="符号名（例如 main）" spellcheck="false" autocomplete="off">
-            <button type="button" data-action="lookup-symbol">查找</button>
-            <span class="addr-error" data-bp-symbol-error>${escapeHtml(error)}</span>
-            <div class="symbol-candidates" data-bp-symbol-candidates${query ? ` data-bp-symbol-query="${escapeHtml(query)}"` : ""}>${renderSymbolCandidates(result)}</div>
+        <div class="bp-row" data-bp-row data-bp-id="${id}" data-bp-addr="${addrText}" data-bp-kind="${kind}" data-bp-enabled="${on ? "true" : "false"}">
+            <span class="tag bp-kind-tag" data-bp-kind-tag>${BREAKPOINT_KIND_LABEL[kind]}</span>
+            ${where}
+            ${symbol ? `<span class="note" data-bp-symbol>${escapeHtml(symbol)}</span>` : ""}
+            ${entry?.degraded === true ? `<span class="tag bp-degraded" data-bp-degraded>降级</span>` : ""}
+            <span class="note" data-bp-hits>命中 ${hits} 次</span>
+            <button type="button" data-action="toggle-breakpoint" data-id="${id}" aria-pressed="${on ? "true" : "false"}">${on ? "禁用" : "启用"}</button>
+            <button type="button" data-action="clear-breakpoint" data-id="${id}">撤掉</button>
         </div>`;
 }
 
@@ -391,20 +488,24 @@ export const DEBUGGER_STATE_KEY = "debugger";
 export const DEFAULT_STEP_COUNT = "10";
 
 /**
- * 读**当前草稿**（断点地址 / 读内存地址 / 宽度 / 条件 / 符号 / 转储 / 步数）。
+ * 读**当前草稿**（断点类型与那**一个**输入框 / 读内存地址 / 宽度 / 转储 / 步数）。
  *
- * ⚠️ 条件、符号、转储的草稿也住这里（契约 v9）⇒ 渲染会重建 DOM ⇒
- * 草稿住在 DOM 里会被清空（D-119）⇒ 草稿**必须**在视图状态里。
+ * ⚠️ 草稿住视图状态（不是 DOM）⇒ 渲染会重建 DOM ⇒ 草稿住在 DOM 里会被
+ *   清空（D-119）⇒ 草稿**必须**在视图状态里。
  *
- * @returns {{bpAddr: string, bpCond: string, bpSymbol: string, memAddr: string, memSize: string, dumpAddr: string, dumpLen: string}}
+ * ⚠️ **STAGE-55**：地址 / 条件 / 符号的**三份草稿合成一份**（`bpDraft`）
+ *   ⇒ ⇒ 与界面上的**一个输入框**一一对应 ⇒ ⇒ 不存在「框里有一份、
+ *   状态里还有另一份」的两套内容。
+ *
+ * @returns {{bpKind: string, bpDraft: string, bpTabIndex: number, memAddr: string, memSize: string, dumpAddr: string, dumpLen: string}}
  */
 export function debuggerDraft() {
     const s = viewStore.getState(DEBUGGER_STATE_KEY) ?? {};
     const size = String(s.memSize ?? WRITE_SIZE.Word);
     return {
-        bpAddr: String(s.bpAddr ?? ""),
-        bpCond: String(s.bpCond ?? ""),
-        bpSymbol: String(s.bpSymbol ?? ""),
+        bpKind: normalizeBreakpointKind(s.bpKind),
+        bpDraft: String(s.bpDraft ?? ""),
+        bpTabIndex: Number.isInteger(s.bpTabIndex) ? s.bpTabIndex : -1,
         memAddr: String(s.memAddr ?? ""),
         memSize: Object.prototype.hasOwnProperty.call(WRITE_SIZE, size) ? size : WRITE_SIZE.Word,
         dumpAddr: String(s.dumpAddr ?? ""),
@@ -460,15 +561,17 @@ function setAddrError(box, selector, message) {
 function resolveAddrParams(action, el) {
     // --- 契约 v9 的三条新动作（各有各的界面来源）--------------------------
     if (action === "set-symbol-breakpoint") {
+        // 候选按钮自带地址与名字 ⇒ ⇒ 这一条**不看输入框**。
         return {
             addr: el?.dataset?.addr,
             symbol: el?.dataset?.symbol ? String(el.dataset.symbol) : null,
-            condition: readBreakpointCondition(el),
+            kind: BREAKPOINT_KIND.Symbol,
         };
     }
     if (action === "lookup-symbol") {
-        const box = el?.closest?.("[data-symbol-input]");
-        const name = String(box?.querySelector?.("[data-bp-symbol-input]")?.value ?? "");
+        // ⚠️ STAGE-55：符号查询与断点共用一个框（`data-bp-input`）。
+        const box = el?.closest?.("[data-bp-add]") ?? el?.closest?.("[data-addr-input]");
+        const name = String(box?.querySelector?.("[data-bp-input]")?.value ?? "");
         return { name };
     }
     if (action === "dump-memory") {
@@ -488,22 +591,12 @@ function resolveAddrParams(action, el) {
         setAddrError(box, "[data-dump-error]", "");
         return { addr: parsed.value, len };
     }
-    if (action !== "set-breakpoint" && action !== "read-mem") return null;
+    if (action !== "read-mem") return null;
     // --- 来源 1：按钮自带地址（旧按钮的路，一字不变）----------------------
     if (el?.dataset?.addr) return { addr: el.dataset.addr };
     // --- 来源 2：同屏的地址输入框 ----------------------------------------
     const box = el?.closest?.("[data-addr-input]");
     if (!box) return null;
-    if (action === "set-breakpoint") {
-        const parsed = parseAddrInput(box.querySelector("[data-bp-addr-input]")?.value ?? "");
-        if (!parsed.ok) {
-            setAddrError(box, "[data-bp-addr-error]", parsed.error);
-            return { invalid: true };
-        }
-        setAddrError(box, "[data-bp-addr-error]", "");
-        // ⚠️ **条件框对地址断点也通用**（裁决 O）。
-        return { addr: parsed.value, condition: readBreakpointCondition(el) };
-    }
     const parsed = parseAddrInput(box.querySelector("[data-mem-addr-input]")?.value ?? "");
     if (!parsed.ok) {
         setAddrError(box, "[data-mem-addr-error]", parsed.error);
@@ -518,19 +611,55 @@ function resolveAddrParams(action, el) {
 }
 
 /**
- * 读**「断点」卡里那个条件框**的内容（契约 v9 · 裁决 O）。
+ * 把「点一下加断点」翻译成一条命令的载荷（STAGE-55 · 表 13「提交载荷」）。
  *
- * ⚠️ **空串 ⇒ `null`**（C-9：不是空串）。纯空格的串照发 ⇒ 前端**不解析**
- * 条件表达式 ⇒ 内核回 `E_DBG-02`，前端显示它的原文。
+ * ⚠️ **三种类型只有一个入口** ⇒ ⇒ 载荷按**当前下拉**组装：
+ *   地址 ⇒ `{kind, addr}`；符号 ⇒ `{kind, name}`（名字**由内核**解析成
+ *   地址，前端**不编**地址）；条件 ⇒ `{kind, condition}`（表达式原文照发，
+ *   **前端不解析**）。
+ *
+ * ⚠️ **只有地址类型在前端挡「压根不是一个数」**（既有裁决 E 不变）⇒ ⇒
+ *   符号 / 条件的合法与否**一律由内核说**。
  *
  * @param {Element|null} el — 被点的那个按钮
- * @returns {string|null}
+ * @returns {{kind: string, addr?: number, name?: string, condition?: string, invalid?: boolean}|null}
  */
-function readBreakpointCondition(el) {
-    const card = el?.closest?.(".breakpoint-card");
-    const input = card?.querySelector?.("[data-bp-cond-input]");
-    const raw = String(input?.value ?? "");
-    return raw === "" ? null : raw;
+function resolveAddBreakpoint(el) {
+    const box = el?.closest?.("[data-bp-add]") ?? el?.closest?.("[data-addr-input]");
+    if (!box) return null;
+    const kind = normalizeBreakpointKind(box.querySelector("[data-bp-kind-input]")?.value);
+    const text = String(box.querySelector("[data-bp-input]")?.value ?? "").trim();
+    if (kind === BREAKPOINT_KIND.Address) {
+        const parsed = parseAddrInput(text);
+        if (!parsed.ok) {
+            setAddrError(box, "[data-bp-error]", parsed.error);
+            return { invalid: true };
+        }
+        setAddrError(box, "[data-bp-error]", "");
+        return { kind, addr: parsed.value };
+    }
+    setAddrError(box, "[data-bp-error]", "");
+    if (kind === BREAKPOINT_KIND.Condition) return { kind, condition: text };
+    return { kind, name: text };
+}
+
+/**
+ * 符号补全能循环的那几条候选（**前 5**、**必须有地址**）。
+ *
+ * ⚠️ 与渲染**同一条口径**（表 13「候选前 5 条」「无地址的候选渲染为
+ *   不可点」）⇒ ⇒ 能 Tab 选中的，就是点得动的。
+ *
+ * @param {{symbol?: object|null, candidates?: object[]}|null} result
+ * @returns {object[]}
+ */
+function tabCandidates(result) {
+    if (!result) return [];
+    const items = [];
+    if (result.symbol) items.push(result.symbol);
+    for (const c of Array.isArray(result.candidates) ? result.candidates : []) items.push(c);
+    return items
+        .filter((s) => typeof s?.addr === "number" && Number.isFinite(s.addr))
+        .slice(0, BREAKPOINT_SYMBOL_TAB_LIMIT);
 }
 
 /**
@@ -544,19 +673,11 @@ function readBreakpointCondition(el) {
 function mountAddrInputListeners(el) {
     el.addEventListener("input", (ev) => {
         const target = ev.target;
-        if (target?.closest?.("[data-bp-addr-input]")) {
-            setDebuggerDraft({ bpAddr: target.value ?? "" });
-            setAddrError(target.closest("[data-addr-input]"), "[data-bp-addr-error]", "");
-            return;
-        }
-        if (target?.closest?.("[data-bp-cond-input]")) {
-            setDebuggerDraft({ bpCond: target.value ?? "" });
-            setAddrError(target.closest("[data-cond-input]"), "[data-bp-cond-error]", "");
-            return;
-        }
-        if (target?.closest?.("[data-bp-symbol-input]")) {
-            setDebuggerDraft({ bpSymbol: target.value ?? "" });
-            setAddrError(target.closest("[data-symbol-input]"), "[data-bp-symbol-error]", "");
+        if (target?.closest?.("[data-bp-input]")) {
+            // ⚠️ STAGE-55：**一个框**管三种类型 ⇒ 敲字就退出 Tab 循环
+            //   （`bpTabIndex = -1`）⇒ ⇒ 下一次 Tab 是一轮**新的**前缀查询。
+            setDebuggerDraft({ bpDraft: target.value ?? "", bpTabIndex: -1 });
+            setAddrError(target.closest("[data-bp-add]") ?? target.closest("[data-addr-input]"), "[data-bp-error]", "");
             return;
         }
         if (target?.closest?.("[data-dump-addr-input]")) {
@@ -582,18 +703,52 @@ function mountAddrInputListeners(el) {
         }
     });
     el.addEventListener("change", (ev) => {
+        const kindBox = ev.target?.closest?.("[data-bp-kind-input]");
+        if (kindBox) {
+            // ⚠️ 表 14：**切换类型 ⇒ 清空草稿与错误位**（免得把地址当表达式
+            //   提交出去）⇒ ⇒ 草稿写在一个地方，重渲染由 app 层发。
+            emitCommand("bp-kind", "debug", { kind: normalizeBreakpointKind(kindBox.value) });
+            return;
+        }
         const target = ev.target?.closest?.("[data-mem-size]");
         if (!target) return;
         setDebuggerDraft({ memSize: target.value ?? WRITE_SIZE.Word });
     });
-    // ⚠️ **回车 = 「查找」**（裁决 M：查询按**显式动作**触发）。
+    // ⚠️ **Tab = 符号补全 / ↑↓ = 换一条 / 回车 = 点「加断点」**
+    //   （表 13「Tab 触发前缀补全，候选前 5 条；↑↓ 选择、回车落断」·
+    //   表 14「Enter 等价点击按钮」）。
     el.addEventListener("keydown", (ev) => {
-        if (ev?.key !== "Enter") return;
-        const target = ev.target?.closest?.("[data-bp-symbol-input]");
-        if (!target) return;
+        const box = ev.target?.closest?.("[data-bp-add]") ?? ev.target?.closest?.("[data-addr-input]");
+        const input = box?.querySelector?.("[data-bp-input]");
+        if (!input || ev.target !== input) return;
+        const kind = normalizeBreakpointKind(box?.querySelector?.("[data-bp-kind-input]")?.value);
+        if (ev?.key === "Enter") {
+            ev.preventDefault?.();
+            box.querySelector("[data-action=\"set-breakpoint\"]")?.click?.();
+            return;
+        }
+        if (kind !== BREAKPOINT_KIND.Symbol) return;
+        if (ev?.key !== "Tab" && ev?.key !== "ArrowDown" && ev?.key !== "ArrowUp") return;
         ev.preventDefault?.();
-        const params = resolveAddrParams("lookup-symbol", target) ?? {};
-        emitCommand("lookup-symbol", "debug", { name: params.name ?? "" });
+        const draft = debuggerDraft();
+        const list = tabCandidates(viewStore.getState("debug")?.debug?.symbol ?? null);
+        if (list.length === 0) {
+            // 还没有候选（或一条都没有）⇒ ⇒ 这一下是**发起前缀查询**。
+            setDebuggerDraft({ bpTabIndex: -1 });
+            emitCommand("lookup-symbol", "debug", { name: String(input.value ?? "") });
+            return;
+        }
+        const back = ev?.key === "ArrowUp";
+        const step = back ? -1 : 1;
+        const index = draft.bpTabIndex < 0
+            ? 0
+            : (draft.bpTabIndex + step + list.length) % list.length;
+        const picked = list[index];
+        input.value = String(picked?.name ?? "");
+        setDebuggerDraft({ bpDraft: input.value, bpTabIndex: index });
+        // ⚠️ 高亮要**看得见** ⇒ ⇒ 让 app 层重渲染一次（草稿已写进状态，
+        //   这一条**不清草稿**——它与「切换类型」不是同一条动作）。
+        emitCommand("bp-tab", "debug", { index });
     });
 }
 
@@ -661,22 +816,19 @@ const debugView = register({
         // ⚠️ **开关状态是推导量**（trace-switch.js）⇒ 视图层与 app 层引同一处。
         const traceSwitch = traceSwitchState(debug.trace ?? null);
         const error = debug.error ?? null;
-        // ⚠️ **断点列表只有一个落点**（裁决 K）⇒ 这里只读视图状态。
-        const breakpoints = Array.isArray(debug.breakpoints) ? debug.breakpoints : [];
-        const bpSymbols = debug.bpSymbols && typeof debug.bpSymbols === "object"
-            ? debug.bpSymbols
-            : {};
-        const bpEnabled = debug.bpEnabled && typeof debug.bpEnabled === "object"
-            ? debug.bpEnabled
-            : {};
-        const bpHits = debug.bpHits && typeof debug.bpHits === "object"
-            ? debug.bpHits
-            : {};
+        // ⚠️ **断点表只有一个落点**（STAGE-55）⇒ `debug.bpEntries` 是内核
+        //   `ListBreakpoints` 回执的**原样条目**（id / 地址 / kind / 表达式 /
+        //   启停 / 命中）⇒ ⇒ 视图层只读，**不持有**第二份。
+        const bpEntries = Array.isArray(debug.bpEntries) ? debug.bpEntries : [];
+        // ⚠️ 反汇编的「断点」列只关心**有地址的**条目 ⇒ ⇒ 谓词条目没有地址，
+        //   不该在反汇编表上占一格。
+        const bpAddrs = bpEntries
+            .filter((e) => normalizeBreakpointKind(e?.kind) !== BREAKPOINT_KIND.Condition)
+            .map((e) => Number(e?.addr ?? 0) >>> 0);
         // 契约 v14：观察表达式的轮询回执（`WatchValue` 列表）。
         const watchValues = Array.isArray(debug.watchValues) ? debug.watchValues : [];
         const symbolResult = debug.symbol ?? null;
-        const condError = String(debug.condError ?? "");
-        const symbolError = String(debug.symbolError ?? "");
+        const bpError = String(debug.bpError ?? "");
         const halt = debug.halt ?? null;
         const readback = debug.readback ?? null;
         const regBaseline = readback?.baseline ?? null;
@@ -713,34 +865,23 @@ const debugView = register({
                     <table class="disasm-table">
                         <thead><tr><th>地址</th><th>机器码</th><th>助记符</th><th>宽度</th><th>源码</th><th>断点</th></tr></thead>
                         <tbody>
-                            ${entries.map((entry) => renderDisasmRow(entry, pc, breakpoints)).join("")
+                            ${entries.map((entry) => renderDisasmRow(entry, pc, bpAddrs)).join("")
                                 || `<tr><td colspan="6" class="muted">尚无反汇编</td></tr>`}
                         </tbody>
                     </table>
                 </section>
                 <section class="card breakpoint-card">
-                    <div class="row"><h3>断点</h3><span class="tag">${breakpoints.length} 个</span><button type="button" data-action="list-breakpoints">刷新内核断点表</button></div>
-                    ${renderBreakpointAddrRow({ draft: draft.bpAddr })}
-                    ${renderBreakpointCondRow({ draft: draft.bpCond, error: condError })}
-                    ${renderSymbolLookupRow({ draft: draft.bpSymbol, error: symbolError, result: symbolResult })}
-                    ${breakpoints.length === 0
+                    <div class="row"><h3>断点</h3><span class="tag">${bpEntries.length} 个</span><button type="button" data-action="list-breakpoints">刷新内核断点表</button></div>
+                    ${renderBreakpointAddRow({
+                        kind: draft.bpKind,
+                        draft: draft.bpDraft,
+                        error: bpError,
+                        symbolResult,
+                        tabIndex: draft.bpTabIndex,
+                    })}
+                    ${bpEntries.length === 0
                         ? `<p class="muted">尚无断点</p>`
-                        : `<div class="bp-list" data-bp-list>${breakpoints.map((raw) => {
-                            const addr = Number(raw ?? 0) >>> 0;
-                            const addrText = `0x${addr.toString(16).padStart(8, "0")}`;
-                            const symbol = bpSymbols[String(addr)] ?? null;
-                            const on = bpEnabled[String(addr)] !== false;
-                            const hits = Number(bpHits[String(addr)] ?? 0);
-                            return `
-                                <div class="bp-row" data-bp-row data-bp-addr="${addrText}" data-bp-enabled="${on ? "true" : "false"}">
-                                    <code class="addr">${addrText}</code>
-                                    ${symbol ? `<span class="note">${escapeHtml(String(symbol))}</span>` : ""}
-                                    <span class="note">断点 id = 地址</span>
-                                    <span class="note" data-bp-hits>命中 ${hits} 次</span>
-                                    <button type="button" data-action="toggle-breakpoint" data-addr="${addrText}" aria-pressed="${on ? "true" : "false"}">${on ? "禁用" : "启用"}</button>
-                                    <button type="button" data-action="clear-breakpoint" data-addr="${addrText}">撤掉</button>
-                                </div>`;
-                        }).join("")}</div>`}
+                        : `<div class="bp-list" data-bp-list>${bpEntries.map((entry) => renderBreakpointRow(entry)).join("")}</div>`}
                 </section>
                 <section class="card watch-card">
                     <div class="row"><h3>观察表达式</h3><span class="tag">${watchValues.length} 项</span><button type="button" data-action="list-watch-exprs">刷新</button></div>
@@ -839,6 +980,22 @@ const debugView = register({
         if (action === "list-watch-exprs") {
             return emitCommand("list-watch-exprs", "debug", {});
         }
+        // ⚠️ **STAGE-55**：加断点的载荷按**当前下拉**组装（三种类型一个入口）
+        //   ⇒ ⇒ 解析不出来时**一条命令都不发**（提示位已就地写）。
+        if (action === "set-breakpoint") {
+            // ⚠️ **反汇编行上的那个「加断点」**是**地址类**的快捷入口 ⇒ ⇒ 它
+            //   不在新增输入行里（没有下拉、没有单框）⇒ ⇒ 不能走「读草稿」
+            //   那条路，直接拿行上的地址 ⇒ ⇒ 两种入口发的是**同一条命令**。
+            if (el?.hasAttribute?.("data-bp-toggle")) {
+                return emitCommand("set-breakpoint", "debug", {
+                    kind: BREAKPOINT_KIND.Address,
+                    addr: el.dataset.addr,
+                });
+            }
+            const params = resolveAddBreakpoint(el);
+            if (!params || params.invalid === true) return undefined;
+            return emitCommand("set-breakpoint", "debug", params);
+        }
         // ⚠️ **任意地址**（裁决 B）：地址有两个来源。
         const addrParams = resolveAddrParams(action, el);
         if (addrParams?.invalid === true) return undefined;
@@ -856,6 +1013,9 @@ const debugView = register({
         return emitCommand(action, "debug", {
             ...(addrParams ?? {}),
             addr: addrParams?.addr ?? el.dataset.addr,
+            // ⚠️ **按 id 的动作**（STAGE-55 的启停 / 撤销）⇒ ⇒ 行上的 id
+            //   是内核给的句柄 ⇒ ⇒ 原样带出去。
+            id: el.dataset.id,
             count: el.dataset.count,
             source: el.dataset.source,
             format: el.dataset.format,
@@ -971,6 +1131,7 @@ function renderDisasmRow(entry, pc, breakpoints = []) {
     const bpButton = `
         <button type="button" class="bp-toggle${on ? " on" : ""}" data-bp-toggle="${addrText}"
             data-action="${on ? "clear-breakpoint" : "set-breakpoint"}" data-addr="${addrText}"
+            data-id="${addrText}"
             title="${on ? "撤掉这个断点" : "在这个地址下断点"}">${on ? "断点 ●" : "加断点"}</button>`;
     return `
         <tr class="disasm-row${isPc ? " is-pc" : ""}" data-disasm-addr="${addrText}"${isPc ? ' data-pc="1"' : ""}>
