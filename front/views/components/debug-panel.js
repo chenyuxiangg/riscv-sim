@@ -602,8 +602,6 @@ export function debuggerDraft() {
         dumpLen: String(s.dumpLen ?? DEFAULT_DUMP_LEN),
         // ⚠️ **步数草稿也住这里**（v0.63）⇒ 重渲染不丢。
         stepCount: String(s.stepCount ?? DEFAULT_STEP_COUNT),
-        // 契约 v14：观察表达式草稿（同一规矩：重渲染不丢）。
-        watchExpr: String(s.watchExpr ?? ""),
     };
 }
 
@@ -828,9 +826,6 @@ function mountAddrInputListeners(el) {
         if (target?.closest?.("[data-step-count-input]")) {
             setDebuggerDraft({ stepCount: target.value ?? "" });
         }
-        if (target?.closest?.("[data-watch-expr-input]")) {
-            setDebuggerDraft({ watchExpr: target.value ?? "" });
-        }
     });
     el.addEventListener("change", (ev) => {
         const kindBox = ev.target?.closest?.("[data-bp-kind-input]");
@@ -989,8 +984,6 @@ const debugView = register({
         const bpAddrs = bpEntries
             .filter((e) => normalizeBreakpointKind(e?.kind) !== BREAKPOINT_KIND.Condition)
             .map((e) => Number(e?.addr ?? 0) >>> 0);
-        // 契约 v14：观察表达式的轮询回执（`WatchValue` 列表）。
-        const watchValues = Array.isArray(debug.watchValues) ? debug.watchValues : [];
         // STAGE-55 栈回溯批：内核回执的那份帧列表（只读 · `frames[0]` 是当前帧）。
         const backtrace = debug.backtrace ?? null;
         // STAGE-55 真相候选列表批：当前帧的「名字 + 位置」（只读，不带值）。
@@ -1051,29 +1044,6 @@ const debugView = register({
                     ${bpEntries.length === 0
                         ? `<p class="muted">尚无断点</p>`
                         : `<div class="bp-list" data-bp-list>${bpEntries.map((entry) => renderBreakpointRow(entry)).join("")}</div>`}
-                </section>
-                <section class="card watch-card">
-                    <div class="row"><h3>观察表达式</h3><span class="tag">${watchValues.length} 项</span><button type="button" data-action="list-watch-exprs">刷新</button></div>
-                    <div class="card-actions">
-                        <input type="text" value="${escapeHtml(draft.watchExpr)}" placeholder="pc / x1 / 0x80000000 / @x2+4" spellcheck="false" autocomplete="off" data-watch-expr-input>
-                        <button type="button" data-action="set-watch-expr">添加观察</button>
-                    </div>
-                    ${watchValues.length === 0
-                        ? `<p class="muted">尚无观察项</p>`
-                        : `<div class="watch-list">${watchValues.map((item) => {
-                            const value = item?.value;
-                            const text = value === null || value === undefined
-                                ? "—"
-                                : `0x${(Number(value) >>> 0).toString(16).padStart(8, "0")}`;
-                            const error = item?.error ? `<span class="note">${escapeHtml(String(item.error))}</span>` : "";
-                            return `<div class="watch-row" data-watch-row data-watch-id="${Number(item?.id ?? 0)}" data-watch-changed="${item?.changed === true ? "true" : "false"}">
-                                <code>${escapeHtml(String(item?.expr ?? ""))}</code>
-                                <code class="addr">${text}</code>
-                                ${item?.changed === true ? `<span class="tag">变化</span>` : ""}
-                                ${error}
-                                <button type="button" data-action="clear-watch-expr" data-id="${Number(item?.id ?? 0)}">删除</button>
-                            </div>`;
-                        }).join("")}</div>`}
                 </section>
                 <section class="card backtrace-card">
                     <div class="row"><h3>调用栈</h3><span class="tag">${backtraceFrames.length} 帧</span><button type="button" data-action="backtrace">回溯</button></div>
@@ -1175,16 +1145,6 @@ const debugView = register({
             const box = el?.closest?.("[data-step-count-box]");
             const raw = String(box?.querySelector?.("[data-step-count-input]")?.value ?? "");
             return emitCommand("step-n", "debug", { steps: raw });
-        }
-        if (action === "set-watch-expr") {
-            const input = el?.closest?.(".card")?.querySelector?.("[data-watch-expr-input]");
-            return emitCommand("set-watch-expr", "debug", { expr: String(input?.value ?? "") });
-        }
-        if (action === "clear-watch-expr") {
-            return emitCommand("clear-watch-expr", "debug", { id: el?.getAttribute?.("data-id") });
-        }
-        if (action === "list-watch-exprs") {
-            return emitCommand("list-watch-exprs", "debug", {});
         }
         // ⚠️ **STAGE-55**：加断点的载荷按**当前下拉**组装（三种类型一个入口）
         //   ⇒ ⇒ 解析不出来时**一条命令都不发**（提示位已就地写）。
