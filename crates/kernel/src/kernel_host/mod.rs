@@ -563,14 +563,23 @@ impl NameResolver for HostNames<'_> {
     /// 同名的全局符号（C 的作用域规则如此）。
     fn resolve_at(&self, name: &str, pc: Option<u32>) -> Result<NameRef, ResolveError> {
         let locals = self.0.locals();
+        // ⚠️ **有没有调试信息**要**先**判出来：「查不到」时要分三种情况报
+        //    （无 DWARF / 当前帧没有这个变量 / 这个名字压根不存在）⇒ ⇒
+        //    前端因此能把两态空文案说清（收口批 · 轻档）。
+        let has_debug_info = !locals.is_empty();
+        // ⚠️ **名字在 DWARF 里哪儿有**：用来区分「只是不在当前帧」与「整份
+        //    调试信息里都没有这个名字」—— 前者要说「换个地址」，后者要说
+        //    「名字打错了」，给错方向的提示比不提示更糟。
+        let anywhere = locals.lookup_any(name);
         let local = match pc {
             // 知道站在哪个函数里 ⇒ ⇒ 按**那个函数**的帧找（同名不歧义）。
             Some(pc) => locals.lookup_at(name, pc),
             // 无地址的条件断点 ⇒ ⇒ 只凭名字（多个函数都有 ⇒ **报歧义**，
             // 不随手挑一个）。
-            None => match locals.lookup_any(name) {
-                LocalLookup::Found(location) => Some(location),
-                LocalLookup::Ambiguous(mut functions) => {
+            None => match &anywhere {
+                LocalLookup::Found(location) => Some(*location),
+                LocalLookup::Ambiguous(functions) => {
+                    let mut functions = functions.clone();
                     functions.sort();
                     functions.dedup();
                     return Err(ResolveError::Ambiguous(functions));
@@ -584,7 +593,25 @@ impl NameResolver for HostNames<'_> {
                 target: NameTarget::Local(local_slot(location)),
             });
         }
-        self.global(name).ok_or(ResolveError::Undefined)
+        if let Some(global) = self.global(name) {
+            return Ok(global);
+        }
+        // ---- 三态：为什么「查不到」----
+        Err(match (has_debug_info, anywhere) {
+            // 没有 DWARF ⇒ 局部变量整类不可用（最可能的原因，先说它）。
+            (false, _) => ResolveError::NoDebugInfo,
+            // 有 DWARF，但这名字**整份调试信息里都没有** ⇒ ⇒ 名字写错了。
+            (true, LocalLookup::Missing) => ResolveError::Undefined,
+            // 有 DWARF、名字存在，只是**不在当前帧** ⇒ ⇒ 点名函数。
+            (true, LocalLookup::Found(_) | LocalLookup::Ambiguous(_)) => ResolveError::NotInFrame(
+                pc.and_then(|pc| locals.scope_at(pc).map(|scope| scope.name.clone())),
+            ),
+        })
+    }
+
+    /// 断点地址所在函数名（DWARF 函数区间；没有调试信息 ⇒ `None`）。
+    fn scope_of(&self, pc: u32) -> Option<String> {
+        self.0.locals().scope_at(pc).map(|scope| scope.name.clone())
     }
 }
 

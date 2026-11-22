@@ -522,6 +522,16 @@ pub struct BreakpointInfo {
     /// `#[serde(default)]` ⇒ ⇒ 旧载荷（无此字段）解析成 `false`。
     #[serde(default)]
     pub degraded: bool,
+    /// **这个断点地址落在哪个函数里**（STAGE-55 收口批 · 档 4 收尾）。
+    ///
+    /// ⚠️ 只对**地址类断点**有意义（观察式条目没有地址 ⇒ `None`）；来源是
+    /// DWARF 的函数区间（`LocalTable::scope_at`）⇒ ⇒ 界面用它说清「这个
+    /// 断点的条件是按哪个帧解析的」。
+    ///
+    /// `#[serde(default)]` + `skip_serializing_if` ⇒ ⇒ 旧载荷可解析、**不是**
+    /// 破坏性格式变更 ⇒ ⇒ 契约版本**不升**（沿用批 A / 批 C 先例）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_function: Option<String>,
 }
 
 impl Default for BreakpointInfo {
@@ -530,6 +540,7 @@ impl Default for BreakpointInfo {
             breakpoint: Breakpoint::default(),
             hit_count: 0,
             degraded: false,
+            scope_function: None,
         }
     }
 }

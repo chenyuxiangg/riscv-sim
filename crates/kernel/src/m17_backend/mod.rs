@@ -670,6 +670,18 @@ impl InstructionExecutor for IssExecutor<'_> {
 
         // store 边界命中的观察式条目 ⇒ **停**（原因复用 `Watchpoint`，
         // 与「观察式命中」同语义；不扩枚举）。
+        //
+        // ⚠️ **与 M-10 观察点的先后是定死的口径**（STAGE-55 收口批 · 用户拍板）：
+        //    同一次 store 同时满足「条件断点谓词」与「M-10 观察点」时 ⇒ ⇒
+        //    **条件断点优先**（停在这里，不再往下走到 (7)）。
+        //
+        //    理由：条件断点是用户**针对这个程序位置显式写的**判据，观察点
+        //    是**顺带挂着看**的地址；一次访存只报一个停因，报了观察点会让
+        //    用户以为「我的条件没命中」。
+        //
+        //    M-10 的命中**不会被抹掉**：总线 hook 独立填命中槽，批次结束时
+        //    `last_watchpoint_hit()` 仍然报出是哪一个观察点命中 ⇒ ⇒ 「停下
+        //    归条件、事实照记」——`trigger_addr` 也仍然指向那条 store。
         if self.breakpoints.last_store_trigger().is_some() {
             return Ok(ExecOutcome::Stop {
                 reason: HaltReason::Watchpoint,
@@ -2298,6 +2310,57 @@ mod tests {
             "guest 的数据读仍然要命中读观察点"
         );
         assert_eq!(backend.last_watchpoint_hit().map(|w| w.addr), Some(0x100));
+    }
+
+    /// **同一次 store 同时满足条件断点与 M-10 观察点** ⇒ ⇒ 停因归**条件断点**，
+    /// 但 M-10 的命中**照样记录**（收口批 · 用户拍板的口径）。
+    ///
+    /// 判别力：把 (6-bis) 与 (7) 的顺序调过来（观察点先判）⇒ ⇒ 停因文案虽然
+    /// 仍是 `Watchpoint`，但 `trigger_addr` 会变成 `None` ⇒ ⇒ 这条立刻变红。
+    #[test]
+    fn a_store_satisfying_both_a_predicate_and_a_watchpoint_stops_for_the_predicate() {
+        let mut backend = backend_with_demo();
+        // demo 的第 4 条指令（0x0c）是 `sw x3, 0x100(x0)`，写进去的值是
+        // 42 + 7 = 49。
+        backend
+            .set_breakpoint_with_id_and_names(
+                Breakpoint {
+                    id: 0,
+                    addr: 0,
+                    source_hint: None,
+                    enabled: true,
+                    kind: BreakpointKind::Condition,
+                    condition: Some("[0x100] == 49".to_string()),
+                },
+                &crate::m08_breakpoint::names::NoNames,
+            )
+            .expect("观察式条目");
+        backend
+            .set_watchpoint_with_id(Watchpoint {
+                id: 1,
+                addr: 0x100,
+                size: WriteSize::Word,
+                access: WatchAccess::Write,
+            })
+            .expect("set watchpoint");
+
+        let executed = backend.step_n(4).expect("step");
+        assert_eq!(executed, 4, "停在写之后的那一步边界（4 条都执行了）");
+        assert_eq!(
+            backend.last_stop_reason(),
+            Some(HaltReason::Watchpoint),
+            "两类命中共用同一个停因枚举"
+        );
+        assert_eq!(
+            backend.last_store_trigger_addr(),
+            Some(0x0c),
+            "停因归条件断点 ⇒ ⇒ 必须报出**触发的那条 store**"
+        );
+        assert_eq!(
+            backend.last_watchpoint_hit().map(|w| w.addr),
+            Some(0x100),
+            "M-10 的命中**不被条件断点抹掉**（事实照记）"
+        );
     }
 
     #[test]

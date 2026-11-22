@@ -131,6 +131,10 @@ export function wireDebug(commandRouter, services = {}) {
                 //   里面）：它是内核的**运行时**状态，不属于注册参数
                 //   ⇒ ⇒ 读错层就是永远 `false`（静默）。
                 degraded: item?.degraded === true,
+                // ⚠️ 所在函数（收口批）：同样是 **`BreakpointInfo` 顶层**的
+                //   派生展示信息（不属于注册参数）⇒ ⇒ 观察式条目没有地址 ⇒
+                //   后端不给 ⇒ `null`。
+                scopeFunction: item?.scope_function ?? null,
             };
         });
         viewStore.setState("debug", (prev) => ({

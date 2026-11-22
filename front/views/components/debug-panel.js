@@ -220,7 +220,9 @@ export const BREAKPOINT_KIND_LABEL = {
 const BREAKPOINT_KIND_PLACEHOLDER = {
     [BREAKPOINT_KIND.Address]: "断点地址（十六进制），例如 0x2000",
     [BREAKPOINT_KIND.Symbol]: "符号名，例如 main（Tab 补全前 5 条）",
-    [BREAKPOINT_KIND.Condition]: "条件表达式，例如 x1 == 5",
+    // ⚠️ **档 4 之后**条件里可以写**当前帧局部变量名**（收口批）：placeholder
+    //    点出这条，用户才知道「变量名」是合法写法（不是只有寄存器）。
+    [BREAKPOINT_KIND.Condition]: "条件表达式，例如 x == 5 / [0x2000] > 3",
 };
 
 /**
@@ -407,7 +409,11 @@ function stopBanner(stop) {
  *   这条表达式求不出来（读内存失败等）⇒ ⇒ 内核仍收下它，但打上标记 ⇒
  *   这里如实显示，没有就不显示（**不编**状态）。
  *
- * @param {{id?: number, addr?: number, kind?: string, condition?: string|null, symbol?: string|null, enabled?: boolean, hits?: number, degraded?: boolean}} entry
+ * ⚠️ **所在函数**（收口批 · `BreakpointInfo.scope_function`）：地址类条目的
+ *   条件是按**哪个帧**解析的 ⇒ ⇒ 展示出来，用户才知道「变量名」指的是谁；
+ *   观察式条目没有地址 ⇒ 没有这一栏（不编）。
+ *
+ * @param {{id?: number, addr?: number, kind?: string, condition?: string|null, symbol?: string|null, enabled?: boolean, hits?: number, degraded?: boolean, scopeFunction?: string|null}} entry
  * @returns {string}
  */
 export function renderBreakpointRow(entry) {
@@ -419,6 +425,7 @@ export function renderBreakpointRow(entry) {
     const hits = Number(entry?.hits ?? 0);
     const condition = entry?.condition ? String(entry.condition) : "";
     const symbol = entry?.symbol ? String(entry.symbol) : "";
+    const scopeFunction = entry?.scopeFunction ? String(entry.scopeFunction) : "";
     const where = kind === BREAKPOINT_KIND.Condition
         ? `<code class="cond" data-bp-cond-text>${escapeHtml(condition)}</code>`
         : `<code class="addr">${addrText}</code>`;
@@ -427,6 +434,7 @@ export function renderBreakpointRow(entry) {
             <span class="tag bp-kind-tag" data-bp-kind-tag>${BREAKPOINT_KIND_LABEL[kind]}</span>
             ${where}
             ${symbol ? `<span class="note" data-bp-symbol>${escapeHtml(symbol)}</span>` : ""}
+            ${scopeFunction ? `<span class="note" data-bp-scope>所在函数 ${escapeHtml(scopeFunction)}</span>` : ""}
             ${entry?.degraded === true ? `<span class="tag bp-degraded" data-bp-degraded>降级</span>` : ""}
             <span class="note" data-bp-hits>命中 ${hits} 次</span>
             <button type="button" data-action="toggle-breakpoint" data-id="${id}" aria-pressed="${on ? "true" : "false"}">${on ? "禁用" : "启用"}</button>
