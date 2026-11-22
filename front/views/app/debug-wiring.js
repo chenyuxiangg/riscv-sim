@@ -127,7 +127,10 @@ export function wireDebug(commandRouter, services = {}) {
                 symbol: bp.source_hint ? String(bp.source_hint) : null,
                 enabled: bp.enabled !== false,
                 hits: Number(item?.hit_count ?? 0),
-                degraded: bp.degraded === true,
+                // ⚠️ 降级标记在 **`BreakpointInfo` 的顶层**（不是 `breakpoint`
+                //   里面）：它是内核的**运行时**状态，不属于注册参数
+                //   ⇒ ⇒ 读错层就是永远 `false`（静默）。
+                degraded: item?.degraded === true,
             };
         });
         viewStore.setState("debug", (prev) => ({

@@ -93,6 +93,8 @@ struct Entry {
     cond: Option<cond::BoundCondition>,
     /// **命中计数**（契约 v13）。只在内核判定「真的命中」时 +1。
     hits: Cell<u64>,
+    /// **降级原因**（`None` ⇒ 没有降级）。见 [`BreakpointTable::mark_degraded`]。
+    degraded: Option<String>,
 }
 
 /// 断点表 —— **id 权威 + 两个派生索引**（STAGE-55 批重构）。
@@ -124,6 +126,24 @@ pub struct BreakpointTable {
     addr_index: BTreeMap<u32, u32>,
     /// **派生索引**：`Condition` 条目的 id。
     pred_ids: BTreeSet<u32>,
+    /// **回执槽**：最后一次 store 边界命中的**触发指令地址**（`exec_pc`）。
+    ///
+    /// ⚠️ store 边界命中时 PC 已经推进到下一条 ⇒ ⇒ 宿主没法从 `pc` 反推
+    /// 「是哪条 store 触发的」⇒ ⇒ 这里记一份。每步开始时由调用方清空。
+    store_trigger: Cell<Option<u32>>,
+}
+
+/// 两段字节区间**有没有相交**（`(起始地址, 字节数)`）。
+///
+/// ⚠️ 用 `saturating_add`：地址逼近 `u32::MAX` 时区间末端不 panic（宁可
+/// 判成「不相交」也不让一次比较把内核弄崩）。
+fn overlaps(load: (u32, u32), writes: &[(u32, u32)]) -> bool {
+    let (load_addr, load_len) = load;
+    let load_end = load_addr.saturating_add(load_len);
+    writes.iter().any(|&(write_addr, write_len)| {
+        let write_end = write_addr.saturating_add(write_len);
+        load_addr < write_end && write_addr < load_end
+    })
 }
 
 impl BreakpointTable {
@@ -210,6 +230,7 @@ impl BreakpointTable {
                 bp,
                 cond,
                 hits: Cell::new(0),
+                degraded: None,
             },
         );
         if is_pred {
@@ -267,48 +288,56 @@ impl BreakpointTable {
         Some(self.hit_entry(pc)?.bp.clone())
     }
 
-    /// **带条件**的命中检测 —— 在 [`Self::hit_check`] 的命中**之上**再判
-    /// 条件。
+    /// **带条件**的命中检测 —— 在「地址匹配」之上再判条件。
     ///
     /// * **无条件断点**（`condition == None`）⇒ ⇒ 与 [`Self::hit_check`]
     ///   **逐字相同**；
-    /// * **条件为真** ⇒ ⇒ 命中；
-    /// * **条件为假** ⇒ ⇒ **不命中**（继续执行）。
+    /// * **条件为真** ⇒ ⇒ 命中；**条件为假 / 求值失败** ⇒ ⇒ 不命中。
     ///
     /// ⚠️ **求值时刻 = 取指之前** ⇒ ⇒ `gpr` 里的值是**断点地址那条指令
     /// 执行前**的值（裁决 H）。
     ///
-    /// ⚠️ **求值失败在 v1 结构上不可能**（只有寄存器读 ⇒ 永远读得到）
-    /// ⇒ ⇒ **不**设计「求值出错」的语义（裁决 J）。
-    pub fn hit_check_cond(&self, pc: u32, gpr: &[u32; 32]) -> Option<Breakpoint> {
+    /// ⚠️ **这一条里的内存读当场读总线**（STAGE-55 表 6 第 2 行）：地址命中
+    /// 的频率极低（一个地址一条指令最多一次）⇒ ⇒ 成本可以忽略 ⇒ ⇒ 不必
+    /// 为它把求值挪到 store 边界（挪了反而会让「地址 + 条件」的语义变成
+    /// 「停在写之后」，与地址断点的心智模型冲突）。
+    pub fn hit_check_cond(
+        &self,
+        pc: u32,
+        gpr: &[u32; 32],
+        mem: &dyn cond::MemReader,
+    ) -> Option<Breakpoint> {
         let entry = self.hit_entry(pc)?;
-        match &entry.cond {
-            None => {
-                entry.hits.set(entry.hits.get() + 1);
-                Some(entry.bp.clone())
-            }
-            Some(expr) => {
-                if expr.eval(gpr, pc) != 0 {
-                    entry.hits.set(entry.hits.get() + 1);
-                    Some(entry.bp.clone())
-                } else {
-                    None
-                }
-            }
+        let hit = match &entry.cond {
+            None => true,
+            // ⚠️ **求值失败（`None`）= 未命中**（不把「读不到」当成结论）。
+            Some(expr) => expr.eval(gpr, pc, mem).is_some_and(|value| value != 0),
+        };
+        if !hit {
+            return None;
         }
+        entry.hits.set(entry.hits.get() + 1);
+        Some(entry.bp.clone())
     }
 
-    /// **观察式条目**的命中检测（STAGE-55 批新增）。
+    /// **观察式条目**的命中检测（取指之前那一支）。
     ///
     /// 只遍历 `Condition` 条目（`pred_ids` 派生索引）⇒ ⇒ 地址断点**不**
     /// 走这条路径 ⇒ ⇒ 两条路径**互不干扰**。
     ///
+    /// ⚠️ **只收「不读内存」的条目**：含内存读的条目走
+    /// [`Self::hit_check_pred_at_store`]（STAGE-55 表 6）⇒ ⇒ 同一时刻不会被
+    /// 两条路径各求值一次（命中计数不会双加）。
+    ///
     /// ⚠️ **按 id 升序**遍历，**首个**为真的条目即返回 ⇒ ⇒ 多条同时为真
     /// 时只停一条（与观察点 `match_access` 取首条**同口径**）。
     /// ⚠️ **禁用的条目不命中、不计数**。
-    /// ⚠️ **求值时刻 = 调用方给定的时刻**（批 A 是「取指之前」；含内存读的
-    /// 条目会在批 C 挪到 store 边界）。
-    pub fn hit_check_pred(&self, pc: u32, gpr: &[u32; 32]) -> Option<Breakpoint> {
+    pub fn hit_check_pred(
+        &self,
+        pc: u32,
+        gpr: &[u32; 32],
+        mem: &dyn cond::MemReader,
+    ) -> Option<Breakpoint> {
         for id in &self.pred_ids {
             let Some(entry) = self.by_id.get(id) else {
                 continue;
@@ -319,7 +348,57 @@ impl BreakpointTable {
             let Some(expr) = entry.cond.as_ref() else {
                 continue;
             };
-            if expr.eval(gpr, pc) != 0 {
+            if expr.reads_memory() {
+                continue;
+            }
+            if expr.eval(gpr, pc, mem).is_some_and(|value| value != 0) {
+                entry.hits.set(entry.hits.get() + 1);
+                return Some(entry.bp.clone());
+            }
+        }
+        None
+    }
+
+    /// **store 边界**的观察式命中检测（含内存读的条目）。
+    ///
+    /// `writes` 是**这条指令刚刚成功提交的写区间**（`(地址, 宽度)`，宽度以
+    /// **字节**计）。判定分两层：
+    ///
+    /// 1. **区间过滤**（等价优化，不是近似）：条目引用的每个地址区间都与
+    ///    本次写区间**不相交** ⇒ ⇒ 它读到的每个值都不可能变 ⇒ ⇒ 跳过。
+    ///    ⚠️ 前提是「store 不改 GPR」（RV32 的 S 型没有 `rd`）。
+    /// 2. **引用 `pc` 的条目不做过滤**：提交后 `pc` 已推进 ⇒ ⇒ 过滤不再
+    ///    等价 ⇒ ⇒ 每条 store 都求值（保守）。
+    ///
+    /// ⚠️ 求值失败（`None`）= **本条未命中**，不是「为假」。
+    pub fn hit_check_pred_at_store(
+        &self,
+        pc: u32,
+        gpr: &[u32; 32],
+        mem: &dyn cond::MemReader,
+        writes: &[(u32, u32)],
+    ) -> Option<Breakpoint> {
+        for id in &self.pred_ids {
+            let Some(entry) = self.by_id.get(id) else {
+                continue;
+            };
+            if !entry.bp.enabled {
+                continue;
+            }
+            let Some(expr) = entry.cond.as_ref() else {
+                continue;
+            };
+            if !expr.reads_memory() {
+                continue;
+            }
+            // 区间过滤：不相交且不引用 pc ⇒ 值不可能变 ⇒ 跳过。
+            if !expr.reads_pc() {
+                let loads = expr.load_intervals(gpr, pc);
+                if !loads.iter().any(|load| overlaps(*load, writes)) {
+                    continue;
+                }
+            }
+            if expr.eval(gpr, pc, mem).is_some_and(|value| value != 0) {
                 entry.hits.set(entry.hits.get() + 1);
                 return Some(entry.bp.clone());
             }
@@ -386,6 +465,7 @@ impl BreakpointTable {
             .map(|entry| BreakpointInfo {
                 breakpoint: entry.bp.clone(),
                 hit_count: entry.hits.get(),
+                degraded: entry.degraded.is_some(),
             })
             .collect()
     }
@@ -395,11 +475,60 @@ impl BreakpointTable {
         self.by_id.get(&id).map(|entry| entry.hits.get())
     }
 
+    /// **标降级**：注册期动态求值失败时由**调用方**（后端）打标。
+    ///
+    /// ⚠️ 表自己**不知道**内存长什么样（它没有总线）⇒ ⇒ 「这条表达式现在
+    /// 求不出来」这件事只能由拿得到内存的人告诉我们 ⇒ ⇒ 这里**只存**原因。
+    ///
+    /// ⚠️ **降级 ≠ 失效**：条目照常参与判定，只是**求值期失败按未命中**
+    /// （STAGE-55 表 7）。
+    ///
+    /// 返回 `false` 表示 id 不存在（不报错）。
+    pub fn mark_degraded(&mut self, id: u32, reason: impl Into<String>) -> bool {
+        match self.by_id.get_mut(&id) {
+            Some(entry) => {
+                entry.degraded = Some(reason.into());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 记一次 **store 边界命中**的触发指令地址（`exec_pc`）。
+    pub fn note_store_trigger(&self, exec_pc: u32) {
+        self.store_trigger.set(Some(exec_pc));
+    }
+
+    /// 取走「最后一次 store 边界命中」的触发地址（没有 ⇒ `None`）。
+    pub fn last_store_trigger(&self) -> Option<u32> {
+        self.store_trigger.get()
+    }
+
+    /// 清空触发地址槽（每步开始 / 会话重置时调）。
+    pub fn clear_store_trigger(&self) {
+        self.store_trigger.set(None);
+    }
+
+    /// 某个 id 的**已绑定条件**（无条件的条目 / 未知 id ⇒ `None`）。
+    ///
+    /// ⚠️ 给**注册期试求值**用（STAGE-55 表 7）：调用方拿得到内存 ⇒ ⇒ 由它
+    /// 判断「这条表达式当下求不求得出来」⇒ ⇒ 求不出来就
+    /// [`Self::mark_degraded`]。
+    pub fn bound_condition(&self, id: u32) -> Option<&cond::BoundCondition> {
+        self.by_id.get(&id)?.cond.as_ref()
+    }
+
+    /// 某个 id 的**降级原因**（没降级 / 未知 id ⇒ `None`）。
+    pub fn degraded_reason(&self, id: u32) -> Option<&str> {
+        self.by_id.get(&id)?.degraded.as_deref()
+    }
+
     /// 清空整张表（会话重置用）。
     pub fn clear_all(&mut self) {
         self.by_id.clear();
         self.addr_index.clear();
         self.pred_ids.clear();
+        self.store_trigger.set(None);
     }
 
     /// **派生索引一致性**（调试 / 测试用）：两个索引都必须能由 `by_id`
@@ -722,12 +851,12 @@ mod tests {
         let mut gpr = [0u32; 32];
         gpr[1] = 5;
         assert!(
-            t.hit_check_cond(0x8000_0000, &gpr).is_some(),
+            t.hit_check_cond(0x8000_0000, &gpr, &cond::NoMem).is_some(),
             "条件为真 ⇒ 命中"
         );
         gpr[1] = 6;
         assert!(
-            t.hit_check_cond(0x8000_0000, &gpr).is_none(),
+            t.hit_check_cond(0x8000_0000, &gpr, &cond::NoMem).is_none(),
             "条件为假 ⇒ 不命中"
         );
     }
@@ -739,7 +868,8 @@ mod tests {
         t.set(bp(1, 0x8000_0000)).expect("set");
         let gpr = [7u32; 32];
         assert_eq!(
-            t.hit_check_cond(0x8000_0000, &gpr).map(|b| b.id),
+            t.hit_check_cond(0x8000_0000, &gpr, &cond::NoMem)
+                .map(|b| b.id),
             t.hit_check(0x8000_0000).map(|b| b.id)
         );
     }
@@ -752,7 +882,7 @@ mod tests {
         t.set_enabled(1, false).expect("disable");
         let mut gpr = [0u32; 32];
         gpr[1] = 5;
-        assert!(t.hit_check_cond(0x8000_0000, &gpr).is_none());
+        assert!(t.hit_check_cond(0x8000_0000, &gpr, &cond::NoMem).is_none());
     }
 
     /// **条件里看到的是「该指令执行前」的值**（裁决 H）—— 这里用「PC」把
@@ -763,8 +893,8 @@ mod tests {
         t.set(bp_cond(1, 0x8000_0000, "pc == 0x80000000"))
             .expect("set");
         let gpr = [0u32; 32];
-        assert!(t.hit_check_cond(0x8000_0000, &gpr).is_some());
-        assert!(t.hit_check_cond(0x8000_0004, &gpr).is_none());
+        assert!(t.hit_check_cond(0x8000_0000, &gpr, &cond::NoMem).is_some());
+        assert!(t.hit_check_cond(0x8000_0004, &gpr, &cond::NoMem).is_none());
     }
 
     // -- 观察点 -------------------------------------------------------------
@@ -834,14 +964,14 @@ mod tests {
         t.set(bp_cond(1, 0x8000_0010, "a0 != 0")).expect("set");
         let mut gpr = [0u32; 32];
         assert!(
-            t.hit_check_cond(0x8000_0010, &gpr).is_none(),
+            t.hit_check_cond(0x8000_0010, &gpr, &cond::NoMem).is_none(),
             "条件假不命中"
         );
         assert_eq!(t.hit_count(1), Some(0), "条件假不能计数");
         gpr[10] = 7;
-        assert!(t.hit_check_cond(0x8000_0010, &gpr).is_some());
+        assert!(t.hit_check_cond(0x8000_0010, &gpr, &cond::NoMem).is_some());
         assert_eq!(t.hit_count(1), Some(1));
-        assert!(t.hit_check_cond(0x8000_0010, &gpr).is_some());
+        assert!(t.hit_check_cond(0x8000_0010, &gpr, &cond::NoMem).is_some());
         assert_eq!(t.hit_count(1), Some(2));
     }
 
@@ -851,7 +981,7 @@ mod tests {
         t.set(bp(1, 0x8000_0010)).expect("set");
         assert!(t.set_enabled(1, false).expect("enable"));
         let gpr = [0u32; 32];
-        assert!(t.hit_check_cond(0x8000_0010, &gpr).is_none());
+        assert!(t.hit_check_cond(0x8000_0010, &gpr, &cond::NoMem).is_none());
         assert_eq!(t.hit_count(1), Some(0), "禁用断点不命中 ⇒ 不计数");
     }
 
@@ -896,7 +1026,9 @@ mod tests {
             .expect("函数名能绑成地址常量");
         assert_eq!(t.get(3).map(|b| b.kind), Some(BreakpointKind::Condition));
         let gpr = [0u32; 32];
-        let hit = t.hit_check_pred(0x2000, &gpr).expect("谓词为真 ⇒ 命中");
+        let hit = t
+            .hit_check_pred(0x2000, &gpr, &cond::NoMem)
+            .expect("谓词为真 ⇒ 命中");
         assert_eq!(hit.id, 3);
     }
 
@@ -919,20 +1051,48 @@ mod tests {
         assert_eq!(t.len(), 0, "校验失败时表不变");
     }
 
-    /// **变量名（要读内存）在注册期就明说拒**（档 3 才有）。
+    /// **变量名（要读内存）现在能注册**（档 3：批 C）。
+    ///
+    /// ⚠️ 它**不会**在取指前求值（归 store 边界）⇒ ⇒ 这里只钉「注册成功 +
+    ///    绑成了读 0x2000」这两件事，执行时刻由 `a_memory_predicate_...` 钉。
     #[test]
-    fn a_variable_condition_is_rejected_until_batch_c() {
+    fn a_variable_condition_now_registers_as_a_memory_read() {
         let mut t = BreakpointTable::new();
+        t.set_with(bp_pred(5, "g_counter == 3"), &FakeNames)
+            .expect("变量名是合法表达式（档 3）");
+        assert_eq!(t.len(), 1);
+        let cond = t.bound_condition(5).expect("绑好的条件必须在表里");
+        assert!(cond.reads_memory(), "变量名 ⇒ 读内存");
+        assert_eq!(cond.load_intervals(&[0u32; 32], 0), vec![(0x2000, 4)]);
+    }
+
+    /// **没有「值」语义的符号（`STT_NOTYPE`）仍拒**：它只许 `&名字`。
+    #[test]
+    fn a_symbol_without_a_value_is_still_rejected_as_a_value() {
+        let mut t = BreakpointTable::new();
+        let names = FakeNamesOnlyOther;
         let err = t
-            .set_with(bp_pred(5, "g_counter == 3"), &FakeNames)
-            .expect_err("变量名要读内存");
+            .set_with(bp_pred(6, "_start == 3"), &names)
+            .expect_err("未分类符号没有值");
         assert_eq!(err.scenario, E_DBG_02_CONDITION_INVALID);
         assert!(
-            err.message.contains("读内存"),
-            "错误消息要说清「要读内存」：{}",
+            err.message.contains("不是已知的变量") && err.message.contains("&_start"),
+            "错误消息要说清「没有值」并给 &名字 写法：{}",
             err.message
         );
         assert_eq!(t.len(), 0);
+    }
+
+    /// 只认识一个 `STT_NOTYPE` 符号（`Other` 分类）的假符号表。
+    struct FakeNamesOnlyOther;
+
+    impl names::NameResolver for FakeNamesOnlyOther {
+        fn resolve(&self, name: &str) -> Option<names::NameRef> {
+            (name == "_start").then_some(names::NameRef {
+                class: names::NameClass::Other,
+                addr: 0x0100,
+            })
+        }
     }
 
     /// **观察式条目不吃地址槽**：它没有地址，所以地址 `0` 的真实断点
@@ -957,14 +1117,15 @@ mod tests {
         let mut gpr = [0u32; 32];
         gpr[1] = 5;
         assert_eq!(
-            t.hit_check_pred(0x8000_0000, &gpr).map(|b| b.id),
+            t.hit_check_pred(0x8000_0000, &gpr, &cond::NoMem)
+                .map(|b| b.id),
             Some(1),
             "谓词真 ⇒ 命中"
         );
         assert_eq!(t.hit_count(1), Some(1));
         gpr[1] = 6;
         assert!(
-            t.hit_check_pred(0x8000_0000, &gpr).is_none(),
+            t.hit_check_pred(0x8000_0000, &gpr, &cond::NoMem).is_none(),
             "谓词假 ⇒ 不停"
         );
         assert_eq!(t.hit_count(1), Some(1), "谓词假不得计数");
@@ -979,7 +1140,7 @@ mod tests {
         gpr[1] = 5;
         for pc in [0x8000_0000u32, 0x8000_0004, 0x1000_0000] {
             assert!(
-                t.hit_check_pred(pc, &gpr).is_some(),
+                t.hit_check_pred(pc, &gpr, &cond::NoMem).is_some(),
                 "观察式条目不该受 pc 限制：0x{pc:08x}"
             );
         }
@@ -993,7 +1154,7 @@ mod tests {
         t.set_enabled(1, false).expect("disable");
         let mut gpr = [0u32; 32];
         gpr[1] = 5;
-        assert!(t.hit_check_pred(0x8000_0000, &gpr).is_none());
+        assert!(t.hit_check_pred(0x8000_0000, &gpr, &cond::NoMem).is_none());
         assert_eq!(t.hit_count(1), Some(0), "禁用 ⇒ 不计数");
     }
 
@@ -1052,6 +1213,111 @@ mod tests {
         assert_eq!(t.clear(2).unwrap(), Some(0x8000_0000));
         assert!(t.indexes_consistent());
         assert!(t.is_empty());
+    }
+
+    // -- 批 C（档 3）：内存读 / store 边界 / 降级 ---------------------------
+
+    /// 一张**假内存**：`addr → word`（表外地址 ⇒ 读不到 ⇒ 求值失败）。
+    struct FakeMem(Vec<(u32, u32)>);
+
+    impl cond::MemReader for FakeMem {
+        fn read_word(&self, addr: u32) -> Option<u32> {
+            self.0
+                .iter()
+                .find(|(candidate, _)| *candidate == addr)
+                .map(|(_, value)| *value)
+        }
+    }
+
+    /// **含内存读的条目不在取指前求值**（STAGE-55 表 6）：它归 store 边界
+    /// ⇒ ⇒ 否则同一时刻两条路径都会算一遍，命中计数会双加。
+    #[test]
+    fn a_memory_predicate_is_not_evaluated_before_the_fetch() {
+        let mut t = BreakpointTable::new();
+        t.set_with(bp_pred(5, "g_counter == 7"), &FakeNames)
+            .expect("变量名能绑成「读 0x2000」");
+        let gpr = [0u32; 32];
+        let mem = FakeMem(vec![(0x2000, 7)]);
+        // 取指前：**跳过**（哪怕内存里已经是 7）。
+        assert!(t.hit_check_pred(0x2000, &gpr, &mem).is_none());
+        // store 边界：写到了 0x2000 ⇒ 求值 ⇒ 命中。
+        let hit = t
+            .hit_check_pred_at_store(0x2004, &gpr, &mem, &[(0x2000, 4)])
+            .expect("写后新值是 7 ⇒ 命中");
+        assert_eq!(hit.id, 5);
+        assert_eq!(t.hit_count(5), Some(1), "只算一次（没被两条路径各算一遍）");
+    }
+
+    /// **区间过滤是等价优化**：写一段不相交的地址 ⇒ 谓词读到的值不可能变
+    /// ⇒ ⇒ 跳过（命中计数不动）。
+    #[test]
+    fn a_disjoint_write_is_filtered_out() {
+        let mut t = BreakpointTable::new();
+        t.set_with(bp_pred(6, "g_counter == 0"), &FakeNames)
+            .expect("绑成「读 0x2000」");
+        let gpr = [0u32; 32];
+        // 内存里是 0 ⇒ 谓词为真 ⇒ 若真求值就会命中。
+        let mem = FakeMem(vec![(0x2000, 0)]);
+        assert!(
+            t.hit_check_pred_at_store(0x1004, &gpr, &mem, &[(0x1000, 4)])
+                .is_none(),
+            "写到 0x1000 不影响 0x2000 的值"
+        );
+        assert_eq!(t.hit_count(6), Some(0));
+        // 写到 0x2000 ⇒ 不再过滤 ⇒ 命中。
+        assert!(t
+            .hit_check_pred_at_store(0x1004, &gpr, &mem, &[(0x2000, 4)])
+            .is_some());
+        assert_eq!(t.hit_count(6), Some(1));
+    }
+
+    /// **引用 pc 的条目不做区间过滤**（提交后 pc 已变 ⇒ 过滤不再等价）。
+    #[test]
+    fn a_pc_referencing_predicate_ignores_the_filter() {
+        let mut t = BreakpointTable::new();
+        t.set_with(bp_pred(7, "pc == 0x1000 && g_counter == 0"), &FakeNames)
+            .expect("pc 子式是合法语法");
+        let gpr = [0u32; 32];
+        let mem = FakeMem(vec![(0x2000, 0)]);
+        // 写的是 0x1000（与「读 0x2000」不相交）——但条目引用了 pc ⇒ 必须
+        // 照常求值（这里 pc 传 0x1000 ⇒ 前半为真、后半为真 ⇒ 命中）。
+        assert!(
+            t.hit_check_pred_at_store(0x1000, &gpr, &mem, &[(0x1000, 4)])
+                .is_some(),
+            "引用 pc 的条目不许被区间过滤跳过"
+        );
+    }
+
+    /// **读不到内存 ⇒ 未命中**（不是「为假」也不是错误）。
+    #[test]
+    fn an_unreadable_memory_predicate_is_a_miss() {
+        let mut t = BreakpointTable::new();
+        t.set_with(bp_pred(8, "g_counter == 0"), &FakeNames)
+            .expect("绑成「读 0x2000」");
+        let gpr = [0u32; 32];
+        // 内存里读不到 0x2000（空表）⇒ 求值失败 ⇒ 未命中。
+        assert!(t
+            .hit_check_pred_at_store(0x2004, &gpr, &FakeMem(vec![]), &[(0x2000, 4)])
+            .is_none());
+        assert_eq!(t.hit_count(8), Some(0));
+    }
+
+    /// **降级标记**：注册期求不出来 ⇒ 允许注册、回执里带 `degraded`。
+    #[test]
+    fn a_degraded_entry_still_registers_and_shows_in_the_receipt() {
+        let mut t = BreakpointTable::new();
+        t.set_with(bp_pred(9, "g_counter == 0"), &FakeNames)
+            .expect("静态上没问题");
+        assert!(t.mark_degraded(9, "注册时读不到 0x2000"));
+        assert_eq!(t.degraded_reason(9), Some("注册时读不到 0x2000"));
+        let info = t
+            .infos()
+            .into_iter()
+            .find(|info| info.breakpoint.id == 9)
+            .expect("回执里必须有它");
+        assert!(info.degraded, "降级标记要跟着回执出去");
+        // 未知 id ⇒ `false`（不报错）。
+        assert!(!t.mark_degraded(404, "nope"));
     }
 
     /// **回执顺序与 v0.124 之前逐字相同**：地址升序在前，观察式条目收尾。

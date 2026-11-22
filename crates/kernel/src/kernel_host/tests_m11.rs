@@ -1567,7 +1567,7 @@ fn s5_a_condition_breakpoint_can_name_a_symbol() {
     // 跑一次：谓词恒真 ⇒ 停在取指之前（pc = 0）。
     let events = dispatch(&mut host, CommandPayload::Continue);
     let halted = events.iter().find_map(|e| match e {
-        EventPayload::Halted { reason, pc } => Some((*reason, *pc)),
+        EventPayload::Halted { reason, pc, .. } => Some((*reason, *pc)),
         _ => None,
     });
     let (reason, pc) = halted.expect("必须停下");

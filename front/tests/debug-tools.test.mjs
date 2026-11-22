@@ -622,6 +622,71 @@ describe("下断点：条件与符号（视图层 · C-7 ~ C-10）", () => {
         // ⚠️ **行内 id 是内核给的句柄**（谓词条目只有 id 可用）。
         assert.equal(rows[1].dataset.bpId, "7", "谓词行的 id 必须来自回执");
     });
+
+    test("C-10b · 降级标记**读顶层**（`BreakpointInfo.degraded`）⇒ ⇒ 该行显示「降级」", () => {
+        router.emit("debug.breakpoints", {
+            breakpoints: [
+                {
+                    breakpoint: {
+                        id: 9,
+                        addr: 0,
+                        source_hint: null,
+                        enabled: true,
+                        condition: "[0xdead0000] == 1",
+                        kind: "Condition",
+                    },
+                    hit_count: 0,
+                    degraded: true,
+                },
+                {
+                    breakpoint: {
+                        id: 10,
+                        addr: 0,
+                        source_hint: null,
+                        enabled: true,
+                        condition: "x1 == 5",
+                        kind: "Condition",
+                    },
+                    hit_count: 0,
+                    degraded: false,
+                },
+            ],
+        });
+
+        const rows = show("debug").querySelectorAll("[data-bp-row]");
+        assert.equal(rows.length, 2);
+        const tag0 = rows[0].querySelector("[data-bp-degraded]");
+        assert.ok(tag0, "降级的条目必须显示「降级」标记");
+        assert.equal(tag0.textContent, "降级");
+        const tag1 = rows[1].querySelector("[data-bp-degraded]");
+        assert.equal(tag1, null, "没降级的条目**不许**挂标记（不编状态）");
+    });
+
+    test("C-10c · 停下横幅说清**停因**与**触发地址**（观察命中 ≠ 命中断点）", () => {
+        // `Watchpoint` = 观察类命中（内存观察点 / store 边界的条件谓词）。
+        m03.setState("debug", (prev) => ({
+            ...prev,
+            debug: { ...(prev.debug ?? {}), halt: { reason: "Watchpoint", pc: 0x10, triggerAddr: 0x0c } },
+        }));
+        const body = show("debug");
+        const banner = body.querySelector("[data-bp-hit]");
+        assert.ok(banner, "观察类停下必须**有**横幅（不许静默）");
+        assert.ok(banner.textContent.includes("观察命中"), "停因必须说成「观察命中」");
+        assert.ok(!banner.textContent.includes("命中断点"), "观察命中不是「命中断点」");
+        assert.ok(banner.textContent.includes("0x00000010"), "必须报出停下的 PC");
+        const trigger = banner.querySelector("[data-bp-trigger]");
+        assert.ok(trigger, "store 边界命中必须报出**触发的那条 store**");
+        assert.equal(trigger.textContent, "0x0000000c");
+
+        // 地址断点：还是原来的「命中断点」，且**没有**触发地址。
+        m03.setState("debug", (prev) => ({
+            ...prev,
+            debug: { ...(prev.debug ?? {}), halt: { reason: "Breakpoint", pc: 0x20 } },
+        }));
+        const plain = show("debug").querySelector("[data-bp-hit]");
+        assert.ok(plain.textContent.includes("命中断点"));
+        assert.equal(plain.querySelector("[data-bp-trigger]"), null, "没触发地址就不许编一个");
+    });
 });
 
 // ---------------------------------------------------------------------------

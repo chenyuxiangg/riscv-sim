@@ -371,6 +371,30 @@ export function renderSymbolCandidates(result, tabIndex = -1) {
 }
 
 /**
+ * **「为什么停」的那一行横幅**（内核的 `Halted` 回执）。
+ *
+ * ⚠️ **两种停因各说各的**：`"Breakpoint"` = 地址断点 / 取指前的谓词命中 ⇒
+ *   「命中断点」；`"Watchpoint"` = 观察类命中（内存观察点 / store 边界的条件
+ *   谓词）⇒ ⇒ 不也叫「命中断点」（那是**另一件事**）。
+ *
+ * ⚠️ **`triggerAddr` 只在 store 边界出现**（STAGE-55 批 C）⇒ ⇒ 有就如实报出
+ *   「是哪条 store 触发的」，没有就不编（其余停因没有这个字段）。
+ *
+ * @param {{reason?: string|null, pc?: number, triggerAddr?: number}|null} stop
+ * @returns {string}
+ */
+function stopBanner(stop) {
+    const reason = stop?.reason ?? null;
+    if (reason !== "Breakpoint" && reason !== "Watchpoint") return "";
+    const hex = (v) => `0x${(Number(v ?? 0) >>> 0).toString(16).padStart(8, "0")}`;
+    const label = reason === "Breakpoint" ? "命中断点" : "观察命中";
+    const trigger = stop?.triggerAddr === null || stop?.triggerAddr === undefined
+        ? ""
+        : ` · 触发于 <code data-bp-trigger>${hex(stop.triggerAddr)}</code>`;
+    return `<p class="bp-hit" data-bp-hit>${label} @ <code>${hex(stop.pc)}</code>${trigger}</p>`;
+}
+
+/**
  * **断点列表的一行**（STAGE-55 · 表 14「断点列表」）。
  *
  * ⚠️ 一行必须自己说清**四件事**：来源标签（地址 / 符号 / 条件）、
@@ -379,8 +403,9 @@ export function renderSymbolCandidates(result, tabIndex = -1) {
  * ⚠️ **行内的 id 是内核给的**（`data-bp-id`）⇒ ⇒ 启停 / 撤销都**按 id**
  *   走 ⇒ ⇒ 谓词条目没有地址，拿地址当句柄会当场坏掉。
  *
- * ⚠️ **降级标记**（批 C 的 `degraded`）现在还不产生 ⇒ ⇒ 这里只留一个
- *   **如实**的位置：有就显示，没有就不显示（**不编**状态）。
+ * ⚠️ **降级标记**（批 C 的 `degraded`）来自内核回执的**顶层字段**：注册期
+ *   这条表达式求不出来（读内存失败等）⇒ ⇒ 内核仍收下它，但打上标记 ⇒
+ *   这里如实显示，没有就不显示（**不编**状态）。
  *
  * @param {{id?: number, addr?: number, kind?: string, condition?: string|null, symbol?: string|null, enabled?: boolean, hits?: number, degraded?: boolean}} entry
  * @returns {string}
@@ -835,9 +860,7 @@ const debugView = register({
         // ⚠️ **变了几个 = 现算**⇒ 不另存一份 ⇒ 数字与格子高亮必然来自同一组数。
         const regChanged = diffRegisters(regBaseline, sim.gpr ?? []).length;
         return `
-            ${halt?.reason === "Breakpoint"
-                ? `<p class="bp-hit" data-bp-hit>命中断点 @ <code>0x${(Number(halt.pc ?? 0) >>> 0).toString(16).padStart(8, "0")}</code></p>`
-                : ""}
+            ${stopBanner(halt)}
             ${error
                 ? `<p class="debug-error" data-debug-error>${escapeHtml(String(error.code))}：${escapeHtml(String(error.message))}</p>`
                 : ""}

@@ -139,7 +139,19 @@ impl KernelHost {
             if reason == HaltReason::Breakpoint {
                 self.log_breakpoint_hit(pc);
             }
-            events.push(EventPayload::Halted { reason, pc });
+            // ⚠️ **store 边界的观察式命中**：`pc` 已推进 ⇒ ⇒ 另带「是哪条
+            //    store 触发的」（STAGE-55 批 C）。其余停止原因取不到 ⇒ ⇒
+            //    如实给 `None`。
+            let trigger_addr = if reason == HaltReason::Watchpoint {
+                self.backend.last_store_trigger_addr()
+            } else {
+                None
+            };
+            events.push(EventPayload::Halted {
+                reason,
+                pc,
+                trigger_addr,
+            });
         }
         // 停下（或本窗口跑完）之后轮询一次观察表达式：值变化 / 求值期
         // 错误都在同一个回执里带回。设置 / 列表命令也会走同一个方法。
@@ -469,6 +481,8 @@ impl KernelHost {
             EventPayload::Halted {
                 reason: HaltReason::UserPause,
                 pc,
+                // 宿主暂停与 store 边界无关。
+                trigger_addr: None,
             },
         ]
     }

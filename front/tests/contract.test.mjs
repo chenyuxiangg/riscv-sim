@@ -533,6 +533,17 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
         assert.deepEqual(shape.fields, ["bytes"]);
     });
 
+    test("批 C 的 `Halted.trigger_addr`：**始终占键**，没触发地址时是 null", () => {
+        // ⚠️ 判别力：把键省掉（`{reason, pc}`）⇒ ⇒ 上一条「字段名逐字一致」
+        // 会红；把 `null` 写成 `0` ⇒ ⇒ 本条的断言会红（0 是**真地址**，会骗人）。
+        const stopped = Event.halted("Watchpoint", 0x10, 0x0c);
+        assert.deepEqual(Object.keys(stopped.Halted), ["reason", "pc", "trigger_addr"]);
+        assert.equal(stopped.Halted.trigger_addr, 12, "触发地址必须逐字搬过去");
+        const plain = Event.halted("Breakpoint", 0x20);
+        assert.deepEqual(plain.Halted, { reason: "Breakpoint", pc: 0x20, trigger_addr: null });
+        assert.equal(JSON.stringify(plain), '{"Halted":{"reason":"Breakpoint","pc":32,"trigger_addr":null}}');
+    });
+
     test("每个变体的内层字段名与 Rust 逐字一致（不只是变体名）", () => {
         requireRustSource();
         const protocol = readFileSync(protocolRs, "utf8");
@@ -598,7 +609,7 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             },
             EventPayload: {
                 Tick: Event.tick(0, 0),
-                Halted: Event.halted("Trap", 0),
+                Halted: Event.halted("Watchpoint", 0, 0x0c),
                 Error: Event.error("E_X-01", "m"),
                 MemoryRead: Event.memoryRead(0, "Word", 0),
                 Registers: Event.registers(0, [0]),

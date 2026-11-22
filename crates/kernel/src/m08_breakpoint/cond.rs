@@ -45,13 +45,18 @@
 //! * `&a0` / `&pc` / `&5` ⇒ **静态错**（`E_DBG-02`）：寄存器与字面量没有
 //!   可寻址的地址。
 //!
-//! ## 档 3 才有的（本批**明确拒**，不是漏做）
+//! ## 档 3（批 C）：变量值与 `[地址]` 读内存
 //!
-//! * `g_counter`（**变量名**）⇒ 变量的值 ⇒ **要读内存** ⇒ 档 3；
-//! * `[x1+8]`（**读内存**）⇒ 档 3。
+//! * `g_counter`（**变量名**）⇒ 变量的**值** ⇒ 读它地址处的那个 word；
+//! * `[x1+8]` / `[main+4]` ⇒ 读该地址的那个 word。
 //!
-//! ⇒ 本批对这两件事的答复是**一句明说**的 `E_DBG-02`（消息里带上「批 C
-//! 起支持」与「要地址请写 `&名字`」），**不**静默求值成 0（那才是骗人）。
+//! ⚠️ **读内存要过总线** ⇒ ⇒ 求值需要一个 `MemReader`（宿主喂 M-14 总线）
+//! ⇒ ⇒ 求值结果变成 `Option`：**读失败 = 求值失败 = 本条未命中**（不是
+//! 「求值为假」——那会把「读不到」伪装成一个结论）。
+//!
+//! ⚠️ **含内存读的条目只在 store 边界求值**（表级
+//! `hit_check_pred_at_store`）：store 不改 GPR ⇒ ⇒ 没有 store 时内存里的值
+//! 不会变 ⇒ ⇒ 在取指前读一遍纯属白读。
 //!
 //! ## `@…` 为什么不在条件文法里
 //!
@@ -225,8 +230,54 @@ impl BoundCondition {
     ///
     /// ⚠️ **短路**：`&&` / `||` 的右操作数**可能不被求值** ⇒ ⇒ 求值顺序
     /// 是**定义的一部分**。
-    pub fn eval(&self, gpr: &[u32; 32], pc: u32) -> u32 {
-        self.expr.eval(gpr, pc)
+    pub fn eval(&self, gpr: &[u32; 32], pc: u32, mem: &dyn MemReader) -> Option<u32> {
+        self.expr.eval(gpr, pc, mem)
+    }
+
+    /// 这条谓词**要不要读内存**（决定它在哪个时刻求值）。
+    pub fn reads_memory(&self) -> bool {
+        self.expr.reads_memory()
+    }
+
+    /// 这条谓词**引用了 pc 吗**。
+    ///
+    /// ⚠️ store 提交后 `pc` 已推进 ⇒ ⇒ 引用 `pc` 的条目**不能**做区间过滤
+    /// （过滤的前提「不碰这块内存，谓词读到的每个值都不变」对 `pc` 不成立）。
+    pub fn reads_pc(&self) -> bool {
+        self.expr.reads_pc()
+    }
+
+    /// 这条谓词**读哪些地址区间**（`(起始地址, 长度)`，长度恒为 4）。
+    ///
+    /// ⚠️ 算地址**只读 GPR / pc，不过总线** ⇒ ⇒ 连「先算地址再判」都不产生
+    /// 内存访问（STAGE-55 表 6）。
+    pub fn load_intervals(&self, gpr: &[u32; 32], pc: u32) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        self.expr.collect_loads(gpr, pc, &mut out);
+        out
+    }
+}
+
+/// **读内存**的窄接口（条件里的变量值 / `[地址]` 要用）。
+///
+/// ⚠️ **只读一个 word**：值类型是 u32 ⇒ ⇒ 4 字节与文法一致（读半个 word
+/// 的语法不存在，别为不存在的东西留接口）。
+///
+/// ⚠️ **失败给 `None`**：地址未映射 / 总线报错都算「读不到」⇒ ⇒ 上层把
+/// 求值失败当**未命中**。
+pub trait MemReader {
+    /// 读一个 32 位 word。
+    fn read_word(&self, addr: u32) -> Option<u32>;
+}
+
+/// **一个 word 也读不到**的读者（没有内存上下文的路径：表级单元测试、
+/// 老端口 `set_breakpoint(addr, enabled)`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoMem;
+
+impl MemReader for NoMem {
+    fn read_word(&self, _addr: u32) -> Option<u32> {
+        None
     }
 }
 
@@ -241,6 +292,8 @@ enum BoundExpr {
     Pc,
     /// `&[地址]`：**算出地址本身**（不读那个 word）。
     AddrOf(AddressSpec),
+    /// `[地址]` / 变量名：**读该地址的那个 word**（档 3）。
+    Load(AddressSpec),
     /// 取反。
     Not(Box<BoundExpr>),
     /// 二元运算。
@@ -248,38 +301,88 @@ enum BoundExpr {
 }
 
 impl BoundExpr {
-    fn eval(&self, gpr: &[u32; 32], pc: u32) -> u32 {
+    fn eval(&self, gpr: &[u32; 32], pc: u32, mem: &dyn MemReader) -> Option<u32> {
         match self {
-            Self::Const(value) => *value,
-            Self::Reg(index) => gpr[*index as usize],
-            Self::Pc => pc,
-            Self::AddrOf(spec) => resolve_address(spec, gpr, pc),
-            Self::Not(inner) => u32::from(inner.eval(gpr, pc) == 0),
+            Self::Const(value) => Some(*value),
+            Self::Reg(index) => Some(gpr[*index as usize]),
+            Self::Pc => Some(pc),
+            Self::AddrOf(spec) => Some(resolve_address(spec, gpr, pc)),
+            // ⚠️ **读不到 ⇒ 求值失败**（`?` 把 `None` 往上抛）。
+            Self::Load(spec) => mem.read_word(resolve_address(spec, gpr, pc)),
+            Self::Not(inner) => Some(u32::from(inner.eval(gpr, pc, mem)? == 0)),
             Self::Bin(op, left, right) => match op {
-                // ⚠️ **短路**：左假 ⇒ 右**不求值**。
+                // ⚠️ **短路**：左假 ⇒ 右**不求值**（右侧的内存读也不发生）。
                 Op::And => {
-                    if left.eval(gpr, pc) == 0 {
-                        0
+                    if left.eval(gpr, pc, mem)? == 0 {
+                        Some(0)
                     } else {
-                        u32::from(right.eval(gpr, pc) != 0)
+                        Some(u32::from(right.eval(gpr, pc, mem)? != 0))
                     }
                 }
                 // ⚠️ **短路**：左真 ⇒ 右**不求值**。
                 Op::Or => {
-                    if left.eval(gpr, pc) != 0 {
-                        1
+                    if left.eval(gpr, pc, mem)? != 0 {
+                        Some(1)
                     } else {
-                        u32::from(right.eval(gpr, pc) != 0)
+                        Some(u32::from(right.eval(gpr, pc, mem)? != 0))
                     }
                 }
-                Op::Eq => u32::from(left.eval(gpr, pc) == right.eval(gpr, pc)),
-                Op::Ne => u32::from(left.eval(gpr, pc) != right.eval(gpr, pc)),
+                Op::Eq => Some(u32::from(
+                    left.eval(gpr, pc, mem)? == right.eval(gpr, pc, mem)?,
+                )),
+                Op::Ne => Some(u32::from(
+                    left.eval(gpr, pc, mem)? != right.eval(gpr, pc, mem)?,
+                )),
                 // ⚠️ **无符号**比较（STAGE-42 §4.2）。
-                Op::Lt => u32::from(left.eval(gpr, pc) < right.eval(gpr, pc)),
-                Op::Le => u32::from(left.eval(gpr, pc) <= right.eval(gpr, pc)),
-                Op::Gt => u32::from(left.eval(gpr, pc) > right.eval(gpr, pc)),
-                Op::Ge => u32::from(left.eval(gpr, pc) >= right.eval(gpr, pc)),
+                Op::Lt => Some(u32::from(
+                    left.eval(gpr, pc, mem)? < right.eval(gpr, pc, mem)?,
+                )),
+                Op::Le => Some(u32::from(
+                    left.eval(gpr, pc, mem)? <= right.eval(gpr, pc, mem)?,
+                )),
+                Op::Gt => Some(u32::from(
+                    left.eval(gpr, pc, mem)? > right.eval(gpr, pc, mem)?,
+                )),
+                Op::Ge => Some(u32::from(
+                    left.eval(gpr, pc, mem)? >= right.eval(gpr, pc, mem)?,
+                )),
             },
+        }
+    }
+
+    /// **要不要读内存**（任一子式是 `Load` 即真）。
+    fn reads_memory(&self) -> bool {
+        match self {
+            Self::Const(_) | Self::Reg(_) | Self::Pc => false,
+            // `&[地址]` 只算地址 ⇒ ⇒ 不读。
+            Self::AddrOf(_) => false,
+            Self::Load(_) => true,
+            Self::Not(inner) => inner.reads_memory(),
+            Self::Bin(_, left, right) => left.reads_memory() || right.reads_memory(),
+        }
+    }
+
+    /// **引用 pc 吗**（`pc` 子式，或地址基址是 `pc`）。
+    fn reads_pc(&self) -> bool {
+        match self {
+            Self::Const(_) | Self::Reg(_) => false,
+            Self::Pc => true,
+            Self::AddrOf(spec) | Self::Load(spec) => spec.base == AddressBase::Pc,
+            Self::Not(inner) => inner.reads_pc(),
+            Self::Bin(_, left, right) => left.reads_pc() || right.reads_pc(),
+        }
+    }
+
+    /// 收集**读内存**的地址区间（`(起始地址, 4)`）。
+    fn collect_loads(&self, gpr: &[u32; 32], pc: u32, out: &mut Vec<(u32, u32)>) {
+        match self {
+            Self::Const(_) | Self::Reg(_) | Self::Pc | Self::AddrOf(_) => {}
+            Self::Load(spec) => out.push((resolve_address(spec, gpr, pc), 4)),
+            Self::Not(inner) => inner.collect_loads(gpr, pc, out),
+            Self::Bin(_, left, right) => {
+                left.collect_loads(gpr, pc, out);
+                right.collect_loads(gpr, pc, out);
+            }
         }
     }
 }
@@ -310,11 +413,21 @@ fn bind_expr(expr: &Expr, names: &dyn NameResolver) -> Result<BoundExpr, CondErr
             Some(reference) if reference.class == NameClass::Function => {
                 BoundExpr::Const(reference.addr)
             }
-            // ⚠️ **变量名 ⇒ 变量的值 ⇒ 要读内存** ⇒ 档 3（批 C）⇒ ⇒ 本批
-            //    明说拒，**不**静默当成地址。
+            // ⚠️ **变量名 ⇒ 变量的值 ⇒ 读它地址处的 word**（档 3 · 批 C）。
+            //     ⚠️ 读的是 **word**：目前没有变量类型的宽度信息 ⇒ ⇒ 1 / 2
+            //     字节的变量也按 4 字节读（与「值类型 = u32」的冻结口径一致；
+            //     窄类型语义留到有 DWARF 类型信息时再谈）。
+            Some(reference) if reference.class == NameClass::Object => {
+                BoundExpr::Load(AddressSpec {
+                    base: AddressBase::Number(reference.addr),
+                    offset: 0,
+                })
+            }
+            // ⚠️ **没分类的符号（`STT_NOTYPE` 等）没有「值」的语义** ⇒ ⇒
+            //     只许 `&名字`。
             Some(_) => {
                 return Err(CondError::new(format!(
-                    "全局变量 \"{name}\" 的值要读内存（本批尚未支持，批 C 起支持）；要它的地址请写 &{name}"
+                    "符号 \"{name}\" 不是已知的变量（它没有确定的值）；要它的地址请写 &{name}"
                 )))
             }
             None => return Err(undefined_name(name)),
@@ -324,14 +437,9 @@ fn bind_expr(expr: &Expr, names: &dyn NameResolver) -> Result<BoundExpr, CondErr
             Some(reference) => BoundExpr::Const(reference.addr),
             None => return Err(undefined_name(name)),
         },
-        // ⚠️ **读内存**（`[地址]`）⇒ 档 3（批 C）。
-        Expr::Mem(spec) => {
-            return Err(CondError::new(format!(
-                "读内存 {} 要过总线（本批尚未支持，批 C 起支持）；要地址请写 &{}",
-                show_spec(spec),
-                show_spec(spec)
-            )))
-        }
+        // ⚠️ **读内存**（`[地址]`）⇒ 档 3（批 C）：基址在绑定期定下来，
+        //    真正的总线读在**求值期**（内存里的值随时会变）。
+        Expr::Mem(spec) => BoundExpr::Load(bind_spec(spec, names)?),
         // ⚠️ **取地址** ⇒ 地址表达式 ⇒ 基址里的符号也要在绑定期定下来。
         Expr::AddrOfMem(spec) => BoundExpr::AddrOf(bind_spec(spec, names)?),
         Expr::Not(inner) => BoundExpr::Not(Box::new(bind_expr(inner, names)?)),
@@ -351,7 +459,12 @@ fn bind_spec(spec: &AddressSpec, names: &dyn NameResolver) -> Result<AddressSpec
         AddressBase::Pc => AddressBase::Pc,
         AddressBase::Symbol(name) => match names.resolve(name) {
             Some(reference) => AddressBase::Number(reference.addr),
-            None => return Err(undefined_name(name)),
+            None => {
+                return Err(CondError::new(format!(
+                    "未定义符号 \"{name}\"（地址表达式 {}）",
+                    show_spec(spec)
+                )))
+            }
         },
     };
     Ok(AddressSpec {
@@ -814,7 +927,8 @@ mod tests {
             .unwrap_or_else(|e| panic!("表达式 {expr:?} 应当能解析：{e}"))
             .bind(&NoNames)
             .unwrap_or_else(|e| panic!("表达式 {expr:?} 应当能绑定：{e}"))
-            .eval(gpr, pc)
+            .eval(gpr, pc, &NoMem)
+            .expect("求值不该失败（这些用例都不读内存）")
     }
 
     /// 带**一张小符号表**的解析 + 绑定 + 求值。
@@ -823,7 +937,35 @@ mod tests {
             .unwrap_or_else(|e| panic!("表达式 {expr:?} 应当能解析：{e}"))
             .bind(names)
             .unwrap_or_else(|e| panic!("表达式 {expr:?} 应当能绑定：{e}"))
-            .eval(gpr, pc)
+            .eval(gpr, pc, &NoMem)
+            .expect("求值不该失败（这些用例都不读内存）")
+    }
+
+    /// **假内存**：`addr → word`（表外地址 ⇒ 读不到 ⇒ 求值失败）。
+    struct FakeMem(Vec<(u32, u32)>);
+
+    impl MemReader for FakeMem {
+        fn read_word(&self, addr: u32) -> Option<u32> {
+            self.0
+                .iter()
+                .find(|(candidate, _)| *candidate == addr)
+                .map(|(_, value)| *value)
+        }
+    }
+
+    /// 带**符号表 + 内存**的解析 + 绑定 + 求值。
+    fn eval_mem(
+        expr: &str,
+        names: &dyn NameResolver,
+        gpr: &[u32; 32],
+        pc: u32,
+        mem: &dyn MemReader,
+    ) -> Option<u32> {
+        parse(expr)
+            .unwrap_or_else(|e| panic!("表达式 {expr:?} 应当能解析：{e}"))
+            .bind(names)
+            .unwrap_or_else(|e| panic!("表达式 {expr:?} 应当能绑定：{e}"))
+            .eval(gpr, pc, mem)
     }
 
     /// 一张**假的符号表**：`(名字, 分类, 地址)`。
@@ -1185,33 +1327,157 @@ mod tests {
         );
     }
 
-    /// **变量名 = 变量的值 ⇒ 要读内存 ⇒ 档 3 才有** ⇒ ⇒ 本批明说拒。
+    /// **变量名 = 变量的值**（档 3）：读它地址处的那个 word。
     #[test]
-    fn a_variable_name_is_rejected_as_unimplemented_read() {
-        let cond = parse("g_counter == 3").expect("语法合法");
-        let err = cond.bind(&names()).expect_err("变量名要读内存，本批不支持");
-        assert!(
-            err.message().contains("读内存") && err.message().contains("g_counter"),
-            "错误消息要指出「要读内存」以及是哪个名字：{}",
-            err.message()
+    fn a_variable_name_is_its_value_in_memory() {
+        // `g_counter` 在 0x2000，那里存着 7。
+        let mem = FakeMem(vec![(0x2000, 7)]);
+        assert_eq!(
+            eval_mem("g_counter == 7", &names(), &gpr(&[]), 0, &mem),
+            Some(1)
         );
-        // ⚠️ 顺手给出**可用的替代写法**（消息里那句「要它的地址请写 &…」）。
-        assert!(
-            err.message().contains("&g_counter"),
-            "错误消息要给替代写法：{}",
-            err.message()
+        assert_eq!(
+            eval_mem("g_counter == 8", &names(), &gpr(&[]), 0, &mem),
+            Some(0)
+        );
+        // ⚠️ **值 ≠ 地址**：`g_counter` 读到的是 7，不是 0x2000。
+        assert_eq!(
+            eval_mem("g_counter == 0x2000", &names(), &gpr(&[]), 0, &mem),
+            Some(0),
+            "变量名是变量的值，不是它的地址"
         );
     }
 
-    /// **`[地址]` 读内存**同样明说拒（档 3）。
+    /// **`[地址]` 读内存**（档 3）：读该地址处的那个 word。
     #[test]
-    fn a_memory_read_is_rejected_as_unimplemented() {
-        let cond = parse("[x1+8] == 5").expect("方括号是合法语法");
-        let err = cond.bind(&names()).expect_err("读内存本批不支持");
-        assert!(
-            err.message().contains("读内存") && err.message().contains("[x1+8]"),
-            "错误消息要回显那个地址表达式：{}",
-            err.message()
+    fn a_bracket_reads_the_word_at_that_address() {
+        let mem = FakeMem(vec![(0x1008, 5), (0x2000, 9)]);
+        assert_eq!(
+            eval_mem("[x1+8] == 5", &names(), &gpr(&[(1, 0x1000)]), 0, &mem),
+            Some(1)
+        );
+        // 符号基址一样能读。
+        assert_eq!(
+            eval_mem("[g_counter] == 9", &names(), &gpr(&[]), 0, &mem),
+            Some(1)
+        );
+        // `&[...]` 仍然**只算地址**（不读 ⇒ 这张表里没有 0x1009 也不影响）。
+        assert_eq!(
+            eval_mem("&[x1+8] == 0x1008", &names(), &gpr(&[(1, 0x1000)]), 0, &mem),
+            Some(1)
+        );
+    }
+
+    /// **读不到 ⇒ 求值失败**（`None`），不是「为假」。
+    #[test]
+    fn an_unreadable_address_is_an_evaluation_failure() {
+        let empty = FakeMem(vec![]);
+        assert_eq!(
+            eval_mem("g_counter == 0", &names(), &gpr(&[]), 0, &empty),
+            None,
+            "读不到内存表达式就求不出值 ⇒ 不能折成 0"
+        );
+        // 用 `NoMem` 也一样（它就是「一个 word 也读不到」）。
+        assert_eq!(
+            eval_mem("g_counter == 0", &names(), &gpr(&[]), 0, &NoMem),
+            None
+        );
+        // 不含内存读的表达式用 `NoMem` 照常求值（它根本不碰内存）。
+        assert_eq!(
+            eval_mem("main == 0x1000", &names(), &gpr(&[]), 0, &NoMem),
+            Some(1)
+        );
+    }
+
+    /// **短路**：右操作数里的内存读**不会发生** ⇒ ⇒ 左假时读不到也不影响
+    /// 结果（少一次白读，也少一次「求值失败」）。
+    #[test]
+    fn a_short_circuited_memory_read_never_happens() {
+        let empty = FakeMem(vec![]);
+        // `x2 == 0` 为真 ⇒ `||` 右**不求值** ⇒ 读不到也没关系。
+        assert_eq!(
+            eval_mem(
+                "x2 == 0 || [x1] == 1",
+                &names(),
+                &gpr(&[(1, 0x1000), (2, 0)]),
+                0,
+                &empty
+            ),
+            Some(1)
+        );
+        // `x2 != 0` 为假 ⇒ `&&` 右**不求值** ⇒ 同上。
+        assert_eq!(
+            eval_mem(
+                "x2 != 0 && [x1] == 1",
+                &names(),
+                &gpr(&[(1, 0x1000), (2, 0)]),
+                0,
+                &empty
+            ),
+            Some(0)
+        );
+        // 反过来（右真的要被求值）⇒ 读不到 ⇒ 求值失败。
+        assert_eq!(
+            eval_mem(
+                "x2 == 0 || [x1] == 1",
+                &names(),
+                &gpr(&[(1, 0x1000), (2, 1)]),
+                0,
+                &empty
+            ),
+            None
+        );
+    }
+
+    /// **`reads_memory` / `reads_pc` / `load_intervals`**（表级判定要用）。
+    #[test]
+    fn the_shape_predicates_describe_the_bound_tree() {
+        let names = names();
+        // 只读寄存器 ⇒ 不读内存、不碰 pc。
+        let cond = parse("x1 == 3").expect("语法").bind(&names).expect("绑定");
+        assert!(!cond.reads_memory());
+        assert!(!cond.reads_pc());
+        assert!(cond.load_intervals(&gpr(&[(1, 0x1000)]), 0).is_empty());
+
+        // 变量值 ⇒ 读内存，区间 = 变量地址处的 4 字节。
+        let cond = parse("g_counter == 3")
+            .expect("语法")
+            .bind(&names)
+            .expect("绑定");
+        assert!(cond.reads_memory());
+        assert!(!cond.reads_pc());
+        assert_eq!(cond.load_intervals(&gpr(&[]), 0), vec![(0x2000, 4)]);
+
+        // `&g_counter` 只算地址 ⇒ 不读。
+        let cond = parse("&g_counter == 0x2000")
+            .expect("语法")
+            .bind(&names)
+            .expect("绑定");
+        assert!(!cond.reads_memory());
+
+        // 引用 pc ⇒ 不许做区间过滤。
+        let cond = parse("pc == 0x1000")
+            .expect("语法")
+            .bind(&names)
+            .expect("绑定");
+        assert!(cond.reads_pc());
+
+        // 地址基址是 pc 的读也算「引用 pc」。
+        let cond = parse("[pc] == 1")
+            .expect("语法")
+            .bind(&names)
+            .expect("绑定");
+        assert!(cond.reads_memory());
+        assert!(cond.reads_pc());
+
+        // 两个读 ⇒ 两条区间（按遍历顺序）。
+        let cond = parse("[x1] == 1 && [x2] == 2")
+            .expect("语法")
+            .bind(&names)
+            .expect("绑定");
+        assert_eq!(
+            cond.load_intervals(&gpr(&[(1, 0x1000), (2, 0x2000)]), 0),
+            vec![(0x1000, 4), (0x2000, 4)]
         );
     }
 
@@ -1272,9 +1538,12 @@ mod tests {
         let cond = parse("main == &g_counter").expect("语法合法");
         let bound = cond.bind(&names()).expect("能绑定");
         // ⚠️ 求值与**符号表无关**：换一张空表来求值，结果一样。
-        let a = bound.eval(&gpr(&[]), 0);
-        let b = cond.bind(&names()).expect("能绑定").eval(&gpr(&[]), 0);
+        let a = bound.eval(&gpr(&[]), 0, &NoMem);
+        let b = cond
+            .bind(&names())
+            .expect("能绑定")
+            .eval(&gpr(&[]), 0, &NoMem);
         assert_eq!(a, b, "绑定后求值不该再依赖符号表");
-        assert_eq!(a, 0, "0x1000 == 0x2000 为假");
+        assert_eq!(a, Some(0), "0x1000 == 0x2000 为假");
     }
 }

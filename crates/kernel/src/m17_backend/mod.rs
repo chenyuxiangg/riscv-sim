@@ -43,6 +43,7 @@ use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink, TimeSo
 use riscv_sim_contract::protocol::HaltReason;
 use riscv_sim_contract::snapshot::EngineSnapshotDto;
 
+use crate::m08_breakpoint::cond::MemReader;
 use crate::m08_breakpoint::{BreakpointTable, WatchpointTable};
 use crate::m12_engine::{
     Engine, ExecOutcome, InstructionExecutor, PeripheralTicker, RunReason, NO_PROGRESS_WINDOW,
@@ -129,6 +130,22 @@ pub const IRQ_FIRMWARE_BYTES: [u8; 44] = [
     // 0x28  mret                    → 0x3020_0073
     0x73, 0x00, 0x20, 0x30,
 ];
+
+/// 把 M-14 总线适配成条件表达式的 [`MemReader`]。
+///
+/// ⚠️ **走 `read_only`（不触发 hook）**：条件求值是**调试判定的内部动作**
+/// ⇒ ⇒ 它读的那一下**不该**出现在访存 trace 里，也不该被观察点当成一次
+/// 真实访存（否则「一个条件断点导致观察点命中」这种鬼故事就会出现）。
+///
+/// ⚠️ **读失败 ⇒ `None`**（未映射 / 跨区）：表达式据此判「求值失败 = 未
+/// 命中」，不把总线错误升级成内核错误。
+struct BusWords<'a>(&'a Bus);
+
+impl MemReader for BusWords<'_> {
+    fn read_word(&self, addr: u32) -> Option<u32> {
+        self.0.read_only(addr, BusWidth::Word).ok()
+    }
+}
 
 /// 把 `state.pending_writes` 里的写**真正提交**到总线（D-07）。
 ///
@@ -363,13 +380,18 @@ impl<'a> IssExecutor<'a> {
     /// ⚠️ **命中即返回** ⇒ ⇒ 观察式条目**不会**在地址断点已命中时被求值
     /// ⇒ ⇒ 计数**不会**双加。
     pub fn breakpoint_hit(&self, state: &SimState) -> Option<Breakpoint> {
-        if let Some(bp) = self.breakpoints.hit_check_cond(state.pc, &state.gpr) {
+        // ⚠️ `self.bus` 已经是 `&mut Bus` ⇒ ⇒ 再取一次引用是多一层的
+        //    `&&mut`（clippy 的 needless_borrow）：直接交进去。
+        let mem = BusWords(self.bus);
+        // ⚠️ **地址 + 条件**：条件里的内存读**当场读总线**（STAGE-55 表 6
+        //    第 2 行：地址命中频率极低 ⇒ 成本可忽略 ⇒ 不必挪到 store 边界）。
+        if let Some(bp) = self.breakpoints.hit_check_cond(state.pc, &state.gpr, &mem) {
             return Some(bp);
         }
         // **观察式条目**：没有地址，按指令步求值谓词。
-        // ⚠️ 批 A 的求值时刻 = **取指之前**（含内存读的条目在批 C 挪到
-        //    store 边界）。
-        self.breakpoints.hit_check_pred(state.pc, &state.gpr)
+        // ⚠️ 这里**只收不含内存读**的条目（`hit_check_pred` 内部跳过含内存
+        //    读的）⇒ ⇒ 含内存读的走 `step()` 里的 store 边界。
+        self.breakpoints.hit_check_pred(state.pc, &state.gpr, &mem)
     }
 
     /// **取走**一次宿主暂停请求（取走即消失）。
@@ -459,6 +481,14 @@ impl InstructionExecutor for IssExecutor<'_> {
             });
         }
 
+        // **本次执行的指令地址**（STAGE-55 批 C）：store 边界命中时 PC 已经
+        // 推进，宿主需要它才能说清「是哪条 store 触发的」。
+        //
+        // ⚠️ 必须在**任何 pc 改动之前**取 —— 中断交付也会改 pc。
+        let exec_pc = state.pc;
+        // 触发地址槽**每步清空**：它只描述「这一步」，不跨步复用。
+        self.breakpoints.clear_store_trigger();
+
         // (1) 断点命中检测 —— 挂在**取指之前**（M-08 LLD §3.2）。
         //     命中时该条指令尚未执行，状态零副作用。
         //
@@ -536,6 +566,9 @@ impl InstructionExecutor for IssExecutor<'_> {
         //     ⚠️ `irq_clear` 的**副作用**（接缝 #4）在 M-17，**不在** M-13：
         //     M-13 只管把值写进 CSR 文件，并**回报**「刚写了哪个 CSR」；
         //     「写了要清哪些线」由 M-17 承担。
+        // ⚠️ **先清空总线上的写记录**：store 边界的区间过滤要的正是
+        //    「**这条**指令写了哪几段」（STAGE-55 批 C）。
+        self.bus.clear_recent_writes();
         let outcome = self.iss.step_one_via_bus(state, self.bus);
         // ⚠️ **判据是「这条指令写了 `irq_clear`」，不是「`irq_clear` 的值
         //     变了」**（STAGE-4 §4 接缝 #4 的原话）。
@@ -603,10 +636,43 @@ impl InstructionExecutor for IssExecutor<'_> {
         //     已经发生的动作，与 guest 这条指令成不成功**无关**。写在
         //     队列里不提交 = 外设的写**永远看不见**。
         commit_pending_writes(state, self.bus)?;
+        // ⚠️ **从总线取写区间**（不是从 `pending_writes`）：guest 的 store 是
+        //    ISS **直接**走总线写的（`pending_writes` 只装调度器给出的写）
+        //    ⇒ ⇒ 只有总线自己知道「这条指令到底写了哪几段」。
+        let writes: Vec<(u32, u32)> = self.bus.recent_writes().to_vec();
+
+        // (6-bis) **store 边界的观察式命中判定**（STAGE-55 表 6 · 批 C）。
+        //
+        //     ⚠️ 时刻 = **写已生效、指令已提交之后** ⇒ ⇒ 谓词读到的是
+        //        **新值**；`pc` 已经是下一条。
+        //     ⚠️ **只在真有 store 时判**：没有 store ⇒ 内存不可能变 ⇒
+        //        读一遍纯属白读（这也是「只监控 store 类指令」那条口径的
+        //        落地处）。
+        //     ⚠️ **陷阱也判**（与提交无关：写已经落盘，就是事实）；但
+        //        陷阱的停止原因优先（下面 `if trapped` 先 return）。
+        if !writes.is_empty() {
+            let mem = BusWords(&*self.bus);
+            if self
+                .breakpoints
+                .hit_check_pred_at_store(state.pc, &state.gpr, &mem, &writes)
+                .is_some()
+            {
+                self.breakpoints.note_store_trigger(exec_pc);
+            }
+        }
 
         if trapped {
             return Ok(ExecOutcome::Stop {
                 reason: HaltReason::Trap,
+                consumed: true,
+            });
+        }
+
+        // store 边界命中的观察式条目 ⇒ **停**（原因复用 `Watchpoint`，
+        // 与「观察式命中」同语义；不扩枚举）。
+        if self.breakpoints.last_store_trigger().is_some() {
+            return Ok(ExecOutcome::Stop {
+                reason: HaltReason::Watchpoint,
                 consumed: true,
             });
         }
@@ -870,7 +936,46 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
         if bp.kind == BreakpointKind::Condition && bp.id == 0 {
             bp.id = self.next_free_predicate_id();
         }
-        self.breakpoints.set_with(bp, names)
+        let id = bp.id;
+        self.breakpoints.set_with(bp, names)?;
+        // **注册期试求值**（STAGE-55 表 7 · 批 C）：静态错上面已经拒掉 ⇒ ⇒
+        // 这里只判「**当下**求不求得出来」。求不出来 ⇒ ⇒ **允许注册**，打
+        // 降级标记；求值期再失败按**未命中**（不是「为假」）。
+        //
+        // ⚠️ 试求值的结论**不参与命中判定** —— 它只回答「这条表达式在这份
+        //    内存上能不能算」。（设计稿里「记基线供界面展示」这一条本批
+        //    **没做**：界面还没有基线那一栏，先不留一个没人读的字段。）
+        self.trial_eval_breakpoint(id);
+        Ok(())
+    }
+
+    /// 注册期**试求值**：读不到内存 ⇒ 打降级标记。
+    ///
+    /// ⚠️ 只有**含内存读**的谓词才可能失败（寄存器 / pc 永远读得到）。
+    fn trial_eval_breakpoint(&mut self, id: u32) {
+        let state = self.engine.snapshot();
+        let failed = {
+            let mem = BusWords(&self.bus);
+            match self.breakpoints.bound_condition(id) {
+                Some(cond) if cond.reads_memory() => {
+                    cond.eval(&state.gpr, state.pc, &mem).is_none()
+                }
+                // 不读内存 / 无条件 ⇒ 不可能失败。
+                _ => false,
+            }
+        };
+        if failed {
+            self.breakpoints
+                .mark_degraded(id, "注册时读不到表达式引用的内存（求值期读失败按未命中）");
+        }
+    }
+
+    /// 上一次 store 边界命中的**触发指令地址**（`exec_pc`）。
+    ///
+    /// ⚠️ 只有「含内存读的观察式条目」会写它 ⇒ ⇒ `None` 表示这次停下**不是**
+    /// store 边界触发的（地址断点 / 取指前的谓词都为 `None`）。
+    pub fn last_store_trigger_addr(&self) -> Option<u32> {
+        self.breakpoints.last_store_trigger()
     }
 
     /// 谓词条目可用的下一个 id（**从 `u32::MAX` 往下找空位**）。
