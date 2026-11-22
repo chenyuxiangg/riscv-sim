@@ -238,8 +238,17 @@ fn parse_base_with(text: &str, names: &dyn NameResolver) -> Result<AddressBase, 
         return Ok(AddressBase::Register(r));
     }
     // ⚠️ **符号名**：解析期就把地址定下来（`@main+4` = `main` 的地址 + 4）。
-    if let Some(name) = names.resolve(t) {
-        return Ok(AddressBase::Number(name.addr));
+    //
+    // ⚠️ **局部变量不进地址文法**（批 D 的边界）：它的「地址」随帧变化，
+    //    而地址文法的符号基址在**解析期**就落定（批 B 的口径）⇒ ⇒ 这里只收
+    //    「有地址常量」的符号；局部变量在条件文法里直接用名字。
+    if let Some(address) = names.resolve(t).and_then(|name| name.addr()) {
+        return Ok(AddressBase::Number(address));
+    }
+    if names.resolve(t).is_some() {
+        return Err(WatchExprError::new(format!(
+            "\"{t}\" 是当前帧的局部变量（没有固定地址）⇒ ⇒ 地址表达式里请用寄存器或数字"
+        )));
     }
     Err(WatchExprError::new(format!(
         "未知寄存器名或地址 \"{t}\"（也不是已加载的符号）"
@@ -368,7 +377,7 @@ mod tests {
         fn resolve(&self, name: &str) -> Option<super::super::names::NameRef> {
             (name == "main").then_some(super::super::names::NameRef {
                 class: super::super::names::NameClass::Function,
-                addr: 0x1000,
+                target: super::super::names::NameTarget::Addr(0x1000),
             })
         }
     }
@@ -389,6 +398,47 @@ mod tests {
         assert_eq!(target.address(&state()), Some(0x1004));
         let target = WatchTarget::parse_with("[main-4]", &FakeNames).unwrap();
         assert_eq!(target.address(&state()), Some(0x0ffc));
+    }
+
+    /// 一张只认**局部变量** `x` 的假符号表（栈位置，没有固定地址）。
+    struct LocalNames;
+
+    impl NameResolver for LocalNames {
+        fn resolve(&self, name: &str) -> Option<super::super::names::NameRef> {
+            (name == "x").then_some(super::super::names::NameRef {
+                class: super::super::names::NameClass::Local,
+                target: super::super::names::NameTarget::Local(
+                    super::super::names::LocalSlot::Frame {
+                        base: super::super::names::FrameBaseSlot::Cfa,
+                        offset: -24,
+                    },
+                ),
+            })
+        }
+    }
+
+    /// **地址文法不接局部变量**（批 D 的边界）：它的地址随帧变化，而符号
+    /// 基址在解析期就落定 ⇒ ⇒ 拒，并指出该用寄存器 / 数字。
+    #[test]
+    fn a_local_variable_is_rejected_as_an_address_base() {
+        for form in ["@x+4", "[x-4]"] {
+            let err =
+                WatchTarget::parse_with(form, &LocalNames).expect_err("局部变量不该进地址文法");
+            assert!(
+                err.message.contains("局部变量") && err.message.contains("寄存器或数字"),
+                "{form} 的错误消息要说明原因与替代写法：{}",
+                err.message
+            );
+        }
+        // ⚠️ 但**寄存器**写法照旧可用（`x` 与 `x8` 撞名时按寄存器优先）。
+        assert_eq!(
+            WatchTarget::parse_with("@x8+4", &LocalNames).unwrap(),
+            WatchTarget::Memory(AddressSpec {
+                base: AddressBase::Register(8),
+                offset: 4,
+            }),
+            "寄存器写法不受局部变量影响"
+        );
     }
 
     /// **没有符号上下文**时符号名仍是错（消息里说清「也不是已加载的符号」）。

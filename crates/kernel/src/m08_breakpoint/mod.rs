@@ -209,10 +209,17 @@ impl BreakpointTable {
             // ⚠️ 解析 + **绑定**都在这里（注册时一次）⇒ ⇒ 表里存的是
             //    **绑定后**的 AST ⇒ ⇒ 命中路径上既没有字符串处理，也没有
             //    符号表查询。
-            Some(text) => match cond::parse(text).and_then(|c| c.bind(resolver)) {
-                Ok(expr) => Some(expr),
-                Err(err) => return Err(self.condition_error(err)),
-            },
+            //
+            // ⚠️ **帧上下文**（批 D）：地址类断点**知道自己站在哪个函数里**
+            //    （`bp.addr`）⇒ ⇒ 局部变量按那个函数解析，同名不歧义；无地址
+            //    的观察式条目没有这个上下文（`None`），局部变量只凭名字。
+            Some(text) => {
+                let scope = if is_pred { None } else { Some(bp.addr) };
+                match cond::parse(text).and_then(|c| c.bind_at(resolver, scope)) {
+                    Ok(expr) => Some(expr),
+                    Err(err) => return Err(self.condition_error(err)),
+                }
+            }
         };
         // ⚠️ 观察式条目**必须**有表达式 ⇒ ⇒ 缺了就按「空表达式」原样拒
         //    （错误消息由 `cond` 给，前端不吞）。
@@ -1007,15 +1014,98 @@ mod tests {
             match name {
                 "main" => Some(names::NameRef {
                     class: names::NameClass::Function,
-                    addr: 0x1000,
+                    target: names::NameTarget::Addr(0x1000),
                 }),
                 "g_counter" => Some(names::NameRef {
                     class: names::NameClass::Object,
-                    addr: 0x2000,
+                    target: names::NameTarget::Addr(0x2000),
                 }),
                 _ => None,
             }
         }
+    }
+
+    // ================= 批 D · 局部变量的**帧上下文**接线 =================
+
+    /// 一张**带帧**的假符号表：`counter` 在 `helper`(0x0..0x38) 是 x11、
+    /// 在 `main`(0x38..0x78) 是 x12 ⇒ ⇒ 光凭名字分不出来。
+    struct ScopedNames;
+
+    impl names::NameResolver for ScopedNames {
+        fn resolve(&self, name: &str) -> Option<names::NameRef> {
+            match name {
+                "main" => Some(names::NameRef {
+                    class: names::NameClass::Function,
+                    target: names::NameTarget::Addr(0x1000),
+                }),
+                _ => None,
+            }
+        }
+
+        fn resolve_at(
+            &self,
+            name: &str,
+            pc: Option<u32>,
+        ) -> Result<names::NameRef, names::ResolveError> {
+            if name != "counter" {
+                return self.resolve(name).ok_or(names::ResolveError::Undefined);
+            }
+            let slot = match pc {
+                Some(pc) if (0x00..0x38).contains(&pc) => names::LocalSlot::Reg(11),
+                Some(pc) if (0x38..0x78).contains(&pc) => names::LocalSlot::Reg(12),
+                _ => {
+                    return Err(names::ResolveError::Ambiguous(vec![
+                        "helper".to_string(),
+                        "main".to_string(),
+                    ]))
+                }
+            };
+            Ok(names::NameRef {
+                class: names::NameClass::Local,
+                target: names::NameTarget::Local(slot),
+            })
+        }
+    }
+
+    /// **地址类断点按自己的地址当帧上下文**（批 D 的接线点）。
+    ///
+    /// ⚠️ 这条钉的是 `set_with` **把 `bp.addr` 传下去了**：不传的话，同名
+    /// 局部变量会一路退化成「只凭名字」⇒ ⇒ 报歧义、注册被拒。
+    #[test]
+    fn an_address_breakpoint_binds_its_condition_against_its_own_frame() {
+        let mut t = BreakpointTable::new();
+        t.set_with(bp_cond(1, 0x10, "counter == 1"), &ScopedNames)
+            .expect("helper 里的地址断点应当能解析自己的局部变量");
+        let bound = t.bound_condition(1).expect("要绑上");
+        // helper ⇒ x11。
+        let mut gpr = [0u32; 32];
+        gpr[11] = 1;
+        gpr[12] = 0;
+        assert_eq!(bound.eval(&gpr, 0x10, &cond::NoMem), Some(1));
+        gpr[11] = 0;
+        gpr[12] = 1;
+        assert_eq!(
+            bound.eval(&gpr, 0x10, &cond::NoMem),
+            Some(0),
+            "0x10 处必须读 x11（不能读到 main 的 x12）"
+        );
+    }
+
+    /// **观察式条目没有帧上下文** ⇒ 同名局部变量报歧义（消息要能被用户读懂）。
+    #[test]
+    fn a_condition_entry_without_a_frame_reports_the_ambiguity() {
+        let mut t = BreakpointTable::new();
+        let err = t
+            .set_with(bp_pred(1, "counter == 1"), &ScopedNames)
+            .expect_err("无地址的观察式条目不该随手挑一个同名局部变量");
+        assert!(
+            err.message.contains("在多个函数里都有")
+                && err.message.contains("helper")
+                && err.message.contains("main"),
+            "错误消息要点名两个函数：{}",
+            err.message
+        );
+        assert_eq!(t.len(), 0, "失败不该留下半条表项");
     }
 
     /// **带符号上下文注册**：`main == 0x1000` 能落表，并按函数地址求值。
@@ -1090,7 +1180,7 @@ mod tests {
         fn resolve(&self, name: &str) -> Option<names::NameRef> {
             (name == "_start").then_some(names::NameRef {
                 class: names::NameClass::Other,
-                addr: 0x0100,
+                target: names::NameTarget::Addr(0x0100),
             })
         }
     }

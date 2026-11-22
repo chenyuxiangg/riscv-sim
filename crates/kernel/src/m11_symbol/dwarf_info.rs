@@ -1,11 +1,18 @@
-//! Minimal `.debug_info` / `.debug_abbrev` reader for `DW_AT_comp_dir`.
+//! Minimal `.debug_info` / `.debug_abbrev` reader.
 //!
-//! The line-table parser deliberately does **not** materialise DIEs (裁决 B):
-//! the only thing it needs from `.debug_info` is the compile directory that
-//! v2–v4 line headers refer to through directory index 0. This module reads
-//! exactly that pair of attributes (`DW_AT_stmt_list` + `DW_AT_comp_dir`) and
-//! returns a `stmt_list → comp_dir` map. Any structural surprise is treated as
-//! "no comp_dir" (best effort) — the line table itself must still load.
+//! 两个用途：
+//!
+//! 1. **`DW_AT_comp_dir`**（STAGE-7 起）：行表解析**不物化 DIE 树**（裁决 B），
+//!    只从 CU 里取 `DW_AT_stmt_list` + `DW_AT_comp_dir`，行头里写的是相对路径
+//!    时用它拼成**绝对路径**。
+//! 2. **DIE 走查**（STAGE-55 批 D 起）：当前帧局部变量要 `DW_TAG_subprogram`
+//!    的 `low_pc` / `high_pc` / `frame_base`，以及 `DW_TAG_variable` /
+//!    `DW_TAG_formal_parameter` 的 `name` / `location`（`DW_OP_fbreg` /
+//!    `DW_OP_regN` 的**字节块**）。
+//!
+//! 两次用途共用同一套 abbrev / form 解析 ⇒ ⇒ 只留一个**通用的 DIE 走查**
+//! （[`walk_dies`]），上面再挂两个薄适配器。结构上的任何意外都不当错误：
+//! 调用方拿到的只会是「少了一些 DIE」，不会让行表 / 符号表一起挂掉。
 
 use std::collections::HashMap;
 
@@ -58,6 +65,102 @@ const DW_FORM_ADDRX3: u64 = 0x2b;
 const DW_FORM_ADDRX4: u64 = 0x2c;
 const DW_FORM_REF_SUP1: u64 = 0x2d;
 
+/// 一个属性的**原始值**。
+///
+/// ⚠️ 块 / `exprloc` **保留字节**（批 D 起要读 `DW_OP_fbreg` 的偏移）——
+/// 以前这里直接丢掉只返回 `Num(0)`，局部变量就没法定位了。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Value {
+    /// 数字（地址 / 长度 / 索引 / 标志）。
+    Num(u64),
+    /// 字符串（`.debug_str` 或 `.debug_line_str` 里取的）。
+    Str(String),
+    /// 块 / `exprloc` 的原始字节（DWARF 表达式）。
+    Bytes(Vec<u8>),
+}
+
+/// 一个 DIE 的属性集合（按 `DW_AT` 编号查）。
+#[derive(Debug, Default, Clone)]
+pub(crate) struct DieAttrs {
+    entries: Vec<(u64, u64, Value)>,
+}
+
+impl DieAttrs {
+    /// 数字属性（`Num` 以外的形态一律当「没有」）。
+    pub(crate) fn num(&self, attr: u64) -> Option<u64> {
+        match self.get(attr)? {
+            Value::Num(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// 字符串属性。
+    pub(crate) fn text(&self, attr: u64) -> Option<&str> {
+        match self.get(attr)? {
+            Value::Str(v) => Some(v.as_str()),
+            _ => None,
+        }
+    }
+
+    /// 块 / `exprloc` 属性的字节。
+    pub(crate) fn bytes(&self, attr: u64) -> Option<&[u8]> {
+        match self.get(attr)? {
+            Value::Bytes(v) => Some(v.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// 这个属性用的是**哪个 `DW_FORM`**（`DW_AT_high_pc` 要靠它区分
+    /// 「绝对结束地址」和「长度」）。
+    pub(crate) fn form(&self, attr: u64) -> Option<u64> {
+        self.entries
+            .iter()
+            .find(|(key, _, _)| *key == attr)
+            .map(|(_, form, _)| *form)
+    }
+
+    fn get(&self, attr: u64) -> Option<&Value> {
+        self.entries
+            .iter()
+            .find(|(key, _, _)| *key == attr)
+            .map(|(_, _, value)| value)
+    }
+}
+
+/// **走一遍所有单元的 DIE**，每个 DIE 调一次 `sink(depth, tag, attrs)`。
+///
+/// * `depth` —— 这个 DIE 在树里的深度（CU 是 `0`）；
+/// * 畸形单元 / 畸形 abbrev 表 ⇒ **跳过整个单元**（走查继续往下），
+///   不返回错误：调用方要的是「能解析多少算多少」。
+pub(crate) fn walk_dies(
+    debug_info: &[u8],
+    debug_abbrev: &[u8],
+    debug_str: &[u8],
+    line_str: &[u8],
+    sink: &mut dyn FnMut(usize, u64, &DieAttrs),
+) {
+    let mut abbrev_cache: HashMap<usize, Option<HashMap<u64, Abbrev>>> = HashMap::new();
+    let mut off = 0usize;
+    while off < debug_info.len() {
+        let next = match walk_unit(
+            debug_info,
+            off,
+            debug_abbrev,
+            debug_str,
+            line_str,
+            &mut abbrev_cache,
+            sink,
+        ) {
+            Ok(next) => next,
+            Err(()) => break,
+        };
+        if next <= off {
+            break;
+        }
+        off = next;
+    }
+}
+
 /// Build `DW_AT_stmt_list` → `DW_AT_comp_dir` from the raw debug sections.
 ///
 /// Errors are intentionally **not** exposed: an unreadable `.debug_info`
@@ -68,38 +171,35 @@ pub(crate) fn comp_dirs(
     debug_str: &[u8],
     line_str: &[u8],
 ) -> HashMap<u64, String> {
+    // 一个单元一个单元地收：`stmt_list` / `comp_dir` 是 CU 自己的属性。
     let mut out = HashMap::new();
-    let mut abbrev_cache: HashMap<usize, Option<HashMap<u64, Abbrev>>> = HashMap::new();
-    let mut off = 0usize;
-    while off < debug_info.len() {
-        let unit = match parse_unit(
-            debug_info,
-            off,
-            debug_abbrev,
-            debug_str,
-            line_str,
-            &mut abbrev_cache,
-        ) {
-            Ok(unit) => unit,
-            Err(()) => break,
-        };
-        if let (Some(stmt), Some(dir)) = (unit.stmt_list, unit.comp_dir) {
-            if !dir.is_empty() {
-                out.insert(stmt, dir);
+    let mut stmt_list: Option<u64> = None;
+    let mut comp_dir: Option<String> = None;
+    walk_dies(
+        debug_info,
+        debug_abbrev,
+        debug_str,
+        line_str,
+        &mut |depth, tag, attrs| {
+            if depth != 0 || tag != DW_TAG_COMPILE_UNIT {
+                return;
             }
+            // 新单元开始 ⇒ 上一个单元的配对先结算。
+            if let (Some(stmt), Some(dir)) = (stmt_list.take(), comp_dir.take()) {
+                if !dir.is_empty() {
+                    out.insert(stmt, dir);
+                }
+            }
+            stmt_list = attrs.num(DW_AT_STMT_LIST);
+            comp_dir = attrs.text(DW_AT_COMP_DIR).map(str::to_string);
+        },
+    );
+    if let (Some(stmt), Some(dir)) = (stmt_list, comp_dir) {
+        if !dir.is_empty() {
+            out.insert(stmt, dir);
         }
-        if unit.next_off <= off {
-            break;
-        }
-        off = unit.next_off;
     }
     out
-}
-
-struct ParsedUnit {
-    next_off: usize,
-    stmt_list: Option<u64>,
-    comp_dir: Option<String>,
 }
 
 struct Abbrev {
@@ -114,19 +214,15 @@ struct AttrSpec {
     implicit_const: i64,
 }
 
-enum Value {
-    Num(u64),
-    Str(String),
-}
-
-fn parse_unit(
+fn walk_unit(
     bytes: &[u8],
     start: usize,
     abbrev_bytes: &[u8],
     debug_str: &[u8],
     line_str: &[u8],
     abbrev_cache: &mut HashMap<usize, Option<HashMap<u64, Abbrev>>>,
-) -> Result<ParsedUnit, ()> {
+    sink: &mut dyn FnMut(usize, u64, &DieAttrs),
+) -> Result<usize, ()> {
     let (offset_size, unit_len) = initial_length(bytes, start)?;
     let unit_end = (start as u64)
         .checked_add(offset_size as u64)
@@ -150,9 +246,7 @@ fn parse_unit(
         .as_ref()
         .ok_or(())?;
 
-    let mut stmt_list = None;
-    let mut comp_dir = None;
-    let mut depth = 0i32;
+    let mut depth = 0usize;
     loop {
         if cur.pos >= unit_end {
             break;
@@ -166,35 +260,18 @@ fn parse_unit(
             continue;
         }
         let abbrev = table.get(&code).ok_or(())?;
-        let is_cu = depth == 0 && abbrev.tag == DW_TAG_COMPILE_UNIT;
+        let mut attrs = DieAttrs::default();
         for spec in &abbrev.attrs {
             let value = read_value(&mut cur, spec, offset_size, debug_str, line_str)?;
-            if is_cu {
-                match spec.attr {
-                    DW_AT_STMT_LIST => {
-                        if let Value::Num(v) = value {
-                            stmt_list = Some(v);
-                        }
-                    }
-                    DW_AT_COMP_DIR => {
-                        if let Value::Str(v) = value {
-                            comp_dir = Some(v);
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            attrs.entries.push((spec.attr, spec.form, value));
         }
+        sink(depth, abbrev.tag, &attrs);
         if abbrev.children {
             depth += 1;
         }
     }
 
-    Ok(ParsedUnit {
-        next_off: unit_end,
-        stmt_list,
-        comp_dir,
-    })
+    Ok(unit_end)
 }
 
 fn initial_length(bytes: &[u8], start: usize) -> Result<(usize, u64), ()> {
@@ -298,25 +375,23 @@ fn read_form(
         DW_FORM_SEC_OFFSET | DW_FORM_REF_ADDR => Ok(Value::Num(cur.offset(offset_size)?)),
         DW_FORM_FLAG_PRESENT => Ok(Value::Num(1)),
         DW_FORM_IMPLICIT_CONST => Ok(Value::Num(implicit_const as u64)),
+        // ⚠️ 块 / `exprloc`：**留字节**（批 D 的 `DW_OP_fbreg` / `DW_OP_regN`
+        //    就住在里面）。
         DW_FORM_BLOCK2 => {
             let len = cur.u16()? as usize;
-            cur.skip(len)?;
-            Ok(Value::Num(0))
+            Ok(Value::Bytes(cur.take(len)?.to_vec()))
         }
         DW_FORM_BLOCK4 => {
             let len = cur.u32()? as usize;
-            cur.skip(len)?;
-            Ok(Value::Num(0))
+            Ok(Value::Bytes(cur.take(len)?.to_vec()))
         }
         DW_FORM_BLOCK1 => {
             let len = cur.u8()? as usize;
-            cur.skip(len)?;
-            Ok(Value::Num(0))
+            Ok(Value::Bytes(cur.take(len)?.to_vec()))
         }
         DW_FORM_BLOCK | DW_FORM_EXPRLOC => {
             let len = cur.uleb()? as usize;
-            cur.skip(len)?;
-            Ok(Value::Num(0))
+            Ok(Value::Bytes(cur.take(len)?.to_vec()))
         }
         DW_FORM_DATA16 => {
             cur.skip(16)?;
@@ -471,5 +546,95 @@ impl<'a> Cursor<'a> {
         let value = std::str::from_utf8(&rest[..end]).map_err(|_| ())?;
         self.pos += end + 1;
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 一个最小 v4 单元：CU（带 `stmt_list` + `comp_dir`）+ 子 DIE（带一块
+    /// `exprloc`）。字节是**手搓**的，只为钉住「块字节不再被丢掉」。
+    fn tiny_unit() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        // .debug_abbrev：1 = CU（children, stmt_list DATA4, comp_dir STRP），
+        //                2 = 子 DIE（children=false, location EXPRLOC）
+        let mut abbrev = Vec::new();
+        for (code, tag, children, attrs) in [
+            (1u64, 0x11u64, true, vec![(0x10u64, 0x06u64), (0x1b, 0x0e)]),
+            (2, 0x34, false, vec![(0x02, 0x18)]),
+        ] {
+            abbrev.extend(uleb(code));
+            abbrev.extend(uleb(tag));
+            abbrev.push(if children { 1 } else { 0 });
+            for (attr, form) in attrs {
+                abbrev.extend(uleb(attr));
+                abbrev.extend(uleb(form));
+            }
+            abbrev.extend([0, 0]);
+        }
+        abbrev.push(0);
+
+        let debug_str = b"/tmp/build\0".to_vec();
+        // .debug_info（v4）：长度 / 版本 / abbrev 偏移 / 地址宽度 + DIE
+        let mut body = Vec::new();
+        body.extend([0x04, 0x00]); // version 4
+        body.extend([0x00, 0x00, 0x00, 0x00]); // abbrev offset
+        body.extend([0x04]); // address size
+        body.extend(uleb(1)); // CU
+        body.extend([0x34, 0x12, 0x00, 0x00]); // stmt_list = 0x1234
+        body.extend([0x00, 0x00, 0x00, 0x00]); // comp_dir = 0
+        body.extend(uleb(2)); // 子 DIE
+        body.extend([0x02, 0x91, 0x68]); // exprloc: len=2, fbreg -24
+        body.push(0); // 子 DIE 结束
+        let mut info = Vec::new();
+        info.extend((body.len() as u32).to_le_bytes());
+        info.extend(body);
+        (info, abbrev, debug_str)
+    }
+
+    fn uleb(mut value: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let low = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(low);
+                return out;
+            }
+            out.push(low | 0x80);
+        }
+    }
+
+    #[test]
+    fn comp_dirs_still_works_through_the_generic_walk() {
+        let (info, abbrev, strings) = tiny_unit();
+        let map = comp_dirs(&info, &abbrev, &strings, &[]);
+        assert_eq!(map.get(&0x1234).map(String::as_str), Some("/tmp/build"));
+    }
+
+    #[test]
+    fn a_block_attribute_keeps_its_bytes() {
+        let (info, abbrev, strings) = tiny_unit();
+        let mut seen: Vec<(usize, u64, Vec<u8>)> = Vec::new();
+        walk_dies(&info, &abbrev, &strings, &[], &mut |depth, tag, attrs| {
+            if let Some(bytes) = attrs.bytes(0x02) {
+                seen.push((depth, tag, bytes.to_vec()));
+            }
+        });
+        assert_eq!(
+            seen,
+            vec![(1, 0x34, vec![0x91, 0x68])],
+            "块的字节必须原样留下"
+        );
+    }
+
+    #[test]
+    fn a_malformed_unit_yields_no_second_unit() {
+        // 长度字段说「有 9 个字节」，但里面只有 2 个 ⇒ 单元畸形 ⇒ 走查停，
+        // 不 panic、不越界读。
+        let info = vec![0x09, 0x00, 0x00, 0x00, 0x04, 0x00];
+        let mut hits = 0;
+        walk_dies(&info, &[], &[], &[], &mut |_, _, _| hits += 1);
+        assert_eq!(hits, 0);
     }
 }

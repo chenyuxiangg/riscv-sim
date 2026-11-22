@@ -71,7 +71,7 @@
 
 use std::fmt;
 
-use super::names::{NameClass, NameResolver};
+use super::names::{LocalSlot, NameClass, NameRef, NameResolver, NameTarget, ResolveError};
 use super::watch_expr::{AddressBase, AddressSpec};
 
 /// 条件表达式的**解析失败**。
@@ -197,15 +197,27 @@ impl Condition {
     /// **绑定**：把名字换成地址，得到一个能求值的 [`BoundCondition`]。
     ///
     /// ⚠️ **注册期只绑一次** ⇒ ⇒ 求值路径上**没有**字符串处理，也没有
-    /// 符号表查询。
+    /// 符号查询（**全局视角**：不看当前帧）。
     ///
-    /// ⚠️ **静态错一律在这里报**（`E_DBG-02`）：
-    /// * 未定义符号；
-    /// * 变量名（要读内存 ⇒ 档 3，本批明确拒）；
-    /// * 读内存的 `[地址]`（同上）。
+    /// ⚠️ **静态错一律在这里报**（`E_DBG-02`）：未定义符号、同名局部变量
+    /// 分不清、寄存器里的变量被取地址……
     pub fn bind(&self, names: &dyn NameResolver) -> Result<BoundCondition, CondError> {
+        self.bind_at(names, None)
+    }
+
+    /// 带**帧上下文**的绑定（批 D）。
+    ///
+    /// * `scope = Some(addr)` ⇒ 地址类断点知道自己站在哪个函数里 ⇒ ⇒ 局部
+    ///   变量按**那个函数**解析（同名不歧义）；
+    /// * `scope = None` ⇒ 无地址的条件断点 ⇒ ⇒ 局部变量只凭名字（多个函数
+    ///   都有 ⇒ 报「在多个函数里都有」，**不**随手挑一个）。
+    pub fn bind_at(
+        &self,
+        names: &dyn NameResolver,
+        scope: Option<u32>,
+    ) -> Result<BoundCondition, CondError> {
         Ok(BoundCondition {
-            expr: bind_expr(&self.expr, names)?,
+            expr: bind_expr(&self.expr, names, scope)?,
         })
     }
 }
@@ -402,74 +414,149 @@ fn resolve_address(spec: &AddressSpec, gpr: &[u32; 32], pc: u32) -> u32 {
     base.wrapping_add(spec.offset as u32)
 }
 
-/// **绑定**：把语法树里的名字换成地址。
-fn bind_expr(expr: &Expr, names: &dyn NameResolver) -> Result<BoundExpr, CondError> {
+/// **绑定**：把语法树里的名字换成「地址 / 寄存器位 / 帧偏移」。
+fn bind_expr(
+    expr: &Expr,
+    names: &dyn NameResolver,
+    scope: Option<u32>,
+) -> Result<BoundExpr, CondError> {
     Ok(match expr {
         Expr::Const(value) => BoundExpr::Const(*value),
         Expr::Reg(index) => BoundExpr::Reg(*index),
         Expr::Pc => BoundExpr::Pc,
-        // ⚠️ **函数名 ⇒ 地址常量**（函数没有「值」· 档 2）。
-        Expr::Name(name) => match names.resolve(name) {
-            Some(reference) if reference.class == NameClass::Function => {
-                BoundExpr::Const(reference.addr)
-            }
-            // ⚠️ **变量名 ⇒ 变量的值 ⇒ 读它地址处的 word**（档 3 · 批 C）。
-            //     ⚠️ 读的是 **word**：目前没有变量类型的宽度信息 ⇒ ⇒ 1 / 2
-            //     字节的变量也按 4 字节读（与「值类型 = u32」的冻结口径一致；
-            //     窄类型语义留到有 DWARF 类型信息时再谈）。
-            Some(reference) if reference.class == NameClass::Object => {
-                BoundExpr::Load(AddressSpec {
-                    base: AddressBase::Number(reference.addr),
+        Expr::Name(name) => {
+            let reference = resolve_in(name, names, scope)?;
+            match reference.class {
+                // ⚠️ **函数名 ⇒ 地址常量**（函数没有「值」· 档 2）。
+                NameClass::Function => BoundExpr::Const(need_addr(name, &reference)?),
+                // ⚠️ **变量名 ⇒ 变量的值**（档 3 / 档 4）。
+                //     ⚠️ 读的是 **word**：目前没有变量类型的宽度信息 ⇒ ⇒ 1 / 2
+                //     字节的变量也按 4 字节读（与「值类型 = u32」的冻结口径一致；
+                //     窄类型语义留到有 DWARF 类型信息时再谈）。
+                NameClass::Object => BoundExpr::Load(AddressSpec {
+                    base: AddressBase::Number(need_addr(name, &reference)?),
                     offset: 0,
-                })
+                }),
+                NameClass::Local => match reference.target {
+                    // ⚠️ 在寄存器里 ⇒ ⇒ 名字就是**寄存器值**（不用读内存 ⇒
+                    //    这条谓词在取指前就能求值）。
+                    NameTarget::Local(LocalSlot::Reg(index)) => BoundExpr::Reg(index),
+                    // ⚠️ 在栈上 ⇒ 地址 = `帧基址寄存器 + 偏移` ⇒ ⇒ 与 `[x1+8]`
+                    //    形状完全一样 ⇒ 不用给 AST 加新变体。
+                    NameTarget::Local(LocalSlot::Frame { base, offset }) => {
+                        BoundExpr::Load(AddressSpec {
+                            base: AddressBase::Register(base.register()),
+                            offset,
+                        })
+                    }
+                    NameTarget::Addr(_) => {
+                        return Err(CondError::new(format!(
+                            "内部不一致：局部变量 \"{name}\" 被当成地址常量"
+                        )))
+                    }
+                },
+                // ⚠️ **没分类的符号（`STT_NOTYPE` 等）没有「值」的语义** ⇒ ⇒
+                //     只许 `&名字`。
+                NameClass::Other => {
+                    return Err(CondError::new(format!(
+                        "符号 \"{name}\" 不是已知的变量（它没有确定的值）；要它的地址请写 &{name}"
+                    )))
+                }
             }
-            // ⚠️ **没分类的符号（`STT_NOTYPE` 等）没有「值」的语义** ⇒ ⇒
-            //     只许 `&名字`。
-            Some(_) => {
-                return Err(CondError::new(format!(
-                    "符号 \"{name}\" 不是已知的变量（它没有确定的值）；要它的地址请写 &{name}"
-                )))
+        }
+        // ⚠️ **取地址 ⇒ 不读内容**（档 2 / 批 D 的栈变量）。
+        Expr::AddrOfName(name) => {
+            let reference = resolve_in(name, names, scope)?;
+            match reference.target {
+                NameTarget::Addr(addr) => BoundExpr::Const(addr),
+                // 栈上的变量**有地址**（帧基址 + 偏移）⇒ ⇒ 不读内容就是它。
+                NameTarget::Local(LocalSlot::Frame { base, offset }) => {
+                    BoundExpr::AddrOf(AddressSpec {
+                        base: AddressBase::Register(base.register()),
+                        offset,
+                    })
+                }
+                // ⚠️ 寄存器没有可寻址的地址（与批 B 的 `&a0` 同一条口径）。
+                NameTarget::Local(LocalSlot::Reg(_)) => {
+                    return Err(CondError::new(format!(
+                        "寄存器里的局部变量 \"{name}\" 没有地址；要它的值请直接写 {name}"
+                    )))
+                }
             }
-            None => return Err(undefined_name(name)),
-        },
-        // ⚠️ **取地址 ⇒ 不读内容**（档 2）。
-        Expr::AddrOfName(name) => match names.resolve(name) {
-            Some(reference) => BoundExpr::Const(reference.addr),
-            None => return Err(undefined_name(name)),
-        },
+        }
         // ⚠️ **读内存**（`[地址]`）⇒ 档 3（批 C）：基址在绑定期定下来，
         //    真正的总线读在**求值期**（内存里的值随时会变）。
-        Expr::Mem(spec) => BoundExpr::Load(bind_spec(spec, names)?),
+        Expr::Mem(spec) => BoundExpr::Load(bind_spec(spec, names, scope)?),
         // ⚠️ **取地址** ⇒ 地址表达式 ⇒ 基址里的符号也要在绑定期定下来。
-        Expr::AddrOfMem(spec) => BoundExpr::AddrOf(bind_spec(spec, names)?),
-        Expr::Not(inner) => BoundExpr::Not(Box::new(bind_expr(inner, names)?)),
+        Expr::AddrOfMem(spec) => BoundExpr::AddrOf(bind_spec(spec, names, scope)?),
+        Expr::Not(inner) => BoundExpr::Not(Box::new(bind_expr(inner, names, scope)?)),
         Expr::Bin(op, left, right) => BoundExpr::Bin(
             *op,
-            Box::new(bind_expr(left, names)?),
-            Box::new(bind_expr(right, names)?),
+            Box::new(bind_expr(left, names, scope)?),
+            Box::new(bind_expr(right, names, scope)?),
         ),
     })
 }
 
-/// 把地址表达式里的符号基址换成数字基址。
-fn bind_spec(spec: &AddressSpec, names: &dyn NameResolver) -> Result<AddressSpec, CondError> {
-    let base = match &spec.base {
-        AddressBase::Number(n) => AddressBase::Number(*n),
-        AddressBase::Register(r) => AddressBase::Register(*r),
-        AddressBase::Pc => AddressBase::Pc,
-        AddressBase::Symbol(name) => match names.resolve(name) {
-            Some(reference) => AddressBase::Number(reference.addr),
-            None => {
-                return Err(CondError::new(format!(
+/// 把地址表达式里的符号基址换成**真的基址**（数字 / 寄存器 / 帧偏移）。
+fn bind_spec(
+    spec: &AddressSpec,
+    names: &dyn NameResolver,
+    scope: Option<u32>,
+) -> Result<AddressSpec, CondError> {
+    let (base, extra) = match &spec.base {
+        AddressBase::Number(n) => (AddressBase::Number(*n), 0),
+        AddressBase::Register(r) => (AddressBase::Register(*r), 0),
+        AddressBase::Pc => (AddressBase::Pc, 0),
+        AddressBase::Symbol(name) => {
+            let reference = resolve_in(name, names, scope).map_err(|_| {
+                CondError::new(format!(
                     "未定义符号 \"{name}\"（地址表达式 {}）",
                     show_spec(spec)
-                )))
+                ))
+            })?;
+            match reference.target {
+                NameTarget::Addr(addr) => (AddressBase::Number(addr), 0),
+                // 栈上的局部变量：它的**地址**就是 `帧基址 + 偏移` ⇒ ⇒ 恰好
+                // 是 `[x1+8]` 那种形状（偏移要与表达式里本来写的那个**相加**）。
+                NameTarget::Local(LocalSlot::Frame { base, offset }) => {
+                    (AddressBase::Register(base.register()), offset)
+                }
+                // 寄存器里的局部变量：`[x]` 是「读 x 里那个指针指向的字」，
+                // 与 `[a0]` 同一个语义 ⇒ ⇒ 基址就是那个寄存器。
+                NameTarget::Local(LocalSlot::Reg(index)) => (AddressBase::Register(index), 0),
             }
-        },
+        }
     };
     Ok(AddressSpec {
         base,
-        offset: spec.offset,
+        offset: extra.wrapping_add(spec.offset),
+    })
+}
+
+/// 按**帧上下文**解析一个名字，把失败原因翻成人话（`E_DBG-02`）。
+fn resolve_in(
+    name: &str,
+    names: &dyn NameResolver,
+    scope: Option<u32>,
+) -> Result<NameRef, CondError> {
+    names.resolve_at(name, scope).map_err(|error| match error {
+        // ⚠️ **同名局部变量分不清** ⇒ ⇒ 告诉用户两条**可执行的出路**
+        //    （换个带地址的断点 / 换个不重名的名字），而不是只说「未定义」。
+        ResolveError::Ambiguous(functions) => CondError::new(format!(
+            "局部变量 \"{name}\" 在多个函数里都有（{}）⇒ ⇒ 请在带地址的断点上用它，或换一个不重名的名字",
+            functions.join(" / ")
+        )),
+        ResolveError::Undefined => undefined_name(name),
+    })
+}
+
+/// 名字必须带地址时用（函数 / 全局变量）。
+fn need_addr(name: &str, reference: &NameRef) -> Result<u32, CondError> {
+    reference.addr().ok_or_else(|| {
+        CondError::new(format!(
+            "符号 \"{name}\" 没有地址（它随帧变化）；要它的值请直接写 {name}"
+        ))
     })
 }
 
@@ -909,7 +996,7 @@ fn parse_bracket(inner: &str) -> Result<AddressSpec, CondError> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::names::NoNames;
+    use super::super::names::{FrameBaseSlot, NoNames, FRAME_POINTER};
     use super::*;
 
     /// 造一份寄存器文件：`gpr[i] = value`。
@@ -978,7 +1065,7 @@ mod tests {
                 .find(|(candidate, _, _)| *candidate == name)
                 .map(|(_, class, addr)| crate::m08_breakpoint::names::NameRef {
                     class: *class,
-                    addr: *addr,
+                    target: crate::m08_breakpoint::names::NameTarget::Addr(*addr),
                 })
         }
     }
@@ -1545,5 +1632,382 @@ mod tests {
             .eval(&gpr(&[]), 0, &NoMem);
         assert_eq!(a, b, "绑定后求值不该再依赖符号表");
         assert_eq!(a, Some(0), "0x1000 == 0x2000 为假");
+    }
+
+    // ================= 批 D · 局部变量（档 4） =================
+
+    /// 一条**局部变量**记录：`(名字, 所在函数名, [low, high), 位置)`。
+    type LocalRec = (&'static str, &'static str, u32, u32, LocalSlot);
+
+    /// 一张**带帧**的假符号表：全局符号 + 若干函数里的局部变量。
+    struct FrameNames {
+        globals: Vec<(&'static str, NameClass, u32)>,
+        locals: Vec<LocalRec>,
+    }
+
+    impl FrameNames {
+        /// 真工具链夹具那份形状：`main` 在 `0x38..0x78`，`helper` 在 `0x0..0x38`。
+        fn fixture() -> Self {
+            Self {
+                globals: vec![("g_counter", NameClass::Object, 0x1078)],
+                locals: vec![
+                    // helper: `int a`（形参，fbreg -36）、`int t`（fbreg -20）
+                    (
+                        "a",
+                        "helper",
+                        0x00,
+                        0x38,
+                        LocalSlot::Frame {
+                            base: FrameBaseSlot::Cfa,
+                            offset: -36,
+                        },
+                    ),
+                    (
+                        "t",
+                        "helper",
+                        0x00,
+                        0x38,
+                        LocalSlot::Frame {
+                            base: FrameBaseSlot::Cfa,
+                            offset: -20,
+                        },
+                    ),
+                    // main: `int x`（fbreg -24）、`int y`（fbreg -20）
+                    (
+                        "x",
+                        "main",
+                        0x38,
+                        0x78,
+                        LocalSlot::Frame {
+                            base: FrameBaseSlot::Cfa,
+                            offset: -24,
+                        },
+                    ),
+                    (
+                        "y",
+                        "main",
+                        0x38,
+                        0x78,
+                        LocalSlot::Frame {
+                            base: FrameBaseSlot::Cfa,
+                            offset: -20,
+                        },
+                    ),
+                ],
+            }
+        }
+
+        /// 加一个**寄存器位置**的局部变量（两个函数里同名，位置不同）。
+        fn with_register_locals(mut self) -> Self {
+            self.locals
+                .push(("counter", "helper", 0x00, 0x38, LocalSlot::Reg(11)));
+            self.locals
+                .push(("counter", "main", 0x38, 0x78, LocalSlot::Reg(12)));
+            self
+        }
+    }
+
+    impl NameResolver for FrameNames {
+        fn resolve(&self, name: &str) -> Option<NameRef> {
+            self.globals
+                .iter()
+                .find(|(candidate, _, _)| *candidate == name)
+                .map(|(_, class, addr)| NameRef {
+                    class: *class,
+                    target: NameTarget::Addr(*addr),
+                })
+        }
+
+        fn resolve_at(&self, name: &str, pc: Option<u32>) -> Result<NameRef, ResolveError> {
+            let hits: Vec<&LocalRec> = self
+                .locals
+                .iter()
+                .filter(|(candidate, ..)| *candidate == name)
+                .collect();
+            if hits.is_empty() {
+                return self.resolve(name).ok_or(ResolveError::Undefined);
+            }
+            // 1. 有帧上下文 ⇒ 先挑**当前 pc 所在函数**里的那一个。
+            if let Some(pc) = pc {
+                if let Some(hit) = hits
+                    .iter()
+                    .find(|(_, _, low, high, _)| (*low..*high).contains(&pc))
+                {
+                    return Ok(NameRef {
+                        class: NameClass::Local,
+                        target: NameTarget::Local(hit.4),
+                    });
+                }
+            }
+            // 2. 没有帧上下文（或 pc 不落在任何函数里）⇒ 只凭名字：
+            //    位置相同的（不同函数同形栈槽）可以合并，不同才算歧义。
+            let mut distinct: Vec<(&str, LocalSlot)> = Vec::new();
+            for hit in &hits {
+                if !distinct.iter().any(|(_, slot)| *slot == hit.4) {
+                    distinct.push((hit.1, hit.4));
+                }
+            }
+            if distinct.len() == 1 {
+                return Ok(NameRef {
+                    class: NameClass::Local,
+                    target: NameTarget::Local(distinct[0].1),
+                });
+            }
+            Err(ResolveError::Ambiguous(
+                distinct
+                    .iter()
+                    .map(|(function, _)| (*function).to_string())
+                    .collect(),
+            ))
+        }
+    }
+
+    /// 解析 + **按帧绑定** + 求值（带内存）。
+    fn eval_scoped(
+        expr: &str,
+        names: &dyn NameResolver,
+        scope: Option<u32>,
+        gpr: &[u32; 32],
+        mem: &dyn MemReader,
+    ) -> u32 {
+        parse(expr)
+            .unwrap_or_else(|e| panic!("表达式 {expr:?} 应当能解析：{e}"))
+            .bind_at(names, scope)
+            .unwrap_or_else(|e| panic!("表达式 {expr:?} 应当能绑定：{e}"))
+            .eval(gpr, scope.unwrap_or(0), mem)
+            .expect("求值不该失败")
+    }
+
+    /// **栈上的局部变量 ⇒ `Load(帧基址 + 偏移)`**：不用给 AST 加新变体。
+    #[test]
+    fn a_stack_local_binds_to_the_frame_register_plus_offset() {
+        let names = FrameNames::fixture();
+        let cond = parse("x == 42")
+            .expect("语法合法")
+            .bind_at(&names, Some(0x38))
+            .expect("带地址的断点上局部变量应当能绑定");
+        // ⚠️ 栈上变量**要读内存** ⇒ ⇒ 它落在 store 边界求值那一档。
+        assert!(cond.reads_memory(), "栈上的局部变量读内存");
+        // s0 = 0x2000 ⇒ `x` 在 0x2000 - 24 = 0x1fe8。
+        let mem = FakeMem(vec![(0x1fe8, 42)]);
+        assert_eq!(
+            cond.eval(&gpr(&[(FRAME_POINTER as usize, 0x2000)]), 0x38, &mem),
+            Some(1),
+            "x == 42 应为真"
+        );
+        let mem = FakeMem(vec![(0x1fe8, 41)]);
+        assert_eq!(
+            cond.eval(&gpr(&[(FRAME_POINTER as usize, 0x2000)]), 0x38, &mem),
+            Some(0),
+            "x == 41 应为假"
+        );
+    }
+
+    /// **寄存器里的局部变量 ⇒ 寄存器值**：取指前就能求值，不读内存。
+    #[test]
+    fn a_register_local_binds_to_that_register() {
+        let names = FrameNames::fixture().with_register_locals();
+        let cond = parse("counter >= 3")
+            .expect("语法合法")
+            .bind_at(&names, Some(0x40))
+            .expect("能绑定");
+        assert!(!cond.reads_memory(), "寄存器位置不读内存");
+        assert_eq!(cond.eval(&gpr(&[(12, 3)]), 0x40, &NoMem), Some(1));
+        assert_eq!(cond.eval(&gpr(&[(12, 2)]), 0x40, &NoMem), Some(0));
+    }
+
+    /// **帧上下文挑对函数**：同名局部变量按断点地址落在哪个函数来解。
+    #[test]
+    fn the_frame_context_selects_the_function_that_contains_the_pc() {
+        let names = FrameNames::fixture().with_register_locals();
+        // pc 在 helper ⇒ counter 是 x11
+        let in_helper = parse("counter == 1")
+            .expect("语法合法")
+            .bind_at(&names, Some(0x10))
+            .expect("helper 里能绑定");
+        assert_eq!(
+            in_helper.eval(&gpr(&[(11, 1), (12, 0)]), 0x10, &NoMem),
+            Some(1)
+        );
+        // pc 在 main ⇒ counter 是 x12
+        let in_main = parse("counter == 1")
+            .expect("语法合法")
+            .bind_at(&names, Some(0x40))
+            .expect("main 里能绑定");
+        assert_eq!(
+            in_main.eval(&gpr(&[(11, 0), (12, 1)]), 0x40, &NoMem),
+            Some(1)
+        );
+    }
+
+    /// **没有帧上下文 + 同名不同位置 ⇒ 歧义**，且错误消息给出两条出路。
+    #[test]
+    fn a_shared_local_name_without_a_frame_is_ambiguous() {
+        let names = FrameNames::fixture().with_register_locals();
+        let err = parse("counter == 1")
+            .expect("语法合法")
+            .bind_at(&names, None)
+            .expect_err("不同位置的同名局部变量不许凭名字绑定");
+        assert!(
+            err.message.contains("在多个函数里都有")
+                && err.message.contains("main")
+                && err.message.contains("helper")
+                && err.message.contains("带地址的断点"),
+            "错误消息要说明歧义并给出出路：{}",
+            err.message
+        );
+    }
+
+    /// **没有帧上下文 + 位置相同** ⇒ 直接可解（不同函数同一栈槽不是歧义）。
+    #[test]
+    fn an_identical_slot_across_functions_is_not_ambiguous() {
+        let names = FrameNames::fixture();
+        // `y` 在 main 是 fbreg -20，`t` 在 helper 是 fbreg -20 —— 但名字不同，
+        // 这里用 `y` 自己：只有 main 有 ⇒ 唯一。
+        assert_eq!(
+            eval_scoped(
+                "y == 7",
+                &names,
+                Some(0x40),
+                &gpr(&[(8, 0x1000)]),
+                &FakeMem(vec![(0x0fec, 7)])
+            ),
+            1
+        );
+        // 同名同位置的 `y` 若在另一个函数也出现 ⇒ 合并成一条，不报歧义。
+        let mut merged = FrameNames::fixture();
+        merged.locals.push((
+            "y",
+            "helper",
+            0x00,
+            0x38,
+            LocalSlot::Frame {
+                base: FrameBaseSlot::Cfa,
+                offset: -20,
+            },
+        ));
+        parse("y == 7")
+            .expect("语法合法")
+            .bind_at(&merged, None)
+            .expect("同位置同名不歧义");
+    }
+
+    /// **栈上局部的地址**（`&y`）⇒ 帧基址 + 偏移。
+    #[test]
+    fn taking_the_address_of_a_stack_local_yields_the_frame_address() {
+        let names = FrameNames::fixture();
+        assert_eq!(
+            eval_scoped(
+                "&y == 0x0fec",
+                &names,
+                Some(0x40),
+                &gpr(&[(8, 0x1000)]),
+                &NoMem
+            ),
+            1,
+            "s0 = 0x1000 ⇒ &y = 0x1000 - 20"
+        );
+    }
+
+    /// **寄存器里的局部变量没有地址** ⇒ `&name` 必须被拒。
+    #[test]
+    fn taking_the_address_of_a_register_local_is_rejected() {
+        let names = FrameNames::fixture().with_register_locals();
+        let err = parse("&counter == 0")
+            .expect("语法合法")
+            .bind_at(&names, Some(0x40))
+            .expect_err("寄存器位置没有地址");
+        assert!(
+            err.message.contains("没有地址") && err.message.contains("直接写 counter"),
+            "错误消息要说清并给直接写法：{}",
+            err.message
+        );
+    }
+
+    /// **地址文法里的局部变量基址**（`[x+4]`）：帧基址 + (偏移 + 写的偏移)。
+    #[test]
+    fn a_stack_local_base_in_a_bracket_expression_uses_the_frame_register() {
+        let names = FrameNames::fixture();
+        // `[x+4]` ⇒ base = s0、offset = -24 + 4 = -20 ⇒ 0x1000 - 20 = 0x0fec。
+        assert_eq!(
+            eval_scoped(
+                "[x+4] == 9",
+                &names,
+                Some(0x40),
+                &gpr(&[(8, 0x1000)]),
+                &FakeMem(vec![(0x0fec, 9)])
+            ),
+            1
+        );
+        // 负偏移要真的**相加**（不是覆盖）：`[x-4]` ⇒ -24 - 4 = -28。
+        assert_eq!(
+            eval_scoped(
+                "[x-4] == 1",
+                &names,
+                Some(0x40),
+                &gpr(&[(8, 0x1000)]),
+                &FakeMem(vec![(0x0fe4, 1)])
+            ),
+            1
+        );
+    }
+
+    /// **局部变量遮住同名全局变量**（解析顺序第 2 条先于第 3 条）。
+    #[test]
+    fn a_local_shadows_a_global_of_the_same_name() {
+        let mut names = FrameNames::fixture();
+        names.globals.push(("x", NameClass::Object, 0x3000));
+        // 有帧 ⇒ 取局部（s0 - 24 = 0x0fe8）
+        assert_eq!(
+            eval_scoped(
+                "x == 42",
+                &names,
+                Some(0x40),
+                &gpr(&[(8, 0x1000)]),
+                &FakeMem(vec![(0x0fe8, 42)])
+            ),
+            1,
+            "局部优先"
+        );
+        // 没有帧 ⇒ **仍然**是局部（唯一名，解析顺序第 2 条先于第 3 条）⇒
+        //   ⇒ 全局 `x` 不会被「借」来当局部变量的替身。
+        assert_eq!(
+            eval_scoped(
+                "x == 42",
+                &names,
+                None,
+                &gpr(&[(8, 0x1000)]),
+                &FakeMem(vec![(0x0fe8, 42)])
+            ),
+            1,
+            "没有帧上下文时也先认局部（同名全局不会被借来用）"
+        );
+        // 没有同名局部时才走全局（`g_counter` 读 0x1078）。
+        assert_eq!(
+            eval_scoped(
+                "g_counter == 7",
+                &names,
+                Some(0x40),
+                &gpr(&[]),
+                &FakeMem(vec![(0x1078, 7)])
+            ),
+            1,
+            "没有同名局部 ⇒ 全局符号"
+        );
+    }
+
+    /// **pc 不落在任何函数区间里** ⇒ 退化成「只凭名字」（唯一名仍可解）。
+    #[test]
+    fn a_pc_outside_every_function_falls_back_to_the_bare_name() {
+        let names = FrameNames::fixture();
+        // 0x0100 不在 0x00..0x38 / 0x38..0x78 里 ⇒ ⇒ 只凭名字，`x` 唯一。
+        let cond = parse("x == 42")
+            .expect("语法合法")
+            .bind_at(&names, Some(0x0100))
+            .expect("唯一名仍可解");
+        assert_eq!(
+            cond.eval(&gpr(&[(8, 0x1000)]), 0x0100, &FakeMem(vec![(0x0fe8, 42)])),
+            Some(1)
+        );
     }
 }
