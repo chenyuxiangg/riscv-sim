@@ -1791,3 +1791,181 @@ fn push_shdr(out: &mut Vec<u8>, sh_name: u32, sh_type: u32, sh_offset: u32, sh_s
     out.extend_from_slice(&1u32.to_le_bytes()); // sh_addralign
     out.extend_from_slice(&0u32.to_le_bytes()); // sh_entsize
 }
+
+// ---------------------------------------------------------------------------
+// 11c. 批 D（STAGE-55）：局部变量（档 4）—— 真实 DWARF 走宿主链路
+// ---------------------------------------------------------------------------
+//
+// 夹具（`locals::debug_sections_fixture`）是真 `riscv-none-elf-gcc` `-O0 -g`
+// 产物切出来的四个调试节区：
+//
+// * `helper`  `0x00..0x38`：`a`（形参）`[s0-36]`、`t` `[s0-20]`
+// * `main`    `0x38..0x78`：`x` `[s0-24]`、`y` `[s0-20]`
+// * 两个函数的帧基址都是 `DW_OP_call_frame_cfa`（⇒ 批 D 按 `CFA == s0` 取）
+
+/// 带**真 DWARF** 的工程（符号表里 `helper`@0x00 / `main`@0x38）。
+fn elf_project_with_locals() -> Project {
+    let (symtab, strtab) = elf_symbol_table(&["helper", "main"]);
+    let mut all: Vec<(String, Vec<u8>)> = vec![
+        (".symtab".to_string(), symtab),
+        (".strtab".to_string(), strtab),
+    ];
+    all.extend(crate::m11_symbol::locals::debug_sections_fixture());
+    // ⚠️ `elf_project` 收 `&[(&str, Vec<u8>)]` ⇒ ⇒ 这里把节区名借出来再克隆字节
+    //    （夹具只有几百字节，克隆不影响可读性）。
+    let sections: Vec<(&str, Vec<u8>)> = all
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), bytes.clone()))
+        .collect();
+    elf_project(&sections)
+}
+
+/// **S-10**：地址断点的条件里写**局部变量** ⇒ 注册期按该地址所在函数解析。
+///
+/// ⚠️ 这条钉的是「**接上了**」：`Lookup` 与文法各自能过，但只要
+/// `set_with` 没把**断点地址**当帧上下文传下去，`x` 就会退化成
+/// 「只凭名字」⇒ ⇒ 换了同名变量就歧义，或者干脆当未定义。
+#[test]
+fn s10_an_address_breakpoint_binds_a_local_from_real_dwarf() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(
+        &mut host,
+        CommandPayload::LoadProject(elf_project_with_locals()),
+    );
+
+    // 0x38 = `main` 的入口 ⇒ `x`（`[s0-24]`）能解出来。
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetBreakpoint(riscv_sim_contract::model::Breakpoint {
+            id: 1,
+            addr: 0x38,
+            source_hint: None,
+            enabled: true,
+            kind: riscv_sim_contract::model::BreakpointKind::Address,
+            condition: Some("x == 42".to_string()),
+        }),
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Error { .. })),
+        "局部变量必须能在地址断点的条件里绑定：{events:?}"
+    );
+    // ⚠️ 注册成功只回一条 `Tick`（不回清单）⇒ ⇒ 清单用 `ListBreakpoints` 取。
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Tick { .. })),
+        "注册成功要有回执：{events:?}"
+    );
+    let infos = dispatch(&mut host, CommandPayload::ListBreakpoints)
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::Breakpoints { breakpoints } => Some(breakpoints.clone()),
+            _ => None,
+        })
+        .expect("必须回一份断点清单");
+    assert_eq!(infos.len(), 1);
+    assert_eq!(
+        infos[0].breakpoint.condition.as_deref(),
+        Some("x == 42"),
+        "条件原文要原样落库"
+    );
+    // ⚠️ 注册期的试求值读 `[s0-24]`：此刻 `s0` 还没被访客写过 ⇒ ⇒ 地址
+    //    `0xffff_ffe8` 不在映射区 ⇒ **读不到** ⇒ ⇒ 降级（不是拒绝注册）。
+    assert!(
+        infos[0].degraded,
+        "读不到栈上变量的当下值 ⇒ 降级标记（注册仍然成立）"
+    );
+}
+
+/// **S-11**：**没有 DWARF** 的镜像 ⇒ 局部变量名照旧是「未定义符号」。
+///
+/// ⚠️ 两态必须分得开：`E_DBG-02` 说的是「**根本没有这个变量**」，
+/// 不是「DWARF 没解析出这个函数」。
+#[test]
+fn s11_a_local_without_dwarf_is_still_an_undefined_symbol() {
+    let mut host = KernelHost::new();
+    let (symtab, strtab) = elf_symbol_table(&["helper", "main"]);
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(
+        &mut host,
+        CommandPayload::LoadProject(elf_project(&[(".symtab", symtab), (".strtab", strtab)])),
+    );
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetBreakpoint(riscv_sim_contract::model::Breakpoint {
+            id: 1,
+            addr: 0x38,
+            source_hint: None,
+            enabled: true,
+            kind: riscv_sim_contract::model::BreakpointKind::Address,
+            condition: Some("x == 42".to_string()),
+        }),
+    );
+    let (code, message) = events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::Error { code, message } => Some((code.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("没有 DWARF ⇒ 局部变量名必须被拒");
+    assert_eq!(code, "E_DBG-02");
+    assert!(
+        message.contains("未定义符号") && message.contains("x"),
+        "错误消息要点出名字：{message}"
+    );
+}
+
+/// **S-12**：观察式（无地址）条目里写**唯一名**的局部变量 ⇒ 能绑定。
+///
+/// 冻结口径「局部变量一律当整帧可见」：`t` 只在 `helper` 里有 ⇒ ⇒ 光凭
+/// 名字就能定位置，不需要用户额外写函数名。
+#[test]
+fn s12_a_condition_entry_binds_a_unique_local_by_name() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(
+        &mut host,
+        CommandPayload::LoadProject(elf_project_with_locals()),
+    );
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetBreakpoint(riscv_sim_contract::model::Breakpoint {
+            id: 0,
+            addr: 0,
+            source_hint: None,
+            enabled: true,
+            kind: riscv_sim_contract::model::BreakpointKind::Condition,
+            condition: Some("t == 0".to_string()),
+        }),
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Error { .. })),
+        "唯一名的局部变量在观察式条目里也必须能绑定：{events:?}"
+    );
+}

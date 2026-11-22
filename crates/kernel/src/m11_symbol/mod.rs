@@ -24,6 +24,7 @@ use riscv_sim_contract::model::{LineEntry, Symbol};
 pub mod disasm;
 pub mod dwarf;
 mod dwarf_info;
+pub mod locals;
 pub mod render;
 pub mod symbols;
 pub mod trace;
@@ -38,6 +39,7 @@ pub use symbols::{SymbolClass, SymbolTable};
 
 // C2 的两个子组件的公开出口（统筹方统一补——C2 拥有那两个文件）。
 pub use dwarf::{DwarfLines, DwarfStatus, UnitHeaderInfo};
+pub use locals::{FrameBase, LocalLocation, LocalLookup, LocalScope, LocalTable, LocalVar};
 pub use trace::{ExportChunk, TraceBuffer, TraceEntry, TraceKind, TRACE_CAP};
 
 /// Result of an address → source-line lookup.
@@ -111,6 +113,8 @@ pub struct SymbolIndex {
     symbols: SymbolTable,
     /// `.debug_line` 的解析结果（Wave 2 起**真的**解析行表）。
     dwarf: DwarfLines,
+    /// `.debug_info` 的**当前帧局部变量**（STAGE-55 批 D）。
+    locals: LocalTable,
 }
 
 impl SymbolIndex {
@@ -122,6 +126,7 @@ impl SymbolIndex {
         Ok(Self {
             symbols: SymbolTable::from_sections(sections)?,
             dwarf: DwarfLines::from_sections(sections)?,
+            locals: LocalTable::from_sections(sections),
         })
     }
 
@@ -133,6 +138,14 @@ impl SymbolIndex {
     /// DWARF 行表（只读）。
     pub fn dwarf(&self) -> &DwarfLines {
         &self.dwarf
+    }
+
+    /// **当前帧局部变量表**（只读 · STAGE-55 批 D）。
+    ///
+    /// ⚠️ 没有 `.debug_info` 时是**空表**（不是错误）：裸机镜像照样能下
+    /// 地址断点，只是局部变量名解不出来。
+    pub fn locals(&self) -> &LocalTable {
+        &self.locals
     }
 
     /// 符号表里有多少条符号。

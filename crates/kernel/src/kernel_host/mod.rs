@@ -178,10 +178,13 @@ use riscv_sim_contract::platform::PlatformDescription;
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload};
 
-use crate::m08_breakpoint::names::{NameClass, NameRef, NameResolver};
+use crate::m08_breakpoint::names::{
+    FrameBaseSlot, LocalSlot, NameClass, NameRef, NameResolver, NameTarget, ResolveError,
+};
 use crate::m08_breakpoint::watch_expr::WatchTarget;
 use crate::m11_symbol::{
-    Disassembler, SymbolClass, SymbolIndex, SymbolTable, TraceBuffer, TRACE_CAP,
+    Disassembler, FrameBase, LocalLocation, LocalLookup, SymbolClass, SymbolIndex, TraceBuffer,
+    TRACE_CAP,
 };
 use crate::m15_peripheral;
 use crate::m16_interrupt::InterruptController;
@@ -504,24 +507,84 @@ impl HostSinks {
     }
 }
 
-/// 宿主侧的**名字解析器**：把 M-11 的符号表接到 M-08 的窄接口上。
+/// 宿主侧的**名字解析器**：把 M-11 的符号表 + 局部变量表接到 M-08 的窄接口上。
 ///
-/// ⚠️ 只做**分类翻译**（[`SymbolClass`] → [`NameClass`]）与**取地址** ⇒ ⇒
-/// M-08 因此不必知道符号表长什么样。
-struct HostNames<'a>(&'a SymbolTable);
+/// ⚠️ 只做**分类翻译**（[`SymbolClass`] → [`NameClass`]、
+/// `m11_symbol::LocalLocation` → [`LocalSlot`]）与**取位置** ⇒ ⇒ M-08 因此
+/// 不必知道符号表 / DWARF 长什么样。
+struct HostNames<'a>(&'a SymbolIndex);
 
-impl NameResolver for HostNames<'_> {
-    fn resolve(&self, name: &str) -> Option<NameRef> {
-        let symbol = self.0.lookup(name)?;
+impl HostNames<'_> {
+    /// 全局符号那一路（判据与批 C 完全一致）。
+    fn global(&self, name: &str) -> Option<NameRef> {
+        let symbol = self.0.symbols().lookup(name)?;
         // ⚠️ **没有地址的符号**（`SHN_UNDEF`）在解析层就当「查无此名」⇒ ⇒
         //    报出去的是「未定义符号」，不是「地址是 0」。
         let addr = symbol.addr?;
-        let class = match self.0.class_of(name).unwrap_or(SymbolClass::Other) {
+        let class = match self
+            .0
+            .symbols()
+            .class_of(name)
+            .unwrap_or(SymbolClass::Other)
+        {
             SymbolClass::Function => NameClass::Function,
             SymbolClass::Object => NameClass::Object,
             SymbolClass::Other => NameClass::Other,
         };
-        Some(NameRef { class, addr })
+        Some(NameRef {
+            class,
+            target: NameTarget::Addr(addr),
+        })
+    }
+}
+
+/// `m11_symbol::LocalLocation` → M-08 的 [`LocalSlot`]（**唯一**的翻译点）。
+fn local_slot(location: LocalLocation) -> LocalSlot {
+    match location {
+        LocalLocation::Reg(index) => LocalSlot::Reg(index),
+        LocalLocation::Frame { base, offset } => LocalSlot::Frame {
+            base: match base {
+                FrameBase::Reg(index) => FrameBaseSlot::Reg(index),
+                FrameBase::Cfa => FrameBaseSlot::Cfa,
+            },
+            offset,
+        },
+    }
+}
+
+impl NameResolver for HostNames<'_> {
+    fn resolve(&self, name: &str) -> Option<NameRef> {
+        self.global(name)
+    }
+
+    /// **解析顺序**（冻结 · STAGE-55 表 9）：当前帧局部变量 → 全局符号。
+    ///
+    /// ⚠️ 局部变量**优先**：同一句源码里 `x` 指的是局部那个 `x`，不是某个
+    /// 同名的全局符号（C 的作用域规则如此）。
+    fn resolve_at(&self, name: &str, pc: Option<u32>) -> Result<NameRef, ResolveError> {
+        let locals = self.0.locals();
+        let local = match pc {
+            // 知道站在哪个函数里 ⇒ ⇒ 按**那个函数**的帧找（同名不歧义）。
+            Some(pc) => locals.lookup_at(name, pc),
+            // 无地址的条件断点 ⇒ ⇒ 只凭名字（多个函数都有 ⇒ **报歧义**，
+            // 不随手挑一个）。
+            None => match locals.lookup_any(name) {
+                LocalLookup::Found(location) => Some(location),
+                LocalLookup::Ambiguous(mut functions) => {
+                    functions.sort();
+                    functions.dedup();
+                    return Err(ResolveError::Ambiguous(functions));
+                }
+                LocalLookup::Missing => None,
+            },
+        };
+        if let Some(location) = local {
+            return Ok(NameRef {
+                class: NameClass::Local,
+                target: NameTarget::Local(local_slot(location)),
+            });
+        }
+        self.global(name).ok_or(ResolveError::Undefined)
     }
 }
 
@@ -1012,7 +1075,7 @@ impl KernelHost {
             CommandPayload::Pause => self.on_pause(),
             CommandPayload::SetBreakpoint(bp) => match self
                 .backend
-                .set_breakpoint_with_id_and_names(bp, &HostNames(self.index.symbols()))
+                .set_breakpoint_with_id_and_names(bp, &HostNames(&self.index))
             {
                 Ok(()) => vec![self.tick()],
                 Err(err) => vec![self.error_from(&err)],
