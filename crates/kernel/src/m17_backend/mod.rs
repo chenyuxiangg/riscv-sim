@@ -305,6 +305,14 @@ pub(crate) struct IssExecutorDeps<'a> {
     pub last_poll_ps: &'a mut u64,
     /// 宿主暂停标志（与后端共享同一份）—— 裁决 C。
     pub pause_requested: &'a mut bool,
+    /// **断点恢复放过位**（与后端共享同一份）：停在断点上时的 `pc`。
+    ///
+    /// `Some(pc)` ⇒ ⇒ 下一次恢复的**第一条**指令**不再判**断点，直接执行；
+    /// 判完即清。没有它 ⇒ ⇒ 断点停在**取指之前**（`pc` 未推进）而恢复时
+    /// 又从同一个 `pc` 判一次 ⇒ ⇒ **立刻原地重停** ⇒ ⇒ 「继续」与「单步」
+    /// 全部原地卡死（断点表里只有地址 / 使能 / 条件 / 计数，**没有**「刚
+    /// 报过」这个状态）。
+    pub resume_skip_pc: &'a mut Option<u32>,
 }
 
 /// 一条指令的执行顺序（M-08 LLD §3.2 / M-17 LLD）：
@@ -333,6 +341,8 @@ pub struct IssExecutor<'a> {
     last_poll_ps: &'a mut u64,
     /// stepOver 的返回地址停点（**不进入断点表**）。
     step_over_return: Option<u32>,
+    /// **断点恢复放过位**（与后端共享同一份）。
+    resume_skip_pc: &'a mut Option<u32>,
 }
 
 impl<'a> IssExecutor<'a> {
@@ -354,6 +364,33 @@ impl<'a> IssExecutor<'a> {
             intc: deps.intc,
             last_poll_ps: deps.last_poll_ps,
             step_over_return,
+            resume_skip_pc: deps.resume_skip_pc,
+        }
+    }
+
+    /// 这一次取指是否要**放过**停在当前 `pc` 上的那个断点（恢复的第一条）。
+    ///
+    /// ⚠️ **只读**：查询口（宿主用来「说清命中了哪个断点」）**不能**消费
+    /// 它 ⇒ ⇒ 否则宿主问一句就把放过位吃掉 ⇒ ⇒ 恢复时又原地重停。
+    fn resume_skip_applies(&self, pc: u32) -> bool {
+        *self.resume_skip_pc == Some(pc)
+    }
+
+    /// 取指之前问一句「要不要因断点停下」，命中时**记下本 pc**（下一次
+    /// 恢复放过它一次）。
+    ///
+    /// ⚠️ 这是 `step_n` 的**预判**（在同步外设时钟**之前**问，一条没执行
+    /// 的指令不该让外设时钟走一格）；真正的执行仍由 [`IssExecutor::step`]
+    /// 复核同一份放过位 —— 两处读的是**同一个**字段，不是两份状态。
+    pub(crate) fn halt_on_breakpoint_before_fetch(&mut self, state: &SimState) -> bool {
+        if self.resume_skip_applies(state.pc) {
+            return false;
+        }
+        if self.breakpoint_at(state) {
+            *self.resume_skip_pc = Some(state.pc);
+            true
+        } else {
+            false
         }
     }
 
@@ -498,12 +535,22 @@ impl InstructionExecutor for IssExecutor<'_> {
         //     ⚠️ **STAGE-55 批**：观察式条件断点也在这里判 ⇒ ⇒ 它的停止
         //     原因**复用 `Watchpoint`**（观察式本就是 watchpoint 语义）
         //     ⇒ ⇒ 不扩 `HaltReason` 枚举 ⇒ 旧前端 / 旧快照不用改。
-        if let Some(hit) = self.breakpoint_hit(state) {
+        //     ⚠️ **恢复放过一次**（本批修）：停在断点上时 `pc` **没有前进**
+        //     ⇒ ⇒ 恢复后第一轮从同一个 `pc` 再判一次 ⇒ ⇒ 原地重停、机器
+        //     卡死（「继续」与「单步」都一样）。⇒ ⇒ 停住时记下本 `pc`
+        //     （`resume_skip_pc`），恢复的第一条指令**跳过这次判定**。
+        //     只跳过**一条**：判完即清 ⇒ ⇒ 指令执行后 `pc` 前进，后续
+        //     循环回到这里时才重新参与判定。
+        if self.resume_skip_applies(state.pc) {
+            *self.resume_skip_pc = None;
+        } else if let Some(hit) = self.breakpoint_hit(state) {
             let reason = if hit.kind == BreakpointKind::Condition {
                 HaltReason::Watchpoint
             } else {
                 HaltReason::Breakpoint
             };
+            // 记下停点：下一次恢复放过它一次（否则原地重停）。
+            *self.resume_skip_pc = Some(state.pc);
             return Ok(ExecOutcome::Stop {
                 reason,
                 consumed: false,
@@ -760,6 +807,12 @@ pub struct SelfIssBackend<B: EventBus, I: InterruptSink> {
     /// ⚠️ **必须**挂在**后端**上，不能挂在执行器上：执行器是**每批次
     /// 新建**的 ⇒ 挂在执行器上等于「每个批次的第一条指令都采样一次」。
     last_poll_ps: u64,
+    /// **断点恢复放过位**：停在断点上时的 `pc`（`Some` ⇒ 下一次恢复的
+    /// 第一条指令**不再判**这个断点，直接执行）。
+    ///
+    /// ⚠️ 与 [`Self::last_poll_ps`] 同一条理由：执行器**每批次新建** ⇒
+    /// 跨批次的状态**必须**挂在后端上。
+    resume_skip_pc: Option<u32>,
 }
 
 impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
@@ -783,6 +836,7 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
             pause_requested: false,
             intc_port: Box::new(NullInterruptPort),
             last_poll_ps: 0,
+            resume_skip_pc: None,
         };
         backend.install_watch_hook();
         backend
@@ -1215,6 +1269,9 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
         self.total_executed = 0;
         // 暂停请求属于**上一次批次**的残留 —— reset 之后不该还有效。
         self.pause_requested = false;
+        // 断点放过位同理：`pc` 归零之后，别让旧 `pc` 上的放过位把新程序
+        // 头一条指令的断点悄悄吞掉。
+        self.resume_skip_pc = None;
         // 虚拟时钟归零 ⇒ 「上次采样时刻」也归零，否则第一次采样会被推迟
         // 一整个量子（复位之后中断迟迟不交付）。
         self.last_poll_ps = 0;
@@ -1236,6 +1293,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             intc_port,
             last_poll_ps,
             step_over_return,
+            resume_skip_pc,
             ..
         } = self;
 
@@ -1265,6 +1323,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
                 intc: intc_port.as_mut(),
                 last_poll_ps,
                 pause_requested,
+                resume_skip_pc,
             },
             *step_over_return,
         );
@@ -1318,7 +1377,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             //     ⚠️ **v0.57 批**：条件断点在**这条**路径上**同样**生效
             //     ⇒ ⇒ 两条路径都要判（F-6）⇒ ⇒ 漏一条 ⇒ ⇒ 那条路径上的
             //     条件断点**永远不生效**。
-            if executor.breakpoint_at(engine.state()) {
+            if executor.halt_on_breakpoint_before_fetch(engine.state()) {
                 *last_stop = Some(HaltReason::Breakpoint);
                 break;
             }
@@ -1469,6 +1528,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             intc_port,
             last_poll_ps,
             step_over_return,
+            resume_skip_pc,
             ..
         } = self;
 
@@ -1485,6 +1545,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
                 intc: intc_port.as_mut(),
                 last_poll_ps,
                 pause_requested,
+                resume_skip_pc,
             },
             *step_over_return,
         );
@@ -1531,6 +1592,8 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
         // 恢复后的第一条指令就重新采样（否则恢复到一个更早的时刻时，
         // 中断要等虚拟时间追上旧值才交付）。
         self.last_poll_ps = 0;
+        // `pc` 被**换掉**了 ⇒ 旧的断点放过位不再属于任何停点。
+        self.resume_skip_pc = None;
         Ok(())
     }
 
@@ -1563,6 +1626,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
         self.engine.restore_dto(snapshot)?;
         // 同 [`Self::restore`]：虚拟时间换了 ⇒ 「上次采样时刻」归零。
         self.last_poll_ps = 0;
+        self.resume_skip_pc = None;
         Ok(())
     }
 
