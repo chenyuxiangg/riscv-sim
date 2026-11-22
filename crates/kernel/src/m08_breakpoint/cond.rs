@@ -445,7 +445,7 @@ fn bind_expr(
                     //    形状完全一样 ⇒ 不用给 AST 加新变体。
                     NameTarget::Local(LocalSlot::Frame { base, offset }) => {
                         BoundExpr::Load(AddressSpec {
-                            base: AddressBase::Register(base.register()),
+                            base: AddressBase::Register(base),
                             offset,
                         })
                     }
@@ -472,7 +472,7 @@ fn bind_expr(
                 // 栈上的变量**有地址**（帧基址 + 偏移）⇒ ⇒ 不读内容就是它。
                 NameTarget::Local(LocalSlot::Frame { base, offset }) => {
                     BoundExpr::AddrOf(AddressSpec {
-                        base: AddressBase::Register(base.register()),
+                        base: AddressBase::Register(base),
                         offset,
                     })
                 }
@@ -520,7 +520,7 @@ fn bind_spec(
                 // 栈上的局部变量：它的**地址**就是 `帧基址 + 偏移` ⇒ ⇒ 恰好
                 // 是 `[x1+8]` 那种形状（偏移要与表达式里本来写的那个**相加**）。
                 NameTarget::Local(LocalSlot::Frame { base, offset }) => {
-                    (AddressBase::Register(base.register()), offset)
+                    (AddressBase::Register(base), offset)
                 }
                 // 寄存器里的局部变量：`[x]` 是「读 x 里那个指针指向的字」，
                 // 与 `[a0]` 同一个语义 ⇒ ⇒ 基址就是那个寄存器。
@@ -1007,7 +1007,7 @@ fn parse_bracket(inner: &str) -> Result<AddressSpec, CondError> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::names::{FrameBaseSlot, NoNames, FRAME_POINTER};
+    use super::super::names::NoNames;
     use super::*;
 
     /// 造一份寄存器文件：`gpr[i] = value`。
@@ -1648,6 +1648,10 @@ mod tests {
     // ================= 批 D · 局部变量（档 4） =================
 
     /// 一条**局部变量**记录：`(名字, 所在函数名, [low, high), 位置)`。
+    /// 夹具里「栈帧基址寄存器」用的就是 `x8`（S0）——
+    /// ⚠️ 这只是**测试数据的喂法**：生产路径上的基址由 `.debug_frame` 算。
+    const FRAME_POINTER: u8 = 8;
+
     type LocalRec = (&'static str, &'static str, u32, u32, LocalSlot);
 
     /// 一张**带帧**的假符号表：全局符号 + 若干函数里的局部变量。
@@ -1669,7 +1673,7 @@ mod tests {
                         0x00,
                         0x38,
                         LocalSlot::Frame {
-                            base: FrameBaseSlot::Cfa,
+                            base: FRAME_POINTER,
                             offset: -36,
                         },
                     ),
@@ -1679,7 +1683,7 @@ mod tests {
                         0x00,
                         0x38,
                         LocalSlot::Frame {
-                            base: FrameBaseSlot::Cfa,
+                            base: FRAME_POINTER,
                             offset: -20,
                         },
                     ),
@@ -1690,7 +1694,7 @@ mod tests {
                         0x38,
                         0x78,
                         LocalSlot::Frame {
-                            base: FrameBaseSlot::Cfa,
+                            base: FRAME_POINTER,
                             offset: -24,
                         },
                     ),
@@ -1700,7 +1704,7 @@ mod tests {
                         0x38,
                         0x78,
                         LocalSlot::Frame {
-                            base: FrameBaseSlot::Cfa,
+                            base: FRAME_POINTER,
                             offset: -20,
                         },
                     ),
@@ -1893,7 +1897,7 @@ mod tests {
             0x00,
             0x38,
             LocalSlot::Frame {
-                base: FrameBaseSlot::Cfa,
+                base: FRAME_POINTER,
                 offset: -20,
             },
         ));

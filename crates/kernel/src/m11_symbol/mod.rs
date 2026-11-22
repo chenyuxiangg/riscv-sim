@@ -8,6 +8,8 @@
 //! - [`render`] —— 助记符渲染器（`Decoded` → 文本）
 //! - [`disasm`] —— 反汇编序列、按地址缓存、自修改代码失效
 //! - [`dwarf`] —— DWARF 行表（v2/v3/v4）与地址→行查询
+//! - [`locals`] —— `.debug_info` 的函数区间 / 局部变量表（当前帧）
+//! - [`cfi`] —— `.debug_frame` 的 CFA 规则（局部变量的「真 CFA」）
 //! - [`trace`] —— 执行轨迹环形缓冲与导出
 //!
 //! ## 两条不变量
@@ -21,6 +23,7 @@
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{LineEntry, Symbol};
 
+pub mod cfi;
 pub mod disasm;
 pub mod dwarf;
 mod dwarf_info;

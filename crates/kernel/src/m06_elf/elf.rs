@@ -65,7 +65,7 @@ pub const SYM_ENTRY_SIZE: u32 = 16;
 /// The debug / symbol sections M-06 extracts from the section table
 /// (STAGE-5 裁决 B). Everything else — including `.shstrtab`, which is
 /// only used internally to read the section names — is ignored.
-const DEBUG_SECTION_WHITELIST: [&str; 7] = [
+const DEBUG_SECTION_WHITELIST: [&str; 8] = [
     ".symtab",
     ".strtab",
     ".debug_line",
@@ -73,6 +73,9 @@ const DEBUG_SECTION_WHITELIST: [&str; 7] = [
     ".debug_str",
     ".debug_abbrev",
     ".debug_info",
+    // `.debug_frame`（CFI）：局部变量的「真 CFA」从这里算，见
+    // `m11_symbol::cfi` 与 `m11_symbol::locals` 的模块头。
+    ".debug_frame",
 ];
 
 /// One PT_LOAD segment, materialised. `bss` (`data.is_empty()` while

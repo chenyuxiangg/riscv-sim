@@ -1126,7 +1126,7 @@ fn debug_section_names(image: &LoadImage) -> Vec<&str> {
 }
 
 /// The whitelist M-06 extracts (STAGE-5 裁决 B).
-const EXPECTED_WHITELIST: [&str; 7] = [
+const EXPECTED_WHITELIST: [&str; 8] = [
     ".symtab",
     ".strtab",
     ".debug_line",
@@ -1134,6 +1134,7 @@ const EXPECTED_WHITELIST: [&str; 7] = [
     ".debug_str",
     ".debug_abbrev",
     ".debug_info",
+    ".debug_frame",
 ];
 
 /// The happy path: a minimal ELF with `.text` + `.symtab` + `.strtab`

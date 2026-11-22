@@ -1803,7 +1803,8 @@ fn push_shdr(out: &mut Vec<u8>, sh_name: u32, sh_type: u32, sh_offset: u32, sh_s
 //
 // * `helper`  `0x00..0x38`：`a`（形参）`[s0-36]`、`t` `[s0-20]`
 // * `main`    `0x38..0x78`：`x` `[s0-24]`、`y` `[s0-20]`
-// * 两个函数的帧基址都是 `DW_OP_call_frame_cfa`（⇒ 批 D 按 `CFA == s0` 取）
+// * 两个函数的帧基址都是 `DW_OP_call_frame_cfa`（⇒ CFI 批按 `.debug_frame`
+//   的主行算：这一段恰好是 `s0+0`）
 
 /// 带**真 DWARF** 的工程（符号表里 `helper`@0x00 / `main`@0x38）。
 fn elf_project_with_locals() -> Project {
@@ -1815,6 +1816,28 @@ fn elf_project_with_locals() -> Project {
     all.extend(crate::m11_symbol::locals::debug_sections_fixture());
     // ⚠️ `elf_project` 收 `&[(&str, Vec<u8>)]` ⇒ ⇒ 这里把节区名借出来再克隆字节
     //    （夹具只有几百字节，克隆不影响可读性）。
+    let sections: Vec<(&str, Vec<u8>)> = all
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), bytes.clone()))
+        .collect();
+    elf_project(&sections)
+}
+
+/// 与 [`elf_project_with_locals`] 同一份 DWARF，但**没有** `.debug_frame`。
+///
+/// ⚠️ 用来钉「读不到 CFI 就不猜」：函数区间照收（所在函数还能显示），
+/// 栈上变量一个不留。
+fn elf_project_without_cfi() -> Project {
+    let (symtab, strtab) = elf_symbol_table(&["helper", "main"]);
+    let mut all: Vec<(String, Vec<u8>)> = vec![
+        (".symtab".to_string(), symtab),
+        (".strtab".to_string(), strtab),
+    ];
+    all.extend(
+        crate::m11_symbol::locals::debug_sections_fixture()
+            .into_iter()
+            .filter(|(name, _)| name != ".debug_frame"),
+    );
     let sections: Vec<(&str, Vec<u8>)> = all
         .iter()
         .map(|(name, bytes)| (name.as_str(), bytes.clone()))
@@ -2075,5 +2098,85 @@ fn s14_an_unknown_name_under_debug_info_stays_undefined() {
     assert!(
         !message.contains("不在 main"),
         "不许把「名字不存在」说成「不在这个函数里」：{message}"
+    );
+}
+
+/// **S-15**（CFI 批）：镜像有 DWARF、但**没有** `.debug_frame` ⇒
+/// 「**保留区间、丢变量**」（用户 2026-11-22 拍板）。
+///
+/// ⚠️ 这条钉两件事：① 断点行仍然说得清「在哪个函数里」；② 栈上变量的
+/// 位置**算不出来就不编**——条件里写它会报「未定义符号」，而不是退回
+/// 旧假设「`CFA == s0`」静默读一个可能错的位置。
+#[test]
+fn s15_without_cfi_the_scope_survives_but_the_local_is_gone() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(
+        &mut host,
+        CommandPayload::LoadProject(elf_project_without_cfi()),
+    );
+
+    // ① 纯地址断点：区间来自 `.debug_info`，与 CFI 无关 ⇒ 所在函数照旧。
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetBreakpoint(riscv_sim_contract::model::Breakpoint {
+            id: 1,
+            addr: 0x38,
+            source_hint: None,
+            enabled: true,
+            kind: riscv_sim_contract::model::BreakpointKind::Address,
+            condition: None,
+        }),
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Error { .. })),
+        "地址断点不依赖 CFI：{events:?}"
+    );
+    let infos = dispatch(&mut host, CommandPayload::ListBreakpoints)
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::Breakpoints { breakpoints } => Some(breakpoints.clone()),
+            _ => None,
+        })
+        .expect("必须回一份断点清单");
+    assert_eq!(
+        infos[0].scope_function.as_deref(),
+        Some("main"),
+        "没有 CFI 也要说清所在函数"
+    );
+
+    // ② 条件里写局部变量：位置无从算起 ⇒ 报未定义，不猜。
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetBreakpoint(riscv_sim_contract::model::Breakpoint {
+            id: 2,
+            // ⚠️ 换一条指令：M-08 不允许同一地址重复注册（`E_CTX-07`）。
+            addr: 0x3c,
+            source_hint: None,
+            enabled: true,
+            kind: riscv_sim_contract::model::BreakpointKind::Address,
+            condition: Some("x == 42".to_string()),
+        }),
+    );
+    let (code, message) = events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::Error { code, message } => Some((code.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("没有 CFA 的局部变量必须被拒");
+    assert_eq!(code, "E_DBG-02");
+    assert!(
+        message.contains("未定义符号") && message.contains("\"x\""),
+        "没有 CFI ⇒ 当作未定义（不编位置）：{message}"
     );
 }

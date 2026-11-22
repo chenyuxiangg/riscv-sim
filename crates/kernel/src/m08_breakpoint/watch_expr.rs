@@ -409,7 +409,7 @@ mod tests {
                 class: super::super::names::NameClass::Local,
                 target: super::super::names::NameTarget::Local(
                     super::super::names::LocalSlot::Frame {
-                        base: super::super::names::FrameBaseSlot::Cfa,
+                        base: 8,
                         offset: -24,
                     },
                 ),

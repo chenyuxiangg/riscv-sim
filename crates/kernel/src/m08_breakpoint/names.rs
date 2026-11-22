@@ -39,40 +39,16 @@ pub enum NameClass {
     Local,
 }
 
-/// **帧基址**去哪儿取（与 `m11_symbol::locals::FrameBase` 一一对应，
-/// 但不直接引 M-11 的类型 ⇒ ⇒ M-08 不长出对 M-11 的依赖）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameBaseSlot {
-    /// 某个通用寄存器里放着帧基址。
-    Reg(u8),
-    /// 「call frame address」⇒ ⇒ 批 D 按 `CFA == s0` 的口径取
-    /// [`FRAME_POINTER`]。
-    Cfa,
-}
-
-/// RISC-V psABI 的帧指针（`s0` / `x8`）。
-///
-/// ⚠️ 只在 [`FrameBaseSlot::Cfa`] 上用到，是一条**显式假设**（见
-/// `m11_symbol::locals` 的模块头）。有帧指针的 `-O0` 产物上成立。
-pub const FRAME_POINTER: u8 = 8;
-
-impl FrameBaseSlot {
-    /// 这个帧基址最终从**哪个寄存器**读（`Cfa` ⇒ 帧指针）。
-    pub fn register(self) -> u8 {
-        match self {
-            Self::Reg(index) => index,
-            Self::Cfa => FRAME_POINTER,
-        }
-    }
-}
-
 /// 一个**局部变量**放在哪儿。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalSlot {
     /// 值就在这个寄存器里（不需要读内存）。
     Reg(u8),
     /// 地址 = `寄存器[base] + offset`（栈上）。
-    Frame { base: FrameBaseSlot, offset: i32 },
+    ///
+    /// ⚠️ `base` / `offset` 是 M-11 用 `.debug_frame` 的 CFA 规则**算好**的
+    /// 结果（CFI 批起），这里不再有「帧指针 / CFA」这种中间假设。
+    Frame { base: u8, offset: i32 },
 }
 
 /// 名字指向的东西**在哪儿**。
@@ -192,21 +168,10 @@ mod tests {
         let local = NameRef {
             class: NameClass::Local,
             target: NameTarget::Local(LocalSlot::Frame {
-                base: FrameBaseSlot::Cfa,
+                base: 8,
                 offset: -24,
             }),
         };
         assert_eq!(local.addr(), None, "局部变量没有「地址常量」这回事");
-    }
-
-    #[test]
-    fn a_cfa_frame_base_reads_the_frame_pointer() {
-        assert_eq!(FrameBaseSlot::Cfa.register(), FRAME_POINTER);
-        assert_eq!(FrameBaseSlot::Reg(8).register(), 8);
-        assert_eq!(
-            FrameBaseSlot::Reg(2).register(),
-            2,
-            "sp 就是寄存器 2，不许被 CFA 的口径顶掉"
-        );
     }
 }
