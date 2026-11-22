@@ -548,6 +548,17 @@ fn resolve_in(
             functions.join(" / ")
         )),
         ResolveError::Undefined => undefined_name(name),
+        // ⚠️ **没有调试信息**：不要报成「未定义符号」—— 用户会以为名字打错了。
+        ResolveError::NoDebugInfo => CondError::new(format!(
+            "\"{name}\" 不是已知的符号，这份固件也没有 DWARF 调试信息（局部变量名用不了）⇒ ⇒ 可改用寄存器或地址写法"
+        )),
+        // ⚠️ **有调试信息但当前帧没有**：点名函数，或说清「不在任何已知函数里」。
+        ResolveError::NotInFrame(Some(function)) => CondError::new(format!(
+            "\"{name}\" 不在 {function} 里（这个函数没有名为 {name} 的变量）⇒ ⇒ 换个变量名，或把断点放到定义了它的函数上"
+        )),
+        ResolveError::NotInFrame(None) => CondError::new(format!(
+            "\"{name}\" 不在任何已知函数里（也不是全局符号）⇒ ⇒ 换个变量名，或把断点放到定义了它的函数上"
+        )),
     })
 }
 
@@ -1920,6 +1931,62 @@ mod tests {
         assert!(
             err.message.contains("没有地址") && err.message.contains("直接写 counter"),
             "错误消息要说清并给直接写法：{}",
+            err.message
+        );
+    }
+
+    /// 一张**固定返回某个错误**的解析器（钉三态文案用）。
+    struct ErrorNames(ResolveError);
+
+    impl NameResolver for ErrorNames {
+        fn resolve(&self, _name: &str) -> Option<NameRef> {
+            None
+        }
+
+        fn resolve_at(&self, _name: &str, _pc: Option<u32>) -> Result<NameRef, ResolveError> {
+            Err(self.0.clone())
+        }
+    }
+
+    /// **三态文案**（收口批 · 轻档）：每种「查不到」都要给**不同的下一步**。
+    #[test]
+    fn each_resolve_failure_gets_its_own_advice() {
+        // ① 没有调试信息 ⇒ 换写法（寄存器 / 地址），不是「名字打错」
+        let err = parse("x == 1")
+            .expect("语法合法")
+            .bind_at(&ErrorNames(ResolveError::NoDebugInfo), None)
+            .expect_err("必须被拒");
+        assert!(
+            err.message.contains("DWARF") && err.message.contains("寄存器或地址"),
+            "无 DWARF 要说清原因与替代写法：{}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("未定义符号"),
+            "无 DWARF 不许说成「未定义符号」：{}",
+            err.message
+        );
+        // ② 名字在、但不在当前帧 ⇒ 点名函数 + 换地址
+        let err = parse("x == 1")
+            .expect("语法合法")
+            .bind_at(
+                &ErrorNames(ResolveError::NotInFrame(Some("helper".to_string()))),
+                Some(0x10),
+            )
+            .expect_err("必须被拒");
+        assert!(
+            err.message.contains("不在 helper 里") && err.message.contains("换个"),
+            "要点名函数并给出下一步：{}",
+            err.message
+        );
+        // ③ 有调试信息但地址不在任何函数里 ⇒ 不点名
+        let err = parse("x == 1")
+            .expect("语法合法")
+            .bind_at(&ErrorNames(ResolveError::NotInFrame(None)), Some(0x9000))
+            .expect_err("必须被拒");
+        assert!(
+            err.message.contains("不在任何已知函数里"),
+            "不知道函数时不许编一个名字出来：{}",
             err.message
         );
     }

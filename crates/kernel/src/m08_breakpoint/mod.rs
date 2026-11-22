@@ -95,6 +95,11 @@ struct Entry {
     hits: Cell<u64>,
     /// **降级原因**（`None` ⇒ 没有降级）。见 [`BreakpointTable::mark_degraded`]。
     degraded: Option<String>,
+    /// **这个地址落在哪个函数里**（只对地址类条目有意义）。
+    ///
+    /// ⚠️ 注册期从解析器问一次（`NameResolver::scope_of`）⇒ ⇒ 只用于**展示**
+    ///   （断点行「所在函数」），不参与求值。
+    scope_function: Option<String>,
 }
 
 /// 断点表 —— **id 权威 + 两个派生索引**（STAGE-55 批重构）。
@@ -228,6 +233,13 @@ impl BreakpointTable {
             return Err(self.condition_error(err));
         }
         let id = bp.id;
+        // ⚠️ **所在函数名**（收口批）：只对地址类条目问 ⇒ ⇒ 观察式条目没有
+        //    地址，问不出东西（也不该问）。
+        let scope_function = if is_pred {
+            None
+        } else {
+            resolver.scope_of(bp.addr)
+        };
         if !is_pred {
             self.addr_index.insert(bp.addr, id);
         }
@@ -238,6 +250,7 @@ impl BreakpointTable {
                 cond,
                 hits: Cell::new(0),
                 degraded: None,
+                scope_function,
             },
         );
         if is_pred {
@@ -473,6 +486,7 @@ impl BreakpointTable {
                 breakpoint: entry.bp.clone(),
                 hit_count: entry.hits.get(),
                 degraded: entry.degraded.is_some(),
+                scope_function: entry.scope_function.clone(),
             })
             .collect()
     }
@@ -1065,6 +1079,16 @@ mod tests {
                 target: names::NameTarget::Local(slot),
             })
         }
+
+        fn scope_of(&self, pc: u32) -> Option<String> {
+            if (0x00..0x38).contains(&pc) {
+                Some("helper".to_string())
+            } else if (0x38..0x78).contains(&pc) {
+                Some("main".to_string())
+            } else {
+                None
+            }
+        }
     }
 
     /// **地址类断点按自己的地址当帧上下文**（批 D 的接线点）。
@@ -1089,6 +1113,28 @@ mod tests {
             Some(0),
             "0x10 处必须读 x11（不能读到 main 的 x12）"
         );
+    }
+
+    /// **地址类条目记下「所在函数」**（收口批：给界面的那条上下文）。
+    #[test]
+    fn an_address_breakpoint_records_the_function_it_sits_in() {
+        let mut t = BreakpointTable::new();
+        t.set_with(bp_cond(1, 0x10, "counter == 1"), &ScopedNames)
+            .expect("helper 里的条目");
+        t.set_with(bp_cond(2, 0x40, "counter == 1"), &ScopedNames)
+            .expect("main 里的条目");
+        t.set_with(bp_pred(3, "main == 0x1000"), &ScopedNames)
+            .expect("观察式条目");
+        let infos = t.infos();
+        let scope = |id: u32| {
+            infos
+                .iter()
+                .find(|info| info.breakpoint.id == id)
+                .and_then(|info| info.scope_function.clone())
+        };
+        assert_eq!(scope(1).as_deref(), Some("helper"), "0x10 在 helper 里");
+        assert_eq!(scope(2).as_deref(), Some("main"), "0x40 在 main 里");
+        assert_eq!(scope(3), None, "观察式条目没有地址 ⇒ 不记函数");
     }
 
     /// **观察式条目没有帧上下文** ⇒ 同名局部变量报歧义（消息要能被用户读懂）。

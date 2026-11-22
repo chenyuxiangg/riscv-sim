@@ -112,6 +112,17 @@ pub enum ResolveError {
     ///
     /// 带着函数名，只为了报错时能点名（「`x` 在 `main` / `helper` 里都有」）。
     Ambiguous(Vec<String>),
+    /// 镜像**没有调试信息**（`.debug_info` 缺失）⇒ ⇒ 局部变量名**整类**
+    /// 不可用。
+    ///
+    /// ⚠️ 与 [`Self::Undefined`] 的区别是**用户下一步不一样**：这一条要
+    /// 告诉他「换个写法（地址 / 寄存器）」，而不是「名字打错了」。
+    NoDebugInfo,
+    /// 有调试信息，但**当前帧里没有这个名字**。
+    ///
+    /// * `Some(函数名)` ⇒ 知道站在哪个函数里 ⇒ 点名；
+    /// * `None` ⇒ 地址不在任何已知函数里（或这条目根本没有地址）。
+    NotInFrame(Option<String>),
 }
 
 /// 名字 → [`NameRef`] 的**窄接口**。
@@ -132,6 +143,14 @@ pub trait NameResolver {
     /// 上下文的实现者（`NoNames`、表级单元测试）不用改。
     fn resolve_at(&self, name: &str, _pc: Option<u32>) -> Result<NameRef, ResolveError> {
         self.resolve(name).ok_or(ResolveError::Undefined)
+    }
+
+    /// **这个地址落在哪个函数里**（函数名；不知道 ⇒ `None`）。
+    ///
+    /// ⚠️ 只用来**展示**（断点行说「所在函数」）⇒ ⇒ 默认 `None`，不实现
+    /// 也不影响解析。
+    fn scope_of(&self, _pc: u32) -> Option<String> {
+        None
     }
 }
 

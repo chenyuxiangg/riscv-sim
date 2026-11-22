@@ -662,6 +662,61 @@ describe("下断点：条件与符号（视图层 · C-7 ~ C-10）", () => {
         assert.equal(tag1, null, "没降级的条目**不许**挂标记（不编状态）");
     });
 
+    test("C-10d · 断点行说清「所在函数」（`BreakpointInfo.scope_function` 顶层）", () => {
+        // ⚠️ **收口批 · 轻档**：地址类条目的条件是按哪个帧解析的 ⇒ ⇒ 界面
+        //   必须说出来（否则用户写了 `x == 42` 也不知道 `x` 指的是谁）。
+        router.emit("debug.breakpoints", {
+            breakpoints: [
+                {
+                    breakpoint: {
+                        id: 11,
+                        addr: 0x38,
+                        source_hint: null,
+                        enabled: true,
+                        condition: "x == 42",
+                        kind: "Address",
+                    },
+                    hit_count: 0,
+                    degraded: false,
+                    scope_function: "main",
+                },
+                {
+                    breakpoint: {
+                        id: 12,
+                        addr: 0x10,
+                        source_hint: null,
+                        enabled: true,
+                        condition: null,
+                        kind: "Address",
+                    },
+                    hit_count: 0,
+                    degraded: false,
+                },
+            ],
+        });
+
+        const rows = show("debug").querySelectorAll("[data-bp-row]");
+        assert.equal(rows.length, 2);
+        const scope0 = rows[0].querySelector("[data-bp-scope]");
+        assert.ok(scope0, "有函数信息时断点行必须显示「所在函数」");
+        assert.equal(scope0.textContent, "所在函数 main", "函数名必须**逐字**来自回执");
+        assert.equal(
+            rows[1].querySelector("[data-bp-scope]"),
+            null,
+            "没有函数信息（无 DWARF / 观察式条目）⇒ ⇒ **不许编**一栏出来",
+        );
+    });
+
+    test("C-10e · 条件 placeholder 点出「可写局部变量名」（档 4 之后）", () => {
+        const body = show("debug");
+        pickKind(body, "Condition");
+        const input = show("debug").querySelector("[data-bp-input]");
+        assert.ok(
+            input.getAttribute("placeholder").includes("x =="),
+            "条件 placeholder 必须给出**变量名**写法（不能只举 `x1`）",
+        );
+    });
+
     test("C-10c · 停下横幅说清**停因**与**触发地址**（观察命中 ≠ 命中断点）", () => {
         // `Watchpoint` = 观察类命中（内存观察点 / store 边界的条件谓词）。
         m03.setState("debug", (prev) => ({

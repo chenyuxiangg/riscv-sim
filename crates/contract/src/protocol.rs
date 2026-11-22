@@ -1058,9 +1058,14 @@ mod tests {
             breakpoint: crate::model::Breakpoint::default(),
             hit_count: 3,
             degraded: true,
+            scope_function: None,
         };
         let value = serde_json::to_value(&info).expect("json");
         assert_eq!(value["degraded"], serde_json::json!(true));
+        assert!(
+            value.get("scope_function").is_none(),
+            "没有所在函数时字段整个不出现"
+        );
         let legacy = serde_json::json!({
             "breakpoint": serde_json::to_value(crate::model::Breakpoint::default()).expect("json"),
             "hit_count": 3
@@ -1068,6 +1073,7 @@ mod tests {
         let parsed: crate::model::BreakpointInfo =
             serde_json::from_value(legacy).expect("旧载荷必须还能解析");
         assert!(!parsed.degraded, "缺字段 ⇒ 默认不降级");
+        assert_eq!(parsed.scope_function, None, "缺字段 ⇒ 默认无所在函数");
     }
 
     /// **v12**（v0.76 · STAGE-52 · 裁决 M）：模板库协议 —— 两个命令、

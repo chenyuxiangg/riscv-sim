@@ -1617,9 +1617,11 @@ fn s6_an_undefined_name_in_a_condition_is_rejected_at_registration() {
         })
         .expect("未定义符号必须被拒");
     assert_eq!(code, "E_DBG-02", "条件表达式无效");
+    // 这份夹具没有 DWARF ⇒ 走「无调试信息」那一支：名字照样被拒，
+    // 文案要指出是哪个名字，并说清是「固件没调试信息」而不是「名字不存在」。
     assert!(
-        message.contains("未定义符号") && message.contains("nope"),
-        "错误消息要指出哪个名字没定义：{message}"
+        message.contains("nope") && message.contains("DWARF"),
+        "错误消息要指出哪个名字没定义、并说明缺调试信息：{message}"
     );
 }
 
@@ -1879,6 +1881,11 @@ fn s10_an_address_breakpoint_binds_a_local_from_real_dwarf() {
         Some("x == 42"),
         "条件原文要原样落库"
     );
+    assert_eq!(
+        infos[0].scope_function.as_deref(),
+        Some("main"),
+        "断点行要说清「这个条件是按哪个帧解析的」"
+    );
     // ⚠️ 注册期的试求值读 `[s0-24]`：此刻 `s0` 还没被访客写过 ⇒ ⇒ 地址
     //    `0xffff_ffe8` 不在映射区 ⇒ **读不到** ⇒ ⇒ 降级（不是拒绝注册）。
     assert!(
@@ -1926,9 +1933,15 @@ fn s11_a_local_without_dwarf_is_still_an_undefined_symbol() {
         })
         .expect("没有 DWARF ⇒ 局部变量名必须被拒");
     assert_eq!(code, "E_DBG-02");
+    // ⚠️ **三态之「没有调试信息」**（收口批）：不能报成「未定义符号」——
+    //    用户会以为名字打错了，而真正的原因是这份固件没有 DWARF。
     assert!(
-        message.contains("未定义符号") && message.contains("x"),
-        "错误消息要点出名字：{message}"
+        message.contains("DWARF") && message.contains("x"),
+        "无 DWARF 要说清原因并点出名字：{message}"
+    );
+    assert!(
+        !message.contains("未定义符号"),
+        "无 DWARF 不许退化成「未定义符号」：{message}"
     );
 }
 
@@ -1967,5 +1980,100 @@ fn s12_a_condition_entry_binds_a_unique_local_by_name() {
             .iter()
             .any(|e| matches!(e, EventPayload::Error { .. })),
         "唯一名的局部变量在观察式条目里也必须能绑定：{events:?}"
+    );
+}
+
+/// **S-13**：**有 DWARF、但这个名字不在当前帧** ⇒ 点名函数（三态之二）。
+///
+/// ⚠️ 与 S-11 的区别：固件**有**调试信息（`main` 里就有 `x`），只是 `helper`
+/// 里没有 ⇒ ⇒ 用户的下一步是「换地址」，不是「换固件」。
+#[test]
+fn s13_a_local_of_another_function_names_the_frame_it_is_missing_from() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(
+        &mut host,
+        CommandPayload::LoadProject(elf_project_with_locals()),
+    );
+
+    // 0x10 在 `helper` 里；`x` 只定义在 `main` 里。
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetBreakpoint(riscv_sim_contract::model::Breakpoint {
+            id: 1,
+            addr: 0x10,
+            source_hint: None,
+            enabled: true,
+            kind: riscv_sim_contract::model::BreakpointKind::Address,
+            condition: Some("x == 42".to_string()),
+        }),
+    );
+    let (code, message) = events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::Error { code, message } => Some((code.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("不在当前帧的变量名必须被拒");
+    assert_eq!(code, "E_DBG-02");
+    assert!(
+        message.contains("helper") && message.contains("\"x\""),
+        "要点名「不在 helper 里」并写出变量名：{message}"
+    );
+}
+
+/// **S-14**：**有 DWARF、但整份调试信息里都没有这个名字** ⇒ 仍是「未定义符号」
+/// （三态之三）。
+///
+/// ⚠️ 这条钉的是「别把『名字打错了』说成『不在这个函数里』」—— 反向的提示
+/// 同样会把人带偏。
+#[test]
+fn s14_an_unknown_name_under_debug_info_stays_undefined() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(
+        &mut host,
+        CommandPayload::LoadProject(elf_project_with_locals()),
+    );
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetBreakpoint(riscv_sim_contract::model::Breakpoint {
+            id: 1,
+            addr: 0x38,
+            source_hint: None,
+            enabled: true,
+            kind: riscv_sim_contract::model::BreakpointKind::Address,
+            condition: Some("nosuch == 1".to_string()),
+        }),
+    );
+    let (code, message) = events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::Error { code, message } => Some((code.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("未定义的名字必须被拒");
+    assert_eq!(code, "E_DBG-02");
+    assert!(
+        message.contains("未定义符号") && message.contains("nosuch"),
+        "名字压根不存在 ⇒ 报「未定义符号」：{message}"
+    );
+    assert!(
+        !message.contains("不在 main"),
+        "不许把「名字不存在」说成「不在这个函数里」：{message}"
     );
 }

@@ -28,9 +28,9 @@ from pathlib import Path
 OUT_DEFAULT = Path("docs/detailed-design/STAGE-55_Breakpoint_Window_Rework.html")
 
 TITLE = "STAGE-55 · 断点窗口重构（三类输入合一 + 观察式条件断点）"
-SUBTITLE = "RISC-V 仿真平台 · 调试服务层 · 详细设计评审稿 v0.2"
-VERSION = ("版本 v0.2 重写稿 · 2026-11-22 · 基线 main 58eb021 · 取代 v0.1 "
-           "· 输入方式按 kind 三值落库 · 未切分支、未编码")
+SUBTITLE = "RISC-V 仿真平台 · 调试服务层 · 详细设计定稿 v0.3"
+VERSION = ("版本 v0.3 定稿 · 2026-11-22 · 基线 main c138751（A→D 已合入）"
+           "· 输入方式按 kind 三值落库 · 实施期偏离与定稿口径见 §11")
 
 KPI = [
     ("3", "种输入方式", "地址 · 符号 · 条件（落库为 kind 三值，可筛选可还原）"),
@@ -266,7 +266,7 @@ SECTIONS.append({
                 ["<code>main</code>（函数名）", "函数地址常量", "否", "取指前", "函数没有「值」"],
                 ["<code>g_counter</code>（全局变量）", "<b>变量的值</b>", "是", "store 边界", "这是 v0.2 的关键纠正"],
                 ["<code>local</code>（局部变量）", "当前帧变量值", "视位置", "见备注",
-                 "寄存器位置 ⇒ 取指前；栈位置 ⇒ store 边界"],
+                 "寄存器位置 ⇒ 取指前；栈位置 ⇒ store 边界；<b>可见性 = 整帧可见</b>"],
                 ["<code>&g_counter</code> / <code>&main</code>", "符号的地址", "否", "取指前", "取地址"],
                 ["<code>[x1+8]</code> / <code>@sp-4</code>", "读该地址的 word", "是", "store 边界",
                  "沿用 watch_expr 既有写法"],
@@ -486,16 +486,43 @@ SECTIONS.append({
     "id": "s11",
     "h": "11 开放决定与交付批次",
     "blocks": [
-        ("list", [
-            "<b>局部变量生命周期</b>：函数序言 / 尾声区间里寄存器位置变量是否可见、何时销毁——"
-            "需 DWARF 解析落地后按实际 DIE 结构再定，属档 4 细节。",
-            "<b>降级态是否参与命中</b>：当前口径是「求值期失败按未命中」；也可选择「降级即暂停」"
-            "以提醒用户配置有误，但这会让断点不可预期，倾向不做。",
-            "<b>读观察点（监控 load）</b>：本批只监控写，读访问观察留后续。",
-            "<b>跨帧 unwind</b>：调用者帧变量、栈帧链 / CFA 解析留后续批次。",
-            "<b><code>trigger_addr</code> 是否进停止回执结构</b>：也可只在界面层用最近一次写记录推导；"
-            "进结构更稳，但扩了回执字段。",
-        ]),
+        ("callout", "A→E 实施期定稿（取代本节原先的开放项）",
+         "<b>① 局部变量生命周期</b> ⇒ <b>一律当整帧可见</b>（用户 2026-11-22 拍板）："
+         "不看 <code>DW_AT_location</code> 的位置区间列表，只认单点位置（<code>DW_OP_fbreg</code> / "
+         "<code>DW_OP_regN</code>）；<code>loclist</code> 变量整条跳过，不编位置。"
+         "<b>② 降级态</b> ⇒ 维持「求值期失败按未命中」；注册期读不到只打标记、不拒。"
+         "<b>③ 读观察点</b>（监控 load）⇒ 仍未做，留后续。"
+         "<b>④ 跨帧 unwind</b> ⇒ 仍未做（只认当前帧；<code>CFA</code> 按 psABI 取 <code>s0</code>，"
+         "真 CFA 需 <code>.debug_frame</code> CFI，另立批次）。"
+         "<b>⑤ <code>trigger_addr</code></b> ⇒ 已进停止回执结构（只在 store 边界命中时给值）。"
+         "<b>⑥ store 谓词与 M-10 观察点同时成立</b> ⇒ <b>条件断点优先</b>（用户拍板）："
+         "停因归条件断点、<code>trigger_addr</code> 指向那条 store，M-10 的命中事实仍记录在 "
+         "<code>last_watchpoint_hit</code>（不抹掉、不改变停因）。"),
+        ("caption", "表 18 · 实施期刻意偏离（代码为准，逐条有落地位置）"),
+        ("table", {
+            "widths": ["28%", "44%", "28%"],
+            "head": ["项", "定稿做法", "落地位置 / 理由"],
+            "rows": [
+                ["条件文法不认 <code>@</code>",
+                 "只认方括号 <code>[...]</code>；<code>@x2+4</code> 没有右边界 ⇒ 在表达式里歧义",
+                 "<code>m08_breakpoint/cond.rs</code> 的词法"],
+                ["<code>AddressBase::Symbol</code> 只在绑定期存在",
+                 "符号基址在注册期落定成数字 / 寄存器 / 帧偏移 ⇒ 求值期不需要符号表",
+                 "<code>cond.rs::bind_spec</code>"],
+                ["「记基线供界面展示」未做",
+                 "界面没有基线栏 ⇒ 不留一个没人读的字段（只报触发地址）",
+                 "<code>m17_backend::trial_eval_breakpoint</code> 注释"],
+                ["局部变量位置只认单点",
+                 "区间列表（loclist）一律跳过 ⇒ 与「整帧可见」同一条口径",
+                 "<code>m11_symbol/locals.rs</code>"],
+                ["<code>CFA == s0(x8)</code> 是显式假设",
+                 "GCC 给的是 <code>DW_OP_call_frame_cfa</code>；本批不解析 <code>.debug_frame</code>",
+                 "<code>locals.rs</code> 模块头；<code>-O2</code> 产物上该假设不成立"],
+                ["两态空文案拆成三态",
+                 "无 DWARF / 该帧没有这个变量 / 名字压根不存在 ⇒ 三条不同的下一步",
+                 "<code>names::ResolveError</code> + <code>cond::resolve_in</code>"],
+            ],
+        }),
         ("caption", "表 17 · 交付批次"),
         ("table", {
             "widths": ["10%", "30%", "36%", "24%"],
@@ -508,12 +535,16 @@ SECTIONS.append({
                 ["C", "内存读与 store 边界",
                  "总线读；地址预计算 + 区间过滤；<code>trigger_addr</code>；降级标记", "档 3"],
                 ["D", "当前帧局部变量",
-                 "DWARF DIE 解析；寄存器 / 栈偏移定位；两态空态", "档 4"],
+                 "DWARF 通用 DIE 走查；变量表 + 帧基址；寄存器 / 栈偏移定位", "档 4"],
+                ["E", "收口批（偏离回写 + 界面上下文）",
+                 "<code>E_DBG-02</code> 三态文案；<code>BreakpointInfo.scope_function</code>；"
+                 "断点行「所在函数」；条件 placeholder 点出变量名", "档 4 收尾"],
             ],
         }),
         ("callout", "下一步",
-         "本稿评审通过后：<code>git fetch origin main</code> → 切 <code>feat/breakpoint-window-rework</code> → "
-         "按 A→D 实施，每批独立跑门禁并登记台账，收口 <code>--no-ff</code> 合 main、删本地分支。"),
+         "A→E 已全部落地（每批独立门禁 + 台账，<code>--no-ff</code> 合 main、删本地分支）。"
+         "剩余两条**单独立批**：① <code>.debug_frame</code> CFI（真 CFA，替掉 <code>CFA == s0</code> 假设）；"
+         "② 真相候选列表（<code>ListLocals</code> 一类命令，把当前函数的可用变量直接列给用户）。"),
     ],
 })
 
@@ -745,7 +776,8 @@ def build(nav: str, body: str) -> str:
 {nav}
 {body}
 <p class="foot">本文件由 <b>tools/build_bp_rework_doc.py</b> 数据驱动生成；改内容请改脚本后重跑，
-不要手改 HTML。本文为设计评审稿，测试矩阵中的用例尚未实现。</p>
+不要手改 HTML。本文为设计定稿（v0.3）：A→E 均已落地并合入 main，
+文中「测试矩阵」的用例已在内核用例中实现。</p>
 </div>
 </body>
 </html>
