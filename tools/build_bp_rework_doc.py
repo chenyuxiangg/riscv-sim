@@ -28,15 +28,18 @@ from pathlib import Path
 OUT_DEFAULT = Path("docs/detailed-design/STAGE-55_Breakpoint_Window_Rework.html")
 
 TITLE = "STAGE-55 · 断点窗口重构（三类输入合一 + 观察式条件断点）"
-SUBTITLE = "RISC-V 仿真平台 · 调试服务层 · 详细设计定稿 v0.3"
-VERSION = ("版本 v0.3 定稿 · 2026-11-22 · 基线 main c138751（A→D 已合入）"
-           "· 输入方式按 kind 三值落库 · 实施期偏离与定稿口径见 §11")
+SUBTITLE = "RISC-V 仿真平台 · 调试服务层 · 详细设计定稿 v0.4"
+VERSION = ("版本 v0.4 定稿 · 2026-11-22 · 基线 main 6dabbdd"
+           "（A→E + CFI 批 + 栈回溯批已合入）"
+           "· 输入方式按 kind 三值落库 · CFI / 栈回溯口径见 §12 · 偏离见 §11")
 
 KPI = [
     ("3", "种输入方式", "地址 · 符号 · 条件（落库为 kind 三值，可筛选可还原）"),
     ("2", "种运行时语义", "地址命中 · 谓词命中"),
     ("1", "张权威表", "by_id 唯一数据源 + 两个派生索引"),
     ("2", "个求值时刻", "无内存读→取指前；含内存读→store 边界"),
+    ("2", "条 CFI 口径", "变量取主行 · 回溯按 pc 逐行（同一节区、两个口径）"),
+    ("32", "帧回溯上限", "返回地址 0 = 栈底；再往上说「被截断」，不猜"),
 ]
 
 SECTIONS = []
@@ -491,9 +494,12 @@ SECTIONS.append({
          "不看 <code>DW_AT_location</code> 的位置区间列表，只认单点位置（<code>DW_OP_fbreg</code> / "
          "<code>DW_OP_regN</code>）；<code>loclist</code> 变量整条跳过，不编位置。"
          "<b>② 降级态</b> ⇒ 维持「求值期失败按未命中」；注册期读不到只打标记、不拒。"
-         "<b>③ 读观察点</b>（监控 load）⇒ 仍未做，留后续。"
-         "<b>④ 跨帧 unwind</b> ⇒ 仍未做（只认当前帧；<code>CFA</code> 按 psABI 取 <code>s0</code>，"
-         "真 CFA 需 <code>.debug_frame</code> CFI，另立批次）。"
+         "<b>③ 读观察点</b>（监控 load）⇒ <b>维持不做</b>（用户 2026-11-22 拍板）：含内存读的条件"
+         "只在 store 边界判定，<b>读到匹配值不触发</b>；停因仍复用 <code>HaltReason::Watchpoint</code>、"
+         "<code>trigger_addr</code> 指向触发指令。产出的<b>文案债务</b>已在条件输入栏写明（见 §12 表 20）。"
+         "<b>④ 跨帧 unwind</b> ⇒ <b>已落地收窄版</b>（用户拍板）：只做<b>栈回溯列表</b>"
+         "（上层函数名 + pc），<b>不解析上层帧变量</b>；<code>CFA</code> 不再假设 <code>s0</code>，"
+         "改为读 <code>.debug_frame</code> 的 CIE/FDE（见 §12）。"
          "<b>⑤ <code>trigger_addr</code></b> ⇒ 已进停止回执结构（只在 store 边界命中时给值）。"
          "<b>⑥ store 谓词与 M-10 观察点同时成立</b> ⇒ <b>条件断点优先</b>（用户拍板）："
          "停因归条件断点、<code>trigger_addr</code> 指向那条 store，M-10 的命中事实仍记录在 "
@@ -515,9 +521,27 @@ SECTIONS.append({
                 ["局部变量位置只认单点",
                  "区间列表（loclist）一律跳过 ⇒ 与「整帧可见」同一条口径",
                  "<code>m11_symbol/locals.rs</code>"],
-                ["<code>CFA == s0(x8)</code> 是显式假设",
-                 "GCC 给的是 <code>DW_OP_call_frame_cfa</code>；本批不解析 <code>.debug_frame</code>",
-                 "<code>locals.rs</code> 模块头；<code>-O2</code> 产物上该假设不成立"],
+                ["<code>CFA</code> 不再假设 <code>s0(x8)</code>（v0.129 替掉）",
+                 "解析 <code>.debug_frame</code> 的 CIE/FDE，变量按<b>主行</b>（覆盖地址最多的一行）取值；"
+                 "读不到 CFI ⇒ <b>保留函数区间、丢掉变量</b>（不退回旧假设）",
+                 "<code>m11_symbol/cfi.rs</code> + <code>locals.rs</code>"],
+                ["<code>DW_CFA_def_cfa_expression</code> 不认",
+                 "CFA 由表达式算的 CIE/FDE 整条按「读不到 CFI」处理（不猜）",
+                 "<code>cfi.rs::run_cfi</code> 的 <code>0x0f</code> 分支"],
+                ["栈回溯只给 pc + 函数名",
+                 "上层帧<b>变量</b>不解析（名字只在当前帧有效）；<code>frames[0]</code> 是当前 pc",
+                 "<code>CommandPayload::Backtrace</code> / <code>EventPayload::Backtrace</code>"],
+                ["回溯只追 CFA 与 RA 两条规则",
+                 "其余 callee-saved 不逐帧恢复 ⇒ 深帧若 CFA 基于 <code>s0</code> 类基址寄存器，"
+                 "用的是<b>当前帧</b>的寄存器值（已知近似）",
+                 "<code>kernel_host::on_backtrace</code> 注释"],
+                ["返回地址 0 视为栈底",
+                 "「爬不上去」与「到顶了」分开：<code>ra == 0</code> 是正常终点（不算截断）；"
+                 "其余四类成因才报 <code>truncated</code>",
+                 "<code>on_backtrace</code> 的 <code>if ra == 0 { break; }</code>"],
+                ["内存条件只在 store 边界判定",
+                 "读到匹配值<b>不触发</b>（用户拍板维持现状）⇒ 界面必须写明，否则用户会以为「读没生效」",
+                 "<code>debug-panel.js</code> 的 <code>data-bp-store-only-note</code>"],
                 ["两态空文案拆成三态",
                  "无 DWARF / 该帧没有这个变量 / 名字压根不存在 ⇒ 三条不同的下一步",
                  "<code>names::ResolveError</code> + <code>cond::resolve_in</code>"],
@@ -539,12 +563,94 @@ SECTIONS.append({
                 ["E", "收口批（偏离回写 + 界面上下文）",
                  "<code>E_DBG-02</code> 三态文案；<code>BreakpointInfo.scope_function</code>；"
                  "断点行「所在函数」；条件 placeholder 点出变量名", "档 4 收尾"],
+                ["F", "CFI 批（真 CFA）",
+                 "M-06 放行 <code>.debug_frame</code>；新模块 <code>cfi.rs</code>；"
+                 "变量位置改由 CFI 主行算出，删 <code>FrameBaseSlot</code>", "档 4 深化"],
+                ["G", "栈回溯批（本批）",
+                 "CFI 补 <b>RA 规则</b> + 按 pc 取行；<code>Backtrace</code> 命令 / 回执；"
+                 "调试面板「调用栈」卡；条件栏补「按写入判定」文案", "档 4 收尾"],
             ],
         }),
         ("callout", "下一步",
-         "A→E 已全部落地（每批独立门禁 + 台账，<code>--no-ff</code> 合 main、删本地分支）。"
-         "剩余两条**单独立批**：① <code>.debug_frame</code> CFI（真 CFA，替掉 <code>CFA == s0</code> 假设）；"
-         "② 真相候选列表（<code>ListLocals</code> 一类命令，把当前函数的可用变量直接列给用户）。"),
+         "A→E + CFI 批 + 栈回溯批均已落地（每批独立门禁 + 台账，<code>--no-ff</code> 合 main、删本地分支）。"
+         "剩余一条<b>单独立批</b>：真相候选列表（<code>ListLocals</code> 一类只读命令，"
+         "把当前帧可用变量「名字 + 位置」列给用户挑；<b>不带当前值、不做类型</b>）。"),
+    ],
+})
+
+SECTIONS.append({
+    "id": "s12",
+    "h": "12 CFI 与栈回溯（v0.129 / v0.130 落地）",
+    "blocks": [
+        ("p", "本节回写两批实施期口径。共同前提：局部变量与栈回溯用的是<b>同一份</b> "
+              "<code>.debug_frame</code>，但<b>取值口径相反</b> —— 变量要「整帧可见」⇒ 取<b>主行</b>；"
+              "回溯要「此刻这条指令」⇒ 按 <b>pc 逐行</b>。两个口径各持一个 <code>CfiTable</code> 实例，"
+              "不共享。"),
+        ("caption", "表 19 · <code>.debug_frame</code> 解析口径（v0.129）"),
+        ("table", {
+            "widths": ["26%", "46%", "28%"],
+            "head": ["项", "定稿做法", "落地位置 / 理由"],
+            "rows": [
+                ["节区放行",
+                 "M-06 的 <code>DEBUG_SECTION_WHITELIST</code> 7 → 8，放行 <code>.debug_frame</code>",
+                 "<code>m06_elf/elf.rs</code> + 测试的 <code>EXPECTED_WHITELIST</code>"],
+                ["记录格式",
+                 "DWARF32；CIE 版本 v1 / v3 / v4；增补串只认空串或 <code>z</code> 打头"
+                 "（<code>eh</code> / <code>zR</code> / <code>zPLR</code> 整条 CIE 不认）",
+                 "<code>cfi.rs::Cie::parse</code>"],
+                ["CIE 索引键",
+                 "用<b>记录起点</b>（FDE 的 <code>cie_pointer</code> 从节区开头数）；"
+                 "曾用「body 偏移」⇒ 0 条 FDE 解析成功，被「真夹具两条 FDE」用例抓住",
+                 "<code>cfi.rs::CfiTable::parse</code>"],
+                ["变量取哪一行",
+                 "变量位置用<b>主行</b>（覆盖地址最多的一行，同宽取后者）⇒ 与「整帧可见」一致",
+                 "<code>cfi.rs::body_cfa</code> → <code>locals.rs</code>"],
+                ["读不到 CFI",
+                 "函数区间<b>照收</b>（断点仍能显示「所在函数」）、栈上变量一个<b>不留</b>；不退回 "
+                 "<code>CFA == s0</code>",
+                 "<code>locals.rs</code> + 宿主 S-15"],
+            ],
+        }),
+        ("callout", "为什么不能沿用「主行」做回溯",
+         "主行是<b>整帧</b>口径：函数入口、函数体、尾声三段的 CFA / 返回地址位置各不相同。"
+         "回溯要回答「<b>当前 pc 这一条</b>的返回地址存在哪儿」⇒ 必须用 <code>row_at(pc)</code> 取覆盖 pc 的那一行"
+         "（FDE 取最小覆盖区间）。用主行回爬会在序言 / 尾声读到<b>错误的返回地址</b>，且错得很安静。"),
+        ("caption", "表 20 · 栈回溯（<code>Backtrace</code>）口径与截断语义（v0.130）"),
+        ("table", {
+            "widths": ["24%", "50%", "26%"],
+            "head": ["项", "定稿做法", "落点 / 判别力"],
+            "rows": [
+                ["命令",
+                 "<code>CommandPayload::Backtrace</code>（unit 变体 · <b>只读</b>，不动任何状态）",
+                 "前端 <code>Command.backtrace()</code>"],
+                ["回执",
+                 "<code>EventPayload::Backtrace { frames, truncated }</code>；"
+                 "<code>StackFrame { pc, function }</code>，无名字时 <code>function</code> 缺省",
+                 "<code>contract/src/model.rs</code>"],
+                ["帧顺序",
+                 "<code>frames[0]</code> 是<b>当前</b> pc；之后每帧是「上一层函数的返回地址」",
+                 "前端首行标 <code>#0</code>，不排序不补帧"],
+                ["返回地址怎么取",
+                 "这一行给 <code>CFA = reg + offset</code> 与 <code>ra_offset</code> ⇒ 读 "
+                 "<code>[CFA + ra_offset]</code> 的 4 字节",
+                 "宿主 <code>on_backtrace</code> + <code>row_at(pc)</code>"],
+                ["栈底",
+                 "<code>ra == 0</code> ⇒ <b>正常终点</b>，<code>truncated = false</code>",
+                 "S-16（真夹具 + 内存写 0）"],
+                ["<code>truncated</code> 的四类成因",
+                 "① pc 不在任何 FDE 里；② 这一行没给 RA 规则；③ 返回地址读不出（越界 / 总线拒绝）；"
+                 "④ 帧数到上限（32）或返回地址落回已出现过的 pc（判环）",
+                 "S-17 / S-18 / S-19"],
+                ["上层帧变量",
+                 "<b>不做</b>（用户拍板收窄）：每一帧只有 pc + 函数名；要看上层变量需逐帧恢复 "
+                 "callee-saved 并另备一份变量位置",
+                 "契约里<b>没有</b>变量字段（不是省了没填）"],
+                ["内存条件文案（债务偿还）",
+                 "条件档写明「条件里的内存读取按<b>写入</b>判定：只有 store 写进匹配值才停，"
+                 "读到匹配值不触发」；地址 / 符号档不挂",
+                 "C-10f；<code>data-bp-store-only-note</code>"],
+            ],
+        }),
     ],
 })
 
@@ -705,7 +811,7 @@ body { margin:0; background:var(--bg); color:var(--ink);
   margin:8px 0 4px; text-align:center; }
 .subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
 .version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 18px; }
-.kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin:6px 0 22px; }
+.kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr)); gap:10px; margin:6px 0 22px; }
 .kpi { background:var(--head-bg); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
 .kpi-n { font-size:22px; font-weight:900; color:var(--brand); line-height:1.2; }
 .kpi-t { font-size:13px; font-weight:700; color:#111827; margin-top:2px; }
@@ -776,8 +882,8 @@ def build(nav: str, body: str) -> str:
 {nav}
 {body}
 <p class="foot">本文件由 <b>tools/build_bp_rework_doc.py</b> 数据驱动生成；改内容请改脚本后重跑，
-不要手改 HTML。本文为设计定稿（v0.3）：A→E 均已落地并合入 main，
-文中「测试矩阵」的用例已在内核用例中实现。</p>
+不要手改 HTML。本文为设计定稿（v0.4）：A→E + CFI 批 + 栈回溯批均已落地并合入 main
+（基线 6dabbdd），文中「测试矩阵」与 §12 的用例已在内核 / 前端用例中实现。</p>
 </div>
 </body>
 </html>
