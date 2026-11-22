@@ -446,6 +446,7 @@ fn breakpoint_halts_execution_at_its_address() {
             source_hint: None,
             enabled: true,
             condition: None,
+            ..riscv_sim_contract::model::Breakpoint::default()
         }),
     );
     first_tick(&events);
@@ -454,6 +455,129 @@ fn breakpoint_halts_execution_at_its_address() {
     let (reason, pc) = first_halted(&events);
     assert_eq!(reason, HaltReason::Breakpoint);
     assert_eq!(pc, DEMO_BREAKPOINT_ADDR, "断点命中时 PC 停在断点地址");
+}
+
+/// **S-2**（STAGE-55）：**观察式条件断点**不绑地址，按指令步求值；
+/// 命中即停，且停止原因**复用 `Watchpoint`**（不扩 `HaltReason` 枚举）。
+#[test]
+fn s2_a_condition_breakpoint_halts_at_the_first_instruction_boundary() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetBreakpoint(riscv_sim_contract::model::Breakpoint {
+            id: 5,
+            addr: 0,
+            source_hint: None,
+            enabled: true,
+            kind: riscv_sim_contract::model::BreakpointKind::Condition,
+            condition: Some("pc >= 0".to_string()),
+        }),
+    );
+    first_tick(&events);
+    let events = dispatch(&mut host, CommandPayload::Continue);
+    let (reason, pc) = first_halted(&events);
+    assert_eq!(
+        reason,
+        HaltReason::Watchpoint,
+        "观察式命中复用 Watchpoint，不扩枚举"
+    );
+    assert_eq!(pc, 0, "停在第一条指令的取指之前（一条都没执行）");
+}
+
+/// **S-3**（STAGE-55）：谓词**由假变真**时才停 —— 第 0 条指令把 `x1`
+/// 改成 42，所以在**下一条**指令边界（`0x04`）命中。
+#[test]
+fn s3_a_condition_breakpoint_halts_once_the_predicate_turns_true() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    dispatch(
+        &mut host,
+        CommandPayload::SetBreakpoint(riscv_sim_contract::model::Breakpoint {
+            id: 6,
+            addr: 0,
+            source_hint: None,
+            enabled: true,
+            kind: riscv_sim_contract::model::BreakpointKind::Condition,
+            condition: Some("x1 == 42".to_string()),
+        }),
+    );
+    let events = dispatch(&mut host, CommandPayload::Continue);
+    let (reason, pc) = first_halted(&events);
+    assert_eq!(reason, HaltReason::Watchpoint);
+    assert_eq!(pc, 0x04, "x1 在第 0 条指令后变成 42 ⇒ 在 0x04 停");
+}
+
+/// **S-4**（STAGE-55）：观察式条目的 id **由内核分配** —— 宿主连发两条
+/// `id = 0` 的条件断点，两条都要落表，且各自的 id **互不相同**、也**不等于
+/// 0**（地址类的「一址一断点」命名空间不受影响）。
+#[test]
+fn s4_condition_breakpoints_with_id_zero_are_allocated_by_the_kernel() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    for expr in ["x1 == 42", "x2 == 7"] {
+        let events = dispatch(
+            &mut host,
+            CommandPayload::SetBreakpoint(riscv_sim_contract::model::Breakpoint {
+                id: 0,
+                addr: 0,
+                source_hint: None,
+                enabled: true,
+                kind: riscv_sim_contract::model::BreakpointKind::Condition,
+                condition: Some(expr.to_string()),
+            }),
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, EventPayload::Error { .. })),
+            "id = 0 应当被当成「请内核分配」，而不是「id 已被占用」：{expr}"
+        );
+    }
+    let events = dispatch(&mut host, CommandPayload::ListBreakpoints);
+    let infos: Vec<_> = events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::Breakpoints { breakpoints } => Some(breakpoints.clone()),
+            _ => None,
+        })
+        .expect("ListBreakpoints 必须回一张表");
+    assert_eq!(infos.len(), 2, "两条条件断点都必须在表里");
+    let mut ids: Vec<u32> = infos.iter().map(|i| i.breakpoint.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 2, "两条条件断点的 id 必须互不相同");
+    assert!(ids.iter().all(|&id| id != 0), "内核不能把 0 当 id 发出去");
+    assert!(
+        infos
+            .iter()
+            .all(|i| i.breakpoint.kind == riscv_sim_contract::model::BreakpointKind::Condition),
+        "落表的来源标记必须还是「条件」"
+    );
 }
 
 #[test]
@@ -478,6 +602,7 @@ fn breakpoint_does_not_modify_the_machine_state() {
             source_hint: None,
             enabled: true,
             condition: None,
+            ..riscv_sim_contract::model::Breakpoint::default()
         }),
     );
     // 跑到断点前（5 条指令：0x00..0x10）。
@@ -499,6 +624,7 @@ fn misaligned_breakpoint_is_rejected() {
             source_hint: None,
             enabled: true,
             condition: None,
+            ..riscv_sim_contract::model::Breakpoint::default()
         }),
     );
     let (code, _) = first_error(&events);
@@ -514,6 +640,7 @@ fn duplicate_breakpoint_is_rejected() {
         source_hint: None,
         enabled: true,
         condition: None,
+        ..riscv_sim_contract::model::Breakpoint::default()
     };
     dispatch(&mut host, CommandPayload::SetBreakpoint(bp.clone()));
     let events = dispatch(&mut host, CommandPayload::SetBreakpoint(bp));
@@ -551,6 +678,7 @@ fn cleared_breakpoint_no_longer_halts() {
             source_hint: None,
             enabled: true,
             condition: None,
+            ..riscv_sim_contract::model::Breakpoint::default()
         }),
     );
     dispatch(&mut host, CommandPayload::ClearBreakpoint { id: 7 });
@@ -890,6 +1018,7 @@ fn a_breakpoint_run_emits_tick_then_waveform_then_halted() {
             source_hint: None,
             enabled: true,
             condition: None,
+            ..riscv_sim_contract::model::Breakpoint::default()
         }),
     );
     let events = dispatch(&mut host, CommandPayload::Continue);

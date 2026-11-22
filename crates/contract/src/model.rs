@@ -426,17 +426,50 @@ impl Default for Symbol {
     }
 }
 
+/// 断点条目的**输入方式**（STAGE-55 批新增）。
+///
+/// ⚠️ 这是**来源标记**，**不是**第三种命中逻辑：`Symbol` 与 `Address` 在
+/// 运行时同构（都走地址匹配），落库的收益只是「列表能筛选、快照能还原、
+/// 排障能分清是名字解析错还是地址错」。
+///
+/// ⚠️ `Condition` ⇒ **观察式条目**：不参与地址匹配，按谓词求值命中
+/// （见 M-08 `BreakpointTable::hit_check_pred`）。
+///
+/// ⚠️ **`#[serde(default)]` ⇒ 旧载荷仍能解析**（缺键 ⇒ `Address`）⇒ ⇒
+/// 既有地址断点行为**一字不变** ⇒ ⇒ `SIM_STATE_SCHEMA_VERSION` **不升**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum BreakpointKind {
+    /// 地址输入（十六进制地址）。
+    #[default]
+    Address,
+    /// 符号名输入，注册时解析成地址。
+    Symbol,
+    /// 条件表达式输入（观察式）。
+    Condition,
+}
+
 /// A single breakpoint (M-08).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Breakpoint {
     /// Stable breakpoint id.
     pub id: u32,
     /// Trigger address.
+    ///
+    /// ⚠️ `kind == Condition` 时**没有**真实地址 ⇒ 置 `0` 且**不进**
+    /// `by_addr` 索引 ⇒ 不会与真实地址 `0` 的断点冲突。
     pub addr: u32,
     /// Optional source location hint (UI display only).
+    ///
+    /// ⚠️ `kind == Symbol` 时这里存**原始符号名**（与 `kind` 互为印证）。
     pub source_hint: Option<String>,
     /// Whether the breakpoint is currently enabled.
     pub enabled: bool,
+    /// **输入方式**（STAGE-55 批新增）。
+    ///
+    /// ⚠️ 缺键 ⇒ `Address` ⇒ 旧载荷无损；`Symbol` 被旧代码读成 `Address`
+    /// 时 `addr` 相同 ⇒ **运行时行为一致，只丢来源标记**。
+    #[serde(default)]
+    pub kind: BreakpointKind,
     /// **条件表达式**（v0.57 批新增 · 裁决 F）。
     ///
     /// ⚠️ `None` ⇒ **无条件断点** ⇒ ⇒ **既有行为一字不变**。
@@ -462,6 +495,7 @@ impl Default for Breakpoint {
             addr: 0,
             source_hint: None,
             enabled: true,
+            kind: BreakpointKind::Address,
             condition: None,
         }
     }

@@ -962,6 +962,7 @@ impl Default for HaltReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::BreakpointKind;
 
     /// The schema version is the contract's single version knob — the
     /// front end's JS mirror hard-codes the same number, and the
@@ -2239,6 +2240,7 @@ mod tests {
             source_hint: None,
             enabled: true,
             condition: None,
+            ..Breakpoint::default()
         })
         .expect("json");
         assert!(
@@ -2252,6 +2254,7 @@ mod tests {
             source_hint: None,
             enabled: true,
             condition: Some("x1 == 5".to_string()),
+            ..Breakpoint::default()
         })
         .expect("json");
         assert_eq!(
@@ -2259,6 +2262,38 @@ mod tests {
             Some(&serde_json::Value::String("x1 == 5".to_string())),
             "`Some(..)` ⇒ 线上是**字符串**"
         );
+    }
+
+    /// **S-1**（STAGE-55 批）：`Breakpoint.kind` 的线上形态与旧载荷兼容。
+    ///
+    /// * 缺 `kind` 键的旧载荷 ⇒ 解析为 `Address`（既有地址断点行为不变）；
+    /// * `kind` 三值都能往返（`Symbol` / `Condition` 落库不丢来源）。
+    #[test]
+    fn s1_the_breakpoint_kind_defaults_to_address_and_round_trips() {
+        let old = serde_json::json!({
+            "id": 3,
+            "addr": 2147483648u64,
+            "source_hint": null,
+            "enabled": true
+        });
+        let parsed: Breakpoint = serde_json::from_value(old).expect("旧载荷必须能解析");
+        assert_eq!(parsed.kind, BreakpointKind::Address, "缺 kind ⇒ Address");
+
+        for kind in [
+            BreakpointKind::Address,
+            BreakpointKind::Symbol,
+            BreakpointKind::Condition,
+        ] {
+            let bp = Breakpoint {
+                id: 1,
+                addr: 0x8000_0000,
+                kind,
+                ..Breakpoint::default()
+            };
+            let json = serde_json::to_value(&bp).expect("json");
+            let back: Breakpoint = serde_json::from_value(json).expect("回解析");
+            assert_eq!(back.kind, kind, "kind 必须往返一致");
+        }
     }
 
     /// **A-5**：**旧载荷仍能解析** ⇒ ⇒ 证明 `#[serde(default)]` 生效 ⇒ ⇒

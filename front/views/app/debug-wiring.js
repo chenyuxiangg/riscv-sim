@@ -5,7 +5,7 @@
 
 import * as viewStore from "../m03_viewstore.js";
 import { publishViewState } from "./shared.js";
-import { updateDebugState, updateBreakpoints, writeErrorSlot } from "./debug-state.js";
+import { updateDebugState, writeErrorSlot } from "./debug-state.js";
 import {
     getRunState,
     setRunState,
@@ -20,6 +20,8 @@ import {
     setPendingErrorSlot,
 } from "./state.js";
 import { Command } from "../../lib/message.js";
+// ⚠️ `kind` 的归一化只有一处（视图层那份）⇒ ⇒ app 层引同一处，不另写一套。
+import { normalizeBreakpointKind } from "../m02_viewcomponents.js";
 import {
     HALT_REASON_END_OF_EXECUTION,
     RUN_ACTION_CONTINUE,
@@ -30,74 +32,21 @@ import {
 import { READBACK_REASON, readbackReasonOf } from "../../lib/readback.js";
 
 /**
- * 记一个「界面请求过的断点」。
+ * 拉一次**内核断点表**（STAGE-55）。
  *
- * ⚠️ **已经在列表里就不重复记** ⇒ ⇒ 内核会拒「该地址已存在」（M-08 的
- * 第二条规则）⇒ ⇒ 前端**不该**去触发那个错误。
+ * ⚠️ **列表只有一份真相**：`debug.bpEntries` 是 `ListBreakpoints` /
+ *   `SetBreakpointEnabled` 回执的**原样**条目 ⇒ ⇒ 谁改了内核的表，谁就
+ *   拉一次回来 ⇒ ⇒ 前端**不再**自己拼「我请求过哪些断点」（那是第二份
+ *   真相，谓词条目一多就必然对不上：它们没有地址，也不占地址槽）。
  *
- * @param {number} addr
- * @returns {number[]} 写进去的列表
+ * ⚠️ **注册失败时不拉**：命令抛错 ⇒ ⇒ 内核表**没变** ⇒ ⇒ 界面也**不该**
+ *   变（沿用「失败不留假断点」的既有判据）。
+ *
+ * @param {object} commandRouter — M-05
+ * @returns {Promise<void>}
  */
-export function requestBreakpoint(addr) {
-    // 新加的断点默认启用（与 `Command.setBreakpoint` 的 `enabled: true` 同拍）。
-    updateDebugState((prev) => ({
-        ...prev,
-        debug: {
-            ...(prev.debug ?? {}),
-            bpEnabled: { ...(prev.debug?.bpEnabled ?? {}), [String(addr)]: true },
-        },
-    }));
-    return updateBreakpoints((list) => (
-        list.includes(addr) ? list : [...list, addr]
-    ));
-}
-
-/**
- * 撤掉一个「界面请求过的断点」。
- *
- * ⚠️ **符号标签一起撤掉** ⇒ ⇒ 列表里不会留下一个**已经没有断点**的名字
- *   ⇒ ⇒ 标签与列表**始终一致**。
- *
- * @param {number} addr
- * @returns {number[]} 写进去的列表
- */
-export function withdrawBreakpoint(addr) {
-    updateDebugState((prev) => {
-        const symbols = { ...(prev?.debug?.bpSymbols ?? {}) };
-        const enabled = { ...(prev?.debug?.bpEnabled ?? {}) };
-        const hits = { ...(prev?.debug?.bpHits ?? {}) };
-        const key = String(Number(addr ?? 0) >>> 0);
-        delete symbols[key];
-        delete enabled[key];
-        delete hits[key];
-        return {
-            ...prev,
-            debug: { ...(prev.debug ?? {}), bpSymbols: symbols, bpEnabled: enabled, bpHits: hits },
-        };
-    });
-    return updateBreakpoints((list) => list.filter((a) => a !== addr));
-}
-
-/**
- * 给一个断点**贴符号名标签**（契约 v9 §5.3 · C-10）。
- *
- * ⚠️ **标签是附注** ⇒ ⇒ 「有哪些断点」仍由 `debug.breakpoints` 决定
- *   ⇒ ⇒ 既有判据（断点列表是**地址数组**）**一个字不用改**。
- *
- * @param {number} addr
- * @param {string} symbol
- */
-export function labelBreakpointSymbol(addr, symbol) {
-    updateDebugState((prev) => ({
-        ...prev,
-        debug: {
-            ...(prev.debug ?? {}),
-            bpSymbols: {
-                ...(prev.debug?.bpSymbols ?? {}),
-                [String(Number(addr ?? 0) >>> 0)]: String(symbol),
-            },
-        },
-    }));
+export async function refreshBreakpoints(commandRouter) {
+    await commandRouter.dispatchCommand(Command.listBreakpoints());
 }
 
 /**
@@ -165,27 +114,25 @@ export function wireDebug(commandRouter, services = {}) {
      */
     commandRouter.subscribe("debug.breakpoints", (event) => {
         const entries = Array.isArray(event.value?.breakpoints) ? event.value.breakpoints : [];
-        const addresses = [];
-        const symbols = {};
-        const enabled = {};
-        const hits = {};
-        for (const item of entries) {
+        // ⚠️ **一条一条原样收**（STAGE-55）：id 是内核给的句柄（谓词条目
+        //   没有地址，只有 id），`kind` 是来源标记，`condition` 是表达式
+        //   原文 ⇒ ⇒ 列表的**成员与内容**都来自这里，前端不添油加醋。
+        const items = entries.map((item) => {
             const bp = item?.breakpoint ?? item ?? {};
-            const addr = Number(bp.addr ?? 0) >>> 0;
-            addresses.push(addr);
-            enabled[String(addr)] = bp.enabled !== false;
-            hits[String(addr)] = Number(item?.hit_count ?? 0);
-            if (bp.source_hint) symbols[String(addr)] = String(bp.source_hint);
-        }
+            return {
+                id: Number(bp.id ?? 0) >>> 0,
+                addr: Number(bp.addr ?? 0) >>> 0,
+                kind: normalizeBreakpointKind(bp.kind),
+                condition: bp.condition ?? null,
+                symbol: bp.source_hint ? String(bp.source_hint) : null,
+                enabled: bp.enabled !== false,
+                hits: Number(item?.hit_count ?? 0),
+                degraded: bp.degraded === true,
+            };
+        });
         viewStore.setState("debug", (prev) => ({
             ...prev,
-            debug: {
-                ...(prev.debug ?? {}),
-                breakpoints: addresses,
-                bpSymbols: symbols,
-                bpEnabled: enabled,
-                bpHits: hits,
-            },
+            debug: { ...(prev.debug ?? {}), bpEntries: items },
         }));
         publishViewState("debug");
     });
@@ -433,12 +380,10 @@ export function wireDebug(commandRouter, services = {}) {
                     // ⚠️ **断点 / 符号标签也必须清**：内核在 `LoadProject` /
                     //   `UnloadProject` 里调 `clear_debug_state()`，但契约
                     //   **没有**「列出断点」的事件 ⇒ ⇒ 前端不在这里清，就会
-                    //   保留上一程序的假断点；用户再点同一地址时又会被
-                    //   `requestBreakpoint` 去重拦住，命令根本发不出去。
-                    breakpoints: [],
-                    bpSymbols: {},
-                    bpEnabled: {},
-                    bpHits: {},
+                    //   保留上一程序的假断点（STAGE-55 之后列表来自内核
+                    //   回执，这一条仍然成立：新工程还没拉过表）。
+                    bpEntries: [],
+                    bpError: "",
                     watchValues: [],
                     watchNextId: 1,
                     // ⚠️ **读回的那一份也清掉**（v0.67 批）⇒ ⇒ 基准与「上次
@@ -446,6 +391,15 @@ export function wireDebug(commandRouter, services = {}) {
                     //   对比⇒ ⇒ 用户会看到**上一趟**的高亮。
                     readback: null,
                 },
+            }));
+            // ⚠️ 断点的**草稿**住在共享的 `debugger` 键里（D-119）⇒ ⇒ 新程序
+            //   的地址 / 表达式都不再指同一个东西 ⇒ ⇒ 一并清掉（否则框里还
+            //   挂着一个**上一条程序**的表达式，用户一按回车就撞墙）。
+            viewStore.setState("debugger", (prev) => ({
+                ...prev,
+                bpKind: "Address",
+                bpDraft: "",
+                bpTabIndex: -1,
             }));
             publishViewState("debug");
             // ⚠️ **「用户要的那次停」也作废**（v0.67 批）⇒ ⇒ 复位之后正在跑的

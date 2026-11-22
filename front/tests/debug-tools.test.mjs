@@ -129,6 +129,49 @@ function type(body, inputSelector, text) {
     return input;
 }
 
+/**
+ * 把断点的**类型下拉**拨到某个类型（STAGE-55：一个框管三种类型）。
+ *
+ * @param {object} body — 视图正文
+ * @param {string} kind — `Address` / `Symbol` / `Condition`（契约变体名）
+ * @returns {object} 那个下拉
+ */
+function pickKind(body, kind) {
+    const select = body.querySelector("[data-bp-kind-input]");
+    assert.ok(select, "断点输入行必须**有**类型下拉（data-bp-kind-input）");
+    select.value = kind;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    return select;
+}
+
+/**
+ * 一个**只**答 `ResolveSymbol` 的路由器替身（符号类型的两步注册用）。
+ *
+ * @param {number|null} addr — 解析出来的地址；`null` = 没有这个符号
+ * @returns {object}
+ */
+function routerWithSymbol(addr) {
+    const base = fakeRouter();
+    return {
+        ...base,
+        async dispatchCommand(payload) {
+            base.sent.push(payload);
+            if (payload && payload.ResolveSymbol) {
+                const name = String(payload.ResolveSymbol.name ?? "");
+                return {
+                    value: {
+                        name,
+                        symbol: addr === null ? null : { name, addr, size: 4 },
+                        candidates: [],
+                        total: addr === null ? 17 : 1,
+                    },
+                };
+            }
+            return { value: {} };
+        },
+    };
+}
+
 /** 派发出去的那些命令里，某一类的那些。 */
 function sentOf(router, key) {
     return router.sent.filter((p) => p && Object.prototype.hasOwnProperty.call(p, key));
@@ -275,42 +318,50 @@ describe("符号查询（视图层 · C-3 ~ C-6）", () => {
         stop = forwardCommands(router);
     });
 
-    test("C-3 · 符号框填 `main` + 点「查找」⇒ ⇒ **发出一条** `ResolveSymbol`", () => {
+    test("C-3 · 符号类型 + Tab ⇒ ⇒ **发出一条** `ResolveSymbol`（表 13 前缀补全）", () => {
         const body = show("debug");
-        type(body, "[data-bp-symbol-input]", "main");
-        const buttons = body.querySelectorAll("[data-action=\"lookup-symbol\"]");
-        assert.equal(buttons.length, 1, "必须**有**一个「查找」按钮");
-        buttons[0].click();
+        pickKind(body, "Symbol");
+        const input = type(body, "[data-bp-input]", "main");
+        const ev = new Event("keydown", { bubbles: true });
+        ev.key = "Tab";
+        input.dispatchEvent(ev);
         stop();
 
         const sent = sentOf(router, "ResolveSymbol");
-        assert.equal(sent.length, 1, "点一次「查找」必须发**一条**命令（不多发、不少发）");
+        assert.equal(sent.length, 1, "第一次 Tab 必须发**一条**前缀查询（不多发、不少发）");
         assert.deepEqual(sent[0].ResolveSymbol, { name: "main" }, "名字必须**逐字**是输入框里的那个");
         assert.equal(
             sentOf(router, "SetBreakpoint").length,
             0,
-            "查符号**不许**顺手下断点（下断点是点候选那一步的事）",
+            "查符号**不许**顺手下断点（下断点是回车 / 点按钮那一步的事）",
         );
     });
 
-    test("C-3 · 回车 = 「查找」（一次输入 = 一次查询）", () => {
+    test("C-3 · 回车 = 点「加断点」（表 14），**不是**查询", () => {
         const body = show("debug");
-        const input = type(body, "[data-bp-symbol-input]", "main");
+        const input = type(body, "[data-bp-input]", "0x2000");
         const ev = new Event("keydown", { bubbles: true });
         ev.key = "Enter";
         input.dispatchEvent(ev);
         stop();
 
-        const sent = sentOf(router, "ResolveSymbol");
-        assert.equal(sent.length, 1, "回车必须**发出一条**查询命令");
-        assert.deepEqual(sent[0].ResolveSymbol, { name: "main" });
+        assert.equal(
+            sentOf(router, "ResolveSymbol").length,
+            0,
+            "地址类型下回车**不该**去查符号",
+        );
+        const sent = sentOf(router, "SetBreakpoint");
+        assert.equal(sent.length, 1, "回车必须等价点击「加断点」");
+        assert.equal(sent[0].SetBreakpoint.addr, 0x2000, "地址逐字来自输入框");
     });
 
     test("C-4 · 收到 `SymbolResolved` ⇒ ⇒ 候选区渲染出候选（断言**个数**）", () => {
         const body = show("debug");
+        pickKind(body, "Symbol");
+        const afterKind = show("debug");
         assert.ok(
-            body.querySelector("[data-bp-symbol-candidates]"),
-            "必须**有**候选容器（data-bp-symbol-candidates）",
+            afterKind.querySelector("[data-bp-symbol-candidates]"),
+            "符号类型下必须**有**候选容器（data-bp-symbol-candidates）",
         );
         router.emit("debug.symbol", {
             name: "ma",
@@ -339,7 +390,7 @@ describe("符号查询（视图层 · C-3 ~ C-6）", () => {
     });
 
     test("C-5 · 候选为空且无精确命中 ⇒ ⇒ 显示「没有这个符号」", () => {
-        show("debug");
+        pickKind(show("debug"), "Symbol");
         router.emit("debug.symbol", {
             name: "zzz",
             symbol: null,
@@ -361,11 +412,12 @@ describe("符号查询（视图层 · C-3 ~ C-6）", () => {
     });
 
     test("C-6 · `total == 0` ⇒ ⇒ 显示「没有符号表」那一行（**另一条文案**）", () => {
-        show("debug");
+        pickKind(show("debug"), "Symbol");
         router.emit("debug.symbol", { name: "zzz", symbol: null, candidates: [], total: 0 });
         const noTable = show("debug").querySelector("[data-bp-symbol-candidates]").textContent;
 
         m03.reset();
+        pickKind(show("debug"), "Symbol");
         router.emit("debug.symbol", { name: "zzz", symbol: null, candidates: [], total: 17 });
         const hasTable = show("debug").querySelector("[data-bp-symbol-candidates]").textContent;
 
@@ -403,6 +455,7 @@ describe("下断点：条件与符号（视图层 · C-7 ~ C-10）", () => {
 
     /** 把符号候选喂进去（一次**内核答复**）。 */
     function seedCandidates() {
+        pickKind(show("debug"), "Symbol");
         router.emit("debug.symbol", {
             name: "main",
             symbol: { name: "main", addr: 0x80001234, size: 4 },
@@ -424,23 +477,30 @@ describe("下断点：条件与符号（视图层 · C-7 ~ C-10）", () => {
         assert.equal(sent[0].SetBreakpoint.addr, 0x80001234, "地址必须**逐字**是候选的地址");
         assert.equal(sent[0].SetBreakpoint.source_hint, "main", "`source_hint` 必须是候选的符号名");
         assert.equal(sent[0].SetBreakpoint.id, 0x80001234, "断点 id 仍然是**地址**（既有语义不变）");
+        assert.equal(sent[0].SetBreakpoint.kind, "Symbol", "输入方式必须落库（表 13 提交载荷）");
     });
 
-    test("C-8 · 条件框非空 ⇒ ⇒ `SetBreakpoint.condition` **逐字**等于输入框内容", () => {
-        const body = seedCandidates();
-        type(body, "[data-bp-cond-input]", "x1 == 5");
-        const candidate = body.querySelector("[data-bp-symbol-candidates]").querySelectorAll(".symbol-candidate");
-        candidate[0].click();
+    test("C-8 · 条件类型 ⇒ ⇒ 表达式**逐字**落进 `condition`、且**不绑地址**", () => {
+        const body = show("debug");
+        pickKind(body, "Condition");
+        const afterKind = show("debug");
+        type(afterKind, "[data-bp-input]", "x1 == 5");
+        afterKind.querySelector("[data-addr-input=\"breakpoint\"]")
+            .querySelector("[data-action=\"set-breakpoint\"]")
+            .click();
         stop();
 
         const sent = sentOf(router, "SetBreakpoint");
-        assert.equal(sent.length, 1);
-        assert.equal(sent[0].SetBreakpoint.condition, "x1 == 5", "条件必须**逐字**是输入框里的那个");
+        assert.equal(sent.length, 1, "条件类型必须发**一条** `SetBreakpoint`");
+        assert.equal(sent[0].SetBreakpoint.kind, "Condition");
+        assert.equal(sent[0].SetBreakpoint.condition, "x1 == 5", "表达式必须**逐字**是输入框里的那个");
+        assert.equal(sent[0].SetBreakpoint.addr, 0, "谓词条目不绑地址（addr 只是占位）");
+        assert.equal(sent[0].SetBreakpoint.id, 0, "谓词条目请内核分配 id（没有地址可当 id）");
     });
 
-    test("C-9 · 条件框为空 ⇒ ⇒ `condition` 是 **`null`**（不是空串）", () => {
+    test("C-9 · 地址类型 ⇒ ⇒ `condition` 是 **`null`**（不是空串）", () => {
         const body = show("debug");
-        type(body, "[data-bp-addr-input]", "0x2000");
+        type(body, "[data-bp-input]", "0x2000");
         body.querySelector("[data-addr-input=\"breakpoint\"]")
             .querySelector("[data-action=\"set-breakpoint\"]")
             .click();
@@ -450,45 +510,117 @@ describe("下断点：条件与符号（视图层 · C-7 ~ C-10）", () => {
         assert.equal(sent.length, 1, "地址入口必须发**一条** `SetBreakpoint`");
         assert.equal(sent[0].SetBreakpoint.condition, null, "无条件时 `condition` 必须是 `null`");
         assert.notEqual(sent[0].SetBreakpoint.condition, "", "**不许**是空串");
+        assert.equal(sent[0].SetBreakpoint.kind, "Address", "输入方式必须落库");
     });
 
-    test("C-8 · 条件框对**地址断点**也通用（裁决 O）", () => {
-        const body = show("debug");
-        type(body, "[data-bp-addr-input]", "0x2000");
-        type(body, "[data-bp-cond-input]", "a0 != 0");
+    /** 点一下「加断点」，把**视图层发出的那一条**动作原样接住。 */
+    function clickAdd(body) {
+        const emitted = [];
+        const onCmd = (ev) => emitted.push(ev.detail);
+        dom.window.addEventListener("riscv:command", onCmd);
         body.querySelector("[data-addr-input=\"breakpoint\"]")
             .querySelector("[data-action=\"set-breakpoint\"]")
             .click();
-        stop();
+        dom.window.removeEventListener("riscv:command", onCmd);
+        return emitted;
+    }
 
-        const sent = sentOf(router, "SetBreakpoint");
-        assert.equal(sent.length, 1);
-        assert.equal(sent[0].SetBreakpoint.condition, "a0 != 0", "地址断点也必须带上条件");
+    test("C-8 · 符号类型 ⇒ ⇒ 载荷是 `{kind: Symbol, name}`，再由内核解成地址", async () => {
+        const symRouter = routerWithSymbol(0x80001234);
+        const body = show("debug");
+        pickKind(body, "Symbol");
+        const afterKind = show("debug");
+        type(afterKind, "[data-bp-input]", "main");
+
+        const emitted = clickAdd(afterKind);
+        assert.equal(emitted.length, 1, "点一次按钮必须只发**一条**动作");
+        assert.equal(emitted[0].action, "set-breakpoint");
+        assert.equal(emitted[0].params.kind, "Symbol", "载荷必须带**类型**");
+        assert.equal(emitted[0].params.name, "main", "符号类型发的是**名字**（不是地址）");
+
+        await app.handleCommand(emitted[0], { commandRouter: symRouter });
+        assert.equal(sentOf(symRouter, "ResolveSymbol").length, 1, "必须先解析名字");
+        const sent = sentOf(symRouter, "SetBreakpoint");
+        assert.equal(sent.length, 1, "解析成功之后才注册断点");
+        assert.equal(sent[0].SetBreakpoint.addr, 0x80001234, "地址必须是**内核**给的");
+        assert.equal(sent[0].SetBreakpoint.source_hint, "main");
+        assert.equal(sent[0].SetBreakpoint.kind, "Symbol");
+        assert.ok(symRouter.sent.includes("ListBreakpoints"), "注册成功后拉一次内核表");
     });
 
-    test("C-10 · 断点列表**显示**符号名", async () => {
-        const body = seedCandidates();
-        body.querySelector("[data-bp-symbol-candidates]").querySelectorAll(".symbol-candidate")[0].click();
-        stop();
+    test("C-8 · 符号类型 · 解析不出来 ⇒ ⇒ **不下断点**（不编一个 0 地址）", async () => {
+        const symRouter = routerWithSymbol(null);
+        const body = show("debug");
+        pickKind(body, "Symbol");
+        const afterKind = show("debug");
+        type(afterKind, "[data-bp-input]", "nosuch");
 
-        // ⚠️ **成功后才落列表**（M-08 状态同步回归）：命令是异步的 ⇒ ⇒
-        //   等这次 `SetBreakpoint` 的 promise 走完再读界面。
-        await new Promise((r) => setTimeout(r, 0));
+        const emitted = clickAdd(afterKind);
+        assert.equal(emitted.length, 1, "动作照发（是否下断点由解答定）");
+
+        await app.handleCommand(emitted[0], { commandRouter: symRouter });
+        assert.equal(sentOf(symRouter, "ResolveSymbol").length, 1, "必须先去问内核");
+        assert.equal(
+            sentOf(symRouter, "SetBreakpoint").length,
+            0,
+            "解不出地址 ⇒ ⇒ **一条断点命令都不发**",
+        );
+    });
+
+    test("C-10 · 断点列表**显示**来源标签、符号名与表达式原文", () => {
+        router.emit("debug.breakpoints", {
+            breakpoints: [
+                {
+                    breakpoint: {
+                        id: 0x80001234,
+                        addr: 0x80001234,
+                        source_hint: "main",
+                        enabled: true,
+                        condition: null,
+                        kind: "Symbol",
+                    },
+                    hit_count: 3,
+                },
+                {
+                    breakpoint: {
+                        id: 7,
+                        addr: 0,
+                        source_hint: null,
+                        enabled: true,
+                        condition: "x1 == 5",
+                        kind: "Condition",
+                    },
+                    hit_count: 0,
+                },
+            ],
+        });
+
         const after = show("debug");
         const rows = after.querySelectorAll("[data-bp-row]");
-        assert.equal(rows.length, 1, "断点列表必须**有**一行（对象存在 ⇒ 不是空断言）");
+        assert.equal(rows.length, 2, "断点列表必须**有**两行（地址类 + 谓词类）");
+        // ⚠️ **来源标签**（表 14）：两行各自说清自己是怎么来的。
+        const tags = rows.map((r) => r.querySelector("[data-bp-kind-tag]").textContent);
+        assert.deepEqual(tags, ["符号", "条件"], "来源标签必须逐字是「符号」「条件」");
+        // 符号行：地址 + 符号名 + 命中次数。
+        assert.ok(rows[0].textContent.includes("0x80001234"), "符号行必须显示地址");
+        assert.ok(rows[0].textContent.includes("main"), "符号行必须显示**符号名**");
+        assert.ok(rows[0].textContent.includes("命中 3 次"), "符号行必须显示命中次数");
+        // 谓词行：**没有地址**，显示的是表达式原文（不编一个 0x00000000）。
         assert.ok(
-            rows[0].textContent.includes("main"),
-            "断点那一行必须**显示符号名**",
+            rows[1].querySelector("[data-bp-cond-text]"),
+            "谓词行必须渲染表达式原文",
         );
-        // ⚠️ **既有那行「断点 id = 地址」保持不变** ⇒ ⇒ 符号名是**另起**的
-        //   一个 `.note` ⇒ ⇒ 契约 v13 又加了命中次数 ⇒ ⇒ 三个 `.note` 并列。
-        const notes = rows[0].querySelectorAll(".note");
-        assert.equal(notes.length, 3, "断点行里必须**三个** `.note`（符号名 + id 那句 + 命中次数）");
-        const texts = notes.map((n) => n.textContent);
-        assert.ok(texts.includes("main"), "其中一个 `.note` 必须是符号名");
-        assert.ok(texts.includes("断点 id = 地址"), "既有那句「断点 id = 地址」必须**保持不变**");
-        assert.ok(texts.some((t) => t.includes("命中")), "其中一个 `.note` 必须显示命中次数");
+        assert.equal(
+            rows[1].querySelector("[data-bp-cond-text]").textContent,
+            "x1 == 5",
+            "表达式必须**逐字**是内核回执里的那一个",
+        );
+        assert.ok(
+            !rows[1].textContent.includes("0x00000000"),
+            "谓词条目**没有地址** ⇒ ⇒ 不许编一个 0x00000000 出来",
+        );
+        // ⚠️ **行内 id 是内核给的句柄**（谓词条目只有 id 可用）。
+        assert.equal(rows[1].dataset.bpId, "7", "谓词行的 id 必须来自回执");
     });
 });
 
@@ -632,9 +764,9 @@ describe("内核原文上屏（视图层 · C-13）", () => {
         );
     });
 
-    test("C-13 · `E_DBG-02` ⇒ ⇒ 内核原文显示在条件那一位 + 调试面板那一处", async () => {
+    test("C-13 · `E_DBG-02` ⇒ ⇒ 内核原文显示在断点提示位 + 调试面板那一处", async () => {
         await app.handleCommand(
-            { action: "set-breakpoint", params: { addr: 0x2000, condition: "x1 ==" } },
+            { action: "set-breakpoint", params: { kind: "Condition", condition: "x1 ==" } },
             { commandRouter: router },
         );
         stop();
@@ -642,8 +774,8 @@ describe("内核原文上屏（视图层 · C-13）", () => {
         router.emit("error", { code: "E_DBG-02", message: raw });
 
         const after = show("debug");
-        const slot = after.querySelector("[data-bp-cond-error]");
-        assert.ok(slot, "必须**有**条件的错误位");
+        const slot = after.querySelector("[data-bp-error]");
+        assert.ok(slot, "必须**有**断点的错误位（三种类型共用一个）");
         assert.equal(
             slot.textContent,
             raw,
@@ -668,9 +800,9 @@ describe("内核原文上屏（视图层 · C-13）", () => {
         router.emit("error", { code: "E_DBG-04", message: raw });
 
         const after = show("debug");
-        const slot = after.querySelector("[data-bp-symbol-error]");
-        assert.ok(slot, "必须**有**符号的错误位");
-        assert.equal(slot.textContent, raw, "符号那一位上必须是**内核原文**");
+        const slot = after.querySelector("[data-bp-error]");
+        assert.ok(slot, "必须**有**断点的错误位（查符号也落这一位）");
+        assert.equal(slot.textContent, raw, "断点提示位上必须是**内核原文**");
     });
 });
 
@@ -687,16 +819,25 @@ describe("M-08 调试状态同步（回归）", () => {
         router = fakeRouter();
     });
 
-    test("调试面 reset 清掉界面断点列表与符号标签", () => {
+    test("调试面 reset 清掉断点表与断点草稿", () => {
         const debug = app.wireDebug(router);
-        app.requestBreakpoint(0x80000000);
-        app.labelBreakpointSymbol(0x80000000, "main");
+        // 先喂一份内核回执 + 一份草稿（新工程 ⇒ 两者都该清）。
+        router.emit("debug.breakpoints", {
+            breakpoints: [
+                {
+                    breakpoint: { id: 0x80000000, addr: 0x80000000, kind: "Symbol", source_hint: "main", enabled: true },
+                    hit_count: 1,
+                },
+            ],
+        });
+        m03.setState("debugger", { bpKind: "Symbol", bpDraft: "main" });
 
         debug.reset();
 
         const state = m03.getState("debug");
-        assert.deepEqual(state?.debug?.breakpoints, [], "reset 后断点地址列表必须为空");
-        assert.deepEqual(state?.debug?.bpSymbols, {}, "reset 后符号标签必须为空");
+        assert.deepEqual(state?.debug?.bpEntries, [], "reset 后断点表必须为空");
+        assert.equal(state?.debug?.bpError, "", "reset 后提示位必须清空");
+        assert.equal(m02.debuggerDraft().bpDraft, "", "reset 后断点草稿必须清空");
     });
 
     test("`SetBreakpoint` 被内核拒绝时，界面列表不落这个地址", async () => {
@@ -732,21 +873,35 @@ describe("M-08 调试状态同步（回归）", () => {
         assert.deepEqual(state?.debug?.bpSymbols ?? {}, {}, "失败时不能留下符号标签");
     });
 
-    test("`ClearBreakpoint` 失败时，界面列表保留原断点", async () => {
+    test("`ClearBreakpoint` 失败时，界面列表保留原断点（不拉表 ⇒ 不改写）", async () => {
         const failing = {
             ...fakeRouter(),
             async dispatchCommand() {
                 throw new Error("E_CTX-06: 传输通道断开");
             },
         };
-        app.requestBreakpoint(0x80000000);
+        const debug = app.wireDebug(failing);
+        // 先有**一份内核回执**（列表的真相在这里）。
+        failing.emit("debug.breakpoints", {
+            breakpoints: [
+                {
+                    breakpoint: { id: 0x80000000, addr: 0x80000000, kind: "Address", enabled: true },
+                    hit_count: 0,
+                },
+            ],
+        });
         await app.handleCommand(
-            { action: "clear-breakpoint", params: { addr: 0x80000000 } },
+            { action: "clear-breakpoint", params: { id: 0x80000000 } },
             { commandRouter: failing },
         );
 
         const state = m03.getState("debug");
-        assert.deepEqual(state?.debug?.breakpoints ?? [], [0x80000000], "清除失败时不能先删界面项");
+        assert.deepEqual(
+            (state?.debug?.bpEntries ?? []).map((e) => e.id),
+            [0x80000000],
+            "清除失败时不能先删界面项（列表只随内核回执变）",
+        );
+        debug.reset();
     });
 });
 
@@ -778,9 +933,12 @@ describe("M-08 断点表回执（契约 v13）", () => {
         });
 
         const state = m03.getState("debug");
-        assert.deepEqual(state.debug.breakpoints, [0x80000010], "列表必须来自内核回执");
-        assert.equal(state.debug.bpEnabled["2147483664"], false, "使能位必须来自回执");
-        assert.equal(state.debug.bpHits["2147483664"], 2, "命中次数必须来自回执");
+        assert.equal(state.debug.bpEntries.length, 1, "列表必须来自内核回执");
+        assert.equal(state.debug.bpEntries[0].id, 0x80000010, "id 必须来自回执");
+        assert.equal(state.debug.bpEntries[0].addr, 0x80000010, "地址必须来自回执");
+        assert.equal(state.debug.bpEntries[0].enabled, false, "使能位必须来自回执");
+        assert.equal(state.debug.bpEntries[0].hits, 2, "命中次数必须来自回执");
+        assert.equal(state.debug.bpEntries[0].kind, "Address", "缺 kind 的旧载荷 ⇒ 地址类型");
 
         const body = show("debug");
         const row = body.querySelector("[data-bp-row]");
@@ -791,7 +949,14 @@ describe("M-08 断点表回执（契约 v13）", () => {
     });
 
     test("点「禁用」发 `SetBreakpointEnabled`，参数逐字一致", async () => {
-        app.requestBreakpoint(0x80000010);
+        router.emit("debug.breakpoints", {
+            breakpoints: [
+                {
+                    breakpoint: { id: 0x80000010, addr: 0x80000010, kind: "Address", enabled: true },
+                    hit_count: 0,
+                },
+            ],
+        });
         const body = show("debug");
         const button = body.querySelector("[data-action=\"toggle-breakpoint\"]");
         assert.ok(button, "必须**有**一个启用/禁用按钮");

@@ -37,7 +37,7 @@ use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_01_INVALID_REGISTER_INDEX, E_ENG_03_NO_PROGRESS,
 };
 use riscv_sim_contract::model::{
-    Breakpoint, BreakpointInfo, SimState, WatchAccess, Watchpoint, WriteSize,
+    Breakpoint, BreakpointInfo, BreakpointKind, SimState, WatchAccess, Watchpoint, WriteSize,
 };
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink, TimeSource};
 use riscv_sim_contract::protocol::HaltReason;
@@ -353,9 +353,23 @@ impl<'a> IssExecutor<'a> {
     /// ⚠️ **状态是「该指令执行前」的** ⇒ ⇒ 条件里看到的寄存器值 =
     /// **断点地址那条指令执行前**的值（裁决 H）。
     pub fn breakpoint_at(&self, state: &SimState) -> bool {
-        self.breakpoints
-            .hit_check_cond(state.pc, &state.gpr)
-            .is_some()
+        self.breakpoint_hit(state).is_some()
+    }
+
+    /// **哪个**断点命中了 —— 地址类优先，其次观察式（STAGE-55 批）。
+    ///
+    /// ⚠️ **顺序是「地址匹配 → 观察式」** ⇒ ⇒ 同一个 `pc` 上两种条目都
+    /// 成立时，地址断点**先赢**（与 v0.124 之前完全一致，观察式条目不抢）。
+    /// ⚠️ **命中即返回** ⇒ ⇒ 观察式条目**不会**在地址断点已命中时被求值
+    /// ⇒ ⇒ 计数**不会**双加。
+    pub fn breakpoint_hit(&self, state: &SimState) -> Option<Breakpoint> {
+        if let Some(bp) = self.breakpoints.hit_check_cond(state.pc, &state.gpr) {
+            return Some(bp);
+        }
+        // **观察式条目**：没有地址，按指令步求值谓词。
+        // ⚠️ 批 A 的求值时刻 = **取指之前**（含内存读的条目在批 C 挪到
+        //    store 边界）。
+        self.breakpoints.hit_check_pred(state.pc, &state.gpr)
     }
 
     /// **取走**一次宿主暂停请求（取走即消失）。
@@ -450,9 +464,18 @@ impl InstructionExecutor for IssExecutor<'_> {
         //
         //     ⚠️ **v0.57 批**：`breakpoint_at` 现在带**条件**判定 ⇒ ⇒
         //     条件为**假** ⇒ ⇒ **不停**（继续执行下一条）。
-        if self.breakpoint_at(state) {
+        //
+        //     ⚠️ **STAGE-55 批**：观察式条件断点也在这里判 ⇒ ⇒ 它的停止
+        //     原因**复用 `Watchpoint`**（观察式本就是 watchpoint 语义）
+        //     ⇒ ⇒ 不扩 `HaltReason` 枚举 ⇒ 旧前端 / 旧快照不用改。
+        if let Some(hit) = self.breakpoint_hit(state) {
+            let reason = if hit.kind == BreakpointKind::Condition {
+                HaltReason::Watchpoint
+            } else {
+                HaltReason::Breakpoint
+            };
             return Ok(ExecOutcome::Stop {
-                reason: HaltReason::Breakpoint,
+                reason,
                 consumed: false,
             });
         }
@@ -826,7 +849,30 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
     ///
     /// Invalid address / duplicate registration → `E_CTX-07` (from M-08).
     pub fn set_breakpoint_with_id(&mut self, bp: Breakpoint) -> Result<(), PlatformError> {
+        // ⚠️ **观察式条目的 id 由内核分配**（STAGE-55 · 条件断点不绑地址 ⇒ ⇒
+        //    宿主手里没有「地址即 id」那个句柄）⇒ ⇒ 宿主发 `id = 0` 就是
+        //    「请分配」。地址类条目的 id **仍然**是地址本身（一址一断点），
+        //    所以这里**只**对 `Condition` 分派 ⇒ ⇒ `0x0` 上下的地址断点不受影响。
+        //
+        // ⚠️ 取值带**从 `u32::MAX` 往下** ⇒ ⇒ 与「低位地址当 id」错开 ⇒ ⇒
+        //    两套命名空间不会在半路撞号（撞了要等累到 4G 量级）。
+        let mut bp = bp;
+        if bp.kind == BreakpointKind::Condition && bp.id == 0 {
+            bp.id = self.next_free_predicate_id();
+        }
         self.breakpoints.set(bp)
+    }
+
+    /// 谓词条目可用的下一个 id（**从 `u32::MAX` 往下找空位**）。
+    fn next_free_predicate_id(&self) -> u32 {
+        let mut id = u32::MAX;
+        while self.breakpoints.get(id).is_some() {
+            id -= 1;
+            if id == 0 {
+                break;
+            }
+        }
+        id
     }
 
     /// Remove a breakpoint by the **host-assigned** contract id.
@@ -1421,6 +1467,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             source_hint: None,
             enabled,
             condition: None,
+            ..Breakpoint::default()
         })
     }
 
@@ -1806,6 +1853,7 @@ mod tests {
                 source_hint: None,
                 enabled: true,
                 condition: None,
+                ..Breakpoint::default()
             })
             .expect("set breakpoint");
         let executed = backend.step_n(100).expect("step");
@@ -1824,6 +1872,7 @@ mod tests {
                 source_hint: None,
                 enabled: false,
                 condition: None,
+                ..Breakpoint::default()
             })
             .expect("set breakpoint");
         backend.step_n(6).expect("step");
@@ -1957,6 +2006,7 @@ mod tests {
                 source_hint: None,
                 enabled: true,
                 condition: None,
+                ..Breakpoint::default()
             })
             .expect("set");
         assert_eq!(
@@ -2020,6 +2070,7 @@ mod tests {
                 source_hint: None,
                 enabled: true,
                 condition: None,
+                ..Breakpoint::default()
             })
             .expect("set");
         backend.step_n(1).expect("step");
@@ -2039,6 +2090,7 @@ mod tests {
                 source_hint: None,
                 enabled: true,
                 condition: None,
+                ..Breakpoint::default()
             })
             .expect("set");
         backend.clear_debug_state();
@@ -2247,6 +2299,7 @@ mod tests {
                 source_hint: None,
                 enabled: true,
                 condition: None,
+                ..Breakpoint::default()
             })
             .expect("set breakpoint");
 
@@ -2887,6 +2940,7 @@ mod tests {
                 source_hint: None,
                 enabled: true,
                 condition: None,
+                ..Breakpoint::default()
             })
             .expect("set breakpoint");
         backend.step_over().expect("step over");
@@ -2916,6 +2970,7 @@ mod tests {
                 source_hint: None,
                 enabled: false,
                 condition: None,
+                ..Breakpoint::default()
             })
             .expect("set breakpoint");
         backend.step_over().expect("step over");
@@ -2942,6 +2997,7 @@ mod tests {
                 source_hint: None,
                 enabled: true,
                 condition: Some("x1 == 0".to_string()),
+                ..Breakpoint::default()
             })
             .expect("set breakpoint");
         backend.step_over().expect("step over");

@@ -244,13 +244,18 @@ describe("STAGE-35 · 断点 UI", () => {
         }
     });
 
-    test("A-7 · 断点列表**只有一处**落点：视图状态 `debug.breakpoints`（视图层不持有第二份）", async () => {
+    test("A-7 · 断点列表**只有一处**落点：视图状态 `debug.bpEntries`（内核回执的镜像）", async () => {
         seedDisasm();
         // ⚠️ **先钉住「列表真的被渲染出来了」** ⇒ ⇒ 否则「列表是空的」
         // 会让「视图层没存第二份」这条断言**恒真** ⇒ ⇒ **假绿**。
+        // ⚠️ **视图状态里存的是「已摊平的条目」**（`debug-wiring` 把内核
+        //   回执摊成一份视图状态）⇒ ⇒ 这里就按那份形状喂。
+        const receipt = (addr) => [
+            { id: addr, addr: addr, kind: "Address", enabled: true, hits: 0, condition: null, symbol: "" },
+        ];
         m03.setState("debug", (prev) => ({
             ...prev,
-            debug: { ...(prev.debug ?? {}), breakpoints: [0x20] },
+            debug: { ...(prev.debug ?? {}), bpEntries: receipt(0x20) },
         }));
         let el = show("debug");
         let rows = el.querySelectorAll("[data-bp-row]");
@@ -265,24 +270,32 @@ describe("STAGE-35 · 断点 UI", () => {
         // 自己存了一份（第二个真相），这里会**继续显示旧地址** ⇒ ⇒ 变红。
         m03.setState("debug", (prev) => ({
             ...prev,
-            debug: { ...(prev.debug ?? {}), breakpoints: [0x30] },
+            debug: { ...(prev.debug ?? {}), bpEntries: receipt(0x30) },
         }));
         el = show("debug");
         rows = el.querySelectorAll("[data-bp-row]");
-        assert.equal(rows.length, 1, `换了一个断点地址之后列表应当还是 1 行，实际 ${rows.length}`);
+        assert.equal(rows.length, 1, `换了一个断点之后列表应当还是 1 行，实际 ${rows.length}`);
         assert.equal(
             rows[0].getAttribute("data-bp-addr"),
             "0x00000030",
             "视图状态改了但列表还是旧地址 ⇒ ⇒ 视图层存了第二份（第二个真相）",
         );
 
-        // ⚠️ **app 层是写的那一方** ⇒ ⇒ 视图层**不写** debug 视图状态。
-        const { services } = fakeServices();
+        // ⚠️ **app 层是写的那一方** ⇒ ⇒ 但写的动作是「**去问内核**」（
+        // `ListBreakpoints`）⇒ ⇒ 列表**只随内核回执变** ⇒ ⇒ 前端不自算。
+        const { services, dispatched } = fakeServices();
         await app.handleCommand({ action: "set-breakpoint", params: { addr: "0x00000040" } }, services);
+        assert.equal(dispatched.length, 2, `应当派发两条命令（下断 + 拉表），实际 ${dispatched.length}`);
+        assert.ok(dispatched[0].SetBreakpoint, "第一条必须是 SetBreakpoint");
+        assert.equal(
+            dispatched[1],
+            "ListBreakpoints",
+            `第二条必须是 ListBreakpoints（列表唯一来源是内核），实际 ${JSON.stringify(dispatched[1])}`,
+        );
         assert.deepEqual(
-            m03.getState("debug")?.debug?.breakpoints,
-            [0x30, 0x40],
-            "app 层没有把断点写进 debug.breakpoints（唯一落点没接上）",
+            m03.getState("debug")?.debug?.bpEntries,
+            receipt(0x30),
+            "app 层自己把断点写进了界面列表 ⇒ ⇒ 第二个真相（必须只靠内核回执）",
         );
         const m02Src = readFileSync(resolve(frontDir, "views/components/debug-panel.js"), "utf8");
         assert.ok(
@@ -290,8 +303,8 @@ describe("STAGE-35 · 断点 UI", () => {
             "m02 里写了 debug 视图状态 ⇒ ⇒ 视图层持有第二份断点列表 ⇒ ⇒ 第二个真相",
         );
         assert.ok(
-            m02Src.includes("debug.breakpoints"),
-            "m02 里连读都没读 debug.breakpoints（断点列表没接上唯一落点）",
+            m02Src.includes("bpEntries"),
+            "m02 里连读都没读 bpEntries（断点列表没接上唯一落点）",
         );
     });
 
@@ -299,7 +312,7 @@ describe("STAGE-35 · 断点 UI", () => {
         seedDisasm();
         m03.setState("debug", (prev) => ({
             ...prev,
-            debug: { ...(prev.debug ?? {}), breakpoints: [] },
+            debug: { ...(prev.debug ?? {}), bpEntries: [] },
         }));
         const el = show("debug");
         const btn = el.querySelector('[data-bp-toggle="0x00000020"]');
@@ -311,7 +324,7 @@ describe("STAGE-35 · 断点 UI", () => {
         // ⚠️ **命令的最终形状**要在 **app 层**验 ⇒ ⇒ 视图发信号、app 发命令。
         const { services, dispatched } = fakeServices();
         await app.handleCommand(signals[0], services);
-        assert.equal(dispatched.length, 1, `应当派发一条命令，实际 ${dispatched.length}`);
+        assert.equal(dispatched.length, 2, `应当派发两条（下断 + 拉表），实际 ${dispatched.length}`);
         const bp = dispatched[0]?.SetBreakpoint;
         assert.ok(bp, `派发的不是 SetBreakpoint：${JSON.stringify(dispatched[0])}`);
         assert.equal(Number(bp.addr), 0x20, "断点地址不对");
@@ -321,13 +334,21 @@ describe("STAGE-35 · 断点 UI", () => {
             `断点 id 必须是地址本身（裁决 J），实际 id=${bp.id} addr=${bp.addr}`,
         );
         assert.equal(bp.enabled, true, "断点必须是启用的");
+        // ⚠️ **来源必须落库**（STAGE-55）⇒ ⇒ 反汇编那一列下的就是地址断点。
+        assert.equal(bp.kind, "Address", "反汇编列下的断点，来源必须是「地址」");
+        assert.equal(dispatched[1], "ListBreakpoints", "下完必须去拉表（列表只认内核回执）");
     });
 
     test("A-9 · 「撤掉断点」发的是 `ClearBreakpoint { id }` 且 **`id === addr`**", async () => {
         seedDisasm();
         m03.setState("debug", (prev) => ({
             ...prev,
-            debug: { ...(prev.debug ?? {}), breakpoints: [0x20] },
+            debug: {
+                ...(prev.debug ?? {}),
+                bpEntries: [
+                    { id: 0x20, addr: 0x20, kind: "Address", enabled: true, hits: 0, condition: null, symbol: "" },
+                ],
+            },
         }));
         const el = show("debug");
         // ⚠️ **按钮文案要说清当前状态** ⇒ ⇒ 已有断点时那个按钮就是「撤掉」。
@@ -344,7 +365,7 @@ describe("STAGE-35 · 断点 UI", () => {
 
         const { services, dispatched } = fakeServices();
         await app.handleCommand(signals[0], services);
-        assert.equal(dispatched.length, 1, `应当派发一条命令，实际 ${dispatched.length}`);
+        assert.equal(dispatched.length, 2, `应当派发两条（撤断 + 拉表），实际 ${dispatched.length}`);
         const clr = dispatched[0]?.ClearBreakpoint;
         assert.ok(clr, `派发的不是 ClearBreakpoint：${JSON.stringify(dispatched[0])}`);
         assert.equal(
@@ -352,6 +373,7 @@ describe("STAGE-35 · 断点 UI", () => {
             0x20,
             `ClearBreakpoint 的 id 必须是地址本身（裁决 J），实际 ${clr.id}`,
         );
+        assert.equal(dispatched[1], "ListBreakpoints", "撤完必须去拉表（列表只认内核回执）");
     });
 
     test("A-15 · 停下原因**只有一个落点**：脚本口 `lastHalt()` 与视图状态 `debug.halt` 读同一份（裁决 L）", () => {

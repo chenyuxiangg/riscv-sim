@@ -650,6 +650,7 @@ fn k11_an_illegal_condition_is_rejected_and_the_table_is_unchanged() {
             source_hint: None,
             enabled: true,
             condition: None,
+            ..Breakpoint::default()
         }),
     );
     let before = host.backend.breakpoints().len();
@@ -661,6 +662,7 @@ fn k11_an_illegal_condition_is_rejected_and_the_table_is_unchanged() {
             source_hint: None,
             enabled: true,
             condition: Some("foo".to_string()),
+            ..Breakpoint::default()
         }),
     );
     let (code, message) = first_error(&events);
@@ -701,6 +703,7 @@ fn k12_a_false_condition_does_not_stop_at_the_breakpoint_address() {
             source_hint: None,
             enabled: true,
             condition: Some("x1 == 5".to_string()),
+            ..Breakpoint::default()
         }),
     );
     let events = dispatch(&mut host, CommandPayload::StepN { n: 12 });
@@ -760,6 +763,7 @@ fn k13_a_true_condition_stops_at_the_breakpoint_address() {
             source_hint: None,
             enabled: true,
             condition: Some("pc == 0x0c".to_string()),
+            ..Breakpoint::default()
         }),
     );
     let events = dispatch(&mut host, CommandPayload::StepN { n: 12 });
@@ -804,6 +808,7 @@ fn k13_the_condition_sees_the_values_from_before_the_instruction() {
             source_hint: None,
             enabled: true,
             condition: Some("x2 == 7".to_string()),
+            ..Breakpoint::default()
         }),
     );
     let events = dispatch(&mut host, CommandPayload::StepN { n: 12 });
@@ -842,6 +847,7 @@ fn k14_an_unconditional_breakpoint_stops_exactly_as_before() {
             source_hint: None,
             enabled: true,
             condition: None,
+            ..Breakpoint::default()
         }),
     );
     let events = dispatch(&mut host, CommandPayload::StepN { n: 12 });
@@ -880,6 +886,7 @@ fn k15_a_conditional_breakpoint_also_works_on_the_time_driven_path() {
             source_hint: None,
             enabled: true,
             condition: Some("pc == 0x0c".to_string()),
+            ..Breakpoint::default()
         }),
     );
     let events = dispatch(&mut host, CommandPayload::Continue);
@@ -915,6 +922,7 @@ fn k15_a_false_condition_does_not_stop_on_the_time_driven_path() {
             source_hint: None,
             enabled: true,
             condition: Some("x1 == 5".to_string()),
+            ..Breakpoint::default()
         }),
     );
     let events = dispatch(&mut host, CommandPayload::Continue);
@@ -964,6 +972,7 @@ fn list_breakpoints_replies_with_the_kernel_table() {
             source_hint: Some("main".to_string()),
             enabled: true,
             condition: None,
+            ..Breakpoint::default()
         }),
     );
 
@@ -986,6 +995,7 @@ fn set_breakpoint_enabled_replies_with_the_updated_table() {
             source_hint: None,
             enabled: true,
             condition: None,
+            ..Breakpoint::default()
         }),
     );
 

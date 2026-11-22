@@ -5,10 +5,21 @@
 //! 08-1」），挂在 **取指之前**——断点命中时该条指令**还没有执行**，寄存器 /
 //! 内存状态与命中前完全一致（M-08 LLD §7.1「命中无副作用」用例）。
 //!
-//! ## 表结构
+//! ## 表结构（STAGE-55 批重构：**id 权威 + 两个派生索引**）
 //!
-//! - `by_addr` —— 按地址索引，命中检测 **O(1)**（M-08 LLD 表38）。
-//! - `by_id` —— id → 地址反查索引，用于 `clear` / `enable` / `disable`。
+//! - `by_id` —— **唯一业务状态**（id → 条目）。
+//! - `addr_index` —— **派生索引**（地址 → id，只收 `Address` / `Symbol`），
+//!   命中检测走这里；地址重复校验也走这里。
+//! - `pred_ids` —— **派生索引**（`Condition` 条目的 id 集合），供每指令遍历。
+//!
+//! ⚠️ 换权威的原因：**观察式条件断点没有地址** ⇒ ⇒ 若权威仍是地址映射，
+//! 这类条目**无处安放**（详见 [`BreakpointTable`] 的文档）。
+//!
+//! ## 观察式条件断点（STAGE-55 批）
+//!
+//! `kind == Condition` 的条目**没有地址**（`addr` 恒为 `0` 占位）⇒ ⇒
+//! **不进** `addr_index`、**不参与**地址匹配 ⇒ ⇒ 命中检测走
+//! [`BreakpointTable::hit_check_pred`]，按指令步求值谓词，为真即停。
 //!
 //! ## 条件断点（v0.57 批 · STAGE-42 §4）
 //!
@@ -45,9 +56,11 @@
 //! **顺手订正**成指向本规格（STAGE-42 · F-15）。
 
 use riscv_sim_contract::error::{ErrorFamily, PlatformError, DEBUG_FAMILY};
-use riscv_sim_contract::model::{Breakpoint, BreakpointInfo, WatchAccess, Watchpoint, WriteSize};
+use riscv_sim_contract::model::{
+    Breakpoint, BreakpointInfo, BreakpointKind, WatchAccess, Watchpoint, WriteSize,
+};
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use riscv_sim_contract::error::E_DBG_02_CONDITION_INVALID;
 
@@ -80,16 +93,35 @@ struct Entry {
     hits: Cell<u64>,
 }
 
-/// 断点表 —— 按地址索引 + id 反查索引。
+/// 断点表 —— **id 权威 + 两个派生索引**（STAGE-55 批重构）。
 ///
-/// 单一数据源：注册 / 删除 / 使能只改这两张表，没有第二份状态
-/// （M-08 LLD §7.2(1)「无隐式状态」）。
+/// ## 权威为什么从「地址」换成「id」
+///
+/// v0.124 之前 `by_addr` 是权威，因为每条断点**都必须有地址**。
+/// STAGE-55 引入**观察式条件断点**（`kind == Condition`）⇒ ⇒ 它**没有
+/// 地址**（`addr` 只是 `0` 占位）⇒ ⇒ 若权威仍是地址映射，这类条目
+/// **无处安放**。所以权威换成 `by_id`，地址映射降级为**索引**。
+///
+/// ## 单一数据源（M-08 LLD §7.2(1)「无隐式状态」）
+///
+/// * `by_id` —— **唯一业务状态**：条目、`enabled`、命中计数、已解析 AST
+///   全在这里；
+/// * `addr_index` —— **派生索引**：`addr → id`，**只收** `Address` /
+///   `Symbol` 条目；地址重复校验走这里；
+/// * `pred_ids` —— **派生索引**：`Condition` 条目的 id 集合，供每指令
+///   遍历用。
+///
+/// ⚠️ 两个索引都**能由 `by_id` 完整重算** ⇒ ⇒ 不是第二份业务状态 ⇒ ⇒
+/// 「无隐式状态」这条纪律**仍然成立**。写路径必须同步三处；读取路径只用
+/// 其中一处、**不交叉推断**。
 #[derive(Debug, Default, Clone)]
 pub struct BreakpointTable {
-    /// 地址 → 断点条目。命中检测走这里（O(log n) 树查找，键即地址）。
-    by_addr: BTreeMap<u32, Entry>,
-    /// 断点 id → 地址。`clear` / `enable` / `disable` 走这里。
-    by_id: BTreeMap<u32, u32>,
+    /// **权威**：id → 条目。
+    by_id: BTreeMap<u32, Entry>,
+    /// **派生索引**：地址 → id（只收 `Address` / `Symbol`）。
+    addr_index: BTreeMap<u32, u32>,
+    /// **派生索引**：`Condition` 条目的 id。
+    pred_ids: BTreeSet<u32>,
 }
 
 impl BreakpointTable {
@@ -98,37 +130,42 @@ impl BreakpointTable {
         Self::default()
     }
 
-    /// 注册或更新一个断点。
+    /// 注册一个断点 —— **按 `kind` 分派校验**。
     ///
-    /// **校验**（M-08 LLD §3.1）：
+    /// **`Address` / `Symbol`**（M-08 LLD §3.1）：
     /// - 地址必须 2 字节对齐 → 否则 `E_CTX-07`；
     /// - 同一地址**重复注册** → `E_CTX-07`；
-    /// - 同一 **id** 复用到另一个地址 → `E_CTX-07`（id 会话内唯一）。
     ///
-    /// **条件**（v0.57 批 · 裁决 I）：
-    /// - `condition` 非法（语法错 / 未知寄存器名 / 空表达式）→ `E_DBG-02`。
+    /// **`Condition`（观察式）**：**不**做地址校验（它没有真实地址）；
+    /// 但**必须**带表达式原文 ⇒ ⇒ 空表达式按 `cond::parse("")` 的原样拒。
+    ///
+    /// **共同**：
+    /// - 同一 **id** 重复注册 → `E_CTX-07`（id 会话内唯一）；
+    /// - `condition` 非法（语法错 / 未知寄存器名 / 空表达式）→ `E_DBG-02`
+    ///   （裁决 I）。
     ///
     /// 校验失败时**表不变**（M-08 LLD §7.1「断点表不变」用例）。
     ///
-    /// ⚠️ **既有三道校验的语义一字未改** ⇒ ⇒ 条件校验**排在它们之后**
+    /// ⚠️ **既有三道地址校验的语义一字未改** ⇒ ⇒ 条件校验**排在它们之后**
     /// ⇒ ⇒ 「地址非法 + 条件非法」时报的仍是**地址**的错（`E_CTX-07`）。
     pub fn set(&mut self, bp: Breakpoint) -> Result<(), PlatformError> {
-        if bp.addr % BP_ADDR_ALIGN != 0 {
-            return Err(self.error(format!(
-                "断点地址未按 {BP_ADDR_ALIGN} 字节对齐：0x{:08x}",
-                bp.addr
-            )));
-        }
-        if self.by_addr.contains_key(&bp.addr) {
-            return Err(self.error(format!("断点地址已存在：0x{:08x}", bp.addr)));
-        }
-        if let Some(&existing_addr) = self.by_id.get(&bp.id) {
-            if existing_addr != bp.addr {
+        let is_pred = bp.kind == BreakpointKind::Condition;
+        if !is_pred {
+            if bp.addr % BP_ADDR_ALIGN != 0 {
                 return Err(self.error(format!(
-                    "断点 id {} 已绑定到 0x{:08x}",
-                    bp.id, existing_addr
+                    "断点地址未按 {BP_ADDR_ALIGN} 字节对齐：0x{:08x}",
+                    bp.addr
                 )));
             }
+            if self.addr_index.contains_key(&bp.addr) {
+                return Err(self.error(format!("断点地址已存在：0x{:08x}", bp.addr)));
+            }
+        }
+        if let Some(existing) = self.by_id.get(&bp.id) {
+            return Err(self.error(format!(
+                "断点 id {} 已绑定到 0x{:08x}",
+                bp.id, existing.bp.addr
+            )));
         }
         // ⚠️ 条件**在这里**解析（注册时一次）⇒ ⇒ 命中时**不再**解析 ⇒ ⇒
         //    命中路径上**没有**字符串处理。
@@ -139,17 +176,28 @@ impl BreakpointTable {
                 Err(err) => return Err(self.condition_error(err)),
             },
         };
+        // ⚠️ 观察式条目**必须**有表达式 ⇒ ⇒ 缺了就按「空表达式」原样拒
+        //    （错误消息由 `cond` 给，前端不吞）。
+        if is_pred && cond.is_none() {
+            let err = cond::parse("").expect_err("空表达式必须被拒");
+            return Err(self.condition_error(err));
+        }
         let id = bp.id;
-        let addr = bp.addr;
-        self.by_addr.insert(
-            addr,
+        if !is_pred {
+            self.addr_index.insert(bp.addr, id);
+        }
+        self.by_id.insert(
+            id,
             Entry {
                 bp,
                 cond,
                 hits: Cell::new(0),
             },
         );
-        self.by_id.insert(id, addr);
+        if is_pred {
+            self.pred_ids.insert(id);
+        }
+        debug_assert!(self.indexes_consistent(), "派生索引必须与 by_id 一致");
         Ok(())
     }
 
@@ -157,11 +205,19 @@ impl BreakpointTable {
     ///
     /// **幂等**：id 不存在时返回 `Ok(None)`，不报错、不产生任何副作用
     /// （M-08 LLD §7.1「无效 id 幂等（评审 09-6 / N8）」）。
+    ///
+    /// ⚠️ `Condition` 条目**没有真实地址** ⇒ ⇒ 返回的是它的 `addr` 占位
+    /// （恒为 `0`）⇒ ⇒ 调用方**不得**把这个 `0` 当地址用。
     pub fn clear(&mut self, id: u32) -> Result<Option<u32>, PlatformError> {
-        let Some(addr) = self.by_id.remove(&id) else {
+        let Some(entry) = self.by_id.remove(&id) else {
             return Ok(None);
         };
-        self.by_addr.remove(&addr);
+        let addr = entry.bp.addr;
+        if entry.bp.kind == BreakpointKind::Condition {
+            self.pred_ids.remove(&id);
+        } else {
+            self.addr_index.remove(&addr);
+        }
         Ok(Some(addr))
     }
 
@@ -169,18 +225,13 @@ impl BreakpointTable {
     ///
     /// **幂等**：id 不存在时返回 `Ok(false)`（同上）。
     pub fn set_enabled(&mut self, id: u32, enabled: bool) -> Result<bool, PlatformError> {
-        let Some(&addr) = self.by_id.get(&id) else {
+        let Some(entry) = self.by_id.get_mut(&id) else {
             return Ok(false);
         };
-        let Some(bp) = self.by_addr.get_mut(&addr) else {
-            // by_id 与 by_addr 不一致属于内部状态损坏；当作「不存在」处理，
-            // 不 panic（WASM 里 panic = Worker 崩）。
-            return Ok(false);
-        };
-        if bp.bp.enabled == enabled {
+        if entry.bp.enabled == enabled {
             return Ok(false);
         }
-        bp.bp.enabled = enabled;
+        entry.bp.enabled = enabled;
         Ok(true)
     }
 
@@ -190,7 +241,7 @@ impl BreakpointTable {
     /// 禁用的断点**不命中**（M-08 LLD §3.2「禁用断点不命中」）。
     ///
     /// ⚠️ **只看地址与 `enabled`** ⇒ ⇒ **无条件断点**的语义与 v0.56 批
-    /// **逐字相同**（K-14）。
+    /// **逐字相同**（K-14）。观察式条目**没有地址** ⇒ ⇒ **不进**这条路径。
     ///
     /// ⚠️ **带条件**的那一条走 [`Self::hit_check_cond`]（在**本方法**的
     /// 命中**之上**再判条件）⇒ ⇒ 「地址匹配」仍然只有**这一个**入口。
@@ -229,12 +280,42 @@ impl BreakpointTable {
         }
     }
 
+    /// **观察式条目**的命中检测（STAGE-55 批新增）。
+    ///
+    /// 只遍历 `Condition` 条目（`pred_ids` 派生索引）⇒ ⇒ 地址断点**不**
+    /// 走这条路径 ⇒ ⇒ 两条路径**互不干扰**。
+    ///
+    /// ⚠️ **按 id 升序**遍历，**首个**为真的条目即返回 ⇒ ⇒ 多条同时为真
+    /// 时只停一条（与观察点 `match_access` 取首条**同口径**）。
+    /// ⚠️ **禁用的条目不命中、不计数**。
+    /// ⚠️ **求值时刻 = 调用方给定的时刻**（批 A 是「取指之前」；含内存读的
+    /// 条目会在批 C 挪到 store 边界）。
+    pub fn hit_check_pred(&self, pc: u32, gpr: &[u32; 32]) -> Option<Breakpoint> {
+        for id in &self.pred_ids {
+            let Some(entry) = self.by_id.get(id) else {
+                continue;
+            };
+            if !entry.bp.enabled {
+                continue;
+            }
+            let Some(expr) = entry.cond.as_ref() else {
+                continue;
+            };
+            if expr.eval(gpr, pc) != 0 {
+                entry.hits.set(entry.hits.get() + 1);
+                return Some(entry.bp.clone());
+            }
+        }
+        None
+    }
+
     /// 命中检测的**内部**实现：按地址取条目，并剔除**禁用**的断点。
     ///
     /// ⚠️ 「地址匹配 + 启用」这条判定**只有这一个落点** ⇒ ⇒
     /// [`Self::hit_check`] 与 [`Self::hit_check_cond`] 不会漂移。
     fn hit_entry(&self, pc: u32) -> Option<&Entry> {
-        let entry = self.by_addr.get(&pc)?;
+        let id = *self.addr_index.get(&pc)?;
+        let entry = self.by_id.get(&id)?;
         if !entry.bp.enabled {
             return None;
         }
@@ -243,34 +324,47 @@ impl BreakpointTable {
 
     /// 按 id 取断点。
     pub fn get(&self, id: u32) -> Option<&Breakpoint> {
-        let addr = *self.by_id.get(&id)?;
-        self.by_addr.get(&addr).map(|entry| &entry.bp)
+        self.by_id.get(&id).map(|entry| &entry.bp)
     }
 
     /// 按地址取断点。
+    ///
+    /// ⚠️ 观察式条目**不在**地址索引里 ⇒ ⇒ 这里**永远**取不到它们。
     pub fn get_by_addr(&self, addr: u32) -> Option<&Breakpoint> {
-        self.by_addr.get(&addr).map(|entry| &entry.bp)
+        let id = *self.addr_index.get(&addr)?;
+        self.by_id.get(&id).map(|entry| &entry.bp)
     }
 
-    /// 断点数量。
+    /// 断点数量（含观察式条目）。
     pub fn len(&self) -> usize {
-        self.by_addr.len()
+        self.by_id.len()
     }
 
     /// 表是否为空。
     pub fn is_empty(&self) -> bool {
-        self.by_addr.is_empty()
+        self.by_id.is_empty()
     }
 
-    /// 按地址升序遍历断点。
+    /// 按地址升序遍历**地址类**断点，随后按 id 升序遍历**观察式**条目。
+    ///
+    /// ⚠️ 顺序与 v0.124 之前**逐字相同**（地址升序）；观察式条目没有地址
+    /// ⇒ ⇒ 排在最后（v0.124 之前根本没有这类条目 ⇒ ⇒ 旧行为不变）。
     pub fn iter(&self) -> impl Iterator<Item = &Breakpoint> {
-        self.by_addr.values().map(|entry| &entry.bp)
+        self.addr_index
+            .values()
+            .filter_map(|id| self.by_id.get(id))
+            .chain(self.pred_ids.iter().filter_map(|id| self.by_id.get(id)))
+            .map(|entry| &entry.bp)
     }
 
-    /// **只读回执**：按地址升序返回「断点 + 命中次数」（契约 v13）。
+    /// **只读回执**：返回「断点 + 命中次数」（契约 v13）。
+    ///
+    /// ⚠️ 顺序同 [`Self::iter`]（地址升序，观察式条目排最后）。
     pub fn infos(&self) -> Vec<BreakpointInfo> {
-        self.by_addr
+        self.addr_index
             .values()
+            .filter_map(|id| self.by_id.get(id))
+            .chain(self.pred_ids.iter().filter_map(|id| self.by_id.get(id)))
             .map(|entry| BreakpointInfo {
                 breakpoint: entry.bp.clone(),
                 hit_count: entry.hits.get(),
@@ -280,14 +374,32 @@ impl BreakpointTable {
 
     /// 某个 id 的命中次数（未知 id ⇒ `None`）。
     pub fn hit_count(&self, id: u32) -> Option<u64> {
-        let addr = *self.by_id.get(&id)?;
-        self.by_addr.get(&addr).map(|entry| entry.hits.get())
+        self.by_id.get(&id).map(|entry| entry.hits.get())
     }
 
     /// 清空整张表（会话重置用）。
     pub fn clear_all(&mut self) {
-        self.by_addr.clear();
         self.by_id.clear();
+        self.addr_index.clear();
+        self.pred_ids.clear();
+    }
+
+    /// **派生索引一致性**（调试 / 测试用）：两个索引都必须能由 `by_id`
+    /// 完整重算。
+    fn indexes_consistent(&self) -> bool {
+        let addr_index: BTreeMap<u32, u32> = self
+            .by_id
+            .iter()
+            .filter(|(_, entry)| entry.bp.kind != BreakpointKind::Condition)
+            .map(|(id, entry)| (entry.bp.addr, *id))
+            .collect();
+        let pred_ids: BTreeSet<u32> = self
+            .by_id
+            .iter()
+            .filter(|(_, entry)| entry.bp.kind == BreakpointKind::Condition)
+            .map(|(id, _)| *id)
+            .collect();
+        addr_index == self.addr_index && pred_ids == self.pred_ids
     }
 
     /// 构造本模块的错误（`E_CTX-07`）。
@@ -425,6 +537,7 @@ mod tests {
             addr,
             source_hint: None,
             enabled: true,
+            kind: BreakpointKind::Address,
             condition: None,
         }
     }
@@ -436,6 +549,7 @@ mod tests {
             addr,
             source_hint: None,
             enabled: true,
+            kind: BreakpointKind::Address,
             condition: Some(condition.to_string()),
         }
     }
@@ -721,5 +835,149 @@ mod tests {
         let gpr = [0u32; 32];
         assert!(t.hit_check_cond(0x8000_0010, &gpr).is_none());
         assert_eq!(t.hit_count(1), Some(0), "禁用断点不命中 ⇒ 不计数");
+    }
+
+    // -- STAGE-55：观察式条件断点（表侧） ------------------------------------
+
+    /// 造一条**观察式**条目：没有真实地址，`addr` 只是 `0` 占位。
+    fn bp_pred(id: u32, condition: &str) -> Breakpoint {
+        Breakpoint {
+            id,
+            addr: 0,
+            source_hint: None,
+            enabled: true,
+            kind: BreakpointKind::Condition,
+            condition: Some(condition.to_string()),
+        }
+    }
+
+    /// **观察式条目不吃地址槽**：它没有地址，所以地址 `0` 的真实断点
+    /// **仍然**能注册（也就是「单表 + 派生索引」必须成立的理由）。
+    #[test]
+    fn a_condition_entry_does_not_occupy_an_address_slot() {
+        let mut t = BreakpointTable::new();
+        t.set(bp_pred(1, "x1 == 5")).expect("观察式条目应当能注册");
+        t.set(bp(2, 0))
+            .expect("地址 0 的地址断点不应被观察式条目挡住");
+        assert_eq!(t.len(), 2, "两条都在表里");
+        assert_eq!(t.get_by_addr(0).map(|b| b.id), Some(2), "地址槽归地址断点");
+        assert_eq!(t.get(1).map(|b| b.kind), Some(BreakpointKind::Condition));
+        assert!(t.indexes_consistent(), "派生索引必须与 by_id 一致");
+    }
+
+    /// **谓词为真 ⇒ 命中；为假 ⇒ 不命中**（观察式路径）。
+    #[test]
+    fn the_condition_entry_hits_only_when_the_predicate_is_true() {
+        let mut t = BreakpointTable::new();
+        t.set(bp_pred(1, "x1 == 5")).expect("set");
+        let mut gpr = [0u32; 32];
+        gpr[1] = 5;
+        assert_eq!(
+            t.hit_check_pred(0x8000_0000, &gpr).map(|b| b.id),
+            Some(1),
+            "谓词真 ⇒ 命中"
+        );
+        assert_eq!(t.hit_count(1), Some(1));
+        gpr[1] = 6;
+        assert!(
+            t.hit_check_pred(0x8000_0000, &gpr).is_none(),
+            "谓词假 ⇒ 不停"
+        );
+        assert_eq!(t.hit_count(1), Some(1), "谓词假不得计数");
+    }
+
+    /// **观察式条目与 PC 无关**：同一条谓词在**任何** `pc` 上都能命中。
+    #[test]
+    fn a_condition_entry_is_independent_of_pc() {
+        let mut t = BreakpointTable::new();
+        t.set(bp_pred(1, "x1 == 5")).expect("set");
+        let mut gpr = [0u32; 32];
+        gpr[1] = 5;
+        for pc in [0x8000_0000u32, 0x8000_0004, 0x1000_0000] {
+            assert!(
+                t.hit_check_pred(pc, &gpr).is_some(),
+                "观察式条目不该受 pc 限制：0x{pc:08x}"
+            );
+        }
+    }
+
+    /// **禁用的观察式条目**不命中、不计数。
+    #[test]
+    fn a_disabled_condition_entry_never_hits() {
+        let mut t = BreakpointTable::new();
+        t.set(bp_pred(1, "x1 == 5")).expect("set");
+        t.set_enabled(1, false).expect("disable");
+        let mut gpr = [0u32; 32];
+        gpr[1] = 5;
+        assert!(t.hit_check_pred(0x8000_0000, &gpr).is_none());
+        assert_eq!(t.hit_count(1), Some(0), "禁用 ⇒ 不计数");
+    }
+
+    /// **观察式条目必须带表达式** ⇒ ⇒ 空表达式按 `E_DBG-02` 原样拒。
+    #[test]
+    fn a_condition_entry_without_an_expression_is_rejected() {
+        let mut t = BreakpointTable::new();
+        let err = t
+            .set(Breakpoint {
+                id: 1,
+                kind: BreakpointKind::Condition,
+                ..Breakpoint::default()
+            })
+            .expect_err("空表达式必须被拒");
+        assert_eq!(err.family, ErrorFamily::Debug);
+        assert_eq!(err.scenario, E_DBG_02_CONDITION_INVALID);
+        assert!(t.is_empty(), "被拒的注册不得留下痕迹");
+    }
+
+    /// **地址校验仍然先于条件校验**（既有纪律一字未改）。
+    #[test]
+    fn the_address_check_still_wins_over_the_condition_check() {
+        let mut t = BreakpointTable::new();
+        let err = t
+            .set(Breakpoint {
+                id: 1,
+                addr: 0x8000_0001,
+                kind: BreakpointKind::Address,
+                condition: Some("foo".to_string()),
+                ..Breakpoint::default()
+            })
+            .unwrap_err();
+        assert_eq!(
+            err.scenario, E_CTX_07_INVALID_OR_DUPLICATE,
+            "地址非法 + 条件非法 ⇒ 报的必须是地址的错"
+        );
+        assert!(t.is_empty());
+    }
+
+    /// **删除 / 启停之后派生索引仍然一致**（这是「单表 + 派生索引」的
+    /// 唯一真正风险点）。
+    #[test]
+    fn clear_and_enable_keep_the_derived_indexes_consistent() {
+        let mut t = BreakpointTable::new();
+        t.set(bp(2, 0x8000_0000)).expect("地址条目");
+        t.set(bp_pred(1, "x1 == 5")).expect("观察式条目");
+        assert!(t.indexes_consistent());
+
+        t.set_enabled(1, false).expect("disable");
+        assert!(t.indexes_consistent());
+
+        assert_eq!(t.clear(1).unwrap(), Some(0), "观察式条目没有真实地址");
+        assert!(t.indexes_consistent(), "删掉观察式条目后索引必须一致");
+        assert_eq!(t.len(), 1);
+
+        assert_eq!(t.clear(2).unwrap(), Some(0x8000_0000));
+        assert!(t.indexes_consistent());
+        assert!(t.is_empty());
+    }
+
+    /// **回执顺序与 v0.124 之前逐字相同**：地址升序在前，观察式条目收尾。
+    #[test]
+    fn infos_keep_the_address_order_and_put_condition_entries_last() {
+        let mut t = BreakpointTable::new();
+        t.set(bp(3, 0x8000_0008)).expect("set");
+        t.set(bp(1, 0x8000_0000)).expect("set");
+        t.set(bp_pred(9, "x1 == 5")).expect("set");
+        let ids: Vec<u32> = t.infos().into_iter().map(|i| i.breakpoint.id).collect();
+        assert_eq!(ids, vec![1, 3, 9], "地址升序在前，观察式排最后");
     }
 }

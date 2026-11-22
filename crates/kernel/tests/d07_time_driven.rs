@@ -685,6 +685,7 @@ fn the_time_driven_path_stops_at_a_breakpoint() {
             source_hint: None,
             enabled: true,
             condition: None,
+            ..Breakpoint::default()
         })
         .expect("set breakpoint");
 
@@ -720,6 +721,7 @@ fn the_instruction_path_and_the_time_driven_path_agree() {
         source_hint: None,
         enabled: true,
         condition: None,
+        ..Breakpoint::default()
     };
     a.0.set_breakpoint_with_id(bp(1)).expect("bp");
     b.0.set_breakpoint_with_id(bp(2)).expect("bp");
@@ -938,6 +940,7 @@ fn a_breakpoint_hit_does_not_advance_the_peripheral_clock() {
             source_hint: None,
             enabled: true,
             condition: None,
+            ..Breakpoint::default()
         })
         .expect("set breakpoint");
 
@@ -1305,6 +1308,7 @@ fn a_stop_reason_does_not_leak_into_the_next_batch() {
             source_hint: None,
             enabled: true,
             condition: None,
+            ..Breakpoint::default()
         })
         .expect("set breakpoint");
     backend.step_n(1).expect("step");
