@@ -1492,11 +1492,58 @@ select.addr-field {
 }
 
 /* ⚠️ **符号候选是「可点的列表」**（裁决 N）⇒ ⇒ 点一下直接下断点。 */
+/*
+ * ⚠️ **v0.135：符号输入框是「组合框」**（用户口径：输入框就应该是个下拉
+ *   列表）⇒ ⇒ 候选**浮在输入框下方**（绝对定位）、竖排、可滚动 ⇒ ⇒ 不再
+ *   把整行往下挤。`data-bp-suggest` 表达开 / 收（`closed` 时不占位）。
+ */
+.bp-add {
+    position: relative;
+}
+
 .symbol-candidates {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
     width: 100%;
+}
+
+.symbol-candidates.bp-suggest {
+    position: absolute;
+    top: calc(100% - 10px);
+    left: 0;
+    right: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    gap: 2px;
+    width: auto;
+    max-height: 220px;
+    overflow-y: auto;
+    padding: 6px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-sm);
+    background: var(--panel);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+/* ⚠️ **收起 = 不占位、不可点**（不是靠透明度装样子）。 */
+.symbol-candidates.bp-suggest[data-bp-suggest="closed"] {
+    display: none;
+}
+
+/* 下拉里的每一条占一整行 ⇒ ⇒ 名字与地址对得齐。 */
+.symbol-candidates.bp-suggest .symbol-candidate {
+    width: 100%;
+    text-align: left;
+    border-radius: var(--r-sm);
+}
+
+.symbol-candidates.bp-suggest .symbol-candidate.is-active {
+    border-color: var(--accent-edge);
+    color: var(--accent);
+    background: var(--panel2);
 }
 
 .symbol-candidates .symbol-candidate {

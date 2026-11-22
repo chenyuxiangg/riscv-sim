@@ -28,11 +28,11 @@ from pathlib import Path
 OUT_DEFAULT = Path("docs/detailed-design/STAGE-55_Breakpoint_Window_Rework.html")
 
 TITLE = "STAGE-55 · 断点窗口重构（三类输入合一 + 观察式条件断点）"
-SUBTITLE = "RISC-V 仿真平台 · 调试服务层 · 详细设计定稿 v0.5"
-VERSION = ("版本 v0.5 定稿 · 2026-11-22 · 基线 main 0bbe4ae"
-           "（A→E + CFI 批 + 栈回溯批 + 真相候选列表批已合入）"
+SUBTITLE = "RISC-V 仿真平台 · 调试服务层 · 详细设计定稿 v0.6"
+VERSION = ("版本 v0.6 定稿 · 2026-11-22 · 基线 main 11b259e"
+           "（A→E + CFI + 栈回溯 + 真相候选列表 + 断点恢复放过 + 符号联想 已合入）"
            "· 输入方式按 kind 三值落库 · CFI / 栈回溯口径见 §12 · "
-           "局部变量候选列表见 §13 · 偏离见 §11")
+           "局部变量候选列表见 §13 · 恢复放过与符号联想见 §14 · 偏离见 §11")
 
 KPI = [
     ("3", "种输入方式", "地址 · 符号 · 条件（落库为 kind 三值，可筛选可还原）"),
@@ -42,6 +42,9 @@ KPI = [
     ("2", "条 CFI 口径", "变量取主行 · 回溯按 pc 逐行（同一节区、两个口径）"),
     ("32", "帧回溯上限", "返回地址 0 = 栈底；再往上说「被截断」，不猜"),
     ("128", "条变量上限", "超了报「列表不完整」，不静默截断"),
+    ("4", "个字符起联", "符号档 ≥4 字符自动联想（防抖 180 ms），Tab 退役"),
+    ("6", "秒报错寿命", "校验类错误到点自己消失，不再永久挂在面板上"),
+    ("1", "次放过", "停在断点上后，恢复只放过这一条一次（否则原地重停）"),
 ]
 
 SECTIONS = []
@@ -510,7 +513,12 @@ SECTIONS.append({
          "<code>last_watchpoint_hit</code>（不抹掉、不改变停因）。"
          "<b>⑦ 真相候选列表</b> ⇒ <b>只读面板</b>（用户 2026-11-22 拍板）：回执只给「名字 + "
          "位置」（人读文本 <code>[s0-24]</code> / <code>a0</code>），<b>不带当前值、不带类型、"
-         "不做条件输入补全</b>；口径见 §13。"),
+         "不做条件输入补全</b>；口径见 §13。"
+         "<b>⑧ 停在断点上后的恢复</b> ⇒ <b>内核放过这一条一次</b>（用户 2026-11-22 拍板）："
+         "钩子仍留在<b>取指位置</b>，但恢复（「继续」/「单步」）的第一条指令不再判断点；"
+         "否则同一个 pc 上立刻二次命中、机器卡死（见 §14 表 22）。"
+         "<b>⑨ 符号档的联想与报错寿命</b> ⇒ <b>≥4 字符自动联想、Tab 退役、报错 6 秒过期</b>"
+         "（用户 2026-11-22 拍板，见 §14 表 23）。"),
         ("caption", "表 18 · 实施期刻意偏离（代码为准，逐条有落地位置）"),
         ("table", {
             "widths": ["28%", "44%", "28%"],
@@ -586,10 +594,16 @@ SECTIONS.append({
                 ["G", "栈回溯批",
                  "CFI 补 <b>RA 规则</b> + 按 pc 取行；<code>Backtrace</code> 命令 / 回执；"
                  "调试面板「调用栈」卡；条件栏补「按写入判定」文案", "档 4 收尾"],
-                ["H", "真相候选列表批（本批）",
+                ["H", "真相候选列表批",
                  "<code>ListLocals</code> 命令 / <code>Locals</code> 回执；"
                  "调试面板「局部变量」卡（名字 + 位置、两态文案互斥）；"
                  "<code>LocalLocation::describe()</code> 收敛位置写法", "档 4 收尾"],
+                ["I", "断点恢复放过批（v0.134 · 本批前的 Bug 修）",
+                 "<code>SelfIssBackend::resume_skip_pc</code>：停住时记 pc、恢复放过一条、"
+                 "reset / restore 清位；查询口不动、放过的一条不重复计命中", "档 4 收尾"],
+                ["J", "符号输入批（v0.135）",
+                 "符号档 ≥4 字符自动联想（防抖 180 ms · 组合框下拉）；Tab 不再触发查询；"
+                 "校验类报错 6 秒存活期；空 / 短文不发 <code>ResolveSymbol</code>", "档 4 收尾"],
             ],
         }),
         ("callout", "下一步",
@@ -760,6 +774,120 @@ SECTIONS.append({
     ],
 })
 
+# ── 14 断点恢复放过 + 符号联想（v0.134 / v0.135 落地） ─────────────────────
+SECTIONS.append({
+    "id": "s14",
+    "h": "14 断点恢复放过与符号输入的联想（v0.134 / v0.135）",
+    "blocks": [
+        ("p", "本节回写三个<b>行为级</b>修订，都不动契约、不动断点表结构："
+              "<b>① 停在断点上之后的恢复</b>（v0.134 · Bug）；"
+              "<b>② 符号档的自动联想与下拉</b>（v0.135）；"
+              "<b>③ 校验类报错的存活期</b>（v0.135）。"),
+        ("callout", "为什么「停在断点上」必须放过一条",
+         "断点判定挂在<b>取指之前</b>（§3 表 3）⇒ 命中时那条指令<b>没有执行</b>、"
+         "<code>pc</code> <b>没有前进</b>（K-13 钉住）。断点表里只有地址 / 使能 / 条件 / 命中计数"
+         "——<b>没有</b>「这一条刚报过」这个状态。于是恢复的第一轮又从<b>同一个 <code>pc</code></b> "
+         "判一次 ⇒ 立刻以 <code>Breakpoint</code> 再停一次、指令数一动不动 ⇒ "
+         "用户感受就是「断住之后继续不了」（实测：首次停 <code>pc=0x0c</code>；再「继续」、"
+         "「单步」、再「继续」三次读数全是 <code>pc=0x0c / Breakpoint / executed=3</code>）。"),
+        ("caption", "表 22 · 断点恢复放过一次（v0.134）"),
+        ("table", {
+            "widths": ["24%", "50%", "26%"],
+            "head": ["项", "定稿做法", "落点 / 判别力"],
+            "rows": [
+                ["钩子位置",
+                 "<b>不动</b>：判定仍在<b>取指之前</b>（用户 2026-11-22 明确口径）⇒ 停住时"
+                 "该条指令未执行、<code>pc</code> 等于断点地址",
+                 "<code>m17_backend::IssExecutor::step</code> 的 (1) 段"],
+                ["放过位住哪儿",
+                 "后端字段 <code>SelfIssBackend::resume_skip_pc: Option&lt;u32&gt;</code>"
+                 "（跨批次）——执行器每批次新建 ⇒ 挂执行器等于每批都丢",
+                 "与 <code>last_poll_ps</code> 同一条理由"],
+                ["谁写、谁读",
+                 "停住时写（<code>step()</code> 命中分支 + <code>step_n</code> 取指前预判）；"
+                 "恢复的第一条指令读一次（<b>只读接口</b>给宿主报告用，不消费）",
+                 "<code>resume_skip_applies()</code> / <code>halt_on_breakpoint_before_fetch()</code>"],
+                ["消费时机",
+                 "<b>判过即清</b>（只放过一条）⇒ 指令执行后 <code>pc</code> 前进，后续轮次照常参与判定",
+                 "K-14 第二次「继续」停在下一条断点"],
+                ["<code>reset</code> / <code>restore</code>",
+                 "清位：<code>pc</code> 被换掉之后，旧的放过位不许再吞新程序的断点",
+                 "<code>reset</code> / <code>restore</code> / <code>restore_full</code> 三处"],
+                ["命中计数",
+                 "被放过的这一条<b>不</b>计数（同一次停只算一次）⇒ 用户看到的命中数不再虚涨",
+                 "K-14：<code>id=1</code> 的 <code>hit_count</code> 仍为 1"],
+                ["哪些停点会放过",
+                 "地址断点与观察式条件断点（<code>kind == Condition</code>）<b>共用</b>同一条规则"
+                 "——谓词在同一个 <code>pc</code> 上反复为真同样会卡死",
+                 "按 <code>pc</code> 生效（不按条目）"],
+                ["已知边角",
+                 "停住时若在<b>同一 <code>pc</code></b> 上新加一条断点，恢复的那一条也会被放过一次"
+                 "（与 GDB「先走一步」同义；未做「按条目放过」）",
+                 "本批遗留问题，未扩表结构"],
+                ["用例",
+                 "<b>K-14</b>（0x0c + 0x10 双断点：第二次「继续」停 0x10、<code>0x100</code> 读到 49、"
+                 "计数仍 1）· <b>K-15</b>（<code>StepN{1}</code> 后 <code>pc</code> 前进且 store 生效）",
+                 "<code>tests_v057_debug.rs</code>"],
+            ],
+        }),
+        ("caption", "表 23 · 符号档的自动联想与报错存活期（v0.135）"),
+        ("table", {
+            "widths": ["24%", "50%", "26%"],
+            "head": ["项", "定稿做法", "落点 / 判别力"],
+            "rows": [
+                ["触发方式",
+                 "<b>边打字边联想</b>：输入<b>≥4 个字符</b>（含 4）才发查询；"
+                 "<b>Tab 不再触发</b>（用户明确口径：Tab 交回浏览器焦点切换）",
+                 "<code>SYMBOL_SUGGEST_MIN_CHARS = 4</code>；C-3 / C-3b"],
+                ["防抖",
+                 "停手 <b>180 ms</b> 再发一条 <code>ResolveSymbol</code>（连续打字只留最后一次）",
+                 "<code>SYMBOL_SUGGEST_DEBOUNCE_MS = 180</code>；C-3"],
+                ["呈现",
+                 "<b>组合框</b>：输入框 <code>role='combobox'</code> + <code>aria-expanded</code>，"
+                 "候选<b>浮在输入框下方</b>竖排、可滚动；收起时<b>不占位</b>"
+                 "（<code>data-bp-suggest='closed'</code>）",
+                 "<code>debug-panel.js</code> + <code>style.css</code> 的 <code>.bp-suggest</code>"],
+                ["开 / 收判据",
+                 "纯函数：输入 ≥4、<b>回执的名字与当前输入逐字相同</b>、且没被 Esc / 选中收过"
+                 "⇒ 打开；敲下一个字符的瞬间旧列表收起，等新回执",
+                 "<code>symbolSuggestOpen()</code>；C-3c"],
+                ["键位",
+                 "↑↓ 在打开的下拉里换一条（列表关着 ⇒ 先按当前输入重查一次）；"
+                 "回车 = 选中高亮那条（填名字 + 收起）；<b>再按一次回车</b>才是「加断点」；Esc = 收起",
+                 "C-3b / C-3c（Tab 一律不查）"],
+                ["候选点击",
+                 "<b>不变</b>：点候选直接下断点（<code>addr</code> + <code>source_hint</code> 逐字来自候选）",
+                 "C-7（既有用例一字未改）"],
+                ["空 / 短文不发",
+                 "<4 个字符<b>根本不发</b> <code>ResolveSymbol</code> ⇒ 「符号名为空」"
+                 "那条错误不再由正常输入触发（命令本身仍不校验，内核真拒时原文照显）",
+                 "<code>scheduleSymbolSuggest()</code> 的早退"],
+                ["报错存活期",
+                 "校验类报错（<code>E_DBG-04</code> / <code>E_DBG-02</code> / <code>E_DBG-03</code>）"
+                 "在输入位与顶部横幅上都只活 <b>6 秒</b>，到点自己消失；输入框里一敲字仍<b>立即</b>清；"
+                 "内容被新错误顶掉时旧定时器<b>不清</b>",
+                 "<code>ERROR_TTL_MS = 6000</code>；C-13 过期用例"],
+                ["原文不变",
+                 "错误码与内核原文到达时<b>一字不改</b>（过期只是不显示）⇒ 真机断言仍逐字可比",
+                 "C-13（逐字相等）"],
+            ],
+        }),
+        ("svg", "suggest"),
+        ("mobile_flow", [
+            ("1", "符号档输入框：敲字时高亮位归零、旧下拉就地收起（不重渲染，不打断输入）"),
+            ("2", "不足 4 个字符 ⇒ 什么都不发（连「符号名为空」都不可能触发）"),
+            ("3", "≥4 个字符 ⇒ 停手 180 ms 发一条 <code>ResolveSymbol</code> ⇒ 回执到了下拉打开"),
+            ("4", "Esc / 选中一条 ⇒ 收起；再敲字 ⇒ 重新打开并重查"),
+        ]),
+        ("callout", "为什么联想必须由「输入」触发，而不是 Tab",
+         "Tab 是<b>键盘焦点</b>的语义：用户按 Tab 通常是想换到下一个控件。把查询绑在 Tab 上，"
+         "等于让「换焦点」变成「发一条命令」——而查询失败（空名字 ⇒ <code>E_DBG-04</code>）又会"
+         "在面板上留下一条不会消失的红字。改成<b>输入驱动 + 最小 4 字符</b>之后，"
+         "查询只在「用户确实写出了可查的前缀」时发生，失败路径基本消失；剩下的失败（极端名字）"
+         "由<b>6 秒存活期</b>兜底。"),
+    ],
+})
+
 # ── SVG ─────────────────────────────────────────────────────────────────
 TABLE_SVG = """
 <svg class="flow-svg" viewBox="0 0 1000 380" xmlns="http://www.w3.org/2000/svg"
@@ -908,6 +1036,59 @@ LOCALS_SVG = """
 </svg>
 """
 
+SUGGEST_SVG = """
+<svg class="flow-svg" viewBox="0 0 1020 420" xmlns="http://www.w3.org/2000/svg"
+  role="img" aria-label="符号输入框的联想状态：不足四字符、达到四字符、回执到达、收起">
+  <defs>
+    <marker id="g1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1e3a8a"/>
+    </marker>
+    <marker id="g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9aa1af"/>
+    </marker>
+  </defs>
+
+  <rect x="360" y="12" width="300" height="56" rx="8" fill="#eef2fb" stroke="#c7d2e5"/>
+  <text x="510" y="36" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">符号档：在输入框里敲字</text>
+  <text x="510" y="56" text-anchor="middle" font-size="11.5" fill="#4b5563">Tab 不再触发查询（旧交互退役）</text>
+  <line x1="510" y1="68" x2="510" y2="86" stroke="#1e3a8a" stroke-width="2" marker-end="url(#g1)"/>
+
+  <rect x="60" y="86" width="900" height="42" rx="6" fill="#f8fafc" stroke="#d8dee9"/>
+  <text x="510" y="112" text-anchor="middle" font-size="12.5" fill="#4b5563">判别只看两件事：字符够不够 4 个 · 回执里的名字是不是当前这串输入</text>
+
+  <rect x="40" y="146" width="300" height="76" rx="8" fill="#f8fafc" stroke="#d8dee9"/>
+  <text x="190" y="173" text-anchor="middle" font-size="13" font-weight="700" fill="#4b5563">不足 4 个字符</text>
+  <text x="190" y="195" text-anchor="middle" font-size="11.5" fill="#6b7280">不下拉、不发查询</text>
+  <line x1="342" y1="184" x2="376" y2="184" stroke="#9aa1af" stroke-width="1.8" marker-end="url(#g2)"/>
+  <rect x="380" y="146" width="600" height="76" rx="8" fill="#f8fafc" stroke="#d8dee9"/>
+  <text x="400" y="173" font-size="13" font-weight="700" fill="#1f2937">只有草稿在增长</text>
+  <text x="400" y="195" font-size="12" fill="#4b5563">「符号名为空：无法查询符号」不可能由正常输入触发</text>
+  <text x="400" y="213" font-size="11.5" fill="#6b7280">C-3b ｜ Tab 也不发</text>
+
+  <rect x="40" y="234" width="300" height="76" rx="8" fill="#f0fdf4" stroke="#86efac"/>
+  <text x="190" y="261" text-anchor="middle" font-size="13" font-weight="700" fill="#166534">≥4 个字符</text>
+  <text x="190" y="283" text-anchor="middle" font-size="11.5" fill="#166534">停手 180 ms 才发</text>
+  <line x1="342" y1="272" x2="376" y2="272" stroke="#1e3a8a" stroke-width="2" marker-end="url(#g1)"/>
+  <rect x="380" y="234" width="600" height="76" rx="8" fill="#f0fdf4" stroke="#86efac"/>
+  <text x="400" y="261" font-size="13" font-weight="700" fill="#166534">ResolveSymbol { name }</text>
+  <text x="400" y="283" font-size="12" fill="#166534">连续打字只留最后一次（防抖）⇒ 回执 SymbolResolved</text>
+  <text x="400" y="301" font-size="11.5" fill="#166534">C-3 ｜ 一条查询，不多发</text>
+
+  <rect x="40" y="322" width="300" height="76" rx="8" fill="#eef2fb" stroke="#c7d2e5"/>
+  <text x="190" y="349" text-anchor="middle" font-size="13" font-weight="700" fill="#1e3a8a">回执的名字 == 当前输入</text>
+  <text x="190" y="371" text-anchor="middle" font-size="11.5" fill="#1e3a8a">组合框展开（listbox）</text>
+  <line x1="342" y1="360" x2="376" y2="360" stroke="#1e3a8a" stroke-width="2" marker-end="url(#g1)"/>
+  <rect x="380" y="322" width="600" height="76" rx="8" fill="#eef2fb" stroke="#c7d2e5"/>
+  <text x="400" y="349" font-size="13" font-weight="700" fill="#1e3a8a">↓↑ 换一条 · 回车选中 · Esc 收起</text>
+  <text x="400" y="371" font-size="12" fill="#4b5563">选中只填名字并收起 ⇒ 再按一次回车才「加断点」（组合框常规语义）</text>
+  <text x="400" y="389" font-size="11.5" fill="#6b7280">C-3c ｜ 收起后再敲字自动重开</text>
+
+  <text x="40" y="414" font-size="11.5" fill="#6b7280">
+图注：连线上的「灰」表示什么都不发生（只有草稿变化）；「蓝」表示真的发了一条命令或真的画出了下拉。
+  </text>
+</svg>
+"""
+
 
 def esc(t: str) -> str:
     return html.escape(t, quote=False)
@@ -946,7 +1127,8 @@ def render_blocks(blocks) -> str:
                 f'<span class="callout-txt">{b[2]}</span></div>'
             )
         elif kind == "svg":
-            out.append({"table": TABLE_SVG, "timing": TIMING_SVG, "locals": LOCALS_SVG}[val])
+            out.append({"table": TABLE_SVG, "timing": TIMING_SVG, "locals": LOCALS_SVG,
+                        "suggest": SUGGEST_SVG}[val])
         elif kind == "mobile_flow":
             out.append('<div class="flow-mobile">' + "".join(
                 f'<div class="flow-step"><span class="num">{n}</span><span class="txt">{t}</span></div>'
@@ -1045,8 +1227,8 @@ def build(nav: str, body: str) -> str:
 {nav}
 {body}
 <p class="foot">本文件由 <b>tools/build_bp_rework_doc.py</b> 数据驱动生成；改内容请改脚本后重跑，
-不要手改 HTML。本文为设计定稿（v0.5）：A→E + CFI 批 + 栈回溯批 + 真相候选列表批均已落地并合入 main
-（基线 0bbe4ae），文中「测试设计」列的用例、§12 与 §13 的用例已在内核 / 前端用例中实现。</p>
+不要手改 HTML。本文为设计定稿（v0.6）：A→E + CFI + 栈回溯 + 真相候选列表 + 断点恢复放过 + 符号联想
+均已落地并合入 main（基线 11b259e），文中「测试设计」列的用例、§12 / §13 / §14 的用例已在内核 / 前端用例中实现。</p>
 </div>
 </body>
 </html>

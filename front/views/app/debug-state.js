@@ -78,6 +78,7 @@ export function memoryToastText(err) {
  */
 export function writeErrorSlot(slot, message) {
     const text = String(message ?? "");
+    if (text) scheduleSlotExpiry(slot, text);
     if (slot === "bp") {
         // ⚠️ STAGE-55：地址 / 符号 / 条件**共用一个提示位** ⇒ ⇒ 因为界面上
         //   只有一个输入框、一个按钮 ⇒ ⇒ 错在哪儿由**内核原文**说。
@@ -93,4 +94,97 @@ export function writeErrorSlot(slot, message) {
         }));
         publishViewState("debug");
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// 报错**会过期**（v0.135 批 · Bug）
+//
+// ⚠️ **为什么**：校验类错误（`E_DBG-04` 符号名为空、`E_DBG-02` 条件非法）
+//   是「你这一下没填对」的即时反馈 ⇒ ⇒ 它**不该永久挂在面板上**：用户改完
+//   输入之后，那行红字还在，看起来像「平台坏了」。⇒ ⇒ 统一给一个
+//   **存活时间**，到点自己消失（输入框里一敲字仍会立即清 ⇒ 两条路都通）。
+//
+// ⚠️ **只过期「显示」**：错误码与原文到达时**一字不改**（真机断言仍逐字
+//   可比），过期只是**不显示了**。
+// ---------------------------------------------------------------------------
+
+/** 调试面板里那两处错误提示的**存活时长**（毫秒）。 */
+export const ERROR_TTL_MS = 6000;
+
+/** 存活时长（用例可临时调小；生产值见 {@link ERROR_TTL_MS}）。 */
+let errorTtlMs = ERROR_TTL_MS;
+
+/**
+ * **用例专用**：把存活时长调小（默认 6000 ms ⇒ 门禁不可能真等 6 秒）。
+ *
+ * @param {number} ms
+ */
+export function setErrorTtlForTest(ms) {
+    errorTtlMs = Number(ms) > 0 ? Number(ms) : ERROR_TTL_MS;
+}
+
+/** 位 → `debug` 子树里的字段名（**唯一落点**）。 */
+const SLOT_FIELD = { bp: "bpError", dump: "dumpError" };
+
+/**
+ * 排一个「到点自己清掉」的定时器（**内容没变过才清**）。
+ *
+ * @param {() => boolean} stillThere — 真 ⇒ 当前显示的仍是这一条
+ * @param {() => void} clear — 清掉并重渲染
+ */
+function scheduleExpiry(stillThere, clear) {
+    const timer = setTimeout(() => {
+        if (!stillThere()) return;
+        clear();
+    }, errorTtlMs);
+    // ⚠️ Node 侧（门禁）不让一个待触发的定时器把进程吊住。
+    timer?.unref?.();
+}
+
+/** 排一个输入位的过期定时器。 */
+function scheduleSlotExpiry(slot, text) {
+    const field = SLOT_FIELD[slot];
+    if (!field) return;
+    scheduleExpiry(
+        () => String(viewStore.getState("debug")?.debug?.[field] ?? "") === text,
+        () => writeErrorSlot(slot, ""),
+    );
+}
+
+/**
+ * 写调试面板**顶部那条**错误横幅（并排一个过期定时器）。
+ *
+ * ⚠️ 同一位置只有一条：后来的错误**顶掉**前一条，前一条的定时器到点发现
+ *   「内容已经不是它」⇒ ⇒ **不清**（不会把新错误顺手抹掉）。
+ *
+ * @param {string} code
+ * @param {string} message
+ */
+export function setDebugError(code, message) {
+    const snapshot = { code: String(code), message: String(message) };
+    updateDebugState((prev) => ({
+        ...prev,
+        debug: { ...(prev.debug ?? {}), error: snapshot },
+    }));
+    scheduleExpiry(
+        () => {
+            const cur = viewStore.getState("debug")?.debug?.error ?? null;
+            return Boolean(cur)
+                && String(cur.code ?? "") === snapshot.code
+                && String(cur.message ?? "") === snapshot.message;
+        },
+        () => updateDebugState((prev) => ({
+            ...prev,
+            debug: { ...(prev.debug ?? {}), error: null },
+        })),
+    );
+}
+
+/** 立刻清掉顶部错误横幅（用例 / 换工程时用）。 */
+export function clearDebugError() {
+    updateDebugState((prev) => ({
+        ...prev,
+        debug: { ...(prev.debug ?? {}), error: null },
+    }));
 }

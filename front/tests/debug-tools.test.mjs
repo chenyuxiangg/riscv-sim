@@ -177,6 +177,9 @@ function sentOf(router, key) {
     return router.sent.filter((p) => p && Object.prototype.hasOwnProperty.call(p, key));
 }
 
+/** 等一小会儿（防抖 / 过期定时器在**真定时器**上跑）。 */
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+
 // ---------------------------------------------------------------------------
 // C-1：契约镜像的版本 + 两个上限 == 跨层夹具
 // ---------------------------------------------------------------------------
@@ -318,22 +321,79 @@ describe("符号查询（视图层 · C-3 ~ C-6）", () => {
         stop = forwardCommands(router);
     });
 
-    test("C-3 · 符号类型 + Tab ⇒ ⇒ **发出一条** `ResolveSymbol`（表 13 前缀补全）", () => {
+    test("C-3 · 符号类型 + 输入 ≥4 个字符 ⇒ ⇒ 防抖后**一条** `ResolveSymbol`", async () => {
         const body = show("debug");
         pickKind(body, "Symbol");
-        const input = type(body, "[data-bp-input]", "main");
-        const ev = new Event("keydown", { bubbles: true });
-        ev.key = "Tab";
-        input.dispatchEvent(ev);
+        type(body, "[data-bp-input]", "main");
+        await sleep(220);
         stop();
 
         const sent = sentOf(router, "ResolveSymbol");
-        assert.equal(sent.length, 1, "第一次 Tab 必须发**一条**前缀查询（不多发、不少发）");
+        assert.equal(sent.length, 1, "停手之后必须发**一条**前缀查询（不多发、不少发）");
         assert.deepEqual(sent[0].ResolveSymbol, { name: "main" }, "名字必须**逐字**是输入框里的那个");
         assert.equal(
             sentOf(router, "SetBreakpoint").length,
             0,
             "查符号**不许**顺手下断点（下断点是回车 / 点按钮那一步的事）",
+        );
+    });
+
+    test("C-3b · 少于 4 个字符 / Tab ⇒ ⇒ **一律不发**查询（旧交互退役）", () => {
+        const body = show("debug");
+        pickKind(body, "Symbol");
+        const input = type(body, "[data-bp-input]", "mai");
+        const ev = new Event("keydown", { bubbles: true });
+        ev.key = "Tab";
+        input.dispatchEvent(ev);
+        stop();
+
+        assert.equal(
+            sentOf(router, "ResolveSymbol").length,
+            0,
+            "3 个字符 + Tab 都不该发查询（用户口径：≥4 个字符才联想、且不用 Tab）",
+        );
+        assert.equal(
+            input.getAttribute("aria-expanded"),
+            "false",
+            "不足 4 个字符时下拉必须是**收起**的",
+        );
+    });
+
+    test("C-3c · 下拉开合：回执对得上 ⇒ 打开；Esc ⇒ 收起（再敲字重开）", () => {
+        const body = show("debug");
+        pickKind(body, "Symbol");
+        const input = type(body, "[data-bp-input]", "main");
+        router.emit("debug.symbol", {
+            name: "main",
+            symbol: { name: "main", addr: 0x80001234, size: 4 },
+            candidates: [],
+            total: 17,
+        });
+
+        const opened = show("debug").querySelector("[data-bp-symbol-candidates]");
+        assert.equal(
+            opened.getAttribute("data-bp-suggest"),
+            "open",
+            "≥4 个字符 + 回执对得上 ⇒ ⇒ 下拉必须**开着**",
+        );
+        assert.equal(
+            show("debug").querySelector("[data-bp-input]").getAttribute("aria-expanded"),
+            "true",
+            "组合框的 aria-expanded 必须跟着开",
+        );
+
+        const ev = new Event("keydown", { bubbles: true });
+        ev.key = "Escape";
+        show("debug").querySelector("[data-bp-input]").dispatchEvent(ev);
+        const closed = show("debug").querySelector("[data-bp-symbol-candidates]");
+        assert.equal(closed.getAttribute("data-bp-suggest"), "closed", "Esc ⇒ 收起");
+
+        const input2 = type(show("debug"), "[data-bp-input]", "mainx");
+        assert.ok(input2, "再敲字之后输入框还在");
+        assert.equal(
+            show("debug").querySelector("[data-bp-symbol-candidates]").getAttribute("data-bp-suggest"),
+            "closed",
+            "敲字后先收起（等新的回执再开）",
         );
     });
 
@@ -1080,6 +1140,46 @@ describe("内核原文上屏（视图层 · C-13）", () => {
         const slot = after.querySelector("[data-bp-error]");
         assert.ok(slot, "必须**有**断点的错误位（查符号也落这一位）");
         assert.equal(slot.textContent, raw, "断点提示位上必须是**内核原文**");
+    });
+
+    test("C-13 · 报错**会过期**：E_DBG-04 到点自己消失（不永久挂着）", async () => {
+        const debugState = await importFront("views/app/debug-state.js");
+        debugState.setErrorTtlForTest(20);
+        try {
+            await app.handleCommand(
+                { action: "lookup-symbol", params: { name: "" } },
+                { commandRouter: router },
+            );
+            stop();
+            const raw = "符号名为空：无法查询符号（请给出符号名）";
+            router.emit("error", { code: "E_DBG-04", message: raw });
+
+            const now = show("debug");
+            assert.equal(
+                now.querySelector("[data-bp-error]").textContent,
+                raw,
+                "刚出错时仍是**内核原文**（不吞、不改写）",
+            );
+            assert.ok(
+                now.querySelector("[data-debug-error]"),
+                "刚出错时顶部横幅也在",
+            );
+
+            await sleep(60);
+            const later = show("debug");
+            assert.equal(
+                later.querySelector("[data-bp-error]").textContent,
+                "",
+                "过了存活时间 ⇒ ⇒ 输入位上的红字自己消失",
+            );
+            assert.equal(
+                later.querySelector("[data-debug-error]"),
+                null,
+                "过了存活时间 ⇒ ⇒ 顶部横幅也自己消失",
+            );
+        } finally {
+            debugState.setErrorTtlForTest(6000);
+        }
     });
 });
 

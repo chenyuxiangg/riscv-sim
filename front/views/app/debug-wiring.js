@@ -5,7 +5,7 @@
 
 import * as viewStore from "../m03_viewstore.js";
 import { publishViewState } from "./shared.js";
-import { updateDebugState, writeErrorSlot } from "./debug-state.js";
+import { setDebugError, updateDebugState, writeErrorSlot } from "./debug-state.js";
 import {
     getRunState,
     setRunState,
@@ -350,16 +350,9 @@ export function wireDebug(commandRouter, services = {}) {
     commandRouter.subscribe("error", (event) => {
         const code = event.value?.code ?? "E_PROTO-08";
         const message = event.value?.message ?? "";
-        viewStore.setState("debug", (prev) => ({
-            ...prev,
-            debug: {
-                ...(prev.debug ?? {}),
-                error: {
-                    code,
-                    message,
-                },
-            },
-        }));
+        // ⚠️ **顶部横幅也会过期**（v0.135 批）：到点自己消失（内容没换过
+        //    才清）⇒ ⇒ 校验类错误不再永久挂在面板上。
+        setDebugError(code, message);
         // ⚠️ **按位显示**：谁发的命令 ⇒ 错误落在谁那一位 ⇒ ⇒ 一次错误
         //   **消费掉**这个标记 ⇒ ⇒ 不会串位。
         const slot = getPendingErrorSlot();
