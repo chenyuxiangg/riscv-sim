@@ -97,4 +97,7 @@ PLIC 源号按规范可到 1023。**对外身份是流 id 与 label，不是这�
 ## 10 剩余欠账
 
 - 门禁工具改造 R-1~R-4（分段重跑 / 失败即 dump / 采集通道 health check / wasm mtime 前置）仍欠；
+  - ⚠️ **订正（2026-11-22 逐条核对代码）**：本条**已过时** —— **R-1~R-4 已于 v0.80 落地**、**R-7 / R-8** 亦已落地；
+    真余项只剩 **§4 总验收演练** + **R-5**（`--trace`）+ **R-6**（clippy 前移）。原文保留作历史记录，
+    现口径见 [`../plans/GATE_TOOLING_PREREQ.md`](../plans/GATE_TOOLING_PREREQ.md) §6；
 - 器件级二级通道（UART RX/TX 分开）本批明确不做。
