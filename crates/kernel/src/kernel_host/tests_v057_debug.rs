@@ -1117,3 +1117,124 @@ fn invalid_watch_expr_is_rejected_without_changing_the_table() {
     let events = dispatch(&mut host, CommandPayload::ListWatchExprs);
     assert!(first_watch_values(&events).is_empty(), "非法表达式不能落表");
 }
+
+// -- K-14 / K-15：**命中之后必须能走**（v0.134 批）---------------------------
+//
+// ⚠️ **回归靶点**：断点判定挂在**取指之前**（M-08 LLD §3.2）⇒ 命中时 `pc`
+// **没有前进**。若恢复时不放过这一条，恢复的第一轮又从**同一个 `pc`** 判
+// 一次 ⇒ **原地重停**、指令数不动 ⇒「继续」与「单步」**全部卡死**（用户
+// 报的现象）。这两条用例就是那个缺口。
+
+/// 在 demo 固件上装 `addr` 处的无条件断点。
+fn set_addr_breakpoint(host: &mut KernelHost, id: u32, addr: u32) {
+    let events = dispatch(
+        host,
+        CommandPayload::SetBreakpoint(Breakpoint {
+            id,
+            addr,
+            source_hint: None,
+            enabled: true,
+            condition: None,
+            ..Breakpoint::default()
+        }),
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Tick { .. })),
+        "SetBreakpoint 至少要回一条 Tick：{events:?}"
+    );
+}
+
+/// 读回断点表里某个 id 的命中计数。
+fn hit_count_of(host: &mut KernelHost, id: u32) -> u64 {
+    let events = dispatch(host, CommandPayload::ListBreakpoints);
+    for e in events {
+        if let EventPayload::Breakpoints { breakpoints } = e {
+            for info in breakpoints {
+                if info.breakpoint.id == id {
+                    return info.hit_count;
+                }
+            }
+        }
+    }
+    panic!("断点表里没有 id={id}");
+}
+
+/// 造一个挂 demo 固件、配好默认板的宿主。
+fn demo_host() -> KernelHost {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    host
+}
+
+/// **K-14**：停在断点上之后**再「继续」⇒ 那条指令真的执行、`pc` 前进**。
+///
+/// 断点在 `0x0c`（`sw x3, 256(x0)`）与 `0x10`（下一条）⇒ 第二次「继续」
+/// 应当执行 `0x0c` 并在 `0x10` 停住；`0x100` 写成 49 就是「它真的跑了」
+/// 的副作用证据。
+#[test]
+fn k14_continue_after_a_breakpoint_hit_runs_the_instruction() {
+    let mut host = demo_host();
+    set_addr_breakpoint(&mut host, 1, DEMO_STORE_INSN_ADDR);
+    set_addr_breakpoint(&mut host, 2, DEMO_STORE_INSN_ADDR + 4);
+
+    let events = dispatch(&mut host, CommandPayload::Continue);
+    let (reason, pc) = first_halted(&events);
+    assert_eq!(reason, HaltReason::Breakpoint, "第一次：停在断点上");
+    assert_eq!(pc, DEMO_STORE_INSN_ADDR, "停住时 pc 就是断点地址");
+
+    let events = dispatch(&mut host, CommandPayload::Continue);
+    let (reason, pc) = first_halted(&events);
+    assert_eq!(
+        pc,
+        DEMO_STORE_INSN_ADDR + 4,
+        "再「继续」必须走掉 0x0c、停在下一个断点 —— 不是原地重停"
+    );
+    assert_eq!(reason, HaltReason::Breakpoint);
+    assert_eq!(
+        host.backend
+            .read_memory(DEMO_STORE_ADDR, WriteSize::Word)
+            .expect("读 demo 的 RAM"),
+        DEMO_STORE_VALUE,
+        "`0x0c` 那条 `sw` 真的执行了（副作用在 0x100）"
+    );
+    assert_eq!(
+        hit_count_of(&mut host, 1),
+        1,
+        "同一处断点只该记一次命中 —— 放过的这一条不能再计数"
+    );
+}
+
+/// **K-15**：停在断点上之后**单步 ⇒ 前进一条**（单步和「继续」走同一个
+/// 放过位；只修「继续」不够）。
+#[test]
+fn k15_step_after_a_breakpoint_hit_advances() {
+    let mut host = demo_host();
+    set_addr_breakpoint(&mut host, 1, DEMO_STORE_INSN_ADDR);
+
+    let events = dispatch(&mut host, CommandPayload::Continue);
+    let (_, pc) = first_halted(&events);
+    assert_eq!(pc, DEMO_STORE_INSN_ADDR);
+
+    let _events = dispatch(&mut host, CommandPayload::StepN { n: 1 });
+    assert_eq!(
+        host.backend.engine().pc(),
+        DEMO_STORE_INSN_ADDR + 4,
+        "单步必须执行掉断点那条指令"
+    );
+    assert_eq!(
+        host.backend
+            .read_memory(DEMO_STORE_ADDR, WriteSize::Word)
+            .expect("读 demo 的 RAM"),
+        DEMO_STORE_VALUE
+    );
+}
