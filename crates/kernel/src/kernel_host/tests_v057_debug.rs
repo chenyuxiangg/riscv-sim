@@ -48,7 +48,7 @@ fn demo_project() -> Project {
 /// 取第一条 `Halted`。
 fn first_halted(events: &[EventPayload]) -> (HaltReason, u32) {
     for e in events {
-        if let EventPayload::Halted { reason, pc } = e {
+        if let EventPayload::Halted { reason, pc, .. } = e {
             return (*reason, *pc);
         }
     }

@@ -922,8 +922,27 @@ export function disasmEntry(e) {
 export const Event = Object.freeze({
     /** `EventPayload::Tick { elapsed_ps, pc }` — `elapsed_ps` 走十进制字符串。 */
     tick: (elapsedPs, pc) => ({ Tick: { elapsed_ps: ps(elapsedPs), pc: Number(pc) } }),
-    /** `EventPayload::Halted { reason, pc }`. */
-    halted: (reason, pc) => ({ Halted: { reason, pc: Number(pc) } }),
+    /**
+     * `EventPayload::Halted { reason, pc, trigger_addr }`。
+     *
+     * ⚠️ `trigger_addr`（STAGE-55 批 C）只在**store 边界命中**时非空 ⇒ ⇒
+     *   其余停因（地址断点 / 取指前的谓词 / 陷阱 / 暂停）是 `null`。
+     *   它在线上**始终占一个键**（Rust 侧 `Option<u32>` 没加
+     *   `skip_serializing_if`）⇒ ⇒ 字段名跨层**逐字**比得上。
+     *
+     * @param {string} reason — `HaltReason` 标签
+     * @param {number} pc — 停下时的 PC
+     * @param {number|null} [triggerAddr] — 触发这条停的 store 指令地址
+     */
+    halted: (reason, pc, triggerAddr = null) => ({
+        Halted: {
+            reason,
+            pc: Number(pc),
+            trigger_addr: triggerAddr === null || triggerAddr === undefined
+                ? null
+                : Number(triggerAddr) >>> 0,
+        },
+    }),
     /** `EventPayload::Error { code, message }`. */
     error: (code, message) => ({ Error: { code: String(code), message: String(message) } }),
     /** `EventPayload::MemoryRead { addr, size, value }`. */

@@ -64,7 +64,7 @@ fn first_tick(events: &[EventPayload]) -> (u64, u32) {
 /// 取第一条 `Halted`。
 fn first_halted(events: &[EventPayload]) -> (HaltReason, u32) {
     for e in events {
-        if let EventPayload::Halted { reason, pc } = e {
+        if let EventPayload::Halted { reason, pc, .. } = e {
             return (*reason, *pc);
         }
     }
@@ -522,6 +522,144 @@ fn s3_a_condition_breakpoint_halts_once_the_predicate_turns_true() {
     let (reason, pc) = first_halted(&events);
     assert_eq!(reason, HaltReason::Watchpoint);
     assert_eq!(pc, 0x04, "x1 在第 0 条指令后变成 42 ⇒ 在 0x04 停");
+}
+
+/// **S-7**（STAGE-55 批 C）：含内存读的谓词在 **store 边界**判 ——
+/// demo 固件第 3 条指令（`0x0c`）把 `x3 = 49` 存到 `0x100` ⇒ ⇒ 谓词
+/// `[0x100] == 49` 在**写生效之后**为真 ⇒ ⇒ 停在 `0x10`，并带回「是哪条
+/// store 触发的」。
+#[test]
+fn s7_a_memory_condition_halts_at_the_store_boundary_with_the_trigger_address() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    dispatch(
+        &mut host,
+        CommandPayload::SetBreakpoint(riscv_sim_contract::model::Breakpoint {
+            id: 7,
+            addr: 0,
+            source_hint: None,
+            enabled: true,
+            kind: riscv_sim_contract::model::BreakpointKind::Condition,
+            // ⚠️ **写后新值**：旧值（0）会让它假 ⇒ ⇒ 只有「提交之后求值」
+            //    这一条路能得到真。
+            condition: Some("[0x100] == 49".to_string()),
+        }),
+    );
+    let events = dispatch(&mut host, CommandPayload::Continue);
+    let halted = events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::Halted {
+                reason,
+                pc,
+                trigger_addr,
+            } => Some((*reason, *pc, *trigger_addr)),
+            _ => None,
+        })
+        .expect("store 边界命中必须停");
+    assert_eq!(
+        halted.0,
+        HaltReason::Watchpoint,
+        "观察式命中复用 Watchpoint"
+    );
+    assert_eq!(halted.1, 0x10, "指令已提交 ⇒ PC 已是下一条");
+    assert_eq!(
+        halted.2,
+        Some(0x0c),
+        "必须带回触发那次写所属的指令地址（PC 自己已经说不清了）"
+    );
+}
+
+/// **S-8**（STAGE-55 批 C）：注册期**求不出来**的表达式 —— **允许注册**，
+/// 回执里带降级标记（不是拒绝，也不是静默当假）。
+#[test]
+fn s8_an_unreadable_memory_condition_registers_as_degraded() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    // 0xDEAD_0000 不在映射表里 ⇒ 现在读不到。
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetBreakpoint(riscv_sim_contract::model::Breakpoint {
+            id: 8,
+            addr: 0,
+            source_hint: None,
+            enabled: true,
+            kind: riscv_sim_contract::model::BreakpointKind::Condition,
+            condition: Some("[0xdead0000] == 1".to_string()),
+        }),
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Error { .. })),
+        "求值期才可能失败 ⇒ 注册期不该拒"
+    );
+    let events = dispatch(&mut host, CommandPayload::ListBreakpoints);
+    let info = events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::Breakpoints { breakpoints } => breakpoints
+                .iter()
+                .find(|info| info.breakpoint.id == 8)
+                .cloned(),
+            _ => None,
+        })
+        .expect("降级条目仍然在表里");
+    assert!(info.degraded, "回执要带降级标记（界面据此提示）");
+}
+
+/// **S-9**（STAGE-55 批 C）：**区间过滤** — 谓词读 `0x104`（= 0，恒真），
+/// 而 `0x0c` 的 store 只写 `0x100` ⇒ ⇒ 写区间不相交 ⇒ 这次 store **不**
+/// 求值 ⇒ ⇒ 不许在 `0x10` 停下。
+#[test]
+fn s9_a_disjoint_store_does_not_evaluate_the_predicate() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    dispatch(
+        &mut host,
+        CommandPayload::SetBreakpoint(riscv_sim_contract::model::Breakpoint {
+            id: 9,
+            addr: 0,
+            source_hint: None,
+            enabled: true,
+            kind: riscv_sim_contract::model::BreakpointKind::Condition,
+            condition: Some("[0x104] == 0".to_string()),
+        }),
+    );
+    // 跑过 `0x0c` 那条 store（4 条指令）——若过滤失效，会在 `0x10` 停。
+    let events = dispatch(&mut host, CommandPayload::StepN { n: 4 });
+    let halted = events.iter().find_map(|e| match e {
+        EventPayload::Halted { pc, .. } => Some(*pc),
+        _ => None,
+    });
+    assert_eq!(
+        halted, None,
+        "写 `0x100` 与谓词读的 `0x104` 不相交 ⇒ 这次 store 不该求值"
+    );
 }
 
 /// **S-4**（STAGE-55）：观察式条目的 id **由内核分配** —— 宿主连发两条

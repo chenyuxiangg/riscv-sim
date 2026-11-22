@@ -755,6 +755,16 @@ pub struct Bus {
     /// Next bus-side peripheral token handed out by
     /// [`Bus::map_peripheral_instance`].
     next_periph_id: u32,
+    /// **这条指令写了哪几段**（STAGE-55 批 C）：每次成功写记 `(起始地址,
+    /// 字节数)`。
+    ///
+    /// ⚠️ 由调用方（M-17 的执行器）在**执行一条指令之前**清空、在提交之后
+    /// 读走 ⇒ ⇒ 它只描述「当前这条指令」。store 边界的观察式谓词靠它做
+    /// 区间过滤（写区间不相交 ⇒ 内存里的值没变 ⇒ 不必求值）。
+    ///
+    /// ⚠️ 不是第二份真相：它就是总线自己刚刚写过的地址，写路径是**唯一**
+    /// 事实来源。
+    recent_writes: Vec<(u32, u32)>,
 }
 
 impl Default for Bus {
@@ -765,6 +775,7 @@ impl Default for Bus {
             last_ts_ps: 0,
             stats: BusStats::default(),
             next_periph_id: 0,
+            recent_writes: Vec::new(),
         }
     }
 }
@@ -1632,6 +1643,7 @@ impl Bus {
     /// same accesses, and the last `set_hook` would otherwise evict
     /// the others (D-46).
     pub fn set_hook(&mut self, hook: Option<BusHook>) {
+        self.recent_writes.clear();
         self.hooks.clear();
         if let Some(h) = hook {
             self.hooks.push(h);
@@ -2141,12 +2153,27 @@ impl Bus {
         Ok(acc)
     }
 
+    /// 清空「这条指令的写区间」记录（执行一条指令**之前**调）。
+    pub fn clear_recent_writes(&mut self) {
+        self.recent_writes.clear();
+    }
+
+    /// 取「这条指令的写区间」：`(起始地址, 字节数)`。
+    pub fn recent_writes(&self) -> &[(u32, u32)] {
+        &self.recent_writes
+    }
+
     /// Write at address, little-endian, width 8/16/32. Two-phase for
     /// cross-region accesses (评审 14-1).
     pub fn write(&mut self, addr: u32, width: BusWidth, value: u32) -> Result<(), PlatformError> {
         self.stats.writes += 1;
 
         let result = self.write_inner(addr, width, value);
+        // **成功落地**才记账（失败 / 静默丢弃的写不改变内存 ⇒ 不能触发
+        // 观察式谓词的区间过滤）。
+        if result.is_ok() {
+            self.recent_writes.push((addr, width.bytes() as u32));
+        }
         let (ok, scenario) = match &result {
             Ok(()) => (true, None),
             Err(e) => {

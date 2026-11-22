@@ -610,9 +610,17 @@ pub enum EventPayload {
         values: Vec<WatchValue>,
     },
     /// The simulation hit a breakpoint or watchpoint and paused.
+    ///
+    /// `trigger_addr`（STAGE-55 批 C）只在**store 边界命中**时出现：
+    /// 那一刻指令已经提交、`pc` 已是下一条 ⇒ ⇒ 「是哪条 store 触发的」只能
+    /// 另带一个地址。地址断点 / 取指前的谓词 / 陷阱 / 暂停都是 `None`。
+    ///
+    /// `#[serde(default)]` ⇒ ⇒ 旧载荷（无此字段）解析成 `None`。
     Halted {
         reason: HaltReason,
         pc: u32,
+        #[serde(default)]
+        trigger_addr: Option<u32>,
     },
     /// Catch-all for kernel errors (see [`crate::error::PlatformError`]).
     Error {
@@ -1012,6 +1020,54 @@ mod tests {
     #[test]
     fn the_schema_version_is_fifteen() {
         assert_eq!(crate::SCHEMA_VERSION, 17);
+    }
+
+    /// **批 C**（STAGE-55）：`Halted` 多一个**可选**的 `trigger_addr`
+    /// **且** `BreakpointInfo` 多一个**可选**的 `degraded` ⇒ ⇒ 两条都是
+    /// **加字段不升版**（旧载荷照常解析，缺字段取默认值）。
+    #[test]
+    fn the_batch_c_fields_are_additive_and_round_trip() {
+        // `Halted`：带触发地址 ⇒ 线上是 `trigger_addr`。
+        let halted = EventPayload::Halted {
+            reason: HaltReason::Watchpoint,
+            pc: 0x10,
+            trigger_addr: Some(0x0c),
+        };
+        let value = serde_json::to_value(&halted).expect("json");
+        assert_eq!(value["Halted"]["trigger_addr"], serde_json::json!(12));
+        assert_eq!(
+            serde_json::from_value::<EventPayload>(value).expect("round trip"),
+            halted
+        );
+        // 旧载荷（**没有**这个字段）⇒ 解析成 `None`（不是报错）。
+        let legacy = serde_json::json!({
+            "Halted": { "reason": "Watchpoint", "pc": 0x10 }
+        });
+        let parsed: EventPayload = serde_json::from_value(legacy).expect("旧载荷必须还能解析");
+        assert_eq!(
+            parsed,
+            EventPayload::Halted {
+                reason: HaltReason::Watchpoint,
+                pc: 0x10,
+                trigger_addr: None,
+            }
+        );
+
+        // `BreakpointInfo`：降级标记缺省为 `false`。
+        let info = crate::model::BreakpointInfo {
+            breakpoint: crate::model::Breakpoint::default(),
+            hit_count: 3,
+            degraded: true,
+        };
+        let value = serde_json::to_value(&info).expect("json");
+        assert_eq!(value["degraded"], serde_json::json!(true));
+        let legacy = serde_json::json!({
+            "breakpoint": serde_json::to_value(crate::model::Breakpoint::default()).expect("json"),
+            "hit_count": 3
+        });
+        let parsed: crate::model::BreakpointInfo =
+            serde_json::from_value(legacy).expect("旧载荷必须还能解析");
+        assert!(!parsed.degraded, "缺字段 ⇒ 默认不降级");
     }
 
     /// **v12**（v0.76 · STAGE-52 · 裁决 M）：模板库协议 —— 两个命令、

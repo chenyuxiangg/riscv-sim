@@ -516,6 +516,12 @@ pub struct BreakpointInfo {
     pub breakpoint: Breakpoint,
     /// 命中次数（`u64`；WASM 侧按 JS 安全整数范围内使用）。
     pub hit_count: u64,
+    /// **降级标记**（STAGE-55 批 C）：注册期这条表达式**当前求不出来**
+    /// （读内存失败等）⇒ ⇒ 仍允许注册，但求值期失败按**未命中**。
+    ///
+    /// `#[serde(default)]` ⇒ ⇒ 旧载荷（无此字段）解析成 `false`。
+    #[serde(default)]
+    pub degraded: bool,
 }
 
 impl Default for BreakpointInfo {
@@ -523,6 +529,7 @@ impl Default for BreakpointInfo {
         Self {
             breakpoint: Breakpoint::default(),
             hit_count: 0,
+            degraded: false,
         }
     }
 }
