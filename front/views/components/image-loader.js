@@ -125,7 +125,7 @@ export function imageKindFor(name) {
  */
 export async function readImageFile(file) {
     if (!file || typeof file.arrayBuffer !== "function") {
-        throw new Error("不是一个可读的文件");
+        throw new Error("文件不可读");
     }
     const buf = await file.arrayBuffer();
     return Array.from(new Uint8Array(buf));
@@ -185,8 +185,8 @@ export function buildImageProjectFromBytes(bytes, name, options = {}) {
  */
 export function describeImageLoad(state) {
     const status = String(state?.status ?? "idle");
-    if (status === "reading") return "正在读取固件……（读完才能点「加载固件」）";
-    if (status === "loading") return "正在读取并装载固件…";
+    if (status === "reading") return "正在读取固件……";
+    if (status === "loading") return "装载中…";
     if (status === "error") {
         const msg = String(state?.error ?? "未知原因");
         return `装载失败：${msg}`;
@@ -194,7 +194,7 @@ export function describeImageLoad(state) {
     if (status === "ok") {
         const name = String(state?.name ?? "固件");
         const bytes = Number(state?.byteLength ?? 0);
-        return `已装载「${name}」（${bytes} 字节）—— 点「继续」开始运行。`;
+        return `已装载「${name}」（${bytes} 字节）`;
     }
     // ⚠️ **「选好了但还没装」与「什么都没选」必须分得开**（施工期订正 4）：
     // 两者都是 `idle` ⇒ 只看状态字面量分不出来 ⇒ ⇒ 用「有没有文件名」分开
@@ -203,9 +203,9 @@ export function describeImageLoad(state) {
     if (state?.name) {
         const name = String(state.name);
         const bytes = Number(state.byteLength ?? 0);
-        return `已选择「${name}」（${bytes} 字节）—— 点「加载固件」装进内核。`;
+        return `已选「${name}」（${bytes} 字节）`;
     }
-    return "尚未装载自己的固件——启动时装的是内建 demo 固件（40 字节）。";
+    return "未选固件";
 }
 
 /**
@@ -331,7 +331,7 @@ export async function loadImageFileIntoPending(file) {
     } catch (err) {
         setImageLoadState({
             status: "error",
-            error: `读取文件失败：${err?.message ?? err}`,
+            error: `读取失败：${err?.message ?? err}`,
             pending: null,
         });
         publishProductState();
@@ -413,7 +413,7 @@ export function imageLoadDecision(state) {
  * @returns {string}
  */
 export function renderImageLoaderControl(options = {}) {
-    const label = options.label ?? "选择固件镜像";
+    const label = options.label ?? "选择固件";
     const buttonText = options.buttonText ?? "加载固件";
     const brief = options.withBrief
         ? `<span class="muted image-loader-brief" data-image-brief data-image-brief-status="idle">未选固件</span>`
@@ -459,13 +459,7 @@ export function renderImageLoadStatus(state) {
             <p class="muted" data-image-load-status="${escapeHtml(status)}">${escapeHtml(text)}</p>
             ${errorBlock}
             <p class="muted">
-                ⚠️ **加载入口只有页头那一个**（「加载固件」）⇒ ⇒ 在**任何视图**
-                都能装载；支持 <code>.elf</code> / <code>.out</code>（按 ELF 解析）
-                与 <code>.bin</code> / <code>.raw</code>（按原始字节解析）
-                ⇒ ⇒ 文件在**浏览器里**读成字节后交给内核
-                ⇒ ⇒ **不需要**任何 HTTP 服务；⚠️ 装完**不自动跑**⇒ ⇒ 请自己
-                点「继续」；⚠️ IHEX（<code>.hex</code> / <code>.ihex</code>）
-                暂不支持。
+                支持 <code>.elf</code> / <code>.out</code> / <code>.bin</code> / <code>.raw</code>；<code>.hex</code> / <code>.ihex</code> 暂不支持。
             </p>
         </section>
     `;

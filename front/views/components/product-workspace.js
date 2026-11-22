@@ -389,7 +389,7 @@ function renderSidebar(state, nodes, locked, dirty) {
     const tree = state?.tree?.root ?? null;
     const treeHtml = nodes.length
         ? nodes.map((node) => renderTreeNode(state, node, state?.selected ?? null, locked)).join("")
-        : `<p class="pw-empty-hint">${loaded ? "这块板还没有任何器件 —— 换一块板，或重新创建。" : "尚未加载任何板子。"}</p>`;
+        : `<p class="pw-empty-hint">${loaded ? "尚无器件" : "尚未加载任何板子。"}</p>`;
     return `
         <aside class="pw-side">
             <header class="pw-side-head">
@@ -399,14 +399,14 @@ function renderSidebar(state, nodes, locked, dirty) {
                 </div>
                 <button type="button" class="pw-lock" data-action="open-add-device" ${loaded ? "" : "disabled"}>添加器件</button>
                 <button type="button" class="pw-lock ${locked ? "is-locked" : ""}" data-action="toggle-lock" ${loaded ? "" : "disabled"}>
-                    ${locked ? "已锁定 · 点此解锁" : "已解锁 · 点此锁定"}
+                    ${locked ? "已锁定 · 解锁" : "已解锁 · 锁定"}
                 </button>
             </header>
             <div class="pw-tree" data-product-tree>${treeHtml}</div>
             <footer class="pw-side-foot">
                 <p class="pw-revision">
                     <span>修订号 <b>${revision}</b></span>
-                    ${meta?.pending ? `<span class="pw-pending">待生效（重新载入后应用）</span>` : ""}
+                    ${meta?.pending ? `<span class="pw-pending">待生效</span>` : ""}
                     ${dirty.dirty ? `<span class="pw-dirty-count">${dirty.count} 处未生效</span>` : ""}
                 </p>
                 <div class="pw-side-actions">
@@ -415,9 +415,9 @@ function renderSidebar(state, nodes, locked, dirty) {
                     <button type="button" class="pw-btn" data-action="open-archives">档案管理</button>
                     <button type="button" class="pw-btn" data-action="save-archive" ${loaded ? "" : "disabled"}>另存为档案</button>
                     <button type="button" class="pw-btn pw-btn-primary" data-action="reload-product" ${loaded ? "" : "disabled"}>重新载入</button>
-                    <button type="button" class="pw-btn" data-action="reload-project" ${loaded ? "" : "disabled"} title="把**当前工程（含固件）**重装进这块板；板与固件不兼容时内核会拒（E_PLT-20/21）">重新装载工程</button>
+                    <button type="button" class="pw-btn" data-action="reload-project" ${loaded ? "" : "disabled"} title="重装当前工程与固件">重新装载工程</button>
                 </div>
-                <p class="pw-tip">${locked ? "锁定：字段只读。解锁后可改基址 / 偏移 / 含义。" : "解锁：可直接改基址 / 偏移 / 含义，改完点「重新载入」才生效。"}</p>
+                <p class="pw-tip">${locked ? "只读" : "可编辑"}</p>
                 ${renderImageLoadStatus(state?.imageLoad ?? null)}
             </footer>
         </aside>
@@ -429,7 +429,7 @@ function renderWindowEmpty() {
     return `
         <div class="pw-window-empty">
             <div class="pw-window-plate">内存展示区</div>
-            <p>点左侧产品树里的器件，这里显示它的基址、各偏移与偏移含义。</p>
+            <p>选择左侧器件查看详情</p>
         </div>
     `;
 }
@@ -471,14 +471,14 @@ function renderGapPlanner(draft, node, locked) {
                 <td><button type="button" class="pw-btn pw-btn-small" data-action="use-product-gap" data-gap-from="${gap.from}" ${locked ? "disabled" : ""}>用这个</button></td>
             </tr>
         `).join("")
-        : `<tr><td colspan="4" class="pw-table-empty">规划范围内没有可用空隙。</td></tr>`;
+        : `<tr><td colspan="4" class="pw-table-empty">范围内没有空隙</td></tr>`;
     return `
         <section class="pw-gaps" data-product-gaps>
             <div class="pw-regs-head">
                 <h4>本器件可用的地址空隙</h4>
                 <span class="muted">规划范围 ${escapeHtml(hex32(range.from))} – ${escapeHtml(hex32(range.to))}</span>
             </div>
-            <p class="pw-tip">只给「哪里空着」作参考；点「用这个」把本器件基址填过去，重叠仍由内核判。</p>
+            <p class="pw-tip">仅供参考</p>
             <table class="pw-table pw-table-gaps">
                 <colgroup><col style="width:32%"><col style="width:32%"><col style="width:20%"><col style="width:16%"></colgroup>
                 <thead><tr><th>起</th><th>止（含）</th><th>可用字节</th><th></th></tr></thead>
@@ -537,7 +537,7 @@ function renderRegisterTable(state, node, locked) {
                 </tr>
             `;
         }).join("")
-        : `<tr><td colspan="4" class="pw-table-empty">这份描述还没有寄存器说明。</td></tr>`;
+        : `<tr><td colspan="4" class="pw-table-empty">暂无寄存器说明</td></tr>`;
     return `
         <table class="pw-table">
             <colgroup>
@@ -563,7 +563,7 @@ function renderWindowDetail(state, node, locked) {
     const region = draftRegion(draft, node);
     const unitLabel = docFor(state, node).unit === "bit" ? "CSR 偏移" : "偏移";
     const baseField = node.kind === "core"
-        ? `<div class="pw-field"><span>基址</span><b class="pw-mono">无（核内部寄存器，不经总线）</b></div>`
+        ? `<div class="pw-field"><span>基址</span><b class="pw-mono">无（核内寄存器）</b></div>`
         : `<label class="pw-field"><span>内存基址</span>
              <input type="text" class="pw-input pw-mono" data-base-input="1" value="${escapeHtml(hexAddress(region?.base ?? node.base))}" ${locked ? "disabled" : ""}>
            </label>`;
@@ -587,15 +587,15 @@ function renderWindowDetail(state, node, locked) {
             <section class="pw-regs">
                 <div class="pw-regs-head">
                     <h4>${node.kind === "core" ? "内部寄存器（CSR）" : `${escapeHtml(unitLabel)}与含义`}</h4>
-                    <span class="muted">${locked ? "锁定中 —— 解锁后可编辑" : "可直接编辑；改完点「重新载入」才生效"}</span>
+                    <span class="muted">${locked ? "只读" : "可编辑"}</span>
                 </div>
-                ${node.kind === "memory" ? `<p class="pw-tip">这段是连续内存，没有固定的寄存器偏移表；装固件后按地址直接访问。</p>` : ""}
+                ${node.kind === "memory" ? `<p class="pw-tip">连续内存</p>` : ""}
                 ${node.kind === "core" || node.kind === "peripheral" || hasDeviceDoc(node.deviceKind)
                     ? renderRegisterTable(state, node, locked)
-                    : `<p class="pw-tip">这个器件类型没有内置寄存器说明。</p>`}
+                    : `<p class="pw-tip">暂无寄存器说明</p>`}
             </section>
             <footer class="pw-window-foot">
-                <span class="muted">修改保存为草稿；点「重新载入」把草稿送进内核并重新装载工程。</span>
+                <span class="muted">改动存为草稿</span>
                 <div class="pw-side-actions">
                     <button type="button" class="pw-btn" data-action="discard-product">放弃修改</button>
                     <button type="button" class="pw-btn pw-btn-primary" data-action="reload-product">重新载入</button>
@@ -618,7 +618,7 @@ function renderCreateDialog(state, locked) {
         <div class="pw-scrim" data-dialog="create">
             <div class="pw-dialog" role="dialog" aria-modal="true">
                 <h3>创建产品</h3>
-                <p class="muted">从零搭一块板：勾选器件，填产品名，然后直接装载。</p>
+                <p class="muted">勾选器件并命名</p>
                 <label class="pw-field"><span>产品名</span><input type="text" class="pw-input" data-create-name value="自定义产品"></label>
                 <div class="pw-check-grid">${items}</div>
                 <footer class="pw-dialog-foot">
@@ -642,7 +642,7 @@ function renderAddDeviceDialog(state, locked) {
         <div class="pw-scrim" data-dialog="add-device">
             <div class="pw-dialog" role="dialog" aria-modal="true">
                 <h3>添加器件</h3>
-                <p class="muted">器件会插进当前产品树；基址先按建议值落草稿，可到右栏改成实际规划的空隙。</p>
+                <p class="muted">插入产品树</p>
                 <div class="pw-template-list">${items}</div>
                 <footer class="pw-dialog-foot">
                     <button type="button" class="pw-btn" data-action="close-dialog">取消</button>
@@ -665,15 +665,15 @@ function renderTemplateDialog(state) {
         ? archive.map((entry) => `
             <button type="button" class="pw-template" data-action="use-template" data-template-id="${escapeHtml(entry?.id)}" data-template-src="archive">
                 <b>${escapeHtml(entry?.description?.name ?? entry?.id)}</b>
-                <span class="muted">${escapeHtml(entry?.id ?? "")} · 本机板档案</span>
+                <span class="muted">${escapeHtml(entry?.id ?? "")} · 本机</span>
             </button>
         `).join("")
-        : `<p class="pw-tip">本机还没有保存过的板档案。</p>`;
+        : `<p class="pw-tip">暂无板档案</p>`;
     return `
         <div class="pw-scrim" data-dialog="templates">
             <div class="pw-dialog" role="dialog" aria-modal="true">
                 <h3>从模版加载</h3>
-                <p class="muted">选一块板直接装载；装载会替换当前产品树。</p>
+                <p class="muted">将替换当前产品树</p>
                 <h4>内置模版</h4>
                 <div class="pw-template-list">${builtin}</div>
                 <h4>本机板档案</h4>
@@ -694,7 +694,7 @@ function renderArchiveDialog(state) {
         <div class="pw-scrim" data-dialog="archive">
             <div class="pw-dialog" role="dialog" aria-modal="true">
                 <h3>另存为档案</h3>
-                <p class="muted">把当前产品（含偏移与偏移含义）复制成本机数据库里的另一条档案；当前产品不受影响。</p>
+                <p class="muted">复制为新档案</p>
                 <label class="pw-field"><span>档案 id</span>
                     <input type="text" class="pw-input pw-mono" data-archive-id value="${escapeHtml(`${currentId}-copy`)}">
                 </label>
@@ -715,10 +715,10 @@ function renderArchivesDialog(state) {
     const archive = Array.isArray(state?.archive) ? state.archive : [];
     const status = String(state?.archiveStatus ?? "ok");
     const statusText = status === "unsupported"
-        ? "板档案只存在于本会话（本浏览器没有可用的持久化存储）。"
+        ? "仅本会话保存"
         : status === "error"
-            ? "板档案读取失败 —— 先看右栏提示。"
-            : "板档案存在本机浏览器，刷新后仍在。";
+            ? "读取失败"
+            : "已存本机，刷新保留";
     const rows = archive.length
         ? archive.map((entry) => {
             const name = entry?.description?.name ?? entry?.id ?? "";
@@ -735,7 +735,7 @@ function renderArchivesDialog(state) {
                 </tr>
             `;
         }).join("")
-        : `<tr><td colspan="3" class="pw-table-empty">还没有板档案 —— 用「另存为档案」保存第一块板。</td></tr>`;
+        : `<tr><td colspan="3" class="pw-table-empty">暂无板档案</td></tr>`;
     return `
         <div class="pw-scrim" data-dialog="archives">
             <div class="pw-dialog pw-dialog-wide" role="dialog" aria-modal="true">

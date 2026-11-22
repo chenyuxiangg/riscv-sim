@@ -37,11 +37,11 @@ export async function handleLoadImageCommand(detail, services) {
     if (!Array.isArray(bytes) || bytes.length === 0) {
         setImageLoadState({
             status: "error",
-            error: "没有镜像字节 —— 请先用文件选择器选一个固件",
+            error: "未选固件",
             pending: null,
         });
         publishProductState();
-        setNote("加载固件失败：没有镜像字节");
+        setNote("未选固件");
         return;
     }
     // ⚠️ **先写「装载中」再发命令**（v0.58 批 · 幂等的关键）：
@@ -73,13 +73,13 @@ export async function handleLoadImageCommand(detail, services) {
         });
         publishProductState();
         const streamErrors = [
-            result.probeError ? `探针流 ${result.probeError.message}` : null,
-            result.consoleError ? `console 流 ${result.consoleError.message}` : null,
-            result.memoryMapError ? `内存图流 ${result.memoryMapError.message}` : null,
+            result.probeError ? `探针：${result.probeError.message}` : null,
+            result.consoleError ? `console：${result.consoleError.message}` : null,
+            result.memoryMapError ? `内存图：${result.memoryMapError.message}` : null,
         ].filter(Boolean);
         setNote(streamErrors.length > 0
-            ? `已加载固件「${detail?.params?.name ?? "image.bin"}」，但流订阅不可用：${streamErrors.join("；")}`
-            : `已加载固件「${detail?.params?.name ?? "image.bin"}」（${result.byteLength} 字节）—— 点「继续」开始运行`);
+            ? `已装载「${detail?.params?.name ?? "image.bin"}」：部分流不可用 ${streamErrors.join("；")}`
+            : `已装载「${detail?.params?.name ?? "image.bin"}」（${result.byteLength} 字节）`);
     } catch (err) {
         // ⚠️ **失败显示内核原文**（STAGE-32 裁决 J）⇒ ⇒ 不吞。
         //
@@ -93,7 +93,7 @@ export async function handleLoadImageCommand(detail, services) {
             error: err?.message ?? String(err),
         });
         publishProductState();
-        setNote(`加载固件失败：${err?.message ?? err}`);
+        setNote(`加载失败：${err?.message ?? err}`);
     }
 }
 

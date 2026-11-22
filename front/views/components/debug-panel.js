@@ -143,7 +143,7 @@ export function downloadExportChunk(exportState, deps = {}) {
  *
  * @type {string}
  */
-export const ADDR_INPUT_ERROR = "请先填十六进制地址（最多 8 位，可带 0x 前缀）。";
+export const ADDR_INPUT_ERROR = "请先填十六进制地址";
 
 /**
  * 「**读内存**」与「**读这一段**」这两个入口的**差别说明**（v0.64 批）。
@@ -153,10 +153,8 @@ export const ADDR_INPUT_ERROR = "请先填十六进制地址（最多 8 位，�
  *
  * @type {string}
  */
-export const MEMORY_READ_HINT = "<strong>读内存</strong> 读<strong>一个字</strong>"
-    + "（走总线 ⇒ ⇒ 探针会动）；"
-    + `<strong>读这一段</strong> 读<strong>你指定的字节数</strong>（≤ ${DUMP_MAX_BYTES} 字节，调试视角 ⇒ ⇒ 不动总线）。`
-    + "地址框会<strong>记住你上次填的那个</strong> ⇒ ⇒ 只有第一次要填。";
+export const MEMORY_READ_HINT = "<strong>读内存</strong> 单字；"
+    + `<strong>读这一段</strong> 按字节数（≤ ${DUMP_MAX_BYTES} 字节）。`;
 
 /**
  * 「读**这一段**」那个按钮的**文案**（v0.64 批）。
@@ -264,7 +262,7 @@ export function renderSymbolCandidate(symbol) {
     const name = String(symbol?.name ?? "");
     const addr = symbol?.addr;
     if (typeof addr !== "number" || !Number.isFinite(addr)) {
-        return `<span class="muted symbol-candidate-na" data-bp-symbol-name="${escapeHtml(name)}">${escapeHtml(name)}（无地址，不能下断点）</span>`;
+        return `<span class="muted symbol-candidate-na" data-bp-symbol-name="${escapeHtml(name)}">${escapeHtml(name)}（无地址）</span>`;
     }
     const addrText = `0x${(addr >>> 0).toString(16).padStart(8, "0")}`;
     return `<button type="button" class="symbol-candidate" data-action="set-symbol-breakpoint"
@@ -286,8 +284,8 @@ export function renderSymbolCandidates(result) {
     const total = Number(result.total ?? 0);
     if (!exact && candidates.length === 0) {
         const why = total === 0
-            ? "这个镜像没有符号表（可能被 strip 了）"
-            : `这个镜像共有 ${total} 个符号`;
+            ? "没有符号表"
+            : `共有 ${total} 个符号`;
         return `<p class="muted" data-bp-symbol-empty>没有这个符号 —— ${escapeHtml(why)}</p>`;
     }
     const items = [];
@@ -363,7 +361,7 @@ export function renderMemoryDump(dump) {
         </tr>`);
     }
     const body = rows.length === 0
-        ? `<p class="muted" data-mem-dump-empty>尚无转储 — 在上面填起始地址与字节数，点「${escapeHtml(MEMORY_DUMP_BUTTON_LABEL)}」。</p>`
+        ? `<p class="muted" data-mem-dump-empty>尚无转储</p>`
         : `<table class="dump-table">
             <thead><tr><th>偏移</th><th>十六进制</th><th>ASCII</th></tr></thead>
             <tbody>${rows.join("")}</tbody>
@@ -606,9 +604,9 @@ function mountAddrInputListeners(el) {
  * @returns {string}
  */
 function traceToggleLabel(sw) {
-    if (sw.state === TRACE_SWITCH_ON) return "trace 记录：已开启（点击关闭）";
-    if (sw.state === TRACE_SWITCH_OFF) return "trace 记录：已关闭（点击开启）";
-    return "trace 记录：状态未查询（点击开启）";
+    if (sw.state === TRACE_SWITCH_ON) return "trace 记录：已开启 · 点击关闭";
+    if (sw.state === TRACE_SWITCH_OFF) return "trace 记录：已关闭 · 点击开启";
+    return "trace 记录：状态未查询";
 }
 
 /**
@@ -621,15 +619,15 @@ function renderTraceStatus(sw) {
     const len = String(sw.len);
     const dropped = String(sw.dropped);
     if (sw.state === TRACE_SWITCH_ON) {
-        return `<span class="trace-state-main">trace 记录：<strong>已开启</strong> · 仿真会明显降速（每条指令与访存都要记录）。</span>`
-            + `<span class="muted trace-state-hint">点上面的开关可<strong>关闭</strong>（关闭后内核零开销）。内核上次回报时环里 <strong>${escapeHtml(len)}</strong> 条 · 溢出丢弃 <strong>${escapeHtml(dropped)}</strong> 条 ⇒ 条数随仿真增长，「导出执行轨迹」里看最新总数。</span>`;
+        return `<span class="trace-state-main">trace 记录：<strong>已开启</strong> · 降速</span>`
+            + `<span class="muted trace-state-hint">环里 <strong>${escapeHtml(len)}</strong> 条 · 溢出丢弃 <strong>${escapeHtml(dropped)}</strong> 条</span>`;
     }
     if (sw.state === TRACE_SWITCH_OFF) {
-        return `<span class="trace-state-main">trace 记录：<strong>已关闭</strong> · 内核不记录任何指令与访存（零开销）。</span>`
-            + `<span class="muted trace-state-hint">点上面的开关可<strong>开启</strong>（每条指令与访存都要记录 ⇒ 仿真会明显降速）。内核上次回报时环里 <strong>${escapeHtml(len)}</strong> 条 · 溢出丢弃 <strong>${escapeHtml(dropped)}</strong> 条 ⇒ 这 ${escapeHtml(len)} 条仍可导出。</span>`;
+        return `<span class="trace-state-main">trace 记录：<strong>已关闭</strong></span>`
+            + `<span class="muted trace-state-hint">环里 <strong>${escapeHtml(len)}</strong> 条 · 溢出丢弃 <strong>${escapeHtml(dropped)}</strong> 条</span>`;
     }
     return `<span class="trace-state-main">trace 记录：<strong>状态未查询</strong></span>`
-        + `<span class="muted trace-state-hint">点上面的开关：向内核确认当前状态，并<strong>开启</strong>记录（每条指令与访存都要记录 ⇒ 仿真会明显降速）。</span>`;
+        + `<span class="muted trace-state-hint">点开关向内核确认状态。</span>`;
 }
 
 const debugView = register({
@@ -694,8 +692,8 @@ const debugView = register({
             <div class="debug-grid">
                 <section class="card disasm">
                     <div class="row">
-                        <h3>反汇编 (M-11)</h3>
-                        <span class="tag">在「断点」列点一下即可下断点</span>
+                        <h3>反汇编</h3>
+                        <span class="tag">点断点列下断点</span>
                         <button type="button" data-action="disasm" data-addr="${pc}" data-count="16">反汇编</button>
                     </div>
                     <div class="card-actions" data-disasm-follow-box>
@@ -711,14 +709,12 @@ const debugView = register({
                             <input type="number" min="1" step="1" value="${escapeHtml(draft.stepCount)}" data-step-count-input>
                         </label>
                         <button type="button" data-action="step-n">按步数单步</button>
-                        <span class="muted">从当前 PC 起走这么多条指令（顶栏「单步」走一条）。</span>
                     </div>
-                    <p class="muted">助记符是 <strong>ISA 助记符</strong>：压缩指令保留 <code>c.</code> 前缀，不做伪指令别名改写（裁决 C）。</p>
                     <table class="disasm-table">
                         <thead><tr><th>地址</th><th>机器码</th><th>助记符</th><th>宽度</th><th>源码</th><th>断点</th></tr></thead>
                         <tbody>
                             ${entries.map((entry) => renderDisasmRow(entry, pc, breakpoints)).join("")
-                                || `<tr><td colspan="6" class="muted">尚无反汇编 — 点击「反汇编」向内核请求一段（M-11）。</td></tr>`}
+                                || `<tr><td colspan="6" class="muted">尚无反汇编</td></tr>`}
                         </tbody>
                     </table>
                 </section>
@@ -728,7 +724,7 @@ const debugView = register({
                     ${renderBreakpointCondRow({ draft: draft.bpCond, error: condError })}
                     ${renderSymbolLookupRow({ draft: draft.bpSymbol, error: symbolError, result: symbolResult })}
                     ${breakpoints.length === 0
-                        ? `<p class="muted">尚无断点 — 在左边反汇编表的「断点」列点「加断点」，或在上面直接填地址。</p>`
+                        ? `<p class="muted">尚无断点</p>`
                         : `<div class="bp-list" data-bp-list>${breakpoints.map((raw) => {
                             const addr = Number(raw ?? 0) >>> 0;
                             const addrText = `0x${addr.toString(16).padStart(8, "0")}`;
@@ -745,7 +741,6 @@ const debugView = register({
                                     <button type="button" data-action="clear-breakpoint" data-addr="${addrText}">撤掉</button>
                                 </div>`;
                         }).join("")}</div>`}
-                    <p class="muted">这里列的是<strong>内核断点表</strong>（契约 v13 的 <code>ListBreakpoints</code> 回执）—— 点「刷新内核断点表」可把脚本口设的断点也读回来。命中次数来自内核的命中计数。</p>
                 </section>
                 <section class="card watch-card">
                     <div class="row"><h3>观察表达式</h3><span class="tag">${watchValues.length} 项</span><button type="button" data-action="list-watch-exprs">刷新</button></div>
@@ -754,7 +749,7 @@ const debugView = register({
                         <button type="button" data-action="set-watch-expr">添加观察</button>
                     </div>
                     ${watchValues.length === 0
-                        ? `<p class="muted">尚无观察项 — 支持 <code>pc</code>、<code>xN</code>、<code>0x...</code> 地址、<code>@x2+4</code> 或 <code>[pc-4]</code>。停下后自动轮询。</p>`
+                        ? `<p class="muted">尚无观察项</p>`
                         : `<div class="watch-list">${watchValues.map((item) => {
                             const value = item?.value;
                             const text = value === null || value === undefined
@@ -771,11 +766,11 @@ const debugView = register({
                         }).join("")}</div>`}
                 </section>
                 <section class="card trace-export">
-                    <div class="row"><h3>trace 记录 / 导出 (M-11 / M-19)</h3></div>
+                    <div class="row"><h3>trace 记录 / 导出</h3></div>
                     <div class="card-actions">
                         <button type="button" data-action="trace-toggle" data-trace-switch="${traceSwitch.state}" aria-pressed="${traceSwitch.state === TRACE_SWITCH_ON ? "true" : "false"}">${escapeHtml(traceToggleLabel(traceSwitch))}</button>
-                        <button type="button" data-action="export-trace" data-source="Execution" data-format="Csv" data-offset="0" data-limit="0" data-whole="1" title="把整条执行轨迹翻完并落盘（CSV）">导出执行轨迹 (CSV)</button>
-                        <button type="button" data-action="export-trace" data-source="Execution" data-format="Json" data-offset="0" data-limit="0" data-whole="1" title="把整条执行轨迹翻完并落盘（JSON）">导出执行轨迹 (JSON)</button>
+                        <button type="button" data-action="export-trace" data-source="Execution" data-format="Csv" data-offset="0" data-limit="0" data-whole="1" title="导出执行轨迹 CSV">导出执行轨迹 (CSV)</button>
+                        <button type="button" data-action="export-trace" data-source="Execution" data-format="Json" data-offset="0" data-limit="0" data-whole="1" title="导出执行轨迹 JSON">导出执行轨迹 (JSON)</button>
                     </div>
                     <p class="trace-state" data-trace-state data-trace-switch="${traceSwitch.state}"${traceSwitch.state === TRACE_SWITCH_ON ? " data-trace-notice" : ""}>${renderTraceStatus(traceSwitch)}</p>
                     <div class="trace-filter" data-trace-filter>
@@ -787,16 +782,16 @@ const debugView = register({
                     <p class="note" data-trace-filter-error></p>
                     ${exportState
                         ? `<p class="muted" data-trace-progress>${escapeHtml(String(exportState.source))} / ${escapeHtml(String(exportState.format))} · 条目 ${Number(exportState.offset)} → ${Number(exportState.next_offset)} / ${Number(exportState.total)}</p>`
-                        : `<p class="muted">尚未导出 — 选一个数据源与格式发起导出。</p>`}
+                        : `<p class="muted">尚未导出</p>`}
                     ${exportState?.overflow_marked === true
-                        ? `<p class="trace-overflow" data-trace-overflow>⚠️ 导出窗口<strong>不是完整历史</strong> —— 源环溢出过、丢过最旧条目（本次导出从第 ${Number(exportState.offset)} 条开始，更早的内容已不在环里）。</p>`
+                        ? `<p class="trace-overflow" data-trace-overflow>⚠️ 导出窗口不是完整历史（从第 ${Number(exportState.offset)} 条起）。</p>`
                         : ""}
                     <pre class="trace-chunk" data-trace-chunk>${escapeHtml(String(exportState?.chunk ?? ""))}</pre>
                 </section>
                 <section class="card regmem-registers" data-window="registers">
                     <div class="row">
                         <h3>寄存器窗口</h3>
-                        <span class="tag">变化高亮 = 与本次运行 / 单步开始前相比</span>
+                        <span class="tag">变化高亮 · 本次运行基准</span>
                         <button type="button" data-action="read-regs">读寄存器</button>
                     </div>
                     <div class="reg-grid">${renderRegGrid(sim.gpr ?? Array(32).fill(0), regBaseline, running)}</div>
@@ -805,14 +800,14 @@ const debugView = register({
                     <code class="pc">${liveValue(running, `0x${(sim.pc ?? 0).toString(16).padStart(8, "0")}`)}</code>
                 </section>
                 <section class="card regmem-memory" data-window="memory">
-                    <div class="row"><h3>内存窗口</h3><span class="tag">读回的字列在下面</span></div>
-                    <p class="muted" data-memory-readback-note>程序<strong>停下</strong>时（断点 / 观察点 / 陷阱 / 暂停 / 单步走完）这里会<strong>自动重读</strong>下面这些单元。</p>
+                    <div class="row"><h3>内存窗口</h3></div>
+                    <p class="muted" data-memory-readback-note>停下时自动重读</p>
                     ${renderMemoryReadRow({ draft: draft.memAddr, size: draft.memSize })}
                     ${renderMemoryDumpRow({ addrDraft: draft.dumpAddr, lenDraft: draft.dumpLen, error: dumpError })}
                     ${renderMemoryDump(dump)}
                     <h4>内存单元</h4>
                     ${cells.length === 0
-                        ? `<p class="muted">尚无读回的内存单元 — 在上面填一个地址，点「读内存」。</p>`
+                        ? `<p class="muted">尚无读回的内存单元</p>`
                         : `<table class="map-table" data-mem-cells>
                             <thead><tr><th>地址</th><th>值</th></tr></thead>
                             <tbody>${cells.map(([addr, value]) => `
@@ -1052,13 +1047,13 @@ export function renderRegGrid(gpr, prevGpr, running = false) {
 export function renderReadbackState(readback, changedCount = 0) {
     const count = Number.isFinite(Number(changedCount)) ? Math.max(0, Number(changedCount)) : 0;
     if (!readback || !Array.isArray(readback.baseline)) {
-        return "尚未运行 —— 点「运行」或「单步」时会记下基准，停下后自动读回并标出这一趟变了的寄存器。";
+        return "尚未运行";
     }
     if (readback.reason === null || readback.reason === undefined) {
-        return "基准已记下（本次运行 / 单步开始前）—— 停下之后会自动读回，并标出这一趟变了的寄存器。";
+        return "基准已记下";
     }
     const label = READBACK_REASON_LABEL[readback.reason] ?? "读回";
-    const how = readback.auto === true ? "自动读回" : "手动读回";
-    const failed = readback.error ? " · ⚠️ 上次读回有失败" : "";
-    return `上次${how}：${label} · 这一趟变了 <strong data-readback-changed-count>${count}</strong> 个寄存器${failed}`;
+    const how = readback.auto === true ? "自动" : "手动";
+    const failed = readback.error ? " · ⚠️ 有失败" : "";
+    return `${how}读回：${label} · 变了 <strong data-readback-changed-count>${count}</strong> 个寄存器${failed}`;
 }

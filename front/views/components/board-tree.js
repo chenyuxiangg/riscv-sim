@@ -106,12 +106,12 @@ function renderDeviceNode({ index, region, kinds, pending }) {
                 ${pending ? `<span class="tag" data-device-node-pending-tag="1">待生效</span>` : ""}
                 <button type="button" class="btn ghost danger"
                         data-action="remove-device" data-mmap-index="${index}"
-                        title="从草稿删除这个器件实例">删除</button>
+                        title="删除器件">删除</button>
             </div>
             <div class="board-device-fields">
-                ${regionField({ index, name: "base", label: "基址 base", value: base })}
+                ${regionField({ index, name: "base", label: "基址", value: base })}
                 ${deviceKindSelect(index, kind, kinds)}
-                ${deviceField({ index, name: "id", label: "器件 id", value: id })}
+                ${deviceField({ index, name: "id", label: "器件", value: id })}
                 ${paramFields}
             </div>
         </div>
@@ -151,9 +151,9 @@ export function renderBoardTree({ draft, deviceTypes, instances, collapsed }) {
             <section class="card">
                 <h3>产品树<span class="tag">板定义</span></h3>
                 <p class="muted" data-board-tree="unsupported">
-                    内核**不支持**任何可实例化的器件类型（内核报告的类型：${escapeHtml(
+                    内核无可实例化的器件类型（已报：${escapeHtml(
         (deviceTypes ?? []).map((t) => String(t?.kind ?? "")).join("、") || "（无）",
-    )}）⇒ ⇒ 先换内核版本，或扩器件类型。
+    )}）。
                 </p>
             </section>
         `;
@@ -171,23 +171,19 @@ export function renderBoardTree({ draft, deviceTypes, instances, collapsed }) {
     const isCollapsed = collapsed instanceof Set ? collapsed.has(TREE_ROOT_KEY) : false;
     const kids = isCollapsed ? "" : `<div class="kids">${nodes}</div>`;
     const empty = devices.length === 0
-        ? `<p class="muted" data-board-tree="empty">这块板上**还没有器件实例** ⇒ ⇒ 点「+ 器件」加一个（内存段在下面那张「内存映射 (M-14)」表里加）。</p>`
+        ? `<p class="muted" data-board-tree="empty">尚无器件实例</p>`
         : "";
     return `
         <section class="card">
-            <h3>产品树<span class="tag">板定义 · 器件的编辑面</span></h3>
-            <p class="muted">
-                ⚠️ 树 = **当前草稿**的派生视图 ⇒ ⇒ 与下面那张内存映射表**共用同一份草稿** ⇒ ⇒
-                在这里加 / 删 / 改器件，那张表**同步变**；提交**只有一条路径**。
-            </p>
+            <h3>产品树<span class="tag">板定义</span></h3>
             <div class="tree" data-board-tree>
                 <div class="node">
                     <span class="caret${devices.length > 0 ? "" : " leaf"}"
                           data-action="toggle-tree" data-tree-key="${TREE_ROOT_KEY}"
                           role="button" tabindex="0" aria-expanded="${isCollapsed ? "false" : "true"}"
-                          title="${devices.length > 0 ? (isCollapsed ? "展开" : "折叠") : "（没有器件可折叠）"}">${isCollapsed ? "▶" : "▼"}</span>
+                          title="${devices.length > 0 ? (isCollapsed ? "展开" : "折叠") : "无可折叠"}">${isCollapsed ? "▶" : "▼"}</span>
                     <span class="name">${escapeHtml(boardName)}</span>
-                    <span class="sub">(板 · ${devices.length} 个器件实例)</span>
+                    <span class="sub">${devices.length} 个器件</span>
                 </div>
                 ${kids}
             </div>

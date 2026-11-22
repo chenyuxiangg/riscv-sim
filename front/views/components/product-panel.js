@@ -230,7 +230,7 @@ const productTreeView = register({
                 const nameInput = body.querySelector?.("[data-create-name]");
                 const kinds = readCreateKinds(body);
                 if (kinds.length === 0) {
-                    setNoteInProduct("至少勾一个器件 —— 空白板没有可展示的器件。");
+                    setNoteInProduct("请至少勾选一个器件");
                     return undefined;
                 }
                 const description = createBoardDraft(nameInput?.value ?? "", kinds);
@@ -244,7 +244,7 @@ const productTreeView = register({
                 // 出来的东西跟保存时不一样）。
                 const entry = findTemplateEntry(state, el.dataset.templateId, el.dataset.templateSrc);
                 if (!entry) {
-                    setNoteInProduct("模版没找到 —— 板档案可能已被删除。");
+                    setNoteInProduct("模版未找到，档案可能已删除");
                     return undefined;
                 }
                 setProductState({ dialog: null }, false);
@@ -256,7 +256,7 @@ const productTreeView = register({
             }
             case "save-archive": {
                 if (state.loaded === false) {
-                    setNoteInProduct("先创建或从模版装载一块板，再另存为档案。");
+                    setNoteInProduct("请先创建或装载一块板");
                     return undefined;
                 }
                 setProductState({ dialog: "archive" });
@@ -542,7 +542,7 @@ const embeddedView = register({
                 <p class="link-status" data-embedded-link data-connected="${connected ? "1" : "0"}">
                     内核连接：<strong>${connected ? "已连接" : "未连接"}</strong>${connected
                         ? ""
-                        : `<span class="muted">（${escapeHtml(String(link.lastError ?? "内核传输层未就绪"))}）</span>`}
+                        : `<span class="muted">（${escapeHtml(String(link.lastError ?? "未就绪"))}）</span>`}
                 </p>
                 <div class="cards">
                     <div class="card kpi">
@@ -555,7 +555,7 @@ const embeddedView = register({
                     </div>
                 </div>
                 <section class="card">
-                    <div class="row"><h3>子视图</h3><span class="tag">${EMBEDDED_VIEW_ENTRIES.length} 个入口</span></div>
+                    <div class="row"><h3>子视图</h3><span class="tag">${EMBEDDED_VIEW_ENTRIES.length} 个</span></div>
                     <ul class="embedded-entries">
                         ${EMBEDDED_VIEW_ENTRIES.map((entry) => `
                             <li>

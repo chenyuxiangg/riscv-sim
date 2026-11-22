@@ -63,7 +63,7 @@ export function wireTopbarImageLoader(services) {
     const slot = document.querySelector("[data-image-load-slot]");
     if (!slot) return;
     slot.innerHTML = renderImageLoaderControl({
-        label: "固件镜像",
+        label: "选择固件",
         buttonText: "加载固件",
         withBrief: true,
     });
@@ -114,23 +114,23 @@ export function wireTopbarImageLoader(services) {
                 // ⚠️ **读取中**（v0.59 批）⇒ ⇒ 字节**还没到**⇒ ⇒ ⛔ **不许**
                 // 说「已装载」⇒ ⇒ 用户刚选的新文件**没被吞掉**⇒ ⇒ 如实说
                 // 「正在读」⇒ ⇒ 用户等状态条变成「已选…」再点一下。
-                setNote("正在读取固件 —— 等页头状态条变成「已选…」之后再点「加载固件」");
+                setNote("正在读取固件…");
                 return;
             }
             if (decision.kind === "already-loaded") {
                 // ⚠️ **用户报的缺陷**：装完再点一下 ⇒ ⇒ 上次**成功**了 ⇒ ⇒
                 // ⛔ **不许**报「装载失败」⇒ ⇒ 如实说「已装载，无需重复加载」。
-                setNote(`固件「${decision.name}」已装载 —— 无需重复加载（要换固件请重新选文件）`);
+                setNote(`已装载：${decision.name}`);
                 return;
             }
             if (decision.kind === "no-file") {
                 setImageLoadState({
                     status: "error",
-                    error: "没有待加载的文件 —— 请先用文件选择器选一个固件镜像",
+                    error: "没有待加载的文件",
                     pending: null,
                 });
                 publishProductState();
-                setNote("加载固件失败：没有待加载的文件 —— 请先用文件选择器选一个固件镜像");
+                setNote("没有待加载的文件");
                 return;
             }
             void handleLoadImageCommand({ params: decision.pending }, services);

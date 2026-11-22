@@ -171,7 +171,7 @@ export function disasmStatusText(input) {
     const pc = Number(input?.pc ?? 0) >>> 0;
     if (base === null) {
         return {
-            text: "尚无反汇编 —— 点上面的「反汇编」向内核请求一段（M-11）。",
+            text: "尚无反汇编",
             stale: false,
             base: null,
             count: 0,
@@ -179,16 +179,16 @@ export function disasmStatusText(input) {
     }
     const count = entries.length;
     const stale = isStaleSegment(entries, pc);
-    const head = `这段是 0x${hex8(base)} 起的 ${count} 条`;
-    const cur = `当前 PC 0x${hex8(pc)}`;
+    const head = `0x${hex8(base)} · ${count} 条`;
+    const cur = `PC 0x${hex8(pc)}`;
     if (!stale) {
         return { text: `${head} · ${cur}`, stale: false, base, count };
     }
     const hint = input?.followPc === true
         ? ""
-        : " · 勾上「跟随 PC」可自动跟上";
+        : " · 开启跟随 PC";
     return {
-        text: `${head} · ${cur} —— **已陈旧**（程序已经跑到别处去了）${hint}`,
+        text: `${head} · ${cur} · 已陈旧${hint}`,
         stale: true,
         base,
         count,
@@ -206,6 +206,6 @@ export function disasmStatusText(input) {
  */
 export function followPcLabel(input) {
     return input?.followPc === true
-        ? "跟随 PC：已开启（停下后自动重取一段 · 点击关闭）"
-        : "跟随 PC：已关闭（停下后不自动重取 · 点击开启）";
+        ? "跟随 PC：已开启 · 点击关闭"
+        : "跟随 PC：已关闭 · 点击开启";
 }

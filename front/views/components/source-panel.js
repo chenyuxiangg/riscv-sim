@@ -42,21 +42,21 @@ const sourceView = register({
         const missed = fileMissing && Number(location.line ?? 0) === 0xFFFFFFFF;
         // ⚠️ **三态如实区分**（裁决 J）：「没有源码树」/「匹配不到」/「匹配到多个」。
         const statusText = keys.length === 0
-            ? "尚未装载源码 — 用上面的入口选一个目录或若干文件。"
+            ? "尚未装载源码"
             : (location?.file
                 ? describeMatch(match)
                 : (noDwarf
-                    ? "该程序没有 DWARF 行表 — 重新编译时加上 -g 才有源码行。"
+                    ? "没有 DWARF 行表"
                     : (missed
-                        ? "该地址不在 DWARF 行表内 — 换一个地址试试。"
-                        : "尚未解析 — 点击「解析当前 PC 的源码行」。")));
+                        ? "不在 DWARF 行表内"
+                        : "尚未解析")));
         const activeKey = selected ?? (match?.kind === "unique" ? match.key : null);
         const line = Number(location?.line ?? 0);
 
         return `
             <section class="source-view">
                 <div class="card">
-                    <div class="row"><h3>源码 (M-11 · DWARF 行号)</h3><span class="tag">左列文件 · 右列代码</span></div>
+                    <div class="row"><h3>源码</h3></div>
                     <div class="debug-toolbar">
                         <label class="source-input">
                             装载目录
@@ -76,9 +76,9 @@ const sourceView = register({
                             <h4>路径前缀映射</h4>
                             <button type="button" data-action="remap-add">+ 添加映射</button>
                         </div>
-                        <p class="muted">DWARF 编译期前缀 ⇒ 本地前缀；本地前缀留空 = 剥掉编译期目录。仅本会话有效。</p>
+                        <p class="muted">编译期前缀 → 本地前缀</p>
                         ${remaps.length === 0
-                            ? `<p class="muted">尚无映射 — 路径对不上时在这里加一条。</p>`
+                            ? `<p class="muted">尚无映射</p>`
                             : remaps.map((r) => `
                                 <div class="remap-row" data-remap-row data-id="${escapeHtml(String(r.id))}">
                                     <input type="text" data-remap-field="from" data-id="${escapeHtml(String(r.id))}" value="${escapeHtml(String(r.from ?? ""))}" placeholder="编译期前缀，如 /home/user/osz_build/osz-main" spellcheck="false" autocomplete="off">
@@ -93,15 +93,14 @@ const sourceView = register({
                             ? `<p class="source-location" data-source-location>${escapeHtml(String(location.file))}:${Number(location.line ?? 0)}（地址 0x${(Number(location.addr ?? 0) >>> 0).toString(16).padStart(8, "0")}）</p>`
                             // ⚠️ 内核**回答了**但没有文件名 ⇒ **不**显示
                             // `:4294967295` 这种无意义行号（VB-5）。
-                            : `<p class="source-location" data-source-location>（地址 0x${(Number(location.addr ?? 0) >>> 0).toString(16).padStart(8, "0")} — 内核没有给出文件名）</p>`)
-                        : `<p class="muted" data-source-location>尚未解析 — 点击「解析当前 PC 的源码行」。</p>`}
+                            : `<p class="source-location" data-source-location>（地址 0x${(Number(location.addr ?? 0) >>> 0).toString(16).padStart(8, "0")}，无文件名）</p>`)
+                        : `<p class="muted" data-source-location>尚未解析</p>`}
                     ${match?.kind === "ambiguous"
                         ? `<ul class="source-candidates" data-source-candidates>${match.candidates.map((key) => `
                             <li><button type="button" data-action="pick-candidate" data-key="${escapeHtml(key)}">${escapeHtml(key)}</button></li>
                         `).join("")}</ul>`
                         : ""}
                     ${renderSourceColumns({ tree, activeKey, currentLine: line })}
-                    <p class="muted">源码<strong>不进内核</strong>（裁判 E）：文件由浏览器读成文本 ⇒ 存进视图状态 ⇒ <strong>不发</strong>任何命令。本视图里唯一离开前端的命令是「解析当前 PC 的源码行」。</p>
                 </div>
             </section>
         `;

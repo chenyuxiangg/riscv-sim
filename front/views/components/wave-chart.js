@@ -401,9 +401,8 @@ export function waveChartHtml(chart) {
             <div class="wave-chart wave-chart-degraded" data-wave-chart data-wave-chart-status="degraded">
                 <p class="wave-degraded">
                     <span class="wave-degraded-title">${WAVE_CHART_DEGRADED_TEXT}</span>
-                    —— 外部波形库没加载到，图画不出来。
                 </p>
-                <p class="muted">通道列表仍在下面 ⇒ ⇒ 调试闭环不受影响；联网后刷新即可恢复。</p>
+                <p class="muted">通道列表不受影响</p>
             </div>`;
     }
 
@@ -413,9 +412,9 @@ export function waveChartHtml(chart) {
         <div class="wave-chart" data-wave-chart data-wave-chart-status="${escapeHtml(status)}">
             ${channelFilterHtml(channels, selected)}
             <div class="wave-chart-slot" data-wave-chart-slot></div>
-            <p class="muted">每个通道最多显示最近 ${limit} 条边沿；通道列表里的「N edges」是总数。</p>
+            <p class="muted">每通道最多显示最近 ${limit} 条边沿。</p>
             <p class="muted">${drawable > 0
                 ? `${drawable} 个通道有边沿可画。`
-                : "还没有可画的边沿 —— 先跑起来，固件驱动外设引脚才会有。"}</p>
+                : "还没有可画的边沿"}</p>
         </div>`;
 }

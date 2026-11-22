@@ -60,12 +60,12 @@ const waveformView = register({
             <section class="waveform">
                 <div class="card">
                     <div class="row">
-                        <h3>波形 (M-19)</h3>
+                        <h3>波形</h3>
                         <span class="tag">${channels.length} 个通道</span>
                         <button type="button" data-action="export-trace" data-source="Waveform" data-format="Vcd" data-offset="0" data-limit="0" data-whole="1">导出波形 (VCD)</button>
                     </div>
                     ${channels.length === 0
-                        ? `<p class="muted">尚无探针信号 — 固件驱动外设后（M-15 + M-18 管道已接通）会列出通道。</p>`
+                        ? `<p class="muted">尚无探针信号</p>`
                         : `<ul class="channel-list">
                             ${channels.map((c) => `
                                 <li>
@@ -76,11 +76,10 @@ const waveformView = register({
                                         : `<span class="muted">· 最新值 ${escapeHtml(String(c.lastValue))}</span>`}
                                 </li>`).join("")}
                            </ul>`}
-                    <p class="muted">通道列表里的边沿数是**总数**；下面的图只画每个通道最近的一段。</p>
-                    <p class="muted">导出的波形内容显示在「<strong>调试视图 → trace 记录 / 导出</strong>」卡片里（下载也在那儿）。</p>
+                    <p class="muted">边沿数为总数</p>
                 </div>
                 <div class="card">
-                    <div class="row"><h3>波形图</h3><span class="tag">M-19 · 边沿回放</span></div>
+                    <div class="row"><h3>波形图</h3><span class="tag">边沿回放</span></div>
                     ${waveChartHtml({
                         status: wave.chart?.status ?? "idle",
                         channels,
