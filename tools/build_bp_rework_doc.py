@@ -28,10 +28,11 @@ from pathlib import Path
 OUT_DEFAULT = Path("docs/detailed-design/STAGE-55_Breakpoint_Window_Rework.html")
 
 TITLE = "STAGE-55 · 断点窗口重构（三类输入合一 + 观察式条件断点）"
-SUBTITLE = "RISC-V 仿真平台 · 调试服务层 · 详细设计定稿 v0.4"
-VERSION = ("版本 v0.4 定稿 · 2026-11-22 · 基线 main 6dabbdd"
-           "（A→E + CFI 批 + 栈回溯批已合入）"
-           "· 输入方式按 kind 三值落库 · CFI / 栈回溯口径见 §12 · 偏离见 §11")
+SUBTITLE = "RISC-V 仿真平台 · 调试服务层 · 详细设计定稿 v0.5"
+VERSION = ("版本 v0.5 定稿 · 2026-11-22 · 基线 main 0bbe4ae"
+           "（A→E + CFI 批 + 栈回溯批 + 真相候选列表批已合入）"
+           "· 输入方式按 kind 三值落库 · CFI / 栈回溯口径见 §12 · "
+           "局部变量候选列表见 §13 · 偏离见 §11")
 
 KPI = [
     ("3", "种输入方式", "地址 · 符号 · 条件（落库为 kind 三值，可筛选可还原）"),
@@ -40,6 +41,7 @@ KPI = [
     ("2", "个求值时刻", "无内存读→取指前；含内存读→store 边界"),
     ("2", "条 CFI 口径", "变量取主行 · 回溯按 pc 逐行（同一节区、两个口径）"),
     ("32", "帧回溯上限", "返回地址 0 = 栈底；再往上说「被截断」，不猜"),
+    ("128", "条变量上限", "超了报「列表不完整」，不静默截断"),
 ]
 
 SECTIONS = []
@@ -436,10 +438,12 @@ SECTIONS.append({
 # ── 10 测试 ─────────────────────────────────────────────────────────────
 SECTIONS.append({
     "id": "s10",
-    "h": "10 测试设计（计划用例 · 未实现）",
+    "h": "10 测试设计（钉错误机制 · 按批落地）",
     "blocks": [
-        ("p", "下列用例钉的是「错误机制」，不是覆盖率。结果列全部为「计划」。"
-              "回归基线：前端 777/777、后端 1899 passed / 0 failed、fmt/clippy rc=0。"),
+        ("p", "下列用例钉的是「错误机制」，不是覆盖率。首批之后已逐批写成真用例，"
+              "编号见 §12 / §13（宿主 S-15 ~ S-23、前端 C-10f / C-14 系列 / C-15 系列）。"
+              "回归基线（v0.132 后）：后端 1998 passed / 0 failed（20 套件）、"
+              "前端 791/791、fmt / clippy rc=0。"),
         ("caption", "表 16 · 计划测试矩阵"),
         ("table", {
             "widths": ["14%", "28%", "30%", "28%"],
@@ -478,7 +482,7 @@ SECTIONS.append({
                 ["前端", "三类切换", "下拉切换 + 提交",
                  "地址串被当表达式提交；错误位不清空"],
                 ["回归", "既有地址链路", "全量门禁",
-                 "777 / 1899 基线被破；fmt/clippy 不干净"],
+                 "1998 / 791 基线被破；fmt/clippy 不干净"],
             ],
         }),
     ],
@@ -503,7 +507,10 @@ SECTIONS.append({
          "<b>⑤ <code>trigger_addr</code></b> ⇒ 已进停止回执结构（只在 store 边界命中时给值）。"
          "<b>⑥ store 谓词与 M-10 观察点同时成立</b> ⇒ <b>条件断点优先</b>（用户拍板）："
          "停因归条件断点、<code>trigger_addr</code> 指向那条 store，M-10 的命中事实仍记录在 "
-         "<code>last_watchpoint_hit</code>（不抹掉、不改变停因）。"),
+         "<code>last_watchpoint_hit</code>（不抹掉、不改变停因）。"
+         "<b>⑦ 真相候选列表</b> ⇒ <b>只读面板</b>（用户 2026-11-22 拍板）：回执只给「名字 + "
+         "位置」（人读文本 <code>[s0-24]</code> / <code>a0</code>），<b>不带当前值、不带类型、"
+         "不做条件输入补全</b>；口径见 §13。"),
         ("caption", "表 18 · 实施期刻意偏离（代码为准，逐条有落地位置）"),
         ("table", {
             "widths": ["28%", "44%", "28%"],
@@ -545,6 +552,16 @@ SECTIONS.append({
                 ["两态空文案拆成三态",
                  "无 DWARF / 该帧没有这个变量 / 名字压根不存在 ⇒ 三条不同的下一步",
                  "<code>names::ResolveError</code> + <code>cond::resolve_in</code>"],
+                ["变量列表只给「名字 + 位置」",
+                 "值要<b>按位置拼地址</b>再读内存 / 读寄存器、类型要顺 "
+                 "<code>DW_AT_type → DW_TAG_base_type</code> 再走一遍 DIE ⇒ 两者都<b>不做</b>"
+                 "（用户拍板），契约里没这两个字段",
+                 "<code>CommandPayload::ListLocals</code> / "
+                 "<code>EventPayload::Locals</code> 的注释"],
+                ["变量列表是<b>快照</b>，不随 pc 自动刷新",
+                 "只在点「列出」时发一条命令；pc 变了列表还是上一次的 ⇒ 要看新帧再点一次"
+                 "（不偷偷重发、不猜用户想看哪帧）",
+                 "<code>debug-panel.js</code> 的 <code>data-action=\"list-locals\"</code>"],
             ],
         }),
         ("caption", "表 17 · 交付批次"),
@@ -566,15 +583,22 @@ SECTIONS.append({
                 ["F", "CFI 批（真 CFA）",
                  "M-06 放行 <code>.debug_frame</code>；新模块 <code>cfi.rs</code>；"
                  "变量位置改由 CFI 主行算出，删 <code>FrameBaseSlot</code>", "档 4 深化"],
-                ["G", "栈回溯批（本批）",
+                ["G", "栈回溯批",
                  "CFI 补 <b>RA 规则</b> + 按 pc 取行；<code>Backtrace</code> 命令 / 回执；"
                  "调试面板「调用栈」卡；条件栏补「按写入判定」文案", "档 4 收尾"],
+                ["H", "真相候选列表批（本批）",
+                 "<code>ListLocals</code> 命令 / <code>Locals</code> 回执；"
+                 "调试面板「局部变量」卡（名字 + 位置、两态文案互斥）；"
+                 "<code>LocalLocation::describe()</code> 收敛位置写法", "档 4 收尾"],
             ],
         }),
         ("callout", "下一步",
-         "A→E + CFI 批 + 栈回溯批均已落地（每批独立门禁 + 台账，<code>--no-ff</code> 合 main、删本地分支）。"
-         "剩余一条<b>单独立批</b>：真相候选列表（<code>ListLocals</code> 一类只读命令，"
-         "把当前帧可用变量「名字 + 位置」列给用户挑；<b>不带当前值、不做类型</b>）。"),
+         "A→E + CFI 批 + 栈回溯批 + 真相候选列表批均已落地（每批独立门禁 + 台账，"
+         "<code>--no-ff</code> 合 main、删本地分支）。剩下的都<b>不是欠做</b>，是<b>拍板不做</b>："
+         "变量<b>带值</b>（要按位置拼地址再读）、变量<b>带类型</b>（顺 "
+         "<code>DW_AT_type</code> 走 DIE）、<b>条件输入补全</b>（点行不填名字）、"
+         "上层帧变量、读观察点（<code>[..] == v</code> 读到即停）。"
+         "任一要动，都是<b>新一笔拍板</b>，不在这条链上自动续。"),
     ],
 })
 
@@ -651,6 +675,88 @@ SECTIONS.append({
                  "C-10f；<code>data-bp-store-only-note</code>"],
             ],
         }),
+    ],
+})
+
+SECTIONS.append({
+    "id": "s13",
+    "h": "13 局部变量的候选列表（v0.132 落地）",
+    "blocks": [
+        ("p", "批 E 收口时用户拍板「两态空态只做轻档」，把「当前帧有哪些变量」推到另立批。"
+              "到 v0.130 收官时，变量表与 CFI 都已就位，缺的只是<b>把已有的真相摆出来</b> —— "
+              "用户写条件时仍不知道这个帧里能写哪些名字。本节回写这批的落地口径："
+              "<b>一条只读命令 + 一张只读卡</b>，复用 §12 的 DWARF / CFI 结果，"
+              "<b>不新增任何解析</b>，也不回写任何状态。"),
+        ("caption", "表 21 · 局部变量候选列表（<code>ListLocals</code>）口径（v0.132）"),
+        ("table", {
+            "widths": ["22%", "52%", "26%"],
+            "head": ["项", "定稿做法", "落点 / 判别力"],
+            "rows": [
+                ["命令",
+                 "<code>CommandPayload::ListLocals</code>（unit 变体 · <b>只读</b>）："
+                 "按<b>当前 pc</b> 取它所在的帧，不动任何状态",
+                 "前端只在点「列出」时发一条（C-15c）"],
+                ["回执",
+                 "<code>EventPayload::Locals { function, vars, truncated }</code>；"
+                 "每个变量是 <code>LocalVarInfo { name, location }</code>",
+                 "<code>contract/src/model.rs</code>"],
+                ["<code>location</code> 谁渲染",
+                 "<b>内核</b>渲染成人读文本；前端<b>不</b>二次解释、不拼自己的格式、"
+                 "不建第二份寄存器名表",
+                 "<code>locals.rs::LocalLocation::describe()</code>；名字表唯一位于 "
+                 "<code>render::reg_name</code>"],
+                ["位置写法（唯一四种）",
+                 "寄存器 ⇒ ABI 名（<code>a0</code>，不写 <code>x10</code>）；栈上 ⇒ "
+                 "<code>[base±offset]</code>；偏移 0 ⇒ <code>[s0]</code>（不写 <code>+0</code>）；"
+                 "正偏移必带 <code>+</code>",
+                 "locals 单测：<code>s0</code> / <code>a0</code> / <code>[s0-24]</code> / "
+                 "<code>[sp+16]</code> / <code>[s0]</code> 逐字断言"],
+                ["「没有名字」≠「没有变量」（两态空态）",
+                 "<code>function</code> 缺省 ⇒ pc 不在<b>任何</b>已知函数里（不编名字）；"
+                 "<code>function</code> 有值而 <code>vars</code> 空 ⇒ 区间收了、位置算不出来"
+                 "（读不到 CFI）⇒ 前端两条文案<b>互斥</b>",
+                 "S-23 / S-22；<code>data-locals-no-function</code> / "
+                 "<code>data-locals-empty</code>（C-15b）"],
+                ["上限与截断",
+                 "128 条上限；超了置 <code>truncated</code> 并在卡上说「列表不完整」"
+                 "（<b>不静默截</b>）；空列表<b>不是</b>截断",
+                 "<code>on_list_locals::MAX_VARS</code>；S-22 / S-23 均断言 "
+                 "<code>truncated = false</code>"],
+                ["不带值、不带类型",
+                 "面板只回答「这个名字此刻在哪儿」；值要按位置拼地址再读内存 / 读寄存器，"
+                 "类型要顺 <code>DW_AT_type</code> 再走一遍 DIE ⇒ 都<b>另立批</b>，"
+                 "契约里<b>没有</b>这两个字段（不是省了没填）",
+                 "契约注释 + 本批遗留问题"],
+                ["不做条件输入补全",
+                 "点变量行<b>不</b>把名字填进条件框；卡上的 "
+                 "<code>data-locals-hint</code> 直接写明「点行不填条件（本批只读）」",
+                 "C-15d（钉住「不填、不加断点」）"],
+                ["快照语义",
+                 "列表是<b>一次查询的结果</b>，不随 pc 变化自动刷新；要看新帧再点一次"
+                 "（不偷偷重发、不猜用户想看哪一帧）",
+                 "<code>debug-wiring.js</code> 的 <code>debug.locals</code> 订阅原样存"],
+                ["真夹具实测行",
+                 "停在 <code>main</code>（pc 0x48）⇒ <code>x [s0-24]</code>、"
+                 "<code>y [s0-20]</code>；换到 <code>helper</code>（pc 0x10）⇒ "
+                 "<code>a [s0-36]</code>、<code>t [s0-20]</code>",
+                 "S-20 / S-21（走真实 ELF 装载路径）"],
+            ],
+        }),
+        ("svg", "locals"),
+        ("mobile_flow", [
+            ("1", "点「列出」⇒ 发一条 <code>ListLocals</code>（只读，不改状态）"),
+            ("2", "pc 不落在任何函数区间 ⇒ <code>function</code> 缺省，"
+                  "文案「当前 pc 不在任何已知函数里」"),
+            ("3", "区间在、但读不到 CFI ⇒ <code>function</code> 有值、<code>vars</code> 空，"
+                  "文案「X 里没有可展示的变量」"),
+            ("4", "区间 + CFI 都在 ⇒ 列出「名字 + 位置」（≤128 条，超了标截断）"),
+        ]),
+        ("callout", "为什么位置必须由内核渲染",
+         "同一个变量有三种写法：寄存器有别名（<code>s0</code> = <code>x8</code> = <code>fp</code>）、"
+         "栈偏移有正负号、偏移 0 写不写 <code>+0</code>。前端各拼一套必然分叉 —— 面板显示 "
+         "<code>[x8+-24]</code>、条件框只认 <code>[s0-24]</code>，用户抄不进去。"
+         "所以 <code>describe()</code> 是<b>唯一落点</b>，且复用条件文法用的那张 "
+         "<code>reg_name</code> 表：<b>显示的名字</b>与<b>能写进条件框的名字</b>同源。"),
     ],
 })
 
@@ -746,6 +852,63 @@ TIMING_SVG = """
 """
 
 
+LOCALS_SVG = """
+<svg class="flow-svg" viewBox="0 0 1020 420" xmlns="http://www.w3.org/2000/svg"
+  role="img" aria-label="当前帧局部变量列表的三种回执形态">
+  <defs>
+    <marker id="l1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1e3a8a"/>
+    </marker>
+    <marker id="l2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9aa1af"/>
+    </marker>
+  </defs>
+
+  <rect x="360" y="12" width="300" height="56" rx="8" fill="#eef2fb" stroke="#c7d2e5"/>
+  <text x="510" y="36" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">点「列出」⇒ ListLocals</text>
+  <text x="510" y="56" text-anchor="middle" font-size="11.5" fill="#4b5563">只读 · 按当前 pc 取帧 · 不动任何状态</text>
+  <line x1="510" y1="68" x2="510" y2="86" stroke="#1e3a8a" stroke-width="2" marker-end="url(#l1)"/>
+
+  <rect x="60" y="86" width="900" height="42" rx="6" fill="#f8fafc" stroke="#d8dee9"/>
+  <text x="510" y="112" text-anchor="middle" font-size="12.5" fill="#4b5563">判别只看两件事：pc 落在函数区间里吗 · 那个函数的变量位置算得出来吗</text>
+
+  <!-- 形态一：没有函数区间 -->
+  <rect x="40" y="146" width="300" height="76" rx="8" fill="#fff7ed" stroke="#fdba74"/>
+  <text x="190" y="173" text-anchor="middle" font-size="13" font-weight="700" fill="#9a3412">没有函数区间</text>
+  <text x="190" y="195" text-anchor="middle" font-size="11.5" fill="#9a3412">pc 不在任何已知函数里</text>
+  <line x1="342" y1="184" x2="376" y2="184" stroke="#9aa1af" stroke-width="1.8" marker-end="url(#l2)"/>
+  <rect x="380" y="146" width="600" height="76" rx="8" fill="#f8fafc" stroke="#d8dee9"/>
+  <text x="400" y="173" font-size="13" font-weight="700" fill="#1f2937">function 缺省 · vars 空</text>
+  <text x="400" y="195" font-size="12" fill="#4b5563">前端文案「当前 pc 不在任何已知函数里」</text>
+  <text x="400" y="213" font-size="11.5" fill="#6b7280">S-23 ｜ 不编一个名字</text>
+
+  <!-- 形态二：区间在、读不到 CFI -->
+  <rect x="40" y="234" width="300" height="76" rx="8" fill="#fff7ed" stroke="#fdba74"/>
+  <text x="190" y="261" text-anchor="middle" font-size="13" font-weight="700" fill="#9a3412">区间在 · 没有 CFI</text>
+  <text x="190" y="283" text-anchor="middle" font-size="11.5" fill="#9a3412">位置算不出来 ⇒ 变量一个不留</text>
+  <line x1="342" y1="272" x2="376" y2="272" stroke="#9aa1af" stroke-width="1.8" marker-end="url(#l2)"/>
+  <rect x="380" y="234" width="600" height="76" rx="8" fill="#f8fafc" stroke="#d8dee9"/>
+  <text x="400" y="261" font-size="13" font-weight="700" fill="#1f2937">function 有值 · vars 空</text>
+  <text x="400" y="283" font-size="12" fill="#4b5563">前端文案「X 里没有可展示的变量（没有调试信息，或读不到 CFI）」</text>
+  <text x="400" y="301" font-size="11.5" fill="#6b7280">S-22 ｜ 空列表不是截断</text>
+
+  <!-- 形态三：能列 -->
+  <rect x="40" y="322" width="300" height="76" rx="8" fill="#f0fdf4" stroke="#86efac"/>
+  <text x="190" y="349" text-anchor="middle" font-size="13" font-weight="700" fill="#166534">区间 + CFI 都在</text>
+  <text x="190" y="371" text-anchor="middle" font-size="11.5" fill="#166534">位置由 describe() 落成人读文本</text>
+  <line x1="342" y1="360" x2="376" y2="360" stroke="#1e3a8a" stroke-width="2" marker-end="url(#l1)"/>
+  <rect x="380" y="322" width="600" height="76" rx="8" fill="#f0fdf4" stroke="#86efac"/>
+  <text x="400" y="349" font-size="13" font-weight="700" fill="#166534">列表：名字 + 位置</text>
+  <text x="400" y="371" font-size="12" fill="#166534">main ⇒ x [s0-24] · y [s0-20]   ／   helper ⇒ a [s0-36] · t [s0-20]</text>
+  <text x="400" y="389" font-size="11.5" fill="#166534">S-20 / S-21 ｜ ≤128 条，超了标 truncated</text>
+
+  <text x="40" y="414" font-size="11.5" fill="#6b7280">
+图注：前两种都是合法回答 —— 「不是任何函数」与「函数在、变量读不到」必须分开说，不能合并成一句「没有数据」。
+  </text>
+</svg>
+"""
+
+
 def esc(t: str) -> str:
     return html.escape(t, quote=False)
 
@@ -783,7 +946,7 @@ def render_blocks(blocks) -> str:
                 f'<span class="callout-txt">{b[2]}</span></div>'
             )
         elif kind == "svg":
-            out.append(TABLE_SVG if val == "table" else TIMING_SVG)
+            out.append({"table": TABLE_SVG, "timing": TIMING_SVG, "locals": LOCALS_SVG}[val])
         elif kind == "mobile_flow":
             out.append('<div class="flow-mobile">' + "".join(
                 f'<div class="flow-step"><span class="num">{n}</span><span class="txt">{t}</span></div>'
@@ -882,8 +1045,8 @@ def build(nav: str, body: str) -> str:
 {nav}
 {body}
 <p class="foot">本文件由 <b>tools/build_bp_rework_doc.py</b> 数据驱动生成；改内容请改脚本后重跑，
-不要手改 HTML。本文为设计定稿（v0.4）：A→E + CFI 批 + 栈回溯批均已落地并合入 main
-（基线 6dabbdd），文中「测试矩阵」与 §12 的用例已在内核 / 前端用例中实现。</p>
+不要手改 HTML。本文为设计定稿（v0.5）：A→E + CFI 批 + 栈回溯批 + 真相候选列表批均已落地并合入 main
+（基线 0bbe4ae），文中「测试设计」列的用例、§12 与 §13 的用例已在内核 / 前端用例中实现。</p>
 </div>
 </body>
 </html>
