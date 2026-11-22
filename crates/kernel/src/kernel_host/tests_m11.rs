@@ -1845,6 +1845,117 @@ fn elf_project_without_cfi() -> Project {
     elf_project(&sections)
 }
 
+/// 取第一条 `Backtrace` 事件。
+fn backtrace_frames(events: &[EventPayload]) -> (Vec<(u32, Option<String>)>, bool) {
+    for event in events {
+        if let EventPayload::Backtrace { frames, truncated } = event {
+            let listed = frames
+                .iter()
+                .map(|frame| (frame.pc, frame.function.clone()))
+                .collect();
+            return (listed, *truncated);
+        }
+    }
+    panic!("没有 Backtrace 事件：{events:?}");
+}
+
+/// 把 `elf_project_with_locals` 装进宿主，并把 `pc` / `s0` 摆到给定位置。
+fn host_at(project: Project, pc: u32, frame_pointer: u32) -> KernelHost {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(&mut host, CommandPayload::LoadProject(project));
+    // ⚠️ 没有 `SetPc` 契约命令 ⇒ 测试直接动后端（本文件是 `kernel_host`
+    //    的子模块，能摸到私有字段）。
+    host.backend.set_pc(pc);
+    dispatch(
+        &mut host,
+        CommandPayload::WriteRegister {
+            index: 8,
+            value: frame_pointer,
+        },
+    );
+    host
+}
+
+/// **S-16**：栈回溯到栈底 ⇒ 只有当前帧、`truncated = false`。
+///
+/// helper 函数体（0x10）的 CFI：CFA = `s0+0`、返回地址在 `cfa-4`。
+/// `s0 = 0x400` ⇒ 返回地址槽在 `0x3fc`；填 0 = 栈底。
+#[test]
+fn s16_a_backtrace_stops_at_the_bottom_of_the_stack() {
+    let mut host = host_at(elf_project_with_locals(), 0x10, 0x400);
+    dispatch(
+        &mut host,
+        CommandPayload::WriteMemory {
+            addr: 0x3fc,
+            size: WriteSize::Word,
+            value: 0,
+        },
+    );
+    let (frames, truncated) = backtrace_frames(&dispatch(&mut host, CommandPayload::Backtrace));
+    assert_eq!(frames, vec![(0x10, Some("helper".to_string()))]);
+    assert!(!truncated, "返回地址为 0 是栈底，不是截断");
+}
+
+/// **S-17**：真夹具两帧 ⇒ 上一层函数的 pc 与函数名都要出来。
+#[test]
+fn s17_a_backtrace_lists_the_caller_frame() {
+    let mut host = host_at(elf_project_with_locals(), 0x10, 0x400);
+    dispatch(
+        &mut host,
+        CommandPayload::WriteMemory {
+            addr: 0x3fc,
+            size: WriteSize::Word,
+            value: 0x38,
+        },
+    );
+    let (frames, truncated) = backtrace_frames(&dispatch(&mut host, CommandPayload::Backtrace));
+    assert_eq!(
+        frames,
+        vec![
+            (0x10, Some("helper".to_string())),
+            (0x38, Some("main".to_string())),
+        ]
+    );
+    assert!(
+        truncated,
+        "`main` 入口那一行还没存 `ra`（CFI 里 ra_offset 为 None）⇒ ⇒ 爬不上去要说截断"
+    );
+}
+
+/// **S-18**：没有 `.debug_frame` ⇒ 只报当前帧、明说截断，**不猜**。
+#[test]
+fn s18_without_cfi_the_backtrace_is_a_single_frame() {
+    let mut host = host_at(elf_project_without_cfi(), 0x10, 0x400);
+    let (frames, truncated) = backtrace_frames(&dispatch(&mut host, CommandPayload::Backtrace));
+    assert_eq!(frames, vec![(0x10, Some("helper".to_string()))]);
+    assert!(truncated);
+}
+
+/// **S-19**：返回地址绕回已经出现过的 pc ⇒ 判环、截断。
+#[test]
+fn s19_a_loop_in_the_return_address_is_truncated() {
+    let mut host = host_at(elf_project_with_locals(), 0x10, 0x400);
+    dispatch(
+        &mut host,
+        CommandPayload::WriteMemory {
+            addr: 0x3fc,
+            size: WriteSize::Word,
+            value: 0x10,
+        },
+    );
+    let (frames, truncated) = backtrace_frames(&dispatch(&mut host, CommandPayload::Backtrace));
+    assert_eq!(frames, vec![(0x10, Some("helper".to_string()))]);
+    assert!(truncated, "返回地址指回自己 ⇒ 环");
+}
+
 /// **S-10**：地址断点的条件里写**局部变量** ⇒ 注册期按该地址所在函数解析。
 ///
 /// ⚠️ 这条钉的是「**接上了**」：`Lookup` 与文法各自能过，但只要

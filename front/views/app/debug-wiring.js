@@ -168,6 +168,29 @@ export function wireDebug(commandRouter, services = {}) {
         publishViewState("debug");
     });
 
+    /**
+     * 栈回溯回执（STAGE-55 栈回溯批 · `debug.backtrace`）。
+     *
+     * ⚠️ **只读**：帧列表由内核算，前端不改、不补、不排序 ⇒ ⇒ `frames[0]`
+     * 就是当前帧。`truncated` 原样透传（「没走到栈底」是内核的判定，不是
+     * 界面的猜测）。
+     */
+    commandRouter.subscribe("debug.backtrace", (event) => {
+        const raw = Array.isArray(event.value?.frames) ? event.value.frames : [];
+        const frames = raw.map((frame) => ({
+            pc: Number(frame?.pc ?? 0) >>> 0,
+            function: frame?.function ? String(frame.function) : null,
+        }));
+        viewStore.setState("debug", (prev) => ({
+            ...prev,
+            debug: {
+                ...(prev.debug ?? {}),
+                backtrace: { frames, truncated: event.value?.truncated === true },
+            },
+        }));
+        publishViewState("debug");
+    });
+
     commandRouter.subscribe("debug.source", (event) => {
         viewStore.setState("source", (prev) => ({
             ...prev,

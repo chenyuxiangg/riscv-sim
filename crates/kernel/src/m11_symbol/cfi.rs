@@ -53,7 +53,11 @@ pub struct CfaRule {
 struct Row {
     start: u32,
     /// `None` = 这一段的 CFA 还没被任何指令定义（或由不认的表达式算）。
-    rule: Option<CfaRule>,
+    cfa: Option<CfaRule>,
+    /// 返回地址**存在哪儿**：`[CFA + ra_offset]`。
+    ///
+    /// `None` = 这一行没给 RA 规则（栈回溯到这一帧就断了，**不猜**）。
+    ra_offset: Option<i32>,
 }
 
 /// 一个 FDE：它覆盖的地址区间 + 分段的行。
@@ -70,6 +74,10 @@ struct Cie {
     code_align: u32,
     data_align: i32,
     initial: Option<CfaRule>,
+    /// **返回地址列号**（RISC-V 上是 1 = `ra`）。
+    ra_register: u8,
+    /// CIE 自己给的 RA 初值规则（`DW_CFA_offset ra`）。
+    initial_ra: Option<i32>,
     /// 增补串以 `z` 开头 ⇒ 每条记录前多一个「增补数据长度」。
     has_z_augmentation: bool,
 }
@@ -122,7 +130,7 @@ impl CfiTable {
                 .get(index + 1)
                 .map(|next| next.start)
                 .unwrap_or(fde.high);
-            let Some(rule) = row.rule else {
+            let Some(rule) = row.cfa else {
                 continue;
             };
             if end <= row.start {
@@ -136,6 +144,28 @@ impl CfiTable {
             }
         }
         best.map(|(_, rule)| rule)
+    }
+
+    /// **`pc` 落在哪一行**（逐行，**不**取主行）。
+    ///
+    /// 栈回溯要的是「此刻这一条指令」的 CFA / RA 规则 ⇒ ⇒ 按 pc 精确取行；
+    /// 局部变量那条路才要主行（见 [`Self::body_cfa`]）。
+    pub fn row_at(&self, pc: u32) -> Option<UnwindRow> {
+        let fde = self
+            .fdes
+            .iter()
+            .filter(|fde| pc >= fde.low && pc < fde.high)
+            .min_by_key(|fde| fde.high.saturating_sub(fde.low))?;
+        let row = fde
+            .rows
+            .iter()
+            .take_while(|row| row.start <= pc)
+            .last()
+            .or_else(|| fde.rows.first())?;
+        Some(UnwindRow {
+            cfa: row.cfa,
+            ra_offset: row.ra_offset,
+        })
     }
 
     fn parse(bytes: &[u8]) -> Self {
@@ -194,16 +224,28 @@ impl Cie {
         }
         let code_align = uleb(&mut rest)? as u32;
         let data_align = sleb(&mut rest)? as i32;
-        let _return_address_register = uleb(&mut rest)?;
+        let ra_register = u8::try_from(uleb(&mut rest)?).ok()?;
         if has_z_augmentation {
             let aug_len = uleb(&mut rest)? as usize;
             rest = rest.get(aug_len..)?;
         }
-        let (_, initial) = run_cfi(rest, 0, None, code_align, data_align, &mut Vec::new());
+        let (_, initial, initial_ra) = run_cfi(
+            rest,
+            0,
+            None,
+            None,
+            None,
+            ra_register,
+            code_align,
+            data_align,
+            &mut Vec::new(),
+        );
         Some(Self {
             code_align,
             data_align,
             initial,
+            ra_register,
+            initial_ra,
             has_z_augmentation,
         })
     }
@@ -223,10 +265,13 @@ impl Fde {
             rest = rest.get(aug_len..)?;
         }
         let mut rows = Vec::new();
-        let (_, _) = run_cfi(
+        let (_, _, _) = run_cfi(
             rest,
             low,
             cie.initial,
+            cie.initial_ra,
+            cie.initial_ra,
+            cie.ra_register,
             cie.code_align,
             cie.data_align,
             &mut rows,
@@ -238,18 +283,34 @@ impl Fde {
     }
 }
 
-/// 跑一遍 CFA 指令；返回**结束时**的 `(pc, 规则)`。
+/// 一行 CFI 给栈回溯的两条信息。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnwindRow {
+    /// 这一段的 CFA 规则（`None` = 算不出来）。
+    pub cfa: Option<CfaRule>,
+    /// 返回地址存在 `[CFA + ra_offset]`（`None` = 这一行没给 RA 规则）。
+    pub ra_offset: Option<i32>,
+}
+
+/// 跑一遍 CFA / RA 指令；返回**结束时**的 `(pc, CFA 规则, RA 偏移)`。
 ///
 /// `rows` 只在 pc 变化时追加（变更规则不影响已经开始的这一段）。
+///
+/// ⚠️ 只追两条规则：**CFA** 与**返回地址的保存位置**。其余寄存器规则
+/// （callee-saved 存哪儿）照长度跳过 —— 那要完整 unwind 表，本批不做。
+#[allow(clippy::too_many_arguments)]
 fn run_cfi(
     mut code: &[u8],
     mut pc: u32,
-    mut rule: Option<CfaRule>,
+    mut cfa: Option<CfaRule>,
+    mut ra: Option<i32>,
+    initial_ra: Option<i32>,
+    ra_register: u8,
     code_align: u32,
     data_align: i32,
     rows: &mut Vec<Row>,
-) -> (u32, Option<CfaRule>) {
-    let mut stack: Vec<(u32, Option<CfaRule>)> = Vec::new();
+) -> (u32, Option<CfaRule>, Option<i32>) {
+    let mut stack: Vec<(u32, Option<CfaRule>, Option<i32>)> = Vec::new();
     while let Some(&op) = code.first() {
         code = &code[1..];
         match op {
@@ -260,7 +321,11 @@ fn run_cfi(
                     break;
                 };
                 code = &code[4..];
-                rows.push(Row { start: pc, rule });
+                rows.push(Row {
+                    start: pc,
+                    cfa,
+                    ra_offset: ra,
+                });
                 pc = loc;
             }
             0x02..=0x04 => {
@@ -269,42 +334,77 @@ fn run_cfi(
                     break;
                 };
                 code = &code[width..];
-                rows.push(Row { start: pc, rule });
+                rows.push(Row {
+                    start: pc,
+                    cfa,
+                    ra_offset: ra,
+                });
                 pc = pc.saturating_add(delta.saturating_mul(code_align));
             }
-            0x05..=0x07 => {
-                // restore / undefined / same_value（寄存器规则，跳过）
-                if uleb(&mut code).is_none() {
+            0x05 => {
+                // restore_extended：把某个寄存器恢复到 CIE 初值
+                let Some(reg) = uleb(&mut code) else {
                     break;
+                };
+                if u8::try_from(reg).ok() == Some(ra_register) {
+                    ra = initial_ra;
                 }
             }
-            0x08 | 0x09 => {
-                // offset_extended / register_extended：两个 ULEB
+            0x06 => {
+                // undefined：该寄存器的值不再可知
+                let Some(reg) = uleb(&mut code) else {
+                    break;
+                };
+                if u8::try_from(reg).ok() == Some(ra_register) {
+                    ra = None;
+                }
+            }
+            0x07 => {
+                // same_value：值没变（可能不在栈上）⇒ 本模块不追
+                let Some(reg) = uleb(&mut code) else {
+                    break;
+                };
+                if u8::try_from(reg).ok() == Some(ra_register) {
+                    ra = None;
+                }
+            }
+            0x08 => {
+                // offset_extended：reg + ULEB（按 data_align 缩放）
+                let (Some(reg), Some(offset)) = (uleb(&mut code), uleb(&mut code)) else {
+                    break;
+                };
+                if u8::try_from(reg).ok() == Some(ra_register) {
+                    ra = Some(scale(offset as i64, data_align));
+                }
+            }
+            0x09 => {
+                // register_extended：reg + reg（值在寄存器里）⇒ RA 不追
                 if uleb(&mut code).is_none() || uleb(&mut code).is_none() {
                     break;
                 }
             }
-            0x0a => stack.push((pc, rule)),
+            0x0a => stack.push((pc, cfa, ra)),
             0x0b => {
-                let Some((saved_pc, saved_rule)) = stack.pop() else {
+                let Some((saved_pc, saved_cfa, saved_ra)) = stack.pop() else {
                     break;
                 };
                 pc = saved_pc;
-                rule = saved_rule;
+                cfa = saved_cfa;
+                ra = saved_ra;
             }
             0x0c => {
-                // def_cfa：规则在这里第一次被定义
+                // def_cfa：CFA 规则在这里第一次被定义
                 let (Some(reg), Some(offset)) = (uleb(&mut code), uleb(&mut code)) else {
                     break;
                 };
                 match u8::try_from(reg) {
                     Ok(reg) => {
-                        rule = Some(CfaRule {
+                        cfa = Some(CfaRule {
                             reg,
                             offset: offset as i32,
                         })
                     }
-                    Err(_) => rule = None,
+                    Err(_) => cfa = None,
                 }
             }
             0x0d => {
@@ -312,8 +412,8 @@ fn run_cfi(
                 let Some(reg) = uleb(&mut code) else {
                     break;
                 };
-                rule = u8::try_from(reg).ok().and_then(|reg| {
-                    rule.map(|current| CfaRule {
+                cfa = u8::try_from(reg).ok().and_then(|reg| {
+                    cfa.map(|current| CfaRule {
                         reg,
                         offset: current.offset,
                     })
@@ -324,7 +424,7 @@ fn run_cfi(
                 let Some(offset) = uleb(&mut code) else {
                     break;
                 };
-                rule = rule.map(|current| CfaRule {
+                cfa = cfa.map(|current| CfaRule {
                     offset: offset as i32,
                     ..current
                 });
@@ -338,7 +438,7 @@ fn run_cfi(
                     break;
                 };
                 code = rest;
-                rule = None;
+                cfa = None;
             }
             0x10 | 0x16 => {
                 // expression / val_expression：reg(仅 0x10) + 长度 + 字节
@@ -355,8 +455,11 @@ fn run_cfi(
             }
             0x11 => {
                 // offset_extended_sf：reg + 有符号偏移（按 data_align 缩放）
-                if uleb(&mut code).is_none() || sleb(&mut code).is_none() {
+                let (Some(reg), Some(scaled)) = (uleb(&mut code), sleb(&mut code)) else {
                     break;
+                };
+                if u8::try_from(reg).ok() == Some(ra_register) {
+                    ra = Some(scale(scaled, data_align));
                 }
             }
             0x12 => {
@@ -366,12 +469,12 @@ fn run_cfi(
                 };
                 match u8::try_from(reg) {
                     Ok(reg) => {
-                        rule = Some(CfaRule {
+                        cfa = Some(CfaRule {
                             reg,
-                            offset: scaled.saturating_mul(i64::from(data_align)) as i32,
+                            offset: scale(scaled, data_align),
                         })
                     }
-                    Err(_) => rule = None,
+                    Err(_) => cfa = None,
                 }
             }
             0x13 => {
@@ -379,8 +482,8 @@ fn run_cfi(
                 let Some(scaled) = sleb(&mut code) else {
                     break;
                 };
-                rule = rule.map(|current| CfaRule {
-                    offset: scaled.saturating_mul(i64::from(data_align)) as i32,
+                cfa = cfa.map(|current| CfaRule {
+                    offset: scale(scaled, data_align),
                     ..current
                 });
             }
@@ -407,21 +510,42 @@ fn run_cfi(
             0x40..=0x7f => {
                 // advance_loc：低 6 位 × code_align
                 let delta = u32::from(op & 0x3f).saturating_mul(code_align);
-                rows.push(Row { start: pc, rule });
+                rows.push(Row {
+                    start: pc,
+                    cfa,
+                    ra_offset: ra,
+                });
                 pc = pc.saturating_add(delta);
             }
             0x80..=0xbf => {
-                // offset：reg（低 6 位）+ ULEB（寄存器规则，跳过）
-                if uleb(&mut code).is_none() {
+                // offset：reg（低 6 位）+ ULEB（按 data_align 缩放）
+                let Some(offset) = uleb(&mut code) else {
                     break;
+                };
+                if op & 0x3f == ra_register {
+                    ra = Some(scale(offset as i64, data_align));
                 }
             }
-            0xc0..=0xff => {} // restore：寄存器规则，跳过
-            _ => break,       // 未知主操作码 ⇒ 后面的看不懂了
+            0xc0..=0xff => {
+                // restore：把该寄存器恢复成 CIE 初值
+                if op & 0x3f == ra_register {
+                    ra = initial_ra;
+                }
+            }
+            _ => break, // 未知主操作码 ⇒ 后面的看不懂了
         }
     }
-    rows.push(Row { start: pc, rule });
-    (pc, rule)
+    rows.push(Row {
+        start: pc,
+        cfa,
+        ra_offset: ra,
+    });
+    (pc, cfa, ra)
+}
+
+/// `DW_CFA_*_sf` 的缩放：偏移 × `data_align`（GCC 在 RV32 上是 `-4`）。
+fn scale(value: i64, data_align: i32) -> i32 {
+    value.saturating_mul(i64::from(data_align)) as i32
 }
 
 /// 读一个小端 `u32`（越界 ⇒ `None`）。
@@ -509,6 +633,70 @@ mod tests {
 
     fn table(bytes: &[u8]) -> CfiTable {
         CfiTable::parse(bytes)
+    }
+
+    #[test]
+    fn the_return_address_rule_lands_on_the_rows_that_have_it() {
+        // 真夹具：`DW_CFA_offset ra at cfa-4`（字节 `0x81 0x01`）出现在
+        // helper 的 0x0c 之后 ⇒ 函数体两行都带 `ra = Some(-4)`。
+        let table = table(DEBUG_FRAME);
+        assert_eq!(
+            table.row_at(0x10),
+            Some(UnwindRow {
+                cfa: Some(CfaRule { reg: 8, offset: 0 }),
+                ra_offset: Some(-4),
+            }),
+            "helper 函数体：CFA = s0+0、返回地址在 cfa-4"
+        );
+        assert_eq!(
+            table.row_at(0x48),
+            Some(UnwindRow {
+                cfa: Some(CfaRule { reg: 8, offset: 0 }),
+                ra_offset: Some(-4),
+            })
+        );
+    }
+
+    #[test]
+    fn rows_before_the_ra_store_have_no_return_address() {
+        let table = table(DEBUG_FRAME);
+        // helper 序言 0x04..0x0c：CFA 已经是 sp+48，但 `ra` 还没存进栈。
+        assert_eq!(
+            table.row_at(0x04),
+            Some(UnwindRow {
+                cfa: Some(CfaRule { reg: 2, offset: 48 }),
+                ra_offset: None,
+            })
+        );
+        // 尾声把 `ra` 恢复回寄存器 ⇒ ⇒ 行里也没有「存哪儿」。
+        assert_eq!(
+            table.row_at(0x34),
+            Some(UnwindRow {
+                cfa: Some(CfaRule { reg: 2, offset: 0 }),
+                ra_offset: None,
+            })
+        );
+    }
+
+    #[test]
+    fn row_at_takes_the_row_for_the_pc_not_the_body_row() {
+        let table = table(DEBUG_FRAME);
+        // 主行是函数体（`s0+0`），但 0x04 那一条要看**序言**的 `sp+48`。
+        assert_eq!(
+            table.body_cfa(0x00, 0x38),
+            Some(CfaRule { reg: 8, offset: 0 })
+        );
+        assert_eq!(
+            table.row_at(0x04).map(|row| row.cfa),
+            Some(Some(CfaRule { reg: 2, offset: 48 }))
+        );
+    }
+
+    #[test]
+    fn row_at_outside_every_fde_has_no_answer() {
+        let table = table(DEBUG_FRAME);
+        assert_eq!(table.row_at(0x38 + 0x78), None);
+        assert_eq!(table.row_at(0x200), None);
     }
 
     #[test]

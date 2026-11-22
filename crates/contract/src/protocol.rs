@@ -6,9 +6,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    Breakpoint, BreakpointInfo, DeltaRegister, DisasmEntryDto, Project, SimState, Symbol,
-    TraceFilter, TraceFormat, TraceSource, WatchExpr, WatchValue, Watchpoint, WaveformHistory,
-    WriteSize,
+    Breakpoint, BreakpointInfo, DeltaRegister, DisasmEntryDto, Project, SimState, StackFrame,
+    Symbol, TraceFilter, TraceFormat, TraceSource, WatchExpr, WatchValue, Watchpoint,
+    WaveformHistory, WriteSize,
 };
 use crate::platform::{PlatformDescription, RegionSpec};
 use crate::SCHEMA_VERSION;
@@ -164,6 +164,14 @@ pub enum CommandPayload {
     /// 回执是 [`EventPayload::Breakpoints`]。前端不再自己维护「本会话
     /// 请求过的地址」——这张表才是真相。
     ListBreakpoints,
+    /// **走一遍调用栈**（STAGE-55 栈回溯批）。
+    ///
+    /// 只读：按**当前 pc** 用 `.debug_frame` 的 CFA / RA 规则往上回溯，
+    /// 回执是 [`EventPayload::Backtrace`]。
+    ///
+    /// ⚠️ 只报「pc + 所在函数名」，**不**解析上层帧的局部变量（那要完整
+    /// unwind 表与帧选择器，另立批）。
+    Backtrace,
     SetWatchpoint(Watchpoint),
     ClearWatchpoint {
         id: u32,
@@ -600,6 +608,17 @@ pub enum EventPayload {
     /// 列表的**唯一数据源**。条目按地址升序。
     Breakpoints {
         breakpoints: Vec<BreakpointInfo>,
+    },
+    /// **调用栈回执**（STAGE-55 栈回溯批）。
+    ///
+    /// `frames[0]` 是最内层（**当前 pc**），往后是返回地址；`truncated`
+    /// 表示**没能走到栈底**（返回地址读不到 / `.debug_frame` 没有 RA 规则 /
+    /// 帧数到上限 / 检测到环）—— 前端据此说「上面还有，但断了」，而不是
+    /// 假装这就是栈底。
+    Backtrace {
+        frames: Vec<StackFrame>,
+        #[serde(default)]
+        truncated: bool,
     },
     /// **观察表达式的轮询结果**（契约 v14 · M-08）。
     ///

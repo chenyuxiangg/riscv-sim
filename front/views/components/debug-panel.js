@@ -276,6 +276,9 @@ export function renderBreakpointAddRow({
             <button type="button" data-action="set-breakpoint">加断点</button>
             <span class="addr-error" data-bp-error>${escapeHtml(error)}</span>
             ${candidates}
+            ${k === BREAKPOINT_KIND.Condition
+                ? `<p class="note bp-store-only-note" data-bp-store-only-note>条件里的内存读取按<b>写入</b>判定：只有 store 写进匹配值才停，读到匹配值不触发。</p>`
+                : ""}
         </div>`;
 }
 
@@ -860,6 +863,9 @@ const debugView = register({
             .map((e) => Number(e?.addr ?? 0) >>> 0);
         // 契约 v14：观察表达式的轮询回执（`WatchValue` 列表）。
         const watchValues = Array.isArray(debug.watchValues) ? debug.watchValues : [];
+        // STAGE-55 栈回溯批：内核回执的那份帧列表（只读 · `frames[0]` 是当前帧）。
+        const backtrace = debug.backtrace ?? null;
+        const backtraceFrames = Array.isArray(backtrace?.frames) ? backtrace.frames : [];
         const symbolResult = debug.symbol ?? null;
         const bpError = String(debug.bpError ?? "");
         const halt = debug.halt ?? null;
@@ -936,6 +942,23 @@ const debugView = register({
                                 <button type="button" data-action="clear-watch-expr" data-id="${Number(item?.id ?? 0)}">删除</button>
                             </div>`;
                         }).join("")}</div>`}
+                </section>
+                <section class="card backtrace-card">
+                    <div class="row"><h3>调用栈</h3><span class="tag">${backtraceFrames.length} 帧</span><button type="button" data-action="backtrace">回溯</button></div>
+                    ${backtraceFrames.length === 0
+                        ? `<p class="muted">尚未回溯</p>`
+                        : `<div class="backtrace-list" data-backtrace-list>${backtraceFrames.map((frame, index) => {
+                            const addr = Number(frame?.pc ?? 0) >>> 0;
+                            const name = frame?.function ? String(frame.function) : null;
+                            return `<div class="backtrace-row" data-backtrace-row data-frame="${index}">
+                                <span class="muted">#${index}</span>
+                                <code class="addr">0x${addr.toString(16).padStart(8, "0")}</code>
+                                ${name ? `<code>${escapeHtml(name)}</code>` : `<span class="muted">（未知函数）</span>`}
+                            </div>`;
+                        }).join("")}</div>`}
+                    ${backtrace?.truncated === true
+                        ? `<p class="note" data-backtrace-truncated>没有走到栈底：返回地址读不到、没有 RA 规则、帧数到上限或检测到调用环。</p>`
+                        : ""}
                 </section>
                 <section class="card trace-export">
                     <div class="row"><h3>trace 记录 / 导出</h3></div>

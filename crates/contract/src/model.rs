@@ -545,6 +545,20 @@ impl Default for BreakpointInfo {
     }
 }
 
+/// **一帧调用栈**（契约 · STAGE-55 栈回溯批）。
+///
+/// ⚠️ 只报「pc + 所在函数名」，**不含**该帧的局部变量 —— 「看上层帧的变量」
+/// 明确不做（要完整 unwind 表与帧选择器，另立批）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct StackFrame {
+    /// 该帧的 pc（最内层是**当前 pc**，外层是**返回地址**）。
+    pub pc: u32,
+    /// 这个地址落在哪个函数里（DWARF 区间；没有调试信息 / 不在任何函数
+    /// 里 ⇒ `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<String>,
+}
+
 /// A watch point (M-10). Fires when the access matches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Watchpoint {

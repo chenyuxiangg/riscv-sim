@@ -438,6 +438,8 @@ export const EVENT_TOPIC = Object.freeze({
     Breakpoints: "debug.breakpoints",
     // 契约 v14 新增：观察表达式轮询回执。
     WatchValues: "debug.watch",
+    // STAGE-55 栈回溯批：栈回溯回执（只读）。
+    Backtrace: "debug.backtrace",
 });
 
 /**
@@ -593,6 +595,8 @@ export const Command = Object.freeze({
     }),
     /** `CommandPayload::ListBreakpoints`（契约 v13）. */
     listBreakpoints: () => "ListBreakpoints",
+    /** `CommandPayload::Backtrace`（STAGE-55 栈回溯批 · 只读）. */
+    backtrace: () => "Backtrace",
     /** `CommandPayload::SetWatchpoint(Watchpoint)`. */
     setWatchpoint: (watchpoint) => ({ SetWatchpoint: watchpoint }),
     /** `CommandPayload::ClearWatchpoint { id }`. */
@@ -1251,6 +1255,20 @@ export const Event = Object.freeze({
      */
     watchValues: (values) => ({
         WatchValues: { values: values ?? [] },
+    }),
+    /**
+     * `EventPayload::Backtrace { frames, truncated }` —— 栈回溯回执
+     * （STAGE-55 栈回溯批）。
+     *
+     * ⚠️ `frames[0]` 是**当前** pc；每一帧只有 **pc + 函数名**（上层帧的
+     * 变量不解析 ⇒ ⇒ 契约里就没有这个字段）。
+     *
+     * @param {Array<{pc: number, function?: string|null}>} frames
+     * @param {boolean} truncated — 没走到栈底（四类成因见契约注释）
+     * @returns {{Backtrace: {frames: Array<object>, truncated: boolean}}}
+     */
+    backtrace: (frames, truncated) => ({
+        Backtrace: { frames: frames ?? [], truncated: Boolean(truncated) },
     }),
 });
 
