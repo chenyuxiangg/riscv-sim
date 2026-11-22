@@ -68,6 +68,8 @@ pub mod watch_expr;
 
 pub mod cond;
 
+pub mod names;
+
 /// 断点地址的对齐粒度（字节）。
 ///
 /// RV32IMC 的 C 扩展允许 **半字（2 字节）** 对齐的压缩指令，所以断点
@@ -88,7 +90,7 @@ struct Entry {
     /// 契约的 `Breakpoint` DTO（**真相**）。
     bp: Breakpoint,
     /// **已解析**的条件（`None` ⇒ 无条件断点）。
-    cond: Option<cond::Condition>,
+    cond: Option<cond::BoundCondition>,
     /// **命中计数**（契约 v13）。只在内核判定「真的命中」时 +1。
     hits: Cell<u64>,
 }
@@ -149,6 +151,19 @@ impl BreakpointTable {
     /// ⚠️ **既有三道地址校验的语义一字未改** ⇒ ⇒ 条件校验**排在它们之后**
     /// ⇒ ⇒ 「地址非法 + 条件非法」时报的仍是**地址**的错（`E_CTX-07`）。
     pub fn set(&mut self, bp: Breakpoint) -> Result<(), PlatformError> {
+        self.set_with(bp, &names::NoNames)
+    }
+
+    /// 注册一个断点，**带名字解析**（条件里的 `main` / `&g_counter`）。
+    ///
+    /// ⚠️ 与 [`BreakpointTable::set`] 的差别**只有**「名字能不能解析」：
+    /// 不带符号上下文的路径（表级测试 / 端口层的 `set_breakpoint(addr)`）
+    /// 上出现名字 ⇒ ⇒ 如实报 `E_DBG-02` 的「未定义符号」。
+    pub fn set_with(
+        &mut self,
+        bp: Breakpoint,
+        resolver: &dyn names::NameResolver,
+    ) -> Result<(), PlatformError> {
         let is_pred = bp.kind == BreakpointKind::Condition;
         if !is_pred {
             if bp.addr % BP_ADDR_ALIGN != 0 {
@@ -171,7 +186,10 @@ impl BreakpointTable {
         //    命中路径上**没有**字符串处理。
         let cond = match bp.condition.as_deref() {
             None => None,
-            Some(text) => match cond::parse(text) {
+            // ⚠️ 解析 + **绑定**都在这里（注册时一次）⇒ ⇒ 表里存的是
+            //    **绑定后**的 AST ⇒ ⇒ 命中路径上既没有字符串处理，也没有
+            //    符号表查询。
+            Some(text) => match cond::parse(text).and_then(|c| c.bind(resolver)) {
                 Ok(expr) => Some(expr),
                 Err(err) => return Err(self.condition_error(err)),
             },
@@ -849,6 +867,72 @@ mod tests {
             kind: BreakpointKind::Condition,
             condition: Some(condition.to_string()),
         }
+    }
+
+    /// 一张**假的符号表**（批 B 的绑定测试用）。
+    struct FakeNames;
+
+    impl names::NameResolver for FakeNames {
+        fn resolve(&self, name: &str) -> Option<names::NameRef> {
+            match name {
+                "main" => Some(names::NameRef {
+                    class: names::NameClass::Function,
+                    addr: 0x1000,
+                }),
+                "g_counter" => Some(names::NameRef {
+                    class: names::NameClass::Object,
+                    addr: 0x2000,
+                }),
+                _ => None,
+            }
+        }
+    }
+
+    /// **带符号上下文注册**：`main == 0x1000` 能落表，并按函数地址求值。
+    #[test]
+    fn a_named_condition_binds_against_the_resolver() {
+        let mut t = BreakpointTable::new();
+        t.set_with(bp_pred(3, "main == 0x1000"), &FakeNames)
+            .expect("函数名能绑成地址常量");
+        assert_eq!(t.get(3).map(|b| b.kind), Some(BreakpointKind::Condition));
+        let gpr = [0u32; 32];
+        let hit = t.hit_check_pred(0x2000, &gpr).expect("谓词为真 ⇒ 命中");
+        assert_eq!(hit.id, 3);
+    }
+
+    /// **没有符号上下文**时同名表达式 ⇒ 如实报「未定义符号」，表不变。
+    #[test]
+    fn a_named_condition_without_symbols_is_rejected() {
+        let mut t = BreakpointTable::new();
+        let err = t
+            .set(bp_pred(4, "main == 0x1000"))
+            .expect_err("没有符号表就没法定下 main");
+        assert_eq!(
+            err.scenario, E_DBG_02_CONDITION_INVALID,
+            "名字解析失败仍是 E_DBG-02：{err}"
+        );
+        assert!(
+            err.message.contains("未定义符号") && err.message.contains("main"),
+            "错误消息要指出哪个名字没定义：{}",
+            err.message
+        );
+        assert_eq!(t.len(), 0, "校验失败时表不变");
+    }
+
+    /// **变量名（要读内存）在注册期就明说拒**（档 3 才有）。
+    #[test]
+    fn a_variable_condition_is_rejected_until_batch_c() {
+        let mut t = BreakpointTable::new();
+        let err = t
+            .set_with(bp_pred(5, "g_counter == 3"), &FakeNames)
+            .expect_err("变量名要读内存");
+        assert_eq!(err.scenario, E_DBG_02_CONDITION_INVALID);
+        assert!(
+            err.message.contains("读内存"),
+            "错误消息要说清「要读内存」：{}",
+            err.message
+        );
+        assert_eq!(t.len(), 0);
     }
 
     /// **观察式条目不吃地址槽**：它没有地址，所以地址 `0` 的真实断点

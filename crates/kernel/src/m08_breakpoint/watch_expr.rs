@@ -7,6 +7,8 @@ use std::fmt;
 
 use riscv_sim_contract::model::SimState;
 
+use super::names::{NameResolver, NoNames};
+
 /// 观察表达式的解析失败。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchExprError {
@@ -35,7 +37,11 @@ impl fmt::Display for WatchExprError {
 impl std::error::Error for WatchExprError {}
 
 /// 地址基址。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// ⚠️ **不再是 `Copy`** —— 为了 [`AddressBase::Symbol`] 那个名字（`String`）。
+/// 这是有意的：符号基址**只在解析期**存在一瞬（见 [`parse_address_with`]
+/// 会把它换成 [`AddressBase::Number`]），但文法层要先表达得出来。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddressBase {
     /// 立即数地址。
     Number(u32),
@@ -43,10 +49,13 @@ pub enum AddressBase {
     Register(u8),
     /// 当前 PC。
     Pc,
+    /// **符号名**（`@main+4` / `[g_counter+2]`）：解析期换成
+    /// [`AddressBase::Number`]。
+    Symbol(String),
 }
 
 /// 内存地址 = 基址 + 有符号偏移。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddressSpec {
     /// 基址。
     pub base: AddressBase,
@@ -55,7 +64,7 @@ pub struct AddressSpec {
 }
 
 /// 表达式指向的东西。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WatchTarget {
     /// 通用寄存器。
     Register(u8),
@@ -66,8 +75,16 @@ pub enum WatchTarget {
 }
 
 impl WatchTarget {
-    /// 解析表达式。
+    /// 解析表达式（**没有符号上下文**）。
+    ///
+    /// ⚠️ 这条路径上出现符号名 ⇒ ⇒ 「查无此名」⇒ ⇒ 与宿主那条
+    /// [`WatchTarget::parse_with`] 的区别**只在这里**。
     pub fn parse(expr: &str) -> Result<Self, WatchExprError> {
+        Self::parse_with(expr, &NoNames)
+    }
+
+    /// 解析表达式，**带名字解析**（`@main+4` / `[g_counter+2]`）。
+    pub fn parse_with(expr: &str, names: &dyn NameResolver) -> Result<Self, WatchExprError> {
         let text = expr.trim();
         if text.is_empty() {
             return Err(WatchExprError::new("空表达式"));
@@ -81,13 +98,20 @@ impl WatchTarget {
             text.strip_prefix('@').map(|inner| inner.trim())
         };
         if let Some(inner) = memory {
-            return Ok(WatchTarget::Memory(parse_address(inner)?));
+            return Ok(WatchTarget::Memory(parse_address_with(inner, names)?));
         }
-        match parse_base(text) {
+        match parse_base_with(text, names) {
             Ok(AddressBase::Register(r)) => Ok(WatchTarget::Register(r)),
             Ok(AddressBase::Pc) => Ok(WatchTarget::Pc),
             Ok(AddressBase::Number(n)) => Ok(WatchTarget::Memory(AddressSpec {
                 base: AddressBase::Number(n),
+                offset: 0,
+            })),
+            // ⚠️ 裸符号名（`@` 省略的写法里**不会**出现——那是 `parse_base`
+            //   只在 `[...]` / `@...` 的内层见到的东西）⇒ ⇒ 这里兜住
+            //   「解析期的符号基址」这一格。
+            Ok(AddressBase::Symbol(name)) => Ok(WatchTarget::Memory(AddressSpec {
+                base: AddressBase::Symbol(name),
                 offset: 0,
             })),
             Err(err) => Err(err),
@@ -95,14 +119,19 @@ impl WatchTarget {
     }
 
     /// 解析出的内存地址（非内存表达式返回 `None`）。
+    ///
+    /// ⚠️ [`AddressBase::Symbol`] 在**解析期**就该被换成数字（见
+    /// [`WatchTarget::parse_with`]）⇒ ⇒ 走到这里还剩符号基址就是内部
+    /// 没绑定 ⇒ ⇒ 返回 `None`（界面显示「无法解析出观察地址」，不猜）。
     pub fn address(&self, state: &SimState) -> Option<u32> {
         let WatchTarget::Memory(spec) = self else {
             return None;
         };
-        let base = match spec.base {
-            AddressBase::Number(n) => n,
-            AddressBase::Register(r) => *state.gpr.get(r as usize)?,
+        let base = match &spec.base {
+            AddressBase::Number(n) => *n,
+            AddressBase::Register(r) => *state.gpr.get(*r as usize)?,
             AddressBase::Pc => state.pc,
+            AddressBase::Symbol(_) => return None,
         };
         Some(base.wrapping_add(spec.offset as u32))
     }
@@ -117,8 +146,29 @@ impl WatchTarget {
     }
 }
 
-/// 解析「基址 ± 偏移」。
-fn parse_address(text: &str) -> Result<AddressSpec, WatchExprError> {
+/// 解析「基址 ± 偏移」的**语法**：符号名**保留**成
+/// [`AddressBase::Symbol`]，不查任何表。
+///
+/// ⚠️ 条件文法用它（`[main+4]` 的方括号内层）—— 名字要等到**绑定**期才
+/// 定得下来；观察表达式用它来「先认得形状、再定地址」。
+pub fn parse_address_syntax(text: &str) -> Result<AddressSpec, WatchExprError> {
+    let (base_text, offset) = split_address(text)?;
+    let base = parse_base_syntax(base_text)?;
+    Ok(AddressSpec { base, offset })
+}
+
+/// 解析「基址 ± 偏移」（**带名字解析**）。
+pub fn parse_address_with(
+    text: &str,
+    names: &dyn NameResolver,
+) -> Result<AddressSpec, WatchExprError> {
+    let (base_text, offset) = split_address(text)?;
+    let base = parse_base_with(base_text, names)?;
+    Ok(AddressSpec { base, offset })
+}
+
+/// 把「基址 ± 偏移」拆成两段。
+fn split_address(text: &str) -> Result<(&str, i32), WatchExprError> {
     let text = text.trim();
     if text.is_empty() {
         return Err(WatchExprError::new("内存表达式缺少地址"));
@@ -127,23 +177,21 @@ fn parse_address(text: &str) -> Result<AddressSpec, WatchExprError> {
         .char_indices()
         .skip(1)
         .find(|(_, c)| *c == '+' || *c == '-');
-    let (base_text, offset) = match split {
+    match split {
         Some((i, _)) => {
             let base = &text[..i];
             let off = &text[i..];
             let offset = off
                 .parse::<i32>()
                 .map_err(|_| WatchExprError::new(format!("偏移不是整数：{off}")))?;
-            (base, offset)
+            Ok((base, offset))
         }
-        None => (text, 0),
-    };
-    let base = parse_base(base_text)?;
-    Ok(AddressSpec { base, offset })
+        None => Ok((text, 0)),
+    }
 }
 
-/// 解析一个基址记号。
-fn parse_base(text: &str) -> Result<AddressBase, WatchExprError> {
+/// 解析一个基址记号，**符号名原样留住**。
+fn parse_base_syntax(text: &str) -> Result<AddressBase, WatchExprError> {
     let t = text.trim().trim_start_matches('$');
     if t.is_empty() {
         return Err(WatchExprError::new("缺少基址"));
@@ -157,7 +205,45 @@ fn parse_base(text: &str) -> Result<AddressBase, WatchExprError> {
     if let Some(r) = parse_register(t) {
         return Ok(AddressBase::Register(r));
     }
+    // ⚠️ 剩下的当**名字**（它到底是不是符号、是函数还是变量，等绑定/解析
+    //   那一层定）⇒ ⇒ 这里只做形状判断：标识符形状才收。
+    let shape_ok = t
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_alphabetic() || c == '_')
+        .unwrap_or(false)
+        && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if shape_ok {
+        return Ok(AddressBase::Symbol(t.to_string()));
+    }
     Err(WatchExprError::new(format!("未知寄存器名或地址 \"{t}\"")))
+}
+
+/// 解析一个基址记号（**带名字解析**）。
+///
+/// 顺序：`pc` → 数字 → 寄存器 → 符号名 → 报错 ⇒ ⇒ 与条件文法同一条口径
+/// （STAGE-55 表 9）。符号名**当场换成数字基址**，不把名字留到运行期。
+fn parse_base_with(text: &str, names: &dyn NameResolver) -> Result<AddressBase, WatchExprError> {
+    let t = text.trim().trim_start_matches('$');
+    if t.is_empty() {
+        return Err(WatchExprError::new("缺少基址"));
+    }
+    if t.eq_ignore_ascii_case("pc") {
+        return Ok(AddressBase::Pc);
+    }
+    if let Some(n) = parse_number(t) {
+        return Ok(AddressBase::Number(n));
+    }
+    if let Some(r) = parse_register(t) {
+        return Ok(AddressBase::Register(r));
+    }
+    // ⚠️ **符号名**：解析期就把地址定下来（`@main+4` = `main` 的地址 + 4）。
+    if let Some(name) = names.resolve(t) {
+        return Ok(AddressBase::Number(name.addr));
+    }
+    Err(WatchExprError::new(format!(
+        "未知寄存器名或地址 \"{t}\"（也不是已加载的符号）"
+    )))
 }
 
 fn parse_number(text: &str) -> Option<u32> {
@@ -273,6 +359,48 @@ mod tests {
         assert_eq!(mem.address(&s), Some(0x9004));
         let mem = WatchTarget::parse("[pc-4]").unwrap();
         assert_eq!(mem.address(&s), Some(0x0ffc));
+    }
+
+    /// 一张只认 `main` 的假符号表。
+    struct FakeNames;
+
+    impl NameResolver for FakeNames {
+        fn resolve(&self, name: &str) -> Option<super::super::names::NameRef> {
+            (name == "main").then_some(super::super::names::NameRef {
+                class: super::super::names::NameClass::Function,
+                addr: 0x1000,
+            })
+        }
+    }
+
+    /// **符号基址**（`@main+4` / `[main-4]`）：解析期就换成数字。
+    #[test]
+    fn a_symbol_base_resolves_at_parse_time() {
+        // ⚠️ **基址换成符号的地址、偏移原样留着** ⇒ ⇒ 求值期只剩下数字 /
+        //    寄存器 / pc 三种基址 ⇒ ⇒ 不需要符号表。
+        assert_eq!(
+            WatchTarget::parse_with("@main+4", &FakeNames).unwrap(),
+            WatchTarget::Memory(AddressSpec {
+                base: AddressBase::Number(0x1000),
+                offset: 4,
+            })
+        );
+        let target = WatchTarget::parse_with("@main+4", &FakeNames).unwrap();
+        assert_eq!(target.address(&state()), Some(0x1004));
+        let target = WatchTarget::parse_with("[main-4]", &FakeNames).unwrap();
+        assert_eq!(target.address(&state()), Some(0x0ffc));
+    }
+
+    /// **没有符号上下文**时符号名仍是错（消息里说清「也不是已加载的符号」）。
+    #[test]
+    fn a_symbol_base_without_names_is_rejected() {
+        let err = WatchTarget::parse("@main+4").unwrap_err();
+        assert!(err.message().contains("main"), "错误消息要指出哪个记号");
+        assert!(
+            err.message().contains("符号"),
+            "错误消息要说明「也不是已加载的符号」：{}",
+            err.message()
+        );
     }
 
     #[test]

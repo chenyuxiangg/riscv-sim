@@ -81,6 +81,41 @@ const STT_NOTYPE: u8 = 0;
 const STT_OBJECT: u8 = 1;
 const STT_FUNC: u8 = 2;
 
+/// 符号**是哪一类东西** —— 决定它在表达式里「有没有值」。
+///
+/// ⚠️ 契约层的 [`Symbol`] **没有**类型字段（它只有 `name` / `addr` /
+/// `size`）⇒ ⇒ 这个区分是**内核侧**的推导量：`.symtab` 的 `st_info`
+/// 高 4 位本来就有，只是以前在过滤时被丢掉了。放进本模块的**内部索引**
+/// 而不是契约 DTO，是因为界面渲染符号列表用不到它（多一个字段就多一次
+/// 契约升版）。
+///
+/// * [`SymbolClass::Function`] —— 函数：**没有值**，名字在表达式里等于
+///   它的**地址常量**。
+/// * [`SymbolClass::Object`] —— 全局 / 静态变量：名字在表达式里等于
+///   **变量的值**（要读内存）。
+/// * [`SymbolClass::Other`] —— `STT_NOTYPE` / 其它：不保证有值也不保证
+///   是代码，表达式里只允许用 `&名字` 取地址。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolClass {
+    /// `STT_FUNC`
+    Function,
+    /// `STT_OBJECT`
+    Object,
+    /// `STT_NOTYPE`（或未识别）：只保证有地址
+    Other,
+}
+
+impl SymbolClass {
+    /// `st_info` 的类型位 → 分类。
+    fn from_stt(sym_type: u8) -> Self {
+        match sym_type {
+            STT_FUNC => Self::Function,
+            STT_OBJECT => Self::Object,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// `SHN_UNDEF` —— 符号**没有地址**（未定义 / 外部符号）。
 const SHN_UNDEF: u16 = 0;
 
@@ -92,7 +127,10 @@ const SHN_UNDEF: u16 = 0;
 pub struct SymbolTable {
     /// 名字 → 符号。**同名取先出现的那条**（`.symtab` 的原始顺序：
     /// 局部符号在前、全局符号在后）。
-    by_name: HashMap<String, Symbol>,
+    ///
+    /// ⚠️ 值里多带一个**分类**（见 [`SymbolClass`]）⇒ ⇒ 表达式要靠它判
+    /// 断「这个名字有没有值」。契约 DTO 不变，分类只在本模块内部活着。
+    by_name: HashMap<String, (Symbol, SymbolClass)>,
     /// 按地址排序的 `(地址, 符号)`（**只有有地址的符号**）。
     by_addr: Vec<(u32, Symbol)>,
 }
@@ -144,7 +182,7 @@ impl SymbolTable {
             ));
         }
 
-        let mut by_name: HashMap<String, Symbol> = HashMap::new();
+        let mut by_name: HashMap<String, (Symbol, SymbolClass)> = HashMap::new();
         let mut by_addr: Vec<(u32, Symbol)> = Vec::new();
 
         for index in 0..count {
@@ -186,8 +224,10 @@ impl SymbolTable {
             if symbol.addr.is_some() {
                 by_addr.push((st_value, symbol.clone()));
             }
-            // 同名取先出现的那条。
-            by_name.entry(name).or_insert(symbol);
+            // 同名取先出现的那条（分类跟着那条走 ⇒ 两者不会错配）。
+            by_name
+                .entry(name)
+                .or_insert((symbol, SymbolClass::from_stt(sym_type)));
         }
 
         by_addr.sort_by_key(|(addr, _)| *addr);
@@ -198,7 +238,14 @@ impl SymbolTable {
     ///
     /// 未知名 ⇒ `None`（**不是错误**，验收 #7）。
     pub fn lookup(&self, name: &str) -> Option<&Symbol> {
-        self.by_name.get(name)
+        self.by_name.get(name).map(|(symbol, _)| symbol)
+    }
+
+    /// 按**名字**查符号的**分类**（[`SymbolClass`]）。
+    ///
+    /// 未知名 ⇒ `None`（与 [`SymbolTable::lookup`] 同一口径：**不是**错误）。
+    pub fn class_of(&self, name: &str) -> Option<SymbolClass> {
+        self.by_name.get(name).map(|(_, class)| *class)
     }
 
     /// 按**前缀**查符号（v0.57 批 · STAGE-42 §6.2 · K-1 / K-2）。
@@ -224,6 +271,7 @@ impl SymbolTable {
         let mut hits: Vec<Symbol> = self
             .by_name
             .values()
+            .map(|(symbol, _)| symbol)
             .filter(|symbol| symbol.name.starts_with(prefix))
             .cloned()
             .collect();
@@ -364,6 +412,22 @@ mod tests {
             (".symtab".to_string(), symtab),
             (".strtab".to_string(), strings),
         ]
+    }
+
+    /// **符号分类**（批 B · `st_info` 的类型位）—— 决定表达式里这个名字
+    /// 「有没有值」：函数没有值、对象有值、`NOTYPE` 只保证有地址。
+    #[test]
+    fn class_of_maps_stt_bits_to_the_symbol_class() {
+        let table = SymbolTable::from_sections(&sample_sections()).expect("parse");
+        assert_eq!(table.class_of("main"), Some(SymbolClass::Function));
+        assert_eq!(table.class_of("helper"), Some(SymbolClass::Function));
+        assert_eq!(table.class_of("data"), Some(SymbolClass::Object));
+        // ⚠️ `ext` 是未定义符号（`SHN_UNDEF`）：它在名字索引里，但**没有
+        //    地址**；分类仍是 `Other`（分类只看 `st_info`）。
+        assert_eq!(table.class_of("ext"), Some(SymbolClass::Other));
+        assert_eq!(table.lookup("ext").and_then(|s| s.addr), None);
+        // 未知名 ⇒ `None`（不是错误）。
+        assert_eq!(table.class_of("nope"), None);
     }
 
     #[test]

@@ -1520,6 +1520,110 @@ fn the_host_can_look_up_a_symbol_by_address() {
 }
 
 // ---------------------------------------------------------------------------
+// 11b. 批 B（STAGE-55）：条件断点里的**名字**要能落到符号表
+// ---------------------------------------------------------------------------
+
+/// **S-5**：`SetBreakpoint` 的条件里写**函数名** ⇒ 注册期用 M-11 的符号表
+/// 绑成地址常量 ⇒ 谓词恒真 ⇒ 停在第一条指令的取指之前。
+///
+/// ⚠️ 这条钉的是「**接上了**」：表级与文法级各自能过，但宿主**没把符号表
+/// 传进去**的话，注册会被当「未定义符号」拒掉 ⇒ ⇒ 必须走真实命令路径。
+#[test]
+fn s5_a_condition_breakpoint_can_name_a_symbol() {
+    let mut host = KernelHost::new();
+    let (symtab, strtab) = elf_symbol_table(&["alpha"]);
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(
+        &mut host,
+        CommandPayload::LoadProject(elf_project(&[(".symtab", symtab), (".strtab", strtab)])),
+    );
+
+    // `alpha` 是 STT_FUNC、地址 0x1000 ⇒ `alpha == 0x1000` 恒真。
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetBreakpoint(riscv_sim_contract::model::Breakpoint {
+            id: 0,
+            addr: 0,
+            source_hint: None,
+            enabled: true,
+            kind: riscv_sim_contract::model::BreakpointKind::Condition,
+            condition: Some("alpha == 0x1000".to_string()),
+        }),
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::Error { .. })),
+        "函数名必须能被符号表绑成地址常量（不能报未定义符号）"
+    );
+
+    // 跑一次：谓词恒真 ⇒ 停在取指之前（pc = 0）。
+    let events = dispatch(&mut host, CommandPayload::Continue);
+    let halted = events.iter().find_map(|e| match e {
+        EventPayload::Halted { reason, pc } => Some((*reason, *pc)),
+        _ => None,
+    });
+    let (reason, pc) = halted.expect("必须停下");
+    assert_eq!(
+        reason,
+        riscv_sim_contract::protocol::HaltReason::Watchpoint,
+        "观察式命中复用 Watchpoint"
+    );
+    assert_eq!(pc, 0, "一条指令都没执行");
+}
+
+/// **S-6**：条件里写**没定义的名字** ⇒ 注册期就报 `E_DBG-02`（不是等运行
+/// 到某条指令才炸，也不是静默当 0）。
+#[test]
+fn s6_an_undefined_name_in_a_condition_is_rejected_at_registration() {
+    let mut host = KernelHost::new();
+    let (symtab, strtab) = elf_symbol_table(&["alpha"]);
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(
+        &mut host,
+        CommandPayload::LoadProject(elf_project(&[(".symtab", symtab), (".strtab", strtab)])),
+    );
+
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetBreakpoint(riscv_sim_contract::model::Breakpoint {
+            id: 0,
+            addr: 0,
+            source_hint: None,
+            enabled: true,
+            kind: riscv_sim_contract::model::BreakpointKind::Condition,
+            condition: Some("nope == 0".to_string()),
+        }),
+    );
+    let (code, message) = events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::Error { code, message } => Some((code.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("未定义符号必须被拒");
+    assert_eq!(code, "E_DBG-02", "条件表达式无效");
+    assert!(
+        message.contains("未定义符号") && message.contains("nope"),
+        "错误消息要指出哪个名字没定义：{message}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 12. 主题常量（STAGE-5 §3.5 / §9.6）
 // ---------------------------------------------------------------------------
 

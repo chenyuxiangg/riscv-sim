@@ -152,16 +152,17 @@ impl KernelHost {
 
     /// 设置 / 覆盖一条观察表达式。**语法非法 ⇒ 表不变**。
     pub(super) fn on_set_watch_expr(&mut self, expr: WatchExpr) -> Vec<EventPayload> {
-        let target = match WatchTarget::parse(&expr.expr) {
-            Ok(target) => target,
-            Err(err) => {
-                return vec![self.error_from(&PlatformError::new(
-                    DEBUG_FAMILY,
-                    E_DBG_02_CONDITION_INVALID,
-                    err.message(),
-                ))];
-            }
-        };
+        let target =
+            match WatchTarget::parse_with(&expr.expr, &super::HostNames(self.index.symbols())) {
+                Ok(target) => target,
+                Err(err) => {
+                    return vec![self.error_from(&PlatformError::new(
+                        DEBUG_FAMILY,
+                        E_DBG_02_CONDITION_INVALID,
+                        err.message(),
+                    ))];
+                }
+            };
         if let Some(item) = self
             .watch_items
             .iter_mut()
