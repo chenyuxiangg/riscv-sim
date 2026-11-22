@@ -109,7 +109,10 @@ async function setup() {
     const transport = inProcessTransport(kernel);
     const router = await m05.mountCommandRouter({ transport });
     app.wireDebug(router);
-    app.wireTopbarRunbar({ commandRouter: router });
+    const runbarServices = { commandRouter: router };
+    app.wireTopbarRunbar(runbarServices, (detail) =>
+        app.handleCommand(detail, runbarServices),
+    );
     m01.assembleWorkspace("embedded");
     m01.route("#/debug");
     return { kernel, transport, router };

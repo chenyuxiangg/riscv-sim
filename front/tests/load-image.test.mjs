@@ -857,14 +857,17 @@ describe("实现唯一性（⛔ 不许有第二份）", () => {
     });
 
     test("装载命令的处理函数**只有一处**，且页头那条路**必须**走它", async () => {
-        const src = readFileSync(resolve(frontDir, "app.js"), "utf8");
+        const appSrc = readFileSync(resolve(frontDir, "app.js"), "utf8");
+        const imageLoaderSrc = readFileSync(resolve(frontDir, "views/app/image-loader.js"), "utf8");
+        const src = `${appSrc}\n${imageLoaderSrc}`;
         const defs = src.match(/function\s+handleLoadImageCommand\s*\(/g) ?? [];
         assert.equal(defs.length, 1, `handleLoadImageCommand 应恰好定义一次，实测 ${defs.length}`);
         // ⚠️ **页头那条路必须调它** ⇒ ⇒ 否则就是**两条**装载路径 ⇒ ⇒ 之后
         // 「重订流 / 清残留」会分叉。
-        const start = src.indexOf("export function wireTopbarImageLoader");
-        assert.ok(start > 0, "app.js 里没有 wireTopbarImageLoader");
-        const body = src.slice(start, src.indexOf("\n}\n", start));
+        const topbarLoaderSrc = readFileSync(resolve(frontDir, "views/app/topbar-loader.js"), "utf8");
+        const start = topbarLoaderSrc.indexOf("export function wireTopbarImageLoader");
+        assert.ok(start > 0, "topbar-loader.js 里没有 wireTopbarImageLoader");
+        const body = topbarLoaderSrc.slice(start, topbarLoaderSrc.indexOf("\n}\n", start));
         assert.ok(
             body.includes("handleLoadImageCommand"),
             "页头那条路没有走 handleLoadImageCommand（⇒ ⇒ 两条装载路径）",
