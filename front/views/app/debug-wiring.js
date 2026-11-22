@@ -183,19 +183,6 @@ export function wireDebug(commandRouter, services = {}) {
      * 区分这两种，不显示错误的行号。
      */
     /**
-     * 观察表达式轮询回执（契约 v14 · `debug.watch`）。
-     * 值变化由内核计算，前端只显示。
-     */
-    commandRouter.subscribe("debug.watch", (event) => {
-        const values = Array.isArray(event.value?.values) ? event.value.values : [];
-        viewStore.setState("debug", (prev) => ({
-            ...prev,
-            debug: { ...(prev.debug ?? {}), watchValues: values },
-        }));
-        publishViewState("debug");
-    });
-
-    /**
      * 栈回溯回执（STAGE-55 栈回溯批 · `debug.backtrace`）。
      *
      * ⚠️ **只读**：帧列表由内核算，前端不改、不补、不排序 ⇒ ⇒ `frames[0]`
@@ -434,8 +421,6 @@ export function wireDebug(commandRouter, services = {}) {
                     //   回执，这一条仍然成立：新工程还没拉过表）。
                     bpEntries: [],
                     bpError: "",
-                    watchValues: [],
-                    watchNextId: 1,
                     // ⚠️ **读回的那一份也清掉**（v0.67 批）⇒ ⇒ 基准与「上次
                     //   读回」说的都是**上一个程序**⇒ ⇒ 留着就是一份**不存在的**
                     //   对比⇒ ⇒ 用户会看到**上一趟**的高亮。

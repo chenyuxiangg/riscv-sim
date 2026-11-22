@@ -797,32 +797,6 @@ export async function handleCommand(detail, services) {
                 // 内核回执（`Breakpoints`）会整表覆盖 ⇒ ⇒ 界面不必自己翻。
                 break;
             }
-            case "set-watch-expr": {
-                // 契约 v14：新增 / 覆盖观察表达式。id 用视图里的递增计数，
-                // 保证同一项可以重复「覆盖」而不是无限追加。
-                const expr = String(detail.params?.expr ?? "").trim();
-                if (!expr) break;
-                const id = toInt(viewStore.getState("debug")?.debug?.watchNextId, 1) >>> 0;
-                await commandRouter.dispatchCommand(Command.setWatchExpr({ id, expr }));
-                updateDebugState((prev) => ({
-                    ...prev,
-                    debug: {
-                        ...(prev.debug ?? {}),
-                        watchNextId: (id + 1) >>> 0,
-                        watchExpr: "",
-                    },
-                }));
-                break;
-            }
-            case "clear-watch-expr": {
-                const id = toInt(detail.params?.id, 0) >>> 0;
-                await commandRouter.dispatchCommand(Command.clearWatchExpr(id));
-                break;
-            }
-            case "list-watch-exprs": {
-                await commandRouter.dispatchCommand(Command.listWatchExprs());
-                break;
-            }
             case "resolve-line": {
                 // 源码视图问内核「当前 PC 对应哪一行」（契约 v3 的
                 // `ResolveLine`，M-11 的 DWARF 行表）。
