@@ -219,7 +219,7 @@ export const BREAKPOINT_KIND_LABEL = {
  */
 const BREAKPOINT_KIND_PLACEHOLDER = {
     [BREAKPOINT_KIND.Address]: "断点地址（十六进制），例如 0x2000",
-    [BREAKPOINT_KIND.Symbol]: "符号名，例如 main（Tab 补全前 5 条）",
+    [BREAKPOINT_KIND.Symbol]: "符号名，例如 main（≥4 个字符自动联想）",
     // ⚠️ **档 4 之后**条件里可以写**当前帧局部变量名**（收口批）：placeholder
     //    点出这条，用户才知道「变量名」是合法写法（不是只有寄存器）。
     [BREAKPOINT_KIND.Condition]: "条件表达式，例如 x == 5 / [0x2000] > 3",
@@ -260,19 +260,27 @@ export function renderBreakpointAddRow({
     error = "",
     symbolResult = null,
     tabIndex = -1,
+    suggestDismissed = "",
 } = {}) {
     const k = normalizeBreakpointKind(kind);
+    // ⚠️ **下拉列表只有符号类型有**（表 13）⇒ ⇒ 开/关由纯函数判（不在这里
+    //   再写一套「够不够 4 个字符」的判据）。
+    const suggestOpen = k === BREAKPOINT_KIND.Symbol
+        && symbolSuggestOpen({ result: symbolResult, draft, dismissed: suggestDismissed });
     const options = Object.values(BREAKPOINT_KIND)
         .map((value) => `<option value="${value}"${value === k ? " selected" : ""}>${BREAKPOINT_KIND_LABEL[value]}</option>`)
         .join("");
     const candidates = k === BREAKPOINT_KIND.Symbol
-        ? `<div class="symbol-candidates" data-bp-symbol-candidates>${renderSymbolCandidates(symbolResult, tabIndex)}</div>`
+        ? `<div class="symbol-candidates bp-suggest" id="bp-symbol-list" role="listbox"
+                data-bp-symbol-candidates data-bp-suggest="${suggestOpen ? "open" : "closed"}">${renderSymbolCandidates(symbolResult, tabIndex)}</div>`
         : "";
     return `
         <div class="addr-input bp-add" data-addr-input="breakpoint" data-bp-add data-bp-kind="${k}">
             <select class="addr-field bp-kind" data-bp-kind-input aria-label="断点类型">${options}</select>
-            <input type="text" class="addr-field" data-bp-input value="${escapeHtml(draft)}"
-                placeholder="${escapeHtml(BREAKPOINT_KIND_PLACEHOLDER[k])}" spellcheck="false" autocomplete="off">
+            <input type="text" class="addr-field bp-input" data-bp-input value="${escapeHtml(draft)}"
+                placeholder="${escapeHtml(BREAKPOINT_KIND_PLACEHOLDER[k])}" spellcheck="false" autocomplete="off"
+                role="combobox" aria-autocomplete="list" aria-controls="bp-symbol-list"
+                aria-expanded="${suggestOpen ? "true" : "false"}">
             <button type="button" data-action="set-breakpoint">加断点</button>
             <span class="addr-error" data-bp-error>${escapeHtml(error)}</span>
             ${candidates}
@@ -318,6 +326,49 @@ export function renderMemoryReadRow({ draft = "", size = WRITE_SIZE.Word, error 
  * @type {number}
  */
 export const BREAKPOINT_SYMBOL_TAB_LIMIT = 5;
+
+/**
+ * 符号类型**开始联想的最小字符数**（v0.135 批 · 用户口径：**≥4 个字符**）。
+ *
+ * ⚠️ 少于 4 个字符**不发查询** ⇒ ⇒ 也就不会撞上「符号名为空」那类校验错误。
+ *
+ * @type {number}
+ */
+export const SYMBOL_SUGGEST_MIN_CHARS = 4;
+
+/**
+ * 边打字边查的**防抖时长**（毫秒）。
+ *
+ * ⚠️ 打字是连续动作 ⇒ ⇒ 每个键都发一条 `ResolveSymbol` 会把内核问爆
+ *   ⇒ ⇒ 停手 180 ms 再问一次（**最后一次**的输入为准）。
+ *
+ * @type {number}
+ */
+export const SYMBOL_SUGGEST_DEBOUNCE_MS = 180;
+
+/**
+ * 下拉列表**该不该开着**（纯函数 ⇒ Node 侧零 DOM 可验）。
+ *
+ * 开着的三个条件：
+ * 1. 输入已到 {@link SYMBOL_SUGGEST_MIN_CHARS} 个字符；
+ * 2. 回执说的是**当前这一串输入**（`result.name` 逐字相同）⇒ ⇒ 敲下一个
+ *    字符的瞬间旧列表**当场收起**，等新回执到了再开（防抖窗口里不显示
+ *    已经不匹配的候选）；
+ * 3. 用户没有在这一份输入上按 Esc / 选过一条（`dismissed` 记的是**关掉
+ *    时的输入** ⇒ 再敲字就自动重新打开）。
+ *
+ * @param {{result?: object|null, draft?: string, dismissed?: string}} [opts]
+ * @returns {boolean}
+ */
+export function symbolSuggestOpen({ result = null, draft = "", dismissed = "" } = {}) {
+    const text = String(draft ?? "").trim();
+    const name = String(result?.name ?? "").trim();
+    if (text.length < SYMBOL_SUGGEST_MIN_CHARS) return false;
+    if (name.length < SYMBOL_SUGGEST_MIN_CHARS) return false;
+    if (String(dismissed ?? "").trim() === text) return false;
+    // 回执说的必须**就是**当前这串输入（见上面第 2 条）。
+    return text === name;
+}
 
 /**
  * 一条符号候选的**可点按钮**（契约 v9 §5.1 · 裁决 N）。
@@ -542,6 +593,9 @@ export function debuggerDraft() {
         bpKind: normalizeBreakpointKind(s.bpKind),
         bpDraft: String(s.bpDraft ?? ""),
         bpTabIndex: Number.isInteger(s.bpTabIndex) ? s.bpTabIndex : -1,
+        // ⚠️ **联想下拉被关掉时的那串输入**（Esc / 选过一条）⇒ ⇒ 再敲字就
+        //   自动重新打开（`""` = 没关过）。
+        bpSuggestDismissed: String(s.bpSuggestDismissed ?? ""),
         memAddr: String(s.memAddr ?? ""),
         memSize: Object.prototype.hasOwnProperty.call(WRITE_SIZE, size) ? size : WRITE_SIZE.Word,
         dumpAddr: String(s.dumpAddr ?? ""),
@@ -698,6 +752,41 @@ function tabCandidates(result) {
         .slice(0, BREAKPOINT_SYMBOL_TAB_LIMIT);
 }
 
+/** 待发的符号查询（防抖：一次只留最后一条）。 */
+let symbolSuggestTimer = null;
+
+/**
+ * 收起下拉列表（**就地改属性**，不重渲染 ⇒ 不打断正在输入的那个框）。
+ *
+ * @param {Element|null} box — 断点输入行
+ */
+function closeSuggestBox(box) {
+    box?.querySelector?.("[data-bp-symbol-candidates]")?.setAttribute?.("data-bp-suggest", "closed");
+    box?.querySelector?.("[data-bp-input]")?.setAttribute?.("aria-expanded", "false");
+}
+
+/**
+ * 按输入**排一次**符号查询（≥4 个字符；防抖 {@link SYMBOL_SUGGEST_DEBOUNCE_MS}）。
+ *
+ * ⚠️ **不足 4 个字符 ⇒ 只收起下拉、什么都不发** ⇒ ⇒ 不会撞上「符号名为空」
+ *   那类校验错误（那是用户抱怨「红字一直挂着」的来源之一）。
+ *
+ * @param {Element|null} box
+ * @param {string} text — 输入框当前文本
+ */
+function scheduleSymbolSuggest(box, text) {
+    if (symbolSuggestTimer) clearTimeout(symbolSuggestTimer);
+    symbolSuggestTimer = null;
+    closeSuggestBox(box);
+    const trimmed = String(text ?? "").trim();
+    if (trimmed.length < SYMBOL_SUGGEST_MIN_CHARS) return;
+    symbolSuggestTimer = setTimeout(() => {
+        symbolSuggestTimer = null;
+        emitCommand("lookup-symbol", "debug", { name: trimmed });
+    }, SYMBOL_SUGGEST_DEBOUNCE_MS);
+    symbolSuggestTimer?.unref?.();
+}
+
 /**
  * 把**输入事件**接上（**事件委托** · 裁决 G / F11）。
  *
@@ -710,10 +799,15 @@ function mountAddrInputListeners(el) {
     el.addEventListener("input", (ev) => {
         const target = ev.target;
         if (target?.closest?.("[data-bp-input]")) {
-            // ⚠️ STAGE-55：**一个框**管三种类型 ⇒ 敲字就退出 Tab 循环
-            //   （`bpTabIndex = -1`）⇒ ⇒ 下一次 Tab 是一轮**新的**前缀查询。
-            setDebuggerDraft({ bpDraft: target.value ?? "", bpTabIndex: -1 });
-            setAddrError(target.closest("[data-bp-add]") ?? target.closest("[data-addr-input]"), "[data-bp-error]", "");
+            // ⚠️ STAGE-55：**一个框**管三种类型 ⇒ 敲字就退出高亮位。
+            // ⚠️ **v0.135**：符号类型**边打字边联想**（≥4 个字符、防抖后查）
+            //   ⇒ ⇒ Tab **不再**触发查询（那是用户明确不要的旧交互）。
+            const box = target.closest("[data-bp-add]") ?? target.closest("[data-addr-input]");
+            const value = target.value ?? "";
+            setDebuggerDraft({ bpDraft: value, bpTabIndex: -1, bpSuggestDismissed: "" });
+            setAddrError(box, "[data-bp-error]", "");
+            const kind = normalizeBreakpointKind(box?.querySelector?.("[data-bp-kind-input]")?.value);
+            scheduleSymbolSuggest(box, kind === BREAKPOINT_KIND.Symbol ? value : "");
             return;
         }
         if (target?.closest?.("[data-dump-addr-input]")) {
@@ -750,41 +844,75 @@ function mountAddrInputListeners(el) {
         if (!target) return;
         setDebuggerDraft({ memSize: target.value ?? WRITE_SIZE.Word });
     });
-    // ⚠️ **Tab = 符号补全 / ↑↓ = 换一条 / 回车 = 点「加断点」**
-    //   （表 13「Tab 触发前缀补全，候选前 5 条；↑↓ 选择、回车落断」·
-    //   表 14「Enter 等价点击按钮」）。
+    // ⚠️ **不用 Tab**（v0.135 批 · 用户口径）：联想由**输入**触发（≥4 个
+    //   字符、防抖后自动查）⇒ ⇒ Tab 交回浏览器默认的焦点切换。
+    //   ↑↓ = 在打开的下拉里换一条 · 回车 = 选中高亮那条（列表关着 ⇒ 加断点）·
+    //   Esc = 收起下拉。
     el.addEventListener("keydown", (ev) => {
         const box = ev.target?.closest?.("[data-bp-add]") ?? ev.target?.closest?.("[data-addr-input]");
         const input = box?.querySelector?.("[data-bp-input]");
         if (!input || ev.target !== input) return;
         const kind = normalizeBreakpointKind(box?.querySelector?.("[data-bp-kind-input]")?.value);
+        const draft = debuggerDraft();
+        const symbolResult = viewStore.getState("debug")?.debug?.symbol ?? null;
+        const list = kind === BREAKPOINT_KIND.Symbol ? tabCandidates(symbolResult) : [];
+        const open = kind === BREAKPOINT_KIND.Symbol
+            && symbolSuggestOpen({ result: symbolResult, draft: draft.bpDraft, dismissed: draft.bpSuggestDismissed });
+        if (ev?.key === "Escape" && open) {
+            ev.preventDefault?.();
+            setDebuggerDraft({ bpSuggestDismissed: String(input.value ?? draft.bpDraft), bpTabIndex: -1 });
+            emitCommand("bp-suggest", "debug", {});
+            return;
+        }
         if (ev?.key === "Enter") {
             ev.preventDefault?.();
+            // ⚠️ **列表开着且有高亮 ⇒ 回车是「选中」**（填名字、收起列表）
+            //   ⇒ ⇒ 再按一次回车才是**下断点**（组合框的常规语义）。
+            const picked = open && draft.bpTabIndex >= 0 ? list[draft.bpTabIndex] : null;
+            if (picked) {
+                input.value = String(picked.name ?? "");
+                setDebuggerDraft({
+                    bpDraft: input.value,
+                    bpTabIndex: -1,
+                    bpSuggestDismissed: input.value,
+                });
+                emitCommand("bp-suggest", "debug", {});
+                return;
+            }
             box.querySelector("[data-action=\"set-breakpoint\"]")?.click?.();
             return;
         }
         if (kind !== BREAKPOINT_KIND.Symbol) return;
-        if (ev?.key !== "Tab" && ev?.key !== "ArrowDown" && ev?.key !== "ArrowUp") return;
+        if (ev?.key !== "ArrowDown" && ev?.key !== "ArrowUp") return;
         ev.preventDefault?.();
-        const draft = debuggerDraft();
-        const list = tabCandidates(viewStore.getState("debug")?.debug?.symbol ?? null);
         if (list.length === 0) {
-            // 还没有候选（或一条都没有）⇒ ⇒ 这一下是**发起前缀查询**。
-            setDebuggerDraft({ bpTabIndex: -1 });
-            emitCommand("lookup-symbol", "debug", { name: String(input.value ?? "") });
+            // 还没有候选 ⇒ ⇒ 这一下当作「手动再查一次」（输入够长才发）。
+            const trimmed = String(input.value ?? "").trim();
+            if (trimmed.length >= SYMBOL_SUGGEST_MIN_CHARS) {
+                setDebuggerDraft({ bpSuggestDismissed: "", bpTabIndex: -1 });
+                emitCommand("lookup-symbol", "debug", { name: trimmed });
+            }
+            return;
+        }
+        if (!open) {
+            // ⚠️ **列表关着（Esc 过 / 刚敲过字）⇒ ⇒ 先把当前输入再查一次**
+            //   ⇒ ⇒ 回执到了列表自然打开（不在这一下硬开旧列表）。
+            const trimmed = String(input.value ?? "").trim();
+            if (trimmed.length >= SYMBOL_SUGGEST_MIN_CHARS) {
+                setDebuggerDraft({ bpSuggestDismissed: "", bpTabIndex: -1 });
+                emitCommand("lookup-symbol", "debug", { name: trimmed });
+            }
             return;
         }
         const back = ev?.key === "ArrowUp";
         const step = back ? -1 : 1;
         const index = draft.bpTabIndex < 0
-            ? 0
+            ? (back ? list.length - 1 : 0)
             : (draft.bpTabIndex + step + list.length) % list.length;
         const picked = list[index];
         input.value = String(picked?.name ?? "");
-        setDebuggerDraft({ bpDraft: input.value, bpTabIndex: index });
-        // ⚠️ 高亮要**看得见** ⇒ ⇒ 让 app 层重渲染一次（草稿已写进状态，
-        //   这一条**不清草稿**——它与「切换类型」不是同一条动作）。
-        emitCommand("bp-tab", "debug", { index });
+        setDebuggerDraft({ bpDraft: input.value, bpTabIndex: index, bpSuggestDismissed: "" });
+        emitCommand("bp-suggest", "debug", {});
     });
 }
 
@@ -918,6 +1046,7 @@ const debugView = register({
                         error: bpError,
                         symbolResult,
                         tabIndex: draft.bpTabIndex,
+                        suggestDismissed: draft.bpSuggestDismissed,
                     })}
                     ${bpEntries.length === 0
                         ? `<p class="muted">尚无断点</p>`

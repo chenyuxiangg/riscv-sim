@@ -683,6 +683,8 @@ export async function handleCommand(detail, services) {
                     bpKind: normalizeBreakpointKind(detail.params?.kind),
                     bpDraft: "",
                     bpTabIndex: -1,
+                    // 换类型 ⇒ 之前「收起过下拉」的那个输入不再适用。
+                    bpSuggestDismissed: "",
                 }));
                 updateDebugState((prev) => ({
                     ...prev,
@@ -690,9 +692,13 @@ export async function handleCommand(detail, services) {
                 }));
                 break;
             }
-            case "bp-tab": {
-                // Tab 选中了某一条候选 ⇒ ⇒ 只要**重渲染**（草稿已经在
-                // 视图层写进 `debugger` 键了）⇒ ⇒ 高亮才看得见。
+            case "bp-suggest": {
+                // 联想下拉的**开 / 收 / 高亮**变了（v0.135 批）⇒ ⇒ 只要
+                // **重渲染**（草稿已经由视图层写进 `debugger` 键）⇒ ⇒
+                // 下拉的 `data-bp-suggest` 与高亮才跟着变。
+                //
+                // ⚠️ **不重发查询**：查询由视图层的**输入防抖**触发 ⇒ ⇒ 这里
+                // 只是把状态画出来（一个动作一个落点）。
                 updateDebugState((prev) => prev);
                 break;
             }
@@ -719,10 +725,12 @@ export async function handleCommand(detail, services) {
             case "lookup-symbol": {
                 // 符号查询（契约 v9 · `ResolveSymbol`）。
                 //
-                // ⚠️ **一次输入 = 一次查询**（裁决 M）⇒ ⇒ 查询按**显式动作**
-                //   触发 ⇒ ⇒ 没有「边打字边查」的乱序问题。
-                // ⚠️ **空名字也照发** ⇒ ⇒ 内核拒（`E_DBG-02`）⇒ ⇒ 前端
-                //   显示**内核原文**（前端**不**写第二套校验器）。
+                // ⚠️ **谁触发**（v0.135 批）：符号类型下由输入**防抖**触发
+                //   （≥4 个字符）；↑↓ 在没有候选时也会手动查一次。
+                // ⚠️ **空名字 / 短文不发**：视图层在 <4 个字符时**根本不发**
+                //   这条命令 ⇒ ⇒ 用户不会再看到「符号名为空」那条红字。
+                // ⚠️ 命令本身**不校验**（前端不写第二套校验器）⇒ ⇒ 内核真拒
+                //   （`E_DBG-04`）时仍**原样显示**它的原文。
                 const name = String(detail.params?.name ?? "");
                 setPendingErrorSlot("bp");
                 writeErrorSlot("bp", "");
