@@ -23,19 +23,25 @@
 //! 本模块会**跳过一个变量**（而不是编一个位置出来）⇒ ⇒ 那个名字在表达式里
 //! 就报「未定义」。**不猜**。
 //!
-//! ## 帧基址：`DW_OP_call_frame_cfa` 怎么办
+//! ## 帧基址：`DW_OP_call_frame_cfa` 与 `.debug_frame`
 //!
 //! GCC 在 RISC-V 上默认给 `DW_AT_frame_base = DW_OP_call_frame_cfa`（不是
-//! 某个寄存器）。真正的 CFA 要读 `.debug_frame` 的 CFI 才能算——本批不做
-//! CFI。⇒ ⇒ 对 psABI 的「`-O0` 有帧指针」约定做**一条显式假设**：
-//! `CFA == s0`（`x8`）。实测（本模块夹具，GCC 15.2.0 `-O0`）：函数体里
-//! `s0 = sp + frame_size`，正是 CFA ⇒ ⇒ `fbreg(-24)` 读 `-24(s0)`，与
-//! 反汇编逐字一致。**没有帧指针的产物**（`-O2` / `-fomit-frame-pointer`）
-//! 上这条假设不成立 ⇒ ⇒ 那时读到的值可能是错的 ⇒ ⇒ 相关条目会在注册期
-//! **降级**（见 `m08_breakpoint` 的 `degraded`，不是静默读错）。
+//! 某个寄存器）⇒ ⇒ 局部变量的地址 = `CFA + fbreg 的偏移`，而 CFA 是多少
+//! 由 `.debug_frame` 的 CFI **按 pc 分段**给出（见 [`super::cfi`]）。
+//!
+//! 批 D 曾把这条信息换成显式假设「`CFA == s0`」；CFI 批把它换成**真的
+//! 读表**：构建期对每个函数取**主行**（覆盖地址最多的那一行）的 CFA
+//! 规则 ⇒ ⇒ `CFA = 寄存器[r] + cfa_offset` ⇒ ⇒ 变量的栈位置直接落成
+//! 「`寄存器[r] + (cfa_offset + fbreg 偏移)`」。⇒ ⇒ 产物是 `sp` 基址
+//! （`-O2` / 无帧指针）时也**算得对**，不再是运气。
+//!
+//! ⚠️ **读不到 CFI 就不猜**（用户 2026-11-22 拍板）：函数区间照收
+//! （「所在函数」照样能显示），但该帧的**栈上变量丢掉** ⇒ ⇒ 表达式里
+//! 写那个名字会报「未定义」，而不是拿一条没根据的规则静默读错。
 
 use std::collections::BTreeMap;
 
+use super::cfi::CfiTable;
 use super::dwarf_info::{walk_dies, DieAttrs};
 
 const DW_TAG_SUBPROGRAM: u64 = 0x2e;
@@ -59,28 +65,27 @@ const DW_OP_REG31: u8 = 0x6f;
 const DW_OP_FBREG: u8 = 0x91;
 const DW_OP_CALL_FRAME_CFA: u8 = 0x9c;
 
-/// **帧基址**是怎么算出来的。
+/// **帧基址**是怎么算出来的（DWARF 里的原始说法）。
+///
+/// ⚠️ 只有 [`FrameBase::Cfa`] 需要 CFI 才能落地 ⇒ ⇒ 构建期就把它解析成
+/// 具体寄存器 + 偏移（见 [`LocalTable::from_sections`]）；出来的
+/// [`LocalLocation`] 里**不再有** `Cfa`，M-08 也就没有「帧指针」这个假设。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameBase {
     /// 某个通用寄存器里放着帧基址（`DW_OP_regN`）。
     Reg(u8),
-    /// `DW_OP_call_frame_cfa` ⇒ ⇒ 本批按「`CFA == s0`」的口径取 [`FRAME_POINTER`]。
+    /// `DW_OP_call_frame_cfa` ⇒ ⇒ 构建期按 `.debug_frame` 的主行解析。
     Cfa,
 }
-
-/// RISC-V psABI 的**帧指针**（`s0` / `x8`）。
-///
-/// ⚠️ 只在 [`FrameBase::Cfa`] 上用到，且是一条**显式假设**（见模块头）。
-/// 有帧指针的 `-O0` 产物上它成立；否则相关条目降级。
-pub const FRAME_POINTER: u8 = 8;
 
 /// 一个局部变量的**位置**。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalLocation {
     /// 值就在这个寄存器里（`DW_OP_regN`）⇒ ⇒ **不需要**读内存。
     Reg(u8),
-    /// 在栈上：地址 = 帧基址 + 偏移（`DW_OP_fbreg`）。
-    Frame { base: FrameBase, offset: i32 },
+    /// 在栈上：地址 = `寄存器[base] + offset`（`DW_OP_fbreg`，其中
+    /// `base` / `offset` 已经吸收了 CFA 规则）。
+    Frame { base: u8, offset: i32 },
 }
 
 /// 一个局部变量（或形参）。
@@ -138,8 +143,11 @@ impl LocalTable {
         };
         let strings = section(sections, ".debug_str").unwrap_or(&[]);
         let line_strings = section(sections, ".debug_line_str").unwrap_or(&[]);
+        // ⚠️ CFI 是可选的：没有它的时候**函数区间照收、变量丢掉**
+        //    （用户拍板「保留区间、丢变量」）。
+        let cfi = CfiTable::from_sections(sections);
 
-        let mut builder = Builder::default();
+        let mut builder = Builder::new(&cfi);
         walk_dies(
             info,
             abbrev,
@@ -200,7 +208,7 @@ impl LocalTable {
                     None => reg_hits.push((index, vec![scope.name.clone()])),
                 },
                 LocalLocation::Frame { base, offset } => {
-                    hits.entry((frame_base_rank(base), offset))
+                    hits.entry((base, offset))
                         .or_default()
                         .push(scope.name.clone());
                 }
@@ -215,11 +223,8 @@ impl LocalTable {
         if distinct > 1 {
             return LocalLookup::Ambiguous(functions);
         }
-        if let Some(((rank, offset), _)) = hits.into_iter().next() {
-            return LocalLookup::Found(LocalLocation::Frame {
-                base: frame_base_from_rank(rank),
-                offset,
-            });
+        if let Some(((base, offset), _)) = hits.into_iter().next() {
+            return LocalLookup::Found(LocalLocation::Frame { base, offset });
         }
         if let Some((index, _)) = reg_hits.into_iter().next() {
             return LocalLookup::Found(LocalLocation::Reg(index));
@@ -230,22 +235,6 @@ impl LocalTable {
     /// 解析出来的全部函数（只读，诊断 / 测试用）。
     pub fn scopes(&self) -> &[LocalScope] {
         &self.scopes
-    }
-}
-
-/// 帧基址的**排序键**（`Cfa` 用 `0x7f`，不与 `x0..x31` 撞）。
-fn frame_base_rank(base: FrameBase) -> u8 {
-    match base {
-        FrameBase::Reg(index) => index,
-        FrameBase::Cfa => 0x7f,
-    }
-}
-
-fn frame_base_from_rank(rank: u8) -> FrameBase {
-    if rank == 0x7f {
-        FrameBase::Cfa
-    } else {
-        FrameBase::Reg(rank)
     }
 }
 
@@ -260,16 +249,30 @@ fn section<'a>(sections: &'a [(String, Vec<u8>)], name: &str) -> Option<&'a [u8]
 struct OpenScope {
     /// 这个 `DW_TAG_subprogram` 在树里的深度。
     depth: usize,
-    scope: LocalScope,
+    low_pc: u32,
+    high_pc: u32,
+    frame_base: FrameBase,
+    name: String,
+    /// ⚠️ 变量的位置**先攒着**：栈上变量的最终地址要等这个函数收尾时
+    /// 拿 `.debug_frame` 的主行 CFA 规则才能落定（CFA 在函数级才查得到）。
+    pending: Vec<(String, ParsedLocation)>,
 }
 
-#[derive(Default)]
-struct Builder {
+struct Builder<'a> {
+    cfi: &'a CfiTable,
     open: Vec<OpenScope>,
     done: Vec<LocalScope>,
 }
 
-impl Builder {
+impl<'a> Builder<'a> {
+    fn new(cfi: &'a CfiTable) -> Self {
+        Self {
+            cfi,
+            open: Vec::new(),
+            done: Vec::new(),
+        }
+    }
+
     fn on_die(&mut self, depth: usize, tag: u64, attrs: &DieAttrs) {
         // 先结算已经离开的函数（当前 DIE 的深度 ≤ 那个函数的深度）。
         while let Some(top) = self.open.last() {
@@ -277,7 +280,8 @@ impl Builder {
                 break;
             }
             let top = self.open.pop().expect("刚看过非空");
-            self.done.push(top.scope);
+            let scope = self.close(top);
+            self.done.push(scope);
         }
 
         if tag == DW_TAG_SUBPROGRAM {
@@ -316,13 +320,11 @@ impl Builder {
                 .to_string();
             self.open.push(OpenScope {
                 depth,
-                scope: LocalScope {
-                    low_pc: low,
-                    high_pc: high,
-                    frame_base,
-                    name,
-                    vars: Vec::new(),
-                },
+                low_pc: low,
+                high_pc: high,
+                frame_base,
+                name,
+                pending: Vec::new(),
             });
             return;
         }
@@ -350,21 +352,51 @@ impl Builder {
             //    变量**：「整帧可见」的口径也要有个位置才谈得上可见。
             return;
         };
-        top.scope.vars.push(LocalVar {
-            name: name.to_string(),
-            location: match location {
-                ParsedLocation::Reg(index) => LocalLocation::Reg(index),
-                ParsedLocation::FrameOffset(offset) => LocalLocation::Frame {
-                    base: top.scope.frame_base,
-                    offset,
-                },
+        top.pending.push((name.to_string(), location));
+    }
+
+    /// 结算一个函数：**在这里**把 `Cfa` 换成 `.debug_frame` 的主行规则。
+    fn close(&self, top: OpenScope) -> LocalScope {
+        let (base, bias) = match top.frame_base {
+            FrameBase::Reg(index) => (Some(index), 0),
+            FrameBase::Cfa => match self.cfi.body_cfa(top.low_pc, top.high_pc) {
+                Some(rule) => (Some(rule.reg), rule.offset),
+                // ⚠️ 读不到 CFI ⇒ ⇒ **丢变量**（保留区间，见模块头）。
+                None => (None, 0),
             },
-        });
+        };
+        let vars = match base {
+            Some(base) => top
+                .pending
+                .into_iter()
+                .map(|(name, location)| LocalVar {
+                    name,
+                    location: match location {
+                        ParsedLocation::Reg(index) => LocalLocation::Reg(index),
+                        // 栈上：`fbreg` 的偏移与 CFA 的偏移**相加** ⇒ ⇒ 最终
+                        // 只剩「寄存器 + 一个偏移」。
+                        ParsedLocation::FrameOffset(offset) => LocalLocation::Frame {
+                            base,
+                            offset: bias.wrapping_add(offset),
+                        },
+                    },
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        LocalScope {
+            low_pc: top.low_pc,
+            high_pc: top.high_pc,
+            frame_base: base.map_or(top.frame_base, FrameBase::Reg),
+            name: top.name,
+            vars,
+        }
     }
 
     fn finish(mut self) -> LocalTable {
         while let Some(top) = self.open.pop() {
-            self.done.push(top.scope);
+            let scope = self.close(top);
+            self.done.push(scope);
         }
         // ⚠️ 词法块（`DW_TAG_LEXICAL_BLOCK`）里的变量已经在同一次走查里按
         //    深度收进来了（它们是 `top` 的后代，`depth > top.depth`）
@@ -446,6 +478,11 @@ pub(crate) fn debug_sections_fixture() -> Vec<(String, Vec<u8>)> {
             ".debug_line_str".to_string(),
             tests::fixtures::DEBUG_LINE_STR.to_vec(),
         ),
+        // CFI：局部变量的「真 CFA」从这里算（缺它 ⇒ 区间留着、变量丢掉）。
+        (
+            ".debug_frame".to_string(),
+            crate::m11_symbol::cfi::DEBUG_FRAME.to_vec(),
+        ),
     ]
 }
 
@@ -514,6 +551,20 @@ mod tests {
                 (".debug_abbrev".to_string(), DEBUG_ABBREV.to_vec()),
                 (".debug_str".to_string(), DEBUG_STR.to_vec()),
                 (".debug_line_str".to_string(), DEBUG_LINE_STR.to_vec()),
+                (
+                    ".debug_frame".to_string(),
+                    crate::m11_symbol::cfi::DEBUG_FRAME.to_vec(),
+                ),
+            ])
+        }
+
+        /// 同一份 `<info>/<abbrev>`，但**没有** `.debug_frame`。
+        pub fn table_without_frame() -> LocalTable {
+            LocalTable::from_sections(&[
+                (".debug_info".to_string(), DEBUG_INFO.to_vec()),
+                (".debug_abbrev".to_string(), DEBUG_ABBREV.to_vec()),
+                (".debug_str".to_string(), DEBUG_STR.to_vec()),
+                (".debug_line_str".to_string(), DEBUG_LINE_STR.to_vec()),
             ])
         }
     }
@@ -526,21 +577,22 @@ mod tests {
         let main = table.scope_at(0x38).expect("0x38 是 main 的第一条");
         assert_eq!(main.name, "main");
         assert_eq!((main.low_pc, main.high_pc), (0x38, 0x78));
-        assert_eq!(main.frame_base, FrameBase::Cfa, "GCC 给的是 call_frame_cfa");
+        assert_eq!(main.frame_base, FrameBase::Reg(8), "CFA 主行是 s0+0");
         let names: Vec<&str> = main.vars.iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, vec!["x", "y"]);
         // ⚠️ 与反汇编逐字一致：`x` 存在 `-24(s0)`、`y` 存在 `-20(s0)`。
+        //    主行 CFA 是 `s0+0` ⇒ ⇒ 偏移与 `fbreg` 写的一模一样。
         assert_eq!(
             table.lookup_at("x", 0x38),
             Some(LocalLocation::Frame {
-                base: FrameBase::Cfa,
+                base: 8,
                 offset: -24
             })
         );
         assert_eq!(
             table.lookup_at("y", 0x38),
             Some(LocalLocation::Frame {
-                base: FrameBase::Cfa,
+                base: 8,
                 offset: -20
             })
         );
@@ -551,7 +603,7 @@ mod tests {
         assert_eq!(
             table.lookup_at("a", 0x10),
             Some(LocalLocation::Frame {
-                base: FrameBase::Cfa,
+                base: 8,
                 offset: -36
             })
         );
@@ -586,17 +638,79 @@ mod tests {
         assert_eq!(
             table.lookup_any("x"),
             LocalLookup::Found(LocalLocation::Frame {
-                base: FrameBase::Cfa,
+                base: 8,
                 offset: -24
             })
         );
         assert_eq!(
             table.lookup_any("a"),
             LocalLookup::Found(LocalLocation::Frame {
-                base: FrameBase::Cfa,
+                base: 8,
                 offset: -36
             })
         );
+    }
+
+    #[test]
+    fn without_cfi_the_scopes_stay_but_their_variables_go() {
+        // ⚠️ 用户拍板的口径：读不到 `.debug_frame` ⇒ ⇒ **保留区间、丢变量**。
+        //    「所在函数」照样能显示，写局部变量名则当作不认识（不猜位置）。
+        let table = fixtures::table_without_frame();
+        assert_eq!(table.scope_count(), 2, "区间照收");
+        assert_eq!(
+            table.scope_at(0x38).map(|scope| scope.name.as_str()),
+            Some("main"),
+            "所在函数照旧可查"
+        );
+        assert!(
+            table.scope_at(0x38).expect("main").vars.is_empty(),
+            "没有 CFA ⇒ 栈上变量全丢"
+        );
+        assert_eq!(table.lookup_at("x", 0x38), None);
+        assert_eq!(table.lookup_any("x"), LocalLookup::Missing);
+    }
+
+    #[test]
+    fn an_sp_based_frame_moves_the_offsets_onto_sp() {
+        // ⚠️ 这条钉「不再是 s0 假设」：把 `.debug_frame` 换成
+        //    「main 的 CFA = sp+32」（`-O2` / 无帧指针产物的形状）⇒
+        //    真夹具里 `x`（fbreg -24）必须落到 `[sp+8]`，而不是 `[s0-24]`。
+        let mut sections = vec![
+            (".debug_info".to_string(), fixtures::DEBUG_INFO.to_vec()),
+            (".debug_abbrev".to_string(), fixtures::DEBUG_ABBREV.to_vec()),
+            (".debug_str".to_string(), fixtures::DEBUG_STR.to_vec()),
+            (
+                ".debug_line_str".to_string(),
+                fixtures::DEBUG_LINE_STR.to_vec(),
+            ),
+        ];
+        sections.push((".debug_frame".to_string(), sp_based_frame()));
+        let table = LocalTable::from_sections(&sections);
+        assert_eq!(
+            table.lookup_at("x", 0x38),
+            Some(LocalLocation::Frame { base: 2, offset: 8 }),
+            "CFA = sp+32、fbreg -24 ⇒ sp+8"
+        );
+        // 没有 FDE 的 `helper` ⇒ 变量照口径丢掉（区间还在）。
+        assert_eq!(
+            table.scope_at(0x10).map(|s| s.name.as_str()),
+            Some("helper")
+        );
+        assert_eq!(table.lookup_at("a", 0x10), None);
+    }
+
+    /// 一条**只覆盖 `main`** 的 `.debug_frame`：CIE `sp+0`，FDE 在 `0x3c`
+    /// 处切成 `sp+32`（覆盖 `0x3c..0x78` ⇒ 主行就是它）。
+    fn sp_based_frame() -> Vec<u8> {
+        let mut bytes = vec![
+            0x0c, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x03, 0x00, 0x01, 0x7c, 0x01, 0x0c,
+            0x02, 0x00,
+        ];
+        bytes.extend_from_slice(&[
+            0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x38, 0x00, 0x00, 0x00, 0x40, 0x00,
+            0x00, 0x00, 0x44, 0x0c, 0x02, 0x20,
+        ]);
+        bytes
     }
 
     #[test]
@@ -608,12 +722,12 @@ mod tests {
                 LocalScope {
                     low_pc: 0x0,
                     high_pc: 0x10,
-                    frame_base: FrameBase::Cfa,
+                    frame_base: FrameBase::Reg(8),
                     name: "alpha".to_string(),
                     vars: vec![LocalVar {
                         name: "dup".to_string(),
                         location: LocalLocation::Frame {
-                            base: FrameBase::Cfa,
+                            base: 8,
                             offset: -8,
                         },
                     }],
@@ -621,12 +735,12 @@ mod tests {
                 LocalScope {
                     low_pc: 0x10,
                     high_pc: 0x20,
-                    frame_base: FrameBase::Cfa,
+                    frame_base: FrameBase::Reg(8),
                     name: "beta".to_string(),
                     vars: vec![LocalVar {
                         name: "dup".to_string(),
                         location: LocalLocation::Frame {
-                            base: FrameBase::Cfa,
+                            base: 8,
                             offset: -12,
                         },
                     }],
@@ -642,14 +756,14 @@ mod tests {
         assert_eq!(
             table.lookup_at("dup", 0x4),
             Some(LocalLocation::Frame {
-                base: FrameBase::Cfa,
+                base: 8,
                 offset: -8
             })
         );
         assert_eq!(
             table.lookup_at("dup", 0x14),
             Some(LocalLocation::Frame {
-                base: FrameBase::Cfa,
+                base: 8,
                 offset: -12
             })
         );
@@ -663,7 +777,7 @@ mod tests {
             scopes: vec![LocalScope {
                 low_pc: 0x0,
                 high_pc: 0x10,
-                frame_base: FrameBase::Cfa,
+                frame_base: FrameBase::Reg(8),
                 name: "f".to_string(),
                 vars: vec![LocalVar {
                     name: "arg".to_string(),

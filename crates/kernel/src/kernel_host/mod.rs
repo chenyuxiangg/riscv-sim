@@ -179,12 +179,11 @@ use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload};
 
 use crate::m08_breakpoint::names::{
-    FrameBaseSlot, LocalSlot, NameClass, NameRef, NameResolver, NameTarget, ResolveError,
+    LocalSlot, NameClass, NameRef, NameResolver, NameTarget, ResolveError,
 };
 use crate::m08_breakpoint::watch_expr::WatchTarget;
 use crate::m11_symbol::{
-    Disassembler, FrameBase, LocalLocation, LocalLookup, SymbolClass, SymbolIndex, TraceBuffer,
-    TRACE_CAP,
+    Disassembler, LocalLocation, LocalLookup, SymbolClass, SymbolIndex, TraceBuffer, TRACE_CAP,
 };
 use crate::m15_peripheral;
 use crate::m16_interrupt::InterruptController;
@@ -539,16 +538,13 @@ impl HostNames<'_> {
 }
 
 /// `m11_symbol::LocalLocation` → M-08 的 [`LocalSlot`]（**唯一**的翻译点）。
+///
+/// ⚠️ CFI 批之后两者形状一致：栈上变量已经是「寄存器 + 偏移」（CFA 在
+/// M-11 的 `.debug_frame` 里算完）⇒ ⇒ 这里不再有帧指针 / CFA 的假设。
 fn local_slot(location: LocalLocation) -> LocalSlot {
     match location {
         LocalLocation::Reg(index) => LocalSlot::Reg(index),
-        LocalLocation::Frame { base, offset } => LocalSlot::Frame {
-            base: match base {
-                FrameBase::Reg(index) => FrameBaseSlot::Reg(index),
-                FrameBase::Cfa => FrameBaseSlot::Cfa,
-            },
-            offset,
-        },
+        LocalLocation::Frame { base, offset } => LocalSlot::Frame { base, offset },
     }
 }
 
