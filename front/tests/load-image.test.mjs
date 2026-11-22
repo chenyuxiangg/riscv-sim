@@ -864,9 +864,10 @@ describe("实现唯一性（⛔ 不许有第二份）", () => {
         assert.equal(defs.length, 1, `handleLoadImageCommand 应恰好定义一次，实测 ${defs.length}`);
         // ⚠️ **页头那条路必须调它** ⇒ ⇒ 否则就是**两条**装载路径 ⇒ ⇒ 之后
         // 「重订流 / 清残留」会分叉。
-        const start = appSrc.indexOf("export function wireTopbarImageLoader");
-        assert.ok(start > 0, "app.js 里没有 wireTopbarImageLoader");
-        const body = appSrc.slice(start, appSrc.indexOf("\n}\n", start));
+        const topbarLoaderSrc = readFileSync(resolve(frontDir, "views/app/topbar-loader.js"), "utf8");
+        const start = topbarLoaderSrc.indexOf("export function wireTopbarImageLoader");
+        assert.ok(start > 0, "topbar-loader.js 里没有 wireTopbarImageLoader");
+        const body = topbarLoaderSrc.slice(start, topbarLoaderSrc.indexOf("\n}\n", start));
         assert.ok(
             body.includes("handleLoadImageCommand"),
             "页头那条路没有走 handleLoadImageCommand（⇒ ⇒ 两条装载路径）",
