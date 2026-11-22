@@ -545,6 +545,23 @@ impl Default for BreakpointInfo {
     }
 }
 
+/// **当前帧**的一个局部变量：名字 + 位置（只读展示，**不带值**）。
+///
+/// ⚠️ `location` 是人读文本（如 `[s0-24]` / `a0`），由内核渲染：寄存器
+/// 命名只有内核知道（`m11_symbol::render` 是唯一落点）⇒ 前端不做二次
+/// 解释，也不拼自己的格式。
+///
+/// ⚠️ **不带当前值**、**不带类型**（用户拍板）：值要读内存 / 读寄存器，
+/// 类型要顺着 `DW_AT_type → DW_TAG_base_type` 再走一遍 DIE ⇒ 都是另一批
+/// 的事；这里只回答「这个名字在这个帧里放哪儿」。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct LocalVarInfo {
+    /// 源程序里的名字（`DW_AT_name` / `DW_AT_linkage_name`）。
+    pub name: String,
+    /// 位置的人读写法（`[s0-24]` / `a0` …）。
+    pub location: String,
+}
+
 /// **一帧调用栈**（契约 · STAGE-55 栈回溯批）。
 ///
 /// ⚠️ 只报「pc + 所在函数名」，**不含**该帧的局部变量 —— 「看上层帧的变量」

@@ -427,6 +427,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Command.setBreakpointEnabled(1, false)),
             // STAGE-55 栈回溯批：一条**只读**命令。
             variantOf(Command.backtrace()),
+            // STAGE-55 真相候选列表批：一条**只读**命令。
+            variantOf(Command.listLocals()),
         ].sort();
         assert.deepEqual(js, rust, "JS 命令变体与 Rust CommandPayload 不一致");
     });
@@ -473,6 +475,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Event.watchValues([])),
             // STAGE-55 栈回溯批：栈回溯回执。
             variantOf(Event.backtrace([], false)),
+            // STAGE-55 真相候选列表批：当前帧局部变量回执。
+            variantOf(Event.locals(null, [], false)),
         ].sort();
         assert.deepEqual(js, rust, "JS 事件变体与 Rust EventPayload 不一致");
     });
@@ -612,6 +616,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 SetBreakpointEnabled: Command.setBreakpointEnabled(1, false),
                 // ⚠️ **STAGE-55 栈回溯批** ⇒ ⇒ unit 变体（裸字符串）。
                 Backtrace: Command.backtrace(),
+                // ⚠️ **STAGE-55 真相候选列表批** ⇒ ⇒ unit 变体（裸字符串）。
+                ListLocals: Command.listLocals(),
             },
             EventPayload: {
                 Tick: Event.tick(0, 0),
@@ -659,6 +665,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 // ⚠️ **STAGE-55 栈回溯批** ⇒ ⇒ 字段名逐字比对的登记处
                 //   （`frames` / `truncated`）。
                 Backtrace: Event.backtrace([], false),
+                // ⚠️ **STAGE-55 真相候选列表批** ⇒ ⇒ 字段名逐字比对的登记处
+                //   （`function` / `vars` / `truncated`）。
+                Locals: Event.locals(null, [], false),
             },
         };
 

@@ -1956,6 +1956,87 @@ fn s19_a_loop_in_the_return_address_is_truncated() {
     assert!(truncated, "返回地址指回自己 ⇒ 环");
 }
 
+/// 取第一条 `Locals` 事件。
+fn locals_event(events: &[EventPayload]) -> (Option<String>, Vec<(String, String)>, bool) {
+    for event in events {
+        if let EventPayload::Locals {
+            function,
+            vars,
+            truncated,
+        } = event
+        {
+            let listed = vars
+                .iter()
+                .map(|var| (var.name.clone(), var.location.clone()))
+                .collect();
+            return (function.clone(), listed, *truncated);
+        }
+    }
+    panic!("没有 Locals 事件：{events:?}");
+}
+
+/// **S-20**：停在 `main` 函数体 ⇒ 列出 `main` 的 `x` / `y`（名字 + 位置）。
+#[test]
+fn s20_list_locals_names_the_frame_and_the_place_of_each_variable() {
+    let mut host = host_at(elf_project_with_locals(), 0x48, 0x400);
+    let (function, vars, truncated) =
+        locals_event(&dispatch(&mut host, CommandPayload::ListLocals));
+    assert_eq!(function.as_deref(), Some("main"), "当前 pc 在 main 里");
+    assert_eq!(
+        vars,
+        vec![
+            ("x".to_string(), "[s0-24]".to_string()),
+            ("y".to_string(), "[s0-20]".to_string()),
+        ],
+        "名字与位置逐字来自 DWARF + CFI 主行（`[s0-24]` 是用户能照抄的写法）"
+    );
+    assert!(!truncated, "两个变量远没到上限");
+}
+
+/// **S-21**：换到 `helper` ⇒ 列的是 `helper` 的变量（不是 `main` 的）。
+#[test]
+fn s21_list_locals_follows_the_pc_into_another_function() {
+    let mut host = host_at(elf_project_with_locals(), 0x10, 0x400);
+    let (function, vars, _) = locals_event(&dispatch(&mut host, CommandPayload::ListLocals));
+    assert_eq!(function.as_deref(), Some("helper"));
+    assert_eq!(
+        vars,
+        vec![
+            ("a".to_string(), "[s0-36]".to_string()),
+            ("t".to_string(), "[s0-20]".to_string()),
+        ]
+    );
+}
+
+/// **S-22**：没有 `.debug_frame` ⇒ 函数名还在、变量为空（**不是**「没调试信息」）。
+#[test]
+fn s22_without_cfi_the_function_survives_but_the_list_is_empty() {
+    let mut host = host_at(elf_project_without_cfi(), 0x48, 0x400);
+    let (function, vars, truncated) =
+        locals_event(&dispatch(&mut host, CommandPayload::ListLocals));
+    assert_eq!(
+        function.as_deref(),
+        Some("main"),
+        "区间照收 ⇒ 前端仍能说「当前停在 main」"
+    );
+    assert!(
+        vars.is_empty(),
+        "读不到 CFI ⇒ 变量位置算不出来 ⇒ 一个都不给"
+    );
+    assert!(!truncated, "空列表不是截断");
+}
+
+/// **S-23**：当前 pc 不在任何函数里 ⇒ `function` 缺省，不编一个名字。
+#[test]
+fn s23_a_pc_outside_every_scope_has_no_function() {
+    let mut host = host_at(elf_project_with_locals(), 0x200, 0x400);
+    let (function, vars, truncated) =
+        locals_event(&dispatch(&mut host, CommandPayload::ListLocals));
+    assert_eq!(function, None, "不在任何函数里 ⇒ 不给名字");
+    assert!(vars.is_empty());
+    assert!(!truncated);
+}
+
 /// **S-10**：地址断点的条件里写**局部变量** ⇒ 注册期按该地址所在函数解析。
 ///
 /// ⚠️ 这条钉的是「**接上了**」：`Lookup` 与文法各自能过，但只要

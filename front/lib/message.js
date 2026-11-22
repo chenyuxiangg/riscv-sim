@@ -440,6 +440,8 @@ export const EVENT_TOPIC = Object.freeze({
     WatchValues: "debug.watch",
     // STAGE-55 栈回溯批：栈回溯回执（只读）。
     Backtrace: "debug.backtrace",
+    // STAGE-55 真相候选列表批：当前帧局部变量回执（只读）。
+    Locals: "debug.locals",
 });
 
 /**
@@ -597,6 +599,8 @@ export const Command = Object.freeze({
     listBreakpoints: () => "ListBreakpoints",
     /** `CommandPayload::Backtrace`（STAGE-55 栈回溯批 · 只读）. */
     backtrace: () => "Backtrace",
+    /** `CommandPayload::ListLocals`（STAGE-55 真相候选列表批 · 只读）. */
+    listLocals: () => "ListLocals",
     /** `CommandPayload::SetWatchpoint(Watchpoint)`. */
     setWatchpoint: (watchpoint) => ({ SetWatchpoint: watchpoint }),
     /** `CommandPayload::ClearWatchpoint { id }`. */
@@ -1269,6 +1273,25 @@ export const Event = Object.freeze({
      */
     backtrace: (frames, truncated) => ({
         Backtrace: { frames: frames ?? [], truncated: Boolean(truncated) },
+    }),
+    /**
+     * `EventPayload::Locals { function, vars, truncated }` —— 当前帧局部
+     * 变量的「名字 + 位置」（STAGE-55 真相候选列表批）。
+     *
+     * ⚠️ **不带值、不带类型**：`location` 是内核渲染的人读文本
+     * （`[s0-24]` / `a0`）⇒ ⇒ 前端原样显示，不解析、不折算。
+     *
+     * @param {string|null} fnName — 当前 pc 所在函数（不在任何函数里 ⇒ null）
+     * @param {Array<{name: string, location: string}>} vars
+     * @param {boolean} truncated — 变量多到上限、列表不完整
+     * @returns {{Locals: {function: string|null, vars: Array<object>, truncated: boolean}}}
+     */
+    locals: (fnName, vars, truncated) => ({
+        Locals: {
+            function: fnName ? String(fnName) : null,
+            vars: vars ?? [],
+            truncated: Boolean(truncated),
+        },
     }),
 });
 

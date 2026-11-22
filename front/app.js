@@ -765,6 +765,12 @@ export async function handleCommand(detail, services) {
                 await commandRouter.dispatchCommand(Command.listBreakpoints());
                 break;
             }
+            case "list-locals": {
+                // STAGE-55 真相候选列表批：只读 ⇒ 取当前帧的「名字 + 位置」
+                // （回执照 `debug.locals` 订阅落进视图状态；不做条件补全）。
+                await commandRouter.dispatchCommand(Command.listLocals());
+                break;
+            }
             case "backtrace": {
                 // STAGE-55 栈回溯批：只读 ⇒ 直接取内核算好的帧列表
                 // （回执照 `debug.backtrace` 订阅落进视图状态）。
