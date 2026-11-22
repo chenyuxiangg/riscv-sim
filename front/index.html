@@ -145,9 +145,7 @@
   </div>
 
   <footer class="footer">
-    RISC-V 仿真 / 调试工作台 · 零构建前端（原生 ES modules，无打包步骤）。
-    需通过 HTTP 打开：<code>python3 tools/serve-front.py</code>
-    <span class="muted">（ES module 与 Worker 均要求同源，<code>file://</code> 直开会被浏览器拦截）</span>
+    RISC-V 仿真调试工作台 · 需通过 HTTP 打开：<code>python3 tools/serve-front.py</code>
     <span id="build-info"></span>
     <span id="kernel-note" class="muted"></span>
   </footer>
@@ -183,7 +181,7 @@
       if (!el) return;
       if (String(el.textContent || "") !== "启动中…") return;  // 脚本跑起来了 ⇒ 不打扰
       el.textContent =
-        "脚本没启动（多半是浏览器缓存了旧版模块）—— 请硬刷新：Cmd/Ctrl+Shift+R";
+        "脚本没启动，请硬刷新：Cmd/Ctrl+Shift+R";
     }, 2500);
   </script>
 

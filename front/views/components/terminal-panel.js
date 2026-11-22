@@ -91,10 +91,10 @@ export const TERMINAL_EOL_DEFAULT = "cr";
  * @type {ReadonlyArray<{id: string, label: string, title: string}>}
  */
 export const TERMINAL_EOL_OPTIONS = Object.freeze([
-    Object.freeze({ id: "cr", label: "CR", title: "0x0D —— 真实串口终端按回车发的就是这个；osz 只认它" }),
-    Object.freeze({ id: "lf", label: "LF", title: "0x0A —— 多数 POSIX shell 认它" }),
-    Object.freeze({ id: "crlf", label: "CRLF", title: "0x0D 0x0A —— Windows 风格" }),
-    Object.freeze({ id: "none", label: "不加", title: "只送原始字节（不追加行结束符）" }),
+    Object.freeze({ id: "cr", label: "CR", title: "0x0D 回车" }),
+    Object.freeze({ id: "lf", label: "LF", title: "0x0A" }),
+    Object.freeze({ id: "crlf", label: "CRLF", title: "0x0D 0x0A" }),
+    Object.freeze({ id: "none", label: "不加", title: "不追加行结束符" }),
 ]);
 
 /**
@@ -264,19 +264,19 @@ const terminalView = register({
         return `
             <section class="terminal">
                 <div class="card">
-                    <div class="row"><h3>串口终端 (M-15 UART)</h3><span class="tag">直输模式 · 字节进 guest UART0</span></div>
+                    <div class="row"><h3>串口终端</h3><span class="tag">字节进 UART0</span></div>
                     <div class="term-scroll" data-xterm-slot>
                         <pre class="terminal-out" data-terminal-out>${escapeHtml(terminalDisplayText(buf, rawMode))}</pre>
                     </div>
                     <div class="term-meta">
-                        <span class="dir">TX（guest → 终端，内核 console 事件累计）</span><span class="n" data-term-tx>${txBytes}</span>
-                        <span class="dir">RX（终端 → guest，前端发出累计）</span><span class="n" data-term-rx>${rxBytes}</span>
+                        <span class="dir">TX（guest → 终端）</span><span class="n" data-term-tx>${txBytes}</span>
+                        <span class="dir">RX（终端 → guest）</span><span class="n" data-term-rx>${rxBytes}</span>
                     </div>
                     <div class="terminal-toolbar">
                         <div class="terminal-eol" role="group" aria-label="行结束符">${renderTerminalEolButtons(eol)}</div>
-                        <button type="button" class="terminal-raw-btn${rawMode ? " is-selected" : ""}" data-action="console-raw-toggle" data-raw-selected="${rawMode ? "true" : "false"}" title="切换「原始字节」与「终端屏幕」两种显示">原始字节</button>
+                        <button type="button" class="terminal-raw-btn${rawMode ? " is-selected" : ""}" data-action="console-raw-toggle" data-raw-selected="${rawMode ? "true" : "false"}" title="切换原始字节 / 终端屏幕">原始字节</button>
                     </div>
-                    <p class="muted">直接在终端区域键入 ⇒ 按键字节逐帧进 guest 的 UART0（契约 v5 的 <code>WriteConsole</code>）；<strong>回显来自 guest</strong>，平台不做本地回显。回车发送当前档行结束符（默认 <code>CR</code> = 0x0D；osz 这类 shell 只认它）；Ctrl-C / 退格 / 方向键按原始控制字节透传。</p>
+                    <p class="muted">回显来自 guest，平台不做本地回显。</p>
                 </div>
             </section>
         `;

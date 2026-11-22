@@ -228,12 +228,12 @@ export function matchSourceFile(tree, dwarfPath, remaps) {
 export function describeMatch(match) {
     if (!match || match.kind === "none") {
         if (match?.reason === "no-tree") {
-            return "尚未装载源码 — 用上面的入口选一个目录或若干文件。";
+            return "尚未装载源码";
         }
-        return "源码树里匹配不到这个文件（按路径尾部逐段比）。";
+        return "匹配不到该文件";
     }
     if (match.kind === "unique") return `命中：${match.key}`;
-    return `匹配到 ${match.candidates.length} 个候选 — 请选一个（不替你挑）。`;
+    return `匹配到 ${match.candidates.length} 个候选，请选择`;
 }
 
 /**
@@ -370,7 +370,7 @@ export function renderSourceColumns(options) {
     //   ⇒ ⇒ 代码区显示「先选一个」而不是**擅自**显示某一份。
     const code = active
         ? `<div class="code" data-source-code>${renderSourceText(treeText(tree, active), line)}</div>`
-        : `<div class="code muted" data-source-code>选中一个源码文件后显示内容。</div>`;
+        : `<div class="code muted" data-source-code>选择源码文件查看内容</div>`;
     return `
         <div class="srcwrap">
             <div class="card">

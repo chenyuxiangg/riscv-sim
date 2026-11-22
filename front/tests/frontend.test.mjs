@@ -116,7 +116,7 @@ describe("bootstrap", () => {
     test("页脚文案由 JS 填充，不再写死阶段号", () => {
         const info = dom.document.getElementById("build-info");
         assert.ok(info, "缺少 #build-info");
-        assert.match(info.textContent, /role=(product|embedded)/);
+        assert.match(info.textContent, /(product|embedded)/);
     });
 
     test("页脚由真实工作台状态派生（写死视图列表会被抓）", () => {
@@ -129,7 +129,7 @@ describe("bootstrap", () => {
         const workspace = m01.currentWorkspace();
         assert.ok(workspace, "缺少工作台快照");
         assert.ok(
-            info.textContent.includes(`role=${workspace.role}`),
+            info.textContent.includes(workspace.role),
             `页脚 role 与工作台快照不符：${info.textContent}`,
         );
         for (const view of workspace.views) {

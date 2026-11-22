@@ -63,7 +63,7 @@ export async function createBoardStoreInstance() {
         return {
             store: null,
             status: "error",
-            reason: `板档案服务不可用：${error?.message ?? error}`,
+            reason: `档案服务不可用：${error?.message ?? error}`,
         };
     }
     const backend = api.createIndexedDbBackend();
@@ -71,7 +71,7 @@ export async function createBoardStoreInstance() {
         return {
             store: null,
             status: "unsupported",
-            reason: String(backend?.reason ?? "本浏览器没有可用的持久化存储"),
+            reason: String(backend?.reason ?? "无持久化存储"),
         };
     }
     return { store: api.createBoardStore(backend), status: "ok", reason: null };
@@ -90,7 +90,7 @@ export async function deleteProductArchive(services, id) {
     const archive = Array.isArray(state.archive) ? state.archive : [];
     const target = String(id ?? "");
     if (!archive.some((row) => String(row?.id) === target)) {
-        setNote(`板档案里没有 id「${target}」这一块`);
+        setNote(`未找到档案「${target}」`);
         return;
     }
     const store = services?.boardStore ?? null;
@@ -98,14 +98,14 @@ export async function deleteProductArchive(services, id) {
         try {
             await store.remove(target);
         } catch (err) {
-            setNote(`板档案删除失败：${err?.message ?? err}`);
+            setNote(`删除失败：${err?.message ?? err}`);
             return;
         }
     }
     patchProductBoard({ archive: archive.filter((row) => String(row?.id) !== target) });
     setNote(store
-        ? `已删除板档案「${target}」`
-        : `已删除板档案「${target}」（板档案只存在于本会话）`);
+        ? `已删除「${target}」`
+        : `已删除「${target}」（仅本会话）`);
 }
 
 /**
@@ -141,7 +141,7 @@ export async function refreshProductArchive(services) {
         });
     } catch (err) {
         patchProductBoard({ archiveStatus: "error" });
-        setNote(`板档案读取失败：${err?.message ?? err}`);
+        setNote(`读取失败：${err?.message ?? err}`);
     }
 }
 
@@ -168,7 +168,7 @@ export async function writeProductArchive(services, description, registers) {
     try {
         await store.put(entry);
     } catch (err) {
-        setNote(`板档案写入失败：${err?.message ?? err}`);
+        setNote(`写入失败：${err?.message ?? err}`);
         return { saved: false, id: entry.id, reason: "write" };
     }
     await refreshProductArchive(services);
@@ -239,7 +239,7 @@ export async function applyProductBoard(services, rawDescription, options = {}) 
                 ...prev,
                 error: { code, message: detail || code },
             }));
-            setNote(`内存图流不可用：${code} ${message}`);
+            setNote(`内存图不可用：${message || code}`);
             throw err;
         }
     }
@@ -358,20 +358,20 @@ export async function startSession(services) {
             //
             // 这里**不能**说「内核未就绪」——那会把排查引到错误的方向
             // （D-46 检视 V-B）。
-            setNote(`内核已就绪，但探针流不可用：${probeError?.message ?? probeError}`);
+            setNote(`探针不可用：${probeError?.message ?? probeError}`);
             return;
         }
         if (consoleError) {
             // 同理：console 流订阅不上 ⇒ 终端永远是空的，但内核是好的。
-            setNote(`内核已就绪，但 console 流不可用：${consoleError?.message ?? consoleError}`);
+            setNote(`console 不可用：${consoleError?.message ?? consoleError}`);
             return;
         }
         if (memoryMapError) {
             // 同理：内存图流订阅不上 ⇒ 内存映射表是空的，但内核是好的。
-            setNote(`内核已就绪，但内存图流不可用：${memoryMapError?.message ?? memoryMapError}`);
+            setNote(`内存图不可用：${memoryMapError?.message ?? memoryMapError}`);
             return;
         }
-        setNote("WASM 内核已就绪（Nop 往返成功）");
+        setNote("内核已就绪");
     } catch (err) {
         setNote(`内核未就绪：${err?.message ?? err}`);
     }

@@ -100,7 +100,7 @@ export function wireWaveform(commandRouter) {
         loadECharts().then((mod) => {
             setChartState(
                 mod ? "ok" : "degraded",
-                mod ? undefined : "波形库没加载到（离线或 CDN 不可达）",
+                mod ? undefined : "波形库不可用",
             );
         });
     }
@@ -174,7 +174,7 @@ export function wireWaveform(commandRouter) {
             loadECharts().then((mod) => {
                 setChartState(
                     mod ? "ok" : "degraded",
-                    mod ? undefined : "波形库没加载到（离线或 CDN 不可达）",
+                    mod ? undefined : "波形库不可用",
                 );
             });
             return source;
@@ -239,7 +239,7 @@ export function ensureTerminalXtermLoaded() {
     loadXterm().then((mod) => {
         setTerminalXtermStatus(
             mod ? "ok" : "degraded",
-            mod ? undefined : "终端库没加载到（离线或 CDN 不可达）",
+            mod ? undefined : "终端库不可用",
         );
     });
 }

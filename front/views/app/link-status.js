@@ -37,14 +37,14 @@ export function describeTransport(transport) {
         // present-but-disconnected one — otherwise a mis-bound mount
         // result (e.g. the workspace snapshot landing in the transport
         // slot) is invisible to the gate (FRONTEND_Review.md R-01/R-02).
-        return "工作台已就绪 — kernel transport 状态未知（M-07 未挂载）";
+        return "未连接 · 状态未知";
     }
     if (transport.connected) {
-        const label = transport.label ?? `${transport.mode} transport`;
-        return `kernel 已连接 — ${label}`;
+        const label = transport.label ?? `${transport.mode}`;
+        return `已连接 · ${label}`;
     }
-    const reason = transport.lastError ? transport.lastError : "M-07 待接线";
-    return `工作台已就绪 — kernel transport 未连接（${reason}）`;
+    const reason = transport.lastError ? transport.lastError : "未接线";
+    return `未连接 · ${reason}`;
 }
 
 /**
@@ -69,7 +69,7 @@ export function describeWorkspace(workspace) {
     const info = document.getElementById("build-info");
     if (!info) return;
     const names = (workspace?.views ?? []).map((v) => v.name).join(" / ");
-    info.textContent = `当前工作台：role=${workspace?.role ?? "?"} · ${names}`;
+    info.textContent = `${workspace?.role ?? "?"} · ${names}`;
 }
 
 /**

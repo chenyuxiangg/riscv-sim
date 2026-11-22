@@ -26,8 +26,8 @@ const IRQ_KINDS = Object.freeze(["uart16550", "gpio"]);
  */
 function noteFor(kind) {
     return kind === "uart16550"
-        ? "RX 与 TX-empty 共用这一个源号（真实 16550 只有一根 IRQ 线）"
-        : "整块 GPIO 一个源号：任一引脚有事件就抬这个源号";
+        ? "RX / TX 共用一根中断线"
+        : "整块 GPIO 共用一个源号";
 }
 
 /**
@@ -63,13 +63,10 @@ export function renderIrqEditor({ draft } = {}) {
     return `
         <div class="card" data-irq-editor>
             <h3>外设中断号<span class="tag">${rows.length} 个</span></h3>
-            <p class="muted">
-                每个外设一个 PLIC 源号（<code>1..sources</code>，<code>0</code> 保留）——
-                同一块板内不允许重复；装载时生效。
-            </p>
+            <p class="muted">同板内不可重复；装载时生效。</p>
             <table class="map-table" data-irq-rows>
                 <thead><tr><th>器件</th><th>类型</th><th>PLIC 源号</th><th>说明</th></tr></thead>
-                <tbody>${rows.join("") || `<tr><td colspan="4" class="muted">还没有中断外设（UART / GPIO）。</td></tr>`}</tbody>
+                <tbody>${rows.join("") || `<tr><td colspan="4" class="muted">暂无中断外设</td></tr>`}</tbody>
             </table>
         </div>
     `;

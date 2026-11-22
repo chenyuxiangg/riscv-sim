@@ -302,19 +302,19 @@ export function splitErrorCode(err) {
 export function boardErrorHint(code) {
     switch (String(code ?? "")) {
         case "E_PLT-01":
-            return "这块板不是合法 JSON 形状 —— 从模板重新导入一份。";
+            return "板格式非法，请从模板重新导入";
         case "E_PLT-02":
-            return "板 id 不能为空 —— 填一个 id 再点「重新载入」。";
+            return "板 id 不能为空";
         case "E_PLT-04":
         case "E_PLT-05":
         case "E_PLT-06":
         case "E_PLT-12":
         case "E_PLT-20":
-            return "这份板没通过校验：草稿已保留，改完再点「重新载入」。";
+            return "校验未通过，草稿已保留";
         case "E_PLT-13":
-            return "板级配置已在别处被改过（修订号对不上）—— 先看当前生效图，再重新提交。";
+            return "板配置已被改动（修订号不符），请查看当前生效图后重新提交";
         case "E_PLT-03":
-            return "这块板的描述格式版本当前不接受 —— 从模板重新导入一份。";
+            return "描述版本不受支持，请从模板重新导入";
         default:
             return "";
     }
@@ -935,42 +935,34 @@ export function renderBasePlanner(state) {
     if (windowUnknown) {
         notes.push(
             `<span data-mmap-plan-window-unknown="1">`
-            + `⚠️ **外设窗口大小未知** —— 内核的器件类型表还没到 ⇒ ⇒ 下面按一个`
-            + `**占位长度**折算 ⇒ ⇒ 空隙**可能不准** ⇒ ⇒ 提交后仍以内核的判定为准。`
+            + `⚠️ 窗口大小未知，空隙仅供参考。`
             + `</span>`,
         );
     }
     if (more > 0) {
         notes.push(
             `<span data-mmap-plan-more="1">`
-            + `这个范围里还有 **${more}** 条空隙（只列了前 ${PLAN_MAX_GAPS} 条）`
-            + ` ⇒ ⇒ 缩小规划范围可以看到更多。`
+            + `还有 ${more} 条`
             + `</span>`,
         );
     }
     if (shown.length === 0) {
         notes.push(
             `<span data-mmap-plan-empty="1">`
-            + `这个范围里**没有空隙**了 ⇒ ⇒ 扩大规划范围，或者改一改已经占掉的段。`
+            + `范围内没有空隙`
             + `</span>`,
         );
     }
     const noteBox = notes.length > 0
         ? `<p class="muted" data-mmap-plan-note>${notes.join("<br/>")}</p>`
-        : `<p class="muted" data-mmap-plan-note>规划范围内有 <strong>${gaps.length}</strong> 条空隙。</p>`;
+        : `<p class="muted" data-mmap-plan-note>范围内有 <strong>${gaps.length}</strong> 条空隙。</p>`;
 
     return `
         <section class="card" data-mmap-plan="1">
             <div class="row">
                 <h3>基址规划</h3>
-                <span class="tag">M-14 · 挑一个空隙</span>
+                <span class="tag">挑一个空隙</span>
             </div>
-            <p class="muted">
-                下面是**当前草稿里还没被占用**的地址区间（限在规划范围内）⇒ ⇒
-                挑一条 ⇒ ⇒ 它会填进「目标行」那一行的基址 ⇒ ⇒
-                <strong>基址仍然由你决定</strong> ⇒ ⇒ 真正的重叠判定是内核的
-                <code>E_PLT-06</code>（前端**不**写第二份校验器）。
-            </p>
             <div class="grid-2">
                 <label class="plan-range">
                     规划范围起
@@ -984,16 +976,16 @@ export function renderBasePlanner(state) {
                 </label>
             </div>
             <label class="plan-target">
-                目标行（填给哪一行）
+                目标行
                 <select data-mmap-plan-target${regions.length === 0 ? " disabled" : ""}>
                     ${targetOptions}
                 </select>
             </label>
-            <p class="muted">已占用 ${occupied.length} 段（规划范围 ${escapeHtml(hex32(range.from))} – ${escapeHtml(hex32((range.to - 1) >>> 0))}）。</p>
+            <p class="muted">已占用 ${occupied.length} 段。</p>
             <table class="map-table" data-mmap-plan-table>
                 <thead><tr><th>起</th><th>止（含）</th><th>可用字节</th><th></th></tr></thead>
                 <tbody>
-                    ${gapRows || `<tr><td colspan="4" class="muted">（这个范围里没有空隙）</td></tr>`}
+                    ${gapRows || `<tr><td colspan="4" class="muted">范围内没有空隙</td></tr>`}
                 </tbody>
             </table>
             ${noteBox}
@@ -1448,7 +1440,7 @@ export function hasRegionWithoutBase(description) {
 export function describeMemoryMapError(code, message) {
     const text = String(message ?? "");
     if (String(code ?? "") === "E_PLT-13") {
-        return `${text}${text ? " —— " : ""}图已被改，请刷新后再提交。`;
+        return `${text}${text ? " —— " : ""}图已被改，请刷新`;
     }
     return text;
 }
@@ -1553,13 +1545,13 @@ export function renderMemoryMapTable(memoryMap) {
     if (!memoryMap || !memoryMap.description) {
         return (
             `<p class="muted" data-memory-map-table="no-data">` +
-            `尚无内存图数据 —— 内核还没有推送当前生效的内存图（订阅 <code>memory.map</code> 后自动更新）。` +
+            `尚无内存图数据` +
             `</p>`
         );
     }
     const rows = descriptionToRows(memoryMap.description);
     if (rows.length === 0) {
-        return `<p class="muted" data-memory-map-table="empty">当前生效的内存图为空（0 段）。</p>`;
+        return `<p class="muted" data-memory-map-table="empty">内存图为空（0 段）</p>`;
     }
     return `
         <table class="map-table" data-memory-map-table="rows">
@@ -1580,11 +1572,11 @@ export function renderMemoryMapTable(memoryMap) {
  */
 export function renderEffectiveSummary(memoryMap) {
     if (!memoryMap || !memoryMap.description) {
-        return `<p class="muted" data-mmap-effective="none">尚无内存图数据 —— 内核还没有推送当前生效的内存图。</p>`;
+        return `<p class="muted" data-mmap-effective="none">尚无内存图数据</p>`;
     }
     const rows = descriptionToRows(memoryMap.description);
     if (rows.length === 0) {
-        return `<p class="muted" data-mmap-effective="empty">当前生效的内存图为空（0 段）。</p>`;
+        return `<p class="muted" data-mmap-effective="empty">内存图为空（0 段）</p>`;
     }
     const counts = rows.reduce((acc, row) => {
         acc[row.type] = (acc[row.type] ?? 0) + 1;
@@ -1594,7 +1586,7 @@ export function renderEffectiveSummary(memoryMap) {
     return (
         `<p class="muted" data-mmap-effective="summary">` +
         `当前生效：${rows.length} 段（${escapeHtml(parts)}）` +
-        `· 板 id ${escapeHtml(String(memoryMap.description.id ?? ""))}` +
+        ` · ${escapeHtml(String(memoryMap.description.id ?? ""))}` +
         `</p>`
     );
 }
@@ -1632,12 +1624,12 @@ export function renderEffectiveSummary(memoryMap) {
  */
 function archiveStatusText(status) {
     if (status === "unsupported") {
-        return "板档案只存在于本会话 —— 本浏览器没有可用的持久化存储 ⇒ 刷新即失。";
+        return "仅本会话保存（无持久化存储）";
     }
     if (status === "error") {
-        return "板档案落库失败 —— 当前只存在于本会话（原因见页脚提示）。";
+        return "落库失败，仅本会话保存";
     }
-    return "板档案存在本机浏览器的持久化存储里 —— 刷新后还在（但**要重新提交**才生效）。";
+    return "已存本机，刷新后保留";
 }
 
 /**
@@ -1980,8 +1972,7 @@ export function renderSegmentBar(segments) {
     if (list.length === 0) {
         return (
             `<div class="empty" data-mmap-segbar="empty">` +
-            `<p>还没有分段 —— 先加一段 RAM / ROM 或一个外设窗口；有了之后这里会按` +
-            `**真实地址区间**画成横向比例条。</p>` +
+            `<p>尚无分段</p>` +
             `</div>`
         );
     }
@@ -2022,7 +2013,7 @@ export function renderSpanChip(span) {
         `<div class="chip">` +
         `<span class="ic">址</span>` +
         `<span class="name">整图跨度</span>` +
-        `<span class="sub">最小 base → 最大 base+size</span>` +
+        `<span class="sub">地址区间</span>` +
         `<span class="vals">${escapeHtml(hex32(span))}</span>` +
         `</div>`
     );
@@ -2149,10 +2140,10 @@ function renderPeripheralRow(region, index, kinds = DEVICE_KINDS) {
     })).join("");
     return `
         <tr data-mmap-row="${index}" data-mmap-row-kind="peripheral">
-            <td>${regionField({ index, name: "base", label: "基址 base", value: region.base ?? "0", extra: "data-mm-base" })}</td>
+            <td>${regionField({ index, name: "base", label: "基址", value: region.base ?? "0", extra: "data-mm-base" })}</td>
             <td>${deviceKindSelect(index, kindName, kinds)}</td>
             <td>
-                ${deviceField({ index, name: "id", label: "器件 id", value: device.id ?? "" })}
+                ${deviceField({ index, name: "id", label: "器件", value: device.id ?? "" })}
                 ${paramFields}
             </td>
             <td><button type="button" class="btn ghost" data-action="remove-region" data-mmap-index="${index}">删除</button></td>
@@ -2165,7 +2156,7 @@ function renderMcuLine(mcu, label) {
     const vt = mcu.vector_table;
     const vtText = vt
         ? ` · 向量表 ${formatBase(String(vt.base))} × ${escapeHtml(String(vt.entries))} 项`
-        : " · （未声明向量表）";
+        : " · 未声明向量表";
     const vendorText = mcu.vendor
         ? `（${escapeHtml(mcu.vendor)}${mcu.model ? " / " + escapeHtml(mcu.model) : ""}）`
         : "";
@@ -2195,19 +2186,14 @@ function renderMcuCard(draft, memoryMap) {
     const effectiveMcu = normalizeMcu(memoryMap?.description?.mcu);
     const lines = [];
     if (draftMcu) lines.push(renderMcuLine(draftMcu, "草稿 MCU"));
-    if (effectiveMcu) lines.push(renderMcuLine(effectiveMcu, "当前生效板 MCU（只读）"));
+    if (effectiveMcu) lines.push(renderMcuLine(effectiveMcu, "当前生效 MCU"));
     const body = lines.length > 0
         ? `<ul class="mcu-summary">${lines.join("")}</ul>`
-        : `<p class="muted" data-mcu-none="1">未声明 MCU —— 从「从内置模版开始」导入模板可带出（如 rv32imac）。</p>`;
+        : `<p class="muted" data-mcu-none="1">未声明 MCU</p>`;
     return `
         <div class="card" data-mcu-display="1">
-            <h3>MCU<span class="tag">只展示 · 不编辑</span></h3>
+            <h3>MCU<span class="tag">只读</span></h3>
             ${body}
-            <p class="muted">
-                板声明 <code>isa</code> 后，内核装载固件时**按 ISA 校验**（位宽 + 压缩指令位，
-                不匹配 ⇒ <code>E_PLT-20</code>）；<code>vendor</code> / <code>model</code> /
-                向量表是身份数据（只展示）。
-            </p>
         </div>
     `;
 }
@@ -2224,8 +2210,8 @@ function renderMemoryRow(region, index) {
     return `
         <tr data-mmap-row="${index}" data-mmap-row-kind="${escapeHtml(label.toLowerCase())}">
             <td>${label}</td>
-            <td>${regionField({ index, name: "base", label: "基址 base", value: region.base ?? "0", extra: "data-mm-base" })}</td>
-            <td>${regionField({ index, name: "size", label: "大小 size", value: region.size ?? "0", extra: "data-mm-size" })}</td>
+            <td>${regionField({ index, name: "base", label: "基址", value: region.base ?? "0", extra: "data-mm-base" })}</td>
+            <td>${regionField({ index, name: "size", label: "大小", value: region.size ?? "0", extra: "data-mm-size" })}</td>
             <td><button type="button" class="btn ghost" data-action="remove-region" data-mmap-index="${index}">删除</button></td>
         </tr>
     `;

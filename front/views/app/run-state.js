@@ -347,8 +347,8 @@ export function syncTopbarRunStatus() {
     if (!el) return null;
     const run = getRunState();
     const text = run.mode === RUN_MODE_RUNNING
-        ? `连续运行中 · 已跑 ${run.windows} 轮`
-        : `已停止 · 跑了 ${run.windows} 轮`;
+        ? `运行中 · ${run.windows} 轮`
+        : `已停止 · ${run.windows} 轮`;
     el.textContent = text;
     el.setAttribute("data-topbar-run-mode", run.mode);
     el.setAttribute("data-topbar-run-windows", String(run.windows));

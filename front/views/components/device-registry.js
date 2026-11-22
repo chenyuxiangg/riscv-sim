@@ -44,7 +44,7 @@ export function renderDeviceTypeCard(types) {
             <section class="card">
                 <h3>器件类型<span class="tag">内核支持</span></h3>
                 <p class="muted" data-device-types="no-data">
-                    尚未收到器件类型表 —— 内核还没有推送（订阅 <code>device.types</code> 后自动更新）。
+                    尚未收到器件类型表
                 </p>
             </section>
         `;
@@ -53,7 +53,7 @@ export function renderDeviceTypeCard(types) {
         return `
             <section class="card">
                 <h3>器件类型<span class="tag">内核支持</span></h3>
-                <p class="muted" data-device-types="empty">内核报告：没有任何器件类型。</p>
+                <p class="muted" data-device-types="empty">暂无器件类型</p>
             </section>
         `;
     }
@@ -93,10 +93,6 @@ export function renderDeviceTypeCard(types) {
     return `
         <section class="card">
             <h3>器件类型<span class="tag">内核支持 · ${types.length} 种</span></h3>
-            <p class="muted">
-                ⚠️ **寄存器只定义偏移**（不含基址）⇒ ⇒ 集成时绑定到**任意基址**；
-                参数合法区间**由内核给出** ⇒ ⇒ 前端**不**自己判。
-            </p>
             <table class="map-table" data-device-types="rows">
                 <thead><tr><th>类型</th><th>窗口</th><th>寄存器（偏移）</th><th>参数合法区间</th></tr></thead>
                 <tbody>${rows}</tbody>
@@ -123,7 +119,7 @@ export function renderDeviceInstanceCard(instances) {
             <section class="card">
                 <h3>器件实例<span class="tag">逐实例</span></h3>
                 <p class="muted" data-device-instances="no-data">
-                    尚未收到器件实例状态 —— 内核还没有推送（订阅 <code>device.instances</code> 后自动更新）。
+                    尚未收到器件实例状态
                 </p>
             </section>
         `;
@@ -132,7 +128,7 @@ export function renderDeviceInstanceCard(instances) {
         return `
             <section class="card">
                 <h3>器件实例<span class="tag">逐实例</span></h3>
-                <p class="muted" data-device-instances="empty">内核报告：当前没有器件实例。</p>
+                <p class="muted" data-device-instances="empty">暂无器件实例</p>
             </section>
         `;
     }
@@ -161,7 +157,7 @@ export function renderDeviceInstanceCard(instances) {
         <section class="card">
             <h3>器件实例<span class="tag">逐实例 · ${instances.length} 个</span></h3>
             <table class="map-table" data-device-instances="rows">
-                <thead><tr><th>实例 id</th><th>类型</th><th>基址</th><th>窗口</th></tr></thead>
+                <thead><tr><th>实例</th><th>类型</th><th>基址</th><th>窗口</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table>
         </section>
