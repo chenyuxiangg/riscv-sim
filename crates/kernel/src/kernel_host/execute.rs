@@ -13,7 +13,7 @@ use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_02_CONDITION_INVALID, E_ENG_03_NO_PROGRESS,
     E_PROTO_01_VERSION_MISMATCH, PROTO_FAMILY,
 };
-use riscv_sim_contract::model::{WatchExpr, WatchValue, WriteSize};
+use riscv_sim_contract::model::{StackFrame, WatchExpr, WatchValue, WriteSize};
 use riscv_sim_contract::port::ExecutionBackend;
 use riscv_sim_contract::protocol::{EventPayload, HaltReason};
 use riscv_sim_contract::snapshot::DEFAULT_INSTRUCTION_BUDGET;
@@ -519,6 +519,95 @@ impl KernelHost {
             index: start,
             values,
         }]
+    }
+
+    /// 栈回溯（`Backtrace` · STAGE-55 栈回溯批）。
+    ///
+    /// 逐帧往上爬：`frames[0]` 是**当前** pc，之后每帧是「上一层函数的返回
+    /// 地址」。每一帧只给 **pc + 函数名**；**不**解析上层帧的变量（名字只在
+    /// 当前帧有效 —— 用户拍板收窄的范围）。
+    ///
+    /// 爬不上去的**四种**成因统一折成 `truncated = true`：
+    ///
+    /// 1. `pc` 不在任何 FDE 里（没有 CFI）→ 不知道 CFA 在哪；
+    /// 2. 这一行没给 RA 规则（`ra_offset == None`）→ 不知道返回地址存哪；
+    /// 3. 返回地址读不出来（`[CFA + ra_offset]` 越界 / 总线拒绝）；
+    /// 4. 帧数到上限或**检测到环**（返回地址回到已出现过的 pc）。
+    ///
+    /// ⚠️ **返回地址为 0 不算截断**：那是栈底（`main` 之上没有调用者），
+    /// 是**正常终点**。把它当截断会让每一次回溯都挂个「被截断」的旗。
+    ///
+    /// ⚠️ **已知近似**：只追 CFA 与 RA 两条规则，callee-saved 寄存器**不**
+    /// 逐帧恢复 ⇒ ⇒ 帧里 `sp` 用上一帧的 CFA（这条是精确的），但若 CFA
+    /// 基于 `s0` 之类的基址寄存器，爬到深帧时用的是**当前帧**的寄存器值。
+    /// 这一层近似写进台账，不做完整 unwind。
+    pub(super) fn on_backtrace(&mut self) -> Vec<EventPayload> {
+        /// 帧数上限：够覆盖正常调用深度，又不至于让环检测跑飞。
+        const MAX_FRAMES: usize = 32;
+
+        let mut regs = self.backend.register_file();
+        let mut pc = self.backend.pc();
+        let mut frames: Vec<StackFrame> = Vec::new();
+        let mut truncated = false;
+
+        loop {
+            frames.push(StackFrame {
+                pc,
+                function: self.index.function_at(pc),
+            });
+            if frames.len() >= MAX_FRAMES {
+                // 还有下一帧没取 ⇒ 是「没爬完」，不是「到顶」。
+                truncated = true;
+                break;
+            }
+            let Some(row) = self.index.cfi().row_at(pc) else {
+                truncated = true;
+                break;
+            };
+            let (Some(cfa), Some(ra_offset)) = (row.cfa, row.ra_offset) else {
+                truncated = true;
+                break;
+            };
+            let base = match regs.get(usize::from(cfa.reg)) {
+                Some(value) => *value,
+                None => {
+                    truncated = true;
+                    break;
+                }
+            };
+            let cfa_value = match base.checked_add_signed(cfa.offset) {
+                Some(value) => value,
+                None => {
+                    truncated = true;
+                    break;
+                }
+            };
+            let ra_addr = match cfa_value.checked_add_signed(ra_offset) {
+                Some(value) => value,
+                None => {
+                    truncated = true;
+                    break;
+                }
+            };
+            let Ok(ra) = self.backend.read_memory(ra_addr, WriteSize::Word) else {
+                truncated = true;
+                break;
+            };
+            // 返回地址 0 ⇒ 栈底（正常终点，不是截断）。
+            if ra == 0 {
+                break;
+            }
+            // 环：返回地址又落回已经出现过的帧。
+            if frames.iter().any(|frame| frame.pc == ra) {
+                truncated = true;
+                break;
+            }
+            // 上一层的 `sp` 就是这一层的 CFA（这条在 RISC-V 上是精确的）。
+            regs[2] = cfa_value;
+            pc = ra;
+        }
+
+        vec![EventPayload::Backtrace { frames, truncated }]
     }
 
     /// 写**一个**通用寄存器（契约 v2 · `WriteRegister`）。

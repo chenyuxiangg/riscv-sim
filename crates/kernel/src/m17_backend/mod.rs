@@ -1057,6 +1057,11 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
         gpr
     }
 
+    /// 当前 pc（栈回溯的**起点**）。
+    pub fn pc(&self) -> u32 {
+        self.engine.snapshot().pc
+    }
+
     /// 写**一个**通用寄存器（调试器写寄存器）。
     ///
     /// 写的是引擎持有的那份状态——**没有影子副本**（见模块头「状态单一

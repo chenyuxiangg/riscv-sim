@@ -425,6 +425,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             // 契约 v13 新增：断点表查询 / 使能（M-08）。
             variantOf(Command.listBreakpoints()),
             variantOf(Command.setBreakpointEnabled(1, false)),
+            // STAGE-55 栈回溯批：一条**只读**命令。
+            variantOf(Command.backtrace()),
         ].sort();
         assert.deepEqual(js, rust, "JS 命令变体与 Rust CommandPayload 不一致");
     });
@@ -469,6 +471,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Event.breakpoints([])),
             // 契约 v14 新增：观察表达式轮询回执。
             variantOf(Event.watchValues([])),
+            // STAGE-55 栈回溯批：栈回溯回执。
+            variantOf(Event.backtrace([], false)),
         ].sort();
         assert.deepEqual(js, rust, "JS 事件变体与 Rust EventPayload 不一致");
     });
@@ -606,6 +610,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 // ⚠️ **契约 v13**（M-08 断点表查询 / 使能批）⇒ ⇒ 登记。
                 ListBreakpoints: Command.listBreakpoints(),
                 SetBreakpointEnabled: Command.setBreakpointEnabled(1, false),
+                // ⚠️ **STAGE-55 栈回溯批** ⇒ ⇒ unit 变体（裸字符串）。
+                Backtrace: Command.backtrace(),
             },
             EventPayload: {
                 Tick: Event.tick(0, 0),
@@ -650,6 +656,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 // ⚠️ **契约 v14**（stepOver / 观察表达式批）⇒ ⇒ 字段名
                 //   逐字比对的登记处（`values`）。
                 WatchValues: Event.watchValues([]),
+                // ⚠️ **STAGE-55 栈回溯批** ⇒ ⇒ 字段名逐字比对的登记处
+                //   （`frames` / `truncated`）。
+                Backtrace: Event.backtrace([], false),
             },
         };
 

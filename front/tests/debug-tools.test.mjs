@@ -759,6 +759,80 @@ describe("整段转储（视图层 · C-11 ~ C-12）", () => {
         stop = forwardCommands(router);
     });
 
+    test("C-10f · 条件档点明「内存条件按写入判定（读到匹配值不触发）」", () => {
+        // 用户拍板：**读观察点维持现状** ⇒ ⇒ 条件里的内存读**只在 store
+        // 边界**判定 ⇒ ⇒ 这份口径必须在写条件的那一栏说出来（文案债务）。
+        const conditionBody = show("debug");
+        pickKind(conditionBody, "Condition");
+        const note = show("debug").querySelector("[data-bp-store-only-note]");
+        assert.ok(note, "条件档必须**有**这条口径说明（不许只写在文档里）");
+        assert.ok(note.textContent.includes("写入"), "必须说清是「按写入判定」");
+        assert.ok(
+            note.textContent.includes("读到匹配值不触发"),
+            "必须说清「读到不触发」（这是用户会误判的那一半）",
+        );
+
+        // 地址 / 符号档不涉及内存条件 ⇒ ⇒ 不挂这条说明（不制造噪声）。
+        const addressBody = show("debug");
+        pickKind(addressBody, "Address");
+        assert.equal(
+            show("debug").querySelector("[data-bp-store-only-note]"),
+            null,
+            "非条件档**不许**挂这条说明",
+        );
+    });
+
+    test("C-14 · 收到 `debug.backtrace` ⇒ ⇒ 调用栈按帧列出（当前帧在前）", () => {
+        router.emit("debug.backtrace", {
+            frames: [
+                { pc: 0x10, function: "helper" },
+                { pc: 0x38, function: "main" },
+            ],
+            truncated: false,
+        });
+        const body = show("debug");
+        const rows = body.querySelectorAll("[data-backtrace-row]");
+        assert.equal(rows.length, 2, "内核给了两帧 ⇒ ⇒ 界面必须列两行");
+        assert.ok(rows[0].textContent.includes("0x00000010"), "第一行必须是当前 pc");
+        assert.ok(rows[0].textContent.includes("helper"), "当前帧的函数名必须显示");
+        assert.ok(rows[1].textContent.includes("0x00000038"), "第二行是调用者 pc");
+        assert.ok(rows[1].textContent.includes("main"), "调用者函数名必须显示");
+        assert.equal(
+            body.querySelector("[data-backtrace-truncated]"),
+            null,
+            "`truncated = false` ⇒ ⇒ **不许**挂截断提示",
+        );
+    });
+
+    test("C-14b · `truncated = true` ⇒ ⇒ 明说「没走到栈底」；没名字就不编", () => {
+        router.emit("debug.backtrace", {
+            frames: [{ pc: 0x200 }],
+            truncated: true,
+        });
+        const body = show("debug");
+        const rows = body.querySelectorAll("[data-backtrace-row]");
+        assert.equal(rows.length, 1);
+        assert.ok(
+            rows[0].textContent.includes("未知函数"),
+            "`function` 缺省 ⇒ ⇒ 显示「未知函数」，**不许**编一个名字",
+        );
+        const note = body.querySelector("[data-backtrace-truncated]");
+        assert.ok(note, "截断必须**说**出来（不许假装走到了栈底）");
+        assert.ok(note.textContent.includes("没有走到栈底"));
+    });
+
+    test("C-14c · 点「回溯」⇒ ⇒ 发出**一条** `Backtrace`（只读命令）", () => {
+        const body = show("debug");
+        const button = body.querySelector("[data-action=\"backtrace\"]");
+        assert.ok(button, "调用栈卡必须**有**「回溯」按钮");
+        button.click();
+        stop();
+
+        // ⚠️ unit 变体在线上是**裸字符串**（不是单键对象）⇒ ⇒ 按值比。
+        const sent = router.sent.filter((payload) => payload === "Backtrace");
+        assert.equal(sent.length, 1, "点一次必须发**一条** `Backtrace`（裸字符串）");
+    });
+
     test("C-11 · 填地址 + 长度 + 点「转储」⇒ ⇒ 发出 `DumpMemory`，参数逐字一致", () => {
         const body = show("debug");
         const box = body.querySelector("[data-dump-input=\"memory\"]");

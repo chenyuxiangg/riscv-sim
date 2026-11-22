@@ -24,6 +24,8 @@ use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{LineEntry, Symbol};
 
 pub mod cfi;
+
+use cfi::CfiTable;
 pub mod disasm;
 pub mod dwarf;
 mod dwarf_info;
@@ -118,6 +120,11 @@ pub struct SymbolIndex {
     dwarf: DwarfLines,
     /// `.debug_info` 的**当前帧局部变量**（STAGE-55 批 D）。
     locals: LocalTable,
+    /// `.debug_frame` 的 CFI 行（STAGE-55 栈回溯批）。
+    ///
+    /// ⚠️ 与 `LocalTable` 内部那份是**同一份字节的两次解析**：局部变量要
+    /// 「主行」，栈回溯要「按 pc 取行」⇒ ⇒ 两个口径，不共享实例。
+    cfi: CfiTable,
 }
 
 impl SymbolIndex {
@@ -130,6 +137,7 @@ impl SymbolIndex {
             symbols: SymbolTable::from_sections(sections)?,
             dwarf: DwarfLines::from_sections(sections)?,
             locals: LocalTable::from_sections(sections),
+            cfi: CfiTable::from_sections(sections),
         })
     }
 
@@ -149,6 +157,19 @@ impl SymbolIndex {
     /// 地址断点，只是局部变量名解不出来。
     pub fn locals(&self) -> &LocalTable {
         &self.locals
+    }
+
+    /// CFI 行表（只读 · STAGE-55 栈回溯批）。
+    pub fn cfi(&self) -> &CfiTable {
+        &self.cfi
+    }
+
+    /// `pc` 落在哪个**函数**里（栈回溯拿它给每一帧命名）。
+    ///
+    /// ⚠️ 名字来自 `.debug_info` 的函数区间（与断点「所在函数」同源）；
+    /// 没有调试信息 ⇒ `None`（帧照样列出，只是没名字）。
+    pub fn function_at(&self, pc: u32) -> Option<String> {
+        self.locals.scope_at(pc).map(|scope| scope.name.clone())
     }
 
     /// 符号表里有多少条符号。

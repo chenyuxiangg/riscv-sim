@@ -765,6 +765,12 @@ export async function handleCommand(detail, services) {
                 await commandRouter.dispatchCommand(Command.listBreakpoints());
                 break;
             }
+            case "backtrace": {
+                // STAGE-55 栈回溯批：只读 ⇒ 直接取内核算好的帧列表
+                // （回执照 `debug.backtrace` 订阅落进视图状态）。
+                await commandRouter.dispatchCommand(Command.backtrace());
+                break;
+            }
             case "toggle-breakpoint": {
                 // 契约 v13：enable / disable ⇒ ⇒ **按 id**（同上）。
                 // 当前状态从**内核回执那一份**（`debug.bpEntries`）里查，
