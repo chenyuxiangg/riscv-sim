@@ -38,7 +38,6 @@ import { buildMockProject } from "./dev/mock-project.js";
 // ⇒ ⇒ Node 侧零 DOM 就能测 ⇒ ⇒ 与 STAGE-36 的「边沿合并剥成纯函数」同形。
 import {
     RUN_MODE_RUNNING,
-    RUN_ACTION_STOP,
     initialRunState,
     startRunState,
     stopRunState,
@@ -52,10 +51,7 @@ import { markStarted, normalizeStepCount } from "./lib/run-action.js";
 // ⚠️ **「读回」的纯函数**（v0.67 批）⇒ ⇒ 「基准怎么抓」「什么时候该读回」
 // **剥成纯函数** ⇒ ⇒ Node 侧**零 DOM** 就能验 ⇒ ⇒ 与 v0.52 批的 run-loop
 // 同形 ⇒ ⇒ 「该不该读回」不必拖一整条链路才测得到。
-import {
-    READBACK_REASON,
-    shouldAutoReadback,
-} from "./lib/readback.js";
+import { READBACK_REASON } from "./lib/readback.js";
 // ⚠️ **trace 记录开关的判定**（纯函数）⇒ ⇒ 「点一下该发什么」只有一处说了算
 // ⇒ ⇒ 视图层渲染的按钮标签与这里发出的命令**引同一处** ⇒ ⇒ 不会对不上。
 import { nextTraceEnabled, traceSwitchState, TRACE_SWITCH_OFF } from "./lib/trace-switch.js";
