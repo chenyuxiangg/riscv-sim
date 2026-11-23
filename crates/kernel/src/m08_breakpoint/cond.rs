@@ -72,7 +72,8 @@
 use std::fmt;
 
 use super::names::{LocalSlot, NameClass, NameRef, NameResolver, NameTarget, ResolveError};
-use super::watch_expr::{AddressBase, AddressSpec};
+
+use self::addr::{AddressBase, AddressSpec};
 
 /// 条件表达式的**解析失败**。
 ///
@@ -999,9 +1000,308 @@ fn parse_bracket(inner: &str) -> Result<AddressSpec, CondError> {
     if text.is_empty() {
         return Err(CondError::new("方括号里缺少地址"));
     }
-    match super::watch_expr::parse_address_syntax(&text) {
+    match addr::parse_address_syntax(&text) {
         Ok(spec) => Ok(spec),
-        Err(err) => Err(CondError::new(err.message())),
+        // ⚠️ 只搬**细节**（`AddrParseError` 自带「地址表达式无效：」前缀，而
+        //    `CondError` 也会加「条件表达式无效：」⇒ ⇒ 直接搬 message 会出现
+        //    两层前缀）。v0.137 顺手订正。
+        Err(err) => Err(CondError::new(err.detail())),
+    }
+}
+
+// ── 地址文法：`基址 ± 偏移`（条件断点与地址表达式共用）────────────────────
+//
+// ⚠️ 这段原本独立成 `watch_expr.rs`（契约 v14 · 观察表达式）。但其中「文本
+// → 地址」这一半**只有条件文法在用**（`[s0-24]` / `[main+4]` 的方括号内层）
+// ⇒ ⇒ 单独开一个模块会让「谁拥有这份文法」含糊 ⇒ ⇒ v0.137 并回本文件，
+// 地址解析**只有一个落点**。
+//
+// ⚠️ 观察表达式（`watch_expr`）现在只留「目标 + 取值」，它的地址解析也从
+//   这里借（见 `watch_expr.rs` 模块头）。
+pub(crate) mod addr {
+    //! 地址文法：把「基址 ± 偏移」的**文本**变成 [`AddressSpec`]。
+    //!
+    //! ⚠️ 类型写 `pub` 但**模块是 `pub(crate)`** ⇒ ⇒ 实际可见性仍是 crate 内，
+    //!    只是免得 `WatchTarget`（`pub`）的返回类型比它更「外露」而触发
+    //!    `private_interfaces` 告警。
+    //!
+    //! ⚠️ 只做**形状**，不查任何表：符号名原样留成 [`AddressBase::Symbol`]，
+    //!    由调用方在自己的时机绑定 —— 条件文法在**绑定期**换成数字（它要按
+    //!    断点 pc 所在的函数选局部变量），地址表达式在**解析期**换成数字。
+
+    use std::fmt;
+
+    use super::super::names::NameResolver;
+
+    /// 地址文法的**解析失败**。
+    ///
+    /// ⚠️ 前缀只说「地址表达式」：同一段文法被条件文法与地址表达式共用，
+    ///    前缀描述的是**这一段**，不冒充调用方的整条表达式。
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct AddrParseError {
+        /// 带前缀的完整消息（给直接展示的调用方）。
+        message: String,
+        /// 不含前缀的细节（给**自带前缀**的调用方包消息用）。
+        detail: String,
+    }
+
+    impl AddrParseError {
+        /// 造一个错误（`watch_expr` 的「空表达式 / 缺右括号」也用它）。
+        pub(crate) fn new(detail: impl fmt::Display) -> Self {
+            let detail = format!("{detail}");
+            Self {
+                message: format!("地址表达式无效：{detail}"),
+                detail,
+            }
+        }
+
+        /// 完整错误消息（前缀 + 细节）。
+        pub(crate) fn message(&self) -> &str {
+            &self.message
+        }
+
+        /// 只有细节（不含前缀）。
+        pub(crate) fn detail(&self) -> &str {
+            &self.detail
+        }
+    }
+
+    impl fmt::Display for AddrParseError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(&self.message)
+        }
+    }
+
+    impl std::error::Error for AddrParseError {}
+
+    /// 地址基址。
+    ///
+    /// ⚠️ **不是 `Copy`** —— 为了 [`AddressBase::Symbol`] 那个名字（`String`）。
+    /// 这是有意的：符号基址**只在解析期**存在一瞬（[`parse_address_with`] 会
+    /// 把它换成 [`AddressBase::Number`]），但文法层要先表达得出来。
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum AddressBase {
+        /// 立即数地址。
+        Number(u32),
+        /// 通用寄存器。
+        Register(u8),
+        /// 当前 PC。
+        Pc,
+        /// **符号名**（`@main+4` / `[g_counter+2]`）：解析期换成
+        /// [`AddressBase::Number`]。
+        Symbol(String),
+    }
+
+    /// 内存地址 = 基址 + 有符号偏移。
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct AddressSpec {
+        /// 基址。
+        pub base: AddressBase,
+        /// 偏移（可正可负）。
+        pub offset: i32,
+    }
+
+    /// 解析「基址 ± 偏移」的**语法**：符号名**保留**成
+    /// [`AddressBase::Symbol`]，不查任何表。
+    ///
+    /// ⚠️ 条件文法用它（`[main+4]` 的方括号内层）—— 名字要等到**绑定**期才
+    /// 定得下来（同一名字在不同函数里可能是不同的局部变量）。
+    pub(crate) fn parse_address_syntax(text: &str) -> Result<AddressSpec, AddrParseError> {
+        let (base_text, offset) = split_address(text)?;
+        let base = parse_base_syntax(base_text)?;
+        Ok(AddressSpec { base, offset })
+    }
+
+    /// 解析「基址 ± 偏移」（**带名字解析**）。
+    ///
+    /// ⚠️ 名字在**这一刻**就换成数字（`@main+4` = `main` 的地址 + 4）⇒ ⇒
+    ///    运行期不需要符号表。观察表达式（`watch_expr`）用这条。
+    pub(crate) fn parse_address_with(
+        text: &str,
+        names: &dyn NameResolver,
+    ) -> Result<AddressSpec, AddrParseError> {
+        let (base_text, offset) = split_address(text)?;
+        let base = parse_base_with(base_text, names)?;
+        Ok(AddressSpec { base, offset })
+    }
+
+    /// 把「基址 ± 偏移」拆成两段。
+    fn split_address(text: &str) -> Result<(&str, i32), AddrParseError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(AddrParseError::new("内存表达式缺少地址"));
+        }
+        let split = text
+            .char_indices()
+            .skip(1)
+            .find(|(_, c)| *c == '+' || *c == '-');
+        match split {
+            Some((i, _)) => {
+                let base = &text[..i];
+                let off = &text[i..];
+                let offset = off
+                    .parse::<i32>()
+                    .map_err(|_| AddrParseError::new(format!("偏移不是整数：{off}")))?;
+                Ok((base, offset))
+            }
+            None => Ok((text, 0)),
+        }
+    }
+
+    /// 解析一个基址记号，**符号名原样留住**。
+    fn parse_base_syntax(text: &str) -> Result<AddressBase, AddrParseError> {
+        let t = text.trim().trim_start_matches('$');
+        if t.is_empty() {
+            return Err(AddrParseError::new("缺少基址"));
+        }
+        if t.eq_ignore_ascii_case("pc") {
+            return Ok(AddressBase::Pc);
+        }
+        if let Some(n) = parse_number(t) {
+            return Ok(AddressBase::Number(n));
+        }
+        if let Some(r) = parse_register(t) {
+            return Ok(AddressBase::Register(r));
+        }
+        // ⚠️ 剩下的当**名字**（它到底是不是符号、是函数还是变量，等绑定/解析
+        //   那一层定）⇒ ⇒ 这里只做形状判断：标识符形状才收。
+        let shape_ok = t
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic() || c == '_')
+            .unwrap_or(false)
+            && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if shape_ok {
+            return Ok(AddressBase::Symbol(t.to_string()));
+        }
+        Err(AddrParseError::new(format!("未知寄存器名或地址 \"{t}\"")))
+    }
+
+    /// 解析一个基址记号（**带名字解析**）。
+    ///
+    /// 顺序：`pc` → 数字 → 寄存器 → 符号名 → 报错 ⇒ ⇒ 与条件文法同一条口径
+    /// （STAGE-55 表 9）。符号名**当场换成数字基址**，不把名字留到运行期。
+    pub(crate) fn parse_base_with(
+        text: &str,
+        names: &dyn NameResolver,
+    ) -> Result<AddressBase, AddrParseError> {
+        let t = text.trim().trim_start_matches('$');
+        if t.is_empty() {
+            return Err(AddrParseError::new("缺少基址"));
+        }
+        if t.eq_ignore_ascii_case("pc") {
+            return Ok(AddressBase::Pc);
+        }
+        if let Some(n) = parse_number(t) {
+            return Ok(AddressBase::Number(n));
+        }
+        if let Some(r) = parse_register(t) {
+            return Ok(AddressBase::Register(r));
+        }
+        // ⚠️ **符号名**：解析期就把地址定下来（`@main+4` = `main` 的地址 + 4）。
+        //
+        // ⚠️ **局部变量不进地址文法**（批 D 的边界）：它的「地址」随帧变化，
+        //    而地址文法的符号基址在**解析期**就落定（批 B 的口径）⇒ ⇒ 这里只收
+        //    「有地址常量」的符号；局部变量在条件文法里直接用名字。
+        if let Some(address) = names.resolve(t).and_then(|name| name.addr()) {
+            return Ok(AddressBase::Number(address));
+        }
+        if names.resolve(t).is_some() {
+            return Err(AddrParseError::new(format!(
+                "\"{t}\" 是当前帧的局部变量（没有固定地址）⇒ ⇒ 地址表达式里请用寄存器或数字"
+            )));
+        }
+        Err(AddrParseError::new(format!(
+            "未知寄存器名或地址 \"{t}\"（也不是已加载的符号）"
+        )))
+    }
+
+    fn parse_number(text: &str) -> Option<u32> {
+        let t = text.trim();
+        if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+            return u32::from_str_radix(hex, 16).ok();
+        }
+        t.parse::<u32>().ok()
+    }
+
+    fn parse_register(text: &str) -> Option<u8> {
+        let t = text.trim().to_ascii_lowercase();
+        if let Some(num) = t.strip_prefix('x') {
+            if let Ok(n) = num.parse::<u8>() {
+                return (n < 32).then_some(n);
+            }
+        }
+        let idx = match t.as_str() {
+            "zero" => 0,
+            "ra" => 1,
+            "sp" => 2,
+            "gp" => 3,
+            "tp" => 4,
+            "t0" => 5,
+            "t1" => 6,
+            "t2" => 7,
+            "s0" | "fp" => 8,
+            "s1" => 9,
+            "a0" => 10,
+            "a1" => 11,
+            "a2" => 12,
+            "a3" => 13,
+            "a4" => 14,
+            "a5" => 15,
+            "a6" => 16,
+            "a7" => 17,
+            "s2" => 18,
+            "s3" => 19,
+            "s4" => 20,
+            "s5" => 21,
+            "s6" => 22,
+            "s7" => 23,
+            "s8" => 24,
+            "s9" => 25,
+            "s10" => 26,
+            "s11" => 27,
+            "t3" => 28,
+            "t4" => 29,
+            "t5" => 30,
+            "t6" => 31,
+            _ => return None,
+        };
+        Some(idx)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// **语法期只认形状**：符号名原样留着（不查表），偏移带符号。
+        #[test]
+        fn the_syntax_keeps_symbol_names_for_the_binder() {
+            assert_eq!(
+                parse_address_syntax("main+4").expect("合法形状"),
+                AddressSpec {
+                    base: AddressBase::Symbol("main".to_string()),
+                    offset: 4,
+                }
+            );
+            assert_eq!(
+                parse_address_syntax("x2-8").expect("合法形状"),
+                AddressSpec {
+                    base: AddressBase::Register(2),
+                    offset: -8,
+                }
+            );
+            let err = parse_address_syntax("").expect_err("空地址必须拒");
+            assert!(
+                err.message().contains("缺少地址"),
+                "错误消息要说清缺什么：{}",
+                err.message()
+            );
+            assert!(
+                err.message().starts_with("地址表达式无效："),
+                "前缀只说这一段：{}",
+                err.message()
+            );
+        }
     }
 }
 
