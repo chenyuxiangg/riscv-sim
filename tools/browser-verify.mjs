@@ -4588,10 +4588,21 @@ const UI_IMAGE_REG_PROBE = `(() => {
 
 /** 终端输出 + 波形通道列表的探针。 */
 const UI_IMAGE_TERM_WAVE_PROBE = `(() => {
-  const term = document.querySelector("[data-terminal-out]");
+  // ⚠️ **v0.139**：屏幕档下**显示权在 xterm** ⇒ 降级「pre」被 hidden，且增量
+  //   路径只写 xterm（不重写 pre）⇒ ⇒ 读那个 pre **恒空** ⇒ 两条判据（B-3 /
+  //   B-9b）会假红，而 B-10「装载后没自动跑」会**恒真**（零判别力）。
+  //   ⇒ ⇒ 读**当前真正显示的那一份**：原始字节档读 pre、屏幕档读 xterm 渲染行。
+  const pre = document.querySelector("[data-terminal-out]");
+  const rows = document.querySelector("[data-xterm-host] .xterm-rows");
+  const shown = pre && !pre.hidden ? String(pre.textContent || "") : "";
+  const xterm = rows ? String(rows.textContent || "") : "";
+  const tx = document.querySelector("[data-term-tx]");
   const items = Array.from(document.querySelectorAll('[data-view-body="waveform"] .channel-list > li'));
   return {
-    terminal: term ? String(term.textContent || "") : "",
+    terminal: shown || xterm,
+    // ⚠️ TX 是**内核 console 事件**累计的字节数 ⇒ ⇒ 「终端一个字都没有」时
+    //   它是**区分**「真的没输出」与「输出到了但探针读错地方」的那条旁证。
+    txBytes: tx ? Number(String(tx.textContent || "").trim()) : null,
     channels: items.map((li) => String(li.textContent || "").trim()),
   };
 })()`;
@@ -6065,8 +6076,10 @@ async function runUiLayoutSection(cdp, opts) {
         return typeof v === "string" ? v.trim() : "";
     })()`);
     add(
-        "B-18b · 设计令牌 `--accent` 的**真实计算值** = #22d3ee（⇒ ⇒ 令牌**真的进了浏览器**）",
-        accent === "#22d3ee",
+        // ⚠️ **v0.139**：令牌值在早前换皮里已从 #22d3ee 改成 #171717
+        //   （`front/style.css:27`）⇒ ⇒ 判据钉**当前声明值**，不是旧色。
+        "B-18b · 设计令牌 `--accent` 的**真实计算值** = #171717（⇒ ⇒ 令牌**真的进了浏览器**）",
+        accent === "#171717",
         `--accent 计算值=${JSON.stringify(accent ?? "")}`,
     );
     await cdp.send("Emulation.clearDeviceMetricsOverride");
@@ -7005,12 +7018,14 @@ const BV_ADDR_INPUT_PROBE = `(() => {
   const memBox = debugBody ? debugBody.querySelector('[data-addr-input="memory"]') : null;
   const memInput = memBox ? memBox.querySelector("[data-mem-addr-input]") : null;
   const sizeSel = memBox ? memBox.querySelector("[data-mem-size]") : null;
-  const bpErr = bpBox ? bpBox.querySelector("[data-bp-addr-error]") : null;
+  const bpErr = bpBox ? bpBox.querySelector("[data-bp-error]") : null;
   const memErr = memBox ? memBox.querySelector("[data-mem-addr-error]") : null;
   return {
     hasDebugBody: !!debugBody,
     hasMemWindow: !!memWin,
-    hasBpInput: !!(bpBox && bpBox.querySelector("[data-bp-addr-input]")),
+    // ⚠️ **v0.139**：v0.135 三类输入合一后属性名是「data-bp-input」
+    //   （「data-bp-addr-input」已随旧结构删除）。
+    hasBpInput: !!(bpBox && bpBox.querySelector("[data-bp-input]")),
     hasMemInput: !!(memBox && memInput),
     memSizeValue: sizeSel ? String(sizeSel.value || "") : "",
     bpErrorText: bpErr ? String(bpErr.textContent || "").trim() : "",
@@ -7101,7 +7116,7 @@ async function runAddrInputSection(cdp, opts) {
     // -- 在**输入框**里填地址 ⇒ ⇒ 点「加断点」 ----------------------------
     await runEffect(cdp, `(() => {
         const box = document.querySelector('[data-view-body="debug"] [data-addr-input="breakpoint"]');
-        const input = box ? box.querySelector("[data-bp-addr-input]") : null;
+        const input = box ? box.querySelector("[data-bp-input]") : null;
         if (!input) return "no-input";
         input.value = ${JSON.stringify(BV_ADDR_INPUT_TARGET_HEX)};
         input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -7286,12 +7301,19 @@ async function runAddrInputSection(cdp, opts) {
 const BV_DEBUGGER_PROBE = `(() => {
   const debugBody = document.querySelector('[data-view-body="debug"]');
   const memWin = debugBody ? debugBody.querySelector('[data-window="memory"]') : null;
-  const symBox = debugBody ? debugBody.querySelector('[data-symbol-input="breakpoint"]') : null;
-  const condBox = debugBody ? debugBody.querySelector('[data-cond-input="breakpoint"]') : null;
+  // ⚠️ **v0.139**：v0.135 起「符号框 / 条件框」两个元素**不存在了** ⇒ ⇒ 三类
+  //   输入合成**一个框**（kind 下拉 + 共用「data-bp-input」）⇒ ⇒ 判据改成
+  //   「同一个框能不能按符号 / 条件提交」（下拉少了那一档 ⇒ 仍然红）。
+  const bpBox = debugBody ? debugBody.querySelector("[data-bp-add]") : null;
+  const kindSel = bpBox ? bpBox.querySelector("[data-bp-kind-input]") : null;
+  const symBox = bpBox;
+  const condBox = bpBox;
   const dumpBox = memWin ? memWin.querySelector('[data-dump-input="memory"]') : null;
   const dumpOut = memWin ? memWin.querySelector("[data-mem-dump]") : null;
-  const symErr = symBox ? symBox.querySelector("[data-bp-symbol-error]") : null;
-  const condErr = condBox ? condBox.querySelector("[data-bp-cond-error]") : null;
+  // ⚠️ 三类共用一个错误位（「data-bp-error」）⇒ ⇒ 符号 / 条件这两条读的是**同一处**。
+  const bpErr = bpBox ? bpBox.querySelector("[data-bp-error]") : null;
+  const symErr = bpErr;
+  const condErr = bpErr;
   const dumpErr = dumpBox ? dumpBox.querySelector("[data-dump-error]") : null;
   const dbgErr = debugBody ? debugBody.querySelector("[data-debug-error]") : null;
   const candBox = symBox ? symBox.querySelector("[data-bp-symbol-candidates]") : null;
@@ -7310,8 +7332,12 @@ const BV_DEBUGGER_PROBE = `(() => {
     memReadHintText: memReadHint ? String(memReadHint.textContent || "").trim() : "",
     dumpButtonText: dumpBtn ? String(dumpBtn.textContent || "").trim() : "",
     hasMemWindow: !!memWin,
-    hasSymbolBox: !!(symBox && symBox.querySelector("[data-bp-symbol-input]")),
-    hasCondBox: !!(condBox && condBox.querySelector("[data-bp-cond-input]")),
+    hasBpInput: !!(bpBox && bpBox.querySelector("[data-bp-input]")),
+    // 下拉里**有那一档** + 有输入框 ⇒ ⇒ 用户能在这一屏按符号 / 条件下断点。
+    hasSymbolBox: !!(kindSel && Array.from(kindSel.options ?? []).some((o) => o.value === "Symbol"))
+        && !!(bpBox && bpBox.querySelector("[data-bp-input]")),
+    hasCondBox: !!(kindSel && Array.from(kindSel.options ?? []).some((o) => o.value === "Condition"))
+        && !!(bpBox && bpBox.querySelector("[data-bp-input]")),
     hasDumpBox: !!(dumpBox && dumpBox.querySelector("[data-dump-addr-input]")
         && dumpBox.querySelector("[data-dump-len-input]")),
     symbolErrorText: symErr ? String(symErr.textContent || "").trim() : "",
@@ -8881,25 +8907,33 @@ async function runSymbolUiSection(cdp, opts) {
 
     let p = await probe();
     add(
-        "B-77 · 调试视图里**同时有**「符号」框与「条件」框"
-        + "（⇒ ⇒ 用户实际会去的那一屏 ⇒ ⇒ 不是「某个藏起来的视图里」）",
+        "B-77 · 调试视图里**同一个断点框**能按「符号」与「条件」提交"
+        + "（⇒ ⇒ 用户实际会去的那一屏 ⇒ ⇒ 不是「某个藏起来的视图里」；v0.135 起三类合一）",
         p?.hasSymbolBox === true && p?.hasCondBox === true,
         `符号框=${p?.hasSymbolBox} 条件框=${p?.hasCondBox}`,
     );
 
     // -- B-78 · 在**没有符号表**的镜像上查符号 ⇒ ⇒ 界面说清「没有符号表」 --
+    // ⚠️ **v0.139**：先切到「符号」档（v0.135 起一个框管三类）⇒ ⇒ 再打字
+    //   ⇒ ⇒ 联想由**输入**触发（≥4 字符、防抖 180 ms），**不再有**查询按钮。
     await runEffect(cdp, `(() => {
-        const box = document.querySelector('[data-view-body="debug"] [data-symbol-input="breakpoint"]');
-        const input = box ? box.querySelector("[data-bp-symbol-input]") : null;
+        const box = document.querySelector('[data-view-body="debug"] [data-bp-add]');
+        const sel = box ? box.querySelector("[data-bp-kind-input]") : null;
+        if (!sel) return "no-kind";
+        sel.value = "Symbol";
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+        return "changed";
+    })()`);
+    await sleep(700);
+    await runEffect(cdp, `(() => {
+        const box = document.querySelector('[data-view-body="debug"] [data-bp-add]');
+        const input = box ? box.querySelector("[data-bp-input]") : null;
         if (!input) return "no-input";
         input.value = "main";
         input.dispatchEvent(new Event("input", { bubbles: true }));
-        const btn = box.querySelector('[data-action="lookup-symbol"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
+        return "typed";
     })()`);
-    await sleep(900);
+    await sleep(1200);
     p = await probe();
     add(
         "B-78 · 在**没有符号表**的镜像上查符号 ⇒ ⇒ 界面说清「这个镜像没有符号表」"
@@ -8912,18 +8946,21 @@ async function runSymbolUiSection(cdp, opts) {
     // ⚠️ **不许在前端判条件的合法性**（裁决 Q）⇒ ⇒ 这条断言盯的就是
     //   「条件这条路真的接到了内核」⇒ ⇒ 前端自己判的话**这里永远不会红**。
     await runEffect(cdp, `(() => {
-        const dbg = document.querySelector('[data-view-body="debug"]');
-        const addrBox = dbg ? dbg.querySelector('[data-addr-input="breakpoint"]') : null;
-        const addrInput = addrBox ? addrBox.querySelector("[data-bp-addr-input]") : null;
-        if (!addrInput) return "no-addr";
-        addrInput.value = "0x00000020";
-        addrInput.dispatchEvent(new Event("input", { bubbles: true }));
-        const condBox = dbg ? dbg.querySelector('[data-cond-input="breakpoint"]') : null;
-        const condInput = condBox ? condBox.querySelector("[data-bp-cond-input]") : null;
-        if (!condInput) return "no-cond";
-        condInput.value = "x1 ==";
-        condInput.dispatchEvent(new Event("input", { bubbles: true }));
-        const btn = addrBox.querySelector('[data-action="set-breakpoint"]');
+        const box = document.querySelector('[data-view-body="debug"] [data-bp-add]');
+        const sel = box ? box.querySelector("[data-bp-kind-input]") : null;
+        if (!sel) return "no-kind";
+        sel.value = "Condition";
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+        return "changed";
+    })()`);
+    await sleep(700);
+    await runEffect(cdp, `(() => {
+        const box = document.querySelector('[data-view-body="debug"] [data-bp-add]');
+        const input = box ? box.querySelector("[data-bp-input]") : null;
+        if (!input) return "no-input";
+        input.value = "x1 ==";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        const btn = box.querySelector('[data-action="set-breakpoint"]');
         if (!btn) return "no-button";
         btn.click();
         return "clicked";
