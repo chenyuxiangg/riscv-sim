@@ -73,8 +73,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use riscv_sim_contract::error::E_DBG_02_CONDITION_INVALID;
 
-pub mod watch_expr;
-
 pub mod cond;
 
 pub mod names;

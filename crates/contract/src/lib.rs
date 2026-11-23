@@ -326,6 +326,11 @@ pub mod snapshot;
 ///   也是每次运行窗口结束后的轮询推送；
 /// - ⚠️ 临时断点**不是** `Breakpoint` 的持久字段（不污染断点表）；
 /// - ⚠️ `SIM_STATE_SCHEMA_VERSION` stays `2`（快照载荷没变）。
+/// - ⚠️ **观察表达式这一半已于 v18 整体删除**（v0.138）：界面在 v0.136 就
+///   下线了，剩下的「无 UI 可达」命令 / 事件 / DTO 一并清掉 ⇒ ⇒
+///   本节关于 `WatchExpr` / `WatchValue` / `SetWatchExpr` / `ClearWatchExpr` /
+///   `ListWatchExprs` / `WatchValues` 的描述**只作历史记录**；
+///   `StepOver` 与 `HaltReason::StepOver` 仍在。
 ///
 /// Contract **v15** adds `HaltReason::StepOver`：
 ///
@@ -350,7 +355,19 @@ pub mod snapshot;
 ///
 /// ⚠️ 两批**各自**是一次信封升版（16 = TraceEvent 带访问值，
 /// 17 = 少一个差量变体）⇒ ⇒ 合并时**不并成一个数**。
-pub const SCHEMA_VERSION: u32 = 17;
+///
+/// Contract **v18** removes the **观察表达式** family（v0.138）：
+///
+/// - 删 `CommandPayload::SetWatchExpr` / `ClearWatchExpr` / `ListWatchExprs`、
+///   `EventPayload::WatchValues`、`model::WatchExpr` / `model::WatchValue`
+///
+///   ⇒ ⇒ 线上**少 3 条命令 + 1 条事件 + 2 个 DTO** ⇒ ⇒ **破坏性**；
+/// - 同一个 v14 里的 `StepOver` / `HaltReason::StepOver`（v15）**不动**；
+/// - `Watchpoint` / `WatchAccess`（M-10 的硬件式观察点）**不动** —— 与观察
+///   表达式是同名前缀的两件事；
+/// - ⚠️ `SIM_STATE_SCHEMA_VERSION` stays `3`（快照载荷没变：观察项本来
+///   不进会话快照）。
+pub const SCHEMA_VERSION: u32 = 18;
 
 /// 转储长度上限（字节）—— v0.57 批（STAGE-42 §2.5 · 裁决 D）。
 ///

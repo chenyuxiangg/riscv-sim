@@ -1,4 +1,4 @@
-//! 命令执行调度族：运行 / 步进 / 步过、观察表达式、断点命中文限频、指令分块
+//! 命令执行调度族：运行 / 步进 / 步过、断点命中文限频、指令分块
 //! 与看门狗检查窗口裁决、暂停、通用寄存器读写、协议能力协商、console 输入写入。
 //!
 //! ⚠️ 本模块是 [`super::KernelHost`] 的后代子模块 ⇒ ⇒ 可访问宿主私有字段；
@@ -7,19 +7,15 @@
 //! 子模块（`debug.rs`）回调的方法提为 `pub(crate)`；仅被父模块调度与同族内部
 //! 调用的方法保持 `pub(super)`。
 
-use std::collections::BTreeMap;
-
 use riscv_sim_contract::error::{
-    ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_02_CONDITION_INVALID, E_ENG_03_NO_PROGRESS,
-    E_PROTO_01_VERSION_MISMATCH, PROTO_FAMILY,
+    ErrorFamily, PlatformError, E_ENG_03_NO_PROGRESS, E_PROTO_01_VERSION_MISMATCH, PROTO_FAMILY,
 };
-use riscv_sim_contract::model::{LocalVarInfo, StackFrame, WatchExpr, WatchValue, WriteSize};
+use riscv_sim_contract::model::{LocalVarInfo, StackFrame, WriteSize};
 use riscv_sim_contract::port::ExecutionBackend;
 use riscv_sim_contract::protocol::{EventPayload, HaltReason};
 use riscv_sim_contract::snapshot::DEFAULT_INSTRUCTION_BUDGET;
 use riscv_sim_contract::SCHEMA_VERSION;
 
-use crate::m08_breakpoint::watch_expr::WatchTarget;
 use crate::m21_logging::LogLevel;
 use crate::m22_hms::{HealthSignal, SignalCtx, SignalKind, SignalSrc};
 
@@ -28,9 +24,7 @@ use super::watchdog::{
     classify_window_with_clock, WindowVerdict, HOST_WATCHDOG_BUDGET_MS, WATCHDOG_ERR_CODE,
     WATCHDOG_LOG_CTX,
 };
-use super::{
-    kernel_descriptor, KernelHost, WatchEntry, E_OBS_02_PIPELINE_UNAVAILABLE, KERNEL_CAP_BITS,
-};
+use super::{kernel_descriptor, KernelHost, E_OBS_02_PIPELINE_UNAVAILABLE, KERNEL_CAP_BITS};
 
 impl KernelHost {
     /// 继续运行（`Continue` 或 `StepN`）。
@@ -153,81 +147,7 @@ impl KernelHost {
                 trigger_addr,
             });
         }
-        // 停下（或本窗口跑完）之后轮询一次观察表达式：值变化 / 求值期
-        // 错误都在同一个回执里带回。设置 / 列表命令也会走同一个方法。
-        if !self.watch_items.is_empty() {
-            let watch = self.watch_values_event();
-            events.push(watch);
-        }
         events
-    }
-
-    /// 设置 / 覆盖一条观察表达式。**语法非法 ⇒ 表不变**。
-    pub(super) fn on_set_watch_expr(&mut self, expr: WatchExpr) -> Vec<EventPayload> {
-        let target = match WatchTarget::parse_with(&expr.expr, &super::HostNames(&self.index)) {
-            Ok(target) => target,
-            Err(err) => {
-                return vec![self.error_from(&PlatformError::new(
-                    DEBUG_FAMILY,
-                    E_DBG_02_CONDITION_INVALID,
-                    err.message(),
-                ))];
-            }
-        };
-        if let Some(item) = self
-            .watch_items
-            .iter_mut()
-            .find(|item| item.expr.id == expr.id)
-        {
-            item.expr = expr;
-            item.target = target;
-        } else {
-            self.watch_items.push(WatchEntry { expr, target });
-        }
-        vec![self.watch_values_event()]
-    }
-
-    /// 对全部观察表达式求值一次，并计算 `changed`。
-    ///
-    /// 内存表达式走 M-17 的 `read_memory`（最终到 M-14 总线）；该地址当前
-    /// 未映射 ⇒ **该项**带 `error`，其他项照常求值（不让一条坏观察项把整
-    /// 张表打掉）。
-    pub(super) fn watch_values_event(&mut self) -> EventPayload {
-        let state = match self.backend.snapshot() {
-            Ok(state) => state,
-            Err(err) => return self.error_from(&err),
-        };
-        let mut values = Vec::with_capacity(self.watch_items.len());
-        let mut next = BTreeMap::new();
-        for item in &self.watch_items {
-            let id = item.expr.id;
-            let (value, error) = match item.target.value(&state) {
-                Some(v) => (Some(v), None),
-                None => match item.target.address(&state) {
-                    Some(addr) => match self.backend.read_memory(addr, WriteSize::Word) {
-                        Ok(v) => (Some(v), None),
-                        Err(err) => (None, Some(format!("读取 0x{addr:08x} 失败：{err}"))),
-                    },
-                    None => (None, Some("无法解析出观察地址".to_string())),
-                },
-            };
-            let previous = self.watch_last.get(&id);
-            let changed = match previous {
-                Some(prev) => prev.value != value || prev.error != error,
-                None => true,
-            };
-            let value_dto = WatchValue {
-                id,
-                expr: item.expr.expr.clone(),
-                value,
-                error,
-                changed,
-            };
-            next.insert(id, value_dto.clone());
-            values.push(value_dto);
-        }
-        self.watch_last = next;
-        EventPayload::WatchValues { values }
     }
 
     /// 写一条「命中断点」日志，**≥1s 限频**。

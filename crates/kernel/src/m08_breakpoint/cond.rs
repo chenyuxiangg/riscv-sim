@@ -756,7 +756,7 @@ fn tokenize(text: &str) -> Result<Vec<Tok>, CondError> {
             }
             // ⚠️ **方括号内的地址原文**：整段当一个记号（`[x1+8]` 里的
             //   `+` 不在条件文法里，它属于**地址**那套文法）⇒ ⇒ 交给
-            //   `watch_expr` 的地址解析。
+            //   本文件的 `addr` 模块解析。
             '[' => {
                 let start = index + 1;
                 let mut end = start;
@@ -1009,29 +1009,25 @@ fn parse_bracket(inner: &str) -> Result<AddressSpec, CondError> {
     }
 }
 
-// ── 地址文法：`基址 ± 偏移`（条件断点与地址表达式共用）────────────────────
+// ── 地址文法：`基址 ± 偏移`（条件断点的方括号内层）──────────────────────
 //
 // ⚠️ 这段原本独立成 `watch_expr.rs`（契约 v14 · 观察表达式）。但其中「文本
 // → 地址」这一半**只有条件文法在用**（`[s0-24]` / `[main+4]` 的方括号内层）
 // ⇒ ⇒ 单独开一个模块会让「谁拥有这份文法」含糊 ⇒ ⇒ v0.137 并回本文件，
 // 地址解析**只有一个落点**。
 //
-// ⚠️ 观察表达式（`watch_expr`）现在只留「目标 + 取值」，它的地址解析也从
-//   这里借（见 `watch_expr.rs` 模块头）。
+// ⚠️ v0.138 起观察表达式**整块下线**（`watch_expr.rs` 已删，契约 v18 撤掉
+//   那 3 条命令 + 1 条事件 + 2 个 DTO）⇒ ⇒ 这份文法的唯一用户就是条件文法，
+//   「带名字解析」的那两条入口也随之删除（`Symbol` 变体留给绑定期的条件文法用）。
 pub(crate) mod addr {
     //! 地址文法：把「基址 ± 偏移」的**文本**变成 [`AddressSpec`]。
     //!
-    //! ⚠️ 类型写 `pub` 但**模块是 `pub(crate)`** ⇒ ⇒ 实际可见性仍是 crate 内，
-    //!    只是免得 `WatchTarget`（`pub`）的返回类型比它更「外露」而触发
-    //!    `private_interfaces` 告警。
+    //! ⚠️ 类型写 `pub`、模块本身 `pub(crate)` ⇒ ⇒ 实际可见性仍限 crate 内。
     //!
     //! ⚠️ 只做**形状**，不查任何表：符号名原样留成 [`AddressBase::Symbol`]，
-    //!    由调用方在自己的时机绑定 —— 条件文法在**绑定期**换成数字（它要按
-    //!    断点 pc 所在的函数选局部变量），地址表达式在**解析期**换成数字。
+    //!    由条件文法在**绑定期**换成数字（它要按断点 pc 所在的函数选局部变量）。
 
     use std::fmt;
-
-    use super::super::names::NameResolver;
 
     /// 地址文法的**解析失败**。
     ///
@@ -1039,28 +1035,20 @@ pub(crate) mod addr {
     ///    前缀描述的是**这一段**，不冒充调用方的整条表达式。
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct AddrParseError {
-        /// 带前缀的完整消息（给直接展示的调用方）。
-        message: String,
         /// 不含前缀的细节（给**自带前缀**的调用方包消息用）。
         detail: String,
     }
 
     impl AddrParseError {
-        /// 造一个错误（`watch_expr` 的「空表达式 / 缺右括号」也用它）。
+        /// 造一个错误（本模块内唯一构造入口）。
         pub(crate) fn new(detail: impl fmt::Display) -> Self {
-            let detail = format!("{detail}");
             Self {
-                message: format!("地址表达式无效：{detail}"),
-                detail,
+                detail: format!("{detail}"),
             }
         }
 
-        /// 完整错误消息（前缀 + 细节）。
-        pub(crate) fn message(&self) -> &str {
-            &self.message
-        }
-
-        /// 只有细节（不含前缀）。
+        /// 只有细节（不含前缀）—— `CondError` 自带「条件表达式无效：」，
+        /// 直接搬完整消息会拼出两层前缀。
         pub(crate) fn detail(&self) -> &str {
             &self.detail
         }
@@ -1068,7 +1056,9 @@ pub(crate) mod addr {
 
     impl fmt::Display for AddrParseError {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str(&self.message)
+            // ⚠️ 前缀只说「地址表达式」：这段文法描述的是**一段**，
+            //    不冒充调用方的整条表达式。
+            write!(f, "地址表达式无效：{}", self.detail)
         }
     }
 
@@ -1109,19 +1099,6 @@ pub(crate) mod addr {
     pub(crate) fn parse_address_syntax(text: &str) -> Result<AddressSpec, AddrParseError> {
         let (base_text, offset) = split_address(text)?;
         let base = parse_base_syntax(base_text)?;
-        Ok(AddressSpec { base, offset })
-    }
-
-    /// 解析「基址 ± 偏移」（**带名字解析**）。
-    ///
-    /// ⚠️ 名字在**这一刻**就换成数字（`@main+4` = `main` 的地址 + 4）⇒ ⇒
-    ///    运行期不需要符号表。观察表达式（`watch_expr`）用这条。
-    pub(crate) fn parse_address_with(
-        text: &str,
-        names: &dyn NameResolver,
-    ) -> Result<AddressSpec, AddrParseError> {
-        let (base_text, offset) = split_address(text)?;
-        let base = parse_base_with(base_text, names)?;
         Ok(AddressSpec { base, offset })
     }
 
@@ -1175,45 +1152,6 @@ pub(crate) mod addr {
             return Ok(AddressBase::Symbol(t.to_string()));
         }
         Err(AddrParseError::new(format!("未知寄存器名或地址 \"{t}\"")))
-    }
-
-    /// 解析一个基址记号（**带名字解析**）。
-    ///
-    /// 顺序：`pc` → 数字 → 寄存器 → 符号名 → 报错 ⇒ ⇒ 与条件文法同一条口径
-    /// （STAGE-55 表 9）。符号名**当场换成数字基址**，不把名字留到运行期。
-    pub(crate) fn parse_base_with(
-        text: &str,
-        names: &dyn NameResolver,
-    ) -> Result<AddressBase, AddrParseError> {
-        let t = text.trim().trim_start_matches('$');
-        if t.is_empty() {
-            return Err(AddrParseError::new("缺少基址"));
-        }
-        if t.eq_ignore_ascii_case("pc") {
-            return Ok(AddressBase::Pc);
-        }
-        if let Some(n) = parse_number(t) {
-            return Ok(AddressBase::Number(n));
-        }
-        if let Some(r) = parse_register(t) {
-            return Ok(AddressBase::Register(r));
-        }
-        // ⚠️ **符号名**：解析期就把地址定下来（`@main+4` = `main` 的地址 + 4）。
-        //
-        // ⚠️ **局部变量不进地址文法**（批 D 的边界）：它的「地址」随帧变化，
-        //    而地址文法的符号基址在**解析期**就落定（批 B 的口径）⇒ ⇒ 这里只收
-        //    「有地址常量」的符号；局部变量在条件文法里直接用名字。
-        if let Some(address) = names.resolve(t).and_then(|name| name.addr()) {
-            return Ok(AddressBase::Number(address));
-        }
-        if names.resolve(t).is_some() {
-            return Err(AddrParseError::new(format!(
-                "\"{t}\" 是当前帧的局部变量（没有固定地址）⇒ ⇒ 地址表达式里请用寄存器或数字"
-            )));
-        }
-        Err(AddrParseError::new(format!(
-            "未知寄存器名或地址 \"{t}\"（也不是已加载的符号）"
-        )))
     }
 
     fn parse_number(text: &str) -> Option<u32> {
@@ -1291,15 +1229,14 @@ pub(crate) mod addr {
                 }
             );
             let err = parse_address_syntax("").expect_err("空地址必须拒");
+            let message = err.to_string();
             assert!(
-                err.message().contains("缺少地址"),
-                "错误消息要说清缺什么：{}",
-                err.message()
+                message.contains("缺少地址"),
+                "错误消息要说清缺什么：{message}"
             );
             assert!(
-                err.message().starts_with("地址表达式无效："),
-                "前缀只说这一段：{}",
-                err.message()
+                message.starts_with("地址表达式无效："),
+                "前缀只说这一段：{message}"
             );
         }
     }
@@ -1923,7 +1860,7 @@ mod tests {
         assert_eq!(eval_with("&_start == 0x100", &names(), &gpr(&[]), 0), 1);
     }
 
-    /// **裸数字仍是字面常量**（不与 watch_expr 的「裸数字=地址」混淆）。
+    /// **裸数字仍是字面常量**（读内存必须显式写 `[…]` / `@…`）。
     #[test]
     fn a_bare_number_stays_a_literal_even_with_symbols() {
         assert_eq!(eval_with("0x1000 == 0x1000", &names(), &gpr(&[]), 0), 1);

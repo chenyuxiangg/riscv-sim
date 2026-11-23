@@ -167,13 +167,13 @@
 //! 投影，裁决 C）⇒ 真实 id 用 [`KernelHost::platform_id`]。
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, E_HMS_02_FATAL_TERMINATED, E_PLT_22_NO_BOARD, PLATFORM_FAMILY,
 };
-use riscv_sim_contract::model::{Project, WatchExpr, WatchValue, SIM_STATE_SCHEMA_VERSION};
+use riscv_sim_contract::model::{Project, SIM_STATE_SCHEMA_VERSION};
 use riscv_sim_contract::platform::PlatformDescription;
 use riscv_sim_contract::port::{EventBus, ExecutionBackend, InterruptSink};
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload};
@@ -181,7 +181,6 @@ use riscv_sim_contract::protocol::{CommandPayload, EventPayload};
 use crate::m08_breakpoint::names::{
     LocalSlot, NameClass, NameRef, NameResolver, NameTarget, ResolveError,
 };
-use crate::m08_breakpoint::watch_expr::WatchTarget;
 use crate::m11_symbol::{
     Disassembler, LocalLocation, LocalLookup, SymbolClass, SymbolIndex, TraceBuffer, TRACE_CAP,
 };
@@ -611,12 +610,6 @@ impl NameResolver for HostNames<'_> {
     }
 }
 
-/// 一条观察表达式（原文 + 已解析目标）。解析在**设置时**完成。
-struct WatchEntry {
-    expr: WatchExpr,
-    target: WatchTarget,
-}
-
 /// 内核宿主 —— 一个会话的全部状态。
 pub struct KernelHost {
     /// 执行后端（M-17）：它持有 M-12 引擎、M-13 ISS、M-14 总线与 M-08 的
@@ -825,10 +818,6 @@ pub struct KernelHost {
     bp_hit_log_last_ps: Option<u64>,
     /// 限频窗口内被压掉的命中日志条数（下一条放行日志里如实带出）。
     bp_hit_log_suppressed: u64,
-    /// 观察表达式（按 id 覆盖）。**不参与**运行期停止判断。
-    watch_items: Vec<WatchEntry>,
-    /// 上一次轮询的观察值（用于计算 `changed`）。
-    watch_last: BTreeMap<u32, WatchValue>,
 }
 
 impl std::fmt::Debug for KernelHost {
@@ -976,8 +965,6 @@ impl KernelHost {
             admin_drain_truncated: 0,
             bp_hit_log_last_ps: None,
             bp_hit_log_suppressed: 0,
-            watch_items: Vec::new(),
-            watch_last: BTreeMap::new(),
         };
         // The default memory map cannot fail on a fresh bus (the regions do
         // not overlap and are far below the per-region budget). If it ever
@@ -1128,13 +1115,6 @@ impl KernelHost {
                 let _ = self.backend.clear_watchpoint_by_id(id);
                 vec![self.tick()]
             }
-            CommandPayload::SetWatchExpr(expr) => self.on_set_watch_expr(expr),
-            CommandPayload::ClearWatchExpr { id } => {
-                self.watch_items.retain(|item| item.expr.id != id);
-                self.watch_last.remove(&id);
-                vec![self.watch_values_event()]
-            }
-            CommandPayload::ListWatchExprs => vec![self.watch_values_event()],
             CommandPayload::ReadMemory { addr, size } => {
                 match self.backend.read_memory(addr, size) {
                     Ok(value) => vec![EventPayload::MemoryRead { addr, size, value }],
